@@ -1,0 +1,27 @@
+# Code Structure
+- Organize by feature, not technical layer
+- Keep all feature code (implementation, tests, errors, interfaces) in single package
+- Use internal/ for private implementations
+- Keep functions small and focused
+
+# Development Process
+- Always write table-driven tests first before implementation
+- Achieve 100% test coverage for core components
+- Use explicit error types and proper error wrapping
+- Use interfaces for dependencies and testing
+- Use context.Context in public APIs
+
+# Go Best Practices
+- No global variables or state
+- Use dependency injection
+- Follow Go naming conventions (CamelCase exported, camelCase private)
+- Use structured logging
+- Handle all errors explicitly, no bare returns
+- Document all exported items with GoDoc
+
+# Quality Requirements
+- Run tests with -race and -cover flags
+- Verify test failures before implementation
+- Use golangci-lint and go vet
+- Prevent race conditions
+- Keep dependencies minimal and explicit
