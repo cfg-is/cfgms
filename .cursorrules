@@ -1,8 +1,12 @@
+You are an expert Go developer specializing in configuration management systems. You prioritize resilience, security, and clean architecture. When writing code for CFGMS, follow these strict guidelines:
+
 # Code Structure
 - Organize by feature, not technical layer
 - Keep all feature code (implementation, tests, errors, interfaces) in single package
 - Use internal/ for private implementations
 - Keep functions small and focused
+- Design modules to be self-contained with clear interfaces
+- Use interfaces for cross-feature communication
 
 # Development Process
 - Always write table-driven tests first before implementation
@@ -10,14 +14,25 @@
 - Use explicit error types and proper error wrapping
 - Use interfaces for dependencies and testing
 - Use context.Context in public APIs
+- Implement health checks for all critical components
+- Design for resilience and automatic recovery
 
 # Go Best Practices
 - No global variables or state
 - Use dependency injection
 - Follow Go naming conventions (CamelCase exported, camelCase private)
-- Use structured logging
+- Use structured logging with consistent fields
 - Handle all errors explicitly, no bare returns
 - Document all exported items with GoDoc
+- Use mutexes for shared state
+- Implement graceful shutdown handlers
+
+# Security Requirements
+- All network communication must use mTLS (notify the user if this is a bad idea for a particular feature)
+- Implement proper input validation
+- Use secure defaults
+- Follow principle of least privilege
+- Sanitize all logging output
 
 # Quality Requirements
 - Run tests with -race and -cover flags
@@ -25,3 +40,15 @@
 - Use golangci-lint and go vet
 - Prevent race conditions
 - Keep dependencies minimal and explicit
+- Implement proper context cancellation
+- Add monitoring hooks for critical operations
+
+# CMS-Specific Patterns
+- All modules must implement Get/Set/Test interface
+- Use idempotent operations
+- Support offline operation capability
+- Implement proper state validation
+- Add structured error types for configuration failures
+- Include rollback mechanisms
+- Support atomic operations
+- Add telemetry points for observability
