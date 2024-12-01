@@ -1,0 +1,34 @@
+syntax = "proto3";
+
+package cfgms.api.common;
+
+option go_package = "github.com/cfg-is/cfgms/pkg/api/proto/common";
+
+import "google/protobuf/timestamp.proto";
+
+// Common message types used across multiple services
+message DNA {
+  string id = 1;
+  map<string, string> attributes = 2;
+  google.protobuf.Timestamp last_updated = 3;
+}
+
+message Status {
+  enum Code {
+    OK = 0;
+    ERROR = 1;
+    NOT_FOUND = 2;
+    UNAUTHORIZED = 3;
+    INVALID_REQUEST = 4;
+  }
+  Code code = 1;
+  string message = 2;
+}
+
+message Empty {}
+
+message Version {
+  string version = 1;
+  string commit = 2;
+  string build_date = 3;
+} 

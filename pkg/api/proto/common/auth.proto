@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package cfgms.api.common;
+
+option go_package = "github.com/cfg-is/cfgms/pkg/api/proto/common";
+
+message Credentials {
+  string tenant_id = 1;
+  string client_id = 2;
+  bytes certificate = 3;
+}
+
+message Token {
+  string access_token = 1;
+  int64 expires_at = 2;
+}

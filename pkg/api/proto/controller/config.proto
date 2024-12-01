@@ -1,0 +1,54 @@
+syntax = "proto3";
+
+package cfgms.api.controller;
+
+option go_package = "github.com/cfg-is/cfgms/pkg/api/proto/controller";
+
+import "common/common.proto";
+import "google/protobuf/timestamp.proto";
+
+service ConfigurationService {
+  rpc GetConfiguration(ConfigRequest) returns (ConfigResponse);
+  rpc ReportConfigStatus(ConfigStatusReport) returns (common.Status);
+  rpc ValidateConfig(ConfigValidationRequest) returns (ConfigValidationResponse);
+}
+
+message ConfigRequest {
+  string steward_id = 1;
+  repeated string modules = 2;
+}
+
+message ConfigResponse {
+  common.Status status = 1;
+  bytes config = 2;  // JSON encoded configuration
+  string version = 3;
+}
+
+message ConfigStatusReport {
+  string steward_id = 1;
+  string config_version = 2;
+  common.Status status = 3;
+  repeated ModuleStatus modules = 4;
+}
+
+message ModuleStatus {
+  string name = 1;
+  common.Status status = 2;
+  string message = 3;
+  google.protobuf.Timestamp timestamp = 4;
+}
+
+message ConfigValidationRequest {
+  bytes config = 1;  // JSON encoded configuration
+  string version = 2;
+}
+
+message ConfigValidationResponse {
+  common.Status status = 1;
+  repeated ValidationError errors = 2;
+}
+
+message ValidationError {
+  string field = 1;
+  string message = 2;
+}
