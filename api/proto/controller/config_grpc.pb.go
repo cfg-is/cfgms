@@ -8,7 +8,7 @@ package controller
 
 import (
 	context "context"
-	common "github.com/cfg-is/cfgms/pkg/api/proto/common"
+	common "cfgms/pkg/api/proto/common"
 	grpc "google.golang.org/grpc"
 	codes "google.golang.org/grpc/codes"
 	status "google.golang.org/grpc/status"

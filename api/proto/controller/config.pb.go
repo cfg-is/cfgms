@@ -7,7 +7,7 @@
 package controller
 
 import (
-	common "github.com/cfg-is/cfgms/pkg/api/proto/common"
+	common "cfgms/pkg/api/proto/common"
 	timestamp "github.com/golang/protobuf/ptypes/timestamp"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"

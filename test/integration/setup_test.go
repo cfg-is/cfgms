@@ -5,7 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfg-is/cfgms/pkg/api/proto/controller"
+	"cfgms/pkg/api/proto/controller"
+
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"

@@ -1,33 +1,47 @@
 package main
 
 import (
-	"context"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
+
+	"cfgms/pkg/logging"
+
+	"cfgms/features/controller/config"
+	"cfgms/features/controller/server"
 )
 
 func main() {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalf("Failed to load configuration: %v", err)
+	}
+
+	logger := logging.NewLogger(cfg.LogLevel)
+
+	srv, err := server.New(cfg, logger)
+	if err != nil {
+		logger.Fatal("Failed to create server", "error", err)
+	}
 
 	// Set up signal handling
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// TODO: Initialize controller components
-	log.Println("Starting CFGMS Controller...")
+	// Start server in a goroutine
+	go func() {
+		if err := srv.Start(); err != nil {
+			logger.Fatal("Server failed", "error", err)
+		}
+	}()
 
-	// Wait for shutdown signal
-	select {
-	case sig := <-sigChan:
-		log.Printf("Received signal %v, initiating shutdown", sig)
-		cancel()
-	case <-ctx.Done():
-		log.Println("Context cancelled, initiating shutdown")
+	// Wait for termination signal
+	sig := <-sigChan
+	logger.Info("Received signal, shutting down...", "signal", sig)
+
+	// Graceful shutdown
+	if err := srv.Stop(); err != nil {
+		logger.Error("Error during shutdown", "error", err)
 	}
-
-	// TODO: Implement graceful shutdown
-	log.Println("Shutdown complete")
 }

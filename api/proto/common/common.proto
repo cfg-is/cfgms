@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package cfgms.api.common;
 
-option go_package = "github.com/cfg-is/cfgms/pkg/api/proto/common";
+option go_package = "cfgms/pkg/api/proto/common";
 
 import "google/protobuf/timestamp.proto";
 

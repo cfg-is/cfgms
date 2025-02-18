@@ -1,0 +1,63 @@
+package controller
+
+import (
+	"context"
+	"sync"
+
+	"cfgms/internal/controller/module"
+)
+
+// Controller manages the core CFGMS functionality
+type Controller struct {
+	mu sync.RWMutex
+
+	// Configuration for the controller
+	config *Config
+
+	// Module registry
+	modules map[string]module.Module
+
+	// Shutdown management
+	shutdown chan struct{}
+}
+
+// Config holds the controller configuration
+type Config struct {
+	// Path to TLS certificates
+	CertPath string
+
+	// Controller listen address
+	ListenAddr string
+
+	// Data directory
+	DataDir string
+}
+
+// New creates a new Controller instance
+func New(cfg *Config) (*Controller, error) {
+	if cfg == nil {
+		cfg = &Config{} // Use defaults
+	}
+
+	return &Controller{
+		config:   cfg,
+		modules:  make(map[string]module.Module),
+		shutdown: make(chan struct{}),
+	}, nil
+}
+
+// Start initializes and starts the controller
+func (c *Controller) Start(ctx context.Context) error {
+	// TODO: Initialize core services
+	// - Set up mTLS server
+	// - Initialize module system
+	// - Start health monitoring
+	return nil
+}
+
+// Stop gracefully shuts down the controller
+func (c *Controller) Stop(ctx context.Context) error {
+	close(c.shutdown)
+	// TODO: Implement graceful shutdown
+	return nil
+}

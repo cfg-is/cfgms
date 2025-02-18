@@ -3,8 +3,9 @@ package integration
 import (
 	"testing"
 
-	"github.com/cfg-is/cfgms/pkg/api/proto/common"
-	"github.com/cfg-is/cfgms/pkg/api/proto/controller"
+	"cfgms/pkg/api/proto/common"
+	"cfgms/pkg/api/proto/controller"
+
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
