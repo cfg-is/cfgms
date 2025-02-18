@@ -5,14 +5,16 @@ You are an expert Go developer specializing in configuration management systems.
 - **Component**: A discrete, reusable, and self-contained unit of functionality.
 - **Module**: A collection of related components that implement Get/Set/Test for a resource type.
 - **Configuration**: The current state of a Resource or Endpoint, may be abbreviated as Config.
-- **Configuration-File**: A declarative specification of desired state for one or more resources, may be abbreviated as cfg.
+- **Configuration-Data**: A declarative specification of desired state for one or more resources, may be abbreviated as cfg.
 - **Resource**: A manageable entity (e.g., users, groups, web servers, applications).
 - **Monitor**: A detector that observes state changes and triggers workflows or alerts.
 - **Workflow**: A defined sequence of operations that automate tasks.
 - **Endpoint**: A managed system or service that a Steward is responsible for
 - **DNA**: System-specific metadata used for targeting and identification
 
-# Code Structure
+# Development Guidelines
+
+## Code Structure
 - Organize by feature, not technical layer
 - Keep all feature code (implementation, tests, errors, interfaces) in single package
 - Use internal/ for private implementations
@@ -20,7 +22,7 @@ You are an expert Go developer specializing in configuration management systems.
 - Design modules to be self-contained with clear interfaces
 - Use interfaces for cross-feature communication
 
-# Development Process
+## Development Process
 - Always write table-driven tests first before implementation
 - Achieve 100% test coverage for core components
 - Use explicit error types and proper error wrapping
@@ -29,7 +31,7 @@ You are an expert Go developer specializing in configuration management systems.
 - Implement health checks for all critical components
 - Design for resilience and automatic recovery
 
-# Go Best Practices
+## Go Best Practices
 - No global variables or state
 - Use dependency injection
 - Follow Go naming conventions (PascalCase exported, camelCase private)
@@ -39,14 +41,14 @@ You are an expert Go developer specializing in configuration management systems.
 - Use mutexes for shared state
 - Implement graceful shutdown handlers
 
-# Security Requirements
+## Security Requirements
 - All network communication must use mTLS (notify the user if this is a bad idea for a particular feature)
 - Implement proper input validation
 - Use secure defaults
 - Follow principle of least privilege
 - Sanitize all logging output
 
-# Quality Requirements
+## Quality Requirements
 - Run tests with -race and -cover flags
 - Verify test failures before implementation
 - Use golangci-lint and go vet
@@ -55,21 +57,23 @@ You are an expert Go developer specializing in configuration management systems.
 - Implement proper context cancellation
 - Add monitoring hooks for critical operations
 
-# CMS-Specific Patterns
+## CMS-Specific Patterns
 - All modules must implement Get/Set/Test interface
 - Use idempotent operations
 - Support offline operation capability
 - Implement proper state validation
-- Add structured error types for configuration failures
+- Add structured error types for module application failures
 - Include rollback mechanisms
 - Support atomic operations
 - Add telemetry points for observability
+
+# System Architecture
 
 ## 1. Global Design Decisions and Principles
 
 ### Foundational Rules
 
-- Endpoint stewards must be extremely resilient (should be able to monitor its own health and always recover to a known-good state)
+- Stewards must be extremely resilient (should be able to monitor its own health and always recover to a known-good state)
 - Parallel execution across all stewards simultaneously
 - All open ports must be 'Dark' and protected by mutual TLS
 - Project must be designed to be modular and extensible
@@ -81,9 +85,9 @@ You are an expert Go developer specializing in configuration management systems.
 - **Module-based Execution**
   - All resource management tasks are performed by 'Modules'
   - Each Module must implement the following three core functions:
-    1. **Get**: Returns a valid cfgms configuration for the resource being configured (essential for rollback)
-    2. **Set**: Idempotent function that configures the resource to the stated configuration, regardless of its current state. Returns a boolean indicating success or failure
-    3. **Test**: On-demand function that validates if the current state matches the prescribed state. Returns a boolean result and optionally detailed status information
+    1. **Get**: Returns the current Configuration of the Resource, as a valid yaml cfg format.
+    2. **Set**: Updates the Resource Configuration to match the idempotent Configuration-Data specification
+    3. **Test**: Validates if the current Configuration matches the Configuration-Data specification
     4. **Monitor**: (Optional) Implements event-driven or system hook-based monitoring to detect real-time changes in the resource state
 - **Workflow Triggers**
   - Module Monitors can trigger predefined workflows
@@ -97,7 +101,7 @@ You are an expert Go developer specializing in configuration management systems.
 - **Strict Schema Validation**
   - Defines a clear schema for configuration validation
   - Clear, actionable error messages
-- **Version Controlled Configurations**
+- **Version Controlled Configuration-Data**
   - Git-native workflow
 - **Continuous Configuration Management and Monitoring**
   - Real-time monitoring of resource states
@@ -129,7 +133,7 @@ You are an expert Go developer specializing in configuration management systems.
 - Dynamic Branching
 - Integrated Script Execution
   - Run scripts (Bash, PowerShell, Python, etc.) as part of the workflow
-  - Pass data between script executions and module configurations
+  - Pass data from the workflow engine to a script and return the output
 - Reusable Workflow Components
 - Workflow Triggers
 - Workflow Visualization
@@ -154,13 +158,6 @@ You are an expert Go developer specializing in configuration management systems.
   - Direct, interactive shell access to individual Stewards
   - Full terminal emulation for complex, interactive tasks
 
-### API First Design
-
-- **gRPC API**
-  - Strongly typed interfaces
-- **Webhook Integration**
-  - Event-driven configuration updates
-
 ## 2. Core System Element Details
 
 ### Architecture
@@ -174,8 +171,8 @@ You are an expert Go developer specializing in configuration management systems.
   - It is responsible for executing workflows and monitoring the state of the endpoint.
 - **Outpost**
   - The Outpost is responsible for managing a group of Stewards or agentless endpoints.
-  - It is responsible for caching/proxying configuration and binaries from the Controller to the Stewards.
-  - Can be tasked with monitoring infrastructure that does not support a Steward (eg. firewalls, routers, printers, etc.)
+  - It is responsible for caching/proxying Configuration-Data and binaries from the Controller to the Stewards.
+  - Can be tasked with monitoring infrastructure that does not support a Steward installation (eg. firewalls, routers, printers, etc.)
 - **SaaS Steward**
   - The SaaS Steward manages the configuration of a SaaS application.
 - **Cloud Steward**
@@ -194,7 +191,7 @@ You are an expert Go developer specializing in configuration management systems.
     2. Health check and validation of v1.5
     3. Gradual responsibility transfer:
        a. v1.5 runs in monitor-only mode
-       b. v1 continues enforcing configurations
+       b. v1 continues enforcing resource state
     4. Switchover of enforcement responsibilities
     5. Decommissioning of v1 after stability period
   - Allows for immediate rollback by reversing enforcement roles.
@@ -214,9 +211,9 @@ You are an expert Go developer specializing in configuration management systems.
       - LevelDB can be replaced with other databases (e.g., Postgres)
   - **Comprehensive Monitoring System**
     - Extensive set of Monitors for various endpoint data points
-    - Virtual DNA Module derived from DNA-specific configuration file
+    - Virtual DNA Module derived from DNA-specific Configuration-Data
     - Allows specification of enabled Monitors for each endpoint
-    - DNA Module can be used in Configs for setting or monitoring DNA data during config runs
+    - DNA Module can be used in Configuration-Data for setting or monitoring DNA data during cfg runs
   - **Dynamic DNA Updates**
     - DNA updated on agent start
     - Continuous updates based on associated Monitor detections
@@ -225,8 +222,8 @@ You are an expert Go developer specializing in configuration management systems.
   - Original Controller can create and manage additional Controllers
   - Supports scaling out and creating hierarchical Controller structures
 
-- **Pluggable Configuration Storage**
-  - Default: Git repository for version-controlled configuration storage
+- **Pluggable Configuration-Data Storage**
+  - Default: Git repository for version-controlled Configuration-Data storage
   - Supports migration to database storage for large-scale deployments
   - Options include:
     - Git (default for small to medium deployments)
@@ -250,7 +247,7 @@ You are an expert Go developer specializing in configuration management systems.
 ### Steward
 
 - **Standalone Operation Capability**
-  - Stewards can operate independently using local configurations
+  - Stewards can operate independently using local configuration-data
   - Enables offline operation and supports air-gapped environments
 
 - **Bootstrap Functionality**
@@ -260,7 +257,7 @@ You are an expert Go developer specializing in configuration management systems.
 - **Steward Health Monitoring**
   - Self-diagnostic capabilities
   - Automatic recovery procedures
-  - Implements metrics for task latency, config errors, steward health, and recovery attempts
+  - Implements metrics for task latency, cfg errors, steward health, and recovery attempts
   - Continuous health checks with automatic recovery attempts
 
 - **Steward Tools System** (v2)
@@ -297,18 +294,15 @@ You are an expert Go developer specializing in configuration management systems.
   - Each tenant has a unique identifier and an optional parent identifier
   - Supports arbitrary depth without predefined levels (e.g., MSP > Client > Department)
 
-- **Recursive Configuration Inheritance**
-  - Hierarchical configuration structure (nested directories or objects)
-  - Recursive merging of configurations from parent to child
-  - Any level can override inherited configurations
+- **Recursive Configuration-Data Inheritance**
+  - Hierarchical Configuration-Data structure (nested directories or objects)
+  - Recursive merging of Configuration-Data from parent to child
+  - Any level can override inherited Configuration-Data
+  - Caching of resolved Configuration-Data for performance
 
 - **Dynamic RBAC with Tenant Context**
   - RBAC system extended to include tenant context in roles and permissions
   - Permissions cascade down the hierarchy unless explicitly overridden
-
-- **Recursive Configuration Resolution**
-  - Configurations resolved recursively from root to target tenant
-  - Caching of resolved configurations for performance
 
 - **Hierarchical Data Isolation**
   - Hierarchical key derivation for tenant-specific encryption
@@ -347,7 +341,7 @@ You are an expert Go developer specializing in configuration management systems.
   - Built-in help and documentation
   - Integration with system's authentication and authorization mechanisms
 - Use cases:
-  - Configuration Management: Read, Diff, Git Pull (cannot write config data)
+  - Configuration-Data Management: Read, Diff, Git Pull (cannot write config data)
   - Steward and Outpost administration
   - Workflow triggering, scheduling and monitoring
   - System health checks and diagnostics
@@ -384,11 +378,11 @@ You are an expert Go developer specializing in configuration management systems.
   - Google Cloud Secret Manager
 - Allow easy extension for other secret management systems
 
-### Configuration-Driven Scheduling and Triggers
+### Configuration-Data Driven Scheduling and Triggers
 
-- **Base Configuration Scheduling**
-  - All scheduling must be defined within the configuration that governs the resource
-  - Base configurations may specify:
+- **Base Configuration-Data Scheduling**
+  - All scheduling must be defined within the configuration-data that governs the resource
+  - Base configuration-data may specify:
     1. **Test Interval**: Frequency of configuration compliance checks (cron pattern or interval based) or
     2. **Monitor Triggers**: Resource-specific monitors that can trigger validation
     3. **Retry Policies**: Whether to retry as soon as possible, or skip until the next test interval.
@@ -405,55 +399,55 @@ You are an expert Go developer specializing in configuration management systems.
   - Support cooldown periods and trigger debouncing
 
 - **Trigger Resolution**
-  - All scheduling and trigger logic must be configuration-driven
+  - All scheduling and trigger logic must be driven by configuration-data
   - Unified trigger evaluation across the system
   - Support for trigger conditions and dependencies
   - Support various scheduling patterns (cron-like, interval-based, one-time)
 
 ### Dry Run and Simulation Mode
 
-- Implement simulation capability for both standalone Stewards and Controller-managed systems
+- Implement simulation capability for both standalone Stewards and Controller-managed Stewards
 - Provide detailed reports of potential changes without applying them
 - Include impact analysis for proposed changes
-- Support partial simulations for specific modules or configurations
+- Support partial simulations for specific modules or configuration-data
 
 ### Logging and Monitoring
 
 - Detailed logging of module execution
 - Performance metrics for each module run
 
-### Configuration File Syntax
+### Configuration-Data Syntax
 
 - **Primary Format: YAML**
-  - Use YAML for all configuration files due to its readability and widespread adoption
+  - Use YAML for all configuration-data files due to its readability and widespread adoption
   - Leverage YAML's support for complex data structures (lists, dictionaries, etc.)
 
 - **Structure**
-  - Top-level keys define major configuration sections
-  - Use nested structures for hierarchical configurations
+  - Top-level keys define major Configuration-Data sections
+  - Use nested structures for hierarchical Configuration-Data
   - Support for lists and dictionaries to represent complex data
 
 - **Module Definitions**
-  - Each module configuration is a top-level key
+  - Each module name is a top-level key for the module definition
   - Module options and parameters are nested under the module key
-  - Support for multiple instances of the same module with different configurations
+  - Support for multiple instances of the same module with different definitions
 
 - **Variables and Templating**
   - Allow for variable definitions in a dedicated section
-  - Support variable interpolation throughout the configuration
+  - Support variable interpolation throughout the configuration-data
   - Enable the use of Go templating for dynamic value generation
 
 - **Include Directives**
-  - Support for including other configuration files
-  - Allow for modular and reusable configuration components
+  - Support for including other configuration-data files
+  - Allow for modular and reusable configuration-data components
 
-- **Environment-specific Configurations**
+- **Environment-specific Configuration-Data**
   - Implement a mechanism for defining environment-specific overrides
-  - Support for easy switching between development, staging, and production configurations
+  - Support for easy switching between development, staging, and production configuration-data
 
 - **Secrets Reference**
   - Define a syntax for referencing secrets stored in the secrets management system
-  - Ensure secrets are never stored in plain text within configuration files
+  - Ensure secrets are never stored in plain text within configuration-data
 
 - **Comments and Documentation**
   - Encourage the use of YAML comments for in-line documentation
@@ -470,15 +464,15 @@ You are an expert Go developer specializing in configuration management systems.
     3. Following best practices
     4. Well-documented
 
-- **Configuration Override Rules**
+- **Module Definition Override Rules**
   - Defaults can be overridden within allowed boundaries defined by the module
   - All overrides must be explicitly defined
   - Override attempts outside allowed boundaries must fail validation
   - An Insecure flag should be used if the override weakens the module's security below a reasonable minimum
 
 - **Module Implementation**
-  - Modules validate configuration against their defined minimums
-  - Modules apply defaults when configuration is not specified
+  - Modules validate configuration-data against their defined minimums
+  - Modules apply defaults when configuration-data is not specified
   - Modules must document:
     1. Mandatory parameters
     2. Minimum requirements
@@ -486,17 +480,17 @@ You are an expert Go developer specializing in configuration management systems.
     4. Configurable boundaries
     5. Override implications
 
-- **Configuration Hierarchy**
-  - core.cfg: Compiled core resource configuration and compliance settings.
+- **Configuration-Data types/files**
+  - core.cfg: Compiled core resource Configuration-Data and compliance settings.
   - workflow.cfg: Defines workflow triggers and execution
 
 - **Module Responsibilities**
   - Modules must not implement independent scheduling
   - Modules must not make autonomous decisions
-  - All behavior must be traceable to configuration
-  - Modules must validate their configuration before execution
+  - All behavior must be traceable to Configuration-Data
+  - Modules must validate their Configuration-Data before execution
 
-- **Configuration Validation**
-  - All configurations must be validated against schema
-  - Modules must fail startup if configuration is invalid
-  - Runtime configuration changes must be validated before application
+- **Configuration-Data Validation**
+  - All Configuration-Data must be validated against schema
+  - Modules must fail startup if configuration-data is invalid
+  - Runtime configuration-data changes must be validated before application
