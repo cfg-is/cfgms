@@ -1,5 +1,17 @@
 You are an expert Go developer specializing in configuration management systems. You prioritize resilience, security, and clean architecture. When writing code for CFGMS, follow these strict guidelines:
 
+# Glossary of Terms
+
+- **Component**: A discrete, reusable, and self-contained unit of functionality.
+- **Module**: A collection of related components that implement Get/Set/Test for a resource type.
+- **Configuration**: The current state of a Resource or Endpoint, may be abbreviated as Config.
+- **Configuration-File**: A declarative specification of desired state for one or more resources, may be abbreviated as cfg.
+- **Resource**: A manageable entity (e.g., users, groups, web servers, applications).
+- **Monitor**: A detector that observes state changes and triggers workflows or alerts.
+- **Workflow**: A defined sequence of operations that automate tasks.
+- **Endpoint**: A managed system or service that a Steward is responsible for
+- **DNA**: System-specific metadata used for targeting and identification
+
 # Code Structure
 - Organize by feature, not technical layer
 - Keep all feature code (implementation, tests, errors, interfaces) in single package
@@ -20,7 +32,7 @@ You are an expert Go developer specializing in configuration management systems.
 # Go Best Practices
 - No global variables or state
 - Use dependency injection
-- Follow Go naming conventions (CamelCase exported, camelCase private)
+- Follow Go naming conventions (PascalCase exported, camelCase private)
 - Use structured logging with consistent fields
 - Handle all errors explicitly, no bare returns
 - Document all exported items with GoDoc
@@ -52,3 +64,439 @@ You are an expert Go developer specializing in configuration management systems.
 - Include rollback mechanisms
 - Support atomic operations
 - Add telemetry points for observability
+
+## 1. Global Design Decisions and Principles
+
+### Foundational Rules
+
+- Endpoint stewards must be extremely resilient (should be able to monitor its own health and always recover to a known-good state)
+- Parallel execution across all stewards simultaneously
+- All open ports must be 'Dark' and protected by mutual TLS
+- Project must be designed to be modular and extensible
+
+### Architecture and Execution
+
+- **Go-based Single Binary**
+- **Offline Operation Capability**
+- **Module-based Execution**
+  - All resource management tasks are performed by 'Modules'
+  - Each Module must implement the following three core functions:
+    1. **Get**: Returns a valid cfgms configuration for the resource being configured (essential for rollback)
+    2. **Set**: Idempotent function that configures the resource to the stated configuration, regardless of its current state. Returns a boolean indicating success or failure
+    3. **Test**: On-demand function that validates if the current state matches the prescribed state. Returns a boolean result and optionally detailed status information
+    4. **Monitor**: (Optional) Implements event-driven or system hook-based monitoring to detect real-time changes in the resource state
+- **Workflow Triggers**
+  - Module Monitors can trigger predefined workflows
+  - Stand-alone Monitors available for custom workflow triggers
+- **Graph-based Dependency Resolution**
+  - Utilizes a DependencyGraph structure for managing resource dependencies
+  - Parallel execution of independent tasks
+
+### Configuration Management
+
+- **Strict Schema Validation**
+  - Defines a clear schema for configuration validation
+  - Clear, actionable error messages
+- **Version Controlled Configurations**
+  - Git-native workflow
+- **Continuous Configuration Management and Monitoring**
+  - Real-time monitoring of resource states
+  - Immediate detection and reporting of configuration drift
+
+### Security
+
+- **Zero Trust Architecture**
+  - Mutual TLS authentication by default
+- **Minimal Attack Surface**
+- **Dark Ports**
+  - All open ports protected by Single Packet Authentication (SPA)
+  - All connections secured by mTLS
+- **RBAC Built-in**
+  - Implements Role and Permission structures for fine-grained access control
+
+### Observability and Error Handling
+
+- **Built-in Telemetry**
+  - Trace-based debugging
+- **Transactional Changes**
+  - Atomic operation sets
+  - Automatic rollback on failure
+
+### Workflow Engine
+
+- YAML-based Workflow Definition
+- Function Blocks
+- Dynamic Branching
+- Integrated Script Execution
+  - Run scripts (Bash, PowerShell, Python, etc.) as part of the workflow
+  - Pass data between script executions and module configurations
+- Reusable Workflow Components
+- Workflow Triggers
+- Workflow Visualization
+
+### Command Execution and Control
+
+- **Multi-mode Command Execution**
+  - Three distinct modes for flexible command execution across Stewards
+
+- **One-off Command Module**
+  - Similar to Salt's execution module
+  - Run single commands against multiple Stewards based on DNA filters
+  - Ideal for quick, targeted actions across the infrastructure
+
+- **One-to-Many Interactive Shell**
+  - Specify DNA filter and shell type (e.g., Bash, PowerShell)
+  - Run multiple commands in sequence
+  - Assign return data to variables for use in subsequent commands
+  - Support for command pipelines and complex operations
+
+- **One-to-One Interactive Shell**
+  - Direct, interactive shell access to individual Stewards
+  - Full terminal emulation for complex, interactive tasks
+
+### API First Design
+
+- **gRPC API**
+  - Strongly typed interfaces
+- **Webhook Integration**
+  - Event-driven configuration updates
+
+## 2. Core System Element Details
+
+### Architecture
+
+- **Controller**
+  - The Controller is the central brain of the CMS.
+  - It is responsible for managing the Stewards and Outposts.
+  - It is responsible for executing workflows and monitoring the state of the infrastructure.
+- **Steward**
+  - The Steward is responsible for managing a single endpoint.
+  - It is responsible for executing workflows and monitoring the state of the endpoint.
+- **Outpost**
+  - The Outpost is responsible for managing a group of Stewards or agentless endpoints.
+  - It is responsible for caching/proxying configuration and binaries from the Controller to the Stewards.
+  - Can be tasked with monitoring infrastructure that does not support a Steward (eg. firewalls, routers, printers, etc.)
+- **SaaS Steward**
+  - The SaaS Steward manages the configuration of a SaaS application.
+- **Cloud Steward**
+  - The Cloud Steward manages the configuration of public or private cloud infrastructure.
+
+### Controller
+
+- **Command Communications**
+  - All command communications between Controller and Stewards occur over gRPC
+  - Protocol Buffers used for efficient data serialization
+
+- **Self-Managed Blue-Green Upgrades**
+  - Leverages CMS's own capabilities for Steward upgrades
+  - Controller-orchestrated upgrade process:
+    1. Deploy Steward v1.5 alongside v1
+    2. Health check and validation of v1.5
+    3. Gradual responsibility transfer:
+       a. v1.5 runs in monitor-only mode
+       b. v1 continues enforcing configurations
+    4. Switchover of enforcement responsibilities
+    5. Decommissioning of v1 after stability period
+  - Allows for immediate rollback by reversing enforcement roles.
+  - End user shouldn't ever have to think about a Steward upgrade.
+
+- **Log Shipping to Central Collector** (v2)
+  - Efficient log collection and forwarding mechanism
+  - Centralized log storage and analysis
+
+- **DNA Management**
+  - **LevelDB Storage with In-Memory Caching**
+    - DNA data stored in LevelDB by default for efficient key-value storage
+    - In-memory caching on the Controller for fast access
+  - **Pluggable Storage Architecture**
+    - Ability to replace default storage solutions:
+      - In-memory cache can be swapped with distributed cache systems
+      - LevelDB can be replaced with other databases (e.g., Postgres)
+  - **Comprehensive Monitoring System**
+    - Extensive set of Monitors for various endpoint data points
+    - Virtual DNA Module derived from DNA-specific configuration file
+    - Allows specification of enabled Monitors for each endpoint
+    - DNA Module can be used in Configs for setting or monitoring DNA data during config runs
+  - **Dynamic DNA Updates**
+    - DNA updated on agent start
+    - Continuous updates based on associated Monitor detections
+
+- **Hierarchical Controller Management**
+  - Original Controller can create and manage additional Controllers
+  - Supports scaling out and creating hierarchical Controller structures
+
+- **Pluggable Configuration Storage**
+  - Default: Git repository for version-controlled configuration storage
+  - Supports migration to database storage for large-scale deployments
+  - Options include:
+    - Git (default for small to medium deployments)
+    - Relational databases (e.g., PostgreSQL)
+
+- **Resilience and Recovery**
+  - Leverages inherent backup and recovery capabilities of Git or chosen database
+  - No need for custom backup solutions within the CMS architecture
+  - Standard backup and recovery procedures can be applied to the storage layer
+
+### Outpost
+
+- File Caching for Stewards (v2)
+- Network Discovery and Continuous Monitoring (v2)
+- SNMP Monitoring (v2)
+- Automated Network Documentation (v2)
+- Passive Network Monitoring (v2)
+- ML-based Network Baseline and Anomaly Detection (v2)
+- Proxy Steward for Agentless Management (v2)
+
+### Steward
+
+- **Standalone Operation Capability**
+  - Stewards can operate independently using local configurations
+  - Enables offline operation and supports air-gapped environments
+
+- **Bootstrap Functionality**
+  - Initial Controller setup performed by a standalone Steward
+  - Enables self-bootstrapping of the CMS infrastructure
+
+- **Steward Health Monitoring**
+  - Self-diagnostic capabilities
+  - Automatic recovery procedures
+  - Implements metrics for task latency, config errors, steward health, and recovery attempts
+  - Continuous health checks with automatic recovery attempts
+
+- **Steward Tools System** (v2)
+  - Extensible plugin architecture for additional functionalities
+  - Integrated Script Execution
+    - Run scripts (Bash, PowerShell, Python, etc.) as part of the workflow
+  - Allows for modular addition of features without bloating the core Steward
+
+- **DEX and Performance Monitoring Tool** (v3)
+  - Digital Employee Experience (DEX) monitoring
+  - Detailed system and application performance metrics
+  - Minimal impact on endpoint performance
+
+### SaaS Steward
+
+- SaaS Environment Management (v2)
+  - M365 Tenant Management
+  - Quickbooks Online Administration
+  - etc.
+
+### Cloud Steward
+
+- Cloud Environment Management (v2)
+  - VMS
+  - Containers
+  - serverless
+  - Cloud network and storage
+  - etc.
+
+### Multi-Tenancy: Recursive Parent-Child Model
+
+- **Generalized Parent-Child Relationship**
+  - Single 'Tenant' module manages tenant hierarchy
+  - Each tenant has a unique identifier and an optional parent identifier
+  - Supports arbitrary depth without predefined levels (e.g., MSP > Client > Department)
+
+- **Recursive Configuration Inheritance**
+  - Hierarchical configuration structure (nested directories or objects)
+  - Recursive merging of configurations from parent to child
+  - Any level can override inherited configurations
+
+- **Dynamic RBAC with Tenant Context**
+  - RBAC system extended to include tenant context in roles and permissions
+  - Permissions cascade down the hierarchy unless explicitly overridden
+
+- **Recursive Configuration Resolution**
+  - Configurations resolved recursively from root to target tenant
+  - Caching of resolved configurations for performance
+
+- **Hierarchical Data Isolation**
+  - Hierarchical key derivation for tenant-specific encryption
+  - Data storage using tenant paths as prefixes or in nested structures
+
+- **Efficient Cross-Tenant Operations**
+  - Targeting using tenant path prefixes for cross-tenant operations
+  - Wildcard matching in tenant paths for flexible targeting
+
+- **Scalability Optimizations**
+  - Efficient caching strategies for deep hierarchies
+  - Optimized algorithms for resolving conflicts in hierarchical data
+  - Designed to handle 50k+ Stewards across multiple regions
+
+- **Compliance and Audit**
+  - Comprehensive tracking of changes across complex hierarchies
+  - Tenant-aware audit logs for improved traceability
+
+- **Visualization and Management Tools**
+  - Interactive tools for visualizing and managing tenant hierarchies
+  - Dashboards for monitoring resource usage and performance across tenants
+
+### API and Interface Design
+
+#### API first design
+
+- Implement a comprehensive API for all Controller operations
+
+#### Command-Line Interface (CLI)
+
+- Develop a powerful CLI interface for API
+- Features:
+  - Full coverage of Controller functionalities
+  - Can be used interactively or in scripts
+  - Consistent syntax and conventions across commands
+  - Built-in help and documentation
+  - Integration with system's authentication and authorization mechanisms
+- Use cases:
+  - Configuration Management: Read, Diff, Git Pull (cannot write config data)
+  - Steward and Outpost administration
+  - Workflow triggering, scheduling and monitoring
+  - System health checks and diagnostics
+  - Batch operations and automation
+- Implementation:
+  - Utilize a robust CLI framework (e.g., cobra for Go)
+  - Ensure cross-platform compatibility (Windows, Linux, macOS)
+  - Implement shell completion for improved usability
+  - Provide colorized output for better readability
+  - Support output in multiple formats (e.g., plain text, JSON, YAML) for easy parsing and integration with other tools
+
+#### Documentation and Examples
+
+- Provide extensive documentation for both RESTful API and CLI
+- Include real-world examples and best practices
+- Offer interactive API explorer for RESTful API (e.g., Swagger UI)
+
+### Templating System
+
+- Utilize Go's built-in `text/template` package
+- Enhance with custom functions for advanced operations (e.g., data manipulation, conditional logic)
+- Provide a rich set of helper functions similar to Sprig library
+
+### Secrets Management
+
+- Implement a pluggable secrets management system
+- Provide a default, simple secrets handler for basic installations
+  - Encrypted storage using industry-standard encryption (e.g., AES-256)
+  - Key rotation and secure key storage mechanisms
+- Support integration with external secret managers:
+  - HashiCorp Vault
+  - AWS Secrets Manager
+  - Azure Key Vault
+  - Google Cloud Secret Manager
+- Allow easy extension for other secret management systems
+
+### Configuration-Driven Scheduling and Triggers
+
+- **Base Configuration Scheduling**
+  - All scheduling must be defined within the configuration that governs the resource
+  - Base configurations may specify:
+    1. **Test Interval**: Frequency of configuration compliance checks (cron pattern or interval based) or
+    2. **Monitor Triggers**: Resource-specific monitors that can trigger validation
+    3. **Retry Policies**: Whether to retry as soon as possible, or skip until the next test interval.
+    4. **Maximum Drift**: Longest allowable time between validations before a warning or error is generated.
+
+- **Workflow Triggers**
+  - Workflows must define their triggers within workflow.cfg
+  - Support multiple trigger types:
+    - Schedule-based (cron patterns)
+    - Event-driven (webhooks, system events)
+    - Monitor-based (metric thresholds, state changes)
+    - External system events (git pushes, CI/CD events)
+  - Allow complex trigger conditions and combinations
+  - Support cooldown periods and trigger debouncing
+
+- **Trigger Resolution**
+  - All scheduling and trigger logic must be configuration-driven
+  - Unified trigger evaluation across the system
+  - Support for trigger conditions and dependencies
+  - Support various scheduling patterns (cron-like, interval-based, one-time)
+
+### Dry Run and Simulation Mode
+
+- Implement simulation capability for both standalone Stewards and Controller-managed systems
+- Provide detailed reports of potential changes without applying them
+- Include impact analysis for proposed changes
+- Support partial simulations for specific modules or configurations
+
+### Logging and Monitoring
+
+- Detailed logging of module execution
+- Performance metrics for each module run
+
+### Configuration File Syntax
+
+- **Primary Format: YAML**
+  - Use YAML for all configuration files due to its readability and widespread adoption
+  - Leverage YAML's support for complex data structures (lists, dictionaries, etc.)
+
+- **Structure**
+  - Top-level keys define major configuration sections
+  - Use nested structures for hierarchical configurations
+  - Support for lists and dictionaries to represent complex data
+
+- **Module Definitions**
+  - Each module configuration is a top-level key
+  - Module options and parameters are nested under the module key
+  - Support for multiple instances of the same module with different configurations
+
+- **Variables and Templating**
+  - Allow for variable definitions in a dedicated section
+  - Support variable interpolation throughout the configuration
+  - Enable the use of Go templating for dynamic value generation
+
+- **Include Directives**
+  - Support for including other configuration files
+  - Allow for modular and reusable configuration components
+
+- **Environment-specific Configurations**
+  - Implement a mechanism for defining environment-specific overrides
+  - Support for easy switching between development, staging, and production configurations
+
+- **Secrets Reference**
+  - Define a syntax for referencing secrets stored in the secrets management system
+  - Ensure secrets are never stored in plain text within configuration files
+
+- **Comments and Documentation**
+  - Encourage the use of YAML comments for in-line documentation
+  - Support for metadata fields for more structured documentation
+
+### Core Module Principles
+
+- **Module Behavior**
+  - Modules must define secure minimums and reasonable defaults
+  - Modules enforce minimum security requirements
+  - Modules provide default behaviors that are:
+    1. Secure by default
+    2. Production-ready
+    3. Following best practices
+    4. Well-documented
+
+- **Configuration Override Rules**
+  - Defaults can be overridden within allowed boundaries defined by the module
+  - All overrides must be explicitly defined
+  - Override attempts outside allowed boundaries must fail validation
+  - An Insecure flag should be used if the override weakens the module's security below a reasonable minimum
+
+- **Module Implementation**
+  - Modules validate configuration against their defined minimums
+  - Modules apply defaults when configuration is not specified
+  - Modules must document:
+    1. Mandatory parameters
+    2. Minimum requirements
+    3. Default behaviors
+    4. Configurable boundaries
+    5. Override implications
+
+- **Configuration Hierarchy**
+  - core.cfg: Compiled core resource configuration and compliance settings.
+  - workflow.cfg: Defines workflow triggers and execution
+
+- **Module Responsibilities**
+  - Modules must not implement independent scheduling
+  - Modules must not make autonomous decisions
+  - All behavior must be traceable to configuration
+  - Modules must validate their configuration before execution
+
+- **Configuration Validation**
+  - All configurations must be validated against schema
+  - Modules must fail startup if configuration is invalid
+  - Runtime configuration changes must be validated before application
