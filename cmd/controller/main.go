@@ -1,15 +1,15 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
 
-	"cfgms/pkg/logging"
-
 	"cfgms/features/controller/config"
 	"cfgms/features/controller/server"
+	"cfgms/pkg/logging"
 )
 
 func main() {
