@@ -30,6 +30,12 @@ You are an expert Go developer specializing in configuration management systems.
 - Use context.Context in public APIs
 - Implement health checks for all critical components
 - Design for resilience and automatic recovery
+- Follow GitFlow branching strategy:
+  - Use `main` for production-ready code only
+  - Use `develop` for integration of features
+  - Use `feature/*` branches for new features
+  - Use `release/*` branches for release preparation
+  - Use `hotfix/*` branches for critical production fixes
 
 ## Go Best Practices
 - No global variables or state

@@ -6,6 +6,14 @@ CFGMS is a modern configuration management system designed with resilience, secu
 
 The project is in early development. Core architecture and structure have been implemented, but many components are still being developed.
 
+## Development
+
+CFGMS follows the GitFlow branching model:
+- `main` branch contains production-ready code
+- `develop` branch is for integration of features
+- Feature development happens in `feature/*` branches
+- See [CONTRIBUTING.md](CONTRIBUTING.md) for complete workflow details
+
 ## Next Steps
 
 - [ ] Implement the testing framework

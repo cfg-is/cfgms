@@ -1,5 +1,47 @@
 # Contributing to CFGMS
 
+## Git Workflow: GitFlow
+
+CFGMS follows the GitFlow branching model for development:
+
+### Main Branches
+
+- `main` - Production-ready code only
+- `develop` - Integration branch for ongoing development
+
+### Supporting Branches
+
+- `feature/*` - New features or enhancements
+- `release/*` - Release preparation
+- `hotfix/*` - Critical fixes for production
+
+### Workflow Rules
+
+1. **Feature Development**
+   - Branch from: `develop`
+   - Name format: `feature/short-description`
+   - Merge back to: `develop`
+   - Example: `feature/add-file-module`
+
+2. **Release Preparation**
+   - Branch from: `develop`
+   - Name format: `release/vX.Y.Z`
+   - Merge to: both `main` and `develop`
+   - Tag on `main` after merging
+
+3. **Hotfixes**
+   - Branch from: `main`
+   - Name format: `hotfix/short-description`
+   - Merge to: both `main` and `develop`
+   - Example: `hotfix/fix-security-issue`
+
+### Commit Guidelines
+
+- Use clear, descriptive commit messages
+- Reference issue numbers when applicable
+- Keep commits focused on a single logical change
+- Sign your commits with `git commit -s`
+
 ## Development Guidelines
 
 ### Test-Driven Development
