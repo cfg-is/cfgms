@@ -3,7 +3,6 @@ package controller
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -49,25 +48,21 @@ func TestControllerCreation(t *testing.T) {
 }
 
 func TestControllerLifecycle(t *testing.T) {
-	// Create a test logger
-	logger := testutil.NewMockLogger(false)
-
-	// Create a controller
+	// Create a test logger and controller
+	logger := testutil.NewMockLogger(true)
 	ctrl, err := New(config.DefaultConfig(), logger)
 	require.NoError(t, err)
 
-	// Create a context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-	defer cancel()
-
 	// Start the controller
+	ctx := context.Background()
 	err = ctrl.Start(ctx)
 	assert.NoError(t, err)
 
 	// Verify start logged properly
 	infoLogs := logger.GetLogs("info")
-	assert.GreaterOrEqual(t, len(infoLogs), 1)
+	assert.GreaterOrEqual(t, len(infoLogs), 2)
 	assert.Equal(t, "Starting controller", infoLogs[0].Message)
+	assert.Equal(t, "Controller started successfully", infoLogs[1].Message)
 
 	// Stop the controller
 	err = ctrl.Stop(ctx)
@@ -75,8 +70,11 @@ func TestControllerLifecycle(t *testing.T) {
 
 	// Verify stop logged properly
 	infoLogs = logger.GetLogs("info")
-	assert.GreaterOrEqual(t, len(infoLogs), 2)
-	assert.Equal(t, "Stopping controller", infoLogs[1].Message)
+	assert.GreaterOrEqual(t, len(infoLogs), 4)
+	assert.Equal(t, "Starting controller", infoLogs[0].Message)
+	assert.Equal(t, "Controller started successfully", infoLogs[1].Message)
+	assert.Equal(t, "Stopping controller", infoLogs[2].Message)
+	assert.Equal(t, "Controller stopped successfully", infoLogs[3].Message)
 }
 
 func TestModuleRegistration(t *testing.T) {
