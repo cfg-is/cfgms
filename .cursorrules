@@ -81,7 +81,7 @@ You are an expert Go developer specializing in configuration management systems.
 
 - Stewards must be extremely resilient (should be able to monitor its own health and always recover to a known-good state)
 - Parallel execution across all stewards simultaneously
-- All open ports must be 'Dark' and protected by mutual TLS
+- All network communication must be secured with appropriate protocols and authentication
 - Project must be designed to be modular and extensible
 
 ### Architecture and Execution
@@ -116,13 +116,17 @@ You are an expert Go developer specializing in configuration management systems.
 ### Security
 
 - **Zero Trust Architecture**
-  - Mutual TLS authentication by default
+  - Mutual TLS authentication for internal agent communication
+  - API key authentication for external REST API access
+  - Role-based access control for all operations
 - **Minimal Attack Surface**
-- **Dark Ports**
-  - All open ports protected by Single Packet Authentication (SPA)
-  - All connections secured by mTLS
+  - Standard HTTPS for REST API
+  - gRPC with mTLS for internal communication
+  - Optional OpenZiti integration for zero-trust networking
 - **RBAC Built-in**
   - Implements Role and Permission structures for fine-grained access control
+  - API key scoping for external access
+  - Certificate-based identity for internal communication
 
 ### Observability and Error Handling
 
@@ -187,7 +191,7 @@ You are an expert Go developer specializing in configuration management systems.
 ### Controller
 
 - **Command Communications**
-  - All command communications between Controller and Stewards occur over gRPC
+  - All command communications between Controller and Agents/Stewards occur over gRPC
   - Protocol Buffers used for efficient data serialization
 
 - **Self-Managed Blue-Green Upgrades**

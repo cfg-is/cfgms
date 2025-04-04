@@ -92,3 +92,50 @@ Before submitting code:
 - Behavior documentation
 - Error documentation
 - Interface documentation
+
+### Security Guidelines
+
+#### Security Best Practices
+
+1. **Authentication & Authorization**
+   - Use mTLS for internal agent communication
+   - Implement proper API key validation
+   - Follow principle of least privilege
+   - Never store credentials in code or configuration
+
+2. **Network Security**
+   - Use HTTPS for all external communication
+   - Implement proper TLS configuration
+   - Validate all network inputs
+   - Sanitize all logging output
+
+3. **Code Security**
+   - Run security linters (gosec, etc.)
+   - Keep dependencies updated
+   - Follow secure coding practices
+   - Document security considerations
+
+4. **Testing Security**
+   - Include security-focused test cases
+   - Test authentication and authorization
+   - Validate input sanitization
+   - Test error handling for security scenarios
+
+#### Security Review Process
+
+1. **Before Submitting**
+   - Run security linters
+   - Check for common vulnerabilities
+   - Review authentication flows
+   - Test error handling
+
+2. **During Review**
+   - Security implications will be reviewed
+   - Authentication flows will be validated
+   - Input validation will be checked
+   - Error handling will be verified
+
+3. **After Merging**
+   - Security tests will be run
+   - Dependencies will be checked
+   - Security documentation will be updated

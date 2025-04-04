@@ -21,10 +21,11 @@ CFGMS follows the GitFlow branching model:
   - [ ] Write unit tests for the steward components
   - [ ] Expand integration tests
 
-- [ ] Implement the mTLS communication layer
-  - [ ] Set up secure communication between Controller and Stewards
-  - [ ] Implement certificate management
-  - [ ] Implement the "Dark Ports" security model with SPA
+- [ ] Implement secure communication layers
+  - [ ] Set up gRPC with mTLS for internal agent communication
+  - [ ] Implement REST API with HTTPS and API keys
+  - [ ] Add optional OpenZiti integration for zero-trust networking
+  - [ ] Implement certificate management for agent authentication
 
 - [ ] Create the first basic module
   - [ ] Implement a simple file management module as a proof of concept
@@ -33,6 +34,25 @@ CFGMS follows the GitFlow branching model:
 - [ ] Enhance the Steward component
   - [ ] Implement health monitoring and self-healing capabilities
   - [ ] Add support for offline operation
+
+## Security
+
+CFGMS implements a robust security architecture:
+
+- **Internal Communication**
+  - gRPC with mutual TLS for agent-controller communication
+  - Certificate-based authentication for agents
+  - Optional OpenZiti integration for zero-trust networking
+
+- **External Access**
+  - REST API with HTTPS and API key authentication
+  - Role-based access control
+  - Rate limiting and request validation
+
+- **Security Best Practices**
+  - No hardcoded credentials
+  - Secure defaults
+  - Comprehensive logging
 
 ## Project Structure
 
