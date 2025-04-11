@@ -4,6 +4,8 @@
 
 CFGMS uses a simple configuration model that focuses on declarative configuration files (`.cfg` files) that define the desired state for resources, where a single configuration file can contain settings for multiple modules and resources.
 
+For a high-level overview of the configuration management system, see [Configuration Management Overview](./overview.md).
+
 ## Core Configuration Files
 
 The primary configuration type in CFGMS is the `.cfg` file, which contains declarative specifications of desired state for one or more resources.
@@ -108,6 +110,8 @@ Targeting can use:
 - Lists of values
 - Negation (e.g., `os: "!windows"`)
 
+For detailed information about how configurations are resolved based on targeting, see [Configuration Resolution](./configuration-resolution.md).
+
 ## Workflow Files
 
 Workflows are defined in separate `.wrkflo` files:
@@ -189,6 +193,15 @@ system:
       cert_path: "/etc/cfgms/certs"
       key_path: "/etc/cfgms/keys"
 ```
+
+For detailed information about how system configurations are stored, see [Configuration Storage](./configuration-storage.md).
+
+## Related Documentation
+
+- [Configuration Management Overview](./overview.md): Introduction to configuration management in CFGMS
+- [Configuration Resolution](./configuration-resolution.md): How configurations are resolved and applied
+- [Configuration Validation](./configuration-validation.md): Schema validation and error handling
+- [Configuration Storage](./configuration-storage.md): How configurations are stored and versioned
 
 ## Version Information
 

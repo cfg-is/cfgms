@@ -11,6 +11,8 @@ CFGMS manages multiple types of configurations with different scopes and inherit
 5. **Inherited** - Configurations can inherit from parent tenants
 6. **Compiled** - Configurations are compiled into a final form before application
 
+For detailed information about configuration types, see [Configuration Types](./configuration-types.md).
+
 ## Key Components
 
 ### Configuration Types
@@ -22,6 +24,8 @@ CFGMS manages several types of configurations:
 3. **Workflow Configurations** - Configurations that define automated workflows
 4. **Module Configurations** - Configurations for specific modules
 
+For detailed information about each configuration type, see [Configuration Types](./configuration-types.md).
+
 ### Configuration Resolution
 
 Configurations are resolved through a process that:
@@ -30,6 +34,8 @@ Configurations are resolved through a process that:
 2. Resolves inheritance from parent tenants
 3. Merges configurations according to precedence rules
 4. Validates the resulting configuration
+
+For detailed information about configuration resolution, see [Configuration Resolution](./configuration-resolution.md).
 
 ### Configuration Storage
 
@@ -40,14 +46,18 @@ Configurations are stored in a flexible storage system that:
 3. Provides efficient historical tracking and retrieval
 4. Supports deduplication and compression
 
-### Configuration Generation
+For detailed information about configuration storage, see [Configuration Storage](./configuration-storage.md).
 
-Configurations are generated through a process that:
+### Configuration Validation
 
-1. Detects changes to source configurations
-2. Compiles configurations for affected endpoints
-3. Stores immutable snapshots of compiled configurations
-4. Notifies affected components of changes
+Configurations are validated through a comprehensive process that:
+
+1. Validates against defined schemas
+2. Checks business rules and constraints
+3. Validates dependencies
+4. Reports validation errors with clear messages
+
+For detailed information about configuration validation, see [Configuration Validation](./configuration-validation.md).
 
 ## Configuration Lifecycle
 
@@ -58,6 +68,13 @@ Configurations are generated through a process that:
 5. **Application** - Configurations are applied to endpoints
 6. **Validation** - The applied configuration is validated
 7. **Monitoring** - The configuration is monitored for drift
+
+## Related Documentation
+
+- [Configuration Types](./configuration-types.md): Different types of configurations and their purposes
+- [Configuration Resolution](./configuration-resolution.md): How configurations are resolved and applied
+- [Configuration Validation](./configuration-validation.md): Schema validation and error handling
+- [Configuration Storage](./configuration-storage.md): How configurations are stored and versioned
 
 ## Version Information
 

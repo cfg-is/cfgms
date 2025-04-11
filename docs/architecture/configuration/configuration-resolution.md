@@ -4,6 +4,9 @@
 
 Configuration resolution is the process of determining which configurations apply to a specific endpoint and how they are merged to produce a final configuration. CFGMS uses a sophisticated resolution process that takes into account DNA matching, tenant inheritance, and configuration specificity.
 
+For a high-level overview of the configuration management system, see [Configuration Management Overview](./overview.md).
+For information about configuration types, see [Configuration Types](./configuration-types.md).
+
 ## DNA-Based Matching
 
 DNA (eg Deoxyribonucleic acid in living organisms) is a set of attributes that describe an endpoint, such as its role, environment, location, or any other metadata. DNA is used to match configurations to endpoints.
@@ -166,6 +169,15 @@ The complete resolution process involves:
 3. **Specificity Sorting** - Sort configurations by specificity
 4. **Configuration Merging** - Merge configurations according to rules
 5. **Validation** - Validate the resulting configuration
+
+For information about configuration validation, see [Configuration Validation](./configuration-validation.md).
+
+## Related Documentation
+
+- [Configuration Management Overview](./overview.md): Introduction to configuration management in CFGMS
+- [Configuration Types](./configuration-types.md): Different types of configurations and their purposes
+- [Configuration Validation](./configuration-validation.md): Schema validation and error handling
+- [Configuration Storage](./configuration-storage.md): How configurations are stored and versioned
 
 ## Version Information
 

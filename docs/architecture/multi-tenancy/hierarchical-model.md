@@ -94,18 +94,24 @@ type RootAdmin interface {
 
 ### Command Line Interface
 
+The CLI provides commands for managing tenants:
+
+#### View Operations
 ```bash
-# View operations
 cfgms tenant get              # Get current tenant info
 cfgms tenant list-children    # List child tenants
 cfgms tenant get-parent       # Get parent tenant info
+```
 
-# Admin operations
+#### Admin Operations
+```bash
 cfgms tenant create-child <name> [flags]
 cfgms tenant update-child <id> [flags]
 cfgms tenant remove-child <id>
+```
 
-# Root-only operations
+#### Root Operations
+```bash
 cfgms tenant create <name> [flags]
 cfgms tenant move <id> <new-parent-id>
 cfgms tenant tree             # View full tenant tree

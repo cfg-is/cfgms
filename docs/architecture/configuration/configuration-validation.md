@@ -4,6 +4,9 @@
 
 Configuration validation is the process of ensuring that configurations meet the required schema and constraints before they are applied. CFGMS uses a comprehensive validation system that includes schema validation, constraint checking, and dependency validation.
 
+For a high-level overview of the configuration management system, see [Configuration Management Overview](./overview.md).
+For information about configuration types, see [Configuration Types](./configuration-types.md).
+
 ## Schema Validation
 
 Schema validation ensures that configurations conform to a defined schema, including required fields, data types, and value constraints.
@@ -188,6 +191,13 @@ func (v *ConfigValidator) ValidateWithContext(cfg *Config) []ValidationError {
 2. **Constraint Errors** - Errors related to constraint checking
 3. **Dependency Errors** - Errors related to dependency validation
 4. **Syntax Errors** - Errors related to configuration syntax
+
+## Related Documentation
+
+- [Configuration Management Overview](./overview.md): Introduction to configuration management in CFGMS
+- [Configuration Types](./configuration-types.md): Different types of configurations and their purposes
+- [Configuration Resolution](./configuration-resolution.md): How configurations are resolved and applied
+- [Configuration Storage](./configuration-storage.md): How configurations are stored and versioned
 
 ## Version Information
 

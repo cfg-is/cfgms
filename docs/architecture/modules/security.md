@@ -1,10 +1,10 @@
 # Module Security Requirements
 
-This document details the security requirements for modules in CFGMS.
+This document details the security requirements specifically for modules in CFGMS. For system-wide security architecture, see [Security Architecture](../../security/architecture.md).
 
 ## Overview
 
-Modules in CFGMS must adhere to strict security requirements to ensure the overall security of the system. These requirements cover various aspects of module security, including authentication, authorization, data protection, and secure communication.
+Modules in CFGMS must adhere to strict security requirements to ensure the overall security of the system. These requirements build upon the [core principles](core-principles.md) of security by design and extend them with module-specific security considerations.
 
 ## Authentication and Authorization
 
@@ -66,10 +66,10 @@ Modules in CFGMS must adhere to strict security requirements to ensure the overa
 - **Error Logging**: Log errors securely without exposing sensitive information
 - **Recovery Mechanisms**: Implement recovery mechanisms for errors
 
-## Best Practices
+## Module-Specific Security Best Practices
 
 1. **Secure Defaults**
-   - Use secure defaults for all configurations
+   - Use secure defaults for all module configurations
    - Avoid insecure defaults that could compromise security
 
 2. **Regular Updates**
@@ -77,14 +77,61 @@ Modules in CFGMS must adhere to strict security requirements to ensure the overa
    - Monitor for security vulnerabilities
 
 3. **Security Testing**
-   - Conduct regular security testing
+   - Conduct regular security testing of modules
    - Use automated security testing tools
 
 4. **Incident Response**
-   - Have a plan for responding to security incidents
+   - Have a plan for responding to security incidents in modules
    - Practice incident response procedures
 
+## Module Security Implementation Examples
+
+### Example: Secure Credential Handling
+
+```go
+// Example of secure credential handling in a module
+func (m *MyModule) Set(ctx context.Context, resourceID string, cfg Configuration) error {
+    // Use the secrets manager to retrieve credentials
+    creds, err := m.secretsManager.Get(ctx, "my-service-credentials")
+    if err != nil {
+        return fmt.Errorf("failed to retrieve credentials: %w", err)
+    }
+    
+    // Use the credentials securely
+    client := NewSecureClient(creds)
+    
+    // Perform the operation
+    return client.ApplyConfiguration(ctx, cfg)
+}
+```
+
+### Example: Input Validation
+
+```go
+// Example of input validation in a module
+func (m *MyModule) validateInput(cfg Configuration) error {
+    if cfg.Port < 1 || cfg.Port > 65535 {
+        return fmt.Errorf("invalid port number: %d", cfg.Port)
+    }
+    
+    if cfg.Hostname == "" {
+        return fmt.Errorf("hostname cannot be empty")
+    }
+    
+    // Additional validation...
+    return nil
+}
+```
+
+## Related Documentation
+
+- [Core Principles](core-principles.md) - Foundational principles for module design
+- [Security Architecture](../../security/architecture.md) - System-wide security architecture
+- [Module Interface](interface.md) - Standard interface for modules
+- [Module Lifecycle](lifecycle.md) - Module lifecycle management
+
 ## Version Information
+
 - **Document Version:** 1.0
 - **Last Updated:** 2024-04-04
-- **Status:** Draft 
+- **Status:** Draft

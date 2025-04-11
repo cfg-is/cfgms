@@ -6,6 +6,8 @@ This document details how modules are loaded, initialized, and managed in CFGMS.
 
 The module lifecycle management system in CFGMS handles the entire lifecycle of modules, from loading and initialization to shutdown and cleanup. This ensures that modules are properly managed and that resources are allocated and released appropriately.
 
+For information about the standard module interface, see [Module Interface](interface.md).
+
 ## Lifecycle Phases
 
 ### 1. Discovery
@@ -48,264 +50,115 @@ The shutdown phase involves gracefully shutting down the module.
 
 - **Request Completion**: The module completes any pending requests
 - **Connection Closure**: Connections to external systems are closed
-- **State Persistence**: The module's state is persisted if necessary
 - **Resource Release**: Resources allocated to the module are released
+- **State Cleanup**: The module's state is cleaned up
 
 ### 6. Cleanup
 
-The cleanup phase involves cleaning up after the module.
+The cleanup phase involves final cleanup after shutdown.
 
 - **Resource Cleanup**: Any remaining resources are cleaned up
-- **State Cleanup**: Any remaining state is cleaned up
-- **Module Unregistration**: The module is unregistered from the system
+- **State Persistence**: Final state is persisted if necessary
+- **Logging**: Final logs are written
 
 ## Module Manager
 
-The Module Manager is responsible for managing the lifecycle of modules.
+The Module Manager is responsible for managing the lifecycle of modules. It handles:
 
-```go
-// ModuleManager manages the lifecycle of modules
-type ModuleManager interface {
-    // RegisterModule registers a module with the system
-    RegisterModule(module Module, metadata ModuleMetadata) error
-    
-    // UnregisterModule unregisters a module from the system
-    UnregisterModule(moduleID string) error
-    
-    // GetModule returns a module by ID
-    GetModule(moduleID string) (Module, error)
-    
-    // ListModules returns a list of all registered modules
-    ListModules() []ModuleMetadata
-    
-    // InitializeModule initializes a module
-    InitializeModule(moduleID string, config Configuration) error
-    
-    // ShutdownModule shuts down a module
-    ShutdownModule(moduleID string) error
-}
-```
+- **Module Registration**: Registering modules with the system
+- **Module Unregistration**: Unregistering modules from the system
+- **Module Loading**: Loading module code and resources
+- **Module Initialization**: Initializing modules for operation
+- **Module Shutdown**: Shutting down modules gracefully
+- **Module Cleanup**: Cleaning up after module shutdown
+
+For more details on the module interface that the Module Manager interacts with, see [Module Interface](interface.md).
 
 ## Module Metadata
 
-Module metadata provides information about a module.
+Module metadata provides information about a module's capabilities and requirements. It includes:
 
-```go
-// ModuleMetadata provides information about a module
-type ModuleMetadata struct {
-    // ID is the unique identifier for the module
-    ID string
-    
-    // Name is the human-readable name of the module
-    Name string
-    
-    // Description is a description of the module
-    Description string
-    
-    // Version is the version of the module
-    Version string
-    
-    // Dependencies is a list of dependencies required by the module
-    Dependencies []string
-    
-    // Capabilities is a list of capabilities provided by the module
-    Capabilities []string
-    
-    // ConfigurationSchema is the schema for the module's configuration
-    ConfigurationSchema interface{}
-}
-```
+- **Module ID**: Unique identifier for the module
+- **Module Name**: Human-readable name for the module
+- **Module Version**: Version of the module
+- **Module Description**: Description of the module's functionality
+- **Module Dependencies**: Dependencies on other modules or resources
+- **Module Configuration**: Configuration schema for the module
+
+For more details on the module interface that uses this metadata, see [Module Interface](interface.md).
 
 ## Module Configuration
 
-Module configuration is loaded during initialization.
+Module configuration defines the settings for a module. It includes:
 
-```go
-// ModuleConfiguration is the configuration for a module
-type ModuleConfiguration struct {
-    // Enabled is whether the module is enabled
-    Enabled bool
-    
-    // Settings is the module-specific settings
-    Settings map[string]interface{}
-    
-    // Resources is the resources required by the module
-    Resources []Resource
-}
-```
+- **Configuration Schema**: The structure of the module's configuration
+- **Default Values**: Default values for configuration parameters
+- **Validation Rules**: Rules for validating configuration values
+- **Constraints**: Constraints on configuration values
 
 ## Module State
 
-Module state is managed during operation.
+Module state represents the current state of a module. It includes:
 
-```go
-// ModuleState represents the state of a module
-type ModuleState struct {
-    // Status is the current status of the module
-    Status ModuleStatus
-    
-    // LastError is the last error encountered by the module
-    LastError error
-    
-    // Metrics is the metrics collected by the module
-    Metrics map[string]interface{}
-}
-```
-
-## Module Status
-
-Module status indicates the current state of the module.
-
-```go
-// ModuleStatus indicates the current state of the module
-type ModuleStatus string
-
-const (
-    // ModuleStatusUnknown indicates that the module status is unknown
-    ModuleStatusUnknown ModuleStatus = "unknown"
-    
-    // ModuleStatusRegistered indicates that the module is registered
-    ModuleStatusRegistered ModuleStatus = "registered"
-    
-    // ModuleStatusInitializing indicates that the module is initializing
-    ModuleStatusInitializing ModuleStatus = "initializing"
-    
-    // ModuleStatusRunning indicates that the module is running
-    ModuleStatusRunning ModuleStatus = "running"
-    
-    // ModuleStatusShuttingDown indicates that the module is shutting down
-    ModuleStatusShuttingDown ModuleStatus = "shutting_down"
-    
-    // ModuleStatusShutdown indicates that the module is shut down
-    ModuleStatusShutdown ModuleStatus = "shutdown"
-    
-    // ModuleStatusError indicates that the module encountered an error
-    ModuleStatusError ModuleStatus = "error"
-)
-```
+- **Status**: The current status of the module (e.g., running, stopped)
+- **Error**: Any error that occurred during module operation
+- **Metrics**: Performance metrics for the module
+- **Last Updated**: Timestamp of the last state update
 
 ## Module Health
 
-Module health is monitored during operation.
+Module health represents the health status of a module. It includes:
 
-```go
-// ModuleHealth represents the health of a module
-type ModuleHealth struct {
-    // Status is the current health status of the module
-    Status HealthStatus
-    
-    // Message is a message describing the health status
-    Message string
-    
-    // LastChecked is the time the health was last checked
-    LastChecked time.Time
-    
-    // Details is additional details about the health status
-    Details map[string]interface{}
-}
-```
-
-## Health Status
-
-Health status indicates the current health of the module.
-
-```go
-// HealthStatus indicates the current health of the module
-type HealthStatus string
-
-const (
-    // HealthStatusHealthy indicates that the module is healthy
-    HealthStatusHealthy HealthStatus = "healthy"
-    
-    // HealthStatusDegraded indicates that the module is degraded
-    HealthStatusDegraded HealthStatus = "degraded"
-    
-    // HealthStatusUnhealthy indicates that the module is unhealthy
-    HealthStatusUnhealthy HealthStatus = "unhealthy"
-)
-```
+- **Status**: The current health status of the module (e.g., healthy, degraded, unhealthy)
+- **Message**: A message describing the health status
+- **Last Checked**: Timestamp of the last health check
+- **Details**: Additional details about the health status
 
 ## Module Events
 
-Module events are emitted during the module lifecycle.
+Module events represent events that occur during the module lifecycle. They include:
 
-```go
-// ModuleEvent represents an event emitted by a module
-type ModuleEvent struct {
-    // ModuleID is the ID of the module that emitted the event
-    ModuleID string
-    
-    // EventType is the type of event
-    EventType ModuleEventType
-    
-    // Timestamp is the time the event was emitted
-    Timestamp time.Time
-    
-    // Data is additional data about the event
-    Data map[string]interface{}
-}
-```
-
-## Event Type
-
-Event type indicates the type of module event.
-
-```go
-// ModuleEventType indicates the type of module event
-type ModuleEventType string
-
-const (
-    // ModuleEventTypeRegistered indicates that a module was registered
-    ModuleEventTypeRegistered ModuleEventType = "registered"
-    
-    // ModuleEventTypeInitializing indicates that a module is initializing
-    ModuleEventTypeInitializing ModuleEventType = "initializing"
-    
-    // ModuleEventTypeRunning indicates that a module is running
-    ModuleEventTypeRunning ModuleEventType = "running"
-    
-    // ModuleEventTypeShuttingDown indicates that a module is shutting down
-    ModuleEventTypeShuttingDown ModuleEventType = "shutting_down"
-    
-    // ModuleEventTypeShutdown indicates that a module was shut down
-    ModuleEventTypeShutdown ModuleEventType = "shutdown"
-    
-    // ModuleEventTypeError indicates that a module encountered an error
-    ModuleEventTypeError ModuleEventType = "error"
-    
-    // ModuleEventTypeHealthChanged indicates that a module's health changed
-    ModuleEventTypeHealthChanged ModuleEventType = "health_changed"
-)
-```
+- **Event Type**: The type of event (e.g., registered, initializing, running, shutting down, shutdown, error)
+- **Timestamp**: The timestamp of the event
+- **Data**: Additional data about the event
 
 ## Best Practices
 
 1. **Graceful Shutdown**
-   - Implement graceful shutdown to ensure resources are released
-   - Complete any pending requests before shutting down
+   - Complete pending requests before shutting down
    - Close connections to external systems
+   - Release allocated resources
+   - Clean up state
 
 2. **Health Monitoring**
-   - Implement health checks to ensure the module is functioning correctly
-   - Report health status to the system
+   - Implement health checks for critical components
+   - Report health status regularly
    - Handle health check failures gracefully
 
 3. **Resource Management**
    - Allocate resources only when needed
-   - Release resources when they are no longer needed
+   - Release resources when no longer needed
    - Handle resource allocation failures gracefully
 
 4. **Error Handling**
    - Handle errors gracefully
-   - Report errors to the system
-   - Implement recovery mechanisms for errors
+   - Log errors with appropriate context
+   - Implement recovery mechanisms
 
 5. **State Management**
-   - Manage state carefully
-   - Persist state when necessary
-   - Handle state corruption gracefully
+   - Initialize state properly
+   - Update state consistently
+   - Clean up state when shutting down
+
+## Related Documentation
+
+- [Module Interface](interface.md) - Standard interface for modules
+- [Core Principles](core-principles.md) - Foundational principles for module design
+- [Security Requirements](security.md) - Security considerations for modules
+- [Testing Requirements](testing.md) - Testing standards for modules
 
 ## Version Information
+
 - **Document Version:** 1.0
 - **Last Updated:** 2024-04-04
 - **Status:** Draft 

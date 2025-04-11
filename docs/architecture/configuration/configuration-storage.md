@@ -4,6 +4,9 @@
 
 CFGMS implements a flexible storage system for configurations that supports both file-based and database implementations. The storage system is designed to be pluggable, allowing for different storage backends to be used based on deployment requirements.
 
+For a high-level overview of the configuration management system, see [Configuration Management Overview](./overview.md).
+For information about configuration types, see [Configuration Types](./configuration-types.md).
+
 ## Storage Interface
 
 The storage system is defined by a common interface that all storage implementations must satisfy:
@@ -202,6 +205,15 @@ storage:
     user: cfgms
     password: ${DB_PASSWORD}
 ```
+
+For information about system configuration, see [Configuration Types](./configuration-types.md).
+
+## Related Documentation
+
+- [Configuration Management Overview](./overview.md): Introduction to configuration management in CFGMS
+- [Configuration Types](./configuration-types.md): Different types of configurations and their purposes
+- [Configuration Resolution](./configuration-resolution.md): How configurations are resolved and applied
+- [Configuration Validation](./configuration-validation.md): Schema validation and error handling
 
 ## Version Information
 

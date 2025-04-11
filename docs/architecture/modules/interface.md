@@ -6,6 +6,10 @@ This document details the standard interface that all modules in CFGMS must impl
 
 The module interface provides a consistent way for CFGMS to interact with modules, ensuring that all modules behave in a predictable and reliable manner. The interface is designed to be simple yet powerful, allowing modules to be developed independently and integrated seamlessly into the CFGMS workflow.
 
+For information about module lifecycle management, see [Module Lifecycle](lifecycle.md).
+For information about module security requirements, see [Module Security Requirements](security.md).
+For information about module testing requirements, see [Module Testing Requirements](testing.md).
+
 ## Core Interface
 
 All modules must implement the following core interface:
@@ -37,14 +41,17 @@ Get(ctx context.Context, resourceID string) (Configuration, error)
 ```
 
 **Parameters:**
+
 - `ctx`: Context for cancellation and timeout
 - `resourceID`: Unique identifier for the resource
 
 **Returns:**
+
 - `Configuration`: The current configuration of the resource
 - `error`: Any error that occurred during the operation
 
 **Behavior:**
+
 - Must return the current state of the resource as a Configuration object
 - Should handle errors gracefully and return meaningful error messages
 - Should be idempotent (multiple calls should return the same result)
@@ -59,14 +66,17 @@ Set(ctx context.Context, resourceID string, config Configuration) error
 ```
 
 **Parameters:**
+
 - `ctx`: Context for cancellation and timeout
 - `resourceID`: Unique identifier for the resource
 - `config`: The desired configuration for the resource
 
 **Returns:**
+
 - `error`: Any error that occurred during the operation
 
 **Behavior:**
+
 - Must update the resource to match the specified configuration
 - Should be idempotent (multiple calls with the same configuration should produce the same result)
 - Should handle errors gracefully and return meaningful error messages
@@ -83,16 +93,19 @@ Test(ctx context.Context, resourceID string, config Configuration) (bool, TestRe
 ```
 
 **Parameters:**
+
 - `ctx`: Context for cancellation and timeout
 - `resourceID`: Unique identifier for the resource
 - `config`: The configuration to test against
 
 **Returns:**
+
 - `bool`: Whether the current configuration matches the specified configuration
 - `TestResult`: Detailed information about the test result
 - `error`: Any error that occurred during the operation
 
 **Behavior:**
+
 - Must call the `Get` method to retrieve the current configuration
 - Must compare the current configuration with the specified configuration
 - Should return true if all settings specified in the configuration are present in the current configuration
@@ -112,15 +125,18 @@ Monitor(ctx context.Context, resourceID string, config Configuration) (Monitor, 
 ```
 
 **Parameters:**
+
 - `ctx`: Context for cancellation and timeout
 - `resourceID`: Unique identifier for the resource
 - `config`: The configuration for the resource
 
 **Returns:**
+
 - `Monitor`: A monitor that can be used to detect changes in the resource
 - `error`: Any error that occurred during the operation
 
 **Behavior:**
+
 - Must set up monitoring for the resource based on the specified configuration
 - Should return a Monitor that can be used to detect changes in the resource
 - Should handle errors gracefully and return meaningful error messages
@@ -250,7 +266,15 @@ Modules should use the provided context for cancellation and timeout:
    - Use caching where appropriate
    - Minimize resource usage
 
+## Related Documentation
+
+- [Module Lifecycle](lifecycle.md): How modules are loaded, initialized, and managed
+- [Module Core Principles](core-principles.md): Fundamental principles that guide module design
+- [Module Security Requirements](security.md): Security considerations for module implementation
+- [Module Testing Requirements](testing.md): Testing standards and requirements for modules
+
 ## Version Information
+
 - **Document Version:** 1.0
 - **Last Updated:** 2024-04-04
-- **Status:** Draft 
+- **Status:** Draft

@@ -39,6 +39,8 @@ Modules are the fundamental building blocks of CFGMS, providing a consistent int
 - **Input Validation**: All inputs must be validated before processing
 - **Secure Communication**: All communication must be secured with appropriate protocols
 
+For detailed security requirements, see [Module Security Requirements](security.md).
+
 ### 5. Observability
 
 - **Structured Logging**: Modules must use structured logging with consistent fields
@@ -116,6 +118,13 @@ Modules must provide default behaviors that are:
    - Document all exported items
    - Provide clear examples
    - Include troubleshooting guides
+
+## Related Documentation
+
+- [Module Interface](interface.md): Detailed specification of the module interface
+- [Module Lifecycle](lifecycle.md): How modules are loaded, initialized, and managed
+- [Module Security Requirements](security.md): Security considerations for module implementation
+- [Module Testing Requirements](testing.md): Testing standards and requirements for modules
 
 ## Version Information
 

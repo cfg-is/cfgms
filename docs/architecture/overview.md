@@ -10,37 +10,13 @@
 
 ## System Components
 
-### Controller
+CFGMS consists of three core components that work together to provide configuration management:
 
-- Central management system with geo-distribution capabilities
-- Clustered architecture for high availability and scale
-- Handles configuration distribution
-- Manages tenant hierarchy
-- Processes DNA information
-- Implements REST API and gRPC interfaces
-- Designed to handle 10,000+ Stewards per controller instance
+- **Controller**: Central management system that distributes configurations and manages the tenant hierarchy
+- **Steward**: Cross-platform agent that executes configurations on managed endpoints
+- **Outpost**: Proxy cache agent that can monitor network devices and provide agentless management
 
-### Steward
-
-- Compiled Go binary with minimal dependencies
-- Self-contained with no external runtime requirements
-- Self-healing architecture with blue-green upgrade capability
-- Bulletproof design principles:
-  - Automatic recovery from failures
-  - Graceful degradation
-  - Stateless operation where possible
-  - Local operation capability during Controller disconnection
-
-### Outpost
-
-- Proxy cache agent for Stewards on a network
-- Monitors netflow and SNMP data from network devices
-- Provides agentless monitoring of IoT devices on the network
-- Can be deployed as:
-  - Controller plugin (simplest deployment)
-  - Standalone service
-  - Serverless function
-  - Containerized service
+For detailed information about each component, see [Components Documentation](./components/components.md).
 
 ## Communication Flow
 
@@ -63,11 +39,15 @@
 
 ## Security Architecture
 
+CFGMS implements a zero-trust security architecture with:
+
 - Mutual TLS (mTLS) for all communications
 - Zero-Trust verification at all points
 - Self-contained binary with no external runtime dependencies
 - Support for signed script execution
 - Comprehensive audit capabilities
+
+For detailed security information, see [Security Architecture](../security/architecture.md).
 
 ## Scalability Architecture
 
@@ -79,6 +59,7 @@
 - Hierarchical multi-tenant model for efficient resource management
 
 ## Version Information
+
 - **Document Version:** 1.0
 - **Last Updated:** 2024-04-07
 - **Status:** Draft

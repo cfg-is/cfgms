@@ -127,6 +127,7 @@ CFGMS implements a multi-layered authentication approach, ensuring that all comp
    - Access to credential storage should be restricted
 
 ## Version Information
+
 - **Document Version:** 1.0
 - **Last Updated:** 2024-04-04
-- **Status:** Draft 
+- **Status:** Draft
