@@ -399,7 +399,7 @@ You are an expert Go developer specializing in configuration management systems.
     4. **Maximum Drift**: Longest allowable time between validations before a warning or error is generated.
 
 - **Workflow Triggers**
-  - Workflows must define their triggers within workflow.cfg
+  - Workflows must define their triggers within .wrkflo file
   - Support multiple trigger types:
     - Schedule-based (cron patterns)
     - Event-driven (webhooks, system events)
@@ -492,7 +492,7 @@ You are an expert Go developer specializing in configuration management systems.
 
 - **Configuration-Data types/files**
   - core.cfg: Compiled core resource Configuration-Data and compliance settings.
-  - workflow.cfg: Defines workflow triggers and execution
+  - .wrkflo: Defines workflow triggers and execution
 
 - **Module Responsibilities**
   - Modules must not implement independent scheduling
