@@ -31,10 +31,11 @@ CFGMS implements a comprehensive security architecture based on the Zero Trust m
 - **communication.md**: Security of communication between components
 - **certificates.md**: Certificate management and PKI
 - **secrets.md**: Secrets management
-- **compliance.md**: Compliance and audit capabilities
-- **plugins.md**: Pluggable security components
+- **compliance.md**: Compliance and audit capabilities (Coming in future releases)
+- **plugins.md**: Pluggable security components (Coming in future releases)
 
 ## Version Information
+
 - **Document Version:** 1.0
-- **Last Updated:** 2024-04-04
-- **Status:** Draft 
+- **Last Updated:** 2024-04-11
+- **Status:** Draft

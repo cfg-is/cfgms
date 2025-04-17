@@ -8,9 +8,9 @@ This directory contains detailed documentation about the core components in the 
 - [Controller](./controller.md) - Controller component details
 - [Steward](./steward.md) - Steward component details
 - [Outpost](./outpost.md) - Outpost component details
+- [Component Interactions](./component-interactions.md) - How components interact with each other
 - [SaaS Steward](./saas-steward.md) - SaaS Steward component details (Coming in v2)
 - [Cloud Steward](./cloud-steward.md) - Cloud Steward component details (Coming in v2)
-- [Component Interactions](./component-interactions.md) - How components interact with each other
 - [Deployment Options](./deployment-options.md) - Different deployment options for components (Coming in future releases)
 
 ## Overview
