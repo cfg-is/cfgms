@@ -9,6 +9,7 @@ This document defines the core components of the CFGMS (Configuration Management
 The **Controller** is the central management server of the CFGMS system.
 
 **Primary Responsibilities:**
+
 - Manages the entire configuration management system
 - Distributes configuration data to Stewards and Outposts
 - Processes and validates configuration changes
@@ -18,6 +19,7 @@ The **Controller** is the central management server of the CFGMS system.
 - Processes DNA (system-specific metadata) information
 
 **Key Characteristics:**
+
 - Designed for high availability and scalability
 - Can handle 10,000+ Stewards per controller instance
 - Supports geo-distributed deployment
@@ -28,6 +30,7 @@ The **Controller** is the central management server of the CFGMS system.
 The **Steward** is the cross-platform agent that runs on managed endpoints.
 
 **Primary Responsibilities:**
+
 - Executes configuration management tasks on endpoints
 - Reports system state back to the Controller
 - Implements the module system for resource management
@@ -35,6 +38,7 @@ The **Steward** is the cross-platform agent that runs on managed endpoints.
 - Enforces configuration compliance
 
 **Key Characteristics:**
+
 - Runs on Windows, Linux, and macOS
 - Self-contained Go binary with minimal dependencies
 - Self-healing architecture with blue-green upgrade capability
@@ -46,6 +50,7 @@ The **Steward** is the cross-platform agent that runs on managed endpoints.
 The **Outpost** is a specialized proxy cache agent with network monitoring capabilities.
 
 **Primary Responsibilities:**
+
 - Acts as a proxy cache for Stewards on a network
 - Monitors netflow and SNMP data from network devices
 - Provides agentless monitoring of IoT devices on the network
@@ -53,6 +58,7 @@ The **Outpost** is a specialized proxy cache agent with network monitoring capab
 - Reduces network traffic between Stewards and Controller
 
 **Key Characteristics:**
+
 - Optimizes network usage in large deployments
 - Enables monitoring of devices that cannot run a Steward
 - Provides local caching for improved performance
@@ -68,6 +74,7 @@ CFGMS includes specialized Steward variants that extend the core functionality t
 The **SaaS Steward** is a specialized component for managing SaaS environments.
 
 **Primary Responsibilities:**
+
 - Manages SaaS application configurations
 - Handles SaaS tenant administration
 - Implements SaaS-specific modules
@@ -75,6 +82,7 @@ The **SaaS Steward** is a specialized component for managing SaaS environments.
 - Enforces SaaS compliance policies
 
 **Key Characteristics:**
+
 - Specialized for SaaS environment management
 - Supports multiple SaaS platforms (e.g., M365, QuickBooks Online)
 - Implements SaaS-specific security controls
@@ -82,6 +90,7 @@ The **SaaS Steward** is a specialized component for managing SaaS environments.
 - Enables SaaS configuration automation
 
 **Deployment Options:**
+
 - As a Controller plugin (simplest deployment)
 - As a standalone service alongside the Controller
 - As a serverless function for cloud-native deployments
@@ -92,6 +101,7 @@ The **SaaS Steward** is a specialized component for managing SaaS environments.
 The **Cloud Steward** is a specialized component for managing cloud environments.
 
 **Primary Responsibilities:**
+
 - Manages cloud infrastructure configurations
 - Handles cloud resource provisioning and lifecycle
 - Implements cloud-specific modules
@@ -99,9 +109,11 @@ The **Cloud Steward** is a specialized component for managing cloud environments
 - Enforces cloud compliance policies
 
 **Key Characteristics:**
+
 - Specialized for cloud environment management
 - Supports multiple cloud platforms (e.g., AWS, Azure, GCP)
 - Manages various cloud resource types:
+
   - Virtual Machines
   - Containers
   - Serverless Functions
@@ -112,6 +124,7 @@ The **Cloud Steward** is a specialized component for managing cloud environments
 - Enables cloud configuration automation
 
 **Deployment Options:**
+
 - As a Controller plugin (simplest deployment)
 - As a standalone service alongside the Controller
 - As a serverless function for cloud-native deployments
@@ -120,6 +133,7 @@ The **Cloud Steward** is a specialized component for managing cloud environments
 ## Component Interactions
 
 ### Basic Deployment (Steward-Only)
+
 In the most basic deployment, a single Steward operates independently with local configuration:
 
 ```mermaid
@@ -129,6 +143,7 @@ graph TD
 ```
 
 ### Typical Deployment (Controller-Steward)
+
 Standard deployment with direct communication between Controller and Steward:
 
 ```mermaid
@@ -141,6 +156,7 @@ graph LR
 ```
 
 ### Large Environment (Controller-Outpost-Steward)
+
 Large deployments with Outpost acting as a local proxy-cache:
 
 ```mermaid
@@ -159,6 +175,7 @@ graph LR
 ```
 
 ### SaaS Environment (Controller-SaaS Steward)
+
 SaaS environment management with SaaS Steward:
 
 ```mermaid
@@ -175,6 +192,7 @@ graph LR
 ```
 
 ### Cloud Environment (Controller-Cloud Steward)
+
 Cloud environment management with Cloud Steward:
 
 ```mermaid
@@ -195,12 +213,14 @@ graph LR
 CFGMS is designed to be both simple to get started with and capable of scaling to any size:
 
 ### Simple Deployment
+
 - Single Controller with standard Stewards
 - Minimal configuration required
 - Automatic discovery and onboarding
 - Zero-touch deployment options
 
 ### Scalable Deployment
+
 - Distributed Controller architecture
 - Hierarchical Controller management
 - Outpost deployment for network optimization
@@ -208,6 +228,7 @@ CFGMS is designed to be both simple to get started with and capable of scaling t
 - Multi-tenant support with recursive parent-child model
 
 ### Deployment Options for Specialized Stewards
+
 - **Controller Plugin**: Simplest option, runs within the Controller process
 - **Standalone Service**: Runs alongside the Controller for better resource isolation
 - **Serverless Function**: Cloud-native deployment for automatic scaling
@@ -216,26 +237,47 @@ CFGMS is designed to be both simple to get started with and capable of scaling t
 ## Related Terms
 
 ### DNA (System-Specific Metadata)
-DNA refers to system-specific metadata used for targeting and identification. This includes:
-- Hardware information
-- Operating system details
-- Network configuration
-- Custom attributes
-- Location information
+
+DNA refers to system-specific metadata used for targeting and identification, creating a comprehensive digital twin of the physical environment. This includes:
+
+- Hardware information (CPU, memory, storage, network interfaces)
+- Operating system details (version, patches, installed software)
+- Network configuration (IP addresses, DNS, routing)
+- Physical location and environment (datacenter, rack, room)
+- System relationships and dependencies
+- Performance metrics and health status
+- Custom attributes and business context
+- Historical state and change tracking
+- Security posture and compliance status
+- Resource utilization and capacity planning data
+
+The DNA system continuously updates this digital twin through:
+
+- Real-time monitoring and state detection
+- Automated discovery of system changes
+- Integration with external data sources
+- Historical tracking of configuration changes
+- Relationship mapping between systems
+- Performance and health metrics collection
 
 ### Module
+
 A Module is a discrete, reusable, and self-contained unit of functionality that implements Get/Set/Test for a resource type.
 
 ### Configuration-Data
+
 A declarative specification of desired state for one or more resources, typically in YAML format.
 
 ### Resource
+
 A manageable entity (e.g., users, groups, web servers, applications).
 
 ### Endpoint
+
 A managed system or service that a Steward is responsible for.
 
 ## Version Information
+
 - **Document Version:** 1.3
 - **Last Updated:** 2024-04-04
 - **Status:** Draft

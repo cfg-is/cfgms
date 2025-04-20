@@ -15,16 +15,40 @@ For detailed information about configuration types, see [Configuration Types](./
 
 ## Key Components
 
-### Configuration Types
+### Configuration Structure
 
-CFGMS manages several types of configurations:
+CFGMS organizes configurations in a hierarchical structure:
 
-1. **System Configurations** - Meta-configurations that define the system itself
-2. **Endpoint Configurations** - Configurations that apply to specific endpoints
-3. **Workflow Configurations** - Configurations that define automated workflows
-4. **Module Configurations** - Configurations for specific modules
+1. **Base Configurations** - Applied to all endpoints, inherited through the tenant hierarchy
+2. **Group Configurations** - Applied to endpoints matching dynamic group criteria
+3. **Endpoint Configurations** - Applied to specific endpoints, not inherited
 
-For detailed information about each configuration type, see [Configuration Types](./configuration-types.md).
+### Dynamic Groups
+
+Dynamic groups are defined using DNA attributes with simple or complex matching criteria:
+
+```yaml
+# Group Definitions
+groups:
+  # Simple group based on role
+  web_servers:
+    public: true  # Whether this group is inherited to child tenants
+    match:
+      dna.role: "web-server"
+  
+  # Complex group with multiple criteria
+  high_performance_servers:
+    public: true
+    match:
+      dna.cpu_cores: ">= 8"
+      dna.memory_gb: ">= 32"
+      dna.os: "ubuntu"
+```
+
+Groups can be marked as:
+
+- **Public**: Inherited to child tenants
+- **Private**: Not inherited, only applies within the defining tenant
 
 ### Configuration Resolution
 
@@ -78,6 +102,10 @@ For detailed information about configuration validation, see [Configuration Vali
 
 ## Version Information
 
-- **Document Version:** 1.0
-- **Last Updated:** 2024-04-07
+- **Document Version:** 1.1
+- **Last Updated:** 2024-04-20
 - **Status:** Draft
+- **Changes:**
+  - Added dynamic groups concept
+  - Updated configuration structure
+  - Clarified inheritance model

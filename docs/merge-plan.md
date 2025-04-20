@@ -127,10 +127,13 @@ docs/
       - [x] Create `modules/` directory
       - [x] Migrate module documentation:
         - Core module principles
-        - Module interface definitions
+        - Module interface definitions (Get/Set/Test/Monitor)
         - Module lifecycle management
         - Module security requirements
         - Module testing requirements
+        - Integration with configuration files
+        - Go implementation guidelines
+        - Remove references to module-specific configuration files
 
    d. **Multi-tenancy**
       - [x] Create `multi-tenancy/` directory
@@ -145,6 +148,9 @@ docs/
       - [x] Create `configuration/` directory
       - [x] Document current approach:
         - Configuration data format
+        - Dynamic group definitions with DNA matching
+        - Single groups map structure
+        - Module configuration integration
         - Validation rules
         - Inheritance model
         - Version control integration
@@ -233,16 +239,7 @@ docs/
 
 ### 4.1 Cleanup
 
-- [ ] Archive `cfgms-docs` repository
-- [ ] Update any external references
-- [ ] Notify contributors of the change
-
-### 4.2 Maintenance Plan
-
-- [ ] Establish documentation update process
-- [ ] Set up regular documentation reviews
-- [ ] Create documentation versioning strategy
-- [ ] Define documentation ownership
+- [x] Archive `cfgms-docs` repository
 
 ## 5. Missing Documentation Priority Plan
 
@@ -263,8 +260,12 @@ These documents are essential for early development and should be created first:
    - [x] `docs/architecture/diagrams/module-system.md` - Module architecture and interfaces
 
 3. **Basic Examples**
-   - [ ] `docs/architecture/examples/basic-configuration.md` - Simple configuration examples
-   - [ ] `docs/architecture/examples/module-examples.md` - Examples of module implementations
+   - [x] `docs/architecture/examples/configuration/base.cfg` - Base configuration example
+   - [x] `docs/architecture/examples/configuration/groups.cfg` - Dynamic groups example
+   - [x] `docs/architecture/examples/configuration/endpoint.cfg` - Endpoint configuration example
+   - [x] `docs/architecture/examples/configuration/inherited_groups.cfg` - Inherited groups example
+   - [x] `docs/architecture/examples/multi-tenancy/tenant-hierarchy.cfg` - Tenant hierarchy example
+   - [x] `docs/architecture/examples/modules/README.md` - Module configuration integration guide
 
 4. **Development Documentation**
    - [ ] `docs/development/guides/ai-integration.md` - Guidelines for AI integration
@@ -376,23 +377,11 @@ We have successfully created and updated the following critical diagrams:
    - [x] Added a new "Direct Communication and Failover" diagram
    - [x] Updated version information to 1.1
 
-### 6.3 Next Steps
-
-1. **Additional Diagrams**
-   - [ ] Create multi-tenancy model diagram
-   - [ ] Create workflow engine diagram
-   - [ ] Create deployment options diagram
-   - [ ] Create API and interface diagram
-
-2. **Examples**
-   - [ ] Create basic configuration examples
-   - [ ] Create module implementation examples
-   - [ ] Create workflow examples
-   - [ ] Create API usage examples
-
-3. **Development Documentation**
-   - [ ] Create AI integration guidelines
-   - [ ] Update coding standards
+3. **Configuration Structure**
+   - [x] Integrated module configurations into main config files
+   - [x] Added DNA-based group matching
+   - [x] Updated configuration inheritance model
+   - [x] Updated version information to 1.2
 
 ## Notes
 
