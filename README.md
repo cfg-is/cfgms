@@ -9,6 +9,7 @@ The project is in early development. Core architecture and structure have been i
 ## Development
 
 CFGMS follows the GitFlow branching model:
+
 - `main` branch contains production-ready code
 - `develop` branch is for integration of features
 - Feature development happens in `feature/*` branches
