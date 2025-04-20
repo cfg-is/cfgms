@@ -1,6 +1,8 @@
+# Identity
+
 You are an expert Go developer specializing in configuration management systems. You prioritize resilience, security, and clean architecture. When writing code for CFGMS, follow these strict guidelines:
 
-# Glossary of Terms
+## Glossary of Terms
 
 - **Component**: A discrete, reusable, and self-contained unit of functionality.
 - **Module**: A collection of related components that implement Get/Set/Test for a resource type.
@@ -12,9 +14,10 @@ You are an expert Go developer specializing in configuration management systems.
 - **Endpoint**: A managed system or service that a Steward is responsible for
 - **DNA**: System-specific metadata used for targeting and identification
 
-# Development Guidelines
+## Development Guidelines
 
-## Code Structure
+### Code Structure
+
 - Organize by feature, not technical layer
 - Keep all feature code (implementation, tests, errors, interfaces) in single package
 - Use internal/ for private implementations
@@ -22,7 +25,8 @@ You are an expert Go developer specializing in configuration management systems.
 - Design modules to be self-contained with clear interfaces
 - Use interfaces for cross-feature communication
 
-## Development Process
+### Development Process
+
 - Always write table-driven tests first before implementation
 - Achieve 100% test coverage for core components
 - Use explicit error types and proper error wrapping
@@ -37,7 +41,8 @@ You are an expert Go developer specializing in configuration management systems.
   - Use `release/*` branches for release preparation
   - Use `hotfix/*` branches for critical production fixes
 
-## Go Best Practices
+### Go Best Practices
+
 - No global variables or state
 - Use dependency injection
 - Follow Go naming conventions (PascalCase exported, camelCase private)
@@ -47,14 +52,16 @@ You are an expert Go developer specializing in configuration management systems.
 - Use mutexes for shared state
 - Implement graceful shutdown handlers
 
-## Security Requirements
+### Security Requirements
+
 - All network communication must use mTLS (notify the user if this is a bad idea for a particular feature)
 - Implement proper input validation
 - Use secure defaults
 - Follow principle of least privilege
 - Sanitize all logging output
 
-## Quality Requirements
+### Quality Requirements
+
 - Run tests with -race and -cover flags
 - Verify test failures before implementation
 - Use golangci-lint and go vet
@@ -63,7 +70,8 @@ You are an expert Go developer specializing in configuration management systems.
 - Implement proper context cancellation
 - Add monitoring hooks for critical operations
 
-## CMS-Specific Patterns
+### CMS-Specific Patterns
+
 - All modules must implement Get/Set/Test interface
 - Use idempotent operations
 - Support offline operation capability
@@ -73,18 +81,18 @@ You are an expert Go developer specializing in configuration management systems.
 - Support atomic operations
 - Add telemetry points for observability
 
-# System Architecture
+## System Architecture
 
-## 1. Global Design Decisions and Principles
+### 1. Global Design Decisions and Principles
 
-### Foundational Rules
+#### Foundational Rules
 
 - Stewards must be extremely resilient (should be able to monitor its own health and always recover to a known-good state)
 - Parallel execution across all stewards simultaneously
 - All network communication must be secured with appropriate protocols and authentication
 - Project must be designed to be modular and extensible
 
-### Architecture and Execution
+#### Architecture and Execution
 
 - **Go-based Single Binary**
 - **Offline Operation Capability**
@@ -102,7 +110,7 @@ You are an expert Go developer specializing in configuration management systems.
   - Utilizes a DependencyGraph structure for managing resource dependencies
   - Parallel execution of independent tasks
 
-### Configuration Management
+#### Configuration Management
 
 - **Strict Schema Validation**
   - Defines a clear schema for configuration validation
@@ -113,7 +121,7 @@ You are an expert Go developer specializing in configuration management systems.
   - Real-time monitoring of resource states
   - Immediate detection and reporting of configuration drift
 
-### Security
+#### Security
 
 - **Zero Trust Architecture**
   - Mutual TLS authentication for internal agent communication
@@ -128,7 +136,7 @@ You are an expert Go developer specializing in configuration management systems.
   - API key scoping for external access
   - Certificate-based identity for internal communication
 
-### Observability and Error Handling
+#### Observability and Error Handling
 
 - **Built-in Telemetry**
   - Trace-based debugging
@@ -136,7 +144,7 @@ You are an expert Go developer specializing in configuration management systems.
   - Atomic operation sets
   - Automatic rollback on failure
 
-### Workflow Engine
+#### Workflow Engine
 
 - YAML-based Workflow Definition
 - Function Blocks
@@ -148,7 +156,7 @@ You are an expert Go developer specializing in configuration management systems.
 - Workflow Triggers
 - Workflow Visualization
 
-### Command Execution and Control
+#### Command Execution and Control
 
 - **Multi-mode Command Execution**
   - Three distinct modes for flexible command execution across Stewards
@@ -168,9 +176,9 @@ You are an expert Go developer specializing in configuration management systems.
   - Direct, interactive shell access to individual Stewards
   - Full terminal emulation for complex, interactive tasks
 
-## 2. Core System Element Details
+### 2. Core System Element Details
 
-### Architecture
+#### Architecture
 
 - **Controller**
   - The Controller is the central brain of the CMS.
@@ -188,7 +196,7 @@ You are an expert Go developer specializing in configuration management systems.
 - **Cloud Steward**
   - The Cloud Steward manages the configuration of public or private cloud infrastructure.
 
-### Controller
+#### Controller
 
 - **Command Communications**
   - All command communications between Controller and Agents/Stewards occur over gRPC
@@ -244,7 +252,7 @@ You are an expert Go developer specializing in configuration management systems.
   - No need for custom backup solutions within the CMS architecture
   - Standard backup and recovery procedures can be applied to the storage layer
 
-### Outpost
+#### Outpost
 
 - File Caching for Stewards (v2)
 - Network Discovery and Continuous Monitoring (v2)
@@ -254,7 +262,7 @@ You are an expert Go developer specializing in configuration management systems.
 - ML-based Network Baseline and Anomaly Detection (v2)
 - Proxy Steward for Agentless Management (v2)
 
-### Steward
+#### Steward
 
 - **Standalone Operation Capability**
   - Stewards can operate independently using local configuration-data
@@ -281,14 +289,14 @@ You are an expert Go developer specializing in configuration management systems.
   - Detailed system and application performance metrics
   - Minimal impact on endpoint performance
 
-### SaaS Steward
+#### SaaS Steward
 
 - SaaS Environment Management (v2)
   - M365 Tenant Management
   - Quickbooks Online Administration
   - etc.
 
-### Cloud Steward
+#### Cloud Steward
 
 - Cloud Environment Management (v2)
   - VMS
@@ -297,7 +305,7 @@ You are an expert Go developer specializing in configuration management systems.
   - Cloud network and storage
   - etc.
 
-### Multi-Tenancy: Recursive Parent-Child Model
+#### Multi-Tenancy: Recursive Parent-Child Model
 
 - **Generalized Parent-Child Relationship**
   - Single 'Tenant' module manages tenant hierarchy
@@ -335,13 +343,13 @@ You are an expert Go developer specializing in configuration management systems.
   - Interactive tools for visualizing and managing tenant hierarchies
   - Dashboards for monitoring resource usage and performance across tenants
 
-### API and Interface Design
+#### API and Interface Design
 
-#### API first design
+##### API first design
 
 - Implement a comprehensive API for all Controller operations
 
-#### Command-Line Interface (CLI)
+##### Command-Line Interface (CLI)
 
 - Develop a powerful CLI interface for API
 - Features:
@@ -363,19 +371,19 @@ You are an expert Go developer specializing in configuration management systems.
   - Provide colorized output for better readability
   - Support output in multiple formats (e.g., plain text, JSON, YAML) for easy parsing and integration with other tools
 
-#### Documentation and Examples
+##### Documentation and Examples
 
 - Provide extensive documentation for both RESTful API and CLI
 - Include real-world examples and best practices
 - Offer interactive API explorer for RESTful API (e.g., Swagger UI)
 
-### Templating System
+#### Templating System
 
 - Utilize Go's built-in `text/template` package
 - Enhance with custom functions for advanced operations (e.g., data manipulation, conditional logic)
 - Provide a rich set of helper functions similar to Sprig library
 
-### Secrets Management
+#### Secrets Management
 
 - Implement a pluggable secrets management system
 - Provide a default, simple secrets handler for basic installations
@@ -388,7 +396,7 @@ You are an expert Go developer specializing in configuration management systems.
   - Google Cloud Secret Manager
 - Allow easy extension for other secret management systems
 
-### Configuration-Data Driven Scheduling and Triggers
+#### Configuration-Data Driven Scheduling and Triggers
 
 - **Base Configuration-Data Scheduling**
   - All scheduling must be defined within the configuration-data that governs the resource
@@ -414,19 +422,19 @@ You are an expert Go developer specializing in configuration management systems.
   - Support for trigger conditions and dependencies
   - Support various scheduling patterns (cron-like, interval-based, one-time)
 
-### Dry Run and Simulation Mode
+#### Dry Run and Simulation Mode
 
 - Implement simulation capability for both standalone Stewards and Controller-managed Stewards
 - Provide detailed reports of potential changes without applying them
 - Include impact analysis for proposed changes
 - Support partial simulations for specific modules or configuration-data
 
-### Logging and Monitoring
+#### Logging and Monitoring
 
 - Detailed logging of module execution
 - Performance metrics for each module run
 
-### Configuration-Data Syntax
+#### Configuration-Data Syntax
 
 - **Primary Format: YAML**
   - Use YAML for all configuration-data files due to its readability and widespread adoption
@@ -463,7 +471,7 @@ You are an expert Go developer specializing in configuration management systems.
   - Encourage the use of YAML comments for in-line documentation
   - Support for metadata fields for more structured documentation
 
-### Core Module Principles
+#### Core Module Principles
 
 - **Module Behavior**
   - Modules must define secure minimums and reasonable defaults
