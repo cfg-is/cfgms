@@ -1,6 +1,33 @@
-# Development Guidelines
+# Development Documentation
 
-This directory contains documentation related to development standards, guidelines, and processes for CFGMS.
+This directory contains documentation related to the development process, standards, and guidelines.
+
+## Contents
+
+- [Project Management](project_management.md) - Issue tracking, milestone management, and release process
+- [Standards](standards/) - Coding standards and best practices
+- [Guides](guides/) - Development guides and tutorials
+
+## Development Process
+
+1. Follow the [project management](project_management.md) guidelines
+2. Adhere to coding standards in [standards](standards/)
+3. Use the development guides in [guides](guides/)
+4. Follow the GitFlow branching strategy
+5. Write tests for all new features
+6. Update documentation as needed
+
+## Getting Started
+
+1. Read the [project management](project_management.md) documentation
+2. Review the coding standards
+3. Set up your development environment
+4. Create a feature branch
+5. Start developing!
+
+## Contributing
+
+Please read [CONTRIBUTING.md](../../CONTRIBUTING.md) for details on our code of conduct and development process.
 
 ## Overview
 
