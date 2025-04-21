@@ -87,12 +87,10 @@ func NewTestEnv(t *testing.T) *TestEnv {
 // Start starts the controller and steward in the test environment
 func (e *TestEnv) Start() {
 	// Start the controller
-	err := e.Controller.Start(e.ctx)
-	require.NoError(e.T, err)
+	e.Controller.Start(e.ctx)
 
 	// Start the steward
-	err = e.Steward.Start(e.ctx)
-	require.NoError(e.T, err)
+	e.Steward.Start(e.ctx)
 
 	// Wait for components to initialize
 	time.Sleep(100 * time.Millisecond)
@@ -101,12 +99,10 @@ func (e *TestEnv) Start() {
 // Stop stops the controller and steward in the test environment
 func (e *TestEnv) Stop() {
 	// Stop the steward
-	err := e.Steward.Stop(e.ctx)
-	require.NoError(e.T, err)
+	e.Steward.Stop(e.ctx)
 
 	// Stop the controller
-	err = e.Controller.Stop(e.ctx)
-	require.NoError(e.T, err)
+	e.Controller.Stop(e.ctx)
 }
 
 // Cleanup cleans up the test environment

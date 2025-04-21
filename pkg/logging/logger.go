@@ -36,6 +36,14 @@ type DefaultLogger struct {
 	log   *log.Logger
 }
 
+// NoopLogger is a logger that does nothing
+type NoopLogger struct{}
+
+// NewNoopLogger creates a new no-op logger
+func NewNoopLogger() Logger {
+	return &NoopLogger{}
+}
+
 // parseLevel converts a string level to a Level
 func parseLevel(level string) Level {
 	switch level {
@@ -96,4 +104,19 @@ func (l *DefaultLogger) Fatal(msg string, keysAndValues ...interface{}) {
 	if l.level <= FatalLevel {
 		l.log.Fatalf("[FATAL] %s %v", msg, keysAndValues)
 	}
-} 
+}
+
+// Debug logs a debug message (no-op)
+func (l *NoopLogger) Debug(msg string, keysAndValues ...interface{}) {}
+
+// Info logs an info message (no-op)
+func (l *NoopLogger) Info(msg string, keysAndValues ...interface{}) {}
+
+// Warn logs a warning message (no-op)
+func (l *NoopLogger) Warn(msg string, keysAndValues ...interface{}) {}
+
+// Error logs an error message (no-op)
+func (l *NoopLogger) Error(msg string, keysAndValues ...interface{}) {}
+
+// Fatal logs a fatal message (no-op)
+func (l *NoopLogger) Fatal(msg string, keysAndValues ...interface{}) {}
