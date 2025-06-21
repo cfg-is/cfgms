@@ -1,0 +1,72 @@
+name: Basic File Operations
+description: Tests basic file creation and management
+tests:
+  - name: Create file with default permissions
+    config:
+      path: /tmp/test-file-1
+      content: "Hello, World!"
+      permissions: 0644
+    expected:
+      path: /tmp/test-file-1
+      content: "Hello, World!"
+      permissions: 0644
+      exists: true
+      is_file: true
+
+  - name: Create file with custom permissions
+    config:
+      path: /tmp/test-file-2
+      content: "Custom permissions"
+      permissions: 0600
+    expected:
+      path: /tmp/test-file-2
+      content: "Custom permissions"
+      permissions: 0600
+      exists: true
+      is_file: true
+
+  - name: Create file with ownership
+    config:
+      path: /tmp/test-file-3
+      content: "Custom ownership"
+      permissions: 0640
+      owner: $CURRENT_USER
+      group: $CURRENT_GROUP
+    expected:
+      path: /tmp/test-file-3
+      content: "Custom ownership"
+      permissions: 0640
+      exists: true
+      is_file: true
+      owner: $CURRENT_USER
+      group: $CURRENT_GROUP
+
+  - name: Update existing file
+    config:
+      path: /tmp/test-file-4
+      content: "Initial content"
+      permissions: 0644
+    setup:
+      - create_file:
+          path: /tmp/test-file-4
+          content: "Old content"
+          permissions: 0644
+    expected:
+      path: /tmp/test-file-4
+      content: "Initial content"
+      permissions: 0644
+      exists: true
+      is_file: true
+
+  - name: Create file with parent directories
+    config:
+      path: /tmp/test-dir/subdir/test-file-5
+      content: "Nested file"
+      permissions: 0644
+      create_dirs: true
+    expected:
+      path: /tmp/test-dir/subdir/test-file-5
+      content: "Nested file"
+      permissions: 0644
+      exists: true
+      is_file: true 

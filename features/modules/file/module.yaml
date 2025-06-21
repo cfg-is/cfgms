@@ -1,0 +1,27 @@
+name: file
+version: 0.1.0
+description: >
+  Manages file resources on the system.
+  Supports reading, writing, and validating file contents.
+
+dependencies: []
+
+requirements:
+  os: [windows, linux, darwin]
+  arch: [amd64, arm64]
+  min_memory: "128MB"
+  min_disk: "1MB"
+
+interfaces:
+  - Get
+  - Set
+  - Test
+
+security:
+  requires_root: false
+  capabilities: []
+  ports: []
+
+documentation:
+  api: "docs/api.md"
+  examples: "docs/examples/" 

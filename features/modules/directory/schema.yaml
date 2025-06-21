@@ -1,0 +1,27 @@
+type: object
+properties:
+  path:
+    type: string
+    description: The absolute path to the directory
+    pattern: ^/[^\\]*$
+  permissions:
+    type: integer
+    description: The directory permissions in octal format
+    minimum: 0
+    maximum: 511
+    default: 493  # 0755 in decimal
+  owner:
+    type: string
+    description: The username that should own the directory
+    pattern: ^[a-zA-Z0-9_-]+$
+  group:
+    type: string
+    description: The group that should own the directory
+    pattern: ^[a-zA-Z0-9_-]+$
+  recursive:
+    type: boolean
+    description: Whether to create parent directories if they don't exist
+    default: false
+required:
+  - path
+additionalProperties: false 

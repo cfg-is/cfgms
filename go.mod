@@ -1,5 +1,4 @@
-module cfgms
-
+module github.com/cfgis/cfgms
 go 1.21
 
 require (
