@@ -1,0 +1,136 @@
+test_cases:
+  - name: Install nginx
+    resource_id: nginx
+    config:
+      name: nginx
+      state: present
+      version: latest
+    expected:
+      success: true
+      state:
+        name: nginx
+        state: present
+        version: latest
+
+  - name: Install specific redis version
+    resource_id: redis
+    config:
+      name: redis
+      state: present
+      version: "6.2.6"
+    expected:
+      success: true
+      state:
+        name: redis
+        state: present
+        version: "6.2.6"
+
+  - name: Remove package
+    resource_id: htop
+    setup:
+      - config:
+          name: htop
+          state: present
+          version: latest
+    config:
+      name: htop
+      state: absent
+    expected:
+      success: true
+      error: ErrPackageNotFound
+
+  - name: Update package
+    resource_id: postgresql
+    setup:
+      - config:
+          name: postgresql
+          state: present
+          version: "14.0"
+    config:
+      name: postgresql
+      state: present
+      version: latest
+      update: true
+    expected:
+      success: true
+      state:
+        name: postgresql
+        state: present
+        version: latest
+
+  - name: Install with dependencies
+    resource_id: nodejs
+    config:
+      name: nodejs
+      state: present
+      version: latest
+      dependencies:
+        - npm
+        - build-essential
+    expected:
+      success: true
+      state:
+        name: nodejs
+        state: present
+        version: latest
+      dependencies:
+        - name: npm
+          state: present
+        - name: build-essential
+          state: present
+
+  - name: Invalid package name
+    resource_id: invalid/package
+    config:
+      name: invalid/package
+      state: present
+    expected:
+      success: false
+      error: ErrInvalidPackageName
+
+  - name: Invalid state
+    resource_id: nginx
+    config:
+      name: nginx
+      state: maybe
+    expected:
+      success: false
+      error: ErrInvalidState
+
+  - name: Invalid version format
+    resource_id: redis
+    config:
+      name: redis
+      state: present
+      version: "not.a.version"
+    expected:
+      success: false
+      error: ErrInvalidVersion
+
+  - name: Package not found
+    resource_id: nonexistent-package
+    config:
+      name: nonexistent-package
+      state: present
+    expected:
+      success: false
+      error: ErrPackageNotFound
+
+  - name: Test idempotency
+    resource_id: apache2
+    setup:
+      - config:
+          name: apache2
+          state: present
+          version: latest
+    config:
+      name: apache2
+      state: present
+      version: latest
+    expected:
+      success: true
+      state:
+        name: apache2
+        state: present
+        version: latest
+      idempotent: true 

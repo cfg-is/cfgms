@@ -1,0 +1,23 @@
+name: package
+description: Manages system packages across different package managers (apt, yum, brew, etc.)
+version: 0.1.0
+author: CFGMS Team
+license: MIT
+platforms:
+  - linux
+  - darwin
+  - windows
+dependencies:
+  - name: yaml
+    version: v3
+  - name: exec
+    version: standard
+schema: schema.yaml
+interfaces:
+  - Get
+  - Set
+  - Test
+security:
+  requires_root: true
+  capabilities: []
+  ports: [] 

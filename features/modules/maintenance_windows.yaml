@@ -1,0 +1,57 @@
+# Maintenance Windows Configuration
+# Version: 1.0
+# Last Updated: 2024-04-20
+
+# Default maintenance windows that apply to all endpoints unless overridden
+maintenance_windows:
+  - name: "default"
+    description: "Default daily patch and reboot window"
+    schedule:
+      time: "0 2 * * *"  # Daily at 2 AM
+      duration: "2h"
+      timezone: "UTC"
+    allowed_operations:
+      - "package_update"
+      - "reboot"
+    notifications:
+      before: "1h"
+      after: "15m"
+
+# Tenant-specific overrides
+tenants:
+  client_acme:
+    maintenance:
+      windows:
+        - name: "acme-patches"
+          schedule:
+            time: "0 2 * * 1,3,5"  # Mon, Wed, Fri at 2 AM
+            duration: "2h"
+            timezone: "UTC"
+          allowed_operations:
+            - "package_update"
+            - "reboot"
+
+# Group-specific maintenance windows
+groups:
+  database_cluster:
+    description: "Database cluster nodes"
+    match:
+      roles:
+        - "database"
+      cluster: "primary_db"
+    maintenance:
+      windows:
+        - name: "cluster-patches"
+          schedule:
+            time: "0 2 * * 1"  # Monday at 2 AM
+            duration: "2h"
+            timezone: "UTC"
+          allowed_operations:
+            - "package_update"
+            - "reboot"
+          cluster:
+            min_nodes: 2  # Minimum nodes that must be available
+            max_concurrent: 1  # Only one node at a time
+            health_check:
+              - "database_quorum"
+              - "replication_status" 
