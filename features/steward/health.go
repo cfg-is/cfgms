@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // HealthStatus represents the current health status of the steward
