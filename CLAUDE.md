@@ -164,6 +164,31 @@ The system implements a recursive parent-child tenant model with:
 - Efficient cross-tenant operations using path-based targeting
 - Designed to handle 50k+ Stewards across multiple regions
 
+## Current Implementation Todos (Issue #17)
+
+### High Priority - Core Steward Functionality
+- [ ] Implement module discovery engine - filesystem scanning for modules
+- [ ] Create module registry and factory - instantiate modules by name  
+- [ ] Implement configuration manager - parse hostname.cfg files
+- [ ] Create module execution engine - run Get/Set operations with ConfigState
+- [ ] Add system-level testing logic - compare ConfigStates using managed fields
+
+### Medium Priority - Infrastructure & Integration
+- [ ] Implement error handling with user configuration options
+- [ ] Add comprehensive logging for module operations
+- [ ] Create CLI interface for standalone steward execution
+- [ ] Update existing modules to implement ConfigState interface
+
+### Low Priority - Monitoring & Enhancement
+- [ ] Add health monitoring and reporting for standalone mode
+
+### Implementation Notes
+- Start with Module Discovery as foundation for everything else
+- Module Factory enables module instantiation from discovery
+- Configuration Manager loads and validates hostname.cfg files
+- Execution Engine orchestrates the Get→Compare→Set→Verify workflow
+- System Testing implements intelligent field-level comparison using GetManagedFields()
+
 ## Dependencies
 - `github.com/spf13/cobra` - CLI framework
 - `github.com/stretchr/testify` - Testing utilities
