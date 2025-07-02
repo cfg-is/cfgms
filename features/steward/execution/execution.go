@@ -1,3 +1,33 @@
+// Package execution provides resource configuration orchestration for steward.
+//
+// This package implements the execution engine that orchestrates the complete
+// Get→Compare→Set→Verify workflow for configuration management. It coordinates
+// between modules, handles error policies, and provides detailed reporting.
+//
+// The execution engine follows this workflow for each resource:
+//   1. Load the required module from the factory
+//   2. Get the current state using module.Get()
+//   3. Compare current vs desired state (drift detection)
+//   4. If drift detected, apply changes using module.Set()
+//   5. Verify changes by calling module.Get() again
+//   6. Generate detailed execution report
+//
+// Basic usage:
+//
+//	// Create execution engine
+//	engine := execution.New(moduleFactory, comparator, errorConfig, logger)
+//
+//	// Execute complete configuration
+//	report := engine.ExecuteConfiguration(ctx, stewardConfig)
+//
+//	// Check results
+//	log.Printf("Executed %d resources: %d successful, %d failed, %d skipped",
+//		report.TotalResources, report.SuccessfulCount, 
+//		report.FailedCount, report.SkippedCount)
+//
+// Error handling follows the steward's configured policies and provides
+// detailed information for troubleshooting and monitoring.
+//
 package execution
 
 import (

@@ -1,3 +1,49 @@
+// Package config provides configuration loading and validation for standalone steward operation.
+//
+// This package handles hostname.cfg files that define steward settings, resource
+// configurations, and error handling policies for standalone mode operation.
+//
+// Configuration files are searched in platform-specific locations:
+//   - Current working directory (highest priority)
+//   - User configuration directories
+//   - System configuration directories
+//
+// Basic usage:
+//
+//	// Load configuration from default search paths
+//	config, err := config.LoadConfiguration("")
+//	if err != nil {
+//		return fmt.Errorf("failed to load config: %w", err)
+//	}
+//
+//	// Get list of required modules
+//	modules := config.GetConfiguredModules(config)
+//
+//	// Validate configuration
+//	if err := config.ValidateConfiguration(config); err != nil {
+//		return fmt.Errorf("invalid config: %w", err)
+//	}
+//
+// Configuration file format (YAML):
+//
+//	steward:
+//	  id: hostname
+//	  mode: standalone
+//	  logging:
+//	    level: info
+//	    format: text
+//	  error_handling:
+//	    module_load_failure: continue
+//	    resource_failure: warn
+//	    configuration_error: fail
+//
+//	resources:
+//	  - name: example-directory
+//	    module: directory
+//	    config:
+//	      path: /opt/example
+//	      permissions: 755
+//
 package config
 
 import (
@@ -9,60 +55,122 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// StewardConfig represents the complete steward configuration
+// StewardConfig represents the complete steward configuration loaded from hostname.cfg.
+//
+// This is the root configuration structure that contains all settings needed
+// for standalone steward operation, including steward-specific settings,
+// resource definitions, and optional module path mappings.
 type StewardConfig struct {
+	// Steward contains steward-specific configuration settings
 	Steward   StewardSettings      `yaml:"steward"`
+	
+	// Resources defines the list of resources to be managed
 	Resources []ResourceConfig     `yaml:"resources"`
+	
+	// Modules provides optional custom paths for specific modules
 	Modules   map[string]string    `yaml:"modules,omitempty"` // module_name -> custom_path
 }
 
-// StewardSettings contains steward-specific configuration
+// StewardSettings contains steward-specific configuration options.
+//
+// These settings control steward behavior, logging, error handling,
+// and module discovery paths.
 type StewardSettings struct {
+	// ID is the unique identifier for this steward instance
 	ID           string              `yaml:"id"`
+	
+	// Mode defines the operation mode (standalone or controller)
 	Mode         OperationMode       `yaml:"mode"`
+	
+	// ModulePaths lists additional directories to search for modules
 	ModulePaths  []string           `yaml:"module_paths,omitempty"`
+	
+	// Logging configures log output format and verbosity
 	Logging      LoggingConfig      `yaml:"logging"`
+	
+	// ErrorHandling defines how to handle various error conditions
 	ErrorHandling ErrorHandlingConfig `yaml:"error_handling"`
 }
 
-// ResourceConfig defines a single resource to be managed
+// ResourceConfig defines a single resource to be managed by the steward.
+//
+// Each resource specifies which module should manage it and provides
+// module-specific configuration data.
 type ResourceConfig struct {
+	// Name is the unique identifier for this resource
 	Name     string                 `yaml:"name"`
+	
+	// Module is the name of the module that will manage this resource
 	Module   string                 `yaml:"module"`
+	
+	// Config contains module-specific configuration data
 	Config   map[string]interface{} `yaml:"config"`
 }
 
-// OperationMode defines how the steward operates
+// OperationMode defines how the steward operates.
 type OperationMode string
 
 const (
+	// ModeStandalone operates using local configuration files and modules
 	ModeStandalone  OperationMode = "standalone"
+	
+	// ModeController connects to a remote CFGMS controller (legacy)
 	ModeController  OperationMode = "controller"
 )
 
-// LoggingConfig defines logging settings
+// LoggingConfig defines logging output settings.
 type LoggingConfig struct {
+	// Level sets the logging verbosity (debug, info, warn, error)
 	Level  string `yaml:"level"`
+	
+	// Format sets the log output format (text, json)
 	Format string `yaml:"format"`
 }
 
-// ErrorHandlingConfig defines error handling behavior
+// ErrorHandlingConfig defines how to handle various error conditions.
+//
+// Each error type can be configured to continue (log and proceed),
+// warn (log warning and proceed), or fail (log error and stop).
 type ErrorHandlingConfig struct {
+	// ModuleLoadFailure defines how to handle module loading errors
 	ModuleLoadFailure   ErrorAction `yaml:"module_load_failure"`
+	
+	// ResourceFailure defines how to handle resource execution errors
 	ResourceFailure     ErrorAction `yaml:"resource_failure"`
+	
+	// ConfigurationError defines how to handle configuration validation errors
 	ConfigurationError  ErrorAction `yaml:"configuration_error"`
 }
 
-// ErrorAction defines how to handle errors
+// ErrorAction defines the available error handling strategies.
 type ErrorAction string
 
 const (
+	// ActionContinue logs the error and continues execution
 	ActionContinue ErrorAction = "continue"
+	
+	// ActionFail logs the error and stops execution
 	ActionFail     ErrorAction = "fail"
+	
+	// ActionWarn logs a warning and continues execution
 	ActionWarn     ErrorAction = "warn"
 )
 
-// LoadConfiguration searches for and loads the steward configuration
+// LoadConfiguration searches for and loads the steward configuration from hostname.cfg.
+//
+// If configPath is empty, searches platform-specific locations for hostname.cfg
+// using the current hostname. If configPath is provided, loads from that specific file.
+//
+// Configuration search order (when configPath is empty):
+//   1. Current working directory/hostname.cfg
+//   2. User configuration directories
+//   3. System configuration directories
+//
+// The function automatically applies defaults for optional fields and validates
+// the complete configuration before returning.
+//
+// Returns the loaded and validated configuration, or an error if no configuration
+// is found, parsing fails, or validation fails.
 func LoadConfiguration(configPath string) (StewardConfig, error) {
 	var config StewardConfig
 	

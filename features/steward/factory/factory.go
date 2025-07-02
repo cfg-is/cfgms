@@ -1,3 +1,34 @@
+// Package factory provides module instantiation and lifecycle management for steward.
+//
+// This package handles dynamic loading of CFGMS modules and manages their lifecycle
+// within the steward. It supports built-in modules, plugin-based modules, and
+// validates that all modules implement the required ConfigState interface.
+//
+// The factory uses a registry-based approach where modules are discovered first,
+// then loaded on-demand when needed for resource execution. This provides
+// efficient memory usage and allows for graceful error handling per configuration.
+//
+// Basic usage:
+//
+//	// Create factory with discovered modules
+//	registry := discovery.ModuleRegistry{...}
+//	errorConfig := config.ErrorHandlingConfig{...}
+//	factory := factory.New(registry, errorConfig)
+//
+//	// Load a module on-demand
+//	module, err := factory.LoadModule("directory")
+//	if err != nil {
+//		log.Printf("Failed to load module: %v", err)
+//	}
+//
+//	// Check loaded modules
+//	loadedNames := factory.GetLoadedModules()
+//
+// Error handling follows the steward's error handling configuration:
+//   - continue: Log error and return nil (caller should handle gracefully)
+//   - warn: Log warning and return nil  
+//   - fail: Log error and return error
+//
 package factory
 
 import (
@@ -10,14 +41,26 @@ import (
 	"github.com/cfgis/cfgms/features/steward/discovery"
 )
 
-// ModuleFactory manages module instantiation and lifecycle
+// ModuleFactory manages module instantiation and lifecycle for the steward.
+//
+// The factory provides on-demand loading of modules from the discovery registry,
+// caches loaded instances for reuse, and handles errors according to the
+// configured error handling policy.
 type ModuleFactory struct {
+	// registry contains information about discovered modules
 	registry   discovery.ModuleRegistry
+	
+	// instances caches loaded module instances for reuse
 	instances  map[string]modules.Module
+	
+	// config defines error handling behavior
 	config     config.ErrorHandlingConfig
 }
 
-// New creates a new ModuleFactory instance
+// New creates a new ModuleFactory instance with the provided registry and error configuration.
+//
+// The factory will use the registry to locate modules when loading and apply
+// the error configuration to determine how to handle loading failures.
 func New(registry discovery.ModuleRegistry, errorConfig config.ErrorHandlingConfig) *ModuleFactory {
 	return &ModuleFactory{
 		registry:  registry,

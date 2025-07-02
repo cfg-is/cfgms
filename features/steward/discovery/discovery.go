@@ -1,3 +1,35 @@
+// Package discovery provides module discovery and registry management for steward.
+//
+// This package scans the filesystem for available CFGMS modules and builds
+// a registry of discovered modules with their metadata and capabilities.
+// It supports custom module paths, platform-specific system paths, and
+// validates module structure before registration.
+//
+// Module discovery searches in priority order:
+//   1. Custom paths from configuration
+//   2. Directory relative to binary executable
+//   3. Platform-specific system paths
+//
+// Basic usage:
+//
+//	// Discover modules from default and custom paths
+//	customPaths := []string{"/opt/custom-modules"}
+//	registry, err := discovery.DiscoverModules(customPaths)
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//
+//	// Check available modules
+//	for name, info := range registry {
+//		fmt.Printf("Found module: %s v%s at %s\n", 
+//			name, info.Version, info.Path)
+//	}
+//
+// Module structure requirements:
+//   - module.yaml with name, version, and optional metadata
+//   - At least one .go source file
+//   - Standard Go module directory structure
+//
 package discovery
 
 import (
@@ -9,19 +41,47 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// ModuleInfo contains metadata about a discovered module
+// ModuleInfo contains metadata about a discovered module loaded from module.yaml.
+//
+// This structure captures both the static metadata from the module.yaml file
+// and runtime information like the discovered filesystem path.
 type ModuleInfo struct {
+	// Name is the unique module identifier
 	Name         string   `yaml:"name"`
+	
+	// Version follows semantic versioning (e.g., "1.2.3")
 	Version      string   `yaml:"version"`
+	
+	// Description provides a human-readable module description
 	Description  string   `yaml:"description"`
+	
+	// Capabilities lists the module's supported features
 	Capabilities []string `yaml:"capabilities"`
-	Path         string   `yaml:"-"` // Runtime field, not in YAML
+	
+	// Path is the filesystem path where the module was discovered (runtime only)
+	Path         string   `yaml:"-"`
 }
 
-// ModuleRegistry maps module names to their information
+// ModuleRegistry maps module names to their discovered information.
+//
+// The registry serves as a central lookup table for all discovered modules,
+// allowing the module factory to locate and load modules by name.
+// Later discoveries override earlier ones when modules have the same name.
 type ModuleRegistry map[string]ModuleInfo
 
-// DiscoverModules scans specified paths for available modules
+// DiscoverModules scans specified paths for available modules and builds a registry.
+//
+// The function searches custom paths first, then standard system locations.
+// Module discovery is non-fatal - individual directory scan failures are logged
+// but don't prevent discovery of modules in other directories.
+//
+// Search path priority:
+//   1. Custom paths from the customPaths parameter
+//   2. ./modules/ relative to the binary executable
+//   3. Platform-specific system paths (/opt/cfgms/modules or C:\Program Files\cfgms\modules)
+//
+// Returns a registry of all successfully discovered modules, or an error only
+// if no modules could be discovered from any path.
 func DiscoverModules(customPaths []string) (ModuleRegistry, error) {
 	registry := make(ModuleRegistry)
 	

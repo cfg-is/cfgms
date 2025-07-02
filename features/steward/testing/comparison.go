@@ -1,3 +1,36 @@
+// Package testing provides intelligent configuration state comparison for steward.
+//
+// This package implements system-level testing logic that compares ConfigState
+// objects to detect configuration drift. It only compares managed fields,
+// provides detailed diff information, and supports type-aware value comparison.
+//
+// The comparison engine is designed for efficiency and accuracy:
+//   - Only compares fields that are actually managed by the module
+//   - Provides detailed diff information for debugging and logging
+//   - Handles complex data types with deep equality checking
+//   - Distinguishes between value changes and type changes
+//
+// Basic usage:
+//
+//	// Create comparator
+//	comparator := testing.NewStateComparator()
+//
+//	// Compare two ConfigState objects
+//	current := getCurrentState()
+//	desired := getDesiredState()
+//	driftDetected, diff := comparator.CompareStates(current, desired)
+//
+//	if driftDetected {
+//		log.Printf("Configuration drift: %s", diff.GetDriftSummary())
+//		log.Printf("Details: %s", diff.GetDetailedDiff())
+//	}
+//
+// The comparison process:
+//   1. Extract managed fields from the desired state
+//   2. Get field values for both current and desired states
+//   3. Compare only the managed fields using deep equality
+//   4. Generate detailed diff with change information
+//
 package testing
 
 import (
@@ -7,41 +40,81 @@ import (
 	"github.com/cfgis/cfgms/features/modules"
 )
 
-// StateComparator provides intelligent field-level comparison of ConfigStates
+// StateComparator provides intelligent field-level comparison of ConfigStates.
+//
+// The comparator implements the core logic for detecting configuration drift
+// by comparing only managed fields between current and desired states.
 type StateComparator struct {
 	// Add configuration options if needed in the future
 }
 
-// StateDiff represents the differences between two configuration states
+// StateDiff represents the differences between two configuration states.
+//
+// This structure provides detailed information about what changed, was added,
+// or was removed between the current and desired configuration states.
 type StateDiff struct {
+	// ChangedFields maps field names to their specific differences
 	ChangedFields map[string]FieldDiff
+	
+	// AddedFields contains fields present in desired but not in current
 	AddedFields   map[string]interface{}
+	
+	// RemovedFields contains fields present in current but not in desired
 	RemovedFields map[string]interface{}
 }
 
-// FieldDiff represents a difference in a specific field
+// FieldDiff represents a difference in a specific configuration field.
+//
+// This captures both the old and new values along with metadata about
+// the type of change that occurred.
 type FieldDiff struct {
+	// Current is the existing field value
 	Current interface{}
+	
+	// Desired is the target field value
 	Desired interface{}
+	
+	// Type indicates the kind of difference detected
 	Type    DiffType
 }
 
-// DiffType represents the type of difference detected
+// DiffType represents the type of difference detected between field values.
 type DiffType int
 
 const (
+	// DiffTypeChanged indicates the field value changed but type remained the same
 	DiffTypeChanged DiffType = iota
+	
+	// DiffTypeAdded indicates the field was added to the configuration
 	DiffTypeAdded
+	
+	// DiffTypeRemoved indicates the field was removed from the configuration
 	DiffTypeRemoved
+	
+	// DiffTypeTypeChanged indicates both the value and type changed
 	DiffTypeTypeChanged
 )
 
-// NewStateComparator creates a new StateComparator instance
+// NewStateComparator creates a new StateComparator instance.
+//
+// The returned comparator is ready to use for comparing ConfigState objects
+// and detecting configuration drift.
 func NewStateComparator() *StateComparator {
 	return &StateComparator{}
 }
 
-// CompareStates compares current and desired states, returning true if drift is detected
+// CompareStates compares current and desired states and detects configuration drift.
+//
+// This method implements the core comparison logic:
+//   1. Extracts managed fields from the desired state
+//   2. Compares only those fields between current and desired states
+//   3. Generates detailed diff information for any differences
+//
+// Returns true if drift is detected (any managed fields differ), along with
+// a detailed StateDiff containing information about all differences found.
+//
+// The comparison only considers fields listed in desired.GetManagedFields(),
+// ensuring that unmanaged fields don't trigger false drift detection.
 func (c *StateComparator) CompareStates(current, desired modules.ConfigState) (bool, StateDiff) {
 	diff := StateDiff{
 		ChangedFields: make(map[string]FieldDiff),
