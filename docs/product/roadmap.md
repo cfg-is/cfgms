@@ -475,8 +475,133 @@ This roadmap is integrated with the documentation structure as follows:
 - **Configuration Documentation**: Configuration data format, validation, and inheritance
 - **Implementation Documentation**: Implementation details and guidelines
 
+## Future Considerations (Beyond v2.5)
+
+The following concepts, principles, and advanced features were identified during architectural research and design. These represent valuable insights that should guide future development decisions beyond the current roadmap scope.
+
+### Core Principles & Philosophy
+
+#### Five Foundational Principles Framework
+The system is built on five core principles that guide all architectural decisions:
+- **Resilience**: Graceful degradation and recovery from failures
+- **Security**: Zero-trust model with defense in depth
+- **Scalability**: Support for massive deployments (50k+ endpoints)
+- **Simplicity**: Progressive complexity with clear upgrade paths
+- **Modularity**: Self-contained components with clear interfaces
+
+#### Progressive Complexity Design
+Start simple with minimal configuration, then provide clear paths for scaling to more complex deployments. Features should be discoverable progressively to ensure adoption accessibility while supporting enterprise growth.
+
+#### Zero-Trust Security by Default
+No implicit trust between components, all communications authenticated and encrypted, continuous verification of component identity, principle of least privilege enforced throughout the system.
+
+### Advanced Feature Ideas
+
+#### Digital Twin Infrastructure Monitoring
+Comprehensive digital model that represents physical infrastructure in real-time:
+- Maintains historical state and performance data
+- Tracks complex relationships between components
+- Provides predictive analytics and capacity planning
+- Enables 3D visualization and AR/VR integration
+- Supports automated optimization recommendations
+
+#### AI/ML Enhanced Operations
+- **Predictive Analytics**: Anticipate failures and performance issues
+- **Anomaly Detection**: Identify unusual patterns in configuration and performance
+- **Automated Optimization**: Self-tuning configurations based on usage patterns
+- **Pattern Recognition**: Establish network baselines and detect deviations
+- **Decision Support**: Intelligent recommendations for operational decisions
+
+#### Advanced Outpost Capabilities
+- ML-based network baseline and anomaly detection
+- Automated network documentation and topology discovery
+- Passive network monitoring with traffic analysis
+- Proxy Steward for agentless device management
+- Comprehensive IoT device management and monitoring
+
+### Technical Insights & Patterns
+
+#### Dynamic Group-Based Configuration
+Configurations applied through dynamic groups defined by DNA attributes:
+- Inheritance through tenant hierarchy with compilation-time resolution
+- Public/private group scoping for security and flexibility
+- Automatic group membership based on system characteristics
+- Real-time configuration updates as systems change
+
+#### Hierarchical Multi-Tenancy with Flat Storage
+Tree-like tenant relationships managed through configuration while maintaining flat directory structure:
+- Root-managed relationships with strong tenant isolation
+- Efficient cross-tenant operations using path-based targeting
+- Scalable to handle complex organizational structures
+- Security benefits of flat storage with operational flexibility
+
+#### Compilation-Based Configuration Inheritance
+Runtime compilation of configurations from hierarchical tenant structure:
+- Depth-first inheritance (deepest override wins)
+- Explicit and traceable inheritance chains
+- Predictable configuration behavior across complex hierarchies
+- Git-based storage with atomic operations and version history
+
+### Security Concepts
+
+#### Security Decision Record (SDR) Framework
+Structured approach to documenting security decisions:
+- Templates for consistent security decision documentation
+- Context, consequences, mitigations, and alternatives captured
+- Reviewable security decisions that can evolve with threat landscape
+- Integration with compliance and audit requirements
+
+#### Dual-Protocol Security Model
+- **Internal**: gRPC with mTLS for agent communication
+- **External**: HTTPS with API keys for user access
+- **Optional**: OpenZiti integration for enhanced zero-trust networking
+- **Benefits**: Strong security with integration flexibility
+
+#### Certificate-Based Identity with Automatic Rotation
+- Unique identity for each component with strong authentication
+- Automatic certificate rotation with minimal operational overhead
+- Secure key storage patterns and hardware security module integration
+- Scalable identity management for large deployments
+
+### Performance & Scale Considerations
+
+#### Resource Optimization Patterns
+- Object pooling for frequently allocated objects
+- Preallocated slices with known capacity
+- Buffer pools for temporary allocations
+- Comprehensive resource monitoring and alerting
+
+#### Hierarchical Scaling Architecture
+- Controller clustering with intelligent load balancing
+- Hierarchical controller management with parent-child relationships
+- Efficient task delegation and distributed processing
+- Database sharding strategies for massive scale
+
+#### Comprehensive Validation Framework
+Multi-layered validation approach:
+- Schema validation for structural correctness
+- Constraint checking for business rules
+- Dependency validation for complex relationships
+- Structured error reporting with clear user guidance
+
+### Configuration Management Insights
+
+#### Steward Connection Architecture
+- Stewards initiate all connections (no open ports on endpoints)
+- Persistent connections for instant command processing
+- Connection resilience with retry backoff and circuit breakers
+- Heartbeat-based connection management and health monitoring
+
+#### Advanced Configuration Storage
+- Git-based configuration storage with atomic operations
+- Automatic state validation and reconciliation
+- Comprehensive version history and rollback capabilities
+- Integration with external configuration management systems
+
+These concepts represent the foundation for future architectural decisions and provide a framework for evaluating new features and capabilities as the system evolves.
+
 ## Version Information
 
-- Version: 1.3
-- Last Updated: 2024-04-17
-- Status: Draft
+- Version: 1.4
+- Last Updated: 2024-07-02
+- Status: Updated with Future Considerations

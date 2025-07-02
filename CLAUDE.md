@@ -69,20 +69,14 @@ make clean
 
 ### Module System
 All resource management is performed through modules that implement the core interface:
-- `Get(ctx, resourceID)` - Returns current configuration as YAML
-- `Set(ctx, resourceID, configData)` - Updates resource to match desired state
-- `Test(ctx, resourceID, configData)` - Validates current vs desired state
-- `Monitor(ctx, resourceID, config)` - **(Optional)** Implements real-time event-driven monitoring using OS hooks and system events
+- `Get(ctx, resourceID)` - Returns current configuration as ConfigState
+- `Set(ctx, resourceID, config)` - Updates resource to match desired state (managed fields only)
+- **System Testing**: Steward automatically compares current vs desired state using managed fields
+- `Monitor(ctx, resourceID, config)` - **(Optional)** Real-time event-driven monitoring via separate interface
 
-**Monitor Functionality**: Modules should implement the Monitor method wherever possible to enable real-time configuration drift detection. This allows the steward to receive immediate notifications of configuration changes through:
-- **OS Event Hooks**: Windows Event Log monitoring (e.g., Event 4720 for new user creation)
-- **File System Triggers**: inotify/FileSystemWatcher for managed file changes
-- **Registry Monitoring**: Windows registry change notifications
-- **Service Events**: System service state changes
-- **Network Events**: Interface configuration changes
-- **Process Events**: Application installation/removal notifications
+**ConfigState Interface**: Enables efficient field-level comparison without marshal/unmarshal overhead. Modules return comprehensive system state, but only managed fields are modified.
 
-Example modules: `directory`, `file`, `firewall`, `package`
+Available modules: `directory`, `file`, `firewall`, `package`
 
 ### Communication
 - **Internal**: gRPC with mutual TLS between components
@@ -138,14 +132,13 @@ features/
 - Sanitize all logging output to prevent information leakage
 
 ### Module Development
-- Each module must be self-contained with clear interfaces
-- Implement Get/Set/Test interface for all resource types
-- **Implement Monitor method where possible** for real-time change detection via OS hooks
-- Use idempotent operations
-- Support offline operation capability
-- Include proper error handling and rollback mechanisms
-- Add comprehensive validation and structured error types
-- Monitor implementations should trigger workflows when configuration drift is detected
+- Each module must be self-contained with clear ConfigState interface
+- Implement Get/Set interface with ConfigState for all resource types
+- **Optional Monitor interface** for real-time change detection via OS hooks
+- Use idempotent operations and support offline operation
+- Include proper error handling and comprehensive validation
+- Get returns comprehensive state, Set modifies only managed fields
+- Use GetManagedFields() to specify which fields Set will change
 
 ## Branching Strategy
 
