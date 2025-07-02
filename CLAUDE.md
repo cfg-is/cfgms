@@ -15,12 +15,12 @@ make build
 
 # Build individual components
 make build-controller  # Builds controller binary
-make build-agent       # Builds agent (steward) binary  
+make build-steward     # Builds steward binary  
 make build-cli         # Builds cfgctl CLI binary
 
 # Alternative: direct Go build commands
 go build -o bin/controller ./cmd/controller
-go build -o bin/agent ./cmd/agent
+go build -o bin/cfgms-steward ./cmd/steward
 go build -o bin/cfgctl ./cmd/cfgctl
 ```
 
@@ -64,8 +64,8 @@ make clean
 
 ### Three-Tier System
 - **Controller**: Central management system for configuration distribution and tenant hierarchy management
-- **Steward**: Cross-platform agent that executes configurations on managed endpoints
-- **Outpost**: Proxy cache agent for network device monitoring and agentless management
+- **Steward**: Cross-platform component that executes configurations on managed endpoints
+- **Outpost**: Proxy cache component for network device monitoring and agentless management
 
 ### Module System
 All resource management is performed through modules that implement the core interface:
@@ -85,7 +85,7 @@ Available modules: `directory`, `file`, `firewall`, `package`
 
 ### Security Architecture
 - Zero-trust security model with mutual TLS for all internal communication
-- Certificate-based authentication for agents
+- Certificate-based authentication for stewards
 - Optional OpenZiti integration for zero-trust networking
 - Role-based access control (RBAC) with hierarchical permissions
 
@@ -95,12 +95,12 @@ Available modules: `directory`, `file`, `firewall`, `package`
 ```
 features/
 ├── controller/    # Controller component and server logic
-├── steward/       # Steward (agent) component with health monitoring
+├── steward/       # Steward component with health monitoring
 └── modules/       # Module implementations (directory, file, firewall, package)
 ```
 
 ### Key Directories
-- `cmd/` - Command-line applications (controller, agent, cfgctl)
+- `cmd/` - Command-line applications (controller, steward, cfgctl)
 - `api/proto/` - Protocol buffer definitions for gRPC communication
 - `pkg/` - Shared packages (logging utilities)
 - `test/` - Integration and end-to-end tests

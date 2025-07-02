@@ -24,14 +24,14 @@ Central management system that:
 - Handles certificate management and authentication
 
 ### Steward  
-Cross-platform agent that:
+Cross-platform component that:
 - Executes configurations on managed endpoints
 - Operates in standalone or Controller-integrated modes
 - Implements module-based resource management
 - Reports system state and configuration compliance
 
 ### Outpost
-Proxy cache agent that:
+Proxy cache component that:
 - Monitors network devices via SNMP/SSH
 - Provides agentless management capabilities
 - Caches configurations for offline operation
@@ -120,12 +120,12 @@ type Module interface {
 ```
 features/
 ├── controller/    # Controller component and server logic
-├── steward/       # Steward (agent) component with health monitoring  
+├── steward/       # Steward component with health monitoring  
 └── modules/       # Module implementations
 ```
 
 ### Key Directories
-- `cmd/` - Command-line applications (controller, agent, cfgctl)
+- `cmd/` - Command-line applications (controller, steward, cfgctl)
 - `api/proto/` - Protocol buffer definitions for gRPC
 - `pkg/` - Shared packages (logging utilities)
 - `test/` - Integration and end-to-end tests

@@ -552,7 +552,7 @@ Structured approach to documenting security decisions:
 - Integration with compliance and audit requirements
 
 #### Dual-Protocol Security Model
-- **Internal**: gRPC with mTLS for agent communication
+- **Internal**: gRPC with mTLS for steward communication
 - **External**: HTTPS with API keys for user access
 - **Optional**: OpenZiti integration for enhanced zero-trust networking
 - **Benefits**: Strong security with integration flexibility

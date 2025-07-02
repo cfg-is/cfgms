@@ -23,10 +23,10 @@ CFGMS follows the GitFlow branching model:
   - [ ] Expand integration tests
 
 - [ ] Implement secure communication layers
-  - [ ] Set up gRPC with mTLS for internal agent communication
+  - [ ] Set up gRPC with mTLS for internal steward communication
   - [ ] Implement REST API with HTTPS and API keys
   - [ ] Add optional OpenZiti integration for zero-trust networking
-  - [ ] Implement certificate management for agent authentication
+  - [ ] Implement certificate management for steward authentication
 
 - [ ] Create the first basic module
   - [ ] Implement a simple file management module as a proof of concept
@@ -41,8 +41,8 @@ CFGMS follows the GitFlow branching model:
 CFGMS implements a robust security architecture:
 
 - **Internal Communication**
-  - gRPC with mutual TLS for agent-controller communication
-  - Certificate-based authentication for agents
+  - gRPC with mutual TLS for steward-controller communication
+  - Certificate-based authentication for stewards
   - Optional OpenZiti integration for zero-trust networking
 
 - **External Access**
@@ -61,7 +61,7 @@ The project follows a feature-based organization:
 
 - `cmd/` - Command-line applications
   - `controller/` - Controller binary
-  - `agent/` - Agent (Steward) binary
+  - `steward/` - Steward binary
   - `cfgctl/` - CLI for interacting with the system
 
 - `features/` - Core feature implementations
@@ -90,8 +90,8 @@ cd cfgms
 # Build the controller
 go build -o bin/controller ./cmd/controller
 
-# Build the agent
-go build -o bin/agent ./cmd/agent
+# Build the steward
+go build -o bin/cfgms-steward ./cmd/steward
 ```
 
 ## Documentation

@@ -4,7 +4,7 @@
 GO_BUILD_FLAGS=-trimpath -ldflags="-s -w"
 
 # Binary names
-AGENT_BINARY=cfgms-agent
+STEWARD_BINARY=cfgms-steward
 CONTROLLER_BINARY=controller
 CLI_BINARY=cfgctl
 
@@ -42,12 +42,12 @@ proto: check-proto-tools
 
 # Build all binaries
 .PHONY: build
-build: build-agent build-controller build-cli
+build: build-steward build-controller build-cli
 
 # Build individual binaries
-.PHONY: build-agent build-controller build-cli
-build-agent:
-	go build ${GO_BUILD_FLAGS} -o bin/${AGENT_BINARY} ./cmd/agent
+.PHONY: build-steward build-controller build-cli
+build-steward:
+	go build ${GO_BUILD_FLAGS} -o bin/${STEWARD_BINARY} ./cmd/steward
 
 build-controller:
 	go build ${GO_BUILD_FLAGS} -o bin/${CONTROLLER_BINARY} ./cmd/controller

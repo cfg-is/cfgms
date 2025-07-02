@@ -1,10 +1,8 @@
 package server
 
 import (
-	"context"
-	
-	"cfgms/features/controller/config"
-	"cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // Server represents the gRPC server component of the controller

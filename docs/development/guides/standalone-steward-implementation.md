@@ -172,8 +172,8 @@ features/steward/
 ### With Existing Modules
 Modules in `features/modules/` need to implement the updated ConfigState interface. See module interface documentation for details.
 
-### With CLI (cmd/agent)
-The main agent command should:
+### With CLI (cmd/steward)
+The main steward command should:
 1. Parse command-line arguments (config path, execution mode)
 2. Initialize Steward with configuration
 3. Execute resource management
