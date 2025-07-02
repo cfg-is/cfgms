@@ -117,6 +117,16 @@ features/
 - Handle all errors explicitly
 - Achieve 100% test coverage for core components
 
+### Documentation Standards
+- **Package Documentation**: Every package must have comprehensive documentation explaining its purpose, key concepts, and usage examples
+- **Function Documentation**: All exported functions and methods must have clear documentation starting with the function name
+- **Type Documentation**: All exported types must be documented with their purpose and key fields explained
+- **Example Code**: Include practical usage examples in package documentation using Go's example testing pattern
+- **Implementation Notes**: Document important implementation details, design decisions, and any non-obvious behavior
+- **Error Documentation**: Document expected error conditions and their meanings
+- **Interface Documentation**: Clearly document interface contracts, expected behavior, and implementation requirements
+- **Constants and Variables**: Document all exported constants and variables with their purpose and valid values
+
 ### Testing Approach
 - **TDD**: Write table-driven tests before implementation
 - **Coverage**: Aim for 100% test coverage on core components
