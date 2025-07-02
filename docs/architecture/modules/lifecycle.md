@@ -12,11 +12,39 @@ For information about the standard module interface, see [Module Interface](inte
 
 ### 1. Discovery
 
-The discovery phase involves identifying available modules in the system.
+The discovery phase involves identifying available modules in the system through filesystem scanning.
 
-- **Module Registration**: Modules register themselves with the system
-- **Module Metadata**: Modules provide metadata about their capabilities and requirements
-- **Module Dependencies**: Modules declare their dependencies on other modules or resources
+**Steward Discovery Process:**
+1. **Filesystem Scan**: Scans module directories in priority order:
+   - `./modules/` (relative to steward binary)
+   - `/opt/cfgms/modules/` (Linux/macOS)
+   - `C:\Program Files\cfgms\modules\` (Windows)
+   - Custom paths from `steward.module_paths` in `hostname.cfg`
+
+2. **Module Metadata Loading**: For each directory:
+   - Check for `module.yaml` metadata file
+   - Parse module name, version, capabilities
+   - Validate module structure and interface compliance
+
+3. **Module Registry**: Build registry mapping module names to implementations
+   - Track module capabilities and requirements
+   - Handle version conflicts and duplicates
+   - Validate ConfigState interface implementation
+
+**Expected Module Structure:**
+```
+modules/
+├── directory/
+│   ├── module.yaml          # Module metadata
+│   └── module.go           # Implementation
+├── file/
+│   ├── module.yaml
+│   ├── interface.go
+│   └── implementation.go
+└── firewall/
+    ├── module.yaml
+    └── module.go
+```
 
 ### 2. Loading
 

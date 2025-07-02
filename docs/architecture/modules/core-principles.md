@@ -8,11 +8,11 @@ Modules are the fundamental building blocks of CFGMS, providing a consistent int
 
 ### 1. Standardized Interface
 
-- **Get/Set/Test Pattern**: All modules must implement the core Get/Set/Test interface
-  - **Get**: Returns the current Configuration of the Resource
-  - **Set**: Updates the Resource Configuration to match the Configuration-Data specification
-  - **Test**: Validates if the current Configuration (*Get*) includes all settings in the Configuration-Data specification
-  - **Monitor**: (Optional) Implements event-driven or system hook-based monitoring
+- **Get/Set Pattern**: All modules must implement the core Get/Set interface with ConfigState
+  - **Get**: Returns the current Configuration of the Resource as ConfigState (comprehensive system state)
+  - **Set**: Updates the Resource Configuration to match the Configuration-Data specification (managed fields only)
+  - **System Testing**: The Steward automatically compares current vs desired state using managed fields
+  - **Monitor**: (Optional) Implements event-driven or system hook-based monitoring via separate interface
 
 - **Idempotent Operations**: All operations must be idempotent, meaning repeated execution produces the same result
 - **Atomic Operations**: Operations should be atomic where possible, ensuring all-or-nothing execution
