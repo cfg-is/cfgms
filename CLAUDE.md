@@ -181,6 +181,10 @@ The system implements a recursive parent-child tenant model with:
 - Configuration Manager loads and validates hostname.cfg files
 - Execution Engine orchestrates the Get→Compare→Set→Verify workflow
 - System Testing implements intelligent field-level comparison using GetManagedFields()
+- **Implementation Guide**: See docs/development/guides/standalone-steward-implementation.md for detailed guidance
+
+### Additional Development Tasks
+- [ ] Create module development tutorial after updating existing modules to ConfigState interface
 
 ## Dependencies
 - `github.com/spf13/cobra` - CLI framework
