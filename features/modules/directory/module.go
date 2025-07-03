@@ -2,7 +2,6 @@ package directory
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/user"
@@ -29,6 +28,55 @@ type directoryConfig struct {
 	Owner       string `yaml:"owner,omitempty"`
 	Group       string `yaml:"group,omitempty"`
 	Recursive   bool   `yaml:"recursive,omitempty"`
+}
+
+// AsMap returns the configuration as a map for efficient field-by-field comparison
+func (c *directoryConfig) AsMap() map[string]interface{} {
+	result := map[string]interface{}{
+		"path":        c.Path,
+		"permissions": c.Permissions,
+	}
+	
+	if c.Owner != "" {
+		result["owner"] = c.Owner
+	}
+	if c.Group != "" {
+		result["group"] = c.Group
+	}
+	if c.Recursive {
+		result["recursive"] = c.Recursive
+	}
+	
+	return result
+}
+
+// ToYAML serializes the configuration to YAML for export/storage
+func (c *directoryConfig) ToYAML() ([]byte, error) {
+	return yaml.Marshal(c)
+}
+
+// FromYAML deserializes YAML data into the configuration
+func (c *directoryConfig) FromYAML(data []byte) error {
+	return yaml.Unmarshal(data, c)
+}
+
+// Validate ensures the configuration is valid
+func (c *directoryConfig) Validate() error {
+	return c.validate()
+}
+
+// GetManagedFields returns the list of fields this configuration manages
+func (c *directoryConfig) GetManagedFields() []string {
+	fields := []string{"path", "permissions"}
+	
+	if c.Owner != "" {
+		fields = append(fields, "owner")
+	}
+	if c.Group != "" {
+		fields = append(fields, "group")
+	}
+	
+	return fields
 }
 
 // validateConfig checks if the configuration is valid
@@ -64,37 +112,52 @@ func (c *directoryConfig) validate() error {
 }
 
 // Set creates or updates a directory according to the configuration
-func (m *directoryModule) Set(ctx context.Context, resourceID string, configData string) error {
-	var config directoryConfig
-	if err := yaml.Unmarshal([]byte(configData), &config); err != nil {
-		return fmt.Errorf("failed to parse config: %w", err)
+func (m *directoryModule) Set(ctx context.Context, resourceID string, config modules.ConfigState) error {
+	// Convert ConfigState to directoryConfig
+	configMap := config.AsMap()
+	dirConfig := &directoryConfig{}
+	
+	if path, ok := configMap["path"].(string); ok {
+		dirConfig.Path = path
+	}
+	if perms, ok := configMap["permissions"].(int); ok {
+		dirConfig.Permissions = perms
+	}
+	if owner, ok := configMap["owner"].(string); ok {
+		dirConfig.Owner = owner
+	}
+	if group, ok := configMap["group"].(string); ok {
+		dirConfig.Group = group
+	}
+	if recursive, ok := configMap["recursive"].(bool); ok {
+		dirConfig.Recursive = recursive
 	}
 
 	// Validate configuration
-	if err := config.validate(); err != nil {
+	if err := dirConfig.validate(); err != nil {
 		return err
 	}
 
 	// Check if path exists and is a directory
-	info, err := os.Stat(config.Path)
+	info, err := os.Stat(dirConfig.Path)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			return fmt.Errorf("failed to stat path: %w", err)
 		}
 		// Path doesn't exist, create it
-		if config.Recursive {
-			if err := os.MkdirAll(config.Path, os.FileMode(config.Permissions)); err != nil {
+		if dirConfig.Recursive {
+			if err := os.MkdirAll(dirConfig.Path, os.FileMode(dirConfig.Permissions)); err != nil {
 				return fmt.Errorf("failed to create directory: %w", err)
 			}
 		} else {
-			parent := filepath.Dir(config.Path)
+			parent := filepath.Dir(dirConfig.Path)
 			if _, err := os.Stat(parent); err != nil {
 				if os.IsNotExist(err) {
 					return ErrRecursiveRequired
 				}
 				return fmt.Errorf("failed to stat parent directory: %w", err)
 			}
-			if err := os.Mkdir(config.Path, os.FileMode(config.Permissions)); err != nil {
+			if err := os.Mkdir(dirConfig.Path, os.FileMode(dirConfig.Permissions)); err != nil {
 				return fmt.Errorf("failed to create directory: %w", err)
 			}
 		}
@@ -103,15 +166,15 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, configData
 	}
 
 	// Set permissions
-	if err := os.Chmod(config.Path, os.FileMode(config.Permissions)); err != nil {
+	if err := os.Chmod(dirConfig.Path, os.FileMode(dirConfig.Permissions)); err != nil {
 		return fmt.Errorf("failed to set permissions: %w", err)
 	}
 
 	// Set ownership if specified
-	if config.Owner != "" || config.Group != "" {
+	if dirConfig.Owner != "" || dirConfig.Group != "" {
 		var uid, gid int
-		if config.Owner != "" {
-			u, err := user.Lookup(config.Owner)
+		if dirConfig.Owner != "" {
+			u, err := user.Lookup(dirConfig.Owner)
 			if err != nil {
 				return ErrInvalidOwner
 			}
@@ -120,8 +183,8 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, configData
 			uid = -1
 		}
 
-		if config.Group != "" {
-			g, err := user.LookupGroup(config.Group)
+		if dirConfig.Group != "" {
+			g, err := user.LookupGroup(dirConfig.Group)
 			if err != nil {
 				return ErrInvalidGroup
 			}
@@ -130,7 +193,7 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, configData
 			gid = -1
 		}
 
-		if err := os.Chown(config.Path, uid, gid); err != nil {
+		if err := os.Chown(dirConfig.Path, uid, gid); err != nil {
 			return fmt.Errorf("failed to set ownership: %w", err)
 		}
 	}
@@ -139,13 +202,13 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, configData
 }
 
 // Get retrieves the current configuration of a directory
-func (m *directoryModule) Get(ctx context.Context, resourceID string) (string, error) {
+func (m *directoryModule) Get(ctx context.Context, resourceID string) (modules.ConfigState, error) {
 	info, err := os.Stat(resourceID)
 	if err != nil {
-		return "", fmt.Errorf("failed to stat directory: %w", err)
+		return nil, fmt.Errorf("failed to stat directory: %w", err)
 	}
 	if !info.IsDir() {
-		return "", ErrNotADirectory
+		return nil, ErrNotADirectory
 	}
 
 	// Get current permissions
@@ -155,67 +218,20 @@ func (m *directoryModule) Get(ctx context.Context, resourceID string) (string, e
 	stat := info.Sys().(*syscall.Stat_t)
 	owner, err := user.LookupId(strconv.FormatUint(uint64(stat.Uid), 10))
 	if err != nil {
-		return "", fmt.Errorf("failed to lookup owner: %w", err)
+		return nil, fmt.Errorf("failed to lookup owner: %w", err)
 	}
 	group, err := user.LookupGroupId(strconv.FormatUint(uint64(stat.Gid), 10))
 	if err != nil {
-		return "", fmt.Errorf("failed to lookup group: %w", err)
+		return nil, fmt.Errorf("failed to lookup group: %w", err)
 	}
 
-	config := directoryConfig{
+	config := &directoryConfig{
 		Path:        resourceID,
 		Permissions: int(perms),
 		Owner:       owner.Username,
 		Group:       group.Name,
 	}
 
-	configData, err := yaml.Marshal(config)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal config: %w", err)
-	}
-
-	return string(configData), nil
+	return config, nil
 }
 
-// Test verifies if the current directory state matches the desired configuration
-func (m *directoryModule) Test(ctx context.Context, resourceID string, configData string) (bool, error) {
-	var desiredConfig directoryConfig
-	if err := yaml.Unmarshal([]byte(configData), &desiredConfig); err != nil {
-		return false, fmt.Errorf("failed to parse config: %w", err)
-	}
-
-	// Validate desired configuration
-	if err := desiredConfig.validate(); err != nil {
-		return false, err
-	}
-
-	// Get current state
-	currentConfig, err := m.Get(ctx, resourceID)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return false, nil
-		}
-		return false, err
-	}
-
-	var currentState directoryConfig
-	if err := yaml.Unmarshal([]byte(currentConfig), &currentState); err != nil {
-		return false, fmt.Errorf("failed to parse current state: %w", err)
-	}
-
-	// Compare only specified fields
-	if desiredConfig.Path != currentState.Path {
-		return false, nil
-	}
-	if desiredConfig.Permissions != currentState.Permissions {
-		return false, nil
-	}
-	if desiredConfig.Owner != "" && desiredConfig.Owner != currentState.Owner {
-		return false, nil
-	}
-	if desiredConfig.Group != "" && desiredConfig.Group != currentState.Group {
-		return false, nil
-	}
-
-	return true, nil
-}
