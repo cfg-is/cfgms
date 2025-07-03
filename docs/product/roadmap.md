@@ -30,9 +30,9 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 - [x] Design component interactions
 - [x] Establish security model
 - [x] Create initial documentation
-- [ ] Implement basic Controller functionality
-- [ ] Implement basic Steward functionality
-- [ ] Create module system framework
+- [x] Create module system framework
+- [ ] Implement basic Steward functionality (issue #13)
+- [ ] Implement basic Controller functionality (issue #14)
 
 #### v0.2.0 (Alpha)
 
@@ -83,6 +83,17 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 - [ ] Add support for custom reports
 - [ ] Implement advanced monitoring
 - [ ] Add support for custom monitors
+
+#### v0.7.0 (Beta)
+
+- [ ] Implement cluster-aware patching module
+- [ ] Add cluster discovery and topology mapping
+- [ ] Implement coordinated patch orchestration with rolling updates
+- [ ] Add dependency-aware sequencing for cluster components
+- [ ] Implement maintenance window scheduling across cluster zones
+- [ ] Add pre-patch validation and post-patch verification
+- [ ] Implement automatic rollback triggers based on cluster health
+- [ ] Add support for canary deployment patterns for patch validation
 
 ### Phase 2: Enhancement (v1.0.0 - v1.5.0)
 
@@ -330,6 +341,12 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 | Custom Reports | Support for custom reports | v0.6.0 |
 | Advanced Monitoring | Advanced monitoring capabilities | v0.6.0 |
 | Custom Monitors | Support for custom monitors | v0.6.0 |
+| Cluster-Aware Patching | Coordinated patching across cluster infrastructure | v0.7.0 |
+| Cluster Discovery | Discovery and mapping of cluster topology | v0.7.0 |
+| Patch Orchestration | Rolling updates with dependency-aware sequencing | v0.7.0 |
+| Maintenance Windows | Scheduled patching across cluster zones | v0.7.0 |
+| Patch Validation | Pre/post-patch validation with automatic rollback | v0.7.0 |
+| Canary Deployments | Canary deployment patterns for patch validation | v0.7.0 |
 
 ### Advanced Features
 
