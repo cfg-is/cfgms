@@ -5,12 +5,12 @@
 // between modules, handles error policies, and provides detailed reporting.
 //
 // The execution engine follows this workflow for each resource:
-//   1. Load the required module from the factory
-//   2. Get the current state using module.Get()
-//   3. Compare current vs desired state (drift detection)
-//   4. If drift detected, apply changes using module.Set()
-//   5. Verify changes by calling module.Get() again
-//   6. Generate detailed execution report
+//  1. Load the required module from the factory
+//  2. Get the current state using module.Get()
+//  3. Compare current vs desired state (drift detection)
+//  4. If drift detected, apply changes using module.Set()
+//  5. Verify changes by calling module.Get() again
+//  6. Generate detailed execution report
 //
 // Basic usage:
 //
@@ -22,12 +22,11 @@
 //
 //	// Check results
 //	log.Printf("Executed %d resources: %d successful, %d failed, %d skipped",
-//		report.TotalResources, report.SuccessfulCount, 
+//		report.TotalResources, report.SuccessfulCount,
 //		report.FailedCount, report.SkippedCount)
 //
 // Error handling follows the steward's configured policies and provides
 // detailed information for troubleshooting and monitoring.
-//
 package execution
 
 import (
@@ -52,26 +51,26 @@ type ExecutionEngine struct {
 
 // ExecutionReport contains the results of configuration execution
 type ExecutionReport struct {
-	StartTime        time.Time
-	EndTime          time.Time
-	TotalResources   int
-	SuccessfulCount  int
-	FailedCount      int
-	SkippedCount     int
-	ResourceResults  []ResourceResult
-	Errors           []string
+	StartTime       time.Time
+	EndTime         time.Time
+	TotalResources  int
+	SuccessfulCount int
+	FailedCount     int
+	SkippedCount    int
+	ResourceResults []ResourceResult
+	Errors          []string
 }
 
 // ResourceResult contains the result of executing a single resource
 type ResourceResult struct {
-	ResourceName  string
-	ModuleName    string
-	Status        ResourceStatus
-	DriftDetected bool
+	ResourceName   string
+	ModuleName     string
+	Status         ResourceStatus
+	DriftDetected  bool
 	ChangesApplied bool
-	ExecutionTime time.Duration
-	Error         string
-	StateDiff     *testing.StateDiff
+	ExecutionTime  time.Duration
+	Error          string
+	StateDiff      *testing.StateDiff
 }
 
 // ResourceStatus represents the execution status of a resource
@@ -85,7 +84,7 @@ const (
 )
 
 // New creates a new ExecutionEngine instance
-func New(factory *factory.ModuleFactory, comparator *testing.StateComparator, 
+func New(factory *factory.ModuleFactory, comparator *testing.StateComparator,
 	errorConfig config.ErrorHandlingConfig, logger logging.Logger) *ExecutionEngine {
 	return &ExecutionEngine{
 		factory:    factory,
@@ -104,7 +103,7 @@ func (e *ExecutionEngine) ExecuteConfiguration(ctx context.Context, cfg config.S
 		Errors:          make([]string, 0),
 	}
 
-	e.logger.Info("Starting configuration execution", 
+	e.logger.Info("Starting configuration execution",
 		"total_resources", report.TotalResources)
 
 	// Execute each resource
@@ -117,7 +116,7 @@ func (e *ExecutionEngine) ExecuteConfiguration(ctx context.Context, cfg config.S
 		default:
 			result := e.ExecuteResource(ctx, resource)
 			report.ResourceResults = append(report.ResourceResults, result)
-			
+
 			switch result.Status {
 			case StatusSuccess, StatusNoChange:
 				report.SuccessfulCount++
@@ -130,7 +129,7 @@ func (e *ExecutionEngine) ExecuteConfiguration(ctx context.Context, cfg config.S
 	}
 
 	report.EndTime = time.Now()
-	
+
 	e.logger.Info("Configuration execution completed",
 		"total", report.TotalResources,
 		"successful", report.SuccessfulCount,
@@ -144,7 +143,7 @@ func (e *ExecutionEngine) ExecuteConfiguration(ctx context.Context, cfg config.S
 // ExecuteResource executes configuration for a single resource
 func (e *ExecutionEngine) ExecuteResource(ctx context.Context, resource config.ResourceConfig) ResourceResult {
 	startTime := time.Now()
-	
+
 	result := ResourceResult{
 		ResourceName: resource.Name,
 		ModuleName:   resource.Module,
@@ -227,7 +226,7 @@ func (e *ExecutionEngine) ExecuteResource(ctx context.Context, resource config.R
 
 	result.Status = StatusSuccess
 	result.ExecutionTime = time.Since(startTime)
-	
+
 	e.logger.Info("Resource configuration applied successfully",
 		"resource", resource.Name,
 		"duration", result.ExecutionTime)
@@ -240,15 +239,15 @@ func (e *ExecutionEngine) createConfigState(configData map[string]interface{}) (
 	// This is a simplified implementation
 	// In a real system, you would need to create the appropriate ConfigState
 	// implementation based on the module type or use a generic implementation
-	
+
 	// For now, return a generic config state
 	return &genericConfigState{data: configData}, nil
 }
 
 // verifyChanges checks that the applied configuration matches the desired state
-func (e *ExecutionEngine) verifyChanges(ctx context.Context, module modules.Module, 
+func (e *ExecutionEngine) verifyChanges(ctx context.Context, module modules.Module,
 	resourceID string, desiredState modules.ConfigState) error {
-	
+
 	// Get the state after changes
 	currentState, err := module.Get(ctx, resourceID)
 	if err != nil {
@@ -258,7 +257,7 @@ func (e *ExecutionEngine) verifyChanges(ctx context.Context, module modules.Modu
 	// Compare again to ensure changes were applied
 	driftDetected, stateDiff := e.comparator.CompareStates(currentState, desiredState)
 	if driftDetected {
-		return fmt.Errorf("verification failed: changes not fully applied, remaining differences: %d", 
+		return fmt.Errorf("verification failed: changes not fully applied, remaining differences: %d",
 			len(stateDiff.ChangedFields))
 	}
 
@@ -280,7 +279,8 @@ func (e *ExecutionEngine) handleResourceError(resource config.ResourceConfig, er
 		e.logger.Error("Resource execution failed",
 			"resource", resource.Name,
 			"error", err)
-		// In a real implementation, this might panic or set a global error state
+		// Return an error that propagates up to stop further execution
+		panic(fmt.Errorf("resource execution failed (fail policy): %s: %w", resource.Name, err))
 	}
 }
 

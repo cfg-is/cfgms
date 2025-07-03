@@ -219,13 +219,28 @@ func (s *Steward) Start(ctx context.Context) error {
 // Configuration execution errors are logged but do not cause startup to fail,
 // allowing the steward to continue operating and retry later.
 func (s *Steward) startStandalone(ctx context.Context) error {
-	s.logger.Info("Starting steward in standalone mode", 
-		"id", s.standaloneConfig.Steward.ID,
-		"resources", len(s.standaloneConfig.Resources))
-	
-	// Start health monitoring in background
-	go s.healthCheck.Start(ctx)
-	
+    s.logger.Info("Starting steward in standalone mode",
+        "id", s.standaloneConfig.Steward.ID,
+        "resources", len(s.standaloneConfig.Resources))
+    
+    // Start health monitoring in background
+    healthErrCh := make(chan error, 1)
+    go func() {
+        if err := s.healthCheck.Start(ctx); err != nil {
+            healthErrCh <- err
+        }
+    }()
+    
+    // Check for immediate health check startup errors
+    select {
+    case err := <-healthErrCh:
+        return fmt.Errorf("failed to start health monitoring: %w", err)
+    case <-time.After(100 * time.Millisecond):
+        // Health check started successfully
+    }
+    
+    // … rest of startStandalone …
+}
 	// Execute configuration immediately on startup
 	report := s.executionEngine.ExecuteConfiguration(ctx, s.standaloneConfig)
 	
