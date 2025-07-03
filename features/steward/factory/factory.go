@@ -26,9 +26,8 @@
 //
 // Error handling follows the steward's error handling configuration:
 //   - continue: Log error and return nil (caller should handle gracefully)
-//   - warn: Log warning and return nil  
+//   - warn: Log warning and return nil
 //   - fail: Log error and return error
-//
 package factory
 
 import (
@@ -37,6 +36,11 @@ import (
 	"reflect"
 
 	"github.com/cfgis/cfgms/features/modules"
+	"github.com/cfgis/cfgms/features/modules/directory"
+	"github.com/cfgis/cfgms/features/modules/file"
+	"github.com/cfgis/cfgms/features/modules/firewall"
+	package_module "github.com/cfgis/cfgms/features/modules/package"
+	"github.com/cfgis/cfgms/features/modules/patch"
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
 )
@@ -48,13 +52,13 @@ import (
 // configured error handling policy.
 type ModuleFactory struct {
 	// registry contains information about discovered modules
-	registry   discovery.ModuleRegistry
-	
+	registry discovery.ModuleRegistry
+
 	// instances caches loaded module instances for reuse
-	instances  map[string]modules.Module
-	
+	instances map[string]modules.Module
+
 	// config defines error handling behavior
-	config     config.ErrorHandlingConfig
+	config config.ErrorHandlingConfig
 }
 
 // New creates a new ModuleFactory instance with the provided registry and error configuration.
@@ -106,7 +110,7 @@ func (f *ModuleFactory) loadModuleFromPath(moduleName, modulePath string) (modul
 	// 1. Go plugins (.so files) - requires CGO
 	// 2. Built-in module registry with reflection
 	// 3. External process communication
-	
+
 	// For now, we'll implement a built-in module registry approach
 	return f.loadBuiltinModule(moduleName)
 }
@@ -115,24 +119,18 @@ func (f *ModuleFactory) loadModuleFromPath(moduleName, modulePath string) (modul
 func (f *ModuleFactory) loadBuiltinModule(moduleName string) (modules.Module, error) {
 	// This would be expanded to include all built-in modules
 	// For now, we'll use a simple registry pattern
-	
+
 	switch moduleName {
 	case "directory":
-		// Import would be: "cfgms/features/modules/directory"
-		// return directory.New(), nil
-		return nil, fmt.Errorf("directory module not yet implemented with ConfigState interface")
+		return directory.New(), nil
 	case "file":
-		// Import would be: "cfgms/features/modules/file"
-		// return file.New(), nil
-		return nil, fmt.Errorf("file module not yet implemented with ConfigState interface")
+		return file.New(), nil
 	case "firewall":
-		// Import would be: "cfgms/features/modules/firewall"
-		// return firewall.New(), nil
-		return nil, fmt.Errorf("firewall module not yet implemented with ConfigState interface")
+		return firewall.New(), nil
 	case "package":
-		// Import would be: "cfgms/features/modules/package"
-		// return package.New(), nil
-		return nil, fmt.Errorf("package module not yet implemented with ConfigState interface")
+		return package_module.New(), nil
+	case "patch":
+		return patch.New(), nil
 	default:
 		return nil, fmt.Errorf("unknown built-in module: %s", moduleName)
 	}
@@ -160,7 +158,7 @@ func (f *ModuleFactory) loadPluginModule(modulePath string) (modules.Module, err
 
 	// Create the module instance
 	instance := newFuncTyped()
-	
+
 	return instance, nil
 }
 
@@ -173,13 +171,13 @@ func (f *ModuleFactory) ValidateModuleInterface(module interface{}) error {
 
 	// Use reflection to verify the interface methods exist with correct signatures
 	moduleType := reflect.TypeOf(module)
-	
+
 	// Check Get method
 	getMethod, exists := moduleType.MethodByName("Get")
 	if !exists {
 		return fmt.Errorf("module missing Get method")
 	}
-	
+
 	// Validate Get method signature: Get(ctx context.Context, resourceID string) (ConfigState, error)
 	if getMethod.Type.NumIn() != 3 { // receiver + 2 parameters
 		return fmt.Errorf("Get method has incorrect number of parameters")
@@ -193,7 +191,7 @@ func (f *ModuleFactory) ValidateModuleInterface(module interface{}) error {
 	if !exists {
 		return fmt.Errorf("module missing Set method")
 	}
-	
+
 	// Validate Set method signature: Set(ctx context.Context, resourceID string, config ConfigState) error
 	if setMethod.Type.NumIn() != 4 { // receiver + 3 parameters
 		return fmt.Errorf("Set method has incorrect number of parameters")

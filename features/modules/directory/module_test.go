@@ -7,7 +7,19 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/cfgis/cfgms/features/modules"
+	"gopkg.in/yaml.v3"
 )
+
+// createConfigFromYAML creates a directoryConfig from YAML string
+func createConfigFromYAML(yamlData string) modules.ConfigState {
+	var config directoryConfig
+	if err := yaml.Unmarshal([]byte(yamlData), &config); err != nil {
+		return nil
+	}
+	return &config
+}
 
 func TestDirectoryModule(t *testing.T) {
 	// Create a temporary directory for testing
@@ -36,7 +48,6 @@ func TestDirectoryModule(t *testing.T) {
 		setup       func() error
 		cleanup     func() error
 		wantErr     bool
-		wantTestErr bool
 	}{
 		{
 			name:       "Create new directory",
@@ -44,7 +55,6 @@ func TestDirectoryModule(t *testing.T) {
 			configData: `path: ` + filepath.Join(tempDir, "newdir") + `
 permissions: 0755`,
 			wantErr:     false,
-			wantTestErr: false,
 		},
 		{
 			name:       "Create directory with ownership",
@@ -54,7 +64,6 @@ permissions: 0750
 owner: ` + currentUser.Username + `
 group: ` + currentGroup.Name,
 			wantErr:     false,
-			wantTestErr: false,
 		},
 		{
 			name:       "Invalid path",
@@ -62,7 +71,6 @@ group: ` + currentGroup.Name,
 			configData: `path: ""
 permissions: 0755`,
 			wantErr:     true,
-			wantTestErr: true,
 		},
 		{
 			name:       "Invalid permissions",
@@ -70,7 +78,6 @@ permissions: 0755`,
 			configData: `path: ` + filepath.Join(tempDir, "invalid-perms") + `
 permissions: 9999`,
 			wantErr:     true,
-			wantTestErr: true,
 		},
 		{
 			name:       "Invalid owner",
@@ -79,7 +86,6 @@ permissions: 9999`,
 permissions: 0755
 owner: nonexistentuser`,
 			wantErr:     true,
-			wantTestErr: true,
 		},
 		{
 			name:       "Invalid group",
@@ -88,7 +94,6 @@ owner: nonexistentuser`,
 permissions: 0755
 group: nonexistentgroup`,
 			wantErr:     true,
-			wantTestErr: true,
 		},
 	}
 
@@ -110,8 +115,15 @@ group: nonexistentgroup`,
 				}()
 			}
 
+			// Create ConfigState from YAML
+			configState := createConfigFromYAML(tt.configData)
+			if configState == nil && !tt.wantErr {
+				t.Errorf("Failed to create config from YAML: %s", tt.configData)
+				return
+			}
+
 			// Test Set
-			err := module.Set(context.Background(), tt.resourceID, tt.configData)
+			err := module.Set(context.Background(), tt.resourceID, configState)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Set() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -124,19 +136,9 @@ group: nonexistentgroup`,
 					t.Errorf("Get() error = %v", err)
 					return
 				}
-				if config == "" {
-					t.Error("Get() returned empty config")
+				if config == nil {
+					t.Error("Get() returned nil config")
 				}
-			}
-
-			// Test Test
-			matches, err := module.Test(context.Background(), tt.resourceID, tt.configData)
-			if (err != nil) != tt.wantTestErr {
-				t.Errorf("Test() error = %v, wantTestErr %v", err, tt.wantTestErr)
-				return
-			}
-			if !tt.wantErr && !tt.wantTestErr && !matches {
-				t.Error("Test() returned false for valid configuration")
 			}
 		})
 	}
@@ -162,7 +164,8 @@ func TestDirectoryModule_EdgeCases(t *testing.T) {
 permissions: 0755`
 
 	// Should fail because path exists but is not a directory
-	err = module.Set(context.Background(), filePath, configData)
+	configState := createConfigFromYAML(configData)
+	err = module.Set(context.Background(), filePath, configState)
 	if err != ErrNotADirectory {
 		t.Errorf("Set() with existing file error = %v, want %v", err, ErrNotADirectory)
 	}
@@ -173,7 +176,8 @@ permissions: 0755`
 permissions: 0755
 recursive: false`
 
-	err = module.Set(context.Background(), nonExistentPath, configData)
+	configState = createConfigFromYAML(configData)
+	err = module.Set(context.Background(), nonExistentPath, configState)
 	if err == nil {
 		t.Error("Set() with non-existent parent and recursive=false should fail")
 	}
@@ -183,7 +187,8 @@ recursive: false`
 permissions: 0755
 recursive: true`
 
-	err = module.Set(context.Background(), nonExistentPath, configData)
+	configState = createConfigFromYAML(configData)
+	err = module.Set(context.Background(), nonExistentPath, configState)
 	if err != nil {
 		t.Errorf("Set() with non-existent parent and recursive=true error = %v", err)
 	}

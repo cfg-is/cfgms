@@ -15,24 +15,24 @@ import (
 type fileModule struct{}
 
 // New creates a new instance of the file module
-func New() Module {
+func New() modules.Module {
 	return &fileModule{}
 }
 
 // Get returns the current configuration of the file
-func (m *fileModule) Get(ctx context.Context, resourceID string) (FileConfig, error) {
+func (m *fileModule) Get(ctx context.Context, resourceID string) (modules.ConfigState, error) {
 	if resourceID == "" {
-		return FileConfig{}, modules.ErrInvalidResourceID
+		return nil, modules.ErrInvalidResourceID
 	}
 
 	info, err := os.Stat(resourceID)
 	if err != nil {
-		return FileConfig{}, err
+		return nil, err
 	}
 
 	content, err := os.ReadFile(resourceID)
 	if err != nil {
-		return FileConfig{}, err
+		return nil, err
 	}
 
 	// Get owner and group
@@ -49,40 +49,69 @@ func (m *fileModule) Get(ctx context.Context, resourceID string) (FileConfig, er
 		}
 	}
 
-	return FileConfig{
+	config := &FileConfig{
 		Content:     string(content),
-		Permissions: info.Mode().Perm(),
+		Permissions: int(info.Mode().Perm()),
 		Owner:       owner,
 		Group:       group,
-	}, nil
+	}
+
+	return config, nil
 }
 
 // Set updates the file content and attributes
-func (m *fileModule) Set(ctx context.Context, resourceID string, config FileConfig) error {
-	if resourceID == "" || config.Content == "" {
+func (m *fileModule) Set(ctx context.Context, resourceID string, config modules.ConfigState) error {
+	if resourceID == "" {
+		return modules.ErrInvalidResourceID
+	}
+
+	if config == nil {
 		return modules.ErrInvalidInput
 	}
 
+	// Convert ConfigState to FileConfig
+	configMap := config.AsMap()
+	fileConfig := &FileConfig{}
+	
+	if content, ok := configMap["content"].(string); ok {
+		fileConfig.Content = content
+	}
+	if perms, ok := configMap["permissions"].(int); ok {
+		fileConfig.Permissions = perms
+	}
+	if owner, ok := configMap["owner"].(string); ok {
+		fileConfig.Owner = owner
+	}
+	if group, ok := configMap["group"].(string); ok {
+		fileConfig.Group = group
+	}
+
+	
+	// Validate configuration
+	if err := fileConfig.Validate(); err != nil {
+		return err
+	}
+
 	// Write file with content
-	if err := os.WriteFile(resourceID, []byte(config.Content), config.Permissions); err != nil {
+	if err := os.WriteFile(resourceID, []byte(fileConfig.Content), os.FileMode(fileConfig.Permissions)); err != nil {
 		return err
 	}
 
 	// Set owner and group if specified
-	if config.Owner != "" || config.Group != "" {
+	if fileConfig.Owner != "" || fileConfig.Group != "" {
 		switch runtime.GOOS {
 		case "linux", "darwin":
 			// Get UID and GID for the specified owner and group
-			var uid, gid int
-			if config.Owner != "" {
-				userInfo, err := user.Lookup(config.Owner)
+			var uid, gid int = -1, -1
+			if fileConfig.Owner != "" {
+				userInfo, err := user.Lookup(fileConfig.Owner)
 				if err != nil {
 					return err
 				}
 				uid, _ = strconv.Atoi(userInfo.Uid)
 			}
-			if config.Group != "" {
-				groupInfo, err := user.LookupGroup(config.Group)
+			if fileConfig.Group != "" {
+				groupInfo, err := user.LookupGroup(fileConfig.Group)
 				if err != nil {
 					return err
 				}
@@ -96,8 +125,8 @@ func (m *fileModule) Set(ctx context.Context, resourceID string, config FileConf
 		case "windows":
 			// Windows doesn't support chown in the same way as Unix
 			// We'll just verify the owner exists
-			if config.Owner != "" {
-				_, err := user.Lookup(config.Owner)
+			if fileConfig.Owner != "" {
+				_, err := user.Lookup(fileConfig.Owner)
 				if err != nil {
 					return err
 				}
@@ -111,44 +140,3 @@ func (m *fileModule) Set(ctx context.Context, resourceID string, config FileConf
 	return nil
 }
 
-// Test checks if the file content and attributes match the desired state
-func (m *fileModule) Test(ctx context.Context, resourceID string, config FileConfig) (bool, error) {
-	if resourceID == "" || config.Content == "" {
-		return false, modules.ErrInvalidInput
-	}
-
-	current, err := m.Get(ctx, resourceID)
-	if err != nil {
-		return false, err
-	}
-
-	// Compare content and permissions
-	contentMatch := current.Content == config.Content
-	permMatch := current.Permissions == config.Permissions
-
-	// Compare owner and group only if specified in config
-	ownerMatch := true
-	groupMatch := true
-
-	if config.Owner != "" || config.Group != "" {
-		switch runtime.GOOS {
-		case "linux", "darwin":
-			if config.Owner != "" {
-				ownerMatch = current.Owner == config.Owner
-			}
-			if config.Group != "" {
-				groupMatch = current.Group == config.Group
-			}
-		case "windows":
-			// Windows only supports owner comparison
-			if config.Owner != "" {
-				ownerMatch = current.Owner == config.Owner
-			}
-		default:
-			// Unsupported platform
-			return false, modules.ErrUnsupportedPlatform
-		}
-	}
-
-	return contentMatch && permMatch && ownerMatch && groupMatch, nil
-}
