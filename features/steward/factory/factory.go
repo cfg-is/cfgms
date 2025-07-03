@@ -39,6 +39,7 @@ import (
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/modules/directory"
 	"github.com/cfgis/cfgms/features/modules/file"
+	"github.com/cfgis/cfgms/features/modules/firewall"
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
 )
@@ -124,9 +125,7 @@ func (f *ModuleFactory) loadBuiltinModule(moduleName string) (modules.Module, er
 	case "file":
 		return file.New(), nil
 	case "firewall":
-		// Import would be: "cfgms/features/modules/firewall"
-		// return firewall.New(), nil
-		return nil, fmt.Errorf("firewall module not yet implemented with ConfigState interface")
+		return firewall.New(), nil
 	case "package":
 		// Import would be: "cfgms/features/modules/package"
 		// return package.New(), nil
