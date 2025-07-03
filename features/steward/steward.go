@@ -33,6 +33,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 	
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
@@ -224,39 +225,29 @@ func (s *Steward) startStandalone(ctx context.Context) error {
         "resources", len(s.standaloneConfig.Resources))
     
     // Start health monitoring in background
-    healthErrCh := make(chan error, 1)
     go func() {
-        if err := s.healthCheck.Start(ctx); err != nil {
-            healthErrCh <- err
-        }
+        s.healthCheck.Start(ctx)
     }()
     
-    // Check for immediate health check startup errors
-    select {
-    case err := <-healthErrCh:
-        return fmt.Errorf("failed to start health monitoring: %w", err)
-    case <-time.After(100 * time.Millisecond):
-        // Health check started successfully
+    // Give health monitor a moment to start
+    time.Sleep(50 * time.Millisecond)
+    
+    // Execute configuration immediately on startup
+    report := s.executionEngine.ExecuteConfiguration(ctx, s.standaloneConfig)
+    
+    s.logger.Info("Initial configuration execution completed",
+        "total", report.TotalResources,
+        "successful", report.SuccessfulCount,
+        "failed", report.FailedCount,
+        "skipped", report.SkippedCount)
+    
+    // Log configuration execution errors but don't fail startup
+    for _, err := range report.Errors {
+        s.logger.Error("Configuration execution error", "error", err)
     }
     
-    // … rest of startStandalone …
-}
-	// Execute configuration immediately on startup
-	report := s.executionEngine.ExecuteConfiguration(ctx, s.standaloneConfig)
-	
-	s.logger.Info("Initial configuration execution completed",
-		"total", report.TotalResources,
-		"successful", report.SuccessfulCount,
-		"failed", report.FailedCount,
-		"skipped", report.SkippedCount)
-	
-	// Log configuration execution errors but don't fail startup
-	for _, err := range report.Errors {
-		s.logger.Error("Configuration execution error", "error", err)
-	}
-	
-	s.logger.Info("Steward started successfully in standalone mode")
-	return nil
+    s.logger.Info("Steward started successfully in standalone mode")
+    return nil
 }
 
 // startController starts the steward in controller mode (legacy implementation).
