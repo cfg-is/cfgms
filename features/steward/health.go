@@ -48,6 +48,11 @@ type HealthMetrics struct {
 
 	// TotalTaskLatency is used to calculate the average
 	TotalTaskLatency time.Duration
+
+	// Controller connectivity metrics (only for controller mode)
+	ControllerConnected bool
+	LastHeartbeat       time.Time
+	HeartbeatErrors     int
 }
 
 // HealthMonitor implements health monitoring and automatic recovery
@@ -250,6 +255,61 @@ func (h *HealthMonitor) SetStatus(status HealthStatus) {
 		h.logger.Info("Health status manually changed",
 			"old_status", oldStatus,
 			"new_status", status)
+	}
+}
+
+// UpdateControllerConnectivity updates controller connectivity metrics
+func (h *HealthMonitor) UpdateControllerConnectivity(connected bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	oldConnected := h.metrics.ControllerConnected
+	h.metrics.ControllerConnected = connected
+
+	if connected != oldConnected {
+		if connected {
+			h.logger.Info("Controller connectivity restored")
+			// Reset heartbeat errors on reconnection
+			h.metrics.HeartbeatErrors = 0
+		} else {
+			h.logger.Warn("Controller connectivity lost")
+		}
+	}
+
+	// Update health status based on connectivity
+	if !connected && h.metrics.Status == StatusHealthy {
+		h.metrics.Status = StatusDegraded
+		h.metrics.LastStatusChange = time.Now()
+		h.logger.Warn("Health status degraded due to controller disconnection")
+	}
+}
+
+// RecordHeartbeatSuccess records a successful heartbeat
+func (h *HealthMonitor) RecordHeartbeatSuccess() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	h.metrics.LastHeartbeat = time.Now()
+	h.metrics.HeartbeatErrors = 0
+	h.metrics.ControllerConnected = true
+}
+
+// RecordHeartbeatError records a heartbeat error
+func (h *HealthMonitor) RecordHeartbeatError() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	h.metrics.HeartbeatErrors++
+
+	// Check if errors exceed threshold
+	if h.metrics.HeartbeatErrors >= 3 {
+		h.metrics.ControllerConnected = false
+		if h.metrics.Status == StatusHealthy {
+			h.metrics.Status = StatusDegraded
+			h.metrics.LastStatusChange = time.Now()
+			h.logger.Warn("Health status degraded due to heartbeat failures",
+				"errors", h.metrics.HeartbeatErrors)
+		}
 	}
 }
 

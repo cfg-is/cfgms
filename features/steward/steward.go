@@ -35,8 +35,11 @@ import (
 	"sync"
 	"time"
 	
+	commonpb "github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/features/steward/client"
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
+	"github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/features/steward/execution"
 	"github.com/cfgis/cfgms/features/steward/factory"
 	"github.com/cfgis/cfgms/features/steward/testing"
@@ -106,6 +109,10 @@ type Steward struct {
 	comparator     *testing.StateComparator
 	executionEngine *execution.ExecutionEngine
 	
+	// Controller mode components (nil in standalone mode)
+	controllerClient *client.Client
+	dnaCollector     *dna.Collector
+	
 	// Shutdown coordination
 	shutdown chan struct{}
 	
@@ -118,21 +125,32 @@ type Steward struct {
 // This constructor initializes a steward that connects to a remote CFGMS controller
 // for configuration management. If cfg is nil, DefaultConfig() values are used.
 //
-// Returns an error only in future versions when additional validation is added.
-// Currently always returns a valid steward instance.
+// Returns an error if controller client or DNA collector initialization fails.
 func New(cfg *Config, logger logging.Logger) (*Steward, error) {
 	if cfg == nil {
 		cfg = DefaultConfig()
 	}
 	
+	// Create health monitor
 	healthMonitor := NewHealthMonitor(logger)
 	
+	// Create controller client
+	controllerClient, err := client.New(cfg.ControllerAddr, cfg.CertPath, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create controller client: %w", err)
+	}
+	
+	// Create DNA collector
+	dnaCollector := dna.NewCollector(logger)
+	
 	return &Steward{
-		legacyConfig: cfg,
-		logger:       logger,
-		healthCheck:  healthMonitor,
-		shutdown:     make(chan struct{}),
-		isStandalone: false,
+		legacyConfig:     cfg,
+		logger:           logger,
+		healthCheck:      healthMonitor,
+		controllerClient: controllerClient,
+		dnaCollector:     dnaCollector,
+		shutdown:         make(chan struct{}),
+		isStandalone:     false,
 	}, nil
 }
 
@@ -250,20 +268,65 @@ func (s *Steward) startStandalone(ctx context.Context) error {
     return nil
 }
 
-// startController starts the steward in controller mode (legacy implementation).
+// startController starts the steward in controller mode with full gRPC integration.
 //
-// This method starts health monitoring and will eventually connect to a remote
-// CFGMS controller for configuration management. Currently this is a placeholder
-// for future controller integration.
+// This method:
+//   1. Starts health monitoring in background
+//   2. Connects to the controller using mTLS authentication
+//   3. Collects system DNA and registers with the controller
+//   4. Starts the heartbeat mechanism for ongoing communication
+//
+// Returns an error if connection, registration, or DNA collection fails.
 func (s *Steward) startController(ctx context.Context) error {
 	s.logger.Info("Starting steward in controller mode", "id", s.legacyConfig.ID)
 	
 	// Start health monitoring in background
-	go s.healthCheck.Start(ctx)
+	go func() {
+		s.healthCheck.Start(ctx)
+	}()
 	
-	// TODO: Connect to controller using mTLS
-	// TODO: Register with controller
-	// TODO: Start module system
+	// Give health monitor a moment to start
+	time.Sleep(50 * time.Millisecond)
+	
+	// Set up health monitoring callback for controller connectivity
+	s.controllerClient.SetHealthCallback(func(connected bool, success bool) {
+		s.healthCheck.UpdateControllerConnectivity(connected)
+		if success {
+			s.healthCheck.RecordHeartbeatSuccess()
+		} else {
+			s.healthCheck.RecordHeartbeatError()
+		}
+	})
+	
+	// Connect to controller using mTLS
+	err := s.controllerClient.Connect(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to connect to controller: %w", err)
+	}
+	
+	s.logger.Info("Connected to controller successfully")
+	
+	// Update health monitoring with successful connection
+	s.healthCheck.UpdateControllerConnectivity(true)
+	
+	// Collect system DNA for registration
+	systemDNA, err := s.dnaCollector.Collect()
+	if err != nil {
+		return fmt.Errorf("failed to collect system DNA: %w", err)
+	}
+	
+	s.logger.Info("System DNA collected", "id", systemDNA.Id, "attributes", len(systemDNA.Attributes))
+	
+	// Register with controller
+	stewardID, err := s.controllerClient.Register(ctx, "v0.1.0", systemDNA)
+	if err != nil {
+		return fmt.Errorf("failed to register with controller: %w", err)
+	}
+	
+	s.logger.Info("Registered with controller successfully", "steward_id", stewardID)
+	
+	// Update legacy config with assigned ID
+	s.legacyConfig.ID = stewardID
 	
 	s.logger.Info("Steward started successfully in controller mode")
 	return nil
@@ -274,8 +337,9 @@ func (s *Steward) startController(ctx context.Context) error {
 // This method:
 //   1. Signals shutdown to all background goroutines
 //   2. Stops health monitoring
-//   3. Unloads all modules in standalone mode
-//   4. Waits for graceful cleanup to complete
+//   3. Disconnects from controller (in controller mode)
+//   4. Unloads all modules (in standalone mode)
+//   5. Waits for graceful cleanup to complete
 //
 // The context can be used to set a timeout for shutdown operations.
 // Returns an error only if cleanup operations fail.
@@ -292,9 +356,21 @@ func (s *Steward) Stop(ctx context.Context) error {
 	// Stop health monitoring
 	s.healthCheck.Stop()
 	
-	// Cleanup standalone components and unload modules
-	if s.isStandalone && s.moduleFactory != nil {
-		s.moduleFactory.UnloadAllModules()
+	// Cleanup based on mode
+	if s.isStandalone {
+		// Standalone mode: unload modules
+		if s.moduleFactory != nil {
+			s.moduleFactory.UnloadAllModules()
+		}
+	} else {
+		// Controller mode: disconnect from controller
+		if s.controllerClient != nil {
+			err := s.controllerClient.Disconnect()
+			if err != nil {
+				s.logger.Error("Error disconnecting from controller", "error", err)
+				return fmt.Errorf("failed to disconnect from controller: %w", err)
+			}
+		}
 	}
 	
 	s.logger.Info("Steward stopped successfully")
@@ -342,4 +418,78 @@ func (s *Steward) GetLoadedModules() []string {
 		return []string{}
 	}
 	return s.moduleFactory.GetLoadedModules()
+}
+
+// GetSystemDNA returns the current system DNA in controller mode.
+//
+// This method collects fresh system information and returns it as a DNA structure.
+// This is useful for checking the current system state or for manual DNA updates.
+//
+// Returns an error if called on a steward in standalone mode or if DNA collection fails.
+func (s *Steward) GetSystemDNA(ctx context.Context) (*commonpb.DNA, error) {
+	if s.isStandalone {
+		return nil, fmt.Errorf("GetSystemDNA is only available in controller mode")
+	}
+	
+	if s.dnaCollector == nil {
+		return nil, fmt.Errorf("DNA collector not initialized")
+	}
+	
+	return s.dnaCollector.Collect()
+}
+
+// SyncDNAWithController synchronizes the current system DNA with the controller.
+//
+// This method collects fresh DNA and sends it to the controller for synchronization.
+// This is useful for updating the controller with current system state changes.
+//
+// Returns an error if called on a steward in standalone mode, if not connected
+// to the controller, or if DNA collection or synchronization fails.
+func (s *Steward) SyncDNAWithController(ctx context.Context) error {
+	if s.isStandalone {
+		return fmt.Errorf("SyncDNAWithController is only available in controller mode")
+	}
+	
+	if s.controllerClient == nil || !s.controllerClient.IsConnected() {
+		return fmt.Errorf("not connected to controller")
+	}
+	
+	// Collect fresh DNA
+	systemDNA, err := s.dnaCollector.Collect()
+	if err != nil {
+		return fmt.Errorf("failed to collect system DNA: %w", err)
+	}
+	
+	// Sync with controller
+	err = s.controllerClient.SyncDNA(ctx, systemDNA)
+	if err != nil {
+		return fmt.Errorf("failed to sync DNA with controller: %w", err)
+	}
+	
+	s.logger.Info("DNA synchronized with controller successfully", "id", systemDNA.Id)
+	return nil
+}
+
+// GetControllerConnectionStatus returns the connection status with the controller.
+//
+// Returns true if connected and registered with the controller, false otherwise.
+// Always returns false for stewards in standalone mode.
+func (s *Steward) GetControllerConnectionStatus() bool {
+	if s.isStandalone || s.controllerClient == nil {
+		return false
+	}
+	
+	return s.controllerClient.IsConnected() && s.controllerClient.IsRegistered()
+}
+
+// GetStewardID returns the assigned steward ID from the controller.
+//
+// Returns the steward ID assigned by the controller during registration,
+// or empty string if not registered or in standalone mode.
+func (s *Steward) GetStewardID() string {
+	if s.isStandalone || s.controllerClient == nil {
+		return ""
+	}
+	
+	return s.controllerClient.GetStewardID()
 } 
