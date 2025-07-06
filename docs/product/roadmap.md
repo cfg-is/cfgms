@@ -32,7 +32,8 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 - [x] Create initial documentation
 - [x] Create module system framework
 - [x] Implement basic Steward functionality (issue #13)
-- [ ] Implement basic Controller functionality (issue #14)
+- [x] Implement basic Controller functionality (issue #14)
+- [ ] Validate Steward-Controller Integration and End-to-End Communication (issue #28)
 
 #### v0.2.0 (Alpha)
 
