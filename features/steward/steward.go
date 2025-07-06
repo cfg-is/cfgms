@@ -35,7 +35,7 @@ import (
 	"sync"
 	"time"
 	
-	commonpb "github.com/cfgis/cfgms/api/proto/common"
+	commonpb "github.com/cfgis/cfgms/api/proto"
 	"github.com/cfgis/cfgms/features/steward/client"
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"

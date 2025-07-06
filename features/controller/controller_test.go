@@ -7,8 +7,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"cfgms/features/controller/config"
-	testutil "cfgms/pkg/testing"
+	"github.com/cfgis/cfgms/features/controller/config"
+	testutil "github.com/cfgis/cfgms/pkg/testing"
 )
 
 func TestControllerCreation(t *testing.T) {
@@ -60,9 +60,10 @@ func TestControllerLifecycle(t *testing.T) {
 
 	// Verify start logged properly
 	infoLogs := logger.GetLogs("info")
-	assert.GreaterOrEqual(t, len(infoLogs), 2)
+	assert.GreaterOrEqual(t, len(infoLogs), 3)
 	assert.Equal(t, "Starting controller", infoLogs[0].Message)
-	assert.Equal(t, "Controller started successfully", infoLogs[1].Message)
+	assert.Equal(t, "Controller server started", infoLogs[1].Message)
+	assert.Equal(t, "Controller started successfully", infoLogs[2].Message)
 
 	// Stop the controller
 	err = ctrl.Stop(ctx)
@@ -70,11 +71,13 @@ func TestControllerLifecycle(t *testing.T) {
 
 	// Verify stop logged properly
 	infoLogs = logger.GetLogs("info")
-	assert.GreaterOrEqual(t, len(infoLogs), 4)
+	assert.GreaterOrEqual(t, len(infoLogs), 6)
 	assert.Equal(t, "Starting controller", infoLogs[0].Message)
-	assert.Equal(t, "Controller started successfully", infoLogs[1].Message)
-	assert.Equal(t, "Stopping controller", infoLogs[2].Message)
-	assert.Equal(t, "Controller stopped successfully", infoLogs[3].Message)
+	assert.Equal(t, "Controller server started", infoLogs[1].Message)
+	assert.Equal(t, "Controller started successfully", infoLogs[2].Message)
+	assert.Equal(t, "Stopping controller", infoLogs[3].Message)
+	assert.Equal(t, "Shutting down controller server", infoLogs[4].Message)
+	assert.Equal(t, "Controller stopped successfully", infoLogs[5].Message)
 }
 
 func TestModuleRegistration(t *testing.T) {

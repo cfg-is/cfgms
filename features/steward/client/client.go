@@ -39,7 +39,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
 
-	commonpb "github.com/cfgis/cfgms/api/proto/common"
+	commonpb "github.com/cfgis/cfgms/api/proto"
 	controllerpb "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/pkg/logging"
 )

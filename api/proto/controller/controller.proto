@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package cfgms.api.controller;
 
-option go_package = "cfgms/pkg/api/proto/controller";
+option go_package = "github.com/cfgis/cfgms/pkg/api/proto/controller";
 
 import "common/common.proto";
 import "common/auth.proto";

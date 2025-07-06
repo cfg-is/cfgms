@@ -9,8 +9,9 @@ func (m *RegisterRequest) Validate() error {
 	if m.InitialDna == nil {
 		return fmt.Errorf("initial DNA cannot be nil")
 	}
-	if err := m.InitialDna.Validate(); err != nil {
-		return fmt.Errorf("invalid DNA: %w", err)
+	// Basic DNA validation
+	if m.InitialDna.Id == "" {
+		return fmt.Errorf("DNA ID cannot be empty")
 	}
 	if m.Credentials == nil {
 		return fmt.Errorf("credentials cannot be nil")

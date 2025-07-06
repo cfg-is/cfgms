@@ -1,4 +1,4 @@
-package proto
+package common
 
 // Validator interface for proto messages that support validation
 type Validator interface {

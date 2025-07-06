@@ -3,7 +3,7 @@ package testing
 import (
 	"sync"
 
-	"cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // MockLogger provides a mock implementation of logging.Logger for testing
