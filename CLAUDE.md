@@ -234,6 +234,47 @@ The module system framework has been implemented and provides:
 
 All modules (directory, file, firewall, package) implement the ConfigState interface and work seamlessly in both standalone and controller-managed modes.
 
+## Project Management
+
+### GitHub Project
+The CFGMS development is managed through the **"CFGMS Development Roadmap"** GitHub Project at:
+https://github.com/orgs/cfg-is/projects/1
+
+This project board provides:
+- **Roadmap Tracking**: Visual progress of major milestones and features
+- **Issue Management**: Centralized tracking of bugs, features, and tasks
+- **Sprint Planning**: Organized development cycles with clear priorities
+- **Status Visibility**: Real-time project status and completion metrics
+
+All development work should be tracked through this project board to ensure coordination and visibility across the team.
+
+### Project Status Flow
+The project follows a structured milestone progression workflow:
+
+**Status Definitions:**
+- **Done**: Completed work items
+- **In Progress**: Current active development
+- **Todo**: Next milestone items ready to start immediately
+- **Backlog**: Future milestone items planned but not immediate
+
+**Milestone Transitions:**
+1. **Milestone Completion**: When a milestone (e.g., v0.1.0) is completed:
+   - Move next milestone issues (e.g., v0.2.0) from "Backlog" → "Todo"
+   - Create following milestone issues (e.g., v0.3.0) and place in "Backlog"
+
+2. **Benefits of This Approach**:
+   - Clear focus on current priorities without scope creep
+   - Manageable scope with only one milestone in "Todo" at a time
+   - Continuous planning maintains forward momentum
+   - Always one milestone ahead in planning for roadmap adjustments
+
+**Current State:**
+- **v0.1.0**: Issue #28 "In Progress" (current focus)
+- **v0.2.0**: Issues #29-32 "Backlog" (planned next)
+- **v0.3.0**: Not created yet (will be created during v0.2.0 work)
+
+This workflow ensures sustainable development rhythm with clear prioritization and forward visibility.
+
 ## Dependencies
 - `github.com/spf13/cobra` - CLI framework
 - `github.com/stretchr/testify` - Testing utilities

@@ -6,6 +6,16 @@ CFGMS is a modern configuration management system designed with resilience, secu
 
 The project is in early development. Core architecture and structure have been implemented, but many components are still being developed.
 
+### Project Management
+Development progress is tracked through the **"CFGMS Development Roadmap"** GitHub Project:
+https://github.com/orgs/cfg-is/projects/1
+
+This project board provides real-time visibility into:
+- Current development priorities and milestones
+- Issue tracking and feature requests
+- Sprint planning and task organization
+- Overall project completion status
+
 ## Development
 
 CFGMS follows the GitFlow branching model:
