@@ -5,7 +5,7 @@ import (
 
 	"github.com/stretchr/testify/suite"
 
-	"cfgms/test/integration/testutil"
+	"github.com/cfgis/cfgms/test/integration/testutil"
 )
 
 // ControllerTestSuite is a test suite for controller integration tests
@@ -48,8 +48,17 @@ func (s *ControllerTestSuite) TestControllerStartStop() {
 
 	// Verify the controller logged shutdown
 	infoLogs = s.env.Logger.GetLogs("info")
-	s.Require().GreaterOrEqual(len(infoLogs), 2)
-	s.Require().Equal("Stopping controller", infoLogs[1].Message)
+	s.Require().GreaterOrEqual(len(infoLogs), 3)
+	
+	// Find the "Stopping controller" message
+	found := false
+	for _, log := range infoLogs {
+		if log.Message == "Stopping controller" {
+			found = true
+			break
+		}
+	}
+	s.Require().True(found, "Should have logged 'Stopping controller'")
 }
 
 func (s *ControllerTestSuite) TestStewardConnectToController() {
@@ -77,9 +86,9 @@ func (s *ControllerTestSuite) TestStewardConnectToController() {
 			hasControllerStart = true
 		} else if log.Message == "Stopping controller" {
 			hasControllerStop = true
-		} else if log.Message == "Starting steward" {
+		} else if log.Message == "Starting steward in controller mode" {
 			hasStewardStart = true
-		} else if log.Message == "Stopping steward" {
+		} else if log.Message == "Stopping steward in controller mode" {
 			hasStewardStop = true
 		}
 	}

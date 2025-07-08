@@ -98,7 +98,13 @@ func (c *Controller) Stop(ctx context.Context) error {
 		return err
 	}
 
-	close(c.shutdown)
+	// Close shutdown channel only if not already closed
+	select {
+	case <-c.shutdown:
+		// Already closed
+	default:
+		close(c.shutdown)
+	}
 	c.running = false
 	c.logger.Info("Controller stopped successfully")
 	return nil

@@ -120,7 +120,13 @@ func (h *HealthMonitor) Start(ctx context.Context) {
 	defer ticker.Stop()
 	defer func() {
 		h.running.Store(false)
-		close(h.stopped)
+		// Close stopped channel only if not already closed
+		select {
+		case <-h.stopped:
+			// Already closed
+		default:
+			close(h.stopped)
+		}
 	}()
 
 	h.logger.Info("Health monitor started")
@@ -142,7 +148,13 @@ func (h *HealthMonitor) Start(ctx context.Context) {
 // Stop ends the health monitoring process
 func (h *HealthMonitor) Stop() {
 	if h.running.Load() {
-		close(h.stop)
+		// Close stop channel only if not already closed
+		select {
+		case <-h.stop:
+			// Already closed
+		default:
+			close(h.stop)
+		}
 		<-h.stopped
 	}
 }

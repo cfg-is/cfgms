@@ -351,7 +351,12 @@ func (s *Steward) Stop(ctx context.Context) error {
 	}
 	
 	// Signal shutdown to all background goroutines
-	close(s.shutdown)
+	select {
+	case <-s.shutdown:
+		// Already closed
+	default:
+		close(s.shutdown)
+	}
 	
 	// Stop health monitoring
 	s.healthCheck.Stop()

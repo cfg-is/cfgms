@@ -10,10 +10,10 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"cfgms/features/controller"
-	"cfgms/features/controller/config"
-	"cfgms/features/steward"
-	testpkg "cfgms/pkg/testing"
+	"github.com/cfgis/cfgms/features/controller"
+	"github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/steward"
+	testpkg "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // TestEnv provides a test environment for integration testing
@@ -47,6 +47,10 @@ func NewTestEnv(t *testing.T) *TestEnv {
 
 	// Create cert directory
 	err = os.MkdirAll(controllerCfg.CertPath, 0755)
+	require.NoError(t, err)
+
+	// Generate test certificates
+	err = GenerateTestCertificates(controllerCfg.CertPath)
 	require.NoError(t, err)
 
 	// Create controller data directory
@@ -123,4 +127,16 @@ func (e *TestEnv) Reset() {
 // GetContext returns the context for the test environment
 func (e *TestEnv) GetContext() context.Context {
 	return e.ctx
+}
+
+// VerifyCertificatesExist verifies that all required certificates are present
+func (e *TestEnv) VerifyCertificatesExist() {
+	certFiles := []string{"ca.crt", "server.crt", "server.key", "client.crt", "client.key"}
+	
+	for _, certFile := range certFiles {
+		certPath := filepath.Join(e.ControllerCfg.CertPath, certFile)
+		if _, err := os.Stat(certPath); os.IsNotExist(err) {
+			e.T.Fatalf("Certificate file missing: %s", certPath)
+		}
+	}
 }

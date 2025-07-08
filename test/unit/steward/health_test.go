@@ -7,8 +7,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"cfgms/features/steward"
-	"cfgms/test/unit"
+	"github.com/cfgis/cfgms/features/steward"
+	"github.com/cfgis/cfgms/test/unit"
 )
 
 func TestHealthMonitorCreation(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sync"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -17,6 +18,7 @@ import (
 
 // Server represents the gRPC server component of the controller
 type Server struct {
+	mu                sync.RWMutex
 	cfg               *config.Config
 	logger            logging.Logger
 	grpcServer        *grpc.Server
@@ -41,6 +43,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 // Start initializes and starts the gRPC server
 func (s *Server) Start() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	
 	// Create listener
 	listener, err := net.Listen("tcp", s.cfg.ListenAddr)
 	if err != nil {
@@ -76,8 +81,14 @@ func (s *Server) Start() error {
 	
 	// Start serving in a goroutine
 	go func() {
-		if err := s.grpcServer.Serve(listener); err != nil {
-			s.logger.Error("gRPC server failed", "error", err)
+		s.mu.RLock()
+		server := s.grpcServer
+		s.mu.RUnlock()
+		
+		if server != nil {
+			if err := server.Serve(listener); err != nil {
+				s.logger.Error("gRPC server failed", "error", err)
+			}
 		}
 	}()
 	
@@ -87,6 +98,9 @@ func (s *Server) Start() error {
 
 // Stop gracefully shuts down the server
 func (s *Server) Stop() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	
 	s.logger.Info("Shutting down controller server")
 	
 	if s.grpcServer != nil {
