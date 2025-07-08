@@ -182,12 +182,14 @@ func (c *Client) Disconnect() error {
 		err := c.conn.Close()
 		c.conn = nil
 		c.client = nil
-		c.connected = false
 		
 		if err != nil {
 			return fmt.Errorf("failed to close connection: %w", err)
 		}
 	}
+
+	// Always set connected to false, even if conn was nil
+	c.connected = false
 
 	c.logger.Info("Disconnected from controller")
 	return nil

@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 	
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/testutil"
 )
 
 func TestNew(t *testing.T) {
@@ -16,32 +17,40 @@ func TestNew(t *testing.T) {
 	tests := []struct {
 		name           string
 		controllerAddr string
-		certPath       string
+		useCerts       bool
 		expectError    bool
 	}{
 		{
 			name:           "valid parameters",
 			controllerAddr: "localhost:8080",
-			certPath:       "/tmp/certs",
+			useCerts:       true,
 			expectError:    false,
 		},
 		{
 			name:           "missing controller address",
 			controllerAddr: "",
-			certPath:       "/tmp/certs",
+			useCerts:       true,
 			expectError:    true,
 		},
 		{
 			name:           "missing cert path",
 			controllerAddr: "localhost:8080",
-			certPath:       "",
+			useCerts:       false,
 			expectError:    true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			client, err := New(tt.controllerAddr, tt.certPath, logger)
+			var certPath string
+			var cleanup func()
+			
+			if tt.useCerts {
+				certPath, cleanup = testutil.SetupTestCerts(t)
+				t.Cleanup(cleanup)
+			}
+			
+			client, err := New(tt.controllerAddr, certPath, logger)
 			
 			if tt.expectError {
 				assert.Error(t, err)
@@ -50,7 +59,7 @@ func TestNew(t *testing.T) {
 				assert.NoError(t, err)
 				assert.NotNil(t, client)
 				assert.Equal(t, tt.controllerAddr, client.controllerAddr)
-				assert.Equal(t, tt.certPath, client.certPath)
+				assert.Equal(t, certPath, client.certPath)
 				assert.False(t, client.IsConnected())
 				assert.False(t, client.IsRegistered())
 			}
@@ -61,8 +70,12 @@ func TestNew(t *testing.T) {
 func TestClientState(t *testing.T) {
 	logger := logging.NewLogger("debug")
 	
-	// Note: This test doesn't actually connect since we don't have certificates
-	client, err := New("localhost:8080", "/tmp/certs", logger)
+	// Set up test certificates
+	certPath, cleanup := testutil.SetupTestCerts(t)
+	t.Cleanup(cleanup)
+	
+	// Note: This test doesn't actually connect since we don't have a running server
+	client, err := New("localhost:8080", certPath, logger)
 	require.NoError(t, err)
 	
 	// Test initial state
@@ -87,7 +100,11 @@ func TestClientState(t *testing.T) {
 func TestDisconnect(t *testing.T) {
 	logger := logging.NewLogger("debug")
 	
-	client, err := New("localhost:8080", "/tmp/certs", logger)
+	// Set up test certificates
+	certPath, cleanup := testutil.SetupTestCerts(t)
+	t.Cleanup(cleanup)
+	
+	client, err := New("localhost:8080", certPath, logger)
 	require.NoError(t, err)
 	
 	// Test disconnect when not connected (should not error)

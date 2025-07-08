@@ -44,7 +44,8 @@ func TestHealthMonitorStandalone(t *testing.T) {
 	
 	metrics = monitor.GetMetrics()
 	assert.Equal(t, 2, metrics.TaskCount)
-	assert.Equal(t, 62*time.Millisecond, metrics.AverageTaskLatency)
+	expectedLatency := float64(50+75) / 2 * float64(time.Millisecond)
+	assert.InDelta(t, expectedLatency, float64(metrics.AverageTaskLatency), float64(time.Millisecond))
 	
 	// Test status reset
 	monitor.ResetMetrics()
