@@ -27,24 +27,12 @@ CFGMS follows the GitFlow branching model:
 
 ## Next Steps
 
-- [ ] Implement the testing framework
-  - [ ] Write unit tests for the controller components
-  - [ ] Write unit tests for the steward components
-  - [ ] Expand integration tests
+For current development priorities and detailed roadmap information, please refer to:
 
-- [ ] Implement secure communication layers
-  - [ ] Set up gRPC with mTLS for internal steward communication
-  - [ ] Implement REST API with HTTPS and API keys
-  - [ ] Add optional OpenZiti integration for zero-trust networking
-  - [ ] Implement certificate management for steward authentication
+- **Roadmap**: See [docs/product/roadmap.md](docs/product/roadmap.md) for the complete development roadmap and version planning
+- **Project Management**: Visit the [CFGMS Development Roadmap](https://github.com/orgs/cfg-is/projects/1) GitHub Project for real-time progress tracking and task management
 
-- [ ] Create the first basic module
-  - [ ] Implement a simple file management module as a proof of concept
-  - [ ] Validate the module interface design
-
-- [ ] Enhance the Steward component
-  - [ ] Implement health monitoring and self-healing capabilities
-  - [ ] Add support for offline operation
+The roadmap provides detailed milestone planning from v0.1.0 through v3.5.0+, including current development phases, feature priorities, and architectural concepts that guide the project's evolution.
 
 ## Security
 
