@@ -1,9 +1,7 @@
 package steward
 
 import (
-	"context"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -41,7 +39,7 @@ func TestStewardControllerMode(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to create controller client")
 }
 
-func TestHealthMonitor(t *testing.T) {
+func TestHealthMonitorIntegration(t *testing.T) {
 	logger := logging.NewLogger("debug")
 	
 	// Test health monitor directly

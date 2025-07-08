@@ -7,7 +7,7 @@
 package steward
 
 import (
-	common "cfgms/pkg/api/proto/common"
+	common "github.com/cfgis/cfgms/api/proto"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"

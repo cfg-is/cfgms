@@ -72,6 +72,9 @@ func TestGracefulShutdown(t *testing.T) {
 			// TODO: Start server
 			// TODO: Trigger shutdown
 			// TODO: Verify shutdown behavior
+			
+			// Use ctx to avoid unused variable error
+			_ = ctx
 		})
 	}
 }

@@ -3,7 +3,7 @@ package controller
 import (
 	"testing"
 
-	"cfgms/pkg/api/proto/common"
+	common "github.com/cfgis/cfgms/api/proto"
 
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/protobuf/types/known/timestamppb"

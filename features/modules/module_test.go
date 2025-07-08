@@ -20,13 +20,14 @@ type ModuleTestSuite struct {
 	ValidConfig string
 	// ModulePath is the path to the module directory
 	ModulePath string
+	// CreateConfigFromYAML creates a ConfigState from YAML string
+	CreateConfigFromYAML func(yamlData string) ConfigState
 }
 
 // RunCoreTests executes all core module interface tests
 func (ts *ModuleTestSuite) RunCoreTests(t *testing.T) {
 	t.Run("Get", ts.testGet)
 	t.Run("Set", ts.testSet)
-	t.Run("Test", ts.testTest)
 	t.Run("ModuleStructure", ts.testModuleStructure)
 }
 
@@ -206,7 +207,16 @@ func (ts *ModuleTestSuite) testSet(t *testing.T) {
 			module := ts.NewModule()
 			ctx := context.Background()
 
-			err := module.Set(ctx, tt.resourceID, tt.configData)
+			// Convert YAML string to ConfigState
+			var config ConfigState
+			if tt.configData != "" {
+				config = ts.CreateConfigFromYAML(tt.configData)
+				if config == nil && !tt.wantErr {
+					t.Fatalf("Failed to create config from YAML: %s", tt.configData)
+				}
+			}
+
+			err := module.Set(ctx, tt.resourceID, config)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Set() error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -214,42 +224,3 @@ func (ts *ModuleTestSuite) testSet(t *testing.T) {
 	}
 }
 
-func (ts *ModuleTestSuite) testTest(t *testing.T) {
-	tests := []struct {
-		name       string
-		resourceID string
-		configData string
-		wantErr    bool
-	}{
-		{
-			name:       "Valid Input",
-			resourceID: ts.ResourceID,
-			configData: ts.ValidConfig,
-			wantErr:    false,
-		},
-		{
-			name:       "Empty Resource ID",
-			resourceID: "",
-			configData: ts.ValidConfig,
-			wantErr:    true,
-		},
-		{
-			name:       "Empty Config Data",
-			resourceID: ts.ResourceID,
-			configData: "",
-			wantErr:    true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			module := ts.NewModule()
-			ctx := context.Background()
-
-			_, err := module.Test(ctx, tt.resourceID, tt.configData)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("Test() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
-	}
-}

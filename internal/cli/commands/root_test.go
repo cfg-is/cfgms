@@ -18,13 +18,13 @@ func TestNewRootCommand(t *testing.T) {
 			name:     "no args shows help",
 			args:     []string{},
 			wantErr:  false,
-			contains: "Command line interface for CFGMS",
+			contains: "A complete command line interface for managing the Configuration Management System",
 		},
 		{
 			name:     "help flag shows help",
 			args:     []string{"--help"},
 			wantErr:  false,
-			contains: "Command line interface for CFGMS",
+			contains: "A complete command line interface for managing the Configuration Management System",
 		},
 		{
 			name:     "invalid command returns error",
@@ -72,7 +72,7 @@ func TestSubcommands(t *testing.T) {
 			name:     "agent command exists",
 			command:  "agent",
 			wantErr:  false,
-			contains: "Manage CFGMS agents",
+			contains: "Manage CFGMS agent lifecycle and operations",
 		},
 		{
 			name:     "controller command exists",
