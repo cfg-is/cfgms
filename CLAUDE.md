@@ -203,23 +203,43 @@ The basic controller functionality has been **fully implemented**:
 - **Thread-safe Operations** with comprehensive error handling and logging
 - **Production-ready Architecture** ready for steward connections
 
-### 🔄 NEXT - Steward-Controller Integration Validation (Issue #28)
-**Current Priority**: Validate end-to-end functionality between steward and controller components to complete v0.1.0 milestone.
+### ✅ COMPLETED - Steward-Controller Integration Validation (Issue #28)
+The steward-controller integration has been **fully validated** and v0.1.0 is complete:
+- [x] Fix integration test import paths
+- [x] Validate steward registration with controller
+- [x] Test steward heartbeat processing
+- [x] Verify DNA synchronization
+- [x] Test mTLS authentication flow
+- [x] Validate configuration retrieval
+- [x] End-to-end communication testing
+- [x] Test multiple steward scenarios
+- [x] Validate error handling and resilience
 
-**Requirements:**
-- [ ] Fix integration test import paths
-- [ ] Validate steward registration with controller
-- [ ] Test steward heartbeat processing
-- [ ] Verify DNA synchronization
-- [ ] Test mTLS authentication flow
-- [ ] Validate configuration retrieval
-- [ ] End-to-end communication testing
-- [ ] Test multiple steward scenarios
-- [ ] Validate error handling and resilience
+**Key Features Delivered:**
+- **Complete Integration Testing** with proper certificate setup and cleanup
+- **End-to-End Communication** between steward and controller components
+- **Production-Ready mTLS Authentication** with comprehensive validation
+- **Robust Error Handling** and resilience testing across multiple scenarios
 
-**Dependencies:** Basic Steward Core ✅, Basic Controller Core ✅
+### 🔄 NEXT - v0.2.0 Critical Core & Early Multi-Tenancy/Automation
+**Current Priority**: Begin v0.2.0 development focusing on critical core functionality and early multi-tenancy features.
 
-**GitHub Issue:** https://github.com/cfg-is/cfgms/issues/28
+**v0.2.0 Requirements (from roadmap):**
+- [ ] Implement configuration data flow
+- [ ] Implement basic module interface
+- [ ] Implement configuration validation
+- [ ] Implement basic RBAC/ABAC
+- [ ] Implement certificate management
+- [ ] Create basic API endpoints
+- [ ] Implement configuration inheritance
+- [ ] Add basic monitoring capabilities
+- [ ] Implement Basic Multi-tenancy
+- [ ] Implement Basic Script Execution Capabilities
+- [ ] Implement Workflow Engine (Basic)
+
+**Dependencies:** v0.1.0 Complete ✅
+
+**Reference:** See `docs/product/roadmap.md` for detailed v0.2.0 planning
 
 ### 🎯 Module System Foundation (Issue #17 - COMPLETED ✅)
 The module system framework has been implemented and provides:
@@ -269,11 +289,98 @@ The project follows a structured milestone progression workflow:
    - Always one milestone ahead in planning for roadmap adjustments
 
 **Current State:**
-- **v0.1.0**: Issue #28 "In Progress" (current focus)
-- **v0.2.0**: Issues #29-32 "Backlog" (planned next)
-- **v0.3.0**: Not created yet (will be created during v0.2.0 work)
+- **v0.1.0**: Complete ✅ (Issue #28 Done)
+- **v0.2.0**: Issues #29-39 "Todo" (current focus)
+- **v0.3.0**: Issues #40-47 "Backlog" (planned next)
 
 This workflow ensures sustainable development rhythm with clear prioritization and forward visibility.
+
+### GitHub CLI Project Management
+
+The project uses GitHub CLI (`gh`) for project management automation. Here are the essential commands and patterns:
+
+#### Project Information
+```bash
+# List all projects in the organization
+gh project list --owner cfg-is
+
+# Get project field information (including status options)
+gh project field-list PROJECT_NUMBER --owner cfg-is --format json
+
+# Example output shows Status field with options:
+# {"id":"PVTSSF_...", "name":"Status", "options":[
+#   {"id":"0e6b51d0","name":"Backlog"},
+#   {"id":"f75ad846","name":"Todo"}, 
+#   {"id":"47fc9ee4","name":"In Progress"},
+#   {"id":"98236657","name":"Done"}
+# ]}
+```
+
+#### Issue Management
+```bash
+# List open issues with JSON output
+gh issue list --repo cfg-is/cfgms --state open --limit 50 --json number,title,labels
+
+# Add issues to project by URL
+gh project item-add PROJECT_NUMBER --owner cfg-is --url "https://github.com/cfg-is/cfgms/issues/ISSUE_NUMBER"
+
+# Add multiple issues in batch
+for i in {33..39}; do 
+  gh project item-add 1 --owner cfg-is --url "https://github.com/cfg-is/cfgms/issues/$i"
+done
+```
+
+#### Project Item Operations
+```bash
+# List project items with details
+gh project item-list PROJECT_NUMBER --owner cfg-is --format json --limit 50
+
+# Filter project items by issue number
+gh project item-list 1 --owner cfg-is --format json --limit 50 | \
+  jq '.items[] | select(.content.number >= 29 and .content.number <= 39)'
+
+# Get specific item details (ID, number, title)
+gh project item-list 1 --owner cfg-is --format json --limit 50 | \
+  jq '.items[] | {id, number: .content.number, title: .content.title}'
+```
+
+#### Status Updates
+```bash
+# Update item status (requires project-id, item-id, field-id, and option-id)
+gh project item-edit \
+  --project-id PROJECT_ID \
+  --id ITEM_ID \
+  --field-id FIELD_ID \
+  --single-select-option-id OPTION_ID
+
+# Example: Move issue to "Todo" status
+gh project item-edit \
+  --project-id PVT_kwDOCrV4cc4A18Ip \
+  --id PVTI_lADOCrV4cc4A18IpzgcSU0g \
+  --field-id PVTSSF_lADOCrV4cc4A18IpzgrVDWc \
+  --single-select-option-id f75ad846
+```
+
+#### Important Notes
+- **Project ID Format**: Use the full project ID (e.g., `PVT_kwDOCrV4cc4A18Ip`), not just the number
+- **Item IDs**: Each project item has a unique ID that must be obtained from item-list command
+- **Field IDs**: Status field ID is consistent but must be retrieved from field-list
+- **Option IDs**: Status options (Backlog, Todo, In Progress, Done) have specific IDs
+- **Batch Operations**: Use shell loops and `&&` operators for multiple updates
+- **Error Handling**: Always verify IDs exist before attempting updates
+
+#### Status Option IDs (for CFGMS project)
+- **Backlog**: `0e6b51d0`
+- **Todo**: `f75ad846` 
+- **In Progress**: `47fc9ee4`
+- **Done**: `98236657`
+
+#### Common Workflow
+1. Get project information and field IDs
+2. Add new issues to project if needed
+3. List project items to get item IDs
+4. Update item status using project-id, item-id, field-id, and option-id
+5. Verify changes with another item-list command
 
 ## Dependencies
 - `github.com/spf13/cobra` - CLI framework
