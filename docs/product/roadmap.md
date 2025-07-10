@@ -41,7 +41,7 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 - [x] Upgrade gRPC to the latest version and implement configuration push from controller (issue #48) - ✅ COMPLETED
 - [x] **BONUS**: DNA-based sync verification system - ✅ COMPLETED (advanced sync state verification with minimal bandwidth usage)
 - [x] Implement configuration validation (issue #34) - ✅ COMPLETED
-- [ ] Implement basic RBAC/ABAC (issue #31)
+- [x] Implement basic RBAC/ABAC (issue #31) - ✅ COMPLETED
 - [ ] Implement certificate management (issue #35)
 - [ ] Create basic API endpoints (issue #36)
 - [ ] Implement configuration inheritance (issue #37)
