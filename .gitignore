@@ -6,6 +6,11 @@ bin/
 *.so
 *.dylib
 
+# Project binaries (built from cmd/ directories)
+cfgctl
+controller
+steward
+
 # Test binary, built with 'go test -c'
 *.test
 
