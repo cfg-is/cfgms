@@ -29,7 +29,7 @@ import (
 
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	commonpb "github.com/cfgis/cfgms/api/proto"
+	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -85,10 +85,18 @@ func (c *Collector) Collect() (*commonpb.DNA, error) {
 	// Generate stable system ID from hardware characteristics
 	systemID := c.generateSystemID(attributes)
 
+	now := time.Now()
+	
 	dna := &commonpb.DNA{
 		Id:          systemID,
 		Attributes:  attributes,
-		LastUpdated: timestamppb.New(time.Now()),
+		LastUpdated: timestamppb.New(now),
+		
+		// Sync metadata (will be updated by steward with config info)
+		ConfigHash:      "", // Will be set when steward loads configuration
+		LastSyncTime:    timestamppb.New(now),
+		AttributeCount:  int32(len(attributes)),
+		SyncFingerprint: c.generateSyncFingerprint(systemID, attributes, ""),
 	}
 
 	c.logger.Info("System DNA collected", 
@@ -328,4 +336,39 @@ func CompareDNA(dna1, dna2 *commonpb.DNA) bool {
 	}
 	
 	return true
+}
+
+// generateSyncFingerprint creates a fingerprint for sync verification.
+//
+// This combines the system ID, number of attributes, and config hash into a single
+// fingerprint that can be used to quickly verify if DNA and configuration are in sync.
+func (c *Collector) generateSyncFingerprint(systemID string, attributes map[string]string, configHash string) string {
+	// Combine stable elements for sync verification
+	elements := []string{
+		systemID,
+		fmt.Sprintf("%d", len(attributes)),
+		configHash,
+	}
+	
+	// Generate SHA256 hash
+	data := strings.Join(elements, "|")
+	hash := sha256.Sum256([]byte(data))
+	
+	// Return first 12 characters for compact representation
+	return fmt.Sprintf("%x", hash[:6])
+}
+
+// UpdateSyncMetadata updates the sync-related fields in DNA.
+//
+// This should be called by the steward when configuration changes or when 
+// sync verification needs to be updated.
+func (c *Collector) UpdateSyncMetadata(dna *commonpb.DNA, configHash string) {
+	if dna == nil {
+		return
+	}
+	
+	dna.ConfigHash = configHash
+	dna.LastSyncTime = timestamppb.New(time.Now())
+	dna.AttributeCount = int32(len(dna.Attributes))
+	dna.SyncFingerprint = c.generateSyncFingerprint(dna.Id, dna.Attributes, configHash)
 }
