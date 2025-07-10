@@ -36,7 +36,7 @@ func (s *ControllerTestSuite) TearDownTest() {
 
 func (s *ControllerTestSuite) TestControllerStartStop() {
 	// Start the controller
-	s.env.Controller.Start(s.env.GetContext())
+	_ = s.env.Controller.Start(s.env.GetContext())
 
 	// Verify the controller logged startup
 	infoLogs := s.env.Logger.GetLogs("info")
@@ -44,7 +44,7 @@ func (s *ControllerTestSuite) TestControllerStartStop() {
 	s.Require().Equal("Starting controller", infoLogs[0].Message)
 
 	// Stop the controller
-	s.env.Controller.Stop(s.env.GetContext())
+	_ = s.env.Controller.Stop(s.env.GetContext())
 
 	// Verify the controller logged shutdown
 	infoLogs = s.env.Logger.GetLogs("info")

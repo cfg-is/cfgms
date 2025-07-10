@@ -2,7 +2,6 @@ package testutil
 
 import (
 	"context"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,6 +12,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller"
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/steward"
+	"github.com/cfgis/cfgms/features/steward/client"
 	testpkg "github.com/cfgis/cfgms/pkg/testing"
 )
 
@@ -31,7 +31,7 @@ type TestEnv struct {
 
 // NewTestEnv creates a new test environment
 func NewTestEnv(t *testing.T) *TestEnv {
-	tempDir, err := ioutil.TempDir("", "cfgms-test-")
+	tempDir, err := os.MkdirTemp("", "cfgms-test-")
 	require.NoError(t, err)
 
 	logger := testpkg.NewMockLogger(false)
@@ -91,10 +91,13 @@ func NewTestEnv(t *testing.T) *TestEnv {
 // Start starts the controller and steward in the test environment
 func (e *TestEnv) Start() {
 	// Start the controller
-	e.Controller.Start(e.ctx)
+	_ = e.Controller.Start(e.ctx)
+
+	// Update steward config with actual controller address
+	e.StewardCfg.ControllerAddr = e.Controller.GetListenAddr()
 
 	// Start the steward
-	e.Steward.Start(e.ctx)
+	_ = e.Steward.Start(e.ctx)
 
 	// Wait for components to initialize
 	time.Sleep(100 * time.Millisecond)
@@ -103,10 +106,10 @@ func (e *TestEnv) Start() {
 // Stop stops the controller and steward in the test environment
 func (e *TestEnv) Stop() {
 	// Stop the steward
-	e.Steward.Stop(e.ctx)
+	_ = e.Steward.Stop(e.ctx)
 
 	// Stop the controller
-	e.Controller.Stop(e.ctx)
+	_ = e.Controller.Stop(e.ctx)
 }
 
 // Cleanup cleans up the test environment
@@ -139,4 +142,11 @@ func (e *TestEnv) VerifyCertificatesExist() {
 			e.T.Fatalf("Certificate file missing: %s", certPath)
 		}
 	}
+}
+
+// CreateStewardClient creates a new steward client for testing
+func (e *TestEnv) CreateStewardClient() (*client.Client, error) {
+	// Use actual server address after binding (important for :0 ports)
+	actualAddr := e.Controller.GetListenAddr()
+	return client.New(actualAddr, e.ControllerCfg.CertPath, e.Logger)
 }
