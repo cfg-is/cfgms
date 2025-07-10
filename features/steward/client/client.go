@@ -29,8 +29,9 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -38,9 +39,11 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
-	commonpb "github.com/cfgis/cfgms/api/proto"
+	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	controllerpb "github.com/cfgis/cfgms/api/proto/controller"
+	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -58,8 +61,9 @@ type Client struct {
 	logger         logging.Logger
 
 	// gRPC connection and client
-	conn   *grpc.ClientConn
-	client controllerpb.ControllerClient
+	conn         *grpc.ClientConn
+	client       controllerpb.ControllerClient
+	configClient controllerpb.ConfigurationServiceClient
 
 	// Authentication state
 	credentials *commonpb.Credentials
@@ -73,6 +77,11 @@ type Client struct {
 	lastHeartbeat time.Time
 	heartbeatInterval time.Duration
 	heartbeatStop chan struct{}
+	
+	// Sync tracking
+	lastSyncFingerprint string
+	lastSyncTime        time.Time
+	isReconnection      bool
 	
 	// Health monitoring callback (optional)
 	healthCallback func(connected bool, success bool)
@@ -153,6 +162,7 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	c.conn = conn
 	c.client = controllerpb.NewControllerClient(conn)
+	c.configClient = controllerpb.NewConfigurationServiceClient(conn)
 	c.connected = true
 
 	c.logger.Info("Connected to controller successfully")
@@ -182,6 +192,7 @@ func (c *Client) Disconnect() error {
 		err := c.conn.Close()
 		c.conn = nil
 		c.client = nil
+		c.configClient = nil
 		
 		if err != nil {
 			return fmt.Errorf("failed to close connection: %w", err)
@@ -210,12 +221,22 @@ func (c *Client) Register(ctx context.Context, version string, dna *commonpb.DNA
 		return "", fmt.Errorf("not connected to controller")
 	}
 
-	c.logger.Info("Registering with controller", "version", version)
+	c.logger.Info("Registering with controller", 
+		"version", version, 
+		"is_reconnection", c.isReconnection,
+		"dna_id", dna.Id)
 
 	req := &controllerpb.RegisterRequest{
-		Version:     version,
-		InitialDna:  dna,
-		Credentials: c.credentials,
+		Version:      version,
+		InitialDna:   dna,
+		Credentials:  c.credentials,
+		IsReconnection: c.isReconnection,
+	}
+	
+	// Add sync verification data for reconnections
+	if c.isReconnection && c.lastSyncFingerprint != "" {
+		req.ExpectedSyncFingerprint = c.lastSyncFingerprint
+		req.LastKnownSync = timestamppb.New(c.lastSyncTime)
 	}
 
 	resp, err := c.client.AcceptRegistration(ctx, req)
@@ -230,7 +251,30 @@ func (c *Client) Register(ctx context.Context, version string, dna *commonpb.DNA
 	c.stewardID = resp.StewardId
 	c.token = resp.Token
 
-	c.logger.Info("Registered successfully", "steward_id", c.stewardID)
+	// Update sync tracking
+	if resp.SyncStatus != nil {
+		c.lastSyncFingerprint = resp.SyncStatus.SyncFingerprint
+		if resp.SyncStatus.LastSyncTime != nil {
+			c.lastSyncTime = resp.SyncStatus.LastSyncTime.AsTime()
+		}
+	}
+
+	c.logger.Info("Registered successfully", 
+		"steward_id", c.stewardID,
+		"in_sync", resp.SyncStatus != nil && resp.SyncStatus.IsInSync,
+		"requires_dna_resync", resp.RequiresDnaResync,
+		"requires_config_resync", resp.RequiresConfigResync)
+
+	// Handle required resyncs
+	if resp.RequiresDnaResync || resp.RequiresConfigResync {
+		c.logger.Warn("Server indicates resync required",
+			"dna_resync", resp.RequiresDnaResync,
+			"config_resync", resp.RequiresConfigResync,
+			"reason", resp.SyncStatus.Reason)
+		
+		// TODO: Trigger resync operations based on flags
+		// This would be handled by the calling steward
+	}
 
 	// Start heartbeat mechanism
 	go c.startHeartbeat()
@@ -408,7 +452,7 @@ func (c *Client) loadTLSCredentials() (credentials.TransportCredentials, error) 
 	}
 
 	// Load CA certificate
-	caCert, err := ioutil.ReadFile(filepath.Join(c.certPath, "ca.crt"))
+	caCert, err := os.ReadFile(filepath.Join(c.certPath, "ca.crt"))
 	if err != nil {
 		return nil, fmt.Errorf("failed to load CA certificate: %w", err)
 	}
@@ -434,7 +478,7 @@ func (c *Client) loadTLSCredentials() (credentials.TransportCredentials, error) 
 // structure required for authentication with the controller.
 func loadCredentials(certPath string) (*commonpb.Credentials, error) {
 	// Load client certificate
-	clientCertData, err := ioutil.ReadFile(filepath.Join(certPath, "client.crt"))
+	clientCertData, err := os.ReadFile(filepath.Join(certPath, "client.crt"))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read client certificate: %w", err)
 	}
@@ -446,4 +490,185 @@ func loadCredentials(certPath string) (*commonpb.Credentials, error) {
 		ClientId:    "steward-client",
 		Certificate: clientCertData,
 	}, nil
+}
+
+// GetConfiguration retrieves configuration from the controller.
+//
+// This method requests configuration from the controller for the registered steward.
+// Optionally, specific modules can be requested to filter the configuration.
+//
+// Returns the configuration and version, or an error if retrieval fails.
+func (c *Client) GetConfiguration(ctx context.Context, modules []string) (*config.StewardConfig, string, error) {
+	c.mu.RLock()
+	configClient := c.configClient
+	connected := c.connected
+	stewardID := c.stewardID
+	c.mu.RUnlock()
+
+	if !connected {
+		return nil, "", fmt.Errorf("not connected to controller")
+	}
+	if stewardID == "" {
+		return nil, "", fmt.Errorf("not registered with controller")
+	}
+
+	req := &controllerpb.ConfigRequest{
+		StewardId: stewardID,
+		Modules:   modules,
+	}
+
+	resp, err := configClient.GetConfiguration(ctx, req)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to get configuration: %w", err)
+	}
+
+	if resp.Status.Code != commonpb.Status_OK {
+		return nil, "", fmt.Errorf("configuration request failed: %s", resp.Status.Message)
+	}
+
+	// Parse the configuration
+	var stewardConfig config.StewardConfig
+	if err := json.Unmarshal(resp.Config, &stewardConfig); err != nil {
+		return nil, "", fmt.Errorf("failed to parse configuration: %w", err)
+	}
+
+	c.logger.Info("Configuration retrieved successfully", "version", resp.Version, "resources", len(stewardConfig.Resources))
+	return &stewardConfig, resp.Version, nil
+}
+
+// ReportConfigurationStatus reports the status of configuration execution to the controller.
+//
+// This method sends a status report to the controller about the execution of
+// configuration resources, including overall status and per-module details.
+//
+// Returns an error if the report fails to be sent or is rejected by the controller.
+func (c *Client) ReportConfigurationStatus(ctx context.Context, configVersion string, status commonpb.Status_Code, message string, moduleStatuses map[string]*controllerpb.ModuleStatus) error {
+	c.mu.RLock()
+	configClient := c.configClient
+	connected := c.connected
+	stewardID := c.stewardID
+	c.mu.RUnlock()
+
+	if !connected {
+		return fmt.Errorf("not connected to controller")
+	}
+	if stewardID == "" {
+		return fmt.Errorf("not registered with controller")
+	}
+
+	// Convert module statuses to slice
+	var modules []*controllerpb.ModuleStatus
+	for _, moduleStatus := range moduleStatuses {
+		modules = append(modules, moduleStatus)
+	}
+
+	req := &controllerpb.ConfigStatusReport{
+		StewardId:     stewardID,
+		ConfigVersion: configVersion,
+		Status: &commonpb.Status{
+			Code:    status,
+			Message: message,
+		},
+		Modules: modules,
+	}
+
+	resp, err := configClient.ReportConfigStatus(ctx, req)
+	if err != nil {
+		return fmt.Errorf("failed to report configuration status: %w", err)
+	}
+
+	if resp.Code != commonpb.Status_OK {
+		return fmt.Errorf("configuration status report rejected: %s", resp.Message)
+	}
+
+	c.logger.Debug("Configuration status reported successfully", "version", configVersion, "status", status)
+	return nil
+}
+
+// ValidateConfiguration validates a configuration with the controller.
+//
+// This method sends a configuration to the controller for validation
+// without actually applying it. Useful for pre-flight checks.
+//
+// Returns validation errors if any, or nil if the configuration is valid.
+func (c *Client) ValidateConfiguration(ctx context.Context, stewardConfig *config.StewardConfig, version string) ([]string, error) {
+	c.mu.RLock()
+	configClient := c.configClient
+	connected := c.connected
+	c.mu.RUnlock()
+
+	if !connected {
+		return nil, fmt.Errorf("not connected to controller")
+	}
+
+	// Marshal configuration
+	configData, err := json.Marshal(stewardConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal configuration: %w", err)
+	}
+
+	req := &controllerpb.ConfigValidationRequest{
+		Config:  configData,
+		Version: version,
+	}
+
+	resp, err := configClient.ValidateConfig(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to validate configuration: %w", err)
+	}
+
+	if resp.Status.Code != commonpb.Status_OK {
+		var errorMessages []string
+		for _, validationError := range resp.Errors {
+			errorMessages = append(errorMessages, fmt.Sprintf("%s: %s", validationError.Field, validationError.Message))
+		}
+		return errorMessages, fmt.Errorf("configuration validation failed: %s", resp.Status.Message)
+	}
+
+	c.logger.Debug("Configuration validation successful", "version", version)
+	return nil, nil
+}
+
+// SetReconnectionMode marks this client as a reconnection with previous sync state.
+//
+// This should be called before Register() when the steward is reconnecting
+// to the controller after a disconnect, to enable sync verification.
+func (c *Client) SetReconnectionMode(lastSyncFingerprint string, lastSyncTime time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	
+	c.isReconnection = true
+	c.lastSyncFingerprint = lastSyncFingerprint
+	c.lastSyncTime = lastSyncTime
+	
+	c.logger.Debug("Set reconnection mode", 
+		"fingerprint", lastSyncFingerprint,
+		"last_sync", lastSyncTime.Format(time.RFC3339))
+}
+
+// GetSyncStatus returns the current sync status information.
+//
+// This provides access to the latest sync fingerprint and timestamp
+// for persistence and reconnection scenarios.
+func (c *Client) GetSyncStatus() (string, time.Time) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	
+	return c.lastSyncFingerprint, c.lastSyncTime
+}
+
+// UpdateSyncState updates the client's sync tracking when DNA or config changes.
+//
+// This should be called by the steward when DNA is updated or configuration
+// changes to maintain accurate sync state.
+func (c *Client) UpdateSyncState(syncFingerprint string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	
+	c.lastSyncFingerprint = syncFingerprint
+	c.lastSyncTime = time.Now()
+	
+	c.logger.Debug("Updated sync state", 
+		"fingerprint", syncFingerprint,
+		"timestamp", c.lastSyncTime.Format(time.RFC3339))
 }
