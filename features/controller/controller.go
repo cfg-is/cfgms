@@ -6,6 +6,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/server"
+	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -136,4 +137,18 @@ func (c *Controller) GetModule(name string) (Module, error) {
 	}
 
 	return module, nil
+}
+
+// GetConfigurationService returns the configuration service instance
+func (c *Controller) GetConfigurationService() *service.ConfigurationService {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.server.GetConfigurationService()
+}
+
+// GetListenAddr returns the actual listen address after binding
+func (c *Controller) GetListenAddr() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.server.GetListenAddr()
 }

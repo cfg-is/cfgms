@@ -23,6 +23,7 @@ type Server struct {
 	logger            logging.Logger
 	grpcServer        *grpc.Server
 	controllerService *service.ControllerService
+	configService     *service.ConfigurationService
 }
 
 // New creates a new server instance
@@ -34,10 +35,14 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// Create the controller service
 	controllerService := service.NewControllerService(logger)
 	
+	// Create the configuration service
+	configService := service.NewConfigurationService(logger, controllerService)
+	
 	return &Server{
 		cfg:               cfg,
 		logger:            logger,
 		controllerService: controllerService,
+		configService:     configService,
 	}, nil
 }
 
@@ -52,10 +57,13 @@ func (s *Server) Start() error {
 		return fmt.Errorf("failed to listen on %s: %w", s.cfg.ListenAddr, err)
 	}
 	
+	// Update config with actual bound address (important for :0 ports)
+	s.cfg.ListenAddr = listener.Addr().String()
+	
 	// Configure TLS (if certificates are available)
 	var opts []grpc.ServerOption
-	certFile := s.cfg.CertPath + "server.crt"
-	keyFile := s.cfg.CertPath + "server.key"
+	certFile := s.cfg.CertPath + "/server.crt"
+	keyFile := s.cfg.CertPath + "/server.key"
 	
 	// Check if certificate files exist
 	if _, err := os.Stat(certFile); err == nil {
@@ -78,6 +86,7 @@ func (s *Server) Start() error {
 	
 	// Register services
 	controller.RegisterControllerServer(s.grpcServer, s.controllerService)
+	controller.RegisterConfigurationServiceServer(s.grpcServer, s.configService)
 	
 	// Start serving in a goroutine
 	go func() {
@@ -108,4 +117,18 @@ func (s *Server) Stop() error {
 	}
 	
 	return nil
+}
+
+// GetConfigurationService returns the configuration service instance
+func (s *Server) GetConfigurationService() *service.ConfigurationService {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.configService
+}
+
+// GetListenAddr returns the actual listen address after binding
+func (s *Server) GetListenAddr() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.cfg.ListenAddr
 } 

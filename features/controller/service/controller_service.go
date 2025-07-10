@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	proto "github.com/cfgis/cfgms/api/proto"
+	common "github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -26,7 +26,7 @@ type ControllerService struct {
 type StewardInfo struct {
 	ID              string
 	Version         string
-	DNA             *proto.DNA
+	DNA             *common.DNA
 	LastHeartbeat   time.Time
 	Status          string
 	Metrics         map[string]string
@@ -42,7 +42,7 @@ func NewControllerService(logger logging.Logger) *ControllerService {
 }
 
 // Authenticate handles authentication requests
-func (s *ControllerService) Authenticate(ctx context.Context, creds *proto.Credentials) (*proto.Token, error) {
+func (s *ControllerService) Authenticate(ctx context.Context, creds *common.Credentials) (*common.Token, error) {
 	s.logger.Info("Authentication request received", "cert_subject", creds.Certificate)
 	
 	// Basic authentication implementation
@@ -54,7 +54,7 @@ func (s *ControllerService) Authenticate(ctx context.Context, creds *proto.Crede
 	}
 	
 	s.logger.Info("Authentication successful", "token", token[:16]+"...")
-	return &proto.Token{
+	return &common.Token{
 		AccessToken: token,
 		ExpiresAt:   time.Now().Add(24 * time.Hour).Unix(),
 	}, nil
@@ -62,13 +62,47 @@ func (s *ControllerService) Authenticate(ctx context.Context, creds *proto.Crede
 
 // AcceptRegistration handles steward registration requests
 func (s *ControllerService) AcceptRegistration(ctx context.Context, req *controller.RegisterRequest) (*controller.RegisterResponse, error) {
-	s.logger.Info("Registration request received", "version", req.Version)
+	s.logger.Info("Registration request received", 
+		"version", req.Version, 
+		"is_reconnection", req.IsReconnection,
+		"steward_dna_id", req.InitialDna.Id)
 	
-	// Generate a unique steward ID
-	stewardID, err := s.generateStewardID()
-	if err != nil {
-		s.logger.Error("Failed to generate steward ID", "error", err)
-		return nil, fmt.Errorf("registration failed: %w", err)
+	var stewardID string
+	var syncStatus *common.SyncStatus
+	var requiresDNAResync, requiresConfigResync bool
+	
+	// Handle reconnection vs new registration
+	if req.IsReconnection {
+		// For reconnections, try to find existing steward by DNA ID
+		if existingSteward := s.findStewardByDNAId(req.InitialDna.Id); existingSteward != nil {
+			stewardID = existingSteward.ID
+			s.logger.Info("Reconnection detected", "steward_id", stewardID)
+			
+			// Verify sync status
+			syncStatus, requiresDNAResync, requiresConfigResync = s.verifySyncStatus(existingSteward, req)
+		} else {
+			s.logger.Warn("Reconnection claimed but no existing steward found", "dna_id", req.InitialDna.Id)
+			// Treat as new registration
+			req.IsReconnection = false
+		}
+	}
+	
+	if !req.IsReconnection {
+		// Generate a unique steward ID for new registration
+		var err error
+		stewardID, err = s.generateStewardID()
+		if err != nil {
+			s.logger.Error("Failed to generate steward ID", "error", err)
+			return nil, fmt.Errorf("registration failed: %w", err)
+		}
+		
+		// For new registrations, sync is considered good initially
+		syncStatus = &common.SyncStatus{
+			LastSyncTime:    req.InitialDna.LastSyncTime,
+			SyncFingerprint: req.InitialDna.SyncFingerprint,
+			IsInSync:        true,
+			Reason:          "New registration",
+		}
 	}
 	
 	// Generate authentication token
@@ -78,7 +112,7 @@ func (s *ControllerService) AcceptRegistration(ctx context.Context, req *control
 		return nil, fmt.Errorf("registration failed: %w", err)
 	}
 	
-	// Store steward information
+	// Store/update steward information
 	s.mu.Lock()
 	s.stewards[stewardID] = &StewardInfo{
 		ID:            stewardID,
@@ -91,23 +125,30 @@ func (s *ControllerService) AcceptRegistration(ctx context.Context, req *control
 	}
 	s.mu.Unlock()
 	
-	s.logger.Info("Steward registered successfully", "steward_id", stewardID, "version", req.Version)
+	s.logger.Info("Steward registration completed", 
+		"steward_id", stewardID, 
+		"version", req.Version,
+		"requires_dna_resync", requiresDNAResync,
+		"requires_config_resync", requiresConfigResync)
 	
 	return &controller.RegisterResponse{
 		StewardId: stewardID,
-		Status: &proto.Status{
-			Code:    proto.Status_OK,
+		Status: &common.Status{
+			Code:    common.Status_OK,
 			Message: "Registration successful",
 		},
-		Token: &proto.Token{
+		Token: &common.Token{
 			AccessToken: token,
 			ExpiresAt:   time.Now().Add(24 * time.Hour).Unix(),
 		},
+		SyncStatus:          syncStatus,
+		RequiresDnaResync:   requiresDNAResync,
+		RequiresConfigResync: requiresConfigResync,
 	}, nil
 }
 
 // ProcessHeartbeat handles heartbeat requests from stewards
-func (s *ControllerService) ProcessHeartbeat(ctx context.Context, req *controller.HeartbeatRequest) (*proto.Status, error) {
+func (s *ControllerService) ProcessHeartbeat(ctx context.Context, req *controller.HeartbeatRequest) (*common.Status, error) {
 	s.logger.Debug("Heartbeat received", "steward_id", req.StewardId, "status", req.Status)
 	
 	s.mu.Lock()
@@ -116,8 +157,8 @@ func (s *ControllerService) ProcessHeartbeat(ctx context.Context, req *controlle
 	steward, exists := s.stewards[req.StewardId]
 	if !exists {
 		s.logger.Warn("Heartbeat from unknown steward", "steward_id", req.StewardId)
-		return &proto.Status{
-			Code:    proto.Status_NOT_FOUND,
+		return &common.Status{
+			Code:    common.Status_NOT_FOUND,
 			Message: "Steward not found",
 		}, nil
 	}
@@ -129,14 +170,14 @@ func (s *ControllerService) ProcessHeartbeat(ctx context.Context, req *controlle
 	
 	s.logger.Debug("Heartbeat processed successfully", "steward_id", req.StewardId)
 	
-	return &proto.Status{
-		Code:    proto.Status_OK,
+	return &common.Status{
+		Code:    common.Status_OK,
 		Message: "Heartbeat processed",
 	}, nil
 }
 
 // SyncDNA handles DNA synchronization requests
-func (s *ControllerService) SyncDNA(ctx context.Context, dna *proto.DNA) (*proto.Status, error) {
+func (s *ControllerService) SyncDNA(ctx context.Context, dna *common.DNA) (*common.Status, error) {
 	s.logger.Debug("DNA sync request received", "steward_id", dna.Id)
 	
 	s.mu.Lock()
@@ -145,8 +186,8 @@ func (s *ControllerService) SyncDNA(ctx context.Context, dna *proto.DNA) (*proto
 	steward, exists := s.stewards[dna.Id]
 	if !exists {
 		s.logger.Warn("DNA sync from unknown steward", "steward_id", dna.Id)
-		return &proto.Status{
-			Code:    proto.Status_NOT_FOUND,
+		return &common.Status{
+			Code:    common.Status_NOT_FOUND,
 			Message: "Steward not found",
 		}, nil
 	}
@@ -156,14 +197,14 @@ func (s *ControllerService) SyncDNA(ctx context.Context, dna *proto.DNA) (*proto
 	
 	s.logger.Debug("DNA synchronized successfully", "steward_id", dna.Id)
 	
-	return &proto.Status{
-		Code:    proto.Status_OK,
+	return &common.Status{
+		Code:    common.Status_OK,
 		Message: "DNA synchronized",
 	}, nil
 }
 
 // GetStewardDNA retrieves DNA information for a specific steward
-func (s *ControllerService) GetStewardDNA(ctx context.Context, req *controller.StewardRequest) (*proto.DNA, error) {
+func (s *ControllerService) GetStewardDNA(ctx context.Context, req *controller.StewardRequest) (*common.DNA, error) {
 	s.logger.Debug("DNA retrieval request", "steward_id", req.StewardId)
 	
 	s.mu.RLock()
@@ -210,4 +251,60 @@ func (s *ControllerService) GetStewardInfo(stewardID string) (*StewardInfo, bool
 	defer s.mu.RUnlock()
 	info, exists := s.stewards[stewardID]
 	return info, exists
+}
+
+// findStewardByDNAId finds an existing steward by DNA ID
+func (s *ControllerService) findStewardByDNAId(dnaId string) *StewardInfo {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	
+	for _, steward := range s.stewards {
+		if steward.DNA != nil && steward.DNA.Id == dnaId {
+			return steward
+		}
+	}
+	return nil
+}
+
+// verifySyncStatus compares client and server sync state
+func (s *ControllerService) verifySyncStatus(existingSteward *StewardInfo, req *controller.RegisterRequest) (*common.SyncStatus, bool, bool) {
+	requiresDNAResync := false
+	requiresConfigResync := false
+	
+	// Compare sync fingerprints
+	serverFingerprint := existingSteward.DNA.SyncFingerprint
+	clientFingerprint := req.ExpectedSyncFingerprint
+	
+	syncStatus := &common.SyncStatus{
+		LastSyncTime:    existingSteward.DNA.LastSyncTime,
+		SyncFingerprint: serverFingerprint,
+		IsInSync:        serverFingerprint == clientFingerprint,
+	}
+	
+	if !syncStatus.IsInSync {
+		// Determine what needs resyncing
+		if existingSteward.DNA.AttributeCount != req.InitialDna.AttributeCount {
+			requiresDNAResync = true
+			syncStatus.Reason = "DNA attribute count mismatch"
+		} else if existingSteward.DNA.ConfigHash != req.InitialDna.ConfigHash {
+			requiresConfigResync = true
+			syncStatus.Reason = "Configuration hash mismatch"
+		} else {
+			// General sync mismatch
+			requiresDNAResync = true
+			requiresConfigResync = true
+			syncStatus.Reason = "Sync fingerprint mismatch"
+		}
+	} else {
+		syncStatus.Reason = "In sync"
+	}
+	
+	s.logger.Info("Sync verification completed",
+		"steward_id", existingSteward.ID,
+		"in_sync", syncStatus.IsInSync,
+		"reason", syncStatus.Reason,
+		"server_fingerprint", serverFingerprint,
+		"client_fingerprint", clientFingerprint)
+	
+	return syncStatus, requiresDNAResync, requiresConfigResync
 }
