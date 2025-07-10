@@ -7,6 +7,7 @@ GO_BUILD_FLAGS=-trimpath -ldflags="-s -w"
 STEWARD_BINARY=cfgms-steward
 CONTROLLER_BINARY=controller
 CLI_BINARY=cfgctl
+CERT_MANAGER_BINARY=cert-manager
 
 # Protocol buffer variables
 PROTO_DIR=api/proto
@@ -42,10 +43,10 @@ proto: check-proto-tools
 
 # Build all binaries
 .PHONY: build
-build: build-steward build-controller build-cli
+build: build-steward build-controller build-cli build-cert-manager
 
 # Build individual binaries
-.PHONY: build-steward build-controller build-cli
+.PHONY: build-steward build-controller build-cli build-cert-manager
 build-steward:
 	go build ${GO_BUILD_FLAGS} -o bin/${STEWARD_BINARY} ./cmd/steward
 
@@ -54,6 +55,9 @@ build-controller:
 
 build-cli:
 	go build ${GO_BUILD_FLAGS} -o bin/${CLI_BINARY} ./cmd/cfgctl
+
+build-cert-manager:
+	go build ${GO_BUILD_FLAGS} -o bin/${CERT_MANAGER_BINARY} ./cmd/cert-manager
 
 test:
 	go test -v -race -cover ./...
