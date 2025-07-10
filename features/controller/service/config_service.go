@@ -10,6 +10,7 @@ import (
 	common "github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
+	"github.com/cfgis/cfgms/features/validation"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -22,6 +23,7 @@ type ConfigurationService struct {
 	mu            sync.RWMutex
 	configurations map[string]*StoredConfiguration
 	controllerSvc *ControllerService
+	validator     *validation.Validator
 	
 	// Configuration streaming
 	subscribers map[string]chan *controller.ConfigurationUpdate
@@ -42,6 +44,7 @@ func NewConfigurationService(logger logging.Logger, controllerSvc *ControllerSer
 		logger:         logger,
 		configurations: make(map[string]*StoredConfiguration),
 		controllerSvc:  controllerSvc,
+		validator:      validation.NewValidator(),
 		subscribers:    make(map[string]chan *controller.ConfigurationUpdate),
 	}
 }
@@ -143,7 +146,7 @@ func (s *ConfigurationService) ReportConfigStatus(ctx context.Context, req *cont
 	}, nil
 }
 
-// ValidateConfig validates a configuration
+// ValidateConfig validates a configuration using the comprehensive validation framework
 func (s *ConfigurationService) ValidateConfig(ctx context.Context, req *controller.ConfigValidationRequest) (*controller.ConfigValidationResponse, error) {
 	s.logger.Debug("Configuration validation request received", "version", req.Version)
 	
@@ -160,36 +163,84 @@ func (s *ConfigurationService) ValidateConfig(ctx context.Context, req *controll
 				{
 					Field:   "config",
 					Message: fmt.Sprintf("JSON parsing error: %v", err),
+					Level:   controller.ValidationError_CRITICAL,
+					Code:    "JSON_PARSING_ERROR",
 				},
 			},
 		}, nil
 	}
 	
-	// Validate configuration
-	if err := stewardconfig.ValidateConfiguration(stewardConfig); err != nil {
-		s.logger.Debug("Configuration validation failed", "error", err)
-		return &controller.ConfigValidationResponse{
-			Status: &common.Status{
-				Code:    common.Status_ERROR,
-				Message: "Configuration validation failed",
-			},
-			Errors: []*controller.ValidationError{
-				{
-					Field:   "config",
-					Message: err.Error(),
-				},
-			},
-		}, nil
+	// Use comprehensive validation framework
+	validationResult := s.validator.ValidateConfiguration(stewardConfig)
+	
+	// Convert validation issues to proto format
+	var validationErrors []*controller.ValidationError
+	for _, issue := range validationResult.Issues {
+		protoLevel := s.convertValidationLevel(issue.Level)
+		validationErrors = append(validationErrors, &controller.ValidationError{
+			Field:      issue.Field,
+			Message:    issue.Message,
+			Level:      protoLevel,
+			Code:       issue.Code,
+			Suggestion: issue.Suggestion,
+		})
 	}
 	
-	s.logger.Debug("Configuration validation successful", "version", req.Version)
+	// Determine response status
+	var status *common.Status
+	if validationResult.HasCriticalErrors() {
+		status = &common.Status{
+			Code:    common.Status_ERROR,
+			Message: "Configuration has critical errors that prevent operation",
+		}
+	} else if validationResult.HasErrors() {
+		status = &common.Status{
+			Code:    common.Status_ERROR,
+			Message: "Configuration has errors that should be fixed",
+		}
+	} else if len(validationResult.Issues) > 0 {
+		status = &common.Status{
+			Code:    common.Status_OK,
+			Message: fmt.Sprintf("Configuration is valid with %d warnings/suggestions", len(validationResult.Issues)),
+		}
+	} else {
+		status = &common.Status{
+			Code:    common.Status_OK,
+			Message: "Configuration is fully valid",
+		}
+	}
+	
+	s.logger.Debug("Configuration validation completed", 
+		"version", req.Version,
+		"valid", validationResult.Valid,
+		"issues", len(validationResult.Issues),
+		"duration", validationResult.Duration)
 	
 	return &controller.ConfigValidationResponse{
-		Status: &common.Status{
-			Code:    common.Status_OK,
-			Message: "Configuration is valid",
+		Status: status,
+		Errors: validationErrors,
+		Metadata: map[string]string{
+			"validation_duration": validationResult.Duration.String(),
+			"validation_timestamp": validationResult.StartTime.Format(time.RFC3339),
+			"total_issues": fmt.Sprintf("%d", len(validationResult.Issues)),
 		},
 	}, nil
+}
+
+// convertValidationLevel converts internal validation level to proto level
+func (s *ConfigurationService) convertValidationLevel(level validation.ValidationLevel) controller.ValidationError_Level {
+	switch level {
+	case validation.ValidationLevelInfo:
+		return controller.ValidationError_INFO
+	case validation.ValidationLevelWarning:
+		return controller.ValidationError_WARNING
+	case validation.ValidationLevelError:
+		return controller.ValidationError_ERROR
+	case validation.ValidationLevelCritical:
+		return controller.ValidationError_CRITICAL
+	default:
+		return controller.ValidationError_ERROR
+	}
 }
 
 // SetConfiguration stores a configuration for a specific steward

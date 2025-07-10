@@ -47,11 +47,22 @@ message ConfigValidationRequest {
 message ConfigValidationResponse {
   common.Status status = 1;
   repeated ValidationError errors = 2;
+  map<string, string> metadata = 3;
 }
 
 message ValidationError {
+  enum Level {
+    INFO = 0;
+    WARNING = 1;
+    ERROR = 2;
+    CRITICAL = 3;
+  }
+  
   string field = 1;
   string message = 2;
+  Level level = 3;
+  string code = 4;
+  string suggestion = 5;
 }
 
 message ConfigStreamRequest {

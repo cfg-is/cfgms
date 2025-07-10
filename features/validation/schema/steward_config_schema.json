@@ -1,0 +1,317 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://cfgms.cfg.is/schemas/steward-config.json",
+  "title": "CFGMS Steward Configuration",
+  "description": "Schema for CFGMS steward configuration files",
+  "type": "object",
+  "properties": {
+    "steward": {
+      "$ref": "#/definitions/StewardSettings"
+    },
+    "resources": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ResourceConfig"
+      },
+      "minItems": 0
+    },
+    "modules": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "description": "Custom path for module"
+      }
+    }
+  },
+  "required": ["steward"],
+  "additionalProperties": false,
+  "definitions": {
+    "StewardSettings": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253,
+          "pattern": "^[a-zA-Z0-9]([a-zA-Z0-9\\-_]*[a-zA-Z0-9])?$",
+          "description": "Unique identifier for this steward instance"
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["standalone", "controller"],
+          "description": "Operation mode for the steward"
+        },
+        "module_paths": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true,
+          "description": "Additional directories to search for modules"
+        },
+        "logging": {
+          "$ref": "#/definitions/LoggingConfig"
+        },
+        "error_handling": {
+          "$ref": "#/definitions/ErrorHandlingConfig"
+        }
+      },
+      "required": ["id", "mode", "logging", "error_handling"],
+      "additionalProperties": false
+    },
+    "LoggingConfig": {
+      "type": "object",
+      "properties": {
+        "level": {
+          "type": "string",
+          "enum": ["debug", "info", "warn", "error"],
+          "description": "Logging verbosity level"
+        },
+        "format": {
+          "type": "string",
+          "enum": ["text", "json"],
+          "description": "Log output format"
+        }
+      },
+      "required": ["level", "format"],
+      "additionalProperties": false
+    },
+    "ErrorHandlingConfig": {
+      "type": "object",
+      "properties": {
+        "module_load_failure": {
+          "$ref": "#/definitions/ErrorAction"
+        },
+        "resource_failure": {
+          "$ref": "#/definitions/ErrorAction"
+        },
+        "configuration_error": {
+          "$ref": "#/definitions/ErrorAction"
+        }
+      },
+      "required": ["module_load_failure", "resource_failure", "configuration_error"],
+      "additionalProperties": false
+    },
+    "ErrorAction": {
+      "type": "string",
+      "enum": ["continue", "fail", "warn"],
+      "description": "Action to take when encountering an error"
+    },
+    "ResourceConfig": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253,
+          "pattern": "^[a-zA-Z0-9]([a-zA-Z0-9\\-_]*[a-zA-Z0-9])?$",
+          "description": "Unique identifier for this resource"
+        },
+        "module": {
+          "type": "string",
+          "enum": ["directory", "file", "firewall", "package"],
+          "description": "Module that will manage this resource"
+        },
+        "config": {
+          "type": "object",
+          "description": "Module-specific configuration data"
+        }
+      },
+      "required": ["name", "module", "config"],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "module": { "const": "directory" }
+            }
+          },
+          "then": {
+            "properties": {
+              "config": {
+                "$ref": "#/definitions/DirectoryConfig"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "module": { "const": "file" }
+            }
+          },
+          "then": {
+            "properties": {
+              "config": {
+                "$ref": "#/definitions/FileConfig"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "module": { "const": "package" }
+            }
+          },
+          "then": {
+            "properties": {
+              "config": {
+                "$ref": "#/definitions/PackageConfig"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "module": { "const": "firewall" }
+            }
+          },
+          "then": {
+            "properties": {
+              "config": {
+                "$ref": "#/definitions/FirewallConfig"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "DirectoryConfig": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^/.*",
+          "description": "Absolute path to the directory"
+        },
+        "permissions": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 511,
+          "description": "Directory permissions in octal (0-0777)"
+        },
+        "owner": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Directory owner (optional)"
+        },
+        "group": {
+          "type": "string", 
+          "minLength": 1,
+          "description": "Directory group (optional)"
+        },
+        "recursive": {
+          "type": "boolean",
+          "description": "Apply permissions recursively"
+        }
+      },
+      "required": ["path", "permissions"],
+      "additionalProperties": false
+    },
+    "FileConfig": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^/.*",
+          "description": "Absolute path to the file"
+        },
+        "content": {
+          "type": "string",
+          "description": "File content"
+        },
+        "permissions": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 511,
+          "description": "File permissions in octal (0-0777)"
+        },
+        "owner": {
+          "type": "string",
+          "minLength": 1,
+          "description": "File owner (optional)"
+        },
+        "group": {
+          "type": "string",
+          "minLength": 1, 
+          "description": "File group (optional)"
+        }
+      },
+      "required": ["path"],
+      "additionalProperties": false
+    },
+    "PackageConfig": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Package name"
+        },
+        "state": {
+          "type": "string",
+          "enum": ["present", "absent"],
+          "description": "Desired package state"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^(\\d+\\.)*\\d+([\\-\\+].*)?$",
+          "description": "Package version (optional)"
+        }
+      },
+      "required": ["name", "state"],
+      "additionalProperties": false
+    },
+    "FirewallConfig": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": ["enabled", "disabled"],
+          "description": "Firewall state"
+        },
+        "rules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/FirewallRule"
+          },
+          "description": "Firewall rules"
+        }
+      },
+      "required": ["state"],
+      "additionalProperties": false
+    },
+    "FirewallRule": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": ["allow", "deny"],
+          "description": "Rule action"
+        },
+        "protocol": {
+          "type": "string",
+          "enum": ["tcp", "udp", "icmp"],
+          "description": "Network protocol"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "Port number"
+        },
+        "source": {
+          "type": "string",
+          "description": "Source IP or network"
+        }
+      },
+      "required": ["action", "protocol"],
+      "additionalProperties": false
+    }
+  }
+}
