@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package cfgms.api.steward;
 
-option go_package = "cfgms/pkg/api/proto/steward";
+option go_package = "github.com/cfgis/cfgms/api/proto/steward";
 
 import "common/common.proto";
 import "common/auth.proto";

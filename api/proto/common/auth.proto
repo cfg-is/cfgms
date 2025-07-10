@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package cfgms.api.common;
 
-option go_package = "cfgms/pkg/api/proto/common";
+option go_package = "github.com/cfgis/cfgms/api/proto/common";
 
 message Credentials {
   string tenant_id = 1;

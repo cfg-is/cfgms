@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package cfgms.api.common;
 
-option go_package = "cfgms/pkg/api/proto/common";
+option go_package = "github.com/cfgis/cfgms/api/proto/common";
 
 import "google/protobuf/timestamp.proto";
 
@@ -11,6 +11,12 @@ message DNA {
   string id = 1;
   map<string, string> attributes = 2;
   google.protobuf.Timestamp last_updated = 3;
+  
+  // Sync verification metadata
+  string config_hash = 4;                        // Hash of current configuration
+  google.protobuf.Timestamp last_sync_time = 5;  // When DNA was last synced with controller
+  int32 attribute_count = 6;                     // Number of attributes (for verification)
+  string sync_fingerprint = 7;                   // Combined hash of all sync-relevant data
 }
 
 message Status {
@@ -31,4 +37,11 @@ message Version {
   string version = 1;
   string commit = 2;
   string build_date = 3;
+}
+
+message SyncStatus {
+  google.protobuf.Timestamp last_sync_time = 1;
+  string sync_fingerprint = 2;
+  bool is_in_sync = 3;
+  string reason = 4;  // If not in sync, reason why
 } 
