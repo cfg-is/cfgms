@@ -1,0 +1,188 @@
+syntax = "proto3";
+
+package cfgms.api.controller;
+
+import "common/rbac.proto";
+
+option go_package = "github.com/cfgis/cfgms/api/proto/controller";
+
+// RBACService provides role-based access control operations
+service RBACService {
+  // Permission Management
+  rpc GetPermission(GetPermissionRequest) returns (GetPermissionResponse);
+  rpc ListPermissions(ListPermissionsRequest) returns (ListPermissionsResponse);
+  
+  // Role Management
+  rpc CreateRole(CreateRoleRequest) returns (CreateRoleResponse);
+  rpc GetRole(GetRoleRequest) returns (GetRoleResponse);
+  rpc ListRoles(ListRolesRequest) returns (ListRolesResponse);
+  rpc UpdateRole(UpdateRoleRequest) returns (UpdateRoleResponse);
+  rpc DeleteRole(DeleteRoleRequest) returns (DeleteRoleResponse);
+  
+  // Subject Management
+  rpc CreateSubject(CreateSubjectRequest) returns (CreateSubjectResponse);
+  rpc GetSubject(GetSubjectRequest) returns (GetSubjectResponse);
+  rpc ListSubjects(ListSubjectsRequest) returns (ListSubjectsResponse);
+  rpc UpdateSubject(UpdateSubjectRequest) returns (UpdateSubjectResponse);
+  rpc DeleteSubject(DeleteSubjectRequest) returns (DeleteSubjectResponse);
+  
+  // Role Assignment
+  rpc AssignRole(AssignRoleRequest) returns (AssignRoleResponse);
+  rpc RevokeRole(RevokeRoleRequest) returns (RevokeRoleResponse);
+  rpc GetSubjectRoles(GetSubjectRolesRequest) returns (GetSubjectRolesResponse);
+  
+  // Permission Checking
+  rpc CheckPermission(CheckPermissionRequest) returns (CheckPermissionResponse);
+  rpc GetSubjectPermissions(GetSubjectPermissionsRequest) returns (GetSubjectPermissionsResponse);
+}
+
+// Permission Management Messages
+
+message GetPermissionRequest {
+  string permission_id = 1;
+}
+
+message GetPermissionResponse {
+  cfgms.api.common.Permission permission = 1;
+}
+
+message ListPermissionsRequest {
+  string resource_type = 1; // Optional filter
+}
+
+message ListPermissionsResponse {
+  repeated cfgms.api.common.Permission permissions = 1;
+}
+
+// Role Management Messages
+
+message CreateRoleRequest {
+  cfgms.api.common.Role role = 1;
+}
+
+message CreateRoleResponse {
+  cfgms.api.common.Role role = 1;
+}
+
+message GetRoleRequest {
+  string role_id = 1;
+}
+
+message GetRoleResponse {
+  cfgms.api.common.Role role = 1;
+}
+
+message ListRolesRequest {
+  string tenant_id = 1; // Optional filter
+}
+
+message ListRolesResponse {
+  repeated cfgms.api.common.Role roles = 1;
+}
+
+message UpdateRoleRequest {
+  cfgms.api.common.Role role = 1;
+}
+
+message UpdateRoleResponse {
+  cfgms.api.common.Role role = 1;
+}
+
+message DeleteRoleRequest {
+  string role_id = 1;
+}
+
+message DeleteRoleResponse {
+  bool success = 1;
+}
+
+// Subject Management Messages
+
+message CreateSubjectRequest {
+  cfgms.api.common.Subject subject = 1;
+}
+
+message CreateSubjectResponse {
+  cfgms.api.common.Subject subject = 1;
+}
+
+message GetSubjectRequest {
+  string subject_id = 1;
+}
+
+message GetSubjectResponse {
+  cfgms.api.common.Subject subject = 1;
+}
+
+message ListSubjectsRequest {
+  string tenant_id = 1; // Optional filter
+  cfgms.api.common.SubjectType type = 2; // Optional filter
+}
+
+message ListSubjectsResponse {
+  repeated cfgms.api.common.Subject subjects = 1;
+}
+
+message UpdateSubjectRequest {
+  cfgms.api.common.Subject subject = 1;
+}
+
+message UpdateSubjectResponse {
+  cfgms.api.common.Subject subject = 1;
+}
+
+message DeleteSubjectRequest {
+  string subject_id = 1;
+}
+
+message DeleteSubjectResponse {
+  bool success = 1;
+}
+
+// Role Assignment Messages
+
+message AssignRoleRequest {
+  cfgms.api.common.RoleAssignment assignment = 1;
+}
+
+message AssignRoleResponse {
+  cfgms.api.common.RoleAssignment assignment = 1;
+}
+
+message RevokeRoleRequest {
+  string subject_id = 1;
+  string role_id = 2;
+  string tenant_id = 3;
+}
+
+message RevokeRoleResponse {
+  bool success = 1;
+}
+
+message GetSubjectRolesRequest {
+  string subject_id = 1;
+  string tenant_id = 2;
+}
+
+message GetSubjectRolesResponse {
+  repeated cfgms.api.common.Role roles = 1;
+}
+
+// Permission Checking Messages
+
+message CheckPermissionRequest {
+  cfgms.api.common.AccessRequest request = 1;
+}
+
+message CheckPermissionResponse {
+  cfgms.api.common.AccessResponse response = 1;
+}
+
+message GetSubjectPermissionsRequest {
+  string subject_id = 1;
+  string tenant_id = 2;
+}
+
+message GetSubjectPermissionsResponse {
+  repeated cfgms.api.common.Permission permissions = 1;
+}

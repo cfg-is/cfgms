@@ -1,0 +1,85 @@
+syntax = "proto3";
+
+package cfgms.api.common;
+
+option go_package = "github.com/cfgis/cfgms/api/proto/common";
+
+// Permission represents a specific action that can be performed
+message Permission {
+  string id = 1;              // Unique permission identifier (e.g., "steward.register")
+  string name = 2;            // Human-readable name
+  string description = 3;     // Description of what this permission allows
+  string resource_type = 4;   // Type of resource (steward, configuration, tenant)
+  repeated string actions = 5; // Allowed actions (create, read, update, delete, execute)
+}
+
+// Role represents a collection of permissions
+message Role {
+  string id = 1;                    // Unique role identifier
+  string name = 2;                  // Human-readable role name
+  string description = 3;           // Role description
+  repeated string permission_ids = 4; // Permission IDs assigned to this role
+  bool is_system_role = 5;          // Whether this is a built-in system role
+  string tenant_id = 6;             // Tenant scope (empty for system-wide roles)
+  int64 created_at = 7;             // Creation timestamp
+  int64 updated_at = 8;             // Last update timestamp
+}
+
+// Subject represents an entity that can have roles assigned
+message Subject {
+  string id = 1;              // Unique subject identifier
+  SubjectType type = 2;       // Type of subject
+  string display_name = 3;    // Human-readable name
+  string tenant_id = 4;       // Primary tenant association
+  repeated string role_ids = 5; // Assigned role IDs
+  map<string, string> attributes = 6; // Additional attributes for ABAC
+  bool is_active = 7;         // Whether subject is active
+  int64 created_at = 8;       // Creation timestamp
+  int64 updated_at = 9;       // Last update timestamp
+}
+
+// SubjectType defines the type of subject
+enum SubjectType {
+  SUBJECT_TYPE_UNSPECIFIED = 0;
+  SUBJECT_TYPE_USER = 1;        // Human user
+  SUBJECT_TYPE_SERVICE = 2;     // Service account
+  SUBJECT_TYPE_STEWARD = 3;     // Steward instance
+  SUBJECT_TYPE_API_CLIENT = 4;  // API client
+}
+
+// RoleAssignment represents the assignment of a role to a subject
+message RoleAssignment {
+  string id = 1;              // Unique assignment identifier
+  string subject_id = 2;      // Subject receiving the role
+  string role_id = 3;         // Role being assigned
+  string tenant_id = 4;       // Tenant scope for this assignment
+  repeated string conditions = 5; // Optional conditions (ABAC support)
+  int64 expires_at = 6;       // Optional expiration timestamp
+  int64 assigned_at = 7;      // Assignment timestamp
+  string assigned_by = 8;     // Who made the assignment
+}
+
+// AccessRequest represents a request for permission checking
+message AccessRequest {
+  string subject_id = 1;      // Subject requesting access
+  string permission_id = 2;   // Permission being requested
+  string resource_id = 3;     // Specific resource (optional)
+  string tenant_id = 4;       // Tenant context
+  map<string, string> context = 5; // Additional context for ABAC
+}
+
+// AccessResponse represents the result of permission checking
+message AccessResponse {
+  bool granted = 1;           // Whether access is granted
+  string reason = 2;          // Reason for the decision
+  repeated string applied_roles = 3; // Roles that granted access
+  repeated string applied_permissions = 4; // Permissions that granted access
+}
+
+// AuthorizationContext provides context for authorization decisions
+message AuthorizationContext {
+  string tenant_id = 1;       // Current tenant context
+  string subject_id = 2;      // Subject making the request
+  map<string, string> environment = 3; // Environment attributes (IP, time, etc.)
+  map<string, string> resource_attributes = 4; // Resource-specific attributes
+}

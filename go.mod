@@ -4,6 +4,7 @@ go 1.23.0
 
 require (
 	github.com/golang/protobuf v1.5.4
+	github.com/google/uuid v1.6.0
 	github.com/spf13/cobra v1.8.0
 	github.com/stretchr/testify v1.8.4
 	google.golang.org/grpc v1.73.0
