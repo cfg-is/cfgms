@@ -41,7 +41,7 @@ func TestValidator_ValidateConfiguration(t *testing.T) {
 						Module: "directory",
 						Config: map[string]interface{}{
 							"path":        "/opt/test",
-							"permissions": 493, // 755 octal = 493 decimal
+							"permissions": 0755, // Standard directory permissions
 						},
 					},
 				},
@@ -89,7 +89,7 @@ func TestValidator_ValidateConfiguration(t *testing.T) {
 						Module: "directory",
 						Config: map[string]interface{}{
 							"path":        "/opt/test1",
-							"permissions": 493, // 755 octal = 493 decimal
+							"permissions": 0755, // Standard directory permissions
 						},
 					},
 					{
@@ -129,7 +129,7 @@ func TestValidator_ValidateConfiguration(t *testing.T) {
 						Module: "directory",
 						Config: map[string]interface{}{
 							"path":        "/opt/unsafe",
-							"permissions": 0777, // World writable
+							"permissions": 0777, // World writable (octal)
 						},
 					},
 				},
@@ -228,7 +228,7 @@ func TestBusinessRules(t *testing.T) {
 					Module: "directory",
 					Config: map[string]interface{}{
 						// Missing required 'path' field
-						"permissions": 493, // 755 octal = 493 decimal
+						"permissions": 0755, // Standard directory permissions
 					},
 				},
 			},
@@ -251,7 +251,7 @@ func TestBusinessRules(t *testing.T) {
 					Module: "file",
 					Config: map[string]interface{}{
 						"path":        "/tmp/unsafe.txt",
-						"permissions": 0646, // World writable
+						"permissions": 0646, // World writable (octal)
 						"content":     "password=secret123", // Sensitive content
 					},
 				},

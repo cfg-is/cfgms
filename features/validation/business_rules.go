@@ -108,15 +108,15 @@ func (r *ModuleCompatibilityRule) validateDirectoryModule(resource config.Resour
 			Field:      fieldPrefix + ".config.permissions",
 			Message:    "Directory module requires a 'permissions' field",
 			Code:       "MISSING_REQUIRED_FIELD",
-			Suggestion: "Add a 'permissions' field with octal permissions (e.g., 755)",
+			Suggestion: "Add a 'permissions' field with octal permissions (e.g., 0755)",
 		})
-	} else if perm, ok := permissions.(int); ok && (perm < 0 || perm > 511) {
+	} else if perm, ok := permissions.(int); ok && (perm < 0 || perm > 0777) {
 		issues = append(issues, ValidationIssue{
 			Level:      ValidationLevelError,
 			Field:      fieldPrefix + ".config.permissions",
-			Message:    fmt.Sprintf("Invalid permissions value: %d", perm),
+			Message:    fmt.Sprintf("Invalid permissions value: %o (octal)", perm),
 			Code:       "INVALID_PERMISSIONS",
-			Suggestion: "Use decimal permissions between 0 and 511 (e.g., 493 for rwxr-xr-x)",
+			Suggestion: "Use octal permissions between 0 and 0777 (e.g., 0755 for rwxr-xr-x)",
 		})
 	}
 
