@@ -1,7 +1,6 @@
 package testutil
 
 import (
-	"io/ioutil"
 	"os"
 	"testing"
 
@@ -46,7 +45,7 @@ func SetupTestEnvironment(t *testing.T, config *StewardTestConfig) (certDir stri
 	var dataDirCleanup func()
 	
 	if config.UseTemporaryDir {
-		tempDir, err := ioutil.TempDir("", "cfgms-test-steward-")
+		tempDir, err := os.MkdirTemp("", "cfgms-test-steward-")
 		require.NoError(t, err)
 		dataDir = tempDir
 		dataDirCleanup = func() { os.RemoveAll(tempDir) }

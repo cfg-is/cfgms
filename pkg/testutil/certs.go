@@ -13,7 +13,6 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
-	"io/ioutil"
 	"math/big"
 	"net"
 	"os"
@@ -68,7 +67,7 @@ func SetupTestCerts(t *testing.T) (certDir string, cleanup func()) {
 // SetupTestCertsWithConfig creates test certificates with custom configuration.
 func SetupTestCertsWithConfig(t *testing.T, config *CertConfig) (certDir string, cleanup func()) {
 	// Create temporary directory
-	tempDir, err := ioutil.TempDir("", "cfgms-test-certs-")
+	tempDir, err := os.MkdirTemp("", "cfgms-test-certs-")
 	require.NoError(t, err)
 	
 	// Set cert directory if not specified

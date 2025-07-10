@@ -9,7 +9,7 @@ CONTROLLER_BINARY=controller
 CLI_BINARY=cfgctl
 
 # Protocol buffer variables
-PROTO_DIR=pkg/api/proto
+PROTO_DIR=api/proto
 PROTO_FILES=$(shell find $(PROTO_DIR) -name "*.proto")
 PROTO_INCLUDES=-I$(PROTO_DIR)
 
