@@ -95,6 +95,18 @@ type Step struct {
 
 	// Variables define step-level variables
 	Variables map[string]interface{} `yaml:"variables,omitempty" json:"variables,omitempty"`
+
+	// HTTP configuration for HTTP steps
+	HTTP *HTTPConfig `yaml:"http,omitempty" json:"http,omitempty"`
+
+	// API configuration for API steps
+	API *APIConfig `yaml:"api,omitempty" json:"api,omitempty"`
+
+	// Webhook configuration for webhook steps
+	Webhook *WebhookConfig `yaml:"webhook,omitempty" json:"webhook,omitempty"`
+
+	// Delay configuration for delay steps
+	Delay *DelayConfig `yaml:"delay,omitempty" json:"delay,omitempty"`
 }
 
 // StepType defines the type of workflow step
@@ -112,6 +124,18 @@ const (
 
 	// StepTypeConditional executes child steps based on a condition
 	StepTypeConditional StepType = "conditional"
+
+	// StepTypeHTTP executes HTTP API calls
+	StepTypeHTTP StepType = "http"
+
+	// StepTypeAPI executes API-based operations (SaaS integrations)
+	StepTypeAPI StepType = "api"
+
+	// StepTypeWebhook handles webhook-based operations
+	StepTypeWebhook StepType = "webhook"
+
+	// StepTypeDelay introduces delays in workflow execution
+	StepTypeDelay StepType = "delay"
 )
 
 // Condition defines execution conditions for conditional steps
@@ -288,4 +312,192 @@ type WorkflowEngine interface {
 type StepExecutor interface {
 	// ExecuteStep executes a single workflow step
 	ExecuteStep(ctx context.Context, step Step, variables map[string]interface{}) (StepResult, error)
+}
+
+// HTTPConfig defines configuration for HTTP-based workflow steps
+type HTTPConfig struct {
+	// URL is the target URL for the HTTP request
+	URL string `yaml:"url" json:"url"`
+
+	// Method is the HTTP method (GET, POST, PUT, DELETE, etc.)
+	Method string `yaml:"method" json:"method"`
+
+	// Headers contains HTTP headers to send with the request
+	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+
+	// Body contains the request body (for POST/PUT requests)
+	Body interface{} `yaml:"body,omitempty" json:"body,omitempty"`
+
+	// Authentication configuration
+	Auth *AuthConfig `yaml:"auth,omitempty" json:"auth,omitempty"`
+
+	// Timeout for the HTTP request
+	Timeout time.Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+
+	// Retry configuration
+	Retry *RetryConfig `yaml:"retry,omitempty" json:"retry,omitempty"`
+
+	// ExpectedStatus defines expected HTTP status codes (default: 200-299)
+	ExpectedStatus []int `yaml:"expected_status,omitempty" json:"expected_status,omitempty"`
+
+	// RateLimit configuration for this specific request
+	RateLimit *RateLimitConfig `yaml:"rate_limit,omitempty" json:"rate_limit,omitempty"`
+}
+
+// APIConfig defines configuration for API-based workflow steps (SaaS integrations)
+type APIConfig struct {
+	// Provider specifies the API provider (e.g., "microsoft", "google", "salesforce")
+	Provider string `yaml:"provider" json:"provider"`
+
+	// Service specifies the specific service within the provider (e.g., "graph", "admin")
+	Service string `yaml:"service" json:"service"`
+
+	// Operation specifies the API operation to perform
+	Operation string `yaml:"operation" json:"operation"`
+
+	// Parameters contains operation-specific parameters
+	Parameters map[string]interface{} `yaml:"parameters,omitempty" json:"parameters,omitempty"`
+
+	// Authentication configuration
+	Auth *AuthConfig `yaml:"auth,omitempty" json:"auth,omitempty"`
+
+	// Timeout for the API request
+	Timeout time.Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+
+	// Retry configuration
+	Retry *RetryConfig `yaml:"retry,omitempty" json:"retry,omitempty"`
+
+	// RateLimit configuration
+	RateLimit *RateLimitConfig `yaml:"rate_limit,omitempty" json:"rate_limit,omitempty"`
+}
+
+// WebhookConfig defines configuration for webhook-based workflow steps
+type WebhookConfig struct {
+	// URL is the webhook endpoint URL
+	URL string `yaml:"url" json:"url"`
+
+	// Method is the HTTP method for the webhook (default: POST)
+	Method string `yaml:"method,omitempty" json:"method,omitempty"`
+
+	// Headers contains HTTP headers to send with the webhook
+	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+
+	// Payload contains the webhook payload
+	Payload interface{} `yaml:"payload,omitempty" json:"payload,omitempty"`
+
+	// Authentication configuration
+	Auth *AuthConfig `yaml:"auth,omitempty" json:"auth,omitempty"`
+
+	// Timeout for the webhook request
+	Timeout time.Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+
+	// Retry configuration
+	Retry *RetryConfig `yaml:"retry,omitempty" json:"retry,omitempty"`
+}
+
+// DelayConfig defines configuration for delay workflow steps
+type DelayConfig struct {
+	// Duration specifies how long to wait
+	Duration time.Duration `yaml:"duration" json:"duration"`
+
+	// Message provides a description of why the delay is happening
+	Message string `yaml:"message,omitempty" json:"message,omitempty"`
+}
+
+// AuthConfig defines authentication configuration for API requests
+type AuthConfig struct {
+	// Type specifies the authentication type
+	Type AuthType `yaml:"type" json:"type"`
+
+	// Bearer token for Bearer authentication
+	BearerToken string `yaml:"bearer_token,omitempty" json:"bearer_token,omitempty"`
+
+	// API key for API key authentication
+	APIKey string `yaml:"api_key,omitempty" json:"api_key,omitempty"`
+
+	// API key header name (default: "X-API-Key")
+	APIKeyHeader string `yaml:"api_key_header,omitempty" json:"api_key_header,omitempty"`
+
+	// Basic authentication username
+	Username string `yaml:"username,omitempty" json:"username,omitempty"`
+
+	// Basic authentication password
+	Password string `yaml:"password,omitempty" json:"password,omitempty"`
+
+	// OAuth2 configuration
+	OAuth2 *OAuth2Config `yaml:"oauth2,omitempty" json:"oauth2,omitempty"`
+
+	// Custom headers for authentication
+	CustomHeaders map[string]string `yaml:"custom_headers,omitempty" json:"custom_headers,omitempty"`
+}
+
+// AuthType defines supported authentication types
+type AuthType string
+
+const (
+	// AuthTypeBearer uses Bearer token authentication
+	AuthTypeBearer AuthType = "bearer"
+
+	// AuthTypeAPIKey uses API key authentication
+	AuthTypeAPIKey AuthType = "api_key"
+
+	// AuthTypeBasic uses HTTP Basic authentication
+	AuthTypeBasic AuthType = "basic"
+
+	// AuthTypeOAuth2 uses OAuth2 authentication
+	AuthTypeOAuth2 AuthType = "oauth2"
+
+	// AuthTypeCustom uses custom authentication headers
+	AuthTypeCustom AuthType = "custom"
+
+	// AuthTypeNone uses no authentication
+	AuthTypeNone AuthType = "none"
+)
+
+// OAuth2Config defines OAuth2 authentication configuration
+type OAuth2Config struct {
+	// ClientID for OAuth2
+	ClientID string `yaml:"client_id" json:"client_id"`
+
+	// ClientSecret for OAuth2
+	ClientSecret string `yaml:"client_secret" json:"client_secret"`
+
+	// TokenURL for obtaining access tokens
+	TokenURL string `yaml:"token_url" json:"token_url"`
+
+	// Scopes for OAuth2 authorization
+	Scopes []string `yaml:"scopes,omitempty" json:"scopes,omitempty"`
+
+	// GrantType for OAuth2 (default: "client_credentials")
+	GrantType string `yaml:"grant_type,omitempty" json:"grant_type,omitempty"`
+}
+
+// RetryConfig defines retry configuration for HTTP/API requests
+type RetryConfig struct {
+	// MaxAttempts is the maximum number of retry attempts
+	MaxAttempts int `yaml:"max_attempts" json:"max_attempts"`
+
+	// InitialDelay is the initial delay between retries
+	InitialDelay time.Duration `yaml:"initial_delay" json:"initial_delay"`
+
+	// MaxDelay is the maximum delay between retries
+	MaxDelay time.Duration `yaml:"max_delay" json:"max_delay"`
+
+	// BackoffMultiplier for exponential backoff
+	BackoffMultiplier float64 `yaml:"backoff_multiplier" json:"backoff_multiplier"`
+
+	// RetryableStatusCodes defines which HTTP status codes should trigger retries
+	RetryableStatusCodes []int `yaml:"retryable_status_codes,omitempty" json:"retryable_status_codes,omitempty"`
+}
+
+// RateLimitConfig defines rate limiting configuration for API requests
+type RateLimitConfig struct {
+	// RequestsPerSecond limits the number of requests per second
+	RequestsPerSecond float64 `yaml:"requests_per_second" json:"requests_per_second"`
+
+	// BurstSize allows for burst requests above the rate limit
+	BurstSize int `yaml:"burst_size" json:"burst_size"`
+
+	// WaitOnLimit determines whether to wait or fail when rate limit is exceeded
+	WaitOnLimit bool `yaml:"wait_on_limit" json:"wait_on_limit"`
 }

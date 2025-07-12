@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -13,18 +14,36 @@ import (
 
 // Engine implements the WorkflowEngine interface
 type Engine struct {
-	moduleFactory *factory.ModuleFactory
-	logger        logging.Logger
-	executions    map[string]*WorkflowExecution
-	mutex         sync.RWMutex
+	moduleFactory    *factory.ModuleFactory
+	logger           logging.Logger
+	executions       map[string]*WorkflowExecution
+	mutex            sync.RWMutex
+	httpClient       *HTTPClient
+	providerRegistry *ProviderRegistry
 }
 
 // NewEngine creates a new workflow engine instance
 func NewEngine(moduleFactory *factory.ModuleFactory, logger logging.Logger) *Engine {
+	// Create HTTP client with default configuration
+	httpClient := NewHTTPClient(HTTPClientConfig{
+		Timeout: 30 * time.Second,
+		DefaultRetryConfig: &RetryConfig{
+			MaxAttempts:       3,
+			InitialDelay:      time.Second,
+			MaxDelay:          30 * time.Second,
+			BackoffMultiplier: 2.0,
+		},
+	})
+
+	// Create provider registry
+	providerRegistry := NewProviderRegistry(logger)
+
 	return &Engine{
-		moduleFactory: moduleFactory,
-		logger:        logger,
-		executions:    make(map[string]*WorkflowExecution),
+		moduleFactory:    moduleFactory,
+		logger:           logger,
+		executions:       make(map[string]*WorkflowExecution),
+		httpClient:       httpClient,
+		providerRegistry: providerRegistry,
 	}
 }
 
@@ -187,6 +206,14 @@ func (e *Engine) executeStep(ctx context.Context, step Step, execution *Workflow
 		err = e.executeParallelStep(ctx, step, execution)
 	case StepTypeConditional:
 		err = e.executeConditionalStep(ctx, step, execution)
+	case StepTypeHTTP:
+		err = e.executeHTTPStep(ctx, step, execution)
+	case StepTypeAPI:
+		err = e.executeAPIStep(ctx, step, execution)
+	case StepTypeWebhook:
+		err = e.executeWebhookStep(ctx, step, execution)
+	case StepTypeDelay:
+		err = e.executeDelayStep(ctx, step, execution)
 	default:
 		err = fmt.Errorf("unknown step type: %s", step.Type)
 	}
@@ -464,4 +491,279 @@ func (g *genericConfigState) GetManagedFields() []string {
 		fields = append(fields, key)
 	}
 	return fields
+}
+
+// executeHTTPStep executes an HTTP-based workflow step
+func (e *Engine) executeHTTPStep(ctx context.Context, step Step, execution *WorkflowExecution) error {
+	if step.HTTP == nil {
+		return fmt.Errorf("HTTP configuration is required for HTTP steps")
+	}
+
+	// Execute HTTP request
+	response, err := e.httpClient.ExecuteRequest(ctx, step.HTTP)
+	if err != nil {
+		return fmt.Errorf("HTTP request failed: %w", err)
+	}
+
+	// Store response in variables safely
+	e.mutex.Lock()
+	execution.Variables[step.Name+"_status_code"] = response.StatusCode
+	execution.Variables[step.Name+"_headers"] = response.Headers
+	execution.Variables[step.Name+"_body"] = string(response.Body)
+	execution.Variables[step.Name+"_duration"] = response.Duration.String()
+	e.mutex.Unlock()
+
+	e.logger.Info("HTTP step completed",
+		"step", step.Name,
+		"status_code", response.StatusCode,
+		"duration", response.Duration)
+
+	return nil
+}
+
+// executeAPIStep executes an API-based workflow step (SaaS integrations)
+func (e *Engine) executeAPIStep(ctx context.Context, step Step, execution *WorkflowExecution) error {
+	if step.API == nil {
+		return fmt.Errorf("API configuration is required for API steps")
+	}
+
+	// Use provider registry for API operations
+	response, err := e.providerRegistry.ExecuteOperation(ctx, step.API)
+	if err != nil {
+		return fmt.Errorf("API operation failed: %w", err)
+	}
+
+	// Store API response in variables safely
+	e.mutex.Lock()
+	execution.Variables[step.Name+"_api_success"] = response.Success
+	execution.Variables[step.Name+"_api_status"] = response.StatusCode
+	execution.Variables[step.Name+"_api_duration"] = response.Duration
+	execution.Variables[step.Name+"_api_response"] = response.Data
+	execution.Variables[step.Name+"_api_metadata"] = response.Metadata
+	e.mutex.Unlock()
+
+	e.logger.Info("API step completed",
+		"step", step.Name,
+		"provider", step.API.Provider,
+		"service", step.API.Service,
+		"operation", step.API.Operation,
+		"success", response.Success)
+
+	return nil
+}
+
+// executeWebhookStep executes a webhook-based workflow step
+func (e *Engine) executeWebhookStep(ctx context.Context, step Step, execution *WorkflowExecution) error {
+	if step.Webhook == nil {
+		return fmt.Errorf("webhook configuration is required for webhook steps")
+	}
+
+	// Convert webhook config to HTTP config
+	httpConfig := &HTTPConfig{
+		URL:            step.Webhook.URL,
+		Method:         step.Webhook.Method,
+		Headers:        step.Webhook.Headers,
+		Body:           step.Webhook.Payload,
+		Auth:           step.Webhook.Auth,
+		Timeout:        step.Webhook.Timeout,
+		Retry:          step.Webhook.Retry,
+		ExpectedStatus: []int{200, 201, 202, 204}, // Common webhook success codes
+	}
+
+	// Set default method if not specified
+	if httpConfig.Method == "" {
+		httpConfig.Method = "POST"
+	}
+
+	// Execute webhook request
+	response, err := e.httpClient.ExecuteRequest(ctx, httpConfig)
+	if err != nil {
+		return fmt.Errorf("webhook request failed: %w", err)
+	}
+
+	// Store webhook response in variables safely
+	e.mutex.Lock()
+	execution.Variables[step.Name+"_webhook_status"] = response.StatusCode
+	execution.Variables[step.Name+"_webhook_response"] = string(response.Body)
+	e.mutex.Unlock()
+
+	e.logger.Info("Webhook step completed",
+		"step", step.Name,
+		"url", step.Webhook.URL,
+		"status_code", response.StatusCode)
+
+	return nil
+}
+
+// executeDelayStep executes a delay workflow step
+func (e *Engine) executeDelayStep(ctx context.Context, step Step, execution *WorkflowExecution) error {
+	if step.Delay == nil {
+		return fmt.Errorf("delay configuration is required for delay steps")
+	}
+
+	if step.Delay.Duration <= 0 {
+		return fmt.Errorf("delay duration must be positive")
+	}
+
+	message := step.Delay.Message
+	if message == "" {
+		message = "Waiting"
+	}
+
+	e.logger.Info("Starting delay step",
+		"step", step.Name,
+		"duration", step.Delay.Duration,
+		"message", message)
+
+	// Wait for the specified duration or context cancellation
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(step.Delay.Duration):
+		// Delay completed successfully
+	}
+
+	e.logger.Info("Delay step completed",
+		"step", step.Name,
+		"duration", step.Delay.Duration)
+
+	return nil
+}
+
+// convertAPIConfigToHTTP converts API configuration to HTTP configuration
+func (e *Engine) convertAPIConfigToHTTP(apiConfig *APIConfig, execution *WorkflowExecution) (*HTTPConfig, error) {
+	// This is a simplified implementation
+	// In a real system, this would have provider-specific logic for different APIs
+	// (Microsoft Graph, Google Admin SDK, Salesforce, etc.)
+
+	var url string
+	var method string
+	var body interface{}
+
+	// Provider-specific URL and method determination
+	switch apiConfig.Provider {
+	case "microsoft":
+		url, method, body = e.buildMicrosoftGraphRequest(apiConfig)
+	case "google":
+		url, method, body = e.buildGoogleAPIRequest(apiConfig)
+	case "salesforce":
+		url, method, body = e.buildSalesforceAPIRequest(apiConfig)
+	default:
+		return nil, fmt.Errorf("unsupported API provider: %s", apiConfig.Provider)
+	}
+
+	httpConfig := &HTTPConfig{
+		URL:       url,
+		Method:    method,
+		Body:      body,
+		Auth:      apiConfig.Auth,
+		Timeout:   apiConfig.Timeout,
+		Retry:     apiConfig.Retry,
+		Headers:   make(map[string]string),
+	}
+
+	// Set default headers
+	if method == "POST" || method == "PUT" || method == "PATCH" {
+		httpConfig.Headers["Content-Type"] = "application/json"
+	}
+
+	return httpConfig, nil
+}
+
+// buildMicrosoftGraphRequest builds Microsoft Graph API requests
+func (e *Engine) buildMicrosoftGraphRequest(apiConfig *APIConfig) (string, string, interface{}) {
+	baseURL := "https://graph.microsoft.com/v1.0"
+	
+	switch apiConfig.Service {
+	case "users":
+		switch apiConfig.Operation {
+		case "list":
+			return baseURL + "/users", "GET", nil
+		case "create":
+			return baseURL + "/users", "POST", apiConfig.Parameters
+		case "get":
+			userID := apiConfig.Parameters["user_id"]
+			return fmt.Sprintf("%s/users/%v", baseURL, userID), "GET", nil
+		case "update":
+			userID := apiConfig.Parameters["user_id"]
+			return fmt.Sprintf("%s/users/%v", baseURL, userID), "PATCH", apiConfig.Parameters
+		case "delete":
+			userID := apiConfig.Parameters["user_id"]
+			return fmt.Sprintf("%s/users/%v", baseURL, userID), "DELETE", nil
+		}
+	case "groups":
+		switch apiConfig.Operation {
+		case "list":
+			return baseURL + "/groups", "GET", nil
+		case "create":
+			return baseURL + "/groups", "POST", apiConfig.Parameters
+		}
+	}
+
+	// Default fallback
+	return baseURL, "GET", nil
+}
+
+// buildGoogleAPIRequest builds Google API requests
+func (e *Engine) buildGoogleAPIRequest(apiConfig *APIConfig) (string, string, interface{}) {
+	// Simplified implementation for Google APIs
+	baseURL := "https://www.googleapis.com"
+	
+	switch apiConfig.Service {
+	case "admin":
+		switch apiConfig.Operation {
+		case "list_users":
+			return baseURL + "/admin/directory/v1/users", "GET", nil
+		case "create_user":
+			return baseURL + "/admin/directory/v1/users", "POST", apiConfig.Parameters
+		}
+	}
+
+	return baseURL, "GET", nil
+}
+
+// buildSalesforceAPIRequest builds Salesforce API requests
+func (e *Engine) buildSalesforceAPIRequest(apiConfig *APIConfig) (string, string, interface{}) {
+	// Simplified implementation for Salesforce APIs
+	// Note: Real implementation would need instance URL from authentication
+	baseURL := "https://your-instance.salesforce.com/services/data/v57.0"
+	
+	switch apiConfig.Service {
+	case "sobjects":
+		switch apiConfig.Operation {
+		case "query":
+			return baseURL + "/query", "GET", nil
+		case "create":
+			objectType := apiConfig.Parameters["object_type"]
+			return fmt.Sprintf("%s/sobjects/%v", baseURL, objectType), "POST", apiConfig.Parameters
+		}
+	}
+
+	return baseURL, "GET", nil
+}
+
+// parseAPIResponse parses API responses and stores relevant data in execution variables
+func (e *Engine) parseAPIResponse(step Step, response *HTTPResponse, execution *WorkflowExecution) error {
+	// Store common response data
+	e.mutex.Lock()
+	execution.Variables[step.Name+"_api_status"] = response.StatusCode
+	execution.Variables[step.Name+"_api_duration"] = response.Duration.String()
+	e.mutex.Unlock()
+
+	// Try to parse JSON response
+	if len(response.Body) > 0 {
+		var responseData interface{}
+		if err := json.Unmarshal(response.Body, &responseData); err == nil {
+			e.mutex.Lock()
+			execution.Variables[step.Name+"_api_response"] = responseData
+			e.mutex.Unlock()
+		} else {
+			// Store as string if JSON parsing fails
+			e.mutex.Lock()
+			execution.Variables[step.Name+"_api_response"] = string(response.Body)
+			e.mutex.Unlock()
+		}
+	}
+
+	return nil
 }

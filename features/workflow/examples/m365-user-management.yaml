@@ -1,0 +1,197 @@
+name: "m365-user-lifecycle-management"
+description: "Complete Microsoft 365 user lifecycle management workflow"
+version: "1.0"
+
+variables:
+  tenant_id: "your-tenant-id"
+  client_id: "your-client-id"
+  client_secret: "your-client-secret"
+  new_user_domain: "contoso.com"
+
+steps:
+  - name: "authenticate-m365"
+    type: "api"
+    api:
+      provider: "microsoft"
+      service: "oauth"
+      operation: "get_token"
+      auth:
+        type: "oauth2"
+        oauth2:
+          client_id: "{{ .client_id }}"
+          client_secret: "{{ .client_secret }}"
+          token_url: "https://login.microsoftonline.com/{{ .tenant_id }}/oauth2/v2.0/token"
+          scopes: ["https://graph.microsoft.com/.default"]
+          grant_type: "client_credentials"
+      timeout: 30s
+      retry:
+        max_attempts: 3
+        initial_delay: 1s
+        backoff_multiplier: 2.0
+
+  - name: "create-new-user"
+    type: "api"
+    api:
+      provider: "microsoft"
+      service: "users"
+      operation: "create"
+      parameters:
+        displayName: "John Doe"
+        userPrincipalName: "john.doe@{{ .new_user_domain }}"
+        mailNickname: "johndoe"
+        passwordProfile:
+          forceChangePasswordNextSignIn: true
+          password: "TempPassword123!"
+        accountEnabled: true
+        usageLocation: "US"
+      auth:
+        type: "bearer"
+        bearer_token: "{{ .authenticate_m365_api_response.access_token }}"
+      timeout: 30s
+      retry:
+        max_attempts: 3
+        initial_delay: 2s
+        backoff_multiplier: 2.0
+
+  - name: "wait-for-user-provisioning"
+    type: "delay"
+    delay:
+      duration: 10s
+      message: "Waiting for user provisioning to complete"
+
+  - name: "assign-licenses"
+    type: "api"
+    api:
+      provider: "microsoft"
+      service: "users"
+      operation: "assign_license"
+      parameters:
+        user_id: "{{ .create_new_user_api_response.id }}"
+        addLicenses:
+          - skuId: "18181a46-0d4e-45cd-891e-60aabd171b4e"  # Office 365 E1
+            disabledPlans: []
+        removeLicenses: []
+      auth:
+        type: "bearer"
+        bearer_token: "{{ .authenticate_m365_api_response.access_token }}"
+      timeout: 30s
+
+  - name: "add-to-security-groups"
+    type: "parallel"
+    steps:
+      - name: "add-to-all-users-group"
+        type: "api"
+        api:
+          provider: "microsoft"
+          service: "groups"
+          operation: "add_member"
+          parameters:
+            group_id: "all-users-group-id"
+            member_id: "{{ .create_new_user_api_response.id }}"
+          auth:
+            type: "bearer"
+            bearer_token: "{{ .authenticate_m365_api_response.access_token }}"
+
+      - name: "add-to-department-group"
+        type: "api"
+        api:
+          provider: "microsoft"
+          service: "groups"
+          operation: "add_member"
+          parameters:
+            group_id: "department-group-id"
+            member_id: "{{ .create_new_user_api_response.id }}"
+          auth:
+            type: "bearer"
+            bearer_token: "{{ .authenticate_m365_api_response.access_token }}"
+
+  - name: "configure-teams-access"
+    type: "api"
+    api:
+      provider: "microsoft"
+      service: "teams"
+      operation: "add_team_member"
+      parameters:
+        team_id: "default-team-id"
+        user_id: "{{ .create_new_user_api_response.id }}"
+        role: "member"
+      auth:
+        type: "bearer"
+        bearer_token: "{{ .authenticate_m365_api_response.access_token }}"
+      timeout: 30s
+
+  - name: "setup-mailbox"
+    type: "api"
+    api:
+      provider: "microsoft"
+      service: "exchange"
+      operation: "configure_mailbox"
+      parameters:
+        user_id: "{{ .create_new_user_api_response.id }}"
+        mailbox_settings:
+          automaticRepliesSetting:
+            status: "disabled"
+          language:
+            locale: "en-US"
+          timeZone: "Eastern Standard Time"
+      auth:
+        type: "bearer"
+        bearer_token: "{{ .authenticate_m365_api_response.access_token }}"
+      timeout: 30s
+
+  - name: "send-welcome-notification"
+    type: "webhook"
+    webhook:
+      url: "https://your-notification-service.com/webhook"
+      method: "POST"
+      headers:
+        Content-Type: "application/json"
+      payload:
+        event: "user_created"
+        user:
+          id: "{{ .create_new_user_api_response.id }}"
+          displayName: "{{ .create_new_user_api_response.displayName }}"
+          userPrincipalName: "{{ .create_new_user_api_response.userPrincipalName }}"
+        timestamp: "{{ .now }}"
+      auth:
+        type: "api_key"
+        api_key: "your-webhook-api-key"
+        api_key_header: "X-API-Key"
+      timeout: 15s
+
+  - name: "verify-user-creation"
+    type: "api"
+    api:
+      provider: "microsoft"
+      service: "users"
+      operation: "get"
+      parameters:
+        user_id: "{{ .create_new_user_api_response.id }}"
+      auth:
+        type: "bearer"
+        bearer_token: "{{ .authenticate_m365_api_response.access_token }}"
+      timeout: 30s
+
+  - name: "log-completion"
+    type: "http"
+    http:
+      url: "https://your-logging-service.com/api/logs"
+      method: "POST"
+      headers:
+        Content-Type: "application/json"
+        X-Service: "cfgms-workflow"
+      body:
+        level: "info"
+        message: "M365 user lifecycle workflow completed successfully"
+        metadata:
+          workflow_id: "{{ .workflow_execution_id }}"
+          user_id: "{{ .create_new_user_api_response.id }}"
+          duration: "{{ .workflow_duration }}"
+      auth:
+        type: "bearer"
+        bearer_token: "your-logging-service-token"
+      expected_status: [200, 201]
+      timeout: 10s
+
+timeout: 5m
+on_failure: "stop"
