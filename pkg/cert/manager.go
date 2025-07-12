@@ -127,13 +127,41 @@ func NewManager(config *ManagerConfig) (*Manager, error) {
 	// Initialize renewer
 	renewer := NewRenewer(ca, store, validator)
 	
-	return &Manager{
+	manager := &Manager{
 		ca:        ca,
 		store:     store,
 		validator: validator,
 		renewer:   renewer,
 		config:    config,
-	}, nil
+	}
+	
+	// Store the CA certificate in the certificate store for easy retrieval
+	if !config.LoadExistingCA {
+		caInfo, err := ca.GetCAInfo()
+		if err == nil {
+			// Get the CA certificate PEM
+			caCertPEM, err := ca.GetCACertificate()
+			if err == nil {
+				// Create a Certificate object for the CA
+				caCertificate := &Certificate{
+					Type:           CertificateTypeCA,
+					CommonName:     caInfo.CommonName,
+					SerialNumber:   caInfo.SerialNumber,
+					CreatedAt:      caInfo.CreatedAt,
+					ExpiresAt:      caInfo.ExpiresAt,
+					IsValid:        caInfo.IsValid,
+					CertificatePEM: caCertPEM,
+					Fingerprint:    caInfo.Fingerprint,
+					Issuer:         "Self-signed CA",
+				}
+				
+				// Store the CA certificate (ignore errors as this is for convenience)
+				_ = store.StoreCertificate(caCertificate)
+			}
+		}
+	}
+	
+	return manager, nil
 }
 
 // GetCACertificate returns the CA certificate in PEM format
@@ -376,4 +404,16 @@ type ManagerStats struct {
 	RenewalCandidates   int
 	CertificatesByType  map[CertificateType]int
 	CAInfo              *CertificateInfo
+}
+
+// GetStoragePath returns the certificate storage path
+func (m *Manager) GetStoragePath() string {
+	return m.store.GetStoragePath()
+}
+
+// InitializeCA initializes the CA if not already initialized
+func (m *Manager) InitializeCA() error {
+	// CA should already be initialized in NewManager
+	// This method is for compatibility with test code
+	return nil
 }

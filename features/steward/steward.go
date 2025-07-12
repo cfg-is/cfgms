@@ -43,6 +43,7 @@ import (
 	"github.com/cfgis/cfgms/features/steward/execution"
 	"github.com/cfgis/cfgms/features/steward/factory"
 	"github.com/cfgis/cfgms/features/steward/testing"
+	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -54,7 +55,7 @@ type Config struct {
 	// ControllerAddr is the address of the CFGMS controller to connect to
 	ControllerAddr string `yaml:"controller_addr"`
 	
-	// CertPath is the directory containing TLS certificates for mTLS authentication
+	// CertPath is the directory containing TLS certificates for mTLS authentication (legacy)
 	CertPath string `yaml:"cert_path"`
 	
 	// DataDir is the directory for local storage and caching
@@ -65,6 +66,42 @@ type Config struct {
 	
 	// ID is the unique identifier for this steward instance
 	ID string `yaml:"id"`
+	
+	// Certificate management configuration
+	Certificate *CertificateConfig `yaml:"certificate"`
+}
+
+// CertificateConfig contains certificate management settings for stewards
+type CertificateConfig struct {
+	// Enable automated certificate management
+	EnableCertManagement bool `yaml:"enable_cert_management"`
+	
+	// Path for certificate storage
+	CertStoragePath string `yaml:"cert_storage_path"`
+	
+	// Enable automatic certificate renewal
+	EnableAutoRenewal bool `yaml:"enable_auto_renewal"`
+	
+	// Certificate renewal threshold in days
+	RenewalThresholdDays int `yaml:"renewal_threshold_days"`
+	
+	// Certificate provisioning configuration
+	Provisioning *ProvisioningConfig `yaml:"provisioning"`
+}
+
+// ProvisioningConfig contains settings for automatic certificate provisioning
+type ProvisioningConfig struct {
+	// Enable automatic certificate provisioning during registration
+	EnableAutoProvisioning bool `yaml:"enable_auto_provisioning"`
+	
+	// Provisioning endpoint on the controller
+	ProvisioningEndpoint string `yaml:"provisioning_endpoint"`
+	
+	// Client certificate validity period in days
+	ValidityDays int `yaml:"validity_days"`
+	
+	// Organization name for certificates
+	Organization string `yaml:"organization"`
 }
 
 // DefaultConfig returns a Config with reasonable defaults for controller mode.
@@ -78,6 +115,18 @@ func DefaultConfig() *Config {
 		DataDir:        "data/",
 		LogLevel:       "info",
 		ID:             "",
+		Certificate: &CertificateConfig{
+			EnableCertManagement:  true,
+			CertStoragePath:      "certs/steward",
+			EnableAutoRenewal:    true,
+			RenewalThresholdDays: 30,
+			Provisioning: &ProvisioningConfig{
+				EnableAutoProvisioning: true,
+				ProvisioningEndpoint:   "/api/v1/certificates/provision",
+				ValidityDays:           365,
+				Organization:           "CFGMS Stewards",
+			},
+		},
 	}
 }
 
@@ -113,6 +162,9 @@ type Steward struct {
 	controllerClient *client.Client
 	dnaCollector     *dna.Collector
 	
+	// Certificate management (for controller mode)
+	certManager      *cert.Manager
+	
 	// Shutdown coordination
 	shutdown chan struct{}
 	
@@ -134,8 +186,18 @@ func New(cfg *Config, logger logging.Logger) (*Steward, error) {
 	// Create health monitor
 	healthMonitor := NewHealthMonitor(logger)
 	
-	// Create controller client
-	controllerClient, err := client.New(cfg.ControllerAddr, cfg.CertPath, logger)
+	// Initialize certificate manager if enabled
+	var certManager *cert.Manager
+	if cfg.Certificate != nil && cfg.Certificate.EnableCertManagement {
+		var err error
+		certManager, err = initializeStewardCertificateManager(cfg, logger)
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize certificate manager: %w", err)
+		}
+	}
+	
+	// Create controller client (will use certificate manager if available)
+	controllerClient, err := createControllerClient(cfg, certManager, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create controller client: %w", err)
 	}
@@ -149,6 +211,7 @@ func New(cfg *Config, logger logging.Logger) (*Steward, error) {
 		healthCheck:      healthMonitor,
 		controllerClient: controllerClient,
 		dnaCollector:     dnaCollector,
+		certManager:      certManager,
 		shutdown:         make(chan struct{}),
 		isStandalone:     false,
 	}, nil
@@ -497,4 +560,65 @@ func (s *Steward) GetStewardID() string {
 	}
 	
 	return s.controllerClient.GetStewardID()
+}
+
+// GetCertificateManager returns the certificate manager instance.
+//
+// Returns nil if certificate management is disabled or in standalone mode.
+func (s *Steward) GetCertificateManager() *cert.Manager {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.certManager
+}
+
+// initializeStewardCertificateManager initializes the certificate manager for steward use.
+func initializeStewardCertificateManager(cfg *Config, logger logging.Logger) (*cert.Manager, error) {
+	// For stewards, we typically don't create a CA, but use an existing one
+	// The CA information would come from the controller or be pre-configured
+	
+	// For now, create a simple certificate store for managing steward certificates
+	// In a full implementation, this would connect to the controller's CA
+	manager, err := cert.NewManager(&cert.ManagerConfig{
+		StoragePath:          cfg.Certificate.CertStoragePath,
+		LoadExistingCA:       false, // Stewards don't manage their own CA
+		EnableAutoRenewal:    cfg.Certificate.EnableAutoRenewal,
+		RenewalThresholdDays: cfg.Certificate.RenewalThresholdDays,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create certificate manager: %w", err)
+	}
+	
+	logger.Info("Initialized steward certificate manager", 
+		"storage_path", cfg.Certificate.CertStoragePath,
+		"auto_renewal", cfg.Certificate.EnableAutoRenewal)
+	
+	return manager, nil
+}
+
+// createControllerClient creates a controller client with optional certificate management.
+func createControllerClient(cfg *Config, certManager *cert.Manager, logger logging.Logger) (*client.Client, error) {
+	certPath := cfg.CertPath
+	
+	// If certificate management is enabled, use the managed certificate path
+	if certManager != nil {
+		certPath = cfg.Certificate.CertStoragePath
+		
+		// Check if we have a valid client certificate, if not request provisioning
+		if cfg.Certificate.Provisioning != nil && cfg.Certificate.Provisioning.EnableAutoProvisioning {
+			// TODO: Implement certificate provisioning during client creation
+			// This would involve:
+			// 1. Check if valid certificate exists
+			// 2. If not, request certificate from controller
+			// 3. Store the received certificate
+			logger.Info("Certificate auto-provisioning enabled, will request certificate during registration")
+		}
+	}
+	
+	// Create the controller client
+	controllerClient, err := client.New(cfg.ControllerAddr, certPath, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create controller client: %w", err)
+	}
+	
+	return controllerClient, nil
 } 

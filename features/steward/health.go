@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -53,6 +54,13 @@ type HealthMetrics struct {
 	ControllerConnected bool
 	LastHeartbeat       time.Time
 	HeartbeatErrors     int
+	
+	// Certificate health metrics
+	CertificateValid      bool
+	CertificateExpiration time.Time
+	DaysUntilExpiration   int
+	CertificateRenewals   int
+	CertificateErrors     int
 }
 
 // HealthMonitor implements health monitoring and automatic recovery
@@ -66,6 +74,7 @@ type HealthMonitor struct {
 	mu                   sync.RWMutex
 	configErrorThreshold int
 	latencyThreshold     time.Duration
+	certManager          *cert.Manager  // Certificate manager for health checks
 }
 
 // NewHealthMonitor creates a new health monitor
@@ -224,16 +233,51 @@ func (h *HealthMonitor) performHealthCheck() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	// Update metrics based on thresholds
+	// Update certificate health metrics first
+	h.updateCertificateHealth()
+
+	// Update overall status based on all health factors
+	var newStatus HealthStatus = StatusHealthy
+	
+	// Check certificate health
+	if !h.metrics.CertificateValid {
+		newStatus = StatusUnhealthy
+	} else if h.metrics.DaysUntilExpiration <= 7 {
+		// Certificate expires within a week
+		if newStatus == StatusHealthy {
+			newStatus = StatusDegraded
+		}
+	}
+	
+	// Check configuration errors
 	if h.metrics.ConfigErrors >= h.configErrorThreshold {
-		h.metrics.Status = StatusUnhealthy
+		newStatus = StatusUnhealthy
+	}
+	
+	// Check task latency
+	if h.metrics.AverageTaskLatency > h.latencyThreshold {
+		if newStatus == StatusHealthy {
+			newStatus = StatusDegraded
+		}
+	}
+	
+	// Check controller connectivity (only affects status if not standalone)
+	if !h.metrics.ControllerConnected && h.metrics.HeartbeatErrors > 0 {
+		if newStatus == StatusHealthy {
+			newStatus = StatusDegraded
+		}
+	}
+
+	// Update status if changed
+	if h.metrics.Status != newStatus {
+		h.metrics.Status = newStatus
 		h.metrics.LastStatusChange = time.Now()
-	} else if h.metrics.AverageTaskLatency > h.latencyThreshold {
-		h.metrics.Status = StatusDegraded
-		h.metrics.LastStatusChange = time.Now()
-	} else {
-		h.metrics.Status = StatusHealthy
-		h.metrics.LastStatusChange = time.Now()
+		h.logger.Info("Health status changed", 
+			"new_status", newStatus,
+			"certificate_valid", h.metrics.CertificateValid,
+			"days_until_expiration", h.metrics.DaysUntilExpiration,
+			"config_errors", h.metrics.ConfigErrors,
+			"controller_connected", h.metrics.ControllerConnected)
 	}
 }
 
@@ -328,4 +372,92 @@ func (h *HealthMonitor) RecordHeartbeatError() {
 // IsRunning returns whether the health monitor is running
 func (h *HealthMonitor) IsRunning() bool {
 	return h.running.Load()
+}
+
+// SetCertificateManager sets the certificate manager for health monitoring
+func (h *HealthMonitor) SetCertificateManager(certManager *cert.Manager) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.certManager = certManager
+}
+
+// RecordCertificateRenewal increments the certificate renewal count
+func (h *HealthMonitor) RecordCertificateRenewal() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.metrics.CertificateRenewals++
+	h.logger.Info("Certificate renewal recorded", "total_renewals", h.metrics.CertificateRenewals)
+}
+
+// RecordCertificateError increments the certificate error count
+func (h *HealthMonitor) RecordCertificateError() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.metrics.CertificateErrors++
+	
+	// Mark certificate as invalid if errors accumulate
+	if h.metrics.CertificateErrors >= 3 {
+		h.metrics.CertificateValid = false
+		h.logger.Warn("Certificate marked as invalid due to errors", 
+			"error_count", h.metrics.CertificateErrors)
+	}
+}
+
+// updateCertificateHealth updates certificate-related health metrics
+func (h *HealthMonitor) updateCertificateHealth() {
+	if h.certManager == nil {
+		// No certificate manager, assume certificate is not being used
+		h.metrics.CertificateValid = true
+		h.metrics.CertificateExpiration = time.Time{}
+		h.metrics.DaysUntilExpiration = 0
+		return
+	}
+
+	// Get current certificates and check their validity
+	certificates, err := h.certManager.GetCertificatesByType(cert.CertificateTypeClient)
+	if err != nil {
+		h.logger.Error("Failed to get certificates for health check", "error", err)
+		h.metrics.CertificateErrors++
+		h.metrics.CertificateValid = false
+		return
+	}
+
+	// Find the most recent valid certificate
+	var mostRecentCert *cert.CertificateInfo
+	for _, certInfo := range certificates {
+		if certInfo.IsValid {
+			if mostRecentCert == nil || certInfo.ExpiresAt.After(mostRecentCert.ExpiresAt) {
+				mostRecentCert = certInfo
+			}
+		}
+	}
+
+	if mostRecentCert == nil {
+		// No valid certificates found
+		h.metrics.CertificateValid = false
+		h.metrics.CertificateExpiration = time.Time{}
+		h.metrics.DaysUntilExpiration = 0
+		h.logger.Warn("No valid certificates found during health check")
+		return
+	}
+
+	// Update metrics with certificate information
+	h.metrics.CertificateValid = true
+	h.metrics.CertificateExpiration = mostRecentCert.ExpiresAt
+	
+	// Calculate days until expiration
+	daysUntilExpiration := int(time.Until(mostRecentCert.ExpiresAt).Hours() / 24)
+	if daysUntilExpiration < 0 {
+		daysUntilExpiration = 0
+		h.metrics.CertificateValid = false
+	}
+	h.metrics.DaysUntilExpiration = daysUntilExpiration
+
+	// Log certificate status
+	if daysUntilExpiration <= 7 && daysUntilExpiration > 0 {
+		h.logger.Warn("Certificate expiring soon", 
+			"serial", mostRecentCert.SerialNumber,
+			"days_until_expiration", daysUntilExpiration,
+			"expires_at", mostRecentCert.ExpiresAt.Format("2006-01-02"))
+	}
 }

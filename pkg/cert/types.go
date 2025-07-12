@@ -308,6 +308,9 @@ type CertificateStore interface {
 	
 	// GetExpiringCertificates returns certificates expiring within the specified days
 	GetExpiringCertificates(withinDays int) ([]*CertificateInfo, error)
+	
+	// GetStoragePath returns the base storage path
+	GetStoragePath() string
 }
 
 // CertificateValidator provides certificate validation functionality

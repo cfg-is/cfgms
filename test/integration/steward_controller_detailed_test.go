@@ -90,8 +90,9 @@ func (s *DetailedIntegrationTestSuite) TestDNASynchronization() {
 
 // TestMTLSAuthentication validates that mTLS authentication works correctly
 func (s *DetailedIntegrationTestSuite) TestMTLSAuthentication() {
-	// Verify certificates exist
-	s.env.VerifyCertificatesExist()
+	// Verify certificates are properly configured
+	err := s.env.ValidateCertificateSetup()
+	s.NoError(err, "Certificate setup should be valid for mTLS authentication")
 	
 	// Start both components - if mTLS fails, connection will fail
 	s.env.Start()

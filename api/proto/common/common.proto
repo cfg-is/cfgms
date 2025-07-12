@@ -26,6 +26,7 @@ message Status {
     NOT_FOUND = 2;
     UNAUTHORIZED = 3;
     INVALID_REQUEST = 4;
+    INTERNAL_ERROR = 5;
   }
   Code code = 1;
   string message = 2;
