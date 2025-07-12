@@ -78,14 +78,18 @@ func (e *Engine) ExecuteWorkflow(ctx context.Context, workflow Workflow, variabl
 
 // executeWorkflowAsync executes the workflow asynchronously
 func (e *Engine) executeWorkflowAsync(execution *WorkflowExecution, workflow Workflow) {
+	e.mutex.Lock()
 	execution.Status = StatusRunning
+	e.mutex.Unlock()
 
 	defer func() {
 		if r := recover(); r != nil {
+			e.mutex.Lock()
 			execution.Status = StatusFailed
 			execution.Error = fmt.Sprintf("workflow panicked: %v", r)
 			endTime := time.Now()
 			execution.EndTime = &endTime
+			e.mutex.Unlock()
 			e.logger.Error("Workflow execution panicked",
 				"execution_id", execution.ID,
 				"error", r)
@@ -96,16 +100,19 @@ func (e *Engine) executeWorkflowAsync(execution *WorkflowExecution, workflow Wor
 	err := e.executeSteps(execution.Context, workflow.Steps, execution)
 	
 	endTime := time.Now()
+	e.mutex.Lock()
 	execution.EndTime = &endTime
 
 	if err != nil {
 		execution.Status = StatusFailed
 		execution.Error = err.Error()
+		e.mutex.Unlock()
 		e.logger.Error("Workflow execution failed",
 			"execution_id", execution.ID,
 			"error", err)
 	} else {
 		execution.Status = StatusCompleted
+		e.mutex.Unlock()
 		e.logger.Info("Workflow execution completed",
 			"execution_id", execution.ID,
 			"duration", endTime.Sub(execution.StartTime))
@@ -150,7 +157,9 @@ func (e *Engine) executeSteps(ctx context.Context, steps []Step, execution *Work
 
 // executeStep executes a single step based on its type
 func (e *Engine) executeStep(ctx context.Context, step Step, execution *WorkflowExecution) error {
+	e.mutex.Lock()
 	execution.CurrentStep = step.Name
+	e.mutex.Unlock()
 	
 	e.logger.Info("Executing step",
 		"execution_id", execution.ID,
@@ -163,8 +172,10 @@ func (e *Engine) executeStep(ctx context.Context, step Step, execution *Workflow
 		StartTime: startTime,
 	}
 
-	// Store initial result
+	// Store initial result safely
+	e.mutex.Lock()
 	execution.StepResults[step.Name] = result
+	e.mutex.Unlock()
 
 	var err error
 	switch step.Type {
@@ -180,7 +191,7 @@ func (e *Engine) executeStep(ctx context.Context, step Step, execution *Workflow
 		err = fmt.Errorf("unknown step type: %s", step.Type)
 	}
 
-	// Update result
+	// Update result safely
 	endTime := time.Now()
 	result.EndTime = &endTime
 	result.Duration = endTime.Sub(startTime)
@@ -192,7 +203,9 @@ func (e *Engine) executeStep(ctx context.Context, step Step, execution *Workflow
 		result.Status = StatusCompleted
 	}
 
+	e.mutex.Lock()
 	execution.StepResults[step.Name] = result
+	e.mutex.Unlock()
 	return err
 }
 
@@ -236,9 +249,11 @@ func (e *Engine) executeTaskStep(ctx context.Context, step Step, execution *Work
 			"step", step.Name,
 			"error", err)
 	} else {
-		// Store output in variables
+		// Store output in variables safely
 		if finalState != nil {
+			e.mutex.Lock()
 			execution.Variables[step.Name+"_result"] = finalState.AsMap()
+			e.mutex.Unlock()
 		}
 	}
 
@@ -287,7 +302,15 @@ func (e *Engine) executeConditionalStep(ctx context.Context, step Step, executio
 		return fmt.Errorf("condition is required for conditional steps")
 	}
 
-	shouldExecute, err := e.evaluateCondition(step.Condition, execution.Variables)
+	// Get variables safely
+	e.mutex.Lock()
+	variablesCopy := make(map[string]interface{})
+	for k, v := range execution.Variables {
+		variablesCopy[k] = v
+	}
+	e.mutex.Unlock()
+	
+	shouldExecute, err := e.evaluateCondition(step.Condition, variablesCopy)
 	if err != nil {
 		return fmt.Errorf("failed to evaluate condition: %w", err)
 	}
@@ -334,14 +357,30 @@ func (e *Engine) evaluateVariableCondition(condition *Condition, variables map[s
 // GetExecution returns the status of a workflow execution
 func (e *Engine) GetExecution(executionID string) (*WorkflowExecution, error) {
 	e.mutex.RLock()
-	defer e.mutex.RUnlock()
-
 	execution, exists := e.executions[executionID]
+	e.mutex.RUnlock()
+
 	if !exists {
 		return nil, fmt.Errorf("execution not found: %s", executionID)
 	}
 
-	return execution, nil
+	// Return a copy to avoid race conditions
+	e.mutex.RLock()
+	executionCopy := *execution
+	
+	// Deep copy maps
+	executionCopy.StepResults = make(map[string]StepResult)
+	for k, v := range execution.StepResults {
+		executionCopy.StepResults[k] = v
+	}
+	
+	executionCopy.Variables = make(map[string]interface{})
+	for k, v := range execution.Variables {
+		executionCopy.Variables[k] = v
+	}
+	e.mutex.RUnlock()
+
+	return &executionCopy, nil
 }
 
 // ListExecutions returns all workflow executions
@@ -369,9 +408,11 @@ func (e *Engine) CancelExecution(executionID string) error {
 
 	if execution.Cancel != nil {
 		execution.Cancel()
+		e.mutex.Lock()
 		execution.Status = StatusCancelled
 		endTime := time.Now()
 		execution.EndTime = &endTime
+		e.mutex.Unlock()
 	}
 
 	return nil
