@@ -49,10 +49,17 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 - [x] Implement Basic Multi-tenancy (issue #30) - ✅ COMPLETED
 - [ ] Implement Basic Script Execution Capabilities (issue #39)
 - [ ] Implement Workflow Engine (Basic) (issue #32)
+  - [ ] Extend workflow engine for API-based modules and SaaS Steward foundation
+  - [ ] Add HTTP client with authentication and rate limiting to workflow engine
+  - [ ] Implement workflow engine integration framework for external APIs
 
-#### v0.3.0 (Alpha) - Enhanced Automation & DNA-driven Drift Tracking
+#### v0.3.0 (Alpha) - Enhanced Automation & SaaS Steward Foundation
 
-- [ ] Implement basic workflow support (issue #40)
+- [ ] Implement Business Logic workflow support (issue #40)
+  - [ ] Add webhook and delay workflow primitives
+- [ ] Build SaaS Steward prototype using workflow engine foundation
+- [ ] Implement API module framework for SaaS platforms
+- [ ] Add multi-tenant configuration inheritance for SaaS management
 - [ ] Implement configuration rollback (issue #41)
 - [ ] Add support for configuration versioning (issue #42)
 - [ ] Add support for configuration templates (issue #43)
@@ -61,12 +68,15 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 - [ ] Implement Configuration Drift Detection (via DNA Change History) (issue #46)
 - [ ] Implement Remote Terminal (1-1) (issue #47)
 
-#### v0.4.0 (Alpha) - Advanced Multi-Tenancy & Module System
+#### v0.4.0 (Alpha) - Advanced Multi-Tenancy & Plugin Architecture
 
 - [ ] Implement advanced module system
 - [ ] Add support for module dependencies
 - [ ] Implement module lifecycle management
 - [ ] Add support for module versioning
+- [ ] Implement plugin architecture for integrations
+- [ ] Create integration registry system
+- [ ] Add support for external integration plugins
 - [ ] Implement advanced RBAC
 - [ ] Add support for role inheritance
 - [ ] Implement advanced multi-tenancy
@@ -95,7 +105,7 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 #### v0.7.0 (Pre-OSS / Alpha) - Open Source Preparation
 
 - [ ] Conduct comprehensive security code review
-- [ ] Finalize Open Source License (e.g., Apache 2.0, MIT)
+- [ ] Finalize GTM stratagy, open-core, vs full OSS, select license etc
 - [ ] Perform branch cleanup (e.g., ensure `main` and `develop` are clean, remove old feature branches)
 - [ ] Review repository for any sensitive data or leftover internal artifacts
 - [ ] Clean up `README.md`, `CONTRIBUTING.md`, and other project meta-files for public consumption
@@ -117,21 +127,58 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 - [ ] Finalize advanced workflow engine and templates
 - [ ] Finalize advanced reporting
 
-#### v1.1.0 - v1.3.0: Focus on API Connector Framework & M365/SaaS Management
+#### v1.1.0 - v1.3.0: SaaS Steward Implementation & MSP Integrations
 
-- [ ] Implement API connector framework
-- [ ] Add support for Microsoft Graph API connector
-- [ ] Implement Microsoft 365 configuration management
-- [ ] Create extensible connector architecture for future integrations
-- [ ] Implement advanced API connector capabilities
-- [ ] Add support for additional SaaS connectors
-- [ ] Develop connector marketplace
+**Phase 1: M365 Foundation (v1.1.0)**
+- [ ] Implement SaaS Steward using workflow engine foundation
+- [ ] Core M365 modules for CSP management (15+ modules):
+  - [ ] Entra ID modules (user, group, license, conditional access)
+  - [ ] Teams modules (team, channel, membership)
+  - [ ] Exchange modules (mailbox, distribution groups, shared mailboxes)
+  - [ ] SharePoint modules (site, list management)
+  - [ ] Security modules (Defender policies, Intune device, Conditional Access policies)
+- [ ] M365 security baseline workflows
+- [ ] M365 user lifecycle automation workflows
 
-#### v1.4.0 - v1.5.0: Deepening Controller/Steward/Outpost Capabilities
+**Phase 2: MSP PSA Integration (v1.2.0)**
+- [ ] ConnectWise Manage integration modules
+  - [ ] Company/customer management
+  - [ ] Contact synchronization
+  - [ ] Ticket creation and management
+  - [ ] Service agreement management
+- [ ] AutoTask integration modules
+  - [ ] Account and contact management
+  - [ ] Ticket and contract management
+- [ ] Customer onboarding automation workflows
+- [ ] User lifecycle management workflows
 
-- [ ] Implement advanced Controller functionality
+**Phase 3: MSP RMM & Documentation (v1.3.0)**
+- [ ] SyncroMSP integration module
+- [ ] Connectwise Screenconnect integration modules
+- [ ] ConnectWise Azio/RMM integration modules
+- [ ] Datto RMM integration modules
+- [ ] Notion integration module (knowledge management)
+- [ ] ITGlue integration modules (documentation automation)
+- [ ] Hudu integration modules (knowledge management)
+- [ ] Incident response automation workflows
+- [ ] Security monitoring and compliance workflows
+- [ ] Multi-tenant management workflows
+
+#### v1.4.0 - v1.5.0: Advanced SaaS Management & Ecosystem Expansion
+
+**v1.4.0: Advanced SaaS Capabilities**
+- [ ] Advanced M365 management modules (Power Platform, Purview, etc.)
+- [ ] Multi-SaaS platform support (Google Workspace, Salesforce)
+- [ ] SaaS configuration templates and best practices library
+- [ ] Advanced security policy automation
+- [ ] Cross-platform SaaS identity management
+
+**v1.5.0: MSP Ecosystem & Controller Enhancement**
+- [ ] Additional MSP tool integrations (N-able, SolarWinds, etc.)
+- [ ] Workflow template marketplace for MSPs
+- [ ] Advanced multi-tenant SaaS management
 - [ ] Hierarchical Controller Management
-- [ ] Advanced Outpost functionality
+- [ ] Advanced Outpost functionality for SaaS traffic optimization
 - [ ] Advanced Steward functionality
 
 ### Phase 3: Digital Twin & Expansion (v1.6.0 - v3.5.0+)
@@ -200,6 +247,6 @@ Multi-layered validation approach:
 
 ## Version Information
 
-- **Version**: 1.5 (Reflects significant roadmap changes)
-- **Last Updated**: 2025-07-05
-- **Status**: Updated with Strategic Revisions
+- **Version**: 1.6 (Major roadmap revision for SaaS Steward and MSP focus)
+- **Last Updated**: 2025-07-12
+- **Status**: Updated with SaaS/MSP Strategic Focus
