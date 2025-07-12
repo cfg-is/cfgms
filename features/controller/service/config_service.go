@@ -7,12 +7,14 @@ import (
 	"sync"
 	"time"
 
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/types/known/timestamppb"
+
 	common "github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/validation"
 	"github.com/cfgis/cfgms/pkg/logging"
-	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // ConfigurationService implements the Configuration gRPC service
@@ -32,6 +34,7 @@ type ConfigurationService struct {
 // StoredConfiguration represents a configuration stored in the controller
 type StoredConfiguration struct {
 	StewardID     string
+	TenantID      string  // Multi-tenant support
 	Version       string
 	Config        *stewardconfig.StewardConfig
 	LastUpdated   time.Time
@@ -53,9 +56,13 @@ func NewConfigurationService(logger logging.Logger, controllerSvc *ControllerSer
 func (s *ConfigurationService) GetConfiguration(ctx context.Context, req *controller.ConfigRequest) (*controller.ConfigResponse, error) {
 	s.logger.Debug("Configuration request received", "steward_id", req.StewardId, "modules", req.Modules)
 	
-	// Verify steward exists
+	// Extract tenant context
+	tenantID := s.extractTenantID(ctx)
+	
+	// Verify steward exists and belongs to the tenant
 	if s.controllerSvc != nil {
-		if _, exists := s.controllerSvc.GetStewardInfo(req.StewardId); !exists {
+		stewardInfo, exists := s.controllerSvc.GetStewardInfo(req.StewardId)
+		if !exists {
 			s.logger.Warn("Configuration request from unknown steward", "steward_id", req.StewardId)
 			return &controller.ConfigResponse{
 				Status: &common.Status{
@@ -64,11 +71,24 @@ func (s *ConfigurationService) GetConfiguration(ctx context.Context, req *contro
 				},
 			}, nil
 		}
+		
+		// Check tenant isolation
+		if stewardInfo.TenantID != tenantID {
+			s.logger.Warn("Configuration request cross-tenant access denied", 
+				"steward_id", req.StewardId,
+				"steward_tenant", stewardInfo.TenantID,
+				"request_tenant", tenantID)
+			return &controller.ConfigResponse{
+				Status: &common.Status{
+					Code:    common.Status_UNAUTHORIZED,
+					Message: "Cross-tenant access denied",
+				},
+			}, nil
+		}
 	}
 	
-	s.mu.RLock()
-	storedConfig, exists := s.configurations[req.StewardId]
-	s.mu.RUnlock()
+	// Use tenant-aware configuration retrieval
+	storedConfig, exists := s.GetTenantConfiguration(tenantID, req.StewardId)
 	
 	if !exists {
 		s.logger.Debug("No configuration found for steward", "steward_id", req.StewardId)
@@ -435,4 +455,121 @@ func (s *ConfigurationService) notifyConfigurationUpdate(stewardID string, confi
 	default:
 		s.logger.Warn("Configuration update channel full, dropping update", "steward_id", stewardID)
 	}
+}
+
+// Tenant-aware configuration management methods
+
+// SetTenantConfiguration sets configuration for a steward within a specific tenant
+func (s *ConfigurationService) SetTenantConfiguration(tenantID, stewardID string, config *stewardconfig.StewardConfig) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	
+	key := s.makeTenantStewardKey(tenantID, stewardID)
+	now := time.Now()
+	
+	existingConfig, exists := s.configurations[key]
+	
+	storedConfig := &StoredConfiguration{
+		StewardID:   stewardID,
+		TenantID:    tenantID,
+		Version:     s.generateVersion(),
+		Config:      config,
+		LastUpdated: now,
+	}
+	
+	if exists {
+		storedConfig.CreatedAt = existingConfig.CreatedAt
+	} else {
+		storedConfig.CreatedAt = now
+	}
+	
+	s.configurations[key] = storedConfig
+	
+	s.logger.Info("Configuration stored for tenant steward", 
+		"tenant_id", tenantID,
+		"steward_id", stewardID,
+		"version", storedConfig.Version)
+	
+	// Notify if steward is subscribed
+	s.notifyConfigurationUpdate(stewardID, storedConfig)
+	
+	return nil
+}
+
+// GetTenantConfiguration retrieves configuration for a steward within a specific tenant
+func (s *ConfigurationService) GetTenantConfiguration(tenantID, stewardID string) (*StoredConfiguration, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	
+	key := s.makeTenantStewardKey(tenantID, stewardID)
+	config, exists := s.configurations[key]
+	if !exists {
+		return nil, false
+	}
+	
+	// Return a copy to prevent external modification
+	configCopy := *config
+	return &configCopy, true
+}
+
+// ListTenantConfigurations lists all configurations for a specific tenant
+func (s *ConfigurationService) ListTenantConfigurations(tenantID string) []*StoredConfiguration {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	
+	var configs []*StoredConfiguration
+	
+	for _, config := range s.configurations {
+		if config.TenantID == tenantID {
+			// Return a copy to prevent external modification
+			configCopy := *config
+			configs = append(configs, &configCopy)
+		}
+	}
+	
+	return configs
+}
+
+// DeleteTenantConfiguration removes configuration for a steward within a specific tenant
+func (s *ConfigurationService) DeleteTenantConfiguration(tenantID, stewardID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	
+	key := s.makeTenantStewardKey(tenantID, stewardID)
+	_, exists := s.configurations[key]
+	if exists {
+		delete(s.configurations, key)
+		s.logger.Info("Configuration deleted for tenant steward", 
+			"tenant_id", tenantID,
+			"steward_id", stewardID)
+	}
+	
+	return exists
+}
+
+// makeTenantStewardKey creates a unique key for tenant-scoped steward configurations
+func (s *ConfigurationService) makeTenantStewardKey(tenantID, stewardID string) string {
+	return fmt.Sprintf("%s:%s", tenantID, stewardID)
+}
+
+// generateVersion generates a new version string
+func (s *ConfigurationService) generateVersion() string {
+	return fmt.Sprintf("v%d", time.Now().Unix())
+}
+
+// extractTenantID extracts tenant ID from gRPC metadata
+func (s *ConfigurationService) extractTenantID(ctx context.Context) string {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		s.logger.Debug("No metadata found in context, using default tenant")
+		return "default"
+	}
+	
+	values := md.Get("tenant-id")
+	if len(values) > 0 && values[0] != "" {
+		return values[0]
+	}
+	
+	s.logger.Debug("No tenant-id in metadata, using default tenant")
+	return "default"
 }

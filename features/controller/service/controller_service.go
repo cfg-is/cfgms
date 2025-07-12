@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 
+	"google.golang.org/grpc/metadata"
+
 	common "github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -25,6 +27,7 @@ type ControllerService struct {
 // StewardInfo holds information about a registered steward
 type StewardInfo struct {
 	ID              string
+	TenantID        string  // Multi-tenant support
 	Version         string
 	DNA             *common.DNA
 	LastHeartbeat   time.Time
@@ -43,17 +46,29 @@ func NewControllerService(logger logging.Logger) *ControllerService {
 
 // Authenticate handles authentication requests
 func (s *ControllerService) Authenticate(ctx context.Context, creds *common.Credentials) (*common.Token, error) {
-	s.logger.Info("Authentication request received", "cert_subject", creds.Certificate)
+	s.logger.Info("Authentication request received", 
+		"tenant_id", creds.TenantId,
+		"client_id", creds.ClientId,
+		"cert_subject", creds.Certificate)
+	
+	// Validate tenant ID
+	tenantID := creds.TenantId
+	if tenantID == "" {
+		tenantID = "default" // Default to "default" tenant if not specified
+	}
 	
 	// Basic authentication implementation
-	// In a real implementation, this would validate certificates
+	// In a real implementation, this would validate certificates and tenant access
 	token, err := s.generateToken()
 	if err != nil {
 		s.logger.Error("Failed to generate authentication token", "error", err)
 		return nil, fmt.Errorf("authentication failed: %w", err)
 	}
 	
-	s.logger.Info("Authentication successful", "token", token[:16]+"...")
+	s.logger.Info("Authentication successful", 
+		"tenant_id", tenantID,
+		"client_id", creds.ClientId,
+		"token", token[:16]+"...")
 	return &common.Token{
 		AccessToken: token,
 		ExpiresAt:   time.Now().Add(24 * time.Hour).Unix(),
@@ -62,7 +77,11 @@ func (s *ControllerService) Authenticate(ctx context.Context, creds *common.Cred
 
 // AcceptRegistration handles steward registration requests
 func (s *ControllerService) AcceptRegistration(ctx context.Context, req *controller.RegisterRequest) (*controller.RegisterResponse, error) {
+	// Extract tenant information from gRPC metadata
+	tenantID := s.extractTenantID(ctx)
+	
 	s.logger.Info("Registration request received", 
+		"tenant_id", tenantID,
 		"version", req.Version, 
 		"is_reconnection", req.IsReconnection,
 		"steward_dna_id", req.InitialDna.Id)
@@ -116,6 +135,7 @@ func (s *ControllerService) AcceptRegistration(ctx context.Context, req *control
 	s.mu.Lock()
 	s.stewards[stewardID] = &StewardInfo{
 		ID:            stewardID,
+		TenantID:      tenantID,
 		Version:       req.Version,
 		DNA:           req.InitialDna,
 		LastHeartbeat: time.Now(),
@@ -307,4 +327,21 @@ func (s *ControllerService) verifySyncStatus(existingSteward *StewardInfo, req *
 		"client_fingerprint", clientFingerprint)
 	
 	return syncStatus, requiresDNAResync, requiresConfigResync
+}
+
+// extractTenantID extracts tenant ID from gRPC metadata
+func (s *ControllerService) extractTenantID(ctx context.Context) string {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		s.logger.Debug("No metadata found in context, using default tenant")
+		return "default"
+	}
+	
+	values := md.Get("tenant-id")
+	if len(values) > 0 && values[0] != "" {
+		return values[0]
+	}
+	
+	s.logger.Debug("No tenant-id in metadata, using default tenant")
+	return "default"
 }

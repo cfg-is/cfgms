@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
@@ -14,6 +15,9 @@ import (
 
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/service"
+	"github.com/cfgis/cfgms/features/rbac"
+	"github.com/cfgis/cfgms/features/tenant"
+	tenantmemory "github.com/cfgis/cfgms/features/tenant/memory"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -29,6 +33,8 @@ type Server struct {
 	configService     *service.ConfigurationService
 	certProvisioningService *service.CertificateProvisioningService
 	certManager       *cert.Manager
+	tenantManager     *tenant.Manager
+	rbacManager       *rbac.Manager
 }
 
 // New creates a new server instance
@@ -36,6 +42,18 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	if cfg == nil {
 		return nil, ErrNilConfig
 	}
+	
+	// Initialize RBAC system
+	rbacManager := rbac.NewManager()
+	
+	// Initialize default permissions and roles
+	if err := rbacManager.Initialize(context.Background()); err != nil {
+		logger.Warn("Failed to initialize RBAC configuration", "error", err)
+	}
+	
+	// Initialize tenant management
+	tenantStore := tenantmemory.NewStore()
+	tenantManager := tenant.NewManager(tenantStore, rbacManager)
 	
 	// Create the controller service
 	controllerService := service.NewControllerService(logger)
@@ -70,6 +88,8 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		configService:           configService,
 		certProvisioningService: certProvisioningService,
 		certManager:             certManager,
+		tenantManager:           tenantManager,
+		rbacManager:             rbacManager,
 	}, nil
 }
 
