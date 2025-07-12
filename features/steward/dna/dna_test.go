@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	
-	commonpb "github.com/cfgis/cfgms/api/proto"
+	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 

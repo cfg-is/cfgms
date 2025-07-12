@@ -8,9 +8,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	commonpb "github.com/cfgis/cfgms/api/proto"
+	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	controllerpb "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/features/steward/config"
 )
@@ -73,6 +74,43 @@ func (m *mockConfigClient) ValidateConfig(ctx context.Context, in *controllerpb.
 			Message: "Configuration is valid",
 		},
 	}, nil
+}
+
+func (m *mockConfigClient) StreamConfigurationUpdates(ctx context.Context, in *controllerpb.ConfigStreamRequest, opts ...grpc.CallOption) (controllerpb.ConfigurationService_StreamConfigurationUpdatesClient, error) {
+	// Return a mock stream client
+	return &mockConfigStreamClient{}, nil
+}
+
+// mockConfigStreamClient implements the streaming interface
+type mockConfigStreamClient struct{}
+
+func (m *mockConfigStreamClient) Recv() (*controllerpb.ConfigurationUpdate, error) {
+	// For testing purposes, just return EOF to end the stream
+	return nil, context.Canceled
+}
+
+func (m *mockConfigStreamClient) Header() (metadata.MD, error) {
+	return nil, nil
+}
+
+func (m *mockConfigStreamClient) Trailer() metadata.MD {
+	return nil
+}
+
+func (m *mockConfigStreamClient) CloseSend() error {
+	return nil
+}
+
+func (m *mockConfigStreamClient) Context() context.Context {
+	return context.Background()
+}
+
+func (m *mockConfigStreamClient) SendMsg(msg interface{}) error {
+	return nil
+}
+
+func (m *mockConfigStreamClient) RecvMsg(msg interface{}) error {
+	return nil
 }
 
 func (m *mockConfigClient) setConfigurationResponse(stewardID string, config *config.StewardConfig, version string) {
