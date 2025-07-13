@@ -162,9 +162,9 @@ func TestSystemMonitorCollectors(t *testing.T) {
 	defer cleanup()
 
 	t.Run("register and collect metrics", func(t *testing.T) {
-		monitor := monitoring.NewSystemMonitor(logger, tracer, &monitoring.MonitorConfig{
-			MetricsInterval: 100 * time.Millisecond,
-		})
+		config := monitoring.DefaultMonitorConfig()
+		config.MetricsInterval = 100 * time.Millisecond
+		monitor := monitoring.NewSystemMonitor(logger, tracer, config)
 
 		// Register mock collector
 		collector := &MockCollector{
@@ -191,7 +191,7 @@ func TestSystemMonitorCollectors(t *testing.T) {
 		time.Sleep(150 * time.Millisecond)
 
 		// Get system metrics
-		metrics := monitor.GetSystemMetrics()
+		metrics := monitor.GetMetrics()
 		assert.NotNil(t, metrics)
 		assert.Contains(t, metrics.ComponentMetrics, "test")
 	})
@@ -208,8 +208,7 @@ func TestSystemMonitorCollectors(t *testing.T) {
 		monitor.RegisterCollector("error", collector)
 
 		// Metrics collection should handle error gracefully
-		ctx := context.Background()
-		metrics := monitor.GetSystemMetrics()
+		metrics := monitor.GetMetrics()
 		assert.NotNil(t, metrics)
 	})
 }
@@ -452,7 +451,7 @@ func TestSystemMonitorIntegration(t *testing.T) {
 		require.NoError(t, err)
 
 		// Verify metrics collected
-		systemMetrics := monitor.GetSystemMetrics()
+		systemMetrics := monitor.GetMetrics()
 		assert.NotNil(t, systemMetrics)
 		assert.Contains(t, systemMetrics.ComponentMetrics, "service")
 
@@ -511,7 +510,7 @@ func BenchmarkSystemMonitorMetricsCollection(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = monitor.GetSystemMetrics()
+		_ = monitor.GetMetrics()
 	}
 }
 

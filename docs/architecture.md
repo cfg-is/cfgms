@@ -131,8 +131,22 @@ features/
 - `test/` - Integration and end-to-end tests
 - `docs/` - Architecture and development documentation
 
+## Monitoring and Observability
+
+CFGMS includes comprehensive monitoring capabilities:
+
+- **Distributed Tracing**: OpenTelemetry-based tracing with correlation IDs
+- **Structured Logging**: JSON logs with trace correlation
+- **System Metrics**: Resource usage and application performance monitoring
+- **Third-Party Integration**: Prometheus, Grafana, ELK stack, Jaeger support
+- **REST API**: Monitoring endpoints for external system integration
+
+See the [Monitoring Guide](monitoring.md) for detailed configuration and usage.
+
 ## Related Documentation
 
+- [Monitoring Guide](monitoring.md) - Complete monitoring and observability guide
+- [REST API Documentation](api/rest-api.md) - API reference including monitoring endpoints
 - [Steward Configuration](steward-configuration.md) - hostname.cfg format and options
 - [Module Development](modules/interface.md) - Module interface and development guide
 - [Development Roadmap](product/roadmap.md) - Feature timeline and future considerations
