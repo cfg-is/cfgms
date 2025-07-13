@@ -25,6 +25,11 @@ func (m *mockLogger) Info(msg string, fields ...interface{})  { m.logs = append(
 func (m *mockLogger) Warn(msg string, fields ...interface{})  { m.logs = append(m.logs, msg) }
 func (m *mockLogger) Error(msg string, fields ...interface{}) { m.logs = append(m.logs, msg) }
 func (m *mockLogger) Fatal(msg string, fields ...interface{}) { m.logs = append(m.logs, msg) }
+func (m *mockLogger) DebugCtx(ctx context.Context, msg string, fields ...interface{}) { m.Debug(msg, fields...) }
+func (m *mockLogger) InfoCtx(ctx context.Context, msg string, fields ...interface{})  { m.Info(msg, fields...) }
+func (m *mockLogger) WarnCtx(ctx context.Context, msg string, fields ...interface{})  { m.Warn(msg, fields...) }
+func (m *mockLogger) ErrorCtx(ctx context.Context, msg string, fields ...interface{}) { m.Error(msg, fields...) }
+func (m *mockLogger) FatalCtx(ctx context.Context, msg string, fields ...interface{}) { m.Fatal(msg, fields...) }
 
 func newMockLogger() *mockLogger {
 	return &mockLogger{logs: make([]string, 0)}
