@@ -43,7 +43,7 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 - [x] Implement configuration validation (issue #34) - ✅ COMPLETED
 - [x] Implement basic RBAC/ABAC (issue #31) - ✅ COMPLETED
 - [x] Implement certificate management (issue #35) - ✅ COMPLETED
-- [ ] Create basic API endpoints (issue #36)
+- [x] Create basic API endpoints (issue #36)
 - [ ] Implement configuration inheritance (issue #37)
 - [ ] Add basic monitoring capabilities (issue #38)
 - [x] Implement Basic Multi-tenancy (issue #30) - ✅ COMPLETED
