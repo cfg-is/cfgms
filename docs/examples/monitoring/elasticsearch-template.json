@@ -1,0 +1,111 @@
+{
+  "index_patterns": ["cfgms-logs-*"],
+  "template": {
+    "settings": {
+      "number_of_shards": 2,
+      "number_of_replicas": 1,
+      "index.refresh_interval": "30s",
+      "index.mapping.total_fields.limit": 2000
+    },
+    "mappings": {
+      "properties": {
+        "@timestamp": {
+          "type": "date",
+          "format": "strict_date_optional_time||epoch_millis"
+        },
+        "level": {
+          "type": "keyword",
+          "fields": {
+            "text": {
+              "type": "text",
+              "analyzer": "standard"
+            }
+          }
+        },
+        "message": {
+          "type": "text",
+          "analyzer": "standard",
+          "fields": {
+            "keyword": {
+              "type": "keyword",
+              "ignore_above": 256
+            }
+          }
+        },
+        "component": {
+          "type": "keyword"
+        },
+        "correlation_id": {
+          "type": "keyword"
+        },
+        "trace_id": {
+          "type": "keyword"
+        },
+        "span_id": {
+          "type": "keyword"
+        },
+        "steward_id": {
+          "type": "keyword"
+        },
+        "tenant_id": {
+          "type": "keyword"
+        },
+        "operation": {
+          "type": "keyword"
+        },
+        "duration_ms": {
+          "type": "long"
+        },
+        "error": {
+          "type": "text",
+          "analyzer": "standard"
+        },
+        "stack_trace": {
+          "type": "text",
+          "analyzer": "keyword"
+        },
+        "metadata": {
+          "type": "object",
+          "dynamic": true
+        },
+        "tags": {
+          "type": "keyword"
+        },
+        "source": {
+          "properties": {
+            "file": {
+              "type": "keyword"
+            },
+            "line": {
+              "type": "integer"
+            },
+            "function": {
+              "type": "keyword"
+            }
+          }
+        },
+        "system": {
+          "properties": {
+            "hostname": {
+              "type": "keyword"
+            },
+            "process_id": {
+              "type": "integer"
+            },
+            "thread_id": {
+              "type": "keyword"
+            }
+          }
+        }
+      }
+    }
+  },
+  "composed_of": [],
+  "priority": 100,
+  "version": 1,
+  "_meta": {
+    "description": "Template for CFGMS log indices",
+    "created_by": "cfgms-monitoring-setup",
+    "version": "0.2.0"
+  }
+}
