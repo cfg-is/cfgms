@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 
+	"github.com/cfgis/cfgms/features/controller/api"
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/server"
 	"github.com/cfgis/cfgms/features/controller/service"
@@ -34,6 +35,9 @@ type Controller struct {
 	// gRPC server for steward communication
 	server *server.Server
 
+	// REST API server for external HTTP access
+	apiServer *api.Server
+
 	// Shutdown management
 	shutdown chan struct{}
 	running  bool
@@ -51,12 +55,29 @@ func New(cfg *config.Config, logger logging.Logger) (*Controller, error) {
 		return nil, err
 	}
 
+	// Create the REST API server
+	apiSrv, err := api.New(
+		cfg,
+		logger,
+		srv.GetControllerService(),
+		srv.GetConfigurationService(),
+		srv.GetCertificateProvisioningService(),
+		srv.GetRBACService(),
+		srv.GetCertificateManager(),
+		srv.GetTenantManager(),
+		srv.GetRBACManager(),
+	)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Controller{
-		config:   cfg,
-		logger:   logger,
-		modules:  make(map[string]Module),
-		server:   srv,
-		shutdown: make(chan struct{}),
+		config:    cfg,
+		logger:    logger,
+		modules:   make(map[string]Module),
+		server:    srv,
+		apiServer: apiSrv,
+		shutdown:  make(chan struct{}),
 	}, nil
 }
 
@@ -77,6 +98,13 @@ func (c *Controller) Start(ctx context.Context) error {
 		return err
 	}
 
+	// Start the REST API server
+	if err := c.apiServer.Start(); err != nil {
+		c.logger.Error("Failed to start REST API server", "error", err)
+		// Don't fail completely if REST API fails to start
+		c.logger.Warn("Controller running without REST API server")
+	}
+
 	c.running = true
 	c.logger.Info("Controller started successfully")
 	return nil
@@ -92,6 +120,12 @@ func (c *Controller) Stop(ctx context.Context) error {
 	}
 
 	c.logger.Info("Stopping controller")
+
+	// Stop the REST API server
+	if err := c.apiServer.Stop(); err != nil {
+		c.logger.Error("Failed to stop REST API server", "error", err)
+		// Continue stopping other services
+	}
 
 	// Stop the gRPC server
 	if err := c.server.Stop(); err != nil {

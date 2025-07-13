@@ -53,6 +53,30 @@ CFGMS implements a robust security architecture:
   - Secure defaults
   - Comprehensive logging
 
+## REST API
+
+CFGMS provides a comprehensive REST API for external system integration:
+
+- **Base URL**: `http://localhost:9080/api/v1` (configurable)
+- **Authentication**: API key-based authentication
+- **Endpoints**: Steward management, configuration, certificates, RBAC
+- **Format**: JSON with standardized response structure
+
+### Quick API Example
+
+```bash
+# Check system health
+curl http://localhost:9080/api/v1/health
+
+# List stewards (requires API key)
+curl -H "X-API-Key: your-key" http://localhost:9080/api/v1/stewards
+
+# Get steward configuration
+curl -H "X-API-Key: your-key" http://localhost:9080/api/v1/stewards/steward-001/config
+```
+
+See [docs/api/rest-api.md](docs/api/rest-api.md) for complete API documentation.
+
 ## Project Structure
 
 The project follows a feature-based organization:
