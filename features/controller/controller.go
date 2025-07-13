@@ -66,6 +66,8 @@ func New(cfg *config.Config, logger logging.Logger) (*Controller, error) {
 		srv.GetCertificateManager(),
 		srv.GetTenantManager(),
 		srv.GetRBACManager(),
+		nil, // systemMonitor - will be integrated in Phase 5
+		nil, // tracer - will be integrated in Phase 5
 	)
 	if err != nil {
 		return nil, err

@@ -150,6 +150,11 @@ func (m *mockLogger) Info(msg string, fields ...interface{})  {}
 func (m *mockLogger) Warn(msg string, fields ...interface{})  {}
 func (m *mockLogger) Error(msg string, fields ...interface{}) {}
 func (m *mockLogger) Fatal(msg string, fields ...interface{}) {}
+func (m *mockLogger) DebugCtx(ctx context.Context, msg string, fields ...interface{}) {}
+func (m *mockLogger) InfoCtx(ctx context.Context, msg string, fields ...interface{})  {}
+func (m *mockLogger) WarnCtx(ctx context.Context, msg string, fields ...interface{})  {}
+func (m *mockLogger) ErrorCtx(ctx context.Context, msg string, fields ...interface{}) {}
+func (m *mockLogger) FatalCtx(ctx context.Context, msg string, fields ...interface{}) {}
 
 func createTestStewardConfig() *config.StewardConfig {
 	return &config.StewardConfig{

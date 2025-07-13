@@ -12,10 +12,12 @@ import (
 
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/service"
+	"github.com/cfgis/cfgms/features/monitoring"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/telemetry"
 	"github.com/gorilla/mux"
 )
 
@@ -33,6 +35,8 @@ type Server struct {
 	certManager             *cert.Manager
 	tenantManager           *tenant.Manager
 	rbacManager             *rbac.Manager
+	systemMonitor           *monitoring.SystemMonitor
+	tracer                  *telemetry.Tracer
 	apiKeys                 map[string]*APIKey // Simple API key storage
 }
 
@@ -66,6 +70,8 @@ func New(
 	certManager *cert.Manager,
 	tenantManager *tenant.Manager,
 	rbacManager *rbac.Manager,
+	systemMonitor *monitoring.SystemMonitor,
+	tracer *telemetry.Tracer,
 ) (*Server, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config cannot be nil")
@@ -81,6 +87,8 @@ func New(
 		certManager:             certManager,
 		tenantManager:           tenantManager,
 		rbacManager:             rbacManager,
+		systemMonitor:           systemMonitor,
+		tracer:                  tracer,
 		apiKeys:                 make(map[string]*APIKey),
 	}
 
@@ -165,6 +173,22 @@ func (s *Server) setupRouter() {
 	apiKeys.HandleFunc("", s.handleCreateAPIKey).Methods("POST")
 	apiKeys.HandleFunc("/{id}", s.handleGetAPIKey).Methods("GET")
 	apiKeys.HandleFunc("/{id}", s.handleDeleteAPIKey).Methods("DELETE")
+
+	// Monitoring endpoints
+	monitoring := api.PathPrefix("/monitoring").Subrouter()
+	monitoring.HandleFunc("/health", s.handleSystemHealth).Methods("GET")
+	monitoring.HandleFunc("/metrics", s.handleSystemMetrics).Methods("GET")
+	monitoring.HandleFunc("/resources", s.handleResourceMetrics).Methods("GET")
+	monitoring.HandleFunc("/logs", s.handleMonitoringLogs).Methods("GET")
+	monitoring.HandleFunc("/traces", s.handleMonitoringTraces).Methods("GET")
+	monitoring.HandleFunc("/events", s.handleMonitoringEvents).Methods("GET")
+	monitoring.HandleFunc("/config", s.handleMonitoringConfig).Methods("GET")
+	
+	// Steward-specific monitoring
+	monitoring.HandleFunc("/stewards/{id}/metrics", s.handleStewardMetrics).Methods("GET")
+	
+	// Controller service monitoring
+	monitoring.HandleFunc("/controller/services", s.handleControllerServices).Methods("GET")
 }
 
 // Start starts the HTTP server
