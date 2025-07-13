@@ -32,3 +32,13 @@ Thumbs.db
 
 # Build artifacts
 dist/
+
+# Certificate files and keys (auto-generated during runtime/testing)
+certs/
+*.pem
+*.crt
+*.key
+
+# Configuration files that might contain sensitive data
+config.yaml
+*.env
