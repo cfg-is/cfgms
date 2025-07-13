@@ -85,6 +85,11 @@ func (sm *SystemMonitor) collectMetrics(ctx context.Context) {
 	sm.logger.DebugCtx(ctx, "Metrics collection completed",
 		"collection_time_ms", collectionTime.Milliseconds(),
 		"collectors_count", len(sm.collectors))
+	
+	// Export metrics if export manager is configured
+	if sm.exportManager != nil {
+		sm.exportMetrics(ctx)
+	}
 }
 
 // resourceMonitoringLoop runs the periodic resource monitoring.
@@ -247,6 +252,11 @@ func (sm *SystemMonitor) emitEvent(event SystemEvent) {
 	// Inject correlation context if tracer is available
 	if sm.config.EnableEventCorrelation && sm.tracer != nil && event.CorrelationID == "" {
 		event.CorrelationID = telemetry.GenerateCorrelationID()
+	}
+	
+	// Export event if export manager is configured
+	if sm.exportManager != nil {
+		go sm.exportEvent(context.Background(), event)
 	}
 	
 	// Find watchers for this event type and "all" events

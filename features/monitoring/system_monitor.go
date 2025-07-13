@@ -31,6 +31,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cfgis/cfgms/features/monitoring/export"
 	"github.com/cfgis/cfgms/features/workflow"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/telemetry"
@@ -46,6 +47,10 @@ type SystemMonitor struct {
 	workflowMonitor *workflow.Monitor
 	collectors      map[string]MetricsCollector
 	watchers        map[string][]SystemEventWatcher
+	
+	// Export management
+	exportManager   *export.ExportManager
+	exportRegistry  *export.ExporterRegistry
 	
 	// Metrics storage
 	systemMetrics   *SystemMetrics
@@ -207,6 +212,9 @@ type MonitorConfig struct {
 	// Event settings
 	MaxEventHistory         int  `json:"max_event_history"`
 	EnableEventCorrelation  bool `json:"enable_event_correlation"`
+	
+	// Export configuration
+	ExportConfig            *export.ExportConfig `json:"export_config,omitempty"`
 }
 
 // DefaultMonitorConfig returns a configuration with sensible defaults.
@@ -231,12 +239,29 @@ func NewSystemMonitor(logger logging.Logger, tracer *telemetry.Tracer, config *M
 		config = DefaultMonitorConfig()
 	}
 	
+	// Create exporter registry
+	exportRegistry := export.NewExporterRegistry(logger, tracer)
+	
+	// Create export manager if export is configured
+	var exportManager *export.ExportManager
+	if config.ExportConfig != nil {
+		var err error
+		exportManager, err = exportRegistry.CreateExportManagerFromConfig(config.ExportConfig)
+		if err != nil {
+			logger.WarnCtx(context.Background(), "Failed to create export manager from config", 
+				"error", err)
+			// Continue without export functionality
+		}
+	}
+	
 	monitor := &SystemMonitor{
 		logger:          logger,
 		tracer:          tracer,
 		workflowMonitor: workflow.NewMonitor(logger),
 		collectors:      make(map[string]MetricsCollector),
 		watchers:        make(map[string][]SystemEventWatcher),
+		exportRegistry:  exportRegistry,
+		exportManager:   exportManager,
 		config:          config,
 		shutdownCh:      make(chan struct{}),
 		systemMetrics: &SystemMetrics{
@@ -308,6 +333,16 @@ func (sm *SystemMonitor) Start(ctx context.Context) error {
 		},
 	})
 	
+	// Start export manager if configured
+	if sm.exportManager != nil {
+		if err := sm.exportManager.Start(ctx); err != nil {
+			sm.logger.WarnCtx(ctx, "Failed to start export manager", "error", err)
+			// Continue without export functionality
+		} else {
+			sm.logger.InfoCtx(ctx, "Export manager started successfully")
+		}
+	}
+	
 	// Start background monitoring goroutines
 	go sm.metricsCollectionLoop(ctx)
 	
@@ -344,6 +379,15 @@ func (sm *SystemMonitor) Stop(ctx context.Context) error {
 		Timestamp: time.Now(),
 		Severity:  SeverityInfo,
 	})
+	
+	// Stop export manager if running
+	if sm.exportManager != nil {
+		if err := sm.exportManager.Stop(ctx); err != nil {
+			sm.logger.WarnCtx(ctx, "Failed to stop export manager", "error", err)
+		} else {
+			sm.logger.InfoCtx(ctx, "Export manager stopped successfully")
+		}
+	}
 	
 	// Signal shutdown and wait for goroutines
 	close(sm.shutdownCh)

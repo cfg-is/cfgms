@@ -34,6 +34,7 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/propagation"
@@ -103,6 +104,10 @@ func DefaultConfig(serviceName, version string) *Config {
 //	}
 //	defer cleanup()
 func Initialize(ctx context.Context, config *Config) (*Tracer, func(), error) {
+	if config == nil {
+		config = DefaultConfig("cfgms", "v0.2.0")
+	}
+	
 	if !config.Enabled {
 		// Return a no-op tracer when disabled
 		noopTracer := &Tracer{
@@ -248,3 +253,32 @@ func getComponentType(serviceName string) string {
 		return "unknown"
 	}
 }
+
+// Attribute creation helpers for common types
+// These provide convenient wrappers around OpenTelemetry attributes
+
+// AttributeString creates a string attribute.
+func AttributeString(key, value string) attribute.KeyValue {
+	return attribute.String(key, value)
+}
+
+// AttributeInt creates an integer attribute.
+func AttributeInt(key string, value int) attribute.KeyValue {
+	return attribute.Int(key, value)
+}
+
+// AttributeFloat creates a float64 attribute.
+func AttributeFloat(key string, value float64) attribute.KeyValue {
+	return attribute.Float64(key, value)
+}
+
+// AttributeBool creates a boolean attribute.
+func AttributeBool(key string, value bool) attribute.KeyValue {
+	return attribute.Bool(key, value)
+}
+
+// Span status constants
+const (
+	StatusOK    = codes.Ok
+	StatusError = codes.Error
+)

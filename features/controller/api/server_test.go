@@ -52,6 +52,8 @@ func setupTestServer(t *testing.T) (*Server, string) {
 		nil, // No cert manager for basic tests
 		tenantManager,
 		rbacManager,
+		nil, // No system monitor for basic tests
+		nil, // No tracer for basic tests
 	)
 	require.NoError(t, err)
 
