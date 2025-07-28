@@ -6,6 +6,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 CFGMS (Config Management System) is a modern, Go-based configuration management system designed with resilience, security, and clean architecture principles. The project implements a zero-trust security model with mutual TLS authentication and follows a feature-based organization structure.
 
+## Development Workflow
+
+### Sprint and Development Process
+- **Sprint Planning Guideline**: At the start of each milestone, ALWAYS conduct sprint/story planning before beginning work
+- **Story Development Workflow**:
+  1. Pick up the next story from the GitHub project
+  2. Create a feature branch
+  3. Use Test-Driven Development (TDD) to complete work on the feature
+  4. Once all tests are passing:
+     a) Commit files to feature branch
+     b) Ensure CLAUDE.md and roadmap are updated to reflect current step
+     c) Update GitHub project with current progress
+     d) Commit updated files and merge feature branch into develop branch
+  5. Start on the next story until all planned stories are complete
+
 ## Development Commands
 
 ### Building
@@ -135,7 +150,8 @@ features/
 - **Chaos Engineering**: Test resilience under failure conditions
 
 ### Security Requirements
-- All network communication must use mTLS
+- All internal network communication must use mTLS to protect gRPC
+- All external network communication must use TLS to secure REST
 - Implement proper input validation and sanitization
 - Use secure defaults in all configurations
 - Follow principle of least privilege
