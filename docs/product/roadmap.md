@@ -14,9 +14,9 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 
 ## Current Status
 
-- **Current Version**: 0.2.0 (Alpha)
-- **Status**: Critical Core & Early Multi-Tenancy/Automation Development
-- **Focus**: Configuration data flow, basic multi-tenancy, and automation capabilities
+- **Current Version**: 0.2.1 (Alpha)
+- **Status**: Test Infrastructure & Sprint Planning Foundation Development
+- **Focus**: Clean test foundation and BMAD agent-driven sprint planning for v0.3.0
 
 ## Development Phases
 
@@ -54,7 +54,23 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - [x] Implement workflow engine integration framework for external APIs
   - [x] Add webhook and delay workflow primitives - ✅ COMPLETED
 
-#### v0.3.0 (Alpha) - Enhanced Automation & SaaS Steward Foundation - 🔄 CURRENT
+#### v0.2.1 (Alpha) - Test Infrastructure & Sprint Planning Foundation - 🔄 CURRENT
+
+**Goal**: Establish clean test foundation and implement BMAD agent-driven sprint planning for v0.3.0 development
+
+**Core Objectives:**
+- [ ] **Test Infrastructure Cleanup**: Ensure all tests pass cleanly to prevent tech debt in v0.3.0
+  - [ ] Evaluate current test coverage sufficiency for v0.3.0 progression
+  - [ ] Fix remaining pre-existing test failures (config service tests)
+  - [ ] Establish baseline test quality standards for future development
+- [ ] **BMAD Agent Sprint Planning Implementation**: Transition to AI-assisted sprint planning methodology
+  - [ ] Use BMAD agents to analyze v0.3.0 roadmap requirements
+  - [ ] Generate detailed user stories from v0.3.0 milestone features
+  - [ ] Create sprint planning framework with automated story breakdown
+  - [ ] Establish story point estimation using historical v0.2.0 velocity data
+  - [ ] Set up automated project board management via GitHub CLI integration
+
+#### v0.3.0 (Alpha) - Enhanced Automation & SaaS Steward Foundation
 
 - [ ] Implement Business Logic workflow support (issue #40)
 - [ ] Build SaaS Steward prototype using workflow engine foundation
@@ -247,6 +263,6 @@ Multi-layered validation approach:
 
 ## Version Information
 
-- **Version**: 1.8 (v0.2.0 completion - all features delivered)
+- **Version**: 1.9 (v0.2.1 planning - BMAD agent sprint methodology)
 - **Last Updated**: 2025-07-28
-- **Status**: v0.2.0 COMPLETE ✅ - Ready for v0.3.0 development
+- **Status**: v0.2.0 COMPLETE ✅ - v0.2.1 Test Infrastructure & BMAD Sprint Planning Current

@@ -172,23 +172,28 @@ The system implements a recursive parent-child tenant model with:
 
 ## Current Development Status
 
-**Current Version**: v0.2.0 (Alpha) - Critical Core & Early Multi-Tenancy/Automation Development
+**Current Version**: v0.2.1 (Alpha) - Test Infrastructure & Sprint Planning Foundation
 
 **Reference**: See `docs/product/roadmap.md` for detailed current status and planning
 
 ### Recent Major Completions
 - ✅ **v0.1.0 Complete**: Steward core, Controller core, and integration validation
-- ✅ **Configuration Data Flow**: Complete gRPC configuration service with real-time updates
-- ✅ **Multi-tenancy Foundation**: Basic RBAC/ABAC and tenant management
-- ✅ **Security Framework**: Certificate management and mTLS authentication
-- ✅ **Workflow Engine**: Basic workflow execution with API integration capabilities
-- ✅ **Module System**: Complete ConfigState interface with directory, file, firewall, package, and script modules
-- ✅ **REST API Endpoints**: External API access for MSP tool integration with comprehensive OpenAPI 3.0 specification
-- ✅ **Configuration Inheritance**: Hierarchical MSP → Client → Group → Device cascading with source tracking
-- ✅ **Script Execution Framework**: Cross-platform script execution capabilities with configurable timeout, OS-level signing, and multi-shell support (Windows: PowerShell/cmd, Unix: bash/zsh/python)
+- ✅ **v0.2.0 Complete**: All 40 story points delivered (100% feature complete)
+  - ✅ **Configuration Data Flow**: Complete gRPC configuration service with real-time updates
+  - ✅ **Multi-tenancy Foundation**: Basic RBAC/ABAC and tenant management
+  - ✅ **Security Framework**: Certificate management and mTLS authentication
+  - ✅ **Workflow Engine**: Basic workflow execution with API integration capabilities
+  - ✅ **Module System**: Complete ConfigState interface with directory, file, firewall, package, and script modules
+  - ✅ **REST API Endpoints**: External API access for MSP tool integration with comprehensive OpenAPI 3.0 specification
+  - ✅ **Configuration Inheritance**: Hierarchical MSP → Client → Group → Device cascading with source tracking
+  - ✅ **Script Execution Framework**: Cross-platform script execution capabilities with configurable timeout, OS-level signing, and multi-shell support (Windows: PowerShell/cmd, Unix: bash/zsh/python)
 
-### Current Status: v0.2.0 82.5% Complete 🔄
-Core features complete (script execution, configuration inheritance, REST API). Working on Story 5 (Script Execution Audit & Management) and Story 6 (Polish & Documentation) to finish v0.2.0.
+### Current Status: v0.2.1 - Test Infrastructure & BMAD Sprint Planning 🔄
+**Next Objectives:**
+- **Test Infrastructure Cleanup**: Fix pre-existing test failures and establish quality baseline
+- **BMAD Agent Sprint Planning**: Implement AI-assisted sprint planning methodology for v0.3.0 development
+- **Automated Story Generation**: Use BMAD agents to create detailed user stories from roadmap features
+- **Project Board Automation**: Integrate GitHub CLI for automated project management
 
 ## Project Management
 
@@ -226,15 +231,15 @@ The project follows a structured milestone progression workflow:
 
 **Current State (Milestone Workflow):**
 - **v0.1.0**: Complete ✅ 
-- **v0.2.0**: 82.5% Complete 🔄 (Issues #29-39 Done, Stories 5-6 remaining)
-- **v0.3.0**: Issues #40-47 "Backlog" (planned next)
+- **v0.2.0**: Complete ✅ (All 40 story points delivered)
+- **v0.2.1**: Current 🔄 (Test Infrastructure & BMAD Sprint Planning)
+- **v0.3.0**: Planned next (Enhanced Automation & SaaS Steward Foundation)
 
-**v0.2.0 Progress:**
-- **Story 1**: REST API Implementation ✅ COMPLETE (Issue #36)
-- **Story 2**: Configuration Inheritance ✅ COMPLETE (Issue #37)  
-- **Story 3**: Script Execution Framework ✅ COMPLETE (Issue #39)
-- **Story 5**: Script Execution Audit & Management 🔄 IN PROGRESS
-- **Story 6**: v0.2.0 Polish & Documentation ⏳ PENDING
+**v0.2.1 Objectives:**
+- **Test Infrastructure Cleanup**: Fix pre-existing config service test failures
+- **BMAD Agent Integration**: Implement AI-assisted sprint planning for v0.3.0
+- **Story Generation**: Automated user story creation from roadmap features
+- **Project Board Automation**: GitHub CLI integration for project management
 
 This workflow ensures sustainable development rhythm with clear prioritization and forward visibility.
 
@@ -324,6 +329,38 @@ gh project item-edit \
 3. List project items to get item IDs
 4. Update item status using project-id, item-id, field-id, and option-id
 5. Verify changes with another item-list command
+
+## v0.2.1 BMAD Agent Sprint Planning Framework
+
+### Overview
+Transitioning to AI-assisted sprint planning using BMAD (Build, Measure, Analyze, Decide) methodology for v0.3.0 development. This approach leverages Claude Code agents to analyze roadmap requirements and generate detailed implementation plans.
+
+### BMAD Agent Integration
+- **Build**: Use agents to create detailed user stories from high-level roadmap features
+- **Measure**: Apply historical velocity data from v0.2.0 (40 story points across 6 stories)
+- **Analyze**: Agent-driven analysis of feature complexity and dependencies
+- **Decide**: Automated sprint planning with story point estimation and task breakdown
+
+### Sprint Planning Process
+1. **Roadmap Analysis**: BMAD agents analyze v0.3.0 features (Business Logic workflows, SaaS Steward, API modules, etc.)
+2. **Story Generation**: Convert high-level features into detailed user stories with acceptance criteria
+3. **Story Point Estimation**: Use v0.2.0 velocity data (2-21 points per story) for estimation
+4. **Sprint Organization**: Group stories into logical sprints with clear deliverable outcomes
+5. **Project Board Setup**: Automated GitHub CLI integration for issue creation and status management
+
+### Implementation Approach
+- **Agent Task Orchestration**: Use Task tool for complex multi-step analysis
+- **Historical Data**: Reference v0.2.0 sprint planning success patterns
+- **Automation**: GitHub CLI integration for seamless project board management
+- **Quality Gates**: Ensure all stories have clear acceptance criteria and definition of done
+
+### Next Steps for v0.2.1
+1. **Complete Test Infrastructure Cleanup**: Fix config service tests
+2. **Implement BMAD Agent Framework**: Create sprint planning automation
+3. **Generate v0.3.0 Stories**: Use agents to create detailed implementation plans
+4. **Establish Project Board Automation**: GitHub CLI integration for story management
+
+---
 
 ## Dependencies
 - `github.com/spf13/cobra` - CLI framework
