@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,6 +17,37 @@ import (
 	"github.com/cfgis/cfgms/features/validation"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
+
+// EffectiveConfig represents the final configuration after applying inheritance
+type EffectiveConfig struct {
+	StewardID   string                           `json:"steward_id"`
+	TenantID    string                           `json:"tenant_id"`
+	Resources   map[string]*EffectiveResource    `json:"resources"`
+	Steward     *EffectiveSection                `json:"steward"`
+	Modules     map[string]*EffectiveValue       `json:"modules"`
+	GeneratedAt time.Time                        `json:"generated_at"`
+}
+
+// EffectiveResource represents a resource configuration with inheritance tracking
+type EffectiveResource struct {
+	Name   string                   `json:"name"`
+	Module string                   `json:"module"`
+	Config map[string]*EffectiveValue `json:"config"`
+	Source string                   `json:"source"` // Which level provided this resource
+	Level  int                      `json:"level"`  // Hierarchy level (0=msp, 1=client, 2=group, 3=device)
+}
+
+// EffectiveSection represents a configuration section with inheritance tracking
+type EffectiveSection struct {
+	Values map[string]*EffectiveValue `json:"values"`
+}
+
+// EffectiveValue represents a single configuration value with its source
+type EffectiveValue struct {
+	Value  interface{} `json:"value"`
+	Source string      `json:"source"` // Which level provided this value
+	Level  int         `json:"level"`  // Hierarchy level
+}
 
 // ConfigurationService implements the Configuration gRPC service
 type ConfigurationService struct {
@@ -265,9 +297,6 @@ func (s *ConfigurationService) convertValidationLevel(level validation.Validatio
 
 // SetConfiguration stores a configuration for a specific steward
 func (s *ConfigurationService) SetConfiguration(stewardID string, config *stewardconfig.StewardConfig) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	
 	version := fmt.Sprintf("v%d", time.Now().Unix())
 	now := time.Now()
 	
@@ -279,6 +308,7 @@ func (s *ConfigurationService) SetConfiguration(stewardID string, config *stewar
 		LastUpdated: now,
 	}
 	
+	s.mu.Lock()
 	if existing, exists := s.configurations[stewardID]; exists {
 		storedConfig.CreatedAt = existing.CreatedAt
 	} else {
@@ -286,10 +316,11 @@ func (s *ConfigurationService) SetConfiguration(stewardID string, config *stewar
 	}
 	
 	s.configurations[stewardID] = storedConfig
+	s.mu.Unlock()
 	
 	s.logger.Info("Configuration stored", "steward_id", stewardID, "version", version)
 	
-	// Notify subscribers of the update
+	// Notify subscribers of the update (after releasing lock to avoid deadlock)
 	s.notifyConfigurationUpdate(stewardID, storedConfig)
 	
 	return nil
@@ -461,13 +492,8 @@ func (s *ConfigurationService) notifyConfigurationUpdate(stewardID string, confi
 
 // SetTenantConfiguration sets configuration for a steward within a specific tenant
 func (s *ConfigurationService) SetTenantConfiguration(tenantID, stewardID string, config *stewardconfig.StewardConfig) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	
 	key := s.makeTenantStewardKey(tenantID, stewardID)
 	now := time.Now()
-	
-	existingConfig, exists := s.configurations[key]
 	
 	storedConfig := &StoredConfiguration{
 		StewardID:   stewardID,
@@ -477,6 +503,9 @@ func (s *ConfigurationService) SetTenantConfiguration(tenantID, stewardID string
 		LastUpdated: now,
 	}
 	
+	s.mu.Lock()
+	existingConfig, exists := s.configurations[key]
+	
 	if exists {
 		storedConfig.CreatedAt = existingConfig.CreatedAt
 	} else {
@@ -484,13 +513,14 @@ func (s *ConfigurationService) SetTenantConfiguration(tenantID, stewardID string
 	}
 	
 	s.configurations[key] = storedConfig
+	s.mu.Unlock()
 	
 	s.logger.Info("Configuration stored for tenant steward", 
 		"tenant_id", tenantID,
 		"steward_id", stewardID,
 		"version", storedConfig.Version)
 	
-	// Notify if steward is subscribed
+	// Notify if steward is subscribed (after releasing lock to avoid deadlock)
 	s.notifyConfigurationUpdate(stewardID, storedConfig)
 	
 	return nil
@@ -528,6 +558,118 @@ func (s *ConfigurationService) ListTenantConfigurations(tenantID string) []*Stor
 	}
 	
 	return configs
+}
+
+// GetEffectiveConfiguration returns the effective configuration for a steward
+// after applying inheritance from the tenant hierarchy
+func (s *ConfigurationService) GetEffectiveConfiguration(stewardID string) (*EffectiveConfig, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Get steward info to determine tenant hierarchy
+	stewardInfo, exists := s.controllerSvc.GetStewardInfo(stewardID)
+	if !exists {
+		return nil, fmt.Errorf("steward not found: %s", stewardID)
+	}
+
+	// For now, implement basic inheritance from tenant config to device config
+	// This is a simplified version - full hierarchy will be implemented later
+	
+	// Start with device-specific config
+	deviceConfig, deviceExists := s.configurations[stewardID]
+	
+	// Get tenant-level config as base
+	tenantKey := fmt.Sprintf("%s:", stewardInfo.TenantID)
+	var tenantConfig *StoredConfiguration
+	for key, config := range s.configurations {
+		if strings.HasPrefix(key, tenantKey) && config.TenantID == stewardInfo.TenantID {
+			tenantConfig = config
+			break
+		}
+	}
+
+	// Build effective configuration
+	effective := &EffectiveConfig{
+		StewardID:   stewardID,
+		TenantID:    stewardInfo.TenantID,
+		Resources:   make(map[string]*EffectiveResource),
+		Steward:     &EffectiveSection{Values: make(map[string]*EffectiveValue)},
+		Modules:     make(map[string]*EffectiveValue),
+		GeneratedAt: time.Now(),
+	}
+
+	// Apply tenant-level configuration first (base layer)
+	if tenantConfig != nil && tenantConfig.Config != nil {
+		s.applyConfigurationLayer(effective, tenantConfig, "tenant", 1)
+	}
+
+	// Apply device-specific configuration (override layer)
+	if deviceExists && deviceConfig.Config != nil {
+		s.applyConfigurationLayer(effective, deviceConfig, "device", 3)
+	}
+
+	// If no configuration found at any level, return basic structure
+	if !deviceExists && tenantConfig == nil {
+		s.logger.Debug("No configuration found for steward", "steward_id", stewardID)
+	}
+
+	return effective, nil
+}
+
+// applyConfigurationLayer applies a configuration layer to the effective config
+func (s *ConfigurationService) applyConfigurationLayer(effective *EffectiveConfig, stored *StoredConfiguration, source string, level int) {
+	if stored.Config == nil {
+		return
+	}
+
+	// Apply resources
+	for _, resource := range stored.Config.Resources {
+		resourceName := resource.Name
+		
+		// Create or update resource (declarative - entire resource replaces)
+		effective.Resources[resourceName] = &EffectiveResource{
+			Name:   resource.Name,
+			Module: resource.Module,
+			Config: make(map[string]*EffectiveValue),
+			Source: source,
+			Level:  level,
+		}
+
+		// Apply all config values for this resource
+		for key, value := range resource.Config {
+			effective.Resources[resourceName].Config[key] = &EffectiveValue{
+				Value:  value,
+				Source: source,
+				Level:  level,
+			}
+		}
+	}
+
+	// Apply steward settings
+	if stored.Config.Steward.ID != "" {
+		effective.Steward.Values["id"] = &EffectiveValue{
+			Value:  stored.Config.Steward.ID,
+			Source: source,
+			Level:  level,
+		}
+	}
+
+	if stored.Config.Steward.Mode != "" {
+		effective.Steward.Values["mode"] = &EffectiveValue{
+			Value:  string(stored.Config.Steward.Mode),
+			Source: source,
+			Level:  level,
+		}
+	}
+
+	// Apply modules
+	for moduleName, modulePath := range stored.Config.Modules {
+		effective.Modules[moduleName] = &EffectiveValue{
+			Value:  modulePath,
+			Source: source,
+			Level:  level,
+		}
+	}
 }
 
 // DeleteTenantConfiguration removes configuration for a steward within a specific tenant

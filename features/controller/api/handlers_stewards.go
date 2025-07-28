@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	controller "github.com/cfgis/cfgms/api/proto/controller"
@@ -260,4 +261,33 @@ func (s *Server) handleGetConfigStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeSuccessResponse(w, status)
+}
+
+// handleGetEffectiveConfig handles GET /api/v1/stewards/{id}/config/effective
+func (s *Server) handleGetEffectiveConfig(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	stewardID := vars["id"]
+
+	if stewardID == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Steward ID is required", "MISSING_STEWARD_ID")
+		return
+	}
+
+	// Get effective configuration from the configuration service
+	effectiveConfig, err := s.configService.GetEffectiveConfiguration(stewardID)
+	if err != nil {
+		s.logger.Error("Failed to get effective configuration", "steward_id", stewardID, "error", err)
+		
+		// Check if steward not found
+		if err.Error() == fmt.Sprintf("steward not found: %s", stewardID) {
+			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+			return
+		}
+		
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve effective configuration", "INTERNAL_ERROR")
+		return
+	}
+
+	s.logger.Info("Retrieved effective configuration", "steward_id", stewardID, "resources_count", len(effectiveConfig.Resources))
+	s.writeSuccessResponse(w, effectiveConfig)
 }

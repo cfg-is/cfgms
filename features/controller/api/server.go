@@ -130,6 +130,7 @@ func (s *Server) setupRouter() {
 	stewards.HandleFunc("/{id}/config", s.handleUpdateStewardConfig).Methods("PUT")
 	stewards.HandleFunc("/{id}/config/validate", s.handleValidateConfig).Methods("POST")
 	stewards.HandleFunc("/{id}/config/status", s.handleGetConfigStatus).Methods("GET")
+	stewards.HandleFunc("/{id}/config/effective", s.handleGetEffectiveConfig).Methods("GET")
 
 	// Certificate management endpoints
 	certs := api.PathPrefix("/certificates").Subrouter()
