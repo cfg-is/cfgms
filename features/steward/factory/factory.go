@@ -41,6 +41,7 @@ import (
 	"github.com/cfgis/cfgms/features/modules/firewall"
 	package_module "github.com/cfgis/cfgms/features/modules/package"
 	"github.com/cfgis/cfgms/features/modules/patch"
+	"github.com/cfgis/cfgms/features/modules/script"
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
 )
@@ -131,6 +132,8 @@ func (f *ModuleFactory) loadBuiltinModule(moduleName string) (modules.Module, er
 		return package_module.New(), nil
 	case "patch":
 		return patch.New(), nil
+	case "script":
+		return script.New(), nil
 	default:
 		return nil, fmt.Errorf("unknown built-in module: %s", moduleName)
 	}

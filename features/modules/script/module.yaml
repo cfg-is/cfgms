@@ -1,0 +1,28 @@
+name: script
+version: 0.1.0
+description: >
+  Cross-platform script execution module that supports running shell scripts,
+  PowerShell scripts, and Python scripts with configurable timeouts, environment
+  variables, and optional signature validation.
+
+dependencies: []
+
+requirements:
+  os: [windows, linux, darwin]
+  arch: [amd64, arm64]
+  min_memory: "256MB"
+  min_disk: "100MB"
+
+interfaces:
+  - Get
+  - Set
+  - Test
+
+security:
+  requires_root: false
+  capabilities: []
+  ports: []
+
+documentation:
+  api: "README.md"
+  examples: "tests/"
