@@ -109,7 +109,7 @@ features/
 ## Development Guidelines
 
 ### Go Standards
-- Use Go 1.21+ features
+- Use Go 1.23+ features
 - Follow dependency injection patterns
 - No global variables or state
 - Implement proper context cancellation
@@ -160,9 +160,12 @@ Following GitFlow:
 - `docs/*` - Documentation updates
 - `refactor/*` - Code improvements
 
-## Multi-Tenancy
+## Multi-Tenancy & Configuration Inheritance
 The system implements a recursive parent-child tenant model with:
-- Hierarchical configuration inheritance
+- **Hierarchical Configuration Inheritance**: MSP (Level 0) → Client (Level 1) → Group (Level 2) → Device (Level 3)
+- **Declarative Merging**: Named resources (e.g., `firewall.rules.web`) replace entire blocks rather than field-level merging
+- **Source Tracking**: Every configuration value includes source attribution and hierarchy level for full auditability
+- **REST API Access**: `/api/v1/stewards/{id}/config/effective` endpoint provides merged configuration with inheritance metadata
 - Tenant-aware RBAC with cascading permissions
 - Efficient cross-tenant operations using path-based targeting
 - Designed to handle 50k+ Stewards across multiple regions
@@ -180,11 +183,11 @@ The system implements a recursive parent-child tenant model with:
 - ✅ **Security Framework**: Certificate management and mTLS authentication
 - ✅ **Workflow Engine**: Basic workflow execution with API integration capabilities
 - ✅ **Module System**: Complete ConfigState interface with directory, file, firewall, and package modules
+- ✅ **REST API Endpoints**: External API access for MSP tool integration with comprehensive OpenAPI 3.0 specification
+- ✅ **Configuration Inheritance**: Hierarchical MSP → Client → Group → Device cascading with source tracking
 
-### Current Focus (v0.2.0 Remaining)
-- 🔄 **REST API Endpoints**: External API access for MSP tool integration
-- 🔄 **Configuration Inheritance**: Hierarchical MSP → Client → Group → Device cascading
-- 🔄 **Script Execution**: Cross-platform script execution capabilities
+### Current Focus (v0.2.0 Final Item)
+- 🔄 **Script Execution Framework**: Cross-platform script execution capabilities with configurable timeout, OS-level signing, and multi-shell support (Windows: PowerShell/cmd, Unix: bash/zsh/python)
 
 ## Project Management
 
@@ -220,10 +223,15 @@ The project follows a structured milestone progression workflow:
    - Continuous planning maintains forward momentum
    - Always one milestone ahead in planning for roadmap adjustments
 
-**Current State:**
-- **v0.1.0**: Complete ✅ (Issue #28 Done)
-- **v0.2.0**: Issues #29-39 "Todo" (current focus)
+**Current State (Agile Sprint Workflow):**
+- **v0.1.0**: Complete ✅ 
+- **v0.2.0**: 95% Complete (Issues #29-38 Done ✅, Issue #39 Script Execution In Progress 🔄)
 - **v0.3.0**: Issues #40-47 "Backlog" (planned next)
+
+**Sprint Progress:**
+- **Story 1**: REST API Implementation ✅ COMPLETE (Issue #36)
+- **Story 2**: Configuration Inheritance ✅ COMPLETE (Issue #37)  
+- **Story 3**: Script Execution Framework 🔄 IN PROGRESS (Issue #39)
 
 This workflow ensures sustainable development rhythm with clear prioritization and forward visibility.
 
