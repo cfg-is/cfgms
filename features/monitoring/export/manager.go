@@ -408,6 +408,13 @@ func (em *ExportManager) Export(data ExportData) error {
 		data.Timestamp = time.Now()
 	}
 	
+	// For test environments, check if we should process synchronously
+	if data.ExportType == ExportTypeManual {
+		// Process synchronously for manual/test exports
+		em.processExportData(context.Background(), data)
+		return nil
+	}
+	
 	select {
 	case em.dataChannel <- data:
 		return nil

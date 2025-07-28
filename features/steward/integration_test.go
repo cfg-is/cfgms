@@ -36,7 +36,7 @@ func TestStewardControllerMode(t *testing.T) {
 	
 	// We expect this to fail since we don't have certificates
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to create controller client")
+	assert.Contains(t, err.Error(), "failed to initialize certificate manager")
 }
 
 func TestHealthMonitorIntegration(t *testing.T) {

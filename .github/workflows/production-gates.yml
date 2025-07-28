@@ -1,0 +1,166 @@
+name: Production Risk Gates
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+    inputs:
+      gate_type:
+        description: 'Which gate to run'
+        required: true
+        default: 'v030'
+        type: choice
+        options:
+        - v030
+        - v040
+        - all
+
+jobs:
+  production-risk-assessment:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.23'
+    
+    - name: Install dependencies
+      run: go mod download
+    
+    - name: Run Production Risk Analysis
+      run: |
+        echo "🔍 PRODUCTION RISK ANALYSIS"
+        echo "=========================="
+        echo ""
+        
+        echo "📊 Current Export Reliability Status:"
+        make test-export-reliability || true
+        
+        echo ""
+        echo "💰 Cost Impact Analysis:"
+        make cost-analysis
+        
+        echo ""
+        echo "🔒 Compliance Risk Assessment:"
+        make compliance-check
+        
+        echo ""
+        echo "📋 Test Summary:"
+        echo "- Core functionality: $(make test-production-critical >/dev/null 2>&1 && echo '✅ PASS' || echo '❌ FAIL')"
+        echo "- Cost protection: $(go test ./features/monitoring/export/... -run 'TestExportManagerDataExport/export_with_sampling' >/dev/null 2>&1 && echo '✅ WORKING' || echo '⚠️ BROKEN')"
+        echo "- Data loss prevention: $(go test ./features/monitoring/export/... -run 'TestExportManagerErrorHandling/handle_export_errors_with_retry' >/dev/null 2>&1 && echo '✅ WORKING' || echo '⚠️ BROKEN')"
+        echo "- Compliance protection: $(go test ./features/monitoring/export/... -run 'TestExportDataFiltering/filter_data_types_per_exporter' >/dev/null 2>&1 && echo '✅ WORKING' || echo '⚠️ BROKEN')"
+
+  v030-release-gate:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || contains(github.event.inputs.gate_type, 'v030') || contains(github.event.inputs.gate_type, 'all')
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.23'
+    
+    - name: Install dependencies
+      run: go mod download
+    
+    - name: v0.3.0 Release Gate - Alpha Readiness
+      run: |
+        echo "🚪 Running v0.3.0 Release Gate"
+        echo "=============================="
+        
+        if make test-v030-gate; then
+          echo ""
+          echo "✅ v0.3.0 RELEASE GATE PASSED"
+          echo "   Ready for alpha MSP deployment"
+          exit 0
+        else
+          echo ""
+          echo "❌ v0.3.0 RELEASE GATE FAILED"
+          echo "   🚫 ALPHA DEPLOYMENT BLOCKED"
+          echo ""
+          echo "Required fixes before alpha deployment:"
+          echo "1. Fix export sampling logic (GitHub issue #62)"
+          echo "2. Fix export retry mechanism (GitHub issue #63)"
+          echo ""
+          echo "Track progress: https://github.com/cfg-is/cfgms/issues/62"
+          exit 1
+        fi
+
+  v040-release-gate:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || contains(github.event.inputs.gate_type, 'v040') || contains(github.event.inputs.gate_type, 'all')
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.23'
+    
+    - name: Install dependencies
+      run: go mod download
+    
+    - name: v0.4.0 Release Gate - Production Readiness  
+      run: |
+        echo "🚪 Running v0.4.0 Release Gate"
+        echo "=============================="
+        
+        if make test-v040-gate; then
+          echo ""
+          echo "✅ v0.4.0 RELEASE GATE PASSED"
+          echo "   Ready for production scale deployment"
+          exit 0
+        else
+          echo ""
+          echo "❌ v0.4.0 RELEASE GATE FAILED"
+          echo "   🚫 PRODUCTION DEPLOYMENT BLOCKED"
+          echo ""
+          echo "Required fixes before production deployment:"
+          echo "1. Fix export sampling logic (GitHub issue #62)"
+          echo "2. Fix export retry mechanism (GitHub issue #63)"  
+          echo "3. Fix export data filtering (GitHub issue #64)"
+          echo ""
+          echo "Track progress: https://github.com/cfg-is/cfgms/projects/1"
+          exit 1
+        fi
+
+  cost-monitoring:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.23'
+    
+    - name: Install dependencies
+      run: go mod download
+    
+    - name: Monitor Cost Risk Trends
+      run: |
+        echo "📈 COST RISK TREND MONITORING"
+        echo "============================="
+        
+        # Check if sampling is getting worse
+        if ! go test ./features/monitoring/export/... -run "TestExportManagerDataExport/export_with_sampling" >/dev/null 2>&1; then
+          echo "🚨 CRITICAL: Sampling logic still broken after $(date)"
+          echo "   Estimated cost impact at scale:"
+          echo "   - 1,000 stewards: Additional $9,720/month"
+          echo "   - 10,000 stewards: Additional $97,200/month" 
+          echo "   - 50,000 stewards: Additional $486,000/month"
+          echo ""
+          echo "⏰ Days since issue opened: $((($(date +%s) - $(date -d '2025-01-28' +%s)) / 86400)) days"
+          echo "🎯 Target fix: v0.3.0 (blocks alpha deployment)"
+        fi
+        
+        # Always show current status for tracking
+        echo ""
+        echo "Current status summary:"
+        make test-export-reliability || true

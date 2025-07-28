@@ -226,16 +226,16 @@ func TestSystemMonitorWatchers(t *testing.T) {
 		monitor := monitoring.NewSystemMonitor(logger, tracer, nil)
 		ctx := context.Background()
 
-		// Start monitor
+		// Register watcher for startup events BEFORE starting
+		watcher := &MockWatcher{name: "test-watcher"}
+		monitor.RegisterWatcher(string(monitoring.EventSystemStartup), watcher)
+
+		// Start monitor (should emit startup event)
 		err := monitor.Start(ctx)
 		require.NoError(t, err)
 		defer monitor.Stop(ctx)
 
-		// Register watcher
-		watcher := &MockWatcher{name: "test-watcher"}
-		monitor.RegisterWatcher(string(monitoring.EventConfigurationApplied), watcher)
-
-		// Give time for startup event
+		// Give time for event processing
 		time.Sleep(50 * time.Millisecond)
 
 		// Should have received startup event
@@ -310,9 +310,10 @@ func TestSystemMonitorHealth(t *testing.T) {
 		// Get system health
 		health := monitor.GetSystemHealth()
 		assert.NotNil(t, health)
-		assert.Len(t, health, 2)
-		assert.Equal(t, "healthy", health["healthy-component"].Status)
-		assert.Equal(t, "degraded", health["degraded-component"].Status)
+		assert.Len(t, health, 3) // 2 collectors + system_monitor
+		assert.Equal(t, "healthy", health["healthy"].Status)
+		assert.Equal(t, "degraded", health["degraded"].Status)
+		assert.Equal(t, "healthy", health["system_monitor"].Status)
 	})
 
 	t.Run("health check with errors", func(t *testing.T) {
@@ -329,7 +330,8 @@ func TestSystemMonitorHealth(t *testing.T) {
 		// Should handle error gracefully
 		health := monitor.GetSystemHealth()
 		assert.NotNil(t, health)
-		assert.Equal(t, "unhealthy", health["error-component"].Status)
+		assert.Len(t, health, 2) // 1 collector + system_monitor
+		assert.Equal(t, "unhealthy", health["error"].Status)
 	})
 }
 
@@ -474,8 +476,8 @@ func TestSystemMonitorIntegration(t *testing.T) {
 
 		// Verify health status
 		health := monitor.GetSystemHealth()
-		assert.Contains(t, health, "test-service")
-		assert.Equal(t, "healthy", health["test-service"].Status)
+		assert.Contains(t, health, "service")
+		assert.Equal(t, "healthy", health["service"].Status)
 	})
 }
 

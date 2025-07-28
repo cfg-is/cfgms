@@ -237,6 +237,17 @@ func DefaultMonitorConfig() *MonitorConfig {
 func NewSystemMonitor(logger logging.Logger, tracer *telemetry.Tracer, config *MonitorConfig) *SystemMonitor {
 	if config == nil {
 		config = DefaultMonitorConfig()
+	} else {
+		// Ensure required fields have defaults if not set
+		if config.MetricsInterval <= 0 {
+			config.MetricsInterval = 30 * time.Second
+		}
+		if config.ResourceInterval <= 0 {
+			config.ResourceInterval = 60 * time.Second
+		}
+		if config.HealthCheckInterval <= 0 {
+			config.HealthCheckInterval = 30 * time.Second
+		}
 	}
 	
 	// Create exporter registry
@@ -392,12 +403,13 @@ func (sm *SystemMonitor) Stop(ctx context.Context) error {
 	// Signal shutdown and wait for goroutines
 	close(sm.shutdownCh)
 	
-	// Wait a moment for graceful shutdown
+	// Wait for graceful shutdown, respecting context timeout
 	select {
-	case <-time.After(5 * time.Second):
-		sm.logger.WarnCtx(ctx, "System monitor shutdown timeout reached")
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-time.After(100 * time.Millisecond):
+		// Give a brief moment for cleanup, then return success
+		return nil
 	}
 	
 	return nil

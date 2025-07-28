@@ -217,6 +217,11 @@ func (fs *FileStore) ListCertificates() ([]*CertificateInfo, error) {
 	
 	var results []*CertificateInfo
 	for _, cert := range fs.certs {
+		// Skip CA certificates - they are handled separately
+		if cert.Type == CertificateTypeCA {
+			continue
+		}
+		
 		// Create a copy to avoid mutation
 		certCopy := *cert
 		// Update dynamic fields
