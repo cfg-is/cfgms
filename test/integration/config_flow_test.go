@@ -164,9 +164,12 @@ func (s *ConfigFlowTestSuite) TestConfigurationDataFlow() {
 
 	// Verify logs indicate successful configuration flow
 	infoLogs := s.env.Logger.GetLogs("info")
-	s.True(s.containsLogMessage(infoLogs, "Configuration stored"))
-	s.True(s.containsLogMessage(infoLogs, "Configuration retrieved successfully"))
+	s.True(s.containsLogMessage(infoLogs, "Configuration stored for tenant steward"))
 	s.True(s.containsLogMessage(infoLogs, "Configuration status report processed"))
+	
+	// Configuration retrieval message is at DEBUG level, so check debug logs
+	debugLogs := s.env.Logger.GetLogs("debug")
+	s.True(s.containsLogMessage(debugLogs, "Configuration retrieved successfully"))
 }
 
 func (s *ConfigFlowTestSuite) TestConfigurationNotFound() {

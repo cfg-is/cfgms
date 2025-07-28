@@ -77,6 +77,7 @@ type Client struct {
 	lastHeartbeat time.Time
 	heartbeatInterval time.Duration
 	heartbeatStop chan struct{}
+	heartbeatRunning bool
 	
 	// Sync tracking
 	lastSyncFingerprint string
@@ -183,9 +184,16 @@ func (c *Client) Disconnect() error {
 
 	c.logger.Info("Disconnecting from controller")
 
-	// Stop heartbeat
-	close(c.heartbeatStop)
-	c.heartbeatStop = make(chan struct{})
+	// Stop heartbeat if running
+	if c.heartbeatRunning {
+		select {
+		case <-c.heartbeatStop:
+			// Already closed
+		default:
+			close(c.heartbeatStop)
+		}
+		c.heartbeatRunning = false
+	}
 
 	// Close connection
 	if c.conn != nil {
@@ -276,8 +284,12 @@ func (c *Client) Register(ctx context.Context, version string, dna *commonpb.DNA
 		// This would be handled by the calling steward
 	}
 
-	// Start heartbeat mechanism
-	go c.startHeartbeat()
+	// Start heartbeat mechanism if not already running
+	if !c.heartbeatRunning {
+		c.heartbeatStop = make(chan struct{})
+		c.heartbeatRunning = true
+		go c.startHeartbeat()
+	}
 
 	return c.stewardID, nil
 }
@@ -432,6 +444,7 @@ func (c *Client) startHeartbeat() {
 			
 		case <-c.heartbeatStop:
 			c.logger.Info("Heartbeat mechanism stopped")
+			// Note: heartbeatRunning flag will be set to false by Disconnect()
 			return
 		}
 	}
