@@ -138,7 +138,7 @@ func (s *Server) writeErrorResponse(w http.ResponseWriter, statusCode int, messa
 		Timestamp: time.Now().UTC(),
 	}
 
-	json.NewEncoder(w).Encode(errorResponse)
+	_ = json.NewEncoder(w).Encode(errorResponse)
 }
 
 // writeSuccessResponse writes a standardized success response
@@ -161,18 +161,3 @@ func (s *Server) writeResponse(w http.ResponseWriter, statusCode int, data inter
 	}
 }
 
-// getAPIKeyFromContext extracts the API key from request context
-func (s *Server) getAPIKeyFromContext(ctx context.Context) *APIKey {
-	if key, ok := ctx.Value(apiKeyContextKey).(*APIKey); ok {
-		return key
-	}
-	return nil
-}
-
-// getUserIDFromContext extracts the user ID from request context
-func (s *Server) getUserIDFromContext(ctx context.Context) string {
-	if userID, ok := ctx.Value(userIDContextKey).(string); ok {
-		return userID
-	}
-	return ""
-}

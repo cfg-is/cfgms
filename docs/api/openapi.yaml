@@ -1,0 +1,1038 @@
+openapi: 3.0.3
+info:
+  title: CFGMS REST API
+  description: |
+    Configuration Management System REST API for managing stewards, configurations,
+    certificates, and role-based access control.
+  version: 1.0.0
+  contact:
+    name: CFGMS Support
+    url: https://github.com/cfg-is/cfgms
+  license:
+    name: Apache 2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: http://localhost:9080/api/v1
+    description: Development server
+  - url: https://{hostname}:9080/api/v1
+    description: Production server
+    variables:
+      hostname:
+        default: cfgms.local
+        description: CFGMS controller hostname
+
+security:
+  - ApiKeyAuth: []
+
+paths:
+  /health:
+    get:
+      summary: Health check endpoint
+      description: Returns the health status of the API server
+      operationId: getHealth
+      security: []  # No authentication required
+      tags:
+        - System
+      responses:
+        '200':
+          description: API is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+              example:
+                data:
+                  status: healthy
+                  service: cfgms-api
+                  version: "0.2.0"
+                timestamp: "2025-07-27T16:00:00Z"
+
+  /stewards:
+    get:
+      summary: List all stewards
+      description: Returns a list of all registered stewards in the system
+      operationId: listStewards
+      tags:
+        - Stewards
+      responses:
+        '200':
+          description: List of stewards
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/StewardInfo'
+                  timestamp:
+                    type: string
+                    format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /stewards/{stewardId}:
+    get:
+      summary: Get steward details
+      description: Returns detailed information about a specific steward
+      operationId: getSteward
+      tags:
+        - Stewards
+      parameters:
+        - $ref: '#/components/parameters/stewardId'
+      responses:
+        '200':
+          description: Steward details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/StewardInfo'
+                  timestamp:
+                    type: string
+                    format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /stewards/{stewardId}/dna:
+    get:
+      summary: Get steward DNA information
+      description: Returns the DNA (system fingerprint) information for a steward
+      operationId: getStewardDNA
+      tags:
+        - Stewards
+      parameters:
+        - $ref: '#/components/parameters/stewardId'
+      responses:
+        '200':
+          description: Steward DNA information
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/DNAInfo'
+                  timestamp:
+                    type: string
+                    format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /stewards/{stewardId}/config:
+    get:
+      summary: Get steward configuration
+      description: Returns the current configuration for a steward
+      operationId: getStewardConfig
+      tags:
+        - Configuration
+      parameters:
+        - $ref: '#/components/parameters/stewardId'
+      responses:
+        '200':
+          description: Steward configuration
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/ConfigInfo'
+                  timestamp:
+                    type: string
+                    format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    put:
+      summary: Update steward configuration
+      description: Updates the configuration for a steward (currently not implemented)
+      operationId: updateStewardConfig
+      tags:
+        - Configuration
+      parameters:
+        - $ref: '#/components/parameters/stewardId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '501':
+          description: Not implemented
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: NOT_IMPLEMENTED
+                  message: Configuration updates not yet implemented
+                timestamp: "2025-07-27T16:00:00Z"
+
+  /stewards/{stewardId}/config/effective:
+    get:
+      summary: Get effective configuration with inheritance
+      description: Returns the effective configuration after applying inheritance hierarchy
+      operationId: getEffectiveConfig
+      tags:
+        - Configuration
+      parameters:
+        - $ref: '#/components/parameters/stewardId'
+      responses:
+        '200':
+          description: Effective configuration with source tracking
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/EffectiveConfig'
+                  timestamp:
+                    type: string
+                    format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+
+  /stewards/{stewardId}/config/validate:
+    post:
+      summary: Validate configuration
+      description: Validates a configuration without applying it
+      operationId: validateConfig
+      tags:
+        - Configuration
+      parameters:
+        - $ref: '#/components/parameters/stewardId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: Validation result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/ValidationResult'
+                  timestamp:
+                    type: string
+                    format: date-time
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /stewards/{stewardId}/config/status:
+    get:
+      summary: Get configuration status
+      description: Returns the status of configuration deployment on a steward
+      operationId: getConfigStatus
+      tags:
+        - Configuration
+      parameters:
+        - $ref: '#/components/parameters/stewardId'
+      responses:
+        '200':
+          description: Configuration status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/ConfigStatusInfo'
+                  timestamp:
+                    type: string
+                    format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /certificates:
+    get:
+      summary: List certificates
+      description: Returns a list of all certificates managed by the system
+      operationId: listCertificates
+      tags:
+        - Certificates
+      responses:
+        '200':
+          description: List of certificates
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/CertificateInfo'
+                  timestamp:
+                    type: string
+                    format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /certificates/provision:
+    post:
+      summary: Provision new certificate
+      description: Provisions a new certificate for a subject
+      operationId: provisionCertificate
+      tags:
+        - Certificates
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CertificateRequest'
+      responses:
+        '200':
+          description: Certificate provisioned successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/CertificateResponse'
+                  timestamp:
+                    type: string
+                    format: date-time
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /certificates/{serial}/revoke:
+    post:
+      summary: Revoke certificate
+      description: Revokes a certificate by serial number
+      operationId: revokeCertificate
+      tags:
+        - Certificates
+      parameters:
+        - name: serial
+          in: path
+          required: true
+          description: Certificate serial number
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Certificate revoked successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /rbac/permissions:
+    get:
+      summary: List permissions
+      description: Returns all available permissions in the system
+      operationId: listPermissions
+      tags:
+        - RBAC
+      responses:
+        '200':
+          description: List of permissions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Permission'
+                  timestamp:
+                    type: string
+                    format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /rbac/roles:
+    get:
+      summary: List roles
+      description: Returns all roles in the system
+      operationId: listRoles
+      tags:
+        - RBAC
+      responses:
+        '200':
+          description: List of roles
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Role'
+                  timestamp:
+                    type: string
+                    format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+    post:
+      summary: Create role
+      description: Creates a new role
+      operationId: createRole
+      tags:
+        - RBAC
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RoleRequest'
+      responses:
+        '200':
+          description: Role created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Role'
+                  timestamp:
+                    type: string
+                    format: date-time
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /rbac/check:
+    post:
+      summary: Check permission
+      description: Checks if a subject has a specific permission
+      operationId: checkPermission
+      tags:
+        - RBAC
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PermissionCheckRequest'
+      responses:
+        '200':
+          description: Permission check result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      allowed:
+                        type: boolean
+                  timestamp:
+                    type: string
+                    format: date-time
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api-keys:
+    get:
+      summary: List API keys
+      description: Returns all API keys (requires admin permissions)
+      operationId: listAPIKeys
+      tags:
+        - API Keys
+      responses:
+        '200':
+          description: List of API keys
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/APIKeyInfo'
+                  timestamp:
+                    type: string
+                    format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+    post:
+      summary: Create API key
+      description: Creates a new API key
+      operationId: createAPIKey
+      tags:
+        - API Keys
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/APIKeyRequest'
+      responses:
+        '200':
+          description: API key created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/APIKeyResponse'
+                  timestamp:
+                    type: string
+                    format: date-time
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api-keys/{keyId}:
+    get:
+      summary: Get API key details
+      description: Returns details about a specific API key
+      operationId: getAPIKey
+      tags:
+        - API Keys
+      parameters:
+        - name: keyId
+          in: path
+          required: true
+          description: API key ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: API key details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/APIKeyInfo'
+                  timestamp:
+                    type: string
+                    format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      summary: Delete API key
+      description: Deletes an API key
+      operationId: deleteAPIKey
+      tags:
+        - API Keys
+      parameters:
+        - name: keyId
+          in: path
+          required: true
+          description: API key ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: API key deleted successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /monitoring/health:
+    get:
+      summary: Get system health overview
+      description: Returns comprehensive health status of all system components
+      operationId: getSystemHealth
+      tags:
+        - Monitoring
+      responses:
+        '200':
+          description: System health overview
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/SystemHealth'
+                  timestamp:
+                    type: string
+                    format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /monitoring/metrics:
+    get:
+      summary: Get performance metrics
+      description: Returns current performance metrics for the system
+      operationId: getMetrics
+      tags:
+        - Monitoring
+      responses:
+        '200':
+          description: Performance metrics
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: true
+                  timestamp:
+                    type: string
+                    format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: API key authentication via X-API-Key header
+
+  parameters:
+    stewardId:
+      name: stewardId
+      in: path
+      required: true
+      description: Unique identifier of the steward
+      schema:
+        type: string
+
+  schemas:
+    SuccessResponse:
+      type: object
+      properties:
+        data:
+          type: object
+        timestamp:
+          type: string
+          format: date-time
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              description: Error code
+            message:
+              type: string
+              description: Human-readable error message
+        timestamp:
+          type: string
+          format: date-time
+
+    StewardInfo:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Unique steward identifier
+        status:
+          type: string
+          description: Current steward status
+          enum: [online, offline, unknown]
+        last_seen:
+          type: string
+          format: date-time
+          description: Last time the steward was seen
+        version:
+          type: string
+          description: Steward software version
+        connected_at:
+          type: string
+          format: date-time
+          description: Connection timestamp
+        metrics:
+          type: object
+          additionalProperties:
+            type: string
+          description: Steward performance metrics
+        dna:
+          $ref: '#/components/schemas/DNAInfo'
+
+    DNAInfo:
+      type: object
+      properties:
+        hostname:
+          type: string
+          description: Steward hostname
+        os:
+          type: string
+          description: Operating system
+        architecture:
+          type: string
+          description: System architecture
+        attributes:
+          type: object
+          additionalProperties:
+            type: string
+          description: Additional DNA attributes
+
+    ConfigInfo:
+      type: object
+      properties:
+        version:
+          type: string
+          description: Configuration version
+        modules:
+          type: object
+          additionalProperties:
+            type: object
+          description: Module-specific configurations
+
+    EffectiveConfig:
+      type: object
+      properties:
+        values:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/ConfigValue'
+
+    ConfigValue:
+      type: object
+      properties:
+        value:
+          description: The configuration value
+        source:
+          type: string
+          description: Which level provided this value
+          enum: [msp, client, group, device]
+        level:
+          type: integer
+          description: Hierarchy level (0=msp, 1=client, 2=group, 3=device)
+
+    ValidationResult:
+      type: object
+      properties:
+        valid:
+          type: boolean
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+              message:
+                type: string
+        warnings:
+          type: array
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+              message:
+                type: string
+
+    ConfigStatusInfo:
+      type: object
+      properties:
+        steward_id:
+          type: string
+        config_version:
+          type: string
+        last_applied:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [pending, applied, failed, unknown]
+        errors:
+          type: array
+          items:
+            type: string
+
+    CertificateInfo:
+      type: object
+      properties:
+        serial:
+          type: string
+        subject:
+          type: string
+        issuer:
+          type: string
+        not_before:
+          type: string
+          format: date-time
+        not_after:
+          type: string
+          format: date-time
+        revoked:
+          type: boolean
+
+    CertificateRequest:
+      type: object
+      required:
+        - subject_type
+        - subject_id
+      properties:
+        subject_type:
+          type: string
+          enum: [steward, user]
+        subject_id:
+          type: string
+        validity_days:
+          type: integer
+          default: 365
+
+    CertificateResponse:
+      type: object
+      properties:
+        certificate:
+          type: string
+          description: PEM-encoded certificate
+        private_key:
+          type: string
+          description: PEM-encoded private key
+        ca_certificate:
+          type: string
+          description: PEM-encoded CA certificate
+
+    Permission:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        resource:
+          type: string
+        action:
+          type: string
+
+    Role:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        permissions:
+          type: array
+          items:
+            type: string
+        tenant_id:
+          type: string
+
+    RoleRequest:
+      type: object
+      required:
+        - name
+        - permissions
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        permissions:
+          type: array
+          items:
+            type: string
+        tenant_id:
+          type: string
+
+    PermissionCheckRequest:
+      type: object
+      required:
+        - subject
+        - resource
+        - action
+      properties:
+        subject:
+          type: string
+        resource:
+          type: string
+        action:
+          type: string
+        tenant_id:
+          type: string
+
+    APIKeyInfo:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        last_used:
+          type: string
+          format: date-time
+        permissions:
+          type: array
+          items:
+            type: string
+
+    APIKeyRequest:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+        expires_in_days:
+          type: integer
+          minimum: 1
+          maximum: 365
+          default: 30
+        permissions:
+          type: array
+          items:
+            type: string
+
+    APIKeyResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        key:
+          type: string
+          description: The actual API key (only shown once)
+        name:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+
+    SystemHealth:
+      type: object
+      properties:
+        overall_status:
+          type: string
+          enum: [healthy, degraded, unhealthy]
+        components:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              status:
+                type: string
+                enum: [healthy, degraded, unhealthy]
+              message:
+                type: string
+        uptime_seconds:
+          type: integer
+        version:
+          type: string
+
+  responses:
+    BadRequest:
+      description: Bad request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: INVALID_REQUEST
+              message: The request was invalid
+            timestamp: "2025-07-27T16:00:00Z"
+
+    Unauthorized:
+      description: Unauthorized
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: UNAUTHORIZED
+              message: Authentication required
+            timestamp: "2025-07-27T16:00:00Z"
+
+    Forbidden:
+      description: Forbidden
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: FORBIDDEN
+              message: Insufficient permissions
+            timestamp: "2025-07-27T16:00:00Z"
+
+    NotFound:
+      description: Not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: NOT_FOUND
+              message: Resource not found
+            timestamp: "2025-07-27T16:00:00Z"
+
+    NotImplemented:
+      description: Not implemented
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: NOT_IMPLEMENTED
+              message: This feature is not yet implemented
+            timestamp: "2025-07-27T16:00:00Z"
