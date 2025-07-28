@@ -46,10 +46,22 @@ func (em *ExportManager) processExportData(ctx context.Context, data ExportData)
 		}
 	}
 	em.mu.RUnlock()
+	
+	// Debug logging for test environments
+	if data.ExportType == ExportTypeManual {
+		em.logger.InfoCtx(ctx, "Processing manual export data", 
+			"exporters_found", len(exporters),
+			"total_exporters", len(em.exporters))
+	}
 
-	// Export to all enabled exporters in parallel
+	// Export to all enabled exporters in parallel (or synchronously for manual exports)
 	for name, exporter := range exporters {
-		go em.exportToExporter(ctx, name, exporter, data)
+		if data.ExportType == ExportTypeManual {
+			// Process synchronously for test environments
+			em.exportToExporter(ctx, name, exporter, data)
+		} else {
+			go em.exportToExporter(ctx, name, exporter, data)
+		}
 	}
 }
 

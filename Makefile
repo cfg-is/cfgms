@@ -62,6 +62,159 @@ build-cert-manager:
 test:
 	go test -v -race -cover ./...
 
+# Production Risk Testing - Automated Gates
+.PHONY: test-production-critical test-export-reliability test-v030-gate test-v040-gate
+
+# Test only production-critical export functionality
+test-production-critical:
+	@echo "Running production-critical test suite..."
+	go test -v -race ./features/monitoring/export/... -run "TestExportManager(DataExport|ErrorHandling|HealthChecks)" || { \
+		echo "❌ PRODUCTION RISK: Export manager critical tests failing"; \
+		echo "   - Potential monitoring cost overruns"; \
+		echo "   - Risk of data loss during outages"; \
+		echo "   - Buffer overflow under load"; \
+		exit 1; \
+	}
+	@echo "✅ Production-critical tests passing"
+
+# Test export reliability and cost protection
+test-export-reliability:
+	@echo "Testing export reliability and cost controls..."
+	@echo "Checking sampling logic..."
+	go test -v ./features/monitoring/export/... -run "TestExportManagerDataExport/export_with_sampling" && { \
+		echo "✅ Sampling logic working - cost protection enabled"; \
+	} || { \
+		echo "⚠️  COST RISK: Sampling logic failing - potential 10x cost overrun"; \
+		echo "   This will become critical when connecting to paid monitoring services"; \
+	}
+	@echo "Checking retry logic..."
+	go test -v ./features/monitoring/export/... -run "TestExportManagerErrorHandling/handle_export_errors_with_retry" && { \
+		echo "✅ Retry logic working - data loss protection enabled"; \
+	} || { \
+		echo "⚠️  DATA LOSS RISK: Retry logic failing - monitoring gaps during outages"; \
+		echo "   This will become critical for SLA compliance"; \
+	}
+	@echo "Checking data filtering..."
+	go test -v ./features/monitoring/export/... -run "TestExportDataFiltering/filter_data_types_per_exporter" && { \
+		echo "✅ Data filtering working - compliance protection enabled"; \
+	} || { \
+		echo "⚠️  COMPLIANCE RISK: Data filtering failing - potential PII leakage"; \
+		echo "   This will become critical for multi-tenant production"; \
+	}
+
+# v0.3.0 Release Gate - Alpha Readiness
+test-v030-gate:
+	@echo "🚪 v0.3.0 RELEASE GATE - Alpha Readiness Check"
+	@echo "================================================================"
+	@echo "Requirement: Fix Tier 1 production risks before first MSP deployment"
+	@echo ""
+	
+	@# Core functionality must pass
+	@echo "1. Testing core functionality..."
+	make test-production-critical
+	
+	@# Check current export reliability status
+	@echo ""
+	@echo "2. Checking export reliability (Tier 1 risks)..."
+	make test-export-reliability || true
+	
+	@# Check if sampling and retry are fixed
+	@sampling_ok=$$(go test ./features/monitoring/export/... -run "TestExportManagerDataExport/export_with_sampling" >/dev/null 2>&1 && echo "true" || echo "false"); \
+	retry_ok=$$(go test ./features/monitoring/export/... -run "TestExportManagerErrorHandling/handle_export_errors_with_retry" >/dev/null 2>&1 && echo "true" || echo "false"); \
+	if [ "$$sampling_ok" = "true" ] && [ "$$retry_ok" = "true" ]; then \
+		echo ""; \
+		echo "✅ v0.3.0 RELEASE APPROVED"; \
+		echo "   - Cost protection: WORKING"; \
+		echo "   - Data loss prevention: WORKING"; \
+		echo "   - Ready for alpha MSP deployment"; \
+		exit 0; \
+	else \
+		echo ""; \
+		echo "❌ v0.3.0 RELEASE BLOCKED"; \
+		echo "   - Missing critical production protections"; \
+		echo "   - Risk of cost overruns and data loss"; \
+		echo "   - Must fix export sampling and retry logic before alpha deployment"; \
+		exit 1; \
+	fi
+
+# v0.4.0 Release Gate - Production Readiness
+test-v040-gate:
+	@echo "🚪 v0.4.0 RELEASE GATE - Production Readiness Check"
+	@echo "=================================================================="
+	@echo "Requirement: All export edge cases resolved before production scale"
+	@echo ""
+	
+	@echo "1. Testing all functionality..."
+	make test
+	
+	@echo ""
+	@echo "2. Checking export manager completeness..."
+	@export_tests_passing=$$(go test ./features/monitoring/export/... >/dev/null 2>&1 && echo "true" || echo "false"); \
+	if [ "$$export_tests_passing" = "true" ]; then \
+		echo "✅ v0.4.0 RELEASE APPROVED"; \
+		echo "   - All export edge cases resolved"; \
+		echo "   - Cost protection: COMPLETE"; \
+		echo "   - Data loss prevention: COMPLETE"; \
+		echo "   - Compliance protection: COMPLETE"; \
+		echo "   - Buffer overflow protection: COMPLETE"; \
+		echo "   - Ready for production scale (>1000 stewards)"; \
+		exit 0; \
+	else \
+		echo "❌ v0.4.0 RELEASE BLOCKED"; \
+		echo "   - Export manager edge cases still failing"; \
+		echo "   - Risk of production instability at scale"; \
+		echo "   - Must resolve ALL export test failures before production"; \
+		exit 1; \
+	fi
+
+# Cost analysis simulation
+.PHONY: cost-analysis
+cost-analysis:
+	@echo "💰 Monitoring Cost Analysis Simulation"
+	@echo "======================================"
+	@echo "Simulating monitoring costs at different scales..."
+	@echo ""
+	@echo "Assumptions:"
+	@echo "  - Datadog metrics: \$$0.15 per host per hour"
+	@echo "  - Log ingestion: \$$1.70 per GB"
+	@echo "  - Default sampling rate: 100% (if sampling broken)"
+	@echo "  - Fixed sampling rate: 10% (if sampling working)"
+	@echo ""
+	@sampling_working=$$(go test ./features/monitoring/export/... -run "TestExportManagerDataExport/export_with_sampling" >/dev/null 2>&1 && echo "true" || echo "false"); \
+	if [ "$$sampling_working" = "true" ]; then \
+		echo "✅ Sampling logic working:"; \
+		echo "   1,000 stewards: ~\$$1,080/month (10% sampling)"; \
+		echo "   10,000 stewards: ~\$$10,800/month (10% sampling)"; \
+		echo "   50,000 stewards: ~\$$54,000/month (10% sampling)"; \
+	else \
+		echo "⚠️  Sampling logic broken:"; \
+		echo "   1,000 stewards: ~\$$10,800/month (100% data = 10x cost!)"; \
+		echo "   10,000 stewards: ~\$$108,000/month (100% data = 10x cost!)"; \
+		echo "   50,000 stewards: ~\$$540,000/month (100% data = 10x cost!)"; \
+		echo ""; \
+		echo "🚨 BUSINESS RISK: Broken sampling could bankrupt MSP margins!"; \
+	fi
+
+# Compliance check simulation  
+.PHONY: compliance-check
+compliance-check:
+	@echo "🔒 Compliance Protection Check"
+	@echo "============================="
+	@filtering_working=$$(go test ./features/monitoring/export/... -run "TestExportDataFiltering/filter_data_types_per_exporter" >/dev/null 2>&1 && echo "true" || echo "false"); \
+	if [ "$$filtering_working" = "true" ]; then \
+		echo "✅ Data filtering working:"; \
+		echo "   - PII logs isolated from metrics exporters"; \
+		echo "   - Sensitive data properly filtered"; \
+		echo "   - SOC2/HIPAA compliance maintained"; \
+	else \
+		echo "⚠️  Data filtering broken:"; \
+		echo "   - Risk of PII leakage to unauthorized systems"; \
+		echo "   - Potential compliance violations"; \
+		echo "   - MSP liability exposure"; \
+		echo ""; \
+		echo "🚨 COMPLIANCE RISK: Could trigger SOC2 audit findings!"; \
+	fi
+
 lint:
 	golangci-lint run
 

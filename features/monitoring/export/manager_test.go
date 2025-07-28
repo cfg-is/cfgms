@@ -259,6 +259,10 @@ func TestExportManagerDataExport(t *testing.T) {
 		err = manager.Start(ctx)
 		require.NoError(t, err)
 		defer manager.Stop(ctx)
+		
+		// Verify exporters are started
+		require.True(t, exporter1.IsStarted())
+		require.True(t, exporter2.IsStarted())
 
 		// Export test data
 		exportData := export.ExportData{
@@ -274,10 +278,7 @@ func TestExportManagerDataExport(t *testing.T) {
 		err = manager.Export(exportData)
 		assert.NoError(t, err)
 
-		// Give time for export processing
-		time.Sleep(100 * time.Millisecond)
-
-		// Both exporters should have received data
+		// Both exporters should have received data (synchronous for manual exports)
 		data1 := exporter1.GetExportedData()
 		data2 := exporter2.GetExportedData()
 		
@@ -308,6 +309,7 @@ func TestExportManagerDataExport(t *testing.T) {
 		exportData := export.ExportData{
 			SystemMetrics: map[string]interface{}{"test": 1},
 			Timestamp:     time.Now(),
+			ExportType:    export.ExportTypeManual, // For synchronous testing
 		}
 
 		err := manager.Export(exportData)

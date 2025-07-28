@@ -140,8 +140,14 @@ func (sm *SystemMonitor) collectResourceMetrics(ctx context.Context) {
 	sm.resourceMetrics.CPUCores = runtime.NumCPU()
 	sm.resourceMetrics.CollectedAt = time.Now()
 	
-	// Check for resource alerts
+	// Release the lock before checking alerts to avoid deadlock with emitEvent
+	sm.mu.Unlock()
+	
+	// Check for resource alerts (this may call emitEvent which needs RLock)
 	sm.checkResourceAlerts(ctx)
+	
+	// Re-acquire lock for the defer statement
+	sm.mu.Lock()
 	
 	sm.logger.DebugCtx(ctx, "Resource metrics collected",
 		"memory_used_mb", sm.resourceMetrics.MemoryUsedBytes/1024/1024,
