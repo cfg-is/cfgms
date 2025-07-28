@@ -14,6 +14,10 @@ type Module struct {
 	mu sync.RWMutex
 	// executions tracks ongoing script executions by resource ID
 	executions map[string]*ExecutionState
+	// auditLogger handles comprehensive audit logging
+	auditLogger *AuditLogger
+	// stewardID identifies the steward this module belongs to
+	stewardID string
 }
 
 // ExecutionState tracks the state of a script execution
@@ -28,14 +32,27 @@ type ExecutionState struct {
 // New creates a new instance of the Script module
 func New() modules.Module {
 	return &Module{
-		executions: make(map[string]*ExecutionState),
+		executions:  make(map[string]*ExecutionState),
+		auditLogger: NewAuditLogger(1000), // Default 1000 records per steward
+		stewardID:   "unknown", // Will be set by steward when module is loaded
 	}
 }
 
 // NewModule creates a new script module instance
 func NewModule() *Module {
 	return &Module{
-		executions: make(map[string]*ExecutionState),
+		executions:  make(map[string]*ExecutionState),
+		auditLogger: NewAuditLogger(1000),
+		stewardID:   "unknown",
+	}
+}
+
+// NewModuleWithConfig creates a new script module with specific configuration
+func NewModuleWithConfig(stewardID string, maxAuditRecords int) *Module {
+	return &Module{
+		executions:  make(map[string]*ExecutionState),
+		auditLogger: NewAuditLogger(maxAuditRecords),
+		stewardID:   stewardID,
 	}
 }
 
@@ -101,6 +118,13 @@ func (m *Module) Set(ctx context.Context, resourceID string, config modules.Conf
 
 	// Execute the script
 	result, err := executor.Execute(ctx)
+	
+	// Create audit record regardless of success/failure
+	auditRecord := CreateAuditRecord(m.stewardID, resourceID, scriptConfig, result, err)
+	if auditErr := m.auditLogger.LogExecution(ctx, auditRecord); auditErr != nil {
+		// Log audit error but don't fail the execution
+		fmt.Printf("Failed to log script execution audit: %v\n", auditErr)
+	}
 	
 	if err != nil {
 		m.updateExecutionStatus(resourceID, StatusFailed, nil, err)
@@ -220,4 +244,29 @@ func (m *Module) ClearExecution(resourceID string) {
 	defer m.mu.Unlock()
 
 	delete(m.executions, resourceID)
+}
+
+// GetExecutionHistory returns the execution history for the steward
+func (m *Module) GetExecutionHistory(limit int) ([]*AuditRecord, error) {
+	return m.auditLogger.GetExecutionHistory(m.stewardID, limit)
+}
+
+// QueryExecutions searches execution history based on query parameters
+func (m *Module) QueryExecutions(query *AuditQuery) ([]*AuditRecord, error) {
+	if query.StewardID == "" {
+		query.StewardID = m.stewardID
+	}
+	return m.auditLogger.QueryExecutions(query)
+}
+
+// GetExecutionMetrics returns aggregated metrics for the steward
+func (m *Module) GetExecutionMetrics(since time.Time) (*AggregatedMetrics, error) {
+	return m.auditLogger.GetExecutionMetrics(m.stewardID, since)
+}
+
+// SetStewardID updates the steward ID for this module instance
+func (m *Module) SetStewardID(stewardID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.stewardID = stewardID
 }

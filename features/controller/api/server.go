@@ -132,6 +132,13 @@ func (s *Server) setupRouter() {
 	stewards.HandleFunc("/{id}/config/status", s.handleGetConfigStatus).Methods("GET")
 	stewards.HandleFunc("/{id}/config/effective", s.handleGetEffectiveConfig).Methods("GET")
 
+	// Script management endpoints
+	stewards.HandleFunc("/{id}/scripts/executions", s.handleGetScriptExecutions).Methods("GET")
+	stewards.HandleFunc("/{id}/scripts/executions/{execution_id}", s.handleGetScriptExecution).Methods("GET")
+	stewards.HandleFunc("/{id}/scripts/executions/{execution_id}/retry", s.handlePostScriptRetry).Methods("POST")
+	stewards.HandleFunc("/{id}/scripts/metrics", s.handleGetScriptMetrics).Methods("GET")
+	stewards.HandleFunc("/{id}/scripts/status", s.handleGetScriptStatus).Methods("GET")
+
 	// Certificate management endpoints
 	certs := api.PathPrefix("/certificates").Subrouter()
 	certs.HandleFunc("", s.handleListCertificates).Methods("GET")
