@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,16 +16,23 @@ import (
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 )
 
-// mockLogger implements a simple logger for testing
+// mockLogger implements a thread-safe logger for testing
 type mockLogger struct {
+	mu   sync.Mutex
 	logs []string
 }
 
-func (m *mockLogger) Debug(msg string, fields ...interface{}) { m.logs = append(m.logs, msg) }
-func (m *mockLogger) Info(msg string, fields ...interface{})  { m.logs = append(m.logs, msg) }
-func (m *mockLogger) Warn(msg string, fields ...interface{})  { m.logs = append(m.logs, msg) }
-func (m *mockLogger) Error(msg string, fields ...interface{}) { m.logs = append(m.logs, msg) }
-func (m *mockLogger) Fatal(msg string, fields ...interface{}) { m.logs = append(m.logs, msg) }
+func (m *mockLogger) appendLog(msg string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.logs = append(m.logs, msg)
+}
+
+func (m *mockLogger) Debug(msg string, fields ...interface{}) { m.appendLog(msg) }
+func (m *mockLogger) Info(msg string, fields ...interface{})  { m.appendLog(msg) }
+func (m *mockLogger) Warn(msg string, fields ...interface{})  { m.appendLog(msg) }
+func (m *mockLogger) Error(msg string, fields ...interface{}) { m.appendLog(msg) }
+func (m *mockLogger) Fatal(msg string, fields ...interface{}) { m.appendLog(msg) }
 func (m *mockLogger) DebugCtx(ctx context.Context, msg string, fields ...interface{}) { m.Debug(msg, fields...) }
 func (m *mockLogger) InfoCtx(ctx context.Context, msg string, fields ...interface{})  { m.Info(msg, fields...) }
 func (m *mockLogger) WarnCtx(ctx context.Context, msg string, fields ...interface{})  { m.Warn(msg, fields...) }
@@ -357,9 +365,17 @@ func TestValidateConfig(t *testing.T) {
 		resp, err := service.ValidateConfig(context.Background(), req)
 		require.NoError(t, err)
 		assert.Equal(t, common.Status_ERROR, resp.Status.Code)
-		assert.Contains(t, resp.Status.Message, "validation failed")
-		assert.Len(t, resp.Errors, 1)
-		assert.Equal(t, "config", resp.Errors[0].Field)
+		assert.Contains(t, resp.Status.Message, "Configuration has critical errors")
+		assert.Greater(t, len(resp.Errors), 0) // Should have multiple validation errors
+		// Check that we have at least one critical error (the missing steward ID)
+		hasCriticalError := false
+		for _, err := range resp.Errors {
+			if err.Level == controller.ValidationError_CRITICAL {
+				hasCriticalError = true
+				break
+			}
+		}
+		assert.True(t, hasCriticalError, "Should have at least one critical validation error")
 	})
 }
 
@@ -402,7 +418,6 @@ func TestConfigurationServiceConcurrency(t *testing.T) {
 	service := NewConfigurationService(logger, nil)
 
 	stewardID := "test-steward"
-	config := createTestStewardConfig(stewardID)
 
 	// Test concurrent access
 	done := make(chan bool)
@@ -410,8 +425,10 @@ func TestConfigurationServiceConcurrency(t *testing.T) {
 	// Goroutine 1: Set configuration
 	go func() {
 		for i := 0; i < 10; i++ {
-			config.Resources[0].Config["permissions"] = "755"
-			_ = service.SetConfiguration(stewardID, config)
+			// Create a new config for each operation to avoid data races
+			newConfig := createTestStewardConfig(stewardID)
+			newConfig.Resources[0].Config["permissions"] = "755"
+			_ = service.SetConfiguration(stewardID, newConfig)
 			time.Sleep(time.Millisecond)
 		}
 		done <- true

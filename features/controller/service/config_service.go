@@ -297,42 +297,14 @@ func (s *ConfigurationService) convertValidationLevel(level validation.Validatio
 
 // SetConfiguration stores a configuration for a specific steward
 func (s *ConfigurationService) SetConfiguration(stewardID string, config *stewardconfig.StewardConfig) error {
-	version := fmt.Sprintf("v%d", time.Now().Unix())
-	now := time.Now()
-	
-	// Create or update stored configuration
-	storedConfig := &StoredConfiguration{
-		StewardID:   stewardID,
-		Version:     version,
-		Config:      config,
-		LastUpdated: now,
-	}
-	
-	s.mu.Lock()
-	if existing, exists := s.configurations[stewardID]; exists {
-		storedConfig.CreatedAt = existing.CreatedAt
-	} else {
-		storedConfig.CreatedAt = now
-	}
-	
-	s.configurations[stewardID] = storedConfig
-	s.mu.Unlock()
-	
-	s.logger.Info("Configuration stored", "steward_id", stewardID, "version", version)
-	
-	// Notify subscribers of the update (after releasing lock to avoid deadlock)
-	s.notifyConfigurationUpdate(stewardID, storedConfig)
-	
-	return nil
+	// Use default tenant for backward compatibility
+	return s.SetTenantConfiguration("default", stewardID, config)
 }
 
-// GetStoredConfiguration retrieves a stored configuration
+// GetStoredConfiguration retrieves a stored configuration (backward compatibility with default tenant)
 func (s *ConfigurationService) GetStoredConfiguration(stewardID string) (*StoredConfiguration, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	
-	config, exists := s.configurations[stewardID]
-	return config, exists
+	// Use default tenant for backward compatibility
+	return s.GetTenantConfiguration("default", stewardID)
 }
 
 // filterConfigByModules filters configuration to include only requested modules
