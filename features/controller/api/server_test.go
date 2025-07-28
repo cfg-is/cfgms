@@ -143,25 +143,46 @@ func TestAPIKeyAuthentication(t *testing.T) {
 func TestListStewards(t *testing.T) {
 	server, apiKey := setupTestServer(t)
 
-	// Create request with authentication
-	req := httptest.NewRequest("GET", "/api/v1/stewards", nil)
-	req.Header.Set("X-API-Key", apiKey)
-	rec := httptest.NewRecorder()
+	t.Run("empty list", func(t *testing.T) {
+		// Create request with authentication
+		req := httptest.NewRequest("GET", "/api/v1/stewards", nil)
+		req.Header.Set("X-API-Key", apiKey)
+		rec := httptest.NewRecorder()
 
-	// Execute request
-	server.router.ServeHTTP(rec, req)
+		// Execute request
+		server.router.ServeHTTP(rec, req)
 
-	// Check response
-	assert.Equal(t, http.StatusOK, rec.Code)
+		// Check response
+		assert.Equal(t, http.StatusOK, rec.Code)
 
-	var response APIResponse
-	err := json.Unmarshal(rec.Body.Bytes(), &response)
-	require.NoError(t, err)
+		var response APIResponse
+		err := json.Unmarshal(rec.Body.Bytes(), &response)
+		require.NoError(t, err)
 
-	// Should return empty list initially
-	stewards, ok := response.Data.([]interface{})
-	require.True(t, ok)
-	assert.Len(t, stewards, 0)
+		// Should return empty list initially
+		stewards, ok := response.Data.([]interface{})
+		require.True(t, ok)
+		assert.Len(t, stewards, 0)
+	})
+
+	t.Run("list format validation", func(t *testing.T) {
+		// Test that the endpoint returns proper format even with empty data
+		req := httptest.NewRequest("GET", "/api/v1/stewards", nil)
+		req.Header.Set("X-API-Key", apiKey)
+		rec := httptest.NewRecorder()
+
+		server.router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Contains(t, rec.Header().Get("Content-Type"), "application/json")
+
+		// Validate response structure
+		var response APIResponse
+		err := json.Unmarshal(rec.Body.Bytes(), &response)
+		require.NoError(t, err)
+		assert.NotNil(t, response.Data)
+		assert.NotEmpty(t, response.Timestamp)
+	})
 }
 
 func TestAPIKeyManagement(t *testing.T) {
@@ -316,6 +337,7 @@ func TestResponseFormat(t *testing.T) {
 	assert.NotNil(t, response.Data)
 	assert.False(t, response.Timestamp.IsZero())
 }
+
 
 func TestAPIKeyExpiration(t *testing.T) {
 	server, _ := setupTestServer(t)

@@ -273,6 +273,18 @@ func (s *ControllerService) GetStewardInfo(stewardID string) (*StewardInfo, bool
 	return info, exists
 }
 
+// GetAllStewards returns a list of all registered stewards
+func (s *ControllerService) GetAllStewards() []*StewardInfo {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	
+	stewards := make([]*StewardInfo, 0, len(s.stewards))
+	for _, info := range s.stewards {
+		stewards = append(stewards, info)
+	}
+	return stewards
+}
+
 // findStewardByDNAId finds an existing steward by DNA ID
 func (s *ControllerService) findStewardByDNAId(dnaId string) *StewardInfo {
 	s.mu.RLock()

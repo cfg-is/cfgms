@@ -11,11 +11,35 @@ import (
 
 // handleListStewards handles GET /api/v1/stewards
 func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
-	// For now, return an empty list since we don't have GetAllStewards method
-	// TODO: Implement GetAllStewards in ControllerService
-	stewardList := []StewardInfo{}
+	// Get all stewards from the controller service
+	stewards := s.controllerService.GetAllStewards()
+	
+	// Convert to API response format
+	stewardList := make([]StewardInfo, 0, len(stewards))
+	for _, steward := range stewards {
+		info := StewardInfo{
+			ID:          steward.ID,
+			Version:     steward.Version,
+			Status:      steward.Status,
+			LastSeen:    steward.LastHeartbeat,
+			ConnectedAt: steward.LastHeartbeat, // Using LastHeartbeat as ConnectedAt for now
+			Metrics:     steward.Metrics,
+		}
+		
+		// Convert DNA if available
+		if steward.DNA != nil {
+			info.DNA = &DNAInfo{
+				Hostname:     steward.DNA.Attributes["hostname"],
+				OS:           steward.DNA.Attributes["os"],
+				Architecture: steward.DNA.Attributes["arch"],
+				Attributes:   steward.DNA.Attributes,
+			}
+		}
+		
+		stewardList = append(stewardList, info)
+	}
 
-	s.logger.Info("Listing stewards - method not yet fully implemented")
+	s.logger.Info("Listed stewards", "count", len(stewardList))
 	s.writeSuccessResponse(w, stewardList)
 }
 
