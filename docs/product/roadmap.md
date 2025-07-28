@@ -117,6 +117,7 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 - [ ] Implement advanced configuration management
 - [ ] Add support for configuration templates (advanced)
 - [ ] Implement Outpost functionality (Basic)
+- [ ] Strong windows patch compliance capabiliteis including Major version updates (eg Win 11 23H2 to 24H2 upgrades), as well as major version upgrades (eg Win 10 to Win 11)
 
 #### v0.7.0 (Pre-OSS / Alpha) - Open Source Preparation
 
