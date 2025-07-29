@@ -116,7 +116,7 @@ All resource management is performed through modules that implement the core int
 
 **ConfigState Interface**: Enables efficient field-level comparison without marshal/unmarshal overhead. Modules return comprehensive system state, but only managed fields are modified.
 
-Available modules: `directory`, `file`, `firewall`, `package`, `script`
+Available modules: `directory`, `file`, `firewall`, `package`, `script`, SaaS modules: `entra_user`, `conditional_access`, `intune_policy`
 
 ### Communication
 - **Internal**: gRPC with mutual TLS between components
@@ -136,7 +136,9 @@ Available modules: `directory`, `file`, `firewall`, `package`, `script`
 features/
 ├── controller/    # Controller component and server logic
 ├── steward/       # Steward component with health monitoring
-└── modules/       # Module implementations (directory, file, firewall, package)
+├── modules/       # Module implementations (directory, file, firewall, package)
+├── saas/          # SaaS provider integrations and API framework
+└── workflow/      # Enhanced workflow engine with conditional logic and loops
 ```
 
 ### Key Directories
@@ -213,9 +215,13 @@ The system implements a recursive parent-child tenant model with:
 
 ## Current Development Status
 
-**Current Version**: v0.2.1 (Alpha) - Test Infrastructure & Sprint Planning Foundation - 🟡 98% COMPLETE
+**Current Version**: v0.3.0 (Alpha) - Enhanced Automation & SaaS Steward Foundation - 🟡 IN PROGRESS
 
-**Status**: 8 of 9 v0.2.1 issues completed. Outstanding: Issue #57 (test failures in controller lifecycle and monitoring export tests)
+**Epic Status**:
+- ✅ **Epic #65 COMPLETE**: Enhanced Workflow Engine & SaaS Foundation (42 points)
+- 🟡 **Epic #66 IN PROGRESS**: Enterprise Configuration Management (34 points) - Story #74 active
+- **Epic #67 PENDING**: DNA-Based Monitoring & Detection (34 points)
+- **Epic #68 PENDING**: Remote Access & Integration (39 points)
 
 **Reference**: See `docs/product/roadmap.md` for detailed current status and planning
 
@@ -230,6 +236,10 @@ The system implements a recursive parent-child tenant model with:
   - ✅ **REST API Endpoints**: External API access for MSP tool integration with comprehensive OpenAPI 3.0 specification
   - ✅ **Configuration Inheritance**: Hierarchical MSP → Client → Group → Device cascading with source tracking
   - ✅ **Script Execution Framework**: Cross-platform script execution capabilities with configurable timeout, OS-level signing, and multi-shell support (Windows: PowerShell/cmd, Unix: bash/zsh/python)
+- ✅ **Epic #65 Complete**: Enhanced Workflow Engine & SaaS Foundation (42 story points)
+  - ✅ **Enhanced Workflow Engine**: Conditional logic, loops, and comprehensive error handling
+  - ✅ **SaaS Steward Prototype**: M365 Virtual Steward with OAuth2 authentication
+  - ✅ **API Module Framework**: Universal provider interface with normalized operations + raw API fallback
 
 ### Current Status: v0.2.1 - Test Infrastructure & BMAD Sprint Planning 🟡 98% COMPLETE
 **Major Achievements:**
