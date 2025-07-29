@@ -21,6 +21,7 @@ type Engine struct {
 	mutex            sync.RWMutex
 	httpClient       *HTTPClient
 	providerRegistry *ProviderRegistry
+	errorHandler     ErrorHandler
 }
 
 // NewEngine creates a new workflow engine instance
@@ -45,6 +46,7 @@ func NewEngine(moduleFactory *factory.ModuleFactory, logger logging.Logger) *Eng
 		executions:       make(map[string]*WorkflowExecution),
 		httpClient:       httpClient,
 		providerRegistry: providerRegistry,
+		errorHandler:     NewDefaultErrorHandler(),
 	}
 }
 
@@ -104,15 +106,24 @@ func (e *Engine) executeWorkflowAsync(execution *WorkflowExecution, workflow Wor
 
 	defer func() {
 		if r := recover(); r != nil {
+			panicErr := NewWorkflowError(
+				ErrorCodeUnknown,
+				fmt.Sprintf("workflow panicked: %v", r),
+				"",
+				"",
+				fmt.Errorf("%v", r),
+			).WithVariableState(execution.Variables)
+
 			e.mutex.Lock()
 			execution.Status = StatusFailed
-			execution.Error = fmt.Sprintf("workflow panicked: %v", r)
+			execution.Error = panicErr.Error()
+			execution.ErrorDetails = panicErr
 			endTime := time.Now()
 			execution.EndTime = &endTime
 			e.mutex.Unlock()
 			e.logger.Error("Workflow execution panicked",
 				"execution_id", execution.ID,
-				"error", r)
+				"error", panicErr.FullError())
 		}
 	}()
 
@@ -124,12 +135,27 @@ func (e *Engine) executeWorkflowAsync(execution *WorkflowExecution, workflow Wor
 	execution.EndTime = &endTime
 
 	if err != nil {
+		// Handle workflow-level error
+		var workflowErr *WorkflowError
+		if wfErr, ok := err.(*WorkflowError); ok {
+			workflowErr = wfErr
+		} else {
+			workflowErr = NewWorkflowError(
+				ErrorCodeStepExecution,
+				err.Error(),
+				execution.CurrentStep,
+				"",
+				err,
+			).WithVariableState(execution.Variables)
+		}
+
 		execution.Status = StatusFailed
-		execution.Error = err.Error()
+		execution.Error = workflowErr.Error()
+		execution.ErrorDetails = workflowErr
 		e.mutex.Unlock()
 		e.logger.Error("Workflow execution failed",
 			"execution_id", execution.ID,
-			"error", err)
+			"error", workflowErr.FullError())
 	} else {
 		execution.Status = StatusCompleted
 		e.mutex.Unlock()
@@ -147,27 +173,58 @@ func (e *Engine) executeSteps(ctx context.Context, steps []Step, execution *Work
 			return ctx.Err()
 		default:
 			if err := e.executeStep(ctx, step, execution); err != nil {
-				// Handle failure based on step or workflow policy
-				failureAction := step.OnFailure
-				if failureAction == "" {
-					// Use default action
-					failureAction = ActionStop
+				// Convert error to WorkflowError if needed
+				var workflowErr *WorkflowError
+				if wfErr, ok := err.(*WorkflowError); ok {
+					workflowErr = wfErr
+				} else {
+					workflowErr = NewWorkflowError(
+						ErrorCodeStepExecution,
+						err.Error(),
+						step.Name,
+						step.Type,
+						err,
+					).WithVariableState(execution.Variables)
 				}
 
-				switch failureAction {
-				case ActionStop:
-					return fmt.Errorf("step %s failed: %w", step.Name, err)
-				case ActionContinue:
-					e.logger.Warn("Step failed but continuing",
+				// Handle error using the error handler
+				decision := e.errorHandler.HandleError(ctx, workflowErr, execution)
+
+				switch decision.Action {
+				case ErrorActionStop:
+					e.logger.Error("Stopping workflow execution due to error",
 						"step", step.Name,
-						"error", err)
+						"error", workflowErr.FullError(),
+						"decision", decision.Message)
+					return workflowErr
+				case ErrorActionContinue:
+					e.logger.Warn("Continuing workflow execution after error",
+						"step", step.Name,
+						"error", workflowErr.Error(),
+						"decision", decision.Message)
 					continue
-				case ActionRetry:
-					// TODO: Implement retry logic with backoff
-					e.logger.Warn("Step failed, retry not yet implemented",
+				case ErrorActionRetry:
+					// Implement retry with backoff
+					if decision.RetryDelay > 0 {
+						e.logger.Info("Retrying step after delay",
+							"step", step.Name,
+							"delay", decision.RetryDelay,
+							"decision", decision.Message)
+						select {
+						case <-ctx.Done():
+							return ctx.Err()
+						case <-time.After(decision.RetryDelay):
+						}
+					}
+					// Retry the step (this would need more sophisticated retry tracking)
+					e.logger.Info("Retrying failed step",
 						"step", step.Name,
-						"error", err)
-					return fmt.Errorf("step %s failed: %w", step.Name, err)
+						"decision", decision.Message)
+					if retryErr := e.executeStep(ctx, step, execution); retryErr != nil {
+						return workflowErr // Return original error if retry fails
+					}
+				default:
+					return workflowErr
 				}
 			}
 		}
@@ -233,9 +290,27 @@ func (e *Engine) executeStep(ctx context.Context, step Step, execution *Workflow
 	if err != nil {
 		result.Status = StatusFailed
 		result.Error = err.Error()
+		
+		// Store detailed error information
+		var workflowErr *WorkflowError
+		if wfErr, ok := err.(*WorkflowError); ok {
+			workflowErr = wfErr
+		} else {
+			workflowErr = NewWorkflowError(
+				ErrorCodeStepExecution,
+				err.Error(),
+				step.Name,
+				step.Type,
+				err,
+			).WithVariableState(execution.Variables)
+		}
+		result.ErrorDetails = workflowErr
 	} else {
 		result.Status = StatusCompleted
 	}
+
+	// Add execution trace entry
+	AddExecutionTrace(execution, step.Name, step.Type, result.Status, result.Duration, execution.Variables, "", 0)
 
 	e.mutex.Lock()
 	execution.StepResults[step.Name] = result
@@ -246,14 +321,26 @@ func (e *Engine) executeStep(ctx context.Context, step Step, execution *Workflow
 // executeTaskStep executes a module task
 func (e *Engine) executeTaskStep(ctx context.Context, step Step, execution *WorkflowExecution) error {
 	if step.Module == "" {
-		return fmt.Errorf("module is required for task steps")
+		return NewWorkflowError(
+			ErrorCodeValidation,
+			"module is required for task steps",
+			step.Name,
+			step.Type,
+			nil,
+		).WithVariableState(execution.Variables)
 	}
 
 	// Create module instance
 	var module modules.Module
 	module, err := e.moduleFactory.CreateModuleInstance(step.Module)
 	if err != nil {
-		return fmt.Errorf("failed to create module instance: %w", err)
+		return NewWorkflowError(
+			ErrorCodeModuleExecution,
+			"failed to create module instance",
+			step.Name,
+			step.Type,
+			err,
+		).WithVariableState(execution.Variables).WithDetails("module", step.Module)
 	}
 
 	// Create resource ID from step name
@@ -273,7 +360,13 @@ func (e *Engine) executeTaskStep(ctx context.Context, step Step, execution *Work
 
 	// Apply configuration
 	if err := module.Set(ctx, resourceID, configState); err != nil {
-		return fmt.Errorf("failed to apply module configuration: %w", err)
+		return NewWorkflowError(
+			ErrorCodeModuleExecution,
+			"failed to apply module configuration",
+			step.Name,
+			step.Type,
+			err,
+		).WithVariableState(execution.Variables).WithDetails("module", step.Module).WithDetails("resource_id", resourceID)
 	}
 
 	// Verify by getting current state

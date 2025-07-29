@@ -110,6 +110,9 @@ type Step struct {
 
 	// Loop configuration for loop steps (for, while, foreach)
 	Loop *LoopConfig `yaml:"loop,omitempty" json:"loop,omitempty"`
+
+	// ErrorHandling defines error handling configuration for this step
+	ErrorHandling *ErrorHandlingConfig `yaml:"error_handling,omitempty" json:"error_handling,omitempty"`
 }
 
 // StepType defines the type of workflow step
@@ -260,8 +263,14 @@ type WorkflowExecution struct {
 	// Variables contains the current variable values
 	Variables map[string]interface{} `json:"variables"`
 
-	// Error contains error information if the execution failed
+	// ExecutionTrace contains the execution path for debugging
+	ExecutionTrace []ExecutionStep `json:"execution_trace,omitempty"`
+
+	// Error contains basic error message if the execution failed (deprecated, use ErrorDetails)
 	Error string `json:"error,omitempty"`
+
+	// ErrorDetails contains comprehensive error information for debugging
+	ErrorDetails *WorkflowError `json:"error_details,omitempty"`
 
 	// Context for cancellation
 	Context context.Context `json:"-"`
@@ -310,11 +319,17 @@ type StepResult struct {
 	// Output contains any output from the step
 	Output map[string]interface{} `json:"output,omitempty"`
 
-	// Error contains error information if the step failed
+	// Error contains basic error message if the step failed (deprecated, use ErrorDetails)
 	Error string `json:"error,omitempty"`
+
+	// ErrorDetails contains comprehensive error information for debugging
+	ErrorDetails *WorkflowError `json:"error_details,omitempty"`
 
 	// RetryCount tracks how many times this step has been retried
 	RetryCount int `json:"retry_count"`
+
+	// RetryAttempts contains details of each retry attempt
+	RetryAttempts []RetryAttempt `json:"retry_attempts,omitempty"`
 }
 
 // WorkflowEngine defines the interface for workflow execution
@@ -578,3 +593,226 @@ const (
 	// LoopTypeForeach executes a loop over a collection
 	LoopTypeForeach LoopType = "foreach"
 )
+
+// WorkflowError provides comprehensive error information for debugging
+type WorkflowError struct {
+	// Code is a unique error code for programmatic handling
+	Code ErrorCode `json:"code"`
+
+	// Message is the human-readable error message
+	Message string `json:"message"`
+
+	// Details provides additional context about the error
+	Details map[string]interface{} `json:"details,omitempty"`
+
+	// Timestamp is when the error occurred
+	Timestamp time.Time `json:"timestamp"`
+
+	// StepName is the name of the step where the error occurred
+	StepName string `json:"step_name"`
+
+	// StepType is the type of step where the error occurred
+	StepType StepType `json:"step_type"`
+
+	// ExecutionPath shows the path through the workflow to this error
+	ExecutionPath []string `json:"execution_path"`
+
+	// VariableState captures the variable state at the time of error
+	VariableState map[string]interface{} `json:"variable_state"`
+
+	// StackTrace provides the Go stack trace for debugging
+	StackTrace []StackFrame `json:"stack_trace,omitempty"`
+
+	// Cause is the underlying error that caused this workflow error
+	Cause error `json:"-"`
+
+	// CauseMessage is the string representation of the underlying error
+	CauseMessage string `json:"cause_message,omitempty"`
+
+	// RetryAttempt indicates which retry attempt this error occurred on (0 = first attempt)
+	RetryAttempt int `json:"retry_attempt"`
+
+	// Recoverable indicates whether this error can be recovered from
+	Recoverable bool `json:"recoverable"`
+
+	// ChildErrors contains errors from child steps (for parallel/sequential steps)
+	ChildErrors []*WorkflowError `json:"child_errors,omitempty"`
+}
+
+// ErrorCode defines specific error types for programmatic handling
+type ErrorCode string
+
+const (
+	// ErrorCodeStepExecution indicates a step failed during execution
+	ErrorCodeStepExecution ErrorCode = "STEP_EXECUTION_FAILED"
+
+	// ErrorCodeTimeout indicates a step or workflow timed out
+	ErrorCodeTimeout ErrorCode = "TIMEOUT"
+
+	// ErrorCodeValidation indicates a validation error
+	ErrorCodeValidation ErrorCode = "VALIDATION_ERROR"
+
+	// ErrorCodeConditionEvaluation indicates a condition evaluation error
+	ErrorCodeConditionEvaluation ErrorCode = "CONDITION_EVALUATION_ERROR"
+
+	// ErrorCodeVariableResolution indicates a variable resolution error
+	ErrorCodeVariableResolution ErrorCode = "VARIABLE_RESOLUTION_ERROR"
+
+	// ErrorCodeLoopExecution indicates a loop execution error
+	ErrorCodeLoopExecution ErrorCode = "LOOP_EXECUTION_ERROR"
+
+	// ErrorCodeInfiniteLoop indicates a loop exceeded maximum iterations
+	ErrorCodeInfiniteLoop ErrorCode = "INFINITE_LOOP_DETECTED"
+
+	// ErrorCodeModuleExecution indicates a module execution error
+	ErrorCodeModuleExecution ErrorCode = "MODULE_EXECUTION_FAILED"
+
+	// ErrorCodeHTTPRequest indicates an HTTP request error
+	ErrorCodeHTTPRequest ErrorCode = "HTTP_REQUEST_FAILED"
+
+	// ErrorCodeAPIRequest indicates an API request error
+	ErrorCodeAPIRequest ErrorCode = "API_REQUEST_FAILED"
+
+	// ErrorCodeWebhookDelivery indicates a webhook delivery error
+	ErrorCodeWebhookDelivery ErrorCode = "WEBHOOK_DELIVERY_FAILED"
+
+	// ErrorCodeAuthenticationFailure indicates an authentication error
+	ErrorCodeAuthenticationFailure ErrorCode = "AUTHENTICATION_FAILED"
+
+	// ErrorCodeRateLimitExceeded indicates a rate limit was exceeded
+	ErrorCodeRateLimitExceeded ErrorCode = "RATE_LIMIT_EXCEEDED"
+
+	// ErrorCodeCancellation indicates the workflow was cancelled
+	ErrorCodeCancellation ErrorCode = "WORKFLOW_CANCELLED"
+
+	// ErrorCodeUnknown indicates an unknown error occurred
+	ErrorCodeUnknown ErrorCode = "UNKNOWN_ERROR"
+)
+
+// StackFrame represents a single frame in a stack trace
+type StackFrame struct {
+	// Function is the function name
+	Function string `json:"function"`
+
+	// File is the source file path
+	File string `json:"file"`
+
+	// Line is the line number in the source file
+	Line int `json:"line"`
+}
+
+// ExecutionStep represents a step in the execution trace
+type ExecutionStep struct {
+	// StepName is the name of the executed step
+	StepName string `json:"step_name"`
+
+	// StepType is the type of step
+	StepType StepType `json:"step_type"`
+
+	// Timestamp is when this step was executed
+	Timestamp time.Time `json:"timestamp"`
+
+	// Duration is how long this step took
+	Duration time.Duration `json:"duration"`
+
+	// Status is the result status of this step
+	Status ExecutionStatus `json:"status"`
+
+	// Variables contains the variable state when this step started
+	Variables map[string]interface{} `json:"variables,omitempty"`
+
+	// ParentStep is the name of the parent step (for nested steps)
+	ParentStep string `json:"parent_step,omitempty"`
+
+	// LoopIteration indicates the loop iteration number (if in a loop)
+	LoopIteration int `json:"loop_iteration,omitempty"`
+}
+
+// RetryAttempt contains details about a retry attempt
+type RetryAttempt struct {
+	// AttemptNumber is the retry attempt number (1-based)
+	AttemptNumber int `json:"attempt_number"`
+
+	// Timestamp is when this retry attempt was made
+	Timestamp time.Time `json:"timestamp"`
+
+	// Error is the error that occurred during this attempt
+	Error *WorkflowError `json:"error,omitempty"`
+
+	// Delay is how long we waited before this retry
+	Delay time.Duration `json:"delay"`
+
+	// Variables contains the variable state at retry time
+	Variables map[string]interface{} `json:"variables,omitempty"`
+}
+
+// ErrorHandler defines the interface for handling workflow errors
+type ErrorHandler interface {
+	// HandleError processes a workflow error and returns recovery actions
+	HandleError(ctx context.Context, err *WorkflowError, execution *WorkflowExecution) ErrorHandlingDecision
+
+	// ShouldRetry determines if a step should be retried based on the error
+	ShouldRetry(err *WorkflowError, retryCount int, config *RetryConfig) bool
+
+	// CalculateRetryDelay calculates the delay before the next retry attempt
+	CalculateRetryDelay(retryCount int, config *RetryConfig) time.Duration
+}
+
+// ErrorHandlingDecision represents the decision made by an error handler
+type ErrorHandlingDecision struct {
+	// Action is the action to take
+	Action ErrorAction `json:"action"`
+
+	// Message provides context for the decision
+	Message string `json:"message,omitempty"`
+
+	// RetryDelay specifies how long to wait before retry (if Action is Retry)
+	RetryDelay time.Duration `json:"retry_delay,omitempty"`
+
+	// ContinueWith specifies which step to continue with (if Action is ContinueWith)
+	ContinueWith string `json:"continue_with,omitempty"`
+
+	// Variables contains any variable updates to apply
+	Variables map[string]interface{} `json:"variables,omitempty"`
+}
+
+// ErrorAction defines the possible actions to take when handling an error
+type ErrorAction string
+
+const (
+	// ErrorActionStop stops the workflow execution
+	ErrorActionStop ErrorAction = "stop"
+
+	// ErrorActionContinue continues with the next step
+	ErrorActionContinue ErrorAction = "continue"
+
+	// ErrorActionRetry retries the failed step
+	ErrorActionRetry ErrorAction = "retry"
+
+	// ErrorActionContinueWith continues execution from a specific step
+	ErrorActionContinueWith ErrorAction = "continue_with"
+
+	// ErrorActionFallback executes a fallback step or workflow
+	ErrorActionFallback ErrorAction = "fallback"
+)
+
+// Step error handling configuration
+type ErrorHandlingConfig struct {
+	// IgnoreErrors defines which error codes to ignore and continue
+	IgnoreErrors []ErrorCode `yaml:"ignore_errors,omitempty" json:"ignore_errors,omitempty"`
+
+	// RetryOnErrors defines which error codes should trigger retries
+	RetryOnErrors []ErrorCode `yaml:"retry_on_errors,omitempty" json:"retry_on_errors,omitempty"`
+
+	// FallbackStep defines a step to execute if this step fails
+	FallbackStep *Step `yaml:"fallback_step,omitempty" json:"fallback_step,omitempty"`
+
+	// ContinueOnErrors defines which error codes allow continuing to next step
+	ContinueOnErrors []ErrorCode `yaml:"continue_on_errors,omitempty" json:"continue_on_errors,omitempty"`
+
+	// StopOnErrors defines which error codes should stop the workflow
+	StopOnErrors []ErrorCode `yaml:"stop_on_errors,omitempty" json:"stop_on_errors,omitempty"`
+
+	// CustomHandler allows specifying a custom error handler function name
+	CustomHandler string `yaml:"custom_handler,omitempty" json:"custom_handler,omitempty"`
+}
