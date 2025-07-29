@@ -130,6 +130,12 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 - [ ] Add support for role inheritance
 - [ ] Implement advanced multi-tenancy
 - [ ] Add support for tenant isolation
+- [ ] **M365 Multi-Tenant Enterprise App Support**
+  - [ ] Implement multi-tenant consent flow using `/common` endpoint
+  - [ ] Add support for delegated permissions model (beyond application permissions)
+  - [ ] Implement tenant discovery and management after admin consent
+  - [ ] Enhanced per-tenant token storage and refresh management
+  - [ ] CSP partner integration for MSP tenant access relationships
 
 #### v0.5.0 (Beta) - Advanced Workflows & Core Readiness
 
