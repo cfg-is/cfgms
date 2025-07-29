@@ -107,6 +107,9 @@ type Step struct {
 
 	// Delay configuration for delay steps
 	Delay *DelayConfig `yaml:"delay,omitempty" json:"delay,omitempty"`
+
+	// Loop configuration for loop steps (for, while, foreach)
+	Loop *LoopConfig `yaml:"loop,omitempty" json:"loop,omitempty"`
 }
 
 // StepType defines the type of workflow step
@@ -136,6 +139,15 @@ const (
 
 	// StepTypeDelay introduces delays in workflow execution
 	StepTypeDelay StepType = "delay"
+
+	// StepTypeFor executes child steps in a for loop
+	StepTypeFor StepType = "for"
+
+	// StepTypeWhile executes child steps in a while loop
+	StepTypeWhile StepType = "while"
+
+	// StepTypeForeach executes child steps for each item in a collection
+	StepTypeForeach StepType = "foreach"
 )
 
 // Condition defines execution conditions for conditional steps
@@ -154,6 +166,15 @@ type Condition struct {
 
 	// Expression allows for complex condition expressions
 	Expression string `yaml:"expression,omitempty" json:"expression,omitempty"`
+
+	// And allows for logical AND combinations of conditions
+	And []*Condition `yaml:"and,omitempty" json:"and,omitempty"`
+
+	// Or allows for logical OR combinations of conditions
+	Or []*Condition `yaml:"or,omitempty" json:"or,omitempty"`
+
+	// Not allows for logical NOT of a condition
+	Not *Condition `yaml:"not,omitempty" json:"not,omitempty"`
 }
 
 // ConditionType defines the type of condition
@@ -165,6 +186,15 @@ const (
 
 	// ConditionTypeExpression evaluates a complex expression
 	ConditionTypeExpression ConditionType = "expression"
+
+	// ConditionTypeAnd evaluates logical AND of multiple conditions
+	ConditionTypeAnd ConditionType = "and"
+
+	// ConditionTypeOr evaluates logical OR of multiple conditions
+	ConditionTypeOr ConditionType = "or"
+
+	// ConditionTypeNot evaluates logical NOT of a condition
+	ConditionTypeNot ConditionType = "not"
 )
 
 // ComparisonOperator defines comparison operators for conditions
@@ -501,3 +531,50 @@ type RateLimitConfig struct {
 	// WaitOnLimit determines whether to wait or fail when rate limit is exceeded
 	WaitOnLimit bool `yaml:"wait_on_limit" json:"wait_on_limit"`
 }
+
+// LoopConfig defines configuration for loop workflow steps
+type LoopConfig struct {
+	// Type specifies the type of loop (for, while, foreach)
+	Type LoopType `yaml:"type" json:"type"`
+
+	// Variable is the loop variable name (for for and foreach loops)
+	Variable string `yaml:"variable,omitempty" json:"variable,omitempty"`
+
+	// Start is the starting value for for loops
+	Start interface{} `yaml:"start,omitempty" json:"start,omitempty"`
+
+	// End is the ending value for for loops
+	End interface{} `yaml:"end,omitempty" json:"end,omitempty"`
+
+	// Step is the increment value for for loops (default: 1)
+	Step interface{} `yaml:"step,omitempty" json:"step,omitempty"`
+
+	// Condition is the condition to evaluate for while loops
+	Condition *Condition `yaml:"condition,omitempty" json:"condition,omitempty"`
+
+	// Items is the collection to iterate over for foreach loops
+	Items interface{} `yaml:"items,omitempty" json:"items,omitempty"`
+
+	// ItemsVariable is the variable name containing the collection for foreach loops
+	ItemsVariable string `yaml:"items_variable,omitempty" json:"items_variable,omitempty"`
+
+	// IndexVariable is the variable name for the current index (optional)
+	IndexVariable string `yaml:"index_variable,omitempty" json:"index_variable,omitempty"`
+
+	// MaxIterations is a safety limit to prevent infinite loops
+	MaxIterations int `yaml:"max_iterations,omitempty" json:"max_iterations,omitempty"`
+}
+
+// LoopType defines the type of loop
+type LoopType string
+
+const (
+	// LoopTypeFor executes a counted loop
+	LoopTypeFor LoopType = "for"
+
+	// LoopTypeWhile executes a conditional loop
+	LoopTypeWhile LoopType = "while"
+
+	// LoopTypeForeach executes a loop over a collection
+	LoopTypeForeach LoopType = "foreach"
+)
