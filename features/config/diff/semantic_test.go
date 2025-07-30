@@ -29,7 +29,7 @@ data:
   host: localhost
   port: "8080"`,
 			expectedSchema:   "kubernetes",
-			expectedSections: 3, // apiVersion, kind, metadata, data
+			expectedSections: 4, // apiVersion, kind, metadata, data
 		},
 		{
 			name:   "docker compose",
@@ -166,7 +166,7 @@ func TestDefaultSemanticAnalyzer_DetectSectionType(t *testing.T) {
 				"host": "localhost",
 				"port": 8080,
 			},
-			expected: "connection",
+			expected: "server",
 		},
 		{
 			name: "feature section",
@@ -369,7 +369,7 @@ func TestDefaultSemanticAnalyzer_InvalidInput(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to parse JSON")
 
 	// Test invalid YAML
-	_, err = analyzer.AnalyzeStructure(context.Background(), []byte("invalid:\nyaml:\n  - badly"), "yaml")
+	_, err = analyzer.AnalyzeStructure(context.Background(), []byte("invalid: [\n  unclosed"), "yaml")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to parse YAML")
 

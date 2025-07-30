@@ -125,7 +125,7 @@ func TestEngine_ExecuteHTTPStep(t *testing.T) {
 
 	finalExecution, err := engine.GetExecution(execution.ID)
 	require.NoError(t, err)
-	assert.Equal(t, StatusCompleted, finalExecution.Status)
+	assert.Equal(t, StatusCompleted, finalExecution.GetStatus())
 
 	// Check that HTTP response was stored in variables
 	assert.Equal(t, 200, finalExecution.Variables["test-http-step_status_code"])
@@ -188,7 +188,7 @@ func TestEngine_ExecuteAPIStep(t *testing.T) {
 
 	finalExecution, err := engine.GetExecution(execution.ID)
 	require.NoError(t, err)
-	assert.Equal(t, StatusCompleted, finalExecution.Status)
+	assert.Equal(t, StatusCompleted, finalExecution.GetStatus())
 
 	// Check that API response was stored in variables
 	assert.Equal(t, 200, finalExecution.Variables["test-api-step_status_code"])
@@ -247,7 +247,7 @@ func TestEngine_ExecuteWebhookStep(t *testing.T) {
 
 	finalExecution, err := engine.GetExecution(execution.ID)
 	require.NoError(t, err)
-	assert.Equal(t, StatusCompleted, finalExecution.Status)
+	assert.Equal(t, StatusCompleted, finalExecution.GetStatus())
 
 	// Check that webhook was called and payload was received
 	assert.NotNil(t, receivedPayload)
@@ -288,7 +288,7 @@ func TestEngine_ExecuteDelayStep(t *testing.T) {
 
 	finalExecution, err := engine.GetExecution(execution.ID)
 	require.NoError(t, err)
-	assert.Equal(t, StatusCompleted, finalExecution.Status)
+	assert.Equal(t, StatusCompleted, finalExecution.GetStatus())
 
 	// Check that the delay actually happened
 	duration := time.Since(startTime)
@@ -387,13 +387,14 @@ func TestEngine_ComplexAPIWorkflow(t *testing.T) {
 
 	finalExecution, err := engine.GetExecution(execution.ID)
 	require.NoError(t, err)
-	assert.Equal(t, StatusCompleted, finalExecution.Status)
+	assert.Equal(t, StatusCompleted, finalExecution.GetStatus())
 
 	// Verify all steps completed successfully
-	assert.Equal(t, StatusCompleted, finalExecution.StepResults["authenticate"].Status)
-	assert.Equal(t, StatusCompleted, finalExecution.StepResults["create-user"].Status)
-	assert.Equal(t, StatusCompleted, finalExecution.StepResults["wait-propagation"].Status)
-	assert.Equal(t, StatusCompleted, finalExecution.StepResults["send-notification"].Status)
+	stepResults := finalExecution.GetStepResults()
+	assert.Equal(t, StatusCompleted, stepResults["authenticate"].Status)
+	assert.Equal(t, StatusCompleted, stepResults["create-user"].Status)
+	assert.Equal(t, StatusCompleted, stepResults["wait-propagation"].Status)
+	assert.Equal(t, StatusCompleted, stepResults["send-notification"].Status)
 
 	// Verify variables were set correctly
 	assert.Equal(t, 200, finalExecution.Variables["authenticate_status_code"])

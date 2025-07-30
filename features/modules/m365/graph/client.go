@@ -302,6 +302,9 @@ type RateLimiter interface {
 	
 	// Allow checks if a request is allowed without blocking
 	Allow() bool
+	
+	// Reset resets the rate limiter to its initial state
+	Reset()
 }
 
 // RetryConfig defines retry configuration for Graph API calls

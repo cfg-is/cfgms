@@ -311,14 +311,15 @@ func TestExecutionTrace(t *testing.T) {
 	}
 	
 	// Add execution trace entries
-	AddExecutionTrace(execution, "step1", StepTypeTask, StatusCompleted, 100*time.Millisecond, execution.Variables, "", 0)
-	AddExecutionTrace(execution, "step2", StepTypeDelay, StatusFailed, 50*time.Millisecond, execution.Variables, "step1", 0)
-	AddExecutionTrace(execution, "step3", StepTypeTask, StatusCompleted, 75*time.Millisecond, execution.Variables, "step2", 2)
+	AddExecutionTrace(execution, "step1", StepTypeTask, StatusCompleted, 100*time.Millisecond, execution.GetVariables(), "", 0)
+	AddExecutionTrace(execution, "step2", StepTypeDelay, StatusFailed, 50*time.Millisecond, execution.GetVariables(), "step1", 0)
+	AddExecutionTrace(execution, "step3", StepTypeTask, StatusCompleted, 75*time.Millisecond, execution.GetVariables(), "step2", 2)
 	
-	require.Len(t, execution.ExecutionTrace, 3)
+	executionTrace := execution.GetExecutionTrace()
+	require.Len(t, executionTrace, 3)
 	
 	// Verify first trace entry
-	trace1 := execution.ExecutionTrace[0]
+	trace1 := executionTrace[0]
 	assert.Equal(t, "step1", trace1.StepName)
 	assert.Equal(t, StepTypeTask, trace1.StepType)
 	assert.Equal(t, StatusCompleted, trace1.Status)
@@ -328,13 +329,13 @@ func TestExecutionTrace(t *testing.T) {
 	assert.NotEmpty(t, trace1.Variables)
 	
 	// Verify second trace entry
-	trace2 := execution.ExecutionTrace[1]
+	trace2 := executionTrace[1]
 	assert.Equal(t, "step2", trace2.StepName)
 	assert.Equal(t, StatusFailed, trace2.Status)
 	assert.Equal(t, "step1", trace2.ParentStep)
 	
 	// Verify third trace entry
-	trace3 := execution.ExecutionTrace[2]
+	trace3 := executionTrace[2]
 	assert.Equal(t, "step3", trace3.StepName)
 	assert.Equal(t, 2, trace3.LoopIteration)
 }

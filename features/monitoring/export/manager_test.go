@@ -43,14 +43,15 @@ func (me *MockExporter) Export(ctx context.Context, data export.ExportData) erro
 	me.mu.Lock()
 	defer me.mu.Unlock()
 	
-	me.exportedData = append(me.exportedData, data)
-	
+	// Check for errors first, only add data if no error
 	if len(me.exportErrors) > 0 {
 		err := me.exportErrors[0]
 		me.exportErrors = me.exportErrors[1:]
 		return err
 	}
 	
+	// Only add data if export succeeds
+	me.exportedData = append(me.exportedData, data)
 	return nil
 }
 
@@ -237,8 +238,9 @@ func TestExportManagerDataExport(t *testing.T) {
 
 	t.Run("export data to multiple exporters", func(t *testing.T) {
 		config := &export.ExportConfig{
-			Enabled:    true,
-			BufferSize: 10,
+			Enabled:      true,
+			BufferSize:   10,
+			SamplingRate: 1.0, // Export everything
 			Exporters: map[string]export.ExporterConfig{
 				"exporter1": {Enabled: true},
 				"exporter2": {Enabled: true},
@@ -291,7 +293,7 @@ func TestExportManagerDataExport(t *testing.T) {
 	t.Run("export with sampling", func(t *testing.T) {
 		config := &export.ExportConfig{
 			Enabled:      true,
-			SamplingRate: 0.0, // No sampling
+			SamplingRate: 0.0, // Never export (0% sampling)
 			Exporters: map[string]export.ExporterConfig{
 				"test": {Enabled: true},
 			},
@@ -364,6 +366,8 @@ func TestExportManagerErrorHandling(t *testing.T) {
 			Enabled:      true,
 			MaxRetries:   2,
 			RetryBackoff: 10 * time.Millisecond,
+			SamplingRate: 1.0, // Export everything
+			BufferSize:   10,   // Adequate buffer size
 			Exporters: map[string]export.ExporterConfig{
 				"error-exporter": {Enabled: true},
 			},
@@ -390,8 +394,8 @@ func TestExportManagerErrorHandling(t *testing.T) {
 		err := manager.Export(exportData)
 		assert.NoError(t, err)
 
-		// Give time for retry processing
-		time.Sleep(100 * time.Millisecond)
+		// Give time for retry processing (initial attempt + up to 2 retries with 10ms backoff each)
+		time.Sleep(200 * time.Millisecond)
 
 		// Should eventually succeed on retry
 		data := exporter.GetExportedData()
@@ -456,7 +460,9 @@ func TestExportDataFiltering(t *testing.T) {
 
 	t.Run("filter data types per exporter", func(t *testing.T) {
 		config := &export.ExportConfig{
-			Enabled: true,
+			Enabled:      true,
+			SamplingRate: 1.0, // Export everything
+			BufferSize:   10,   // Adequate buffer size
 			Exporters: map[string]export.ExporterConfig{
 				"metrics-only": {
 					Enabled:   true,

@@ -30,9 +30,9 @@ package saas
 import (
 	"context"
 	"fmt"
-	"reflect"
 
 	"github.com/cfgis/cfgms/features/modules"
+	"gopkg.in/yaml.v3"
 )
 
 // ModuleBridge provides a bridge between SaaS providers and CFGMS modules
@@ -221,6 +221,38 @@ type MapConfigState struct {
 // AsMap implements ConfigState.AsMap
 func (m *MapConfigState) AsMap() map[string]interface{} {
 	return m.data
+}
+
+// ToYAML implements ConfigState.ToYAML
+func (m *MapConfigState) ToYAML() ([]byte, error) {
+	return yaml.Marshal(m.data)
+}
+
+// FromYAML implements ConfigState.FromYAML
+func (m *MapConfigState) FromYAML(data []byte) error {
+	return yaml.Unmarshal(data, &m.data)
+}
+
+// Validate implements ConfigState.Validate
+func (m *MapConfigState) Validate() error {
+	// Basic validation - ensure data is not nil
+	if m.data == nil {
+		return fmt.Errorf("configuration data cannot be nil")
+	}
+	return nil
+}
+
+// GetManagedFields implements ConfigState.GetManagedFields
+func (m *MapConfigState) GetManagedFields() []string {
+	if m.data == nil {
+		return []string{}
+	}
+	
+	fields := make([]string, 0, len(m.data))
+	for key := range m.data {
+		fields = append(fields, key)
+	}
+	return fields
 }
 
 // ValidateProviderOperation validates that a provider supports a specific operation

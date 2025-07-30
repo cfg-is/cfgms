@@ -114,6 +114,13 @@ func (sa *DefaultSemanticAnalyzer) detectSchema(data interface{}, format string)
 			}
 		}
 		
+		// Check for Kubernetes with apiVersion instead of version
+		if _, hasAPIVersion := rootMap["apiVersion"]; hasAPIVersion {
+			if _, hasKind := rootMap["kind"]; hasKind {
+				return "kubernetes"
+			}
+		}
+		
 		if _, hasServices := rootMap["services"]; hasServices {
 			return "docker-compose"
 		}
@@ -216,6 +223,10 @@ func (sa *DefaultSemanticAnalyzer) detectSectionType(key string, value interface
 	}
 	
 	// Default type based on value type
+	if value == nil {
+		return "unknown"
+	}
+	
 	switch reflect.TypeOf(value).Kind() {
 	case reflect.Map:
 		return "object"

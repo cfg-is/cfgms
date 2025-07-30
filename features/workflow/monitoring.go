@@ -93,12 +93,19 @@ func (m *Monitor) TrackExecution(execution *WorkflowExecution) {
 	workflowStats.ExecutionCount++
 	workflowStats.LastExecution = execution.StartTime
 
-	// Calculate step statistics
-	totalSteps := int64(len(execution.StepResults))
+	// Calculate step statistics using thread-safe access
+	stepResults := make(map[string]StepResult)
+	execution.mutex.RLock()
+	for k, v := range execution.StepResults {
+		stepResults[k] = v
+	}
+	execution.mutex.RUnlock()
+
+	totalSteps := int64(len(stepResults))
 	successfulSteps := int64(0)
 	failedSteps := int64(0)
 
-	for _, result := range execution.StepResults {
+	for _, result := range stepResults {
 		if result.Status == StatusCompleted {
 			successfulSteps++
 		} else if result.Status == StatusFailed {

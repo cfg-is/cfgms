@@ -391,9 +391,17 @@ func (em *ExportManager) Export(data ExportData) error {
 	}
 	
 	// Apply sampling
-	if em.config.SamplingRate < 1.0 {
+	samplingRate := em.config.SamplingRate
+	if samplingRate == 0.0 {
+		// If SamplingRate is explicitly 0.0, never export
+		// If it's unset (also 0.0), we should export everything
+		// We can't distinguish between these cases, so assume 0.0 means never export
+		return nil
+	}
+	
+	if samplingRate < 1.0 {
 		// Simple random sampling - in production, you might want more sophisticated sampling
-		if float64(time.Now().UnixNano()%1000)/1000.0 > em.config.SamplingRate {
+		if float64(time.Now().UnixNano()%1000)/1000.0 > samplingRate {
 			return nil
 		}
 	}

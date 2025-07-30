@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/stretchr/testify/assert"
@@ -509,12 +510,13 @@ func TestWorkflowConditionalExecution(t *testing.T) {
 	require.NotNil(t, execution)
 
 	// Wait for completion
-	for execution.Status == StatusRunning {
+	for execution.GetStatus() == StatusRunning || execution.GetStatus() == StatusPending {
 		// Small delay to allow workflow to complete
+		time.Sleep(10 * time.Millisecond)
 		execution, _ = engine.GetExecution(execution.ID)
 	}
 
-	assert.Equal(t, StatusCompleted, execution.Status)
-	assert.Contains(t, execution.StepResults, "conditional-step")
-	assert.Contains(t, execution.StepResults, "inner-step")
+	assert.Equal(t, StatusCompleted, execution.GetStatus())
+	assert.True(t, execution.HasStepResult("conditional-step"))
+	assert.True(t, execution.HasStepResult("inner-step"))
 }

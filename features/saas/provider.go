@@ -82,6 +82,11 @@ type Provider interface {
 	
 	// ValidateResource validates resource data against the schema
 	ValidateResource(resourceType string, data map[string]interface{}) error
+	
+	// Configuration Validation
+	
+	// ValidateConfig validates the provider configuration
+	ValidateConfig(config ProviderConfig) error
 }
 
 // ProviderInfo contains basic information about a provider

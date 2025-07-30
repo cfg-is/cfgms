@@ -3,6 +3,7 @@ package monitoring_test
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -46,14 +47,26 @@ func (mc *MockCollector) GetHealthStatus(ctx context.Context) (monitoring.Health
 type MockWatcher struct {
 	name   string
 	events []monitoring.SystemEvent
+	mutex  sync.RWMutex
 }
 
 func (mw *MockWatcher) OnSystemEvent(event monitoring.SystemEvent) {
+	mw.mutex.Lock()
+	defer mw.mutex.Unlock()
 	mw.events = append(mw.events, event)
 }
 
 func (mw *MockWatcher) GetWatcherName() string {
 	return mw.name
+}
+
+func (mw *MockWatcher) GetEvents() []monitoring.SystemEvent {
+	mw.mutex.RLock()
+	defer mw.mutex.RUnlock()
+	// Return a copy to avoid race conditions
+	eventsCopy := make([]monitoring.SystemEvent, len(mw.events))
+	copy(eventsCopy, mw.events)
+	return eventsCopy
 }
 
 func TestSystemMonitorCreation(t *testing.T) {
@@ -239,7 +252,7 @@ func TestSystemMonitorWatchers(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 
 		// Should have received startup event
-		assert.NotEmpty(t, watcher.events)
+		assert.NotEmpty(t, watcher.GetEvents())
 	})
 
 	t.Run("register all events watcher", func(t *testing.T) {
@@ -259,11 +272,12 @@ func TestSystemMonitorWatchers(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 
 		// Should have received events
-		assert.NotEmpty(t, watcher.events)
+		events := watcher.GetEvents()
+		assert.NotEmpty(t, events)
 		
 		// Check for startup event
 		hasStartup := false
-		for _, event := range watcher.events {
+		for _, event := range events {
 			if event.Type == monitoring.EventSystemStartup {
 				hasStartup = true
 				break
@@ -392,8 +406,9 @@ func TestSystemMonitorResourceMetrics(t *testing.T) {
 		time.Sleep(150 * time.Millisecond)
 
 		// Should have received resource alerts
+		events := watcher.GetEvents()
 		hasAlert := false
-		for _, event := range watcher.events {
+		for _, event := range events {
 			if event.Type == monitoring.EventResourceAlert {
 				hasAlert = true
 				break
@@ -458,12 +473,13 @@ func TestSystemMonitorIntegration(t *testing.T) {
 		assert.Contains(t, systemMetrics.ComponentMetrics, "service")
 
 		// Verify events received
-		assert.NotEmpty(t, watcher.events)
+		events := watcher.GetEvents()
+		assert.NotEmpty(t, events)
 		
 		// Should have startup and shutdown events
 		hasStartup := false
 		hasShutdown := false
-		for _, event := range watcher.events {
+		for _, event := range events {
 			if event.Type == monitoring.EventSystemStartup {
 				hasStartup = true
 			}

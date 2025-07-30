@@ -40,6 +40,7 @@ package workflow
 
 import (
 	"context"
+	"sync"
 	"time"
 )
 
@@ -277,6 +278,192 @@ type WorkflowExecution struct {
 
 	// Cancel function for stopping execution
 	Cancel context.CancelFunc `json:"-"`
+
+	// mutex protects concurrent access to Variables, StepResults, and ExecutionTrace
+	mutex sync.RWMutex `json:"-"`
+}
+
+// Thread-safe methods for WorkflowExecution
+
+// SetVariable safely sets a variable value
+func (we *WorkflowExecution) SetVariable(key string, value interface{}) {
+	we.mutex.Lock()
+	defer we.mutex.Unlock()
+	if we.Variables == nil {
+		we.Variables = make(map[string]interface{})
+	}
+	we.Variables[key] = value
+}
+
+// GetVariable safely gets a variable value
+func (we *WorkflowExecution) GetVariable(key string) (interface{}, bool) {
+	we.mutex.RLock()
+	defer we.mutex.RUnlock()
+	if we.Variables == nil {
+		return nil, false
+	}
+	value, exists := we.Variables[key]
+	return value, exists
+}
+
+// GetVariables safely returns a copy of all variables
+func (we *WorkflowExecution) GetVariables() map[string]interface{} {
+	we.mutex.RLock()
+	defer we.mutex.RUnlock()
+	if we.Variables == nil {
+		return make(map[string]interface{})
+	}
+	// Return a copy to prevent external modification
+	result := make(map[string]interface{})
+	for k, v := range we.Variables {
+		result[k] = v
+	}
+	return result
+}
+
+// SetStepResult safely sets a step result
+func (we *WorkflowExecution) SetStepResult(stepName string, result StepResult) {
+	we.mutex.Lock()
+	defer we.mutex.Unlock()
+	if we.StepResults == nil {
+		we.StepResults = make(map[string]StepResult)
+	}
+	we.StepResults[stepName] = result
+}
+
+// GetStepResult safely gets a step result
+func (we *WorkflowExecution) GetStepResult(stepName string) (StepResult, bool) {
+	we.mutex.RLock()
+	defer we.mutex.RUnlock()
+	if we.StepResults == nil {
+		return StepResult{}, false
+	}
+	result, exists := we.StepResults[stepName]
+	return result, exists
+}
+
+// AddExecutionTrace safely adds an execution trace entry
+func (we *WorkflowExecution) AddExecutionTrace(step ExecutionStep) {
+	we.mutex.Lock()
+	defer we.mutex.Unlock()
+	we.ExecutionTrace = append(we.ExecutionTrace, step)
+}
+
+// GetExecutionTrace safely returns a copy of the execution trace
+func (we *WorkflowExecution) GetExecutionTrace() []ExecutionStep {
+	we.mutex.RLock()
+	defer we.mutex.RUnlock()
+	// Return a copy to prevent external modification
+	result := make([]ExecutionStep, len(we.ExecutionTrace))
+	copy(result, we.ExecutionTrace)
+	return result
+}
+
+// SetStatus safely sets the execution status
+func (we *WorkflowExecution) SetStatus(status ExecutionStatus) {
+	we.mutex.Lock()
+	defer we.mutex.Unlock()
+	we.Status = status
+}
+
+// GetStatus safely gets the execution status
+func (we *WorkflowExecution) GetStatus() ExecutionStatus {
+	we.mutex.RLock()
+	defer we.mutex.RUnlock()
+	return we.Status
+}
+
+// GetStepResults safely returns a copy of all step results
+func (we *WorkflowExecution) GetStepResults() map[string]StepResult {
+	we.mutex.RLock()
+	defer we.mutex.RUnlock()
+	if we.StepResults == nil {
+		return make(map[string]StepResult)
+	}
+	// Return a copy to prevent external modification
+	result := make(map[string]StepResult)
+	for k, v := range we.StepResults {
+		result[k] = v
+	}
+	return result
+}
+
+// HasStepResult safely checks if a step result exists
+func (we *WorkflowExecution) HasStepResult(stepName string) bool {
+	we.mutex.RLock()
+	defer we.mutex.RUnlock()
+	if we.StepResults == nil {
+		return false
+	}
+	_, exists := we.StepResults[stepName]
+	return exists
+}
+
+// HasVariable safely checks if a variable exists
+func (we *WorkflowExecution) HasVariable(varName string) bool {
+	we.mutex.RLock()
+	defer we.mutex.RUnlock()
+	if we.Variables == nil {
+		return false
+	}
+	_, exists := we.Variables[varName]
+	return exists
+}
+
+// SetCurrentStep safely sets the current step
+func (we *WorkflowExecution) SetCurrentStep(stepName string) {
+	we.mutex.Lock()
+	defer we.mutex.Unlock()
+	we.CurrentStep = stepName
+}
+
+// GetCurrentStep safely gets the current step
+func (we *WorkflowExecution) GetCurrentStep() string {
+	we.mutex.RLock()
+	defer we.mutex.RUnlock()
+	return we.CurrentStep
+}
+
+// SetError safely sets the error message
+func (we *WorkflowExecution) SetError(errorMsg string) {
+	we.mutex.Lock()
+	defer we.mutex.Unlock()
+	we.Error = errorMsg
+}
+
+// GetError safely gets the error message
+func (we *WorkflowExecution) GetError() string {
+	we.mutex.RLock()
+	defer we.mutex.RUnlock()
+	return we.Error
+}
+
+// SetErrorDetails safely sets the error details
+func (we *WorkflowExecution) SetErrorDetails(errorDetails *WorkflowError) {
+	we.mutex.Lock()
+	defer we.mutex.Unlock()
+	we.ErrorDetails = errorDetails
+}
+
+// GetErrorDetails safely gets the error details
+func (we *WorkflowExecution) GetErrorDetails() *WorkflowError {
+	we.mutex.RLock()
+	defer we.mutex.RUnlock()
+	return we.ErrorDetails
+}
+
+// SetEndTime safely sets the end time
+func (we *WorkflowExecution) SetEndTime(endTime *time.Time) {
+	we.mutex.Lock()
+	defer we.mutex.Unlock()
+	we.EndTime = endTime
+}
+
+// GetEndTime safely gets the end time
+func (we *WorkflowExecution) GetEndTime() *time.Time {
+	we.mutex.RLock()
+	defer we.mutex.RUnlock()
+	return we.EndTime
 }
 
 // ExecutionStatus represents the status of a workflow execution
@@ -815,4 +1002,65 @@ type ErrorHandlingConfig struct {
 
 	// CustomHandler allows specifying a custom error handler function name
 	CustomHandler string `yaml:"custom_handler,omitempty" json:"custom_handler,omitempty"`
+}
+
+// Node represents a workflow node interface
+type Node interface {
+	// Execute runs the node with given inputs and returns outputs
+	Execute(ctx context.Context, inputs NodeInput) (NodeOutput, error)
+	
+	// GetID returns the unique identifier for this node
+	GetID() string
+	
+	// GetType returns the node type
+	GetType() string
+}
+
+// BaseNode provides common functionality for workflow nodes
+type BaseNode struct {
+	// ID is the unique identifier for this node
+	ID string `yaml:"id" json:"id"`
+	
+	// Type specifies the node type
+	Type string `yaml:"type" json:"type"`
+	
+	// Name is a human-readable name for the node
+	Name string `yaml:"name" json:"name"`
+	
+	// Description provides additional context about the node
+	Description string `yaml:"description,omitempty" json:"description,omitempty"`
+}
+
+// GetID returns the node's unique identifier
+func (bn *BaseNode) GetID() string {
+	return bn.ID
+}
+
+// GetType returns the node's type
+func (bn *BaseNode) GetType() string {
+	return bn.Type
+}
+
+// NodeInput represents input data for a workflow node
+type NodeInput struct {
+	// Data contains the input data as key-value pairs
+	Data map[string]interface{} `json:"data"`
+	
+	// Context provides additional context information
+	Context map[string]interface{} `json:"context,omitempty"`
+}
+
+// NodeOutput represents output data from a workflow node
+type NodeOutput struct {
+	// Data contains the output data as key-value pairs
+	Data map[string]interface{} `json:"data"`
+	
+	// Success indicates whether the node executed successfully
+	Success bool `json:"success"`
+	
+	// Error contains error information if execution failed
+	Error string `json:"error,omitempty"`
+	
+	// Metadata provides additional information about the execution
+	Metadata map[string]interface{} `json:"metadata,omitempty"`
 }

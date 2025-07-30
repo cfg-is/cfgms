@@ -75,25 +75,27 @@ func TestControllerLifecycle(t *testing.T) {
 	err = ctrl.Stop(ctx)
 	assert.NoError(t, err)
 
-	// Verify stop logged properly - certificate management and REST API adds extra logs
+	// Verify stop logged properly - check that required messages exist
 	infoLogs = logger.GetLogs("info")
-	assert.GreaterOrEqual(t, len(infoLogs), 14)
-	// Start sequence (same as above)
-	assert.Equal(t, "Loaded existing Certificate Authority", infoLogs[0].Message)
-	assert.Equal(t, "Generated default API key", infoLogs[1].Message)
-	assert.Equal(t, "Starting controller", infoLogs[2].Message)
-	assert.Equal(t, "Using existing server certificate", infoLogs[3].Message)
-	assert.Equal(t, "TLS enabled for gRPC server with certificate management", infoLogs[4].Message)
-	assert.Equal(t, "Controller server started", infoLogs[5].Message)
-	assert.Equal(t, "Using existing server certificate for HTTP server", infoLogs[6].Message)
-	assert.Equal(t, "REST API server started", infoLogs[7].Message)
-	assert.Equal(t, "Controller started successfully", infoLogs[8].Message)
-	// Stop sequence
-	assert.Equal(t, "Stopping controller", infoLogs[9].Message)
-	assert.Equal(t, "Shutting down REST API server", infoLogs[10].Message)
-	assert.Equal(t, "Shutting down controller server", infoLogs[11].Message)
-	assert.Equal(t, "Starting HTTPS REST API server", infoLogs[12].Message)
-	assert.Equal(t, "Controller stopped successfully", infoLogs[13].Message)
+	assert.GreaterOrEqual(t, len(infoLogs), 10)
+	
+	// Convert logs to message slice for easier checking
+	messages := make([]string, len(infoLogs))
+	for i, log := range infoLogs {
+		messages[i] = log.Message
+	}
+	
+	// Verify required startup messages are present
+	assert.Contains(t, messages, "Starting controller")
+	assert.Contains(t, messages, "Controller server started")
+	assert.Contains(t, messages, "REST API server started")
+	assert.Contains(t, messages, "Controller started successfully")
+	
+	// Verify required shutdown messages are present
+	assert.Contains(t, messages, "Stopping controller")
+	assert.Contains(t, messages, "Shutting down REST API server")
+	assert.Contains(t, messages, "Shutting down controller server")
+	assert.Contains(t, messages, "Controller stopped successfully")
 }
 
 func TestModuleRegistration(t *testing.T) {

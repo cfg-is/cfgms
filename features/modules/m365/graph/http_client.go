@@ -587,7 +587,8 @@ func (c *HTTPClient) calculateRetryDelay(attempt int) time.Duration {
 	
 	// Add jitter (±25%)
 	jitter := time.Duration(float64(delay) * 0.25)
-	delay = delay + time.Duration(float64(jitter)*(2*time.Now().UnixNano()%1000/1000.0-1))
+	randomFactor := float64(time.Now().UnixNano()%1000)/1000.0
+	delay = delay + time.Duration(float64(jitter)*(2*randomFactor-1))
 	
 	return delay
 }

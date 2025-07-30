@@ -5,7 +5,6 @@ package examples
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -126,8 +125,8 @@ func (p *MicrosoftProvider) List(ctx context.Context, resourceType string, filte
 
 // RawAPI executes a raw API call
 func (p *MicrosoftProvider) RawAPI(ctx context.Context, method, path string, body interface{}) (*saas.ProviderResult, error) {
-	// Build full URL
-	url := p.baseURL + path
+	// Build full URL (for actual implementation)
+	_ = p.baseURL + path
 	
 	// This would make the actual HTTP request
 	// For demonstration, return a mock successful result

@@ -320,9 +320,18 @@ func (m *entraUserModule) Get(ctx context.Context, resourceID string) (modules.C
 	}
 	
 	// Get user's license assignments
-	licenses, err := m.graphClient.GetUserLicenses(ctx, token, user.ID)
+	graphLicenses, err := m.graphClient.GetUserLicenses(ctx, token, user.ID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get user licenses: %w", err)
+	}
+	
+	// Convert graph.LicenseAssignment to local LicenseAssignment
+	licenses := make([]LicenseAssignment, len(graphLicenses))
+	for i, gl := range graphLicenses {
+		licenses[i] = LicenseAssignment{
+			SkuID:         gl.SkuID,
+			DisabledPlans: gl.DisabledPlans,
+		}
 	}
 	
 	// Get user's group memberships

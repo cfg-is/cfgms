@@ -246,7 +246,7 @@ func TestEngine_ExecuteAPIStep_WithProviderRegistry(t *testing.T) {
 
 	finalExecution, err := engine.GetExecution(execution.ID)
 	require.NoError(t, err)
-	assert.Equal(t, StatusCompleted, finalExecution.Status)
+	assert.Equal(t, StatusCompleted, finalExecution.GetStatus())
 
 	// Check that API response was stored correctly
 	assert.True(t, finalExecution.Variables["test-api-call_api_success"].(bool))

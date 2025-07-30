@@ -85,7 +85,7 @@ func TestEngine_ExecuteWorkflow_Simple(t *testing.T) {
 	// Check final status
 	finalExecution, err := engine.GetExecution(execution.ID)
 	require.NoError(t, err)
-	assert.Contains(t, []ExecutionStatus{StatusCompleted, StatusFailed}, finalExecution.Status)
+	assert.Contains(t, []ExecutionStatus{StatusCompleted, StatusFailed}, finalExecution.GetStatus())
 }
 
 func TestEngine_ExecuteWorkflow_Parallel(t *testing.T) {
@@ -139,7 +139,7 @@ func TestEngine_ExecuteWorkflow_Parallel(t *testing.T) {
 
 	finalExecution, err := engine.GetExecution(execution.ID)
 	require.NoError(t, err)
-	assert.Contains(t, []ExecutionStatus{StatusCompleted, StatusFailed}, finalExecution.Status)
+	assert.Contains(t, []ExecutionStatus{StatusCompleted, StatusFailed}, finalExecution.GetStatus())
 }
 
 func TestEngine_CancelExecution(t *testing.T) {
@@ -185,7 +185,7 @@ func TestEngine_CancelExecution(t *testing.T) {
 	// Check status
 	finalExecution, err := engine.GetExecution(execution.ID)
 	require.NoError(t, err)
-	assert.Equal(t, StatusCancelled, finalExecution.Status)
+	assert.Equal(t, StatusCancelled, finalExecution.GetStatus())
 }
 
 func TestEngine_ListExecutions(t *testing.T) {

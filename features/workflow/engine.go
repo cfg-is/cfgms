@@ -100,9 +100,7 @@ func (e *Engine) ExecuteWorkflow(ctx context.Context, workflow Workflow, variabl
 
 // executeWorkflowAsync executes the workflow asynchronously
 func (e *Engine) executeWorkflowAsync(execution *WorkflowExecution, workflow Workflow) {
-	e.mutex.Lock()
-	execution.Status = StatusRunning
-	e.mutex.Unlock()
+	execution.SetStatus(StatusRunning)
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -114,13 +112,11 @@ func (e *Engine) executeWorkflowAsync(execution *WorkflowExecution, workflow Wor
 				fmt.Errorf("%v", r),
 			).WithVariableState(execution.Variables)
 
-			e.mutex.Lock()
-			execution.Status = StatusFailed
-			execution.Error = panicErr.Error()
-			execution.ErrorDetails = panicErr
+			execution.SetError(panicErr.Error())
+			execution.SetErrorDetails(panicErr)
 			endTime := time.Now()
-			execution.EndTime = &endTime
-			e.mutex.Unlock()
+			execution.SetEndTime(&endTime)
+			execution.SetStatus(StatusFailed)
 			e.logger.Error("Workflow execution panicked",
 				"execution_id", execution.ID,
 				"error", panicErr.FullError())
@@ -131,8 +127,8 @@ func (e *Engine) executeWorkflowAsync(execution *WorkflowExecution, workflow Wor
 	err := e.executeSteps(execution.Context, workflow.Steps, execution)
 	
 	endTime := time.Now()
+	execution.SetEndTime(&endTime)
 	e.mutex.Lock()
-	execution.EndTime = &endTime
 
 	if err != nil {
 		// Handle workflow-level error
@@ -143,22 +139,22 @@ func (e *Engine) executeWorkflowAsync(execution *WorkflowExecution, workflow Wor
 			workflowErr = NewWorkflowError(
 				ErrorCodeStepExecution,
 				err.Error(),
-				execution.CurrentStep,
+				execution.GetCurrentStep(),
 				"",
 				err,
 			).WithVariableState(execution.Variables)
 		}
 
-		execution.Status = StatusFailed
-		execution.Error = workflowErr.Error()
-		execution.ErrorDetails = workflowErr
+		execution.SetError(workflowErr.Error())
+		execution.SetErrorDetails(workflowErr)
 		e.mutex.Unlock()
+		execution.SetStatus(StatusFailed)
 		e.logger.Error("Workflow execution failed",
 			"execution_id", execution.ID,
 			"error", workflowErr.FullError())
 	} else {
-		execution.Status = StatusCompleted
 		e.mutex.Unlock()
+		execution.SetStatus(StatusCompleted)
 		e.logger.Info("Workflow execution completed",
 			"execution_id", execution.ID,
 			"duration", endTime.Sub(execution.StartTime))
@@ -234,9 +230,7 @@ func (e *Engine) executeSteps(ctx context.Context, steps []Step, execution *Work
 
 // executeStep executes a single step based on its type
 func (e *Engine) executeStep(ctx context.Context, step Step, execution *WorkflowExecution) error {
-	e.mutex.Lock()
-	execution.CurrentStep = step.Name
-	e.mutex.Unlock()
+	execution.SetCurrentStep(step.Name)
 	
 	e.logger.Info("Executing step",
 		"execution_id", execution.ID,
@@ -250,9 +244,7 @@ func (e *Engine) executeStep(ctx context.Context, step Step, execution *Workflow
 	}
 
 	// Store initial result safely
-	e.mutex.Lock()
-	execution.StepResults[step.Name] = result
-	e.mutex.Unlock()
+	execution.SetStepResult(step.Name, result)
 
 	var err error
 	switch step.Type {
@@ -312,9 +304,7 @@ func (e *Engine) executeStep(ctx context.Context, step Step, execution *Workflow
 	// Add execution trace entry
 	AddExecutionTrace(execution, step.Name, step.Type, result.Status, result.Duration, execution.Variables, "", 0)
 
-	e.mutex.Lock()
-	execution.StepResults[step.Name] = result
-	e.mutex.Unlock()
+	execution.SetStepResult(step.Name, result)
 	return err
 }
 
@@ -379,7 +369,7 @@ func (e *Engine) executeTaskStep(ctx context.Context, step Step, execution *Work
 		// Store output in variables safely
 		if finalState != nil {
 			e.mutex.Lock()
-			execution.Variables[step.Name+"_result"] = finalState.AsMap()
+			execution.SetVariable(step.Name+"_result", finalState.AsMap())
 			e.mutex.Unlock()
 		}
 	}
@@ -819,21 +809,28 @@ func (e *Engine) GetExecution(executionID string) (*WorkflowExecution, error) {
 		return nil, fmt.Errorf("execution not found: %s", executionID)
 	}
 
-	// Return a copy to avoid race conditions
-	e.mutex.RLock()
-	executionCopy := *execution
-	
-	// Deep copy maps
-	executionCopy.StepResults = make(map[string]StepResult)
-	for k, v := range execution.StepResults {
-		executionCopy.StepResults[k] = v
+	// Return a copy to avoid race conditions - use thread-safe methods
+	executionCopy := WorkflowExecution{
+		ID:             execution.ID,
+		WorkflowName:   execution.WorkflowName,
+		Status:         execution.GetStatus(),
+		StartTime:      execution.StartTime,
+		EndTime:        execution.GetEndTime(),
+		CurrentStep:    execution.GetCurrentStep(),
+		StepResults:    execution.GetStepResults(),
+		Variables:      execution.GetVariables(),
+		ExecutionTrace: execution.GetExecutionTrace(),
+		Error:          execution.GetError(),
+		ErrorDetails:   execution.GetErrorDetails(),
+		Context:        execution.Context,
+		Cancel:         execution.Cancel,
 	}
 	
-	executionCopy.Variables = make(map[string]interface{})
-	for k, v := range execution.Variables {
-		executionCopy.Variables[k] = v
+	// Copy EndTime if it exists (GetEndTime returns the pointer, so copy the value)
+	if executionCopy.EndTime != nil {
+		endTimeCopy := *executionCopy.EndTime
+		executionCopy.EndTime = &endTimeCopy
 	}
-	e.mutex.RUnlock()
 
 	return &executionCopy, nil
 }
@@ -864,10 +861,10 @@ func (e *Engine) CancelExecution(executionID string) error {
 	if execution.Cancel != nil {
 		execution.Cancel()
 		e.mutex.Lock()
-		execution.Status = StatusCancelled
 		endTime := time.Now()
-		execution.EndTime = &endTime
+		execution.SetEndTime(&endTime)
 		e.mutex.Unlock()
+		execution.SetStatus(StatusCancelled)
 	}
 
 	return nil
@@ -935,10 +932,10 @@ func (e *Engine) executeHTTPStep(ctx context.Context, step Step, execution *Work
 
 	// Store response in variables safely
 	e.mutex.Lock()
-	execution.Variables[step.Name+"_status_code"] = response.StatusCode
-	execution.Variables[step.Name+"_headers"] = response.Headers
-	execution.Variables[step.Name+"_body"] = string(response.Body)
-	execution.Variables[step.Name+"_duration"] = response.Duration.String()
+	execution.SetVariable(step.Name+"_status_code", response.StatusCode)
+	execution.SetVariable(step.Name+"_headers", response.Headers)
+	execution.SetVariable(step.Name+"_body", string(response.Body))
+	execution.SetVariable(step.Name+"_duration", response.Duration.String())
 	e.mutex.Unlock()
 
 	e.logger.Info("HTTP step completed",
@@ -963,11 +960,11 @@ func (e *Engine) executeAPIStep(ctx context.Context, step Step, execution *Workf
 
 	// Store API response in variables safely
 	e.mutex.Lock()
-	execution.Variables[step.Name+"_api_success"] = response.Success
-	execution.Variables[step.Name+"_api_status"] = response.StatusCode
-	execution.Variables[step.Name+"_api_duration"] = response.Duration
-	execution.Variables[step.Name+"_api_response"] = response.Data
-	execution.Variables[step.Name+"_api_metadata"] = response.Metadata
+	execution.SetVariable(step.Name+"_api_success", response.Success)
+	execution.SetVariable(step.Name+"_api_status", response.StatusCode)
+	execution.SetVariable(step.Name+"_api_duration", response.Duration)
+	execution.SetVariable(step.Name+"_api_response", response.Data)
+	execution.SetVariable(step.Name+"_api_metadata", response.Metadata)
 	e.mutex.Unlock()
 
 	e.logger.Info("API step completed",
@@ -1011,8 +1008,8 @@ func (e *Engine) executeWebhookStep(ctx context.Context, step Step, execution *W
 
 	// Store webhook response in variables safely
 	e.mutex.Lock()
-	execution.Variables[step.Name+"_webhook_status"] = response.StatusCode
-	execution.Variables[step.Name+"_webhook_response"] = string(response.Body)
+	execution.SetVariable(step.Name+"_webhook_status", response.StatusCode)
+	execution.SetVariable(step.Name+"_webhook_response", string(response.Body))
 	e.mutex.Unlock()
 
 	e.logger.Info("Webhook step completed",
@@ -1174,8 +1171,8 @@ func (e *Engine) buildSalesforceAPIRequest(apiConfig *APIConfig) (string, string
 func (e *Engine) parseAPIResponse(step Step, response *HTTPResponse, execution *WorkflowExecution) error {
 	// Store common response data
 	e.mutex.Lock()
-	execution.Variables[step.Name+"_api_status"] = response.StatusCode
-	execution.Variables[step.Name+"_api_duration"] = response.Duration.String()
+	execution.SetVariable(step.Name+"_api_status", response.StatusCode)
+	execution.SetVariable(step.Name+"_api_duration", response.Duration.String())
 	e.mutex.Unlock()
 
 	// Try to parse JSON response
@@ -1183,12 +1180,12 @@ func (e *Engine) parseAPIResponse(step Step, response *HTTPResponse, execution *
 		var responseData interface{}
 		if err := json.Unmarshal(response.Body, &responseData); err == nil {
 			e.mutex.Lock()
-			execution.Variables[step.Name+"_api_response"] = responseData
+			execution.SetVariable(step.Name+"_api_response", responseData)
 			e.mutex.Unlock()
 		} else {
 			// Store as string if JSON parsing fails
 			e.mutex.Lock()
-			execution.Variables[step.Name+"_api_response"] = string(response.Body)
+			execution.SetVariable(step.Name+"_api_response", string(response.Body))
 			e.mutex.Unlock()
 		}
 	}
@@ -1258,9 +1255,7 @@ func (e *Engine) executeForStep(ctx context.Context, step Step, execution *Workf
 		}
 
 		// Set loop variable safely
-		e.mutex.Lock()
-		execution.Variables[step.Loop.Variable] = i
-		e.mutex.Unlock()
+		execution.SetVariable(step.Loop.Variable, i)
 
 		// Execute child steps
 		if err := e.executeSteps(ctx, step.Steps, execution); err != nil {
@@ -1364,9 +1359,7 @@ func (e *Engine) executeForeachStep(ctx context.Context, step Step, execution *W
 
 	if step.Loop.ItemsVariable != "" {
 		// Get items from variable
-		e.mutex.Lock()
-		itemsVar, exists := execution.Variables[step.Loop.ItemsVariable]
-		e.mutex.Unlock()
+		itemsVar, exists := execution.GetVariable(step.Loop.ItemsVariable)
 
 		if !exists {
 			return fmt.Errorf("items variable '%s' not found", step.Loop.ItemsVariable)
@@ -1410,12 +1403,10 @@ func (e *Engine) executeForeachStep(ctx context.Context, step Step, execution *W
 		}
 
 		// Set loop variables safely
-		e.mutex.Lock()
-		execution.Variables[step.Loop.Variable] = item
+		execution.SetVariable(step.Loop.Variable, item)
 		if step.Loop.IndexVariable != "" {
-			execution.Variables[step.Loop.IndexVariable] = index
+			execution.SetVariable(step.Loop.IndexVariable, index)
 		}
-		e.mutex.Unlock()
 
 		// Execute child steps
 		if err := e.executeSteps(ctx, step.Steps, execution); err != nil {
@@ -1446,9 +1437,7 @@ func (e *Engine) resolveLoopValue(value interface{}, execution *WorkflowExecutio
 		if strings.HasPrefix(strVal, "${") && strings.HasSuffix(strVal, "}") {
 			// Variable reference
 			varName := strVal[2 : len(strVal)-1]
-			e.mutex.Lock()
-			varValue, exists := execution.Variables[varName]
-			e.mutex.Unlock()
+			varValue, exists := execution.GetVariable(varName)
 
 			if !exists {
 				return 0, fmt.Errorf("variable '%s' not found", varName)

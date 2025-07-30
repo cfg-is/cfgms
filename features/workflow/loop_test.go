@@ -122,7 +122,7 @@ func TestWorkflowForLoop(t *testing.T) {
 					t.Fatal("Test timed out waiting for workflow completion")
 				default:
 					execution, _ = engine.GetExecution(execution.ID)
-					if execution.Status != StatusRunning && execution.Status != StatusPending {
+					if execution.GetStatus() != StatusRunning && execution.GetStatus() != StatusPending {
 						completed = true
 					} else {
 						time.Sleep(10 * time.Millisecond)
@@ -131,14 +131,15 @@ func TestWorkflowForLoop(t *testing.T) {
 			}
 
 			if tt.expectErr {
-				assert.Equal(t, StatusFailed, execution.Status)
+				assert.Equal(t, StatusFailed, execution.GetStatus())
 				assert.Contains(t, execution.Error, "exceeded maximum iterations")
 			} else {
-				assert.Equal(t, StatusCompleted, execution.Status)
-				assert.Contains(t, execution.StepResults, "for-loop-step")
+				assert.Equal(t, StatusCompleted, execution.GetStatus())
+				assert.True(t, execution.HasStepResult("for-loop-step"))
 				
 				// Check that the loop variable reached the expected final value
-				finalVarValue := execution.Variables[tt.loop.Variable]
+				finalVarValue, exists := execution.GetVariable(tt.loop.Variable)
+				assert.True(t, exists)
 				assert.NotNil(t, finalVarValue)
 			}
 		})
@@ -197,7 +198,7 @@ func TestWorkflowWhileLoop(t *testing.T) {
 				t.Fatal("Test timed out waiting for workflow completion")
 			default:
 				execution, _ = engine.GetExecution(execution.ID)
-				if execution.Status != StatusRunning && execution.Status != StatusPending {
+				if execution.GetStatus() != StatusRunning && execution.GetStatus() != StatusPending {
 					completed = true
 				} else {
 					time.Sleep(10 * time.Millisecond)
@@ -206,7 +207,7 @@ func TestWorkflowWhileLoop(t *testing.T) {
 		}
 
 		// It should fail due to max iterations safety limit
-		assert.Equal(t, StatusFailed, execution.Status)
+		assert.Equal(t, StatusFailed, execution.GetStatus())
 		assert.Contains(t, execution.Error, "exceeded maximum iterations")
 	})
 }
@@ -316,7 +317,7 @@ func TestWorkflowForeachLoop(t *testing.T) {
 					t.Fatal("Test timed out waiting for workflow completion")
 				default:
 					execution, _ = engine.GetExecution(execution.ID)
-					if execution.Status != StatusRunning && execution.Status != StatusPending {
+					if execution.GetStatus() != StatusRunning && execution.GetStatus() != StatusPending {
 						completed = true
 					} else {
 						time.Sleep(10 * time.Millisecond)
@@ -325,16 +326,16 @@ func TestWorkflowForeachLoop(t *testing.T) {
 			}
 
 			if tt.expectErr {
-				assert.Equal(t, StatusFailed, execution.Status)
+				assert.Equal(t, StatusFailed, execution.GetStatus())
 				assert.Contains(t, execution.Error, "exceeds maximum iterations")
 			} else {
-				assert.Equal(t, StatusCompleted, execution.Status)
-				assert.Contains(t, execution.StepResults, "foreach-loop-step")
+				assert.Equal(t, StatusCompleted, execution.GetStatus())
+				assert.True(t, execution.HasStepResult("foreach-loop-step"))
 				
 				// Check that loop variables were set
-				assert.Contains(t, execution.Variables, tt.loop.Variable)
+				assert.True(t, execution.HasVariable(tt.loop.Variable))
 				if tt.loop.IndexVariable != "" {
-					assert.Contains(t, execution.Variables, tt.loop.IndexVariable)
+					assert.True(t, execution.HasVariable(tt.loop.IndexVariable))
 				}
 			}
 		})
@@ -492,7 +493,7 @@ func TestNestedLoops(t *testing.T) {
 			t.Fatal("Test timed out waiting for workflow completion")
 		default:
 			execution, _ = engine.GetExecution(execution.ID)
-			if execution.Status != StatusRunning && execution.Status != StatusPending {
+			if execution.GetStatus() != StatusRunning && execution.GetStatus() != StatusPending {
 				completed = true
 			} else {
 				time.Sleep(10 * time.Millisecond)
@@ -500,12 +501,12 @@ func TestNestedLoops(t *testing.T) {
 		}
 	}
 
-	assert.Equal(t, StatusCompleted, execution.Status)
-	assert.Contains(t, execution.StepResults, "outer-foreach")
-	assert.Contains(t, execution.StepResults, "inner-foreach")
-	assert.Contains(t, execution.StepResults, "nested-delay")
+	assert.Equal(t, StatusCompleted, execution.GetStatus())
+	assert.True(t, execution.HasStepResult("outer-foreach"))
+	assert.True(t, execution.HasStepResult("inner-foreach"))
+	assert.True(t, execution.HasStepResult("nested-delay"))
 
 	// Check that both loop variables were set to their final values
-	assert.Contains(t, execution.Variables, "outer_item")
-	assert.Contains(t, execution.Variables, "inner_item")
+	assert.True(t, execution.HasVariable("outer_item"))
+	assert.True(t, execution.HasVariable("inner_item"))
 }

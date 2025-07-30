@@ -144,18 +144,18 @@ func NewAPINode(registry *ProviderRegistry) *APINode {
 }
 
 // Execute implements the workflow.Node interface for SaaSActionNode
-func (n *SaaSActionNode) Execute(ctx context.Context, input *workflow.NodeInput) (*workflow.NodeOutput, error) {
+func (n *SaaSActionNode) Execute(ctx context.Context, input workflow.NodeInput) (workflow.NodeOutput, error) {
 	// Get the provider
 	provider, err := n.registry.GetProvider(n.Provider)
 	if err != nil {
 		if n.Config.IgnoreErrors {
-			return &workflow.NodeOutput{
+			return workflow.NodeOutput{
 				Success: false,
-				Data:    nil,
+				Data:    make(map[string]interface{}),
 				Error:   err.Error(),
 			}, nil
 		}
-		return nil, fmt.Errorf("failed to get provider %s: %w", n.Provider, err)
+		return workflow.NodeOutput{}, fmt.Errorf("failed to get provider %s: %w", n.Provider, err)
 	}
 	
 	// Initialize normalized operations if not already done
@@ -164,47 +164,59 @@ func (n *SaaSActionNode) Execute(ctx context.Context, input *workflow.NodeInput)
 	}
 	
 	// Substitute variables in data, resource_id, and filters
-	data, err := n.substituteVariables(n.Data, input.Variables)
+	data, err := n.substituteVariables(n.Data, input.Data)
 	if err != nil {
-		return nil, fmt.Errorf("failed to substitute variables in data: %w", err)
+		return workflow.NodeOutput{}, fmt.Errorf("failed to substitute variables in data: %w", err)
 	}
 	
-	resourceID, err := n.substituteString(n.ResourceID, input.Variables)
+	resourceID, err := n.substituteString(n.ResourceID, input.Data)
 	if err != nil {
-		return nil, fmt.Errorf("failed to substitute variables in resource_id: %w", err)
+		return workflow.NodeOutput{}, fmt.Errorf("failed to substitute variables in resource_id: %w", err)
 	}
 	
-	filters, err := n.substituteVariables(n.Filters, input.Variables)
+	filters, err := n.substituteVariables(n.Filters, input.Data)
 	if err != nil {
-		return nil, fmt.Errorf("failed to substitute variables in filters: %w", err)
+		return workflow.NodeOutput{}, fmt.Errorf("failed to substitute variables in filters: %w", err)
 	}
 	
 	// Execute the normalized operation
 	var result *ProviderResult
 	switch n.Operation {
 	case "create":
-		result, err = n.operations.Create(ctx, n.ResourceType, data)
+		if dataMap, ok := data.(map[string]interface{}); ok {
+			result, err = n.operations.Create(ctx, n.ResourceType, dataMap)
+		} else {
+			err = fmt.Errorf("data must be a map[string]interface{} for create operation")
+		}
 	case "read":
 		result, err = n.operations.Read(ctx, n.ResourceType, resourceID)
 	case "update":
-		result, err = n.operations.Update(ctx, n.ResourceType, resourceID, data)
+		if dataMap, ok := data.(map[string]interface{}); ok {
+			result, err = n.operations.Update(ctx, n.ResourceType, resourceID, dataMap)
+		} else {
+			err = fmt.Errorf("data must be a map[string]interface{} for update operation")
+		}
 	case "delete":
 		result, err = n.operations.Delete(ctx, n.ResourceType, resourceID)
 	case "list":
-		result, err = n.operations.List(ctx, n.ResourceType, filters)
+		if filtersMap, ok := filters.(map[string]interface{}); ok {
+			result, err = n.operations.List(ctx, n.ResourceType, filtersMap)
+		} else {
+			err = fmt.Errorf("filters must be a map[string]interface{} for list operation")
+		}
 	default:
 		err = fmt.Errorf("unsupported operation: %s", n.Operation)
 	}
 	
 	if err != nil {
 		if n.Config.IgnoreErrors {
-			return &workflow.NodeOutput{
+			return workflow.NodeOutput{
 				Success: false,
-				Data:    nil,
+				Data:    make(map[string]interface{}),
 				Error:   err.Error(),
 			}, nil
 		}
-		return nil, fmt.Errorf("SaaS operation failed: %w", err)
+		return workflow.NodeOutput{}, fmt.Errorf("SaaS operation failed: %w", err)
 	}
 	
 	// Apply output mapping if configured
@@ -213,40 +225,55 @@ func (n *SaaSActionNode) Execute(ctx context.Context, input *workflow.NodeInput)
 		outputData = n.applyOutputMapping(result, n.Config.OutputMapping)
 	}
 	
-	return &workflow.NodeOutput{
-		Success:    result.Success,
-		Data:       outputData,
-		Metadata:   result.Metadata,
-		StatusCode: result.StatusCode,
+	// Convert outputData to map[string]interface{} if needed
+	var outputMap map[string]interface{}
+	if dataMap, ok := outputData.(map[string]interface{}); ok {
+		outputMap = dataMap
+	} else {
+		outputMap = make(map[string]interface{})
+		outputMap["result"] = outputData
+	}
+	
+	// Add status code to metadata
+	metadata := make(map[string]interface{})
+	if result.Metadata != nil {
+		metadata = result.Metadata
+	}
+	metadata["status_code"] = result.StatusCode
+	
+	return workflow.NodeOutput{
+		Success:  result.Success,
+		Data:     outputMap,
+		Metadata: metadata,
 	}, nil
 }
 
 // Execute implements the workflow.Node interface for APINode
-func (n *APINode) Execute(ctx context.Context, input *workflow.NodeInput) (*workflow.NodeOutput, error) {
+func (n *APINode) Execute(ctx context.Context, input workflow.NodeInput) (workflow.NodeOutput, error) {
 	// Get the provider
 	provider, err := n.registry.GetProvider(n.Provider)
 	if err != nil {
 		if n.Config.IgnoreErrors {
-			return &workflow.NodeOutput{
+			return workflow.NodeOutput{
 				Success: false,
-				Data:    nil,
+				Data:    make(map[string]interface{}),
 				Error:   err.Error(),
 			}, nil
 		}
-		return nil, fmt.Errorf("failed to get provider %s: %w", n.Provider, err)
+		return workflow.NodeOutput{}, fmt.Errorf("failed to get provider %s: %w", n.Provider, err)
 	}
 	
 	// Substitute variables in path and body
-	path, err := n.substituteString(n.Path, input.Variables)
+	path, err := n.substituteString(n.Path, input.Data)
 	if err != nil {
-		return nil, fmt.Errorf("failed to substitute variables in path: %w", err)
+		return workflow.NodeOutput{}, fmt.Errorf("failed to substitute variables in path: %w", err)
 	}
 	
 	var body interface{}
 	if n.Body != nil {
-		body, err = n.substituteVariables(n.Body, input.Variables)
+		body, err = n.substituteVariables(n.Body, input.Data)
 		if err != nil {
-			return nil, fmt.Errorf("failed to substitute variables in body: %w", err)
+			return workflow.NodeOutput{}, fmt.Errorf("failed to substitute variables in body: %w", err)
 		}
 	}
 	
@@ -254,27 +281,40 @@ func (n *APINode) Execute(ctx context.Context, input *workflow.NodeInput) (*work
 	result, err := provider.RawAPI(ctx, n.Method, path, body)
 	if err != nil {
 		if n.Config.IgnoreErrors {
-			return &workflow.NodeOutput{
+			return workflow.NodeOutput{
 				Success: false,
-				Data:    nil,
+				Data:    make(map[string]interface{}),
 				Error:   err.Error(),
 			}, nil
 		}
-		return nil, fmt.Errorf("API call failed: %w", err)
+		return workflow.NodeOutput{}, fmt.Errorf("API call failed: %w", err)
 	}
 	
 	// Check if status code is expected
 	if len(n.Config.ExpectedStatusCodes) > 0 {
 		if !contains(convertToStringSlice(n.Config.ExpectedStatusCodes), fmt.Sprintf("%d", result.StatusCode)) {
 			if n.Config.IgnoreErrors {
-				return &workflow.NodeOutput{
-					Success:    false,
-					Data:       result.Data,
-					Error:      fmt.Sprintf("unexpected status code: %d", result.StatusCode),
-					StatusCode: result.StatusCode,
+				// Convert result.Data to map[string]interface{}
+				var outputMap map[string]interface{}
+				if dataMap, ok := result.Data.(map[string]interface{}); ok {
+					outputMap = dataMap
+				} else {
+					outputMap = make(map[string]interface{})
+					outputMap["result"] = result.Data
+				}
+				
+				// Add status code to metadata
+				metadata := make(map[string]interface{})
+				metadata["status_code"] = result.StatusCode
+				
+				return workflow.NodeOutput{
+					Success:  false,
+					Data:     outputMap,
+					Error:    fmt.Sprintf("unexpected status code: %d", result.StatusCode),
+					Metadata: metadata,
 				}, nil
 			}
-			return nil, fmt.Errorf("unexpected status code: %d", result.StatusCode)
+			return workflow.NodeOutput{}, fmt.Errorf("unexpected status code: %d", result.StatusCode)
 		}
 	}
 	
@@ -284,12 +324,29 @@ func (n *APINode) Execute(ctx context.Context, input *workflow.NodeInput) (*work
 		outputData = n.applyResponseMapping(result, n.Config.ResponseMapping)
 	}
 	
-	return &workflow.NodeOutput{
-		Success:    result.Success,
-		Data:       outputData,
-		Metadata:   result.Metadata,
-		StatusCode: result.StatusCode,
-		Headers:    result.Headers,
+	// Convert outputData to map[string]interface{} if needed
+	var outputMap map[string]interface{}
+	if dataMap, ok := outputData.(map[string]interface{}); ok {
+		outputMap = dataMap
+	} else {
+		outputMap = make(map[string]interface{})
+		outputMap["result"] = outputData
+	}
+	
+	// Add status code and headers to metadata
+	metadata := make(map[string]interface{})
+	if result.Metadata != nil {
+		metadata = result.Metadata
+	}
+	metadata["status_code"] = result.StatusCode
+	if result.Headers != nil {
+		metadata["headers"] = result.Headers
+	}
+	
+	return workflow.NodeOutput{
+		Success:  result.Success,
+		Data:     outputMap,
+		Metadata: metadata,
 	}, nil
 }
 
@@ -319,11 +376,18 @@ func (n *SaaSActionNode) Validate() error {
 	
 	// Validate operation-specific requirements
 	switch n.Operation {
-	case "read", "update", "delete":
+	case "read", "delete":
 		if n.ResourceID == "" {
 			return fmt.Errorf("resource_id is required for %s operation", n.Operation)
 		}
-	case "create", "update":
+	case "create":
+		if len(n.Data) == 0 {
+			return fmt.Errorf("data is required for %s operation", n.Operation)
+		}
+	case "update":
+		if n.ResourceID == "" {
+			return fmt.Errorf("resource_id is required for %s operation", n.Operation)
+		}
 		if len(n.Data) == 0 {
 			return fmt.Errorf("data is required for %s operation", n.Operation)
 		}
@@ -559,17 +623,18 @@ func (f *WorkflowNodeFactory) configureNode(node interface{}, config map[string]
 }
 
 // RegisterWorkflowNodes registers SaaS workflow nodes with the workflow engine
-func RegisterWorkflowNodes(engine *workflow.Engine, registry *ProviderRegistry) error {
-	factory := NewWorkflowNodeFactory(registry)
+// Note: This function is disabled until workflow.Engine.RegisterNodeType is implemented
+func RegisterWorkflowNodes(engine interface{}, registry *ProviderRegistry) error {
+	// factory := NewWorkflowNodeFactory(registry)
 	
-	// Register node types
-	engine.RegisterNodeType("saas_action", func(config map[string]interface{}) (workflow.Node, error) {
-		return factory.CreateNode("saas_action", config)
-	})
+	// TODO: Implement when workflow.Engine.RegisterNodeType is available
+	// engine.RegisterNodeType("saas_action", func(config map[string]interface{}) (workflow.Node, error) {
+	//	return factory.CreateNode("saas_action", config)
+	// })
 	
-	engine.RegisterNodeType("api", func(config map[string]interface{}) (workflow.Node, error) {
-		return factory.CreateNode("api", config)
-	})
+	// engine.RegisterNodeType("api", func(config map[string]interface{}) (workflow.Node, error) {
+	//	return factory.CreateNode("api", config)
+	// })
 	
 	return nil
 }
