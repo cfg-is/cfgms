@@ -389,15 +389,13 @@ func TestExportManagerErrorHandling(t *testing.T) {
 		exportData := export.ExportData{
 			SystemMetrics: map[string]interface{}{"test": 1},
 			Timestamp:     time.Now(),
+			ExportType:    export.ExportTypeManual, // For synchronous testing
 		}
 
 		err := manager.Export(exportData)
 		assert.NoError(t, err)
 
-		// Give time for retry processing (initial attempt + up to 2 retries with 10ms backoff each)
-		time.Sleep(200 * time.Millisecond)
-
-		// Should eventually succeed on retry
+		// Should succeed on retry (manual export is synchronous)
 		data := exporter.GetExportedData()
 		assert.Len(t, data, 1)
 	})
@@ -497,15 +495,14 @@ func TestExportDataFiltering(t *testing.T) {
 					Message:   "Test log",
 				},
 			},
-			Timestamp: time.Now(),
+			Timestamp:  time.Now(),
+			ExportType: export.ExportTypeManual, // For synchronous testing
 		}
 
 		err := manager.Export(exportData)
 		assert.NoError(t, err)
 
-		time.Sleep(100 * time.Millisecond)
-
-		// Check filtered data
+		// Check filtered data (manual export is synchronous)
 		metricsData := metricsExporter.GetExportedData()
 		logsData := logsExporter.GetExportedData()
 
