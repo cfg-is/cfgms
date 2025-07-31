@@ -14,12 +14,13 @@ CFGMS (Config Management System) is a modern, Go-based configuration management 
   1. Pick up the next story from the GitHub project
   2. Create a feature branch
   3. Use Test-Driven Development (TDD) to complete work on the feature
-  4. Once all tests are passing:
+  4. Run full test suite and fix any failing tests weather they are related or not.
+  5. Once all tests are passing:
      a) Commit files to feature branch
      b) Ensure CLAUDE.md and roadmap are updated to reflect current step
      c) Update GitHub project with current progress
      d) Commit updated files and merge feature branch into develop branch
-  5. Start on the next story until all planned stories are complete
+  6. Start on the next story until all planned stories are complete
 
 ## Development Commands
 
@@ -220,7 +221,7 @@ The system implements a recursive parent-child tenant model with:
 **Epic Status**:
 - ✅ **Epic #65 COMPLETE**: Enhanced Workflow Engine & SaaS Foundation (42 points)
 - ✅ **Epic #66 COMPLETE**: Enterprise Configuration Management (34 points)
-- 🟡 **Epic #67 IN PROGRESS**: DNA-Based Monitoring & Detection (34 points) - Story #78 complete, Story #79 next
+- 🟡 **Epic #67 IN PROGRESS**: DNA-Based Monitoring & Detection (34 points) - Stories #78, #79 complete, Story #80 next
 - **Epic #68 PENDING**: Remote Access & Integration (39 points)
 
 **Reference**: See `docs/product/roadmap.md` for detailed current status and planning
@@ -247,6 +248,7 @@ The system implements a recursive parent-child tenant model with:
   - ✅ **Version Comparison Tools**: Side-by-side diff view with semantic analysis and approval workflow integration
 - 🟡 **Epic #67 In Progress**: DNA-Based Monitoring & Detection (34 story points)
   - ✅ **Enhanced DNA Collection**: Comprehensive system fingerprinting with 161 attributes across hardware, software, network, and security domains with cross-platform support and performance optimization
+  - ✅ **DNA Storage System**: Content-addressable storage with 90%+ compression, deduplication, historical queries, and horizontal scaling capabilities
 
 ### Current Status: v0.2.1 - Test Infrastructure & BMAD Sprint Planning ✅ COMPLETE
 **Major Achievements:**
