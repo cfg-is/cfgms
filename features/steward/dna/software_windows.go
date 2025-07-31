@@ -53,6 +53,9 @@ func (w *WindowsSoftwareCollector) CollectPackages(attributes map[string]string)
 	// Chocolatey packages (if available)
 	w.collectChocolateyPackages(attributes)
 	
+	// Winget packages (if available)
+	w.collectWingetPackages(attributes)
+	
 	// Windows Store apps
 	w.collectWindowsStoreApps(attributes)
 	
@@ -275,6 +278,96 @@ func (w *WindowsSoftwareCollector) collectChocolateyPackages(attributes map[stri
 		if packageCount > 0 {
 			attributes["chocolatey_package_count"] = fmt.Sprintf("%d", packageCount)
 			attributes["chocolatey_packages_sample"] = strings.Join(packages, "; ")
+		}
+	}
+}
+
+// collectWingetPackages collects Winget packages if available
+func (w *WindowsSoftwareCollector) collectWingetPackages(attributes map[string]string) {
+	// List installed packages
+	if output, err := exec.Command("winget", "list").Output(); err == nil {
+		lines := strings.Split(string(output), "\n")
+		var packageCount int
+		var packages []string
+		var headerFound bool
+		
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			
+			// Skip until we find the header line with "Name" and "Id"
+			if !headerFound {
+				if strings.Contains(line, "Name") && strings.Contains(line, "Id") {
+					headerFound = true
+				}
+				continue
+			}
+			
+			// Skip separator line (dashes)
+			if strings.Contains(line, "---") {
+				continue
+			}
+			
+			// Parse package line
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				packageCount++
+				if packageCount <= 15 { // Store first 15 as sample
+					// Try to extract package name and version
+					packageInfo := fields[0] // Package name is usually first field
+					if len(fields) > 2 {
+						// Try to find version (usually after ID)
+						for _, field := range fields {
+							// Version often contains dots or numbers
+							if strings.Contains(field, ".") && (strings.ContainsAny(field, "0123456789")) {
+								packageInfo += " " + field
+								break
+							}
+						}
+					}
+					packages = append(packages, packageInfo)
+				}
+			}
+		}
+		
+		if packageCount > 0 {
+			attributes["winget_package_count"] = fmt.Sprintf("%d", packageCount)
+			attributes["winget_packages_sample"] = strings.Join(packages, "; ")
+		}
+	}
+	
+	// Get winget version for diagnostics
+	if output, err := exec.Command("winget", "--version").Output(); err == nil {
+		version := strings.TrimSpace(string(output))
+		if version != "" {
+			attributes["winget_version"] = version
+		}
+	}
+	
+	// Check for winget sources
+	if output, err := exec.Command("winget", "source", "list").Output(); err == nil {
+		lines := strings.Split(string(output), "\n")
+		var sourceCount int
+		var sources []string
+		
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.Contains(line, "Name") || strings.Contains(line, "---") {
+				continue
+			}
+			
+			fields := strings.Fields(line)
+			if len(fields) >= 1 {
+				sourceCount++
+				sources = append(sources, fields[0])
+			}
+		}
+		
+		if sourceCount > 0 {
+			attributes["winget_source_count"] = fmt.Sprintf("%d", sourceCount)
+			attributes["winget_sources"] = strings.Join(sources, ", ")
 		}
 	}
 }
