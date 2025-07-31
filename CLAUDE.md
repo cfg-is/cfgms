@@ -220,7 +220,7 @@ The system implements a recursive parent-child tenant model with:
 **Epic Status**:
 - ✅ **Epic #65 COMPLETE**: Enhanced Workflow Engine & SaaS Foundation (42 points)
 - ✅ **Epic #66 COMPLETE**: Enterprise Configuration Management (34 points)
-- 🟡 **Epic #67 IN PROGRESS**: DNA-Based Monitoring & Detection (34 points) - Story #78 next
+- 🟡 **Epic #67 IN PROGRESS**: DNA-Based Monitoring & Detection (34 points) - Story #78 complete, Story #79 next
 - **Epic #68 PENDING**: Remote Access & Integration (39 points)
 
 **Reference**: See `docs/product/roadmap.md` for detailed current status and planning
@@ -245,6 +245,8 @@ The system implements a recursive parent-child tenant model with:
   - ✅ **Configuration Rollback**: Comprehensive rollback system with risk assessment and validation
   - ✅ **Configuration Templates**: Template engine with DNA integration and compliance template foundation
   - ✅ **Version Comparison Tools**: Side-by-side diff view with semantic analysis and approval workflow integration
+- 🟡 **Epic #67 In Progress**: DNA-Based Monitoring & Detection (34 story points)
+  - ✅ **Enhanced DNA Collection**: Comprehensive system fingerprinting with 161 attributes across hardware, software, network, and security domains with cross-platform support and performance optimization
 
 ### Current Status: v0.2.1 - Test Infrastructure & BMAD Sprint Planning ✅ COMPLETE
 **Major Achievements:**
