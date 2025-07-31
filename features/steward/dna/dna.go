@@ -123,52 +123,63 @@ func (c *Collector) collectBasicInfo(attributes map[string]string) {
 	}
 }
 
-// collectHardwareInfo collects hardware-specific information.
+// collectHardwareInfo collects hardware-specific information using platform-specific collectors.
 func (c *Collector) collectHardwareInfo(attributes map[string]string) {
-	// CPU information
-	attributes["cpu_count"] = fmt.Sprintf("%d", runtime.NumCPU())
+	hwCollector := NewHardwareCollector()
 	
-	// Memory information (basic runtime stats)
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-	attributes["memory_alloc"] = fmt.Sprintf("%d", m.Alloc)
-	attributes["memory_sys"] = fmt.Sprintf("%d", m.Sys)
+	// Collect CPU information
+	if err := hwCollector.CollectCPU(attributes); err != nil {
+		c.logger.Error("Failed to collect CPU information", "error", err)
+	}
 	
-	// Architecture
-	attributes["arch"] = runtime.GOARCH
+	// Collect memory information
+	if err := hwCollector.CollectMemory(attributes); err != nil {
+		c.logger.Error("Failed to collect memory information", "error", err)
+	}
 	
-	// TODO: Add more detailed hardware info using platform-specific methods
-	// - CPU model, speed, features
-	// - Total memory, disk space
-	// - Hardware serial numbers
+	// Collect disk information
+	if err := hwCollector.CollectDisk(attributes); err != nil {
+		c.logger.Error("Failed to collect disk information", "error", err)
+	}
+	
+	// Collect motherboard/system information
+	if err := hwCollector.CollectMotherboard(attributes); err != nil {
+		c.logger.Error("Failed to collect motherboard information", "error", err)
+	}
+	
+	// Add basic runtime information as backup
+	attributes["runtime_arch"] = runtime.GOARCH
+	attributes["runtime_os"] = runtime.GOOS
 }
 
-// collectSoftwareInfo collects software and OS information.
+// collectSoftwareInfo collects software and OS information using platform-specific collectors.
 func (c *Collector) collectSoftwareInfo(attributes map[string]string) {
-	attributes["os"] = runtime.GOOS
-	attributes["go_version"] = runtime.Version()
+	swCollector := NewSoftwareCollector()
 	
-	// Environment-based OS info
+	// Collect OS information
+	if err := swCollector.CollectOS(attributes); err != nil {
+		c.logger.Error("Failed to collect OS information", "error", err)
+	}
+	
+	// Collect installed packages/applications
+	if err := swCollector.CollectPackages(attributes); err != nil {
+		c.logger.Error("Failed to collect package information", "error", err)
+	}
+	
+	// Collect service information
+	if err := swCollector.CollectServices(attributes); err != nil {
+		c.logger.Error("Failed to collect service information", "error", err)
+	}
+	
+	// Collect process information
+	if err := swCollector.CollectProcesses(attributes); err != nil {
+		c.logger.Error("Failed to collect process information", "error", err)
+	}
+	
+	// Environment-based OS info as backup
 	if osName := os.Getenv("OS"); osName != "" {
-		attributes["os_name"] = osName
+		attributes["env_os_name"] = osName
 	}
-	
-	// Process information
-	attributes["pid"] = fmt.Sprintf("%d", os.Getpid())
-	attributes["ppid"] = fmt.Sprintf("%d", os.Getppid())
-	
-	if uid := os.Getuid(); uid >= 0 {
-		attributes["uid"] = fmt.Sprintf("%d", uid)
-	}
-	
-	if gid := os.Getgid(); gid >= 0 {
-		attributes["gid"] = fmt.Sprintf("%d", gid)
-	}
-	
-	// TODO: Add more detailed software info
-	// - Kernel version
-	// - Installed packages
-	// - Running services
 }
 
 // collectNetworkInfo collects network configuration information.

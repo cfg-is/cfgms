@@ -71,15 +71,15 @@ func TestCollectHardwareInfo(t *testing.T) {
 	attributes := make(map[string]string)
 	collector.collectHardwareInfo(attributes)
 	
-	// Test hardware attributes
+	// Test enhanced hardware attributes
 	assert.Contains(t, attributes, "cpu_count")
-	assert.Contains(t, attributes, "memory_alloc")
-	assert.Contains(t, attributes, "memory_sys")
-	assert.Contains(t, attributes, "arch")
+	assert.Contains(t, attributes, "cpu_arch")
+	assert.Contains(t, attributes, "runtime_arch")
+	assert.Contains(t, attributes, "runtime_os")
 	
 	// Test values are reasonable
 	assert.NotEmpty(t, attributes["cpu_count"])
-	assert.NotEmpty(t, attributes["arch"])
+	assert.NotEmpty(t, attributes["cpu_arch"])
 }
 
 func TestCollectSoftwareInfo(t *testing.T) {
@@ -89,14 +89,17 @@ func TestCollectSoftwareInfo(t *testing.T) {
 	attributes := make(map[string]string)
 	collector.collectSoftwareInfo(attributes)
 	
-	// Test software attributes
+	// Test enhanced software attributes
 	assert.Contains(t, attributes, "os")
 	assert.Contains(t, attributes, "go_version")
-	assert.Contains(t, attributes, "pid")
-	assert.Contains(t, attributes, "ppid")
+	assert.Contains(t, attributes, "current_pid")
+	assert.Contains(t, attributes, "parent_pid")
+	assert.Contains(t, attributes, "runtime_arch")
+	assert.Contains(t, attributes, "runtime_os")
 	
 	// Test values are reasonable
 	assert.NotEmpty(t, attributes["os"])
+	assert.NotEmpty(t, attributes["current_pid"])
 	assert.NotEmpty(t, attributes["go_version"])
 }
 
