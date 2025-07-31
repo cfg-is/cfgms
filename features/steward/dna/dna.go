@@ -62,32 +62,46 @@ func NewCollector(logger logging.Logger) *Collector {
 // Returns a DNA structure with a unique system ID and all collected attributes.
 // The system ID is generated from stable hardware identifiers.
 func (c *Collector) Collect() (*commonpb.DNA, error) {
+	startTime := time.Now()
 	c.logger.Debug("Collecting system DNA")
 
 	attributes := make(map[string]string)
 
-	// Collect basic system information
+	// Collect basic system information (fastest first)
+	basicStart := time.Now()
 	c.collectBasicInfo(attributes)
+	c.logger.Debug("Basic info collected", "duration", time.Since(basicStart))
 	
 	// Collect hardware information
+	hwStart := time.Now()
 	c.collectHardwareInfo(attributes)
+	c.logger.Debug("Hardware info collected", "duration", time.Since(hwStart))
 	
-	// Collect software information
+	// Collect software information (potentially slow)
+	swStart := time.Now()
 	c.collectSoftwareInfo(attributes)
+	c.logger.Debug("Software info collected", "duration", time.Since(swStart))
 	
-	// Collect network information
+	// Collect network information  
+	netStart := time.Now()
 	c.collectNetworkInfo(attributes)
+	c.logger.Debug("Network info collected", "duration", time.Since(netStart))
 	
-	// Collect environment information
+	// Collect environment information (fast)
+	envStart := time.Now()
 	c.collectEnvironmentInfo(attributes)
+	c.logger.Debug("Environment info collected", "duration", time.Since(envStart))
 	
-	// Collect security information
+	// Collect security information (potentially slow)
+	secStart := time.Now()
 	c.collectSecurityInfo(attributes)
+	c.logger.Debug("Security info collected", "duration", time.Since(secStart))
 
 	// Generate stable system ID from hardware characteristics
 	systemID := c.generateSystemID(attributes)
 
 	now := time.Now()
+	totalDuration := now.Sub(startTime)
 	
 	dna := &commonpb.DNA{
 		Id:          systemID,
@@ -103,7 +117,8 @@ func (c *Collector) Collect() (*commonpb.DNA, error) {
 
 	c.logger.Info("System DNA collected", 
 		"id", systemID,
-		"attributes", len(attributes))
+		"attributes", len(attributes),
+		"total_duration", totalDuration)
 
 	return dna, nil
 }
