@@ -97,19 +97,39 @@ func testStoreAndRetrieve(t *testing.T, manager *Manager) {
 func testDeduplication(t *testing.T, manager *Manager) {
 	ctx := context.Background()
 
-	// Create identical DNA for two different devices
-	attributes := map[string]string{
-		"os":        "windows",
-		"arch":      "amd64",
-		"hostname":  "shared-config",
-		"cpu_count": "8",
-	}
 
 	device1ID := "device-001"
 	device2ID := "device-002"
 
-	dna1 := createTestDNA(device1ID, attributes)
-	dna2 := createTestDNA(device2ID, attributes)
+	// For proper deduplication testing, create DNA with shared content but different device context
+	// Both DNA records have identical attributes but represent different devices with the same configuration
+	sharedDNAAttributes := map[string]string{
+		"os":        "windows",
+		"arch":      "amd64", 
+		"hostname":  "shared-config",
+		"cpu_count": "8",
+	}
+	
+	// Create identical DNA objects for deduplication (same content hash)
+	dna1 := &commonpb.DNA{
+		Id:              "shared-system-id", // Same system configuration
+		Attributes:      sharedDNAAttributes,
+		LastUpdated:     timestamppb.New(time.Now()),
+		ConfigHash:      "shared-config-hash",
+		LastSyncTime:    timestamppb.New(time.Now()),
+		AttributeCount:  int32(len(sharedDNAAttributes)),
+		SyncFingerprint: "shared-sync-fingerprint",
+	}
+	
+	dna2 := &commonpb.DNA{
+		Id:              "shared-system-id", // Same system configuration
+		Attributes:      sharedDNAAttributes,
+		LastUpdated:     timestamppb.New(time.Now()),
+		ConfigHash:      "shared-config-hash", 
+		LastSyncTime:    timestamppb.New(time.Now()),
+		AttributeCount:  int32(len(sharedDNAAttributes)),
+		SyncFingerprint: "shared-sync-fingerprint",
+	}
 
 	// Store both DNA records
 	err := manager.Store(ctx, device1ID, dna1)

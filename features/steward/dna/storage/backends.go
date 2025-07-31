@@ -108,9 +108,14 @@ func (b *MemoryBackend) StoreRecord(ctx context.Context, record *DNARecord, comp
 	// Update global statistics
 	b.updateGlobalStats(record)
 
+	hashDisplay := record.ContentHash
+	if len(hashDisplay) > 16 {
+		hashDisplay = hashDisplay[:16]
+	}
+	
 	b.logger.Debug("DNA record stored in memory",
 		"device_id", record.DeviceID,
-		"content_hash", record.ContentHash[:16],
+		"content_hash", hashDisplay,
 		"shard_id", record.ShardID,
 		"compressed_size", record.CompressedSize)
 
@@ -128,9 +133,14 @@ func (b *MemoryBackend) StoreReference(ctx context.Context, record *DNARecord) e
 	// Update statistics for reference
 	b.updateGlobalStats(record)
 
+	hashDisplay := record.ContentHash
+	if len(hashDisplay) > 16 {
+		hashDisplay = hashDisplay[:16]
+	}
+	
 	b.logger.Debug("DNA reference stored in memory",
 		"device_id", record.DeviceID,
-		"content_hash", record.ContentHash[:16],
+		"content_hash", hashDisplay,
 		"references", len(b.references[record.ContentHash]))
 
 	return nil
@@ -369,9 +379,14 @@ func (b *FileBackend) StoreRecord(ctx context.Context, record *DNARecord, compre
 		return fmt.Errorf("failed to write record file: %w", err)
 	}
 
+	hashDisplay := record.ContentHash
+	if len(hashDisplay) > 16 {
+		hashDisplay = hashDisplay[:16]
+	}
+	
 	b.logger.Debug("DNA record stored to file",
 		"device_id", record.DeviceID,
-		"content_hash", record.ContentHash[:16],
+		"content_hash", hashDisplay,
 		"file_path", filePath,
 		"file_size", len(data))
 
@@ -400,9 +415,14 @@ func (b *FileBackend) StoreReference(ctx context.Context, record *DNARecord) err
 		return fmt.Errorf("failed to write reference file: %w", err)
 	}
 
+	hashDisplay := record.ContentHash
+	if len(hashDisplay) > 16 {
+		hashDisplay = hashDisplay[:16]
+	}
+	
 	b.logger.Debug("DNA reference stored to file",
 		"device_id", record.DeviceID,
-		"content_hash", record.ContentHash[:16],
+		"content_hash", hashDisplay,
 		"ref_file", filePath)
 
 	return nil

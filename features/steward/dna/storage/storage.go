@@ -311,6 +311,11 @@ func (m *Manager) GetHistory(ctx context.Context, deviceID string, options *Quer
 			continue
 		}
 		
+		// Override the device ID with the one from the reference (for deduplication support)
+		record.DeviceID = ref.DeviceID
+		record.Version = ref.Version
+		record.StoredAt = ref.StoredAt
+		
 		// Decompress data if requested
 		if options.IncludeData {
 			if err := m.decompressRecord(record); err != nil {
