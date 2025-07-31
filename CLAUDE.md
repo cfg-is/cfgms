@@ -185,6 +185,37 @@ features/
 - Follow principle of least privilege
 - Sanitize all logging output to prevent information leakage
 
+### Stream vs Batch Processing - Lean Manufacturing Principles
+
+**Default to streaming approaches** guided by Lean manufacturing waste elimination:
+
+#### Batch Processing Criteria (Avoid Over-Processing Waste)
+Use batch processing **only when**:
+- **No time sensitivity**: Data consumers don't need results for hours/days
+- **High processing efficiency**: Batch operations are significantly more efficient than individual processing
+- **Natural batching boundaries**: External systems or business processes naturally batch data
+- **Resource optimization**: Batching reduces overall system resource usage
+
+#### Stream Processing Indicators (Eliminate Waste)
+Use streaming when batch processing creates waste:
+- **Over-Processing**: Processing unchanged data repeatedly (e.g., DNA scanning when most systems are stable)
+- **Waiting**: Artificial delays when consumers need faster feedback
+- **Inventory**: Accumulating unprocessed data that becomes stale
+- **Motion**: Unnecessary movement of large data sets for batch processing
+
+#### Decision Framework
+Ask these Lean questions:
+1. **Value Stream**: Does the consumer need this data immediately or can it wait?
+2. **Over-Processing**: Are we processing unchanged data unnecessarily?
+3. **Batch Efficiency**: Is batch processing significantly more resource-efficient?
+4. **Flow**: Does batching create artificial delays in the value stream?
+
+#### Examples
+**Good Batch Use**: Monthly compliance reports (consumer doesn't need real-time, high processing efficiency)
+**Poor Batch Use**: DNA drift detection (massive over-processing of unchanged systems, consumer needs fast detection)
+
+**For time-bounded SLAs** (e.g., "5-minute detection"): Implement streaming with time-bound guarantees, not polling intervals.
+
 ### Module Development
 - Each module must be self-contained with clear ConfigState interface
 - Implement Get/Set interface with ConfigState for all resource types
