@@ -21,7 +21,6 @@ package dna
 import (
 	"crypto/sha256"
 	"fmt"
-	"net"
 	"os"
 	"runtime"
 	"strings"
@@ -81,6 +80,9 @@ func (c *Collector) Collect() (*commonpb.DNA, error) {
 	
 	// Collect environment information
 	c.collectEnvironmentInfo(attributes)
+	
+	// Collect security information
+	c.collectSecurityInfo(attributes)
 
 	// Generate stable system ID from hardware characteristics
 	systemID := c.generateSystemID(attributes)
@@ -182,56 +184,54 @@ func (c *Collector) collectSoftwareInfo(attributes map[string]string) {
 	}
 }
 
-// collectNetworkInfo collects network configuration information.
+// collectNetworkInfo collects network configuration information using platform-specific collectors.
 func (c *Collector) collectNetworkInfo(attributes map[string]string) {
-	// Get all network interfaces
-	interfaces, err := net.Interfaces()
-	if err != nil {
-		c.logger.Error("Failed to get network interfaces", "error", err)
-		return
+	netCollector := NewNetworkCollector()
+	
+	// Collect network interface information
+	if err := netCollector.CollectInterfaces(attributes); err != nil {
+		c.logger.Error("Failed to collect network interface information", "error", err)
 	}
-
-	var ipAddresses []string
-	var macAddresses []string
-
-	for _, iface := range interfaces {
-		// Skip loopback and down interfaces
-		if iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagUp == 0 {
-			continue
-		}
-
-		// Collect MAC address
-		if iface.HardwareAddr != nil {
-			macAddresses = append(macAddresses, iface.HardwareAddr.String())
-		}
-
-		// Get IP addresses for this interface
-		addrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-
-		for _, addr := range addrs {
-			if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-				if ipnet.IP.To4() != nil {
-					ipAddresses = append(ipAddresses, ipnet.IP.String())
-				}
-			}
-		}
+	
+	// Collect routing information
+	if err := netCollector.CollectRouting(attributes); err != nil {
+		c.logger.Error("Failed to collect routing information", "error", err)
 	}
-
-	if len(ipAddresses) > 0 {
-		attributes["ip_addresses"] = strings.Join(ipAddresses, ",")
-		attributes["primary_ip"] = ipAddresses[0]
+	
+	// Collect DNS configuration
+	if err := netCollector.CollectDNS(attributes); err != nil {
+		c.logger.Error("Failed to collect DNS information", "error", err)
 	}
-
-	if len(macAddresses) > 0 {
-		attributes["mac_addresses"] = strings.Join(macAddresses, ",")
-		attributes["primary_mac"] = macAddresses[0]
+	
+	// Collect firewall configuration
+	if err := netCollector.CollectFirewall(attributes); err != nil {
+		c.logger.Error("Failed to collect firewall information", "error", err)
 	}
+}
 
-	// Network interface count
-	attributes["network_interface_count"] = fmt.Sprintf("%d", len(interfaces))
+// collectSecurityInfo collects security attributes using platform-specific collectors.
+func (c *Collector) collectSecurityInfo(attributes map[string]string) {
+	secCollector := NewSecurityCollector()
+	
+	// Collect user information
+	if err := secCollector.CollectUsers(attributes); err != nil {
+		c.logger.Error("Failed to collect user information", "error", err)
+	}
+	
+	// Collect group information
+	if err := secCollector.CollectGroups(attributes); err != nil {
+		c.logger.Error("Failed to collect group information", "error", err)
+	}
+	
+	// Collect permission information
+	if err := secCollector.CollectPermissions(attributes); err != nil {
+		c.logger.Error("Failed to collect permission information", "error", err)
+	}
+	
+	// Collect certificate information
+	if err := secCollector.CollectCertificates(attributes); err != nil {
+		c.logger.Error("Failed to collect certificate information", "error", err)
+	}
 }
 
 // collectEnvironmentInfo collects environment and user information.
