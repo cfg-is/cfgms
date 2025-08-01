@@ -328,3 +328,422 @@ func (g *TestDataGenerator) getPerformanceInt(metric string, small, medium, larg
 		return small
 	}
 }
+
+// Cross-Feature Integration Test Data Generators
+
+// GenerateWorkflowConfigurationScenario creates data for workflow + configuration integration testing
+func (g *TestDataGenerator) GenerateWorkflowConfigurationScenario() *WorkflowConfigurationScenario {
+	stewardID := "workflow-config-test-steward"
+	templateID := "test-app-deployment-template"
+	
+	// Create a realistic deployment template
+	template := &TemplateData{
+		ID:   templateID,
+		Name: "Application Deployment Template",
+		Content: `
+# Application Deployment Configuration
+resources:
+  - name: app-directory
+    module: directory
+    config:
+      path: $app_path
+      permissions: "755"
+      owner: $app_user
+      
+  - name: app-config-file
+    module: file
+    config:
+      path: "$app_path/config.json"
+      content: |
+        {
+          "environment": "$environment",
+          "database_url": "$database_url",
+          "log_level": "$log_level"
+        }
+      permissions: "644"
+      
+  - name: app-service
+    module: script
+    config:
+      script: |
+        #!/bin/bash
+        systemctl enable $service_name
+        systemctl start $service_name
+      interpreter: "bash"
+      timeout: 30
+`,
+		Variables: map[string]interface{}{
+			"app_path":     "/opt/testapp",
+			"app_user":     "testapp",
+			"environment":  "testing",
+			"database_url": "sqlite:///tmp/test.db",
+			"log_level":    "info",
+			"service_name": "testapp",
+		},
+	}
+	
+	// Create workflow that uses the template
+	workflow := &WorkflowData{
+		Name:        "deploy-application-workflow",
+		Description: "Deploy application using configuration template",
+		Steps: []WorkflowStep{
+			{
+				Name: "validate-environment",
+				Type: "conditional",
+				Condition: map[string]interface{}{
+					"type":     "variable",
+					"variable": "environment",
+					"operator": "eq",
+					"value":    "testing",
+				},
+				Steps: []WorkflowStep{
+					{
+						Name: "environment-setup",
+						Type: "delay",
+						Config: map[string]interface{}{
+							"duration": "1s",
+							"message":  "Setting up testing environment",
+						},
+					},
+				},
+			},
+			{
+				Name: "deploy-template",
+				Type: "template",
+				Config: map[string]interface{}{
+					"template_id": templateID,
+					"target":      stewardID,
+				},
+			},
+			{
+				Name: "verify-deployment",
+				Type: "script",
+				Config: map[string]interface{}{
+					"script":      "test -d /opt/testapp && echo 'Deployment verified'",
+					"interpreter": "bash",
+					"timeout":     10,
+				},
+			},
+		},
+	}
+	
+	return &WorkflowConfigurationScenario{
+		StewardID: stewardID,
+		Template:  template,
+		Workflow:  workflow,
+	}
+}
+
+// GenerateDNADriftScenario creates data for DNA + drift detection integration testing  
+func (g *TestDataGenerator) GenerateDNADriftScenario() *DNADriftScenario {
+	stewardID := "dna-drift-test-steward"
+	
+	// Generate baseline DNA
+	baselineDNA := g.GenerateTestDNA(stewardID)
+	
+	// Create modified DNA simulating system drift
+	driftedDNA := g.GenerateTestDNA(stewardID)
+	// Simulate critical changes that should trigger alerts
+	driftedDNA.Attributes["cpu_cores"] = "8"  // Changed from original
+	driftedDNA.Attributes["memory_mb"] = "8192" // Changed from original
+	driftedDNA.Attributes["firewall_enabled"] = "false" // Security-critical change
+	driftedDNA.Attributes["antivirus_status"] = "inactive" // Security-critical change
+	
+	// Create remediation workflow
+	remediationWorkflow := &WorkflowData{
+		Name:        "drift-remediation-workflow",
+		Description: "Automatic remediation for detected system drift",
+		Steps: []WorkflowStep{
+			{
+				Name: "assess-drift-severity",
+				Type: "conditional",
+				Condition: map[string]interface{}{
+					"type":     "expression",
+					"expression": "${firewall_enabled} == 'false' || ${antivirus_status} == 'inactive'",
+				},
+				Steps: []WorkflowStep{
+					{
+						Name: "critical-security-alert",
+						Type: "webhook",
+						Config: map[string]interface{}{
+							"url":    "https://alerts.example.com/critical",
+							"method": "POST",
+							"payload": map[string]interface{}{
+								"severity": "critical",
+								"message":  "Security drift detected on ${steward_id}",
+							},
+						},
+					},
+				},
+			},
+			{
+				Name: "restore-security-settings",
+				Type: "parallel",
+				Steps: []WorkflowStep{
+					{
+						Name: "enable-firewall",
+						Type: "script",
+						Config: map[string]interface{}{
+							"script":      "ufw enable",
+							"interpreter": "bash",
+							"timeout":     30,
+						},
+					},
+					{
+						Name: "start-antivirus",
+						Type: "script", 
+						Config: map[string]interface{}{
+							"script":      "systemctl start clamav-daemon",
+							"interpreter": "bash",
+							"timeout":     30,
+						},
+					},
+				},
+			},
+		},
+	}
+	
+	return &DNADriftScenario{
+		StewardID:           stewardID,
+		BaselineDNA:        baselineDNA,
+		DriftedDNA:         driftedDNA,
+		RemediationWorkflow: remediationWorkflow,
+		ExpectedDetectionTime: 5 * time.Minute, // SLA requirement
+	}
+}
+
+// GenerateTemplateRollbackScenario creates data for template + rollback integration testing
+func (g *TestDataGenerator) GenerateTemplateRollbackScenario() *TemplateRollbackScenario {
+	stewardID := "template-rollback-test"
+	
+	// Create a template that will intentionally fail
+	faultyTemplate := &TemplateData{
+		ID:   "faulty-deployment-template",
+		Name: "Faulty Deployment Template",
+		Content: `
+resources:
+  - name: create-directory
+    module: directory
+    config:
+      path: "/opt/testapp"
+      permissions: "755"
+      
+  - name: failing-operation
+    module: script
+    config:
+      script: |
+        #!/bin/bash
+        # This will fail intentionally
+        exit 1
+      interpreter: "bash"
+      timeout: 10
+`,
+		Variables: map[string]interface{}{
+			"should_fail": true,
+		},
+	}
+	
+	// Create known-good rollback configuration
+	rollbackConfig := map[string]interface{}{
+		"resources": []map[string]interface{}{
+			{
+				"name":   "cleanup-directory", 
+				"module": "directory",
+				"config": map[string]interface{}{
+					"path":  "/opt/testapp",
+					"state": "absent",
+				},
+			},
+		},
+	}
+	
+	return &TemplateRollbackScenario{
+		StewardID:        stewardID,
+		FaultyTemplate:   faultyTemplate,
+		RollbackConfig:   rollbackConfig,
+		MaxRollbackTime:  30 * time.Second,
+	}
+}
+
+// GenerateTerminalAuditScenario creates data for terminal + audit integration testing
+func (g *TestDataGenerator) GenerateTerminalAuditScenario() *TerminalAuditScenario {
+	stewardID := "terminal-audit-test"
+	userID := "test-user"
+	
+	// Create test commands with different security levels
+	testCommands := []TerminalCommand{
+		{
+			Command:       "ls -la",
+			ExpectedAction: "allow",
+			RiskLevel:     "low",
+		},
+		{
+			Command:       "cat /etc/passwd",
+			ExpectedAction: "allow", 
+			RiskLevel:     "medium",
+		},
+		{
+			Command:       "rm -rf /tmp/testfile",
+			ExpectedAction: "block",
+			RiskLevel:     "high",
+		},
+		{
+			Command:       "sudo su -",
+			ExpectedAction: "audit",
+			RiskLevel:     "critical",
+		},
+	}
+	
+	// Create RBAC permissions for test user
+	userPermissions := map[string]bool{
+		"terminal.connect": true,
+		"terminal.execute": true,
+		"terminal.view":    true,
+		"terminal.audit":   false, // Cannot view audit logs
+		"terminal.admin":   false, // Cannot admin terminals
+	}
+	
+	return &TerminalAuditScenario{
+		StewardID:       stewardID,
+		UserID:          userID,
+		TestCommands:    testCommands,
+		UserPermissions: userPermissions,
+		ExpectedAuditEvents: len(testCommands) + 2, // Commands + session start/end
+	}
+}
+
+// GenerateMultiTenantSaaSScenario creates data for multi-tenant + SaaS integration testing
+func (g *TestDataGenerator) GenerateMultiTenantSaaSScenario() *MultiTenantSaaSScenario {
+	// Create MSP-level configuration
+	mspConfig := map[string]interface{}{
+		"tenant_id":   "test-msp",
+		"tenant_type": "msp",
+		"m365": map[string]interface{}{
+			"default_license": "Microsoft 365 Business Premium",
+			"security_defaults": map[string]interface{}{
+				"mfa_required":        true,
+				"password_complexity": "high",
+				"session_timeout":     "8h",
+			},
+		},
+	}
+	
+	// Create client-level configuration that inherits from MSP
+	clientConfig := map[string]interface{}{
+		"tenant_id":   "test-client-1",
+		"tenant_type": "client", 
+		"parent_id":   "test-msp",
+		"m365": map[string]interface{}{
+			"domain": "testclient1.onmicrosoft.com",
+			"security_defaults": map[string]interface{}{
+				"session_timeout": "4h", // Override MSP setting
+			},
+			"users": []map[string]interface{}{
+				{
+					"display_name":    "Test User 1",
+					"user_principal_name": "testuser1@testclient1.onmicrosoft.com",
+					"job_title":       "Test Engineer",
+					"department":      "IT",
+				},
+			},
+		},
+	}
+	
+	// Create expected effective configuration after inheritance
+	expectedEffectiveConfig := map[string]interface{}{
+		"tenant_id":   "test-client-1",
+		"tenant_type": "client",
+		"parent_id":   "test-msp", 
+		"m365": map[string]interface{}{
+			"domain":         "testclient1.onmicrosoft.com",
+			"default_license": "Microsoft 365 Business Premium", // Inherited from MSP
+			"security_defaults": map[string]interface{}{
+				"mfa_required":        true, // Inherited from MSP
+				"password_complexity": "high", // Inherited from MSP
+				"session_timeout":     "4h", // Overridden by client
+			},
+			"users": []map[string]interface{}{
+				{
+					"display_name":    "Test User 1",
+					"user_principal_name": "testuser1@testclient1.onmicrosoft.com",
+					"job_title":       "Test Engineer",
+					"department":      "IT",
+				},
+			},
+		},
+	}
+	
+	return &MultiTenantSaaSScenario{
+		MSPConfig:               mspConfig,
+		ClientConfig:            clientConfig,
+		ExpectedEffectiveConfig: expectedEffectiveConfig,
+		SaaSStewardID:          "saas-test-steward",
+		TenantHierarchy: []string{"test-msp", "test-client-1"},
+	}
+}
+
+// Supporting data structures for cross-feature integration scenarios
+
+type WorkflowConfigurationScenario struct {
+	StewardID string
+	Template  *TemplateData
+	Workflow  *WorkflowData
+}
+
+type DNADriftScenario struct {
+	StewardID              string
+	BaselineDNA           *common.DNA
+	DriftedDNA            *common.DNA
+	RemediationWorkflow   *WorkflowData
+	ExpectedDetectionTime time.Duration
+}
+
+type TemplateRollbackScenario struct {
+	StewardID       string
+	FaultyTemplate  *TemplateData
+	RollbackConfig  map[string]interface{}
+	MaxRollbackTime time.Duration
+}
+
+type TerminalAuditScenario struct {
+	StewardID           string
+	UserID              string
+	TestCommands        []TerminalCommand
+	UserPermissions     map[string]bool
+	ExpectedAuditEvents int
+}
+
+type MultiTenantSaaSScenario struct {
+	MSPConfig               map[string]interface{}
+	ClientConfig            map[string]interface{}
+	ExpectedEffectiveConfig map[string]interface{}
+	SaaSStewardID          string
+	TenantHierarchy        []string
+}
+
+type TemplateData struct {
+	ID        string
+	Name      string
+	Content   string
+	Variables map[string]interface{}
+}
+
+type WorkflowData struct {
+	Name        string
+	Description string
+	Steps       []WorkflowStep
+}
+
+type WorkflowStep struct {
+	Name      string
+	Type      string
+	Condition map[string]interface{} `json:",omitempty"`
+	Config    map[string]interface{} `json:",omitempty"`
+	Steps     []WorkflowStep         `json:",omitempty"`
+}
+
+type TerminalCommand struct {
+	Command        string
+	ExpectedAction string // "allow", "block", "audit"
+	RiskLevel      string // "low", "medium", "high", "critical"
+}

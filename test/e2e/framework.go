@@ -87,6 +87,7 @@ type TestMetrics struct {
 	TestResults         []TestResult  `json:"test_results"`
 	PerformanceMetrics  PerformanceMetrics `json:"performance_metrics"`
 	ResourceUsage       ResourceUsage `json:"resource_usage"`
+	LatencyMetrics      map[string][]time.Duration `json:"latency_metrics"`
 	mu                  sync.RWMutex
 }
 
@@ -639,4 +640,78 @@ func LocalDevelopmentConfig() *E2EConfig {
 	config.ParallelExecution = true         // Can use more resources locally
 	config.MaxConcurrentTests = 4           // More concurrent tests
 	return config
+}
+
+// Component accessor methods for integration tests
+
+func (f *E2ETestFramework) getTemplateEngine() interface{} {
+	// In real implementation, would return actual template engine
+	// For now, return nil to trigger simulation mode
+	return nil
+}
+
+func (f *E2ETestFramework) getWorkflowEngine() *workflow.Engine {
+	return f.workflowEngine
+}
+
+func (f *E2ETestFramework) getDNAStorage() interface{} {
+	// In real implementation, would return actual DNA storage
+	// For now, return nil to trigger simulation mode
+	return nil
+}
+
+func (f *E2ETestFramework) getDriftDetector() interface{} {
+	// In real implementation, would return actual drift detector
+	// For now, return nil to trigger simulation mode
+	return nil
+}
+
+func (f *E2ETestFramework) getRollbackManager() interface{} {
+	// In real implementation, would return actual rollback manager
+	// For now, return nil to trigger simulation mode
+	return nil
+}
+
+func (f *E2ETestFramework) getRBACManager() rbac.RBACManager {
+	return f.rbacManager
+}
+
+func (f *E2ETestFramework) getTerminalManager() terminal.SessionManager {
+	return f.terminalMgr
+}
+
+func (f *E2ETestFramework) getAuditManager() interface{} {
+	// In real implementation, would return actual audit manager
+	// For now, return nil to trigger simulation mode
+	return nil
+}
+
+func (f *E2ETestFramework) getTenantManager() interface{} {
+	// In real implementation, would return actual tenant manager
+	// For now, return nil to trigger simulation mode
+	return nil
+}
+
+func (f *E2ETestFramework) getConfigService() interface{} {
+	// In real implementation, would return actual config service
+	// For now, return nil to trigger simulation mode
+	return nil
+}
+
+// Performance and metrics methods
+
+func (f *E2ETestFramework) recordLatencyMetric(operation string, latency time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	
+	if f.metrics.LatencyMetrics == nil {
+		f.metrics.LatencyMetrics = make(map[string][]time.Duration)
+	}
+	
+	f.metrics.LatencyMetrics[operation] = append(f.metrics.LatencyMetrics[operation], latency)
+	
+	f.logger.Info("Latency metric recorded", 
+		"operation", operation, 
+		"latency", latency,
+		"samples", len(f.metrics.LatencyMetrics[operation]))
 }

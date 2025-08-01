@@ -88,6 +88,31 @@ test-e2e:
 	@echo "=================================="
 	go test -v -race -timeout=20m ./test/e2e/... -run "TestE2EScenarios"
 
+# Cross-Feature Integration Testing (Story #85)
+.PHONY: test-cross-feature-integration test-failure-propagation test-data-consistency test-integration-comprehensive
+
+# Cross-feature integration test scenarios
+test-cross-feature-integration:
+	@echo "🔗 Running Cross-Feature Integration Tests"
+	@echo "=========================================="
+	go test -v -race -timeout=25m ./test/e2e/... -run "TestE2EScenarios/(TestWorkflowConfigurationIntegration|TestDNADriftWorkflowIntegration|TestTemplateRollbackIntegration|TestTerminalAuditIntegration|TestMultiTenantSaaSIntegration)"
+
+# Failure propagation and recovery testing
+test-failure-propagation:
+	@echo "🔄 Running Failure Propagation Tests"
+	@echo "===================================="
+	go test -v -race -timeout=15m ./test/e2e/... -run "TestE2EScenarios/TestFailureRecovery"
+
+# Data consistency validation across features
+test-data-consistency:
+	@echo "📊 Running Data Consistency Tests"
+	@echo "================================="
+	go test -v -race -timeout=15m ./test/e2e/... -run "TestE2EScenarios/TestDataConsistencyAcrossFeatures"
+
+# Comprehensive integration testing (all cross-feature tests)
+test-integration-comprehensive: test-cross-feature-integration test-failure-propagation test-data-consistency
+	@echo "✅ All Cross-Feature Integration Tests Complete"
+
 # Cross-platform terminal testing
 test-cross-platform:
 	@echo "🖥️ Testing Cross-Platform Terminal Support"
