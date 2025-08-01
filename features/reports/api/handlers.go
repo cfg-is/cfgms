@@ -8,19 +8,19 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
-	"github.com/cfgis/cfgms/features/reports"
+	"github.com/cfgis/cfgms/features/reports/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // Handler implements HTTP handlers for the reports API
 type Handler struct {
-	engine   reports.ReportEngine
-	exporter reports.Exporter
+	engine   interfaces.ReportEngine
+	exporter interfaces.Exporter
 	logger   logging.Logger
 }
 
 // New creates a new reports API handler
-func New(engine reports.ReportEngine, exporter reports.Exporter, logger logging.Logger) *Handler {
+func New(engine interfaces.ReportEngine, exporter interfaces.Exporter, logger logging.Logger) *Handler {
 	return &Handler{
 		engine:   engine,
 		exporter: exporter,
@@ -51,7 +51,7 @@ func (h *Handler) RegisterRoutes(router *mux.Router) {
 
 // generateReport handles POST /api/v1/reports/generate
 func (h *Handler) generateReport(w http.ResponseWriter, r *http.Request) {
-	var req reports.ReportRequest
+	var req interfaces.ReportRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		h.writeError(w, http.StatusBadRequest, "Invalid request body", err)
 		return
@@ -59,7 +59,7 @@ func (h *Handler) generateReport(w http.ResponseWriter, r *http.Request) {
 
 	// Set default format if not specified
 	if req.Format == "" {
-		req.Format = reports.FormatJSON
+		req.Format = interfaces.FormatJSON
 	}
 
 	// Generate the report
@@ -142,13 +142,13 @@ func (h *Handler) getDashboardOverview(w http.ResponseWriter, r *http.Request) {
 	tenantIDs := h.parseTenantIDs(r)
 
 	// Generate executive dashboard report  
-	req := reports.ReportRequest{
-		Type:      reports.ReportTypeExecutive,
+	req := interfaces.ReportRequest{
+		Type:      interfaces.ReportTypeExecutive,
 		Template:  "executive-dashboard",
 		TimeRange: timeRange,
 		DeviceIDs: deviceIDs,
 		TenantIDs: tenantIDs,
-		Format:    reports.FormatJSON,
+		Format:    interfaces.FormatJSON,
 		Parameters: map[string]any{
 			"include_charts": false, // Just data for API
 		},
@@ -192,13 +192,13 @@ func (h *Handler) getDashboardTrends(w http.ResponseWriter, r *http.Request) {
 	tenantIDs := h.parseTenantIDs(r)
 
 	// Generate executive dashboard with charts
-	req := reports.ReportRequest{
-		Type:      reports.ReportTypeExecutive,
+	req := interfaces.ReportRequest{
+		Type:      interfaces.ReportTypeExecutive,
 		Template:  "executive-dashboard", 
 		TimeRange: timeRange,
 		DeviceIDs: deviceIDs,
 		TenantIDs: tenantIDs,
-		Format:    reports.FormatJSON,
+		Format:    interfaces.FormatJSON,
 		Parameters: map[string]any{
 			"include_charts": true,
 		},
@@ -241,13 +241,13 @@ func (h *Handler) getDashboardAlerts(w http.ResponseWriter, r *http.Request) {
 	tenantIDs := h.parseTenantIDs(r)
 
 	// Generate drift analysis report filtered to critical/warning events
-	req := reports.ReportRequest{
-		Type:      reports.ReportTypeDrift,
+	req := interfaces.ReportRequest{
+		Type:      interfaces.ReportTypeDrift,
 		Template:  "drift-analysis",
 		TimeRange: timeRange,
 		DeviceIDs: deviceIDs,
 		TenantIDs: tenantIDs,
-		Format:    reports.FormatJSON,
+		Format:    interfaces.FormatJSON,
 		Parameters: map[string]any{
 			"severity_filter": "critical", // Focus on critical events for alerts
 		},
@@ -264,7 +264,7 @@ func (h *Handler) getDashboardAlerts(w http.ResponseWriter, r *http.Request) {
 	alerts := make([]map[string]interface{}, 0)
 	
 	for _, section := range report.Sections {
-		if section.Type == reports.SectionTypeAlert || section.ID == "drift-events" {
+		if section.Type == interfaces.SectionTypeAlert || section.ID == "drift-events" {
 			if tableData, ok := section.Content.(map[string]interface{}); ok {
 				if rows, ok := tableData["rows"].([][]interface{}); ok {
 					for _, row := range rows {
@@ -306,13 +306,13 @@ func (h *Handler) getComplianceStatus(w http.ResponseWriter, r *http.Request) {
 	tenantIDs := h.parseTenantIDs(r)
 
 	// Generate compliance summary report
-	req := reports.ReportRequest{
-		Type:      reports.ReportTypeCompliance,
+	req := interfaces.ReportRequest{
+		Type:      interfaces.ReportTypeCompliance,
 		Template:  "compliance-summary",
 		TimeRange: timeRange,
 		DeviceIDs: deviceIDs,
 		TenantIDs: tenantIDs,
-		Format:    reports.FormatJSON,
+		Format:    interfaces.FormatJSON,
 		Parameters: map[string]any{
 			"include_details": false,
 		},
@@ -365,13 +365,13 @@ func (h *Handler) getDriftSummary(w http.ResponseWriter, r *http.Request) {
 	tenantIDs := h.parseTenantIDs(r)
 
 	// Generate drift analysis report
-	req := reports.ReportRequest{
-		Type:      reports.ReportTypeDrift,
+	req := interfaces.ReportRequest{
+		Type:      interfaces.ReportTypeDrift,
 		Template:  "drift-analysis",
 		TimeRange: timeRange,
 		DeviceIDs: deviceIDs,
 		TenantIDs: tenantIDs,
-		Format:    reports.FormatJSON,
+		Format:    interfaces.FormatJSON,
 	}
 
 	report, err := h.engine.GenerateReport(r.Context(), req)
@@ -409,7 +409,7 @@ func (h *Handler) getDriftSummary(w http.ResponseWriter, r *http.Request) {
 
 // Helper methods
 
-func (h *Handler) parseTimeRange(r *http.Request) (reports.TimeRange, error) {
+func (h *Handler) parseTimeRange(r *http.Request) (interfaces.TimeRange, error) {
 	// Default to last 24 hours
 	end := time.Now()
 	start := end.Add(-24 * time.Hour)
@@ -418,7 +418,7 @@ func (h *Handler) parseTimeRange(r *http.Request) (reports.TimeRange, error) {
 		if parsedStart, err := time.Parse(time.RFC3339, startStr); err == nil {
 			start = parsedStart
 		} else {
-			return reports.TimeRange{}, fmt.Errorf("invalid start time format: %s", startStr)
+			return interfaces.TimeRange{}, fmt.Errorf("invalid start time format: %s", startStr)
 		}
 	}
 
@@ -426,7 +426,7 @@ func (h *Handler) parseTimeRange(r *http.Request) (reports.TimeRange, error) {
 		if parsedEnd, err := time.Parse(time.RFC3339, endStr); err == nil {
 			end = parsedEnd
 		} else {
-			return reports.TimeRange{}, fmt.Errorf("invalid end time format: %s", endStr)
+			return interfaces.TimeRange{}, fmt.Errorf("invalid end time format: %s", endStr)
 		}
 	}
 
@@ -445,7 +445,7 @@ func (h *Handler) parseTimeRange(r *http.Request) (reports.TimeRange, error) {
 		}
 	}
 
-	return reports.TimeRange{Start: start, End: end}, nil
+	return interfaces.TimeRange{Start: start, End: end}, nil
 }
 
 func (h *Handler) parseDeviceIDs(r *http.Request) []string {
@@ -472,19 +472,19 @@ func (h *Handler) parseTenantIDs(r *http.Request) []string {
 	return tenantIDs
 }
 
-func (h *Handler) setExportHeaders(w http.ResponseWriter, format reports.ExportFormat, reportID string) {
+func (h *Handler) setExportHeaders(w http.ResponseWriter, format interfaces.ExportFormat, reportID string) {
 	switch format {
-	case reports.FormatJSON:
+	case interfaces.FormatJSON:
 		w.Header().Set("Content-Type", "application/json")
-	case reports.FormatCSV:
+	case interfaces.FormatCSV:
 		w.Header().Set("Content-Type", "text/csv")
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"report_%s.csv\"", reportID))
-	case reports.FormatHTML:
+	case interfaces.FormatHTML:
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	case reports.FormatPDF:
+	case interfaces.FormatPDF:
 		w.Header().Set("Content-Type", "application/pdf")
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"report_%s.pdf\"", reportID))
-	case reports.FormatExcel:
+	case interfaces.FormatExcel:
 		w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"report_%s.xlsx\"", reportID))
 	}

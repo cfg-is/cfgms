@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/features/reports"
+	"github.com/cfgis/cfgms/features/reports/interfaces"
 	"github.com/cfgis/cfgms/features/steward/dna/drift"
 	"github.com/cfgis/cfgms/features/steward/dna/storage"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -20,38 +20,38 @@ type MockDataProvider struct {
 	mock.Mock
 }
 
-func (m *MockDataProvider) GetDNAData(ctx context.Context, query reports.DataQuery) ([]storage.DNARecord, error) {
+func (m *MockDataProvider) GetDNAData(ctx context.Context, query interfaces.DataQuery) ([]storage.DNARecord, error) {
 	args := m.Called(ctx, query)
 	return args.Get(0).([]storage.DNARecord), args.Error(1)
 }
 
-func (m *MockDataProvider) GetDriftEvents(ctx context.Context, query reports.DataQuery) ([]drift.DriftEvent, error) {
+func (m *MockDataProvider) GetDriftEvents(ctx context.Context, query interfaces.DataQuery) ([]drift.DriftEvent, error) {
 	args := m.Called(ctx, query)
 	return args.Get(0).([]drift.DriftEvent), args.Error(1)
 }
 
-func (m *MockDataProvider) GetDeviceStats(ctx context.Context, deviceIDs []string, timeRange reports.TimeRange) (map[string]reports.DeviceStats, error) {
+func (m *MockDataProvider) GetDeviceStats(ctx context.Context, deviceIDs []string, timeRange interfaces.TimeRange) (map[string]interfaces.DeviceStats, error) {
 	args := m.Called(ctx, deviceIDs, timeRange)
-	return args.Get(0).(map[string]reports.DeviceStats), args.Error(1)
+	return args.Get(0).(map[string]interfaces.DeviceStats), args.Error(1)
 }
 
-func (m *MockDataProvider) GetTrendData(ctx context.Context, metric string, query reports.DataQuery) ([]reports.TrendPoint, error) {
+func (m *MockDataProvider) GetTrendData(ctx context.Context, metric string, query interfaces.DataQuery) ([]interfaces.TrendPoint, error) {
 	args := m.Called(ctx, metric, query)
-	return args.Get(0).([]reports.TrendPoint), args.Error(1)
+	return args.Get(0).([]interfaces.TrendPoint), args.Error(1)
 }
 
 type MockTemplateProcessor struct {
 	mock.Mock
 }
 
-func (m *MockTemplateProcessor) ProcessTemplate(ctx context.Context, templateName string, data reports.ReportData, params map[string]any) (*reports.Report, error) {
+func (m *MockTemplateProcessor) ProcessTemplate(ctx context.Context, templateName string, data interfaces.ReportData, params map[string]any) (*interfaces.Report, error) {
 	args := m.Called(ctx, templateName, data, params)
-	return args.Get(0).(*reports.Report), args.Error(1)
+	return args.Get(0).(*interfaces.Report), args.Error(1)
 }
 
-func (m *MockTemplateProcessor) GetTemplateInfo(templateName string) (*reports.TemplateInfo, error) {
+func (m *MockTemplateProcessor) GetTemplateInfo(templateName string) (*interfaces.TemplateInfo, error) {
 	args := m.Called(templateName)
-	return args.Get(0).(*reports.TemplateInfo), args.Error(1)
+	return args.Get(0).(*interfaces.TemplateInfo), args.Error(1)
 }
 
 func (m *MockTemplateProcessor) ValidateTemplate(templateName string) error {
@@ -63,29 +63,29 @@ type MockExporter struct {
 	mock.Mock
 }
 
-func (m *MockExporter) Export(ctx context.Context, report *reports.Report, format reports.ExportFormat) ([]byte, error) {
+func (m *MockExporter) Export(ctx context.Context, report *interfaces.Report, format interfaces.ExportFormat) ([]byte, error) {
 	args := m.Called(ctx, report, format)
 	return args.Get(0).([]byte), args.Error(1)
 }
 
-func (m *MockExporter) SupportedFormats() []reports.ExportFormat {
+func (m *MockExporter) SupportedFormats() []interfaces.ExportFormat {
 	args := m.Called()
-	return args.Get(0).([]reports.ExportFormat)
+	return args.Get(0).([]interfaces.ExportFormat)
 }
 
 type MockCache struct {
 	mock.Mock
 }
 
-func (m *MockCache) Get(ctx context.Context, key string) (*reports.Report, error) {
+func (m *MockCache) Get(ctx context.Context, key string) (*interfaces.Report, error) {
 	args := m.Called(ctx, key)
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
 	}
-	return args.Get(0).(*reports.Report), args.Error(1)
+	return args.Get(0).(*interfaces.Report), args.Error(1)
 }
 
-func (m *MockCache) Set(ctx context.Context, key string, report *reports.Report, ttl time.Duration) error {
+func (m *MockCache) Set(ctx context.Context, key string, report *interfaces.Report, ttl time.Duration) error {
 	args := m.Called(ctx, key, report, ttl)
 	return args.Error(0)
 }
@@ -103,21 +103,21 @@ func (m *MockCache) Clear(ctx context.Context) error {
 func TestEngine_GenerateReport(t *testing.T) {
 	tests := []struct {
 		name          string
-		request       reports.ReportRequest
+		request       interfaces.ReportRequest
 		expectError   bool
 		setupMocks    func(*MockDataProvider, *MockTemplateProcessor, *MockExporter, *MockCache)
-		validateResult func(*testing.T, *reports.Report)
+		validateResult func(*testing.T, *interfaces.Report)
 	}{
 		{
 			name: "successful compliance report generation",
-			request: reports.ReportRequest{
-				Type:      reports.ReportTypeCompliance,
+			request: interfaces.ReportRequest{
+				Type:      interfaces.ReportTypeCompliance,
 				Template:  "compliance-summary",
-				TimeRange: reports.TimeRange{
+				TimeRange: interfaces.TimeRange{
 					Start: time.Now().Add(-24 * time.Hour),
 					End:   time.Now(),
 				},
-				Format: reports.FormatJSON,
+				Format: interfaces.FormatJSON,
 			},
 			expectError: false,
 			setupMocks: func(dp *MockDataProvider, tp *MockTemplateProcessor, ex *MockExporter, cache *MockCache) {
@@ -125,38 +125,38 @@ func TestEngine_GenerateReport(t *testing.T) {
 				cache.On("Get", mock.Anything, mock.AnythingOfType("string")).Return(nil, assert.AnError)
 				
 				// Data provider returns
-				dp.On("GetDNAData", mock.Anything, mock.AnythingOfType("reports.DataQuery")).Return([]storage.DNARecord{
-					{DeviceID: "device1", Timestamp: time.Now()},
-					{DeviceID: "device2", Timestamp: time.Now()},
+				dp.On("GetDNAData", mock.Anything, mock.AnythingOfType("interfaces.DataQuery")).Return([]storage.DNARecord{
+					{DeviceID: "device1", StoredAt: time.Now()},
+					{DeviceID: "device2", StoredAt: time.Now()},
 				}, nil)
 				
-				dp.On("GetDriftEvents", mock.Anything, mock.AnythingOfType("reports.DataQuery")).Return([]drift.DriftEvent{
-					{DeviceID: "device1", Severity: drift.Critical, Timestamp: time.Now()},
+				dp.On("GetDriftEvents", mock.Anything, mock.AnythingOfType("interfaces.DataQuery")).Return([]drift.DriftEvent{
+					{DeviceID: "device1", Severity: drift.SeverityCritical, Timestamp: time.Now()},
 				}, nil)
 				
-				dp.On("GetDeviceStats", mock.Anything, mock.AnythingOfType("[]string"), mock.AnythingOfType("reports.TimeRange")).Return(map[string]reports.DeviceStats{
-					"device1": {DeviceID: "device1", ComplianceScore: 0.8, RiskLevel: reports.RiskLevelMedium},
-					"device2": {DeviceID: "device2", ComplianceScore: 0.9, RiskLevel: reports.RiskLevelLow},
+				dp.On("GetDeviceStats", mock.Anything, mock.AnythingOfType("[]string"), mock.AnythingOfType("interfaces.TimeRange")).Return(map[string]interfaces.DeviceStats{
+					"device1": {DeviceID: "device1", ComplianceScore: 0.8, RiskLevel: interfaces.RiskLevelMedium},
+					"device2": {DeviceID: "device2", ComplianceScore: 0.9, RiskLevel: interfaces.RiskLevelLow},
 				}, nil)
 				
-				dp.On("GetTrendData", mock.Anything, mock.AnythingOfType("string"), mock.AnythingOfType("reports.DataQuery")).Return([]reports.TrendPoint{
+				dp.On("GetTrendData", mock.Anything, mock.AnythingOfType("string"), mock.AnythingOfType("interfaces.DataQuery")).Return([]interfaces.TrendPoint{
 					{Timestamp: time.Now(), Value: 0.85},
 				}, nil)
 				
 				// Template processor returns mock report
-				mockReport := &reports.Report{
-					Type:      reports.ReportTypeCompliance,
+				mockReport := &interfaces.Report{
+					Type:      interfaces.ReportTypeCompliance,
 					Title:     "Test Compliance Report",
-					Sections:  []reports.ReportSection{},
-					Summary:   reports.ReportSummary{DevicesAnalyzed: 2, ComplianceScore: 0.85},
+					Sections:  []interfaces.ReportSection{},
+					Summary:   interfaces.ReportSummary{DevicesAnalyzed: 2, ComplianceScore: 0.85},
 				}
-				tp.On("ProcessTemplate", mock.Anything, "compliance-summary", mock.AnythingOfType("reports.ReportData"), mock.AnythingOfType("map[string]interface {}")).Return(mockReport, nil)
+				tp.On("ProcessTemplate", mock.Anything, "compliance-summary", mock.AnythingOfType("interfaces.ReportData"), mock.AnythingOfType("map[string]interface {}")).Return(mockReport, nil)
 				
 				// Cache set
-				cache.On("Set", mock.Anything, mock.AnythingOfType("string"), mock.AnythingOfType("*reports.Report"), mock.AnythingOfType("time.Duration")).Return(nil)
+				cache.On("Set", mock.Anything, mock.AnythingOfType("string"), mock.AnythingOfType("*interfaces.Report"), mock.AnythingOfType("time.Duration")).Return(nil)
 			},
-			validateResult: func(t *testing.T, report *reports.Report) {
-				assert.Equal(t, reports.ReportTypeCompliance, report.Type)
+			validateResult: func(t *testing.T, report *interfaces.Report) {
+				assert.Equal(t, interfaces.ReportTypeCompliance, report.Type)
 				assert.Equal(t, "Test Compliance Report", report.Title)
 				assert.Equal(t, 2, report.Summary.DevicesAnalyzed)
 				assert.Equal(t, 0.85, report.Summary.ComplianceScore)
@@ -166,47 +166,47 @@ func TestEngine_GenerateReport(t *testing.T) {
 		},
 		{
 			name: "cache hit scenario",
-			request: reports.ReportRequest{
-				Type:      reports.ReportTypeExecutive,
+			request: interfaces.ReportRequest{
+				Type:      interfaces.ReportTypeExecutive,
 				Template:  "executive-dashboard",
-				TimeRange: reports.TimeRange{
+				TimeRange: interfaces.TimeRange{
 					Start: time.Now().Add(-24 * time.Hour),
 					End:   time.Now(),
 				},
-				Format: reports.FormatJSON,
+				Format: interfaces.FormatJSON,
 			},
 			expectError: false,
 			setupMocks: func(dp *MockDataProvider, tp *MockTemplateProcessor, ex *MockExporter, cache *MockCache) {
 				// Cache hit
-				cachedReport := &reports.Report{
-					Type:     reports.ReportTypeExecutive,
+				cachedReport := &interfaces.Report{
+					Type:     interfaces.ReportTypeExecutive,
 					Title:    "Cached Executive Dashboard",
-					Metadata: reports.ReportMetadata{CacheHit: false}, // Will be updated
+					Metadata: interfaces.ReportMetadata{CacheHit: false}, // Will be updated
 				}
 				cache.On("Get", mock.Anything, mock.AnythingOfType("string")).Return(cachedReport, nil)
 			},
-			validateResult: func(t *testing.T, report *reports.Report) {
-				assert.Equal(t, reports.ReportTypeExecutive, report.Type)
+			validateResult: func(t *testing.T, report *interfaces.Report) {
+				assert.Equal(t, interfaces.ReportTypeExecutive, report.Type)
 				assert.Equal(t, "Cached Executive Dashboard", report.Title)
 				assert.True(t, report.Metadata.CacheHit)
 			},
 		},
 		{
 			name: "invalid request validation",
-			request: reports.ReportRequest{
+			request: interfaces.ReportRequest{
 				Type:     "invalid-type",
 				Template: "compliance-summary",
-				TimeRange: reports.TimeRange{
+				TimeRange: interfaces.TimeRange{
 					Start: time.Now(),
 					End:   time.Now().Add(-24 * time.Hour), // Invalid: start after end
 				},
-				Format: reports.FormatJSON,
+				Format: interfaces.FormatJSON,
 			},
 			expectError: true,
 			setupMocks: func(dp *MockDataProvider, tp *MockTemplateProcessor, ex *MockExporter, cache *MockCache) {
 				// No mocks needed for validation failure
 			},
-			validateResult: func(t *testing.T, report *reports.Report) {
+			validateResult: func(t *testing.T, report *interfaces.Report) {
 				// Should not be called
 			},
 		},
@@ -219,7 +219,7 @@ func TestEngine_GenerateReport(t *testing.T) {
 			mockTemplateProcessor := &MockTemplateProcessor{}
 			mockExporter := &MockExporter{}
 			mockCache := &MockCache{}
-			mockLogger := logging.NewNopLogger()
+			mockLogger := logging.NewNoopLogger()
 
 			// Setup mocks
 			tt.setupMocks(mockDataProvider, mockTemplateProcessor, mockExporter, mockCache)
@@ -251,84 +251,84 @@ func TestEngine_GenerateReport(t *testing.T) {
 }
 
 func TestEngine_ValidateRequest(t *testing.T) {
-	engine := New(nil, nil, nil, nil, logging.NewNopLogger())
+	engine := New(nil, nil, nil, nil, logging.NewNoopLogger())
 
 	tests := []struct {
 		name    string
-		request reports.ReportRequest
+		request interfaces.ReportRequest
 		wantErr bool
 	}{
 		{
 			name: "valid request",
-			request: reports.ReportRequest{
-				Type:     reports.ReportTypeCompliance,
+			request: interfaces.ReportRequest{
+				Type:     interfaces.ReportTypeCompliance,
 				Template: "compliance-summary",
-				TimeRange: reports.TimeRange{
+				TimeRange: interfaces.TimeRange{
 					Start: time.Now().Add(-24 * time.Hour),
 					End:   time.Now(),
 				},
-				Format: reports.FormatJSON,
+				Format: interfaces.FormatJSON,
 			},
 			wantErr: false,
 		},
 		{
 			name: "invalid report type",
-			request: reports.ReportRequest{
+			request: interfaces.ReportRequest{
 				Type:     "invalid",
 				Template: "compliance-summary",
-				TimeRange: reports.TimeRange{
+				TimeRange: interfaces.TimeRange{
 					Start: time.Now().Add(-24 * time.Hour),
 					End:   time.Now(),
 				},
-				Format: reports.FormatJSON,
+				Format: interfaces.FormatJSON,
 			},
 			wantErr: true,
 		},
 		{
 			name: "empty template",
-			request: reports.ReportRequest{
-				Type:     reports.ReportTypeCompliance,
+			request: interfaces.ReportRequest{
+				Type:     interfaces.ReportTypeCompliance,
 				Template: "",
-				TimeRange: reports.TimeRange{
+				TimeRange: interfaces.TimeRange{
 					Start: time.Now().Add(-24 * time.Hour),
 					End:   time.Now(),
 				},
-				Format: reports.FormatJSON,
+				Format: interfaces.FormatJSON,
 			},
 			wantErr: true,
 		},
 		{
 			name: "invalid time range - start after end",
-			request: reports.ReportRequest{
-				Type:     reports.ReportTypeCompliance,
+			request: interfaces.ReportRequest{
+				Type:     interfaces.ReportTypeCompliance,
 				Template: "compliance-summary",
-				TimeRange: reports.TimeRange{
+				TimeRange: interfaces.TimeRange{
 					Start: time.Now(),
 					End:   time.Now().Add(-24 * time.Hour),
 				},
-				Format: reports.FormatJSON,
+				Format: interfaces.FormatJSON,
 			},
 			wantErr: true,
 		},
 		{
 			name: "time range too large",
-			request: reports.ReportRequest{
-				Type:     reports.ReportTypeCompliance,
+			request: interfaces.ReportRequest{
+				Type:     interfaces.ReportTypeCompliance,
 				Template: "compliance-summary",
-				TimeRange: reports.TimeRange{
+				TimeRange: interfaces.TimeRange{
 					Start: time.Now().Add(-60 * 24 * time.Hour), // 60 days
 					End:   time.Now(),
 				},
-				Format: reports.FormatJSON,
+				Format: interfaces.FormatJSON,
 			},
 			wantErr: true,
 		},
 		{
 			name: "invalid export format",
-			request: reports.ReportRequest{
-				Type:     reports.ReportTypeCompliance,
+			request: interfaces.ReportRequest{
+				Type:     interfaces.ReportTypeCompliance,
 				Template: "compliance-summary",
-				TimeRange: reports.TimeRange{
+				TimeRange: interfaces.TimeRange{
 					Start: time.Now().Add(-24 * time.Hour),
 					End:   time.Now(),
 				},
@@ -351,7 +351,7 @@ func TestEngine_ValidateRequest(t *testing.T) {
 }
 
 func TestEngine_GetAvailableTemplates(t *testing.T) {
-	engine := New(nil, nil, nil, nil, logging.NewNopLogger())
+	engine := New(nil, nil, nil, nil, logging.NewNoopLogger())
 	
 	templates := engine.GetAvailableTemplates()
 	
@@ -369,32 +369,32 @@ func TestEngine_GetAvailableTemplates(t *testing.T) {
 }
 
 func TestEngine_GenerateReportSummary(t *testing.T) {
-	engine := New(nil, nil, nil, nil, logging.NewNopLogger())
+	engine := New(nil, nil, nil, nil, logging.NewNoopLogger())
 
 	// Create test data
-	data := &reports.ReportData{
+	data := &interfaces.ReportData{
 		DNARecords: []storage.DNARecord{
 			{DeviceID: "device1"},
 			{DeviceID: "device2"},
 		},
 		DriftEvents: []drift.DriftEvent{
-			{DeviceID: "device1", Severity: drift.Critical},
-			{DeviceID: "device1", Severity: drift.Warning},
-			{DeviceID: "device2", Severity: drift.Info},
+			{DeviceID: "device1", Severity: drift.SeverityCritical},
+			{DeviceID: "device1", Severity: drift.SeverityWarning},
+			{DeviceID: "device2", Severity: drift.SeverityInfo},
 		},
-		DeviceStats: map[string]reports.DeviceStats{
+		DeviceStats: map[string]interfaces.DeviceStats{
 			"device1": {
 				DeviceID:        "device1",
 				ComplianceScore: 0.7,
-				RiskLevel:       reports.RiskLevelHigh,
+				RiskLevel:       interfaces.RiskLevelHigh,
 			},
 			"device2": {
 				DeviceID:        "device2", 
 				ComplianceScore: 0.9,
-				RiskLevel:       reports.RiskLevelLow,
+				RiskLevel:       interfaces.RiskLevelLow,
 			},
 		},
-		TrendData: map[string][]reports.TrendPoint{
+		TrendData: map[string][]interfaces.TrendPoint{
 			"compliance_score": {
 				{Value: 0.8, Timestamp: time.Now().Add(-24 * time.Hour)},
 				{Value: 0.85, Timestamp: time.Now()},
@@ -408,30 +408,30 @@ func TestEngine_GenerateReportSummary(t *testing.T) {
 	assert.Equal(t, 3, summary.DriftEventsTotal)
 	assert.Equal(t, 0.8, summary.ComplianceScore) // Average of 0.7 and 0.9
 	assert.Equal(t, 0, summary.CriticalIssues)    // No critical risk devices
-	assert.Equal(t, reports.TrendImproving, summary.TrendDirection) // 0.8 -> 0.85
+	assert.Equal(t, interfaces.TrendImproving, summary.TrendDirection) // 0.8 -> 0.85
 	assert.NotEmpty(t, summary.KeyInsights)
 	assert.NotEmpty(t, summary.RecommendedActions)
 }
 
 func TestEngine_GenerateCacheKey(t *testing.T) {
-	engine := New(nil, nil, nil, nil, logging.NewNopLogger())
+	engine := New(nil, nil, nil, nil, logging.NewNoopLogger())
 
-	req1 := reports.ReportRequest{
-		Type:     reports.ReportTypeCompliance,
+	req1 := interfaces.ReportRequest{
+		Type:     interfaces.ReportTypeCompliance,
 		Template: "compliance-summary",
-		Format:   reports.FormatJSON,
+		Format:   interfaces.FormatJSON,
 	}
 
-	req2 := reports.ReportRequest{
-		Type:     reports.ReportTypeCompliance,
+	req2 := interfaces.ReportRequest{
+		Type:     interfaces.ReportTypeCompliance,
 		Template: "compliance-summary",
-		Format:   reports.FormatJSON,
+		Format:   interfaces.FormatJSON,
 	}
 
-	req3 := reports.ReportRequest{
-		Type:     reports.ReportTypeExecutive,
+	req3 := interfaces.ReportRequest{
+		Type:     interfaces.ReportTypeExecutive,
 		Template: "executive-dashboard",
-		Format:   reports.FormatJSON,
+		Format:   interfaces.FormatJSON,
 	}
 
 	key1 := engine.generateCacheKey(req1)
@@ -450,7 +450,7 @@ func TestEngine_GenerateCacheKey(t *testing.T) {
 }
 
 func TestEngine_WithConfig(t *testing.T) {
-	engine := New(nil, nil, nil, nil, logging.NewNopLogger())
+	engine := New(nil, nil, nil, nil, logging.NewNoopLogger())
 	
 	customConfig := Config{
 		CacheEnabled:    false,

@@ -6,12 +6,12 @@ import (
 	"sort"
 	"time"
 
-	"github.com/cfgis/cfgms/features/reports"
+	"github.com/cfgis/cfgms/features/reports/interfaces"
 	"github.com/cfgis/cfgms/features/steward/dna/drift"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
-// Processor implements the reports.TemplateProcessor interface
+// Processor implements the interfaces.TemplateProcessor interface
 type Processor struct {
 	logger    logging.Logger
 	templates map[string]TemplateDefinition
@@ -20,11 +20,11 @@ type Processor struct {
 // TemplateDefinition defines how to process a specific template
 type TemplateDefinition struct {
 	Name        string
-	Type        reports.ReportType
+	Type        interfaces.ReportType
 	Description string
-	Parameters  []reports.TemplateParam
-	Formats     []reports.ExportFormat
-	Generator   func(ctx context.Context, data reports.ReportData, params map[string]any) (*reports.Report, error)
+	Parameters  []interfaces.TemplateParam
+	Formats     []interfaces.ExportFormat
+	Generator   func(ctx context.Context, data interfaces.ReportData, params map[string]any) (*interfaces.Report, error)
 }
 
 // New creates a new template processor
@@ -41,7 +41,7 @@ func New(logger logging.Logger) *Processor {
 }
 
 // ProcessTemplate processes a template with the given data and parameters
-func (p *Processor) ProcessTemplate(ctx context.Context, templateName string, data reports.ReportData, params map[string]any) (*reports.Report, error) {
+func (p *Processor) ProcessTemplate(ctx context.Context, templateName string, data interfaces.ReportData, params map[string]any) (*interfaces.Report, error) {
 	template, exists := p.templates[templateName]
 	if !exists {
 		return nil, fmt.Errorf("template not found: %s", templateName)
@@ -63,13 +63,13 @@ func (p *Processor) ProcessTemplate(ctx context.Context, templateName string, da
 }
 
 // GetTemplateInfo returns information about a specific template
-func (p *Processor) GetTemplateInfo(templateName string) (*reports.TemplateInfo, error) {
+func (p *Processor) GetTemplateInfo(templateName string) (*interfaces.TemplateInfo, error) {
 	template, exists := p.templates[templateName]
 	if !exists {
 		return nil, fmt.Errorf("template not found: %s", templateName)
 	}
 
-	return &reports.TemplateInfo{
+	return &interfaces.TemplateInfo{
 		Name:        template.Name,
 		Type:        template.Type,
 		Description: template.Description,
@@ -92,9 +92,9 @@ func (p *Processor) registerBuiltinTemplates() {
 	// Compliance Summary Template
 	p.templates["compliance-summary"] = TemplateDefinition{
 		Name:        "compliance-summary",
-		Type:        reports.ReportTypeCompliance,
+		Type:        interfaces.ReportTypeCompliance,
 		Description: "High-level compliance status with drift summary",
-		Parameters: []reports.TemplateParam{
+		Parameters: []interfaces.TemplateParam{
 			{
 				Name:        "baseline_date",
 				Type:        "datetime",
@@ -109,10 +109,10 @@ func (p *Processor) registerBuiltinTemplates() {
 				Default:     true,
 			},
 		},
-		Formats: []reports.ExportFormat{
-			reports.FormatJSON,
-			reports.FormatHTML,
-			reports.FormatCSV,
+		Formats: []interfaces.ExportFormat{
+			interfaces.FormatJSON,
+			interfaces.FormatHTML,
+			interfaces.FormatCSV,
 		},
 		Generator: p.generateComplianceSummary,
 	}
@@ -120,9 +120,9 @@ func (p *Processor) registerBuiltinTemplates() {
 	// Executive Dashboard Template
 	p.templates["executive-dashboard"] = TemplateDefinition{
 		Name:        "executive-dashboard",
-		Type:        reports.ReportTypeExecutive,
+		Type:        interfaces.ReportTypeExecutive,
 		Description: "Executive overview with trend analysis and KPIs",
-		Parameters: []reports.TemplateParam{
+		Parameters: []interfaces.TemplateParam{
 			{
 				Name:        "include_charts",
 				Type:        "boolean",
@@ -131,9 +131,9 @@ func (p *Processor) registerBuiltinTemplates() {
 				Default:     true,
 			},
 		},
-		Formats: []reports.ExportFormat{
-			reports.FormatJSON,
-			reports.FormatHTML,
+		Formats: []interfaces.ExportFormat{
+			interfaces.FormatJSON,
+			interfaces.FormatHTML,
 		},
 		Generator: p.generateExecutiveDashboard,
 	}
@@ -141,9 +141,9 @@ func (p *Processor) registerBuiltinTemplates() {
 	// Drift Analysis Template
 	p.templates["drift-analysis"] = TemplateDefinition{
 		Name:        "drift-analysis",
-		Type:        reports.ReportTypeDrift,
+		Type:        interfaces.ReportTypeDrift,
 		Description: "Detailed analysis of configuration drift events",
-		Parameters: []reports.TemplateParam{
+		Parameters: []interfaces.TemplateParam{
 			{
 				Name:        "severity_filter",
 				Type:        "string",
@@ -158,26 +158,26 @@ func (p *Processor) registerBuiltinTemplates() {
 				Default:     false,
 			},
 		},
-		Formats: []reports.ExportFormat{
-			reports.FormatJSON,
-			reports.FormatCSV,
-			reports.FormatHTML,
+		Formats: []interfaces.ExportFormat{
+			interfaces.FormatJSON,
+			interfaces.FormatCSV,
+			interfaces.FormatHTML,
 		},
 		Generator: p.generateDriftAnalysis,
 	}
 }
 
 // generateComplianceSummary generates a compliance summary report
-func (p *Processor) generateComplianceSummary(ctx context.Context, data reports.ReportData, params map[string]any) (*reports.Report, error) {
-	report := &reports.Report{
-		Type:      reports.ReportTypeCompliance,
+func (p *Processor) generateComplianceSummary(ctx context.Context, data interfaces.ReportData, params map[string]any) (*interfaces.Report, error) {
+	report := &interfaces.Report{
+		Type:      interfaces.ReportTypeCompliance,
 		Title:     "Compliance Summary Report",
 		Subtitle:  fmt.Sprintf("Analysis period: %s - %s", 
 			data.TimeRange.Start.Format("Jan 2, 2006"), 
 			data.TimeRange.End.Format("Jan 2, 2006")),
 		TimeRange: data.TimeRange,
-		Sections:  make([]reports.ReportSection, 0),
-		Charts:    make([]reports.ChartData, 0),
+		Sections:  make([]interfaces.ReportSection, 0),
+		Charts:    make([]interfaces.ChartData, 0),
 	}
 
 	// Check parameters
@@ -210,14 +210,14 @@ func (p *Processor) generateComplianceSummary(ctx context.Context, data reports.
 }
 
 // generateExecutiveDashboard generates an executive dashboard report
-func (p *Processor) generateExecutiveDashboard(ctx context.Context, data reports.ReportData, params map[string]any) (*reports.Report, error) {
-	report := &reports.Report{
-		Type:      reports.ReportTypeExecutive,
+func (p *Processor) generateExecutiveDashboard(ctx context.Context, data interfaces.ReportData, params map[string]any) (*interfaces.Report, error) {
+	report := &interfaces.Report{
+		Type:      interfaces.ReportTypeExecutive,
 		Title:     "Executive Dashboard",
 		Subtitle:  "Configuration Management Overview",
 		TimeRange: data.TimeRange,
-		Sections:  make([]reports.ReportSection, 0),
-		Charts:    make([]reports.ChartData, 0),
+		Sections:  make([]interfaces.ReportSection, 0),
+		Charts:    make([]interfaces.ChartData, 0),
 	}
 
 	// Check parameters
@@ -259,14 +259,14 @@ func (p *Processor) generateExecutiveDashboard(ctx context.Context, data reports
 }
 
 // generateDriftAnalysis generates a detailed drift analysis report
-func (p *Processor) generateDriftAnalysis(ctx context.Context, data reports.ReportData, params map[string]any) (*reports.Report, error) {
-	report := &reports.Report{
-		Type:      reports.ReportTypeDrift,
+func (p *Processor) generateDriftAnalysis(ctx context.Context, data interfaces.ReportData, params map[string]any) (*interfaces.Report, error) {
+	report := &interfaces.Report{
+		Type:      interfaces.ReportTypeDrift,
 		Title:     "Configuration Drift Analysis",
 		Subtitle:  "Detailed drift event analysis and recommendations",
 		TimeRange: data.TimeRange,
-		Sections:  make([]reports.ReportSection, 0),
-		Charts:    make([]reports.ChartData, 0),
+		Sections:  make([]interfaces.ReportSection, 0),
+		Charts:    make([]interfaces.ChartData, 0),
 	}
 
 	// Filter events by severity if specified
@@ -308,7 +308,7 @@ func (p *Processor) generateDriftAnalysis(ctx context.Context, data reports.Repo
 }
 
 // generateComplianceOverview creates the compliance overview section
-func (p *Processor) generateComplianceOverview(data reports.ReportData) reports.ReportSection {
+func (p *Processor) generateComplianceOverview(data interfaces.ReportData) interfaces.ReportSection {
 	// Calculate compliance metrics
 	totalDevices := len(data.DeviceStats)
 	compliantDevices := 0
@@ -334,41 +334,41 @@ func (p *Processor) generateComplianceOverview(data reports.ReportData) reports.
 		"total_drift_events": len(data.DriftEvents),
 	}
 
-	return reports.ReportSection{
+	return interfaces.ReportSection{
 		ID:       "compliance-overview",
 		Title:    "Compliance Overview",
-		Type:     reports.SectionTypeKPI,
+		Type:     interfaces.SectionTypeKPI,
 		Content:  content,
 		Priority: 1,
 	}
 }
 
 // generateDriftSummarySection creates the drift summary section
-func (p *Processor) generateDriftSummarySection(data reports.ReportData) reports.ReportSection {
+func (p *Processor) generateDriftSummarySection(data interfaces.ReportData) interfaces.ReportSection {
 	// Categorize drift events by severity
-	severityCount := make(map[drift.Severity]int)
+	severityCount := make(map[drift.DriftSeverity]int)
 	for _, event := range data.DriftEvents {
 		severityCount[event.Severity]++
 	}
 
 	content := map[string]interface{}{
-		"critical_events": severityCount[drift.Critical],
-		"warning_events":  severityCount[drift.Warning],
-		"info_events":     severityCount[drift.Info],
+		"critical_events": severityCount[drift.SeverityCritical],
+		"warning_events":  severityCount[drift.SeverityWarning],
+		"info_events":     severityCount[drift.SeverityInfo],
 		"total_events":    len(data.DriftEvents),
 	}
 
-	return reports.ReportSection{
+	return interfaces.ReportSection{
 		ID:       "drift-summary",
 		Title:    "Configuration Drift Summary",
-		Type:     reports.SectionTypeKPI,
+		Type:     interfaces.SectionTypeKPI,
 		Content:  content,
 		Priority: 2,
 	}
 }
 
 // generateDeviceComplianceSection creates the device compliance section
-func (p *Processor) generateDeviceComplianceSection(data reports.ReportData, includeDetails bool) reports.ReportSection {
+func (p *Processor) generateDeviceComplianceSection(data interfaces.ReportData, includeDetails bool) interfaces.ReportSection {
 	// Sort devices by compliance score (lowest first)
 	type deviceInfo struct {
 		DeviceID        string
@@ -415,17 +415,17 @@ func (p *Processor) generateDeviceComplianceSection(data reports.ReportData, inc
 		content = fmt.Sprintf("Analyzed %d devices. Top 3 non-compliant devices need attention.", len(devices))
 	}
 
-	return reports.ReportSection{
+	return interfaces.ReportSection{
 		ID:       "device-compliance",
 		Title:    "Device Compliance Details",
-		Type:     reports.SectionTypeTable,
+		Type:     interfaces.SectionTypeTable,
 		Content:  content,
 		Priority: 3,
 	}
 }
 
 // generateKPISection creates the KPI section for executive dashboard
-func (p *Processor) generateKPISection(data reports.ReportData) reports.ReportSection {
+func (p *Processor) generateKPISection(data interfaces.ReportData) interfaces.ReportSection {
 	// Calculate key performance indicators
 	totalDevices := len(data.DeviceStats)
 	highRiskDevices := 0
@@ -433,7 +433,7 @@ func (p *Processor) generateKPISection(data reports.ReportData) reports.ReportSe
 	
 	for _, stats := range data.DeviceStats {
 		avgComplianceScore += stats.ComplianceScore
-		if stats.RiskLevel == reports.RiskLevelHigh || stats.RiskLevel == reports.RiskLevelCritical {
+		if stats.RiskLevel == interfaces.RiskLevelHigh || stats.RiskLevel == interfaces.RiskLevelCritical {
 			highRiskDevices++
 		}
 	}
@@ -447,20 +447,20 @@ func (p *Processor) generateKPISection(data reports.ReportData) reports.ReportSe
 		"high_risk_devices":     highRiskDevices,
 		"average_compliance":    avgComplianceScore,
 		"total_drift_events":    len(data.DriftEvents),
-		"critical_drift_events": p.countEventsBySeverity(data.DriftEvents, drift.Critical),
+		"critical_drift_events": p.countEventsBySeverity(data.DriftEvents, drift.SeverityCritical),
 	}
 
-	return reports.ReportSection{
+	return interfaces.ReportSection{
 		ID:       "kpis",
 		Title:    "Key Performance Indicators",
-		Type:     reports.SectionTypeKPI,
+		Type:     interfaces.SectionTypeKPI,
 		Content:  content,
 		Priority: 1,
 	}
 }
 
 // generateTrendsSection creates the trends analysis section
-func (p *Processor) generateTrendsSection(data reports.ReportData) reports.ReportSection {
+func (p *Processor) generateTrendsSection(data interfaces.ReportData) interfaces.ReportSection {
 	// Analyze trends from trend data
 	trendAnalysis := make(map[string]string)
 	
@@ -487,35 +487,35 @@ func (p *Processor) generateTrendsSection(data reports.ReportData) reports.Repor
 		"period_days":    int(data.TimeRange.End.Sub(data.TimeRange.Start).Hours() / 24),
 	}
 
-	return reports.ReportSection{
+	return interfaces.ReportSection{
 		ID:       "trends",
 		Title:    "Trend Analysis",
-		Type:     reports.SectionTypeText,
+		Type:     interfaces.SectionTypeText,
 		Content:  content,
 		Priority: 2,
 	}
 }
 
 // generateRiskAssessmentSection creates the risk assessment section
-func (p *Processor) generateRiskAssessmentSection(data reports.ReportData) reports.ReportSection {
+func (p *Processor) generateRiskAssessmentSection(data interfaces.ReportData) interfaces.ReportSection {
 	// Calculate risk distribution
-	riskCounts := make(map[reports.RiskLevel]int)
+	riskCounts := make(map[interfaces.RiskLevel]int)
 	for _, stats := range data.DeviceStats {
 		riskCounts[stats.RiskLevel]++
 	}
 
 	content := map[string]interface{}{
-		"critical_risk": riskCounts[reports.RiskLevelCritical],
-		"high_risk":     riskCounts[reports.RiskLevelHigh],
-		"medium_risk":   riskCounts[reports.RiskLevelMedium],
-		"low_risk":      riskCounts[reports.RiskLevelLow],
+		"critical_risk": riskCounts[interfaces.RiskLevelCritical],
+		"high_risk":     riskCounts[interfaces.RiskLevelHigh],
+		"medium_risk":   riskCounts[interfaces.RiskLevelMedium],
+		"low_risk":      riskCounts[interfaces.RiskLevelLow],
 		"total_devices": len(data.DeviceStats),
 	}
 
-	return reports.ReportSection{
+	return interfaces.ReportSection{
 		ID:       "risk-assessment",
 		Title:    "Risk Assessment",
-		Type:     reports.SectionTypeKPI,
+		Type:     interfaces.SectionTypeKPI,
 		Content:  content,
 		Priority: 3,
 	}
@@ -523,58 +523,58 @@ func (p *Processor) generateRiskAssessmentSection(data reports.ReportData) repor
 
 // Helper functions for generating charts and filtering data
 
-func (p *Processor) generateComplianceChart(data reports.ReportData) *reports.ChartData {
+func (p *Processor) generateComplianceChart(data interfaces.ReportData) *interfaces.ChartData {
 	if trends, exists := data.TrendData["compliance_score"]; exists && len(trends) > 0 {
-		series := make([]reports.DataPoint, len(trends))
+		series := make([]interfaces.DataPoint, len(trends))
 		for i, trend := range trends {
-			series[i] = reports.DataPoint{
+			series[i] = interfaces.DataPoint{
 				X: trend.Timestamp,
 				Y: trend.Value,
 			}
 		}
 
-		return &reports.ChartData{
+		return &interfaces.ChartData{
 			ID:    "compliance-trend",
-			Type:  reports.ChartTypeLine,
+			Type:  interfaces.ChartTypeLine,
 			Title: "Compliance Score Trend",
-			Series: []reports.SeriesData{
+			Series: []interfaces.SeriesData{
 				{
 					Name: "Compliance Score",
 					Data: series,
 				},
 			},
-			XAxis: reports.AxisConfig{Title: "Time", Type: "time"},
-			YAxis: reports.AxisConfig{Title: "Score", Type: "numeric"},
+			XAxis: interfaces.AxisConfig{Title: "Time", Type: "time"},
+			YAxis: interfaces.AxisConfig{Title: "Score", Type: "numeric"},
 		}
 	}
 	return nil
 }
 
-func (p *Processor) generateTrendChart(data reports.ReportData) *reports.ChartData {
+func (p *Processor) generateTrendChart(data interfaces.ReportData) *interfaces.ChartData {
 	// Similar to compliance chart but with multiple series
 	return p.generateComplianceChart(data)
 }
 
-func (p *Processor) generateRiskDistributionChart(data reports.ReportData) *reports.ChartData {
-	riskCounts := make(map[reports.RiskLevel]int)
+func (p *Processor) generateRiskDistributionChart(data interfaces.ReportData) *interfaces.ChartData {
+	riskCounts := make(map[interfaces.RiskLevel]int)
 	for _, stats := range data.DeviceStats {
 		riskCounts[stats.RiskLevel]++
 	}
 
-	series := make([]reports.DataPoint, 0)
+	series := make([]interfaces.DataPoint, 0)
 	for risk, count := range riskCounts {
-		series = append(series, reports.DataPoint{
+		series = append(series, interfaces.DataPoint{
 			X:     string(risk),
 			Y:     float64(count),
 			Label: fmt.Sprintf("%d devices", count),
 		})
 	}
 
-	return &reports.ChartData{
+	return &interfaces.ChartData{
 		ID:    "risk-distribution",
-		Type:  reports.ChartTypePie,
+		Type:  interfaces.ChartTypePie,
 		Title: "Device Risk Distribution",
-		Series: []reports.SeriesData{
+		Series: []interfaces.SeriesData{
 			{
 				Name: "Risk Levels",
 				Data: series,
@@ -583,7 +583,7 @@ func (p *Processor) generateRiskDistributionChart(data reports.ReportData) *repo
 	}
 }
 
-func (p *Processor) generateDriftTimelineChart(events []drift.DriftEvent) *reports.ChartData {
+func (p *Processor) generateDriftTimelineChart(events []drift.DriftEvent) *interfaces.ChartData {
 	if len(events) == 0 {
 		return nil
 	}
@@ -602,41 +602,41 @@ func (p *Processor) generateDriftTimelineChart(events []drift.DriftEvent) *repor
 	}
 	sort.Strings(days)
 
-	series := make([]reports.DataPoint, len(days))
+	series := make([]interfaces.DataPoint, len(days))
 	for i, day := range days {
 		parsedTime, _ := time.Parse("2006-01-02", day)
-		series[i] = reports.DataPoint{
+		series[i] = interfaces.DataPoint{
 			X: parsedTime,
 			Y: float64(dailyCounts[day]),
 		}
 	}
 
-	return &reports.ChartData{
+	return &interfaces.ChartData{
 		ID:    "drift-timeline",
-		Type:  reports.ChartTypeLine,
+		Type:  interfaces.ChartTypeLine,
 		Title: "Drift Events Timeline",
-		Series: []reports.SeriesData{
+		Series: []interfaces.SeriesData{
 			{
 				Name: "Daily Drift Events",
 				Data: series,
 			},
 		},
-		XAxis: reports.AxisConfig{Title: "Date", Type: "time"},
-		YAxis: reports.AxisConfig{Title: "Events", Type: "numeric"},
+		XAxis: interfaces.AxisConfig{Title: "Date", Type: "time"},
+		YAxis: interfaces.AxisConfig{Title: "Events", Type: "numeric"},
 	}
 }
 
 func (p *Processor) filterEventsBySeverity(events []drift.DriftEvent, severityFilter string) []drift.DriftEvent {
 	var filtered []drift.DriftEvent
-	var targetSeverity drift.Severity
+	var targetSeverity drift.DriftSeverity
 
 	switch severityFilter {
 	case "critical":
-		targetSeverity = drift.Critical
+		targetSeverity = drift.SeverityCritical
 	case "warning":
-		targetSeverity = drift.Warning
+		targetSeverity = drift.SeverityWarning
 	case "info":
-		targetSeverity = drift.Info
+		targetSeverity = drift.SeverityInfo
 	default:
 		return events // No filtering
 	}
@@ -650,7 +650,7 @@ func (p *Processor) filterEventsBySeverity(events []drift.DriftEvent, severityFi
 	return filtered
 }
 
-func (p *Processor) countEventsBySeverity(events []drift.DriftEvent, severity drift.Severity) int {
+func (p *Processor) countEventsBySeverity(events []drift.DriftEvent, severity drift.DriftSeverity) int {
 	count := 0
 	for _, event := range events {
 		if event.Severity == severity {
@@ -660,29 +660,29 @@ func (p *Processor) countEventsBySeverity(events []drift.DriftEvent, severity dr
 	return count
 }
 
-func (p *Processor) generateDriftOverviewSection(events []drift.DriftEvent) reports.ReportSection {
-	severityCount := make(map[drift.Severity]int)
+func (p *Processor) generateDriftOverviewSection(events []drift.DriftEvent) interfaces.ReportSection {
+	severityCount := make(map[drift.DriftSeverity]int)
 	for _, event := range events {
 		severityCount[event.Severity]++
 	}
 
 	content := map[string]interface{}{
 		"total_events":    len(events),
-		"critical_events": severityCount[drift.Critical],
-		"warning_events":  severityCount[drift.Warning],
-		"info_events":     severityCount[drift.Info],
+		"critical_events": severityCount[drift.SeverityCritical],
+		"warning_events":  severityCount[drift.SeverityWarning],
+		"info_events":     severityCount[drift.SeverityInfo],
 	}
 
-	return reports.ReportSection{
+	return interfaces.ReportSection{
 		ID:       "drift-overview",
 		Title:    "Drift Events Overview",
-		Type:     reports.SectionTypeKPI,
+		Type:     interfaces.SectionTypeKPI,
 		Content:  content,
 		Priority: 1,
 	}
 }
 
-func (p *Processor) generateDriftEventsSection(events []drift.DriftEvent) reports.ReportSection {
+func (p *Processor) generateDriftEventsSection(events []drift.DriftEvent) interfaces.ReportSection {
 	// Create table of recent events (limited to avoid huge reports)
 	maxEvents := 50
 	if len(events) > maxEvents {
@@ -706,16 +706,16 @@ func (p *Processor) generateDriftEventsSection(events []drift.DriftEvent) report
 		"rows":    rows,
 	}
 
-	return reports.ReportSection{
+	return interfaces.ReportSection{
 		ID:       "drift-events",
 		Title:    fmt.Sprintf("Recent Drift Events (showing %d of %d)", len(rows), len(events)),
-		Type:     reports.SectionTypeTable,
+		Type:     interfaces.SectionTypeTable,
 		Content:  content,
 		Priority: 2,
 	}
 }
 
-func (p *Processor) generateDriftEventsByDeviceSection(events []drift.DriftEvent) reports.ReportSection {
+func (p *Processor) generateDriftEventsByDeviceSection(events []drift.DriftEvent) interfaces.ReportSection {
 	// Group events by device
 	deviceEvents := make(map[string][]drift.DriftEvent)
 	for _, event := range events {
@@ -727,7 +727,7 @@ func (p *Processor) generateDriftEventsByDeviceSection(events []drift.DriftEvent
 	rows := make([][]interface{}, 0, len(deviceEvents))
 
 	for deviceID, devEvents := range deviceEvents {
-		severityCount := make(map[drift.Severity]int)
+		severityCount := make(map[drift.DriftSeverity]int)
 		for _, event := range devEvents {
 			severityCount[event.Severity]++
 		}
@@ -735,9 +735,9 @@ func (p *Processor) generateDriftEventsByDeviceSection(events []drift.DriftEvent
 		rows = append(rows, []interface{}{
 			deviceID,
 			len(devEvents),
-			severityCount[drift.Critical],
-			severityCount[drift.Warning],
-			severityCount[drift.Info],
+			severityCount[drift.SeverityCritical],
+			severityCount[drift.SeverityWarning],
+			severityCount[drift.SeverityInfo],
 		})
 	}
 
@@ -751,10 +751,10 @@ func (p *Processor) generateDriftEventsByDeviceSection(events []drift.DriftEvent
 		"rows":    rows,
 	}
 
-	return reports.ReportSection{
+	return interfaces.ReportSection{
 		ID:       "drift-events-by-device",
 		Title:    "Drift Events by Device",
-		Type:     reports.SectionTypeTable,
+		Type:     interfaces.SectionTypeTable,
 		Content:  content,
 		Priority: 2,
 	}

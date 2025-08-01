@@ -8,18 +8,17 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/cfgis/cfgms/features/reports"
+	"github.com/cfgis/cfgms/features/reports/interfaces"
 	"github.com/cfgis/cfgms/features/steward/dna/drift"
-	"github.com/cfgis/cfgms/features/steward/dna/storage"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // Engine implements the ReportEngine interface
 type Engine struct {
-	dataProvider      reports.DataProvider
-	templateProcessor reports.TemplateProcessor
-	exporter          reports.Exporter
-	cache             reports.ReportCache
+	dataProvider      interfaces.DataProvider
+	templateProcessor interfaces.TemplateProcessor
+	exporter          interfaces.Exporter
+	cache             interfaces.ReportCache
 	logger            logging.Logger
 	config            Config
 }
@@ -46,10 +45,10 @@ func DefaultConfig() Config {
 
 // New creates a new report engine instance
 func New(
-	dataProvider reports.DataProvider,
-	templateProcessor reports.TemplateProcessor,
-	exporter reports.Exporter,
-	cache reports.ReportCache,
+	dataProvider interfaces.DataProvider,
+	templateProcessor interfaces.TemplateProcessor,
+	exporter interfaces.Exporter,
+	cache interfaces.ReportCache,
 	logger logging.Logger,
 ) *Engine {
 	return &Engine{
@@ -69,7 +68,7 @@ func (e *Engine) WithConfig(config Config) *Engine {
 }
 
 // GenerateReport generates a report based on the provided request
-func (e *Engine) GenerateReport(ctx context.Context, req reports.ReportRequest) (*reports.Report, error) {
+func (e *Engine) GenerateReport(ctx context.Context, req interfaces.ReportRequest) (*interfaces.Report, error) {
 	startTime := time.Now()
 	
 	// Validate the request
@@ -135,14 +134,14 @@ func (e *Engine) GenerateReport(ctx context.Context, req reports.ReportRequest) 
 }
 
 // GetAvailableTemplates returns information about available report templates
-func (e *Engine) GetAvailableTemplates() []reports.TemplateInfo {
+func (e *Engine) GetAvailableTemplates() []interfaces.TemplateInfo {
 	// This would typically be loaded from template configuration
-	return []reports.TemplateInfo{
+	return []interfaces.TemplateInfo{
 		{
 			Name:        "compliance-summary",
-			Type:        reports.ReportTypeCompliance,
+			Type:        interfaces.ReportTypeCompliance,
 			Description: "High-level compliance status with drift summary",
-			Parameters: []reports.TemplateParam{
+			Parameters: []interfaces.TemplateParam{
 				{
 					Name:        "baseline_date",
 					Type:        "datetime",
@@ -157,17 +156,17 @@ func (e *Engine) GetAvailableTemplates() []reports.TemplateInfo {
 					Default:     true,
 				},
 			},
-			Formats: []reports.ExportFormat{
-				reports.FormatJSON,
-				reports.FormatHTML,
-				reports.FormatPDF,
+			Formats: []interfaces.ExportFormat{
+				interfaces.FormatJSON,
+				interfaces.FormatHTML,
+				interfaces.FormatPDF,
 			},
 		},
 		{
 			Name:        "executive-dashboard",
-			Type:        reports.ReportTypeExecutive,
+			Type:        interfaces.ReportTypeExecutive,
 			Description: "Executive overview with trend analysis and KPIs",
-			Parameters: []reports.TemplateParam{
+			Parameters: []interfaces.TemplateParam{
 				{
 					Name:        "include_charts",
 					Type:        "boolean",
@@ -176,17 +175,17 @@ func (e *Engine) GetAvailableTemplates() []reports.TemplateInfo {
 					Default:     true,
 				},
 			},
-			Formats: []reports.ExportFormat{
-				reports.FormatJSON,
-				reports.FormatHTML,
-				reports.FormatPDF,
+			Formats: []interfaces.ExportFormat{
+				interfaces.FormatJSON,
+				interfaces.FormatHTML,
+				interfaces.FormatPDF,
 			},
 		},
 		{
 			Name:        "drift-analysis",
-			Type:        reports.ReportTypeDrift,
+			Type:        interfaces.ReportTypeDrift,
 			Description: "Detailed analysis of configuration drift events",
-			Parameters: []reports.TemplateParam{
+			Parameters: []interfaces.TemplateParam{
 				{
 					Name:        "severity_filter",
 					Type:        "string",
@@ -201,10 +200,10 @@ func (e *Engine) GetAvailableTemplates() []reports.TemplateInfo {
 					Default:     false,
 				},
 			},
-			Formats: []reports.ExportFormat{
-				reports.FormatJSON,
-				reports.FormatCSV,
-				reports.FormatHTML,
+			Formats: []interfaces.ExportFormat{
+				interfaces.FormatJSON,
+				interfaces.FormatCSV,
+				interfaces.FormatHTML,
 			},
 		},
 	}
@@ -216,12 +215,12 @@ func (e *Engine) ValidateTemplate(template string) error {
 }
 
 // ValidateRequest validates a report request
-func (e *Engine) ValidateRequest(req reports.ReportRequest) error {
+func (e *Engine) ValidateRequest(req interfaces.ReportRequest) error {
 	// Validate report type
 	switch req.Type {
-	case reports.ReportTypeCompliance, reports.ReportTypeExecutive, 
-		 reports.ReportTypeDrift, reports.ReportTypeOperational, 
-		 reports.ReportTypeCustom:
+	case interfaces.ReportTypeCompliance, interfaces.ReportTypeExecutive, 
+		 interfaces.ReportTypeDrift, interfaces.ReportTypeOperational, 
+		 interfaces.ReportTypeCustom:
 		// Valid types
 	default:
 		return fmt.Errorf("invalid report type: %s", req.Type)
@@ -253,8 +252,8 @@ func (e *Engine) ValidateRequest(req reports.ReportRequest) error {
 
 	// Validate export format
 	switch req.Format {
-	case reports.FormatJSON, reports.FormatCSV, reports.FormatPDF, 
-		 reports.FormatExcel, reports.FormatHTML:
+	case interfaces.FormatJSON, interfaces.FormatCSV, interfaces.FormatPDF, 
+		 interfaces.FormatExcel, interfaces.FormatHTML:
 		// Valid formats
 	default:
 		return fmt.Errorf("invalid export format: %s", req.Format)
@@ -264,8 +263,8 @@ func (e *Engine) ValidateRequest(req reports.ReportRequest) error {
 }
 
 // gatherReportData collects all data needed for report generation
-func (e *Engine) gatherReportData(ctx context.Context, req reports.ReportRequest) (*reports.ReportData, error) {
-	query := reports.DataQuery{
+func (e *Engine) gatherReportData(ctx context.Context, req interfaces.ReportRequest) (*interfaces.ReportData, error) {
+	query := interfaces.DataQuery{
 		TimeRange: req.TimeRange,
 		DeviceIDs: req.DeviceIDs,
 		TenantIDs: req.TenantIDs,
@@ -290,7 +289,7 @@ func (e *Engine) gatherReportData(ctx context.Context, req reports.ReportRequest
 	}
 
 	// Get trend data for key metrics
-	trendData := make(map[string][]reports.TrendPoint)
+	trendData := make(map[string][]interfaces.TrendPoint)
 	metrics := []string{"drift_events", "compliance_score", "device_count"}
 	
 	for _, metric := range metrics {
@@ -302,7 +301,7 @@ func (e *Engine) gatherReportData(ctx context.Context, req reports.ReportRequest
 		trendData[metric] = trends
 	}
 
-	return &reports.ReportData{
+	return &interfaces.ReportData{
 		DNARecords:  dnaRecords,
 		DriftEvents: driftEvents,
 		TimeRange:   req.TimeRange,
@@ -313,9 +312,9 @@ func (e *Engine) gatherReportData(ctx context.Context, req reports.ReportRequest
 
 // enrichReportMetadata adds metadata to the generated report
 func (e *Engine) enrichReportMetadata(
-	report *reports.Report,
-	req reports.ReportRequest,
-	data *reports.ReportData,
+	report *interfaces.Report,
+	req interfaces.ReportRequest,
+	data *interfaces.ReportData,
 	generationTime time.Duration,
 ) {
 	report.ID = e.generateReportID(req)
@@ -330,7 +329,7 @@ func (e *Engine) enrichReportMetadata(
 		report.Subtitle = req.Subtitle
 	}
 
-	report.Metadata = reports.ReportMetadata{
+	report.Metadata = interfaces.ReportMetadata{
 		Template:     req.Template,
 		DeviceCount:  len(data.DNARecords),
 		DataPoints:   len(data.DNARecords) + len(data.DriftEvents),
@@ -344,8 +343,8 @@ func (e *Engine) enrichReportMetadata(
 }
 
 // generateReportSummary creates a summary of the report data
-func (e *Engine) generateReportSummary(data *reports.ReportData) reports.ReportSummary {
-	summary := reports.ReportSummary{
+func (e *Engine) generateReportSummary(data *interfaces.ReportData) interfaces.ReportSummary {
+	summary := interfaces.ReportSummary{
 		DevicesAnalyzed:  len(data.DNARecords),
 		DriftEventsTotal: len(data.DriftEvents),
 	}
@@ -356,7 +355,7 @@ func (e *Engine) generateReportSummary(data *reports.ReportData) reports.ReportS
 	
 	for _, stats := range data.DeviceStats {
 		totalScore += stats.ComplianceScore
-		if stats.RiskLevel == reports.RiskLevelCritical {
+		if stats.RiskLevel == interfaces.RiskLevelCritical {
 			criticalIssues++
 		}
 	}
@@ -372,14 +371,14 @@ func (e *Engine) generateReportSummary(data *reports.ReportData) reports.ReportS
 		lastScore := trends[len(trends)-1].Value
 		
 		if lastScore > firstScore+0.05 {
-			summary.TrendDirection = reports.TrendImproving
+			summary.TrendDirection = interfaces.TrendImproving
 		} else if lastScore < firstScore-0.05 {
-			summary.TrendDirection = reports.TrendDeclining
+			summary.TrendDirection = interfaces.TrendDeclining
 		} else {
-			summary.TrendDirection = reports.TrendStable
+			summary.TrendDirection = interfaces.TrendStable
 		}
 	} else {
-		summary.TrendDirection = reports.TrendUnknown
+		summary.TrendDirection = interfaces.TrendUnknown
 	}
 
 	// Generate key insights
@@ -390,7 +389,7 @@ func (e *Engine) generateReportSummary(data *reports.ReportData) reports.ReportS
 }
 
 // generateKeyInsights analyzes data to provide key insights
-func (e *Engine) generateKeyInsights(data *reports.ReportData) []string {
+func (e *Engine) generateKeyInsights(data *interfaces.ReportData) []string {
 	insights := make([]string, 0)
 
 	// Analyze drift events by severity
@@ -399,9 +398,9 @@ func (e *Engine) generateKeyInsights(data *reports.ReportData) []string {
 	
 	for _, event := range data.DriftEvents {
 		switch event.Severity {
-		case drift.Critical:
+		case drift.SeverityCritical:
 			criticalCount++
-		case drift.Warning:
+		case drift.SeverityWarning:
 			warningCount++
 		}
 	}
@@ -417,7 +416,7 @@ func (e *Engine) generateKeyInsights(data *reports.ReportData) []string {
 	// Analyze device risk distribution
 	highRiskDevices := 0
 	for _, stats := range data.DeviceStats {
-		if stats.RiskLevel == reports.RiskLevelHigh || stats.RiskLevel == reports.RiskLevelCritical {
+		if stats.RiskLevel == interfaces.RiskLevelHigh || stats.RiskLevel == interfaces.RiskLevelCritical {
 			highRiskDevices++
 		}
 	}
@@ -432,7 +431,7 @@ func (e *Engine) generateKeyInsights(data *reports.ReportData) []string {
 }
 
 // generateRecommendedActions provides actionable recommendations
-func (e *Engine) generateRecommendedActions(data *reports.ReportData, summary reports.ReportSummary) []string {
+func (e *Engine) generateRecommendedActions(data *interfaces.ReportData, summary interfaces.ReportSummary) []string {
 	actions := make([]string, 0)
 
 	// Critical issues
@@ -446,7 +445,7 @@ func (e *Engine) generateRecommendedActions(data *reports.ReportData, summary re
 	}
 
 	// Trend analysis
-	if summary.TrendDirection == reports.TrendDeclining {
+	if summary.TrendDirection == interfaces.TrendDeclining {
 		actions = append(actions, "Investigate root causes of declining compliance trends and implement corrective measures")
 	}
 
@@ -466,7 +465,7 @@ func (e *Engine) generateRecommendedActions(data *reports.ReportData, summary re
 }
 
 // generateCacheKey creates a unique cache key for the request
-func (e *Engine) generateCacheKey(req reports.ReportRequest) string {
+func (e *Engine) generateCacheKey(req interfaces.ReportRequest) string {
 	// Create a hash of the request parameters
 	data, _ := json.Marshal(req)
 	hash := sha256.Sum256(data)
@@ -474,7 +473,7 @@ func (e *Engine) generateCacheKey(req reports.ReportRequest) string {
 }
 
 // generateReportID creates a unique ID for the report
-func (e *Engine) generateReportID(req reports.ReportRequest) string {
+func (e *Engine) generateReportID(req interfaces.ReportRequest) string {
 	timestamp := time.Now().Unix()
 	data, _ := json.Marshal(req)
 	hash := sha256.Sum256(data)

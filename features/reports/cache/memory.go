@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cfgis/cfgms/features/reports"
+	"github.com/cfgis/cfgms/features/reports/interfaces"
 )
 
 // MemoryCache implements an in-memory cache for reports
@@ -15,7 +15,7 @@ type MemoryCache struct {
 }
 
 type cacheEntry struct {
-	report    *reports.Report
+	report    *interfaces.Report
 	expiresAt time.Time
 }
 
@@ -32,7 +32,7 @@ func NewMemoryCache() *MemoryCache {
 }
 
 // Get retrieves a report from the cache
-func (c *MemoryCache) Get(ctx context.Context, key string) (*reports.Report, error) {
+func (c *MemoryCache) Get(ctx context.Context, key string) (*interfaces.Report, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	
@@ -52,7 +52,7 @@ func (c *MemoryCache) Get(ctx context.Context, key string) (*reports.Report, err
 }
 
 // Set stores a report in the cache with the specified TTL
-func (c *MemoryCache) Set(ctx context.Context, key string, report *reports.Report, ttl time.Duration) error {
+func (c *MemoryCache) Set(ctx context.Context, key string, report *interfaces.Report, ttl time.Duration) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	

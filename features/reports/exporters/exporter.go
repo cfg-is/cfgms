@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cfgis/cfgms/features/reports/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -51,19 +52,19 @@ func (e *MultiFormatExporter) WithConfig(config Config) *MultiFormatExporter {
 }
 
 // Export exports a report in the specified format
-func (e *MultiFormatExporter) Export(ctx context.Context, report *Report, format ExportFormat) ([]byte, error) {
+func (e *MultiFormatExporter) Export(ctx context.Context, report *interfaces.Report, format interfaces.ExportFormat) ([]byte, error) {
 	e.logger.Debug("exporting report", "format", format, "report_id", report.ID)
 
 	switch format {
-	case FormatJSON:
+	case interfaces.FormatJSON:
 		return e.exportJSON(report)
-	case FormatCSV:
+	case interfaces.FormatCSV:
 		return e.exportCSV(report)
-	case FormatHTML:
+	case interfaces.FormatHTML:
 		return e.exportHTML(report)
-	case FormatPDF:
+	case interfaces.FormatPDF:
 		return e.exportPDF(ctx, report)
-	case FormatExcel:
+	case interfaces.FormatExcel:
 		return e.exportExcel(report)
 	default:
 		return nil, fmt.Errorf("unsupported export format: %s", format)
@@ -71,25 +72,25 @@ func (e *MultiFormatExporter) Export(ctx context.Context, report *Report, format
 }
 
 // SupportedFormats returns the formats supported by this exporter
-func (e *MultiFormatExporter) SupportedFormats() []ExportFormat {
-	formats := []ExportFormat{
-		FormatJSON,
-		FormatCSV,
-		FormatHTML,
+func (e *MultiFormatExporter) SupportedFormats() []interfaces.ExportFormat {
+	formats := []interfaces.ExportFormat{
+		interfaces.FormatJSON,
+		interfaces.FormatCSV,
+		interfaces.FormatHTML,
 	}
 
 	if e.config.PDFEnabled {
-		formats = append(formats, FormatPDF)
+		formats = append(formats, interfaces.FormatPDF)
 	}
 
 	// Excel export would require additional dependencies
-	// formats = append(formats, FormatExcel)
+	// formats = append(formats, interfaces.FormatExcel)
 
 	return formats
 }
 
 // exportJSON exports the report as JSON
-func (e *MultiFormatExporter) exportJSON(report *Report) ([]byte, error) {
+func (e *MultiFormatExporter) exportJSON(report *interfaces.Report) ([]byte, error) {
 	data, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal report to JSON: %w", err)
@@ -98,7 +99,7 @@ func (e *MultiFormatExporter) exportJSON(report *Report) ([]byte, error) {
 }
 
 // exportCSV exports the report as CSV
-func (e *MultiFormatExporter) exportCSV(report *Report) ([]byte, error) {
+func (e *MultiFormatExporter) exportCSV(report *interfaces.Report) ([]byte, error) {
 	var buf bytes.Buffer
 	writer := csv.NewWriter(&buf)
 
@@ -144,11 +145,11 @@ func (e *MultiFormatExporter) exportCSV(report *Report) ([]byte, error) {
 		
 		// Handle different section types
 		switch section.Type {
-		case SectionTypeTable:
+		case interfaces.SectionTypeTable:
 			if tableData, ok := section.Content.(map[string]interface{}); ok {
 				e.writeTableDataToCSV(writer, tableData)
 			}
-		case SectionTypeKPI:
+		case interfaces.SectionTypeKPI:
 			if kpiData, ok := section.Content.(map[string]interface{}); ok {
 				e.writeKPIDataToCSV(writer, kpiData)
 			}
@@ -168,7 +169,7 @@ func (e *MultiFormatExporter) exportCSV(report *Report) ([]byte, error) {
 }
 
 // exportHTML exports the report as HTML
-func (e *MultiFormatExporter) exportHTML(report *Report) ([]byte, error) {
+func (e *MultiFormatExporter) exportHTML(report *interfaces.Report) ([]byte, error) {
 	tmpl, err := template.New("report").Funcs(template.FuncMap{
 		"formatTime": func(t time.Time) string {
 			return t.Format("January 2, 2006 at 3:04 PM")
@@ -196,7 +197,7 @@ func (e *MultiFormatExporter) exportHTML(report *Report) ([]byte, error) {
 }
 
 // exportPDF exports the report as PDF (requires external tool)
-func (e *MultiFormatExporter) exportPDF(ctx context.Context, report *Report) ([]byte, error) {
+func (e *MultiFormatExporter) exportPDF(ctx context.Context, report *interfaces.Report) ([]byte, error) {
 	if !e.config.PDFEnabled {
 		return nil, fmt.Errorf("PDF export is not enabled")
 	}
@@ -209,7 +210,7 @@ func (e *MultiFormatExporter) exportPDF(ctx context.Context, report *Report) ([]
 }
 
 // exportExcel exports the report as Excel file
-func (e *MultiFormatExporter) exportExcel(report *Report) ([]byte, error) {
+func (e *MultiFormatExporter) exportExcel(report *interfaces.Report) ([]byte, error) {
 	// Excel export would require a library like excelize
 	// For now, return an error indicating it's not implemented
 	e.logger.Warn("Excel export not implemented - would require additional dependencies")

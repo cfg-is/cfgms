@@ -16,7 +16,7 @@
 // Architecture:
 //   - Engine: Core report generation logic with caching
 //   - Templates: Built-in templates for compliance, executive, and drift reports
-//   - Exporters: Multi-format export capabilities
+//   - interfaces.Exporters: Multi-format export capabilities
 //   - DataProvider: Integration with existing DNA storage and drift detection
 //   - API: REST endpoints for dashboard and report access
 //
@@ -32,11 +32,11 @@
 //	engine := engine.New(dataProvider, templateProcessor, exporter, cache, logger)
 //	
 //	// Generate report
-//	req := reports.ReportRequest{
-//		Type:      reports.ReportTypeCompliance,
+//	req := reports.interfaces.ReportRequest{
+//		Type:      reports.interfaces.ReportTypeCompliance,
 //		Template:  "compliance-summary",
-//		TimeRange: reports.TimeRange{Start: start, End: end},
-//		Format:    reports.FormatJSON,
+//		interfaces.TimeRange: reports.interfaces.TimeRange{Start: start, End: end},
+//		Format:    reports.interfaces.FormatJSON,
 //	}
 //	
 //	report, err := engine.GenerateReport(ctx, req)
@@ -65,6 +65,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/reports/engine"
 	"github.com/cfgis/cfgms/features/reports/exporters"
+	"github.com/cfgis/cfgms/features/reports/interfaces"
 	"github.com/cfgis/cfgms/features/reports/provider"
 	"github.com/cfgis/cfgms/features/reports/templates"
 	"github.com/cfgis/cfgms/features/steward/dna/drift"
@@ -74,8 +75,8 @@ import (
 
 // Service provides the main entry point for the reports subsystem
 type Service struct {
-	engine   ReportEngine
-	exporter Exporter
+	engine   interfaces.ReportEngine
+	exporter interfaces.Exporter
 	logger   logging.Logger
 }
 
@@ -105,7 +106,7 @@ func DefaultServiceConfig() ServiceConfig {
 func NewService(
 	storageManager *storage.Manager,
 	driftDetector *drift.Detector,
-	cache ReportCache,
+	cache interfaces.ReportCache,
 	logger logging.Logger,
 ) *Service {
 	// Create data provider
@@ -131,7 +132,7 @@ func NewService(
 func NewServiceWithConfig(
 	storageManager *storage.Manager,
 	driftDetector *drift.Detector,
-	cache ReportCache,
+	cache interfaces.ReportCache,
 	config ServiceConfig,
 	logger logging.Logger,
 ) *Service {
@@ -164,12 +165,12 @@ func NewServiceWithConfig(
 }
 
 // GenerateReport generates a report based on the provided request
-func (s *Service) GenerateReport(ctx context.Context, req ReportRequest) (*Report, error) {
+func (s *Service) GenerateReport(ctx context.Context, req interfaces.ReportRequest) (*interfaces.Report, error) {
 	return s.engine.GenerateReport(ctx, req)
 }
 
 // GenerateAndExport generates a report and exports it in the specified format
-func (s *Service) GenerateAndExport(ctx context.Context, req ReportRequest) ([]byte, error) {
+func (s *Service) GenerateAndExport(ctx context.Context, req interfaces.ReportRequest) ([]byte, error) {
 	// Generate the report
 	report, err := s.engine.GenerateReport(ctx, req)
 	if err != nil {
@@ -186,24 +187,24 @@ func (s *Service) GenerateAndExport(ctx context.Context, req ReportRequest) ([]b
 }
 
 // GetAvailableTemplates returns information about available report templates
-func (s *Service) GetAvailableTemplates() []TemplateInfo {
+func (s *Service) GetAvailableTemplates() []interfaces.TemplateInfo {
 	return s.engine.GetAvailableTemplates()
 }
 
 // ValidateRequest validates a report request
-func (s *Service) ValidateRequest(req ReportRequest) error {
+func (s *Service) ValidateRequest(req interfaces.ReportRequest) error {
 	return s.engine.ValidateRequest(req)
 }
 
 // GetSupportedFormats returns the export formats supported by the service
-func (s *Service) GetSupportedFormats() []ExportFormat {
+func (s *Service) GetSupportedFormats() []interfaces.ExportFormat {
 	return s.exporter.SupportedFormats()
 }
 
 // GenerateComplianceReport is a convenience method for generating compliance reports
-func (s *Service) GenerateComplianceReport(ctx context.Context, timeRange TimeRange, deviceIDs []string, format ExportFormat) ([]byte, error) {
-	req := ReportRequest{
-		Type:      ReportTypeCompliance,
+func (s *Service) GenerateComplianceReport(ctx context.Context, timeRange interfaces.TimeRange, deviceIDs []string, format interfaces.ExportFormat) ([]byte, error) {
+	req := interfaces.ReportRequest{
+		Type:      interfaces.ReportTypeCompliance,
 		Template:  "compliance-summary",
 		TimeRange: timeRange,
 		DeviceIDs: deviceIDs,
@@ -218,16 +219,16 @@ func (s *Service) GenerateComplianceReport(ctx context.Context, timeRange TimeRa
 }
 
 // GenerateExecutiveDashboard is a convenience method for generating executive dashboards
-func (s *Service) GenerateExecutiveDashboard(ctx context.Context, timeRange TimeRange, format ExportFormat) ([]byte, error) {
-	req := ReportRequest{
-		Type:      ReportTypeExecutive,
+func (s *Service) GenerateExecutiveDashboard(ctx context.Context, timeRange interfaces.TimeRange, format interfaces.ExportFormat) ([]byte, error) {
+	req := interfaces.ReportRequest{
+		Type:      interfaces.ReportTypeExecutive,
 		Template:  "executive-dashboard",
 		TimeRange: timeRange,
 		Format:    format,
 		Title:     "Executive Dashboard",
 		Subtitle:  "Configuration Management Overview",
 		Parameters: map[string]any{
-			"include_charts": format == FormatHTML || format == FormatJSON,
+			"include_charts": format == interfaces.FormatHTML || format == interfaces.FormatJSON,
 		},
 	}
 
@@ -235,9 +236,9 @@ func (s *Service) GenerateExecutiveDashboard(ctx context.Context, timeRange Time
 }
 
 // GenerateDriftAnalysis is a convenience method for generating drift analysis reports
-func (s *Service) GenerateDriftAnalysis(ctx context.Context, timeRange TimeRange, deviceIDs []string, format ExportFormat) ([]byte, error) {
-	req := ReportRequest{
-		Type:      ReportTypeDrift,
+func (s *Service) GenerateDriftAnalysis(ctx context.Context, timeRange interfaces.TimeRange, deviceIDs []string, format interfaces.ExportFormat) ([]byte, error) {
+	req := interfaces.ReportRequest{
+		Type:      interfaces.ReportTypeDrift,
 		Template:  "drift-analysis",
 		TimeRange: timeRange,
 		DeviceIDs: deviceIDs,
@@ -252,14 +253,14 @@ func (s *Service) GenerateDriftAnalysis(ctx context.Context, timeRange TimeRange
 }
 
 // GetComplianceStatus returns current compliance status for dashboard APIs
-func (s *Service) GetComplianceStatus(ctx context.Context, timeRange TimeRange, deviceIDs []string) (*ComplianceStatus, error) {
+func (s *Service) GetComplianceStatus(ctx context.Context, timeRange interfaces.TimeRange, deviceIDs []string) (*ComplianceStatus, error) {
 	// Generate compliance report in JSON format
-	req := ReportRequest{
-		Type:      ReportTypeCompliance,
+	req := interfaces.ReportRequest{
+		Type:      interfaces.ReportTypeCompliance,
 		Template:  "compliance-summary",
 		TimeRange: timeRange,
 		DeviceIDs: deviceIDs,
-		Format:    FormatJSON,
+		Format:    interfaces.FormatJSON,
 		Parameters: map[string]any{
 			"include_details": false,
 		},
@@ -298,14 +299,14 @@ func (s *Service) GetComplianceStatus(ctx context.Context, timeRange TimeRange, 
 }
 
 // GetDriftSummary returns current drift summary for dashboard APIs
-func (s *Service) GetDriftSummary(ctx context.Context, timeRange TimeRange, deviceIDs []string) (*DriftSummary, error) {
+func (s *Service) GetDriftSummary(ctx context.Context, timeRange interfaces.TimeRange, deviceIDs []string) (*DriftSummary, error) {
 	// Generate drift report in JSON format
-	req := ReportRequest{
-		Type:      ReportTypeDrift,
+	req := interfaces.ReportRequest{
+		Type:      interfaces.ReportTypeDrift,
 		Template:  "drift-analysis",
 		TimeRange: timeRange,
 		DeviceIDs: deviceIDs,
-		Format:    FormatJSON,
+		Format:    interfaces.FormatJSON,
 	}
 
 	report, err := s.engine.GenerateReport(ctx, req)
@@ -351,11 +352,11 @@ func (s *Service) GetDriftSummary(ctx context.Context, timeRange TimeRange, devi
 type ComplianceStatus struct {
 	Score            float64        `json:"score"`
 	ComplianceRate   float64        `json:"compliance_rate"`
-	TrendDirection   TrendDirection `json:"trend_direction"`
+	TrendDirection   interfaces.TrendDirection `json:"trend_direction"`
 	CriticalIssues   int            `json:"critical_issues"`
 	DevicesAnalyzed  int            `json:"devices_analyzed"`
 	TotalDriftEvents int            `json:"total_drift_events"`
-	TimeRange        TimeRange      `json:"time_range"`
+	TimeRange        interfaces.TimeRange      `json:"time_range"`
 	GeneratedAt      time.Time      `json:"generated_at"`
 }
 
@@ -365,9 +366,9 @@ type DriftSummary struct {
 	CriticalEvents int         `json:"critical_events"`
 	WarningEvents  int         `json:"warning_events"`
 	InfoEvents     int         `json:"info_events"`
-	TimeRange      TimeRange   `json:"time_range"`
+	TimeRange      interfaces.TimeRange   `json:"time_range"`
 	GeneratedAt    time.Time   `json:"generated_at"`
-	Charts         []ChartData `json:"charts,omitempty"`
+	Charts         []interfaces.ChartData `json:"charts,omitempty"`
 }
 
 // Health returns the health status of the reports service
