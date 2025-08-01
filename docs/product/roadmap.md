@@ -195,7 +195,7 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 
 **Epic #68: Remote Access & Integration (39 story points)**
 - [x] **Terminal Core Implementation** (Story #82) - ✅ COMPLETED
-- [ ] **Terminal Security Controls** (Story #83)
+- [x] **Terminal Security Controls** (Story #83) - ✅ COMPLETED
 - [ ] **Session Recording** (Story #84)
 - [ ] **End-to-End Integration Tests** (Story #85)
 - [ ] **v0.3.0 Production Readiness** (Story #86)

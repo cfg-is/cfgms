@@ -156,6 +156,50 @@ var DefaultPermissions = []*common.Permission{
 		Actions:      []string{"read"},
 	},
 
+	// Terminal Management Permissions
+	{
+		Id:           "terminal.session.create",
+		Name:         "Create Terminal Session",
+		Description:  "Create new terminal sessions",
+		ResourceType: "terminal",
+		Actions:      []string{"create"},
+	},
+	{
+		Id:           "terminal.session.read",
+		Name:         "Read Terminal Sessions",
+		Description:  "View terminal session information and status",
+		ResourceType: "terminal",
+		Actions:      []string{"read"},
+	},
+	{
+		Id:           "terminal.session.terminate",
+		Name:         "Terminate Terminal Sessions",
+		Description:  "Terminate active terminal sessions",
+		ResourceType: "terminal",
+		Actions:      []string{"delete"},
+	},
+	{
+		Id:           "terminal.session.monitor",
+		Name:         "Monitor Terminal Sessions",
+		Description:  "Real-time monitoring of terminal sessions",
+		ResourceType: "terminal",
+		Actions:      []string{"read"},
+	},
+	{
+		Id:           "terminal.recording.read",
+		Name:         "Read Terminal Recordings",
+		Description:  "Access terminal session recordings",
+		ResourceType: "terminal",
+		Actions:      []string{"read"},
+	},
+	{
+		Id:           "terminal.admin",
+		Name:         "Terminal Administration",
+		Description:  "Full terminal system administration",
+		ResourceType: "terminal",
+		Actions:      []string{"create", "read", "update", "delete", "execute"},
+	},
+
 	// System Administration Permissions
 	{
 		Id:           "system.admin",
@@ -217,6 +261,12 @@ var DefaultRoles = []*common.Role{
 			"rbac.role.read",
 			"rbac.assignment.manage",
 			"tenant.read",
+			"terminal.session.create",
+			"terminal.session.read",
+			"terminal.session.terminate",
+			"terminal.session.monitor",
+			"terminal.recording.read",
+			"terminal.admin",
 		},
 		IsSystemRole: false, // Tenant-specific role template
 	},
@@ -231,6 +281,10 @@ var DefaultRoles = []*common.Role{
 			"config.status.report",
 			"module.read",
 			"tenant.read",
+			"terminal.session.create",
+			"terminal.session.read",
+			"terminal.session.monitor",
+			"terminal.recording.read",
 		},
 		IsSystemRole: false, // Tenant-specific role template
 	},
@@ -244,6 +298,8 @@ var DefaultRoles = []*common.Role{
 			"module.read",
 			"tenant.read",
 			"rbac.role.read",
+			"terminal.session.read",
+			"terminal.recording.read",
 		},
 		IsSystemRole: false, // Tenant-specific role template
 	},
