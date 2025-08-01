@@ -264,10 +264,14 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 - [ ] Perform branch cleanup (e.g., ensure `main` and `develop` are clean, remove old feature branches)
 - [ ] Review repository for any sensitive data or leftover internal artifacts
 - [ ] Clean up `README.md`, `CONTRIBUTING.md`, and other project meta-files for public consumption
-- [ ] Convert repository to Public
+- [ ] Create quick start guides for using cfgms.
+
+#### v0.8.0 Go public
+
 - [ ] Set Up GitHub Actions and Acceptance Tests #15
 - [ ] Set up githup CI CD pipeline
-- [ ] Create quick start guides for using cfgms.
+- [ ] Review Automated secure code scanning tooling implementation
+- [ ] Convert repository to Public
 
 ### Phase 2: Enhancement (v1.0.0 - v1.5.0)
 
