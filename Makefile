@@ -62,6 +62,51 @@ build-cert-manager:
 test:
 	go test -v -race -cover ./...
 
+# Integration Testing Framework (Story #84)
+.PHONY: test-integration test-integration-controller test-integration-steward test-e2e test-cross-platform
+
+# Run all integration tests
+test-integration: test-integration-controller test-integration-steward test-e2e
+
+# Controller integration tests (Linux only)
+test-integration-controller:
+	@echo "🖥️ Running Controller Integration Tests (Linux)"
+	@echo "=============================================="
+	go test -v -race -timeout=10m ./test/integration/...
+	go test -v -race -timeout=15m ./test/e2e/... -run "TestE2EScenarios/(TestControllerStewardIntegration|TestRBACIntegration|TestWorkflowIntegration|TestDataFlow)"
+
+# Steward integration tests (current platform)
+test-integration-steward:
+	@echo "🔧 Running Steward Integration Tests"
+	@echo "===================================="
+	go test -v -race -timeout=10m ./features/steward/... -short
+	go test -v -race -timeout=15m ./test/e2e/... -run "TestE2EScenarios/(TestTerminalSecurityIntegration|TestMultiStewardScenario|TestFailureRecovery|TestSecurityCompliance)"
+
+# Full E2E test suite
+test-e2e:
+	@echo "🎯 Running Comprehensive E2E Tests"
+	@echo "=================================="
+	go test -v -race -timeout=20m ./test/e2e/... -run "TestE2EScenarios"
+
+# Cross-platform terminal testing
+test-cross-platform:
+	@echo "🖥️ Testing Cross-Platform Terminal Support"
+	@echo "=========================================="
+	go test -v -timeout=5m ./features/terminal/... -run "TestSecurity"
+	@echo "Platform-specific shell tests would run here (requires CI matrix)"
+
+# Performance regression testing
+test-performance:
+	@echo "📊 Running Performance Regression Tests"
+	@echo "======================================="
+	go test -v -timeout=20m ./test/e2e/... -run "TestPerformanceRegression"
+
+# Performance baseline establishment (for new releases)
+test-performance-baseline:
+	@echo "📈 Establishing Performance Baselines"
+	@echo "====================================="
+	go test -v -timeout=30m ./test/e2e/... -run "TestPerformanceRegression" -args -establish-baseline
+
 # Production Risk Testing - Automated Gates
 .PHONY: test-production-critical test-export-reliability test-v030-gate test-v040-gate
 
