@@ -131,6 +131,9 @@ func (s *SyntheticMonitoringSuite) TestContinuousHealthChecks() {
 		if s.framework.config.OptimizeForCI {
 			testDuration = 10 * time.Second
 		}
+		if testing.Short() {
+			testDuration = 5 * time.Second
+		}
 
 		endTime := time.Now().Add(testDuration)
 		checkInterval := 2 * time.Second
@@ -223,6 +226,9 @@ func (s *SyntheticMonitoringSuite) TestAPIEndpointMonitoring() {
 		if s.framework.config.OptimizeForCI {
 			testDuration = 5 * time.Second
 		}
+		if testing.Short() {
+			testDuration = 3 * time.Second
+		}
 
 		var wg sync.WaitGroup
 		endTime := time.Now().Add(testDuration)
@@ -269,6 +275,9 @@ func (s *SyntheticMonitoringSuite) TestTerminalSessionMonitoring() {
 		testDuration := 15 * time.Second
 		if s.framework.config.OptimizeForCI {
 			testDuration = 5 * time.Second
+		}
+		if testing.Short() {
+			testDuration = 3 * time.Second
 		}
 
 		sessionResults := make([]SyntheticTestResult, 0)
@@ -374,6 +383,9 @@ func (s *SyntheticMonitoringSuite) TestResourceUsageMonitoring() {
 		testDuration := 20 * time.Second
 		if s.framework.config.OptimizeForCI {
 			testDuration = 5 * time.Second
+		}
+		if testing.Short() {
+			testDuration = 3 * time.Second
 		}
 
 		endTime := time.Now().Add(testDuration)

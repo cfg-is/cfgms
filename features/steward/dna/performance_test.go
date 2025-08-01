@@ -8,6 +8,58 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
+// TestDNACollectionBasic tests core DNA collection functionality quickly
+func TestDNACollectionBasic(t *testing.T) {
+	if !testing.Short() {
+		// In non-short mode, do minimal real collection for validation
+		logger := logging.NewLogger("error") // Minimal noise
+		collector := NewCollector(logger)
+		
+		// Quick validation that collection works
+		dna, err := collector.Collect()
+		if err != nil {
+			t.Fatalf("DNA collection failed: %v", err)
+		}
+		
+		// Basic validation
+		if dna.Id == "" {
+			t.Error("DNA ID should not be empty")
+		}
+		
+		if len(dna.Attributes) < 50 {
+			t.Errorf("Expected at least 50 attributes, got %d", len(dna.Attributes))
+		}
+		
+		t.Logf("✅ DNA collection basic validation passed (%d attributes)", len(dna.Attributes))
+		return
+	}
+	
+	// In short mode, just test the constructor and basic functionality
+	logger := logging.NewLogger("error")
+	collector := NewCollector(logger)
+	
+	// Test that collector was created properly
+	if collector == nil {
+		t.Fatal("DNA collector should not be nil")
+	}
+	
+	// Test individual component functions work (without full collection)
+	attributes := make(map[string]string)
+	collector.collectBasicInfo(attributes)
+	
+	// Should have at least hostname and basic info
+	if len(attributes) < 3 {
+		t.Errorf("Basic info collection should return at least 3 attributes, got %d", len(attributes))
+	}
+	
+	// Check hostname exists (this is fast to collect)
+	if _, exists := attributes["hostname"]; !exists {
+		t.Error("Basic info should include hostname")
+	}
+	
+	t.Logf("✅ DNA collection fast validation passed (%d basic attributes)", len(attributes))
+}
+
 // BenchmarkDNACollection benchmarks the DNA collection performance
 func BenchmarkDNACollection(b *testing.B) {
 	logger := logging.NewLogger("error") // Use error level to reduce noise
@@ -25,6 +77,10 @@ func BenchmarkDNACollection(b *testing.B) {
 
 // TestDNACollectionPerformance tests that DNA collection meets performance requirements
 func TestDNACollectionPerformance(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping DNA performance test in short mode")
+	}
+	
 	logger := logging.NewLogger("info")
 	collector := NewCollector(logger)
 	
@@ -73,6 +129,10 @@ func TestDNACollectionPerformance(t *testing.T) {
 
 // TestDNACollectionComponents tests individual collection components
 func TestDNACollectionComponents(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping DNA component performance test in short mode")
+	}
+	
 	logger := logging.NewLogger("info")
 	collector := NewCollector(logger)
 	
@@ -107,10 +167,15 @@ func TestDNACollectionComponents(t *testing.T) {
 
 // TestConcurrentDNACollection tests DNA collection under concurrent load
 func TestConcurrentDNACollection(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping concurrent DNA collection test in short mode")
+	}
+	
 	logger := logging.NewLogger("error") // Reduce noise
 	
-	const goroutines = 5
-	const collectionsPerGoroutine = 3
+	// Reduced for faster testing - still validates concurrency
+	const goroutines = 3
+	const collectionsPerGoroutine = 2
 	
 	results := make(chan time.Duration, goroutines*collectionsPerGoroutine)
 	

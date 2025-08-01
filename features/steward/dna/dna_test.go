@@ -20,6 +20,10 @@ func TestNewCollector(t *testing.T) {
 }
 
 func TestCollect(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping full DNA collection test in short mode")
+	}
+	
 	logger := logging.NewLogger("debug")
 	collector := NewCollector(logger)
 	
@@ -169,6 +173,10 @@ func TestGenerateSystemID(t *testing.T) {
 }
 
 func TestRefreshDNA(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping DNA refresh test in short mode")
+	}
+	
 	logger := logging.NewLogger("debug")
 	collector := NewCollector(logger)
 	
@@ -183,6 +191,10 @@ func TestRefreshDNA(t *testing.T) {
 }
 
 func TestCompareDNA(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping DNA compare test in short mode")
+	}
+	
 	logger := logging.NewLogger("debug")
 	collector := NewCollector(logger)
 	
