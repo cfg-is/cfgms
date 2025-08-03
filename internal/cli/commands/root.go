@@ -27,7 +27,9 @@ func newConfigCommand() *cobra.Command {
 		Short: "Manage CFGMS configuration",
 		Long:  `Manage CFGMS configuration settings and files.`,
 		Run: func(cmd *cobra.Command, args []string) {
-			cmd.Help()
+			if err := cmd.Help(); err != nil {
+				// Help failed, but we can't do much about it
+			}
 		},
 	}
 }
@@ -38,7 +40,9 @@ func newAgentCommand() *cobra.Command {
 		Short: "Manage CFGMS agents",
 		Long:  `Manage CFGMS agent lifecycle and operations.`,
 		Run: func(cmd *cobra.Command, args []string) {
-			cmd.Help()
+			if err := cmd.Help(); err != nil {
+				// Help failed, but we can't do much about it
+			}
 		},
 	}
 }
@@ -49,7 +53,9 @@ func newControllerCommand() *cobra.Command {
 		Short: "Manage CFGMS controller",
 		Long:  `Manage CFGMS controller operations and status.`,
 		Run: func(cmd *cobra.Command, args []string) {
-			cmd.Help()
+			if err := cmd.Help(); err != nil {
+				// Help failed, but we can't do much about it
+			}
 		},
 	}
 }

@@ -104,60 +104,106 @@ func (e *MultiFormatExporter) exportCSV(report *interfaces.Report) ([]byte, erro
 	writer := csv.NewWriter(&buf)
 
 	// Write header information
-	writer.Write([]string{"Report Title", report.Title})
-	writer.Write([]string{"Report Type", string(report.Type)})
-	writer.Write([]string{"Generated At", report.GeneratedAt.Format(time.RFC3339)})
-	writer.Write([]string{"Time Range", fmt.Sprintf("%s to %s", 
+	if err := writer.Write([]string{"Report Title", report.Title}); err != nil {
+		return nil, err
+	}
+	if err := writer.Write([]string{"Report Type", string(report.Type)}); err != nil {
+		return nil, err
+	}
+	if err := writer.Write([]string{"Generated At", report.GeneratedAt.Format(time.RFC3339)}); err != nil {
+		return nil, err
+	}
+	if err := writer.Write([]string{"Time Range", fmt.Sprintf("%s to %s", 
 		report.TimeRange.Start.Format(time.RFC3339), 
-		report.TimeRange.End.Format(time.RFC3339))})
-	writer.Write([]string{}) // Empty row
+		report.TimeRange.End.Format(time.RFC3339))}); err != nil {
+		return nil, err
+	}
+	if err := writer.Write([]string{}); err != nil { // Empty row
+		return nil, err
+	}
 
 	// Write summary information
-	writer.Write([]string{"Summary"})
-	writer.Write([]string{"Devices Analyzed", strconv.Itoa(report.Summary.DevicesAnalyzed)})
-	writer.Write([]string{"Drift Events Total", strconv.Itoa(report.Summary.DriftEventsTotal)})
-	writer.Write([]string{"Compliance Score", fmt.Sprintf("%.2f", report.Summary.ComplianceScore)})
-	writer.Write([]string{"Critical Issues", strconv.Itoa(report.Summary.CriticalIssues)})
-	writer.Write([]string{"Trend Direction", string(report.Summary.TrendDirection)})
-	writer.Write([]string{}) // Empty row
+	if err := writer.Write([]string{"Summary"}); err != nil {
+		return nil, err
+	}
+	if err := writer.Write([]string{"Devices Analyzed", strconv.Itoa(report.Summary.DevicesAnalyzed)}); err != nil {
+		return nil, err
+	}
+	if err := writer.Write([]string{"Drift Events Total", strconv.Itoa(report.Summary.DriftEventsTotal)}); err != nil {
+		return nil, err
+	}
+	if err := writer.Write([]string{"Compliance Score", fmt.Sprintf("%.2f", report.Summary.ComplianceScore)}); err != nil {
+		return nil, err
+	}
+	if err := writer.Write([]string{"Critical Issues", strconv.Itoa(report.Summary.CriticalIssues)}); err != nil {
+		return nil, err
+	}
+	if err := writer.Write([]string{"Trend Direction", string(report.Summary.TrendDirection)}); err != nil {
+		return nil, err
+	}
+	if err := writer.Write([]string{}); err != nil { // Empty row
+		return nil, err
+	}
 
 	// Write key insights
 	if len(report.Summary.KeyInsights) > 0 {
-		writer.Write([]string{"Key Insights"})
-		for i, insight := range report.Summary.KeyInsights {
-			writer.Write([]string{strconv.Itoa(i + 1), insight})
+		if err := writer.Write([]string{"Key Insights"}); err != nil {
+			return nil, err
 		}
-		writer.Write([]string{}) // Empty row
+		for i, insight := range report.Summary.KeyInsights {
+			if err := writer.Write([]string{strconv.Itoa(i + 1), insight}); err != nil {
+				return nil, err
+			}
+		}
+		if err := writer.Write([]string{}); err != nil { // Empty row
+			return nil, err
+		}
 	}
 
 	// Write recommended actions
 	if len(report.Summary.RecommendedActions) > 0 {
-		writer.Write([]string{"Recommended Actions"})
-		for i, action := range report.Summary.RecommendedActions {
-			writer.Write([]string{strconv.Itoa(i + 1), action})
+		if err := writer.Write([]string{"Recommended Actions"}); err != nil {
+			return nil, err
 		}
-		writer.Write([]string{}) // Empty row
+		for i, action := range report.Summary.RecommendedActions {
+			if err := writer.Write([]string{strconv.Itoa(i + 1), action}); err != nil {
+				return nil, err
+			}
+		}
+		if err := writer.Write([]string{}); err != nil { // Empty row
+			return nil, err
+		}
 	}
 
 	// Write section data
 	for _, section := range report.Sections {
-		writer.Write([]string{fmt.Sprintf("Section: %s", section.Title)})
+		if err := writer.Write([]string{fmt.Sprintf("Section: %s", section.Title)}); err != nil {
+			return nil, err
+		}
 		
 		// Handle different section types
 		switch section.Type {
 		case interfaces.SectionTypeTable:
 			if tableData, ok := section.Content.(map[string]interface{}); ok {
-				e.writeTableDataToCSV(writer, tableData)
+				if err := e.writeTableDataToCSV(writer, tableData); err != nil {
+					return nil, err
+				}
 			}
 		case interfaces.SectionTypeKPI:
 			if kpiData, ok := section.Content.(map[string]interface{}); ok {
-				e.writeKPIDataToCSV(writer, kpiData)
+				if err := e.writeKPIDataToCSV(writer, kpiData); err != nil {
+					return nil, err
+				}
 			}
 		default:
 			// For other section types, write as string
-			writer.Write([]string{"Content", fmt.Sprintf("%v", section.Content)})
+			if err := writer.Write([]string{"Content", fmt.Sprintf("%v", section.Content)}); err != nil {
+				return nil, err
+			}
 		}
-		writer.Write([]string{}) // Empty row
+		if err := writer.Write([]string{}); err != nil { // Empty row
+			return nil, err
+		}
 	}
 
 	writer.Flush()
@@ -218,14 +264,16 @@ func (e *MultiFormatExporter) exportExcel(report *interfaces.Report) ([]byte, er
 }
 
 // writeTableDataToCSV writes table data to CSV writer
-func (e *MultiFormatExporter) writeTableDataToCSV(writer *csv.Writer, data map[string]interface{}) {
+func (e *MultiFormatExporter) writeTableDataToCSV(writer *csv.Writer, data map[string]interface{}) error {
 	// Extract headers and rows from table data
 	if headers, ok := data["headers"].([]interface{}); ok {
 		headerStrings := make([]string, len(headers))
 		for i, h := range headers {
 			headerStrings[i] = fmt.Sprintf("%v", h)
 		}
-		writer.Write(headerStrings)
+		if err := writer.Write(headerStrings); err != nil {
+			return err
+		}
 	}
 
 	if rows, ok := data["rows"].([]interface{}); ok {
@@ -235,20 +283,28 @@ func (e *MultiFormatExporter) writeTableDataToCSV(writer *csv.Writer, data map[s
 				for i, cell := range rowData {
 					rowStrings[i] = fmt.Sprintf("%v", cell)
 				}
-				writer.Write(rowStrings)
+				if err := writer.Write(rowStrings); err != nil {
+					return err
+				}
 			}
 		}
 	}
+	return nil
 }
 
 // writeKPIDataToCSV writes KPI data to CSV writer
-func (e *MultiFormatExporter) writeKPIDataToCSV(writer *csv.Writer, data map[string]interface{}) {
-	writer.Write([]string{"Metric", "Value", "Unit"})
+func (e *MultiFormatExporter) writeKPIDataToCSV(writer *csv.Writer, data map[string]interface{}) error {
+	if err := writer.Write([]string{"Metric", "Value", "Unit"}); err != nil {
+		return err
+	}
 	
 	for key, value := range data {
 		valueStr := fmt.Sprintf("%v", value)
-		writer.Write([]string{key, valueStr, ""})
+		if err := writer.Write([]string{key, valueStr, ""}); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // defaultHTMLTemplate is the default HTML template for reports

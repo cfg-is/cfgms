@@ -80,7 +80,10 @@ func (h *Handler) generateReport(w http.ResponseWriter, r *http.Request) {
 
 	// Set appropriate content type and headers
 	h.setExportHeaders(w, req.Format, report.ID)
-	w.Write(exportData)
+	if _, err := w.Write(exportData); err != nil {
+		h.logger.Error("failed to write export data", "error", err)
+		// Can't return error to client at this point as headers are already sent
+	}
 
 	h.logger.Info("report generated successfully", 
 		"report_id", report.ID,
