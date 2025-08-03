@@ -109,21 +109,21 @@ func (w *WindowsSoftwareCollector) CollectProcesses(attributes map[string]string
 // LinuxSoftwareCollector handles Linux-specific software collection
 type LinuxSoftwareCollector struct{}
 
-func (l *LinuxSoftwareCollector) CollectOS(attributes map[string]string) error {
+// DarwinSoftwareCollector handles macOS-specific software collection
+type DarwinSoftwareCollector struct{}
+
+func (d *DarwinSoftwareCollector) CollectOS(attributes map[string]string) error {
 	return (&GenericSoftwareCollector{}).CollectOS(attributes)
 }
 
-func (l *LinuxSoftwareCollector) CollectPackages(attributes map[string]string) error {
+func (d *DarwinSoftwareCollector) CollectPackages(attributes map[string]string) error {
 	return (&GenericSoftwareCollector{}).CollectPackages(attributes)
 }
 
-func (l *LinuxSoftwareCollector) CollectServices(attributes map[string]string) error {
+func (d *DarwinSoftwareCollector) CollectServices(attributes map[string]string) error {
 	return (&GenericSoftwareCollector{}).CollectServices(attributes)
 }
 
-func (l *LinuxSoftwareCollector) CollectProcesses(attributes map[string]string) error {
+func (d *DarwinSoftwareCollector) CollectProcesses(attributes map[string]string) error {
 	return (&GenericSoftwareCollector{}).CollectProcesses(attributes)
 }
-
-// DarwinSoftwareCollector handles macOS-specific software collection
-type DarwinSoftwareCollector struct{}

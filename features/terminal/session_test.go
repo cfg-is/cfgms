@@ -34,7 +34,7 @@ func TestSessionCreation(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "valid bash session",
+			name: "bash session (platform dependent)",
 			request: &SessionRequest{
 				StewardID: "test-steward-001",
 				UserID:    "test-user",
@@ -42,11 +42,10 @@ func TestSessionCreation(t *testing.T) {
 				Cols:      80,
 				Rows:      24,
 			},
-			wantErr:  false,
-			skipOnOS: "windows",
+			wantErr: runtime.GOOS == "windows", // bash doesn't work on Windows
 		},
 		{
-			name: "valid powershell session",
+			name: "powershell session (platform dependent)",
 			request: &SessionRequest{
 				StewardID: "test-steward-001",
 				UserID:    "test-user",
@@ -54,8 +53,7 @@ func TestSessionCreation(t *testing.T) {
 				Cols:      120,
 				Rows:      30,
 			},
-			wantErr:  false,
-			skipOnOS: "darwin", // Skip on non-Windows
+			wantErr: runtime.GOOS != "windows", // PowerShell only works on Windows
 		},
 		{
 			name: "invalid shell",

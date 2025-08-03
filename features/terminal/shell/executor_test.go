@@ -21,24 +21,22 @@ func TestFactory(t *testing.T) {
 		skipOnOS   string
 	}{
 		{
-			name: "valid bash config",
+			name: "bash config (platform dependent)",
 			config: &Config{
 				Shell: "bash",
 				Cols:  80,
 				Rows:  24,
 			},
-			wantErr:  false,
-			skipOnOS: "windows",
+			wantErr: runtime.GOOS == "windows", // bash doesn't work on Windows
 		},
 		{
-			name: "valid powershell config",
+			name: "powershell config (platform dependent)",
 			config: &Config{
 				Shell: "powershell",
 				Cols:  80,
 				Rows:  24,
 			},
-			wantErr:  false,
-			skipOnOS: "darwin", // Skip on non-Windows
+			wantErr: runtime.GOOS != "windows", // PowerShell only works on Windows
 		},
 		{
 			name: "invalid shell",

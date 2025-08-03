@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/creack/pty"
 )
@@ -23,6 +24,7 @@ type UnixExecutor struct {
 	running    bool
 	ctx        context.Context
 	cancel     context.CancelFunc
+	wg         sync.WaitGroup // To wait for goroutines to finish
 }
 
 // NewUnixExecutor creates a new Unix shell executor
@@ -90,9 +92,11 @@ func (e *UnixExecutor) Start(ctx context.Context, config *Config) error {
 	e.running = true
 
 	// Start output reader
+	e.wg.Add(1)
 	go e.readOutput()
 
 	// Start process monitor
+	e.wg.Add(1)
 	go e.monitorProcess()
 
 	return nil
@@ -141,20 +145,18 @@ func (e *UnixExecutor) Resize(ctx context.Context, cols, rows int) error {
 // Close terminates the shell process
 func (e *UnixExecutor) Close(ctx context.Context) error {
 	e.mu.Lock()
-	defer e.mu.Unlock()
-
 	if !e.running {
+		e.mu.Unlock()
 		return nil // Already closed
 	}
-
 	e.running = false
-
-	// Cancel context
+	
+	// Cancel context first to signal goroutines to stop
 	if e.cancel != nil {
 		e.cancel()
 	}
 
-	// Close PTY
+	// Close PTY to break read operations
 	if e.pty != nil {
 		e.pty.Close()
 	}
@@ -164,20 +166,20 @@ func (e *UnixExecutor) Close(ctx context.Context) error {
 		// Try SIGTERM first
 		e.cmd.Process.Signal(syscall.SIGTERM)
 
-		// Wait for graceful shutdown or force kill
-		done := make(chan error, 1)
-		go func() {
-			done <- e.cmd.Wait()
-		}()
-
+		// Wait a short time for graceful shutdown, then force kill if needed
 		select {
 		case <-ctx.Done():
 			// Force kill if context expires
 			e.cmd.Process.Kill()
-		case <-done:
-			// Process exited gracefully
+		case <-time.After(2 * time.Second):
+			// Force kill after timeout
+			e.cmd.Process.Kill()
 		}
 	}
+	e.mu.Unlock()
+
+	// Wait for goroutines to finish before closing channels (without holding lock)
+	e.wg.Wait()
 
 	// Close channels
 	close(e.outputCh)
@@ -238,6 +240,7 @@ func (e *UnixExecutor) readOutput() {
 		e.mu.Lock()
 		e.running = false
 		e.mu.Unlock()
+		e.wg.Done()
 	}()
 
 	buffer := make([]byte, 4096)
@@ -251,7 +254,10 @@ func (e *UnixExecutor) readOutput() {
 				if err != io.EOF {
 					select {
 					case e.errorCh <- fmt.Errorf("PTY read error: %w", err):
+					case <-e.ctx.Done():
+						return
 					default:
+						// Drop error if channel is closed
 					}
 				}
 				return
@@ -267,7 +273,7 @@ func (e *UnixExecutor) readOutput() {
 				case <-e.ctx.Done():
 					return
 				default:
-					// Drop data if channel is full
+					// Drop data if channel is full or closed
 				}
 			}
 		}
@@ -276,6 +282,8 @@ func (e *UnixExecutor) readOutput() {
 
 // monitorProcess monitors the shell process and handles its exit
 func (e *UnixExecutor) monitorProcess() {
+	defer e.wg.Done()
+	
 	if e.cmd == nil {
 		return
 	}
@@ -289,7 +297,10 @@ func (e *UnixExecutor) monitorProcess() {
 	if err != nil {
 		select {
 		case e.errorCh <- fmt.Errorf("shell process exited: %w", err):
+		case <-e.ctx.Done():
+			return
 		default:
+			// Drop error if channel is closed
 		}
 	}
 }

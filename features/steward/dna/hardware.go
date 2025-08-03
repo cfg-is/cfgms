@@ -91,21 +91,21 @@ func (w *WindowsHardwareCollector) CollectMotherboard(attributes map[string]stri
 // LinuxHardwareCollector handles Linux-specific hardware collection  
 type LinuxHardwareCollector struct{}
 
-func (l *LinuxHardwareCollector) CollectCPU(attributes map[string]string) error {
+// DarwinHardwareCollector handles macOS-specific hardware collection
+type DarwinHardwareCollector struct{}
+
+func (d *DarwinHardwareCollector) CollectCPU(attributes map[string]string) error {
 	return (&GenericHardwareCollector{}).CollectCPU(attributes)
 }
 
-func (l *LinuxHardwareCollector) CollectMemory(attributes map[string]string) error {
+func (d *DarwinHardwareCollector) CollectMemory(attributes map[string]string) error {
 	return (&GenericHardwareCollector{}).CollectMemory(attributes)
 }
 
-func (l *LinuxHardwareCollector) CollectDisk(attributes map[string]string) error {
+func (d *DarwinHardwareCollector) CollectDisk(attributes map[string]string) error {
 	return (&GenericHardwareCollector{}).CollectDisk(attributes)
 }
 
-func (l *LinuxHardwareCollector) CollectMotherboard(attributes map[string]string) error {
+func (d *DarwinHardwareCollector) CollectMotherboard(attributes map[string]string) error {
 	return (&GenericHardwareCollector{}).CollectMotherboard(attributes)
 }
-
-// DarwinHardwareCollector handles macOS-specific hardware collection
-type DarwinHardwareCollector struct{}

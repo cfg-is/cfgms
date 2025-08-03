@@ -160,3 +160,19 @@ func (l *LinuxNetworkCollector) CollectFirewall(attributes map[string]string) er
 
 // DarwinNetworkCollector handles macOS-specific network collection
 type DarwinNetworkCollector struct{}
+
+func (d *DarwinNetworkCollector) CollectInterfaces(attributes map[string]string) error {
+	return (&GenericNetworkCollector{}).CollectInterfaces(attributes)
+}
+
+func (d *DarwinNetworkCollector) CollectRouting(attributes map[string]string) error {
+	return (&GenericNetworkCollector{}).CollectRouting(attributes)
+}
+
+func (d *DarwinNetworkCollector) CollectDNS(attributes map[string]string) error {
+	return (&GenericNetworkCollector{}).CollectDNS(attributes)
+}
+
+func (d *DarwinNetworkCollector) CollectFirewall(attributes map[string]string) error {
+	return (&GenericNetworkCollector{}).CollectFirewall(attributes)
+}
