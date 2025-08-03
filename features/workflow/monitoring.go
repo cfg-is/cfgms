@@ -337,7 +337,10 @@ func NewLoggingWatcher(logger logging.Logger) *LoggingWatcher {
 
 // OnEvent logs the execution event
 func (w *LoggingWatcher) OnEvent(event ExecutionEvent) {
-	data, _ := json.Marshal(event.Data)
+	data, err := json.Marshal(event.Data)
+	if err != nil {
+		data = []byte("{\"error\": \"failed to marshal event data\"}")
+	}
 	
 	w.logger.Info("Workflow event",
 		"execution_id", event.ExecutionID,

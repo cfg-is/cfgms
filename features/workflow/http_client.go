@@ -204,7 +204,11 @@ func (c *HTTPClient) executeSingleRequest(ctx context.Context, httpConfig *HTTPC
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			// Log error but continue
+		}
+	}()
 
 	// Read response body
 	body, err := io.ReadAll(resp.Body)

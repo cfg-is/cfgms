@@ -25,9 +25,13 @@ func TestHTTPClient_ExecuteRequest(t *testing.T) {
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"message": "success", "data": {"id": 123}}`))
+		if _, err := w.Write([]byte(`{"message": "success", "data": {"id": 123}}`)); err != nil {
+			t.Logf("Failed to write test response: %v", err)
+		}
 	}))
-	defer server.Close()
+	defer func() {
+		server.Close() // Test server close doesn't return error
+	}()
 
 	client := NewHTTPClient(HTTPClientConfig{
 		Timeout: 10 * time.Second,
@@ -61,9 +65,13 @@ func TestHTTPClient_ExecuteRequest_WithRetry(t *testing.T) {
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"success": true}`))
+		if _, err := w.Write([]byte(`{"success": true}`)); err != nil {
+			t.Logf("Failed to write test response: %v", err)
+		}
 	}))
-	defer server.Close()
+	defer func() {
+		server.Close() // Test server close doesn't return error
+	}()
 
 	client := NewHTTPClient(HTTPClientConfig{})
 
@@ -90,9 +98,13 @@ func TestEngine_ExecuteHTTPStep(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"result": "http step executed"}`))
+		if _, err := w.Write([]byte(`{"result": "http step executed"}`)); err != nil {
+			t.Logf("Failed to write test response: %v", err)
+		}
 	}))
-	defer server.Close()
+	defer func() {
+		server.Close() // Test server close doesn't return error
+	}()
 
 	// Create engine
 	moduleFactory := createTestFactory()
@@ -139,7 +151,7 @@ func TestEngine_ExecuteAPIStep(t *testing.T) {
 		if r.URL.Path == "/v1.0/users" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{
+			if _, err := w.Write([]byte(`{
 				"@odata.context": "https://graph.microsoft.com/v1.0/$metadata#users",
 				"value": [
 					{
@@ -148,12 +160,16 @@ func TestEngine_ExecuteAPIStep(t *testing.T) {
 						"userPrincipalName": "john.doe@contoso.com"
 					}
 				]
-			}`))
+			}`)); err != nil {
+				t.Logf("Failed to write test response: %v", err)
+			}
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
 	}))
-	defer server.Close()
+	defer func() {
+		server.Close() // Test server close doesn't return error
+	}()
 
 	// Create engine
 	moduleFactory := createTestFactory()
@@ -210,7 +226,9 @@ func TestEngine_ExecuteWebhookStep(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"webhook": "received"}`))
 	}))
-	defer server.Close()
+	defer func() {
+		server.Close() // Test server close doesn't return error
+	}()
 
 	// Create engine
 	moduleFactory := createTestFactory()
@@ -319,7 +337,9 @@ func TestEngine_ComplexAPIWorkflow(t *testing.T) {
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}))
-	defer server.Close()
+	defer func() {
+		server.Close() // Test server close doesn't return error
+	}()
 
 	// Create engine
 	moduleFactory := createTestFactory()
