@@ -22,16 +22,7 @@ type HardwareCollector interface {
 
 // NewHardwareCollector creates a platform-specific hardware collector
 func NewHardwareCollector() HardwareCollector {
-	switch runtime.GOOS {
-	case "windows":
-		return &WindowsHardwareCollector{}
-	case "linux":
-		return &LinuxHardwareCollector{}
-	case "darwin":
-		return &DarwinHardwareCollector{}
-	default:
-		return &GenericHardwareCollector{}
-	}
+	return newPlatformHardwareCollector()
 }
 
 // GenericHardwareCollector provides basic cross-platform hardware collection
@@ -91,21 +82,6 @@ func (w *WindowsHardwareCollector) CollectMotherboard(attributes map[string]stri
 // LinuxHardwareCollector handles Linux-specific hardware collection  
 type LinuxHardwareCollector struct{}
 
+
 // DarwinHardwareCollector handles macOS-specific hardware collection
 type DarwinHardwareCollector struct{}
-
-func (d *DarwinHardwareCollector) CollectCPU(attributes map[string]string) error {
-	return (&GenericHardwareCollector{}).CollectCPU(attributes)
-}
-
-func (d *DarwinHardwareCollector) CollectMemory(attributes map[string]string) error {
-	return (&GenericHardwareCollector{}).CollectMemory(attributes)
-}
-
-func (d *DarwinHardwareCollector) CollectDisk(attributes map[string]string) error {
-	return (&GenericHardwareCollector{}).CollectDisk(attributes)
-}
-
-func (d *DarwinHardwareCollector) CollectMotherboard(attributes map[string]string) error {
-	return (&GenericHardwareCollector{}).CollectMotherboard(attributes)
-}
