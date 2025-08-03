@@ -441,7 +441,9 @@ func (s *ProductionReadinessSuite) TearDownSuite() {
 	if s.terminalManager != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		s.terminalManager.(*terminal.DefaultSessionManager).Stop(ctx)
+		if err := s.terminalManager.(*terminal.DefaultSessionManager).Stop(ctx); err != nil {
+			// Log error but continue - cleanup operation
+		}
 	}
 	
 	if s.framework != nil {
