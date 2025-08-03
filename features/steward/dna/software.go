@@ -23,16 +23,7 @@ type SoftwareCollector interface {
 
 // NewSoftwareCollector creates a platform-specific software collector
 func NewSoftwareCollector() SoftwareCollector {
-	switch runtime.GOOS {
-	case "windows":
-		return &WindowsSoftwareCollector{}
-	case "linux":
-		return &LinuxSoftwareCollector{}
-	case "darwin":
-		return &DarwinSoftwareCollector{}
-	default:
-		return &GenericSoftwareCollector{}
-	}
+	return newPlatformSoftwareCollector()
 }
 
 // GenericSoftwareCollector provides basic cross-platform software collection
@@ -109,21 +100,7 @@ func (w *WindowsSoftwareCollector) CollectProcesses(attributes map[string]string
 // LinuxSoftwareCollector handles Linux-specific software collection
 type LinuxSoftwareCollector struct{}
 
+
 // DarwinSoftwareCollector handles macOS-specific software collection
 type DarwinSoftwareCollector struct{}
 
-func (d *DarwinSoftwareCollector) CollectOS(attributes map[string]string) error {
-	return (&GenericSoftwareCollector{}).CollectOS(attributes)
-}
-
-func (d *DarwinSoftwareCollector) CollectPackages(attributes map[string]string) error {
-	return (&GenericSoftwareCollector{}).CollectPackages(attributes)
-}
-
-func (d *DarwinSoftwareCollector) CollectServices(attributes map[string]string) error {
-	return (&GenericSoftwareCollector{}).CollectServices(attributes)
-}
-
-func (d *DarwinSoftwareCollector) CollectProcesses(attributes map[string]string) error {
-	return (&GenericSoftwareCollector{}).CollectProcesses(attributes)
-}

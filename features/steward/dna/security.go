@@ -1,8 +1,5 @@
 package dna
 
-import (
-	"runtime"
-)
 
 // SecurityCollector defines the interface for platform-specific security attribute collection
 type SecurityCollector interface {
@@ -21,16 +18,7 @@ type SecurityCollector interface {
 
 // NewSecurityCollector creates a platform-specific security collector
 func NewSecurityCollector() SecurityCollector {
-	switch runtime.GOOS {
-	case "windows":
-		return &WindowsSecurityCollector{}
-	case "linux":
-		return &LinuxSecurityCollector{}
-	case "darwin":
-		return &DarwinSecurityCollector{}
-	default:
-		return &GenericSecurityCollector{}
-	}
+	return newPlatformSecurityCollector()
 }
 
 // GenericSecurityCollector provides basic cross-platform security collection
@@ -104,18 +92,3 @@ func (l *LinuxSecurityCollector) CollectCertificates(attributes map[string]strin
 // DarwinSecurityCollector handles macOS-specific security collection
 type DarwinSecurityCollector struct{}
 
-func (d *DarwinSecurityCollector) CollectUsers(attributes map[string]string) error {
-	return (&GenericSecurityCollector{}).CollectUsers(attributes)
-}
-
-func (d *DarwinSecurityCollector) CollectGroups(attributes map[string]string) error {
-	return (&GenericSecurityCollector{}).CollectGroups(attributes)
-}
-
-func (d *DarwinSecurityCollector) CollectPermissions(attributes map[string]string) error {
-	return (&GenericSecurityCollector{}).CollectPermissions(attributes)
-}
-
-func (d *DarwinSecurityCollector) CollectCertificates(attributes map[string]string) error {
-	return (&GenericSecurityCollector{}).CollectCertificates(attributes)
-}
