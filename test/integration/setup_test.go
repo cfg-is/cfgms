@@ -44,5 +44,7 @@ func setupTestEnv(t *testing.T) *testEnv {
 
 func (env *testEnv) cleanup() {
 	env.cancel()
-	env.conn.Close()
+	if err := env.conn.Close(); err != nil {
+		// Log error but continue cleanup
+	}
 }

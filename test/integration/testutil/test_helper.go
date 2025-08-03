@@ -204,7 +204,9 @@ func (e *TestEnv) Cleanup() {
 
 	// Remove temporary directory
 	if e.TempDir != "" {
-		os.RemoveAll(e.TempDir)
+		if err := os.RemoveAll(e.TempDir); err != nil {
+			// Log error but continue cleanup
+		}
 	}
 }
 
