@@ -23,7 +23,11 @@ func TestStorageManager(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create storage manager: %v", err)
 	}
-	defer manager.Close()
+	defer func() {
+		if err := manager.Close(); err != nil {
+			t.Logf("Failed to close manager: %v", err)
+		}
+	}()
 
 	t.Run("StoreAndRetrieve", func(t *testing.T) {
 		testStoreAndRetrieve(t, manager)
@@ -384,7 +388,11 @@ func testCompressionAlgorithm(t *testing.T, algorithm string) {
 	if err != nil {
 		t.Fatalf("Failed to create %s compressor: %v", algorithm, err)
 	}
-	defer compressor.Close()
+	defer func() {
+		if err := compressor.Close(); err != nil {
+			t.Logf("Failed to close compressor: %v", err)
+		}
+	}()
 
 	// Create test DNA with repetitive content
 	attributes := make(map[string]string)
@@ -475,7 +483,11 @@ func testStorageBackend(t *testing.T, backendType BackendType, config *Config, l
 	if err != nil {
 		t.Fatalf("Failed to create %s backend: %v", backendType, err)
 	}
-	defer backend.Close()
+	defer func() {
+		if err := backend.Close(); err != nil {
+			t.Logf("Failed to close backend: %v", err)
+		}
+	}()
 
 	ctx := context.Background()
 
@@ -567,7 +579,11 @@ func TestIndexer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create indexer: %v", err)
 	}
-	defer indexer.Close()
+	defer func() {
+		if err := indexer.Close(); err != nil {
+			t.Logf("Failed to close indexer: %v", err)
+		}
+	}()
 
 	ctx := context.Background()
 
@@ -773,7 +789,11 @@ func BenchmarkDNAStorage(b *testing.B) {
 	if err != nil {
 		b.Fatalf("Failed to create storage manager: %v", err)
 	}
-	defer manager.Close()
+	defer func() {
+		if err := manager.Close(); err != nil {
+			b.Logf("Failed to close manager: %v", err)
+		}
+	}()
 
 	ctx := context.Background()
 
@@ -809,7 +829,11 @@ func BenchmarkDNARetrieval(b *testing.B) {
 	if err != nil {
 		b.Fatalf("Failed to create storage manager: %v", err)
 	}
-	defer manager.Close()
+	defer func() {
+		if err := manager.Close(); err != nil {
+			b.Logf("Failed to close manager: %v", err)
+		}
+	}()
 
 	ctx := context.Background()
 

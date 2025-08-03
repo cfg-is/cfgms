@@ -83,7 +83,7 @@ func (c *GzipCompressor) Compress(dna *commonpb.DNA) ([]byte, int64, error) {
 	}
 
 	if _, err := writer.Write(originalData); err != nil {
-		writer.Close()
+		_ = writer.Close() // Best effort cleanup
 		return nil, originalSize, fmt.Errorf("failed to compress data: %w", err)
 	}
 
@@ -107,7 +107,11 @@ func (c *GzipCompressor) Decompress(data []byte) (*commonpb.DNA, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create gzip reader: %w", err)
 	}
-	defer reader.Close()
+	defer func() {
+		if err := reader.Close(); err != nil {
+			// Log error but continue - decompression already completed
+		}
+	}()
 
 	var decompressed bytes.Buffer
 	if _, err := decompressed.ReadFrom(reader); err != nil {

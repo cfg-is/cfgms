@@ -42,7 +42,11 @@ func TestDNAStorageIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create storage manager: %v", err)
 	}
-	defer manager.Close()
+	defer func() {
+		if err := manager.Close(); err != nil {
+			t.Logf("Failed to close manager: %v", err)
+		}
+	}()
 
 	ctx := context.Background()
 
@@ -280,7 +284,11 @@ func testCompressionPerformance(t *testing.T, algorithm string, level int) {
 	if err != nil {
 		t.Fatalf("Failed to create compressor: %v", err)
 	}
-	defer compressor.Close()
+	defer func() {
+		if err := compressor.Close(); err != nil {
+			t.Logf("Failed to close compressor: %v", err)
+		}
+	}()
 
 	// Create test DNA with varying content patterns
 	attributes := make(map[string]string)

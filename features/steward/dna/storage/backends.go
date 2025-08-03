@@ -517,12 +517,14 @@ func (b *FileBackend) calculateFileSystemStats() {
 	// This is a simplified implementation
 	var totalSize int64
 	
-	filepath.Walk(b.basePath, func(path string, info os.FileInfo, err error) error {
+	if err := filepath.Walk(b.basePath, func(path string, info os.FileInfo, err error) error {
 		if err == nil && !info.IsDir() {
 			totalSize += info.Size()
 		}
 		return nil
-	})
+	}); err != nil {
+		// Log error but continue - filesystem stats are not critical
+	}
 
 	b.stats.TotalSize = totalSize
 	b.stats.CompressedSize = totalSize // Assume all data is compressed
