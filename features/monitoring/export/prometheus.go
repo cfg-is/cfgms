@@ -212,8 +212,13 @@ func (pe *PrometheusExporter) handleMetrics(w http.ResponseWriter, r *http.Reque
 func (pe *PrometheusExporter) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, `{"status":"healthy","service":"prometheus_exporter","timestamp":"%s"}`, 
-		time.Now().Format(time.RFC3339))
+	if _, err := fmt.Fprintf(w, `{"status":"healthy","service":"prometheus_exporter","timestamp":"%s"}`, 
+		time.Now().Format(time.RFC3339)); err != nil {
+		// Can't return error to client at this point as headers are already sent
+		if pe.logger != nil {
+			pe.logger.Error("failed to write health response", "error", err)
+		}
+	}
 }
 
 // formatPrometheusMetrics converts CFGMS metrics to Prometheus format.

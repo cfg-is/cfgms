@@ -81,7 +81,11 @@ func TestPrometheusExporterMetrics(t *testing.T) {
 		ctx := context.Background()
 		err = exporter.Start(ctx)
 		require.NoError(t, err)
-		defer exporter.Stop(ctx)
+		defer func() {
+			if err := exporter.Stop(ctx); err != nil {
+				t.Logf("Failed to stop exporter: %v", err)
+			}
+		}()
 
 		// Export test data
 		exportData := export.ExportData{
@@ -125,7 +129,11 @@ func TestPrometheusExporterMetrics(t *testing.T) {
 		ctx := context.Background()
 		err := exporter.Start(ctx)
 		require.NoError(t, err)
-		defer exporter.Stop(ctx)
+		defer func() {
+			if err := exporter.Stop(ctx); err != nil {
+				t.Logf("Failed to stop exporter: %v", err)
+			}
+		}()
 
 		// Export empty data
 		exportData := export.ExportData{
@@ -166,7 +174,11 @@ func TestPrometheusExporterHealthCheck(t *testing.T) {
 		ctx := context.Background()
 		err = exporter.Start(ctx)
 		require.NoError(t, err)
-		defer exporter.Stop(ctx)
+		defer func() {
+			if err := exporter.Stop(ctx); err != nil {
+				t.Logf("Failed to stop exporter: %v", err)
+			}
+		}()
 
 		// Give server time to start
 		time.Sleep(100 * time.Millisecond)
@@ -205,7 +217,9 @@ func TestPrometheusMetricsFormatting(t *testing.T) {
 				"metric_prefix": "cfgms",
 			},
 		}
-		exporter.Configure(config)
+		if err := exporter.Configure(config); err != nil {
+			t.Fatalf("Failed to configure exporter: %v", err)
+		}
 
 		// We can't directly test the internal sanitization function
 		// but we can verify that different metric names are handled
@@ -232,7 +246,11 @@ func TestPrometheusMetricsFormatting(t *testing.T) {
 		ctx := context.Background()
 		err := exporter.Start(ctx)
 		require.NoError(t, err)
-		defer exporter.Stop(ctx)
+		defer func() {
+			if err := exporter.Stop(ctx); err != nil {
+				t.Logf("Failed to stop exporter: %v", err)
+			}
+		}()
 
 		// Test different metric types
 		exportData := export.ExportData{
@@ -264,7 +282,11 @@ func TestPrometheusDataTypes(t *testing.T) {
 		ctx := context.Background()
 		err := exporter.Start(ctx)
 		require.NoError(t, err)
-		defer exporter.Stop(ctx)
+		defer func() {
+			if err := exporter.Stop(ctx); err != nil {
+				t.Logf("Failed to stop exporter: %v", err)
+			}
+		}()
 
 		// Test various data types
 		exportData := export.ExportData{
@@ -291,7 +313,11 @@ func TestPrometheusDataTypes(t *testing.T) {
 		ctx := context.Background()
 		err := exporter.Start(ctx)
 		require.NoError(t, err)
-		defer exporter.Stop(ctx)
+		defer func() {
+			if err := exporter.Stop(ctx); err != nil {
+				t.Logf("Failed to stop exporter: %v", err)
+			}
+		}()
 
 		// Test nested metrics
 		exportData := export.ExportData{
@@ -322,7 +348,11 @@ func TestPrometheusHealthStatusMetrics(t *testing.T) {
 		ctx := context.Background()
 		err := exporter.Start(ctx)
 		require.NoError(t, err)
-		defer exporter.Stop(ctx)
+		defer func() {
+			if err := exporter.Stop(ctx); err != nil {
+				t.Logf("Failed to stop exporter: %v", err)
+			}
+		}()
 
 		exportData := export.ExportData{
 			HealthStatus: map[string]export.HealthStatus{
@@ -360,7 +390,11 @@ func TestPrometheusExporterConcurrency(t *testing.T) {
 		ctx := context.Background()
 		err := exporter.Start(ctx)
 		require.NoError(t, err)
-		defer exporter.Stop(ctx)
+		defer func() {
+			if err := exporter.Stop(ctx); err != nil {
+				t.Logf("Failed to stop exporter: %v", err)
+			}
+		}()
 
 		// Launch concurrent exports
 		done := make(chan bool)
@@ -378,7 +412,9 @@ func TestPrometheusExporterConcurrency(t *testing.T) {
 					Timestamp: time.Now(),
 				}
 
-				exporter.Export(ctx, exportData)
+				if err := exporter.Export(ctx, exportData); err != nil {
+					t.Logf("Export failed in concurrent test: %v", err)
+				}
 			}(i)
 		}
 
@@ -394,8 +430,14 @@ func BenchmarkPrometheusExport(b *testing.B) {
 	exporter := export.NewPrometheusExporter(logger)
 
 	ctx := context.Background()
-	exporter.Start(ctx)
-	defer exporter.Stop(ctx)
+	if err := exporter.Start(ctx); err != nil {
+		b.Fatalf("Failed to start exporter: %v", err)
+	}
+	defer func() {
+		if err := exporter.Stop(ctx); err != nil {
+			b.Logf("Failed to stop exporter: %v", err)
+		}
+	}()
 
 	exportData := export.ExportData{
 		SystemMetrics: map[string]interface{}{
@@ -412,7 +454,9 @@ func BenchmarkPrometheusExport(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		exporter.Export(ctx, exportData)
+		if err := exporter.Export(ctx, exportData); err != nil {
+			b.Fatalf("Export failed: %v", err)
+		}
 	}
 }
 
@@ -441,7 +485,11 @@ func TestPrometheusEndpointIntegration(t *testing.T) {
 		ctx := context.Background()
 		err = exporter.Start(ctx)
 		require.NoError(t, err)
-		defer exporter.Stop(ctx)
+		defer func() {
+			if err := exporter.Stop(ctx); err != nil {
+				t.Logf("Failed to stop exporter: %v", err)
+			}
+		}()
 
 		// Export some data first
 		exportData := export.ExportData{

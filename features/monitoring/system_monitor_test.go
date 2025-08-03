@@ -198,7 +198,11 @@ func TestSystemMonitorCollectors(t *testing.T) {
 		ctx := context.Background()
 		err := monitor.Start(ctx)
 		require.NoError(t, err)
-		defer monitor.Stop(ctx)
+		defer func() {
+			if err := monitor.Stop(ctx); err != nil {
+				t.Logf("Failed to stop monitor: %v", err)
+			}
+		}()
 
 		// Wait for metrics collection
 		time.Sleep(150 * time.Millisecond)
@@ -246,7 +250,11 @@ func TestSystemMonitorWatchers(t *testing.T) {
 		// Start monitor (should emit startup event)
 		err := monitor.Start(ctx)
 		require.NoError(t, err)
-		defer monitor.Stop(ctx)
+		defer func() {
+			if err := monitor.Stop(ctx); err != nil {
+				t.Logf("Failed to stop monitor: %v", err)
+			}
+		}()
 
 		// Give time for event processing
 		time.Sleep(50 * time.Millisecond)
@@ -266,7 +274,11 @@ func TestSystemMonitorWatchers(t *testing.T) {
 		ctx := context.Background()
 		err := monitor.Start(ctx)
 		require.NoError(t, err)
-		defer monitor.Stop(ctx)
+		defer func() {
+			if err := monitor.Stop(ctx); err != nil {
+				t.Logf("Failed to stop monitor: %v", err)
+			}
+		}()
 
 		// Give time for event processing
 		time.Sleep(50 * time.Millisecond)
@@ -370,7 +382,11 @@ func TestSystemMonitorResourceMetrics(t *testing.T) {
 		// Start monitor
 		err := monitor.Start(ctx)
 		require.NoError(t, err)
-		defer monitor.Stop(ctx)
+		defer func() {
+			if err := monitor.Stop(ctx); err != nil {
+				t.Logf("Failed to stop monitor: %v", err)
+			}
+		}()
 
 		// Wait for resource collection
 		time.Sleep(150 * time.Millisecond)
@@ -400,7 +416,11 @@ func TestSystemMonitorResourceMetrics(t *testing.T) {
 		ctx := context.Background()
 		err := monitor.Start(ctx)
 		require.NoError(t, err)
-		defer monitor.Stop(ctx)
+		defer func() {
+			if err := monitor.Stop(ctx); err != nil {
+				t.Logf("Failed to stop monitor: %v", err)
+			}
+		}()
 
 		// Wait for resource collection and alerts
 		time.Sleep(150 * time.Millisecond)
@@ -523,8 +543,14 @@ func BenchmarkSystemMonitorMetricsCollection(b *testing.B) {
 	}
 
 	ctx := context.Background()
-	monitor.Start(ctx)
-	defer monitor.Stop(ctx)
+	if err := monitor.Start(ctx); err != nil {
+		b.Fatalf("Failed to start monitor: %v", err)
+	}
+	defer func() {
+		if err := monitor.Stop(ctx); err != nil {
+			b.Logf("Failed to stop monitor: %v", err)
+		}
+	}()
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -549,8 +575,14 @@ func BenchmarkSystemMonitorEventEmission(b *testing.B) {
 	}
 
 	ctx := context.Background()
-	monitor.Start(ctx)
-	defer monitor.Stop(ctx)
+	if err := monitor.Start(ctx); err != nil {
+		b.Fatalf("Failed to start monitor: %v", err)
+	}
+	defer func() {
+		if err := monitor.Stop(ctx); err != nil {
+			b.Logf("Failed to stop monitor: %v", err)
+		}
+	}()
 
 	// Note: This is testing internal event emission which isn't directly exposed
 	// In a real scenario, you'd test through public APIs

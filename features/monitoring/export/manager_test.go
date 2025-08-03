@@ -347,10 +347,14 @@ func TestExportManagerDataExport(t *testing.T) {
 
 		manager := export.NewExportManager(logger, tracer, config)
 		exporter := NewMockExporter("test")
-		manager.RegisterExporter("test", exporter)
+		if err := manager.RegisterExporter("test", exporter); err != nil {
+			t.Fatalf("Failed to register exporter: %v", err)
+		}
 
 		ctx := context.Background()
-		manager.Start(ctx)
+		if err := manager.Start(ctx); err != nil {
+			t.Fatalf("Failed to start manager: %v", err)
+		}
 		defer func() {
 			if err := manager.Stop(ctx); err != nil {
 				t.Logf("Failed to stop manager: %v", err)
@@ -363,7 +367,10 @@ func TestExportManagerDataExport(t *testing.T) {
 				SystemMetrics: map[string]interface{}{"test": i},
 				Timestamp:     time.Now(),
 			}
-			manager.Export(exportData) // Some may fail due to buffer overflow
+			if err := manager.Export(exportData); err != nil {
+				// Expected to fail due to buffer overflow, log but continue
+				t.Logf("Export failed (expected): %v", err)
+			}
 		}
 	})
 }
@@ -395,10 +402,14 @@ func TestExportManagerErrorHandling(t *testing.T) {
 		// Set up exporter to fail once, then succeed
 		exporter.SetExportError(assert.AnError)
 		
-		manager.RegisterExporter("error-exporter", exporter)
+		if err := manager.RegisterExporter("error-exporter", exporter); err != nil {
+			t.Fatalf("Failed to register exporter: %v", err)
+		}
 
 		ctx := context.Background()
-		manager.Start(ctx)
+		if err := manager.Start(ctx); err != nil {
+			t.Fatalf("Failed to start manager: %v", err)
+		}
 		defer func() {
 			if err := manager.Stop(ctx); err != nil {
 				t.Logf("Failed to stop manager: %v", err)
@@ -450,11 +461,17 @@ func TestExportManagerHealthChecks(t *testing.T) {
 			Message: "Connection failed",
 		})
 
-		manager.RegisterExporter("healthy", healthyExporter)
-		manager.RegisterExporter("unhealthy", unhealthyExporter)
+		if err := manager.RegisterExporter("healthy", healthyExporter); err != nil {
+			t.Fatalf("Failed to register healthy exporter: %v", err)
+		}
+		if err := manager.RegisterExporter("unhealthy", unhealthyExporter); err != nil {
+			t.Fatalf("Failed to register unhealthy exporter: %v", err)
+		}
 
 		ctx := context.Background()
-		manager.Start(ctx)
+		if err := manager.Start(ctx); err != nil {
+			t.Fatalf("Failed to start manager: %v", err)
+		}
 		defer func() {
 			if err := manager.Stop(ctx); err != nil {
 				t.Logf("Failed to stop manager: %v", err)
@@ -502,11 +519,17 @@ func TestExportDataFiltering(t *testing.T) {
 		metricsExporter := NewMockExporter("metrics-only")
 		logsExporter := NewMockExporter("logs-only")
 		
-		manager.RegisterExporter("metrics-only", metricsExporter)
-		manager.RegisterExporter("logs-only", logsExporter)
+		if err := manager.RegisterExporter("metrics-only", metricsExporter); err != nil {
+			t.Fatalf("Failed to register metrics exporter: %v", err)
+		}
+		if err := manager.RegisterExporter("logs-only", logsExporter); err != nil {
+			t.Fatalf("Failed to register logs exporter: %v", err)
+		}
 
 		ctx := context.Background()
-		manager.Start(ctx)
+		if err := manager.Start(ctx); err != nil {
+			t.Fatalf("Failed to start manager: %v", err)
+		}
 		defer func() {
 			if err := manager.Stop(ctx); err != nil {
 				t.Logf("Failed to stop manager: %v", err)
@@ -568,10 +591,14 @@ func TestExportManagerConcurrency(t *testing.T) {
 
 		manager := export.NewExportManager(logger, tracer, config)
 		exporter := NewMockExporter("test")
-		manager.RegisterExporter("test", exporter)
+		if err := manager.RegisterExporter("test", exporter); err != nil {
+			t.Fatalf("Failed to register exporter: %v", err)
+		}
 
 		ctx := context.Background()
-		manager.Start(ctx)
+		if err := manager.Start(ctx); err != nil {
+			t.Fatalf("Failed to start manager: %v", err)
+		}
 		defer func() {
 			if err := manager.Stop(ctx); err != nil {
 				t.Logf("Failed to stop manager: %v", err)
@@ -596,7 +623,10 @@ func TestExportManagerConcurrency(t *testing.T) {
 						Timestamp: time.Now(),
 						ExportType: export.ExportTypeManual, // Use manual for synchronous processing in tests
 					}
-					manager.Export(exportData)
+					if err := manager.Export(exportData); err != nil {
+						// Log but continue in concurrent test
+						t.Logf("Export failed: %v", err)
+					}
 				}
 			}(i)
 		}
@@ -625,11 +655,19 @@ func BenchmarkExportManagerExport(b *testing.B) {
 
 	manager := export.NewExportManager(logger, tracer, config)
 	exporter := NewMockExporter("bench")
-	manager.RegisterExporter("bench", exporter)
+	if err := manager.RegisterExporter("bench", exporter); err != nil {
+		b.Fatalf("Failed to register exporter: %v", err)
+	}
 
 	ctx := context.Background()
-	manager.Start(ctx)
-	defer manager.Stop(ctx)
+	if err := manager.Start(ctx); err != nil {
+		b.Fatalf("Failed to start manager: %v", err)
+	}
+	defer func() {
+		if err := manager.Stop(ctx); err != nil {
+			b.Logf("Failed to stop manager: %v", err)
+		}
+	}()
 
 	exportData := export.ExportData{
 		SystemMetrics: map[string]interface{}{
@@ -641,6 +679,8 @@ func BenchmarkExportManagerExport(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		manager.Export(exportData)
+		if err := manager.Export(exportData); err != nil {
+			b.Fatalf("Export failed: %v", err)
+		}
 	}
 }
