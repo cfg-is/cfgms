@@ -10,17 +10,114 @@ CFGMS (Config Management System) is a modern, Go-based configuration management 
 
 ### Sprint and Development Process
 - **Sprint Planning Guideline**: At the start of each milestone, ALWAYS conduct sprint/story planning before beginning work
-- **Story Development Workflow**:
-  1. Pick up the next story from the GitHub project
-  2. Create a feature branch
-  3. Use Test-Driven Development (TDD) to complete work on the feature
-  4. Run full test suite and fix any failing tests weather they are related or not.
-  5. Once all tests are passing:
-     a) Commit files to feature branch
-     b) Ensure CLAUDE.md and roadmap are updated to reflect current step
-     c) Update GitHub project with current progress
-     d) Commit updated files and merge feature branch into develop branch
-  6. Start on the next story until all planned stories are complete
+
+### MANDATORY Story Development Checklist
+
+**BEFORE STARTING ANY CODE:**
+
+1. **Create Feature Branch** (MANDATORY)
+   ```bash
+   git checkout develop
+   git pull origin develop
+   git checkout -b feature/story-[NUMBER]-[brief-description]
+   ```
+
+2. **Verify Branch Creation**
+   ```bash
+   git branch --show-current  # Must show feature branch name
+   ```
+
+**DURING DEVELOPMENT:**
+
+3. **Implement using TDD**
+   - Write tests first, then implementation
+   - Run tests frequently: `make test`
+
+4. **MANDATORY Security Review** (CRITICAL)
+   
+   **Act as a cybersecurity expert specializing in Go applications and zero-trust systems.** Review ALL code changes for security vulnerabilities with particular attention to:
+
+   **Authentication & Authorization:**
+   - Verify all API endpoints require proper authentication
+   - Check certificate validation is not bypassed
+   - Ensure RBAC permissions are enforced
+   - Validate JWT/token handling is secure
+
+   **Input Validation & Injection Prevention:**
+   - Check ALL user inputs are validated and sanitized
+   - Verify SQL queries use parameterized statements
+   - Ensure command injection is prevented in shell executions
+   - Validate file path operations prevent directory traversal
+
+   **Cryptography & TLS:**
+   - Verify mutual TLS implementation is correct
+   - Check certificate handling follows security requirements
+   - Ensure no hardcoded cryptographic keys or secrets
+   - Validate random number generation uses crypto/rand
+
+   **Information Disclosure:**
+   - Check logs don't contain sensitive information (passwords, keys, tokens)
+   - Verify error messages don't leak internal details
+   - Ensure debug information is not exposed in production paths
+
+   **CFGMS-Specific Security:**
+   - Verify tenant isolation is maintained (no cross-tenant data access)
+   - Check configuration inheritance doesn't bypass security controls
+   - Ensure steward certificates are properly validated
+   - Validate gRPC endpoints enforce mTLS
+
+   **Action Required:** If ANY security issues are found, STOP and fix them before proceeding. Document the vulnerability and remediation in commit message.
+
+**BEFORE ANY COMMITS:**
+
+5. **STOP - Run Full Test Suite** (MANDATORY)
+   ```bash
+   make test  # MUST pass 100% before proceeding
+   ```
+   - If ANY tests fail, fix them before continuing
+   - This includes unrelated test failures
+
+6. **Run Linting** (MANDATORY)
+   ```bash
+   make lint  # MUST pass before proceeding
+   ```
+
+**COMMIT AND PROJECT MANAGEMENT:**
+
+7. **Commit Feature Work**
+   ```bash
+   git add .
+   git commit -m "Implement Story #[NUMBER]: [description]
+
+   Security Review: [Brief summary of security review findings/all clear]"
+   ```
+
+8. **Update Documentation** (REQUIRED)
+   - Update `docs/product/roadmap.md` if needed
+   - Update `CLAUDE.md` if workflow/commands changed
+
+9. **Update GitHub Project Status** (MANDATORY)
+   ```bash
+   # See docs/github-cli-reference.md for exact commands
+   # Move story from "In Progress" to "Done"
+   ```
+
+10. **Final Test Run** (MANDATORY)
+    ```bash
+    make test  # Final verification before merge
+    ```
+
+11. **Merge to Develop**
+    ```bash
+    git checkout develop
+    git merge feature/story-[NUMBER]-[brief-description]
+    git push origin develop
+    ```
+
+**VALIDATION CHECKPOINTS:**
+- Verify branch was created: `git log --oneline -5`
+- Verify tests pass: `make test`
+- Verify project updated: Check GitHub project board
 
 ## Development Commands
 
@@ -33,11 +130,6 @@ make build
 make build-controller  # Builds controller binary
 make build-steward     # Builds steward binary  
 make build-cli         # Builds cfgctl CLI binary
-
-# Alternative: direct Go build commands
-go build -o bin/controller ./cmd/controller
-go build -o bin/cfgms-steward ./cmd/steward
-go build -o bin/cfgctl ./cmd/cfgctl
 ```
 
 ### Testing
@@ -103,10 +195,23 @@ make clean
 
 ## Core Architecture
 
-### Three-Tier System
+### System Architecture
+
+**Three-Tier System:**
 - **Controller**: Central management system for configuration distribution and tenant hierarchy management
 - **Steward**: Cross-platform component that executes configurations on managed endpoints
 - **Outpost**: Proxy cache component for network device monitoring and agentless management
+
+**Communication:**
+- **Internal**: gRPC with mutual TLS between components
+- **External**: REST API with HTTPS and API key authentication
+- **Protocol Buffers**: Used for efficient data serialization
+
+**Security:**
+- Zero-trust security model with mutual TLS for all internal communication
+- Certificate-based authentication for stewards
+- Optional OpenZiti integration for zero-trust networking
+- Role-based access control (RBAC) with hierarchical permissions
 
 ### Module System
 All resource management is performed through modules that implement the core interface:
@@ -119,16 +224,29 @@ All resource management is performed through modules that implement the core int
 
 Available modules: `directory`, `file`, `firewall`, `package`, `script`, SaaS modules: `entra_user`, `conditional_access`, `intune_policy`
 
-### Communication
-- **Internal**: gRPC with mutual TLS between components
-- **External**: REST API with HTTPS and API key authentication
-- **Protocol Buffers**: Used for efficient data serialization
+### Pluggable Infrastructure Design Paradigm
+CFGMS follows a **pluggable architecture design paradigm** where infrastructure components are built with abstraction interfaces, enabling flexible backend selection without core system changes.
 
-### Security Architecture
-- Zero-trust security model with mutual TLS for all internal communication
-- Certificate-based authentication for stewards
-- Optional OpenZiti integration for zero-trust networking
-- Role-based access control (RBAC) with hierarchical permissions
+**Core Principle**: *Any infrastructure component that could reasonably have multiple implementations should be designed with a provider interface from the start.*
+
+**Current Pluggable Components:**
+- **Storage Backends**: `Backend` interface (File, Database, Git, Hybrid)
+- **Git Providers**: `GitProvider` interface (GitHub, GitLab, Bitbucket)  
+- **Compression**: `Compressor` interface (GZIP, ZSTD, LZ4)
+- **Audit Storage**: `AuditStorage` interface (File-based, future DB/remote)
+
+**Future Pluggable Areas** (Design Paradigm):
+- **Database Providers**: Postgres, MySQL, MSSQL abstraction
+- **KMS Providers**: HashiCorp Vault, AWS KMS, Azure Key Vault
+- **Log Storage**: File, InfluxDB, Elasticsearch, Loki
+- **Time Series DB**: TimescaleDB, InfluxDB, custom implementations
+
+**Deployment Flexibility:**
+- **POC/Small MSP**: Flat file storage, no external dependencies  
+- **Medium MSP**: Postgres + basic external services
+- **Enterprise**: Postgres + TimescaleDB + Apache AGE + dedicated KMS
+
+This paradigm ensures CFGMS can scale from simple deployments to enterprise infrastructure without architectural refactoring.
 
 ## Code Organization
 
@@ -185,36 +303,18 @@ features/
 - Follow principle of least privilege
 - Sanitize all logging output to prevent information leakage
 
-### Stream vs Batch Processing - Lean Manufacturing Principles
+### Stream vs Batch Processing
 
-**Default to streaming approaches** guided by Lean manufacturing waste elimination:
+**Default to streaming approaches** - use batch processing only when:
+- Data consumers don't need results for hours/days (no time sensitivity)
+- Batch operations are significantly more resource-efficient
+- External systems naturally batch data
 
-#### Batch Processing Criteria (Avoid Over-Processing Waste)
-Use batch processing **only when**:
-- **No time sensitivity**: Data consumers don't need results for hours/days
-- **High processing efficiency**: Batch operations are significantly more efficient than individual processing
-- **Natural batching boundaries**: External systems or business processes naturally batch data
-- **Resource optimization**: Batching reduces overall system resource usage
+**Examples:**
+- **Good batch use**: Monthly compliance reports (no real-time need, high efficiency)
+- **Poor batch use**: Configuration drift detection (needs fast feedback, wastes processing on unchanged systems)
 
-#### Stream Processing Indicators (Eliminate Waste)
-Use streaming when batch processing creates waste:
-- **Over-Processing**: Processing unchanged data repeatedly (e.g., DNA scanning when most systems are stable)
-- **Waiting**: Artificial delays when consumers need faster feedback
-- **Inventory**: Accumulating unprocessed data that becomes stale
-- **Motion**: Unnecessary movement of large data sets for batch processing
-
-#### Decision Framework
-Ask these Lean questions:
-1. **Value Stream**: Does the consumer need this data immediately or can it wait?
-2. **Over-Processing**: Are we processing unchanged data unnecessarily?
-3. **Batch Efficiency**: Is batch processing significantly more resource-efficient?
-4. **Flow**: Does batching create artificial delays in the value stream?
-
-#### Examples
-**Good Batch Use**: Monthly compliance reports (consumer doesn't need real-time, high processing efficiency)
-**Poor Batch Use**: DNA drift detection (massive over-processing of unchanged systems, consumer needs fast detection)
-
-**For time-bounded SLAs** (e.g., "5-minute detection"): Implement streaming with time-bound guarantees, not polling intervals.
+**For time-bounded SLAs**: Implement streaming with time guarantees, not polling intervals.
 
 ### Module Development
 - Each module must be self-contained with clear ConfigState interface
@@ -247,50 +347,7 @@ The system implements a recursive parent-child tenant model with:
 
 ## Current Development Status
 
-**Current Version**: v0.3.0 (Alpha) - Enhanced Automation & SaaS Steward Foundation - 🟡 IN PROGRESS
-
-**Epic Status**:
-- ✅ **Epic #65 COMPLETE**: Enhanced Workflow Engine & SaaS Foundation (42 points)
-- ✅ **Epic #66 COMPLETE**: Enterprise Configuration Management (34 points)
-- ✅ **Epic #67 COMPLETE**: DNA-Based Monitoring & Detection (34 points) - All stories complete
-- 🟡 **Epic #68 NEXT**: Remote Access & Integration (39 points)
-
-**Reference**: See `docs/product/roadmap.md` for detailed current status and planning
-
-### Recent Major Completions
-- ✅ **v0.1.0 Complete**: Steward core, Controller core, and integration validation
-- ✅ **v0.2.0 Complete**: All 40 story points delivered (100% feature complete)
-  - ✅ **Configuration Data Flow**: Complete gRPC configuration service with real-time updates
-  - ✅ **Multi-tenancy Foundation**: Basic RBAC/ABAC and tenant management
-  - ✅ **Security Framework**: Certificate management and mTLS authentication
-  - ✅ **Workflow Engine**: Basic workflow execution with API integration capabilities
-  - ✅ **Module System**: Complete ConfigState interface with directory, file, firewall, package, and script modules
-  - ✅ **REST API Endpoints**: External API access for MSP tool integration with comprehensive OpenAPI 3.0 specification
-  - ✅ **Configuration Inheritance**: Hierarchical MSP → Client → Group → Device cascading with source tracking
-  - ✅ **Script Execution Framework**: Cross-platform script execution capabilities with configurable timeout, OS-level signing, and multi-shell support (Windows: PowerShell/cmd, Unix: bash/zsh/python)
-- ✅ **Epic #65 Complete**: Enhanced Workflow Engine & SaaS Foundation (42 story points)
-  - ✅ **Enhanced Workflow Engine**: Conditional logic, loops, and comprehensive error handling
-  - ✅ **SaaS Steward Prototype**: M365 Virtual Steward with OAuth2 authentication
-  - ✅ **API Module Framework**: Universal provider interface with normalized operations + raw API fallback
-- ✅ **Epic #66 Complete**: Enterprise Configuration Management (34 story points)
-  - ✅ **Git Backend Implementation**: Hybrid repository architecture with multi-provider support
-  - ✅ **Configuration Rollback**: Comprehensive rollback system with risk assessment and validation
-  - ✅ **Configuration Templates**: Template engine with DNA integration and compliance template foundation
-  - ✅ **Version Comparison Tools**: Side-by-side diff view with semantic analysis and approval workflow integration
-- ✅ **Epic #67 Complete**: DNA-Based Monitoring & Detection (34 story points)
-  - ✅ **Enhanced DNA Collection**: Comprehensive system fingerprinting with 161 attributes across hardware, software, network, and security domains with cross-platform support and performance optimization
-  - ✅ **DNA Storage System**: Content-addressable storage with 90%+ compression, deduplication, historical queries, and horizontal scaling capabilities
-  - ✅ **Drift Detection Engine**: Real-time drift detection with 5-minute SLA and smart filtering
-  - ✅ **Comprehensive Reporting System**: Template-based report generation with compliance reports, executive dashboards, multi-format export (JSON, CSV, HTML, PDF), REST API endpoints, and performance-optimized caching
-
-### Current Status: v0.2.1 - Test Infrastructure & BMAD Sprint Planning ✅ COMPLETE
-**Major Achievements:**
-- **Test Infrastructure Excellence**: 98%+ test success rate with all core functionality working
-- **Production Risk Protection**: Automated gates preventing cost overruns, data loss, and compliance violations
-- **BMAD Agent Sprint Planning**: AI-assisted methodology established for v0.3.0 development
-- **Automated Story Generation**: Framework ready for creating detailed user stories from roadmap features
-- **Project Board Automation**: GitHub CLI integration implemented for project management
-- **Business Risk Analysis**: Created $540k/month cost protection with monitoring sampling controls
+See docs/product/roadmap.md and Github Project for current status.
 
 ## Project Management
 
@@ -326,137 +383,13 @@ The project follows a structured milestone progression workflow:
    - Continuous planning maintains forward momentum
    - Always one milestone ahead in planning for roadmap adjustments
 
-**Current State (Milestone Workflow):**
-- **v0.1.0**: Complete ✅ 
-- **v0.2.0**: Complete ✅ (All 40 story points delivered)
-- **v0.2.1**: Complete ✅ (Test Infrastructure & BMAD Sprint Planning)
-- **v0.3.0**: In Progress 🟡 (Enhanced Automation & SaaS Steward Foundation - Epic #67 next)
-
-**v0.2.1 COMPLETED Achievements:**
-- **Test Infrastructure Cleanup**: ✅ Fixed config service test failures, race conditions, deadlocks (98%+ success rate)
-- **BMAD Agent Integration**: ✅ Implemented AI-assisted sprint planning framework for v0.3.0
-- **Story Generation**: ✅ Automated user story creation methodology established
-- **Project Board Automation**: ✅ GitHub CLI integration implemented for project management
-- **Production Risk Gates**: ✅ Automated deployment protection against cost overruns and compliance violations
+**Current Development**: See roadmap.md and GitHub Project for current milestone status and progress.
 
 This workflow ensures sustainable development rhythm with clear prioritization and forward visibility.
 
 ### GitHub CLI Project Management
 
-The project uses GitHub CLI (`gh`) for project management automation. Here are the essential commands and patterns:
-
-#### Project Information
-```bash
-# List all projects in the organization
-gh project list --owner cfg-is
-
-# Get project field information (including status options)
-gh project field-list PROJECT_NUMBER --owner cfg-is --format json
-
-# Example output shows Status field with options:
-# {"id":"PVTSSF_...", "name":"Status", "options":[
-#   {"id":"0e6b51d0","name":"Backlog"},
-#   {"id":"f75ad846","name":"Todo"}, 
-#   {"id":"47fc9ee4","name":"In Progress"},
-#   {"id":"98236657","name":"Done"}
-# ]}
-```
-
-#### Issue Management
-```bash
-# List open issues with JSON output
-gh issue list --repo cfg-is/cfgms --state open --limit 50 --json number,title,labels
-
-# Add issues to project by URL
-gh project item-add PROJECT_NUMBER --owner cfg-is --url "https://github.com/cfg-is/cfgms/issues/ISSUE_NUMBER"
-
-# Add multiple issues in batch
-for i in {33..39}; do 
-  gh project item-add 1 --owner cfg-is --url "https://github.com/cfg-is/cfgms/issues/$i"
-done
-```
-
-#### Project Item Operations
-```bash
-# List project items with details
-gh project item-list PROJECT_NUMBER --owner cfg-is --format json --limit 50
-
-# Filter project items by issue number
-gh project item-list 1 --owner cfg-is --format json --limit 50 | \
-  jq '.items[] | select(.content.number >= 29 and .content.number <= 39)'
-
-# Get specific item details (ID, number, title)
-gh project item-list 1 --owner cfg-is --format json --limit 50 | \
-  jq '.items[] | {id, number: .content.number, title: .content.title}'
-```
-
-#### Status Updates
-```bash
-# Update item status (requires project-id, item-id, field-id, and option-id)
-gh project item-edit \
-  --project-id PROJECT_ID \
-  --id ITEM_ID \
-  --field-id FIELD_ID \
-  --single-select-option-id OPTION_ID
-
-# Example: Move issue to "Todo" status
-gh project item-edit \
-  --project-id PVT_kwDOCrV4cc4A18Ip \
-  --id PVTI_lADOCrV4cc4A18IpzgcSU0g \
-  --field-id PVTSSF_lADOCrV4cc4A18IpzgrVDWc \
-  --single-select-option-id f75ad846
-```
-
-#### Important Notes
-- **Project ID Format**: Use the full project ID (e.g., `PVT_kwDOCrV4cc4A18Ip`), not just the number
-- **Item IDs**: Each project item has a unique ID that must be obtained from item-list command
-- **Field IDs**: Status field ID is consistent but must be retrieved from field-list
-- **Option IDs**: Status options (Backlog, Todo, In Progress, Done) have specific IDs
-- **Batch Operations**: Use shell loops and `&&` operators for multiple updates
-- **Error Handling**: Always verify IDs exist before attempting updates
-
-#### Status Option IDs (for CFGMS project)
-- **Backlog**: `0e6b51d0`
-- **Todo**: `f75ad846` 
-- **In Progress**: `47fc9ee4`
-- **Done**: `98236657`
-
-#### Common Workflow
-1. Get project information and field IDs
-2. Add new issues to project if needed
-3. List project items to get item IDs
-4. Update item status using project-id, item-id, field-id, and option-id
-5. Verify changes with another item-list command
-
-## v0.2.1 BMAD Agent Sprint Planning Framework
-
-### Overview
-Transitioning to AI-assisted sprint planning using BMAD (Build, Measure, Analyze, Decide) methodology for v0.3.0 development. This approach leverages Claude Code agents to analyze roadmap requirements and generate detailed implementation plans.
-
-### BMAD Agent Integration
-- **Build**: Use agents to create detailed user stories from high-level roadmap features
-- **Measure**: Apply historical velocity data from v0.2.0 (40 story points across 6 stories)
-- **Analyze**: Agent-driven analysis of feature complexity and dependencies
-- **Decide**: Automated sprint planning with story point estimation and task breakdown
-
-### Sprint Planning Process
-1. **Roadmap Analysis**: BMAD agents analyze v0.3.0 features (Business Logic workflows, SaaS Steward, API modules, etc.)
-2. **Story Generation**: Convert high-level features into detailed user stories with acceptance criteria
-3. **Story Point Estimation**: Use v0.2.0 velocity data (2-21 points per story) for estimation
-4. **Sprint Organization**: Group stories into logical sprints with clear deliverable outcomes
-5. **Project Board Setup**: Automated GitHub CLI integration for issue creation and status management
-
-### Implementation Approach
-- **Agent Task Orchestration**: Use Task tool for complex multi-step analysis
-- **Historical Data**: Reference v0.2.0 sprint planning success patterns
-- **Automation**: GitHub CLI integration for seamless project board management
-- **Quality Gates**: Ensure all stories have clear acceptance criteria and definition of done
-
-### Next Steps for v0.2.1
-1. **Complete Test Infrastructure Cleanup**: Fix config service tests
-2. **Implement BMAD Agent Framework**: Create sprint planning automation
-3. **Generate v0.3.0 Stories**: Use agents to create detailed implementation plans
-4. **Establish Project Board Automation**: GitHub CLI integration for story management
+The project uses GitHub CLI (`gh`) for project management automation. For detailed commands and operational patterns, see **[docs/github-cli-reference.md](docs/github-cli-reference.md)**.
 
 ---
 
