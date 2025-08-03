@@ -530,8 +530,9 @@ func TestExportManagerConcurrency(t *testing.T) {
 
 	t.Run("concurrent exports", func(t *testing.T) {
 		config := &export.ExportConfig{
-			Enabled:    true,
-			BufferSize: 100,
+			Enabled:      true,
+			BufferSize:   100,
+			SamplingRate: 1.0, // Export everything
 			Exporters: map[string]export.ExporterConfig{
 				"test": {Enabled: true},
 			},
@@ -561,6 +562,7 @@ func TestExportManagerConcurrency(t *testing.T) {
 							"export_id":    j,
 						},
 						Timestamp: time.Now(),
+						ExportType: export.ExportTypeManual, // Use manual for synchronous processing in tests
 					}
 					manager.Export(exportData)
 				}

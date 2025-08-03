@@ -370,9 +370,11 @@ func (e *Engine) generateReportSummary(data *interfaces.ReportData) interfaces.R
 		firstScore := trends[0].Value
 		lastScore := trends[len(trends)-1].Value
 		
-		if lastScore > firstScore+0.05 {
+		difference := lastScore - firstScore
+		
+		if difference > 0.049 { // Using 0.049 to handle floating-point precision
 			summary.TrendDirection = interfaces.TrendImproving
-		} else if lastScore < firstScore-0.05 {
+		} else if difference < -0.049 {
 			summary.TrendDirection = interfaces.TrendDeclining
 		} else {
 			summary.TrendDirection = interfaces.TrendStable
@@ -437,6 +439,17 @@ func (e *Engine) generateRecommendedActions(data *interfaces.ReportData, summary
 	// Critical issues
 	if summary.CriticalIssues > 0 {
 		actions = append(actions, "Address critical risk devices immediately to prevent security or compliance violations")
+	}
+
+	// Critical drift events
+	criticalDriftCount := 0
+	for _, event := range data.DriftEvents {
+		if event.Severity == drift.SeverityCritical {
+			criticalDriftCount++
+		}
+	}
+	if criticalDriftCount > 0 {
+		actions = append(actions, "Investigate and remediate critical drift events to maintain system stability")
 	}
 
 	// Compliance score

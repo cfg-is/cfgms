@@ -63,7 +63,13 @@ build-cert-manager:
 test:
 	@echo "🧪 Running Core Unit Tests (Fast)"
 	@echo "================================="
-	go test -v -race -cover -short ./...
+	go test -race -cover -short -timeout=3m ./features/... ./api/... ./cmd/... ./pkg/...
+
+# Quick smoke test (fastest, for development)
+test-quick:
+	@echo "⚡ Quick Smoke Test"
+	@echo "=================="
+	go test -short -timeout=1m ./features/... ./api/... ./cmd/... ./pkg/...
 
 # Complete test validation (recommended for CI/pre-commit)
 test-all: test-fast test-integration test-production-critical

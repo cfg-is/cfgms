@@ -24,7 +24,11 @@ func (em *ExportManager) exportLoop(ctx context.Context) {
 			return
 		case <-em.shutdownCh:
 			return
-		case data := <-em.dataChannel:
+		case data, ok := <-em.dataChannel:
+			if !ok {
+				// Channel closed, exit loop
+				return
+			}
 			em.processExportData(ctx, data)
 		case <-ticker.C:
 			// Periodic health check trigger
@@ -51,7 +55,16 @@ func (em *ExportManager) processExportData(ctx context.Context, data ExportData)
 	if data.ExportType == ExportTypeManual {
 		em.logger.InfoCtx(ctx, "Processing manual export data", 
 			"exporters_found", len(exporters),
-			"total_exporters", len(em.exporters))
+			"total_exporters", len(em.exporters),
+			"export_type", data.ExportType)
+		// Log each exporter check result
+		for name := range em.exporters {
+			enabled := em.isExporterEnabled(name, data.ExportType)
+			em.logger.InfoCtx(ctx, "Exporter check",
+				"name", name,
+				"enabled", enabled,
+				"export_type", data.ExportType)
+		}
 	}
 
 	// Export to all enabled exporters in parallel (or synchronously for manual exports)

@@ -400,19 +400,22 @@ func (sm *SessionMonitor) performMonitoringCheck() {
 
 // checkSessionHealth checks the health and activity of a session
 func (sm *SessionMonitor) checkSessionHealth(session *MonitoredSession) {
-	session.mutex.RLock()
-	defer session.mutex.RUnlock()
-	
 	now := time.Now()
 	
-	// Check for idle timeout
-	if now.Sub(session.LastActivity) > sm.config.MaxIdleTime {
+	// Gather data under lock
+	session.mutex.RLock()
+	lastActivity := session.LastActivity
+	createdAt := session.Session.CreatedAt
+	session.mutex.RUnlock()
+	
+	// Check for idle timeout (without holding lock)
+	if now.Sub(lastActivity) > sm.config.MaxIdleTime {
 		sm.generateAlert(session, "session_idle_timeout", FilterSeverityMedium, 
-			fmt.Sprintf("Session idle for %v", now.Sub(session.LastActivity)))
+			fmt.Sprintf("Session idle for %v", now.Sub(lastActivity)))
 	}
 	
-	// Check session duration
-	sessionDuration := now.Sub(session.Session.CreatedAt)
+	// Check session duration (without holding lock)
+	sessionDuration := now.Sub(createdAt)
 	if sessionDuration > sm.config.MaxSessionDuration {
 		sm.generateAlert(session, "session_duration_exceeded", FilterSeverityHigh,
 			fmt.Sprintf("Session duration %v exceeds maximum %v", sessionDuration, sm.config.MaxSessionDuration))
@@ -427,7 +430,7 @@ func (sm *SessionMonitor) checkSessionTimeouts(session *MonitoredSession) {
 // updateThreatLevel updates the threat level based on recent activity
 func (sm *SessionMonitor) updateThreatLevel(session *MonitoredSession) {
 	session.mutex.Lock()
-	defer session.mutex.Unlock()
+	// Note: we unlock manually before calling generateAlert to avoid deadlock
 	
 	// Calculate threat level based on various factors
 	threatLevel := ThreatLevelLow
@@ -473,11 +476,20 @@ func (sm *SessionMonitor) updateThreatLevel(session *MonitoredSession) {
 		}()
 	}
 	
-	// Generate alert if threat level increased
-	if threatLevel > oldLevel {
+	// Check if alert should be generated (before releasing lock)
+	shouldAlert := threatLevel > oldLevel
+	
+	// Release the lock before calling generateAlert to avoid deadlock
+	session.mutex.Unlock()
+	
+	// Generate alert if threat level increased (without holding lock)
+	if shouldAlert {
 		sm.generateAlert(session, "threat_level_increased", FilterSeverityHigh,
 			fmt.Sprintf("Threat level increased from %s to %s", oldLevel, threatLevel))
 	}
+	
+	// Note: we've already unlocked, so remove the defer unlock
+	return
 }
 
 // checkForAnomalies checks for anomalous patterns in session activity

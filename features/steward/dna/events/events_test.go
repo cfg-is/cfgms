@@ -4,6 +4,7 @@ package events
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,9 +22,13 @@ type mockSubscriber struct {
 	events    []*DNAChangeEvent
 	errors    []error
 	callCount int
+	mu        sync.Mutex
 }
 
 func (m *mockSubscriber) OnEvent(ctx context.Context, event *DNAChangeEvent) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	
 	m.callCount++
 	m.events = append(m.events, event)
 	
@@ -49,6 +54,21 @@ func (m *mockSubscriber) GetSubscriberInfo() *SubscriberInfo {
 
 func (m *mockSubscriber) Close() error {
 	return nil
+}
+
+func (m *mockSubscriber) getCallCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.callCount
+}
+
+func (m *mockSubscriber) getEvents() []*DNAChangeEvent {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// Return a copy to avoid race conditions
+	events := make([]*DNAChangeEvent, len(m.events))
+	copy(events, m.events)
+	return events
 }
 
 func TestEventPublisher_PublishAndSubscribe(t *testing.T) {
@@ -90,9 +110,10 @@ func TestEventPublisher_PublishAndSubscribe(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	
 	// Verify subscriber was called
-	assert.Equal(t, 1, subscriber.callCount)
-	assert.Len(t, subscriber.events, 1)
-	assert.Equal(t, "test-device", subscriber.events[0].DeviceID)
+	assert.Equal(t, 1, subscriber.getCallCount())
+	events := subscriber.getEvents()
+	assert.Len(t, events, 1)
+	assert.Equal(t, "test-device", events[0].DeviceID)
 }
 
 func TestEventPublisher_PriorityOrdering(t *testing.T) {
@@ -134,9 +155,9 @@ func TestEventPublisher_PriorityOrdering(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	
 	// Verify all subscribers were called
-	assert.Equal(t, 1, sub1.callCount)
-	assert.Equal(t, 1, sub2.callCount)
-	assert.Equal(t, 1, sub3.callCount)
+	assert.Equal(t, 1, sub1.getCallCount())
+	assert.Equal(t, 1, sub2.getCallCount())
+	assert.Equal(t, 1, sub3.getCallCount())
 }
 
 func TestEventPublisher_MultipleEvents(t *testing.T) {
@@ -180,8 +201,8 @@ func TestEventPublisher_MultipleEvents(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 	
 	// Verify all events were processed
-	assert.Equal(t, numEvents, subscriber.callCount)
-	assert.Len(t, subscriber.events, numEvents)
+	assert.Equal(t, numEvents, subscriber.getCallCount())
+	assert.Len(t, subscriber.getEvents(), numEvents)
 }
 
 func TestEventPublisher_Stats(t *testing.T) {

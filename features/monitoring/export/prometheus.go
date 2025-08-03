@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -19,6 +20,7 @@ type PrometheusExporter struct {
 	config     PrometheusConfig
 	
 	// Metrics storage for scraping
+	mu          sync.RWMutex
 	lastMetrics ExportData
 	lastUpdate  time.Time
 }
@@ -122,9 +124,11 @@ func (pe *PrometheusExporter) Stop(ctx context.Context) error {
 
 // Export stores the metrics data for Prometheus scraping.
 func (pe *PrometheusExporter) Export(ctx context.Context, data ExportData) error {
-	// Store metrics for scraping
+	// Store metrics for scraping (protected by mutex)
+	pe.mu.Lock()
 	pe.lastMetrics = data
 	pe.lastUpdate = time.Now()
+	pe.mu.Unlock()
 
 	pe.logger.DebugCtx(ctx, "Updated Prometheus metrics",
 		"metrics_count", len(pe.flattenMetrics(data)),
@@ -174,13 +178,19 @@ func (pe *PrometheusExporter) HealthCheck(ctx context.Context) ExporterHealth {
 func (pe *PrometheusExporter) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 
+	// Get a consistent snapshot of metrics data (protected by mutex)
+	pe.mu.RLock()
+	lastMetrics := pe.lastMetrics
+	lastUpdate := pe.lastUpdate
+	pe.mu.RUnlock()
+
 	// If no metrics data is available, return empty response
-	if pe.lastMetrics.Timestamp.IsZero() {
+	if lastMetrics.Timestamp.IsZero() {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
-	metrics := pe.formatPrometheusMetrics(pe.lastMetrics)
+	metrics := pe.formatPrometheusMetrics(lastMetrics)
 	
 	// Write metrics
 	for _, line := range metrics {
@@ -188,7 +198,7 @@ func (pe *PrometheusExporter) handleMetrics(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Add timestamp of last update
-	fmt.Fprintf(w, "# Last updated: %s\n", pe.lastUpdate.Format(time.RFC3339))
+	fmt.Fprintf(w, "# Last updated: %s\n", lastUpdate.Format(time.RFC3339))
 }
 
 // handleHealth provides a simple health check endpoint.
