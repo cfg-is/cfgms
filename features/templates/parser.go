@@ -182,7 +182,6 @@ func (e *DefaultTemplateEngine) extractVariables(content string) (map[string]int
 				variableLines = append(variableLines, line)
 			} else {
 				// End of variables section
-				inVariables = false
 				remainingLines = append(remainingLines, lines[i:]...)
 				break
 			}

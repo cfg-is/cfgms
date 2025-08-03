@@ -260,7 +260,7 @@ func TestRecordingSizeLimit(t *testing.T) {
 	assert.NoError(t, err)
 
 	// This should fail or be truncated (over 1MB)
-	err = recorder.RecordData(sessionID, largeData, DataDirectionOutput)
+	_ = recorder.RecordData(sessionID, largeData, DataDirectionOutput)
 	// Implementation might handle this by truncating or returning an error
 	// The exact behavior depends on the implementation
 }

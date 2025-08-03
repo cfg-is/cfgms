@@ -55,7 +55,7 @@ func (e *Engine) ExecuteWorkflow(ctx context.Context, workflow Workflow, variabl
 	executionID := generateExecutionID()
 	
 	// Create execution context with timeout if specified
-	execCtx := ctx
+	var execCtx context.Context
 	var cancel context.CancelFunc
 	if workflow.Timeout > 0 {
 		execCtx, cancel = context.WithTimeout(ctx, workflow.Timeout)

@@ -423,8 +423,8 @@ func (s *LocalRepositoryStore) CheckoutBranch(ctx context.Context, localPath, br
 	if err != nil {
 		// Try to create branch from remote
 		remoteRef := plumbing.NewRemoteReferenceName("origin", branchName)
-		ref, err := repo.Reference(remoteRef, true)
-		if err != nil {
+		ref, refErr := repo.Reference(remoteRef, true)
+		if refErr != nil {
 			return fmt.Errorf("branch not found: %s", branchName)
 		}
 		

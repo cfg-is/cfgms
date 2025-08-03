@@ -127,9 +127,8 @@ func (di *DNADriftIntegrator) DetectDriftForAllDevices(ctx context.Context) (map
 		return nil, fmt.Errorf("failed to get recently updated devices: %w", err)
 	}
 	
-	results := make(map[string][]*DriftEvent)
-	
 	// Process devices in batches if configured
+	var results map[string][]*DriftEvent
 	if di.config.BatchSize > 0 {
 		results, err = di.processBatchedDetection(ctx, devices)
 	} else {
