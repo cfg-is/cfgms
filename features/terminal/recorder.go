@@ -177,7 +177,11 @@ func (r *DefaultSessionRecorder) GetRecording(sessionID string) (*SessionRecordi
 	if err != nil {
 		return nil, fmt.Errorf("failed to open recording file: %w", err)
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); err != nil {
+			// Log error but continue
+		}
+	}()
 
 	// Read file content - check if file was actually compressed
 	// We need to detect if this specific file was compressed by checking the first bytes
@@ -186,14 +190,22 @@ func (r *DefaultSessionRecorder) GetRecording(sessionID string) (*SessionRecordi
 	// Try to create a gzip reader first - if it works, the file is compressed
 	if r.config.Compression {
 		// Reset file position
-		file.Seek(0, 0)
+		if _, err := file.Seek(0, 0); err != nil {
+			// Log error but continue with uncompressed read
+		}
 		gzReader, err := gzip.NewReader(file)
 		if err == nil {
-			defer gzReader.Close()
+			defer func() {
+				if err := gzReader.Close(); err != nil {
+					// Log error but continue
+				}
+			}()
 			reader = gzReader
 		} else {
 			// If gzip reader creation fails, file isn't compressed, read as-is
-			file.Seek(0, 0)
+			if _, err := file.Seek(0, 0); err != nil {
+				// Log error but continue
+			}
 			reader = file
 		}
 	}
@@ -209,7 +221,11 @@ func (r *DefaultSessionRecorder) GetRecording(sessionID string) (*SessionRecordi
 	var events []RecordEvent
 
 	if metadataFile, err := os.Open(metadataPath); err == nil {
-		defer metadataFile.Close()
+		defer func() {
+			if err := metadataFile.Close(); err != nil {
+				// Log error but continue
+			}
+		}()
 		
 		type recordingMetadata struct {
 			Metadata SessionMetadata `json:"metadata"`
@@ -346,7 +362,11 @@ func (w *recordingWriter) close() error {
 	// Save metadata
 	metadataPath := w.file.Name() + ".meta"
 	if metadataFile, metaErr := os.Create(metadataPath); metaErr == nil {
-		defer metadataFile.Close()
+		defer func() {
+			if err := metadataFile.Close(); err != nil {
+				// Log error but continue
+			}
+		}()
 
 		type recordingMetadata struct {
 			Metadata SessionMetadata `json:"metadata"`

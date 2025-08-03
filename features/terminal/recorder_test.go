@@ -67,7 +67,11 @@ func TestDataRecording(t *testing.T) {
 
 	recorder, err := NewSessionRecorder(config, logger)
 	require.NoError(t, err)
-	defer recorder.Close()
+	defer func() {
+		if err := recorder.Close(); err != nil {
+			t.Logf("Failed to close recorder: %v", err)
+		}
+	}()
 
 	sessionID := "test-session-001"
 
@@ -113,7 +117,11 @@ func TestRecordingMetadata(t *testing.T) {
 
 	recorder, err := NewSessionRecorder(config, logger)
 	require.NoError(t, err)
-	defer recorder.Close()
+	defer func() {
+		if err := recorder.Close(); err != nil {
+			t.Logf("Failed to close recorder: %v", err)
+		}
+	}()
 
 	sessionID := "test-session-002"
 	metadata := &SessionMetadata{
@@ -178,7 +186,11 @@ func TestRecordingCompression(t *testing.T) {
 
 			recorder, err := NewSessionRecorder(config, logger)
 			require.NoError(t, err)
-			defer recorder.Close()
+			defer func() {
+		if err := recorder.Close(); err != nil {
+			t.Logf("Failed to close recorder: %v", err)
+		}
+	}()
 
 			sessionID := "test-session-compression"
 
@@ -225,7 +237,11 @@ func TestRecordingSizeLimit(t *testing.T) {
 
 	recorder, err := NewSessionRecorder(config, logger)
 	require.NoError(t, err)
-	defer recorder.Close()
+	defer func() {
+		if err := recorder.Close(); err != nil {
+			t.Logf("Failed to close recorder: %v", err)
+		}
+	}()
 
 	sessionID := "test-session-size-limit"
 
@@ -259,7 +275,11 @@ func TestConcurrentRecording(t *testing.T) {
 
 	recorder, err := NewSessionRecorder(config, logger)
 	require.NoError(t, err)
-	defer recorder.Close()
+	defer func() {
+		if err := recorder.Close(); err != nil {
+			t.Logf("Failed to close recorder: %v", err)
+		}
+	}()
 
 	// Record to multiple sessions concurrently
 	done := make(chan bool, 3)
@@ -318,12 +338,18 @@ func TestRecordingPersistence(t *testing.T) {
 	err = recorder1.RecordData(sessionID, testData, DataDirectionInput)
 	assert.NoError(t, err)
 
-	recorder1.Close()
+	if err := recorder1.Close(); err != nil {
+		t.Logf("Failed to close recorder1: %v", err)
+	}
 
 	// Create new recorder instance and try to retrieve data
 	recorder2, err := NewSessionRecorder(config, logger)
 	require.NoError(t, err)
-	defer recorder2.Close()
+	defer func() {
+		if err := recorder2.Close(); err != nil {
+			t.Logf("Failed to close recorder2: %v", err)
+		}
+	}()
 
 	recording, err := recorder2.GetRecording(sessionID)
 	assert.NoError(t, err)
@@ -366,5 +392,7 @@ func TestRecordingCleanup(t *testing.T) {
 	_, err = recorder.GetRecording(sessionID)
 	assert.Error(t, err)
 
-	recorder.Close()
+	if err := recorder.Close(); err != nil {
+		t.Logf("Failed to close recorder: %v", err)
+	}
 }
