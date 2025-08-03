@@ -143,7 +143,11 @@ func TestSessionDataHandling(t *testing.T) {
 	// Start the session so shell is running
 	err = session.Start(ctx)
 	require.NoError(t, err)
-	defer session.Close(ctx)
+	defer func() {
+		if err := session.Close(ctx); err != nil {
+			t.Logf("Failed to close session: %v", err)
+		}
+	}()
 
 	// Test writing data to session
 	testInput := []byte("echo 'hello world'\n")

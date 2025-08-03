@@ -46,7 +46,9 @@ func TestWebSocketUpgrade(t *testing.T) {
 
 	// Create test server
 	server := httptest.NewServer(http.HandlerFunc(handler.HandleWebSocket))
-	defer server.Close()
+	defer func() {
+		server.Close() // Test server close doesn't return error
+	}()
 
 	// Convert HTTP URL to WebSocket URL
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
@@ -54,7 +56,11 @@ func TestWebSocketUpgrade(t *testing.T) {
 	// Test WebSocket connection
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL+"?steward_id=test-steward&user_id=test-user&shell=bash", nil)
 	require.NoError(t, err)
-	defer conn.Close()
+	defer func() {
+		if err := conn.Close(); err != nil {
+			t.Logf("Failed to close connection: %v", err)
+		}
+	}()
 
 	// Connection should be established
 	assert.NotNil(t, conn)
@@ -80,14 +86,20 @@ func TestWebSocketMessageHandling(t *testing.T) {
 
 	// Create test server
 	server := httptest.NewServer(http.HandlerFunc(handler.HandleWebSocket))
-	defer server.Close()
+	defer func() {
+		server.Close() // Test server close doesn't return error
+	}()
 
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
 
 	// Connect to WebSocket
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL+"?steward_id=test-steward&user_id=test-user&shell=bash", nil)
 	require.NoError(t, err)
-	defer conn.Close()
+	defer func() {
+		if err := conn.Close(); err != nil {
+			t.Logf("Failed to close connection: %v", err)
+		}
+	}()
 
 	// Test data message
 	dataMsg := &TerminalMessage{
@@ -161,7 +173,9 @@ func TestWebSocketAuthentication(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Create test server
 			server := httptest.NewServer(http.HandlerFunc(handler.HandleWebSocket))
-			defer server.Close()
+			defer func() {
+		server.Close() // Test server close doesn't return error
+	}()
 
 			wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + tt.queryPath
 
@@ -171,7 +185,9 @@ func TestWebSocketAuthentication(t *testing.T) {
 			if tt.wantStatus == http.StatusSwitchingProtocols {
 				require.NoError(t, err)
 				require.NotNil(t, conn)
-				conn.Close()
+				if err := conn.Close(); err != nil {
+				t.Logf("Failed to close connection: %v", err)
+			}
 			} else {
 				require.Error(t, err)
 				require.NotNil(t, resp)
@@ -197,14 +213,20 @@ func TestWebSocketBidirectionalCommunication(t *testing.T) {
 
 	// Create test server
 	server := httptest.NewServer(http.HandlerFunc(handler.HandleWebSocket))
-	defer server.Close()
+	defer func() {
+		server.Close() // Test server close doesn't return error
+	}()
 
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
 
 	// Connect to WebSocket
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL+"?steward_id=test-steward&user_id=test-user&shell=bash", nil)
 	require.NoError(t, err)
-	defer conn.Close()
+	defer func() {
+		if err := conn.Close(); err != nil {
+			t.Logf("Failed to close connection: %v", err)
+		}
+	}()
 
 	// Send command
 	inputMsg := &TerminalMessage{
@@ -216,7 +238,9 @@ func TestWebSocketBidirectionalCommunication(t *testing.T) {
 	require.NoError(t, err)
 
 	// Read response (in real implementation, this would come from the shell)
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Logf("Failed to set read deadline: %v", err)
+	}
 	var outputMsg TerminalMessage
 	err = conn.ReadJSON(&outputMsg)
 
@@ -243,7 +267,9 @@ func TestWebSocketSessionCleanup(t *testing.T) {
 
 	// Create test server
 	server := httptest.NewServer(http.HandlerFunc(handler.HandleWebSocket))
-	defer server.Close()
+	defer func() {
+		server.Close() // Test server close doesn't return error
+	}()
 
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
 
@@ -282,7 +308,9 @@ func TestWebSocketConcurrentConnections(t *testing.T) {
 
 	// Create test server
 	server := httptest.NewServer(http.HandlerFunc(handler.HandleWebSocket))
-	defer server.Close()
+	defer func() {
+		server.Close() // Test server close doesn't return error
+	}()
 
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
 

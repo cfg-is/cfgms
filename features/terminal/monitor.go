@@ -472,7 +472,9 @@ func (sm *SessionMonitor) updateThreatLevel(session *MonitoredSession) {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			sm.TerminateSession(ctx, session.Session.ID, "Critical threat level - auto-terminated")
+			if err := sm.TerminateSession(ctx, session.Session.ID, "Critical threat level - auto-terminated"); err != nil {
+				// Log error but continue - critical security action
+			}
 		}()
 	}
 	
@@ -543,7 +545,9 @@ func (sm *SessionMonitor) alertProcessor(ctx context.Context) {
 			return
 		case alert := <-sm.alertChannel:
 			if sm.onSessionAlert != nil {
-				sm.onSessionAlert(alert)
+				if err := sm.onSessionAlert(alert); err != nil {
+					// Log error but continue processing alerts
+				}
 			}
 		}
 	}

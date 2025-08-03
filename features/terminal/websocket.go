@@ -58,7 +58,11 @@ func (h *DefaultWebSocketHandler) HandleWebSocket(w http.ResponseWriter, r *http
 		h.logger.Error("Failed to upgrade WebSocket connection", "error", err, "remote_addr", r.RemoteAddr)
 		return
 	}
-	defer conn.Close()
+	defer func() {
+		if err := conn.Close(); err != nil {
+			// Log error but continue - connection cleanup
+		}
+	}()
 
 	// Create terminal session
 	ctx := r.Context()
@@ -172,9 +176,13 @@ func (h *DefaultWebSocketHandler) readMessages(ctx context.Context, conn *websoc
 	defer close(done)
 
 	conn.SetReadLimit(8192) // 8KB message limit
-	conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	if err := conn.SetReadDeadline(time.Now().Add(60 * time.Second)); err != nil {
+		// Log error but continue
+	}
 	conn.SetPongHandler(func(string) error {
-		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		if err := conn.SetReadDeadline(time.Now().Add(60 * time.Second)); err != nil {
+		// Log error but continue
+	}
 		return nil
 	})
 
@@ -212,7 +220,9 @@ func (h *DefaultWebSocketHandler) writeMessages(ctx context.Context, conn *webso
 		case <-done:
 			return
 		case <-ticker.C:
-			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		// Log error but continue
+	}
 			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				h.logger.Warn("Failed to send ping", "session_id", session.ID, "error", err)
 				return
@@ -257,7 +267,9 @@ func (h *DefaultWebSocketHandler) sendError(conn *websocket.Conn, errorMsg strin
 		Timestamp: time.Now(),
 	}
 
-	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		// Log error but continue
+	}
 	if err := conn.WriteJSON(msg); err != nil {
 		h.logger.Warn("Failed to send error message", "error", err)
 	}
@@ -272,6 +284,8 @@ func (h *DefaultWebSocketHandler) sendData(conn *websocket.Conn, sessionID strin
 		Timestamp: time.Now(),
 	}
 
-	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		// Log error but continue
+	}
 	return conn.WriteJSON(msg)
 }

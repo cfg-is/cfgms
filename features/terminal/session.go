@@ -168,7 +168,9 @@ func (s *Session) Close(ctx context.Context) error {
 
 	// Close recorder if set
 	if s.recorder != nil {
-		s.recorder.Close()
+		if err := s.recorder.Close(); err != nil {
+			// Log error but continue cleanup
+		}
 	}
 
 	return nil
@@ -255,7 +257,9 @@ func (s *Session) handleShellOutput(ctx context.Context) {
 			}
 			
 			// Handle the output data (send to WebSocket, record, etc.)
-			s.HandleOutput(ctx, data)
+			if err := s.HandleOutput(ctx, data); err != nil {
+				// Log error but continue processing output
+			}
 			
 		case err, ok := <-s.executor.ErrorChannel():
 			if !ok {

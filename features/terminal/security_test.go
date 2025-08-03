@@ -380,8 +380,14 @@ func TestSessionMonitor_ThreatLevelCalculation(t *testing.T) {
 	monitor := NewSessionMonitor(validator, DefaultMonitorConfig())
 
 	ctx := context.Background()
-	monitor.Start(ctx)
-	defer monitor.Stop()
+	if err := monitor.Start(ctx); err != nil {
+		t.Fatalf("Failed to start monitor: %v", err)
+	}
+	defer func() {
+		if err := monitor.Stop(); err != nil {
+			t.Logf("Failed to stop monitor: %v", err)
+		}
+	}()
 
 	// Create a test session
 	session := &Session{
@@ -464,7 +470,11 @@ func TestAuditLogger_IntegrityProtection(t *testing.T) {
 	ctx := context.Background()
 	err = logger.Start(ctx)
 	require.NoError(t, err)
-	defer logger.Stop()
+	defer func() {
+		if err := logger.Stop(); err != nil {
+			t.Logf("Failed to stop logger: %v", err)
+		}
+	}()
 
 	// Test logging and integrity verification
 	t.Run("Log entry with integrity protection", func(t *testing.T) {

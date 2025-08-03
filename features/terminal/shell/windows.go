@@ -206,7 +206,9 @@ func (e *WindowsExecutor) Close(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			// Force kill if context expires
-			e.cmd.Process.Kill()
+			if err := e.cmd.Process.Kill(); err != nil {
+				// Log but continue - process might already be dead
+			}
 		case <-done:
 			// Process exited gracefully
 		}

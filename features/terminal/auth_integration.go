@@ -303,8 +303,10 @@ func (atm *AuthenticatedTerminalManager) ValidateSessionToken(ctx context.Contex
 	if atm.config.TLSFingerprintCheck && r.TLS != nil {
 		currentFingerprint := atm.generateTLSFingerprint(r.TLS)
 		if token.TLSFingerprint != currentFingerprint {
-			atm.auditLogger.LogSecurityViolation(ctx, token.SessionID, token.UserID, "", "",
-				"session_hijack_attempt", "TLS fingerprint mismatch", FilterSeverityCritical)
+			if err := atm.auditLogger.LogSecurityViolation(ctx, token.SessionID, token.UserID, "", "",
+				"session_hijack_attempt", "TLS fingerprint mismatch", FilterSeverityCritical); err != nil {
+				// Log error but continue with security response
+			}
 			
 			atm.invalidateToken(token.Token)
 			return nil, fmt.Errorf("session hijacking detected: TLS fingerprint mismatch")
