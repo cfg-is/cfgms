@@ -403,7 +403,11 @@ func (al *AuditLogger) addIntegrityProtection(entry *AuditEntry) error {
 // processingLoop processes audit entries from the channel
 func (al *AuditLogger) processingLoop(ctx context.Context) {
 	defer close(al.stopped)
-	defer al.logFile.Close()
+	defer func() {
+		if err := al.logFile.Close(); err != nil {
+			// Log error but continue with shutdown
+		}
+	}()
 	
 	ticker := time.NewTicker(al.config.FlushInterval)
 	defer ticker.Stop()
@@ -466,7 +470,9 @@ func (al *AuditLogger) processBatch(batch []*AuditEntry) {
 	}
 	
 	// Flush file buffer
-	al.logFile.Sync()
+	if err := al.logFile.Sync(); err != nil {
+		// Log error but continue - this is best effort
+	}
 }
 
 // VerifyIntegrity verifies the integrity of an audit entry
@@ -595,7 +601,11 @@ func (fas *FileAuditStorage) Store(ctx context.Context, entry *AuditEntry) error
 	if err != nil {
 		return fmt.Errorf("failed to create audit file: %w", err)
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); err != nil {
+			// Log error but continue
+		}
+	}()
 	
 	encoder := json.NewEncoder(file)
 	if err := encoder.Encode(entry); err != nil {

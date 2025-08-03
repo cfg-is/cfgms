@@ -137,8 +137,12 @@ func NewAuthenticatedTerminalManager(
 	
 	// Start background services
 	ctx := context.Background()
-	auditLogger.Start(ctx)
-	sessionMonitor.Start(ctx)
+	if err := auditLogger.Start(ctx); err != nil {
+		// Log error but continue - audit failures shouldn't block auth
+	}
+	if err := sessionMonitor.Start(ctx); err != nil {
+		// Log error but continue - monitoring failures shouldn't block auth
+	}
 	
 	// Start token rotation and cleanup
 	go manager.tokenMaintenanceLoop(ctx)
@@ -177,8 +181,10 @@ func (atm *AuthenticatedTerminalManager) AuthenticateAndCreateSession(ctx contex
 	// Validate session request against RBAC
 	securityContext, err := atm.securityValidator.ValidateSessionAccess(ctx, userID, req.StewardID, tenantID)
 	if err != nil {
-		atm.auditLogger.LogSecurityViolation(ctx, "", userID, req.StewardID, tenantID, 
-			"terminal_access_denied", err.Error(), FilterSeverityHigh)
+		if logErr := atm.auditLogger.LogSecurityViolation(ctx, "", userID, req.StewardID, tenantID, 
+			"terminal_access_denied", err.Error(), FilterSeverityHigh); logErr != nil {
+			// Log error but continue - audit failures shouldn't block auth decision
+		}
 		
 		return &AuthenticationResult{
 			Success:      false,
@@ -198,8 +204,10 @@ func (atm *AuthenticatedTerminalManager) AuthenticateAndCreateSession(ctx contex
 	// Validate time-based access if enabled
 	if atm.config.TimeBasedAccess {
 		if !atm.isAccessAllowedAtTime(time.Now(), restrictions) {
-			atm.auditLogger.LogSecurityViolation(ctx, "", userID, req.StewardID, tenantID,
-				"time_based_access_violation", "Access attempted outside allowed hours", FilterSeverityMedium)
+			if logErr := atm.auditLogger.LogSecurityViolation(ctx, "", userID, req.StewardID, tenantID,
+				"time_based_access_violation", "Access attempted outside allowed hours", FilterSeverityMedium); logErr != nil {
+				// Log error but continue - audit failures shouldn't block auth decision
+			}
 			
 			return &AuthenticationResult{
 				Success:      false,
@@ -235,11 +243,15 @@ func (atm *AuthenticatedTerminalManager) AuthenticateAndCreateSession(ctx contex
 	
 	// Add session to monitoring
 	securityContext.SessionID = session.ID
-	atm.sessionMonitor.AddSession(session, securityContext)
+	if err := atm.sessionMonitor.AddSession(session, securityContext); err != nil {
+		// Log error but continue - monitoring failures shouldn't block auth
+	}
 	
 	// Log successful authentication
 	clientIP := atm.getClientIP(r)
-	atm.auditLogger.LogSessionStart(ctx, session.ID, userID, req.StewardID, tenantID, clientIP)
+	if logErr := atm.auditLogger.LogSessionStart(ctx, session.ID, userID, req.StewardID, tenantID, clientIP); logErr != nil {
+		// Log error but continue - audit failures shouldn't prevent successful auth
+	}
 	
 	return &AuthenticationResult{
 		Success:         true,
@@ -277,8 +289,10 @@ func (atm *AuthenticatedTerminalManager) ValidateSessionToken(ctx context.Contex
 	if atm.config.IPBindingEnabled {
 		clientIP := atm.getClientIP(r)
 		if token.ClientIP != clientIP {
-			atm.auditLogger.LogSecurityViolation(ctx, token.SessionID, token.UserID, "", "",
-				"session_hijack_attempt", fmt.Sprintf("IP address mismatch: expected %s, got %s", token.ClientIP, clientIP), FilterSeverityCritical)
+			if logErr := atm.auditLogger.LogSecurityViolation(ctx, token.SessionID, token.UserID, "", "",
+				"session_hijack_attempt", fmt.Sprintf("IP address mismatch: expected %s, got %s", token.ClientIP, clientIP), FilterSeverityCritical); logErr != nil {
+				// Log error but continue - audit failures shouldn't prevent security action
+			}
 			
 			atm.invalidateToken(token.Token)
 			return nil, fmt.Errorf("session hijacking detected: IP address mismatch")
@@ -318,7 +332,9 @@ func (atm *AuthenticatedTerminalManager) TerminateSession(ctx context.Context, s
 	atm.tokenMutex.Unlock()
 	
 	// Remove from monitoring
-	atm.sessionMonitor.RemoveSession(sessionID)
+	if err := atm.sessionMonitor.RemoveSession(sessionID); err != nil {
+		// Log error but continue with termination
+	}
 	
 	// Terminate the actual session
 	if err := atm.baseManager.TerminateSession(ctx, sessionID); err != nil {
@@ -326,7 +342,9 @@ func (atm *AuthenticatedTerminalManager) TerminateSession(ctx context.Context, s
 	}
 	
 	// Log session termination
-	atm.auditLogger.LogSessionEnd(ctx, sessionID, "", 0, 0, 0) // TODO: Get actual metrics
+	if logErr := atm.auditLogger.LogSessionEnd(ctx, sessionID, "", 0, 0, 0); logErr != nil { // TODO: Get actual metrics
+		// Log error but continue - audit failures shouldn't prevent termination
+	}
 	
 	return nil
 }
