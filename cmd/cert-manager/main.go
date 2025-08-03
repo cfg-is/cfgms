@@ -23,6 +23,13 @@ import (
 	"github.com/cfgis/cfgms/pkg/cert"
 )
 
+// safePrint wraps fmt.Printf with error handling for CLI output
+func safePrint(format string, args ...interface{}) {
+	if _, err := fmt.Printf(format, args...); err != nil {
+		// Continue on print error - CLI output
+	}
+}
+
 var (
 	storagePath string
 	manager     *cert.Manager
@@ -107,11 +114,11 @@ func initCACmd() *cobra.Command {
 				return fmt.Errorf("failed to get CA info: %w", err)
 			}
 
-			fmt.Printf("Certificate Authority initialized successfully\n")
-			fmt.Printf("  Common Name: %s\n", caInfo.CommonName)
-			fmt.Printf("  Serial Number: %s\n", caInfo.SerialNumber)
-			fmt.Printf("  Valid Until: %s\n", caInfo.ExpiresAt.Format("2006-01-02 15:04:05"))
-			fmt.Printf("  Storage Path: %s\n", storagePath)
+			safePrint("Certificate Authority initialized successfully\n")
+			safePrint("  Common Name: %s\n", caInfo.CommonName)
+			safePrint("  Serial Number: %s\n", caInfo.SerialNumber)
+			safePrint("  Valid Until: %s\n", caInfo.ExpiresAt.Format("2006-01-02 15:04:05"))
+			safePrint("  Storage Path: %s\n", storagePath)
 
 			return nil
 		},
@@ -158,11 +165,11 @@ func generateServerCmd() *cobra.Command {
 				return fmt.Errorf("failed to generate server certificate: %w", err)
 			}
 
-			fmt.Printf("Server certificate generated successfully\n")
-			fmt.Printf("  Common Name: %s\n", certificate.CommonName)
-			fmt.Printf("  Serial Number: %s\n", certificate.SerialNumber)
-			fmt.Printf("  Valid Until: %s\n", certificate.ExpiresAt.Format("2006-01-02 15:04:05"))
-			fmt.Printf("  Fingerprint: %s\n", certificate.Fingerprint)
+			safePrint("Server certificate generated successfully\n")
+			safePrint("  Common Name: %s\n", certificate.CommonName)
+			safePrint("  Serial Number: %s\n", certificate.SerialNumber)
+			safePrint("  Valid Until: %s\n", certificate.ExpiresAt.Format("2006-01-02 15:04:05"))
+			safePrint("  Fingerprint: %s\n", certificate.Fingerprint)
 
 			return nil
 		},
@@ -205,12 +212,12 @@ func generateClientCmd() *cobra.Command {
 				return fmt.Errorf("failed to generate client certificate: %w", err)
 			}
 
-			fmt.Printf("Client certificate generated successfully\n")
-			fmt.Printf("  Common Name: %s\n", certificate.CommonName)
-			fmt.Printf("  Serial Number: %s\n", certificate.SerialNumber)
-			fmt.Printf("  Client ID: %s\n", certificate.ClientID)
-			fmt.Printf("  Valid Until: %s\n", certificate.ExpiresAt.Format("2006-01-02 15:04:05"))
-			fmt.Printf("  Fingerprint: %s\n", certificate.Fingerprint)
+			safePrint("Client certificate generated successfully\n")
+			safePrint("  Common Name: %s\n", certificate.CommonName)
+			safePrint("  Serial Number: %s\n", certificate.SerialNumber)
+			safePrint("  Client ID: %s\n", certificate.ClientID)
+			safePrint("  Valid Until: %s\n", certificate.ExpiresAt.Format("2006-01-02 15:04:05"))
+			safePrint("  Fingerprint: %s\n", certificate.Fingerprint)
 
 			return nil
 		},
@@ -254,13 +261,13 @@ func listCmd() *cobra.Command {
 			}
 
 			if len(certificates) == 0 {
-				fmt.Println("No certificates found")
+				safePrint("%s\n", "No certificates found")
 				return nil
 			}
 
-			fmt.Printf("%-12s %-20s %-40s %-12s %-20s %-8s\n", 
+			safePrint("%-12s %-20s %-40s %-12s %-20s %-8s\n", 
 				"Type", "Common Name", "Serial Number", "Status", "Expires", "Days Left")
-			fmt.Println(strings.Repeat("-", 120))
+			safePrint("%s\n", strings.Repeat("-", 120))
 
 			for _, c := range certificates {
 				status := "Valid"
@@ -272,7 +279,7 @@ func listCmd() *cobra.Command {
 					status = "Expiring"
 				}
 
-				fmt.Printf("%-12s %-20s %-40s %-12s %-20s %8d\n",
+				safePrint("%-12s %-20s %-40s %-12s %-20s %8d\n",
 					c.Type.String(),
 					c.CommonName,
 					c.SerialNumber,
@@ -308,24 +315,24 @@ func validateCmd() *cobra.Command {
 				return fmt.Errorf("failed to validate certificate: %w", err)
 			}
 
-			fmt.Printf("Certificate Validation Results\n")
-			fmt.Printf("  Serial Number: %s\n", certificate.SerialNumber)
-			fmt.Printf("  Common Name: %s\n", certificate.CommonName)
-			fmt.Printf("  Valid: %v\n", result.IsValid)
-			fmt.Printf("  Expired: %v\n", result.IsExpired)
-			fmt.Printf("  Days Until Expiration: %d\n", result.DaysUntilExpiration)
+			safePrint("Certificate Validation Results\n")
+			safePrint("  Serial Number: %s\n", certificate.SerialNumber)
+			safePrint("  Common Name: %s\n", certificate.CommonName)
+			safePrint("  Valid: %v\n", result.IsValid)
+			safePrint("  Expired: %v\n", result.IsExpired)
+			safePrint("  Days Until Expiration: %d\n", result.DaysUntilExpiration)
 
 			if len(result.Errors) > 0 {
-				fmt.Printf("  Errors:\n")
+				safePrint("  Errors:\n")
 				for _, err := range result.Errors {
-					fmt.Printf("    - %s\n", err)
+					safePrint("    - %s\n", err)
 				}
 			}
 
 			if len(result.Warnings) > 0 {
-				fmt.Printf("  Warnings:\n")
+				safePrint("  Warnings:\n")
 				for _, warning := range result.Warnings {
-					fmt.Printf("    - %s\n", warning)
+					safePrint("    - %s\n", warning)
 				}
 			}
 
@@ -353,11 +360,11 @@ func renewCmd() *cobra.Command {
 				return fmt.Errorf("failed to renew certificate: %w", err)
 			}
 
-			fmt.Printf("Certificate renewed successfully\n")
-			fmt.Printf("  Old Serial: %s\n", serialNumber)
-			fmt.Printf("  New Serial: %s\n", newCert.SerialNumber)
-			fmt.Printf("  Common Name: %s\n", newCert.CommonName)
-			fmt.Printf("  Valid Until: %s\n", newCert.ExpiresAt.Format("2006-01-02 15:04:05"))
+			safePrint("Certificate renewed successfully\n")
+			safePrint("  Old Serial: %s\n", serialNumber)
+			safePrint("  New Serial: %s\n", newCert.SerialNumber)
+			safePrint("  Common Name: %s\n", newCert.CommonName)
+			safePrint("  Valid Until: %s\n", newCert.ExpiresAt.Format("2006-01-02 15:04:05"))
 
 			return nil
 		},
@@ -381,21 +388,21 @@ func statsCmd() *cobra.Command {
 				return fmt.Errorf("failed to get statistics: %w", err)
 			}
 
-			fmt.Printf("Certificate Manager Statistics\n")
-			fmt.Printf("  Total Certificates: %d\n", stats.TotalCertificates)
-			fmt.Printf("  Expiring Certificates: %d\n", stats.ExpiringCertificates)
-			fmt.Printf("  Renewal Candidates: %d\n", stats.RenewalCandidates)
-			fmt.Printf("\n  Certificates by Type:\n")
+			safePrint("Certificate Manager Statistics\n")
+			safePrint("  Total Certificates: %d\n", stats.TotalCertificates)
+			safePrint("  Expiring Certificates: %d\n", stats.ExpiringCertificates)
+			safePrint("  Renewal Candidates: %d\n", stats.RenewalCandidates)
+			safePrint("\n  Certificates by Type:\n")
 			for certType, count := range stats.CertificatesByType {
-				fmt.Printf("    %s: %d\n", certType.String(), count)
+				safePrint("    %s: %d\n", certType.String(), count)
 			}
 
 			if stats.CAInfo != nil {
-				fmt.Printf("\n  Certificate Authority:\n")
-				fmt.Printf("    Common Name: %s\n", stats.CAInfo.CommonName)
-				fmt.Printf("    Serial Number: %s\n", stats.CAInfo.SerialNumber)
-				fmt.Printf("    Valid Until: %s\n", stats.CAInfo.ExpiresAt.Format("2006-01-02 15:04:05"))
-				fmt.Printf("    Days Until Expiration: %d\n", stats.CAInfo.DaysUntilExpiration)
+				safePrint("\n  Certificate Authority:\n")
+				safePrint("    Common Name: %s\n", stats.CAInfo.CommonName)
+				safePrint("    Serial Number: %s\n", stats.CAInfo.SerialNumber)
+				safePrint("    Valid Until: %s\n", stats.CAInfo.ExpiresAt.Format("2006-01-02 15:04:05"))
+				safePrint("    Days Until Expiration: %d\n", stats.CAInfo.DaysUntilExpiration)
 			}
 
 			return nil
@@ -437,7 +444,7 @@ func exportCmd() *cobra.Command {
 				return fmt.Errorf("failed to write certificate file: %w", err)
 			}
 
-			fmt.Printf("Certificate exported: %s\n", certPath)
+			safePrint("Certificate exported: %s\n", certPath)
 
 			// Write private key file if included
 			if includePrivateKey && keyPEM != nil {
@@ -445,7 +452,7 @@ func exportCmd() *cobra.Command {
 				if err := os.WriteFile(keyPath, keyPEM, 0600); err != nil {
 					return fmt.Errorf("failed to write private key file: %w", err)
 				}
-				fmt.Printf("Private key exported: %s\n", keyPath)
+				safePrint("Private key exported: %s\n", keyPath)
 			}
 
 			return nil
