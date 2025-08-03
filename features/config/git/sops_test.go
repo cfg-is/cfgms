@@ -219,7 +219,11 @@ func TestSOPSManager_PreCommitSOPSCheck(t *testing.T) {
 	// Create a temporary directory for testing
 	tmpDir, err := os.MkdirTemp("", "sops-test-")
 	require.NoError(t, err)
-	defer os.RemoveAll(tmpDir)
+	defer func() {
+		if err := os.RemoveAll(tmpDir); err != nil {
+			t.Logf("Failed to remove temp dir: %v", err)
+		}
+	}()
 	
 	// Test file with sensitive content
 	sensitiveContent := `

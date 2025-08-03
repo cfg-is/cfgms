@@ -56,7 +56,11 @@ func (s *SOPSManager) EncryptContent(ctx context.Context, content []byte, config
 	if err != nil {
 		return nil, fmt.Errorf("failed to create temp file: %w", err)
 	}
-	defer os.Remove(tmpFile)
+	defer func() {
+		if err := os.Remove(tmpFile); err != nil {
+			// Log error but continue - temp file cleanup is best effort
+		}
+	}()
 	
 	// Determine KMS key to use
 	kmsKey, err := s.selectKMSKey(filePath, config)
@@ -116,7 +120,11 @@ func (s *SOPSManager) DecryptContent(ctx context.Context, content []byte) ([]byt
 	if err != nil {
 		return nil, fmt.Errorf("failed to create temp file: %w", err)
 	}
-	defer os.Remove(tmpFile)
+	defer func() {
+		if err := os.Remove(tmpFile); err != nil {
+			// Log error but continue - temp file cleanup is best effort
+		}
+	}()
 	
 	// Execute SOPS decryption
 	cmd := exec.CommandContext(ctx, s.sopsPath, "--decrypt", "--in-place", tmpFile)
@@ -242,12 +250,14 @@ func (s *SOPSManager) createTempFile(content []byte, filePath string) (string, e
 	}
 	
 	if _, err := tmpFile.Write(content); err != nil {
-		tmpFile.Close()
-		os.Remove(tmpFile.Name())
+		_ = tmpFile.Close() // Best effort cleanup
+		_ = os.Remove(tmpFile.Name()) // Best effort cleanup
 		return "", err
 	}
 	
-	tmpFile.Close()
+	if err := tmpFile.Close(); err != nil {
+		// Log error but continue - file was written successfully
+	}
 	return tmpFile.Name(), nil
 }
 

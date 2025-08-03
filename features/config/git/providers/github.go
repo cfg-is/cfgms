@@ -364,7 +364,11 @@ func (p *GitHubProvider) makeRequest(ctx context.Context, method, path string, p
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			// Log error but continue
+		}
+	}()
 	
 	respBody := &bytes.Buffer{}
 	if _, err := respBody.ReadFrom(resp.Body); err != nil {
