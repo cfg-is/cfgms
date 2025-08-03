@@ -123,7 +123,11 @@ func QuickDetectDrift(previous, current *commonpb.DNA) ([]*DriftEvent, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer detector.Close()
+	defer func() {
+		if err := detector.Close(); err != nil {
+			// Log error but continue
+		}
+	}()
 	
 	ctx := context.Background()
 	return detector.DetectDrift(ctx, previous, current)

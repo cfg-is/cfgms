@@ -32,7 +32,11 @@ func createTestLogger() logging.Logger {
 func TestDetector_DetectDrift_BasicChanges(t *testing.T) {
 	detector, err := NewDetector(DefaultDetectorConfig(), createTestLogger())
 	require.NoError(t, err)
-	defer detector.Close()
+	defer func() {
+		if err := detector.Close(); err != nil {
+			t.Logf("Failed to close detector: %v", err)
+		}
+	}()
 
 	previous := createTestDNA("device1", map[string]string{
 		"hostname":     "server1",
@@ -83,7 +87,11 @@ func TestDetector_DetectDrift_SecurityChanges(t *testing.T) {
 	
 	detector, err := NewDetector(config, createTestLogger())
 	require.NoError(t, err)
-	defer detector.Close()
+	defer func() {
+		if err := detector.Close(); err != nil {
+			t.Logf("Failed to close detector: %v", err)
+		}
+	}()
 
 	previous := createTestDNA("device1", map[string]string{
 		"firewall_enabled": "true",
@@ -123,7 +131,11 @@ func TestDetector_DetectDrift_SecurityChanges(t *testing.T) {
 func TestDetector_DetectDrift_NoChanges(t *testing.T) {
 	detector, err := NewDetector(DefaultDetectorConfig(), createTestLogger())
 	require.NoError(t, err)
-	defer detector.Close()
+	defer func() {
+		if err := detector.Close(); err != nil {
+			t.Logf("Failed to close detector: %v", err)
+		}
+	}()
 
 	dna := createTestDNA("device1", map[string]string{
 		"hostname":   "server1",
@@ -141,7 +153,11 @@ func TestDetector_DetectDrift_NoChanges(t *testing.T) {
 func TestDetector_DetectDrift_InvalidInput(t *testing.T) {
 	detector, err := NewDetector(DefaultDetectorConfig(), createTestLogger())
 	require.NoError(t, err)
-	defer detector.Close()
+	defer func() {
+		if err := detector.Close(); err != nil {
+			t.Logf("Failed to close detector: %v", err)
+		}
+	}()
 
 	ctx := context.Background()
 
@@ -163,7 +179,11 @@ func TestDetector_DetectDrift_InvalidInput(t *testing.T) {
 func TestDetector_DetectDriftBatch(t *testing.T) {
 	detector, err := NewDetector(DefaultDetectorConfig(), createTestLogger())
 	require.NoError(t, err)
-	defer detector.Close()
+	defer func() {
+		if err := detector.Close(); err != nil {
+			t.Logf("Failed to close detector: %v", err)
+		}
+	}()
 
 	comparisons := []*DNAComparison{
 		{
@@ -208,7 +228,11 @@ func TestDetector_DetectDriftBatch(t *testing.T) {
 func TestFilter_FilterEvents_IgnoreTemporaryFiles(t *testing.T) {
 	filter, err := NewFilter(DefaultFilterConfig(), createTestLogger())
 	require.NoError(t, err)
-	defer filter.Close()
+	defer func() {
+		if err := filter.Close(); err != nil {
+			t.Logf("Failed to close filter: %v", err)
+		}
+	}()
 
 	events := []*DriftEvent{
 		{
@@ -261,7 +285,11 @@ func TestFilter_FilterEvents_IgnoreTemporaryFiles(t *testing.T) {
 func TestFilter_IsExpectedChange_VolatileAttributes(t *testing.T) {
 	filter, err := NewFilter(DefaultFilterConfig(), createTestLogger())
 	require.NoError(t, err)
-	defer filter.Close()
+	defer func() {
+		if err := filter.Close(); err != nil {
+			t.Logf("Failed to close filter: %v", err)
+		}
+	}()
 
 	testCases := []struct {
 		name     string
@@ -308,7 +336,11 @@ func TestFilter_IsExpectedChange_VolatileAttributes(t *testing.T) {
 func TestFilter_AddRemoveWhitelist(t *testing.T) {
 	filter, err := NewFilter(DefaultFilterConfig(), createTestLogger())
 	require.NoError(t, err)
-	defer filter.Close()
+	defer func() {
+		if err := filter.Close(); err != nil {
+			t.Logf("Failed to close filter: %v", err)
+		}
+	}()
 
 	pattern := &WhitelistPattern{
 		ID:        "test-pattern",
@@ -347,7 +379,11 @@ func TestFilter_AddRemoveWhitelist(t *testing.T) {
 func TestRuleEngine_EvaluateRules_AttributeMatch(t *testing.T) {
 	engine, err := NewRuleEngine(DefaultRuleEngineConfig(), createTestLogger())
 	require.NoError(t, err)
-	defer engine.Close()
+	defer func() {
+		if err := engine.Close(); err != nil {
+			t.Logf("Failed to close engine: %v", err)
+		}
+	}()
 
 	rule := &DriftRule{
 		ID:       "test-rule",
@@ -397,7 +433,11 @@ func TestRuleEngine_EvaluateRules_AttributeMatch(t *testing.T) {
 func TestRuleEngine_EvaluateRules_MultipleConditions(t *testing.T) {
 	engine, err := NewRuleEngine(DefaultRuleEngineConfig(), createTestLogger())
 	require.NoError(t, err)
-	defer engine.Close()
+	defer func() {
+		if err := engine.Close(); err != nil {
+			t.Logf("Failed to close engine: %v", err)
+		}
+	}()
 
 	rule := &DriftRule{
 		ID:       "multi-condition-rule",
@@ -454,7 +494,11 @@ func TestRuleEngine_EvaluateRules_MultipleConditions(t *testing.T) {
 func TestRuleEngine_EvaluateRules_OROperator(t *testing.T) {
 	engine, err := NewRuleEngine(DefaultRuleEngineConfig(), createTestLogger())
 	require.NoError(t, err)
-	defer engine.Close()
+	defer func() {
+		if err := engine.Close(); err != nil {
+			t.Logf("Failed to close engine: %v", err)
+		}
+	}()
 
 	rule := &DriftRule{
 		ID:       "or-rule",
@@ -510,7 +554,11 @@ func TestRuleEngine_EvaluateRules_OROperator(t *testing.T) {
 func TestRuleEngine_TestRule(t *testing.T) {
 	engine, err := NewRuleEngine(DefaultRuleEngineConfig(), createTestLogger())
 	require.NoError(t, err)
-	defer engine.Close()
+	defer func() {
+		if err := engine.Close(); err != nil {
+			t.Logf("Failed to close engine: %v", err)
+		}
+	}()
 
 	rule := &DriftRule{
 		ID:       "test-rule",
@@ -640,15 +688,27 @@ func TestDriftDetectionIntegration(t *testing.T) {
 	// Create components
 	detector, err := NewDetector(DefaultDetectorConfig(), createTestLogger())
 	require.NoError(t, err)
-	defer detector.Close()
+	defer func() {
+		if err := detector.Close(); err != nil {
+			t.Logf("Failed to close detector: %v", err)
+		}
+	}()
 
 	filter, err := NewFilter(DefaultFilterConfig(), createTestLogger())
 	require.NoError(t, err)
-	defer filter.Close()
+	defer func() {
+		if err := filter.Close(); err != nil {
+			t.Logf("Failed to close filter: %v", err)
+		}
+	}()
 
 	engine, err := NewRuleEngine(DefaultRuleEngineConfig(), createTestLogger())
 	require.NoError(t, err)
-	defer engine.Close()
+	defer func() {
+		if err := engine.Close(); err != nil {
+			t.Logf("Failed to close engine: %v", err)
+		}
+	}()
 
 	// Add a rule
 	rule := &DriftRule{
@@ -716,7 +776,11 @@ func TestDriftDetectionIntegration(t *testing.T) {
 
 func BenchmarkDetector_DetectDrift(b *testing.B) {
 	detector, _ := NewDetector(DefaultDetectorConfig(), createTestLogger())
-	defer detector.Close()
+	defer func() {
+		if err := detector.Close(); err != nil {
+			b.Logf("Failed to close detector: %v", err)
+		}
+	}()
 
 	previous := createTestDNA("device1", map[string]string{
 		"hostname":     "server1",
@@ -745,7 +809,11 @@ func BenchmarkDetector_DetectDrift(b *testing.B) {
 
 func BenchmarkFilter_FilterEvents(b *testing.B) {
 	filter, _ := NewFilter(DefaultFilterConfig(), createTestLogger())
-	defer filter.Close()
+	defer func() {
+		if err := filter.Close(); err != nil {
+			b.Logf("Failed to close filter: %v", err)
+		}
+	}()
 
 	events := []*DriftEvent{
 		{

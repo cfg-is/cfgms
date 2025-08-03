@@ -870,7 +870,11 @@ func BenchmarkCompression(b *testing.B) {
 	if err != nil {
 		b.Fatalf("Failed to create compressor: %v", err)
 	}
-	defer compressor.Close()
+	defer func() {
+		if err := compressor.Close(); err != nil {
+			b.Logf("Failed to close compressor: %v", err)
+		}
+	}()
 
 	// Create test DNA with varying sizes
 	dna := createTestDNA("bench-device", map[string]string{

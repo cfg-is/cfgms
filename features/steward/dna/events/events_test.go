@@ -90,7 +90,11 @@ func TestEventPublisher_PublishAndSubscribe(t *testing.T) {
 	ctx := context.Background()
 	err = publisher.Start(ctx)
 	require.NoError(t, err)
-	defer publisher.Stop(ctx)
+	defer func() {
+		if err := publisher.Stop(ctx); err != nil {
+			t.Logf("Failed to stop publisher: %v", err)
+		}
+	}()
 	
 	// Create test event
 	event := &DNAChangeEvent{
@@ -137,7 +141,11 @@ func TestEventPublisher_PriorityOrdering(t *testing.T) {
 	ctx := context.Background()
 	err = publisher.Start(ctx)
 	require.NoError(t, err)
-	defer publisher.Stop(ctx)
+	defer func() {
+		if err := publisher.Stop(ctx); err != nil {
+			t.Logf("Failed to stop publisher: %v", err)
+		}
+	}()
 	
 	// Create test event
 	event := &DNAChangeEvent{
@@ -181,7 +189,11 @@ func TestEventPublisher_MultipleEvents(t *testing.T) {
 	ctx := context.Background()
 	err = publisher.Start(ctx)
 	require.NoError(t, err)
-	defer publisher.Stop(ctx)
+	defer func() {
+		if err := publisher.Stop(ctx); err != nil {
+			t.Logf("Failed to stop publisher: %v", err)
+		}
+	}()
 	
 	// Publish multiple events
 	numEvents := 5
@@ -216,7 +228,11 @@ func TestEventPublisher_Stats(t *testing.T) {
 	ctx := context.Background()
 	err = publisher.Start(ctx)
 	require.NoError(t, err)
-	defer publisher.Stop(ctx)
+	defer func() {
+		if err := publisher.Stop(ctx); err != nil {
+			t.Logf("Failed to stop publisher: %v", err)
+		}
+	}()
 	
 	// Get initial stats
 	stats := publisher.GetStats()
@@ -255,7 +271,11 @@ func TestEventPublisher_ErrorHandling(t *testing.T) {
 	ctx := context.Background()
 	err = publisher.Start(ctx)
 	require.NoError(t, err)
-	defer publisher.Stop(ctx)
+	defer func() {
+		if err := publisher.Stop(ctx); err != nil {
+			t.Logf("Failed to stop publisher: %v", err)
+		}
+	}()
 	
 	// Publish event
 	event := &DNAChangeEvent{

@@ -438,7 +438,11 @@ func (w *eventWorker) run(ctx context.Context) {
 		case <-w.publisher.stopChan:
 			return
 		case task := <-w.publisher.eventQueue:
-			w.publisher.processTask(ctx, task)
+			if err := w.publisher.processTask(ctx, task); err != nil {
+				if w.publisher.logger != nil {
+					w.publisher.logger.Error("Failed to process event task", "error", err, "worker_id", w.id)
+				}
+			}
 		}
 	}
 }
