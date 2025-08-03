@@ -242,6 +242,21 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - [ ] Implement tenant discovery and management after admin consent
   - [ ] Enhanced per-tenant token storage and refresh management
   - [ ] CSP partner integration for MSP tenant access relationships
+- [ ] **Unified Directory Management Interface**
+  - [ ] Directory Service Abstraction Layer
+    - [ ] Universal Directory interface supporting Active Directory and Entra ID
+    - [ ] Extensible architecture designed for future directory service providers (post v1.0)
+    - [ ] User/Group/OU DNA collection and management
+    - [ ] Directory-agnostic CRUD operations
+  - [ ] Directory DNA Integration
+    - [ ] Each User/Group as DNA-enabled object (like Stewards)
+    - [ ] Directory drift detection for user lifecycle changes
+    - [ ] Hierarchical tenant-aware directory operations
+  - [ ] Microsoft Directory Integration
+    - [ ] Active Directory provider implementation (LDAP/AD APIs)
+    - [ ] Entra ID provider implementation (Graph API)
+    - [ ] Multi-tenant directory support for MSPs
+    - [ ] Unified Microsoft identity management across on-premises and cloud
 
 #### v0.5.0 (Beta) - Advanced Workflows & Core Readiness
 

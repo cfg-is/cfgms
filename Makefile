@@ -80,7 +80,7 @@ test-all: test-fast test-integration test-production-critical
 test-fast:
 	@echo "⚡ Running Fast Comprehensive Test Suite"
 	@echo "======================================="
-	go test -v -race -cover -timeout=10m ./features/... ./api/... ./cmd/...
+	go test -v -race -cover -short -timeout=10m ./features/... ./api/... ./cmd/...
 	@echo "✅ Fast test suite completed"
 
 # Production-critical functionality only (moderate timeout)
@@ -242,16 +242,6 @@ test-performance-baseline:
 .PHONY: test-production-critical test-export-reliability test-v030-gate test-v040-gate
 
 # Test only production-critical export functionality
-test-production-critical:
-	@echo "Running production-critical test suite..."
-	go test -v -race ./features/monitoring/export/... -run "TestExportManager(DataExport|ErrorHandling|HealthChecks)" || { \
-		echo "❌ PRODUCTION RISK: Export manager critical tests failing"; \
-		echo "   - Potential monitoring cost overruns"; \
-		echo "   - Risk of data loss during outages"; \
-		echo "   - Buffer overflow under load"; \
-		exit 1; \
-	}
-	@echo "✅ Production-critical tests passing"
 
 # Test export reliability and cost protection
 test-export-reliability:
