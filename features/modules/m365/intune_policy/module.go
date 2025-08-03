@@ -145,7 +145,7 @@ func (c *IntunePolicyConfig) Validate() error {
 		return fmt.Errorf("tenant_id is required")
 	}
 	
-	if c.Settings == nil || len(c.Settings) == 0 {
+	if len(c.Settings) == 0 {
 		return fmt.Errorf("settings cannot be empty")
 	}
 	

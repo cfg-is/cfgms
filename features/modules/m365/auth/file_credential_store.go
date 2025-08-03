@@ -167,9 +167,7 @@ func (s *FileCredentialStore) IsAvailable() bool {
 	if err := os.WriteFile(testFile, []byte("test"), 0600); err != nil {
 		return false
 	}
-	if err := os.Remove(testFile); err != nil {
-		// Log but continue - we tested write access successfully
-	}
+	_ = os.Remove(testFile) // Ignore error - we tested write access successfully
 	return true
 }
 

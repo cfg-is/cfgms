@@ -45,11 +45,7 @@ func TestScriptModule_New(t *testing.T) {
 		t.Fatal("New() returned nil")
 	}
 
-	// Verify it implements the Module interface
-	_, ok := module.(modules.Module)
-	if !ok {
-		t.Fatal("New() did not return a Module interface")
-	}
+	// Module is already of type modules.Module, no need to verify
 }
 
 func TestScriptConfig_Validation(t *testing.T) {

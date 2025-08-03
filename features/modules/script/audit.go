@@ -223,9 +223,10 @@ func (al *AuditLogger) GetExecutionMetrics(stewardID string, since time.Time) (*
 		metrics.TotalExecutions++
 		totalDuration += record.Duration
 		
-		if record.Status == StatusCompleted {
+		switch record.Status {
+		case StatusCompleted:
 			successCount++
-		} else if record.Status == StatusFailed {
+		case StatusFailed:
 			failureCount++
 		}
 		

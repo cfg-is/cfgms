@@ -322,17 +322,17 @@ func (e *DefaultExporter) groupChangesByPath(entries []DiffEntry) map[string][]D
 func (e *DefaultExporter) formatTextEntry(buf *bytes.Buffer, entry DiffEntry, options ExportOptions) {
 	// Write path and change type
 	symbol := e.getChangeSymbol(entry.Type)
-	buf.WriteString(fmt.Sprintf("%s %s", symbol, entry.Path))
+	fmt.Fprintf(buf, "%s %s", symbol, entry.Path)
 	
 	if options.LineNumbers && entry.Context.LineNumber > 0 {
-		buf.WriteString(fmt.Sprintf(" (line %d)", entry.Context.LineNumber))
+		fmt.Fprintf(buf, " (line %d)", entry.Context.LineNumber)
 	}
 	buf.WriteString("\n")
 	
 	// Write change details
 	switch entry.Type {
 	case DiffTypeAdd:
-		buf.WriteString(fmt.Sprintf("  + %v\n", formatValue(entry.NewValue)))
+		fmt.Fprintf(buf, "  + %v\n", formatValue(entry.NewValue))
 	case DiffTypeDelete:
 		buf.WriteString(fmt.Sprintf("  - %v\n", formatValue(entry.OldValue)))
 	case DiffTypeModify:

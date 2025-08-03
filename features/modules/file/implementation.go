@@ -102,7 +102,7 @@ func (m *fileModule) Set(ctx context.Context, resourceID string, config modules.
 		switch runtime.GOOS {
 		case "linux", "darwin":
 			// Get UID and GID for the specified owner and group
-			var uid, gid int = -1, -1
+			var uid, gid = -1, -1
 			if fileConfig.Owner != "" {
 				userInfo, err := user.Lookup(fileConfig.Owner)
 				if err != nil {

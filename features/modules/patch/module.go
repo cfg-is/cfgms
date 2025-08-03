@@ -55,15 +55,8 @@ func (m *PatchModule) Get(ctx context.Context, resourceID string) (modules.Confi
 		TestMode:   false,      // Default to actual patching
 	}
 
-	// Add information about available patches in a comment-like field
-	// This isn't a real config field but provides status information
-	if len(m.cachedStatus.AvailablePatches) > 0 {
-		var patchIDs []string
-		for _, patch := range m.cachedStatus.AvailablePatches {
-			patchIDs = append(patchIDs, patch.ID)
-		}
-		// We'll add this as metadata rather than direct config
-	}
+	// Note: Available patches information is stored in cachedStatus
+	// and can be accessed via separate methods if needed
 
 	return config, nil
 }
