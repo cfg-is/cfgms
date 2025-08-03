@@ -6,6 +6,7 @@ package examples
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 
@@ -292,7 +293,10 @@ func ExampleUsage() {
 	
 	// Register Microsoft provider
 	microsoftProvider := NewMicrosoftProvider()
-	registry.RegisterProvider(microsoftProvider)
+	if err := registry.RegisterProvider(microsoftProvider); err != nil {
+		log.Printf("Failed to register Microsoft provider: %v", err)
+		return
+	}
 	
 	// Create universal authenticator (would need actual credential store)
 	// authenticator := saas.NewUniversalAuthenticator(credStore, httpClient)

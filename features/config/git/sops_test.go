@@ -456,7 +456,9 @@ func TestSOPSManager_createTempFile(t *testing.T) {
 			assert.Equal(t, content, fileContent)
 			
 			// Clean up
-			os.Remove(tmpFile)
+			if err := os.Remove(tmpFile); err != nil {
+				t.Logf("Failed to remove temp file: %v", err)
+			}
 		})
 	}
 }

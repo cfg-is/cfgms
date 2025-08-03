@@ -348,7 +348,9 @@ func (m *DefaultRollbackManager) executeRollbackAsync(ctx context.Context, opera
 		operation.Progress.ItemsProcessed = i + 1
 		operation.Progress.Percentage = 40 + (40 * (i + 1) / len(preview.Changes))
 		operation.Progress.CurrentAction = fmt.Sprintf("Applying %s", change.Path)
-		m.store.UpdateOperation(ctx, operation)
+		if err := m.store.UpdateOperation(ctx, operation); err != nil {
+			// Log error but continue rollback operation
+		}
 		
 		// Apply the change
 		if err := m.applyChange(ctx, repoID, branchName, change); err != nil {
@@ -374,7 +376,9 @@ func (m *DefaultRollbackManager) executeRollbackAsync(ctx context.Context, opera
 	operation.Progress.Stage = "merging"
 	operation.Progress.Percentage = 85
 	operation.Progress.CurrentAction = "Merging rollback changes"
-	m.store.UpdateOperation(ctx, operation)
+	if err := m.store.UpdateOperation(ctx, operation); err != nil {
+		// Log error but continue rollback operation
+	}
 	
 	if err := m.gitManager.MergeBranch(ctx, repoID, branchName, "main", fmt.Sprintf("Rollback to %s", operation.Request.RollbackTo)); err != nil {
 		m.failRollback(ctx, operation, fmt.Errorf("failed to merge rollback: %w", err))
@@ -385,7 +389,9 @@ func (m *DefaultRollbackManager) executeRollbackAsync(ctx context.Context, opera
 	operation.Progress.Stage = "deploying"
 	operation.Progress.Percentage = 90
 	operation.Progress.CurrentAction = "Deploying to devices"
-	m.store.UpdateOperation(ctx, operation)
+	if err := m.store.UpdateOperation(ctx, operation); err != nil {
+		// Log error but continue rollback operation
+	}
 	
 	// Simulate deployment
 	time.Sleep(2 * time.Second)

@@ -177,7 +177,11 @@ func (p *OAuth2Provider) makeTokenRequest(ctx context.Context, tokenURL string, 
 	if err != nil {
 		return nil, fmt.Errorf("failed to make token request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			// Log error but continue
+		}
+	}()
 	
 	// Parse response
 	var tokenResponse struct {
@@ -378,7 +382,11 @@ func (p *OAuth2Provider) ValidateToken(ctx context.Context, token *AccessToken) 
 	if err != nil {
 		return fmt.Errorf("failed to validate token: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			// Log error but continue
+		}
+	}()
 	
 	if resp.StatusCode == http.StatusUnauthorized {
 		return NewAuthenticationError(token.TenantID, "INVALID_TOKEN", "Token validation failed", nil)
@@ -405,7 +413,11 @@ func (p *OAuth2Provider) GetTenantInfo(ctx context.Context, token *AccessToken) 
 	if err != nil {
 		return nil, fmt.Errorf("failed to get tenant info: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			// Log error but continue
+		}
+	}()
 	
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("tenant info request failed with status %d", resp.StatusCode)

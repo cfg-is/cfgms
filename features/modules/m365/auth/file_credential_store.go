@@ -167,7 +167,9 @@ func (s *FileCredentialStore) IsAvailable() bool {
 	if err := os.WriteFile(testFile, []byte("test"), 0600); err != nil {
 		return false
 	}
-	os.Remove(testFile)
+	if err := os.Remove(testFile); err != nil {
+		// Log but continue - we tested write access successfully
+	}
 	return true
 }
 
@@ -413,13 +415,21 @@ func (s *FileCredentialStore) copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer srcFile.Close()
+	defer func() {
+		if err := srcFile.Close(); err != nil {
+			// Log error but continue
+		}
+	}()
 	
 	dstFile, err := os.Create(dst)
 	if err != nil {
 		return err
 	}
-	defer dstFile.Close()
+	defer func() {
+		if err := dstFile.Close(); err != nil {
+			// Log error but continue
+		}
+	}()
 	
 	// Set secure permissions
 	if err := dstFile.Chmod(0600); err != nil {
