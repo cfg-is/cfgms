@@ -48,7 +48,11 @@ func SetupTestEnvironment(t *testing.T, config *StewardTestConfig) (certDir stri
 		tempDir, err := os.MkdirTemp("", "cfgms-test-steward-")
 		require.NoError(t, err)
 		dataDir = tempDir
-		dataDirCleanup = func() { os.RemoveAll(tempDir) }
+		dataDirCleanup = func() { 
+			if err := os.RemoveAll(tempDir); err != nil {
+				// Log error but continue cleanup
+			}
+		}
 	} else {
 		dataDir = config.DataDir
 		if dataDir != "" {

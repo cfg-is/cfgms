@@ -60,7 +60,11 @@ func TestNewManager(t *testing.T) {
 			if tt.config != nil && tt.config.StoragePath != "" {
 				tempDir, err := os.MkdirTemp("", "cert-test-")
 				require.NoError(t, err)
-				defer os.RemoveAll(tempDir)
+				defer func() {
+				if err := os.RemoveAll(tempDir); err != nil {
+					t.Logf("Failed to remove temp directory: %v", err)
+				}
+			}()
 				
 				tt.config.StoragePath = tempDir
 			}

@@ -255,7 +255,11 @@ func TestCA_LoadCA(t *testing.T) {
 	// Create temporary directory for CA storage
 	tempDir, err := os.MkdirTemp("", "ca-test-")
 	require.NoError(t, err)
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		if err := os.RemoveAll(tempDir); err != nil {
+			t.Logf("Failed to remove temp directory: %v", err)
+		}
+	}()
 
 	// Create and initialize CA
 	caConfig := &CAConfig{

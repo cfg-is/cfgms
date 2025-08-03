@@ -85,9 +85,13 @@ func SetupTestCertsWithConfig(t *testing.T, config *CertConfig) (certDir string,
 	
 	// Return cleanup function
 	cleanup = func() {
-		os.RemoveAll(tempDir)
+		if err := os.RemoveAll(tempDir); err != nil {
+			// Log error but continue cleanup
+		}
 		if config.CertDir != tempDir {
-			os.RemoveAll(config.CertDir)
+			if err := os.RemoveAll(config.CertDir); err != nil {
+				// Log error but continue cleanup
+			}
 		}
 	}
 	
@@ -133,7 +137,11 @@ func GenerateTestCertificates(config *CertConfig) error {
 	if err != nil {
 		return err
 	}
-	defer caCertFile.Close()
+	defer func() {
+		if err := caCertFile.Close(); err != nil {
+			// Log error but continue
+		}
+	}()
 
 	if err := pem.Encode(caCertFile, &pem.Block{Type: "CERTIFICATE", Bytes: caCertDER}); err != nil {
 		return err
@@ -174,7 +182,11 @@ func GenerateTestCertificates(config *CertConfig) error {
 	if err != nil {
 		return err
 	}
-	defer serverCertFile.Close()
+	defer func() {
+		if err := serverCertFile.Close(); err != nil {
+			// Log error but continue
+		}
+	}()
 
 	if err := pem.Encode(serverCertFile, &pem.Block{Type: "CERTIFICATE", Bytes: serverCertDER}); err != nil {
 		return err
@@ -185,7 +197,11 @@ func GenerateTestCertificates(config *CertConfig) error {
 	if err != nil {
 		return err
 	}
-	defer serverKeyFile.Close()
+	defer func() {
+		if err := serverKeyFile.Close(); err != nil {
+			// Log error but continue
+		}
+	}()
 
 	if err := pem.Encode(serverKeyFile, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(serverKey)}); err != nil {
 		return err
@@ -224,7 +240,11 @@ func GenerateTestCertificates(config *CertConfig) error {
 	if err != nil {
 		return err
 	}
-	defer clientCertFile.Close()
+	defer func() {
+		if err := clientCertFile.Close(); err != nil {
+			// Log error but continue
+		}
+	}()
 
 	if err := pem.Encode(clientCertFile, &pem.Block{Type: "CERTIFICATE", Bytes: clientCertDER}); err != nil {
 		return err
@@ -235,7 +255,11 @@ func GenerateTestCertificates(config *CertConfig) error {
 	if err != nil {
 		return err
 	}
-	defer clientKeyFile.Close()
+	defer func() {
+		if err := clientKeyFile.Close(); err != nil {
+			// Log error but continue
+		}
+	}()
 
 	if err := pem.Encode(clientKeyFile, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(clientKey)}); err != nil {
 		return err
