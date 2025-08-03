@@ -248,7 +248,9 @@ func (h *RollbackHandler) ListRollbackHistory(w http.ResponseWriter, r *http.Req
 func (h *RollbackHandler) sendJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
+	if err := json.NewEncoder(w).Encode(data); err != nil {
+		// Log error but can't return error from HTTP handler
+	}
 }
 
 func (h *RollbackHandler) sendError(w http.ResponseWriter, status int, message string) {

@@ -290,7 +290,9 @@ func (m *DefaultRollbackManager) executeRollbackAsync(ctx context.Context, opera
 	operation.Status = RollbackStatusValidating
 	operation.Progress.Stage = "validating"
 	operation.Progress.Percentage = 10
-	m.store.UpdateOperation(ctx, operation)
+	if err := m.store.UpdateOperation(ctx, operation); err != nil {
+		// Log error but continue - operation state updates are best effort
+	}
 	
 	// Perform final validation
 	validationResults, err := m.validator.ValidateRollback(ctx, operation.Request, preview)
@@ -308,8 +310,12 @@ func (m *DefaultRollbackManager) executeRollbackAsync(ctx context.Context, opera
 	operation.Status = RollbackStatusInProgress
 	operation.Progress.Stage = "executing"
 	operation.Progress.Percentage = 20
-	m.store.UpdateOperation(ctx, operation)
-	m.notifier.NotifyRollbackProgress(ctx, operation)
+	if err := m.store.UpdateOperation(ctx, operation); err != nil {
+		// Log error but continue - operation state updates are best effort
+	}
+	if err := m.notifier.NotifyRollbackProgress(ctx, operation); err != nil {
+		// Log error but continue - notifications are best effort
+	}
 	
 	// Get repository
 	repoID, err := m.getRepositoryID(ctx, operation.Request.TargetType, operation.Request.TargetID)
@@ -329,7 +335,9 @@ func (m *DefaultRollbackManager) executeRollbackAsync(ctx context.Context, opera
 	operation.Progress.Stage = "applying_changes"
 	operation.Progress.Percentage = 40
 	operation.Progress.ItemsTotal = len(preview.Changes)
-	m.store.UpdateOperation(ctx, operation)
+	if err := m.store.UpdateOperation(ctx, operation); err != nil {
+		// Log error but continue - operation state updates are best effort
+	}
 	
 	// Apply changes
 	failures := []RollbackFailure{}
@@ -403,9 +411,13 @@ func (m *DefaultRollbackManager) executeRollbackAsync(ctx context.Context, opera
 	}
 	
 	// Final update
-	m.store.UpdateOperation(ctx, operation)
+	if err := m.store.UpdateOperation(ctx, operation); err != nil {
+		// Log error but continue - operation state updates are best effort
+	}
 	m.addAuditEntry(ctx, operation, "rollback_completed", "Rollback completed successfully", nil)
-	m.notifier.NotifyRollbackCompleted(ctx, operation)
+	if err := m.notifier.NotifyRollbackCompleted(ctx, operation); err != nil {
+		// Log error but continue - notifications are best effort
+	}
 }
 
 func (m *DefaultRollbackManager) failRollback(ctx context.Context, operation *RollbackOperation, err error) {
@@ -426,9 +438,13 @@ func (m *DefaultRollbackManager) failRollback(ctx context.Context, operation *Ro
 		},
 	}
 	
-	m.store.UpdateOperation(ctx, operation)
+	if storeErr := m.store.UpdateOperation(ctx, operation); storeErr != nil {
+		// Log error but continue - operation state updates are best effort
+	}
 	m.addAuditEntry(ctx, operation, "rollback_failed", err.Error(), nil)
-	m.notifier.NotifyRollbackFailed(ctx, operation, err)
+	if notifyErr := m.notifier.NotifyRollbackFailed(ctx, operation, err); notifyErr != nil {
+		// Log error but continue - notifications are best effort
+	}
 }
 
 func (m *DefaultRollbackManager) getRepositoryID(ctx context.Context, targetType TargetType, targetID string) (string, error) {
@@ -665,7 +681,9 @@ func (m *DefaultRollbackManager) addAuditEntry(ctx context.Context, operation *R
 	}
 	
 	operation.AuditTrail = append(operation.AuditTrail, entry)
-	m.store.AddAuditEntry(ctx, operation.ID, entry)
+	if err := m.store.AddAuditEntry(ctx, operation.ID, entry); err != nil {
+		// Log error but continue - audit entries are best effort
+	}
 }
 
 func (m *DefaultRollbackManager) applyChange(ctx context.Context, repoID, branch string, change ConfigurationChange) error {

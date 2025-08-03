@@ -14,7 +14,10 @@ import (
 // Helper function to create Config from YAML string
 func createConfigFromYAML(yamlStr string) *Config {
 	var cfg Config
-	yaml.Unmarshal([]byte(yamlStr), &cfg)
+	if err := yaml.Unmarshal([]byte(yamlStr), &cfg); err != nil {
+		// Test helper - should not fail in practice
+		panic(err)
+	}
 	return &cfg
 }
 

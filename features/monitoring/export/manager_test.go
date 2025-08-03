@@ -260,7 +260,11 @@ func TestExportManagerDataExport(t *testing.T) {
 		ctx := context.Background()
 		err = manager.Start(ctx)
 		require.NoError(t, err)
-		defer manager.Stop(ctx)
+		defer func() {
+			if err := manager.Stop(ctx); err != nil {
+				t.Logf("Failed to stop manager: %v", err)
+			}
+		}()
 		
 		// Verify exporters are started
 		require.True(t, exporter1.IsStarted())
@@ -301,11 +305,19 @@ func TestExportManagerDataExport(t *testing.T) {
 
 		manager := export.NewExportManager(logger, tracer, config)
 		exporter := NewMockExporter("test")
-		manager.RegisterExporter("test", exporter)
+		if err := manager.RegisterExporter("test", exporter); err != nil {
+			t.Fatalf("Failed to register exporter: %v", err)
+		}
 
 		ctx := context.Background()
-		manager.Start(ctx)
-		defer manager.Stop(ctx)
+		if err := manager.Start(ctx); err != nil {
+			t.Fatalf("Failed to start manager: %v", err)
+		}
+		defer func() {
+			if err := manager.Stop(ctx); err != nil {
+				t.Logf("Failed to stop manager: %v", err)
+			}
+		}()
 
 		// Export data that should be sampled out
 		exportData := export.ExportData{
@@ -339,7 +351,11 @@ func TestExportManagerDataExport(t *testing.T) {
 
 		ctx := context.Background()
 		manager.Start(ctx)
-		defer manager.Stop(ctx)
+		defer func() {
+			if err := manager.Stop(ctx); err != nil {
+				t.Logf("Failed to stop manager: %v", err)
+			}
+		}()
 
 		// Fill buffer beyond capacity
 		for i := 0; i < 5; i++ {
@@ -383,7 +399,11 @@ func TestExportManagerErrorHandling(t *testing.T) {
 
 		ctx := context.Background()
 		manager.Start(ctx)
-		defer manager.Stop(ctx)
+		defer func() {
+			if err := manager.Stop(ctx); err != nil {
+				t.Logf("Failed to stop manager: %v", err)
+			}
+		}()
 
 		// Export data
 		exportData := export.ExportData{
@@ -435,7 +455,11 @@ func TestExportManagerHealthChecks(t *testing.T) {
 
 		ctx := context.Background()
 		manager.Start(ctx)
-		defer manager.Stop(ctx)
+		defer func() {
+			if err := manager.Stop(ctx); err != nil {
+				t.Logf("Failed to stop manager: %v", err)
+			}
+		}()
 
 		// Wait for health checks
 		time.Sleep(100 * time.Millisecond)
@@ -483,7 +507,11 @@ func TestExportDataFiltering(t *testing.T) {
 
 		ctx := context.Background()
 		manager.Start(ctx)
-		defer manager.Stop(ctx)
+		defer func() {
+			if err := manager.Stop(ctx); err != nil {
+				t.Logf("Failed to stop manager: %v", err)
+			}
+		}()
 
 		// Export data with both metrics and logs
 		exportData := export.ExportData{
@@ -544,7 +572,11 @@ func TestExportManagerConcurrency(t *testing.T) {
 
 		ctx := context.Background()
 		manager.Start(ctx)
-		defer manager.Stop(ctx)
+		defer func() {
+			if err := manager.Stop(ctx); err != nil {
+				t.Logf("Failed to stop manager: %v", err)
+			}
+		}()
 
 		// Launch concurrent exports
 		var wg sync.WaitGroup
