@@ -160,7 +160,11 @@ func (pe *PrometheusExporter) HealthCheck(ctx context.Context) ExporterHealth {
 		health.Message = fmt.Sprintf("Health check failed: %v", err)
 		return health
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			// Log error but continue
+		}
+	}()
 
 	if resp.StatusCode == http.StatusOK {
 		health.Status = "healthy"
@@ -194,11 +198,14 @@ func (pe *PrometheusExporter) handleMetrics(w http.ResponseWriter, r *http.Reque
 	
 	// Write metrics
 	for _, line := range metrics {
-		fmt.Fprintf(w, "%s\n", line)
+		if _, err := fmt.Fprintf(w, "%s\n", line); err != nil {
+			// Log error but continue - can't return error from HTTP handler
+			continue
+		}
 	}
 
 	// Add timestamp of last update
-	fmt.Fprintf(w, "# Last updated: %s\n", lastUpdate.Format(time.RFC3339))
+	_, _ = fmt.Fprintf(w, "# Last updated: %s\n", lastUpdate.Format(time.RFC3339))
 }
 
 // handleHealth provides a simple health check endpoint.

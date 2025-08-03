@@ -158,22 +158,24 @@ func (e *UnixExecutor) Close(ctx context.Context) error {
 
 	// Close PTY to break read operations
 	if e.pty != nil {
-		e.pty.Close()
+		if err := e.pty.Close(); err != nil {
+			// Log error but continue cleanup
+		}
 	}
 
 	// Terminate process gracefully
 	if e.cmd != nil && e.cmd.Process != nil {
-		// Try SIGTERM first
-		e.cmd.Process.Signal(syscall.SIGTERM)
+		// Try SIGTERM first - ignore errors as process might already be dead
+		_ = e.cmd.Process.Signal(syscall.SIGTERM)
 
 		// Wait a short time for graceful shutdown, then force kill if needed
 		select {
 		case <-ctx.Done():
-			// Force kill if context expires
-			e.cmd.Process.Kill()
+			// Force kill if context expires - ignore errors as process might be dead
+			_ = e.cmd.Process.Kill()
 		case <-time.After(2 * time.Second):
-			// Force kill after timeout
-			e.cmd.Process.Kill()
+			// Force kill after timeout - ignore errors as process might be dead
+			_ = e.cmd.Process.Kill()
 		}
 	}
 	e.mu.Unlock()

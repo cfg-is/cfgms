@@ -265,7 +265,11 @@ func (ee *ElasticsearchExporter) HealthCheck(ctx context.Context) ExporterHealth
 		health.Message = fmt.Sprintf("Health check request failed: %v", err)
 		return health
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			// Log error but continue
+		}
+	}()
 	
 	if resp.StatusCode != http.StatusOK {
 		health.Status = "unhealthy"
@@ -458,7 +462,11 @@ func (ee *ElasticsearchExporter) bulkIndex(ctx context.Context, documents []Elas
 	if err != nil {
 		return fmt.Errorf("bulk request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			// Log error but continue
+		}
+	}()
 	
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("bulk request returned status %d", resp.StatusCode)

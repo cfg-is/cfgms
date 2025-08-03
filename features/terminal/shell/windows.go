@@ -184,15 +184,15 @@ func (e *WindowsExecutor) Close(ctx context.Context) error {
 		e.cancel()
 	}
 
-	// Close pipes
+	// Close pipes - ignore errors as they may already be closed
 	if e.stdin != nil {
-		e.stdin.Close()
+		_ = e.stdin.Close()
 	}
 	if e.stdout != nil {
-		e.stdout.Close()
+		_ = e.stdout.Close()
 	}
 	if e.stderr != nil {
-		e.stderr.Close()
+		_ = e.stderr.Close()
 	}
 
 	// Terminate process gracefully

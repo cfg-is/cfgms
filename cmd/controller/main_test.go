@@ -24,7 +24,9 @@ func TestSignalHandling(t *testing.T) {
 		// Send a signal after a short delay
 		go func() {
 			time.Sleep(100 * time.Millisecond)
-			syscall.Kill(syscall.Getpid(), syscall.SIGINT)
+			if err := syscall.Kill(syscall.Getpid(), syscall.SIGINT); err != nil {
+				t.Logf("Failed to send SIGINT: %v", err)
+			}
 		}()
 
 		// Wait for signal

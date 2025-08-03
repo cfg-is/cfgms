@@ -174,7 +174,9 @@ func generateServerCmd() *cobra.Command {
 	cmd.Flags().StringVar(&organization, "org", "CFGMS", "Organization name")
 	cmd.Flags().IntVar(&validityDays, "validity", 365, "Certificate validity in days")
 
-	cmd.MarkFlagRequired("common-name")
+	if err := cmd.MarkFlagRequired("common-name"); err != nil {
+		panic(fmt.Sprintf("Failed to mark common-name flag as required: %v", err))
+	}
 
 	return cmd
 }
@@ -219,7 +221,9 @@ func generateClientCmd() *cobra.Command {
 	cmd.Flags().StringVar(&clientID, "client-id", "", "Client identifier")
 	cmd.Flags().IntVar(&validityDays, "validity", 365, "Certificate validity in days")
 
-	cmd.MarkFlagRequired("common-name")
+	if err := cmd.MarkFlagRequired("common-name"); err != nil {
+		panic(fmt.Sprintf("Failed to mark common-name flag as required: %v", err))
+	}
 
 	return cmd
 }
@@ -330,7 +334,9 @@ func validateCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&serialNumber, "serial", "", "Certificate serial number (required)")
-	cmd.MarkFlagRequired("serial")
+	if err := cmd.MarkFlagRequired("serial"); err != nil {
+		panic(fmt.Sprintf("Failed to mark serial flag as required: %v", err))
+	}
 
 	return cmd
 }
@@ -358,7 +364,9 @@ func renewCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&serialNumber, "serial", "", "Certificate serial number to renew (required)")
-	cmd.MarkFlagRequired("serial")
+	if err := cmd.MarkFlagRequired("serial"); err != nil {
+		panic(fmt.Sprintf("Failed to mark serial flag as required: %v", err))
+	}
 
 	return cmd
 }
@@ -448,7 +456,9 @@ func exportCmd() *cobra.Command {
 	cmd.Flags().StringVar(&outputDir, "output", ".", "Output directory for certificate files")
 	cmd.Flags().BoolVar(&includePrivateKey, "include-key", false, "Include private key in export")
 
-	cmd.MarkFlagRequired("serial")
+	if err := cmd.MarkFlagRequired("serial"); err != nil {
+		panic(fmt.Sprintf("Failed to mark serial flag as required: %v", err))
+	}
 
 	return cmd
 }

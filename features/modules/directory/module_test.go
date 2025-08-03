@@ -27,7 +27,11 @@ func TestDirectoryModule(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		if err := os.RemoveAll(tempDir); err != nil {
+			t.Logf("Failed to cleanup temp dir %s: %v", tempDir, err)
+		}
+	}()
 
 	// Get current user and group for ownership tests
 	currentUser, err := user.Current()
@@ -150,7 +154,11 @@ func TestDirectoryModule_EdgeCases(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		if err := os.RemoveAll(tempDir); err != nil {
+			t.Logf("Failed to cleanup temp dir %s: %v", tempDir, err)
+		}
+	}()
 
 	module := New()
 

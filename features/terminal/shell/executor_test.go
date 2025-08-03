@@ -182,7 +182,11 @@ func TestShellExecutorMultipleCommands(t *testing.T) {
 
 	err = executor.Start(ctx, nil)
 	require.NoError(t, err)
-	defer executor.Close(ctx)
+	defer func() {
+		if err := executor.Close(ctx); err != nil {
+			t.Logf("Failed to close executor: %v", err)
+		}
+	}()
 
 	commands := getTestCommands()
 	
@@ -265,7 +269,11 @@ func TestShellExecutorError(t *testing.T) {
 	// Start executor
 	err = executor.Start(ctx, nil)
 	require.NoError(t, err)
-	defer executor.Close(ctx)
+	defer func() {
+		if err := executor.Close(ctx); err != nil {
+			t.Logf("Failed to close executor: %v", err)
+		}
+	}()
 
 	// Try to start again (should fail)
 	err = executor.Start(ctx, nil)

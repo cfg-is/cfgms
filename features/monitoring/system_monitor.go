@@ -411,8 +411,6 @@ func (sm *SystemMonitor) Stop(ctx context.Context) error {
 		// Give a brief moment for cleanup, then return success
 		return nil
 	}
-	
-	return nil
 }
 
 // GetSystemHealth returns the current system health status.
