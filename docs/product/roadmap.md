@@ -244,6 +244,41 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 - [ ] Create Production Deployment Gates - Critical vulnerability blocking with emergency override
 - [ ] Optimize and Document Complete Workflow - End-to-end documentation and performance optimization
 
+#### v0.3.2 (Alpha) - Security Vulnerability Remediation
+
+**Goal**: Address critical and high severity security vulnerabilities discovered by the newly implemented security scanning tooling from v0.3.1
+
+**Security Issues Identified by Trivy (v0.3.1 Security Tools)**:
+
+[ ] **Critical Security Fixes**
+- [ ] **CVE-2025-21613** (CRITICAL) - Update `github.com/go-git/go-git/v5` from v5.12.0 → v5.13.0
+  - Issue: Argument injection via URL field 
+  - Impact: Remote code execution potential
+  - Fix: `go get github.com/go-git/go-git/v5@v5.13.0`
+- [ ] **CVE-2025-21614** (HIGH) - Update `github.com/go-git/go-git/v5` from v5.12.0 → v5.13.0  
+  - Issue: DoS vulnerability via maliciously crafted Git server replies
+  - Impact: Service availability disruption
+  - Fix: Same dependency update as above
+
+[ ] **Low Priority Security Updates**
+- [ ] **GHSA-2x5j-vhc8-9cwm** (LOW) - Update `github.com/cloudflare/circl` from v1.3.7 → v1.6.1
+  - Issue: CIRCL-Fourq validation errors leading to incorrect results
+  - Impact: Cryptographic operation reliability
+  - Status: Already marked as fixed, verify update path
+
+**Validation Requirements**:
+- [ ] Run `make security-trivy` to verify all critical/high vulnerabilities resolved
+- [ ] Ensure all existing tests continue to pass after dependency updates
+- [ ] Validate Git backend functionality with updated go-git dependency
+- [ ] Update go.mod and go.sum with dependency changes
+- [ ] Document security update process for future vulnerability remediation
+
+**Success Criteria**:
+- ✅ Trivy security scan passes with zero CRITICAL/HIGH vulnerabilities
+- ✅ All existing functionality remains intact after updates
+- ✅ Updated dependencies do not introduce breaking changes
+- ✅ Security tooling validates clean state for production deployment
+
 #### v0.4.0 (Alpha) - Advanced Multi-Tenancy & Plugin Architecture
 
 - [ ] Implement advanced module system

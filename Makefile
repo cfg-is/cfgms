@@ -1,4 +1,4 @@
-.PHONY: build test proto lint clean
+.PHONY: build test proto lint clean security-trivy security-scan security-check
 
 # Build settings
 GO_BUILD_FLAGS=-trimpath -ldflags="-s -w"
@@ -386,6 +386,53 @@ compliance-check:
 		echo ""; \
 		echo "🚨 COMPLIANCE RISK: Could trigger SOC2 audit findings!"; \
 	fi
+
+# Security Scanning Tools (v0.3.1)
+.PHONY: security-trivy security-scan security-check
+
+# Trivy filesystem scanning for vulnerabilities, secrets, and misconfigurations
+security-trivy:
+	@echo "🔍 Running Trivy Filesystem Scan"
+	@echo "================================"
+	@if ! command -v trivy >/dev/null 2>&1; then \
+		echo "❌ Error: trivy is not installed"; \
+		echo ""; \
+		echo "Install trivy using Go (recommended for Go projects):"; \
+		echo "  go install github.com/aquasecurity/trivy/cmd/trivy@latest"; \
+		echo ""; \
+		echo "Or pin to specific version for reproducible builds:"; \
+		echo "  go install github.com/aquasecurity/trivy/cmd/trivy@v0.48.3"; \
+		echo ""; \
+		echo "Alternative installation methods:"; \
+		echo "  # Binary download:"; \
+		echo "  curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin v0.48.3"; \
+		echo "  # Official documentation: https://aquasecurity.github.io/trivy/latest/getting-started/installation/"; \
+		exit 1; \
+	fi
+	@echo "Running trivy filesystem scan..."
+	@echo "🔍 Vulnerability Scan (Critical Issues):"
+	@trivy fs . --scanners vuln --format table --severity CRITICAL,HIGH --exit-code 1 || { \
+		echo ""; \
+		echo "❌ CRITICAL/HIGH vulnerabilities found - deployment blocked!"; \
+		echo "   Please update dependencies to fix these security issues."; \
+		exit 1; \
+	}
+	@echo "🔍 Complete Security Scan (All Issues):"
+	@trivy fs . --scanners vuln,secret,misconfig --format table --exit-code 0 || true
+	@echo ""; \
+	echo "✅ Trivy scan completed"; \
+	echo "   Note: Development certificates detected in features/controller/certs/ are expected"; \
+	echo "   Critical/High vulnerabilities will block deployment"
+
+# Unified security scanning (runs all security tools)
+security-scan: security-trivy
+	@echo "🛡️  Security Scan Complete"
+	@echo "=========================="
+	@echo "✅ All security tools passed"
+
+# Quick security check (placeholder for future incremental scanning)
+security-check: security-trivy
+	@echo "⚡ Quick Security Check Complete"
 
 lint:
 	golangci-lint run

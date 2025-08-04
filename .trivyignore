@@ -1,0 +1,64 @@
+# .trivyignore - Trivy security scanner configuration
+# Manages false positives and known acceptable risks
+# Format: CVE-ID or vulnerability rule pattern per line
+
+# Development and Test Certificate Files
+# These are test certificates used for development/testing mTLS functionality
+# They are not used in production and are safe to ignore for security scanning
+
+# Specific test certificate files to ignore
+features/controller/certs/244812452512842577549117018372747127309/key.pem
+features/controller/certs/ca/ca.key
+
+# Development dependencies (test/build tools)
+# These vulnerabilities are not exploitable in production deployment
+# since test and build dependencies are not included in runtime binaries
+
+# Go module dependencies - test-only packages
+# Test packages are not included in production builds
+# Uncomment specific CVEs below if they appear in test dependencies:
+# CVE-XXXX-XXXXX  # Example: test dependency vulnerability
+
+# Documentation and example files
+# These files are not part of the production system
+docs/
+examples/
+test/
+*.md
+
+# Configuration and template files that may contain patterns detected as secrets
+# These are template files and documentation, not actual secrets
+docs/examples/
+docs/templates/
+
+# Build artifacts and generated files
+bin/
+dist/
+*.log
+.git/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Common false positives in Go projects:
+# Uncomment specific patterns if they become problematic:
+
+# Generic passwords in test files (these are not real credentials)
+# password
+# secret
+# token
+
+# Example configuration files with placeholder values
+# example.yaml
+# sample.conf
+
+# Note: This file should be reviewed regularly and updated as needed
+# Each ignored item should have a justification comment explaining why it's safe to ignore

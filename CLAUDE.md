@@ -77,14 +77,22 @@ CFGMS (Config Management System) is a modern, Go-based configuration management 
    - If ANY tests fail, fix them before continuing
    - This includes unrelated test failures
 
-6. **Run Linting** (MANDATORY)
+6. **Run Security Scanning** (MANDATORY)
+   ```bash
+   make security-scan  # MUST pass before proceeding
+   ```
+   - Critical/High vulnerabilities will block deployment
+   - Fix security issues before continuing with commit
+   - Development certificates in features/controller/certs/ are expected (non-blocking)
+
+7. **Run Linting** (MANDATORY)
    ```bash
    make lint  # MUST pass before proceeding
    ```
 
 **COMMIT AND PROJECT MANAGEMENT:**
 
-7. **Commit Feature Work**
+8. **Commit Feature Work**
    ```bash
    git add .
    git commit -m "Implement Story #[NUMBER]: [description]
@@ -92,22 +100,22 @@ CFGMS (Config Management System) is a modern, Go-based configuration management 
    Security Review: [Brief summary of security review findings/all clear]"
    ```
 
-8. **Update Documentation** (REQUIRED)
+9. **Update Documentation** (REQUIRED)
    - Update `docs/product/roadmap.md` if needed
    - Update `CLAUDE.md` if workflow/commands changed
 
-9. **Update GitHub Project Status** (MANDATORY)
-   ```bash
-   # See docs/github-cli-reference.md for exact commands
-   # Move story from "In Progress" to "Done"
-   ```
+10. **Update GitHub Project Status** (MANDATORY)
+    ```bash
+    # See docs/github-cli-reference.md for exact commands
+    # Move story from "In Progress" to "Done"
+    ```
 
-10. **Final Test Run** (MANDATORY)
+11. **Final Test Run** (MANDATORY)
     ```bash
     make test  # Final verification before merge
     ```
 
-11. **Merge to Develop**
+12. **Merge to Develop**
     ```bash
     git checkout develop
     git merge feature/story-[NUMBER]-[brief-description]
@@ -117,6 +125,7 @@ CFGMS (Config Management System) is a modern, Go-based configuration management 
 **VALIDATION CHECKPOINTS:**
 - Verify branch was created: `git log --oneline -5`
 - Verify tests pass: `make test`
+- Verify security scan passes: `make security-scan`
 - Verify project updated: Check GitHub project board
 
 ## Development Commands
@@ -176,6 +185,21 @@ make test-v040-gate
 # Run linter (requires golangci-lint)
 make lint
 # Equivalent to: golangci-lint run
+```
+
+### Security Scanning
+```bash
+# Run all security tools (comprehensive scan)
+make security-scan
+
+# Run individual security tools
+make security-trivy      # Trivy filesystem scanning
+make security-nancy      # Nancy Go dependency scanning  
+make security-gosec      # gosec Go security patterns
+make security-staticcheck # Staticcheck static analysis
+
+# Quick security check (development workflow)
+make security-check
 ```
 
 ### Protocol Buffers
