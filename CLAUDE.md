@@ -201,6 +201,7 @@ make security-check
 # Individual security tools
 make security-trivy      # Filesystem vulnerability scanning
 make security-deps       # Go dependency vulnerability scanning
+make security-gosec      # Go security pattern analysis
 
 # Automatic tool installation
 make install-nancy       # Cross-platform Nancy installation

@@ -8,22 +8,24 @@ CFGMS uses a multi-layered security scanning approach with four primary tools:
 
 - **🔍 Trivy**: Filesystem scanning for vulnerabilities, secrets, and misconfigurations
 - **📦 Nancy**: Go dependency vulnerability scanning 
-- **🛡️ gosec**: Go security pattern analysis (Future: v0.3.1 Story 2.1)
+- **🛡️ gosec**: Go security pattern analysis and anti-pattern detection
 - **🔬 staticcheck**: Advanced static analysis (Future: v0.3.1 Story 2.2)
 
 ## Quick Start
 
 ```bash
-# 1. Automatic installation (recommended)
+# 1. Install security tools
+go install github.com/aquasecurity/trivy/cmd/trivy@latest
+go install github.com/securego/gosec/v2/cmd/gosec@latest
 make install-nancy     # Auto-install Nancy for your platform
-# Note: Trivy should be installed via: go install github.com/aquasecurity/trivy/cmd/trivy@latest
 
 # 2. Verify installation and run security scan
 make security-scan     # All tools (used in CLAUDE.md workflow)
 
 # 3. Run individual tools if needed
 make security-trivy    # Filesystem scanning
-make security-deps     # Dependency scanning
+make security-deps     # Dependency scanning  
+make security-gosec    # Go security pattern analysis
 
 # 4. Quick development check
 make security-check    # Same as security-scan but optimized for development
@@ -117,14 +119,23 @@ Invoke-WebRequest -Uri 'https://github.com/sonatype-nexus-community/nancy/releas
 Move-Item nancy.exe $(go env GOPATH)\bin\nancy.exe
 ```
 
-### 🛡️ gosec Installation (Future - v0.3.1 Story 2.1)
+### 🛡️ gosec Installation
 
-gosec analyzes Go source code for security problems.
+gosec analyzes Go source code for security problems and anti-patterns.
 
 ```bash
-# Go installation (all platforms)
-go install github.com/securecodewarrior/gosec/v2/cmd/gosec@latest
+# Go installation (all platforms) - RECOMMENDED
+go install github.com/securego/gosec/v2/cmd/gosec@latest
+
+# Verify installation
+gosec --version
 ```
+
+**Key Features:**
+- Detects SQL injection, crypto weaknesses, and other security anti-patterns
+- Configurable via .gosec.json for rule management and false positive suppression
+- Non-blocking by default - reports issues without stopping development workflow
+- Excludes test files automatically to focus on production code security
 
 ### 🔬 staticcheck Installation (Future - v0.3.1 Story 2.2)
 
@@ -144,9 +155,9 @@ After installing the tools, verify they're working correctly:
 # Check all tools are in PATH
 trivy --version      # Should show: trivy version X.X.X
 nancy --version      # Should show: nancy version X.X.X
+gosec --version      # Should show: Version: X.X.X
 
 # Future tools (v0.3.1)
-# gosec --version     # Should show: gosec version X.X.X
 # staticcheck --version # Should show: staticcheck version X.X.X
 ```
 
@@ -158,8 +169,10 @@ make security-trivy
 # Test Nancy dependency scanning  
 make security-deps
 
-# Future: gosec and staticcheck testing
-# make security-gosec
+# Test gosec Go security pattern analysis
+make security-gosec
+
+# Future: staticcheck testing
 # make security-staticcheck
 ```
 
@@ -225,11 +238,39 @@ dist/
 *.log
 ```
 
+### .gosec.json
+Located at project root, configures gosec security analysis:
+
+```json
+{
+  "global": {
+    "nosec": false,
+    "exclude-generated": true
+  },
+  "exclude": {
+    "paths": [
+      "test/**/*",
+      "*_test.go", 
+      "*/testdata/*",
+      "examples/**/*",
+      "docs/**/*"
+    ]
+  },
+  "severity": "medium",
+  "confidence": "medium"
+}
+```
+
+**Key Configuration Options:**
+- **exclude.paths**: Automatically excludes test files and documentation
+- **severity/confidence**: Set to "medium" to focus on actionable issues
+- **nosec comments**: Use `#nosec` in code to suppress false positives on specific lines
+
 ### Security Tool Behavior
 
 - **Trivy**: Blocks on CRITICAL/HIGH vulnerabilities, shows all findings
-- **Nancy**: Non-blocking, provides remediation guidance
-- **gosec**: (Future) Configurable blocking via .gosec.json
+- **Nancy**: Non-blocking, provides remediation guidance for vulnerable dependencies
+- **gosec**: Non-blocking, reports security anti-patterns with configurable rules via .gosec.json
 - **staticcheck**: (Future) Focuses on important issues, excludes style warnings
 
 ## Troubleshooting
@@ -307,7 +348,7 @@ make install-nancy       # Automatic cross-platform Nancy installation
 ```bash
 make security-trivy      # Trivy filesystem scanning
 make security-deps       # Nancy dependency scanning
-make security-gosec      # gosec Go security patterns (future)
+make security-gosec      # gosec Go security pattern analysis
 make security-staticcheck # staticcheck static analysis (future)
 ```
 
@@ -339,7 +380,7 @@ make security-check      # Quick security validation for development
 Current tool versions (as of v0.3.1):
 - **Trivy**: v0.48.3+ (latest recommended)
 - **Nancy**: v1.0.51
-- **gosec**: latest (future implementation)  
+- **gosec**: v2.22.7+ (latest recommended via `go install @latest`)
 - **staticcheck**: latest (future implementation)
 
 ## Contributing to Security Setup
