@@ -281,6 +281,12 @@ func (f *E2ETestFramework) initializeController() error {
 			ServerCertValidityDays: 1,
 			ClientCertValidityDays: 1,
 			EnableAutoRenewal:     false, // Disable for tests
+			Server: &controllerConfig.ServerCertificateConfig{
+				CommonName:   "localhost",
+				DNSNames:     []string{"localhost", "127.0.0.1"},
+				IPAddresses:  []string{"127.0.0.1", "::1"},
+				Organization: "Test Organization",
+			},
 		},
 	}
 	

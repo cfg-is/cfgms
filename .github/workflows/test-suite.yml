@@ -48,7 +48,7 @@ jobs:
       run: make test
     
     - name: Upload test results
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       if: always()
       with:
         name: unit-test-results
@@ -89,7 +89,7 @@ jobs:
       run: make test-production-critical
     
     - name: Upload integration test results
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       if: always()
       with:
         name: integration-test-results
@@ -207,7 +207,7 @@ jobs:
         esac
     
     - name: Upload production test results
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       if: always()
       with:
         name: production-test-results-${{ matrix.readiness-test }}
