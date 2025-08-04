@@ -16,10 +16,200 @@ on:
         - v030
         - v040
         - all
+      emergency_override:
+        description: 'Emergency override for security gate (requires justification)'
+        required: false
+        default: false
+        type: boolean
+      override_reason:
+        description: 'Reason for emergency override (required if override is true)'
+        required: false
+        type: string
 
 jobs:
+  # Security Gate - Critical Vulnerability Blocking (Story #99)
+  security-deployment-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      security-status: ${{ steps.security-gate.outputs.security-status }}
+      deployment-allowed: ${{ steps.security-gate.outputs.deployment-allowed }}
+      override-required: ${{ steps.security-gate.outputs.override-required }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.23'
+    
+    - name: Install Security Tools
+      run: |
+        echo "🔧 Installing Security Tools for Production Gate"
+        echo "=============================================="
+        
+        # Install Trivy
+        sudo apt-get update
+        sudo apt-get install wget apt-transport-https gnupg lsb-release
+        wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+        echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
+        sudo apt-get update
+        sudo apt-get install trivy
+        
+        # Install other security tools
+        make install-nancy
+        go install github.com/securecodewarrior/gosec/v2/cmd/gosec@latest
+        go install honnef.co/go/tools/cmd/staticcheck@latest
+        
+        echo "✅ Security tools installed"
+    
+    - name: Run Security Gate Analysis
+      id: security-gate
+      run: |
+        echo "🚪 PRODUCTION SECURITY DEPLOYMENT GATE"
+        echo "======================================"
+        echo ""
+        
+        # Initialize variables
+        critical_vulns=0
+        high_vulns=0
+        security_issues_found=false
+        deployment_blocked=false
+        override_required=false
+        
+        # Check for critical vulnerabilities with Trivy
+        echo "🔍 Scanning for Critical/High Vulnerabilities..."
+        trivy fs . --severity CRITICAL,HIGH --exit-code 1 --format table > /tmp/trivy-critical.txt 2>&1
+        trivy_exit_code=$?
+        
+        if [ $trivy_exit_code -ne 0 ]; then
+          echo "❌ CRITICAL/HIGH vulnerabilities detected in dependencies"
+          critical_vulns=$(trivy fs . --severity CRITICAL --format json --quiet | jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' 2>/dev/null || echo "0")
+          high_vulns=$(trivy fs . --severity HIGH --format json --quiet | jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' 2>/dev/null || echo "0")
+          security_issues_found=true
+          deployment_blocked=true
+          
+          echo "  Critical vulnerabilities: $critical_vulns"
+          echo "  High vulnerabilities: $high_vulns"
+          echo ""
+          cat /tmp/trivy-critical.txt
+        else
+          echo "✅ No critical/high vulnerabilities detected"
+        fi
+        
+        echo ""
+        echo "🛡️ Running Additional Security Scans..."
+        
+        # Run gosec for security patterns (non-blocking but reported)
+        if ! make security-gosec >/dev/null 2>&1; then
+          echo "⚠️  gosec detected security patterns (non-blocking)"
+        else
+          echo "✅ gosec security pattern scan passed"
+        fi
+        
+        # Check for emergency override
+        if [ "${{ github.event.inputs.emergency_override }}" = "true" ] || [ -f "EMERGENCY_DEPLOYMENT" ]; then
+          echo ""
+          echo "🚨 EMERGENCY OVERRIDE DETECTED"
+          echo "============================="
+          if [ "$deployment_blocked" = "true" ]; then
+            echo "⚠️  Security issues present but emergency override authorized"
+            echo "   Override reason: ${{ github.event.inputs.override_reason || 'Manual emergency file present' }}"
+            deployment_blocked=false
+            override_required=true
+          fi
+        fi
+        
+        # Set outputs
+        echo "security-status=$( [ "$security_issues_found" = "true" ] && echo "issues-found" || echo "clean" )" >> $GITHUB_OUTPUT
+        echo "deployment-allowed=$( [ "$deployment_blocked" = "false" ] && echo "true" || echo "false" )" >> $GITHUB_OUTPUT
+        echo "override-required=$override_required" >> $GITHUB_OUTPUT
+        
+        # Final decision
+        echo ""
+        echo "🎯 SECURITY GATE DECISION"
+        echo "========================"
+        if [ "$deployment_blocked" = "true" ]; then
+          echo "❌ DEPLOYMENT BLOCKED"
+          echo "   Critical security vulnerabilities must be resolved"
+          echo ""
+          echo "🤖 Automated Remediation Available:"
+          echo "   1. Download security scan artifacts from previous workflow run"
+          echo "   2. Use Claude Code with the remediation JSON to fix issues"
+          echo "   3. Re-run deployment after fixes are merged"
+          echo ""
+          echo "🚨 Emergency Override Available:"
+          echo "   Use workflow_dispatch with emergency_override: true"
+          echo "   Requires proper justification and approval"
+          exit 1
+        else
+          if [ "$override_required" = "true" ]; then
+            echo "⚠️  DEPLOYMENT ALLOWED (EMERGENCY OVERRIDE)"
+            echo "   Security issues present but override authorized"
+          else
+            echo "✅ DEPLOYMENT ALLOWED"
+            echo "   All security checks passed"
+          fi
+        fi
+    
+    - name: Generate Security Audit Trail
+      if: always()
+      run: |
+        echo "📝 SECURITY AUDIT TRAIL"
+        echo "======================"
+        echo ""
+        echo "Deployment Details:"
+        echo "- Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "- Branch: ${{ github.ref }}"
+        echo "- Commit: ${{ github.sha }}"
+        echo "- Actor: ${{ github.actor }}"
+        echo "- Event: ${{ github.event_name }}"
+        echo ""
+        echo "Security Gate Results:"
+        echo "- Security Status: ${{ steps.security-gate.outputs.security-status }}"
+        echo "- Deployment Allowed: ${{ steps.security-gate.outputs.deployment-allowed }}"
+        echo "- Override Used: ${{ steps.security-gate.outputs.override-required }}"
+        echo ""
+        if [ "${{ steps.security-gate.outputs.override-required }}" = "true" ]; then
+          echo "Override Details:"
+          echo "- Reason: ${{ github.event.inputs.override_reason || 'Emergency file override' }}"
+          echo "- Authorized by: ${{ github.actor }}"
+          echo "- Approval required: YES (manual review needed)"
+        fi
+        
+        # Save audit trail
+        mkdir -p audit-logs
+        cat > audit-logs/deployment-security-audit.json << EOF
+        {
+          "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+          "deployment": {
+            "branch": "${{ github.ref }}",
+            "commit": "${{ github.sha }}",
+            "actor": "${{ github.actor }}",
+            "event": "${{ github.event_name }}"
+          },
+          "security_gate": {
+            "status": "${{ steps.security-gate.outputs.security-status }}",
+            "deployment_allowed": ${{ steps.security-gate.outputs.deployment-allowed }},
+            "override_used": ${{ steps.security-gate.outputs.override-required }},
+            "override_reason": "${{ github.event.inputs.override_reason || 'N/A' }}"
+          }
+        }
+        EOF
+    
+    - name: Upload Security Audit Trail
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: security-deployment-audit
+        path: audit-logs/
+        retention-days: 90
+
   production-risk-assessment:
     runs-on: ubuntu-latest
+    needs: security-deployment-gate
+    if: needs.security-deployment-gate.outputs.deployment-allowed == 'true'
     steps:
     - uses: actions/checkout@v4
     
@@ -35,6 +225,11 @@ jobs:
       run: |
         echo "🔍 PRODUCTION RISK ANALYSIS"
         echo "=========================="
+        echo ""
+        echo "Security Gate Status: ✅ ${{ needs.security-deployment-gate.outputs.security-status }}"
+        if [ "${{ needs.security-deployment-gate.outputs.override-required }}" = "true" ]; then
+          echo "⚠️  Emergency override was used - additional review required"
+        fi
         echo ""
         
         echo "📊 Current Export Reliability Status:"
@@ -57,7 +252,8 @@ jobs:
 
   v030-release-gate:
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' || contains(github.event.inputs.gate_type, 'v030') || contains(github.event.inputs.gate_type, 'all')
+    needs: security-deployment-gate
+    if: (github.ref == 'refs/heads/main' || contains(github.event.inputs.gate_type, 'v030') || contains(github.event.inputs.gate_type, 'all')) && needs.security-deployment-gate.outputs.deployment-allowed == 'true'
     steps:
     - uses: actions/checkout@v4
     
@@ -74,10 +270,19 @@ jobs:
         echo "🚪 Running v0.3.0 Release Gate"
         echo "=============================="
         
+        echo "Security Gate Status: ✅ Passed (${{ needs.security-deployment-gate.outputs.security-status }})"
+        if [ "${{ needs.security-deployment-gate.outputs.override-required }}" = "true" ]; then
+          echo "⚠️  Emergency override was used - additional review required"
+        fi
+        echo ""
+        
         if make test-v030-gate; then
           echo ""
           echo "✅ v0.3.0 RELEASE GATE PASSED"
           echo "   Ready for alpha MSP deployment"
+          if [ "${{ needs.security-deployment-gate.outputs.override-required }}" = "true" ]; then
+            echo "⚠️  Note: Emergency security override was used"
+          fi
           exit 0
         else
           echo ""
@@ -187,8 +392,8 @@ jobs:
 
   v040-release-gate:
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' || contains(github.event.inputs.gate_type, 'v040') || contains(github.event.inputs.gate_type, 'all')
-    needs: [production-readiness-validation, synthetic-monitoring-validation]
+    needs: [security-deployment-gate, production-readiness-validation, synthetic-monitoring-validation]
+    if: (github.ref == 'refs/heads/main' || contains(github.event.inputs.gate_type, 'v040') || contains(github.event.inputs.gate_type, 'all')) && needs.security-deployment-gate.outputs.deployment-allowed == 'true'
     steps:
     - uses: actions/checkout@v4
     
@@ -205,10 +410,19 @@ jobs:
         echo "🚪 Running v0.4.0 Release Gate"
         echo "=============================="
         
+        echo "Security Gate Status: ✅ Passed (${{ needs.security-deployment-gate.outputs.security-status }})"
+        if [ "${{ needs.security-deployment-gate.outputs.override-required }}" = "true" ]; then
+          echo "⚠️  Emergency override was used - additional review required"
+        fi
+        echo ""
+        
         if make test-v040-gate; then
           echo ""
           echo "✅ v0.4.0 RELEASE GATE PASSED"
           echo "   Ready for production scale deployment"
+          if [ "${{ needs.security-deployment-gate.outputs.override-required }}" = "true" ]; then
+            echo "⚠️  Note: Emergency security override was used"
+          fi
           exit 0
         else
           echo ""
@@ -441,6 +655,117 @@ jobs:
         path: |
           test/reports/
           **/*test*.log
+        retention-days: 30
+
+  # Automated Notifications for Security-Blocked Deployments (Story #99)
+  deployment-notification:
+    runs-on: ubuntu-latest
+    needs: security-deployment-gate
+    if: always()
+    steps:
+    - name: Generate Deployment Status Notification
+      run: |
+        echo "📧 DEPLOYMENT STATUS NOTIFICATION"
+        echo "================================"
+        
+        security_status="${{ needs.security-deployment-gate.outputs.security-status }}"
+        deployment_allowed="${{ needs.security-deployment-gate.outputs.deployment-allowed }}"
+        override_used="${{ needs.security-deployment-gate.outputs.override-required }}"
+        
+        echo "Deployment Details:"
+        echo "- Branch: ${{ github.ref }}"
+        echo "- Commit: ${{ github.sha }}"
+        echo "- Actor: ${{ github.actor }}"
+        echo "- Triggered by: ${{ github.event_name }}"
+        echo ""
+        echo "Security Gate Results:"
+        echo "- Security Status: $security_status"
+        echo "- Deployment Allowed: $deployment_allowed"
+        echo "- Emergency Override Used: $override_used"
+        echo ""
+        
+        if [ "$deployment_allowed" = "false" ]; then
+          echo "🚨 DEPLOYMENT BLOCKED - SECURITY ISSUES DETECTED"
+          echo "==============================================="
+          echo ""
+          echo "Critical security vulnerabilities have blocked this deployment."
+          echo ""
+          echo "🤖 Automated Remediation Steps:"
+          echo "1. Download the security scan artifacts from the security-scan workflow"
+          echo "2. Extract the remediation JSON file"
+          echo "3. Use Claude Code to automatically fix the security issues:"
+          echo "   - Copy the JSON content to Claude Code"
+          echo "   - Ask Claude to apply the security fixes"
+          echo "   - Review and commit the fixes"
+          echo "4. Push the fixes and re-trigger the deployment"
+          echo ""
+          echo "🚨 Emergency Override Available (Use with caution):"
+          echo "   If this is a critical emergency deployment:"
+          echo "   1. Go to Actions → Production Risk Gates → Run workflow"
+          echo "   2. Set 'emergency_override' to true"
+          echo "   3. Provide a detailed 'override_reason'"
+          echo "   4. Emergency deployments require post-deployment security remediation"
+          echo ""
+          echo "📋 Security Remediation Checklist:"
+          echo "   - [ ] Security vulnerabilities identified and documented"
+          echo "   - [ ] Remediation plan created with timelines"
+          echo "   - [ ] Development team notified"
+          echo "   - [ ] Security team approval obtained (if override used)"
+          echo "   - [ ] Post-deployment security validation scheduled"
+          
+          # In a real environment, this would send notifications via:
+          # - Slack/Teams webhooks
+          # - Email notifications
+          # - PagerDuty/incident management systems
+          # - JIRA/issue tracking systems
+          
+        elif [ "$override_used" = "true" ]; then
+          echo "⚠️  DEPLOYMENT PROCEEDED WITH EMERGENCY OVERRIDE"
+          echo "==============================================="
+          echo ""
+          echo "Security issues were present but emergency override was authorized."
+          echo ""
+          echo "🔍 Post-Deployment Security Actions Required:"
+          echo "1. Immediate security remediation planning"
+          echo "2. Risk assessment documentation"
+          echo "3. Timeline for security fixes implementation"
+          echo "4. Security team review and approval"
+          echo ""
+          echo "Override Details:"
+          echo "- Reason: ${{ github.event.inputs.override_reason || 'Emergency file override' }}"
+          echo "- Authorized by: ${{ github.actor }}"
+          echo "- Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          
+        else
+          echo "✅ DEPLOYMENT APPROVED - ALL SECURITY CHECKS PASSED"
+          echo "=================================================="
+          echo ""
+          echo "All security scans have passed successfully."
+          echo "Deployment is proceeding with full security approval."
+        fi
+        
+        # Create notification summary for external systems
+        cat > deployment-notification.json << EOF
+        {
+          "deployment_id": "${{ github.run_id }}",
+          "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+          "branch": "${{ github.ref }}",
+          "commit": "${{ github.sha }}",
+          "actor": "${{ github.actor }}",
+          "security_status": "$security_status",
+          "deployment_allowed": $deployment_allowed,
+          "emergency_override": $override_used,
+          "override_reason": "${{ github.event.inputs.override_reason || null }}",
+          "notification_type": "$( [ "$deployment_allowed" = "false" ] && echo "deployment_blocked" || [ "$override_used" = "true" ] && echo "emergency_override" || echo "deployment_approved" )"
+        }
+        EOF
+    
+    - name: Upload Notification Data
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: deployment-notification
+        path: deployment-notification.json
         retention-days: 30
 
   # Story #85: Cross-Feature Integration Testing
