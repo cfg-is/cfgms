@@ -14,17 +14,19 @@ CFGMS uses a multi-layered security scanning approach with four primary tools:
 ## Quick Start
 
 ```bash
-# 1. Install all security tools (see platform-specific instructions below)
-# 2. Verify installation
-make security-scan  # This will show installation instructions for missing tools
+# 1. Automatic installation (recommended)
+make install-nancy     # Auto-install Nancy for your platform
+# Note: Trivy should be installed via: go install github.com/aquasecurity/trivy/cmd/trivy@latest
 
-# 3. Run individual tools
+# 2. Verify installation and run security scan
+make security-scan     # All tools (used in CLAUDE.md workflow)
+
+# 3. Run individual tools if needed
 make security-trivy    # Filesystem scanning
 make security-deps     # Dependency scanning
 
-# 4. Run unified security validation
-make security-scan     # All tools (used in CLAUDE.md workflow)
-make security-check    # Quick development check
+# 4. Quick development check
+make security-check    # Same as security-scan but optimized for development
 ```
 
 ## Installation Instructions
@@ -67,41 +69,52 @@ Move-Item trivy.exe $env:USERPROFILE\go\bin\trivy.exe
 
 Nancy scans Go dependencies for known vulnerabilities.
 
-#### Linux (x86_64)
+#### Automatic Installation (Recommended)
 ```bash
-# Binary download (recommended)
-curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v1.0.51/nancy-v1.0.51-linux-amd64 -o /tmp/nancy
-chmod +x /tmp/nancy && sudo mv /tmp/nancy /usr/local/bin/nancy
+# Cross-platform automatic installation
+make install-nancy
+
+# This automatically detects your platform and installs Nancy v1.0.51
+# to your Go bin directory (already in PATH)
 ```
 
-#### macOS (Intel)
+#### Manual Installation Options
+
+##### Linux (x86_64)
+```bash
+# Binary download to Go bin directory
+curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v1.0.51/nancy-v1.0.51-linux-amd64 -o ~/nancy
+chmod +x ~/nancy && mv ~/nancy $(go env GOPATH)/bin/nancy
+```
+
+##### macOS (Intel)
 ```bash
 # Homebrew (recommended)
 brew install nancy
 
-# Binary download
-curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v1.0.51/nancy-v1.0.51-darwin-amd64 -o /tmp/nancy
-chmod +x /tmp/nancy && sudo mv /tmp/nancy /usr/local/bin/nancy
+# Binary download to Go bin directory
+curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v1.0.51/nancy-v1.0.51-darwin-amd64 -o ~/nancy
+chmod +x ~/nancy && mv ~/nancy $(go env GOPATH)/bin/nancy
 ```
 
-#### macOS (Apple Silicon)
+##### macOS (Apple Silicon)
 ```bash
-# Binary download
-curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v1.0.51/nancy-v1.0.51-darwin-arm64 -o /tmp/nancy
-chmod +x /tmp/nancy && sudo mv /tmp/nancy /usr/local/bin/nancy
+# Binary download to Go bin directory
+curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v1.0.51/nancy-v1.0.51-darwin-arm64 -o ~/nancy
+chmod +x ~/nancy && mv ~/nancy $(go env GOPATH)/bin/nancy
 ```
 
-#### Linux (Arch)
+##### Linux (Arch)
 ```bash
 # AUR package
 yay -S nancy-bin
 ```
 
-#### Windows (PowerShell)
+##### Windows (PowerShell)
 ```powershell
-# Binary download
+# Binary download to Go bin directory
 Invoke-WebRequest -Uri 'https://github.com/sonatype-nexus-community/nancy/releases/download/v1.0.51/nancy-v1.0.51-windows-amd64.exe' -OutFile 'nancy.exe'
-Move-Item nancy.exe C:\Windows\System32\nancy.exe
+Move-Item nancy.exe $(go env GOPATH)\bin\nancy.exe
 ```
 
 ### 🛡️ gosec Installation (Future - v0.3.1 Story 2.1)
@@ -284,6 +297,11 @@ go mod tidy
 - **Distribution Packages**: Some tools may be available via package managers (apt, yum, pacman)
 
 ## Make Target Reference
+
+### Installation Helpers
+```bash
+make install-nancy       # Automatic cross-platform Nancy installation
+```
 
 ### Individual Tools
 ```bash

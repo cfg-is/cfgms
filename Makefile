@@ -388,7 +388,51 @@ compliance-check:
 	fi
 
 # Security Scanning Tools (v0.3.1)
-.PHONY: security-trivy security-deps security-scan security-check
+.PHONY: security-trivy security-deps security-scan security-check install-nancy
+
+# Automatic Nancy installation (cross-platform)
+install-nancy:
+	@echo "📦 Installing Nancy v1.0.51..."
+	@echo "============================="
+	@if command -v nancy >/dev/null 2>&1; then \
+		echo "✅ Nancy is already installed: $$(nancy --version)"; \
+		exit 0; \
+	fi
+	@echo "Detecting platform and installing Nancy..."
+	@os=$$(uname -s | tr '[:upper:]' '[:lower:]'); \
+	arch=$$(uname -m); \
+	gopath=$$(go env GOPATH); \
+	if [ "$$gopath" = "" ]; then \
+		echo "❌ Error: GOPATH not set. Please install Go first."; \
+		exit 1; \
+	fi; \
+	mkdir -p "$$gopath/bin"; \
+	case "$$os" in \
+		linux) \
+			if [ "$$arch" = "x86_64" ]; then \
+				curl -L "https://github.com/sonatype-nexus-community/nancy/releases/download/v1.0.51/nancy-v1.0.51-linux-amd64" -o "$$gopath/bin/nancy"; \
+			else \
+				echo "❌ Unsupported architecture: $$arch"; \
+				exit 1; \
+			fi ;; \
+		darwin) \
+			if [ "$$arch" = "x86_64" ]; then \
+				curl -L "https://github.com/sonatype-nexus-community/nancy/releases/download/v1.0.51/nancy-v1.0.51-darwin-amd64" -o "$$gopath/bin/nancy"; \
+			elif [ "$$arch" = "arm64" ]; then \
+				curl -L "https://github.com/sonatype-nexus-community/nancy/releases/download/v1.0.51/nancy-v1.0.51-darwin-arm64" -o "$$gopath/bin/nancy"; \
+			else \
+				echo "❌ Unsupported architecture: $$arch"; \
+				exit 1; \
+			fi ;; \
+		*) \
+			echo "❌ Unsupported operating system: $$os"; \
+			echo "Please install Nancy manually using the instructions in 'make security-deps'"; \
+			exit 1 ;; \
+	esac; \
+	chmod +x "$$gopath/bin/nancy"; \
+	echo "✅ Nancy installed successfully to $$gopath/bin/nancy"; \
+	echo "Verifying installation..."; \
+	nancy --version
 
 # Trivy filesystem scanning for vulnerabilities, secrets, and misconfigurations
 security-trivy:
@@ -433,21 +477,24 @@ security-deps:
 		echo ""; \
 		echo "Install nancy (v1.0.51) for your platform:"; \
 		echo ""; \
-		echo "📥 Linux (amd64):"; \
-		echo "  curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v1.0.51/nancy-v1.0.51-linux-amd64 -o /tmp/nancy"; \
-		echo "  chmod +x /tmp/nancy && sudo mv /tmp/nancy /usr/local/bin/nancy"; \
+		echo "🚀 Quick Install (recommended):"; \
+		echo "  make install-nancy"; \
 		echo ""; \
-		echo "🍎 macOS (Intel):"; \
-		echo "  curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v1.0.51/nancy-v1.0.51-darwin-amd64 -o /tmp/nancy"; \
-		echo "  chmod +x /tmp/nancy && sudo mv /tmp/nancy /usr/local/bin/nancy"; \
+		echo "📥 Manual Install - Linux (amd64):"; \
+		echo "  curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v1.0.51/nancy-v1.0.51-linux-amd64 -o ~/nancy"; \
+		echo "  chmod +x ~/nancy && mv ~/nancy \$$(go env GOPATH)/bin/nancy"; \
 		echo ""; \
-		echo "🍎 macOS (Apple Silicon):"; \
-		echo "  curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v1.0.51/nancy-v1.0.51-darwin-arm64 -o /tmp/nancy"; \
-		echo "  chmod +x /tmp/nancy && sudo mv /tmp/nancy /usr/local/bin/nancy"; \
+		echo "🍎 Manual Install - macOS (Intel):"; \
+		echo "  curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v1.0.51/nancy-v1.0.51-darwin-amd64 -o ~/nancy"; \
+		echo "  chmod +x ~/nancy && mv ~/nancy \$$(go env GOPATH)/bin/nancy"; \
 		echo ""; \
-		echo "🪟 Windows (PowerShell):"; \
+		echo "🍎 Manual Install - macOS (Apple Silicon):"; \
+		echo "  curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v1.0.51/nancy-v1.0.51-darwin-arm64 -o ~/nancy"; \
+		echo "  chmod +x ~/nancy && mv ~/nancy \$$(go env GOPATH)/bin/nancy"; \
+		echo ""; \
+		echo "🪟 Manual Install - Windows (PowerShell):"; \
 		echo "  Invoke-WebRequest -Uri 'https://github.com/sonatype-nexus-community/nancy/releases/download/v1.0.51/nancy-v1.0.51-windows-amd64.exe' -OutFile 'nancy.exe'"; \
-		echo "  Move-Item nancy.exe C:\\Windows\\System32\\nancy.exe"; \
+		echo "  Move-Item nancy.exe \$$(go env GOPATH)\\bin\\nancy.exe"; \
 		echo ""; \
 		echo "📦 Package Managers:"; \
 		echo "  # macOS: brew install nancy"; \
