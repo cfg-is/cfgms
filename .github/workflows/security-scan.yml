@@ -21,16 +21,67 @@ env:
   GO_VERSION: '1.23'
 
 jobs:
-  security-validation:
+  # Parallel security scanning jobs for optimal performance
+  trivy-scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     outputs:
-      trivy-status: ${{ steps.security-results.outputs.trivy-status }}
-      nancy-status: ${{ steps.security-results.outputs.nancy-status }}
-      gosec-status: ${{ steps.security-results.outputs.gosec-status }}
-      staticcheck-status: ${{ steps.security-results.outputs.staticcheck-status }}
-      issues-found: ${{ steps.security-results.outputs.issues-found }}
+      status: ${{ steps.scan.outputs.status }}
+      issues-found: ${{ steps.scan.outputs.issues-found }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
     
+    - name: Install Trivy
+      run: |
+        sudo apt-get update
+        sudo apt-get install wget apt-transport-https gnupg lsb-release
+        wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+        echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
+        sudo apt-get update
+        sudo apt-get install trivy
+    
+    - name: Run Trivy Scan
+      id: scan
+      run: |
+        echo "🔍 Running Trivy Filesystem Scan with SARIF"
+        mkdir -p sarif-results
+        
+        # Run with SARIF output for GitHub Security tab
+        trivy fs . --format sarif --output sarif-results/trivy.sarif --scanners vuln,secret,misconfig
+        trivy_exit_code=$?
+        
+        # Also run regular scan for status checking
+        if trivy fs . --scanners vuln,secret,misconfig --severity CRITICAL,HIGH --exit-code 1; then
+          echo "status=passed" >> $GITHUB_OUTPUT
+          echo "issues-found=false" >> $GITHUB_OUTPUT
+        else
+          echo "status=failed" >> $GITHUB_OUTPUT
+          echo "issues-found=true" >> $GITHUB_OUTPUT
+        fi
+    
+    - name: Upload Trivy SARIF
+      uses: github/codeql-action/upload-sarif@v3
+      if: always() && hashFiles('sarif-results/trivy.sarif') != ''
+      with:
+        sarif_file: sarif-results/trivy.sarif
+        category: trivy-vulnerabilities
+      continue-on-error: true
+    
+    - name: Upload Trivy Results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: trivy-results
+        path: sarif-results/
+        retention-days: 30
+
+  nancy-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      status: ${{ steps.scan.outputs.status }}
+      issues-found: ${{ steps.scan.outputs.issues-found }}
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -44,133 +95,189 @@ jobs:
       uses: actions/cache@v3
       with:
         path: ~/go/pkg/mod
-        key: ${{ runner.os }}-security-go-${{ hashFiles('**/go.sum') }}
+        key: ${{ runner.os }}-nancy-go-${{ hashFiles('**/go.sum') }}
         restore-keys: |
-          ${{ runner.os }}-security-go-
+          ${{ runner.os }}-nancy-go-
     
-    - name: Install Security Tools
+    - name: Install Nancy
+      run: make install-nancy
+    
+    - name: Run Nancy Scan
+      id: scan
       run: |
-        echo "🔧 Installing Security Tools for v0.3.1"
-        echo "======================================="
+        echo "📦 Running Nancy Go Dependency Scan"
         
-        # Install Trivy
-        if ! command -v trivy >/dev/null 2>&1; then
-          echo "Installing Trivy..."
-          sudo apt-get update
-          sudo apt-get install wget apt-transport-https gnupg lsb-release
-          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
-          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
-          sudo apt-get update
-          sudo apt-get install trivy
+        if make security-deps; then
+          echo "status=passed" >> $GITHUB_OUTPUT
+          echo "issues-found=false" >> $GITHUB_OUTPUT
+        else
+          echo "status=failed" >> $GITHUB_OUTPUT
+          echo "issues-found=true" >> $GITHUB_OUTPUT
         fi
+
+  gosec-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      status: ${{ steps.scan.outputs.status }}
+      issues-found: ${{ steps.scan.outputs.issues-found }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+    
+    - name: Cache Go modules
+      uses: actions/cache@v3
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-gosec-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-gosec-go-
+    
+    - name: Install gosec
+      run: go install github.com/securecodewarrior/gosec/v2/cmd/gosec@latest
+    
+    - name: Run gosec Scan
+      id: scan
+      run: |
+        echo "🛡️  Running gosec Go Security Analysis"
+        mkdir -p sarif-results
         
-        # Install Nancy
+        # Run with SARIF output for GitHub Security tab
+        gosec -fmt sarif -out sarif-results/gosec.sarif ./...
+        gosec_exit_code=$?
+        
+        # Run regular scan for status checking
+        if make security-gosec; then
+          echo "status=passed" >> $GITHUB_OUTPUT
+          echo "issues-found=false" >> $GITHUB_OUTPUT
+        else
+          echo "status=failed" >> $GITHUB_OUTPUT
+          echo "issues-found=true" >> $GITHUB_OUTPUT
+        fi
+    
+    - name: Upload gosec SARIF
+      uses: github/codeql-action/upload-sarif@v3
+      if: always() && hashFiles('sarif-results/gosec.sarif') != ''
+      with:
+        sarif_file: sarif-results/gosec.sarif
+        category: gosec-security-patterns
+      continue-on-error: true
+    
+    - name: Upload gosec Results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: gosec-results
+        path: sarif-results/
+        retention-days: 30
+
+  staticcheck-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      status: ${{ steps.scan.outputs.status }}
+      issues-found: ${{ steps.scan.outputs.issues-found }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+    
+    - name: Cache Go modules
+      uses: actions/cache@v3
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-staticcheck-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-staticcheck-go-
+    
+    - name: Install staticcheck
+      run: go install honnef.co/go/tools/cmd/staticcheck@latest
+    
+    - name: Run staticcheck Scan
+      id: scan
+      run: |
+        echo "🔍 Running Staticcheck Advanced Analysis"
+        
+        if make security-staticcheck; then
+          echo "status=passed" >> $GITHUB_OUTPUT
+          echo "issues-found=false" >> $GITHUB_OUTPUT
+        else
+          echo "status=failed" >> $GITHUB_OUTPUT
+          echo "issues-found=true" >> $GITHUB_OUTPUT
+        fi
+
+  # Consolidated security validation job
+  security-validation:
+    runs-on: ubuntu-latest
+    needs: [trivy-scan, nancy-scan, gosec-scan, staticcheck-scan]
+    timeout-minutes: 5
+    outputs:
+      trivy-status: ${{ needs.trivy-scan.outputs.status }}
+      nancy-status: ${{ needs.nancy-scan.outputs.status }}
+      gosec-status: ${{ needs.gosec-scan.outputs.status }}
+      staticcheck-status: ${{ needs.staticcheck-scan.outputs.status }}
+      issues-found: ${{ steps.summary.outputs.issues-found }}
+    
+    steps:
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+    
+    - name: Security Summary
+      id: summary
+      run: |
+        echo "📊 Parallel Security Scan Summary"
+        echo "================================="
+        echo ""
+        echo "Individual Tool Results:"
+        echo "  • Trivy: ${{ needs.trivy-scan.outputs.status }}"
+        echo "  • Nancy: ${{ needs.nancy-scan.outputs.status }}"
+        echo "  • gosec: ${{ needs.gosec-scan.outputs.status }}"
+        echo "  • staticcheck: ${{ needs.staticcheck-scan.outputs.status }}"
+        echo ""
+        
+        # Determine if any issues were found
+        if [ "${{ needs.trivy-scan.outputs.issues-found }}" = "true" ] || \
+           [ "${{ needs.nancy-scan.outputs.issues-found }}" = "true" ] || \
+           [ "${{ needs.gosec-scan.outputs.issues-found }}" = "true" ] || \
+           [ "${{ needs.staticcheck-scan.outputs.issues-found }}" = "true" ]; then
+          echo "issues-found=true" >> $GITHUB_OUTPUT
+          echo "❌ Security issues detected across tools"
+        else
+          echo "issues-found=false" >> $GITHUB_OUTPUT
+          echo "✅ All security scans passed"
+        fi
+    
+    - name: Install Security Tools for Remediation Report
+      if: steps.summary.outputs.issues-found == 'true'
+      run: |
+        # Only install tools if we need to generate remediation report
         make install-nancy
         
-        # Install gosec
-        if ! command -v gosec >/dev/null 2>&1; then
-          echo "Installing gosec..."
-          go install github.com/securecodewarrior/gosec/v2/cmd/gosec@latest
-        fi
+        # Install Trivy
+        sudo apt-get update
+        sudo apt-get install wget apt-transport-https gnupg lsb-release
+        wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+        echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
+        sudo apt-get update
+        sudo apt-get install trivy
         
-        # Install staticcheck
-        if ! command -v staticcheck >/dev/null 2>&1; then
-          echo "Installing staticcheck..."
-          go install honnef.co/go/tools/cmd/staticcheck@latest
-        fi
-        
-        echo ""
-        echo "✅ All security tools installed successfully"
-    
-    - name: Download Go dependencies
-      run: go mod download
-    
-    - name: Run Security Scan
-      id: security-scan
-      run: |
-        echo "🛡️  Running Comprehensive Security Scan"
-        echo "======================================"
-        echo "Mode: GitHub Actions CI/CD Pipeline"
-        echo ""
-        
-        # Determine scan type
-        SCAN_TYPE="${{ github.event.inputs.scan_type || 'full' }}"
-        
-        if [ "$SCAN_TYPE" = "quick" ]; then
-          echo "Running quick security check..."
-          make security-check
-        elif [ "$SCAN_TYPE" = "remediation-report" ]; then
-          echo "Generating remediation report..."
-          make security-remediation-report
-        else
-          echo "Running full security scan..."
-          make security-scan
-        fi
-    
-    - name: Extract Security Results
-      id: security-results
-      if: always()
-      run: |
-        echo "📊 Extracting Security Scan Results"
-        echo "==================================="
-        
-        # Initialize status variables
-        trivy_status="unknown"
-        nancy_status="unknown"
-        gosec_status="unknown"
-        staticcheck_status="unknown"
-        issues_found="false"
-        
-        # Test individual tools to get their status
-        echo "Testing trivy..."
-        if make security-trivy >/dev/null 2>&1; then
-          trivy_status="passed"
-        else
-          trivy_status="failed"
-          issues_found="true"
-        fi
-        
-        echo "Testing nancy..."
-        if make security-deps >/dev/null 2>&1; then
-          nancy_status="passed"
-        else
-          nancy_status="failed"
-          issues_found="true"
-        fi
-        
-        echo "Testing gosec..."
-        if make security-gosec >/dev/null 2>&1; then
-          gosec_status="passed"
-        else
-          gosec_status="failed"
-          issues_found="true"
-        fi
-        
-        echo "Testing staticcheck..."
-        if make security-staticcheck >/dev/null 2>&1; then
-          staticcheck_status="passed"
-        else
-          staticcheck_status="failed"
-          issues_found="true"
-        fi
-        
-        # Set outputs
-        echo "trivy-status=$trivy_status" >> $GITHUB_OUTPUT
-        echo "nancy-status=$nancy_status" >> $GITHUB_OUTPUT
-        echo "gosec-status=$gosec_status" >> $GITHUB_OUTPUT
-        echo "staticcheck-status=$staticcheck_status" >> $GITHUB_OUTPUT
-        echo "issues-found=$issues_found" >> $GITHUB_OUTPUT
-        
-        echo ""
-        echo "📋 Security Scan Results Summary:"
-        echo "  • Trivy: $trivy_status"
-        echo "  • Nancy: $nancy_status" 
-        echo "  • gosec: $gosec_status"
-        echo "  • staticcheck: $staticcheck_status"
-        echo "  • Issues found: $issues_found"
+        # Install gosec and staticcheck
+        go install github.com/securecodewarrior/gosec/v2/cmd/gosec@latest
+        go install honnef.co/go/tools/cmd/staticcheck@latest
     
     - name: Generate Remediation Report on Failure
-      if: steps.security-results.outputs.issues-found == 'true'
+      if: steps.summary.outputs.issues-found == 'true'
       run: |
         echo "🤖 Generating Automated Remediation Report"
         echo "========================================="
@@ -184,11 +291,11 @@ jobs:
           cat /tmp/cfgms-security-remediation.json
         fi
     
-    - name: Upload Security Results
+    - name: Upload Consolidated Security Results
       uses: actions/upload-artifact@v4
       if: always()
       with:
-        name: security-scan-results
+        name: security-scan-consolidated
         path: |
           /tmp/cfgms-security-remediation.json
           /tmp/*-results.json
