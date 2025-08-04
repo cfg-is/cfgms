@@ -674,67 +674,140 @@ security-remediation-report:
 	echo '  "timestamp": "'$$(date -u +%Y-%m-%dT%H:%M:%SZ)'",' >> $$report_file; \
 	echo '  "project": "cfgms",' >> $$report_file; \
 	echo '  "scanning_tools": ["trivy", "nancy", "gosec", "staticcheck"],' >> $$report_file; \
+	echo '  "summary": {' >> $$report_file; \
+	echo '    "total_issues": 0,' >> $$report_file; \
+	echo '    "critical": 0,' >> $$report_file; \
+	echo '    "high": 0,' >> $$report_file; \
+	echo '    "medium": 0,' >> $$report_file; \
+	echo '    "low": 0,' >> $$report_file; \
+	echo '    "auto_fixable": 0' >> $$report_file; \
+	echo '  },' >> $$report_file; \
 	echo '  "remediation_suggestions": [' >> $$report_file; \
+	suggestions_added=false; \
 	\
-	echo "🔍 Analyzing trivy results..."; \
-	if trivy fs . --format json --scanners vuln,secret,misconfig --quiet > /tmp/trivy-remediation.json 2>/dev/null; then \
-		trivy_issues=$$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL" or .Severity == "HIGH")]' /tmp/trivy-remediation.json 2>/dev/null | jq length 2>/dev/null || echo "0"); \
-		if [ "$$trivy_issues" -gt 0 ]; then \
+	echo "🔍 Analyzing Trivy results..."; \
+	trivy fs . --format json --scanners vuln,secret,misconfig --quiet > /tmp/trivy-remediation.json 2>/dev/null || true; \
+	if [ -f /tmp/trivy-remediation.json ]; then \
+		critical_issues=$$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' /tmp/trivy-remediation.json 2>/dev/null || echo "0"); \
+		high_issues=$$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' /tmp/trivy-remediation.json 2>/dev/null || echo "0"); \
+		total_trivy_issues=$$((critical_issues + high_issues)); \
+		if [ "$$total_trivy_issues" -gt 0 ]; then \
+			if [ "$$suggestions_added" = "true" ]; then echo '    ,' >> $$report_file; fi; \
 			echo '    {' >> $$report_file; \
 			echo '      "tool": "trivy",' >> $$report_file; \
 			echo '      "category": "dependency_vulnerabilities",' >> $$report_file; \
-			echo '      "issues_count": '$$trivy_issues',' >> $$report_file; \
-			echo '      "claude_prompt": "Fix critical and high vulnerability dependencies found by Trivy. Update the following Go modules to secure versions:",' >> $$report_file; \
-			echo '      "remediation_type": "dependency_update"' >> $$report_file; \
-			echo '    },' >> $$report_file; \
+			echo '      "severity": "CRITICAL_HIGH",' >> $$report_file; \
+			echo '      "issues_count": '$$total_trivy_issues',' >> $$report_file; \
+			echo '      "critical_count": '$$critical_issues',' >> $$report_file; \
+			echo '      "high_count": '$$high_issues',' >> $$report_file; \
+			echo '      "auto_fixable": true,' >> $$report_file; \
+			echo '      "remediation_type": "dependency_update",' >> $$report_file; \
+			echo '      "claude_prompt": "Fix critical and high vulnerability dependencies found by Trivy. Update Go modules to secure versions using go get commands.",' >> $$report_file; \
+			echo '      "priority": 1,' >> $$report_file; \
+			echo '      "validation_command": "make security-trivy",' >> $$report_file; \
+			echo '      "detailed_vulnerabilities": ' >> $$report_file; \
+			jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL" or .Severity == "HIGH") | {VulnerabilityID, Severity, PkgName, InstalledVersion, FixedVersion, Title}]' /tmp/trivy-remediation.json >> $$report_file 2>/dev/null || echo '[]' >> $$report_file; \
+			echo '    }' >> $$report_file; \
+			suggestions_added=true; \
+		fi; \
+	fi; \
+	\
+	echo "🔍 Analyzing Nancy results..."; \
+	nancy sleuth -p go.mod --output=json > /tmp/nancy-remediation.json 2>/dev/null || true; \
+	if [ -f /tmp/nancy-remediation.json ] && [ -s /tmp/nancy-remediation.json ]; then \
+		nancy_issues=$$(jq '.vulnerable | length' /tmp/nancy-remediation.json 2>/dev/null || echo "0"); \
+		if [ "$$nancy_issues" -gt 0 ]; then \
+			if [ "$$suggestions_added" = "true" ]; then echo '    ,' >> $$report_file; fi; \
+			echo '    {' >> $$report_file; \
+			echo '      "tool": "nancy",' >> $$report_file; \
+			echo '      "category": "dependency_vulnerabilities",' >> $$report_file; \
+			echo '      "severity": "VARIOUS",' >> $$report_file; \
+			echo '      "issues_count": '$$nancy_issues',' >> $$report_file; \
+			echo '      "auto_fixable": true,' >> $$report_file; \
+			echo '      "remediation_type": "dependency_update",' >> $$report_file; \
+			echo '      "claude_prompt": "Fix vulnerable Go dependencies found by Nancy. Update packages to non-vulnerable versions.",' >> $$report_file; \
+			echo '      "priority": 2,' >> $$report_file; \
+			echo '      "validation_command": "make security-deps"' >> $$report_file; \
+			echo '    }' >> $$report_file; \
+			suggestions_added=true; \
 		fi; \
 	fi; \
 	\
 	echo "🔍 Analyzing gosec results..."; \
-	if gosec -fmt json -quiet -tests=false -severity=high -confidence=medium ./... > /tmp/gosec-remediation.json 2>/dev/null; then \
-		gosec_issues=$$(jq '.Issues | length' /tmp/gosec-remediation.json 2>/dev/null || echo "0"); \
-		if [ "$$gosec_issues" -gt 0 ]; then \
+	gosec -fmt json -quiet ./... > /tmp/gosec-remediation.json 2>/dev/null || true; \
+	if [ -f /tmp/gosec-remediation.json ]; then \
+		high_gosec=$$(jq '[.Issues[]? | select(.severity == "HIGH")] | length' /tmp/gosec-remediation.json 2>/dev/null || echo "0"); \
+		medium_gosec=$$(jq '[.Issues[]? | select(.severity == "MEDIUM")] | length' /tmp/gosec-remediation.json 2>/dev/null || echo "0"); \
+		total_gosec=$$((high_gosec + medium_gosec)); \
+		if [ "$$total_gosec" -gt 0 ]; then \
+			if [ "$$suggestions_added" = "true" ]; then echo '    ,' >> $$report_file; fi; \
 			echo '    {' >> $$report_file; \
 			echo '      "tool": "gosec",' >> $$report_file; \
 			echo '      "category": "security_patterns",' >> $$report_file; \
-			echo '      "issues_count": '$$gosec_issues',' >> $$report_file; \
-			echo '      "claude_prompt": "Fix Go security anti-patterns found by gosec. Address the following security issues:",' >> $$report_file; \
-			echo '      "remediation_type": "code_security_fix"' >> $$report_file; \
-			echo '    },' >> $$report_file; \
+			echo '      "severity": "HIGH_MEDIUM",' >> $$report_file; \
+			echo '      "issues_count": '$$total_gosec',' >> $$report_file; \
+			echo '      "high_count": '$$high_gosec',' >> $$report_file; \
+			echo '      "medium_count": '$$medium_gosec',' >> $$report_file; \
+			echo '      "auto_fixable": true,' >> $$report_file; \
+			echo '      "remediation_type": "code_security_fix",' >> $$report_file; \
+			echo '      "claude_prompt": "Fix Go security anti-patterns found by gosec. Apply security best practices to resolve identified issues.",' >> $$report_file; \
+			echo '      "priority": 3,' >> $$report_file; \
+			echo '      "validation_command": "make security-gosec",' >> $$report_file; \
+			echo '      "common_patterns": ["G115_integer_overflow", "G404_weak_random", "G402_tls_min_version", "G204_subprocess_variable", "G304_file_inclusion", "G301_directory_permissions", "G302_file_permissions", "G306_writefile_permissions"]' >> $$report_file; \
+			echo '    }' >> $$report_file; \
+			suggestions_added=true; \
 		fi; \
 	fi; \
 	\
 	echo "🔍 Analyzing staticcheck results..."; \
-	if ! staticcheck -f json ./... > /tmp/staticcheck-remediation.json 2>/dev/null; then \
+	staticcheck -f json ./... > /tmp/staticcheck-remediation.json 2>/dev/null || true; \
+	if [ -f /tmp/staticcheck-remediation.json ] && [ -s /tmp/staticcheck-remediation.json ]; then \
 		staticcheck_issues=$$(wc -l < /tmp/staticcheck-remediation.json 2>/dev/null || echo "0"); \
 		if [ "$$staticcheck_issues" -gt 0 ]; then \
+			if [ "$$suggestions_added" = "true" ]; then echo '    ,' >> $$report_file; fi; \
 			echo '    {' >> $$report_file; \
 			echo '      "tool": "staticcheck",' >> $$report_file; \
 			echo '      "category": "code_quality",' >> $$report_file; \
+			echo '      "severity": "INFO",' >> $$report_file; \
 			echo '      "issues_count": '$$staticcheck_issues',' >> $$report_file; \
-			echo '      "claude_prompt": "Fix static analysis issues found by staticcheck. Improve code quality by addressing:",' >> $$report_file; \
-			echo '      "remediation_type": "code_improvement"' >> $$report_file; \
+			echo '      "auto_fixable": false,' >> $$report_file; \
+			echo '      "remediation_type": "code_improvement",' >> $$report_file; \
+			echo '      "claude_prompt": "Fix static analysis issues found by staticcheck. Improve code quality by addressing identified patterns.",' >> $$report_file; \
+			echo '      "priority": 4,' >> $$report_file; \
+			echo '      "validation_command": "make security-staticcheck"' >> $$report_file; \
 			echo '    }' >> $$report_file; \
+			suggestions_added=true; \
 		fi; \
 	fi; \
 	\
-	sed -i 's/,$$//g' $$report_file 2>/dev/null || sed -i '' 's/,$$//g' $$report_file 2>/dev/null || true; \
 	echo '  ]' >> $$report_file; \
 	echo '}' >> $$report_file; \
 	\
-	if [ -s "$$report_file" ] && [ "$$(jq '.remediation_suggestions | length' $$report_file 2>/dev/null || echo "0")" -gt 0 ]; then \
-		echo "📋 Security Remediation Report Generated:"; \
-		echo ""; \
-		jq -r '.remediation_suggestions[] | "🔧 \(.tool | ascii_upcase): \(.issues_count) \(.category) issues"' $$report_file 2>/dev/null || echo "Report generated but could not parse summary"; \
-		echo ""; \
-		echo "📁 Full report: $$report_file"; \
-		echo "🤖 Claude Code can automatically remediate these issues"; \
-		echo "   Copy the report content and ask Claude to fix the issues"; \
+	if [ "$$suggestions_added" = "true" ] && [ -s "$$report_file" ]; then \
+		suggestion_count=$$(jq '.remediation_suggestions | length' $$report_file 2>/dev/null || echo "0"); \
+		if [ "$$suggestion_count" -gt 0 ]; then \
+			echo ""; \
+			echo "📋 Security Remediation Report Generated:"; \
+			echo "========================================="; \
+			jq -r '.remediation_suggestions[] | "🔧 \(.tool | ascii_upcase): \(.issues_count) \(.category) issues (Priority \(.priority))"' $$report_file 2>/dev/null || echo "Report generated but could not parse summary"; \
+			echo ""; \
+			echo "📁 Full report: $$report_file"; \
+			echo "🤖 Claude Code Integration Instructions:"; \
+			echo "   1. Read the report: jq . $$report_file"; \
+			echo "   2. Start with Priority 1 (Critical/High CVEs) first"; \
+			echo "   3. Use validation_command after each fix"; \
+			echo "   4. Reference: docs/development/automated-remediation-guide.md"; \
+			echo ""; \
+			echo "📖 For manual review: make security-scan-nonblocking"; \
+		else \
+			echo "✅ No security issues found requiring automated remediation"; \
+			rm -f "$$report_file"; \
+		fi; \
 	else \
 		echo "✅ No security issues found requiring automated remediation"; \
 		rm -f "$$report_file"; \
 	fi; \
-	rm -f /tmp/trivy-remediation.json /tmp/gosec-remediation.json /tmp/staticcheck-remediation.json
+	rm -f /tmp/trivy-remediation.json /tmp/nancy-remediation.json /tmp/gosec-remediation.json /tmp/staticcheck-remediation.json
 
 lint:
 	golangci-lint run
