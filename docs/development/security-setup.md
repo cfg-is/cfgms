@@ -402,6 +402,132 @@ When adding new security tools:
 5. Add verification steps and troubleshooting guidance
 6. Test on all supported platforms (Linux, macOS, Windows)
 
+## 🪝 Optional: Pre-commit Hooks (Story 2.3)
+
+**OPTIONAL** pre-commit hooks provide automated security scanning before commits for developers who want additional safety without impacting the core development workflow.
+
+### Quick Setup
+```bash
+# Install pre-commit (Python package)
+pip install pre-commit
+
+# Install hooks in your local repository  
+pre-commit install
+
+# Verify installation
+pre-commit --version
+```
+
+### What's Included
+The `.pre-commit-config.yaml` configuration includes:
+
+**🛡️ Security Hooks (Performance Optimized):**
+- **gosec**: Go security pattern analysis on changed files only
+- **staticcheck**: Static analysis with curated rules on changed files only
+- **detect-secrets**: Secret detection with known development certificate exclusions
+
+**⚡ Fast Development Hooks:**
+- **go fmt**: Code formatting
+- **go imports**: Import organization  
+- **go vet**: Basic Go analysis
+- **go mod tidy**: Module maintenance
+
+**📁 File Quality Hooks:**
+- Trailing whitespace removal
+- File ending fixes
+- YAML/JSON/TOML validation
+- Merge conflict detection
+- Large file prevention (1MB limit)
+
+### Usage
+
+**Normal Commit (with hooks):**
+```bash
+git add .
+git commit -m "Your commit message"
+# Hooks run automatically on changed files only
+```
+
+**Bypass When Needed:**
+```bash
+# Skip all hooks (emergency commits, CI fixes, etc.)
+git commit --no-verify -m "Emergency fix"
+
+# Skip specific hooks  
+SKIP=gosec,staticcheck git commit -m "Skip security checks"
+```
+
+**Manual Hook Execution:**
+```bash
+# Run hooks on all files (useful for initial setup)
+pre-commit run --all-files
+
+# Run specific hook
+pre-commit run gosec
+
+# Update hook versions
+pre-commit autoupdate
+```
+
+### Performance Design
+
+**Optimized for Development Velocity:**
+- Hooks run only on **changed files** (not entire codebase)
+- Security tools use **medium severity/confidence** for speed
+- **Non-blocking**: Hooks can be bypassed when needed
+- **Fast exit**: Basic checks run first, expensive checks run last
+
+**Resource Usage:**
+- Average hook execution: **2-5 seconds** for typical commits
+- Large commits (10+ files): **10-15 seconds**  
+- Full codebase scan: **60+ seconds** (only on `--all-files`)
+
+### Integration with Existing Workflow
+
+**Pre-commit hooks are OPTIONAL and do not replace:**
+- CLAUDE.md mandatory workflow security scanning
+- CI/CD pipeline security validation
+- Make targets for security scanning
+
+**Benefits:**
+- **Early Detection**: Catch issues before they reach CI/CD
+- **Developer Choice**: Enable when you want extra safety
+- **Learning Tool**: See security patterns as you develop
+- **Consistency**: Automatic formatting and basic checks
+
+### Troubleshooting
+
+**Hook Installation Issues:**
+```bash
+# Reinstall hooks
+pre-commit uninstall
+pre-commit install
+
+# Clear cache and reinstall
+pre-commit clean
+pre-commit install --install-hooks
+```
+
+**Tool Not Found Errors:**
+```bash
+# Install missing Go tools
+go install honnef.co/go/tools/cmd/staticcheck@latest
+go install github.com/securego/gosec/v2/cmd/gosec@latest
+
+# Verify PATH
+which staticcheck gosec
+```
+
+**Performance Issues:**
+```bash
+# Skip expensive hooks temporarily
+SKIP=detect-secrets git commit -m "Skip secret detection"
+
+# Or disable pre-commit entirely
+git config core.hooksPath /dev/null  # Disable
+git config --unset core.hooksPath     # Re-enable
+```
+
 ## Support and Documentation
 
 - **CFGMS Security Architecture**: [docs/security/architecture.md](../security/architecture.md)
