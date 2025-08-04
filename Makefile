@@ -65,6 +65,16 @@ test:
 	@echo "================================="
 	go test -race -cover -short -timeout=3m ./features/... ./api/... ./cmd/... ./pkg/...
 
+# Test with security validation (recommended for development)
+test-with-security: test security-scan
+	@echo ""
+	@echo "✅ Complete Development Validation Finished"
+	@echo "==========================================="
+	@echo "- ✅ Unit tests passed"
+	@echo "- ✅ Security scanning passed"
+	@echo ""
+	@echo "🎯 Code is ready for commit"
+
 # Quick smoke test (fastest, for development)
 test-quick:
 	@echo "⚡ Quick Smoke Test"
@@ -388,7 +398,7 @@ compliance-check:
 	fi
 
 # Security Scanning Tools (v0.3.1)
-.PHONY: security-trivy security-deps security-scan security-check install-nancy
+.PHONY: security-trivy security-deps security-scan security-check security-scan-nonblocking install-nancy test-with-security
 
 # Automatic Nancy installation (cross-platform)
 install-nancy:
@@ -516,20 +526,36 @@ security-deps:
 		echo "ℹ️  Non-blocking for development workflow - fix when convenient"; \
 	fi
 
-# Unified security scanning (runs all security tools)
+# Unified security scanning (runs all security tools) - BLOCKING mode
 security-scan: security-trivy security-deps
-	@echo "🛡️  Security Scan Complete"
-	@echo "=========================="
-	@echo "✅ Trivy filesystem scan - passed"
-	@echo "✅ Nancy dependency scan - passed"
 	@echo ""
-	@echo "🎯 All security tools passed - deployment approved"
+	@echo "🛡️  SECURITY SCAN COMPLETE"
+	@echo "=========================="
+	@echo "📊 Security Scan Results:"
+	@echo "   • Trivy filesystem scan: ✅ PASSED"
+	@echo "   • Nancy dependency scan: ✅ PASSED"
+	@echo ""
+	@echo "🎯 ALL SECURITY TOOLS PASSED - DEPLOYMENT APPROVED"
+	@echo "   Mode: BLOCKING (critical issues block deployment)"
+
+# Non-blocking security scan (continues on vulnerabilities)
+security-scan-nonblocking:
+	@echo "🛡️  Running Security Scan (Non-Blocking Mode)"
+	@echo "============================================="
+	@echo "📋 Mode: NON-BLOCKING (vulnerabilities logged but don't block execution)"
+	@echo ""
+	-@$(MAKE) security-trivy 2>/dev/null || echo "⚠️  Trivy scan found issues (non-blocking)"
+	-@$(MAKE) security-deps 2>/dev/null || echo "⚠️  Nancy scan found issues (non-blocking)"
+	@echo ""
+	@echo "ℹ️  Non-blocking scan complete - check output above for any issues"
 
 # Quick security check (optimized for development workflow)
 security-check: security-trivy security-deps
-	@echo "⚡ Quick Security Check Complete"
+	@echo ""
+	@echo "⚡ QUICK SECURITY CHECK COMPLETE"
 	@echo "===============================" 
 	@echo "✅ Critical vulnerability checks passed"
+	@echo "   Use 'make security-scan' for comprehensive security validation"
 
 lint:
 	golangci-lint run

@@ -90,6 +90,13 @@ CFGMS (Config Management System) is a modern, Go-based configuration management 
    make lint  # MUST pass before proceeding
    ```
 
+**ALTERNATIVE: Unified Development Validation** (RECOMMENDED)
+Instead of steps 5-7, use the unified target that runs all validations:
+```bash
+make test-with-security  # Runs: test + security-scan + displays summary
+```
+This ensures optimal order (test → security → summary) and provides clear validation status.
+
 **COMMIT AND PROJECT MANAGEMENT:**
 
 8. **Commit Feature Work**
@@ -180,6 +187,36 @@ make test-v040-gate
 - **v0.3.0 Gate**: Blocks alpha deployment until cost protection and data loss prevention are working
 - **v0.4.0 Gate**: Blocks production deployment until ALL export edge cases are resolved
 
+### Security Scanning
+```bash
+# Comprehensive security validation (BLOCKING - recommended)
+make security-scan
+
+# Non-blocking security scan (logs issues but continues)
+make security-scan-nonblocking
+
+# Quick security check for development
+make security-check
+
+# Individual security tools
+make security-trivy      # Filesystem vulnerability scanning
+make security-deps       # Go dependency vulnerability scanning
+
+# Automatic tool installation
+make install-nancy       # Cross-platform Nancy installation
+```
+
+### Unified Development Validation
+```bash
+# Complete validation workflow (test + security + summary)
+make test-with-security
+
+# Traditional individual steps
+make test
+make security-scan
+make lint
+```
+
 ### Linting
 ```bash
 # Run linter (requires golangci-lint)
@@ -187,20 +224,6 @@ make lint
 # Equivalent to: golangci-lint run
 ```
 
-### Security Scanning
-```bash
-# Run all security tools (comprehensive scan)
-make security-scan
-
-# Run individual security tools
-make security-trivy      # Trivy filesystem scanning
-make security-nancy      # Nancy Go dependency scanning  
-make security-gosec      # gosec Go security patterns
-make security-staticcheck # Staticcheck static analysis
-
-# Quick security check (development workflow)
-make security-check
-```
 
 ### Protocol Buffers
 ```bash
