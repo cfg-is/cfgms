@@ -366,10 +366,10 @@ func NewReportGenerator(monitor *Monitor) *ReportGenerator {
 func (r *ReportGenerator) GenerateReport() string {
 	metrics := r.monitor.GetMetrics()
 	
-	report := fmt.Sprintf("Workflow Execution Report\n")
+	report := "Workflow Execution Report\n"
 	report += fmt.Sprintf("Generated: %s\n\n", time.Now().Format(time.RFC3339))
 	
-	report += fmt.Sprintf("Overall Statistics:\n")
+	report += "Overall Statistics:\n"
 	report += fmt.Sprintf("  Total Executions: %d\n", metrics.TotalExecutions)
 	report += fmt.Sprintf("  Completed: %d\n", metrics.CompletedExecutions)
 	report += fmt.Sprintf("  Failed: %d\n", metrics.FailedExecutions)
@@ -379,7 +379,7 @@ func (r *ReportGenerator) GenerateReport() string {
 		report += fmt.Sprintf("  Average Execution Time: %s\n", metrics.AverageExecutionTime)
 	}
 	
-	report += fmt.Sprintf("\nWorkflow Statistics:\n")
+	report += "\nWorkflow Statistics:\n"
 	for workflowName, stats := range metrics.WorkflowStats {
 		successRate := float64(0)
 		if stats.ExecutionCount > 0 {

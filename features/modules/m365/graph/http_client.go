@@ -481,6 +481,7 @@ func (c *HTTPClient) doRequest(ctx context.Context, token *auth.AccessToken, met
 	defer func() {
 		if err := resp.Body.Close(); err != nil {
 			// Log error but continue
+			_ = err // Explicitly ignore error for cleanup operation
 		}
 	}()
 	

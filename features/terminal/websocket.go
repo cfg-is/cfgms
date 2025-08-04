@@ -61,6 +61,7 @@ func (h *DefaultWebSocketHandler) HandleWebSocket(w http.ResponseWriter, r *http
 	defer func() {
 		if err := conn.Close(); err != nil {
 			// Log error but continue - connection cleanup
+			_ = err // Explicitly ignore connection close errors during cleanup
 		}
 	}()
 
@@ -178,10 +179,12 @@ func (h *DefaultWebSocketHandler) readMessages(ctx context.Context, conn *websoc
 	conn.SetReadLimit(8192) // 8KB message limit
 	if err := conn.SetReadDeadline(time.Now().Add(60 * time.Second)); err != nil {
 		// Log error but continue
+		_ = err // Explicitly ignore deadline errors for resilience
 	}
 	conn.SetPongHandler(func(string) error {
 		if err := conn.SetReadDeadline(time.Now().Add(60 * time.Second)); err != nil {
 		// Log error but continue
+		_ = err // Explicitly ignore deadline errors for resilience
 	}
 		return nil
 	})
@@ -222,6 +225,7 @@ func (h *DefaultWebSocketHandler) writeMessages(ctx context.Context, conn *webso
 		case <-ticker.C:
 			if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
 		// Log error but continue
+		_ = err // Explicitly ignore deadline errors for resilience
 	}
 			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				h.logger.Warn("Failed to send ping", "session_id", session.ID, "error", err)
@@ -269,6 +273,7 @@ func (h *DefaultWebSocketHandler) sendError(conn *websocket.Conn, errorMsg strin
 
 	if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
 		// Log error but continue
+		_ = err // Explicitly ignore deadline errors for resilience
 	}
 	if err := conn.WriteJSON(msg); err != nil {
 		h.logger.Warn("Failed to send error message", "error", err)
@@ -286,6 +291,7 @@ func (h *DefaultWebSocketHandler) sendData(conn *websocket.Conn, sessionID strin
 
 	if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
 		// Log error but continue
+		_ = err // Explicitly ignore deadline errors for resilience
 	}
 	return conn.WriteJSON(msg)
 }

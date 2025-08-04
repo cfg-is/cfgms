@@ -374,12 +374,14 @@ func (v *DefaultRollbackValidator) validatePermissions(ctx context.Context, requ
 	if request.Emergency {
 		// Check for emergency rollback permission
 		// return error if not authorized
+		_ = request.Emergency // Placeholder for emergency permission check implementation
 	}
 	
 	// MSP-level rollbacks require admin permission
 	if request.TargetType == TargetTypeMSP {
 		// Check for MSP admin permission
 		// return error if not authorized
+		_ = request.TargetType // Placeholder for MSP admin permission check implementation
 	}
 	
 	return nil

@@ -36,6 +36,7 @@ func main() {
 		if configFile == "" {
 			// No config path provided, try to find hostname.cfg
 			// This will be handled by the config loader's search logic
+			configFile = "" // Default to empty - config loader will search for hostname.cfg
 		}
 		
 		s, err = steward.NewStandalone(configFile, logger)

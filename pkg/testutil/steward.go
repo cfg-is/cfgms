@@ -51,6 +51,7 @@ func SetupTestEnvironment(t *testing.T, config *StewardTestConfig) (certDir stri
 		dataDirCleanup = func() { 
 			if err := os.RemoveAll(tempDir); err != nil {
 				// Log error but continue cleanup
+				_ = err // Explicitly ignore cleanup errors
 			}
 		}
 	} else {

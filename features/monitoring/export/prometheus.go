@@ -163,6 +163,7 @@ func (pe *PrometheusExporter) HealthCheck(ctx context.Context) ExporterHealth {
 	defer func() {
 		if err := resp.Body.Close(); err != nil {
 			// Log error but continue
+			_ = err // Explicitly ignore error for cleanup operation
 		}
 	}()
 

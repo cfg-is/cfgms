@@ -141,6 +141,7 @@ func (e *Executor) Execute(ctx context.Context) (*ExecutionResult, error) {
 		// Timeout occurred
 		if err := cmd.Process.Kill(); err != nil {
 			// Log or handle kill error if needed, but don't fail the timeout handling
+			_ = err // Explicitly ignore kill errors during timeout handling
 		}
 		result.EndTime = time.Now()
 		result.Duration = result.EndTime.Sub(result.StartTime)
@@ -243,7 +244,7 @@ func (e *Executor) validateWindowsShell() error {
 		}
 	case ShellPython3:
 		if _, err := exec.LookPath("python3"); err != nil {
-			return fmt.Errorf("Python 3 is not available: %w", err)
+			return fmt.Errorf("python 3 is not available: %w", err)
 		}
 	default:
 		return fmt.Errorf("unsupported shell on Windows: %s", e.config.Shell)

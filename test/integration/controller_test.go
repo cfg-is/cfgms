@@ -82,13 +82,14 @@ func (s *ControllerTestSuite) TestStewardConnectToController() {
 	hasStewardStop := false
 
 	for _, log := range infoLogs {
-		if log.Message == "Starting controller" {
+		switch log.Message {
+		case "Starting controller":
 			hasControllerStart = true
-		} else if log.Message == "Stopping controller" {
+		case "Stopping controller":
 			hasControllerStop = true
-		} else if log.Message == "Starting steward in controller mode" {
+		case "Starting steward in controller mode":
 			hasStewardStart = true
-		} else if log.Message == "Stopping steward in controller mode" {
+		case "Stopping steward in controller mode":
 			hasStewardStop = true
 		}
 	}

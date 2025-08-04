@@ -28,9 +28,8 @@ func setupTestEnv(t *testing.T) *testEnv {
 	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
 
 	// Set up connection to the server
-	conn, err := grpc.DialContext(ctx, testAddress,
+	conn, err := grpc.NewClient(testAddress,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithBlock(),
 	)
 	require.NoError(t, err)
 
@@ -46,5 +45,6 @@ func (env *testEnv) cleanup() {
 	env.cancel()
 	if err := env.conn.Close(); err != nil {
 		// Log error but continue cleanup
+		_ = err // Explicitly ignore connection close errors during cleanup
 	}
 }

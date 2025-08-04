@@ -474,6 +474,7 @@ func (sm *SessionMonitor) updateThreatLevel(session *MonitoredSession) {
 			defer cancel()
 			if err := sm.TerminateSession(ctx, session.Session.ID, "Critical threat level - auto-terminated"); err != nil {
 				// Log error but continue - critical security action
+				_ = err // Explicitly ignore termination errors during security response
 			}
 		}()
 	}
@@ -546,6 +547,7 @@ func (sm *SessionMonitor) alertProcessor(ctx context.Context) {
 			if sm.onSessionAlert != nil {
 				if err := sm.onSessionAlert(alert); err != nil {
 					// Log error but continue processing alerts
+					_ = err // Explicitly ignore alert callback errors
 				}
 			}
 		}

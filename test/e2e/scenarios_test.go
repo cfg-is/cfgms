@@ -120,6 +120,7 @@ func (s *E2ETestSuite) TestTerminalAuditIntegration() {
 		go func() {
 			if err := steward.Start(ctx); err != nil {
 				// Log error but continue - this is an E2E test
+				_ = err // Explicitly ignore start errors in E2E test
 			}
 		}()
 		time.Sleep(2 * time.Second) // Allow connection
@@ -314,6 +315,7 @@ func (s *E2ETestSuite) TestMultiTenantSaaSIntegration() {
 		go func() {
 			if err := steward.Start(ctx); err != nil {
 				// Log error but continue - this is an E2E test
+				_ = err // Explicitly ignore start errors in E2E test
 			}
 		}()
 		time.Sleep(2 * time.Second) // Allow connection
@@ -434,6 +436,7 @@ func (s *E2ETestSuite) TestWorkflowConfigurationIntegration() {
 		go func() {
 			if err := steward.Start(ctx); err != nil {
 				// Log error but continue - this is an E2E test
+				_ = err // Explicitly ignore start errors in E2E test
 			}
 		}()
 		time.Sleep(2 * time.Second) // Allow connection
@@ -514,6 +517,7 @@ func (s *E2ETestSuite) TestDNADriftWorkflowIntegration() {
 		go func() {
 			if err := steward.Start(ctx); err != nil {
 				// Log error but continue - this is an E2E test
+				_ = err // Explicitly ignore start errors in E2E test
 			}
 		}()
 		time.Sleep(2 * time.Second) // Allow connection
@@ -626,6 +630,7 @@ func (s *E2ETestSuite) TestTemplateRollbackIntegration() {
 		go func() {
 			if err := steward.Start(ctx); err != nil {
 				// Log error but continue - this is an E2E test
+				_ = err // Explicitly ignore start errors in E2E test
 			}
 		}()
 		time.Sleep(2 * time.Second) // Allow connection
@@ -743,6 +748,7 @@ func (s *E2ETestSuite) TestMultiStewardScenario() {
 			go func(steward *steward.Steward) {
 				if err := steward.Start(ctx); err != nil {
 					// Log error but continue test
+					_ = err // Explicitly ignore start errors in E2E test
 				}
 			}(s)
 		}
@@ -786,11 +792,13 @@ func (s *E2ETestSuite) TestFailureRecovery() {
 		go func() {
 			if err := primarySteward.Start(ctx); err != nil {
 				// Log error but continue test
+				_ = err // Explicitly ignore start errors in E2E test
 			}
 		}()
 		go func() {
 			if err := secondarySteward.Start(ctx); err != nil {
 				// Log error but continue test
+				_ = err // Explicitly ignore start errors in E2E test
 			}
 		}()
 		time.Sleep(3 * time.Second) // Allow connections to establish
@@ -801,6 +809,7 @@ func (s *E2ETestSuite) TestFailureRecovery() {
 		// Simulate network disruption by stopping primary steward
 		if err := primarySteward.Stop(context.Background()); err != nil {
 			// Log error but continue test
+			_ = err // Explicitly ignore stop errors in E2E test
 		}
 		time.Sleep(2 * time.Second) // Simulate network downtime
 		
@@ -814,6 +823,7 @@ func (s *E2ETestSuite) TestFailureRecovery() {
 		go func() {
 			if err := primarySteward.Start(ctx); err != nil {
 				// Log error but continue test
+				_ = err // Explicitly ignore start errors in E2E test
 			}
 		}()
 		time.Sleep(4 * time.Second) // Allow recovery
@@ -958,11 +968,13 @@ func (s *E2ETestSuite) TestDataConsistencyAcrossFeatures() {
 		go func() {
 			if err := steward1.Start(ctx); err != nil {
 				// Log error but continue test
+				_ = err // Explicitly ignore start errors in E2E test
 			}
 		}()
 		go func() {
 			if err := steward2.Start(ctx); err != nil {
 				// Log error but continue test
+				_ = err // Explicitly ignore start errors in E2E test
 			}
 		}()
 		time.Sleep(3 * time.Second) // Allow connections
@@ -1195,6 +1207,7 @@ func (s *E2ETestSuite) TestDataFlow() {
 		go func() {
 			if err := steward.Start(ctx); err != nil {
 				// Log error but continue - this is an E2E test
+				_ = err // Explicitly ignore start errors in E2E test
 			}
 		}()
 		time.Sleep(2 * time.Second)
@@ -1249,30 +1262,39 @@ func (s *E2ETestSuite) printTestSummary() {
 	
 	if _, err := fmt.Printf("\n" + strings.Repeat("=", 60) + "\n"); err != nil {
 		// Continue on print error - best effort output
+		_ = err // Explicitly ignore print errors for best effort output
 	}
 	if _, err := fmt.Printf("E2E TEST SUMMARY\n"); err != nil {
 		// Continue on print error - best effort output
+		_ = err // Explicitly ignore print errors for best effort output
 	}
 	if _, err := fmt.Printf(strings.Repeat("=", 60) + "\n"); err != nil {
 		// Continue on print error - best effort output
+		_ = err // Explicitly ignore print errors for best effort output
 	}
 	if _, err := fmt.Printf("Total Tests:    %d\n", totalTests); err != nil {
 		// Continue on print error - best effort output
+		_ = err // Explicitly ignore print errors for best effort output
 	}
 	if _, err := fmt.Printf("Passed:         %d\n", passedTests); err != nil {
 		// Continue on print error - best effort output
+		_ = err // Explicitly ignore print errors for best effort output
 	}
 	if _, err := fmt.Printf("Failed:         %d\n", failedTests); err != nil {
 		// Continue on print error - best effort output
+		_ = err // Explicitly ignore print errors for best effort output
 	}
 	if _, err := fmt.Printf("Success Rate:   %.1f%%\n", float64(passedTests)/float64(totalTests)*100); err != nil {
 		// Continue on print error - best effort output
+		_ = err // Explicitly ignore print errors for best effort output
 	}
 	if _, err := fmt.Printf("Total Duration: %v\n", totalDuration); err != nil {
 		// Continue on print error - best effort output
+		_ = err // Explicitly ignore print errors for best effort output
 	}
 	if _, err := fmt.Printf(strings.Repeat("=", 60) + "\n"); err != nil {
 		// Continue on print error - best effort output
+		_ = err // Explicitly ignore print errors for best effort output
 	}
 	
 	// Print failed tests

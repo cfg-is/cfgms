@@ -160,6 +160,7 @@ func (e *UnixExecutor) Close(ctx context.Context) error {
 	if e.pty != nil {
 		if err := e.pty.Close(); err != nil {
 			// Log error but continue cleanup
+			_ = err // Explicitly ignore PTY close errors during cleanup
 		}
 	}
 

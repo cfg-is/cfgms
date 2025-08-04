@@ -520,10 +520,13 @@ func (b *FileBackend) calculateFileSystemStats() {
 	if err := filepath.Walk(b.basePath, func(path string, info os.FileInfo, err error) error {
 		if err == nil && !info.IsDir() {
 			totalSize += info.Size()
+		} else if err != nil {
+			_ = err // Explicitly ignore file access errors during size calculation
 		}
 		return nil
 	}); err != nil {
 		// Log error but continue - filesystem stats are not critical
+		_ = err // Explicitly ignore filesystem walk errors
 	}
 
 	b.stats.TotalSize = totalSize
@@ -547,23 +550,23 @@ func NewGitBackend(config *Config, logger logging.Logger) (*GitBackend, error) {
 
 // Implement Backend interface (stubs)
 func (b *GitBackend) StoreRecord(ctx context.Context, record *DNARecord, compressedData []byte) error {
-	return fmt.Errorf("Git backend not fully implemented")
+	return fmt.Errorf("git backend not fully implemented")
 }
 
 func (b *GitBackend) StoreReference(ctx context.Context, record *DNARecord) error {
-	return fmt.Errorf("Git backend not fully implemented")
+	return fmt.Errorf("git backend not fully implemented")
 }
 
 func (b *GitBackend) GetRecord(ctx context.Context, contentHash, shardID string) (*DNARecord, error) {
-	return nil, fmt.Errorf("Git backend not fully implemented")
+	return nil, fmt.Errorf("git backend not fully implemented")
 }
 
 func (b *GitBackend) HasContent(ctx context.Context, contentHash string) (bool, error) {
-	return false, fmt.Errorf("Git backend not fully implemented")
+	return false, fmt.Errorf("git backend not fully implemented")
 }
 
 func (b *GitBackend) GetStats(ctx context.Context) (*StorageStats, error) {
-	return &StorageStats{}, fmt.Errorf("Git backend not fully implemented")
+	return &StorageStats{}, fmt.Errorf("git backend not fully implemented")
 }
 
 func (b *GitBackend) Flush() error {
@@ -595,23 +598,23 @@ func NewDatabaseBackend(config *Config, logger logging.Logger) (*DatabaseBackend
 
 // Implement Backend interface (stubs)
 func (b *DatabaseBackend) StoreRecord(ctx context.Context, record *DNARecord, compressedData []byte) error {
-	return fmt.Errorf("Database backend not fully implemented")
+	return fmt.Errorf("database backend not fully implemented")
 }
 
 func (b *DatabaseBackend) StoreReference(ctx context.Context, record *DNARecord) error {
-	return fmt.Errorf("Database backend not fully implemented")
+	return fmt.Errorf("database backend not fully implemented")
 }
 
 func (b *DatabaseBackend) GetRecord(ctx context.Context, contentHash, shardID string) (*DNARecord, error) {
-	return nil, fmt.Errorf("Database backend not fully implemented")
+	return nil, fmt.Errorf("database backend not fully implemented")
 }
 
 func (b *DatabaseBackend) HasContent(ctx context.Context, contentHash string) (bool, error) {
-	return false, fmt.Errorf("Database backend not fully implemented")
+	return false, fmt.Errorf("database backend not fully implemented")
 }
 
 func (b *DatabaseBackend) GetStats(ctx context.Context) (*StorageStats, error) {
-	return &StorageStats{}, fmt.Errorf("Database backend not fully implemented")
+	return &StorageStats{}, fmt.Errorf("database backend not fully implemented")
 }
 
 func (b *DatabaseBackend) Flush() error {

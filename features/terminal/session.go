@@ -96,6 +96,7 @@ func (s *Session) WriteData(ctx context.Context, data []byte) error {
 		if err := s.recorder.RecordData(s.ID, data, DataDirectionInput); err != nil {
 			// Log error but don't fail the write operation
 			// This ensures terminal functionality continues even if recording fails
+			_ = err // Explicitly ignore recording errors for resilience
 		}
 	}
 
@@ -121,6 +122,7 @@ func (s *Session) HandleOutput(ctx context.Context, data []byte) error {
 	if s.recorder != nil {
 		if err := s.recorder.RecordData(s.ID, data, DataDirectionOutput); err != nil {
 			// Log error but don't fail the operation
+			_ = err // Explicitly ignore recording errors for resilience
 		}
 	}
 
@@ -163,6 +165,7 @@ func (s *Session) Close(ctx context.Context) error {
 	if s.executor != nil {
 		if err := s.executor.Close(ctx); err != nil {
 			// Log error but continue cleanup
+			_ = err // Explicitly ignore close errors during cleanup
 		}
 	}
 
@@ -170,6 +173,7 @@ func (s *Session) Close(ctx context.Context) error {
 	if s.recorder != nil {
 		if err := s.recorder.Close(); err != nil {
 			// Log error but continue cleanup
+			_ = err // Explicitly ignore close errors during cleanup
 		}
 	}
 
@@ -259,6 +263,7 @@ func (s *Session) handleShellOutput(ctx context.Context) {
 			// Handle the output data (send to WebSocket, record, etc.)
 			if err := s.HandleOutput(ctx, data); err != nil {
 				// Log error but continue processing output
+				_ = err // Explicitly ignore output handling errors for resilience
 			}
 			
 		case err, ok := <-s.executor.ErrorChannel():

@@ -221,8 +221,8 @@ func (e *DefaultExporter) ExportMarkdown(ctx context.Context, result *Comparison
 		buf.WriteString(fmt.Sprintf("- **Generated**: %s\n\n", result.Metadata.CreatedAt.Format(time.RFC3339)))
 		
 		buf.WriteString("### Change Statistics\n\n")
-		buf.WriteString(fmt.Sprintf("| Type | Count |\n"))
-		buf.WriteString(fmt.Sprintf("|------|-------|\n"))
+		buf.WriteString("| Type | Count |\n")
+		buf.WriteString("|------|-------|\n")
 		buf.WriteString(fmt.Sprintf("| Total | %d |\n", result.Summary.TotalChanges))
 		buf.WriteString(fmt.Sprintf("| Added | %d |\n", result.Summary.AddedItems))
 		buf.WriteString(fmt.Sprintf("| Modified | %d |\n", result.Summary.ModifiedItems))
@@ -339,14 +339,14 @@ func (e *DefaultExporter) formatTextEntry(buf *bytes.Buffer, entry DiffEntry, op
 		fmt.Fprintf(buf, "  - %v\n", formatValue(entry.OldValue))
 		fmt.Fprintf(buf, "  + %v\n", formatValue(entry.NewValue))
 	case DiffTypeMove:
-		buf.WriteString(fmt.Sprintf("  moved from: %s\n", entry.OldPath))
+		fmt.Fprintf(buf, "  moved from: %s\n", entry.OldPath)
 	}
 	
 	// Write impact information if requested
 	if options.IncludeContext && entry.Impact.Level != ImpactLevelLow {
-		buf.WriteString(fmt.Sprintf("  Impact: %s (%s)\n", entry.Impact.Level, entry.Impact.Category))
+		fmt.Fprintf(buf, "  Impact: %s (%s)\n", entry.Impact.Level, entry.Impact.Category)
 		if entry.Impact.Description != "" {
-			buf.WriteString(fmt.Sprintf("  %s\n", entry.Impact.Description))
+			fmt.Fprintf(buf, "  %s\n", entry.Impact.Description)
 		}
 	}
 }
@@ -355,15 +355,15 @@ func (e *DefaultExporter) formatTextEntry(buf *bytes.Buffer, entry DiffEntry, op
 func (e *DefaultExporter) formatUnifiedEntry(buf *bytes.Buffer, entry DiffEntry, options ExportOptions) {
 	switch entry.Type {
 	case DiffTypeAdd:
-		buf.WriteString(fmt.Sprintf("+%s = %v\n", entry.Path, formatValue(entry.NewValue)))
+		fmt.Fprintf(buf, "+%s = %v\n", entry.Path, formatValue(entry.NewValue))
 	case DiffTypeDelete:
-		buf.WriteString(fmt.Sprintf("-%s = %v\n", entry.Path, formatValue(entry.OldValue)))
+		fmt.Fprintf(buf, "-%s = %v\n", entry.Path, formatValue(entry.OldValue))
 	case DiffTypeModify:
-		buf.WriteString(fmt.Sprintf("-%s = %v\n", entry.Path, formatValue(entry.OldValue)))
-		buf.WriteString(fmt.Sprintf("+%s = %v\n", entry.Path, formatValue(entry.NewValue)))
+		fmt.Fprintf(buf, "-%s = %v\n", entry.Path, formatValue(entry.OldValue))
+		fmt.Fprintf(buf, "+%s = %v\n", entry.Path, formatValue(entry.NewValue))
 	case DiffTypeMove:
-		buf.WriteString(fmt.Sprintf("-%s\n", entry.OldPath))
-		buf.WriteString(fmt.Sprintf("+%s\n", entry.Path))
+		fmt.Fprintf(buf, "-%s\n", entry.OldPath)
+		fmt.Fprintf(buf, "+%s\n", entry.Path)
 	}
 }
 
@@ -395,7 +395,7 @@ func (e *DefaultExporter) formatSideBySideEntry(buf *bytes.Buffer, entry DiffEnt
 		rightSide = rightSide[:45] + "..."
 	}
 	
-	buf.WriteString(fmt.Sprintf("%-50s | %s\n", leftSide, rightSide))
+	fmt.Fprintf(buf, "%-50s | %s\n", leftSide, rightSide)
 }
 
 // formatMarkdownEntry formats a diff entry for Markdown output
@@ -404,34 +404,34 @@ func (e *DefaultExporter) formatMarkdownEntry(buf *bytes.Buffer, entry DiffEntry
 	changeIcon := e.getChangeIcon(entry.Type)
 	impactBadge := e.getImpactBadge(entry.Impact.Level)
 	
-	buf.WriteString(fmt.Sprintf("### %s `%s` %s\n\n", changeIcon, entry.Path, impactBadge))
+	fmt.Fprintf(buf, "### %s `%s` %s\n\n", changeIcon, entry.Path, impactBadge)
 	
 	// Write change details
 	switch entry.Type {
 	case DiffTypeAdd:
 		buf.WriteString("```diff\n")
-		buf.WriteString(fmt.Sprintf("+ %v\n", formatValue(entry.NewValue)))
+		fmt.Fprintf(buf, "+ %v\n", formatValue(entry.NewValue))
 		buf.WriteString("```\n\n")
 	case DiffTypeDelete:
 		buf.WriteString("```diff\n")
-		buf.WriteString(fmt.Sprintf("- %v\n", formatValue(entry.OldValue)))
+		fmt.Fprintf(buf, "- %v\n", formatValue(entry.OldValue))
 		buf.WriteString("```\n\n")
 	case DiffTypeModify:
 		buf.WriteString("```diff\n")
-		buf.WriteString(fmt.Sprintf("- %v\n", formatValue(entry.OldValue)))
-		buf.WriteString(fmt.Sprintf("+ %v\n", formatValue(entry.NewValue)))
+		fmt.Fprintf(buf, "- %v\n", formatValue(entry.OldValue))
+		fmt.Fprintf(buf, "+ %v\n", formatValue(entry.NewValue))
 		buf.WriteString("```\n\n")
 	case DiffTypeMove:
-		buf.WriteString(fmt.Sprintf("**Moved from**: `%s`\n\n", entry.OldPath))
+		fmt.Fprintf(buf, "**Moved from**: `%s`\n\n", entry.OldPath)
 	}
 	
 	// Write impact information
 	if options.IncludeContext && entry.Impact.Level != ImpactLevelLow {
 		buf.WriteString("**Impact Details:**\n")
-		buf.WriteString(fmt.Sprintf("- **Level**: %s\n", entry.Impact.Level))
-		buf.WriteString(fmt.Sprintf("- **Category**: %s\n", entry.Impact.Category))
+		fmt.Fprintf(buf, "- **Level**: %s\n", entry.Impact.Level)
+		fmt.Fprintf(buf, "- **Category**: %s\n", entry.Impact.Category)
 		if entry.Impact.Description != "" {
-			buf.WriteString(fmt.Sprintf("- **Description**: %s\n", entry.Impact.Description))
+			fmt.Fprintf(buf, "- **Description**: %s\n", entry.Impact.Description)
 		}
 		if entry.Impact.BreakingChange {
 			buf.WriteString("- **⚠️ Breaking Change**\n")

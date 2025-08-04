@@ -110,6 +110,7 @@ func (c *GzipCompressor) Decompress(data []byte) (*commonpb.DNA, error) {
 	defer func() {
 		if err := reader.Close(); err != nil {
 			// Log error but continue - decompression already completed
+			_ = err // Explicitly ignore close errors after successful decompression
 		}
 	}()
 

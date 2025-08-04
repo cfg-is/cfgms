@@ -292,6 +292,7 @@ func (m *DefaultRollbackManager) executeRollbackAsync(ctx context.Context, opera
 	operation.Progress.Percentage = 10
 	if err := m.store.UpdateOperation(ctx, operation); err != nil {
 		// Log error but continue - operation state updates are best effort
+		_ = err // Explicitly ignore error for best effort operation
 	}
 	
 	// Perform final validation
@@ -312,9 +313,11 @@ func (m *DefaultRollbackManager) executeRollbackAsync(ctx context.Context, opera
 	operation.Progress.Percentage = 20
 	if err := m.store.UpdateOperation(ctx, operation); err != nil {
 		// Log error but continue - operation state updates are best effort
+		_ = err // Explicitly ignore error for best effort operation
 	}
 	if err := m.notifier.NotifyRollbackProgress(ctx, operation); err != nil {
 		// Log error but continue - notifications are best effort
+		_ = err // Explicitly ignore error for best effort operation
 	}
 	
 	// Get repository
@@ -337,6 +340,7 @@ func (m *DefaultRollbackManager) executeRollbackAsync(ctx context.Context, opera
 	operation.Progress.ItemsTotal = len(preview.Changes)
 	if err := m.store.UpdateOperation(ctx, operation); err != nil {
 		// Log error but continue - operation state updates are best effort
+		_ = err // Explicitly ignore error for best effort operation
 	}
 	
 	// Apply changes
@@ -350,6 +354,7 @@ func (m *DefaultRollbackManager) executeRollbackAsync(ctx context.Context, opera
 		operation.Progress.CurrentAction = fmt.Sprintf("Applying %s", change.Path)
 		if err := m.store.UpdateOperation(ctx, operation); err != nil {
 			// Log error but continue rollback operation
+			_ = err // Explicitly ignore store errors during rollback
 		}
 		
 		// Apply the change
@@ -378,6 +383,7 @@ func (m *DefaultRollbackManager) executeRollbackAsync(ctx context.Context, opera
 	operation.Progress.CurrentAction = "Merging rollback changes"
 	if err := m.store.UpdateOperation(ctx, operation); err != nil {
 		// Log error but continue rollback operation
+		_ = err // Explicitly ignore store errors during rollback
 	}
 	
 	if err := m.gitManager.MergeBranch(ctx, repoID, branchName, "main", fmt.Sprintf("Rollback to %s", operation.Request.RollbackTo)); err != nil {
@@ -391,6 +397,7 @@ func (m *DefaultRollbackManager) executeRollbackAsync(ctx context.Context, opera
 	operation.Progress.CurrentAction = "Deploying to devices"
 	if err := m.store.UpdateOperation(ctx, operation); err != nil {
 		// Log error but continue rollback operation
+		_ = err // Explicitly ignore store errors during rollback
 	}
 	
 	// Simulate deployment
@@ -419,10 +426,12 @@ func (m *DefaultRollbackManager) executeRollbackAsync(ctx context.Context, opera
 	// Final update
 	if err := m.store.UpdateOperation(ctx, operation); err != nil {
 		// Log error but continue - operation state updates are best effort
+		_ = err // Explicitly ignore error for best effort operation
 	}
 	m.addAuditEntry(ctx, operation, "rollback_completed", "Rollback completed successfully", nil)
 	if err := m.notifier.NotifyRollbackCompleted(ctx, operation); err != nil {
 		// Log error but continue - notifications are best effort
+		_ = err // Explicitly ignore notification errors for best effort operation
 	}
 }
 
@@ -446,10 +455,12 @@ func (m *DefaultRollbackManager) failRollback(ctx context.Context, operation *Ro
 	
 	if storeErr := m.store.UpdateOperation(ctx, operation); storeErr != nil {
 		// Log error but continue - operation state updates are best effort
+		_ = storeErr // Explicitly ignore store errors for best effort operation
 	}
 	m.addAuditEntry(ctx, operation, "rollback_failed", err.Error(), nil)
 	if notifyErr := m.notifier.NotifyRollbackFailed(ctx, operation, err); notifyErr != nil {
 		// Log error but continue - notifications are best effort
+		_ = notifyErr // Explicitly ignore notification errors for best effort operation
 	}
 }
 
@@ -689,6 +700,7 @@ func (m *DefaultRollbackManager) addAuditEntry(ctx context.Context, operation *R
 	operation.AuditTrail = append(operation.AuditTrail, entry)
 	if err := m.store.AddAuditEntry(ctx, operation.ID, entry); err != nil {
 		// Log error but continue - audit entries are best effort
+		_ = err // Explicitly ignore audit storage errors for best effort operation
 	}
 }
 

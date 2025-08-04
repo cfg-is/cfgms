@@ -268,7 +268,7 @@ func (e *MultiFormatExporter) exportExcel(report *interfaces.Report) ([]byte, er
 	// Excel export would require a library like excelize
 	// For now, return an error indicating it's not implemented
 	e.logger.Warn("Excel export not implemented - would require additional dependencies")
-	return nil, fmt.Errorf("Excel export not implemented - requires additional dependencies")
+	return nil, fmt.Errorf("excel export not implemented - requires additional dependencies")
 }
 
 // writeTableDataToCSV writes table data to CSV writer

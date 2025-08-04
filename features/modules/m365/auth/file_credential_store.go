@@ -416,6 +416,7 @@ func (s *FileCredentialStore) copyFile(src, dst string) error {
 	defer func() {
 		if err := srcFile.Close(); err != nil {
 			// Log error but continue
+			_ = err // Explicitly ignore file close errors
 		}
 	}()
 	
@@ -426,6 +427,7 @@ func (s *FileCredentialStore) copyFile(src, dst string) error {
 	defer func() {
 		if err := dstFile.Close(); err != nil {
 			// Log error but continue
+			_ = err // Explicitly ignore file close errors
 		}
 	}()
 	

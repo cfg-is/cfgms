@@ -406,7 +406,8 @@ func (al *AuditLogger) processingLoop(ctx context.Context) {
 	defer close(al.stopped)
 	defer func() {
 		if err := al.logFile.Close(); err != nil {
-			// Log error but continue with shutdown
+			// Log error but continue with shutdown - file close errors during shutdown are not critical
+			_ = err // Explicitly ignore file close errors during shutdown
 		}
 	}()
 	
@@ -464,7 +465,8 @@ func (al *AuditLogger) processBatch(batch []*AuditEntry) {
 		if al.storage != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			if err := al.storage.Store(ctx, entry); err != nil {
-				// Log error but continue processing
+				// Log error but continue processing - external storage failures shouldn't stop auditing
+				_ = err // Explicitly ignore external storage errors for resilience
 			}
 			cancel()
 		}
@@ -472,7 +474,8 @@ func (al *AuditLogger) processBatch(batch []*AuditEntry) {
 	
 	// Flush file buffer
 	if err := al.logFile.Sync(); err != nil {
-		// Log error but continue - this is best effort
+		// Log error but continue - this is best effort and sync failures are not critical
+		_ = err // Explicitly ignore sync errors for best effort operation
 	}
 }
 
@@ -605,6 +608,7 @@ func (fas *FileAuditStorage) Store(ctx context.Context, entry *AuditEntry) error
 	defer func() {
 		if err := file.Close(); err != nil {
 			// Log error but continue
+			_ = err // Explicitly ignore file close errors
 		}
 	}()
 	

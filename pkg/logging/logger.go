@@ -241,12 +241,12 @@ func (l *DefaultLogger) Warn(msg string, keysAndValues ...interface{}) {
 
 // Error logs an error message
 func (l *DefaultLogger) Error(msg string, keysAndValues ...interface{}) {
-	l.logEntry(nil, ErrorLevel, "ERROR", msg, keysAndValues...)
+	l.logEntry(context.TODO(), ErrorLevel, "ERROR", msg, keysAndValues...)
 }
 
 // Fatal logs a fatal message and exits
 func (l *DefaultLogger) Fatal(msg string, keysAndValues ...interface{}) {
-	l.logEntry(nil, FatalLevel, "FATAL", msg, keysAndValues...)
+	l.logEntry(context.TODO(), FatalLevel, "FATAL", msg, keysAndValues...)
 	os.Exit(1)
 }
 

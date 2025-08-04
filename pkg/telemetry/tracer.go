@@ -42,6 +42,7 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 )
 
 // Tracer provides distributed tracing capabilities with correlation ID support.
@@ -111,7 +112,7 @@ func Initialize(ctx context.Context, config *Config) (*Tracer, func(), error) {
 	if !config.Enabled {
 		// Return a no-op tracer when disabled
 		noopTracer := &Tracer{
-			tracer:   trace.NewNoopTracerProvider().Tracer(config.ServiceName),
+			tracer:   noop.NewTracerProvider().Tracer(config.ServiceName),
 			provider: nil,
 		}
 		return noopTracer, func() {}, nil

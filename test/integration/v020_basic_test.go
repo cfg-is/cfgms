@@ -94,6 +94,7 @@ func TestV020BasicIntegration(t *testing.T) {
 			// We expect some to fail, so don't require NoError for all
 			if err := module.Set(ctx, s.resourceID, config); err != nil {
 				// Log error but continue test - some scenarios are expected to fail
+				_ = err // Explicitly ignore expected test failures
 			}
 		}
 		

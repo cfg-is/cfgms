@@ -87,10 +87,12 @@ func SetupTestCertsWithConfig(t *testing.T, config *CertConfig) (certDir string,
 	cleanup = func() {
 		if err := os.RemoveAll(tempDir); err != nil {
 			// Log error but continue cleanup
+			_ = err // Explicitly ignore cleanup errors
 		}
 		if config.CertDir != tempDir {
 			if err := os.RemoveAll(config.CertDir); err != nil {
 				// Log error but continue cleanup
+				_ = err // Explicitly ignore cleanup errors
 			}
 		}
 	}
@@ -140,6 +142,7 @@ func GenerateTestCertificates(config *CertConfig) error {
 	defer func() {
 		if err := caCertFile.Close(); err != nil {
 			// Log error but continue
+			_ = err // Explicitly ignore file close errors
 		}
 	}()
 
@@ -185,6 +188,7 @@ func GenerateTestCertificates(config *CertConfig) error {
 	defer func() {
 		if err := serverCertFile.Close(); err != nil {
 			// Log error but continue
+			_ = err // Explicitly ignore file close errors
 		}
 	}()
 
@@ -200,6 +204,7 @@ func GenerateTestCertificates(config *CertConfig) error {
 	defer func() {
 		if err := serverKeyFile.Close(); err != nil {
 			// Log error but continue
+			_ = err // Explicitly ignore file close errors
 		}
 	}()
 
@@ -243,6 +248,7 @@ func GenerateTestCertificates(config *CertConfig) error {
 	defer func() {
 		if err := clientCertFile.Close(); err != nil {
 			// Log error but continue
+			_ = err // Explicitly ignore file close errors
 		}
 	}()
 
@@ -258,6 +264,7 @@ func GenerateTestCertificates(config *CertConfig) error {
 	defer func() {
 		if err := clientKeyFile.Close(); err != nil {
 			// Log error but continue
+			_ = err // Explicitly ignore file close errors
 		}
 	}()
 

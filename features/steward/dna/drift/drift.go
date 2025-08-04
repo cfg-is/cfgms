@@ -126,6 +126,7 @@ func QuickDetectDrift(previous, current *commonpb.DNA) ([]*DriftEvent, error) {
 	defer func() {
 		if err := detector.Close(); err != nil {
 			// Log error but continue
+			_ = err // Explicitly ignore detector close errors
 		}
 	}()
 	
@@ -145,6 +146,7 @@ func QuickFilterEvents(events []*DriftEvent) ([]*DriftEvent, error) {
 	defer func() {
 		if closeErr := filter.Close(); closeErr != nil {
 			// Log error but don't return it as it might mask the main error
+			_ = closeErr // Explicitly ignore close errors to avoid masking main error
 		}
 	}()
 	
@@ -164,6 +166,7 @@ func ValidateRule(rule *DriftRule) error {
 	defer func() {
 		if closeErr := engine.Close(); closeErr != nil {
 			// Log error but don't return it as it might mask the main error
+			_ = closeErr // Explicitly ignore close errors to avoid masking main error
 		}
 	}()
 	

@@ -268,6 +268,7 @@ func (ee *ElasticsearchExporter) HealthCheck(ctx context.Context) ExporterHealth
 	defer func() {
 		if err := resp.Body.Close(); err != nil {
 			// Log error but continue
+			_ = err // Explicitly ignore error for cleanup operation
 		}
 	}()
 	
@@ -465,6 +466,7 @@ func (ee *ElasticsearchExporter) bulkIndex(ctx context.Context, documents []Elas
 	defer func() {
 		if err := resp.Body.Close(); err != nil {
 			// Log error but continue
+			_ = err // Explicitly ignore error for cleanup operation
 		}
 	}()
 	

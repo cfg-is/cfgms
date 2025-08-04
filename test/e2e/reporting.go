@@ -20,6 +20,7 @@ func NewTestReporter(framework *E2ETestFramework) *TestReporter {
 	reportDir := filepath.Join(framework.tempDir, "reports")
 	if err := os.MkdirAll(reportDir, 0755); err != nil {
 		// Log error but continue - reports are optional
+		_ = err // Explicitly ignore directory creation errors for optional reports
 	}
 	
 	return &TestReporter{

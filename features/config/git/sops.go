@@ -59,6 +59,7 @@ func (s *SOPSManager) EncryptContent(ctx context.Context, content []byte, config
 	defer func() {
 		if err := os.Remove(tmpFile); err != nil {
 			// Log error but continue - temp file cleanup is best effort
+			_ = err // Explicitly ignore temp file cleanup errors
 		}
 	}()
 	
@@ -123,6 +124,7 @@ func (s *SOPSManager) DecryptContent(ctx context.Context, content []byte) ([]byt
 	defer func() {
 		if err := os.Remove(tmpFile); err != nil {
 			// Log error but continue - temp file cleanup is best effort
+			_ = err // Explicitly ignore temp file cleanup errors
 		}
 	}()
 	
@@ -257,6 +259,7 @@ func (s *SOPSManager) createTempFile(content []byte, filePath string) (string, e
 	
 	if err := tmpFile.Close(); err != nil {
 		// Log error but continue - file was written successfully
+		_ = err // Explicitly ignore file close errors after successful write
 	}
 	return tmpFile.Name(), nil
 }

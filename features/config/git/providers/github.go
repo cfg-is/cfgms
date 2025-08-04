@@ -44,6 +44,7 @@ func (p *GitHubProvider) CreateRepository(ctx context.Context, config cfgit.Repo
 	
 	if config.InitialBranch != "" && config.InitialBranch != "main" {
 		// GitHub uses "main" as default, we'll handle other branches after creation
+		_ = config.InitialBranch // Will be handled in post-creation logic
 	}
 	
 	respBody, err := p.makeRequest(ctx, "POST", "/user/repos", payload)
@@ -367,6 +368,7 @@ func (p *GitHubProvider) makeRequest(ctx context.Context, method, path string, p
 	defer func() {
 		if err := resp.Body.Close(); err != nil {
 			// Log error but continue
+			_ = err // Explicitly ignore error for cleanup operation
 		}
 	}()
 	

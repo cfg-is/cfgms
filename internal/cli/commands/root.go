@@ -29,6 +29,7 @@ func newConfigCommand() *cobra.Command {
 		Run: func(cmd *cobra.Command, args []string) {
 			if err := cmd.Help(); err != nil {
 				// Help failed, but we can't do much about it
+				_ = err // Explicitly ignore help display errors
 			}
 		},
 	}
@@ -42,6 +43,7 @@ func newAgentCommand() *cobra.Command {
 		Run: func(cmd *cobra.Command, args []string) {
 			if err := cmd.Help(); err != nil {
 				// Help failed, but we can't do much about it
+				_ = err // Explicitly ignore help display errors
 			}
 		},
 	}
@@ -55,6 +57,7 @@ func newControllerCommand() *cobra.Command {
 		Run: func(cmd *cobra.Command, args []string) {
 			if err := cmd.Help(); err != nil {
 				// Help failed, but we can't do much about it
+				_ = err // Explicitly ignore help display errors
 			}
 		},
 	}

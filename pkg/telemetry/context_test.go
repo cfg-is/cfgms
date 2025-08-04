@@ -10,6 +10,11 @@ import (
 	"github.com/cfgis/cfgms/pkg/telemetry"
 )
 
+// Context key type to avoid collisions
+type contextKey string
+
+const testKey contextKey = "test"
+
 func TestCorrelationID(t *testing.T) {
 	t.Run("generate correlation ID", func(t *testing.T) {
 		id1 := telemetry.GenerateCorrelationID()
@@ -51,7 +56,7 @@ func TestCorrelationID(t *testing.T) {
 		parentCtx := telemetry.WithCorrelationID(ctx, correlationID)
 
 		// Create child context
-		childCtx := context.WithValue(parentCtx, "test", "value")
+		childCtx := context.WithValue(parentCtx, testKey, "value")
 
 		// Correlation ID should be preserved
 		assert.Equal(t, correlationID, telemetry.GetCorrelationID(childCtx))

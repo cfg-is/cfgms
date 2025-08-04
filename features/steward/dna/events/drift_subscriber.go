@@ -114,6 +114,7 @@ func (d *driftSubscriber) OnEvent(ctx context.Context, event *DNAChangeEvent) er
 	_ = ctx
 	if d.config.MaxDetectionTime > 0 {
 		// Would apply timeout in real implementation
+		_ = d.config.MaxDetectionTime // Timeout will be implemented in future iteration
 	}
 	
 	// For now, we'll just log that we would perform drift detection

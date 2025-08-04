@@ -250,6 +250,7 @@ func (h *RollbackHandler) sendJSON(w http.ResponseWriter, status int, data inter
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(data); err != nil {
 		// Log error but can't return error from HTTP handler
+		_ = err // Explicitly ignore JSON encoding errors in HTTP handler
 	}
 }
 

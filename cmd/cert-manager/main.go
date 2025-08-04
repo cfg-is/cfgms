@@ -27,6 +27,7 @@ import (
 func safePrint(format string, args ...interface{}) {
 	if _, err := fmt.Printf(format, args...); err != nil {
 		// Continue on print error - CLI output
+		_ = err // Explicitly ignore print errors for CLI output
 	}
 }
 

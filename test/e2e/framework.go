@@ -581,9 +581,10 @@ func (f *E2ETestFramework) generateTestData() error {
 	
 	// Generate multiple steward configs for scalability testing
 	stewardCount := 1
-	if f.config.TestDataSize == "medium" {
+	switch f.config.TestDataSize {
+	case "medium":
 		stewardCount = 3
-	} else if f.config.TestDataSize == "large" {
+	case "large":
 		stewardCount = 5
 	}
 	

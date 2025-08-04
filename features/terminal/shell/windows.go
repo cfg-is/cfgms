@@ -208,6 +208,7 @@ func (e *WindowsExecutor) Close(ctx context.Context) error {
 			// Force kill if context expires
 			if err := e.cmd.Process.Kill(); err != nil {
 				// Log but continue - process might already be dead
+				_ = err // Explicitly ignore kill errors for cleanup
 			}
 		case <-done:
 			// Process exited gracefully

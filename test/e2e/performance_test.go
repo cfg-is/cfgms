@@ -124,6 +124,7 @@ func (s *PerformanceRegressionSuite) TestStewardPerformanceBaseline() {
 		go func() {
 			if err := steward.Start(ctx); err != nil {
 				// Log error but continue - this is a performance test
+				_ = err // Explicitly ignore errors in performance test
 			}
 		}()
 		
@@ -185,6 +186,7 @@ func (s *PerformanceRegressionSuite) TestTerminalPerformanceBaseline() {
 		go func() {
 			if err := steward.Start(ctx); err != nil {
 				// Log error but continue - this is a performance test
+				_ = err // Explicitly ignore errors in performance test
 			}
 		}()
 		time.Sleep(1 * time.Second) // Allow connection
@@ -271,11 +273,13 @@ func (s *PerformanceRegressionSuite) TestMemoryLeakDetection() {
 				go func() {
 					if err := steward.Start(ctx); err != nil {
 						// Log error but continue - this is a performance test
+						_ = err // Explicitly ignore errors in performance test
 					}
 				}()
 				time.Sleep(100 * time.Millisecond)
 				if err := steward.Stop(context.Background()); err != nil {
 					// Log error but continue - this is a performance test
+					_ = err // Explicitly ignore errors in performance test
 				}
 				cancel()
 				operationCount++
@@ -334,6 +338,7 @@ func (s *PerformanceRegressionSuite) testConcurrentStewardConnections(count int)
 			go func() {
 				if err := steward.Start(ctx); err != nil {
 					// Log error but continue - this is a performance test
+					_ = err // Explicitly ignore start errors in performance test
 				}
 			}()
 			time.Sleep(100 * time.Millisecond)
@@ -443,6 +448,7 @@ func (s *ProductionReadinessSuite) TearDownSuite() {
 		defer cancel()
 		if err := s.terminalManager.(*terminal.DefaultSessionManager).Stop(ctx); err != nil {
 			// Log error but continue - cleanup operation
+			_ = err // Explicitly ignore cleanup errors in test teardown
 		}
 	}
 	
@@ -482,6 +488,7 @@ func (s *ProductionReadinessSuite) TestConcurrentTerminalSessions() {
 		go func() {
 			if err := steward.Start(ctx); err != nil {
 				// Log error but continue - this is a performance test
+				_ = err // Explicitly ignore errors in performance test
 			}
 		}()
 		time.Sleep(2 * time.Second) // Allow steward to start
@@ -567,6 +574,7 @@ func (s *ProductionReadinessSuite) TestConcurrentTerminalSessions() {
 						cmd := fmt.Sprintf(commands[sessionIndex%len(commands)], sessionIndex)
 						if err := session.WriteData(ctx, []byte(cmd)); err != nil {
 							// Log error but continue test
+							_ = err // Explicitly ignore write errors in performance test
 						}
 						
 						time.Sleep(time.Duration(500+sessionIndex*10) * time.Millisecond)

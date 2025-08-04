@@ -180,6 +180,7 @@ func (p *OAuth2Provider) makeTokenRequest(ctx context.Context, tokenURL string, 
 	defer func() {
 		if err := resp.Body.Close(); err != nil {
 			// Log error but continue
+			_ = err // Explicitly ignore error for cleanup operation
 		}
 	}()
 	
@@ -385,6 +386,7 @@ func (p *OAuth2Provider) ValidateToken(ctx context.Context, token *AccessToken) 
 	defer func() {
 		if err := resp.Body.Close(); err != nil {
 			// Log error but continue
+			_ = err // Explicitly ignore error for cleanup operation
 		}
 	}()
 	
@@ -416,6 +418,7 @@ func (p *OAuth2Provider) GetTenantInfo(ctx context.Context, token *AccessToken) 
 	defer func() {
 		if err := resp.Body.Close(); err != nil {
 			// Log error but continue
+			_ = err // Explicitly ignore error for cleanup operation
 		}
 	}()
 	

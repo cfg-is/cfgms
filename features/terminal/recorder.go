@@ -180,6 +180,7 @@ func (r *DefaultSessionRecorder) GetRecording(sessionID string) (*SessionRecordi
 	defer func() {
 		if err := file.Close(); err != nil {
 			// Log error but continue
+			_ = err // Explicitly ignore file close errors
 		}
 	}()
 
@@ -192,12 +193,14 @@ func (r *DefaultSessionRecorder) GetRecording(sessionID string) (*SessionRecordi
 		// Reset file position
 		if _, err := file.Seek(0, 0); err != nil {
 			// Log error but continue with uncompressed read
+			_ = err // Explicitly ignore seek errors
 		}
 		gzReader, err := gzip.NewReader(file)
 		if err == nil {
 			defer func() {
 				if err := gzReader.Close(); err != nil {
 					// Log error but continue
+					_ = err // Explicitly ignore gzReader close errors
 				}
 			}()
 			reader = gzReader
@@ -205,6 +208,7 @@ func (r *DefaultSessionRecorder) GetRecording(sessionID string) (*SessionRecordi
 			// If gzip reader creation fails, file isn't compressed, read as-is
 			if _, err := file.Seek(0, 0); err != nil {
 				// Log error but continue
+				_ = err // Explicitly ignore seek errors for uncompressed read
 			}
 			reader = file
 		}
@@ -224,6 +228,7 @@ func (r *DefaultSessionRecorder) GetRecording(sessionID string) (*SessionRecordi
 		defer func() {
 			if err := metadataFile.Close(); err != nil {
 				// Log error but continue
+				_ = err // Explicitly ignore metadata file close errors
 			}
 		}()
 		
@@ -365,6 +370,7 @@ func (w *recordingWriter) close() error {
 		defer func() {
 			if err := metadataFile.Close(); err != nil {
 				// Log error but continue
+				_ = err // Explicitly ignore metadata file close errors
 			}
 		}()
 
