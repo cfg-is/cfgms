@@ -139,7 +139,7 @@ jobs:
           ${{ runner.os }}-gosec-go-
     
     - name: Install gosec
-      run: go install github.com/securecodewarrior/gosec/v2/cmd/gosec@latest
+      run: go install github.com/securego/gosec/v2/cmd/gosec@latest
     
     - name: Run gosec Scan
       id: scan
@@ -273,7 +273,7 @@ jobs:
         sudo apt-get install trivy
         
         # Install gosec and staticcheck
-        go install github.com/securecodewarrior/gosec/v2/cmd/gosec@latest
+        go install github.com/securego/gosec/v2/cmd/gosec@latest
         go install honnef.co/go/tools/cmd/staticcheck@latest
     
     - name: Generate Remediation Report on Failure

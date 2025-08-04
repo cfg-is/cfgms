@@ -59,7 +59,7 @@ jobs:
         
         # Install other security tools
         make install-nancy
-        go install github.com/securecodewarrior/gosec/v2/cmd/gosec@latest
+        go install github.com/securego/gosec/v2/cmd/gosec@latest
         go install honnef.co/go/tools/cmd/staticcheck@latest
         
         echo "✅ Security tools installed"
