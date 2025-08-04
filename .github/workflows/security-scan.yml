@@ -95,9 +95,10 @@ jobs:
       uses: actions/cache@v3
       with:
         path: ~/go/pkg/mod
-        key: ${{ runner.os }}-nancy-go-${{ hashFiles('**/go.sum') }}
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
         restore-keys: |
-          ${{ runner.os }}-nancy-go-
+          ${{ runner.os }}-go-modules-
+      continue-on-error: true
     
     - name: Install Nancy
       run: make install-nancy
@@ -134,9 +135,10 @@ jobs:
       uses: actions/cache@v3
       with:
         path: ~/go/pkg/mod
-        key: ${{ runner.os }}-gosec-go-${{ hashFiles('**/go.sum') }}
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
         restore-keys: |
-          ${{ runner.os }}-gosec-go-
+          ${{ runner.os }}-go-modules-
+      continue-on-error: true
     
     - name: Install gosec
       run: go install github.com/securego/gosec/v2/cmd/gosec@latest
@@ -195,9 +197,10 @@ jobs:
       uses: actions/cache@v3
       with:
         path: ~/go/pkg/mod
-        key: ${{ runner.os }}-staticcheck-go-${{ hashFiles('**/go.sum') }}
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
         restore-keys: |
-          ${{ runner.os }}-staticcheck-go-
+          ${{ runner.os }}-go-modules-
+      continue-on-error: true
     
     - name: Install staticcheck
       run: go install honnef.co/go/tools/cmd/staticcheck@latest
