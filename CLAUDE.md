@@ -118,8 +118,15 @@ This ensures optimal order (test → security → summary) and provides clear va
 
 10. **Update GitHub Project Status** (MANDATORY)
     ```bash
-    # See docs/github-cli-reference.md for exact commands
-    # Move story from "In Progress" to "Done"
+    # ALWAYS review docs/github-cli-reference.md FIRST before any gh project commands
+    # This document contains the exact project IDs, field IDs, and option IDs required
+    # Never guess or use generic commands - use the documented patterns
+    
+    # Example workflow:
+    # 1. Check docs/github-cli-reference.md for current project details
+    # 2. Add issues to project: gh project item-add 1 --owner cfg-is --url "URL"
+    # 3. Update status: Use exact IDs from documentation
+    # 4. Move story from "In Progress" to "Done" using documented commands
     ```
 
 11. **Final Test Run** (MANDATORY)
