@@ -350,9 +350,15 @@ func (f *E2ETestFramework) CreateSteward(stewardID string) (*steward.Steward, er
 		LogLevel:       "info",
 		Certificate: &steward.CertificateConfig{
 			EnableCertManagement: f.config.EnableTLS,
-			CertStoragePath:     filepath.Join(f.tempDir, "certs"),
+			CertStoragePath:     filepath.Join(f.tempDir, "certs"), // Use same cert path as controller
 			EnableAutoRenewal:   false,
 			RenewalThresholdDays: 1,
+			Provisioning: &steward.ProvisioningConfig{
+				EnableAutoProvisioning: true,
+				ProvisioningEndpoint:   fmt.Sprintf("https://localhost:%d/api/v1/certificates/provision", f.config.ControllerPort),
+				ValidityDays:          1,
+				Organization:          "Test Organization",
+			},
 		},
 	}
 	

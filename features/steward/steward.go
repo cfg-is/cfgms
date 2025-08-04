@@ -580,7 +580,7 @@ func initializeStewardCertificateManager(cfg *Config, logger logging.Logger) (*c
 	// In a full implementation, this would connect to the controller's CA
 	manager, err := cert.NewManager(&cert.ManagerConfig{
 		StoragePath:          cfg.Certificate.CertStoragePath,
-		LoadExistingCA:       false, // Stewards don't manage their own CA
+		LoadExistingCA:       true, // Load existing CA from controller setup
 		EnableAutoRenewal:    cfg.Certificate.EnableAutoRenewal,
 		RenewalThresholdDays: cfg.Certificate.RenewalThresholdDays,
 	})
