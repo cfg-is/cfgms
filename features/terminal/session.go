@@ -85,9 +85,12 @@ func NewSession(req *SessionRequest, logger logging.Logger) (*Session, error) {
 
 // WriteData writes data to the session
 func (s *Session) WriteData(ctx context.Context, data []byte) error {
+	s.mu.RLock()
 	if s.closed {
+		s.mu.RUnlock()
 		return fmt.Errorf("session is closed")
 	}
+	s.mu.RUnlock()
 
 	s.UpdateActivity()
 
@@ -112,9 +115,12 @@ func (s *Session) WriteData(ctx context.Context, data []byte) error {
 
 // HandleOutput handles output data from the shell
 func (s *Session) HandleOutput(ctx context.Context, data []byte) error {
+	s.mu.RLock()
 	if s.closed {
+		s.mu.RUnlock()
 		return fmt.Errorf("session is closed")
 	}
+	s.mu.RUnlock()
 
 	s.UpdateActivity()
 
@@ -131,6 +137,9 @@ func (s *Session) HandleOutput(ctx context.Context, data []byte) error {
 
 // Resize resizes the terminal
 func (s *Session) Resize(ctx context.Context, cols, rows int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	
 	if s.closed {
 		return fmt.Errorf("session is closed")
 	}
@@ -141,7 +150,7 @@ func (s *Session) Resize(ctx context.Context, cols, rows int) error {
 
 	s.Cols = cols
 	s.Rows = rows
-	s.UpdateActivity()
+	s.LastActivity = time.Now() // Update activity directly since we already hold the lock
 
 	// Resize the shell executor
 	if s.executor != nil {
@@ -155,6 +164,9 @@ func (s *Session) Resize(ctx context.Context, cols, rows int) error {
 
 // Close closes the session
 func (s *Session) Close(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	
 	if s.closed {
 		return nil // Already closed
 	}
@@ -182,26 +194,37 @@ func (s *Session) Close(ctx context.Context) error {
 
 // IsActive returns true if the session is active
 func (s *Session) IsActive() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return !s.closed
 }
 
 // IsClosed returns true if the session is closed
 func (s *Session) IsClosed() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.closed
 }
 
 // UpdateActivity updates the last activity timestamp
 func (s *Session) UpdateActivity() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.LastActivity = time.Now()
 }
 
 // IsTimedOut returns true if the session has timed out
 func (s *Session) IsTimedOut(timeout time.Duration) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return time.Since(s.LastActivity) > timeout
 }
 
 // GetMetadata returns session metadata
 func (s *Session) GetMetadata() *SessionMetadata {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	
 	metadata := &SessionMetadata{
 		SessionID:   s.ID,
 		StewardID:   s.StewardID,
@@ -221,21 +244,28 @@ func (s *Session) GetMetadata() *SessionMetadata {
 
 // SetRecorder sets the session recorder
 func (s *Session) SetRecorder(recorder Recorder) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.recorder = recorder
 }
 
 // Start starts the shell execution
 func (s *Session) Start(ctx context.Context) error {
+	s.mu.RLock()
 	if s.closed {
+		s.mu.RUnlock()
 		return fmt.Errorf("session is closed")
 	}
 
 	if s.executor == nil {
+		s.mu.RUnlock()
 		return fmt.Errorf("no shell executor available")
 	}
+	executor := s.executor // Copy reference while holding lock
+	s.mu.RUnlock()
 
 	// Start the shell executor
-	if err := s.executor.Start(ctx, nil); err != nil {
+	if err := executor.Start(ctx, nil); err != nil {
 		return fmt.Errorf("failed to start shell: %w", err)
 	}
 
@@ -247,15 +277,20 @@ func (s *Session) Start(ctx context.Context) error {
 
 // handleShellOutput handles output from the shell executor
 func (s *Session) handleShellOutput(ctx context.Context) {
+	s.mu.RLock()
 	if s.executor == nil {
+		s.mu.RUnlock()
 		return
 	}
+	outputChan := s.executor.OutputChannel()
+	errorChan := s.executor.ErrorChannel()
+	s.mu.RUnlock()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case data, ok := <-s.executor.OutputChannel():
+		case data, ok := <-outputChan:
 			if !ok {
 				return // Channel closed
 			}
@@ -266,7 +301,7 @@ func (s *Session) handleShellOutput(ctx context.Context) {
 				_ = err // Explicitly ignore output handling errors for resilience
 			}
 			
-		case err, ok := <-s.executor.ErrorChannel():
+		case err, ok := <-errorChan:
 			if !ok {
 				return // Channel closed
 			}
@@ -279,6 +314,8 @@ func (s *Session) handleShellOutput(ctx context.Context) {
 
 // GetOutputChannel returns the shell output channel
 func (s *Session) GetOutputChannel() <-chan []byte {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if s.executor == nil {
 		return nil
 	}
@@ -287,6 +324,8 @@ func (s *Session) GetOutputChannel() <-chan []byte {
 
 // GetErrorChannel returns the shell error channel  
 func (s *Session) GetErrorChannel() <-chan error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if s.executor == nil {
 		return nil
 	}
