@@ -27,35 +27,6 @@ func (m *mockModule) Set(ctx context.Context, resourceID string, config modules.
 	return args.Error(0)
 }
 
-// mockConfigState implements the ConfigState interface for testing
-type mockConfigState struct {
-	mock.Mock
-}
-
-func (m *mockConfigState) AsMap() map[string]interface{} {
-	args := m.Called()
-	return args.Get(0).(map[string]interface{})
-}
-
-func (m *mockConfigState) ToYAML() ([]byte, error) {
-	args := m.Called()
-	return args.Get(0).([]byte), args.Error(1)
-}
-
-func (m *mockConfigState) FromYAML(data []byte) error {
-	args := m.Called(data)
-	return args.Error(0)
-}
-
-func (m *mockConfigState) Validate() error {
-	args := m.Called()
-	return args.Error(0)
-}
-
-func (m *mockConfigState) GetManagedFields() []string {
-	args := m.Called()
-	return args.Get(0).([]string)
-}
 
 func TestNew(t *testing.T) {
 	registry := discovery.ModuleRegistry{

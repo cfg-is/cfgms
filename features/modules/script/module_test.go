@@ -5,19 +5,9 @@ import (
 	"runtime"
 	"testing"
 	"time"
-
-	"github.com/cfgis/cfgms/features/modules"
-	"gopkg.in/yaml.v3"
 )
 
-// createConfigFromYAML creates a ScriptConfig from YAML string
-func createConfigFromYAML(yamlData string) modules.ConfigState {
-	var config ScriptConfig
-	if err := yaml.Unmarshal([]byte(yamlData), &config); err != nil {
-		return nil
-	}
-	return &config
-}
+
 
 // getTestShell returns an appropriate shell for the current platform
 func getTestShell() ShellType {
@@ -292,7 +282,7 @@ func TestScriptModule_GetSet(t *testing.T) {
 	}
 
 	// Add context timestamp to avoid panic
-	ctx = context.WithValue(ctx, "timestamp", time.Now().Unix())
+	ctx = context.WithValue(ctx, timestampKey, time.Now().Unix())
 
 	err = module.Set(ctx, resourceID, testConfig)
 	if err != nil {
@@ -337,7 +327,7 @@ func TestScriptModule_ExecutionState(t *testing.T) {
 		Shell:   getTestShell(),
 	}
 
-	ctx := context.WithValue(context.Background(), "timestamp", time.Now().Unix())
+	ctx := context.WithValue(context.Background(), timestampKey, time.Now().Unix())
 	
 	// This will create an execution state
 	err := module.Set(ctx, resourceID, testConfig)

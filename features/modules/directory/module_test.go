@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
-	"runtime"
 	"testing"
 
 	"github.com/cfgis/cfgms/features/modules"
@@ -202,30 +201,3 @@ recursive: true`
 	}
 }
 
-// getTestUser returns a test user and group for the current platform
-func getTestUser(t *testing.T) (string, string) {
-	switch runtime.GOOS {
-	case "linux", "darwin":
-		// Try to use the current user for testing
-		currentUser, err := user.Current()
-		if err != nil {
-			t.Fatalf("Failed to get current user: %v", err)
-		}
-		// Get the primary group name
-		group, err := user.LookupGroupId(currentUser.Gid)
-		if err != nil {
-			t.Fatalf("Failed to get group name: %v", err)
-		}
-		return currentUser.Username, group.Name
-	case "windows":
-		// Windows uses SIDs, but we'll use the username for testing
-		currentUser, err := user.Current()
-		if err != nil {
-			t.Fatalf("Failed to get current user: %v", err)
-		}
-		return currentUser.Username, "Users" // Common Windows group
-	default:
-		t.Skipf("Unsupported platform: %s", runtime.GOOS)
-		return "", ""
-	}
-}

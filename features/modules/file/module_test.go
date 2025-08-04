@@ -21,10 +21,6 @@ func createConfigFromYAML(yamlData string) modules.ConfigState {
 	return &config
 }
 
-// createConfigState creates a ConfigState from FileConfig
-func createConfigState(config FileConfig) modules.ConfigState {
-	return &config
-}
 
 // getTestUser returns a test user for the current platform
 func getTestUser(t *testing.T) (string, string) {
