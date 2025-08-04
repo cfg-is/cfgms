@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-
 	"github.com/cfgis/cfgms/features/controller"
 	controllerConfig "github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/rbac"
@@ -342,6 +341,32 @@ func (f *E2ETestFramework) CreateSteward(stewardID string) (*steward.Steward, er
 		return nil, fmt.Errorf("steward %s already exists", stewardID)
 	}
 	
+	// Generate client certificate for this steward (like integration tests do)
+	if f.config.EnableTLS && f.certManager != nil {
+		clientCert, err := f.certManager.GenerateClientCertificate(&cert.ClientCertConfig{
+			CommonName:         stewardID,
+			Organization:       "CFGMS Test Stewards",
+			OrganizationalUnit: "E2E Tests",
+			ValidityDays:       1,
+			KeySize:            2048,
+			ClientID:           stewardID,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate client certificate for steward %s: %w", stewardID, err)
+		}
+		
+		f.logger.Info("Generated client certificate for steward", "steward_id", stewardID, "serial", clientCert.SerialNumber)
+		
+		// Save client certificate files for steward to use
+		certPath := filepath.Join(f.tempDir, "certs")
+		err = f.certManager.SaveCertificateFiles(clientCert.SerialNumber,
+			filepath.Join(certPath, "client.crt"), 
+			filepath.Join(certPath, "client.key"))
+		if err != nil {
+			return nil, fmt.Errorf("failed to save client certificate files for steward %s: %w", stewardID, err)
+		}
+	}
+	
 	stewardConfig := &steward.Config{
 		ID:             stewardID,
 		ControllerAddr: fmt.Sprintf("localhost:%d", f.config.ControllerPort),
@@ -349,12 +374,12 @@ func (f *E2ETestFramework) CreateSteward(stewardID string) (*steward.Steward, er
 		DataDir:        filepath.Join(f.tempDir, "steward-data"),
 		LogLevel:       "info",
 		Certificate: &steward.CertificateConfig{
-			EnableCertManagement: f.config.EnableTLS,
-			CertStoragePath:     filepath.Join(f.tempDir, "certs"), // Use same cert path as controller
+			EnableCertManagement: false, // Disable cert management like integration tests
+			CertStoragePath:     filepath.Join(f.tempDir, "certs"),
 			EnableAutoRenewal:   false,
 			RenewalThresholdDays: 1,
 			Provisioning: &steward.ProvisioningConfig{
-				EnableAutoProvisioning: true,
+				EnableAutoProvisioning: false, // Disable auto-provisioning like integration tests
 				ProvisioningEndpoint:   fmt.Sprintf("https://localhost:%d/api/v1/certificates/provision", f.config.ControllerPort),
 				ValidityDays:          1,
 				Organization:          "Test Organization",
