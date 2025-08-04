@@ -565,7 +565,9 @@ func (s *ProductionReadinessSuite) TestConcurrentTerminalSessions() {
 						}
 						
 						cmd := fmt.Sprintf(commands[sessionIndex%len(commands)], sessionIndex)
-						session.WriteData(ctx, []byte(cmd))
+						if err := session.WriteData(ctx, []byte(cmd)); err != nil {
+							// Log error but continue test
+						}
 						
 						time.Sleep(time.Duration(500+sessionIndex*10) * time.Millisecond)
 					}

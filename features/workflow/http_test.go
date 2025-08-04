@@ -224,7 +224,9 @@ func TestEngine_ExecuteWebhookStep(t *testing.T) {
 		}
 		
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"webhook": "received"}`))
+		if _, err := w.Write([]byte(`{"webhook": "received"}`)); err != nil {
+			t.Logf("Failed to write webhook response: %v", err)
+		}
 	}))
 	defer func() {
 		server.Close() // Test server close doesn't return error
@@ -321,18 +323,26 @@ func TestEngine_ComplexAPIWorkflow(t *testing.T) {
 		switch r.URL.Path {
 		case "/auth/token":
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{"access_token": "mock-token", "expires_in": 3600}`))
+			if _, err := w.Write([]byte(`{"access_token": "mock-token", "expires_in": 3600}`)); err != nil {
+				t.Logf("Failed to write auth response: %v", err)
+			}
 		case "/api/users":
 			if r.Method == "POST" {
 				w.WriteHeader(http.StatusCreated)
-				w.Write([]byte(`{"id": "user123", "name": "Test User", "email": "test@example.com"}`))
+				if _, err := w.Write([]byte(`{"id": "user123", "name": "Test User", "email": "test@example.com"}`)); err != nil {
+					t.Logf("Failed to write user creation response: %v", err)
+				}
 			} else {
 				w.WriteHeader(http.StatusOK)
-				w.Write([]byte(`{"users": [{"id": "user123", "name": "Test User"}]}`))
+				if _, err := w.Write([]byte(`{"users": [{"id": "user123", "name": "Test User"}]}`)); err != nil {
+					t.Logf("Failed to write users response: %v", err)
+				}
 			}
 		case "/webhook":
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{"status": "received"}`))
+			if _, err := w.Write([]byte(`{"status": "received"}`)); err != nil {
+				t.Logf("Failed to write webhook response: %v", err)
+			}
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}

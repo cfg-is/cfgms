@@ -86,7 +86,11 @@ func TestManager_GenerateServerCertificate(t *testing.T) {
 	// Setup
 	tempDir, err := os.MkdirTemp("", "cert-test-")
 	require.NoError(t, err)
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		if err := os.RemoveAll(tempDir); err != nil {
+			t.Logf("Failed to clean up temp directory: %v", err)
+		}
+	}()
 
 	manager, err := NewManager(&ManagerConfig{
 		StoragePath: tempDir,
@@ -129,7 +133,11 @@ func TestManager_GenerateClientCertificate(t *testing.T) {
 	// Setup
 	tempDir, err := os.MkdirTemp("", "cert-test-")
 	require.NoError(t, err)
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		if err := os.RemoveAll(tempDir); err != nil {
+			t.Logf("Failed to clean up temp directory: %v", err)
+		}
+	}()
 
 	manager, err := NewManager(&ManagerConfig{
 		StoragePath: tempDir,
@@ -172,7 +180,11 @@ func TestManager_CertificateValidation(t *testing.T) {
 	// Setup
 	tempDir, err := os.MkdirTemp("", "cert-test-")
 	require.NoError(t, err)
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		if err := os.RemoveAll(tempDir); err != nil {
+			t.Logf("Failed to clean up temp directory: %v", err)
+		}
+	}()
 
 	manager, err := NewManager(&ManagerConfig{
 		StoragePath: tempDir,
@@ -208,7 +220,11 @@ func TestManager_CertificateRenewal(t *testing.T) {
 	// Setup
 	tempDir, err := os.MkdirTemp("", "cert-test-")
 	require.NoError(t, err)
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		if err := os.RemoveAll(tempDir); err != nil {
+			t.Logf("Failed to clean up temp directory: %v", err)
+		}
+	}()
 
 	manager, err := NewManager(&ManagerConfig{
 		StoragePath:      tempDir,
@@ -255,7 +271,11 @@ func TestManager_ListCertificates(t *testing.T) {
 	// Setup
 	tempDir, err := os.MkdirTemp("", "cert-test-")
 	require.NoError(t, err)
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		if err := os.RemoveAll(tempDir); err != nil {
+			t.Logf("Failed to clean up temp directory: %v", err)
+		}
+	}()
 
 	manager, err := NewManager(&ManagerConfig{
 		StoragePath: tempDir,
@@ -302,7 +322,11 @@ func TestManager_GetManagerStats(t *testing.T) {
 	// Setup
 	tempDir, err := os.MkdirTemp("", "cert-test-")
 	require.NoError(t, err)
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		if err := os.RemoveAll(tempDir); err != nil {
+			t.Logf("Failed to clean up temp directory: %v", err)
+		}
+	}()
 
 	manager, err := NewManager(&ManagerConfig{
 		StoragePath: tempDir,
@@ -343,7 +367,11 @@ func TestManager_ImportExportCertificate(t *testing.T) {
 	// Setup
 	tempDir, err := os.MkdirTemp("", "cert-test-")
 	require.NoError(t, err)
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		if err := os.RemoveAll(tempDir); err != nil {
+			t.Logf("Failed to clean up temp directory: %v", err)
+		}
+	}()
 
 	manager, err := NewManager(&ManagerConfig{
 		StoragePath: tempDir,
@@ -393,7 +421,11 @@ func TestManager_SaveCertificateFiles(t *testing.T) {
 	// Setup
 	tempDir, err := os.MkdirTemp("", "cert-test-")
 	require.NoError(t, err)
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		if err := os.RemoveAll(tempDir); err != nil {
+			t.Logf("Failed to clean up temp directory: %v", err)
+		}
+	}()
 
 	manager, err := NewManager(&ManagerConfig{
 		StoragePath: tempDir,

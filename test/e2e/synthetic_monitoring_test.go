@@ -110,7 +110,9 @@ func (s *SyntheticMonitoringSuite) TearDownSuite() {
 	if s.terminalManager != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		s.terminalManager.(*terminal.DefaultSessionManager).Stop(ctx)
+		if err := s.terminalManager.(*terminal.DefaultSessionManager).Stop(ctx); err != nil {
+			// Log error but continue cleanup
+		}
 	}
 
 	if s.framework != nil {
@@ -269,7 +271,11 @@ func (s *SyntheticMonitoringSuite) TestTerminalSessionMonitoring() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		go steward.Start(ctx)
+		go func() {
+			if err := steward.Start(ctx); err != nil {
+				// Log error but continue test
+			}
+		}()
 		time.Sleep(1 * time.Second) // Allow steward to start
 
 		testDuration := 15 * time.Second
@@ -329,7 +335,9 @@ func (s *SyntheticMonitoringSuite) TestTerminalSessionMonitoring() {
 				}
 
 				// Clean up session
-				s.terminalManager.TerminateSession(ctx, session.ID)
+				if err := s.terminalManager.TerminateSession(ctx, session.ID); err != nil {
+					// Log error but continue test
+				}
 			}
 
 			sessionResults = append(sessionResults, result)

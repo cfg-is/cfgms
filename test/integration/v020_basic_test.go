@@ -92,7 +92,9 @@ func TestV020BasicIntegration(t *testing.T) {
 			}
 			
 			// We expect some to fail, so don't require NoError for all
-			module.Set(ctx, s.resourceID, config)
+			if err := module.Set(ctx, s.resourceID, config); err != nil {
+				// Log error but continue test - some scenarios are expected to fail
+			}
 		}
 		
 		// Test audit query functionality

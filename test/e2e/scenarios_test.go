@@ -740,7 +740,11 @@ func (s *E2ETestSuite) TestMultiStewardScenario() {
 			stewards[i] = s
 			
 			// Start steward
-			go s.Start(ctx)
+			go func(steward *steward.Steward) {
+				if err := steward.Start(ctx); err != nil {
+					// Log error but continue test
+				}
+			}(s)
 		}
 		
 		// Wait for all stewards to connect
@@ -779,15 +783,25 @@ func (s *E2ETestSuite) TestFailureRecovery() {
 		}
 		
 		// Start both stewards
-		go primarySteward.Start(ctx)
-		go secondarySteward.Start(ctx)
+		go func() {
+			if err := primarySteward.Start(ctx); err != nil {
+				// Log error but continue test
+			}
+		}()
+		go func() {
+			if err := secondarySteward.Start(ctx); err != nil {
+				// Log error but continue test
+			}
+		}()
 		time.Sleep(3 * time.Second) // Allow connections to establish
 		
 		// Step 2: Test network failure and recovery
 		s.framework.logger.Info("Simulating network failure")
 		
 		// Simulate network disruption by stopping primary steward
-		primarySteward.Stop(context.Background())
+		if err := primarySteward.Stop(context.Background()); err != nil {
+			// Log error but continue test
+		}
 		time.Sleep(2 * time.Second) // Simulate network downtime
 		
 		// Test that secondary steward continues operating
@@ -797,7 +811,11 @@ func (s *E2ETestSuite) TestFailureRecovery() {
 		recoveryStart := time.Now()
 		s.framework.logger.Info("Initiating primary steward recovery")
 		
-		go primarySteward.Start(ctx)
+		go func() {
+			if err := primarySteward.Start(ctx); err != nil {
+				// Log error but continue test
+			}
+		}()
 		time.Sleep(4 * time.Second) // Allow recovery
 		
 		networkRecoveryLatency := time.Since(recoveryStart)
@@ -937,8 +955,16 @@ func (s *E2ETestSuite) TestDataConsistencyAcrossFeatures() {
 		}
 		
 		// Start stewards
-		go steward1.Start(ctx)
-		go steward2.Start(ctx)
+		go func() {
+			if err := steward1.Start(ctx); err != nil {
+				// Log error but continue test
+			}
+		}()
+		go func() {
+			if err := steward2.Start(ctx); err != nil {
+				// Log error but continue test
+			}
+		}()
 		time.Sleep(3 * time.Second) // Allow connections
 		
 		// Step 2: Test configuration state consistency

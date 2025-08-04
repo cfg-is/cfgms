@@ -282,7 +282,9 @@ func TestWebSocketSessionCleanup(t *testing.T) {
 	assert.Len(t, activeSessions, 1)
 
 	// Close connection
-	conn.Close()
+	if err := conn.Close(); err != nil {
+		t.Logf("Failed to close connection: %v", err)
+	}
 
 	// Give time for cleanup
 	time.Sleep(100 * time.Millisecond)
@@ -334,7 +336,9 @@ func TestWebSocketConcurrentConnections(t *testing.T) {
 
 	// Clean up connections
 	for _, conn := range connections {
-		conn.Close()
+		if err := conn.Close(); err != nil {
+			t.Logf("Failed to close connection: %v", err)
+		}
 	}
 
 	// Give time for cleanup

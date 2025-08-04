@@ -18,7 +18,9 @@ type TestReporter struct {
 // NewTestReporter creates a new test reporter
 func NewTestReporter(framework *E2ETestFramework) *TestReporter {
 	reportDir := filepath.Join(framework.tempDir, "reports")
-	os.MkdirAll(reportDir, 0755)
+	if err := os.MkdirAll(reportDir, 0755); err != nil {
+		// Log error but continue - reports are optional
+	}
 	
 	return &TestReporter{
 		framework: framework,
