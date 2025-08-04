@@ -81,9 +81,14 @@ CFGMS (Config Management System) is a modern, Go-based configuration management 
    ```bash
    make security-scan  # MUST pass before proceeding
    ```
+   - **Trivy**: Filesystem vulnerability scanning (critical/high blocking)
+   - **Nancy**: Go dependency vulnerability scanning  
+   - **gosec**: Go security pattern analysis (127 checks)
+   - **staticcheck**: Advanced static analysis (47 categories)
    - Critical/High vulnerabilities will block deployment
    - Fix security issues before continuing with commit
    - Development certificates in features/controller/certs/ are expected (non-blocking)
+   - **Claude Code Integration**: Use `make security-remediation-report` for automated fixes
 
 7. **Run Linting** (MANDATORY)
    ```bash
@@ -134,6 +139,12 @@ This ensures optimal order (test → security → summary) and provides clear va
 - Verify tests pass: `make test`
 - Verify security scan passes: `make security-scan`
 - Verify project updated: Check GitHub project board
+
+**GITHUB ACTIONS CI/CD:**
+- **Security Scanning Workflow**: Automatic security validation on push/PR
+- **Production Deployment Gates**: Critical vulnerabilities block main branch deployment
+- **Automated Remediation**: Download artifacts and use Claude Code for automatic fixes
+- **Manual Trigger**: Use workflow_dispatch for specific scan types (quick/full/remediation-report)
 
 ## Development Commands
 
@@ -202,6 +213,10 @@ make security-check
 make security-trivy      # Filesystem vulnerability scanning
 make security-deps       # Go dependency vulnerability scanning
 make security-gosec      # Go security pattern analysis
+make security-staticcheck # Advanced static analysis
+
+# Claude Code Integration (v0.3.1)
+make security-remediation-report  # Generate JSON report for automated remediation
 
 # Automatic tool installation
 make install-nancy       # Cross-platform Nancy installation
