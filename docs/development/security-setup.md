@@ -9,7 +9,7 @@ CFGMS uses a multi-layered security scanning approach with four primary tools:
 - **🔍 Trivy**: Filesystem scanning for vulnerabilities, secrets, and misconfigurations
 - **📦 Nancy**: Go dependency vulnerability scanning 
 - **🛡️ gosec**: Go security pattern analysis and anti-pattern detection
-- **🔬 staticcheck**: Advanced static analysis (Future: v0.3.1 Story 2.2)
+- **🔬 staticcheck**: Advanced static analysis with curated rule sets
 
 ## Quick Start
 
@@ -17,6 +17,7 @@ CFGMS uses a multi-layered security scanning approach with four primary tools:
 # 1. Install security tools
 go install github.com/aquasecurity/trivy/cmd/trivy@latest
 go install github.com/securego/gosec/v2/cmd/gosec@latest
+go install honnef.co/go/tools/cmd/staticcheck@latest
 make install-nancy     # Auto-install Nancy for your platform
 
 # 2. Verify installation and run security scan
@@ -26,6 +27,7 @@ make security-scan     # All tools (used in CLAUDE.md workflow)
 make security-trivy    # Filesystem scanning
 make security-deps     # Dependency scanning  
 make security-gosec    # Go security pattern analysis
+make security-staticcheck # Advanced static analysis
 
 # 4. Quick development check
 make security-check    # Same as security-scan but optimized for development
@@ -137,14 +139,21 @@ gosec --version
 - Non-blocking by default - reports issues without stopping development workflow
 - Excludes test files automatically to focus on production code security
 
-### 🔬 staticcheck Installation (Future - v0.3.1 Story 2.2)
+### 🔬 staticcheck Installation
 
-staticcheck provides advanced static analysis for Go.
+staticcheck provides advanced static analysis for Go with curated rule sets that focus on important issues while excluding style warnings for development velocity.
 
 ```bash
 # Go installation (all platforms) 
 go install honnef.co/go/tools/cmd/staticcheck@latest
 ```
+
+**Configuration**: CFGMS includes a `staticcheck.conf` file with curated rules that:
+- Focus on critical correctness issues (SA* rules)
+- Include standard library misuse detection (ST* rules) 
+- Exclude style warnings for faster development
+- Enable performance optimizations (caching, concurrency)
+- Provide clear priority guidance for issue resolution
 
 ## Verification Steps
 
@@ -157,8 +166,7 @@ trivy --version      # Should show: trivy version X.X.X
 nancy --version      # Should show: nancy version X.X.X
 gosec --version      # Should show: Version: X.X.X
 
-# Future tools (v0.3.1)
-# staticcheck --version # Should show: staticcheck version X.X.X
+staticcheck --version # Should show: staticcheck version X.X.X
 ```
 
 ### 2. Individual Tool Testing
@@ -172,8 +180,8 @@ make security-deps
 # Test gosec Go security pattern analysis
 make security-gosec
 
-# Future: staticcheck testing
-# make security-staticcheck
+# Test staticcheck advanced static analysis  
+make security-staticcheck
 ```
 
 ### 3. Unified Security Validation
@@ -271,7 +279,7 @@ Located at project root, configures gosec security analysis:
 - **Trivy**: Blocks on CRITICAL/HIGH vulnerabilities, shows all findings
 - **Nancy**: Non-blocking, provides remediation guidance for vulnerable dependencies
 - **gosec**: Non-blocking, reports security anti-patterns with configurable rules via .gosec.json
-- **staticcheck**: (Future) Focuses on important issues, excludes style warnings
+- **staticcheck**: Curated rule sets focus on critical issues, performance-optimized with caching
 
 ## Troubleshooting
 
@@ -349,7 +357,7 @@ make install-nancy       # Automatic cross-platform Nancy installation
 make security-trivy      # Trivy filesystem scanning
 make security-deps       # Nancy dependency scanning
 make security-gosec      # gosec Go security pattern analysis
-make security-staticcheck # staticcheck static analysis (future)
+make security-staticcheck # staticcheck advanced static analysis
 ```
 
 ### Unified Targets  
@@ -381,7 +389,7 @@ Current tool versions (as of v0.3.1):
 - **Trivy**: v0.48.3+ (latest recommended)
 - **Nancy**: v1.0.51
 - **gosec**: v2.22.7+ (latest recommended via `go install @latest`)
-- **staticcheck**: latest (future implementation)
+- **staticcheck**: latest (v2023.1.7+ recommended via `go install @latest`)
 
 ## Contributing to Security Setup
 
