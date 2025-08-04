@@ -8,7 +8,8 @@
 - Tar errors: "Cannot open: File exists" for Go modules
 
 **Solution**: 
-- Unified cache keys to `go-modules-${{ hashFiles('**/go.sum') }}`
+- Updated to unique cache keys per job: `nancy-`, `gosec-`, `staticcheck-`
+- Maintained fallback to shared `go-modules-` cache for reuse
 - Added `continue-on-error: true` to cache operations
 - Prevents workflow failures due to cache conflicts
 

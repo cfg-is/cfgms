@@ -95,9 +95,10 @@ jobs:
       uses: actions/cache@v3
       with:
         path: ~/go/pkg/mod
-        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        key: ${{ runner.os }}-nancy-${{ hashFiles('**/go.sum') }}
         restore-keys: |
           ${{ runner.os }}-go-modules-
+          ${{ runner.os }}-nancy-
       continue-on-error: true
     
     - name: Install Nancy
@@ -135,9 +136,10 @@ jobs:
       uses: actions/cache@v3
       with:
         path: ~/go/pkg/mod
-        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        key: ${{ runner.os }}-gosec-${{ hashFiles('**/go.sum') }}
         restore-keys: |
           ${{ runner.os }}-go-modules-
+          ${{ runner.os }}-gosec-
       continue-on-error: true
     
     - name: Install gosec
@@ -197,9 +199,10 @@ jobs:
       uses: actions/cache@v3
       with:
         path: ~/go/pkg/mod
-        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        key: ${{ runner.os }}-staticcheck-${{ hashFiles('**/go.sum') }}
         restore-keys: |
           ${{ runner.os }}-go-modules-
+          ${{ runner.os }}-staticcheck-
       continue-on-error: true
     
     - name: Install staticcheck
