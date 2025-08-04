@@ -11,6 +11,14 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// Context key types to avoid collisions
+type contextKey string
+
+const (
+	authContextKey  contextKey = "auth_context"
+	authResponseKey contextKey = "auth_response"
+)
+
 // AuthorizationInterceptor provides gRPC middleware for RBAC authorization
 type AuthorizationInterceptor struct {
 	rbacManager    RBACManager
@@ -197,8 +205,8 @@ func getDefaultPublicMethods() map[string]bool {
 
 // withAuthInfo adds authorization information to the context
 func withAuthInfo(ctx context.Context, authContext *common.AuthorizationContext, response *common.AccessResponse) context.Context {
-	ctx = context.WithValue(ctx, "auth_context", authContext)
-	ctx = context.WithValue(ctx, "auth_response", response)
+	ctx = context.WithValue(ctx, authContextKey, authContext)
+	ctx = context.WithValue(ctx, authResponseKey, response)
 	return ctx
 }
 

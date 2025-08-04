@@ -587,9 +587,7 @@ func (f *filter) initializeDefaultWhitelist() {
 		},
 	}
 	
-	for _, pattern := range defaultPatterns {
-		f.whitelist = append(f.whitelist, pattern)
-	}
+	f.whitelist = append(f.whitelist, defaultPatterns...)
 }
 
 // DefaultFilterConfig returns a default configuration for drift event filtering.

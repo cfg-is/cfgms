@@ -36,19 +36,19 @@ func (e *DefaultExporter) ExportText(ctx context.Context, result *ComparisonResu
 	
 	// Write header
 	if options.IncludeSummary {
-		buf.WriteString(fmt.Sprintf("Configuration Diff Report\n"))
-		buf.WriteString(fmt.Sprintf("========================\n\n"))
+		buf.WriteString("Configuration Diff Report\n")
+		buf.WriteString("========================\n\n")
 		buf.WriteString(fmt.Sprintf("From: %s (%s)\n", result.FromRef.Repository, result.FromRef.Commit[:8]))
 		buf.WriteString(fmt.Sprintf("To:   %s (%s)\n", result.ToRef.Repository, result.ToRef.Commit[:8]))
 		buf.WriteString(fmt.Sprintf("Generated: %s\n\n", result.Metadata.CreatedAt.Format(time.RFC3339)))
 		
-		buf.WriteString(fmt.Sprintf("Summary:\n"))
+		buf.WriteString("Summary:\n")
 		buf.WriteString(fmt.Sprintf("  Total Changes: %d\n", result.Summary.TotalChanges))
 		buf.WriteString(fmt.Sprintf("  Added:         %d\n", result.Summary.AddedItems))
 		buf.WriteString(fmt.Sprintf("  Modified:      %d\n", result.Summary.ModifiedItems))
 		buf.WriteString(fmt.Sprintf("  Deleted:       %d\n", result.Summary.DeletedItems))
 		buf.WriteString(fmt.Sprintf("  Breaking:      %d\n", result.Summary.BreakingChanges))
-		buf.WriteString(fmt.Sprintf("\n"))
+		buf.WriteString("\n")
 	}
 	
 	// Write changes
@@ -334,10 +334,10 @@ func (e *DefaultExporter) formatTextEntry(buf *bytes.Buffer, entry DiffEntry, op
 	case DiffTypeAdd:
 		fmt.Fprintf(buf, "  + %v\n", formatValue(entry.NewValue))
 	case DiffTypeDelete:
-		buf.WriteString(fmt.Sprintf("  - %v\n", formatValue(entry.OldValue)))
+		fmt.Fprintf(buf, "  - %v\n", formatValue(entry.OldValue))
 	case DiffTypeModify:
-		buf.WriteString(fmt.Sprintf("  - %v\n", formatValue(entry.OldValue)))
-		buf.WriteString(fmt.Sprintf("  + %v\n", formatValue(entry.NewValue)))
+		fmt.Fprintf(buf, "  - %v\n", formatValue(entry.OldValue))
+		fmt.Fprintf(buf, "  + %v\n", formatValue(entry.NewValue))
 	case DiffTypeMove:
 		buf.WriteString(fmt.Sprintf("  moved from: %s\n", entry.OldPath))
 	}

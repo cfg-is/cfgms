@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -726,9 +727,15 @@ func (d *detector) generateEventDescription(event *DriftEvent) (string, string) 
 	category := string(event.Category)
 	severity := string(event.Severity)
 	
-	// Generate title
+	// Generate title  
+	severityTitle := severity
+	if severity != "" {
+		runes := []rune(severity)
+		runes[0] = unicode.ToUpper(runes[0])
+		severityTitle = string(runes)
+	}
 	title := fmt.Sprintf("%s %s drift detected (%d changes)", 
-		strings.Title(severity), category, changeCount)
+		severityTitle, category, changeCount)
 	
 	// Generate description
 	var descriptionParts []string

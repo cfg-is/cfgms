@@ -106,9 +106,10 @@ func (m *Monitor) TrackExecution(execution *WorkflowExecution) {
 	failedSteps := int64(0)
 
 	for _, result := range stepResults {
-		if result.Status == StatusCompleted {
+		switch result.Status {
+		case StatusCompleted:
 			successfulSteps++
-		} else if result.Status == StatusFailed {
+		case StatusFailed:
 			failedSteps++
 		}
 	}

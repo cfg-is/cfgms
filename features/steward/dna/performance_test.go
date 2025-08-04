@@ -202,7 +202,7 @@ func TestConcurrentDNACollection(t *testing.T) {
 	// Collect all results
 	var totalDuration time.Duration
 	var maxDuration time.Duration
-	var minDuration time.Duration = time.Hour // Start with a large value
+	minDuration := time.Hour // Start with a large value
 	
 	for i := 0; i < goroutines*collectionsPerGoroutine; i++ {
 		duration := <-results

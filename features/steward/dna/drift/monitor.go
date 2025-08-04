@@ -472,7 +472,7 @@ func (m *monitor) performParallelScan(ctx context.Context, devices []string) int
 	for _, deviceID := range devices {
 		select {
 		case <-ctx.Done():
-			break
+			return scannedCount
 		case semaphore <- struct{}{}:
 			wg.Add(1)
 			go func(devID string) {
@@ -496,7 +496,7 @@ func (m *monitor) performSequentialScan(ctx context.Context, devices []string) i
 	for _, deviceID := range devices {
 		select {
 		case <-ctx.Done():
-			break
+			return scannedCount
 		default:
 			if m.scanDevice(ctx, deviceID) {
 				scannedCount++

@@ -7,6 +7,11 @@ import (
 	"time"
 )
 
+// Context key types to avoid collisions
+type contextKey string
+
+const timestampKey contextKey = "timestamp"
+
 // TestScriptExecution_Integration performs actual script execution
 func TestScriptExecution_Integration(t *testing.T) {
 	if testing.Short() {
@@ -14,7 +19,7 @@ func TestScriptExecution_Integration(t *testing.T) {
 	}
 
 	module := NewModule()
-	ctx := context.WithValue(context.Background(), "timestamp", time.Now().Unix())
+	ctx := context.WithValue(context.Background(), timestampKey, time.Now().Unix())
 	resourceID := "integration-test"
 
 	// Test simple echo command
@@ -72,7 +77,7 @@ func TestScriptExecution_Timeout(t *testing.T) {
 	}
 
 	module := NewModule()
-	ctx := context.WithValue(context.Background(), "timestamp", time.Now().Unix())
+	ctx := context.WithValue(context.Background(), timestampKey, time.Now().Unix())
 	resourceID := "timeout-test"
 
 	// Create a script that will timeout
@@ -118,7 +123,7 @@ func TestScriptExecution_Environment(t *testing.T) {
 	}
 
 	module := NewModule()
-	ctx := context.WithValue(context.Background(), "timestamp", time.Now().Unix())
+	ctx := context.WithValue(context.Background(), timestampKey, time.Now().Unix())
 	resourceID := "env-test"
 
 	// Test environment variable script

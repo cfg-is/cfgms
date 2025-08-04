@@ -491,7 +491,6 @@ func (sm *SessionMonitor) updateThreatLevel(session *MonitoredSession) {
 	}
 	
 	// Note: we've already unlocked, so remove the defer unlock
-	return
 }
 
 // checkForAnomalies checks for anomalous patterns in session activity

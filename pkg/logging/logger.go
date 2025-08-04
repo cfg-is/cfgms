@@ -226,17 +226,17 @@ func (l *DefaultLogger) logText(ctx context.Context, level, msg string, keysAndV
 
 // Debug logs a debug message
 func (l *DefaultLogger) Debug(msg string, keysAndValues ...interface{}) {
-	l.logEntry(nil, DebugLevel, "DEBUG", msg, keysAndValues...)
+	l.logEntry(context.TODO(), DebugLevel, "DEBUG", msg, keysAndValues...)
 }
 
 // Info logs an info message
 func (l *DefaultLogger) Info(msg string, keysAndValues ...interface{}) {
-	l.logEntry(nil, InfoLevel, "INFO", msg, keysAndValues...)
+	l.logEntry(context.TODO(), InfoLevel, "INFO", msg, keysAndValues...)
 }
 
 // Warn logs a warning message
 func (l *DefaultLogger) Warn(msg string, keysAndValues ...interface{}) {
-	l.logEntry(nil, WarnLevel, "WARN", msg, keysAndValues...)
+	l.logEntry(context.TODO(), WarnLevel, "WARN", msg, keysAndValues...)
 }
 
 // Error logs an error message

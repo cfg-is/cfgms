@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/cfgis/cfgms/features/reports/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -227,7 +228,14 @@ func (e *MultiFormatExporter) exportHTML(report *interfaces.Report) ([]byte, err
 			return fmt.Sprintf("%.1f%%", f*100)
 		},
 		"upper": strings.ToUpper,
-		"title": strings.Title,
+		"title": func(s string) string {
+			if s == "" {
+				return s
+			}
+			runes := []rune(s)
+			runes[0] = unicode.ToUpper(runes[0])
+			return string(runes)
+		},
 	}).Parse(e.config.HTMLTemplate)
 	
 	if err != nil {

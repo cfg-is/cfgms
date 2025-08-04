@@ -156,7 +156,7 @@ func (c *Client) Connect(ctx context.Context) error {
 		}),
 	}
 
-	conn, err := grpc.DialContext(ctx, c.controllerAddr, opts...)
+	conn, err := grpc.NewClient(c.controllerAddr, opts...)
 	if err != nil {
 		return fmt.Errorf("failed to connect to controller: %w", err)
 	}

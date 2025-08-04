@@ -112,7 +112,7 @@ func (e *ExecutionEngine) ExecuteConfiguration(ctx context.Context, cfg config.S
 		case <-ctx.Done():
 			e.logger.Warn("Configuration execution cancelled")
 			report.Errors = append(report.Errors, "execution cancelled: "+ctx.Err().Error())
-			break
+			return report
 		default:
 			result := e.ExecuteResource(ctx, resource)
 			report.ResourceResults = append(report.ResourceResults, result)

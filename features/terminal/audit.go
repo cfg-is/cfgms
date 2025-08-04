@@ -305,9 +305,10 @@ func (al *AuditLogger) LogCommandBlocked(ctx context.Context, sessionID, userID,
 // LogSecurityViolation logs security violations and threats
 func (al *AuditLogger) LogSecurityViolation(ctx context.Context, sessionID, userID, stewardID, tenantID string, violationType, description string, threatLevel FilterSeverity) error {
 	logLevel := AuditLevelWarning
-	if threatLevel == FilterSeverityCritical {
+	switch threatLevel {
+	case FilterSeverityCritical:
 		logLevel = AuditLevelCritical
-	} else if threatLevel == FilterSeverityHigh {
+	case FilterSeverityHigh:
 		logLevel = AuditLevelError
 	}
 	

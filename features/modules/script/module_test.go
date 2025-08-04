@@ -360,7 +360,7 @@ func TestScriptModule_ExecutionState(t *testing.T) {
 
 	// Test clear execution
 	module.ClearExecution(resourceID)
-	state, exists = module.GetExecutionState(resourceID)
+	_, exists = module.GetExecutionState(resourceID)
 	if exists {
 		t.Error("Expected cleared execution state to return false")
 	}

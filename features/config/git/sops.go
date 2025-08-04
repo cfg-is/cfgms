@@ -310,11 +310,11 @@ func (s *SOPSManager) validateKMSProvider(name string, provider KMSProvider) err
 		}
 	case "azure":
 		if provider.KeyID == "" {
-			return fmt.Errorf("Azure Key Vault provider requires key_id")
+			return fmt.Errorf("azure Key Vault provider requires key_id")
 		}
 		// Validate vault URL format
 		if !strings.Contains(provider.KeyID, "vault.azure.net") {
-			return fmt.Errorf("Azure Key Vault key_id must be a valid vault URL")
+			return fmt.Errorf("azure Key Vault key_id must be a valid vault URL")
 		}
 	case "pgp":
 		if provider.KeyID == "" {

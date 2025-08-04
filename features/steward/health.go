@@ -237,7 +237,7 @@ func (h *HealthMonitor) performHealthCheck() {
 	h.updateCertificateHealth()
 
 	// Update overall status based on all health factors
-	var newStatus HealthStatus = StatusHealthy
+	newStatus := StatusHealthy
 	
 	// Check certificate health
 	if !h.metrics.CertificateValid {

@@ -235,11 +235,11 @@ func (e *Executor) validateWindowsShell() error {
 		}
 	case ShellCmd:
 		if _, err := exec.LookPath("cmd.exe"); err != nil {
-			return fmt.Errorf("Command Prompt is not available: %w", err)
+			return fmt.Errorf("command prompt is not available: %w", err)
 		}
 	case ShellPython:
 		if _, err := exec.LookPath("python"); err != nil {
-			return fmt.Errorf("Python is not available: %w", err)
+			return fmt.Errorf("python is not available: %w", err)
 		}
 	case ShellPython3:
 		if _, err := exec.LookPath("python3"); err != nil {

@@ -100,7 +100,7 @@ func ValidateKeyPair(certPEM, keyPEM []byte) error {
 		if !ok {
 			return fmt.Errorf("certificate public key is not RSA")
 		}
-		if privKey.PublicKey.N.Cmp(pubKey.N) != 0 || privKey.PublicKey.E != pubKey.E {
+		if privKey.N.Cmp(pubKey.N) != 0 || privKey.E != pubKey.E {
 			return fmt.Errorf("private key does not match certificate public key")
 		}
 	default:

@@ -716,7 +716,7 @@ func (e *Engine) getValueFromExpression(expr string, variables map[string]interf
 	// Try to parse as integer
 	if len(expr) > 0 && (expr[0] >= '0' && expr[0] <= '9') {
 		// Simple integer parsing
-		var result int = 0
+		result := 0
 		for _, char := range expr {
 			if char >= '0' && char <= '9' {
 				result = result*10 + int(char-'0')
