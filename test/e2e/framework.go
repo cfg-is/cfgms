@@ -342,8 +342,9 @@ func (f *E2ETestFramework) CreateSteward(stewardID string) (*steward.Steward, er
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	
-	if _, exists := f.stewards[stewardID]; exists {
-		return nil, fmt.Errorf("steward %s already exists", stewardID)
+	if existingSteward, exists := f.stewards[stewardID]; exists {
+		f.logger.Info("Reusing existing steward for test", "steward_id", stewardID)
+		return existingSteward, nil
 	}
 	
 	// Generate client certificate for this steward (like integration tests do)

@@ -7,7 +7,6 @@ import (
 	"os/user"
 	"path/filepath"
 	"strconv"
-	"syscall"
 
 	"github.com/cfgis/cfgms/features/modules"
 	"gopkg.in/yaml.v3"
@@ -224,34 +223,10 @@ func (m *directoryModule) Get(ctx context.Context, resourceID string) (modules.C
 	// Get current permissions
 	perms := info.Mode().Perm()
 
-	// Get current ownership (Unix-like systems only)
-	var owner *user.User
-	var ownerName, groupName string
-	
-	// Try to get ownership info - this will fail on Windows but that's OK
-	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
-		var err error
-		owner, err = user.LookupId(strconv.FormatUint(uint64(stat.Uid), 10))
-		if err == nil {
-			ownerName = owner.Username
-		}
-		
-		grp, err := user.LookupGroupId(strconv.FormatUint(uint64(stat.Gid), 10))
-		if err == nil {
-			groupName = grp.Name
-		}
-	}
-	
-	// Fallback for Windows or when owner lookup fails
-	if ownerName == "" {
-		if current, err := user.Current(); err == nil {
-			ownerName = current.Username
-		} else {
-			ownerName = "unknown"
-		}
-	}
-	if groupName == "" {
-		groupName = "unknown"
+	// Get current ownership (cross-platform)
+	ownerName, groupName, err := getFileOwnership(info)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get file ownership: %w", err)
 	}
 
 	config := &directoryConfig{

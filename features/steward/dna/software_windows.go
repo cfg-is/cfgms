@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
-	"strconv"
 	"strings"
 )
 
@@ -540,14 +539,14 @@ func (w *WindowsSoftwareCollector) parseTasklistOutput(output string, attributes
 	attributes["unique_process_users"] = fmt.Sprintf("%d", len(users))
 	
 	// Find top processes by count
-	type processCount struct {
+	type processInfo struct {
 		name  string
 		count int
 	}
 	
-	var topProcesses []processCount
+	var topProcesses []processInfo
 	for name, count := range processes {
-		topProcesses = append(topProcesses, processCount{name, count})
+		topProcesses = append(topProcesses, processInfo{name, count})
 	}
 	
 	// Simple sort by count (descending)
@@ -575,7 +574,7 @@ func (w *WindowsSoftwareCollector) parsePowerShellProcessStatsOutput(output stri
 	var processStats []string
 	
 	for i := 1; i < len(lines) && i <= 6; i++ { // Skip header, get top 5
-		line = strings.TrimSpace(lines[i])
+		line := strings.TrimSpace(lines[i])
 		if line == "" {
 			continue
 		}

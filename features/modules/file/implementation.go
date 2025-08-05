@@ -6,7 +6,6 @@ import (
 	"os/user"
 	"runtime"
 	"strconv"
-	"syscall"
 
 	"github.com/cfgis/cfgms/features/modules"
 )
@@ -35,30 +34,10 @@ func (m *fileModule) Get(ctx context.Context, resourceID string) (modules.Config
 		return nil, err
 	}
 
-	// Get owner and group (Unix-like systems only)
-	var owner, group string
-	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
-		ownerUser, err := user.LookupId(strconv.FormatUint(uint64(stat.Uid), 10))
-		if err == nil {
-			owner = ownerUser.Username
-		}
-
-		groupUser, err := user.LookupGroupId(strconv.FormatUint(uint64(stat.Gid), 10))
-		if err == nil {
-			group = groupUser.Name
-		}
-	}
-	
-	// Fallback for Windows or when owner lookup fails
-	if owner == "" {
-		if current, err := user.Current(); err == nil {
-			owner = current.Username
-		} else {
-			owner = "unknown"
-		}
-	}
-	if group == "" {
-		group = "unknown"
+	// Get owner and group (cross-platform)
+	owner, group, err := getFileOwnership(info)
+	if err != nil {
+		return nil, err
 	}
 
 	config := &FileConfig{
