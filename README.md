@@ -16,6 +16,21 @@ This project board provides real-time visibility into:
 - Sprint planning and task organization
 - Overall project completion status
 
+## Platform Support
+
+CFGMS is designed for cross-platform deployment across diverse infrastructure environments:
+
+### Steward (Agent) Support
+- **Linux**: AMD64 & ARM64 - Full support across distributions
+- **Windows**: AMD64 & ARM64 - Windows 10, 11, Server 2019+
+- **macOS**: ARM64 (M series) - Apple Silicon Macs
+
+### Controller Support  
+- **Linux**: AMD64 - Primary target for production deployments
+- **Windows**: AMD64 - Development and testing environments
+
+For detailed platform information, installation instructions, and deployment architectures, see [docs/deployment/platform-support.md](docs/deployment/platform-support.md).
+
 ## Development
 
 CFGMS follows the GitFlow branching model:

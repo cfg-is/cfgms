@@ -6,6 +6,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 CFGMS (Config Management System) is a modern, Go-based configuration management system designed with resilience, security, and clean architecture principles. The project implements a zero-trust security model with mutual TLS authentication and follows a feature-based organization structure.
 
+### Platform Support
+**Steward (Agent) Support:**
+- Linux: AMD64 & ARM64 - Full cross-distribution support
+- Windows: AMD64 & ARM64 - Windows 10/11, Server 2019+
+- macOS: ARM64 (M series) - Apple Silicon Macs
+
+**Controller Support:**
+- Linux: AMD64 - Primary target for production deployments  
+- Windows: AMD64 - Development and testing environments
+
+**Cross-Platform Development:** All components compile and run on developer workstations across Windows, macOS, and Linux for seamless development experience.
+
 ## Development Workflow
 
 ### Sprint and Development Process
@@ -157,13 +169,25 @@ This ensures optimal order (test → security → summary) and provides clear va
 
 ### Building
 ```bash
-# Build all binaries
+# Build all binaries (current platform)
 make build
 
-# Build individual components
+# Build individual components (current platform)
 make build-controller  # Builds controller binary
 make build-steward     # Builds steward binary  
 make build-cli         # Builds cfgctl CLI binary
+
+# Cross-platform builds for all supported platforms
+# Steward cross-compilation
+GOOS=linux GOARCH=amd64 go build -o bin/cfgms-steward-linux-amd64 ./cmd/steward
+GOOS=linux GOARCH=arm64 go build -o bin/cfgms-steward-linux-arm64 ./cmd/steward
+GOOS=windows GOARCH=amd64 go build -o bin/cfgms-steward-windows-amd64.exe ./cmd/steward
+GOOS=windows GOARCH=arm64 go build -o bin/cfgms-steward-windows-arm64.exe ./cmd/steward
+GOOS=darwin GOARCH=arm64 go build -o bin/cfgms-steward-darwin-arm64 ./cmd/steward
+
+# Controller cross-compilation
+GOOS=linux GOARCH=amd64 go build -o bin/controller-linux-amd64 ./cmd/controller
+GOOS=windows GOARCH=amd64 go build -o bin/controller-windows-amd64.exe ./cmd/controller
 ```
 
 ### Testing

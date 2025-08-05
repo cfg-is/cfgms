@@ -22,13 +22,15 @@ Central management system that:
 - Manages tenant hierarchy and RBAC
 - Provides REST API for external access
 - Handles certificate management and authentication
+- **Platform Support**: Linux AMD64 (primary), Windows AMD64 (development)
 
 ### Steward  
-Cross-platform component that:
+Cross-platform agent that:
 - Executes configurations on managed endpoints
 - Operates in standalone or Controller-integrated modes
-- Implements module-based resource management
+- Implements module-based resource management with platform-specific optimizations
 - Reports system state and configuration compliance
+- **Platform Support**: Linux (AMD64/ARM64), Windows (AMD64/ARM64), macOS (ARM64)
 
 ### Outpost
 Proxy cache component that:
@@ -113,6 +115,73 @@ type Module interface {
 - Path-based targeting for efficient operations
 - Distributed Controller architecture support
 - Database sharding for massive scale
+
+## Platform Architecture
+
+### Cross-Platform Design Philosophy
+CFGMS implements a **platform-agnostic core** with **platform-specific optimizations**:
+
+- **Unified Business Logic**: Core configuration management logic works identically across platforms
+- **Platform-Specific Collectors**: Native system information gathering (WMI on Windows, syscalls on Unix)
+- **Adaptive Module System**: Modules automatically adapt to platform capabilities and constraints
+- **Consistent API**: Same REST and gRPC interfaces regardless of underlying platform
+
+### Platform-Specific Implementations
+
+#### Windows Optimizations
+- **WMI Integration**: Native Windows Management Instrumentation for system data
+- **PowerShell Commands**: Advanced system configuration via PowerShell execution  
+- **Windows Services**: Native service management and health monitoring
+- **Registry Management**: Direct Windows Registry manipulation for configuration
+- **ACL Support**: Windows Access Control List integration for security
+
+#### Unix-like Optimizations (Linux/macOS)
+- **Syscall Integration**: Direct system call access for efficient data collection
+- **Package Manager Integration**: Native support for apt, yum, brew, etc.
+- **POSIX Compliance**: Full POSIX file system and process management
+- **Process Control**: Advanced Unix process management and signal handling
+- **Network Stack**: Native network interface and routing table access
+
+### Deployment Patterns
+
+#### Enterprise MSP Architecture
+```
+                    ┌─────────────────────┐
+                    │   Linux Controller  │
+                    │   (Primary Target)  │
+                    │                     │
+                    │ - High Performance  │
+                    │ - Container Ready   │
+                    │ - 50k+ Stewards     │
+                    └──────────┬──────────┘
+                               │ mTLS
+           ┌───────────────────┼───────────────────┐
+           │                   │                   │
+    ┌──────▼──────┐    ┌──────▼──────┐    ┌──────▼──────┐
+    │   Linux     │    │   Windows   │    │   macOS     │
+    │  Stewards   │    │  Stewards   │    │  Stewards   │
+    │             │    │             │    │             │
+    │ AMD64/ARM64 │    │ AMD64/ARM64 │    │ ARM64 (M1+) │
+    └─────────────┘    └─────────────┘    └─────────────┘
+```
+
+#### Development Environment Architecture
+```
+    ┌─────────────────────────────────────────────────┐
+    │          Developer Workstation                  │
+    │                                                 │
+    │  ┌─────────────────┐    ┌─────────────────┐     │
+    │  │   Controller    │    │    Steward      │     │
+    │  │   (Any OS)      │    │   (Local OS)    │     │
+    │  │                 │    │                 │     │
+    │  │ - Windows       │◄──►│ - Same Platform │     │
+    │  │ - macOS         │    │ - Local Testing │     │
+    │  │ - Linux         │    │                 │     │
+    │  └─────────────────┘    └─────────────────┘     │
+    └─────────────────────────────────────────────────┘
+```
+
+For detailed platform support information, see [docs/deployment/platform-support.md](../deployment/platform-support.md).
 
 ## Development Architecture
 
