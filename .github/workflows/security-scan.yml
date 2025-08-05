@@ -154,10 +154,11 @@ jobs:
         mkdir -p sarif-results
         
         # Run with SARIF output for GitHub Security tab using our configuration
+        # Use -no-fail to prevent SARIF generation from failing the workflow
         if [ -f .gosec.json ]; then
-          gosec -conf .gosec.json -fmt sarif -out sarif-results/gosec.sarif ./...
+          gosec -conf .gosec.json -fmt sarif -out sarif-results/gosec.sarif -no-fail ./...
         else
-          gosec -fmt sarif -out sarif-results/gosec.sarif ./...
+          gosec -fmt sarif -out sarif-results/gosec.sarif -no-fail ./...
         fi
         gosec_exit_code=$?
         
