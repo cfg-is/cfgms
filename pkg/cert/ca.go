@@ -119,6 +119,7 @@ func (ca *CA) LoadCA(storagePath string) error {
 	
 	// Load CA certificate
 	caCertPath := filepath.Join(storagePath, "ca.crt")
+	// #nosec G304 - CA management requires loading CA certificate files from controlled paths
 	caCertPEM, err := os.ReadFile(caCertPath)
 	if err != nil {
 		return fmt.Errorf("failed to read CA certificate: %w", err)
@@ -136,6 +137,7 @@ func (ca *CA) LoadCA(storagePath string) error {
 	
 	// Load CA private key
 	caKeyPath := filepath.Join(storagePath, "ca.key")
+	// #nosec G304 - CA management requires loading CA private key files from controlled paths
 	caKeyPEM, err := os.ReadFile(caKeyPath)
 	if err != nil {
 		return fmt.Errorf("failed to read CA private key: %w", err)

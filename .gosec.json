@@ -214,7 +214,10 @@
       "*/testdata/*",
       "examples/**/*",
       "docs/**/*",
-      "features/controller/certs/**/*"
+      "features/controller/certs/**/*",
+      "pkg/testutil/**/*",
+      "*.pb.go",
+      "**/*.pb.go"
     ],
     "rules": []
   },

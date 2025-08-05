@@ -125,12 +125,12 @@ func (s *LocalRepositoryStore) WriteFile(ctx context.Context, localPath, filePat
 	
 	// Create directory if needed
 	dir := filepath.Dir(fullPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0750); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 	
 	// Write file
-	if err := os.WriteFile(fullPath, content, 0644); err != nil {
+	if err := os.WriteFile(fullPath, content, 0600); err != nil {
 		return fmt.Errorf("failed to write file: %w", err)
 	}
 	

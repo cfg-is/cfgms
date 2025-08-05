@@ -435,13 +435,13 @@ func exportCmd() *cobra.Command {
 			}
 
 			// Create output directory if it doesn't exist
-			if err := os.MkdirAll(outputDir, 0755); err != nil {
+			if err := os.MkdirAll(outputDir, 0750); err != nil {
 				return fmt.Errorf("failed to create output directory: %w", err)
 			}
 
 			// Write certificate file
 			certPath := filepath.Join(outputDir, fmt.Sprintf("%s.crt", cert.CommonName))
-			if err := os.WriteFile(certPath, certPEM, 0644); err != nil {
+			if err := os.WriteFile(certPath, certPEM, 0600); err != nil {
 				return fmt.Errorf("failed to write certificate file: %w", err)
 			}
 

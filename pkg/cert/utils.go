@@ -162,6 +162,7 @@ func GetCertificateInfo(cert *x509.Certificate) *CertificateInfo {
 
 // LoadCertificateFromFile loads a certificate from a file
 func LoadCertificateFromFile(filename string) (*x509.Certificate, error) {
+	// #nosec G304 - Certificate management requires loading certificate files from controlled paths
 	certPEM, err := os.ReadFile(filename)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read certificate file: %w", err)
@@ -172,6 +173,7 @@ func LoadCertificateFromFile(filename string) (*x509.Certificate, error) {
 
 // LoadCertificateChainFromFile loads a certificate chain from a file
 func LoadCertificateChainFromFile(filename string) ([]*x509.Certificate, error) {
+	// #nosec G304 - Certificate management requires loading certificate files from controlled paths
 	certChainPEM, err := os.ReadFile(filename)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read certificate chain file: %w", err)

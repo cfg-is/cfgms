@@ -34,21 +34,21 @@ func (m *DefaultHookManager) InstallHooks(ctx context.Context, repoPath string) 
 	hooksDir := filepath.Join(repoPath, ".git", "hooks")
 	
 	// Create hooks directory if it doesn't exist
-	if err := os.MkdirAll(hooksDir, 0755); err != nil {
+	if err := os.MkdirAll(hooksDir, 0750); err != nil {
 		return fmt.Errorf("failed to create hooks directory: %w", err)
 	}
 	
 	// Install pre-commit hook
 	preCommitHook := m.generatePreCommitHook()
 	preCommitPath := filepath.Join(hooksDir, "pre-commit")
-	if err := os.WriteFile(preCommitPath, []byte(preCommitHook), 0755); err != nil {
+	if err := os.WriteFile(preCommitPath, []byte(preCommitHook), 0700); err != nil {
 		return fmt.Errorf("failed to install pre-commit hook: %w", err)
 	}
 	
 	// Install pre-push hook
 	prePushHook := m.generatePrePushHook()
 	prePushPath := filepath.Join(hooksDir, "pre-push")
-	if err := os.WriteFile(prePushPath, []byte(prePushHook), 0755); err != nil {
+	if err := os.WriteFile(prePushPath, []byte(prePushHook), 0700); err != nil {
 		return fmt.Errorf("failed to install pre-push hook: %w", err)
 	}
 	
@@ -83,7 +83,8 @@ func (m *DefaultHookManager) RunPreCommitHooks(ctx context.Context, repoPath str
 	// Run custom pre-commit script if it exists
 	customHookPath := filepath.Join(repoPath, ".cfgms", "hooks", "pre-commit")
 	if _, err := os.Stat(customHookPath); err == nil {
-		cmd := exec.CommandContext(ctx, customHookPath, files...) // #nosec G204 - Executing validated custom hook script
+		// #nosec G204 - Git hook execution required for repository management
+		cmd := exec.CommandContext(ctx, customHookPath, files...)
 		cmd.Dir = repoPath
 		if output, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("custom pre-commit hook failed: %s", string(output))
@@ -100,7 +101,8 @@ func (m *DefaultHookManager) RunPreReceiveHooks(ctx context.Context, repoPath st
 	
 	for _, commit := range commits {
 		// Get files changed in this commit
-		cmd := exec.CommandContext(ctx, "git", "diff-tree", "--no-commit-id", "--name-only", "-r", commit) // #nosec G204 - Standard git command with validated commit hash
+		// #nosec G204 - Git repository management requires git command execution
+		cmd := exec.CommandContext(ctx, "git", "diff-tree", "--no-commit-id", "--name-only", "-r", commit)
 		cmd.Dir = repoPath
 		output, err := cmd.Output()
 		if err != nil {
@@ -115,7 +117,8 @@ func (m *DefaultHookManager) RunPreReceiveHooks(ctx context.Context, repoPath st
 			
 			if m.isConfigurationFile(file) {
 				// Get file content at this commit
-				cmd := exec.CommandContext(ctx, "git", "show", fmt.Sprintf("%s:%s", commit, file)) // #nosec G204 - Standard git command with validated parameters
+				// #nosec G204 - Git repository management requires git command execution
+				cmd := exec.CommandContext(ctx, "git", "show", fmt.Sprintf("%s:%s", commit, file))
 				cmd.Dir = repoPath
 				content, err := cmd.Output()
 				if err != nil {

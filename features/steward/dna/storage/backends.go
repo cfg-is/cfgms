@@ -314,7 +314,7 @@ type FileBackend struct {
 // NewFileBackend creates a new file-based storage backend
 func NewFileBackend(config *Config, logger logging.Logger) (*FileBackend, error) {
 	basePath := "/tmp/cfgms-dna-storage" // Default path
-	if err := os.MkdirAll(basePath, 0755); err != nil {
+	if err := os.MkdirAll(basePath, 0750); err != nil {
 		return nil, fmt.Errorf("failed to create storage directory: %w", err)
 	}
 
@@ -332,14 +332,14 @@ func NewFileBackend(config *Config, logger logging.Logger) (*FileBackend, error)
 	if config.EnableSharding {
 		for i := 0; i < config.ShardCount; i++ {
 			shardPath := filepath.Join(basePath, fmt.Sprintf("shard_%d", i))
-			if err := os.MkdirAll(shardPath, 0755); err != nil {
+			if err := os.MkdirAll(shardPath, 0750); err != nil {
 				return nil, fmt.Errorf("failed to create shard directory: %w", err)
 			}
 		}
 		backend.stats.TotalShards = config.ShardCount
 	} else {
 		defaultPath := filepath.Join(basePath, "default")
-		if err := os.MkdirAll(defaultPath, 0755); err != nil {
+		if err := os.MkdirAll(defaultPath, 0750); err != nil {
 			return nil, fmt.Errorf("failed to create default directory: %w", err)
 		}
 		backend.stats.TotalShards = 1
@@ -375,7 +375,7 @@ func (b *FileBackend) StoreRecord(ctx context.Context, record *DNARecord, compre
 	}
 
 	// Write to file
-	if err := os.WriteFile(filePath, data, 0644); err != nil {
+	if err := os.WriteFile(filePath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write record file: %w", err)
 	}
 
@@ -400,7 +400,7 @@ func (b *FileBackend) StoreReference(ctx context.Context, record *DNARecord) err
 	filePath := filepath.Join(b.basePath, record.ShardID, "refs", fileName)
 
 	// Ensure refs directory exists
-	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(filePath), 0750); err != nil {
 		return fmt.Errorf("failed to create refs directory: %w", err)
 	}
 
@@ -411,7 +411,7 @@ func (b *FileBackend) StoreReference(ctx context.Context, record *DNARecord) err
 	}
 
 	// Write reference file
-	if err := os.WriteFile(filePath, data, 0644); err != nil {
+	if err := os.WriteFile(filePath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write reference file: %w", err)
 	}
 

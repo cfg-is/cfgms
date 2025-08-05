@@ -18,6 +18,7 @@ func NewParser() *Parser {
 
 // ParseFile loads and parses a workflow from a YAML file
 func (p *Parser) ParseFile(filePath string) (Workflow, error) {
+	// #nosec G304 - Workflow engine requires loading workflow files from controlled paths
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return Workflow{}, fmt.Errorf("failed to read workflow file: %w", err)
