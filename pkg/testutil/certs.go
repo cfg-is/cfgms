@@ -301,6 +301,7 @@ func VerifyTLSConnection(certDir string) error {
 		Certificates: []tls.Certificate{clientCert},
 		RootCAs:      caCertPool,
 		ServerName:   "cfgms-controller",
+		MinVersion:   tls.VersionTLS12, // Enforce minimum TLS 1.2 for test environment
 	}
 
 	// Test that the configuration is valid

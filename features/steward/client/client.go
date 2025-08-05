@@ -480,6 +480,7 @@ func (c *Client) loadTLSCredentials() (credentials.TransportCredentials, error) 
 		Certificates: []tls.Certificate{clientCert},
 		RootCAs:      caCertPool,
 		ServerName:   "cfgms-controller", // Should match certificate
+		MinVersion:   tls.VersionTLS12,   // Enforce minimum TLS 1.2
 	}
 
 	return credentials.NewTLS(tlsConfig), nil

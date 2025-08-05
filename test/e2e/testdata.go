@@ -1,8 +1,9 @@
 package e2e
 
 import (
+	"crypto/rand"
 	"fmt"
-	"math/rand"
+	"math/big"
 	"time"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -13,16 +14,27 @@ import (
 
 // TestDataGenerator provides lightweight test data generation optimized for CI environments
 type TestDataGenerator struct {
-	random *rand.Rand
 	config *E2EConfig
 }
 
 // NewTestDataGenerator creates a new test data generator
 func NewTestDataGenerator(config *E2EConfig) *TestDataGenerator {
 	return &TestDataGenerator{
-		random: rand.New(rand.NewSource(time.Now().UnixNano())),
 		config: config,
 	}
+}
+
+// cryptoRandInt generates a cryptographically secure random integer in range [0, max)
+func (g *TestDataGenerator) cryptoRandInt(max int64) int64 {
+	if max <= 0 {
+		return 0
+	}
+	n, err := rand.Int(rand.Reader, big.NewInt(max))
+	if err != nil {
+		// Fallback to timestamp-based value for test environments
+		return time.Now().UnixNano() % max
+	}
+	return n.Int64()
 }
 
 // GenerateTestDNA creates realistic DNA data for testing
@@ -45,23 +57,23 @@ func (g *TestDataGenerator) GenerateTestDNA(stewardID string) *common.DNA {
 		attributes["disk_gb"] = "20"
 	case "medium":
 		// More comprehensive for local testing
-		attributes["cpu_cores"] = fmt.Sprintf("%d", g.random.Intn(8)+2)
-		attributes["memory_mb"] = fmt.Sprintf("%d", (g.random.Intn(8)+4)*1024)
-		attributes["disk_gb"] = fmt.Sprintf("%d", g.random.Intn(100)+50)
-		attributes["network_interfaces"] = fmt.Sprintf("%d", g.random.Intn(3)+1)
+		attributes["cpu_cores"] = fmt.Sprintf("%d", g.cryptoRandInt(8)+2)
+		attributes["memory_mb"] = fmt.Sprintf("%d", (g.cryptoRandInt(8)+4)*1024)
+		attributes["disk_gb"] = fmt.Sprintf("%d", g.cryptoRandInt(100)+50)
+		attributes["network_interfaces"] = fmt.Sprintf("%d", g.cryptoRandInt(3)+1)
 		attributes["os_family"] = g.randomChoice([]string{"linux", "windows", "darwin"})
 		attributes["architecture"] = g.randomChoice([]string{"amd64", "arm64"})
 	case "large":
 		// Full dataset for performance testing
-		attributes["cpu_cores"] = fmt.Sprintf("%d", g.random.Intn(32)+4)
-		attributes["memory_mb"] = fmt.Sprintf("%d", (g.random.Intn(32)+8)*1024)
-		attributes["disk_gb"] = fmt.Sprintf("%d", g.random.Intn(1000)+100)
-		attributes["network_interfaces"] = fmt.Sprintf("%d", g.random.Intn(10)+1)
+		attributes["cpu_cores"] = fmt.Sprintf("%d", g.cryptoRandInt(32)+4)
+		attributes["memory_mb"] = fmt.Sprintf("%d", (g.cryptoRandInt(32)+8)*1024)
+		attributes["disk_gb"] = fmt.Sprintf("%d", g.cryptoRandInt(1000)+100)
+		attributes["network_interfaces"] = fmt.Sprintf("%d", g.cryptoRandInt(10)+1)
 		attributes["os_family"] = g.randomChoice([]string{"linux", "windows", "darwin"})
 		attributes["architecture"] = g.randomChoice([]string{"amd64", "arm64", "386"})
 		attributes["kernel_version"] = g.generateKernelVersion()
-		attributes["uptime_seconds"] = fmt.Sprintf("%d", g.random.Intn(86400*30))
-		attributes["load_average"] = fmt.Sprintf("%.2f", g.random.Float64()*4)
+		attributes["uptime_seconds"] = fmt.Sprintf("%d", g.cryptoRandInt(86400*30))
+		attributes["load_average"] = fmt.Sprintf("%.2f", float64(g.cryptoRandInt(400))/100.0)
 		
 		// Add security attributes
 		attributes["firewall_enabled"] = g.randomChoice([]string{"true", "false"})
@@ -69,7 +81,7 @@ func (g *TestDataGenerator) GenerateTestDNA(stewardID string) *common.DNA {
 		attributes["encryption_status"] = g.randomChoice([]string{"enabled", "disabled", "partial"})
 		
 		// Add network attributes
-		for i := 0; i < g.random.Intn(3)+1; i++ {
+		for i := 0; i < int(g.cryptoRandInt(3))+1; i++ {
 			attributes[fmt.Sprintf("ip_address_%d", i)] = g.generateIPAddress()
 			attributes[fmt.Sprintf("mac_address_%d", i)] = g.generateMACAddress()
 		}
@@ -260,21 +272,21 @@ func (g *TestDataGenerator) generateScriptResource(name, script string) config.R
 }
 
 func (g *TestDataGenerator) generateKernelVersion() string {
-	major := g.random.Intn(3) + 5 // 5.x, 6.x, 7.x
-	minor := g.random.Intn(20)
-	patch := g.random.Intn(10)
+	major := g.cryptoRandInt(3) + 5 // 5.x, 6.x, 7.x
+	minor := g.cryptoRandInt(20)
+	patch := g.cryptoRandInt(10)
 	return fmt.Sprintf("%d.%d.%d", major, minor, patch)
 }
 
 func (g *TestDataGenerator) generateIPAddress() string {
 	return fmt.Sprintf("192.168.%d.%d", 
-		g.random.Intn(255)+1, 
-		g.random.Intn(254)+1)
+		g.cryptoRandInt(255)+1, 
+		g.cryptoRandInt(254)+1)
 }
 
 func (g *TestDataGenerator) generateMACAddress() string {
 	mac := make([]byte, 6)
-	g.random.Read(mac)
+	rand.Read(mac) // Use crypto/rand
 	// Set the locally administered bit
 	mac[0] |= 2
 	mac[0] &= 0xfe
@@ -285,13 +297,16 @@ func (g *TestDataGenerator) generateMACAddress() string {
 func (g *TestDataGenerator) generateLargeContent(sizeBytes int) string {
 	content := make([]byte, sizeBytes)
 	for i := range content {
-		content[i] = byte(g.random.Intn(94) + 32) // Printable ASCII
+		content[i] = byte(g.cryptoRandInt(94) + 32) // Printable ASCII
 	}
 	return string(content)
 }
 
 func (g *TestDataGenerator) randomChoice(choices []string) string {
-	return choices[g.random.Intn(len(choices))]
+	if len(choices) == 0 {
+		return ""
+	}
+	return choices[g.cryptoRandInt(int64(len(choices)))]
 }
 
 // Performance test data generators

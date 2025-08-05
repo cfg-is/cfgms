@@ -89,8 +89,12 @@ func (pe *PrometheusExporter) Start(ctx context.Context) error {
 	mux.HandleFunc("/health", pe.handleHealth)
 
 	pe.httpServer = &http.Server{
-		Addr:    pe.config.ListenAddr,
-		Handler: mux,
+		Addr:              pe.config.ListenAddr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second, // Prevent Slowloris attacks
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	// Start server in goroutine

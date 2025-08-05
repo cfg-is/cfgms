@@ -80,9 +80,13 @@ func (e *UnixExecutor) Start(ctx context.Context, config *Config) error {
 	}
 
 	// Start the command with a PTY
+	// Validate terminal dimensions are within uint16 range
+	if e.config.Rows < 0 || e.config.Rows > 65535 || e.config.Cols < 0 || e.config.Cols > 65535 {
+		return fmt.Errorf("invalid terminal dimensions: rows=%d, cols=%d", e.config.Rows, e.config.Cols)
+	}
 	ptyFile, err := pty.StartWithSize(e.cmd, &pty.Winsize{
-		Rows: uint16(e.config.Rows),
-		Cols: uint16(e.config.Cols),
+		Rows: uint16(e.config.Rows), // #nosec G115 - bounds validated above
+		Cols: uint16(e.config.Cols), // #nosec G115 - bounds validated above
 	})
 	if err != nil {
 		return fmt.Errorf("failed to start shell with PTY: %w", err)
@@ -131,9 +135,14 @@ func (e *UnixExecutor) Resize(ctx context.Context, cols, rows int) error {
 	e.config.Cols = cols
 	e.config.Rows = rows
 
+	// Validate terminal dimensions are within uint16 range
+	if rows < 0 || rows > 65535 || cols < 0 || cols > 65535 {
+		return fmt.Errorf("invalid terminal dimensions: rows=%d, cols=%d", rows, cols)
+	}
+	
 	err := pty.Setsize(e.pty, &pty.Winsize{
-		Rows: uint16(rows),
-		Cols: uint16(cols),
+		Rows: uint16(rows), // #nosec G115 - bounds validated above  
+		Cols: uint16(cols), // #nosec G115 - bounds validated above
 	})
 	if err != nil {
 		return fmt.Errorf("failed to resize terminal: %w", err)

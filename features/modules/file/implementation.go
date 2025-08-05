@@ -93,6 +93,10 @@ func (m *fileModule) Set(ctx context.Context, resourceID string, config modules.
 	}
 
 	// Write file with content
+	// Validate permissions are within os.FileMode range
+	if fileConfig.Permissions < 0 || fileConfig.Permissions > 0777 {
+		return modules.ErrInvalidConfig
+	}
 	if err := os.WriteFile(resourceID, []byte(fileConfig.Content), os.FileMode(fileConfig.Permissions)); err != nil {
 		return err
 	}

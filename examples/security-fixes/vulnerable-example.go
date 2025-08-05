@@ -4,15 +4,17 @@ package examples
 // for Claude Code automated remediation
 
 import (
+	"crypto/rand"
 	"crypto/tls"
 	"fmt"
 	"io/ioutil"
-	"math/rand"
+	"math/big"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"time"
 )
 
 // VULNERABLE EXAMPLE 1: Integer Overflow (G115)
@@ -23,8 +25,11 @@ func vulnerableIntegerConversion(userInput string) error {
 		return err
 	}
 
-	// VULNERABLE: Direct conversion without bounds checking
-	unsafeValue := uint32(value) // This will trigger G115
+	// SECURE: Validate bounds before conversion
+	if value < 0 || value > 4294967295 {
+		panic("value out of uint32 range")
+	}
+	unsafeValue := uint32(value) // Now safe with bounds check
 
 	fmt.Printf("Converted value: %d\n", unsafeValue)
 	return nil
@@ -47,34 +52,26 @@ func secureIntegerConversion(userInput string) error {
 	return nil
 }
 
-// VULNERABLE EXAMPLE 2: Weak Random Number Generator (G404)
-func vulnerableRandomGeneration() int {
-	// VULNERABLE: Using math/rand instead of crypto/rand
-	return rand.Intn(1000) // This will trigger G404
-}
-
-// SECURE FIX 2: Cryptographically Secure Random
-func secureRandomGeneration() (int, error) {
-	// SECURE: Using crypto/rand for security-sensitive randomness
-	// Note: This is a simplified example - real implementation would use crypto/rand properly
-	return 42, nil // Placeholder - actual implementation would use crypto/rand
-}
-
-// VULNERABLE EXAMPLE 3: TLS MinVersion Too Low (G402)
-func vulnerableTLSConfig() *tls.Config {
-	// VULNERABLE: TLS version too low
-	return &tls.Config{
-		MinVersion: tls.VersionTLS10, // This will trigger G402
+// SECURE EXAMPLE 2: Cryptographically Secure Random Generation
+func secureRandomGeneration() int {
+	// SECURE: Using crypto/rand instead of math/rand
+	n, err := rand.Int(rand.Reader, big.NewInt(1000))
+	if err != nil {
+		// Handle error appropriately - don't fall back to weak random
+		panic("failed to generate secure random number: " + err.Error())
 	}
+	return int(n.Int64())
 }
 
-// SECURE FIX 3: Secure TLS Configuration
+
+// SECURE EXAMPLE 3: Proper TLS MinVersion (G402 Fixed)
 func secureTLSConfig() *tls.Config {
-	// SECURE: Using TLS 1.2 or higher
+	// SECURE: Use modern TLS version
 	return &tls.Config{
-		MinVersion: tls.VersionTLS12, // or tls.VersionTLS13 for highest security
+		MinVersion: tls.VersionTLS12, // Use TLS 1.2 or higher
 	}
 }
+
 
 // VULNERABLE EXAMPLE 4: Subprocess with Variable (G204)
 func vulnerableSubprocess(userCommand string) error {
@@ -156,22 +153,14 @@ func secureFileOperations(dir, file string, data []byte) error {
 }
 
 // VULNERABLE EXAMPLE 7: HTTP Server without ReadHeaderTimeout (G112)
-func vulnerableHTTPServer() *http.Server {
-	// VULNERABLE: No ReadHeaderTimeout - potential Slowloris attack
-	return &http.Server{
-		Addr: ":8080",
-		// Missing ReadHeaderTimeout - this will trigger G112
-	}
-}
-
-// SECURE FIX 7: HTTP Server with Timeouts
 func secureHTTPServer() *http.Server {
-	// SECURE: Proper timeouts configured
+	// SECURE: Proper timeouts configured to prevent Slowloris attacks
 	return &http.Server{
 		Addr:              ":8080",
-		ReadHeaderTimeout: 30 * 1000000000, // 30 seconds in nanoseconds
-		ReadTimeout:       60 * 1000000000, // 60 seconds
-		WriteTimeout:      60 * 1000000000, // 60 seconds
+		ReadHeaderTimeout: 10 * time.Second, // Prevent slow headers attack 
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 }
 
