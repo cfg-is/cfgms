@@ -229,6 +229,37 @@ make security-remediation-report  # Generate JSON report for automated remediati
 make install-nancy       # Cross-platform Nancy installation
 ```
 
+#### Security Exception Policy (gosec)
+
+**Configuration File (.gosec.json)**:
+- Use ONLY for project-wide rule suppression that applies to entire codebase
+- Use ONLY for excluding non-production directories (test/, examples/, vendor/)
+- Use ONLY for excluding generated files (*.pb.go)
+- Never exclude production code files via configuration
+
+**Inline Exclusions (Production Code)**:
+- All production code security exceptions MUST use inline `#nosec` comments
+- Each exclusion MUST include business justification
+- Use specific rule codes (e.g., `#nosec G204`) rather than blanket exclusions
+- Format: `// #nosec G204 - Business justification for why this is necessary`
+
+**Examples**:
+```go
+// Correct - Inline with justification
+cmd := exec.Command("bash", script) // #nosec G204 - CMS requires script execution for configuration management
+
+// Correct - Specific rule with context  
+data, err := ioutil.ReadFile(userPath) // #nosec G304 - User-specified config paths are validated upstream
+
+// Incorrect - No justification
+cmd := exec.Command("bash", script) // #nosec
+
+// Incorrect - Should be in .gosec.json instead
+// This would belong in config file for test directories
+```
+
+**Rationale**: Inline exclusions ensure future vulnerabilities in the same file are still detected, provide visibility during code review, and document security decisions at the point of implementation.
+
 ### Unified Development Validation
 ```bash
 # Complete validation workflow (test + security + summary)
