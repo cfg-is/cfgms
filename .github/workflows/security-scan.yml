@@ -153,11 +153,15 @@ jobs:
         echo "🛡️  Running gosec Go Security Analysis"
         mkdir -p sarif-results
         
-        # Run with SARIF output for GitHub Security tab
-        gosec -fmt sarif -out sarif-results/gosec.sarif ./...
+        # Run with SARIF output for GitHub Security tab using our configuration
+        if [ -f .gosec.json ]; then
+          gosec -conf .gosec.json -fmt sarif -out sarif-results/gosec.sarif ./...
+        else
+          gosec -fmt sarif -out sarif-results/gosec.sarif ./...
+        fi
         gosec_exit_code=$?
         
-        # Run regular scan for status checking
+        # Run regular scan for status checking (this honors our configuration)
         if make security-gosec; then
           echo "status=passed" >> $GITHUB_OUTPUT
           echo "issues-found=false" >> $GITHUB_OUTPUT
