@@ -147,7 +147,7 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 		// Path doesn't exist, create it
 		// Validate permissions are within os.FileMode range
 		if dirConfig.Permissions < 0 || dirConfig.Permissions > 0777 {
-			return modules.ErrInvalidConfig
+			return modules.ErrInvalidInput
 		}
 		if dirConfig.Recursive {
 			if err := os.MkdirAll(dirConfig.Path, os.FileMode(dirConfig.Permissions)); err != nil {
@@ -172,7 +172,7 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 	// Set permissions
 	// Validate permissions are within os.FileMode range (check again for existing directories)
 	if dirConfig.Permissions < 0 || dirConfig.Permissions > 0777 {
-		return modules.ErrInvalidConfig
+		return modules.ErrInvalidInput
 	}
 	if err := os.Chmod(dirConfig.Path, os.FileMode(dirConfig.Permissions)); err != nil {
 		return fmt.Errorf("failed to set permissions: %w", err)
