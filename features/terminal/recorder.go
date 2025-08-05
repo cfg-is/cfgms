@@ -50,7 +50,7 @@ func NewSessionRecorder(config *RecorderConfig, logger logging.Logger) (*Default
 	}
 
 	// Ensure storage directory exists
-	if err := os.MkdirAll(config.StoragePath, 0755); err != nil {
+	if err := os.MkdirAll(config.StoragePath, 0750); err != nil {
 		return nil, fmt.Errorf("failed to create storage directory: %w", err)
 	}
 

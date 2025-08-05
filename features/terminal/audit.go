@@ -170,7 +170,7 @@ func NewAuditLogger(config *AuditConfig, storage AuditStorage) (*AuditLogger, er
 	
 	// Open log file
 	logPath := filepath.Join(config.StoragePath, fmt.Sprintf("audit-%s.log", time.Now().Format("2006-01-02")))
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0640)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open audit log file: %w", err)
 	}
