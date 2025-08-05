@@ -169,14 +169,16 @@ func (e *Executor) buildWindowsCommand(ctx context.Context) (*exec.Cmd, error) {
 	switch e.config.Shell {
 	case ShellPowerShell:
 		// Use PowerShell with appropriate execution policy
+		// #nosec G204 - CMS requires script execution for configuration management
 		return exec.CommandContext(ctx, "powershell.exe", 
 			"-ExecutionPolicy", "Bypass", 
 			"-NonInteractive", 
-			"-Command", e.config.Content), nil // #nosec G204 - Intentional script execution in configuration management system
+			"-Command", e.config.Content), nil
 			
 	case ShellCmd:
 		// Use Command Prompt
-		return exec.CommandContext(ctx, "cmd.exe", "/c", e.config.Content), nil // #nosec G204 - Intentional script execution in configuration management system
+		// #nosec G204 - CMS requires script execution for configuration management
+		return exec.CommandContext(ctx, "cmd.exe", "/c", e.config.Content), nil
 		
 	case ShellPython, ShellPython3:
 		// Use Python interpreter
@@ -184,7 +186,8 @@ func (e *Executor) buildWindowsCommand(ctx context.Context) (*exec.Cmd, error) {
 		if e.config.Shell == ShellPython3 {
 			pythonCmd = "python3"
 		}
-		return exec.CommandContext(ctx, pythonCmd, "-c", e.config.Content), nil // #nosec G204 - Intentional script execution in configuration management system
+		// #nosec G204 - CMS requires script execution for configuration management
+		return exec.CommandContext(ctx, pythonCmd, "-c", e.config.Content), nil
 		
 	default:
 		return nil, fmt.Errorf("unsupported shell on Windows: %s", e.config.Shell)
@@ -195,20 +198,24 @@ func (e *Executor) buildWindowsCommand(ctx context.Context) (*exec.Cmd, error) {
 func (e *Executor) buildUnixCommand(ctx context.Context) (*exec.Cmd, error) {
 	switch e.config.Shell {
 	case ShellBash:
-		return exec.CommandContext(ctx, "/bin/bash", "-c", e.config.Content), nil // #nosec G204 - Intentional script execution in configuration management system
+		// #nosec G204 - CMS requires script execution for configuration management
+		return exec.CommandContext(ctx, "/bin/bash", "-c", e.config.Content), nil
 		
 	case ShellZsh:
-		return exec.CommandContext(ctx, "/bin/zsh", "-c", e.config.Content), nil // #nosec G204 - Intentional script execution in configuration management system
+		// #nosec G204 - CMS requires script execution for configuration management
+		return exec.CommandContext(ctx, "/bin/zsh", "-c", e.config.Content), nil
 		
 	case ShellSh:
-		return exec.CommandContext(ctx, "/bin/sh", "-c", e.config.Content), nil // #nosec G204 - Intentional script execution in configuration management system
+		// #nosec G204 - CMS requires script execution for configuration management
+		return exec.CommandContext(ctx, "/bin/sh", "-c", e.config.Content), nil
 		
 	case ShellPython, ShellPython3:
 		pythonCmd := "/usr/bin/python"
 		if e.config.Shell == ShellPython3 {
 			pythonCmd = "/usr/bin/python3"
 		}
-		return exec.CommandContext(ctx, pythonCmd, "-c", e.config.Content), nil // #nosec G204 - Intentional script execution in configuration management system
+		// #nosec G204 - CMS requires script execution for configuration management
+		return exec.CommandContext(ctx, pythonCmd, "-c", e.config.Content), nil
 		
 	default:
 		return nil, fmt.Errorf("unsupported shell on Unix: %s", e.config.Shell)

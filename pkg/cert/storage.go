@@ -25,7 +25,7 @@ func NewFileStore(basePath string) (*FileStore, error) {
 	}
 	
 	// Create base directory if it doesn't exist
-	if err := os.MkdirAll(basePath, 0755); err != nil {
+	if err := os.MkdirAll(basePath, 0750); err != nil {
 		return nil, fmt.Errorf("failed to create storage directory: %w", err)
 	}
 	
@@ -53,13 +53,13 @@ func (fs *FileStore) StoreCertificate(cert *Certificate) error {
 	
 	// Create certificate-specific directory
 	certDir := filepath.Join(fs.basePath, cert.SerialNumber)
-	if err := os.MkdirAll(certDir, 0755); err != nil {
+	if err := os.MkdirAll(certDir, 0750); err != nil {
 		return fmt.Errorf("failed to create certificate directory: %w", err)
 	}
 	
 	// Store certificate PEM
 	certPath := filepath.Join(certDir, "cert.pem")
-	if err := os.WriteFile(certPath, cert.CertificatePEM, 0644); err != nil {
+	if err := os.WriteFile(certPath, cert.CertificatePEM, 0600); err != nil {
 		return fmt.Errorf("failed to write certificate: %w", err)
 	}
 	
@@ -92,7 +92,7 @@ func (fs *FileStore) StoreCertificate(cert *Certificate) error {
 		return fmt.Errorf("failed to marshal metadata: %w", err)
 	}
 	
-	if err := os.WriteFile(metadataPath, metadataJSON, 0644); err != nil {
+	if err := os.WriteFile(metadataPath, metadataJSON, 0600); err != nil {
 		return fmt.Errorf("failed to write metadata: %w", err)
 	}
 	

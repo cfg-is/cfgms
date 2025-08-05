@@ -241,18 +241,29 @@ make install-nancy       # Cross-platform Nancy installation
 - All production code security exceptions MUST use inline `#nosec` comments
 - Each exclusion MUST include business justification
 - Use specific rule codes (e.g., `#nosec G204`) rather than blanket exclusions
-- Format: `// #nosec G204 - Business justification for why this is necessary`
+- Format: Comment must be on the line BEFORE the flagged code
+- Use: `// #nosec G204 - Business justification for why this is necessary`
 
 **Examples**:
 ```go
-// Correct - Inline with justification
-cmd := exec.Command("bash", script) // #nosec G204 - CMS requires script execution for configuration management
+// Correct - Comment before the flagged line with justification
+// #nosec G204 - CMS requires script execution for configuration management
+cmd := exec.Command("bash", script)
 
-// Correct - Specific rule with context  
-data, err := ioutil.ReadFile(userPath) // #nosec G304 - User-specified config paths are validated upstream
+// Correct - Specific rule with context on preceding line
+// #nosec G304 - User-specified config paths are validated upstream  
+data, err := ioutil.ReadFile(userPath)
+
+// Correct - With detailed business context
+// #nosec G115 - bounds validated above (0-0777 check)
+if err := os.Mkdir(path, os.FileMode(permissions)); err != nil {
+
+// Incorrect - Comment at end of line (gosec may not recognize)
+cmd := exec.Command("bash", script) // #nosec G204 - CMS requires script execution
 
 // Incorrect - No justification
-cmd := exec.Command("bash", script) // #nosec
+// #nosec
+cmd := exec.Command("bash", script)
 
 // Incorrect - Should be in .gosec.json instead
 // This would belong in config file for test directories

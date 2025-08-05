@@ -36,7 +36,8 @@ func (s *Server) handleListCertificates(w http.ResponseWriter, r *http.Request) 
 				StewardID:           stewardID,
 				IsValid:             certInfo.IsValid,
 				ExpiresAt:           certInfo.ExpiresAt,
-				DaysUntilExpiration: int32(min(certInfo.DaysUntilExpiration, 2147483647)), // #nosec G115 - clamped to int32 max
+				// #nosec G115 - clamped to int32 max to prevent overflow
+			DaysUntilExpiration: int32(min(certInfo.DaysUntilExpiration, 2147483647)),
 				NeedsRenewal:        certInfo.NeedsRenewal,
 			})
 		}

@@ -111,7 +111,8 @@ func (c *Collector) Collect() (*commonpb.DNA, error) {
 		// Sync metadata (will be updated by steward with config info)
 		ConfigHash:      "", // Will be set when steward loads configuration
 		LastSyncTime:    timestamppb.New(now),
-		AttributeCount:  int32(min(len(attributes), 2147483647)), // #nosec G115 - clamped to int32 max
+		// #nosec G115 - clamped to int32 max to prevent overflow
+		AttributeCount:  int32(min(len(attributes), 2147483647)),
 		SyncFingerprint: c.generateSyncFingerprint(systemID, attributes, ""),
 	}
 
@@ -395,6 +396,7 @@ func (c *Collector) UpdateSyncMetadata(dna *commonpb.DNA, configHash string) {
 	
 	dna.ConfigHash = configHash
 	dna.LastSyncTime = timestamppb.New(time.Now())
-	dna.AttributeCount = int32(min(len(dna.Attributes), 2147483647)) // #nosec G115 - clamped to int32 max
+	// #nosec G115 - clamped to int32 max to prevent overflow
+	dna.AttributeCount = int32(min(len(dna.Attributes), 2147483647))
 	dna.SyncFingerprint = c.generateSyncFingerprint(dna.Id, dna.Attributes, configHash)
 }

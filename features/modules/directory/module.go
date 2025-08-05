@@ -150,6 +150,7 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 			return modules.ErrInvalidInput
 		}
 		if dirConfig.Recursive {
+			// #nosec G115 - bounds validated above (0-0777 check)
 			if err := os.MkdirAll(dirConfig.Path, os.FileMode(dirConfig.Permissions)); err != nil {
 				return fmt.Errorf("failed to create directory: %w", err)
 			}
@@ -161,6 +162,7 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 				}
 				return fmt.Errorf("failed to stat parent directory: %w", err)
 			}
+			// #nosec G115 - bounds validated above (0-0777 check)
 			if err := os.Mkdir(dirConfig.Path, os.FileMode(dirConfig.Permissions)); err != nil {
 				return fmt.Errorf("failed to create directory: %w", err)
 			}

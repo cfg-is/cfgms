@@ -183,7 +183,7 @@ func LoadCertificateChainFromFile(filename string) ([]*x509.Certificate, error) 
 // SaveCertificateToFile saves a certificate to a file in PEM format
 func SaveCertificateToFile(cert *Certificate, certPath, keyPath string) error {
 	// Save certificate
-	if err := os.WriteFile(certPath, cert.CertificatePEM, 0644); err != nil {
+	if err := os.WriteFile(certPath, cert.CertificatePEM, 0600); err != nil {
 		return fmt.Errorf("failed to write certificate file: %w", err)
 	}
 	

@@ -460,7 +460,7 @@ func (ca *CA) saveToStorage() error {
 	}
 	
 	// Create storage directory
-	if err := os.MkdirAll(ca.config.StoragePath, 0755); err != nil {
+	if err := os.MkdirAll(ca.config.StoragePath, 0750); err != nil {
 		return fmt.Errorf("failed to create storage directory: %w", err)
 	}
 	
@@ -471,7 +471,7 @@ func (ca *CA) saveToStorage() error {
 		Bytes: ca.certificate.Raw,
 	})
 	
-	if err := os.WriteFile(caCertPath, certPEM, 0644); err != nil {
+	if err := os.WriteFile(caCertPath, certPEM, 0600); err != nil {
 		return fmt.Errorf("failed to write CA certificate: %w", err)
 	}
 	

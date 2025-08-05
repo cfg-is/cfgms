@@ -79,8 +79,9 @@ func (e *WindowsExecutor) Start(ctx context.Context, config *Config) error {
 		return fmt.Errorf("unsupported Windows shell: %s", e.config.Shell)
 	}
 
-	// Create command  
-	e.cmd = exec.CommandContext(e.ctx, cmdPath, args...) // #nosec G204 - Validated shell path execution
+	// Create command
+	// #nosec G204 - Terminal requires shell execution with validated shell paths
+	e.cmd = exec.CommandContext(e.ctx, cmdPath, args...)
 	
 	// Set environment variables
 	e.cmd.Env = os.Environ()
