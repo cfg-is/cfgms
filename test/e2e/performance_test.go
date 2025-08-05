@@ -362,7 +362,7 @@ func (s *PerformanceRegressionSuite) measureDNACollectionTime() time.Duration {
 func (s *PerformanceRegressionSuite) measureMemoryUsage() float64 {
 	// In a real implementation, this would use runtime.MemStats
 	// For testing purposes, return a simulated value
-	return float64(s.framework.dataGenerator.random.Intn(50) + 30) // 30-80 MB
+	return float64(s.framework.dataGenerator.cryptoRandInt(50) + 30) // 30-80 MB
 }
 
 func (s *PerformanceRegressionSuite) measureRequestThroughput(requestCount int) float64 {
@@ -371,7 +371,7 @@ func (s *PerformanceRegressionSuite) measureRequestThroughput(requestCount int) 
 	// Simulate requests (in real implementation, would make actual gRPC calls)
 	for i := 0; i < requestCount; i++ {
 		// Simulate request processing time
-		time.Sleep(time.Millisecond * time.Duration(s.framework.dataGenerator.random.Intn(10)+5))
+		time.Sleep(time.Millisecond * time.Duration(s.framework.dataGenerator.cryptoRandInt(10)+5))
 	}
 	
 	duration := time.Since(startTime)

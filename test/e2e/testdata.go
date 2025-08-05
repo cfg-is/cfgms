@@ -123,7 +123,7 @@ func (g *TestDataGenerator) GenerateStewardConfig(stewardID string) *config.Stew
 		)
 	case "medium":
 		// More resources for comprehensive testing
-		for i := 0; i < g.random.Intn(3)+2; i++ {
+		for i := 0; i < int(g.cryptoRandInt(3))+2; i++ {
 			baseConfig.Resources = append(baseConfig.Resources,
 				g.generateDirectoryResource(
 					fmt.Sprintf("test-dir-%d", i),
@@ -131,7 +131,7 @@ func (g *TestDataGenerator) GenerateStewardConfig(stewardID string) *config.Stew
 				),
 			)
 		}
-		for i := 0; i < g.random.Intn(5)+2; i++ {
+		for i := 0; i < int(g.cryptoRandInt(5))+2; i++ {
 			baseConfig.Resources = append(baseConfig.Resources,
 				g.generateFileResource(
 					fmt.Sprintf("test-file-%d", i),
