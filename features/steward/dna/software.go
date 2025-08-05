@@ -81,21 +81,7 @@ func (g *GenericSoftwareCollector) CollectProcesses(attributes map[string]string
 // WindowsSoftwareCollector handles Windows-specific software collection
 type WindowsSoftwareCollector struct{}
 
-func (w *WindowsSoftwareCollector) CollectOS(attributes map[string]string) error {
-	return (&GenericSoftwareCollector{}).CollectOS(attributes)
-}
-
-func (w *WindowsSoftwareCollector) CollectPackages(attributes map[string]string) error {
-	return (&GenericSoftwareCollector{}).CollectPackages(attributes)
-}
-
-func (w *WindowsSoftwareCollector) CollectServices(attributes map[string]string) error {
-	return (&GenericSoftwareCollector{}).CollectServices(attributes)
-}
-
-func (w *WindowsSoftwareCollector) CollectProcesses(attributes map[string]string) error {
-	return (&GenericSoftwareCollector{}).CollectProcesses(attributes)
-}
+// Windows-specific implementations are in software_windows.go
 
 // LinuxSoftwareCollector handles Linux-specific software collection
 type LinuxSoftwareCollector struct{}

@@ -62,22 +62,7 @@ func (g *GenericHardwareCollector) CollectMotherboard(attributes map[string]stri
 // WindowsHardwareCollector handles Windows-specific hardware collection
 type WindowsHardwareCollector struct{}
 
-func (w *WindowsHardwareCollector) CollectCPU(attributes map[string]string) error {
-	// Fallback to generic implementation for now
-	return (&GenericHardwareCollector{}).CollectCPU(attributes)
-}
-
-func (w *WindowsHardwareCollector) CollectMemory(attributes map[string]string) error {
-	return (&GenericHardwareCollector{}).CollectMemory(attributes)
-}
-
-func (w *WindowsHardwareCollector) CollectDisk(attributes map[string]string) error {
-	return (&GenericHardwareCollector{}).CollectDisk(attributes)
-}
-
-func (w *WindowsHardwareCollector) CollectMotherboard(attributes map[string]string) error {
-	return (&GenericHardwareCollector{}).CollectMotherboard(attributes)
-}
+// Windows-specific implementations are in hardware_windows.go
 
 // LinuxHardwareCollector handles Linux-specific hardware collection  
 type LinuxHardwareCollector struct{}

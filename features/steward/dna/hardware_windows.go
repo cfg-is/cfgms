@@ -495,7 +495,7 @@ func (w *WindowsHardwareCollector) parseCSVLine(line string) []string {
 	var current strings.Builder
 	inQuotes := false
 	
-	for i, char := range line {
+	for _, char := range line {
 		switch char {
 		case '"':
 			inQuotes = !inQuotes

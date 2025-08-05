@@ -480,7 +480,7 @@ func (w *WindowsSoftwareCollector) parseWMIServicesOutput(output string, attribu
 // collectStartupPrograms collects startup programs
 func (w *WindowsSoftwareCollector) collectStartupPrograms(attributes map[string]string) {
 	if output, err := exec.Command("wmic", "startup", "get", "Name,Command,Location", "/format:csv").Output(); err == nil {
-		lines := strings.Split(output, "\n")
+		lines := strings.Split(string(output), "\n")
 		var startupCount int
 		var startupPrograms []string
 		

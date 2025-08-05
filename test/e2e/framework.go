@@ -306,7 +306,12 @@ func (f *E2ETestFramework) initializeController() error {
 	
 	f.controller = ctrl
 	f.addCleanup(func() error {
-		return ctrl.Stop(context.Background())
+		err := ctrl.Stop(context.Background())
+		// Ignore "controller not running" errors during cleanup
+		if err != nil && err.Error() == "controller not running" {
+			return nil
+		}
+		return err
 	})
 	
 	return nil
@@ -396,6 +401,9 @@ func (f *E2ETestFramework) CreateSteward(stewardID string) (*steward.Steward, er
 	
 	// Add cleanup for this steward
 	f.addCleanup(func() error {
+		f.mu.Lock()
+		delete(f.stewards, stewardID)
+		f.mu.Unlock()
 		return s.Stop(context.Background())
 	})
 	
