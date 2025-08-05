@@ -498,7 +498,7 @@ func (l *LinuxHardwareCollector) collectSMARTInfo(attributes map[string]string) 
 	drives := []string{"sda", "sdb", "nvme0n1", "nvme1n1"}
 	
 	for _, drive := range drives {
-		if output, err := exec.Command("smartctl", "-H", "/dev/"+drive).Output(); err == nil {
+		if output, err := exec.Command("smartctl", "-H", "/dev/"+drive).Output(); err == nil { // #nosec G204 - Hardware discovery with validated drive names
 			if strings.Contains(string(output), "PASSED") {
 				attributes["smart_"+drive+"_health"] = "PASSED"
 			} else if strings.Contains(string(output), "FAILED") {

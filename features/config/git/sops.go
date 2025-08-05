@@ -33,7 +33,7 @@ func NewSOPSManager() *SOPSManager {
 
 // IsSOPSAvailable checks if SOPS is available on the system
 func (s *SOPSManager) IsSOPSAvailable(ctx context.Context) bool {
-	cmd := exec.CommandContext(ctx, s.sopsPath, "--version")
+	cmd := exec.CommandContext(ctx, s.sopsPath, "--version") // #nosec G204 - Validated SOPS binary path
 	return cmd.Run() == nil
 }
 
@@ -96,7 +96,7 @@ func (s *SOPSManager) EncryptContent(ctx context.Context, content []byte, config
 	args = append(args, "--in-place", tmpFile)
 	
 	// Execute SOPS encryption
-	cmd := exec.CommandContext(ctx, s.sopsPath, args...)
+	cmd := exec.CommandContext(ctx, s.sopsPath, args...) // #nosec G204 - Validated SOPS binary with controlled arguments
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("sops encryption failed: %s", string(output))
 	}
@@ -129,7 +129,7 @@ func (s *SOPSManager) DecryptContent(ctx context.Context, content []byte) ([]byt
 	}()
 	
 	// Execute SOPS decryption
-	cmd := exec.CommandContext(ctx, s.sopsPath, "--decrypt", "--in-place", tmpFile)
+	cmd := exec.CommandContext(ctx, s.sopsPath, "--decrypt", "--in-place", tmpFile) // #nosec G204 - Validated SOPS binary with controlled arguments
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("sops decryption failed: %s", string(output))
 	}

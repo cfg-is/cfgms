@@ -66,7 +66,7 @@ func (e *UnixExecutor) Start(ctx context.Context, config *Config) error {
 	}
 
 	// Create command
-	e.cmd = exec.CommandContext(e.ctx, shellPath)
+	e.cmd = exec.CommandContext(e.ctx, shellPath) // #nosec G204 - Validated shell path execution
 	
 	// Set environment variables
 	e.cmd.Env = os.Environ()

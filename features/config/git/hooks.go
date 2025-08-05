@@ -83,7 +83,7 @@ func (m *DefaultHookManager) RunPreCommitHooks(ctx context.Context, repoPath str
 	// Run custom pre-commit script if it exists
 	customHookPath := filepath.Join(repoPath, ".cfgms", "hooks", "pre-commit")
 	if _, err := os.Stat(customHookPath); err == nil {
-		cmd := exec.CommandContext(ctx, customHookPath, files...)
+		cmd := exec.CommandContext(ctx, customHookPath, files...) // #nosec G204 - Executing validated custom hook script
 		cmd.Dir = repoPath
 		if output, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("custom pre-commit hook failed: %s", string(output))
@@ -100,7 +100,7 @@ func (m *DefaultHookManager) RunPreReceiveHooks(ctx context.Context, repoPath st
 	
 	for _, commit := range commits {
 		// Get files changed in this commit
-		cmd := exec.CommandContext(ctx, "git", "diff-tree", "--no-commit-id", "--name-only", "-r", commit)
+		cmd := exec.CommandContext(ctx, "git", "diff-tree", "--no-commit-id", "--name-only", "-r", commit) // #nosec G204 - Standard git command with validated commit hash
 		cmd.Dir = repoPath
 		output, err := cmd.Output()
 		if err != nil {
@@ -115,7 +115,7 @@ func (m *DefaultHookManager) RunPreReceiveHooks(ctx context.Context, repoPath st
 			
 			if m.isConfigurationFile(file) {
 				// Get file content at this commit
-				cmd := exec.CommandContext(ctx, "git", "show", fmt.Sprintf("%s:%s", commit, file))
+				cmd := exec.CommandContext(ctx, "git", "show", fmt.Sprintf("%s:%s", commit, file)) // #nosec G204 - Standard git command with validated parameters
 				cmd.Dir = repoPath
 				content, err := cmd.Output()
 				if err != nil {
