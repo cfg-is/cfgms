@@ -130,6 +130,80 @@ func (RoleInheritanceType) EnumDescriptor() ([]byte, []int) {
 	return file_common_rbac_proto_rawDescGZIP(), []int{1}
 }
 
+// ConditionOperator defines comparison operators for conditions
+type ConditionOperator int32
+
+const (
+	ConditionOperator_CONDITION_OPERATOR_UNSPECIFIED  ConditionOperator = 0
+	ConditionOperator_CONDITION_OPERATOR_EQUALS       ConditionOperator = 1  // Equal to
+	ConditionOperator_CONDITION_OPERATOR_NOT_EQUALS   ConditionOperator = 2  // Not equal to
+	ConditionOperator_CONDITION_OPERATOR_IN           ConditionOperator = 3  // In list
+	ConditionOperator_CONDITION_OPERATOR_NOT_IN       ConditionOperator = 4  // Not in list
+	ConditionOperator_CONDITION_OPERATOR_GREATER_THAN ConditionOperator = 5  // Greater than
+	ConditionOperator_CONDITION_OPERATOR_LESS_THAN    ConditionOperator = 6  // Less than
+	ConditionOperator_CONDITION_OPERATOR_CONTAINS     ConditionOperator = 7  // Contains substring
+	ConditionOperator_CONDITION_OPERATOR_REGEX        ConditionOperator = 8  // Matches regex
+	ConditionOperator_CONDITION_OPERATOR_TIME_WITHIN  ConditionOperator = 9  // Within time range
+	ConditionOperator_CONDITION_OPERATOR_IP_IN_RANGE  ConditionOperator = 10 // IP in CIDR range
+)
+
+// Enum value maps for ConditionOperator.
+var (
+	ConditionOperator_name = map[int32]string{
+		0:  "CONDITION_OPERATOR_UNSPECIFIED",
+		1:  "CONDITION_OPERATOR_EQUALS",
+		2:  "CONDITION_OPERATOR_NOT_EQUALS",
+		3:  "CONDITION_OPERATOR_IN",
+		4:  "CONDITION_OPERATOR_NOT_IN",
+		5:  "CONDITION_OPERATOR_GREATER_THAN",
+		6:  "CONDITION_OPERATOR_LESS_THAN",
+		7:  "CONDITION_OPERATOR_CONTAINS",
+		8:  "CONDITION_OPERATOR_REGEX",
+		9:  "CONDITION_OPERATOR_TIME_WITHIN",
+		10: "CONDITION_OPERATOR_IP_IN_RANGE",
+	}
+	ConditionOperator_value = map[string]int32{
+		"CONDITION_OPERATOR_UNSPECIFIED":  0,
+		"CONDITION_OPERATOR_EQUALS":       1,
+		"CONDITION_OPERATOR_NOT_EQUALS":   2,
+		"CONDITION_OPERATOR_IN":           3,
+		"CONDITION_OPERATOR_NOT_IN":       4,
+		"CONDITION_OPERATOR_GREATER_THAN": 5,
+		"CONDITION_OPERATOR_LESS_THAN":    6,
+		"CONDITION_OPERATOR_CONTAINS":     7,
+		"CONDITION_OPERATOR_REGEX":        8,
+		"CONDITION_OPERATOR_TIME_WITHIN":  9,
+		"CONDITION_OPERATOR_IP_IN_RANGE":  10,
+	}
+)
+
+func (x ConditionOperator) Enum() *ConditionOperator {
+	p := new(ConditionOperator)
+	*p = x
+	return p
+}
+
+func (x ConditionOperator) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ConditionOperator) Descriptor() protoreflect.EnumDescriptor {
+	return file_common_rbac_proto_enumTypes[2].Descriptor()
+}
+
+func (ConditionOperator) Type() protoreflect.EnumType {
+	return &file_common_rbac_proto_enumTypes[2]
+}
+
+func (x ConditionOperator) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ConditionOperator.Descriptor instead.
+func (ConditionOperator) EnumDescriptor() ([]byte, []int) {
+	return file_common_rbac_proto_rawDescGZIP(), []int{2}
+}
+
 // Permission represents a specific action that can be performed
 type Permission struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -757,6 +831,604 @@ func (x *AuthorizationContext) GetResourceAttributes() map[string]string {
 	return nil
 }
 
+// ConditionalPermission represents a permission with context-based conditions
+type ConditionalPermission struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`                                         // Unique conditional permission identifier
+	PermissionId  string                 `protobuf:"bytes,2,opt,name=permission_id,json=permissionId,proto3" json:"permission_id,omitempty"` // Base permission this extends
+	Conditions    []*Condition           `protobuf:"bytes,3,rep,name=conditions,proto3" json:"conditions,omitempty"`                         // Conditions that must be met
+	Scope         *PermissionScope       `protobuf:"bytes,4,opt,name=scope,proto3" json:"scope,omitempty"`                                   // Resource scope limitations
+	ExpiresAt     int64                  `protobuf:"varint,5,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`         // Optional expiration timestamp
+	GrantedBy     string                 `protobuf:"bytes,6,opt,name=granted_by,json=grantedBy,proto3" json:"granted_by,omitempty"`          // Who granted this permission
+	GrantedAt     int64                  `protobuf:"varint,7,opt,name=granted_at,json=grantedAt,proto3" json:"granted_at,omitempty"`         // When this was granted
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ConditionalPermission) Reset() {
+	*x = ConditionalPermission{}
+	mi := &file_common_rbac_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ConditionalPermission) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ConditionalPermission) ProtoMessage() {}
+
+func (x *ConditionalPermission) ProtoReflect() protoreflect.Message {
+	mi := &file_common_rbac_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ConditionalPermission.ProtoReflect.Descriptor instead.
+func (*ConditionalPermission) Descriptor() ([]byte, []int) {
+	return file_common_rbac_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *ConditionalPermission) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *ConditionalPermission) GetPermissionId() string {
+	if x != nil {
+		return x.PermissionId
+	}
+	return ""
+}
+
+func (x *ConditionalPermission) GetConditions() []*Condition {
+	if x != nil {
+		return x.Conditions
+	}
+	return nil
+}
+
+func (x *ConditionalPermission) GetScope() *PermissionScope {
+	if x != nil {
+		return x.Scope
+	}
+	return nil
+}
+
+func (x *ConditionalPermission) GetExpiresAt() int64 {
+	if x != nil {
+		return x.ExpiresAt
+	}
+	return 0
+}
+
+func (x *ConditionalPermission) GetGrantedBy() string {
+	if x != nil {
+		return x.GrantedBy
+	}
+	return ""
+}
+
+func (x *ConditionalPermission) GetGrantedAt() int64 {
+	if x != nil {
+		return x.GrantedAt
+	}
+	return 0
+}
+
+// Condition represents a single condition for permission evaluation
+type Condition struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Type          string                 `protobuf:"bytes,1,opt,name=type,proto3" json:"type,omitempty"`                                                                                   // Condition type (time, location, device, etc.)
+	Operator      ConditionOperator      `protobuf:"varint,2,opt,name=operator,proto3,enum=cfgms.api.common.ConditionOperator" json:"operator,omitempty"`                                  // Comparison operator
+	Values        []string               `protobuf:"bytes,3,rep,name=values,proto3" json:"values,omitempty"`                                                                               // Values to compare against
+	Metadata      map[string]string      `protobuf:"bytes,4,rep,name=metadata,proto3" json:"metadata,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // Additional condition metadata
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Condition) Reset() {
+	*x = Condition{}
+	mi := &file_common_rbac_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Condition) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Condition) ProtoMessage() {}
+
+func (x *Condition) ProtoReflect() protoreflect.Message {
+	mi := &file_common_rbac_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Condition.ProtoReflect.Descriptor instead.
+func (*Condition) Descriptor() ([]byte, []int) {
+	return file_common_rbac_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *Condition) GetType() string {
+	if x != nil {
+		return x.Type
+	}
+	return ""
+}
+
+func (x *Condition) GetOperator() ConditionOperator {
+	if x != nil {
+		return x.Operator
+	}
+	return ConditionOperator_CONDITION_OPERATOR_UNSPECIFIED
+}
+
+func (x *Condition) GetValues() []string {
+	if x != nil {
+		return x.Values
+	}
+	return nil
+}
+
+func (x *Condition) GetMetadata() map[string]string {
+	if x != nil {
+		return x.Metadata
+	}
+	return nil
+}
+
+// PermissionScope defines resource-level granularity for permissions
+type PermissionScope struct {
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	ResourceIds        []string               `protobuf:"bytes,1,rep,name=resource_ids,json=resourceIds,proto3" json:"resource_ids,omitempty"`                                                                                                // Specific resource IDs (empty = all resources)
+	ResourcePatterns   []string               `protobuf:"bytes,2,rep,name=resource_patterns,json=resourcePatterns,proto3" json:"resource_patterns,omitempty"`                                                                                 // Resource patterns (wildcards allowed)
+	ExcludedResources  []string               `protobuf:"bytes,3,rep,name=excluded_resources,json=excludedResources,proto3" json:"excluded_resources,omitempty"`                                                                              // Explicitly excluded resources
+	ResourceAttributes map[string]string      `protobuf:"bytes,4,rep,name=resource_attributes,json=resourceAttributes,proto3" json:"resource_attributes,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // Required resource attributes
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
+}
+
+func (x *PermissionScope) Reset() {
+	*x = PermissionScope{}
+	mi := &file_common_rbac_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PermissionScope) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PermissionScope) ProtoMessage() {}
+
+func (x *PermissionScope) ProtoReflect() protoreflect.Message {
+	mi := &file_common_rbac_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PermissionScope.ProtoReflect.Descriptor instead.
+func (*PermissionScope) Descriptor() ([]byte, []int) {
+	return file_common_rbac_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *PermissionScope) GetResourceIds() []string {
+	if x != nil {
+		return x.ResourceIds
+	}
+	return nil
+}
+
+func (x *PermissionScope) GetResourcePatterns() []string {
+	if x != nil {
+		return x.ResourcePatterns
+	}
+	return nil
+}
+
+func (x *PermissionScope) GetExcludedResources() []string {
+	if x != nil {
+		return x.ExcludedResources
+	}
+	return nil
+}
+
+func (x *PermissionScope) GetResourceAttributes() map[string]string {
+	if x != nil {
+		return x.ResourceAttributes
+	}
+	return nil
+}
+
+// PermissionDelegation represents temporary permission delegation
+type PermissionDelegation struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`                                            // Unique delegation identifier
+	DelegatorId   string                 `protobuf:"bytes,2,opt,name=delegator_id,json=delegatorId,proto3" json:"delegator_id,omitempty"`       // Subject who is delegating
+	DelegateeId   string                 `protobuf:"bytes,3,opt,name=delegatee_id,json=delegateeId,proto3" json:"delegatee_id,omitempty"`       // Subject receiving the delegation
+	PermissionIds []string               `protobuf:"bytes,4,rep,name=permission_ids,json=permissionIds,proto3" json:"permission_ids,omitempty"` // Permissions being delegated
+	Scope         *PermissionScope       `protobuf:"bytes,5,opt,name=scope,proto3" json:"scope,omitempty"`                                      // Scope limitations for delegation
+	ExpiresAt     int64                  `protobuf:"varint,6,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`            // When delegation expires
+	CreatedAt     int64                  `protobuf:"varint,7,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`            // When delegation was created
+	TenantId      string                 `protobuf:"bytes,8,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`                // Tenant context
+	Revoked       bool                   `protobuf:"varint,9,opt,name=revoked,proto3" json:"revoked,omitempty"`                                 // Whether delegation has been revoked
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PermissionDelegation) Reset() {
+	*x = PermissionDelegation{}
+	mi := &file_common_rbac_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PermissionDelegation) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PermissionDelegation) ProtoMessage() {}
+
+func (x *PermissionDelegation) ProtoReflect() protoreflect.Message {
+	mi := &file_common_rbac_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PermissionDelegation.ProtoReflect.Descriptor instead.
+func (*PermissionDelegation) Descriptor() ([]byte, []int) {
+	return file_common_rbac_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *PermissionDelegation) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *PermissionDelegation) GetDelegatorId() string {
+	if x != nil {
+		return x.DelegatorId
+	}
+	return ""
+}
+
+func (x *PermissionDelegation) GetDelegateeId() string {
+	if x != nil {
+		return x.DelegateeId
+	}
+	return ""
+}
+
+func (x *PermissionDelegation) GetPermissionIds() []string {
+	if x != nil {
+		return x.PermissionIds
+	}
+	return nil
+}
+
+func (x *PermissionDelegation) GetScope() *PermissionScope {
+	if x != nil {
+		return x.Scope
+	}
+	return nil
+}
+
+func (x *PermissionDelegation) GetExpiresAt() int64 {
+	if x != nil {
+		return x.ExpiresAt
+	}
+	return 0
+}
+
+func (x *PermissionDelegation) GetCreatedAt() int64 {
+	if x != nil {
+		return x.CreatedAt
+	}
+	return 0
+}
+
+func (x *PermissionDelegation) GetTenantId() string {
+	if x != nil {
+		return x.TenantId
+	}
+	return ""
+}
+
+func (x *PermissionDelegation) GetRevoked() bool {
+	if x != nil {
+		return x.Revoked
+	}
+	return false
+}
+
+// PermissionAuditEntry represents an audit log entry for permission operations
+type PermissionAuditEntry struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`                                                                                     // Unique audit entry identifier
+	SubjectId     string                 `protobuf:"bytes,2,opt,name=subject_id,json=subjectId,proto3" json:"subject_id,omitempty"`                                                      // Subject who performed the action
+	Action        string                 `protobuf:"bytes,3,opt,name=action,proto3" json:"action,omitempty"`                                                                             // Action performed (check, grant, revoke, delegate)
+	PermissionId  string                 `protobuf:"bytes,4,opt,name=permission_id,json=permissionId,proto3" json:"permission_id,omitempty"`                                             // Permission involved
+	ResourceId    string                 `protobuf:"bytes,5,opt,name=resource_id,json=resourceId,proto3" json:"resource_id,omitempty"`                                                   // Resource accessed (if applicable)
+	TenantId      string                 `protobuf:"bytes,6,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`                                                         // Tenant context
+	Granted       bool                   `protobuf:"varint,7,opt,name=granted,proto3" json:"granted,omitempty"`                                                                          // Whether access was granted
+	Reason        string                 `protobuf:"bytes,8,opt,name=reason,proto3" json:"reason,omitempty"`                                                                             // Reason for the decision
+	Context       map[string]string      `protobuf:"bytes,9,rep,name=context,proto3" json:"context,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // Additional context information
+	Timestamp     int64                  `protobuf:"varint,10,opt,name=timestamp,proto3" json:"timestamp,omitempty"`                                                                     // When the action occurred
+	SourceIp      string                 `protobuf:"bytes,11,opt,name=source_ip,json=sourceIp,proto3" json:"source_ip,omitempty"`                                                        // Source IP address
+	UserAgent     string                 `protobuf:"bytes,12,opt,name=user_agent,json=userAgent,proto3" json:"user_agent,omitempty"`                                                     // User agent (if applicable)
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PermissionAuditEntry) Reset() {
+	*x = PermissionAuditEntry{}
+	mi := &file_common_rbac_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PermissionAuditEntry) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PermissionAuditEntry) ProtoMessage() {}
+
+func (x *PermissionAuditEntry) ProtoReflect() protoreflect.Message {
+	mi := &file_common_rbac_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PermissionAuditEntry.ProtoReflect.Descriptor instead.
+func (*PermissionAuditEntry) Descriptor() ([]byte, []int) {
+	return file_common_rbac_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *PermissionAuditEntry) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *PermissionAuditEntry) GetSubjectId() string {
+	if x != nil {
+		return x.SubjectId
+	}
+	return ""
+}
+
+func (x *PermissionAuditEntry) GetAction() string {
+	if x != nil {
+		return x.Action
+	}
+	return ""
+}
+
+func (x *PermissionAuditEntry) GetPermissionId() string {
+	if x != nil {
+		return x.PermissionId
+	}
+	return ""
+}
+
+func (x *PermissionAuditEntry) GetResourceId() string {
+	if x != nil {
+		return x.ResourceId
+	}
+	return ""
+}
+
+func (x *PermissionAuditEntry) GetTenantId() string {
+	if x != nil {
+		return x.TenantId
+	}
+	return ""
+}
+
+func (x *PermissionAuditEntry) GetGranted() bool {
+	if x != nil {
+		return x.Granted
+	}
+	return false
+}
+
+func (x *PermissionAuditEntry) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+func (x *PermissionAuditEntry) GetContext() map[string]string {
+	if x != nil {
+		return x.Context
+	}
+	return nil
+}
+
+func (x *PermissionAuditEntry) GetTimestamp() int64 {
+	if x != nil {
+		return x.Timestamp
+	}
+	return 0
+}
+
+func (x *PermissionAuditEntry) GetSourceIp() string {
+	if x != nil {
+		return x.SourceIp
+	}
+	return ""
+}
+
+func (x *PermissionAuditEntry) GetUserAgent() string {
+	if x != nil {
+		return x.UserAgent
+	}
+	return ""
+}
+
+// PermissionTemplate represents a reusable permission configuration
+type PermissionTemplate struct {
+	state                  protoimpl.MessageState   `protogen:"open.v1"`
+	Id                     string                   `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`                                                                                                                                  // Unique template identifier
+	Name                   string                   `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`                                                                                                                              // Template name
+	Description            string                   `protobuf:"bytes,3,opt,name=description,proto3" json:"description,omitempty"`                                                                                                                // Template description
+	Category               string                   `protobuf:"bytes,4,opt,name=category,proto3" json:"category,omitempty"`                                                                                                                      // Template category (compliance, department, etc.)
+	PermissionIds          []string                 `protobuf:"bytes,5,rep,name=permission_ids,json=permissionIds,proto3" json:"permission_ids,omitempty"`                                                                                       // Permissions in this template
+	ConditionalPermissions []*ConditionalPermission `protobuf:"bytes,6,rep,name=conditional_permissions,json=conditionalPermissions,proto3" json:"conditional_permissions,omitempty"`                                                            // Conditional permissions
+	DefaultConditions      map[string]string        `protobuf:"bytes,7,rep,name=default_conditions,json=defaultConditions,proto3" json:"default_conditions,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // Default condition values
+	IsSystemTemplate       bool                     `protobuf:"varint,8,opt,name=is_system_template,json=isSystemTemplate,proto3" json:"is_system_template,omitempty"`                                                                           // Whether this is a built-in template
+	TenantId               string                   `protobuf:"bytes,9,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`                                                                                                      // Tenant scope (empty for system templates)
+	CreatedAt              int64                    `protobuf:"varint,10,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`                                                                                                 // Creation timestamp
+	UpdatedAt              int64                    `protobuf:"varint,11,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`                                                                                                 // Last update timestamp
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
+}
+
+func (x *PermissionTemplate) Reset() {
+	*x = PermissionTemplate{}
+	mi := &file_common_rbac_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PermissionTemplate) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PermissionTemplate) ProtoMessage() {}
+
+func (x *PermissionTemplate) ProtoReflect() protoreflect.Message {
+	mi := &file_common_rbac_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PermissionTemplate.ProtoReflect.Descriptor instead.
+func (*PermissionTemplate) Descriptor() ([]byte, []int) {
+	return file_common_rbac_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *PermissionTemplate) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *PermissionTemplate) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *PermissionTemplate) GetDescription() string {
+	if x != nil {
+		return x.Description
+	}
+	return ""
+}
+
+func (x *PermissionTemplate) GetCategory() string {
+	if x != nil {
+		return x.Category
+	}
+	return ""
+}
+
+func (x *PermissionTemplate) GetPermissionIds() []string {
+	if x != nil {
+		return x.PermissionIds
+	}
+	return nil
+}
+
+func (x *PermissionTemplate) GetConditionalPermissions() []*ConditionalPermission {
+	if x != nil {
+		return x.ConditionalPermissions
+	}
+	return nil
+}
+
+func (x *PermissionTemplate) GetDefaultConditions() map[string]string {
+	if x != nil {
+		return x.DefaultConditions
+	}
+	return nil
+}
+
+func (x *PermissionTemplate) GetIsSystemTemplate() bool {
+	if x != nil {
+		return x.IsSystemTemplate
+	}
+	return false
+}
+
+func (x *PermissionTemplate) GetTenantId() string {
+	if x != nil {
+		return x.TenantId
+	}
+	return ""
+}
+
+func (x *PermissionTemplate) GetCreatedAt() int64 {
+	if x != nil {
+		return x.CreatedAt
+	}
+	return 0
+}
+
+func (x *PermissionTemplate) GetUpdatedAt() int64 {
+	if x != nil {
+		return x.UpdatedAt
+	}
+	return 0
+}
+
 var File_common_rbac_proto protoreflect.FileDescriptor
 
 const file_common_rbac_proto_rawDesc = "" +
@@ -843,6 +1515,85 @@ const file_common_rbac_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1aE\n" +
 	"\x17ResourceAttributesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x9f\x02\n" +
+	"\x15ConditionalPermission\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12#\n" +
+	"\rpermission_id\x18\x02 \x01(\tR\fpermissionId\x12;\n" +
+	"\n" +
+	"conditions\x18\x03 \x03(\v2\x1b.cfgms.api.common.ConditionR\n" +
+	"conditions\x127\n" +
+	"\x05scope\x18\x04 \x01(\v2!.cfgms.api.common.PermissionScopeR\x05scope\x12\x1d\n" +
+	"\n" +
+	"expires_at\x18\x05 \x01(\x03R\texpiresAt\x12\x1d\n" +
+	"\n" +
+	"granted_by\x18\x06 \x01(\tR\tgrantedBy\x12\x1d\n" +
+	"\n" +
+	"granted_at\x18\a \x01(\x03R\tgrantedAt\"\xfc\x01\n" +
+	"\tCondition\x12\x12\n" +
+	"\x04type\x18\x01 \x01(\tR\x04type\x12?\n" +
+	"\boperator\x18\x02 \x01(\x0e2#.cfgms.api.common.ConditionOperatorR\boperator\x12\x16\n" +
+	"\x06values\x18\x03 \x03(\tR\x06values\x12E\n" +
+	"\bmetadata\x18\x04 \x03(\v2).cfgms.api.common.Condition.MetadataEntryR\bmetadata\x1a;\n" +
+	"\rMetadataEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xc3\x02\n" +
+	"\x0fPermissionScope\x12!\n" +
+	"\fresource_ids\x18\x01 \x03(\tR\vresourceIds\x12+\n" +
+	"\x11resource_patterns\x18\x02 \x03(\tR\x10resourcePatterns\x12-\n" +
+	"\x12excluded_resources\x18\x03 \x03(\tR\x11excludedResources\x12j\n" +
+	"\x13resource_attributes\x18\x04 \x03(\v29.cfgms.api.common.PermissionScope.ResourceAttributesEntryR\x12resourceAttributes\x1aE\n" +
+	"\x17ResourceAttributesEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xc1\x02\n" +
+	"\x14PermissionDelegation\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12!\n" +
+	"\fdelegator_id\x18\x02 \x01(\tR\vdelegatorId\x12!\n" +
+	"\fdelegatee_id\x18\x03 \x01(\tR\vdelegateeId\x12%\n" +
+	"\x0epermission_ids\x18\x04 \x03(\tR\rpermissionIds\x127\n" +
+	"\x05scope\x18\x05 \x01(\v2!.cfgms.api.common.PermissionScopeR\x05scope\x12\x1d\n" +
+	"\n" +
+	"expires_at\x18\x06 \x01(\x03R\texpiresAt\x12\x1d\n" +
+	"\n" +
+	"created_at\x18\a \x01(\x03R\tcreatedAt\x12\x1b\n" +
+	"\ttenant_id\x18\b \x01(\tR\btenantId\x12\x18\n" +
+	"\arevoked\x18\t \x01(\bR\arevoked\"\xd7\x03\n" +
+	"\x14PermissionAuditEntry\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1d\n" +
+	"\n" +
+	"subject_id\x18\x02 \x01(\tR\tsubjectId\x12\x16\n" +
+	"\x06action\x18\x03 \x01(\tR\x06action\x12#\n" +
+	"\rpermission_id\x18\x04 \x01(\tR\fpermissionId\x12\x1f\n" +
+	"\vresource_id\x18\x05 \x01(\tR\n" +
+	"resourceId\x12\x1b\n" +
+	"\ttenant_id\x18\x06 \x01(\tR\btenantId\x12\x18\n" +
+	"\agranted\x18\a \x01(\bR\agranted\x12\x16\n" +
+	"\x06reason\x18\b \x01(\tR\x06reason\x12M\n" +
+	"\acontext\x18\t \x03(\v23.cfgms.api.common.PermissionAuditEntry.ContextEntryR\acontext\x12\x1c\n" +
+	"\ttimestamp\x18\n" +
+	" \x01(\x03R\ttimestamp\x12\x1b\n" +
+	"\tsource_ip\x18\v \x01(\tR\bsourceIp\x12\x1d\n" +
+	"\n" +
+	"user_agent\x18\f \x01(\tR\tuserAgent\x1a:\n" +
+	"\fContextEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xba\x04\n" +
+	"\x12PermissionTemplate\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12 \n" +
+	"\vdescription\x18\x03 \x01(\tR\vdescription\x12\x1a\n" +
+	"\bcategory\x18\x04 \x01(\tR\bcategory\x12%\n" +
+	"\x0epermission_ids\x18\x05 \x03(\tR\rpermissionIds\x12`\n" +
+	"\x17conditional_permissions\x18\x06 \x03(\v2'.cfgms.api.common.ConditionalPermissionR\x16conditionalPermissions\x12j\n" +
+	"\x12default_conditions\x18\a \x03(\v2;.cfgms.api.common.PermissionTemplate.DefaultConditionsEntryR\x11defaultConditions\x12,\n" +
+	"\x12is_system_template\x18\b \x01(\bR\x10isSystemTemplate\x12\x1b\n" +
+	"\ttenant_id\x18\t \x01(\tR\btenantId\x12\x1d\n" +
+	"\n" +
+	"created_at\x18\n" +
+	" \x01(\x03R\tcreatedAt\x12\x1d\n" +
+	"\n" +
+	"updated_at\x18\v \x01(\x03R\tupdatedAt\x1aD\n" +
+	"\x16DefaultConditionsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01*\x93\x01\n" +
 	"\vSubjectType\x12\x1c\n" +
 	"\x18SUBJECT_TYPE_UNSPECIFIED\x10\x00\x12\x15\n" +
@@ -854,7 +1605,20 @@ const file_common_rbac_proto_rawDesc = "" +
 	"\x15ROLE_INHERITANCE_NONE\x10\x00\x12\x1d\n" +
 	"\x19ROLE_INHERITANCE_ADDITIVE\x10\x01\x12\x1d\n" +
 	"\x19ROLE_INHERITANCE_OVERRIDE\x10\x02\x12 \n" +
-	"\x1cROLE_INHERITANCE_RESTRICTIVE\x10\x03B)Z'github.com/cfgis/cfgms/api/proto/commonb\x06proto3"
+	"\x1cROLE_INHERITANCE_RESTRICTIVE\x10\x03*\x81\x03\n" +
+	"\x11ConditionOperator\x12\"\n" +
+	"\x1eCONDITION_OPERATOR_UNSPECIFIED\x10\x00\x12\x1d\n" +
+	"\x19CONDITION_OPERATOR_EQUALS\x10\x01\x12!\n" +
+	"\x1dCONDITION_OPERATOR_NOT_EQUALS\x10\x02\x12\x19\n" +
+	"\x15CONDITION_OPERATOR_IN\x10\x03\x12\x1d\n" +
+	"\x19CONDITION_OPERATOR_NOT_IN\x10\x04\x12#\n" +
+	"\x1fCONDITION_OPERATOR_GREATER_THAN\x10\x05\x12 \n" +
+	"\x1cCONDITION_OPERATOR_LESS_THAN\x10\x06\x12\x1f\n" +
+	"\x1bCONDITION_OPERATOR_CONTAINS\x10\a\x12\x1c\n" +
+	"\x18CONDITION_OPERATOR_REGEX\x10\b\x12\"\n" +
+	"\x1eCONDITION_OPERATOR_TIME_WITHIN\x10\t\x12\"\n" +
+	"\x1eCONDITION_OPERATOR_IP_IN_RANGE\x10\n" +
+	"B)Z'github.com/cfgis/cfgms/api/proto/commonb\x06proto3"
 
 var (
 	file_common_rbac_proto_rawDescOnce sync.Once
@@ -868,35 +1632,55 @@ func file_common_rbac_proto_rawDescGZIP() []byte {
 	return file_common_rbac_proto_rawDescData
 }
 
-var file_common_rbac_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_common_rbac_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
+var file_common_rbac_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
+var file_common_rbac_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
 var file_common_rbac_proto_goTypes = []any{
-	(SubjectType)(0),             // 0: cfgms.api.common.SubjectType
-	(RoleInheritanceType)(0),     // 1: cfgms.api.common.RoleInheritanceType
-	(*Permission)(nil),           // 2: cfgms.api.common.Permission
-	(*Role)(nil),                 // 3: cfgms.api.common.Role
-	(*Subject)(nil),              // 4: cfgms.api.common.Subject
-	(*RoleAssignment)(nil),       // 5: cfgms.api.common.RoleAssignment
-	(*AccessRequest)(nil),        // 6: cfgms.api.common.AccessRequest
-	(*AccessResponse)(nil),       // 7: cfgms.api.common.AccessResponse
-	(*AuthorizationContext)(nil), // 8: cfgms.api.common.AuthorizationContext
-	nil,                          // 9: cfgms.api.common.Subject.AttributesEntry
-	nil,                          // 10: cfgms.api.common.AccessRequest.ContextEntry
-	nil,                          // 11: cfgms.api.common.AuthorizationContext.EnvironmentEntry
-	nil,                          // 12: cfgms.api.common.AuthorizationContext.ResourceAttributesEntry
+	(SubjectType)(0),              // 0: cfgms.api.common.SubjectType
+	(RoleInheritanceType)(0),      // 1: cfgms.api.common.RoleInheritanceType
+	(ConditionOperator)(0),        // 2: cfgms.api.common.ConditionOperator
+	(*Permission)(nil),            // 3: cfgms.api.common.Permission
+	(*Role)(nil),                  // 4: cfgms.api.common.Role
+	(*Subject)(nil),               // 5: cfgms.api.common.Subject
+	(*RoleAssignment)(nil),        // 6: cfgms.api.common.RoleAssignment
+	(*AccessRequest)(nil),         // 7: cfgms.api.common.AccessRequest
+	(*AccessResponse)(nil),        // 8: cfgms.api.common.AccessResponse
+	(*AuthorizationContext)(nil),  // 9: cfgms.api.common.AuthorizationContext
+	(*ConditionalPermission)(nil), // 10: cfgms.api.common.ConditionalPermission
+	(*Condition)(nil),             // 11: cfgms.api.common.Condition
+	(*PermissionScope)(nil),       // 12: cfgms.api.common.PermissionScope
+	(*PermissionDelegation)(nil),  // 13: cfgms.api.common.PermissionDelegation
+	(*PermissionAuditEntry)(nil),  // 14: cfgms.api.common.PermissionAuditEntry
+	(*PermissionTemplate)(nil),    // 15: cfgms.api.common.PermissionTemplate
+	nil,                           // 16: cfgms.api.common.Subject.AttributesEntry
+	nil,                           // 17: cfgms.api.common.AccessRequest.ContextEntry
+	nil,                           // 18: cfgms.api.common.AuthorizationContext.EnvironmentEntry
+	nil,                           // 19: cfgms.api.common.AuthorizationContext.ResourceAttributesEntry
+	nil,                           // 20: cfgms.api.common.Condition.MetadataEntry
+	nil,                           // 21: cfgms.api.common.PermissionScope.ResourceAttributesEntry
+	nil,                           // 22: cfgms.api.common.PermissionAuditEntry.ContextEntry
+	nil,                           // 23: cfgms.api.common.PermissionTemplate.DefaultConditionsEntry
 }
 var file_common_rbac_proto_depIdxs = []int32{
 	1,  // 0: cfgms.api.common.Role.inheritance_type:type_name -> cfgms.api.common.RoleInheritanceType
 	0,  // 1: cfgms.api.common.Subject.type:type_name -> cfgms.api.common.SubjectType
-	9,  // 2: cfgms.api.common.Subject.attributes:type_name -> cfgms.api.common.Subject.AttributesEntry
-	10, // 3: cfgms.api.common.AccessRequest.context:type_name -> cfgms.api.common.AccessRequest.ContextEntry
-	11, // 4: cfgms.api.common.AuthorizationContext.environment:type_name -> cfgms.api.common.AuthorizationContext.EnvironmentEntry
-	12, // 5: cfgms.api.common.AuthorizationContext.resource_attributes:type_name -> cfgms.api.common.AuthorizationContext.ResourceAttributesEntry
-	6,  // [6:6] is the sub-list for method output_type
-	6,  // [6:6] is the sub-list for method input_type
-	6,  // [6:6] is the sub-list for extension type_name
-	6,  // [6:6] is the sub-list for extension extendee
-	0,  // [0:6] is the sub-list for field type_name
+	16, // 2: cfgms.api.common.Subject.attributes:type_name -> cfgms.api.common.Subject.AttributesEntry
+	17, // 3: cfgms.api.common.AccessRequest.context:type_name -> cfgms.api.common.AccessRequest.ContextEntry
+	18, // 4: cfgms.api.common.AuthorizationContext.environment:type_name -> cfgms.api.common.AuthorizationContext.EnvironmentEntry
+	19, // 5: cfgms.api.common.AuthorizationContext.resource_attributes:type_name -> cfgms.api.common.AuthorizationContext.ResourceAttributesEntry
+	11, // 6: cfgms.api.common.ConditionalPermission.conditions:type_name -> cfgms.api.common.Condition
+	12, // 7: cfgms.api.common.ConditionalPermission.scope:type_name -> cfgms.api.common.PermissionScope
+	2,  // 8: cfgms.api.common.Condition.operator:type_name -> cfgms.api.common.ConditionOperator
+	20, // 9: cfgms.api.common.Condition.metadata:type_name -> cfgms.api.common.Condition.MetadataEntry
+	21, // 10: cfgms.api.common.PermissionScope.resource_attributes:type_name -> cfgms.api.common.PermissionScope.ResourceAttributesEntry
+	12, // 11: cfgms.api.common.PermissionDelegation.scope:type_name -> cfgms.api.common.PermissionScope
+	22, // 12: cfgms.api.common.PermissionAuditEntry.context:type_name -> cfgms.api.common.PermissionAuditEntry.ContextEntry
+	10, // 13: cfgms.api.common.PermissionTemplate.conditional_permissions:type_name -> cfgms.api.common.ConditionalPermission
+	23, // 14: cfgms.api.common.PermissionTemplate.default_conditions:type_name -> cfgms.api.common.PermissionTemplate.DefaultConditionsEntry
+	15, // [15:15] is the sub-list for method output_type
+	15, // [15:15] is the sub-list for method input_type
+	15, // [15:15] is the sub-list for extension type_name
+	15, // [15:15] is the sub-list for extension extendee
+	0,  // [0:15] is the sub-list for field type_name
 }
 
 func init() { file_common_rbac_proto_init() }
@@ -909,8 +1693,8 @@ func file_common_rbac_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_common_rbac_proto_rawDesc), len(file_common_rbac_proto_rawDesc)),
-			NumEnums:      2,
-			NumMessages:   11,
+			NumEnums:      3,
+			NumMessages:   21,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

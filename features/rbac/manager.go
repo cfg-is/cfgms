@@ -8,24 +8,50 @@ import (
 	"github.com/cfgis/cfgms/features/rbac/memory"
 )
 
-// Manager provides a complete RBAC implementation
+// Manager provides a complete RBAC implementation with advanced features
 type Manager struct {
-	store           *memory.Store
-	engine          *AuthEngine
-	hierarchyEngine *HierarchyEngine
+	store             *memory.Store
+	engine            *AuthEngine
+	advancedEngine    *AdvancedAuthEngine
+	hierarchyEngine   *HierarchyEngine
+	delegationManager *DelegationManager
+	auditLogger       *AuditLogger
+	templateManager   *TemplateManager
 }
 
-// NewManager creates a new RBAC manager with in-memory storage
+// NewManager creates a new RBAC manager with in-memory storage and advanced features
 func NewManager() *Manager {
 	store := memory.NewStore()
 	engine := NewAuthEngine(store, store, store, store)
 	hierarchyEngine := NewHierarchyEngine(store, store)
 	
-	return &Manager{
+	// Create manager instance first
+	manager := &Manager{
 		store:           store,
 		engine:          engine,
 		hierarchyEngine: hierarchyEngine,
 	}
+	
+	// Initialize advanced components
+	advancedEngine := NewAdvancedAuthEngine(store, store, store, store)
+	delegationManager := NewDelegationManager(manager) // Pass manager for RBAC operations
+	auditLogger := NewAuditLogger()
+	templateManager := NewTemplateManager(manager) // Pass manager for template operations
+	
+	// Set circular references
+	advancedEngine.SetRBACManager(manager)
+	
+	// Update manager with advanced components
+	manager.advancedEngine = advancedEngine
+	manager.delegationManager = delegationManager
+	manager.auditLogger = auditLogger
+	manager.templateManager = templateManager
+	
+	// Share the same delegation manager and audit logger instances
+	advancedEngine.SetDelegationManager(delegationManager)
+	advancedEngine.SetAuditLogger(auditLogger)
+	
+	return manager
 }
 
 // Initialize sets up the RBAC system with default roles and permissions
@@ -39,6 +65,11 @@ func (m *Manager) Initialize(ctx context.Context) error {
 	
 	// Load default system roles
 	m.store.LoadRoles(GetSystemRoles())
+	
+	// Initialize template manager with system templates
+	if err := m.templateManager.Initialize(ctx); err != nil {
+		return fmt.Errorf("failed to initialize template manager: %w", err)
+	}
 	
 	return nil
 }
@@ -147,21 +178,9 @@ func (m *Manager) GetSubjectAssignments(ctx context.Context, subjectID, tenantID
 	return m.store.GetSubjectAssignments(ctx, subjectID, tenantID)
 }
 
-// Authorization Engine Methods
-func (m *Manager) CheckPermission(ctx context.Context, request *common.AccessRequest) (*common.AccessResponse, error) {
-	return m.engine.CheckPermission(ctx, request)
-}
-
-func (m *Manager) GetSubjectPermissions(ctx context.Context, subjectID, tenantID string) ([]*common.Permission, error) {
-	return m.engine.GetSubjectPermissions(ctx, subjectID, tenantID)
-}
-
+// Authorization Engine Methods (delegated to advanced engine)
 func (m *Manager) ValidateAccess(ctx context.Context, authContext *common.AuthorizationContext, requiredPermission string) (*common.AccessResponse, error) {
-	return m.engine.ValidateAccess(ctx, authContext, requiredPermission)
-}
-
-func (m *Manager) GetEffectivePermissions(ctx context.Context, subjectID, tenantID string) ([]*common.Permission, error) {
-	return m.engine.GetEffectivePermissions(ctx, subjectID, tenantID)
+	return m.advancedEngine.ValidateAccess(ctx, authContext, requiredPermission)
 }
 
 // Helper methods for common operations
@@ -327,27 +346,6 @@ func (m *Manager) GetRoleHierarchy(ctx context.Context, roleID string) (*memory.
 	return memoryHierarchy, nil
 }
 
-// Helper to convert between hierarchy types
-func (m *Manager) convertToRBACHierarchy(memHierarchy *memory.RoleHierarchy) *memory.RoleHierarchy {
-	if memHierarchy == nil {
-		return nil
-	}
-
-	hierarchy := &memory.RoleHierarchy{
-		Role:  memHierarchy.Role,
-		Depth: memHierarchy.Depth,
-	}
-
-	if memHierarchy.Parent != nil {
-		hierarchy.Parent = m.convertToRBACHierarchy(memHierarchy.Parent)
-	}
-
-	for _, child := range memHierarchy.Children {
-		hierarchy.Children = append(hierarchy.Children, m.convertToRBACHierarchy(child))
-	}
-
-	return hierarchy
-}
 
 // Delegate hierarchy store operations
 func (m *Manager) GetChildRoles(ctx context.Context, roleID string) ([]*common.Role, error) {
@@ -372,6 +370,103 @@ func (m *Manager) RemoveRoleParent(ctx context.Context, roleID string) error {
 
 func (m *Manager) ValidateRoleHierarchy(ctx context.Context, roleID string) error {
 	return m.hierarchyEngine.ValidateHierarchy(ctx, roleID)
+}
+
+// Advanced Permission Management Methods
+
+// CheckPermissionWithContext performs advanced permission checking with context
+func (m *Manager) CheckPermissionWithContext(ctx context.Context, request *common.AccessRequest) (*common.AccessResponse, error) {
+	return m.advancedEngine.CheckPermission(ctx, request)
+}
+
+// CheckConditionalPermission checks a conditional permission with full context evaluation
+func (m *Manager) CheckConditionalPermission(ctx context.Context, request *common.AccessRequest, conditionalPerm *common.ConditionalPermission, authContext *common.AuthorizationContext) (*common.AccessResponse, error) {
+	return m.advancedEngine.CheckConditionalPermission(ctx, request, conditionalPerm, authContext)
+}
+
+// CreateDelegation creates a new permission delegation
+func (m *Manager) CreateDelegation(ctx context.Context, req *DelegationRequest) (*common.PermissionDelegation, error) {
+	return m.delegationManager.CreateDelegation(ctx, req)
+}
+
+// RevokeDelegation revokes an existing permission delegation
+func (m *Manager) RevokeDelegation(ctx context.Context, delegationID string, revokerID string) error {
+	return m.delegationManager.RevokeDelegation(ctx, delegationID, revokerID)
+}
+
+// GetActiveDelegations returns active delegations for a delegatee
+func (m *Manager) GetActiveDelegations(ctx context.Context, delegateeID string, tenantID string) ([]*common.PermissionDelegation, error) {
+	return m.delegationManager.GetActiveDelegations(ctx, delegateeID, tenantID)
+}
+
+// CreateTemporaryPermission creates a temporary permission grant with conditions
+func (m *Manager) CreateTemporaryPermission(ctx context.Context, req *TemporaryPermissionRequest) (*common.ConditionalPermission, error) {
+	return m.advancedEngine.CreateTemporaryPermission(ctx, req)
+}
+
+// GetAuditEntries retrieves audit entries with filtering
+func (m *Manager) GetAuditEntries(ctx context.Context, filter *AuditFilter) ([]*common.PermissionAuditEntry, error) {
+	return m.auditLogger.GetAuditEntries(ctx, filter)
+}
+
+// GetComplianceReport generates a compliance report
+func (m *Manager) GetComplianceReport(ctx context.Context, filter *AuditFilter) (*ComplianceReport, error) {
+	return m.auditLogger.GetComplianceReport(ctx, filter)
+}
+
+// GetSecurityAlerts identifies potential security issues
+func (m *Manager) GetSecurityAlerts(ctx context.Context, lookbackHours int) ([]*SecurityAlert, error) {
+	return m.auditLogger.GetSecurityAlerts(ctx, lookbackHours)
+}
+
+// CreateTemplate creates a new permission template
+func (m *Manager) CreateTemplate(ctx context.Context, req *TemplateCreateRequest) (*common.PermissionTemplate, error) {
+	return m.templateManager.CreateTemplate(ctx, req)
+}
+
+// ApplyTemplate applies a template to create roles and assign permissions
+func (m *Manager) ApplyTemplate(ctx context.Context, templateID, subjectID, tenantID string, customizations map[string]string) error {
+	return m.templateManager.ApplyTemplate(ctx, templateID, subjectID, tenantID, customizations)
+}
+
+// ListTemplates lists available permission templates
+func (m *Manager) ListTemplates(ctx context.Context, tenantID, category string) ([]*common.PermissionTemplate, error) {
+	return m.templateManager.ListTemplates(ctx, tenantID, category)
+}
+
+// GetTemplatesByCategory returns templates grouped by category
+func (m *Manager) GetTemplatesByCategory(ctx context.Context, tenantID string) (map[string][]*common.PermissionTemplate, error) {
+	return m.templateManager.GetTemplatesByCategory(ctx, tenantID)
+}
+
+// GetDelegationStats returns delegation statistics for a tenant
+func (m *Manager) GetDelegationStats(ctx context.Context, tenantID string) (*DelegationStats, error) {
+	return m.delegationManager.GetDelegationStats(ctx, tenantID)
+}
+
+// ExportAuditLog exports audit entries in various formats
+func (m *Manager) ExportAuditLog(ctx context.Context, filter *AuditFilter, format string) ([]byte, error) {
+	return m.auditLogger.ExportAuditLog(ctx, filter, format)
+}
+
+// CleanupExpiredDelegations removes expired delegations
+func (m *Manager) CleanupExpiredDelegations(ctx context.Context) error {
+	return m.delegationManager.CleanupExpiredDelegations(ctx)
+}
+
+// Override CheckPermission to use advanced engine by default
+func (m *Manager) CheckPermission(ctx context.Context, request *common.AccessRequest) (*common.AccessResponse, error) {
+	return m.advancedEngine.CheckPermission(ctx, request)
+}
+
+// Override GetSubjectPermissions to include delegated permissions
+func (m *Manager) GetSubjectPermissions(ctx context.Context, subjectID, tenantID string) ([]*common.Permission, error) {
+	return m.advancedEngine.GetSubjectPermissions(ctx, subjectID, tenantID)
+}
+
+// Override GetEffectivePermissions to include advanced features
+func (m *Manager) GetEffectivePermissions(ctx context.Context, subjectID, tenantID string) ([]*common.Permission, error) {
+	return m.advancedEngine.GetEffectivePermissions(ctx, subjectID, tenantID)
 }
 
 // Verify that Manager implements the RBACManager interface
