@@ -291,7 +291,7 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 
 #### v0.4.0 (Alpha) - Advanced Multi-Tenancy & Plugin Architecture
 
-**Status**: 🚧 IN PROGRESS - 128 story points across 14 stories (Issues #110-123)
+**Status**: 🚧 IN PROGRESS - 152 story points across 21 stories (Issues #110-127)
 
 **Goal**: Transform CFGMS from foundational architecture to production-ready enterprise platform with advanced multi-tenancy, unified directory management, and comprehensive module system.
 
@@ -300,22 +300,26 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 - [x] **Module Lifecycle Management** (Issue #111) - 8 points ✅ COMPLETED
 - [x] **Module Versioning System** (Issue #112) - 5 points ✅ COMPLETED
 
-**✅ Epic 2: Advanced RBAC (21 story points) - Issues #113-115**
+**✅ Epic 2: Advanced RBAC + Zero-Trust/JIT Access (45 story points) - Issues #113-119**
 - [ ] **Role Inheritance System** (Issue #113) - 8 points
 - [ ] **Advanced Permission Management** (Issue #114) - 8 points
 - [ ] **Enhanced Multi-Tenant Security** (Issue #115) - 5 points
+- [ ] **Just-In-Time (JIT) Access Framework** (Issue #116) - 8 points
+- [ ] **Risk-Based Access Controls** (Issue #117) - 8 points
+- [ ] **Continuous Authorization Engine** (Issue #118) - 8 points
+- [ ] **Zero-Trust Policy Engine** (Issue #119) - 5 points
 
-**✅ Epic 3: M365 Multi-Tenant Enterprise App Support (39 story points) - Issues #116-119**
-- [ ] **Multi-Tenant Consent Flow Implementation** (Issue #116) - 13 points
-- [ ] **Delegated Permissions Model** (Issue #117) - 8 points
-- [ ] **Enhanced Tenant Management** (Issue #118) - 8 points
-- [ ] **Per-Tenant Token Storage and Management** (Issue #119) - 10 points
+**✅ Epic 3: M365 Multi-Tenant Enterprise App Support (39 story points) - Issues #120-123**
+- [ ] **Multi-Tenant Consent Flow Implementation** (Issue #120) - 13 points
+- [ ] **Delegated Permissions Model** (Issue #121) - 8 points
+- [ ] **Enhanced Tenant Management** (Issue #122) - 8 points
+- [ ] **Per-Tenant Token Storage and Management** (Issue #123) - 10 points
 
-**✅ Epic 4: Unified Directory Management Interface (47 story points) - Issues #120-123**
-- [ ] **Directory Service Abstraction Layer** (Issue #120) - 15 points
-- [ ] **Directory DNA Integration** (Issue #121) - 13 points
-- [ ] **Active Directory Provider Implementation** (Issue #122) - 10 points
-- [ ] **Entra ID Provider Implementation** (Issue #123) - 9 points
+**✅ Epic 4: Unified Directory Management Interface (47 story points) - Issues #124-127**
+- [ ] **Directory Service Abstraction Layer** (Issue #124) - 15 points
+- [ ] **Directory DNA Integration** (Issue #125) - 13 points
+- [ ] **Active Directory Provider Implementation** (Issue #126) - 10 points
+- [ ] **Entra ID Provider Implementation** (Issue #127) - 9 points
 
 #### v0.5.0 (Beta) - Advanced Workflows & Core Readiness
 
