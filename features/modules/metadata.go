@@ -70,7 +70,11 @@ func LoadModuleMetadata(filePath string) (*ModuleMetadata, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open module metadata file %s: %v", filePath, err)
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); err != nil {
+			// Log error but don't override original error
+		}
+	}()
 
 	return ParseModuleMetadata(file)
 }

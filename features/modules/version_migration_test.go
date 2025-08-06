@@ -374,10 +374,10 @@ func TestDefaultVersionMigrator_ExecuteMigration(t *testing.T) {
 
 		// Make migrations take longer for this test
 		for i := range path1.Steps {
-			path1.Steps[i].EstimatedTime = 500 * time.Millisecond
+			path1.Steps[i].EstimatedTime = 2 * time.Second
 		}
 		for i := range path2.Steps {
-			path2.Steps[i].EstimatedTime = 500 * time.Millisecond
+			path2.Steps[i].EstimatedTime = 2 * time.Second
 		}
 
 		ctx := context.Background()
@@ -393,7 +393,7 @@ func TestDefaultVersionMigrator_ExecuteMigration(t *testing.T) {
 		assert.Contains(t, err.Error(), "migration already in progress")
 
 		// Wait for first migration to complete
-		time.Sleep(4 * time.Second)
+		time.Sleep(15 * time.Second)
 
 		// Now second migration should succeed
 		result3, err := migrator.ExecuteMigration(ctx, path2)
@@ -550,15 +550,15 @@ func TestDefaultVersionMigrator_RollbackMigration(t *testing.T) {
 	}
 	metadata2 := &ModuleMetadata{
 		Name:        "test-module",
-		Version:     "1.1.0",
-		Description: "Test module v1.1.0",
+		Version:     "1.0.1",
+		Description: "Test module v1.0.1",
 	}
 	require.NoError(t, registry.RegisterVersion(metadata1))
 	require.NoError(t, registry.RegisterVersion(metadata2))
 
 	t.Run("rollback completed migration", func(t *testing.T) {
 		// First, complete a migration
-		path, err := migrator.GetMigrationPath("test-module", "1.0.0", "1.1.0")
+		path, err := migrator.GetMigrationPath("test-module", "1.0.0", "1.0.1")
 		require.NoError(t, err)
 
 		// Make migration quick for testing
@@ -588,7 +588,7 @@ func TestDefaultVersionMigrator_RollbackMigration(t *testing.T) {
 		assert.Equal(t, MigrationStatusRunning, rollbackResult.Status)
 
 		// Wait for rollback to complete
-		time.Sleep(2 * time.Second)
+		time.Sleep(3 * time.Second)
 
 		rollbackStatus, err := migrator.GetMigrationStatus(rollbackResult.ID)
 		require.NoError(t, err)

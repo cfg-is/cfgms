@@ -425,9 +425,14 @@ func (s *RBACService) convertToProtoHierarchy(hierarchy *memory.RoleHierarchy) *
 		return nil
 	}
 
+	// Validate role hierarchy depth is within reasonable bounds
+	if hierarchy.Depth < 0 || hierarchy.Depth > 2147483647 {
+		hierarchy.Depth = 0 // Default to root level for invalid depth
+	}
+	
 	protoHierarchy := &controller.RoleHierarchy{
 		Role:  hierarchy.Role,
-		Depth: int32(hierarchy.Depth),
+		Depth: int32(hierarchy.Depth), // Safe: bounds validated above
 	}
 
 	if hierarchy.Parent != nil {
