@@ -302,7 +302,7 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 
 **✅ Epic 2: Advanced RBAC + Zero-Trust/JIT Access (45 story points) - Issues #113-119**
 - [x] **Role Inheritance System** (Issue #113) - 8 points ✅ COMPLETED
-- [ ] **Advanced Permission Management** (Issue #114) - 8 points
+- [x] **Advanced Permission Management** (Issue #114) - 8 points ✅ COMPLETED
 - [ ] **Enhanced Multi-Tenant Security** (Issue #115) - 5 points
 - [ ] **Just-In-Time (JIT) Access Framework** (Issue #116) - 8 points
 - [ ] **Risk-Based Access Controls** (Issue #117) - 8 points
