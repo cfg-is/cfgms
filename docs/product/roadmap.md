@@ -357,9 +357,11 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 
 #### v0.8.0 Go public
 
+- [ ] Re-enable GitHub Actions workflows (move workflows-disabled/ back to workflows/)
 - [ ] Set Up GitHub Actions and Acceptance Tests #15
-- [ ] Set up githup CI CD pipeline
+- [ ] Set up github CI CD pipeline  
 - [ ] Review Automated secure code scanning tooling implementation
+- [ ] Validate all workflows function properly on public repository
 - [ ] Convert repository to Public
 
 ### Phase 2: Enhancement (v1.0.0 - v1.5.0)
