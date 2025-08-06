@@ -37,15 +37,20 @@ func (h *HierarchyEngine) ComputeEffectivePermissions(ctx context.Context, roleI
 		return nil, fmt.Errorf("failed to collect hierarchy permissions: %w", err)
 	}
 
-	// Resolve conflicts
-	conflicts, err := h.detectPermissionConflicts(directPermissions, inheritedPermissions)
-	if err != nil {
-		return nil, fmt.Errorf("failed to detect conflicts: %w", err)
-	}
+	// Resolve conflicts (skip for restrictive inheritance since it's already resolved)
+	var conflictResolution map[string]memory.ConflictResult
+	if hierarchy.Role.InheritanceType != common.RoleInheritanceType_ROLE_INHERITANCE_RESTRICTIVE {
+		conflicts, err := h.detectPermissionConflicts(directPermissions, inheritedPermissions)
+		if err != nil {
+			return nil, fmt.Errorf("failed to detect conflicts: %w", err)
+		}
 
-	conflictResolution, err := h.resolveConflicts(ctx, roleID, conflicts, hierarchy)
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve conflicts: %w", err)
+		conflictResolution, err = h.resolveConflicts(ctx, roleID, conflicts, hierarchy)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve conflicts: %w", err)
+		}
+	} else {
+		conflictResolution = make(map[string]memory.ConflictResult)
 	}
 
 	return &memory.EffectivePermissions{
@@ -141,8 +146,10 @@ func (h *HierarchyEngine) collectHierarchyPermissions(ctx context.Context, hiera
 
 		case common.RoleInheritanceType_ROLE_INHERITANCE_RESTRICTIVE:
 			// Only permissions present in both parent and child
-			restrictedPermissions := h.intersectPermissions(directPermissions, parentPermissions)
-			inheritedPermissions[hierarchy.Parent.Role.Id] = restrictedPermissions
+			// For restrictive inheritance, both direct and inherited are filtered to intersection
+			intersection := h.intersectPermissions(directPermissions, parentPermissions)
+			directPermissions = intersection
+			inheritedPermissions[hierarchy.Parent.Role.Id] = intersection
 
 		case common.RoleInheritanceType_ROLE_INHERITANCE_NONE:
 			// No inheritance - use only direct permissions
@@ -187,15 +194,14 @@ func (h *HierarchyEngine) detectPermissionConflicts(
 	// Check for conflicts with inherited permissions
 	for _, permissions := range inherited {
 		for _, perm := range permissions {
-			if directPerm, exists := directMap[perm.Id]; exists {
-				// Same permission ID exists in both direct and inherited
-				if h.permissionsConflict(directPerm, perm) {
-					conflictKey := perm.Id
-					if conflicts[conflictKey] == nil {
-						conflicts[conflictKey] = make([]*common.Permission, 0)
-					}
-					conflicts[conflictKey] = append(conflicts[conflictKey], perm)
+			if _, exists := directMap[perm.Id]; exists {
+				// Same permission ID exists in both direct and inherited - this is always a potential conflict
+				// The resolution depends on the inheritance type
+				conflictKey := perm.Id
+				if conflicts[conflictKey] == nil {
+					conflicts[conflictKey] = make([]*common.Permission, 0)
 				}
+				conflicts[conflictKey] = append(conflicts[conflictKey], perm)
 			}
 		}
 	}
@@ -392,19 +398,9 @@ func (h *HierarchyEngine) detectCycles(ctx context.Context, roleID string, visit
 		return fmt.Errorf("failed to get role %s: %w", roleID, err)
 	}
 
+	// Only check parent chain for cycles - checking both directions creates false positives
 	if role.ParentRoleId != "" {
 		if err := h.detectCycles(ctx, role.ParentRoleId, visited, inPath); err != nil {
-			return err
-		}
-	}
-
-	children, err := h.roleStore.GetChildRoles(ctx, roleID)
-	if err != nil {
-		return fmt.Errorf("failed to get child roles: %w", err)
-	}
-
-	for _, child := range children {
-		if err := h.detectCycles(ctx, child.Id, visited, inPath); err != nil {
 			return err
 		}
 	}

@@ -647,7 +647,10 @@ func (m *DefaultVersionMigrator) ExecuteMigration(ctx context.Context, path *Mig
 
 // executeMigrationSteps executes the migration steps
 func (m *DefaultVersionMigrator) executeMigrationSteps(execution *MigrationExecution) {
+	// Set status to running under lock protection
+	m.mu.Lock()
 	execution.Status = MigrationStatusRunning
+	m.mu.Unlock()
 	
 	defer func() {
 		endTime := time.Now()
@@ -681,28 +684,38 @@ func (m *DefaultVersionMigrator) executeMigrationSteps(execution *MigrationExecu
 		// Check if migration was cancelled
 		select {
 		case <-execution.Context.Done():
+			m.mu.Lock()
 			execution.Status = MigrationStatusCancelled
 			execution.ErrorMessage = "migration was cancelled"
+			m.mu.Unlock()
 			return
 		default:
 		}
 
+		m.mu.Lock()
 		execution.CurrentStep = i
 		execution.Progress = float64(i) / float64(totalSteps)
+		m.mu.Unlock()
 
 		stepResult := m.executeStep(execution.Context, step)
+		m.mu.Lock()
 		execution.CompletedSteps = append(execution.CompletedSteps, *stepResult)
+		m.mu.Unlock()
 
 		if stepResult.Status == StepStatusFailed {
+			m.mu.Lock()
 			execution.Status = MigrationStatusFailed
 			execution.ErrorMessage = fmt.Sprintf("step %s failed: %s", step.ID, stepResult.ErrorMessage)
+			m.mu.Unlock()
 			return
 		}
 	}
 
 	// Migration completed successfully
+	m.mu.Lock()
 	execution.Status = MigrationStatusCompleted
 	execution.Progress = 1.0
+	m.mu.Unlock()
 
 	// Record the version transition in the registry
 	var transitionType VersionTransitionType
@@ -794,11 +807,11 @@ func (m *DefaultVersionMigrator) executeStep(ctx context.Context, step Migration
 func (m *DefaultVersionMigrator) GetMigrationStatus(migrationID string) (*MigrationStatus, error) {
 	m.mu.RLock()
 	execution := m.activeMigrations[migrationID]
-	m.mu.RUnlock()
 	if execution == nil {
 		// Check historical migrations
 		for _, result := range m.migrationHistory {
 			if result.ID == migrationID {
+				m.mu.RUnlock()
 				return &MigrationStatus{
 					ID:          result.ID,
 					ModuleName:  result.Path.ModuleName,
@@ -812,27 +825,40 @@ func (m *DefaultVersionMigrator) GetMigrationStatus(migrationID string) (*Migrat
 				}, nil
 			}
 		}
+		m.mu.RUnlock()
 		return nil, fmt.Errorf("migration %s not found", migrationID)
 	}
 
-	elapsedTime := time.Since(execution.StartTime)
+	// Take a snapshot of execution fields while holding the lock
+	status := execution.Status
+	progress := execution.Progress
+	currentStep := execution.CurrentStep
+	startTime := execution.StartTime
+	pathID := execution.Path.ID
+	moduleName := execution.Path.ModuleName
+	fromVersion := execution.Path.FromVersion
+	toVersion := execution.Path.ToVersion
+	totalSteps := len(execution.Path.Steps)
+	m.mu.RUnlock()
+
+	elapsedTime := time.Since(startTime)
 	var estimatedETA time.Duration
 	
-	if execution.Progress > 0 {
-		totalEstimatedTime := time.Duration(float64(elapsedTime) / execution.Progress)
+	if progress > 0 {
+		totalEstimatedTime := time.Duration(float64(elapsedTime) / progress)
 		estimatedETA = totalEstimatedTime - elapsedTime
 	}
 
 	return &MigrationStatus{
-		ID:           execution.Path.ID,
-		ModuleName:   execution.Path.ModuleName,
-		FromVersion:  execution.Path.FromVersion,
-		ToVersion:    execution.Path.ToVersion,
-		Status:       execution.Status,
-		Progress:     execution.Progress,
-		CurrentStep:  execution.CurrentStep,
-		TotalSteps:   len(execution.Path.Steps),
-		StartTime:    execution.StartTime,
+		ID:           pathID,
+		ModuleName:   moduleName,
+		FromVersion:  fromVersion,
+		ToVersion:    toVersion,
+		Status:       status,
+		Progress:     progress,
+		CurrentStep:  currentStep,
+		TotalSteps:   totalSteps,
+		StartTime:    startTime,
 		ElapsedTime:  elapsedTime,
 		EstimatedETA: estimatedETA,
 	}, nil
@@ -842,10 +868,19 @@ func (m *DefaultVersionMigrator) GetMigrationStatus(migrationID string) (*Migrat
 func (m *DefaultVersionMigrator) ListActiveMigrations() ([]*MigrationStatus, error) {
 	var activeMigrations []*MigrationStatus
 	
+	// Take a snapshot of migration IDs while holding the lock
+	m.mu.RLock()
+	migrationIDs := make([]string, 0, len(m.activeMigrations))
 	for migrationID := range m.activeMigrations {
+		migrationIDs = append(migrationIDs, migrationID)
+	}
+	m.mu.RUnlock()
+	
+	// Get status for each migration (this safely handles concurrency)
+	for _, migrationID := range migrationIDs {
 		status, err := m.GetMigrationStatus(migrationID)
 		if err != nil {
-			continue // Skip migrations with errors
+			continue // Skip migrations with errors (may have completed while we were iterating)
 		}
 		activeMigrations = append(activeMigrations, status)
 	}

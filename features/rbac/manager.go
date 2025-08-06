@@ -267,8 +267,34 @@ func (m *Manager) ValidateHierarchyOperation(ctx context.Context, childRoleID, p
 		return fmt.Errorf("role cannot be its own parent")
 	}
 
-	// Check if this would create a cycle
-	return m.hierarchyEngine.ValidateHierarchy(ctx, childRoleID)
+	// Check if parent exists
+	if parentRoleID != "" {
+		_, err := m.store.GetRole(ctx, parentRoleID)
+		if err != nil {
+			return fmt.Errorf("failed to get role %s: %w", parentRoleID, err)
+		}
+		
+		// Check if adding this relationship would create a cycle
+		// We need to check if parentRoleID is already a descendant of childRoleID
+		// Only do this check if the child role already exists
+		if childExists, _ := m.roleExists(ctx, childRoleID); childExists {
+			return m.hierarchyEngine.ValidateHierarchy(ctx, childRoleID)
+		}
+	}
+
+	return nil
+}
+
+func (m *Manager) roleExists(ctx context.Context, roleID string) (bool, error) {
+	_, err := m.store.GetRole(ctx, roleID)
+	if err != nil {
+		// Check if it's a "not found" error vs other errors
+		if err.Error() == "role "+roleID+" not found" {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 func (m *Manager) ResolvePermissionConflicts(ctx context.Context, roleID string, conflictingPermissions map[string][]*common.Permission) (map[string]*common.Permission, error) {

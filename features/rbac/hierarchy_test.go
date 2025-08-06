@@ -54,9 +54,9 @@ func TestHierarchyEngine_ComputeEffectivePermissions(t *testing.T) {
 		{
 			name:                   "Role with restrictive inheritance",
 			roleID:                 "child.restrictive",
-			expectedDirectCount:    2,
-			expectedInheritedRoles: []string{"parent.role"},
-			expectedConflicts:      0,
+			expectedDirectCount:    1, // Only shared.permission intersection
+			expectedInheritedRoles: []string{"parent.role"}, // Inherited permissions are also restricted
+			expectedConflicts:      0, // No conflicts in restrictive mode
 			expectError:            false,
 		},
 		{
