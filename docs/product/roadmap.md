@@ -291,38 +291,31 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 
 #### v0.4.0 (Alpha) - Advanced Multi-Tenancy & Plugin Architecture
 
-- [ ] Implement advanced module system
-- [ ] Add support for module dependencies
-- [ ] Implement module lifecycle management
-- [ ] Add support for module versioning
-- [ ] Implement plugin architecture for integrations
-- [ ] Create integration registry system
-- [ ] Add support for external integration plugins
-- [ ] Implement advanced RBAC
-- [ ] Add support for role inheritance
-- [ ] Implement advanced multi-tenancy
-- [ ] Add support for tenant isolation
-- [ ] **M365 Multi-Tenant Enterprise App Support**
-  - [ ] Implement multi-tenant consent flow using `/common` endpoint
-  - [ ] Add support for delegated permissions model (beyond application permissions)
-  - [ ] Implement tenant discovery and management after admin consent
-  - [ ] Enhanced per-tenant token storage and refresh management
-  - [ ] CSP partner integration for MSP tenant access relationships
-- [ ] **Unified Directory Management Interface**
-  - [ ] Directory Service Abstraction Layer
-    - [ ] Universal Directory interface supporting Active Directory and Entra ID
-    - [ ] Extensible architecture designed for future directory service providers (post v1.0)
-    - [ ] User/Group/OU DNA collection and management
-    - [ ] Directory-agnostic CRUD operations
-  - [ ] Directory DNA Integration
-    - [ ] Each User/Group as DNA-enabled object (like Stewards)
-    - [ ] Directory drift detection for user lifecycle changes
-    - [ ] Hierarchical tenant-aware directory operations
-  - [ ] Microsoft Directory Integration
-    - [ ] Active Directory provider implementation (LDAP/AD APIs)
-    - [ ] Entra ID provider implementation (Graph API)
-    - [ ] Multi-tenant directory support for MSPs
-    - [ ] Unified Microsoft identity management across on-premises and cloud
+**Status**: 🚧 IN PROGRESS - 128 story points across 14 stories (Issues #110-123)
+
+**Goal**: Transform CFGMS from foundational architecture to production-ready enterprise platform with advanced multi-tenancy, unified directory management, and comprehensive module system.
+
+**✅ Epic 1: Advanced Module System (21 story points) - Issues #110-112**
+- [ ] **Module Dependency Management** (Issue #110) - 8 points
+- [ ] **Module Lifecycle Management** (Issue #111) - 8 points
+- [ ] **Module Versioning System** (Issue #112) - 5 points
+
+**✅ Epic 2: Advanced RBAC (21 story points) - Issues #113-115**
+- [ ] **Role Inheritance System** (Issue #113) - 8 points
+- [ ] **Advanced Permission Management** (Issue #114) - 8 points
+- [ ] **Enhanced Multi-Tenant Security** (Issue #115) - 5 points
+
+**✅ Epic 3: M365 Multi-Tenant Enterprise App Support (39 story points) - Issues #116-119**
+- [ ] **Multi-Tenant Consent Flow Implementation** (Issue #116) - 13 points
+- [ ] **Delegated Permissions Model** (Issue #117) - 8 points
+- [ ] **Enhanced Tenant Management** (Issue #118) - 8 points
+- [ ] **Per-Tenant Token Storage and Management** (Issue #119) - 10 points
+
+**✅ Epic 4: Unified Directory Management Interface (47 story points) - Issues #120-123**
+- [ ] **Directory Service Abstraction Layer** (Issue #120) - 15 points
+- [ ] **Directory DNA Integration** (Issue #121) - 13 points
+- [ ] **Active Directory Provider Implementation** (Issue #122) - 10 points
+- [ ] **Entra ID Provider Implementation** (Issue #123) - 9 points
 
 #### v0.5.0 (Beta) - Advanced Workflows & Core Readiness
 
@@ -357,7 +350,7 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 
 #### v0.8.0 Go public
 
-- [ ] Re-enable GitHub Actions workflows (move workflows-disabled/ back to workflows/)
+- [ ] Re-enable GitHub Actions workflows (move workflows-disabled/ back to workflows/) (issue 109)
 - [ ] Set Up GitHub Actions and Acceptance Tests #15
 - [ ] Set up github CI CD pipeline  
 - [ ] Review Automated secure code scanning tooling implementation
