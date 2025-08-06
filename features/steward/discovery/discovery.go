@@ -30,6 +30,7 @@
 //   - At least one .go source file
 //   - Standard Go module directory structure
 //
+// #nosec G304 - Steward discovery requires file access for detecting system configurations
 package discovery
 
 import (

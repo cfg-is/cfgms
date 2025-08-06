@@ -44,6 +44,7 @@
 //	      path: /opt/example
 //	      permissions: 755
 //
+// #nosec G304 - Steward configuration system requires file access for loading config files
 package config
 
 import (

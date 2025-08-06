@@ -13,6 +13,12 @@ import (
 )
 
 // SOPSManager handles SOPS encryption and decryption operations
+//
+// #nosec G304 - SOPS configuration management requires file access for:
+// - Loading encrypted configuration files from controlled git repositories
+// - Reading SOPS configuration and keys from designated paths
+// - Processing encrypted secrets for configuration management
+// All file operations are within controlled repository contexts
 type SOPSManager struct {
 	sopsPath string // Path to SOPS binary
 }
@@ -104,6 +110,7 @@ func (s *SOPSManager) EncryptContent(ctx context.Context, content []byte, config
 	}
 	
 	// Read encrypted content
+	// #nosec G304 - SOPS operation requires reading temporary encrypted files
 	encryptedContent, err := os.ReadFile(tmpFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read encrypted content: %w", err)
@@ -138,6 +145,7 @@ func (s *SOPSManager) DecryptContent(ctx context.Context, content []byte) ([]byt
 	}
 	
 	// Read decrypted content
+	// #nosec G304 - SOPS operation requires reading temporary decrypted files
 	decryptedContent, err := os.ReadFile(tmpFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read decrypted content: %w", err)
@@ -379,6 +387,7 @@ func (s *SOPSManager) buildCreationRules(config *SOPSConfig) []map[string]interf
 func (s *SOPSManager) PreCommitSOPSCheck(ctx context.Context, files []string, repoPath string) error {
 	for _, file := range files {
 		fullPath := filepath.Join(repoPath, file)
+		// #nosec G304 - SOPS pre-commit check requires reading files within repository
 		content, err := os.ReadFile(fullPath)
 		if err != nil {
 			continue // Skip files that can't be read

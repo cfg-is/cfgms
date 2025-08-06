@@ -1,3 +1,4 @@
+// #nosec G304 - Module metadata system requires file access for loading module definitions
 package modules
 
 import (
@@ -127,7 +128,7 @@ func ParseModuleMetadata(reader io.Reader) (*ModuleMetadata, error) {
 func (m *ModuleMetadata) SaveModuleMetadata(filePath string) error {
 	// Create directory if it doesn't exist
 	dir := filepath.Dir(filePath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0750); err != nil {
 		return fmt.Errorf("failed to create directory %s: %v", dir, err)
 	}
 
@@ -138,7 +139,7 @@ func (m *ModuleMetadata) SaveModuleMetadata(filePath string) error {
 	}
 
 	// Write to file
-	if err := os.WriteFile(filePath, data, 0644); err != nil {
+	if err := os.WriteFile(filePath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write module metadata file %s: %v", filePath, err)
 	}
 

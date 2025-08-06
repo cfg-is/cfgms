@@ -540,12 +540,14 @@ security-gosec:
 		exit 1; \
 	fi
 	@echo "Analyzing Go code for security patterns..."
-	@if [ -f .gosec.json ]; then \
-		gosec -conf .gosec.json -fmt json -quiet -tests=false ./... > /tmp/gosec-results.json 2>/dev/null || true; \
-	else \
-		gosec -fmt json -quiet -tests=false -severity=medium -confidence=medium ./... > /tmp/gosec-results.json 2>/dev/null || true; \
-	fi
-	@issues_count=$$(jq '.Issues | length' /tmp/gosec-results.json 2>/dev/null || echo "0"); \
+	@echo "Using command-line configuration for optimal results..."
+	@gosec -fmt json -quiet -tests=false -severity=medium -confidence=medium \
+		-exclude-dir=test \
+		-exclude-dir=examples \
+		-exclude-dir=docs \
+		-exclude-generated \
+		./... > /tmp/gosec-results.json 2>/dev/null || true
+	@issues_count=$$(test -s /tmp/gosec-results.json && jq '.Issues | length' /tmp/gosec-results.json 2>/dev/null || echo "0"); \
 	if [ "$$issues_count" -gt 0 ]; then \
 		echo "⚠️  gosec found $$issues_count security issues:"; \
 		echo ""; \

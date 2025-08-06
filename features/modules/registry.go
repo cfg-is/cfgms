@@ -98,7 +98,9 @@ func (r *ModuleRegistry) UnregisterModule(name string) error {
 	tempGraph := NewDependencyGraph()
 	for _, metadata := range r.modules {
 		if metadata.Name != name { // Skip the module we're about to remove
-			tempGraph.AddModule(metadata)
+			if err := tempGraph.AddModule(metadata); err != nil {
+				return fmt.Errorf("failed to rebuild dependency graph: %w", err)
+			}
 		}
 	}
 

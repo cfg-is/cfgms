@@ -41,6 +41,7 @@ func (m *DefaultHookManager) InstallHooks(ctx context.Context, repoPath string) 
 	// Install pre-commit hook
 	preCommitHook := m.generatePreCommitHook()
 	preCommitPath := filepath.Join(hooksDir, "pre-commit")
+	// #nosec G306 - Git hooks must be executable (0700) to function properly
 	if err := os.WriteFile(preCommitPath, []byte(preCommitHook), 0700); err != nil {
 		return fmt.Errorf("failed to install pre-commit hook: %w", err)
 	}
@@ -48,6 +49,7 @@ func (m *DefaultHookManager) InstallHooks(ctx context.Context, repoPath string) 
 	// Install pre-push hook
 	prePushHook := m.generatePrePushHook()
 	prePushPath := filepath.Join(hooksDir, "pre-push")
+	// #nosec G306 - Git hooks must be executable (0700) to function properly
 	if err := os.WriteFile(prePushPath, []byte(prePushHook), 0700); err != nil {
 		return fmt.Errorf("failed to install pre-push hook: %w", err)
 	}
@@ -62,6 +64,7 @@ func (m *DefaultHookManager) RunPreCommitHooks(ctx context.Context, repoPath str
 		if m.isConfigurationFile(file) {
 			// Read the file
 			fullPath := filepath.Join(repoPath, file)
+			// #nosec G304 - Git hook validation requires reading committed files within repository
 			content, err := os.ReadFile(fullPath)
 			if err != nil {
 				return fmt.Errorf("failed to read file %s: %w", file, err)

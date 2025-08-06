@@ -2,29 +2,42 @@ package script
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // Executor handles cross-platform script execution
 type Executor struct {
 	config *ScriptConfig
+	logger logging.Logger
 }
 
 // NewExecutor creates a new script executor with the given configuration
 func NewExecutor(config *ScriptConfig) *Executor {
 	return &Executor{
 		config: config,
+		logger: logging.NewLogger("info"),
 	}
 }
 
 // Execute runs the script and returns the execution result
 func (e *Executor) Execute(ctx context.Context) (*ExecutionResult, error) {
 	startTime := time.Now()
+
+	// Enhanced security monitoring: Log script execution details
+	e.logger.Info("Script execution initiated",
+		"shell", e.config.Shell,
+		"working_dir", e.config.WorkingDir,
+		"timeout", e.config.Timeout,
+		"content_hash", hashScriptContent(e.config.Content),
+		"env_vars", len(e.config.Environment))
 
 	// Create timeout context
 	timeoutCtx, cancel := context.WithTimeout(ctx, e.config.Timeout)
@@ -150,6 +163,12 @@ func (e *Executor) Execute(ctx context.Context) (*ExecutionResult, error) {
 
 		return result, fmt.Errorf("script execution timed out after %v", e.config.Timeout)
 	}
+}
+
+// hashScriptContent creates a secure hash of script content for audit logging
+func hashScriptContent(content string) string {
+	hash := sha256.Sum256([]byte(content))
+	return fmt.Sprintf("%x", hash[:8]) // First 8 bytes for logging
 }
 
 // buildCommand creates the appropriate command for the shell type and platform
