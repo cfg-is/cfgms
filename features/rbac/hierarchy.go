@@ -209,27 +209,6 @@ func (h *HierarchyEngine) detectPermissionConflicts(
 	return conflicts, nil
 }
 
-// permissionsConflict checks if two permissions with the same ID have conflicting definitions
-func (h *HierarchyEngine) permissionsConflict(perm1, perm2 *common.Permission) bool {
-	// Permissions conflict if they have different resource types or actions
-	if perm1.ResourceType != perm2.ResourceType {
-		return true
-	}
-
-	// Check if actions differ
-	actions1 := make(map[string]bool)
-	for _, action := range perm1.Actions {
-		actions1[action] = true
-	}
-
-	for _, action := range perm2.Actions {
-		if !actions1[action] {
-			return true
-		}
-	}
-
-	return len(perm1.Actions) != len(perm2.Actions)
-}
 
 // resolveConflicts resolves permission conflicts based on inheritance type and role hierarchy
 func (h *HierarchyEngine) resolveConflicts(
