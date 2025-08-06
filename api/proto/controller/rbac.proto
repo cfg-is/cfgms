@@ -34,6 +34,14 @@ service RBACService {
   // Permission Checking
   rpc CheckPermission(CheckPermissionRequest) returns (CheckPermissionResponse);
   rpc GetSubjectPermissions(GetSubjectPermissionsRequest) returns (GetSubjectPermissionsResponse);
+  
+  // Role Hierarchy Management
+  rpc CreateRoleWithParent(CreateRoleWithParentRequest) returns (CreateRoleWithParentResponse);
+  rpc GetRoleHierarchy(GetRoleHierarchyRequest) returns (GetRoleHierarchyResponse);
+  rpc SetRoleParent(SetRoleParentRequest) returns (SetRoleParentResponse);
+  rpc RemoveRoleParent(RemoveRoleParentRequest) returns (RemoveRoleParentResponse);
+  rpc ComputeEffectivePermissions(ComputeEffectivePermissionsRequest) returns (ComputeEffectivePermissionsResponse);
+  rpc ValidateRoleHierarchy(ValidateRoleHierarchyRequest) returns (ValidateRoleHierarchyResponse);
 }
 
 // Permission Management Messages
@@ -185,4 +193,86 @@ message GetSubjectPermissionsRequest {
 
 message GetSubjectPermissionsResponse {
   repeated cfgms.api.common.Permission permissions = 1;
+}
+
+// Role Hierarchy Management Messages
+
+message CreateRoleWithParentRequest {
+  cfgms.api.common.Role role = 1;
+  string parent_role_id = 2;
+  cfgms.api.common.RoleInheritanceType inheritance_type = 3;
+}
+
+message CreateRoleWithParentResponse {
+  cfgms.api.common.Role role = 1;
+}
+
+message GetRoleHierarchyRequest {
+  string role_id = 1;
+  int32 max_depth = 2; // Optional depth limit
+}
+
+message RoleHierarchy {
+  cfgms.api.common.Role role = 1;
+  RoleHierarchy parent = 2;
+  repeated RoleHierarchy children = 3;
+  int32 depth = 4;
+}
+
+message GetRoleHierarchyResponse {
+  RoleHierarchy hierarchy = 1;
+}
+
+message SetRoleParentRequest {
+  string role_id = 1;
+  string parent_role_id = 2;
+  cfgms.api.common.RoleInheritanceType inheritance_type = 3;
+}
+
+message SetRoleParentResponse {
+  bool success = 1;
+}
+
+message RemoveRoleParentRequest {
+  string role_id = 1;
+}
+
+message RemoveRoleParentResponse {
+  bool success = 1;
+}
+
+message ComputeEffectivePermissionsRequest {
+  string role_id = 1;
+}
+
+message EffectivePermissions {
+  string role_id = 1;
+  repeated cfgms.api.common.Permission direct_permissions = 2;
+  map<string, PermissionList> inherited_permissions = 3; // role_id -> permissions
+  map<string, ConflictResult> conflict_resolution = 4;
+  int64 computed_at = 5; // Unix timestamp
+}
+
+message PermissionList {
+  repeated cfgms.api.common.Permission permissions = 1;
+}
+
+message ConflictResult {
+  cfgms.api.common.Permission permission = 1;
+  string source_role_id = 2;
+  string resolution = 3; // "override", "merge", "restrict"
+  repeated string conflicted_with = 4;
+}
+
+message ComputeEffectivePermissionsResponse {
+  EffectivePermissions effective_permissions = 1;
+}
+
+message ValidateRoleHierarchyRequest {
+  string role_id = 1;
+}
+
+message ValidateRoleHierarchyResponse {
+  bool valid = 1;
+  repeated string validation_errors = 2;
 }

@@ -77,6 +77,59 @@ func (SubjectType) EnumDescriptor() ([]byte, []int) {
 	return file_common_rbac_proto_rawDescGZIP(), []int{0}
 }
 
+// RoleInheritanceType defines how a role inherits from its parent
+type RoleInheritanceType int32
+
+const (
+	RoleInheritanceType_ROLE_INHERITANCE_NONE        RoleInheritanceType = 0 // No inheritance (standalone role)
+	RoleInheritanceType_ROLE_INHERITANCE_ADDITIVE    RoleInheritanceType = 1 // Inherits all parent permissions + own permissions
+	RoleInheritanceType_ROLE_INHERITANCE_OVERRIDE    RoleInheritanceType = 2 // Own permissions override conflicting parent permissions
+	RoleInheritanceType_ROLE_INHERITANCE_RESTRICTIVE RoleInheritanceType = 3 // Only permissions present in both parent and child
+)
+
+// Enum value maps for RoleInheritanceType.
+var (
+	RoleInheritanceType_name = map[int32]string{
+		0: "ROLE_INHERITANCE_NONE",
+		1: "ROLE_INHERITANCE_ADDITIVE",
+		2: "ROLE_INHERITANCE_OVERRIDE",
+		3: "ROLE_INHERITANCE_RESTRICTIVE",
+	}
+	RoleInheritanceType_value = map[string]int32{
+		"ROLE_INHERITANCE_NONE":        0,
+		"ROLE_INHERITANCE_ADDITIVE":    1,
+		"ROLE_INHERITANCE_OVERRIDE":    2,
+		"ROLE_INHERITANCE_RESTRICTIVE": 3,
+	}
+)
+
+func (x RoleInheritanceType) Enum() *RoleInheritanceType {
+	p := new(RoleInheritanceType)
+	*p = x
+	return p
+}
+
+func (x RoleInheritanceType) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (RoleInheritanceType) Descriptor() protoreflect.EnumDescriptor {
+	return file_common_rbac_proto_enumTypes[1].Descriptor()
+}
+
+func (RoleInheritanceType) Type() protoreflect.EnumType {
+	return &file_common_rbac_proto_enumTypes[1]
+}
+
+func (x RoleInheritanceType) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use RoleInheritanceType.Descriptor instead.
+func (RoleInheritanceType) EnumDescriptor() ([]byte, []int) {
+	return file_common_rbac_proto_rawDescGZIP(), []int{1}
+}
+
 // Permission represents a specific action that can be performed
 type Permission struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -154,19 +207,22 @@ func (x *Permission) GetActions() []string {
 	return nil
 }
 
-// Role represents a collection of permissions
+// Role represents a collection of permissions with optional hierarchy support
 type Role struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`                                            // Unique role identifier
-	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`                                        // Human-readable role name
-	Description   string                 `protobuf:"bytes,3,opt,name=description,proto3" json:"description,omitempty"`                          // Role description
-	PermissionIds []string               `protobuf:"bytes,4,rep,name=permission_ids,json=permissionIds,proto3" json:"permission_ids,omitempty"` // Permission IDs assigned to this role
-	IsSystemRole  bool                   `protobuf:"varint,5,opt,name=is_system_role,json=isSystemRole,proto3" json:"is_system_role,omitempty"` // Whether this is a built-in system role
-	TenantId      string                 `protobuf:"bytes,6,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`                // Tenant scope (empty for system-wide roles)
-	CreatedAt     int64                  `protobuf:"varint,7,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`            // Creation timestamp
-	UpdatedAt     int64                  `protobuf:"varint,8,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`            // Last update timestamp
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Id              string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`                                                                                              // Unique role identifier
+	Name            string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`                                                                                          // Human-readable role name
+	Description     string                 `protobuf:"bytes,3,opt,name=description,proto3" json:"description,omitempty"`                                                                            // Role description
+	PermissionIds   []string               `protobuf:"bytes,4,rep,name=permission_ids,json=permissionIds,proto3" json:"permission_ids,omitempty"`                                                   // Permission IDs assigned to this role
+	IsSystemRole    bool                   `protobuf:"varint,5,opt,name=is_system_role,json=isSystemRole,proto3" json:"is_system_role,omitempty"`                                                   // Whether this is a built-in system role
+	TenantId        string                 `protobuf:"bytes,6,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`                                                                  // Tenant scope (empty for system-wide roles)
+	CreatedAt       int64                  `protobuf:"varint,7,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`                                                              // Creation timestamp
+	UpdatedAt       int64                  `protobuf:"varint,8,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`                                                              // Last update timestamp
+	ParentRoleId    string                 `protobuf:"bytes,9,opt,name=parent_role_id,json=parentRoleId,proto3" json:"parent_role_id,omitempty"`                                                    // Parent role ID for inheritance (optional)
+	ChildRoleIds    []string               `protobuf:"bytes,10,rep,name=child_role_ids,json=childRoleIds,proto3" json:"child_role_ids,omitempty"`                                                   // Child role IDs for hierarchy traversal
+	InheritanceType RoleInheritanceType    `protobuf:"varint,11,opt,name=inheritance_type,json=inheritanceType,proto3,enum=cfgms.api.common.RoleInheritanceType" json:"inheritance_type,omitempty"` // How this role inherits from parent
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *Role) Reset() {
@@ -253,6 +309,27 @@ func (x *Role) GetUpdatedAt() int64 {
 		return x.UpdatedAt
 	}
 	return 0
+}
+
+func (x *Role) GetParentRoleId() string {
+	if x != nil {
+		return x.ParentRoleId
+	}
+	return ""
+}
+
+func (x *Role) GetChildRoleIds() []string {
+	if x != nil {
+		return x.ChildRoleIds
+	}
+	return nil
+}
+
+func (x *Role) GetInheritanceType() RoleInheritanceType {
+	if x != nil {
+		return x.InheritanceType
+	}
+	return RoleInheritanceType_ROLE_INHERITANCE_NONE
 }
 
 // Subject represents an entity that can have roles assigned
@@ -691,7 +768,7 @@ const file_common_rbac_proto_rawDesc = "" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x03 \x01(\tR\vdescription\x12#\n" +
 	"\rresource_type\x18\x04 \x01(\tR\fresourceType\x12\x18\n" +
-	"\aactions\x18\x05 \x03(\tR\aactions\"\xf4\x01\n" +
+	"\aactions\x18\x05 \x03(\tR\aactions\"\x92\x03\n" +
 	"\x04Role\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12 \n" +
@@ -702,7 +779,11 @@ const file_common_rbac_proto_rawDesc = "" +
 	"\n" +
 	"created_at\x18\a \x01(\x03R\tcreatedAt\x12\x1d\n" +
 	"\n" +
-	"updated_at\x18\b \x01(\x03R\tupdatedAt\"\x8c\x03\n" +
+	"updated_at\x18\b \x01(\x03R\tupdatedAt\x12$\n" +
+	"\x0eparent_role_id\x18\t \x01(\tR\fparentRoleId\x12$\n" +
+	"\x0echild_role_ids\x18\n" +
+	" \x03(\tR\fchildRoleIds\x12P\n" +
+	"\x10inheritance_type\x18\v \x01(\x0e2%.cfgms.api.common.RoleInheritanceTypeR\x0finheritanceType\"\x8c\x03\n" +
 	"\aSubject\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x121\n" +
 	"\x04type\x18\x02 \x01(\x0e2\x1d.cfgms.api.common.SubjectTypeR\x04type\x12!\n" +
@@ -768,7 +849,12 @@ const file_common_rbac_proto_rawDesc = "" +
 	"\x11SUBJECT_TYPE_USER\x10\x01\x12\x18\n" +
 	"\x14SUBJECT_TYPE_SERVICE\x10\x02\x12\x18\n" +
 	"\x14SUBJECT_TYPE_STEWARD\x10\x03\x12\x1b\n" +
-	"\x17SUBJECT_TYPE_API_CLIENT\x10\x04B)Z'github.com/cfgis/cfgms/api/proto/commonb\x06proto3"
+	"\x17SUBJECT_TYPE_API_CLIENT\x10\x04*\x90\x01\n" +
+	"\x13RoleInheritanceType\x12\x19\n" +
+	"\x15ROLE_INHERITANCE_NONE\x10\x00\x12\x1d\n" +
+	"\x19ROLE_INHERITANCE_ADDITIVE\x10\x01\x12\x1d\n" +
+	"\x19ROLE_INHERITANCE_OVERRIDE\x10\x02\x12 \n" +
+	"\x1cROLE_INHERITANCE_RESTRICTIVE\x10\x03B)Z'github.com/cfgis/cfgms/api/proto/commonb\x06proto3"
 
 var (
 	file_common_rbac_proto_rawDescOnce sync.Once
@@ -782,33 +868,35 @@ func file_common_rbac_proto_rawDescGZIP() []byte {
 	return file_common_rbac_proto_rawDescData
 }
 
-var file_common_rbac_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_common_rbac_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
 var file_common_rbac_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
 var file_common_rbac_proto_goTypes = []any{
 	(SubjectType)(0),             // 0: cfgms.api.common.SubjectType
-	(*Permission)(nil),           // 1: cfgms.api.common.Permission
-	(*Role)(nil),                 // 2: cfgms.api.common.Role
-	(*Subject)(nil),              // 3: cfgms.api.common.Subject
-	(*RoleAssignment)(nil),       // 4: cfgms.api.common.RoleAssignment
-	(*AccessRequest)(nil),        // 5: cfgms.api.common.AccessRequest
-	(*AccessResponse)(nil),       // 6: cfgms.api.common.AccessResponse
-	(*AuthorizationContext)(nil), // 7: cfgms.api.common.AuthorizationContext
-	nil,                          // 8: cfgms.api.common.Subject.AttributesEntry
-	nil,                          // 9: cfgms.api.common.AccessRequest.ContextEntry
-	nil,                          // 10: cfgms.api.common.AuthorizationContext.EnvironmentEntry
-	nil,                          // 11: cfgms.api.common.AuthorizationContext.ResourceAttributesEntry
+	(RoleInheritanceType)(0),     // 1: cfgms.api.common.RoleInheritanceType
+	(*Permission)(nil),           // 2: cfgms.api.common.Permission
+	(*Role)(nil),                 // 3: cfgms.api.common.Role
+	(*Subject)(nil),              // 4: cfgms.api.common.Subject
+	(*RoleAssignment)(nil),       // 5: cfgms.api.common.RoleAssignment
+	(*AccessRequest)(nil),        // 6: cfgms.api.common.AccessRequest
+	(*AccessResponse)(nil),       // 7: cfgms.api.common.AccessResponse
+	(*AuthorizationContext)(nil), // 8: cfgms.api.common.AuthorizationContext
+	nil,                          // 9: cfgms.api.common.Subject.AttributesEntry
+	nil,                          // 10: cfgms.api.common.AccessRequest.ContextEntry
+	nil,                          // 11: cfgms.api.common.AuthorizationContext.EnvironmentEntry
+	nil,                          // 12: cfgms.api.common.AuthorizationContext.ResourceAttributesEntry
 }
 var file_common_rbac_proto_depIdxs = []int32{
-	0,  // 0: cfgms.api.common.Subject.type:type_name -> cfgms.api.common.SubjectType
-	8,  // 1: cfgms.api.common.Subject.attributes:type_name -> cfgms.api.common.Subject.AttributesEntry
-	9,  // 2: cfgms.api.common.AccessRequest.context:type_name -> cfgms.api.common.AccessRequest.ContextEntry
-	10, // 3: cfgms.api.common.AuthorizationContext.environment:type_name -> cfgms.api.common.AuthorizationContext.EnvironmentEntry
-	11, // 4: cfgms.api.common.AuthorizationContext.resource_attributes:type_name -> cfgms.api.common.AuthorizationContext.ResourceAttributesEntry
-	5,  // [5:5] is the sub-list for method output_type
-	5,  // [5:5] is the sub-list for method input_type
-	5,  // [5:5] is the sub-list for extension type_name
-	5,  // [5:5] is the sub-list for extension extendee
-	0,  // [0:5] is the sub-list for field type_name
+	1,  // 0: cfgms.api.common.Role.inheritance_type:type_name -> cfgms.api.common.RoleInheritanceType
+	0,  // 1: cfgms.api.common.Subject.type:type_name -> cfgms.api.common.SubjectType
+	9,  // 2: cfgms.api.common.Subject.attributes:type_name -> cfgms.api.common.Subject.AttributesEntry
+	10, // 3: cfgms.api.common.AccessRequest.context:type_name -> cfgms.api.common.AccessRequest.ContextEntry
+	11, // 4: cfgms.api.common.AuthorizationContext.environment:type_name -> cfgms.api.common.AuthorizationContext.EnvironmentEntry
+	12, // 5: cfgms.api.common.AuthorizationContext.resource_attributes:type_name -> cfgms.api.common.AuthorizationContext.ResourceAttributesEntry
+	6,  // [6:6] is the sub-list for method output_type
+	6,  // [6:6] is the sub-list for method input_type
+	6,  // [6:6] is the sub-list for extension type_name
+	6,  // [6:6] is the sub-list for extension extendee
+	0,  // [0:6] is the sub-list for field type_name
 }
 
 func init() { file_common_rbac_proto_init() }
@@ -821,7 +909,7 @@ func file_common_rbac_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_common_rbac_proto_rawDesc), len(file_common_rbac_proto_rawDesc)),
-			NumEnums:      1,
+			NumEnums:      2,
 			NumMessages:   11,
 			NumExtensions: 0,
 			NumServices:   0,

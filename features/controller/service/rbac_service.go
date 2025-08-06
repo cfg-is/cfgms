@@ -310,3 +310,165 @@ func (s *RBACService) GetSubjectPermissions(ctx context.Context, req *controller
 		Permissions: permissions,
 	}, nil
 }
+
+// Role Hierarchy Management
+
+func (s *RBACService) CreateRoleWithParent(ctx context.Context, req *controller.CreateRoleWithParentRequest) (*controller.CreateRoleWithParentResponse, error) {
+	if req.Role == nil {
+		return nil, status.Error(codes.InvalidArgument, "role is required")
+	}
+
+	if req.Role.Id == "" {
+		return nil, status.Error(codes.InvalidArgument, "role.id is required")
+	}
+
+	err := s.rbacManager.CreateRoleWithParent(ctx, req.Role, req.ParentRoleId, req.InheritanceType)
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	return &controller.CreateRoleWithParentResponse{
+		Role: req.Role,
+	}, nil
+}
+
+func (s *RBACService) GetRoleHierarchy(ctx context.Context, req *controller.GetRoleHierarchyRequest) (*controller.GetRoleHierarchyResponse, error) {
+	if req.RoleId == "" {
+		return nil, status.Error(codes.InvalidArgument, "role_id is required")
+	}
+
+	hierarchy, err := s.rbacManager.GetRoleHierarchy(ctx, req.RoleId)
+	if err != nil {
+		return nil, status.Error(codes.NotFound, err.Error())
+	}
+
+	// Convert to protobuf hierarchy
+	protoHierarchy := s.convertToProtoHierarchy(hierarchy)
+
+	return &controller.GetRoleHierarchyResponse{
+		Hierarchy: protoHierarchy,
+	}, nil
+}
+
+func (s *RBACService) SetRoleParent(ctx context.Context, req *controller.SetRoleParentRequest) (*controller.SetRoleParentResponse, error) {
+	if req.RoleId == "" {
+		return nil, status.Error(codes.InvalidArgument, "role_id is required")
+	}
+
+	err := s.rbacManager.SetRoleParent(ctx, req.RoleId, req.ParentRoleId, req.InheritanceType)
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	return &controller.SetRoleParentResponse{
+		Success: true,
+	}, nil
+}
+
+func (s *RBACService) RemoveRoleParent(ctx context.Context, req *controller.RemoveRoleParentRequest) (*controller.RemoveRoleParentResponse, error) {
+	if req.RoleId == "" {
+		return nil, status.Error(codes.InvalidArgument, "role_id is required")
+	}
+
+	err := s.rbacManager.RemoveRoleParent(ctx, req.RoleId)
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	return &controller.RemoveRoleParentResponse{
+		Success: true,
+	}, nil
+}
+
+func (s *RBACService) ComputeEffectivePermissions(ctx context.Context, req *controller.ComputeEffectivePermissionsRequest) (*controller.ComputeEffectivePermissionsResponse, error) {
+	if req.RoleId == "" {
+		return nil, status.Error(codes.InvalidArgument, "role_id is required")
+	}
+
+	effectivePerms, err := s.rbacManager.ComputeRolePermissions(ctx, req.RoleId)
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	// Convert to protobuf format
+	protoEffectivePerms := s.convertToProtoEffectivePermissions(effectivePerms)
+
+	return &controller.ComputeEffectivePermissionsResponse{
+		EffectivePermissions: protoEffectivePerms,
+	}, nil
+}
+
+func (s *RBACService) ValidateRoleHierarchy(ctx context.Context, req *controller.ValidateRoleHierarchyRequest) (*controller.ValidateRoleHierarchyResponse, error) {
+	if req.RoleId == "" {
+		return nil, status.Error(codes.InvalidArgument, "role_id is required")
+	}
+
+	err := s.rbacManager.ValidateRoleHierarchy(ctx, req.RoleId)
+	if err != nil {
+		return &controller.ValidateRoleHierarchyResponse{
+			Valid: false,
+			ValidationErrors: []string{err.Error()},
+		}, nil
+	}
+
+	return &controller.ValidateRoleHierarchyResponse{
+		Valid: true,
+		ValidationErrors: []string{},
+	}, nil
+}
+
+// Helper methods for type conversion
+
+func (s *RBACService) convertToProtoHierarchy(hierarchy *rbac.RoleHierarchy) *controller.RoleHierarchy {
+	if hierarchy == nil {
+		return nil
+	}
+
+	protoHierarchy := &controller.RoleHierarchy{
+		Role:  hierarchy.Role,
+		Depth: int32(hierarchy.Depth),
+	}
+
+	if hierarchy.Parent != nil {
+		protoHierarchy.Parent = s.convertToProtoHierarchy(hierarchy.Parent)
+	}
+
+	for _, child := range hierarchy.Children {
+		protoHierarchy.Children = append(protoHierarchy.Children, s.convertToProtoHierarchy(child))
+	}
+
+	return protoHierarchy
+}
+
+func (s *RBACService) convertToProtoEffectivePermissions(effectivePerms *rbac.EffectivePermissions) *controller.EffectivePermissions {
+	if effectivePerms == nil {
+		return nil
+	}
+
+	protoEffective := &controller.EffectivePermissions{
+		RoleId:            effectivePerms.RoleID,
+		DirectPermissions: effectivePerms.DirectPermissions,
+		InheritedPermissions: make(map[string]*controller.PermissionList),
+		ConflictResolution: make(map[string]*controller.ConflictResult),
+		ComputedAt: effectivePerms.ComputedAt.Unix(),
+	}
+
+	// Convert inherited permissions
+	for roleID, permissions := range effectivePerms.InheritedPermissions {
+		protoEffective.InheritedPermissions[roleID] = &controller.PermissionList{
+			Permissions: permissions,
+		}
+	}
+
+	// Convert conflict resolution
+	for permID, conflict := range effectivePerms.ConflictResolution {
+		protoEffective.ConflictResolution[permID] = &controller.ConflictResult{
+			Permission:     conflict.Permission,
+			SourceRoleId:   conflict.SourceRoleID,
+			Resolution:     conflict.Resolution,
+			ConflictedWith: conflict.ConflictedWith,
+		}
+	}
+
+	return protoEffective
+}

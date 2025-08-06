@@ -2,6 +2,7 @@ package rbac
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/rbac/memory"
@@ -9,18 +10,21 @@ import (
 
 // Manager provides a complete RBAC implementation
 type Manager struct {
-	store  *memory.Store
-	engine *AuthEngine
+	store           *memory.Store
+	engine          *AuthEngine
+	hierarchyEngine *HierarchyEngine
 }
 
 // NewManager creates a new RBAC manager with in-memory storage
 func NewManager() *Manager {
 	store := memory.NewStore()
 	engine := NewAuthEngine(store, store, store, store)
+	hierarchyEngine := NewHierarchyEngine(store, store)
 	
 	return &Manager{
-		store:  store,
-		engine: engine,
+		store:           store,
+		engine:          engine,
+		hierarchyEngine: hierarchyEngine,
 	}
 }
 
@@ -221,6 +225,127 @@ func (m *Manager) CreateServiceSubject(ctx context.Context, serviceID, serviceNa
 	}
 
 	return nil
+}
+
+// Hierarchy Management Operations
+
+func (m *Manager) ComputeRolePermissions(ctx context.Context, roleID string) (*memory.EffectivePermissions, error) {
+	return m.hierarchyEngine.ComputeEffectivePermissions(ctx, roleID)
+}
+
+func (m *Manager) CreateRoleWithParent(ctx context.Context, role *common.Role, parentRoleID string, inheritanceType common.RoleInheritanceType) error {
+	// Validate hierarchy operation first
+	if parentRoleID != "" {
+		if err := m.ValidateHierarchyOperation(ctx, role.Id, parentRoleID); err != nil {
+			return fmt.Errorf("invalid hierarchy operation: %w", err)
+		}
+	}
+
+	// Set parent relationship
+	role.ParentRoleId = parentRoleID
+	role.InheritanceType = inheritanceType
+
+	// Create the role
+	if err := m.CreateRole(ctx, role); err != nil {
+		return err
+	}
+
+	// Set the parent relationship in store
+	if parentRoleID != "" {
+		return m.store.SetRoleParent(ctx, role.Id, parentRoleID, inheritanceType)
+	}
+
+	return nil
+}
+
+func (m *Manager) GetRoleHierarchyTree(ctx context.Context, rootRoleID string, maxDepth int) (*memory.RoleHierarchy, error) {
+	return m.hierarchyEngine.buildRoleHierarchy(ctx, rootRoleID)
+}
+
+func (m *Manager) ValidateHierarchyOperation(ctx context.Context, childRoleID, parentRoleID string) error {
+	if childRoleID == parentRoleID {
+		return fmt.Errorf("role cannot be its own parent")
+	}
+
+	// Check if this would create a cycle
+	return m.hierarchyEngine.ValidateHierarchy(ctx, childRoleID)
+}
+
+func (m *Manager) ResolvePermissionConflicts(ctx context.Context, roleID string, conflictingPermissions map[string][]*common.Permission) (map[string]*common.Permission, error) {
+	hierarchy, err := m.hierarchyEngine.buildRoleHierarchy(ctx, roleID)
+	if err != nil {
+		return nil, err
+	}
+
+	resolution, err := m.hierarchyEngine.resolveConflicts(ctx, roleID, conflictingPermissions, hierarchy)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert ConflictResult map to Permission map
+	result := make(map[string]*common.Permission)
+	for permID, conflict := range resolution {
+		result[permID] = conflict.Permission
+	}
+
+	return result, nil
+}
+
+// Override GetRoleHierarchy to convert between types
+func (m *Manager) GetRoleHierarchy(ctx context.Context, roleID string) (*memory.RoleHierarchy, error) {
+	memoryHierarchy, err := m.store.GetRoleHierarchy(ctx, roleID)
+	if err != nil {
+		return nil, err
+	}
+
+	return memoryHierarchy, nil
+}
+
+// Helper to convert between hierarchy types
+func (m *Manager) convertToRBACHierarchy(memHierarchy *memory.RoleHierarchy) *memory.RoleHierarchy {
+	if memHierarchy == nil {
+		return nil
+	}
+
+	hierarchy := &memory.RoleHierarchy{
+		Role:  memHierarchy.Role,
+		Depth: memHierarchy.Depth,
+	}
+
+	if memHierarchy.Parent != nil {
+		hierarchy.Parent = m.convertToRBACHierarchy(memHierarchy.Parent)
+	}
+
+	for _, child := range memHierarchy.Children {
+		hierarchy.Children = append(hierarchy.Children, m.convertToRBACHierarchy(child))
+	}
+
+	return hierarchy
+}
+
+// Delegate hierarchy store operations
+func (m *Manager) GetChildRoles(ctx context.Context, roleID string) ([]*common.Role, error) {
+	return m.store.GetChildRoles(ctx, roleID)
+}
+
+func (m *Manager) GetParentRole(ctx context.Context, roleID string) (*common.Role, error) {
+	return m.store.GetParentRole(ctx, roleID)
+}
+
+func (m *Manager) SetRoleParent(ctx context.Context, roleID, parentRoleID string, inheritanceType common.RoleInheritanceType) error {
+	// Validate first
+	if err := m.ValidateHierarchyOperation(ctx, roleID, parentRoleID); err != nil {
+		return err
+	}
+	return m.store.SetRoleParent(ctx, roleID, parentRoleID, inheritanceType)
+}
+
+func (m *Manager) RemoveRoleParent(ctx context.Context, roleID string) error {
+	return m.store.RemoveRoleParent(ctx, roleID)
+}
+
+func (m *Manager) ValidateRoleHierarchy(ctx context.Context, roleID string) error {
+	return m.hierarchyEngine.ValidateHierarchy(ctx, roleID)
 }
 
 // Verify that Manager implements the RBACManager interface
