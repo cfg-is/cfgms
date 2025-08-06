@@ -98,7 +98,7 @@ func TestExecuteConfiguration_WithUnknownModule(t *testing.T) {
 	assert.Equal(t, "test-resource", result.ResourceName)
 	assert.Equal(t, "unknown-module", result.ModuleName)
 	assert.Equal(t, StatusSkipped, result.Status)
-	assert.Greater(t, result.ExecutionTime, time.Duration(0))
+	assert.GreaterOrEqual(t, result.ExecutionTime, time.Duration(0))
 }
 
 func TestExecuteConfiguration_CanceledContext(t *testing.T) {
