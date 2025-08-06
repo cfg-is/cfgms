@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/features/rbac/memory"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -156,6 +157,61 @@ func (m *MockRBACManager) CreateTenantDefaultRoles(ctx context.Context, tenantID
 func (m *MockRBACManager) GetEffectivePermissions(ctx context.Context, subjectID, tenantID string) ([]*common.Permission, error) {
 	args := m.Called(ctx, subjectID, tenantID)
 	return args.Get(0).([]*common.Permission), args.Error(1)
+}
+
+func (m *MockRBACManager) ComputeRolePermissions(ctx context.Context, roleID string) (*memory.EffectivePermissions, error) {
+	args := m.Called(ctx, roleID)
+	return args.Get(0).(*memory.EffectivePermissions), args.Error(1)
+}
+
+func (m *MockRBACManager) CreateRoleWithParent(ctx context.Context, role *common.Role, parentRoleID string, inheritanceType common.RoleInheritanceType) error {
+	args := m.Called(ctx, role, parentRoleID, inheritanceType)
+	return args.Error(0)
+}
+
+func (m *MockRBACManager) GetRoleHierarchyTree(ctx context.Context, rootRoleID string, maxDepth int) (*memory.RoleHierarchy, error) {
+	args := m.Called(ctx, rootRoleID, maxDepth)
+	return args.Get(0).(*memory.RoleHierarchy), args.Error(1)
+}
+
+func (m *MockRBACManager) ValidateHierarchyOperation(ctx context.Context, childRoleID, parentRoleID string) error {
+	args := m.Called(ctx, childRoleID, parentRoleID)
+	return args.Error(0)
+}
+
+func (m *MockRBACManager) ResolvePermissionConflicts(ctx context.Context, roleID string, conflictingPermissions map[string][]*common.Permission) (map[string]*common.Permission, error) {
+	args := m.Called(ctx, roleID, conflictingPermissions)
+	return args.Get(0).(map[string]*common.Permission), args.Error(1)
+}
+
+func (m *MockRBACManager) GetRoleHierarchy(ctx context.Context, roleID string) (*memory.RoleHierarchy, error) {
+	args := m.Called(ctx, roleID)
+	return args.Get(0).(*memory.RoleHierarchy), args.Error(1)
+}
+
+func (m *MockRBACManager) GetChildRoles(ctx context.Context, roleID string) ([]*common.Role, error) {
+	args := m.Called(ctx, roleID)
+	return args.Get(0).([]*common.Role), args.Error(1)
+}
+
+func (m *MockRBACManager) GetParentRole(ctx context.Context, roleID string) (*common.Role, error) {
+	args := m.Called(ctx, roleID)
+	return args.Get(0).(*common.Role), args.Error(1)
+}
+
+func (m *MockRBACManager) SetRoleParent(ctx context.Context, roleID, parentRoleID string, inheritanceType common.RoleInheritanceType) error {
+	args := m.Called(ctx, roleID, parentRoleID, inheritanceType)
+	return args.Error(0)
+}
+
+func (m *MockRBACManager) RemoveRoleParent(ctx context.Context, roleID string) error {
+	args := m.Called(ctx, roleID)
+	return args.Error(0)
+}
+
+func (m *MockRBACManager) ValidateRoleHierarchy(ctx context.Context, roleID string) error {
+	args := m.Called(ctx, roleID)
+	return args.Error(0)
 }
 
 func TestSecurityValidator_ValidateSessionAccess(t *testing.T) {
