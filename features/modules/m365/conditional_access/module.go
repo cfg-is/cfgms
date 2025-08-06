@@ -30,33 +30,33 @@ type ConditionalAccessConfig struct {
 	// Basic policy properties
 	DisplayName string `yaml:"display_name"`
 	State       string `yaml:"state"` // enabled, disabled, enabledForReportingButNotEnforced
-	
+
 	// Conditions
 	Conditions ConditionalAccessConditions `yaml:"conditions"`
-	
+
 	// Grant controls
 	GrantControls ConditionalAccessGrantControls `yaml:"grant_controls"`
-	
+
 	// Session controls (optional)
 	SessionControls *ConditionalAccessSessionControls `yaml:"session_controls,omitempty"`
-	
+
 	// Tenant configuration
 	TenantID string `yaml:"tenant_id"`
-	
+
 	// Managed fields - controls which fields Set() will modify
 	ManagedFieldsList []string `yaml:"managed_fields,omitempty"`
 }
 
 // ConditionalAccessConditions represents the conditions for a CA policy
 type ConditionalAccessConditions struct {
-	Users         ConditionalAccessUsers         `yaml:"users"`
-	Applications  ConditionalAccessApplications  `yaml:"applications"`
-	Locations     *ConditionalAccessLocations    `yaml:"locations,omitempty"`
-	Platforms     *ConditionalAccessPlatforms    `yaml:"platforms,omitempty"`
-	DeviceStates  *ConditionalAccessDeviceStates `yaml:"device_states,omitempty"`
-	ClientAppTypes []string                      `yaml:"client_app_types,omitempty"`
-	SignInRiskLevels []string                    `yaml:"sign_in_risk_levels,omitempty"`
-	UserRiskLevels   []string                    `yaml:"user_risk_levels,omitempty"`
+	Users            ConditionalAccessUsers         `yaml:"users"`
+	Applications     ConditionalAccessApplications  `yaml:"applications"`
+	Locations        *ConditionalAccessLocations    `yaml:"locations,omitempty"`
+	Platforms        *ConditionalAccessPlatforms    `yaml:"platforms,omitempty"`
+	DeviceStates     *ConditionalAccessDeviceStates `yaml:"device_states,omitempty"`
+	ClientAppTypes   []string                       `yaml:"client_app_types,omitempty"`
+	SignInRiskLevels []string                       `yaml:"sign_in_risk_levels,omitempty"`
+	UserRiskLevels   []string                       `yaml:"user_risk_levels,omitempty"`
 }
 
 // ConditionalAccessUsers represents user conditions
@@ -130,7 +130,7 @@ type PersistentBrowser struct {
 // SignInFrequency represents sign-in frequency settings
 type SignInFrequency struct {
 	IsEnabled         bool   `yaml:"is_enabled"`
-	Type              string `yaml:"type,omitempty"`              // hours, days
+	Type              string `yaml:"type,omitempty"` // hours, days
 	Value             int    `yaml:"value,omitempty"`
 	FrequencyInterval string `yaml:"frequency_interval,omitempty"` // timeBased, everyTime
 }
@@ -138,17 +138,17 @@ type SignInFrequency struct {
 // AsMap returns the configuration as a map for efficient field-by-field comparison
 func (c *ConditionalAccessConfig) AsMap() map[string]interface{} {
 	result := map[string]interface{}{
-		"display_name": c.DisplayName,
-		"state":        c.State,
-		"conditions":   c.Conditions,
+		"display_name":   c.DisplayName,
+		"state":          c.State,
+		"conditions":     c.Conditions,
 		"grant_controls": c.GrantControls,
-		"tenant_id":    c.TenantID,
+		"tenant_id":      c.TenantID,
 	}
-	
+
 	if c.SessionControls != nil {
 		result["session_controls"] = c.SessionControls
 	}
-	
+
 	return result
 }
 
@@ -167,49 +167,49 @@ func (c *ConditionalAccessConfig) Validate() error {
 	if c.DisplayName == "" {
 		return fmt.Errorf("display_name is required")
 	}
-	
+
 	if c.State == "" {
 		c.State = "enabled" // Default to enabled
 	}
-	
+
 	// Validate state
 	validStates := []string{"enabled", "disabled", "enabledForReportingButNotEnforced"}
 	if !contains(validStates, c.State) {
 		return fmt.Errorf("invalid state: %s, must be one of: %v", c.State, validStates)
 	}
-	
+
 	if c.TenantID == "" {
 		return fmt.Errorf("tenant_id is required")
 	}
-	
+
 	// Validate conditions
 	if err := c.validateConditions(); err != nil {
 		return fmt.Errorf("invalid conditions: %w", err)
 	}
-	
+
 	// Validate grant controls
 	if err := c.validateGrantControls(); err != nil {
 		return fmt.Errorf("invalid grant_controls: %w", err)
 	}
-	
+
 	return nil
 }
 
 // validateConditions validates the conditions section
 func (c *ConditionalAccessConfig) validateConditions() error {
 	// Users must be specified
-	if len(c.Conditions.Users.IncludeUsers) == 0 && 
-	   len(c.Conditions.Users.IncludeGroups) == 0 && 
-	   len(c.Conditions.Users.IncludeRoles) == 0 {
+	if len(c.Conditions.Users.IncludeUsers) == 0 &&
+		len(c.Conditions.Users.IncludeGroups) == 0 &&
+		len(c.Conditions.Users.IncludeRoles) == 0 {
 		return fmt.Errorf("at least one user, group, or role must be included")
 	}
-	
+
 	// Applications must be specified
-	if len(c.Conditions.Applications.IncludeApplications) == 0 && 
-	   len(c.Conditions.Applications.IncludeUserActions) == 0 {
+	if len(c.Conditions.Applications.IncludeApplications) == 0 &&
+		len(c.Conditions.Applications.IncludeUserActions) == 0 {
 		return fmt.Errorf("at least one application or user action must be included")
 	}
-	
+
 	return nil
 }
 
@@ -218,20 +218,20 @@ func (c *ConditionalAccessConfig) validateGrantControls() error {
 	if c.GrantControls.Operator == "" {
 		c.GrantControls.Operator = "OR" // Default to OR
 	}
-	
+
 	// Validate operator
 	validOperators := []string{"AND", "OR"}
 	if !contains(validOperators, c.GrantControls.Operator) {
 		return fmt.Errorf("invalid grant controls operator: %s, must be one of: %v", c.GrantControls.Operator, validOperators)
 	}
-	
+
 	// At least one control must be specified
-	if len(c.GrantControls.BuiltInControls) == 0 && 
-	   len(c.GrantControls.CustomAuthenticationFactors) == 0 && 
-	   len(c.GrantControls.TermsOfUse) == 0 {
+	if len(c.GrantControls.BuiltInControls) == 0 &&
+		len(c.GrantControls.CustomAuthenticationFactors) == 0 &&
+		len(c.GrantControls.TermsOfUse) == 0 {
 		return fmt.Errorf("at least one grant control must be specified")
 	}
-	
+
 	return nil
 }
 
@@ -241,14 +241,14 @@ func (c *ConditionalAccessConfig) GetManagedFields() []string {
 	if len(c.ManagedFieldsList) > 0 {
 		return c.ManagedFieldsList
 	}
-	
+
 	// Default managed fields
 	fields := []string{"display_name", "state", "conditions", "grant_controls"}
-	
+
 	if c.SessionControls != nil {
 		fields = append(fields, "session_controls")
 	}
-	
+
 	return fields
 }
 
@@ -257,7 +257,7 @@ func (m *conditionalAccessModule) Set(ctx context.Context, resourceID string, co
 	// Convert ConfigState to ConditionalAccessConfig
 	configMap := config.AsMap()
 	caConfig := &ConditionalAccessConfig{}
-	
+
 	// Map basic fields
 	if displayName, ok := configMap["display_name"].(string); ok {
 		caConfig.DisplayName = displayName
@@ -268,36 +268,36 @@ func (m *conditionalAccessModule) Set(ctx context.Context, resourceID string, co
 	if tenantID, ok := configMap["tenant_id"].(string); ok {
 		caConfig.TenantID = tenantID
 	}
-	
+
 	// Map conditions
 	if conditions, ok := configMap["conditions"].(ConditionalAccessConditions); ok {
 		caConfig.Conditions = conditions
 	}
-	
+
 	// Map grant controls
 	if grantControls, ok := configMap["grant_controls"].(ConditionalAccessGrantControls); ok {
 		caConfig.GrantControls = grantControls
 	}
-	
+
 	// Map session controls
 	if sessionControls, ok := configMap["session_controls"].(*ConditionalAccessSessionControls); ok {
 		caConfig.SessionControls = sessionControls
 	}
-	
+
 	// Validate configuration
 	if err := caConfig.Validate(); err != nil {
 		return fmt.Errorf("invalid configuration: %w", err)
 	}
-	
+
 	// Authenticate with Microsoft Graph
 	token, err := m.authProvider.GetAccessToken(ctx, caConfig.TenantID)
 	if err != nil {
 		return fmt.Errorf("failed to authenticate with Microsoft Graph: %w", err)
 	}
-	
+
 	// Parse policy ID from resource ID if provided
 	policyID := extractPolicyID(resourceID)
-	
+
 	// Check if policy exists
 	var existingPolicy *graph.ConditionalAccessPolicy
 	if policyID != "" {
@@ -309,12 +309,12 @@ func (m *conditionalAccessModule) Set(ctx context.Context, resourceID string, co
 			// Policy doesn't exist, we'll create it
 		}
 	}
-	
+
 	if existingPolicy == nil {
 		// Create new policy
 		return m.createPolicy(ctx, token, caConfig)
 	}
-	
+
 	// Update existing policy with only managed fields
 	return m.updatePolicy(ctx, token, caConfig, existingPolicy)
 }
@@ -327,33 +327,33 @@ func (m *conditionalAccessModule) Get(ctx context.Context, resourceID string) (m
 	if err != nil {
 		return nil, fmt.Errorf("invalid resource ID format: %w", err)
 	}
-	
+
 	// Authenticate with Microsoft Graph
 	token, err := m.authProvider.GetAccessToken(ctx, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to authenticate with Microsoft Graph: %w", err)
 	}
-	
+
 	// Get policy from Graph API
 	policy, err := m.graphClient.GetConditionalAccessPolicy(ctx, token, policyID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get policy from Graph API: %w", err)
 	}
-	
+
 	// Convert Graph policy to our config format
 	config := &ConditionalAccessConfig{
-		DisplayName: policy.DisplayName,
-		State:       policy.State,
-		TenantID:    tenantID,
-		Conditions:  convertGraphConditions(policy.Conditions),
+		DisplayName:   policy.DisplayName,
+		State:         policy.State,
+		TenantID:      tenantID,
+		Conditions:    convertGraphConditions(policy.Conditions),
 		GrantControls: convertGraphGrantControls(policy.GrantControls),
 	}
-	
+
 	// Convert session controls if present
 	if policy.SessionControls != (graph.ConditionalAccessSessionControls{}) {
 		config.SessionControls = convertGraphSessionControls(policy.SessionControls)
 	}
-	
+
 	return config, nil
 }
 
@@ -365,18 +365,18 @@ func (m *conditionalAccessModule) createPolicy(ctx context.Context, token *auth.
 		Conditions:    convertToGraphConditions(config.Conditions),
 		GrantControls: convertToGraphGrantControls(config.GrantControls),
 	}
-	
+
 	// Add session controls if specified
 	if config.SessionControls != nil {
 		request.SessionControls = convertToGraphSessionControls(*config.SessionControls)
 	}
-	
+
 	// Create the policy
 	_, err := m.graphClient.CreateConditionalAccessPolicy(ctx, token, request)
 	if err != nil {
 		return fmt.Errorf("failed to create policy: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -384,7 +384,7 @@ func (m *conditionalAccessModule) createPolicy(ctx context.Context, token *auth.
 func (m *conditionalAccessModule) updatePolicy(ctx context.Context, token *auth.AccessToken, config *ConditionalAccessConfig, existingPolicy *graph.ConditionalAccessPolicy) error {
 	managedFields := config.GetManagedFields()
 	updateRequest := &graph.UpdateConditionalAccessPolicyRequest{}
-	
+
 	// Only update managed fields
 	for _, field := range managedFields {
 		switch field {
@@ -411,7 +411,7 @@ func (m *conditionalAccessModule) updatePolicy(ctx context.Context, token *auth.
 			}
 		}
 	}
-	
+
 	// Update the policy if there are changes
 	return m.graphClient.UpdateConditionalAccessPolicy(ctx, token, existingPolicy.ID, updateRequest)
 }
@@ -502,27 +502,27 @@ func convertToGraphGrantControls(grantControls ConditionalAccessGrantControls) g
 // convertGraphSessionControls converts Graph API session controls to our format
 func convertGraphSessionControls(graphSessionControls graph.ConditionalAccessSessionControls) *ConditionalAccessSessionControls {
 	sessionControls := &ConditionalAccessSessionControls{}
-	
+
 	if graphSessionControls.ApplicationEnforcedRestrictions.IsEnabled {
 		sessionControls.ApplicationEnforcedRestrictions = &ApplicationEnforcedRestrictions{
 			IsEnabled: graphSessionControls.ApplicationEnforcedRestrictions.IsEnabled,
 		}
 	}
-	
+
 	if graphSessionControls.CloudAppSecurity.IsEnabled {
 		sessionControls.CloudAppSecurity = &CloudAppSecurity{
 			IsEnabled:            graphSessionControls.CloudAppSecurity.IsEnabled,
 			CloudAppSecurityType: graphSessionControls.CloudAppSecurity.CloudAppSecurityType,
 		}
 	}
-	
+
 	if graphSessionControls.PersistentBrowser.IsEnabled {
 		sessionControls.PersistentBrowser = &PersistentBrowser{
 			IsEnabled: graphSessionControls.PersistentBrowser.IsEnabled,
 			Mode:      graphSessionControls.PersistentBrowser.Mode,
 		}
 	}
-	
+
 	if graphSessionControls.SignInFrequency.IsEnabled {
 		sessionControls.SignInFrequency = &SignInFrequency{
 			IsEnabled:         graphSessionControls.SignInFrequency.IsEnabled,
@@ -531,34 +531,34 @@ func convertGraphSessionControls(graphSessionControls graph.ConditionalAccessSes
 			FrequencyInterval: graphSessionControls.SignInFrequency.FrequencyInterval,
 		}
 	}
-	
+
 	return sessionControls
 }
 
 // convertToGraphSessionControls converts our format to Graph API session controls
 func convertToGraphSessionControls(sessionControls ConditionalAccessSessionControls) graph.ConditionalAccessSessionControls {
 	graphSessionControls := graph.ConditionalAccessSessionControls{}
-	
+
 	if sessionControls.ApplicationEnforcedRestrictions != nil {
 		graphSessionControls.ApplicationEnforcedRestrictions = graph.ApplicationEnforcedRestrictions{
 			IsEnabled: sessionControls.ApplicationEnforcedRestrictions.IsEnabled,
 		}
 	}
-	
+
 	if sessionControls.CloudAppSecurity != nil {
 		graphSessionControls.CloudAppSecurity = graph.CloudAppSecurity{
 			IsEnabled:            sessionControls.CloudAppSecurity.IsEnabled,
 			CloudAppSecurityType: sessionControls.CloudAppSecurity.CloudAppSecurityType,
 		}
 	}
-	
+
 	if sessionControls.PersistentBrowser != nil {
 		graphSessionControls.PersistentBrowser = graph.PersistentBrowser{
 			IsEnabled: sessionControls.PersistentBrowser.IsEnabled,
 			Mode:      sessionControls.PersistentBrowser.Mode,
 		}
 	}
-	
+
 	if sessionControls.SignInFrequency != nil {
 		graphSessionControls.SignInFrequency = graph.SignInFrequency{
 			IsEnabled:         sessionControls.SignInFrequency.IsEnabled,
@@ -567,7 +567,7 @@ func convertToGraphSessionControls(sessionControls ConditionalAccessSessionContr
 			FrequencyInterval: sessionControls.SignInFrequency.FrequencyInterval,
 		}
 	}
-	
+
 	return graphSessionControls
 }
 

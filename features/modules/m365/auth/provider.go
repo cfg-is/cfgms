@@ -10,10 +10,10 @@ import (
 type Provider interface {
 	// GetAccessToken retrieves a valid access token for the specified tenant
 	GetAccessToken(ctx context.Context, tenantID string) (*AccessToken, error)
-	
+
 	// RefreshToken refreshes an existing access token
 	RefreshToken(ctx context.Context, refreshToken string) (*AccessToken, error)
-	
+
 	// IsTokenValid checks if a token is still valid
 	IsTokenValid(token *AccessToken) bool
 }
@@ -22,22 +22,22 @@ type Provider interface {
 type AccessToken struct {
 	// Token is the actual access token string
 	Token string `json:"access_token"`
-	
+
 	// TokenType is usually "Bearer"
 	TokenType string `json:"token_type"`
-	
+
 	// ExpiresIn is the token lifetime in seconds
 	ExpiresIn int `json:"expires_in"`
-	
+
 	// ExpiresAt is when the token expires
 	ExpiresAt time.Time `json:"expires_at"`
-	
+
 	// Scope contains the granted scopes
 	Scope string `json:"scope,omitempty"`
-	
+
 	// RefreshToken for renewing the access token
 	RefreshToken string `json:"refresh_token,omitempty"`
-	
+
 	// TenantID this token is valid for
 	TenantID string `json:"tenant_id"`
 }
@@ -60,22 +60,22 @@ func (t *AccessToken) GetAuthorizationHeader() string {
 type OAuth2Config struct {
 	// ClientID for the Azure AD application
 	ClientID string `yaml:"client_id"`
-	
+
 	// ClientSecret for the Azure AD application (for confidential clients)
 	ClientSecret string `yaml:"client_secret,omitempty"`
-	
+
 	// TenantID for the Azure AD tenant
 	TenantID string `yaml:"tenant_id"`
-	
+
 	// Scopes to request
 	Scopes []string `yaml:"scopes"`
-	
+
 	// RedirectURI for authorization code flow (for interactive flows)
 	RedirectURI string `yaml:"redirect_uri,omitempty"`
-	
+
 	// AuthorityURL is the Azure AD authority URL
 	AuthorityURL string `yaml:"authority_url,omitempty"`
-	
+
 	// UseClientCredentials determines if we use client credentials flow
 	UseClientCredentials bool `yaml:"use_client_credentials"`
 }
@@ -105,19 +105,19 @@ func (c *OAuth2Config) GetScopeString() string {
 type CredentialStore interface {
 	// StoreToken securely stores an access token
 	StoreToken(tenantID string, token *AccessToken) error
-	
+
 	// GetToken retrieves a stored access token
 	GetToken(tenantID string) (*AccessToken, error)
-	
+
 	// DeleteToken removes a stored access token
 	DeleteToken(tenantID string) error
-	
+
 	// StoreConfig securely stores OAuth2 configuration
 	StoreConfig(tenantID string, config *OAuth2Config) error
-	
+
 	// GetConfig retrieves stored OAuth2 configuration
 	GetConfig(tenantID string) (*OAuth2Config, error)
-	
+
 	// IsAvailable checks if the credential store is available
 	IsAvailable() bool
 }
@@ -132,10 +132,10 @@ type AuthenticationError struct {
 
 func (e *AuthenticationError) Error() string {
 	if e.Cause != nil {
-		return fmt.Sprintf("authentication failed for tenant %s [%s]: %s, cause: %v", 
+		return fmt.Sprintf("authentication failed for tenant %s [%s]: %s, cause: %v",
 			e.TenantID, e.Code, e.Message, e.Cause)
 	}
-	return fmt.Sprintf("authentication failed for tenant %s [%s]: %s", 
+	return fmt.Sprintf("authentication failed for tenant %s [%s]: %s",
 		e.TenantID, e.Code, e.Message)
 }
 

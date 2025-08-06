@@ -43,26 +43,26 @@ type PatchManager interface {
 
 // PatchInfo represents information about a single patch
 type PatchInfo struct {
-	ID          string    `json:"id" yaml:"id"`
-	Title       string    `json:"title" yaml:"title"`
-	Description string    `json:"description" yaml:"description"`
-	Severity    string    `json:"severity" yaml:"severity"` // "critical", "important", "moderate", "low"
-	Category    string    `json:"category" yaml:"category"` // "security", "bugfix", "enhancement"
-	Size        int64     `json:"size" yaml:"size"`         // Size in bytes
-	ReleaseDate time.Time `json:"release_date" yaml:"release_date"`
-	Installed   bool      `json:"installed" yaml:"installed"`
-	RebootRequired bool   `json:"reboot_required" yaml:"reboot_required"`
+	ID             string    `json:"id" yaml:"id"`
+	Title          string    `json:"title" yaml:"title"`
+	Description    string    `json:"description" yaml:"description"`
+	Severity       string    `json:"severity" yaml:"severity"` // "critical", "important", "moderate", "low"
+	Category       string    `json:"category" yaml:"category"` // "security", "bugfix", "enhancement"
+	Size           int64     `json:"size" yaml:"size"`         // Size in bytes
+	ReleaseDate    time.Time `json:"release_date" yaml:"release_date"`
+	Installed      bool      `json:"installed" yaml:"installed"`
+	RebootRequired bool      `json:"reboot_required" yaml:"reboot_required"`
 }
 
 // Config represents the patch management configuration
 type Config struct {
 	// Core patch configuration
-	PatchType        string   `yaml:"patch_type"`        // "security", "all", "kernel", "critical"
-	AutoReboot       bool     `yaml:"auto_reboot"`       // Automatically reboot if required
-	IncludePatches   []string `yaml:"include_patches"`   // Specific patches to include
-	ExcludePatches   []string `yaml:"exclude_patches"`   // Specific patches to exclude
-	MaxDowntime      string   `yaml:"max_downtime"`      // Maximum acceptable downtime (e.g., "30m", "1h")
-	
+	PatchType      string   `yaml:"patch_type"`      // "security", "all", "kernel", "critical"
+	AutoReboot     bool     `yaml:"auto_reboot"`     // Automatically reboot if required
+	IncludePatches []string `yaml:"include_patches"` // Specific patches to include
+	ExcludePatches []string `yaml:"exclude_patches"` // Specific patches to exclude
+	MaxDowntime    string   `yaml:"max_downtime"`    // Maximum acceptable downtime (e.g., "30m", "1h")
+
 	// Scheduling and maintenance windows
 	Maintenance struct {
 		Window   string        `yaml:"window"`   // Optional: Reference to a named maintenance window
@@ -70,23 +70,23 @@ type Config struct {
 		Duration time.Duration `yaml:"duration"` // Optional: Duration of the window
 		Timezone string        `yaml:"timezone"` // Optional: Timezone for the schedule
 	} `yaml:"maintenance,omitempty"`
-	
+
 	// Advanced options
 	PrePatchScript  string `yaml:"pre_patch_script"`  // Script to run before patching
 	PostPatchScript string `yaml:"post_patch_script"` // Script to run after patching
 	TestMode        bool   `yaml:"test_mode"`         // Dry run mode - don't actually install patches
-	
+
 	// Platform-specific options
 	Platform struct {
 		// Linux options
-		UseYum        bool `yaml:"use_yum"`         // Force yum on RHEL systems
-		UseApt        bool `yaml:"use_apt"`         // Force apt on Debian systems
-		UpdateKernel  bool `yaml:"update_kernel"`   // Include kernel updates
-		
+		UseYum       bool `yaml:"use_yum"`       // Force yum on RHEL systems
+		UseApt       bool `yaml:"use_apt"`       // Force apt on Debian systems
+		UpdateKernel bool `yaml:"update_kernel"` // Include kernel updates
+
 		// Windows options
-		UseWSUS       bool `yaml:"use_wsus"`        // Use WSUS server
-		WSUSServer    string `yaml:"wsus_server"`   // WSUS server URL
-		
+		UseWSUS    bool   `yaml:"use_wsus"`    // Use WSUS server
+		WSUSServer string `yaml:"wsus_server"` // WSUS server URL
+
 		// macOS options
 		IncludeAppStore bool `yaml:"include_app_store"` // Include App Store updates
 	} `yaml:"platform,omitempty"`
@@ -95,11 +95,11 @@ type Config struct {
 // AsMap returns the configuration as a map for efficient field-by-field comparison
 func (c *Config) AsMap() map[string]interface{} {
 	result := map[string]interface{}{
-		"patch_type": c.PatchType,
+		"patch_type":  c.PatchType,
 		"auto_reboot": c.AutoReboot,
-		"test_mode": c.TestMode,
+		"test_mode":   c.TestMode,
 	}
-	
+
 	if len(c.IncludePatches) > 0 {
 		result["include_patches"] = c.IncludePatches
 	}
@@ -115,7 +115,7 @@ func (c *Config) AsMap() map[string]interface{} {
 	if c.PostPatchScript != "" {
 		result["post_patch_script"] = c.PostPatchScript
 	}
-	
+
 	// Include maintenance if it has values
 	if c.Maintenance.Window != "" || c.Maintenance.Schedule != "" {
 		maintenance := make(map[string]interface{})
@@ -133,7 +133,7 @@ func (c *Config) AsMap() map[string]interface{} {
 		}
 		result["maintenance"] = maintenance
 	}
-	
+
 	// Include platform options if any are set
 	platformMap := make(map[string]interface{})
 	if c.Platform.UseYum {
@@ -157,7 +157,7 @@ func (c *Config) AsMap() map[string]interface{} {
 	if len(platformMap) > 0 {
 		result["platform"] = platformMap
 	}
-	
+
 	return result
 }
 
@@ -179,7 +179,7 @@ func (c *Config) Validate() error {
 // GetManagedFields returns the list of fields this configuration manages
 func (c *Config) GetManagedFields() []string {
 	fields := []string{"patch_type", "auto_reboot", "test_mode"}
-	
+
 	if len(c.IncludePatches) > 0 {
 		fields = append(fields, "include_patches")
 	}
@@ -198,13 +198,13 @@ func (c *Config) GetManagedFields() []string {
 	if c.Maintenance.Window != "" || c.Maintenance.Schedule != "" {
 		fields = append(fields, "maintenance")
 	}
-	
+
 	// Add platform fields if they have values
 	if c.Platform.UseYum || c.Platform.UseApt || c.Platform.UpdateKernel ||
 		c.Platform.UseWSUS || c.Platform.WSUSServer != "" || c.Platform.IncludeAppStore {
 		fields = append(fields, "platform")
 	}
-	
+
 	return fields
 }
 
@@ -217,21 +217,21 @@ func (c *Config) validate() error {
 	if !validPatchTypes[c.PatchType] {
 		return ErrInvalidPatchType
 	}
-	
+
 	// Validate max downtime format if specified
 	if c.MaxDowntime != "" {
 		if !isValidDuration(c.MaxDowntime) {
 			return ErrInvalidMaxDowntime
 		}
 	}
-	
+
 	// Validate maintenance window format if specified
 	if c.Maintenance.Window != "" {
 		if !maintenanceWindowRegex.MatchString(c.Maintenance.Window) {
 			return ErrInvalidMaintenanceWindow
 		}
 	}
-	
+
 	// Validate patch IDs format
 	for _, patchID := range c.IncludePatches {
 		if !isValidPatchID(patchID) {
@@ -243,7 +243,7 @@ func (c *Config) validate() error {
 			return ErrInvalidPatchID
 		}
 	}
-	
+
 	// Check for conflicts
 	for _, include := range c.IncludePatches {
 		for _, exclude := range c.ExcludePatches {
@@ -252,12 +252,12 @@ func (c *Config) validate() error {
 			}
 		}
 	}
-	
+
 	// Validate platform-specific settings
 	if c.Platform.UseYum && c.Platform.UseApt {
 		return ErrConflictingPlatformOptions
 	}
-	
+
 	return nil
 }
 
@@ -286,12 +286,12 @@ type PatchModule struct {
 
 // PatchStatus represents the current patching status of the system
 type PatchStatus struct {
-	LastPatchDate     time.Time   `json:"last_patch_date" yaml:"last_patch_date"`
-	RebootRequired    bool        `json:"reboot_required" yaml:"reboot_required"`
-	AvailablePatches  []PatchInfo `json:"available_patches" yaml:"available_patches"`
-	InstalledPatches  []PatchInfo `json:"installed_patches" yaml:"installed_patches"`
-	PendingPatches    []PatchInfo `json:"pending_patches" yaml:"pending_patches"`
-	TotalSize         int64       `json:"total_size" yaml:"total_size"`
-	SecurityPatches   int         `json:"security_patches" yaml:"security_patches"`
-	CriticalPatches   int         `json:"critical_patches" yaml:"critical_patches"`
+	LastPatchDate    time.Time   `json:"last_patch_date" yaml:"last_patch_date"`
+	RebootRequired   bool        `json:"reboot_required" yaml:"reboot_required"`
+	AvailablePatches []PatchInfo `json:"available_patches" yaml:"available_patches"`
+	InstalledPatches []PatchInfo `json:"installed_patches" yaml:"installed_patches"`
+	PendingPatches   []PatchInfo `json:"pending_patches" yaml:"pending_patches"`
+	TotalSize        int64       `json:"total_size" yaml:"total_size"`
+	SecurityPatches  int         `json:"security_patches" yaml:"security_patches"`
+	CriticalPatches  int         `json:"critical_patches" yaml:"critical_patches"`
 }

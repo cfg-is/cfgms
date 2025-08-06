@@ -32,29 +32,29 @@ type EntraUserConfig struct {
 	UserPrincipalName string `yaml:"user_principal_name"`
 	DisplayName       string `yaml:"display_name"`
 	MailNickname      string `yaml:"mail_nickname"`
-	
+
 	// Account settings
-	AccountEnabled   bool   `yaml:"account_enabled"`
-	PasswordProfile  *PasswordProfile `yaml:"password_profile,omitempty"`
-	ForceChangePassword bool `yaml:"force_change_password,omitempty"`
-	
+	AccountEnabled      bool             `yaml:"account_enabled"`
+	PasswordProfile     *PasswordProfile `yaml:"password_profile,omitempty"`
+	ForceChangePassword bool             `yaml:"force_change_password,omitempty"`
+
 	// Contact information
-	Mail            string `yaml:"mail,omitempty"`
-	MobilePhone     string `yaml:"mobile_phone,omitempty"`
-	OfficeLocation  string `yaml:"office_location,omitempty"`
-	JobTitle        string `yaml:"job_title,omitempty"`
-	Department      string `yaml:"department,omitempty"`
-	CompanyName     string `yaml:"company_name,omitempty"`
-	
+	Mail           string `yaml:"mail,omitempty"`
+	MobilePhone    string `yaml:"mobile_phone,omitempty"`
+	OfficeLocation string `yaml:"office_location,omitempty"`
+	JobTitle       string `yaml:"job_title,omitempty"`
+	Department     string `yaml:"department,omitempty"`
+	CompanyName    string `yaml:"company_name,omitempty"`
+
 	// License assignment
 	Licenses []LicenseAssignment `yaml:"licenses,omitempty"`
-	
+
 	// Group memberships
 	Groups []string `yaml:"groups,omitempty"`
-	
+
 	// Tenant configuration
 	TenantID string `yaml:"tenant_id"`
-	
+
 	// Managed fields - controls which fields Set() will modify
 	ManagedFieldsList []string `yaml:"managed_fields,omitempty"`
 }
@@ -67,8 +67,8 @@ type PasswordProfile struct {
 
 // LicenseAssignment represents a license assignment for a user
 type LicenseAssignment struct {
-	SkuID           string   `yaml:"sku_id"`
-	DisabledPlans   []string `yaml:"disabled_plans,omitempty"`
+	SkuID         string   `yaml:"sku_id"`
+	DisabledPlans []string `yaml:"disabled_plans,omitempty"`
 }
 
 // AsMap returns the configuration as a map for efficient field-by-field comparison
@@ -80,18 +80,18 @@ func (c *EntraUserConfig) AsMap() map[string]interface{} {
 		"account_enabled":     c.AccountEnabled,
 		"tenant_id":           c.TenantID,
 	}
-	
+
 	if c.PasswordProfile != nil {
 		result["password_profile"] = map[string]interface{}{
 			"force_change_password_next_signin": c.PasswordProfile.ForceChangePasswordNextSignIn,
 		}
 		// Note: password field is intentionally omitted for security
 	}
-	
+
 	if c.ForceChangePassword {
 		result["force_change_password"] = c.ForceChangePassword
 	}
-	
+
 	if c.Mail != "" {
 		result["mail"] = c.Mail
 	}
@@ -110,15 +110,15 @@ func (c *EntraUserConfig) AsMap() map[string]interface{} {
 	if c.CompanyName != "" {
 		result["company_name"] = c.CompanyName
 	}
-	
+
 	if len(c.Licenses) > 0 {
 		result["licenses"] = c.Licenses
 	}
-	
+
 	if len(c.Groups) > 0 {
 		result["groups"] = c.Groups
 	}
-	
+
 	return result
 }
 
@@ -145,26 +145,26 @@ func (c *EntraUserConfig) Validate() error {
 	if c.UserPrincipalName == "" {
 		return fmt.Errorf("user_principal_name is required")
 	}
-	
+
 	if c.DisplayName == "" {
 		return fmt.Errorf("display_name is required")
 	}
-	
+
 	if c.MailNickname == "" {
 		return fmt.Errorf("mail_nickname is required")
 	}
-	
+
 	if c.TenantID == "" {
 		return fmt.Errorf("tenant_id is required")
 	}
-	
+
 	// Validate license SKU IDs if provided
 	for _, license := range c.Licenses {
 		if license.SkuID == "" {
 			return fmt.Errorf("license sku_id cannot be empty")
 		}
 	}
-	
+
 	return nil
 }
 
@@ -174,10 +174,10 @@ func (c *EntraUserConfig) GetManagedFields() []string {
 	if len(c.ManagedFieldsList) > 0 {
 		return c.ManagedFieldsList
 	}
-	
+
 	// Default managed fields based on what's configured
 	fields := []string{"display_name", "account_enabled"}
-	
+
 	if c.Mail != "" {
 		fields = append(fields, "mail")
 	}
@@ -205,7 +205,7 @@ func (c *EntraUserConfig) GetManagedFields() []string {
 	if c.PasswordProfile != nil {
 		fields = append(fields, "password_profile")
 	}
-	
+
 	return fields
 }
 
@@ -214,7 +214,7 @@ func (m *entraUserModule) Set(ctx context.Context, resourceID string, config mod
 	// Convert ConfigState to EntraUserConfig
 	configMap := config.AsMap()
 	userConfig := &EntraUserConfig{}
-	
+
 	// Map basic fields
 	if upn, ok := configMap["user_principal_name"].(string); ok {
 		userConfig.UserPrincipalName = upn
@@ -231,7 +231,7 @@ func (m *entraUserModule) Set(ctx context.Context, resourceID string, config mod
 	if tenantID, ok := configMap["tenant_id"].(string); ok {
 		userConfig.TenantID = tenantID
 	}
-	
+
 	// Map optional fields
 	if mail, ok := configMap["mail"].(string); ok {
 		userConfig.Mail = mail
@@ -251,7 +251,7 @@ func (m *entraUserModule) Set(ctx context.Context, resourceID string, config mod
 	if companyName, ok := configMap["company_name"].(string); ok {
 		userConfig.CompanyName = companyName
 	}
-	
+
 	// Handle password profile
 	if passwordProfile, ok := configMap["password_profile"].(map[string]interface{}); ok {
 		userConfig.PasswordProfile = &PasswordProfile{}
@@ -262,28 +262,28 @@ func (m *entraUserModule) Set(ctx context.Context, resourceID string, config mod
 			userConfig.PasswordProfile.Password = password
 		}
 	}
-	
+
 	// Handle licenses
 	if licenses, ok := configMap["licenses"].([]LicenseAssignment); ok {
 		userConfig.Licenses = licenses
 	}
-	
+
 	// Handle groups
 	if groups, ok := configMap["groups"].([]string); ok {
 		userConfig.Groups = groups
 	}
-	
+
 	// Validate configuration
 	if err := userConfig.Validate(); err != nil {
 		return fmt.Errorf("invalid configuration: %w", err)
 	}
-	
+
 	// Authenticate with Microsoft Graph
 	token, err := m.authProvider.GetAccessToken(ctx, userConfig.TenantID)
 	if err != nil {
 		return fmt.Errorf("failed to authenticate with Microsoft Graph: %w", err)
 	}
-	
+
 	// Check if user exists
 	existingUser, err := m.graphClient.GetUser(ctx, token, userConfig.UserPrincipalName)
 	if err != nil {
@@ -293,7 +293,7 @@ func (m *entraUserModule) Set(ctx context.Context, resourceID string, config mod
 		// User doesn't exist, create it
 		return m.createUser(ctx, token, userConfig)
 	}
-	
+
 	// User exists, update it with only managed fields
 	return m.updateUser(ctx, token, userConfig, existingUser)
 }
@@ -306,25 +306,25 @@ func (m *entraUserModule) Get(ctx context.Context, resourceID string) (modules.C
 	if err != nil {
 		return nil, fmt.Errorf("invalid resource ID format: %w", err)
 	}
-	
+
 	// Authenticate with Microsoft Graph
 	token, err := m.authProvider.GetAccessToken(ctx, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to authenticate with Microsoft Graph: %w", err)
 	}
-	
+
 	// Get user from Graph API
 	user, err := m.graphClient.GetUser(ctx, token, upn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get user from Graph API: %w", err)
 	}
-	
+
 	// Get user's license assignments
 	graphLicenses, err := m.graphClient.GetUserLicenses(ctx, token, user.ID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get user licenses: %w", err)
 	}
-	
+
 	// Convert graph.LicenseAssignment to local LicenseAssignment
 	licenses := make([]LicenseAssignment, len(graphLicenses))
 	for i, gl := range graphLicenses {
@@ -333,13 +333,13 @@ func (m *entraUserModule) Get(ctx context.Context, resourceID string) (modules.C
 			DisabledPlans: gl.DisabledPlans,
 		}
 	}
-	
+
 	// Get user's group memberships
 	groups, err := m.graphClient.GetUserGroups(ctx, token, user.ID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get user groups: %w", err)
 	}
-	
+
 	// Convert Graph user to our config format
 	config := &EntraUserConfig{
 		UserPrincipalName: user.UserPrincipalName,
@@ -356,7 +356,7 @@ func (m *entraUserModule) Get(ctx context.Context, resourceID string) (modules.C
 		Licenses:          licenses,
 		Groups:            groups,
 	}
-	
+
 	return config, nil
 }
 
@@ -374,7 +374,7 @@ func (m *entraUserModule) createUser(ctx context.Context, token *auth.AccessToke
 		Department:        config.Department,
 		CompanyName:       config.CompanyName,
 	}
-	
+
 	// Set password profile if provided
 	if config.PasswordProfile != nil {
 		userRequest.PasswordProfile = &graph.PasswordProfile{
@@ -382,16 +382,16 @@ func (m *entraUserModule) createUser(ctx context.Context, token *auth.AccessToke
 			ForceChangePasswordNextSignIn: config.PasswordProfile.ForceChangePasswordNextSignIn,
 		}
 	}
-	
+
 	// Create the user
 	user, err := m.graphClient.CreateUser(ctx, token, userRequest)
 	if err != nil {
 		return fmt.Errorf("failed to create user: %w", err)
 	}
-	
+
 	// Wait a moment for user creation to propagate
 	time.Sleep(2 * time.Second)
-	
+
 	// Assign licenses if specified
 	if len(config.Licenses) > 0 {
 		for _, license := range config.Licenses {
@@ -400,7 +400,7 @@ func (m *entraUserModule) createUser(ctx context.Context, token *auth.AccessToke
 			}
 		}
 	}
-	
+
 	// Add to groups if specified
 	if len(config.Groups) > 0 {
 		for _, groupName := range config.Groups {
@@ -409,7 +409,7 @@ func (m *entraUserModule) createUser(ctx context.Context, token *auth.AccessToke
 			}
 		}
 	}
-	
+
 	return nil
 }
 
@@ -417,7 +417,7 @@ func (m *entraUserModule) createUser(ctx context.Context, token *auth.AccessToke
 func (m *entraUserModule) updateUser(ctx context.Context, token *auth.AccessToken, config *EntraUserConfig, existingUser *graph.User) error {
 	managedFields := config.GetManagedFields()
 	updateRequest := &graph.UpdateUserRequest{}
-	
+
 	// Only update managed fields
 	for _, field := range managedFields {
 		switch field {
@@ -455,28 +455,28 @@ func (m *entraUserModule) updateUser(ctx context.Context, token *auth.AccessToke
 			}
 		}
 	}
-	
+
 	// Update the user if there are changes
 	if updateRequest.HasChanges() {
 		if err := m.graphClient.UpdateUser(ctx, token, existingUser.ID, updateRequest); err != nil {
 			return fmt.Errorf("failed to update user: %w", err)
 		}
 	}
-	
+
 	// Handle license assignments if managed
 	if contains(managedFields, "licenses") {
 		if err := m.syncUserLicenses(ctx, token, existingUser.ID, config.Licenses); err != nil {
 			return fmt.Errorf("failed to sync user licenses: %w", err)
 		}
 	}
-	
+
 	// Handle group memberships if managed
 	if contains(managedFields, "groups") {
 		if err := m.syncUserGroups(ctx, token, existingUser.ID, config.Groups); err != nil {
 			return fmt.Errorf("failed to sync user groups: %w", err)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -487,18 +487,18 @@ func (m *entraUserModule) syncUserLicenses(ctx context.Context, token *auth.Acce
 	if err != nil {
 		return fmt.Errorf("failed to get current licenses: %w", err)
 	}
-	
+
 	// Create maps for easier comparison
 	currentLicenseMap := make(map[string]bool)
 	for _, license := range currentLicenses {
 		currentLicenseMap[license.SkuID] = true
 	}
-	
+
 	desiredLicenseMap := make(map[string]LicenseAssignment)
 	for _, license := range desiredLicenses {
 		desiredLicenseMap[license.SkuID] = license
 	}
-	
+
 	// Remove licenses that are no longer desired
 	for skuID := range currentLicenseMap {
 		if _, exists := desiredLicenseMap[skuID]; !exists {
@@ -507,7 +507,7 @@ func (m *entraUserModule) syncUserLicenses(ctx context.Context, token *auth.Acce
 			}
 		}
 	}
-	
+
 	// Add new licenses
 	for skuID, license := range desiredLicenseMap {
 		if !currentLicenseMap[skuID] {
@@ -516,7 +516,7 @@ func (m *entraUserModule) syncUserLicenses(ctx context.Context, token *auth.Acce
 			}
 		}
 	}
-	
+
 	return nil
 }
 
@@ -527,18 +527,18 @@ func (m *entraUserModule) syncUserGroups(ctx context.Context, token *auth.Access
 	if err != nil {
 		return fmt.Errorf("failed to get current groups: %w", err)
 	}
-	
+
 	// Create maps for easier comparison
 	currentGroupMap := make(map[string]bool)
 	for _, group := range currentGroups {
 		currentGroupMap[group] = true
 	}
-	
+
 	desiredGroupMap := make(map[string]bool)
 	for _, group := range desiredGroups {
 		desiredGroupMap[group] = true
 	}
-	
+
 	// Remove from groups that are no longer desired
 	for group := range currentGroupMap {
 		if !desiredGroupMap[group] {
@@ -547,7 +547,7 @@ func (m *entraUserModule) syncUserGroups(ctx context.Context, token *auth.Access
 			}
 		}
 	}
-	
+
 	// Add to new groups
 	for group := range desiredGroupMap {
 		if !currentGroupMap[group] {
@@ -556,7 +556,7 @@ func (m *entraUserModule) syncUserGroups(ctx context.Context, token *auth.Access
 			}
 		}
 	}
-	
+
 	return nil
 }
 

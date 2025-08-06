@@ -54,7 +54,7 @@ func (c *Config) AsMap() map[string]interface{} {
 		"name":  c.Name,
 		"state": c.State,
 	}
-	
+
 	if c.Version != "" {
 		result["version"] = c.Version
 	}
@@ -67,7 +67,7 @@ func (c *Config) AsMap() map[string]interface{} {
 	if c.PackageManager != "" {
 		result["package_manager"] = c.PackageManager
 	}
-	
+
 	// Only include maintenance if it has values
 	if c.Maintenance.Window != "" || c.Maintenance.Schedule != "" {
 		maintenance := make(map[string]interface{})
@@ -85,7 +85,7 @@ func (c *Config) AsMap() map[string]interface{} {
 		}
 		result["maintenance"] = maintenance
 	}
-	
+
 	return result
 }
 
@@ -107,7 +107,7 @@ func (c *Config) Validate() error {
 // GetManagedFields returns the list of fields this configuration manages
 func (c *Config) GetManagedFields() []string {
 	fields := []string{"name", "state"}
-	
+
 	if c.Version != "" {
 		fields = append(fields, "version")
 	}
@@ -123,7 +123,7 @@ func (c *Config) GetManagedFields() []string {
 	if c.Maintenance.Window != "" || c.Maintenance.Schedule != "" {
 		fields = append(fields, "maintenance")
 	}
-	
+
 	return fields
 }
 

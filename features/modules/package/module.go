@@ -8,7 +8,6 @@ import (
 	"github.com/cfgis/cfgms/features/modules"
 )
 
-
 // New creates a new instance of the Package module
 func New() modules.Module {
 	return &PackageModule{
@@ -68,7 +67,7 @@ func (m *PackageModule) Set(ctx context.Context, name string, config modules.Con
 	// Convert ConfigState to Config
 	configMap := config.AsMap()
 	cfg := &Config{}
-	
+
 	if nameVal, ok := configMap["name"].(string); ok {
 		cfg.Name = nameVal
 	}
@@ -155,5 +154,3 @@ func (m *PackageModule) Set(ctx context.Context, name string, config modules.Con
 
 	return m.packageManager.Install(ctx, name, cfg.Version)
 }
-
-

@@ -197,7 +197,7 @@ platform:
 		t.Run(tt.name, func(t *testing.T) {
 			// Create mock patch manager
 			mockPatchManager := NewMockPatchManager()
-			
+
 			// Create patch module with mock
 			m, err := NewPatchModule(mockPatchManager)
 			require.NoError(t, err)
@@ -227,9 +227,9 @@ platform:
 
 func TestPatchModule_PatchTypes(t *testing.T) {
 	tests := []struct {
-		name       string
-		patchType  string
-		wantErr    bool
+		name      string
+		patchType string
+		wantErr   bool
 	}{
 		{"Valid security", "security", false},
 		{"Valid all", "all", false},
@@ -265,11 +265,11 @@ func TestPatchModule_PatchTypes(t *testing.T) {
 
 func TestPatchModule_ErrorHandling(t *testing.T) {
 	tests := []struct {
-		name         string
-		resourceID   string
-		config       *Config
-		setupFunc    func(*MockPatchManager)
-		expectedErr  error
+		name        string
+		resourceID  string
+		config      *Config
+		setupFunc   func(*MockPatchManager)
+		expectedErr error
 	}{
 		{
 			name:       "Network error",
@@ -314,7 +314,7 @@ func TestPatchModule_ErrorHandling(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			mockPatchManager := NewMockPatchManager()
-			
+
 			if tt.setupFunc != nil {
 				tt.setupFunc(mockPatchManager)
 			}
@@ -364,13 +364,13 @@ func TestPatchModule_GetPatchStatus(t *testing.T) {
 
 func TestConfig_ConfigStateInterface(t *testing.T) {
 	config := &Config{
-		PatchType:  "security",
-		AutoReboot: true,
-		TestMode:   false,
-		IncludePatches: []string{"SEC-2024-001"},
-		ExcludePatches: []string{"KER-2024-001"},
-		MaxDowntime: "1h",
-		PrePatchScript: "echo 'starting patch'",
+		PatchType:       "security",
+		AutoReboot:      true,
+		TestMode:        false,
+		IncludePatches:  []string{"SEC-2024-001"},
+		ExcludePatches:  []string{"KER-2024-001"},
+		MaxDowntime:     "1h",
+		PrePatchScript:  "echo 'starting patch'",
 		PostPatchScript: "echo 'patch complete'",
 	}
 
@@ -476,12 +476,12 @@ func TestConfig_Validation(t *testing.T) {
 			config: &Config{
 				PatchType: "security",
 				Platform: struct {
-					UseYum        bool   `yaml:"use_yum"`
-					UseApt        bool   `yaml:"use_apt"`
-					UpdateKernel  bool   `yaml:"update_kernel"`
-					UseWSUS       bool   `yaml:"use_wsus"`
-					WSUSServer    string `yaml:"wsus_server"`
-					IncludeAppStore bool `yaml:"include_app_store"`
+					UseYum          bool   `yaml:"use_yum"`
+					UseApt          bool   `yaml:"use_apt"`
+					UpdateKernel    bool   `yaml:"update_kernel"`
+					UseWSUS         bool   `yaml:"use_wsus"`
+					WSUSServer      string `yaml:"wsus_server"`
+					IncludeAppStore bool   `yaml:"include_app_store"`
 				}{
 					UseYum: true,
 					UseApt: true,

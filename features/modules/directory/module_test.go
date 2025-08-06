@@ -45,19 +45,19 @@ func TestDirectoryModule(t *testing.T) {
 	}
 
 	tests := []struct {
-		name        string
-		resourceID  string
-		configData  string
-		setup       func() error
-		cleanup     func() error
-		wantErr     bool
+		name       string
+		resourceID string
+		configData string
+		setup      func() error
+		cleanup    func() error
+		wantErr    bool
 	}{
 		{
 			name:       "Create new directory",
 			resourceID: filepath.Join(tempDir, "newdir"),
 			configData: `path: ` + filepath.Join(tempDir, "newdir") + `
 permissions: 0755`,
-			wantErr:     false,
+			wantErr: false,
 		},
 		{
 			name:       "Create directory with ownership",
@@ -66,21 +66,21 @@ permissions: 0755`,
 permissions: 0750
 owner: ` + currentUser.Username + `
 group: ` + currentGroup.Name,
-			wantErr:     false,
+			wantErr: false,
 		},
 		{
 			name:       "Invalid path",
 			resourceID: "",
 			configData: `path: ""
 permissions: 0755`,
-			wantErr:     true,
+			wantErr: true,
 		},
 		{
 			name:       "Invalid permissions",
 			resourceID: filepath.Join(tempDir, "invalid-perms"),
 			configData: `path: ` + filepath.Join(tempDir, "invalid-perms") + `
 permissions: 9999`,
-			wantErr:     true,
+			wantErr: true,
 		},
 		{
 			name:       "Invalid owner",
@@ -88,7 +88,7 @@ permissions: 9999`,
 			configData: `path: ` + filepath.Join(tempDir, "invalid-owner") + `
 permissions: 0755
 owner: nonexistentuser`,
-			wantErr:     true,
+			wantErr: true,
 		},
 		{
 			name:       "Invalid group",
@@ -96,7 +96,7 @@ owner: nonexistentuser`,
 			configData: `path: ` + filepath.Join(tempDir, "invalid-group") + `
 permissions: 0755
 group: nonexistentgroup`,
-			wantErr:     true,
+			wantErr: true,
 		},
 	}
 
@@ -200,4 +200,3 @@ recursive: true`
 		t.Errorf("Set() with non-existent parent and recursive=true error = %v", err)
 	}
 }
-

@@ -35,7 +35,7 @@ func (c *directoryConfig) AsMap() map[string]interface{} {
 		"path":        c.Path,
 		"permissions": c.Permissions,
 	}
-	
+
 	if c.Owner != "" {
 		result["owner"] = c.Owner
 	}
@@ -45,7 +45,7 @@ func (c *directoryConfig) AsMap() map[string]interface{} {
 	if c.Recursive {
 		result["recursive"] = c.Recursive
 	}
-	
+
 	return result
 }
 
@@ -67,14 +67,14 @@ func (c *directoryConfig) Validate() error {
 // GetManagedFields returns the list of fields this configuration manages
 func (c *directoryConfig) GetManagedFields() []string {
 	fields := []string{"path", "permissions"}
-	
+
 	if c.Owner != "" {
 		fields = append(fields, "owner")
 	}
 	if c.Group != "" {
 		fields = append(fields, "group")
 	}
-	
+
 	return fields
 }
 
@@ -115,7 +115,7 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 	// Convert ConfigState to directoryConfig
 	configMap := config.AsMap()
 	dirConfig := &directoryConfig{}
-	
+
 	if path, ok := configMap["path"].(string); ok {
 		dirConfig.Path = path
 	}
@@ -238,4 +238,3 @@ func (m *directoryModule) Get(ctx context.Context, resourceID string) (modules.C
 
 	return config, nil
 }
-

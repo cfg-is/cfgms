@@ -12,15 +12,15 @@ import (
 
 // ScriptConfig represents the configuration for a script resource
 type ScriptConfig struct {
-	Content       string                 `yaml:"content"`                 // Script content
-	Shell         ShellType              `yaml:"shell"`                   // Required shell type
-	Timeout       time.Duration          `yaml:"timeout"`                 // Execution timeout
-	Environment   map[string]string      `yaml:"environment,omitempty"`   // Environment variables
-	WorkingDir    string                 `yaml:"working_dir,omitempty"`   // Working directory
-	Signature     *ScriptSignature       `yaml:"signature,omitempty"`     // Script signature
-	SigningPolicy SigningPolicy          `yaml:"signing_policy"`          // Signing policy
-	Description   string                 `yaml:"description,omitempty"`   // Script description
-	Metadata      map[string]interface{} `yaml:"metadata,omitempty"`      // Additional metadata
+	Content       string                 `yaml:"content"`               // Script content
+	Shell         ShellType              `yaml:"shell"`                 // Required shell type
+	Timeout       time.Duration          `yaml:"timeout"`               // Execution timeout
+	Environment   map[string]string      `yaml:"environment,omitempty"` // Environment variables
+	WorkingDir    string                 `yaml:"working_dir,omitempty"` // Working directory
+	Signature     *ScriptSignature       `yaml:"signature,omitempty"`   // Script signature
+	SigningPolicy SigningPolicy          `yaml:"signing_policy"`        // Signing policy
+	Description   string                 `yaml:"description,omitempty"` // Script description
+	Metadata      map[string]interface{} `yaml:"metadata,omitempty"`    // Additional metadata
 }
 
 // AsMap returns the configuration as a map for efficient field-by-field comparison

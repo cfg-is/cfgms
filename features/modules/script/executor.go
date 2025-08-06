@@ -25,7 +25,7 @@ func NewExecutor(config *ScriptConfig) *Executor {
 // Execute runs the script and returns the execution result
 func (e *Executor) Execute(ctx context.Context) (*ExecutionResult, error) {
 	startTime := time.Now()
-	
+
 	// Create timeout context
 	timeoutCtx, cancel := context.WithTimeout(ctx, e.config.Timeout)
 	defer cancel()
@@ -119,12 +119,12 @@ func (e *Executor) Execute(ctx context.Context) (*ExecutionResult, error) {
 		// Command completed
 		<-stdoutDone
 		<-stderrDone
-		
+
 		result.EndTime = time.Now()
 		result.Duration = result.EndTime.Sub(result.StartTime)
 		result.Stdout = string(stdoutData)
 		result.Stderr = string(stderrData)
-		
+
 		if err != nil {
 			if exitError, ok := err.(*exec.ExitError); ok {
 				result.ExitCode = exitError.ExitCode()
@@ -134,7 +134,7 @@ func (e *Executor) Execute(ctx context.Context) (*ExecutionResult, error) {
 		} else {
 			result.ExitCode = 0
 		}
-		
+
 		return result, nil
 
 	case <-timeoutCtx.Done():
@@ -147,7 +147,7 @@ func (e *Executor) Execute(ctx context.Context) (*ExecutionResult, error) {
 		result.Duration = result.EndTime.Sub(result.StartTime)
 		result.ExitCode = -1
 		result.Stderr = "Script execution timed out"
-		
+
 		return result, fmt.Errorf("script execution timed out after %v", e.config.Timeout)
 	}
 }
@@ -170,16 +170,16 @@ func (e *Executor) buildWindowsCommand(ctx context.Context) (*exec.Cmd, error) {
 	case ShellPowerShell:
 		// Use PowerShell with appropriate execution policy
 		// #nosec G204 - CMS requires script execution for configuration management
-		return exec.CommandContext(ctx, "powershell.exe", 
-			"-ExecutionPolicy", "Bypass", 
-			"-NonInteractive", 
+		return exec.CommandContext(ctx, "powershell.exe",
+			"-ExecutionPolicy", "Bypass",
+			"-NonInteractive",
 			"-Command", e.config.Content), nil
-			
+
 	case ShellCmd:
 		// Use Command Prompt
 		// #nosec G204 - CMS requires script execution for configuration management
 		return exec.CommandContext(ctx, "cmd.exe", "/c", e.config.Content), nil
-		
+
 	case ShellPython, ShellPython3:
 		// Use Python interpreter
 		pythonCmd := "python"
@@ -188,7 +188,7 @@ func (e *Executor) buildWindowsCommand(ctx context.Context) (*exec.Cmd, error) {
 		}
 		// #nosec G204 - CMS requires script execution for configuration management
 		return exec.CommandContext(ctx, pythonCmd, "-c", e.config.Content), nil
-		
+
 	default:
 		return nil, fmt.Errorf("unsupported shell on Windows: %s", e.config.Shell)
 	}
@@ -200,15 +200,15 @@ func (e *Executor) buildUnixCommand(ctx context.Context) (*exec.Cmd, error) {
 	case ShellBash:
 		// #nosec G204 - CMS requires script execution for configuration management
 		return exec.CommandContext(ctx, "/bin/bash", "-c", e.config.Content), nil
-		
+
 	case ShellZsh:
 		// #nosec G204 - CMS requires script execution for configuration management
 		return exec.CommandContext(ctx, "/bin/zsh", "-c", e.config.Content), nil
-		
+
 	case ShellSh:
 		// #nosec G204 - CMS requires script execution for configuration management
 		return exec.CommandContext(ctx, "/bin/sh", "-c", e.config.Content), nil
-		
+
 	case ShellPython, ShellPython3:
 		pythonCmd := "/usr/bin/python"
 		if e.config.Shell == ShellPython3 {
@@ -216,7 +216,7 @@ func (e *Executor) buildUnixCommand(ctx context.Context) (*exec.Cmd, error) {
 		}
 		// #nosec G204 - CMS requires script execution for configuration management
 		return exec.CommandContext(ctx, pythonCmd, "-c", e.config.Content), nil
-		
+
 	default:
 		return nil, fmt.Errorf("unsupported shell on Unix: %s", e.config.Shell)
 	}
@@ -262,7 +262,7 @@ func (e *Executor) validateWindowsShell() error {
 // validateUnixShell checks Unix shell availability
 func (e *Executor) validateUnixShell() error {
 	var shellPath string
-	
+
 	switch e.config.Shell {
 	case ShellBash:
 		shellPath = "/bin/bash"
@@ -277,7 +277,7 @@ func (e *Executor) validateUnixShell() error {
 	default:
 		return fmt.Errorf("unsupported shell on Unix: %s", e.config.Shell)
 	}
-	
+
 	if _, err := os.Stat(shellPath); os.IsNotExist(err) {
 		// Try to find in PATH as fallback
 		shellName := strings.TrimPrefix(shellPath, "/usr/bin/")
@@ -286,6 +286,6 @@ func (e *Executor) validateUnixShell() error {
 			return fmt.Errorf("shell %s is not available at %s or in PATH: %w", e.config.Shell, shellPath, err)
 		}
 	}
-	
+
 	return nil
 }

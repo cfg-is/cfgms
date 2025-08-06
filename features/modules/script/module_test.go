@@ -7,8 +7,6 @@ import (
 	"time"
 )
 
-
-
 // getTestShell returns an appropriate shell for the current platform
 func getTestShell() ShellType {
 	switch runtime.GOOS {
@@ -328,7 +326,7 @@ func TestScriptModule_ExecutionState(t *testing.T) {
 	}
 
 	ctx := context.WithValue(context.Background(), timestampKey, time.Now().Unix())
-	
+
 	// This will create an execution state
 	err := module.Set(ctx, resourceID, testConfig)
 	if err != nil {

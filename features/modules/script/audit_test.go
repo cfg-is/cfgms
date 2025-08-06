@@ -94,7 +94,7 @@ func TestAuditLogger_QueryExecutions(t *testing.T) {
 		},
 		{
 			StewardID:     stewardID,
-			ResourceID:    "script-2", 
+			ResourceID:    "script-2",
 			ExecutionTime: baseTime.Add(-30 * time.Minute),
 			Status:        StatusFailed,
 			ExitCode:      1,
@@ -270,7 +270,7 @@ func TestAuditLogger_GetExecutionMetrics(t *testing.T) {
 func TestCreateAuditRecord(t *testing.T) {
 	stewardID := "test-steward"
 	resourceID := "test-script"
-	
+
 	config := &ScriptConfig{
 		Content:       "echo 'test'",
 		Shell:         ShellBash,
@@ -328,7 +328,7 @@ func TestCreateAuditRecord(t *testing.T) {
 func TestCreateAuditRecord_WithError(t *testing.T) {
 	stewardID := "test-steward"
 	resourceID := "test-script"
-	
+
 	config := &ScriptConfig{
 		Content: "exit 1",
 		Shell:   ShellBash,

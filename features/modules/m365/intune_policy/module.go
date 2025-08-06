@@ -31,16 +31,16 @@ type IntunePolicyConfig struct {
 	DisplayName             string `yaml:"display_name"`
 	Description             string `yaml:"description"`
 	DeviceConfigurationType string `yaml:"device_configuration_type"` // Type of configuration (e.g., windows10GeneralConfiguration)
-	
+
 	// Policy settings - flexible structure to accommodate different policy types
 	Settings map[string]interface{} `yaml:"settings"`
-	
+
 	// Assignments - which groups/users this policy applies to
 	Assignments []PolicyAssignment `yaml:"assignments,omitempty"`
-	
+
 	// Tenant configuration
 	TenantID string `yaml:"tenant_id"`
-	
+
 	// Managed fields - controls which fields Set() will modify
 	ManagedFieldsList []string `yaml:"managed_fields,omitempty"`
 }
@@ -49,10 +49,10 @@ type IntunePolicyConfig struct {
 type PolicyAssignment struct {
 	// Target specifies what this assignment targets
 	Target PolicyAssignmentTarget `yaml:"target"`
-	
+
 	// Intent specifies the assignment intent (required, available, etc.)
 	Intent string `yaml:"intent,omitempty"` // apply, remove
-	
+
 	// Settings for the assignment
 	Settings *PolicyAssignmentSettings `yaml:"settings,omitempty"`
 }
@@ -61,13 +61,13 @@ type PolicyAssignment struct {
 type PolicyAssignmentTarget struct {
 	// TargetType specifies the type of target (allUsers, allDevices, groupAssignmentTarget, etc.)
 	TargetType string `yaml:"target_type"`
-	
+
 	// GroupID for group-based assignments
 	GroupID string `yaml:"group_id,omitempty"`
-	
+
 	// IncludeGroups for inclusion-based assignments
 	IncludeGroups []string `yaml:"include_groups,omitempty"`
-	
+
 	// ExcludeGroups for exclusion-based assignments
 	ExcludeGroups []string `yaml:"exclude_groups,omitempty"`
 }
@@ -76,10 +76,10 @@ type PolicyAssignmentTarget struct {
 type PolicyAssignmentSettings struct {
 	// DeviceAndAppManagementAssignmentFilterType
 	FilterType string `yaml:"filter_type,omitempty"` // none, include, exclude
-	
+
 	// DeviceAndAppManagementAssignmentFilterId
 	FilterID string `yaml:"filter_id,omitempty"`
-	
+
 	// Additional settings as needed
 	AdditionalSettings map[string]interface{} `yaml:"additional_settings,omitempty"`
 }
@@ -87,37 +87,37 @@ type PolicyAssignmentSettings struct {
 // Common Intune policy types
 const (
 	// Windows 10 configuration types
-	Windows10GeneralConfiguration           = "microsoft.graph.windows10GeneralConfiguration"
+	Windows10GeneralConfiguration            = "microsoft.graph.windows10GeneralConfiguration"
 	Windows10EndpointProtectionConfiguration = "microsoft.graph.windows10EndpointProtectionConfiguration"
 	Windows10SecureAssessmentConfiguration   = "microsoft.graph.windows10SecureAssessmentConfiguration"
-	
+
 	// macOS configuration types
-	MacOSGeneralDeviceConfiguration         = "microsoft.graph.macOSGeneralDeviceConfiguration"
-	MacOSDeviceFeaturesConfiguration       = "microsoft.graph.macOSDeviceFeaturesConfiguration"
-	
+	MacOSGeneralDeviceConfiguration  = "microsoft.graph.macOSGeneralDeviceConfiguration"
+	MacOSDeviceFeaturesConfiguration = "microsoft.graph.macOSDeviceFeaturesConfiguration"
+
 	// iOS configuration types
-	IosGeneralDeviceConfiguration          = "microsoft.graph.iosGeneralDeviceConfiguration"
-	IosDeviceFeaturesConfiguration         = "microsoft.graph.iosDeviceFeaturesConfiguration"
-	
+	IosGeneralDeviceConfiguration  = "microsoft.graph.iosGeneralDeviceConfiguration"
+	IosDeviceFeaturesConfiguration = "microsoft.graph.iosDeviceFeaturesConfiguration"
+
 	// Android configuration types
-	AndroidGeneralDeviceConfiguration      = "microsoft.graph.androidGeneralDeviceConfiguration"
+	AndroidGeneralDeviceConfiguration            = "microsoft.graph.androidGeneralDeviceConfiguration"
 	AndroidWorkProfileGeneralDeviceConfiguration = "microsoft.graph.androidWorkProfileGeneralDeviceConfiguration"
 )
 
 // AsMap returns the configuration as a map for efficient field-by-field comparison
 func (c *IntunePolicyConfig) AsMap() map[string]interface{} {
 	result := map[string]interface{}{
-		"display_name":               c.DisplayName,
-		"description":                c.Description,
-		"device_configuration_type":  c.DeviceConfigurationType,
-		"settings":                   c.Settings,
-		"tenant_id":                  c.TenantID,
+		"display_name":              c.DisplayName,
+		"description":               c.Description,
+		"device_configuration_type": c.DeviceConfigurationType,
+		"settings":                  c.Settings,
+		"tenant_id":                 c.TenantID,
 	}
-	
+
 	if len(c.Assignments) > 0 {
 		result["assignments"] = c.Assignments
 	}
-	
+
 	return result
 }
 
@@ -136,26 +136,26 @@ func (c *IntunePolicyConfig) Validate() error {
 	if c.DisplayName == "" {
 		return fmt.Errorf("display_name is required")
 	}
-	
+
 	if c.DeviceConfigurationType == "" {
 		return fmt.Errorf("device_configuration_type is required")
 	}
-	
+
 	if c.TenantID == "" {
 		return fmt.Errorf("tenant_id is required")
 	}
-	
+
 	if len(c.Settings) == 0 {
 		return fmt.Errorf("settings cannot be empty")
 	}
-	
+
 	// Validate assignments
 	for i, assignment := range c.Assignments {
 		if err := c.validateAssignment(assignment); err != nil {
 			return fmt.Errorf("invalid assignment at index %d: %w", i, err)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -164,23 +164,23 @@ func (c *IntunePolicyConfig) validateAssignment(assignment PolicyAssignment) err
 	if assignment.Target.TargetType == "" {
 		return fmt.Errorf("target.target_type is required")
 	}
-	
+
 	validTargetTypes := []string{
-		"allUsers", "allDevices", "groupAssignmentTarget", 
+		"allUsers", "allDevices", "groupAssignmentTarget",
 		"exclusionGroupAssignmentTarget", "configurationManagerCollectionAssignmentTarget",
 	}
-	
+
 	if !contains(validTargetTypes, assignment.Target.TargetType) {
 		return fmt.Errorf("invalid target_type: %s, must be one of: %v", assignment.Target.TargetType, validTargetTypes)
 	}
-	
+
 	// Validate group-specific assignments
 	if assignment.Target.TargetType == "groupAssignmentTarget" || assignment.Target.TargetType == "exclusionGroupAssignmentTarget" {
 		if assignment.Target.GroupID == "" && len(assignment.Target.IncludeGroups) == 0 {
 			return fmt.Errorf("group_id or include_groups must be specified for group-based assignments")
 		}
 	}
-	
+
 	return nil
 }
 
@@ -190,14 +190,14 @@ func (c *IntunePolicyConfig) GetManagedFields() []string {
 	if len(c.ManagedFieldsList) > 0 {
 		return c.ManagedFieldsList
 	}
-	
+
 	// Default managed fields
 	fields := []string{"display_name", "description", "settings"}
-	
+
 	if len(c.Assignments) > 0 {
 		fields = append(fields, "assignments")
 	}
-	
+
 	return fields
 }
 
@@ -206,7 +206,7 @@ func (m *intunePolicyModule) Set(ctx context.Context, resourceID string, config 
 	// Convert ConfigState to IntunePolicyConfig
 	configMap := config.AsMap()
 	intuneConfig := &IntunePolicyConfig{}
-	
+
 	// Map basic fields
 	if displayName, ok := configMap["display_name"].(string); ok {
 		intuneConfig.DisplayName = displayName
@@ -220,31 +220,31 @@ func (m *intunePolicyModule) Set(ctx context.Context, resourceID string, config 
 	if tenantID, ok := configMap["tenant_id"].(string); ok {
 		intuneConfig.TenantID = tenantID
 	}
-	
+
 	// Map settings
 	if settings, ok := configMap["settings"].(map[string]interface{}); ok {
 		intuneConfig.Settings = settings
 	}
-	
+
 	// Map assignments
 	if assignments, ok := configMap["assignments"].([]PolicyAssignment); ok {
 		intuneConfig.Assignments = assignments
 	}
-	
+
 	// Validate configuration
 	if err := intuneConfig.Validate(); err != nil {
 		return fmt.Errorf("invalid configuration: %w", err)
 	}
-	
+
 	// Authenticate with Microsoft Graph
 	token, err := m.authProvider.GetAccessToken(ctx, intuneConfig.TenantID)
 	if err != nil {
 		return fmt.Errorf("failed to authenticate with Microsoft Graph: %w", err)
 	}
-	
+
 	// Parse configuration ID from resource ID if provided
 	configurationID := extractConfigurationID(resourceID)
-	
+
 	// Check if configuration exists
 	var existingConfig *graph.DeviceConfiguration
 	if configurationID != "" {
@@ -256,12 +256,12 @@ func (m *intunePolicyModule) Set(ctx context.Context, resourceID string, config 
 			// Configuration doesn't exist, we'll create it
 		}
 	}
-	
+
 	if existingConfig == nil {
 		// Create new configuration
 		return m.createConfiguration(ctx, token, intuneConfig)
 	}
-	
+
 	// Update existing configuration with only managed fields
 	return m.updateConfiguration(ctx, token, intuneConfig, existingConfig)
 }
@@ -274,19 +274,19 @@ func (m *intunePolicyModule) Get(ctx context.Context, resourceID string) (module
 	if err != nil {
 		return nil, fmt.Errorf("invalid resource ID format: %w", err)
 	}
-	
+
 	// Authenticate with Microsoft Graph
 	token, err := m.authProvider.GetAccessToken(ctx, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to authenticate with Microsoft Graph: %w", err)
 	}
-	
+
 	// Get configuration from Graph API
 	deviceConfig, err := m.graphClient.GetDeviceConfiguration(ctx, token, configurationID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get configuration from Graph API: %w", err)
 	}
-	
+
 	// Convert Graph configuration to our config format
 	config := &IntunePolicyConfig{
 		DisplayName:             deviceConfig.DisplayName,
@@ -296,7 +296,7 @@ func (m *intunePolicyModule) Get(ctx context.Context, resourceID string) (module
 		TenantID:                tenantID,
 		// Note: Assignments would need separate API calls to retrieve
 	}
-	
+
 	return config, nil
 }
 
@@ -304,24 +304,24 @@ func (m *intunePolicyModule) Get(ctx context.Context, resourceID string) (module
 func (m *intunePolicyModule) createConfiguration(ctx context.Context, token *auth.AccessToken, config *IntunePolicyConfig) error {
 	request := &graph.CreateDeviceConfigurationRequest{
 		DeviceConfigurationType: config.DeviceConfigurationType,
-		DisplayName:            config.DisplayName,
-		Description:            config.Description,
-		Settings:               config.Settings,
+		DisplayName:             config.DisplayName,
+		Description:             config.Description,
+		Settings:                config.Settings,
 	}
-	
+
 	// Create the configuration
 	deviceConfig, err := m.graphClient.CreateDeviceConfiguration(ctx, token, request)
 	if err != nil {
 		return fmt.Errorf("failed to create configuration: %w", err)
 	}
-	
+
 	// Apply assignments if specified
 	if len(config.Assignments) > 0 {
 		if err := m.assignConfiguration(ctx, token, deviceConfig.ID, config.Assignments); err != nil {
 			return fmt.Errorf("failed to assign configuration: %w", err)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -329,7 +329,7 @@ func (m *intunePolicyModule) createConfiguration(ctx context.Context, token *aut
 func (m *intunePolicyModule) updateConfiguration(ctx context.Context, token *auth.AccessToken, config *IntunePolicyConfig, existingConfig *graph.DeviceConfiguration) error {
 	managedFields := config.GetManagedFields()
 	updateRequest := &graph.UpdateDeviceConfigurationRequest{}
-	
+
 	// Only update managed fields
 	for _, field := range managedFields {
 		switch field {
@@ -346,21 +346,21 @@ func (m *intunePolicyModule) updateConfiguration(ctx context.Context, token *aut
 			updateRequest.Settings = config.Settings
 		}
 	}
-	
+
 	// Update the configuration if there are changes
 	if updateRequest.DisplayName != nil || updateRequest.Description != nil || updateRequest.Settings != nil {
 		if err := m.graphClient.UpdateDeviceConfiguration(ctx, token, existingConfig.ID, updateRequest); err != nil {
 			return fmt.Errorf("failed to update configuration: %w", err)
 		}
 	}
-	
+
 	// Handle assignments if managed
 	if contains(managedFields, "assignments") && len(config.Assignments) > 0 {
 		if err := m.assignConfiguration(ctx, token, existingConfig.ID, config.Assignments); err != nil {
 			return fmt.Errorf("failed to update configuration assignments: %w", err)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -368,21 +368,21 @@ func (m *intunePolicyModule) updateConfiguration(ctx context.Context, token *aut
 func (m *intunePolicyModule) assignConfiguration(ctx context.Context, token *auth.AccessToken, configurationID string, assignments []PolicyAssignment) error {
 	// Note: In a real implementation, this would use the Graph API assignments endpoint
 	// For now, this is a placeholder that demonstrates the structure
-	
+
 	for _, assignment := range assignments {
 		// Convert our assignment format to Graph API format and make assignment calls
 		// This would involve calling something like:
 		// POST /deviceManagement/deviceConfigurations/{id}/assign
-		
+
 		// Placeholder logging
 		fmt.Printf("Assigning configuration %s to target type %s\n", configurationID, assignment.Target.TargetType)
-		
+
 		// In real implementation:
 		// - Build assignment request based on assignment.Target
 		// - Call Graph API to create assignment
 		// - Handle assignment-specific errors
 	}
-	
+
 	return nil
 }
 
@@ -423,26 +423,26 @@ func GetPolicyTemplates() map[string]IntunePolicyConfig {
 			Description:             "Basic security configuration for Windows 10 devices",
 			DeviceConfigurationType: Windows10GeneralConfiguration,
 			Settings: map[string]interface{}{
-				"passwordRequired":                    true,
-				"passwordMinimumLength":               8,
-				"passwordRequiredType":                "alphanumeric",
-				"passwordPreviousPasswordBlockCount":  5,
-				"passwordMinimumCharacterSetCount":    2,
-				"passwordExpirationDays":              90,
+				"passwordRequired":                               true,
+				"passwordMinimumLength":                          8,
+				"passwordRequiredType":                           "alphanumeric",
+				"passwordPreviousPasswordBlockCount":             5,
+				"passwordMinimumCharacterSetCount":               2,
+				"passwordExpirationDays":                         90,
 				"passwordMinutesOfInactivityBeforeScreenTimeout": 15,
 				"passwordSignInFailureCountBeforeFactoryReset":   10,
-				"defenderRequireRealTimeMonitoring":   true,
-				"defenderRequireBehaviorMonitoring":   true,
-				"defenderRequireNetworkInspectionSystem": true,
-				"defenderScanDownloads":               true,
-				"defenderScheduleScanDay":             "everyday",
-				"defenderScanType":                    "quick",
-				"defenderSystemScanSchedule":          "userDefined",
-				"smartScreenEnabled":                  true,
-				"smartScreenBlockPromptOverride":      true,
-				"smartScreenBlockPromptOverrideForFiles": true,
-				"storageBlockRemovableStorage":        false,
-				"storageRequireMobileDeviceEncryption": true,
+				"defenderRequireRealTimeMonitoring":              true,
+				"defenderRequireBehaviorMonitoring":              true,
+				"defenderRequireNetworkInspectionSystem":         true,
+				"defenderScanDownloads":                          true,
+				"defenderScheduleScanDay":                        "everyday",
+				"defenderScanType":                               "quick",
+				"defenderSystemScanSchedule":                     "userDefined",
+				"smartScreenEnabled":                             true,
+				"smartScreenBlockPromptOverride":                 true,
+				"smartScreenBlockPromptOverrideForFiles":         true,
+				"storageBlockRemovableStorage":                   false,
+				"storageRequireMobileDeviceEncryption":           true,
 			},
 		},
 		"macos_security_baseline": {
@@ -450,19 +450,19 @@ func GetPolicyTemplates() map[string]IntunePolicyConfig {
 			Description:             "Basic security configuration for macOS devices",
 			DeviceConfigurationType: MacOSGeneralDeviceConfiguration,
 			Settings: map[string]interface{}{
-				"passwordRequired":                    true,
-				"passwordMinimumLength":               8,
-				"passwordRequiredType":                "alphanumeric",
-				"passwordPreviousPasswordBlockCount":  5,
-				"passwordMinimumCharacterSetCount":    2,
-				"passwordExpirationDays":              90,
+				"passwordRequired":                               true,
+				"passwordMinimumLength":                          8,
+				"passwordRequiredType":                           "alphanumeric",
+				"passwordPreviousPasswordBlockCount":             5,
+				"passwordMinimumCharacterSetCount":               2,
+				"passwordExpirationDays":                         90,
 				"passwordMinutesOfInactivityBeforeScreenTimeout": 15,
-				"passwordSignInFailureCountBeforeWipe": 10,
-				"systemIntegrityProtectionEnabled":    true,
-				"firewallEnabled":                     true,
-				"firewallBlockAllIncoming":            false,
-				"firewallEnableStealthMode":           true,
-				"gatekeeperAllowedAppSource":          "macAppStoreAndIdentifiedDevelopers",
+				"passwordSignInFailureCountBeforeWipe":           10,
+				"systemIntegrityProtectionEnabled":               true,
+				"firewallEnabled":                                true,
+				"firewallBlockAllIncoming":                       false,
+				"firewallEnableStealthMode":                      true,
+				"gatekeeperAllowedAppSource":                     "macAppStoreAndIdentifiedDevelopers",
 			},
 		},
 		"ios_security_baseline": {
@@ -470,23 +470,23 @@ func GetPolicyTemplates() map[string]IntunePolicyConfig {
 			Description:             "Basic security configuration for iOS devices",
 			DeviceConfigurationType: IosGeneralDeviceConfiguration,
 			Settings: map[string]interface{}{
-				"passcodeRequired":                    true,
-				"passcodeMinimumLength":               6,
-				"passcodeRequiredType":                "numeric",
-				"passcodePreviousPasscodeBlockCount":  5,
-				"passcodeMinimumCharacterSetCount":    1,
-				"passcodeExpirationDays":              90,
+				"passcodeRequired":                               true,
+				"passcodeMinimumLength":                          6,
+				"passcodeRequiredType":                           "numeric",
+				"passcodePreviousPasscodeBlockCount":             5,
+				"passcodeMinimumCharacterSetCount":               1,
+				"passcodeExpirationDays":                         90,
 				"passcodeMinutesOfInactivityBeforeScreenTimeout": 15,
-				"passcodeSignInFailureCountBeforeWipe": 10,
-				"touchIdTimeoutInHours":               48,
-				"faceIdBlocked":                       false,
-				"appStoreBlockAutomaticDownloads":     false,
-				"appStoreBlocked":                     false,
-				"appStoreBlockUIAppInstallation":      false,
-				"appStoreRequirePassword":             "always",
-				"bluetoothBlockModification":          false,
-				"cameraBlocked":                       false,
-				"cellularBlockDataRoaming":            true,
+				"passcodeSignInFailureCountBeforeWipe":           10,
+				"touchIdTimeoutInHours":                          48,
+				"faceIdBlocked":                                  false,
+				"appStoreBlockAutomaticDownloads":                false,
+				"appStoreBlocked":                                false,
+				"appStoreBlockUIAppInstallation":                 false,
+				"appStoreRequirePassword":                        "always",
+				"bluetoothBlockModification":                     false,
+				"cameraBlocked":                                  false,
+				"cellularBlockDataRoaming":                       true,
 				"cellularBlockGlobalBackgroundFetchWhileRoaming": true,
 			},
 		},
@@ -495,23 +495,23 @@ func GetPolicyTemplates() map[string]IntunePolicyConfig {
 			Description:             "Basic security configuration for Android devices",
 			DeviceConfigurationType: AndroidGeneralDeviceConfiguration,
 			Settings: map[string]interface{}{
-				"passwordRequired":                    true,
-				"passwordMinimumLength":               6,
-				"passwordRequiredType":                "numeric",
-				"passwordPreviousPasswordBlockCount":  5,
-				"passwordExpirationDays":              90,
+				"passwordRequired":                               true,
+				"passwordMinimumLength":                          6,
+				"passwordRequiredType":                           "numeric",
+				"passwordPreviousPasswordBlockCount":             5,
+				"passwordExpirationDays":                         90,
 				"passwordMinutesOfInactivityBeforeScreenTimeout": 15,
-				"passwordSignInFailureCountBeforeFactoryReset": 10,
-				"storageRequireDeviceEncryption":      true,
-				"storageRequireRemovableStorageEncryption": true,
-				"securityRequireVerifyApps":           true,
-				"deviceCompliancePolicyScript":        nil,
-				"securityBlockJailbrokenDevices":      true,
-				"locationServicesBlocked":             false,
-				"googleAccountsBlocked":               false,
-				"googlePlayStoreBlocked":              false,
-				"kioskModeBlockSleepButton":           false,
-				"kioskModeBlockVolumeButtons":         false,
+				"passwordSignInFailureCountBeforeFactoryReset":   10,
+				"storageRequireDeviceEncryption":                 true,
+				"storageRequireRemovableStorageEncryption":       true,
+				"securityRequireVerifyApps":                      true,
+				"deviceCompliancePolicyScript":                   nil,
+				"securityBlockJailbrokenDevices":                 true,
+				"locationServicesBlocked":                        false,
+				"googleAccountsBlocked":                          false,
+				"googlePlayStoreBlocked":                         false,
+				"kioskModeBlockSleepButton":                      false,
+				"kioskModeBlockVolumeButtons":                    false,
 			},
 		},
 	}

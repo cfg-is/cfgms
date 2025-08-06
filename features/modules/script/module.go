@@ -34,7 +34,7 @@ func New() modules.Module {
 	return &Module{
 		executions:  make(map[string]*ExecutionState),
 		auditLogger: NewAuditLogger(1000), // Default 1000 records per steward
-		stewardID:   "unknown", // Will be set by steward when module is loaded
+		stewardID:   "unknown",            // Will be set by steward when module is loaded
 	}
 }
 
@@ -104,7 +104,7 @@ func (m *Module) Set(ctx context.Context, resourceID string, config modules.Conf
 	} else {
 		startTime = time.Now().Unix()
 	}
-	
+
 	m.mu.Lock()
 	m.executions[resourceID] = &ExecutionState{
 		Config:    scriptConfig,
@@ -118,14 +118,14 @@ func (m *Module) Set(ctx context.Context, resourceID string, config modules.Conf
 
 	// Execute the script
 	result, err := executor.Execute(ctx)
-	
+
 	// Create audit record regardless of success/failure
 	auditRecord := CreateAuditRecord(m.stewardID, resourceID, scriptConfig, result, err)
 	if auditErr := m.auditLogger.LogExecution(ctx, auditRecord); auditErr != nil {
 		// Log audit error but don't fail the execution
 		fmt.Printf("Failed to log script execution audit: %v\n", auditErr)
 	}
-	
+
 	if err != nil {
 		m.updateExecutionStatus(resourceID, StatusFailed, nil, err)
 		return fmt.Errorf("script execution failed: %w", err)
@@ -135,7 +135,7 @@ func (m *Module) Set(ctx context.Context, resourceID string, config modules.Conf
 	if result.ExitCode == 0 {
 		m.updateExecutionStatus(resourceID, StatusCompleted, result, nil)
 	} else {
-		m.updateExecutionStatus(resourceID, StatusFailed, result, 
+		m.updateExecutionStatus(resourceID, StatusFailed, result,
 			fmt.Errorf("script exited with code %d: %s", result.ExitCode, result.Stderr))
 	}
 
@@ -160,21 +160,21 @@ func (m *Module) validateSignature(config *ScriptConfig) error {
 	case SigningPolicyNone:
 		// No validation required
 		return nil
-		
+
 	case SigningPolicyOptional:
 		// Validate only if signature is present
 		if config.Signature != nil {
 			return m.verifySignature(config)
 		}
 		return nil
-		
+
 	case SigningPolicyRequired:
 		// Signature must be present and valid
 		if config.Signature == nil {
 			return fmt.Errorf("%w: signature is required but not provided", modules.ErrInvalidInput)
 		}
 		return m.verifySignature(config)
-		
+
 	default:
 		return fmt.Errorf("%w: invalid signing policy: %s", modules.ErrInvalidInput, config.SigningPolicy)
 	}
@@ -184,7 +184,7 @@ func (m *Module) validateSignature(config *ScriptConfig) error {
 func (m *Module) verifySignature(config *ScriptConfig) error {
 	// TODO: Implement actual signature verification
 	// This is a placeholder implementation
-	
+
 	if config.Signature == nil {
 		return fmt.Errorf("%w: signature is required but not provided", modules.ErrInvalidInput)
 	}

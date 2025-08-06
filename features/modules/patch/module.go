@@ -220,7 +220,7 @@ func (m *PatchModule) Set(ctx context.Context, resourceID string, config modules
 
 	// Release the lock before refreshing status
 	m.mu.Unlock()
-	
+
 	// Refresh cached status after successful patching
 	err = m.refreshStatus(ctx)
 	if err != nil {
@@ -266,7 +266,7 @@ func (m *PatchModule) refreshStatus(ctx context.Context) error {
 		if !patch.Installed {
 			pendingPatches = append(pendingPatches, patch)
 			totalSize += patch.Size
-			
+
 			if patch.Category == "security" {
 				securityPatches++
 			}
@@ -299,7 +299,7 @@ func (m *PatchModule) executeScript(ctx context.Context, script string) error {
 	if strings.TrimSpace(script) == "" {
 		return fmt.Errorf("empty script")
 	}
-	
+
 	// Simulate script execution
 	fmt.Printf("Executing script: %s\n", script)
 	return nil

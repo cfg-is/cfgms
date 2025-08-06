@@ -63,7 +63,7 @@ func (m *fileModule) Set(ctx context.Context, resourceID string, config modules.
 	// Convert ConfigState to FileConfig
 	configMap := config.AsMap()
 	fileConfig := &FileConfig{}
-	
+
 	if content, ok := configMap["content"].(string); ok {
 		fileConfig.Content = content
 	}
@@ -77,7 +77,6 @@ func (m *fileModule) Set(ctx context.Context, resourceID string, config modules.
 		fileConfig.Group = group
 	}
 
-	
 	// Validate configuration
 	if err := fileConfig.Validate(); err != nil {
 		return err
@@ -134,4 +133,3 @@ func (m *fileModule) Set(ctx context.Context, resourceID string, config modules.
 
 	return nil
 }
-

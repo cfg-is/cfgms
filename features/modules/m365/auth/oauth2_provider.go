@@ -15,14 +15,14 @@ import (
 type OAuth2Provider struct {
 	// HTTP client for making requests
 	httpClient *http.Client
-	
+
 	// Configuration storage
 	credentialStore CredentialStore
-	
+
 	// Token cache to avoid unnecessary requests
 	tokenCache map[string]*cachedToken
 	cacheMutex sync.RWMutex
-	
+
 	// Default configuration for new tenants
 	defaultConfig *OAuth2Config
 }
@@ -51,20 +51,20 @@ func (p *OAuth2Provider) GetAccessToken(ctx context.Context, tenantID string) (*
 	if token := p.getCachedToken(tenantID); token != nil && !token.IsExpired() {
 		return token, nil
 	}
-	
+
 	// Get OAuth2 configuration for the tenant
 	config, err := p.getOAuth2Config(tenantID)
 	if err != nil {
 		return nil, NewAuthenticationError(tenantID, "CONFIG_ERROR", "Failed to get OAuth2 configuration", err)
 	}
-	
+
 	// Try to get stored token first
 	storedToken, err := p.credentialStore.GetToken(tenantID)
 	if err == nil && storedToken != nil && !storedToken.IsExpired() {
 		p.setCachedToken(tenantID, storedToken)
 		return storedToken, nil
 	}
-	
+
 	// If stored token is expired or doesn't exist, get a new one
 	var token *AccessToken
 	if config.UseClientCredentials {
@@ -74,24 +74,24 @@ func (p *OAuth2Provider) GetAccessToken(ctx context.Context, tenantID string) (*
 		if storedToken != nil && storedToken.RefreshToken != "" {
 			token, err = p.RefreshToken(ctx, storedToken.RefreshToken)
 		} else {
-			return nil, NewAuthenticationError(tenantID, "NO_REFRESH_TOKEN", 
+			return nil, NewAuthenticationError(tenantID, "NO_REFRESH_TOKEN",
 				"No valid refresh token available for interactive flow", nil)
 		}
 	}
-	
+
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Store the new token
 	if err := p.credentialStore.StoreToken(tenantID, token); err != nil {
 		// Log warning but don't fail - we can still return the token
 		fmt.Printf("Warning: Failed to store token for tenant %s: %v\n", tenantID, err)
 	}
-	
+
 	// Cache the token
 	p.setCachedToken(tenantID, token)
-	
+
 	return token, nil
 }
 
@@ -100,16 +100,16 @@ func (p *OAuth2Provider) RefreshToken(ctx context.Context, refreshToken string) 
 	// Parse the refresh token to extract tenant information
 	// In a real implementation, you might store tenant info with the refresh token
 	// For now, we'll assume the refresh token contains or is associated with tenant info
-	
+
 	// This is a simplified implementation - in practice, you'd need to track
 	// which tenant this refresh token belongs to
 	tenantID := "unknown" // Would need to be determined from context
-	
+
 	config, err := p.getOAuth2Config(tenantID)
 	if err != nil {
 		return nil, NewAuthenticationError(tenantID, "CONFIG_ERROR", "Failed to get OAuth2 configuration", err)
 	}
-	
+
 	// Prepare refresh token request
 	data := url.Values{
 		"grant_type":    {"refresh_token"},
@@ -117,18 +117,18 @@ func (p *OAuth2Provider) RefreshToken(ctx context.Context, refreshToken string) 
 		"client_id":     {config.ClientID},
 		"scope":         {config.GetScopeString()},
 	}
-	
+
 	// Add client secret if available (for confidential clients)
 	if config.ClientSecret != "" {
 		data.Set("client_secret", config.ClientSecret)
 	}
-	
+
 	// Make the token request
 	token, err := p.makeTokenRequest(ctx, config.GetTokenURL(), data)
 	if err != nil {
 		return nil, NewAuthenticationError(tenantID, "REFRESH_FAILED", "Failed to refresh token", err)
 	}
-	
+
 	token.TenantID = tenantID
 	return token, nil
 }
@@ -147,14 +147,14 @@ func (p *OAuth2Provider) getClientCredentialsToken(ctx context.Context, config *
 		"client_secret": {config.ClientSecret},
 		"scope":         {config.GetScopeString()},
 	}
-	
+
 	// Make the token request
 	token, err := p.makeTokenRequest(ctx, config.GetTokenURL(), data)
 	if err != nil {
-		return nil, NewAuthenticationError(config.TenantID, "CLIENT_CREDENTIALS_FAILED", 
+		return nil, NewAuthenticationError(config.TenantID, "CLIENT_CREDENTIALS_FAILED",
 			"Failed to obtain client credentials token", err)
 	}
-	
+
 	token.TenantID = config.TenantID
 	return token, nil
 }
@@ -166,12 +166,12 @@ func (p *OAuth2Provider) makeTokenRequest(ctx context.Context, tokenURL string, 
 	if err != nil {
 		return nil, fmt.Errorf("failed to create token request: %w", err)
 	}
-	
+
 	// Set headers
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "CFGMS-SaaS-Steward/1.0")
-	
+
 	// Make the request
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
@@ -183,32 +183,32 @@ func (p *OAuth2Provider) makeTokenRequest(ctx context.Context, tokenURL string, 
 			_ = err // Explicitly ignore error for cleanup operation
 		}
 	}()
-	
+
 	// Parse response
 	var tokenResponse struct {
-		AccessToken  string `json:"access_token"`
-		TokenType    string `json:"token_type"`
-		ExpiresIn    int    `json:"expires_in"`
-		RefreshToken string `json:"refresh_token,omitempty"`
-		Scope        string `json:"scope,omitempty"`
-		Error        string `json:"error,omitempty"`
+		AccessToken      string `json:"access_token"`
+		TokenType        string `json:"token_type"`
+		ExpiresIn        int    `json:"expires_in"`
+		RefreshToken     string `json:"refresh_token,omitempty"`
+		Scope            string `json:"scope,omitempty"`
+		Error            string `json:"error,omitempty"`
 		ErrorDescription string `json:"error_description,omitempty"`
 	}
-	
+
 	if err := json.NewDecoder(resp.Body).Decode(&tokenResponse); err != nil {
 		return nil, fmt.Errorf("failed to decode token response: %w", err)
 	}
-	
+
 	// Check for OAuth2 errors
 	if tokenResponse.Error != "" {
 		return nil, fmt.Errorf("OAuth2 error: %s - %s", tokenResponse.Error, tokenResponse.ErrorDescription)
 	}
-	
+
 	// Check HTTP status
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("token request failed with status %d", resp.StatusCode)
 	}
-	
+
 	// Create AccessToken
 	token := &AccessToken{
 		Token:        tokenResponse.AccessToken,
@@ -218,12 +218,12 @@ func (p *OAuth2Provider) makeTokenRequest(ctx context.Context, tokenURL string, 
 		RefreshToken: tokenResponse.RefreshToken,
 		Scope:        tokenResponse.Scope,
 	}
-	
+
 	// Default token type if not specified
 	if token.TokenType == "" {
 		token.TokenType = "Bearer"
 	}
-	
+
 	return token, nil
 }
 
@@ -235,7 +235,7 @@ func (p *OAuth2Provider) getOAuth2Config(tenantID string) (*OAuth2Config, error)
 			return config, nil
 		}
 	}
-	
+
 	// Fall back to default configuration if available
 	if p.defaultConfig != nil {
 		// Create a copy with the specific tenant ID
@@ -243,7 +243,7 @@ func (p *OAuth2Provider) getOAuth2Config(tenantID string) (*OAuth2Config, error)
 		config.TenantID = tenantID
 		return &config, nil
 	}
-	
+
 	return nil, fmt.Errorf("no OAuth2 configuration found for tenant %s", tenantID)
 }
 
@@ -251,17 +251,17 @@ func (p *OAuth2Provider) getOAuth2Config(tenantID string) (*OAuth2Config, error)
 func (p *OAuth2Provider) getCachedToken(tenantID string) *AccessToken {
 	p.cacheMutex.RLock()
 	defer p.cacheMutex.RUnlock()
-	
+
 	cached, exists := p.tokenCache[tenantID]
 	if !exists {
 		return nil
 	}
-	
+
 	// Check if cached token is still valid (with 5-minute buffer)
 	if time.Now().Add(5 * time.Minute).After(cached.expiresAt) {
 		return nil
 	}
-	
+
 	return cached.token
 }
 
@@ -269,7 +269,7 @@ func (p *OAuth2Provider) getCachedToken(tenantID string) *AccessToken {
 func (p *OAuth2Provider) setCachedToken(tenantID string, token *AccessToken) {
 	p.cacheMutex.Lock()
 	defer p.cacheMutex.Unlock()
-	
+
 	p.tokenCache[tenantID] = &cachedToken{
 		token:     token,
 		expiresAt: token.ExpiresAt,
@@ -280,7 +280,7 @@ func (p *OAuth2Provider) setCachedToken(tenantID string, token *AccessToken) {
 func (p *OAuth2Provider) ClearCache() {
 	p.cacheMutex.Lock()
 	defer p.cacheMutex.Unlock()
-	
+
 	p.tokenCache = make(map[string]*cachedToken)
 }
 
@@ -288,7 +288,7 @@ func (p *OAuth2Provider) ClearCache() {
 func (p *OAuth2Provider) ClearCacheForTenant(tenantID string) {
 	p.cacheMutex.Lock()
 	defer p.cacheMutex.Unlock()
-	
+
 	delete(p.tokenCache, tenantID)
 }
 
@@ -303,9 +303,9 @@ func (p *OAuth2Provider) AuthorizeURL(tenantID string, state string, codeChallen
 	if err != nil {
 		return "", fmt.Errorf("failed to get OAuth2 configuration: %w", err)
 	}
-	
+
 	authorizeURL := fmt.Sprintf("%s/oauth2/v2.0/authorize", config.GetAuthorityURL())
-	
+
 	params := url.Values{
 		"client_id":     {config.ClientID},
 		"response_type": {"code"},
@@ -313,13 +313,13 @@ func (p *OAuth2Provider) AuthorizeURL(tenantID string, state string, codeChallen
 		"scope":         {config.GetScopeString()},
 		"state":         {state},
 	}
-	
+
 	// Add PKCE parameters if using PKCE
 	if codeChallenge != "" {
 		params.Set("code_challenge", codeChallenge)
 		params.Set("code_challenge_method", "S256")
 	}
-	
+
 	return fmt.Sprintf("%s?%s", authorizeURL, params.Encode()), nil
 }
 
@@ -329,7 +329,7 @@ func (p *OAuth2Provider) ExchangeCodeForToken(ctx context.Context, tenantID, cod
 	if err != nil {
 		return nil, NewAuthenticationError(tenantID, "CONFIG_ERROR", "Failed to get OAuth2 configuration", err)
 	}
-	
+
 	// Prepare authorization code request
 	data := url.Values{
 		"grant_type":   {"authorization_code"},
@@ -337,34 +337,34 @@ func (p *OAuth2Provider) ExchangeCodeForToken(ctx context.Context, tenantID, cod
 		"code":         {code},
 		"redirect_uri": {config.RedirectURI},
 	}
-	
+
 	// Add client secret if available (for confidential clients)
 	if config.ClientSecret != "" {
 		data.Set("client_secret", config.ClientSecret)
 	}
-	
+
 	// Add PKCE code verifier if provided
 	if codeVerifier != "" {
 		data.Set("code_verifier", codeVerifier)
 	}
-	
+
 	// Make the token request
 	token, err := p.makeTokenRequest(ctx, config.GetTokenURL(), data)
 	if err != nil {
-		return nil, NewAuthenticationError(tenantID, "CODE_EXCHANGE_FAILED", 
+		return nil, NewAuthenticationError(tenantID, "CODE_EXCHANGE_FAILED",
 			"Failed to exchange authorization code for token", err)
 	}
-	
+
 	token.TenantID = tenantID
-	
+
 	// Store the token
 	if err := p.credentialStore.StoreToken(tenantID, token); err != nil {
 		fmt.Printf("Warning: Failed to store token for tenant %s: %v\n", tenantID, err)
 	}
-	
+
 	// Cache the token
 	p.setCachedToken(tenantID, token)
-	
+
 	return token, nil
 }
 
@@ -375,10 +375,10 @@ func (p *OAuth2Provider) ValidateToken(ctx context.Context, token *AccessToken) 
 	if err != nil {
 		return fmt.Errorf("failed to create validation request: %w", err)
 	}
-	
+
 	req.Header.Set("Authorization", token.GetAuthorizationHeader())
 	req.Header.Set("Accept", "application/json")
-	
+
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to validate token: %w", err)
@@ -389,15 +389,15 @@ func (p *OAuth2Provider) ValidateToken(ctx context.Context, token *AccessToken) 
 			_ = err // Explicitly ignore error for cleanup operation
 		}
 	}()
-	
+
 	if resp.StatusCode == http.StatusUnauthorized {
 		return NewAuthenticationError(token.TenantID, "INVALID_TOKEN", "Token validation failed", nil)
 	}
-	
+
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("token validation failed with status %d", resp.StatusCode)
 	}
-	
+
 	return nil
 }
 
@@ -407,10 +407,10 @@ func (p *OAuth2Provider) GetTenantInfo(ctx context.Context, token *AccessToken) 
 	if err != nil {
 		return nil, fmt.Errorf("failed to create tenant info request: %w", err)
 	}
-	
+
 	req.Header.Set("Authorization", token.GetAuthorizationHeader())
 	req.Header.Set("Accept", "application/json")
-	
+
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get tenant info: %w", err)
@@ -421,32 +421,32 @@ func (p *OAuth2Provider) GetTenantInfo(ctx context.Context, token *AccessToken) 
 			_ = err // Explicitly ignore error for cleanup operation
 		}
 	}()
-	
+
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("tenant info request failed with status %d", resp.StatusCode)
 	}
-	
+
 	var response struct {
 		Value []struct {
-			ID                 string   `json:"id"`
-			DisplayName        string   `json:"displayName"`
-			VerifiedDomains    []struct {
+			ID              string `json:"id"`
+			DisplayName     string `json:"displayName"`
+			VerifiedDomains []struct {
 				Name      string `json:"name"`
 				IsDefault bool   `json:"isDefault"`
 			} `json:"verifiedDomains"`
-			CountryLetterCode  string `json:"countryLetterCode"`
-			PreferredLanguage  string `json:"preferredLanguage"`
+			CountryLetterCode string `json:"countryLetterCode"`
+			PreferredLanguage string `json:"preferredLanguage"`
 		} `json:"value"`
 	}
-	
+
 	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
 		return nil, fmt.Errorf("failed to decode tenant info response: %w", err)
 	}
-	
+
 	if len(response.Value) == 0 {
 		return nil, fmt.Errorf("no tenant information found")
 	}
-	
+
 	org := response.Value[0]
 	tenantInfo := &TenantInfo{
 		TenantID:          org.ID,
@@ -454,7 +454,7 @@ func (p *OAuth2Provider) GetTenantInfo(ctx context.Context, token *AccessToken) 
 		CountryLetterCode: org.CountryLetterCode,
 		PreferredLanguage: org.PreferredLanguage,
 	}
-	
+
 	// Extract verified domains
 	for _, domain := range org.VerifiedDomains {
 		tenantInfo.VerifiedDomains = append(tenantInfo.VerifiedDomains, domain.Name)
@@ -462,7 +462,7 @@ func (p *OAuth2Provider) GetTenantInfo(ctx context.Context, token *AccessToken) 
 			tenantInfo.DefaultDomain = domain.Name
 		}
 	}
-	
+
 	return tenantInfo, nil
 }
 

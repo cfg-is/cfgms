@@ -46,7 +46,7 @@ func (c *firewallConfig) AsMap() map[string]interface{} {
 		"destination": c.Destination,
 		"enabled":     c.Enabled,
 	}
-	
+
 	if c.Protocol != "" {
 		result["protocol"] = c.Protocol
 	}
@@ -62,7 +62,7 @@ func (c *firewallConfig) AsMap() map[string]interface{} {
 	if c.Description != "" {
 		result["description"] = c.Description
 	}
-	
+
 	return result
 }
 
@@ -84,7 +84,7 @@ func (c *firewallConfig) Validate() error {
 // GetManagedFields returns the list of fields this configuration manages
 func (c *firewallConfig) GetManagedFields() []string {
 	fields := []string{"name", "action", "source", "destination", "enabled"}
-	
+
 	if c.Protocol != "" {
 		fields = append(fields, "protocol")
 	}
@@ -100,7 +100,7 @@ func (c *firewallConfig) GetManagedFields() []string {
 	if c.Description != "" {
 		fields = append(fields, "description")
 	}
-	
+
 	return fields
 }
 
@@ -180,7 +180,7 @@ func (m *firewallModule) Set(ctx context.Context, resourceID string, config modu
 	// Convert ConfigState to firewallConfig
 	configMap := config.AsMap()
 	firewallConf := &firewallConfig{}
-	
+
 	if name, ok := configMap["name"].(string); ok {
 		firewallConf.Name = name
 	}
@@ -247,4 +247,3 @@ func (m *firewallModule) Get(ctx context.Context, resourceID string) (modules.Co
 	ruleCopy := rule
 	return &ruleCopy, nil
 }
-

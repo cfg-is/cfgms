@@ -10,13 +10,13 @@ import (
 
 // MockPatchManager implements PatchManager for testing purposes
 type MockPatchManager struct {
-	mu                  sync.RWMutex
-	availablePatches    []PatchInfo
-	installedPatches    []PatchInfo
-	rebootRequired      bool
-	lastPatchDate       time.Time
-	patchingInProgress  bool
-	simulateNetworkError bool
+	mu                      sync.RWMutex
+	availablePatches        []PatchInfo
+	installedPatches        []PatchInfo
+	rebootRequired          bool
+	lastPatchDate           time.Time
+	patchingInProgress      bool
+	simulateNetworkError    bool
 	simulatePermissionError bool
 }
 
@@ -97,10 +97,10 @@ func (m *MockPatchManager) ListAvailablePatches(ctx context.Context, patchType s
 func (m *MockPatchManager) getAvailablePatchesInternal(patchType string) []PatchInfo {
 	var filtered []PatchInfo
 	for _, patch := range m.availablePatches {
-		if patchType == "all" || 
-		   (patchType == "security" && patch.Category == "security") ||
-		   (patchType == "critical" && patch.Severity == "critical") ||
-		   (patchType == "kernel" && strings.Contains(strings.ToLower(patch.Title), "kernel")) {
+		if patchType == "all" ||
+			(patchType == "security" && patch.Category == "security") ||
+			(patchType == "critical" && patch.Severity == "critical") ||
+			(patchType == "kernel" && strings.Contains(strings.ToLower(patch.Title), "kernel")) {
 			filtered = append(filtered, patch)
 		}
 	}
@@ -278,7 +278,7 @@ func (m *MockPatchManager) GetPatchingStatus() bool {
 func (m *MockPatchManager) Reset() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	now := time.Now()
 	m.availablePatches = []PatchInfo{
 		{
@@ -293,7 +293,7 @@ func (m *MockPatchManager) Reset() {
 			RebootRequired: false,
 		},
 	}
-	
+
 	m.installedPatches = []PatchInfo{
 		{
 			ID:             "SEC-2024-000",
@@ -307,7 +307,7 @@ func (m *MockPatchManager) Reset() {
 			RebootRequired: false,
 		},
 	}
-	
+
 	m.lastPatchDate = now.AddDate(0, 0, -15)
 	m.rebootRequired = false
 	m.patchingInProgress = false

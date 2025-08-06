@@ -15,23 +15,23 @@ type Client interface {
 	CreateUser(ctx context.Context, token *auth.AccessToken, request *CreateUserRequest) (*User, error)
 	UpdateUser(ctx context.Context, token *auth.AccessToken, userID string, request *UpdateUserRequest) error
 	DeleteUser(ctx context.Context, token *auth.AccessToken, userID string) error
-	
+
 	// License operations
 	GetUserLicenses(ctx context.Context, token *auth.AccessToken, userID string) ([]LicenseAssignment, error)
 	AssignLicense(ctx context.Context, token *auth.AccessToken, userID, skuID string, disabledPlans []string) error
 	RemoveLicense(ctx context.Context, token *auth.AccessToken, userID, skuID string) error
-	
+
 	// Group operations
 	GetUserGroups(ctx context.Context, token *auth.AccessToken, userID string) ([]string, error)
 	AddUserToGroup(ctx context.Context, token *auth.AccessToken, userID, groupName string) error
 	RemoveUserFromGroup(ctx context.Context, token *auth.AccessToken, userID, groupName string) error
-	
+
 	// Conditional Access operations
 	GetConditionalAccessPolicy(ctx context.Context, token *auth.AccessToken, policyID string) (*ConditionalAccessPolicy, error)
 	CreateConditionalAccessPolicy(ctx context.Context, token *auth.AccessToken, request *CreateConditionalAccessPolicyRequest) (*ConditionalAccessPolicy, error)
 	UpdateConditionalAccessPolicy(ctx context.Context, token *auth.AccessToken, policyID string, request *UpdateConditionalAccessPolicyRequest) error
 	DeleteConditionalAccessPolicy(ctx context.Context, token *auth.AccessToken, policyID string) error
-	
+
 	// Intune operations
 	GetDeviceConfiguration(ctx context.Context, token *auth.AccessToken, configurationID string) (*DeviceConfiguration, error)
 	CreateDeviceConfiguration(ctx context.Context, token *auth.AccessToken, request *CreateDeviceConfigurationRequest) (*DeviceConfiguration, error)
@@ -108,26 +108,26 @@ type LicenseAssignment struct {
 
 // ConditionalAccessPolicy represents a Conditional Access policy
 type ConditionalAccessPolicy struct {
-	ID                   string                        `json:"id"`
-	DisplayName          string                        `json:"displayName"`
-	State                string                        `json:"state"`
-	Conditions           ConditionalAccessConditions  `json:"conditions"`
-	GrantControls        ConditionalAccessGrantControls `json:"grantControls"`
-	SessionControls      ConditionalAccessSessionControls `json:"sessionControls,omitempty"`
-	CreatedDateTime      string                        `json:"createdDateTime"`
-	ModifiedDateTime     string                        `json:"modifiedDateTime"`
+	ID               string                           `json:"id"`
+	DisplayName      string                           `json:"displayName"`
+	State            string                           `json:"state"`
+	Conditions       ConditionalAccessConditions      `json:"conditions"`
+	GrantControls    ConditionalAccessGrantControls   `json:"grantControls"`
+	SessionControls  ConditionalAccessSessionControls `json:"sessionControls,omitempty"`
+	CreatedDateTime  string                           `json:"createdDateTime"`
+	ModifiedDateTime string                           `json:"modifiedDateTime"`
 }
 
 // ConditionalAccessConditions represents the conditions for a CA policy
 type ConditionalAccessConditions struct {
-	Users         ConditionalAccessUsers         `json:"users"`
-	Applications  ConditionalAccessApplications  `json:"applications"`
-	Locations     ConditionalAccessLocations     `json:"locations,omitempty"`
-	Platforms     ConditionalAccessPlatforms     `json:"platforms,omitempty"`
-	DeviceStates  ConditionalAccessDeviceStates  `json:"deviceStates,omitempty"`
-	ClientAppTypes []string                       `json:"clientAppTypes,omitempty"`
-	SignInRiskLevels []string                     `json:"signInRiskLevels,omitempty"`
-	UserRiskLevels   []string                     `json:"userRiskLevels,omitempty"`
+	Users            ConditionalAccessUsers        `json:"users"`
+	Applications     ConditionalAccessApplications `json:"applications"`
+	Locations        ConditionalAccessLocations    `json:"locations,omitempty"`
+	Platforms        ConditionalAccessPlatforms    `json:"platforms,omitempty"`
+	DeviceStates     ConditionalAccessDeviceStates `json:"deviceStates,omitempty"`
+	ClientAppTypes   []string                      `json:"clientAppTypes,omitempty"`
+	SignInRiskLevels []string                      `json:"signInRiskLevels,omitempty"`
+	UserRiskLevels   []string                      `json:"userRiskLevels,omitempty"`
 }
 
 // ConditionalAccessUsers represents user conditions
@@ -167,10 +167,10 @@ type ConditionalAccessDeviceStates struct {
 
 // ConditionalAccessGrantControls represents grant controls
 type ConditionalAccessGrantControls struct {
-	Operator              string   `json:"operator"`
-	BuiltInControls       []string `json:"builtInControls,omitempty"`
+	Operator                    string   `json:"operator"`
+	BuiltInControls             []string `json:"builtInControls,omitempty"`
 	CustomAuthenticationFactors []string `json:"customAuthenticationFactors,omitempty"`
-	TermsOfUse            []string `json:"termsOfUse,omitempty"`
+	TermsOfUse                  []string `json:"termsOfUse,omitempty"`
 }
 
 // ConditionalAccessSessionControls represents session controls
@@ -210,8 +210,8 @@ type SignInFrequency struct {
 type CreateConditionalAccessPolicyRequest struct {
 	DisplayName     string                           `json:"displayName"`
 	State           string                           `json:"state"`
-	Conditions      ConditionalAccessConditions     `json:"conditions"`
-	GrantControls   ConditionalAccessGrantControls  `json:"grantControls"`
+	Conditions      ConditionalAccessConditions      `json:"conditions"`
+	GrantControls   ConditionalAccessGrantControls   `json:"grantControls"`
 	SessionControls ConditionalAccessSessionControls `json:"sessionControls,omitempty"`
 }
 
@@ -219,45 +219,45 @@ type CreateConditionalAccessPolicyRequest struct {
 type UpdateConditionalAccessPolicyRequest struct {
 	DisplayName     *string                           `json:"displayName,omitempty"`
 	State           *string                           `json:"state,omitempty"`
-	Conditions      *ConditionalAccessConditions     `json:"conditions,omitempty"`
-	GrantControls   *ConditionalAccessGrantControls  `json:"grantControls,omitempty"`
+	Conditions      *ConditionalAccessConditions      `json:"conditions,omitempty"`
+	GrantControls   *ConditionalAccessGrantControls   `json:"grantControls,omitempty"`
 	SessionControls *ConditionalAccessSessionControls `json:"sessionControls,omitempty"`
 }
 
 // DeviceConfiguration represents an Intune device configuration
 type DeviceConfiguration struct {
-	ID                   string            `json:"id"`
-	DisplayName          string            `json:"displayName"`
-	Description          string            `json:"description"`
-	DeviceConfigurationType string         `json:"@odata.type"`
-	CreatedDateTime      string            `json:"createdDateTime"`
-	LastModifiedDateTime string            `json:"lastModifiedDateTime"`
-	Version              int               `json:"version"`
-	Settings             map[string]interface{} `json:"settings,omitempty"`
+	ID                      string                 `json:"id"`
+	DisplayName             string                 `json:"displayName"`
+	Description             string                 `json:"description"`
+	DeviceConfigurationType string                 `json:"@odata.type"`
+	CreatedDateTime         string                 `json:"createdDateTime"`
+	LastModifiedDateTime    string                 `json:"lastModifiedDateTime"`
+	Version                 int                    `json:"version"`
+	Settings                map[string]interface{} `json:"settings,omitempty"`
 }
 
 // CreateDeviceConfigurationRequest represents a request to create a device configuration
 type CreateDeviceConfigurationRequest struct {
-	DeviceConfigurationType string            `json:"@odata.type"`
-	DisplayName            string            `json:"displayName"`
-	Description            string            `json:"description"`
-	Settings               map[string]interface{} `json:"settings,omitempty"`
+	DeviceConfigurationType string                 `json:"@odata.type"`
+	DisplayName             string                 `json:"displayName"`
+	Description             string                 `json:"description"`
+	Settings                map[string]interface{} `json:"settings,omitempty"`
 }
 
 // UpdateDeviceConfigurationRequest represents a request to update a device configuration
 type UpdateDeviceConfigurationRequest struct {
-	DisplayName *string            `json:"displayName,omitempty"`
-	Description *string            `json:"description,omitempty"`
+	DisplayName *string                `json:"displayName,omitempty"`
+	Description *string                `json:"description,omitempty"`
 	Settings    map[string]interface{} `json:"settings,omitempty"`
 }
 
 // GraphError represents an error response from Microsoft Graph API
 type GraphError struct {
-	Code       string            `json:"code"`
-	Message    string            `json:"message"`
-	Details    []GraphErrorDetail `json:"details,omitempty"`
+	Code       string                 `json:"code"`
+	Message    string                 `json:"message"`
+	Details    []GraphErrorDetail     `json:"details,omitempty"`
 	InnerError map[string]interface{} `json:"innerError,omitempty"`
-	StatusCode int               `json:"-"`
+	StatusCode int                    `json:"-"`
 }
 
 // GraphErrorDetail represents additional error details
@@ -299,20 +299,20 @@ func IsThrottledError(err error) bool {
 type RateLimiter interface {
 	// Wait blocks until the rate limiter allows another request
 	Wait(ctx context.Context) error
-	
+
 	// Allow checks if a request is allowed without blocking
 	Allow() bool
-	
+
 	// Reset resets the rate limiter to its initial state
 	Reset()
 }
 
 // RetryConfig defines retry configuration for Graph API calls
 type RetryConfig struct {
-	MaxRetries      int           `yaml:"max_retries"`
-	InitialDelay    time.Duration `yaml:"initial_delay"`
-	MaxDelay        time.Duration `yaml:"max_delay"`
-	BackoffMultiplier float64     `yaml:"backoff_multiplier"`
+	MaxRetries        int           `yaml:"max_retries"`
+	InitialDelay      time.Duration `yaml:"initial_delay"`
+	MaxDelay          time.Duration `yaml:"max_delay"`
+	BackoffMultiplier float64       `yaml:"backoff_multiplier"`
 }
 
 // DefaultRetryConfig returns a default retry configuration

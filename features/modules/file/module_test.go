@@ -21,7 +21,6 @@ func createConfigFromYAML(yamlData string) modules.ConfigState {
 	return &config
 }
 
-
 // getTestUser returns a test user for the current platform
 func getTestUser(t *testing.T) (string, string) {
 	switch runtime.GOOS {
@@ -50,7 +49,6 @@ func getTestUser(t *testing.T) (string, string) {
 		return "", ""
 	}
 }
-
 
 func TestFileModule(t *testing.T) {
 	// Create a temporary directory for test files
@@ -146,7 +144,7 @@ group: nonexistentgroup`,
 				t.Errorf("configState is nil but test should not expect error")
 				return
 			}
-			
+
 			err := module.Set(context.Background(), testFile, configState)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Set() error = %v, wantErr %v", err, tt.wantErr)

@@ -6,21 +6,20 @@ import (
 	"time"
 )
 
-
 // TokenBucketRateLimiter implements a token bucket rate limiter
 type TokenBucketRateLimiter struct {
 	// tokens is the current number of available tokens
 	tokens float64
-	
+
 	// capacity is the maximum number of tokens
 	capacity float64
-	
+
 	// refillRate is the rate at which tokens are added (tokens per second)
 	refillRate float64
-	
+
 	// lastRefill is the last time tokens were added
 	lastRefill time.Time
-	
+
 	// mutex protects the token bucket state
 	mutex sync.Mutex
 }
@@ -41,13 +40,13 @@ func (r *TokenBucketRateLimiter) Wait(ctx context.Context) error {
 		if r.Allow() {
 			return nil
 		}
-		
+
 		// Calculate how long to wait
 		waitTime := r.calculateWaitTime()
 		if waitTime <= 0 {
 			continue // Try again immediately
 		}
-		
+
 		// Wait for either the timeout or context cancellation
 		select {
 		case <-ctx.Done():
@@ -62,16 +61,16 @@ func (r *TokenBucketRateLimiter) Wait(ctx context.Context) error {
 func (r *TokenBucketRateLimiter) Allow() bool {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
-	
+
 	// Refill tokens based on elapsed time
 	r.refill()
-	
+
 	// Check if we have tokens available
 	if r.tokens >= 1 {
 		r.tokens--
 		return true
 	}
-	
+
 	return false
 }
 
@@ -79,11 +78,11 @@ func (r *TokenBucketRateLimiter) Allow() bool {
 func (r *TokenBucketRateLimiter) refill() {
 	now := time.Now()
 	elapsed := now.Sub(r.lastRefill).Seconds()
-	
+
 	// Add tokens based on elapsed time and refill rate
 	tokensToAdd := elapsed * r.refillRate
 	r.tokens = min(r.capacity, r.tokens+tokensToAdd)
-	
+
 	r.lastRefill = now
 }
 
@@ -91,17 +90,17 @@ func (r *TokenBucketRateLimiter) refill() {
 func (r *TokenBucketRateLimiter) calculateWaitTime() time.Duration {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
-	
+
 	r.refill()
-	
+
 	if r.tokens >= 1 {
 		return 0 // No wait needed
 	}
-	
+
 	// Calculate time needed to accumulate one token
 	tokensNeeded := 1 - r.tokens
 	waitSeconds := tokensNeeded / r.refillRate
-	
+
 	return time.Duration(waitSeconds * float64(time.Second))
 }
 
@@ -109,7 +108,7 @@ func (r *TokenBucketRateLimiter) calculateWaitTime() time.Duration {
 func (r *TokenBucketRateLimiter) GetAvailableTokens() float64 {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
-	
+
 	r.refill()
 	return r.tokens
 }
@@ -118,7 +117,7 @@ func (r *TokenBucketRateLimiter) GetAvailableTokens() float64 {
 func (r *TokenBucketRateLimiter) Reset() {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
-	
+
 	r.tokens = r.capacity
 	r.lastRefill = time.Now()
 }
@@ -127,13 +126,13 @@ func (r *TokenBucketRateLimiter) Reset() {
 type SlidingWindowRateLimiter struct {
 	// requests stores the timestamps of recent requests
 	requests []time.Time
-	
+
 	// limit is the maximum number of requests allowed in the window
 	limit int
-	
+
 	// window is the time window duration
 	window time.Duration
-	
+
 	// mutex protects the requests slice
 	mutex sync.Mutex
 }
@@ -153,13 +152,13 @@ func (r *SlidingWindowRateLimiter) Wait(ctx context.Context) error {
 		if r.Allow() {
 			return nil
 		}
-		
+
 		// Calculate how long to wait
 		waitTime := r.calculateWaitTime()
 		if waitTime <= 0 {
 			continue // Try again immediately
 		}
-		
+
 		// Wait for either the timeout or context cancellation
 		select {
 		case <-ctx.Done():
@@ -174,25 +173,25 @@ func (r *SlidingWindowRateLimiter) Wait(ctx context.Context) error {
 func (r *SlidingWindowRateLimiter) Allow() bool {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
-	
+
 	now := time.Now()
-	
+
 	// Remove expired requests
 	r.cleanupExpiredRequests(now)
-	
+
 	// Check if we can make a new request
 	if len(r.requests) < r.limit {
 		r.requests = append(r.requests, now)
 		return true
 	}
-	
+
 	return false
 }
 
 // cleanupExpiredRequests removes requests outside the current window
 func (r *SlidingWindowRateLimiter) cleanupExpiredRequests(now time.Time) {
 	cutoff := now.Add(-r.window)
-	
+
 	// Find the first request within the window
 	firstValid := 0
 	for i, req := range r.requests {
@@ -201,7 +200,7 @@ func (r *SlidingWindowRateLimiter) cleanupExpiredRequests(now time.Time) {
 			break
 		}
 	}
-	
+
 	// Remove expired requests
 	if firstValid > 0 {
 		copy(r.requests, r.requests[firstValid:])
@@ -213,22 +212,22 @@ func (r *SlidingWindowRateLimiter) cleanupExpiredRequests(now time.Time) {
 func (r *SlidingWindowRateLimiter) calculateWaitTime() time.Duration {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
-	
+
 	now := time.Now()
 	r.cleanupExpiredRequests(now)
-	
+
 	if len(r.requests) < r.limit {
 		return 0 // No wait needed
 	}
-	
+
 	// Wait until the oldest request expires
 	oldestRequest := r.requests[0]
 	waitTime := r.window - now.Sub(oldestRequest)
-	
+
 	if waitTime < 0 {
 		return 0
 	}
-	
+
 	return waitTime
 }
 
@@ -236,7 +235,7 @@ func (r *SlidingWindowRateLimiter) calculateWaitTime() time.Duration {
 func (r *SlidingWindowRateLimiter) GetRequestCount() int {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
-	
+
 	r.cleanupExpiredRequests(time.Now())
 	return len(r.requests)
 }
@@ -245,7 +244,7 @@ func (r *SlidingWindowRateLimiter) GetRequestCount() int {
 func (r *SlidingWindowRateLimiter) Reset() {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
-	
+
 	r.requests = r.requests[:0]
 }
 
@@ -253,19 +252,19 @@ func (r *SlidingWindowRateLimiter) Reset() {
 type AdaptiveRateLimiter struct {
 	// baseLimiter is the underlying rate limiter
 	baseLimiter RateLimiter
-	
+
 	// currentRate is the current adjusted rate
 	currentRate float64
-	
+
 	// baseRate is the original configured rate
 	baseRate float64
-	
+
 	// successCount tracks consecutive successful requests
 	successCount int
-	
+
 	// throttleCount tracks consecutive throttling responses
 	throttleCount int
-	
+
 	// mutex protects the adaptive state
 	mutex sync.Mutex
 }
@@ -273,10 +272,10 @@ type AdaptiveRateLimiter struct {
 // NewAdaptiveRateLimiter creates a new adaptive rate limiter
 func NewAdaptiveRateLimiter(baseRate float64, capacity float64) *AdaptiveRateLimiter {
 	return &AdaptiveRateLimiter{
-		baseLimiter:  NewTokenBucketRateLimiter(capacity, baseRate),
-		currentRate:  baseRate,
-		baseRate:     baseRate,
-		successCount: 0,
+		baseLimiter:   NewTokenBucketRateLimiter(capacity, baseRate),
+		currentRate:   baseRate,
+		baseRate:      baseRate,
+		successCount:  0,
 		throttleCount: 0,
 	}
 }
@@ -295,10 +294,10 @@ func (r *AdaptiveRateLimiter) Allow() bool {
 func (r *AdaptiveRateLimiter) RecordSuccess() {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
-	
+
 	r.successCount++
 	r.throttleCount = 0
-	
+
 	// Gradually increase rate after sustained success
 	if r.successCount >= 10 && r.currentRate < r.baseRate {
 		r.increaseRate()
@@ -310,10 +309,10 @@ func (r *AdaptiveRateLimiter) RecordSuccess() {
 func (r *AdaptiveRateLimiter) RecordThrottle() {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
-	
+
 	r.throttleCount++
 	r.successCount = 0
-	
+
 	// Immediately decrease rate on throttling
 	r.decreaseRate()
 }
@@ -325,7 +324,7 @@ func (r *AdaptiveRateLimiter) increaseRate() {
 	if newRate > r.baseRate {
 		newRate = r.baseRate
 	}
-	
+
 	r.currentRate = newRate
 	r.updateBaseLimiter()
 }
@@ -334,13 +333,13 @@ func (r *AdaptiveRateLimiter) increaseRate() {
 func (r *AdaptiveRateLimiter) decreaseRate() {
 	// Decrease by 50% on throttling
 	r.currentRate = r.currentRate * 0.5
-	
+
 	// Don't go below 10% of base rate
 	minRate := r.baseRate * 0.1
 	if r.currentRate < minRate {
 		r.currentRate = minRate
 	}
-	
+
 	r.updateBaseLimiter()
 }
 
@@ -363,7 +362,7 @@ func (r *AdaptiveRateLimiter) GetCurrentRate() float64 {
 func (r *AdaptiveRateLimiter) Reset() {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
-	
+
 	r.currentRate = r.baseRate
 	r.successCount = 0
 	r.throttleCount = 0
