@@ -306,7 +306,7 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 - [x] **Enhanced Multi-Tenant Security** (Issue #115) - 5 points ✅ COMPLETED
 - [x] **Just-In-Time (JIT) Access Framework** (Issue #124) - 8 points ✅ COMPLETED
 - [x] **Risk-Based Access Controls** (Issue #125) - 8 points ✅ COMPLETED
-- [ ] **Continuous Authorization Engine** (TBD) - 8 points
+- [ ] **Continuous Authorization Engine** (Issue #126) - 8 points
 - [ ] **Zero-Trust Policy Engine** (TBD) - 5 points
 
 **Epic 3: M365 Multi-Tenant Enterprise App Support (39 story points) - Issues #116-119**
