@@ -305,7 +305,7 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 - [x] **Advanced Permission Management** (Issue #114) - 8 points ✅ COMPLETED
 - [x] **Enhanced Multi-Tenant Security** (Issue #115) - 5 points ✅ COMPLETED
 - [x] **Just-In-Time (JIT) Access Framework** (Issue #116) - 8 points ✅ COMPLETED
-- [ ] **Risk-Based Access Controls** (Issue #117) - 8 points
+- [x] **Risk-Based Access Controls** (Issue #117) - 8 points ✅ COMPLETED
 - [ ] **Continuous Authorization Engine** (Issue #118) - 8 points
 - [ ] **Zero-Trust Policy Engine** (Issue #119) - 5 points
 
