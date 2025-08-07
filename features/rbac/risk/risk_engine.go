@@ -100,6 +100,20 @@ func (rae *RiskAssessmentEngine) EvaluateRisk(ctx context.Context, request *Risk
 	startTime := time.Now()
 	requestID := fmt.Sprintf("risk-assessment-%d", startTime.UnixNano())
 
+	// Validate request
+	if request == nil {
+		return nil, fmt.Errorf("risk assessment request cannot be nil")
+	}
+	if request.AccessRequest == nil {
+		return nil, fmt.Errorf("access request cannot be nil")
+	}
+	if request.UserContext == nil {
+		return nil, fmt.Errorf("user context cannot be nil")
+	}
+	if request.ResourceContext == nil {
+		return nil, fmt.Errorf("resource context cannot be nil")
+	}
+
 	// Check cache for recent assessment
 	if cachedResult := rae.cache.Get(request); cachedResult != nil {
 		return cachedResult, nil

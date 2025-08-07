@@ -43,6 +43,7 @@ const (
 	TenantSecurityEventUnauthorizedAccess  TenantSecurityEventType = "unauthorized_access"
 	TenantSecurityEventComplianceViolation TenantSecurityEventType = "compliance_violation"
 	TenantSecurityEventSecurityPolicyChange TenantSecurityEventType = "security_policy_change"
+	TenantSecurityEventZeroTrustOverlay    TenantSecurityEventType = "zero_trust_overlay"
 )
 
 // AuditSeverity defines the severity levels for audit events

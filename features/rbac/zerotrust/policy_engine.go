@@ -376,6 +376,11 @@ func (z *ZeroTrustPolicyEngine) Stop() error {
 func (z *ZeroTrustPolicyEngine) EvaluateAccess(ctx context.Context, request *ZeroTrustAccessRequest) (*ZeroTrustAccessResponse, error) {
 	startTime := time.Now()
 	
+	// Input validation
+	if request == nil {
+		return nil, fmt.Errorf("invalid request: nil request provided")
+	}
+	
 	// Create evaluation context
 	evalCtx := &PolicyEvaluationContext{
 		Request:       request,
@@ -416,8 +421,9 @@ func (z *ZeroTrustPolicyEngine) EvaluateAccess(ctx context.Context, request *Zer
 	// Step 6: Create comprehensive response
 	response := z.createAccessResponse(request, finalDecision, evaluationResults, integrationResults, complianceResults)
 	
-	// Step 7: Update statistics and audit
+	// Step 7: Update processing time and statistics
 	processingTime := time.Since(startTime)
+	response.ProcessingTime = processingTime
 	z.updateStatistics(response, processingTime)
 	if err := z.auditLogger.LogAccessEvaluation(ctx, request, response, processingTime); err != nil {
 		// Log error but don't fail the access evaluation
@@ -494,8 +500,64 @@ func (z *ZeroTrustPolicyEngine) findApplicablePolicies(ctx context.Context, requ
 }
 
 func (z *ZeroTrustPolicyEngine) performSystemIntegration(ctx context.Context, request *ZeroTrustAccessRequest, policyResults []*PolicyEvaluationResult) (*SystemIntegrationResults, error) {
-	// Implementation will integrate with RBAC, JIT, Risk, and Tenant systems
-	return &SystemIntegrationResults{}, nil
+	results := &SystemIntegrationResults{
+		RBACResult:           &RBACIntegrationResult{},
+		JITResult:            &JITIntegrationResult{},
+		RiskResult:           &RiskIntegrationResult{},
+		TenantResult:         &TenantIntegrationResult{},
+		ContinuousAuthResult: &ContinuousAuthResult{},
+	}
+	
+	var integrationErrors []error
+	
+	// RBAC Integration
+	if z.config.EnableRBACIntegration && z.rbacManager != nil {
+		if request.AccessRequest != nil {
+			_, err := z.rbacManager.CheckPermission(ctx, request.AccessRequest)
+			if err != nil {
+				results.RBACResult.Granted = false
+				results.RBACResult.Reason = err.Error()
+				integrationErrors = append(integrationErrors, fmt.Errorf("RBAC integration failed: %w", err))
+			} else {
+				results.RBACResult.Granted = true
+			}
+		}
+	}
+	
+	// JIT Integration  
+	if z.config.EnableJITIntegration && z.jitManager != nil {
+		if request.AccessRequest != nil {
+			_, err := z.jitManager.ValidateJITAccess(ctx, request.AccessRequest)
+			if err != nil {
+				results.JITResult.Granted = false
+				integrationErrors = append(integrationErrors, fmt.Errorf("JIT integration failed: %w", err))
+			} else {
+				results.JITResult.Granted = true
+				results.JITResult.JITAccessGranted = true
+			}
+		}
+	}
+	
+	// Risk Integration
+	if z.config.EnableRiskIntegration && z.riskManager != nil {
+		if request.AccessRequest != nil {
+			_, err := z.riskManager.AssessRisk(ctx, request.AccessRequest)
+			if err != nil {
+				results.RiskResult.RiskScore = 100.0 // High risk on error
+				integrationErrors = append(integrationErrors, fmt.Errorf("Risk integration failed: %w", err))
+			} else {
+				results.RiskResult.RiskScore = 0.0 // Low risk on success
+			}
+		}
+	}
+	
+	// Return combined error if any integrations failed
+	if len(integrationErrors) > 0 {
+		combinedError := fmt.Errorf("integration failures: %v", integrationErrors)
+		return results, combinedError
+	}
+	
+	return results, nil
 }
 
 func (z *ZeroTrustPolicyEngine) makeAccessDecision(ctx context.Context, evalCtx *PolicyEvaluationContext, policyResults []*PolicyEvaluationResult, integrationResults *SystemIntegrationResults, complianceResults *ComplianceValidationResults) *AccessDecision {
@@ -507,17 +569,60 @@ func (z *ZeroTrustPolicyEngine) makeAccessDecision(ctx context.Context, evalCtx 
 }
 
 func (z *ZeroTrustPolicyEngine) createAccessResponse(request *ZeroTrustAccessRequest, decision *AccessDecision, policyResults []*PolicyEvaluationResult, integrationResults *SystemIntegrationResults, complianceResults *ComplianceValidationResults) *ZeroTrustAccessResponse {
-	// Implementation will create comprehensive response
+	// Create evaluation ID
+	evaluationID := fmt.Sprintf("eval-%d", time.Now().UnixNano())
+	
+	// Collect applied policies
+	var appliedPolicies []string
+	for _, result := range policyResults {
+		if result.Result == PolicyResultAllow || result.Result == PolicyResultDeny {
+			appliedPolicies = append(appliedPolicies, result.PolicyID)
+		}
+	}
+	
+	// Create audit trail
+	auditTrail := []*AuditEntry{
+		{
+			EntryID:    fmt.Sprintf("audit-%d", time.Now().UnixNano()),
+			Timestamp:  time.Now(),
+			EventType:  AuditEventPolicyEvaluation,
+			Action:     "comprehensive-evaluation", 
+			Outcome:    decision.Reason,
+		},
+	}
+	
+	// Create comprehensive response
 	return &ZeroTrustAccessResponse{
-		Granted: decision.Granted,
-		Reason:  decision.Reason,
+		Granted:          decision.Granted,
+		Reason:           decision.Reason,
+		EvaluationID:     evaluationID,
+		EvaluationTime:   time.Now(),
+		ProcessingTime:   time.Since(time.Now()), // Will be updated by caller
+		AppliedPolicies:  appliedPolicies,
+		AuditTrail:       auditTrail,
 	}
 }
 
 func (z *ZeroTrustPolicyEngine) createDenyResponse(request *ZeroTrustAccessRequest, reason string, err error) *ZeroTrustAccessResponse {
 	return &ZeroTrustAccessResponse{
-		Granted: false,
-		Reason:  fmt.Sprintf("%s: %v", reason, err),
+		Granted:           false,
+		Reason:            fmt.Sprintf("%s: %v", reason, err),
+		EvaluationID:      fmt.Sprintf("eval-%d", time.Now().UnixNano()),
+		EvaluationTime:    time.Now(),
+		ProcessingTime:    time.Millisecond, // Minimal processing time
+		PoliciesEvaluated: []string{"fail-secure"},
+		AuditTrail: []*AuditEntry{
+			{
+				EntryID:     fmt.Sprintf("entry-%d", time.Now().UnixNano()),
+				Timestamp:   time.Now(),
+				EventType:   AuditEventPolicyEvaluation,
+				Actor:       "zero-trust-policy-engine",
+				Action:      "deny",
+				Resource:    request.AccessRequest.ResourceId,
+				Outcome:     "denied",
+				Details:     map[string]interface{}{"reason": reason, "error": err.Error()},
+			},
+		},
 	}
 }
 

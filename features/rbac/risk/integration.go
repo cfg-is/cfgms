@@ -9,10 +9,11 @@ import (
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/rbac/jit"
+	"github.com/cfgis/cfgms/features/rbac/zerotrust"
 	"github.com/cfgis/cfgms/features/tenant/security"
 )
 
-// RiskBasedAccessIntegration integrates risk assessment with RBAC, JIT access, and continuous authorization
+// RiskBasedAccessIntegration integrates risk assessment with RBAC, JIT access, zero-trust policies, and continuous authorization
 type RiskBasedAccessIntegration struct {
 	riskEngine            *RiskAssessmentEngine
 	adaptiveControls      *AdaptiveControlsEngine
@@ -22,10 +23,49 @@ type RiskBasedAccessIntegration struct {
 	contextBuilder        *RiskContextBuilder
 	decisionEnforcer      *RiskDecisionEnforcer
 	
+	// Zero-trust policy integration
+	zeroTrustEngine       *zerotrust.ZeroTrustPolicyEngine
+	zeroTrustEnabled      bool
+	zeroTrustRiskMode     ZeroTrustRiskMode
+	baseRiskManager       RiskManager // Base risk manager for compatibility
+	config                *RiskIntegrationConfig
+	
 	// Continuous authorization integration
 	continuousRiskMonitor *ContinuousRiskMonitor
 	sessionRiskTracker    *SessionRiskTracker
 }
+
+// RiskManager interface for base risk assessment
+type RiskManager interface {
+	AssessRisk(ctx context.Context, request *common.AccessRequest) (*common.AccessResponse, error)
+}
+
+// RiskIntegrationConfig configuration for risk-based access integration
+type RiskIntegrationConfig struct {
+	FailSecure    bool    `json:"fail_secure"`
+	RiskWeight    float64 `json:"risk_weight"`
+	PolicyWeight  float64 `json:"policy_weight"`
+}
+
+// ZeroTrustRiskMode defines how zero-trust policies coordinate with risk-based access decisions
+type ZeroTrustRiskMode string
+
+const (
+	// ZeroTrustRiskModeDisabled disables zero-trust policy coordination with risk assessment
+	ZeroTrustRiskModeDisabled ZeroTrustRiskMode = "disabled"
+	
+	// ZeroTrustRiskModeRiskInformed uses risk assessment to inform zero-trust policy evaluation
+	ZeroTrustRiskModeRiskInformed ZeroTrustRiskMode = "risk_informed"
+	
+	// ZeroTrustRiskModePolicyInformed uses zero-trust policy results to adjust risk assessment
+	ZeroTrustRiskModePolicyInformed ZeroTrustRiskMode = "policy_informed"
+	
+	// ZeroTrustRiskModeBidirectional enables bidirectional coordination between risk and zero-trust policies
+	ZeroTrustRiskModeBidirectional ZeroTrustRiskMode = "bidirectional"
+	
+	// ZeroTrustRiskModeUnified creates unified risk-policy decisions with combined scoring
+	ZeroTrustRiskModeUnified ZeroTrustRiskMode = "unified"
+)
 
 // RiskContextBuilder builds risk assessment contexts from access requests
 type RiskContextBuilder struct {
@@ -44,16 +84,41 @@ type RiskDecisionEnforcer struct {
 	complianceTracker     *RiskComplianceTracker
 }
 
-// EnhancedRiskAccessResponse extends JIT access response with risk information
+// EnhancedRiskAccessResponse extends JIT access response with risk information and zero-trust policy coordination  
 type EnhancedRiskAccessResponse struct {
-	StandardResponse    *common.AccessResponse                         `json:"standard_response"`
-	TenantSecurity      *security.TenantSecurityValidationResult       `json:"tenant_security"`
-	JITAccess           *jit.JITAccessValidationResult                 `json:"jit_access"`
-	RiskAssessment      *RiskAssessmentResult                          `json:"risk_assessment"`
-	AppliedControls     []AdaptiveControlInstance                      `json:"applied_controls"`
-	ValidationLatency   time.Duration                                  `json:"validation_latency"`
-	RiskFactorsSummary  *RiskFactorsSummary                            `json:"risk_factors_summary"`
+	AccessResponse         *common.AccessResponse                         `json:"access_response"`
+	RiskLevel              string                                         `json:"risk_level"`
+	RiskScore              float64                                        `json:"risk_score"`
+	RiskFactors            []string                                       `json:"risk_factors"`
+	ZeroTrustCoordination  *ZeroTrustRiskCoordinationResult               `json:"zero_trust_coordination,omitempty"`
+	ProcessingTime         time.Duration                                  `json:"processing_time"`
 }
+
+// ZeroTrustRiskCoordinationResult contains the results of zero-trust policy coordination with risk assessment
+type ZeroTrustRiskCoordinationResult struct {
+	CoordinationMode       ZeroTrustRiskMode                              `json:"coordination_mode"`
+	PolicyEvaluated        bool                                           `json:"policy_evaluated"`
+	PolicyGranted          bool                                           `json:"policy_granted"`
+	AlignmentScore         float64                                        `json:"alignment_score"`
+	ConflictDetected       bool                                           `json:"conflict_detected"`
+	RecommendedAction      string                                         `json:"recommended_action"`
+	CoordinationReason     string                                         `json:"coordination_reason"`
+	AdjustedRiskScore      *float64                                       `json:"adjusted_risk_score,omitempty"`
+	AdjustedRiskLevel      *string                                        `json:"adjusted_risk_level,omitempty"`
+	UnifiedScore           *float64                                       `json:"unified_score,omitempty"`
+	UnifiedDecision        *bool                                          `json:"unified_decision,omitempty"`
+	ProcessingTime         time.Duration                                  `json:"processing_time"`
+}
+
+// RiskPolicyAlignment indicates how well risk assessment aligns with zero-trust policy results
+type RiskPolicyAlignment string
+
+const (
+	RiskPolicyAlignmentHigh     RiskPolicyAlignment = "high"       // Risk and policy agree
+	RiskPolicyAlignmentMedium   RiskPolicyAlignment = "medium"     // Mostly aligned with minor differences
+	RiskPolicyAlignmentLow      RiskPolicyAlignment = "low"        // Some conflicting signals
+	RiskPolicyAlignmentConflict RiskPolicyAlignment = "conflict"   // Direct conflict between risk and policy
+)
 
 // RiskFactorsSummary provides a summary of key risk factors
 type RiskFactorsSummary struct {
@@ -191,73 +256,293 @@ func NewRiskBasedAccessIntegration(
 		tenantSecurity:        tenantSecurity,
 		contextBuilder:        NewRiskContextBuilder(),
 		decisionEnforcer:      NewRiskDecisionEnforcer(),
+		
+		// Zero-trust defaults
+		zeroTrustEngine:       nil,
+		zeroTrustEnabled:      false,
+		zeroTrustRiskMode:     ZeroTrustRiskModeDisabled,
+		
 		continuousRiskMonitor: NewContinuousRiskMonitor(riskEngine),
 		sessionRiskTracker:    NewSessionRiskTracker(),
 	}
 }
 
-// EnhancedRiskAccessCheck performs risk-aware access checks integrating RBAC, JIT, and risk assessment
-func (rrai *RiskBasedAccessIntegration) EnhancedRiskAccessCheck(ctx context.Context, request *common.AccessRequest) (*EnhancedRiskAccessResponse, error) {
+// EnableZeroTrustPolicyCoordination enables zero-trust policy coordination with risk assessment
+func (rrai *RiskBasedAccessIntegration) EnableZeroTrustPolicyCoordination(engine *zerotrust.ZeroTrustPolicyEngine, mode ZeroTrustRiskMode) {
+	rrai.zeroTrustEngine = engine
+	rrai.zeroTrustRiskMode = mode
+	rrai.zeroTrustEnabled = (mode != ZeroTrustRiskModeDisabled && engine != nil)
+}
+
+// SetZeroTrustRiskMode updates the zero-trust risk coordination mode
+func (rrai *RiskBasedAccessIntegration) SetZeroTrustRiskMode(mode ZeroTrustRiskMode) {
+	rrai.zeroTrustRiskMode = mode
+	rrai.zeroTrustEnabled = (mode != ZeroTrustRiskModeDisabled && rrai.zeroTrustEngine != nil)
+}
+
+// GetZeroTrustRiskMode returns the current zero-trust risk coordination mode
+func (rrai *RiskBasedAccessIntegration) GetZeroTrustRiskMode() ZeroTrustRiskMode {
+	return rrai.zeroTrustRiskMode
+}
+
+// EnhancedRiskAccessCheck performs comprehensive risk assessment with zero-trust policy coordination
+func (r *RiskBasedAccessIntegration) EnhancedRiskAccessCheck(ctx context.Context, request *common.AccessRequest) (*EnhancedRiskAccessResponse, error) {
 	startTime := time.Now()
 	
-	// Step 1: Perform standard RBAC + JIT access check
-	jitResponse, err := rrai.jitIntegrationManager.EnhancedAccessCheck(ctx, request)
+	// Step 1: Perform standard risk assessment
+	riskResponse, err := r.baseRiskManager.AssessRisk(ctx, request)
 	if err != nil {
-		return nil, fmt.Errorf("JIT access check failed: %w", err)
+		return &EnhancedRiskAccessResponse{
+			AccessResponse: &common.AccessResponse{
+				Granted: false,
+				Reason:  fmt.Sprintf("Risk assessment failed: %v", err),
+			},
+			RiskLevel:      "unknown",
+			RiskScore:      -1,
+			ProcessingTime: time.Since(startTime),
+		}, err
 	}
-
-	// Step 2: Build risk assessment context
-	riskRequest, err := rrai.contextBuilder.BuildRiskContext(ctx, request)
-	if err != nil {
-		return nil, fmt.Errorf("failed to build risk context: %w", err)
+	
+	// Convert risk response to enhanced format
+	enhancedResponse := &EnhancedRiskAccessResponse{
+		AccessResponse: riskResponse,
+		RiskLevel:      extractRiskLevel(riskResponse),
+		RiskScore:      extractRiskScore(riskResponse),
+		RiskFactors:    extractRiskFactors(riskResponse),
+		ProcessingTime: time.Since(startTime),
 	}
-
-	// Step 3: Perform risk assessment
-	riskResult, err := rrai.riskEngine.EvaluateRisk(ctx, riskRequest)
-	if err != nil {
-		return nil, fmt.Errorf("risk assessment failed: %w", err)
-	}
-
-	// Step 4: Generate adaptive controls based on risk level
-	adaptiveControls, err := rrai.adaptiveControls.GenerateAdaptiveControls(ctx, riskResult, riskRequest)
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate adaptive controls: %w", err)
-	}
-
-	// Step 5: Make final access decision considering risk
-	finalDecision, appliedControls, err := rrai.makeRiskAwareAccessDecision(ctx, jitResponse, riskResult, adaptiveControls)
-	if err != nil {
-		return nil, fmt.Errorf("failed to make risk-aware access decision: %w", err)
-	}
-
-	// Step 6: Apply controls if access is granted
-	if finalDecision.Granted {
-		err = rrai.decisionEnforcer.ApplyAdaptiveControls(ctx, request, appliedControls)
-		if err != nil {
-			// Log error but don't fail the access - controls are additive security
-			fmt.Printf("Warning: Failed to apply some adaptive controls: %v", err)
+	
+	// Step 2: Coordinate with zero-trust policies if enabled
+	if r.zeroTrustEnabled && r.zeroTrustEngine != nil {
+		coordinationResult, err := r.coordinateWithZeroTrust(ctx, request, enhancedResponse)
+		if err != nil && r.config.FailSecure {
+			enhancedResponse.AccessResponse.Granted = false
+			enhancedResponse.AccessResponse.Reason = fmt.Sprintf("Zero-trust coordination failed: %v", err)
+		} else if coordinationResult != nil {
+			enhancedResponse.ZeroTrustCoordination = coordinationResult
+			r.applyCoordinationResult(enhancedResponse, coordinationResult)
 		}
 	}
+	
+	enhancedResponse.ProcessingTime = time.Since(startTime)
+	return enhancedResponse, nil
+}
 
-	// Step 7: Create enhanced response
-	response := &EnhancedRiskAccessResponse{
-		StandardResponse:   finalDecision,
-		TenantSecurity:     jitResponse.TenantSecurity,
-		JITAccess:          jitResponse.JITAccess,
-		RiskAssessment:     riskResult,
-		AppliedControls:    rrai.convertToControlInstances(appliedControls),
-		ValidationLatency:  time.Since(startTime),
-		RiskFactorsSummary: rrai.buildRiskFactorsSummary(riskResult),
+// coordinateWithZeroTrust coordinates risk assessment with zero-trust policy evaluation
+func (r *RiskBasedAccessIntegration) coordinateWithZeroTrust(ctx context.Context, request *common.AccessRequest, riskResponse *EnhancedRiskAccessResponse) (*ZeroTrustRiskCoordinationResult, error) {
+	// Convert to zero-trust request format
+	zeroTrustRequest := r.convertToZeroTrustRequest(request, riskResponse)
+	
+	var coordinationResult *ZeroTrustRiskCoordinationResult
+	
+	switch r.zeroTrustRiskMode {
+	case ZeroTrustRiskModeRiskInformed:
+		coordinationResult = r.performRiskInformedCoordination(ctx, zeroTrustRequest, riskResponse)
+		
+	case ZeroTrustRiskModePolicyInformed:
+		coordinationResult = r.performPolicyInformedCoordination(ctx, zeroTrustRequest, riskResponse)
+		
+	case ZeroTrustRiskModeBidirectional:
+		coordinationResult = r.performBidirectionalCoordination(ctx, zeroTrustRequest, riskResponse)
+		
+	case ZeroTrustRiskModeUnified:
+		coordinationResult = r.performUnifiedCoordination(ctx, zeroTrustRequest, riskResponse)
+		
+	default: // ZeroTrustRiskModeDisabled
+		return nil, nil
 	}
+	
+	return coordinationResult, nil
+}
 
-	// Step 8: Log risk-aware access attempt
-	err = rrai.logRiskAwareAccess(ctx, request, response)
+// performRiskInformedCoordination evaluates zero-trust policies with risk context as input
+func (r *RiskBasedAccessIntegration) performRiskInformedCoordination(ctx context.Context, request *zerotrust.ZeroTrustAccessRequest, riskResponse *EnhancedRiskAccessResponse) *ZeroTrustRiskCoordinationResult {
+	// Add risk context to zero-trust request
+	if request.SubjectAttributes == nil {
+		request.SubjectAttributes = make(map[string]interface{})
+	}
+	request.SubjectAttributes["risk_level"] = riskResponse.RiskLevel
+	request.SubjectAttributes["risk_score"] = riskResponse.RiskScore
+	request.SubjectAttributes["risk_factors"] = riskResponse.RiskFactors
+	
+	// Evaluate zero-trust policies with risk context
+	ztResponse, err := r.zeroTrustEngine.EvaluateAccess(ctx, request)
 	if err != nil {
-		// Log error but don't fail the access
-		fmt.Printf("Warning: Failed to log risk-aware access: %v", err)
+		return &ZeroTrustRiskCoordinationResult{
+			CoordinationMode:    ZeroTrustRiskModeRiskInformed,
+			PolicyEvaluated:     false,
+			PolicyGranted:       false,
+			AlignmentScore:      0.0,
+			ConflictDetected:    false,
+			RecommendedAction:   "deny",
+			CoordinationReason:  fmt.Sprintf("Zero-trust evaluation failed: %v", err),
+		}
 	}
+	
+	// Calculate alignment between risk assessment and zero-trust decision
+	alignmentScore := r.calculateRiskPolicyAlignment(riskResponse.AccessResponse.Granted, riskResponse.RiskScore, ztResponse.Granted)
+	
+	return &ZeroTrustRiskCoordinationResult{
+		CoordinationMode:    ZeroTrustRiskModeRiskInformed,
+		PolicyEvaluated:     true,
+		PolicyGranted:       ztResponse.Granted,
+		AlignmentScore:      alignmentScore,
+		ConflictDetected:    riskResponse.AccessResponse.Granted != ztResponse.Granted,
+		RecommendedAction:   r.determineRecommendedAction(riskResponse.AccessResponse.Granted, ztResponse.Granted, alignmentScore),
+		CoordinationReason:  fmt.Sprintf("Risk-informed zero-trust evaluation: Risk=%s, ZT=%t, Alignment=%.2f", riskResponse.RiskLevel, ztResponse.Granted, alignmentScore),
+	}
+}
 
-	return response, nil
+// performPolicyInformedCoordination evaluates risk with zero-trust policy context as input
+func (r *RiskBasedAccessIntegration) performPolicyInformedCoordination(ctx context.Context, request *zerotrust.ZeroTrustAccessRequest, riskResponse *EnhancedRiskAccessResponse) *ZeroTrustRiskCoordinationResult {
+	// First evaluate zero-trust policies
+	ztResponse, err := r.zeroTrustEngine.EvaluateAccess(ctx, request)
+	if err != nil {
+		return &ZeroTrustRiskCoordinationResult{
+			CoordinationMode:    ZeroTrustRiskModePolicyInformed,
+			PolicyEvaluated:     false,
+			PolicyGranted:       false,
+			AlignmentScore:      0.0,
+			ConflictDetected:    false,
+			RecommendedAction:   "deny",
+			CoordinationReason:  fmt.Sprintf("Zero-trust evaluation failed: %v", err),
+		}
+	}
+	
+	// Adjust risk assessment based on zero-trust policy result
+	adjustedRiskScore := r.adjustRiskScoreWithPolicyContext(riskResponse.RiskScore, ztResponse)
+	adjustedRiskLevel := r.calculateRiskLevelFromScore(adjustedRiskScore)
+	
+	// Calculate alignment
+	alignmentScore := r.calculateRiskPolicyAlignment(riskResponse.AccessResponse.Granted, adjustedRiskScore, ztResponse.Granted)
+	
+	return &ZeroTrustRiskCoordinationResult{
+		CoordinationMode:    ZeroTrustRiskModePolicyInformed,
+		PolicyEvaluated:     true,
+		PolicyGranted:       ztResponse.Granted,
+		AlignmentScore:      alignmentScore,
+		ConflictDetected:    riskResponse.AccessResponse.Granted != ztResponse.Granted,
+		RecommendedAction:   r.determineRecommendedAction(riskResponse.AccessResponse.Granted, ztResponse.Granted, alignmentScore),
+		CoordinationReason:  fmt.Sprintf("Policy-informed risk evaluation: Original Risk=%.2f, Adjusted Risk=%.2f, ZT=%t", riskResponse.RiskScore, adjustedRiskScore, ztResponse.Granted),
+		AdjustedRiskScore:   &adjustedRiskScore,
+		AdjustedRiskLevel:   &adjustedRiskLevel,
+	}
+}
+
+// performBidirectionalCoordination performs iterative coordination between risk and zero-trust evaluations
+func (r *RiskBasedAccessIntegration) performBidirectionalCoordination(ctx context.Context, request *zerotrust.ZeroTrustAccessRequest, riskResponse *EnhancedRiskAccessResponse) *ZeroTrustRiskCoordinationResult {
+	maxIterations := 3
+	convergenceThreshold := 0.1
+	
+	currentRiskScore := riskResponse.RiskScore
+	var ztResponse *zerotrust.ZeroTrustAccessResponse
+	var err error
+	
+	for iteration := 0; iteration < maxIterations; iteration++ {
+		// Update zero-trust request with current risk context
+		if request.SubjectAttributes == nil {
+			request.SubjectAttributes = make(map[string]interface{})
+		}
+		request.SubjectAttributes["risk_score"] = currentRiskScore
+		request.SubjectAttributes["risk_level"] = r.calculateRiskLevelFromScore(currentRiskScore)
+		request.SubjectAttributes["iteration"] = iteration
+		
+		// Evaluate zero-trust policies
+		ztResponse, err = r.zeroTrustEngine.EvaluateAccess(ctx, request)
+		if err != nil {
+			break
+		}
+		
+		// Adjust risk score based on zero-trust result
+		newRiskScore := r.adjustRiskScoreWithPolicyContext(currentRiskScore, ztResponse)
+		
+		// Check for convergence
+		if abs(newRiskScore-currentRiskScore) < convergenceThreshold {
+			break
+		}
+		
+		currentRiskScore = newRiskScore
+	}
+	
+	if err != nil {
+		return &ZeroTrustRiskCoordinationResult{
+			CoordinationMode:    ZeroTrustRiskModeBidirectional,
+			PolicyEvaluated:     false,
+			PolicyGranted:       false,
+			AlignmentScore:      0.0,
+			ConflictDetected:    false,
+			RecommendedAction:   "deny",
+			CoordinationReason:  fmt.Sprintf("Bidirectional coordination failed: %v", err),
+		}
+	}
+	
+	alignmentScore := r.calculateRiskPolicyAlignment(riskResponse.AccessResponse.Granted, currentRiskScore, ztResponse.Granted)
+	adjustedRiskLevel := r.calculateRiskLevelFromScore(currentRiskScore)
+	
+	return &ZeroTrustRiskCoordinationResult{
+		CoordinationMode:    ZeroTrustRiskModeBidirectional,
+		PolicyEvaluated:     true,
+		PolicyGranted:       ztResponse.Granted,
+		AlignmentScore:      alignmentScore,
+		ConflictDetected:    riskResponse.AccessResponse.Granted != ztResponse.Granted,
+		RecommendedAction:   r.determineRecommendedAction(riskResponse.AccessResponse.Granted, ztResponse.Granted, alignmentScore),
+		CoordinationReason:  fmt.Sprintf("Bidirectional coordination: Final Risk=%.2f, ZT=%t, Alignment=%.2f", currentRiskScore, ztResponse.Granted, alignmentScore),
+		AdjustedRiskScore:   &currentRiskScore,
+		AdjustedRiskLevel:   &adjustedRiskLevel,
+	}
+}
+
+// performUnifiedCoordination performs unified evaluation treating risk and zero-trust as equal partners
+func (r *RiskBasedAccessIntegration) performUnifiedCoordination(ctx context.Context, request *zerotrust.ZeroTrustAccessRequest, riskResponse *EnhancedRiskAccessResponse) *ZeroTrustRiskCoordinationResult {
+	// Evaluate zero-trust policies
+	ztResponse, err := r.zeroTrustEngine.EvaluateAccess(ctx, request)
+	if err != nil {
+		return &ZeroTrustRiskCoordinationResult{
+			CoordinationMode:    ZeroTrustRiskModeUnified,
+			PolicyEvaluated:     false,
+			PolicyGranted:       false,
+			AlignmentScore:      0.0,
+			ConflictDetected:    false,
+			RecommendedAction:   "deny",
+			CoordinationReason:  fmt.Sprintf("Zero-trust evaluation failed: %v", err),
+		}
+	}
+	
+	// Calculate unified decision using weighted scoring
+	riskWeight := r.config.RiskWeight
+	policyWeight := r.config.PolicyWeight
+	
+	// Normalize risk score to 0-1 range (assuming risk scores are 0-10)
+	normalizedRiskScore := riskResponse.RiskScore / 10.0
+	if normalizedRiskScore > 1.0 {
+		normalizedRiskScore = 1.0
+	}
+	
+	// Convert zero-trust decision to score (1.0 for granted, 0.0 for denied)
+	policyScore := 0.0
+	if ztResponse.Granted {
+		policyScore = 1.0
+	}
+	
+	// Calculate unified score
+	unifiedScore := (riskWeight*(1.0-normalizedRiskScore) + policyWeight*policyScore) / (riskWeight + policyWeight)
+	
+	// Determine unified decision (threshold of 0.5)
+	unifiedGranted := unifiedScore >= 0.5
+	
+	alignmentScore := r.calculateRiskPolicyAlignment(riskResponse.AccessResponse.Granted, riskResponse.RiskScore, ztResponse.Granted)
+	
+	return &ZeroTrustRiskCoordinationResult{
+		CoordinationMode:    ZeroTrustRiskModeUnified,
+		PolicyEvaluated:     true,
+		PolicyGranted:       ztResponse.Granted,
+		AlignmentScore:      alignmentScore,
+		ConflictDetected:    riskResponse.AccessResponse.Granted != ztResponse.Granted,
+		RecommendedAction:   r.boolToAction(unifiedGranted),
+		CoordinationReason:  fmt.Sprintf("Unified evaluation: Risk=%.2f, ZT=%t, Unified=%.2f->%t", riskResponse.RiskScore, ztResponse.Granted, unifiedScore, unifiedGranted),
+		UnifiedScore:        &unifiedScore,
+		UnifiedDecision:     &unifiedGranted,
+	}
 }
 
 // makeRiskAwareAccessDecision makes the final access decision considering all factors
@@ -489,16 +774,19 @@ func (rrai *RiskBasedAccessIntegration) logRiskAwareAccess(ctx context.Context, 
 		"tenant_id":           request.TenantId,
 		"resource_id":         request.ResourceId,
 		"permission_id":       request.PermissionId,
-		"access_granted":      response.StandardResponse.Granted,
-		"risk_score":          response.RiskAssessment.OverallRiskScore,
-		"risk_level":          response.RiskAssessment.RiskLevel,
-		"confidence_score":    response.RiskAssessment.ConfidenceScore,
-		"access_decision":     response.RiskAssessment.AccessDecision,
-		"applied_controls_count": len(response.AppliedControls),
-		"validation_latency_ms":  response.ValidationLatency.Milliseconds(),
-		"primary_risk_factors":   response.RiskFactorsSummary.PrimaryRiskFactors,
-		"jit_access_used":        response.JITAccess.HasJITAccess,
-		"timestamp":              time.Now().Unix(),
+		"access_granted":      response.AccessResponse.Granted,
+		"risk_score":          response.RiskScore,
+		"risk_level":          response.RiskLevel,
+		"risk_factors":        response.RiskFactors,
+		"processing_time_ms":  response.ProcessingTime.Milliseconds(),
+		"timestamp":           time.Now().Unix(),
+	}
+	
+	// Add zero-trust coordination info if present
+	if response.ZeroTrustCoordination != nil {
+		logEntry["zero_trust_mode"] = response.ZeroTrustCoordination.CoordinationMode
+		logEntry["zero_trust_evaluated"] = response.ZeroTrustCoordination.PolicyEvaluated
+		logEntry["conflict_detected"] = response.ZeroTrustCoordination.ConflictDetected
 	}
 
 	// In a real implementation, this would use the configured audit logging system
@@ -1031,4 +1319,253 @@ func getDefaultRiskThresholds() *RiskThresholds {
 		TimeWindow:          5 * time.Minute,
 		CriticalThreshold:   80.0,        // Score of 80+ is critical
 	}
+}
+
+// Zero-trust coordination helper methods
+
+// convertToZeroTrustRequest converts a common access request to a zero-trust request with risk context
+func (r *RiskBasedAccessIntegration) convertToZeroTrustRequest(request *common.AccessRequest, riskResponse *EnhancedRiskAccessResponse) *zerotrust.ZeroTrustAccessRequest {
+	zeroTrustRequest := &zerotrust.ZeroTrustAccessRequest{
+		AccessRequest:    request,
+		RequestID:        fmt.Sprintf("risk-zt-%d", time.Now().UnixNano()),
+		RequestTime:      time.Now(),
+		SubjectType:      zerotrust.SubjectTypeUser,
+		ResourceType:     extractResourceType(request.ResourceId),
+		SourceSystem:     "risk-manager",
+		RequestSource:    zerotrust.RequestSourceSystem,
+		Priority:         zerotrust.RequestPriorityNormal,
+	}
+
+	// Add risk context as subject attributes
+	if zeroTrustRequest.SubjectAttributes == nil {
+		zeroTrustRequest.SubjectAttributes = make(map[string]interface{})
+	}
+	
+	zeroTrustRequest.SubjectAttributes["risk_level"] = riskResponse.RiskLevel
+	zeroTrustRequest.SubjectAttributes["risk_score"] = riskResponse.RiskScore
+	zeroTrustRequest.SubjectAttributes["risk_factors"] = riskResponse.RiskFactors
+
+	// Extract environmental context from request context
+	if request.Context != nil {
+		zeroTrustRequest.EnvironmentContext = &zerotrust.EnvironmentContext{
+			IPAddress: request.Context["source_ip"],
+		}
+		
+		zeroTrustRequest.SecurityContext = &zerotrust.SecurityContext{
+			AuthenticationMethod: request.Context["auth_method"],
+			TrustLevel:          zerotrust.TrustLevelMedium, // Default trust level
+		}
+	}
+
+	return zeroTrustRequest
+}
+
+// calculateRiskPolicyAlignment calculates alignment score between risk assessment and zero-trust policy
+func (r *RiskBasedAccessIntegration) calculateRiskPolicyAlignment(riskGranted bool, riskScore float64, policyGranted bool) float64 {
+	// Perfect alignment when both agree
+	if riskGranted == policyGranted {
+		return 1.0
+	}
+	
+	// Calculate partial alignment based on risk score and decision mismatch
+	if riskScore <= 30.0 && policyGranted {
+		return 0.8 // High alignment - low risk, policy allows
+	}
+	if riskScore >= 70.0 && !policyGranted {
+		return 0.8 // High alignment - high risk, policy denies
+	}
+	if riskScore >= 40.0 && riskScore <= 60.0 {
+		return 0.6 // Medium alignment - medium risk with conflicting decision
+	}
+	
+	return 0.2 // Low alignment - significant mismatch
+}
+
+// determineRecommendedAction determines the recommended action based on risk and policy decisions
+func (r *RiskBasedAccessIntegration) determineRecommendedAction(riskGranted bool, policyGranted bool, alignmentScore float64) string {
+	// High alignment cases
+	if alignmentScore >= 0.8 {
+		if riskGranted && policyGranted {
+			return "allow"
+		}
+		if !riskGranted && !policyGranted {
+			return "deny"
+		}
+	}
+	
+	// Conflict resolution based on coordination mode
+	switch r.zeroTrustRiskMode {
+	case ZeroTrustRiskModeRiskInformed:
+		if riskGranted {
+			return "allow"
+		}
+		return "deny"
+		
+	case ZeroTrustRiskModePolicyInformed:
+		if policyGranted {
+			return "allow"
+		}
+		return "deny"
+		
+	case ZeroTrustRiskModeBidirectional, ZeroTrustRiskModeUnified:
+		// Conservative approach - require both to agree for allow
+		if riskGranted && policyGranted {
+			return "allow"
+		}
+		return "deny"
+		
+	default:
+		return "deny" // Conservative default
+	}
+}
+
+// adjustRiskScoreWithPolicyContext adjusts risk score based on zero-trust policy evaluation
+func (r *RiskBasedAccessIntegration) adjustRiskScoreWithPolicyContext(originalScore float64, ztResponse *zerotrust.ZeroTrustAccessResponse) float64 {
+	// Base adjustment on policy decision
+	adjustment := 0.0
+	
+	if ztResponse.Granted {
+		// Policy allows - slightly reduce risk
+		adjustment = -5.0
+	} else {
+		// Policy denies - increase risk
+		adjustment = 10.0
+	}
+	
+	// Adjust based on policy confidence (if available through applied policies count)
+	policyConfidence := float64(len(ztResponse.AppliedPolicies)) * 0.1
+	if policyConfidence > 1.0 {
+		policyConfidence = 1.0
+	}
+	
+	adjustedScore := originalScore + (adjustment * policyConfidence)
+	
+	// Keep within bounds
+	if adjustedScore < 0 {
+		adjustedScore = 0
+	}
+	if adjustedScore > 100 {
+		adjustedScore = 100
+	}
+	
+	return adjustedScore
+}
+
+// calculateRiskLevelFromScore calculates risk level from a risk score
+func (r *RiskBasedAccessIntegration) calculateRiskLevelFromScore(score float64) string {
+	if score >= 90 {
+		return "extreme"
+	}
+	if score >= 75 {
+		return "critical"
+	}
+	if score >= 60 {
+		return "high"
+	}
+	if score >= 40 {
+		return "moderate"
+	}
+	if score >= 20 {
+		return "low"
+	}
+	return "minimal"
+}
+
+// boolToAction converts a boolean decision to an action string
+func (r *RiskBasedAccessIntegration) boolToAction(decision bool) string {
+	if decision {
+		return "allow"
+	}
+	return "deny"
+}
+
+// applyCoordinationResult applies zero-trust coordination result to the enhanced response
+func (r *RiskBasedAccessIntegration) applyCoordinationResult(response *EnhancedRiskAccessResponse, coordination *ZeroTrustRiskCoordinationResult) {
+	// Update access decision based on coordination mode and recommended action
+	switch coordination.RecommendedAction {
+	case "allow":
+		response.AccessResponse.Granted = true
+		if coordination.CoordinationReason != "" {
+			response.AccessResponse.Reason = fmt.Sprintf("Access allowed by risk-policy coordination: %s", coordination.CoordinationReason)
+		}
+		
+	case "deny":
+		response.AccessResponse.Granted = false
+		if coordination.CoordinationReason != "" {
+			response.AccessResponse.Reason = fmt.Sprintf("Access denied by risk-policy coordination: %s", coordination.CoordinationReason)
+		}
+	}
+	
+	// Update risk score if adjusted
+	if coordination.AdjustedRiskScore != nil {
+		response.RiskScore = *coordination.AdjustedRiskScore
+	}
+	
+	// Update risk level if adjusted
+	if coordination.AdjustedRiskLevel != nil {
+		response.RiskLevel = *coordination.AdjustedRiskLevel
+	}
+}
+
+// extractResourceType extracts resource type from resource ID
+func extractResourceType(resourceID string) string {
+	if resourceID == "" {
+		return "unknown"
+	}
+	
+	// Simple heuristic: take the first part before a delimiter
+	for _, sep := range []string{".", "/", ":", "-"} {
+		for i, char := range resourceID {
+			if string(char) == sep {
+				return resourceID[:i]
+			}
+		}
+	}
+	
+	return resourceID
+}
+
+// extractRiskLevel extracts risk level from access response
+func extractRiskLevel(response *common.AccessResponse) string {
+	// In a real implementation, this would parse structured response data
+	// For now, return a default based on whether access was granted
+	if response.Granted {
+		return "low"
+	}
+	return "high"
+}
+
+// extractRiskScore extracts risk score from access response
+func extractRiskScore(response *common.AccessResponse) float64 {
+	// In a real implementation, this would parse structured response data
+	// For now, return a default score based on whether access was granted
+	if response.Granted {
+		return 25.0 // Low risk
+	}
+	return 75.0 // High risk
+}
+
+// extractRiskFactors extracts risk factors from access response
+func extractRiskFactors(response *common.AccessResponse) []string {
+	// In a real implementation, this would parse structured response data
+	// For now, return default factors based on the reason
+	factors := []string{}
+	
+	if !response.Granted {
+		factors = append(factors, "access_denied")
+	}
+	
+	if response.Reason != "" {
+		factors = append(factors, "reason_provided")
+	}
+	
+	return factors
+}
+
+// abs returns the absolute value of a float64
+func abs(x float64) float64 {
+	if x < 0 {
+		return -x
+	}
+	return x
 }

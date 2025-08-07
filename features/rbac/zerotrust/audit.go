@@ -159,12 +159,16 @@ func (z *ZeroTrustAuditLogger) LogAccessEvaluation(ctx context.Context, request 
 		EventType:        AuditEventPolicyEvaluation,
 		RequestID:        request.RequestID,
 		SessionID:        request.SessionID,
-		SubjectID:        request.AccessRequest.SubjectId,
-		TenantID:         request.AccessRequest.TenantId,
 		PoliciesEvaluated: response.PoliciesEvaluated,
 		ProcessingTime:   processingTime,
 		SourceSystem:     "zero-trust-policy-engine",
 		Version:          "1.0.0",
+	}
+	
+	// Safely extract SubjectID and TenantID from AccessRequest if present
+	if request.AccessRequest != nil {
+		entry.SubjectID = request.AccessRequest.SubjectId
+		entry.TenantID = request.AccessRequest.TenantId
 	}
 	
 	// Set evaluation result

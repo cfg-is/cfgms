@@ -293,6 +293,10 @@ func (rac *RiskAssessmentCache) Store(request *RiskAssessmentRequest, result *Ri
 
 // generateRequestHash generates a hash for the request for caching
 func (rac *RiskAssessmentCache) generateRequestHash(request *RiskAssessmentRequest) string {
+	if request == nil || request.AccessRequest == nil {
+		return fmt.Sprintf("nil-request-%d", time.Now().Unix()/300)
+	}
+	
 	// Simplified hash generation - in practice would use proper hashing
 	return fmt.Sprintf("%s-%s-%s-%d", 
 		request.AccessRequest.SubjectId,
