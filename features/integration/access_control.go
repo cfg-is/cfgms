@@ -3,6 +3,7 @@ package integration
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/cfgis/cfgms/api/proto/common"
@@ -10,11 +11,12 @@ import (
 	"github.com/cfgis/cfgms/features/rbac/continuous"
 	"github.com/cfgis/cfgms/features/rbac/jit"
 	"github.com/cfgis/cfgms/features/rbac/risk"
+	"github.com/cfgis/cfgms/features/rbac/zerotrust"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/features/tenant/security"
 )
 
-// EnhancedAccessControlManager provides unified access control combining RBAC, JIT, Risk-based, and Continuous controls
+// EnhancedAccessControlManager provides unified access control combining RBAC, JIT, Risk-based, Continuous, and Zero-Trust controls
 type EnhancedAccessControlManager struct {
 	rbacManager               rbac.RBACManager
 	tenantManager            *tenant.Manager
@@ -22,10 +24,13 @@ type EnhancedAccessControlManager struct {
 	jitIntegrationManager    *jit.JITIntegrationManager
 	riskIntegrationManager   *risk.RiskBasedAccessIntegration
 	continuousAuthEngine     *continuous.ContinuousAuthorizationEngine
+	zeroTrustPolicyEngine    *zerotrust.ZeroTrustPolicyEngine
 	integrationMode          IntegrationMode
+	zeroTrustPolicyMode      ZeroTrustPolicyMode
 	fallbackBehavior         FallbackBehavior
 	performanceConfig        *PerformanceConfig
 	enableContinuousAuth     bool
+	enableZeroTrustPolicies  bool
 }
 
 // IntegrationMode defines how the different access control systems are integrated
@@ -40,6 +45,30 @@ const (
 	IntegrationModeRiskFirst     IntegrationMode = "risk_first"
 	// IntegrationModeContinuous enables per-action continuous authorization
 	IntegrationModeContinuous    IntegrationMode = "continuous"
+	// IntegrationModeZeroTrustFirst evaluates zero-trust policies before other controls
+	IntegrationModeZeroTrustFirst IntegrationMode = "zero_trust_first"
+	// IntegrationModeZeroTrustAlways evaluates zero-trust policies with every access decision
+	IntegrationModeZeroTrustAlways IntegrationMode = "zero_trust_always"
+)
+
+// ZeroTrustPolicyMode defines how zero-trust policies are applied in the access control pipeline
+type ZeroTrustPolicyMode string
+
+const (
+	// ZeroTrustPolicyModeDisabled disables zero-trust policy evaluation
+	ZeroTrustPolicyModeDisabled  ZeroTrustPolicyMode = "disabled"
+	// ZeroTrustPolicyModeAugmented uses zero-trust policies to augment existing controls
+	// All existing controls AND zero-trust policies must pass
+	ZeroTrustPolicyModeAugmented ZeroTrustPolicyMode = "augmented"
+	// ZeroTrustPolicyModeEnforced uses zero-trust policies as the primary authorization
+	// Zero-trust policies override traditional access control decisions
+	ZeroTrustPolicyModeEnforced  ZeroTrustPolicyMode = "enforced"
+	// ZeroTrustPolicyModeAuditing logs zero-trust policy decisions but doesn't enforce them
+	// Allows comparison between traditional and zero-trust decisions
+	ZeroTrustPolicyModeAuditing  ZeroTrustPolicyMode = "auditing"
+	// ZeroTrustPolicyModeAdaptive dynamically adjusts enforcement based on risk assessment
+	// Low risk: auditing, Medium risk: augmented, High risk: enforced
+	ZeroTrustPolicyModeAdaptive  ZeroTrustPolicyMode = "adaptive"
 )
 
 // FallbackBehavior defines behavior when components fail
@@ -76,6 +105,7 @@ type EnhancedAccessResponse struct {
 	JITAccess          *jit.JITAccessValidationResult     `json:"jit_access"`
 	RiskAssessment     *risk.RiskAssessmentResult         `json:"risk_assessment"`
 	ContinuousAuth     *ContinuousAuthValidationResult    `json:"continuous_auth"`
+	ZeroTrustPolicies  *ZeroTrustPolicyValidationResult   `json:"zero_trust_policies"`
 	
 	// Applied controls and recommendations
 	AppliedControls    []risk.AdaptiveControlInstance     `json:"applied_controls"`
@@ -111,6 +141,24 @@ type ContinuousAuthValidationResult struct {
 	LatencyMs           int                              `json:"latency_ms"`
 	ValidationTime      time.Time                        `json:"validation_time"`
 	NextRevalidation    time.Time                        `json:"next_revalidation"`
+}
+
+// ZeroTrustPolicyValidationResult contains zero-trust policy-specific validation results
+type ZeroTrustPolicyValidationResult struct {
+	DecisionID          string                                  `json:"decision_id"`
+	PolicyMode          ZeroTrustPolicyMode                     `json:"policy_mode"`
+	TraditionalGranted  bool                                    `json:"traditional_granted"`
+	ZeroTrustGranted    bool                                    `json:"zero_trust_granted"`
+	FinalDecision       bool                                    `json:"final_decision"`
+	PoliciesEvaluated   []string                                `json:"policies_evaluated"`
+	PolicyResults       []*zerotrust.PolicyEvaluationResult    `json:"policy_results"`
+	ComplianceFrameworks []string                               `json:"compliance_frameworks"`
+	TrustScore          float64                                 `json:"trust_score"`
+	RiskFactors         []string                                `json:"risk_factors"`
+	ProcessingTime      time.Duration                           `json:"processing_time"`
+	ValidationTime      time.Time                               `json:"validation_time"`
+	Reason              string                                  `json:"reason"`
+	Recommendations     []string                                `json:"recommendations"`
 }
 
 // AccessRecommendation provides recommendations for improving access control
@@ -159,9 +207,12 @@ func NewEnhancedAccessControlManager(
 		jitIntegrationManager:  jitIntegrationManager,
 		riskIntegrationManager: riskIntegrationManager,
 		continuousAuthEngine:   nil, // Will be set when continuous mode is enabled
+		zeroTrustPolicyEngine:  nil, // Will be set when zero-trust mode is enabled
 		integrationMode:        IntegrationModeSequential, // Default to sequential
+		zeroTrustPolicyMode:    ZeroTrustPolicyModeDisabled, // Default to disabled
 		fallbackBehavior:       FallbackBehaviorDegrade,   // Default to graceful degradation
 		enableContinuousAuth:   false,                     // Default to disabled
+		enableZeroTrustPolicies: false,                    // Default to disabled
 		performanceConfig: &PerformanceConfig{
 			MaxProcessingTime:        5 * time.Second,
 			EnableCaching:            true,
@@ -179,6 +230,34 @@ func (eacm *EnhancedAccessControlManager) EnableContinuousAuthorization(continuo
 	eacm.continuousAuthEngine = continuousAuthEngine
 	eacm.enableContinuousAuth = true
 	eacm.integrationMode = IntegrationModeContinuous
+}
+
+// EnableZeroTrustPolicies enables zero-trust policy evaluation with specified mode
+func (eacm *EnhancedAccessControlManager) EnableZeroTrustPolicies(engine *zerotrust.ZeroTrustPolicyEngine, mode ZeroTrustPolicyMode) {
+	eacm.zeroTrustPolicyEngine = engine
+	eacm.zeroTrustPolicyMode = mode
+	eacm.enableZeroTrustPolicies = (mode != ZeroTrustPolicyModeDisabled && engine != nil)
+	
+	// Adjust integration mode based on zero-trust policy mode
+	if eacm.enableZeroTrustPolicies {
+		switch mode {
+		case ZeroTrustPolicyModeEnforced:
+			eacm.integrationMode = IntegrationModeZeroTrustFirst
+		case ZeroTrustPolicyModeAugmented, ZeroTrustPolicyModeAdaptive:
+			eacm.integrationMode = IntegrationModeZeroTrustAlways
+		}
+	}
+}
+
+// SetZeroTrustPolicyMode updates the zero-trust policy mode
+func (eacm *EnhancedAccessControlManager) SetZeroTrustPolicyMode(mode ZeroTrustPolicyMode) {
+	eacm.zeroTrustPolicyMode = mode
+	eacm.enableZeroTrustPolicies = (mode != ZeroTrustPolicyModeDisabled && eacm.zeroTrustPolicyEngine != nil)
+}
+
+// GetZeroTrustPolicyMode returns the current zero-trust policy mode
+func (eacm *EnhancedAccessControlManager) GetZeroTrustPolicyMode() ZeroTrustPolicyMode {
+	return eacm.zeroTrustPolicyMode
 }
 
 // Initialize initializes all access control components
@@ -225,6 +304,16 @@ func (eacm *EnhancedAccessControlManager) CheckAccess(ctx context.Context, reque
 		}
 	case IntegrationModeContinuous:
 		err := eacm.evaluateContinuous(processCtx, request, response)
+		if err != nil {
+			return eacm.handleEvaluationError(ctx, request, response, err)
+		}
+	case IntegrationModeZeroTrustFirst:
+		err := eacm.evaluateZeroTrustFirst(processCtx, request, response)
+		if err != nil {
+			return eacm.handleEvaluationError(ctx, request, response, err)
+		}
+	case IntegrationModeZeroTrustAlways:
+		err := eacm.evaluateZeroTrustAlways(processCtx, request, response)
 		if err != nil {
 			return eacm.handleEvaluationError(ctx, request, response, err)
 		}
@@ -306,6 +395,30 @@ func (eacm *EnhancedAccessControlManager) evaluateSequential(ctx context.Context
 		}
 	}
 	response.ComponentLatency["risk"] = time.Since(riskStart)
+
+	// Step 4: Zero-trust policy evaluation (if enabled and access granted)
+	if eacm.enableZeroTrustPolicies && response.StandardResponse != nil && response.StandardResponse.Granted {
+		zeroTrustStart := time.Now()
+		zeroTrustResult, err := eacm.evaluateZeroTrustPolicies(ctx, request, response.StandardResponse.Granted, "traditional access granted")
+		if err != nil {
+			// Zero-trust policy failure handling based on fallback behavior
+			switch eacm.fallbackBehavior {
+			case FallbackBehaviorDeny:
+				return fmt.Errorf("zero-trust policy evaluation failed: %w", err)
+			case FallbackBehaviorAllow:
+				response.FallbacksUsed = append(response.FallbacksUsed, "zero_trust_fallback")
+			case FallbackBehaviorDegrade:
+				// Apply conservative zero-trust controls
+				response.FallbacksUsed = append(response.FallbacksUsed, "zero_trust_degraded")
+				eacm.applyConservativeZeroTrustControls(response)
+			}
+		} else {
+			response.ZeroTrustPolicies = zeroTrustResult
+			// Apply zero-trust decision based on mode
+			response.StandardResponse = eacm.combineZeroTrustDecision(response.StandardResponse, zeroTrustResult)
+		}
+		response.ComponentLatency["zero_trust"] = time.Since(zeroTrustStart)
+	}
 
 	return nil
 }
@@ -486,6 +599,77 @@ func (eacm *EnhancedAccessControlManager) evaluateComprehensive(ctx context.Cont
 	return nil
 }
 
+// evaluateZeroTrustFirst performs zero-trust-first evaluation where policies determine access control approach
+func (eacm *EnhancedAccessControlManager) evaluateZeroTrustFirst(ctx context.Context, request *common.AccessRequest, response *EnhancedAccessResponse) error {
+	if eacm.zeroTrustPolicyEngine == nil {
+		return fmt.Errorf("zero-trust policy engine not available")
+	}
+
+	// Step 1: Evaluate zero-trust policies first
+	zeroTrustStart := time.Now()
+	zeroTrustResult, err := eacm.evaluateZeroTrustPolicies(ctx, request, false, "pre-authorization evaluation")
+	if err != nil {
+		// Fall back to sequential evaluation if zero-trust fails
+		response.FallbacksUsed = append(response.FallbacksUsed, "zero_trust_first_fallback")
+		return eacm.evaluateSequential(ctx, request, response)
+	}
+	response.ComponentLatency["zero_trust"] = time.Since(zeroTrustStart)
+	response.ZeroTrustPolicies = zeroTrustResult
+
+	// Step 2: Apply traditional controls based on zero-trust decision
+	if zeroTrustResult.ZeroTrustGranted {
+		// Zero-trust grants access - verify with traditional controls
+		return eacm.evaluateSequential(ctx, request, response)
+	} else {
+		// Zero-trust denies access - no need for traditional controls
+		response.StandardResponse = &common.AccessResponse{
+			Granted: false,
+			Reason:  fmt.Sprintf("Access denied by zero-trust policies: %s", zeroTrustResult.Reason),
+		}
+		return nil
+	}
+}
+
+// evaluateZeroTrustAlways performs comprehensive evaluation with zero-trust policy integration
+func (eacm *EnhancedAccessControlManager) evaluateZeroTrustAlways(ctx context.Context, request *common.AccessRequest, response *EnhancedAccessResponse) error {
+	if eacm.zeroTrustPolicyEngine == nil {
+		return fmt.Errorf("zero-trust policy engine not available")
+	}
+
+	// Step 1: Perform traditional access control evaluation
+	err := eacm.evaluateSequential(ctx, request, response)
+	if err != nil {
+		return err
+	}
+
+	traditionalGranted := response.StandardResponse != nil && response.StandardResponse.Granted
+
+	// Step 2: Evaluate zero-trust policies
+	zeroTrustStart := time.Now()
+	zeroTrustResult, err := eacm.evaluateZeroTrustPolicies(ctx, request, traditionalGranted, "comprehensive evaluation")
+	if err != nil {
+		// Handle zero-trust failure based on fallback behavior
+		switch eacm.fallbackBehavior {
+		case FallbackBehaviorDeny:
+			return fmt.Errorf("zero-trust policy evaluation failed: %w", err)
+		case FallbackBehaviorAllow:
+			response.FallbacksUsed = append(response.FallbacksUsed, "zero_trust_always_fallback")
+			return nil // Keep traditional decision
+		case FallbackBehaviorDegrade:
+			response.FallbacksUsed = append(response.FallbacksUsed, "zero_trust_always_degraded")
+			eacm.applyConservativeZeroTrustControls(response)
+			return nil
+		}
+	}
+	response.ComponentLatency["zero_trust"] = time.Since(zeroTrustStart)
+	response.ZeroTrustPolicies = zeroTrustResult
+
+	// Step 3: Combine decisions based on zero-trust policy mode
+	response.StandardResponse = eacm.combineZeroTrustDecision(response.StandardResponse, zeroTrustResult)
+
+	return nil
+}
+
 // Helper methods
 
 func (eacm *EnhancedAccessControlManager) evaluateRBACAccess(ctx context.Context, request *common.AccessRequest) (*RBACValidationResult, error) {
@@ -568,6 +752,165 @@ func (eacm *EnhancedAccessControlManager) applyConservativeRiskControls(response
 	response.AppliedControls = append(response.AppliedControls, conservativeControl)
 }
 
+// evaluateZeroTrustPolicies evaluates zero-trust policies for an access request
+func (eacm *EnhancedAccessControlManager) evaluateZeroTrustPolicies(ctx context.Context, request *common.AccessRequest, traditionalGranted bool, evaluationContext string) (*ZeroTrustPolicyValidationResult, error) {
+	if eacm.zeroTrustPolicyEngine == nil {
+		return nil, fmt.Errorf("zero-trust policy engine not configured")
+	}
+
+	// Convert common.AccessRequest to zerotrust.ZeroTrustAccessRequest
+	zeroTrustRequest := &zerotrust.ZeroTrustAccessRequest{
+		AccessRequest:    request,
+		RequestID:        fmt.Sprintf("integration-%d", time.Now().UnixNano()),
+		RequestTime:      time.Now(),
+		SubjectType:      zerotrust.SubjectTypeUser, // Default, could be enhanced based on context
+		ResourceType:     extractResourceType(request.ResourceId),
+		SourceSystem:     "enhanced-access-control",
+		RequestSource:    zerotrust.RequestSourceSystem,
+		Priority:         zerotrust.RequestPriorityNormal,
+	}
+
+	// Extract environmental context from request
+	if request.Context != nil {
+		zeroTrustRequest.EnvironmentContext = &zerotrust.EnvironmentContext{
+			IPAddress: request.Context["source_ip"],
+		}
+		
+		zeroTrustRequest.SecurityContext = &zerotrust.SecurityContext{
+			AuthenticationMethod: request.Context["auth_method"],
+			TrustLevel:          zerotrust.TrustLevelMedium, // Default trust level
+		}
+		
+		// Set MFA verified if available
+		if mfaStr := request.Context["mfa_verified"]; mfaStr == "true" {
+			zeroTrustRequest.SecurityContext.MFAVerified = true
+		}
+	}
+
+	// Evaluate zero-trust policies
+	zeroTrustResponse, err := eacm.zeroTrustPolicyEngine.EvaluateAccess(ctx, zeroTrustRequest)
+	if err != nil {
+		return nil, fmt.Errorf("zero-trust policy evaluation failed: %w", err)
+	}
+
+	// Build validation result
+	result := &ZeroTrustPolicyValidationResult{
+		DecisionID:          zeroTrustRequest.RequestID,
+		PolicyMode:          eacm.zeroTrustPolicyMode,
+		TraditionalGranted:  traditionalGranted,
+		ZeroTrustGranted:    zeroTrustResponse.Granted,
+		FinalDecision:       false, // Will be set by combineZeroTrustDecision
+		PoliciesEvaluated:   zeroTrustResponse.PoliciesEvaluated,
+		PolicyResults:       nil, // Would be populated from policy evaluation details
+		ComplianceFrameworks: extractComplianceFrameworks(zeroTrustResponse),
+		TrustScore:          calculateTrustScore(zeroTrustResponse),
+		RiskFactors:         extractRiskFactors(zeroTrustResponse),
+		ProcessingTime:      zeroTrustResponse.ProcessingTime,
+		ValidationTime:      time.Now(),
+		Reason:              zeroTrustResponse.Reason,
+		Recommendations:     generateZeroTrustRecommendations(zeroTrustResponse),
+	}
+
+	return result, nil
+}
+
+// combineZeroTrustDecision combines traditional and zero-trust decisions based on policy mode
+func (eacm *EnhancedAccessControlManager) combineZeroTrustDecision(traditionalResponse *common.AccessResponse, zeroTrustResult *ZeroTrustPolicyValidationResult) *common.AccessResponse {
+	if traditionalResponse == nil {
+		traditionalResponse = &common.AccessResponse{
+			Granted: false,
+			Reason:  "No traditional access decision available",
+		}
+	}
+
+	// Handle adaptive mode by determining appropriate enforcement based on risk
+	effectiveMode := eacm.zeroTrustPolicyMode
+	if effectiveMode == ZeroTrustPolicyModeAdaptive {
+		effectiveMode = eacm.determineAdaptiveMode(zeroTrustResult)
+	}
+
+	// Combine decisions based on effective mode
+	switch effectiveMode {
+	case ZeroTrustPolicyModeAugmented:
+		// Both traditional and zero-trust must grant access
+		granted := traditionalResponse.Granted && zeroTrustResult.ZeroTrustGranted
+		reason := fmt.Sprintf("Traditional: %s | Zero-Trust: %s", traditionalResponse.Reason, zeroTrustResult.Reason)
+		if !granted {
+			if !traditionalResponse.Granted {
+				reason = fmt.Sprintf("Access denied by traditional controls: %s", traditionalResponse.Reason)
+			} else {
+				reason = fmt.Sprintf("Access denied by zero-trust policies: %s", zeroTrustResult.Reason)
+			}
+		}
+		zeroTrustResult.FinalDecision = granted
+		return &common.AccessResponse{
+			Granted:            granted,
+			Reason:             reason,
+			AppliedRoles:       traditionalResponse.AppliedRoles,
+			AppliedPermissions: traditionalResponse.AppliedPermissions,
+		}
+
+	case ZeroTrustPolicyModeEnforced:
+		// Zero-trust policies override traditional decisions
+		granted := zeroTrustResult.ZeroTrustGranted
+		reason := fmt.Sprintf("Zero-trust decision: %s (Traditional: %s)", zeroTrustResult.Reason, traditionalResponse.Reason)
+		zeroTrustResult.FinalDecision = granted
+		return &common.AccessResponse{
+			Granted:            granted,
+			Reason:             reason,
+			AppliedRoles:       traditionalResponse.AppliedRoles,
+			AppliedPermissions: traditionalResponse.AppliedPermissions,
+		}
+
+	case ZeroTrustPolicyModeAuditing:
+		// Use traditional decision but log zero-trust result
+		granted := traditionalResponse.Granted
+		reason := fmt.Sprintf("%s (Zero-Trust audit: %s)", traditionalResponse.Reason, zeroTrustResult.Reason)
+		zeroTrustResult.FinalDecision = granted
+		return &common.AccessResponse{
+			Granted:            granted,
+			Reason:             reason,
+			AppliedRoles:       traditionalResponse.AppliedRoles,
+			AppliedPermissions: traditionalResponse.AppliedPermissions,
+		}
+
+	default: // ZeroTrustPolicyModeDisabled
+		// Should not reach here, but fallback to traditional decision
+		zeroTrustResult.FinalDecision = traditionalResponse.Granted
+		return traditionalResponse
+	}
+}
+
+// determineAdaptiveMode determines the appropriate zero-trust mode based on risk assessment
+func (eacm *EnhancedAccessControlManager) determineAdaptiveMode(zeroTrustResult *ZeroTrustPolicyValidationResult) ZeroTrustPolicyMode {
+	// Use trust score to determine enforcement level
+	if zeroTrustResult.TrustScore >= 0.8 {
+		return ZeroTrustPolicyModeAuditing // High trust - just audit
+	} else if zeroTrustResult.TrustScore >= 0.6 {
+		return ZeroTrustPolicyModeAugmented // Medium trust - augment traditional controls
+	} else {
+		return ZeroTrustPolicyModeEnforced // Low trust - enforce zero-trust decisions
+	}
+}
+
+// applyConservativeZeroTrustControls applies conservative controls when zero-trust evaluation fails
+func (eacm *EnhancedAccessControlManager) applyConservativeZeroTrustControls(response *EnhancedAccessResponse) {
+	conservativeControl := risk.AdaptiveControlInstance{
+		ID:           fmt.Sprintf("zt-conservative-%d", time.Now().UnixNano()),
+		DefinitionID: "zero_trust_conservative_monitoring",
+		Status:       risk.ControlStatusActive,
+		AppliedAt:    time.Now(),
+		Parameters: map[string]interface{}{
+			"monitoring_level":    "comprehensive",
+			"session_timeout":     10, // 10 minutes
+			"continuous_eval":     true,
+			"reason":             "zero_trust_evaluation_fallback",
+			"requires_mfa":       true,
+		},
+	}
+	response.AppliedControls = append(response.AppliedControls, conservativeControl)
+}
+
 func (eacm *EnhancedAccessControlManager) generateRecommendations(ctx context.Context, request *common.AccessRequest, response *EnhancedAccessResponse) {
 	// Generate recommendations based on evaluation results
 	
@@ -622,17 +965,20 @@ func (eacm *EnhancedAccessControlManager) UpdatePerformanceConfig(config *Perfor
 // GetIntegrationStatus returns the current status of all integration components
 func (eacm *EnhancedAccessControlManager) GetIntegrationStatus(ctx context.Context) map[string]interface{} {
 	return map[string]interface{}{
-		"integration_mode":   eacm.integrationMode,
-		"fallback_behavior":  eacm.fallbackBehavior,
-		"performance_config": eacm.performanceConfig,
+		"integration_mode":        eacm.integrationMode,
+		"zero_trust_policy_mode":  eacm.zeroTrustPolicyMode,
+		"fallback_behavior":       eacm.fallbackBehavior,
+		"performance_config":      eacm.performanceConfig,
 		"components": map[string]bool{
-			"rbac_manager":        eacm.rbacManager != nil,
-			"jit_integration":     eacm.jitIntegrationManager != nil,
-			"risk_integration":    eacm.riskIntegrationManager != nil,
-			"tenant_security":     eacm.tenantSecurity != nil,
-			"continuous_auth":     eacm.continuousAuthEngine != nil,
+			"rbac_manager":          eacm.rbacManager != nil,
+			"jit_integration":       eacm.jitIntegrationManager != nil,
+			"risk_integration":      eacm.riskIntegrationManager != nil,
+			"tenant_security":       eacm.tenantSecurity != nil,
+			"continuous_auth":       eacm.continuousAuthEngine != nil,
+			"zero_trust_policies":   eacm.zeroTrustPolicyEngine != nil,
 		},
-		"continuous_auth_enabled": eacm.enableContinuousAuth,
+		"continuous_auth_enabled":     eacm.enableContinuousAuth,
+		"zero_trust_policies_enabled": eacm.enableZeroTrustPolicies,
 	}
 }
 
@@ -709,4 +1055,61 @@ func convertPolicyViolations(policyViolations []continuous.PolicyViolation) []st
 		violations[i] = fmt.Sprintf("%s: %s", violation.ViolationType, violation.Description)
 	}
 	return violations
+}
+
+// extractResourceType extracts the resource type from a resource ID
+func extractResourceType(resourceID string) string {
+	if resourceID == "" {
+		return "unknown"
+	}
+	
+	// Simple heuristic: take the first part before a dot or slash
+	for _, sep := range []string{".", "/", ":"} {
+		if idx := strings.Index(resourceID, sep); idx != -1 {
+			return resourceID[:idx]
+		}
+	}
+	
+	return resourceID
+}
+
+// extractComplianceFrameworks extracts compliance frameworks from zero-trust response
+func extractComplianceFrameworks(response *zerotrust.ZeroTrustAccessResponse) []string {
+	frameworks := make([]string, 0)
+	// This would be populated from the zero-trust response compliance metadata
+	// For now, return empty slice - implementation would depend on zerotrust response structure
+	return frameworks
+}
+
+// calculateTrustScore calculates a trust score from zero-trust response
+func calculateTrustScore(response *zerotrust.ZeroTrustAccessResponse) float64 {
+	// Simple trust score calculation based on response
+	// In practice, this would be more sophisticated
+	if response.Granted {
+		return 0.8 // High trust if granted
+	}
+	return 0.3 // Low trust if denied
+}
+
+// extractRiskFactors extracts risk factors from zero-trust response
+func extractRiskFactors(response *zerotrust.ZeroTrustAccessResponse) []string {
+	factors := make([]string, 0)
+	// This would be populated from the zero-trust response risk analysis
+	// For now, return empty slice - implementation would depend on zerotrust response structure
+	return factors
+}
+
+// generateZeroTrustRecommendations generates recommendations based on zero-trust evaluation
+func generateZeroTrustRecommendations(response *zerotrust.ZeroTrustAccessResponse) []string {
+	recommendations := make([]string, 0)
+	
+	if !response.Granted {
+		recommendations = append(recommendations, "Review zero-trust policy compliance")
+	}
+	
+	if response.ProcessingTime > 5*time.Millisecond {
+		recommendations = append(recommendations, "Optimize zero-trust policy evaluation performance")
+	}
+	
+	return recommendations
 }

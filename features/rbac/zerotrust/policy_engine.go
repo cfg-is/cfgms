@@ -6,21 +6,39 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cfgis/cfgms/features/rbac"
-	"github.com/cfgis/cfgms/features/rbac/continuous"
-	"github.com/cfgis/cfgms/features/rbac/jit"
-	"github.com/cfgis/cfgms/features/rbac/risk"
-	"github.com/cfgis/cfgms/features/tenant/security"
+	"github.com/cfgis/cfgms/api/proto/common"
 )
+
+// External system interfaces (to avoid circular imports)
+type RBACManager interface {
+	CheckPermission(ctx context.Context, request *common.AccessRequest) (*common.AccessResponse, error)
+	GetEffectivePermissions(ctx context.Context, subjectID, tenantID string) ([]*common.Permission, error)
+}
+
+type JITManager interface {
+	ValidateJITAccess(ctx context.Context, request *common.AccessRequest) (*common.AccessResponse, error)
+}
+
+type RiskManager interface {
+	AssessRisk(ctx context.Context, request *common.AccessRequest) (*common.AccessResponse, error)
+}
+
+type ContinuousAuthManager interface {
+	ValidateContinuousAuth(ctx context.Context, request *common.AccessRequest) (*common.AccessResponse, error)
+}
+
+type TenantSecurityManager interface {
+	ValidateTenantSecurity(ctx context.Context, request *common.AccessRequest) (*common.AccessResponse, error)
+}
 
 // ZeroTrustPolicyEngine provides unified zero-trust policy enforcement across all authorization systems
 type ZeroTrustPolicyEngine struct {
 	// Core authorization system integrations
-	rbacManager              rbac.RBACManager
-	jitManager              *jit.JITIntegrationManager
-	riskManager             *risk.RiskBasedAccessIntegration
-	continuousAuthEngine    *continuous.ContinuousAuthorizationEngine
-	tenantSecurityEngine    *security.TenantSecurityPolicyEngine
+	rbacManager              RBACManager
+	jitManager              JITManager
+	riskManager             RiskManager
+	continuousAuthEngine    ContinuousAuthManager
+	tenantSecurityEngine    TenantSecurityManager
 	
 	// Policy management components
 	policyManager           *PolicyLifecycleManager
@@ -303,11 +321,11 @@ func NewZeroTrustPolicyEngine(config *ZeroTrustConfig) *ZeroTrustPolicyEngine {
 
 // SetIntegrations configures the authorization system integrations
 func (z *ZeroTrustPolicyEngine) SetIntegrations(
-	rbacManager rbac.RBACManager,
-	jitManager *jit.JITIntegrationManager,
-	riskManager *risk.RiskBasedAccessIntegration,
-	continuousAuthEngine *continuous.ContinuousAuthorizationEngine,
-	tenantSecurityEngine *security.TenantSecurityPolicyEngine,
+	rbacManager RBACManager,
+	jitManager JITManager,
+	riskManager RiskManager,
+	continuousAuthEngine ContinuousAuthManager,
+	tenantSecurityEngine TenantSecurityManager,
 ) {
 	z.rbacManager = rbacManager
 	z.jitManager = jitManager
