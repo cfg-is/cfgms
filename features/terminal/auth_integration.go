@@ -11,25 +11,29 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/rbac"
+	"github.com/cfgis/cfgms/features/rbac/continuous"
 	"github.com/cfgis/cfgms/pkg/cert"
 )
 
-// AuthenticatedTerminalManager manages terminal sessions with mTLS authentication
+// AuthenticatedTerminalManager manages terminal sessions with mTLS authentication and continuous authorization
 type AuthenticatedTerminalManager struct {
-	baseManager       SessionManager
-	rbacManager       rbac.RBACManager
-	certValidator     *cert.Validator
-	securityValidator *SecurityValidator
-	auditLogger       *AuditLogger
-	sessionMonitor    *SessionMonitor
+	baseManager         SessionManager
+	rbacManager         rbac.RBACManager
+	certValidator       *cert.Validator
+	securityValidator   *SecurityValidator
+	auditLogger         *AuditLogger
+	sessionMonitor      *SessionMonitor
+	continuousAuthEngine *continuous.ContinuousAuthorizationEngine
 	
 	// Anti-hijacking measures
-	sessionTokens     map[string]*SessionToken
-	tokenMutex        sync.RWMutex
+	sessionTokens       map[string]*SessionToken
+	tokenMutex          sync.RWMutex
 	
 	// Configuration
-	config            *AuthConfig
+	config              *AuthConfig
+	continuousAuthConfig *ContinuousAuthConfig
 }
 
 // AuthConfig contains authentication and security configuration
@@ -55,6 +59,28 @@ type AuthConfig struct {
 	AllowedCountries    []string      `json:"allowed_countries"`
 	TimeBasedAccess     bool          `json:"time_based_access"`
 	AllowedHours        []int         `json:"allowed_hours"`
+}
+
+// ContinuousAuthConfig contains continuous authorization configuration
+type ContinuousAuthConfig struct {
+	// Continuous Authorization
+	EnableContinuousAuth     bool          `json:"enable_continuous_auth"`
+	AuthorizePerCommand      bool          `json:"authorize_per_command"`
+	CommandAuthTimeout       time.Duration `json:"command_auth_timeout"`
+	SessionRevalidationInterval time.Duration `json:"session_revalidation_interval"`
+	
+	// Per-command authorization settings
+	RequireAuthCommands      []string      `json:"require_auth_commands"`
+	HighRiskCommands         []string      `json:"high_risk_commands"`
+	CriticalCommands         []string      `json:"critical_commands"`
+	
+	// Session monitoring
+	MonitorSessionContext    bool          `json:"monitor_session_context"`
+	ContextChangeThreshold   float64       `json:"context_change_threshold"`
+	MaxAuthLatencyMs         int           `json:"max_auth_latency_ms"`
+	
+	// Fallback behavior
+	ContinuousAuthFallback   string        `json:"continuous_auth_fallback"` // "allow", "deny", "traditional"
 }
 
 // SessionToken represents a secure session token with anti-hijacking properties
@@ -125,14 +151,16 @@ func NewAuthenticatedTerminalManager(
 	sessionMonitor := NewSessionMonitor(securityValidator, DefaultMonitorConfig())
 	
 	manager := &AuthenticatedTerminalManager{
-		baseManager:       baseManager,
-		rbacManager:       rbacManager,
-		certValidator:     certValidator,
-		securityValidator: securityValidator,
-		auditLogger:       auditLogger,
-		sessionMonitor:    sessionMonitor,
-		sessionTokens:     make(map[string]*SessionToken),
-		config:            config,
+		baseManager:         baseManager,
+		rbacManager:         rbacManager,
+		certValidator:       certValidator,
+		securityValidator:   securityValidator,
+		auditLogger:         auditLogger,
+		sessionMonitor:      sessionMonitor,
+		continuousAuthEngine: nil, // Will be set when enabled
+		sessionTokens:       make(map[string]*SessionToken),
+		config:              config,
+		continuousAuthConfig: DefaultContinuousAuthConfig(),
 	}
 	
 	// Start background services
@@ -602,4 +630,280 @@ func DefaultAuthConfig() *AuthConfig {
 		TimeBasedAccess:       false,
 		AllowedHours:          []int{8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18},
 	}
+}
+
+// DefaultContinuousAuthConfig returns default continuous authorization configuration
+func DefaultContinuousAuthConfig() *ContinuousAuthConfig {
+	return &ContinuousAuthConfig{
+		EnableContinuousAuth:        false, // Disabled by default
+		AuthorizePerCommand:         true,
+		CommandAuthTimeout:          100 * time.Millisecond,
+		SessionRevalidationInterval: 5 * time.Minute,
+		RequireAuthCommands: []string{
+			"sudo", "su", "passwd", "chmod", "chown", "rm -rf",
+			"dd", "mkfs", "fdisk", "mount", "umount", "systemctl",
+		},
+		HighRiskCommands: []string{
+			"rm", "rmdir", "mv", "cp -r", "rsync", "scp",
+			"ssh", "telnet", "ftp", "wget", "curl", "git clone",
+		},
+		CriticalCommands: []string{
+			"format", "fdisk -l", "parted", "gparted", "cfdisk",
+			"mkfs.ext4", "mkfs.ntfs", "dd if=/dev/zero", "shred",
+		},
+		MonitorSessionContext:     true,
+		ContextChangeThreshold:    0.3, // 30% context change triggers reauth
+		MaxAuthLatencyMs:          10,
+		ContinuousAuthFallback:    "traditional", // Fall back to traditional auth
+	}
+}
+
+// EnableContinuousAuthorization enables continuous authorization for terminal sessions
+func (atm *AuthenticatedTerminalManager) EnableContinuousAuthorization(engine *continuous.ContinuousAuthorizationEngine, config *ContinuousAuthConfig) {
+	atm.continuousAuthEngine = engine
+	if config != nil {
+		atm.continuousAuthConfig = config
+	}
+	atm.continuousAuthConfig.EnableContinuousAuth = true
+}
+
+// AuthorizeCommand performs continuous authorization for a specific command
+func (atm *AuthenticatedTerminalManager) AuthorizeCommand(ctx context.Context, sessionID, command string, token *SessionToken) (*continuous.ContinuousAuthResponse, error) {
+	if !atm.continuousAuthConfig.EnableContinuousAuth || atm.continuousAuthEngine == nil {
+		// Fall back to traditional command validation
+		return atm.authorizeCommandTraditional(ctx, sessionID, command, token)
+	}
+
+	// Apply command authorization timeout
+	authCtx, cancel := context.WithTimeout(ctx, atm.continuousAuthConfig.CommandAuthTimeout)
+	defer cancel()
+
+	// Determine command risk level
+	riskLevel := atm.assessCommandRisk(command)
+	operationType := atm.getOperationType(riskLevel)
+
+	// Create continuous authorization request
+	continuousRequest := &continuous.ContinuousAuthRequest{
+		AccessRequest: &common.AccessRequest{
+			SubjectId:    token.UserID,
+			PermissionId: "terminal.execute",
+			TenantId:     extractTenantID(token),
+			ResourceId:   command,
+		},
+		SessionID:       sessionID,
+		OperationType:   operationType,
+		ResourceContext: map[string]string{
+			"session_id":     sessionID,
+			"command":        command,
+			"risk_level":     string(riskLevel),
+			"command_type":   string(operationType),
+		},
+		RequestTime: time.Now(),
+	}
+
+	// Perform continuous authorization
+	authStart := time.Now()
+	response, err := atm.continuousAuthEngine.AuthorizeAction(authCtx, continuousRequest)
+	authLatency := time.Since(authStart)
+
+	// Check authorization latency against SLA
+	if authLatency.Milliseconds() > int64(atm.continuousAuthConfig.MaxAuthLatencyMs) {
+		// Log performance violation but don't fail the request
+		if logErr := atm.auditLogger.LogSecurityViolation(ctx, sessionID, token.UserID, "", "",
+			"authorization_latency_sla_violation", 
+			fmt.Sprintf("Authorization latency %v exceeds SLA %dms", authLatency, atm.continuousAuthConfig.MaxAuthLatencyMs),
+			FilterSeverityMedium); logErr != nil {
+			_ = logErr // Ignore audit failures
+		}
+	}
+
+	if err != nil {
+		// Handle fallback based on configuration
+		switch atm.continuousAuthConfig.ContinuousAuthFallback {
+		case "allow":
+			// Allow command execution but log the issue
+			if logErr := atm.auditLogger.LogSecurityViolation(ctx, sessionID, token.UserID, "", "",
+				"continuous_auth_failure_fallback_allow", fmt.Sprintf("Continuous auth failed: %v", err), FilterSeverityHigh); logErr != nil {
+				_ = logErr // Ignore audit failures
+			}
+			return &continuous.ContinuousAuthResponse{
+				AccessResponse: &common.AccessResponse{
+					Granted: true,
+					Reason:  "Fallback to allow due to continuous auth failure",
+				},
+				ValidUntil: time.Now().Add(5 * time.Minute),
+			}, nil
+		case "deny":
+			return nil, fmt.Errorf("continuous authorization failed: %w", err)
+		case "traditional":
+			return atm.authorizeCommandTraditional(ctx, sessionID, command, token)
+		default:
+			return nil, fmt.Errorf("continuous authorization failed: %w", err)
+		}
+	}
+
+	// Log successful authorization for audit
+	if response.AccessResponse.Granted {
+		// Log successful authorization (using existing audit method)
+		if logErr := atm.auditLogger.LogSecurityViolation(ctx, sessionID, token.UserID, "", "",
+			"command_authorized", fmt.Sprintf("Command authorized: %s, latency: %v", command, authLatency), FilterSeverityLow); logErr != nil {
+			_ = logErr // Ignore audit failures
+		}
+	} else {
+		// Log denied command
+		if logErr := atm.auditLogger.LogSecurityViolation(ctx, sessionID, token.UserID, "", "",
+			"command_authorization_denied", fmt.Sprintf("Command denied: %s, Reason: %s", command, response.AccessResponse.Reason), FilterSeverityMedium); logErr != nil {
+			_ = logErr // Ignore audit failures
+		}
+	}
+
+	return response, nil
+}
+
+// authorizeCommandTraditional performs traditional command authorization without continuous auth
+func (atm *AuthenticatedTerminalManager) authorizeCommandTraditional(ctx context.Context, sessionID, command string, token *SessionToken) (*continuous.ContinuousAuthResponse, error) {
+	// Check if command requires special authorization
+	requiresAuth := atm.doesCommandRequireAuth(command)
+	
+	if !requiresAuth {
+		return &continuous.ContinuousAuthResponse{
+			AccessResponse: &common.AccessResponse{
+				Granted: true,
+				Reason:  "Command allowed by traditional authorization",
+			},
+			ValidUntil: time.Now().Add(5 * time.Minute),
+		}, nil
+	}
+
+	// For high-risk commands, check RBAC permissions
+	hasPermission, err := atm.rbacManager.CheckPermission(ctx, &common.AccessRequest{
+		SubjectId:    token.UserID,
+		PermissionId: "terminal.execute.high_risk",
+		TenantId:     extractTenantID(token),
+		ResourceId:   command,
+	})
+	
+	if err != nil {
+		return nil, fmt.Errorf("traditional authorization check failed: %w", err)
+	}
+
+	return &continuous.ContinuousAuthResponse{
+		AccessResponse: hasPermission,
+		ValidUntil: time.Now().Add(1 * time.Minute),
+	}, nil
+}
+
+// RevalidateSession performs session revalidation for continuous authorization
+func (atm *AuthenticatedTerminalManager) RevalidateSession(ctx context.Context, sessionID string, token *SessionToken) error {
+	if !atm.continuousAuthConfig.EnableContinuousAuth || atm.continuousAuthEngine == nil {
+		return nil // No revalidation needed for traditional auth
+	}
+
+	// Check if revalidation is due
+	if time.Since(token.LastRotated) < atm.continuousAuthConfig.SessionRevalidationInterval {
+		return nil // Revalidation not yet due
+	}
+
+	// Create revalidation request
+	revalidationRequest := &continuous.ContinuousAuthRequest{
+		AccessRequest: &common.AccessRequest{
+			SubjectId:    token.UserID,
+			PermissionId: "terminal.session.continue",
+			TenantId:     extractTenantID(token),
+			ResourceId:   sessionID,
+		},
+		SessionID:       sessionID,
+		OperationType:   continuous.OperationTypeStandard,
+		ResourceContext: map[string]string{
+			"session_id": sessionID,
+			"action":     "revalidate",
+		},
+		RequestTime: time.Now(),
+	}
+
+	// Perform revalidation
+	response, err := atm.continuousAuthEngine.AuthorizeAction(ctx, revalidationRequest)
+	if err != nil {
+		return fmt.Errorf("session revalidation failed: %w", err)
+	}
+
+	if !response.AccessResponse.Granted {
+		// Session revalidation failed - terminate session
+		terminationReason := fmt.Sprintf("Session revalidation denied: %s", response.AccessResponse.Reason)
+		if termErr := atm.TerminateSession(ctx, sessionID, terminationReason); termErr != nil {
+			_ = termErr // Log but don't fail on termination error
+		}
+		
+		return fmt.Errorf("session terminated due to revalidation failure: %s", response.AccessResponse.Reason)
+	}
+
+	// Update token rotation time
+	atm.tokenMutex.Lock()
+	token.LastRotated = time.Now()
+	atm.tokenMutex.Unlock()
+
+	return nil
+}
+
+// Helper methods for continuous authorization
+
+// assessCommandRisk determines the risk level of a command
+func (atm *AuthenticatedTerminalManager) assessCommandRisk(command string) continuous.RiskLevel {
+	// Check for critical commands first
+	for _, critical := range atm.continuousAuthConfig.CriticalCommands {
+		if strings.Contains(command, critical) {
+			return continuous.RiskLevelCritical
+		}
+	}
+
+	// Check for high-risk commands
+	for _, highRisk := range atm.continuousAuthConfig.HighRiskCommands {
+		if strings.Contains(command, highRisk) {
+			return continuous.RiskLevelHigh
+		}
+	}
+
+	// Check for commands requiring authorization
+	for _, requireAuth := range atm.continuousAuthConfig.RequireAuthCommands {
+		if strings.Contains(command, requireAuth) {
+			return continuous.RiskLevelModerate
+		}
+	}
+
+	return continuous.RiskLevelLow
+}
+
+// getOperationType determines the operation type based on risk level
+func (atm *AuthenticatedTerminalManager) getOperationType(riskLevel continuous.RiskLevel) continuous.OperationType {
+	switch riskLevel {
+	case continuous.RiskLevelCritical:
+		return continuous.OperationTypeCritical
+	case continuous.RiskLevelHigh:
+		return continuous.OperationTypeHighRisk
+	case continuous.RiskLevelModerate:
+		return continuous.OperationTypeModerate
+	default:
+		return continuous.OperationTypeStandard
+	}
+}
+
+// doesCommandRequireAuth checks if a command requires special authorization in traditional mode
+func (atm *AuthenticatedTerminalManager) doesCommandRequireAuth(command string) bool {
+	allRequiredCommands := append(atm.continuousAuthConfig.RequireAuthCommands,
+		append(atm.continuousAuthConfig.HighRiskCommands, atm.continuousAuthConfig.CriticalCommands...)...)
+	
+	for _, requiredCmd := range allRequiredCommands {
+		if strings.Contains(command, requiredCmd) {
+			return true
+		}
+	}
+	return false
+}
+
+// extractTenantID extracts tenant ID from session token
+func extractTenantID(token *SessionToken) string {
+	if tenantID, exists := token.Metadata["tenant_id"]; exists {
+		return tenantID
+	}
+	return "default" // Fallback to default tenant
 }

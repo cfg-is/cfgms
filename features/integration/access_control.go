@@ -7,22 +7,25 @@ import (
 
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/rbac"
+	"github.com/cfgis/cfgms/features/rbac/continuous"
 	"github.com/cfgis/cfgms/features/rbac/jit"
 	"github.com/cfgis/cfgms/features/rbac/risk"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/features/tenant/security"
 )
 
-// EnhancedAccessControlManager provides unified access control combining RBAC, JIT, and Risk-based controls
+// EnhancedAccessControlManager provides unified access control combining RBAC, JIT, Risk-based, and Continuous controls
 type EnhancedAccessControlManager struct {
-	rbacManager              rbac.RBACManager
-	tenantManager           *tenant.Manager
-	tenantSecurity          *security.TenantSecurityMiddleware
-	jitIntegrationManager   *jit.JITIntegrationManager
-	riskIntegrationManager  *risk.RiskBasedAccessIntegration
-	integrationMode         IntegrationMode
-	fallbackBehavior        FallbackBehavior
-	performanceConfig       *PerformanceConfig
+	rbacManager               rbac.RBACManager
+	tenantManager            *tenant.Manager
+	tenantSecurity           *security.TenantSecurityMiddleware
+	jitIntegrationManager    *jit.JITIntegrationManager
+	riskIntegrationManager   *risk.RiskBasedAccessIntegration
+	continuousAuthEngine     *continuous.ContinuousAuthorizationEngine
+	integrationMode          IntegrationMode
+	fallbackBehavior         FallbackBehavior
+	performanceConfig        *PerformanceConfig
+	enableContinuousAuth     bool
 }
 
 // IntegrationMode defines how the different access control systems are integrated
@@ -30,11 +33,13 @@ type IntegrationMode string
 
 const (
 	// IntegrationModeSequential evaluates RBAC -> JIT -> Risk in sequence
-	IntegrationModeSequential IntegrationMode = "sequential"
+	IntegrationModeSequential    IntegrationMode = "sequential"
 	// IntegrationModeParallel evaluates all systems in parallel and combines results
-	IntegrationModeParallel   IntegrationMode = "parallel"
+	IntegrationModeParallel      IntegrationMode = "parallel"
 	// IntegrationModeRiskFirst evaluates risk first to determine appropriate controls
-	IntegrationModeRiskFirst  IntegrationMode = "risk_first"
+	IntegrationModeRiskFirst     IntegrationMode = "risk_first"
+	// IntegrationModeContinuous enables per-action continuous authorization
+	IntegrationModeContinuous    IntegrationMode = "continuous"
 )
 
 // FallbackBehavior defines behavior when components fail
@@ -51,11 +56,13 @@ const (
 
 // PerformanceConfig defines performance-related configuration
 type PerformanceConfig struct {
-	MaxProcessingTime    time.Duration `json:"max_processing_time"`
-	EnableCaching        bool          `json:"enable_caching"`
-	CacheTimeout         time.Duration `json:"cache_timeout"`
-	EnableParallelEval   bool          `json:"enable_parallel_eval"`
-	RiskAssessmentTimeout time.Duration `json:"risk_assessment_timeout"`
+	MaxProcessingTime         time.Duration `json:"max_processing_time"`
+	EnableCaching             bool          `json:"enable_caching"`
+	CacheTimeout              time.Duration `json:"cache_timeout"`
+	EnableParallelEval        bool          `json:"enable_parallel_eval"`
+	RiskAssessmentTimeout     time.Duration `json:"risk_assessment_timeout"`
+	ContinuousAuthTimeout     time.Duration `json:"continuous_auth_timeout"`
+	MaxContinuousAuthLatency  time.Duration `json:"max_continuous_auth_latency"`
 }
 
 // EnhancedAccessResponse provides comprehensive access control results
@@ -64,23 +71,24 @@ type EnhancedAccessResponse struct {
 	StandardResponse *common.AccessResponse `json:"standard_response"`
 	
 	// Component-specific results
-	RBACResult       *RBACValidationResult              `json:"rbac_result"`
-	TenantSecurity   *security.TenantSecurityValidationResult `json:"tenant_security"`
-	JITAccess        *jit.JITAccessValidationResult     `json:"jit_access"`
-	RiskAssessment   *risk.RiskAssessmentResult         `json:"risk_assessment"`
+	RBACResult         *RBACValidationResult              `json:"rbac_result"`
+	TenantSecurity     *security.TenantSecurityValidationResult `json:"tenant_security"`
+	JITAccess          *jit.JITAccessValidationResult     `json:"jit_access"`
+	RiskAssessment     *risk.RiskAssessmentResult         `json:"risk_assessment"`
+	ContinuousAuth     *ContinuousAuthValidationResult    `json:"continuous_auth"`
 	
 	// Applied controls and recommendations
-	AppliedControls  []risk.AdaptiveControlInstance     `json:"applied_controls"`
-	Recommendations  []AccessRecommendation             `json:"recommendations"`
+	AppliedControls    []risk.AdaptiveControlInstance     `json:"applied_controls"`
+	Recommendations    []AccessRecommendation             `json:"recommendations"`
 	
 	// Processing metadata
-	ProcessingTime   time.Duration                      `json:"processing_time"`
-	ComponentLatency map[string]time.Duration           `json:"component_latency"`
-	FallbacksUsed    []string                          `json:"fallbacks_used"`
+	ProcessingTime     time.Duration                      `json:"processing_time"`
+	ComponentLatency   map[string]time.Duration           `json:"component_latency"`
+	FallbacksUsed      []string                          `json:"fallbacks_used"`
 	
 	// Risk and compliance metadata
-	RiskFactorsSummary *risk.RiskFactorsSummary         `json:"risk_factors_summary"`
-	ComplianceStatus   *ComplianceStatus                `json:"compliance_status"`
+	RiskFactorsSummary *risk.RiskFactorsSummary           `json:"risk_factors_summary"`
+	ComplianceStatus   *ComplianceStatus                  `json:"compliance_status"`
 }
 
 // RBACValidationResult contains RBAC-specific validation results
@@ -90,6 +98,19 @@ type RBACValidationResult struct {
 	PermissionSource   string                           `json:"permission_source"` // "direct", "role", "inheritance"
 	HierarchyPath      []string                         `json:"hierarchy_path"`
 	ValidationTime     time.Time                        `json:"validation_time"`
+}
+
+// ContinuousAuthValidationResult contains continuous authorization-specific validation results
+type ContinuousAuthValidationResult struct {
+	DecisionID          string                           `json:"decision_id"`
+	SessionID           string                           `json:"session_id"`
+	AuthorizationMode   continuous.AuthorizationMode     `json:"authorization_mode"`
+	PolicyEvaluation    *continuous.PolicyEvaluationResult `json:"policy_evaluation"`
+	ContextStatus       *continuous.ContextStatus        `json:"context_status"`
+	CacheHit            bool                             `json:"cache_hit"`
+	LatencyMs           int                              `json:"latency_ms"`
+	ValidationTime      time.Time                        `json:"validation_time"`
+	NextRevalidation    time.Time                        `json:"next_revalidation"`
 }
 
 // AccessRecommendation provides recommendations for improving access control
@@ -137,16 +158,27 @@ func NewEnhancedAccessControlManager(
 		tenantSecurity:         tenantSecurity,
 		jitIntegrationManager:  jitIntegrationManager,
 		riskIntegrationManager: riskIntegrationManager,
+		continuousAuthEngine:   nil, // Will be set when continuous mode is enabled
 		integrationMode:        IntegrationModeSequential, // Default to sequential
 		fallbackBehavior:       FallbackBehaviorDegrade,   // Default to graceful degradation
+		enableContinuousAuth:   false,                     // Default to disabled
 		performanceConfig: &PerformanceConfig{
-			MaxProcessingTime:     5 * time.Second,
-			EnableCaching:         true,
-			CacheTimeout:          10 * time.Minute,
-			EnableParallelEval:    false,
-			RiskAssessmentTimeout: 2 * time.Second,
+			MaxProcessingTime:        5 * time.Second,
+			EnableCaching:            true,
+			CacheTimeout:             10 * time.Minute,
+			EnableParallelEval:       false,
+			RiskAssessmentTimeout:    2 * time.Second,
+			ContinuousAuthTimeout:    500 * time.Millisecond,
+			MaxContinuousAuthLatency: 10 * time.Millisecond,
 		},
 	}
+}
+
+// EnableContinuousAuthorization enables continuous authorization mode
+func (eacm *EnhancedAccessControlManager) EnableContinuousAuthorization(continuousAuthEngine *continuous.ContinuousAuthorizationEngine) {
+	eacm.continuousAuthEngine = continuousAuthEngine
+	eacm.enableContinuousAuth = true
+	eacm.integrationMode = IntegrationModeContinuous
 }
 
 // Initialize initializes all access control components
@@ -188,6 +220,11 @@ func (eacm *EnhancedAccessControlManager) CheckAccess(ctx context.Context, reque
 		}
 	case IntegrationModeRiskFirst:
 		err := eacm.evaluateRiskFirst(processCtx, request, response)
+		if err != nil {
+			return eacm.handleEvaluationError(ctx, request, response, err)
+		}
+	case IntegrationModeContinuous:
+		err := eacm.evaluateContinuous(processCtx, request, response)
 		if err != nil {
 			return eacm.handleEvaluationError(ctx, request, response, err)
 		}
@@ -299,6 +336,101 @@ func (eacm *EnhancedAccessControlManager) evaluateRiskFirst(ctx context.Context,
 	case risk.RiskLevelHigh, risk.RiskLevelCritical, risk.RiskLevelExtreme:
 		// High risk - comprehensive access control
 		return eacm.evaluateComprehensive(ctx, request, response)
+	}
+
+	return nil
+}
+
+// evaluateContinuous performs continuous authorization evaluation with per-action validation
+func (eacm *EnhancedAccessControlManager) evaluateContinuous(ctx context.Context, request *common.AccessRequest, response *EnhancedAccessResponse) error {
+	if eacm.continuousAuthEngine == nil {
+		return fmt.Errorf("continuous authorization engine not available")
+	}
+
+	continuousStart := time.Now()
+	
+	// Convert access request to continuous authorization request
+	continuousRequest := &continuous.ContinuousAuthRequest{
+		AccessRequest:   request,
+		SessionID:       extractSessionID(ctx, request),
+		OperationType:   continuous.OperationTypeAPI,
+		ResourceContext: make(map[string]string),
+		RequestTime:     time.Now(),
+	}
+
+	// Apply continuous authorization timeout
+	continuousCtx, cancel := context.WithTimeout(ctx, eacm.performanceConfig.ContinuousAuthTimeout)
+	defer cancel()
+
+	// Perform continuous authorization
+	continuousResponse, err := eacm.continuousAuthEngine.AuthorizeAction(continuousCtx, continuousRequest)
+	if err != nil {
+		// Fall back to sequential evaluation on continuous auth failure
+		response.FallbacksUsed = append(response.FallbacksUsed, "continuous_auth_fallback")
+		return eacm.evaluateSequential(ctx, request, response)
+	}
+
+	response.ComponentLatency["continuous"] = time.Since(continuousStart)
+
+	// Build continuous auth validation result
+	response.ContinuousAuth = &ContinuousAuthValidationResult{
+		DecisionID:          continuousResponse.DecisionID,
+		SessionID:           continuousRequest.SessionID,
+		AuthorizationMode:   continuous.AuthorizationModeContinuous,
+		PolicyEvaluation:    continuousResponse.PolicyEvaluation,
+		ContextStatus:       continuousResponse.ContextStatus,
+		CacheHit:            continuousResponse.CacheHit,
+		LatencyMs:           int(response.ComponentLatency["continuous"].Milliseconds()),
+		ValidationTime:      time.Now(),
+		NextRevalidation:    continuousResponse.ValidUntil,
+	}
+
+	// Set standard response from continuous authorization
+	response.StandardResponse = continuousResponse.AccessResponse
+
+	// Include risk assessment if available - convert types appropriately
+	if continuousResponse.RiskAssessment != nil {
+		// Note: Type conversion needed between continuous.RiskLevel and risk.RiskLevel
+		// Use the actual RiskScore field and CurrentRiskLevel
+		response.RiskAssessment = &risk.RiskAssessmentResult{
+			RiskLevel:    risk.RiskLevel(continuousResponse.RiskAssessment.CurrentRiskLevel),
+		}
+	}
+
+	// Include compliance status from policy evaluation
+	if continuousResponse.PolicyEvaluation != nil {
+		response.ComplianceStatus = &ComplianceStatus{
+			OverallCompliant: continuousResponse.PolicyEvaluation.ComplianceStatus,
+			Frameworks:       make(map[string]bool),
+			Violations:       convertPolicyViolations(continuousResponse.PolicyEvaluation.Violations),
+			RequiredActions:  continuousResponse.PolicyEvaluation.RecommendedActions,
+		}
+	}
+
+	// Apply any adaptive controls from continuous authorization - convert types
+	if len(continuousResponse.AdaptiveControls) > 0 {
+		// Convert from continuous.AdaptiveControl to risk.AdaptiveControlInstance
+		response.AppliedControls = make([]risk.AdaptiveControlInstance, len(continuousResponse.AdaptiveControls))
+		for i, control := range continuousResponse.AdaptiveControls {
+			response.AppliedControls[i] = risk.AdaptiveControlInstance{
+				ID:          control.ID,
+				DefinitionID: control.Type, // Map Type to DefinitionID
+				Status:      risk.ControlStatus(control.Status),
+				AppliedAt:   control.AppliedAt,
+				Parameters:  control.Parameters,
+			}
+		}
+	}
+
+	// Check for performance SLA compliance
+	if response.ComponentLatency["continuous"] > eacm.performanceConfig.MaxContinuousAuthLatency {
+		response.Recommendations = append(response.Recommendations, AccessRecommendation{
+			Type:        RecommendationTypeSecurityImprovement,
+			Priority:    "high",
+			Description: "Continuous authorization latency exceeds SLA",
+			Action:      "optimize_continuous_authorization_performance",
+			Rationale:   fmt.Sprintf("Latency %v exceeds SLA %v", response.ComponentLatency["continuous"], eacm.performanceConfig.MaxContinuousAuthLatency),
+		})
 	}
 
 	return nil
@@ -494,10 +626,87 @@ func (eacm *EnhancedAccessControlManager) GetIntegrationStatus(ctx context.Conte
 		"fallback_behavior":  eacm.fallbackBehavior,
 		"performance_config": eacm.performanceConfig,
 		"components": map[string]bool{
-			"rbac_manager":    eacm.rbacManager != nil,
-			"jit_integration": eacm.jitIntegrationManager != nil,
-			"risk_integration": eacm.riskIntegrationManager != nil,
-			"tenant_security": eacm.tenantSecurity != nil,
+			"rbac_manager":        eacm.rbacManager != nil,
+			"jit_integration":     eacm.jitIntegrationManager != nil,
+			"risk_integration":    eacm.riskIntegrationManager != nil,
+			"tenant_security":     eacm.tenantSecurity != nil,
+			"continuous_auth":     eacm.continuousAuthEngine != nil,
 		},
+		"continuous_auth_enabled": eacm.enableContinuousAuth,
 	}
+}
+
+// CheckContinuousAccess performs continuous authorization for an ongoing session action
+func (eacm *EnhancedAccessControlManager) CheckContinuousAccess(ctx context.Context, sessionID string, request *common.AccessRequest) (*EnhancedAccessResponse, error) {
+	if !eacm.enableContinuousAuth || eacm.continuousAuthEngine == nil {
+		// Fall back to standard access check
+		return eacm.CheckAccess(ctx, request)
+	}
+
+	// Set session ID in request context for continuous authorization
+	requestWithSession := *request
+	requestWithSession.Context = make(map[string]string)
+	for k, v := range request.Context {
+		requestWithSession.Context[k] = v
+	}
+	requestWithSession.Context["session_id"] = sessionID
+
+	// Force continuous authorization mode temporarily
+	originalMode := eacm.integrationMode
+	eacm.integrationMode = IntegrationModeContinuous
+	defer func() {
+		eacm.integrationMode = originalMode
+	}()
+
+	return eacm.CheckAccess(ctx, &requestWithSession)
+}
+
+// Helper functions
+
+// extractSessionID extracts session ID from context or request
+func extractSessionID(ctx context.Context, request *common.AccessRequest) string {
+	// Try to get session ID from request context first
+	if sessionID, exists := request.Context["session_id"]; exists {
+		return sessionID
+	}
+	
+	// Try to get from context metadata
+	if sessionID := getSessionIDFromContext(ctx); sessionID != "" {
+		return sessionID
+	}
+	
+	// Generate a session ID if none exists
+	return fmt.Sprintf("session-%s-%d", request.SubjectId, time.Now().UnixNano())
+}
+
+// getSessionIDFromContext extracts session ID from context (implementation would depend on context structure)
+func getSessionIDFromContext(ctx context.Context) string {
+	// Implementation would extract session ID from context
+	// This is a placeholder - real implementation would depend on how session ID is stored in context
+	return ""
+}
+
+// convertRiskFactors converts continuous auth risk factors to integration risk factors
+func convertRiskFactors(continuousFactors []continuous.RiskFactor) []interface{} {
+	riskFactors := make([]interface{}, len(continuousFactors))
+	for i, factor := range continuousFactors {
+		riskFactors[i] = map[string]interface{}{
+			"type":        factor.Type,
+			"category":    factor.Category,
+			"severity":    factor.Severity,
+			"score":       factor.Score,
+			"description": factor.Description,
+			"detected_at": factor.DetectedAt,
+		}
+	}
+	return riskFactors
+}
+
+// convertPolicyViolations converts continuous auth policy violations to compliance violations
+func convertPolicyViolations(policyViolations []continuous.PolicyViolation) []string {
+	violations := make([]string, len(policyViolations))
+	for i, violation := range policyViolations {
+		violations[i] = fmt.Sprintf("%s: %s", violation.ViolationType, violation.Description)
+	}
+	return violations
 }

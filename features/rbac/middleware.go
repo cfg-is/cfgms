@@ -3,8 +3,10 @@ package rbac
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/features/rbac/continuous"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -19,19 +21,47 @@ const (
 	authResponseKey contextKey = "auth_response"
 )
 
+// AuthorizationMode defines the authorization mode for the interceptor
+type AuthorizationMode string
+
+const (
+	AuthorizationModeTraditional  AuthorizationMode = "traditional"   // Session-based authorization
+	AuthorizationModeContinuous   AuthorizationMode = "continuous"    // Per-action authorization
+)
+
 // AuthorizationInterceptor provides gRPC middleware for RBAC authorization
 type AuthorizationInterceptor struct {
-	rbacManager    RBACManager
-	permissionMap  map[string]string // Maps gRPC method to required permission
-	publicMethods  map[string]bool   // Methods that don't require authorization
+	rbacManager           RBACManager
+	continuousAuthEngine  *continuous.ContinuousAuthorizationEngine
+	permissionMap         map[string]string // Maps gRPC method to required permission
+	publicMethods         map[string]bool   // Methods that don't require authorization
+	authorizationMode     AuthorizationMode
+	enableContinuous      bool
+	continuousRequired    map[string]bool   // Methods that require continuous authorization
 }
 
 // NewAuthorizationInterceptor creates a new authorization interceptor
 func NewAuthorizationInterceptor(rbacManager RBACManager) *AuthorizationInterceptor {
 	return &AuthorizationInterceptor{
-		rbacManager:   rbacManager,
-		permissionMap: getDefaultPermissionMap(),
-		publicMethods: getDefaultPublicMethods(),
+		rbacManager:        rbacManager,
+		permissionMap:      getDefaultPermissionMap(),
+		publicMethods:      getDefaultPublicMethods(),
+		authorizationMode:  AuthorizationModeTraditional,
+		enableContinuous:   false,
+		continuousRequired: getDefaultContinuousRequiredMethods(),
+	}
+}
+
+// NewContinuousAuthorizationInterceptor creates an interceptor with continuous authorization
+func NewContinuousAuthorizationInterceptor(rbacManager RBACManager, continuousAuthEngine *continuous.ContinuousAuthorizationEngine) *AuthorizationInterceptor {
+	return &AuthorizationInterceptor{
+		rbacManager:          rbacManager,
+		continuousAuthEngine: continuousAuthEngine,
+		permissionMap:        getDefaultPermissionMap(),
+		publicMethods:        getDefaultPublicMethods(),
+		authorizationMode:    AuthorizationModeContinuous,
+		enableContinuous:     true,
+		continuousRequired:   getDefaultContinuousRequiredMethods(),
 	}
 }
 
@@ -56,18 +86,34 @@ func (a *AuthorizationInterceptor) UnaryServerInterceptor() grpc.UnaryServerInte
 			return nil, status.Error(codes.PermissionDenied, "no permission mapping for method")
 		}
 
-		// Check authorization
-		response, err := a.rbacManager.ValidateAccess(ctx, authContext, requiredPermission)
-		if err != nil {
-			return nil, status.Error(codes.Internal, fmt.Sprintf("authorization check failed: %v", err))
-		}
+		// Perform authorization based on mode
+		if a.enableContinuous && (a.authorizationMode == AuthorizationModeContinuous || a.continuousRequired[info.FullMethod]) {
+			// Use continuous authorization
+			response, err := a.performContinuousAuth(ctx, authContext, requiredPermission, info.FullMethod)
+			if err != nil {
+				return nil, status.Error(codes.Internal, fmt.Sprintf("continuous authorization failed: %v", err))
+			}
 
-		if !response.Granted {
-			return nil, status.Error(codes.PermissionDenied, response.Reason)
-		}
+			if !response.Granted {
+				return nil, status.Error(codes.PermissionDenied, response.Reason)
+			}
 
-		// Add authorization info to context for downstream use
-		ctx = withAuthInfo(ctx, authContext, response)
+			// Add authorization info to context
+			ctx = withAuthInfo(ctx, authContext, response)
+		} else {
+			// Use traditional authorization
+			response, err := a.rbacManager.ValidateAccess(ctx, authContext, requiredPermission)
+			if err != nil {
+				return nil, status.Error(codes.Internal, fmt.Sprintf("authorization check failed: %v", err))
+			}
+
+			if !response.Granted {
+				return nil, status.Error(codes.PermissionDenied, response.Reason)
+			}
+
+			// Add authorization info to context for downstream use
+			ctx = withAuthInfo(ctx, authContext, response)
+		}
 
 		return handler(ctx, req)
 	}
@@ -263,4 +309,89 @@ func (a *AuthorizationInterceptor) CheckMethodPermission(ctx context.Context, su
 	}
 
 	return response.Granted, nil
+}
+
+// performContinuousAuth performs continuous authorization for a request
+func (a *AuthorizationInterceptor) performContinuousAuth(ctx context.Context, authContext *common.AuthorizationContext, permission, method string) (*common.AccessResponse, error) {
+	if a.continuousAuthEngine == nil {
+		return nil, fmt.Errorf("continuous authorization engine not available")
+	}
+
+	// Extract session ID from context or create one
+	sessionID := getSessionIDFromContext(ctx)
+	if sessionID == "" {
+		// Generate a session ID for this request
+		sessionID = fmt.Sprintf("grpc-%s-%d", authContext.SubjectId, time.Now().UnixNano())
+	}
+
+	// Create continuous authorization request
+	continuousRequest := &continuous.ContinuousAuthRequest{
+		AccessRequest: &common.AccessRequest{
+			SubjectId:    authContext.SubjectId,
+			PermissionId: permission,
+			TenantId:     authContext.TenantId,
+			ResourceId:   method, // Use method as resource ID
+		},
+		SessionID:       sessionID,
+		OperationType:   continuous.OperationTypeAPI,
+		ResourceContext: authContext.ResourceAttributes,
+		RequestTime:     time.Now(),
+	}
+
+	// Perform continuous authorization
+	continuousResponse, err := a.continuousAuthEngine.AuthorizeAction(ctx, continuousRequest)
+	if err != nil {
+		return nil, fmt.Errorf("continuous authorization failed: %w", err)
+	}
+
+	return continuousResponse.AccessResponse, nil
+}
+
+// getSessionIDFromContext extracts session ID from context
+func getSessionIDFromContext(ctx context.Context) string {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return ""
+	}
+	return getMetadataValue(md, "session-id")
+}
+
+// EnableContinuousMode enables continuous authorization mode
+func (a *AuthorizationInterceptor) EnableContinuousMode(continuousAuthEngine *continuous.ContinuousAuthorizationEngine) *AuthorizationInterceptor {
+	a.continuousAuthEngine = continuousAuthEngine
+	a.enableContinuous = true
+	a.authorizationMode = AuthorizationModeContinuous
+	return a
+}
+
+// SetAuthorizationMode sets the authorization mode
+func (a *AuthorizationInterceptor) SetAuthorizationMode(mode AuthorizationMode) *AuthorizationInterceptor {
+	a.authorizationMode = mode
+	return a
+}
+
+// WithContinuousRequired marks a method as requiring continuous authorization
+func (a *AuthorizationInterceptor) WithContinuousRequired(method string) *AuthorizationInterceptor {
+	a.continuousRequired[method] = true
+	return a
+}
+
+// getDefaultContinuousRequiredMethods returns methods that require continuous authorization by default
+func getDefaultContinuousRequiredMethods() map[string]bool {
+	return map[string]bool{
+		// Terminal service methods require continuous authorization
+		"/cfgms.api.terminal.TerminalService/CreateSession":     true,
+		"/cfgms.api.terminal.TerminalService/ExecuteCommand":    true,
+		"/cfgms.api.terminal.TerminalService/TerminateSession":  true,
+		
+		// Sensitive RBAC operations
+		"/cfgms.api.controller.RBACService/CreateRole":         true,
+		"/cfgms.api.controller.RBACService/DeleteRole":         true,
+		"/cfgms.api.controller.RBACService/AssignRole":         true,
+		"/cfgms.api.controller.RBACService/RevokeRole":         true,
+		
+		// Sensitive configuration operations
+		"/cfgms.api.controller.ConfigurationService/UpdateConfiguration": true,
+		"/cfgms.api.controller.ConfigurationService/DeployConfiguration": true,
+	}
 }
