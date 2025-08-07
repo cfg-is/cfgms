@@ -27,7 +27,7 @@ func TestDirectoryModule(t *testing.T) {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
 	defer func() {
-		if err := os.RemoveAll(tempDir); err != nil {
+		if err := os.RemoveAll(tempDir) }(); err != nil {
 			t.Logf("Failed to cleanup temp dir %s: %v", tempDir, err)
 		}
 	}()
@@ -154,7 +154,7 @@ func TestDirectoryModule_EdgeCases(t *testing.T) {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
 	defer func() {
-		if err := os.RemoveAll(tempDir); err != nil {
+		if err := os.RemoveAll(tempDir) }(); err != nil {
 			t.Logf("Failed to cleanup temp dir %s: %v", tempDir, err)
 		}
 	}()

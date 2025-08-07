@@ -20,7 +20,7 @@ func TestServer_New_SecurityValidation(t *testing.T) {
 	// Create temporary directory for test certificates
 	tempDir, err := os.MkdirTemp("", "server_security_test")
 	require.NoError(t, err)
-	defer os.RemoveAll(tempDir)
+	defer func() { _ = os.RemoveAll(tempDir) }()
 
 	tests := []struct {
 		name    string
@@ -102,7 +102,7 @@ func TestServer_SecurityConfiguration(t *testing.T) {
 	// Create temporary directory for test certificates
 	tempDir, err := os.MkdirTemp("", "server_security_config_test")
 	require.NoError(t, err)
-	defer os.RemoveAll(tempDir)
+	defer func() { _ = os.RemoveAll(tempDir) }()
 
 	// Test various security configuration scenarios
 	tests := []struct {
@@ -184,7 +184,7 @@ func TestServer_SecurityEdgeCases_And_AttackVectors(t *testing.T) {
 	// Create temporary directory for test certificates
 	tempDir, err := os.MkdirTemp("", "server_security_edge_test")
 	require.NoError(t, err)
-	defer os.RemoveAll(tempDir)
+	defer func() { _ = os.RemoveAll(tempDir) }()
 
 	// Test security against common attack vectors
 	tests := []struct {
@@ -438,7 +438,7 @@ func TestServer_CertificateSecurityValidation(t *testing.T) {
 	// Create temporary directory for test certificates
 	tempDir, err := os.MkdirTemp("", "server_cert_security_test")
 	require.NoError(t, err)
-	defer os.RemoveAll(tempDir)
+	defer func() { _ = os.RemoveAll(tempDir) }()
 
 	// Test certificate-related security validations
 	tests := []struct {
@@ -528,11 +528,11 @@ func TestServer_EnvironmentSecurityIsolation(t *testing.T) {
 	// Create separate temporary directories for each server
 	tempDir1, err := os.MkdirTemp("", "server_isolation_test1")
 	require.NoError(t, err)
-	defer os.RemoveAll(tempDir1)
+	defer func() { _ = os.RemoveAll(tempDir1) }()
 
 	tempDir2, err := os.MkdirTemp("", "server_isolation_test2")
 	require.NoError(t, err)
-	defer os.RemoveAll(tempDir2)
+	defer func() { _ = os.RemoveAll(tempDir2) }()
 
 	// Test that servers created with different configurations are properly isolated
 	config1 := &config.Config{
@@ -592,7 +592,7 @@ func TestServer_DataDirectorySecurity(t *testing.T) {
 
 	tempDir, err := os.MkdirTemp("", "server_data_test")
 	require.NoError(t, err)
-	defer os.RemoveAll(tempDir)
+	defer func() { _ = os.RemoveAll(tempDir) }()
 
 	config := &config.Config{
 		ListenAddr: "127.0.0.1:0",

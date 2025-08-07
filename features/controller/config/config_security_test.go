@@ -134,7 +134,7 @@ func TestLoad_ConfigFileSecurityValidation(t *testing.T) {
 	// Create temporary directory for test configs
 	tempDir, err := os.MkdirTemp("", "config_security_test")
 	require.NoError(t, err)
-	defer func() { _ = os.RemoveAll(tempDir) }()
+	defer func() { _ = os.RemoveAll(tempDir) }() }()
 
 	// Change to temp directory for testing
 	originalDir, err := os.Getwd()

@@ -61,7 +61,7 @@ func TestNewManager(t *testing.T) {
 				tempDir, err := os.MkdirTemp("", "cert-test-")
 				require.NoError(t, err)
 				defer func() {
-				if err := os.RemoveAll(tempDir); err != nil {
+				if err := os.RemoveAll(tempDir) }(); err != nil {
 					t.Logf("Failed to remove temp directory: %v", err)
 				}
 			}()
@@ -87,7 +87,7 @@ func TestManager_GenerateServerCertificate(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "cert-test-")
 	require.NoError(t, err)
 	defer func() {
-		if err := os.RemoveAll(tempDir); err != nil {
+		if err := os.RemoveAll(tempDir) }(); err != nil {
 			t.Logf("Failed to clean up temp directory: %v", err)
 		}
 	}()
@@ -134,7 +134,7 @@ func TestManager_GenerateClientCertificate(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "cert-test-")
 	require.NoError(t, err)
 	defer func() {
-		if err := os.RemoveAll(tempDir); err != nil {
+		if err := os.RemoveAll(tempDir) }(); err != nil {
 			t.Logf("Failed to clean up temp directory: %v", err)
 		}
 	}()
@@ -181,7 +181,7 @@ func TestManager_CertificateValidation(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "cert-test-")
 	require.NoError(t, err)
 	defer func() {
-		if err := os.RemoveAll(tempDir); err != nil {
+		if err := os.RemoveAll(tempDir) }(); err != nil {
 			t.Logf("Failed to clean up temp directory: %v", err)
 		}
 	}()
@@ -221,7 +221,7 @@ func TestManager_CertificateRenewal(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "cert-test-")
 	require.NoError(t, err)
 	defer func() {
-		if err := os.RemoveAll(tempDir); err != nil {
+		if err := os.RemoveAll(tempDir) }(); err != nil {
 			t.Logf("Failed to clean up temp directory: %v", err)
 		}
 	}()
@@ -272,7 +272,7 @@ func TestManager_ListCertificates(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "cert-test-")
 	require.NoError(t, err)
 	defer func() {
-		if err := os.RemoveAll(tempDir); err != nil {
+		if err := os.RemoveAll(tempDir) }(); err != nil {
 			t.Logf("Failed to clean up temp directory: %v", err)
 		}
 	}()
@@ -323,7 +323,7 @@ func TestManager_GetManagerStats(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "cert-test-")
 	require.NoError(t, err)
 	defer func() {
-		if err := os.RemoveAll(tempDir); err != nil {
+		if err := os.RemoveAll(tempDir) }(); err != nil {
 			t.Logf("Failed to clean up temp directory: %v", err)
 		}
 	}()
@@ -368,7 +368,7 @@ func TestManager_ImportExportCertificate(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "cert-test-")
 	require.NoError(t, err)
 	defer func() {
-		if err := os.RemoveAll(tempDir); err != nil {
+		if err := os.RemoveAll(tempDir) }(); err != nil {
 			t.Logf("Failed to clean up temp directory: %v", err)
 		}
 	}()
@@ -422,7 +422,7 @@ func TestManager_SaveCertificateFiles(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "cert-test-")
 	require.NoError(t, err)
 	defer func() {
-		if err := os.RemoveAll(tempDir); err != nil {
+		if err := os.RemoveAll(tempDir) }(); err != nil {
 			t.Logf("Failed to clean up temp directory: %v", err)
 		}
 	}()

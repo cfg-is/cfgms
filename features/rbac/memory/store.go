@@ -126,18 +126,28 @@ func (s *Store) LoadRoles(roles []*common.Role) {
 	
 	now := time.Now().Unix()
 	for _, role := range roles {
-		role.CreatedAt = now
-		role.UpdatedAt = now
-		s.roles[role.Id] = role
+		// Create a copy to avoid race conditions on shared role objects
+		roleCopy := &common.Role{
+			Id:           role.Id,
+			Name:         role.Name,
+			Description:  role.Description,
+			TenantId:     role.TenantId,
+			ParentRoleId: role.ParentRoleId,
+			ChildRoleIds: append([]string{}, role.ChildRoleIds...),
+			InheritanceType: role.InheritanceType,
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		}
+		s.roles[roleCopy.Id] = roleCopy
 	}
 	
 	// Second pass: establish bidirectional parent-child relationships
-	for _, role := range roles {
-		if role.ParentRoleId != "" {
-			if parent, exists := s.roles[role.ParentRoleId]; exists {
+	for _, inputRole := range roles {
+		if inputRole.ParentRoleId != "" {
+			if parent, exists := s.roles[inputRole.ParentRoleId]; exists {
 				// Add this role to parent's children if not already present
-				if !contains(parent.ChildRoleIds, role.Id) {
-					parent.ChildRoleIds = append(parent.ChildRoleIds, role.Id)
+				if !contains(parent.ChildRoleIds, inputRole.Id) {
+					parent.ChildRoleIds = append(parent.ChildRoleIds, inputRole.Id)
 				}
 			}
 		}
