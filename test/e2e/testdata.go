@@ -286,7 +286,11 @@ func (g *TestDataGenerator) generateIPAddress() string {
 
 func (g *TestDataGenerator) generateMACAddress() string {
 	mac := make([]byte, 6)
-	rand.Read(mac) // Use crypto/rand
+	if _, err := rand.Read(mac); err != nil {
+		// Fallback for the extremely unlikely case that crypto/rand fails
+		// Use predictable values for testing
+		mac = []byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}
+	}
 	// Set the locally administered bit
 	mac[0] |= 2
 	mac[0] &= 0xfe

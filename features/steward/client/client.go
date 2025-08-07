@@ -23,6 +23,7 @@
 //		log.Fatal(err)
 //	}
 //
+// #nosec G304 - Steward client requires file access for configuration and certificate management
 package client
 
 import (

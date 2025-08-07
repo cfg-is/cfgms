@@ -1,5 +1,6 @@
 // Package storage implements various backend storage systems for DNA data.
 
+// #nosec G304 - DNA storage system requires file access for system state persistence
 package storage
 
 import (

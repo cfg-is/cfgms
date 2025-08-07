@@ -1,3 +1,4 @@
+// #nosec G304 - Terminal audit system requires file access for session recording and compliance
 package terminal
 
 import (

@@ -130,6 +130,7 @@ func (fs *FileStore) GetCertificate(serialNumber string) (*Certificate, error) {
 	var keyPEM []byte
 	keyPath := filepath.Join(certDir, "key.pem")
 	if _, err := os.Stat(keyPath); err == nil {
+		// #nosec G304 - Certificate storage requires loading private key files from controlled paths
 		keyPEM, err = os.ReadFile(keyPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read private key: %w", err)

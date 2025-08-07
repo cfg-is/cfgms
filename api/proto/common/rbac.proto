@@ -13,7 +13,7 @@ message Permission {
   repeated string actions = 5; // Allowed actions (create, read, update, delete, execute)
 }
 
-// Role represents a collection of permissions
+// Role represents a collection of permissions with optional hierarchy support
 message Role {
   string id = 1;                    // Unique role identifier
   string name = 2;                  // Human-readable role name
@@ -23,6 +23,9 @@ message Role {
   string tenant_id = 6;             // Tenant scope (empty for system-wide roles)
   int64 created_at = 7;             // Creation timestamp
   int64 updated_at = 8;             // Last update timestamp
+  string parent_role_id = 9;        // Parent role ID for inheritance (optional)
+  repeated string child_role_ids = 10; // Child role IDs for hierarchy traversal
+  RoleInheritanceType inheritance_type = 11; // How this role inherits from parent
 }
 
 // Subject represents an entity that can have roles assigned
@@ -45,6 +48,14 @@ enum SubjectType {
   SUBJECT_TYPE_SERVICE = 2;     // Service account
   SUBJECT_TYPE_STEWARD = 3;     // Steward instance
   SUBJECT_TYPE_API_CLIENT = 4;  // API client
+}
+
+// RoleInheritanceType defines how a role inherits from its parent
+enum RoleInheritanceType {
+  ROLE_INHERITANCE_NONE = 0;        // No inheritance (standalone role)
+  ROLE_INHERITANCE_ADDITIVE = 1;    // Inherits all parent permissions + own permissions
+  ROLE_INHERITANCE_OVERRIDE = 2;    // Own permissions override conflicting parent permissions
+  ROLE_INHERITANCE_RESTRICTIVE = 3; // Only permissions present in both parent and child
 }
 
 // RoleAssignment represents the assignment of a role to a subject
@@ -82,4 +93,90 @@ message AuthorizationContext {
   string subject_id = 2;      // Subject making the request
   map<string, string> environment = 3; // Environment attributes (IP, time, etc.)
   map<string, string> resource_attributes = 4; // Resource-specific attributes
+}
+
+// ConditionalPermission represents a permission with context-based conditions
+message ConditionalPermission {
+  string id = 1;                    // Unique conditional permission identifier
+  string permission_id = 2;         // Base permission this extends
+  repeated Condition conditions = 3; // Conditions that must be met
+  PermissionScope scope = 4;        // Resource scope limitations
+  int64 expires_at = 5;            // Optional expiration timestamp
+  string granted_by = 6;           // Who granted this permission
+  int64 granted_at = 7;            // When this was granted
+}
+
+// Condition represents a single condition for permission evaluation
+message Condition {
+  string type = 1;                  // Condition type (time, location, device, etc.)
+  ConditionOperator operator = 2;   // Comparison operator
+  repeated string values = 3;       // Values to compare against
+  map<string, string> metadata = 4; // Additional condition metadata
+}
+
+// ConditionOperator defines comparison operators for conditions
+enum ConditionOperator {
+  CONDITION_OPERATOR_UNSPECIFIED = 0;
+  CONDITION_OPERATOR_EQUALS = 1;        // Equal to
+  CONDITION_OPERATOR_NOT_EQUALS = 2;    // Not equal to
+  CONDITION_OPERATOR_IN = 3;            // In list
+  CONDITION_OPERATOR_NOT_IN = 4;        // Not in list
+  CONDITION_OPERATOR_GREATER_THAN = 5;  // Greater than
+  CONDITION_OPERATOR_LESS_THAN = 6;     // Less than
+  CONDITION_OPERATOR_CONTAINS = 7;      // Contains substring
+  CONDITION_OPERATOR_REGEX = 8;         // Matches regex
+  CONDITION_OPERATOR_TIME_WITHIN = 9;   // Within time range
+  CONDITION_OPERATOR_IP_IN_RANGE = 10;  // IP in CIDR range
+}
+
+// PermissionScope defines resource-level granularity for permissions
+message PermissionScope {
+  repeated string resource_ids = 1;     // Specific resource IDs (empty = all resources)
+  repeated string resource_patterns = 2; // Resource patterns (wildcards allowed)
+  repeated string excluded_resources = 3; // Explicitly excluded resources
+  map<string, string> resource_attributes = 4; // Required resource attributes
+}
+
+// PermissionDelegation represents temporary permission delegation
+message PermissionDelegation {
+  string id = 1;                    // Unique delegation identifier
+  string delegator_id = 2;          // Subject who is delegating
+  string delegatee_id = 3;          // Subject receiving the delegation
+  repeated string permission_ids = 4; // Permissions being delegated
+  PermissionScope scope = 5;        // Scope limitations for delegation
+  int64 expires_at = 6;            // When delegation expires
+  int64 created_at = 7;            // When delegation was created
+  string tenant_id = 8;            // Tenant context
+  bool revoked = 9;                // Whether delegation has been revoked
+}
+
+// PermissionAuditEntry represents an audit log entry for permission operations
+message PermissionAuditEntry {
+  string id = 1;                    // Unique audit entry identifier
+  string subject_id = 2;            // Subject who performed the action
+  string action = 3;                // Action performed (check, grant, revoke, delegate)
+  string permission_id = 4;         // Permission involved
+  string resource_id = 5;           // Resource accessed (if applicable)
+  string tenant_id = 6;            // Tenant context
+  bool granted = 7;                // Whether access was granted
+  string reason = 8;               // Reason for the decision
+  map<string, string> context = 9; // Additional context information
+  int64 timestamp = 10;            // When the action occurred
+  string source_ip = 11;           // Source IP address
+  string user_agent = 12;          // User agent (if applicable)
+}
+
+// PermissionTemplate represents a reusable permission configuration
+message PermissionTemplate {
+  string id = 1;                    // Unique template identifier
+  string name = 2;                  // Template name
+  string description = 3;           // Template description
+  string category = 4;              // Template category (compliance, department, etc.)
+  repeated string permission_ids = 5; // Permissions in this template
+  repeated ConditionalPermission conditional_permissions = 6; // Conditional permissions
+  map<string, string> default_conditions = 7; // Default condition values
+  bool is_system_template = 8;      // Whether this is a built-in template
+  string tenant_id = 9;            // Tenant scope (empty for system templates)
+  int64 created_at = 10;           // Creation timestamp
+  int64 updated_at = 11;           // Last update timestamp
 }

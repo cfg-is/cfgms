@@ -36,8 +36,7 @@ func (s *Server) handleListCertificates(w http.ResponseWriter, r *http.Request) 
 				StewardID:           stewardID,
 				IsValid:             certInfo.IsValid,
 				ExpiresAt:           certInfo.ExpiresAt,
-				// #nosec G115 - clamped to int32 max to prevent overflow
-			DaysUntilExpiration: int32(min(certInfo.DaysUntilExpiration, 2147483647)),
+			DaysUntilExpiration: safeInt32(certInfo.DaysUntilExpiration), // Safe conversion with bounds validation
 				NeedsRenewal:        certInfo.NeedsRenewal,
 			})
 		}
@@ -145,4 +144,16 @@ func (s *Server) handleRevokeCertificate(w http.ResponseWriter, r *http.Request)
 		"reason", revocationReq.Reason)
 
 	s.writeErrorResponse(w, http.StatusNotImplemented, "Certificate revocation not yet implemented", "NOT_IMPLEMENTED")
+}
+
+// safeInt32 safely converts an int to int32 with bounds validation
+func safeInt32(value int) int32 {
+	// Clamp to int32 max to prevent overflow
+	if value > 2147483647 {
+		return 2147483647
+	}
+	if value < -2147483648 {
+		return -2147483648
+	}
+	return int32(value) // Safe: bounds validated above
 }

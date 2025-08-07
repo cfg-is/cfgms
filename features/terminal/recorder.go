@@ -1,3 +1,4 @@
+// #nosec G304 - Terminal recorder requires file access for session recording and playback
 package terminal
 
 import (

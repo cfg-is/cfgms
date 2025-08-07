@@ -2,9 +2,9 @@ package rbac
 
 import (
 	"context"
-	"time"
 
 	"github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/features/rbac/memory"
 )
 
 // PermissionStore defines the interface for managing permissions
@@ -44,6 +44,26 @@ type RoleStore interface {
 	
 	// GetRolePermissions retrieves all permissions for a role
 	GetRolePermissions(ctx context.Context, roleID string) ([]*common.Permission, error)
+	
+	// Hierarchy operations
+	
+	// GetRoleHierarchy retrieves the complete role hierarchy for a role
+	GetRoleHierarchy(ctx context.Context, roleID string) (*memory.RoleHierarchy, error)
+	
+	// GetChildRoles retrieves all direct child roles
+	GetChildRoles(ctx context.Context, roleID string) ([]*common.Role, error)
+	
+	// GetParentRole retrieves the parent role if it exists
+	GetParentRole(ctx context.Context, roleID string) (*common.Role, error)
+	
+	// SetRoleParent sets or updates the parent role for a role
+	SetRoleParent(ctx context.Context, roleID, parentRoleID string, inheritanceType common.RoleInheritanceType) error
+	
+	// RemoveRoleParent removes the parent relationship for a role
+	RemoveRoleParent(ctx context.Context, roleID string) error
+	
+	// ValidateRoleHierarchy checks for circular dependencies and validates hierarchy
+	ValidateRoleHierarchy(ctx context.Context, roleID string) error
 }
 
 // SubjectStore defines the interface for managing subjects
@@ -100,41 +120,13 @@ type AuthorizationEngine interface {
 // PolicyEngine defines the interface for policy-based authorization (ABAC support)
 type PolicyEngine interface {
 	// EvaluatePolicy evaluates policies against an access request
-	EvaluatePolicy(ctx context.Context, request *common.AccessRequest, policies []Policy) (bool, string)
+	EvaluatePolicy(ctx context.Context, request *common.AccessRequest, policies []memory.Policy) (bool, string)
 	
 	// CreatePolicy creates a new policy
-	CreatePolicy(ctx context.Context, policy Policy) error
+	CreatePolicy(ctx context.Context, policy memory.Policy) error
 	
 	// GetPolicies retrieves policies for a tenant/resource combination
-	GetPolicies(ctx context.Context, tenantID, resourceType string) ([]Policy, error)
-}
-
-// Policy represents an ABAC policy
-type Policy struct {
-	ID          string            `json:"id"`
-	Name        string            `json:"name"`
-	Description string            `json:"description"`
-	TenantID    string            `json:"tenant_id"`
-	ResourceType string           `json:"resource_type"`
-	Effect      PolicyEffect      `json:"effect"`
-	Conditions  []PolicyCondition `json:"conditions"`
-	CreatedAt   time.Time         `json:"created_at"`
-	UpdatedAt   time.Time         `json:"updated_at"`
-}
-
-// PolicyEffect defines whether a policy allows or denies access
-type PolicyEffect string
-
-const (
-	PolicyEffectAllow PolicyEffect = "allow"
-	PolicyEffectDeny  PolicyEffect = "deny"
-)
-
-// PolicyCondition represents a condition in a policy
-type PolicyCondition struct {
-	Attribute string      `json:"attribute"`
-	Operator  string      `json:"operator"`
-	Value     interface{} `json:"value"`
+	GetPolicies(ctx context.Context, tenantID, resourceType string) ([]memory.Policy, error)
 }
 
 // RBACManager provides a high-level interface for RBAC operations
@@ -153,4 +145,21 @@ type RBACManager interface {
 	
 	// GetEffectivePermissions gets all effective permissions for a subject considering role hierarchy
 	GetEffectivePermissions(ctx context.Context, subjectID, tenantID string) ([]*common.Permission, error)
+	
+	// Hierarchy management operations
+	
+	// ComputeRolePermissions computes effective permissions for a role considering inheritance
+	ComputeRolePermissions(ctx context.Context, roleID string) (*memory.EffectivePermissions, error)
+	
+	// CreateRoleWithParent creates a new role with optional parent relationship
+	CreateRoleWithParent(ctx context.Context, role *common.Role, parentRoleID string, inheritanceType common.RoleInheritanceType) error
+	
+	// GetRoleHierarchyTree retrieves the complete hierarchy tree starting from a role
+	GetRoleHierarchyTree(ctx context.Context, rootRoleID string, maxDepth int) (*memory.RoleHierarchy, error)
+	
+	// ValidateHierarchyOperation validates that a hierarchy operation won't create cycles
+	ValidateHierarchyOperation(ctx context.Context, childRoleID, parentRoleID string) error
+	
+	// ResolvePermissionConflicts resolves conflicts when multiple inherited permissions exist
+	ResolvePermissionConflicts(ctx context.Context, roleID string, conflictingPermissions map[string][]*common.Permission) (map[string]*common.Permission, error)
 }

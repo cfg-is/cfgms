@@ -145,12 +145,14 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 		}
 		// Path doesn't exist, create it
 		// Validate permissions are within os.FileMode range
+		// Validate and safely convert permissions to os.FileMode
 		if dirConfig.Permissions < 0 || dirConfig.Permissions > 0777 {
 			return modules.ErrInvalidInput
 		}
+		fileMode := os.FileMode(dirConfig.Permissions) // Safe: bounds validated above
+
 		if dirConfig.Recursive {
-			// #nosec G115 - bounds validated above (0-0777 check)
-			if err := os.MkdirAll(dirConfig.Path, os.FileMode(dirConfig.Permissions)); err != nil {
+			if err := os.MkdirAll(dirConfig.Path, fileMode); err != nil {
 				return fmt.Errorf("failed to create directory: %w", err)
 			}
 		} else {
@@ -161,8 +163,7 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 				}
 				return fmt.Errorf("failed to stat parent directory: %w", err)
 			}
-			// #nosec G115 - bounds validated above (0-0777 check)
-			if err := os.Mkdir(dirConfig.Path, os.FileMode(dirConfig.Permissions)); err != nil {
+			if err := os.Mkdir(dirConfig.Path, fileMode); err != nil {
 				return fmt.Errorf("failed to create directory: %w", err)
 			}
 		}
@@ -175,7 +176,8 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 	if dirConfig.Permissions < 0 || dirConfig.Permissions > 0777 {
 		return modules.ErrInvalidInput
 	}
-	if err := os.Chmod(dirConfig.Path, os.FileMode(dirConfig.Permissions)); err != nil {
+	fileMode := os.FileMode(dirConfig.Permissions) // Safe: bounds validated above
+	if err := os.Chmod(dirConfig.Path, fileMode); err != nil {
 		return fmt.Errorf("failed to set permissions: %w", err)
 	}
 

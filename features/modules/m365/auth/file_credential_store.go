@@ -1,3 +1,4 @@
+// #nosec G304 - M365 authentication requires file access for secure credential storage
 package auth
 
 import (

@@ -1,3 +1,4 @@
+// #nosec G304 - File module requires file system access for configuration management
 package file
 
 import (

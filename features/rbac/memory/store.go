@@ -10,6 +10,69 @@ import (
 	"github.com/google/uuid"
 )
 
+// Import the actual protobuf types
+type RoleInheritanceType = common.RoleInheritanceType
+
+// RoleHierarchy represents a role and its position in the hierarchy
+type RoleHierarchy struct {
+	Role     *common.Role
+	Parent   *RoleHierarchy
+	Children []*RoleHierarchy
+	Depth    int // 0 for requested role, positive for ancestors, negative for descendants
+}
+
+// EffectivePermissions represents the computed permissions for a role considering hierarchy
+type EffectivePermissions struct {
+	RoleID             string                      `json:"role_id"`
+	DirectPermissions  []*common.Permission        `json:"direct_permissions"`
+	InheritedPermissions map[string][]*common.Permission `json:"inherited_permissions"` // roleID -> permissions
+	ConflictResolution map[string]ConflictResult   `json:"conflict_resolution,omitempty"`
+	ComputedAt         time.Time                   `json:"computed_at"`
+}
+
+// ConflictResult represents how a permission conflict was resolved
+type ConflictResult struct {
+	Permission    *common.Permission `json:"permission"`
+	SourceRoleID  string             `json:"source_role_id"`
+	Resolution    string             `json:"resolution"` // "override", "merge", "restrict"
+	ConflictedWith []string          `json:"conflicted_with"`
+}
+
+// Policy represents an ABAC policy
+type Policy struct {
+	ID          string            `json:"id"`
+	Name        string            `json:"name"`
+	Description string            `json:"description"`
+	TenantID    string            `json:"tenant_id"`
+	ResourceType string           `json:"resource_type"`
+	Effect      PolicyEffect      `json:"effect"`
+	Conditions  []PolicyCondition `json:"conditions"`
+	CreatedAt   time.Time         `json:"created_at"`
+	UpdatedAt   time.Time         `json:"updated_at"`
+}
+
+// PolicyEffect defines whether a policy allows or denies access
+type PolicyEffect string
+
+const (
+	PolicyEffectAllow PolicyEffect = "allow"
+	PolicyEffectDeny  PolicyEffect = "deny"
+)
+
+// PolicyCondition represents a condition in a policy
+type PolicyCondition struct {
+	Attribute string      `json:"attribute"`
+	Operator  string      `json:"operator"`
+	Value     interface{} `json:"value"`
+}
+
+const (
+	RoleInheritanceNone = common.RoleInheritanceType_ROLE_INHERITANCE_NONE
+	RoleInheritanceAdditive = common.RoleInheritanceType_ROLE_INHERITANCE_ADDITIVE
+	RoleInheritanceOverride = common.RoleInheritanceType_ROLE_INHERITANCE_OVERRIDE
+	RoleInheritanceRestrictive = common.RoleInheritanceType_ROLE_INHERITANCE_RESTRICTIVE
+)
+
 // Store provides an in-memory implementation of all RBAC stores
 type Store struct {
 	mu           sync.RWMutex
@@ -66,6 +129,18 @@ func (s *Store) LoadRoles(roles []*common.Role) {
 		role.CreatedAt = now
 		role.UpdatedAt = now
 		s.roles[role.Id] = role
+	}
+	
+	// Second pass: establish bidirectional parent-child relationships
+	for _, role := range roles {
+		if role.ParentRoleId != "" {
+			if parent, exists := s.roles[role.ParentRoleId]; exists {
+				// Add this role to parent's children if not already present
+				if !contains(parent.ChildRoleIds, role.Id) {
+					parent.ChildRoleIds = append(parent.ChildRoleIds, role.Id)
+				}
+			}
+		}
 	}
 }
 
@@ -428,6 +503,216 @@ func (s *Store) GetSubjectAssignments(ctx context.Context, subjectID, tenantID s
 	}
 
 	return assignments, nil
+}
+
+// Role Hierarchy Operations
+
+func (s *Store) GetRoleHierarchy(ctx context.Context, roleID string) (*RoleHierarchy, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	role, exists := s.roles[roleID]
+	if !exists {
+		return nil, fmt.Errorf("role %s not found", roleID)
+	}
+
+	hierarchy := &RoleHierarchy{
+		Role:  role,
+		Depth: 0,
+	}
+
+	// Get parent if exists
+	if role.ParentRoleId != "" {
+		if parentRole, exists := s.roles[role.ParentRoleId]; exists {
+			parentHierarchy := &RoleHierarchy{
+				Role:  parentRole,
+				Depth: 1,
+			}
+			hierarchy.Parent = parentHierarchy
+		}
+	}
+
+	// Get children
+	var children []*RoleHierarchy
+	for _, childRoleID := range role.ChildRoleIds {
+		if childRole, exists := s.roles[childRoleID]; exists {
+			childHierarchy := &RoleHierarchy{
+				Role:  childRole,
+				Depth: -1,
+			}
+			children = append(children, childHierarchy)
+		}
+	}
+	hierarchy.Children = children
+
+	return hierarchy, nil
+}
+
+func (s *Store) GetChildRoles(ctx context.Context, roleID string) ([]*common.Role, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	role, exists := s.roles[roleID]
+	if !exists {
+		return nil, fmt.Errorf("role %s not found", roleID)
+	}
+
+	var children []*common.Role
+	for _, childRoleID := range role.ChildRoleIds {
+		if childRole, exists := s.roles[childRoleID]; exists {
+			children = append(children, childRole)
+		}
+	}
+
+	return children, nil
+}
+
+func (s *Store) GetParentRole(ctx context.Context, roleID string) (*common.Role, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	role, exists := s.roles[roleID]
+	if !exists {
+		return nil, fmt.Errorf("role %s not found", roleID)
+	}
+
+	if role.ParentRoleId == "" {
+		return nil, fmt.Errorf("role %s has no parent", roleID)
+	}
+
+	parentRole, exists := s.roles[role.ParentRoleId]
+	if !exists {
+		return nil, fmt.Errorf("parent role %s not found", role.ParentRoleId)
+	}
+
+	return parentRole, nil
+}
+
+func (s *Store) SetRoleParent(ctx context.Context, roleID, parentRoleID string, inheritanceType common.RoleInheritanceType) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Validate both roles exist
+	role, exists := s.roles[roleID]
+	if !exists {
+		return fmt.Errorf("role %s not found", roleID)
+	}
+
+	var parentRole *common.Role
+	if parentRoleID != "" {
+		parentRole, exists = s.roles[parentRoleID]
+		if !exists {
+			return fmt.Errorf("parent role %s not found", parentRoleID)
+		}
+	}
+
+	// Remove from old parent's children list if changing parent
+	if role.ParentRoleId != "" && role.ParentRoleId != parentRoleID {
+		if oldParent, exists := s.roles[role.ParentRoleId]; exists {
+			oldParent.ChildRoleIds = removeFromSlice(oldParent.ChildRoleIds, roleID)
+			oldParent.UpdatedAt = time.Now().Unix()
+		}
+	}
+
+	// Update parent's children list
+	if parentRole != nil {
+		if !contains(parentRole.ChildRoleIds, roleID) {
+			parentRole.ChildRoleIds = append(parentRole.ChildRoleIds, roleID)
+			parentRole.UpdatedAt = time.Now().Unix()
+		}
+	}
+
+	// Update role relationships
+	role.ParentRoleId = parentRoleID
+	role.InheritanceType = inheritanceType
+	role.UpdatedAt = time.Now().Unix()
+
+	return nil
+}
+
+func (s *Store) RemoveRoleParent(ctx context.Context, roleID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	role, exists := s.roles[roleID]
+	if !exists {
+		return fmt.Errorf("role %s not found", roleID)
+	}
+
+	if role.ParentRoleId == "" {
+		return nil // Already has no parent
+	}
+
+	// Remove from parent's children list
+	if parent, exists := s.roles[role.ParentRoleId]; exists {
+		parent.ChildRoleIds = removeFromSlice(parent.ChildRoleIds, roleID)
+		parent.UpdatedAt = time.Now().Unix()
+	}
+
+	// Clear parent relationship
+	role.ParentRoleId = ""
+	role.InheritanceType = common.RoleInheritanceType_ROLE_INHERITANCE_NONE
+	role.UpdatedAt = time.Now().Unix()
+
+	return nil
+}
+
+func (s *Store) ValidateRoleHierarchy(ctx context.Context, roleID string) error {
+	// This will be implemented by the HierarchyEngine
+	// The store provides basic validation here
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	role, exists := s.roles[roleID]
+	if !exists {
+		return fmt.Errorf("role %s not found", roleID)
+	}
+
+	// Basic cycle detection - check if role is its own ancestor
+	visited := make(map[string]bool)
+	return s.detectCycle(role, visited)
+}
+
+func (s *Store) detectCycle(role *common.Role, visited map[string]bool) error {
+	if visited[role.Id] {
+		return fmt.Errorf("circular dependency detected in role hierarchy for role %s", role.Id)
+	}
+
+	if role.ParentRoleId == "" {
+		return nil
+	}
+
+	parentRole, exists := s.roles[role.ParentRoleId]
+	if !exists {
+		return nil
+	}
+
+	visited[role.Id] = true
+	err := s.detectCycle(parentRole, visited)
+	delete(visited, role.Id)
+
+	return err
+}
+
+// Helper functions
+
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
+}
+
+func removeFromSlice(slice []string, item string) []string {
+	var result []string
+	for _, s := range slice {
+		if s != item {
+			result = append(result, s)
+		}
+	}
+	return result
 }
 
 // Interfaces are verified in the manager.go file to avoid import cycles

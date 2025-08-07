@@ -111,8 +111,7 @@ func (c *Collector) Collect() (*commonpb.DNA, error) {
 		// Sync metadata (will be updated by steward with config info)
 		ConfigHash:      "", // Will be set when steward loads configuration
 		LastSyncTime:    timestamppb.New(now),
-		// #nosec G115 - clamped to int32 max to prevent overflow
-		AttributeCount:  int32(min(len(attributes), 2147483647)),
+		AttributeCount:  c.safeInt32(len(attributes)), // Safe conversion with bounds validation
 		SyncFingerprint: c.generateSyncFingerprint(systemID, attributes, ""),
 	}
 
@@ -396,7 +395,18 @@ func (c *Collector) UpdateSyncMetadata(dna *commonpb.DNA, configHash string) {
 	
 	dna.ConfigHash = configHash
 	dna.LastSyncTime = timestamppb.New(time.Now())
-	// #nosec G115 - clamped to int32 max to prevent overflow
-	dna.AttributeCount = int32(min(len(dna.Attributes), 2147483647))
+	dna.AttributeCount = c.safeInt32(len(dna.Attributes)) // Safe conversion with bounds validation
 	dna.SyncFingerprint = c.generateSyncFingerprint(dna.Id, dna.Attributes, configHash)
+}
+
+// safeInt32 safely converts an int to int32 with bounds validation
+func (c *Collector) safeInt32(value int) int32 {
+	// Clamp to int32 max to prevent overflow
+	if value > 2147483647 {
+		return 2147483647
+	}
+	if value < -2147483648 {
+		return -2147483648
+	}
+	return int32(value) // Safe: bounds validated above
 }

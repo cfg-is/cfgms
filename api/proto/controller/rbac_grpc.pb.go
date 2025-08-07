@@ -19,23 +19,29 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	RBACService_GetPermission_FullMethodName         = "/cfgms.api.controller.RBACService/GetPermission"
-	RBACService_ListPermissions_FullMethodName       = "/cfgms.api.controller.RBACService/ListPermissions"
-	RBACService_CreateRole_FullMethodName            = "/cfgms.api.controller.RBACService/CreateRole"
-	RBACService_GetRole_FullMethodName               = "/cfgms.api.controller.RBACService/GetRole"
-	RBACService_ListRoles_FullMethodName             = "/cfgms.api.controller.RBACService/ListRoles"
-	RBACService_UpdateRole_FullMethodName            = "/cfgms.api.controller.RBACService/UpdateRole"
-	RBACService_DeleteRole_FullMethodName            = "/cfgms.api.controller.RBACService/DeleteRole"
-	RBACService_CreateSubject_FullMethodName         = "/cfgms.api.controller.RBACService/CreateSubject"
-	RBACService_GetSubject_FullMethodName            = "/cfgms.api.controller.RBACService/GetSubject"
-	RBACService_ListSubjects_FullMethodName          = "/cfgms.api.controller.RBACService/ListSubjects"
-	RBACService_UpdateSubject_FullMethodName         = "/cfgms.api.controller.RBACService/UpdateSubject"
-	RBACService_DeleteSubject_FullMethodName         = "/cfgms.api.controller.RBACService/DeleteSubject"
-	RBACService_AssignRole_FullMethodName            = "/cfgms.api.controller.RBACService/AssignRole"
-	RBACService_RevokeRole_FullMethodName            = "/cfgms.api.controller.RBACService/RevokeRole"
-	RBACService_GetSubjectRoles_FullMethodName       = "/cfgms.api.controller.RBACService/GetSubjectRoles"
-	RBACService_CheckPermission_FullMethodName       = "/cfgms.api.controller.RBACService/CheckPermission"
-	RBACService_GetSubjectPermissions_FullMethodName = "/cfgms.api.controller.RBACService/GetSubjectPermissions"
+	RBACService_GetPermission_FullMethodName               = "/cfgms.api.controller.RBACService/GetPermission"
+	RBACService_ListPermissions_FullMethodName             = "/cfgms.api.controller.RBACService/ListPermissions"
+	RBACService_CreateRole_FullMethodName                  = "/cfgms.api.controller.RBACService/CreateRole"
+	RBACService_GetRole_FullMethodName                     = "/cfgms.api.controller.RBACService/GetRole"
+	RBACService_ListRoles_FullMethodName                   = "/cfgms.api.controller.RBACService/ListRoles"
+	RBACService_UpdateRole_FullMethodName                  = "/cfgms.api.controller.RBACService/UpdateRole"
+	RBACService_DeleteRole_FullMethodName                  = "/cfgms.api.controller.RBACService/DeleteRole"
+	RBACService_CreateSubject_FullMethodName               = "/cfgms.api.controller.RBACService/CreateSubject"
+	RBACService_GetSubject_FullMethodName                  = "/cfgms.api.controller.RBACService/GetSubject"
+	RBACService_ListSubjects_FullMethodName                = "/cfgms.api.controller.RBACService/ListSubjects"
+	RBACService_UpdateSubject_FullMethodName               = "/cfgms.api.controller.RBACService/UpdateSubject"
+	RBACService_DeleteSubject_FullMethodName               = "/cfgms.api.controller.RBACService/DeleteSubject"
+	RBACService_AssignRole_FullMethodName                  = "/cfgms.api.controller.RBACService/AssignRole"
+	RBACService_RevokeRole_FullMethodName                  = "/cfgms.api.controller.RBACService/RevokeRole"
+	RBACService_GetSubjectRoles_FullMethodName             = "/cfgms.api.controller.RBACService/GetSubjectRoles"
+	RBACService_CheckPermission_FullMethodName             = "/cfgms.api.controller.RBACService/CheckPermission"
+	RBACService_GetSubjectPermissions_FullMethodName       = "/cfgms.api.controller.RBACService/GetSubjectPermissions"
+	RBACService_CreateRoleWithParent_FullMethodName        = "/cfgms.api.controller.RBACService/CreateRoleWithParent"
+	RBACService_GetRoleHierarchy_FullMethodName            = "/cfgms.api.controller.RBACService/GetRoleHierarchy"
+	RBACService_SetRoleParent_FullMethodName               = "/cfgms.api.controller.RBACService/SetRoleParent"
+	RBACService_RemoveRoleParent_FullMethodName            = "/cfgms.api.controller.RBACService/RemoveRoleParent"
+	RBACService_ComputeEffectivePermissions_FullMethodName = "/cfgms.api.controller.RBACService/ComputeEffectivePermissions"
+	RBACService_ValidateRoleHierarchy_FullMethodName       = "/cfgms.api.controller.RBACService/ValidateRoleHierarchy"
 )
 
 // RBACServiceClient is the client API for RBACService service.
@@ -66,6 +72,13 @@ type RBACServiceClient interface {
 	// Permission Checking
 	CheckPermission(ctx context.Context, in *CheckPermissionRequest, opts ...grpc.CallOption) (*CheckPermissionResponse, error)
 	GetSubjectPermissions(ctx context.Context, in *GetSubjectPermissionsRequest, opts ...grpc.CallOption) (*GetSubjectPermissionsResponse, error)
+	// Role Hierarchy Management
+	CreateRoleWithParent(ctx context.Context, in *CreateRoleWithParentRequest, opts ...grpc.CallOption) (*CreateRoleWithParentResponse, error)
+	GetRoleHierarchy(ctx context.Context, in *GetRoleHierarchyRequest, opts ...grpc.CallOption) (*GetRoleHierarchyResponse, error)
+	SetRoleParent(ctx context.Context, in *SetRoleParentRequest, opts ...grpc.CallOption) (*SetRoleParentResponse, error)
+	RemoveRoleParent(ctx context.Context, in *RemoveRoleParentRequest, opts ...grpc.CallOption) (*RemoveRoleParentResponse, error)
+	ComputeEffectivePermissions(ctx context.Context, in *ComputeEffectivePermissionsRequest, opts ...grpc.CallOption) (*ComputeEffectivePermissionsResponse, error)
+	ValidateRoleHierarchy(ctx context.Context, in *ValidateRoleHierarchyRequest, opts ...grpc.CallOption) (*ValidateRoleHierarchyResponse, error)
 }
 
 type rBACServiceClient struct {
@@ -246,6 +259,66 @@ func (c *rBACServiceClient) GetSubjectPermissions(ctx context.Context, in *GetSu
 	return out, nil
 }
 
+func (c *rBACServiceClient) CreateRoleWithParent(ctx context.Context, in *CreateRoleWithParentRequest, opts ...grpc.CallOption) (*CreateRoleWithParentResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CreateRoleWithParentResponse)
+	err := c.cc.Invoke(ctx, RBACService_CreateRoleWithParent_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *rBACServiceClient) GetRoleHierarchy(ctx context.Context, in *GetRoleHierarchyRequest, opts ...grpc.CallOption) (*GetRoleHierarchyResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetRoleHierarchyResponse)
+	err := c.cc.Invoke(ctx, RBACService_GetRoleHierarchy_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *rBACServiceClient) SetRoleParent(ctx context.Context, in *SetRoleParentRequest, opts ...grpc.CallOption) (*SetRoleParentResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetRoleParentResponse)
+	err := c.cc.Invoke(ctx, RBACService_SetRoleParent_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *rBACServiceClient) RemoveRoleParent(ctx context.Context, in *RemoveRoleParentRequest, opts ...grpc.CallOption) (*RemoveRoleParentResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RemoveRoleParentResponse)
+	err := c.cc.Invoke(ctx, RBACService_RemoveRoleParent_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *rBACServiceClient) ComputeEffectivePermissions(ctx context.Context, in *ComputeEffectivePermissionsRequest, opts ...grpc.CallOption) (*ComputeEffectivePermissionsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ComputeEffectivePermissionsResponse)
+	err := c.cc.Invoke(ctx, RBACService_ComputeEffectivePermissions_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *rBACServiceClient) ValidateRoleHierarchy(ctx context.Context, in *ValidateRoleHierarchyRequest, opts ...grpc.CallOption) (*ValidateRoleHierarchyResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ValidateRoleHierarchyResponse)
+	err := c.cc.Invoke(ctx, RBACService_ValidateRoleHierarchy_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RBACServiceServer is the server API for RBACService service.
 // All implementations must embed UnimplementedRBACServiceServer
 // for forward compatibility.
@@ -274,6 +347,13 @@ type RBACServiceServer interface {
 	// Permission Checking
 	CheckPermission(context.Context, *CheckPermissionRequest) (*CheckPermissionResponse, error)
 	GetSubjectPermissions(context.Context, *GetSubjectPermissionsRequest) (*GetSubjectPermissionsResponse, error)
+	// Role Hierarchy Management
+	CreateRoleWithParent(context.Context, *CreateRoleWithParentRequest) (*CreateRoleWithParentResponse, error)
+	GetRoleHierarchy(context.Context, *GetRoleHierarchyRequest) (*GetRoleHierarchyResponse, error)
+	SetRoleParent(context.Context, *SetRoleParentRequest) (*SetRoleParentResponse, error)
+	RemoveRoleParent(context.Context, *RemoveRoleParentRequest) (*RemoveRoleParentResponse, error)
+	ComputeEffectivePermissions(context.Context, *ComputeEffectivePermissionsRequest) (*ComputeEffectivePermissionsResponse, error)
+	ValidateRoleHierarchy(context.Context, *ValidateRoleHierarchyRequest) (*ValidateRoleHierarchyResponse, error)
 	mustEmbedUnimplementedRBACServiceServer()
 }
 
@@ -334,6 +414,24 @@ func (UnimplementedRBACServiceServer) CheckPermission(context.Context, *CheckPer
 }
 func (UnimplementedRBACServiceServer) GetSubjectPermissions(context.Context, *GetSubjectPermissionsRequest) (*GetSubjectPermissionsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetSubjectPermissions not implemented")
+}
+func (UnimplementedRBACServiceServer) CreateRoleWithParent(context.Context, *CreateRoleWithParentRequest) (*CreateRoleWithParentResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CreateRoleWithParent not implemented")
+}
+func (UnimplementedRBACServiceServer) GetRoleHierarchy(context.Context, *GetRoleHierarchyRequest) (*GetRoleHierarchyResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetRoleHierarchy not implemented")
+}
+func (UnimplementedRBACServiceServer) SetRoleParent(context.Context, *SetRoleParentRequest) (*SetRoleParentResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SetRoleParent not implemented")
+}
+func (UnimplementedRBACServiceServer) RemoveRoleParent(context.Context, *RemoveRoleParentRequest) (*RemoveRoleParentResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RemoveRoleParent not implemented")
+}
+func (UnimplementedRBACServiceServer) ComputeEffectivePermissions(context.Context, *ComputeEffectivePermissionsRequest) (*ComputeEffectivePermissionsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ComputeEffectivePermissions not implemented")
+}
+func (UnimplementedRBACServiceServer) ValidateRoleHierarchy(context.Context, *ValidateRoleHierarchyRequest) (*ValidateRoleHierarchyResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ValidateRoleHierarchy not implemented")
 }
 func (UnimplementedRBACServiceServer) mustEmbedUnimplementedRBACServiceServer() {}
 func (UnimplementedRBACServiceServer) testEmbeddedByValue()                     {}
@@ -662,6 +760,114 @@ func _RBACService_GetSubjectPermissions_Handler(srv interface{}, ctx context.Con
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RBACService_CreateRoleWithParent_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateRoleWithParentRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RBACServiceServer).CreateRoleWithParent(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RBACService_CreateRoleWithParent_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RBACServiceServer).CreateRoleWithParent(ctx, req.(*CreateRoleWithParentRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RBACService_GetRoleHierarchy_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetRoleHierarchyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RBACServiceServer).GetRoleHierarchy(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RBACService_GetRoleHierarchy_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RBACServiceServer).GetRoleHierarchy(ctx, req.(*GetRoleHierarchyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RBACService_SetRoleParent_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetRoleParentRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RBACServiceServer).SetRoleParent(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RBACService_SetRoleParent_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RBACServiceServer).SetRoleParent(ctx, req.(*SetRoleParentRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RBACService_RemoveRoleParent_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RemoveRoleParentRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RBACServiceServer).RemoveRoleParent(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RBACService_RemoveRoleParent_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RBACServiceServer).RemoveRoleParent(ctx, req.(*RemoveRoleParentRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RBACService_ComputeEffectivePermissions_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ComputeEffectivePermissionsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RBACServiceServer).ComputeEffectivePermissions(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RBACService_ComputeEffectivePermissions_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RBACServiceServer).ComputeEffectivePermissions(ctx, req.(*ComputeEffectivePermissionsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RBACService_ValidateRoleHierarchy_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ValidateRoleHierarchyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RBACServiceServer).ValidateRoleHierarchy(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RBACService_ValidateRoleHierarchy_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RBACServiceServer).ValidateRoleHierarchy(ctx, req.(*ValidateRoleHierarchyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // RBACService_ServiceDesc is the grpc.ServiceDesc for RBACService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -736,6 +942,30 @@ var RBACService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetSubjectPermissions",
 			Handler:    _RBACService_GetSubjectPermissions_Handler,
+		},
+		{
+			MethodName: "CreateRoleWithParent",
+			Handler:    _RBACService_CreateRoleWithParent_Handler,
+		},
+		{
+			MethodName: "GetRoleHierarchy",
+			Handler:    _RBACService_GetRoleHierarchy_Handler,
+		},
+		{
+			MethodName: "SetRoleParent",
+			Handler:    _RBACService_SetRoleParent_Handler,
+		},
+		{
+			MethodName: "RemoveRoleParent",
+			Handler:    _RBACService_RemoveRoleParent_Handler,
+		},
+		{
+			MethodName: "ComputeEffectivePermissions",
+			Handler:    _RBACService_ComputeEffectivePermissions_Handler,
+		},
+		{
+			MethodName: "ValidateRoleHierarchy",
+			Handler:    _RBACService_ValidateRoleHierarchy_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
