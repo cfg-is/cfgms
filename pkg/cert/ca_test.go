@@ -256,7 +256,7 @@ func TestCA_LoadCA(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "ca-test-")
 	require.NoError(t, err)
 	defer func() {
-		if err := os.RemoveAll(tempDir) }(); err != nil {
+		if err := os.RemoveAll(tempDir); err != nil {
 			t.Logf("Failed to remove temp directory: %v", err)
 		}
 	}()

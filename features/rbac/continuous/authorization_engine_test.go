@@ -3,6 +3,7 @@ package continuous
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -149,6 +150,8 @@ func createTestContinuousAuthEngine() *ContinuousAuthorizationEngine {
 		contextMonitor:  NewContextMonitor(nil, config.SessionUpdateInterval), // nil risk manager for test
 		policyEnforcer:  NewPolicyEnforcer(nil, false), // nil tenant security, no auto termination
 		config:         config,
+		stats:          &AuthorizationStats{mutex: sync.RWMutex{}}, // Initialize stats for tests
+		stopChannel:    make(chan struct{}), // Initialize stop channel
 	}
 }
 
@@ -217,15 +220,24 @@ func TestContinuousAuthorizationEngine_Start_InitializationError(t *testing.T) {
 
 func TestContinuousAuthorizationEngine_Stop_Success(t *testing.T) {
 	engine := createTestContinuousAuthEngine()
+	ctx := context.Background()
 
-	err := engine.Stop()
+	// Start the engine first
+	err := engine.Start(ctx)
+	require.NoError(t, err)
 
+	// Now stop it
+	err = engine.Stop()
 	require.NoError(t, err)
 }
 
 func TestContinuousAuthorizationEngine_AuthorizeAction_Success(t *testing.T) {
 	engine := createTestContinuousAuthEngine()
 	ctx := context.Background()
+	
+	// Register session first
+	err := engine.RegisterSession(ctx, "session1", "user1", "tenant1", nil)
+	require.NoError(t, err)
 	
 	// Setup successful RBAC response
 	engine.rbacManager = &MockRBACManager{
@@ -250,6 +262,10 @@ func TestContinuousAuthorizationEngine_AuthorizeAction_RBACDenied(t *testing.T) 
 	engine := createTestContinuousAuthEngine()
 	ctx := context.Background()
 	
+	// Register session first
+	err := engine.RegisterSession(ctx, "session1", "user1", "tenant1", nil)
+	require.NoError(t, err)
+	
 	// Setup RBAC denial
 	engine.rbacManager = &MockRBACManager{
 		checkPermissionResponse: &common.AccessResponse{
@@ -273,6 +289,10 @@ func TestContinuousAuthorizationEngine_AuthorizeAction_WithJITAccess(t *testing.
 	engine := createTestContinuousAuthEngine()
 	ctx := context.Background()
 	
+	// Register session first
+	err := engine.RegisterSession(ctx, "session1", "user1", "tenant1", nil)
+	require.NoError(t, err)
+	
 	// Setup RBAC denial but JIT access granted
 	engine.rbacManager = &MockRBACManager{
 		checkPermissionResponse: &common.AccessResponse{
@@ -289,6 +309,17 @@ func TestContinuousAuthorizationEngine_AuthorizeAction_WithJITAccess(t *testing.
 		},
 	}
 	
+	// Setup risk manager to preserve JIT access decision
+	engine.riskManager = &MockRiskManager{
+		enhancedRiskResponse: &RiskAccessResult{
+			StandardResponse: &common.AccessResponse{
+				Granted: true,
+				Reason:  "JIT access active",
+				AppliedPermissions: []string{"admin"},
+			},
+		},
+	}
+	
 	request := createTestContinuousAuthRequest("user1", "resource1", "admin", "tenant1", "session1")
 
 	response, err := engine.AuthorizeAction(ctx, request)
@@ -302,6 +333,10 @@ func TestContinuousAuthorizationEngine_AuthorizeAction_WithJITAccess(t *testing.
 func TestContinuousAuthorizationEngine_AuthorizeAction_RiskBasedDenial(t *testing.T) {
 	engine := createTestContinuousAuthEngine()
 	ctx := context.Background()
+	
+	// Register session first
+	err := engine.RegisterSession(ctx, "session1", "user1", "tenant1", nil)
+	require.NoError(t, err)
 	
 	// Setup RBAC success but high risk denial
 	engine.rbacManager = &MockRBACManager{
@@ -470,6 +505,10 @@ func TestContinuousAuthorizationEngine_GetAuthorizationStats(t *testing.T) {
 func TestContinuousAuthorizationEngine_AuthorizeAction_SystemIntegrationFailure(t *testing.T) {
 	engine := createTestContinuousAuthEngine()
 	ctx := context.Background()
+
+	// Register session first
+	err := engine.RegisterSession(ctx, "session1", "user1", "tenant1", nil)
+	require.NoError(t, err)
 
 	// Setup RBAC system failure
 	engine.rbacManager = &MockRBACManager{

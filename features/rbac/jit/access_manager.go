@@ -703,7 +703,12 @@ func (jam *JITAccessManager) scheduleDeactivation(ctx context.Context, grant *JI
 	// In a real implementation, this would schedule a background job
 	// For now, we'll implement a simple goroutine
 	go func() {
-		duration := time.Until(grant.ExpiresAt)
+		// Read ExpiresAt under mutex protection to avoid race condition
+		jam.mutex.RLock()
+		expiresAt := grant.ExpiresAt
+		jam.mutex.RUnlock()
+		
+		duration := time.Until(expiresAt)
 		if duration > 0 {
 			time.Sleep(duration)
 			

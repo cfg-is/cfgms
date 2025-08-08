@@ -128,15 +128,17 @@ func (s *Store) LoadRoles(roles []*common.Role) {
 	for _, role := range roles {
 		// Create a copy to avoid race conditions on shared role objects
 		roleCopy := &common.Role{
-			Id:           role.Id,
-			Name:         role.Name,
-			Description:  role.Description,
-			TenantId:     role.TenantId,
-			ParentRoleId: role.ParentRoleId,
-			ChildRoleIds: append([]string{}, role.ChildRoleIds...),
+			Id:            role.Id,
+			Name:          role.Name,
+			Description:   role.Description,
+			PermissionIds: append([]string{}, role.PermissionIds...),
+			TenantId:      role.TenantId,
+			ParentRoleId:  role.ParentRoleId,
+			ChildRoleIds:  append([]string{}, role.ChildRoleIds...),
 			InheritanceType: role.InheritanceType,
-			CreatedAt:    now,
-			UpdatedAt:    now,
+			IsSystemRole:    role.IsSystemRole,
+			CreatedAt:       now,
+			UpdatedAt:       now,
 		}
 		s.roles[roleCopy.Id] = roleCopy
 	}

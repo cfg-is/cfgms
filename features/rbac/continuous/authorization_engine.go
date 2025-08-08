@@ -372,6 +372,13 @@ func (cae *ContinuousAuthorizationEngine) Start(ctx context.Context) error {
 		return fmt.Errorf("continuous authorization engine is already running")
 	}
 
+	// Initialize RBAC manager
+	if cae.rbacManager != nil {
+		if err := cae.rbacManager.Initialize(ctx); err != nil {
+			return fmt.Errorf("failed to initialize RBAC manager: %w", err)
+		}
+	}
+
 	// Start core components
 	if err := cae.sessionRegistry.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start session registry: %w", err)
@@ -423,6 +430,23 @@ func (cae *ContinuousAuthorizationEngine) Stop() error {
 // AuthorizeAction performs per-action continuous authorization
 func (cae *ContinuousAuthorizationEngine) AuthorizeAction(ctx context.Context, request *ContinuousAuthRequest) (*ContinuousAuthResponse, error) {
 	startTime := time.Now()
+	
+	// Validate request
+	if request == nil {
+		return nil, fmt.Errorf("authorization request cannot be nil")
+	}
+	
+	if request.AccessRequest == nil {
+		return nil, fmt.Errorf("access request cannot be nil")
+	}
+	
+	if request.SubjectId == "" {
+		return nil, fmt.Errorf("subject ID is required")
+	}
+	
+	if request.SessionID == "" {
+		return nil, fmt.Errorf("session ID is required")
+	}
 	
 	// Update statistics
 	cae.updateStatsOnRequest()
@@ -524,7 +548,11 @@ func (cae *ContinuousAuthorizationEngine) performAuthorizationCheck(ctx context.
 	// First check RBAC
 	rbacResponse, err := cae.rbacManager.CheckPermission(ctx, accessRequest)
 	if err != nil {
-		return nil, fmt.Errorf("RBAC check failed: %w", err)
+		// Return a denied response with system error message instead of returning error
+		return &common.AccessResponse{
+			Granted: false,
+			Reason:  fmt.Sprintf("system error - RBAC check failed: %v", err),
+		}, nil
 	}
 
 	// If RBAC denies, check JIT access
