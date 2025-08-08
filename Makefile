@@ -65,6 +65,17 @@ test:
 	@echo "================================="
 	go test -race -cover -short -timeout=3m ./features/... ./api/... ./cmd/... ./pkg/...
 
+# Complete validation (tests + linting + security) - RECOMMENDED FOR COMMITS
+test-complete: test lint security-scan
+	@echo ""
+	@echo "✅ COMPLETE VALIDATION FINISHED"
+	@echo "==============================="
+	@echo "- ✅ Unit tests passed"
+	@echo "- ✅ Linting passed"
+	@echo "- ✅ Security scanning passed"
+	@echo ""
+	@echo "🎯 Code is fully validated and ready for commit/PR"
+
 # Test with security validation (recommended for development)
 test-with-security: test security-scan
 	@echo ""
