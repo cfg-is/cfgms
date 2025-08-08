@@ -417,11 +417,11 @@ func (cae *ContinuousAuthorizationEngine) Stop() error {
 	// Signal shutdown
 	close(cae.stopChannel)
 
-	// Stop components
-	cae.policyEnforcer.Stop()
-	cae.contextMonitor.Stop()
-	cae.eventBus.Stop()
-	cae.sessionRegistry.Stop()
+	// Stop components - ignore errors during shutdown for graceful cleanup
+	_ = cae.policyEnforcer.Stop()
+	_ = cae.contextMonitor.Stop()
+	_ = cae.eventBus.Stop()
+	_ = cae.sessionRegistry.Stop()
 
 	cae.running = false
 	return nil
@@ -520,11 +520,11 @@ func (cae *ContinuousAuthorizationEngine) AuthorizeAction(ctx context.Context, r
 	// 8. Set validity period
 	response.ValidUntil = time.Now().Add(cae.config.PermissionCacheTTL)
 
-	// 9. Cache the decision
-	cae.permissionCache.CacheAuth(request, response)
+	// 9. Cache the decision - ignore cache errors, they're non-critical
+	_ = cae.permissionCache.CacheAuth(request, response)
 
-	// 10. Publish authorization event
-	cae.eventBus.PublishAuthorizationEvent(&AuthorizationEvent{
+	// 10. Publish authorization event - ignore event publishing errors, they're non-critical
+	_ = cae.eventBus.PublishAuthorizationEvent(&AuthorizationEvent{
 		DecisionID:    decisionID,
 		SessionID:     request.SessionID,
 		SubjectID:     request.SubjectId,
@@ -786,8 +786,8 @@ func (cae *ContinuousAuthorizationEngine) generateActionRecommendations(request 
 func (cae *ContinuousAuthorizationEngine) performSessionHealthCheck(ctx context.Context) {
 	sessions := cae.sessionRegistry.GetAllSessions()
 	for _, session := range sessions {
-		// Check session context and update if needed
-		cae.contextMonitor.CheckSessionContext(ctx, session)
+		// Check session context and update if needed - ignore errors during health checks
+		_ = cae.contextMonitor.CheckSessionContext(ctx, session)
 	}
 }
 

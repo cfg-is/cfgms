@@ -80,24 +80,14 @@ type NetworkPattern struct {
 
 // PatternDetector detects behavioral patterns
 type PatternDetector struct {
-	temporalAnalyzer  *TemporalPatternAnalyzer
-	spatialAnalyzer   *SpatialPatternAnalyzer
-	accessAnalyzer    *AccessPatternAnalyzer
-	velocityAnalyzer  *VelocityPatternAnalyzer
 }
 
 // AnomalyDetector detects behavioral anomalies
 type AnomalyDetector struct {
-	statisticalDetector *StatisticalAnomalyDetector
-	mlDetector         *MLAnomalyDetector
-	ruleBasedDetector  *RuleBasedAnomalyDetector
 }
 
 // BehavioralLearningEngine handles continuous learning
 type BehavioralLearningEngine struct {
-	profileUpdater    *ProfileUpdater
-	feedbackProcessor *FeedbackProcessor
-	adaptiveThreshold *AdaptiveThresholdManager
 }
 
 // ConfidenceEngine calculates confidence scores

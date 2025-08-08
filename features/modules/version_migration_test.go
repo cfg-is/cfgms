@@ -887,12 +887,12 @@ func BenchmarkMigrationPath_Generation(b *testing.B) {
 	// Register test versions
 	metadata1 := &ModuleMetadata{Name: "bench-module", Version: "1.0.0", Description: "Bench"}
 	metadata2 := &ModuleMetadata{Name: "bench-module", Version: "2.0.0", Description: "Bench"}
-	registry.RegisterVersion(metadata1)
-	registry.RegisterVersion(metadata2)
+	_ = registry.RegisterVersion(metadata1) // Ignore error in benchmark setup
+	_ = registry.RegisterVersion(metadata2) // Ignore error in benchmark setup
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		migrator.GetMigrationPath("bench-module", "1.0.0", "2.0.0")
+		_, _ = migrator.GetMigrationPath("bench-module", "1.0.0", "2.0.0") // Ignore error in benchmark
 	}
 }
 

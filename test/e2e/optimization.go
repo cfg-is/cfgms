@@ -3,7 +3,6 @@ package e2e
 import (
 	"os"
 	"runtime"
-	"strconv"
 	"time"
 )
 
@@ -368,22 +367,3 @@ func contains(s, substr string) bool {
 		   (len(s) > len(substr) && s[len(s)/2-len(substr)/2:len(s)/2+len(substr)/2] == substr)
 }
 
-// Environment variable helpers
-
-func getEnvInt(key string, defaultVal int) int {
-	if val := os.Getenv(key); val != "" {
-		if intVal, err := strconv.Atoi(val); err == nil {
-			return intVal
-		}
-	}
-	return defaultVal
-}
-
-func getEnvDuration(key string, defaultVal time.Duration) time.Duration {
-	if val := os.Getenv(key); val != "" {
-		if duration, err := time.ParseDuration(val); err == nil {
-			return duration
-		}
-	}
-	return defaultVal
-}

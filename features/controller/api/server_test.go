@@ -60,25 +60,6 @@ func setupTestServer(t *testing.T) *Server {
 	return server
 }
 
-// DEPRECATED: setupTestServerWithDefaultKey is deprecated for security reasons.
-// Use setupTestServer() + NewTestKey() / NewEphemeralTestKey() instead.
-// This function exists only for backward compatibility and will be removed.
-func setupTestServerWithDefaultKey(t *testing.T) (*Server, string) {
-	server := setupTestServer(t)
-	
-	// Get the default API key for legacy compatibility
-	server.mu.RLock()
-	var testAPIKey string
-	for key := range server.apiKeys {
-		testAPIKey = key
-		break
-	}
-	server.mu.RUnlock()
-
-	require.NotEmpty(t, testAPIKey, "Test API key should be generated")
-
-	return server, testAPIKey
-}
 
 // NewEphemeralTestKey creates a short-lived API key for test scenarios
 func NewEphemeralTestKey(t *testing.T, server *Server, permissions []string, tenantID string, ttl time.Duration) string {

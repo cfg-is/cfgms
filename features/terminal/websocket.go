@@ -280,18 +280,3 @@ func (h *DefaultWebSocketHandler) sendError(conn *websocket.Conn, errorMsg strin
 	}
 }
 
-// sendData sends data to the WebSocket client
-func (h *DefaultWebSocketHandler) sendData(conn *websocket.Conn, sessionID string, data []byte) error {
-	msg := &TerminalMessage{
-		Type:      MessageTypeData,
-		SessionID: sessionID,
-		Data:      data,
-		Timestamp: time.Now(),
-	}
-
-	if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
-		// Log error but continue
-		_ = err // Explicitly ignore deadline errors for resilience
-	}
-	return conn.WriteJSON(msg)
-}

@@ -551,13 +551,7 @@ func (tspe *TenantSecurityPolicyEngine) evaluateZeroTrustOverlay(ctx context.Con
 
 // coordinatePolicyResults coordinates tenant and zero-trust policy results into a final decision
 func (tspe *TenantSecurityPolicyEngine) coordinatePolicyResults(ctx context.Context, tenantResult *SecurityEvaluationResult, overlayResult *ZeroTrustOverlayResult) *SecurityEvaluationResult {
-	finalResult := &SecurityEvaluationResult{
-		Request:               tenantResult.Request,
-		EvaluationTime:        tenantResult.EvaluationTime,
-		Violations:           tenantResult.Violations,
-		AppliedRules:         tenantResult.AppliedRules,
-		ZeroTrustOverlay:     overlayResult,
-	}
+	var finalResult *SecurityEvaluationResult
 	
 	// Apply coordination logic based on mode and priority
 	switch tspe.zeroTrustMode {

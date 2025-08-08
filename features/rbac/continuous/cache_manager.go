@@ -338,7 +338,11 @@ func (cm *CacheManager) InvalidateCache(request *CacheInvalidationRequest) error
 
 // EvictSessionCache removes all cached entries for a session
 func (cm *CacheManager) EvictSessionCache(sessionID string) {
-	cm.invalidateSession(sessionID, "session_terminated")
+	if err := cm.invalidateSession(sessionID, "session_terminated"); err != nil {
+		// Log error but don't fail the eviction
+		// This is a best-effort cleanup operation
+		return
+	}
 }
 
 // EvictSubjectPermissions removes cached permissions for specific permissions
@@ -512,11 +516,29 @@ func (cm *CacheManager) storeInL2(sessionID, cacheKey string, cached *CachedAuth
 
 // promoteToL1 promotes a cache entry from L2 to L1
 func (cm *CacheManager) promoteToL1(cacheKey string, cached *CachedAuthDecision) {
-	// Create a copy for L1
-	l1Cached := *cached
-	l1Cached.CacheLevel = CacheLevelL1
+	// Create a copy for L1 - copy fields individually to avoid copying mutex
+	l1Cached := &CachedAuthDecision{
+		CacheKey:       cached.CacheKey,
+		CacheLevel:     CacheLevelL1,
+		CreatedAt:      cached.CreatedAt,
+		ValidUntil:     cached.ValidUntil,
+		AccessCount:    cached.AccessCount,
+		LastAccessed:   cached.LastAccessed,
+		Request:        cached.Request,
+		AccessResponse: cached.AccessResponse,
+		SessionID:      cached.SessionID,
+		SubjectID:      cached.SubjectID,
+		PermissionID:   cached.PermissionID,
+		TenantID:       cached.TenantID,
+		ContextHash:    cached.ContextHash,
+		DecisionID:     cached.DecisionID,
+		DecisionTime:   cached.DecisionTime,
+		Source:         cached.Source,
+		InvalidatedBy:  append([]string{}, cached.InvalidatedBy...), // Copy slice
+		InvalidatedAt:  cached.InvalidatedAt,
+	}
 	
-	cm.storeInL1(cacheKey, &l1Cached)
+	cm.storeInL1(cacheKey, l1Cached)
 }
 
 // Cache invalidation methods
@@ -698,7 +720,7 @@ func (cm *CacheManager) invalidateAll(reason string) error {
 func (cm *CacheManager) evictFromL1() {
 	// Simple LRU eviction - remove oldest entry
 	var oldestKey string
-	var oldestTime time.Time = time.Now()
+	var oldestTime = time.Now()
 
 	for key, cached := range cm.l1Cache {
 		if cached.LastAccessed.Before(oldestTime) {
@@ -718,7 +740,7 @@ func (cm *CacheManager) evictFromL1() {
 func (cm *CacheManager) evictFromL2() {
 	// Find session with oldest entries
 	var oldestSessionID string
-	var oldestTime time.Time = time.Now()
+	var oldestTime = time.Now()
 
 	for sessionID, sessionCache := range cm.l2Cache {
 		for _, cached := range sessionCache {

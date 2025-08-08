@@ -73,7 +73,8 @@ func LoadModuleMetadata(filePath string) (*ModuleMetadata, error) {
 	}
 	defer func() {
 		if err := file.Close(); err != nil {
-			// Log error but don't override original error
+			// Log error but don't override original error - best effort cleanup
+			_ = err
 		}
 	}()
 

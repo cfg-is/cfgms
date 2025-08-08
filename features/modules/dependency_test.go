@@ -127,8 +127,8 @@ func TestDependencyGraph_GetDependencies(t *testing.T) {
 		Version: "1.0.0",
 	}
 
-	graph.AddModule(moduleA)
-	graph.AddModule(moduleB)
+	_ = graph.AddModule(moduleA) // Ignore error in test setup
+	_ = graph.AddModule(moduleB) // Ignore error in test setup
 
 	// Test getting dependencies
 	deps := graph.GetDependencies("a")
@@ -196,7 +196,7 @@ func TestDependencyGraph_HasCycles(t *testing.T) {
 			graph := NewDependencyGraph()
 
 			for _, module := range tt.modules {
-				graph.AddModule(module)
+				_ = graph.AddModule(module) // Ignore error in test setup
 			}
 
 			hasCycles, cycle := graph.HasCycles()
@@ -285,7 +285,7 @@ func TestDependencyGraph_TopologicalSort(t *testing.T) {
 			graph := NewDependencyGraph()
 
 			for _, module := range tt.modules {
-				graph.AddModule(module)
+				_ = graph.AddModule(module) // Ignore error in test setup
 			}
 
 			order, err := graph.TopologicalSort()
@@ -330,7 +330,7 @@ func TestDependencyGraph_ValidateAllDependencies(t *testing.T) {
 	}
 
 	for _, module := range modules {
-		graph.AddModule(module)
+		_ = graph.AddModule(module) // Ignore error in test setup
 	}
 
 	errors := graph.ValidateAllDependencies()
@@ -401,7 +401,7 @@ func BenchmarkDependencyGraph_AddModule(b *testing.B) {
 			Name:    "test" + string(rune(i)),
 			Version: "1.0.0",
 		}
-		graph.AddModule(metadata)
+		_ = graph.AddModule(metadata) // Ignore error in benchmark setup
 	}
 }
 
@@ -424,7 +424,7 @@ func BenchmarkDependencyGraph_TopologicalSort(b *testing.B) {
 			Version:            "1.0.0",
 			ModuleDependencies: deps,
 		}
-		graph.AddModule(metadata)
+		_ = graph.AddModule(metadata) // Ignore error in benchmark setup
 	}
 
 	b.ResetTimer()
@@ -436,19 +436,3 @@ func BenchmarkDependencyGraph_TopologicalSort(b *testing.B) {
 	}
 }
 
-// Test helpers
-func createTestModuleMetadata(name, version string, deps ...string) *ModuleMetadata {
-	var moduleDeps []ModuleDependency
-	for _, dep := range deps {
-		moduleDeps = append(moduleDeps, ModuleDependency{
-			Name:    dep,
-			Version: "1.0.0",
-		})
-	}
-
-	return &ModuleMetadata{
-		Name:               name,
-		Version:            version,
-		ModuleDependencies: moduleDeps,
-	}
-}

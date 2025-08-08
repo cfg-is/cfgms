@@ -28,7 +28,7 @@ func TestTerminalRBACComprehensiveIntegration(t *testing.T) {
 	// Setup real continuous auth registry
 	authRegistry := continuous.NewSessionRegistry()
 	require.NoError(t, authRegistry.Start(ctx))
-	defer authRegistry.Stop()
+	defer func() { _ = authRegistry.Stop() }() // Ignore error in test cleanup
 
 	t.Run("EndToEndRBACFlowWithRealComponents", func(t *testing.T) {
 		// 1. Setup real permissions in memory store

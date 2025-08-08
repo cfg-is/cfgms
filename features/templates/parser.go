@@ -16,8 +16,6 @@ type DefaultTemplateEngine struct {
 	functions map[string]interface{}
 	store     TemplateStore
 	dnaProvider DNAProvider
-	resolver  VariableResolver
-	inheritance TemplateInheritance
 }
 
 // NewTemplateEngine creates a new template engine

@@ -493,9 +493,10 @@ func (era *EnvironmentRiskAnalyzer) calculateNetworkRiskScore(networkRisk *Netwo
 	}
 
 	// Network type factor
-	if networkRisk.NetworkType == "public" {
+	switch networkRisk.NetworkType {
+	case "public":
 		score += 20.0
-	} else if networkRisk.NetworkType == "mobile" {
+	case "mobile":
 		score += 10.0
 	}
 
@@ -759,18 +760,6 @@ func NewTimeRiskAssessor() *TimeRiskAssessor {
 		timezoneValidator: &TimezoneValidator{},
 		holidayCalendar:   &HolidayCalendar{},
 	}
-}
-
-func (tra *TimeRiskAssessor) isBusinessHours(accessTime time.Time, timezone string) bool {
-	// Simplified business hours check
-	hour := accessTime.Hour()
-	weekday := accessTime.Weekday()
-	
-	if weekday == time.Saturday || weekday == time.Sunday {
-		return false
-	}
-	
-	return hour >= 9 && hour <= 17
 }
 
 func NewNetworkRiskAssessor() *NetworkRiskAssessor {

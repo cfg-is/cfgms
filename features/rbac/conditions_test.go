@@ -146,7 +146,7 @@ func TestConditionEngine(t *testing.T) {
 			"security_level": "5",
 		}
 
-		result, reason := engine.EvaluateCondition(ctx, condition, evaluationContext)
+		result, _ := engine.EvaluateCondition(ctx, condition, evaluationContext)
 		assert.True(t, result, "Should allow access when numeric values match")
 
 		// Test GREATER_THAN condition
@@ -154,11 +154,11 @@ func TestConditionEngine(t *testing.T) {
 		condition.Values = []string{"3"}
 		evaluationContext["security_level"] = "5"
 
-		result, reason = engine.EvaluateCondition(ctx, condition, evaluationContext)
+		result, _ = engine.EvaluateCondition(ctx, condition, evaluationContext)
 		assert.True(t, result, "Should allow access when value is greater than threshold")
 
 		evaluationContext["security_level"] = "2"
-		result, reason = engine.EvaluateCondition(ctx, condition, evaluationContext)
+		result, _ = engine.EvaluateCondition(ctx, condition, evaluationContext)
 		assert.False(t, result, "Should deny access when value is not greater than threshold")
 
 		// Test LESS_THAN condition
@@ -166,7 +166,7 @@ func TestConditionEngine(t *testing.T) {
 		condition.Values = []string{"10"}
 		evaluationContext["security_level"] = "5"
 
-		result, reason = engine.EvaluateCondition(ctx, condition, evaluationContext)
+		result, reason := engine.EvaluateCondition(ctx, condition, evaluationContext)
 		assert.True(t, result, "Should allow access when value is less than threshold")
 		assert.Contains(t, reason, "less than")
 	})
@@ -187,7 +187,7 @@ func TestConditionEngine(t *testing.T) {
 		assert.Contains(t, reason, "equals")
 
 		evaluationContext["mfa_verified"] = "false"
-		result, reason = engine.EvaluateCondition(ctx, condition, evaluationContext)
+		result, _ = engine.EvaluateCondition(ctx, condition, evaluationContext)
 		assert.False(t, result, "Should deny access when boolean condition is not met")
 	})
 

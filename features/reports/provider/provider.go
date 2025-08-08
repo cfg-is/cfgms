@@ -387,12 +387,3 @@ func (p *DataProvider) findTimeBucket(timestamp time.Time, buckets []time.Time) 
 
 // getDriftEvents is a placeholder for getting drift events
 // The drift detection system currently doesn't expose historical event querying
-func (p *DataProvider) getDriftEvents(ctx context.Context) ([]drift.DriftEvent, error) {
-	// This is a placeholder implementation
-	// The actual drift package would need to provide a method to query historical events
-	
-	// For now, return empty slice - this would need to be implemented
-	// based on how drift events are actually stored and queried
-	p.logger.Debug("getDriftEvents not fully implemented - returning empty results")
-	return []drift.DriftEvent{}, nil
-}

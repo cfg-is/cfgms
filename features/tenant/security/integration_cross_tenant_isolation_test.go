@@ -355,7 +355,7 @@ func TestCrossTenantPermissionIsolationIntegration(t *testing.T) {
 
 					request := &common.AccessRequest{
 						SubjectId:    subjectID,
-						PermissionId: fmt.Sprintf("resource.read"),
+						PermissionId: "resource.read",
 						TenantId:     targetTenant,
 						ResourceId:   fmt.Sprintf("resource-%d-%d", id, op),
 					}

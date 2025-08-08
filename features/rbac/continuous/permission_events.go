@@ -214,8 +214,6 @@ type SubscriberStats struct {
 	EventsFailed     int64     `json:"events_failed"`
 	LastEventAt      time.Time `json:"last_event_at"`
 	AverageLatencyMs float64   `json:"average_latency_ms"`
-	
-	mutex           sync.RWMutex
 }
 
 // NewPermissionEventBus creates a new permission event bus

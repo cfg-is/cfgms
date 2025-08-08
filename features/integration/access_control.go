@@ -987,9 +987,14 @@ func (eacm *EnhancedAccessControlManager) CheckContinuousAccess(ctx context.Cont
 		return eacm.CheckAccess(ctx, request)
 	}
 
-	// Set session ID in request context for continuous authorization
-	requestWithSession := *request
-	requestWithSession.Context = make(map[string]string)
+	// Set session ID in request context for continuous authorization - create copy to avoid copying mutex
+	requestWithSession := &common.AccessRequest{
+		SubjectId:    request.SubjectId,
+		ResourceId:   request.ResourceId,
+		PermissionId: request.PermissionId,
+		TenantId:     request.TenantId,
+		Context:      make(map[string]string),
+	}
 	for k, v := range request.Context {
 		requestWithSession.Context[k] = v
 	}
@@ -1002,7 +1007,7 @@ func (eacm *EnhancedAccessControlManager) CheckContinuousAccess(ctx context.Cont
 		eacm.integrationMode = originalMode
 	}()
 
-	return eacm.CheckAccess(ctx, &requestWithSession)
+	return eacm.CheckAccess(ctx, requestWithSession)
 }
 
 // Helper functions
@@ -1030,21 +1035,6 @@ func getSessionIDFromContext(ctx context.Context) string {
 	return ""
 }
 
-// convertRiskFactors converts continuous auth risk factors to integration risk factors
-func convertRiskFactors(continuousFactors []continuous.RiskFactor) []interface{} {
-	riskFactors := make([]interface{}, len(continuousFactors))
-	for i, factor := range continuousFactors {
-		riskFactors[i] = map[string]interface{}{
-			"type":        factor.Type,
-			"category":    factor.Category,
-			"severity":    factor.Severity,
-			"score":       factor.Score,
-			"description": factor.Description,
-			"detected_at": factor.DetectedAt,
-		}
-	}
-	return riskFactors
-}
 
 // convertPolicyViolations converts continuous auth policy violations to compliance violations
 func convertPolicyViolations(policyViolations []continuous.PolicyViolation) []string {

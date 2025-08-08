@@ -84,26 +84,6 @@ func (sm *SystemMonitor) exportEvent(ctx context.Context, event SystemEvent) {
 	}
 }
 
-// exportLogs exports log entries to configured exporters.
-func (sm *SystemMonitor) exportLogs(ctx context.Context, logs []export.LogEntry) {
-	if sm.exportManager == nil || len(logs) == 0 {
-		return
-	}
-	
-	// Prepare export data
-	exportData := export.ExportData{
-		Logs:          logs,
-		Timestamp:     time.Now(),
-		CorrelationID: telemetry.GetCorrelationID(ctx),
-		Source:        "controller",
-		ExportType:    export.ExportTypeScheduled,
-	}
-	
-	// Queue for export
-	if err := sm.exportManager.Export(exportData); err != nil {
-		sm.logger.WarnCtx(ctx, "Failed to queue logs for export", "error", err)
-	}
-}
 
 // GetExporterHealth returns the health status of all configured exporters.
 func (sm *SystemMonitor) GetExporterHealth() map[string]export.ExporterHealth {

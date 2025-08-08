@@ -529,9 +529,7 @@ func (m *DefaultCompatibilityMatrix) CheckCrossModuleCompatibility(moduleVersion
 			report.DetailedResults = append(report.DetailedResults, *pairResult)
 			
 			// Add issues from this pair
-			for _, issue := range pairResult.Issues {
-				report.Issues = append(report.Issues, issue)
-			}
+			report.Issues = append(report.Issues, pairResult.Issues...)
 			
 			// Count compatible pairs
 			if pairResult.CompatibilityLevel == CompatibilityLevelFullyCompatible ||

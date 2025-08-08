@@ -582,24 +582,6 @@ func (f *E2ETestFramework) addCleanup(fn func() error) {
 	f.cleanupFuncs = append(f.cleanupFuncs, fn)
 }
 
-func (f *E2ETestFramework) waitForComponent(name string, readyCheck func() bool) error {
-	timeout := time.After(f.config.ComponentStartup)
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-	
-	for {
-		select {
-		case <-timeout:
-			return fmt.Errorf("timeout waiting for %s to be ready", name)
-		case <-ticker.C:
-			if readyCheck() {
-				return nil
-			}
-		case <-f.ctx.Done():
-			return f.ctx.Err()
-		}
-	}
-}
 
 func (f *E2ETestFramework) createTestTenants() error {
 	// Implementation would create test tenants and users

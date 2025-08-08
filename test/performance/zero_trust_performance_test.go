@@ -333,7 +333,7 @@ func TestPerformanceRequirementValidation(t *testing.T) {
 
 		err := engine.Start(ctx)
 		require.NoError(t, err)
-		defer engine.Stop()
+		defer func() { _ = engine.Stop() }() // Ignore error in test cleanup
 
 		// Test various request types
 		requestTypes := []struct {

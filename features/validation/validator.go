@@ -300,34 +300,6 @@ func (v *Validator) validateModuleConfigs(cfg config.StewardConfig) []Validation
 	return issues
 }
 
-// checkCache checks if validation result is cached
-func (v *Validator) checkCache(cfg config.StewardConfig) *ValidationResult {
-	if !v.enableCaching {
-		return nil
-	}
-	
-	key := v.generateCacheKey(cfg)
-	if cached, exists := v.cache[key]; exists {
-		// Create a copy with updated timestamp
-		result := *cached
-		result.StartTime = time.Now()
-		result.Duration = 0 // Cached result
-		return &result
-	}
-	return nil
-}
-
-// cacheResult stores validation result in cache
-func (v *Validator) cacheResult(cfg config.StewardConfig, result *ValidationResult) {
-	if !v.enableCaching {
-		return
-	}
-	
-	key := v.generateCacheKey(cfg)
-	// Store a copy to prevent mutations
-	cached := *result
-	v.cache[key] = &cached
-}
 
 // generateCacheKey generates a cache key for the configuration
 func (v *Validator) generateCacheKey(cfg config.StewardConfig) string {

@@ -838,7 +838,7 @@ func BenchmarkCompatibilityMatrix_RecordCompatibility(b *testing.B) {
 			Version:     "1.0.0",
 			Description: "Benchmark module",
 		}
-		registry.RegisterVersion(metadata)
+		_ = registry.RegisterVersion(metadata) // Ignore error in test setup
 	}
 
 	compatibility := &VersionCompatibilityInfo{
@@ -851,7 +851,7 @@ func BenchmarkCompatibilityMatrix_RecordCompatibility(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		moduleName := fmt.Sprintf("bench-module-%d", i%100)
-		matrix.RecordCompatibility(moduleName, "1.0.0", compatibility)
+		_ = matrix.RecordCompatibility(moduleName, "1.0.0", compatibility) // Ignore error in test setup
 	}
 }
 
@@ -868,20 +868,20 @@ func BenchmarkCompatibilityMatrix_CheckCrossModuleCompatibility(b *testing.B) {
 			Version:     "1.0.0",
 			Description: "Benchmark module",
 		}
-		registry.RegisterVersion(metadata)
+		_ = registry.RegisterVersion(metadata) // Ignore error in test setup
 
 		compatibility := &VersionCompatibilityInfo{
 			BackwardsCompatible: []string{},
 			ForwardsCompatible:  []string{},
 			MigrationRequired:   false,
 		}
-		matrix.RecordCompatibility(moduleName, "1.0.0", compatibility)
+		_ = matrix.RecordCompatibility(moduleName, "1.0.0", compatibility) // Ignore error in test setup
 
 		moduleVersions[moduleName] = "1.0.0"
 	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		matrix.CheckCrossModuleCompatibility(moduleVersions)
+		_, _ = matrix.CheckCrossModuleCompatibility(moduleVersions) // Ignore error in test
 	}
 }

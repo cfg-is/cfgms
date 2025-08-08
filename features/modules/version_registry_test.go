@@ -551,7 +551,7 @@ func BenchmarkVersionRegistry_RegisterVersion(b *testing.B) {
 			Version:     "1.0.0",
 			Description: "Benchmark module",
 		}
-		registry.RegisterVersion(metadata)
+		_ = registry.RegisterVersion(metadata) // Ignore error in test setup
 	}
 }
 
@@ -565,12 +565,12 @@ func BenchmarkVersionRegistry_GetAvailableVersions(b *testing.B) {
 			Version:     fmt.Sprintf("1.%d.0", i),
 			Description: "Benchmark module",
 		}
-		registry.RegisterVersion(metadata)
+		_ = registry.RegisterVersion(metadata) // Ignore error in test setup
 	}
 	
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		registry.GetAvailableVersions("bench-module")
+		_, _ = registry.GetAvailableVersions("bench-module") // Ignore error in benchmark
 	}
 }
 
@@ -585,7 +585,7 @@ func BenchmarkVersionRegistry_ResolveVersionConstraints(b *testing.B) {
 				Version:     fmt.Sprintf("1.%d.0", versionIdx),
 				Description: "Benchmark module",
 			}
-			registry.RegisterVersion(metadata)
+			_ = registry.RegisterVersion(metadata) // Ignore error in test setup
 		}
 	}
 
@@ -597,6 +597,6 @@ func BenchmarkVersionRegistry_ResolveVersionConstraints(b *testing.B) {
 	
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		registry.ResolveVersionConstraints(requirements)
+		_, _ = registry.ResolveVersionConstraints(requirements) // Ignore error in benchmark
 	}
 }

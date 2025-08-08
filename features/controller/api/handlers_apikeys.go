@@ -215,17 +215,6 @@ func (s *Server) generateEphemeralKey(name string, permissions []string, ttl tim
 	return apiKey, nil
 }
 
-// generateTestKey creates a short-lived API key for test scenarios (5-minute expiry)
-func (s *Server) generateTestKey(permissions []string, tenantID string) (*APIKey, error) {
-	testName := fmt.Sprintf("Test Key %d", time.Now().Unix())
-	return s.generateEphemeralKey(testName, permissions, 5*time.Minute, tenantID)
-}
-
-// generateJITKey creates a just-in-time API key for remote script execution (1-hour expiry)
-func (s *Server) generateJITKey(scriptName string, permissions []string, tenantID string) (*APIKey, error) {
-	jitName := fmt.Sprintf("JIT-%s-%d", scriptName, time.Now().Unix())
-	return s.generateEphemeralKey(jitName, permissions, 1*time.Hour, tenantID)
-}
 
 // generateDefaultAPIKey creates a default API key for initial setup
 func (s *Server) generateDefaultAPIKey() error {

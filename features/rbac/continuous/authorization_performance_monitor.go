@@ -285,9 +285,39 @@ func (apm *AuthorizationPerformanceMonitor) GetCurrentMetrics() *LivePerformance
 	apm.metrics.mutex.RLock()
 	defer apm.metrics.mutex.RUnlock()
 
-	// Return a copy to prevent data races
-	metricsCopy := *apm.metrics
-	return &metricsCopy
+	// Return a copy to prevent data races - copy fields individually to avoid copying mutex
+	metricsCopy := &LivePerformanceMetrics{
+		RequestsPerSecond:     apm.metrics.RequestsPerSecond,
+		TotalRequests:         apm.metrics.TotalRequests,
+		SuccessfulRequests:    apm.metrics.SuccessfulRequests,
+		FailedRequests:        apm.metrics.FailedRequests,
+		CurrentLatencyMs:      apm.metrics.CurrentLatencyMs,
+		AverageLatencyMs:      apm.metrics.AverageLatencyMs,
+		P50LatencyMs:          apm.metrics.P50LatencyMs,
+		P95LatencyMs:          apm.metrics.P95LatencyMs,
+		P99LatencyMs:          apm.metrics.P99LatencyMs,
+		MaxLatencyMs:          apm.metrics.MaxLatencyMs,
+		CacheHitRate:          apm.metrics.CacheHitRate,
+		CacheHits:             apm.metrics.CacheHits,
+		CacheMisses:           apm.metrics.CacheMisses,
+		CacheSize:             apm.metrics.CacheSize,
+		CacheEvictions:        apm.metrics.CacheEvictions,
+		ErrorRate:             apm.metrics.ErrorRate,
+		MemoryUsageMB:         apm.metrics.MemoryUsageMB,
+		GoroutineCount:        apm.metrics.GoroutineCount,
+		CPUUsagePercent:       apm.metrics.CPUUsagePercent,
+		ActiveSessions:        apm.metrics.ActiveSessions,
+		ConcurrentRequests:    apm.metrics.ConcurrentRequests,
+		PeakConcurrency:       apm.metrics.PeakConcurrency,
+		TimeoutCount:          apm.metrics.TimeoutCount,
+		CircuitBreakerTrips:   apm.metrics.CircuitBreakerTrips,
+		PermissionDenials:     apm.metrics.PermissionDenials,
+		PolicyViolations:      apm.metrics.PolicyViolations,
+		SecurityAlerts:        apm.metrics.SecurityAlerts,
+		MonitoringUptime:      apm.metrics.MonitoringUptime,
+		LastUpdated:           apm.metrics.LastUpdated,
+	}
+	return metricsCopy
 }
 
 // GetSLACompliance returns current SLA compliance status

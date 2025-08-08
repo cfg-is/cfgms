@@ -111,7 +111,8 @@ func (s *SyntheticMonitoringSuite) TearDownSuite() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := s.terminalManager.(*terminal.DefaultSessionManager).Stop(ctx); err != nil {
-			// Log error but continue cleanup
+			// Log error but continue cleanup - best effort cleanup
+			_ = err
 		}
 	}
 
@@ -274,6 +275,7 @@ func (s *SyntheticMonitoringSuite) TestTerminalSessionMonitoring() {
 		go func() {
 			if err := steward.Start(ctx); err != nil {
 				// Log error but continue test
+				_ = err
 			}
 		}()
 		time.Sleep(1 * time.Second) // Allow steward to start
@@ -337,6 +339,7 @@ func (s *SyntheticMonitoringSuite) TestTerminalSessionMonitoring() {
 				// Clean up session
 				if err := s.terminalManager.TerminateSession(ctx, session.ID); err != nil {
 					// Log error but continue test
+					_ = err
 				}
 			}
 

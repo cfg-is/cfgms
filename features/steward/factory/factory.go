@@ -32,7 +32,6 @@ package factory
 
 import (
 	"fmt"
-	"plugin"
 	"reflect"
 
 	"github.com/cfgis/cfgms/features/modules"
@@ -140,30 +139,6 @@ func (f *ModuleFactory) loadBuiltinModule(moduleName string) (modules.Module, er
 }
 
 // loadPluginModule loads a module using Go's plugin system (requires CGO)
-func (f *ModuleFactory) loadPluginModule(modulePath string) (modules.Module, error) {
-	// Load the plugin
-	p, err := plugin.Open(modulePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open plugin: %w", err)
-	}
-
-	// Look for the New function
-	newFunc, err := p.Lookup("New")
-	if err != nil {
-		return nil, fmt.Errorf("New function not found in plugin: %w", err)
-	}
-
-	// Ensure it's the right type
-	newFuncTyped, ok := newFunc.(func() modules.Module)
-	if !ok {
-		return nil, fmt.Errorf("New function has incorrect signature")
-	}
-
-	// Create the module instance
-	instance := newFuncTyped()
-
-	return instance, nil
-}
 
 // ValidateModuleInterface ensures the module implements the required interface
 func (f *ModuleFactory) ValidateModuleInterface(module interface{}) error {

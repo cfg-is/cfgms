@@ -3,13 +3,10 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
-	"github.com/cfgis/cfgms/api/proto/common"
-	controller "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/gorilla/mux"
 )
 
@@ -254,137 +251,6 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 			s.auditAuthorizationDecision(r, decision)
 
 			next.ServeHTTP(w, r.WithContext(ctx))
-			return
-			
-			// Cross-tenant access prevention
-			if err := s.validateCrossTenantAccess(r, userID, tenantID, resourceType); err != nil {
-				s.logger.Warn("Cross-tenant access attempt blocked",
-					"user_id", userID,
-					"user_tenant", tenantID,
-					"resource_type", resourceType,
-					"resource", resource,
-					"error", err,
-				)
-				
-				decision := &AuthorizationDecision{
-					Granted:      false,
-					PermissionID: s.buildPermissionID(resourceType, action),
-					Resource:     resource,
-					Action:       action,
-					Decision:     "DENY",
-					Reason:       "Cross-tenant access violation: " + err.Error(),
-					CheckedAt:    time.Now(),
-					SubjectID:    userID,
-					TenantID:     tenantID,
-				}
-				
-				// Audit the denied access attempt
-				s.auditAuthorizationDecision(r, decision)
-				s.writeAuthorizationError(w, "Cross-tenant access denied", "CROSS_TENANT_ACCESS_DENIED", decision)
-				return
-			}
-			
-			// Create permission check request (reuse permissionID from above)
-			start := time.Now()
-			
-			checkReq := &controller.CheckPermissionRequest{
-				Request: &common.AccessRequest{
-					SubjectId:    userID,
-					PermissionId: permissionID,
-					ResourceId:   resource,
-					TenantId:     tenantID,
-					Context: map[string]string{
-						"request_id":   s.generateRequestID(),
-						"request_path": r.URL.Path,
-						"method":       r.Method,
-						"remote_addr":  r.RemoteAddr,
-						"user_agent":   r.Header.Get("User-Agent"),
-						"timestamp":    fmt.Sprintf("%d", time.Now().Unix()),
-					},
-				},
-			}
-
-			// Check permission
-			resp, err := s.rbacService.CheckPermission(r.Context(), checkReq)
-			duration := time.Since(start)
-			
-			// Create authorization decision
-			rbacDecision := &AuthorizationDecision{
-				Granted:      false,
-				PermissionID: permissionID,
-				Resource:     resource,
-				Action:       action,
-				CheckedAt:    time.Now(),
-				DurationMs:   duration.Milliseconds(),
-				SubjectID:    userID,
-				TenantID:     tenantID,
-			}
-
-			if err != nil {
-				s.logger.Error("Permission check failed", 
-					"error", err,
-					"subject_id", userID,
-					"permission_id", permissionID,
-					"resource", resource,
-					"duration_ms", duration.Milliseconds(),
-				)
-				rbacDecision.Decision = "ERROR"
-				rbacDecision.Reason = "Permission check service error"
-				
-				// Audit the error
-				s.auditAuthorizationDecision(r, rbacDecision)
-				
-				s.writeAuthorizationError(w, "Permission check failed", "PERMISSION_CHECK_FAILED", rbacDecision)
-				return
-			}
-
-			// Process authorization response
-			if resp == nil || resp.Response == nil {
-				rbacDecision.Decision = "DENY"
-				rbacDecision.Reason = "Empty response from authorization service"
-				
-				// Audit the denied access
-				s.auditAuthorizationDecision(r, rbacDecision)
-				s.writeAuthorizationError(w, "Access denied", "ACCESS_DENIED", rbacDecision)
-				return
-			}
-
-			rbacDecision.Granted = resp.Response.Granted
-			rbacDecision.Decision = "ALLOW" // AccessResponse doesn't have Decision field
-			if !resp.Response.Granted {
-				rbacDecision.Decision = "DENY"
-			}
-			rbacDecision.Reason = resp.Response.Reason
-
-			// Add decision to context
-			ctx = context.WithValue(r.Context(), authDecisionContextKey, rbacDecision)
-
-			if !rbacDecision.Granted {
-				s.logger.Warn("Access denied",
-					"subject_id", userID,
-					"permission_id", permissionID,
-					"resource", resource,
-					"reason", rbacDecision.Reason,
-					"duration_ms", duration.Milliseconds(),
-				)
-				
-				// Audit the denied access
-				s.auditAuthorizationDecision(r, rbacDecision)
-				s.writeAuthorizationError(w, "Access denied", "ACCESS_DENIED", rbacDecision)
-				return
-			}
-
-			s.logger.Debug("Access granted",
-				"subject_id", userID,
-				"permission_id", permissionID,
-				"resource", resource,
-				"duration_ms", duration.Milliseconds(),
-			)
-
-			// Audit the authorization decision
-			s.auditAuthorizationDecision(r, rbacDecision)
-
-			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
 }
@@ -450,95 +316,6 @@ func (s *Server) writeAuthorizationError(w http.ResponseWriter, message, code st
 	_ = json.NewEncoder(w).Encode(errorResponse)
 }
 
-// validateCrossTenantAccess prevents users from accessing resources outside their tenant
-func (s *Server) validateCrossTenantAccess(r *http.Request, userID, userTenantID, resourceType string) error {
-	vars := mux.Vars(r)
-	
-	// Global resources that don't have tenant boundaries
-	globalResourceTypes := map[string]bool{
-		"monitoring": true,    // System monitoring accessible to admins
-		"api-key":    true,    // API key management (with proper permissions)
-		"rbac":       true,    // RBAC management (with proper permissions)
-	}
-	
-	// Skip tenant validation for global resources
-	if globalResourceTypes[resourceType] {
-		return nil
-	}
-	
-	switch resourceType {
-	case "steward":
-		// For steward resources, validate the steward belongs to the user's tenant
-		stewardID := vars["id"]
-		if stewardID != "" && stewardID != "*" {
-			return s.validateStewardTenantAccess(stewardID, userTenantID)
-		}
-		
-	case "certificate":
-		// For certificate resources, validate through certificate ownership
-		serial := vars["serial"]
-		if serial != "" && serial != "*" {
-			return s.validateCertificateTenantAccess(serial, userTenantID)
-		}
-	}
-	
-	return nil
-}
-
-// validateStewardTenantAccess validates that a steward belongs to the user's tenant
-func (s *Server) validateStewardTenantAccess(stewardID, userTenantID string) error {
-	// For now, we'll implement basic validation
-	// TODO: Integrate with actual steward service when method becomes available
-	s.logger.Debug("Validating steward tenant access", 
-		"steward_id", stewardID,
-		"user_tenant", userTenantID,
-	)
-	
-	// Currently accepting all steward access for same tenant
-	// In a real implementation, we would check if the steward belongs to the user's tenant
-	return nil
-}
-
-// validateCertificateTenantAccess validates certificate access based on tenant ownership
-func (s *Server) validateCertificateTenantAccess(serial, userTenantID string) error {
-	// For now, we'll implement basic validation
-	// TODO: Integrate with certificate tenant metadata when available
-	s.logger.Debug("Validating certificate tenant access", 
-		"certificate_serial", serial,
-		"user_tenant", userTenantID,
-	)
-	
-	// Currently accepting all certificate access
-	// In a real implementation, we would check certificate tenant ownership
-	return nil
-}
-
-// isTenantAccessible checks if a resource tenant is accessible to a user tenant
-// This supports hierarchical tenant access where parent tenants can access child resources
-func (s *Server) isTenantAccessible(resourceTenantID, userTenantID string) bool {
-	// Same tenant - always accessible
-	if resourceTenantID == userTenantID {
-		return true
-	}
-	
-	// Empty resource tenant means system-level resource
-	if resourceTenantID == "" {
-		return true
-	}
-	
-	// Check hierarchical tenant access through tenant manager
-	if s.tenantManager != nil {
-		// TODO: Implement hierarchical tenant checking when method becomes available
-		// For now, we'll use basic same-tenant validation
-		s.logger.Debug("Would check hierarchical tenant access", 
-			"user_tenant", userTenantID,
-			"resource_tenant", resourceTenantID,
-		)
-	}
-	
-	// Default deny for cross-tenant access
-	return false
-}
 
 // auditAuthorizationDecision logs authorization decisions for security auditing
 func (s *Server) auditAuthorizationDecision(r *http.Request, decision *AuthorizationDecision) {
@@ -660,4 +437,5 @@ func (s *Server) auditToRBACManager(decision *AuthorizationDecision, r *http.Req
 		"resource", decision.Resource,
 	)
 }
+
 

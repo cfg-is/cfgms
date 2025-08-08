@@ -26,7 +26,6 @@ type SessionMonitor struct {
 	
 	// Callbacks
 	onSessionAlert   func(*SecurityAlert) error
-	onSessionBlocked func(sessionID string, reason string) error
 }
 
 // MonitoredSession represents a session under security monitoring
@@ -77,15 +76,11 @@ type SuspiciousActivity struct {
 type SessionActivityMonitor struct {
 	sessionID       string
 	commandHistory  []CommandHistory
-	accessPatterns  []AccessPattern
 	anomalyDetector *AnomalyDetector
 	
 	// Metrics
 	startTime       time.Time
 	lastCommand     time.Time
-	commandRate     float64  // Commands per minute
-	failureRate     float64  // Failed commands per minute
-	privilegedUsage float64  // Percentage of privileged commands
 	
 	mutex           sync.RWMutex
 }
@@ -113,7 +108,6 @@ type AccessPattern struct {
 // AnomalyDetector detects unusual patterns in session activity
 type AnomalyDetector struct {
 	baselineMetrics BaselineMetrics
-	currentMetrics  CurrentMetrics
 	anomalyRules    []AnomalyRule
 }
 

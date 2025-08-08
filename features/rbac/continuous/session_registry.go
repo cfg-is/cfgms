@@ -450,9 +450,28 @@ func (sr *SessionRegistry) GetUserSessions(ctx context.Context, subjectID, tenan
 	for _, sessionID := range sessionIDs {
 		if session, ok := sr.sessions[sessionID]; ok {
 			if tenantID == "" || session.TenantID == tenantID {
-				// Return a copy to prevent external modifications
-				sessionCopy := *session
-				sessions = append(sessions, &sessionCopy)
+				// Return a copy to prevent external modifications - copy fields individually to avoid copying mutex
+				sessionCopy := &AuthorizedSession{
+					SessionID:            session.SessionID,
+					SubjectID:            session.SubjectID,
+					TenantID:             session.TenantID,
+					CreatedAt:            session.CreatedAt,
+					LastActivity:         session.LastActivity,
+					ExpiresAt:            session.ExpiresAt,
+					SessionType:          session.SessionType,
+					ClientInfo:           session.ClientInfo,
+					Metadata:             session.Metadata,
+					GrantedPermissions:   session.GrantedPermissions,
+					ActiveDelegations:    append([]string{}, session.ActiveDelegations...),
+					JITPermissions:       session.JITPermissions,
+					ThreatLevel:          session.ThreatLevel,
+					SecurityViolations:   append([]SecurityViolation{}, session.SecurityViolations...),
+					ComplianceStatus:     session.ComplianceStatus,
+					RequiresContinuousAuth: session.RequiresContinuousAuth,
+					AutoTerminate:        session.AutoTerminate,
+					TerminationScheduled: session.TerminationScheduled,
+				}
+				sessions = append(sessions, sessionCopy)
 			}
 		}
 	}
@@ -473,9 +492,28 @@ func (sr *SessionRegistry) GetTenantSessions(ctx context.Context, tenantID strin
 	sessions := make([]*AuthorizedSession, 0)
 	for _, sessionID := range sessionIDs {
 		if session, ok := sr.sessions[sessionID]; ok {
-			// Return a copy to prevent external modifications
-			sessionCopy := *session
-			sessions = append(sessions, &sessionCopy)
+			// Return a copy to prevent external modifications - copy fields individually to avoid copying mutex
+			sessionCopy := &AuthorizedSession{
+				SessionID:            session.SessionID,
+				SubjectID:            session.SubjectID,
+				TenantID:             session.TenantID,
+				CreatedAt:            session.CreatedAt,
+				LastActivity:         session.LastActivity,
+				ExpiresAt:            session.ExpiresAt,
+				SessionType:          session.SessionType,
+				ClientInfo:           session.ClientInfo,
+				Metadata:             session.Metadata,
+				GrantedPermissions:   session.GrantedPermissions,
+				ActiveDelegations:    append([]string{}, session.ActiveDelegations...),
+				JITPermissions:       session.JITPermissions,
+				ThreatLevel:          session.ThreatLevel,
+				SecurityViolations:   append([]SecurityViolation{}, session.SecurityViolations...),
+				ComplianceStatus:     session.ComplianceStatus,
+				RequiresContinuousAuth: session.RequiresContinuousAuth,
+				AutoTerminate:        session.AutoTerminate,
+				TerminationScheduled: session.TerminationScheduled,
+			}
+			sessions = append(sessions, sessionCopy)
 		}
 	}
 
@@ -489,9 +527,28 @@ func (sr *SessionRegistry) GetAllSessions() []*AuthorizedSession {
 
 	sessions := make([]*AuthorizedSession, 0, len(sr.sessions))
 	for _, session := range sr.sessions {
-		// Return a copy to prevent external modifications
-		sessionCopy := *session
-		sessions = append(sessions, &sessionCopy)
+		// Return a copy to prevent external modifications - copy fields individually to avoid copying mutex
+		sessionCopy := &AuthorizedSession{
+			SessionID:            session.SessionID,
+			SubjectID:            session.SubjectID,
+			TenantID:             session.TenantID,
+			CreatedAt:            session.CreatedAt,
+			LastActivity:         session.LastActivity,
+			ExpiresAt:            session.ExpiresAt,
+			SessionType:          session.SessionType,
+			ClientInfo:           session.ClientInfo,
+			Metadata:             session.Metadata,
+			GrantedPermissions:   session.GrantedPermissions,
+			ActiveDelegations:    append([]string{}, session.ActiveDelegations...),
+			JITPermissions:       session.JITPermissions,
+			ThreatLevel:          session.ThreatLevel,
+			SecurityViolations:   append([]SecurityViolation{}, session.SecurityViolations...),
+			ComplianceStatus:     session.ComplianceStatus,
+			RequiresContinuousAuth: session.RequiresContinuousAuth,
+			AutoTerminate:        session.AutoTerminate,
+			TerminationScheduled: session.TerminationScheduled,
+		}
+		sessions = append(sessions, sessionCopy)
 	}
 
 	return sessions
@@ -549,29 +606,28 @@ func (sr *SessionRegistry) GetRegistryStats() *SessionRegistryStats {
 	sr.mutex.RLock()
 	defer sr.mutex.RUnlock()
 
-	// Return a copy to prevent external modifications
-	stats := sr.stats
-	stats.mutex.RLock()
+	// Return a copy to prevent external modifications - access sr.stats directly to avoid copying mutex
+	sr.stats.mutex.RLock()
 	statsCopy := SessionRegistryStats{
-		TotalSessions:      stats.TotalSessions,
-		ActiveSessions:     stats.ActiveSessions,
-		ExpiredSessions:    stats.ExpiredSessions,
-		TerminatedSessions: stats.TerminatedSessions,
-		AverageSessionTime: stats.AverageSessionTime,
+		TotalSessions:      sr.stats.TotalSessions,
+		ActiveSessions:     sr.stats.ActiveSessions,
+		ExpiredSessions:    sr.stats.ExpiredSessions,
+		TerminatedSessions: sr.stats.TerminatedSessions,
+		AverageSessionTime: sr.stats.AverageSessionTime,
 		SessionsByType:     make(map[SessionType]int),
 		SessionsByTenant:   make(map[string]int),
-		LastCleanup:        stats.LastCleanup,
+		LastCleanup:        sr.stats.LastCleanup,
 	}
 
 	// Copy maps
-	for k, v := range stats.SessionsByType {
+	for k, v := range sr.stats.SessionsByType {
 		statsCopy.SessionsByType[k] = v
 	}
-	for k, v := range stats.SessionsByTenant {
+	for k, v := range sr.stats.SessionsByTenant {
 		statsCopy.SessionsByTenant[k] = v
 	}
 
-	stats.mutex.RUnlock()
+	sr.stats.mutex.RUnlock()
 	return &statsCopy
 }
 

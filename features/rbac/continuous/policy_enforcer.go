@@ -448,11 +448,29 @@ func (pe *PolicyEnforcer) GetViolations(ctx context.Context, sessionID string) (
 		return []*PolicyViolationRecord{}, nil
 	}
 
-	// Return copies to prevent external modification
+	// Return copies to prevent external modification - copy fields individually to avoid copying mutex
 	result := make([]*PolicyViolationRecord, len(violations))
 	for i, violation := range violations {
-		violationCopy := *violation
-		result[i] = &violationCopy
+		violationCopy := &PolicyViolationRecord{
+			ViolationID:        violation.ViolationID,
+			SessionID:          violation.SessionID,
+			PolicyID:           violation.PolicyID,
+			ViolationType:      violation.ViolationType,
+			Severity:           violation.Severity,
+			Description:        violation.Description,
+			Context:            violation.Context,
+			DetectedAt:         violation.DetectedAt,
+			FirstOccurrence:    violation.FirstOccurrence,
+			LastOccurrence:     violation.LastOccurrence,
+			OccurrenceCount:    violation.OccurrenceCount,
+			Status:             violation.Status,
+			Resolution:         violation.Resolution,
+			ResolvedAt:         violation.ResolvedAt,
+			ResolvedBy:         violation.ResolvedBy,
+			EnforcementActions: append([]EnforcementAction{}, violation.EnforcementActions...), // Copy slice
+			GracePeriodExpiry:  violation.GracePeriodExpiry,
+		}
+		result[i] = violationCopy
 	}
 
 	return result, nil
@@ -577,7 +595,8 @@ func (pe *PolicyEnforcer) violationCleanupLoop(ctx context.Context) {
 
 func (pe *PolicyEnforcer) recordViolations(ctx context.Context, sessionID string, violations []PolicyViolation) {
 	for _, violation := range violations {
-		pe.RecordViolation(ctx, sessionID, violation)
+		// Record violation - ignore errors to prevent enforcement failures
+		_ = pe.RecordViolation(ctx, sessionID, violation)
 	}
 }
 
@@ -590,9 +609,9 @@ func (pe *PolicyEnforcer) applyEnforcementRules(ctx context.Context, request *Co
 				action := pe.createEnforcementAction(rule, violation, request.SessionID)
 				actions = append(actions, action)
 				
-				// Execute immediate actions
+				// Execute immediate actions - ignore errors to prevent blocking authorization
 				if pe.shouldExecuteImmediately(rule) {
-					pe.executeAction(ctx, &action)
+					_ = pe.executeAction(ctx, &action)
 				}
 			}
 		}
@@ -613,8 +632,8 @@ func (pe *PolicyEnforcer) applyViolationEnforcement(ctx context.Context, violati
 				violation.EnforcementActions = append(violation.EnforcementActions, action)
 				violation.mutex.Unlock()
 				
-				// Execute action
-				pe.executeAction(ctx, &action)
+				// Execute action - ignore errors to prevent blocking enforcement
+				_ = pe.executeAction(ctx, &action)
 			}
 		}
 	}

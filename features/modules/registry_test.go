@@ -170,8 +170,8 @@ func TestModuleRegistry_UnregisterModule(t *testing.T) {
 	}
 	appInstance := &mockModule{name: "app"}
 
-	registry.RegisterModule(baseMetadata, baseInstance)
-	registry.RegisterModule(appMetadata, appInstance)
+	_ = registry.RegisterModule(baseMetadata, baseInstance) // Ignore error in test setup
+	_ = registry.RegisterModule(appMetadata, appInstance)  // Ignore error in test setup
 
 	// Try to unregister base module (should fail - app depends on it)
 	err = registry.UnregisterModule("base")
@@ -205,7 +205,7 @@ func TestModuleRegistry_GetModule(t *testing.T) {
 	metadata := &ModuleMetadata{Name: "test", Version: "1.0.0"}
 	instance := &mockModule{name: "test"}
 
-	registry.RegisterModule(metadata, instance)
+	_ = registry.RegisterModule(metadata, instance) // Ignore error in test setup
 
 	retrieved, err := registry.GetModule("test")
 	if err != nil {
@@ -230,7 +230,7 @@ func TestModuleRegistry_GetModuleMetadata(t *testing.T) {
 	metadata := &ModuleMetadata{Name: "test", Version: "1.0.0", Description: "Test module"}
 	instance := &mockModule{name: "test"}
 
-	registry.RegisterModule(metadata, instance)
+	_ = registry.RegisterModule(metadata, instance) // Ignore error in test setup
 
 	retrieved, err := registry.GetModuleMetadata("test")
 	if err != nil {
@@ -262,7 +262,7 @@ func TestModuleRegistry_ListModules(t *testing.T) {
 	for _, name := range moduleNames {
 		metadata := &ModuleMetadata{Name: name, Version: "1.0.0"}
 		instance := &mockModule{name: name}
-		registry.RegisterModule(metadata, instance)
+		_ = registry.RegisterModule(metadata, instance) // Ignore error in test setup
 	}
 
 	// Get list
@@ -314,8 +314,8 @@ func TestModuleRegistry_Initialize(t *testing.T) {
 		},
 	}
 
-	registry.RegisterModule(moduleA, &mockModule{name: "a"})
-	registry.RegisterModule(moduleB, &mockModule{name: "b"})
+	_ = registry.RegisterModule(moduleA, &mockModule{name: "a"}) // Ignore error in test setup
+	_ = registry.RegisterModule(moduleB, &mockModule{name: "b"}) // Ignore error in test setup
 
 	err = registry.Initialize()
 	if err == nil {
@@ -333,7 +333,7 @@ func TestModuleRegistry_Initialize(t *testing.T) {
 		},
 	}
 
-	registry.RegisterModule(moduleWithMissingDep, &mockModule{name: "app"})
+	_ = registry.RegisterModule(moduleWithMissingDep, &mockModule{name: "app"}) // Ignore error in test setup
 
 	err = registry.Initialize()
 	if err == nil {
@@ -388,7 +388,7 @@ func TestModuleRegistry_GetLoadingOrder(t *testing.T) {
 	modules := []*ModuleMetadata{crypto, auth, database, middleware, app}
 	for _, metadata := range modules {
 		instance := &mockModule{name: metadata.Name}
-		registry.RegisterModule(metadata, instance)
+		_ = registry.RegisterModule(metadata, instance) // Ignore error in test setup
 	}
 
 	// Initialize
@@ -440,7 +440,7 @@ func TestModuleRegistry_DetectConflicts(t *testing.T) {
 
 	// Test no conflicts
 	crypto := &ModuleMetadata{Name: "crypto", Version: "1.0.0"}
-	registry.RegisterModule(crypto, &mockModule{name: "crypto"})
+	_ = registry.RegisterModule(crypto, &mockModule{name: "crypto"}) // Ignore error in test setup
 
 	conflicts, err := registry.DetectConflicts()
 	if err != nil {
@@ -470,8 +470,8 @@ func TestModuleRegistry_DetectConflicts(t *testing.T) {
 		},
 	}
 
-	registry.RegisterModule(moduleA, &mockModule{name: "a"})
-	registry.RegisterModule(moduleB, &mockModule{name: "b"})
+	_ = registry.RegisterModule(moduleA, &mockModule{name: "a"}) // Ignore error in test setup
+	_ = registry.RegisterModule(moduleB, &mockModule{name: "b"}) // Ignore error in test setup
 
 	conflicts, err = registry.DetectConflicts()
 	if err != nil {
@@ -490,8 +490,8 @@ func TestModuleRegistry_LoadModulesFromDirectory(t *testing.T) {
 	// Create module directories
 	module1Dir := filepath.Join(tempDir, "module1")
 	module2Dir := filepath.Join(tempDir, "module2")
-	os.MkdirAll(module1Dir, 0755)
-	os.MkdirAll(module2Dir, 0755)
+	_ = os.MkdirAll(module1Dir, 0755) // Ignore error in test setup
+	_ = os.MkdirAll(module2Dir, 0755) // Ignore error in test setup
 
 	// Create module.yaml files
 	module1YAML := `name: module1
@@ -505,8 +505,8 @@ module_dependencies:
   - name: module1
     version: "^1.0.0"`
 
-	os.WriteFile(filepath.Join(module1Dir, "module.yaml"), []byte(module1YAML), 0644)
-	os.WriteFile(filepath.Join(module2Dir, "module.yaml"), []byte(module2YAML), 0644)
+	_ = os.WriteFile(filepath.Join(module1Dir, "module.yaml"), []byte(module1YAML), 0644) // Ignore error in test setup
+	_ = os.WriteFile(filepath.Join(module2Dir, "module.yaml"), []byte(module2YAML), 0644) // Ignore error in test setup
 
 	registry := NewModuleRegistry()
 
@@ -548,9 +548,9 @@ func TestModuleRegistry_GetRegistryStatus(t *testing.T) {
 	module1 := &ModuleMetadata{Name: "module1", Version: "1.0.0"}
 	module2 := &ModuleMetadata{Name: "module2", Version: "1.0.0"}
 
-	registry.RegisterModule(module1, &mockModule{name: "module1"})
-	registry.RegisterModule(module2, &mockModule{name: "module2"})
-	registry.Initialize()
+	_ = registry.RegisterModule(module1, &mockModule{name: "module1"}) // Ignore error in test setup
+	_ = registry.RegisterModule(module2, &mockModule{name: "module2"}) // Ignore error in test setup
+	_ = registry.Initialize() // Ignore error in test setup
 
 	status = registry.GetRegistryStatus()
 	if status.TotalModules != 2 {
@@ -598,10 +598,10 @@ func TestModuleRegistry_ConcurrentAccess(t *testing.T) {
 		name := fmt.Sprintf("module%d", i)
 		metadata := &ModuleMetadata{Name: name, Version: "1.0.0"}
 		instance := &mockModule{name: name}
-		registry.RegisterModule(metadata, instance)
+		_ = registry.RegisterModule(metadata, instance) // Ignore error in test setup
 	}
 
-	registry.Initialize()
+	_ = registry.Initialize() // Ignore error in test setup
 
 	// Concurrent reads
 	done := make(chan bool, 100)
@@ -611,14 +611,14 @@ func TestModuleRegistry_ConcurrentAccess(t *testing.T) {
 
 			// Various read operations
 			registry.ListModules()
-			registry.GetLoadingOrder()
+			_, _ = registry.GetLoadingOrder() // Ignore error in concurrent test
 			registry.GetRegistryStatus()
 
 			name := fmt.Sprintf("module%d", i%10)
-			registry.GetModule(name)
-			registry.GetModuleMetadata(name)
-			registry.GetDependencies(name)
-			registry.GetDependents(name)
+			_, _ = registry.GetModule(name)         // Ignore error in concurrent test
+			_, _ = registry.GetModuleMetadata(name) // Ignore error in concurrent test
+			_, _ = registry.GetDependencies(name)   // Ignore error in concurrent test
+			_, _ = registry.GetDependents(name)     // Ignore error in concurrent test
 		}(i)
 	}
 
@@ -642,7 +642,7 @@ func BenchmarkModuleRegistry_RegisterModule(b *testing.B) {
 		name := fmt.Sprintf("module%d", i)
 		metadata := &ModuleMetadata{Name: name, Version: "1.0.0"}
 		instance := &mockModule{name: name}
-		registry.RegisterModule(metadata, instance)
+		_ = registry.RegisterModule(metadata, instance) // Ignore error in benchmark
 	}
 }
 
@@ -654,13 +654,13 @@ func BenchmarkModuleRegistry_GetModule(b *testing.B) {
 		name := fmt.Sprintf("module%d", i)
 		metadata := &ModuleMetadata{Name: name, Version: "1.0.0"}
 		instance := &mockModule{name: name}
-		registry.RegisterModule(metadata, instance)
+		_ = registry.RegisterModule(metadata, instance) // Ignore error in benchmark setup
 	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		name := fmt.Sprintf("module%d", i%100)
-		registry.GetModule(name)
+		_, _ = registry.GetModule(name) // Ignore error in benchmark
 	}
 }
 
@@ -686,10 +686,10 @@ func BenchmarkModuleRegistry_Initialize(b *testing.B) {
 				ModuleDependencies: deps,
 			}
 			instance := &mockModule{name: name}
-			registry.RegisterModule(metadata, instance)
+			_ = registry.RegisterModule(metadata, instance) // Ignore error in benchmark setup
 		}
 
 		b.StartTimer()
-		registry.Initialize()
+		_ = registry.Initialize() // Ignore error in benchmark
 	}
 }

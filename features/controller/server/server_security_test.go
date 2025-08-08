@@ -88,9 +88,8 @@ func TestServer_New_SecurityValidation(t *testing.T) {
 				assert.NotNil(t, server.tenantManager)
 				assert.NotNil(t, server.rbacService)
 				
-				if tt.config.Certificate != nil && tt.config.Certificate.EnableCertManagement {
-					// Note: certManager might be nil if CA setup fails, which is expected in test environment
-				}
+				// Note: if certificate management is enabled, certManager might be nil if CA setup fails, which is expected in test environment
+				_ = tt.config.Certificate != nil && tt.config.Certificate.EnableCertManagement
 			}
 		})
 	}

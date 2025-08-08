@@ -25,17 +25,11 @@ package saas
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"time"
 )
 
 // SaaSteward is the main SaaS management component
 type SaaSteward struct {
-	config     *Config
-	authMgr    AuthenticationManager
-	credStore  CredentialStore
-	providers  map[string]SaaSProvider
-	httpClient *http.Client
 }
 
 // Config holds the SaaS Steward configuration

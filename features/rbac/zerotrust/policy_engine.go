@@ -544,7 +544,7 @@ func (z *ZeroTrustPolicyEngine) performSystemIntegration(ctx context.Context, re
 			_, err := z.riskManager.AssessRisk(ctx, request.AccessRequest)
 			if err != nil {
 				results.RiskResult.RiskScore = 100.0 // High risk on error
-				integrationErrors = append(integrationErrors, fmt.Errorf("Risk integration failed: %w", err))
+				integrationErrors = append(integrationErrors, fmt.Errorf("risk integration failed: %w", err))
 			} else {
 				results.RiskResult.RiskScore = 0.0 // Low risk on success
 			}

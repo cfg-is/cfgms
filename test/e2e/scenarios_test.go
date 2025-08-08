@@ -1299,44 +1299,54 @@ func (s *E2ETestSuite) printTestSummary() {
 	
 	// Print failed tests
 	if failedTests > 0 {
-		if _, err := fmt.Printf("FAILED TESTS:\n"); err != nil {
+		if _, printErr := fmt.Printf("FAILED TESTS:\n"); printErr != nil {
 			// Continue on print error - best effort output
+			_ = printErr
 		}
 		for _, result := range metrics.TestResults {
 			if !result.Success {
-				if _, err := fmt.Printf("  - %s (%s): %v\n", result.Name, result.Category, result.Error); err != nil {
+				if _, printErr := fmt.Printf("  - %s (%s): %v\n", result.Name, result.Category, result.Error); printErr != nil {
 					// Continue on print error - best effort output
+					_ = printErr
 				}
 			}
 		}
-		if _, err := fmt.Printf(strings.Repeat("=", 60) + "\n"); err != nil {
+		if _, printErr := fmt.Printf(strings.Repeat("=", 60) + "\n"); printErr != nil {
 			// Continue on print error - best effort output
+			_ = printErr
 		}
 	}
 	
 	// Print performance metrics if available
 	if metrics.PerformanceMetrics.TotalRequests > 0 {
-		if _, err := fmt.Printf("PERFORMANCE METRICS:\n"); err != nil {
+		if _, printErr := fmt.Printf("PERFORMANCE METRICS:\n"); printErr != nil {
 			// Continue on print error - best effort output
+			_ = printErr
 		}
-		if _, err := fmt.Printf("  Total Requests:     %d\n", metrics.PerformanceMetrics.TotalRequests); err != nil {
+		if _, printErr := fmt.Printf("  Total Requests:     %d\n", metrics.PerformanceMetrics.TotalRequests); printErr != nil {
 			// Continue on print error - best effort output
+			_ = printErr
 		}
-		if _, err := fmt.Printf("  Success Rate:       %.1f%%\n", 
-			float64(metrics.PerformanceMetrics.SuccessfulRequests)/float64(metrics.PerformanceMetrics.TotalRequests)*100); err != nil {
+		if _, printErr := fmt.Printf("  Success Rate:       %.1f%%\n", 
+			float64(metrics.PerformanceMetrics.SuccessfulRequests)/float64(metrics.PerformanceMetrics.TotalRequests)*100); printErr != nil {
 			// Continue on print error - best effort output
+			_ = printErr
 		}
-		if _, err := fmt.Printf("  Average Latency:    %v\n", metrics.PerformanceMetrics.AverageLatency); err != nil {
+		if _, printErr := fmt.Printf("  Average Latency:    %v\n", metrics.PerformanceMetrics.AverageLatency); printErr != nil {
 			// Continue on print error - best effort output
+			_ = printErr
 		}
-		if _, err := fmt.Printf("  P95 Latency:        %v\n", metrics.PerformanceMetrics.P95Latency); err != nil {
+		if _, printErr := fmt.Printf("  P95 Latency:        %v\n", metrics.PerformanceMetrics.P95Latency); printErr != nil {
 			// Continue on print error - best effort output
+			_ = printErr
 		}
-		if _, err := fmt.Printf("  Throughput:         %.1f RPS\n", metrics.PerformanceMetrics.ThroughputRPS); err != nil {
+		if _, printErr := fmt.Printf("  Throughput:         %.1f RPS\n", metrics.PerformanceMetrics.ThroughputRPS); printErr != nil {
 			// Continue on print error - best effort output
+			_ = printErr
 		}
-		if _, err := fmt.Printf(strings.Repeat("=", 60) + "\n"); err != nil {
+		if _, printErr := fmt.Printf(strings.Repeat("=", 60) + "\n"); printErr != nil {
 			// Continue on print error - best effort output
+			_ = printErr
 		}
 	}
 }

@@ -2,7 +2,6 @@ package workflow
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -1056,142 +1055,10 @@ func (e *Engine) executeDelayStep(ctx context.Context, step Step, execution *Wor
 }
 
 // convertAPIConfigToHTTP converts API configuration to HTTP configuration
-func (e *Engine) convertAPIConfigToHTTP(apiConfig *APIConfig, execution *WorkflowExecution) (*HTTPConfig, error) {
-	// This is a simplified implementation
-	// In a real system, this would have provider-specific logic for different APIs
-	// (Microsoft Graph, Google Admin SDK, Salesforce, etc.)
 
-	var url string
-	var method string
-	var body interface{}
 
-	// Provider-specific URL and method determination
-	switch apiConfig.Provider {
-	case "microsoft":
-		url, method, body = e.buildMicrosoftGraphRequest(apiConfig)
-	case "google":
-		url, method, body = e.buildGoogleAPIRequest(apiConfig)
-	case "salesforce":
-		url, method, body = e.buildSalesforceAPIRequest(apiConfig)
-	default:
-		return nil, fmt.Errorf("unsupported API provider: %s", apiConfig.Provider)
-	}
 
-	httpConfig := &HTTPConfig{
-		URL:       url,
-		Method:    method,
-		Body:      body,
-		Auth:      apiConfig.Auth,
-		Timeout:   apiConfig.Timeout,
-		Retry:     apiConfig.Retry,
-		Headers:   make(map[string]string),
-	}
 
-	// Set default headers
-	if method == "POST" || method == "PUT" || method == "PATCH" {
-		httpConfig.Headers["Content-Type"] = "application/json"
-	}
-
-	return httpConfig, nil
-}
-
-// buildMicrosoftGraphRequest builds Microsoft Graph API requests
-func (e *Engine) buildMicrosoftGraphRequest(apiConfig *APIConfig) (string, string, interface{}) {
-	baseURL := "https://graph.microsoft.com/v1.0"
-	
-	switch apiConfig.Service {
-	case "users":
-		switch apiConfig.Operation {
-		case "list":
-			return baseURL + "/users", "GET", nil
-		case "create":
-			return baseURL + "/users", "POST", apiConfig.Parameters
-		case "get":
-			userID := apiConfig.Parameters["user_id"]
-			return fmt.Sprintf("%s/users/%v", baseURL, userID), "GET", nil
-		case "update":
-			userID := apiConfig.Parameters["user_id"]
-			return fmt.Sprintf("%s/users/%v", baseURL, userID), "PATCH", apiConfig.Parameters
-		case "delete":
-			userID := apiConfig.Parameters["user_id"]
-			return fmt.Sprintf("%s/users/%v", baseURL, userID), "DELETE", nil
-		}
-	case "groups":
-		switch apiConfig.Operation {
-		case "list":
-			return baseURL + "/groups", "GET", nil
-		case "create":
-			return baseURL + "/groups", "POST", apiConfig.Parameters
-		}
-	}
-
-	// Default fallback
-	return baseURL, "GET", nil
-}
-
-// buildGoogleAPIRequest builds Google API requests
-func (e *Engine) buildGoogleAPIRequest(apiConfig *APIConfig) (string, string, interface{}) {
-	// Simplified implementation for Google APIs
-	baseURL := "https://www.googleapis.com"
-	
-	switch apiConfig.Service {
-	case "admin":
-		switch apiConfig.Operation {
-		case "list_users":
-			return baseURL + "/admin/directory/v1/users", "GET", nil
-		case "create_user":
-			return baseURL + "/admin/directory/v1/users", "POST", apiConfig.Parameters
-		}
-	}
-
-	return baseURL, "GET", nil
-}
-
-// buildSalesforceAPIRequest builds Salesforce API requests
-func (e *Engine) buildSalesforceAPIRequest(apiConfig *APIConfig) (string, string, interface{}) {
-	// Simplified implementation for Salesforce APIs
-	// Note: Real implementation would need instance URL from authentication
-	baseURL := "https://your-instance.salesforce.com/services/data/v57.0"
-	
-	switch apiConfig.Service {
-	case "sobjects":
-		switch apiConfig.Operation {
-		case "query":
-			return baseURL + "/query", "GET", nil
-		case "create":
-			objectType := apiConfig.Parameters["object_type"]
-			return fmt.Sprintf("%s/sobjects/%v", baseURL, objectType), "POST", apiConfig.Parameters
-		}
-	}
-
-	return baseURL, "GET", nil
-}
-
-// parseAPIResponse parses API responses and stores relevant data in execution variables
-func (e *Engine) parseAPIResponse(step Step, response *HTTPResponse, execution *WorkflowExecution) error {
-	// Store common response data
-	e.mutex.Lock()
-	execution.SetVariable(step.Name+"_api_status", response.StatusCode)
-	execution.SetVariable(step.Name+"_api_duration", response.Duration.String())
-	e.mutex.Unlock()
-
-	// Try to parse JSON response
-	if len(response.Body) > 0 {
-		var responseData interface{}
-		if err := json.Unmarshal(response.Body, &responseData); err == nil {
-			e.mutex.Lock()
-			execution.SetVariable(step.Name+"_api_response", responseData)
-			e.mutex.Unlock()
-		} else {
-			// Store as string if JSON parsing fails
-			e.mutex.Lock()
-			execution.SetVariable(step.Name+"_api_response", string(response.Body))
-			e.mutex.Unlock()
-		}
-	}
-
-	return nil
-}
 
 // executeForStep executes a for loop workflow step
 func (e *Engine) executeForStep(ctx context.Context, step Step, execution *WorkflowExecution) error {

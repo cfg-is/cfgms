@@ -639,6 +639,7 @@ func (cm *ContextMonitor) performContextChecks(ctx context.Context) {
 		// Check if context needs updating
 		if time.Since(authContext.LastChecked) > cm.checkInterval {
 			// Perform context checks (implementation would be more detailed)
+			_ = authContext // Placeholder for context validation logic
 		}
 	}
 
@@ -724,10 +725,6 @@ func (cm *ContextMonitor) isContextValid(context *AuthorizationContext) bool {
 	return true
 }
 
-func (cm *ContextMonitor) generateContextRecommendations(context *AuthorizationContext) []string {
-	// Implementation would generate recommendations
-	return []string{}
-}
 
 // Factory functions
 

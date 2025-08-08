@@ -54,7 +54,6 @@ type ConnectionPoolMetrics struct {
 	
 	// Resource exhaustion metrics
 	poolExhaustionEvents  int64
-	retryAttempts         int64
 	gracefulDegradations  int64
 	
 	// Recovery metrics
@@ -70,12 +69,9 @@ type MemoryStabilityMetrics struct {
 	initialAllocMB        float64
 	currentAllocMB        float64
 	peakAllocMB           float64
-	totalAllocMB          float64
-	systemMemMB           float64
 	
 	// Garbage collection metrics
 	gcCount               uint32
-	gcPauseTimeMs         float64
 	gcCycles              []GCCycle
 	
 	// Memory leak detection
@@ -84,9 +80,7 @@ type MemoryStabilityMetrics struct {
 	goroutineLeakCount    int
 	initialGoroutineCount int
 	
-	// Memory pressure events
-	memoryPressureEvents  int64
-	outOfMemoryEvents     int64
+	// Memory pressure events (tracking for analysis)
 	
 	// Snapshots for trend analysis
 	memorySnapshots       []MemorySnapshot

@@ -2,7 +2,6 @@ package controller
 
 import (
 	"context"
-	"sync"
 )
 
 // Module defines the interface that all modules must implement
@@ -22,8 +21,6 @@ type Module interface {
 
 // Controller manages the core CFGMS functionality
 type Controller struct {
-	mu sync.RWMutex
-
 	// Configuration for the controller
 	config *Config
 

@@ -281,22 +281,6 @@ func (h *HealthMonitor) performHealthCheck() {
 	}
 }
 
-// attemptRecovery tries to restore the steward to a healthy state
-func (h *HealthMonitor) attemptRecovery() {
-	h.mu.Lock()
-	h.metrics.RecoveryAttempts++
-	recoveryAttempt := h.metrics.RecoveryAttempts
-	h.mu.Unlock()
-
-	h.logger.Warn("Attempting steward recovery", "attempt", recoveryAttempt)
-
-	// TODO: Implement recovery strategies
-	// - Restart failed components
-	// - Re-establish controller connection
-	// - Reset state if necessary
-
-	h.logger.Info("Recovery attempt completed", "attempt", recoveryAttempt)
-}
 
 // SetStatus manually sets the health status
 func (h *HealthMonitor) SetStatus(status HealthStatus) {

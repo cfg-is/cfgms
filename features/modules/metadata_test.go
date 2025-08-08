@@ -220,7 +220,7 @@ schema: schema.yaml`,
 			}
 
 			if tt.validate != nil {
-				tt.validate(metadata)
+				_ = tt.validate(metadata) // Ignore error in test validation
 			}
 		})
 	}
@@ -562,7 +562,7 @@ interfaces:
   - Get
   - Set`
 
-	os.WriteFile(metadataFile, []byte(yamlContent), 0644)
+	_ = os.WriteFile(metadataFile, []byte(yamlContent), 0644) // Ignore error in benchmark setup
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

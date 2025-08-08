@@ -22,7 +22,6 @@ type CommandInterceptor struct {
 	bufferMutex   sync.Mutex
 	
 	// State tracking
-	inCommand     bool
 	commandStart  time.Time
 	
 	// Callbacks
@@ -376,16 +375,10 @@ type StreamInterceptor struct {
 
 // CommandProcessor processes command streams and extracts complete commands
 type CommandProcessor struct {
-	buffer      []byte
-	commandLine []byte
-	inEscape    bool
-	escapeSeq   []byte
 }
 
 // OutputProcessor processes output streams for sensitive data detection
 type OutputProcessor struct {
-	buffer         []byte
-	sensitiveRules []SensitiveDataRule
 }
 
 // SensitiveDataRule defines patterns for detecting sensitive data in output

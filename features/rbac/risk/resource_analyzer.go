@@ -227,13 +227,14 @@ func (rra *ResourceRiskAnalyzer) EvaluateResourceRisk(ctx context.Context, reque
 	complianceWeight := 0.25
 	businessImpactWeight := 0.20
 	
-	if sensitivityRisk.Sensitivity == ResourceSensitivitySecret || sensitivityRisk.Sensitivity == ResourceSensitivityTopSecret {
+	switch sensitivityRisk.Sensitivity {
+	case ResourceSensitivitySecret, ResourceSensitivityTopSecret:
 		// For extreme sensitivity, increase sensitivity weight significantly
 		sensitivityWeight = 0.60        // 60% weight for secret/top-secret
 		accessPatternWeight = 0.15      // 15% weight
 		complianceWeight = 0.15         // 15% weight
 		businessImpactWeight = 0.10     // 10% weight
-	} else if sensitivityRisk.Sensitivity == ResourceSensitivityConfidential {
+	case ResourceSensitivityConfidential:
 		// For high sensitivity, moderately increase sensitivity weight
 		sensitivityWeight = 0.45        // 45% weight for confidential
 		accessPatternWeight = 0.20      // 20% weight

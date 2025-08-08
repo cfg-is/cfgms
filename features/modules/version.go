@@ -23,9 +23,7 @@ func ParseVersion(version string) (*SemanticVersion, error) {
 	}
 
 	// Remove 'v' prefix if present
-	if strings.HasPrefix(version, "v") {
-		version = version[1:]
-	}
+	version = strings.TrimPrefix(version, "v")
 
 	// Regular expression for semantic versioning
 	// Matches: MAJOR.MINOR.PATCH[-prerelease][+build]
