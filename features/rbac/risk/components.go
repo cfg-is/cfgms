@@ -297,11 +297,37 @@ func (rac *RiskAssessmentCache) generateRequestHash(request *RiskAssessmentReque
 		return fmt.Sprintf("nil-request-%d", time.Now().Unix()/300)
 	}
 	
+	// Include resource sensitivity in the hash to ensure proper cache isolation
+	resourceSensitivity := "unknown"
+	if request.ResourceContext != nil {
+		resourceSensitivity = string(request.ResourceContext.Sensitivity)
+	}
+	
+	// Include environmental context for proper cache isolation
+	accessTime := "unknown"
+	businessHours := "unknown"
+	country := "unknown"
+	if request.EnvironmentContext != nil {
+		accessTime = request.EnvironmentContext.AccessTime.Format("2006-01-02T15:04:05Z07:00")
+		if request.EnvironmentContext.BusinessHours {
+			businessHours = "true"
+		} else {
+			businessHours = "false"
+		}
+		if request.EnvironmentContext.GeoLocation != nil {
+			country = request.EnvironmentContext.GeoLocation.Country
+		}
+	}
+	
 	// Simplified hash generation - in practice would use proper hashing
-	return fmt.Sprintf("%s-%s-%s-%d", 
+	return fmt.Sprintf("%s-%s-%s-%s-%s-%s-%s-%d", 
 		request.AccessRequest.SubjectId,
 		request.AccessRequest.ResourceId,
 		request.AccessRequest.PermissionId,
+		resourceSensitivity,
+		businessHours,
+		accessTime,
+		country,
 		time.Now().Unix()/300) // 5-minute buckets
 }
 
@@ -417,7 +443,8 @@ func (pde *PolicyDecisionEngine) ResolveDecision(ctx context.Context, policyResu
 		return string(PolicyActionDeny), nil
 	}
 
-	return string(PolicyActionAllow), nil
+	// No policy decision - let risk-based decision logic determine the outcome
+	return "", nil
 }
 
 func NewRiskAuditStore() *RiskAuditStore {

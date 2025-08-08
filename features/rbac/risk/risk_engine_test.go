@@ -85,6 +85,7 @@ func TestRiskAssessmentEngine_EvaluateRisk_ExtremeRisk(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotNil(t, result)
 	
+	
 	// Extreme risk should result in very high scores and denial/break-glass decisions
 	assert.True(t, result.OverallRiskScore > 70, "Extreme risk request should have very high risk score")
 	assert.Contains(t, []RiskLevel{RiskLevelHigh, RiskLevelCritical, RiskLevelExtreme}, result.RiskLevel)

@@ -220,12 +220,32 @@ func (rra *ResourceRiskAnalyzer) EvaluateResourceRisk(ctx context.Context, reque
 	}
 	result.BusinessImpactRisk = *businessImpactRisk
 
-	// Calculate overall resource risk score
+	// Calculate overall resource risk score with dynamic weighting
+	// For high-sensitivity resources, increase sensitivity weight
+	sensitivityWeight := 0.30
+	accessPatternWeight := 0.25
+	complianceWeight := 0.25
+	businessImpactWeight := 0.20
+	
+	if sensitivityRisk.Sensitivity == ResourceSensitivitySecret || sensitivityRisk.Sensitivity == ResourceSensitivityTopSecret {
+		// For extreme sensitivity, increase sensitivity weight significantly
+		sensitivityWeight = 0.60        // 60% weight for secret/top-secret
+		accessPatternWeight = 0.15      // 15% weight
+		complianceWeight = 0.15         // 15% weight
+		businessImpactWeight = 0.10     // 10% weight
+	} else if sensitivityRisk.Sensitivity == ResourceSensitivityConfidential {
+		// For high sensitivity, moderately increase sensitivity weight
+		sensitivityWeight = 0.45        // 45% weight for confidential
+		accessPatternWeight = 0.20      // 20% weight
+		complianceWeight = 0.20         // 20% weight
+		businessImpactWeight = 0.15     // 15% weight
+	}
+	
 	riskComponents := []float64{
-		sensitivityRisk.RiskScore * 0.30,        // 30% weight
-		accessPatternRisk.RiskScore * 0.25,      // 25% weight
-		complianceRisk.RiskScore * 0.25,         // 25% weight
-		businessImpactRisk.RiskScore * 0.20,     // 20% weight
+		sensitivityRisk.RiskScore * sensitivityWeight,
+		accessPatternRisk.RiskScore * accessPatternWeight,
+		complianceRisk.RiskScore * complianceWeight,
+		businessImpactRisk.RiskScore * businessImpactWeight,
 	}
 
 	combinedRisk := 0.0

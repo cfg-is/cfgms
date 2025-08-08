@@ -150,13 +150,35 @@ func (era *EnvironmentRiskAnalyzer) EvaluateEnvironmentalRisk(ctx context.Contex
 	}
 	result.ThreatEnvironment = *threatRisk
 
-	// Calculate overall environmental risk score
+	// Calculate overall environmental risk score with dynamic weighting
+	locationWeight := 0.25
+	timeWeight := 0.15
+	networkWeight := 0.25
+	deviceWeight := 0.20
+	threatWeight := 0.15
+	
+	// For high threat intelligence, increase threat weight significantly
+	if threatRisk.RiskScore > 70.0 {
+		threatWeight = 0.55      // 55% weight for high threat scenarios
+		locationWeight = 0.15    // 15% weight
+		timeWeight = 0.10        // 10% weight
+		networkWeight = 0.10     // 10% weight
+		deviceWeight = 0.10      // 10% weight
+	} else if timeRisk.RiskScore > 40.0 {
+		// For high time risk (after hours, unusual times), increase time weight
+		timeWeight = 0.35        // 35% weight for time-based risk
+		locationWeight = 0.20    // 20% weight
+		threatWeight = 0.20      // 20% weight
+		networkWeight = 0.15     // 15% weight
+		deviceWeight = 0.10      // 10% weight
+	}
+	
 	riskComponents := []float64{
-		locationRisk.RiskScore * 0.25,  // 25% weight
-		timeRisk.RiskScore * 0.15,      // 15% weight
-		networkRisk.RiskScore * 0.25,   // 25% weight
-		deviceRisk.RiskScore * 0.20,    // 20% weight
-		threatRisk.RiskScore * 0.15,    // 15% weight
+		locationRisk.RiskScore * locationWeight,
+		timeRisk.RiskScore * timeWeight,
+		networkRisk.RiskScore * networkWeight,
+		deviceRisk.RiskScore * deviceWeight,
+		threatRisk.RiskScore * threatWeight,
 	}
 
 	combinedRisk := 0.0
@@ -235,8 +257,8 @@ func (era *EnvironmentRiskAnalyzer) assessTimeRisk(ctx context.Context, request 
 	accessTime := request.EnvironmentContext.AccessTime
 	timezone := request.EnvironmentContext.Timezone
 
-	// Check if access is during business hours
-	timeRisk.IsBusinessHours = era.timeRiskAssessor.isBusinessHours(accessTime, timezone)
+	// Check if access is during business hours - use provided context value
+	timeRisk.IsBusinessHours = request.EnvironmentContext.BusinessHours
 
 	// Check if time is typical for user
 	if request.HistoricalData != nil && request.HistoricalData.AccessPatterns != nil {
@@ -252,8 +274,8 @@ func (era *EnvironmentRiskAnalyzer) assessTimeRisk(ctx context.Context, request 
 	// Assess timezone risk
 	timeRisk.TimezoneRisk = era.assessTimezoneRisk(timezone, request.EnvironmentContext.GeoLocation)
 
-	// Calculate time risk score
-	timeRisk.RiskScore = era.calculateTimeRiskScore(timeRisk)
+	// Calculate time risk score with access time context
+	timeRisk.RiskScore = era.calculateTimeRiskScore(timeRisk, accessTime)
 
 	return timeRisk, nil
 }
@@ -348,24 +370,37 @@ func (era *EnvironmentRiskAnalyzer) assessThreatEnvironment(ctx context.Context,
 
 	ipAddress := request.SessionContext.IPAddress
 
-	// Get IP reputation score
-	reputationScore := era.threatIntelService.getIPReputation(ipAddress)
-	threatRisk.ReputationScore = reputationScore
+	// Use threat intelligence from request context if available, otherwise query service
+	if request.EnvironmentContext != nil && request.EnvironmentContext.ThreatIntelligence != nil {
+		threatIntel := request.EnvironmentContext.ThreatIntelligence
+		
+		// Use provided threat intelligence data
+		threatRisk.ReputationScore = threatIntel.IPReputationScore * 100.0 // Convert from 0-1 scale to 0-100 scale
+		threatRisk.ThreatCategories = threatIntel.ThreatCategories
+		threatRisk.ThreatLevel = threatIntel.ThreatLevel
+		
+		// Count recent threats as active threats
+		threatRisk.ActiveThreats = len(threatIntel.RecentThreats)
+		
+		// Recent incidents based on recent threats
+		threatRisk.RecentIncidents = len(threatIntel.RecentThreats)
+	} else {
+		// Fallback to querying threat intelligence service
+		reputationScore := era.threatIntelService.getIPReputation(ipAddress)
+		threatRisk.ReputationScore = reputationScore
 
-	// Get threat categories
-	threatCategories := era.threatIntelService.getThreatCategories(ipAddress)
-	threatRisk.ThreatCategories = threatCategories
+		threatCategories := era.threatIntelService.getThreatCategories(ipAddress)
+		threatRisk.ThreatCategories = threatCategories
 
-	// Count active threats
-	activeThreats := era.threatIntelService.getActiveThreats(ipAddress)
-	threatRisk.ActiveThreats = len(activeThreats)
+		activeThreats := era.threatIntelService.getActiveThreats(ipAddress)
+		threatRisk.ActiveThreats = len(activeThreats)
 
-	// Get recent incidents count
-	recentIncidents := era.threatIntelService.getRecentIncidents(ipAddress, 24*time.Hour)
-	threatRisk.RecentIncidents = len(recentIncidents)
+		recentIncidents := era.threatIntelService.getRecentIncidents(ipAddress, 24*time.Hour)
+		threatRisk.RecentIncidents = len(recentIncidents)
 
-	// Determine threat level
-	threatRisk.ThreatLevel = era.determineThreatLevel(reputationScore, len(threatCategories), threatRisk.ActiveThreats, threatRisk.RecentIncidents)
+		// Determine threat level
+		threatRisk.ThreatLevel = era.determineThreatLevel(reputationScore, len(threatCategories), threatRisk.ActiveThreats, threatRisk.RecentIncidents)
+	}
 
 	// Calculate threat environment risk score
 	threatRisk.RiskScore = era.calculateThreatRiskScore(threatRisk)
@@ -404,18 +439,31 @@ func (era *EnvironmentRiskAnalyzer) calculateLocationRiskScore(locationRisk *Loc
 	return math.Min(score, 100.0)
 }
 
-func (era *EnvironmentRiskAnalyzer) calculateTimeRiskScore(timeRisk *TimeRisk) float64 {
+func (era *EnvironmentRiskAnalyzer) calculateTimeRiskScore(timeRisk *TimeRisk, accessTime time.Time) float64 {
 	score := 0.0
 
 	// Business hours factor
 	if !timeRisk.IsBusinessHours {
-		score += 15.0
+		score += 20.0 // Base penalty for non-business hours
 	}
 
 	// Typical time factor
 	if !timeRisk.IsTypicalTime {
-		score += timeRisk.HourDeviation * 20.0    // 0-20 points
-		score += timeRisk.DayDeviation * 10.0     // 0-10 points
+		score += timeRisk.HourDeviation * 25.0    // Increased from 20 to 25 points
+		score += timeRisk.DayDeviation * 15.0     // Increased from 10 to 15 points
+	}
+
+	// Extreme hour penalty for very late/early access (midnight to 6 AM)
+	hour := accessTime.Hour()
+	if hour >= 0 && hour <= 6 {
+		extremeRisk := 0.0
+		switch hour {
+		case 0, 1, 2, 3:
+			extremeRisk = 36.0 // Very extreme hours (midnight to 3 AM)
+		case 4, 5, 6:
+			extremeRisk = 12.0 // Somewhat extreme hours (4 AM to 6 AM)
+		}
+		score += extremeRisk
 	}
 
 	// Timezone risk
@@ -490,8 +538,8 @@ func (era *EnvironmentRiskAnalyzer) calculateDeviceRiskScore(deviceRisk *DeviceR
 func (era *EnvironmentRiskAnalyzer) calculateThreatRiskScore(threatRisk *ThreatEnvironmentRisk) float64 {
 	score := 0.0
 
-	// Reputation score factor (inverted - lower reputation = higher risk)
-	reputationRisk := (100.0 - threatRisk.ReputationScore) / 100.0
+	// Reputation score factor (direct - higher reputation score = higher risk)
+	reputationRisk := threatRisk.ReputationScore / 100.0
 	score += reputationRisk * 40.0
 
 	// Threat categories penalty
@@ -524,14 +572,19 @@ func (era *EnvironmentRiskAnalyzer) calculateEnvironmentalAmplification(location
 		}
 	}
 
+	// Special amplification for high threat scenarios
+	if threatRisk.RiskScore > 70.0 {
+		amplification = math.Max(amplification, 1.25) // 25% amplification for high threat
+	}
+	
 	// Amplify risk for high-risk combinations
 	switch highRiskCount {
 	case 2:
-		amplification = 1.10
+		amplification = math.Max(amplification, 1.10)
 	case 3:
-		amplification = 1.20
+		amplification = math.Max(amplification, 1.20)
 	case 4, 5:
-		amplification = 1.35
+		amplification = math.Max(amplification, 1.35)
 	}
 
 	return amplification
@@ -665,8 +718,12 @@ func NewGeoRiskAssessor() *GeoRiskAssessor {
 	return &GeoRiskAssessor{
 		countryRiskScores: map[string]float64{
 			// Sample country risk scores (0.0 = lowest risk, 1.0 = highest risk)
-			"US": 0.1, "CA": 0.1, "GB": 0.1, "DE": 0.1, "FR": 0.1,
-			"CN": 0.6, "RU": 0.7, "KP": 0.9, "IR": 0.8, "SY": 0.9,
+			"United States": 0.1, "US": 0.1, "CA": 0.1, "Canada": 0.1, 
+			"GB": 0.1, "United Kingdom": 0.1, "DE": 0.1, "Germany": 0.1, 
+			"FR": 0.1, "France": 0.1, "AU": 0.1, "Australia": 0.1,
+			"CN": 0.6, "China": 0.6, "RU": 0.7, "Russia": 0.7, 
+			"KP": 0.9, "North Korea": 0.9, "IR": 0.8, "Iran": 0.8, 
+			"SY": 0.9, "Syria": 0.9, "AF": 0.8, "Afghanistan": 0.8,
 		},
 		regionRiskScores: make(map[string]float64),
 		vpnDetector:      &VPNDetector{},

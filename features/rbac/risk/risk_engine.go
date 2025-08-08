@@ -153,6 +153,7 @@ func (rae *RiskAssessmentEngine) EvaluateRisk(ctx context.Context, request *Risk
 	overallScore := rae.calculateOverallRiskScore(behavioralRisk, environmentalRisk, resourceRisk)
 	result.OverallRiskScore = overallScore
 	result.RiskLevel = rae.determineRiskLevel(overallScore)
+	
 
 	// Calculate confidence score based on data quality and completeness
 	result.ConfidenceScore = rae.calculateConfidenceScore(request, behavioralRisk, environmentalRisk, resourceRisk)
@@ -168,6 +169,9 @@ func (rae *RiskAssessmentEngine) EvaluateRisk(ctx context.Context, request *Risk
 
 	// Generate recommended risk mitigation actions
 	result.RecommendedActions = rae.generateRecommendedActions(result)
+
+	// Generate evaluated risk factors
+	result.RiskFactors = rae.generateRiskFactors(result)
 
 	// Generate required adaptive controls
 	result.RequiredControls = rae.generateAdaptiveControls(result)
@@ -191,10 +195,26 @@ func (rae *RiskAssessmentEngine) EvaluateRisk(ctx context.Context, request *Risk
 
 // calculateOverallRiskScore combines individual risk scores using weighted formula
 func (rae *RiskAssessmentEngine) calculateOverallRiskScore(behavioral *BehavioralRiskResult, environmental *EnvironmentalRiskResult, resource *ResourceRiskResult) float64 {
-	// Weighted risk calculation with configurable weights
+	// Dynamic risk calculation with configurable weights
 	behavioralWeight := 0.35  // User behavior patterns
 	environmentalWeight := 0.30 // Location, time, device factors
 	resourceWeight := 0.35    // Resource sensitivity and classification
+
+	// Adjust weights for high-threat scenarios
+	if environmental != nil && environmental.ThreatEnvironment.ReputationScore > 80.0 {
+		// High threat intelligence: increase environmental weight significantly
+		environmentalWeight = 0.50  // 50% weight for high-threat scenarios
+		behavioralWeight = 0.25     // 25% weight
+		resourceWeight = 0.25       // 25% weight
+	}
+
+	// Adjust weights for high behavioral risk scenarios
+	if behavioral != nil && (len(behavioral.PatternAnomalies) > 3 || len(behavioral.BehaviorDeviations) > 3) {
+		// Multiple behavioral anomalies: increase behavioral weight significantly
+		behavioralWeight = 0.55     // 55% weight for high behavioral risk
+		environmentalWeight = 0.25  // 25% weight
+		resourceWeight = 0.20       // 20% weight
+	}
 
 	weightedScore := (behavioral.RiskScore * behavioralWeight) +
 		(environmental.RiskScore * environmentalWeight) +
@@ -207,6 +227,10 @@ func (rae *RiskAssessmentEngine) calculateOverallRiskScore(behavioral *Behaviora
 	}
 	if resource.RiskScore > 80 {
 		amplificationFactor = math.Max(amplificationFactor, 1.10) // 10% minimum for high resource risk
+	}
+	// High threat intelligence amplification
+	if environmental != nil && environmental.ThreatEnvironment.ReputationScore > 80.0 {
+		amplificationFactor = math.Max(amplificationFactor, 1.20) // 20% amplification for high threat
 	}
 
 	finalScore := weightedScore * amplificationFactor
@@ -303,7 +327,7 @@ func (rae *RiskAssessmentEngine) determineAccessDecision(result *RiskAssessmentR
 	case RiskLevelModerate:
 		return AccessDecisionAllowWithControls
 	case RiskLevelHigh:
-		if result.ConfidenceScore > 80 {
+		if result.ConfidenceScore > 0.8 {
 			return AccessDecisionChallenge
 		}
 		return AccessDecisionStepUp
@@ -350,6 +374,156 @@ func (rae *RiskAssessmentEngine) generateRecommendedActions(result *RiskAssessme
 	}
 
 	return actions
+}
+
+// generateRiskFactors identifies and evaluates risk factors from the assessment
+func (rae *RiskAssessmentEngine) generateRiskFactors(result *RiskAssessmentResult) []EvaluatedRiskFactor {
+	factors := make([]EvaluatedRiskFactor, 0)
+
+	// Behavioral risk factors
+	if result.BehavioralRisk != nil && result.BehavioralRisk.RiskScore > 20 {
+		// Check for pattern anomalies
+		if len(result.BehavioralRisk.PatternAnomalies) > 0 {
+			for _, anomaly := range result.BehavioralRisk.PatternAnomalies {
+				severity := RiskFactorSeverityMedium
+				if anomaly.Severity >= 0.8 {
+					severity = RiskFactorSeverityCritical
+				} else if anomaly.Severity >= 0.6 {
+					severity = RiskFactorSeverityHigh
+				}
+				
+				factors = append(factors, EvaluatedRiskFactor{
+					FactorID:      fmt.Sprintf("behavioral-%d", len(factors)),
+					FactorName:    "behavioral_anomaly",
+					Category:      RiskFactorCategoryBehavioral,
+					Score:         anomaly.Severity * 100,
+					Weight:        0.4,
+					WeightedScore: anomaly.Severity * 100 * 0.4,
+					Severity:      severity,
+					Explanation:   anomaly.Description,
+					Confidence:    anomaly.Confidence,
+				})
+			}
+		}
+		
+		// Check for behavior deviations
+		if len(result.BehavioralRisk.BehaviorDeviations) > 0 {
+			for _, deviation := range result.BehavioralRisk.BehaviorDeviations {
+				severity := RiskFactorSeverityMedium
+				if deviation.Significance >= 0.8 {
+					severity = RiskFactorSeverityCritical
+				} else if deviation.Significance >= 0.6 {
+					severity = RiskFactorSeverityHigh
+				}
+				
+				factors = append(factors, EvaluatedRiskFactor{
+					FactorID:      fmt.Sprintf("behavioral-deviation-%d", len(factors)),
+					FactorName:    "behavior_deviation",
+					Category:      RiskFactorCategoryBehavioral,
+					Score:         deviation.Significance * 100,
+					Weight:        0.3,
+					WeightedScore: deviation.Significance * 100 * 0.3,
+					Severity:      severity,
+					Explanation:   fmt.Sprintf("Behavioral deviation in %s", deviation.Metric),
+					Confidence:    0.8,
+				})
+			}
+		}
+	}
+
+	// Environmental risk factors  
+	if result.EnvironmentalRisk != nil {
+		// Location-based risk factors
+		if result.EnvironmentalRisk.LocationRisk.RiskScore > 25 {
+			countryRisk := result.EnvironmentalRisk.LocationRisk.CountryRisk
+			severity := RiskFactorSeverityLow
+			if countryRisk >= 0.8 {
+				severity = RiskFactorSeverityCritical
+			} else if countryRisk >= 0.6 {
+				severity = RiskFactorSeverityHigh
+			} else if countryRisk >= 0.3 {
+				severity = RiskFactorSeverityMedium
+			}
+			
+			factors = append(factors, EvaluatedRiskFactor{
+				FactorID:      fmt.Sprintf("geographic-%d", len(factors)),
+				FactorName:    "geographic_location",
+				Category:      RiskFactorCategoryGeographic,
+				Score:         countryRisk * 100,
+				Weight:        0.5,
+				WeightedScore: countryRisk * 100 * 0.5,
+				Severity:      severity,
+				Explanation:   "Access from elevated risk geographic location",
+				Confidence:    0.9,
+			})
+		}
+		
+		// Time-based risk factors
+		if result.EnvironmentalRisk.TimeRisk.RiskScore > 25 {
+			if !result.EnvironmentalRisk.TimeRisk.IsBusinessHours {
+				factors = append(factors, EvaluatedRiskFactor{
+					FactorID:      fmt.Sprintf("temporal-%d", len(factors)),
+					FactorName:    "after_hours_access",
+					Category:      RiskFactorCategoryTemporal,
+					Score:         60.0,
+					Weight:        0.3,
+					WeightedScore: 60.0 * 0.3,
+					Severity:      RiskFactorSeverityMedium,
+					Explanation:   "Access outside normal business hours",
+					Confidence:    0.8,
+				})
+			}
+		}
+		
+		// Network security factors
+		if result.EnvironmentalRisk.NetworkRisk.RiskScore > 25 {
+			networkRisk := result.EnvironmentalRisk.NetworkRisk.RiskScore
+			severity := RiskFactorSeverityMedium
+			if networkRisk >= 70 {
+				severity = RiskFactorSeverityCritical
+			} else if networkRisk >= 50 {
+				severity = RiskFactorSeverityHigh
+			}
+			
+			factors = append(factors, EvaluatedRiskFactor{
+				FactorID:      fmt.Sprintf("network-%d", len(factors)),
+				FactorName:    "network_security",
+				Category:      RiskFactorCategoryEnvironmental,
+				Score:         networkRisk,
+				Weight:        0.4,
+				WeightedScore: networkRisk * 0.4,
+				Severity:      severity,
+				Explanation:   "Network security concerns detected",
+				Confidence:    0.7,
+			})
+		}
+	}
+
+	// Resource sensitivity risk factors
+	if result.ResourceRisk != nil && result.ResourceRisk.SensitivityRisk.RiskScore > 30 {
+		sensitivity := result.ResourceRisk.SensitivityRisk.Sensitivity
+		if sensitivity == ResourceSensitivityConfidential || sensitivity == ResourceSensitivitySecret {
+			sensitivityScore := result.ResourceRisk.SensitivityRisk.RiskScore
+			severity := RiskFactorSeverityHigh
+			if sensitivity == ResourceSensitivitySecret {
+				severity = RiskFactorSeverityCritical
+			}
+			
+			factors = append(factors, EvaluatedRiskFactor{
+				FactorID:      fmt.Sprintf("resource-%d", len(factors)),
+				FactorName:    "sensitive_resource",
+				Category:      RiskFactorCategoryResource,
+				Score:         sensitivityScore,
+				Weight:        0.6,
+				WeightedScore: sensitivityScore * 0.6,
+				Severity:      severity,
+				Explanation:   fmt.Sprintf("Access to %s resource", sensitivity),
+				Confidence:    0.95,
+			})
+		}
+	}
+
+	return factors
 }
 
 // generateAdaptiveControls creates specific controls based on risk assessment

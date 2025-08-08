@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strings"
 	"sync"
 	"time"
 )
@@ -120,8 +121,8 @@ func NewBehavioralRiskAnalyzer() *BehavioralRiskAnalyzer {
 
 // EvaluateBehavioralRisk evaluates behavioral risk for an access request
 func (bra *BehavioralRiskAnalyzer) EvaluateBehavioralRisk(ctx context.Context, request *RiskAssessmentRequest) (*BehavioralRiskResult, error) {
-	bra.mutex.RLock()
-	defer bra.mutex.RUnlock()
+	bra.mutex.Lock()
+	defer bra.mutex.Unlock()
 
 	startTime := time.Now()
 	userID := request.UserContext.UserID
@@ -133,6 +134,11 @@ func (bra *BehavioralRiskAnalyzer) EvaluateBehavioralRisk(ctx context.Context, r
 		return nil, fmt.Errorf("failed to get user behavior profile: %w", err)
 	}
 
+	// If historical data is available, use it to establish baseline
+	if request.HistoricalData != nil && !profile.BaselineEstablished {
+		bra.establishBaselineFromHistoricalData(profile, request.HistoricalData)
+	}
+
 	result := &BehavioralRiskResult{
 		LastUpdate:          startTime,
 		PatternAnomalies:    make([]PatternAnomaly, 0),
@@ -142,11 +148,20 @@ func (bra *BehavioralRiskAnalyzer) EvaluateBehavioralRisk(ctx context.Context, r
 		SamplesCount:        profile.SampleCount,
 	}
 
-	// Skip analysis if profile is not established
+	// For new users without baseline, perform contextual risk analysis
 	if !profile.BaselineEstablished {
-		result.RiskScore = 50.0 // Default moderate risk for unknown users
 		result.ConfidenceScore = 25.0 // Low confidence without baseline
 		result.LearningStatus = LearningStatusInitializing
+		
+		// Perform contextual behavioral risk analysis
+		contextualRisk, patterns := bra.performContextualAnalysis(ctx, request)
+		result.RiskScore = contextualRisk
+		result.PatternAnomalies = patterns
+		
+		// Generate behavioral deviations for new user analysis
+		deviations := bra.generateNewUserDeviations(ctx, request)
+		result.BehaviorDeviations = deviations
+		
 		return result, nil
 	}
 
@@ -196,6 +211,14 @@ func (bra *BehavioralRiskAnalyzer) EvaluateBehavioralRisk(ctx context.Context, r
 
 	// Apply amplification factors for high-risk combinations
 	amplificationFactor := bra.calculateAmplificationFactor(riskComponents)
+	
+	// Additional amplification for multiple anomalies (applies to historical anomaly cases)
+	totalAnomalies := len(temporalRisk.Anomalies) + len(spatialRisk.Anomalies) + 
+			len(accessRisk.Anomalies) + len(velocityRisk.Anomalies) + len(deviceRisk.Anomalies)
+	if totalAnomalies > 3 {
+		amplificationFactor = math.Max(amplificationFactor, 1.50) // 50% minimum amplification for multiple anomalies
+	}
+	
 	result.RiskScore = math.Min(combinedRisk*amplificationFactor, 100.0)
 
 	// Calculate confidence score
@@ -274,6 +297,16 @@ func (bra *BehavioralRiskAnalyzer) analyzeTemporalPatterns(ctx context.Context, 
 			DeviationMagnitude: hourDeviation,
 			Confidence:         0.8,
 		})
+
+		// Generate behavior deviation for unusual hour
+		risk.Deviations = append(risk.Deviations, BehaviorDeviation{
+			DeviationType:    "unusual_hour",
+			Metric:           "access_hour",
+			ExpectedValue:    float64(bra.getMostCommonHour(profile.TypicalAccessHours)),
+			ActualValue:      float64(currentHour),
+			DeviationPercent: hourDeviation * 100,
+			Significance:     hourDeviation,
+		})
 	}
 
 	// Analyze day of week pattern
@@ -323,6 +356,16 @@ func (bra *BehavioralRiskAnalyzer) analyzeSpatialPatterns(ctx context.Context, r
 				ActualPattern:      locationKey,
 				DeviationMagnitude: 1.0 - locationFrequency,
 				Confidence:         0.9,
+			})
+
+			// Generate behavior deviation for unusual location
+			risk.Deviations = append(risk.Deviations, BehaviorDeviation{
+				DeviationType:    "unusual_location",
+				Metric:           "access_location",
+				ExpectedValue:    bra.getMostCommonLocationFrequency(profile.TypicalLocations),
+				ActualValue:      locationFrequency,
+				DeviationPercent: (1.0 - locationFrequency) * 100,
+				Significance:     0.8,
 			})
 		}
 	}
@@ -663,13 +706,13 @@ func NewConfidenceEngine() *ConfidenceEngine {
 
 // calculateBehavioralConfidence calculates confidence score for behavioral analysis
 func (ce *ConfidenceEngine) calculateBehavioralConfidence(profile *UserBehaviorProfile, request *RiskAssessmentRequest, components []RiskComponent) float64 {
-	// Base confidence on sample size
-	sampleConfidence := math.Min(float64(profile.SampleCount)/20.0, 1.0) * 100.0
+	// Base confidence on sample size (0.0 to 1.0)
+	sampleConfidence := math.Min(float64(profile.SampleCount)/20.0, 1.0)
 	
-	// Adjust for profile age - newer profiles are less reliable
-	ageConfidence := math.Min(time.Since(profile.ProfileCreated).Hours()/168.0, 1.0) * 100.0 // 1 week to full confidence
+	// Adjust for profile age - newer profiles are less reliable (0.0 to 1.0)
+	ageConfidence := math.Min(time.Since(profile.ProfileCreated).Hours()/168.0, 1.0) // 1 week to full confidence
 	
-	// Combine confidence factors
+	// Combine confidence factors (result: 0.0 to 1.0)
 	return (sampleConfidence*0.6 + ageConfidence*0.4)
 }
 
@@ -677,6 +720,255 @@ func (ce *ConfidenceEngine) calculateBehavioralConfidence(profile *UserBehaviorP
 type DataQualityAssessor struct{}
 type SampleSizeAnalyzer struct{}
 type TemporalConfidenceAnalyzer struct{}
+
+// performContextualAnalysis performs risk analysis for users without established baselines
+func (bra *BehavioralRiskAnalyzer) performContextualAnalysis(ctx context.Context, request *RiskAssessmentRequest) (float64, []PatternAnomaly) {
+	riskScore := 30.0 // Start with low-moderate risk
+	patterns := make([]PatternAnomaly, 0)
+	
+	// Analyze access time patterns
+	if request.EnvironmentContext != nil {
+		accessTime := request.EnvironmentContext.AccessTime
+		hour := accessTime.Hour()
+		
+		// After hours access increases risk
+		if !request.EnvironmentContext.BusinessHours {
+			riskScore += 15.0
+			patterns = append(patterns, PatternAnomaly{
+				AnomalyType:   "temporal_deviation",
+				Severity:      0.6,
+				Description:   "Access outside business hours",
+				Confidence:    0.8,
+			})
+		}
+		
+		// Very early morning access (2-6 AM) increases risk significantly
+		if hour >= 2 && hour <= 6 {
+			riskScore += 20.0
+			patterns = append(patterns, PatternAnomaly{
+				AnomalyType:   "suspicious_timing",
+				Severity:      0.8,
+				Description:   "Access during unusual hours (2-6 AM)",
+				Confidence:    0.9,
+			})
+		}
+		
+		// Weekend access increases risk
+		weekday := accessTime.Weekday()
+		if weekday == time.Saturday || weekday == time.Sunday {
+			riskScore += 10.0
+			patterns = append(patterns, PatternAnomaly{
+				AnomalyType:   "temporal_deviation",
+				Severity:      0.4,
+				Description:   "Weekend access",
+				Confidence:    0.7,
+			})
+		}
+		
+		// Geographic location risk
+		if request.EnvironmentContext.GeoLocation != nil {
+			country := request.EnvironmentContext.GeoLocation.Country
+			
+			// High-risk countries significantly increase risk
+			highRiskCountries := []string{"North Korea", "Iran", "Russia", "China"}
+			for _, riskCountry := range highRiskCountries {
+				if country == riskCountry {
+					riskScore += 30.0
+					patterns = append(patterns, PatternAnomaly{
+						AnomalyType:   "geographic_anomaly",
+						Severity:      0.9,
+						Description:   fmt.Sprintf("Access from high-risk location: %s", country),
+						Confidence:    0.95,
+					})
+					break
+				}
+			}
+		}
+		
+		// Network security factors
+		if !request.EnvironmentContext.VPNConnected {
+			riskScore += 8.0
+			patterns = append(patterns, PatternAnomaly{
+				AnomalyType:   "network_security",
+				Severity:      0.6,
+				Description:   "Direct internet access without VPN",
+				Confidence:    0.7,
+			})
+		}
+		
+		// Threat intelligence factors
+		if request.EnvironmentContext.ThreatIntelligence != nil {
+			ipRep := request.EnvironmentContext.ThreatIntelligence.IPReputationScore
+			if ipRep > 0.5 {
+				riskIncrease := ipRep * 25.0 // Up to 25 point increase
+				riskScore += riskIncrease
+				patterns = append(patterns, PatternAnomaly{
+					AnomalyType:   "threat_intelligence",
+					Severity:      0.8,
+					Description:   fmt.Sprintf("High IP reputation risk score: %.2f", ipRep),
+					Confidence:    0.85,
+				})
+			}
+		}
+	}
+	
+	// Analyze user context factors
+	if request.UserContext != nil {
+		// No MFA significantly increases risk
+		if !request.UserContext.MFAEnabled {
+			riskScore += 15.0
+			patterns = append(patterns, PatternAnomaly{
+				AnomalyType:   "authentication_weakness",
+				Severity:      0.8,
+				Description:   "Multi-factor authentication not enabled",
+				Confidence:    0.9,
+			})
+		}
+		
+		// Privileged account access increases risk
+		if request.AccessRequest != nil {
+			permission := request.AccessRequest.PermissionId
+			highPrivilegePerms := []string{"admin", "system_admin", "root", "administrator"}
+			for _, privPerm := range highPrivilegePerms {
+				if permission == privPerm {
+					riskScore += 20.0
+					patterns = append(patterns, PatternAnomaly{
+						AnomalyType:   "privilege_escalation",
+						Severity:      0.9,
+						Description:   fmt.Sprintf("High privilege access request: %s", permission),
+						Confidence:    0.9,
+					})
+					break
+				}
+			}
+		}
+	}
+	
+	// Factor in historical anomaly data if available
+	if request.HistoricalData != nil && len(request.HistoricalData.AnomalyHistory) > 0 {
+		for _, anomaly := range request.HistoricalData.AnomalyHistory {
+			// Add risk based on historical anomaly severity
+			anomalyRisk := anomaly.Severity * 15.0 // Up to 15 points per anomaly
+			riskScore += anomalyRisk
+			
+			// Create pattern anomaly from historical data
+			patterns = append(patterns, PatternAnomaly{
+				AnomalyType:   anomaly.AnomalyType,
+				Severity:      anomaly.Severity,
+				Description:   fmt.Sprintf("Historical anomaly: %s", anomaly.Description),
+				Confidence:    0.8, // Good confidence for historical data
+			})
+		}
+	}
+	
+	// Cap risk score at 100
+	if riskScore > 100.0 {
+		riskScore = 100.0
+	}
+	
+	return riskScore, patterns
+}
+
+// generateNewUserDeviations generates behavioral deviations for new users
+func (bra *BehavioralRiskAnalyzer) generateNewUserDeviations(ctx context.Context, request *RiskAssessmentRequest) []BehaviorDeviation {
+	deviations := make([]BehaviorDeviation, 0)
+	
+	if request.EnvironmentContext != nil {
+		// Time-based deviation
+		if !request.EnvironmentContext.BusinessHours {
+			deviations = append(deviations, BehaviorDeviation{
+				DeviationType:    "temporal_pattern",
+				Metric:           "access_time",
+				ExpectedValue:    1.0,  // Business hours expected
+				ActualValue:      0.0,  // Non-business hours
+				DeviationPercent: 70.0, // 70% deviation
+				Significance:     0.7,
+			})
+		}
+		
+		// Location-based deviation for high-risk locations
+		if request.EnvironmentContext.GeoLocation != nil {
+			country := request.EnvironmentContext.GeoLocation.Country
+			highRiskCountries := []string{"North Korea", "Iran", "Russia", "China"}
+			for _, riskCountry := range highRiskCountries {
+				if country == riskCountry {
+					deviations = append(deviations, BehaviorDeviation{
+						DeviationType:    "geographic_pattern",
+						Metric:           "access_location",
+						ExpectedValue:    0.1,  // Low-risk location expected
+						ActualValue:      0.9,  // High-risk location
+						DeviationPercent: 95.0, // 95% deviation
+						Significance:     0.95,
+					})
+					break
+				}
+			}
+		}
+	}
+	
+	return deviations
+}
+
+// getMostCommonHour returns the most common hour from typical access hours
+func (bra *BehavioralRiskAnalyzer) getMostCommonHour(hours []int) int {
+	if len(hours) == 0 {
+		return 12 // Default to noon
+	}
+	// For simplicity, return the first hour (could be enhanced with frequency analysis)
+	return hours[0]
+}
+
+
+// getMostCommonLocationFrequency returns the highest frequency from typical locations
+func (bra *BehavioralRiskAnalyzer) getMostCommonLocationFrequency(locations map[string]float64) float64 {
+	if len(locations) == 0 {
+		return 0.0
+	}
+	
+	maxFreq := 0.0
+	for _, freq := range locations {
+		if freq > maxFreq {
+			maxFreq = freq
+		}
+	}
+	return maxFreq
+}
+
+// establishBaselineFromHistoricalData uses historical data to establish user baseline
+func (bra *BehavioralRiskAnalyzer) establishBaselineFromHistoricalData(profile *UserBehaviorProfile, historicalData *HistoricalAccessData) {
+	if historicalData.AccessPatterns == nil {
+		return
+	}
+
+	patterns := historicalData.AccessPatterns
+	
+	// Set baseline from historical patterns
+	profile.TypicalAccessHours = patterns.TypicalHours
+	profile.TypicalAccessDays = patterns.TypicalDays
+	profile.AverageSessionTime = patterns.AverageSessionTime
+	
+	// Convert locations to map format
+	profile.TypicalLocations = make(map[string]float64)
+	for _, location := range patterns.TypicalLocations {
+		// Store location in the format used by spatial analysis: "Country:City"
+		// For historical data, we assume US locations if no country specified
+		if !strings.Contains(location, ":") {
+			location = "United States:" + location
+		}
+		profile.TypicalLocations[location] = 0.9 // High confidence for typical locations
+	}
+	
+	// Convert resources to map format  
+	profile.TypicalResources = make(map[string]float64)
+	for _, resource := range patterns.TypicalResources {
+		profile.TypicalResources[resource] = 0.8 // Good confidence for typical resources
+	}
+	
+	// Mark baseline as established
+	profile.BaselineEstablished = true
+	profile.SampleCount = len(historicalData.RecentAccess)
+	profile.LastUpdated = time.Now()
+}
 
 // Supporting types for pattern detection
 type TemporalPatternAnalyzer struct{}
