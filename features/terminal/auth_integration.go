@@ -280,6 +280,17 @@ func (atm *AuthenticatedTerminalManager) AuthenticateAndCreateSession(ctx contex
 		_ = err // Explicitly ignore monitoring failures for resilience
 	}
 	
+	// Register session for continuous authorization if enabled
+	if atm.continuousAuthConfig.EnableContinuousAuth && atm.continuousAuthEngine != nil {
+		if regErr := atm.RegisterSessionForContinuousAuth(ctx, session.ID, userID, tenantID, "terminal"); regErr != nil {
+			// Log error but don't fail authentication
+			if logErr := atm.auditLogger.LogSecurityViolation(ctx, session.ID, userID, req.StewardID, tenantID,
+				"continuous_auth_registration_failed", fmt.Sprintf("Failed to register session for continuous auth: %v", regErr), FilterSeverityMedium); logErr != nil {
+				_ = logErr
+			}
+		}
+	}
+
 	// Log successful authentication
 	clientIP := atm.getClientIP(r)
 	if logErr := atm.auditLogger.LogSessionStart(ctx, session.ID, userID, req.StewardID, tenantID, clientIP); logErr != nil {
@@ -373,6 +384,12 @@ func (atm *AuthenticatedTerminalManager) TerminateSession(ctx context.Context, s
 	if err := atm.sessionMonitor.RemoveSession(sessionID); err != nil {
 		// Log error but continue with termination
 		_ = err // Explicitly ignore monitoring errors during termination
+	}
+	
+	// Unregister from continuous authorization
+	if err := atm.UnregisterSessionFromContinuousAuth(ctx, sessionID); err != nil {
+		// Log error but continue with termination
+		_ = err // Explicitly ignore continuous auth errors during termination
 	}
 	
 	// Terminate the actual session
@@ -906,4 +923,228 @@ func extractTenantID(token *SessionToken) string {
 		return tenantID
 	}
 	return "default" // Fallback to default tenant
+}
+
+// HandlePermissionRevocation handles real-time permission revocation for terminal sessions
+func (atm *AuthenticatedTerminalManager) HandlePermissionRevocation(ctx context.Context, userID, tenantID string, permissions []string) error {
+	if !atm.continuousAuthConfig.EnableContinuousAuth || atm.continuousAuthEngine == nil {
+		return nil // No continuous auth enabled
+	}
+
+	// Find all active sessions for the user
+	activeSessions := make([]*SessionToken, 0)
+	atm.tokenMutex.RLock()
+	for _, token := range atm.sessionTokens {
+		if token.UserID == userID && token.Active {
+			if tenantID == "" || extractTenantID(token) == tenantID {
+				activeSessions = append(activeSessions, token)
+			}
+		}
+	}
+	atm.tokenMutex.RUnlock()
+
+	// Revoke permissions using continuous authorization engine
+	startTime := time.Now()
+	err := atm.continuousAuthEngine.RevokePermissions(ctx, userID, tenantID, permissions)
+	if err != nil {
+		return fmt.Errorf("failed to revoke permissions: %w", err)
+	}
+
+	propagationTime := time.Since(startTime)
+
+	// Terminate sessions that no longer have required permissions
+	for _, token := range activeSessions {
+		// Check if session requires the revoked permissions
+		if atm.sessionRequiresPermissions(token, permissions) {
+			// Schedule session for termination
+			terminationReason := fmt.Sprintf("Permission revoked: %s", strings.Join(permissions, ", "))
+			
+			if logErr := atm.auditLogger.LogSecurityViolation(ctx, token.SessionID, userID, "", tenantID,
+				"permission_revocation_termination", terminationReason, FilterSeverityCritical); logErr != nil {
+				_ = logErr // Ignore audit failures for resilience
+			}
+
+			// Terminate the session
+			if termErr := atm.TerminateSession(ctx, token.SessionID, terminationReason); termErr != nil {
+				// Log error but continue processing other sessions
+				_ = termErr
+			}
+		}
+	}
+
+	// Log successful permission revocation
+	if logErr := atm.auditLogger.LogSecurityViolation(ctx, "", userID, "", tenantID,
+		"permission_revocation_completed", 
+		fmt.Sprintf("Revoked permissions %s, propagation time: %v", strings.Join(permissions, ", "), propagationTime), 
+		FilterSeverityHigh); logErr != nil {
+		_ = logErr // Ignore audit failures for resilience
+	}
+
+	return nil
+}
+
+// sessionRequiresPermissions checks if a session requires specific permissions for continued operation
+func (atm *AuthenticatedTerminalManager) sessionRequiresPermissions(token *SessionToken, permissions []string) bool {
+	// Check if any of the revoked permissions are critical for terminal sessions
+	criticalPermissions := []string{
+		"terminal.session.create",
+		"terminal.session.continue", 
+		"terminal.execute",
+	}
+
+	for _, revokedPerm := range permissions {
+		for _, criticalPerm := range criticalPermissions {
+			if revokedPerm == criticalPerm {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// EnhanceJITIntegration enhances JIT access integration for terminal operations
+func (atm *AuthenticatedTerminalManager) EnhanceJITIntegration(ctx context.Context, sessionID, command string, token *SessionToken) (*continuous.ContinuousAuthResponse, error) {
+	if !atm.continuousAuthConfig.EnableContinuousAuth || atm.continuousAuthEngine == nil {
+		return atm.authorizeCommandTraditional(ctx, sessionID, command, token)
+	}
+
+	// Create JIT-specific continuous authorization request
+	continuousRequest := &continuous.ContinuousAuthRequest{
+		AccessRequest: &common.AccessRequest{
+			SubjectId:    token.UserID,
+			PermissionId: "terminal.execute.elevated",
+			TenantId:     extractTenantID(token),
+			ResourceId:   command,
+			Context: map[string]string{
+				"session_id":     sessionID,
+				"command":        command,
+				"elevation_type": "jit",
+				"operation_type": "terminal_command",
+			},
+		},
+		SessionID:       sessionID,
+		OperationType:   continuous.OperationTypeTerminal,
+		ResourceContext: map[string]string{
+			"command":           command,
+			"requires_elevation": "true",
+			"session_type":      "terminal",
+		},
+		RequestTime: time.Now(),
+	}
+
+	// Apply command authorization timeout for JIT operations
+	authCtx, cancel := context.WithTimeout(ctx, atm.continuousAuthConfig.CommandAuthTimeout)
+	defer cancel()
+
+	authStart := time.Now()
+	response, err := atm.continuousAuthEngine.AuthorizeAction(authCtx, continuousRequest)
+	authLatency := time.Since(authStart)
+
+	// Log JIT access attempt
+	if logErr := atm.auditLogger.LogSecurityViolation(ctx, sessionID, token.UserID, "", extractTenantID(token),
+		"jit_access_attempt", 
+		fmt.Sprintf("Command: %s, Result: %t, Latency: %v", command, response != nil && response.AccessResponse.Granted, authLatency), 
+		FilterSeverityMedium); logErr != nil {
+		_ = logErr // Ignore audit failures for resilience
+	}
+
+	if err != nil {
+		// Log JIT failure
+		if logErr := atm.auditLogger.LogSecurityViolation(ctx, sessionID, token.UserID, "", extractTenantID(token),
+			"jit_access_failure", fmt.Sprintf("JIT authorization failed: %v", err), FilterSeverityHigh); logErr != nil {
+			_ = logErr
+		}
+		return nil, fmt.Errorf("JIT authorization failed: %w", err)
+	}
+
+	return response, nil
+}
+
+// RegisterSessionForContinuousAuth registers a terminal session for continuous authorization monitoring
+func (atm *AuthenticatedTerminalManager) RegisterSessionForContinuousAuth(ctx context.Context, sessionID, userID, tenantID string, sessionType string) error {
+	if !atm.continuousAuthConfig.EnableContinuousAuth || atm.continuousAuthEngine == nil {
+		return nil // No continuous auth enabled
+	}
+
+	// Create metadata for continuous authorization
+	metadata := map[string]string{
+		"session_type":             sessionType,
+		"requires_continuous_auth": "true",
+		"user_id":                  userID,
+		"tenant_id":                tenantID,
+		"created_at":               time.Now().Format(time.RFC3339),
+		"privilege_level":          "high", // Terminal sessions are considered high privilege
+	}
+
+	err := atm.continuousAuthEngine.RegisterSession(ctx, sessionID, userID, tenantID, metadata)
+	if err != nil {
+		return fmt.Errorf("failed to register session for continuous authorization: %w", err)
+	}
+
+	// Log successful registration
+	if logErr := atm.auditLogger.LogSecurityViolation(ctx, sessionID, userID, "", tenantID,
+		"continuous_auth_registration", "Session registered for continuous authorization monitoring", FilterSeverityLow); logErr != nil {
+		_ = logErr // Ignore audit failures for resilience
+	}
+
+	return nil
+}
+
+// UnregisterSessionFromContinuousAuth removes a terminal session from continuous authorization monitoring
+func (atm *AuthenticatedTerminalManager) UnregisterSessionFromContinuousAuth(ctx context.Context, sessionID string) error {
+	if !atm.continuousAuthConfig.EnableContinuousAuth || atm.continuousAuthEngine == nil {
+		return nil // No continuous auth enabled
+	}
+
+	err := atm.continuousAuthEngine.UnregisterSession(ctx, sessionID)
+	if err != nil {
+		return fmt.Errorf("failed to unregister session from continuous authorization: %w", err)
+	}
+
+	return nil
+}
+
+// GetSessionRBACStatus returns the current RBAC status of a terminal session
+func (atm *AuthenticatedTerminalManager) GetSessionRBACStatus(ctx context.Context, sessionID string) (*TerminalRBACStatus, error) {
+	if !atm.continuousAuthConfig.EnableContinuousAuth || atm.continuousAuthEngine == nil {
+		return &TerminalRBACStatus{
+			SessionID:           sessionID,
+			ContinuousAuthEnabled: false,
+			LastValidated:       time.Now(),
+			Status:              "traditional_auth",
+		}, nil
+	}
+
+	// Get session status from continuous authorization engine
+	status, err := atm.continuousAuthEngine.GetSessionStatus(ctx, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get session status: %w", err)
+	}
+
+	rbacStatus := &TerminalRBACStatus{
+		SessionID:            sessionID,
+		ContinuousAuthEnabled: true,
+		LastValidated:        status.LastValidation,
+		Status:              status.Status,
+		ActivePermissions:    status.ActivePermissions,
+		RequiresReauth:      status.RequiresReauth,
+		SecurityAlerts:      status.SecurityAlerts,
+		ComplianceStatus:    status.ComplianceStatus,
+		RecommendedActions:  status.RecommendedActions,
+	}
+
+	return rbacStatus, nil
+}
+
+// TerminalRBACStatus represents the RBAC status of a terminal session
+type TerminalRBACStatus struct {
+	SessionID             string    `json:"session_id"`
+	ContinuousAuthEnabled bool      `json:"continuous_auth_enabled"`
+	LastValidated         time.Time `json:"last_validated"`
+	Status                string    `json:"status"`
+	ActivePermissions     int       `json:"active_permissions"`
+	RequiresReauth        bool      `json:"requires_reauth"`
+	SecurityAlerts        int       `json:"security_alerts"`
+	ComplianceStatus      string    `json:"compliance_status"`
+	RecommendedActions    []string  `json:"recommended_actions"`
 }
