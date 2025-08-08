@@ -135,8 +135,19 @@ This ensures optimal order (test → security → summary) and provides clear va
    - Update `docs/product/roadmap.md` if needed
    - Update `CLAUDE.md` if workflow/commands changed
 
-10. **Update GitHub Project Status** (MANDATORY)
+10. **Final Test Run - COMPLETION GATE** (MANDATORY)
     ```bash
+    make test  # MUST be 100% green before marking story complete
+    ```
+    **COMPLETION GATE**: This is the final validation before marking story complete. If ANY tests fail here:
+    - DO NOT update GitHub project status
+    - DO NOT update roadmap  
+    - DO NOT merge
+    - Fix all failures first, then restart from this step
+
+11. **Update GitHub Project Status** (MANDATORY - ONLY AFTER TESTS PASS)
+    ```bash
+    # ONLY proceed if step 10 test run passed 100%
     # ALWAYS review docs/github-cli-reference.md FIRST before any gh project commands
     # This document contains the exact project IDs, field IDs, and option IDs required
     # Never guess or use generic commands - use the documented patterns
@@ -148,13 +159,16 @@ This ensures optimal order (test → security → summary) and provides clear va
     # 4. Move story from "In Progress" to "Done" using documented commands
     ```
 
-11. **Final Test Run** (MANDATORY)
+12. **Update Roadmap** (MANDATORY - ONLY AFTER TESTS PASS)
     ```bash
-    make test  # Final verification before merge - MUST be 100% green
+    # ONLY proceed if step 10 test run passed 100%
+    # Update docs/product/roadmap.md to reflect story completion
+    # Mark the completed story with ✅ and update progress
+    # Update milestone completion percentage if applicable
+    # This ensures roadmap stays current with actual development progress
     ```
-    **FINAL GATE**: This is the last checkpoint before merge. If ANY tests fail here, DO NOT MERGE. Fix all failures first.
 
-12. **Merge to Develop**
+13. **Merge to Develop**
     ```bash
     git checkout develop
     git merge feature/story-[NUMBER]-[brief-description]
@@ -166,6 +180,7 @@ This ensures optimal order (test → security → summary) and provides clear va
 - **Verify tests pass: `make test` - NO FAILING TESTS ALLOWED**
 - Verify security scan passes: `make security-scan`
 - Verify project updated: Check GitHub project board
+- **Verify roadmap updated: Check docs/product/roadmap.md shows story completion**
 - **BLOCKING REQUIREMENT**: ALL validation checkpoints must pass before story completion
 
 **GITHUB ACTIONS CI/CD:**
