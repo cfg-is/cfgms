@@ -100,6 +100,9 @@ func New(
 		logger.Warn("Failed to generate default API key", "error", err)
 	}
 
+	// Start background cleanup for expired API keys
+	server.startAPIKeyCleanup()
+
 	return server, nil
 }
 
@@ -421,4 +424,59 @@ func (s *Server) GetListenAddr() string {
 		return s.httpServer.Addr
 	}
 	return s.getHTTPListenAddr()
+}
+
+// startAPIKeyCleanup starts a background goroutine to clean up expired API keys
+func (s *Server) startAPIKeyCleanup() {
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute) // Clean up every 10 minutes
+		defer ticker.Stop()
+
+		s.logger.Info("Started API key cleanup background process", "interval", "10 minutes")
+
+		for range ticker.C {
+			s.cleanupExpiredAPIKeys()
+		}
+	}()
+}
+
+// cleanupExpiredAPIKeys removes expired API keys from memory to prevent memory leaks
+func (s *Server) cleanupExpiredAPIKeys() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now()
+	expiredKeys := make([]string, 0)
+	cleanedCount := 0
+
+	// Find expired keys
+	for keyString, apiKey := range s.apiKeys {
+		if apiKey.ExpiresAt != nil && now.After(*apiKey.ExpiresAt) {
+			expiredKeys = append(expiredKeys, keyString)
+		}
+	}
+
+	// Remove expired keys
+	for _, keyString := range expiredKeys {
+		apiKey := s.apiKeys[keyString]
+		delete(s.apiKeys, keyString)
+		cleanedCount++
+
+		s.logger.Debug("Cleaned up expired API key",
+			"id", apiKey.ID,
+			"name", apiKey.Name,
+			"tenant_id", apiKey.TenantID,
+			"expired_at", apiKey.ExpiresAt.Format(time.RFC3339),
+			"expired_ago", now.Sub(*apiKey.ExpiresAt).String())
+	}
+
+	if cleanedCount > 0 {
+		s.logger.Info("API key cleanup completed",
+			"cleaned_count", cleanedCount,
+			"remaining_keys", len(s.apiKeys),
+			"next_cleanup", now.Add(10*time.Minute).Format(time.RFC3339))
+	} else {
+		s.logger.Debug("API key cleanup completed - no expired keys found",
+			"remaining_keys", len(s.apiKeys))
+	}
 }

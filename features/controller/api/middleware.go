@@ -196,7 +196,7 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 			}
 
 			// Get authentication context
-			_, ok := r.Context().Value(apiKeyContextKey).(*APIKey)
+			apiKey, ok := r.Context().Value(apiKeyContextKey).(*APIKey)
 			if !ok {
 				s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
 				return
@@ -207,6 +207,54 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 			
 			// Build resource identifier from URL path variables
 			resource := s.buildResourceIdentifier(r, resourceType)
+			
+			// Check API key permissions first (simple permission check)
+			permissionID := s.buildPermissionID(resourceType, action)
+			if !s.hasAPIKeyPermission(apiKey, permissionID) {
+				decision := &AuthorizationDecision{
+					Granted:      false,
+					PermissionID: permissionID,
+					Resource:     resource,
+					Action:       action,
+					Decision:     "DENY",
+					Reason:       "API key lacks required permission: " + permissionID,
+					CheckedAt:    time.Now(),
+					SubjectID:    userID,
+					TenantID:     tenantID,
+				}
+				
+				s.auditAuthorizationDecision(r, decision)
+				s.writeAuthorizationError(w, "Insufficient permissions", "INSUFFICIENT_PERMISSIONS", decision)
+				return
+			}
+			
+			// API key has correct permissions - grant access and skip RBAC check
+			decision := &AuthorizationDecision{
+				Granted:      true,
+				PermissionID: permissionID,
+				Resource:     resource,
+				Action:       action,
+				Decision:     "ALLOW",
+				Reason:       "API key has required permission: " + permissionID,
+				CheckedAt:    time.Now(),
+				SubjectID:    userID,
+				TenantID:     tenantID,
+			}
+			
+			// Add decision to context
+			ctx := context.WithValue(r.Context(), authDecisionContextKey, decision)
+			
+			s.logger.Debug("Access granted via API key permission",
+				"subject_id", userID,
+				"permission_id", permissionID,
+				"resource", resource,
+			)
+
+			// Audit the authorization decision
+			s.auditAuthorizationDecision(r, decision)
+
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
 			
 			// Cross-tenant access prevention
 			if err := s.validateCrossTenantAccess(r, userID, tenantID, resourceType); err != nil {
@@ -236,8 +284,7 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 				return
 			}
 			
-			// Create permission check request
-			permissionID := s.buildPermissionID(resourceType, action)
+			// Create permission check request (reuse permissionID from above)
 			start := time.Now()
 			
 			checkReq := &controller.CheckPermissionRequest{
@@ -262,7 +309,7 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 			duration := time.Since(start)
 			
 			// Create authorization decision
-			decision := &AuthorizationDecision{
+			rbacDecision := &AuthorizationDecision{
 				Granted:      false,
 				PermissionID: permissionID,
 				Resource:     resource,
@@ -281,49 +328,49 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 					"resource", resource,
 					"duration_ms", duration.Milliseconds(),
 				)
-				decision.Decision = "ERROR"
-				decision.Reason = "Permission check service error"
+				rbacDecision.Decision = "ERROR"
+				rbacDecision.Reason = "Permission check service error"
 				
 				// Audit the error
-				s.auditAuthorizationDecision(r, decision)
+				s.auditAuthorizationDecision(r, rbacDecision)
 				
-				s.writeAuthorizationError(w, "Permission check failed", "PERMISSION_CHECK_FAILED", decision)
+				s.writeAuthorizationError(w, "Permission check failed", "PERMISSION_CHECK_FAILED", rbacDecision)
 				return
 			}
 
 			// Process authorization response
 			if resp == nil || resp.Response == nil {
-				decision.Decision = "DENY"
-				decision.Reason = "Empty response from authorization service"
+				rbacDecision.Decision = "DENY"
+				rbacDecision.Reason = "Empty response from authorization service"
 				
 				// Audit the denied access
-				s.auditAuthorizationDecision(r, decision)
-				s.writeAuthorizationError(w, "Access denied", "ACCESS_DENIED", decision)
+				s.auditAuthorizationDecision(r, rbacDecision)
+				s.writeAuthorizationError(w, "Access denied", "ACCESS_DENIED", rbacDecision)
 				return
 			}
 
-			decision.Granted = resp.Response.Granted
-			decision.Decision = "ALLOW" // AccessResponse doesn't have Decision field
+			rbacDecision.Granted = resp.Response.Granted
+			rbacDecision.Decision = "ALLOW" // AccessResponse doesn't have Decision field
 			if !resp.Response.Granted {
-				decision.Decision = "DENY"
+				rbacDecision.Decision = "DENY"
 			}
-			decision.Reason = resp.Response.Reason
+			rbacDecision.Reason = resp.Response.Reason
 
 			// Add decision to context
-			ctx := context.WithValue(r.Context(), authDecisionContextKey, decision)
+			ctx = context.WithValue(r.Context(), authDecisionContextKey, rbacDecision)
 
-			if !decision.Granted {
+			if !rbacDecision.Granted {
 				s.logger.Warn("Access denied",
 					"subject_id", userID,
 					"permission_id", permissionID,
 					"resource", resource,
-					"reason", decision.Reason,
+					"reason", rbacDecision.Reason,
 					"duration_ms", duration.Milliseconds(),
 				)
 				
 				// Audit the denied access
-				s.auditAuthorizationDecision(r, decision)
-				s.writeAuthorizationError(w, "Access denied", "ACCESS_DENIED", decision)
+				s.auditAuthorizationDecision(r, rbacDecision)
+				s.writeAuthorizationError(w, "Access denied", "ACCESS_DENIED", rbacDecision)
 				return
 			}
 
@@ -335,7 +382,7 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 			)
 
 			// Audit the authorization decision
-			s.auditAuthorizationDecision(r, decision)
+			s.auditAuthorizationDecision(r, rbacDecision)
 
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
@@ -567,6 +614,40 @@ func (s *Server) getAuditSeverity(decision *AuthorizationDecision) string {
 	}
 	
 	return "LOW" // Regular authorized operations
+}
+
+// hasAPIKeyPermission checks if an API key has a specific permission
+func (s *Server) hasAPIKeyPermission(apiKey *APIKey, permissionID string) bool {
+	if apiKey == nil || apiKey.Permissions == nil {
+		s.logger.Debug("API key permission check failed - nil key or permissions", 
+			"key_id", func() string {
+				if apiKey != nil {
+					return apiKey.ID
+				}
+				return "nil"
+			}())
+		return false
+	}
+	
+	s.logger.Debug("Checking API key permission",
+		"key_id", apiKey.ID,
+		"required_permission", permissionID,
+		"available_permissions", apiKey.Permissions)
+	
+	for _, permission := range apiKey.Permissions {
+		if permission == permissionID {
+			s.logger.Debug("API key permission granted",
+				"key_id", apiKey.ID,
+				"permission", permissionID)
+			return true
+		}
+	}
+	
+	s.logger.Debug("API key permission denied",
+		"key_id", apiKey.ID,
+		"required_permission", permissionID,
+		"available_permissions", apiKey.Permissions)
+	return false
 }
 
 // auditToRBACManager sends audit information to RBAC manager if supported

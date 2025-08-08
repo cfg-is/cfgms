@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -176,6 +177,56 @@ func (s *Server) handleDeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// generateEphemeralKey creates an API key with a specified TTL
+func (s *Server) generateEphemeralKey(name string, permissions []string, ttl time.Duration, tenantID string) (*APIKey, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Generate cryptographically secure API key
+	keyBytes := make([]byte, 32) // 256-bit key
+	if _, err := rand.Read(keyBytes); err != nil {
+		return nil, fmt.Errorf("failed to generate ephemeral API key: %w", err)
+	}
+
+	keyString := base64.URLEncoding.EncodeToString(keyBytes)
+	expiresAt := time.Now().UTC().Add(ttl)
+
+	// Create ephemeral API key
+	apiKey := &APIKey{
+		ID:          uuid.New().String(),
+		Key:         keyString,
+		Name:        name,
+		Permissions: permissions,
+		CreatedAt:   time.Now().UTC(),
+		ExpiresAt:   &expiresAt,
+		TenantID:    tenantID,
+	}
+
+	// Store the key
+	s.apiKeys[keyString] = apiKey
+
+	s.logger.Info("Generated ephemeral API key",
+		"id", apiKey.ID,
+		"name", apiKey.Name,
+		"tenant_id", apiKey.TenantID,
+		"ttl", ttl,
+		"expires_at", expiresAt.Format(time.RFC3339))
+
+	return apiKey, nil
+}
+
+// generateTestKey creates a short-lived API key for test scenarios (5-minute expiry)
+func (s *Server) generateTestKey(permissions []string, tenantID string) (*APIKey, error) {
+	testName := fmt.Sprintf("Test Key %d", time.Now().Unix())
+	return s.generateEphemeralKey(testName, permissions, 5*time.Minute, tenantID)
+}
+
+// generateJITKey creates a just-in-time API key for remote script execution (1-hour expiry)
+func (s *Server) generateJITKey(scriptName string, permissions []string, tenantID string) (*APIKey, error) {
+	jitName := fmt.Sprintf("JIT-%s-%d", scriptName, time.Now().Unix())
+	return s.generateEphemeralKey(jitName, permissions, 1*time.Hour, tenantID)
+}
+
 // generateDefaultAPIKey creates a default API key for initial setup
 func (s *Server) generateDefaultAPIKey() error {
 	s.mu.Lock()
@@ -200,16 +251,47 @@ func (s *Server) generateDefaultAPIKey() error {
 		Key:  keyString,
 		Name: "Default Admin Key",
 		Permissions: []string{
-			"stewards:read",
-			"stewards:write",
-			"config:read",
-			"config:write",
-			"certificates:read",
-			"certificates:write",
-			"rbac:read",
-			"rbac:write",
-			"api-keys:read",
-			"api-keys:write",
+			"steward:list",
+			"steward:read",
+			"steward:read-dna",
+			"steward:read-config",
+			"steward:write-config",
+			"steward:validate-config",
+			"steward:read-scripts",
+			"steward:execute-scripts",
+			"certificate:list",
+			"certificate:provision",
+			"certificate:revoke",
+			"rbac:list-permissions",
+			"rbac:read-permission",
+			"rbac:list-roles",
+			"rbac:create-role",
+			"rbac:read-role",
+			"rbac:update-role",
+			"rbac:delete-role",
+			"rbac:list-subjects",
+			"rbac:create-subject",
+			"rbac:read-subject",
+			"rbac:update-subject",
+			"rbac:delete-subject",
+			"rbac:read-assignments",
+			"rbac:assign-role",
+			"rbac:revoke-role",
+			"rbac:read-permissions",
+			"rbac:check-permission",
+			"api-key:list",
+			"api-key:create",
+			"api-key:read",
+			"api-key:delete",
+			"monitoring:read-health",
+			"monitoring:read-metrics",
+			"monitoring:read-resources",
+			"monitoring:read-logs",
+			"monitoring:read-traces",
+			"monitoring:read-events",
+			"monitoring:read-config",
+			"monitoring:read-steward-metrics",
+			"monitoring:read-services",
 		},
 		CreatedAt: time.Now().UTC(),
 		TenantID:  "default",

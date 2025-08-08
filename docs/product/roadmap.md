@@ -310,8 +310,8 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 - [x] **Zero-Trust Policy Engine** (Issue #127) - 5 points ✅ COMPLETED
 
 **Epic 2.5: RBAC Integration & Production Validation (25 story points) - Issues #128-135**
-- [x] **Terminal-RBAC Integration Testing** (Issue #128) - 3 points
-- [ ] **Controller API Authorization Validation** (Issue #129) - 3 points
+- [x] **Terminal-RBAC Integration Testing** (Issue #128) - 3 points ✅ COMPLETED
+- [x] **Controller API Authorization Validation** (Issue #129) - 3 points ✅ COMPLETED
 - [ ] **Cross-Tenant Permission Isolation** (Issue #130) - 3 points
 - [ ] **Concurrent Authorization Performance** (Issue #131) - 3 points
 - [ ] **Multi-Tenant Scale Validation** (Issue #132) - 3 points

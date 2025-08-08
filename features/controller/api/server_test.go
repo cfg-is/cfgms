@@ -20,7 +20,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
-func setupTestServer(t *testing.T) (*Server, string) {
+func setupTestServer(t *testing.T) *Server {
 	// Create test configuration
 	cfg := config.DefaultConfig()
 	cfg.Certificate.EnableCertManagement = false // Disable for testing
@@ -57,7 +57,16 @@ func setupTestServer(t *testing.T) (*Server, string) {
 	)
 	require.NoError(t, err)
 
-	// Get the default API key for testing
+	return server
+}
+
+// DEPRECATED: setupTestServerWithDefaultKey is deprecated for security reasons.
+// Use setupTestServer() + NewTestKey() / NewEphemeralTestKey() instead.
+// This function exists only for backward compatibility and will be removed.
+func setupTestServerWithDefaultKey(t *testing.T) (*Server, string) {
+	server := setupTestServer(t)
+	
+	// Get the default API key for legacy compatibility
 	server.mu.RLock()
 	var testAPIKey string
 	for key := range server.apiKeys {
@@ -71,8 +80,43 @@ func setupTestServer(t *testing.T) (*Server, string) {
 	return server, testAPIKey
 }
 
+// NewEphemeralTestKey creates a short-lived API key for test scenarios
+func NewEphemeralTestKey(t *testing.T, server *Server, permissions []string, tenantID string, ttl time.Duration) string {
+	t.Helper()
+
+	// Generate ephemeral test key
+	apiKey, err := server.generateEphemeralKey(
+		"Test Key "+time.Now().Format("15:04:05.999"),
+		permissions,
+		ttl,
+		tenantID,
+	)
+	require.NoError(t, err, "Failed to generate ephemeral test key")
+
+	t.Cleanup(func() {
+		// Clean up the key when test ends
+		server.mu.Lock()
+		delete(server.apiKeys, apiKey.Key)
+		server.mu.Unlock()
+	})
+
+	return apiKey.Key
+}
+
+// NewTestKey creates a 5-minute ephemeral API key for standard test scenarios
+func NewTestKey(t *testing.T, server *Server, permissions []string) string {
+	t.Helper()
+	return NewEphemeralTestKey(t, server, permissions, "test-tenant", 5*time.Minute)
+}
+
+// NewJITTestKey creates a 1-hour ephemeral API key for JIT test scenarios
+func NewJITTestKey(t *testing.T, server *Server, permissions []string) string {
+	t.Helper()
+	return NewEphemeralTestKey(t, server, permissions, "test-tenant", 1*time.Hour)
+}
+
 func TestHealthEndpoint(t *testing.T) {
-	server, _ := setupTestServer(t)
+	server := setupTestServer(t)
 
 	// Create request
 	req := httptest.NewRequest("GET", "/api/v1/health", nil)
@@ -96,7 +140,10 @@ func TestHealthEndpoint(t *testing.T) {
 }
 
 func TestAPIKeyAuthentication(t *testing.T) {
-	server, apiKey := setupTestServer(t)
+	server := setupTestServer(t)
+
+	// Use ephemeral key for valid authentication tests (more secure)
+	validAPIKey := NewTestKey(t, server, []string{"steward:list"})
 
 	tests := []struct {
 		name           string
@@ -105,12 +152,12 @@ func TestAPIKeyAuthentication(t *testing.T) {
 	}{
 		{
 			name:           "Valid API key in X-API-Key header",
-			headers:        map[string]string{"X-API-Key": apiKey},
+			headers:        map[string]string{"X-API-Key": validAPIKey},
 			expectedStatus: http.StatusOK,
 		},
 		{
 			name:           "Valid API key in Authorization header",
-			headers:        map[string]string{"Authorization": "Bearer " + apiKey},
+			headers:        map[string]string{"Authorization": "Bearer " + validAPIKey},
 			expectedStatus: http.StatusOK,
 		},
 		{
@@ -141,12 +188,15 @@ func TestAPIKeyAuthentication(t *testing.T) {
 }
 
 func TestListStewards(t *testing.T) {
-	server, apiKey := setupTestServer(t)
+	server := setupTestServer(t)
+
+	// Use ephemeral key for steward list operations (more secure)
+	stewardAPIKey := NewTestKey(t, server, []string{"steward:list"})
 
 	t.Run("empty list", func(t *testing.T) {
 		// Create request with authentication
 		req := httptest.NewRequest("GET", "/api/v1/stewards", nil)
-		req.Header.Set("X-API-Key", apiKey)
+		req.Header.Set("X-API-Key", stewardAPIKey)
 		rec := httptest.NewRecorder()
 
 		// Execute request
@@ -168,7 +218,7 @@ func TestListStewards(t *testing.T) {
 	t.Run("list format validation", func(t *testing.T) {
 		// Test that the endpoint returns proper format even with empty data
 		req := httptest.NewRequest("GET", "/api/v1/stewards", nil)
-		req.Header.Set("X-API-Key", apiKey)
+		req.Header.Set("X-API-Key", stewardAPIKey)
 		rec := httptest.NewRecorder()
 
 		server.router.ServeHTTP(rec, req)
@@ -186,7 +236,10 @@ func TestListStewards(t *testing.T) {
 }
 
 func TestAPIKeyManagement(t *testing.T) {
-	server, adminAPIKey := setupTestServer(t)
+	server := setupTestServer(t)
+
+	// Use ephemeral key for API key management (more secure for testing)
+	adminAPIKey := NewTestKey(t, server, []string{"api-key:create", "api-key:list"})
 
 	// Test creating a new API key
 	createReq := APIKeyCreateRequest{
@@ -237,7 +290,7 @@ func TestAPIKeyManagement(t *testing.T) {
 }
 
 func TestCORSHeaders(t *testing.T) {
-	server, _ := setupTestServer(t)
+	server := setupTestServer(t)
 
 	// Test OPTIONS request (preflight)
 	req := httptest.NewRequest("OPTIONS", "/api/v1/health", nil)
@@ -253,7 +306,10 @@ func TestCORSHeaders(t *testing.T) {
 }
 
 func TestConfigurationValidation(t *testing.T) {
-	server, apiKey := setupTestServer(t)
+	server := setupTestServer(t)
+
+	// Use ephemeral key for configuration validation (more secure)
+	configAPIKey := NewTestKey(t, server, []string{"steward:validate-config"})
 
 	// Test configuration validation
 	validationReq := ConfigValidationRequest{
@@ -270,7 +326,7 @@ func TestConfigurationValidation(t *testing.T) {
 	require.NoError(t, err)
 
 	req := httptest.NewRequest("POST", "/api/v1/stewards/test-steward/config/validate", bytes.NewReader(reqBody))
-	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("X-API-Key", configAPIKey)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 
@@ -290,11 +346,15 @@ func TestConfigurationValidation(t *testing.T) {
 }
 
 func TestErrorResponses(t *testing.T) {
-	server, apiKey := setupTestServer(t)
+	server := setupTestServer(t)
+
+	// Use ephemeral keys for error response testing (more secure)
+	apiKeyCreateKey := NewTestKey(t, server, []string{"api-key:create"})
+	stewardReadKey := NewTestKey(t, server, []string{"steward:read"})
 
 	// Test invalid JSON
 	req := httptest.NewRequest("POST", "/api/v1/api-keys", bytes.NewReader([]byte("invalid json")))
-	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("X-API-Key", apiKeyCreateKey)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 
@@ -309,7 +369,7 @@ func TestErrorResponses(t *testing.T) {
 
 	// Test not found
 	req = httptest.NewRequest("GET", "/api/v1/stewards/nonexistent", nil)
-	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("X-API-Key", stewardReadKey)
 	rec = httptest.NewRecorder()
 
 	server.router.ServeHTTP(rec, req)
@@ -318,7 +378,7 @@ func TestErrorResponses(t *testing.T) {
 }
 
 func TestResponseFormat(t *testing.T) {
-	server, _ := setupTestServer(t)
+	server := setupTestServer(t)
 
 	// Test health endpoint response format
 	req := httptest.NewRequest("GET", "/api/v1/health", nil)
@@ -340,7 +400,7 @@ func TestResponseFormat(t *testing.T) {
 
 
 func TestAPIKeyExpiration(t *testing.T) {
-	server, _ := setupTestServer(t)
+	server := setupTestServer(t)
 
 	// Create an expired API key
 	expiredTime := time.Now().Add(-1 * time.Hour)
@@ -371,4 +431,111 @@ func TestAPIKeyExpiration(t *testing.T) {
 	err := json.Unmarshal(rec.Body.Bytes(), &errorResponse)
 	require.NoError(t, err)
 	assert.Equal(t, "EXPIRED_API_KEY", errorResponse.Error.Code)
+}
+
+func TestEphemeralAPIKeys(t *testing.T) {
+	server := setupTestServer(t)
+
+	t.Run("create ephemeral key with TTL", func(t *testing.T) {
+		permissions := []string{"steward:list"}  // Correct permission for /api/v1/stewards endpoint
+		
+		// Create ephemeral key with 1 minute TTL
+		ephemeralKey := NewEphemeralTestKey(t, server, permissions, "test-tenant", 1*time.Minute)
+		
+		// Verify key works immediately
+		req := httptest.NewRequest("GET", "/api/v1/stewards", nil)
+		req.Header.Set("X-API-Key", ephemeralKey)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusOK, rec.Code, "Ephemeral key should work immediately")
+		
+		// Verify key has expiration set
+		server.mu.RLock()
+		keyInfo, exists := server.apiKeys[ephemeralKey]
+		server.mu.RUnlock()
+		
+		require.True(t, exists, "Ephemeral key should exist")
+		require.NotNil(t, keyInfo.ExpiresAt, "Ephemeral key should have expiration")
+		assert.True(t, keyInfo.ExpiresAt.After(time.Now()), "Key should not be expired yet")
+		assert.True(t, keyInfo.ExpiresAt.Before(time.Now().Add(2*time.Minute)), "Key should expire within TTL")
+	})
+
+	t.Run("test key convenience function", func(t *testing.T) {
+		permissions := []string{"api-key:list"}  // Correct permission for /api/v1/api-keys endpoint
+		
+		// Use convenience function for 5-minute test key
+		testKey := NewTestKey(t, server, permissions)
+		
+		// Verify it works
+		req := httptest.NewRequest("GET", "/api/v1/api-keys", nil)
+		req.Header.Set("X-API-Key", testKey)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusOK, rec.Code, "Test key should work")
+	})
+
+	t.Run("JIT key convenience function", func(t *testing.T) {
+		permissions := []string{"stewards:execute-scripts"}
+		
+		// Use convenience function for 1-hour JIT key
+		jitKey := NewJITTestKey(t, server, permissions)
+		
+		// Verify key has 1-hour TTL
+		server.mu.RLock()
+		keyInfo, exists := server.apiKeys[jitKey]
+		server.mu.RUnlock()
+		
+		require.True(t, exists, "JIT key should exist")
+		require.NotNil(t, keyInfo.ExpiresAt, "JIT key should have expiration")
+		
+		// Should expire in approximately 1 hour (within 5 seconds tolerance)
+		expectedExpiry := time.Now().Add(1 * time.Hour)
+		assert.WithinDuration(t, expectedExpiry, *keyInfo.ExpiresAt, 5*time.Second)
+	})
+
+	t.Run("automatic cleanup removes expired keys", func(t *testing.T) {
+		// Create a key that expires in 1 second
+		ephemeralKey := NewEphemeralTestKey(t, server, []string{"test"}, "test", 1*time.Second)
+		
+		// Verify key exists
+		server.mu.RLock()
+		_, exists := server.apiKeys[ephemeralKey]
+		server.mu.RUnlock()
+		require.True(t, exists, "Key should exist initially")
+		
+		// Wait for key to expire
+		time.Sleep(2 * time.Second)
+		
+		// Manually trigger cleanup (normally happens every 10 minutes)
+		server.cleanupExpiredAPIKeys()
+		
+		// Verify key is cleaned up
+		server.mu.RLock()
+		_, exists = server.apiKeys[ephemeralKey]
+		server.mu.RUnlock()
+		assert.False(t, exists, "Expired key should be cleaned up")
+	})
+
+	t.Run("helper functions generate different keys", func(t *testing.T) {
+		permissions := []string{"test"}
+		
+		// Generate multiple keys
+		key1 := NewTestKey(t, server, permissions)
+		key2 := NewTestKey(t, server, permissions) 
+		key3 := NewJITTestKey(t, server, permissions)
+		
+		// All keys should be different
+		assert.NotEqual(t, key1, key2, "Each test key should be unique")
+		assert.NotEqual(t, key1, key3, "Test and JIT keys should be different")
+		assert.NotEqual(t, key2, key3, "Each key should be unique")
+		
+		// All should work
+		for i, key := range []string{key1, key2, key3} {
+			req := httptest.NewRequest("GET", "/api/v1/health", nil)
+			req.Header.Set("X-API-Key", key)
+			rec := httptest.NewRecorder()
+			server.router.ServeHTTP(rec, req)
+			assert.Equal(t, http.StatusOK, rec.Code, "Key %d should work", i+1)
+		}
+	})
 }
