@@ -236,4 +236,6 @@ const (
 	ConditionTypeMFARequired    ConditionType = "mfa_required"    // MFA required for access
 	ConditionTypeAuditEnhanced  ConditionType = "audit_enhanced"  // Enhanced audit logging
 	ConditionTypeResourceScope  ConditionType = "resource_scope"  // Limited to specific resources
+	ConditionTypeEmergencyAccess ConditionType = "emergency_access" // Emergency access controls
+	ConditionTypeFailsafeMode   ConditionType = "failsafe_mode"   // Failsafe mode restrictions
 )
