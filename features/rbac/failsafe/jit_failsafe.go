@@ -421,11 +421,8 @@ func (fjam *FailsafeJITAccessManager) startHealthChecking() {
 	ticker := time.NewTicker(fjam.healthCheck.healthCheckInterval)
 	defer ticker.Stop()
 
-	for {
-		select {
-		case <-ticker.C:
-			fjam.performHealthCheck()
-		}
+	for range ticker.C {
+		fjam.performHealthCheck()
 	}
 }
 

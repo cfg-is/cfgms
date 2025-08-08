@@ -3,6 +3,7 @@ package integration
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -215,8 +216,9 @@ func (framework *DegradedModeSecurityTestFramework) testRBACPermissionInDegraded
 		}
 		
 		if response != nil {
-			op.Result.SecurityMetadata = response.Metadata
-			if response.Metadata["failsafe_reason"] != "" {
+			// Parse reason to determine security controls
+			if strings.Contains(response.Reason, "failsafe") {
+				op.Result.SecurityMetadata["failsafe_reason"] = "rbac_failsafe"
 				op.SecurityControls = append(op.SecurityControls, "failsafe_activation")
 			}
 		}
@@ -226,16 +228,18 @@ func (framework *DegradedModeSecurityTestFramework) testRBACPermissionInDegraded
 			Granted:          response.Granted,
 			Reason:           response.Reason,
 			ResponseTime:     responseTime,
-			SecurityMetadata: response.Metadata,
+			SecurityMetadata: make(map[string]string),
 		}
 		
-		// Check for enhanced monitoring requirements
-		if response.Metadata["enhanced_monitoring"] == "required" {
+		// Check for enhanced monitoring requirements based on reason
+		if strings.Contains(response.Reason, "enhanced_monitoring") {
 			op.Result.EnhancedMonitoring = true
+			op.Result.SecurityMetadata["enhanced_monitoring"] = "required"
 			op.SecurityControls = append(op.SecurityControls, "enhanced_monitoring")
 		}
 		
-		if response.Metadata["degradation_active"] == "true" {
+		if strings.Contains(response.Reason, "degraded") {
+			op.Result.SecurityMetadata["degradation_active"] = "true"
 			op.SecurityControls = append(op.SecurityControls, "degraded_mode")
 		}
 	}
@@ -434,9 +438,10 @@ func (framework *DegradedModeSecurityTestFramework) testNetworkPartitionToleranc
 			SecurityMetadata: make(map[string]string),
 		}
 		
-		if response != nil && response.Metadata != nil {
-			op.Result.SecurityMetadata = response.Metadata
-			if response.Metadata["partition_reason"] != "" {
+		if response != nil {
+			// Parse reason to determine security controls
+			if strings.Contains(response.Reason, "partition") {
+				op.Result.SecurityMetadata["partition_reason"] = "network_partition"
 				op.SecurityControls = append(op.SecurityControls, "partition_failsafe")
 			}
 		}
@@ -446,23 +451,24 @@ func (framework *DegradedModeSecurityTestFramework) testNetworkPartitionToleranc
 			Granted:          response.Granted,
 			Reason:           response.Reason,
 			ResponseTime:     responseTime,
-			SecurityMetadata: response.Metadata,
+			SecurityMetadata: make(map[string]string),
 		}
 		
-		// Check for partition-specific controls
-		if response.Metadata != nil {
-			if response.Metadata["partition_mode"] != "" {
-				op.SecurityControls = append(op.SecurityControls, "partition_tolerance")
-			}
-			
-			if response.Metadata["degradation_active"] == "true" {
-				op.Result.EnhancedMonitoring = true
-				op.SecurityControls = append(op.SecurityControls, "degraded_mode", "enhanced_monitoring")
-			}
-			
-			if response.Metadata["cache_reason"] == "policy_cached" {
-				op.SecurityControls = append(op.SecurityControls, "cache_based_decision")
-			}
+		// Check for partition-specific controls based on reason
+		if strings.Contains(response.Reason, "partition") {
+			op.Result.SecurityMetadata["partition_mode"] = "active"
+			op.SecurityControls = append(op.SecurityControls, "partition_tolerance")
+		}
+		
+		if strings.Contains(response.Reason, "degraded") {
+			op.Result.SecurityMetadata["degradation_active"] = "true"
+			op.Result.EnhancedMonitoring = true
+			op.SecurityControls = append(op.SecurityControls, "degraded_mode", "enhanced_monitoring")
+		}
+		
+		if strings.Contains(response.Reason, "cache") || strings.Contains(response.Reason, "cached") {
+			op.Result.SecurityMetadata["cache_reason"] = "policy_cached"
+			op.SecurityControls = append(op.SecurityControls, "cache_based_decision")
 		}
 	}
 	

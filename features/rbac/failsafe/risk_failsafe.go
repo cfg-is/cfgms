@@ -372,11 +372,8 @@ func (fre *FailsafeRiskEngine) startHealthChecking() {
 	ticker := time.NewTicker(fre.healthCheck.healthCheckInterval)
 	defer ticker.Stop()
 
-	for {
-		select {
-		case <-ticker.C:
-			fre.performHealthCheck()
-		}
+	for range ticker.C {
+		fre.performHealthCheck()
 	}
 }
 
@@ -416,13 +413,8 @@ func (fre *FailsafeRiskEngine) performHealthCheck() {
 		fre.metrics.mutex.Unlock()
 
 		if fre.healthCheck.consecutiveFailures >= fre.healthCheck.maxConsecutiveFailures {
-			wasHealthy := fre.healthCheck.isHealthy
 			fre.healthCheck.isHealthy = false
-			
-			// Log transition to unhealthy state (would be proper logging in production)
-			if wasHealthy {
-				// Risk engine just became unhealthy
-			}
+			// Risk engine transitioned to unhealthy state (would log in production)
 		}
 	} else {
 		// Health check succeeded

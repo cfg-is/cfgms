@@ -211,11 +211,8 @@ func (fsm *FailsafeRBACManager) startHealthChecking() {
 	ticker := time.NewTicker(fsm.healthCheck.healthCheckInterval)
 	defer ticker.Stop()
 
-	for {
-		select {
-		case <-ticker.C:
-			fsm.performHealthCheck()
-		}
+	for range ticker.C {
+		fsm.performHealthCheck()
 	}
 }
 
@@ -246,13 +243,8 @@ func (fsm *FailsafeRBACManager) performHealthCheck() {
 		fsm.metrics.mutex.Unlock()
 
 		if fsm.healthCheck.consecutiveFailures >= fsm.healthCheck.maxConsecutiveFailures {
-			wasHealthy := fsm.healthCheck.isHealthy
 			fsm.healthCheck.isHealthy = false
-			
-			// Log transition to unhealthy state (would be proper logging in production)
-			if wasHealthy {
-				// System just became unhealthy
-			}
+			// System transitioned to unhealthy state (would log in production)
 		}
 	} else {
 		// Health check succeeded

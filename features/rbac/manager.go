@@ -10,13 +10,14 @@ import (
 
 // Manager provides a complete RBAC implementation with advanced features
 type Manager struct {
-	store             *memory.Store
-	engine            *AuthEngine
-	advancedEngine    *AdvancedAuthEngine
-	hierarchyEngine   *HierarchyEngine
-	delegationManager *DelegationManager
-	auditLogger       *AuditLogger
-	templateManager   *TemplateManager
+	store                    *memory.Store
+	engine                   *AuthEngine
+	advancedEngine           *AdvancedAuthEngine
+	hierarchyEngine          *HierarchyEngine
+	delegationManager        *DelegationManager
+	auditLogger              *AuditLogger
+	templateManager          *TemplateManager
+	escalationPreventionMgr  *EscalationPreventionManager
 }
 
 // NewManager creates a new RBAC manager with in-memory storage and advanced features
@@ -37,6 +38,7 @@ func NewManager() *Manager {
 	delegationManager := NewDelegationManager(manager) // Pass manager for RBAC operations
 	auditLogger := NewAuditLogger()
 	templateManager := NewTemplateManager(manager) // Pass manager for template operations
+	escalationPreventionMgr := NewEscalationPreventionManager(manager) // Pass manager for privilege escalation protection
 	
 	// Set circular references
 	advancedEngine.SetRBACManager(manager)
@@ -46,6 +48,7 @@ func NewManager() *Manager {
 	manager.delegationManager = delegationManager
 	manager.auditLogger = auditLogger
 	manager.templateManager = templateManager
+	manager.escalationPreventionMgr = escalationPreventionMgr
 	
 	// Share the same delegation manager and audit logger instances
 	advancedEngine.SetDelegationManager(delegationManager)
@@ -159,7 +162,8 @@ func (m *Manager) GetSubjectRoles(ctx context.Context, subjectID string, tenantI
 
 // Role Assignment Store Methods
 func (m *Manager) AssignRole(ctx context.Context, assignment *common.RoleAssignment) error {
-	return m.store.AssignRole(ctx, assignment)
+	// Use escalation prevention manager for enhanced security
+	return m.escalationPreventionMgr.ValidateAndAssignRole(ctx, assignment)
 }
 
 func (m *Manager) RevokeRole(ctx context.Context, subjectID, roleID, tenantID string) error {
@@ -297,6 +301,11 @@ func (m *Manager) ValidateHierarchyOperation(ctx context.Context, childRoleID, p
 		// We need to check if parentRoleID is already a descendant of childRoleID
 		// Only do this check if the child role already exists
 		if childExists, _ := m.roleExists(ctx, childRoleID); childExists {
+			// Check if the proposed parent is already an ancestor of the child
+			// This would create a circular dependency
+			if err := m.checkForCircularDependency(ctx, childRoleID, parentRoleID); err != nil {
+				return err
+			}
 			return m.hierarchyEngine.ValidateHierarchy(ctx, childRoleID)
 		}
 	}
@@ -314,6 +323,39 @@ func (m *Manager) roleExists(ctx context.Context, roleID string) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// checkForCircularDependency checks if setting parentRoleID as parent of childRoleID would create a cycle
+func (m *Manager) checkForCircularDependency(ctx context.Context, childRoleID, parentRoleID string) error {
+	// Traverse up the hierarchy from parentRoleID
+	// If we find childRoleID, then setting childRoleID -> parentRoleID would create a cycle
+	visited := make(map[string]bool)
+	return m.checkAncestorsForRole(ctx, parentRoleID, childRoleID, visited)
+}
+
+// checkAncestorsForRole recursively checks if targetRoleID appears in the ancestor chain of startRoleID
+func (m *Manager) checkAncestorsForRole(ctx context.Context, startRoleID, targetRoleID string, visited map[string]bool) error {
+	if visited[startRoleID] {
+		return nil // Already checked this branch
+	}
+	visited[startRoleID] = true
+	
+	if startRoleID == targetRoleID {
+		return fmt.Errorf("circular dependency detected: role %s is already an ancestor of role %s", targetRoleID, startRoleID)
+	}
+	
+	// Get the current role to check its parent
+	role, err := m.store.GetRole(ctx, startRoleID)
+	if err != nil {
+		return err
+	}
+	
+	// If this role has a parent, recursively check the parent chain
+	if role.ParentRoleId != "" {
+		return m.checkAncestorsForRole(ctx, role.ParentRoleId, targetRoleID, visited)
+	}
+	
+	return nil
 }
 
 func (m *Manager) ResolvePermissionConflicts(ctx context.Context, roleID string, conflictingPermissions map[string][]*common.Permission) (map[string]*common.Permission, error) {
@@ -357,11 +399,8 @@ func (m *Manager) GetParentRole(ctx context.Context, roleID string) (*common.Rol
 }
 
 func (m *Manager) SetRoleParent(ctx context.Context, roleID, parentRoleID string, inheritanceType common.RoleInheritanceType) error {
-	// Validate first
-	if err := m.ValidateHierarchyOperation(ctx, roleID, parentRoleID); err != nil {
-		return err
-	}
-	return m.store.SetRoleParent(ctx, roleID, parentRoleID, inheritanceType)
+	// Use escalation prevention manager for enhanced security
+	return m.escalationPreventionMgr.ValidateAndSetRoleParent(ctx, roleID, parentRoleID, inheritanceType, "system")
 }
 
 func (m *Manager) RemoveRoleParent(ctx context.Context, roleID string) error {
@@ -452,6 +491,28 @@ func (m *Manager) ExportAuditLog(ctx context.Context, filter *AuditFilter, forma
 // CleanupExpiredDelegations removes expired delegations
 func (m *Manager) CleanupExpiredDelegations(ctx context.Context) error {
 	return m.delegationManager.CleanupExpiredDelegations(ctx)
+}
+
+// Privilege Escalation Prevention Methods
+
+// GetEscalationAlerts returns recent privilege escalation alerts
+func (m *Manager) GetEscalationAlerts() []EscalationAlert {
+	return m.escalationPreventionMgr.GetEscalationAlerts()
+}
+
+// GetEscalationPreventionMetrics returns comprehensive metrics about escalation prevention
+func (m *Manager) GetEscalationPreventionMetrics() map[string]interface{} {
+	return m.escalationPreventionMgr.GetMetrics()
+}
+
+// GetOperationLog returns recent RBAC operations for audit purposes
+func (m *Manager) GetOperationLog() []OperationRecord {
+	return m.escalationPreventionMgr.GetOperationLog()
+}
+
+// GetStore returns the internal store (for testing purposes)
+func (m *Manager) GetStore() *memory.Store {
+	return m.store
 }
 
 // Override CheckPermission to use advanced engine by default

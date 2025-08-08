@@ -325,11 +325,8 @@ func (nptm *NetworkPartitionTolerantManager) startNetworkMonitoring() {
 	ticker := time.NewTicker(nptm.networkMonitor.checkInterval)
 	defer ticker.Stop()
 
-	for {
-		select {
-		case <-ticker.C:
-			nptm.performConnectivityCheck()
-		}
+	for range ticker.C {
+		nptm.performConnectivityCheck()
 	}
 }
 
@@ -437,11 +434,8 @@ func (nptm *NetworkPartitionTolerantManager) startCacheMaintenance() {
 	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
 
-	for {
-		select {
-		case <-ticker.C:
-			nptm.performCacheMaintenance()
-		}
+	for range ticker.C {
+		nptm.performCacheMaintenance()
 	}
 }
 
