@@ -22,6 +22,7 @@ CFGMS (Config Management System) is a modern, Go-based configuration management 
 
 ### Sprint and Development Process
 - **Sprint Planning Guideline**: At the start of each milestone, ALWAYS conduct sprint/story planning before beginning work
+- **Sprint Completion**: At the end of each sprint, run `make test-complete` to validate all stories and ensure system integrity before sprint closure
 
 ### MANDATORY Story Development Checklist
 

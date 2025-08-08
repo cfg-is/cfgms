@@ -14,10 +14,6 @@ import (
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/rbac/continuous"
-	"github.com/cfgis/cfgms/features/rbac/jit"
-	"github.com/cfgis/cfgms/features/rbac/memory"
-	"github.com/cfgis/cfgms/features/rbac/risk"
-	"github.com/cfgis/cfgms/features/tenant/security"
 )
 
 // ConcurrentAuthorizationPerformanceSuite tests concurrent authorization performance

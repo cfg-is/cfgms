@@ -195,6 +195,33 @@ func (bra *BehavioralRiskAnalyzer) EvaluateBehavioralRisk(ctx context.Context, r
 		return nil, fmt.Errorf("device pattern analysis failed: %w", err)
 	}
 
+	// Process historical anomalies if present (regardless of baseline status)
+	anomalyRisk := 0.0
+	if request.HistoricalData != nil && len(request.HistoricalData.AnomalyHistory) > 0 {
+		for _, anomaly := range request.HistoricalData.AnomalyHistory {
+			// Add risk based on historical anomaly severity
+			anomalyRisk += anomaly.Severity * 15.0 // Up to 15 points per anomaly
+			
+			// Create pattern anomaly from historical data
+			result.PatternAnomalies = append(result.PatternAnomalies, PatternAnomaly{
+				AnomalyType:   anomaly.AnomalyType,
+				Severity:      anomaly.Severity,
+				Description:   fmt.Sprintf("Historical anomaly: %s", anomaly.Description),
+				Confidence:    0.8, // Good confidence for historical data
+			})
+			
+			// Create behavior deviation from historical anomaly
+			result.BehaviorDeviations = append(result.BehaviorDeviations, BehaviorDeviation{
+				DeviationType:    "historical_anomaly",
+				Metric:           anomaly.AnomalyType,
+				ExpectedValue:    0.0, // No anomaly expected
+				ActualValue:      anomaly.Severity,
+				DeviationPercent: anomaly.Severity * 100.0,
+				Significance:     anomaly.Severity,
+			})
+		}
+	}
+
 	// Combine risk scores using weighted approach
 	riskComponents := map[string]float64{
 		"temporal": temporalRisk.RiskScore * 0.20,  // 20% weight
@@ -203,11 +230,17 @@ func (bra *BehavioralRiskAnalyzer) EvaluateBehavioralRisk(ctx context.Context, r
 		"velocity": velocityRisk.RiskScore * 0.15,  // 15% weight
 		"device":   deviceRisk.RiskScore * 0.15,    // 15% weight
 	}
+	
+	// Add anomaly risk to the combined score (not as a weighted component)
+	combinedAnomalyRisk := anomalyRisk
 
 	combinedRisk := 0.0
 	for _, score := range riskComponents {
 		combinedRisk += score
 	}
+	
+	// Add anomaly risk to the base combined risk
+	combinedRisk += combinedAnomalyRisk
 
 	// Apply amplification factors for high-risk combinations
 	amplificationFactor := bra.calculateAmplificationFactor(riskComponents)
