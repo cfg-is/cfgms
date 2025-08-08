@@ -377,6 +377,221 @@ func TestErrorResponses(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+// TestPermissionDenial specifically tests that insufficient permissions are correctly denied
+func TestPermissionDenial(t *testing.T) {
+	server := setupTestServer(t)
+
+	tests := []struct {
+		name           string
+		endpoint       string
+		method         string
+		permissions    []string
+		expectedStatus int
+		body           []byte
+	}{
+		{
+			name:           "Insufficient permissions for steward list",
+			endpoint:       "/api/v1/stewards",
+			method:         "GET",
+			permissions:    []string{"api-key:read"}, // Wrong permission
+			expectedStatus: http.StatusForbidden,
+		},
+		{
+			name:           "Insufficient permissions for API key creation",
+			endpoint:       "/api/v1/api-keys",
+			method:         "POST",
+			permissions:    []string{"steward:list"}, // Wrong permission
+			expectedStatus: http.StatusForbidden,
+			body:           []byte(`{"name":"Test","permissions":["test"],"tenant_id":"test"}`),
+		},
+		{
+			name:           "Insufficient permissions for config validation",
+			endpoint:       "/api/v1/stewards/test/config/validate",
+			method:         "POST",
+			permissions:    []string{"steward:list"}, // Wrong permission
+			expectedStatus: http.StatusForbidden,
+			body:           []byte(`{"config":{},"version":"1.0.0"}`),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create key with insufficient permissions
+			insufficientKey := NewTestKey(t, server, tt.permissions)
+
+			var req *http.Request
+			if tt.body != nil {
+				req = httptest.NewRequest(tt.method, tt.endpoint, bytes.NewReader(tt.body))
+				req.Header.Set("Content-Type", "application/json")
+			} else {
+				req = httptest.NewRequest(tt.method, tt.endpoint, nil)
+			}
+			req.Header.Set("X-API-Key", insufficientKey)
+			rec := httptest.NewRecorder()
+
+			server.router.ServeHTTP(rec, req)
+
+			assert.Equal(t, tt.expectedStatus, rec.Code, "Should be denied for insufficient permissions")
+
+			if rec.Code == http.StatusForbidden {
+				var errorResponse ErrorResponse
+				err := json.Unmarshal(rec.Body.Bytes(), &errorResponse)
+				require.NoError(t, err)
+				assert.Contains(t, errorResponse.Error.Code, "INSUFFICIENT_PERMISSIONS")
+			}
+		})
+	}
+}
+
+// TestActualAPIFunctionality tests that APIs work correctly with proper permissions (not just permission failures)
+func TestActualAPIFunctionality(t *testing.T) {
+	server := setupTestServer(t)
+
+	t.Run("API Key CRUD operations work with proper permissions", func(t *testing.T) {
+		// Use proper admin permissions for full API key management
+		adminKey := NewTestKey(t, server, []string{"api-key:create", "api-key:list", "api-key:read", "api-key:delete"})
+
+		// 1. Create a new API key
+		createReq := APIKeyCreateRequest{
+			Name:        "Functional Test Key",
+			Permissions: []string{"steward:list"},
+			TenantID:    "func-test-tenant",
+		}
+
+		reqBody, err := json.Marshal(createReq)
+		require.NoError(t, err)
+
+		req := httptest.NewRequest("POST", "/api/v1/api-keys", bytes.NewReader(reqBody))
+		req.Header.Set("X-API-Key", adminKey)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+
+		server.router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusCreated, rec.Code, "API key creation should succeed with proper permissions")
+
+		var createResponse APIResponse
+		err = json.Unmarshal(rec.Body.Bytes(), &createResponse)
+		require.NoError(t, err)
+
+		keyData, ok := createResponse.Data.(map[string]interface{})
+		require.True(t, ok)
+		createdKeyID := keyData["id"].(string)
+		actualKey := keyData["key"].(string)
+
+		// 2. Verify the created key actually works for its intended purpose
+		req = httptest.NewRequest("GET", "/api/v1/stewards", nil)
+		req.Header.Set("X-API-Key", actualKey)
+		rec = httptest.NewRecorder()
+
+		server.router.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusOK, rec.Code, "New API key should work for steward:list")
+
+		// 3. List API keys should include the created key
+		req = httptest.NewRequest("GET", "/api/v1/api-keys", nil)
+		req.Header.Set("X-API-Key", adminKey)
+		rec = httptest.NewRecorder()
+
+		server.router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code, "Listing API keys should work")
+		var listResponse APIResponse
+		err = json.Unmarshal(rec.Body.Bytes(), &listResponse)
+		require.NoError(t, err)
+
+		keys, ok := listResponse.Data.([]interface{})
+		require.True(t, ok)
+		assert.GreaterOrEqual(t, len(keys), 1, "Should have at least one key")
+
+		// 4. Get specific API key by ID
+		req = httptest.NewRequest("GET", "/api/v1/api-keys/"+createdKeyID, nil)
+		req.Header.Set("X-API-Key", adminKey)
+		rec = httptest.NewRecorder()
+
+		server.router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code, "Get API key by ID should work")
+		var getResponse APIResponse
+		err = json.Unmarshal(rec.Body.Bytes(), &getResponse)
+		require.NoError(t, err)
+
+		keyDetails, ok := getResponse.Data.(map[string]interface{})
+		require.True(t, ok)
+		assert.Equal(t, "Functional Test Key", keyDetails["name"])
+
+		// 5. Delete the API key
+		req = httptest.NewRequest("DELETE", "/api/v1/api-keys/"+createdKeyID, nil)
+		req.Header.Set("X-API-Key", adminKey)
+		rec = httptest.NewRecorder()
+
+		server.router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code, "API key deletion should work")
+
+		// 6. Verify deleted key no longer works
+		req = httptest.NewRequest("GET", "/api/v1/stewards", nil)
+		req.Header.Set("X-API-Key", actualKey)
+		rec = httptest.NewRecorder()
+
+		server.router.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, "Deleted API key should no longer work")
+	})
+
+	t.Run("Configuration validation works with proper permissions", func(t *testing.T) {
+		configKey := NewTestKey(t, server, []string{"steward:validate-config"})
+
+		validationReq := ConfigValidationRequest{
+			Config: map[string]interface{}{
+				"file": map[string]interface{}{
+					"path":    "/tmp/test.txt",
+					"content": "test content",
+					"mode":    "0644",
+				},
+			},
+			Version: "1.0.0",
+		}
+
+		reqBody, err := json.Marshal(validationReq)
+		require.NoError(t, err)
+
+		req := httptest.NewRequest("POST", "/api/v1/stewards/test-steward/config/validate", bytes.NewReader(reqBody))
+		req.Header.Set("X-API-Key", configKey)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+
+		server.router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code, "Config validation should work with proper permissions")
+
+		var response APIResponse
+		err = json.Unmarshal(rec.Body.Bytes(), &response)
+		require.NoError(t, err)
+
+		validationData, ok := response.Data.(map[string]interface{})
+		require.True(t, ok)
+		assert.Contains(t, validationData, "valid", "Validation response should contain 'valid' field")
+	})
+
+	t.Run("Cross-permission functionality isolation", func(t *testing.T) {
+		// Create key with only steward:list permission
+		stewardKey := NewTestKey(t, server, []string{"steward:list"})
+
+		// Should work for steward endpoints
+		req := httptest.NewRequest("GET", "/api/v1/stewards", nil)
+		req.Header.Set("X-API-Key", stewardKey)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusOK, rec.Code, "Steward key should work for steward endpoints")
+
+		// Should be denied for API key endpoints (different permission)
+		req = httptest.NewRequest("GET", "/api/v1/api-keys", nil)
+		req.Header.Set("X-API-Key", stewardKey)
+		rec = httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "Steward key should be denied for API key endpoints")
+	})
+}
+
 func TestResponseFormat(t *testing.T) {
 	server := setupTestServer(t)
 
