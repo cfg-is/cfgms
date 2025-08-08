@@ -43,6 +43,9 @@ CFGMS (Config Management System) is a modern, Go-based configuration management 
 
 3. **Implement using TDD**
    - Write tests first, then implementation
+   - **CRITICAL**: Never mock CFGMS functionality - test the actual program using real components
+   - Use real memory stores, real session creation, real component integration
+   - Only mock external dependencies we don't control (network, file I/O)
    - Run tests frequently: `make test`
 
 4. **MANDATORY Security Review** (CRITICAL)
@@ -86,8 +89,12 @@ CFGMS (Config Management System) is a modern, Go-based configuration management 
    ```bash
    make test  # MUST pass 100% before proceeding
    ```
-   - If ANY tests fail, fix them before continuing
-   - This includes unrelated test failures
+   **ZERO TOLERANCE POLICY**: 
+   - If ANY tests fail, STOP immediately and fix them before continuing
+   - This includes ALL unrelated test failures - fix them or the story cannot proceed
+   - NO exceptions, NO workarounds, NO "fix later" - tests MUST be 100% green
+   - Stories cannot be marked 'Done' or merged with ANY failing tests
+   - Bypassing this requirement violates the development workflow
 
 6. **Run Security Scanning** (MANDATORY)
    ```bash
@@ -143,8 +150,9 @@ This ensures optimal order (test → security → summary) and provides clear va
 
 11. **Final Test Run** (MANDATORY)
     ```bash
-    make test  # Final verification before merge
+    make test  # Final verification before merge - MUST be 100% green
     ```
+    **FINAL GATE**: This is the last checkpoint before merge. If ANY tests fail here, DO NOT MERGE. Fix all failures first.
 
 12. **Merge to Develop**
     ```bash
@@ -155,9 +163,10 @@ This ensures optimal order (test → security → summary) and provides clear va
 
 **VALIDATION CHECKPOINTS:**
 - Verify branch was created: `git log --oneline -5`
-- Verify tests pass: `make test`
+- **Verify tests pass: `make test` - NO FAILING TESTS ALLOWED**
 - Verify security scan passes: `make security-scan`
 - Verify project updated: Check GitHub project board
+- **BLOCKING REQUIREMENT**: ALL validation checkpoints must pass before story completion
 
 **GITHUB ACTIONS CI/CD:**
 - **Security Scanning Workflow**: Automatic security validation on push/PR
@@ -426,6 +435,12 @@ features/
 
 ### Testing Approach
 - **TDD**: Write table-driven tests before implementation
+- **Real Component Testing**: **NEVER mock CFGMS functionality in tests - test the actual program**
+  - Use real memory stores (e.g., `memory.NewStore()`) instead of mocking RBAC interfaces
+  - Use real session creation (`NewSession()`) instead of mock session managers
+  - Use real component integration instead of simulated behavior
+  - Only mock external dependencies that we don't control (network calls, file I/O)
+  - Integration tests must demonstrate actual system functionality, not theoretical behavior
 - **Coverage**: Aim for 100% test coverage on core components
 - **Race Detection**: Always run tests with `-race` flag
 - **Integration**: Test component interactions with real dependencies
