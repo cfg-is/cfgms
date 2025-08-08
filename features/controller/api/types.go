@@ -21,9 +21,9 @@ type ErrorResponse struct {
 
 // APIError represents an API error
 type APIError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
-	Details string `json:"details,omitempty"`
+	Code    string                 `json:"code"`
+	Message string                 `json:"message"`
+	Details map[string]interface{} `json:"details,omitempty"`
 }
 
 // StewardInfo represents steward information for API responses

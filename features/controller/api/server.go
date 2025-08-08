@@ -121,82 +121,82 @@ func (s *Server) setupRouter() {
 
 	// Steward management endpoints
 	stewards := api.PathPrefix("/stewards").Subrouter()
-	stewards.HandleFunc("", s.handleListStewards).Methods("GET")
-	stewards.HandleFunc("/{id}", s.handleGetSteward).Methods("GET")
-	stewards.HandleFunc("/{id}/dna", s.handleGetStewardDNA).Methods("GET")
+	stewards.Handle("", s.requirePermission("steward", "list")(http.HandlerFunc(s.handleListStewards))).Methods("GET")
+	stewards.Handle("/{id}", s.requirePermission("steward", "read")(http.HandlerFunc(s.handleGetSteward))).Methods("GET")
+	stewards.Handle("/{id}/dna", s.requirePermission("steward", "read-dna")(http.HandlerFunc(s.handleGetStewardDNA))).Methods("GET")
 
 	// Configuration management endpoints
-	stewards.HandleFunc("/{id}/config", s.handleGetStewardConfig).Methods("GET")
-	stewards.HandleFunc("/{id}/config", s.handleUpdateStewardConfig).Methods("PUT")
-	stewards.HandleFunc("/{id}/config/validate", s.handleValidateConfig).Methods("POST")
-	stewards.HandleFunc("/{id}/config/status", s.handleGetConfigStatus).Methods("GET")
-	stewards.HandleFunc("/{id}/config/effective", s.handleGetEffectiveConfig).Methods("GET")
+	stewards.Handle("/{id}/config", s.requirePermission("steward", "read-config")(http.HandlerFunc(s.handleGetStewardConfig))).Methods("GET")
+	stewards.Handle("/{id}/config", s.requirePermission("steward", "write-config")(http.HandlerFunc(s.handleUpdateStewardConfig))).Methods("PUT")
+	stewards.Handle("/{id}/config/validate", s.requirePermission("steward", "validate-config")(http.HandlerFunc(s.handleValidateConfig))).Methods("POST")
+	stewards.Handle("/{id}/config/status", s.requirePermission("steward", "read-config")(http.HandlerFunc(s.handleGetConfigStatus))).Methods("GET")
+	stewards.Handle("/{id}/config/effective", s.requirePermission("steward", "read-config")(http.HandlerFunc(s.handleGetEffectiveConfig))).Methods("GET")
 
 	// Script management endpoints
-	stewards.HandleFunc("/{id}/scripts/executions", s.handleGetScriptExecutions).Methods("GET")
-	stewards.HandleFunc("/{id}/scripts/executions/{execution_id}", s.handleGetScriptExecution).Methods("GET")
-	stewards.HandleFunc("/{id}/scripts/executions/{execution_id}/retry", s.handlePostScriptRetry).Methods("POST")
-	stewards.HandleFunc("/{id}/scripts/metrics", s.handleGetScriptMetrics).Methods("GET")
-	stewards.HandleFunc("/{id}/scripts/status", s.handleGetScriptStatus).Methods("GET")
+	stewards.Handle("/{id}/scripts/executions", s.requirePermission("steward", "read-scripts")(http.HandlerFunc(s.handleGetScriptExecutions))).Methods("GET")
+	stewards.Handle("/{id}/scripts/executions/{execution_id}", s.requirePermission("steward", "read-scripts")(http.HandlerFunc(s.handleGetScriptExecution))).Methods("GET")
+	stewards.Handle("/{id}/scripts/executions/{execution_id}/retry", s.requirePermission("steward", "execute-scripts")(http.HandlerFunc(s.handlePostScriptRetry))).Methods("POST")
+	stewards.Handle("/{id}/scripts/metrics", s.requirePermission("steward", "read-scripts")(http.HandlerFunc(s.handleGetScriptMetrics))).Methods("GET")
+	stewards.Handle("/{id}/scripts/status", s.requirePermission("steward", "read-scripts")(http.HandlerFunc(s.handleGetScriptStatus))).Methods("GET")
 
 	// Certificate management endpoints
 	certs := api.PathPrefix("/certificates").Subrouter()
-	certs.HandleFunc("", s.handleListCertificates).Methods("GET")
-	certs.HandleFunc("/provision", s.handleProvisionCertificate).Methods("POST")
-	certs.HandleFunc("/{serial}/revoke", s.handleRevokeCertificate).Methods("POST")
+	certs.Handle("", s.requirePermission("certificate", "list")(http.HandlerFunc(s.handleListCertificates))).Methods("GET")
+	certs.Handle("/provision", s.requirePermission("certificate", "provision")(http.HandlerFunc(s.handleProvisionCertificate))).Methods("POST")
+	certs.Handle("/{serial}/revoke", s.requirePermission("certificate", "revoke")(http.HandlerFunc(s.handleRevokeCertificate))).Methods("POST")
 
 	// RBAC management endpoints
 	rbac := api.PathPrefix("/rbac").Subrouter()
 
 	// Permissions
-	rbac.HandleFunc("/permissions", s.handleListPermissions).Methods("GET")
-	rbac.HandleFunc("/permissions/{id}", s.handleGetPermission).Methods("GET")
+	rbac.Handle("/permissions", s.requirePermission("rbac", "list-permissions")(http.HandlerFunc(s.handleListPermissions))).Methods("GET")
+	rbac.Handle("/permissions/{id}", s.requirePermission("rbac", "read-permission")(http.HandlerFunc(s.handleGetPermission))).Methods("GET")
 
 	// Roles
-	rbac.HandleFunc("/roles", s.handleListRoles).Methods("GET")
-	rbac.HandleFunc("/roles", s.handleCreateRole).Methods("POST")
-	rbac.HandleFunc("/roles/{id}", s.handleGetRole).Methods("GET")
-	rbac.HandleFunc("/roles/{id}", s.handleUpdateRole).Methods("PUT")
-	rbac.HandleFunc("/roles/{id}", s.handleDeleteRole).Methods("DELETE")
+	rbac.Handle("/roles", s.requirePermission("rbac", "list-roles")(http.HandlerFunc(s.handleListRoles))).Methods("GET")
+	rbac.Handle("/roles", s.requirePermission("rbac", "create-role")(http.HandlerFunc(s.handleCreateRole))).Methods("POST")
+	rbac.Handle("/roles/{id}", s.requirePermission("rbac", "read-role")(http.HandlerFunc(s.handleGetRole))).Methods("GET")
+	rbac.Handle("/roles/{id}", s.requirePermission("rbac", "update-role")(http.HandlerFunc(s.handleUpdateRole))).Methods("PUT")
+	rbac.Handle("/roles/{id}", s.requirePermission("rbac", "delete-role")(http.HandlerFunc(s.handleDeleteRole))).Methods("DELETE")
 
 	// Subjects
-	rbac.HandleFunc("/subjects", s.handleListSubjects).Methods("GET")
-	rbac.HandleFunc("/subjects", s.handleCreateSubject).Methods("POST")
-	rbac.HandleFunc("/subjects/{id}", s.handleGetSubject).Methods("GET")
-	rbac.HandleFunc("/subjects/{id}", s.handleUpdateSubject).Methods("PUT")
-	rbac.HandleFunc("/subjects/{id}", s.handleDeleteSubject).Methods("DELETE")
+	rbac.Handle("/subjects", s.requirePermission("rbac", "list-subjects")(http.HandlerFunc(s.handleListSubjects))).Methods("GET")
+	rbac.Handle("/subjects", s.requirePermission("rbac", "create-subject")(http.HandlerFunc(s.handleCreateSubject))).Methods("POST")
+	rbac.Handle("/subjects/{id}", s.requirePermission("rbac", "read-subject")(http.HandlerFunc(s.handleGetSubject))).Methods("GET")
+	rbac.Handle("/subjects/{id}", s.requirePermission("rbac", "update-subject")(http.HandlerFunc(s.handleUpdateSubject))).Methods("PUT")
+	rbac.Handle("/subjects/{id}", s.requirePermission("rbac", "delete-subject")(http.HandlerFunc(s.handleDeleteSubject))).Methods("DELETE")
 
 	// Role assignments
-	rbac.HandleFunc("/subjects/{id}/roles", s.handleGetSubjectRoles).Methods("GET")
-	rbac.HandleFunc("/subjects/{id}/roles", s.handleAssignRole).Methods("POST")
-	rbac.HandleFunc("/subjects/{id}/roles/{role_id}", s.handleRevokeRole).Methods("DELETE")
+	rbac.Handle("/subjects/{id}/roles", s.requirePermission("rbac", "read-assignments")(http.HandlerFunc(s.handleGetSubjectRoles))).Methods("GET")
+	rbac.Handle("/subjects/{id}/roles", s.requirePermission("rbac", "assign-role")(http.HandlerFunc(s.handleAssignRole))).Methods("POST")
+	rbac.Handle("/subjects/{id}/roles/{role_id}", s.requirePermission("rbac", "revoke-role")(http.HandlerFunc(s.handleRevokeRole))).Methods("DELETE")
 
 	// Permission checking
-	rbac.HandleFunc("/subjects/{id}/permissions", s.handleGetSubjectPermissions).Methods("GET")
-	rbac.HandleFunc("/check", s.handleCheckPermission).Methods("POST")
+	rbac.Handle("/subjects/{id}/permissions", s.requirePermission("rbac", "read-permissions")(http.HandlerFunc(s.handleGetSubjectPermissions))).Methods("GET")
+	rbac.Handle("/check", s.requirePermission("rbac", "check-permission")(http.HandlerFunc(s.handleCheckPermission))).Methods("POST")
 
 	// API key management endpoints (for managing API keys themselves)
 	apiKeys := api.PathPrefix("/api-keys").Subrouter()
-	apiKeys.HandleFunc("", s.handleListAPIKeys).Methods("GET")
-	apiKeys.HandleFunc("", s.handleCreateAPIKey).Methods("POST")
-	apiKeys.HandleFunc("/{id}", s.handleGetAPIKey).Methods("GET")
-	apiKeys.HandleFunc("/{id}", s.handleDeleteAPIKey).Methods("DELETE")
+	apiKeys.Handle("", s.requirePermission("api-key", "list")(http.HandlerFunc(s.handleListAPIKeys))).Methods("GET")
+	apiKeys.Handle("", s.requirePermission("api-key", "create")(http.HandlerFunc(s.handleCreateAPIKey))).Methods("POST")
+	apiKeys.Handle("/{id}", s.requirePermission("api-key", "read")(http.HandlerFunc(s.handleGetAPIKey))).Methods("GET")
+	apiKeys.Handle("/{id}", s.requirePermission("api-key", "delete")(http.HandlerFunc(s.handleDeleteAPIKey))).Methods("DELETE")
 
 	// Monitoring endpoints
 	monitoring := api.PathPrefix("/monitoring").Subrouter()
-	monitoring.HandleFunc("/health", s.handleSystemHealth).Methods("GET")
-	monitoring.HandleFunc("/metrics", s.handleSystemMetrics).Methods("GET")
-	monitoring.HandleFunc("/resources", s.handleResourceMetrics).Methods("GET")
-	monitoring.HandleFunc("/logs", s.handleMonitoringLogs).Methods("GET")
-	monitoring.HandleFunc("/traces", s.handleMonitoringTraces).Methods("GET")
-	monitoring.HandleFunc("/events", s.handleMonitoringEvents).Methods("GET")
-	monitoring.HandleFunc("/config", s.handleMonitoringConfig).Methods("GET")
+	monitoring.Handle("/health", s.requirePermission("monitoring", "read-health")(http.HandlerFunc(s.handleSystemHealth))).Methods("GET")
+	monitoring.Handle("/metrics", s.requirePermission("monitoring", "read-metrics")(http.HandlerFunc(s.handleSystemMetrics))).Methods("GET")
+	monitoring.Handle("/resources", s.requirePermission("monitoring", "read-resources")(http.HandlerFunc(s.handleResourceMetrics))).Methods("GET")
+	monitoring.Handle("/logs", s.requirePermission("monitoring", "read-logs")(http.HandlerFunc(s.handleMonitoringLogs))).Methods("GET")
+	monitoring.Handle("/traces", s.requirePermission("monitoring", "read-traces")(http.HandlerFunc(s.handleMonitoringTraces))).Methods("GET")
+	monitoring.Handle("/events", s.requirePermission("monitoring", "read-events")(http.HandlerFunc(s.handleMonitoringEvents))).Methods("GET")
+	monitoring.Handle("/config", s.requirePermission("monitoring", "read-config")(http.HandlerFunc(s.handleMonitoringConfig))).Methods("GET")
 	
 	// Steward-specific monitoring
-	monitoring.HandleFunc("/stewards/{id}/metrics", s.handleStewardMetrics).Methods("GET")
+	monitoring.Handle("/stewards/{id}/metrics", s.requirePermission("monitoring", "read-steward-metrics")(http.HandlerFunc(s.handleStewardMetrics))).Methods("GET")
 	
 	// Controller service monitoring
-	monitoring.HandleFunc("/controller/services", s.handleControllerServices).Methods("GET")
+	monitoring.Handle("/controller/services", s.requirePermission("monitoring", "read-services")(http.HandlerFunc(s.handleControllerServices))).Methods("GET")
 }
 
 // Start starts the HTTP server
