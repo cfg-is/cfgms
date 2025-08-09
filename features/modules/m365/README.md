@@ -112,9 +112,31 @@ Manages Intune device configuration policies:
 
 ## Authentication
 
-The modules support OAuth2 authentication with secure local credential storage:
+The modules support both OAuth2 application permissions and delegated permissions with secure local credential storage:
 
-### Client Credentials Flow (Recommended for Production)
+### Delegated Permissions Flow (New in v0.4.0)
+```yaml
+steward:
+  authentication:
+    type: "oauth2_delegated"
+    oauth2:
+      client_id: "${M365_CLIENT_ID}"
+      client_secret: "${M365_CLIENT_SECRET}"
+      tenant_id: "your-tenant-id"
+      redirect_uri: "http://localhost:8080/callback"
+      support_delegated_auth: true
+      fallback_to_app_permissions: true
+      delegated_scopes:
+        - "User.Read"
+        - "User.ReadWrite.All"
+        - "Directory.Read.All"
+        - "Policy.ReadWrite.ConditionalAccess"
+      required_delegated_scopes:
+        - "User.Read"
+        - "Directory.Read.All"
+```
+
+### Client Credentials Flow (Application Permissions)
 ```yaml
 steward:
   authentication:
@@ -130,6 +152,7 @@ steward:
 
 The Azure AD application needs these permissions:
 
+#### Application Permissions (for Client Credentials Flow)
 **User Management:**
 - `User.ReadWrite.All`
 - `Group.ReadWrite.All`
@@ -142,6 +165,59 @@ The Azure AD application needs these permissions:
 **Intune Management:**
 - `DeviceManagementConfiguration.ReadWrite.All`
 - `DeviceManagementApps.ReadWrite.All`
+
+#### Delegated Permissions (for Delegated Flow)
+**User Management:**
+- `User.Read` (minimum required)
+- `User.ReadWrite.All` 
+- `Directory.Read.All` (minimum required)
+- `Directory.ReadWrite.All`
+- `Group.Read.All`
+- `Group.ReadWrite.All`
+
+**Conditional Access:**
+- `Policy.ReadWrite.ConditionalAccess`
+
+**Intune Management:**
+- `DeviceManagementConfiguration.ReadWrite.All`
+- `DeviceManagementApps.ReadWrite.All`
+
+### Delegated Permissions vs Application Permissions
+
+| Aspect | Application Permissions | Delegated Permissions |
+|--------|------------------------|----------------------|
+| **User Context** | Operations run as application | Operations run as authenticated user |
+| **Access Level** | Full tenant access | Limited by user's permissions |
+| **Authentication** | Client credentials only | Requires user authentication |
+| **Audit Trail** | Shows application as actor | Shows actual user as actor |
+| **Security Model** | Application-wide consent | User-aware access controls |
+| **Use Case** | Automated/background operations | Interactive/user-driven operations |
+
+### User Context Configuration
+
+When using delegated permissions, operations preserve user context:
+
+```yaml
+# User context is automatically tracked and preserved
+user_context:
+  user_id: "admin@contoso.com"
+  user_principal_name: "admin@contoso.com"
+  display_name: "System Administrator"
+  roles:
+    - "Global Administrator"
+    - "Conditional Access Administrator"
+  last_authenticated: "2024-01-15T10:30:00Z"
+  session_id: "session-abc123"
+
+resources:
+  - id: "tenant:user@domain.com"
+    type: "entra_user"
+    config:
+      # Operations will be performed with user context
+      use_delegated_permissions: true
+      required_scopes: ["User.ReadWrite.All"]
+      # ... resource configuration
+```
 
 ## Multi-Tenant Configuration
 
@@ -310,6 +386,46 @@ workflow:
         # Create blocking policy
 ```
 
+## Delegated Permissions Benefits
+
+### Enhanced Security
+- **Principle of Least Privilege**: Operations limited by user's actual permissions
+- **Audit Transparency**: Operations attributed to actual users, not applications
+- **Zero Standing Access**: No permanent elevated application permissions
+- **Context-Aware Access**: Operations respect user's current authorization state
+
+### Compliance & Governance
+- **Regulatory Compliance**: Better alignment with SOX, GDPR, and other frameworks
+- **Audit Trail**: Clear attribution of who performed what operations
+- **Access Reviews**: User permissions can be reviewed and adjusted dynamically
+- **Segregation of Duties**: Different users can have different operational capabilities
+
+### Operational Flexibility
+- **Role-Based Operations**: Different users can perform different M365 operations
+- **Graceful Degradation**: Automatic fallback to application permissions when needed
+- **Interactive Workflows**: Support for user-driven configuration changes
+- **Permission Validation**: Operations validate permissions before execution
+
+### Implementation Notes
+
+#### Token Management
+- Delegated tokens are cached per user to optimize performance
+- Automatic token refresh handles expiration seamlessly
+- Secure encrypted storage for both tokens and user context
+- Cache invalidation when user permissions change
+
+#### Error Handling
+- Permission validation before operations prevent authorization failures
+- Graceful fallback to application permissions when configured
+- Detailed error messages for troubleshooting permission issues
+- Retry logic for transient authentication failures
+
+#### Security Considerations
+- All delegated operations are audited and logged
+- Token encryption at rest using AES-256-GCM
+- Secure file permissions (0600) for credential storage
+- Session management with configurable timeouts
+
 ## Performance and Scale
 
 The Virtual Steward is designed for enterprise scale:
@@ -317,7 +433,7 @@ The Virtual Steward is designed for enterprise scale:
 - **Multi-Tenant**: Supports 2-20,000 M365 tenants
 - **Rate Limiting**: Respects Graph API limits (10,000 requests/10 min)
 - **Parallel Processing**: Concurrent operations across tenants
-- **Caching**: Intelligent token and metadata caching
+- **Caching**: Intelligent token and metadata caching (both app and delegated tokens)
 - **Batch Operations**: Groups related API calls for efficiency
 
 ## Monitoring and Observability

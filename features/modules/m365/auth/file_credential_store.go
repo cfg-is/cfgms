@@ -30,8 +30,10 @@ type FileCredentialStore struct {
 
 // StoredCredentials represents the structure of data stored in credential files
 type StoredCredentials struct {
-	Tokens  map[string]*AccessToken  `json:"tokens"`
-	Configs map[string]*OAuth2Config `json:"configs"`
+	Tokens           map[string]*AccessToken  `json:"tokens"`
+	DelegatedTokens  map[string]*AccessToken  `json:"delegated_tokens,omitempty"`
+	UserContexts     map[string]*UserContext  `json:"user_contexts,omitempty"`
+	Configs          map[string]*OAuth2Config `json:"configs"`
 }
 
 // NewFileCredentialStore creates a new file-based credential store
@@ -62,8 +64,10 @@ func (s *FileCredentialStore) StoreToken(tenantID string, token *AccessToken) er
 	if err != nil {
 		// If file doesn't exist, create new credentials
 		creds = &StoredCredentials{
-			Tokens:  make(map[string]*AccessToken),
-			Configs: make(map[string]*OAuth2Config),
+			Tokens:          make(map[string]*AccessToken),
+			DelegatedTokens: make(map[string]*AccessToken),
+			UserContexts:    make(map[string]*UserContext),
+			Configs:         make(map[string]*OAuth2Config),
 		}
 	}
 
@@ -129,8 +133,10 @@ func (s *FileCredentialStore) StoreConfig(tenantID string, config *OAuth2Config)
 	if err != nil {
 		// If file doesn't exist, create new credentials
 		creds = &StoredCredentials{
-			Tokens:  make(map[string]*AccessToken),
-			Configs: make(map[string]*OAuth2Config),
+			Tokens:          make(map[string]*AccessToken),
+			DelegatedTokens: make(map[string]*AccessToken),
+			UserContexts:    make(map[string]*UserContext),
+			Configs:         make(map[string]*OAuth2Config),
 		}
 	}
 
@@ -245,6 +251,20 @@ func (s *FileCredentialStore) loadCredentials(tenantID string) (*StoredCredentia
 	var creds StoredCredentials
 	if err := json.Unmarshal(decryptedData, &creds); err != nil {
 		return nil, fmt.Errorf("failed to parse credentials: %w", err)
+	}
+
+	// Ensure backward compatibility by initializing new fields if they don't exist
+	if creds.DelegatedTokens == nil {
+		creds.DelegatedTokens = make(map[string]*AccessToken)
+	}
+	if creds.UserContexts == nil {
+		creds.UserContexts = make(map[string]*UserContext)
+	}
+	if creds.Tokens == nil {
+		creds.Tokens = make(map[string]*AccessToken)
+	}
+	if creds.Configs == nil {
+		creds.Configs = make(map[string]*OAuth2Config)
 	}
 
 	return &creds, nil
@@ -439,4 +459,178 @@ func (s *FileCredentialStore) copyFile(src, dst string) error {
 
 	_, err = io.Copy(dstFile, srcFile)
 	return err
+}
+
+// StoreDelegatedToken securely stores a delegated access token for a specific user
+func (s *FileCredentialStore) StoreDelegatedToken(tenantID string, userID string, token *AccessToken) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	// Load existing credentials
+	creds, err := s.loadCredentials(tenantID)
+	if err != nil {
+		// If file doesn't exist, create new credentials
+		creds = &StoredCredentials{
+			Tokens:          make(map[string]*AccessToken),
+			DelegatedTokens: make(map[string]*AccessToken),
+			UserContexts:    make(map[string]*UserContext),
+			Configs:         make(map[string]*OAuth2Config),
+		}
+	}
+
+	// Ensure maps are initialized
+	if creds.DelegatedTokens == nil {
+		creds.DelegatedTokens = make(map[string]*AccessToken)
+	}
+
+	// Store the delegated token with user-specific key
+	tokenKey := fmt.Sprintf("delegated_%s", userID)
+	creds.DelegatedTokens[tokenKey] = token
+
+	// Save credentials back to file
+	return s.saveCredentials(tenantID, creds)
+}
+
+// GetDelegatedToken retrieves a stored delegated access token for a specific user
+func (s *FileCredentialStore) GetDelegatedToken(tenantID string, userID string) (*AccessToken, error) {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	// Load credentials
+	creds, err := s.loadCredentials(tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load credentials: %w", err)
+	}
+
+	// Ensure maps are initialized
+	if creds.DelegatedTokens == nil {
+		return nil, fmt.Errorf("no delegated tokens found for tenant %s", tenantID)
+	}
+
+	// Get the delegated token
+	tokenKey := fmt.Sprintf("delegated_%s", userID)
+	token, exists := creds.DelegatedTokens[tokenKey]
+	if !exists {
+		return nil, fmt.Errorf("no delegated token found for user %s in tenant %s", userID, tenantID)
+	}
+
+	return token, nil
+}
+
+// DeleteDelegatedToken removes a stored delegated access token for a specific user
+func (s *FileCredentialStore) DeleteDelegatedToken(tenantID string, userID string) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	// Load existing credentials
+	creds, err := s.loadCredentials(tenantID)
+	if err != nil {
+		// If file doesn't exist, consider it already deleted
+		return nil
+	}
+
+	// Ensure maps are initialized
+	if creds.DelegatedTokens == nil {
+		return nil
+	}
+
+	// Delete the delegated token
+	tokenKey := fmt.Sprintf("delegated_%s", userID)
+	delete(creds.DelegatedTokens, tokenKey)
+
+	// If no more tokens or configs, delete the entire file
+	if len(creds.Tokens) == 0 && len(creds.DelegatedTokens) == 0 && len(creds.Configs) == 0 {
+		credPath := s.getCredentialPath(tenantID)
+		return os.Remove(credPath)
+	}
+
+	// Otherwise, save the updated credentials
+	return s.saveCredentials(tenantID, creds)
+}
+
+// StoreUserContext securely stores user context information
+func (s *FileCredentialStore) StoreUserContext(tenantID string, userID string, context *UserContext) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	// Load existing credentials
+	creds, err := s.loadCredentials(tenantID)
+	if err != nil {
+		// If file doesn't exist, create new credentials
+		creds = &StoredCredentials{
+			Tokens:          make(map[string]*AccessToken),
+			DelegatedTokens: make(map[string]*AccessToken),
+			UserContexts:    make(map[string]*UserContext),
+			Configs:         make(map[string]*OAuth2Config),
+		}
+	}
+
+	// Ensure maps are initialized
+	if creds.UserContexts == nil {
+		creds.UserContexts = make(map[string]*UserContext)
+	}
+
+	// Store the user context
+	contextKey := fmt.Sprintf("user_%s", userID)
+	creds.UserContexts[contextKey] = context
+
+	// Save credentials back to file
+	return s.saveCredentials(tenantID, creds)
+}
+
+// GetUserContext retrieves stored user context information
+func (s *FileCredentialStore) GetUserContext(tenantID string, userID string) (*UserContext, error) {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	// Load credentials
+	creds, err := s.loadCredentials(tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load credentials: %w", err)
+	}
+
+	// Ensure maps are initialized
+	if creds.UserContexts == nil {
+		return nil, fmt.Errorf("no user contexts found for tenant %s", tenantID)
+	}
+
+	// Get the user context
+	contextKey := fmt.Sprintf("user_%s", userID)
+	context, exists := creds.UserContexts[contextKey]
+	if !exists {
+		return nil, fmt.Errorf("no user context found for user %s in tenant %s", userID, tenantID)
+	}
+
+	return context, nil
+}
+
+// DeleteUserContext removes stored user context information
+func (s *FileCredentialStore) DeleteUserContext(tenantID string, userID string) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	// Load existing credentials
+	creds, err := s.loadCredentials(tenantID)
+	if err != nil {
+		// If file doesn't exist, consider it already deleted
+		return nil
+	}
+
+	// Ensure maps are initialized
+	if creds.UserContexts == nil {
+		return nil
+	}
+
+	// Delete the user context
+	contextKey := fmt.Sprintf("user_%s", userID)
+	delete(creds.UserContexts, contextKey)
+
+	// If no more tokens or configs, delete the entire file
+	if len(creds.Tokens) == 0 && len(creds.DelegatedTokens) == 0 && len(creds.UserContexts) == 0 && len(creds.Configs) == 0 {
+		credPath := s.getCredentialPath(tenantID)
+		return os.Remove(credPath)
+	}
+
+	// Otherwise, save the updated credentials
+	return s.saveCredentials(tenantID, creds)
 }
