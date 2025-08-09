@@ -229,7 +229,12 @@ func (p *MicrosoftMultiTenantProvider) DiscoverTenantsFromMicrosoft(ctx context.
 	if err != nil {
 		return nil, fmt.Errorf("failed to make request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			// Log error but continue - this is cleanup
+			_ = closeErr
+		}
+	}()
 	
 	if resp.StatusCode != http.StatusOK {
 		return &TenantDiscoveryResult{
@@ -354,7 +359,12 @@ func (p *MicrosoftMultiTenantProvider) rawAPIWithToken(ctx context.Context, meth
 	if err != nil {
 		return nil, fmt.Errorf("HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			// Log error but continue - this is cleanup
+			_ = closeErr
+		}
+	}()
 	
 	// Parse response
 	var responseData interface{}
