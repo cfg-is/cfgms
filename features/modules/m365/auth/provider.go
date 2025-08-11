@@ -2,8 +2,16 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
+)
+
+// Common errors for authentication operations
+var (
+	ErrTokenNotFound = errors.New("token not found")
+	ErrTokenExpired  = errors.New("token expired")
+	ErrInvalidToken  = errors.New("invalid token")
 )
 
 // Provider defines the interface for Microsoft Graph authentication
