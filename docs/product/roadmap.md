@@ -291,7 +291,7 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 
 #### v0.4.0 (Alpha) - Advanced Multi-Tenancy & Plugin Architecture
 
-**Status**: 🚧 IN PROGRESS - 109/177 story points completed across 31 stories (Issues #110-116, #124-135) - 61.6% complete
+**Status**: 🚧 IN PROGRESS - 109/159 story points completed across 29 stories (Issues #110-117, #124-135) - 68.6% complete *(18 points moved to v1.1.0)*
 
 **Goal**: Transform CFGMS from foundational architecture to production-ready enterprise platform with advanced multi-tenancy, unified directory management, and comprehensive module system.
 
@@ -319,11 +319,13 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 - [x] **Component Failure Security Posture** (Issue #134) - 4 points ✅ COMPLETED
 - [x] **Permission Escalation Attack Prevention** (Issue #135) - 5 points ✅ COMPLETED
 
-**Epic 3: M365 Multi-Tenant Enterprise App Support (39 story points) - Issues #116-119**
+**Epic 3: M365 Direct App Access Foundation (21 story points) - Issues #116-117**
 - [x] **Multi-Tenant Consent Flow Implementation** (Issue #116) - 13 points ✅ COMPLETED
-- [ ] **Delegated Permissions Model** (Issue #117) - 8 points
-- [ ] **Enhanced Tenant Management** (Issue #118) - 8 points
-- [ ] **Per-Tenant Token Storage and Management** (Issue #119) - 10 points
+- [ ] **Delegated Permissions Model - Direct App Access** (Issue #117) - 8 points *(Scope reduced: Direct app testing only, full multi-tenant moved to v1.1.0+)*
+
+**Epic 3.1: M365 Multi-Tenant Enterprise App Support (18 story points) - Issues #118-119 - MOVED TO v1.1.0+**
+- [ ] **Enhanced Tenant Management** (Issue #118) - 8 points *(Moved to v1.1.0 - requires CSP sandbox)*
+- [ ] **Per-Tenant Token Storage and Management** (Issue #119) - 10 points *(Moved to v1.1.0 - requires CSP sandbox)*
 
 **Epic 4: Unified Directory Management Interface (47 story points) - Issues #120-123**
 - [ ] **Directory Service Abstraction Layer** (Issue #120) - 15 points
@@ -356,7 +358,13 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 #### v0.7.0 (Pre-OSS / Alpha) - Open Source Preparation
 
 - [ ] Conduct comprehensive security code review
-- [ ] Finalize GTM stratagy, open-core, vs full OSS, select license etc
+- [ ] Finalize GTM strategy, open-core vs full OSS, select license etc
+- [ ] Define open-core vs commercial feature boundaries
+- [ ] Renumber roadmap for proper semantic versioning alignment
+  - [ ] Reassess all version numbers for semantic versioning compliance
+  - [ ] Align v1.0.0 with first truly production-ready, API-stable release
+  - [ ] Update documentation and marketing materials with new version strategy
+  - [ ] Ensure open-source v1.0.0 represents stable, backwards-compatible public API
 - [ ] Perform branch cleanup (e.g., ensure `main` and `develop` are clean, remove old feature branches)
 - [ ] Review repository for any sensitive data or leftover internal artifacts
 - [ ] Clean up `README.md`, `CONTRIBUTING.md`, and other project meta-files for public consumption
@@ -387,6 +395,9 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 #### v1.1.0 - v1.3.0: SaaS Steward Implementation & MSP Integrations
 
 **Phase 1: M365 Foundation (v1.1.0)**
+- [ ] **Complete M365 Multi-Tenant Enterprise App Support** (18 story points from v0.4.0):
+  - [ ] Enhanced Tenant Management (Issue #118) - 8 points *(requires CSP sandbox setup)*
+  - [ ] Per-Tenant Token Storage and Management (Issue #119) - 10 points *(requires CSP sandbox setup)*
 - [ ] Implement SaaS Steward using workflow engine foundation
 - [ ] Core M365 modules for CSP management (15+ modules):
   - [ ] Entra ID modules (user, group, license, conditional access)
@@ -406,6 +417,13 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 - [ ] AutoTask integration modules
   - [ ] Account and contact management
   - [ ] Ticket and contract management
+- [ ] Smart Helpdesk Context System
+  - [ ] Phone system integration for automatic client environment loading
+  - [ ] Real-time client environment dashboard with DNA-driven system state
+  - [ ] Progressive context surfacing based on call notes and issue keywords
+  - [ ] Network topology visualization and recent changes timeline
+  - [ ] Integration with PSA ticketing for contextual troubleshooting guides
+  - [ ] Call logging interface with intelligent information surfacing
 - [ ] Customer onboarding automation workflows
 - [ ] User lifecycle management workflows
 
