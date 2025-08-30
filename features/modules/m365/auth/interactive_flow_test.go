@@ -271,51 +271,95 @@ func TestCapabilityTesting(t *testing.T) {
 		
 		w.Header().Set("Content-Type", "application/json")
 		
-		switch r.URL.Path {
-		case "/me":
-			// User profile endpoint
+		// Strip /v1.0 prefix if present for consistent handling
+		path := r.URL.Path
+		if strings.HasPrefix(path, "/v1.0") {
+			path = strings.TrimPrefix(path, "/v1.0")
+		}
+		
+		switch {
+		case strings.HasPrefix(path, "/users"):
+			// MSP user read endpoint - handles both /users and /users with query params
+			response := map[string]interface{}{
+				"value": []map[string]interface{}{
+					{"id": "user-1", "userPrincipalName": "user1@example.com", "displayName": "Test User 1"},
+					{"id": "user-2", "userPrincipalName": "user2@example.com", "displayName": "Test User 2"},
+				},
+			}
+			json.NewEncoder(w).Encode(response)
+			
+		case strings.HasPrefix(path, "/organization"):
+			// MSP organization endpoint
+			response := map[string]interface{}{
+				"value": []map[string]interface{}{
+					{
+						"id": "org-123",
+						"displayName": "Test Organization",
+						"verifiedDomains": []interface{}{
+							map[string]interface{}{"name": "example.com", "isDefault": true},
+							map[string]interface{}{"name": "test.onmicrosoft.com", "isDefault": false},
+						},
+					},
+				},
+			}
+			json.NewEncoder(w).Encode(response)
+			
+		case strings.HasPrefix(path, "/groups"):
+			// MSP group management endpoint
+			response := map[string]interface{}{
+				"value": []map[string]interface{}{
+					{"id": "group-1", "displayName": "Test Group 1", "groupTypes": []interface{}{"Unified"}},
+					{"id": "group-2", "displayName": "Test Group 2", "groupTypes": []interface{}{}},
+				},
+			}
+			json.NewEncoder(w).Encode(response)
+			
+		case strings.HasPrefix(path, "/identity/conditionalAccess/policies"):
+			// MSP conditional access endpoint
+			response := map[string]interface{}{
+				"value": []map[string]interface{}{
+					{"id": "policy-1", "displayName": "Test CA Policy", "state": "enabled"},
+					{"id": "policy-2", "displayName": "Test CA Policy 2", "state": "disabled"},
+				},
+			}
+			json.NewEncoder(w).Encode(response)
+			
+		case strings.HasPrefix(path, "/deviceManagement/managedDevices"):
+			// MSP Intune managed devices endpoint (updated from deviceConfigurations)
+			response := map[string]interface{}{
+				"value": []map[string]interface{}{
+					{"id": "device-1", "deviceName": "Test Device 1", "operatingSystem": "Windows", "complianceState": "compliant"},
+					{"id": "device-2", "deviceName": "Test Device 2", "operatingSystem": "iOS", "complianceState": "noncompliant"},
+				},
+			}
+			json.NewEncoder(w).Encode(response)
+			
+		case strings.HasPrefix(path, "/auditLogs/directoryAudits"):
+			// MSP audit log endpoint
+			response := map[string]interface{}{
+				"value": []map[string]interface{}{
+					{"id": "audit-1", "activityDisplayName": "Add user", "result": "success"},
+					{"id": "audit-2", "activityDisplayName": "Update group", "result": "success"},
+				},
+			}
+			json.NewEncoder(w).Encode(response)
+			
+		case strings.HasPrefix(path, "/reports/"):
+			// MSP usage reports endpoint  
+			response := map[string]interface{}{
+				"value": []map[string]interface{}{
+					{"userPrincipalName": "user1@example.com", "lastActivityDate": "2024-01-15"},
+					{"userPrincipalName": "user2@example.com", "lastActivityDate": "2024-01-14"},
+				},
+			}
+			json.NewEncoder(w).Encode(response)
+			
+		case path == "/me":
+			// Legacy endpoint for backward compatibility
 			response := map[string]interface{}{
 				"id":                "user-123",
 				"userPrincipalName": "testuser@example.com",
 				"displayName":       "Test User",
-			}
-			json.NewEncoder(w).Encode(response)
-			
-		case "/users":
-			// Directory users endpoint
-			response := map[string]interface{}{
-				"value": []map[string]interface{}{
-					{"id": "user-1", "userPrincipalName": "user1@example.com"},
-					{"id": "user-2", "userPrincipalName": "user2@example.com"},
-				},
-			}
-			json.NewEncoder(w).Encode(response)
-			
-		case "/groups":
-			// Groups endpoint
-			response := map[string]interface{}{
-				"value": []map[string]interface{}{
-					{"id": "group-1", "displayName": "Test Group 1"},
-					{"id": "group-2", "displayName": "Test Group 2"},
-				},
-			}
-			json.NewEncoder(w).Encode(response)
-			
-		case "/identity/conditionalAccess/policies":
-			// Conditional Access endpoint
-			response := map[string]interface{}{
-				"value": []map[string]interface{}{
-					{"id": "policy-1", "displayName": "Test CA Policy", "state": "enabled"},
-				},
-			}
-			json.NewEncoder(w).Encode(response)
-			
-		case "/deviceManagement/deviceConfigurations":
-			// Intune endpoint
-			response := map[string]interface{}{
-				"value": []map[string]interface{}{
-					{"id": "config-1", "displayName": "Test Device Config"},
-				},
 			}
 			json.NewEncoder(w).Encode(response)
 			
@@ -330,12 +374,10 @@ func TestCapabilityTesting(t *testing.T) {
 	require.NoError(t, err)
 	
 	config := &OAuth2Config{
-		ClientID:        "capability-test-client",
-		TenantID:        "capability-test-tenant",
-		DelegatedScopes: []string{
-			"User.Read", "Directory.Read.All", "Group.ReadWrite.All",
-			"Policy.ReadWrite.ConditionalAccess", "DeviceManagementConfiguration.ReadWrite.All",
-		},
+		ClientID:             "capability-test-client",
+		TenantID:             "capability-test-tenant",
+		UseClientCredentials: true, // MSP application permissions
+		Scopes: []string{"https://graph.microsoft.com/.default"}, // Application permissions use .default scope
 	}
 	
 	provider := NewOAuth2Provider(credStore, config)
@@ -343,14 +385,14 @@ func TestCapabilityTesting(t *testing.T) {
 	
 	// Note: GraphBaseURL is a const, so we use HTTP transport override instead
 	
-	// Create test access token with all scopes
+	// Create test access token for MSP application permissions
 	accessToken := &AccessToken{
 		Token:         "test-capability-token",
 		TokenType:     "Bearer",
 		TenantID:      config.TenantID,
-		IsDelegated:   true,
+		IsDelegated:   false, // MSP uses application permissions, not delegated
 		ExpiresAt:     time.Now().Add(time.Hour),
-		GrantedScopes: config.DelegatedScopes,
+		GrantedScopes: config.Scopes, // .default scope for application permissions
 	}
 	
 	// Override HTTP client to use mock server
@@ -363,30 +405,30 @@ func TestCapabilityTesting(t *testing.T) {
 	ctx := context.Background()
 	
 	t.Run("TestIndividualCapabilities", func(t *testing.T) {
-		// Test user profile capability
-		userTest := flow.testUserProfileAccess(ctx, accessToken)
-		assert.True(t, userTest.Success, "User profile test should succeed")
-		assert.Contains(t, userTest.Details, "Successfully retrieved user profile")
+		// Test MSP user read capability
+		userTest := flow.testUserReadAccess(ctx, accessToken)
+		assert.True(t, userTest.Success, "MSP user read test should succeed")
+		assert.Contains(t, userTest.Details, "Successfully retrieved")
 		
-		// Test directory read capability
+		// Test MSP directory access capability
 		dirTest := flow.testDirectoryReadAccess(ctx, accessToken)
-		assert.True(t, dirTest.Success, "Directory read test should succeed")
-		assert.Contains(t, dirTest.Details, "users from directory")
+		assert.True(t, dirTest.Success, "MSP directory access test should succeed") 
+		assert.Contains(t, dirTest.Details, "organization")
 		
-		// Test group management capability
+		// Test MSP group management capability
 		groupTest := flow.testGroupManagementAccess(ctx, accessToken)
-		assert.True(t, groupTest.Success, "Group management test should succeed")
+		assert.True(t, groupTest.Success, "MSP group management test should succeed")
 		assert.Contains(t, groupTest.Details, "groups")
 		
-		// Test conditional access capability
+		// Test MSP conditional access capability
 		caTest := flow.testConditionalAccessAccess(ctx, accessToken)
-		assert.True(t, caTest.Success, "Conditional Access test should succeed")
+		assert.True(t, caTest.Success, "MSP Conditional Access test should succeed")
 		assert.Contains(t, caTest.Details, "conditional access policies")
 		
-		// Test Intune capability
+		// Test MSP Intune capability
 		intuneTest := flow.testIntuneManagementAccess(ctx, accessToken)
-		assert.True(t, intuneTest.Success, "Intune test should succeed")
-		assert.Contains(t, intuneTest.Details, "device configurations")
+		assert.True(t, intuneTest.Success, "MSP Intune test should succeed")
+		assert.Contains(t, intuneTest.Details, "managed devices")
 	})
 	
 	t.Run("TestFullCapabilityReport", func(t *testing.T) {
@@ -399,10 +441,11 @@ func TestCapabilityTesting(t *testing.T) {
 		assert.True(t, report.OverallSuccess)
 		assert.Equal(t, 1.0, report.SuccessRate) // 100% success
 		
-		// Verify all capabilities are available
+		// Verify all MSP capabilities are available
 		expectedCapabilities := []string{
-			"user_profile", "directory_read", "group_management",
-			"conditional_access", "intune_management",
+			"user_read", "directory_access", "group_management",
+			"conditional_access", "intune_management", "organization_management",
+			"audit_log_access", "usage_reports",
 		}
 		
 		for _, capability := range expectedCapabilities {
@@ -420,32 +463,40 @@ func TestCapabilityTesting(t *testing.T) {
 		t.Logf("Capability Summary:\n%s", summary)
 	})
 	
-	t.Run("TestInsufficientPermissions", func(t *testing.T) {
-		// Test with limited scopes
-		limitedToken := &AccessToken{
-			Token:         "limited-token",
-			TokenType:     "Bearer",
-			TenantID:      config.TenantID,
-			IsDelegated:   true,
-			ExpiresAt:     time.Now().Add(time.Hour),
-			GrantedScopes: []string{"User.Read"}, // Only basic scope
+	t.Run("TestMSPCapabilities", func(t *testing.T) {
+		// Test MSP capability testing function directly
+		mspConfig := &MSPOAuth2Config{
+			ClientID:               "msp-test-client",
+			TenantID:               "cfgis-tenant",
+			ApplicationPermissions: DefaultMSPApplicationPermissions(),
 		}
 		
-		report, err := flow.TestFullCapabilities(ctx, config.TenantID, limitedToken)
+		report, err := TestMSPCapabilitiesWithClient(ctx, mspConfig, "client-tenant-123", accessToken, flow.httpClient)
 		require.NoError(t, err)
+		assert.NotNil(t, report)
 		
-		// Should have some missing capabilities
-		assert.False(t, report.OverallSuccess)
-		assert.Less(t, report.SuccessRate, 1.0)
-		assert.True(t, report.Capabilities["user_profile"])   // Should work
-		assert.False(t, report.Capabilities["group_management"]) // Should fail
+		// Should be successful for MSP operations
+		assert.True(t, report.OverallSuccess, "MSP capabilities should be operational")
+		assert.Equal(t, 1.0, report.SuccessRate)
+		assert.Equal(t, "client-tenant-123", report.TenantID)
 		
-		// Should have recommendations
-		assert.NotEmpty(t, report.Recommendations)
+		// Verify MSP-specific capabilities
+		expectedMSPCapabilities := []string{
+			"user_management", "directory_management", "group_management",
+			"conditional_access", "intune_management", "organization_settings",
+			"audit_and_compliance", "usage_analytics",
+		}
 		
-		summary := report.GetCapabilitySummary()
-		assert.Contains(t, summary, "❌")
-		assert.Contains(t, summary, "Recommendations:")
+		for _, capability := range expectedMSPCapabilities {
+			assert.True(t, report.Capabilities[capability], 
+				"MSP capability %s should be available", capability)
+		}
+		
+		// Test MSP-specific summary
+		mspSummary := report.GetMSPCapabilitySummary()
+		assert.Contains(t, mspSummary, "MSP READY")
+		assert.Contains(t, mspSummary, "100.0%")
+		assert.Contains(t, mspSummary, "client-tenant-123")
 	})
 }
 

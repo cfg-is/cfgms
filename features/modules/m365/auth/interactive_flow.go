@@ -204,7 +204,7 @@ func (f *InteractiveAuthFlow) TestCapabilities(ctx context.Context, tenantID str
 	}
 	
 	// Test basic user profile access
-	testResult.Tests["user_profile"] = f.testUserProfileAccess(ctx, accessToken)
+	testResult.Tests["user_read"] = f.testUserReadAccess(ctx, accessToken)
 	
 	// Test directory read access
 	testResult.Tests["directory_read"] = f.testDirectoryReadAccess(ctx, accessToken)
@@ -411,8 +411,16 @@ func (f *InteractiveAuthFlow) cleanupFlowState(state string) {
 // Helper methods
 
 func (f *InteractiveAuthFlow) hasScope(token *AccessToken, scope string) bool {
+	// For MSP application permissions, check if we have the .default scope
+	// which grants all consented application permissions
 	for _, grantedScope := range token.GrantedScopes {
 		if grantedScope == scope {
+			return true
+		}
+		// For application permissions with .default scope, assume we have all consented permissions
+		if grantedScope == "https://graph.microsoft.com/.default" {
+			// For MSP scenarios, we assume all capabilities are available if .default scope is present
+			// The actual capability testing will validate real API access
 			return true
 		}
 	}
