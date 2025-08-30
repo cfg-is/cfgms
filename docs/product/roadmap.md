@@ -329,10 +329,6 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - [x] Comprehensive test suite with 100% clean status
   - [x] Production-ready MSP functionality for client management
 
-**Epic 3.1: M365 Multi-Tenant Enterprise App Support (18 story points) - Issues #118-119 - MOVED TO v1.1.0+**
-- [ ] **Enhanced Tenant Management** (Issue #118) - 8 points *(Moved to v1.1.0 - requires CSP sandbox)*
-- [ ] **Per-Tenant Token Storage and Management** (Issue #119) - 10 points *(Moved to v1.1.0 - requires CSP sandbox)*
-
 **Epic 4: Unified Directory Management Interface (47 story points) - Issues #120-123**
 - [ ] **Directory Service Abstraction Layer** (Issue #120) - 15 points
 - [ ] **Directory DNA Integration** (Issue #121) - 13 points
