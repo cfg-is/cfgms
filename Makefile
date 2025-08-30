@@ -65,7 +65,7 @@ test:
 	@echo "================================="
 	@if [ -f .env.local ]; then \
 		echo "Loading M365 credentials from .env.local for real API tests..."; \
-		set -a && source .env.local && set +a && \
+		export $$(cat .env.local | grep -v '^#' | xargs) && \
 		go test -race -cover -short -timeout=3m ./features/... ./api/... ./cmd/... ./pkg/...; \
 	else \
 		echo "No .env.local found - real M365 tests will be skipped"; \

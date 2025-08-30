@@ -142,10 +142,14 @@ func TestInteractiveAuthFlowSetup(t *testing.T) {
 		assert.NotNil(t, result.UserContext)
 		assert.Equal(t, config.DelegatedScopes, result.GrantedScopes)
 		
-		// Verify stored token
-		assert.Equal(t, "mock-access-token-interactive", result.AccessToken.Token)
-		assert.True(t, result.AccessToken.IsDelegated)
-		assert.Equal(t, config.TenantID, result.AccessToken.TenantID)
+		// Verify stored token (with nil safety check)
+		if result.AccessToken != nil {
+			assert.Equal(t, "mock-access-token-interactive", result.AccessToken.Token)
+			assert.True(t, result.AccessToken.IsDelegated)
+			assert.Equal(t, config.TenantID, result.AccessToken.TenantID)
+		} else {
+			t.Error("AccessToken is nil - callback processing failed")
+		}
 		
 		t.Logf("Successfully processed callback and obtained delegated token")
 	})
