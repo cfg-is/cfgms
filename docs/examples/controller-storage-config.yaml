@@ -1,0 +1,37 @@
+# Example CFGMS Controller Configuration
+# Shows how global storage provider selection works
+
+controller:
+  # Single storage provider choice affects ALL modules
+  storage:
+    provider: "database"  # Options: memory, file, git, database, hybrid
+    config:
+      # Database provider configuration
+      database_url: "postgresql://cfgms:password@localhost:5432/cfgms"
+      pool_size: 10
+      
+      # Alternative configurations for other providers:
+      # 
+      # For file provider:
+      # file_path: "/var/lib/cfgms/storage"
+      # 
+      # For git provider:  
+      # git_repository: "https://github.com/company/cfgms-config.git"
+      # git_branch: "production"
+      # 
+      # For memory provider:
+      # (no additional config needed)
+
+# All modules automatically use the configured storage
+modules:
+  m365:
+    enabled: true
+    # ✅ No storage config needed - uses controller.storage automatically
+    
+  firewall:
+    enabled: true 
+    # ✅ No storage config needed - uses controller.storage automatically
+    
+  packages:
+    enabled: true
+    # ✅ No storage config needed - uses controller.storage automatically

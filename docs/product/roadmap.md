@@ -333,6 +333,51 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 - [ ] **Active Directory Provider Implementation** (Issue #122) - 10 points
 - [ ] **Entra ID Provider Implementation** (Issue #123) - 9 points
 
+**Epic 5: Global Storage Provider Architecture Migration (25 story points) - PLANNED**
+*Migrate from module-specific storage to global controller-level plugin architecture*
+
+- [ ] **Implement Global Storage Interfaces** (8 points)
+  - Create `pkg/storage/interfaces/` with ClientTenantStore, ConfigStore, AuditStore contracts
+  - Establish StorageProvider interface for unified backend creation
+  - Design plugin auto-registration system via `init()` functions
+
+- [ ] **Implement Git Storage Provider** (8 points)  
+  - Local git repository support with versioning and audit trail
+  - Remote git repository support with GitOps workflow integration
+  - Mozilla SOPS integration for secrets management (first KMS implementation)
+  - Extensible KMS interface to support future providers (Vault, AWS KMS, Azure Key Vault)
+
+- [ ] **Implement Database Storage Provider** (6 points)
+  - PostgreSQL backend with ACID transactions and concurrency support
+  - Auto-schema creation and migration support
+  - Connection pooling and production-ready configuration
+
+- [ ] **Evaluate Best storage for DNA**
+  - options to consider LevelDB, vs storage provider
+
+- [ ] **Migrate All Modules to Global Storage** (3 points)
+  - Migrate existing DNA storage system to use global plugin architecture
+  - Update all modules to import `pkg/storage/interfaces` only (never specific providers)
+  - Remove module-specific storage implementations
+  - Validate all modules work with both git and database providers
+
+**Configuration Strategy:**
+```yaml
+# Simple deployment - Local git with SOPS
+controller.storage.provider: git
+controller.storage.config.repository_path: /var/lib/cfgms/config.git
+
+# Production deployment - PostgreSQL  
+controller.storage.provider: database
+controller.storage.config.database_url: postgresql://...
+```
+
+**Benefits:**
+- **Consistency**: All data in same storage system (no mixed backends)
+- **Simplicity**: One controller-level decision affects entire system
+- **Extensibility**: KMS interface enables future security providers
+- **GitOps Ready**: Git provider enables infrastructure-as-code workflows
+
 #### v0.5.0 (Beta) - Advanced Workflows & Core Readiness
 
 - [ ] Implement advanced workflow engine
