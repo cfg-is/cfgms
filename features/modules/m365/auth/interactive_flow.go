@@ -290,7 +290,7 @@ func (f *InteractiveAuthFlow) buildAuthorizationURL(tenantID string, flowState *
 // Token exchange
 
 func (f *InteractiveAuthFlow) exchangeCodeForTokens(ctx context.Context, authCode string, flowState *AuthFlowState) (*TokenResponse, error) {
-	tokenURL := fmt.Sprintf("https://login.microsoftonline.com/%s/oauth2/v2.0/token", flowState.TenantID)
+	tokenURL := f.config.GetTokenURL()
 	
 	data := url.Values{
 		"grant_type":    {"authorization_code"},

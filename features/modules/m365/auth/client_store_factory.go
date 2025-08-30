@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
@@ -89,6 +91,13 @@ func GitBasedClientStoreConfig(repository, branch string) *ClientStoreConfig {
 	}
 }
 
+// generateUniqueID generates a unique identifier for test isolation
+func generateUniqueID() string {
+	bytes := make([]byte, 8)
+	rand.Read(bytes)
+	return hex.EncodeToString(bytes)
+}
+
 // NewClientTenantStore creates a new ClientTenantStore based on configuration
 // This factory now uses the global plugin architecture with git as the unified backend:
 // - All storage types now use git provider (memory option removed for simplicity)
@@ -102,23 +111,25 @@ func NewClientTenantStore(config *ClientStoreConfig, logger interface{}) (Client
 	case ClientStoreMemory:
 		// Memory storage deprecated - use git provider instead
 		providerName = "git"
-		globalConfig["repository_path"] = "/tmp/cfgms-memory-replacement.git"
+		globalConfig["repository_path"] = fmt.Sprintf("/tmp/cfgms-memory-replacement-%s.git", generateUniqueID())
 		
 	case ClientStoreFile:
 		// Use git provider with local repository path
 		providerName = "git"
 		globalConfig["repository_path"] = config.FilePath
 		if config.FilePath == "" {
-			globalConfig["repository_path"] = "/tmp/cfgms-client-tenants.git"
+			globalConfig["repository_path"] = fmt.Sprintf("/tmp/cfgms-client-tenants-%s.git", generateUniqueID())
 		}
 		
 	case ClientStoreGit:
 		providerName = "git"
 		if config.GitRepository != "" {
 			globalConfig["remote_url"] = config.GitRepository
-			globalConfig["repository_path"] = "/tmp/cfgms-client-git"
+			// Use unique path to avoid test conflicts
+			globalConfig["repository_path"] = fmt.Sprintf("/tmp/cfgms-client-git-%s", generateUniqueID())
 		} else {
-			globalConfig["repository_path"] = "/tmp/cfgms-client-tenants.git"
+			// Use unique path to avoid test conflicts
+			globalConfig["repository_path"] = fmt.Sprintf("/tmp/cfgms-client-tenants-%s.git", generateUniqueID())
 		}
 		
 	case ClientStoreDatabase:
@@ -367,12 +378,13 @@ func GetRecommendedStoreType(clientCount int, requiresHA bool, hasDatabase bool)
 		return ClientStoreGit
 	}
 	
-	if hasDatabase && clientCount > 50 {
-		return ClientStoreDatabase
-	}
-	
+	// Check for hybrid first (most specific - requires both HA and database)
 	if hasDatabase && requiresHA {
 		return ClientStoreHybrid
+	}
+	
+	if hasDatabase && clientCount > 50 {
+		return ClientStoreDatabase
 	}
 	
 	// Default to git-based storage (CFGMS philosophy)

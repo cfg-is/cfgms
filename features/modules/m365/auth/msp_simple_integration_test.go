@@ -81,7 +81,7 @@ func TestMSPCompleteFlow(t *testing.T) {
 		// Test Step 2: Handle successful callback
 		t.Run("HandleSuccessfulCallback", func(t *testing.T) {
 			// Simulate successful admin consent callback
-			callbackURL := fmt.Sprintf("%s?admin_consent=true&tenant=%s&state=%s",
+			callbackURL := fmt.Sprintf("%s?admin_consent=True&tenant=%s&state=%s",
 				mspConfig.AdminCallbackURI,
 				"client-tenant-uuid-12345", 
 				request.State,
@@ -175,10 +175,11 @@ func TestMSPErrorScenarios(t *testing.T) {
 	ctx := context.Background()
 	
 	t.Run("InvalidCallbackState", func(t *testing.T) {
-		invalidCallbackURL := "https://test.example.com/callback?admin_consent=true&tenant=test-tenant&state=invalid-state-999"
+		invalidCallbackURL := "https://test.example.com/callback?admin_consent=True&tenant=test-tenant&state=invalid-state-999"
 		
 		result, err := flow.HandleAdminConsentCallback(ctx, invalidCallbackURL)
-		assert.Error(t, err, "Should reject invalid state")
+		require.NoError(t, err, "Should handle callback without error")
+		require.NotNil(t, result, "Should return result")
 		assert.False(t, result.Success, "Result should indicate failure")
 		
 		t.Logf("✅ Invalid state rejection verified")
@@ -193,9 +194,10 @@ func TestMSPErrorScenarios(t *testing.T) {
 		deniedCallbackURL := fmt.Sprintf("https://test.example.com/callback?admin_consent=false&error=access_denied&state=%s", request.State)
 		
 		result, err := flow.HandleAdminConsentCallback(ctx, deniedCallbackURL)
-		assert.Error(t, err, "Should reject denied consent")
+		require.NoError(t, err, "Should handle callback without error")
+		require.NotNil(t, result, "Should return result")
 		assert.False(t, result.Success, "Result should indicate failure")
-		assert.Contains(t, err.Error(), "access_denied", "Error should mention access denied")
+		assert.Equal(t, "access_denied", result.Error, "Should indicate access denied")
 		
 		t.Logf("✅ Consent denial handling verified")
 	})

@@ -213,7 +213,7 @@ func (f *AdminConsentFlow) HandleAdminConsentCallback(ctx context.Context, callb
 		TenantName:       request.ClientName,
 		ClientIdentifier: request.ClientIdentifier,
 		ConsentedAt:      time.Now(),
-		Status:           ClientTenantStatusConsented,
+		Status:           ClientTenantStatusActive,
 		CreatedAt:        time.Now(),
 		UpdatedAt:        time.Now(),
 		Metadata: map[string]interface{}{

@@ -137,6 +137,8 @@ func TestInteractiveAuthFlowSetup(t *testing.T) {
 		result, err := flow.HandleCallback(ctx, callbackURL)
 		require.NoError(t, err)
 		assert.NotNil(t, result)
+		
+		
 		assert.True(t, result.Success)
 		assert.NotNil(t, result.AccessToken)
 		assert.NotNil(t, result.UserContext)

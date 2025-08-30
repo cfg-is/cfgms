@@ -1,0 +1,187 @@
+{
+  "main": {
+    "id": "e50732c70576b407",
+    "type": "split",
+    "children": [
+      {
+        "id": "4452abe1a73a1619",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "dcd4da8671559423",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "docs/M365_INTEGRATION_GUIDE.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "M365_INTEGRATION_GUIDE"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "vertical"
+  },
+  "left": {
+    "id": "504a408e749f5230",
+    "type": "split",
+    "children": [
+      {
+        "id": "88f9399ff90cb7a1",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "a94cfe9f634ad21a",
+            "type": "leaf",
+            "state": {
+              "type": "file-explorer",
+              "state": {
+                "sortOrder": "alphabetical",
+                "autoReveal": false
+              },
+              "icon": "lucide-folder-closed",
+              "title": "Files"
+            }
+          },
+          {
+            "id": "336ccdc3ceafd392",
+            "type": "leaf",
+            "state": {
+              "type": "search",
+              "state": {
+                "query": "",
+                "matchingCase": false,
+                "explainSearch": false,
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical"
+              },
+              "icon": "lucide-search",
+              "title": "Search"
+            }
+          },
+          {
+            "id": "78e9952129c74b6a",
+            "type": "leaf",
+            "state": {
+              "type": "bookmarks",
+              "state": {},
+              "icon": "lucide-bookmark",
+              "title": "Bookmarks"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300,
+    "collapsed": true
+  },
+  "right": {
+    "id": "6d2bdaa6910d90ee",
+    "type": "split",
+    "children": [
+      {
+        "id": "682bb9dccd4d98ab",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "f9a45a5540fe6717",
+            "type": "leaf",
+            "state": {
+              "type": "backlink",
+              "state": {
+                "file": "docs/M365_INTEGRATION_GUIDE.md",
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical",
+                "showSearch": false,
+                "searchQuery": "",
+                "backlinkCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-coming-in",
+              "title": "Backlinks for M365_INTEGRATION_GUIDE"
+            }
+          },
+          {
+            "id": "f805c69bb48c93d3",
+            "type": "leaf",
+            "state": {
+              "type": "outgoing-link",
+              "state": {
+                "file": "docs/M365_INTEGRATION_GUIDE.md",
+                "linksCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-going-out",
+              "title": "Outgoing links from M365_INTEGRATION_GUIDE"
+            }
+          },
+          {
+            "id": "f27f14511bae61ab",
+            "type": "leaf",
+            "state": {
+              "type": "tag",
+              "state": {
+                "sortOrder": "frequency",
+                "useHierarchy": true,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-tags",
+              "title": "Tags"
+            }
+          },
+          {
+            "id": "7871e45707e043c3",
+            "type": "leaf",
+            "state": {
+              "type": "outline",
+              "state": {
+                "file": "docs/M365_INTEGRATION_GUIDE.md",
+                "followCursor": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-list",
+              "title": "Outline of M365_INTEGRATION_GUIDE"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300,
+    "collapsed": true
+  },
+  "left-ribbon": {
+    "hiddenItems": {
+      "switcher:Open quick switcher": false,
+      "graph:Open graph view": false,
+      "canvas:Create new canvas": false,
+      "daily-notes:Open today's daily note": false,
+      "templates:Insert template": false,
+      "command-palette:Open command palette": false,
+      "bases:Create new base": false
+    }
+  },
+  "active": "dcd4da8671559423",
+  "lastOpenFiles": [
+    "features/modules/m365/auth/client_store_factory.go.tmp.3539928.1756525979552",
+    "features/modules/m365/auth/client_store_factory.go.tmp.3539928.1756525968522",
+    "features/modules/m365/auth/client_store_factory.go.tmp.3539928.1756525960734",
+    "features/modules/m365/auth/client_store_factory.go.tmp.3539928.1756525938381",
+    "features/modules/m365/auth/client_store_factory.go.tmp.3539928.1756525933054",
+    "features/modules/m365/auth/client_store_factory.go.tmp.3539928.1756525925709",
+    "features/modules/m365/auth/client_store_factory.go.tmp.3539928.1756525915906",
+    "features/modules/m365/auth/callback_handler.go.tmp.3539928.1756525854082",
+    "features/modules/m365/auth/callback_handler.go.tmp.3539928.1756525849526",
+    "features/modules/m365/auth/callback_handler.go.tmp.3539928.1756525823810",
+    "features/modules/m365/auth/callback_handler.go.tmp.3539928.1756525813026"
+  ]
+}

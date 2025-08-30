@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -39,15 +40,23 @@ func (h *CallbackHandler) StartCallbackServer(ctx context.Context, port string) 
 	mux.HandleFunc("/auth/status", h.handleStatus)
 	mux.HandleFunc("/health", h.handleHealth)
 	
+	// Create listener to get actual port when using "0"
+	listener, err := net.Listen("tcp", ":"+h.serverPort)
+	if err != nil {
+		return fmt.Errorf("failed to create listener: %w", err)
+	}
+	
+	// Update serverPort with actual port (important when using "0")
+	h.serverPort = fmt.Sprintf("%d", listener.Addr().(*net.TCPAddr).Port)
+	
 	h.server = &http.Server{
-		Addr:         ":" + h.serverPort,
 		Handler:      mux,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 30 * time.Second,
 	}
 	
 	go func() {
-		if err := h.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := h.server.Serve(listener); err != nil && err != http.ErrServerClosed {
 			fmt.Printf("Callback server error: %v\n", err)
 		}
 	}()
@@ -245,14 +254,21 @@ func (h *CallbackHandler) getCallbackResult(state string) *CallbackResult {
 func (h *CallbackHandler) generateCallbackHTML(response map[string]interface{}) string {
 	success, _ := response["success"].(bool)
 	message, _ := response["message"].(string)
+	errorCode, _ := response["error"].(string)
+	errorDescription, _ := response["error_description"].(string)
 	
-	var statusClass, statusIcon string
+	var statusClass, statusIcon, details string
 	if success {
 		statusClass = "success"
 		statusIcon = "✅"
+		details = "<strong>Next Steps:</strong><br>Return to the CFGMS application to continue setup."
 	} else {
 		statusClass = "error"
 		statusIcon = "❌"
+		details = "<strong>Next Steps:</strong><br>Return to the CFGMS application to continue setup."
+		if errorCode != "" {
+			details = fmt.Sprintf("<strong>Error:</strong> %s<br>%s<br><br><strong>Next Steps:</strong><br>Return to the CFGMS application to continue setup.", errorCode, errorDescription)
+		}
 	}
 	
 	return fmt.Sprintf(`
@@ -335,8 +351,7 @@ func (h *CallbackHandler) generateCallbackHTML(response map[string]interface{}) 
         </button>
         
         <div class="details">
-            <strong>Next Steps:</strong><br>
-            Return to the CFGMS application to continue setup.
+            %s
         </div>
     </div>
     
@@ -368,7 +383,7 @@ func (h *CallbackHandler) generateCallbackHTML(response map[string]interface{}) 
     </script>
 </body>
 </html>
-`, statusClass, statusIcon, message, success, success, response["state"], success, response["state"])
+`, statusClass, statusIcon, message, details, success, success, response["state"], success, response["state"])
 }
 
 // GetCallbackURL returns the callback URL for the OAuth2 flow

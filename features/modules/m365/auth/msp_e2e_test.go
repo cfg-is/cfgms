@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/url"
-	"strings"
 	"testing"
 	"time"
 
@@ -162,7 +161,7 @@ func TestMSPEndToEndClientOnboarding(t *testing.T) {
 					
 					// Simulate successful callback from Microsoft
 					successCallbackURL := fmt.Sprintf(
-						"%s?admin_consent=true&tenant=%s&state=%s",
+						"%s?admin_consent=True&tenant=%s&state=%s",
 						mspConfig.AdminCallbackURI,
 						clientTenantID,
 						request.State,
@@ -400,7 +399,7 @@ func TestMSPMultiClientScenario(t *testing.T) {
 		tenantID := fmt.Sprintf("tenant-%s", client.identifier)
 		
 		callbackURL := fmt.Sprintf(
-			"%s?admin_consent=true&tenant=%s&state=%s",
+			"%s?admin_consent=True&tenant=%s&state=%s",
 			mspConfig.AdminCallbackURI,
 			tenantID,
 			request.State,
@@ -453,12 +452,13 @@ func TestMSPErrorRecoveryScenarios(t *testing.T) {
 	
 	// Test 1: Invalid state parameter
 	t.Run("InvalidState", func(t *testing.T) {
-		invalidCallback := "https://error.test.com/callback?admin_consent=true&tenant=test&state=invalid-state"
+		invalidCallback := "https://error.test.com/callback?admin_consent=True&tenant=test&state=invalid-state"
 		
 		result, err := flow.HandleAdminConsentCallback(ctx, invalidCallback)
-		assert.Error(t, err, "Should reject invalid state")
+		require.NoError(t, err, "Should handle callback without error")
+		require.NotNil(t, result, "Should return result")
 		assert.False(t, result.Success, "Should indicate failure")
-		assert.Contains(t, err.Error(), "not found", "Should mention state not found")
+		assert.Equal(t, "INVALID_STATE", result.Error, "Should indicate invalid state error")
 		
 		t.Logf("   ✅ Invalid state properly rejected")
 	})
@@ -474,9 +474,10 @@ func TestMSPErrorRecoveryScenarios(t *testing.T) {
 		)
 		
 		result, err := flow.HandleAdminConsentCallback(ctx, deniedCallback)
-		assert.Error(t, err, "Should handle denied consent")
+		require.NoError(t, err, "Should handle callback without error")
+		require.NotNil(t, result, "Should return result")
 		assert.False(t, result.Success, "Should indicate failure")
-		assert.Contains(t, strings.ToLower(err.Error()), "denied", "Should mention denial")
+		assert.Equal(t, "access_denied", result.Error, "Should indicate access denied")
 		
 		t.Logf("   ✅ Consent denial properly handled")
 	})
@@ -490,7 +491,7 @@ func TestMSPErrorRecoveryScenarios(t *testing.T) {
 		require.NoError(t, err)
 		
 		callback1 := fmt.Sprintf(
-			"https://error.test.com/callback?admin_consent=true&tenant=tenant1&state=%s",
+			"https://error.test.com/callback?admin_consent=True&tenant=tenant1&state=%s",
 			request1.State,
 		)
 		
@@ -505,7 +506,7 @@ func TestMSPErrorRecoveryScenarios(t *testing.T) {
 		} else {
 			// If allowed, verify it updates existing record
 			callback2 := fmt.Sprintf(
-				"https://error.test.com/callback?admin_consent=true&tenant=tenant2&state=%s",
+				"https://error.test.com/callback?admin_consent=True&tenant=tenant2&state=%s",
 				request2.State,
 			)
 			
