@@ -71,6 +71,7 @@ func init() {
 type GitClientTenantStore struct {
 	repoPath  string
 	remoteURL string // MVP: not used, for future implementation
+	storage   *memoryStorage // Per-instance storage to avoid test conflicts
 }
 
 // NewGitClientTenantStore creates a new git-based client tenant store
@@ -78,6 +79,7 @@ func NewGitClientTenantStore(repoPath, remoteURL string) (*GitClientTenantStore,
 	store := &GitClientTenantStore{
 		repoPath:  repoPath,
 		remoteURL: remoteURL,
+		storage:   newMemoryStorage(), // Each instance gets its own storage
 	}
 	
 	// Initialize git repository if it doesn't exist
@@ -154,15 +156,12 @@ func newMemoryStorage() *memoryStorage {
 	}
 }
 
-// GitClientTenantStore with embedded memory storage
-var globalMemoryStorage = newMemoryStorage()
-
 // Interface implementations - MVP uses simple memory storage
 // Future: implement proper git file storage with commits
 
 func (s *GitClientTenantStore) StoreClientTenant(client *interfaces.ClientTenant) error {
-	globalMemoryStorage.mutex.Lock()
-	defer globalMemoryStorage.mutex.Unlock()
+	s.storage.mutex.Lock()
+	defer s.storage.mutex.Unlock()
 	
 	if client.ID == "" {
 		client.ID = client.TenantID // Use tenant ID as primary key
@@ -172,15 +171,15 @@ func (s *GitClientTenantStore) StoreClientTenant(client *interfaces.ClientTenant
 	}
 	client.UpdatedAt = time.Now()
 	
-	globalMemoryStorage.clients[client.TenantID] = client
+	s.storage.clients[client.TenantID] = client
 	return nil
 }
 
 func (s *GitClientTenantStore) GetClientTenant(tenantID string) (*interfaces.ClientTenant, error) {
-	globalMemoryStorage.mutex.RLock()
-	defer globalMemoryStorage.mutex.RUnlock()
+	s.storage.mutex.RLock()
+	defer s.storage.mutex.RUnlock()
 	
-	client, exists := globalMemoryStorage.clients[tenantID]
+	client, exists := s.storage.clients[tenantID]
 	if !exists {
 		return nil, fmt.Errorf("client tenant not found: %s", tenantID)
 	}
@@ -188,10 +187,10 @@ func (s *GitClientTenantStore) GetClientTenant(tenantID string) (*interfaces.Cli
 }
 
 func (s *GitClientTenantStore) GetClientTenantByIdentifier(clientIdentifier string) (*interfaces.ClientTenant, error) {
-	globalMemoryStorage.mutex.RLock()
-	defer globalMemoryStorage.mutex.RUnlock()
+	s.storage.mutex.RLock()
+	defer s.storage.mutex.RUnlock()
 	
-	for _, client := range globalMemoryStorage.clients {
+	for _, client := range s.storage.clients {
 		if client.ClientIdentifier == clientIdentifier {
 			return client, nil
 		}
@@ -200,11 +199,11 @@ func (s *GitClientTenantStore) GetClientTenantByIdentifier(clientIdentifier stri
 }
 
 func (s *GitClientTenantStore) ListClientTenants(status interfaces.ClientTenantStatus) ([]*interfaces.ClientTenant, error) {
-	globalMemoryStorage.mutex.RLock()
-	defer globalMemoryStorage.mutex.RUnlock()
+	s.storage.mutex.RLock()
+	defer s.storage.mutex.RUnlock()
 	
 	var result []*interfaces.ClientTenant
-	for _, client := range globalMemoryStorage.clients {
+	for _, client := range s.storage.clients {
 		if status == "" || client.Status == status {
 			result = append(result, client)
 		}
@@ -213,10 +212,10 @@ func (s *GitClientTenantStore) ListClientTenants(status interfaces.ClientTenantS
 }
 
 func (s *GitClientTenantStore) UpdateClientTenantStatus(tenantID string, status interfaces.ClientTenantStatus) error {
-	globalMemoryStorage.mutex.Lock()
-	defer globalMemoryStorage.mutex.Unlock()
+	s.storage.mutex.Lock()
+	defer s.storage.mutex.Unlock()
 	
-	client, exists := globalMemoryStorage.clients[tenantID]
+	client, exists := s.storage.clients[tenantID]
 	if !exists {
 		return fmt.Errorf("client tenant not found: %s", tenantID)
 	}
@@ -227,30 +226,30 @@ func (s *GitClientTenantStore) UpdateClientTenantStatus(tenantID string, status 
 }
 
 func (s *GitClientTenantStore) DeleteClientTenant(tenantID string) error {
-	globalMemoryStorage.mutex.Lock()
-	defer globalMemoryStorage.mutex.Unlock()
+	s.storage.mutex.Lock()
+	defer s.storage.mutex.Unlock()
 	
-	delete(globalMemoryStorage.clients, tenantID)
+	delete(s.storage.clients, tenantID)
 	return nil
 }
 
 func (s *GitClientTenantStore) StoreAdminConsentRequest(request *interfaces.AdminConsentRequest) error {
-	globalMemoryStorage.mutex.Lock()
-	defer globalMemoryStorage.mutex.Unlock()
+	s.storage.mutex.Lock()
+	defer s.storage.mutex.Unlock()
 	
 	if request.CreatedAt.IsZero() {
 		request.CreatedAt = time.Now()
 	}
 	
-	globalMemoryStorage.requests[request.State] = request
+	s.storage.requests[request.State] = request
 	return nil
 }
 
 func (s *GitClientTenantStore) GetAdminConsentRequest(state string) (*interfaces.AdminConsentRequest, error) {
-	globalMemoryStorage.mutex.RLock()
-	defer globalMemoryStorage.mutex.RUnlock()
+	s.storage.mutex.RLock()
+	defer s.storage.mutex.RUnlock()
 	
-	request, exists := globalMemoryStorage.requests[state]
+	request, exists := s.storage.requests[state]
 	if !exists {
 		return nil, fmt.Errorf("admin consent request not found: %s", state)
 	}
@@ -264,9 +263,9 @@ func (s *GitClientTenantStore) GetAdminConsentRequest(state string) (*interfaces
 }
 
 func (s *GitClientTenantStore) DeleteAdminConsentRequest(state string) error {
-	globalMemoryStorage.mutex.Lock()
-	defer globalMemoryStorage.mutex.Unlock()
+	s.storage.mutex.Lock()
+	defer s.storage.mutex.Unlock()
 	
-	delete(globalMemoryStorage.requests, state)
+	delete(s.storage.requests, state)
 	return nil
 }

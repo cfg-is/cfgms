@@ -172,16 +172,16 @@
   },
   "active": "dcd4da8671559423",
   "lastOpenFiles": [
+    "pkg/storage/providers/git/plugin.go.tmp.3539928.1756526442257",
+    "pkg/storage/providers/git/plugin.go.tmp.3539928.1756526420109",
+    "pkg/storage/providers/git/plugin.go.tmp.3539928.1756526413719",
+    "pkg/storage/providers/git/plugin.go.tmp.3539928.1756526404641",
+    "pkg/storage/providers/git/plugin.go.tmp.3539928.1756526399469",
+    "pkg/storage/providers/git/plugin.go.tmp.3539928.1756526386929",
     "features/modules/m365/auth/client_store_factory.go.tmp.3539928.1756525979552",
     "features/modules/m365/auth/client_store_factory.go.tmp.3539928.1756525968522",
     "features/modules/m365/auth/client_store_factory.go.tmp.3539928.1756525960734",
     "features/modules/m365/auth/client_store_factory.go.tmp.3539928.1756525938381",
-    "features/modules/m365/auth/client_store_factory.go.tmp.3539928.1756525933054",
-    "features/modules/m365/auth/client_store_factory.go.tmp.3539928.1756525925709",
-    "features/modules/m365/auth/client_store_factory.go.tmp.3539928.1756525915906",
-    "features/modules/m365/auth/callback_handler.go.tmp.3539928.1756525854082",
-    "features/modules/m365/auth/callback_handler.go.tmp.3539928.1756525849526",
-    "features/modules/m365/auth/callback_handler.go.tmp.3539928.1756525823810",
-    "features/modules/m365/auth/callback_handler.go.tmp.3539928.1756525813026"
+    "features/modules/m365/auth/client_store_factory.go.tmp.3539928.1756525933054"
   ]
 }
