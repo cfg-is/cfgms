@@ -42,3 +42,4 @@ certs/
 # Configuration files that might contain sensitive data
 config.yaml
 *.env
+.env.local
