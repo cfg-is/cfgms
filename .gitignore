@@ -43,3 +43,5 @@ certs/
 config.yaml
 *.env
 .env.local
+
+.obsidian/
