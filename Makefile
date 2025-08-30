@@ -63,7 +63,14 @@ build-cert-manager:
 test:
 	@echo "🧪 Running Core Unit Tests (Fast)"
 	@echo "================================="
-	go test -race -cover -short -timeout=3m ./features/... ./api/... ./cmd/... ./pkg/...
+	@if [ -f .env.local ]; then \
+		echo "Loading M365 credentials from .env.local for real API tests..."; \
+		set -a && source .env.local && set +a && \
+		go test -race -cover -short -timeout=3m ./features/... ./api/... ./cmd/... ./pkg/...; \
+	else \
+		echo "No .env.local found - real M365 tests will be skipped"; \
+		go test -race -cover -short -timeout=3m ./features/... ./api/... ./cmd/... ./pkg/...; \
+	fi
 
 # Complete validation (tests + linting + security) - RECOMMENDED FOR COMMITS
 test-complete: test lint security-scan

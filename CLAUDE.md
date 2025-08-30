@@ -135,6 +135,7 @@ This ensures optimal order (test → security → summary) and provides clear va
 9. **Update Documentation** (REQUIRED)
    - Update `docs/product/roadmap.md` if needed
    - Update `CLAUDE.md` if workflow/commands changed
+   - For M365/MSP features, ensure `docs/M365_INTEGRATION_GUIDE.md` is current
 
 10. **Final Test Run - COMPLETION GATE** (MANDATORY)
     ```bash
@@ -386,28 +387,68 @@ All resource management is performed through modules that implement the core int
 Available modules: `directory`, `file`, `firewall`, `package`, `script`, SaaS modules: `entra_user`, `conditional_access`, `intune_policy`
 
 ### Pluggable Infrastructure Design Paradigm
-CFGMS follows a **pluggable architecture design paradigm** where infrastructure components are built with abstraction interfaces, enabling flexible backend selection without core system changes.
+CFGMS follows a **pluggable architecture** where infrastructure components are built with abstraction interfaces, enabling flexible backend selection without core system changes.
 
 **Core Principle**: *Any infrastructure component that could reasonably have multiple implementations should be designed with a provider interface from the start.*
 
+**Architecture Pattern: Global Controller Storage**
+- **Controller-Level Decision**: Single storage provider choice affects entire system
+- **All Modules Use Same Backend**: No per-module storage configuration needed  
+- **Interface Injection**: Modules receive interfaces, never import specific providers
+- **Discovery**: Providers auto-register via `init()` functions
+- **Simple Configuration**: One setting: `controller.storage.provider: "database"`
+
+**Directory Structure:**
+```
+pkg/
+├── storage/                   # Global storage system
+│   ├── interfaces/           # Storage contracts (used by all modules)
+│   │   ├── client_tenant.go # MSP client tenant storage
+│   │   ├── config.go        # Configuration storage  
+│   │   └── audit.go         # Audit log storage
+│   └── providers/           # Storage implementations
+│       ├── memory/          # Memory provider (all interfaces)
+│       ├── file/           # File provider (all interfaces)
+│       ├── database/       # Database provider (all interfaces)
+│       └── git/            # Git provider (all interfaces)
+```
+
 **Current Pluggable Components:**
-- **Storage Backends**: `Backend` interface (File, Database, Git, Hybrid)
+- **Storage Providers**: `StorageProvider` interface creates all storage interfaces (Memory, File, Database, Git, Hybrid)
 - **Git Providers**: `GitProvider` interface (GitHub, GitLab, Bitbucket)  
 - **Compression**: `Compressor` interface (GZIP, ZSTD, LZ4)
-- **Audit Storage**: `AuditStorage` interface (File-based, future DB/remote)
+- **KMS Providers**: `KMSProvider` interface (Vault, AWS KMS, Azure Key Vault)
 
-**Future Pluggable Areas** (Design Paradigm):
-- **Database Providers**: Postgres, MySQL, MSSQL abstraction
-- **KMS Providers**: HashiCorp Vault, AWS KMS, Azure Key Vault
-- **Log Storage**: File, InfluxDB, Elasticsearch, Loki
-- **Time Series DB**: TimescaleDB, InfluxDB, custom implementations
+**Configuration Flow:**
+```
+cfgms.yaml (controller.storage.provider: "database")
+    ↓
+Controller creates DatabaseProvider 
+    ↓  
+All storage interfaces use database:
+  ├── ClientTenantStore → PostgreSQL tables
+  ├── ConfigStore → PostgreSQL tables  
+  └── AuditStore → PostgreSQL tables
+    ↓
+Modules get injected with interfaces (don't know it's PostgreSQL)
+```
 
 **Deployment Flexibility:**
-- **POC/Small MSP**: Flat file storage, no external dependencies  
-- **Medium MSP**: Postgres + basic external services
-- **Enterprise**: Postgres + TimescaleDB + Apache AGE + dedicated KMS
+- **POC/Small MSP**: Memory provider, no external dependencies  
+- **Simple Deployment**: File provider, local storage
+- **Distributed Teams**: Git provider with Mozilla SOPS
+- **Production**: Database provider with PostgreSQL
+- **Enterprise**: Database provider + external KMS integration
 
-This paradigm ensures CFGMS can scale from simple deployments to enterprise infrastructure without architectural refactoring.
+**Plugin Development Guidelines:**
+- Each provider implements ALL storage interfaces for consistency
+- Plugins auto-register via `init()` functions in `pkg/storage/providers/[name]/plugin.go`
+- Business logic imports `pkg/storage/interfaces` only, never specific providers
+- Configuration validation and dependency checking handled by provider plugins
+
+**Documentation**: See `docs/architecture/plugin-architecture.md` for complete implementation guide.
+
+This paradigm ensures CFGMS can scale from simple deployments to enterprise infrastructure without architectural refactoring, while maintaining consistency across all storage operations.
 
 ## Code Organization
 
@@ -424,7 +465,10 @@ features/
 ### Key Directories
 - `cmd/` - Command-line applications (controller, steward, cfgctl)
 - `api/proto/` - Protocol buffer definitions for gRPC communication
-- `pkg/` - Shared packages (logging utilities)
+- `pkg/` - Shared packages and global plugin interfaces
+  - `pkg/storage/interfaces/` - Global storage contracts (imported by all modules)
+  - `pkg/storage/providers/` - Storage plugin implementations (auto-discovered)
+- `features/` - Business logic using global plugin interfaces only
 - `test/` - Integration and end-to-end tests
 - `docs/` - Comprehensive documentation including architecture and standards
 
@@ -491,6 +535,15 @@ features/
 - Include proper error handling and comprehensive validation
 - Get returns comprehensive state, Set modifies only managed fields
 - Use GetManagedFields() to specify which fields Set will change
+
+### Storage Plugin Development
+- **Golden Rule**: Business logic NEVER imports specific storage providers
+- **Interface-Only Imports**: Modules import `pkg/storage/interfaces` only
+- **Provider Discovery**: Check `pkg/storage/providers/` directory to see available implementations
+- **Testing Strategy**: Test modules against all available storage providers automatically
+- **Plugin Structure**: Each provider implements ALL storage interfaces (ClientTenantStore, ConfigStore, AuditStore)
+- **Auto-Registration**: Providers register via `init()` functions - no manual registry needed
+- **Configuration**: Controller selects provider globally via `controller.storage.provider` in YAML
 
 ## Branching Strategy
 
