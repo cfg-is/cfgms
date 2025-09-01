@@ -14,11 +14,11 @@ var (
 	// Connection errors
 	ErrNotConnected        = errors.New("not connected to Active Directory")
 	ErrConnectionFailed    = errors.New("failed to connect to domain controller")
-	ErrAuthenticationFailed = errors.New("Active Directory authentication failed")
+	ErrAuthenticationFailed = errors.New("active Directory authentication failed")
 	ErrDCDiscoveryFailed   = errors.New("failed to discover domain controller")
 	
 	// Query errors
-	ErrObjectNotFound      = errors.New("Active Directory object not found")
+	ErrObjectNotFound      = errors.New("active Directory object not found")
 	ErrInvalidSearchBase   = errors.New("invalid search base DN")
 	ErrSearchFailed        = errors.New("LDAP search operation failed")
 	ErrInvalidFilter       = errors.New("invalid LDAP search filter")
@@ -26,7 +26,7 @@ var (
 	// Operation errors
 	ErrReadOnlyMode        = errors.New("module is in read-only mode")
 	ErrInsufficientPrivs   = errors.New("insufficient privileges for operation")
-	ErrObjectExists        = errors.New("Active Directory object already exists")
+	ErrObjectExists        = errors.New("active Directory object already exists")
 	ErrInvalidDN           = errors.New("invalid distinguished name")
 	
 	// Data conversion errors

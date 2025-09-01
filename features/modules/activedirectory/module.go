@@ -175,7 +175,9 @@ func (m *activeDirectoryModule) Set(ctx context.Context, resourceID string, conf
 	
 	// Close existing connection if any
 	if m.conn != nil {
-		m.conn.Close()
+		if err := m.conn.Close(); err != nil {
+			m.logger.Warn("Failed to close LDAP connection", "error", err)
+		}
 		m.conn = nil
 	}
 	
@@ -231,7 +233,9 @@ func (m *activeDirectoryModule) connect(ctx context.Context) error {
 	
 	// Authenticate using authentication manager
 	if err := m.authManager.Authenticate(ctx, conn); err != nil {
-		conn.Close()
+		if err := conn.Close(); err != nil {
+			m.logger.Warn("Failed to close LDAP connection", "error", err)
+		}
 		return fmt.Errorf("authentication failed: %w", err)
 	}
 	
@@ -741,7 +745,9 @@ func (m *activeDirectoryModule) Close(ctx context.Context) error {
 	defer m.connMux.Unlock()
 	
 	if m.conn != nil {
-		m.conn.Close()
+		if err := m.conn.Close(); err != nil {
+			m.logger.Warn("Failed to close LDAP connection", "error", err)
+		}
 		m.conn = nil
 		m.logger.Info("Closed Active Directory connection")
 	}
@@ -866,7 +872,11 @@ func (m *activeDirectoryModule) queryTrustedDomain(ctx context.Context, targetDo
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to trusted domain DC %s: %w", targetDC, err)
 	}
-	defer targetConn.Close()
+	defer func() {
+		if err := targetConn.Close(); err != nil {
+			m.logger.Warn("Failed to close cross-domain LDAP connection", "error", err)
+		}
+	}()
 	
 	// Authenticate to target domain (using same credentials - requires cross-domain trust)
 	if err := m.authManager.Authenticate(ctx, targetConn); err != nil {
@@ -1003,7 +1013,11 @@ func (m *activeDirectoryModule) queryGlobalCatalog(ctx context.Context, objectTy
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to Global Catalog: %w", err)
 	}
-	defer gcConn.Close()
+	defer func() {
+		if err := gcConn.Close(); err != nil {
+			m.logger.Warn("Failed to close global catalog LDAP connection", "error", err)
+		}
+	}()
 	
 	// Authenticate to Global Catalog
 	if err := m.authManager.Authenticate(ctx, gcConn); err != nil {
