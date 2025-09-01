@@ -5,6 +5,11 @@ description: >
   PowerShell scripts, and Python scripts with configurable timeouts, environment
   variables, and optional signature validation.
 
+# Supported execution environments
+executors:
+  - steward  # Local script execution on steward systems
+  - outpost  # Remote script execution via SSH/WinRM on outpost systems
+
 dependencies: []
 
 requirements:

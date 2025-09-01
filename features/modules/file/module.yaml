@@ -4,6 +4,10 @@ description: >
   Manages file resources on the system.
   Supports reading, writing, and validating file contents.
 
+# Supported execution environments
+executors:
+  - steward  # Local file management on steward systems
+
 dependencies: []
 
 requirements:

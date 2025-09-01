@@ -45,6 +45,12 @@ description: >          # Module description
   Brief description of what this module does
   and what resources it manages.
 
+# NEW: Supported execution environments
+executors:             # List of supported agent types
+  - steward           # Local system management (files, services, local AD)
+  - outpost           # Network resource management (remote systems, REST APIs)
+  - saas_steward      # SaaS API management (M365, AWS, etc.)
+
 dependencies: []        # List of other modules this module depends on
 
 requirements:           # System requirements
@@ -102,23 +108,27 @@ documentation:        # Documentation links
 
 ## Module Categories
 
-Modules are organized by category:
+Modules are organized by execution environment and category:
 
-- **System Modules**: Core system management
-  - files/ - File system management
-  - service/ - Service management
-  - user/ - User management
+### **Steward Modules** (Local System Management)
+- **System Modules**: Core local system management
+  - file/ - Local file system management
+  - directory/ - Local directory management
+  - service/ - Local service management
+  - activedirectory/ - Local AD management using system context
 
-- **Application Modules**: Application-specific management
-  - apache/ - Apache web server
-  - nginx/ - Nginx web server
-  - mysql/ - MySQL database
+### **Outpost Modules** (Network Resource Management)
+- **Network Directory Modules**: Remote directory management
+  - network_activedirectory/ - Remote AD management via LDAP
+- **Network Infrastructure Modules**: Remote system management
+  - ssh_file/ - Remote file management via SSH
+  - rest_api/ - Generic REST API management
 
-- **Vendor Modules**: Vendor-specific management
-  - adobe/ - Adobe products
-    - acrobat/ - Adobe Acrobat
-  - microsoft/ - Microsoft products
-    - office/ - Microsoft Office
+### **SaaS Steward Modules** (API-Based Management)
+- **Microsoft 365 Modules**: M365 API management
+  - entra_user/ - Entra ID user management
+  - conditional_access/ - Conditional access policies
+  - intune_policy/ - Intune device policies
 
 ## Creating a New Module
 

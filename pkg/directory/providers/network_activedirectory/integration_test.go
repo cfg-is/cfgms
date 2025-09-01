@@ -1,4 +1,4 @@
-package activedirectory
+package network_activedirectory
 
 import (
 	"context"
@@ -327,9 +327,9 @@ func TestADProviderIntegration(t *testing.T) {
 				t.Logf("Note: Connection info requires active connection: %v", err)
 				assert.Contains(t, err.Error(), "not connected")
 			} else {
-				assert.Equal(t, "activedirectory", info.ProviderName)
+				assert.Equal(t, "network_activedirectory", info.ProviderName)
 				assert.Equal(t, "corp.contoso.com", info.ServerAddress)
-				assert.Equal(t, "kerberos", info.AuthMethod)
+				assert.Equal(t, interfaces.AuthMethod("kerberos"), info.AuthMethod)
 				assert.NotZero(t, info.ConnectedSince, "Connected timestamp should be set")
 			}
 		})
@@ -443,8 +443,8 @@ func TestADProviderIntegration(t *testing.T) {
 	t.Run("Provider Capabilities and Schema", func(t *testing.T) {
 		t.Run("Provider Info", func(t *testing.T) {
 			info := provider.GetProviderInfo()
-			assert.Equal(t, "activedirectory", info.Name)
-			assert.Equal(t, "Active Directory", info.DisplayName)
+			assert.Equal(t, "network_activedirectory", info.Name)
+			assert.Equal(t, "Network Active Directory", info.DisplayName)
 			assert.True(t, info.Capabilities.SupportsUserManagement)
 			assert.True(t, info.Capabilities.SupportsGroupManagement)
 			assert.True(t, info.Capabilities.SupportsAdvancedSearch)

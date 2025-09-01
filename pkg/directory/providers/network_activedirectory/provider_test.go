@@ -1,4 +1,4 @@
-package activedirectory
+package network_activedirectory
 
 import (
 	"context"
@@ -131,8 +131,8 @@ func TestActiveDirectoryProviderInfo(t *testing.T) {
 	
 	info := provider.GetProviderInfo()
 	
-	assert.Equal(t, "activedirectory", info.Name)
-	assert.Equal(t, "Active Directory", info.DisplayName)
+	assert.Equal(t, "network_activedirectory", info.Name)
+	assert.Equal(t, "Network Active Directory", info.DisplayName)
 	assert.Equal(t, "1.0.0", info.Version)
 	assert.True(t, info.Capabilities.SupportsUserManagement)
 	assert.True(t, info.Capabilities.SupportsGroupManagement)
@@ -187,7 +187,7 @@ func TestActiveDirectoryProviderConnection(t *testing.T) {
 	t.Run("connection info", func(t *testing.T) {
 		info, err := provider.GetConnectionInfo()
 		require.NoError(t, err)
-		assert.Equal(t, "activedirectory", info.ProviderName)
+		assert.Equal(t, "network_activedirectory", info.ProviderName)
 		assert.Equal(t, "example.com", info.ServerAddress)
 		assert.Equal(t, interfaces.AuthMethodLDAP, info.AuthMethod)
 	})

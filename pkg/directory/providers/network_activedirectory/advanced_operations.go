@@ -1,4 +1,4 @@
-package activedirectory
+package network_activedirectory
 
 import (
 	"context"
@@ -380,7 +380,7 @@ func (p *ActiveDirectoryProvider) GetConnectionInfo() (*interfaces.ConnectionInf
 	p.stats.RUnlock()
 	
 	info := &interfaces.ConnectionInfo{
-		ProviderName:   "activedirectory",
+		ProviderName:   "network_activedirectory",
 		ServerAddress:  p.config.ServerAddress,
 		ConnectedSince: connectedSince,
 		AuthMethod:     p.config.AuthMethod,

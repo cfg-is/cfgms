@@ -1,482 +1,269 @@
-# Active Directory Module
-
-The Active Directory module enables CFGMS stewards to read and manage Microsoft Active Directory objects via LDAP protocol. This module runs on stewards deployed to Windows domain controllers or servers with AD access.
+# Active Directory Module (System Context)
 
 ## Purpose and scope
 
-**Purpose**: The Active Directory module provides CFGMS with comprehensive Microsoft Active Directory integration capabilities, enabling configuration management systems to read, query, and manage AD objects through a secure, standardized interface.
-
-**Scope**: This module covers:
-- User account management and queries
-- Group membership and security group management  
-- Organizational Unit (OU) structure navigation
-- Computer object tracking and management
-- Group Policy Object (GPO) reading and analysis
-- Domain trust relationship validation
-- Multi-domain and multi-forest operations
-- Cross-domain authentication and queries
-- Real-time status monitoring and health checks
-
-**Target Environments**: Designed for enterprise Active Directory deployments including multi-domain forests, MSP environments with multiple client domains, and complex trust relationships.
+The Active Directory module provides secure, credential-free integration with local Active Directory domains using Windows system context APIs. This module is designed to run on Windows stewards that are members of an Active Directory domain, leveraging the system service account for authentication and authorization.
 
 ## Overview
 
-This module provides:
-- **LDAP Integration**: Direct connection to Active Directory via LDAP/LDAPS
-- **Domain Controller Discovery**: Automatic DC discovery via DNS SRV records
-- **Object Management**: Read operations for users, groups, OUs, computers, GPOs, and trusts
-- **Multi-Domain Support**: Cross-domain queries and forest-wide searches
-- **Authentication**: Support for simple bind, Kerberos, and NTLM
-- **Windows Integration**: Optimized for Windows domain environments
-- **AD-Specific Operations**: Computer objects, Group Policy Objects, domain trusts
+The Active Directory module provides secure, credential-free integration with local Active Directory domains using Windows system context APIs. This module is designed to run on Windows stewards that are members of an Active Directory domain, leveraging the system service account for authentication and authorization.
+
+## Key Features
+
+- **System Context Authentication**: Uses Windows system context (typically SYSTEM account) instead of stored credentials
+- **PowerShell Integration**: Leverages the Windows Active Directory PowerShell module for robust AD operations
+- **Directory DNA Collection**: Comprehensive AD domain statistics and metadata collection for drift detection
+- **Multi-Object Support**: Supports users, groups, computers, and organizational units
+- **Zero Credential Storage**: No credential storage or management required - relies on Windows authentication
 
 ## Architecture
 
-The AD module follows CFGMS's security-first design:
-- **Steward Deployment**: Runs on Windows servers with AD access
-- **Local Access**: Uses LDAP to access local/nearby domain controllers
-- **gRPC Communication**: Controller accesses AD via secure steward communication
-- **Zero Trust**: All communication uses mTLS authentication
+### Execution Environment
+- **Executor Type**: `steward` - Runs locally on Windows steward systems
+- **Platform Support**: Windows only (requires Windows Active Directory PowerShell module)
+- **Authentication**: Windows system context (service account permissions)
+
+### System Requirements
+- Windows Server 2012 R2+ or Windows 10/11
+- Active Directory PowerShell module installed
+- Steward running as service with system-level privileges
+- Domain membership (steward must be domain-joined)
 
 ## Configuration options
 
-### Basic Configuration
+### Minimal Configuration
+The module requires minimal configuration due to system context authentication:
 
 ```yaml
-# Steward configuration (cfgms.yaml)
-modules:
-  activedirectory:
-    enabled: true
-    config:
-      domain: "corp.example.com"
-      auth_method: "simple"
-      operation_type: "read"
-      object_types: ["user", "group", "organizational_unit"]
-      username: "CORP\\svc-cfgms"
-      password: "${AD_SERVICE_PASSWORD}"
+operation_type: read
+object_types:
+  - user
+  - group
+  - computer
+  - organizational_unit
+enable_dna_collection: true
 ```
 
-### Advanced Configuration
+### Configuration Fields
 
-```yaml
-modules:
-  activedirectory:
-    enabled: true
-    config:
-      # Connection settings
-      domain: "corp.example.com"
-      domain_controller: "dc01.corp.example.com"  # Optional: specific DC
-      port: 636                                   # LDAPS port
-      use_tls: true
-      
-      # Authentication
-      auth_method: "kerberos"
-      username: "svc-cfgms@corp.example.com"
-      password: "${AD_SERVICE_PASSWORD}"
-      
-      # Search settings
-      search_base: "DC=corp,DC=example,DC=com"
-      page_size: 200
-      
-      # Performance settings
-      max_connections: 10
-      request_timeout: "45s"
-      
-      # Security settings
-      operation_type: "read"  # "read" or "read_write"
-      object_types: 
-        - "user"
-        - "group"
-        - "organizational_unit"
-        - "computer"
-```
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `operation_type` | string | Yes | "read" | Type of operations (read/write) |
+| `object_types` | array | Yes | - | AD object types to manage |
+| `search_base` | string | No | Auto-detected | Search base DN (auto-discovers if not specified) |
+| `page_size` | integer | No | 100 | Number of objects to retrieve per page |
+| `request_timeout` | duration | No | 30s | Timeout for PowerShell operations |
+| `enable_dna_collection` | boolean | No | true | Enable directory DNA collection |
 
-### Multi-Domain Configuration
+## Supported Operations
 
-```yaml
-modules:
-  activedirectory:
-    enabled: true
-    config:
-      # Primary domain settings
-      domain: "corp.contoso.com"
-      auth_method: "kerberos"
-      use_tls: true
-      port: 636
-      
-      # Multi-domain and forest settings
-      trusted_domains:
-        - "dev.contoso.com"
-        - "test.contoso.com"
-        - "external.partner.com"
-      forest_root: "contoso.com"
-      global_catalog_dc: "gc1.contoso.com"
-      cross_domain_auth: true
-      
-      # Enhanced object support
-      operation_type: "read"
-      object_types:
-        - "user"
-        - "group"
-        - "organizational_unit"
-        - "computer"
-        - "gpo"
-        - "group_policy"
-        - "domain_trust"
-        - "trust"
-      
-      # Performance optimization
-      page_size: 1000
-      max_connections: 20
-      request_timeout: "60s"
-```
+### Read Operations
+- `status` - Get system and domain status
+- `query:type:id` - Query specific AD object by ID
+- `list:type` - List AD objects by type
+- `dna_collection` - Collect comprehensive directory DNA
 
-## Resource Types
-
-### Connection Status (`status`)
-
-Query the connection status and health:
-
-```bash
-# Via controller API
-curl -X GET https://controller/api/v1/stewards/{steward-id}/modules/activedirectory/status
-
-# Returns ADConnectionStatus
-{
-  "connected": true,
-  "domain_controller": "dc01.corp.example.com",
-  "domain": "corp.example.com",
-  "auth_method": "simple",
-  "connected_since": "2025-01-15T10:30:00Z",
-  "last_health_check": "2025-01-15T14:25:30Z",
-  "health_status": "healthy",
-  "response_time": "50ms",
-  "error_count": 0,
-  "request_count": 1247
-}
-```
-
-### User Queries (`query:user:{identifier}`)
-
-Query specific users by various identifiers:
-
-```bash
-# Query by sAMAccountName
-GET /modules/activedirectory/query:user:john.doe
-
-# Query by UPN
-GET /modules/activedirectory/query:user:john.doe@corp.example.com
-
-# Query by DN
-GET /modules/activedirectory/query:user:CN=John Doe,OU=Users,DC=corp,DC=example,DC=com
-```
-
-### Group Queries (`query:group:{identifier}`)
-
-Query specific groups:
-
-```bash
-# Query by sAMAccountName
-GET /modules/activedirectory/query:group:Domain Admins
-
-# Query by DN
-GET /modules/activedirectory/query:group:CN=Domain Admins,CN=Users,DC=corp,DC=example,DC=com
-```
-
-### Organizational Unit Queries (`query:ou:{identifier}`)
-
-Query specific OUs:
-
-```bash
-# Query by name
-GET /modules/activedirectory/query:ou:Users
-
-# Query by DN
-GET /modules/activedirectory/query:ou:OU=Users,DC=corp,DC=example,DC=com
-```
-
-### List Operations
-
-List objects by type:
-
-```bash
-# List all users
-GET /modules/activedirectory/list:user
-
-# List all groups
-GET /modules/activedirectory/list:group
-
-# List all OUs
-GET /modules/activedirectory/list:ou
-
-# List computers
-GET /modules/activedirectory/list:computer
-
-# List Group Policy Objects
-GET /modules/activedirectory/list:gpo
-
-# List domain trusts
-GET /modules/activedirectory/list:trust
-```
-
-### Multi-Domain Operations
-
-Query objects across trusted domains:
-
-```bash
-# Cross-domain user query
-GET /modules/activedirectory/query:user:john.doe:dev.contoso.com
-
-# Cross-domain group query  
-GET /modules/activedirectory/query:group:admins:external.partner.com
-
-# Forest-wide user search
-GET /modules/activedirectory/forest:user:jane.smith
-
-# Forest-wide group search
-GET /modules/activedirectory/forest:group:managers
-
-# Validate domain trust
-GET /modules/activedirectory/validate_trust:dev.contoso.com
-```
-
-### AD-Specific Object Queries
-
-Query Active Directory specific objects:
-
-```bash
-# Computer object query
-GET /modules/activedirectory/query:computer:WORKSTATION-01
-
-# Group Policy Object query
-GET /modules/activedirectory/query:gpo:Default Domain Policy
-
-# Domain trust query
-GET /modules/activedirectory/query:trust:external.partner.com
-```
-
-## Authentication Methods
-
-### Simple Bind (`simple`)
-- Basic username/password authentication
-- Supports both UPN and DN formats
-- Recommended for service accounts
-
-### Kerberos (`kerberos`)
-- Uses Kerberos tickets for authentication
-- Requires properly configured service account
-- Best security for domain environments
-
-### NTLM (`ntlm`)
-- Windows NTLM authentication (planned)
-- Fallback for environments without Kerberos
-
-## Deployment
-
-### Prerequisites
-
-**Windows Deployment (Recommended):**
-- Windows Server 2019+ or Windows 10+
-- Domain-joined machine
-- Network access to domain controllers
-- Service account with "Log on as a service" right
-
-**Linux Deployment (Limited):**
-- Network access to domain controllers
-- LDAP-only functionality (no Windows APIs)
-- Service account credentials
-
-### Service Account Setup
-
-1. Create dedicated service account:
-```powershell
-New-ADUser -Name "svc-cfgms" -UserPrincipalName "svc-cfgms@corp.example.com" -AccountPassword (ConvertTo-SecureString "ComplexPassword123!" -AsPlainText -Force) -Enabled $true
-```
-
-2. Grant required permissions:
-```powershell
-# Grant "Log on as a service"
-Grant-CServicePermission -Identity "CORP\svc-cfgms" -Privilege SeServiceLogonRight
-
-# Grant read permissions to AD (usually inherited from Domain Users)
-```
+### Supported Object Types
+- `user` - AD user accounts (including computer accounts)
+- `group` - AD groups (security and distribution)
+- `computer` - AD computer objects
+- `organizational_unit` / `ou` - Organizational units
+- `gpo` / `group_policy` - Group Policy Objects (read-only)
 
 ## Usage examples
 
-### Basic User Management
-
-```go
-// Query a specific user
-result, err := module.Get(ctx, "query:user:john.doe")
-if err != nil {
-    log.Printf("Failed to get user: %v", err)
-    return
-}
-
-userResult := result.(*ADQueryResult)
-if userResult.Success && userResult.User != nil {
-    fmt.Printf("User: %s (%s)\n", userResult.User.DisplayName, userResult.User.EmailAddress)
-}
+### Query Specific User
+```bash
+cfgctl steward get-config steward-id "query:user:Administrator"
 ```
 
-### Multi-Domain Operations
-
-```go
-// Cross-domain user lookup
-result, err := module.Get(ctx, "query:user:jane.doe:dev.contoso.com")
-
-// Forest-wide user search
-result, err := module.Get(ctx, "forest:user:admin.user")
-
-// Validate domain trust
-result, err := module.Get(ctx, "validate_trust:external.partner.com")
+### List All Groups
+```bash
+cfgctl steward get-config steward-id "list:group"
 ```
 
-### Enterprise Scenarios
-
-```go
-// List all computers in domain
-computers, err := module.Get(ctx, "list:computer")
-
-// Get Group Policy Objects
-gpos, err := module.Get(ctx, "list:gpo")
-
-// Check domain trusts
-trusts, err := module.Get(ctx, "list:trust")
+### Get System Status
+```bash
+cfgctl steward get-config steward-id "status"
 ```
 
-## Known limitations
-
-- **Write Operations**: Currently read-only mode; write operations planned for future release
-- **Real-time Monitoring**: DirSync change notifications not yet implemented
-- **Linux Limitations**: Full functionality requires Windows deployment; Linux provides LDAP-only access
-- **Forest Topology**: Complex forest topologies may require additional trust configuration
-- **Performance**: Large forests with 100k+ objects may require performance tuning
-- **Exchange Objects**: Mailbox and Exchange-specific attributes not currently supported
-- **ADFS Integration**: Active Directory Federation Services not directly supported
+### Collect Directory DNA
+```bash
+cfgctl steward get-config steward-id "dna_collection"
+```
 
 ## Security considerations
 
-### Authentication Security
-- **Credential Protection**: Store passwords in secure configuration or environment variables
-- **Least Privilege**: Use read-only service accounts when possible
-- **Multi-Factor Authentication**: Service accounts should use strong authentication methods
-- **Account Rotation**: Implement regular service account password rotation
+### Zero-Credential Design
+- **No Stored Credentials**: Module does not store or manage any AD credentials
+- **System Context**: Leverages Windows service account security context
+- **Automatic Authentication**: Uses Kerberos/NTLM through Windows subsystem
+- **Minimal Attack Surface**: No credential exposure risk
 
-### Network Security
-- **Encrypted Communication**: Use LDAPS (port 636) for encrypted communication
-- **Certificate Validation**: Validate domain controller certificates in production
-- **Network Segmentation**: Isolate AD traffic using network security controls
-- **Connection Limits**: Configure appropriate connection pool sizes to prevent DoS
+### Required Permissions
+The steward service account requires:
+- **Log on as a service** - Standard service account permission
+- **Act as part of operating system** - For system context access
+- **Domain membership** - Computer must be domain-joined
 
-### Access Control
-- **Service Account Permissions**: Grant minimal required AD permissions
-- **Audit Logging**: All AD operations are logged for security auditing  
-- **Cross-Domain Controls**: Validate trust relationships before cross-domain access
-- **Tenant Isolation**: Ensure proper tenant separation in MSP deployments
+### Audit and Compliance
+- All operations are logged with security event correlation
+- Sensitive operations (create/update/delete) are audited
+- No credential information is logged or stored
 
-### Data Protection
-- **Sensitive Data Handling**: PII and sensitive AD attributes are handled securely
-- **Log Sanitization**: Passwords and sensitive data are redacted from logs
-- **Transport Encryption**: All data in transit is encrypted via TLS/mTLS
-- **Storage Security**: Configuration data is stored using CFGMS secure storage providers
+## Directory DNA Integration
 
-## Integration with Directory DNA
+The module integrates with the DirectoryDNA framework to provide:
 
-The AD module integrates with CFGMS DirectoryDNA system:
+### Collected Metrics
+- **Domain Statistics**: Total users, groups, computers, OUs
+- **Domain Controller Information**: DC names, roles, health status
+- **Group Policy Data**: GPO count, names, versions
+- **Forest Information**: Forest mode, schema master, naming contexts
+- **Security Metrics**: Enabled/disabled accounts, group types
 
-```yaml
-# Enable DNA collection for AD objects
-features:
-  directory_dna:
-    enabled: true
-    providers:
-      - activedirectory
-    collection_schedule: "0 */6 * * *"  # Every 6 hours
-```
-
-This enables:
-- **Drift Detection**: Monitor changes to AD objects
-- **Relationship Mapping**: Track group memberships and OU hierarchy
-- **Change History**: Historical tracking of AD modifications
-- **Compliance Monitoring**: Detect unauthorized AD changes
-
-## Monitoring and Health Checks
-
-The module provides comprehensive monitoring:
-
-### Health Checks
-- **AD Connectivity**: Test LDAP connection to domain controller
-- **Authentication**: Verify service account credentials
-- **Response Time**: Monitor query performance
-- **Error Rates**: Track failed operations
-
-### Metrics
-- `ad_requests_total`: Total AD requests processed
-- `ad_request_duration_seconds`: Request latency distribution
-- `ad_errors_total`: Total errors by type
-- `ad_connection_status`: Connection health status
-
-### Logging
-
-All operations are logged with structured fields:
+### DNA Data Structure
 ```json
 {
-  "level": "info",
-  "timestamp": "2025-01-15T14:25:30Z",
-  "module": "activedirectory",
-  "operation": "query_user",
-  "object_id": "john.doe",
+  "collection_time": "2023-01-01T12:00:00Z",
   "success": true,
-  "response_time": "75ms",
-  "steward_id": "steward-dc01"
+  "source": "activedirectory_system",
+  "dna": {
+    "domain_info": {
+      "domain_name": "example.com",
+      "forest_name": "example.com",
+      "domain_mode": "WinThreshold",
+      "forest_mode": "WinThreshold"
+    },
+    "statistics": {
+      "total_users": 150,
+      "enabled_users": 145,
+      "disabled_users": 5,
+      "total_groups": 75,
+      "security_groups": 65,
+      "distribution_groups": 10
+    }
+  }
 }
+```
+
+## Error Handling
+
+### Common Error Scenarios
+- **Module Not Available**: Active Directory PowerShell module not installed
+- **Domain Access**: System cannot access domain controller
+- **Permission Denied**: Insufficient system permissions
+- **PowerShell Execution**: PowerShell script execution failures
+
+### Error Response Format
+```json
+{
+  "success": false,
+  "error": "PowerShell execution failed: Access denied",
+  "response_time": "1.5s"
+}
+```
+
+## Performance Considerations
+
+### Optimization Features
+- **Configurable Page Size**: Control memory usage for large result sets
+- **Request Timeouts**: Prevent hung operations
+- **Efficient Queries**: Uses PowerShell filters for server-side filtering
+- **Minimal Data Transfer**: Returns only requested fields
+
+### Monitoring Metrics
+- `ad_local_requests_total` - Total requests processed
+- `ad_local_request_duration_seconds` - Request processing time
+- `ad_local_errors_total` - Total errors encountered
+- `ad_dna_collection_status` - DNA collection health status
+
+## Comparison with Network AD Module
+
+| Feature | System Context Module | Network AD Module |
+|---------|----------------------|-------------------|
+| **Executor** | Steward (local) | Outpost (network) |
+| **Authentication** | System context | LDAP credentials |
+| **Credential Storage** | None | Encrypted storage |
+| **Performance** | High (local APIs) | Medium (network LDAP) |
+| **Security** | Windows integrated | mTLS + credentials |
+| **Use Case** | Domain controllers | Remote management |
+
+## Development and Testing
+
+### Unit Tests
+The module includes comprehensive unit tests for:
+- Configuration validation
+- Object conversion methods
+- Error handling scenarios
+- Statistics tracking
+- YAML serialization
+
+### Integration Tests
+Integration tests are provided but require a Windows AD environment:
+- System access verification
+- Real AD object queries
+- Directory DNA collection
+- Performance benchmarks
+
+Run tests with:
+```bash
+go test -v ./features/modules/activedirectory
 ```
 
 ## Troubleshooting
 
 ### Common Issues
 
-**Connection Failed:**
-- Verify domain controller accessibility
-- Check firewall rules (ports 389/636)
-- Validate service account credentials
-- Ensure proper DNS resolution
+**"PowerShell execution failed"**
+- Verify PowerShell execution policy allows script execution
+- Check if Active Directory module is installed: `Get-Module -ListAvailable ActiveDirectory`
 
-**Authentication Failed:**
-- Verify service account is not disabled/locked
-- Check password expiration
-- Validate domain trust relationships
-- Ensure proper time synchronization
+**"System AD access verification failed"**
+- Verify computer is domain-joined: `Test-ComputerSecureChannel`
+- Check steward service account permissions
+- Verify domain controller connectivity
 
-**Slow Performance:**
-- Increase connection pool size
-- Reduce page size for large queries
-- Check network latency to domain controller
-- Monitor domain controller performance
+**"Module not configured"**
+- Ensure module configuration is applied before use
+- Verify all required fields are provided in configuration
 
-**Permission Denied:**
-- Verify service account has read permissions
-- Check for account restrictions or group policies
-- Validate OU access permissions
-
-### Debug Mode
-
-Enable detailed logging:
+### Debug Logging
+Enable debug logging to troubleshoot issues:
 ```yaml
 logging:
   level: debug
-  modules:
-    activedirectory: debug
+  components:
+    - activedirectory
 ```
 
-This provides verbose LDAP operation logging for troubleshooting.
+## Known limitations
 
-## Future Enhancements
+### Platform Restrictions
+- **Windows Only**: Requires Windows platform with Active Directory PowerShell module
+- **Domain Membership Required**: Steward must be domain-joined for system context access
+- **Service Account Privileges**: Requires elevated service account permissions
 
-- **Write Operations**: User/group creation and modification
-- **Real-time Monitoring**: DirSync for change notifications
-- **Multi-Forest Support**: Cross-forest trust relationships
-- **Computer Management**: Full computer object lifecycle
-- **Group Policy Integration**: Read GP assignments and settings
-- **Exchange Integration**: Mailbox and distribution list management
+### Functional Limitations
+- **Read-Heavy Operations**: Optimized for read operations; write operations may have higher latency
+- **PowerShell Dependency**: Requires PowerShell and AD module availability
+- **Local Domain Only**: Cannot query remote domains without trust relationships
+- **No Schema Extensions**: Does not support custom AD schema extensions in current version
+
+### Performance Considerations
+- **PowerShell Overhead**: PowerShell execution adds processing overhead compared to native LDAP
+- **Large Result Sets**: Memory usage scales with query result size
+- **Concurrent Limits**: Limited by PowerShell's concurrent execution capabilities
+
+## Version History
+
+- **v1.0.0** - Initial system-context implementation with PowerShell integration
+- **v1.0.0** - DirectoryDNA integration and comprehensive testing
+- **v1.0.0** - Support for users, groups, computers, and organizational units
+
+## Related Modules
+
+- **network_activedirectory** - Network-based AD provider for outpost components
+- **directory** - Generic directory operations and provider abstraction
+- **entra_user** - Azure AD/Entra ID user management
+- **conditional_access** - Azure AD conditional access policies

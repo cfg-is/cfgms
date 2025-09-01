@@ -1,6 +1,11 @@
 name: package
 description: Manages system packages across different package managers (apt, yum, brew, etc.)
 version: 0.1.0
+
+# Supported execution environments
+executors:
+  - steward  # Local package management on steward systems
+
 author: CFGMS Team
 license: MIT
 platforms:

@@ -1,4 +1,4 @@
-package activedirectory
+package network_activedirectory
 
 import (
 	"strconv"

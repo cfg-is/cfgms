@@ -1,4 +1,4 @@
-package activedirectory
+package network_activedirectory
 
 import (
 	"context"
@@ -85,10 +85,10 @@ func NewActiveDirectoryProvider(stewardClient StewardClient, logger logging.Logg
 // GetProviderInfo returns information about this provider
 func (p *ActiveDirectoryProvider) GetProviderInfo() interfaces.ProviderInfo {
 	return interfaces.ProviderInfo{
-		Name:        "activedirectory",
-		DisplayName: "Active Directory",
+		Name:        "network_activedirectory",
+		DisplayName: "Network Active Directory",
 		Version:     "1.0.0",
-		Description: "Microsoft Active Directory provider with full LDAP support and Windows authentication",
+		Description: "Network-based Microsoft Active Directory provider with LDAP support for remote AD management (future Outpost component)",
 		SupportedTypes: []interfaces.DirectoryObjectType{
 			interfaces.DirectoryObjectTypeUser,
 			interfaces.DirectoryObjectTypeGroup,
@@ -505,7 +505,7 @@ type ADModuleQueryResult struct {
 
 // init registers this provider with the global factory
 func init() {
-	interfaces.RegisterDirectoryProviderConstructor("activedirectory", func() interfaces.DirectoryProvider {
+	interfaces.RegisterDirectoryProviderConstructor("network_activedirectory", func() interfaces.DirectoryProvider {
 		// In a real implementation, this would get the steward client from a registry
 		// For now, return a provider that will need to be configured with a client
 		return &ActiveDirectoryProvider{
