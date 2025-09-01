@@ -1,0 +1,130 @@
+name: activedirectory
+version: "1.0.0"
+description: "Active Directory integration module for reading and managing AD objects via LDAP"
+
+# Required interfaces for module compliance
+interfaces:
+  - Get
+  - Set
+  - Test
+
+# Platform support - requires Windows for full functionality
+platforms:
+  - windows  # Primary - domain controller access
+  - linux    # Limited - LDAP-only access
+
+# Resource type this module manages
+resource_types:
+  - activedirectory_connection
+  - activedirectory_query
+
+# Required permissions
+permissions:
+  windows:
+    - "Log on as a service"
+    - "Read domain information"
+  all:
+    - "Network access to domain controller"
+
+# Configuration schema
+configuration:
+  required_fields:
+    - domain
+    - auth_method
+    - operation_type
+    - object_types
+  optional_fields:
+    - domain_controller
+    - port
+    - use_tls
+    - username
+    - password
+    - search_base
+    - page_size
+    - max_connections
+    - request_timeout
+    - trusted_domains
+    - forest_root
+    - global_catalog_dc
+    - cross_domain_auth
+    - managed_fields
+
+# Default configuration values
+defaults:
+  port: 389
+  use_tls: false
+  page_size: 100
+  max_connections: 5
+  request_timeout: "30s"
+  operation_type: "read"
+  auth_method: "simple"
+
+# Supported object types
+supported_object_types:
+  - user
+  - group
+  - organizational_unit
+  - computer
+  - gpo
+  - group_policy
+  - domain_trust
+  - trust
+
+# Supported operations
+supported_operations:
+  read:
+    - query
+    - list
+    - status
+    - cross_domain_query
+    - forest_search
+    - trust_validation
+  write:
+    - create_user
+    - update_user
+    - delete_user
+    - create_group
+    - update_group
+    - delete_group
+
+# Dependencies
+dependencies:
+  go_packages:
+    - "github.com/go-ldap/ldap/v3"
+    - "github.com/jcmturner/gokrb5/v8"
+  system:
+    windows:
+      - "Active Directory Domain Services"
+    linux:
+      - "Network connectivity to domain controller"
+
+# Health checks
+health_checks:
+  - name: "ad_connectivity"
+    description: "Test LDAP connection to domain controller"
+    interval: "60s"
+  - name: "authentication"
+    description: "Verify authentication credentials"
+    interval: "300s"
+
+# Monitoring
+monitoring:
+  metrics:
+    - "ad_requests_total"
+    - "ad_request_duration_seconds"
+    - "ad_errors_total"
+    - "ad_connection_status"
+  
+# Security considerations
+security:
+  sensitive_fields:
+    - password
+  encryption_required:
+    - password
+  audit_operations:
+    - create_user
+    - update_user
+    - delete_user
+    - create_group
+    - update_group
+    - delete_group
