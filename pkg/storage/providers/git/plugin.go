@@ -678,8 +678,14 @@ func (s *GitConfigStore) GetConfigHistory(ctx context.Context, key *interfaces.C
 	
 	filePath := s.getConfigPath(key)
 	
+	// Make path relative to repository root for git commands
+	relPath, err := filepath.Rel(s.repoPath, filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get relative path: %w", err)
+	}
+	
 	// Get git log for the file
-	args := []string{"log", "--oneline", fmt.Sprintf("-%d", limit), "--", filePath}
+	args := []string{"log", "--oneline", fmt.Sprintf("-%d", limit), "--", relPath}
 	// #nosec G204 - Git storage requires controlled git command execution with validated args
 	cmd := exec.Command("git", args...)
 	cmd.Dir = s.repoPath
@@ -711,7 +717,7 @@ func (s *GitConfigStore) GetConfigHistory(ctx context.Context, key *interfaces.C
 		
 		// Get file content at this commit
 		// #nosec G204 - Git history requires accessing files at specific commits
-		cmd := exec.Command("git", "show", commitHash+":"+filePath)
+		cmd := exec.Command("git", "show", commitHash+":"+relPath)
 		cmd.Dir = s.repoPath
 		
 		output, err := cmd.Output()
