@@ -127,9 +127,9 @@ func (framework *ChaosSecurityTestFramework) Setup() error {
 		}
 		
 		// Assign roles
-		roleID := "user.standard"
+		roleID := "chaos-tenant.tenant.viewer"
 		if subjectID == "chaos-admin" {
-			roleID = "admin"
+			roleID = "system.admin"
 		}
 		
 		assignment := &common.RoleAssignment{

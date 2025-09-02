@@ -124,9 +124,9 @@ func (framework *DegradedModeSecurityTestFramework) Setup() error {
 		ID   string
 		Role string
 	}{
-		{"degraded-user-low", "user.standard"},
-		{"degraded-user-high", "user.advanced"},
-		{"degraded-admin", "admin"},
+		{"degraded-user-low", "system.read-only"},
+		{"degraded-user-high", "system.read-only"}, // Using read-only for both user levels
+		{"degraded-admin", "system.admin"},
 		{"degraded-service", "service.basic"},
 	}
 	

@@ -372,12 +372,12 @@ func TestDefaultVersionMigrator_ExecuteMigration(t *testing.T) {
 		path2, err := migrator.GetMigrationPath("test-module", "1.1.0", "1.0.0")
 		require.NoError(t, err)
 
-		// Make migrations take longer for this test
+		// Make migrations take a reasonable amount of time for this test
 		for i := range path1.Steps {
-			path1.Steps[i].EstimatedTime = 2 * time.Second
+			path1.Steps[i].EstimatedTime = 100 * time.Millisecond
 		}
 		for i := range path2.Steps {
-			path2.Steps[i].EstimatedTime = 2 * time.Second
+			path2.Steps[i].EstimatedTime = 100 * time.Millisecond
 		}
 
 		ctx := context.Background()
@@ -392,8 +392,15 @@ func TestDefaultVersionMigrator_ExecuteMigration(t *testing.T) {
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "migration already in progress")
 
-		// Wait for first migration to complete
-		time.Sleep(15 * time.Second)
+		// Wait for first migration to complete with polling
+		timeout := time.Now().Add(5 * time.Second)
+		for time.Now().Before(timeout) {
+			status, err := migrator.GetMigrationStatus("test-module")
+			if err == nil && status.Status == MigrationStatusCompleted {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
 
 		// Now second migration should succeed
 		result3, err := migrator.ExecuteMigration(ctx, path2)
@@ -499,9 +506,9 @@ func TestDefaultVersionMigrator_ListActiveMigrations(t *testing.T) {
 			path, err := migrator.GetMigrationPath(moduleName, "1.0.0", "1.1.0")
 			require.NoError(t, err)
 
-			// Make migrations take longer
+			// Make migrations take a reasonable time for testing
 			for j := range path.Steps {
-				path.Steps[j].EstimatedTime = 2 * time.Second
+				path.Steps[j].EstimatedTime = 200 * time.Millisecond
 			}
 
 			ctx := context.Background()
@@ -528,8 +535,16 @@ func TestDefaultVersionMigrator_ListActiveMigrations(t *testing.T) {
 			assert.True(t, foundIDs[id], "Migration ID %s not found in active list", id)
 		}
 
-		// Wait for migrations to complete
-		time.Sleep(15 * time.Second)
+		// Wait for migrations to complete with polling
+		timeout := time.Now().Add(10 * time.Second)
+		for time.Now().Before(timeout) {
+			activeMigrations, err := migrator.ListActiveMigrations()
+			require.NoError(t, err)
+			if len(activeMigrations) == 0 {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
 
 		// Should have no active migrations now
 		activeMigrations, err = migrator.ListActiveMigrations()

@@ -93,7 +93,7 @@ func (framework *ComponentFailureSecurityTestFramework) Setup() error {
 	// Assign role to test subject
 	assignment := &common.RoleAssignment{
 		SubjectId: "test-user",
-		RoleId:    "user.standard",
+		RoleId:    "system.read-only",
 		TenantId:  "test-tenant",
 	}
 	err = framework.rbacManager.AssignRole(ctx, assignment)

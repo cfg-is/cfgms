@@ -107,9 +107,9 @@ func (framework *SecurityStateConsistencyTestFramework) Setup() error {
 		ID   string
 		Role string
 	}{
-		{"consistency-user", "user.standard"},
-		{"consistency-admin", "admin"},
-		{"consistency-service", "service.basic"},
+		{"consistency-user", "system.read-only"},
+		{"consistency-admin", "system.admin"},
+		{"consistency-service", "system.read-only"}, // Using read-only for service as well
 	}
 	
 	for _, subj := range subjects {
