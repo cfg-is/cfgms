@@ -361,9 +361,9 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 
 **Epic 5B: Core Global Storage Foundation (25 story points)**
 - [x] **Core Global Storage Interfaces** (Issue #136) - 8 points ✅ COMPLETED
-- [ ] **Enhanced Git Storage Provider** (8 points)
-- [ ] **Enhanced Database Storage Provider** (6 points)
-- [ ] **Foundation Storage Migration** (3 points)
+- [ ] **Enhanced Git Storage Provider** (Issue #137) - 8 points
+- [ ] **Enhanced Database Storage Provider** (Issue #138) - 6 points
+- [ ] **Foundation Storage Migration** (Issue #139) - 3 points
 
 #### v0.4.6.0 (Alpha) - Complete Storage Migration
 
