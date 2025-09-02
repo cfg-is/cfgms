@@ -355,50 +355,27 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 - [x] **Active Directory Provider Implementation** (Issue #122) - 10 points ✅ COMPLETED
 - [x] **Entra ID Provider Implementation** (Issue #123) - 9 points ✅ COMPLETED
 
-**Epic 5: Global Storage Provider Architecture Migration (25 story points) - PLANNED**
-*Migrate from module-specific storage to global controller-level plugin architecture*
+#### v0.4.5.0 (Alpha) - Core Global Storage Foundation
 
-- [ ] **Implement Global Storage Interfaces** (8 points)
-  - Create `pkg/storage/interfaces/` with ClientTenantStore, ConfigStore, AuditStore contracts
-  - Establish StorageProvider interface for unified backend creation
-  - Design plugin auto-registration system via `init()` functions
+**Status**: 📋 PLANNED - 25 story points - Epic 5B: Core Global Storage Foundation
 
-- [ ] **Implement Git Storage Provider** (8 points)  
-  - Local git repository support with versioning and audit trail
-  - Remote git repository support with GitOps workflow integration
-  - Mozilla SOPS integration for secrets management (first KMS implementation)
-  - Extensible KMS interface to support future providers (Vault, AWS KMS, Azure Key Vault)
+**Epic 5B: Core Global Storage Foundation (25 story points)**
+- [x] **Core Global Storage Interfaces** (Issue #136) - 8 points ✅ COMPLETED
+- [ ] **Enhanced Git Storage Provider** (8 points)
+- [ ] **Enhanced Database Storage Provider** (6 points)
+- [ ] **Foundation Storage Migration** (3 points)
 
-- [ ] **Implement Database Storage Provider** (6 points)
-  - PostgreSQL backend with ACID transactions and concurrency support
-  - Auto-schema creation and migration support
-  - Connection pooling and production-ready configuration
+#### v0.4.6.0 (Alpha) - Complete Storage Migration
 
-- [ ] **Evaluate Best storage for DNA**
-  - options to consider LevelDB, vs storage provider
+**Status**: 📋 PLANNED - 33 story points - Epic 6: Complete Storage Migration
 
-- [ ] **Migrate All Modules to Global Storage** (3 points)
-  - Migrate existing DNA storage system to use global plugin architecture
-  - Update all modules to import `pkg/storage/interfaces` only (never specific providers)
-  - Remove module-specific storage implementations
-  - Validate all modules work with both git and database providers
-
-**Configuration Strategy:**
-```yaml
-# Simple deployment - Local git with SOPS
-controller.storage.provider: git
-controller.storage.config.repository_path: /var/lib/cfgms/config.git
-
-# Production deployment - PostgreSQL  
-controller.storage.provider: database
-controller.storage.config.database_url: postgresql://...
-```
-
-**Benefits:**
-- **Consistency**: All data in same storage system (no mixed backends)
-- **Simplicity**: One controller-level decision affects entire system
-- **Extensibility**: KMS interface enables future security providers
-- **GitOps Ready**: Git provider enables infrastructure-as-code workflows
+**Epic 6: Complete Storage Migration (33 story points)**
+- [ ] **RBAC Storage Migration** (8 points)
+- [ ] **Audit & Compliance Storage Migration** (8 points)
+- [ ] **Configuration & Rollback Storage Migration** (6 points)
+- [ ] **Session & Runtime Storage Migration** (5 points)
+- [ ] **DNA Storage Integration Assessment** (3 points)
+- [ ] **Storage Pattern Validation & Cleanup** (3 points)
 
 #### v0.5.0 (Beta) - Advanced Workflows & Core Readiness
 

@@ -57,3 +57,23 @@ type AdminConsentRequest struct {
 	CreatedAt        time.Time              `json:"created_at"`
 	Metadata         map[string]interface{} `json:"metadata,omitempty"`
 }
+
+// ClientTenantValidationError represents validation errors
+type ClientTenantValidationError struct {
+	Field   string `json:"field"`
+	Message string `json:"message"`
+	Code    string `json:"code"`
+}
+
+func (e *ClientTenantValidationError) Error() string {
+	return e.Field + ": " + e.Message
+}
+
+// Common client tenant errors
+var (
+	ErrTenantNotFound     = &ClientTenantValidationError{Field: "tenant_id", Message: "tenant not found", Code: "TENANT_NOT_FOUND"}
+	ErrTenantExists       = &ClientTenantValidationError{Field: "tenant_id", Message: "tenant already exists", Code: "TENANT_EXISTS"}
+	ErrInvalidTenantID    = &ClientTenantValidationError{Field: "tenant_id", Message: "invalid tenant ID", Code: "INVALID_TENANT_ID"}
+	ErrInvalidEmail       = &ClientTenantValidationError{Field: "admin_email", Message: "invalid email address", Code: "INVALID_EMAIL"}
+	ErrConsentExpired     = &ClientTenantValidationError{Field: "consent", Message: "admin consent has expired", Code: "CONSENT_EXPIRED"}
+)
