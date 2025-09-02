@@ -307,10 +307,12 @@ func containsIgnoreCase(s, substr string) bool {
 	if len(s) < len(substr) {
 		return false
 	}
-	s = stringToLower(s)
-	substr = stringToLower(substr)
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
+	
+	sLower := stringToLower(s)
+	substrLower := stringToLower(substr)
+	
+	for i := 0; i <= len(sLower)-len(substrLower); i++ {
+		if sLower[i:i+len(substrLower)] == substrLower {
 			return true
 		}
 	}

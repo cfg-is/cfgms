@@ -9,6 +9,7 @@ package interfaces
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -339,8 +340,8 @@ func (p *DefaultDirectoryConnectionPool) Put(conn DirectoryConnection) error {
 	if atomic.LoadInt32(&p.closed) != 0 {
 		if conn != nil {
 			if err := conn.Close(context.Background()); err != nil {
-				// Could add logging here if needed
-			_ = err
+				// Log error but don't fail the operation
+				log.Printf("Warning: failed to close connection: %v", err)
 			}
 		}
 		return fmt.Errorf("connection pool is closed")
@@ -362,8 +363,8 @@ func (p *DefaultDirectoryConnectionPool) Put(conn DirectoryConnection) error {
 	if err := p.healthChecker.CheckHealth(ctx, conn); err != nil {
 		// Connection is unhealthy, close it
 		if err := conn.Close(ctx); err != nil {
-			// Could add logging here if needed
-			_ = err
+			// Log error but don't fail the health check process
+			log.Printf("Warning: failed to close unhealthy connection: %v", err)
 		}
 		
 		p.updateStatistics(func(stats *PoolStatistics) {
@@ -387,8 +388,13 @@ func (p *DefaultDirectoryConnectionPool) Put(conn DirectoryConnection) error {
 	default:
 		// Pool is full, close connection
 		if err := conn.Close(ctx); err != nil {
+<<<<<<< HEAD
 			// Could add logging here if needed
 			_ = err
+=======
+			// Log error but don't fail the pool operation
+			log.Printf("Warning: failed to close excess connection: %v", err)
+>>>>>>> 61afb7f (Implement Story #123: Epic 4: Entra ID Provider Implementation (9 points))
 		}
 		
 		p.updateStatistics(func(stats *PoolStatistics) {
