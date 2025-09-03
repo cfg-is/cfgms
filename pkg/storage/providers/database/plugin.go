@@ -187,7 +187,7 @@ func NewDatabaseClientTenantStore(dsn string, config map[string]interface{}) (*D
 	
 	// Test connection
 	if err := db.Ping(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 	
@@ -199,7 +199,7 @@ func NewDatabaseClientTenantStore(dsn string, config map[string]interface{}) (*D
 	
 	// Initialize database schema
 	if err := store.initializeSchema(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("failed to initialize database schema: %w", err)
 	}
 	

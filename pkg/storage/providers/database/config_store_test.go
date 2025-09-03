@@ -576,7 +576,7 @@ func setupTestDatabaseForBench(tb testingTB) *sql.DB {
 	}
 	
 	if err := db.Ping(); err != nil {
-		db.Close()
+		_ = db.Close()
 		tb.Skip("PostgreSQL test database not reachable:", err)
 	}
 	

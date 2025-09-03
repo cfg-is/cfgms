@@ -42,7 +42,7 @@ func getTestDB(t *testing.T) *sql.DB {
 	}
 	
 	if err := db.Ping(); err != nil {
-		db.Close()
+		_ = db.Close()
 		t.Skip("PostgreSQL test database not reachable:", err)
 	}
 	
@@ -95,7 +95,7 @@ func TestDatabaseProvider_CreateClientTenantStore(t *testing.T) {
 	}
 	
 	db := setupTestDatabase(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	
 	provider := &DatabaseProvider{}
 	
@@ -119,7 +119,7 @@ func TestDatabaseProvider_CreateConfigStore(t *testing.T) {
 	}
 	
 	db := setupTestDatabase(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	
 	provider := &DatabaseProvider{}
 	
@@ -143,7 +143,7 @@ func TestDatabaseProvider_CreateAuditStore(t *testing.T) {
 	}
 	
 	db := setupTestDatabase(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	
 	provider := &DatabaseProvider{}
 	
@@ -229,7 +229,7 @@ func TestDatabaseSchemas_CreateTables(t *testing.T) {
 	}
 	
 	db := setupTestDatabase(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	
 	schemas := NewDatabaseSchemas()
 	ctx := context.Background()
@@ -270,11 +270,11 @@ func TestDatabaseClientTenantStore_CRUD(t *testing.T) {
 	}
 	
 	db := setupTestDatabase(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	
 	store, err := NewDatabaseClientTenantStore("", testDBConfig)
 	require.NoError(t, err)
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	
 	// Create a test client tenant
 	tenant := &interfaces.ClientTenant{
@@ -344,11 +344,11 @@ func TestDatabaseClientTenantStore_AdminConsent(t *testing.T) {
 	}
 	
 	db := setupTestDatabase(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	
 	store, err := NewDatabaseClientTenantStore("", testDBConfig)
 	require.NoError(t, err)
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	
 	// Create a test admin consent request
 	request := &interfaces.AdminConsentRequest{
@@ -392,7 +392,7 @@ func TestDatabaseProvider_Integration(t *testing.T) {
 	}
 	
 	db := setupTestDatabase(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	
 	// Test provider registration
 	providerNames := interfaces.GetRegisteredProviderNames()
