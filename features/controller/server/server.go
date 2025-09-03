@@ -21,6 +21,7 @@ import (
 	tenantmemory "github.com/cfgis/cfgms/features/tenant/memory"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
 // Server represents the gRPC server component of the controller
@@ -44,15 +45,30 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		return nil, ErrNilConfig
 	}
 
-	// TODO: Foundation storage migration - implement global storage provider system
-	// For now, continue using existing memory stores but log the configured storage provider
+	// Initialize global storage provider system
+	var rbacManager *rbac.Manager
 	if cfg.Storage != nil {
-		logger.Info("Storage provider configuration", "provider", cfg.Storage.Provider)
-		// Future: Use cfg.Storage to create pluggable storage backends
+		logger.Info("Using pluggable storage provider", "provider", cfg.Storage.Provider)
+		
+		// Create storage manager with pluggable provider
+		storageManager, err := interfaces.CreateAllStoresFromConfig(cfg.Storage.Provider, cfg.Storage.Config)
+		if err != nil {
+			logger.Warn("Failed to create pluggable storage, falling back to memory", "error", err, "provider", cfg.Storage.Provider)
+			// Fall back to memory storage
+			rbacManager = rbac.NewManager()
+		} else {
+			// Use pluggable storage for RBAC
+			rbacManager = rbac.NewManagerWithStorage(
+				storageManager.GetAuditStore(),
+				storageManager.GetClientTenantStore(),
+			)
+			logger.Info("RBAC system initialized with pluggable storage", "provider", cfg.Storage.Provider)
+		}
+	} else {
+		logger.Info("No storage configuration found, using memory storage")
+		// Default to memory storage for backward compatibility
+		rbacManager = rbac.NewManager()
 	}
-
-	// Initialize RBAC system (currently uses memory store)
-	rbacManager := rbac.NewManager()
 
 	// Initialize default permissions and roles
 	if err := rbacManager.Initialize(context.Background()); err != nil {
