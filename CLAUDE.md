@@ -49,40 +49,19 @@ CFGMS (Config Management System) is a modern, Go-based configuration management 
    - Only mock external dependencies we don't control (network, file I/O)
    - Run tests frequently: `make test`
 
-4. **MANDATORY Security Review** (CRITICAL)
+4. **Basic Security Review** (CRITICAL)
    
-   **Act as a cybersecurity expert specializing in Go applications and zero-trust systems.** Review ALL code changes for security vulnerabilities with particular attention to:
-
-   **Authentication & Authorization:**
-   - Verify all API endpoints require proper authentication
-   - Check certificate validation is not bypassed
-   - Ensure RBAC permissions are enforced
-   - Validate JWT/token handling is secure
-
-   **Input Validation & Injection Prevention:**
-   - Check ALL user inputs are validated and sanitized
-   - Verify SQL queries use parameterized statements
-   - Ensure command injection is prevented in shell executions
-   - Validate file path operations prevent directory traversal
-
-   **Cryptography & TLS:**
-   - Verify mutual TLS implementation is correct
-   - Check certificate handling follows security requirements
-   - Ensure no hardcoded cryptographic keys or secrets
-   - Validate random number generation uses crypto/rand
-
-   **Information Disclosure:**
-   - Check logs don't contain sensitive information (passwords, keys, tokens)
-   - Verify error messages don't leak internal details
-   - Ensure debug information is not exposed in production paths
-
-   **CFGMS-Specific Security:**
-   - Verify tenant isolation is maintained (no cross-tenant data access)
-   - Check configuration inheritance doesn't bypass security controls
-   - Ensure steward certificates are properly validated
-   - Validate gRPC endpoints enforce mTLS
-
-   **Action Required:** If ANY security issues are found, STOP and fix them before proceeding. Document the vulnerability and remediation in commit message.
+   Perform initial security validation during development:
+   - No hardcoded secrets, passwords, or keys in code
+   - SQL queries use parameterized statements (no string concatenation)
+   - File operations use validated paths (prevent directory traversal)
+   - Input validation present for user-provided data
+   - Error messages don't expose sensitive information
+   - Tenant isolation maintained (no cross-tenant data leaks)
+   
+   **Note**: Comprehensive security review occurs during PR review phase with fresh context.
+   
+   **Action Required:** If ANY critical security issues are found, STOP and fix them before proceeding.
 
 **BEFORE ANY COMMITS:**
 
@@ -129,7 +108,7 @@ This ensures optimal order (test → security → summary) and provides clear va
    git add .
    git commit -m "Implement Story #[NUMBER]: [description]
 
-   Security Review: [Brief summary of security review findings/all clear]"
+   Basic Security Review: [Brief summary - no hardcoded secrets, SQL injection prevention, input validation present]"
    ```
 
 9. **Update Documentation** (REQUIRED)
@@ -170,12 +149,156 @@ This ensures optimal order (test → security → summary) and provides clear va
     # This ensures roadmap stays current with actual development progress
     ```
 
-13. **Merge to Develop**
+13. **Create Pull Request for Code Review**
     ```bash
+    # Push feature branch to remote
+    git push origin feature/story-[NUMBER]-[brief-description]
+    
+    # Create pull request using GitHub CLI
+    gh pr create --base develop --title "Implement Story #[NUMBER]: [description]" --body "$(cat <<'EOF'
+    ## Summary
+    [Brief description of the changes]
+    
+    ### Changes Made
+    - [List key changes]
+    - [Include any breaking changes]
+    
+    ### Test Results  
+    ✅ All tests passing
+    ✅ Security scan clean
+    ✅ Linting passed
+    
+    ### Basic Security Review
+    [Brief summary - no hardcoded secrets, SQL injection prevention, input validation present]
+    
+    🤖 Generated with [Claude Code](https://claude.ai/code)
+    
+    Co-Authored-By: Claude <noreply@anthropic.com>
+    EOF
+    )"
+    
+    # MANDATORY: Objective PR Review (see PR Review Process section)
+    # After comprehensive review approval, merge the PR
+    gh pr merge --merge
+    
+    # Clean up local feature branch after merge
     git checkout develop
-    git merge feature/story-[NUMBER]-[brief-description]
-    git push origin develop
+    git pull origin develop  # Get the merged changes
+    git branch -D feature/story-[NUMBER]-[brief-description]  # Delete local feature branch
     ```
+
+**Benefits of PR-Based Workflow:**
+- **Code Review Trail**: Permanent record of changes and review discussions
+- **CI/CD Integration**: GitHub Actions run automatically on PRs before merge
+- **Quality Gates**: Can enforce status checks, approvals, and branch protection
+- **Documentation**: PR descriptions provide context for future reference
+- **Team Collaboration**: Enables review comments and suggestions
+- **Rollback History**: Easy to identify and revert specific features
+
+**When to Use PRs vs Direct Commits:**
+- **ALWAYS use PRs for**: Feature development, bug fixes, refactoring, architectural changes
+- **Optional for**: Minor documentation updates, typo fixes, CLAUDE.md workflow updates
+- **Direct commits allowed for**: Emergency hotfixes (followed by retroactive PR documentation)
+
+## PR Review Process (MANDATORY)
+
+**CRITICAL**: All PRs must undergo systematic review with fresh context to ensure objectivity and catch issues missed during development.
+
+### Pre-Review Setup
+1. **Clear All Context**: Start fresh Claude Code session or clear conversation history
+2. **Review Environment**: Open PR in GitHub web interface for full context
+3. **Access Documentation**: Have CLAUDE.md, security requirements, and architecture docs available
+
+### Structured Review Methodology
+
+**Phase 1: PR Overview Assessment**
+```
+Prompt: "Review this GitHub PR for CFGMS project. Analyze the PR description, title, and overall scope. Identify any missing information or unclear objectives."
+
+Key Questions:
+- Does the PR clearly state its purpose and scope?
+- Are breaking changes properly documented?
+- Is the security review status clear?
+- Are test results validated and documented?
+```
+
+**Phase 2: Code Quality & Security Review**
+```
+Prompt: "Act as a senior Go developer and security expert. Perform a comprehensive code review focusing on:
+
+SECURITY (CRITICAL):
+- Authentication/Authorization bypass potential
+- Input validation and injection prevention  
+- Cryptographic implementation correctness
+- Information disclosure risks
+- CFGMS-specific tenant isolation
+- Certificate and mTLS validation
+
+CODE QUALITY:
+- Go best practices and idioms
+- Error handling completeness
+- Resource management (defer, cleanup)
+- Race condition potential
+- Performance implications
+- Interface design and dependency injection
+
+ARCHITECTURE COMPLIANCE:
+- Follows CFGMS pluggable architecture patterns
+- Proper interface usage vs direct imports
+- Module system compliance
+- Zero-trust security model adherence"
+```
+
+**Phase 3: Testing & Validation Review**
+```
+Prompt: "Validate the testing approach and coverage:
+
+TESTING VALIDATION:
+- Are tests testing actual functionality vs mocks?
+- Is error path testing comprehensive?
+- Are integration tests covering component interactions?
+- Is race condition testing adequate?
+- Are security edge cases tested?
+
+TEST QUALITY:
+- Table-driven test patterns used correctly?
+- Test data realistic and comprehensive?
+- Cleanup and resource management in tests?
+- Performance/benchmark testing where needed?"
+```
+
+**Phase 4: Documentation & Integration Review**
+```
+Prompt: "Review documentation and integration aspects:
+
+DOCUMENTATION:
+- Are exported functions/types properly documented?
+- Is architectural context explained?
+- Are breaking changes clearly documented?
+- Is usage guidance provided?
+
+INTEGRATION:
+- Will this change affect existing components?
+- Are database migrations handled properly?
+- Are configuration changes backward compatible?
+- Is deployment impact assessed?"
+```
+
+**Phase 5: Final Approval Checklist**
+```
+REQUIRED BEFORE MERGE:
+□ All security concerns addressed or documented as accepted risks
+□ Code follows CFGMS architecture patterns and Go best practices
+□ Tests provide adequate coverage of new functionality
+□ Breaking changes are properly documented and justified
+□ Performance impact assessed for production workloads
+□ Documentation updated for any API/interface changes
+□ CI/CD validation passes (tests, security scans, linting)
+□ Deployment impact reviewed and mitigation planned
+```
+
+### Review Completion
+Only after ALL phases pass and checklist is complete should the PR be merged. Document any concerns or accepted risks in PR comments.
 
 **VALIDATION CHECKPOINTS:**
 - Verify branch was created: `git log --oneline -5`
@@ -183,6 +306,10 @@ This ensures optimal order (test → security → summary) and provides clear va
 - Verify security scan passes: `make security-scan`
 - Verify project updated: Check GitHub project board
 - **Verify roadmap updated: Check docs/product/roadmap.md shows story completion**
+- **Verify PR created**: `gh pr view --json title,state,url`
+- **Verify PR reviewed using structured methodology**: All 5 review phases completed
+- **Verify PR merged**: `gh pr list --state merged --limit 5`
+- **Verify feature branch cleaned up**: `git branch -a | grep feature/story-[NUMBER]` (should be empty)
 - **BLOCKING REQUIREMENT**: ALL validation checkpoints must pass before story completion
 
 **GITHUB ACTIONS CI/CD:**
