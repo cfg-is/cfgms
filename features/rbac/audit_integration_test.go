@@ -73,9 +73,8 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 		assert.Equal(t, interfaces.AuditSeverityHigh, entry.Severity)
 		assert.Equal(t, "rbac", entry.Source)
 		
-		// Verify audit integrity (Note: Skip for git storage due to timestamp precision issues)
-		// TODO: Investigate timestamp precision differences between storage providers
-		// assert.True(t, manager.auditManager.VerifyIntegrity(entry), "Audit entry should have valid integrity checksum")
+		// Verify audit integrity  
+		assert.True(t, manager.auditManager.VerifyIntegrity(entry), "Audit entry should have valid integrity checksum")
 	})
 	
 	t.Run("UpdateRole generates audit event with changes", func(t *testing.T) {
@@ -281,11 +280,10 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 		require.NoError(t, err)
 		assert.NotEmpty(t, auditEntries, "Should have audit entries from previous tests")
 		
-		// Verify all entries have basic audit properties
+		// Verify all entries have valid integrity checksums
 		for i, entry := range auditEntries {
-			// TODO: Re-enable integrity checks after resolving storage provider timestamp precision
-			// assert.True(t, manager.auditManager.VerifyIntegrity(entry), 
-			// 	"Audit entry %d should have valid integrity checksum", i)
+			assert.True(t, manager.auditManager.VerifyIntegrity(entry), 
+				"Audit entry %d should have valid integrity checksum", i)
 			assert.NotEmpty(t, entry.Checksum, "Audit entry %d should have checksum", i)
 			assert.Equal(t, "rbac", entry.Source, "Audit entry %d should have correct source", i)
 			assert.Equal(t, "1.0", entry.Version, "Audit entry %d should have version", i)

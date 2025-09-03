@@ -29,42 +29,22 @@ type Manager struct {
 	escalationPreventionMgr  *EscalationPreventionManager
 }
 
-// NewManager creates a new RBAC manager with in-memory storage and advanced features
-func NewManager() *Manager {
-	store := memory.NewStore()
-	engine := NewAuthEngine(store, store, store, store)
-	hierarchyEngine := NewHierarchyEngine(store, store)
-	
-	// Create manager instance first
-	manager := &Manager{
-		store:           store,
-		engine:          engine,
-		hierarchyEngine: hierarchyEngine,
-	}
-	
-	// Initialize advanced components
-	advancedEngine := NewAdvancedAuthEngine(store, store, store, store)
-	delegationManager := NewDelegationManager(manager) // Pass manager for RBAC operations
-	auditLogger := NewAuditLogger()
-	templateManager := NewTemplateManager(manager) // Pass manager for template operations
-	escalationPreventionMgr := NewEscalationPreventionManager(manager) // Pass manager for privilege escalation protection
-	
-	// Set circular references
-	advancedEngine.SetRBACManager(manager)
-	
-	// Update manager with advanced components
-	manager.advancedEngine = advancedEngine
-	manager.delegationManager = delegationManager
-	manager.auditLogger = auditLogger
-	manager.templateManager = templateManager
-	manager.escalationPreventionMgr = escalationPreventionMgr
-	
-	// Share the same delegation manager and audit logger instances
-	advancedEngine.SetDelegationManager(delegationManager)
-	advancedEngine.SetAuditLogger(auditLogger)
-	
-	return manager
-}
+// NewManager is DEPRECATED and removed in Epic 6: Complete Storage Migration
+// Use NewManagerWithStorage() with pluggable storage providers instead
+// Minimum storage requirement: git provider with local repository
+// 
+// BREAKING CHANGE: This function has been removed to eliminate package-level 
+// storage mechanisms. All RBAC operations now require durable storage.
+//
+// Migration example:
+//   // OLD: manager := rbac.NewManager()  
+//   // NEW: 
+//   storageManager := interfaces.CreateAllStoresFromConfig("git", config)
+//   manager := rbac.NewManagerWithStorage(storageManager.GetAuditStore(), storageManager.GetClientTenantStore())
+//
+// For testing, use: pkg/testing.SetupTestRBACManager(t)
+//
+// This change ensures Epic 6 goal: Zero package-level storage mechanisms
 
 // NewManagerWithStorage creates a new RBAC manager with pluggable storage interfaces
 // This is the recommended constructor for production deployments with configurable storage backends

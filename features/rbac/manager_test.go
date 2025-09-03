@@ -5,12 +5,28 @@ import (
 	"testing"
 
 	"github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	
+	// Import storage providers for testing
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 )
 
 func TestManager_Initialize(t *testing.T) {
-	manager := NewManager()
+	// Use git storage for durable testing - minimum storage requirement
+	config := map[string]interface{}{
+		"repository_path": t.TempDir(),
+		"branch":         "main",
+		"auto_init":      true,
+	}
+	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	require.NoError(t, err)
+	
+	manager := NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+	)
 	ctx := context.Background()
 
 	err := manager.Initialize(ctx)

@@ -47,39 +47,29 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		return nil, ErrNilConfig
 	}
 
-	// Initialize global storage provider system
-	var rbacManager *rbac.Manager
-	var auditManager *audit.Manager
-	if cfg.Storage != nil {
-		logger.Info("Using pluggable storage provider", "provider", cfg.Storage.Provider)
-		
-		// Create storage manager with pluggable provider
-		storageManager, err := interfaces.CreateAllStoresFromConfig(cfg.Storage.Provider, cfg.Storage.Config)
-		if err != nil {
-			logger.Warn("Failed to create pluggable storage, falling back to memory", "error", err, "provider", cfg.Storage.Provider)
-			// Fall back to memory storage
-			rbacManager = rbac.NewManager()
-			// TODO: Create fallback audit manager with memory store when available
-			auditManager = nil // Will be set below with memory provider
-		} else {
-			// Use pluggable storage for RBAC and Audit
-			rbacManager = rbac.NewManagerWithStorage(
-				storageManager.GetAuditStore(),
-				storageManager.GetClientTenantStore(),
-			)
-			
-			// Initialize unified audit system with pluggable storage
-			auditManager = audit.NewManager(storageManager.GetAuditStore(), "controller")
-			
-			logger.Info("RBAC and Audit systems initialized with pluggable storage", "provider", cfg.Storage.Provider)
-		}
-	} else {
-		logger.Info("No storage configuration found, using memory storage")
-		// Default to memory storage for backward compatibility
-		rbacManager = rbac.NewManager()
-		// TODO: Create fallback audit manager with memory provider when available
-		auditManager = nil // Will be set when memory audit store is implemented
+	// Initialize global storage provider system - REQUIRED for all deployments
+	if cfg.Storage == nil {
+		return nil, fmt.Errorf("storage configuration is required for CFGMS operation - configure storage.provider as 'git' (minimum) or 'database' (production). See docs/examples/controller-storage-config.yaml for examples")
 	}
+
+	logger.Info("Initializing global storage provider", "provider", cfg.Storage.Provider)
+	
+	// Create storage manager with pluggable provider - no fallbacks allowed
+	storageManager, err := interfaces.CreateAllStoresFromConfig(cfg.Storage.Provider, cfg.Storage.Config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize storage provider '%s': %w. Verify storage configuration and ensure storage backend is accessible", cfg.Storage.Provider, err)
+	}
+
+	// Initialize RBAC system with pluggable storage only
+	rbacManager := rbac.NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+	)
+	
+	// Initialize unified audit system with pluggable storage only
+	auditManager := audit.NewManager(storageManager.GetAuditStore(), "controller")
+	
+	logger.Info("RBAC and Audit systems initialized with pluggable storage", "provider", cfg.Storage.Provider)
 
 	// Initialize default permissions and roles
 	if err := rbacManager.Initialize(context.Background()); err != nil {
