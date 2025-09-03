@@ -1,0 +1,84 @@
+# Example: Hybrid Storage Configuration for Large MSP Deployment
+# This configuration addresses the GitOps workflow requirements while maintaining performance
+
+controller:
+  # Simplified hybrid storage configuration
+  # Each deployment specifies separate backends for operational vs configuration data
+  storage:
+    # Operational data: High-performance PostgreSQL for runtime performance
+    # - Audit logs (high write volume, query performance critical)
+    # - Client tenant data (frequent reads, relational data)  
+    # - Session management (fast lookups required)
+    operational:
+      provider: "database"
+      config:
+        host: "cfgms-postgres.internal"
+        port: 5432
+        database: "cfgms_ops"
+        username: "cfgms"
+        password: "${POSTGRES_PASSWORD}"
+        sslmode: "require"
+        max_open_connections: 50    # Higher for operational queries
+        max_idle_connections: 10
+        connection_max_lifetime_minutes: 30
+        
+    # Configuration data: Git for GitOps workflows and change management
+    # - Configuration templates (version controlled, peer reviewed)
+    # - Certificate management (audit trail via Git history)
+    # - Policy configurations (GitOps deployment pipeline)
+    configuration:
+      provider: "git"
+      config:
+        repository_path: "/data/cfgms-configs"
+        remote_url: "git@github.com:msp-corp/cfgms-configs.git"
+        branch: "main"
+        auto_sync: true
+        sync_interval_minutes: 5
+        
+        # GitOps workflow features
+        require_pull_request: true
+        require_approval: true
+        protected_branches: ["main", "production"]
+        
+        # Security: SOPS encryption for sensitive configs
+        sops_enabled: true
+        sops_key_path: "/etc/cfgms/sops/key.asc"
+        
+        # Git commit metadata for audit trail
+        commit_user_name: "CFGMS System"
+        commit_user_email: "cfgms@msp-corp.com"
+        commit_signing_key: "/etc/cfgms/git/signing.key"
+
+  # RBAC and multi-tenancy remain unchanged
+  rbac:
+    enabled: true
+    
+  # API configuration
+  api:
+    endpoint: "https://cfgms-api.msp-corp.com"
+
+# Benefits of this hybrid approach:
+# 
+# 1. GitOps Workflow Support:
+#    - All configuration changes go through Git PR process
+#    - Full audit trail and history via Git commits  
+#    - Peer review process for critical changes
+#    - Rollback capability via Git revert
+#    - Branch-based environments (dev/staging/prod)
+#
+# 2. Performance for Operational Data:
+#    - PostgreSQL provides ACID transactions for audit logs
+#    - Fast queries for client tenant lookups
+#    - Efficient indexing for compliance reporting
+#    - High-volume audit log ingestion
+#
+# 3. Security and Compliance:
+#    - SOPS encryption for sensitive configuration data
+#    - Git-based access controls and permissions  
+#    - Immutable audit trail via both Git and database
+#    - Separation of concerns (operational vs configuration data)
+#
+# 4. Migration Support:
+#    - Existing database deployments can migrate gradually
+#    - Git provider can be added without disrupting operations
+#    - Configuration detection automatically handles both formats

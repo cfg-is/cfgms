@@ -11,6 +11,7 @@ require (
 	github.com/gorilla/mux v1.8.1
 	github.com/gorilla/websocket v1.5.3
 	github.com/jcmturner/gokrb5/v8 v8.4.4
+	github.com/lib/pq v1.10.9
 	github.com/spf13/cobra v1.8.0
 	github.com/stretchr/testify v1.10.0
 	go.opentelemetry.io/otel v1.37.0

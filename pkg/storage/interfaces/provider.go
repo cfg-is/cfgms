@@ -288,7 +288,7 @@ func CreateAuditStoreFromConfig(providerName string, config map[string]interface
 }
 
 // CreateAllStoresFromConfig creates all storage interfaces from a single configuration
-// This is the main entry point for unified storage configuration
+// This is the main entry point for unified storage configuration (legacy single-backend)
 func CreateAllStoresFromConfig(providerName string, config map[string]interface{}) (*StorageManager, error) {
 	provider, err := GetStorageProvider(providerName)
 	if err != nil {
@@ -398,3 +398,10 @@ func ListProvidersV2() []ProviderInfoV2 {
 	
 	return providers
 }
+
+// CreateHybridStorageManagerFromConfig creates hybrid storage manager from configuration
+// This is the recommended entry point for production deployments with mixed storage needs
+func CreateHybridStorageManagerFromConfig(config HybridStorageConfig) (*HybridStorageManager, error) {
+	return CreateHybridStorageFromConfig(config)
+}
+
