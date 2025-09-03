@@ -19,6 +19,7 @@ import (
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/tenant"
 	tenantmemory "github.com/cfgis/cfgms/features/tenant/memory"
+	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
@@ -37,6 +38,7 @@ type Server struct {
 	certManager             *cert.Manager
 	tenantManager           *tenant.Manager
 	rbacManager             *rbac.Manager
+	auditManager            *audit.Manager
 }
 
 // New creates a new server instance
@@ -47,6 +49,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 	// Initialize global storage provider system
 	var rbacManager *rbac.Manager
+	var auditManager *audit.Manager
 	if cfg.Storage != nil {
 		logger.Info("Using pluggable storage provider", "provider", cfg.Storage.Provider)
 		
@@ -56,18 +59,26 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			logger.Warn("Failed to create pluggable storage, falling back to memory", "error", err, "provider", cfg.Storage.Provider)
 			// Fall back to memory storage
 			rbacManager = rbac.NewManager()
+			// TODO: Create fallback audit manager with memory store when available
+			auditManager = nil // Will be set below with memory provider
 		} else {
-			// Use pluggable storage for RBAC
+			// Use pluggable storage for RBAC and Audit
 			rbacManager = rbac.NewManagerWithStorage(
 				storageManager.GetAuditStore(),
 				storageManager.GetClientTenantStore(),
 			)
-			logger.Info("RBAC system initialized with pluggable storage", "provider", cfg.Storage.Provider)
+			
+			// Initialize unified audit system with pluggable storage
+			auditManager = audit.NewManager(storageManager.GetAuditStore(), "controller")
+			
+			logger.Info("RBAC and Audit systems initialized with pluggable storage", "provider", cfg.Storage.Provider)
 		}
 	} else {
 		logger.Info("No storage configuration found, using memory storage")
 		// Default to memory storage for backward compatibility
 		rbacManager = rbac.NewManager()
+		// TODO: Create fallback audit manager with memory provider when available
+		auditManager = nil // Will be set when memory audit store is implemented
 	}
 
 	// Initialize default permissions and roles
@@ -118,6 +129,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		certManager:             certManager,
 		tenantManager:           tenantManager,
 		rbacManager:             rbacManager,
+		auditManager:            auditManager,
 	}, nil
 }
 
@@ -168,6 +180,16 @@ func (s *Server) Start() error {
 	}()
 
 	s.logger.Info("Controller server started", "address", s.cfg.ListenAddr)
+	
+	// Record system startup audit event
+	if s.auditManager != nil {
+		ctx := context.Background()
+		event := audit.SystemEvent("system", "controller_start", fmt.Sprintf("Controller server started on %s", s.cfg.ListenAddr))
+		if err := s.auditManager.RecordEvent(ctx, event); err != nil {
+			s.logger.Warn("Failed to record startup audit event", "error", err)
+		}
+	}
+	
 	return nil
 }
 
@@ -177,6 +199,15 @@ func (s *Server) Stop() error {
 	defer s.mu.Unlock()
 
 	s.logger.Info("Shutting down controller server")
+
+	// Record system shutdown audit event  
+	if s.auditManager != nil {
+		ctx := context.Background()
+		event := audit.SystemEvent("system", "controller_stop", "Controller server shutting down")
+		if err := s.auditManager.RecordEvent(ctx, event); err != nil {
+			s.logger.Warn("Failed to record shutdown audit event", "error", err)
+		}
+	}
 
 	if s.grpcServer != nil {
 		s.grpcServer.GracefulStop()
