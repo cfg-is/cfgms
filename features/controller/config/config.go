@@ -23,6 +23,9 @@ type Config struct {
 	
 	// Certificate management configuration
 	Certificate *CertificateConfig `yaml:"certificate"`
+	
+	// Storage configuration for global storage provider system
+	Storage *StorageConfig `yaml:"storage"`
 }
 
 // CertificateConfig contains certificate management settings
@@ -67,6 +70,16 @@ type ServerCertificateConfig struct {
 	Organization string `yaml:"organization"`
 }
 
+// StorageConfig contains global storage provider configuration
+type StorageConfig struct {
+	// Provider specifies which storage provider to use (memory, file, database, git)
+	Provider string `yaml:"provider"`
+	
+	// Configuration options passed to the storage provider
+	// The structure depends on the specific provider being used
+	Config map[string]interface{} `yaml:"config"`
+}
+
 // DefaultConfig returns a Config with reasonable defaults
 func DefaultConfig() *Config {
 	return &Config{
@@ -88,6 +101,10 @@ func DefaultConfig() *Config {
 				IPAddresses:  []string{"127.0.0.1"},
 				Organization: "CFGMS",
 			},
+		},
+		Storage: &StorageConfig{
+			Provider: "memory", // Default to memory provider for backwards compatibility
+			Config:   make(map[string]interface{}),
 		},
 	}
 }
@@ -172,6 +189,11 @@ func Load() (*Config, error) {
 	
 	if serverOrg := os.Getenv("CFGMS_CERT_SERVER_ORGANIZATION"); serverOrg != "" {
 		cfg.Certificate.Server.Organization = serverOrg
+	}
+	
+	// Storage configuration environment variables
+	if storageProvider := os.Getenv("CFGMS_STORAGE_PROVIDER"); storageProvider != "" {
+		cfg.Storage.Provider = storageProvider
 	}
 	
 	return cfg, nil

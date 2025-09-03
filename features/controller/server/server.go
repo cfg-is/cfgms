@@ -44,7 +44,14 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		return nil, ErrNilConfig
 	}
 
-	// Initialize RBAC system
+	// TODO: Foundation storage migration - implement global storage provider system
+	// For now, continue using existing memory stores but log the configured storage provider
+	if cfg.Storage != nil {
+		logger.Info("Storage provider configuration", "provider", cfg.Storage.Provider)
+		// Future: Use cfg.Storage to create pluggable storage backends
+	}
+
+	// Initialize RBAC system (currently uses memory store)
 	rbacManager := rbac.NewManager()
 
 	// Initialize default permissions and roles
@@ -52,7 +59,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		logger.Warn("Failed to initialize RBAC configuration", "error", err)
 	}
 
-	// Initialize tenant management
+	// Initialize tenant management (currently uses memory store)
 	tenantStore := tenantmemory.NewStore()
 	tenantManager := tenant.NewManager(tenantStore, rbacManager)
 
