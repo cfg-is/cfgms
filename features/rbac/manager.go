@@ -6,11 +6,18 @@ import (
 
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/rbac/memory"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
 // Manager provides a complete RBAC implementation with advanced features
 type Manager struct {
 	store                    *memory.Store
+	
+	// Pluggable storage interfaces (when using NewManagerWithStorage)
+	auditStore               interfaces.AuditStore
+	clientTenantStore        interfaces.ClientTenantStore
+	usePluggableStorage      bool
+	
 	engine                   *AuthEngine
 	advancedEngine           *AdvancedAuthEngine
 	hierarchyEngine          *HierarchyEngine
@@ -35,6 +42,53 @@ func NewManager() *Manager {
 	
 	// Initialize advanced components
 	advancedEngine := NewAdvancedAuthEngine(store, store, store, store)
+	delegationManager := NewDelegationManager(manager) // Pass manager for RBAC operations
+	auditLogger := NewAuditLogger()
+	templateManager := NewTemplateManager(manager) // Pass manager for template operations
+	escalationPreventionMgr := NewEscalationPreventionManager(manager) // Pass manager for privilege escalation protection
+	
+	// Set circular references
+	advancedEngine.SetRBACManager(manager)
+	
+	// Update manager with advanced components
+	manager.advancedEngine = advancedEngine
+	manager.delegationManager = delegationManager
+	manager.auditLogger = auditLogger
+	manager.templateManager = templateManager
+	manager.escalationPreventionMgr = escalationPreventionMgr
+	
+	// Share the same delegation manager and audit logger instances
+	advancedEngine.SetDelegationManager(delegationManager)
+	advancedEngine.SetAuditLogger(auditLogger)
+	
+	return manager
+}
+
+// NewManagerWithStorage creates a new RBAC manager with pluggable storage interfaces
+// This is the recommended constructor for production deployments with configurable storage backends
+func NewManagerWithStorage(auditStore interfaces.AuditStore, clientTenantStore interfaces.ClientTenantStore) *Manager {
+	if auditStore == nil || clientTenantStore == nil {
+		panic("NewManagerWithStorage requires non-nil storage interfaces")
+	}
+	
+	// Create a temporary memory store for compatibility with existing auth engines
+	// TODO: Future optimization - make auth engines work directly with storage interfaces
+	tempStore := memory.NewStore()
+	engine := NewAuthEngine(tempStore, tempStore, tempStore, tempStore)
+	hierarchyEngine := NewHierarchyEngine(tempStore, tempStore)
+	
+	// Create manager instance with pluggable storage
+	manager := &Manager{
+		store:               tempStore, // Keep for compatibility with existing engines
+		auditStore:          auditStore,
+		clientTenantStore:   clientTenantStore,
+		usePluggableStorage: true,
+		engine:              engine,
+		hierarchyEngine:     hierarchyEngine,
+	}
+	
+	// Initialize advanced components
+	advancedEngine := NewAdvancedAuthEngine(tempStore, tempStore, tempStore, tempStore)
 	delegationManager := NewDelegationManager(manager) // Pass manager for RBAC operations
 	auditLogger := NewAuditLogger()
 	templateManager := NewTemplateManager(manager) // Pass manager for template operations
