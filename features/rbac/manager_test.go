@@ -29,11 +29,12 @@ func TestManager_Initialize(t *testing.T) {
 	)
 	ctx := context.Background()
 
-	err := manager.Initialize(ctx)
+	err = manager.Initialize(ctx)
 	require.NoError(t, err)
 
 	// Verify default permissions were loaded
-	permissions, err := manager.ListPermissions(ctx, "")
+	var permissions []*common.Permission
+	permissions, err = manager.ListPermissions(ctx, "")
 	require.NoError(t, err)
 	assert.NotEmpty(t, permissions)
 
@@ -55,10 +56,22 @@ func TestManager_Initialize(t *testing.T) {
 }
 
 func TestManager_CreateTenantDefaultRoles(t *testing.T) {
-	manager := NewManager()
+	// Use git storage for durable testing - minimum storage requirement
+	config := map[string]interface{}{
+		"repository_path": t.TempDir(),
+		"branch":         "main",
+		"auto_init":      true,
+	}
+	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	require.NoError(t, err)
+	
+	manager := NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+	)
 	ctx := context.Background()
-
-	err := manager.Initialize(ctx)
+	
+	err = manager.Initialize(ctx)
 	require.NoError(t, err)
 
 	tenantID := "test-tenant"
@@ -84,10 +97,22 @@ func TestManager_CreateTenantDefaultRoles(t *testing.T) {
 }
 
 func TestManager_SubjectManagement(t *testing.T) {
-	manager := NewManager()
+	// Use git storage for durable testing - minimum storage requirement
+	config := map[string]interface{}{
+		"repository_path": t.TempDir(),
+		"branch":         "main",
+		"auto_init":      true,
+	}
+	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	require.NoError(t, err)
+	
+	manager := NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+	)
 	ctx := context.Background()
-
-	err := manager.Initialize(ctx)
+	
+	err = manager.Initialize(ctx)
 	require.NoError(t, err)
 
 	// Create a test subject
@@ -137,10 +162,22 @@ func TestManager_SubjectManagement(t *testing.T) {
 }
 
 func TestManager_RoleAssignment(t *testing.T) {
-	manager := NewManager()
+	// Use git storage for durable testing - minimum storage requirement
+	config := map[string]interface{}{
+		"repository_path": t.TempDir(),
+		"branch":         "main",
+		"auto_init":      true,
+	}
+	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	require.NoError(t, err)
+	
+	manager := NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+	)
 	ctx := context.Background()
-
-	err := manager.Initialize(ctx)
+	
+	err = manager.Initialize(ctx)
 	require.NoError(t, err)
 
 	tenantID := "test-tenant"
@@ -191,10 +228,22 @@ func TestManager_RoleAssignment(t *testing.T) {
 }
 
 func TestManager_PermissionChecking(t *testing.T) {
-	manager := NewManager()
+	// Use git storage for durable testing - minimum storage requirement
+	config := map[string]interface{}{
+		"repository_path": t.TempDir(),
+		"branch":         "main",
+		"auto_init":      true,
+	}
+	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	require.NoError(t, err)
+	
+	manager := NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+	)
 	ctx := context.Background()
-
-	err := manager.Initialize(ctx)
+	
+	err = manager.Initialize(ctx)
 	require.NoError(t, err)
 
 	tenantID := "test-tenant"
@@ -267,10 +316,22 @@ func TestManager_PermissionChecking(t *testing.T) {
 }
 
 func TestManager_SystemAdminPermissions(t *testing.T) {
-	manager := NewManager()
+	// Use git storage for durable testing - minimum storage requirement
+	config := map[string]interface{}{
+		"repository_path": t.TempDir(),
+		"branch":         "main",
+		"auto_init":      true,
+	}
+	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	require.NoError(t, err)
+	
+	manager := NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+	)
 	ctx := context.Background()
-
-	err := manager.Initialize(ctx)
+	
+	err = manager.Initialize(ctx)
 	require.NoError(t, err)
 
 	// Create a system admin subject
@@ -322,10 +383,22 @@ func TestManager_SystemAdminPermissions(t *testing.T) {
 }
 
 func TestManager_CreateStewardSubject(t *testing.T) {
-	manager := NewManager()
+	// Use git storage for durable testing - minimum storage requirement
+	config := map[string]interface{}{
+		"repository_path": t.TempDir(),
+		"branch":         "main",
+		"auto_init":      true,
+	}
+	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	require.NoError(t, err)
+	
+	manager := NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+	)
 	ctx := context.Background()
-
-	err := manager.Initialize(ctx)
+	
+	err = manager.Initialize(ctx)
 	require.NoError(t, err)
 
 	stewardID := "steward-001"
@@ -370,10 +443,22 @@ func TestManager_CreateStewardSubject(t *testing.T) {
 }
 
 func TestManager_InactiveSubjectPermissions(t *testing.T) {
-	manager := NewManager()
+	// Use git storage for durable testing - minimum storage requirement
+	config := map[string]interface{}{
+		"repository_path": t.TempDir(),
+		"branch":         "main",
+		"auto_init":      true,
+	}
+	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	require.NoError(t, err)
+	
+	manager := NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+	)
 	ctx := context.Background()
-
-	err := manager.Initialize(ctx)
+	
+	err = manager.Initialize(ctx)
 	require.NoError(t, err)
 
 	tenantID := "test-tenant"

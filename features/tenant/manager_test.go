@@ -11,7 +11,32 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/rbac"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	
+	// Import storage providers for testing
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 )
+
+// setupTestRBACManager creates an RBAC manager with git storage for tenant testing
+func setupTestRBACManager(t *testing.T) *rbac.Manager {
+	config := map[string]interface{}{
+		"repository_path": t.TempDir(),
+		"branch":         "main",
+		"auto_init":      true,
+	}
+	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	require.NoError(t, err)
+	
+	manager := rbac.NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+	)
+	
+	err = manager.Initialize(context.Background())
+	require.NoError(t, err)
+	
+	return manager
+}
 
 // mockStore implements Store interface for testing
 type mockStore struct {
@@ -237,8 +262,7 @@ func (s *mockStore) IsTenantAncestor(ctx context.Context, ancestorID, descendant
 func TestManager_CreateTenant(t *testing.T) {
 	// Setup
 	tenantStore := newMockStore()
-	rbacManager := rbac.NewManager()
-	require.NoError(t, rbacManager.Initialize(context.Background()))
+	rbacManager := setupTestRBACManager(t)
 	
 	manager := NewManager(tenantStore, rbacManager)
 	ctx := context.Background()
@@ -272,8 +296,7 @@ func TestManager_CreateTenant(t *testing.T) {
 func TestManager_CreateTenant_WithParent(t *testing.T) {
 	// Setup
 	tenantStore := newMockStore()
-	rbacManager := rbac.NewManager()
-	require.NoError(t, rbacManager.Initialize(context.Background()))
+	rbacManager := setupTestRBACManager(t)
 	
 	manager := NewManager(tenantStore, rbacManager)
 	ctx := context.Background()
@@ -311,8 +334,7 @@ func TestManager_CreateTenant_WithParent(t *testing.T) {
 func TestManager_CreateTenant_Validation(t *testing.T) {
 	// Setup
 	tenantStore := newMockStore()
-	rbacManager := rbac.NewManager()
-	require.NoError(t, rbacManager.Initialize(context.Background()))
+	rbacManager := setupTestRBACManager(t)
 	
 	manager := NewManager(tenantStore, rbacManager)
 	ctx := context.Background()
@@ -351,8 +373,7 @@ func TestManager_CreateTenant_Validation(t *testing.T) {
 func TestManager_ListTenants(t *testing.T) {
 	// Setup
 	tenantStore := newMockStore()
-	rbacManager := rbac.NewManager()
-	require.NoError(t, rbacManager.Initialize(context.Background()))
+	rbacManager := setupTestRBACManager(t)
 	
 	manager := NewManager(tenantStore, rbacManager)
 	ctx := context.Background()
@@ -380,8 +401,7 @@ func TestManager_ListTenants(t *testing.T) {
 func TestManager_UpdateTenant(t *testing.T) {
 	// Setup
 	tenantStore := newMockStore()
-	rbacManager := rbac.NewManager()
-	require.NoError(t, rbacManager.Initialize(context.Background()))
+	rbacManager := setupTestRBACManager(t)
 	
 	manager := NewManager(tenantStore, rbacManager)
 	ctx := context.Background()
@@ -415,8 +435,7 @@ func TestManager_UpdateTenant(t *testing.T) {
 func TestManager_DeleteTenant(t *testing.T) {
 	// Setup
 	tenantStore := newMockStore()
-	rbacManager := rbac.NewManager()
-	require.NoError(t, rbacManager.Initialize(context.Background()))
+	rbacManager := setupTestRBACManager(t)
 	
 	manager := NewManager(tenantStore, rbacManager)
 	ctx := context.Background()
@@ -438,8 +457,7 @@ func TestManager_DeleteTenant(t *testing.T) {
 func TestManager_DeleteTenant_WithChildren(t *testing.T) {
 	// Setup
 	tenantStore := newMockStore()
-	rbacManager := rbac.NewManager()
-	require.NoError(t, rbacManager.Initialize(context.Background()))
+	rbacManager := setupTestRBACManager(t)
 	
 	manager := NewManager(tenantStore, rbacManager)
 	ctx := context.Background()
@@ -460,8 +478,7 @@ func TestManager_DeleteTenant_WithChildren(t *testing.T) {
 func TestManager_IsTenantAncestor(t *testing.T) {
 	// Setup
 	tenantStore := newMockStore()
-	rbacManager := rbac.NewManager()
-	require.NoError(t, rbacManager.Initialize(context.Background()))
+	rbacManager := setupTestRBACManager(t)
 	
 	manager := NewManager(tenantStore, rbacManager)
 	ctx := context.Background()

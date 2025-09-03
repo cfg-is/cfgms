@@ -5,16 +5,33 @@ import (
 	"testing"
 
 	"github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	
+	// Import storage providers for testing
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 )
 
 func TestManager_CreateRoleWithParent(t *testing.T) {
-	manager := NewManager()
+	// Use git storage for durable testing - minimum storage requirement
+	config := map[string]interface{}{
+		"repository_path": t.TempDir(),
+		"branch":         "main",
+		"auto_init":      true,
+	}
+	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	require.NoError(t, err)
+	
+	manager := NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+	)
 	ctx := context.Background()
 	
 	// Initialize manager
-	require.NoError(t, manager.Initialize(ctx))
+	err = manager.Initialize(ctx)
+	require.NoError(t, err)
 
 	// Create parent role first
 	parentRole := &common.Role{
@@ -136,11 +153,24 @@ func TestManager_CreateRoleWithParent(t *testing.T) {
 }
 
 func TestManager_GetRoleHierarchy(t *testing.T) {
-	manager := NewManager()
+	// Use git storage for durable testing - minimum storage requirement
+	config := map[string]interface{}{
+		"repository_path": t.TempDir(),
+		"branch":         "main",
+		"auto_init":      true,
+	}
+	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	require.NoError(t, err)
+	
+	manager := NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+	)
 	ctx := context.Background()
 	
 	// Initialize and set up test hierarchy
-	require.NoError(t, manager.Initialize(ctx))
+	err = manager.Initialize(ctx)
+	require.NoError(t, err)
 	setupManagerHierarchyTestData(t, manager)
 
 	tests := []struct {
@@ -215,10 +245,23 @@ func TestManager_GetRoleHierarchy(t *testing.T) {
 }
 
 func TestManager_SetAndRemoveRoleParent(t *testing.T) {
-	manager := NewManager()
+	// Use git storage for durable testing - minimum storage requirement
+	config := map[string]interface{}{
+		"repository_path": t.TempDir(),
+		"branch":         "main",
+		"auto_init":      true,
+	}
+	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	require.NoError(t, err)
+	
+	manager := NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+	)
 	ctx := context.Background()
 	
-	require.NoError(t, manager.Initialize(ctx))
+	err = manager.Initialize(ctx)
+	require.NoError(t, err)
 
 	// Create test roles
 	parentRole := &common.Role{
@@ -274,10 +317,23 @@ func TestManager_SetAndRemoveRoleParent(t *testing.T) {
 }
 
 func TestManager_ComputeRolePermissions(t *testing.T) {
-	manager := NewManager()
+	// Use git storage for durable testing - minimum storage requirement
+	config := map[string]interface{}{
+		"repository_path": t.TempDir(),
+		"branch":         "main",
+		"auto_init":      true,
+	}
+	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	require.NoError(t, err)
+	
+	manager := NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+	)
 	ctx := context.Background()
 	
-	require.NoError(t, manager.Initialize(ctx))
+	err = manager.Initialize(ctx)
+	require.NoError(t, err)
 	setupManagerPermissionTestData(t, manager)
 
 	tests := []struct {
@@ -332,10 +388,23 @@ func TestManager_ComputeRolePermissions(t *testing.T) {
 }
 
 func TestManager_ValidateHierarchyOperation(t *testing.T) {
-	manager := NewManager()
+	// Use git storage for durable testing - minimum storage requirement
+	config := map[string]interface{}{
+		"repository_path": t.TempDir(),
+		"branch":         "main",
+		"auto_init":      true,
+	}
+	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	require.NoError(t, err)
+	
+	manager := NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+	)
 	ctx := context.Background()
 	
-	require.NoError(t, manager.Initialize(ctx))
+	err = manager.Initialize(ctx)
+	require.NoError(t, err)
 
 	// Create roles for testing
 	role1 := &common.Role{Id: "role1", Name: "Role 1", TenantId: "tenant-1"}

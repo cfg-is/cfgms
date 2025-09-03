@@ -1438,14 +1438,8 @@ func (s *GitAuditStore) StoreAuditEntry(ctx context.Context, entry *interfaces.A
 		entry.Timestamp = time.Now()
 	}
 	
-	// Calculate checksum for integrity
-	entryJSON, err := json.Marshal(entry)
-	if err != nil {
-		return fmt.Errorf("failed to marshal audit entry: %w", err)
-	}
-	hasher := sha256.New()
-	hasher.Write(entryJSON)
-	entry.Checksum = hex.EncodeToString(hasher.Sum(nil))
+	// The audit manager is responsible for checksum calculation
+	// Storage providers should preserve checksums, not generate them
 	
 	// Get file path
 	filePath := s.getAuditPath(entry)
@@ -1865,14 +1859,8 @@ func (s *GitAuditStore) validateAndSetMetadata(entry *interfaces.AuditEntry) err
 		entry.Timestamp = time.Now()
 	}
 	
-	// Calculate checksum for integrity
-	entryJSON, err := json.Marshal(entry)
-	if err != nil {
-		return fmt.Errorf("failed to marshal audit entry: %w", err)
-	}
-	hasher := sha256.New()
-	hasher.Write(entryJSON)
-	entry.Checksum = hex.EncodeToString(hasher.Sum(nil))
+	// The audit manager is responsible for checksum calculation
+	// Storage providers should preserve checksums, not generate them
 	
 	return nil
 }

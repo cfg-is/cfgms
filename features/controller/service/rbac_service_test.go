@@ -7,16 +7,31 @@ import (
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/features/rbac"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	
+	// Import storage providers for testing
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 )
 
 func TestRBACService_Integration(t *testing.T) {
-	// Setup RBAC manager and service
-	rbacManager := rbac.NewManager()
+	// Setup RBAC manager and service with git storage
+	config := map[string]interface{}{
+		"repository_path": t.TempDir(),
+		"branch":         "main",
+		"auto_init":      true,
+	}
+	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	require.NoError(t, err)
+	
+	rbacManager := rbac.NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+	)
 	ctx := context.Background()
-
-	err := rbacManager.Initialize(ctx)
+	
+	err = rbacManager.Initialize(ctx)
 	require.NoError(t, err)
 
 	tenantID := "test-tenant"

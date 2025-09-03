@@ -6,14 +6,32 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	
+	// Import storage providers for testing
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 )
 
 func TestAdvancedPermissionManagement(t *testing.T) {
+	// Use git storage for durable testing - minimum storage requirement
+	config := map[string]interface{}{
+		"repository_path": t.TempDir(),
+		"branch":         "main",
+		"auto_init":      true,
+	}
+	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	require.NoError(t, err)
+	
+	manager := NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+	)
 	ctx := context.Background()
-	manager := NewManager()
-	require.NoError(t, manager.Initialize(ctx))
+	
+	err = manager.Initialize(ctx)
+	require.NoError(t, err)
 
 	// Create test subject
 	subject := &common.Subject{

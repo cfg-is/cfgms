@@ -41,6 +41,15 @@ func TestServer_New_SecurityValidation(t *testing.T) {
 				Certificate: &config.CertificateConfig{
 					EnableCertManagement: false,
 				},
+				// Epic 6: Storage configuration now required
+				Storage: &config.StorageConfig{
+					Provider: "git",
+					Config: map[string]interface{}{
+						"repository_path": tempDir + "/test-storage",
+						"branch":          "main",
+						"auto_init":       true,
+					},
+				},
 			},
 			wantErr: false,
 		},
@@ -62,6 +71,15 @@ func TestServer_New_SecurityValidation(t *testing.T) {
 						DNSNames:     []string{"localhost"},
 						IPAddresses:  []string{"127.0.0.1"},
 						Organization: "Test Org",
+					},
+				},
+				// Epic 6: Storage configuration now required
+				Storage: &config.StorageConfig{
+					Provider: "git",
+					Config: map[string]interface{}{
+						"repository_path": tempDir + "/secure-storage",
+						"branch":          "main",
+						"auto_init":       true,
 					},
 				},
 			},

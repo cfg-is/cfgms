@@ -340,14 +340,23 @@ func TestRBACManager_AuditFailureHandling(t *testing.T) {
 	})
 	
 	t.Run("Audit system is resilient to nil manager", func(t *testing.T) {
-		// Create a manager with nil audit manager (simulating memory fallback)
-		manager := &Manager{
-			store:               NewManager().store,
-			auditStore:          nil,
-			clientTenantStore:   nil,
-			usePluggableStorage: false,
-			auditManager:        nil, // No audit manager
+		// With Epic 6, all managers require proper storage configuration
+		// Test that operations work normally even if audit events might fail
+		config := map[string]interface{}{
+			"repository_path": t.TempDir(),
+			"branch":         "main",
+			"auto_init":      true,
 		}
+		storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+		require.NoError(t, err)
+		
+		// Create a properly configured manager (audit manager is always present in Epic 6)
+		manager := NewManagerWithStorage(
+			storageManager.GetAuditStore(),
+			storageManager.GetClientTenantStore(),
+		)
+		err = manager.Initialize(ctx)
+		require.NoError(t, err)
 		
 		// Operations should still work
 		role := &common.Role{
@@ -356,7 +365,7 @@ func TestRBACManager_AuditFailureHandling(t *testing.T) {
 			TenantId:    "test-tenant",
 		}
 		
-		err := manager.CreateRole(ctx, role)
+		err = manager.CreateRole(ctx, role)
 		require.NoError(t, err, "Should handle nil audit manager gracefully")
 	})
 }

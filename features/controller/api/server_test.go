@@ -18,6 +18,10 @@ import (
 	"github.com/cfgis/cfgms/features/tenant"
 	tenantmemory "github.com/cfgis/cfgms/features/tenant/memory"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	
+	// Import storage providers for testing
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 )
 
 func setupTestServer(t *testing.T) *Server {
@@ -28,9 +32,21 @@ func setupTestServer(t *testing.T) *Server {
 	// Create test logger
 	logger := logging.NewNoopLogger()
 
-	// Initialize RBAC system
-	rbacManager := rbac.NewManager()
-	require.NoError(t, rbacManager.Initialize(context.Background()))
+	// Initialize RBAC system with git storage
+	config := map[string]interface{}{
+		"repository_path": t.TempDir(),
+		"branch":         "main",
+		"auto_init":      true,
+	}
+	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	require.NoError(t, err)
+	
+	rbacManager := rbac.NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+	)
+	err = rbacManager.Initialize(context.Background())
+	require.NoError(t, err)
 
 	// Initialize tenant management
 	tenantStore := tenantmemory.NewStore()
