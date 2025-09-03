@@ -142,25 +142,10 @@ func TestNewManagerWithStorage(t *testing.T) {
 	}
 }
 
-// TestNewManagerWithStorage_BackwardCompatibility tests that existing NewManager() still works
-func TestNewManagerWithStorage_BackwardCompatibility(t *testing.T) {
-	// Existing code should continue to work unchanged
-	manager := NewManager()
-	require.NotNil(t, manager)
-
-	ctx := context.Background()
-	err := manager.Initialize(ctx)
-	require.NoError(t, err)
-
-	// Verify default permissions and roles are loaded
-	permissions, err := manager.ListPermissions(ctx, "")
-	require.NoError(t, err)
-	assert.NotEmpty(t, permissions)
-
-	systemAdminRole, err := manager.GetRole(ctx, "system.admin")
-	require.NoError(t, err)
-	assert.Equal(t, "System Administrator", systemAdminRole.Name)
-}
+// TestNewManagerWithStorage_BackwardCompatibility was removed in Epic 6
+// This test previously validated the NewManager() function which has been
+// deliberately removed to eliminate package-level storage mechanisms
+// All RBAC managers now require explicit storage configuration via NewManagerWithStorage()
 
 // TestNewManagerWithStorage_NilStorageHandling tests error handling for nil storage interfaces
 func TestNewManagerWithStorage_NilStorageHandling(t *testing.T) {

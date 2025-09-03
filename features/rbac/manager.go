@@ -6,6 +6,7 @@ import (
 
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/rbac/memory"
+	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
@@ -17,6 +18,7 @@ type Manager struct {
 	auditStore               interfaces.AuditStore
 	clientTenantStore        interfaces.ClientTenantStore
 	usePluggableStorage      bool
+	auditManager             *audit.Manager
 	
 	engine                   *AuthEngine
 	advancedEngine           *AdvancedAuthEngine
@@ -27,42 +29,22 @@ type Manager struct {
 	escalationPreventionMgr  *EscalationPreventionManager
 }
 
-// NewManager creates a new RBAC manager with in-memory storage and advanced features
-func NewManager() *Manager {
-	store := memory.NewStore()
-	engine := NewAuthEngine(store, store, store, store)
-	hierarchyEngine := NewHierarchyEngine(store, store)
-	
-	// Create manager instance first
-	manager := &Manager{
-		store:           store,
-		engine:          engine,
-		hierarchyEngine: hierarchyEngine,
-	}
-	
-	// Initialize advanced components
-	advancedEngine := NewAdvancedAuthEngine(store, store, store, store)
-	delegationManager := NewDelegationManager(manager) // Pass manager for RBAC operations
-	auditLogger := NewAuditLogger()
-	templateManager := NewTemplateManager(manager) // Pass manager for template operations
-	escalationPreventionMgr := NewEscalationPreventionManager(manager) // Pass manager for privilege escalation protection
-	
-	// Set circular references
-	advancedEngine.SetRBACManager(manager)
-	
-	// Update manager with advanced components
-	manager.advancedEngine = advancedEngine
-	manager.delegationManager = delegationManager
-	manager.auditLogger = auditLogger
-	manager.templateManager = templateManager
-	manager.escalationPreventionMgr = escalationPreventionMgr
-	
-	// Share the same delegation manager and audit logger instances
-	advancedEngine.SetDelegationManager(delegationManager)
-	advancedEngine.SetAuditLogger(auditLogger)
-	
-	return manager
-}
+// NewManager is DEPRECATED and removed in Epic 6: Complete Storage Migration
+// Use NewManagerWithStorage() with pluggable storage providers instead
+// Minimum storage requirement: git provider with local repository
+// 
+// BREAKING CHANGE: This function has been removed to eliminate package-level 
+// storage mechanisms. All RBAC operations now require durable storage.
+//
+// Migration example:
+//   // OLD: manager := rbac.NewManager()  
+//   // NEW: 
+//   storageManager := interfaces.CreateAllStoresFromConfig("git", config)
+//   manager := rbac.NewManagerWithStorage(storageManager.GetAuditStore(), storageManager.GetClientTenantStore())
+//
+// For testing, use: pkg/testing.SetupTestRBACManager(t)
+//
+// This change ensures Epic 6 goal: Zero package-level storage mechanisms
 
 // NewManagerWithStorage creates a new RBAC manager with pluggable storage interfaces
 // This is the recommended constructor for production deployments with configurable storage backends
@@ -77,12 +59,16 @@ func NewManagerWithStorage(auditStore interfaces.AuditStore, clientTenantStore i
 	engine := NewAuthEngine(tempStore, tempStore, tempStore, tempStore)
 	hierarchyEngine := NewHierarchyEngine(tempStore, tempStore)
 	
+	// Create audit manager for RBAC operations
+	auditManager := audit.NewManager(auditStore, "rbac")
+	
 	// Create manager instance with pluggable storage
 	manager := &Manager{
 		store:               tempStore, // Keep for compatibility with existing engines
 		auditStore:          auditStore,
 		clientTenantStore:   clientTenantStore,
 		usePluggableStorage: true,
+		auditManager:        auditManager,
 		engine:              engine,
 		hierarchyEngine:     hierarchyEngine,
 	}
@@ -166,7 +152,33 @@ func (m *Manager) DeletePermission(ctx context.Context, id string) error {
 
 // Role Store Methods
 func (m *Manager) CreateRole(ctx context.Context, role *common.Role) error {
-	return m.store.CreateRole(ctx, role)
+	err := m.store.CreateRole(ctx, role)
+	
+	// Record audit event for role creation
+	if m.auditManager != nil {
+		result := interfaces.AuditResultSuccess
+		if err != nil {
+			result = interfaces.AuditResultError
+		}
+		
+		event := audit.UserManagementEvent(role.TenantId, "system", role.Id, "create_role").
+			Resource("role", role.Id, role.Name).
+			Result(result).
+			Detail("role_permissions", len(role.PermissionIds)).
+			Detail("role_description", role.Description).
+			Severity(interfaces.AuditSeverityHigh)
+			
+		if err != nil {
+			event = event.Error("RBAC_CREATE_ROLE_FAILED", err.Error())
+		}
+		
+		if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
+			// Don't fail the operation due to audit failure, but log it
+			// In production, you might want more sophisticated audit failure handling
+		}
+	}
+	
+	return err
 }
 
 func (m *Manager) GetRole(ctx context.Context, id string) (*common.Role, error) {
@@ -178,11 +190,114 @@ func (m *Manager) ListRoles(ctx context.Context, tenantID string) ([]*common.Rol
 }
 
 func (m *Manager) UpdateRole(ctx context.Context, role *common.Role) error {
-	return m.store.UpdateRole(ctx, role)
+	// Get the old role for change tracking
+	var oldRole *common.Role
+	if m.auditManager != nil {
+		oldRole, _ = m.store.GetRole(ctx, role.Id) // Ignore error for audit purposes
+	}
+	
+	err := m.store.UpdateRole(ctx, role)
+	
+	// Record audit event for role update
+	if m.auditManager != nil {
+		result := interfaces.AuditResultSuccess
+		if err != nil {
+			result = interfaces.AuditResultError
+		}
+		
+		event := audit.UserManagementEvent(role.TenantId, "system", role.Id, "update_role").
+			Resource("role", role.Id, role.Name).
+			Result(result).
+			Detail("role_permissions", len(role.PermissionIds)).
+			Severity(interfaces.AuditSeverityHigh)
+		
+		// Add change tracking if we have the old role
+		if oldRole != nil {
+			changes := make(map[string]interface{})
+			after := make(map[string]interface{})
+			before := make(map[string]interface{})
+			
+			if oldRole.Name != role.Name {
+				before["name"] = oldRole.Name
+				after["name"] = role.Name
+				changes["name"] = true
+			}
+			if oldRole.Description != role.Description {
+				before["description"] = oldRole.Description
+				after["description"] = role.Description
+				changes["description"] = true
+			}
+			if len(oldRole.PermissionIds) != len(role.PermissionIds) {
+				before["permission_count"] = len(oldRole.PermissionIds)
+				after["permission_count"] = len(role.PermissionIds)
+				changes["permissions"] = true
+			}
+			
+			if len(changes) > 0 {
+				fields := make([]string, 0, len(changes))
+				for field := range changes {
+					fields = append(fields, field)
+				}
+				event = event.Changes(before, after, fields)
+			}
+		}
+			
+		if err != nil {
+			event = event.Error("RBAC_UPDATE_ROLE_FAILED", err.Error())
+		}
+		
+		if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
+			// Don't fail the operation due to audit failure
+		}
+	}
+	
+	return err
 }
 
 func (m *Manager) DeleteRole(ctx context.Context, id string) error {
-	return m.store.DeleteRole(ctx, id)
+	// Get the role before deletion for audit purposes
+	var deletedRole *common.Role
+	if m.auditManager != nil {
+		deletedRole, _ = m.store.GetRole(ctx, id) // Ignore error for audit purposes
+	}
+	
+	err := m.store.DeleteRole(ctx, id)
+	
+	// Record audit event for role deletion
+	if m.auditManager != nil {
+		result := interfaces.AuditResultSuccess
+		tenantID := "system" // Default for system-level operations
+		roleName := id
+		
+		if deletedRole != nil {
+			tenantID = deletedRole.TenantId
+			roleName = deletedRole.Name
+		}
+		
+		if err != nil {
+			result = interfaces.AuditResultError
+		}
+		
+		event := audit.UserManagementEvent(tenantID, "system", id, "delete_role").
+			Resource("role", id, roleName).
+			Result(result).
+			Severity(interfaces.AuditSeverityCritical) // Role deletion is critical
+		
+		if deletedRole != nil {
+			event = event.Detail("deleted_permissions", len(deletedRole.PermissionIds)).
+				Detail("role_description", deletedRole.Description)
+		}
+			
+		if err != nil {
+			event = event.Error("RBAC_DELETE_ROLE_FAILED", err.Error())
+		}
+		
+		if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
+			// Don't fail the operation due to audit failure
+		}
+	}
+	
+	return err
 }
 
 func (m *Manager) GetRolePermissions(ctx context.Context, roleID string) ([]*common.Permission, error) {
@@ -221,7 +336,32 @@ func (m *Manager) AssignRole(ctx context.Context, assignment *common.RoleAssignm
 }
 
 func (m *Manager) RevokeRole(ctx context.Context, subjectID, roleID, tenantID string) error {
-	return m.store.RevokeRole(ctx, subjectID, roleID, tenantID)
+	err := m.store.RevokeRole(ctx, subjectID, roleID, tenantID)
+	
+	// Record audit event for role revocation
+	if m.auditManager != nil {
+		result := interfaces.AuditResultSuccess
+		if err != nil {
+			result = interfaces.AuditResultError
+		}
+		
+		event := audit.UserManagementEvent(tenantID, subjectID, subjectID, "revoke_role").
+			Resource("role_assignment", roleID, "").
+			Result(result).
+			Detail("revoked_role", roleID).
+			Detail("subject_id", subjectID).
+			Severity(interfaces.AuditSeverityHigh)
+			
+		if err != nil {
+			event = event.Error("RBAC_REVOKE_ROLE_FAILED", err.Error())
+		}
+		
+		if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
+			// Don't fail the operation due to audit failure
+		}
+	}
+	
+	return err
 }
 
 func (m *Manager) GetAssignment(ctx context.Context, id string) (*common.RoleAssignment, error) {

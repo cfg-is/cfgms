@@ -17,7 +17,11 @@ import (
 	"github.com/cfgis/cfgms/features/workflow"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	testpkg "github.com/cfgis/cfgms/pkg/testing"
+	
+	// Import storage providers for testing
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 )
 
 // E2ETestFramework provides a comprehensive end-to-end testing environment
@@ -249,7 +253,21 @@ func (f *E2ETestFramework) initializeCertificates() error {
 func (f *E2ETestFramework) initializeRBAC() error {
 	f.metrics.ComponentStartTimes["rbac"] = time.Now()
 	
-	rbacManager := rbac.NewManager()
+	// Use git storage for durable E2E testing - minimum storage requirement  
+	storageConfig := map[string]interface{}{
+		"repository_path": filepath.Join(f.tempDir, "rbac-storage"),
+		"branch":         "main",
+		"auto_init":      true,
+	}
+	storageManager, err := interfaces.CreateAllStoresFromConfig("git", storageConfig)
+	if err != nil {
+		return fmt.Errorf("failed to setup E2E storage: %w", err)
+	}
+	
+	rbacManager := rbac.NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+	)
 	if err := rbacManager.Initialize(f.ctx); err != nil {
 		return fmt.Errorf("failed to initialize RBAC: %w", err)
 	}

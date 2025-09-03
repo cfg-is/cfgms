@@ -374,11 +374,11 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 
 #### v0.4.6.0 (Alpha) - Complete Storage Migration
 
-**Status**: 📋 IN PROGRESS - 33 story points - Epic 6: Complete Storage Migration (8/33 points complete - 24%)
+**Status**: 📋 IN PROGRESS - 33 story points - Epic 6: Complete Storage Migration (16/33 points complete - 48%)
 
 **Epic 6: Complete Storage Migration (33 story points)**
 - [x] **RBAC Storage Migration** (Issue #141) - 8 points ✅
-- [ ] **Audit & Compliance Storage Migration** (Issue #142) - 8 points
+- [x] **Audit & Compliance Storage Migration** (Issue #142) - 8 points ✅
 - [ ] **Configuration & Rollback Storage Migration** (Issue #143) - 6 points
 - [ ] **Session & Runtime Storage Migration** (Issue #144) - 5 points
 - [ ] **DNA Storage Integration Assessment** (Issue #145) - 3 points

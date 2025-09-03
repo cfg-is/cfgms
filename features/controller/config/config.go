@@ -103,8 +103,12 @@ func DefaultConfig() *Config {
 			},
 		},
 		Storage: &StorageConfig{
-			Provider: "memory", // Default to memory provider for backwards compatibility
-			Config:   make(map[string]interface{}),
+			Provider: "git", // Epic 6: Use git as minimum viable storage (no in-memory fallbacks)
+			Config: map[string]interface{}{
+				"repository_path": "data/cfgms-storage", // Default local git repository
+				"branch":          "main",
+				"auto_init":       true,
+			},
 		},
 	}
 }

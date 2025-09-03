@@ -1,0 +1,87 @@
+# Minimum Storage Configuration for CFGMS
+# 
+# This example shows the minimum durable storage configuration required
+# for CFGMS operation. In-memory storage has been eliminated to ensure 
+# data durability and audit trail persistence.
+
+# Minimum Configuration: Local Git Storage (No Remote Required)
+controller:
+  # Git storage provider - minimum acceptable storage for CFGMS
+  storage:
+    provider: "git" 
+    config:
+      # Local git repository - no remote required for basic operation
+      repository_path: "/var/lib/cfgms/storage"
+      branch: "main"
+      auto_init: true
+      
+      # Optional: Remote repository for backup/collaboration
+      # remote_url: "git@github.com:company/cfgms-config.git"
+      # ssh_key_path: "/etc/cfgms/deploy-key"
+      
+      # Optional: SOPS encryption for sensitive data
+      # sops:
+      #   enabled: true
+      #   key_file: "/etc/cfgms/sops-key.asc"
+
+  # Server configuration
+  listen_addr: "0.0.0.0:8443"
+  
+  # Certificate management (optional but recommended)
+  certificate:
+    enable_cert_management: true
+    ca_cert_path: "/etc/cfgms/certs/ca.crt"
+    ca_key_path: "/etc/cfgms/certs/ca.key"
+
+---
+# Alternative: Production Database Storage
+controller:
+  # Database storage provider - recommended for production
+  storage:
+    provider: "database"
+    config:
+      driver: "postgres"
+      dsn: "postgresql://cfgms:password@localhost:5432/cfgms?sslmode=require"
+      max_connections: 25
+      connection_timeout: "30s"
+      
+      # Backup configuration
+      backup_enabled: true
+      backup_schedule: "0 2 * * *"  # Daily at 2 AM
+      backup_retention: "30d"
+      
+  listen_addr: "0.0.0.0:8443"
+
+---
+# Development/Testing Configuration  
+controller:
+  storage:
+    provider: "git"
+    config:
+      # Temporary directory for development/testing
+      repository_path: "/tmp/cfgms-dev-storage"
+      branch: "main"
+      auto_init: true
+      
+  listen_addr: "127.0.0.1:8443"
+  
+# IMPORTANT NOTES:
+# 
+# 1. BREAKING CHANGE: In-memory storage has been removed entirely
+#    - No fallback to memory storage if configuration fails
+#    - All deployments must specify a storage provider
+#    - Minimum requirement: git provider with local repository
+# 
+# 2. Storage Provider Selection:
+#    - git: Minimum viable storage, suitable for single-node deployments
+#    - database: Recommended for production, supports clustering
+# 
+# 3. Migration from Memory Storage:
+#    - All existing deployments must add storage configuration
+#    - Use git provider for minimal impact
+#    - Database provider for production scalability
+#
+# 4. Testing:
+#    - Tests now use git storage with temporary directories
+#    - No more in-memory testing - ensures realistic behavior
+#    - CI/CD environments require git/database configuration

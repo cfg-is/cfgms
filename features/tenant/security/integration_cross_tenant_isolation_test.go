@@ -12,8 +12,12 @@ import (
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/tenant"
 	tenantMemory "github.com/cfgis/cfgms/features/tenant/memory"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	
+	// Import storage providers for testing
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 )
 
 // TestCrossTenantPermissionIsolationIntegration tests tenant isolation using real RBAC components
@@ -21,16 +25,29 @@ import (
 func TestCrossTenantPermissionIsolationIntegration(t *testing.T) {
 	ctx := context.Background()
 	
-	// Setup REAL RBAC and tenant infrastructure
+	// Setup REAL RBAC and tenant infrastructure with git storage
+	config := map[string]interface{}{
+		"repository_path": t.TempDir(),
+		"branch":         "main",
+		"auto_init":      true,
+	}
+	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	require.NoError(t, err)
+	
+	rbacManager := rbac.NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+	)
+	err = rbacManager.Initialize(ctx)
+	require.NoError(t, err)
+	
 	tenantStore := tenantMemory.NewStore()
-	tenantManager := tenant.NewManager(tenantStore, nil)
-	rbacManager := rbac.NewManager() // Real RBAC manager
+	tenantManager := tenant.NewManager(tenantStore, rbacManager)
 	auditLogger := NewTenantSecurityAuditLogger()
 	isolationEngine := NewTenantIsolationEngine(tenantManager)
-	require.NoError(t, rbacManager.Initialize(ctx))
 
 	// Create comprehensive tenant hierarchy for integration testing
-	err := setupRealTenantHierarchy(t, ctx, tenantStore, tenantManager)
+	err = setupRealTenantHierarchy(t, ctx, tenantStore, tenantManager)
 	require.NoError(t, err, "Failed to setup tenant hierarchy")
 
 	// Create real isolation rules
