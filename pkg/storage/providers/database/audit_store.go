@@ -43,7 +43,7 @@ func NewDatabaseAuditStore(dsn string, config map[string]interface{}) (*Database
 	
 	// Test connection
 	if err := db.Ping(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 	
@@ -55,7 +55,7 @@ func NewDatabaseAuditStore(dsn string, config map[string]interface{}) (*Database
 	
 	// Initialize database schema
 	if err := store.initializeSchema(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("failed to initialize database schema: %w", err)
 	}
 	
@@ -94,7 +94,7 @@ func (s *DatabaseAuditStore) StoreAuditEntry(ctx context.Context, entry *interfa
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	
 	// Set metadata
 	if entry.ID == "" {
@@ -244,7 +244,7 @@ func (s *DatabaseAuditStore) ListAuditEntries(ctx context.Context, filter *inter
 	if err != nil {
 		return nil, fmt.Errorf("failed to list audit entries: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	
 	var entries []*interfaces.AuditEntry
 	
@@ -273,7 +273,7 @@ func (s *DatabaseAuditStore) StoreAuditBatch(ctx context.Context, entries []*int
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	
 	// Prepare statement for batch insert
 	query := `
@@ -291,7 +291,7 @@ func (s *DatabaseAuditStore) StoreAuditBatch(ctx context.Context, entries []*int
 	if err != nil {
 		return fmt.Errorf("failed to prepare batch statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 	
 	// Insert each entry
 	for _, entry := range entries {
@@ -708,7 +708,7 @@ func (s *DatabaseAuditStore) populateStatsMap(ctx context.Context, query string,
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	
 	for rows.Next() {
 		var key string

@@ -41,7 +41,7 @@ func NewDatabaseConfigStore(dsn string, config map[string]interface{}) (*Databas
 	
 	// Test connection
 	if err := db.Ping(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 	
@@ -53,7 +53,7 @@ func NewDatabaseConfigStore(dsn string, config map[string]interface{}) (*Databas
 	
 	// Initialize database schema
 	if err := store.initializeSchema(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("failed to initialize database schema: %w", err)
 	}
 	
@@ -92,7 +92,7 @@ func (s *DatabaseConfigStore) StoreConfig(ctx context.Context, config *interface
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	
 	// Set metadata
 	now := time.Now()
@@ -280,7 +280,7 @@ func (s *DatabaseConfigStore) DeleteConfig(ctx context.Context, key *interfaces.
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	
 	// Get the configuration before deletion for history
 	existingConfig, err := s.getConfigInternal(ctx, tx, key)
@@ -365,7 +365,7 @@ func (s *DatabaseConfigStore) ListConfigs(ctx context.Context, filter *interface
 	if err != nil {
 		return nil, fmt.Errorf("failed to list configurations: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	
 	var configs []*interfaces.ConfigEntry
 	
@@ -437,7 +437,7 @@ func (s *DatabaseConfigStore) GetConfigHistory(ctx context.Context, key *interfa
 	if err != nil {
 		return nil, fmt.Errorf("failed to get configuration history: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	
 	var configs []*interfaces.ConfigEntry
 	
@@ -557,7 +557,7 @@ func (s *DatabaseConfigStore) StoreConfigBatch(ctx context.Context, configs []*i
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	
 	// Store each configuration
 	for _, config := range configs {
@@ -584,7 +584,7 @@ func (s *DatabaseConfigStore) DeleteConfigBatch(ctx context.Context, keys []*int
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	
 	// Delete each configuration
 	for _, key := range keys {
@@ -648,7 +648,7 @@ func (s *DatabaseConfigStore) GetConfigStats(ctx context.Context) (*interfaces.C
 	if err != nil {
 		return nil, fmt.Errorf("failed to get tenant statistics: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	
 	for rows.Next() {
 		var tenantID string
@@ -665,7 +665,7 @@ func (s *DatabaseConfigStore) GetConfigStats(ctx context.Context) (*interfaces.C
 	if err != nil {
 		return nil, fmt.Errorf("failed to get format statistics: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	
 	for rows.Next() {
 		var format string
@@ -682,7 +682,7 @@ func (s *DatabaseConfigStore) GetConfigStats(ctx context.Context) (*interfaces.C
 	if err != nil {
 		return nil, fmt.Errorf("failed to get namespace statistics: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	
 	for rows.Next() {
 		var namespace string

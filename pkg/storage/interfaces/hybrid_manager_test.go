@@ -255,9 +255,10 @@ func TestPlanHybridMigration(t *testing.T) {
 			assert.Equal(t, tt.expectedCfg, strategy.TargetConfig.Configuration.Provider)
 
 			// Verify config preservation
-			if tt.currentProvider == "database" {
+			switch tt.currentProvider {
+			case "database":
 				assert.Equal(t, tt.currentConfig, strategy.TargetConfig.Operational.Config)
-			} else if tt.currentProvider == "git" {
+			case "git":
 				assert.Equal(t, tt.currentConfig, strategy.TargetConfig.Configuration.Config)
 			}
 		})

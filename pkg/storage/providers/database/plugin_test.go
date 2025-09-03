@@ -104,13 +104,12 @@ func TestDatabaseProvider_CreateClientTenantStore(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, store)
 	
-	// Verify store implements interface
-	_, ok := store.(interfaces.ClientTenantStore)
-	assert.True(t, ok)
+	// Verify store is not nil - interface compliance verified at compile time
+	assert.NotNil(t, store)
 	
 	// Clean up
 	if dbStore, ok := store.(*DatabaseClientTenantStore); ok {
-		dbStore.Close()
+		_ = dbStore.Close()
 	}
 }
 
@@ -129,13 +128,12 @@ func TestDatabaseProvider_CreateConfigStore(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, store)
 	
-	// Verify store implements interface
-	_, ok := store.(interfaces.ConfigStore)
-	assert.True(t, ok)
+	// Verify store is not nil - interface compliance verified at compile time
+	assert.NotNil(t, store)
 	
 	// Clean up
 	if dbStore, ok := store.(*DatabaseConfigStore); ok {
-		dbStore.Close()
+		_ = dbStore.Close()
 	}
 }
 
@@ -154,13 +152,12 @@ func TestDatabaseProvider_CreateAuditStore(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, store)
 	
-	// Verify store implements interface
-	_, ok := store.(interfaces.AuditStore)
-	assert.True(t, ok)
+	// Verify store is not nil - interface compliance verified at compile time
+	assert.NotNil(t, store)
 	
 	// Clean up
 	if dbStore, ok := store.(*DatabaseAuditStore); ok {
-		dbStore.Close()
+		_ = dbStore.Close()
 	}
 }
 
@@ -486,7 +483,7 @@ func BenchmarkDatabaseProvider_CreateStores(b *testing.B) {
 		store, err := provider.CreateClientTenantStore(testDBConfig)
 		if err == nil && store != nil {
 			if dbStore, ok := store.(*DatabaseClientTenantStore); ok {
-				dbStore.Close()
+				_ = dbStore.Close()
 			}
 		}
 	}

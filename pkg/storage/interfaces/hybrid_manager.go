@@ -245,7 +245,8 @@ func PlanHybridMigration(currentProvider string, currentConfig map[string]interf
 	}
 	
 	// Recommend hybrid configuration based on current setup
-	if currentProvider == "database" {
+	switch currentProvider {
+	case "database":
 		// Already using database - keep for operational, add git for configs
 		strategy.TargetConfig = HybridStorageConfig{
 			Operational: StorageBackendConfig{
@@ -260,7 +261,7 @@ func PlanHybridMigration(currentProvider string, currentConfig map[string]interf
 				},
 			},
 		}
-	} else if currentProvider == "git" {
+	case "git":
 		// Already using git - keep for configs, add database for operational
 		strategy.TargetConfig = HybridStorageConfig{
 			Operational: StorageBackendConfig{

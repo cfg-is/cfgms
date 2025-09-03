@@ -4,7 +4,6 @@ package database
 import (
 	"encoding/json"
 	"fmt"
-	"time"
 
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
@@ -37,34 +36,6 @@ func deserializeMetadata(data []byte) (map[string]interface{}, error) {
 	return metadata, nil
 }
 
-// serializeStringSlice converts a string slice to PostgreSQL array format
-func serializeStringSlice(slice []string) interface{} {
-	if slice == nil {
-		return []string{}
-	}
-	return slice
-}
-
-// buildConfigKey creates a ConfigKey from database row values
-func buildConfigKey(tenantID, namespace, name, scope string) *interfaces.ConfigKey {
-	return &interfaces.ConfigKey{
-		TenantID:  tenantID,
-		Namespace: namespace,
-		Name:      name,
-		Scope:     scope,
-	}
-}
-
-// buildTimeRange creates a TimeRange from optional time pointers
-func buildTimeRange(start, end *time.Time) *interfaces.TimeRange {
-	if start == nil && end == nil {
-		return nil
-	}
-	return &interfaces.TimeRange{
-		Start: start,
-		End:   end,
-	}
-}
 
 // serializeAuditChanges converts AuditChanges to JSON for database storage
 func serializeAuditChanges(changes *interfaces.AuditChanges) ([]byte, error) {
@@ -102,13 +73,6 @@ func convertNullString(s string) interface{} {
 	return s
 }
 
-// convertNullTime handles SQL NULL timestamps
-func convertNullTime(t time.Time) interface{} {
-	if t.IsZero() {
-		return nil
-	}
-	return t
-}
 
 // buildAuditFilterQuery constructs a WHERE clause from AuditFilter
 func buildAuditFilterQuery(filter *interfaces.AuditFilter, args []interface{}) (string, []interface{}) {

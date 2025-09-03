@@ -235,7 +235,7 @@ func (s *DatabaseClientTenantStore) StoreClientTenant(client *interfaces.ClientT
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	
 	// Set timestamps
 	now := time.Now()
@@ -431,7 +431,7 @@ func (s *DatabaseClientTenantStore) ListClientTenants(status interfaces.ClientTe
 	if err != nil {
 		return nil, fmt.Errorf("failed to list client tenants: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	
 	var clients []*interfaces.ClientTenant
 	
@@ -490,7 +490,7 @@ func (s *DatabaseClientTenantStore) UpdateClientTenantStatus(tenantID string, st
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	
 	query := `
 		UPDATE client_tenants
@@ -532,7 +532,7 @@ func (s *DatabaseClientTenantStore) DeleteClientTenant(tenantID string) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	
 	query := `DELETE FROM client_tenants WHERE tenant_id = $1`
 	
@@ -561,7 +561,7 @@ func (s *DatabaseClientTenantStore) StoreAdminConsentRequest(request *interfaces
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	
 	// Set created timestamp
 	if request.CreatedAt.IsZero() {
@@ -669,7 +669,7 @@ func (s *DatabaseClientTenantStore) DeleteAdminConsentRequest(state string) erro
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	
 	query := `DELETE FROM admin_consent_requests WHERE state = $1`
 	
