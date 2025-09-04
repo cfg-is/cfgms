@@ -106,6 +106,38 @@ func (p *DatabaseProvider) CreateAuditStore(config map[string]interface{}) (inte
 }
 
 // CreateRBACStore creates a database-based RBAC store
+func (p *DatabaseProvider) CreateRuntimeStore(config map[string]interface{}) (interfaces.RuntimeStore, error) {
+	dsn, err := p.getDSN(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open database connection: %w", err)
+	}
+
+	// Test the connection
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to connect to database: %w", err)
+	}
+
+	store := &DatabaseRuntimeStore{
+		db:             db,
+		tableName:      p.getTableName(config, "runtime_sessions"),
+		stateTableName: p.getTableName(config, "runtime_state"),
+	}
+
+	// Create tables if they don't exist
+	if err := store.createTables(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to create runtime tables: %w", err)
+	}
+
+	return store, nil
+}
+
 func (p *DatabaseProvider) CreateRBACStore(config map[string]interface{}) (interfaces.RBACStore, error) {
 	// Get database connection string from config
 	dsn, err := p.getDSN(config)
@@ -170,6 +202,20 @@ func getBoolFromConfig(config map[string]interface{}, key string, defaultValue b
 		return val
 	}
 	return defaultValue
+}
+
+// getTableName returns the table name for the given key, with optional prefix
+func (p *DatabaseProvider) getTableName(config map[string]interface{}, defaultName string) string {
+	// Check for table prefix
+	prefix := getStringFromConfig(config, "table_prefix", "cfgms_")
+	
+	// Check for custom table name
+	tableKey := defaultName + "_table"
+	if customName, ok := config[tableKey].(string); ok && customName != "" {
+		return prefix + customName
+	}
+	
+	return prefix + defaultName
 }
 
 // Auto-register this provider (Salt-style)

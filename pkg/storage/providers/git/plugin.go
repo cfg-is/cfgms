@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	"github.com/cfgis/cfgms/pkg/storage/providers/memory"
 	"github.com/cfgis/cfgms/features/config/git"
 	"gopkg.in/yaml.v3"
 )
@@ -146,6 +147,16 @@ func (p *GitProvider) CreateAuditStore(config map[string]interface{}) (interface
 }
 
 // CreateRBACStore creates a git-based RBAC store
+func (p *GitProvider) CreateRuntimeStore(config map[string]interface{}) (interfaces.RuntimeStore, error) {
+	// Git provider implements RuntimeStore using memory for runtime/session data
+	// Git is for configuration/policy storage, runtime sessions are ephemeral by nature
+	// Epic 6 Compliance: Provider implements interface without exposing implementation details
+	
+	// Use memory implementation for runtime storage
+	memoryProvider := &memory.MemoryProvider{}
+	return memoryProvider.CreateRuntimeStore(config)
+}
+
 func (p *GitProvider) CreateRBACStore(config map[string]interface{}) (interfaces.RBACStore, error) {
 	// Get repository path from config
 	repoPathStr := "/tmp/cfgms-git-rbac"

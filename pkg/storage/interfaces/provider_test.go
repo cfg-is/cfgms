@@ -76,6 +76,10 @@ func (m *MockStorageProvider) CreateRBACStore(config map[string]interface{}) (RB
 	return &MockRBACStore{}, nil
 }
 
+func (m *MockStorageProvider) CreateRuntimeStore(config map[string]interface{}) (RuntimeStore, error) {
+	return &MockRuntimeStore{}, nil
+}
+
 // Mock implementations of store interfaces
 type MockClientTenantStore struct{}
 
@@ -147,6 +151,45 @@ func (m *MockRBACStore) GetRolePermissions(ctx context.Context, roleID string) (
 func (m *MockRBACStore) GetSubjectAssignments(ctx context.Context, subjectID, tenantID string) ([]*common.RoleAssignment, error) { return nil, nil }
 func (m *MockRBACStore) Initialize(ctx context.Context) error { return nil }
 func (m *MockRBACStore) Close() error { return nil }
+
+type MockRuntimeStore struct{}
+
+// Session Management
+func (m *MockRuntimeStore) CreateSession(ctx context.Context, session *Session) error { return nil }
+func (m *MockRuntimeStore) GetSession(ctx context.Context, sessionID string) (*Session, error) { 
+	return &Session{SessionID: sessionID}, nil 
+}
+func (m *MockRuntimeStore) UpdateSession(ctx context.Context, sessionID string, session *Session) error { return nil }
+func (m *MockRuntimeStore) DeleteSession(ctx context.Context, sessionID string) error { return nil }
+func (m *MockRuntimeStore) ListSessions(ctx context.Context, filters *SessionFilter) ([]*Session, error) { return nil, nil }
+
+// Session Lifecycle Management
+func (m *MockRuntimeStore) SetSessionTTL(ctx context.Context, sessionID string, ttl time.Duration) error { return nil }
+func (m *MockRuntimeStore) CleanupExpiredSessions(ctx context.Context) (int, error) { return 0, nil }
+func (m *MockRuntimeStore) ListExpiredSessions(ctx context.Context, cutoff time.Time) ([]string, error) { return nil, nil }
+
+// Runtime State Management
+func (m *MockRuntimeStore) SetRuntimeState(ctx context.Context, key string, value interface{}) error { return nil }
+func (m *MockRuntimeStore) GetRuntimeState(ctx context.Context, key string) (interface{}, error) { return nil, fmt.Errorf("not found") }
+func (m *MockRuntimeStore) DeleteRuntimeState(ctx context.Context, key string) error { return nil }
+func (m *MockRuntimeStore) ListRuntimeKeys(ctx context.Context, prefix string) ([]string, error) { return nil, nil }
+
+// Batch Operations
+func (m *MockRuntimeStore) CreateSessionsBatch(ctx context.Context, sessions []*Session) error { return nil }
+func (m *MockRuntimeStore) DeleteSessionsBatch(ctx context.Context, sessionIDs []string) error { return nil }
+
+// Session Queries
+func (m *MockRuntimeStore) GetSessionsByUser(ctx context.Context, userID string) ([]*Session, error) { return nil, nil }
+func (m *MockRuntimeStore) GetSessionsByTenant(ctx context.Context, tenantID string) ([]*Session, error) { return nil, nil }
+func (m *MockRuntimeStore) GetSessionsByType(ctx context.Context, sessionType SessionType) ([]*Session, error) { return nil, nil }
+func (m *MockRuntimeStore) GetActiveSessionsCount(ctx context.Context) (int64, error) { return 0, nil }
+
+// Health and Maintenance
+func (m *MockRuntimeStore) HealthCheck(ctx context.Context) error { return nil }
+func (m *MockRuntimeStore) GetStats(ctx context.Context) (*RuntimeStoreStats, error) { 
+	return &RuntimeStoreStats{}, nil 
+}
+func (m *MockRuntimeStore) Vacuum(ctx context.Context) error { return nil }
 
 // Test provider registration
 func TestRegisterStorageProvider(t *testing.T) {

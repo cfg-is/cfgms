@@ -10,8 +10,10 @@ import (
 
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	
 	// Import storage providers for Epic 6 compliance testing
+	// Note: memory provider is NOT imported as it's not a global provider
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
 )
@@ -49,6 +51,33 @@ func TestServer_New_SecurityValidation(t *testing.T) {
 			config:  nil,
 			wantErr: true,
 			errMsg:  "config",
+		},
+		{
+			name: "missing storage configuration should fail",
+			config: &config.Config{
+				ListenAddr: "127.0.0.1:0",
+				Certificate: &config.CertificateConfig{
+					EnableCertManagement: false,
+				},
+				// Storage: nil - Missing storage configuration
+			},
+			wantErr: true,
+			errMsg:  "storage configuration is required",
+		},
+		{
+			name: "invalid storage provider should fail",
+			config: &config.Config{
+				ListenAddr: "127.0.0.1:0",
+				Certificate: &config.CertificateConfig{
+					EnableCertManagement: false,
+				},
+				Storage: &config.StorageConfig{
+					Provider: "invalid-provider-name",
+					Config:   make(map[string]interface{}),
+				},
+			},
+			wantErr: true,
+			errMsg:  "storage provider",
 		},
 		{
 			name: "insecure config should create server but with warnings",
@@ -127,6 +156,119 @@ func TestServer_New_SecurityValidation(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestServer_StorageProviderValidation dynamically validates storage provider configuration
+// against all registered global storage providers
+func TestServer_StorageProviderValidation(t *testing.T) {
+	
+	logger := logging.NewNoopLogger()
+	tempDir, err := os.MkdirTemp("", "storage_provider_test")
+	require.NoError(t, err)
+	defer func() { _ = os.RemoveAll(tempDir) }()
+
+	// Get all registered storage providers dynamically
+	registeredProviders := interfaces.ListProviders()
+	require.NotEmpty(t, registeredProviders, "No storage providers registered - this indicates a system configuration problem")
+
+	t.Run("ValidateRegisteredProvidersWork", func(t *testing.T) {
+		// Test each registered provider works
+		for _, providerInfo := range registeredProviders {
+			if !providerInfo.Available {
+				t.Logf("Skipping unavailable provider '%s': %s", providerInfo.Name, providerInfo.UnavailableReason)
+				continue
+			}
+
+			t.Run("provider_"+providerInfo.Name, func(t *testing.T) {
+				config := &config.Config{
+					ListenAddr: "127.0.0.1:0",
+					Certificate: &config.CertificateConfig{
+						EnableCertManagement: false,
+					},
+					Storage: &config.StorageConfig{
+						Provider: providerInfo.Name,
+						Config: map[string]interface{}{
+							"repository_path": tempDir + "/" + providerInfo.Name + "-test",
+							"branch":          "main",
+							"auto_init":       true,
+						},
+					},
+				}
+
+				server, err := New(config, logger)
+				assert.NoError(t, err, "Valid storage provider '%s' should not cause server creation to fail", providerInfo.Name)
+				assert.NotNil(t, server, "Server should be created with valid provider '%s'", providerInfo.Name)
+				
+				if server != nil {
+					// Verify all storage interfaces are properly initialized
+					assert.NotNil(t, server.rbacManager, "RBAC manager should be initialized with provider '%s'", providerInfo.Name)
+					assert.NotNil(t, server.tenantManager, "Tenant manager should be initialized with provider '%s'", providerInfo.Name)
+				}
+			})
+		}
+	})
+
+	t.Run("InvalidProviderShouldFail", func(t *testing.T) {
+		// Generate an invalid provider name that's guaranteed not to be registered
+		invalidProvider := "definitely-not-a-real-provider-name"
+		
+		// Verify it's actually not registered
+		isRegistered := false
+		for _, providerInfo := range registeredProviders {
+			if providerInfo.Name == invalidProvider {
+				isRegistered = true
+				break
+			}
+		}
+		require.False(t, isRegistered, "Test setup error: invalid provider name is actually registered")
+
+		config := &config.Config{
+			ListenAddr: "127.0.0.1:0",
+			Certificate: &config.CertificateConfig{
+				EnableCertManagement: false,
+			},
+			Storage: &config.StorageConfig{
+				Provider: invalidProvider,
+				Config:   make(map[string]interface{}),
+			},
+		}
+
+		server, err := New(config, logger)
+		assert.Error(t, err, "Invalid storage provider should cause server creation to fail")
+		assert.Nil(t, server, "Server should not be created with invalid provider")
+		assert.Contains(t, err.Error(), "storage provider", "Error should mention storage provider issue")
+	})
+
+	t.Run("FutureProofProviderList", func(t *testing.T) {
+		// This test documents expected providers and will alert if providers are added/removed
+		providerNames := make([]string, 0, len(registeredProviders))
+		for _, providerInfo := range registeredProviders {
+			providerNames = append(providerNames, providerInfo.Name)
+		}
+
+		t.Logf("Currently registered storage providers: %v", providerNames)
+		
+		// These are the providers we expect to exist based on our architecture
+		expectedProviders := []string{"git", "database"}
+		
+		for _, expected := range expectedProviders {
+			found := false
+			for _, actual := range providerNames {
+				if actual == expected {
+					found = true
+					break
+				}
+			}
+			assert.True(t, found, "Expected storage provider '%s' is not registered", expected)
+		}
+		
+		// Alert if unexpected providers are registered (could indicate foot-gun memory provider)
+		for _, actual := range providerNames {
+			if actual == "memory" {
+				t.Errorf("CRITICAL: Memory provider is registered as global storage provider - this violates our architecture and creates a foot-gun!")
+			}
+		}
+	})
 }
 
 func TestServer_SecurityConfiguration(t *testing.T) {
@@ -403,11 +545,18 @@ func TestServer_SecurityEdgeCases_And_AttackVectors(t *testing.T) {
 func TestServer_ConcurrentSecurity_And_RaceConditions(t *testing.T) {
 	logger := logging.NewNoopLogger()
 
+	// Create temporary directory for storage
+	tempDir, err := os.MkdirTemp("", "concurrent_test")
+	require.NoError(t, err)
+	defer func() { _ = os.RemoveAll(tempDir) }()
+
 	config := &config.Config{
 		ListenAddr: "127.0.0.1:0",
 		Certificate: &config.CertificateConfig{
 			EnableCertManagement: false,
 		},
+		// Epic 6: Storage configuration required for all server creation
+		Storage: createTestStorageConfig(tempDir, "concurrent"),
 	}
 
 	const numConcurrent = 10
