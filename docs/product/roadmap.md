@@ -374,9 +374,9 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 
 #### v0.4.6.0 (Alpha) - Complete Storage Migration
 
-**Status**: 📋 IN PROGRESS - 38 story points - Epic 6: Complete Storage Migration (27/38 points complete - 71%)
+**Status**: 📋 IN PROGRESS - 46 story points - Epic 6: Complete Storage Migration (27/46 points complete - 59%)
 
-**Epic 6: Complete Storage Migration (38 story points)**
+**Epic 6: Complete Storage Migration (46 story points)**
 - [x] **RBAC Storage Migration** (Issue #141) - 8 points ✅
 - [x] **Audit & Compliance Storage Migration** (Issue #142) - 8 points ✅
 - [x] **Configuration & Rollback Storage Migration** (Issue #143) - 6 points ✅ COMPLETED
@@ -392,6 +392,15 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - [ ] Implement storage provider test fixtures and helpers  
   - [ ] Enhance storage provider validation test coverage
   - [ ] Resolve all storage provider related test failures
+- [ ] **Memory Storage Backend Elimination** (Issue #148) - 8 points
+  - [ ] Remove memory provider from global storage provider registration
+  - [ ] Relocate memory provider to internal utility package (pkg/internal/memory)
+  - [ ] Audit all modules/features using memory storage and migrate to write-through caching pattern
+  - [ ] Create standardized component memory optimization pattern documentation
+  - [ ] Implement example write-through caching in 2-3 key components (session, RBAC, config)
+  - [ ] Remove all memory provider imports from global storage interfaces
+  - [ ] Update CLAUDE.md with memory provider elimination completion
+  - [ ] Validate no components can accidentally select memory as global storage provider
 - [ ] **DNA Storage Integration Assessment** (Issue #145) - 3 points
 - [ ] **Storage Pattern Validation & Cleanup** (Issue #146) - 3 points
 
