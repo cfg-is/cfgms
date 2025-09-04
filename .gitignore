@@ -45,3 +45,7 @@ config.yaml
 .env.local
 
 .obsidian/
+
+# Test/development storage data
+features/controller/data/
+**/cfgms-storage/
