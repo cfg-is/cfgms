@@ -26,6 +26,7 @@ func TestManager_Initialize(t *testing.T) {
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
 	)
 	ctx := context.Background()
 
@@ -68,6 +69,7 @@ func TestManager_CreateTenantDefaultRoles(t *testing.T) {
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
 	)
 	ctx := context.Background()
 	
@@ -109,6 +111,7 @@ func TestManager_SubjectManagement(t *testing.T) {
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
 	)
 	ctx := context.Background()
 	
@@ -174,6 +177,7 @@ func TestManager_RoleAssignment(t *testing.T) {
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
 	)
 	ctx := context.Background()
 	
@@ -240,6 +244,7 @@ func TestManager_PermissionChecking(t *testing.T) {
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
 	)
 	ctx := context.Background()
 	
@@ -328,6 +333,7 @@ func TestManager_SystemAdminPermissions(t *testing.T) {
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
 	)
 	ctx := context.Background()
 	
@@ -395,6 +401,7 @@ func TestManager_CreateStewardSubject(t *testing.T) {
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
 	)
 	ctx := context.Background()
 	
@@ -455,6 +462,7 @@ func TestManager_InactiveSubjectPermissions(t *testing.T) {
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
 	)
 	ctx := context.Background()
 	

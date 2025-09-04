@@ -2,8 +2,11 @@ package interfaces
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
+
+	"github.com/cfgis/cfgms/api/proto/common"
 )
 
 // MockStorageProvider implements StorageProvider for testing
@@ -69,6 +72,10 @@ func (m *MockStorageProvider) CreateAuditStore(config map[string]interface{}) (A
 	return &MockAuditStore{}, nil
 }
 
+func (m *MockStorageProvider) CreateRBACStore(config map[string]interface{}) (RBACStore, error) {
+	return &MockRBACStore{}, nil
+}
+
 // Mock implementations of store interfaces
 type MockClientTenantStore struct{}
 
@@ -110,6 +117,36 @@ func (m *MockAuditStore) GetSuspiciousActivity(ctx context.Context, tenantID str
 func (m *MockAuditStore) GetAuditStats(ctx context.Context) (*AuditStats, error)              { return &AuditStats{}, nil }
 func (m *MockAuditStore) ArchiveAuditEntries(ctx context.Context, beforeDate time.Time) (int64, error) { return 0, nil }
 func (m *MockAuditStore) PurgeAuditEntries(ctx context.Context, beforeDate time.Time) (int64, error) { return 0, nil }
+
+type MockRBACStore struct{}
+
+func (m *MockRBACStore) StorePermission(ctx context.Context, permission *common.Permission) error { return nil }
+func (m *MockRBACStore) GetPermission(ctx context.Context, id string) (*common.Permission, error) { return nil, fmt.Errorf("permission not found") }
+func (m *MockRBACStore) ListPermissions(ctx context.Context, resourceType string) ([]*common.Permission, error) { return nil, nil }
+func (m *MockRBACStore) UpdatePermission(ctx context.Context, permission *common.Permission) error { return nil }
+func (m *MockRBACStore) DeletePermission(ctx context.Context, id string) error { return nil }
+func (m *MockRBACStore) StoreRole(ctx context.Context, role *common.Role) error { return nil }
+func (m *MockRBACStore) GetRole(ctx context.Context, id string) (*common.Role, error) { return nil, fmt.Errorf("role not found") }
+func (m *MockRBACStore) ListRoles(ctx context.Context, tenantID string) ([]*common.Role, error) { return nil, nil }
+func (m *MockRBACStore) UpdateRole(ctx context.Context, role *common.Role) error { return nil }
+func (m *MockRBACStore) DeleteRole(ctx context.Context, id string) error { return nil }
+func (m *MockRBACStore) StoreSubject(ctx context.Context, subject *common.Subject) error { return nil }
+func (m *MockRBACStore) GetSubject(ctx context.Context, id string) (*common.Subject, error) { return nil, fmt.Errorf("subject not found") }
+func (m *MockRBACStore) ListSubjects(ctx context.Context, tenantID string, subjectType common.SubjectType) ([]*common.Subject, error) { return nil, nil }
+func (m *MockRBACStore) UpdateSubject(ctx context.Context, subject *common.Subject) error { return nil }
+func (m *MockRBACStore) DeleteSubject(ctx context.Context, id string) error { return nil }
+func (m *MockRBACStore) StoreRoleAssignment(ctx context.Context, assignment *common.RoleAssignment) error { return nil }
+func (m *MockRBACStore) GetRoleAssignment(ctx context.Context, id string) (*common.RoleAssignment, error) { return nil, fmt.Errorf("assignment not found") }
+func (m *MockRBACStore) ListRoleAssignments(ctx context.Context, subjectID, roleID, tenantID string) ([]*common.RoleAssignment, error) { return nil, nil }
+func (m *MockRBACStore) DeleteRoleAssignment(ctx context.Context, subjectID, roleID, tenantID string) error { return nil }
+func (m *MockRBACStore) StoreBulkPermissions(ctx context.Context, permissions []*common.Permission) error { return nil }
+func (m *MockRBACStore) StoreBulkRoles(ctx context.Context, roles []*common.Role) error { return nil }
+func (m *MockRBACStore) StoreBulkSubjects(ctx context.Context, subjects []*common.Subject) error { return nil }
+func (m *MockRBACStore) GetSubjectRoles(ctx context.Context, subjectID, tenantID string) ([]*common.Role, error) { return nil, nil }
+func (m *MockRBACStore) GetRolePermissions(ctx context.Context, roleID string) ([]*common.Permission, error) { return nil, nil }
+func (m *MockRBACStore) GetSubjectAssignments(ctx context.Context, subjectID, tenantID string) ([]*common.RoleAssignment, error) { return nil, nil }
+func (m *MockRBACStore) Initialize(ctx context.Context) error { return nil }
+func (m *MockRBACStore) Close() error { return nil }
 
 // Test provider registration
 func TestRegisterStorageProvider(t *testing.T) {

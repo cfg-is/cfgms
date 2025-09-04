@@ -17,6 +17,7 @@ type Manager struct {
 	// Pluggable storage interfaces (when using NewManagerWithStorage)
 	auditStore               interfaces.AuditStore
 	clientTenantStore        interfaces.ClientTenantStore
+	rbacStore                interfaces.RBACStore
 	usePluggableStorage      bool
 	auditManager             *audit.Manager
 	
@@ -48,8 +49,8 @@ type Manager struct {
 
 // NewManagerWithStorage creates a new RBAC manager with pluggable storage interfaces
 // This is the recommended constructor for production deployments with configurable storage backends
-func NewManagerWithStorage(auditStore interfaces.AuditStore, clientTenantStore interfaces.ClientTenantStore) *Manager {
-	if auditStore == nil || clientTenantStore == nil {
+func NewManagerWithStorage(auditStore interfaces.AuditStore, clientTenantStore interfaces.ClientTenantStore, rbacStore interfaces.RBACStore) *Manager {
+	if auditStore == nil || clientTenantStore == nil || rbacStore == nil {
 		panic("NewManagerWithStorage requires non-nil storage interfaces")
 	}
 	
@@ -68,6 +69,7 @@ func NewManagerWithStorage(auditStore interfaces.AuditStore, clientTenantStore i
 		store:               ephemeralStore, // Epic 6: Ephemeral store - not persistent
 		auditStore:          auditStore,
 		clientTenantStore:   clientTenantStore,
+		rbacStore:           rbacStore,      // Write-through persistent RBAC storage
 		usePluggableStorage: true,
 		auditManager:        auditManager,
 		engine:              engine,
@@ -104,15 +106,108 @@ func (m *Manager) Initialize(ctx context.Context) error {
 		return err
 	}
 
-	// Load default permissions
-	m.store.LoadPermissions(DefaultPermissions)
+	// Initialize persistent storage
+	if m.rbacStore != nil {
+		if err := m.rbacStore.Initialize(ctx); err != nil {
+			return fmt.Errorf("failed to initialize RBAC store: %w", err)
+		}
+		
+		// Load existing data from persistent storage into ephemeral store
+		if err := m.loadFromPersistentStorage(ctx); err != nil {
+			return fmt.Errorf("failed to load data from persistent storage: %w", err)
+		}
+	}
+
+	// Load default permissions (both in ephemeral and persistent storage)
+	if err := m.loadDefaultPermissions(ctx); err != nil {
+		return fmt.Errorf("failed to load default permissions: %w", err)
+	}
 	
-	// Load default system roles
-	m.store.LoadRoles(GetSystemRoles())
+	// Load default system roles (both in ephemeral and persistent storage)
+	if err := m.loadDefaultRoles(ctx); err != nil {
+		return fmt.Errorf("failed to load default roles: %w", err)
+	}
 	
 	// Initialize template manager with system templates
 	if err := m.templateManager.Initialize(ctx); err != nil {
 		return fmt.Errorf("failed to initialize template manager: %w", err)
+	}
+	
+	return nil
+}
+
+// loadFromPersistentStorage loads existing RBAC data from persistent storage into ephemeral store
+func (m *Manager) loadFromPersistentStorage(ctx context.Context) error {
+	if m.rbacStore == nil {
+		return nil
+	}
+	
+	// Load all permissions
+	permissions, err := m.rbacStore.ListPermissions(ctx, "")
+	if err != nil {
+		return fmt.Errorf("failed to load permissions: %w", err)
+	}
+	if len(permissions) > 0 {
+		m.store.LoadPermissions(permissions)
+	}
+	
+	// Load all roles
+	roles, err := m.rbacStore.ListRoles(ctx, "")
+	if err != nil {
+		return fmt.Errorf("failed to load roles: %w", err)
+	}
+	if len(roles) > 0 {
+		m.store.LoadRoles(roles)
+	}
+	
+	// Load all subjects
+	subjects, err := m.rbacStore.ListSubjects(ctx, "", common.SubjectType_SUBJECT_TYPE_UNSPECIFIED)
+	if err != nil {
+		return fmt.Errorf("failed to load subjects: %w", err)
+	}
+	for _, subject := range subjects {
+		_ = m.store.CreateSubject(ctx, subject)
+	}
+	
+	// Load all role assignments
+	assignments, err := m.rbacStore.ListRoleAssignments(ctx, "", "", "")
+	if err != nil {
+		return fmt.Errorf("failed to load role assignments: %w", err)
+	}
+	for _, assignment := range assignments {
+		_ = m.store.AssignRole(ctx, assignment)
+	}
+	
+	return nil
+}
+
+// loadDefaultPermissions ensures default permissions exist in both stores
+func (m *Manager) loadDefaultPermissions(ctx context.Context) error {
+	// Load into ephemeral store
+	m.store.LoadPermissions(DefaultPermissions)
+	
+	// Persist to storage provider if available
+	if m.rbacStore != nil {
+		if err := m.rbacStore.StoreBulkPermissions(ctx, DefaultPermissions); err != nil {
+			return fmt.Errorf("failed to persist default permissions: %w", err)
+		}
+	}
+	
+	return nil
+}
+
+// loadDefaultRoles ensures default roles exist in both stores
+func (m *Manager) loadDefaultRoles(ctx context.Context) error {
+	systemRoles := GetSystemRoles()
+	
+	// Load into ephemeral store
+	m.store.LoadRoles(systemRoles)
+	
+	// Persist to storage provider if available
+	if m.rbacStore != nil {
+		if err := m.rbacStore.StoreBulkRoles(ctx, systemRoles); err != nil {
+			return fmt.Errorf("failed to persist default roles: %w", err)
+		}
 	}
 	
 	return nil
@@ -132,7 +227,21 @@ func (m *Manager) CreateTenantDefaultRoles(ctx context.Context, tenantID string)
 
 // Permission Store Methods
 func (m *Manager) CreatePermission(ctx context.Context, permission *common.Permission) error {
-	return m.store.CreatePermission(ctx, permission)
+	// Write-through: persist to both ephemeral and persistent storage
+	if err := m.store.CreatePermission(ctx, permission); err != nil {
+		return err
+	}
+	
+	// Persist to storage provider
+	if m.rbacStore != nil {
+		if err := m.rbacStore.StorePermission(ctx, permission); err != nil {
+			// Try to rollback ephemeral store change
+			_ = m.store.DeletePermission(ctx, permission.Id)
+			return fmt.Errorf("failed to persist permission: %w", err)
+		}
+	}
+	
+	return nil
 }
 
 func (m *Manager) GetPermission(ctx context.Context, id string) (*common.Permission, error) {
@@ -144,42 +253,85 @@ func (m *Manager) ListPermissions(ctx context.Context, resourceType string) ([]*
 }
 
 func (m *Manager) UpdatePermission(ctx context.Context, permission *common.Permission) error {
-	return m.store.UpdatePermission(ctx, permission)
+	// Write-through: persist to both ephemeral and persistent storage
+	if err := m.store.UpdatePermission(ctx, permission); err != nil {
+		return err
+	}
+	
+	// Persist to storage provider
+	if m.rbacStore != nil {
+		if err := m.rbacStore.UpdatePermission(ctx, permission); err != nil {
+			return fmt.Errorf("failed to persist permission update: %w", err)
+		}
+	}
+	
+	return nil
 }
 
 func (m *Manager) DeletePermission(ctx context.Context, id string) error {
-	return m.store.DeletePermission(ctx, id)
+	// Write-through: remove from both ephemeral and persistent storage
+	if err := m.store.DeletePermission(ctx, id); err != nil {
+		return err
+	}
+	
+	// Remove from storage provider
+	if m.rbacStore != nil {
+		if err := m.rbacStore.DeletePermission(ctx, id); err != nil {
+			return fmt.Errorf("failed to persist permission deletion: %w", err)
+		}
+	}
+	
+	return nil
 }
 
 // Role Store Methods
 func (m *Manager) CreateRole(ctx context.Context, role *common.Role) error {
+	// Write-through: persist to both ephemeral and persistent storage
 	err := m.store.CreateRole(ctx, role)
+	if err != nil {
+		// Record audit failure
+		if m.auditManager != nil {
+			event := audit.UserManagementEvent(role.TenantId, "system", role.Id, "create_role").
+				Resource("role", role.Id, role.Name).
+				Result(interfaces.AuditResultError).
+				Error("RBAC_CREATE_ROLE_FAILED", err.Error()).
+				Severity(interfaces.AuditSeverityHigh)
+			_ = m.auditManager.RecordEvent(ctx, event)
+		}
+		return err
+	}
 	
-	// Record audit event for role creation
-	if m.auditManager != nil {
-		result := interfaces.AuditResultSuccess
-		if err != nil {
-			result = interfaces.AuditResultError
-		}
-		
-		event := audit.UserManagementEvent(role.TenantId, "system", role.Id, "create_role").
-			Resource("role", role.Id, role.Name).
-			Result(result).
-			Detail("role_permissions", len(role.PermissionIds)).
-			Detail("role_description", role.Description).
-			Severity(interfaces.AuditSeverityHigh)
+	// Persist to storage provider
+	if m.rbacStore != nil {
+		if persistErr := m.rbacStore.StoreRole(ctx, role); persistErr != nil {
+			// Try to rollback ephemeral store change
+			_ = m.store.DeleteRole(ctx, role.Id)
 			
-		if err != nil {
-			event = event.Error("RBAC_CREATE_ROLE_FAILED", err.Error())
-		}
-		
-		if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
-			// Don't fail the operation due to audit failure, but log it
-			// In production, you might want more sophisticated audit failure handling
+			// Record audit failure
+			if m.auditManager != nil {
+				event := audit.UserManagementEvent(role.TenantId, "system", role.Id, "create_role").
+					Resource("role", role.Id, role.Name).
+					Result(interfaces.AuditResultError).
+					Error("RBAC_CREATE_ROLE_PERSISTENCE_FAILED", persistErr.Error()).
+					Severity(interfaces.AuditSeverityHigh)
+				_ = m.auditManager.RecordEvent(ctx, event)
+			}
+			return fmt.Errorf("failed to persist role: %w", persistErr)
 		}
 	}
 	
-	return err
+	// Record successful audit event
+	if m.auditManager != nil {
+		event := audit.UserManagementEvent(role.TenantId, "system", role.Id, "create_role").
+			Resource("role", role.Id, role.Name).
+			Result(interfaces.AuditResultSuccess).
+			Detail("role_permissions", len(role.PermissionIds)).
+			Detail("role_description", role.Description).
+			Severity(interfaces.AuditSeverityHigh)
+		_ = m.auditManager.RecordEvent(ctx, event)
+	}
+	
+	return nil
 }
 
 func (m *Manager) GetRole(ctx context.Context, id string) (*common.Role, error) {
@@ -197,18 +349,42 @@ func (m *Manager) UpdateRole(ctx context.Context, role *common.Role) error {
 		oldRole, _ = m.store.GetRole(ctx, role.Id) // Ignore error for audit purposes
 	}
 	
+	// Write-through: persist to both ephemeral and persistent storage
 	err := m.store.UpdateRole(ctx, role)
-	
-	// Record audit event for role update
-	if m.auditManager != nil {
-		result := interfaces.AuditResultSuccess
-		if err != nil {
-			result = interfaces.AuditResultError
+	if err != nil {
+		// Record audit failure
+		if m.auditManager != nil {
+			event := audit.UserManagementEvent(role.TenantId, "system", role.Id, "update_role").
+				Resource("role", role.Id, role.Name).
+				Result(interfaces.AuditResultError).
+				Error("RBAC_UPDATE_ROLE_FAILED", err.Error()).
+				Severity(interfaces.AuditSeverityHigh)
+			_ = m.auditManager.RecordEvent(ctx, event)
 		}
-		
+		return err
+	}
+	
+	// Persist to storage provider
+	if m.rbacStore != nil {
+		if persistErr := m.rbacStore.UpdateRole(ctx, role); persistErr != nil {
+			// Record audit failure
+			if m.auditManager != nil {
+				event := audit.UserManagementEvent(role.TenantId, "system", role.Id, "update_role").
+					Resource("role", role.Id, role.Name).
+					Result(interfaces.AuditResultError).
+					Error("RBAC_UPDATE_ROLE_PERSISTENCE_FAILED", persistErr.Error()).
+					Severity(interfaces.AuditSeverityHigh)
+				_ = m.auditManager.RecordEvent(ctx, event)
+			}
+			return fmt.Errorf("failed to persist role update: %w", persistErr)
+		}
+	}
+	
+	// Record successful audit event with change tracking
+	if m.auditManager != nil {
 		event := audit.UserManagementEvent(role.TenantId, "system", role.Id, "update_role").
 			Resource("role", role.Id, role.Name).
-			Result(result).
+			Result(interfaces.AuditResultSuccess).
 			Detail("role_permissions", len(role.PermissionIds)).
 			Severity(interfaces.AuditSeverityHigh)
 		
@@ -242,17 +418,11 @@ func (m *Manager) UpdateRole(ctx context.Context, role *common.Role) error {
 				event = event.Changes(before, after, fields)
 			}
 		}
-			
-		if err != nil {
-			event = event.Error("RBAC_UPDATE_ROLE_FAILED", err.Error())
-		}
 		
-		if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
-			// Don't fail the operation due to audit failure
-		}
+		_ = m.auditManager.RecordEvent(ctx, event)
 	}
 	
-	return err
+	return nil
 }
 
 func (m *Manager) DeleteRole(ctx context.Context, id string) error {
@@ -262,11 +432,53 @@ func (m *Manager) DeleteRole(ctx context.Context, id string) error {
 		deletedRole, _ = m.store.GetRole(ctx, id) // Ignore error for audit purposes
 	}
 	
+	// Write-through: remove from both ephemeral and persistent storage
 	err := m.store.DeleteRole(ctx, id)
+	if err != nil {
+		// Record audit failure
+		if m.auditManager != nil {
+			tenantID := "system" // Default for system-level operations
+			roleName := id
+			if deletedRole != nil {
+				tenantID = deletedRole.TenantId
+				roleName = deletedRole.Name
+			}
+			
+			event := audit.UserManagementEvent(tenantID, "system", id, "delete_role").
+				Resource("role", id, roleName).
+				Result(interfaces.AuditResultError).
+				Error("RBAC_DELETE_ROLE_FAILED", err.Error()).
+				Severity(interfaces.AuditSeverityCritical)
+			_ = m.auditManager.RecordEvent(ctx, event)
+		}
+		return err
+	}
 	
-	// Record audit event for role deletion
+	// Remove from storage provider
+	if m.rbacStore != nil {
+		if persistErr := m.rbacStore.DeleteRole(ctx, id); persistErr != nil {
+			// Record audit failure
+			if m.auditManager != nil {
+				tenantID := "system"
+				roleName := id
+				if deletedRole != nil {
+					tenantID = deletedRole.TenantId
+					roleName = deletedRole.Name
+				}
+				
+				event := audit.UserManagementEvent(tenantID, "system", id, "delete_role").
+					Resource("role", id, roleName).
+					Result(interfaces.AuditResultError).
+					Error("RBAC_DELETE_ROLE_PERSISTENCE_FAILED", persistErr.Error()).
+					Severity(interfaces.AuditSeverityCritical)
+				_ = m.auditManager.RecordEvent(ctx, event)
+			}
+			return fmt.Errorf("failed to persist role deletion: %w", persistErr)
+		}
+	}
+	
+	// Record successful audit event
 	if m.auditManager != nil {
-		result := interfaces.AuditResultSuccess
 		tenantID := "system" // Default for system-level operations
 		roleName := id
 		
@@ -275,30 +487,20 @@ func (m *Manager) DeleteRole(ctx context.Context, id string) error {
 			roleName = deletedRole.Name
 		}
 		
-		if err != nil {
-			result = interfaces.AuditResultError
-		}
-		
 		event := audit.UserManagementEvent(tenantID, "system", id, "delete_role").
 			Resource("role", id, roleName).
-			Result(result).
+			Result(interfaces.AuditResultSuccess).
 			Severity(interfaces.AuditSeverityCritical) // Role deletion is critical
 		
 		if deletedRole != nil {
 			event = event.Detail("deleted_permissions", len(deletedRole.PermissionIds)).
 				Detail("role_description", deletedRole.Description)
 		}
-			
-		if err != nil {
-			event = event.Error("RBAC_DELETE_ROLE_FAILED", err.Error())
-		}
 		
-		if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
-			// Don't fail the operation due to audit failure
-		}
+		_ = m.auditManager.RecordEvent(ctx, event)
 	}
 	
-	return err
+	return nil
 }
 
 func (m *Manager) GetRolePermissions(ctx context.Context, roleID string) ([]*common.Permission, error) {
@@ -307,7 +509,21 @@ func (m *Manager) GetRolePermissions(ctx context.Context, roleID string) ([]*com
 
 // Subject Store Methods
 func (m *Manager) CreateSubject(ctx context.Context, subject *common.Subject) error {
-	return m.store.CreateSubject(ctx, subject)
+	// Write-through: persist to both ephemeral and persistent storage
+	if err := m.store.CreateSubject(ctx, subject); err != nil {
+		return err
+	}
+	
+	// Persist to storage provider
+	if m.rbacStore != nil {
+		if err := m.rbacStore.StoreSubject(ctx, subject); err != nil {
+			// Try to rollback ephemeral store change
+			_ = m.store.DeleteSubject(ctx, subject.Id)
+			return fmt.Errorf("failed to persist subject: %w", err)
+		}
+	}
+	
+	return nil
 }
 
 func (m *Manager) GetSubject(ctx context.Context, id string) (*common.Subject, error) {
@@ -337,32 +553,53 @@ func (m *Manager) AssignRole(ctx context.Context, assignment *common.RoleAssignm
 }
 
 func (m *Manager) RevokeRole(ctx context.Context, subjectID, roleID, tenantID string) error {
+	// Write-through: remove from both ephemeral and persistent storage
 	err := m.store.RevokeRole(ctx, subjectID, roleID, tenantID)
+	if err != nil {
+		// Record audit failure
+		if m.auditManager != nil {
+			event := audit.UserManagementEvent(tenantID, subjectID, subjectID, "revoke_role").
+				Resource("role_assignment", roleID, "").
+				Result(interfaces.AuditResultError).
+				Error("RBAC_REVOKE_ROLE_FAILED", err.Error()).
+				Detail("revoked_role", roleID).
+				Detail("subject_id", subjectID).
+				Severity(interfaces.AuditSeverityHigh)
+			_ = m.auditManager.RecordEvent(ctx, event)
+		}
+		return err
+	}
 	
-	// Record audit event for role revocation
-	if m.auditManager != nil {
-		result := interfaces.AuditResultSuccess
-		if err != nil {
-			result = interfaces.AuditResultError
-		}
-		
-		event := audit.UserManagementEvent(tenantID, subjectID, subjectID, "revoke_role").
-			Resource("role_assignment", roleID, "").
-			Result(result).
-			Detail("revoked_role", roleID).
-			Detail("subject_id", subjectID).
-			Severity(interfaces.AuditSeverityHigh)
-			
-		if err != nil {
-			event = event.Error("RBAC_REVOKE_ROLE_FAILED", err.Error())
-		}
-		
-		if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
-			// Don't fail the operation due to audit failure
+	// Remove from storage provider
+	if m.rbacStore != nil {
+		if persistErr := m.rbacStore.DeleteRoleAssignment(ctx, subjectID, roleID, tenantID); persistErr != nil {
+			// Record audit failure
+			if m.auditManager != nil {
+				event := audit.UserManagementEvent(tenantID, subjectID, subjectID, "revoke_role").
+					Resource("role_assignment", roleID, "").
+					Result(interfaces.AuditResultError).
+					Error("RBAC_REVOKE_ROLE_PERSISTENCE_FAILED", persistErr.Error()).
+					Detail("revoked_role", roleID).
+					Detail("subject_id", subjectID).
+					Severity(interfaces.AuditSeverityHigh)
+				_ = m.auditManager.RecordEvent(ctx, event)
+			}
+			return fmt.Errorf("failed to persist role revocation: %w", persistErr)
 		}
 	}
 	
-	return err
+	// Record successful audit event
+	if m.auditManager != nil {
+		event := audit.UserManagementEvent(tenantID, subjectID, subjectID, "revoke_role").
+			Resource("role_assignment", roleID, "").
+			Result(interfaces.AuditResultSuccess).
+			Detail("revoked_role", roleID).
+			Detail("subject_id", subjectID).
+			Severity(interfaces.AuditSeverityHigh)
+		_ = m.auditManager.RecordEvent(ctx, event)
+	}
+	
+	return nil
 }
 
 func (m *Manager) GetAssignment(ctx context.Context, id string) (*common.RoleAssignment, error) {
@@ -708,6 +945,10 @@ func (m *Manager) GetOperationLog() []OperationRecord {
 // GetStore returns the internal store (for testing purposes)
 func (m *Manager) GetStore() *memory.Store {
 	return m.store
+}
+
+func (m *Manager) GetRBACStore() interfaces.RBACStore {
+	return m.rbacStore
 }
 
 // Override CheckPermission to use advanced engine by default

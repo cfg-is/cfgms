@@ -145,6 +145,33 @@ func (p *GitProvider) CreateAuditStore(config map[string]interface{}) (interface
 	return store, nil
 }
 
+// CreateRBACStore creates a git-based RBAC store
+func (p *GitProvider) CreateRBACStore(config map[string]interface{}) (interfaces.RBACStore, error) {
+	// Get repository path from config
+	repoPathStr := "/tmp/cfgms-git-rbac"
+	if repoPath, ok := config["repository_path"]; ok {
+		if pathStr, ok := repoPath.(string); ok && pathStr != "" {
+			repoPathStr = pathStr + "/rbac"
+		}
+	}
+	
+	// Optional remote URL for distributed deployments
+	remoteURL := ""
+	if remote, ok := config["remote_url"]; ok {
+		if remoteStr, ok := remote.(string); ok {
+			remoteURL = remoteStr
+		}
+	}
+	
+	// Create the git RBAC store
+	store, err := NewGitRBACStore(repoPathStr, remoteURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create git RBAC store: %w", err)
+	}
+	
+	return store, nil
+}
+
 // Auto-register this provider (Salt-style)
 func init() {
 	interfaces.RegisterStorageProvider(&GitProvider{})

@@ -59,6 +59,7 @@ func TestNewManagerWithStorage(t *testing.T) {
 			manager := NewManagerWithStorage(
 				storageManager.GetAuditStore(),
 				storageManager.GetClientTenantStore(),
+				storageManager.GetRBACStore(),
 			)
 			require.NotNil(t, manager)
 
@@ -167,10 +168,10 @@ func TestNewManagerWithStorage_NilStorageHandling(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if tt.expectPanic {
 				assert.Panics(t, func() {
-					NewManagerWithStorage(tt.auditStore, tt.clientTenantStore)
+					NewManagerWithStorage(tt.auditStore, tt.clientTenantStore, nil)
 				})
 			} else {
-				manager := NewManagerWithStorage(tt.auditStore, tt.clientTenantStore)
+				manager := NewManagerWithStorage(tt.auditStore, tt.clientTenantStore, nil)
 				assert.NotNil(t, manager)
 			}
 		})
@@ -191,6 +192,7 @@ func TestManagerWithStorage_TenantIsolation(t *testing.T) {
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
 	)
 	require.NotNil(t, manager)
 
@@ -262,6 +264,7 @@ func TestManagerWithStorage_AuditTrail(t *testing.T) {
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
 	)
 	require.NotNil(t, manager)
 

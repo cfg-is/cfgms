@@ -18,6 +18,7 @@ type StorageProvider interface {
 	CreateClientTenantStore(config map[string]interface{}) (ClientTenantStore, error)
 	CreateConfigStore(config map[string]interface{}) (ConfigStore, error)
 	CreateAuditStore(config map[string]interface{}) (AuditStore, error)
+	CreateRBACStore(config map[string]interface{}) (RBACStore, error)
 	
 	// Future: CreateDNAStore for DNA storage integration (Epic 6)
 	// CreateDNAStore(config map[string]interface{}) (DNAStore, error)
@@ -129,6 +130,10 @@ func RegisterStorageProviderWithValidation(provider StorageProvider, testConfig 
 		
 		if _, err := provider.CreateAuditStore(testConfig); err != nil {
 			return fmt.Errorf("failed to create AuditStore: %w", err)
+		}
+		
+		if _, err := provider.CreateRBACStore(testConfig); err != nil {
+			return fmt.Errorf("failed to create RBACStore: %w", err)
 		}
 	}
 	
@@ -287,6 +292,16 @@ func CreateAuditStoreFromConfig(providerName string, config map[string]interface
 	return provider.CreateAuditStore(config)
 }
 
+// CreateRBACStoreFromConfig creates an RBACStore from configuration
+func CreateRBACStoreFromConfig(providerName string, config map[string]interface{}) (RBACStore, error) {
+	provider, err := GetStorageProvider(providerName)
+	if err != nil {
+		return nil, fmt.Errorf("storage provider '%s' not available: %w", providerName, err)
+	}
+	
+	return provider.CreateRBACStore(config)
+}
+
 // CreateAllStoresFromConfig creates all storage interfaces from a single configuration
 // This is the main entry point for unified storage configuration (legacy single-backend)
 func CreateAllStoresFromConfig(providerName string, config map[string]interface{}) (*StorageManager, error) {
@@ -317,12 +332,18 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 		return nil, fmt.Errorf("failed to create audit store: %w", err)
 	}
 	
+	rbacStore, err := provider.CreateRBACStore(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create RBAC store: %w", err)
+	}
+	
 	return &StorageManager{
 		providerName:      providerName,
 		provider:          provider,
 		clientTenantStore: clientTenantStore,
 		configStore:       configStore,
 		auditStore:        auditStore,
+		rbacStore:         rbacStore,
 	}, nil
 }
 
@@ -333,6 +354,7 @@ type StorageManager struct {
 	clientTenantStore ClientTenantStore
 	configStore       ConfigStore
 	auditStore        AuditStore
+	rbacStore         RBACStore
 }
 
 // GetProviderName returns the name of the storage provider
@@ -358,6 +380,11 @@ func (sm *StorageManager) GetConfigStore() ConfigStore {
 // GetAuditStore returns the audit storage interface
 func (sm *StorageManager) GetAuditStore() AuditStore {
 	return sm.auditStore
+}
+
+// GetRBACStore returns the RBAC storage interface
+func (sm *StorageManager) GetRBACStore() RBACStore {
+	return sm.rbacStore
 }
 
 // GetCapabilities returns the provider's capabilities

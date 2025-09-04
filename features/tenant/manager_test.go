@@ -30,6 +30,7 @@ func setupTestRBACManager(t *testing.T) *rbac.Manager {
 	manager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
 	)
 	
 	err = manager.Initialize(context.Background())
