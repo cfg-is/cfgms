@@ -49,6 +49,13 @@ CFGMS (Config Management System) is a modern, Go-based configuration management 
    - Only mock external dependencies we don't control (network, file I/O)
    - Run tests frequently: `make test`
 
+**STORAGE DEVELOPMENT CHECKLIST** (Required for any storage-related work):
+   - ❌ **STOP**: Am I about to create a global memory storage provider? (PROHIBITED)
+   - ❌ **STOP**: Am I storing secrets in cleartext anywhere? (PROHIBITED)
+   - ✅ **VERIFY**: Does my component use write-through caching (memory → durable)?
+   - ✅ **VERIFY**: Does my component import only `pkg/storage/interfaces`?
+   - ✅ **VERIFY**: Does my implementation work with ALL global storage providers?
+
 4. **Basic Security Review** (CRITICAL)
    
    Perform initial security validation during development:
@@ -533,18 +540,25 @@ pkg/
 │   │   ├── client_tenant.go # MSP client tenant storage
 │   │   ├── config.go        # Configuration storage  
 │   │   └── audit.go         # Audit log storage
-│   └── providers/           # Storage implementations
-│       ├── memory/          # Memory provider (all interfaces)
-│       ├── file/           # File provider (all interfaces)
-│       ├── database/       # Database provider (all interfaces)
-│       └── git/            # Git provider (all interfaces)
+│   └── providers/           # Durable storage implementations only
+│       ├── database/        # Database provider (PostgreSQL)
+│       └── git/             # Git provider with SOPS encryption
+```
+
+**Component-Level Memory Optimization:**
+```
+features/[component]/
+├── cache/                   # Component-specific memory caching
+├── manager.go              # Uses durable storage + memory optimization
+└── interfaces.go           # Component interfaces (not storage providers)
 ```
 
 **Current Pluggable Components:**
-- **Storage Providers**: `StorageProvider` interface creates all storage interfaces (Memory, File, Database, Git, Hybrid)
+- **Storage Providers**: `StorageProvider` interface creates all storage interfaces (durable, encrypted implementations)
 - **Git Providers**: `GitProvider` interface (GitHub, GitLab, Bitbucket)  
 - **Compression**: `Compressor` interface (GZIP, ZSTD, LZ4)
 - **KMS Providers**: `KMSProvider` interface (Vault, AWS KMS, Azure Key Vault)
+- **Encryption Providers**: `EncryptionProvider` interface (SOPS, native encryption backends)
 
 **Configuration Flow:**
 ```
@@ -560,12 +574,16 @@ All storage interfaces use database:
 Modules get injected with interfaces (don't know it's PostgreSQL)
 ```
 
-**Deployment Flexibility:**
-- **POC/Small MSP**: Memory provider, no external dependencies  
-- **Simple Deployment**: File provider, local storage
-- **Distributed Teams**: Git provider with Mozilla SOPS
-- **Production**: Database provider with PostgreSQL
-- **Enterprise**: Database provider + external KMS integration
+**Deployment Flexibility (Default: Git with SOPS):**
+- **POC/Small MSP**: Global storage provider with auto-generated encryption (local), no external dependencies  
+- **Simple Deployment**: Global storage provider with encryption key management
+- **Distributed Teams**: Global storage provider with shared encryption keys and remote backup
+- **Production**: Global storage provider with managed infrastructure or distributed storage
+- **Enterprise**: Global storage provider with external KMS integration
+
+**CRITICAL SAFETY REQUIREMENTS:**
+1. **No Memory Provider**: Memory is NEVER a global storage provider choice. Memory is only used internally by components for performance optimization (caching, ephemeral sessions) with write-through to the configured durable storage provider.
+2. **Encryption by Default**: All storage providers ALWAYS use encryption. Cleartext secrets on disk are prohibited in all deployment scenarios for security and compliance.
 
 **Plugin Development Guidelines:**
 - Each provider implements ALL storage interfaces for consistency
@@ -663,10 +681,55 @@ features/
 - Get returns comprehensive state, Set modifies only managed fields
 - Use GetManagedFields() to specify which fields Set will change
 
+### Storage Architecture Requirements (CRITICAL)
+
+**FOOT-GUN PREVENTION - READ BEFORE ANY STORAGE WORK:**
+
+**Prohibited Patterns:**
+- ❌ Memory as a global storage provider choice
+- ❌ Cleartext secrets on disk (even in development)
+- ❌ Component-specific storage provider selection
+- ❌ Bypassing global storage configuration
+
+**Required Patterns:**
+- ✅ Git with SOPS is the secure default provider (product decision)
+- ✅ Memory used ONLY for internal component optimization
+- ✅ All persistent data flows through global storage provider contract
+- ✅ Write-through caching pattern (memory → global storage provider)
+
+**Component Memory Optimization Pattern:**
+```go
+type ComponentManager struct {
+    // Fast memory cache for performance
+    cache        map[string]*Data
+    cacheExpiry  time.Duration
+    
+    // Durable storage via global storage provider contract
+    durableStore interfaces.ComponentStore
+}
+
+func (c *ComponentManager) Set(key string, data *Data) error {
+    // 1. Write to durable storage first (fail-fast)
+    if err := c.durableStore.Set(key, data); err != nil {
+        return err
+    }
+    
+    // 2. Update memory cache for performance
+    c.cache[key] = data
+    return nil
+}
+```
+
+**Storage Provider Contract Requirements:**
+- All deployments (POC → Enterprise) use encrypted durable storage
+- Global storage provider automatically enables encryption by default
+- All providers implement the same storage contract (durability, encryption, authentication, audit)
+- No configuration option to disable encryption
+
 ### Storage Plugin Development
 - **Golden Rule**: Business logic NEVER imports specific storage providers
 - **Interface-Only Imports**: Modules import `pkg/storage/interfaces` only
-- **Provider Discovery**: Check `pkg/storage/providers/` directory to see available implementations
+- **Durable Only**: Only implement providers that guarantee persistence
 - **Testing Strategy**: Test modules against all available storage providers automatically
 - **Plugin Structure**: Each provider implements ALL storage interfaces (ClientTenantStore, ConfigStore, AuditStore)
 - **Auto-Registration**: Providers register via `init()` functions - no manual registry needed

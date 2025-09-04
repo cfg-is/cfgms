@@ -3,6 +3,7 @@ package interfaces
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -331,6 +332,10 @@ func (p *mockProvider) CreateRBACStore(config map[string]interface{}) (RBACStore
 	return &mockRBACStore{}, nil
 }
 
+func (p *mockProvider) CreateRuntimeStore(config map[string]interface{}) (RuntimeStore, error) {
+	return &mockRuntimeStore{}, nil
+}
+
 func (p *mockProvider) GetCapabilities() ProviderCapabilities {
 	return ProviderCapabilities{
 		SupportsTransactions:    true,
@@ -532,3 +537,42 @@ func (s *mockRBACStore) GetRolePermissions(ctx context.Context, roleID string) (
 func (s *mockRBACStore) GetSubjectAssignments(ctx context.Context, subjectID, tenantID string) ([]*common.RoleAssignment, error) { return nil, nil }
 func (s *mockRBACStore) Initialize(ctx context.Context) error { return nil }
 func (s *mockRBACStore) Close() error { return nil }
+
+type mockRuntimeStore struct{}
+
+// Session Management
+func (s *mockRuntimeStore) CreateSession(ctx context.Context, session *Session) error { return nil }
+func (s *mockRuntimeStore) GetSession(ctx context.Context, sessionID string) (*Session, error) { 
+	return &Session{SessionID: sessionID}, nil 
+}
+func (s *mockRuntimeStore) UpdateSession(ctx context.Context, sessionID string, session *Session) error { return nil }
+func (s *mockRuntimeStore) DeleteSession(ctx context.Context, sessionID string) error { return nil }
+func (s *mockRuntimeStore) ListSessions(ctx context.Context, filters *SessionFilter) ([]*Session, error) { return nil, nil }
+
+// Session Lifecycle Management  
+func (s *mockRuntimeStore) SetSessionTTL(ctx context.Context, sessionID string, ttl time.Duration) error { return nil }
+func (s *mockRuntimeStore) CleanupExpiredSessions(ctx context.Context) (int, error) { return 0, nil }
+func (s *mockRuntimeStore) ListExpiredSessions(ctx context.Context, cutoff time.Time) ([]string, error) { return nil, nil }
+
+// Runtime State Management
+func (s *mockRuntimeStore) SetRuntimeState(ctx context.Context, key string, value interface{}) error { return nil }
+func (s *mockRuntimeStore) GetRuntimeState(ctx context.Context, key string) (interface{}, error) { return nil, fmt.Errorf("not found") }
+func (s *mockRuntimeStore) DeleteRuntimeState(ctx context.Context, key string) error { return nil }
+func (s *mockRuntimeStore) ListRuntimeKeys(ctx context.Context, prefix string) ([]string, error) { return nil, nil }
+
+// Batch Operations
+func (s *mockRuntimeStore) CreateSessionsBatch(ctx context.Context, sessions []*Session) error { return nil }
+func (s *mockRuntimeStore) DeleteSessionsBatch(ctx context.Context, sessionIDs []string) error { return nil }
+
+// Session Queries
+func (s *mockRuntimeStore) GetSessionsByUser(ctx context.Context, userID string) ([]*Session, error) { return nil, nil }
+func (s *mockRuntimeStore) GetSessionsByTenant(ctx context.Context, tenantID string) ([]*Session, error) { return nil, nil }
+func (s *mockRuntimeStore) GetSessionsByType(ctx context.Context, sessionType SessionType) ([]*Session, error) { return nil, nil }
+func (s *mockRuntimeStore) GetActiveSessionsCount(ctx context.Context) (int64, error) { return 0, nil }
+
+// Health and Maintenance
+func (s *mockRuntimeStore) HealthCheck(ctx context.Context) error { return nil }
+func (s *mockRuntimeStore) GetStats(ctx context.Context) (*RuntimeStoreStats, error) { 
+	return &RuntimeStoreStats{}, nil 
+}
+func (s *mockRuntimeStore) Vacuum(ctx context.Context) error { return nil }

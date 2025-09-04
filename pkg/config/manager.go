@@ -4,13 +4,13 @@ package config
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"fmt"
 	"time"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 )
 
 // Manager handles all configuration operations using the ConfigStore interface
@@ -68,8 +68,8 @@ func (m *Manager) StoreConfiguration(ctx context.Context, tenantID, stewardID st
 	return m.configStore.StoreConfig(ctx, configEntry)
 }
 
-// GetConfiguration retrieves a configuration from persistent storage as raw data
-func (m *Manager) GetConfiguration(ctx context.Context, tenantID, stewardID string) ([]byte, error) {
+// GetConfiguration retrieves a configuration from persistent storage
+func (m *Manager) GetConfiguration(ctx context.Context, tenantID, stewardID string) (*stewardconfig.StewardConfig, error) {
 	// Create config key
 	configKey := &interfaces.ConfigKey{
 		TenantID:  tenantID,
