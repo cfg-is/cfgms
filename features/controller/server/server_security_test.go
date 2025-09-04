@@ -10,9 +10,25 @@ import (
 
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/pkg/logging"
+	
+	// Import storage providers for Epic 6 compliance testing
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
 )
 
 // Security-focused tests for the controller server
+
+// Epic 6: Helper function to create storage configuration for all tests
+func createTestStorageConfig(tempDir, suffix string) *config.StorageConfig {
+	return &config.StorageConfig{
+		Provider: "git",
+		Config: map[string]interface{}{
+			"repository_path": tempDir + "/" + suffix + "-storage",
+			"branch":          "main",
+			"auto_init":       true,
+		},
+	}
+}
 
 func TestServer_New_SecurityValidation(t *testing.T) {
 	logger := logging.NewNoopLogger()
@@ -133,6 +149,15 @@ func TestServer_SecurityConfiguration(t *testing.T) {
 			config: &config.Config{
 				ListenAddr: "127.0.0.1:0",
 				CertPath:   tempDir,
+				// Epic 6: Storage configuration required
+				Storage: &config.StorageConfig{
+					Provider: "git",
+					Config: map[string]interface{}{
+						"repository_path": tempDir + "/prod-storage",
+						"branch":          "main",
+						"auto_init":       true,
+					},
+				},
 				Certificate: &config.CertificateConfig{
 					EnableCertManagement:   true,
 					ClientCertValidityDays: 30, // Short validity for security
@@ -167,6 +192,15 @@ func TestServer_SecurityConfiguration(t *testing.T) {
 			name: "development configuration with security warnings",
 			config: &config.Config{
 				ListenAddr: "127.0.0.1:0",
+				// Epic 6: Storage configuration required
+				Storage: &config.StorageConfig{
+					Provider: "git",
+					Config: map[string]interface{}{
+						"repository_path": tempDir + "/dev-storage",
+						"branch":          "main",
+						"auto_init":       true,
+					},
+				},
 				Certificate: &config.CertificateConfig{
 					EnableCertManagement: false, // Insecure for development
 				},
@@ -216,6 +250,15 @@ func TestServer_SecurityEdgeCases_And_AttackVectors(t *testing.T) {
 				return &config.Config{
 					ListenAddr: "127.0.0.1:0",
 					CertPath:   tempDir, // Valid cert path for storage
+					// Epic 6: Storage configuration required
+					Storage: &config.StorageConfig{
+						Provider: "git",
+						Config: map[string]interface{}{
+							"repository_path": tempDir + "/malformed-paths-storage",
+							"branch":          "main",
+							"auto_init":       true,
+						},
+					},
 					Certificate: &config.CertificateConfig{
 						EnableCertManagement: true,
 						CAPath:               "../../../etc/passwd", // Path traversal attempt
@@ -236,6 +279,15 @@ func TestServer_SecurityEdgeCases_And_AttackVectors(t *testing.T) {
 				return &config.Config{
 					ListenAddr: "127.0.0.1:0",
 					CertPath:   tempDir,
+					// Epic 6: Storage configuration required
+					Storage: &config.StorageConfig{
+						Provider: "git",
+						Config: map[string]interface{}{
+							"repository_path": tempDir + "/excessive-validity-storage",
+							"branch":          "main",
+							"auto_init":       true,
+						},
+					},
 					Certificate: &config.CertificateConfig{
 						EnableCertManagement:   true,
 						ClientCertValidityDays: 36500, // 100 years - excessive
@@ -257,6 +309,15 @@ func TestServer_SecurityEdgeCases_And_AttackVectors(t *testing.T) {
 			configFunc: func() *config.Config {
 				return &config.Config{
 					ListenAddr: "127.0.0.1:80", // Privileged port
+					// Epic 6: Storage configuration required
+					Storage: &config.StorageConfig{
+						Provider: "git",
+						Config: map[string]interface{}{
+							"repository_path": tempDir + "/privileged-port-storage",
+							"branch":          "main",
+							"auto_init":       true,
+						},
+					},
 					Certificate: &config.CertificateConfig{
 						EnableCertManagement: false,
 					},
@@ -270,6 +331,15 @@ func TestServer_SecurityEdgeCases_And_AttackVectors(t *testing.T) {
 			configFunc: func() *config.Config {
 				return &config.Config{
 					ListenAddr: "127.0.0.1:0", // Localhost only
+					// Epic 6: Storage configuration required
+					Storage: &config.StorageConfig{
+						Provider: "git",
+						Config: map[string]interface{}{
+							"repository_path": tempDir + "/localhost-storage",
+							"branch":          "main",
+							"auto_init":       true,
+						},
+					},
 					Certificate: &config.CertificateConfig{
 						EnableCertManagement: false,
 					},
@@ -284,6 +354,15 @@ func TestServer_SecurityEdgeCases_And_AttackVectors(t *testing.T) {
 				return &config.Config{
 					ListenAddr: "0.0.0.0:0", // Wildcard binding
 					CertPath:   tempDir,
+					// Epic 6: Storage configuration required
+					Storage: &config.StorageConfig{
+						Provider: "git",
+						Config: map[string]interface{}{
+							"repository_path": tempDir + "/wildcard-storage",
+							"branch":          "main",
+							"auto_init":       true,
+						},
+					},
 					Certificate: &config.CertificateConfig{
 						EnableCertManagement: true, // Should require TLS for wildcard
 						CAPath:               tempDir,

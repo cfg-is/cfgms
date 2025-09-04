@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"github.com/cfgis/cfgms/pkg/testing"
 	"context"
 	"fmt"
 	"runtime"
@@ -151,7 +152,7 @@ func (s *MultiTenantScaleValidationSuite) SetupSuite() {
 
 	// Initialize real CFGMS components for scale testing
 	s.rbacStore = memory.NewStore()
-	s.rbacManager = rbac.NewManager()
+	s.rbacManager = testing.SetupTestRBACManager(t)
 	s.tenantStore = tenantMemory.NewStore()
 	s.tenantManager = tenant.NewManager(s.tenantStore, nil)
 	

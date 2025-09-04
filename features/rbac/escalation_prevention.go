@@ -246,13 +246,27 @@ func (epm *EscalationPreventionManager) ValidateAndAssignRole(ctx context.Contex
 	epm.operationMutex.Lock()
 	defer epm.operationMutex.Unlock()
 	
-	// Perform the actual role assignment directly through the underlying store
-	// to avoid circular calls back to the Manager's AssignRole method
+	// Perform the actual role assignment with write-through persistence
+	// Store in ephemeral store first, then persist to RBAC store
 	manager, ok := epm.rbacManager.(*Manager)
 	if !ok {
 		return fmt.Errorf("escalation prevention manager requires Manager implementation")
 	}
+	
+	// First, store in ephemeral memory store for immediate access
 	err := manager.GetStore().AssignRole(ctx, assignment)
+	if err != nil {
+		return fmt.Errorf("failed to store role assignment in memory: %w", err)
+	}
+	
+	// Then, persist to RBAC store for durability (write-through pattern)
+	if manager.GetRBACStore() != nil {
+		if persistErr := manager.GetRBACStore().StoreRoleAssignment(ctx, assignment); persistErr != nil {
+			// If persistence fails, we should remove from memory store to maintain consistency
+			_ = manager.GetStore().RevokeRole(ctx, assignment.SubjectId, assignment.RoleId, assignment.TenantId)
+			return fmt.Errorf("failed to persist role assignment: %w", persistErr)
+		}
+	}
 	
 	// Record operation result
 	operation.Success = (err == nil)

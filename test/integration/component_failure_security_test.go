@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"github.com/cfgis/cfgms/pkg/testing"
 	"context"
 	"fmt"
 	"sync"
@@ -38,7 +39,7 @@ func NewComponentFailureSecurityTestFramework(t *testing.T) *ComponentFailureSec
 	env := testutil.NewTestEnv(t)
 	
 	// Create standard RBAC components
-	rbacManager := rbac.NewManager()
+	rbacManager := testing.SetupTestRBACManager(t)
 	riskEngine := risk.NewRiskAssessmentEngine()
 	jitManager := jit.NewJITAccessManager(rbacManager, nil) // Nil notification service for testing
 	

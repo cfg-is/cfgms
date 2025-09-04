@@ -44,6 +44,7 @@ func setupTestServer(t *testing.T) *Server {
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
 	)
 	err = rbacManager.Initialize(context.Background())
 	require.NoError(t, err)

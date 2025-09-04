@@ -28,6 +28,7 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
 	)
 	require.NotNil(t, manager)
 	require.NotNil(t, manager.auditManager)
@@ -201,8 +202,8 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 			TenantId:  "test-tenant",
 		}
 		
-		// For this test, we'll directly add to store to simulate an existing assignment
-		err = manager.store.AssignRole(ctx, assignment)
+		// Use the manager's AssignRole method to ensure proper persistence through RBAC store
+		err = manager.AssignRole(ctx, assignment)
 		require.NoError(t, err)
 		
 		// Now revoke the role - this should generate an audit event
@@ -307,6 +308,7 @@ func TestRBACManager_AuditFailureHandling(t *testing.T) {
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
 	)
 	require.NotNil(t, manager)
 	
@@ -354,6 +356,7 @@ func TestRBACManager_AuditFailureHandling(t *testing.T) {
 		manager := NewManagerWithStorage(
 			storageManager.GetAuditStore(),
 			storageManager.GetClientTenantStore(),
+			storageManager.GetRBACStore(),
 		)
 		err = manager.Initialize(ctx)
 		require.NoError(t, err)

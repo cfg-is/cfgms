@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"github.com/cfgis/cfgms/pkg/testing"
 	"context"
 	"fmt"
 	"runtime"
@@ -179,7 +180,7 @@ func (s *AuthorizationDatabasePerformanceSuite) initializeDatabaseComponents() {
 	s.Require().NoError(err)
 
 	// Create RBAC manager with the store
-	s.rbacManager = rbac.NewManager()
+	s.rbacManager = testing.SetupTestRBACManager(t)
 	err = s.rbacManager.Initialize(ctx)
 	s.Require().NoError(err)
 

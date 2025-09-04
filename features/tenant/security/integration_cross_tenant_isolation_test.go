@@ -37,6 +37,7 @@ func TestCrossTenantPermissionIsolationIntegration(t *testing.T) {
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
 	)
 	err = rbacManager.Initialize(ctx)
 	require.NoError(t, err)

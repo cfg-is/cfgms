@@ -27,6 +27,7 @@ func TestAdvancedPermissionManagement(t *testing.T) {
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
 	)
 	ctx := context.Background()
 	

@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/cfgis/cfgms/api/proto/common"
 )
 
 func TestHybridStorageConfig_Validation(t *testing.T) {
@@ -326,6 +327,10 @@ func (p *mockProvider) CreateAuditStore(config map[string]interface{}) (AuditSto
 	return &mockAuditStore{}, nil
 }
 
+func (p *mockProvider) CreateRBACStore(config map[string]interface{}) (RBACStore, error) {
+	return &mockRBACStore{}, nil
+}
+
 func (p *mockProvider) GetCapabilities() ProviderCapabilities {
 	return ProviderCapabilities{
 		SupportsTransactions:    true,
@@ -497,3 +502,33 @@ func (s *mockAuditStore) ArchiveAuditEntries(ctx context.Context, beforeDate tim
 func (s *mockAuditStore) PurgeAuditEntries(ctx context.Context, beforeDate time.Time) (int64, error) {
 	return 0, nil
 }
+
+type mockRBACStore struct{}
+
+func (s *mockRBACStore) StorePermission(ctx context.Context, permission *common.Permission) error { return nil }
+func (s *mockRBACStore) GetPermission(ctx context.Context, id string) (*common.Permission, error) { return nil, nil }
+func (s *mockRBACStore) ListPermissions(ctx context.Context, resourceType string) ([]*common.Permission, error) { return nil, nil }
+func (s *mockRBACStore) UpdatePermission(ctx context.Context, permission *common.Permission) error { return nil }
+func (s *mockRBACStore) DeletePermission(ctx context.Context, id string) error { return nil }
+func (s *mockRBACStore) StoreRole(ctx context.Context, role *common.Role) error { return nil }
+func (s *mockRBACStore) GetRole(ctx context.Context, id string) (*common.Role, error) { return nil, nil }
+func (s *mockRBACStore) ListRoles(ctx context.Context, tenantID string) ([]*common.Role, error) { return nil, nil }
+func (s *mockRBACStore) UpdateRole(ctx context.Context, role *common.Role) error { return nil }
+func (s *mockRBACStore) DeleteRole(ctx context.Context, id string) error { return nil }
+func (s *mockRBACStore) StoreSubject(ctx context.Context, subject *common.Subject) error { return nil }
+func (s *mockRBACStore) GetSubject(ctx context.Context, id string) (*common.Subject, error) { return nil, nil }
+func (s *mockRBACStore) ListSubjects(ctx context.Context, tenantID string, subjectType common.SubjectType) ([]*common.Subject, error) { return nil, nil }
+func (s *mockRBACStore) UpdateSubject(ctx context.Context, subject *common.Subject) error { return nil }
+func (s *mockRBACStore) DeleteSubject(ctx context.Context, id string) error { return nil }
+func (s *mockRBACStore) StoreRoleAssignment(ctx context.Context, assignment *common.RoleAssignment) error { return nil }
+func (s *mockRBACStore) GetRoleAssignment(ctx context.Context, id string) (*common.RoleAssignment, error) { return nil, nil }
+func (s *mockRBACStore) ListRoleAssignments(ctx context.Context, subjectID, roleID, tenantID string) ([]*common.RoleAssignment, error) { return nil, nil }
+func (s *mockRBACStore) DeleteRoleAssignment(ctx context.Context, subjectID, roleID, tenantID string) error { return nil }
+func (s *mockRBACStore) StoreBulkPermissions(ctx context.Context, permissions []*common.Permission) error { return nil }
+func (s *mockRBACStore) StoreBulkRoles(ctx context.Context, roles []*common.Role) error { return nil }
+func (s *mockRBACStore) StoreBulkSubjects(ctx context.Context, subjects []*common.Subject) error { return nil }
+func (s *mockRBACStore) GetSubjectRoles(ctx context.Context, subjectID, tenantID string) ([]*common.Role, error) { return nil, nil }
+func (s *mockRBACStore) GetRolePermissions(ctx context.Context, roleID string) ([]*common.Permission, error) { return nil, nil }
+func (s *mockRBACStore) GetSubjectAssignments(ctx context.Context, subjectID, tenantID string) ([]*common.RoleAssignment, error) { return nil, nil }
+func (s *mockRBACStore) Initialize(ctx context.Context) error { return nil }
+func (s *mockRBACStore) Close() error { return nil }

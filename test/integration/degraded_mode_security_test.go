@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"github.com/cfgis/cfgms/pkg/testing"
 	"context"
 	"fmt"
 	"strings"
@@ -78,7 +79,7 @@ func NewDegradedModeSecurityTestFramework(t *testing.T) *DegradedModeSecurityTes
 	env := testutil.NewTestEnv(t)
 	
 	// Create standard components
-	rbacManager := rbac.NewManager()
+	rbacManager := testing.SetupTestRBACManager(t)
 	riskEngine := risk.NewRiskAssessmentEngine()
 	jitManager := jit.NewJITAccessManager(rbacManager, nil)
 	

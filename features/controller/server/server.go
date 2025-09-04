@@ -64,6 +64,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
 	)
 	
 	// Initialize unified audit system with pluggable storage only

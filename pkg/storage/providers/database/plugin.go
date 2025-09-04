@@ -105,6 +105,23 @@ func (p *DatabaseProvider) CreateAuditStore(config map[string]interface{}) (inte
 	return store, nil
 }
 
+// CreateRBACStore creates a database-based RBAC store
+func (p *DatabaseProvider) CreateRBACStore(config map[string]interface{}) (interfaces.RBACStore, error) {
+	// Get database connection string from config
+	dsn, err := p.getDSN(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+	
+	// Create the database RBAC store
+	store, err := NewDatabaseRBACStore(dsn, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database RBAC store: %w", err)
+	}
+	
+	return store, nil
+}
+
 // getDSN extracts and validates the database connection string from configuration
 func (p *DatabaseProvider) getDSN(config map[string]interface{}) (string, error) {
 	// First, try to get a complete DSN

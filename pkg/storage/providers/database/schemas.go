@@ -360,6 +360,185 @@ func (s DatabaseSchemas) SetupHealthMonitoring(ctx context.Context, db *sql.DB) 
 	return nil
 }
 
+// CreateRBACTables creates all RBAC-related tables with proper indexing
+func (s DatabaseSchemas) CreateRBACTables(ctx context.Context, db *sql.DB) error {
+	// Create permissions table
+	if err := s.CreateRBACPermissionsTable(ctx, db); err != nil {
+		return err
+	}
+	
+	// Create roles table
+	if err := s.CreateRBACRolesTable(ctx, db); err != nil {
+		return err
+	}
+	
+	// Create subjects table
+	if err := s.CreateRBACSubjectsTable(ctx, db); err != nil {
+		return err
+	}
+	
+	// Create role assignments table
+	if err := s.CreateRBACRoleAssignmentsTable(ctx, db); err != nil {
+		return err
+	}
+	
+	return nil
+}
+
+// CreateRBACPermissionsTable creates the rbac_permissions table
+func (s DatabaseSchemas) CreateRBACPermissionsTable(ctx context.Context, db *sql.DB) error {
+	createTableQuery := `
+		CREATE TABLE IF NOT EXISTS rbac_permissions (
+			id VARCHAR(255) PRIMARY KEY,
+			name VARCHAR(255) NOT NULL,
+			description TEXT DEFAULT '',
+			resource_type VARCHAR(100) NOT NULL,
+			actions JSONB NOT NULL DEFAULT '[]',
+			created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+		);
+	`
+	
+	if _, err := db.ExecContext(ctx, createTableQuery); err != nil {
+		return fmt.Errorf("failed to create rbac_permissions table: %w", err)
+	}
+	
+	// Create indexes for performance
+	indexes := []string{
+		"CREATE INDEX IF NOT EXISTS idx_rbac_permissions_resource_type ON rbac_permissions(resource_type);",
+		"CREATE INDEX IF NOT EXISTS idx_rbac_permissions_name ON rbac_permissions(name);",
+		"CREATE INDEX IF NOT EXISTS idx_rbac_permissions_actions ON rbac_permissions USING GIN(actions);",
+	}
+	
+	for _, indexQuery := range indexes {
+		if _, err := db.ExecContext(ctx, indexQuery); err != nil {
+			return fmt.Errorf("failed to create rbac_permissions index: %w", err)
+		}
+	}
+	
+	return nil
+}
+
+// CreateRBACRolesTable creates the rbac_roles table
+func (s DatabaseSchemas) CreateRBACRolesTable(ctx context.Context, db *sql.DB) error {
+	createTableQuery := `
+		CREATE TABLE IF NOT EXISTS rbac_roles (
+			id VARCHAR(255) PRIMARY KEY,
+			name VARCHAR(255) NOT NULL,
+			description TEXT DEFAULT '',
+			permission_ids JSONB NOT NULL DEFAULT '[]',
+			is_system_role BOOLEAN NOT NULL DEFAULT FALSE,
+			tenant_id VARCHAR(255) DEFAULT '',
+			parent_role_id VARCHAR(255) DEFAULT NULL,
+			inheritance_type INTEGER DEFAULT 0,
+			created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+			FOREIGN KEY (parent_role_id) REFERENCES rbac_roles(id) ON DELETE SET NULL
+		);
+	`
+	
+	if _, err := db.ExecContext(ctx, createTableQuery); err != nil {
+		return fmt.Errorf("failed to create rbac_roles table: %w", err)
+	}
+	
+	// Create indexes for performance and tenant isolation
+	indexes := []string{
+		"CREATE INDEX IF NOT EXISTS idx_rbac_roles_tenant_id ON rbac_roles(tenant_id);",
+		"CREATE INDEX IF NOT EXISTS idx_rbac_roles_is_system_role ON rbac_roles(is_system_role);",
+		"CREATE INDEX IF NOT EXISTS idx_rbac_roles_name ON rbac_roles(name);",
+		"CREATE INDEX IF NOT EXISTS idx_rbac_roles_parent_role_id ON rbac_roles(parent_role_id);",
+		"CREATE INDEX IF NOT EXISTS idx_rbac_roles_permission_ids ON rbac_roles USING GIN(permission_ids);",
+	}
+	
+	for _, indexQuery := range indexes {
+		if _, err := db.ExecContext(ctx, indexQuery); err != nil {
+			return fmt.Errorf("failed to create rbac_roles index: %w", err)
+		}
+	}
+	
+	return nil
+}
+
+// CreateRBACSubjectsTable creates the rbac_subjects table
+func (s DatabaseSchemas) CreateRBACSubjectsTable(ctx context.Context, db *sql.DB) error {
+	createTableQuery := `
+		CREATE TABLE IF NOT EXISTS rbac_subjects (
+			id VARCHAR(255) PRIMARY KEY,
+			type INTEGER NOT NULL,
+			display_name VARCHAR(500) NOT NULL,
+			tenant_id VARCHAR(255) NOT NULL,
+			role_ids JSONB NOT NULL DEFAULT '[]',
+			is_active BOOLEAN NOT NULL DEFAULT TRUE,
+			attributes JSONB DEFAULT '{}',
+			created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+		);
+	`
+	
+	if _, err := db.ExecContext(ctx, createTableQuery); err != nil {
+		return fmt.Errorf("failed to create rbac_subjects table: %w", err)
+	}
+	
+	// Create indexes for performance and tenant isolation
+	indexes := []string{
+		"CREATE INDEX IF NOT EXISTS idx_rbac_subjects_tenant_id ON rbac_subjects(tenant_id);",
+		"CREATE INDEX IF NOT EXISTS idx_rbac_subjects_type ON rbac_subjects(type);",
+		"CREATE INDEX IF NOT EXISTS idx_rbac_subjects_tenant_type ON rbac_subjects(tenant_id, type);",
+		"CREATE INDEX IF NOT EXISTS idx_rbac_subjects_is_active ON rbac_subjects(is_active);",
+		"CREATE INDEX IF NOT EXISTS idx_rbac_subjects_role_ids ON rbac_subjects USING GIN(role_ids);",
+		"CREATE INDEX IF NOT EXISTS idx_rbac_subjects_attributes ON rbac_subjects USING GIN(attributes);",
+	}
+	
+	for _, indexQuery := range indexes {
+		if _, err := db.ExecContext(ctx, indexQuery); err != nil {
+			return fmt.Errorf("failed to create rbac_subjects index: %w", err)
+		}
+	}
+	
+	return nil
+}
+
+// CreateRBACRoleAssignmentsTable creates the rbac_role_assignments table
+func (s DatabaseSchemas) CreateRBACRoleAssignmentsTable(ctx context.Context, db *sql.DB) error {
+	createTableQuery := `
+		CREATE TABLE IF NOT EXISTS rbac_role_assignments (
+			id VARCHAR(255) PRIMARY KEY,
+			subject_id VARCHAR(255) NOT NULL,
+			role_id VARCHAR(255) NOT NULL,
+			tenant_id VARCHAR(255) NOT NULL,
+			expires_at TIMESTAMP WITH TIME ZONE DEFAULT NULL,
+			created_by VARCHAR(255) DEFAULT '',
+			created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+			FOREIGN KEY (subject_id) REFERENCES rbac_subjects(id) ON DELETE CASCADE,
+			FOREIGN KEY (role_id) REFERENCES rbac_roles(id) ON DELETE CASCADE,
+			UNIQUE(subject_id, role_id, tenant_id)
+		);
+	`
+	
+	if _, err := db.ExecContext(ctx, createTableQuery); err != nil {
+		return fmt.Errorf("failed to create rbac_role_assignments table: %w", err)
+	}
+	
+	// Create indexes for performance and tenant isolation
+	indexes := []string{
+		"CREATE INDEX IF NOT EXISTS idx_rbac_assignments_subject_id ON rbac_role_assignments(subject_id);",
+		"CREATE INDEX IF NOT EXISTS idx_rbac_assignments_role_id ON rbac_role_assignments(role_id);",
+		"CREATE INDEX IF NOT EXISTS idx_rbac_assignments_tenant_id ON rbac_role_assignments(tenant_id);",
+		"CREATE INDEX IF NOT EXISTS idx_rbac_assignments_subject_tenant ON rbac_role_assignments(subject_id, tenant_id);",
+		"CREATE INDEX IF NOT EXISTS idx_rbac_assignments_expires_at ON rbac_role_assignments(expires_at);",
+		"CREATE INDEX IF NOT EXISTS idx_rbac_assignments_active ON rbac_role_assignments(subject_id, tenant_id) WHERE expires_at IS NULL OR expires_at > NOW();",
+	}
+	
+	for _, indexQuery := range indexes {
+		if _, err := db.ExecContext(ctx, indexQuery); err != nil {
+			return fmt.Errorf("failed to create rbac_role_assignments index: %w", err)
+		}
+	}
+	
+	return nil
+}
+
 // CreateAllTables creates all necessary database tables and indexes
 func (s DatabaseSchemas) CreateAllTables(ctx context.Context, db *sql.DB) error {
 	// Create tables in dependency order
@@ -391,12 +570,16 @@ func (s DatabaseSchemas) CreateAllTables(ctx context.Context, db *sql.DB) error 
 		return err
 	}
 	
+	if err := s.CreateRBACTables(ctx, db); err != nil {
+		return err
+	}
+	
 	return nil
 }
 
 // DropAllTables drops all tables (for testing or clean reinstall)
 func (s DatabaseSchemas) DropAllTables(ctx context.Context, db *sql.DB) error {
-	// Drop in reverse dependency order
+	// Drop in reverse dependency order (foreign keys need to be dropped first)
 	dropQueries := []string{
 		"DROP MATERIALIZED VIEW IF EXISTS audit_stats;",
 		"DROP TABLE IF EXISTS storage_health;",
@@ -405,6 +588,10 @@ func (s DatabaseSchemas) DropAllTables(ctx context.Context, db *sql.DB) error {
 		"DROP TABLE IF EXISTS configs;",
 		"DROP TABLE IF EXISTS admin_consent_requests;",
 		"DROP TABLE IF EXISTS client_tenants;",
+		"DROP TABLE IF EXISTS rbac_role_assignments;", // Has foreign keys to subjects and roles
+		"DROP TABLE IF EXISTS rbac_subjects;",
+		"DROP TABLE IF EXISTS rbac_roles;", // Has self-reference foreign key
+		"DROP TABLE IF EXISTS rbac_permissions;",
 	}
 	
 	for _, query := range dropQueries {

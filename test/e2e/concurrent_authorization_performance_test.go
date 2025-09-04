@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"github.com/cfgis/cfgms/pkg/testing"
 	"context"
 	"fmt"
 	"runtime"
@@ -140,7 +141,7 @@ func (s *ConcurrentAuthorizationPerformanceSuite) initializeAuthorizationCompone
 	ctx := context.Background()
 
 	// Create real memory-based RBAC manager (no mocking)
-	s.rbacManager = rbac.NewManager()
+	s.rbacManager = testing.SetupTestRBACManager(t)
 	err := s.rbacManager.Initialize(ctx)
 	s.Require().NoError(err)
 
