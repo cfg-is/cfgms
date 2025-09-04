@@ -53,18 +53,19 @@ func NewManagerWithStorage(auditStore interfaces.AuditStore, clientTenantStore i
 		panic("NewManagerWithStorage requires non-nil storage interfaces")
 	}
 	
-	// Create a temporary memory store for compatibility with existing auth engines
-	// TODO: Future optimization - make auth engines work directly with storage interfaces
-	tempStore := memory.NewStore()
-	engine := NewAuthEngine(tempStore, tempStore, tempStore, tempStore)
-	hierarchyEngine := NewHierarchyEngine(tempStore, tempStore)
+	// Epic 6: Create ephemeral memory store (not package-level persistent)
+	// This store exists only for the lifetime of this manager instance
+	// All persistent data flows through global storage interfaces (auditStore, clientTenantStore)
+	ephemeralStore := memory.NewStore()
+	engine := NewAuthEngine(ephemeralStore, ephemeralStore, ephemeralStore, ephemeralStore)
+	hierarchyEngine := NewHierarchyEngine(ephemeralStore, ephemeralStore)
 	
 	// Create audit manager for RBAC operations
 	auditManager := audit.NewManager(auditStore, "rbac")
 	
 	// Create manager instance with pluggable storage
 	manager := &Manager{
-		store:               tempStore, // Keep for compatibility with existing engines
+		store:               ephemeralStore, // Epic 6: Ephemeral store - not persistent
 		auditStore:          auditStore,
 		clientTenantStore:   clientTenantStore,
 		usePluggableStorage: true,
@@ -74,7 +75,7 @@ func NewManagerWithStorage(auditStore interfaces.AuditStore, clientTenantStore i
 	}
 	
 	// Initialize advanced components
-	advancedEngine := NewAdvancedAuthEngine(tempStore, tempStore, tempStore, tempStore)
+	advancedEngine := NewAdvancedAuthEngine(ephemeralStore, ephemeralStore, ephemeralStore, ephemeralStore)
 	delegationManager := NewDelegationManager(manager) // Pass manager for RBAC operations
 	auditLogger := NewAuditLogger()
 	templateManager := NewTemplateManager(manager) // Pass manager for template operations

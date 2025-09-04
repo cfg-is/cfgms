@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"github.com/cfgis/cfgms/pkg/testing"
 	"context"
 	"fmt"
 	"sync"
@@ -61,7 +62,7 @@ func NewSecurityStateConsistencyTestFramework(t *testing.T) *SecurityStateConsis
 	env := testutil.NewTestEnv(t)
 	
 	// Create standard components
-	rbacManager := rbac.NewManager()
+	rbacManager := testing.SetupTestRBACManager(t)
 	riskEngine := risk.NewRiskAssessmentEngine()
 	jitManager := jit.NewJITAccessManager(rbacManager, nil)
 	
