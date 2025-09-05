@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -15,14 +16,37 @@ import (
 	_ "github.com/lib/pq" // PostgreSQL driver
 )
 
-// Test database configuration - requires PostgreSQL instance for full tests
-var testDBConfig = map[string]interface{}{
-	"host":     "localhost",
-	"port":     5432,
-	"database": "cfgms_test",
-	"username": "cfgms_test",
-	"password": "cfgms_test",
-	"sslmode":  "disable",
+// buildTestDSN creates a DSN string from test configuration
+func buildTestDSN() string {
+	config := getTestConfig()
+	return fmt.Sprintf("host=%s port=%d dbname=%s user=%s password=%s sslmode=%s",
+		config["host"], config["port"], config["database"],
+		config["username"], config["password"], config["sslmode"])
+}
+
+// getTestConfig returns test database configuration using environment variables or defaults
+func getTestConfig() map[string]interface{} {
+	password := os.Getenv("CFGMS_TEST_DB_PASSWORD")
+	if password == "" {
+		password = "cfgms_test" // fallback for non-Docker tests
+	}
+	
+	port := 5432
+	if portStr := os.Getenv("CFGMS_TEST_DB_PORT"); portStr != "" {
+		if p, err := strconv.Atoi(portStr); err == nil {
+			port = p
+		}
+	}
+	
+	
+	return map[string]interface{}{
+		"host":     "localhost",
+		"port":     port,
+		"database": "cfgms_test",
+		"username": "cfgms_test",
+		"password": password,
+		"sslmode":  "disable",
+	}
 }
 
 // getTestDB returns a test database connection or skips if not available
@@ -31,10 +55,14 @@ func getTestDB(t *testing.T) *sql.DB {
 		t.Skip("Skipping database tests in short mode")
 	}
 	
+	// Get fresh config each time to pick up environment variables
+	testDBConfig := getTestConfig()
+	
 	// Check if test database is available
 	dsn := fmt.Sprintf("host=%s port=%d dbname=%s user=%s password=%s sslmode=%s",
 		testDBConfig["host"], testDBConfig["port"], testDBConfig["database"],
 		testDBConfig["username"], testDBConfig["password"], testDBConfig["sslmode"])
+	
 	
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
@@ -100,7 +128,7 @@ func TestDatabaseProvider_CreateClientTenantStore(t *testing.T) {
 	provider := &DatabaseProvider{}
 	
 	// Test creating client tenant store
-	store, err := provider.CreateClientTenantStore(testDBConfig)
+	store, err := provider.CreateClientTenantStore(getTestConfig())
 	require.NoError(t, err)
 	require.NotNil(t, store)
 	
@@ -124,7 +152,7 @@ func TestDatabaseProvider_CreateConfigStore(t *testing.T) {
 	provider := &DatabaseProvider{}
 	
 	// Test creating config store
-	store, err := provider.CreateConfigStore(testDBConfig)
+	store, err := provider.CreateConfigStore(getTestConfig())
 	require.NoError(t, err)
 	require.NotNil(t, store)
 	
@@ -148,7 +176,7 @@ func TestDatabaseProvider_CreateAuditStore(t *testing.T) {
 	provider := &DatabaseProvider{}
 	
 	// Test creating audit store
-	store, err := provider.CreateAuditStore(testDBConfig)
+	store, err := provider.CreateAuditStore(getTestConfig())
 	require.NoError(t, err)
 	require.NotNil(t, store)
 	
@@ -258,7 +286,7 @@ func TestDatabaseSchemas_CreateTables(t *testing.T) {
 	
 	// Verify materialized view exists
 	var viewExists bool
-	viewQuery := `SELECT EXISTS (SELECT 1 FROM information_schema.views WHERE table_name = 'audit_stats')`
+	viewQuery := `SELECT EXISTS (SELECT 1 FROM pg_matviews WHERE matviewname = 'audit_stats')`
 	err = db.QueryRowContext(ctx, viewQuery).Scan(&viewExists)
 	require.NoError(t, err)
 	assert.True(t, viewExists, "Materialized view audit_stats should exist")
@@ -272,7 +300,7 @@ func TestDatabaseClientTenantStore_CRUD(t *testing.T) {
 	db := setupTestDatabase(t)
 	defer func() { _ = db.Close() }()
 	
-	store, err := NewDatabaseClientTenantStore("", testDBConfig)
+	store, err := NewDatabaseClientTenantStore(buildTestDSN(), getTestConfig())
 	require.NoError(t, err)
 	defer func() { _ = store.Close() }()
 	
@@ -346,7 +374,7 @@ func TestDatabaseClientTenantStore_AdminConsent(t *testing.T) {
 	db := setupTestDatabase(t)
 	defer func() { _ = db.Close() }()
 	
-	store, err := NewDatabaseClientTenantStore("", testDBConfig)
+	store, err := NewDatabaseClientTenantStore(buildTestDSN(), getTestConfig())
 	require.NoError(t, err)
 	defer func() { _ = store.Close() }()
 	
@@ -404,7 +432,7 @@ func TestDatabaseProvider_Integration(t *testing.T) {
 	assert.NotNil(t, provider)
 	
 	// Test creating storage manager
-	storageManager, err := interfaces.CreateAllStoresFromConfig("database", testDBConfig)
+	storageManager, err := interfaces.CreateAllStoresFromConfig("database", getTestConfig())
 	require.NoError(t, err)
 	require.NotNil(t, storageManager)
 	
@@ -480,7 +508,7 @@ func BenchmarkDatabaseProvider_CreateStores(b *testing.B) {
 	
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		store, err := provider.CreateClientTenantStore(testDBConfig)
+		store, err := provider.CreateClientTenantStore(getTestConfig())
 		if err == nil && store != nil {
 			if dbStore, ok := store.(*DatabaseClientTenantStore); ok {
 				_ = dbStore.Close()

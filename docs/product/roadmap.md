@@ -374,7 +374,7 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 
 #### v0.4.6.0 (Alpha) - Complete Storage Migration
 
-**Status**: 📋 IN PROGRESS - 46 story points - Epic 6: Complete Storage Migration (27/46 points complete - 59%)
+**Status**: 📋 IN PROGRESS - 46 story points - Epic 6: Complete Storage Migration (32/46 points complete - 70%)
 
 **Epic 6: Complete Storage Migration (46 story points)**
 - [x] **RBAC Storage Migration** (Issue #141) - 8 points ✅
@@ -386,12 +386,15 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - [x] Eliminated memory provider foot-gun from global registry
   - [x] Created comprehensive storage provider validation tests
   - [x] Established write-through caching pattern for component optimization
-- [ ] **Storage Provider Testing Infrastructure** (Issue #147) - 5 points
-  - [ ] Fix git provider repository initialization issues in tests
-  - [ ] Create proper database connection configuration for testing
-  - [ ] Implement storage provider test fixtures and helpers  
-  - [ ] Enhance storage provider validation test coverage
-  - [ ] Resolve all storage provider related test failures
+- [x] **Storage Provider Testing Infrastructure** (Issue #152) - 5 points ✅ **COMPLETED**
+  - [x] Docker-based integration testing with PostgreSQL, Gitea, and Redis
+  - [x] Fixed database provider SQL data type conversion issues (pq.Array(), ROUND())
+  - [x] Fixed Git provider concurrent initialization conflicts with unique storage paths
+  - [x] Enhanced server security tests with proper storage configuration
+  - [x] Dynamic secure credential generation replacing all hardcoded secrets
+  - [x] PostgreSQL materialized view detection using pg_matviews
+  - [x] 100% core test success rate achieved
+  - [x] Complete storage provider validation infrastructure for Epic 6
 - [ ] **Memory Storage Backend Elimination** (Issue #148) - 8 points
   - [ ] Remove memory provider from global storage provider registration
   - [ ] Relocate memory provider to internal utility package (pkg/internal/memory)

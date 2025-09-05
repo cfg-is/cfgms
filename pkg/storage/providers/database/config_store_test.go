@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+
 func TestDatabaseConfigStore_CRUD(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping database integration tests in short mode")
@@ -20,7 +21,7 @@ func TestDatabaseConfigStore_CRUD(t *testing.T) {
 	db := setupTestDatabase(t)
 	defer func() { _ = db.Close() }()
 	
-	store, err := NewDatabaseConfigStore("", testDBConfig)
+	store, err := NewDatabaseConfigStore(buildTestDSN(), getTestConfig())
 	require.NoError(t, err)
 	defer func() { _ = store.Close() }()
 	
@@ -100,7 +101,7 @@ func TestDatabaseConfigStore_ListConfigs(t *testing.T) {
 	db := setupTestDatabase(t)
 	defer func() { _ = db.Close() }()
 	
-	store, err := NewDatabaseConfigStore("", testDBConfig)
+	store, err := NewDatabaseConfigStore(buildTestDSN(), getTestConfig())
 	require.NoError(t, err)
 	defer func() { _ = store.Close() }()
 	
@@ -220,7 +221,7 @@ func TestDatabaseConfigStore_VersionHistory(t *testing.T) {
 	db := setupTestDatabase(t)
 	defer func() { _ = db.Close() }()
 	
-	store, err := NewDatabaseConfigStore("", testDBConfig)
+	store, err := NewDatabaseConfigStore(buildTestDSN(), getTestConfig())
 	require.NoError(t, err)
 	defer func() { _ = store.Close() }()
 	
@@ -290,7 +291,7 @@ func TestDatabaseConfigStore_BatchOperations(t *testing.T) {
 	db := setupTestDatabase(t)
 	defer func() { _ = db.Close() }()
 	
-	store, err := NewDatabaseConfigStore("", testDBConfig)
+	store, err := NewDatabaseConfigStore(buildTestDSN(), getTestConfig())
 	require.NoError(t, err)
 	defer func() { _ = store.Close() }()
 	
@@ -361,7 +362,7 @@ func TestDatabaseConfigStore_Statistics(t *testing.T) {
 	db := setupTestDatabase(t)
 	defer func() { _ = db.Close() }()
 	
-	store, err := NewDatabaseConfigStore("", testDBConfig)
+	store, err := NewDatabaseConfigStore(buildTestDSN(), getTestConfig())
 	require.NoError(t, err)
 	defer func() { _ = store.Close() }()
 	
@@ -435,7 +436,7 @@ func TestDatabaseConfigStore_Validation(t *testing.T) {
 	db := setupTestDatabase(t)
 	defer func() { _ = db.Close() }()
 	
-	store, err := NewDatabaseConfigStore("", testDBConfig)
+	store, err := NewDatabaseConfigStore(buildTestDSN(), getTestConfig())
 	require.NoError(t, err)
 	defer func() { _ = store.Close() }()
 	
@@ -510,7 +511,7 @@ func TestDatabaseConfigStore_ConcurrentAccess(t *testing.T) {
 	db := setupTestDatabase(t)
 	defer func() { _ = db.Close() }()
 	
-	store, err := NewDatabaseConfigStore("", testDBConfig)
+	store, err := NewDatabaseConfigStore(buildTestDSN(), getTestConfig())
 	require.NoError(t, err)
 	defer func() { _ = store.Close() }()
 	
@@ -567,8 +568,8 @@ func setupTestDatabaseForBench(tb testingTB) *sql.DB {
 	
 	// Check if test database is available
 	dsn := fmt.Sprintf("host=%s port=%d dbname=%s user=%s password=%s sslmode=%s",
-		testDBConfig["host"], testDBConfig["port"], testDBConfig["database"],
-		testDBConfig["username"], testDBConfig["password"], testDBConfig["sslmode"])
+		getTestConfig()["host"], getTestConfig()["port"], getTestConfig()["database"],
+		getTestConfig()["username"], getTestConfig()["password"], getTestConfig()["sslmode"])
 	
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
@@ -600,7 +601,7 @@ func BenchmarkDatabaseConfigStore_StoreConfig(b *testing.B) {
 	db := setupTestDatabaseForBench(b)
 	defer func() { _ = db.Close() }()
 	
-	store, err := NewDatabaseConfigStore("", testDBConfig)
+	store, err := NewDatabaseConfigStore(buildTestDSN(), getTestConfig())
 	require.NoError(b, err)
 	defer func() { _ = store.Close() }()
 	
@@ -634,7 +635,7 @@ func BenchmarkDatabaseConfigStore_GetConfig(b *testing.B) {
 	db := setupTestDatabaseForBench(b)
 	defer func() { _ = db.Close() }()
 	
-	store, err := NewDatabaseConfigStore("", testDBConfig)
+	store, err := NewDatabaseConfigStore(buildTestDSN(), getTestConfig())
 	require.NoError(b, err)
 	defer func() { _ = store.Close() }()
 	
@@ -673,7 +674,7 @@ func BenchmarkDatabaseConfigStore_ListConfigs(b *testing.B) {
 	db := setupTestDatabaseForBench(b)
 	defer func() { _ = db.Close() }()
 	
-	store, err := NewDatabaseConfigStore("", testDBConfig)
+	store, err := NewDatabaseConfigStore(buildTestDSN(), getTestConfig())
 	require.NoError(b, err)
 	defer func() { _ = store.Close() }()
 	

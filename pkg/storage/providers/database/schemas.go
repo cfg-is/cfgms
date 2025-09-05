@@ -270,8 +270,9 @@ func (s DatabaseSchemas) CreateAuditEntriesTable(ctx context.Context, db *sql.DB
 		"CREATE INDEX IF NOT EXISTS idx_audit_entries_source ON audit_entries(source);",
 		"CREATE INDEX IF NOT EXISTS idx_audit_entries_tenant_event_timestamp ON audit_entries(tenant_id, event_type, timestamp);",
 		
-		// Time-based partitioning support (for future sharding)
-		"CREATE INDEX IF NOT EXISTS idx_audit_entries_timestamp_hash ON audit_entries(date_trunc('day', timestamp), tenant_id);",
+		// Time-based partitioning support (for future sharding) - temporarily disabled
+		// Complex date functions in indexes require careful IMMUTABLE handling
+		// "CREATE INDEX IF NOT EXISTS idx_audit_entries_daily_partition ON audit_entries(tenant_id, date_trunc('day', timestamp));",
 	}
 	
 	for _, indexQuery := range indexes {
@@ -527,7 +528,9 @@ func (s DatabaseSchemas) CreateRBACRoleAssignmentsTable(ctx context.Context, db 
 		"CREATE INDEX IF NOT EXISTS idx_rbac_assignments_tenant_id ON rbac_role_assignments(tenant_id);",
 		"CREATE INDEX IF NOT EXISTS idx_rbac_assignments_subject_tenant ON rbac_role_assignments(subject_id, tenant_id);",
 		"CREATE INDEX IF NOT EXISTS idx_rbac_assignments_expires_at ON rbac_role_assignments(expires_at);",
-		"CREATE INDEX IF NOT EXISTS idx_rbac_assignments_active ON rbac_role_assignments(subject_id, tenant_id) WHERE expires_at IS NULL OR expires_at > NOW();",
+		// Active assignments index - disabled due to NOW() function not being IMMUTABLE in WHERE clause
+		// "CREATE INDEX IF NOT EXISTS idx_rbac_assignments_active ON rbac_role_assignments(subject_id, tenant_id) WHERE expires_at IS NULL OR expires_at > NOW();",
+		"CREATE INDEX IF NOT EXISTS idx_rbac_assignments_expires_null ON rbac_role_assignments(subject_id, tenant_id) WHERE expires_at IS NULL;",
 	}
 	
 	for _, indexQuery := range indexes {

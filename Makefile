@@ -1041,6 +1041,122 @@ prepare-team-workflow:
 	@echo ""
 	@echo "✅ Foundation prepared for team expansion"
 
+# Docker-based Integration Testing (Story #152: Storage Provider Testing Infrastructure)
+.PHONY: test-integration-setup test-integration-cleanup test-with-real-storage test-integration-status
+.PHONY: test-integration-db test-integration-git test-integration-redis
+
+# Set up Docker test environment with secure credentials
+test-integration-setup:
+	@echo "🐳 Setting up CFGMS Docker test environment..."
+	@echo "=============================================="
+	@./scripts/generate-test-credentials.sh
+	@echo "Starting PostgreSQL and Gitea test services..."
+	docker-compose -f docker-compose.test.yml -f docker-compose.test.override.yml up -d postgres-test git-server-test
+	@echo ""
+	@echo "⏳ Waiting for services to be ready..."
+	@sleep 5  # Brief pause before health checks
+	@./scripts/wait-for-services.sh
+	@echo ""
+	@echo "🔧 Setting up test repositories..."
+	@docker-compose -f docker-compose.test.yml exec -T git-server-test /docker-entrypoint-init.d/setup-test-repos.sh || { \
+		echo "📁 Setting up repositories manually..."; \
+		sleep 10; \
+		curl -X POST -u "cfgms_test:$$CFGMS_TEST_GITEA_PASSWORD" \
+			-H "Content-Type: application/json" \
+			-d '{"name":"cfgms-test-global","auto_init":true}' \
+			http://localhost:3001/api/v1/user/repos || true; \
+	}
+	@echo ""
+	@echo "✅ Docker test environment ready!"
+	@echo ""
+	@echo "📋 Service Information:"
+	@echo "   PostgreSQL: localhost:5433 (user: cfgms_test, db: cfgms_test)"
+	@echo "   Gitea:      http://localhost:3001 (user: cfgms_test)"
+	@echo ""
+
+# Clean up Docker test environment and generated credentials
+test-integration-cleanup:
+	@echo "🧹 Cleaning up CFGMS Docker test environment..."
+	@echo "================================================"
+	docker-compose -f docker-compose.test.yml -f docker-compose.test.override.yml down -v --remove-orphans 2>/dev/null || \
+	docker-compose -f docker-compose.test.yml down -v --remove-orphans
+	@echo "🔐 Removing generated credentials..."
+	@rm -f .env.test docker-compose.test.override.yml
+	@echo "✅ Docker test environment and credentials cleaned up"
+
+# Check status of Docker test services
+test-integration-status:
+	@echo "📊 CFGMS Docker Test Services Status"
+	@echo "===================================="
+	@docker-compose -f docker-compose.test.yml ps
+	@echo ""
+	@echo "🔍 Service Health Checks:"
+	@./scripts/wait-for-services.sh || echo "⚠️  Some services may not be ready"
+
+# Run integration tests against real storage providers
+test-with-real-storage: 
+	@echo "🧪 Running CFGMS Integration Tests with Real Storage"
+	@echo "=================================================="
+	@echo "Testing with Docker-based PostgreSQL and Gitea..."
+	@echo ""
+	@./scripts/wait-for-services.sh
+	@echo ""
+	@echo "🔬 Running storage provider validation tests..."
+	@if [ -f .env.test ]; then \
+		echo "Using generated credentials from .env.test"; \
+		set -a && . ./.env.test && set +a && \
+		go test -v -race -cover -tags=integration ./pkg/testing/storage/... ./features/controller/server/...; \
+	else \
+		echo "⚠️  .env.test not found. Run: make test-integration-setup"; \
+		exit 1; \
+	fi
+	@echo ""
+	@echo "✅ Integration tests completed successfully!"
+
+# Test database provider specifically
+test-integration-db:
+	@echo "📊 Testing Database Storage Provider"
+	@echo "==================================="
+	@./scripts/wait-for-services.sh
+	CFGMS_TEST_DB_HOST=localhost \
+	CFGMS_TEST_DB_PORT=5433 \
+	CFGMS_TEST_DB_PASSWORD=cfgms_test_password \
+	go test -v -tags=integration ./pkg/storage/providers/database/...
+
+# Test git provider specifically  
+test-integration-git:
+	@echo "📁 Testing Git Storage Provider"
+	@echo "==============================="
+	@./scripts/wait-for-services.sh
+	CFGMS_TEST_GITEA_URL=http://localhost:3001 \
+	CFGMS_TEST_GITEA_USER=cfgms_test \
+	CFGMS_TEST_GITEA_PASSWORD=cfgms_test_password \
+	go test -v -tags=integration ./pkg/storage/providers/git/...
+
+# Future: Test Redis provider (when implemented)
+test-integration-redis:
+	@echo "🔴 Testing Redis Provider (Future)"
+	@echo "================================="
+	@echo "Redis testing will be implemented in future Epic"
+	@echo "Current profile: docker-compose --profile future"
+
+# Complete integration testing workflow
+test-integration-complete: test-integration-setup test-with-real-storage test-integration-cleanup
+	@echo ""
+	@echo "🎉 Complete integration testing workflow finished!"
+	@echo "   - Docker services started"
+	@echo "   - Real storage provider tests executed"
+	@echo "   - Environment cleaned up"
+
+# Combined testing with local unit tests and Docker integration tests
+test-comprehensive: test test-integration-complete
+	@echo ""
+	@echo "🚀 Comprehensive Testing Complete!"
+	@echo "================================="
+	@echo "   ✅ Unit tests (local, fast)"
+	@echo "   ✅ Integration tests (Docker, real storage)"
+	@echo "   ✅ Environment cleanup"
+
 clean:
 	rm -rf bin/
 	rm -rf metrics/

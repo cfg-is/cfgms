@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	"github.com/lib/pq"
 )
 
 // serializeMetadata converts a metadata map to JSON bytes
@@ -287,14 +288,14 @@ func buildConfigFilterQuery(filter *interfaces.ConfigFilter, args []interface{})
 	if len(filter.Names) > 0 {
 		argCount++
 		conditions = append(conditions, fmt.Sprintf("name = ANY($%d)", argCount))
-		args = append(args, filter.Names)
+		args = append(args, pq.Array(filter.Names))
 	}
 	
 	// Tags filter
 	if len(filter.Tags) > 0 {
 		argCount++
 		conditions = append(conditions, fmt.Sprintf("tags @> $%d", argCount))
-		args = append(args, filter.Tags)
+		args = append(args, pq.Array(filter.Tags))
 	}
 	
 	// Created by filter
