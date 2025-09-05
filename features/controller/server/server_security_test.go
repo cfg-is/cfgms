@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -20,7 +21,7 @@ import (
 
 // Security-focused tests for the controller server
 
-// Epic 6: Helper function to create storage configuration for all tests
+// Epic 6: Helper function to create storage configuration for all tests using Docker fixtures
 func createTestStorageConfig(tempDir, suffix string) *config.StorageConfig {
 	return &config.StorageConfig{
 		Provider: "git",
@@ -29,6 +30,37 @@ func createTestStorageConfig(tempDir, suffix string) *config.StorageConfig {
 			"branch":          "main",
 			"auto_init":       true,
 		},
+	}
+}
+
+// createDockerTestStorageConfig creates storage configs for Docker-based testing
+func createDockerTestStorageConfig(provider string) *config.StorageConfig {
+	switch provider {
+	case "git":
+		return &config.StorageConfig{
+			Provider: "git",
+			Config: map[string]interface{}{
+				"repository_url": os.Getenv("CFGMS_TEST_GITEA_URL") + "/cfgms_test/cfgms-test-global.git",
+				"branch":         "main",
+				"auto_init":      true,
+				"username":       os.Getenv("CFGMS_TEST_GITEA_USER"),
+				"password":       os.Getenv("CFGMS_TEST_GITEA_PASSWORD"),
+			},
+		}
+	case "database":
+		return &config.StorageConfig{
+			Provider: "database",
+			Config: map[string]interface{}{
+				"host":     os.Getenv("CFGMS_TEST_DB_HOST"),
+				"port":     5433,
+				"database": "cfgms_test",
+				"username": "cfgms_test",
+				"password": os.Getenv("CFGMS_TEST_DB_PASSWORD"),
+				"sslmode":  "disable",
+			},
+		}
+	default:
+		return createTestStorageConfig(os.TempDir(), provider)
 	}
 }
 
@@ -180,22 +212,41 @@ func TestServer_StorageProviderValidation(t *testing.T) {
 			}
 
 			t.Run("provider_"+providerInfo.Name, func(t *testing.T) {
+				var storageConfig *config.StorageConfig
+				
+				// Use Docker test configuration if available, otherwise fall back to local test
+				if isDockerTestEnvironment() {
+					storageConfig = createDockerTestStorageConfig(providerInfo.Name)
+					t.Logf("Using Docker test configuration for provider '%s'", providerInfo.Name)
+				} else {
+					// For local testing, use appropriate configuration per provider
+					switch providerInfo.Name {
+					case "database":
+						// Skip database provider if no Docker environment
+						t.Skipf("Database provider requires Docker environment - run 'make test-integration-setup'")
+						return
+					default:
+						// Use git or other local providers
+						storageConfig = createTestStorageConfig(tempDir, providerInfo.Name)
+					}
+				}
+
 				config := &config.Config{
 					ListenAddr: "127.0.0.1:0",
 					Certificate: &config.CertificateConfig{
 						EnableCertManagement: false,
 					},
-					Storage: &config.StorageConfig{
-						Provider: providerInfo.Name,
-						Config: map[string]interface{}{
-							"repository_path": tempDir + "/" + providerInfo.Name + "-test",
-							"branch":          "main",
-							"auto_init":       true,
-						},
-					},
+					Storage: storageConfig,
 				}
 
 				server, err := New(config, logger)
+				if providerInfo.Name == "database" && !isDockerTestEnvironment() {
+					// Database provider should fail gracefully without proper config
+					assert.Error(t, err, "Database provider should fail without proper configuration")
+					assert.Contains(t, err.Error(), "password", "Error should mention password requirement")
+					return
+				}
+				
 				assert.NoError(t, err, "Valid storage provider '%s' should not cause server creation to fail", providerInfo.Name)
 				assert.NotNil(t, server, "Server should be created with valid provider '%s'", providerInfo.Name)
 				
@@ -550,15 +601,6 @@ func TestServer_ConcurrentSecurity_And_RaceConditions(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = os.RemoveAll(tempDir) }()
 
-	config := &config.Config{
-		ListenAddr: "127.0.0.1:0",
-		Certificate: &config.CertificateConfig{
-			EnableCertManagement: false,
-		},
-		// Epic 6: Storage configuration required for all server creation
-		Storage: createTestStorageConfig(tempDir, "concurrent"),
-	}
-
 	const numConcurrent = 10
 
 	// Test concurrent server creation (should be thread-safe)
@@ -566,14 +608,24 @@ func TestServer_ConcurrentSecurity_And_RaceConditions(t *testing.T) {
 	errors := make(chan error, numConcurrent)
 
 	for i := 0; i < numConcurrent; i++ {
-		go func() {
-			server, err := New(config, logger)
+		go func(index int) {
+			// Each goroutine gets its own unique storage configuration to avoid Git conflicts
+			uniqueConfig := &config.Config{
+				ListenAddr: "127.0.0.1:0",
+				Certificate: &config.CertificateConfig{
+					EnableCertManagement: false,
+				},
+				// Epic 6: Storage configuration required for all server creation
+				// Use unique storage path per goroutine to prevent Git repository conflicts
+				Storage: createTestStorageConfig(tempDir, fmt.Sprintf("concurrent-%d", index)),
+			}
+			server, err := New(uniqueConfig, logger)
 			if err != nil {
 				errors <- err
 			} else {
 				results <- server
 			}
-		}()
+		}(i)
 	}
 
 	// Collect results
@@ -601,11 +653,18 @@ func TestServer_ConcurrentSecurity_And_RaceConditions(t *testing.T) {
 func TestServer_RBAC_SecurityIntegration(t *testing.T) {
 	logger := logging.NewNoopLogger()
 
+	// Create temporary directory for storage
+	tempDir, err := os.MkdirTemp("", "rbac_test")
+	require.NoError(t, err)
+	defer func() { _ = os.RemoveAll(tempDir) }()
+
 	config := &config.Config{
 		ListenAddr: "127.0.0.1:0",
 		Certificate: &config.CertificateConfig{
 			EnableCertManagement: false,
 		},
+		// Epic 6: Storage configuration required for server creation
+		Storage: createTestStorageConfig(tempDir, "rbac"),
 	}
 
 	server, err := New(config, logger)
@@ -658,11 +717,18 @@ func TestServer_NetworkSecurity_And_Binding(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Create temporary directory for storage
+			tempDir, err := os.MkdirTemp("", "network_test")
+			require.NoError(t, err)
+			defer func() { _ = os.RemoveAll(tempDir) }()
+			
 			config := &config.Config{
 				ListenAddr: tt.listenAddr,
 				Certificate: &config.CertificateConfig{
 					EnableCertManagement: false,
 				},
+				// Epic 6: Storage configuration required for server creation
+				Storage: createTestStorageConfig(tempDir, "network"),
 			}
 
 			server, err := New(config, logger)
@@ -755,6 +821,14 @@ func TestServer_CertificateSecurityValidation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Create temporary directory for storage
+			storageDir, err := os.MkdirTemp("", "cert_test")
+			require.NoError(t, err)
+			defer func() { _ = os.RemoveAll(storageDir) }()
+			
+			// Add storage configuration to test config
+			tt.config.Storage = createTestStorageConfig(storageDir, "cert")
+			
 			server, err := New(tt.config, logger)
 			require.NoError(t, err)
 			require.NotNil(t, server)
@@ -793,6 +867,8 @@ func TestServer_EnvironmentSecurityIsolation(t *testing.T) {
 				Organization: "Server1 Org",
 			},
 		},
+		// Epic 6: Storage configuration required for server creation
+		Storage: createTestStorageConfig(tempDir1, "env1"),
 	}
 
 	config2 := &config.Config{
@@ -808,6 +884,8 @@ func TestServer_EnvironmentSecurityIsolation(t *testing.T) {
 				Organization: "Server2 Org",
 			},
 		},
+		// Epic 6: Storage configuration required for server creation
+		Storage: createTestStorageConfig(tempDir2, "env2"),
 	}
 
 	server1, err := New(config1, logger)
@@ -845,6 +923,8 @@ func TestServer_DataDirectorySecurity(t *testing.T) {
 		Certificate: &config.CertificateConfig{
 			EnableCertManagement: false,
 		},
+		// Epic 6: Storage configuration required for server creation
+		Storage: createTestStorageConfig(tempDir, "data"),
 	}
 
 	server, err := New(config, logger)
@@ -853,4 +933,9 @@ func TestServer_DataDirectorySecurity(t *testing.T) {
 
 	// Verify data directory configuration is preserved
 	assert.Equal(t, tempDir, server.cfg.DataDir)
+}
+
+// Check if we're running in Docker integration test environment
+func isDockerTestEnvironment() bool {
+	return os.Getenv("CFGMS_TEST_DB_PASSWORD") != "" && os.Getenv("CFGMS_TEST_GITEA_URL") != ""
 }

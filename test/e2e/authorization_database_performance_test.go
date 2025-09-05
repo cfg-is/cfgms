@@ -1,7 +1,6 @@
 package e2e
 
 import (
-	"github.com/cfgis/cfgms/pkg/testing"
 	"context"
 	"fmt"
 	"runtime"

@@ -629,8 +629,8 @@ func (s *DatabaseConfigStore) GetConfigStats(ctx context.Context) (*interfaces.C
 	overallQuery := `
 		SELECT 
 			COUNT(*) as total_configs,
-			SUM(LENGTH(data)) as total_size,
-			AVG(LENGTH(data)) as average_size,
+			COALESCE(SUM(LENGTH(data)), 0) as total_size,
+			COALESCE(ROUND(AVG(LENGTH(data))), 0) as average_size,
 			MIN(created_at) as oldest_config,
 			MAX(updated_at) as newest_config
 		FROM configs
