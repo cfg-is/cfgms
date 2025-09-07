@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	testutil "github.com/cfgis/cfgms/pkg/testing"
 	"context"
 	"fmt"
 	"runtime"
@@ -543,7 +544,7 @@ func (s *AuditLoadTestSuite) TestComplianceReportAccuracyUnderLoad() {
 
 func (s *AuditLoadTestSuite) createTestRBACManager(auditLogger *rbac.AuditLogger) *rbac.Manager {
 	// Create a real RBAC manager with audit logging
-	manager := testing.SetupTestRBACManager(t)
+	manager := testutil.SetupTestRBACManager(s.T())
 	
 	// In a real implementation, we would set the audit logger
 	// manager.SetAuditLogger(auditLogger)

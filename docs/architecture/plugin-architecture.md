@@ -84,38 +84,38 @@ type StorageProvider interface {
 ### Step 2: Provider Implementation (One Provider = All Storage Types)
 
 ```go
-// pkg/storage/providers/memory/plugin.go
-package memory
+// pkg/storage/providers/database/plugin.go
+package database
 
 import "your.domain/cfgms/pkg/storage/interfaces"
 
-type MemoryProvider struct{}
+type DatabaseProvider struct{}
 
-func (p *MemoryProvider) Name() string { return "memory" }
+func (p *DatabaseProvider) Name() string { return "database" }
 
-func (p *MemoryProvider) Available() (bool, error) {
-    return true, nil // Memory is always available
+func (p *DatabaseProvider) Available() (bool, error) {
+    return true, nil // Check database connectivity
 }
 
-func (p *MemoryProvider) CreateClientTenantStore(config map[string]interface{}) (interfaces.ClientTenantStore, error) {
-    return NewMemoryClientTenantStore(), nil
+func (p *DatabaseProvider) CreateClientTenantStore(config map[string]interface{}) (interfaces.ClientTenantStore, error) {
+    return NewDatabaseClientTenantStore(), nil
 }
 
-func (p *MemoryProvider) CreateConfigStore(config map[string]interface{}) (interfaces.ConfigStore, error) {
-    return NewMemoryConfigStore(), nil
+func (p *DatabaseProvider) CreateConfigStore(config map[string]interface{}) (interfaces.ConfigStore, error) {
+    return NewDatabaseConfigStore(), nil
 }
 
-func (p *MemoryProvider) CreateAuditStore(config map[string]interface{}) (interfaces.AuditStore, error) {
-    return NewMemoryAuditStore(), nil
+func (p *DatabaseProvider) CreateAuditStore(config map[string]interface{}) (interfaces.AuditStore, error) {
+    return NewDatabaseAuditStore(), nil
 }
 
-func (p *MemoryProvider) Description() string {
+func (p *DatabaseProvider) Description() string {
     return "In-memory storage for development and testing"
 }
 
 // Salt-style auto-registration
 func init() {
-    interfaces.RegisterStorageProvider(&MemoryProvider{})
+    interfaces.RegisterStorageProvider(&DatabaseProvider{})
 }
 ```
 
@@ -127,8 +127,8 @@ package auth
 
 import (
     "your.domain/cfgms/pkg/storage/interfaces"
-    // ❌ NEVER import providers like:
-    // "your.domain/cfgms/pkg/storage/providers/memory"
+    // ❌ NEVER import specific providers like:
+    // "your.domain/cfgms/pkg/storage/providers/database"
 )
 
 type AdminConsentFlow struct {
@@ -297,7 +297,7 @@ func TestAdminConsentFlow(t *testing.T) {
 func NewBackend(backendType BackendType, config *Config, logger Logger) (Backend, error) {
     switch backendType {
     case BackendMemory:
-        return NewMemoryBackend(config, logger)
+        return NewDatabaseBackend(config, logger)
     case BackendFile:
         return NewFileBackend(config, logger)
     // ...

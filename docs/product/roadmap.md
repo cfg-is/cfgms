@@ -381,29 +381,21 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 - [x] **Audit & Compliance Storage Migration** (Issue #142) - 8 points ✅
 - [x] **Configuration & Rollback Storage Migration** (Issue #143) - 6 points ✅ COMPLETED
 - [x] **Session & Runtime Storage Migration** (Issue #144) - 5 points ✅ COMPLETED
-  - [x] Implemented RuntimeStore interface for Epic 6 compliance
-  - [x] Migrated session management to use global storage provider
+  - [x] Implemented RuntimeStore interface and migrated session management
   - [x] Eliminated memory provider foot-gun from global registry
-  - [x] Created comprehensive storage provider validation tests
   - [x] Established write-through caching pattern for component optimization
 - [x] **Storage Provider Testing Infrastructure** (Issue #152) - 5 points ✅ **COMPLETED**
   - [x] Docker-based integration testing with PostgreSQL, Gitea, and Redis
-  - [x] Fixed database provider SQL data type conversion issues (pq.Array(), ROUND())
-  - [x] Fixed Git provider concurrent initialization conflicts with unique storage paths
-  - [x] Enhanced server security tests with proper storage configuration
-  - [x] Dynamic secure credential generation replacing all hardcoded secrets
-  - [x] PostgreSQL materialized view detection using pg_matviews
-  - [x] 100% core test success rate achieved
+  - [x] Fixed database and Git provider issues, achieved 100% core test success rate
   - [x] Complete storage provider validation infrastructure for Epic 6
-- [ ] **Memory Storage Backend Elimination** (Issue #148) - 8 points
-  - [ ] Remove memory provider from global storage provider registration
-  - [ ] Relocate memory provider to internal utility package (pkg/internal/memory)
-  - [ ] Audit all modules/features using memory storage and migrate to write-through caching pattern
-  - [ ] Create standardized component memory optimization pattern documentation
-  - [ ] Implement example write-through caching in 2-3 key components (session, RBAC, config)
-  - [ ] Remove all memory provider imports from global storage interfaces
-  - [ ] Update CLAUDE.md with memory provider elimination completion
-  - [ ] Validate no components can accidentally select memory as global storage provider
+- [x] **Memory Storage Backend Elimination** (Issue #154) - 8 points ✅ COMPLETED
+  - [x] Eliminated memory provider entirely from global storage provider structure
+  - [x] Established component-level write-through caching patterns
+  - [x] Identified significant code duplication (~200+ lines) requiring future consolidation
+- [ ] **Shared Cache Utility Consolidation** (Issue #157) - 3 points
+  - [ ] Create `pkg/cache/runtime.go` with TTL, size limits, and metrics
+  - [ ] Migrate duplicate EphemeralRuntimeStore and InMemoryRuntimeStore implementations
+  - [ ] Eliminate ~200+ lines of duplicate cache code with comprehensive testing
 - [ ] **DNA Storage Integration Assessment** (Issue #145) - 3 points
 - [ ] **Storage Pattern Validation & Cleanup** (Issue #146) - 3 points
 

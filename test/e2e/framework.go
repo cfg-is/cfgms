@@ -18,6 +18,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	testutil "github.com/cfgis/cfgms/pkg/testing"
 	
 	// Import storage providers for testing
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
@@ -137,9 +138,9 @@ func NewE2EFramework(t *testing.T, config *E2EConfig) (*E2ETestFramework, error)
 	// Create logger with appropriate level for CI
 	var logger logging.Logger
 	if config.ReducedLogging {
-		logger = testpkg.NewMockLogger(false) // No debug output in CI
+		logger = testutil.NewMockLogger(false) // No debug output in CI
 	} else {
-		logger = testpkg.NewMockLogger(true)  // Full output for local testing
+		logger = testutil.NewMockLogger(true)  // Full output for local testing
 	}
 	
 	// Create context with timeout

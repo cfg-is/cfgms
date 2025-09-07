@@ -1,7 +1,6 @@
 package integration
 
 import (
-	"github.com/cfgis/cfgms/pkg/testing"
 	"context"
 	"fmt"
 	"strings"
@@ -18,6 +17,7 @@ import (
 	"github.com/cfgis/cfgms/features/rbac/jit"
 	"github.com/cfgis/cfgms/features/rbac/risk"
 	"github.com/cfgis/cfgms/test/integration/testutil"
+	pkgtestutil "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // DegradedModeSecurityTestFramework tests security policy enforcement in various degraded modes
@@ -79,7 +79,7 @@ func NewDegradedModeSecurityTestFramework(t *testing.T) *DegradedModeSecurityTes
 	env := testutil.NewTestEnv(t)
 	
 	// Create standard components
-	rbacManager := testing.SetupTestRBACManager(t)
+	rbacManager := pkgtestutil.SetupTestRBACManager(t)
 	riskEngine := risk.NewRiskAssessmentEngine()
 	jitManager := jit.NewJITAccessManager(rbacManager, nil)
 	

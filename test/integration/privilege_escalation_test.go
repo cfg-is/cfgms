@@ -1,7 +1,7 @@
 package integration
 
 import (
-	"github.com/cfgis/cfgms/pkg/testing"
+	testutil "github.com/cfgis/cfgms/pkg/testing"
 	"context"
 	"fmt"
 	"sync"
@@ -33,7 +33,7 @@ type PrivilegeEscalationTestFramework struct {
 
 // NewPrivilegeEscalationTestFramework creates a new testing framework
 func NewPrivilegeEscalationTestFramework(t *testing.T) *PrivilegeEscalationTestFramework {
-	rbacManager := testing.SetupTestRBACManager(t)
+	rbacManager := testutil.SetupTestRBACManager(t)
 	
 	ctx := context.Background()
 	err := rbacManager.Initialize(ctx)

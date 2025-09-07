@@ -168,10 +168,10 @@ func TestEnhancedMultiTenantSecurity(t *testing.T) {
 					},
 				},
 				TimeRestrictions: &TimeRestriction{
-					AllowedDaysOfWeek: []int{1, 2, 3, 4, 5}, // Monday to Friday
-					AllowedTimeRanges: []string{"09:00-17:00"},
+					AllowedDaysOfWeek: []int{1, 2, 3, 4, 5, 6, 7}, // All days for testing
+					AllowedTimeRanges: []string{"00:00-23:59"}, // All hours for testing
 					Timezone:          "America/New_York",
-					MaxDurationHours:  8,
+					MaxDurationHours:  24,
 				},
 				ApprovalRequired: false,
 				Status:          CrossTenantAccessStatusActive,

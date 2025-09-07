@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -225,7 +226,7 @@ func TestEpic6ComplianceConfigurationStorage(t *testing.T) {
 	logger := logging.NewNoopLogger()
 	
 	// Create mock storage provider and ConfigStore
-	provider := &MockStorageProvider{}
+	_ = &MockStorageProvider{} // Create provider for potential future use
 	configStore := NewMockConfigStore()
 	
 	// Create configuration storage migration (Epic 6 compliant)
