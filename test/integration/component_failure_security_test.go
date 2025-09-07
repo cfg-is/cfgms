@@ -1,7 +1,6 @@
 package integration
 
 import (
-	"github.com/cfgis/cfgms/pkg/testing"
 	"context"
 	"fmt"
 	"sync"
@@ -17,6 +16,7 @@ import (
 	"github.com/cfgis/cfgms/features/rbac/jit"
 	"github.com/cfgis/cfgms/features/rbac/risk"
 	"github.com/cfgis/cfgms/test/integration/testutil"
+	pkgtestutil "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // ComponentFailureSecurityTestFramework provides a comprehensive testing framework for security component failures
@@ -39,7 +39,7 @@ func NewComponentFailureSecurityTestFramework(t *testing.T) *ComponentFailureSec
 	env := testutil.NewTestEnv(t)
 	
 	// Create standard RBAC components
-	rbacManager := testing.SetupTestRBACManager(t)
+	rbacManager := pkgtestutil.SetupTestRBACManager(t)
 	riskEngine := risk.NewRiskAssessmentEngine()
 	jitManager := jit.NewJITAccessManager(rbacManager, nil) // Nil notification service for testing
 	

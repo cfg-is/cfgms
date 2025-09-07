@@ -395,15 +395,15 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - [x] PostgreSQL materialized view detection using pg_matviews
   - [x] 100% core test success rate achieved
   - [x] Complete storage provider validation infrastructure for Epic 6
-- [ ] **Memory Storage Backend Elimination** (Issue #148) - 8 points
-  - [ ] Remove memory provider from global storage provider registration
-  - [ ] Relocate memory provider to internal utility package (pkg/internal/memory)
-  - [ ] Audit all modules/features using memory storage and migrate to write-through caching pattern
-  - [ ] Create standardized component memory optimization pattern documentation
+- [ ] **Memory Storage Backend Elimination** (Issue #155) - 8 points
+  - [ ] Remove memory provider entirely from pkg/storage/providers/ directory structure
+  - [ ] Remove memory provider from global storage provider registration/factory
+  - [ ] Establish component-level write-through caching patterns (no global memory provider)
+  - [ ] Audit existing modules/components for direct memory storage usage
   - [ ] Implement example write-through caching in 2-3 key components (session, RBAC, config)
   - [ ] Remove all memory provider imports from global storage interfaces
+  - [ ] Evaluate global cache utility package only if significant code duplication exists
   - [ ] Update CLAUDE.md with memory provider elimination completion
-  - [ ] Validate no components can accidentally select memory as global storage provider
 - [ ] **DNA Storage Integration Assessment** (Issue #145) - 3 points
 - [ ] **Storage Pattern Validation & Cleanup** (Issue #146) - 3 points
 

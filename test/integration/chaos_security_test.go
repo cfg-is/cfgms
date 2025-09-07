@@ -1,7 +1,6 @@
 package integration
 
 import (
-	"github.com/cfgis/cfgms/pkg/testing"
 	"context"
 	"fmt"
 	"math/rand"
@@ -19,6 +18,7 @@ import (
 	"github.com/cfgis/cfgms/features/rbac/jit"
 	"github.com/cfgis/cfgms/features/rbac/risk"
 	"github.com/cfgis/cfgms/test/integration/testutil"
+	pkgtestutil "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // ChaosSecurityTestFramework provides chaos engineering tests for security components
@@ -70,7 +70,7 @@ func NewChaosSecurityTestFramework(t *testing.T) *ChaosSecurityTestFramework {
 	env := testutil.NewTestEnv(t)
 	
 	// Create standard components
-	rbacManager := testing.SetupTestRBACManager(t)
+	rbacManager := pkgtestutil.SetupTestRBACManager(t)
 	riskEngine := risk.NewRiskAssessmentEngine()
 	jitManager := jit.NewJITAccessManager(rbacManager, nil)
 	

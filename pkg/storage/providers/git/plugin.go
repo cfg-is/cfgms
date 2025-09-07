@@ -16,13 +16,20 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-	"github.com/cfgis/cfgms/pkg/storage/providers/memory"
 	"github.com/cfgis/cfgms/features/config/git"
 	"gopkg.in/yaml.v3"
 )
 
 // GitProvider implements the StorageProvider interface using git for persistence
 type GitProvider struct{}
+
+// InMemoryRuntimeStore provides ephemeral runtime storage for git provider
+// Runtime sessions and state don't need git persistence - they're ephemeral by nature
+type InMemoryRuntimeStore struct {
+	sessions     map[string]*interfaces.Session
+	runtimeState map[string]interface{}
+	mutex        *sync.RWMutex
+}
 
 // Name returns the provider name
 func (p *GitProvider) Name() string {
@@ -146,15 +153,17 @@ func (p *GitProvider) CreateAuditStore(config map[string]interface{}) (interface
 	return store, nil
 }
 
-// CreateRBACStore creates a git-based RBAC store
 func (p *GitProvider) CreateRuntimeStore(config map[string]interface{}) (interfaces.RuntimeStore, error) {
-	// Git provider implements RuntimeStore using memory for runtime/session data
-	// Git is for configuration/policy storage, runtime sessions are ephemeral by nature
-	// Epic 6 Compliance: Provider implements interface without exposing implementation details
+	// Git provider implements RuntimeStore using in-memory storage for runtime/session data
+	// Git is for durable configuration storage, runtime sessions are ephemeral by nature
+	// Epic 6 Compliance: Implements interface without external provider dependencies
 	
-	// Use memory implementation for runtime storage
-	memoryProvider := &memory.MemoryProvider{}
-	return memoryProvider.CreateRuntimeStore(config)
+	// Create inline memory-based runtime store
+	return &InMemoryRuntimeStore{
+		sessions:     make(map[string]*interfaces.Session),
+		runtimeState: make(map[string]interface{}),
+		mutex:        &sync.RWMutex{},
+	}, nil
 }
 
 func (p *GitProvider) CreateRBACStore(config map[string]interface{}) (interfaces.RBACStore, error) {
@@ -2288,4 +2297,309 @@ func (s *GitAuditStore) SetRemoteURL(remoteURL string) error {
 	}
 	
 	return nil
+}
+
+// InMemoryRuntimeStore implementation
+// Provides ephemeral runtime storage for sessions and runtime state
+
+// CreateSession creates a new session
+func (s *InMemoryRuntimeStore) CreateSession(ctx context.Context, session *interfaces.Session) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	
+	if session == nil {
+		return fmt.Errorf("session cannot be nil")
+	}
+	
+	if err := session.Validate(); err != nil {
+		return fmt.Errorf("invalid session: %w", err)
+	}
+	
+	if _, exists := s.sessions[session.SessionID]; exists {
+		return fmt.Errorf("session already exists: %s", session.SessionID)
+	}
+	
+	s.sessions[session.SessionID] = session
+	return nil
+}
+
+// GetSession retrieves a session by ID
+func (s *InMemoryRuntimeStore) GetSession(ctx context.Context, sessionID string) (*interfaces.Session, error) {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+	
+	session, exists := s.sessions[sessionID]
+	if !exists {
+		return nil, fmt.Errorf("session not found: %s", sessionID)
+	}
+	
+	return session, nil
+}
+
+// UpdateSession updates an existing session
+func (s *InMemoryRuntimeStore) UpdateSession(ctx context.Context, sessionID string, session *interfaces.Session) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	
+	if session == nil {
+		return fmt.Errorf("session cannot be nil")
+	}
+	
+	if err := session.Validate(); err != nil {
+		return fmt.Errorf("invalid session: %w", err)
+	}
+	
+	if _, exists := s.sessions[sessionID]; !exists {
+		return fmt.Errorf("session not found: %s", sessionID)
+	}
+	
+	s.sessions[sessionID] = session
+	return nil
+}
+
+// DeleteSession removes a session
+func (s *InMemoryRuntimeStore) DeleteSession(ctx context.Context, sessionID string) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	
+	if _, exists := s.sessions[sessionID]; !exists {
+		return fmt.Errorf("session not found: %s", sessionID)
+	}
+	
+	delete(s.sessions, sessionID)
+	return nil
+}
+
+// ListSessions returns sessions matching the filter
+func (s *InMemoryRuntimeStore) ListSessions(ctx context.Context, filters *interfaces.SessionFilter) ([]*interfaces.Session, error) {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+	
+	var result []*interfaces.Session
+	
+	for _, session := range s.sessions {
+		if s.matchesFilter(session, filters) {
+			result = append(result, session)
+		}
+	}
+	
+	return result, nil
+}
+
+// SetSessionTTL sets session TTL
+func (s *InMemoryRuntimeStore) SetSessionTTL(ctx context.Context, sessionID string, ttl time.Duration) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	
+	session, exists := s.sessions[sessionID]
+	if !exists {
+		return fmt.Errorf("session not found: %s", sessionID)
+	}
+	
+	session.ExpiresAt = time.Now().Add(ttl)
+	return nil
+}
+
+// CleanupExpiredSessions removes expired sessions
+func (s *InMemoryRuntimeStore) CleanupExpiredSessions(ctx context.Context) (int, error) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	
+	now := time.Now()
+	count := 0
+	
+	for id, session := range s.sessions {
+		if session.ExpiresAt.Before(now) {
+			delete(s.sessions, id)
+			count++
+		}
+	}
+	
+	return count, nil
+}
+
+// ListExpiredSessions returns IDs of expired sessions
+func (s *InMemoryRuntimeStore) ListExpiredSessions(ctx context.Context, cutoff time.Time) ([]string, error) {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+	
+	var result []string
+	
+	for id, session := range s.sessions {
+		if session.ExpiresAt.Before(cutoff) {
+			result = append(result, id)
+		}
+	}
+	
+	return result, nil
+}
+
+// Runtime state methods
+func (s *InMemoryRuntimeStore) SetRuntimeState(ctx context.Context, key string, value interface{}) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	
+	s.runtimeState[key] = value
+	return nil
+}
+
+func (s *InMemoryRuntimeStore) GetRuntimeState(ctx context.Context, key string) (interface{}, error) {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+	
+	value, exists := s.runtimeState[key]
+	if !exists {
+		return nil, fmt.Errorf("runtime state key not found: %s", key)
+	}
+	
+	return value, nil
+}
+
+func (s *InMemoryRuntimeStore) DeleteRuntimeState(ctx context.Context, key string) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	
+	delete(s.runtimeState, key)
+	return nil
+}
+
+func (s *InMemoryRuntimeStore) ListRuntimeKeys(ctx context.Context, prefix string) ([]string, error) {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+	
+	var result []string
+	
+	for key := range s.runtimeState {
+		if strings.HasPrefix(key, prefix) {
+			result = append(result, key)
+		}
+	}
+	
+	return result, nil
+}
+
+// Batch operations
+func (s *InMemoryRuntimeStore) CreateSessionsBatch(ctx context.Context, sessions []*interfaces.Session) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	
+	for _, session := range sessions {
+		if session == nil {
+			return fmt.Errorf("session cannot be nil")
+		}
+		
+		if err := session.Validate(); err != nil {
+			return fmt.Errorf("invalid session: %w", err)
+		}
+		
+		if _, exists := s.sessions[session.SessionID]; exists {
+			return fmt.Errorf("session already exists: %s", session.SessionID)
+		}
+		
+		s.sessions[session.SessionID] = session
+	}
+	
+	return nil
+}
+
+func (s *InMemoryRuntimeStore) DeleteSessionsBatch(ctx context.Context, sessionIDs []string) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	
+	for _, id := range sessionIDs {
+		delete(s.sessions, id)
+	}
+	
+	return nil
+}
+
+// Query methods
+func (s *InMemoryRuntimeStore) GetSessionsByUser(ctx context.Context, userID string) ([]*interfaces.Session, error) {
+	filter := &interfaces.SessionFilter{UserID: userID}
+	return s.ListSessions(ctx, filter)
+}
+
+func (s *InMemoryRuntimeStore) GetSessionsByTenant(ctx context.Context, tenantID string) ([]*interfaces.Session, error) {
+	filter := &interfaces.SessionFilter{TenantID: tenantID}
+	return s.ListSessions(ctx, filter)
+}
+
+func (s *InMemoryRuntimeStore) GetSessionsByType(ctx context.Context, sessionType interfaces.SessionType) ([]*interfaces.Session, error) {
+	filter := &interfaces.SessionFilter{Type: sessionType}
+	return s.ListSessions(ctx, filter)
+}
+
+func (s *InMemoryRuntimeStore) GetActiveSessionsCount(ctx context.Context) (int64, error) {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+	
+	count := int64(0)
+	for _, session := range s.sessions {
+		if session.IsActive() {
+			count++
+		}
+	}
+	
+	return count, nil
+}
+
+// Health and maintenance
+func (s *InMemoryRuntimeStore) HealthCheck(ctx context.Context) error {
+	return nil // Always healthy for in-memory
+}
+
+func (s *InMemoryRuntimeStore) GetStats(ctx context.Context) (*interfaces.RuntimeStoreStats, error) {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+	
+	stats := &interfaces.RuntimeStoreStats{
+		TotalSessions:    int64(len(s.sessions)),
+		ActiveSessions:   0,
+		ExpiredSessions:  0,
+		SessionsByType:   make(map[string]int64),
+		SessionsByStatus: make(map[string]int64),
+		RuntimeStateKeys: int64(len(s.runtimeState)),
+		StorageSize:      0, // Not calculated for in-memory
+	}
+	
+	for _, session := range s.sessions {
+		if session.IsActive() {
+			stats.ActiveSessions++
+		}
+		if session.IsExpired() {
+			stats.ExpiredSessions++
+		}
+		
+		stats.SessionsByType[string(session.SessionType)]++
+		stats.SessionsByStatus[string(session.Status)]++
+	}
+	
+	return stats, nil
+}
+
+func (s *InMemoryRuntimeStore) Vacuum(ctx context.Context) error {
+	_, err := s.CleanupExpiredSessions(ctx)
+	return err
+}
+
+// Helper method for filtering
+func (s *InMemoryRuntimeStore) matchesFilter(session *interfaces.Session, filter *interfaces.SessionFilter) bool {
+	if filter == nil {
+		return true
+	}
+	
+	if filter.UserID != "" && session.UserID != filter.UserID {
+		return false
+	}
+	if filter.TenantID != "" && session.TenantID != filter.TenantID {
+		return false
+	}
+	if filter.Type != "" && session.SessionType != filter.Type {
+		return false
+	}
+	if filter.Status != "" && session.Status != filter.Status {
+		return false
+	}
+	
+	return true
 }

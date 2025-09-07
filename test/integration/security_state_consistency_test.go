@@ -1,7 +1,6 @@
 package integration
 
 import (
-	"github.com/cfgis/cfgms/pkg/testing"
 	"context"
 	"fmt"
 	"sync"
@@ -17,6 +16,7 @@ import (
 	"github.com/cfgis/cfgms/features/rbac/jit"
 	"github.com/cfgis/cfgms/features/rbac/risk"
 	"github.com/cfgis/cfgms/test/integration/testutil"
+	pkgtestutil "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // SecurityStateConsistencyTestFramework tests security state consistency across failure/recovery cycles
@@ -62,7 +62,7 @@ func NewSecurityStateConsistencyTestFramework(t *testing.T) *SecurityStateConsis
 	env := testutil.NewTestEnv(t)
 	
 	// Create standard components
-	rbacManager := testing.SetupTestRBACManager(t)
+	rbacManager := pkgtestutil.SetupTestRBACManager(t)
 	riskEngine := risk.NewRiskAssessmentEngine()
 	jitManager := jit.NewJITAccessManager(rbacManager, nil)
 	
