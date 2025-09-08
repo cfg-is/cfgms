@@ -258,8 +258,10 @@ func TestRuntimeStateOperations(t *testing.T) {
 	
 	t.Run("ListRuntimeKeys", func(t *testing.T) {
 		// Add more keys
-		cache.SetRuntimeState(ctx, "key2", "value2")
-		cache.SetRuntimeState(ctx, "prefix_key3", "value3")
+		err := cache.SetRuntimeState(ctx, "key2", "value2")
+		require.NoError(t, err)
+		err = cache.SetRuntimeState(ctx, "prefix_key3", "value3")
+		require.NoError(t, err)
 		
 		// List all keys with prefix
 		keys, err := cache.ListRuntimeKeys(ctx, "key")
@@ -439,8 +441,10 @@ func TestHealthAndStats(t *testing.T) {
 	t.Run("GetStats", func(t *testing.T) {
 		// Add some test data
 		session := createTestSession("session1", "user1", "tenant1")
-		cache.CreateSession(ctx, session)
-		cache.SetRuntimeState(ctx, "key1", "value1")
+		err := cache.CreateSession(ctx, session)
+		require.NoError(t, err)
+		err = cache.SetRuntimeState(ctx, "key1", "value1")
+		require.NoError(t, err)
 		
 		stats, err := cache.GetStats(ctx)
 		require.NoError(t, err)
@@ -454,11 +458,14 @@ func TestHealthAndStats(t *testing.T) {
 	
 	t.Run("Vacuum", func(t *testing.T) {
 		// Create an expired session
+		now := time.Now()
 		expiredSession := createTestSession("expired", "user2", "tenant2")
-		expiredSession.ExpiresAt = time.Now().Add(-1 * time.Hour)
-		cache.CreateSession(ctx, expiredSession)
+		expiredSession.CreatedAt = now.Add(-3 * time.Hour)  // Created 3 hours ago
+		expiredSession.ExpiresAt = now.Add(-1 * time.Hour)  // Expired 1 hour ago
+		err := cache.CreateSession(ctx, expiredSession)
+		require.NoError(t, err)
 		
-		err := cache.Vacuum(ctx)
+		err = cache.Vacuum(ctx)
 		require.NoError(t, err)
 		
 		// Expired session should be cleaned up
@@ -483,16 +490,18 @@ func TestBackgroundCleanup(t *testing.T) {
 	// Create sessions that will expire
 	session := createTestSession("session1", "user1", "tenant1")
 	session.ExpiresAt = time.Now().Add(30 * time.Millisecond)
-	cache.CreateSession(ctx, session)
+	err := cache.CreateSession(ctx, session)
+	require.NoError(t, err)
 	
 	// Add runtime state that will expire
-	cache.SetRuntimeState(ctx, "key1", "value1")
+	err = cache.SetRuntimeState(ctx, "key1", "value1")
+	require.NoError(t, err)
 	
 	// Wait for cleanup to run
 	time.Sleep(100 * time.Millisecond)
 	
 	// Items should be cleaned up
-	_, err := cache.GetSession(ctx, "session1")
+	_, err = cache.GetSession(ctx, "session1")
 	assert.Error(t, err)
 	
 	_, err = cache.GetRuntimeState(ctx, "key1")
@@ -519,7 +528,7 @@ func TestConcurrency(t *testing.T) {
 		go func() {
 			for i := 0; i < 100; i++ {
 				session := createTestSession(fmt.Sprintf("concurrent%d", i), "user1", "tenant1")
-				cache.CreateSession(ctx, session)
+				_ = cache.CreateSession(ctx, session)
 			}
 			done <- true
 		}()
@@ -527,7 +536,7 @@ func TestConcurrency(t *testing.T) {
 		// Reader goroutine
 		go func() {
 			for i := 0; i < 100; i++ {
-				cache.GetSession(ctx, fmt.Sprintf("concurrent%d", i%10))
+				_, _ = cache.GetSession(ctx, fmt.Sprintf("concurrent%d", i%10))
 			}
 			done <- true
 		}()

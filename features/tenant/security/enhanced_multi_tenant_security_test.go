@@ -168,7 +168,7 @@ func TestEnhancedMultiTenantSecurity(t *testing.T) {
 					},
 				},
 				TimeRestrictions: &TimeRestriction{
-					AllowedDaysOfWeek: []int{1, 2, 3, 4, 5, 6, 7}, // All days for testing
+					AllowedDaysOfWeek: []int{0, 1, 2, 3, 4, 5, 6}, // All days for testing (0=Sunday, 6=Saturday)
 					AllowedTimeRanges: []string{"00:00-23:59"}, // All hours for testing
 					Timezone:          "America/New_York",
 					MaxDurationHours:  24,
@@ -198,7 +198,11 @@ func TestEnhancedMultiTenantSecurity(t *testing.T) {
 			validation, err := accessValidator.ValidateCrossTenantAccess(ctx, accessRequest)
 			require.NoError(t, err)
 			assert.True(t, validation.Granted, "Cross-tenant access should be granted")
-			assert.Equal(t, createdPolicy.ID, validation.GrantingPolicy.ID)
+			if validation.GrantingPolicy != nil {
+				assert.Equal(t, createdPolicy.ID, validation.GrantingPolicy.ID)
+			} else {
+				t.Errorf("GrantingPolicy is nil when access was granted. Validation: %+v", validation)
+			}
 
 			// Test access to excluded resource
 			accessRequest.ResourceID = "config/secrets/api-key"

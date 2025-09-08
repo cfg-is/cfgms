@@ -28,6 +28,9 @@ CFGMS (Config Management System) is a modern, Go-based configuration management 
 
 **BEFORE STARTING ANY CODE:**
 
+0. **Run FULL test suite**
+   Do not start working on a new feature until all issues have been fixed. From this point forward you will be responsible for ANY issues that show up in your feature branch
+
 1. **Create Feature Branch** (MANDATORY)
    ```bash
    git checkout develop
