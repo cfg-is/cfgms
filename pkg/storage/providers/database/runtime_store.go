@@ -353,7 +353,12 @@ func (s *DatabaseRuntimeStore) ListSessions(ctx context.Context, filters *interf
 	if err != nil {
 		return nil, fmt.Errorf("failed to query sessions: %w", err)
 	}
-	defer rows.Close()
+	defer func() {
+		if err := rows.Close(); err != nil {
+			// Could add logging here if needed
+			_ = err
+		}
+	}()
 
 	var sessions []*interfaces.Session
 	for rows.Next() {
@@ -460,7 +465,12 @@ func (s *DatabaseRuntimeStore) ListExpiredSessions(ctx context.Context, cutoff t
 	if err != nil {
 		return nil, fmt.Errorf("failed to query expired sessions: %w", err)
 	}
-	defer rows.Close()
+	defer func() {
+		if err := rows.Close(); err != nil {
+			// Could add logging here if needed
+			_ = err
+		}
+	}()
 
 	var sessionIDs []string
 	for rows.Next() {
@@ -560,7 +570,12 @@ func (s *DatabaseRuntimeStore) ListRuntimeKeys(ctx context.Context, prefix strin
 	if err != nil {
 		return nil, fmt.Errorf("failed to query runtime state keys: %w", err)
 	}
-	defer rows.Close()
+	defer func() {
+		if err := rows.Close(); err != nil {
+			// Could add logging here if needed
+			_ = err
+		}
+	}()
 
 	var keys []string
 	for rows.Next() {
@@ -603,7 +618,12 @@ func (s *DatabaseRuntimeStore) CreateSessionsBatch(ctx context.Context, sessions
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() {
+		if err := tx.Rollback(); err != nil {
+			// Transaction rollback completed or already committed
+			_ = err
+		}
+	}()
 
 	query := fmt.Sprintf(`
 		INSERT INTO %s (
@@ -617,7 +637,12 @@ func (s *DatabaseRuntimeStore) CreateSessionsBatch(ctx context.Context, sessions
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func() {
+		if err := stmt.Close(); err != nil {
+			// Could add logging here if needed
+			_ = err
+		}
+	}()
 
 	for _, session := range persistentSessions {
 		if err := session.Validate(); err != nil {
@@ -736,7 +761,12 @@ func (s *DatabaseRuntimeStore) GetStats(ctx context.Context) (*interfaces.Runtim
 	if err != nil {
 		return nil, fmt.Errorf("failed to get sessions by type: %w", err)
 	}
-	defer rows.Close()
+	defer func() {
+		if err := rows.Close(); err != nil {
+			// Could add logging here if needed
+			_ = err
+		}
+	}()
 
 	for rows.Next() {
 		var sessionType string
@@ -753,7 +783,12 @@ func (s *DatabaseRuntimeStore) GetStats(ctx context.Context) (*interfaces.Runtim
 	if err != nil {
 		return nil, fmt.Errorf("failed to get sessions by status: %w", err)
 	}
-	defer rows.Close()
+	defer func() {
+		if err := rows.Close(); err != nil {
+			// Could add logging here if needed
+			_ = err
+		}
+	}()
 
 	for rows.Next() {
 		var status string

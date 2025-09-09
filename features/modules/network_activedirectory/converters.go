@@ -256,22 +256,6 @@ func (m *activeDirectoryModule) extractParentOUFromDN(dn string) string {
 	return ""
 }
 
-// convertWindowsTimeToUnix converts Windows FILETIME to Unix time
-func (m *activeDirectoryModule) convertWindowsTimeToUnix(filetime string) *time.Time {
-	if filetime == "" || filetime == "0" || filetime == "9223372036854775807" {
-		return nil
-	}
-	
-	ft, err := strconv.ParseInt(filetime, 10, 64)
-	if err != nil {
-		return nil
-	}
-	
-	// Convert from Windows FILETIME (100ns intervals since 1601) to Unix time
-	unixTime := time.Unix((ft/10000000)-11644473600, 0)
-	return &unixTime
-}
-
 // extractDomainFromDN extracts the domain name from a distinguished name
 func (m *activeDirectoryModule) extractDomainFromDN(dn string) string {
 	if dn == "" {

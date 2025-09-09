@@ -49,9 +49,15 @@ func (f *InteractiveAuthFlow) testUserReadAccess(ctx context.Context, token *Acc
 		test.Error = fmt.Sprintf("API call failed: %v", err)
 		return test
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			// Could add logging here if needed
+			_ = err
+		}
+	}()
 	
-	if resp.StatusCode == http.StatusOK {
+	switch resp.StatusCode {
+	case http.StatusOK:
 		var response struct {
 			Value []map[string]interface{} `json:"value"`
 		}
@@ -62,10 +68,10 @@ func (f *InteractiveAuthFlow) testUserReadAccess(ctx context.Context, token *Acc
 			test.Success = true
 			test.Details = "Successfully accessed users API with application permissions"
 		}
-	} else if resp.StatusCode == http.StatusForbidden {
+	case http.StatusForbidden:
 		test.Success = false
 		test.Error = "Insufficient permissions for user read access - need User.Read.All application permission"
-	} else {
+	default:
 		test.Success = false
 		test.Error = fmt.Sprintf("API returned status %d", resp.StatusCode)
 	}
@@ -90,7 +96,12 @@ func (f *InteractiveAuthFlow) testDirectoryReadAccess(ctx context.Context, token
 		test.Error = fmt.Sprintf("Organization API call failed: %v", err)
 		return test
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			// Could add logging here if needed
+			_ = err
+		}
+	}()
 	
 	if resp.StatusCode == http.StatusOK {
 		var response struct {
@@ -139,7 +150,12 @@ func (f *InteractiveAuthFlow) testGroupManagementAccess(ctx context.Context, tok
 		test.Error = fmt.Sprintf("Group read API call failed: %v", err)
 		return test
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			// Could add logging here if needed
+			_ = err
+		}
+	}()
 	
 	if resp.StatusCode == http.StatusOK {
 		var response struct {
@@ -190,7 +206,12 @@ func (f *InteractiveAuthFlow) testConditionalAccessAccess(ctx context.Context, t
 		test.Error = fmt.Sprintf("Conditional Access API call failed: %v", err)
 		return test
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			// Could add logging here if needed
+			_ = err
+		}
+	}()
 	
 	if resp.StatusCode == http.StatusOK {
 		var response struct {
@@ -237,7 +258,12 @@ func (f *InteractiveAuthFlow) testIntuneManagementAccess(ctx context.Context, to
 		test.Error = fmt.Sprintf("Intune managed devices API call failed: %v", err)
 		return test
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			// Could add logging here if needed
+			_ = err
+		}
+	}()
 	
 	if resp.StatusCode == http.StatusOK {
 		var response struct {
@@ -284,7 +310,12 @@ func (f *InteractiveAuthFlow) testOrganizationManagementAccess(ctx context.Conte
 		test.Error = fmt.Sprintf("Organization API call failed: %v", err)
 		return test
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			// Could add logging here if needed
+			_ = err
+		}
+	}()
 	
 	if resp.StatusCode == http.StatusOK {
 		var response struct {
@@ -336,7 +367,12 @@ func (f *InteractiveAuthFlow) testAuditLogAccess(ctx context.Context, token *Acc
 		test.Error = fmt.Sprintf("Audit log API call failed: %v", err)
 		return test
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			// Could add logging here if needed
+			_ = err
+		}
+	}()
 	
 	if resp.StatusCode == http.StatusOK {
 		var response struct {
@@ -377,7 +413,12 @@ func (f *InteractiveAuthFlow) testUsageReportsAccess(ctx context.Context, token 
 		test.Error = fmt.Sprintf("Usage reports API call failed: %v", err)
 		return test
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			// Could add logging here if needed
+			_ = err
+		}
+	}()
 	
 	if resp.StatusCode == http.StatusOK {
 		test.Success = true

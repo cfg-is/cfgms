@@ -90,12 +90,6 @@ func (m *mockCredentialStore) IsAvailable() bool {
 	return true
 }
 
-// mockGDAPClient implements the GDAP client interface for testing
-type mockGDAPClient struct {
-	relationships []GDAPRelationship
-	returnError   bool
-}
-
 // Embed GDAPClient to avoid conversion issues
 type mockGDAPClientWithEmbedded struct {
 	*GDAPClient

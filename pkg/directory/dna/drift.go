@@ -772,7 +772,7 @@ func (d *DefaultDirectoryDriftDetector) generateDriftDescription(drift *Director
 	case DirectoryDriftTypeObjectCreation:
 		return fmt.Sprintf("New %s object created", objectTypeName)
 	case DirectoryDriftTypeObjectDeletion:
-		return fmt.Sprintf("%s object deleted", strings.Title(objectTypeName))
+		return fmt.Sprintf("%s object deleted", capitalize(objectTypeName))
 	default:
 		return fmt.Sprintf("Changes detected in %s: %d attributes modified", 
 			objectTypeName, len(drift.Changes))
@@ -1026,4 +1026,12 @@ func (d *DefaultDirectoryDriftDetector) UnregisterDriftHandler(handlerID string)
 	
 	delete(d.handlers, handlerID)
 	return nil
+}
+
+// capitalize capitalizes the first letter of a string
+func capitalize(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
 }

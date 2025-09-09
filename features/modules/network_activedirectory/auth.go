@@ -90,7 +90,7 @@ func (a *AuthenticationManager) authenticateKerberos(ctx context.Context, conn *
 	// Login to get TGT
 	err := krb5Client.Login()
 	if err != nil {
-		return fmt.Errorf("Kerberos login failed: %w", err)
+		return fmt.Errorf("kerberos login failed: %w", err)
 	}
 	
 	a.krb5Client = krb5Client
@@ -103,7 +103,7 @@ func (a *AuthenticationManager) authenticateKerberos(ctx context.Context, conn *
 	userPrincipal := fmt.Sprintf("%s@%s", a.config.Username, strings.ToUpper(a.config.Domain))
 	err = conn.Bind(userPrincipal, a.config.Password)
 	if err != nil {
-		return fmt.Errorf("Kerberos-authenticated bind failed: %w", err)
+		return fmt.Errorf("kerberos-authenticated bind failed: %w", err)
 	}
 	
 	return nil

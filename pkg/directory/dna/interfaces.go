@@ -585,11 +585,6 @@ func FromDNA(dna *commonpb.DNA, objectID string, objectType interfaces.Directory
 }
 
 // Helper functions for protobuf time conversion (to be implemented)
-func convertTimeToProtobuf(t *time.Time) interface{} {
-	// Implementation depends on protobuf version - returning nil for now
-	// In a real implementation, this would convert to *timestamppb.Timestamp
-	return nil
-}
 
 func convertProtobufToTime(pb interface{}) *time.Time {
 	// Implementation depends on protobuf version - returning nil for now

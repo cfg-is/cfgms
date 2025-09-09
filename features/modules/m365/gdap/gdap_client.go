@@ -76,7 +76,7 @@ func (c *GDAPClient) GetGDAPRelationships(ctx context.Context) ([]GDAPRelationsh
 	// Execute request
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("Partner Center API request failed: %w", err)
+		return nil, fmt.Errorf("partner center API request failed: %w", err)
 	}
 	defer func() {
 		if closeErr := resp.Body.Close(); closeErr != nil {
@@ -86,7 +86,7 @@ func (c *GDAPClient) GetGDAPRelationships(ctx context.Context) ([]GDAPRelationsh
 	}()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Partner Center API returned status %d", resp.StatusCode)
+		return nil, fmt.Errorf("partner center API returned status %d", resp.StatusCode)
 	}
 
 	// Parse response
@@ -171,7 +171,7 @@ func (c *GDAPClient) GetGDAPRelationship(ctx context.Context, relationshipID str
 	// Execute request
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("Partner Center API request failed: %w", err)
+		return nil, fmt.Errorf("partner center API request failed: %w", err)
 	}
 	defer func() {
 		if closeErr := resp.Body.Close(); closeErr != nil {
@@ -184,7 +184,7 @@ func (c *GDAPClient) GetGDAPRelationship(ctx context.Context, relationshipID str
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Partner Center API returned status %d", resp.StatusCode)
+		return nil, fmt.Errorf("partner center API returned status %d", resp.StatusCode)
 	}
 
 	// Parse single relationship response
@@ -306,7 +306,7 @@ func (c *GDAPClient) GetCustomerInformation(ctx context.Context, customerTenantI
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("Partner Center API request failed: %w", err)
+		return nil, fmt.Errorf("partner center API request failed: %w", err)
 	}
 	defer func() {
 		if closeErr := resp.Body.Close(); closeErr != nil {
@@ -315,7 +315,7 @@ func (c *GDAPClient) GetCustomerInformation(ctx context.Context, customerTenantI
 	}()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Failed to get customer information, status: %d", resp.StatusCode)
+		return nil, fmt.Errorf("failed to get customer information, status: %d", resp.StatusCode)
 	}
 
 	var customerProfile struct {
@@ -365,7 +365,7 @@ func (c *GDAPClient) getPartnerCenterToken(ctx context.Context) (*auth.AccessTok
 
 	// Need to get new Partner Center token - this would require partner credentials
 	// In a real implementation, this would use the Partner Center OAuth2 flow
-	return nil, fmt.Errorf("Partner Center token acquisition not implemented - requires partner credentials")
+	return nil, fmt.Errorf("partner Center token acquisition not implemented - requires partner credentials")
 }
 
 // generateRequestID generates a unique request ID for Partner Center API calls

@@ -1021,7 +1021,7 @@ func (m *activeDirectoryModule) queryGlobalCatalog(ctx context.Context, objectTy
 	
 	// Authenticate to Global Catalog
 	if err := m.authManager.Authenticate(ctx, gcConn); err != nil {
-		return nil, fmt.Errorf("Global Catalog authentication failed: %w", err)
+		return nil, fmt.Errorf("global Catalog authentication failed: %w", err)
 	}
 	
 	// Perform forest-wide search

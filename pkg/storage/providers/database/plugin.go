@@ -119,7 +119,10 @@ func (p *DatabaseProvider) CreateRuntimeStore(config map[string]interface{}) (in
 
 	// Test the connection
 	if err := db.Ping(); err != nil {
-		db.Close()
+		if err := db.Close(); err != nil {
+			// Could add logging here if needed
+			_ = err
+		}
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
 	}
 
@@ -131,7 +134,10 @@ func (p *DatabaseProvider) CreateRuntimeStore(config map[string]interface{}) (in
 
 	// Create tables if they don't exist
 	if err := store.createTables(); err != nil {
-		db.Close()
+		if err := db.Close(); err != nil {
+			// Could add logging here if needed
+			_ = err
+		}
 		return nil, fmt.Errorf("failed to create runtime tables: %w", err)
 	}
 

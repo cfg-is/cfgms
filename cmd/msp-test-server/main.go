@@ -117,7 +117,9 @@ func main() {
 </body>
 </html>`
 		w.Header().Set("Content-Type", "text/html")
-		fmt.Fprint(w, html)
+		if _, err := fmt.Fprint(w, html); err != nil {
+			http.Error(w, "Failed to write response", http.StatusInternalServerError)
+		}
 	})
 	
 	http.HandleFunc("/test-consent", func(w http.ResponseWriter, r *http.Request) {
@@ -206,7 +208,9 @@ func main() {
 			adminURL, adminURL)
 		
 		w.Header().Set("Content-Type", "text/html")
-		fmt.Fprint(w, html)
+		if _, err := fmt.Fprint(w, html); err != nil {
+			http.Error(w, "Failed to write response", http.StatusInternalServerError)
+		}
 	})
 	
 	http.HandleFunc("/admin/callback", func(w http.ResponseWriter, r *http.Request) {
@@ -314,7 +318,9 @@ func main() {
 		}
 		
 		w.Header().Set("Content-Type", "text/html")
-		fmt.Fprint(w, html)
+		if _, err := fmt.Fprint(w, html); err != nil {
+			http.Error(w, "Failed to write response", http.StatusInternalServerError)
+		}
 	})
 	
 	http.HandleFunc("/list-clients", func(w http.ResponseWriter, r *http.Request) {
@@ -377,7 +383,9 @@ func main() {
 		html += `<p><a href="/">&larr; Back to main page</a></p></body></html>`
 		
 		w.Header().Set("Content-Type", "text/html")
-		fmt.Fprint(w, html)
+		if _, err := fmt.Fprint(w, html); err != nil {
+			http.Error(w, "Failed to write response", http.StatusInternalServerError)
+		}
 	})
 	
 	// API testing handler
@@ -417,7 +425,9 @@ func main() {
 </html>`, tenantID, results)
 		
 		w.Header().Set("Content-Type", "text/html")
-		fmt.Fprint(w, html)
+		if _, err := fmt.Fprint(w, html); err != nil {
+			http.Error(w, "Failed to write response", http.StatusInternalServerError)
+		}
 	})
 	
 	// Start server
@@ -478,7 +488,11 @@ func getMSPToken(config *auth.MultiTenantConfig, clientTenantID string) (*auth.A
 	if err != nil {
 		return nil, fmt.Errorf("token request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log.Printf("Failed to close response body: %v", err)
+		}
+	}()
 	
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -523,7 +537,11 @@ func testAPIEndpoint(endpoint, token, name, description string) string {
 	if err != nil {
 		return fmt.Sprintf(`<div class="api-test error"><h4>%s - %s</h4><p>Request failed: %s</p></div>`, name, description, err.Error())
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log.Printf("Failed to close response body: %v", err)
+		}
+	}()
 	
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

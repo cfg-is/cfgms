@@ -244,7 +244,7 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 			TenantId: "test-tenant",
 		}
 		
-		err := manager.CreateRole(ctx, invalidRole)
+		_ = manager.CreateRole(ctx, invalidRole)
 		// This should fail, but let's check if we still get an audit event
 		
 		// Query for any audit entries with error result

@@ -32,7 +32,6 @@ type DefaultDirectoryDNACollector struct {
 	
 	// State management
 	mutex    sync.RWMutex
-	active   bool
 	stats    *CollectionStats
 	
 	// Caching for performance

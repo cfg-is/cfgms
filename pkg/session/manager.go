@@ -28,8 +28,6 @@ type UnifiedSessionManager struct {
 	// Cleanup management
 	stopCleanup chan struct{}
 	cleanupWG   sync.WaitGroup
-	
-	mutex sync.RWMutex
 }
 
 // Config contains configuration for the unified session manager

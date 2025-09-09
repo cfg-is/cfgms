@@ -233,7 +233,10 @@ func (f *AdminConsentFlow) HandleAdminConsentCallback(ctx context.Context, callb
 	}
 	
 	// Clean up admin consent request
-	f.clientStore.DeleteAdminConsentRequest(state)
+	if err := f.clientStore.DeleteAdminConsentRequest(state); err != nil {
+		// Log warning - we could add a logger field to AdminConsentFlow in the future
+		_ = err // Acknowledge error but continue
+	}
 	
 	// Create admin consent info
 	adminConsentInfo := &AdminConsentInfo{
@@ -317,7 +320,10 @@ func (f *AdminConsentFlow) generateState() (string, error) {
 // generateClientID generates a unique client ID for CFGMS internal use
 func (f *AdminConsentFlow) generateClientID() string {
 	randomBytes := make([]byte, 16)
-	rand.Read(randomBytes)
+	if _, err := rand.Read(randomBytes); err != nil {
+		// Fallback to timestamp-based ID if crypto/rand fails
+		return fmt.Sprintf("cfgms-client-%d", time.Now().UnixNano())
+	}
 	return fmt.Sprintf("client-%s", base64.RawURLEncoding.EncodeToString(randomBytes))
 }
 

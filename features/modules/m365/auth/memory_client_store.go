@@ -301,9 +301,20 @@ func (s *MemoryClientTenantStore) SearchClientTenants(query string) ([]*ClientTe
 
 // Helper function for case-insensitive string search
 func containsIgnoreCase(s, substr string) bool {
-	return len(s) >= len(substr) && 
-		   len(substr) > 0 && 
-		   stringToLower(s)[:len(s)-len(substr)+1] != stringToLower(s)[:len(s)-len(substr)+1]
+	if len(substr) == 0 {
+		return true
+	}
+	if len(s) < len(substr) {
+		return false
+	}
+	s = stringToLower(s)
+	substr = stringToLower(substr)
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }
 
 // Simple lowercase conversion (basic implementation)

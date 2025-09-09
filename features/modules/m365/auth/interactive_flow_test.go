@@ -102,7 +102,10 @@ func TestInteractiveAuthFlowSetup(t *testing.T) {
 		mockTokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/oauth2/v2.0/token" {
 				// Verify PKCE parameters
-				r.ParseForm()
+				if err := r.ParseForm(); err != nil {
+					http.Error(w, "Failed to parse form", http.StatusBadRequest)
+					return
+				}
 				assert.Equal(t, "authorization_code", r.Form.Get("grant_type"))
 				assert.Equal(t, config.ClientID, r.Form.Get("client_id"))
 				assert.Equal(t, config.ClientSecret, r.Form.Get("client_secret"))
@@ -121,7 +124,9 @@ func TestInteractiveAuthFlowSetup(t *testing.T) {
 				}
 				
 				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(response)
+				if err := json.NewEncoder(w).Encode(response); err != nil {
+					http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+				}
 			} else {
 				w.WriteHeader(http.StatusNotFound)
 			}
@@ -185,12 +190,20 @@ func TestCallbackHandlerServer(t *testing.T) {
 	// Start callback server
 	err := handler.StartCallbackServer(ctx, "0") // Use random port
 	require.NoError(t, err)
-	defer handler.StopCallbackServer(ctx)
+	defer func() {
+		if err := handler.StopCallbackServer(ctx); err != nil {
+			t.Logf("Failed to stop callback server: %v", err)
+		}
+	}()
 	
 	t.Run("TestHealthEndpoint", func(t *testing.T) {
 		resp, err := http.Get("http://localhost:" + handler.serverPort + "/health")
 		require.NoError(t, err)
-		defer resp.Body.Close()
+		defer func() {
+			if err := resp.Body.Close(); err != nil {
+				t.Logf("Failed to close response body: %v", err)
+			}
+		}()
 		
 		assert.Equal(t, http.StatusOK, resp.StatusCode)
 		assert.Equal(t, "application/json", resp.Header.Get("Content-Type"))
@@ -208,7 +221,11 @@ func TestCallbackHandlerServer(t *testing.T) {
 		
 		resp, err := http.Get(callbackURL)
 		require.NoError(t, err)
-		defer resp.Body.Close()
+		defer func() {
+			if err := resp.Body.Close(); err != nil {
+				t.Logf("Failed to close response body: %v", err)
+			}
+		}()
 		
 		assert.Equal(t, http.StatusOK, resp.StatusCode)
 		assert.Equal(t, "text/html", resp.Header.Get("Content-Type"))
@@ -229,7 +246,11 @@ func TestCallbackHandlerServer(t *testing.T) {
 		
 		resp, err := http.Get(callbackURL)
 		require.NoError(t, err)
-		defer resp.Body.Close()
+		defer func() {
+			if err := resp.Body.Close(); err != nil {
+				t.Logf("Failed to close response body: %v", err)
+			}
+		}()
 		
 		assert.Equal(t, http.StatusOK, resp.StatusCode)
 		
@@ -253,7 +274,11 @@ func TestCallbackHandlerServer(t *testing.T) {
 		
 		resp, err := client.Do(req)
 		require.NoError(t, err)
-		defer resp.Body.Close()
+		defer func() {
+			if err := resp.Body.Close(); err != nil {
+				t.Logf("Failed to close response body: %v", err)
+			}
+		}()
 		
 		assert.Equal(t, http.StatusOK, resp.StatusCode)
 		assert.Equal(t, "application/json", resp.Header.Get("Content-Type"))
@@ -278,10 +303,7 @@ func TestCapabilityTesting(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		
 		// Strip /v1.0 prefix if present for consistent handling
-		path := r.URL.Path
-		if strings.HasPrefix(path, "/v1.0") {
-			path = strings.TrimPrefix(path, "/v1.0")
-		}
+		path := strings.TrimPrefix(r.URL.Path, "/v1.0")
 		
 		switch {
 		case strings.HasPrefix(path, "/users"):
@@ -292,7 +314,9 @@ func TestCapabilityTesting(t *testing.T) {
 					{"id": "user-2", "userPrincipalName": "user2@example.com", "displayName": "Test User 2"},
 				},
 			}
-			json.NewEncoder(w).Encode(response)
+			if err := json.NewEncoder(w).Encode(response); err != nil {
+				http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+			}
 			
 		case strings.HasPrefix(path, "/organization"):
 			// MSP organization endpoint
@@ -308,7 +332,9 @@ func TestCapabilityTesting(t *testing.T) {
 					},
 				},
 			}
-			json.NewEncoder(w).Encode(response)
+			if err := json.NewEncoder(w).Encode(response); err != nil {
+				http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+			}
 			
 		case strings.HasPrefix(path, "/groups"):
 			// MSP group management endpoint
@@ -318,7 +344,9 @@ func TestCapabilityTesting(t *testing.T) {
 					{"id": "group-2", "displayName": "Test Group 2", "groupTypes": []interface{}{}},
 				},
 			}
-			json.NewEncoder(w).Encode(response)
+			if err := json.NewEncoder(w).Encode(response); err != nil {
+				http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+			}
 			
 		case strings.HasPrefix(path, "/identity/conditionalAccess/policies"):
 			// MSP conditional access endpoint
@@ -328,7 +356,9 @@ func TestCapabilityTesting(t *testing.T) {
 					{"id": "policy-2", "displayName": "Test CA Policy 2", "state": "disabled"},
 				},
 			}
-			json.NewEncoder(w).Encode(response)
+			if err := json.NewEncoder(w).Encode(response); err != nil {
+				http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+			}
 			
 		case strings.HasPrefix(path, "/deviceManagement/managedDevices"):
 			// MSP Intune managed devices endpoint (updated from deviceConfigurations)
@@ -338,7 +368,9 @@ func TestCapabilityTesting(t *testing.T) {
 					{"id": "device-2", "deviceName": "Test Device 2", "operatingSystem": "iOS", "complianceState": "noncompliant"},
 				},
 			}
-			json.NewEncoder(w).Encode(response)
+			if err := json.NewEncoder(w).Encode(response); err != nil {
+				http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+			}
 			
 		case strings.HasPrefix(path, "/auditLogs/directoryAudits"):
 			// MSP audit log endpoint
@@ -348,7 +380,9 @@ func TestCapabilityTesting(t *testing.T) {
 					{"id": "audit-2", "activityDisplayName": "Update group", "result": "success"},
 				},
 			}
-			json.NewEncoder(w).Encode(response)
+			if err := json.NewEncoder(w).Encode(response); err != nil {
+				http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+			}
 			
 		case strings.HasPrefix(path, "/reports/"):
 			// MSP usage reports endpoint  
@@ -358,7 +392,9 @@ func TestCapabilityTesting(t *testing.T) {
 					{"userPrincipalName": "user2@example.com", "lastActivityDate": "2024-01-14"},
 				},
 			}
-			json.NewEncoder(w).Encode(response)
+			if err := json.NewEncoder(w).Encode(response); err != nil {
+				http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+			}
 			
 		case path == "/me":
 			// Legacy endpoint for backward compatibility
@@ -367,7 +403,9 @@ func TestCapabilityTesting(t *testing.T) {
 				"userPrincipalName": "testuser@example.com",
 				"displayName":       "Test User",
 			}
-			json.NewEncoder(w).Encode(response)
+			if err := json.NewEncoder(w).Encode(response); err != nil {
+				http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+			}
 			
 		default:
 			w.WriteHeader(http.StatusNotFound)

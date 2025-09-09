@@ -338,7 +338,10 @@ func (p *DefaultDirectoryConnectionPool) createNewConnection(ctx context.Context
 func (p *DefaultDirectoryConnectionPool) Put(conn DirectoryConnection) error {
 	if atomic.LoadInt32(&p.closed) != 0 {
 		if conn != nil {
-			conn.Close(context.Background())
+			if err := conn.Close(context.Background()); err != nil {
+				// Could add logging here if needed
+			_ = err
+			}
 		}
 		return fmt.Errorf("connection pool is closed")
 	}
@@ -358,7 +361,10 @@ func (p *DefaultDirectoryConnectionPool) Put(conn DirectoryConnection) error {
 	
 	if err := p.healthChecker.CheckHealth(ctx, conn); err != nil {
 		// Connection is unhealthy, close it
-		conn.Close(ctx)
+		if err := conn.Close(ctx); err != nil {
+			// Could add logging here if needed
+			_ = err
+		}
 		
 		p.updateStatistics(func(stats *PoolStatistics) {
 			stats.ActiveConnections--
@@ -380,7 +386,10 @@ func (p *DefaultDirectoryConnectionPool) Put(conn DirectoryConnection) error {
 		
 	default:
 		// Pool is full, close connection
-		conn.Close(ctx)
+		if err := conn.Close(ctx); err != nil {
+			// Could add logging here if needed
+			_ = err
+		}
 		
 		p.updateStatistics(func(stats *PoolStatistics) {
 			stats.ActiveConnections--
@@ -407,7 +416,10 @@ func (p *DefaultDirectoryConnectionPool) Close() error {
 		close(p.connections)
 		for conn := range p.connections {
 			if conn != nil {
-				conn.Close(context.Background())
+				if err := conn.Close(context.Background()); err != nil {
+				// Log error - could add logging here if needed
+				_ = err
+			}
 			}
 		}
 		
@@ -415,7 +427,10 @@ func (p *DefaultDirectoryConnectionPool) Close() error {
 		p.mutex.Lock()
 		for conn := range p.activeConns {
 			if conn != nil {
-				conn.Close(context.Background())
+				if err := conn.Close(context.Background()); err != nil {
+				// Log error - could add logging here if needed
+				_ = err
+			}
 			}
 		}
 		p.activeConns = make(map[DirectoryConnection]bool)

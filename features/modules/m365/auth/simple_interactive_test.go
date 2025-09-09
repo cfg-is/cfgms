@@ -126,7 +126,11 @@ func TestCallbackServer(t *testing.T) {
 	// Start server on random port
 	err := handler.StartCallbackServer(ctx, "0")
 	require.NoError(t, err)
-	defer handler.StopCallbackServer(ctx)
+	defer func() {
+		if err := handler.StopCallbackServer(ctx); err != nil {
+			t.Logf("Failed to stop callback server: %v", err)
+		}
+	}()
 	
 	t.Run("TestHealthEndpoint", func(t *testing.T) {
 		// Get the actual port being used

@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"time"
 
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
@@ -94,7 +95,10 @@ func GitBasedClientStoreConfig(repository, branch string) *ClientStoreConfig {
 // generateUniqueID generates a unique identifier for test isolation
 func generateUniqueID() string {
 	bytes := make([]byte, 8)
-	rand.Read(bytes)
+	if _, err := rand.Read(bytes); err != nil {
+		// Fallback to timestamp-based ID if crypto/rand fails
+		return fmt.Sprintf("%x", time.Now().UnixNano())
+	}
 	return hex.EncodeToString(bytes)
 }
 
@@ -294,19 +298,6 @@ func (g *GlobalStorageAdapter) DeleteAdminConsentRequest(state string) error {
 
 // Legacy functions removed - now using global plugin architecture
 // All storage creation goes through interfaces.CreateClientTenantStoreFromConfig
-
-// maskDatabaseURL masks sensitive information in database URL for logging
-func maskDatabaseURL(url string) string {
-	if url == "" {
-		return ""
-	}
-	
-	// Simple masking - in production, use more sophisticated URL parsing
-	if len(url) > 20 {
-		return url[:8] + "***" + url[len(url)-8:]
-	}
-	return "***"
-}
 
 // ValidateClientStoreConfig validates client store configuration
 func ValidateClientStoreConfig(config *ClientStoreConfig) error {

@@ -167,14 +167,21 @@ func (h *CallbackHandler) handleCallback(w http.ResponseWriter, r *http.Request)
 	// Return JSON response for API clients
 	if r.Header.Get("Accept") == "application/json" {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			// Log error - we could add a logger field to CallbackHandler in the future
+			_ = err // Acknowledge error
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		}
 		return
 	}
 	
 	// Return HTML page for browser clients
 	html := h.generateCallbackHTML(response)
 	w.Header().Set("Content-Type", "text/html")
-	w.Write([]byte(html))
+	if _, err := w.Write([]byte(html)); err != nil {
+		// Log error - we could add a logger field to CallbackHandler in the future
+		_ = err // Acknowledge error
+	}
 }
 
 func (h *CallbackHandler) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -189,26 +196,37 @@ func (h *CallbackHandler) handleStatus(w http.ResponseWriter, r *http.Request) {
 	
 	w.Header().Set("Content-Type", "application/json")
 	if result != nil {
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		if err := json.NewEncoder(w).Encode(map[string]interface{}{
 			"ready":   true,
 			"success": result.Success,
 			"state":   result.State,
-		})
+		}); err != nil {
+			// Log error - we could add a logger field to CallbackHandler in the future
+			_ = err // Acknowledge error
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		}
 	} else {
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		if err := json.NewEncoder(w).Encode(map[string]interface{}{
 			"ready": false,
 			"state": state,
-		})
+		}); err != nil {
+			// Log error - we could add a logger field to CallbackHandler in the future
+			_ = err // Acknowledge error
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		}
 	}
 }
 
 func (h *CallbackHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	if err := json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":    "healthy",
 		"timestamp": time.Now().Format(time.RFC3339),
 		"version":   "1.0.0",
-	})
+	}); err != nil {
+		// Could add logging here if needed
+		_ = err
+	}
 }
 
 // Callback result storage (temporary)

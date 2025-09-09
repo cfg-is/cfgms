@@ -7,8 +7,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/cfgis/cfgms/features/terminal"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
@@ -460,9 +458,4 @@ func (m *TerminalSessionManager) restoreTerminalSession(runtimeSession *interfac
 	// Note: We don't restore shell executor state as that's ephemeral
 
 	return session, nil
-}
-
-// createSessionID generates a unique session ID
-func (m *TerminalSessionManager) createSessionID() string {
-	return uuid.New().String()
 }

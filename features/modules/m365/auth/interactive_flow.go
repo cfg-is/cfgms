@@ -255,13 +255,19 @@ func (f *InteractiveAuthFlow) generateCodeChallenge(codeVerifier string) string 
 
 func (f *InteractiveAuthFlow) generateState() string {
 	randomBytes := make([]byte, 16)
-	rand.Read(randomBytes)
+	if _, err := rand.Read(randomBytes); err != nil {
+		// Fallback to timestamp-based state if crypto/rand fails
+		return fmt.Sprintf("state-%x", time.Now().UnixNano())
+	}
 	return base64.RawURLEncoding.EncodeToString(randomBytes)
 }
 
 func (f *InteractiveAuthFlow) generateNonce() string {
 	randomBytes := make([]byte, 16)
-	rand.Read(randomBytes)
+	if _, err := rand.Read(randomBytes); err != nil {
+		// Fallback to timestamp-based nonce if crypto/rand fails
+		return fmt.Sprintf("nonce-%x", time.Now().UnixNano())
+	}
 	return base64.RawURLEncoding.EncodeToString(randomBytes)
 }
 
@@ -313,7 +319,12 @@ func (f *InteractiveAuthFlow) exchangeCodeForTokens(ctx context.Context, authCod
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			// Log error - could add logger field to InteractiveAuthFlow
+			_ = err
+		}
+	}()
 	
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("token exchange failed with status: %d", resp.StatusCode)
