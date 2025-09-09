@@ -291,7 +291,7 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 
 #### v0.4.0 (Alpha) - Advanced Multi-Tenancy & Plugin Architecture
 
-**Status**: 🚧 IN PROGRESS - 132/159 story points completed across 31 stories (Issues #110-117, #121-122, #124-135) - 83.0% complete *(18 points moved to v1.1.0)*
+**Status**: 🚧 IN PROGRESS - 123/159 story points completed across 31 stories (Issues #110-117, #121-122, #124-135) - 77.4% complete *(9 points incomplete in #123, 18 points moved to v1.1.0)*
 
 **Goal**: Transform CFGMS from foundational architecture to production-ready enterprise platform with advanced multi-tenancy, unified directory management, and comprehensive module system.
 
@@ -329,7 +329,7 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - [x] Comprehensive test suite with 100% clean status
   - [x] Production-ready MSP functionality for client management
 
-**Epic 4: Unified Directory Management Interface (47/47 story points) - Issues #120-123 ✅ COMPLETED**
+**Epic 4: Unified Directory Management Interface (38/47 story points) - Issues #120-123 🚧 IN PROGRESS**
 - [x] **Directory Service Abstraction Layer** (Issue #120) - 15 points ✅ COMPLETED
   - [x] Universal Directory interface supporting Active Directory and Entra ID
   - [x] Extensible architecture for future directory service providers
@@ -353,7 +353,15 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - [x] Performance-optimized collection with configurable batch sizes
   - [x] Comprehensive test suite with race condition resolution and security validation
 - [x] **Active Directory Provider Implementation** (Issue #122) - 10 points ✅ COMPLETED
-- [x] **Entra ID Provider Implementation** (Issue #123) - 9 points ✅ COMPLETED
+- [ ] **Entra ID Provider Implementation** (Issue #123) - 9 points 🚧 IN PROGRESS
+  - [x] OAuth2 authentication framework with Microsoft Graph API
+  - [x] Configuration structures and validation (EntraApplicationConfig, EntraAdminUnitConfig)  
+  - [x] Integration test framework with real API authentication
+  - [x] Unit test coverage with comprehensive mocking
+  - [x] Enhanced testing strategy (strict/permissive modes)
+  - [ ] **Real Graph API Get operations** (currently returns placeholder data)
+  - [ ] **Real Graph API Set operations** (currently returns "not yet implemented")
+  - [ ] **Complete CRUD functionality for applications and admin units**
 
 #### v0.4.5.0 (Alpha) - Core Global Storage Foundation
 
