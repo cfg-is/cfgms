@@ -19,7 +19,7 @@ func TestDNAStorageIntegration(t *testing.T) {
 	
 	// Create a simplified config for integration testing
 	config := &Config{
-		Backend:                BackendMemory,
+		Backend:                BackendSQLite,
 		CompressionLevel:       6,
 		CompressionType:        "gzip",
 		TargetCompressionRatio: 0.7, // More relaxed target for testing
