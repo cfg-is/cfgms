@@ -186,7 +186,7 @@ func TestEntraApplication_Integration_ConfigValidation(t *testing.T) {
 	
 	// Should get validation error before making API call
 	assert.Error(t, err, "Set should return validation error for invalid config")
-	assert.Contains(t, err.Error(), "display_name\\|tenant_id", "Error should mention missing required fields")
+	assert.Regexp(t, "(display_name|tenant_id)", err.Error(), "Error should mention missing required fields")
 }
 
 // TestEntraApplication_Integration_ComplexConfiguration tests complex application configuration
