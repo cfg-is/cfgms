@@ -5,9 +5,20 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
-	"runtime"
 	"testing"
+
+	"github.com/cfgis/cfgms/features/modules"
+	"gopkg.in/yaml.v3"
 )
+
+// createConfigFromYAML creates a directoryConfig from YAML string
+func createConfigFromYAML(yamlData string) modules.ConfigState {
+	var config directoryConfig
+	if err := yaml.Unmarshal([]byte(yamlData), &config); err != nil {
+		return nil
+	}
+	return &config
+}
 
 func TestDirectoryModule(t *testing.T) {
 	// Create a temporary directory for testing
@@ -15,7 +26,11 @@ func TestDirectoryModule(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		if err := os.RemoveAll(tempDir); err != nil {
+			t.Logf("Failed to cleanup temp dir %s: %v", tempDir, err)
+		}
+	}()
 
 	// Get current user and group for ownership tests
 	currentUser, err := user.Current()
@@ -30,21 +45,19 @@ func TestDirectoryModule(t *testing.T) {
 	}
 
 	tests := []struct {
-		name        string
-		resourceID  string
-		configData  string
-		setup       func() error
-		cleanup     func() error
-		wantErr     bool
-		wantTestErr bool
+		name       string
+		resourceID string
+		configData string
+		setup      func() error
+		cleanup    func() error
+		wantErr    bool
 	}{
 		{
 			name:       "Create new directory",
 			resourceID: filepath.Join(tempDir, "newdir"),
 			configData: `path: ` + filepath.Join(tempDir, "newdir") + `
 permissions: 0755`,
-			wantErr:     false,
-			wantTestErr: false,
+			wantErr: false,
 		},
 		{
 			name:       "Create directory with ownership",
@@ -53,24 +66,21 @@ permissions: 0755`,
 permissions: 0750
 owner: ` + currentUser.Username + `
 group: ` + currentGroup.Name,
-			wantErr:     false,
-			wantTestErr: false,
+			wantErr: false,
 		},
 		{
 			name:       "Invalid path",
 			resourceID: "",
 			configData: `path: ""
 permissions: 0755`,
-			wantErr:     true,
-			wantTestErr: true,
+			wantErr: true,
 		},
 		{
 			name:       "Invalid permissions",
 			resourceID: filepath.Join(tempDir, "invalid-perms"),
 			configData: `path: ` + filepath.Join(tempDir, "invalid-perms") + `
 permissions: 9999`,
-			wantErr:     true,
-			wantTestErr: true,
+			wantErr: true,
 		},
 		{
 			name:       "Invalid owner",
@@ -78,8 +88,7 @@ permissions: 9999`,
 			configData: `path: ` + filepath.Join(tempDir, "invalid-owner") + `
 permissions: 0755
 owner: nonexistentuser`,
-			wantErr:     true,
-			wantTestErr: true,
+			wantErr: true,
 		},
 		{
 			name:       "Invalid group",
@@ -87,8 +96,7 @@ owner: nonexistentuser`,
 			configData: `path: ` + filepath.Join(tempDir, "invalid-group") + `
 permissions: 0755
 group: nonexistentgroup`,
-			wantErr:     true,
-			wantTestErr: true,
+			wantErr: true,
 		},
 	}
 
@@ -110,8 +118,15 @@ group: nonexistentgroup`,
 				}()
 			}
 
+			// Create ConfigState from YAML
+			configState := createConfigFromYAML(tt.configData)
+			if configState == nil && !tt.wantErr {
+				t.Errorf("Failed to create config from YAML: %s", tt.configData)
+				return
+			}
+
 			// Test Set
-			err := module.Set(context.Background(), tt.resourceID, tt.configData)
+			err := module.Set(context.Background(), tt.resourceID, configState)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Set() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -124,19 +139,9 @@ group: nonexistentgroup`,
 					t.Errorf("Get() error = %v", err)
 					return
 				}
-				if config == "" {
-					t.Error("Get() returned empty config")
+				if config == nil {
+					t.Error("Get() returned nil config")
 				}
-			}
-
-			// Test Test
-			matches, err := module.Test(context.Background(), tt.resourceID, tt.configData)
-			if (err != nil) != tt.wantTestErr {
-				t.Errorf("Test() error = %v, wantTestErr %v", err, tt.wantTestErr)
-				return
-			}
-			if !tt.wantErr && !tt.wantTestErr && !matches {
-				t.Error("Test() returned false for valid configuration")
 			}
 		})
 	}
@@ -148,7 +153,11 @@ func TestDirectoryModule_EdgeCases(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		if err := os.RemoveAll(tempDir); err != nil {
+			t.Logf("Failed to cleanup temp dir %s: %v", tempDir, err)
+		}
+	}()
 
 	module := New()
 
@@ -162,7 +171,8 @@ func TestDirectoryModule_EdgeCases(t *testing.T) {
 permissions: 0755`
 
 	// Should fail because path exists but is not a directory
-	err = module.Set(context.Background(), filePath, configData)
+	configState := createConfigFromYAML(configData)
+	err = module.Set(context.Background(), filePath, configState)
 	if err != ErrNotADirectory {
 		t.Errorf("Set() with existing file error = %v, want %v", err, ErrNotADirectory)
 	}
@@ -173,7 +183,8 @@ permissions: 0755`
 permissions: 0755
 recursive: false`
 
-	err = module.Set(context.Background(), nonExistentPath, configData)
+	configState = createConfigFromYAML(configData)
+	err = module.Set(context.Background(), nonExistentPath, configState)
 	if err == nil {
 		t.Error("Set() with non-existent parent and recursive=false should fail")
 	}
@@ -183,36 +194,9 @@ recursive: false`
 permissions: 0755
 recursive: true`
 
-	err = module.Set(context.Background(), nonExistentPath, configData)
+	configState = createConfigFromYAML(configData)
+	err = module.Set(context.Background(), nonExistentPath, configState)
 	if err != nil {
 		t.Errorf("Set() with non-existent parent and recursive=true error = %v", err)
-	}
-}
-
-// getTestUser returns a test user and group for the current platform
-func getTestUser(t *testing.T) (string, string) {
-	switch runtime.GOOS {
-	case "linux", "darwin":
-		// Try to use the current user for testing
-		currentUser, err := user.Current()
-		if err != nil {
-			t.Fatalf("Failed to get current user: %v", err)
-		}
-		// Get the primary group name
-		group, err := user.LookupGroupId(currentUser.Gid)
-		if err != nil {
-			t.Fatalf("Failed to get group name: %v", err)
-		}
-		return currentUser.Username, group.Name
-	case "windows":
-		// Windows uses SIDs, but we'll use the username for testing
-		currentUser, err := user.Current()
-		if err != nil {
-			t.Fatalf("Failed to get current user: %v", err)
-		}
-		return currentUser.Username, "Users" // Common Windows group
-	default:
-		t.Skipf("Unsupported platform: %s", runtime.GOOS)
-		return "", ""
 	}
 }

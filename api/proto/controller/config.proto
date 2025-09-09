@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package cfgms.api.controller;
 
-option go_package = "cfgms/pkg/api/proto/controller";
+option go_package = "github.com/cfgis/cfgms/api/proto/controller";
 
 import "common/common.proto";
 import "google/protobuf/timestamp.proto";
@@ -11,6 +11,7 @@ service ConfigurationService {
   rpc GetConfiguration(ConfigRequest) returns (ConfigResponse);
   rpc ReportConfigStatus(ConfigStatusReport) returns (common.Status);
   rpc ValidateConfig(ConfigValidationRequest) returns (ConfigValidationResponse);
+  rpc StreamConfigurationUpdates(ConfigStreamRequest) returns (stream ConfigurationUpdate);
 }
 
 message ConfigRequest {
@@ -46,9 +47,39 @@ message ConfigValidationRequest {
 message ConfigValidationResponse {
   common.Status status = 1;
   repeated ValidationError errors = 2;
+  map<string, string> metadata = 3;
 }
 
 message ValidationError {
+  enum Level {
+    INFO = 0;
+    WARNING = 1;
+    ERROR = 2;
+    CRITICAL = 3;
+  }
+  
   string field = 1;
   string message = 2;
+  Level level = 3;
+  string code = 4;
+  string suggestion = 5;
+}
+
+message ConfigStreamRequest {
+  string steward_id = 1;
+  repeated string modules = 2;
+}
+
+message ConfigurationUpdate {
+  string steward_id = 1;
+  bytes config = 2;  // JSON encoded configuration
+  string version = 3;
+  google.protobuf.Timestamp timestamp = 4;
+  enum UpdateType {
+    UNKNOWN = 0;
+    INITIAL = 1;
+    UPDATE = 2;
+    DELETE = 3;
+  }
+  UpdateType update_type = 5;
 }

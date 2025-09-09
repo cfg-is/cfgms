@@ -1,0 +1,110 @@
+name: activedirectory
+version: "1.0.0"
+description: "Local Active Directory integration module using Windows system context for secure, credential-free AD management on domain controllers"
+
+# Supported execution environments
+executors:
+  - steward  # Local AD management using Windows system context APIs
+
+# Required interfaces for module compliance
+interfaces:
+  - Get
+  - Set
+  - Test
+
+# Platform support - Windows only for system context APIs
+platforms:
+  - windows  # Required - uses Windows ADSI/DirectoryServices APIs
+
+# Resource type this module manages
+resource_types:
+  - activedirectory_local
+  - activedirectory_system
+
+# Required permissions
+permissions:
+  windows:
+    - "Log on as a service"
+    - "Act as part of operating system" # For system context access
+    - "Local system account context"
+
+# Configuration schema - minimal due to system context
+configuration:
+  required_fields:
+    - operation_type
+    - object_types
+  optional_fields:
+    - search_base
+    - page_size
+    - request_timeout
+    - managed_fields
+    - enable_dna_collection
+
+# Default configuration values
+defaults:
+  page_size: 100
+  request_timeout: "30s"
+  operation_type: "read"
+  enable_dna_collection: true
+
+# Supported object types
+supported_object_types:
+  - user
+  - group
+  - organizational_unit
+  - computer
+  - gpo
+  - group_policy
+  - domain_trust
+  - trust
+
+# Supported operations
+supported_operations:
+  read:
+    - query
+    - list
+    - status
+    - dna_collection
+  write:
+    - create_user
+    - update_user
+    - delete_user
+    - create_group
+    - update_group
+    - delete_group
+
+# Dependencies
+dependencies:
+  system:
+    windows:
+      - "Active Directory Domain Services"
+      - "Windows Management Framework"
+
+# Health checks
+health_checks:
+  - name: "system_context"
+    description: "Verify system context access to AD"
+    interval: "60s"
+  - name: "ad_accessibility"
+    description: "Test local AD accessibility"
+    interval: "300s"
+
+# Monitoring
+monitoring:
+  metrics:
+    - "ad_local_requests_total"
+    - "ad_local_request_duration_seconds"
+    - "ad_local_errors_total"
+    - "ad_dna_collection_status"
+  
+# Security considerations
+security:
+  sensitive_fields: []  # No stored credentials
+  encryption_required: []  # No credential storage
+  audit_operations:
+    - create_user
+    - update_user
+    - delete_user
+    - create_group
+    - update_group
+    - delete_group

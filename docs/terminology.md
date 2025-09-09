@@ -27,7 +27,7 @@ The **Controller** is the central management server of the CFGMS system.
 
 ### Steward
 
-The **Steward** is the cross-platform agent that runs on managed endpoints.
+The **Steward** is the cross-platform component that runs on managed endpoints.
 
 **Primary Responsibilities:**
 
@@ -47,7 +47,7 @@ The **Steward** is the cross-platform agent that runs on managed endpoints.
 
 ### Outpost
 
-The **Outpost** is a specialized proxy cache agent with network monitoring capabilities.
+The **Outpost** is a specialized proxy cache component with network monitoring capabilities.
 
 **Primary Responsibilities:**
 

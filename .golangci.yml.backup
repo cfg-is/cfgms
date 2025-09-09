@@ -1,0 +1,25 @@
+# golangci-lint configuration for CFGMS
+# Compatible with golangci-lint v2.2.2
+
+run:
+  timeout: 5m
+  tests: true
+  skip-dirs:
+    - vendor
+
+linters-settings:
+  errcheck:
+    check-type-assertions: true
+    check-blank: true
+
+linters:
+  enable:
+    - errcheck      # Critical: unchecked errors
+    - govet        # Critical: potential bugs  
+    - staticcheck  # Important: code quality
+    - unused       # Cleanup: dead code
+    - ineffassign  # Cleanup: ineffectual assignments
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

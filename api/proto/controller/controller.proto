@@ -2,10 +2,11 @@ syntax = "proto3";
 
 package cfgms.api.controller;
 
-option go_package = "cfgms/pkg/api/proto/controller";
+option go_package = "github.com/cfgis/cfgms/api/proto/controller";
 
 import "common/common.proto";
 import "common/auth.proto";
+import "google/protobuf/timestamp.proto";
 
 service Controller {
   // Authentication
@@ -24,12 +25,22 @@ message RegisterRequest {
   string version = 1;
   common.DNA initial_dna = 2;
   common.Credentials credentials = 3;
+  
+  // Sync verification for reconnections
+  google.protobuf.Timestamp last_known_sync = 4;
+  string expected_sync_fingerprint = 5;
+  bool is_reconnection = 6;
 }
 
 message RegisterResponse {
   string steward_id = 1;
   common.Status status = 2;
   common.Token token = 3;
+  
+  // Sync verification response
+  common.SyncStatus sync_status = 4;
+  bool requires_dna_resync = 5;
+  bool requires_config_resync = 6;
 }
 
 message HeartbeatRequest {

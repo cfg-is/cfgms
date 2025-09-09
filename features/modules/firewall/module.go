@@ -2,7 +2,6 @@ package firewall
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"strings"
 	"sync"
@@ -36,6 +35,73 @@ type firewallConfig struct {
 	Destination string `yaml:"destination"`
 	Description string `yaml:"description,omitempty"`
 	Enabled     bool   `yaml:"enabled,omitempty"`
+}
+
+// AsMap returns the configuration as a map for efficient field-by-field comparison
+func (c *firewallConfig) AsMap() map[string]interface{} {
+	result := map[string]interface{}{
+		"name":        c.Name,
+		"action":      c.Action,
+		"source":      c.Source,
+		"destination": c.Destination,
+		"enabled":     c.Enabled,
+	}
+
+	if c.Protocol != "" {
+		result["protocol"] = c.Protocol
+	}
+	if c.Service != "" {
+		result["service"] = c.Service
+	}
+	if c.Port != 0 {
+		result["port"] = c.Port
+	}
+	if len(c.Ports) > 0 {
+		result["ports"] = c.Ports
+	}
+	if c.Description != "" {
+		result["description"] = c.Description
+	}
+
+	return result
+}
+
+// ToYAML serializes the configuration to YAML for export/storage
+func (c *firewallConfig) ToYAML() ([]byte, error) {
+	return yaml.Marshal(c)
+}
+
+// FromYAML deserializes YAML data into the configuration
+func (c *firewallConfig) FromYAML(data []byte) error {
+	return yaml.Unmarshal(data, c)
+}
+
+// Validate ensures the configuration is valid
+func (c *firewallConfig) Validate() error {
+	return c.validate()
+}
+
+// GetManagedFields returns the list of fields this configuration manages
+func (c *firewallConfig) GetManagedFields() []string {
+	fields := []string{"name", "action", "source", "destination", "enabled"}
+
+	if c.Protocol != "" {
+		fields = append(fields, "protocol")
+	}
+	if c.Service != "" {
+		fields = append(fields, "service")
+	}
+	if c.Port != 0 {
+		fields = append(fields, "port")
+	}
+	if len(c.Ports) > 0 {
+		fields = append(fields, "ports")
+	}
+	if c.Description != "" {
+		fields = append(fields, "description")
+	}
+
+	return fields
 }
 
 // validateConfig checks if the configuration is valid
@@ -106,104 +172,78 @@ func isValidIPOrCIDR(s string) bool {
 }
 
 // Set creates or updates a firewall rule according to the configuration
-func (m *firewallModule) Set(ctx context.Context, resourceID string, configData string) error {
-	var config firewallConfig
-	if err := yaml.Unmarshal([]byte(configData), &config); err != nil {
-		return fmt.Errorf("failed to parse config: %w", err)
+func (m *firewallModule) Set(ctx context.Context, resourceID string, config modules.ConfigState) error {
+	if config == nil {
+		return ErrInvalidName // reuse existing error for invalid input
+	}
+
+	// Convert ConfigState to firewallConfig
+	configMap := config.AsMap()
+	firewallConf := &firewallConfig{}
+
+	if name, ok := configMap["name"].(string); ok {
+		firewallConf.Name = name
+	}
+	if action, ok := configMap["action"].(string); ok {
+		firewallConf.Action = action
+	}
+	if protocol, ok := configMap["protocol"].(string); ok {
+		firewallConf.Protocol = protocol
+	}
+	if service, ok := configMap["service"].(string); ok {
+		firewallConf.Service = service
+	}
+	if port, ok := configMap["port"].(int); ok {
+		firewallConf.Port = port
+	}
+	if ports, ok := configMap["ports"].([]int); ok {
+		firewallConf.Ports = ports
+	} else if portsInterface, ok := configMap["ports"].([]interface{}); ok {
+		// Handle YAML unmarshaling which might give []interface{}
+		for _, p := range portsInterface {
+			if portInt, ok := p.(int); ok {
+				firewallConf.Ports = append(firewallConf.Ports, portInt)
+			}
+		}
+	}
+	if source, ok := configMap["source"].(string); ok {
+		firewallConf.Source = source
+	}
+	if destination, ok := configMap["destination"].(string); ok {
+		firewallConf.Destination = destination
+	}
+	if description, ok := configMap["description"].(string); ok {
+		firewallConf.Description = description
+	}
+	if enabled, ok := configMap["enabled"].(bool); ok {
+		firewallConf.Enabled = enabled
 	}
 
 	// Validate configuration
-	if err := config.validate(); err != nil {
+	if err := firewallConf.validate(); err != nil {
 		return err
 	}
 
 	// Store the rule
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.rules[resourceID] = config
+	m.rules[resourceID] = *firewallConf
 
 	return nil
 }
 
 // Get retrieves the current configuration of a firewall rule
-func (m *firewallModule) Get(ctx context.Context, resourceID string) (string, error) {
+func (m *firewallModule) Get(ctx context.Context, resourceID string) (modules.ConfigState, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	// Get the rule
 	rule, exists := m.rules[resourceID]
 	if !exists {
-		return "", ErrRuleNotFound
+		return nil, ErrRuleNotFound
 	}
 
-	// Convert to YAML
-	data, err := yaml.Marshal(rule)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal config: %w", err)
-	}
-
-	return string(data), nil
-}
-
-// Test verifies if the current firewall rule state matches the desired configuration
-func (m *firewallModule) Test(ctx context.Context, resourceID string, configData string) (bool, error) {
-	var desiredConfig firewallConfig
-	if err := yaml.Unmarshal([]byte(configData), &desiredConfig); err != nil {
-		return false, fmt.Errorf("failed to parse config: %w", err)
-	}
-
-	// Validate desired configuration
-	if err := desiredConfig.validate(); err != nil {
-		return false, err
-	}
-
-	// Get current state
-	currentConfig, err := m.Get(ctx, resourceID)
-	if err != nil {
-		return false, err
-	}
-
-	var currentState firewallConfig
-	if err := yaml.Unmarshal([]byte(currentConfig), &currentState); err != nil {
-		return false, fmt.Errorf("failed to parse current state: %w", err)
-	}
-
-	// Compare configurations
-	if desiredConfig.Name != currentState.Name {
-		return false, nil
-	}
-	if desiredConfig.Action != currentState.Action {
-		return false, nil
-	}
-	if desiredConfig.Protocol != currentState.Protocol {
-		return false, nil
-	}
-	if desiredConfig.Service != currentState.Service {
-		return false, nil
-	}
-	if desiredConfig.Port != currentState.Port {
-		return false, nil
-	}
-	if len(desiredConfig.Ports) != len(currentState.Ports) {
-		return false, nil
-	}
-	for i, port := range desiredConfig.Ports {
-		if port != currentState.Ports[i] {
-			return false, nil
-		}
-	}
-	if desiredConfig.Source != currentState.Source {
-		return false, nil
-	}
-	if desiredConfig.Destination != currentState.Destination {
-		return false, nil
-	}
-	if desiredConfig.Description != currentState.Description {
-		return false, nil
-	}
-	if desiredConfig.Enabled != currentState.Enabled {
-		return false, nil
-	}
-
-	return true, nil
+	// Return a copy of the rule as ConfigState
+	ruleCopy := rule
+	return &ruleCopy, nil
 }

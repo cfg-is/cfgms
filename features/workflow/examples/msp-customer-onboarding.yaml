@@ -1,0 +1,340 @@
+name: "msp-customer-onboarding-automation"
+description: "Complete MSP customer onboarding workflow integrating M365, ConnectWise, and ITGlue"
+version: "1.0"
+
+variables:
+  # Customer Information
+  customer_name: "Acme Corporation"
+  customer_domain: "acme-corp.com"
+  customer_primary_contact: "john.doe@acme-corp.com"
+  
+  # ConnectWise Configuration
+  connectwise_company_id: ""
+  connectwise_api_url: "https://api-na.myconnectwise.net"
+  connectwise_client_id: "your-client-id"
+  
+  # Microsoft 365 Configuration
+  m365_tenant_id: "your-tenant-id"
+  m365_client_id: "your-client-id"
+  m365_client_secret: "your-client-secret"
+  
+  # ITGlue Configuration
+  itglue_api_key: "your-itglue-api-key"
+  itglue_organization_id: ""
+
+steps:
+  # Step 1: Create customer in ConnectWise Manage
+  - name: "create-connectwise-company"
+    type: "api"
+    api:
+      provider: "connectwise"
+      service: "manage"
+      operation: "companies"
+      parameters:
+        identifier: "{{ .customer_name | replace \" \" \"-\" | lower }}"
+        name: "{{ .customer_name }}"
+        status:
+          id: 1  # Active status
+        type:
+          id: 7  # Customer type
+        addressLine1: "123 Business St"
+        city: "Business City"
+        state: "CA"
+        zip: "90210"
+        country: "USA"
+        phoneNumber: "(555) 123-4567"
+        website: "https://{{ .customer_domain }}"
+      auth:
+        type: "basic"
+        username: "{{ .connectwise_client_id }}"
+        password: "{{ .connectwise_api_key }}"
+      timeout: 30s
+      retry:
+        max_attempts: 3
+        initial_delay: 2s
+        backoff_multiplier: 2.0
+
+  # Step 2: Store ConnectWise company ID for later steps
+  - name: "store-company-id"
+    type: "conditional"
+    condition:
+      type: "variable"
+      variable: "create-connectwise-company_api_success"
+      operator: "eq"
+      value: true
+    steps:
+      - name: "set-company-id"
+        type: "http"
+        http:
+          url: "http://localhost:8080/internal/variables"
+          method: "POST"
+          body:
+            connectwise_company_id: "{{ .create-connectwise-company_api_response.id }}"
+
+  # Step 3: Create initial support ticket for onboarding
+  - name: "create-onboarding-ticket"
+    type: "api"
+    api:
+      provider: "connectwise"
+      service: "manage"
+      operation: "tickets"
+      parameters:
+        summary: "Customer Onboarding - {{ .customer_name }}"
+        company:
+          id: "{{ .create-connectwise-company_api_response.id }}"
+        board:
+          id: 31  # Service Board ID
+        status:
+          id: 2   # New status
+        priority:
+          id: 3   # Normal priority
+        initialDescription: |
+          Customer onboarding automation initiated for {{ .customer_name }}.
+          
+          Tasks to complete:
+          - Microsoft 365 tenant setup
+          - User account creation
+          - Security baseline configuration
+          - Documentation creation in ITGlue
+          
+          Domain: {{ .customer_domain }}
+          Primary Contact: {{ .customer_primary_contact }}
+      auth:
+        type: "basic"
+        username: "{{ .connectwise_client_id }}"
+        password: "{{ .connectwise_api_key }}"
+      timeout: 30s
+
+  # Step 4: Microsoft 365 Authentication
+  - name: "authenticate-m365"
+    type: "api"
+    api:
+      provider: "microsoft"
+      service: "oauth"
+      operation: "get_token"
+      auth:
+        type: "oauth2"
+        oauth2:
+          client_id: "{{ .m365_client_id }}"
+          client_secret: "{{ .m365_client_secret }}"
+          token_url: "https://login.microsoftonline.com/{{ .m365_tenant_id }}/oauth2/v2.0/token"
+          scopes: ["https://graph.microsoft.com/.default"]
+          grant_type: "client_credentials"
+      timeout: 30s
+
+  # Step 5: Apply M365 Security Baseline Configuration
+  - name: "apply-m365-security-baseline"
+    type: "parallel"
+    steps:
+      # Enable security defaults
+      - name: "enable-security-defaults"
+        type: "api"
+        api:
+          provider: "microsoft"
+          service: "security"
+          operation: "enable_security_defaults"
+          auth:
+            type: "bearer"
+            bearer_token: "{{ .authenticate_m365_api_response.access_token }}"
+
+      # Configure conditional access policies
+      - name: "configure-conditional-access"
+        type: "api"
+        api:
+          provider: "microsoft"
+          service: "security"
+          operation: "create_conditional_access_policy"
+          parameters:
+            displayName: "{{ .customer_name }} - Require MFA for All Users"
+            state: "enabled"
+            conditions:
+              users:
+                includeUsers: ["All"]
+              applications:
+                includeApplications: ["All"]
+            grantControls:
+              operator: "OR"
+              builtInControls: ["mfa"]
+          auth:
+            type: "bearer"
+            bearer_token: "{{ .authenticate_m365_api_response.access_token }}"
+
+      # Configure Exchange Online protection
+      - name: "configure-exchange-protection"
+        type: "api"
+        api:
+          provider: "microsoft"
+          service: "exchange"
+          operation: "configure_anti_phishing_policy"
+          parameters:
+            name: "{{ .customer_name }} Anti-Phishing Policy"
+            enableMailboxIntelligence: true
+            enableSpoofIntelligence: true
+            enableUnauthenticatedSender: true
+          auth:
+            type: "bearer"
+            bearer_token: "{{ .authenticate_m365_api_response.access_token }}"
+
+  # Step 6: Create admin user account
+  - name: "create-admin-user"
+    type: "api"
+    api:
+      provider: "microsoft"
+      service: "users"
+      operation: "create"
+      parameters:
+        displayName: "{{ .customer_name }} Admin"
+        userPrincipalName: "admin@{{ .customer_domain }}"
+        mailNickname: "admin"
+        passwordProfile:
+          forceChangePasswordNextSignIn: true
+          password: "TempPassword123!"
+        accountEnabled: true
+        usageLocation: "US"
+      auth:
+        type: "bearer"
+        bearer_token: "{{ .authenticate_m365_api_response.access_token }}"
+      timeout: 30s
+
+  # Step 7: Assign admin roles
+  - name: "assign-admin-roles"
+    type: "api"
+    api:
+      provider: "microsoft"
+      service: "users"
+      operation: "assign_role"
+      parameters:
+        user_id: "{{ .create-admin-user_api_response.id }}"
+        role_id: "62e90394-69f5-4237-9190-012177145e10"  # Global Administrator
+      auth:
+        type: "bearer"
+        bearer_token: "{{ .authenticate_m365_api_response.access_token }}"
+      timeout: 30s
+
+  # Step 8: Wait for M365 configuration propagation
+  - name: "wait-for-m365-propagation"
+    type: "delay"
+    delay:
+      duration: 60s
+      message: "Waiting for M365 configuration to propagate"
+
+  # Step 9: Create customer documentation in ITGlue
+  - name: "create-itglue-organization"
+    type: "api"
+    api:
+      provider: "itglue"
+      service: "organizations"
+      operation: "create"
+      parameters:
+        data:
+          type: "organizations"
+          attributes:
+            name: "{{ .customer_name }}"
+            organization-type-name: "Customer"
+            primary-domain: "{{ .customer_domain }}"
+            quick-notes: |
+              Customer onboarded on {{ .now }}.
+              
+              Microsoft 365 Tenant: {{ .m365_tenant_id }}
+              ConnectWise Company ID: {{ .create-connectwise-company_api_response.id }}
+              
+              Admin Account: admin@{{ .customer_domain }}
+              Primary Contact: {{ .customer_primary_contact }}
+      auth:
+        type: "api_key"
+        api_key: "{{ .itglue_api_key }}"
+        api_key_header: "x-api-key"
+      timeout: 30s
+
+  # Step 10: Create M365 configuration documentation
+  - name: "document-m365-configuration"
+    type: "api"
+    api:
+      provider: "itglue"
+      service: "flexible-assets"
+      operation: "create"
+      parameters:
+        data:
+          type: "flexible-assets"
+          attributes:
+            organization-id: "{{ .create-itglue-organization_api_response.data.id }}"
+            flexible-asset-type-id: 123456  # M365 Configuration asset type
+            traits:
+              tenant-id: "{{ .m365_tenant_id }}"
+              primary-domain: "{{ .customer_domain }}"
+              admin-account: "admin@{{ .customer_domain }}"
+              security-defaults-enabled: true
+              conditional-access-configured: true
+              anti-phishing-configured: true
+              onboarding-date: "{{ .now }}"
+      auth:
+        type: "api_key"
+        api_key: "{{ .itglue_api_key }}"
+        api_key_header: "x-api-key"
+      timeout: 30s
+
+  # Step 11: Update ConnectWise ticket with completion
+  - name: "update-onboarding-ticket"
+    type: "api"
+    api:
+      provider: "connectwise"
+      service: "manage"
+      operation: "update_ticket"
+      parameters:
+        ticket_id: "{{ .create-onboarding-ticket_api_response.id }}"
+        status:
+          id: 5  # Completed status
+        resolution: |
+          Customer onboarding completed successfully.
+          
+          Completed tasks:
+          ✓ ConnectWise company created (ID: {{ .create-connectwise-company_api_response.id }})
+          ✓ Microsoft 365 security baseline applied
+          ✓ Admin user account created (admin@{{ .customer_domain }})
+          ✓ Global Administrator role assigned
+          ✓ ITGlue organization and documentation created
+          
+          ITGlue Organization ID: {{ .create-itglue-organization_api_response.data.id }}
+          
+          Next steps:
+          - Provide customer with admin credentials
+          - Schedule security review meeting
+          - Begin user account creation process
+      auth:
+        type: "basic"
+        username: "{{ .connectwise_client_id }}"
+        password: "{{ .connectwise_api_key }}"
+      timeout: 30s
+
+  # Step 12: Send completion notification
+  - name: "send-completion-notification"
+    type: "webhook"
+    webhook:
+      url: "https://your-notification-service.com/msp-onboarding"
+      method: "POST"
+      headers:
+        Content-Type: "application/json"
+      payload:
+        event: "customer_onboarding_completed"
+        customer:
+          name: "{{ .customer_name }}"
+          domain: "{{ .customer_domain }}"
+          primary_contact: "{{ .customer_primary_contact }}"
+        connectwise:
+          company_id: "{{ .create-connectwise-company_api_response.id }}"
+          ticket_id: "{{ .create-onboarding-ticket_api_response.id }}"
+        microsoft365:
+          tenant_id: "{{ .m365_tenant_id }}"
+          admin_user_id: "{{ .create-admin-user_api_response.id }}"
+        itglue:
+          organization_id: "{{ .create-itglue-organization_api_response.data.id }}"
+        completion_time: "{{ .now }}"
+        workflow_execution_id: "{{ .workflow_execution_id }}"
+      auth:
+        type: "api_key"
+        api_key: "your-webhook-api-key"
+        api_key_header: "X-API-Key"
+      timeout: 15s
+
+timeout: 15m
+on_failure: "stop"

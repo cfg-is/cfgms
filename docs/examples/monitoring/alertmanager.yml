@@ -1,0 +1,140 @@
+# AlertManager configuration for CFGMS
+
+global:
+  smtp_smarthost: 'localhost:587'
+  smtp_from: 'alerts@cfgms.example.com'
+  smtp_auth_username: 'alerts@cfgms.example.com'
+  smtp_auth_password: 'your-smtp-password'
+
+# Route tree
+route:
+  group_by: ['alertname', 'component']
+  group_wait: 10s
+  group_interval: 10s
+  repeat_interval: 1h
+  receiver: 'default'
+  
+  routes:
+    # Critical alerts go to on-call immediately
+    - match:
+        severity: critical
+      receiver: 'critical-alerts'
+      group_wait: 5s
+      group_interval: 5s
+      repeat_interval: 15m
+    
+    # Controller-specific alerts
+    - match:
+        component: controller
+      receiver: 'controller-team'
+      group_wait: 30s
+      repeat_interval: 2h
+    
+    # Steward-specific alerts
+    - match:
+        component: steward
+      receiver: 'steward-team'
+      group_wait: 30s
+      repeat_interval: 2h
+    
+    # Monitoring system alerts
+    - match:
+        component: monitoring
+      receiver: 'monitoring-team'
+      repeat_interval: 4h
+
+# Receivers
+receivers:
+  - name: 'default'
+    email_configs:
+      - to: 'cfgms-team@example.com'
+        subject: 'CFGMS Alert: {{ .GroupLabels.alertname }}'
+        body: |
+          {{ range .Alerts }}
+          Alert: {{ .Annotations.summary }}
+          Description: {{ .Annotations.description }}
+          Severity: {{ .Labels.severity }}
+          Component: {{ .Labels.component }}
+          {{ end }}
+
+  - name: 'critical-alerts'
+    email_configs:
+      - to: 'cfgms-oncall@example.com'
+        subject: 'CRITICAL CFGMS Alert: {{ .GroupLabels.alertname }}'
+        body: |
+          CRITICAL ALERT DETECTED
+          
+          {{ range .Alerts }}
+          Alert: {{ .Annotations.summary }}
+          Description: {{ .Annotations.description }}
+          Component: {{ .Labels.component }}
+          Started: {{ .StartsAt }}
+          {{ end }}
+    
+    # Optional: Slack integration
+    slack_configs:
+      - api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+        channel: '#cfgms-alerts'
+        title: 'CRITICAL: {{ .GroupLabels.alertname }}'
+        text: |
+          {{ range .Alerts }}
+          *{{ .Annotations.summary }}*
+          {{ .Annotations.description }}
+          {{ end }}
+
+  - name: 'controller-team'
+    email_configs:
+      - to: 'cfgms-controller-team@example.com'
+        subject: 'CFGMS Controller Alert: {{ .GroupLabels.alertname }}'
+        body: |
+          Controller Alert Details:
+          
+          {{ range .Alerts }}
+          Alert: {{ .Annotations.summary }}
+          Description: {{ .Annotations.description }}
+          Instance: {{ .Labels.instance }}
+          {{ end }}
+
+  - name: 'steward-team'
+    email_configs:
+      - to: 'cfgms-steward-team@example.com'
+        subject: 'CFGMS Steward Alert: {{ .GroupLabels.alertname }}'
+        body: |
+          Steward Alert Details:
+          
+          {{ range .Alerts }}
+          Alert: {{ .Annotations.summary }}
+          Description: {{ .Annotations.description }}
+          {{ end }}
+
+  - name: 'monitoring-team'
+    email_configs:
+      - to: 'cfgms-monitoring-team@example.com'
+        subject: 'CFGMS Monitoring Alert: {{ .GroupLabels.alertname }}'
+        body: |
+          Monitoring System Alert:
+          
+          {{ range .Alerts }}
+          Alert: {{ .Annotations.summary }}
+          Description: {{ .Annotations.description }}
+          {{ end }}
+
+# Inhibit rules
+inhibit_rules:
+  # Inhibit warning alerts when critical alerts are firing
+  - source_match:
+      severity: 'critical'
+    target_match:
+      severity: 'warning'
+    equal: ['alertname', 'component', 'instance']
+
+  # Inhibit steward alerts when controller is down
+  - source_match:
+      alertname: 'CFGMSControllerDown'
+    target_match:
+      component: 'steward'
+    equal: ['instance']
+
+# Templates for custom messages
+templates:
+  - '/etc/alertmanager/templates/*.tmpl'

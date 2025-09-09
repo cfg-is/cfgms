@@ -8,7 +8,7 @@ package controller
 
 import (
 	context "context"
-	common "cfgms/pkg/api/proto/common"
+	common "github.com/cfgis/cfgms/api/proto/common"
 	grpc "google.golang.org/grpc"
 	codes "google.golang.org/grpc/codes"
 	status "google.golang.org/grpc/status"
@@ -20,9 +20,10 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	ConfigurationService_GetConfiguration_FullMethodName   = "/cfgms.api.controller.ConfigurationService/GetConfiguration"
-	ConfigurationService_ReportConfigStatus_FullMethodName = "/cfgms.api.controller.ConfigurationService/ReportConfigStatus"
-	ConfigurationService_ValidateConfig_FullMethodName     = "/cfgms.api.controller.ConfigurationService/ValidateConfig"
+	ConfigurationService_GetConfiguration_FullMethodName           = "/cfgms.api.controller.ConfigurationService/GetConfiguration"
+	ConfigurationService_ReportConfigStatus_FullMethodName         = "/cfgms.api.controller.ConfigurationService/ReportConfigStatus"
+	ConfigurationService_ValidateConfig_FullMethodName             = "/cfgms.api.controller.ConfigurationService/ValidateConfig"
+	ConfigurationService_StreamConfigurationUpdates_FullMethodName = "/cfgms.api.controller.ConfigurationService/StreamConfigurationUpdates"
 )
 
 // ConfigurationServiceClient is the client API for ConfigurationService service.
@@ -32,6 +33,7 @@ type ConfigurationServiceClient interface {
 	GetConfiguration(ctx context.Context, in *ConfigRequest, opts ...grpc.CallOption) (*ConfigResponse, error)
 	ReportConfigStatus(ctx context.Context, in *ConfigStatusReport, opts ...grpc.CallOption) (*common.Status, error)
 	ValidateConfig(ctx context.Context, in *ConfigValidationRequest, opts ...grpc.CallOption) (*ConfigValidationResponse, error)
+	StreamConfigurationUpdates(ctx context.Context, in *ConfigStreamRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ConfigurationUpdate], error)
 }
 
 type configurationServiceClient struct {
@@ -72,6 +74,25 @@ func (c *configurationServiceClient) ValidateConfig(ctx context.Context, in *Con
 	return out, nil
 }
 
+func (c *configurationServiceClient) StreamConfigurationUpdates(ctx context.Context, in *ConfigStreamRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ConfigurationUpdate], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &ConfigurationService_ServiceDesc.Streams[0], ConfigurationService_StreamConfigurationUpdates_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[ConfigStreamRequest, ConfigurationUpdate]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ConfigurationService_StreamConfigurationUpdatesClient = grpc.ServerStreamingClient[ConfigurationUpdate]
+
 // ConfigurationServiceServer is the server API for ConfigurationService service.
 // All implementations must embed UnimplementedConfigurationServiceServer
 // for forward compatibility.
@@ -79,6 +100,7 @@ type ConfigurationServiceServer interface {
 	GetConfiguration(context.Context, *ConfigRequest) (*ConfigResponse, error)
 	ReportConfigStatus(context.Context, *ConfigStatusReport) (*common.Status, error)
 	ValidateConfig(context.Context, *ConfigValidationRequest) (*ConfigValidationResponse, error)
+	StreamConfigurationUpdates(*ConfigStreamRequest, grpc.ServerStreamingServer[ConfigurationUpdate]) error
 	mustEmbedUnimplementedConfigurationServiceServer()
 }
 
@@ -97,6 +119,9 @@ func (UnimplementedConfigurationServiceServer) ReportConfigStatus(context.Contex
 }
 func (UnimplementedConfigurationServiceServer) ValidateConfig(context.Context, *ConfigValidationRequest) (*ConfigValidationResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ValidateConfig not implemented")
+}
+func (UnimplementedConfigurationServiceServer) StreamConfigurationUpdates(*ConfigStreamRequest, grpc.ServerStreamingServer[ConfigurationUpdate]) error {
+	return status.Errorf(codes.Unimplemented, "method StreamConfigurationUpdates not implemented")
 }
 func (UnimplementedConfigurationServiceServer) mustEmbedUnimplementedConfigurationServiceServer() {}
 func (UnimplementedConfigurationServiceServer) testEmbeddedByValue()                              {}
@@ -173,6 +198,17 @@ func _ConfigurationService_ValidateConfig_Handler(srv interface{}, ctx context.C
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ConfigurationService_StreamConfigurationUpdates_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(ConfigStreamRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(ConfigurationServiceServer).StreamConfigurationUpdates(m, &grpc.GenericServerStream[ConfigStreamRequest, ConfigurationUpdate]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ConfigurationService_StreamConfigurationUpdatesServer = grpc.ServerStreamingServer[ConfigurationUpdate]
+
 // ConfigurationService_ServiceDesc is the grpc.ServiceDesc for ConfigurationService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -193,6 +229,12 @@ var ConfigurationService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _ConfigurationService_ValidateConfig_Handler,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "StreamConfigurationUpdates",
+			Handler:       _ConfigurationService_StreamConfigurationUpdates_Handler,
+			ServerStreams: true,
+		},
+	},
 	Metadata: "controller/config.proto",
 }

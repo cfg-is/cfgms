@@ -1,15 +1,14 @@
 package main
 
 import (
-	"context"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
 
-	"cfgms/features/controller/config"
-	"cfgms/features/controller/server"
-	"cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/controller/server"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 func main() {

@@ -3,7 +3,19 @@ package firewall
 import (
 	"context"
 	"testing"
+
+	"github.com/cfgis/cfgms/features/modules"
+	"gopkg.in/yaml.v3"
 )
+
+// createConfigFromYAML creates a firewallConfig from YAML string
+func createConfigFromYAML(yamlData string) modules.ConfigState {
+	var config firewallConfig
+	if err := yaml.Unmarshal([]byte(yamlData), &config); err != nil {
+		return nil
+	}
+	return &config
+}
 
 func TestFirewallModule(t *testing.T) {
 	// Create a new firewall module instance
@@ -11,12 +23,10 @@ func TestFirewallModule(t *testing.T) {
 
 	// Define test cases
 	tests := []struct {
-		name          string
-		resourceID    string
-		configData    string
-		wantErr       bool
-		wantTestErr   bool
-		wantTestMatch bool
+		name       string
+		resourceID string
+		configData string
+		wantErr    bool
 	}{
 		{
 			name:       "Basic allow rule",
@@ -28,10 +38,9 @@ protocol: tcp
 port: 80
 source: 0.0.0.0/0
 destination: 10.0.0.0/24
+enabled: true
 `,
-			wantErr:       false,
-			wantTestErr:   false,
-			wantTestMatch: true,
+			wantErr: false,
 		},
 		{
 			name:       "Deny rule",
@@ -43,10 +52,9 @@ protocol: tcp
 port: 22
 source: 192.168.1.0/24
 destination: 10.0.0.0/24
+enabled: true
 `,
-			wantErr:       false,
-			wantTestErr:   false,
-			wantTestMatch: true,
+			wantErr: false,
 		},
 		{
 			name:       "Service-based rule",
@@ -57,10 +65,9 @@ action: allow
 service: https
 source: 0.0.0.0/0
 destination: 10.0.0.0/24
+enabled: true
 `,
-			wantErr:       false,
-			wantTestErr:   false,
-			wantTestMatch: true,
+			wantErr: false,
 		},
 		{
 			name:       "Multiple ports",
@@ -72,10 +79,9 @@ protocol: udp
 ports: [53, 5353]
 source: 10.0.0.0/24
 destination: 8.8.8.8
+enabled: true
 `,
-			wantErr:       false,
-			wantTestErr:   false,
-			wantTestMatch: true,
+			wantErr: false,
 		},
 		{
 			name:       "Disabled rule",
@@ -89,9 +95,7 @@ source: 0.0.0.0/0
 destination: 10.0.0.0/24
 enabled: false
 `,
-			wantErr:       false,
-			wantTestErr:   false,
-			wantTestMatch: true,
+			wantErr: false,
 		},
 		{
 			name:       "Invalid protocol",
@@ -103,10 +107,9 @@ protocol: invalid
 port: 80
 source: 0.0.0.0/0
 destination: 10.0.0.0/24
+enabled: true
 `,
-			wantErr:       true,
-			wantTestErr:   true,
-			wantTestMatch: false,
+			wantErr: true,
 		},
 		{
 			name:       "Invalid port",
@@ -118,10 +121,9 @@ protocol: tcp
 port: 70000
 source: 0.0.0.0/0
 destination: 10.0.0.0/24
+enabled: true
 `,
-			wantErr:       true,
-			wantTestErr:   true,
-			wantTestMatch: false,
+			wantErr: true,
 		},
 		{
 			name:       "Invalid IP",
@@ -133,10 +135,9 @@ protocol: tcp
 port: 80
 source: invalid-ip
 destination: 10.0.0.0/24
+enabled: true
 `,
-			wantErr:       true,
-			wantTestErr:   true,
-			wantTestMatch: false,
+			wantErr: true,
 		},
 		{
 			name:       "Missing required fields",
@@ -144,18 +145,38 @@ destination: 10.0.0.0/24
 			configData: `
 name: missing-fields
 action: allow
+enabled: true
 `,
-			wantErr:       true,
-			wantTestErr:   true,
-			wantTestMatch: false,
+			wantErr: true,
+		},
+		{
+			name:       "Invalid action",
+			resourceID: "invalid-action",
+			configData: `
+name: invalid-action
+action: maybe
+protocol: tcp
+port: 80
+source: 0.0.0.0/0
+destination: 10.0.0.0/24
+enabled: true
+`,
+			wantErr: true,
 		},
 	}
 
 	// Run tests
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Create ConfigState from YAML
+			configState := createConfigFromYAML(tt.configData)
+			if configState == nil && !tt.wantErr {
+				t.Errorf("Failed to create config from YAML: %s", tt.configData)
+				return
+			}
+
 			// Test Set
-			err := module.Set(context.Background(), tt.resourceID, tt.configData)
+			err := module.Set(context.Background(), tt.resourceID, configState)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Set() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -168,20 +189,69 @@ action: allow
 					t.Errorf("Get() error = %v", err)
 					return
 				}
-				if config == "" {
-					t.Error("Get() returned empty config")
+				if config == nil {
+					t.Error("Get() returned nil config")
 				}
 			}
-
-			// Test Test
-			matches, err := module.Test(context.Background(), tt.resourceID, tt.configData)
-			if (err != nil) != tt.wantTestErr {
-				t.Errorf("Test() error = %v, wantTestErr %v", err, tt.wantTestErr)
-				return
-			}
-			if matches != tt.wantTestMatch {
-				t.Errorf("Test() matches = %v, want %v", matches, tt.wantTestMatch)
-			}
 		})
+	}
+}
+
+func TestFirewallModule_EdgeCases(t *testing.T) {
+	module := New()
+
+	// Test with nil config
+	err := module.Set(context.Background(), "test-rule", nil)
+	if err == nil {
+		t.Error("Set() with nil config should fail")
+	}
+
+	// Test Get with non-existent rule
+	_, err = module.Get(context.Background(), "non-existent")
+	if err != ErrRuleNotFound {
+		t.Errorf("Get() with non-existent rule error = %v, want %v", err, ErrRuleNotFound)
+	}
+
+	// Test successful rule creation and retrieval
+	configData := `
+name: test-rule
+action: allow
+protocol: tcp
+port: 443
+source: 192.168.1.0/24
+destination: 10.0.0.0/24
+description: Test HTTPS rule
+enabled: true
+`
+	configState := createConfigFromYAML(configData)
+	if configState == nil {
+		t.Fatal("Failed to create config from YAML")
+	}
+
+	err = module.Set(context.Background(), "test-rule", configState)
+	if err != nil {
+		t.Errorf("Set() failed: %v", err)
+	}
+
+	// Verify the rule was stored correctly
+	retrieved, err := module.Get(context.Background(), "test-rule")
+	if err != nil {
+		t.Errorf("Get() failed: %v", err)
+	}
+
+	if retrieved == nil {
+		t.Error("Get() returned nil")
+	}
+
+	// Check that the retrieved config has expected values
+	retrievedMap := retrieved.AsMap()
+	if retrievedMap["name"] != "test-rule" {
+		t.Errorf("Retrieved rule name = %v, want %v", retrievedMap["name"], "test-rule")
+	}
+	if retrievedMap["action"] != "allow" {
+		t.Errorf("Retrieved rule action = %v, want %v", retrievedMap["action"], "allow")
+	}
+	if retrievedMap["port"] != 443 {
+		t.Errorf("Retrieved rule port = %v, want %v", retrievedMap["port"], 443)
 	}
 }

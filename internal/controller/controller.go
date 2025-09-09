@@ -2,20 +2,30 @@ package controller
 
 import (
 	"context"
-	"sync"
-
-	"cfgms/internal/controller/module"
 )
+
+// Module defines the interface that all modules must implement
+type Module interface {
+	// Name returns the name of the module
+	Name() string
+	
+	// Get returns the current state of the resource as YAML configuration
+	Get(ctx context.Context, resourceID string) (string, error)
+	
+	// Set applies the desired state to the resource
+	Set(ctx context.Context, resourceID string, configData string) error
+	
+	// Test validates if the current state matches the desired state
+	Test(ctx context.Context, resourceID string, configData string) (bool, error)
+}
 
 // Controller manages the core CFGMS functionality
 type Controller struct {
-	mu sync.RWMutex
-
 	// Configuration for the controller
 	config *Config
 
 	// Module registry
-	modules map[string]module.Module
+	modules map[string]Module
 
 	// Shutdown management
 	shutdown chan struct{}
@@ -41,7 +51,7 @@ func New(cfg *Config) (*Controller, error) {
 
 	return &Controller{
 		config:   cfg,
-		modules:  make(map[string]module.Module),
+		modules:  make(map[string]Module),
 		shutdown: make(chan struct{}),
 	}, nil
 }

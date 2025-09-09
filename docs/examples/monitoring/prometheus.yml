@@ -1,0 +1,85 @@
+# Prometheus Configuration for CFGMS
+# This configuration sets up Prometheus to scrape metrics from CFGMS components
+
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+  external_labels:
+    cluster: 'cfgms-production'
+    environment: 'production'
+
+# Rule files specifies a list of globs for rule files
+rule_files:
+  - "cfgms_alerts.yml"
+
+# Alertmanager configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          - alertmanager:9093
+
+# Scrape configurations
+scrape_configs:
+  # CFGMS Controller monitoring
+  - job_name: 'cfgms-controller'
+    static_configs:
+      - targets: ['cfgms-controller:9080']
+    metrics_path: '/api/v1/monitoring/metrics'
+    scrape_interval: 30s
+    scrape_timeout: 10s
+    scheme: http
+    params:
+      format: ['prometheus']
+    basic_auth:
+      username: 'monitoring'
+      password: 'your-api-key'
+    # Optional: TLS configuration for HTTPS
+    # tls_config:
+    #   ca_file: /etc/ssl/certs/ca.pem
+    #   cert_file: /etc/ssl/certs/client.pem
+    #   key_file: /etc/ssl/private/client.key
+    #   insecure_skip_verify: false
+
+  # CFGMS Health checks
+  - job_name: 'cfgms-health'
+    static_configs:
+      - targets: ['cfgms-controller:9080']
+    metrics_path: '/api/v1/monitoring/health'
+    scrape_interval: 15s
+    scrape_timeout: 5s
+    scheme: http
+    basic_auth:
+      username: 'monitoring'
+      password: 'your-api-key'
+
+  # Multiple controller instances (for scaled deployments)
+  - job_name: 'cfgms-controllers'
+    static_configs:
+      - targets: 
+        - 'cfgms-controller-1:9080'
+        - 'cfgms-controller-2:9080'
+        - 'cfgms-controller-3:9080'
+    metrics_path: '/api/v1/monitoring/metrics'
+    scrape_interval: 30s
+    basic_auth:
+      username: 'monitoring'
+      password: 'your-api-key'
+
+# Remote write configuration for long-term storage
+remote_write:
+  - url: "https://prometheus-remote-storage:9201/api/v1/write"
+    basic_auth:
+      username: 'cfgms'
+      password: 'remote-storage-password'
+    queue_config:
+      max_samples_per_send: 1000
+      max_shards: 200
+      capacity: 2500
+
+# Remote read configuration
+remote_read:
+  - url: "https://prometheus-remote-storage:9201/api/v1/read"
+    basic_auth:
+      username: 'cfgms'
+      password: 'remote-storage-password'

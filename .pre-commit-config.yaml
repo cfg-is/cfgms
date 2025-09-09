@@ -1,0 +1,164 @@
+# Pre-commit Hooks Configuration for CFGMS
+# 
+# This file provides OPTIONAL pre-commit hooks for security scanning
+# Installation: pip install pre-commit && pre-commit install
+# Bypass when needed: git commit --no-verify
+#
+# Performance optimized: hooks run only on changed files for development velocity
+
+repos:
+  # Go security pattern analysis with gosec
+  - repo: https://github.com/securecodewarrior/gosec
+    rev: v2.22.0
+    hooks:
+      - id: gosec
+        name: gosec security scan
+        description: "Run gosec Go security analysis on changed files"
+        entry: gosec
+        language: golang
+        files: \.go$
+        args: 
+          - "-fmt=compact"
+          - "-quiet"
+          - "-tests=false"
+          - "-severity=medium"
+          - "-confidence=medium"
+        pass_filenames: true
+        require_serial: false
+        stages: [commit]
+
+  # Go static analysis with staticcheck (curated rules)
+  - repo: local
+    hooks:
+      - id: staticcheck-changed
+        name: staticcheck (changed files)
+        description: "Run staticcheck static analysis on changed Go files"
+        entry: sh
+        language: system
+        files: \.go$
+        args:
+          - "-c"
+          - |
+            if command -v staticcheck >/dev/null 2>&1; then
+              if [ -f staticcheck.conf ]; then
+                staticcheck -config staticcheck.conf "$@"
+              else
+                staticcheck "$@"
+              fi
+            else
+              echo "⚠️  staticcheck not installed - skipping (run: go install honnef.co/go/tools/cmd/staticcheck@latest)"
+              exit 0
+            fi
+        stages: [commit]
+
+  # Go formatting and basic checks
+  - repo: https://github.com/dnephin/pre-commit-golang
+    rev: v0.5.1
+    hooks:
+      - id: go-fmt
+        name: go fmt
+        description: "Format Go code with gofmt"
+        stages: [commit]
+      
+      - id: go-imports
+        name: go imports
+        description: "Update Go import lines"
+        stages: [commit]
+        args: ["-local", "github.com/cfgis/cfgms"]
+      
+      - id: go-vet-mod
+        name: go vet
+        description: "Run go vet on Go files"
+        stages: [commit]
+      
+      - id: go-mod-tidy
+        name: go mod tidy
+        description: "Tidy Go modules"
+        stages: [commit]
+
+  # General file checks (fast, always available)
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+        name: trim trailing whitespace
+        description: "Remove trailing whitespace"
+        stages: [commit]
+        
+      - id: end-of-file-fixer
+        name: fix end of files
+        description: "Ensure files end with newline"
+        stages: [commit]
+        
+      - id: check-yaml
+        name: check yaml
+        description: "Validate YAML files"
+        stages: [commit]
+        
+      - id: check-json
+        name: check json
+        description: "Validate JSON files"
+        stages: [commit]
+        exclude: '\.vscode/.*\.json$'
+        
+      - id: check-toml
+        name: check toml
+        description: "Validate TOML files"
+        stages: [commit]
+        
+      - id: check-merge-conflict
+        name: check merge conflicts
+        description: "Check for merge conflict markers"
+        stages: [commit]
+        
+      - id: check-added-large-files
+        name: check large files
+        description: "Prevent large files from being committed"
+        args: ['--maxkb=1024']  # 1MB limit
+        stages: [commit]
+
+  # Security-focused checks
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        name: detect secrets
+        description: "Detect secrets in code"
+        args: ['--baseline', '.secrets.baseline']
+        stages: [commit]
+        exclude: |
+          (?x)^(
+              .*\.lock$|
+              .*\.log$|
+              features/controller/certs/.*|
+              test/.*\.pem$|
+              test/.*\.key$|
+              test/.*\.crt$
+          )$
+
+# Configuration for development velocity
+default_stages: [commit]
+default_language_version:
+  python: python3
+
+# Fail fast for performance
+fail_fast: false
+
+# Minimum pre-commit version
+minimum_pre_commit_version: '3.0.0'
+
+# CI configuration  
+ci:
+  autofix_commit_msg: |
+    🤖 Auto-fix pre-commit hooks
+
+    [pre-commit.ci] auto fixes from pre-commit.com hooks
+  autofix_prs: true
+  autoupdate_branch: 'develop'
+  autoupdate_commit_msg: |
+    🔄 Update pre-commit hooks
+
+    [pre-commit.ci] pre-commit autoupdate
+  autoupdate_schedule: monthly
+  skip: []
+  submodules: false

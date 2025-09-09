@@ -6,6 +6,11 @@ bin/
 *.so
 *.dylib
 
+# Project binaries (built from cmd/ directories)
+/cfgctl
+/controller
+/steward
+
 # Test binary, built with 'go test -c'
 *.test
 
@@ -27,3 +32,22 @@ Thumbs.db
 
 # Build artifacts
 dist/
+
+# Certificate files and keys (auto-generated during runtime/testing)
+certs/
+*.pem
+*.crt
+*.key
+
+# Configuration files that might contain sensitive data
+config.yaml
+*.env
+.env.local
+
+.obsidian/
+
+# Test/development storage data
+features/controller/data/
+**/cfgms-storage/
+.env.test
+docker-compose.test.override.yml

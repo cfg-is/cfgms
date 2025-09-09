@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	testutil "cfgms/pkg/testing"
+	testutil "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // TestSetup holds common test dependencies and cleanup functions

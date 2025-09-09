@@ -7,8 +7,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"cfgms/features/controller/config"
-	testutil "cfgms/pkg/testing"
+	"github.com/cfgis/cfgms/features/controller/config"
+	testutil "github.com/cfgis/cfgms/pkg/testing"
 )
 
 func TestControllerCreation(t *testing.T) {
@@ -58,23 +58,64 @@ func TestControllerLifecycle(t *testing.T) {
 	err = ctrl.Start(ctx)
 	assert.NoError(t, err)
 
-	// Verify start logged properly
+	// Verify start logged properly - certificate management and REST API adds extra logs
 	infoLogs := logger.GetLogs("info")
-	assert.GreaterOrEqual(t, len(infoLogs), 2)
-	assert.Equal(t, "Starting controller", infoLogs[0].Message)
-	assert.Equal(t, "Controller started successfully", infoLogs[1].Message)
+	assert.GreaterOrEqual(t, len(infoLogs), 8)
+	
+	// Convert logs to messages for easier checking
+	messages := make([]string, len(infoLogs))
+	for i, log := range infoLogs {
+		messages[i] = log.Message
+	}
+	
+	// Verify required messages are present (order may vary based on certificate state)
+	assert.Contains(t, messages, "Loaded existing Certificate Authority")
+	assert.Contains(t, messages, "Generated default API key")
+	assert.Contains(t, messages, "Starting controller")
+	assert.Contains(t, messages, "TLS enabled for gRPC server with certificate management")
+	assert.Contains(t, messages, "Controller server started")
+	assert.Contains(t, messages, "REST API server started")
+	assert.Contains(t, messages, "Controller started successfully")
+	
+	// Certificate message can be either "Using existing" or "Generating new" depending on environment
+	certificateFound := false
+	httpCertificateFound := false
+	for _, msg := range messages {
+		if msg == "Using existing server certificate" || msg == "Generating new server certificate" || msg == "Generated new server certificate" {
+			certificateFound = true
+		}
+		if msg == "Using existing server certificate for HTTP server" || msg == "Generated new server certificate for HTTP server" {
+			httpCertificateFound = true
+		}
+	}
+	assert.True(t, certificateFound, "Expected certificate management message not found in logs: %v", messages)
+	assert.True(t, httpCertificateFound, "Expected HTTP certificate message not found in logs: %v", messages)
 
 	// Stop the controller
 	err = ctrl.Stop(ctx)
 	assert.NoError(t, err)
 
-	// Verify stop logged properly
+	// Verify stop logged properly - check that required messages exist
 	infoLogs = logger.GetLogs("info")
-	assert.GreaterOrEqual(t, len(infoLogs), 4)
-	assert.Equal(t, "Starting controller", infoLogs[0].Message)
-	assert.Equal(t, "Controller started successfully", infoLogs[1].Message)
-	assert.Equal(t, "Stopping controller", infoLogs[2].Message)
-	assert.Equal(t, "Controller stopped successfully", infoLogs[3].Message)
+	assert.GreaterOrEqual(t, len(infoLogs), 10)
+	
+	// Update messages slice with all current logs
+	messages = make([]string, len(infoLogs))
+	for i, log := range infoLogs {
+		messages[i] = log.Message
+	}
+	
+	// Verify required startup messages are present
+	assert.Contains(t, messages, "Starting controller")
+	assert.Contains(t, messages, "Controller server started")
+	assert.Contains(t, messages, "REST API server started")
+	assert.Contains(t, messages, "Controller started successfully")
+	
+	// Verify required shutdown messages are present
+	assert.Contains(t, messages, "Stopping controller")
+	assert.Contains(t, messages, "Shutting down REST API server")
+	assert.Contains(t, messages, "Shutting down controller server")
+	assert.Contains(t, messages, "Controller stopped successfully")
 }
 
 func TestModuleRegistration(t *testing.T) {

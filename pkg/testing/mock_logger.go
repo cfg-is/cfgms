@@ -1,9 +1,10 @@
 package testing
 
 import (
+	"context"
 	"sync"
 
-	"cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // MockLogger provides a mock implementation of logging.Logger for testing
@@ -81,6 +82,33 @@ func (l *MockLogger) Fatal(msg string, keysAndValues ...interface{}) {
 		Message: msg,
 		Data:    keysAndValues,
 	})
+}
+
+// Context-aware logging methods
+
+// DebugCtx logs a debug message with context
+func (l *MockLogger) DebugCtx(ctx context.Context, msg string, keysAndValues ...interface{}) {
+	l.Debug(msg, keysAndValues...)
+}
+
+// InfoCtx logs an info message with context
+func (l *MockLogger) InfoCtx(ctx context.Context, msg string, keysAndValues ...interface{}) {
+	l.Info(msg, keysAndValues...)
+}
+
+// WarnCtx logs a warning message with context
+func (l *MockLogger) WarnCtx(ctx context.Context, msg string, keysAndValues ...interface{}) {
+	l.Warn(msg, keysAndValues...)
+}
+
+// ErrorCtx logs an error message with context
+func (l *MockLogger) ErrorCtx(ctx context.Context, msg string, keysAndValues ...interface{}) {
+	l.Error(msg, keysAndValues...)
+}
+
+// FatalCtx logs a fatal message with context but doesn't exit in the mock implementation
+func (l *MockLogger) FatalCtx(ctx context.Context, msg string, keysAndValues ...interface{}) {
+	l.Fatal(msg, keysAndValues...)
 }
 
 // GetLogs returns all logs of a specific level

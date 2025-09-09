@@ -6,6 +6,31 @@ CFGMS is a modern configuration management system designed with resilience, secu
 
 The project is in early development. Core architecture and structure have been implemented, but many components are still being developed.
 
+### Project Management
+Development progress is tracked through the **"CFGMS Development Roadmap"** GitHub Project:
+https://github.com/orgs/cfg-is/projects/1
+
+This project board provides real-time visibility into:
+- Current development priorities and milestones
+- Issue tracking and feature requests
+- Sprint planning and task organization
+- Overall project completion status
+
+## Platform Support
+
+CFGMS is designed for cross-platform deployment across diverse infrastructure environments:
+
+### Steward (Agent) Support
+- **Linux**: AMD64 & ARM64 - Full support across distributions
+- **Windows**: AMD64 & ARM64 - Windows 10, 11, Server 2019+
+- **macOS**: ARM64 (M series) - Apple Silicon Macs
+
+### Controller Support  
+- **Linux**: AMD64 - Primary target for production deployments
+- **Windows**: AMD64 - Development and testing environments
+
+For detailed platform information, installation instructions, and deployment architectures, see [docs/deployment/platform-support.md](docs/deployment/platform-support.md).
+
 ## Development
 
 CFGMS follows the GitFlow branching model:
@@ -17,32 +42,20 @@ CFGMS follows the GitFlow branching model:
 
 ## Next Steps
 
-- [ ] Implement the testing framework
-  - [ ] Write unit tests for the controller components
-  - [ ] Write unit tests for the steward components
-  - [ ] Expand integration tests
+For current development priorities and detailed roadmap information, please refer to:
 
-- [ ] Implement secure communication layers
-  - [ ] Set up gRPC with mTLS for internal agent communication
-  - [ ] Implement REST API with HTTPS and API keys
-  - [ ] Add optional OpenZiti integration for zero-trust networking
-  - [ ] Implement certificate management for agent authentication
+- **Roadmap**: See [docs/product/roadmap.md](docs/product/roadmap.md) for the complete development roadmap and version planning
+- **Project Management**: Visit the [CFGMS Development Roadmap](https://github.com/orgs/cfg-is/projects/1) GitHub Project for real-time progress tracking and task management
 
-- [ ] Create the first basic module
-  - [ ] Implement a simple file management module as a proof of concept
-  - [ ] Validate the module interface design
-
-- [ ] Enhance the Steward component
-  - [ ] Implement health monitoring and self-healing capabilities
-  - [ ] Add support for offline operation
+The roadmap provides detailed milestone planning from v0.1.0 through v3.5.0+, including current development phases, feature priorities, and architectural concepts that guide the project's evolution.
 
 ## Security
 
 CFGMS implements a robust security architecture:
 
 - **Internal Communication**
-  - gRPC with mutual TLS for agent-controller communication
-  - Certificate-based authentication for agents
+  - gRPC with mutual TLS for steward-controller communication
+  - Certificate-based authentication for stewards
   - Optional OpenZiti integration for zero-trust networking
 
 - **External Access**
@@ -55,13 +68,37 @@ CFGMS implements a robust security architecture:
   - Secure defaults
   - Comprehensive logging
 
+## REST API
+
+CFGMS provides a comprehensive REST API for external system integration:
+
+- **Base URL**: `http://localhost:9080/api/v1` (configurable)
+- **Authentication**: API key-based authentication
+- **Endpoints**: Steward management, configuration, certificates, RBAC
+- **Format**: JSON with standardized response structure
+
+### Quick API Example
+
+```bash
+# Check system health
+curl http://localhost:9080/api/v1/health
+
+# List stewards (requires API key)
+curl -H "X-API-Key: your-key" http://localhost:9080/api/v1/stewards
+
+# Get steward configuration
+curl -H "X-API-Key: your-key" http://localhost:9080/api/v1/stewards/steward-001/config
+```
+
+See [docs/api/rest-api.md](docs/api/rest-api.md) for complete API documentation.
+
 ## Project Structure
 
 The project follows a feature-based organization:
 
 - `cmd/` - Command-line applications
   - `controller/` - Controller binary
-  - `agent/` - Agent (Steward) binary
+  - `steward/` - Steward binary
   - `cfgctl/` - CLI for interacting with the system
 
 - `features/` - Core feature implementations
@@ -90,8 +127,8 @@ cd cfgms
 # Build the controller
 go build -o bin/controller ./cmd/controller
 
-# Build the agent
-go build -o bin/agent ./cmd/agent
+# Build the steward
+go build -o bin/cfgms-steward ./cmd/steward
 ```
 
 ## Documentation

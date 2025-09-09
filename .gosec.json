@@ -1,0 +1,17 @@
+{
+  "_comment": "NOTE: This config file is currently not used by the Makefile.",
+  "_reason": "gosec config files have limitations with directory exclusions and generated file handling.",
+  "_solution": "The Makefile uses command-line flags for better control over exclusions.",
+  "_usage": "Use 'gosec -conf .gosec.json ./...' to test this config, but production uses command-line flags.",
+  
+  "global": {
+    "nosec": false,
+    "audit": false,
+    "exclude-generated": true
+  },
+  "exclude": [
+    "G103"
+  ],
+  "severity": "medium",
+  "confidence": "medium"
+}

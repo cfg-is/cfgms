@@ -5,7 +5,7 @@ import (
 
 	"github.com/stretchr/testify/suite"
 
-	"cfgms/test/integration/testutil"
+	"github.com/cfgis/cfgms/test/integration/testutil"
 )
 
 // ControllerTestSuite is a test suite for controller integration tests
@@ -36,7 +36,7 @@ func (s *ControllerTestSuite) TearDownTest() {
 
 func (s *ControllerTestSuite) TestControllerStartStop() {
 	// Start the controller
-	s.env.Controller.Start(s.env.GetContext())
+	_ = s.env.Controller.Start(s.env.GetContext())
 
 	// Verify the controller logged startup
 	infoLogs := s.env.Logger.GetLogs("info")
@@ -44,12 +44,21 @@ func (s *ControllerTestSuite) TestControllerStartStop() {
 	s.Require().Equal("Starting controller", infoLogs[0].Message)
 
 	// Stop the controller
-	s.env.Controller.Stop(s.env.GetContext())
+	_ = s.env.Controller.Stop(s.env.GetContext())
 
 	// Verify the controller logged shutdown
 	infoLogs = s.env.Logger.GetLogs("info")
-	s.Require().GreaterOrEqual(len(infoLogs), 2)
-	s.Require().Equal("Stopping controller", infoLogs[1].Message)
+	s.Require().GreaterOrEqual(len(infoLogs), 3)
+	
+	// Find the "Stopping controller" message
+	found := false
+	for _, log := range infoLogs {
+		if log.Message == "Stopping controller" {
+			found = true
+			break
+		}
+	}
+	s.Require().True(found, "Should have logged 'Stopping controller'")
 }
 
 func (s *ControllerTestSuite) TestStewardConnectToController() {
@@ -73,13 +82,14 @@ func (s *ControllerTestSuite) TestStewardConnectToController() {
 	hasStewardStop := false
 
 	for _, log := range infoLogs {
-		if log.Message == "Starting controller" {
+		switch log.Message {
+		case "Starting controller":
 			hasControllerStart = true
-		} else if log.Message == "Stopping controller" {
+		case "Stopping controller":
 			hasControllerStop = true
-		} else if log.Message == "Starting steward" {
+		case "Starting steward in controller mode":
 			hasStewardStart = true
-		} else if log.Message == "Stopping steward" {
+		case "Stopping steward in controller mode":
 			hasStewardStop = true
 		}
 	}

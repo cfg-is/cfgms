@@ -1,0 +1,389 @@
+name: Security Scanning Workflow
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+    inputs:
+      scan_type:
+        description: 'Type of security scan to run'
+        required: true
+        default: 'full'
+        type: choice
+        options:
+        - quick
+        - full
+        - remediation-report
+
+env:
+  GO_VERSION: '1.23'
+
+jobs:
+  # Parallel security scanning jobs for optimal performance
+  trivy-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      status: ${{ steps.scan.outputs.status }}
+      issues-found: ${{ steps.scan.outputs.issues-found }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Install Trivy
+      run: |
+        sudo apt-get update
+        sudo apt-get install wget apt-transport-https gnupg lsb-release
+        wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+        echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
+        sudo apt-get update
+        sudo apt-get install trivy
+    
+    - name: Run Trivy Scan
+      id: scan
+      run: |
+        echo "🔍 Running Trivy Filesystem Scan with SARIF"
+        mkdir -p sarif-results
+        
+        # Run with SARIF output for GitHub Security tab
+        trivy fs . --format sarif --output sarif-results/trivy.sarif --scanners vuln,secret,misconfig
+        trivy_exit_code=$?
+        
+        # Also run regular scan for status checking
+        if trivy fs . --scanners vuln,secret,misconfig --severity CRITICAL,HIGH --exit-code 1; then
+          echo "status=passed" >> $GITHUB_OUTPUT
+          echo "issues-found=false" >> $GITHUB_OUTPUT
+        else
+          echo "status=failed" >> $GITHUB_OUTPUT
+          echo "issues-found=true" >> $GITHUB_OUTPUT
+        fi
+    
+    - name: Upload Trivy SARIF
+      uses: github/codeql-action/upload-sarif@v3
+      if: always() && hashFiles('sarif-results/trivy.sarif') != ''
+      with:
+        sarif_file: sarif-results/trivy.sarif
+        category: trivy-vulnerabilities
+      continue-on-error: true
+    
+    - name: Upload Trivy Results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: trivy-results
+        path: sarif-results/
+        retention-days: 30
+
+  nancy-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      status: ${{ steps.scan.outputs.status }}
+      issues-found: ${{ steps.scan.outputs.issues-found }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+    
+    # Cache disabled due to parallel job conflicts causing tar extraction failures
+    # - name: Cache Go modules
+    #   uses: actions/cache@v3
+    #   with:
+    #     path: ~/go/pkg/mod
+    #     key: ${{ runner.os }}-nancy-${{ hashFiles('**/go.sum') }}
+    #     restore-keys: |
+    #       ${{ runner.os }}-go-modules-
+    #       ${{ runner.os }}-nancy-
+    #   continue-on-error: true
+    
+    - name: Install Nancy
+      run: make install-nancy
+    
+    - name: Run Nancy Scan
+      id: scan
+      run: |
+        echo "📦 Running Nancy Go Dependency Scan"
+        
+        if make security-deps; then
+          echo "status=passed" >> $GITHUB_OUTPUT
+          echo "issues-found=false" >> $GITHUB_OUTPUT
+        else
+          echo "status=failed" >> $GITHUB_OUTPUT
+          echo "issues-found=true" >> $GITHUB_OUTPUT
+        fi
+
+  gosec-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      status: ${{ steps.scan.outputs.status }}
+      issues-found: ${{ steps.scan.outputs.issues-found }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+    
+    # Cache disabled due to parallel job conflicts causing tar extraction failures
+    # - name: Cache Go modules
+    #   uses: actions/cache@v3
+    #   with:
+    #     path: ~/go/pkg/mod
+    #     key: ${{ runner.os }}-gosec-${{ hashFiles('**/go.sum') }}
+    #     restore-keys: |
+    #       ${{ runner.os }}-go-modules-
+    #       ${{ runner.os }}-gosec-
+    #   continue-on-error: true
+    
+    - name: Install gosec
+      run: go install github.com/securego/gosec/v2/cmd/gosec@latest
+    
+    - name: Run gosec Scan
+      id: scan
+      run: |
+        echo "🛡️  Running gosec Go Security Analysis"
+        mkdir -p sarif-results
+        
+        # Run with SARIF output for GitHub Security tab using our configuration
+        # Use -no-fail to prevent SARIF generation from failing the workflow
+        if [ -f .gosec.json ]; then
+          gosec -conf .gosec.json -fmt sarif -out sarif-results/gosec.sarif -no-fail ./...
+        else
+          gosec -fmt sarif -out sarif-results/gosec.sarif -no-fail ./...
+        fi
+        gosec_exit_code=$?
+        
+        # Run regular scan for status checking (this honors our configuration)
+        if make security-gosec; then
+          echo "status=passed" >> $GITHUB_OUTPUT
+          echo "issues-found=false" >> $GITHUB_OUTPUT
+        else
+          echo "status=failed" >> $GITHUB_OUTPUT
+          echo "issues-found=true" >> $GITHUB_OUTPUT
+        fi
+    
+    - name: Upload gosec SARIF
+      uses: github/codeql-action/upload-sarif@v3
+      if: always() && hashFiles('sarif-results/gosec.sarif') != ''
+      with:
+        sarif_file: sarif-results/gosec.sarif
+        category: gosec-security-patterns
+      continue-on-error: true
+    
+    - name: Upload gosec Results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: gosec-results
+        path: sarif-results/
+        retention-days: 30
+
+  staticcheck-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      status: ${{ steps.scan.outputs.status }}
+      issues-found: ${{ steps.scan.outputs.issues-found }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+    
+    # Cache disabled due to parallel job conflicts causing tar extraction failures
+    # - name: Cache Go modules
+    #   uses: actions/cache@v3
+    #   with:
+    #     path: ~/go/pkg/mod
+    #     key: ${{ runner.os }}-staticcheck-${{ hashFiles('**/go.sum') }}
+    #     restore-keys: |
+    #       ${{ runner.os }}-go-modules-
+    #       ${{ runner.os }}-staticcheck-
+    #   continue-on-error: true
+    
+    - name: Install staticcheck
+      run: go install honnef.co/go/tools/cmd/staticcheck@latest
+    
+    - name: Run staticcheck Scan
+      id: scan
+      run: |
+        echo "🔍 Running Staticcheck Advanced Analysis"
+        
+        if make security-staticcheck; then
+          echo "status=passed" >> $GITHUB_OUTPUT
+          echo "issues-found=false" >> $GITHUB_OUTPUT
+        else
+          echo "status=failed" >> $GITHUB_OUTPUT
+          echo "issues-found=true" >> $GITHUB_OUTPUT
+        fi
+
+  # Consolidated security validation job
+  security-validation:
+    runs-on: ubuntu-latest
+    needs: [trivy-scan, nancy-scan, gosec-scan, staticcheck-scan]
+    timeout-minutes: 5
+    outputs:
+      trivy-status: ${{ needs.trivy-scan.outputs.status }}
+      nancy-status: ${{ needs.nancy-scan.outputs.status }}
+      gosec-status: ${{ needs.gosec-scan.outputs.status }}
+      staticcheck-status: ${{ needs.staticcheck-scan.outputs.status }}
+      issues-found: ${{ steps.summary.outputs.issues-found }}
+    
+    steps:
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+    
+    - name: Security Summary
+      id: summary
+      run: |
+        echo "📊 Parallel Security Scan Summary"
+        echo "================================="
+        echo ""
+        echo "Individual Tool Results:"
+        echo "  • Trivy: ${{ needs.trivy-scan.outputs.status }}"
+        echo "  • Nancy: ${{ needs.nancy-scan.outputs.status }}"
+        echo "  • gosec: ${{ needs.gosec-scan.outputs.status }}"
+        echo "  • staticcheck: ${{ needs.staticcheck-scan.outputs.status }}"
+        echo ""
+        
+        # Determine if any issues were found
+        if [ "${{ needs.trivy-scan.outputs.issues-found }}" = "true" ] || \
+           [ "${{ needs.nancy-scan.outputs.issues-found }}" = "true" ] || \
+           [ "${{ needs.gosec-scan.outputs.issues-found }}" = "true" ] || \
+           [ "${{ needs.staticcheck-scan.outputs.issues-found }}" = "true" ]; then
+          echo "issues-found=true" >> $GITHUB_OUTPUT
+          echo "❌ Security issues detected across tools"
+        else
+          echo "issues-found=false" >> $GITHUB_OUTPUT
+          echo "✅ All security scans passed"
+        fi
+    
+    - name: Install Security Tools for Remediation Report
+      if: steps.summary.outputs.issues-found == 'true'
+      run: |
+        # Only install tools if we need to generate remediation report
+        make install-nancy
+        
+        # Install Trivy
+        sudo apt-get update
+        sudo apt-get install wget apt-transport-https gnupg lsb-release
+        wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+        echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
+        sudo apt-get update
+        sudo apt-get install trivy
+        
+        # Install gosec and staticcheck
+        go install github.com/securego/gosec/v2/cmd/gosec@latest
+        go install honnef.co/go/tools/cmd/staticcheck@latest
+    
+    - name: Generate Remediation Report on Failure
+      if: steps.summary.outputs.issues-found == 'true'
+      run: |
+        echo "🤖 Generating Automated Remediation Report"
+        echo "========================================="
+        make security-remediation-report
+        
+        if [ -f "/tmp/cfgms-security-remediation.json" ]; then
+          echo ""
+          echo "📋 Remediation Report Available:"
+          echo "Copy the following JSON and ask Claude Code to fix the issues:"
+          echo ""
+          cat /tmp/cfgms-security-remediation.json
+        fi
+    
+    - name: Upload Consolidated Security Results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: security-scan-consolidated
+        path: |
+          /tmp/cfgms-security-remediation.json
+          /tmp/*-results.json
+        retention-days: 30
+
+  # Production Deployment Gate
+  production-gate:
+    runs-on: ubuntu-latest
+    needs: security-validation
+    if: github.ref == 'refs/heads/main'
+    steps:
+    - name: Production Deployment Decision
+      run: |
+        echo "🚪 PRODUCTION DEPLOYMENT GATE"
+        echo "============================"
+        echo ""
+        echo "Security Scan Results:"
+        echo "  • Trivy: ${{ needs.security-validation.outputs.trivy-status }}"
+        echo "  • Nancy: ${{ needs.security-validation.outputs.nancy-status }}"
+        echo "  • gosec: ${{ needs.security-validation.outputs.gosec-status }}"
+        echo "  • staticcheck: ${{ needs.security-validation.outputs.staticcheck-status }}"
+        echo ""
+        
+        if [ "${{ needs.security-validation.outputs.issues-found }}" = "true" ]; then
+          echo "❌ PRODUCTION DEPLOYMENT BLOCKED"
+          echo "   Critical security issues must be resolved before deployment"
+          echo ""
+          echo "🤖 Automated Remediation Available:"
+          echo "   1. Download the security-scan-results artifact"
+          echo "   2. Copy the remediation JSON to Claude Code"
+          echo "   3. Ask Claude to automatically fix the issues"
+          echo ""
+          exit 1
+        else
+          echo "✅ PRODUCTION DEPLOYMENT APPROVED"
+          echo "   All security scans passed - deployment can proceed"
+        fi
+
+  # Summary Report
+  security-summary:
+    runs-on: ubuntu-latest
+    needs: security-validation
+    if: always()
+    steps:
+    - name: Security Scan Summary
+      run: |
+        echo "## Security Scan Summary 🛡️" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Scan Results" >> $GITHUB_STEP_SUMMARY
+        echo "| Tool | Status |" >> $GITHUB_STEP_SUMMARY
+        echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
+        echo "| Trivy | ${{ needs.security-validation.outputs.trivy-status == 'passed' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Nancy | ${{ needs.security-validation.outputs.nancy-status == 'passed' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| gosec | ${{ needs.security-validation.outputs.gosec-status == 'passed' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| staticcheck | ${{ needs.security-validation.outputs.staticcheck-status == 'passed' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [ "${{ needs.security-validation.outputs.issues-found }}" = "true" ]; then
+          echo "### 🤖 Automated Remediation" >> $GITHUB_STEP_SUMMARY
+          echo "Security issues detected! Use Claude Code for automated fixes:" >> $GITHUB_STEP_SUMMARY
+          echo "1. Download the \`security-scan-results\` artifact" >> $GITHUB_STEP_SUMMARY
+          echo "2. Copy the JSON remediation report" >> $GITHUB_STEP_SUMMARY
+          echo "3. Ask Claude Code to automatically fix the issues" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "### ✅ All Security Checks Passed" >> $GITHUB_STEP_SUMMARY
+          echo "No security issues found - deployment ready!" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Manual Commands" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+        echo "# Run full security scan locally" >> $GITHUB_STEP_SUMMARY
+        echo "make security-scan" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "# Generate remediation report" >> $GITHUB_STEP_SUMMARY
+        echo "make security-remediation-report" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY

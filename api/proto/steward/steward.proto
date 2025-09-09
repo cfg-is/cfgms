@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+package cfgms.api.steward;
+
+option go_package = "github.com/cfgis/cfgms/api/proto/steward";
+
+import "common/common.proto";
+import "common/auth.proto";
+
+service Steward {
+  // Core management
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (common.Status);
+  
+  // DNA management
+  rpc UpdateDNA(common.DNA) returns (common.Status);
+  rpc GetDNA(common.Empty) returns (common.DNA);
+}
+
+message RegisterRequest {
+  string version = 1;
+  common.DNA initial_dna = 2;
+  common.Credentials credentials = 3;
+}
+
+message RegisterResponse {
+  string steward_id = 1;
+  common.Status status = 2;
+  common.Token token = 3;
+}
+
+message HeartbeatRequest {
+  string steward_id = 1;
+  string status = 2;
+  map<string, string> metrics = 3;
+}

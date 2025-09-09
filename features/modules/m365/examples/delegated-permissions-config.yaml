@@ -1,0 +1,303 @@
+# CFGMS M365 Delegated Permissions Configuration Example
+# This example demonstrates how to configure M365 modules to use delegated permissions
+# for user-context aware operations while maintaining fallback to application permissions.
+
+steward:
+  id: "m365-delegated-steward"
+  tenant_id: "contoso-corp-tenant"
+  
+  # Delegated permissions authentication configuration
+  authentication:
+    type: "oauth2_delegated"
+    oauth2:
+      client_id: "${M365_CLIENT_ID}"
+      client_secret: "${M365_CLIENT_SECRET}"
+      tenant_id: "${M365_TENANT_ID}"
+      redirect_uri: "http://localhost:8080/callback"
+      
+      # Enable delegated authentication support
+      support_delegated_auth: true
+      
+      # Allow fallback to application permissions when delegated auth fails
+      fallback_to_app_permissions: true
+      
+      # Delegated scopes for user-context operations
+      delegated_scopes:
+        - "User.Read"
+        - "User.ReadWrite.All"
+        - "Directory.Read.All"
+        - "Directory.ReadWrite.All"
+        - "Group.Read.All"
+        - "Group.ReadWrite.All"
+        - "Policy.ReadWrite.ConditionalAccess"
+        - "DeviceManagementConfiguration.ReadWrite.All"
+        - "DeviceManagementApps.ReadWrite.All"
+      
+      # Application scopes for fallback operations
+      scopes:
+        - "https://graph.microsoft.com/.default"
+      
+      # Minimum required scopes for delegated operations
+      required_delegated_scopes:
+        - "User.Read"
+        - "Directory.Read.All"
+
+# User context configuration for delegated operations
+# This would typically be provided by the calling system or CFGMS controller
+user_context:
+  user_id: "admin@contoso.com"
+  user_principal_name: "admin@contoso.com"
+  display_name: "CFGMS Administrator"
+  roles:
+    - "Global Administrator"
+    - "User Administrator"
+    - "Conditional Access Administrator"
+    - "Intune Administrator"
+
+resources:
+  # User management with delegated permissions
+  - id: "contoso-tenant:john.doe@contoso.com"
+    type: "entra_user"
+    config:
+      user_principal_name: "john.doe@contoso.com"
+      display_name: "John Doe"
+      job_title: "Sales Manager"
+      department: "Sales"
+      office_location: "New York"
+      account_enabled: true
+      usage_location: "US"
+      
+      # License assignment
+      licenses:
+        - sku_id: "c7df2760-2c81-4ef7-b578-5b5392b571df"  # Office 365 E5
+          disabled_plans: []
+      
+      # Group memberships
+      groups:
+        - "Sales Team"
+        - "All Company"
+        - "Office 365 Users"
+      
+      # Delegated operation configuration
+      use_delegated_permissions: true
+      required_scopes:
+        - "User.ReadWrite.All"
+        - "Directory.ReadWrite.All"
+        - "Group.ReadWrite.All"
+      
+      managed_fields:
+        - "display_name"
+        - "job_title" 
+        - "department"
+        - "office_location"
+        - "licenses"
+        - "groups"
+
+  # Conditional Access policy with delegated permissions
+  - id: "contoso-tenant:delegated-mfa-policy"
+    type: "conditional_access"
+    config:
+      display_name: "Delegated Admin - Require MFA for All Users"
+      state: "enabled"
+      
+      conditions:
+        users:
+          include_users: ["All"]
+          exclude_users: ["emergency-access@contoso.com"]
+        applications:
+          include_applications: ["All"]
+        locations:
+          include_locations: ["All"]
+          exclude_locations: ["trusted-network-location-id"]
+      
+      grant_controls:
+        operator: "OR"
+        built_in_controls: ["mfa"]
+        custom_authentication_factors: []
+      
+      session_controls:
+        sign_in_frequency:
+          value: 4
+          type: "hours"
+          is_enabled: true
+      
+      # Delegated operation configuration
+      use_delegated_permissions: true
+      required_scopes:
+        - "Policy.ReadWrite.ConditionalAccess"
+      
+      managed_fields:
+        - "display_name"
+        - "state"
+        - "conditions"
+        - "grant_controls"
+        - "session_controls"
+
+  # Intune device configuration with delegated permissions
+  - id: "contoso-tenant:windows-security-baseline"
+    type: "intune_policy" 
+    config:
+      display_name: "Windows 10 Security Baseline (Delegated)"
+      description: "Security baseline created via delegated permissions"
+      device_configuration_type: "microsoft.graph.windows10GeneralConfiguration"
+      
+      settings:
+        # Password policies
+        password_required: true
+        password_minimum_length: 12
+        password_minimum_character_set_count: 3
+        password_expiration_days: 90
+        password_previous_password_block_count: 12
+        password_required_type: "alphanumeric"
+        
+        # Windows Defender settings
+        defender_require_real_time_monitoring: true
+        defender_require_behavior_monitoring: true
+        defender_require_network_inspection_system: true
+        defender_scan_downloads: true
+        defender_scan_scripts_loaded_in_internet_explorer: true
+        
+        # Firewall settings
+        firewall_profile_domain_firewall_enabled: true
+        firewall_profile_public_firewall_enabled: true
+        firewall_profile_private_firewall_enabled: true
+      
+      assignments:
+        - target:
+            target_type: "groupAssignmentTarget"
+            include_groups: ["Corporate Devices"]
+        - target:
+            target_type: "allLicensedUsersAssignmentTarget"
+      
+      # Delegated operation configuration
+      use_delegated_permissions: true
+      required_scopes:
+        - "DeviceManagementConfiguration.ReadWrite.All"
+      
+      managed_fields:
+        - "display_name"
+        - "description"
+        - "settings"
+        - "assignments"
+
+# Advanced delegated permissions configuration
+delegation_settings:
+  # Token refresh behavior
+  token_refresh:
+    # Automatically refresh tokens when they expire
+    auto_refresh: true
+    # Refresh tokens that expire within this time window
+    refresh_threshold: "5m"
+    # Maximum number of refresh attempts
+    max_refresh_attempts: 3
+  
+  # Permission validation behavior
+  permission_validation:
+    # Validate permissions before each operation
+    strict_validation: true
+    # Cache permission validation results
+    cache_validation: true
+    # Validation cache TTL
+    cache_ttl: "15m"
+  
+  # Fallback behavior configuration
+  fallback_behavior:
+    # Log when falling back to application permissions
+    log_fallbacks: true
+    # Audit delegated permission failures
+    audit_failures: true
+    # Maximum fallback attempts per operation
+    max_fallback_attempts: 2
+
+# Monitoring and observability for delegated operations
+monitoring:
+  # Track delegated vs application permission usage
+  track_permission_usage: true
+  
+  # Metrics to collect
+  metrics:
+    - "delegated_operations_total"
+    - "delegated_operations_failed"
+    - "app_permission_fallbacks_total"
+    - "token_refresh_operations"
+    - "permission_validation_failures"
+  
+  # Alert conditions
+  alerts:
+    - name: "high_delegation_failure_rate"
+      condition: "delegated_operations_failed / delegated_operations_total > 0.10"
+      severity: "warning"
+      description: "Delegated permission failure rate exceeds 10%"
+    
+    - name: "frequent_fallbacks"
+      condition: "app_permission_fallbacks_total > 50"
+      severity: "info"
+      description: "High number of application permission fallbacks"
+
+# Security considerations for delegated permissions
+security:
+  # Audit all delegated operations
+  audit_delegated_operations: true
+  
+  # Require MFA for delegated authentication
+  require_mfa: true
+  
+  # Token security settings
+  token_security:
+    # Encrypt tokens at rest
+    encrypt_tokens: true
+    # Token storage path
+    token_storage_path: "/opt/cfgms/credentials"
+    # Secure token permissions
+    token_file_permissions: "0600"
+  
+  # Session management
+  session_management:
+    # Maximum session duration
+    max_session_duration: "8h"
+    # Session inactivity timeout
+    inactivity_timeout: "1h"
+    # Require reauthentication for sensitive operations
+    require_reauth_for_sensitive_ops: true
+
+# Examples of different permission scenarios
+examples:
+  # Scenario 1: User administrator with limited scope
+  limited_user_admin:
+    user_context:
+      roles: ["User Administrator"]
+    available_scopes:
+      - "User.ReadWrite.All"
+      - "Directory.Read.All"
+      - "Group.Read.All"
+    operations:
+      - "User management (create, update, delete)"
+      - "Basic directory reading"
+      - "Group membership viewing"
+  
+  # Scenario 2: Conditional Access administrator
+  conditional_access_admin:
+    user_context:
+      roles: ["Conditional Access Administrator"]
+    available_scopes:
+      - "Policy.ReadWrite.ConditionalAccess"
+      - "User.Read.All"
+      - "Directory.Read.All"
+    operations:
+      - "Conditional Access policy management"
+      - "User and directory reading for policy targeting"
+  
+  # Scenario 3: Global administrator with full access
+  global_admin:
+    user_context:
+      roles: ["Global Administrator"]
+    available_scopes:
+      - "User.ReadWrite.All"
+      - "Directory.ReadWrite.All"
+      - "Group.ReadWrite.All"
+      - "Policy.ReadWrite.ConditionalAccess"
+      - "DeviceManagementConfiguration.ReadWrite.All"
+    operations:
+      - "Full user and directory management"
+      - "Conditional Access policy management"
+      - "Intune device configuration management"

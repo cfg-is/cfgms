@@ -7,9 +7,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"cfgms/features/controller"
-	testutil "cfgms/pkg/testing"
-	unit "cfgms/test/unit"
+	"github.com/cfgis/cfgms/features/controller"
+	testutil "github.com/cfgis/cfgms/pkg/testing"
+	unit "github.com/cfgis/cfgms/test/unit"
 )
 
 func TestModuleInterface(t *testing.T) {

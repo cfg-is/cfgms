@@ -1,0 +1,142 @@
+workflow:
+  name: "conditional-deployment"
+  description: "Demonstrates enhanced conditional logic for deployment scenarios"
+  version: "1.0"
+  variables:
+    environment: "production"
+    feature_enabled: true
+    service_health: "healthy"
+    load_threshold: 80
+    current_load: 45
+    backup_required: true
+
+  steps:
+    # Simple conditional based on environment
+    - name: "environment-check"
+      type: conditional
+      condition:
+        type: variable
+        variable: environment
+        operator: eq
+        value: "production"
+      steps:
+        - name: "production-setup"
+          type: delay
+          delay:
+            duration: 1s
+            message: "Setting up production environment"
+
+    # Complex nested conditions using AND/OR logic
+    - name: "deployment-decision"
+      type: conditional
+      condition:
+        type: and
+        and:
+          - type: variable
+            variable: feature_enabled
+            operator: eq
+            value: true
+          - type: or
+            or:
+              - type: variable
+                variable: service_health
+                operator: eq
+                value: "healthy"
+              - type: and
+                and:
+                  - type: variable
+                    variable: service_health
+                    operator: eq
+                    value: "degraded"
+                  - type: variable
+                    variable: current_load
+                    operator: lt
+                    value: 50
+      steps:
+        - name: "deploy-feature"
+          type: delay
+          delay:
+            duration: 2s
+            message: "Deploying new feature"
+
+    # Expression-based condition
+    - name: "load-based-scaling"
+      type: conditional
+      condition:
+        type: expression
+        expression: "${current_load} > ${load_threshold} && ${environment} == 'production'"
+      steps:
+        - name: "scale-up"
+          type: delay
+          delay:
+            duration: 1s
+            message: "Scaling up due to high load"
+
+    # NOT condition for backup logic
+    - name: "backup-check"
+      type: conditional
+      condition:
+        type: not
+        not:
+          type: variable
+          variable: backup_required
+          operator: eq
+          value: false
+      steps:
+        - name: "create-backup"
+          type: delay
+          delay:
+            duration: 3s
+            message: "Creating backup before deployment"
+
+    # 5-level deep nested condition (demonstrating complexity support)
+    - name: "deep-conditional-logic"
+      type: conditional
+      condition:
+        type: and
+        and:
+          - type: variable
+            variable: environment
+            operator: eq
+            value: "production"
+          - type: or
+            or:
+              - type: and
+                and:
+                  - type: variable
+                    variable: feature_enabled
+                    operator: eq
+                    value: true
+                  - type: or
+                    or:
+                      - type: variable
+                        variable: service_health
+                        operator: eq
+                        value: "healthy"
+                      - type: and
+                        and:
+                          - type: variable
+                            variable: current_load
+                            operator: lt
+                            value: 70
+                          - type: not
+                            not:
+                              type: variable
+                              variable: backup_required
+                              operator: eq
+                              value: false
+              - type: expression
+                expression: "${environment} == 'staging' && ${current_load} < 30"
+      steps:
+        - name: "complex-deployment"
+          type: delay
+          delay:
+            duration: 2s
+            message: "Executing complex deployment logic"
+
+    # Final summary step (always executes)
+    - name: "deployment-summary"
+      type: delay
+      delay:
+        duration: 500ms
+        message: "Deployment workflow completed"

@@ -26,7 +26,7 @@ func NewPackageManager(ctx context.Context) (PackageManager, error) {
 		if _, err := exec.CommandContext(ctx, "brew", "--version").Output(); err == nil {
 			return newHomebrewManager(), nil
 		}
-		return nil, fmt.Errorf("Homebrew not found on macOS")
+		return nil, fmt.Errorf("homebrew not found on macOS")
 
 	case "linux":
 		// Check for Linux package managers in order of preference

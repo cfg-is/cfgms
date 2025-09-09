@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Steward configuration file (`hostname.cfg`) defines how the Steward agent operates in standalone mode. The file uses YAML format but has a `.cfg` extension and is named after the device hostname.
+The Steward configuration file (`hostname.cfg`) defines how the Steward operates in standalone mode. The file uses YAML format but has a `.cfg` extension and is named after the device hostname.
 
 ## Configuration File Locations
 

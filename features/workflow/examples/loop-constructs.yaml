@@ -1,0 +1,180 @@
+workflow:
+  name: "loop-constructs-demo"
+  description: "Demonstrates for, while, and foreach loop constructs"
+  version: "1.0"
+  variables:
+    max_count: 5
+    servers: ["web-01", "web-02", "db-01"]
+    counter: 0
+    enabled: true
+
+  steps:
+    # For loop example - counting from 1 to 3
+    - name: "for-loop-example"
+      type: for
+      loop:
+        type: for
+        variable: i
+        start: 1
+        end: 3
+        step: 1
+        max_iterations: 10
+      steps:
+        - name: "for-loop-task"
+          type: delay
+          delay:
+            duration: 100ms
+            message: "For loop iteration ${i}"
+
+    # For loop with variable references
+    - name: "for-loop-with-variables"
+      type: for
+      loop:
+        type: for
+        variable: count
+        start: 1
+        end: "${max_count}"
+        step: 2
+        max_iterations: 10
+      steps:
+        - name: "variable-for-task"
+          type: delay
+          delay:
+            duration: 50ms
+            message: "Counting by 2s: ${count}"
+
+    # While loop example (NOTE: This is a demonstration - in real usage you'd need
+    # a way to modify the condition variable within the loop)
+    - name: "while-loop-example"
+      type: while
+      loop:
+        type: while
+        condition:
+          type: variable
+          variable: enabled
+          operator: eq
+          value: true
+        max_iterations: 3  # Safety limit to prevent infinite loop
+      steps:
+        - name: "while-loop-task"
+          type: delay
+          delay:
+            duration: 100ms
+            message: "While loop iteration"
+        # In a real scenario, you'd have a task here that could set enabled = false
+
+    # While loop with expression condition
+    - name: "while-with-expression"
+      type: while
+      loop:
+        type: while
+        condition:
+          type: expression
+          expression: "${counter} < 2"
+        max_iterations: 5
+      steps:
+        - name: "expression-while-task"
+          type: delay
+          delay:
+            duration: 75ms
+            message: "Expression while loop: counter = ${counter}"
+
+    # Foreach loop example - iterating over server list
+    - name: "foreach-servers"
+      type: foreach
+      loop:
+        type: foreach
+        variable: server
+        items_variable: servers
+        index_variable: server_index
+        max_iterations: 10
+      steps:
+        - name: "process-server"
+          type: delay
+          delay:
+            duration: 200ms
+            message: "Processing server ${server} (index: ${server_index})"
+
+    # Foreach loop with direct items
+    - name: "foreach-direct-items"
+      type: foreach
+      loop:
+        type: foreach
+        variable: status
+        items: ["starting", "running", "stopped"]
+        max_iterations: 5
+      steps:
+        - name: "handle-status"
+          type: delay
+          delay:
+            duration: 150ms
+            message: "Handling status: ${status}"
+
+    # Nested loops example - for loop inside foreach
+    - name: "nested-loops-example"
+      type: foreach
+      loop:
+        type: foreach
+        variable: server
+        items: ["app-01", "app-02"]
+        max_iterations: 5
+      steps:
+        - name: "server-setup"
+          type: delay
+          delay:
+            duration: 50ms
+            message: "Setting up ${server}"
+        
+        - name: "port-checks"
+          type: for
+          loop:
+            type: for
+            variable: port
+            start: 8080
+            end: 8082
+            step: 1
+            max_iterations: 5
+          steps:
+            - name: "check-port"
+              type: delay
+              delay:
+                duration: 25ms
+                message: "Checking ${server}:${port}"
+
+    # Complex nested condition with loops
+    - name: "conditional-loop"
+      type: conditional
+      condition:
+        type: variable
+        variable: enabled
+        operator: eq
+        value: true
+      steps:
+        - name: "conditional-foreach"
+          type: foreach
+          loop:
+            type: foreach
+            variable: item
+            items: [1, 2, 3]
+            max_iterations: 5
+          steps:
+            - name: "conditional-item-processing"
+              type: conditional
+              condition:
+                type: variable
+                variable: item
+                operator: gt
+                value: 1
+              steps:
+                - name: "process-large-item"
+                  type: delay
+                  delay:
+                    duration: 100ms
+                    message: "Processing large item: ${item}"
+
+    # Summary step
+    - name: "loop-demo-complete"
+      type: delay
+      delay:
+        duration: 500ms
+        message: "All loop constructs demonstrated successfully"

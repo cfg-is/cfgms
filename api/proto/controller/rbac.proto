@@ -1,0 +1,278 @@
+syntax = "proto3";
+
+package cfgms.api.controller;
+
+import "common/rbac.proto";
+
+option go_package = "github.com/cfgis/cfgms/api/proto/controller";
+
+// RBACService provides role-based access control operations
+service RBACService {
+  // Permission Management
+  rpc GetPermission(GetPermissionRequest) returns (GetPermissionResponse);
+  rpc ListPermissions(ListPermissionsRequest) returns (ListPermissionsResponse);
+  
+  // Role Management
+  rpc CreateRole(CreateRoleRequest) returns (CreateRoleResponse);
+  rpc GetRole(GetRoleRequest) returns (GetRoleResponse);
+  rpc ListRoles(ListRolesRequest) returns (ListRolesResponse);
+  rpc UpdateRole(UpdateRoleRequest) returns (UpdateRoleResponse);
+  rpc DeleteRole(DeleteRoleRequest) returns (DeleteRoleResponse);
+  
+  // Subject Management
+  rpc CreateSubject(CreateSubjectRequest) returns (CreateSubjectResponse);
+  rpc GetSubject(GetSubjectRequest) returns (GetSubjectResponse);
+  rpc ListSubjects(ListSubjectsRequest) returns (ListSubjectsResponse);
+  rpc UpdateSubject(UpdateSubjectRequest) returns (UpdateSubjectResponse);
+  rpc DeleteSubject(DeleteSubjectRequest) returns (DeleteSubjectResponse);
+  
+  // Role Assignment
+  rpc AssignRole(AssignRoleRequest) returns (AssignRoleResponse);
+  rpc RevokeRole(RevokeRoleRequest) returns (RevokeRoleResponse);
+  rpc GetSubjectRoles(GetSubjectRolesRequest) returns (GetSubjectRolesResponse);
+  
+  // Permission Checking
+  rpc CheckPermission(CheckPermissionRequest) returns (CheckPermissionResponse);
+  rpc GetSubjectPermissions(GetSubjectPermissionsRequest) returns (GetSubjectPermissionsResponse);
+  
+  // Role Hierarchy Management
+  rpc CreateRoleWithParent(CreateRoleWithParentRequest) returns (CreateRoleWithParentResponse);
+  rpc GetRoleHierarchy(GetRoleHierarchyRequest) returns (GetRoleHierarchyResponse);
+  rpc SetRoleParent(SetRoleParentRequest) returns (SetRoleParentResponse);
+  rpc RemoveRoleParent(RemoveRoleParentRequest) returns (RemoveRoleParentResponse);
+  rpc ComputeEffectivePermissions(ComputeEffectivePermissionsRequest) returns (ComputeEffectivePermissionsResponse);
+  rpc ValidateRoleHierarchy(ValidateRoleHierarchyRequest) returns (ValidateRoleHierarchyResponse);
+}
+
+// Permission Management Messages
+
+message GetPermissionRequest {
+  string permission_id = 1;
+}
+
+message GetPermissionResponse {
+  cfgms.api.common.Permission permission = 1;
+}
+
+message ListPermissionsRequest {
+  string resource_type = 1; // Optional filter
+}
+
+message ListPermissionsResponse {
+  repeated cfgms.api.common.Permission permissions = 1;
+}
+
+// Role Management Messages
+
+message CreateRoleRequest {
+  cfgms.api.common.Role role = 1;
+}
+
+message CreateRoleResponse {
+  cfgms.api.common.Role role = 1;
+}
+
+message GetRoleRequest {
+  string role_id = 1;
+}
+
+message GetRoleResponse {
+  cfgms.api.common.Role role = 1;
+}
+
+message ListRolesRequest {
+  string tenant_id = 1; // Optional filter
+}
+
+message ListRolesResponse {
+  repeated cfgms.api.common.Role roles = 1;
+}
+
+message UpdateRoleRequest {
+  cfgms.api.common.Role role = 1;
+}
+
+message UpdateRoleResponse {
+  cfgms.api.common.Role role = 1;
+}
+
+message DeleteRoleRequest {
+  string role_id = 1;
+}
+
+message DeleteRoleResponse {
+  bool success = 1;
+}
+
+// Subject Management Messages
+
+message CreateSubjectRequest {
+  cfgms.api.common.Subject subject = 1;
+}
+
+message CreateSubjectResponse {
+  cfgms.api.common.Subject subject = 1;
+}
+
+message GetSubjectRequest {
+  string subject_id = 1;
+}
+
+message GetSubjectResponse {
+  cfgms.api.common.Subject subject = 1;
+}
+
+message ListSubjectsRequest {
+  string tenant_id = 1; // Optional filter
+  cfgms.api.common.SubjectType type = 2; // Optional filter
+}
+
+message ListSubjectsResponse {
+  repeated cfgms.api.common.Subject subjects = 1;
+}
+
+message UpdateSubjectRequest {
+  cfgms.api.common.Subject subject = 1;
+}
+
+message UpdateSubjectResponse {
+  cfgms.api.common.Subject subject = 1;
+}
+
+message DeleteSubjectRequest {
+  string subject_id = 1;
+}
+
+message DeleteSubjectResponse {
+  bool success = 1;
+}
+
+// Role Assignment Messages
+
+message AssignRoleRequest {
+  cfgms.api.common.RoleAssignment assignment = 1;
+}
+
+message AssignRoleResponse {
+  cfgms.api.common.RoleAssignment assignment = 1;
+}
+
+message RevokeRoleRequest {
+  string subject_id = 1;
+  string role_id = 2;
+  string tenant_id = 3;
+}
+
+message RevokeRoleResponse {
+  bool success = 1;
+}
+
+message GetSubjectRolesRequest {
+  string subject_id = 1;
+  string tenant_id = 2;
+}
+
+message GetSubjectRolesResponse {
+  repeated cfgms.api.common.Role roles = 1;
+}
+
+// Permission Checking Messages
+
+message CheckPermissionRequest {
+  cfgms.api.common.AccessRequest request = 1;
+}
+
+message CheckPermissionResponse {
+  cfgms.api.common.AccessResponse response = 1;
+}
+
+message GetSubjectPermissionsRequest {
+  string subject_id = 1;
+  string tenant_id = 2;
+}
+
+message GetSubjectPermissionsResponse {
+  repeated cfgms.api.common.Permission permissions = 1;
+}
+
+// Role Hierarchy Management Messages
+
+message CreateRoleWithParentRequest {
+  cfgms.api.common.Role role = 1;
+  string parent_role_id = 2;
+  cfgms.api.common.RoleInheritanceType inheritance_type = 3;
+}
+
+message CreateRoleWithParentResponse {
+  cfgms.api.common.Role role = 1;
+}
+
+message GetRoleHierarchyRequest {
+  string role_id = 1;
+  int32 max_depth = 2; // Optional depth limit
+}
+
+message RoleHierarchy {
+  cfgms.api.common.Role role = 1;
+  RoleHierarchy parent = 2;
+  repeated RoleHierarchy children = 3;
+  int32 depth = 4;
+}
+
+message GetRoleHierarchyResponse {
+  RoleHierarchy hierarchy = 1;
+}
+
+message SetRoleParentRequest {
+  string role_id = 1;
+  string parent_role_id = 2;
+  cfgms.api.common.RoleInheritanceType inheritance_type = 3;
+}
+
+message SetRoleParentResponse {
+  bool success = 1;
+}
+
+message RemoveRoleParentRequest {
+  string role_id = 1;
+}
+
+message RemoveRoleParentResponse {
+  bool success = 1;
+}
+
+message ComputeEffectivePermissionsRequest {
+  string role_id = 1;
+}
+
+message EffectivePermissions {
+  string role_id = 1;
+  repeated cfgms.api.common.Permission direct_permissions = 2;
+  map<string, PermissionList> inherited_permissions = 3; // role_id -> permissions
+  map<string, ConflictResult> conflict_resolution = 4;
+  int64 computed_at = 5; // Unix timestamp
+}
+
+message PermissionList {
+  repeated cfgms.api.common.Permission permissions = 1;
+}
+
+message ConflictResult {
+  cfgms.api.common.Permission permission = 1;
+  string source_role_id = 2;
+  string resolution = 3; // "override", "merge", "restrict"
+  repeated string conflicted_with = 4;
+}
+
+message ComputeEffectivePermissionsResponse {
+  EffectivePermissions effective_permissions = 1;
+}
+
+message ValidateRoleHierarchyRequest {
+  string role_id = 1;
+}
+
+message ValidateRoleHierarchyResponse {
+  bool valid = 1;
+  repeated string validation_errors = 2;
+}

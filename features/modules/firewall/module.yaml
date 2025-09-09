@@ -1,6 +1,11 @@
 name: firewall
 description: Manages firewall rules across different operating systems
 version: 0.1.0
+
+# Supported execution environments
+executors:
+  - steward  # Local firewall management on steward systems
+
 author: CFGMS Team
 license: MIT
 platforms:
