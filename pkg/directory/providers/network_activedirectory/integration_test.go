@@ -107,8 +107,7 @@ func (m *MockStewardClientForIntegration) GetModuleState(ctx context.Context, st
 	}
 
 	// Simulate realistic AD responses based on resourceID
-	switch {
-	case resourceID == "status":
+	if resourceID == "status" {
 		return map[string]interface{}{
 			"connected":         true,
 			"domain_controller": "dc1.corp.contoso.com",
@@ -120,7 +119,7 @@ func (m *MockStewardClientForIntegration) GetModuleState(ctx context.Context, st
 			"error_count":      int64(2),
 		}, nil
 
-	case resourceID == "query:user:john.doe":
+	} else if resourceID == "query:user:john.doe" {
 		return map[string]interface{}{
 			"success":      true,
 			"query_type":   "user",
@@ -139,7 +138,7 @@ func (m *MockStewardClientForIntegration) GetModuleState(ctx context.Context, st
 			},
 		}, nil
 
-	case resourceID == "query:user:jane.smith:dev.contoso.com":
+	} else if resourceID == "query:user:jane.smith:dev.contoso.com" {
 		return map[string]interface{}{
 			"success":       true,
 			"query_type":    "user",
@@ -160,7 +159,7 @@ func (m *MockStewardClientForIntegration) GetModuleState(ctx context.Context, st
 			},
 		}, nil
 
-	case resourceID == "forest:user:admin.user":
+	} else if resourceID == "forest:user:admin.user" {
 		return map[string]interface{}{
 			"success":       true,
 			"query_type":    "forest_user",
@@ -186,7 +185,7 @@ func (m *MockStewardClientForIntegration) GetModuleState(ctx context.Context, st
 			},
 		}, nil
 
-	case resourceID == "validate_trust:dev.contoso.com":
+	} else if resourceID == "validate_trust:dev.contoso.com" {
 		return map[string]interface{}{
 			"success":       true,
 			"query_type":    "trust_validation",
@@ -195,7 +194,7 @@ func (m *MockStewardClientForIntegration) GetModuleState(ctx context.Context, st
 			"response_time": 25 * time.Millisecond,
 		}, nil
 
-	case resourceID == "query:computer:WORKSTATION-01":
+	} else if resourceID == "query:computer:WORKSTATION-01" {
 		return map[string]interface{}{
 			"success":      true,
 			"query_type":   "computer",
@@ -212,7 +211,7 @@ func (m *MockStewardClientForIntegration) GetModuleState(ctx context.Context, st
 			},
 		}, nil
 
-	case resourceID == "query:gpo:Default Domain Policy":
+	} else if resourceID == "query:gpo:Default Domain Policy" {
 		return map[string]interface{}{
 			"success":       true,
 			"query_type":    "gpo",
@@ -230,7 +229,7 @@ func (m *MockStewardClientForIntegration) GetModuleState(ctx context.Context, st
 			},
 		}, nil
 
-	case resourceID == "list:user":
+	} else if resourceID == "list:user" {
 		return map[string]interface{}{
 			"success":       true,
 			"query_type":    "user",
@@ -259,7 +258,7 @@ func (m *MockStewardClientForIntegration) GetModuleState(ctx context.Context, st
 			},
 		}, nil
 
-	default:
+	} else {
 		return map[string]interface{}{
 			"success": false,
 			"error":   fmt.Sprintf("mock: resource not found: %s", resourceID),
@@ -652,17 +651,18 @@ func TestADProviderIntegration(t *testing.T) {
 								}
 							}
 						case "list":
-							if parts[1] == "computer" {
+							switch parts[1] {
+							case "computer":
 								_, err := provider.ListComputers(ctx, nil)
 								if err != nil {
 									t.Logf("Note: %s requires real AD environment", comp.description)
 								}
-							} else if parts[1] == "gpo" {
+							case "gpo":
 								_, err := provider.ListGroupPolicies(ctx)
 								if err != nil {
 									t.Logf("Note: %s requires real AD environment", comp.description)
 								}
-							} else if parts[1] == "trust" {
+							case "trust":
 								_, err := provider.ListDomainTrusts(ctx)
 								if err != nil {
 									t.Logf("Note: %s requires real AD environment", comp.description)

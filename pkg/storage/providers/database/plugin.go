@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -218,10 +219,29 @@ func (p *DatabaseProvider) getTableName(config map[string]interface{}, defaultNa
 	// Check for custom table name
 	tableKey := defaultName + "_table"
 	if customName, ok := config[tableKey].(string); ok && customName != "" {
-		return prefix + customName
+		return p.validateTableName(prefix + customName)
 	}
 	
-	return prefix + defaultName
+	return p.validateTableName(prefix + defaultName)
+}
+
+// validateTableName validates and sanitizes table names to prevent SQL injection
+func (p *DatabaseProvider) validateTableName(tableName string) string {
+	// Only allow alphanumeric characters and underscores
+	// This prevents SQL injection in table names
+	var sanitized strings.Builder
+	for _, r := range tableName {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
+			sanitized.WriteRune(r)
+		}
+	}
+	
+	result := sanitized.String()
+	if result == "" {
+		return "cfgms_default" // fallback to safe default
+	}
+	
+	return result
 }
 
 // Auto-register this provider (Salt-style)

@@ -18,6 +18,19 @@ type GitRBACStore struct {
 	remoteURL string
 }
 
+// safeReadFile safely reads a file with path validation to prevent directory traversal
+func (s *GitRBACStore) safeReadFile(targetPath string) ([]byte, error) {
+	// Clean the path to resolve any .. or . components
+	cleanPath := filepath.Clean(targetPath)
+	
+	// Ensure the path is within the repo directory
+	if !strings.HasPrefix(cleanPath, filepath.Clean(s.repoPath)) {
+		return nil, fmt.Errorf("path outside repository: %s", targetPath)
+	}
+	
+	return os.ReadFile(cleanPath)
+}
+
 // NewGitRBACStore creates a new git-based RBAC store
 func NewGitRBACStore(repoPath, remoteURL string) (*GitRBACStore, error) {
 	store := &GitRBACStore{
@@ -38,7 +51,7 @@ func (s *GitRBACStore) initializeRepo() error {
 	// Check if directory exists
 	if _, err := os.Stat(s.repoPath); os.IsNotExist(err) {
 		// Create directory
-		if err := os.MkdirAll(s.repoPath, 0755); err != nil {
+		if err := os.MkdirAll(s.repoPath, 0750); err != nil {
 			return fmt.Errorf("failed to create directory: %w", err)
 		}
 	}
@@ -47,7 +60,7 @@ func (s *GitRBACStore) initializeRepo() error {
 	dirs := []string{"permissions", "roles", "subjects", "assignments"}
 	for _, dir := range dirs {
 		fullPath := filepath.Join(s.repoPath, dir)
-		if err := os.MkdirAll(fullPath, 0755); err != nil {
+		if err := os.MkdirAll(fullPath, 0750); err != nil {
 			return fmt.Errorf("failed to create directory %s: %w", dir, err)
 		}
 	}
@@ -75,7 +88,7 @@ func (s *GitRBACStore) StorePermission(ctx context.Context, permission *common.P
 	}
 	
 	filePath := filepath.Join(s.repoPath, "permissions", permission.Id+".json")
-	if err := os.WriteFile(filePath, data, 0644); err != nil {
+	if err := os.WriteFile(filePath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write permission file: %w", err)
 	}
 	
@@ -85,7 +98,7 @@ func (s *GitRBACStore) StorePermission(ctx context.Context, permission *common.P
 // GetPermission implements RBACStore.GetPermission
 func (s *GitRBACStore) GetPermission(ctx context.Context, id string) (*common.Permission, error) {
 	filePath := filepath.Join(s.repoPath, "permissions", id+".json")
-	data, err := os.ReadFile(filePath)
+	data, err := s.safeReadFile(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("permission not found: %s", id)
@@ -111,7 +124,7 @@ func (s *GitRBACStore) ListPermissions(ctx context.Context, resourceType string)
 	
 	var permissions []*common.Permission
 	for _, file := range files {
-		data, err := os.ReadFile(file)
+		data, err := s.safeReadFile(file)
 		if err != nil {
 			continue // Skip files that can't be read
 		}
@@ -158,7 +171,7 @@ func (s *GitRBACStore) StoreRole(ctx context.Context, role *common.Role) error {
 	}
 	
 	filePath := filepath.Join(s.repoPath, "roles", role.Id+".json")
-	if err := os.WriteFile(filePath, data, 0644); err != nil {
+	if err := os.WriteFile(filePath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write role file: %w", err)
 	}
 	
@@ -168,7 +181,7 @@ func (s *GitRBACStore) StoreRole(ctx context.Context, role *common.Role) error {
 // GetRole implements RBACStore.GetRole
 func (s *GitRBACStore) GetRole(ctx context.Context, id string) (*common.Role, error) {
 	filePath := filepath.Join(s.repoPath, "roles", id+".json")
-	data, err := os.ReadFile(filePath)
+	data, err := s.safeReadFile(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("role not found: %s", id)
@@ -194,7 +207,7 @@ func (s *GitRBACStore) ListRoles(ctx context.Context, tenantID string) ([]*commo
 	
 	var roles []*common.Role
 	for _, file := range files {
-		data, err := os.ReadFile(file)
+		data, err := s.safeReadFile(file)
 		if err != nil {
 			continue // Skip files that can't be read
 		}
@@ -241,7 +254,7 @@ func (s *GitRBACStore) StoreSubject(ctx context.Context, subject *common.Subject
 	}
 	
 	filePath := filepath.Join(s.repoPath, "subjects", subject.Id+".json")
-	if err := os.WriteFile(filePath, data, 0644); err != nil {
+	if err := os.WriteFile(filePath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write subject file: %w", err)
 	}
 	
@@ -251,7 +264,7 @@ func (s *GitRBACStore) StoreSubject(ctx context.Context, subject *common.Subject
 // GetSubject implements RBACStore.GetSubject
 func (s *GitRBACStore) GetSubject(ctx context.Context, id string) (*common.Subject, error) {
 	filePath := filepath.Join(s.repoPath, "subjects", id+".json")
-	data, err := os.ReadFile(filePath)
+	data, err := s.safeReadFile(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("subject not found: %s", id)
@@ -302,7 +315,7 @@ func (s *GitRBACStore) StoreRoleAssignment(ctx context.Context, assignment *comm
 	
 	fileName := fmt.Sprintf("%s-%s-%s.json", assignment.SubjectId, assignment.RoleId, assignment.TenantId)
 	filePath := filepath.Join(s.repoPath, "assignments", fileName)
-	if err := os.WriteFile(filePath, data, 0644); err != nil {
+	if err := os.WriteFile(filePath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write assignment file: %w", err)
 	}
 	
@@ -336,7 +349,7 @@ func (s *GitRBACStore) ListRoleAssignments(ctx context.Context, subjectID, roleI
 		}
 		
 		filePath := filepath.Join(assignmentsDir, file.Name())
-		data, err := os.ReadFile(filePath)
+		data, err := s.safeReadFile(filePath)
 		if err != nil {
 			continue // Skip files that can't be read
 		}

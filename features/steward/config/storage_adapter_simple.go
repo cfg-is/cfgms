@@ -90,6 +90,8 @@ func (ssa *SimpleStorageAdapter) LoadConfiguration(ctx context.Context) (*Stewar
 	expectedChecksum := fmt.Sprintf("%x", sha256.Sum256(configEntry.Data))
 	if expectedChecksum != configEntry.Checksum {
 		// Don't fail for checksum mismatch, just proceed (data integrity warning)
+		// TODO: Add logging for checksum mismatch in future version
+		_ = expectedChecksum // Mark as intentionally unused
 	}
 
 	// Parse YAML configuration

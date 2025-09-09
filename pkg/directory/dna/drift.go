@@ -876,9 +876,10 @@ func (d *DefaultDirectoryDriftDetector) generateSuggestedActions(drift *Director
 	}
 	
 	// Add severity-specific actions
-	if drift.Severity == DriftSeverityCritical {
+	switch drift.Severity {
+	case DriftSeverityCritical:
 		actions = append([]string{"URGENT: Immediate investigation required"}, actions...)
-	} else if drift.Severity == DriftSeverityHigh {
+	case DriftSeverityHigh:
 		actions = append([]string{"High priority: Review within 1 hour"}, actions...)
 	}
 	

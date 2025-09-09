@@ -1229,6 +1229,7 @@ func (s *DatabaseRBACStore) GetRolePermissions(ctx context.Context, roleID strin
 		args[i] = permissionID
 	}
 	
+	// #nosec G201 - Using parameterized query with dynamic IN clause - placeholders are $1, $2, etc.
 	query := fmt.Sprintf(`
 		SELECT id, name, description, resource_type, actions
 		FROM rbac_permissions

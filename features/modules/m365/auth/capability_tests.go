@@ -103,7 +103,8 @@ func (f *InteractiveAuthFlow) testDirectoryReadAccess(ctx context.Context, token
 		}
 	}()
 	
-	if resp.StatusCode == http.StatusOK {
+	switch resp.StatusCode {
+	case http.StatusOK:
 		var response struct {
 			Value []map[string]interface{} `json:"value"`
 		}
@@ -122,10 +123,10 @@ func (f *InteractiveAuthFlow) testDirectoryReadAccess(ctx context.Context, token
 			test.Success = true
 			test.Details = "Successfully accessed directory API with application permissions"
 		}
-	} else if resp.StatusCode == http.StatusForbidden {
+	case http.StatusForbidden:
 		test.Success = false
 		test.Error = "Insufficient permissions for directory access - need Directory.ReadWrite.All application permission"
-	} else {
+	default:
 		test.Success = false
 		test.Error = fmt.Sprintf("API returned status %d", resp.StatusCode)
 	}
@@ -157,7 +158,8 @@ func (f *InteractiveAuthFlow) testGroupManagementAccess(ctx context.Context, tok
 		}
 	}()
 	
-	if resp.StatusCode == http.StatusOK {
+	switch resp.StatusCode {
+	case http.StatusOK:
 		var response struct {
 			Value []map[string]interface{} `json:"value"`
 		}
@@ -178,10 +180,10 @@ func (f *InteractiveAuthFlow) testGroupManagementAccess(ctx context.Context, tok
 			test.Success = true
 			test.Details = "Successfully accessed groups API with application permissions"
 		}
-	} else if resp.StatusCode == http.StatusForbidden {
+	case http.StatusForbidden:
 		test.Success = false
 		test.Error = "Insufficient permissions for group management - need Group.ReadWrite.All application permission"
-	} else {
+	default:
 		test.Success = false
 		test.Error = fmt.Sprintf("API returned status %d", resp.StatusCode)
 	}
@@ -213,7 +215,8 @@ func (f *InteractiveAuthFlow) testConditionalAccessAccess(ctx context.Context, t
 		}
 	}()
 	
-	if resp.StatusCode == http.StatusOK {
+	switch resp.StatusCode {
+	case http.StatusOK:
 		var response struct {
 			Value []map[string]interface{} `json:"value"`
 		}
@@ -230,10 +233,10 @@ func (f *InteractiveAuthFlow) testConditionalAccessAccess(ctx context.Context, t
 			test.Success = true
 			test.Details = "Successfully accessed Conditional Access API with application permissions"
 		}
-	} else if resp.StatusCode == http.StatusForbidden {
+	case http.StatusForbidden:
 		test.Success = false
 		test.Error = "Insufficient permissions for Conditional Access - need Policy.ReadWrite.ConditionalAccess or Policy.ReadWrite.All application permission"
-	} else {
+	default:
 		test.Success = false
 		test.Error = fmt.Sprintf("API returned status %d", resp.StatusCode)
 	}
@@ -265,7 +268,8 @@ func (f *InteractiveAuthFlow) testIntuneManagementAccess(ctx context.Context, to
 		}
 	}()
 	
-	if resp.StatusCode == http.StatusOK {
+	switch resp.StatusCode {
+	case http.StatusOK:
 		var response struct {
 			Value []map[string]interface{} `json:"value"`
 		}
@@ -282,10 +286,10 @@ func (f *InteractiveAuthFlow) testIntuneManagementAccess(ctx context.Context, to
 			test.Success = true
 			test.Details = "Successfully accessed Intune managed devices API with application permissions"
 		}
-	} else if resp.StatusCode == http.StatusForbidden {
+	case http.StatusForbidden:
 		test.Success = false
 		test.Error = "Insufficient permissions for Intune device management - need DeviceManagementManagedDevices.ReadWrite.All application permission"
-	} else {
+	default:
 		test.Success = false
 		test.Error = fmt.Sprintf("API returned status %d", resp.StatusCode)
 	}
@@ -317,7 +321,8 @@ func (f *InteractiveAuthFlow) testOrganizationManagementAccess(ctx context.Conte
 		}
 	}()
 	
-	if resp.StatusCode == http.StatusOK {
+	switch resp.StatusCode {
+	case http.StatusOK:
 		var response struct {
 			Value []map[string]interface{} `json:"value"`
 		}
@@ -339,10 +344,10 @@ func (f *InteractiveAuthFlow) testOrganizationManagementAccess(ctx context.Conte
 			test.Success = true
 			test.Details = "Successfully accessed organization API with application permissions"
 		}
-	} else if resp.StatusCode == http.StatusForbidden {
+	case http.StatusForbidden:
 		test.Success = false
 		test.Error = "Insufficient permissions for organization management - need Organization.ReadWrite.All application permission"
-	} else {
+	default:
 		test.Success = false
 		test.Error = fmt.Sprintf("API returned status %d", resp.StatusCode)
 	}
@@ -374,7 +379,8 @@ func (f *InteractiveAuthFlow) testAuditLogAccess(ctx context.Context, token *Acc
 		}
 	}()
 	
-	if resp.StatusCode == http.StatusOK {
+	switch resp.StatusCode {
+	case http.StatusOK:
 		var response struct {
 			Value []map[string]interface{} `json:"value"`
 		}
@@ -385,10 +391,10 @@ func (f *InteractiveAuthFlow) testAuditLogAccess(ctx context.Context, token *Acc
 			test.Success = true
 			test.Details = "Successfully accessed audit logs API with application permissions"
 		}
-	} else if resp.StatusCode == http.StatusForbidden {
+	case http.StatusForbidden:
 		test.Success = false
 		test.Error = "Insufficient permissions for audit log access - need AuditLog.Read.All application permission"
-	} else {
+	default:
 		test.Success = false
 		test.Error = fmt.Sprintf("API returned status %d", resp.StatusCode)
 	}
@@ -420,13 +426,14 @@ func (f *InteractiveAuthFlow) testUsageReportsAccess(ctx context.Context, token 
 		}
 	}()
 	
-	if resp.StatusCode == http.StatusOK {
+	switch resp.StatusCode {
+	case http.StatusOK:
 		test.Success = true
 		test.Details = "Successfully accessed Office 365 usage reports with application permissions"
-	} else if resp.StatusCode == http.StatusForbidden {
+	case http.StatusForbidden:
 		test.Success = false
 		test.Error = "Insufficient permissions for usage reports - need Reports.Read.All application permission"
-	} else {
+	default:
 		test.Success = false
 		test.Error = fmt.Sprintf("API returned status %d", resp.StatusCode)
 	}

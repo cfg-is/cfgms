@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -611,7 +612,13 @@ func (c *DefaultDirectoryDNACollector) generateUserDNA(user *interfaces.Director
 		Relationships: c.extractRelationshipIDs(relationships),
 		
 		// DNA framework compatibility
-		AttributeCount:  int32(len(attributes)),
+		AttributeCount: func() int32 {
+			count := len(attributes)
+			if count > math.MaxInt32 {
+				return math.MaxInt32
+			}
+			return int32(count)
+		}(),
 		SyncFingerprint: c.generateSyncFingerprint(dnaID, attributes),
 		
 		// Change tracking
@@ -700,7 +707,13 @@ func (c *DefaultDirectoryDNACollector) generateGroupDNA(group *interfaces.Direct
 		Relationships: c.extractRelationshipIDs(relationships),
 		
 		// DNA framework compatibility
-		AttributeCount:  int32(len(attributes)),
+		AttributeCount: func() int32 {
+			count := len(attributes)
+			if count > math.MaxInt32 {
+				return math.MaxInt32
+			}
+			return int32(count)
+		}(),
 		SyncFingerprint: c.generateSyncFingerprint(dnaID, attributes),
 		
 		// Change tracking
@@ -772,7 +785,13 @@ func (c *DefaultDirectoryDNACollector) generateOUDNA(ou *interfaces.Organization
 		Relationships: c.extractRelationshipIDs(relationships),
 		
 		// DNA framework compatibility
-		AttributeCount:  int32(len(attributes)),
+		AttributeCount: func() int32 {
+			count := len(attributes)
+			if count > math.MaxInt32 {
+				return math.MaxInt32
+			}
+			return int32(count)
+		}(),
 		SyncFingerprint: c.generateSyncFingerprint(dnaID, attributes),
 		
 		// Change tracking
@@ -999,7 +1018,13 @@ func (c *DefaultDirectoryDNACollector) CollectDomainDNA(ctx context.Context) (*D
 		Provider:        providerInfo.Name,
 		TenantID:        c.config.TenantID,
 		CollectedAt:     now,
-		AttributeCount:  int32(len(attributes)),
+		AttributeCount: func() int32 {
+			count := len(attributes)
+			if count > math.MaxInt32 {
+				return math.MaxInt32
+			}
+			return int32(count)
+		}(),
 		SyncFingerprint: c.generateSyncFingerprint(domainID, attributes),
 	}
 	
@@ -1148,7 +1173,13 @@ func (c *DefaultDirectoryDNACollector) CollectHierarchicalDNA(ctx context.Contex
 		TenantID:         c.config.TenantID,
 		CollectedAt:      now,
 		CollectionTime:   time.Since(startTime),
-		AttributeCount:   int32(len(attributes)),
+		AttributeCount: func() int32 {
+			count := len(attributes)
+			if count > math.MaxInt32 {
+				return math.MaxInt32
+			}
+			return int32(count)
+		}(),
 		SyncFingerprint:  c.generateSyncFingerprint(hierarchyID, attributes),
 	}
 	

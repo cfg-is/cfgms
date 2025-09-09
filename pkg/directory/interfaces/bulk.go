@@ -1269,11 +1269,12 @@ func (m *DefaultBulkOperationManager) SetRateLimit(requests int, window time.Dur
 	m.rateLimiter = NewRateLimiter(requests, window, m.config.BurstSize)
 	
 	// Update config
-	if window == time.Second {
+	switch window {
+	case time.Second:
 		m.config.RequestsPerSecond = requests
-	} else if window == time.Minute {
+	case time.Minute:
 		m.config.RequestsPerMinute = requests
-	} else if window == time.Hour {
+	case time.Hour:
 		m.config.RequestsPerHour = requests
 	}
 }

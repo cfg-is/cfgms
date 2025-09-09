@@ -266,7 +266,7 @@ func (vm *ValidationManager) validateResources(result *ValidationResult, config 
 		}
 
 		// Validate resource configuration
-		if resource.Config == nil || len(resource.Config) == 0 {
+		if len(resource.Config) == 0 {
 			result.Warnings = append(result.Warnings, ValidationError{
 				Field:   fmt.Sprintf("resources[%d].config", i),
 				Message: fmt.Sprintf("Resource '%s' has empty configuration", resource.Name),
@@ -359,10 +359,10 @@ func isValidResourceName(name string) bool {
 	}
 
 	for _, char := range name {
-		if !((char >= 'a' && char <= 'z') || 
-			 (char >= 'A' && char <= 'Z') || 
-			 (char >= '0' && char <= '9') || 
-			 char == '-' || char == '_') {
+		if (char < 'a' || char > 'z') && 
+			 (char < 'A' || char > 'Z') && 
+			 (char < '0' || char > '9') && 
+			 char != '-' && char != '_' {
 			return false
 		}
 	}

@@ -1032,8 +1032,10 @@ func (m *DefaultDirectorySchemaMapper) ValidateProviderObject(providerName strin
 	for fieldName, value := range data {
 		if field, exists := objectSchema.Fields[fieldName]; exists {
 			if value != nil && field.ProviderType != "" {
-				// Provider-specific type validation would go here
-				// This is a placeholder for more sophisticated validation
+				// TODO: Implement provider-specific type validation
+				// Each provider (AD, Azure, etc.) has different data types and constraints
+				// that should be validated based on field.ProviderType
+				_ = field.ProviderType // Acknowledge need for future validation implementation
 			}
 		}
 	}

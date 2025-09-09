@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -336,7 +337,14 @@ func (s *DirectoryDNAStorageAdapter) StoreRelationships(ctx context.Context, rel
 			"tenant_id":         relationships.TenantID,
 			"collected_at":      relationships.CollectedAt.Format(time.RFC3339),
 		},
-		AttributeCount: int32(len(relationships.MemberOf) + len(relationships.Members) + len(relationships.ChildOUs)),
+		AttributeCount: func() int32 {
+			count := len(relationships.MemberOf) + len(relationships.Members) + len(relationships.ChildOUs)
+			if count > math.MaxInt32 {
+				return math.MaxInt32
+			}
+			// #nosec G115 - Bounds checking above prevents integer overflow
+			return int32(count)
+		}(),
 	}
 	
 	record := &storage.DNARecord{

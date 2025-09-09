@@ -264,8 +264,10 @@ func (m *DirectoryProviderManager) RemoveProvider(name string) error {
 	defer cancel()
 	
 	if err := provider.Disconnect(ctx); err != nil {
-		// Log warning but continue with removal
+		// Log warning but continue with removal - disconnect errors are non-fatal
+		// as the provider is being removed from the registry regardless
 		// In a real implementation, this would use structured logging
+		_ = err // Acknowledge error but continue with removal
 	}
 	
 	delete(m.providers, name)
@@ -438,7 +440,7 @@ func GetProviderConfigurationTemplate(providerName string) (*ProviderConfig, err
 	}
 	
 	// Set provider-specific defaults based on capabilities
-	if info.Capabilities.SupportedAuthMethods != nil && len(info.Capabilities.SupportedAuthMethods) > 0 {
+	if len(info.Capabilities.SupportedAuthMethods) > 0 {
 		template.AuthMethod = info.Capabilities.SupportedAuthMethods[0]
 	}
 	

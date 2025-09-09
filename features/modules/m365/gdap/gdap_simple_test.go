@@ -240,14 +240,14 @@ func TestGDAPProviderCreation(t *testing.T) {
 func TestGDAPImplementationComplete(t *testing.T) {
 	t.Run("RequiredTypesExist", func(t *testing.T) {
 		// Validate that all required types are defined
-		var _ GDAPRelationshipStatus = GDAPStatusActive
-		var _ GDAPRole = GDAPRole{}
-		var _ GDAPRelationship = GDAPRelationship{}
-		var _ GDAPConfig = GDAPConfig{}
-		var _ GDAPMetrics = GDAPMetrics{}
-		var _ PartnerAccessValidation = PartnerAccessValidation{}
-		var _ CustomerInfo = CustomerInfo{}
-		var _ GDAPClientConfig = GDAPClientConfig{}
+		_ = GDAPStatusActive
+		var _ = GDAPRole{}
+		var _ = GDAPRelationship{}
+		var _ = GDAPConfig{}
+		var _ = GDAPMetrics{}
+		var _ = PartnerAccessValidation{}
+		var _ = CustomerInfo{}
+		var _ = GDAPClientConfig{}
 		
 		// This test will fail at compile time if any of these types don't exist
 		assert.True(t, true)
