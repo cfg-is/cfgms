@@ -374,9 +374,9 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 
 #### v0.4.6.0 (Alpha) - Complete Storage Migration
 
-**Status**: 📋 IN PROGRESS - 46 story points - Epic 6: Complete Storage Migration (35/46 points complete - 76%)
+**Status**: 📋 IN PROGRESS - 54 story points - Epic 6: Complete Storage Migration (35/54 points complete - 65%)
 
-**Epic 6: Complete Storage Migration (46 story points)**
+**Epic 6: Complete Storage Migration (54 story points)**
 - [x] **RBAC Storage Migration** (Issue #141) - 8 points ✅
 - [x] **Audit & Compliance Storage Migration** (Issue #142) - 8 points ✅
 - [x] **Configuration & Rollback Storage Migration** (Issue #143) - 6 points ✅ COMPLETED
@@ -397,6 +397,12 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - [x] Migrate duplicate EphemeralRuntimeStore and InMemoryRuntimeStore implementations
   - [x] Eliminate ~200+ lines of duplicate cache code with comprehensive testing
 - [ ] **DNA Storage Integration Assessment** (Issue #145) - 3 points
+- [ ] **SQLite DNA Storage Implementation** (Issue #159) - 8 points
+  - [ ] Implement SQLite as default backend for DNA storage with zero-setup deployment
+  - [ ] Complete PostgreSQL implementation for production scale deployments
+  - [ ] Remove memory, git, and hybrid backends completely from DNA storage
+  - [ ] Migrate all DNA storage tests from memory to SQLite backends
+  - [ ] Establish three-tier storage strategy: SQLite (default) → PostgreSQL (scale) → File (fallback)
 - [ ] **Storage Pattern Validation & Cleanup** (Issue #146) - 3 points
 
 #### v0.5.0 (Beta) - Advanced Workflows & Core Readiness
