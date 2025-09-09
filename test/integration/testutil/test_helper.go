@@ -80,6 +80,15 @@ func NewTestEnv(t *testing.T) *TestEnv {
 		CertPath:   certStoragePath, // Legacy cert path for backward compatibility
 		DataDir:    filepath.Join(tempDir, "controller-data"),
 		LogLevel:   "debug",
+		Storage: &config.StorageConfig{
+			Provider: "git",
+			Config: map[string]interface{}{
+				"repository_path": filepath.Join(tempDir, "storage-git"),
+				"encryption": map[string]interface{}{
+					"enabled": false, // Disable encryption for tests
+				},
+			},
+		},
 		Certificate: &config.CertificateConfig{
 			EnableCertManagement:   true,
 			CAPath:                filepath.Join(certStoragePath, "ca"),
@@ -99,6 +108,11 @@ func NewTestEnv(t *testing.T) *TestEnv {
 
 	// Create controller data directory
 	err = os.MkdirAll(controllerCfg.DataDir, 0755)
+	require.NoError(t, err)
+	
+	// Create storage directory
+	storageDir := filepath.Join(tempDir, "storage-git")
+	err = os.MkdirAll(storageDir, 0755)
 	require.NoError(t, err)
 
 	ctrl, err := controller.New(controllerCfg, logger)

@@ -291,6 +291,15 @@ func (f *E2ETestFramework) initializeController() error {
 		CertPath:   filepath.Join(f.tempDir, "certs"), // Legacy cert path
 		DataDir:    filepath.Join(f.tempDir, "controller-data"),
 		LogLevel:   "info",
+		Storage: &controllerConfig.StorageConfig{
+			Provider: "git",
+			Config: map[string]interface{}{
+				"repository_path": filepath.Join(f.tempDir, "storage-git"),
+				"encryption": map[string]interface{}{
+					"enabled": false, // Disable encryption for tests
+				},
+			},
+		},
 		Certificate: &controllerConfig.CertificateConfig{
 			EnableCertManagement:   f.config.EnableTLS,
 			CAPath:                filepath.Join(f.tempDir, "certs", "ca"),
@@ -306,6 +315,12 @@ func (f *E2ETestFramework) initializeController() error {
 				Organization: "Test Organization",
 			},
 		},
+	}
+	
+	// Create storage directory
+	storageDir := filepath.Join(f.tempDir, "storage-git")
+	if err := os.MkdirAll(storageDir, 0755); err != nil {
+		return fmt.Errorf("failed to create storage directory: %w", err)
 	}
 	
 	ctrl, err := controller.New(config, f.logger)

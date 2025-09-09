@@ -53,11 +53,12 @@ CFGMS (Config Management System) is a modern, Go-based configuration management 
    - Run tests frequently: `make test`
 
 **STORAGE DEVELOPMENT CHECKLIST** (Required for any storage-related work):
-   - ✅ **COMPLETED**: Global memory storage provider eliminated in Epic 6
+   - ✅ **EPIC 6 COMPLETED**: Global storage migration complete - all components use pluggable storage
    - ❌ **STOP**: Am I storing secrets in cleartext anywhere? (PROHIBITED)
    - ✅ **VERIFY**: Does my component use write-through caching (memory → durable)?
    - ✅ **VERIFY**: Does my component import only `pkg/storage/interfaces`?
-   - ✅ **VERIFY**: Does my implementation work with ALL global storage providers?
+   - ✅ **VERIFY**: Does my implementation work with ALL global storage providers (git/database/memory)?
+   - ✅ **VERIFY**: Does my test use proper storage configuration in test helpers?
 
 4. **Basic Security Review** (CRITICAL)
    
@@ -641,7 +642,7 @@ features/
 - **Interface Documentation**: Clearly document interface contracts, expected behavior, and implementation requirements
 - **Constants and Variables**: Document all exported constants and variables with their purpose and valid values
 
-### Testing Approach
+### Testing Approach - POST-EPIC-6
 - **TDD**: Write table-driven tests before implementation
 - **Real Component Testing**: **NEVER mock CFGMS functionality in tests - test the actual program**
   - Use real memory stores (e.g., `memory.NewStore()`) instead of mocking RBAC interfaces
@@ -649,6 +650,11 @@ features/
   - Use real component integration instead of simulated behavior
   - Only mock external dependencies that we don't control (network calls, file I/O)
   - Integration tests must demonstrate actual system functionality, not theoretical behavior
+- **Storage Configuration Required**: All tests that create controllers must include storage configuration
+  - Integration tests: Use Git provider with temporary directories
+  - Performance tests: Use Git provider with disabled encryption
+  - Unit tests: Use memory stores for isolated component testing
+  - **Test Helper Fixed**: `test/integration/testutil/test_helper.go` and `test/e2e/framework.go` updated with storage config
 - **Coverage**: Aim for 100% test coverage on core components
 - **Race Detection**: Always run tests with `-race` flag
 - **Integration**: Test component interactions with real dependencies
@@ -684,15 +690,15 @@ features/
 - Get returns comprehensive state, Set modifies only managed fields
 - Use GetManagedFields() to specify which fields Set will change
 
-### Storage Architecture Requirements (CRITICAL)
+### Storage Architecture Requirements (CRITICAL) - EPIC 6 COMPLETE ✅
 
-**FOOT-GUN PREVENTION - READ BEFORE ANY STORAGE WORK:**
+**POST-EPIC-6 STORAGE PATTERNS - ALL COMPONENTS MIGRATED:**
 
-**Prohibited Patterns:**
-- ✅ **ELIMINATED**: Memory as a global storage provider choice (Epic 6)
-- ❌ Cleartext secrets on disk (even in development)
-- ❌ Component-specific storage provider selection
-- ❌ Bypassing global storage configuration
+**Prohibited Patterns (ELIMINATED):**
+- ✅ **ELIMINATED**: Memory as a global storage provider choice (Epic 6 Complete)
+- ❌ Cleartext secrets on disk (even in development) - STILL PROHIBITED
+- ❌ Component-specific storage provider selection - STILL PROHIBITED  
+- ❌ Bypassing global storage configuration - STILL PROHIBITED
 
 **Required Patterns:**
 - ✅ Git with SOPS is the secure default provider (product decision)
