@@ -435,7 +435,8 @@ func (m *entraAdminUnitModule) updateAdminUnit(ctx context.Context, token *auth.
 
 	// Update the administrative unit if there are changes
 	if len(updates) > 0 {
-		// Would make Graph API PATCH call here
+		// TODO: Implement Graph API PATCH call to update administrative unit
+		return fmt.Errorf("administrative unit updates not yet implemented")
 	}
 
 	// Handle membership if managed and not dynamic

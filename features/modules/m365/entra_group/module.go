@@ -458,7 +458,8 @@ func (m *entraGroupModule) updateGroup(ctx context.Context, token *auth.AccessTo
 
 	// Update the group if there are changes
 	if len(updates) > 0 {
-		// Would make Graph API PATCH call here
+		// TODO: Implement Graph API PATCH call to update group
+		return fmt.Errorf("group updates not yet implemented")
 	}
 
 	// Handle membership if managed

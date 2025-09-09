@@ -501,7 +501,8 @@ func (m *entraApplicationModule) updateApplication(ctx context.Context, token *a
 
 	// Update the application if there are changes
 	if len(updates) > 0 {
-		// Would make Graph API PATCH call here
+		// TODO: Implement Graph API PATCH call to update application
+		return fmt.Errorf("application updates not yet implemented")
 	}
 
 	// Handle credentials if managed

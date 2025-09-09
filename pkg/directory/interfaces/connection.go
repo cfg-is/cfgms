@@ -388,13 +388,8 @@ func (p *DefaultDirectoryConnectionPool) Put(conn DirectoryConnection) error {
 	default:
 		// Pool is full, close connection
 		if err := conn.Close(ctx); err != nil {
-<<<<<<< HEAD
-			// Could add logging here if needed
-			_ = err
-=======
 			// Log error but don't fail the pool operation
 			log.Printf("Warning: failed to close excess connection: %v", err)
->>>>>>> 61afb7f (Implement Story #123: Epic 4: Entra ID Provider Implementation (9 points))
 		}
 		
 		p.updateStatistics(func(stats *PoolStatistics) {

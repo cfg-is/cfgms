@@ -89,27 +89,9 @@ func isValidUPN(upn string) bool {
 	return upnRegex.MatchString(upn)
 }
 
-// isValidEmail validates email address format
-func isValidEmail(email string) bool {
-	if email == "" {
-		return true // Empty email is valid (optional field)
-	}
-
-	emailRegex := regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
-	return emailRegex.MatchString(email)
-}
-
-// isValidMailNickname validates mail nickname format for Microsoft 365
-func isValidMailNickname(nickname string) bool {
-	if nickname == "" {
-		return false
-	}
-
-	// Mail nickname should be alphanumeric with some special characters allowed
-	// No spaces, no special characters that could cause issues
-	nicknameRegex := regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
-	return nicknameRegex.MatchString(nickname) && len(nickname) <= 64
-}
+// TODO: Add validation functions when needed
+// - isValidEmail: validates email address format
+// - isValidMailNickname: validates mail nickname format for Microsoft 365
 
 // Conversion error types
 
