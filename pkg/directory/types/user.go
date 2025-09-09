@@ -101,7 +101,7 @@ func FromGraphUser(graphUser *GraphUser, providerName string) *DirectoryUser {
 		Company:           graphUser.CompanyName, // Normalize to Company
 		CompanyName:       graphUser.CompanyName, // Keep original for compatibility
 		Created:           created,
-		Modified:          &time.Time{}, // Set to current time
+		Modified:          func() *time.Time { now := time.Now(); return &now }(), // Set to current time
 		Source:            providerName,
 	}
 }

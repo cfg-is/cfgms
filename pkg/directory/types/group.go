@@ -100,7 +100,7 @@ func FromGraphGroup(graphGroup *GraphGroup, providerName string) *DirectoryGroup
 		MailNickname:    graphGroup.MailNickname,
 		Mail:            graphGroup.Mail,
 		Created:         created,
-		Modified:        &time.Time{}, // Set to current time
+		Modified:        func() *time.Time { now := time.Now(); return &now }(), // Set to current time
 		Source:          providerName,
 	}
 }
