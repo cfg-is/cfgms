@@ -5,6 +5,7 @@ package storage
 import (
 	"context"
 	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -14,10 +15,38 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+// createTestConfig creates a test configuration with unique database path
+func createTestConfig(t *testing.T, backendType BackendType) *Config {
+	config := DefaultConfig()
+	config.Backend = backendType
+	
+	// For SQLite testing, the database will be created in a temporary location
+	// by the SQLite backend implementation (data/dna.db by default)
+	// Tests will run in isolated environments
+	
+	return config
+}
+
+// cleanupTestConfig cleans up test resources
+func cleanupTestConfig(t *testing.T, config *Config) {
+	if config.Backend == BackendSQLite {
+		// Clean up SQLite database files to ensure test isolation
+		dbFiles := []string{"data/dna.db", "data/dna.db-wal", "data/dna.db-shm"}
+		for _, file := range dbFiles {
+			if err := os.Remove(file); err != nil && !os.IsNotExist(err) {
+				t.Logf("Warning: Could not remove database file %s: %v", file, err)
+			}
+		}
+	}
+}
+
 func TestStorageManager(t *testing.T) {
 	logger := logging.NewLogger("debug")
-	config := DefaultConfig()
-	config.Backend = BackendMemory // Use memory backend for testing
+	config := createTestConfig(t, BackendSQLite)
+	
+	// Clean up before starting to ensure isolated test environment
+	cleanupTestConfig(t, config)
+	defer cleanupTestConfig(t, config)
 
 	manager, err := NewManager(config, logger)
 	if err != nil {
@@ -467,10 +496,15 @@ func TestStorageBackends(t *testing.T) {
 	logger := logging.NewLogger("debug")
 	config := DefaultConfig()
 
-	backends := []BackendType{BackendMemory, BackendFile}
+	backends := []BackendType{BackendSQLite, BackendFile}
 	
 	for _, backendType := range backends {
 		t.Run(string(backendType), func(t *testing.T) {
+			// Clean database before each backend test
+			if backendType == BackendSQLite {
+				testConfig := createTestConfig(t, BackendSQLite)
+				cleanupTestConfig(t, testConfig)
+			}
 			testStorageBackend(t, backendType, config, logger)
 		})
 	}
@@ -783,7 +817,7 @@ func createTestDNA(deviceID string, attributes map[string]string) *commonpb.DNA 
 func BenchmarkDNAStorage(b *testing.B) {
 	logger := logging.NewLogger("error") // Reduce logging noise
 	config := DefaultConfig()
-	config.Backend = BackendMemory
+	config.Backend = BackendSQLite
 
 	manager, err := NewManager(config, logger)
 	if err != nil {
@@ -823,7 +857,7 @@ func BenchmarkDNAStorage(b *testing.B) {
 func BenchmarkDNARetrieval(b *testing.B) {
 	logger := logging.NewLogger("error")
 	config := DefaultConfig()
-	config.Backend = BackendMemory
+	config.Backend = BackendSQLite
 
 	manager, err := NewManager(config, logger)
 	if err != nil {

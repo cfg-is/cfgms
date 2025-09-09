@@ -83,11 +83,12 @@ type Config struct {
 type BackendType string
 
 const (
-	BackendMemory   BackendType = "memory"
-	BackendFile     BackendType = "file"
-	BackendGit      BackendType = "git"
-	BackendDatabase BackendType = "database"
-	BackendHybrid   BackendType = "hybrid" // Git + database for optimal performance
+	BackendSQLite   BackendType = "sqlite"   // SQLite embedded database (DEFAULT)
+	BackendMemory   BackendType = "memory"   // In-memory only (DEPRECATED - data loss risk)
+	BackendFile     BackendType = "file"     // File system storage (fallback)
+	BackendGit      BackendType = "git"      // Git-based storage (DEPRECATED)
+	BackendDatabase BackendType = "database" // External PostgreSQL database (scale)
+	BackendHybrid   BackendType = "hybrid"   // Git + database (DEPRECATED)
 )
 
 // DNARecord represents a stored DNA record with metadata
@@ -405,25 +406,30 @@ func (m *Manager) Close() error {
 }
 
 // DefaultConfig returns a default configuration for DNA storage
+// 
+// New simplified defaults for Issue #159:
+// - SQLite backend for zero-setup deployment
+// - Removed complex features (compression, deduplication, sharding)
+// - Databases handle optimization internally
 func DefaultConfig() *Config {
 	return &Config{
-		Backend:                BackendHybrid,
-		CompressionLevel:       6,
-		CompressionType:        "zstd",
-		TargetCompressionRatio: 0.3, // 70% space savings target
-		EnableDeduplication:    true,
-		BlockSize:             64 * 1024, // 64KB blocks
-		HashAlgorithm:         "sha256",
-		RetentionPeriod:       90 * 24 * time.Hour,        // 90 days
-		ArchivalPeriod:        30 * 24 * time.Hour,        // Archive after 30 days
-		MaxRecordsPerDevice:   1000,                       // Limit per device
-		EnableSharding:        true,
-		ShardCount:           16,
-		ShardingStrategy:     "hybrid",
-		BatchSize:            100,
-		FlushInterval:        5 * time.Minute,
-		CacheSize:            1000,                        // Cache 1000 records
-		MaxStoragePerMonth:   100 * 1024 * 1024,          // 100MB per device per month
+		Backend:                BackendSQLite,                 // DEFAULT: SQLite embedded database
+		CompressionLevel:       6,                             // Kept for compatibility
+		CompressionType:        "zstd",                        // Kept for compatibility
+		TargetCompressionRatio: 0.3,                           // Kept for compatibility
+		EnableDeduplication:    false,                         // Simplified: Let database handle it
+		BlockSize:             64 * 1024,                      // Kept for compatibility
+		HashAlgorithm:         "sha256",                       // Kept for compatibility
+		RetentionPeriod:       90 * 24 * time.Hour,            // 90 days
+		ArchivalPeriod:        30 * 24 * time.Hour,            // Archive after 30 days
+		MaxRecordsPerDevice:   1000,                           // Limit per device
+		EnableSharding:        false,                          // Simplified: Single database file
+		ShardCount:           1,                               // Simplified: No sharding
+		ShardingStrategy:     "device_id",                     // Kept for compatibility
+		BatchSize:            100,                             // Kept for compatibility
+		FlushInterval:        5 * time.Minute,                 // Kept for compatibility
+		CacheSize:            1000,                            // Kept for compatibility
+		MaxStoragePerMonth:   100 * 1024 * 1024,              // 100MB per device per month
 	}
 }
 
