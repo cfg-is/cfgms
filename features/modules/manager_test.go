@@ -282,8 +282,12 @@ func TestModuleLifecycleManager_StartStopAllModules(t *testing.T) {
 	config := DefaultModuleConfig()
 
 	// Register in registry first
-	registry.RegisterModule(baseMetadata, baseModule)
-	registry.RegisterModule(appMetadata, appModule)
+	if err := registry.RegisterModule(baseMetadata, baseModule); err != nil {
+		t.Fatalf("RegisterModule(base) in registry error = %v", err)
+	}
+	if err := registry.RegisterModule(appMetadata, appModule); err != nil {
+		t.Fatalf("RegisterModule(app) in registry error = %v", err)
+	}
 
 	// Register with lifecycle manager
 	_, err := manager.RegisterModule(baseMetadata, baseModule, config)
@@ -415,7 +419,11 @@ func TestModuleLifecycleManager_EventSystem(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	defer manager.Stop()
+	defer func() {
+		if stopErr := manager.Stop(); stopErr != nil {
+			t.Errorf("Stop() error = %v", stopErr)
+		}
+	}()
 
 	// Wait for start event
 	time.Sleep(50 * time.Millisecond)
@@ -513,7 +521,11 @@ func TestModuleLifecycleManager_ConcurrentAccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	defer manager.Stop()
+	defer func() {
+		if stopErr := manager.Stop(); stopErr != nil {
+			t.Errorf("Stop() error = %v", stopErr)
+		}
+	}()
 
 	const numGoroutines = 50
 	const numModules = 10
@@ -591,7 +603,9 @@ func BenchmarkModuleLifecycleManager_GetModuleInstance(b *testing.B) {
 	metadata := &ModuleMetadata{Name: "bench-module", Version: "1.0.0"}
 	config := DefaultModuleConfig()
 
-	manager.RegisterModule(metadata, module, config)
+	if _, err := manager.RegisterModule(metadata, module, config); err != nil {
+		b.Fatalf("RegisterModule() error = %v", err)
+	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -614,7 +628,9 @@ func BenchmarkModuleLifecycleManager_GetSystemHealth(b *testing.B) {
 		}
 		config := DefaultModuleConfig()
 
-		manager.RegisterModule(metadata, module, config)
+		if _, err := manager.RegisterModule(metadata, module, config); err != nil {
+		b.Fatalf("RegisterModule() error = %v", err)
+	}
 	}
 
 	b.ResetTimer()
@@ -638,7 +654,9 @@ func BenchmarkModuleLifecycleManager_ListModuleInstances(b *testing.B) {
 		}
 		config := DefaultModuleConfig()
 
-		manager.RegisterModule(metadata, module, config)
+		if _, err := manager.RegisterModule(metadata, module, config); err != nil {
+		b.Fatalf("RegisterModule() error = %v", err)
+	}
 	}
 
 	b.ResetTimer()

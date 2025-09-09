@@ -52,13 +52,6 @@ func (ml *mockModuleLoader) GetModuleInfo(moduleName string) (discovery.ModuleIn
 	return discovery.ModuleInfo{}, false
 }
 
-func (ml *mockModuleLoader) addModule(name string, module Module) {
-	ml.modules[name] = module
-}
-
-func (ml *mockModuleLoader) addError(name string, err error) {
-	ml.errors[name] = err
-}
 
 func TestNewLifecycleAwareModuleFactory(t *testing.T) {
 	discoveryRegistry := make(discovery.ModuleRegistry)
@@ -121,7 +114,11 @@ func TestLifecycleAwareModuleFactory_LoadModule(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	defer factory.Stop()
+	defer func() {
+		if stopErr := factory.Stop(); stopErr != nil {
+			t.Errorf("Stop() error = %v", stopErr)
+		}
+	}()
 
 	// Test loading non-existent module
 	_, err = factory.LoadModule("non-existent")
@@ -145,7 +142,11 @@ func TestLifecycleAwareModuleFactory_LoadModuleWithConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	defer factory.Stop()
+	defer func() {
+		if stopErr := factory.Stop(); stopErr != nil {
+			t.Errorf("Stop() error = %v", stopErr)
+		}
+	}()
 
 	moduleConfig := ModuleConfig{
 		InitializationTimeout: 10 * time.Second,
@@ -171,7 +172,11 @@ func TestLifecycleAwareModuleFactory_ModuleOperations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	defer factory.Stop()
+	defer func() {
+		if stopErr := factory.Stop(); stopErr != nil {
+			t.Errorf("Stop() error = %v", stopErr)
+		}
+	}()
 
 	// Test operations on non-existent module
 	err = factory.StartModule("non-existent")
@@ -216,7 +221,11 @@ func TestLifecycleAwareModuleFactory_ListModules(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	defer factory.Stop()
+	defer func() {
+		if stopErr := factory.Stop(); stopErr != nil {
+			t.Errorf("Stop() error = %v", stopErr)
+		}
+	}()
 
 	// Test empty list
 	modules := factory.ListModules()
@@ -236,7 +245,11 @@ func TestLifecycleAwareModuleFactory_GetSystemHealth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	defer factory.Stop()
+	defer func() {
+		if stopErr := factory.Stop(); stopErr != nil {
+			t.Errorf("Stop() error = %v", stopErr)
+		}
+	}()
 
 	health := factory.GetSystemHealth()
 
@@ -271,7 +284,11 @@ func TestLifecycleAwareModuleFactory_EventSystem(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	defer factory.Stop()
+	defer func() {
+		if stopErr := factory.Stop(); stopErr != nil {
+			t.Errorf("Stop() error = %v", stopErr)
+		}
+	}()
 
 	// Wait for start event
 	time.Sleep(50 * time.Millisecond)
@@ -337,7 +354,11 @@ func TestLifecycleAwareModuleFactory_UnloadModule(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	defer factory.Stop()
+	defer func() {
+		if stopErr := factory.Stop(); stopErr != nil {
+			t.Errorf("Stop() error = %v", stopErr)
+		}
+	}()
 
 	// Test unloading non-existent module
 	err = factory.UnloadModule("non-existent")
@@ -449,7 +470,11 @@ func TestLifecycleAwareModuleFactory_Integration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	defer factory.Stop()
+	defer func() {
+		if stopErr := factory.Stop(); stopErr != nil {
+			t.Errorf("Stop() error = %v", stopErr)
+		}
+	}()
 
 	// Manually register the module with lifecycle manager
 	// (since the discovery registry doesn't have it)
@@ -531,8 +556,14 @@ func BenchmarkLifecycleAwareModuleFactory_GetModule(b *testing.B) {
 	mockLoader := newMockModuleLoader()
 
 	factory := NewLifecycleAwareModuleFactory(discoveryRegistry, moduleRegistry, mockLoader)
-	factory.Start()
-	defer factory.Stop()
+	if err := factory.Start(); err != nil {
+		b.Fatalf("Start() error = %v", err)
+	}
+	defer func() {
+		if stopErr := factory.Stop(); stopErr != nil {
+			b.Errorf("Stop() error = %v", stopErr)
+		}
+	}()
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -546,8 +577,14 @@ func BenchmarkLifecycleAwareModuleFactory_GetSystemHealth(b *testing.B) {
 	mockLoader := newMockModuleLoader()
 
 	factory := NewLifecycleAwareModuleFactory(discoveryRegistry, moduleRegistry, mockLoader)
-	factory.Start()
-	defer factory.Stop()
+	if err := factory.Start(); err != nil {
+		b.Fatalf("Start() error = %v", err)
+	}
+	defer func() {
+		if stopErr := factory.Stop(); stopErr != nil {
+			b.Errorf("Stop() error = %v", stopErr)
+		}
+	}()
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
