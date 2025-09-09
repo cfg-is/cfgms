@@ -143,10 +143,10 @@ test-full: test-fast test-integration-comprehensive test-story-86
 
 # Integration Testing Framework (Story #84)
 .PHONY: test test-all test-fast test-production-critical test-full
-.PHONY: test-integration test-integration-controller test-integration-steward test-e2e test-cross-platform
+.PHONY: test-integration test-integration-controller test-integration-steward test-e2e test-cross-platform test-m365-integration test-m365-integration-dev test-m365-unit
 
 # Run all integration tests
-test-integration: test-integration-controller test-integration-steward test-e2e
+test-integration: test-integration-controller test-integration-steward test-e2e test-m365-integration
 
 # Controller integration tests (Linux only)
 test-integration-controller:
@@ -167,6 +167,36 @@ test-e2e:
 	@echo "🎯 Running Comprehensive E2E Tests"
 	@echo "=================================="
 	go test -v -race -timeout=20m ./test/e2e/... -run "TestE2EScenarios"
+
+# M365 Integration Testing (Enhanced Testing Strategy)
+# M365 integration tests - STRICT mode (fails without credentials)
+# Use this for local PR validation to ensure critical tests aren't missed
+test-m365-integration:
+	@echo "🌐 Running M365 Integration Tests (STRICT MODE)"
+	@echo "==============================================="
+	@echo "⚡ This will FAIL if M365 credentials are not available"
+	@echo "📝 Add credentials to .env.local or set M365_CLIENT_ID, M365_CLIENT_SECRET, M365_TENANT_ID"
+	@echo ""
+	go test -v -race -timeout=10m ./features/modules/m365/entra_application/... -run "Integration"
+	go test -v -race -timeout=10m ./features/modules/m365/entra_admin_unit/... -run "Integration"
+
+# M365 integration tests - PERMISSIVE mode (skips without credentials) 
+# Use this for development when you don't have M365 credentials
+test-m365-integration-dev:
+	@echo "🌐 Running M365 Integration Tests (DEV MODE)"
+	@echo "============================================"
+	@echo "⚡ This will SKIP if M365 credentials are not available"
+	@echo ""
+	ALLOW_SKIP_INTEGRATION=true go test -v -race -timeout=10m ./features/modules/m365/entra_application/... -run "Integration"
+	ALLOW_SKIP_INTEGRATION=true go test -v -race -timeout=10m ./features/modules/m365/entra_admin_unit/... -run "Integration"
+
+# M365 unit tests (mocked dependencies, no credentials needed)
+test-m365-unit:
+	@echo "🌐 Running M365 Unit Tests"
+	@echo "=========================="
+	@echo "⚡ Using mocked dependencies - no credentials required"
+	@echo ""
+	go test -v -race -short -timeout=5m ./features/modules/m365/entra_application/... ./features/modules/m365/entra_admin_unit/... ./pkg/directory/types/...
 
 # Cross-Feature Integration Testing (Story #85)
 .PHONY: test-cross-feature-integration test-failure-propagation test-data-consistency test-integration-comprehensive

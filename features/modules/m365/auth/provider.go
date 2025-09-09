@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -157,7 +158,7 @@ func (c *OAuth2Config) GetScopeString() string {
 	if len(c.Scopes) == 0 {
 		return "https://graph.microsoft.com/.default"
 	}
-	return fmt.Sprintf("%v", c.Scopes)
+	return strings.Join(c.Scopes, " ")
 }
 
 // GetDelegatedScopeString returns delegated scopes as a space-separated string
@@ -166,7 +167,7 @@ func (c *OAuth2Config) GetDelegatedScopeString() string {
 		// Default delegated scopes for user operations
 		return "User.Read User.ReadWrite.All Group.ReadWrite.All Directory.ReadWrite.All Policy.ReadWrite.ConditionalAccess DeviceManagementConfiguration.ReadWrite.All"
 	}
-	return fmt.Sprintf("%v", c.DelegatedScopes)
+	return strings.Join(c.DelegatedScopes, " ")
 }
 
 // SupportsDelegatedAuth checks if delegated authentication is configured
