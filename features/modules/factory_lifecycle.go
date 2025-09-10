@@ -116,7 +116,10 @@ func (laf *LifecycleAwareModuleFactory) LoadModule(moduleName string) (Module, e
 	// Load the module (initialize it)
 	if err := laf.lifecycleManager.LoadModule(moduleName); err != nil {
 		// Unregister on failure
-		laf.lifecycleManager.UnregisterModule(moduleName)
+		if unregErr := laf.lifecycleManager.UnregisterModule(moduleName); unregErr != nil {
+			// Log the unregister error but don't change the return error
+			fmt.Printf("Warning: failed to unregister module '%s' after load failure: %v\n", moduleName, unregErr)
+		}
 		return nil, fmt.Errorf("failed to initialize module '%s': %v", moduleName, err)
 	}
 	
@@ -158,7 +161,10 @@ func (laf *LifecycleAwareModuleFactory) LoadModuleWithConfig(moduleName string, 
 	// Load the module (initialize it)
 	if err := laf.lifecycleManager.LoadModule(moduleName); err != nil {
 		// Unregister on failure
-		laf.lifecycleManager.UnregisterModule(moduleName)
+		if unregErr := laf.lifecycleManager.UnregisterModule(moduleName); unregErr != nil {
+			// Log the unregister error but don't change the return error
+			fmt.Printf("Warning: failed to unregister module '%s' after load failure: %v\n", moduleName, unregErr)
+		}
 		return nil, fmt.Errorf("failed to initialize module '%s': %v", moduleName, err)
 	}
 	
@@ -363,13 +369,19 @@ func (mfb *ModuleFactoryBridge) GetLoadedModules() []string {
 // UnloadModule implements the standard factory interface
 func (mfb *ModuleFactoryBridge) UnloadModule(moduleName string) {
 	// Ignore errors for compatibility with existing interface
-	mfb.lifecycleFactory.UnloadModule(moduleName)
+	if err := mfb.lifecycleFactory.UnloadModule(moduleName); err != nil {
+		// Log error but don't return it to maintain interface compatibility
+		fmt.Printf("Warning: failed to unload module '%s': %v\n", moduleName, err)
+	}
 }
 
 // UnloadAllModules implements the standard factory interface
 func (mfb *ModuleFactoryBridge) UnloadAllModules() {
 	// Stop and unload all modules
-	mfb.lifecycleFactory.Stop()
+	if err := mfb.lifecycleFactory.Stop(); err != nil {
+		// Log error but don't return it to maintain interface compatibility
+		fmt.Printf("Warning: failed to stop lifecycle factory: %v\n", err)
+	}
 }
 
 // ValidateModuleInterface implements the standard factory interface

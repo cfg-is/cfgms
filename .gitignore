@@ -51,3 +51,8 @@ features/controller/data/
 **/cfgms-storage/
 .env.test
 docker-compose.test.override.yml
+
+# SQLite database files
+*.db
+*.sqlite
+*.sqlite3

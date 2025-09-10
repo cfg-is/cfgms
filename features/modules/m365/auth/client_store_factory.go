@@ -299,6 +299,7 @@ func (g *GlobalStorageAdapter) DeleteAdminConsentRequest(state string) error {
 // Legacy functions removed - now using global plugin architecture
 // All storage creation goes through interfaces.CreateClientTenantStoreFromConfig
 
+
 // ValidateClientStoreConfig validates client store configuration
 func ValidateClientStoreConfig(config *ClientStoreConfig) error {
 	if config == nil {
