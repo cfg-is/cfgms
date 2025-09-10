@@ -22,7 +22,7 @@ CFGMS (Config Management System) is a modern, Go-based configuration management 
 
 ### Sprint and Development Process
 - **Sprint Planning Guideline**: At the start of each milestone, ALWAYS conduct sprint/story planning before beginning work
-- **Sprint Completion**: At the end of each sprint, run `make test-complete` to validate all stories and ensure system integrity before sprint closure
+- **Sprint Completion**: At the end of each sprint, run `make test-ci` to validate all stories and ensure system integrity before sprint closure
 
 ### MANDATORY Story Development Checklist
 
@@ -108,9 +108,9 @@ CFGMS (Config Management System) is a modern, Go-based configuration management 
 **ALTERNATIVE: Unified Development Validation** (RECOMMENDED)
 Instead of steps 5-7, use the unified target that runs all validations:
 ```bash
-make test-with-security  # Runs: test + security-scan + displays summary
+make test-commit  # Runs: test + lint + security-scan + M365-dev (skips if no creds)
 ```
-This ensures optimal order (test → security → summary) and provides clear validation status.
+This ensures optimal order and provides clear validation status. M365 tests are skipped gracefully if credentials are not available.
 
 **COMMIT AND PROJECT MANAGEMENT:**
 
@@ -129,7 +129,7 @@ This ensures optimal order (test → security → summary) and provides clear va
 
 10. **Final Test Run - COMPLETION GATE** (MANDATORY)
     ```bash
-    make test  # MUST be 100% green before marking story complete
+    make test-commit  # MUST be 100% green before marking story complete
     ```
     **COMPLETION GATE**: This is the final validation before marking story complete. If ANY tests fail here:
     - DO NOT update GitHub project status
@@ -368,30 +368,39 @@ go test -v ./features/modules/
 go test -v -run TestControllerStart ./features/controller/
 ```
 
-### Production Risk Testing & Release Gates
+### Streamlined Testing Workflow
+
+**Daily Development (3 targets):**
 ```bash
-# Test production-critical functionality only
-make test-production-critical
+# Fast TDD feedback (30s) - mocked M365 tests
+make test
 
-# Check export reliability and cost protection
-make test-export-reliability
+# Pre-commit validation (2-3min) - gracefully skips M365 if no credentials
+make test-commit
 
-# Simulate monitoring costs at scale
-make cost-analysis
-
-# Check compliance protection status
-make compliance-check
-
-# v0.3.0 Release Gate (Alpha Readiness)
-make test-v030-gate
-
-# v0.4.0 Release Gate (Production Readiness)  
-make test-v040-gate
+# CI validation (8-12min) - fails if M365 credentials missing
+make test-ci
 ```
 
-**IMPORTANT**: Release gates must pass before deployment:
-- **v0.3.0 Gate**: Blocks alpha deployment until cost protection and data loss prevention are working
-- **v0.4.0 Gate**: Blocks production deployment until ALL export edge cases are resolved
+**Specialized Testing:**
+```bash
+# M365 + storage integration
+make test-integration
+
+# Security scanning only
+make test-security
+
+# Performance and load testing
+make test-performance
+
+# Docker environment management
+make test-docker
+```
+
+**M365 Credential Handling:**
+- **`test`**: Uses mocked M365 tests only
+- **`test-commit`**: Skips M365 tests if credentials unavailable (developer-friendly)
+- **`test-ci`**: Requires M365 credentials or fails (CI enforcement)
 
 ### Security Scanning
 ```bash

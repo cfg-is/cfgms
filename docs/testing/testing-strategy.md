@@ -23,15 +23,15 @@ make test
 # Equivalent to: go test -v -race -cover -short ./...
 ```
 
-### Layer 2: Integration Tests (`make test-all`)
-- **Runtime**: < 30 minutes total
-- **Scope**: Component integration, cross-feature validation
-- **Trigger**: Pre-commit, CI on main/develop branches
-- **Coverage**: Fast comprehensive + production-critical tests
+### Layer 2: CI Validation (`make test-ci`)
+- **Runtime**: < 15 minutes total
+- **Scope**: Complete validation for CI/CD
+- **Trigger**: CI on all branches, pre-merge validation
+- **Coverage**: Unit tests + linting + security + M365 + storage integration
 
 ```bash
-make test-all
-# Runs: test-fast + test-integration + test-production-critical
+make test-ci
+# Runs: test + lint + security-scan + test-m365-integration + test-integration-complete
 ```
 
 ### Layer 3: Full Production Validation (`make test-full`)
@@ -80,7 +80,8 @@ make test                           # < 15 min - Unit tests only
 
 # Pre-commit validation
 make test-fast                      # < 10 min - Fast comprehensive
-make test-all                       # < 30 min - Recommended pre-commit
+make test-commit                    # < 3 min - Recommended pre-commit
+make test-ci                        # < 15 min - CI validation
 
 # Specific test categories
 make test-production-critical       # < 15 min - Core functionality
@@ -197,7 +198,8 @@ Tests automatically detect CI and adjust:
 
 ### For Developers
 1. **Always run `make test`** before committing
-2. **Use `make test-all`** for significant changes
+2. **Use `make test-commit`** for significant changes
+3. **Use `make test-ci`** for complete validation
 3. **Run `make test-full`** before releases
 4. **Write tests with appropriate timeouts**
 5. **Use `-short` flag for development testing**
