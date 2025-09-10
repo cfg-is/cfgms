@@ -25,14 +25,16 @@ For development/testing, create an app in your development tenant:
 3. **Add Application Permissions**:
    ```
    Microsoft Graph:
-   - User.ReadWrite.All
-   - Directory.ReadWrite.All
-   - Group.ReadWrite.All
-   - Policy.ReadWrite.ConditionalAccess
-   - DeviceManagementManagedDevices.ReadWrite.All
-   - Organization.ReadWrite.All
-   - Reports.Read.All
-   - AuditLog.Read.All
+   - User.ReadWrite.All                              # User management (entra_user)
+   - Group.ReadWrite.All                             # Group management (entra_group)  
+   - Application.ReadWrite.All                       # Application management (entra_application)
+   - AdministrativeUnit.ReadWrite.All               # Administrative unit management (entra_admin_unit)
+   - Directory.ReadWrite.All                        # Directory operations (unified directory provider)
+   - Policy.ReadWrite.ConditionalAccess            # Conditional access policies
+   - DeviceManagementManagedDevices.ReadWrite.All  # Intune device management
+   - Organization.ReadWrite.All                     # Organization settings
+   - Reports.Read.All                               # Usage reports
+   - AuditLog.Read.All                              # Audit logs
    ```
 
 4. **Grant Admin Consent** (for your dev tenant only)
@@ -360,10 +362,30 @@ func DefaultMSPPermissions() []string {
 
 ## Troubleshooting
 
-**"Insufficient permissions" errors:** 
-- Verify application permissions are configured (not delegated)
-- Ensure client admin has granted consent
-- Check that client tenant status is "active"
+### Permission Errors
+
+**"Authorization_RequestDenied" or "Insufficient privileges" errors:**
+
+This means the API call is working but the service principal lacks required permissions. Check these:
+
+1. **Application Permissions Required:**
+   - `Application.ReadWrite.All` - For entra_application module (create/manage applications)
+   - `AdministrativeUnit.ReadWrite.All` - For entra_admin_unit module (create/manage admin units)  
+   - `User.ReadWrite.All` - For entra_user module (create/manage users)
+   - `Group.ReadWrite.All` - For entra_group module (create/manage groups)
+
+2. **Verification Steps:**
+   ```bash
+   # Test specific permissions
+   go test -v ./features/modules/m365/entra_application/ -run TestEntraApplication_Integration_BasicOperations
+   go test -v ./features/modules/m365/entra_admin_unit/ -run TestEntraAdminUnit_Integration_BasicOperations
+   ```
+
+3. **Azure Portal Check:**
+   - Go to Azure Portal → App Registrations → Your App → API Permissions
+   - Verify all permissions above are listed as "Application" type (not "Delegated")
+   - Ensure "Admin consent" status shows green checkmark
+   - Click "Grant admin consent" if needed
 
 **"Client tenant not found" errors:**
 - Verify admin consent callback was processed successfully

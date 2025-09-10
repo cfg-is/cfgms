@@ -6,6 +6,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/controller/api"
 	"github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/controller/directory"
 	"github.com/cfgis/cfgms/features/controller/server"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -16,7 +17,8 @@ type Interface interface {
 	Start(ctx context.Context) error
 	Stop(ctx context.Context) error
 	RegisterModule(module Module) error
-	GetModule(name string) (Module, error)
+	GetModuleTyped(name string) (Module, error)
+	GetDirectoryService() directory.Service
 }
 
 // Controller manages the core CFGMS functionality
@@ -37,6 +39,9 @@ type Controller struct {
 
 	// REST API server for external HTTP access
 	apiServer *api.Server
+
+	// Directory service for unified directory operations
+	directoryService directory.Service
 
 	// Shutdown management
 	shutdown chan struct{}
@@ -73,14 +78,23 @@ func New(cfg *config.Config, logger logging.Logger) (*Controller, error) {
 		return nil, err
 	}
 
-	return &Controller{
-		config:    cfg,
-		logger:    logger,
-		modules:   make(map[string]Module),
-		server:    srv,
-		apiServer: apiSrv,
-		shutdown:  make(chan struct{}),
-	}, nil
+	// Create the directory service
+	dirService := directory.NewDirectoryService(logger)
+
+	controller := &Controller{
+		config:           cfg,
+		logger:           logger,
+		modules:          make(map[string]Module),
+		server:           srv,
+		apiServer:        apiSrv,
+		directoryService: dirService,
+		shutdown:         make(chan struct{}),
+	}
+
+	// Set up module registry integration
+	dirService.SetModuleRegistry(controller)
+
+	return controller, nil
 }
 
 // Start initializes and starts the controller
@@ -162,18 +176,6 @@ func (c *Controller) RegisterModule(module Module) error {
 	return nil
 }
 
-// GetModule returns a module by name
-func (c *Controller) GetModule(name string) (Module, error) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	module, exists := c.modules[name]
-	if !exists {
-		return nil, ErrModuleNotFound
-	}
-
-	return module, nil
-}
 
 // GetConfigurationService returns the configuration service instance
 func (c *Controller) GetConfigurationService() *service.ConfigurationService {
@@ -187,4 +189,64 @@ func (c *Controller) GetListenAddr() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.server.GetListenAddr()
+}
+
+// GetDirectoryService returns the directory service instance
+func (c *Controller) GetDirectoryService() directory.Service {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.directoryService
+}
+
+// ModuleRegistry implementation for directory service integration
+
+// ListModules returns all available modules
+func (c *Controller) ListModules() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	
+	var modules []string
+	for name := range c.modules {
+		modules = append(modules, name)
+	}
+	return modules
+}
+
+// GetModule returns a module by name (for ModuleRegistry interface)
+func (c *Controller) GetModule(name string) (interface{}, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	module, exists := c.modules[name]
+	if !exists {
+		return nil, ErrModuleNotFound
+	}
+
+	return module, nil
+}
+
+// GetModuleTyped returns a module by name with proper typing
+func (c *Controller) GetModuleTyped(name string) (Module, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	module, exists := c.modules[name]
+	if !exists {
+		return nil, ErrModuleNotFound
+	}
+
+	return module, nil
+}
+
+// ExecuteModuleOperation executes an operation on a module
+func (c *Controller) ExecuteModuleOperation(ctx context.Context, moduleName, operation string, params map[string]interface{}) (interface{}, error) {
+	module, err := c.GetModule(moduleName)
+	if err != nil {
+		return nil, err
+	}
+
+	// This would be implemented based on the specific module interface
+	// For now, return a generic interface
+	c.logger.Info("Executing module operation", "module", moduleName, "operation", operation)
+	return module, nil
 }

@@ -3,6 +3,7 @@ package graph
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/cfgis/cfgms/features/modules/m365/auth"
@@ -12,6 +13,7 @@ import (
 type Client interface {
 	// User operations
 	GetUser(ctx context.Context, token *auth.AccessToken, userPrincipalName string) (*User, error)
+	ListUsers(ctx context.Context, token *auth.AccessToken, filter string) ([]User, error)
 	CreateUser(ctx context.Context, token *auth.AccessToken, request *CreateUserRequest) (*User, error)
 	UpdateUser(ctx context.Context, token *auth.AccessToken, userID string, request *UpdateUserRequest) error
 	DeleteUser(ctx context.Context, token *auth.AccessToken, userID string) error
@@ -37,6 +39,27 @@ type Client interface {
 	CreateDeviceConfiguration(ctx context.Context, token *auth.AccessToken, request *CreateDeviceConfigurationRequest) (*DeviceConfiguration, error)
 	UpdateDeviceConfiguration(ctx context.Context, token *auth.AccessToken, configurationID string, request *UpdateDeviceConfigurationRequest) error
 	DeleteDeviceConfiguration(ctx context.Context, token *auth.AccessToken, configurationID string) error
+
+	// Application operations
+	GetApplication(ctx context.Context, token *auth.AccessToken, applicationID string) (*Application, error)
+	ListApplications(ctx context.Context, token *auth.AccessToken, filter string) ([]Application, error)
+	CreateApplication(ctx context.Context, token *auth.AccessToken, request *CreateApplicationRequest) (*Application, error)
+	UpdateApplication(ctx context.Context, token *auth.AccessToken, applicationID string, request *UpdateApplicationRequest) error
+	DeleteApplication(ctx context.Context, token *auth.AccessToken, applicationID string) error
+
+	// Administrative Unit operations
+	GetAdministrativeUnit(ctx context.Context, token *auth.AccessToken, unitID string) (*AdministrativeUnit, error)
+	ListAdministrativeUnits(ctx context.Context, token *auth.AccessToken, filter string) ([]AdministrativeUnit, error)
+	CreateAdministrativeUnit(ctx context.Context, token *auth.AccessToken, request *CreateAdministrativeUnitRequest) (*AdministrativeUnit, error)
+	UpdateAdministrativeUnit(ctx context.Context, token *auth.AccessToken, unitID string, request *UpdateAdministrativeUnitRequest) error
+	DeleteAdministrativeUnit(ctx context.Context, token *auth.AccessToken, unitID string) error
+
+	// Group operations (extend existing)
+	GetGroup(ctx context.Context, token *auth.AccessToken, groupID string) (*Group, error)
+	ListGroups(ctx context.Context, token *auth.AccessToken, filter string) ([]Group, error)
+	CreateGroup(ctx context.Context, token *auth.AccessToken, request *CreateGroupRequest) (*Group, error)
+	UpdateGroup(ctx context.Context, token *auth.AccessToken, groupID string, request *UpdateGroupRequest) error
+	DeleteGroup(ctx context.Context, token *auth.AccessToken, groupID string) error
 }
 
 // User represents a Microsoft Graph user object
@@ -273,10 +296,20 @@ func (e *GraphError) Error() string {
 
 // IsNotFoundError checks if the error is a "not found" error
 func IsNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	
+	// Check if it's a direct GraphError
 	if graphErr, ok := err.(*GraphError); ok {
 		return graphErr.Code == "Request_ResourceNotFound" || graphErr.StatusCode == 404
 	}
-	return false
+	
+	// Check if the error string contains not found patterns (for wrapped errors)
+	errStr := err.Error()
+	return strings.Contains(errStr, "Request_ResourceNotFound") || 
+		   strings.Contains(errStr, "does not exist") ||
+		   strings.Contains(errStr, "404")
 }
 
 // IsConflictError checks if the error is a conflict error (resource already exists)
@@ -323,4 +356,205 @@ func DefaultRetryConfig() *RetryConfig {
 		MaxDelay:          30 * time.Second,
 		BackoffMultiplier: 2.0,
 	}
+}
+
+// Application represents a Microsoft Graph application object
+type Application struct {
+	ID                         string                      `json:"id"`
+	AppID                      string                      `json:"appId"`
+	DisplayName                string                      `json:"displayName"`
+	Description                string                      `json:"description,omitempty"`
+	SignInAudience             string                      `json:"signInAudience"`
+	IdentifierUris             []string                    `json:"identifierUris"`
+	Web                        *ApplicationWeb             `json:"web,omitempty"`
+	Spa                        *ApplicationSpa             `json:"spa,omitempty"`
+	RequiredResourceAccess     []ApplicationResourceAccess `json:"requiredResourceAccess"`
+	AppRoles                   []ApplicationAppRole        `json:"appRoles"`
+	Oauth2PermissionScopes     []ApplicationOAuth2Scope    `json:"oauth2PermissionScopes"`
+	KeyCredentials             []ApplicationKeyCredential  `json:"keyCredentials"`
+	PasswordCredentials        []ApplicationPasswordCredential `json:"passwordCredentials"`
+	OptionalClaims             *ApplicationOptionalClaims  `json:"optionalClaims,omitempty"`
+	Tags                       []string                    `json:"tags"`
+}
+
+// ApplicationWeb represents web settings for an application
+type ApplicationWeb struct {
+	RedirectUris []string `json:"redirectUris"`
+	LogoutUrl    string   `json:"logoutUrl,omitempty"`
+}
+
+// ApplicationSpa represents SPA settings for an application
+type ApplicationSpa struct {
+	RedirectUris []string `json:"redirectUris"`
+}
+
+// ApplicationResourceAccess represents required resource access
+type ApplicationResourceAccess struct {
+	ResourceAppId  string                             `json:"resourceAppId"`
+	ResourceAccess []ApplicationPermissionScope       `json:"resourceAccess"`
+}
+
+// ApplicationPermissionScope represents a permission scope
+type ApplicationPermissionScope struct {
+	ID   string `json:"id"`
+	Type string `json:"type"`
+}
+
+// ApplicationAppRole represents an application role
+type ApplicationAppRole struct {
+	ID                 string   `json:"id"`
+	DisplayName        string   `json:"displayName"`
+	Description        string   `json:"description"`
+	Value              string   `json:"value"`
+	AllowedMemberTypes []string `json:"allowedMemberTypes"`
+	IsEnabled          bool     `json:"isEnabled"`
+}
+
+// ApplicationOAuth2Scope represents an OAuth2 permission scope
+type ApplicationOAuth2Scope struct {
+	ID                      string `json:"id"`
+	AdminConsentDisplayName string `json:"adminConsentDisplayName"`
+	AdminConsentDescription string `json:"adminConsentDescription"`
+	UserConsentDisplayName  string `json:"userConsentDisplayName,omitempty"`
+	UserConsentDescription  string `json:"userConsentDescription,omitempty"`
+	Value                   string `json:"value"`
+	Type                    string `json:"type"`
+	IsEnabled               bool   `json:"isEnabled"`
+}
+
+// ApplicationKeyCredential represents a key credential
+type ApplicationKeyCredential struct {
+	KeyID       string    `json:"keyId"`
+	Usage       string    `json:"usage"`
+	Type        string    `json:"type"`
+	Key         []byte    `json:"key"`
+	StartDate   time.Time `json:"startDateTime"`
+	EndDate     time.Time `json:"endDateTime"`
+	DisplayName string    `json:"displayName,omitempty"`
+}
+
+// ApplicationPasswordCredential represents a password credential
+type ApplicationPasswordCredential struct {
+	KeyID       string    `json:"keyId"`
+	DisplayName string    `json:"displayName,omitempty"`
+	StartDate   time.Time `json:"startDateTime"`
+	EndDate     time.Time `json:"endDateTime"`
+	SecretText  string    `json:"secretText,omitempty"`
+}
+
+// ApplicationOptionalClaims represents optional claims configuration
+type ApplicationOptionalClaims struct {
+	IdToken     []ApplicationOptionalClaim `json:"idToken"`
+	AccessToken []ApplicationOptionalClaim `json:"accessToken"`
+	Saml2Token  []ApplicationOptionalClaim `json:"saml2Token"`
+}
+
+// ApplicationOptionalClaim represents an optional claim
+type ApplicationOptionalClaim struct {
+	Name      string `json:"name"`
+	Source    string `json:"source,omitempty"`
+	Essential bool   `json:"essential,omitempty"`
+}
+
+// CreateApplicationRequest represents a request to create an application
+type CreateApplicationRequest struct {
+	DisplayName            string                      `json:"displayName"`
+	Description            string                      `json:"description,omitempty"`
+	SignInAudience         string                      `json:"signInAudience"`
+	IdentifierUris         []string                    `json:"identifierUris,omitempty"`
+	Web                    *ApplicationWeb             `json:"web,omitempty"`
+	Spa                    *ApplicationSpa             `json:"spa,omitempty"`
+	RequiredResourceAccess []ApplicationResourceAccess `json:"requiredResourceAccess,omitempty"`
+	AppRoles               []ApplicationAppRole        `json:"appRoles,omitempty"`
+	Oauth2PermissionScopes []ApplicationOAuth2Scope    `json:"oauth2PermissionScopes,omitempty"`
+	OptionalClaims         *ApplicationOptionalClaims  `json:"optionalClaims,omitempty"`
+	Tags                   []string                    `json:"tags,omitempty"`
+}
+
+// UpdateApplicationRequest represents a request to update an application
+type UpdateApplicationRequest struct {
+	DisplayName            *string                      `json:"displayName,omitempty"`
+	Description            *string                      `json:"description,omitempty"`
+	SignInAudience         *string                      `json:"signInAudience,omitempty"`
+	IdentifierUris         []string                     `json:"identifierUris,omitempty"`
+	Web                    *ApplicationWeb              `json:"web,omitempty"`
+	Spa                    *ApplicationSpa              `json:"spa,omitempty"`
+	RequiredResourceAccess []ApplicationResourceAccess  `json:"requiredResourceAccess,omitempty"`
+	AppRoles               []ApplicationAppRole         `json:"appRoles,omitempty"`
+	Oauth2PermissionScopes []ApplicationOAuth2Scope     `json:"oauth2PermissionScopes,omitempty"`
+	OptionalClaims         *ApplicationOptionalClaims   `json:"optionalClaims,omitempty"`
+	Tags                   []string                     `json:"tags,omitempty"`
+}
+
+// AdministrativeUnit represents a Microsoft Graph administrative unit object
+type AdministrativeUnit struct {
+	ID                            string                 `json:"id"`
+	DisplayName                   string                 `json:"displayName"`
+	Description                   string                 `json:"description,omitempty"`
+	Visibility                    string                 `json:"visibility"`
+	MembershipType                string                 `json:"membershipType,omitempty"`
+	MembershipRule                string                 `json:"membershipRule,omitempty"`
+	MembershipRuleProcessingState string                 `json:"membershipRuleProcessingState,omitempty"`
+	ExtensionAttributes           map[string]interface{} `json:"extensionAttributes,omitempty"`
+}
+
+// CreateAdministrativeUnitRequest represents a request to create an administrative unit
+type CreateAdministrativeUnitRequest struct {
+	DisplayName                   string                 `json:"displayName"`
+	Description                   string                 `json:"description,omitempty"`
+	Visibility                    string                 `json:"visibility"`
+	MembershipType                string                 `json:"membershipType,omitempty"`
+	MembershipRule                string                 `json:"membershipRule,omitempty"`
+	MembershipRuleProcessingState string                 `json:"membershipRuleProcessingState,omitempty"`
+	ExtensionAttributes           map[string]interface{} `json:"extensionAttributes,omitempty"`
+}
+
+// UpdateAdministrativeUnitRequest represents a request to update an administrative unit
+type UpdateAdministrativeUnitRequest struct {
+	DisplayName                   *string                `json:"displayName,omitempty"`
+	Description                   *string                `json:"description,omitempty"`
+	Visibility                    *string                `json:"visibility,omitempty"`
+	MembershipType                *string                `json:"membershipType,omitempty"`
+	MembershipRule                *string                `json:"membershipRule,omitempty"`
+	MembershipRuleProcessingState *string                `json:"membershipRuleProcessingState,omitempty"`
+	ExtensionAttributes           map[string]interface{} `json:"extensionAttributes,omitempty"`
+}
+
+// Group represents a Microsoft Graph group object
+type Group struct {
+	ID                   string   `json:"id"`
+	DisplayName          string   `json:"displayName"`
+	Description          string   `json:"description,omitempty"`
+	GroupTypes           []string `json:"groupTypes"`
+	SecurityEnabled      bool     `json:"securityEnabled"`
+	MailEnabled          bool     `json:"mailEnabled"`
+	MailNickname         string   `json:"mailNickname"`
+	Mail                 string   `json:"mail,omitempty"`
+	Visibility           string   `json:"visibility,omitempty"`
+	MembershipRule       string   `json:"membershipRule,omitempty"`
+	MembershipRuleProcessingState string `json:"membershipRuleProcessingState,omitempty"`
+}
+
+// CreateGroupRequest represents a request to create a group
+type CreateGroupRequest struct {
+	DisplayName         string   `json:"displayName"`
+	Description         string   `json:"description,omitempty"`
+	GroupTypes          []string `json:"groupTypes,omitempty"`
+	SecurityEnabled     bool     `json:"securityEnabled"`
+	MailEnabled         bool     `json:"mailEnabled"`
+	MailNickname        string   `json:"mailNickname"`
+	Visibility          string   `json:"visibility,omitempty"`
+	MembershipRule      string   `json:"membershipRule,omitempty"`
+}
+
+// UpdateGroupRequest represents a request to update a group
+type UpdateGroupRequest struct {
+	DisplayName    *string  `json:"displayName,omitempty"`
+	Description    *string  `json:"description,omitempty"`
+	GroupTypes     []string `json:"groupTypes,omitempty"`
+	SecurityEnabled *bool   `json:"securityEnabled,omitempty"`
+	MailEnabled    *bool    `json:"mailEnabled,omitempty"`
+	MailNickname   *string  `json:"mailNickname,omitempty"`
+	Visibility     *string  `json:"visibility,omitempty"`
+	MembershipRule *string  `json:"membershipRule,omitempty"`
 }

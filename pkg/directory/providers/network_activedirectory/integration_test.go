@@ -107,7 +107,8 @@ func (m *MockStewardClientForIntegration) GetModuleState(ctx context.Context, st
 	}
 
 	// Simulate realistic AD responses based on resourceID
-	if resourceID == "status" {
+	switch resourceID {
+	case "status":
 		return map[string]interface{}{
 			"connected":         true,
 			"domain_controller": "dc1.corp.contoso.com",
@@ -119,7 +120,7 @@ func (m *MockStewardClientForIntegration) GetModuleState(ctx context.Context, st
 			"error_count":      int64(2),
 		}, nil
 
-	} else if resourceID == "query:user:john.doe" {
+	case "query:user:john.doe":
 		return map[string]interface{}{
 			"success":      true,
 			"query_type":   "user",
@@ -138,7 +139,7 @@ func (m *MockStewardClientForIntegration) GetModuleState(ctx context.Context, st
 			},
 		}, nil
 
-	} else if resourceID == "query:user:jane.smith:dev.contoso.com" {
+	case "query:user:jane.smith:dev.contoso.com":
 		return map[string]interface{}{
 			"success":       true,
 			"query_type":    "user",
@@ -159,7 +160,7 @@ func (m *MockStewardClientForIntegration) GetModuleState(ctx context.Context, st
 			},
 		}, nil
 
-	} else if resourceID == "forest:user:admin.user" {
+	case "forest:user:admin.user":
 		return map[string]interface{}{
 			"success":       true,
 			"query_type":    "forest_user",
@@ -185,7 +186,7 @@ func (m *MockStewardClientForIntegration) GetModuleState(ctx context.Context, st
 			},
 		}, nil
 
-	} else if resourceID == "validate_trust:dev.contoso.com" {
+	case "validate_trust:dev.contoso.com":
 		return map[string]interface{}{
 			"success":       true,
 			"query_type":    "trust_validation",
@@ -194,7 +195,7 @@ func (m *MockStewardClientForIntegration) GetModuleState(ctx context.Context, st
 			"response_time": 25 * time.Millisecond,
 		}, nil
 
-	} else if resourceID == "query:computer:WORKSTATION-01" {
+	case "query:computer:WORKSTATION-01":
 		return map[string]interface{}{
 			"success":      true,
 			"query_type":   "computer",
@@ -211,7 +212,7 @@ func (m *MockStewardClientForIntegration) GetModuleState(ctx context.Context, st
 			},
 		}, nil
 
-	} else if resourceID == "query:gpo:Default Domain Policy" {
+	case "query:gpo:Default Domain Policy":
 		return map[string]interface{}{
 			"success":       true,
 			"query_type":    "gpo",
@@ -229,7 +230,7 @@ func (m *MockStewardClientForIntegration) GetModuleState(ctx context.Context, st
 			},
 		}, nil
 
-	} else if resourceID == "list:user" {
+	case "list:user":
 		return map[string]interface{}{
 			"success":       true,
 			"query_type":    "user",
@@ -258,7 +259,7 @@ func (m *MockStewardClientForIntegration) GetModuleState(ctx context.Context, st
 			},
 		}, nil
 
-	} else {
+	default:
 		return map[string]interface{}{
 			"success": false,
 			"error":   fmt.Sprintf("mock: resource not found: %s", resourceID),

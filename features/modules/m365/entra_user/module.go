@@ -82,10 +82,14 @@ func (c *EntraUserConfig) AsMap() map[string]interface{} {
 	}
 
 	if c.PasswordProfile != nil {
-		result["password_profile"] = map[string]interface{}{
+		passwordMap := map[string]interface{}{
 			"force_change_password_next_signin": c.PasswordProfile.ForceChangePasswordNextSignIn,
 		}
-		// Note: password field is intentionally omitted for security
+		// Include password if set (needed for user creation)
+		if c.PasswordProfile.Password != "" {
+			passwordMap["password"] = c.PasswordProfile.Password
+		}
+		result["password_profile"] = passwordMap
 	}
 
 	if c.ForceChangePassword {

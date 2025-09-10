@@ -507,13 +507,56 @@ make clean
 - **External**: REST API with HTTPS and API key authentication
 - **Protocol Buffers**: Used for efficient data serialization
 
+### **CFGMS Controller: Two Interaction Points with External World**
+
+**FUNDAMENTAL PRINCIPLE**: The controller has exactly **TWO ways** to interact with the outside world:
+
+#### **1. Workflow Engine (SaaS/Cloud Operations)**
+- **Purpose**: Manages SaaS and cloud-based resources through API calls
+- **Examples**: Microsoft 365, AWS, Azure, Google Workspace operations
+- **Implementation**: SaaS Stewards built on top of workflow engine
+- **Modules**: `entra_user`, `entra_group`, `conditional_access`, `intune_policy`
+- **Authentication**: OAuth2, API keys, service principals
+- **Execution**: Centralized at controller level
+
+#### **2. Stewards (Endpoint Operations)** 
+- **Purpose**: Manages resources on individual endpoints (Windows, macOS, Linux)
+- **Examples**: Files, firewall rules, packages, local AD operations
+- **Implementation**: Endpoint Stewards deployed to managed systems
+- **Modules**: `file`, `firewall`, `package`, `script`, `directory`, `activedirectory`
+- **Authentication**: mTLS certificates
+- **Execution**: Distributed to endpoint systems
+
+**CRITICAL ARCHITECTURAL RULE**: 
+- **SaaS/Cloud Resources** → Workflow Engine → SaaS Modules
+- **Endpoint Resources** → Stewards → Endpoint Modules
+- **Never Mix**: Don't put SaaS operations in endpoint modules or endpoint operations in SaaS modules
+
 **Security:**
 - Zero-trust security model with mutual TLS for all internal communication
 - Certificate-based authentication for stewards
 - Optional OpenZiti integration for zero-trust networking
 - Role-based access control (RBAC) with hierarchical permissions
 
-### Module System
+### Module System & Controller-Steward Architecture
+
+CFGMS follows a **clear separation of concerns** between the Controller and Stewards:
+
+#### **Controller Role: Unified Abstractions & Orchestration**
+- **Central Management**: Provides unified interfaces for complex operations (directory management, tenant hierarchy)
+- **Cross-System Coordination**: Manages operations that span multiple endpoints or systems
+- **Policy & RBAC**: Enforces access controls and configuration inheritance
+- **SaaS Integration**: Routes SaaS operations through workflow engine to appropriate modules
+- **Abstraction Layer**: Presents simplified interfaces that hide provider-specific complexity
+
+#### **Steward Role: Endpoint Resource Management** 
+- **Local Operations**: Manages resources on individual endpoints (Windows, macOS, Linux)
+- **Resource Modules**: Implements modules for endpoint-specific resources (`file`, `firewall`, `package`, `script`)
+- **State Enforcement**: Executes configuration changes and maintains desired state
+- **Monitoring**: Reports resource state changes back to controller
+- **Cross-Platform**: Same steward binary works across all supported platforms
+
+#### **Module Interface Pattern**
 All resource management is performed through modules that implement the core interface:
 - `Get(ctx, resourceID)` - Returns current configuration as ConfigState
 - `Set(ctx, resourceID, config)` - Updates resource to match desired state (managed fields only)
@@ -522,7 +565,26 @@ All resource management is performed through modules that implement the core int
 
 **ConfigState Interface**: Enables efficient field-level comparison without marshal/unmarshal overhead. Modules return comprehensive system state, but only managed fields are modified.
 
-Available modules: `directory`, `file`, `firewall`, `package`, `script`, SaaS modules: `entra_user`, `conditional_access`, `intune_policy`
+#### **Module Categories & Deployment**
+
+**Endpoint Modules** (Deployed to Stewards):
+- `directory` - Local filesystem directories
+- `file` - File management and templating
+- `firewall` - Local firewall rules
+- `package` - Software package management
+- `script` - Script execution and management
+- `activedirectory` - AD operations for domain-joined systems
+
+**SaaS Modules** (Executed via Controller Workflow Engine):
+- `entra_user` - Microsoft Entra ID user management
+- `entra_group` - Microsoft Entra ID group management
+- `conditional_access` - Conditional access policies
+- `intune_policy` - Intune device configuration
+
+**Controller Service Modules** (Unified Abstractions):
+- `directory` service - Unified interface over multiple directory providers
+- `tenant` service - Multi-tenant configuration management
+- `rbac` service - Role-based access control
 
 ### Pluggable Infrastructure Design Paradigm
 CFGMS follows a **pluggable architecture** where infrastructure components are built with abstraction interfaces, enabling flexible backend selection without core system changes.
@@ -617,9 +679,30 @@ features/
 - `pkg/` - Shared packages and global plugin interfaces
   - `pkg/storage/interfaces/` - Global storage contracts (imported by all modules)
   - `pkg/storage/providers/` - Storage plugin implementations (auto-discovered)
+  - `pkg/directory/types/` - Unified directory object types (DirectoryUser, DirectoryGroup)
 - `features/` - Business logic using global plugin interfaces only
+  - `features/controller/` - Controller-specific services and abstractions
+    - `features/controller/directory/` - Unified directory service interface
+  - `features/steward/` - Steward-specific functionality
+  - `features/modules/` - Module implementations
 - `test/` - Integration and end-to-end tests
 - `docs/` - Comprehensive documentation including architecture and standards
+
+#### **Anti-Pattern: Code Duplication Across Layers**
+**AVOID**: Creating separate representations of the same data across different components:
+```go
+// WRONG - Multiple representations of users
+pkg/directory/interfaces/provider.go: type DirectoryUser struct {...}
+features/modules/m365/graph/client.go: type User struct {...}  
+features/modules/m365/entra_user/module.go: type EntraUserConfig struct {...}
+```
+
+**CORRECT**: Single canonical type with conversion methods:
+```go
+// RIGHT - Single source of truth with conversions
+pkg/directory/types/user.go: type DirectoryUser struct {...}
+// + conversion methods: ToGraphUser(), FromGraphUser(), ToEntraUserConfig()
+```
 
 ## Development Guidelines
 
@@ -681,7 +764,31 @@ features/
 
 **For time-bounded SLAs**: Implement streaming with time guarantees, not polling intervals.
 
-### Module Development
+### Module Development Guidelines
+
+#### **Architectural Decision: Controller vs Steward Module Placement**
+
+**CRITICAL**: Before developing any module, determine the correct deployment location:
+
+#### **Deploy to Controller When:**
+- **Cross-System Operations**: Module manages resources across multiple endpoints
+- **SaaS/Cloud APIs**: Module interacts with external APIs (Microsoft 365, AWS, etc.)
+- **Complex Orchestration**: Operations require coordination between multiple systems
+- **Centralized Policy**: Module enforces organization-wide policies or compliance
+- **Data Aggregation**: Module collects and processes data from multiple sources
+
+**Examples**: `entra_user`, `conditional_access`, `tenant_management`, `rbac_policies`
+
+#### **Deploy to Steward When:**
+- **Local Resources**: Module manages resources on individual endpoints
+- **Platform-Specific**: Operations are Windows/macOS/Linux specific
+- **Performance Critical**: Operations need low latency or offline capability  
+- **Security Isolation**: Operations should be isolated to individual systems
+- **Endpoint State**: Module maintains state of local system resources
+
+**Examples**: `file`, `firewall`, `package`, `script`, `directory`, `activedirectory` (for domain-joined systems)
+
+#### **Module Implementation Standards**
 - Each module must be self-contained with clear ConfigState interface
 - Implement Get/Set interface with ConfigState for all resource types
 - **Optional Monitor interface** for real-time change detection via OS hooks
@@ -734,6 +841,37 @@ func (c *ComponentManager) Set(key string, data *Data) error {
 - Global storage provider automatically enables encryption by default
 - All providers implement the same storage contract (durability, encryption, authentication, audit)
 - No configuration option to disable encryption
+
+#### **Controller Service Development**
+When creating controller-level abstractions:
+- **Unified Interfaces**: Create single interface that abstracts multiple providers
+- **Provider Pattern**: Use pluggable providers for different backends
+- **Graceful Degradation**: Handle provider-specific features transparently
+- **Auto-Discovery**: Providers self-register via `init()` functions
+- **Configuration Routing**: Route operations to appropriate modules/providers
+
+#### **Common Architectural Confusion: Providers vs Modules**
+
+**AVOID CONFUSION**: Understanding the difference between directory providers and storage providers:
+
+**Directory Providers** (Business Logic):
+- **Location**: `features/modules/m365/directory_provider.go`
+- **Purpose**: Implement directory operations for specific systems (AD, Entra ID)
+- **Interface**: `features/controller/directory.Provider`
+- **Examples**: EntraIDDirectoryProvider, ActiveDirectoryProvider
+- **Responsibility**: User/group management, authentication, directory-specific operations
+
+**Storage Providers** (Infrastructure):
+- **Location**: `pkg/storage/providers/[name]/plugin.go`
+- **Purpose**: Persist data using different storage backends
+- **Interface**: `pkg/storage/interfaces.StorageProvider`
+- **Examples**: MemoryProvider, DatabaseProvider, GitProvider
+- **Responsibility**: Data persistence, transactions, storage-specific operations
+
+**KEY DISTINCTION**:
+- **Directory Providers**: Handle WHAT data to manage (users, groups, policies)
+- **Storage Providers**: Handle WHERE/HOW to store data (database, file, memory)
+- **Controller Services**: Provide unified abstractions over multiple providers of the same type
 
 ### Storage Plugin Development
 - **Golden Rule**: Business logic NEVER imports specific storage providers
