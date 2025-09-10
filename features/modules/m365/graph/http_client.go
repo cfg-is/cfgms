@@ -82,7 +82,10 @@ func WithRetryConfig(retryConfig *RetryConfig) ClientOption {
 func (c *HTTPClient) GetUser(ctx context.Context, token *auth.AccessToken, userPrincipalName string) (*User, error) {
 	// URL encode the UPN to handle special characters
 	encodedUPN := url.QueryEscape(userPrincipalName)
-	endpoint := fmt.Sprintf("/users/%s", encodedUPN)
+	
+	// Explicitly select all the fields we need to ensure they're returned
+	selectFields := "id,userPrincipalName,displayName,mailNickname,accountEnabled,mail,mobilePhone,officeLocation,jobTitle,department,companyName,createdDateTime"
+	endpoint := fmt.Sprintf("/users/%s?$select=%s", encodedUPN, selectFields)
 
 	var user User
 	if err := c.makeRequest(ctx, token, "GET", endpoint, nil, &user); err != nil {
@@ -94,9 +97,14 @@ func (c *HTTPClient) GetUser(ctx context.Context, token *auth.AccessToken, userP
 
 // ListUsers retrieves users with optional OData filter
 func (c *HTTPClient) ListUsers(ctx context.Context, token *auth.AccessToken, filter string) ([]User, error) {
-	endpoint := "/users"
+	// Explicitly select all the fields we need to ensure they're returned
+	selectFields := "id,userPrincipalName,displayName,mailNickname,accountEnabled,mail,mobilePhone,officeLocation,jobTitle,department,companyName,createdDateTime"
+	
+	var endpoint string
 	if filter != "" {
-		endpoint = fmt.Sprintf("/users?$filter=%s", url.QueryEscape(filter))
+		endpoint = fmt.Sprintf("/users?$filter=%s&$select=%s", url.QueryEscape(filter), selectFields)
+	} else {
+		endpoint = fmt.Sprintf("/users?$select=%s", selectFields)
 	}
 
 	var response struct {
