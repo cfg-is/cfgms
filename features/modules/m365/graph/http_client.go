@@ -92,6 +92,24 @@ func (c *HTTPClient) GetUser(ctx context.Context, token *auth.AccessToken, userP
 	return &user, nil
 }
 
+// ListUsers retrieves users with optional OData filter
+func (c *HTTPClient) ListUsers(ctx context.Context, token *auth.AccessToken, filter string) ([]User, error) {
+	endpoint := "/users"
+	if filter != "" {
+		endpoint = fmt.Sprintf("/users?$filter=%s", url.QueryEscape(filter))
+	}
+
+	var response struct {
+		Value []User `json:"value"`
+	}
+
+	if err := c.makeRequest(ctx, token, "GET", endpoint, nil, &response); err != nil {
+		return nil, fmt.Errorf("failed to list users: %w", err)
+	}
+
+	return response.Value, nil
+}
+
 // CreateUser creates a new user
 func (c *HTTPClient) CreateUser(ctx context.Context, token *auth.AccessToken, request *CreateUserRequest) (*User, error) {
 	endpoint := "/users"
@@ -596,4 +614,172 @@ func (c *HTTPClient) calculateRetryDelay(attempt int) time.Duration {
 	delay = delay + time.Duration(float64(jitter)*(2*randomFactor-1))
 
 	return delay
+}
+
+// GetApplication retrieves an application by ID
+func (c *HTTPClient) GetApplication(ctx context.Context, token *auth.AccessToken, applicationID string) (*Application, error) {
+	endpoint := fmt.Sprintf("/applications/%s", applicationID)
+	var application Application
+	if err := c.makeRequest(ctx, token, "GET", endpoint, nil, &application); err != nil {
+		return nil, fmt.Errorf("failed to get application: %w", err)
+	}
+	return &application, nil
+}
+
+// CreateApplication creates a new application
+func (c *HTTPClient) CreateApplication(ctx context.Context, token *auth.AccessToken, request *CreateApplicationRequest) (*Application, error) {
+	endpoint := "/applications"
+	var application Application
+	if err := c.makeRequest(ctx, token, "POST", endpoint, request, &application); err != nil {
+		return nil, fmt.Errorf("failed to create application: %w", err)
+	}
+	return &application, nil
+}
+
+// UpdateApplication updates an existing application
+func (c *HTTPClient) UpdateApplication(ctx context.Context, token *auth.AccessToken, applicationID string, request *UpdateApplicationRequest) error {
+	endpoint := fmt.Sprintf("/applications/%s", applicationID)
+	if err := c.makeRequest(ctx, token, "PATCH", endpoint, request, nil); err != nil {
+		return fmt.Errorf("failed to update application: %w", err)
+	}
+	return nil
+}
+
+// DeleteApplication deletes an application
+func (c *HTTPClient) DeleteApplication(ctx context.Context, token *auth.AccessToken, applicationID string) error {
+	endpoint := fmt.Sprintf("/applications/%s", applicationID)
+	if err := c.makeRequest(ctx, token, "DELETE", endpoint, nil, nil); err != nil {
+		return fmt.Errorf("failed to delete application: %w", err)
+	}
+	return nil
+}
+
+// ListApplications retrieves applications with optional OData filter
+func (c *HTTPClient) ListApplications(ctx context.Context, token *auth.AccessToken, filter string) ([]Application, error) {
+	endpoint := "/applications"
+	if filter != "" {
+		endpoint = fmt.Sprintf("/applications?$filter=%s", url.QueryEscape(filter))
+	}
+
+	var response struct {
+		Value []Application `json:"value"`
+	}
+
+	if err := c.makeRequest(ctx, token, "GET", endpoint, nil, &response); err != nil {
+		return nil, fmt.Errorf("failed to list applications: %w", err)
+	}
+
+	return response.Value, nil
+}
+
+// GetAdministrativeUnit retrieves an administrative unit by ID
+func (c *HTTPClient) GetAdministrativeUnit(ctx context.Context, token *auth.AccessToken, unitID string) (*AdministrativeUnit, error) {
+	endpoint := fmt.Sprintf("/administrativeUnits/%s", unitID)
+	var unit AdministrativeUnit
+	if err := c.makeRequest(ctx, token, "GET", endpoint, nil, &unit); err != nil {
+		return nil, fmt.Errorf("failed to get administrative unit: %w", err)
+	}
+	return &unit, nil
+}
+
+// ListAdministrativeUnits retrieves administrative units with optional OData filter
+func (c *HTTPClient) ListAdministrativeUnits(ctx context.Context, token *auth.AccessToken, filter string) ([]AdministrativeUnit, error) {
+	endpoint := "/administrativeUnits"
+	if filter != "" {
+		endpoint = fmt.Sprintf("/administrativeUnits?$filter=%s", url.QueryEscape(filter))
+	}
+
+	var response struct {
+		Value []AdministrativeUnit `json:"value"`
+	}
+
+	if err := c.makeRequest(ctx, token, "GET", endpoint, nil, &response); err != nil {
+		return nil, fmt.Errorf("failed to list administrative units: %w", err)
+	}
+
+	return response.Value, nil
+}
+
+// CreateAdministrativeUnit creates a new administrative unit
+func (c *HTTPClient) CreateAdministrativeUnit(ctx context.Context, token *auth.AccessToken, request *CreateAdministrativeUnitRequest) (*AdministrativeUnit, error) {
+	endpoint := "/administrativeUnits"
+	var unit AdministrativeUnit
+	if err := c.makeRequest(ctx, token, "POST", endpoint, request, &unit); err != nil {
+		return nil, fmt.Errorf("failed to create administrative unit: %w", err)
+	}
+	return &unit, nil
+}
+
+// UpdateAdministrativeUnit updates an existing administrative unit
+func (c *HTTPClient) UpdateAdministrativeUnit(ctx context.Context, token *auth.AccessToken, unitID string, request *UpdateAdministrativeUnitRequest) error {
+	endpoint := fmt.Sprintf("/administrativeUnits/%s", unitID)
+	if err := c.makeRequest(ctx, token, "PATCH", endpoint, request, nil); err != nil {
+		return fmt.Errorf("failed to update administrative unit: %w", err)
+	}
+	return nil
+}
+
+// DeleteAdministrativeUnit deletes an administrative unit
+func (c *HTTPClient) DeleteAdministrativeUnit(ctx context.Context, token *auth.AccessToken, unitID string) error {
+	endpoint := fmt.Sprintf("/administrativeUnits/%s", unitID)
+	if err := c.makeRequest(ctx, token, "DELETE", endpoint, nil, nil); err != nil {
+		return fmt.Errorf("failed to delete administrative unit: %w", err)
+	}
+	return nil
+}
+
+// GetGroup retrieves a group by ID
+func (c *HTTPClient) GetGroup(ctx context.Context, token *auth.AccessToken, groupID string) (*Group, error) {
+	endpoint := fmt.Sprintf("/groups/%s", groupID)
+	var group Group
+	if err := c.makeRequest(ctx, token, "GET", endpoint, nil, &group); err != nil {
+		return nil, fmt.Errorf("failed to get group: %w", err)
+	}
+	return &group, nil
+}
+
+// ListGroups retrieves groups with optional OData filter
+func (c *HTTPClient) ListGroups(ctx context.Context, token *auth.AccessToken, filter string) ([]Group, error) {
+	endpoint := "/groups"
+	if filter != "" {
+		endpoint = fmt.Sprintf("/groups?$filter=%s", url.QueryEscape(filter))
+	}
+
+	var response struct {
+		Value []Group `json:"value"`
+	}
+
+	if err := c.makeRequest(ctx, token, "GET", endpoint, nil, &response); err != nil {
+		return nil, fmt.Errorf("failed to list groups: %w", err)
+	}
+
+	return response.Value, nil
+}
+
+// CreateGroup creates a new group
+func (c *HTTPClient) CreateGroup(ctx context.Context, token *auth.AccessToken, request *CreateGroupRequest) (*Group, error) {
+	endpoint := "/groups"
+	var group Group
+	if err := c.makeRequest(ctx, token, "POST", endpoint, request, &group); err != nil {
+		return nil, fmt.Errorf("failed to create group: %w", err)
+	}
+	return &group, nil
+}
+
+// UpdateGroup updates an existing group
+func (c *HTTPClient) UpdateGroup(ctx context.Context, token *auth.AccessToken, groupID string, request *UpdateGroupRequest) error {
+	endpoint := fmt.Sprintf("/groups/%s", groupID)
+	if err := c.makeRequest(ctx, token, "PATCH", endpoint, request, nil); err != nil {
+		return fmt.Errorf("failed to update group: %w", err)
+	}
+	return nil
+}
+
+// DeleteGroup deletes a group
+func (c *HTTPClient) DeleteGroup(ctx context.Context, token *auth.AccessToken, groupID string) error {
+	endpoint := fmt.Sprintf("/groups/%s", groupID)
+	if err := c.makeRequest(ctx, token, "DELETE", endpoint, nil, nil); err != nil {
+		return fmt.Errorf("failed to delete group: %w", err)
+	}
+	return nil
 }

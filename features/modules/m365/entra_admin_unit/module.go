@@ -341,38 +341,49 @@ func (m *entraAdminUnitModule) Get(ctx context.Context, resourceID string) (modu
 	return config, nil
 }
 
-// Helper methods (placeholders - would need Graph API extensions)
+// Helper methods for Graph API operations
 
 func (m *entraAdminUnitModule) getAdminUnitByID(ctx context.Context, token *auth.AccessToken, auID string) (*AdminUnitInfo, error) {
-	// Placeholder - would use Graph API /administrativeUnits/{id}
+	// Get administrative unit from Graph API
+	au, err := m.graphClient.GetAdministrativeUnit(ctx, token, auID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get administrative unit from Graph API: %w", err)
+	}
+
+	// Convert Graph API response to our internal format
 	return &AdminUnitInfo{
-		ID:             auID,
-		DisplayName:    "Sample Administrative Unit",
-		Description:    "Sample administrative unit description",
-		Visibility:     "Public",
-		MembershipType: "Assigned",
-		MembershipRule: "",
+		ID:                            au.ID,
+		DisplayName:                   au.DisplayName,
+		Description:                   au.Description,
+		Visibility:                    au.Visibility,
+		MembershipType:                au.MembershipType,
+		MembershipRule:                au.MembershipRule,
+		MembershipRuleProcessingState: au.MembershipRuleProcessingState,
 	}, nil
 }
 
 func (m *entraAdminUnitModule) createAdminUnit(ctx context.Context, token *auth.AccessToken, config *EntraAdminUnitConfig) error {
-	// Placeholder - would use Graph API POST /administrativeUnits
-	auRequest := map[string]interface{}{
-		"displayName": config.DisplayName,
-		"visibility":  config.Visibility,
+	// Build the create request
+	request := &graph.CreateAdministrativeUnitRequest{
+		DisplayName: config.DisplayName,
+		Visibility:  config.Visibility,
 	}
 
 	if config.Description != "" {
-		auRequest["description"] = config.Description
+		request.Description = config.Description
 	}
 
 	if config.MembershipType == "Dynamic" {
-		auRequest["membershipType"] = "Dynamic"
-		auRequest["membershipRule"] = config.MembershipRule
-		auRequest["membershipRuleProcessingState"] = "On"
+		request.MembershipType = "Dynamic"
+		request.MembershipRule = config.MembershipRule
+		request.MembershipRuleProcessingState = "On"
 	}
 
-	// Would make Graph API call here to create the administrative unit
+	// Create administrative unit via Graph API
+	au, err := m.graphClient.CreateAdministrativeUnit(ctx, token, request)
+	if err != nil {
+		return fmt.Errorf("failed to create administrative unit via Graph API: %w", err)
+	}
 	
 	// Wait for creation to propagate
 	time.Sleep(2 * time.Second)
@@ -380,7 +391,7 @@ func (m *entraAdminUnitModule) createAdminUnit(ctx context.Context, token *auth.
 	// Add user members if specified and not dynamic
 	if len(config.UserMembers) > 0 && config.MembershipType != "Dynamic" {
 		for _, userID := range config.UserMembers {
-			if err := m.addUserMember(ctx, token, "new-au-id", userID); err != nil {
+			if err := m.addUserMember(ctx, token, au.ID, userID); err != nil {
 				return fmt.Errorf("failed to add user member %s: %w", userID, err)
 			}
 		}
@@ -389,7 +400,7 @@ func (m *entraAdminUnitModule) createAdminUnit(ctx context.Context, token *auth.
 	// Add group members if specified and not dynamic
 	if len(config.GroupMembers) > 0 && config.MembershipType != "Dynamic" {
 		for _, groupID := range config.GroupMembers {
-			if err := m.addGroupMember(ctx, token, "new-au-id", groupID); err != nil {
+			if err := m.addGroupMember(ctx, token, au.ID, groupID); err != nil {
 				return fmt.Errorf("failed to add group member %s: %w", groupID, err)
 			}
 		}
@@ -398,7 +409,7 @@ func (m *entraAdminUnitModule) createAdminUnit(ctx context.Context, token *auth.
 	// Add scoped role members if specified
 	if len(config.ScopedRoleMembers) > 0 {
 		for _, roleMember := range config.ScopedRoleMembers {
-			if err := m.addScopedRoleMember(ctx, token, "new-au-id", &roleMember); err != nil {
+			if err := m.addScopedRoleMember(ctx, token, au.ID, &roleMember); err != nil {
 				return fmt.Errorf("failed to add scoped role member %s: %w", roleMember.PrincipalID, err)
 			}
 		}
@@ -435,8 +446,26 @@ func (m *entraAdminUnitModule) updateAdminUnit(ctx context.Context, token *auth.
 
 	// Update the administrative unit if there are changes
 	if len(updates) > 0 {
-		// TODO: Implement Graph API PATCH call to update administrative unit
-		return fmt.Errorf("administrative unit updates not yet implemented")
+		// Build the update request
+		updateRequest := &graph.UpdateAdministrativeUnitRequest{}
+		
+		if displayName, ok := updates["displayName"].(string); ok {
+			updateRequest.DisplayName = &displayName
+		}
+		if description, ok := updates["description"].(string); ok {
+			updateRequest.Description = &description
+		}
+		if visibility, ok := updates["visibility"].(string); ok {
+			updateRequest.Visibility = &visibility
+		}
+		if membershipRule, ok := updates["membershipRule"].(string); ok {
+			updateRequest.MembershipRule = &membershipRule
+		}
+		
+		// Update administrative unit via Graph API
+		if err := m.graphClient.UpdateAdministrativeUnit(ctx, token, existingAU.ID, updateRequest); err != nil {
+			return fmt.Errorf("failed to update administrative unit via Graph API: %w", err)
+		}
 	}
 
 	// Handle membership if managed and not dynamic
@@ -514,12 +543,13 @@ func (m *entraAdminUnitModule) syncScopedRoleMembers(ctx context.Context, token 
 // Utility types and functions
 
 type AdminUnitInfo struct {
-	ID             string
-	DisplayName    string
-	Description    string
-	Visibility     string
-	MembershipType string
-	MembershipRule string
+	ID                            string
+	DisplayName                   string
+	Description                   string
+	Visibility                    string
+	MembershipType                string
+	MembershipRule                string
+	MembershipRuleProcessingState string
 }
 
 func parseEntraAdminUnitResourceID(resourceID string) (tenantID, auID string, err error) {

@@ -364,41 +364,48 @@ func (m *entraGroupModule) Get(ctx context.Context, resourceID string) (modules.
 	return config, nil
 }
 
-// Helper methods (placeholders - would need Graph API extensions)
+// Helper methods for Graph API operations
 
 func (m *entraGroupModule) getGroupByID(ctx context.Context, token *auth.AccessToken, groupID string) (*GroupInfo, error) {
-	// Placeholder - would use Graph API groups endpoint
+	// Get group from Graph API
+	group, err := m.graphClient.GetGroup(ctx, token, groupID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get group from Graph API: %w", err)
+	}
+
+	// Convert Graph API response to our internal format
 	return &GroupInfo{
-		ID:              groupID,
-		DisplayName:     "Sample Group",
-		Description:     "Sample Description",
-		MailNickname:    "samplegroup",
-		MailEnabled:     false,
-		SecurityEnabled: true,
+		ID:              group.ID,
+		DisplayName:     group.DisplayName,
+		Description:     group.Description,
+		MailNickname:    group.MailNickname,
+		MailEnabled:     group.MailEnabled,
+		SecurityEnabled: group.SecurityEnabled,
 	}, nil
 }
 
 func (m *entraGroupModule) createGroup(ctx context.Context, token *auth.AccessToken, config *EntraGroupConfig) error {
-	// Placeholder for group creation via Graph API
-	// Would implement: POST /groups
-	
-	// Create basic group first
-	groupRequest := map[string]interface{}{
-		"displayName":     config.DisplayName,
-		"mailNickname":    config.MailNickname,
-		"mailEnabled":     config.MailEnabled,
-		"securityEnabled": config.SecurityEnabled,
+	// Build the create request
+	request := &graph.CreateGroupRequest{
+		DisplayName:     config.DisplayName,
+		MailNickname:    config.MailNickname,
+		MailEnabled:     config.MailEnabled,
+		SecurityEnabled: config.SecurityEnabled,
 	}
 
 	if config.Description != "" {
-		groupRequest["description"] = config.Description
+		request.Description = config.Description
 	}
 
 	if config.GroupType == "Unified" {
-		groupRequest["groupTypes"] = []string{"Unified"}
+		request.GroupTypes = []string{"Unified"}
 	}
 
-	// Would make Graph API call here
+	// Create group via Graph API
+	group, err := m.graphClient.CreateGroup(ctx, token, request)
+	if err != nil {
+		return fmt.Errorf("failed to create group via Graph API: %w", err)
+	}
 	
 	// Wait for group creation to propagate
 	time.Sleep(2 * time.Second)
@@ -406,7 +413,7 @@ func (m *entraGroupModule) createGroup(ctx context.Context, token *auth.AccessTo
 	// Add members and owners if specified
 	if len(config.Members) > 0 {
 		for _, member := range config.Members {
-			if err := m.addGroupMember(ctx, token, "new-group-id", member); err != nil {
+			if err := m.addGroupMember(ctx, token, group.ID, member); err != nil {
 				return fmt.Errorf("failed to add member %s: %w", member, err)
 			}
 		}
@@ -414,7 +421,7 @@ func (m *entraGroupModule) createGroup(ctx context.Context, token *auth.AccessTo
 
 	if len(config.Owners) > 0 {
 		for _, owner := range config.Owners {
-			if err := m.addGroupOwner(ctx, token, "new-group-id", owner); err != nil {
+			if err := m.addGroupOwner(ctx, token, group.ID, owner); err != nil {
 				return fmt.Errorf("failed to add owner %s: %w", owner, err)
 			}
 		}
@@ -422,7 +429,7 @@ func (m *entraGroupModule) createGroup(ctx context.Context, token *auth.AccessTo
 
 	// Create Microsoft Team if enabled
 	if config.IsTeamEnabled {
-		if err := m.createTeam(ctx, token, "new-group-id", config.TeamSettings); err != nil {
+		if err := m.createTeam(ctx, token, group.ID, config.TeamSettings); err != nil {
 			return fmt.Errorf("failed to create team: %w", err)
 		}
 	}
@@ -458,8 +465,27 @@ func (m *entraGroupModule) updateGroup(ctx context.Context, token *auth.AccessTo
 
 	// Update the group if there are changes
 	if len(updates) > 0 {
-		// TODO: Implement Graph API PATCH call to update group
-		return fmt.Errorf("group updates not yet implemented")
+		// Build the update request
+		updateRequest := &graph.UpdateGroupRequest{}
+		
+		// Map updates to the request structure (using pointers as required)
+		if displayName, ok := updates["displayName"].(string); ok {
+			updateRequest.DisplayName = &displayName
+		}
+		if description, ok := updates["description"].(string); ok {
+			updateRequest.Description = &description
+		}
+		if mailEnabled, ok := updates["mailEnabled"].(bool); ok {
+			updateRequest.MailEnabled = &mailEnabled
+		}
+		if securityEnabled, ok := updates["securityEnabled"].(bool); ok {
+			updateRequest.SecurityEnabled = &securityEnabled
+		}
+		
+		// Make the Graph API PATCH call
+		if err := m.graphClient.UpdateGroup(ctx, token, existingGroup.ID, updateRequest); err != nil {
+			return fmt.Errorf("failed to update group via Graph API: %w", err)
+		}
 	}
 
 	// Handle membership if managed

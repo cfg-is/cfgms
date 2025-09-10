@@ -417,41 +417,51 @@ func (m *entraApplicationModule) Get(ctx context.Context, resourceID string) (mo
 	return config, nil
 }
 
-// Helper methods (placeholders - would need Graph API extensions)
+// Helper methods for Graph API operations
 
 func (m *entraApplicationModule) getApplicationByID(ctx context.Context, token *auth.AccessToken, appID string) (*ApplicationInfo, error) {
-	// Placeholder - would use Graph API /applications/{id}
+	// Get application from Graph API
+	app, err := m.graphClient.GetApplication(ctx, token, appID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get application from Graph API: %w", err)
+	}
+
+	// Convert Graph API response to our internal format
 	return &ApplicationInfo{
-		ID:             appID,
-		DisplayName:    "Sample Application",
-		Description:    "Sample application description",
-		SignInAudience: "AzureADMyOrg",
-		IdentifierUris: []string{},
+		ID:             app.ID,
+		DisplayName:    app.DisplayName,
+		Description:    app.Description,
+		SignInAudience: app.SignInAudience,
+		IdentifierUris: app.IdentifierUris,
 	}, nil
 }
 
 func (m *entraApplicationModule) createApplication(ctx context.Context, token *auth.AccessToken, config *EntraApplicationConfig) error {
-	// Placeholder - would use Graph API POST /applications
-	appRequest := map[string]interface{}{
-		"displayName":    config.DisplayName,
-		"signInAudience": config.SignInAudience,
+	// Build the create request
+	request := &graph.CreateApplicationRequest{
+		DisplayName:    config.DisplayName,
+		SignInAudience: config.SignInAudience,
 	}
 
 	if config.Description != "" {
-		appRequest["description"] = config.Description
+		request.Description = config.Description
 	}
 	if len(config.IdentifierUris) > 0 {
-		appRequest["identifierUris"] = config.IdentifierUris
+		request.IdentifierUris = config.IdentifierUris
 	}
 
-	// Would make Graph API call here to create application
+	// Create application via Graph API
+	app, err := m.graphClient.CreateApplication(ctx, token, request)
+	if err != nil {
+		return fmt.Errorf("failed to create application via Graph API: %w", err)
+	}
 	
 	// Wait for application creation to propagate
 	time.Sleep(2 * time.Second)
 
 	// Create service principal if requested
 	if config.CreateServicePrincipal {
-		if err := m.createServicePrincipal(ctx, token, "new-app-id", config.ServicePrincipalSettings); err != nil {
+		if err := m.createServicePrincipal(ctx, token, app.AppID, config.ServicePrincipalSettings); err != nil {
 			return fmt.Errorf("failed to create service principal: %w", err)
 		}
 	}
@@ -459,7 +469,7 @@ func (m *entraApplicationModule) createApplication(ctx context.Context, token *a
 	// Add password credentials (client secrets) if specified
 	if len(config.PasswordCredentials) > 0 {
 		for _, cred := range config.PasswordCredentials {
-			if err := m.addPasswordCredential(ctx, token, "new-app-id", &cred); err != nil {
+			if err := m.addPasswordCredential(ctx, token, app.ID, &cred); err != nil {
 				return fmt.Errorf("failed to add password credential: %w", err)
 			}
 		}
@@ -468,7 +478,7 @@ func (m *entraApplicationModule) createApplication(ctx context.Context, token *a
 	// Add certificate credentials if specified
 	if len(config.KeyCredentials) > 0 {
 		for _, cred := range config.KeyCredentials {
-			if err := m.addKeyCredential(ctx, token, "new-app-id", &cred); err != nil {
+			if err := m.addKeyCredential(ctx, token, app.ID, &cred); err != nil {
 				return fmt.Errorf("failed to add key credential: %w", err)
 			}
 		}
@@ -501,8 +511,23 @@ func (m *entraApplicationModule) updateApplication(ctx context.Context, token *a
 
 	// Update the application if there are changes
 	if len(updates) > 0 {
-		// TODO: Implement Graph API PATCH call to update application
-		return fmt.Errorf("application updates not yet implemented")
+		// Build the update request
+		updateRequest := &graph.UpdateApplicationRequest{}
+		
+		if displayName, ok := updates["displayName"].(string); ok {
+			updateRequest.DisplayName = &displayName
+		}
+		if description, ok := updates["description"].(string); ok {
+			updateRequest.Description = &description
+		}
+		if signInAudience, ok := updates["signInAudience"].(string); ok {
+			updateRequest.SignInAudience = &signInAudience
+		}
+		
+		// Update application via Graph API
+		if err := m.graphClient.UpdateApplication(ctx, token, existingApp.ID, updateRequest); err != nil {
+			return fmt.Errorf("failed to update application via Graph API: %w", err)
+		}
 	}
 
 	// Handle credentials if managed

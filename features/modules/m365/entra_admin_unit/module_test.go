@@ -172,6 +172,97 @@ func (m *MockGraphClient) DeleteDeviceConfiguration(ctx context.Context, token *
 	return args.Error(0)
 }
 
+// Application operations
+func (m *MockGraphClient) GetApplication(ctx context.Context, token *auth.AccessToken, applicationID string) (*graph.Application, error) {
+	args := m.Called(ctx, token, applicationID)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*graph.Application), args.Error(1)
+}
+
+func (m *MockGraphClient) CreateApplication(ctx context.Context, token *auth.AccessToken, request *graph.CreateApplicationRequest) (*graph.Application, error) {
+	args := m.Called(ctx, token, request)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*graph.Application), args.Error(1)
+}
+
+func (m *MockGraphClient) UpdateApplication(ctx context.Context, token *auth.AccessToken, applicationID string, request *graph.UpdateApplicationRequest) error {
+	args := m.Called(ctx, token, applicationID, request)
+	return args.Error(0)
+}
+
+func (m *MockGraphClient) DeleteApplication(ctx context.Context, token *auth.AccessToken, applicationID string) error {
+	args := m.Called(ctx, token, applicationID)
+	return args.Error(0)
+}
+
+func (m *MockGraphClient) ListApplications(ctx context.Context, token *auth.AccessToken, filter string) ([]graph.Application, error) {
+	args := m.Called(ctx, token, filter)
+	return args.Get(0).([]graph.Application), args.Error(1)
+}
+
+// Administrative Unit operations
+func (m *MockGraphClient) GetAdministrativeUnit(ctx context.Context, token *auth.AccessToken, unitID string) (*graph.AdministrativeUnit, error) {
+	args := m.Called(ctx, token, unitID)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*graph.AdministrativeUnit), args.Error(1)
+}
+
+func (m *MockGraphClient) CreateAdministrativeUnit(ctx context.Context, token *auth.AccessToken, request *graph.CreateAdministrativeUnitRequest) (*graph.AdministrativeUnit, error) {
+	args := m.Called(ctx, token, request)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*graph.AdministrativeUnit), args.Error(1)
+}
+
+func (m *MockGraphClient) UpdateAdministrativeUnit(ctx context.Context, token *auth.AccessToken, unitID string, request *graph.UpdateAdministrativeUnitRequest) error {
+	args := m.Called(ctx, token, unitID, request)
+	return args.Error(0)
+}
+
+func (m *MockGraphClient) DeleteAdministrativeUnit(ctx context.Context, token *auth.AccessToken, unitID string) error {
+	args := m.Called(ctx, token, unitID)
+	return args.Error(0)
+}
+
+func (m *MockGraphClient) ListAdministrativeUnits(ctx context.Context, token *auth.AccessToken, filter string) ([]graph.AdministrativeUnit, error) {
+	args := m.Called(ctx, token, filter)
+	return args.Get(0).([]graph.AdministrativeUnit), args.Error(1)
+}
+
+// Group operations (extend existing)
+func (m *MockGraphClient) GetGroup(ctx context.Context, token *auth.AccessToken, groupID string) (*graph.Group, error) {
+	args := m.Called(ctx, token, groupID)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*graph.Group), args.Error(1)
+}
+
+func (m *MockGraphClient) CreateGroup(ctx context.Context, token *auth.AccessToken, request *graph.CreateGroupRequest) (*graph.Group, error) {
+	args := m.Called(ctx, token, request)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*graph.Group), args.Error(1)
+}
+
+func (m *MockGraphClient) UpdateGroup(ctx context.Context, token *auth.AccessToken, groupID string, request *graph.UpdateGroupRequest) error {
+	args := m.Called(ctx, token, groupID, request)
+	return args.Error(0)
+}
+
+func (m *MockGraphClient) DeleteGroup(ctx context.Context, token *auth.AccessToken, groupID string) error {
+	args := m.Called(ctx, token, groupID)
+	return args.Error(0)
+}
+
 // Test functions
 
 func TestNew(t *testing.T) {
