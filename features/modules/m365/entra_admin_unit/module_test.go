@@ -72,6 +72,14 @@ func (m *MockGraphClient) GetUser(ctx context.Context, token *auth.AccessToken, 
 	return args.Get(0).(*graph.User), args.Error(1)
 }
 
+func (m *MockGraphClient) ListUsers(ctx context.Context, token *auth.AccessToken, filter string) ([]graph.User, error) {
+	args := m.Called(ctx, token, filter)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]graph.User), args.Error(1)
+}
+
 func (m *MockGraphClient) CreateUser(ctx context.Context, token *auth.AccessToken, request *graph.CreateUserRequest) (*graph.User, error) {
 	args := m.Called(ctx, token, request)
 	if args.Get(0) == nil {
@@ -256,6 +264,14 @@ func (m *MockGraphClient) CreateGroup(ctx context.Context, token *auth.AccessTok
 func (m *MockGraphClient) UpdateGroup(ctx context.Context, token *auth.AccessToken, groupID string, request *graph.UpdateGroupRequest) error {
 	args := m.Called(ctx, token, groupID, request)
 	return args.Error(0)
+}
+
+func (m *MockGraphClient) ListGroups(ctx context.Context, token *auth.AccessToken, filter string) ([]graph.Group, error) {
+	args := m.Called(ctx, token, filter)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]graph.Group), args.Error(1)
 }
 
 func (m *MockGraphClient) DeleteGroup(ctx context.Context, token *auth.AccessToken, groupID string) error {
