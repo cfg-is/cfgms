@@ -882,15 +882,61 @@ When creating controller-level abstractions:
 - **Auto-Registration**: Providers register via `init()` functions - no manual registry needed
 - **Configuration**: Controller selects provider globally via `controller.storage.provider` in YAML
 
-## Branching Strategy
+## Branching Strategy & PR Process
 
-Following GitFlow:
-- `main` - Production-ready code only
-- `develop` - Integration branch for features
-- `feature/*` - New feature development
-- `fix/*` - Bug fixes
-- `docs/*` - Documentation updates
-- `refactor/*` - Code improvements
+Following GitFlow with **MANDATORY feature branch workflow**:
+
+### Branch Hierarchy
+- `main` - Production-ready code only (protected)
+- `develop` - Integration branch for features (never delete)
+- `feature/*` - New feature development (temporary)
+- `fix/*` - Bug fixes (temporary)
+- `docs/*` - Documentation updates (temporary)
+- `refactor/*` - Code improvements (temporary)
+
+### CRITICAL RULE: Never Create Direct develop→main PRs
+
+**❌ WRONG (Will Delete Develop Branch):**
+```bash
+# On develop branch - DON'T DO THIS
+gh pr create --base main --title "Epic Complete"  # ❌ Will delete develop!
+```
+
+**✅ CORRECT (Feature Branch Workflow):**
+```bash
+# ALWAYS create feature branch first
+git checkout develop
+git checkout -b feature/epic-4-unified-directory
+git push origin feature/epic-4-unified-directory
+
+# Create PR: feature → develop (for development)
+gh pr create --base develop --title "Epic 4: Unified Directory Management"
+
+# After develop integration, create PR: develop → main (for release)
+git checkout develop
+git pull origin develop  # Ensure develop has latest
+gh pr create --base main --title "Release: Epic 4 to Production"
+```
+
+### PR Merge Settings (GitHub Repository Settings)
+To prevent accidental branch deletion:
+1. Go to GitHub → Repository → Settings → General
+2. Under "Pull Requests" section:
+   - ✅ Enable "Allow merge commits"
+   - ❌ Disable "Automatically delete head branches" 
+3. For develop branch specifically:
+   - ✅ Enable branch protection
+   - ✅ Require pull request reviews
+   - ❌ Never allow deletion
+
+### Safe Merge Commands
+```bash
+# Merge PR without deleting source branch
+gh pr merge [PR_NUMBER] --merge --no-delete-branch
+
+# Or use squash merge (preferred for clean history)
+gh pr merge [PR_NUMBER] --squash --no-delete-branch
+```
 
 ## Multi-Tenancy & Configuration Inheritance
 The system implements a recursive parent-child tenant model with:
