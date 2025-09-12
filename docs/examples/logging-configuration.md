@@ -105,9 +105,9 @@ controller:
       compress_rotated: false     # No compression for easier reading
 ```
 
-### TimescaleDB Provider (Future)
+### TimescaleDB Provider
 
-**Note: This provider will be available in a future update.**
+**High-Performance Time-Series Logging with PostgreSQL Compatibility**
 
 ```yaml
 controller:
@@ -126,10 +126,73 @@ controller:
       database: "cfgms_logs"
       username: "cfgms_logger"
       password: "${CFGMS_LOG_DB_PASSWORD}"  # Environment variable
-      table_prefix: "logs"
-      partition_interval: "1 day"
-      retention_policy: "30 days"
-      compression: true
+      ssl_mode: "require"
+      table_name: "log_entries"
+      schema_name: "public"
+      chunk_interval: "7d"         # TimescaleDB chunk size (7 days)
+      compression_after: "7d"      # Compress chunks after 7 days
+      retention_after: "30d"       # Auto-delete chunks after 30 days
+      batch_size: 1000
+      max_connections: 20
+      create_schema: true
+```
+
+**Production Configuration:**
+```yaml
+controller:
+  logging:
+    provider: "timescale"
+    level: "WARN"                 # Production: warnings and errors only
+    service_name: "cfgms-prod"
+    component: "controller"
+    batch_size: 2000              # High-performance batches
+    flush_interval: "60s"         # Less frequent flushing for performance
+    async_writes: true
+    tenant_isolation: true
+    enable_correlation: true
+    config:
+      host: "${CFGMS_TIMESCALEDB_HOST}"
+      port: 5432
+      database: "cfgms_logs_prod"
+      username: "cfgms_logger"
+      password: "${CFGMS_LOG_DB_PASSWORD}"
+      ssl_mode: "verify-full"     # Production: strict SSL
+      table_name: "log_entries"
+      chunk_interval: "1d"        # Daily chunks for high volume
+      compression_after: "24h"    # Aggressive compression
+      retention_after: "90d"      # 90-day retention
+      compression_ratio: 15       # High compression ratio
+      batch_size: 2000
+      max_connections: 50
+      connection_timeout: "30s"
+      query_timeout: "60s"
+```
+
+**Development Configuration:**
+```yaml
+controller:
+  logging:
+    provider: "timescale"
+    level: "DEBUG"                # Development: all log levels
+    service_name: "cfgms-dev"
+    component: "controller"
+    batch_size: 100               # Smaller batches for immediate feedback
+    flush_interval: "5s"          # Frequent flushing
+    async_writes: false           # Synchronous for debugging
+    config:
+      host: "localhost"
+      port: 5432
+      database: "cfgms_logs_dev"
+      username: "cfgms_logger"
+      password: "dev_password"
+      ssl_mode: "disable"         # Development: no SSL
+      table_name: "log_entries"
+      chunk_interval: "6h"        # Smaller chunks for development
+      compression_after: "1h"     # Quick compression
+      retention_after: "7d"       # Short retention for development
+      batch_size: 50
+      max_connections: 5
+      create_schema: true
 ```
 
 ## Environment Variables
@@ -224,12 +287,30 @@ moduleLogger.Info("Enhanced message", "enhanced", true)
 - **Latency**: <5ms per entry
 - **Storage**: ~10:1 compression ratio with GZIP
 - **Memory**: <50MB for typical workloads
+- **Best for**: Single-server deployments, development, edge locations
 
-### Expected TimescaleDB Provider
-- **Throughput**: ~100,000+ entries/second
-- **Latency**: <2ms per entry
-- **Storage**: Excellent compression with time-series optimization
-- **Memory**: <100MB for typical workloads
+### TimescaleDB Provider
+- **Throughput**: ~100,000+ entries/second with batch writes
+- **Latency**: <2ms per entry (database network latency dependent)
+- **Storage**: 10:1-20:1 compression ratio with native compression
+- **Memory**: <100MB for typical workloads (plus database memory)
+- **Query Performance**: Sub-second for time-range queries with proper indexing
+- **Scalability**: Horizontal scaling with distributed TimescaleDB
+- **Best for**: Enterprise deployments, high-volume logging, complex analytics
+
+### Comparative Performance
+
+| Feature | File Provider | TimescaleDB Provider |
+|---------|--------------|---------------------|
+| Setup Complexity | Low | Medium |
+| Infrastructure Requirements | None | PostgreSQL + TimescaleDB |
+| Query Performance | Good (file parsing) | Excellent (SQL queries) |
+| Real-time Analytics | Limited | Excellent |
+| Multi-tenant Queries | Good | Excellent |
+| Compression | GZIP (10:1) | Native (10:1-20:1) |
+| Retention Management | File rotation | Automated policies |
+| High Availability | File system dependent | Database clustering |
+| Backup/Recovery | File system tools | Database tools |
 
 ## Migration Guide
 

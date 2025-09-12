@@ -248,6 +248,20 @@ func GetRegisteredLoggingProviderNames() []string {
 	return names
 }
 
+// GetRegisteredProviders returns a map of all registered providers
+func GetRegisteredProviders() map[string]LoggingProvider {
+	globalLoggingRegistry.mutex.RLock()
+	defer globalLoggingRegistry.mutex.RUnlock()
+	
+	// Return a copy to prevent external modification
+	providers := make(map[string]LoggingProvider)
+	for name, provider := range globalLoggingRegistry.providers {
+		providers[name] = provider
+	}
+	
+	return providers
+}
+
 // GetAvailableLoggingProviders returns all providers that are currently available
 func GetAvailableLoggingProviders() map[string]LoggingProvider {
 	globalLoggingRegistry.mutex.RLock()

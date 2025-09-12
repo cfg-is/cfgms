@@ -13,6 +13,7 @@ import (
 	
 	// Import logging providers for auto-registration
 	_ "github.com/cfgis/cfgms/pkg/logging/providers/file"
+	_ "github.com/cfgis/cfgms/pkg/logging/providers/timescale"
 )
 
 // Interface defines the core controller functionality
