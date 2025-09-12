@@ -10,6 +10,9 @@ import (
 	"github.com/cfgis/cfgms/features/controller/server"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/pkg/logging"
+	
+	// Import logging providers for auto-registration
+	_ "github.com/cfgis/cfgms/pkg/logging/providers/file"
 )
 
 // Interface defines the core controller functionality
@@ -52,6 +55,23 @@ type Controller struct {
 func New(cfg *config.Config, logger logging.Logger) (*Controller, error) {
 	if cfg == nil {
 		cfg = config.DefaultConfig() // Use defaults
+	}
+
+	// Initialize global logging provider system if configured
+	if cfg.Logging != nil {
+		loggingConfig := cfg.Logging.ToLoggingManagerConfig()
+		if err := logging.InitializeGlobalLogging(loggingConfig); err != nil {
+			// Log warning but continue with fallback logging
+			logger.Warn("Failed to initialize global logging provider, using fallback", "error", err, "provider", cfg.Logging.Provider)
+		} else {
+			logger.Info("Initialized global logging provider", "provider", cfg.Logging.Provider)
+		}
+		
+		// Initialize global logger factory for module injection
+		logging.InitializeGlobalLoggerFactory(loggingConfig.ServiceName, loggingConfig.Component)
+	} else {
+		// Initialize with defaults if no logging config provided
+		logging.InitializeGlobalLoggerFactory("cfgms-controller", "controller")
 	}
 
 	// Create the gRPC server
@@ -147,6 +167,16 @@ func (c *Controller) Stop(ctx context.Context) error {
 	if err := c.server.Stop(); err != nil {
 		c.logger.Error("Failed to stop gRPC server", "error", err)
 		return err
+	}
+
+	// Cleanup global logging provider
+	if manager := logging.GetGlobalLoggingManager(); manager != nil {
+		if err := manager.Close(); err != nil {
+			c.logger.Error("Failed to close global logging manager", "error", err)
+			// Continue with cleanup, don't fail
+		} else {
+			c.logger.Info("Global logging manager closed successfully")
+		}
 	}
 
 	// Close shutdown channel only if not already closed
