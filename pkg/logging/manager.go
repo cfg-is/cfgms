@@ -8,17 +8,23 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/logging/interfaces"
+	"github.com/cfgis/cfgms/pkg/logging/subscribers/syslog"
 )
 
-// LoggingManager manages the global logging provider and provides a unified interface
+// LoggingManager manages the global logging provider and subscribers
 // for all CFGMS components to write structured logs
 type LoggingManager struct {
 	provider         interfaces.LoggingProvider
+	subscribers      []interfaces.LoggingSubscriber
 	config          *LoggingConfig
 	batchBuffer     []interfaces.LogEntry
 	batchMutex      sync.Mutex
-	batchTimer      *time.Timer
 	stopBatching    chan struct{}
+	
+	// Event subscriber support
+	eventChan       chan interfaces.LogEntry
+	stopEvents      chan struct{}
+	
 	initialized     bool
 	defaultFields   map[string]interface{}
 }
@@ -50,6 +56,16 @@ type LoggingConfig struct {
 	// Enhanced correlation tracking
 	EnableCorrelation bool        `yaml:"enable_correlation" json:"enable_correlation"` // Enable automatic correlation IDs
 	EnableTracing     bool        `yaml:"enable_tracing" json:"enable_tracing"`         // Enable OpenTelemetry integration
+	
+	// Event subscriber configuration (optional)
+	Subscribers []SubscriberConfig `yaml:"subscribers" json:"subscribers"` // Event subscribers for real-time forwarding
+}
+
+// SubscriberConfig holds configuration for event subscribers
+type SubscriberConfig struct {
+	Type    string                 `yaml:"type" json:"type"`       // Subscriber type (e.g., "syslog", "webhook")
+	Config  map[string]interface{} `yaml:"config" json:"config"`   // Subscriber-specific configuration
+	Enabled bool                  `yaml:"enabled" json:"enabled"` // Enable/disable subscriber
 }
 
 // DefaultLoggingConfig returns a sensible default configuration
@@ -121,6 +137,7 @@ func NewLoggingManager(config *LoggingConfig) (*LoggingManager, error) {
 	// Create manager
 	manager := &LoggingManager{
 		provider:      provider,
+		subscribers:   make([]interfaces.LoggingSubscriber, 0),
 		config:        config,
 		batchBuffer:   make([]interfaces.LogEntry, 0, config.BatchSize),
 		stopBatching:  make(chan struct{}),
@@ -130,6 +147,19 @@ func NewLoggingManager(config *LoggingConfig) (*LoggingManager, error) {
 	// Set default fields
 	manager.defaultFields["service_name"] = config.ServiceName
 	manager.defaultFields["component"] = config.Component
+	
+	// Initialize subscribers
+	if err := manager.initializeSubscribers(); err != nil {
+		provider.Close() // Clean up provider if subscriber initialization fails
+		return nil, fmt.Errorf("failed to initialize subscribers: %w", err)
+	}
+	
+	// Initialize event channels only if we have subscribers
+	if len(manager.subscribers) > 0 {
+		manager.eventChan = make(chan interfaces.LogEntry, config.BufferSize)
+		manager.stopEvents = make(chan struct{})
+		go manager.eventLoop()
+	}
 	
 	// Start batching routine if async writes are enabled
 	if config.AsyncWrites && config.BatchSize > 1 {
@@ -154,13 +184,27 @@ func (m *LoggingManager) WriteEntry(ctx context.Context, entry interfaces.LogEnt
 		return nil
 	}
 	
+	var err error
+	
 	// Use batching for async writes
 	if m.config.AsyncWrites && m.config.BatchSize > 1 {
-		return m.addToBatch(entry)
+		err = m.addToBatch(entry)
+	} else {
+		// Direct write for synchronous mode
+		err = m.provider.WriteEntry(ctx, entry)
 	}
 	
-	// Direct write for synchronous mode
-	return m.provider.WriteEntry(ctx, entry)
+	// If primary storage succeeded, notify subscribers (best effort)
+	if err == nil && len(m.subscribers) > 0 && m.eventChan != nil {
+		select {
+		case m.eventChan <- entry:
+			// Event queued for subscribers
+		default:
+			// Buffer full, drop event (primary storage still succeeded)
+		}
+	}
+	
+	return err
 }
 
 // WriteBatch writes multiple log entries efficiently
@@ -192,6 +236,15 @@ func (m *LoggingManager) QueryTimeRange(ctx context.Context, query interfaces.Ti
 	}
 	
 	return m.provider.QueryTimeRange(ctx, query)
+}
+
+// QueryCount returns count of log entries matching criteria
+func (m *LoggingManager) QueryCount(ctx context.Context, query interfaces.CountQuery) (int64, error) {
+	if !m.initialized {
+		return 0, fmt.Errorf("logging manager not initialized")
+	}
+	
+	return m.provider.QueryCount(ctx, query)
 }
 
 // GetStats returns operational statistics
@@ -226,7 +279,18 @@ func (m *LoggingManager) Close() error {
 	// Stop batching routine
 	if m.stopBatching != nil {
 		close(m.stopBatching)
-		m.stopBatching = nil
+	}
+	
+	// Stop event loop for subscribers
+	if m.stopEvents != nil {
+		close(m.stopEvents)
+	}
+	
+	// Close all subscribers
+	for _, subscriber := range m.subscribers {
+		if err := subscriber.Close(); err != nil {
+			fmt.Printf("Warning: failed to close subscriber %s: %v\n", subscriber.Name(), err)
+		}
 	}
 	
 	// Flush any remaining entries
@@ -387,7 +451,9 @@ func (m *LoggingManager) batchingRoutine() {
 			}
 		case <-m.stopBatching:
 			// Final flush before stopping
-			m.flushBatch(context.Background())
+			if err := m.flushBatch(context.Background()); err != nil {
+				fmt.Printf("Warning: failed to flush batch during shutdown: %v\n", err)
+			}
 			return
 		}
 	}
@@ -461,4 +527,73 @@ func Error(ctx context.Context, message string, fields map[string]interface{}) e
 // Fatal writes a fatal log entry
 func Fatal(ctx context.Context, message string, fields map[string]interface{}) error {
 	return WriteLog(ctx, "FATAL", message, fields)
+}
+
+// initializeSubscribers creates and initializes configured subscribers
+func (m *LoggingManager) initializeSubscribers() error {
+	for i, subscriberConfig := range m.config.Subscribers {
+		if !subscriberConfig.Enabled {
+			continue // Skip disabled subscribers
+		}
+		
+		subscriber, err := m.createSubscriber(subscriberConfig.Type)
+		if err != nil {
+			return fmt.Errorf("failed to create subscriber %d (%s): %w", i, subscriberConfig.Type, err)
+		}
+		
+		if err := subscriber.Initialize(subscriberConfig.Config); err != nil {
+			return fmt.Errorf("failed to initialize subscriber %d (%s): %w", i, subscriberConfig.Type, err)
+		}
+		
+		m.subscribers = append(m.subscribers, subscriber)
+		fmt.Printf("Initialized logging subscriber: %s - %s\n", subscriber.Name(), subscriber.Description())
+	}
+	
+	return nil
+}
+
+// createSubscriber creates a subscriber instance by type
+func (m *LoggingManager) createSubscriber(subscriberType string) (interfaces.LoggingSubscriber, error) {
+	// Check for test mock subscribers first
+	if mockFactory != nil {
+		if mock, err := mockFactory(subscriberType); err == nil {
+			return mock, nil
+		}
+	}
+	
+	switch subscriberType {
+	case "syslog":
+		return syslog.NewSyslogSubscriber(), nil
+	default:
+		return nil, fmt.Errorf("unknown subscriber type: %s", subscriberType)
+	}
+}
+
+// mockFactory is used for testing - set to nil in production
+var mockFactory func(string) (interfaces.LoggingSubscriber, error)
+
+// eventLoop processes log entries for subscribers in background
+func (m *LoggingManager) eventLoop() {
+	for {
+		select {
+		case entry := <-m.eventChan:
+			// Send to all subscribers in parallel
+			for _, subscriber := range m.subscribers {
+				if subscriber.ShouldHandle(entry) {
+					go func(s interfaces.LoggingSubscriber) {
+						ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+						defer cancel()
+						
+						if err := s.HandleLogEntry(ctx, entry); err != nil {
+							// Log subscriber failure, but don't fail primary logging
+							fmt.Printf("Warning: Subscriber %s failed: %v\n", s.Name(), err)
+						}
+					}(subscriber)
+				}
+			}
+			
+		case <-m.stopEvents:
+			return
+		}
+	}
 }

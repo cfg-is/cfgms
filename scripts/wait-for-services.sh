@@ -19,6 +19,12 @@ POSTGRES_USER="cfgms_test"
 POSTGRES_DB="cfgms_test"
 POSTGRES_PASSWORD="${CFGMS_TEST_DB_PASSWORD:-cfgms_test_password}"
 
+TIMESCALEDB_HOST="localhost"
+TIMESCALEDB_PORT="${CFGMS_TEST_TIMESCALEDB_PORT:-5434}"
+TIMESCALEDB_USER="cfgms_logger_test"
+TIMESCALEDB_DB="cfgms_logs_test"
+TIMESCALEDB_PASSWORD="${CFGMS_TEST_TIMESCALEDB_PASSWORD:-cfgms_test_password}"
+
 GITEA_URL="http://localhost:3001"
 GITEA_HEALTH_URL="http://localhost:3001/api/healthz"
 
@@ -29,6 +35,12 @@ WAIT_INTERVAL=5
 check_postgres() {
     echo -n "Checking PostgreSQL... "
     PGPASSWORD=$POSTGRES_PASSWORD psql -h $POSTGRES_HOST -p $POSTGRES_PORT -U $POSTGRES_USER -d $POSTGRES_DB -c "SELECT 1;" > /dev/null 2>&1
+}
+
+# Function to check TimescaleDB
+check_timescaledb() {
+    echo -n "Checking TimescaleDB... "
+    PGPASSWORD=$TIMESCALEDB_PASSWORD psql -h $TIMESCALEDB_HOST -p $TIMESCALEDB_PORT -U $TIMESCALEDB_USER -d $TIMESCALEDB_DB -c "SELECT extversion FROM pg_extension WHERE extname='timescaledb';" > /dev/null 2>&1
 }
 
 # Function to check Gitea
@@ -84,6 +96,21 @@ else
     exit 1
 fi
 
+if wait_for_service "TimescaleDB" check_timescaledb; then
+    echo "⏰ Testing TimescaleDB functionality..."
+    PGPASSWORD=$TIMESCALEDB_PASSWORD psql -h $TIMESCALEDB_HOST -p $TIMESCALEDB_PORT -U $TIMESCALEDB_USER -d $TIMESCALEDB_DB -c "
+        SELECT 
+            'TimescaleDB' as service,
+            extversion as version,
+            current_database() as database,
+            current_user as user,
+            now() as timestamp
+        FROM pg_extension WHERE extname='timescaledb';
+    " 2>/dev/null || echo -e "${YELLOW}⚠️  TimescaleDB basic query failed${NC}"
+else
+    echo -e "${YELLOW}⚠️  TimescaleDB not available - logging tests will be skipped${NC}"
+fi
+
 if wait_for_service "Gitea" check_gitea; then
     echo "📁 Testing Gitea functionality..."
     
@@ -108,8 +135,9 @@ echo ""
 echo -e "${GREEN}🎉 All services are ready for testing!${NC}"
 echo ""
 echo "📋 Service Information:"
-echo "   PostgreSQL: localhost:5433 (user: cfgms_test, db: cfgms_test)"
-echo "   Gitea:      http://localhost:3001 (user: cfgms_test)"
+echo "   PostgreSQL:  localhost:5433 (user: cfgms_test, db: cfgms_test)"
+echo "   TimescaleDB: localhost:5434 (user: cfgms_logger_test, db: cfgms_logs_test)"
+echo "   Gitea:       http://localhost:3001 (user: cfgms_test)"
 echo ""
 echo "🧪 Ready to run integration tests:"
 echo "   make test-with-real-storage"

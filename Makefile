@@ -842,8 +842,8 @@ test-integration-setup:
 	@echo "🐳 Setting up CFGMS Docker test environment..."
 	@echo "=============================================="
 	@./scripts/generate-test-credentials.sh
-	@echo "Starting PostgreSQL and Gitea test services..."
-	docker-compose -f docker-compose.test.yml -f docker-compose.test.override.yml up -d postgres-test git-server-test
+	@echo "Starting PostgreSQL, TimescaleDB, and Gitea test services..."
+	docker-compose -f docker-compose.test.yml -f docker-compose.test.override.yml up -d postgres-test timescaledb-test git-server-test
 	@echo ""
 	@echo "⏳ Waiting for services to be ready..."
 	@sleep 5  # Brief pause before health checks
@@ -897,7 +897,7 @@ test-with-real-storage:
 	@if [ -f .env.test ]; then \
 		echo "Using generated credentials from .env.test"; \
 		set -a && . ./.env.test && set +a && \
-		go test -v -race -cover -tags=integration ./pkg/testing/storage/... ./features/controller/server/...; \
+		go test -v -race -cover -tags=integration ./pkg/testing/storage/... ./features/controller/server/... ./pkg/logging/providers/timescale/...; \
 	else \
 		echo "⚠️  .env.test not found. Run: make test-integration-setup"; \
 		exit 1; \

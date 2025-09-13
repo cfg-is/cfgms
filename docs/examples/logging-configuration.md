@@ -105,6 +105,70 @@ controller:
       compress_rotated: false     # No compression for easier reading
 ```
 
+### Syslog Subscriber (Enterprise Integration)
+
+**Event-based syslog forwarding for enterprise log aggregation systems**
+
+```yaml
+controller:
+  logging:
+    provider: "file"                  # Primary storage (required)
+    config:
+      directory: "/var/log/cfgms"
+      retention_days: 30
+    
+    # Syslog subscriber configuration (optional)
+    subscribers:
+      - type: "syslog"
+        enabled: true
+        config:
+          network: "udp"              # "udp", "tcp", "unix"
+          address: "syslog.company.com:514"
+          facility: "daemon"          # "daemon", "local0-7", etc.
+          tag: "cfgms-controller"
+          levels: ["ERROR", "WARN", "INFO"]  # Filter levels
+          structured_data: true       # Include CFGMS fields as structured data
+```
+
+**Example Syslog Output (RFC5424 format):**
+```
+<165>1 2024-01-15T10:30:00.000Z cfgms-controller-01 cfgms 1234 controller_INFO [cfgms tenant_id="tenant-123" session_id="sess-456" request_id="req-789"] Request processed successfully
+```
+
+**Production Configuration with Multiple Subscribers:**
+```yaml
+controller:
+  logging:
+    provider: "timescale"            # High-performance primary storage
+    config:
+      host: "localhost"
+      database: "cfgms_logs"
+    
+    # Multiple subscribers for different enterprise systems
+    subscribers:
+      # Send all logs to company SIEM
+      - type: "syslog"
+        enabled: true
+        config:
+          network: "tcp"
+          address: "splunk-collector.company.com:514"
+          enable_tls: true
+          facility: "local0"
+          tag: "cfgms-prod"
+          levels: ["INFO", "WARN", "ERROR", "FATAL"]
+          structured_data: true
+          
+      # Send critical alerts to monitoring system
+      - type: "syslog"
+        enabled: true
+        config:
+          network: "udp"
+          address: "monitoring.company.com:514"
+          facility: "daemon" 
+          tag: "cfgms-alerts"
+          levels: ["ERROR", "FATAL"]   # Only critical events
+```
+
 ### TimescaleDB Provider
 
 **High-Performance Time-Series Logging with PostgreSQL Compatibility**

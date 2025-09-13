@@ -8,6 +8,7 @@ package interfaces
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -43,11 +44,20 @@ type LoggingProvider interface {
 }
 
 // LogEntry represents a structured log entry optimized for time-series storage
+// with RFC5424 compliance for syslog compatibility
 type LogEntry struct {
 	// Core fields
 	Timestamp time.Time `json:"timestamp"`
 	Level     string    `json:"level"`     // DEBUG, INFO, WARN, ERROR, FATAL
 	Message   string    `json:"message"`
+	
+	// RFC5424 compliance fields for syslog integration
+	Priority int    `json:"priority,omitempty"`   // Calculated: facility*8 + severity
+	Version  int    `json:"version,omitempty"`    // Always 1 for RFC5424
+	Hostname string `json:"hostname,omitempty"`   // System hostname
+	AppName  string `json:"app_name,omitempty"`   // Application name
+	ProcID   string `json:"proc_id,omitempty"`    // Process ID
+	MsgID    string `json:"msg_id,omitempty"`     // Message type identifier
 	
 	// CFGMS context fields - critical for multi-tenant operations
 	ServiceName string `json:"service_name,omitempty"` // controller, steward, cfgctl
@@ -134,6 +144,185 @@ type LoggingCapabilities struct {
 	SupportsTransactions   bool `json:"supports_transactions"`    // ACID transaction support
 	SupportsPartitioning   bool `json:"supports_partitioning"`   // Time-based partitioning
 	SupportsIndexing       bool `json:"supports_indexing"`       // Field-based indexing
+}
+
+// LoggingSubscriber defines the interface for event-based log subscribers
+// Subscribers receive log entries asynchronously for real-time forwarding/processing
+type LoggingSubscriber interface {
+	// Identification
+	Name() string
+	Description() string
+	
+	// Lifecycle management
+	Initialize(config map[string]interface{}) error
+	Close() error
+	
+	// Event handling - called asynchronously for each log entry
+	HandleLogEntry(ctx context.Context, entry LogEntry) error
+	
+	// Filtering - determines if subscriber should handle this entry
+	ShouldHandle(entry LogEntry) bool
+	
+	// Health check
+	Available() (bool, error)
+}
+
+// SyslogFacility represents syslog facility codes per RFC5424
+type SyslogFacility int
+
+const (
+	// Standard syslog facilities
+	FacilityKernel     SyslogFacility = 0  // kernel messages
+	FacilityUser       SyslogFacility = 1  // user-level messages  
+	FacilityMail       SyslogFacility = 2  // mail system
+	FacilityDaemon     SyslogFacility = 3  // system daemons
+	FacilitySyslog     SyslogFacility = 5  // messages generated internally by syslogd
+	FacilityLPR        SyslogFacility = 6  // line printer subsystem
+	FacilityNews       SyslogFacility = 7  // network news subsystem
+	FacilityUUCP       SyslogFacility = 8  // UUCP subsystem
+	FacilityCron       SyslogFacility = 9  // clock daemon
+	FacilityAuthpriv   SyslogFacility = 10 // security/authorization messages
+	FacilityFTP        SyslogFacility = 11 // FTP daemon
+	FacilityLocal0     SyslogFacility = 16 // local use facility 0
+	FacilityLocal1     SyslogFacility = 17 // local use facility 1  
+	FacilityLocal2     SyslogFacility = 18 // local use facility 2
+	FacilityLocal3     SyslogFacility = 19 // local use facility 3
+	FacilityLocal4     SyslogFacility = 20 // local use facility 4
+	FacilityLocal5     SyslogFacility = 21 // local use facility 5
+	FacilityLocal6     SyslogFacility = 22 // local use facility 6
+	FacilityLocal7     SyslogFacility = 23 // local use facility 7
+)
+
+// SyslogSeverity represents syslog severity levels per RFC5424
+type SyslogSeverity int
+
+const (
+	// Standard syslog severity levels
+	SeverityEmergency     SyslogSeverity = 0 // system is unusable
+	SeverityAlert         SyslogSeverity = 1 // action must be taken immediately
+	SeverityCritical      SyslogSeverity = 2 // critical conditions
+	SeverityError         SyslogSeverity = 3 // error conditions
+	SeverityWarning       SyslogSeverity = 4 // warning conditions
+	SeverityNotice        SyslogSeverity = 5 // normal but significant condition
+	SeverityInformational SyslogSeverity = 6 // informational messages
+	SeverityDebug         SyslogSeverity = 7 // debug-level messages
+)
+
+// LogLevelToSyslogSeverity maps CFGMS log levels to syslog severity
+func LogLevelToSyslogSeverity(level string) SyslogSeverity {
+	switch level {
+	case "FATAL":
+		return SeverityEmergency
+	case "ERROR":
+		return SeverityError
+	case "WARN":
+		return SeverityWarning
+	case "INFO":
+		return SeverityInformational
+	case "DEBUG":
+		return SeverityDebug
+	default:
+		return SeverityInformational
+	}
+}
+
+// CalculateSyslogPriority calculates RFC5424 priority from facility and severity
+func CalculateSyslogPriority(facility SyslogFacility, severity SyslogSeverity) int {
+	return int(facility)*8 + int(severity)
+}
+
+// PopulateRFC5424Fields fills RFC5424 fields in a log entry for syslog compatibility
+func PopulateRFC5424Fields(entry *LogEntry, hostname, appName, procID string, facility SyslogFacility) {
+	if entry.Version == 0 {
+		entry.Version = 1 // RFC5424 version
+	}
+	
+	if entry.Hostname == "" {
+		entry.Hostname = hostname
+	}
+	
+	if entry.AppName == "" {
+		entry.AppName = appName
+	}
+	
+	if entry.ProcID == "" {
+		entry.ProcID = procID
+	}
+	
+	// Calculate priority from facility and log level
+	severity := LogLevelToSyslogSeverity(entry.Level)
+	entry.Priority = CalculateSyslogPriority(facility, severity)
+	
+	// Generate message ID from component and level
+	if entry.MsgID == "" && entry.Component != "" {
+		entry.MsgID = fmt.Sprintf("%s_%s", entry.Component, entry.Level)
+	}
+}
+
+// ToSyslogFormat converts a LogEntry to RFC5424 syslog format
+func (entry LogEntry) ToSyslogFormat() string {
+	// Format timestamp as RFC3339
+	timestamp := entry.Timestamp.Format(time.RFC3339)
+	
+	// Build structured data from CFGMS fields
+	var structuredData strings.Builder
+	structuredData.WriteString("[cfgms")
+	
+	if entry.TenantID != "" {
+		structuredData.WriteString(fmt.Sprintf(` tenant_id="%s"`, entry.TenantID))
+	}
+	if entry.SessionID != "" {
+		structuredData.WriteString(fmt.Sprintf(` session_id="%s"`, entry.SessionID))
+	}
+	if entry.CorrelationID != "" {
+		structuredData.WriteString(fmt.Sprintf(` correlation_id="%s"`, entry.CorrelationID))
+	}
+	if entry.TraceID != "" {
+		structuredData.WriteString(fmt.Sprintf(` trace_id="%s"`, entry.TraceID))
+	}
+	
+	// Add custom fields
+	for key, value := range entry.Fields {
+		structuredData.WriteString(fmt.Sprintf(` %s="%v"`, key, value))
+	}
+	
+	structuredData.WriteString("]")
+	
+	// Handle missing fields with defaults
+	hostname := entry.Hostname
+	if hostname == "" {
+		hostname = "-"
+	}
+	
+	appName := entry.AppName
+	if appName == "" {
+		appName = entry.ServiceName
+		if appName == "" {
+			appName = "-"
+		}
+	}
+	
+	procID := entry.ProcID
+	if procID == "" {
+		procID = "-"
+	}
+	
+	msgID := entry.MsgID
+	if msgID == "" {
+		msgID = "-"
+	}
+	
+	// Format as RFC5424: <PRI>VER TIMESTAMP HOSTNAME APP-NAME PROCID MSGID [STRUCTURED-DATA] MSG
+	return fmt.Sprintf("<%d>%d %s %s %s %s %s %s %s",
+		entry.Priority,
+		entry.Version,
+		timestamp,
+		hostname,
+		appName,
+		procID,
+		msgID,
+		structuredData.String(),
+		entry.Message)
 }
 
 // Global logging provider registry (separate from storage providers)

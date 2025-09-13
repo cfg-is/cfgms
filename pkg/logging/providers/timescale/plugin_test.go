@@ -437,7 +437,7 @@ func getTestTimescaleConfig() map[string]interface{} {
 
 	return map[string]interface{}{
 		"host":              host,
-		"port":              5434,
+		"port":              port,
 		"database":          "cfgms_logs_test",
 		"username":          "cfgms_logger_test", 
 		"password":          password,

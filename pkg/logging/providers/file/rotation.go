@@ -4,6 +4,7 @@ package file
 import (
 	"bufio"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -61,19 +62,19 @@ func (p *FileProvider) rotateLogFile() error {
 	p.currentFile = file
 	p.writer = bufio.NewWriterSize(file, p.config.BufferSize)
 	
-	// Start compression of old files in background (don't access shared state)
-	go p.compressOldFiles()
+	// Start compression of old files in background (pass needed config to avoid race)
+	go p.compressOldFiles(p.config.CompressRotated, p.config.Directory, p.config.FilePrefix)
 	
 	return nil
 }
 
 // compressOldFiles compresses rotated log files to save space
-func (p *FileProvider) compressOldFiles() {
-	if !p.config.CompressRotated {
+func (p *FileProvider) compressOldFiles(compressRotated bool, directory, filePrefix string) {
+	if !compressRotated {
 		return
 	}
 	
-	pattern := filepath.Join(p.config.Directory, p.config.FilePrefix+"*.log")
+	pattern := filepath.Join(directory, filePrefix+"*.log")
 	files, err := filepath.Glob(pattern)
 	if err != nil {
 		return
@@ -355,8 +356,8 @@ func (p *FileProvider) matchesFilters(entry interfaces.LogEntry, filters map[str
 }
 
 // backgroundMaintenance runs periodic maintenance tasks
-func (p *FileProvider) backgroundMaintenance() {
-	ticker := time.NewTicker(p.config.FlushInterval)
+func (p *FileProvider) backgroundMaintenance(flushInterval time.Duration) {
+	ticker := time.NewTicker(flushInterval)
 	defer ticker.Stop()
 	
 	for {
@@ -375,6 +376,9 @@ func (p *FileProvider) backgroundMaintenance() {
 			// Check again if still initialized before doing work
 			p.mutex.RLock()
 			stillInitialized := p.initialized
+			compressRotated := p.config.CompressRotated
+			directory := p.config.Directory
+			filePrefix := p.config.FilePrefix
 			p.mutex.RUnlock()
 			
 			if !stillInitialized {
@@ -382,12 +386,12 @@ func (p *FileProvider) backgroundMaintenance() {
 			}
 			
 			// Periodic flush
-			if err := p.Flush(nil); err != nil {
+			if err := p.Flush(context.TODO()); err != nil {
 				fmt.Printf("Warning: periodic flush failed: %v\n", err)
 			}
 			
 			// Compress old files
-			p.compressOldFiles()
+			p.compressOldFiles(compressRotated, directory, filePrefix)
 			
 			// Clean up old files based on max files limit
 			p.cleanupOldFiles()

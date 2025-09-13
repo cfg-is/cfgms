@@ -6,12 +6,8 @@
 CREATE EXTENSION IF NOT EXISTS timescaledb;
 
 -- Create additional user for logging tests (if needed)
-DO $$ 
-BEGIN 
-    IF NOT EXISTS (SELECT FROM pg_user WHERE usename = 'cfgms_logger_test') THEN
-        CREATE USER cfgms_logger_test WITH PASSWORD 'cfgms_test_password';
-    END IF;
-END $$;
+-- Note: Password is set via environment variable in Docker container
+-- The cfgms_logger_test user is created by Docker's POSTGRES_USER env var
 
 -- Grant necessary permissions
 GRANT ALL PRIVILEGES ON DATABASE cfgms_logs_test TO cfgms_logger_test;

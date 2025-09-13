@@ -148,9 +148,10 @@ func (p *FileProvider) Initialize(config map[string]interface{}) error {
 	}
 	p.stopRotation = make(chan struct{})
 	p.initialized = true
+	flushInterval := p.config.FlushInterval
 	p.mutex.Unlock()
 	
-	go p.backgroundMaintenance()
+	go p.backgroundMaintenance(flushInterval)
 	p.stats = interfaces.ProviderStats{
 		OldestEntry:    time.Now(),
 		LatestEntry:    time.Now(),

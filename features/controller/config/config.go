@@ -116,6 +116,16 @@ type LoggingConfig struct {
 	// Enhanced correlation tracking
 	EnableCorrelation bool `yaml:"enable_correlation"`      // Enable automatic correlation IDs
 	EnableTracing     bool `yaml:"enable_tracing"`          // Enable OpenTelemetry integration
+	
+	// Event subscriber configuration (optional)
+	Subscribers []SubscriberConfig `yaml:"subscribers"`     // Event subscribers for real-time forwarding
+}
+
+// SubscriberConfig holds configuration for event subscribers
+type SubscriberConfig struct {
+	Type    string                 `yaml:"type"`     // Subscriber type (e.g., "syslog", "webhook")
+	Config  map[string]interface{} `yaml:"config"`   // Subscriber-specific configuration
+	Enabled bool                  `yaml:"enabled"`  // Enable/disable subscriber
 }
 
 // DefaultConfig returns a Config with reasonable defaults
@@ -295,6 +305,16 @@ func (lc *LoggingConfig) ToLoggingManagerConfig() *loggingPkg.LoggingConfig {
 		}
 	}
 	
+	// Convert subscribers configuration
+	var subscribers []loggingPkg.SubscriberConfig
+	for _, sub := range lc.Subscribers {
+		subscribers = append(subscribers, loggingPkg.SubscriberConfig{
+			Type:    sub.Type,
+			Config:  sub.Config,
+			Enabled: sub.Enabled,
+		})
+	}
+	
 	return &loggingPkg.LoggingConfig{
 		Provider:          lc.Provider,
 		Config:            lc.Config,
@@ -310,5 +330,6 @@ func (lc *LoggingConfig) ToLoggingManagerConfig() *loggingPkg.LoggingConfig {
 		TenantIsolation:   lc.TenantIsolation,
 		EnableCorrelation: lc.EnableCorrelation,
 		EnableTracing:     lc.EnableTracing,
+		Subscribers:       subscribers,
 	}
 } 
