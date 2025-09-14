@@ -116,10 +116,14 @@ func (p *TimescaleProvider) ApplyRetentionPolicy(ctx context.Context, policy int
 	// But we can also manually delete for immediate cleanup
 	cutoffTime := time.Now().AddDate(0, 0, -policy.RetentionDays)
 
-	deleteQuery := fmt.Sprintf(`
+	// Build secure delete query
+	deleteQuery, err := p.buildSafeQuery(`
 		DELETE FROM %s.%s 
 		WHERE timestamp < $1
-	`, p.config.SchemaName, p.config.TableName)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to build secure delete query: %w", err)
+	}
 
 	p.mutex.RLock()
 	db := p.db
@@ -425,9 +429,14 @@ func (p *TimescaleProvider) applyPostProcessing(results []interfaces.LogEntry, q
 func (p *TimescaleProvider) queryDatabaseStats(ctx context.Context) (*interfaces.ProviderStats, error) {
 	stats := &interfaces.ProviderStats{}
 
-	tableName := fmt.Sprintf("%s.%s", p.config.SchemaName, p.config.TableName)
+	// Build secure table name and query
+	tableName, err := p.buildSafeQuery("%s.%s")
+	if err != nil {
+		return nil, fmt.Errorf("failed to build secure table name: %w", err)
+	}
 
 	// Query basic statistics
+	// #nosec G201 - tableName is validated via buildSafeQuery above
 	statsQuery := fmt.Sprintf(`
 		SELECT 
 			COUNT(*) as total_entries,
@@ -441,7 +450,7 @@ func (p *TimescaleProvider) queryDatabaseStats(ctx context.Context) (*interfaces
 	var oldestEntry, latestEntry sql.NullTime
 	var storageSize int64
 
-	err := p.db.QueryRowContext(ctx, statsQuery).Scan(
+	err = p.db.QueryRowContext(ctx, statsQuery).Scan(
 		&totalEntries,
 		&oldestEntry,
 		&latestEntry,

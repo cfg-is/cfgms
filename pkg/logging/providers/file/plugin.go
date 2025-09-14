@@ -115,7 +115,11 @@ func (p *FileProvider) Available() (bool, error) {
 	}
 	
 	// Check write permissions
-	testFile := filepath.Join(p.config.Directory, ".cfgms-write-test")
+	testFile, err := p.buildSecureFilePath(".cfgms-write-test")
+	if err != nil {
+		return false, fmt.Errorf("cannot build test file path: %w", err)
+	}
+	// #nosec G304 - testFile is validated via buildSecureFilePath above
 	if f, err := os.OpenFile(testFile, os.O_CREATE|os.O_WRONLY, p.config.FileMode); err != nil {
 		return false, fmt.Errorf("cannot write to log directory: %w", err)
 	} else {
@@ -128,19 +132,20 @@ func (p *FileProvider) Available() (bool, error) {
 
 // Initialize sets up the file provider with the given configuration
 func (p *FileProvider) Initialize(config map[string]interface{}) error {
-	// Parse configuration
+	// Parse configuration with proper synchronization
+	p.mutex.Lock()
 	p.config = DefaultFileConfig()
 	if err := p.parseConfig(config); err != nil {
+		p.mutex.Unlock()
 		return fmt.Errorf("invalid configuration: %w", err)
 	}
 	
 	// Create directory if it doesn't exist
 	if err := os.MkdirAll(p.config.Directory, p.config.DirMode); err != nil {
+		p.mutex.Unlock()
 		return fmt.Errorf("failed to create log directory: %w", err)
 	}
 	
-	// Start background rotation/cleanup tasks with proper synchronization
-	p.mutex.Lock()
 	// Open initial log file (rotateLogFile expects mutex to be held)
 	if err := p.rotateLogFile(); err != nil {
 		p.mutex.Unlock()
@@ -517,6 +522,65 @@ func (p *FileProvider) parseConfig(config map[string]interface{}) error {
 	}
 	
 	return nil
+}
+
+// validateFilePath validates file paths to prevent directory traversal attacks
+// #nosec G304 - This function prevents directory traversal by validating paths
+func validateFilePath(basePath, filePath string) error {
+	if basePath == "" {
+		return fmt.Errorf("base path cannot be empty")
+	}
+	
+	if filePath == "" {
+		return fmt.Errorf("file path cannot be empty")
+	}
+	
+	// Clean the paths to resolve . and .. components
+	cleanBase := filepath.Clean(basePath)
+	cleanFile := filepath.Clean(filePath)
+	
+	// Convert to absolute paths for comparison
+	absBase, err := filepath.Abs(cleanBase)
+	if err != nil {
+		return fmt.Errorf("failed to get absolute base path: %w", err)
+	}
+	
+	absFile, err := filepath.Abs(cleanFile)
+	if err != nil {
+		return fmt.Errorf("failed to get absolute file path: %w", err)
+	}
+	
+	// Check if the file path is within the base directory
+	relPath, err := filepath.Rel(absBase, absFile)
+	if err != nil {
+		return fmt.Errorf("failed to get relative path: %w", err)
+	}
+	
+	// If the relative path starts with "..", it's outside the base directory
+	if len(relPath) >= 2 && relPath[:2] == ".." {
+		return fmt.Errorf("file path is outside base directory: %s", filePath)
+	}
+	
+	// Check for suspicious patterns
+	if filepath.IsAbs(relPath) {
+		return fmt.Errorf("relative path should not be absolute: %s", relPath)
+	}
+	
+	return nil
+}
+
+// buildSecureFilePath builds a file path and validates it for security
+// #nosec G304 - File paths are validated before use
+func (p *FileProvider) buildSecureFilePath(filename string) (string, error) {
+	// Build the full file path
+	fullPath := filepath.Join(p.config.Directory, filename)
+	
+	// Validate the path
+	if err := validateFilePath(p.config.Directory, fullPath); err != nil {
+		return "", fmt.Errorf("invalid file path: %w", err)
+	}
+	
+	return fullPath, nil
 }
 
 // init registers the file provider

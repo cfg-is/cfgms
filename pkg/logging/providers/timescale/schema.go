@@ -16,6 +16,11 @@ func (p *TimescaleProvider) setupSchema() error {
 
 	// Create schema if it doesn't exist
 	if p.config.CreateSchema && p.config.SchemaName != "public" {
+		// Validate schema name before use
+		if err := validateSQLIdentifier(p.config.SchemaName); err != nil {
+			return fmt.Errorf("invalid schema name for creation: %w", err)
+		}
+		// #nosec G201 - Schema name is validated above
 		createSchemaQuery := fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s;", p.config.SchemaName)
 		if _, err := p.db.ExecContext(ctx, createSchemaQuery); err != nil {
 			return fmt.Errorf("failed to create schema: %w", err)
@@ -75,7 +80,12 @@ func (p *TimescaleProvider) createLogEntriesTable(ctx context.Context) error {
 
 // createIndexes creates performance indexes for common query patterns
 func (p *TimescaleProvider) createIndexes(ctx context.Context) error {
-	tableName := fmt.Sprintf("%s.%s", p.config.SchemaName, p.config.TableName)
+	// Use safe query building for table name
+	safeTableName, err := p.buildSafeQuery("%s.%s")
+	if err != nil {
+		return fmt.Errorf("failed to build safe table name: %w", err)
+	}
+	tableName := safeTableName
 	
 	indexes := []struct {
 		name  string
@@ -204,6 +214,7 @@ func (p *TimescaleProvider) createHypertable(ctx context.Context, tableName stri
 	}
 
 	// Convert to hypertable
+	// #nosec G201 - tableName is validated via buildSafeQuery above, duration is controlled
 	createHypertableQuery := fmt.Sprintf(
 		"SELECT create_hypertable('%s', 'timestamp', chunk_time_interval => INTERVAL '%s');",
 		tableName,
@@ -236,6 +247,7 @@ func (p *TimescaleProvider) setupCompressionPolicy(ctx context.Context, tableNam
 	}
 
 	// Add compression policy
+	// #nosec G201 - tableName is validated via buildSafeQuery above, duration is controlled
 	addCompressionPolicyQuery := fmt.Sprintf(
 		"SELECT add_compression_policy('%s', INTERVAL '%s');",
 		tableName,
@@ -257,6 +269,7 @@ func (p *TimescaleProvider) setupCompressionPolicy(ctx context.Context, tableNam
 
 // setupRetentionPolicy sets up automatic data retention
 func (p *TimescaleProvider) setupRetentionPolicy(ctx context.Context, tableName string) error {
+	// #nosec G201 - tableName is validated via buildSafeQuery in caller, duration is controlled
 	addRetentionPolicyQuery := fmt.Sprintf(
 		"SELECT add_retention_policy('%s', INTERVAL '%s');",
 		tableName,

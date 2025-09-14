@@ -51,9 +51,15 @@ func (p *FileProvider) rotateLogFile() error {
 	// Create new log file with timestamp
 	timestamp := time.Now().Format("2006-01-02-15-04-05")
 	filename := fmt.Sprintf("%s-%s.log", p.config.FilePrefix, timestamp)
-	filepath := filepath.Join(p.config.Directory, filename)
+	
+	// Build secure file path
+	filepath, err := p.buildSecureFilePath(filename)
+	if err != nil {
+		return fmt.Errorf("failed to build secure file path: %w", err)
+	}
 	
 	// Open new file
+	// #nosec G304 - filepath is validated via buildSecureFilePath above
 	file, err := os.OpenFile(filepath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, p.config.FileMode)
 	if err != nil {
 		return fmt.Errorf("failed to open log file %s: %w", filepath, err)
@@ -113,7 +119,19 @@ func (p *FileProvider) compressOldFiles(compressRotated bool, directory, filePre
 }
 
 // compressFile compresses a single log file using GZIP
+// #nosec G304 - Filename parameter is from controlled directory scan
 func (p *FileProvider) compressFile(filename string) error {
+	// Get config values with proper synchronization
+	p.mutex.RLock()
+	directory := p.config.Directory
+	compressionLevel := p.config.CompressionLevel
+	p.mutex.RUnlock()
+	
+	// Validate the file path is within our directory
+	if err := validateFilePath(directory, filename); err != nil {
+		return fmt.Errorf("invalid file path for compression: %w", err)
+	}
+	
 	// Open source file
 	src, err := os.Open(filename)
 	if err != nil {
@@ -130,7 +148,7 @@ func (p *FileProvider) compressFile(filename string) error {
 	defer dst.Close()
 	
 	// Create GZIP writer
-	gzWriter, err := gzip.NewWriterLevel(dst, p.config.CompressionLevel)
+	gzWriter, err := gzip.NewWriterLevel(dst, compressionLevel)
 	if err != nil {
 		return fmt.Errorf("failed to create gzip writer: %w", err)
 	}
@@ -197,7 +215,13 @@ func (p *FileProvider) findRelevantLogFiles(startTime, endTime time.Time) ([]str
 }
 
 // parseLogFile parses a log file and returns entries matching the query
+// #nosec G304 - Filename parameter is from controlled directory scan
 func (p *FileProvider) parseLogFile(filename string, query interfaces.TimeRangeQuery) ([]interfaces.LogEntry, error) {
+	// Validate the file path is within our directory
+	if err := validateFilePath(p.config.Directory, filename); err != nil {
+		return nil, fmt.Errorf("invalid file path for parsing: %w", err)
+	}
+	
 	var reader io.Reader
 	
 	// Open file (handle compressed files)
@@ -477,9 +501,15 @@ func (p *FileProvider) calculateDiskUsage() (float64, error) {
 		return 0, fmt.Errorf("failed to get filesystem stats: %w", err)
 	}
 	
-	// Calculate usage percentage
-	totalBytes := stat.Blocks * uint64(stat.Bsize)
-	freeBytes := stat.Bavail * uint64(stat.Bsize)
+	// Calculate usage percentage with bounds checking
+	if stat.Bsize < 0 {
+		return 0, fmt.Errorf("invalid block size: %d", stat.Bsize)
+	}
+	// #nosec G115 - Block size is validated above to be non-negative
+	blockSize := uint64(stat.Bsize)
+	
+	totalBytes := stat.Blocks * blockSize
+	freeBytes := stat.Bavail * blockSize
 	usedBytes := totalBytes - freeBytes
 	
 	if totalBytes == 0 {

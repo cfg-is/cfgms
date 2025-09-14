@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -229,14 +230,17 @@ func (p *TimescaleProvider) WriteEntry(ctx context.Context, entry interfaces.Log
 		return fmt.Errorf("failed to marshal fields: %w", err)
 	}
 
-	// Insert into TimescaleDB
-	query := fmt.Sprintf(`
+	// Insert into TimescaleDB with validated identifiers
+	query, err := p.buildSafeQuery(`
 		INSERT INTO %s.%s (
 			timestamp, level, message, service_name, component,
 			tenant_id, session_id, correlation_id, trace_id, span_id,
 			fields, created_at
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-	`, p.config.SchemaName, p.config.TableName)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to build safe query: %w", err)
+	}
 
 	p.mutex.RLock()
 	db := p.db
@@ -290,14 +294,20 @@ func (p *TimescaleProvider) WriteBatch(ctx context.Context, entries []interfaces
 	}
 	defer tx.Rollback()
 
-	// Prepare batch insert statement
-	stmt, err := tx.PrepareContext(ctx, fmt.Sprintf(`
+	// Prepare batch insert statement with validated identifiers
+	queryTemplate := `
 		INSERT INTO %s.%s (
 			timestamp, level, message, service_name, component,
 			tenant_id, session_id, correlation_id, trace_id, span_id,
 			fields, created_at
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-	`, p.config.SchemaName, p.config.TableName))
+	`
+	query, err := p.buildSafeQuery(queryTemplate)
+	if err != nil {
+		return fmt.Errorf("failed to build safe batch query: %w", err)
+	}
+	
+	stmt, err := tx.PrepareContext(ctx, query)
 	if err != nil {
 		return fmt.Errorf("failed to prepare batch statement: %w", err)
 	}
@@ -457,6 +467,67 @@ func (p *TimescaleProvider) parseConfig(config map[string]interface{}) error {
 	}
 
 	return nil
+}
+
+// validateSQLIdentifier validates SQL identifiers to prevent injection attacks
+// #nosec G201 - This function prevents SQL injection by validating identifiers
+func validateSQLIdentifier(identifier string) error {
+	if identifier == "" {
+		return fmt.Errorf("SQL identifier cannot be empty")
+	}
+	
+	// Check length (PostgreSQL limit is 63 characters)
+	if len(identifier) > 63 {
+		return fmt.Errorf("SQL identifier too long (max 63 characters): %s", identifier)
+	}
+	
+	// Must start with letter or underscore
+	if !((identifier[0] >= 'a' && identifier[0] <= 'z') || 
+		 (identifier[0] >= 'A' && identifier[0] <= 'Z') || 
+		 identifier[0] == '_') {
+		return fmt.Errorf("SQL identifier must start with letter or underscore: %s", identifier)
+	}
+	
+	// Can only contain letters, digits, underscores, and dollar signs
+	for _, char := range identifier {
+		if !((char >= 'a' && char <= 'z') || 
+			 (char >= 'A' && char <= 'Z') || 
+			 (char >= '0' && char <= '9') || 
+			 char == '_' || char == '$') {
+			return fmt.Errorf("SQL identifier contains invalid character: %s", identifier)
+		}
+	}
+	
+	// Check against SQL reserved words (basic list)
+	reservedWords := map[string]bool{
+		"select": true, "insert": true, "update": true, "delete": true,
+		"drop": true, "create": true, "alter": true, "table": true,
+		"database": true, "schema": true, "index": true, "view": true,
+		"union": true, "where": true, "from": true, "join": true,
+		"order": true, "group": true, "having": true, "limit": true,
+	}
+	
+	if reservedWords[strings.ToLower(identifier)] {
+		return fmt.Errorf("SQL identifier cannot be a reserved word: %s", identifier)
+	}
+	
+	return nil
+}
+
+// buildSafeQuery builds a SQL query with validated identifiers to prevent injection
+// #nosec G201 - SQL identifiers are validated before use
+func (p *TimescaleProvider) buildSafeQuery(template string) (string, error) {
+	// Validate schema and table names
+	if err := validateSQLIdentifier(p.config.SchemaName); err != nil {
+		return "", fmt.Errorf("invalid schema name: %w", err)
+	}
+	
+	if err := validateSQLIdentifier(p.config.TableName); err != nil {
+		return "", fmt.Errorf("invalid table name: %w", err)
+	}
+	
+	// Build query with validated identifiers
+	return fmt.Sprintf(template, p.config.SchemaName, p.config.TableName), nil
 }
 
 // updateStats updates provider statistics
