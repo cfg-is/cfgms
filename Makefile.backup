@@ -1,4 +1,4 @@
-.PHONY: build test test-commit test-ci test-integration test-security test-performance test-docker proto lint clean security-trivy security-deps security-scan security-check
+.PHONY: build test proto lint clean security-trivy security-deps security-scan security-check
 
 # Build settings
 GO_BUILD_FLAGS=-trimpath -ldflags="-s -w"
@@ -72,36 +72,50 @@ test:
 		go test -race -cover -short -timeout=3m ./features/... ./api/... ./cmd/... ./pkg/...; \
 	fi
 
-# DAILY DEVELOPMENT WORKFLOW TARGETS
-
-# Pre-commit validation (tests + linting + security) - MANDATORY FOR COMMITS
-test-commit: test lint security-scan test-m365-integration-dev
+# Complete validation (tests + linting + security) - RECOMMENDED FOR COMMITS
+test-complete: test lint security-scan
 	@echo ""
-	@echo "✅ PRE-COMMIT VALIDATION FINISHED"
-	@echo "===================================="
+	@echo "✅ COMPLETE VALIDATION FINISHED"
+	@echo "==============================="
 	@echo "- ✅ Unit tests passed"
 	@echo "- ✅ Linting passed"
 	@echo "- ✅ Security scanning passed"
-	@echo "- ✅ M365 integration tested (skipped if no credentials)"
 	@echo ""
-	@echo "🎯 Code is validated and ready for commit/PR"
+	@echo "🎯 Code is fully validated and ready for commit/PR"
 
-# CI validation (complete validation) - RUNS IN CI/CD
-test-ci: test lint security-scan test-m365-integration test-integration-complete
+# Test with security validation (recommended for development)
+test-with-security: test security-scan
 	@echo ""
-	@echo "✅ CI VALIDATION FINISHED"
-	@echo "=========================="
+	@echo "✅ Complete Development Validation Finished"
+	@echo "==========================================="
 	@echo "- ✅ Unit tests passed"
-	@echo "- ✅ Linting passed"
 	@echo "- ✅ Security scanning passed"
-	@echo "- ✅ M365 integration tested (strict - fails if no credentials)"
-	@echo "- ✅ Storage backends tested (Docker PostgreSQL + Gitea)"
 	@echo ""
-	@echo "🚀 Code is fully validated for production deployment"
+	@echo "🎯 Code is ready for commit"
 
+# Quick smoke test (fastest, for development)
+test-quick:
+	@echo "⚡ Quick Smoke Test"
+	@echo "=================="
+	go test -short -timeout=1m ./features/... ./api/... ./cmd/... ./pkg/...
 
+# Complete test validation (recommended for CI/pre-commit)
+test-all: test-fast test-integration test-production-critical
+	@echo ""
+	@echo "✅ Complete Test Suite Validation Finished"
+	@echo "========================================="
+	@echo "- ✅ Unit tests passed"
+	@echo "- ✅ Integration tests passed" 
+	@echo "- ✅ Production-critical tests passed"
+	@echo ""
+	@echo "🎯 System is ready for production deployment"
 
-
+# Fast comprehensive testing (no long-running performance tests)
+test-fast:
+	@echo "⚡ Running Fast Comprehensive Test Suite"
+	@echo "======================================="
+	go test -v -race -cover -short -timeout=10m ./features/... ./api/... ./cmd/...
+	@echo "✅ Fast test suite completed"
 
 # Production-critical functionality only (moderate timeout)
 test-production-critical:
@@ -110,24 +124,49 @@ test-production-critical:
 	go test -v -race -timeout=15m ./test/unit/... ./test/integration/...
 	@echo "✅ Production-critical tests completed"
 
+# Full validation including long-running tests (use for releases)
+test-full: test-fast test-integration-comprehensive test-story-86
+	@echo ""
+	@echo "🏆 FULL TEST SUITE VALIDATION COMPLETE"
+	@echo "======================================"
+	@echo "- ✅ All unit tests passed"
+	@echo "- ✅ All integration tests passed"
+	@echo "- ✅ All cross-feature tests passed"
+	@echo "- ✅ All production readiness tests passed"
+	@echo "- ✅ Load testing validated (100+ sessions)"
+	@echo "- ✅ Performance benchmarks met"
+	@echo "- ✅ Security audit passed"
+	@echo "- ✅ Disaster recovery validated"
+	@echo "- ✅ Monitoring integration confirmed"
+	@echo ""
+	@echo "🚀 System is FULLY VALIDATED for production deployment"
 
 # Integration Testing Framework (Story #84)
-.PHONY: test-m365-integration test-m365-integration-dev test-m365-unit
+.PHONY: test test-all test-fast test-production-critical test-full
+.PHONY: test-integration test-integration-controller test-integration-steward test-e2e test-cross-platform test-m365-integration test-m365-integration-dev test-m365-unit
 
-# SPECIALIZED TESTING TARGETS
+# Run all integration tests
+test-integration: test-integration-controller test-integration-steward test-e2e test-m365-integration
 
-# Integration testing (M365 + storage backends)
-test-integration: test-m365-integration test-integration-complete
-	@echo ""
-	@echo "✅ INTEGRATION TESTING FINISHED"
-	@echo "================================"
-	@echo "- ✅ M365 integration tested"
-	@echo "- ✅ Storage backends tested (Docker)"
-	@echo ""
-	@echo "🔗 External integrations validated"
+# Controller integration tests (Linux only)
+test-integration-controller:
+	@echo "🖥️ Running Controller Integration Tests (Linux)"
+	@echo "=============================================="
+	go test -v -race -timeout=10m ./test/integration/...
+	go test -v -race -timeout=15m ./test/e2e/... -run "TestE2EScenarios/(TestControllerStewardIntegration|TestRBACIntegration|TestWorkflowIntegration|TestDataFlow)"
 
+# Steward integration tests (current platform)
+test-integration-steward:
+	@echo "🔧 Running Steward Integration Tests"
+	@echo "===================================="
+	go test -v -race -timeout=10m ./features/steward/... -short
+	go test -v -race -timeout=15m ./test/e2e/... -run "TestE2EScenarios/(TestTerminalSecurityIntegration|TestMultiStewardScenario|TestFailureRecovery|TestSecurityCompliance)"
 
-
+# Full E2E test suite
+test-e2e:
+	@echo "🎯 Running Comprehensive E2E Tests"
+	@echo "=================================="
+	go test -v -race -timeout=20m ./test/e2e/... -run "TestE2EScenarios"
 
 # M365 Integration Testing (Enhanced Testing Strategy)
 # M365 integration tests - STRICT mode (fails without credentials)
@@ -159,10 +198,103 @@ test-m365-unit:
 	@echo ""
 	go test -v -race -short -timeout=5m ./features/modules/m365/entra_application/... ./features/modules/m365/entra_admin_unit/... ./pkg/directory/types/...
 
+# Cross-Feature Integration Testing (Story #85)
+.PHONY: test-cross-feature-integration test-failure-propagation test-data-consistency test-integration-comprehensive
 
+# Cross-feature integration test scenarios
+test-cross-feature-integration:
+	@echo "🔗 Running Cross-Feature Integration Tests"
+	@echo "=========================================="
+	go test -v -race -timeout=25m ./test/e2e/... -run "TestE2EScenarios/(TestWorkflowConfigurationIntegration|TestDNADriftWorkflowIntegration|TestTemplateRollbackIntegration|TestTerminalAuditIntegration|TestMultiTenantSaaSIntegration)"
 
+# Failure propagation and recovery testing
+test-failure-propagation:
+	@echo "🔄 Running Failure Propagation Tests"
+	@echo "===================================="
+	go test -v -race -timeout=15m ./test/e2e/... -run "TestE2EScenarios/TestFailureRecovery"
 
+# Data consistency validation across features
+test-data-consistency:
+	@echo "📊 Running Data Consistency Tests"
+	@echo "================================="
+	go test -v -race -timeout=15m ./test/e2e/... -run "TestE2EScenarios/TestDataConsistencyAcrossFeatures"
 
+# Comprehensive integration testing (all cross-feature tests)
+test-integration-comprehensive: test-cross-feature-integration test-failure-propagation test-data-consistency
+	@echo "✅ All Cross-Feature Integration Tests Complete"
+
+# Production Readiness Testing (Story #86)
+.PHONY: test-production-readiness test-load-testing test-synthetic-monitoring test-security-audit
+
+# Complete production readiness validation
+test-production-readiness:
+	@echo "🚀 Running Production Readiness Tests (Story #86)"
+	@echo "================================================="
+	go test -v -race -timeout=30m ./test/e2e/... -run "TestProductionReadiness"
+
+# Load testing for 100+ concurrent terminal sessions
+test-load-testing:
+	@echo "⚡ Running Load Testing - 100+ Concurrent Sessions"
+	@echo "================================================="
+	go test -v -race -timeout=25m ./test/e2e/... -run "TestProductionReadiness/TestConcurrentTerminalSessions"
+
+# Performance benchmarks and SLA validation
+test-performance-benchmarks:
+	@echo "📊 Running Performance Benchmarks and SLA Validation"
+	@echo "====================================================" 
+	go test -v -race -timeout=15m ./test/e2e/... -run "TestProductionReadiness/TestPerformanceBenchmarksAndSLAs"
+
+# Security audit validation
+test-security-audit:
+	@echo "🔒 Running Security Audit Validation"
+	@echo "===================================="
+	go test -v -race -timeout=10m ./test/e2e/... -run "TestProductionReadiness/TestSecurityAuditValidation"
+
+# Disaster recovery testing
+test-disaster-recovery:
+	@echo "🆘 Running Disaster Recovery Procedures Test"
+	@echo "============================================"
+	go test -v -race -timeout=15m ./test/e2e/... -run "TestProductionReadiness/TestDisasterRecoveryProcedures"
+
+# Monitoring and alerting integration
+test-monitoring-integration:
+	@echo "📡 Running Monitoring and Alerting Integration Test"
+	@echo "=================================================="
+	go test -v -race -timeout=10m ./test/e2e/... -run "TestProductionReadiness/TestMonitoringAndAlertingIntegration"
+
+# Synthetic monitoring for ongoing validation
+test-synthetic-monitoring:
+	@echo "🤖 Running Synthetic Monitoring Tests"
+	@echo "====================================="
+	go test -v -race -timeout=20m ./test/e2e/... -run "TestSyntheticMonitoring"
+
+# Story #86 comprehensive test suite
+test-story-86: test-production-readiness test-synthetic-monitoring
+	@echo "✅ Story #86: v0.3.0 Production Readiness - All Tests Complete"
+	@echo ""
+	@echo "Production Readiness Validation Summary:"
+	@echo "- ✅ 100+ concurrent terminal sessions load tested"
+	@echo "- ✅ Performance benchmarks and SLAs validated"
+	@echo "- ✅ Security audit completed with no critical findings"
+	@echo "- ✅ Disaster recovery procedures tested and documented"
+	@echo "- ✅ Monitoring and alerting integration validated"
+	@echo "- ✅ Synthetic monitoring implemented for ongoing validation"
+	@echo "- ✅ Operational runbooks created and tested"
+	@echo ""
+	@echo "🎉 CFGMS v0.3.0 is PRODUCTION READY!"
+
+# Cross-platform terminal testing
+test-cross-platform:
+	@echo "🖥️ Testing Cross-Platform Terminal Support"
+	@echo "=========================================="
+	go test -v -timeout=5m ./features/terminal/... -run "TestSecurity"
+	@echo "Platform-specific shell tests would run here (requires CI matrix)"
+
+# Performance regression testing
+test-performance:
+	@echo "📊 Running Performance Regression Tests"
+	@echo "======================================="
+	go test -v -timeout=20m ./test/e2e/... -run "TestPerformanceRegression"
 
 # Performance baseline establishment (for new releases)
 test-performance-baseline:
@@ -171,17 +303,150 @@ test-performance-baseline:
 	go test -v -timeout=30m ./test/e2e/... -run "TestPerformanceRegression" -args -establish-baseline
 
 # Production Risk Testing - Automated Gates
-.PHONY: test-production-critical
+.PHONY: test-production-critical test-export-reliability test-v030-gate test-v040-gate
 
 # Test only production-critical export functionality
 
+# Test export reliability and cost protection
+test-export-reliability:
+	@echo "Testing export reliability and cost controls..."
+	@echo "Checking sampling logic..."
+	go test -v ./features/monitoring/export/... -run "TestExportManagerDataExport/export_with_sampling" && { \
+		echo "✅ Sampling logic working - cost protection enabled"; \
+	} || { \
+		echo "⚠️  COST RISK: Sampling logic failing - potential 10x cost overrun"; \
+		echo "   This will become critical when connecting to paid monitoring services"; \
+	}
+	@echo "Checking retry logic..."
+	go test -v ./features/monitoring/export/... -run "TestExportManagerErrorHandling/handle_export_errors_with_retry" && { \
+		echo "✅ Retry logic working - data loss protection enabled"; \
+	} || { \
+		echo "⚠️  DATA LOSS RISK: Retry logic failing - monitoring gaps during outages"; \
+		echo "   This will become critical for SLA compliance"; \
+	}
+	@echo "Checking data filtering..."
+	go test -v ./features/monitoring/export/... -run "TestExportDataFiltering/filter_data_types_per_exporter" && { \
+		echo "✅ Data filtering working - compliance protection enabled"; \
+	} || { \
+		echo "⚠️  COMPLIANCE RISK: Data filtering failing - potential PII leakage"; \
+		echo "   This will become critical for multi-tenant production"; \
+	}
 
+# v0.3.0 Release Gate - Alpha Readiness
+test-v030-gate:
+	@echo "🚪 v0.3.0 RELEASE GATE - Alpha Readiness Check"
+	@echo "================================================================"
+	@echo "Requirement: Fix Tier 1 production risks before first MSP deployment"
+	@echo ""
+	
+	@# Core functionality must pass
+	@echo "1. Testing core functionality..."
+	make test-production-critical
+	
+	@# Check current export reliability status
+	@echo ""
+	@echo "2. Checking export reliability (Tier 1 risks)..."
+	make test-export-reliability || true
+	
+	@# Check if sampling and retry are fixed
+	@sampling_ok=$$(go test ./features/monitoring/export/... -run "TestExportManagerDataExport/export_with_sampling" >/dev/null 2>&1 && echo "true" || echo "false"); \
+	retry_ok=$$(go test ./features/monitoring/export/... -run "TestExportManagerErrorHandling/handle_export_errors_with_retry" >/dev/null 2>&1 && echo "true" || echo "false"); \
+	if [ "$$sampling_ok" = "true" ] && [ "$$retry_ok" = "true" ]; then \
+		echo ""; \
+		echo "✅ v0.3.0 RELEASE APPROVED"; \
+		echo "   - Cost protection: WORKING"; \
+		echo "   - Data loss prevention: WORKING"; \
+		echo "   - Ready for alpha MSP deployment"; \
+		exit 0; \
+	else \
+		echo ""; \
+		echo "❌ v0.3.0 RELEASE BLOCKED"; \
+		echo "   - Missing critical production protections"; \
+		echo "   - Risk of cost overruns and data loss"; \
+		echo "   - Must fix export sampling and retry logic before alpha deployment"; \
+		exit 1; \
+	fi
 
+# v0.4.0 Release Gate - Production Readiness
+test-v040-gate:
+	@echo "🚪 v0.4.0 RELEASE GATE - Production Readiness Check"
+	@echo "=================================================================="
+	@echo "Requirement: All export edge cases resolved before production scale"
+	@echo ""
+	
+	@echo "1. Testing all functionality..."
+	make test
+	
+	@echo ""
+	@echo "2. Checking export manager completeness..."
+	@export_tests_passing=$$(go test ./features/monitoring/export/... >/dev/null 2>&1 && echo "true" || echo "false"); \
+	if [ "$$export_tests_passing" = "true" ]; then \
+		echo "✅ v0.4.0 RELEASE APPROVED"; \
+		echo "   - All export edge cases resolved"; \
+		echo "   - Cost protection: COMPLETE"; \
+		echo "   - Data loss prevention: COMPLETE"; \
+		echo "   - Compliance protection: COMPLETE"; \
+		echo "   - Buffer overflow protection: COMPLETE"; \
+		echo "   - Ready for production scale (>1000 stewards)"; \
+		exit 0; \
+	else \
+		echo "❌ v0.4.0 RELEASE BLOCKED"; \
+		echo "   - Export manager edge cases still failing"; \
+		echo "   - Risk of production instability at scale"; \
+		echo "   - Must resolve ALL export test failures before production"; \
+		exit 1; \
+	fi
 
+# Cost analysis simulation
+.PHONY: cost-analysis
+cost-analysis:
+	@echo "💰 Monitoring Cost Analysis Simulation"
+	@echo "======================================"
+	@echo "Simulating monitoring costs at different scales..."
+	@echo ""
+	@echo "Assumptions:"
+	@echo "  - Datadog metrics: \$$0.15 per host per hour"
+	@echo "  - Log ingestion: \$$1.70 per GB"
+	@echo "  - Default sampling rate: 100% (if sampling broken)"
+	@echo "  - Fixed sampling rate: 10% (if sampling working)"
+	@echo ""
+	@sampling_working=$$(go test ./features/monitoring/export/... -run "TestExportManagerDataExport/export_with_sampling" >/dev/null 2>&1 && echo "true" || echo "false"); \
+	if [ "$$sampling_working" = "true" ]; then \
+		echo "✅ Sampling logic working:"; \
+		echo "   1,000 stewards: ~\$$1,080/month (10% sampling)"; \
+		echo "   10,000 stewards: ~\$$10,800/month (10% sampling)"; \
+		echo "   50,000 stewards: ~\$$54,000/month (10% sampling)"; \
+	else \
+		echo "⚠️  Sampling logic broken:"; \
+		echo "   1,000 stewards: ~\$$10,800/month (100% data = 10x cost!)"; \
+		echo "   10,000 stewards: ~\$$108,000/month (100% data = 10x cost!)"; \
+		echo "   50,000 stewards: ~\$$540,000/month (100% data = 10x cost!)"; \
+		echo ""; \
+		echo "🚨 BUSINESS RISK: Broken sampling could bankrupt MSP margins!"; \
+	fi
 
+# Compliance check simulation  
+.PHONY: compliance-check
+compliance-check:
+	@echo "🔒 Compliance Protection Check"
+	@echo "============================="
+	@filtering_working=$$(go test ./features/monitoring/export/... -run "TestExportDataFiltering/filter_data_types_per_exporter" >/dev/null 2>&1 && echo "true" || echo "false"); \
+	if [ "$$filtering_working" = "true" ]; then \
+		echo "✅ Data filtering working:"; \
+		echo "   - PII logs isolated from metrics exporters"; \
+		echo "   - Sensitive data properly filtered"; \
+		echo "   - SOC2/HIPAA compliance maintained"; \
+	else \
+		echo "⚠️  Data filtering broken:"; \
+		echo "   - Risk of PII leakage to unauthorized systems"; \
+		echo "   - Potential compliance violations"; \
+		echo "   - MSP liability exposure"; \
+		echo ""; \
+		echo "🚨 COMPLIANCE RISK: Could trigger SOC2 audit findings!"; \
+	fi
 
 # Security Scanning Tools (v0.3.1)
-.PHONY: security-trivy security-deps security-gosec security-staticcheck security-scan security-check security-scan-nonblocking security-remediation-report install-nancy
+.PHONY: security-trivy security-deps security-gosec security-staticcheck security-scan security-check security-scan-nonblocking security-remediation-report install-nancy test-with-security
 
 # Automatic Nancy installation (cross-platform)
 install-nancy:
@@ -408,33 +673,6 @@ security-staticcheck:
 	fi
 	@echo "📁 Full results saved to: /tmp/staticcheck-results.json"
 	@echo "🎯 Focused on important issues - style warnings excluded for development velocity"
-
-# Security testing only
-test-security: security-scan
-	@echo ""
-	@echo "✅ SECURITY TESTING FINISHED"
-	@echo "=============================="
-	@echo "- ✅ All security scans passed"
-	@echo ""
-	@echo "🔒 Security validation complete"
-
-# Performance and load testing
-test-performance: test-performance-baseline
-	@echo ""
-	@echo "✅ PERFORMANCE TESTING FINISHED"
-	@echo "=================================="
-	@echo "- ✅ Performance benchmarks completed"
-	@echo ""
-	@echo "📊 Performance validation complete"
-
-# Docker environment management
-test-docker: test-integration-status
-	@echo ""
-	@echo "✅ DOCKER ENVIRONMENT STATUS"
-	@echo "=============================="
-	@echo "Use 'make test-integration-setup' to start Docker services"
-	@echo "Use 'make test-integration-cleanup' to stop Docker services"
-	@echo "Use 'make test-with-real-storage' to run tests against Docker backends"
 
 # Unified security scanning (runs all security tools) - BLOCKING mode
 security-scan: security-trivy security-deps security-gosec security-staticcheck
@@ -842,8 +1080,8 @@ test-integration-setup:
 	@echo "🐳 Setting up CFGMS Docker test environment..."
 	@echo "=============================================="
 	@./scripts/generate-test-credentials.sh
-	@echo "Starting PostgreSQL, TimescaleDB, and Gitea test services..."
-	docker-compose -f docker-compose.test.yml -f docker-compose.test.override.yml up -d postgres-test timescaledb-test git-server-test
+	@echo "Starting PostgreSQL and Gitea test services..."
+	docker-compose -f docker-compose.test.yml -f docker-compose.test.override.yml up -d postgres-test git-server-test
 	@echo ""
 	@echo "⏳ Waiting for services to be ready..."
 	@sleep 5  # Brief pause before health checks
@@ -897,7 +1135,7 @@ test-with-real-storage:
 	@if [ -f .env.test ]; then \
 		echo "Using generated credentials from .env.test"; \
 		set -a && . ./.env.test && set +a && \
-		go test -v -race -cover -tags=integration ./pkg/testing/storage/... ./features/controller/server/... ./pkg/logging/providers/timescale/...; \
+		go test -v -race -cover -tags=integration ./pkg/testing/storage/... ./features/controller/server/...; \
 	else \
 		echo "⚠️  .env.test not found. Run: make test-integration-setup"; \
 		exit 1; \
@@ -940,6 +1178,14 @@ test-integration-complete: test-integration-setup test-with-real-storage test-in
 	@echo "   - Real storage provider tests executed"
 	@echo "   - Environment cleaned up"
 
+# Combined testing with local unit tests and Docker integration tests
+test-comprehensive: test test-integration-complete
+	@echo ""
+	@echo "🚀 Comprehensive Testing Complete!"
+	@echo "================================="
+	@echo "   ✅ Unit tests (local, fast)"
+	@echo "   ✅ Integration tests (Docker, real storage)"
+	@echo "   ✅ Environment cleanup"
 
 clean:
 	rm -rf bin/

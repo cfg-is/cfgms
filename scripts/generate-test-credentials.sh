@@ -14,6 +14,7 @@ echo -e "${YELLOW}🔐 Generating secure test credentials...${NC}"
 
 # Generate random credentials (shorter, YAML-safe)
 DB_PASSWORD=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-25)
+TIMESCALEDB_PASSWORD=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-25)
 GITEA_PASSWORD=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-25)
 GITEA_SECRET_KEY=$(openssl rand -base64 48 | tr -d "=+/\n" | cut -c1-32)
 GITEA_INTERNAL_TOKEN=$(openssl rand -base64 48 | tr -d "=+/\n" | cut -c1-32)
@@ -29,6 +30,13 @@ cat > "$TEST_ENV_FILE" <<EOF
 # Database credentials
 CFGMS_TEST_DB_PASSWORD=$DB_PASSWORD
 POSTGRES_PASSWORD=$DB_PASSWORD
+
+# TimescaleDB credentials
+CFGMS_TEST_TIMESCALEDB=1
+CFGMS_TEST_TIMESCALEDB_HOST=localhost
+CFGMS_TEST_TIMESCALEDB_PORT=5434
+CFGMS_TEST_TIMESCALEDB_PASSWORD=$TIMESCALEDB_PASSWORD
+TIMESCALEDB_PASSWORD=$TIMESCALEDB_PASSWORD
 
 # Gitea credentials
 CFGMS_TEST_GITEA_PASSWORD=$GITEA_PASSWORD
@@ -62,6 +70,10 @@ services:
   postgres-test:
     environment:
       POSTGRES_PASSWORD: $DB_PASSWORD
+
+  timescaledb-test:
+    environment:
+      POSTGRES_PASSWORD: $TIMESCALEDB_PASSWORD
 
   git-server-test:
     environment:

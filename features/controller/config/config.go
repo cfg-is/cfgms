@@ -3,8 +3,11 @@ package config
 import (
 	"os"
 	"strconv"
+	"time"
 	
 	"gopkg.in/yaml.v3"
+	
+	loggingPkg "github.com/cfgis/cfgms/pkg/logging"
 )
 
 // Config holds the controller configuration
@@ -26,6 +29,9 @@ type Config struct {
 	
 	// Storage configuration for global storage provider system
 	Storage *StorageConfig `yaml:"storage"`
+	
+	// Logging configuration for global logging provider system
+	Logging *LoggingConfig `yaml:"logging"`
 }
 
 // CertificateConfig contains certificate management settings
@@ -80,6 +86,48 @@ type StorageConfig struct {
 	Config map[string]interface{} `yaml:"config"`
 }
 
+// LoggingConfig contains global logging provider configuration
+type LoggingConfig struct {
+	// Provider specifies which logging provider to use (file, timescale, clickhouse)
+	Provider string `yaml:"provider"`
+	
+	// Configuration options passed to the logging provider
+	// The structure depends on the specific provider being used
+	Config map[string]interface{} `yaml:"config"`
+	
+	// Global logging settings
+	Level         string `yaml:"level"`                       // Minimum log level (DEBUG, INFO, WARN, ERROR, FATAL)
+	ServiceName   string `yaml:"service_name"`               // Service identifier
+	Component     string `yaml:"component"`                  // Component identifier
+	
+	// Performance settings
+	BatchSize      int    `yaml:"batch_size"`                // Batch size for bulk writes
+	FlushInterval  string `yaml:"flush_interval"`            // Auto-flush interval (duration string)
+	AsyncWrites    bool   `yaml:"async_writes"`              // Enable asynchronous writes
+	BufferSize     int    `yaml:"buffer_size"`               // Internal buffer size
+	
+	// Retention settings (provider-dependent)
+	RetentionDays  int  `yaml:"retention_days"`             // Log retention period
+	CompressLogs   bool `yaml:"compress_logs"`              // Enable log compression
+	
+	// Multi-tenant settings
+	TenantIsolation bool `yaml:"tenant_isolation"`          // Enable tenant isolation in logs
+	
+	// Enhanced correlation tracking
+	EnableCorrelation bool `yaml:"enable_correlation"`      // Enable automatic correlation IDs
+	EnableTracing     bool `yaml:"enable_tracing"`          // Enable OpenTelemetry integration
+	
+	// Event subscriber configuration (optional)
+	Subscribers []SubscriberConfig `yaml:"subscribers"`     // Event subscribers for real-time forwarding
+}
+
+// SubscriberConfig holds configuration for event subscribers
+type SubscriberConfig struct {
+	Type    string                 `yaml:"type"`     // Subscriber type (e.g., "syslog", "webhook")
+	Config  map[string]interface{} `yaml:"config"`   // Subscriber-specific configuration
+	Enabled bool                  `yaml:"enabled"`  // Enable/disable subscriber
+}
+
 // DefaultConfig returns a Config with reasonable defaults
 func DefaultConfig() *Config {
 	return &Config{
@@ -109,6 +157,29 @@ func DefaultConfig() *Config {
 				"branch":          "main",
 				"auto_init":       true,
 			},
+		},
+		Logging: &LoggingConfig{
+			Provider:          "file", // Default to file-based time-series logging
+			Config: map[string]interface{}{
+				"directory":        "/var/log/cfgms",
+				"file_prefix":      "cfgms",
+				"max_file_size":    100 * 1024 * 1024, // 100MB
+				"max_files":        10,
+				"retention_days":   30,
+				"compress_rotated": true,
+			},
+			Level:             "INFO",
+			ServiceName:       "cfgms-controller",
+			Component:         "controller",
+			BatchSize:         100,
+			FlushInterval:     "5s",
+			AsyncWrites:       true,
+			BufferSize:        1000,
+			RetentionDays:     30,
+			CompressLogs:      true,
+			TenantIsolation:   true,
+			EnableCorrelation: true,
+			EnableTracing:     true,
 		},
 	}
 }
@@ -200,5 +271,65 @@ func Load() (*Config, error) {
 		cfg.Storage.Provider = storageProvider
 	}
 	
+	// Logging configuration environment variables
+	if loggingProvider := os.Getenv("CFGMS_LOGGING_PROVIDER"); loggingProvider != "" {
+		cfg.Logging.Provider = loggingProvider
+	}
+	
+	if logLevel := os.Getenv("CFGMS_LOG_LEVEL"); logLevel != "" {
+		cfg.Logging.Level = logLevel
+	}
+	
+	if serviceName := os.Getenv("CFGMS_LOGGING_SERVICE_NAME"); serviceName != "" {
+		cfg.Logging.ServiceName = serviceName
+	}
+	
+	if component := os.Getenv("CFGMS_LOGGING_COMPONENT"); component != "" {
+		cfg.Logging.Component = component
+	}
+	
 	return cfg, nil
+}
+
+// ToLoggingManagerConfig converts the controller logging config to pkg/logging config
+func (lc *LoggingConfig) ToLoggingManagerConfig() *loggingPkg.LoggingConfig {
+	if lc == nil {
+		return loggingPkg.DefaultLoggingConfig("cfgms-controller", "controller")
+	}
+	
+	// Parse flush interval duration
+	flushInterval := 5 * time.Second
+	if lc.FlushInterval != "" {
+		if duration, err := time.ParseDuration(lc.FlushInterval); err == nil {
+			flushInterval = duration
+		}
+	}
+	
+	// Convert subscribers configuration
+	var subscribers []loggingPkg.SubscriberConfig
+	for _, sub := range lc.Subscribers {
+		subscribers = append(subscribers, loggingPkg.SubscriberConfig{
+			Type:    sub.Type,
+			Config:  sub.Config,
+			Enabled: sub.Enabled,
+		})
+	}
+	
+	return &loggingPkg.LoggingConfig{
+		Provider:          lc.Provider,
+		Config:            lc.Config,
+		Level:             lc.Level,
+		ServiceName:       lc.ServiceName,
+		Component:         lc.Component,
+		BatchSize:         lc.BatchSize,
+		FlushInterval:     flushInterval,
+		AsyncWrites:       lc.AsyncWrites,
+		BufferSize:        lc.BufferSize,
+		RetentionDays:     lc.RetentionDays,
+		CompressLogs:      lc.CompressLogs,
+		TenantIsolation:   lc.TenantIsolation,
+		EnableCorrelation: lc.EnableCorrelation,
+		EnableTracing:     lc.EnableTracing,
+		Subscribers:       subscribers,
+	}
 } 

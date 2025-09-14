@@ -30,6 +30,36 @@ services:
     networks:
       - cfgms-test
 
+  # TimescaleDB database for time-series logging provider testing
+  timescaledb-test:
+    image: timescale/timescaledb:latest-pg15
+    container_name: cfgms-timescaledb-test
+    environment:
+      POSTGRES_DB: cfgms_logs_test
+      POSTGRES_USER: cfgms_logger_test
+      POSTGRES_PASSWORD: ${TIMESCALEDB_PASSWORD}
+      POSTGRES_INITDB_ARGS: "--auth-host=md5"
+      # Enable TimescaleDB extension on startup
+      TIMESCALEDB_TELEMETRY: "off"
+    ports:
+      - "5434:5432"  # Use different port from regular PostgreSQL
+    volumes:
+      - ./test/timescaledb:/docker-entrypoint-initdb.d:ro
+      - timescaledb_test_data:/var/lib/postgresql/data
+    tmpfs:
+      # Use tmpfs for faster I/O in testing
+      - /tmp
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cfgms_logger_test -d cfgms_logs_test"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 60s  # TimescaleDB takes longer to initialize
+    networks:
+      - cfgms-test
+    profiles:
+      - timescale  # Only start with --profile timescale
+
   # Gitea server for git provider testing (lightweight Git server)
   git-server-test:
     image: gitea/gitea:1.21-alpine
@@ -84,6 +114,12 @@ services:
 
 volumes:
   postgres_test_data:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=512m
+  timescaledb_test_data:
     driver: local
     driver_opts:
       type: tmpfs

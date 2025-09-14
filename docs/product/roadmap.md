@@ -476,16 +476,93 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 
 #### v0.5.0 (Beta) - Advanced Workflows & Core Readiness
 
-- [ ] Implement advanced workflow engine
-- [ ] Add support for complex workflows
-- [ ] Implement workflow versioning
-- [ ] Add support for workflow templates
-- [ ] Implement advanced reporting
-- [ ] Add support for custom reports
-- [ ] Implement advanced monitoring
-- [ ] Add support for custom monitors
-- [ ] Production-ready Security
-- [ ] Add support for high availability
+**Status**: 🚧 IN PROGRESS - Single comprehensive epic for production-ready enterprise platform transition
+
+**Goal**: Transform CFGMS from foundational architecture (v0.4.6.0) to production-ready enterprise platform by implementing global logging provider, advanced workflow capabilities, comprehensive reporting, internal monitoring, lightweight SIEM, and high availability infrastructure while maintaining complete backward compatibility.
+
+**✅ Epic 1: v0.5.0 Beta - Advanced Workflows & Core Readiness**
+- [x] **Global Logging Provider Foundation** (Story 1.1) - 8 points (Issue #165) - ✅ COMPLETED
+  - ✅ Pluggable global logging provider system following existing storage provider pattern
+  - ✅ Enhanced LogEntry with RFC5424 fields and LoggingSubscriber interface for syslog forwarding
+  - ✅ File and TimescaleDB providers with syslog subscriber for enterprise integration
+  - ✅ Performance optimization: Race conditions fixed, Docker integration for TimescaleDB testing
+- [ ] **Logging Provider Migration and Standardization** (Story 1.2) - 8 points (Issue #166)
+  - All CFGMS modules and packages migrated to use global logging provider
+  - Consistent structured logging fields (tenant_id, session_id, component, operation)
+  - Proper log levels (ERROR, WARN, INFO, DEBUG) with configurable filtering
+  - Complete tenant isolation in log entries without cross-tenant information leakage
+- [ ] **Advanced Workflow Engine Extensions** (Story 2.1) - 13 points (Issue #167)
+  - Complex conditional logic: if/else, switch/case, and boolean expressions
+  - Nested workflows with parameter passing and parallel execution paths
+  - Loop constructs: for-each and while loops with break/continue control flow
+  - Advanced error handling with try/catch blocks and custom error workflows
+- [ ] **Workflow Trigger and Scheduling System** (Story 2.2) - 10 points (Issue #168)
+  - Schedule-based triggers with cron-style scheduling and timezone handling
+  - Webhook triggers with secure endpoints and authentication for external systems
+  - SIEM integration API for triggering workflows based on log analysis
+  - Trigger management REST API and monitoring with execution tracking
+- [ ] **Advanced Data Processing and Transformation** (Story 2.3) - 13 points (Issue #169)
+  - Comprehensive built-in function library for data transformation
+  - Go template engine for dynamic content generation
+  - JSONPath and XPath support for complex data structure querying
+  - Schema validation and format conversion (JSON, XML, YAML, CSV)
+- [ ] **Interactive Workflow Debugging and Inspection** (Story 2.5) - 10 points (Issue #170)
+  - Complete pause/resume implementation for workflow execution control
+  - Step-by-step execution with breakpoint system and live variable inspector
+  - API call inspection with request/response data and replay capabilities
+  - Debug session management with rollback capabilities for safe testing
+- [ ] **Enhanced Logging for ML Backtesting** (Story 2.6) - 8 points (Issue #171)
+  - Structured event logging for all workflow execution data
+  - API response logging with complete request/response pairs and timing
+  - Variable state and performance metrics logging for future analysis
+  - Export capabilities for external ML analysis tools
+- [ ] **Workflow Versioning and Template System** (Story 3.1) - 13 points (Issue #172)
+  - Semantic versioning (major.minor.patch) for all workflow definitions
+  - Template system with inheritance capabilities and parameter instantiation
+  - Version management with forking, rollback, and conflict resolution
+  - Integration with existing storage providers for version storage
+- [ ] **Advanced Reporting Framework Foundation** (Story 5.1) - 13 points (Issue #173)
+  - Comprehensive reporting engine integrating DNA monitoring and audit data
+  - Built-in report templates for compliance and operational scenarios
+  - Multi-tenant aggregation while respecting access controls
+  - Caching strategy for expensive queries without impacting real-time operations
+- [ ] **Custom Report Generation and Export** (Story 6.1) - 13 points (Issue #174)
+  - Custom report generation with user-defined parameters and validation
+  - Export to multiple formats (JSON, CSV, PDF, HTML) with proper formatting
+  - Scheduled report generation with configurable frequency and delivery
+  - Template sharing across tenants with permission controls
+- [ ] **Internal Platform Monitoring Implementation** (Story 7.1) - 13 points (Issue #175)
+  - Comprehensive health, performance, and status metrics for all components
+  - Audit log integration using global logging provider
+  - Performance telemetry and basic anomaly detection for unusual patterns
+  - REST endpoints for health checks and monitoring dashboard integration
+- [ ] **Lightweight SIEM Stream Processing Engine** (Story 8.1) - 13 points (Issue #176)
+  - Real-time log analysis with stream processing engine
+  - Pattern matching and event correlation across multiple log sources
+  - Workflow trigger integration for automated response to detected patterns
+  - Performance optimization: 10,000+ log entries per second with <100ms latency
+- [ ] **Production Security Hardening and Tenant Isolation** (Story 9.1) - 13 points (Issue #177)
+  - Comprehensive vulnerability remediation and input validation across all APIs
+  - Enhanced tenant isolation with encrypted secret segregation
+  - Breach detection for unusual access patterns and privilege escalations
+  - Zero-trust security model enhancement with additional verification layers
+- [ ] **High Availability Infrastructure Implementation** (Story 10.1) - 13 points (Issue #178)
+  - Controller clustering with leader election and automatic failover
+  - Session continuity during controller failover with <30s recovery time
+  - Zero-downtime updates and load balancing across controller instances
+  - Split-brain prevention mechanisms in clustering architecture
+- [ ] **Backward Compatibility Validation and System Integration** (Story 11.1) - 13 points (Issue #179)
+  - Complete validation of all v0.4.6.0 functionality with new capabilities
+  - API and configuration compatibility testing
+  - Performance parity confirmation and comprehensive integration testing
+  - Smooth upgrade path validation from v0.4.6.0 to v0.5.0 without downtime
+
+#### Integration Requirements
+- All new capabilities integrate seamlessly with existing pluggable storage architecture
+- Multi-tenant configuration inheritance preserved and extended for new features
+- Steward-controller communication protocol remains compatible with new capabilities
+- Performance characteristics: 99.9% uptime, 10,000+ concurrent steward connections
+- Security standards: Zero-trust tenant isolation, encrypted data at rest and in transit
 
 #### v0.6.0 (Beta) - Finalizing Foundational Endpoint CMS & Outpost
 

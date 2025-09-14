@@ -7,6 +7,8 @@ import (
 	"log"
 	"os"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/logging/interfaces"
 )
 
 // Logger provides a structured logging interface with context support for correlation IDs.
@@ -96,9 +98,11 @@ type LogEntry struct {
 }
 
 // DefaultLogger is an enhanced implementation of Logger with correlation support
+// It can use either the legacy stdout logging or the new provider system
 type DefaultLogger struct {
-	config *Config
-	log    *log.Logger
+	config           *Config
+	log              *log.Logger
+	useProviderSystem bool // Use new provider system if available
 }
 
 // NoopLogger is a logger that does nothing
@@ -138,9 +142,15 @@ func NewLogger(levelStr string) Logger {
 		ServiceName:       "",
 		Component:         "",
 	}
+	
+	// Check if global provider system is available
+	manager := GetGlobalLoggingManager()
+	useProvider := (manager != nil)
+	
 	return &DefaultLogger{
-		config: config,
-		log:    log.New(os.Stdout, "", log.LstdFlags),
+		config:           config,
+		log:              log.New(os.Stdout, "", log.LstdFlags),
+		useProviderSystem: useProvider,
 	}
 }
 
@@ -151,9 +161,14 @@ func NewLoggerWithConfig(config *Config) Logger {
 		config = DefaultConfig("cfgms", "unknown")
 	}
 	
+	// Check if global provider system is available
+	manager := GetGlobalLoggingManager()
+	useProvider := (manager != nil)
+	
 	return &DefaultLogger{
-		config: config,
-		log:    log.New(os.Stdout, "", 0), // No timestamp for JSON format
+		config:           config,
+		log:              log.New(os.Stdout, "", 0), // No timestamp for JSON format
+		useProviderSystem: useProvider,
 	}
 }
 
@@ -176,6 +191,28 @@ func (l *DefaultLogger) logEntry(ctx context.Context, level Level, levelStr, msg
 		return
 	}
 	
+	// Use global provider system if available and enabled
+	if l.useProviderSystem {
+		manager := GetGlobalLoggingManager()
+		if manager != nil {
+			entry := interfaces.LogEntry{
+				Level:       levelStr,
+				Message:     msg,
+				ServiceName: l.config.ServiceName,
+				Component:   l.config.Component,
+				Fields:      keysAndValuesToMap(keysAndValues),
+			}
+			
+			// Write via provider system (handles correlation, tenant isolation, etc. automatically)
+			if err := manager.WriteEntry(ctx, entry); err != nil {
+				// Fallback to stdout if provider fails
+				fmt.Printf("[ERROR] Provider logging failed: %v - Fallback: [%s] %s\n", err, levelStr, msg)
+			}
+			return
+		}
+	}
+	
+	// Fallback to legacy stdout logging
 	if l.config.Format == JSONFormat {
 		l.logJSON(ctx, levelStr, msg, keysAndValues...)
 	} else {
