@@ -87,7 +87,9 @@ func (m *MockBackend) GetStats(ctx context.Context) (*storage.StorageStats, erro
 	m.mutex.RLock()
 	defer m.mutex.RUnlock()
 	
-	return m.stats, nil
+	// Return a copy to prevent race conditions
+	statsCopy := *m.stats
+	return &statsCopy, nil
 }
 
 func (m *MockBackend) Flush() error { return nil }
@@ -95,6 +97,7 @@ func (m *MockBackend) Optimize() error { return nil }
 func (m *MockBackend) Close() error { return nil }
 
 type MockCompressor struct {
+	mutex            sync.RWMutex
 	compressionRatio float64
 	stats           *storage.CompressionStats
 }
@@ -122,9 +125,12 @@ func (m *MockCompressor) Compress(dna *commonpb.DNA) ([]byte, int64, error) {
 	compressedSize := int64(float64(originalSize) * m.compressionRatio)
 	compressedData := make([]byte, compressedSize)
 	
+	// Update stats with proper synchronization
+	m.mutex.Lock()
 	m.stats.TotalBytesIn += originalSize
 	m.stats.TotalBytesOut += compressedSize
 	m.stats.TotalOperations++
+	m.mutex.Unlock()
 	
 	return compressedData, originalSize, nil
 }
@@ -144,12 +150,18 @@ func (m *MockCompressor) GetCompressionRatio() float64 {
 }
 
 func (m *MockCompressor) GetStats() *storage.CompressionStats {
-	return m.stats
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+	
+	// Return a copy to prevent race conditions
+	statsCopy := *m.stats
+	return &statsCopy
 }
 
 func (m *MockCompressor) Close() error { return nil }
 
 type MockIndexer struct {
+	mutex   sync.RWMutex
 	records map[string][]*storage.RecordRef
 	stats   *storage.IndexStats
 }
@@ -175,48 +187,70 @@ func (m *MockIndexer) IndexRecord(ctx context.Context, record *storage.DNARecord
 		Size:        record.OriginalSize,
 	}
 	
+	m.mutex.Lock()
 	m.records[record.DeviceID] = append(m.records[record.DeviceID], ref)
 	m.stats.TotalEntries++
+	m.mutex.Unlock()
 	return nil
 }
 
 func (m *MockIndexer) QueryRecords(ctx context.Context, deviceID string, options *storage.QueryOptions) ([]*storage.RecordRef, int64, error) {
+	m.mutex.RLock()
 	refs, exists := m.records[deviceID]
 	if !exists {
+		m.mutex.RUnlock()
 		return nil, 0, nil
 	}
 	
+	// Make a copy to prevent race conditions
+	refsCopy := make([]*storage.RecordRef, len(refs))
+	copy(refsCopy, refs)
+	m.mutex.RUnlock()
+	
 	// Apply limit if specified
-	if options != nil && options.Limit > 0 && len(refs) > options.Limit {
-		refs = refs[:options.Limit]
+	if options != nil && options.Limit > 0 && len(refsCopy) > options.Limit {
+		refsCopy = refsCopy[:options.Limit]
 	}
 	
-	return refs, int64(len(refs)), nil
+	return refsCopy, int64(len(refsCopy)), nil
 }
 
 func (m *MockIndexer) GetNextVersion(ctx context.Context, deviceID string) (int64, error) {
+	m.mutex.RLock()
 	refs, exists := m.records[deviceID]
 	if !exists {
+		m.mutex.RUnlock()
 		return 1, nil
 	}
-	return int64(len(refs)) + 1, nil
+	count := int64(len(refs))
+	m.mutex.RUnlock()
+	return count + 1, nil
 }
 
 func (m *MockIndexer) GetDeviceStats(ctx context.Context, deviceID string) (*storage.DeviceStats, error) {
+	m.mutex.RLock()
 	refs, exists := m.records[deviceID]
 	if !exists {
+		m.mutex.RUnlock()
 		return nil, assert.AnError
 	}
+	count := int64(len(refs))
+	m.mutex.RUnlock()
 	
 	return &storage.DeviceStats{
 		DeviceID:     deviceID,
-		TotalRecords: int64(len(refs)),
+		TotalRecords: count,
 		TotalSize:    1024,
 	}, nil
 }
 
 func (m *MockIndexer) GetGlobalStats(ctx context.Context) (*storage.IndexStats, error) {
-	return m.stats, nil
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+	
+	// Return a copy to prevent race conditions
+	statsCopy := *m.stats
+	return &statsCopy, nil
 }
 
 func (m *MockIndexer) Close() error { return nil }
