@@ -150,7 +150,7 @@ func NewLoggingManager(config *LoggingConfig) (*LoggingManager, error) {
 	
 	// Initialize subscribers
 	if err := manager.initializeSubscribers(); err != nil {
-		provider.Close() // Clean up provider if subscriber initialization fails
+		_ = provider.Close() // Clean up provider if subscriber initialization fails
 		return nil, fmt.Errorf("failed to initialize subscribers: %w", err)
 	}
 	

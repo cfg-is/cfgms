@@ -39,12 +39,12 @@ func (p *FileProvider) needsRotation() bool {
 func (p *FileProvider) rotateLogFile() error {
 	// Flush and close current file
 	if p.writer != nil {
-		p.writer.Flush()
+		_ = p.writer.Flush() // Ignore flush error during rotation
 		p.writer = nil
 	}
 	
 	if p.currentFile != nil {
-		p.currentFile.Close()
+		_ = p.currentFile.Close() // Ignore close error during rotation
 		p.currentFile = nil
 	}
 	
@@ -137,7 +137,7 @@ func (p *FileProvider) compressFile(filename string) error {
 	if err != nil {
 		return fmt.Errorf("failed to open source file: %w", err)
 	}
-	defer src.Close()
+	defer func() { _ = src.Close() }()
 	
 	// Create compressed file
 	compressedFilename := filename + ".gz"
@@ -145,14 +145,14 @@ func (p *FileProvider) compressFile(filename string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create compressed file: %w", err)
 	}
-	defer dst.Close()
+	defer func() { _ = dst.Close() }()
 	
 	// Create GZIP writer
 	gzWriter, err := gzip.NewWriterLevel(dst, compressionLevel)
 	if err != nil {
 		return fmt.Errorf("failed to create gzip writer: %w", err)
 	}
-	defer gzWriter.Close()
+	defer func() { _ = gzWriter.Close() }()
 	
 	// Copy data
 	if _, err := io.Copy(gzWriter, src); err != nil {
@@ -230,13 +230,13 @@ func (p *FileProvider) parseLogFile(filename string, query interfaces.TimeRangeQ
 		if err != nil {
 			return nil, fmt.Errorf("failed to open compressed file: %w", err)
 		}
-		defer file.Close()
+		defer func() { _ = file.Close() }()
 		
 		gzReader, err := gzip.NewReader(file)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create gzip reader: %w", err)
 		}
-		defer gzReader.Close()
+		defer func() { _ = gzReader.Close() }()
 		
 		reader = gzReader
 	} else {
@@ -244,7 +244,7 @@ func (p *FileProvider) parseLogFile(filename string, query interfaces.TimeRangeQ
 		if err != nil {
 			return nil, fmt.Errorf("failed to open file: %w", err)
 		}
-		defer file.Close()
+		defer func() { _ = file.Close() }()
 		
 		reader = file
 	}
