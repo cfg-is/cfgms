@@ -33,10 +33,11 @@ Different developers have different mental models:
 Both commands perform identical operations:
 1. Final validation gates
 2. Story completeness verification
-3. Pull request creation
-4. Project management updates
-5. Roadmap updates
-6. Branch cleanup
+3. **Duplicate PR detection** (prevents creating multiple PRs for same branch)
+4. Pull request creation
+5. Project management updates
+6. Roadmap updates
+7. Branch cleanup
 
 ## Command Relationship
 

@@ -47,7 +47,25 @@ gh issue view [story_number] --json body,title,state,assignees
 
 After successful validation, creates comprehensive PR:
 
-### 1. PR Template Generation
+### 1. Duplicate PR Detection & Smart Handling
+```bash
+gh pr list --head [current-branch] --state=open
+```
+**Automatic Behavior**:
+- ✅ **IF no existing PR**: Creates new PR with full template
+- ✅ **IF existing PR found**: Automatically updates existing PR description
+- ✅ **Prevents** duplicate PR creation entirely
+- ℹ️ **Informs** user which PR was updated with link
+
+**Commands Used**:
+```bash
+# If existing PR found:
+gh pr edit [pr-number] --body "[updated-template]"
+# If no existing PR:
+gh pr create --title "[title]" --body "[template]"
+```
+
+### 2. PR Template Generation
 ```bash
 gh pr create --base develop --title "Implement Story #[NUMBER]: [title]" --body "[template]"
 ```
@@ -150,7 +168,8 @@ git branch -D feature/story-[NUMBER]-[description]  # Clean up local branch
    ✅ Issue ready for completion
 
 🚀 Creating Pull Request...
-   ✅ PR created: https://github.com/cfg-is/cfgms/pull/182
+   ℹ️ Existing PR detected: #181
+   ✅ PR updated: https://github.com/cfg-is/cfgms/pull/181
    ✅ GitHub project updated to "Done"
    ✅ Roadmap updated: Story #166 marked complete
 
@@ -211,6 +230,23 @@ git branch -D feature/story-[NUMBER]-[description]  # Clean up local branch
    3. Retry when 100% complete
 
    💡 Use /story-commit to continue development
+```
+
+### Duplicate PR Detection
+```bash
+⚠️ DUPLICATE PR DETECTED
+
+   ✅ Story validation passed
+   ⚠️ Found existing PR for this branch:
+      🔗 PR #182: https://github.com/cfg-is/cfgms/pull/182
+
+   📋 Available Actions:
+   1. View existing PR: gh pr view 182
+   2. Update existing PR description: gh pr edit 182
+   3. Continue with existing PR (recommended)
+   4. Close duplicate and create new (not recommended)
+
+   💡 Tip: Use existing PR to avoid confusion
 ```
 
 ### GitHub Integration Errors
