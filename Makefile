@@ -843,14 +843,14 @@ test-integration-setup:
 	@echo "=============================================="
 	@./scripts/generate-test-credentials.sh
 	@echo "Starting PostgreSQL, TimescaleDB, and Gitea test services..."
-	docker-compose -f docker-compose.test.yml -f docker-compose.test.override.yml up -d postgres-test timescaledb-test git-server-test
+	docker compose -f docker-compose.test.yml -f docker-compose.test.override.yml up -d postgres-test timescaledb-test git-server-test
 	@echo ""
 	@echo "⏳ Waiting for services to be ready..."
 	@sleep 5  # Brief pause before health checks
 	@./scripts/wait-for-services.sh
 	@echo ""
 	@echo "🔧 Setting up test repositories..."
-	@docker-compose -f docker-compose.test.yml exec -T git-server-test /docker-entrypoint-init.d/setup-test-repos.sh || { \
+	@docker compose -f docker-compose.test.yml exec -T git-server-test /docker-entrypoint-init.d/setup-test-repos.sh || { \
 		echo "📁 Setting up repositories manually..."; \
 		sleep 10; \
 		curl -X POST -u "cfgms_test:$$CFGMS_TEST_GITEA_PASSWORD" \
@@ -870,8 +870,8 @@ test-integration-setup:
 test-integration-cleanup:
 	@echo "🧹 Cleaning up CFGMS Docker test environment..."
 	@echo "================================================"
-	docker-compose -f docker-compose.test.yml -f docker-compose.test.override.yml down -v --remove-orphans 2>/dev/null || \
-	docker-compose -f docker-compose.test.yml down -v --remove-orphans
+	docker compose -f docker-compose.test.yml -f docker-compose.test.override.yml down -v --remove-orphans 2>/dev/null || \
+	docker compose -f docker-compose.test.yml down -v --remove-orphans
 	@echo "🔐 Removing generated credentials..."
 	@rm -f .env.test docker-compose.test.override.yml
 	@echo "✅ Docker test environment and credentials cleaned up"
@@ -880,7 +880,7 @@ test-integration-cleanup:
 test-integration-status:
 	@echo "📊 CFGMS Docker Test Services Status"
 	@echo "===================================="
-	@docker-compose -f docker-compose.test.yml ps
+	@docker compose -f docker-compose.test.yml ps
 	@echo ""
 	@echo "🔍 Service Health Checks:"
 	@./scripts/wait-for-services.sh || echo "⚠️  Some services may not be ready"
@@ -930,7 +930,7 @@ test-integration-redis:
 	@echo "🔴 Testing Redis Provider (Future)"
 	@echo "================================="
 	@echo "Redis testing will be implemented in future Epic"
-	@echo "Current profile: docker-compose --profile future"
+	@echo "Current profile: docker compose --profile future"
 
 # Complete integration testing workflow
 test-integration-complete: test-integration-setup test-with-real-storage test-integration-cleanup

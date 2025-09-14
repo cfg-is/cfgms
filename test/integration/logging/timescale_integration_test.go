@@ -65,7 +65,7 @@ func testLoggingManagerWithTimescaleDB(t *testing.T) {
 	// Create logging manager
 	manager, err := logging.NewLoggingManager(config)
 	require.NoError(t, err)
-	defer manager.Close()
+	defer func() { _ = manager.Close() }()
 
 	ctx := context.Background()
 
@@ -161,7 +161,7 @@ func testModuleLoggerWithTimescaleDB(t *testing.T) {
 
 	defer func() {
 		if manager := logging.GetGlobalLoggingManager(); manager != nil {
-			manager.Close()
+			_ = manager.Close()
 		}
 	}()
 
@@ -230,7 +230,7 @@ func testConcurrentLoggingPerformance(t *testing.T) {
 
 	manager, err := logging.NewLoggingManager(config)
 	require.NoError(t, err)
-	defer manager.Close()
+	defer func() { _ = manager.Close() }()
 
 	ctx := context.Background()
 	const numGoroutines = 10
@@ -340,7 +340,7 @@ func testTimescaleFeaturesValidation(t *testing.T) {
 
 	err := provider.Initialize(config)
 	require.NoError(t, err)
-	defer provider.Close()
+	defer func() { _ = provider.Close() }()
 
 	// Test capabilities
 	capabilities := provider.GetCapabilities()
@@ -371,7 +371,7 @@ func testMultiTenantIsolation(t *testing.T) {
 
 	manager, err := logging.NewLoggingManager(config)
 	require.NoError(t, err)
-	defer manager.Close()
+	defer func() { _ = manager.Close() }()
 
 	ctx := context.Background()
 	baseTime := time.Now().Truncate(time.Second)

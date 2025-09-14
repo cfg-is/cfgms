@@ -25,8 +25,28 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA test_logging GRANT ALL ON TABLES TO cfgms_log
 ALTER DEFAULT PRIVILEGES IN SCHEMA test_logging GRANT ALL ON SEQUENCES TO cfgms_logger_test;
 ALTER DEFAULT PRIVILEGES IN SCHEMA test_logging GRANT ALL ON FUNCTIONS TO cfgms_logger_test;
 
--- Verify TimescaleDB is working
-SELECT * FROM timescaledb_information.license;
+-- Verify TimescaleDB is working (license info may not be available in all versions)
+DO $$
+BEGIN
+    -- Try to query license info, ignore errors if table doesn't exist
+    BEGIN
+        PERFORM 1 FROM timescaledb_information.license LIMIT 1;
+        RAISE NOTICE 'TimescaleDB license information available';
+    EXCEPTION WHEN undefined_table THEN
+        RAISE NOTICE 'TimescaleDB license information not available (this is normal for some versions)';
+    END;
+END
+$$;
 
--- Display TimescaleDB version for debugging
-SELECT * FROM timescaledb_information.version;
+-- Display TimescaleDB version for debugging (may not be available in all versions)
+DO $$
+BEGIN
+    BEGIN
+        RAISE NOTICE 'Checking TimescaleDB version...';
+        PERFORM 1 FROM timescaledb_information.version LIMIT 1;
+        RAISE NOTICE 'TimescaleDB version information available';
+    EXCEPTION WHEN undefined_table THEN
+        RAISE NOTICE 'TimescaleDB version information not available (this is normal for some versions)';
+    END;
+END
+$$;

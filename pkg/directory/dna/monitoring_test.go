@@ -126,7 +126,9 @@ func (m *MockDirectoryDNAStorage) GetDirectoryStats(ctx context.Context) (*Direc
 	if m.shouldError {
 		return nil, assert.AnError
 	}
-	return m.stats, nil
+	// Return a copy to prevent race conditions
+	statsCopy := *m.stats
+	return &statsCopy, nil
 }
 
 func (m *MockDirectoryDNAStorage) GetObjectStats(ctx context.Context, objectType interfaces.DirectoryObjectType) (*ObjectTypeStats, error) {

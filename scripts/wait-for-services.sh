@@ -72,7 +72,7 @@ wait_for_service() {
 
 # Check if Docker Compose is running
 echo "🔍 Checking Docker Compose services..."
-if ! docker-compose -f docker-compose.test.yml ps | grep -q "Up"; then
+if ! docker compose -f docker-compose.test.yml ps | grep -q "Up"; then
     echo -e "${RED}❌ Docker Compose test services are not running!${NC}"
     echo "Run: make test-integration-setup"
     exit 1

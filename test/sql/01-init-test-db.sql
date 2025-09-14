@@ -29,8 +29,4 @@ GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA cfgms_test TO cfgms_test;
 -- Set default search path for test user
 ALTER USER cfgms_test SET search_path = cfgms_test,public;
 
--- Insert test data fixtures
-INSERT INTO cfgms_test.test_fixtures (name, description, created_at) VALUES 
-    ('database_provider_test', 'Test fixture for database provider validation', NOW()),
-    ('integration_test', 'Test fixture for integration testing', NOW())
-ON CONFLICT DO NOTHING;
+-- Test data fixtures will be created by 02-create-test-fixtures.sql

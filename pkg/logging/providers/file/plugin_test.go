@@ -16,7 +16,7 @@ func TestFileProvider_BasicFunctionality(t *testing.T) {
 	// Create temporary directory for test logs
 	tmpDir, err := os.MkdirTemp("", "cfgms-logging-test-*")
 	require.NoError(t, err)
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Create provider
 	provider := &FileProvider{}
@@ -48,7 +48,7 @@ func TestFileProvider_BasicFunctionality(t *testing.T) {
 	// Test initialization
 	err = provider.Initialize(config)
 	require.NoError(t, err)
-	defer provider.Close()
+	defer func() { _ = provider.Close() }()
 	
 	// Test availability
 	available, err := provider.Available()
@@ -60,7 +60,7 @@ func TestFileProvider_WriteAndQuery(t *testing.T) {
 	// Create temporary directory for test logs
 	tmpDir, err := os.MkdirTemp("", "cfgms-logging-test-*")
 	require.NoError(t, err)
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Create and initialize provider
 	provider := &FileProvider{}
@@ -77,7 +77,7 @@ func TestFileProvider_WriteAndQuery(t *testing.T) {
 	
 	err = provider.Initialize(config)
 	require.NoError(t, err)
-	defer provider.Close()
+	defer func() { _ = provider.Close() }()
 
 	ctx := context.Background()
 	
@@ -179,7 +179,7 @@ func TestFileProvider_LevelFiltering(t *testing.T) {
 	// Create temporary directory for test logs
 	tmpDir, err := os.MkdirTemp("", "cfgms-logging-test-*")
 	require.NoError(t, err)
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Create and initialize provider
 	provider := &FileProvider{}
@@ -190,7 +190,7 @@ func TestFileProvider_LevelFiltering(t *testing.T) {
 	
 	err = provider.Initialize(config)
 	require.NoError(t, err)
-	defer provider.Close()
+	defer func() { _ = provider.Close() }()
 
 	ctx := context.Background()
 	
@@ -231,7 +231,7 @@ func TestFileProvider_Stats(t *testing.T) {
 	// Create temporary directory for test logs
 	tmpDir, err := os.MkdirTemp("", "cfgms-logging-test-*")
 	require.NoError(t, err)
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Create and initialize provider
 	provider := &FileProvider{}
@@ -242,7 +242,7 @@ func TestFileProvider_Stats(t *testing.T) {
 	
 	err = provider.Initialize(config)
 	require.NoError(t, err)
-	defer provider.Close()
+	defer func() { _ = provider.Close() }()
 
 	ctx := context.Background()
 	

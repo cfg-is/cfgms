@@ -123,8 +123,8 @@ func (p *FileProvider) Available() (bool, error) {
 	if f, err := os.OpenFile(testFile, os.O_CREATE|os.O_WRONLY, p.config.FileMode); err != nil {
 		return false, fmt.Errorf("cannot write to log directory: %w", err)
 	} else {
-		f.Close()
-		os.Remove(testFile)
+		_ = f.Close()       // Ignore close error on test file
+		_ = os.Remove(testFile) // Ignore remove error on test file
 	}
 	
 	return true, nil
@@ -197,12 +197,12 @@ func (p *FileProvider) Close() error {
 		
 		// Close resources
 		if p.writer != nil {
-			p.writer.Flush()
+			_ = p.writer.Flush() // Ignore flush error during cleanup
 			p.writer = nil
 		}
 		
 		if p.currentFile != nil {
-			p.currentFile.Close()
+			_ = p.currentFile.Close() // Ignore close error during cleanup
 			p.currentFile = nil
 		}
 	})

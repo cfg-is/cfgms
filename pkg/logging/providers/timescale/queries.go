@@ -41,7 +41,7 @@ func (p *TimescaleProvider) QueryTimeRange(ctx context.Context, query interfaces
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute time range query: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	// Parse results
 	var results []interfaces.LogEntry

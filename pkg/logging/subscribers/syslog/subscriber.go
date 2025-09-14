@@ -168,7 +168,7 @@ func (s *SyslogSubscriber) Available() (bool, error) {
 		if err != nil {
 			return false, fmt.Errorf("cannot connect to syslog server: %w", err)
 		}
-		conn.Close()
+		_ = conn.Close()
 	}
 	
 	return true, nil

@@ -47,7 +47,7 @@ func TestSyslogSubscriber_Initialize(t *testing.T) {
 	assert.False(t, subscriber.enabledLevels["DEBUG"])
 	
 	// Cleanup
-	subscriber.Close()
+	_ = subscriber.Close()
 }
 
 func TestSyslogSubscriber_Initialize_InvalidConfig(t *testing.T) {
@@ -62,7 +62,7 @@ func TestSyslogSubscriber_Initialize_InvalidConfig(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "already initialized")
 	
-	subscriber.Close()
+	_ = subscriber.Close()
 }
 
 func TestSyslogSubscriber_ShouldHandle(t *testing.T) {
@@ -72,7 +72,7 @@ func TestSyslogSubscriber_ShouldHandle(t *testing.T) {
 	config := map[string]interface{}{"facility": "daemon"}
 	err := subscriber.Initialize(config)
 	require.NoError(t, err)
-	defer subscriber.Close()
+	defer func() { _ = subscriber.Close() }()
 	
 	entry1 := interfaces.LogEntry{Level: "INFO", Message: "Test"}
 	entry2 := interfaces.LogEntry{Level: "DEBUG", Message: "Test"}
@@ -88,7 +88,7 @@ func TestSyslogSubscriber_ShouldHandle(t *testing.T) {
 	}
 	err = subscriber2.Initialize(config2)
 	require.NoError(t, err)
-	defer subscriber2.Close()
+	defer func() { _ = subscriber2.Close() }()
 	
 	assert.False(t, subscriber2.ShouldHandle(entry1)) // INFO not in filter
 	assert.False(t, subscriber2.ShouldHandle(entry2)) // DEBUG not in filter
@@ -114,7 +114,7 @@ func TestSyslogSubscriber_Available(t *testing.T) {
 	
 	err = subscriber.Initialize(config)
 	require.NoError(t, err)
-	defer subscriber.Close()
+	defer func() { _ = subscriber.Close() }()
 	
 	available, err = subscriber.Available()
 	// Local syslog (empty network) always reports as available by design
@@ -139,7 +139,7 @@ func TestSyslogSubscriber_Available_NetworkSyslog(t *testing.T) {
 		t.Skipf("Network syslog initialization failed (system dependent): %v", err)
 		return
 	}
-	defer subscriber.Close()
+	defer func() { _ = subscriber.Close() }()
 	
 	available, err := subscriber.Available()
 	// This should fail because the test address is unreachable
@@ -168,7 +168,7 @@ func TestSyslogSubscriber_HandleLogEntry(t *testing.T) {
 	
 	err := subscriber.Initialize(config)
 	require.NoError(t, err)
-	defer subscriber.Close()
+	defer func() { _ = subscriber.Close() }()
 	
 	// Create test log entry
 	entry := interfaces.LogEntry{
@@ -218,7 +218,7 @@ func TestSyslogSubscriber_HandleLogEntry_Filtered(t *testing.T) {
 	
 	err := subscriber.Initialize(config)
 	require.NoError(t, err)
-	defer subscriber.Close()
+	defer func() { _ = subscriber.Close() }()
 	
 	// INFO entry should be silently skipped (not error)
 	entry := interfaces.LogEntry{
@@ -269,7 +269,7 @@ func TestSyslogSubscriber_ParseConfig(t *testing.T) {
 	
 	err := subscriber.Initialize(config)
 	require.NoError(t, err)
-	defer subscriber.Close()
+	defer func() { _ = subscriber.Close() }()
 	
 	// Verify configuration was parsed correctly
 	assert.Equal(t, "", subscriber.config.Network)
@@ -295,7 +295,7 @@ func TestSyslogSubscriber_ParseConfig_TypeConversion(t *testing.T) {
 	
 	err := subscriber.Initialize(config)
 	require.NoError(t, err)
-	defer subscriber.Close()
+	defer func() { _ = subscriber.Close() }()
 	
 	assert.Equal(t, 150, subscriber.config.BufferSize)
 	assert.Equal(t, []string{"INFO", "ERROR"}, subscriber.config.Levels)
@@ -369,8 +369,8 @@ func BenchmarkSyslogSubscriber_ShouldHandle(b *testing.B) {
 		"facility": "daemon",
 		"levels":   []string{"INFO", "WARN", "ERROR"},
 	}
-	subscriber.Initialize(config)
-	defer subscriber.Close()
+	_ = subscriber.Initialize(config)
+	defer func() { _ = subscriber.Close() }()
 	
 	entry := interfaces.LogEntry{
 		Level:   "INFO",

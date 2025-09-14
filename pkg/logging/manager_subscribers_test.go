@@ -146,7 +146,7 @@ func TestLoggingManager_WithSubscribers(t *testing.T) {
 
 	manager, err := NewLoggingManager(config)
 	require.NoError(t, err)
-	defer manager.Close()
+	defer func() { _ = manager.Close() }()
 
 	// Verify subscribers were initialized
 	assert.Len(t, manager.subscribers, 2) // Only enabled ones
@@ -225,7 +225,7 @@ func TestLoggingManager_SubscriberFiltering(t *testing.T) {
 
 	manager, err := NewLoggingManager(config)
 	require.NoError(t, err)
-	defer manager.Close()
+	defer func() { _ = manager.Close() }()
 
 	ctx := context.Background()
 
@@ -285,7 +285,7 @@ func TestLoggingManager_SubscriberError(t *testing.T) {
 
 	manager, err := NewLoggingManager(config)
 	require.NoError(t, err)
-	defer manager.Close()
+	defer func() { _ = manager.Close() }()
 
 	ctx := context.Background()
 	entry := interfaces.LogEntry{
@@ -334,7 +334,7 @@ func TestLoggingManager_EventChannelOverflow(t *testing.T) {
 
 	manager, err := NewLoggingManager(config)
 	require.NoError(t, err)
-	defer manager.Close()
+	defer func() { _ = manager.Close() }()
 
 	ctx := context.Background()
 
@@ -369,7 +369,7 @@ func TestLoggingManager_NoSubscribers(t *testing.T) {
 
 	manager, err := NewLoggingManager(config)
 	require.NoError(t, err)
-	defer manager.Close()
+	defer func() { _ = manager.Close() }()
 
 	assert.Len(t, manager.subscribers, 0)
 	assert.Nil(t, manager.eventChan)

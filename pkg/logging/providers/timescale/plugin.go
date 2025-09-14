@@ -123,7 +123,7 @@ func (p *TimescaleProvider) Available() (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("cannot connect to TimescaleDB: %w", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// Check if TimescaleDB extension is available
 	var extensionExists bool
@@ -292,7 +292,7 @@ func (p *TimescaleProvider) WriteBatch(ctx context.Context, entries []interfaces
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Prepare batch insert statement with validated identifiers
 	queryTemplate := `
@@ -311,7 +311,7 @@ func (p *TimescaleProvider) WriteBatch(ctx context.Context, entries []interfaces
 	if err != nil {
 		return fmt.Errorf("failed to prepare batch statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	// Insert all entries
 	now := time.Now()
@@ -387,7 +387,7 @@ func (p *TimescaleProvider) createConnection() (*sql.DB, error) {
 	defer cancel()
 
 	if err := db.PingContext(ctx); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 
@@ -482,18 +482,18 @@ func validateSQLIdentifier(identifier string) error {
 	}
 	
 	// Must start with letter or underscore
-	if !((identifier[0] >= 'a' && identifier[0] <= 'z') || 
-		 (identifier[0] >= 'A' && identifier[0] <= 'Z') || 
-		 identifier[0] == '_') {
+	if (identifier[0] < 'a' || identifier[0] > 'z') && 
+		 (identifier[0] < 'A' || identifier[0] > 'Z') && 
+		 identifier[0] != '_' {
 		return fmt.Errorf("SQL identifier must start with letter or underscore: %s", identifier)
 	}
 	
 	// Can only contain letters, digits, underscores, and dollar signs
 	for _, char := range identifier {
-		if !((char >= 'a' && char <= 'z') || 
-			 (char >= 'A' && char <= 'Z') || 
-			 (char >= '0' && char <= '9') || 
-			 char == '_' || char == '$') {
+		if (char < 'a' || char > 'z') && 
+			 (char < 'A' || char > 'Z') && 
+			 (char < '0' || char > '9') && 
+			 char != '_' && char != '$' {
 			return fmt.Errorf("SQL identifier contains invalid character: %s", identifier)
 		}
 	}

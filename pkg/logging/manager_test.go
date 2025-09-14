@@ -19,7 +19,7 @@ func TestLoggingManager_BasicFunctionality(t *testing.T) {
 	// Create temporary directory for test logs
 	tmpDir, err := os.MkdirTemp("", "cfgms-logging-manager-test-*")
 	require.NoError(t, err)
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Create logging manager configuration
 	config := &LoggingConfig{
@@ -47,7 +47,7 @@ func TestLoggingManager_BasicFunctionality(t *testing.T) {
 	// Create manager
 	manager, err := NewLoggingManager(config)
 	require.NoError(t, err)
-	defer manager.Close()
+	defer func() { _ = manager.Close() }()
 
 	ctx := context.Background()
 
@@ -98,7 +98,7 @@ func TestGlobalLoggingManager(t *testing.T) {
 	// Create temporary directory for test logs
 	tmpDir, err := os.MkdirTemp("", "cfgms-global-logging-test-*")
 	require.NoError(t, err)
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Create configuration
 	config := &LoggingConfig{
@@ -150,14 +150,14 @@ func TestGlobalLoggingManager(t *testing.T) {
 	assert.Greater(t, len(files), 0, "Expected at least one log file")
 
 	// Clean up global state
-	manager.Close()
+	_ = manager.Close()
 }
 
 func TestModuleLogger(t *testing.T) {
 	// Create temporary directory for test logs
 	tmpDir, err := os.MkdirTemp("", "cfgms-module-logging-test-*")
 	require.NoError(t, err)
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Initialize global logging first
 	config := &LoggingConfig{
@@ -178,7 +178,7 @@ func TestModuleLogger(t *testing.T) {
 	
 	defer func() {
 		if manager := GetGlobalLoggingManager(); manager != nil {
-			manager.Close()
+			_ = manager.Close()
 		}
 	}()
 
@@ -263,7 +263,7 @@ func TestLoggingLevelFiltering(t *testing.T) {
 	// Create temporary directory for test logs
 	tmpDir, err := os.MkdirTemp("", "cfgms-level-test-*")
 	require.NoError(t, err)
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Create configuration with WARN level (should filter out DEBUG and INFO)
 	config := &LoggingConfig{
@@ -281,7 +281,7 @@ func TestLoggingLevelFiltering(t *testing.T) {
 
 	manager, err := NewLoggingManager(config)
 	require.NoError(t, err)
-	defer manager.Close()
+	defer func() { _ = manager.Close() }()
 
 	ctx := context.Background()
 

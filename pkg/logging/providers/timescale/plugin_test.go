@@ -30,7 +30,7 @@ func TestTimescaleProvider_BasicFunctionality(t *testing.T) {
 	// Initialize provider
 	err = provider.Initialize(config)
 	require.NoError(t, err)
-	defer provider.Close()
+	defer func() { _ = provider.Close() }()
 
 	// Test availability after initialization
 	available, err = provider.Available()
@@ -65,7 +65,7 @@ func TestTimescaleProvider_WriteAndQuery(t *testing.T) {
 
 	err := provider.Initialize(config)
 	require.NoError(t, err)
-	defer provider.Close()
+	defer func() { _ = provider.Close() }()
 
 	ctx := context.Background()
 
@@ -194,7 +194,7 @@ func TestTimescaleProvider_LevelFiltering(t *testing.T) {
 
 	err := provider.Initialize(config)
 	require.NoError(t, err)
-	defer provider.Close()
+	defer func() { _ = provider.Close() }()
 
 	ctx := context.Background()
 	baseTime := time.Now().Truncate(time.Second)
@@ -270,7 +270,7 @@ func TestTimescaleProvider_HighVolume(t *testing.T) {
 
 	err := provider.Initialize(config)
 	require.NoError(t, err)
-	defer provider.Close()
+	defer func() { _ = provider.Close() }()
 
 	ctx := context.Background()
 	baseTime := time.Now().Truncate(time.Second)
@@ -355,7 +355,7 @@ func TestTimescaleProvider_Stats(t *testing.T) {
 
 	err := provider.Initialize(config)
 	require.NoError(t, err)
-	defer provider.Close()
+	defer func() { _ = provider.Close() }()
 
 	ctx := context.Background()
 	baseTime := time.Now().Truncate(time.Second)
@@ -407,7 +407,7 @@ func TestTimescaleProvider_ProviderRegistration(t *testing.T) {
 	assert.Equal(t, "timescale", provider.Name())
 
 	// Clean up
-	provider.Close()
+	_ = provider.Close()
 }
 
 // Helper functions
