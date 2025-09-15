@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/features/modules"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // Module implements the modules.Module interface for script execution
@@ -18,6 +19,8 @@ type Module struct {
 	auditLogger *AuditLogger
 	// stewardID identifies the steward this module belongs to
 	stewardID string
+	// logger provides structured logging for the module
+	logger *logging.ModuleLogger
 }
 
 // ExecutionState tracks the state of a script execution
@@ -35,6 +38,7 @@ func New() modules.Module {
 		executions:  make(map[string]*ExecutionState),
 		auditLogger: NewAuditLogger(1000), // Default 1000 records per steward
 		stewardID:   "unknown",            // Will be set by steward when module is loaded
+		logger:      logging.ForModule("script").WithField("component", "module"),
 	}
 }
 
@@ -44,6 +48,7 @@ func NewModule() *Module {
 		executions:  make(map[string]*ExecutionState),
 		auditLogger: NewAuditLogger(1000),
 		stewardID:   "unknown",
+		logger:      logging.ForModule("script").WithField("component", "module"),
 	}
 }
 
@@ -53,6 +58,7 @@ func NewModuleWithConfig(stewardID string, maxAuditRecords int) *Module {
 		executions:  make(map[string]*ExecutionState),
 		auditLogger: NewAuditLogger(maxAuditRecords),
 		stewardID:   stewardID,
+		logger:      logging.ForModule("script").WithField("component", "module"),
 	}
 }
 
@@ -76,24 +82,54 @@ func (m *Module) Get(ctx context.Context, resourceID string) (modules.ConfigStat
 
 // Set executes a script with the given configuration
 func (m *Module) Set(ctx context.Context, resourceID string, config modules.ConfigState) error {
+	tenantID := logging.ExtractTenantFromContext(ctx)
+	logger := m.logger.WithTenant(tenantID)
+
+	logger.InfoCtx(ctx, "Starting script execution",
+		"operation", "script_execute",
+		"resource_id", resourceID,
+		"resource_type", "script")
+
 	scriptConfig, ok := config.(*ScriptConfig)
 	if !ok {
+		logger.ErrorCtx(ctx, "Invalid configuration type provided",
+			"operation", "script_execute",
+			"resource_id", resourceID,
+			"error_code", "INVALID_CONFIG_TYPE",
+			"expected_type", "ScriptConfig",
+			"actual_type", fmt.Sprintf("%T", config))
 		return fmt.Errorf("%w: expected ScriptConfig, got %T", modules.ErrInvalidInput, config)
 	}
 
 	// Validate the configuration
 	if err := scriptConfig.Validate(); err != nil {
+		logger.ErrorCtx(ctx, "Configuration validation failed",
+			"operation", "script_execute",
+			"resource_id", resourceID,
+			"error_code", "CONFIG_VALIDATION_FAILED",
+			"error_details", err.Error())
 		return fmt.Errorf("configuration validation failed: %w", err)
 	}
 
 	// Create executor and validate shell availability
 	executor := NewExecutor(scriptConfig)
 	if err := executor.ValidateShellAvailability(); err != nil {
+		logger.ErrorCtx(ctx, "Shell validation failed",
+			"operation", "script_execute",
+			"resource_id", resourceID,
+			"error_code", "SHELL_VALIDATION_FAILED",
+			"error_details", err.Error())
 		return fmt.Errorf("shell validation failed: %w", err)
 	}
 
 	// Validate script signature if signing policy requires it
 	if err := m.validateSignature(scriptConfig); err != nil {
+		logger.ErrorCtx(ctx, "Script signature validation failed",
+			"operation", "script_execute",
+			"resource_id", resourceID,
+			"error_code", "SIGNATURE_VALIDATION_FAILED",
+			"signing_policy", string(scriptConfig.SigningPolicy),
+			"error_details", err.Error())
 		return fmt.Errorf("signature validation failed: %w", err)
 	}
 
@@ -123,20 +159,42 @@ func (m *Module) Set(ctx context.Context, resourceID string, config modules.Conf
 	auditRecord := CreateAuditRecord(m.stewardID, resourceID, scriptConfig, result, err)
 	if auditErr := m.auditLogger.LogExecution(ctx, auditRecord); auditErr != nil {
 		// Log audit error but don't fail the execution
-		fmt.Printf("Failed to log script execution audit: %v\n", auditErr)
+		logger.WarnCtx(ctx, "Failed to log script execution audit",
+			"operation", "script_execute",
+			"resource_id", resourceID,
+			"error_code", "AUDIT_LOG_FAILED",
+			"audit_error", auditErr.Error())
 	}
 
 	if err != nil {
+		logger.ErrorCtx(ctx, "Script execution failed",
+			"operation", "script_execute",
+			"resource_id", resourceID,
+			"error_code", "SCRIPT_EXECUTION_FAILED",
+			"error_details", err.Error())
 		m.updateExecutionStatus(resourceID, StatusFailed, nil, err)
 		return fmt.Errorf("script execution failed: %w", err)
 	}
 
 	// Update execution state with result
 	if result.ExitCode == 0 {
+		logger.InfoCtx(ctx, "Script execution completed successfully",
+			"operation", "script_execute",
+			"resource_id", resourceID,
+			"status", "completed",
+			"exit_code", result.ExitCode,
+			"duration_ms", result.Duration.Milliseconds())
 		m.updateExecutionStatus(resourceID, StatusCompleted, result, nil)
 	} else {
-		m.updateExecutionStatus(resourceID, StatusFailed, result,
-			fmt.Errorf("script exited with code %d: %s", result.ExitCode, result.Stderr))
+		scriptErr := fmt.Errorf("script exited with code %d: %s", result.ExitCode, result.Stderr)
+		logger.ErrorCtx(ctx, "Script execution failed with non-zero exit code",
+			"operation", "script_execute",
+			"resource_id", resourceID,
+			"error_code", "SCRIPT_NON_ZERO_EXIT",
+			"exit_code", result.ExitCode,
+			"stderr", result.Stderr,
+			"duration_ms", result.Duration.Milliseconds())
+		m.updateExecutionStatus(resourceID, StatusFailed, result, scriptErr)
 	}
 
 	return nil
