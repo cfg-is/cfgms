@@ -3,16 +3,21 @@ package file
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/user"
 	"runtime"
 	"strconv"
 
 	"github.com/cfgis/cfgms/features/modules"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // fileModule implements the Module interface for file management
-type fileModule struct{}
+type fileModule struct {
+	// Embed default logging support for automatic injection capability
+	modules.DefaultLoggingSupport
+}
 
 // New creates a new instance of the file module
 func New() modules.Module {
@@ -53,6 +58,15 @@ func (m *fileModule) Get(ctx context.Context, resourceID string) (modules.Config
 
 // Set updates the file content and attributes
 func (m *fileModule) Set(ctx context.Context, resourceID string, config modules.ConfigState) error {
+	// Get effective logger (injected or fallback)
+	logger := m.GetEffectiveLogger(logging.ForModule("file"))
+	tenantID := logging.ExtractTenantFromContext(ctx)
+
+	logger.InfoCtx(ctx, "Starting file configuration",
+		"operation", "file_set",
+		"resource_id", resourceID,
+		"tenant_id", tenantID,
+		"resource_type", "file")
 	if resourceID == "" {
 		return modules.ErrInvalidResourceID
 	}
@@ -80,6 +94,11 @@ func (m *fileModule) Set(ctx context.Context, resourceID string, config modules.
 
 	// Validate configuration
 	if err := fileConfig.Validate(); err != nil {
+		logger.ErrorCtx(ctx, "File configuration validation failed",
+			"operation", "file_set",
+			"resource_id", resourceID,
+			"error_code", "CONFIG_VALIDATION_FAILED",
+			"error_details", err.Error())
 		return err
 	}
 
@@ -128,9 +147,21 @@ func (m *fileModule) Set(ctx context.Context, resourceID string, config modules.
 			}
 		default:
 			// Unsupported platform
+			logger.ErrorCtx(ctx, "Unsupported platform for file ownership",
+				"operation", "file_set",
+				"resource_id", resourceID,
+				"error_code", "UNSUPPORTED_PLATFORM",
+				"platform", runtime.GOOS)
 			return modules.ErrUnsupportedPlatform
 		}
 	}
+
+	logger.InfoCtx(ctx, "File configuration completed successfully",
+		"operation", "file_set",
+		"resource_id", resourceID,
+		"file_size", len(fileConfig.Content),
+		"permissions", fmt.Sprintf("0%o", fileConfig.Permissions),
+		"status", "completed")
 
 	return nil
 }

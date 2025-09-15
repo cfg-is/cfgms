@@ -9,11 +9,15 @@ import (
 	"strconv"
 
 	"github.com/cfgis/cfgms/features/modules"
+	"github.com/cfgis/cfgms/pkg/logging"
 	"gopkg.in/yaml.v3"
 )
 
 // directoryModule implements the Module interface for directory management
-type directoryModule struct{}
+type directoryModule struct {
+	// Embed default logging support for automatic injection capability
+	modules.DefaultLoggingSupport
+}
 
 // New creates a new instance of the Directory module
 func New() modules.Module {
@@ -112,6 +116,15 @@ func (c *directoryConfig) validate() error {
 
 // Set creates or updates a directory according to the configuration
 func (m *directoryModule) Set(ctx context.Context, resourceID string, config modules.ConfigState) error {
+	// Get effective logger (injected or fallback)
+	logger := m.GetEffectiveLogger(logging.ForModule("directory"))
+	tenantID := logging.ExtractTenantFromContext(ctx)
+
+	logger.InfoCtx(ctx, "Starting directory configuration",
+		"operation", "directory_set",
+		"resource_id", resourceID,
+		"tenant_id", tenantID,
+		"resource_type", "directory")
 	// Convert ConfigState to directoryConfig
 	configMap := config.AsMap()
 	dirConfig := &directoryConfig{}
@@ -134,6 +147,11 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 
 	// Validate configuration
 	if err := dirConfig.validate(); err != nil {
+		logger.ErrorCtx(ctx, "Directory configuration validation failed",
+			"operation", "directory_set",
+			"resource_id", resourceID,
+			"error_code", "CONFIG_VALIDATION_FAILED",
+			"error_details", err.Error())
 		return err
 	}
 
@@ -205,9 +223,24 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 		}
 
 		if err := os.Chown(dirConfig.Path, uid, gid); err != nil {
+			logger.ErrorCtx(ctx, "Failed to set directory ownership",
+				"operation", "directory_set",
+				"resource_id", resourceID,
+				"error_code", "OWNERSHIP_FAILED",
+				"path", dirConfig.Path,
+				"owner", dirConfig.Owner,
+				"group", dirConfig.Group,
+				"error_details", err.Error())
 			return fmt.Errorf("failed to set ownership: %w", err)
 		}
 	}
+
+	logger.InfoCtx(ctx, "Directory configuration completed successfully",
+		"operation", "directory_set",
+		"resource_id", resourceID,
+		"path", dirConfig.Path,
+		"permissions", fmt.Sprintf("0%o", dirConfig.Permissions),
+		"status", "completed")
 
 	return nil
 }

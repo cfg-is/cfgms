@@ -249,8 +249,12 @@ func NewStandalone(configPath string, logger logging.Logger) (*Steward, error) {
 		return nil, fmt.Errorf("failed to discover modules: %w", err)
 	}
 	
-	// Create module factory for dynamic loading
-	moduleFactory := factory.New(registry, cfg.Steward.ErrorHandling)
+	// Create module factory for dynamic loading with steward ID for central logging
+	stewardID := cfg.Steward.ID
+	if stewardID == "" {
+		stewardID = "steward-standalone" // Default ID for standalone mode
+	}
+	moduleFactory := factory.NewWithStewardID(registry, cfg.Steward.ErrorHandling, stewardID)
 	
 	// Create state comparator for configuration drift detection
 	comparator := testing.NewStateComparator()

@@ -21,6 +21,8 @@ type Module struct {
 	stewardID string
 	// logger provides structured logging for the module
 	logger *logging.ModuleLogger
+	// Embed default logging support for automatic injection capability
+	modules.DefaultLoggingSupport
 }
 
 // ExecutionState tracks the state of a script execution
