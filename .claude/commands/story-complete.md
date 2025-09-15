@@ -62,7 +62,7 @@ gh pr list --head [current-branch] --state=open
 # If existing PR found:
 gh pr edit [pr-number] --body "[updated-template]"
 # If no existing PR:
-gh pr create --title "[title]" --body "[template]"
+gh pr create --base develop --title "[title]" --body "[template]"
 ```
 
 ### 2. PR Template Generation
