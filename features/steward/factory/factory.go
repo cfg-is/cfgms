@@ -33,6 +33,7 @@ package factory
 import (
 	"fmt"
 	"reflect"
+	"time"
 
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/modules/directory"
@@ -43,13 +44,14 @@ import (
 	"github.com/cfgis/cfgms/features/modules/script"
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // ModuleFactory manages module instantiation and lifecycle for the steward.
 //
 // The factory provides on-demand loading of modules from the discovery registry,
-// caches loaded instances for reuse, and handles errors according to the
-// configured error handling policy.
+// caches loaded instances for reuse, handles errors according to the configured
+// error handling policy, and implements centralized logging injection.
 type ModuleFactory struct {
 	// registry contains information about discovered modules
 	registry discovery.ModuleRegistry
@@ -59,6 +61,15 @@ type ModuleFactory struct {
 
 	// config defines error handling behavior
 	config config.ErrorHandlingConfig
+
+	// stewardID identifies the steward this factory belongs to
+	stewardID string
+
+	// loggerProvider creates loggers for module injection
+	loggerProvider modules.LoggerProvider
+
+	// injectionStatus tracks logger injection status for each module
+	injectionStatus map[string]modules.LoggerInjectionStatus
 }
 
 // New creates a new ModuleFactory instance with the provided registry and error configuration.
@@ -67,10 +78,32 @@ type ModuleFactory struct {
 // the error configuration to determine how to handle loading failures.
 func New(registry discovery.ModuleRegistry, errorConfig config.ErrorHandlingConfig) *ModuleFactory {
 	return &ModuleFactory{
-		registry:  registry,
-		instances: make(map[string]modules.Module),
-		config:    errorConfig,
+		registry:        registry,
+		instances:       make(map[string]modules.Module),
+		config:          errorConfig,
+		stewardID:       "unknown", // Will be set by steward during initialization
+		injectionStatus: make(map[string]modules.LoggerInjectionStatus),
 	}
+}
+
+// NewWithStewardID creates a new ModuleFactory with a specific steward ID and logging capability.
+//
+// This constructor enables centralized logging from the moment of factory creation.
+func NewWithStewardID(registry discovery.ModuleRegistry, errorConfig config.ErrorHandlingConfig, stewardID string) *ModuleFactory {
+	factory := &ModuleFactory{
+		registry:        registry,
+		instances:       make(map[string]modules.Module),
+		config:          errorConfig,
+		stewardID:       stewardID,
+		injectionStatus: make(map[string]modules.LoggerInjectionStatus),
+	}
+
+	// Create a logger provider for this steward
+	factory.loggerProvider = &StewardLoggerProvider{
+		stewardID: stewardID,
+	}
+
+	return factory
 }
 
 // LoadModule dynamically loads a module from the given path and name
@@ -96,6 +129,9 @@ func (f *ModuleFactory) LoadModule(moduleName string) (modules.Module, error) {
 	if err := f.ValidateModuleInterface(instance); err != nil {
 		return nil, fmt.Errorf("module %s interface validation failed: %w", moduleName, err)
 	}
+
+	// Attempt logger injection if supported
+	f.attemptLoggerInjection(instance, moduleName)
 
 	// Cache the instance
 	f.instances[moduleName] = instance
@@ -227,4 +263,155 @@ func (f *ModuleFactory) UnloadAllModules() {
 func (f *ModuleFactory) GetModuleInfo(moduleName string) (discovery.ModuleInfo, bool) {
 	info, exists := f.registry[moduleName]
 	return info, exists
+}
+
+// SetStewardID updates the steward ID for this factory and reinitializes the logger provider
+func (f *ModuleFactory) SetStewardID(stewardID string) {
+	f.stewardID = stewardID
+	f.loggerProvider = &StewardLoggerProvider{
+		stewardID: stewardID,
+	}
+}
+
+// attemptLoggerInjection tries to inject a logger into a module if it supports injection
+func (f *ModuleFactory) attemptLoggerInjection(instance modules.Module, moduleName string) {
+	// Initialize injection status
+	status := modules.LoggerInjectionStatus{
+		ModuleName:     moduleName,
+		StewardID:      f.stewardID,
+		Injected:       false,
+		SupportsInject: false,
+		LoggerType:     "",
+		LastInjected:   0,
+		ErrorMessage:   "",
+	}
+
+	// Check if module supports logger injection
+	injectable, supportsInjection := instance.(modules.LoggingInjectable)
+	status.SupportsInject = supportsInjection
+
+	if !supportsInjection {
+		// Module doesn't support injection - this is fine, use default behavior
+		f.injectionStatus[moduleName] = status
+		return
+	}
+
+	// Module supports injection, attempt to inject logger
+	if f.loggerProvider == nil {
+		status.ErrorMessage = "no logger provider available"
+		f.injectionStatus[moduleName] = status
+		return
+	}
+
+	// Create logger for the module
+	logger, err := f.loggerProvider.ForModule(moduleName, f.stewardID)
+	if err != nil {
+		status.ErrorMessage = fmt.Sprintf("failed to create logger: %v", err)
+		f.injectionStatus[moduleName] = status
+		return
+	}
+
+	// Inject the logger
+	if err := injectable.SetLogger(logger); err != nil {
+		status.ErrorMessage = fmt.Sprintf("failed to inject logger: %v", err)
+		f.injectionStatus[moduleName] = status
+		return
+	}
+
+	// Success!
+	status.Injected = true
+	status.LoggerType = fmt.Sprintf("%T", logger)
+	status.LastInjected = time.Now().Unix()
+	f.injectionStatus[moduleName] = status
+}
+
+// InjectLogger implements modules.CentralLoggingManager.InjectLogger
+func (f *ModuleFactory) InjectLogger(module modules.Module, moduleName string) (bool, error) {
+	injectable, supportsInjection := module.(modules.LoggingInjectable)
+	if !supportsInjection {
+		return false, nil // Not an error, just doesn't support injection
+	}
+
+	if f.loggerProvider == nil {
+		return false, fmt.Errorf("no logger provider available")
+	}
+
+	logger, err := f.loggerProvider.ForModule(moduleName, f.stewardID)
+	if err != nil {
+		return false, fmt.Errorf("failed to create logger: %w", err)
+	}
+
+	if err := injectable.SetLogger(logger); err != nil {
+		return false, fmt.Errorf("failed to inject logger: %w", err)
+	}
+
+	// Update injection status
+	status := modules.LoggerInjectionStatus{
+		ModuleName:     moduleName,
+		StewardID:      f.stewardID,
+		Injected:       true,
+		SupportsInject: true,
+		LoggerType:     fmt.Sprintf("%T", logger),
+		LastInjected:   time.Now().Unix(),
+		ErrorMessage:   "",
+	}
+	f.injectionStatus[moduleName] = status
+
+	return true, nil
+}
+
+// GetModuleLogger implements modules.CentralLoggingManager.GetModuleLogger
+func (f *ModuleFactory) GetModuleLogger(module modules.Module) (logging.Logger, bool) {
+	injectable, supportsInjection := module.(modules.LoggingInjectable)
+	if !supportsInjection {
+		return nil, false
+	}
+
+	return injectable.GetLogger()
+}
+
+// ListModulesWithLoggers implements modules.CentralLoggingManager.ListModulesWithLoggers
+func (f *ModuleFactory) ListModulesWithLoggers() map[string]modules.LoggerInjectionStatus {
+	// Return a copy to prevent external modification
+	result := make(map[string]modules.LoggerInjectionStatus)
+	for name, status := range f.injectionStatus {
+		result[name] = status
+	}
+	return result
+}
+
+// StewardLoggerProvider implements modules.LoggerProvider for steward-based logger creation
+type StewardLoggerProvider struct {
+	stewardID string
+}
+
+// ForModule creates a logger for a specific module
+func (p *StewardLoggerProvider) ForModule(moduleName, stewardID string) (logging.Logger, error) {
+	// Use the global logging provider to create module-specific loggers
+	logger := logging.ForModule(moduleName)
+	if logger == nil {
+		return nil, fmt.Errorf("failed to create logger for module %s", moduleName)
+	}
+
+	// Add steward-specific context
+	contextLogger := logger.WithField("steward_id", stewardID)
+	contextLogger = contextLogger.WithField("component", moduleName)
+
+	return contextLogger, nil
+}
+
+// ForComponent creates a logger for a specific component within a module
+func (p *StewardLoggerProvider) ForComponent(moduleName, componentName, stewardID string) (logging.Logger, error) {
+	// Use the global logging provider to create component-specific loggers
+	logger := logging.ForComponent(fmt.Sprintf("%s.%s", moduleName, componentName))
+	if logger == nil {
+		return nil, fmt.Errorf("failed to create logger for component %s.%s", moduleName, componentName)
+	}
+
+	// Add steward-specific context
+	contextLogger := logger.WithField("steward_id", stewardID)
+	contextLogger = contextLogger.WithField("component", componentName)
+	contextLogger = contextLogger.WithField("module", moduleName)
+
+	return contextLogger, nil
 }

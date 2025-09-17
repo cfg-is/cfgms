@@ -1,4 +1,4 @@
-.PHONY: build test test-commit test-ci test-integration test-security test-performance test-docker proto lint clean security-trivy security-deps security-scan security-check
+.PHONY: build test test-unit test-integration-factory test-watch test-commit test-ci test-integration test-security test-performance test-docker proto lint clean security-trivy security-deps security-scan security-check
 
 # Build settings
 GO_BUILD_FLAGS=-trimpath -ldflags="-s -w"
@@ -59,10 +59,12 @@ build-cli:
 build-cert-manager:
 	go build ${GO_BUILD_FLAGS} -o bin/${CERT_MANAGER_BINARY} ./cmd/cert-manager
 
-# Basic test suite (fast unit tests only)
+# Basic test suite (fast unit tests only) - Cache-safe implementation
 test:
-	@echo "🧪 Running Core Unit Tests (Fast)"
-	@echo "================================="
+	@echo "🧪 Running Core Unit Tests (Fresh Build)"
+	@echo "========================================"
+	@echo "🔄 Clearing test cache to ensure fresh compilation..."
+	@go clean -testcache
 	@if [ -f .env.local ]; then \
 		echo "Loading M365 credentials from .env.local for real API tests..."; \
 		export $$(cat .env.local | grep -v '^#' | xargs) && \
@@ -70,6 +72,57 @@ test:
 	else \
 		echo "No .env.local found - real M365 tests will be skipped"; \
 		go test -race -cover -short -timeout=3m ./features/... ./api/... ./cmd/... ./pkg/...; \
+	fi
+
+# OPTIMIZED TEST TARGETS (Cache-Aware Strategy)
+
+# Fast unit tests only (cache-friendly for rapid feedback)
+test-unit:
+	@echo "🚀 Running Unit Tests (Fast Feedback)"
+	@echo "===================================="
+	@echo "💡 Cache-friendly: No cache clearing for speed"
+	@echo "🎯 Scope: Unit tests only (mocked dependencies)"
+	@if [ -f .env.local ]; then \
+		echo "Loading M365 credentials from .env.local for real API tests..."; \
+		export $$(cat .env.local | grep -v '^#' | xargs) && \
+		go test -race -cover -short -timeout=2m ./features/... ./api/... ./cmd/... ./pkg/...; \
+	else \
+		echo "No .env.local found - real M365 tests will be skipped"; \
+		go test -race -cover -short -timeout=2m ./features/... ./api/... ./cmd/... ./pkg/...; \
+	fi
+
+# Integration tests with factory patterns (cache-safe)
+test-integration-factory:
+	@echo "🔗 Running Factory Integration Tests (Cache-Safe)"
+	@echo "================================================"
+	@echo "🔄 Cache clearing for integration safety"
+	@echo "🏭 Testing real factory loading and injection patterns"
+	@go clean -testcache
+	@if [ -f .env.local ]; then \
+		export $$(cat .env.local | grep -v '^#' | xargs) && \
+		go test -race -cover -tags=integration -timeout=5m ./test/integration/logging/...; \
+	else \
+		go test -race -cover -tags=integration -timeout=5m ./test/integration/logging/...; \
+	fi
+
+# Watch mode for development (fast feedback loop)
+test-watch:
+	@echo "👀 Starting Test Watch Mode (Development)"
+	@echo "========================================"
+	@echo "📝 Watching for Go file changes..."
+	@echo "🚀 Running fast unit tests on each change"
+	@echo "💡 Use Ctrl+C to stop watching"
+	@echo ""
+	@if command -v entr >/dev/null 2>&1; then \
+		find . -name "*.go" -not -path "./vendor/*" | entr -r make test-unit; \
+	else \
+		echo "❌ 'entr' not found. Install with:"; \
+		echo "   # Ubuntu/Debian: apt-get install entr"; \
+		echo "   # macOS: brew install entr"; \
+		echo "   # Arch: pacman -S entr"; \
+		echo ""; \
+		echo "🔄 Falling back to single run..."; \
+		make test-unit; \
 	fi
 
 # DAILY DEVELOPMENT WORKFLOW TARGETS
@@ -87,11 +140,12 @@ test-commit: test lint security-scan test-m365-integration-dev
 	@echo "🎯 Code is validated and ready for commit/PR"
 
 # CI validation (complete validation) - RUNS IN CI/CD
-test-ci: test lint security-scan test-m365-integration test-integration-complete
+test-ci: test lint security-scan test-m365-integration test-integration-complete test-integration-factory
 	@echo ""
 	@echo "✅ CI VALIDATION FINISHED"
 	@echo "=========================="
-	@echo "- ✅ Unit tests passed"
+	@echo "- ✅ Unit tests passed (cache-safe)"
+	@echo "- ✅ Factory integration tests passed"
 	@echo "- ✅ Linting passed"
 	@echo "- ✅ Security scanning passed"
 	@echo "- ✅ M365 integration tested (strict - fails if no credentials)"

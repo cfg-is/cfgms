@@ -22,7 +22,7 @@ type DirectoryDNAMonitoringSystem struct {
 	collector       DirectoryDNACollector
 	driftDetector   DirectoryDriftDetector
 	storage         DirectoryDNAStorage
-	logger          logging.Logger
+	logger          *logging.ModuleLogger
 	
 	// Monitoring configuration
 	config          *MonitoringConfig
@@ -210,11 +210,14 @@ func NewDirectoryDNAMonitoringSystem(
 	storage DirectoryDNAStorage,
 	logger logging.Logger,
 ) *DirectoryDNAMonitoringSystem {
+	// Create structured logger for directory DNA monitoring
+	dnaLogger := logging.ForComponent("directory_dna").WithField("component", "monitoring")
+
 	return &DirectoryDNAMonitoringSystem{
 		collector:     collector,
 		driftDetector: driftDetector,
 		storage:       storage,
-		logger:        logger,
+		logger:        dnaLogger,
 		config:        getDefaultMonitoringConfig(),
 		metrics:       &DirectoryMonitoringMetrics{
 			ObjectsMonitored:  make(map[interfaces.DirectoryObjectType]int64),
@@ -275,9 +278,11 @@ func (m *DirectoryDNAMonitoringSystem) Start(ctx context.Context) error {
 	m.doneChan = make(chan struct{})
 	m.mutex.Unlock()
 	
-	m.logger.Info("Starting directory DNA monitoring system",
+	m.logger.InfoCtx(ctx, "Starting directory DNA monitoring system",
+		"operation", "monitoring_start",
 		"collection_interval", m.config.CollectionInterval,
-		"drift_check_interval", m.config.DriftCheckInterval)
+		"drift_check_interval", m.config.DriftCheckInterval,
+		"component", "directory_dna")
 	
 	// Start monitoring goroutines
 	go m.monitoringLoop(ctx)
