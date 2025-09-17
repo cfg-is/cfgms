@@ -15,7 +15,7 @@ import (
 // Engine implements the WorkflowEngine interface
 type Engine struct {
 	moduleFactory    *factory.ModuleFactory
-	logger           logging.Logger
+	logger           *logging.ModuleLogger
 	executions       map[string]*WorkflowExecution
 	mutex            sync.RWMutex
 	httpClient       *HTTPClient
@@ -25,6 +25,9 @@ type Engine struct {
 
 // NewEngine creates a new workflow engine instance
 func NewEngine(moduleFactory *factory.ModuleFactory, logger logging.Logger) *Engine {
+	// Create module logger for structured workflow logging
+	workflowLogger := logging.ForModule("workflow").WithField("component", "engine")
+
 	// Create HTTP client with default configuration
 	httpClient := NewHTTPClient(HTTPClientConfig{
 		Timeout: 30 * time.Second,
@@ -36,12 +39,13 @@ func NewEngine(moduleFactory *factory.ModuleFactory, logger logging.Logger) *Eng
 		},
 	})
 
-	// Create provider registry
-	providerRegistry := NewProviderRegistry(logger)
+	// Create provider registry with workflow logger for consistency
+	// Note: ProviderRegistry will need updating to accept ModuleLogger
+	providerRegistry := NewProviderRegistry(logger) // Keep legacy for now
 
 	return &Engine{
 		moduleFactory:    moduleFactory,
-		logger:           logger,
+		logger:           workflowLogger,
 		executions:       make(map[string]*WorkflowExecution),
 		httpClient:       httpClient,
 		providerRegistry: providerRegistry,
@@ -87,9 +91,15 @@ func (e *Engine) ExecuteWorkflow(ctx context.Context, workflow Workflow, variabl
 	e.executions[executionID] = execution
 	e.mutex.Unlock()
 
-	e.logger.Info("Starting workflow execution",
+	// Extract tenant context for structured logging
+	tenantID := logging.ExtractTenantFromContext(ctx)
+	logger := e.logger.WithTenant(tenantID)
+
+	logger.InfoCtx(ctx, "Starting workflow execution",
+		"operation", "workflow_execute",
 		"execution_id", executionID,
-		"workflow", workflow.Name)
+		"workflow", workflow.Name,
+		"step_count", len(workflow.Steps))
 
 	// Start execution in goroutine
 	go e.executeWorkflowAsync(execution, workflow)

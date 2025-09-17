@@ -150,6 +150,8 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 		logger.ErrorCtx(ctx, "Directory configuration validation failed",
 			"operation", "directory_set",
 			"resource_id", resourceID,
+			"tenant_id", tenantID,
+			"resource_type", "directory",
 			"error_code", "CONFIG_VALIDATION_FAILED",
 			"error_details", err.Error())
 		return err
@@ -226,6 +228,8 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 			logger.ErrorCtx(ctx, "Failed to set directory ownership",
 				"operation", "directory_set",
 				"resource_id", resourceID,
+				"tenant_id", tenantID,
+				"resource_type", "directory",
 				"error_code", "OWNERSHIP_FAILED",
 				"path", dirConfig.Path,
 				"owner", dirConfig.Owner,
@@ -238,6 +242,8 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 	logger.InfoCtx(ctx, "Directory configuration completed successfully",
 		"operation", "directory_set",
 		"resource_id", resourceID,
+		"tenant_id", tenantID,
+		"resource_type", "directory",
 		"path", dirConfig.Path,
 		"permissions", fmt.Sprintf("0%o", dirConfig.Permissions),
 		"status", "completed")

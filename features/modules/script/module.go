@@ -84,12 +84,14 @@ func (m *Module) Get(ctx context.Context, resourceID string) (modules.ConfigStat
 
 // Set executes a script with the given configuration
 func (m *Module) Set(ctx context.Context, resourceID string, config modules.ConfigState) error {
+	// Get effective logger (injected or fallback)
+	logger := m.GetEffectiveLogger(logging.ForModule("script"))
 	tenantID := logging.ExtractTenantFromContext(ctx)
-	logger := m.logger.WithTenant(tenantID)
 
 	logger.InfoCtx(ctx, "Starting script execution",
 		"operation", "script_execute",
 		"resource_id", resourceID,
+		"tenant_id", tenantID,
 		"resource_type", "script")
 
 	scriptConfig, ok := config.(*ScriptConfig)
@@ -97,6 +99,8 @@ func (m *Module) Set(ctx context.Context, resourceID string, config modules.Conf
 		logger.ErrorCtx(ctx, "Invalid configuration type provided",
 			"operation", "script_execute",
 			"resource_id", resourceID,
+			"tenant_id", tenantID,
+			"resource_type", "script",
 			"error_code", "INVALID_CONFIG_TYPE",
 			"expected_type", "ScriptConfig",
 			"actual_type", fmt.Sprintf("%T", config))
@@ -108,6 +112,8 @@ func (m *Module) Set(ctx context.Context, resourceID string, config modules.Conf
 		logger.ErrorCtx(ctx, "Configuration validation failed",
 			"operation", "script_execute",
 			"resource_id", resourceID,
+			"tenant_id", tenantID,
+			"resource_type", "script",
 			"error_code", "CONFIG_VALIDATION_FAILED",
 			"error_details", err.Error())
 		return fmt.Errorf("configuration validation failed: %w", err)
@@ -119,6 +125,8 @@ func (m *Module) Set(ctx context.Context, resourceID string, config modules.Conf
 		logger.ErrorCtx(ctx, "Shell validation failed",
 			"operation", "script_execute",
 			"resource_id", resourceID,
+			"tenant_id", tenantID,
+			"resource_type", "script",
 			"error_code", "SHELL_VALIDATION_FAILED",
 			"error_details", err.Error())
 		return fmt.Errorf("shell validation failed: %w", err)
@@ -129,6 +137,8 @@ func (m *Module) Set(ctx context.Context, resourceID string, config modules.Conf
 		logger.ErrorCtx(ctx, "Script signature validation failed",
 			"operation", "script_execute",
 			"resource_id", resourceID,
+			"tenant_id", tenantID,
+			"resource_type", "script",
 			"error_code", "SIGNATURE_VALIDATION_FAILED",
 			"signing_policy", string(scriptConfig.SigningPolicy),
 			"error_details", err.Error())
@@ -164,6 +174,8 @@ func (m *Module) Set(ctx context.Context, resourceID string, config modules.Conf
 		logger.WarnCtx(ctx, "Failed to log script execution audit",
 			"operation", "script_execute",
 			"resource_id", resourceID,
+			"tenant_id", tenantID,
+			"resource_type", "script",
 			"error_code", "AUDIT_LOG_FAILED",
 			"audit_error", auditErr.Error())
 	}
@@ -172,6 +184,8 @@ func (m *Module) Set(ctx context.Context, resourceID string, config modules.Conf
 		logger.ErrorCtx(ctx, "Script execution failed",
 			"operation", "script_execute",
 			"resource_id", resourceID,
+			"tenant_id", tenantID,
+			"resource_type", "script",
 			"error_code", "SCRIPT_EXECUTION_FAILED",
 			"error_details", err.Error())
 		m.updateExecutionStatus(resourceID, StatusFailed, nil, err)
@@ -183,6 +197,8 @@ func (m *Module) Set(ctx context.Context, resourceID string, config modules.Conf
 		logger.InfoCtx(ctx, "Script execution completed successfully",
 			"operation", "script_execute",
 			"resource_id", resourceID,
+			"tenant_id", tenantID,
+			"resource_type", "script",
 			"status", "completed",
 			"exit_code", result.ExitCode,
 			"duration_ms", result.Duration.Milliseconds())
@@ -192,6 +208,8 @@ func (m *Module) Set(ctx context.Context, resourceID string, config modules.Conf
 		logger.ErrorCtx(ctx, "Script execution failed with non-zero exit code",
 			"operation", "script_execute",
 			"resource_id", resourceID,
+			"tenant_id", tenantID,
+			"resource_type", "script",
 			"error_code", "SCRIPT_NON_ZERO_EXIT",
 			"exit_code", result.ExitCode,
 			"stderr", result.Stderr,
