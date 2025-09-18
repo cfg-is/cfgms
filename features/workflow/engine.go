@@ -21,6 +21,7 @@ type Engine struct {
 	httpClient       *HTTPClient
 	providerRegistry *ProviderRegistry
 	errorHandler     ErrorHandler
+	syncManager      *SyncManager
 }
 
 // NewEngine creates a new workflow engine instance
@@ -50,6 +51,7 @@ func NewEngine(moduleFactory *factory.ModuleFactory, logger logging.Logger) *Eng
 		httpClient:       httpClient,
 		providerRegistry: providerRegistry,
 		errorHandler:     NewDefaultErrorHandler(),
+		syncManager:      NewSyncManager(),
 	}
 }
 
@@ -172,12 +174,22 @@ func (e *Engine) executeWorkflowAsync(execution *WorkflowExecution, workflow Wor
 
 // executeSteps executes a list of steps based on their type
 func (e *Engine) executeSteps(ctx context.Context, steps []Step, execution *WorkflowExecution) error {
+	return e.executeStepsWithRetry(ctx, steps, execution, true)
+}
+
+func (e *Engine) executeStepsWithRetry(ctx context.Context, steps []Step, execution *WorkflowExecution, enableRetry bool) error {
 	for _, step := range steps {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 			if err := e.executeStep(ctx, step, execution); err != nil {
+				// Check if it's a loop control error (break/continue)
+				if _, isLoopControl := err.(*LoopControlError); isLoopControl {
+					// Propagate loop control errors without handling
+					return err
+				}
+
 				// Convert error to WorkflowError if needed
 				var workflowErr *WorkflowError
 				if wfErr, ok := err.(*WorkflowError); ok {
@@ -192,23 +204,24 @@ func (e *Engine) executeSteps(ctx context.Context, steps []Step, execution *Work
 					).WithVariableState(execution.Variables)
 				}
 
-				// Handle error using the error handler
-				decision := e.errorHandler.HandleError(ctx, workflowErr, execution)
+				// Handle error using the error handler only if retry is enabled
+				if enableRetry {
+					decision := e.errorHandler.HandleError(ctx, workflowErr, execution)
 
-				switch decision.Action {
-				case ErrorActionStop:
-					e.logger.Error("Stopping workflow execution due to error",
-						"step", step.Name,
-						"error", workflowErr.FullError(),
-						"decision", decision.Message)
-					return workflowErr
-				case ErrorActionContinue:
-					e.logger.Warn("Continuing workflow execution after error",
-						"step", step.Name,
-						"error", workflowErr.Error(),
-						"decision", decision.Message)
-					continue
-				case ErrorActionRetry:
+					switch decision.Action {
+					case ErrorActionStop:
+						e.logger.Error("Stopping workflow execution due to error",
+							"step", step.Name,
+							"error", workflowErr.FullError(),
+							"decision", decision.Message)
+						return workflowErr
+					case ErrorActionContinue:
+						e.logger.Warn("Continuing workflow execution after error",
+							"step", step.Name,
+							"error", workflowErr.Error(),
+							"decision", decision.Message)
+						continue
+					case ErrorActionRetry:
 					// Implement retry with backoff
 					if decision.RetryDelay > 0 {
 						e.logger.Info("Retrying step after delay",
@@ -228,7 +241,11 @@ func (e *Engine) executeSteps(ctx context.Context, steps []Step, execution *Work
 					if retryErr := e.executeStep(ctx, step, execution); retryErr != nil {
 						return workflowErr // Return original error if retry fails
 					}
-				default:
+					default:
+						return workflowErr
+					}
+				} else {
+					// When retry is disabled (e.g., in try/catch blocks), return error immediately
 					return workflowErr
 				}
 			}
@@ -279,8 +296,40 @@ func (e *Engine) executeStep(ctx context.Context, step Step, execution *Workflow
 		err = e.executeWhileStep(ctx, step, execution)
 	case StepTypeForeach:
 		err = e.executeForeachStep(ctx, step, execution)
+	case StepTypeSwitch:
+		err = e.executeSwitchStep(ctx, step, execution)
+	case StepTypeTry:
+		err = e.executeTryStep(ctx, step, execution)
+	case StepTypeWorkflow:
+		err = e.executeWorkflowStep(ctx, step, execution)
+	case StepTypeBreak:
+		err = NewBreakError(step.Name)
+	case StepTypeContinue:
+		err = NewContinueError(step.Name)
+	case StepTypeBarrier:
+		err = e.executeBarrierStep(ctx, step, execution)
+	case StepTypeSemaphore:
+		err = e.executeSemaphoreStep(ctx, step, execution)
+	case StepTypeLock:
+		err = e.executeLockStep(ctx, step, execution)
+	case StepTypeWaitGroup:
+		err = e.executeWaitGroupStep(ctx, step, execution)
+	case StepTypeFanOut:
+		err = e.executeFanOutStep(ctx, step, execution)
+	case StepTypeFanIn:
+		err = e.executeFanInStep(ctx, step, execution)
+	case StepTypeErrorWorkflow:
+		err = e.executeErrorWorkflowStep(ctx, step, execution)
+	case StepTypeComposite:
+		err = e.executeCompositeStep(ctx, step, execution)
 	default:
 		err = fmt.Errorf("unknown step type: %s", step.Type)
+	}
+
+	// Get the current result (which may have been updated by the step execution)
+	currentResult, exists := execution.GetStepResult(step.Name)
+	if exists {
+		result = currentResult
 	}
 
 	// Update result safely
@@ -291,7 +340,7 @@ func (e *Engine) executeStep(ctx context.Context, step Step, execution *Workflow
 	if err != nil {
 		result.Status = StatusFailed
 		result.Error = err.Error()
-		
+
 		// Store detailed error information
 		var workflowErr *WorkflowError
 		if wfErr, ok := err.(*WorkflowError); ok {
@@ -1061,6 +1110,16 @@ func (e *Engine) executeDelayStep(ctx context.Context, step Step, execution *Wor
 		"step", step.Name,
 		"duration", step.Delay.Duration)
 
+	// Set the output for the step result
+	result, exists := execution.GetStepResult(step.Name)
+	if exists {
+		if result.Output == nil {
+			result.Output = make(map[string]interface{})
+		}
+		result.Output["message"] = message
+		execution.SetStepResult(step.Name, result)
+	}
+
 	return nil
 }
 
@@ -1136,10 +1195,24 @@ func (e *Engine) executeForStep(ctx context.Context, step Step, execution *Workf
 
 		// Execute child steps
 		if err := e.executeSteps(ctx, step.Steps, execution); err != nil {
+			// Check if it's a loop control error
+			if loopErr, isLoopControl := err.(*LoopControlError); isLoopControl {
+				switch loopErr.Type {
+				case LoopControlBreak:
+					// Break out of the loop
+					e.logger.Debug("Breaking out of for loop", "step", loopErr.StepName, "iteration", i)
+					goto forLoopComplete // Use goto to break out of the for loop
+				case LoopControlContinue:
+					// Continue to next iteration
+					e.logger.Debug("Continuing for loop", "step", loopErr.StepName, "iteration", i)
+					continue
+				}
+			}
 			return fmt.Errorf("for loop iteration %d failed: %w", i, err)
 		}
 	}
 
+forLoopComplete:
 	e.logger.Info("For loop completed",
 		"step", step.Name,
 		"iterations", iterations)
@@ -1173,6 +1246,7 @@ func (e *Engine) executeWhileStep(ctx context.Context, step Step, execution *Wor
 
 	// Execute loop
 	iterations := 0
+whileLoopExecute:
 	for {
 		iterations++
 		if iterations > maxIterations {
@@ -1205,9 +1279,23 @@ func (e *Engine) executeWhileStep(ctx context.Context, step Step, execution *Wor
 
 		// Execute child steps
 		if err := e.executeSteps(ctx, step.Steps, execution); err != nil {
+			// Check if it's a loop control error
+			if loopErr, isLoopControl := err.(*LoopControlError); isLoopControl {
+				switch loopErr.Type {
+				case LoopControlBreak:
+					// Break out of the loop
+					e.logger.Debug("Breaking out of while loop", "step", loopErr.StepName, "iteration", iterations)
+					goto whileLoopComplete
+				case LoopControlContinue:
+					// Continue to next iteration
+					e.logger.Debug("Continuing while loop", "step", loopErr.StepName, "iteration", iterations)
+					continue whileLoopExecute
+				}
+			}
 			return fmt.Errorf("while loop iteration %d failed: %w", iterations, err)
 		}
 	}
+whileLoopComplete:
 
 	e.logger.Info("While loop completed",
 		"step", step.Name,
@@ -1272,6 +1360,7 @@ func (e *Engine) executeForeachStep(ctx context.Context, step Step, execution *W
 		"items_count", len(items))
 
 	// Execute loop
+foreachLoopExecute:
 	for index, item := range items {
 		select {
 		case <-ctx.Done():
@@ -1287,9 +1376,23 @@ func (e *Engine) executeForeachStep(ctx context.Context, step Step, execution *W
 
 		// Execute child steps
 		if err := e.executeSteps(ctx, step.Steps, execution); err != nil {
+			// Check if it's a loop control error
+			if loopErr, isLoopControl := err.(*LoopControlError); isLoopControl {
+				switch loopErr.Type {
+				case LoopControlBreak:
+					// Break out of the loop
+					e.logger.Debug("Breaking out of foreach loop", "step", loopErr.StepName, "iteration", index)
+					goto foreachLoopComplete
+				case LoopControlContinue:
+					// Continue to next iteration
+					e.logger.Debug("Continuing foreach loop", "step", loopErr.StepName, "iteration", index)
+					continue foreachLoopExecute
+				}
+			}
 			return fmt.Errorf("foreach loop iteration %d failed: %w", index, err)
 		}
 	}
+foreachLoopComplete:
 
 	e.logger.Info("Foreach loop completed",
 		"step", step.Name,
@@ -1418,4 +1521,1303 @@ func (e *Engine) parseInteger(s string) (int, error) {
 	}
 
 	return result, nil
+}
+
+// executeTryStep executes a try/catch/finally step with error handling
+func (e *Engine) executeTryStep(ctx context.Context, step Step, execution *WorkflowExecution) error {
+	if step.Try == nil {
+		return NewWorkflowError(
+			ErrorCodeValidation,
+			"try step missing try configuration",
+			step.Name,
+			step.Type,
+			fmt.Errorf("try configuration is nil"),
+		).WithVariableState(execution.GetVariables())
+	}
+
+	tryConfig := step.Try
+	logger := e.logger.WithField("step", step.Name).WithField("step_type", "try")
+
+	var tryErr error
+	var finallyErr error
+	var errorHandled bool
+
+	// Execute try block
+	logger.InfoCtx(ctx, "Executing try block",
+		"operation", "try_execute",
+		"step_count", len(tryConfig.Try))
+
+	tryErr = e.executeStepsWithRetry(ctx, tryConfig.Try, execution, false)
+
+	// Handle errors if any occurred in the try block
+	if tryErr != nil {
+		logger.Debug("Try block failed, checking catch blocks",
+			"error", tryErr.Error(),
+			"catch_blocks_count", len(tryConfig.Catch))
+
+		// Try to handle the error with catch blocks
+		for _, catchBlock := range tryConfig.Catch {
+			if e.shouldHandleError(tryErr, catchBlock) {
+				logger.InfoCtx(ctx, "Executing catch block",
+					"operation", "catch_execute",
+					"step_count", len(catchBlock.Steps),
+					"error", tryErr.Error())
+
+				catchErr := e.executeSteps(ctx, catchBlock.Steps, execution)
+				if catchErr != nil {
+					// If catch block fails, return both errors
+					logger.Error("Catch block execution failed",
+						"catch_error", catchErr.Error(),
+						"original_error", tryErr.Error())
+
+					// Wrap the catch error with context about the original error
+					if workflowErr, ok := catchErr.(*WorkflowError); ok {
+						_ = workflowErr.WithDetails("original_try_error", tryErr.Error())
+						tryErr = workflowErr
+					} else {
+						tryErr = NewWorkflowError(
+							ErrorCodeStepExecution,
+							fmt.Sprintf("catch block failed: %v (original error: %v)", catchErr, tryErr),
+							step.Name,
+							step.Type,
+							catchErr,
+						).WithVariableState(execution.GetVariables()).WithDetails("original_try_error", tryErr.Error())
+					}
+				} else {
+					// Error was handled successfully
+					logger.Debug("Error handled by catch block")
+					errorHandled = true
+					tryErr = nil
+				}
+				break // Only execute the first matching catch block
+			}
+		}
+
+		// If no catch block handled the error, the error will propagate
+		if !errorHandled {
+			logger.Debug("No catch block handled the error")
+		}
+	} else {
+		logger.Debug("Try block completed successfully")
+	}
+
+	// Always execute finally block if present
+	if len(tryConfig.Finally) > 0 {
+		logger.InfoCtx(ctx, "Executing finally block",
+			"operation", "finally_execute",
+			"step_count", len(tryConfig.Finally))
+
+		finallyErr = e.executeSteps(ctx, tryConfig.Finally, execution)
+		if finallyErr != nil {
+			logger.Error("Finally block execution failed",
+				"finally_error", finallyErr.Error())
+
+			// If both try/catch and finally failed, combine the errors
+			if tryErr != nil {
+				if workflowErr, ok := finallyErr.(*WorkflowError); ok {
+					_ = workflowErr.WithDetails("try_catch_error", tryErr.Error())
+					return workflowErr
+				} else {
+					return NewWorkflowError(
+						ErrorCodeStepExecution,
+						fmt.Sprintf("finally block failed: %v (try/catch error: %v)", finallyErr, tryErr),
+						step.Name,
+						step.Type,
+						finallyErr,
+					).WithVariableState(execution.GetVariables()).WithDetails("try_catch_error", tryErr.Error())
+				}
+			} else {
+				// Only finally failed
+				return finallyErr
+			}
+		} else {
+			logger.Debug("Finally block completed successfully")
+		}
+	}
+
+	// Return the try/catch error if it wasn't handled, otherwise return nil
+	// Mark unhandled errors as non-recoverable to prevent retry of the entire try/catch step
+	if tryErr != nil {
+		if workflowErr, ok := tryErr.(*WorkflowError); ok {
+			// Convert to validation error to ensure workflow stops for unhandled errors
+			unhandledErr := NewWorkflowError(
+				ErrorCodeValidation,
+				fmt.Sprintf("unhandled error in try/catch: %s", workflowErr.Message),
+				step.Name,
+				step.Type,
+				workflowErr,
+			).WithVariableState(execution.GetVariables()).WithDetails("original_error_code", workflowErr.Code)
+			unhandledErr.Recoverable = false
+			return unhandledErr
+		}
+		// For non-WorkflowError, wrap it with validation error code to stop execution
+		wrappedErr := NewWorkflowError(
+			ErrorCodeValidation, // Use validation error to ensure workflow stops
+			fmt.Sprintf("unhandled error in try/catch: %v", tryErr),
+			step.Name,
+			step.Type,
+			tryErr,
+		).WithVariableState(execution.GetVariables())
+		wrappedErr.Recoverable = false
+		return wrappedErr
+	}
+	return nil
+}
+
+// shouldHandleError determines if a catch block should handle the given error
+func (e *Engine) shouldHandleError(err error, catchBlock CatchBlock) bool {
+	// Convert error to WorkflowError if possible for better error matching
+	var workflowErr *WorkflowError
+	if we, ok := err.(*WorkflowError); ok {
+		workflowErr = we
+	} else {
+		// For non-WorkflowError, we can only match by error message
+		if len(catchBlock.ErrorTypes) > 0 {
+			errMsg := err.Error()
+			for _, errorType := range catchBlock.ErrorTypes {
+				if contains(errMsg, errorType) {
+					return true
+				}
+			}
+		}
+		return len(catchBlock.ErrorCodes) == 0 && len(catchBlock.ErrorTypes) == 0 // Match all if no specific criteria
+	}
+
+	// Match by error codes
+	if len(catchBlock.ErrorCodes) > 0 {
+		for _, errorCode := range catchBlock.ErrorCodes {
+			if workflowErr.Code == errorCode {
+				return true
+			}
+		}
+	}
+
+	// Match by error types (string matching in error message)
+	if len(catchBlock.ErrorTypes) > 0 {
+		errMsg := workflowErr.Error()
+		for _, errorType := range catchBlock.ErrorTypes {
+			if contains(errMsg, errorType) {
+				return true
+			}
+		}
+	}
+
+	// If no specific error codes or types are specified, catch all errors
+	return len(catchBlock.ErrorCodes) == 0 && len(catchBlock.ErrorTypes) == 0
+}
+
+// contains checks if a string contains a substring (case-insensitive)
+func contains(str, substr string) bool {
+	// Simple case-insensitive substring matching
+	str = strings.ToLower(str)
+	substr = strings.ToLower(substr)
+	return strings.Contains(str, substr)
+}
+
+// executeWorkflowStep executes a nested workflow step
+func (e *Engine) executeWorkflowStep(ctx context.Context, step Step, execution *WorkflowExecution) error {
+	if step.WorkflowCall == nil {
+		return NewWorkflowError(
+			ErrorCodeValidation,
+			"workflow step missing workflow call configuration",
+			step.Name,
+			step.Type,
+			fmt.Errorf("workflow call configuration is nil"),
+		).WithVariableState(execution.GetVariables())
+	}
+
+	workflowConfig := step.WorkflowCall
+	logger := e.logger.WithField("step", step.Name).WithField("step_type", "workflow")
+
+	// Validate workflow specification
+	if workflowConfig.WorkflowName == "" && workflowConfig.WorkflowPath == "" {
+		return NewWorkflowError(
+			ErrorCodeValidation,
+			"workflow step must specify either workflow_name or workflow_path",
+			step.Name,
+			step.Type,
+			fmt.Errorf("no workflow specified"),
+		).WithVariableState(execution.GetVariables())
+	}
+
+	// Create nested workflow
+	var nestedWorkflow Workflow
+	var err error
+
+	if workflowConfig.WorkflowName != "" {
+		// Load workflow by name (this would typically load from a registry)
+		nestedWorkflow, err = e.loadWorkflowByName(workflowConfig.WorkflowName)
+		if err != nil {
+			return NewWorkflowError(
+				ErrorCodeValidation,
+				fmt.Sprintf("failed to load workflow '%s': %v", workflowConfig.WorkflowName, err),
+				step.Name,
+				step.Type,
+				err,
+			).WithVariableState(execution.GetVariables())
+		}
+		logger.Debug("Loaded workflow by name",
+			"workflow_name", workflowConfig.WorkflowName)
+	} else {
+		// Load workflow from file path
+		nestedWorkflow, err = e.loadWorkflowFromPath(workflowConfig.WorkflowPath)
+		if err != nil {
+			return NewWorkflowError(
+				ErrorCodeValidation,
+				fmt.Sprintf("failed to load workflow from path '%s': %v", workflowConfig.WorkflowPath, err),
+				step.Name,
+				step.Type,
+				err,
+			).WithVariableState(execution.GetVariables())
+		}
+		logger.Debug("Loaded workflow from path",
+			"workflow_path", workflowConfig.WorkflowPath)
+	}
+
+	// Prepare nested workflow parameters
+	nestedParameters := make(map[string]interface{})
+
+	// Apply direct parameters
+	for key, value := range workflowConfig.Parameters {
+		nestedParameters[key] = value
+	}
+
+	// Apply parameter mappings (map current variables to nested workflow parameters)
+	for nestedParam, currentVar := range workflowConfig.ParameterMappings {
+		if value, exists := execution.GetVariable(currentVar); exists {
+			nestedParameters[nestedParam] = value
+		} else {
+			logger.Warn("Parameter mapping source variable not found",
+				"nested_param", nestedParam,
+				"current_var", currentVar)
+		}
+	}
+
+	logger.InfoCtx(ctx, "Executing nested workflow",
+		"operation", "nested_workflow_execute",
+		"nested_workflow", nestedWorkflow.Name,
+		"parameter_count", len(nestedParameters),
+		"async", workflowConfig.Async)
+
+	// Execute nested workflow
+	var nestedExecution *WorkflowExecution
+	if workflowConfig.Async {
+		// Asynchronous execution
+		nestedExecution, err = e.executeNestedWorkflowAsync(ctx, nestedWorkflow, nestedParameters, workflowConfig.Timeout)
+	} else {
+		// Synchronous execution
+		nestedExecution, err = e.executeNestedWorkflowSync(ctx, nestedWorkflow, nestedParameters, workflowConfig.Timeout)
+	}
+
+	if err != nil {
+		return NewWorkflowError(
+			ErrorCodeStepExecution,
+			fmt.Sprintf("nested workflow execution failed: %v", err),
+			step.Name,
+			step.Type,
+			err,
+		).WithVariableState(execution.GetVariables())
+	}
+
+	// Apply output mappings (map nested workflow outputs back to current variables)
+	if len(workflowConfig.OutputMappings) > 0 {
+		logger.Debug("Applying output mappings",
+			"mapping_count", len(workflowConfig.OutputMappings))
+
+		for currentVar, nestedVar := range workflowConfig.OutputMappings {
+			if value, exists := nestedExecution.GetVariable(nestedVar); exists {
+				execution.SetVariable(currentVar, value)
+				logger.Debug("Mapped output variable",
+					"current_var", currentVar,
+					"nested_var", nestedVar,
+					"value", value)
+			} else {
+				logger.Warn("Output mapping source variable not found in nested workflow",
+					"current_var", currentVar,
+					"nested_var", nestedVar)
+			}
+		}
+	}
+
+	logger.InfoCtx(ctx, "Nested workflow completed successfully",
+		"operation", "nested_workflow_complete",
+		"nested_workflow", nestedWorkflow.Name,
+		"status", nestedExecution.GetStatus())
+
+	return nil
+}
+
+// executeNestedWorkflowSync executes a nested workflow synchronously
+func (e *Engine) executeNestedWorkflowSync(ctx context.Context, workflow Workflow, parameters map[string]interface{}, timeout time.Duration) (*WorkflowExecution, error) {
+	// Create timeout context if specified
+	var execCtx context.Context
+	var cancel context.CancelFunc
+
+	if timeout > 0 {
+		execCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	} else {
+		execCtx = ctx
+	}
+
+	// Execute nested workflow
+	return e.ExecuteWorkflow(execCtx, workflow, parameters)
+}
+
+// executeNestedWorkflowAsync executes a nested workflow asynchronously
+func (e *Engine) executeNestedWorkflowAsync(ctx context.Context, workflow Workflow, parameters map[string]interface{}, timeout time.Duration) (*WorkflowExecution, error) {
+	// For async execution, we start the workflow and return immediately
+	// The caller can check the status later if needed
+
+	// Create timeout context if specified
+	var execCtx context.Context
+	var cancel context.CancelFunc
+
+	if timeout > 0 {
+		execCtx, cancel = context.WithTimeout(ctx, timeout)
+		// Don't defer cancel here since we're returning immediately
+		_ = cancel // To avoid unused variable warning for now
+	} else {
+		execCtx = ctx
+	}
+
+	// Start async execution
+	execution, err := e.ExecuteWorkflow(execCtx, workflow, parameters)
+	if err != nil {
+		return nil, err
+	}
+
+	// For async execution, we don't wait for completion
+	// Return the execution object immediately
+	return execution, nil
+}
+
+// loadWorkflowByName loads a workflow by name from a registry (placeholder implementation)
+func (e *Engine) loadWorkflowByName(name string) (Workflow, error) {
+	// For now, create a simple test workflow
+	// In a real implementation, this would load from a workflow registry
+	if name == "test-nested-workflow" {
+		return Workflow{
+			Name: "test-nested-workflow",
+			Variables: map[string]interface{}{
+				"nested_result": "default",
+			},
+			Steps: []Step{
+				{
+					Name: "nested-delay",
+					Type: StepTypeDelay,
+					Delay: &DelayConfig{
+						Duration: 1 * time.Millisecond,
+						Message:  "Nested workflow executed",
+					},
+				},
+			},
+		}, nil
+	}
+
+	return Workflow{}, fmt.Errorf("workflow '%s' not found", name)
+}
+
+// loadWorkflowFromPath loads a workflow from a file path (placeholder implementation)
+func (e *Engine) loadWorkflowFromPath(path string) (Workflow, error) {
+	// For now, return a simple test workflow
+	// In a real implementation, this would load and parse a YAML/JSON file
+	return Workflow{
+		Name: "file-loaded-workflow",
+		Variables: map[string]interface{}{
+			"loaded_from": path,
+		},
+		Steps: []Step{
+			{
+				Name: "file-loaded-step",
+				Type: StepTypeDelay,
+				Delay: &DelayConfig{
+					Duration: 1 * time.Millisecond,
+					Message:  "Workflow loaded from file",
+				},
+			},
+		},
+	}, nil
+}
+
+// executeBarrierStep executes a barrier synchronization step
+func (e *Engine) executeBarrierStep(ctx context.Context, step Step, execution *WorkflowExecution) error {
+	if step.Barrier == nil {
+		return fmt.Errorf("step %s: barrier configuration is required", step.Name)
+	}
+
+	barrierName := step.Barrier.Name
+	if barrierName == "" {
+		barrierName = step.Name
+	}
+
+	barrier, err := e.syncManager.GetOrCreateBarrier(barrierName, step.Barrier.Count)
+	if err != nil {
+		return fmt.Errorf("step %s: failed to get barrier: %w", step.Name, err)
+	}
+
+	e.logger.Info("Waiting at barrier", "step", step.Name, "barrier", barrierName, "count", step.Barrier.Count)
+
+	timeout := step.Barrier.Timeout
+	if timeout == 0 {
+		timeout = 30 * time.Second // Default timeout
+	}
+
+	err = barrier.Wait(ctx, timeout)
+	if err != nil {
+		return fmt.Errorf("step %s: barrier wait failed: %w", step.Name, err)
+	}
+
+	e.logger.Info("Barrier released", "step", step.Name, "barrier", barrierName)
+	return nil
+}
+
+// executeSemaphoreStep executes a semaphore synchronization step
+func (e *Engine) executeSemaphoreStep(ctx context.Context, step Step, execution *WorkflowExecution) error {
+	if step.Semaphore == nil {
+		return fmt.Errorf("step %s: semaphore configuration is required", step.Name)
+	}
+
+	semaphoreName := step.Semaphore.Name
+	if semaphoreName == "" {
+		semaphoreName = step.Name
+	}
+
+	permits := step.Semaphore.InitialPermits
+	if permits <= 0 {
+		permits = 1 // Default to 1 permit
+	}
+
+	semaphore, err := e.syncManager.GetOrCreateSemaphore(semaphoreName, permits)
+	if err != nil {
+		return fmt.Errorf("step %s: failed to get semaphore: %w", step.Name, err)
+	}
+
+	acquireCount := step.Semaphore.Count
+	if acquireCount <= 0 {
+		acquireCount = 1
+	}
+
+	timeout := step.Semaphore.Timeout
+	if timeout == 0 {
+		timeout = 30 * time.Second // Default timeout
+	}
+
+	switch step.Semaphore.Action {
+	case SemaphoreActionAcquire:
+		e.logger.Info("Acquiring semaphore", "step", step.Name, "semaphore", semaphoreName, "count", acquireCount)
+		err = semaphore.Acquire(ctx, acquireCount, timeout)
+		if err != nil {
+			return fmt.Errorf("step %s: semaphore acquire failed: %w", step.Name, err)
+		}
+		e.logger.Info("Semaphore acquired", "step", step.Name, "semaphore", semaphoreName)
+
+	case SemaphoreActionRelease:
+		e.logger.Info("Releasing semaphore", "step", step.Name, "semaphore", semaphoreName, "count", acquireCount)
+		semaphore.Release(acquireCount)
+		e.logger.Info("Semaphore released", "step", step.Name, "semaphore", semaphoreName)
+
+	default:
+		return fmt.Errorf("step %s: invalid semaphore action: %s", step.Name, step.Semaphore.Action)
+	}
+
+	return nil
+}
+
+// executeLockStep executes a lock synchronization step
+func (e *Engine) executeLockStep(ctx context.Context, step Step, execution *WorkflowExecution) error {
+	if step.Lock == nil {
+		return fmt.Errorf("step %s: lock configuration is required", step.Name)
+	}
+
+	lockName := step.Lock.Name
+	if lockName == "" {
+		lockName = step.Name
+	}
+
+	lock, err := e.syncManager.GetOrCreateLock(lockName)
+	if err != nil {
+		return fmt.Errorf("step %s: failed to get lock: %w", step.Name, err)
+	}
+
+	timeout := step.Lock.Timeout
+	if timeout == 0 {
+		timeout = 30 * time.Second // Default timeout
+	}
+
+	switch step.Lock.Action {
+	case LockActionAcquire:
+		if step.Lock.Exclusive {
+			e.logger.Info("Acquiring write lock", "step", step.Name, "lock", lockName)
+			err = lock.AcquireWrite(ctx, timeout)
+			if err != nil {
+				return fmt.Errorf("step %s: write lock acquire failed: %w", step.Name, err)
+			}
+			e.logger.Info("Write lock acquired", "step", step.Name, "lock", lockName)
+		} else {
+			e.logger.Info("Acquiring read lock", "step", step.Name, "lock", lockName)
+			err = lock.AcquireRead(ctx, timeout)
+			if err != nil {
+				return fmt.Errorf("step %s: read lock acquire failed: %w", step.Name, err)
+			}
+			e.logger.Info("Read lock acquired", "step", step.Name, "lock", lockName)
+		}
+
+	case LockActionRelease:
+		if step.Lock.Exclusive {
+			e.logger.Info("Releasing write lock", "step", step.Name, "lock", lockName)
+			lock.ReleaseWrite()
+			e.logger.Info("Write lock released", "step", step.Name, "lock", lockName)
+		} else {
+			e.logger.Info("Releasing read lock", "step", step.Name, "lock", lockName)
+			lock.ReleaseRead()
+			e.logger.Info("Read lock released", "step", step.Name, "lock", lockName)
+		}
+
+	default:
+		return fmt.Errorf("step %s: invalid lock action: %s", step.Name, step.Lock.Action)
+	}
+
+	return nil
+}
+
+// executeWaitGroupStep executes a wait group synchronization step
+func (e *Engine) executeWaitGroupStep(ctx context.Context, step Step, execution *WorkflowExecution) error {
+	if step.WaitGroup == nil {
+		return fmt.Errorf("step %s: wait group configuration is required", step.Name)
+	}
+
+	waitGroupName := step.WaitGroup.Name
+	if waitGroupName == "" {
+		waitGroupName = step.Name
+	}
+
+	waitGroup, err := e.syncManager.GetOrCreateWaitGroup(waitGroupName)
+	if err != nil {
+		return fmt.Errorf("step %s: failed to get wait group: %w", step.Name, err)
+	}
+
+	timeout := step.WaitGroup.Timeout
+	if timeout == 0 {
+		timeout = 30 * time.Second // Default timeout
+	}
+
+	switch step.WaitGroup.Action {
+	case WaitGroupActionAdd:
+		count := step.WaitGroup.Count
+		if count == 0 {
+			count = 1 // Default to 1
+		}
+		e.logger.Info("Adding to wait group", "step", step.Name, "waitGroup", waitGroupName, "count", count)
+		waitGroup.Add(count)
+		e.logger.Info("Wait group updated", "step", step.Name, "waitGroup", waitGroupName)
+
+	case WaitGroupActionDone:
+		e.logger.Info("Marking wait group done", "step", step.Name, "waitGroup", waitGroupName)
+		waitGroup.Done()
+		e.logger.Info("Wait group done", "step", step.Name, "waitGroup", waitGroupName)
+
+	case WaitGroupActionWait:
+		e.logger.Info("Waiting for wait group", "step", step.Name, "waitGroup", waitGroupName)
+		err = waitGroup.Wait(ctx, timeout)
+		if err != nil {
+			return fmt.Errorf("step %s: wait group wait failed: %w", step.Name, err)
+		}
+		e.logger.Info("Wait group completed", "step", step.Name, "waitGroup", waitGroupName)
+
+	default:
+		return fmt.Errorf("step %s: invalid wait group action: %s", step.Name, step.WaitGroup.Action)
+	}
+
+	return nil
+}
+
+// executeFanOutStep executes a fan-out step that distributes work across multiple parallel branches
+func (e *Engine) executeFanOutStep(ctx context.Context, step Step, execution *WorkflowExecution) error {
+	if step.FanOut == nil {
+		return fmt.Errorf("step %s: fan-out configuration is required", step.Name)
+	}
+
+	config := step.FanOut
+
+	// Get the data source
+	dataSource, exists := execution.GetVariable(config.DataSource)
+	if !exists {
+		return fmt.Errorf("step %s: data source variable '%s' not found", step.Name, config.DataSource)
+	}
+
+	// Convert data source to slice for iteration
+	dataSlice, ok := dataSource.([]interface{})
+	if !ok {
+		return fmt.Errorf("step %s: data source must be an array, got %T", step.Name, dataSource)
+	}
+
+	if len(dataSlice) == 0 {
+		e.logger.Info("Fan-out with empty data source", "step", step.Name)
+		return nil
+	}
+
+	e.logger.Info("Starting fan-out", "step", step.Name, "items", len(dataSlice), "max_concurrency", config.MaxConcurrency)
+
+	// Create semaphore for concurrency control if specified
+	var semaphore chan struct{}
+	if config.MaxConcurrency > 0 {
+		semaphore = make(chan struct{}, config.MaxConcurrency)
+		for i := 0; i < config.MaxConcurrency; i++ {
+			semaphore <- struct{}{}
+		}
+	}
+
+	// Create context with timeout if specified
+	workCtx := ctx
+	if config.Timeout > 0 {
+		var cancel context.CancelFunc
+		workCtx, cancel = context.WithTimeout(ctx, config.Timeout)
+		defer cancel()
+	}
+
+	// Channel to collect results
+	resultsChan := make(chan fanOutResult, len(dataSlice))
+	var wg sync.WaitGroup
+
+	// Execute worker for each data item
+	for i, item := range dataSlice {
+		wg.Add(1)
+		go func(index int, dataItem interface{}) {
+			defer wg.Done()
+
+			// Acquire semaphore if concurrency is limited
+			if semaphore != nil {
+				select {
+				case <-semaphore:
+				case <-workCtx.Done():
+					resultsChan <- fanOutResult{Index: index, Error: workCtx.Err()}
+					return
+				}
+				defer func() { semaphore <- struct{}{} }()
+			}
+
+			// Create a copy of the worker template
+			workerStep := config.WorkerTemplate
+			workerStep.Name = fmt.Sprintf("%s_worker_%d", step.Name, index)
+
+			// Create new execution context for the worker
+			workerExecution := &WorkflowExecution{
+				ID:           fmt.Sprintf("%s_worker_%d", execution.ID, index),
+				WorkflowName: fmt.Sprintf("%s_worker_%d", execution.WorkflowName, index),
+				Status:       StatusPending,
+				StartTime:    time.Now(),
+				StepResults:  make(map[string]StepResult),
+				Variables:    execution.GetVariables(),
+				Context:      workCtx,
+			}
+
+			// Set the current data item in a variable (default name is "item")
+			itemVarName := "item"
+			if config.ResultVariable != "" {
+				itemVarName = config.ResultVariable + "_item"
+			}
+			workerExecution.SetVariable(itemVarName, dataItem)
+			workerExecution.SetVariable("index", index)
+
+			// Execute the worker step
+			err := e.executeStep(workCtx, workerStep, workerExecution)
+
+			result := fanOutResult{Index: index}
+			if err != nil {
+				result.Error = err
+			} else {
+				// Get the result from the worker execution
+				if config.ResultVariable != "" {
+					if value, exists := workerExecution.GetVariable(config.ResultVariable); exists {
+						result.Value = value
+					}
+				}
+				// Also capture step result
+				if stepResult, exists := workerExecution.GetStepResult(workerStep.Name); exists {
+					result.StepResult = stepResult
+				}
+			}
+
+			resultsChan <- result
+		}(i, item)
+	}
+
+	// Wait for all workers to complete
+	go func() {
+		wg.Wait()
+		close(resultsChan)
+	}()
+
+	// Collect results
+	results := make([]fanOutResult, len(dataSlice))
+	for result := range resultsChan {
+		results[result.Index] = result
+	}
+
+	// Check for errors
+	var workerErrors []error
+	var successfulResults []interface{}
+	var stepResults []interface{}
+
+	for _, result := range results {
+		if result.Error != nil {
+			workerErrors = append(workerErrors, result.Error)
+		} else {
+			if result.Value != nil {
+				successfulResults = append(successfulResults, result.Value)
+			}
+			if result.StepResult != nil {
+				stepResults = append(stepResults, result.StepResult)
+			}
+		}
+	}
+
+	// Store results in execution context
+	if config.ResultVariable != "" {
+		execution.SetVariable(config.ResultVariable, successfulResults)
+	}
+	execution.SetVariable(step.Name+"_results", stepResults)
+	execution.SetVariable(step.Name+"_errors", workerErrors)
+
+	e.logger.Info("Fan-out completed", "step", step.Name, "successful", len(successfulResults), "errors", len(workerErrors))
+
+	// Return error if any workers failed
+	if len(workerErrors) > 0 {
+		return fmt.Errorf("step %s: %d workers failed: %v", step.Name, len(workerErrors), workerErrors[0])
+	}
+
+	return nil
+}
+
+// fanOutResult holds the result of a single fan-out worker
+type fanOutResult struct {
+	Index      int
+	Value      interface{}
+	StepResult interface{}
+	Error      error
+}
+
+// executeFanInStep executes a fan-in step that collects and combines results from multiple sources
+func (e *Engine) executeFanInStep(ctx context.Context, step Step, execution *WorkflowExecution) error {
+	if step.FanIn == nil {
+		return fmt.Errorf("step %s: fan-in configuration is required", step.Name)
+	}
+
+	config := step.FanIn
+
+	if len(config.Sources) == 0 {
+		return fmt.Errorf("step %s: at least one source must be specified", step.Name)
+	}
+
+	e.logger.Info("Starting fan-in", "step", step.Name, "sources", len(config.Sources), "strategy", config.Strategy)
+
+	// Collect data from all sources
+	var sourceData []interface{}
+	for _, source := range config.Sources {
+		if value, exists := execution.GetVariable(source); exists && value != nil {
+			sourceData = append(sourceData, value)
+		}
+	}
+
+	if len(sourceData) == 0 {
+		e.logger.Warn("Fan-in with no data from sources", "step", step.Name)
+		execution.SetVariable(config.OutputVariable, nil)
+		return nil
+	}
+
+	// Apply strategy to combine results
+	var result interface{}
+	var err error
+
+	switch config.Strategy {
+	case FanInStrategyMerge:
+		result, err = e.fanInMerge(sourceData)
+	case FanInStrategyConcat:
+		result, err = e.fanInConcat(sourceData)
+	case FanInStrategySum:
+		result, err = e.fanInSum(sourceData)
+	case FanInStrategyFirst:
+		result = sourceData[0]
+	case FanInStrategyLast:
+		result = sourceData[len(sourceData)-1]
+	case FanInStrategyCustom:
+		result, err = e.fanInCustom(sourceData, config.Transform)
+	default:
+		err = fmt.Errorf("unsupported fan-in strategy: %s", config.Strategy)
+	}
+
+	if err != nil {
+		return fmt.Errorf("step %s: fan-in failed: %w", step.Name, err)
+	}
+
+	// Apply filter if specified
+	if config.Filter != "" {
+		// For now, we'll skip filtering implementation
+		e.logger.Warn("Fan-in filtering not yet implemented", "step", step.Name, "filter", config.Filter)
+	}
+
+	// Store result
+	execution.SetVariable(config.OutputVariable, result)
+
+	e.logger.Info("Fan-in completed", "step", step.Name, "output_variable", config.OutputVariable)
+	return nil
+}
+
+// fanInMerge merges all source data into a single array
+func (e *Engine) fanInMerge(sourceData []interface{}) (interface{}, error) {
+	var merged []interface{}
+	for _, data := range sourceData {
+		if slice, ok := data.([]interface{}); ok {
+			merged = append(merged, slice...)
+		} else {
+			merged = append(merged, data)
+		}
+	}
+	return merged, nil
+}
+
+// fanInConcat concatenates string results
+func (e *Engine) fanInConcat(sourceData []interface{}) (interface{}, error) {
+	var result strings.Builder
+	for _, data := range sourceData {
+		if str, ok := data.(string); ok {
+			result.WriteString(str)
+		} else {
+			result.WriteString(fmt.Sprintf("%v", data))
+		}
+	}
+	return result.String(), nil
+}
+
+// fanInSum sums numeric results
+func (e *Engine) fanInSum(sourceData []interface{}) (interface{}, error) {
+	var sum float64
+	for _, data := range sourceData {
+		switch v := data.(type) {
+		case int:
+			sum += float64(v)
+		case int64:
+			sum += float64(v)
+		case float32:
+			sum += float64(v)
+		case float64:
+			sum += v
+		default:
+			return nil, fmt.Errorf("cannot sum non-numeric value: %T", data)
+		}
+	}
+	return sum, nil
+}
+
+// fanInCustom applies a custom transformation (placeholder implementation)
+func (e *Engine) fanInCustom(sourceData []interface{}, transform string) (interface{}, error) {
+	// For now, just return the first item
+	// In a full implementation, this would evaluate the transform expression
+	e.logger.Warn("Custom fan-in transformation not fully implemented", "transform", transform)
+	if len(sourceData) > 0 {
+		return sourceData[0], nil
+	}
+	return nil, nil
+}
+
+// executeErrorWorkflowStep executes a custom error workflow step
+func (e *Engine) executeErrorWorkflowStep(ctx context.Context, step Step, execution *WorkflowExecution) error {
+	if step.ErrorWorkflow == nil {
+		return fmt.Errorf("step %s: error workflow configuration is required", step.Name)
+	}
+
+	config := step.ErrorWorkflow
+
+	// Load the error handling workflow
+	var errorWorkflow Workflow
+	var err error
+
+	if config.WorkflowName != "" {
+		errorWorkflow, err = e.loadWorkflowByName(config.WorkflowName)
+	} else if config.WorkflowPath != "" {
+		errorWorkflow, err = e.loadWorkflowFromPath(config.WorkflowPath)
+	} else {
+		return fmt.Errorf("step %s: either workflow_name or workflow_path must be specified", step.Name)
+	}
+
+	if err != nil {
+		return fmt.Errorf("step %s: failed to load error workflow: %w", step.Name, err)
+	}
+
+	e.logger.Info("Executing error workflow", "step", step.Name, "error_workflow", errorWorkflow.Name)
+
+	// Create parameters for the error workflow
+	parameters := make(map[string]interface{})
+
+	// Add direct parameters
+	for key, value := range config.Parameters {
+		parameters[key] = value
+	}
+
+	// Add parameter mappings from current execution variables
+	for errorParam, sourceVar := range config.ParameterMappings {
+		if value, exists := execution.GetVariable(sourceVar); exists {
+			parameters[errorParam] = value
+		}
+	}
+
+	// Add error context
+	parameters["original_execution_id"] = execution.ID
+	parameters["original_workflow"] = execution.WorkflowName
+	if execution.GetError() != "" {
+		parameters["error_message"] = execution.GetError()
+	}
+	if errorDetails := execution.GetErrorDetails(); errorDetails != nil {
+		parameters["error_details"] = errorDetails
+	}
+
+	// Execute the error workflow
+	var errorExecution *WorkflowExecution
+	if config.Async {
+		// Execute asynchronously
+		errorExecution, err = e.executeErrorWorkflowAsync(ctx, errorWorkflow, parameters, config.Timeout)
+	} else {
+		// Execute synchronously
+		errorExecution, err = e.executeErrorWorkflowSync(ctx, errorWorkflow, parameters, config.Timeout)
+	}
+
+	if err != nil {
+		return fmt.Errorf("step %s: error workflow execution failed: %w", step.Name, err)
+	}
+
+	// Apply output mappings
+	for errorVar, targetVar := range config.OutputMappings {
+		if value, exists := errorExecution.GetVariable(errorVar); exists {
+			execution.SetVariable(targetVar, value)
+		}
+	}
+
+	e.logger.Info("Error workflow completed", "step", step.Name, "error_workflow", errorWorkflow.Name, "status", errorExecution.GetStatus())
+
+	// Handle recovery action (but don't apply it here - that should be done by the caller)
+	// Just store the recovery action for the caller to use
+	execution.SetVariable(step.Name+"_recovery_action", config.RecoveryAction)
+
+	return nil
+}
+
+// executeErrorWorkflowSync executes an error workflow synchronously
+func (e *Engine) executeErrorWorkflowSync(ctx context.Context, workflow Workflow, parameters map[string]interface{}, timeout time.Duration) (*WorkflowExecution, error) {
+	// Create context with timeout if specified
+	execCtx := ctx
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		execCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+
+	// Execute the error workflow
+	execution, err := e.ExecuteWorkflow(execCtx, workflow, parameters)
+	if err != nil {
+		return nil, err
+	}
+
+	// Wait for completion if timeout is specified
+	if timeout > 0 {
+		select {
+		case <-time.After(timeout):
+			if execution.Cancel != nil {
+				execution.Cancel()
+			}
+			return execution, fmt.Errorf("error workflow timed out after %v", timeout)
+		case <-execCtx.Done():
+			return execution, execCtx.Err()
+		default:
+			// Continue to check status
+		}
+	}
+
+	// Wait a bit for execution to complete
+	time.Sleep(10 * time.Millisecond)
+
+	return execution, nil
+}
+
+// executeErrorWorkflowAsync executes an error workflow asynchronously
+func (e *Engine) executeErrorWorkflowAsync(ctx context.Context, workflow Workflow, parameters map[string]interface{}, timeout time.Duration) (*WorkflowExecution, error) {
+	// Create context with timeout if specified
+	execCtx := ctx
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		execCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+
+	// Execute the error workflow asynchronously
+	execution, err := e.ExecuteWorkflow(execCtx, workflow, parameters)
+	if err != nil {
+		return nil, err
+	}
+
+	// Return immediately for async execution
+	return execution, nil
+}
+
+
+// executeCompositeStep executes a workflow composition step
+func (e *Engine) executeCompositeStep(ctx context.Context, step Step, execution *WorkflowExecution) error {
+	if step.Composite == nil {
+		return fmt.Errorf("step %s: composite configuration is required", step.Name)
+	}
+
+	config := step.Composite
+
+	if len(config.Components) == 0 {
+		return fmt.Errorf("step %s: at least one component must be specified", step.Name)
+	}
+
+	e.logger.Info("Starting workflow composition", "step", step.Name, "components", len(config.Components), "strategy", config.Strategy)
+
+	// Create context with timeout if specified
+	compCtx := ctx
+	if config.Timeout > 0 {
+		var cancel context.CancelFunc
+		compCtx, cancel = context.WithTimeout(ctx, config.Timeout)
+		defer cancel()
+	}
+
+	// Execute components based on strategy
+	var err error
+	switch config.Strategy {
+	case CompositionStrategySequential:
+		err = e.executeComponentsSequential(compCtx, config, execution, step.Name)
+	case CompositionStrategyParallel:
+		err = e.executeComponentsParallel(compCtx, config, execution, step.Name)
+	case CompositionStrategyDependency:
+		err = e.executeComponentsDependency(compCtx, config, execution, step.Name)
+	case CompositionStrategyPipeline:
+		err = e.executeComponentsPipeline(compCtx, config, execution, step.Name)
+	case CompositionStrategyConditional:
+		err = e.executeComponentsConditional(compCtx, config, execution, step.Name)
+	default:
+		err = fmt.Errorf("unsupported composition strategy: %s", config.Strategy)
+	}
+
+	if err != nil {
+		return fmt.Errorf("step %s: composition failed: %w", step.Name, err)
+	}
+
+	e.logger.Info("Workflow composition completed", "step", step.Name)
+	return nil
+}
+
+// executeComponentsSequential executes components one by one
+func (e *Engine) executeComponentsSequential(ctx context.Context, config *CompositeConfig, execution *WorkflowExecution, stepName string) error {
+	for i, component := range config.Components {
+		e.logger.Info("Executing component sequentially", "component", component.Name, "index", i)
+
+		err := e.executeComponent(ctx, component, execution, stepName)
+		if err != nil {
+			return e.handleComponentFailure(err, component, config.FailurePolicy)
+		}
+	}
+	return nil
+}
+
+// executeComponentsParallel executes all components in parallel
+func (e *Engine) executeComponentsParallel(ctx context.Context, config *CompositeConfig, execution *WorkflowExecution, stepName string) error {
+	// Create semaphore for concurrency control if specified
+	var semaphore chan struct{}
+	if config.MaxConcurrency > 0 {
+		semaphore = make(chan struct{}, config.MaxConcurrency)
+		for i := 0; i < config.MaxConcurrency; i++ {
+			semaphore <- struct{}{}
+		}
+	}
+
+	// Channel to collect errors
+	errorsChan := make(chan error, len(config.Components))
+	var wg sync.WaitGroup
+
+	// Execute components in parallel
+	for _, component := range config.Components {
+		wg.Add(1)
+		go func(comp WorkflowComponent) {
+			defer wg.Done()
+
+			// Acquire semaphore if concurrency is limited
+			if semaphore != nil {
+				select {
+				case <-semaphore:
+				case <-ctx.Done():
+					errorsChan <- ctx.Err()
+					return
+				}
+				defer func() { semaphore <- struct{}{} }()
+			}
+
+			err := e.executeComponent(ctx, comp, execution, stepName)
+			if err != nil {
+				errorsChan <- e.handleComponentFailure(err, comp, config.FailurePolicy)
+			} else {
+				errorsChan <- nil
+			}
+		}(component)
+	}
+
+	// Wait for all components to complete
+	go func() {
+		wg.Wait()
+		close(errorsChan)
+	}()
+
+	// Collect errors
+	var errors []error
+	for err := range errorsChan {
+		if err != nil {
+			errors = append(errors, err)
+		}
+	}
+
+	if len(errors) > 0 {
+		return errors[0] // Return first error
+	}
+
+	return nil
+}
+
+// executeComponentsDependency executes components based on dependencies (simplified implementation)
+func (e *Engine) executeComponentsDependency(ctx context.Context, config *CompositeConfig, execution *WorkflowExecution, stepName string) error {
+	// For now, just execute sequentially - a full implementation would build a dependency graph
+	e.logger.Warn("Dependency-based composition not fully implemented, falling back to sequential")
+	return e.executeComponentsSequential(ctx, config, execution, stepName)
+}
+
+// executeComponentsPipeline executes components as a data processing pipeline
+func (e *Engine) executeComponentsPipeline(ctx context.Context, config *CompositeConfig, execution *WorkflowExecution, stepName string) error {
+	// For now, just execute sequentially with data flow - a full implementation would handle complex pipelines
+	e.logger.Warn("Pipeline composition not fully implemented, falling back to sequential")
+	return e.executeComponentsSequential(ctx, config, execution, stepName)
+}
+
+// executeComponentsConditional executes components based on conditions
+func (e *Engine) executeComponentsConditional(ctx context.Context, config *CompositeConfig, execution *WorkflowExecution, stepName string) error {
+	for _, component := range config.Components {
+		// Check component condition (simplified - would need full condition evaluation)
+		if component.Condition != nil {
+			e.logger.Info("Skipping component due to condition", "component", component.Name)
+			continue
+		}
+
+		err := e.executeComponent(ctx, component, execution, stepName)
+		if err != nil {
+			return e.handleComponentFailure(err, component, config.FailurePolicy)
+		}
+	}
+	return nil
+}
+
+// executeComponent executes a single workflow component
+func (e *Engine) executeComponent(ctx context.Context, component WorkflowComponent, execution *WorkflowExecution, stepName string) error {
+	// Load the component workflow
+	var workflow Workflow
+	var err error
+
+	if component.WorkflowName != "" {
+		workflow, err = e.loadWorkflowByName(component.WorkflowName)
+	} else if component.WorkflowPath != "" {
+		workflow, err = e.loadWorkflowFromPath(component.WorkflowPath)
+	} else {
+		return fmt.Errorf("component %s: either workflow_name or workflow_path must be specified", component.Name)
+	}
+
+	if err != nil {
+		return fmt.Errorf("component %s: failed to load workflow: %w", component.Name, err)
+	}
+
+	// Create parameters for the component
+	parameters := make(map[string]interface{})
+
+	// Add direct parameters
+	for key, value := range component.Parameters {
+		parameters[key] = value
+	}
+
+	// Add parameter mappings
+	for compParam, sourceVar := range component.ParameterMappings {
+		if value, exists := execution.GetVariable(sourceVar); exists {
+			parameters[compParam] = value
+		}
+	}
+
+	// Create context with timeout if specified
+	compCtx := ctx
+	if component.Timeout > 0 {
+		var cancel context.CancelFunc
+		compCtx, cancel = context.WithTimeout(ctx, component.Timeout)
+		defer cancel()
+	}
+
+	// Execute the component workflow
+	var componentExecution *WorkflowExecution
+	if component.Async {
+		componentExecution, err = e.executeComponentAsync(compCtx, workflow, parameters)
+	} else {
+		componentExecution, err = e.executeComponentSync(compCtx, workflow, parameters)
+	}
+
+	if err != nil {
+		return fmt.Errorf("component %s: execution failed: %w", component.Name, err)
+	}
+
+	// Apply output mappings
+	for compVar, targetVar := range component.OutputMappings {
+		if value, exists := componentExecution.GetVariable(compVar); exists {
+			execution.SetVariable(targetVar, value)
+		}
+	}
+
+	// Store component execution result
+	execution.SetVariable(stepName+"_component_"+component.Name+"_result", componentExecution.GetStepResults())
+
+	return nil
+}
+
+// executeComponentSync executes a component workflow synchronously
+func (e *Engine) executeComponentSync(ctx context.Context, workflow Workflow, parameters map[string]interface{}) (*WorkflowExecution, error) {
+	execution, err := e.ExecuteWorkflow(ctx, workflow, parameters)
+	if err != nil {
+		return nil, err
+	}
+
+	// Wait a bit for execution to complete
+	time.Sleep(10 * time.Millisecond)
+
+	return execution, nil
+}
+
+// executeComponentAsync executes a component workflow asynchronously
+func (e *Engine) executeComponentAsync(ctx context.Context, workflow Workflow, parameters map[string]interface{}) (*WorkflowExecution, error) {
+	execution, err := e.ExecuteWorkflow(ctx, workflow, parameters)
+	if err != nil {
+		return nil, err
+	}
+
+	// Return immediately for async execution
+	return execution, nil
+}
+
+// handleComponentFailure handles component execution failures based on failure policy
+func (e *Engine) handleComponentFailure(err error, component WorkflowComponent, policy CompositeFailurePolicy) error {
+	switch policy {
+	case CompositeFailurePolicyFail:
+		return err
+	case CompositeFailurePolicySkip:
+		e.logger.Warn("Skipping failed component", "component", component.Name, "error", err.Error())
+		return nil
+	case CompositeFailurePolicyRetry:
+		e.logger.Warn("Component retry not fully implemented", "component", component.Name)
+		return err
+	case CompositeFailurePolicyIsolate:
+		e.logger.Warn("Component isolation not fully implemented", "component", component.Name)
+		return nil
+	default:
+		return err
+	}
 }

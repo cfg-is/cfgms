@@ -357,3 +357,41 @@ func AddExecutionTrace(execution *WorkflowExecution, stepName string, stepType S
 	
 	execution.AddExecutionTrace(step)
 }
+
+// LoopControlError represents a break or continue statement in a loop
+type LoopControlError struct {
+	Type    LoopControlType
+	StepName string
+}
+
+// LoopControlType defines the type of loop control flow
+type LoopControlType string
+
+const (
+	// LoopControlBreak indicates a break statement
+	LoopControlBreak LoopControlType = "break"
+
+	// LoopControlContinue indicates a continue statement
+	LoopControlContinue LoopControlType = "continue"
+)
+
+// Error implements the error interface
+func (e *LoopControlError) Error() string {
+	return fmt.Sprintf("loop control: %s from step %s", e.Type, e.StepName)
+}
+
+// NewBreakError creates a break control flow error
+func NewBreakError(stepName string) *LoopControlError {
+	return &LoopControlError{
+		Type:    LoopControlBreak,
+		StepName: stepName,
+	}
+}
+
+// NewContinueError creates a continue control flow error
+func NewContinueError(stepName string) *LoopControlError {
+	return &LoopControlError{
+		Type:    LoopControlContinue,
+		StepName: stepName,
+	}
+}
