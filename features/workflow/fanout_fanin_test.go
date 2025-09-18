@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"sort"
 	"testing"
 	"time"
 
@@ -35,7 +36,7 @@ func TestFanOutStep(t *testing.T) {
 							Message:  "Processing number",
 						},
 						Variables: map[string]interface{}{
-							"result": "{{item * 2}}", // Would need expression evaluation
+							"processed": "{{item * 2}}", // Would need expression evaluation
 						},
 					},
 				},
@@ -429,5 +430,7 @@ func getKeys(m map[string]interface{}) []string {
 	for k := range m {
 		keys = append(keys, k)
 	}
+	// Sort keys to ensure consistent order
+	sort.Strings(keys)
 	return keys
 }
