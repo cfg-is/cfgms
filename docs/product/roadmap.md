@@ -491,11 +491,11 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - ✅ Consistent structured logging fields (tenant_id, session_id, component, operation)
   - ✅ Proper log levels (ERROR, WARN, INFO, DEBUG) with configurable filtering
   - ✅ Complete tenant isolation in log entries without cross-tenant information leakage
-- [ ] **Advanced Workflow Engine Extensions** (Story 2.1) - 13 points (Issue #167)
-  - Complex conditional logic: if/else, switch/case, and boolean expressions
-  - Nested workflows with parameter passing and parallel execution paths
-  - Loop constructs: for-each and while loops with break/continue control flow
-  - Advanced error handling with try/catch blocks and custom error workflows
+- [x] **Advanced Workflow Engine Extensions** (Story 2.1) - 13 points (Issue #167) ✅ COMPLETED
+  - ✅ Complex conditional logic: if/else, switch/case, and boolean expressions
+  - ✅ Nested workflows with parameter passing and parallel execution paths
+  - ✅ Loop constructs: for-each and while loops with break/continue control flow
+  - ✅ Advanced error handling with try/catch blocks and custom error workflows
 - [ ] **Workflow Trigger and Scheduling System** (Story 2.2) - 10 points (Issue #168)
   - Schedule-based triggers with cron-style scheduling and timezone handling
   - Webhook triggers with secure endpoints and authentication for external systems

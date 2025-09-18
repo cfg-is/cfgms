@@ -66,6 +66,9 @@ type Workflow struct {
 
 	// OnFailure defines what to do when a step fails
 	OnFailure FailureAction `yaml:"on_failure,omitempty" json:"on_failure,omitempty"`
+
+	// ErrorWorkflows define custom error handling workflows
+	ErrorWorkflows []ErrorWorkflowConfig `yaml:"error_workflows,omitempty" json:"error_workflows,omitempty"`
 }
 
 // Step represents a single execution unit in a workflow
@@ -112,8 +115,33 @@ type Step struct {
 	// Loop configuration for loop steps (for, while, foreach)
 	Loop *LoopConfig `yaml:"loop,omitempty" json:"loop,omitempty"`
 
+	// Switch configuration for switch steps
+	Switch *SwitchConfig `yaml:"switch,omitempty" json:"switch,omitempty"`
+
+	// Try configuration for try/catch/finally steps
+	Try *TryConfig `yaml:"try,omitempty" json:"try,omitempty"`
+
+	// Workflow configuration for nested workflow steps
+	WorkflowCall *WorkflowCallConfig `yaml:"workflow_call,omitempty" json:"workflow_call,omitempty"`
+
 	// ErrorHandling defines error handling configuration for this step
 	ErrorHandling *ErrorHandlingConfig `yaml:"error_handling,omitempty" json:"error_handling,omitempty"`
+	// Barrier configuration for barrier synchronization steps
+	Barrier *BarrierConfig `yaml:"barrier,omitempty" json:"barrier,omitempty"`
+	// Semaphore configuration for semaphore steps
+	Semaphore *SemaphoreConfig `yaml:"semaphore,omitempty" json:"semaphore,omitempty"`
+	// Lock configuration for lock steps
+	Lock *LockConfig `yaml:"lock,omitempty" json:"lock,omitempty"`
+	// WaitGroup configuration for wait group steps
+	WaitGroup *WaitGroupConfig `yaml:"waitgroup,omitempty" json:"waitgroup,omitempty"`
+	// FanOut configuration for fan-out steps
+	FanOut *FanOutConfig `yaml:"fanout,omitempty" json:"fanout,omitempty"`
+	// FanIn configuration for fan-in steps
+	FanIn *FanInConfig `yaml:"fanin,omitempty" json:"fanin,omitempty"`
+	// ErrorWorkflow configuration for custom error workflow steps
+	ErrorWorkflow *ErrorWorkflowConfig `yaml:"error_workflow,omitempty" json:"error_workflow,omitempty"`
+	// Composite configuration for workflow composition steps
+	Composite *CompositeConfig `yaml:"composite,omitempty" json:"composite,omitempty"`
 }
 
 // StepType defines the type of workflow step
@@ -152,6 +180,45 @@ const (
 
 	// StepTypeForeach executes child steps for each item in a collection
 	StepTypeForeach StepType = "foreach"
+
+	// StepTypeSwitch executes child steps based on switch/case logic
+	StepTypeSwitch StepType = "switch"
+
+	// StepTypeTry executes child steps with try/catch/finally error handling
+	StepTypeTry StepType = "try"
+
+	// StepTypeWorkflow executes a nested workflow
+	StepTypeWorkflow StepType = "workflow"
+
+	// StepTypeBreak breaks out of the current loop
+	StepTypeBreak StepType = "break"
+
+	// StepTypeContinue continues to the next iteration of the current loop
+	StepTypeContinue StepType = "continue"
+
+	// StepTypeBarrier waits for all parallel executions to reach the barrier
+	StepTypeBarrier StepType = "barrier"
+
+	// StepTypeSemaphore acquires or releases a semaphore
+	StepTypeSemaphore StepType = "semaphore"
+
+	// StepTypeLock acquires or releases a named lock
+	StepTypeLock StepType = "lock"
+
+	// StepTypeWaitGroup waits for a group of operations to complete
+	StepTypeWaitGroup StepType = "waitgroup"
+
+	// StepTypeFanOut distributes work across multiple parallel branches
+	StepTypeFanOut StepType = "fanout"
+
+	// StepTypeFanIn collects and combines results from multiple parallel branches
+	StepTypeFanIn StepType = "fanin"
+
+	// StepTypeErrorWorkflow executes a custom error handling workflow
+	StepTypeErrorWorkflow StepType = "error_workflow"
+
+	// StepTypeComposite executes a composed workflow from multiple components
+	StepTypeComposite StepType = "composite"
 )
 
 // Condition defines execution conditions for conditional steps
@@ -214,8 +281,14 @@ const (
 	// OperatorGreaterThan checks if left > right
 	OperatorGreaterThan ComparisonOperator = "gt"
 
+	// OperatorGreaterThanOrEqual checks if left >= right
+	OperatorGreaterThanOrEqual ComparisonOperator = "gte"
+
 	// OperatorLessThan checks if left < right
 	OperatorLessThan ComparisonOperator = "lt"
+
+	// OperatorLessThanOrEqual checks if left <= right
+	OperatorLessThanOrEqual ComparisonOperator = "lte"
 
 	// OperatorContains checks if left contains right
 	OperatorContains ComparisonOperator = "contains"
@@ -1063,4 +1136,348 @@ type NodeOutput struct {
 	
 	// Metadata provides additional information about the execution
 	Metadata map[string]interface{} `json:"metadata,omitempty"`
+}
+
+// SwitchConfig defines configuration for switch workflow steps
+type SwitchConfig struct {
+	// Variable is the variable name to evaluate for switch logic
+	Variable string `yaml:"variable,omitempty" json:"variable,omitempty"`
+
+	// Expression allows for complex expression evaluation (alternative to Variable)
+	Expression string `yaml:"expression,omitempty" json:"expression,omitempty"`
+
+	// Cases define the different case branches
+	Cases []SwitchCase `yaml:"cases" json:"cases"`
+
+	// Default defines the default steps to execute if no case matches
+	Default []Step `yaml:"default,omitempty" json:"default,omitempty"`
+}
+
+// SwitchCase represents a single case in a switch statement
+type SwitchCase struct {
+	// Value is the value to match against the switch variable/expression
+	Value interface{} `yaml:"value" json:"value"`
+
+	// Steps define the steps to execute if this case matches
+	Steps []Step `yaml:"steps" json:"steps"`
+
+	// Condition allows for more complex matching logic (alternative to Value)
+	Condition *Condition `yaml:"condition,omitempty" json:"condition,omitempty"`
+}
+
+// TryConfig defines configuration for try/catch/finally workflow steps
+type TryConfig struct {
+	// Try defines the steps to execute in the try block
+	Try []Step `yaml:"try" json:"try"`
+
+	// Catch defines the error handling steps
+	Catch []CatchBlock `yaml:"catch,omitempty" json:"catch,omitempty"`
+
+	// Finally defines steps that always execute after try/catch
+	Finally []Step `yaml:"finally,omitempty" json:"finally,omitempty"`
+}
+
+// CatchBlock represents a catch block for specific error types
+type CatchBlock struct {
+	// ErrorCodes define which error codes this catch block handles
+	ErrorCodes []ErrorCode `yaml:"error_codes,omitempty" json:"error_codes,omitempty"`
+
+	// ErrorTypes define which error types this catch block handles (for string matching)
+	ErrorTypes []string `yaml:"error_types,omitempty" json:"error_types,omitempty"`
+
+	// Steps define the error handling steps
+	Steps []Step `yaml:"steps" json:"steps"`
+
+	// RethrowAfter determines if the error should be rethrown after handling
+	RethrowAfter bool `yaml:"rethrow_after,omitempty" json:"rethrow_after,omitempty"`
+}
+
+// WorkflowCallConfig defines configuration for nested workflow execution
+type WorkflowCallConfig struct {
+	// WorkflowName is the name of the workflow to execute
+	WorkflowName string `yaml:"workflow_name" json:"workflow_name"`
+
+	// WorkflowPath is the path to the workflow file (alternative to WorkflowName)
+	WorkflowPath string `yaml:"workflow_path,omitempty" json:"workflow_path,omitempty"`
+
+	// Parameters define input parameters to pass to the nested workflow
+	Parameters map[string]interface{} `yaml:"parameters,omitempty" json:"parameters,omitempty"`
+
+	// ParameterMappings define how to map current variables to nested workflow parameters
+	ParameterMappings map[string]string `yaml:"parameter_mappings,omitempty" json:"parameter_mappings,omitempty"`
+
+	// OutputMappings define how to map nested workflow outputs back to current variables
+	OutputMappings map[string]string `yaml:"output_mappings,omitempty" json:"output_mappings,omitempty"`
+
+	// Timeout defines maximum execution time for the nested workflow
+	Timeout time.Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+
+	// Async determines if the nested workflow should run asynchronously
+	Async bool `yaml:"async,omitempty" json:"async,omitempty"`
+
+	// WaitForCompletion determines if we should wait for async workflows to complete
+	WaitForCompletion bool `yaml:"wait_for_completion,omitempty" json:"wait_for_completion,omitempty"`
+}
+
+// BarrierConfig defines configuration for barrier synchronization
+type BarrierConfig struct {
+	// Name is the unique identifier for this barrier
+	Name string `yaml:"name" json:"name"`
+	// Count is the number of workflows/steps that must reach the barrier
+	Count int `yaml:"count" json:"count"`
+	// Timeout defines maximum time to wait for all participants
+	Timeout time.Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+}
+
+// SemaphoreConfig defines configuration for semaphore operations
+type SemaphoreConfig struct {
+	// Name is the unique identifier for this semaphore
+	Name string `yaml:"name" json:"name"`
+	// Action defines the operation: "acquire" or "release"
+	Action SemaphoreAction `yaml:"action" json:"action"`
+	// Count is the number of permits to acquire/release (default: 1)
+	Count int `yaml:"count,omitempty" json:"count,omitempty"`
+	// Timeout defines maximum time to wait for acquisition
+	Timeout time.Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+	// InitialPermits defines initial permits when creating the semaphore
+	InitialPermits int `yaml:"initial_permits,omitempty" json:"initial_permits,omitempty"`
+}
+
+// SemaphoreAction defines the type of semaphore operation
+type SemaphoreAction string
+
+const (
+	SemaphoreActionAcquire SemaphoreAction = "acquire"
+	SemaphoreActionRelease SemaphoreAction = "release"
+)
+
+// LockConfig defines configuration for lock operations
+type LockConfig struct {
+	// Name is the unique identifier for this lock
+	Name string `yaml:"name" json:"name"`
+	// Action defines the operation: "acquire" or "release"
+	Action LockAction `yaml:"action" json:"action"`
+	// Timeout defines maximum time to wait for acquisition
+	Timeout time.Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+	// Exclusive determines if this is an exclusive (write) lock or shared (read) lock
+	Exclusive bool `yaml:"exclusive,omitempty" json:"exclusive,omitempty"`
+}
+
+// LockAction defines the type of lock operation
+type LockAction string
+
+const (
+	LockActionAcquire LockAction = "acquire"
+	LockActionRelease LockAction = "release"
+)
+
+// WaitGroupConfig defines configuration for wait group operations
+type WaitGroupConfig struct {
+	// Name is the unique identifier for this wait group
+	Name string `yaml:"name" json:"name"`
+	// Action defines the operation: "add", "done", or "wait"
+	Action WaitGroupAction `yaml:"action" json:"action"`
+	// Count is the number to add to the wait group (for "add" action)
+	Count int `yaml:"count,omitempty" json:"count,omitempty"`
+	// Timeout defines maximum time to wait for completion
+	Timeout time.Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+}
+
+// WaitGroupAction defines the type of wait group operation
+type WaitGroupAction string
+
+const (
+	WaitGroupActionAdd  WaitGroupAction = "add"
+	WaitGroupActionDone WaitGroupAction = "done"
+	WaitGroupActionWait WaitGroupAction = "wait"
+)
+
+// FanOutConfig defines configuration for fan-out operations
+type FanOutConfig struct {
+	// DataSource defines the variable containing data to distribute
+	DataSource string `yaml:"data_source" json:"data_source"`
+	// WorkerTemplate defines the step template to execute for each data item
+	WorkerTemplate Step `yaml:"worker_template" json:"worker_template"`
+	// MaxConcurrency limits the number of concurrent workers (0 = unlimited)
+	MaxConcurrency int `yaml:"max_concurrency,omitempty" json:"max_concurrency,omitempty"`
+	// ResultVariable defines where to store individual worker results
+	ResultVariable string `yaml:"result_variable,omitempty" json:"result_variable,omitempty"`
+	// Timeout defines maximum time to wait for all workers to complete
+	Timeout time.Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+}
+
+// FanInConfig defines configuration for fan-in operations
+type FanInConfig struct {
+	// Sources defines the variables to collect from
+	Sources []string `yaml:"sources" json:"sources"`
+	// Strategy defines how to combine the results
+	Strategy FanInStrategy `yaml:"strategy" json:"strategy"`
+	// OutputVariable defines where to store the combined result
+	OutputVariable string `yaml:"output_variable" json:"output_variable"`
+	// Filter defines optional filtering expression for results
+	Filter string `yaml:"filter,omitempty" json:"filter,omitempty"`
+	// Transform defines optional transformation expression for results
+	Transform string `yaml:"transform,omitempty" json:"transform,omitempty"`
+}
+
+// FanInStrategy defines how to combine fan-in results
+type FanInStrategy string
+
+const (
+	// FanInStrategyMerge merges all results into a single array
+	FanInStrategyMerge FanInStrategy = "merge"
+	// FanInStrategyConcat concatenates string results
+	FanInStrategyConcat FanInStrategy = "concat"
+	// FanInStrategySum sums numeric results
+	FanInStrategySum FanInStrategy = "sum"
+	// FanInStrategyFirst takes the first non-nil result
+	FanInStrategyFirst FanInStrategy = "first"
+	// FanInStrategyLast takes the last non-nil result
+	FanInStrategyLast FanInStrategy = "last"
+	// FanInStrategyCustom applies a custom aggregation function
+	FanInStrategyCustom FanInStrategy = "custom"
+)
+
+// ErrorWorkflowConfig defines configuration for custom error workflow execution
+type ErrorWorkflowConfig struct {
+	// WorkflowName is the name of the error handling workflow to execute
+	WorkflowName string `yaml:"workflow_name,omitempty" json:"workflow_name,omitempty"`
+	// WorkflowPath is the file path to the error handling workflow
+	WorkflowPath string `yaml:"workflow_path,omitempty" json:"workflow_path,omitempty"`
+	// ErrorCodes specifies which error codes this workflow should handle
+	ErrorCodes []ErrorCode `yaml:"error_codes,omitempty" json:"error_codes,omitempty"`
+	// ErrorTypes specifies which error types (by message content) to handle
+	ErrorTypes []string `yaml:"error_types,omitempty" json:"error_types,omitempty"`
+	// Priority determines the order of error workflow execution (higher = first)
+	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
+	// Parameters to pass to the error handling workflow
+	Parameters map[string]interface{} `yaml:"parameters,omitempty" json:"parameters,omitempty"`
+	// ParameterMappings maps variables from the current workflow to error workflow parameters
+	ParameterMappings map[string]string `yaml:"parameter_mappings,omitempty" json:"parameter_mappings,omitempty"`
+	// OutputMappings maps variables from the error workflow back to the current workflow
+	OutputMappings map[string]string `yaml:"output_mappings,omitempty" json:"output_mappings,omitempty"`
+	// RecoveryAction defines what to do after the error workflow completes
+	RecoveryAction RecoveryAction `yaml:"recovery_action,omitempty" json:"recovery_action,omitempty"`
+	// Timeout defines maximum time to wait for error workflow completion
+	Timeout time.Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+	// Async determines if the error workflow should run asynchronously
+	Async bool `yaml:"async,omitempty" json:"async,omitempty"`
+}
+
+// RecoveryAction defines what to do after an error workflow completes
+type RecoveryAction string
+
+const (
+	// RecoveryActionContinue continues normal workflow execution
+	RecoveryActionContinue RecoveryAction = "continue"
+	// RecoveryActionRetry retries the failed step
+	RecoveryActionRetry RecoveryAction = "retry"
+	// RecoveryActionSkip skips the failed step and continues
+	RecoveryActionSkip RecoveryAction = "skip"
+	// RecoveryActionFail fails the workflow (default behavior)
+	RecoveryActionFail RecoveryAction = "fail"
+	// RecoveryActionAbort immediately stops workflow execution
+	RecoveryActionAbort RecoveryAction = "abort"
+)
+
+// CompositeConfig defines configuration for workflow composition
+type CompositeConfig struct {
+	// Components defines the workflow components to compose
+	Components []WorkflowComponent `yaml:"components" json:"components"`
+	// Strategy defines how to compose the components
+	Strategy CompositionStrategy `yaml:"strategy" json:"strategy"`
+	// DataFlow defines how data flows between components
+	DataFlow []DataFlowMapping `yaml:"data_flow,omitempty" json:"data_flow,omitempty"`
+	// FailurePolicy defines how to handle component failures
+	FailurePolicy CompositeFailurePolicy `yaml:"failure_policy,omitempty" json:"failure_policy,omitempty"`
+	// Timeout defines maximum time for the entire composition
+	Timeout time.Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+	// MaxConcurrency limits concurrent component execution
+	MaxConcurrency int `yaml:"max_concurrency,omitempty" json:"max_concurrency,omitempty"`
+}
+
+// WorkflowComponent defines a single component in a workflow composition
+type WorkflowComponent struct {
+	// Name is the unique identifier for this component
+	Name string `yaml:"name" json:"name"`
+	// WorkflowName is the name of the workflow to execute
+	WorkflowName string `yaml:"workflow_name,omitempty" json:"workflow_name,omitempty"`
+	// WorkflowPath is the file path to the workflow
+	WorkflowPath string `yaml:"workflow_path,omitempty" json:"workflow_path,omitempty"`
+	// Parameters to pass to the component workflow
+	Parameters map[string]interface{} `yaml:"parameters,omitempty" json:"parameters,omitempty"`
+	// ParameterMappings maps variables to component parameters
+	ParameterMappings map[string]string `yaml:"parameter_mappings,omitempty" json:"parameter_mappings,omitempty"`
+	// OutputMappings maps component outputs back to variables
+	OutputMappings map[string]string `yaml:"output_mappings,omitempty" json:"output_mappings,omitempty"`
+	// DependsOn defines component dependencies
+	DependsOn []string `yaml:"depends_on,omitempty" json:"depends_on,omitempty"`
+	// Condition defines when this component should execute
+	Condition *Condition `yaml:"condition,omitempty" json:"condition,omitempty"`
+	// Timeout defines maximum time for this component
+	Timeout time.Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+	// Async determines if this component runs asynchronously
+	Async bool `yaml:"async,omitempty" json:"async,omitempty"`
+	// RetryPolicy defines retry behavior for this component
+	RetryPolicy *RetryPolicy `yaml:"retry_policy,omitempty" json:"retry_policy,omitempty"`
+}
+
+// CompositionStrategy defines how workflow components are composed
+type CompositionStrategy string
+
+const (
+	// CompositionStrategySequential executes components one by one
+	CompositionStrategySequential CompositionStrategy = "sequential"
+	// CompositionStrategyParallel executes all components in parallel
+	CompositionStrategyParallel CompositionStrategy = "parallel"
+	// CompositionStrategyDependency executes components based on dependencies
+	CompositionStrategyDependency CompositionStrategy = "dependency"
+	// CompositionStrategyPipeline creates a data processing pipeline
+	CompositionStrategyPipeline CompositionStrategy = "pipeline"
+	// CompositionStrategyConditional executes components based on conditions
+	CompositionStrategyConditional CompositionStrategy = "conditional"
+)
+
+// DataFlowMapping defines how data flows between workflow components
+type DataFlowMapping struct {
+	// FromComponent is the source component name
+	FromComponent string `yaml:"from_component" json:"from_component"`
+	// FromVariable is the source variable name
+	FromVariable string `yaml:"from_variable" json:"from_variable"`
+	// ToComponent is the target component name
+	ToComponent string `yaml:"to_component" json:"to_component"`
+	// ToVariable is the target variable name
+	ToVariable string `yaml:"to_variable" json:"to_variable"`
+	// Transform defines optional data transformation
+	Transform string `yaml:"transform,omitempty" json:"transform,omitempty"`
+	// Condition defines when this mapping should apply
+	Condition *Condition `yaml:"condition,omitempty" json:"condition,omitempty"`
+}
+
+// CompositeFailurePolicy defines how to handle failures in workflow composition
+type CompositeFailurePolicy string
+
+const (
+	// CompositeFailurePolicyFail fails the entire composition on any component failure
+	CompositeFailurePolicyFail CompositeFailurePolicy = "fail"
+	// CompositeFailurePolicySkip skips failed components and continues
+	CompositeFailurePolicySkip CompositeFailurePolicy = "skip"
+	// CompositeFailurePolicyRetry retries failed components
+	CompositeFailurePolicyRetry CompositeFailurePolicy = "retry"
+	// CompositeFailurePolicyIsolate isolates failed components from affecting others
+	CompositeFailurePolicyIsolate CompositeFailurePolicy = "isolate"
+)
+
+// RetryPolicy defines retry behavior for workflow components
+type RetryPolicy struct {
+	// MaxAttempts is the maximum number of retry attempts
+	MaxAttempts int `yaml:"max_attempts" json:"max_attempts"`
+	// Delay is the initial delay between retries
+	Delay time.Duration `yaml:"delay" json:"delay"`
+	// BackoffMultiplier increases delay between attempts
+	BackoffMultiplier float64 `yaml:"backoff_multiplier,omitempty" json:"backoff_multiplier,omitempty"`
+	// MaxDelay is the maximum delay between retries
+	MaxDelay time.Duration `yaml:"max_delay,omitempty" json:"max_delay,omitempty"`
+	// RetryableErrors defines which errors should trigger retries
+	RetryableErrors []string `yaml:"retryable_errors,omitempty" json:"retryable_errors,omitempty"`
 }
