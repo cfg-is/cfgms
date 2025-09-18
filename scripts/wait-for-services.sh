@@ -34,13 +34,13 @@ WAIT_INTERVAL=5
 # Function to check PostgreSQL
 check_postgres() {
     echo -n "Checking PostgreSQL... "
-    PGPASSWORD=$POSTGRES_PASSWORD psql -h $POSTGRES_HOST -p $POSTGRES_PORT -U $POSTGRES_USER -d $POSTGRES_DB -c "SELECT 1;" > /dev/null 2>&1
+    docker exec cfgms-postgres-test psql -U $POSTGRES_USER -d $POSTGRES_DB -c "SELECT 1;" > /dev/null 2>&1
 }
 
 # Function to check TimescaleDB
 check_timescaledb() {
     echo -n "Checking TimescaleDB... "
-    PGPASSWORD=$TIMESCALEDB_PASSWORD psql -h $TIMESCALEDB_HOST -p $TIMESCALEDB_PORT -U $TIMESCALEDB_USER -d $TIMESCALEDB_DB -c "SELECT extversion FROM pg_extension WHERE extname='timescaledb';" > /dev/null 2>&1
+    docker exec cfgms-timescaledb-test psql -U $TIMESCALEDB_USER -d $TIMESCALEDB_DB -c "SELECT extversion FROM pg_extension WHERE extname='timescaledb';" > /dev/null 2>&1
 }
 
 # Function to check Gitea
@@ -84,8 +84,8 @@ echo "🔄 Testing service connectivity..."
 
 if wait_for_service "PostgreSQL" check_postgres; then
     echo "📊 Testing PostgreSQL functionality..."
-    PGPASSWORD=$POSTGRES_PASSWORD psql -h $POSTGRES_HOST -p $POSTGRES_PORT -U $POSTGRES_USER -d $POSTGRES_DB -c "
-        SELECT 
+    docker exec cfgms-postgres-test psql -U $POSTGRES_USER -d $POSTGRES_DB -c "
+        SELECT
             'PostgreSQL' as service,
             version() as version,
             current_database() as database,
@@ -98,8 +98,8 @@ fi
 
 if wait_for_service "TimescaleDB" check_timescaledb; then
     echo "⏰ Testing TimescaleDB functionality..."
-    PGPASSWORD=$TIMESCALEDB_PASSWORD psql -h $TIMESCALEDB_HOST -p $TIMESCALEDB_PORT -U $TIMESCALEDB_USER -d $TIMESCALEDB_DB -c "
-        SELECT 
+    docker exec cfgms-timescaledb-test psql -U $TIMESCALEDB_USER -d $TIMESCALEDB_DB -c "
+        SELECT
             'TimescaleDB' as service,
             extversion as version,
             current_database() as database,

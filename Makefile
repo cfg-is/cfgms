@@ -901,7 +901,12 @@ test-integration-setup:
 	@echo ""
 	@echo "⏳ Waiting for services to be ready..."
 	@sleep 5  # Brief pause before health checks
-	@./scripts/wait-for-services.sh
+	@if [ -f .env.test ]; then \
+		set -a && . ./.env.test && set +a && ./scripts/wait-for-services.sh; \
+	else \
+		echo "⚠️  .env.test not found. Using default credentials."; \
+		./scripts/wait-for-services.sh; \
+	fi
 	@echo ""
 	@echo "🔧 Setting up test repositories..."
 	@docker compose -f docker-compose.test.yml exec -T git-server-test /docker-entrypoint-init.d/setup-test-repos.sh || { \
@@ -937,7 +942,12 @@ test-integration-status:
 	@docker compose -f docker-compose.test.yml ps
 	@echo ""
 	@echo "🔍 Service Health Checks:"
-	@./scripts/wait-for-services.sh || echo "⚠️  Some services may not be ready"
+	@if [ -f .env.test ]; then \
+		set -a && . ./.env.test && set +a && ./scripts/wait-for-services.sh || echo "⚠️  Some services may not be ready"; \
+	else \
+		echo "⚠️  .env.test not found. Using default credentials."; \
+		./scripts/wait-for-services.sh || echo "⚠️  Some services may not be ready"; \
+	fi
 
 # Run integration tests against real storage providers
 test-with-real-storage: 
@@ -945,7 +955,12 @@ test-with-real-storage:
 	@echo "=================================================="
 	@echo "Testing with Docker-based PostgreSQL and Gitea..."
 	@echo ""
-	@./scripts/wait-for-services.sh
+	@if [ -f .env.test ]; then \
+		set -a && . ./.env.test && set +a && ./scripts/wait-for-services.sh; \
+	else \
+		echo "⚠️  .env.test not found. Using default credentials."; \
+		./scripts/wait-for-services.sh; \
+	fi
 	@echo ""
 	@echo "🔬 Running storage provider validation tests..."
 	@if [ -f .env.test ]; then \
@@ -963,7 +978,12 @@ test-with-real-storage:
 test-integration-db:
 	@echo "📊 Testing Database Storage Provider"
 	@echo "==================================="
-	@./scripts/wait-for-services.sh
+	@if [ -f .env.test ]; then \
+		set -a && . ./.env.test && set +a && ./scripts/wait-for-services.sh; \
+	else \
+		echo "⚠️  .env.test not found. Using default credentials."; \
+		./scripts/wait-for-services.sh; \
+	fi
 	CFGMS_TEST_DB_HOST=localhost \
 	CFGMS_TEST_DB_PORT=5433 \
 	CFGMS_TEST_DB_PASSWORD=cfgms_test_password \
@@ -973,7 +993,12 @@ test-integration-db:
 test-integration-git:
 	@echo "📁 Testing Git Storage Provider"
 	@echo "==============================="
-	@./scripts/wait-for-services.sh
+	@if [ -f .env.test ]; then \
+		set -a && . ./.env.test && set +a && ./scripts/wait-for-services.sh; \
+	else \
+		echo "⚠️  .env.test not found. Using default credentials."; \
+		./scripts/wait-for-services.sh; \
+	fi
 	CFGMS_TEST_GITEA_URL=http://localhost:3001 \
 	CFGMS_TEST_GITEA_USER=cfgms_test \
 	CFGMS_TEST_GITEA_PASSWORD=cfgms_test_password \
