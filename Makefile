@@ -897,7 +897,7 @@ test-integration-setup:
 	@echo "=============================================="
 	@./scripts/generate-test-credentials.sh
 	@echo "Starting PostgreSQL, TimescaleDB, and Gitea test services..."
-	docker compose -f docker-compose.test.yml -f docker-compose.test.override.yml up -d postgres-test timescaledb-test git-server-test
+	@set -a && . ./.env.test && set +a && docker compose -f docker-compose.test.yml -f docker-compose.test.override.yml up -d postgres-test timescaledb-test git-server-test
 	@echo ""
 	@echo "⏳ Waiting for services to be ready..."
 	@sleep 5  # Brief pause before health checks
@@ -909,7 +909,7 @@ test-integration-setup:
 	fi
 	@echo ""
 	@echo "🔧 Setting up test repositories..."
-	@docker compose -f docker-compose.test.yml exec -T git-server-test /docker-entrypoint-init.d/setup-test-repos.sh || { \
+	@set -a && . ./.env.test && set +a && docker compose -f docker-compose.test.yml exec -T git-server-test /docker-entrypoint-init.d/setup-test-repos.sh || { \
 		echo "📁 Setting up repositories manually..."; \
 		sleep 10; \
 		curl -X POST -u "cfgms_test:$$CFGMS_TEST_GITEA_PASSWORD" \
