@@ -281,9 +281,25 @@ func (entry LogEntry) ToSyslogFormat() string {
 		structuredData.WriteString(fmt.Sprintf(` trace_id="%s"`, entry.TraceID))
 	}
 	
-	// Add custom fields
-	for key, value := range entry.Fields {
-		structuredData.WriteString(fmt.Sprintf(` %s="%v"`, key, value))
+	// Add custom fields in sorted order for deterministic output
+	if len(entry.Fields) > 0 {
+		// Get keys and sort them for deterministic output
+		keys := make([]string, 0, len(entry.Fields))
+		for key := range entry.Fields {
+			keys = append(keys, key)
+		}
+		// Sort keys to ensure deterministic field order
+		for i := 0; i < len(keys); i++ {
+			for j := i + 1; j < len(keys); j++ {
+				if keys[i] > keys[j] {
+					keys[i], keys[j] = keys[j], keys[i]
+				}
+			}
+		}
+
+		for _, key := range keys {
+			structuredData.WriteString(fmt.Sprintf(` %s="%v"`, key, entry.Fields[key]))
+		}
 	}
 	
 	structuredData.WriteString("]")
