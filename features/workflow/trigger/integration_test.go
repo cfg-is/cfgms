@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -43,6 +44,10 @@ func NewTestStorageProvider() *TestStorageProvider {
 
 func (t *TestStorageProvider) Initialize(ctx context.Context, config map[string]interface{}) error {
 	return nil
+}
+
+func (t *TestStorageProvider) Available() (bool, error) {
+	return true, nil
 }
 
 func (t *TestStorageProvider) Store(ctx context.Context, key string, data []byte) error {
@@ -90,6 +95,47 @@ func (t *TestStorageProvider) Exists(ctx context.Context, key string) (bool, err
 
 func (t *TestStorageProvider) Close() error {
 	return nil
+}
+
+// Additional methods required by StorageProvider interface
+func (t *TestStorageProvider) Name() string {
+	return "test"
+}
+
+func (t *TestStorageProvider) Description() string {
+	return "Test storage provider for integration tests"
+}
+
+func (t *TestStorageProvider) CreateClientTenantStore(config map[string]interface{}) (interfaces.ClientTenantStore, error) {
+	return nil, fmt.Errorf("not implemented in test provider")
+}
+
+func (t *TestStorageProvider) CreateConfigStore(config map[string]interface{}) (interfaces.ConfigStore, error) {
+	return nil, fmt.Errorf("not implemented in test provider")
+}
+
+func (t *TestStorageProvider) CreateAuditStore(config map[string]interface{}) (interfaces.AuditStore, error) {
+	return nil, fmt.Errorf("not implemented in test provider")
+}
+
+func (t *TestStorageProvider) CreateRBACStore(config map[string]interface{}) (interfaces.RBACStore, error) {
+	return nil, fmt.Errorf("not implemented in test provider")
+}
+
+func (t *TestStorageProvider) CreateRuntimeStore(config map[string]interface{}) (interfaces.RuntimeStore, error) {
+	return nil, fmt.Errorf("not implemented in test provider")
+}
+
+func (t *TestStorageProvider) GetCapabilities() interfaces.ProviderCapabilities {
+	return interfaces.ProviderCapabilities{
+		MaxBatchSize:          100,
+		MaxConfigSize:         1024,
+		MaxAuditRetentionDays: 30,
+	}
+}
+
+func (t *TestStorageProvider) GetVersion() string {
+	return "1.0.0-test"
 }
 
 // TestWorkflowTrigger implements a test workflow trigger that records executions
@@ -149,17 +195,17 @@ func setupIntegrationTest(t *testing.T) *IntegrationTestSuite {
 	storage := NewTestStorageProvider()
 	workflowTrigger := NewTestWorkflowTrigger()
 
-	// Create scheduler
-	scheduler := NewCronScheduler(workflowTrigger)
-
-	// Create manager
+	// Create manager first (we'll create scheduler separately)
 	manager := NewTriggerManager(
 		storage,
-		scheduler,
+		nil, // scheduler will be set later
 		nil, // webhook handler will be set later
 		nil, // siem integration will be set later
 		workflowTrigger,
 	)
+
+	// Create scheduler
+	scheduler := NewCronScheduler(manager, workflowTrigger)
 
 	// Create webhook handler
 	webhookHandler := NewHTTPWebhookHandler(manager, workflowTrigger, "localhost", 0)
@@ -168,6 +214,7 @@ func setupIntegrationTest(t *testing.T) *IntegrationTestSuite {
 	siemProcessor := NewSIEMProcessor(manager, workflowTrigger)
 
 	// Update manager with all components
+	manager.scheduler = scheduler
 	manager.webhookHandler = webhookHandler
 	manager.siemIntegration = siemProcessor
 
@@ -430,7 +477,7 @@ func TestTriggerSystem_FullIntegration(t *testing.T) {
 
 		resp, err = http.Post(suite.server.URL+"/triggers/api-integration-1/execute", "application/json", strings.NewReader(string(executeJSON)))
 		require.NoError(t, err)
-		require.Equal(t, http.StatusOK, resp.StatusStatus)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
 
 		var execution TriggerExecution
 		err = json.NewDecoder(resp.Body).Decode(&execution)

@@ -8,7 +8,6 @@ import (
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
-	"github.com/stretchr/testify/require"
 )
 
 // MockStorageProvider implements StorageProvider for testing
@@ -46,9 +45,60 @@ func (m *MockStorageProvider) Exists(ctx context.Context, key string) (bool, err
 	return args.Bool(0), args.Error(1)
 }
 
+func (m *MockStorageProvider) Available() (bool, error) {
+	args := m.Called()
+	return args.Bool(0), args.Error(1)
+}
+
 func (m *MockStorageProvider) Close() error {
 	args := m.Called()
 	return args.Error(0)
+}
+
+// Additional methods required by StorageProvider interface
+func (m *MockStorageProvider) Name() string {
+	args := m.Called()
+	return args.String(0)
+}
+
+func (m *MockStorageProvider) Description() string {
+	args := m.Called()
+	return args.String(0)
+}
+
+func (m *MockStorageProvider) CreateClientTenantStore(config map[string]interface{}) (interfaces.ClientTenantStore, error) {
+	args := m.Called(config)
+	return args.Get(0).(interfaces.ClientTenantStore), args.Error(1)
+}
+
+func (m *MockStorageProvider) CreateConfigStore(config map[string]interface{}) (interfaces.ConfigStore, error) {
+	args := m.Called(config)
+	return args.Get(0).(interfaces.ConfigStore), args.Error(1)
+}
+
+func (m *MockStorageProvider) CreateAuditStore(config map[string]interface{}) (interfaces.AuditStore, error) {
+	args := m.Called(config)
+	return args.Get(0).(interfaces.AuditStore), args.Error(1)
+}
+
+func (m *MockStorageProvider) CreateRBACStore(config map[string]interface{}) (interfaces.RBACStore, error) {
+	args := m.Called(config)
+	return args.Get(0).(interfaces.RBACStore), args.Error(1)
+}
+
+func (m *MockStorageProvider) CreateRuntimeStore(config map[string]interface{}) (interfaces.RuntimeStore, error) {
+	args := m.Called(config)
+	return args.Get(0).(interfaces.RuntimeStore), args.Error(1)
+}
+
+func (m *MockStorageProvider) GetCapabilities() interfaces.ProviderCapabilities {
+	args := m.Called()
+	return args.Get(0).(interfaces.ProviderCapabilities)
+}
+
+func (m *MockStorageProvider) GetVersion() string {
+	args := m.Called()
+	return args.String(0)
 }
 
 // MockScheduler implements Scheduler for testing
@@ -146,6 +196,8 @@ func TestTriggerManagerImpl_NewTriggerManager(t *testing.T) {
 	mockSIEMIntegration := &MockSIEMIntegration{}
 	mockWorkflowTrigger := &MockWorkflowTrigger{}
 
+	mockStorage.On("Available").Return(true, nil)
+
 	manager := NewTriggerManager(
 		mockStorage,
 		mockScheduler,
@@ -171,6 +223,8 @@ func TestTriggerManagerImpl_StartStop(t *testing.T) {
 	mockWebhookHandler := &MockWebhookHandler{}
 	mockSIEMIntegration := &MockSIEMIntegration{}
 	mockWorkflowTrigger := &MockWorkflowTrigger{}
+
+	mockStorage.On("Available").Return(true, nil)
 
 	manager := NewTriggerManager(
 		mockStorage,
@@ -225,6 +279,8 @@ func TestTriggerManagerImpl_CreateTrigger(t *testing.T) {
 	mockWebhookHandler := &MockWebhookHandler{}
 	mockSIEMIntegration := &MockSIEMIntegration{}
 	mockWorkflowTrigger := &MockWorkflowTrigger{}
+
+	mockStorage.On("Available").Return(true, nil)
 
 	manager := NewTriggerManager(
 		mockStorage,
@@ -403,6 +459,8 @@ func TestTriggerManagerImpl_UpdateTrigger(t *testing.T) {
 	mockSIEMIntegration := &MockSIEMIntegration{}
 	mockWorkflowTrigger := &MockWorkflowTrigger{}
 
+	mockStorage.On("Available").Return(true, nil)
+
 	manager := NewTriggerManager(
 		mockStorage,
 		mockScheduler,
@@ -523,6 +581,8 @@ func TestTriggerManagerImpl_DeleteTrigger(t *testing.T) {
 	mockWebhookHandler := &MockWebhookHandler{}
 	mockSIEMIntegration := &MockSIEMIntegration{}
 	mockWorkflowTrigger := &MockWorkflowTrigger{}
+
+	mockStorage.On("Available").Return(true, nil)
 
 	manager := NewTriggerManager(
 		mockStorage,
@@ -656,6 +716,8 @@ func TestTriggerManagerImpl_GetTrigger(t *testing.T) {
 	mockSIEMIntegration := &MockSIEMIntegration{}
 	mockWorkflowTrigger := &MockWorkflowTrigger{}
 
+	mockStorage.On("Available").Return(true, nil)
+
 	manager := NewTriggerManager(
 		mockStorage,
 		mockScheduler,
@@ -719,6 +781,8 @@ func TestTriggerManagerImpl_ListTriggers(t *testing.T) {
 	mockWebhookHandler := &MockWebhookHandler{}
 	mockSIEMIntegration := &MockSIEMIntegration{}
 	mockWorkflowTrigger := &MockWorkflowTrigger{}
+
+	mockStorage.On("Available").Return(true, nil)
 
 	manager := NewTriggerManager(
 		mockStorage,
@@ -853,6 +917,8 @@ func TestTriggerManagerImpl_EnableDisableTrigger(t *testing.T) {
 	mockSIEMIntegration := &MockSIEMIntegration{}
 	mockWorkflowTrigger := &MockWorkflowTrigger{}
 
+	mockStorage.On("Available").Return(true, nil)
+
 	manager := NewTriggerManager(
 		mockStorage,
 		mockScheduler,
@@ -919,6 +985,8 @@ func TestTriggerManagerImpl_ExecuteTrigger(t *testing.T) {
 	mockWebhookHandler := &MockWebhookHandler{}
 	mockSIEMIntegration := &MockSIEMIntegration{}
 	mockWorkflowTrigger := &MockWorkflowTrigger{}
+
+	mockStorage.On("Available").Return(true, nil)
 
 	manager := NewTriggerManager(
 		mockStorage,
