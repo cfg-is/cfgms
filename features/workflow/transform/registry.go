@@ -317,11 +317,7 @@ func (r *DefaultTransformRegistry) validateTransform(transform Transform) error 
 	}
 
 	// Try to get schema (this validates the transform implements the interface correctly)
-	schema := transform.GetSchema()
-	if schema.InputSchema.Type == "" && schema.OutputSchema.Type == "" {
-		// This is just a warning - transforms can have flexible schemas
-		// But they should at least define something
-	}
+	_ = transform.GetSchema() // Validation that the interface is implemented correctly
 
 	// Test basic validation (this ensures the Validate method works)
 	if err := transform.Validate(nil); err != nil {

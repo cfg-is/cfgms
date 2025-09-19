@@ -122,7 +122,7 @@ func TestAPIHandler_HandleCreateTrigger(t *testing.T) {
 			if str, ok := tt.requestBody.(string); ok {
 				body.WriteString(str)
 			} else {
-				json.NewEncoder(&body).Encode(tt.requestBody)
+				_ = json.NewEncoder(&body).Encode(tt.requestBody)
 			}
 
 			req, err := http.NewRequest("POST", "/triggers", &body)
@@ -150,11 +150,6 @@ func TestAPIHandler_HandleCreateTrigger(t *testing.T) {
 }
 
 func TestAPIHandler_HandleListTriggers(t *testing.T) {
-	mockTriggerManager := &MockTriggerManager{}
-	handler := NewAPIHandler(mockTriggerManager)
-	router := mux.NewRouter()
-	handler.RegisterRoutes(router)
-
 	testTriggers := []*Trigger{
 		{
 			ID:           "trigger-1",
@@ -175,7 +170,7 @@ func TestAPIHandler_HandleListTriggers(t *testing.T) {
 	tests := []struct {
 		name           string
 		queryParams    string
-		setupMocks     func()
+		setupMocks     func(*MockTriggerManager)
 		expectedStatus int
 		expectedCount  int
 		expectedError  string
@@ -183,8 +178,8 @@ func TestAPIHandler_HandleListTriggers(t *testing.T) {
 		{
 			name:        "list all triggers",
 			queryParams: "",
-			setupMocks: func() {
-				mockTriggerManager.On("ListTriggers", mock.Anything, mock.Anything).Return(testTriggers, nil)
+			setupMocks: func(m *MockTriggerManager) {
+				m.On("ListTriggers", mock.Anything, mock.Anything).Return(testTriggers, nil)
 			},
 			expectedStatus: http.StatusOK,
 			expectedCount:  2,
@@ -192,8 +187,8 @@ func TestAPIHandler_HandleListTriggers(t *testing.T) {
 		{
 			name:        "list with type filter",
 			queryParams: "?type=schedule",
-			setupMocks: func() {
-				mockTriggerManager.On("ListTriggers", mock.Anything, mock.Anything).Return([]*Trigger{testTriggers[0]}, nil)
+			setupMocks: func(m *MockTriggerManager) {
+				m.On("ListTriggers", mock.Anything, mock.Anything).Return([]*Trigger{testTriggers[0]}, nil)
 			},
 			expectedStatus: http.StatusOK,
 			expectedCount:  1,
@@ -201,8 +196,8 @@ func TestAPIHandler_HandleListTriggers(t *testing.T) {
 		{
 			name:        "list with limit",
 			queryParams: "?limit=1",
-			setupMocks: func() {
-				mockTriggerManager.On("ListTriggers", mock.Anything, mock.Anything).Return([]*Trigger{testTriggers[0]}, nil)
+			setupMocks: func(m *MockTriggerManager) {
+				m.On("ListTriggers", mock.Anything, mock.Anything).Return([]*Trigger{testTriggers[0]}, nil)
 			},
 			expectedStatus: http.StatusOK,
 			expectedCount:  1,
@@ -210,15 +205,15 @@ func TestAPIHandler_HandleListTriggers(t *testing.T) {
 		{
 			name:        "invalid query parameter",
 			queryParams: "?limit=invalid",
-			setupMocks:  func() {},
+			setupMocks:  func(m *MockTriggerManager) {},
 			expectedStatus: http.StatusBadRequest,
 			expectedError:  "Invalid query parameters",
 		},
 		{
 			name:        "trigger manager error",
 			queryParams: "",
-			setupMocks: func() {
-				mockTriggerManager.On("ListTriggers", mock.Anything, mock.Anything).Return(nil, fmt.Errorf("list failed"))
+			setupMocks: func(m *MockTriggerManager) {
+				m.On("ListTriggers", mock.Anything, mock.Anything).Return(nil, fmt.Errorf("list failed"))
 			},
 			expectedStatus: http.StatusInternalServerError,
 			expectedError:  "Failed to list triggers",
@@ -227,9 +222,13 @@ func TestAPIHandler_HandleListTriggers(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Reset mocks
-			mockTriggerManager.ExpectedCalls = nil
-			tt.setupMocks()
+			// Create fresh mock for each test
+			mockTriggerManager := &MockTriggerManager{}
+			handler := NewAPIHandler(mockTriggerManager)
+			router := mux.NewRouter()
+			handler.RegisterRoutes(router)
+
+			tt.setupMocks(mockTriggerManager)
 
 			req, err := http.NewRequest("GET", "/triggers"+tt.queryParams, nil)
 			require.NoError(t, err)
@@ -393,7 +392,7 @@ func TestAPIHandler_HandleUpdateTrigger(t *testing.T) {
 			if str, ok := tt.requestBody.(string); ok {
 				body.WriteString(str)
 			} else {
-				json.NewEncoder(&body).Encode(tt.requestBody)
+				_ = json.NewEncoder(&body).Encode(tt.requestBody)
 			}
 
 			req, err := http.NewRequest("PUT", "/triggers/"+tt.triggerID, &body)
@@ -640,7 +639,7 @@ func TestAPIHandler_HandleExecuteTrigger(t *testing.T) {
 			tt.setupMocks()
 
 			var body bytes.Buffer
-			json.NewEncoder(&body).Encode(tt.requestBody)
+			_ = json.NewEncoder(&body).Encode(tt.requestBody)
 
 			req, err := http.NewRequest("POST", "/triggers/"+tt.triggerID+"/execute", &body)
 			require.NoError(t, err)

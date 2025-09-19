@@ -293,7 +293,7 @@ func (e *DefaultTransformExecutor) ExecuteChain(ctx context.Context, chain []Tra
 				warning := fmt.Sprintf("Step %d (%s) failed, skipping remaining steps: %s", i+1, step.Name, stepResult.Error)
 				allWarnings = append(allWarnings, warning)
 				e.logger.Warn("Transform step failed, skipping chain", "step", i+1, "transform", step.Name, "error", stepResult.Error)
-				break
+				goto skipRemaining
 
 			case ErrorActionRetry:
 				// Retry logic is handled within Execute method
@@ -333,6 +333,7 @@ func (e *DefaultTransformExecutor) ExecuteChain(ctx context.Context, chain []Tra
 		lastResult = stepResult
 	}
 
+skipRemaining:
 	// Build final result
 	finalResult := TransformResult{
 		Data:          currentData,

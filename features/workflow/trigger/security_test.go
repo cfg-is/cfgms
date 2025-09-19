@@ -770,6 +770,6 @@ func TestSecurityEdgeCases_CryptographicSafety(t *testing.T) {
 // Helper function to generate random bytes for testing
 func generateRandomBytes(size int) []byte {
 	bytes := make([]byte, size)
-	rand.Read(bytes)
+	_, _ = rand.Read(bytes)
 	return bytes
 }

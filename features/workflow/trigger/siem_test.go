@@ -281,7 +281,7 @@ func TestSIEMProcessor_ProcessLogEntry(t *testing.T) {
 			if tt.running {
 				err := processor.Start(ctx)
 				require.NoError(t, err)
-				defer processor.Stop(ctx)
+				defer func() { _ = processor.Stop(ctx) }()
 			}
 
 			err := processor.ProcessLogEntry(ctx, tt.logEntry)

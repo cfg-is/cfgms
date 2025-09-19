@@ -3,6 +3,7 @@ package trigger
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -331,9 +332,16 @@ func (api *APIHandler) handleGetTriggerExecutions(w http.ResponseWriter, r *http
 	// Parse limit parameter
 	limit := 50 // Default limit
 	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
-		if parsedLimit, err := strconv.Atoi(limitStr); err == nil && parsedLimit > 0 {
-			limit = parsedLimit
+		parsedLimit, err := strconv.Atoi(limitStr)
+		if err != nil {
+			api.sendErrorResponse(w, http.StatusBadRequest, "Invalid limit parameter", err)
+			return
 		}
+		if parsedLimit <= 0 {
+			api.sendErrorResponse(w, http.StatusBadRequest, "Invalid limit parameter: must be greater than 0", nil)
+			return
+		}
+		limit = parsedLimit
 	}
 
 	executions, err := api.triggerManager.GetTriggerExecutions(ctx, triggerID, limit)
@@ -407,16 +415,26 @@ func (api *APIHandler) parseFilterFromQuery(r *http.Request) (*TriggerFilter, er
 
 	// Parse limit
 	if limitStr := query.Get("limit"); limitStr != "" {
-		if limit, err := strconv.Atoi(limitStr); err == nil && limit > 0 {
-			filter.Limit = limit
+		limit, err := strconv.Atoi(limitStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid limit parameter: must be a positive integer")
 		}
+		if limit <= 0 {
+			return nil, fmt.Errorf("invalid limit parameter: must be greater than 0")
+		}
+		filter.Limit = limit
 	}
 
 	// Parse offset
 	if offsetStr := query.Get("offset"); offsetStr != "" {
-		if offset, err := strconv.Atoi(offsetStr); err == nil && offset >= 0 {
-			filter.Offset = offset
+		offset, err := strconv.Atoi(offsetStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid offset parameter: must be a non-negative integer")
 		}
+		if offset < 0 {
+			return nil, fmt.Errorf("invalid offset parameter: must be greater than or equal to 0")
+		}
+		filter.Offset = offset
 	}
 
 	return filter, nil

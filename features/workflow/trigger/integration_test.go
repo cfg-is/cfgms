@@ -256,7 +256,7 @@ func TestTriggerSystem_FullIntegration(t *testing.T) {
 	// Start the system
 	err := suite.manager.Start(ctx)
 	require.NoError(t, err)
-	defer suite.manager.Stop(ctx)
+	defer func() { _ = suite.manager.Stop(ctx) }()
 
 	t.Run("Schedule Trigger End-to-End", func(t *testing.T) {
 		// Create a schedule trigger via API
