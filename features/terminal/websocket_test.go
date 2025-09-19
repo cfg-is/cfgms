@@ -14,6 +14,30 @@ import (
 	testutil "github.com/cfgis/cfgms/pkg/testing"
 )
 
+// waitForSessionCleanup waits for sessions to be cleaned up with exponential backoff
+func waitForSessionCleanup(t *testing.T, manager SessionManager, expectedCount int) {
+	t.Helper()
+
+	maxRetries := 10
+	retryDelay := 10 * time.Millisecond
+
+	for i := 0; i < maxRetries; i++ {
+		time.Sleep(retryDelay)
+		activeSessions := manager.GetActiveSessions()
+		if len(activeSessions) == expectedCount {
+			return
+		}
+		retryDelay *= 2 // Exponential backoff
+		if retryDelay > 500*time.Millisecond {
+			retryDelay = 500 * time.Millisecond // Cap at 500ms
+		}
+	}
+
+	// Final assertion with detailed message
+	activeSessions := manager.GetActiveSessions()
+	assert.Len(t, activeSessions, expectedCount, "Expected %d sessions after cleanup, but found %d", expectedCount, len(activeSessions))
+}
+
 func TestWebSocketHandlerCreation(t *testing.T) {
 	logger := testutil.NewMockLogger(true)
 	config := &Config{
@@ -286,12 +310,8 @@ func TestWebSocketSessionCleanup(t *testing.T) {
 		t.Logf("Failed to close connection: %v", err)
 	}
 
-	// Give time for cleanup
-	time.Sleep(100 * time.Millisecond)
-
-	// Session should be cleaned up
-	activeSessions = manager.GetActiveSessions()
-	assert.Len(t, activeSessions, 0)
+	// Wait for session cleanup (cleanup is asynchronous)
+	waitForSessionCleanup(t, manager, 0)
 }
 
 func TestWebSocketConcurrentConnections(t *testing.T) {
@@ -341,10 +361,6 @@ func TestWebSocketConcurrentConnections(t *testing.T) {
 		}
 	}
 
-	// Give time for cleanup
-	time.Sleep(100 * time.Millisecond)
-
-	// All sessions should be cleaned up
-	activeSessions = manager.GetActiveSessions()
-	assert.Len(t, activeSessions, 0)
+	// Wait for all sessions to be cleaned up (cleanup is asynchronous)
+	waitForSessionCleanup(t, manager, 0)
 }
