@@ -22,6 +22,7 @@ type Engine struct {
 	providerRegistry *ProviderRegistry
 	errorHandler     ErrorHandler
 	syncManager      *SyncManager
+	debugEngine      *DebugEngineImpl
 }
 
 // NewEngine creates a new workflow engine instance
@@ -44,7 +45,7 @@ func NewEngine(moduleFactory *factory.ModuleFactory, logger logging.Logger) *Eng
 	// Note: ProviderRegistry will need updating to accept ModuleLogger
 	providerRegistry := NewProviderRegistry(logger) // Keep legacy for now
 
-	return &Engine{
+	engine := &Engine{
 		moduleFactory:    moduleFactory,
 		logger:           workflowLogger,
 		executions:       make(map[string]*WorkflowExecution),
@@ -53,6 +54,11 @@ func NewEngine(moduleFactory *factory.ModuleFactory, logger logging.Logger) *Eng
 		errorHandler:     NewDefaultErrorHandler(),
 		syncManager:      NewSyncManager(),
 	}
+
+	// Initialize debug engine
+	engine.debugEngine = NewDebugEngine(engine, logger)
+
+	return engine
 }
 
 // ExecuteWorkflow starts execution of a workflow
@@ -257,11 +263,27 @@ func (e *Engine) executeStepsWithRetry(ctx context.Context, steps []Step, execut
 // executeStep executes a single step based on its type
 func (e *Engine) executeStep(ctx context.Context, step Step, execution *WorkflowExecution) error {
 	execution.SetCurrentStep(step.Name)
-	
+
 	e.logger.Info("Executing step",
 		"execution_id", execution.ID,
 		"step", step.Name,
 		"type", step.Type)
+
+	// Check for pause status before executing step
+	if execution.GetStatus() == StatusPaused {
+		// Wait for resume signal
+		for execution.GetStatus() == StatusPaused {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(100 * time.Millisecond):
+				// Check again
+			}
+		}
+	}
+
+	// Check for debug sessions and breakpoints
+	e.checkDebugBreakpoints(execution, step.Name)
 
 	startTime := time.Now()
 	result := StepResult{
@@ -930,14 +952,135 @@ func (e *Engine) CancelExecution(executionID string) error {
 
 // PauseExecution pauses a running workflow execution
 func (e *Engine) PauseExecution(executionID string) error {
-	// TODO: Implement pause functionality
-	return fmt.Errorf("pause functionality not yet implemented")
+	e.mutex.Lock()
+	defer e.mutex.Unlock()
+
+	execution, exists := e.executions[executionID]
+	if !exists {
+		return fmt.Errorf("execution not found: %s", executionID)
+	}
+
+	currentStatus := execution.GetStatus()
+	if currentStatus != StatusRunning {
+		return fmt.Errorf("cannot pause execution in status: %s", currentStatus)
+	}
+
+	// Set execution status to paused
+	execution.SetStatus(StatusPaused)
+
+	e.logger.Info("Paused workflow execution",
+		"execution_id", executionID,
+		"workflow", execution.WorkflowName)
+
+	return nil
 }
 
 // ResumeExecution resumes a paused workflow execution
 func (e *Engine) ResumeExecution(executionID string) error {
-	// TODO: Implement resume functionality
-	return fmt.Errorf("resume functionality not yet implemented")
+	e.mutex.Lock()
+	defer e.mutex.Unlock()
+
+	execution, exists := e.executions[executionID]
+	if !exists {
+		return fmt.Errorf("execution not found: %s", executionID)
+	}
+
+	currentStatus := execution.GetStatus()
+	if currentStatus != StatusPaused {
+		return fmt.Errorf("cannot resume execution in status: %s", currentStatus)
+	}
+
+	// Set execution status back to running
+	execution.SetStatus(StatusRunning)
+
+	e.logger.Info("Resumed workflow execution",
+		"execution_id", executionID,
+		"workflow", execution.WorkflowName)
+
+	return nil
+}
+
+// GetDebugEngine returns the debug engine for this workflow engine
+func (e *Engine) GetDebugEngine() DebugEngine {
+	return e.debugEngine
+}
+
+// checkDebugBreakpoints checks if execution should pause at a breakpoint
+func (e *Engine) checkDebugBreakpoints(execution *WorkflowExecution, stepName string) {
+	// Find any debug sessions for this execution
+	if e.debugEngine != nil {
+		sessions, err := e.debugEngine.ListDebugSessions()
+		if err != nil {
+			return
+		}
+
+		for _, session := range sessions {
+			if session.ExecutionID == execution.ID {
+				// Check if there's a breakpoint for this step
+				if breakpoint, shouldBreak := e.debugEngine.checkBreakpoint(session, stepName, execution.GetVariables()); shouldBreak {
+					e.logger.Info("Breakpoint hit",
+						"execution_id", execution.ID,
+						"step", stepName,
+						"breakpoint_id", breakpoint.ID)
+
+					// Pause execution
+					execution.SetStatus(StatusPaused)
+
+					// Update debug session status
+					session.mutex.Lock()
+					session.Status = DebugStatusBreakpoint
+					session.CurrentStep = stepName
+					session.mutex.Unlock()
+
+					// Wait for debug commands
+					e.waitForDebugCommands(session, execution)
+				}
+			}
+		}
+	}
+}
+
+// waitForDebugCommands waits for debug commands while paused at a breakpoint
+func (e *Engine) waitForDebugCommands(session *DebugSession, execution *WorkflowExecution) {
+	for {
+		select {
+		case command := <-session.stepChan:
+			switch command.Action {
+			case DebugActionContinue:
+				// Resume normal execution
+				execution.SetStatus(StatusRunning)
+				session.mutex.Lock()
+				session.Status = DebugStatusActive
+				session.mutex.Unlock()
+				return
+			case DebugActionStep:
+				// Execute next step and pause again
+				execution.SetStatus(StatusRunning)
+				session.mutex.Lock()
+				session.Status = DebugStatusStepping
+				session.mutex.Unlock()
+				return
+			case DebugActionStop:
+				// Stop execution
+				execution.Cancel()
+				return
+			case DebugActionUpdateVariables:
+				// Apply variable updates
+				if command.VariableUpdates != nil {
+					for varName, value := range command.VariableUpdates {
+						execution.SetVariable(varName, value)
+					}
+				}
+			}
+		case <-session.Context.Done():
+			return
+		case <-time.After(100 * time.Millisecond):
+			// Check if execution status changed externally
+			if execution.GetStatus() == StatusRunning {
+				return
+			}
+		}
+	}
 }
 
 // generateExecutionID generates a unique execution ID
