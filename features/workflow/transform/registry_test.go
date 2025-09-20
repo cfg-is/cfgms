@@ -87,20 +87,26 @@ func TestTransformRegistry_ListByCategory(t *testing.T) {
 	// Create transforms with different categories
 	stringTransform := NewMockTransform("string_transform")
 	stringTransform.SetMetadata(TransformMetadata{
-		Name:     "string_transform",
-		Category: CategoryString,
+		Name:        "string_transform",
+		Version:     "1.0.0",
+		Description: "String transform",
+		Category:    CategoryString,
 	})
 
 	dataTransform := NewMockTransform("data_transform")
 	dataTransform.SetMetadata(TransformMetadata{
-		Name:     "data_transform",
-		Category: CategoryData,
+		Name:        "data_transform",
+		Version:     "1.0.0",
+		Description: "Data transform",
+		Category:    CategoryData,
 	})
 
 	testTransform := NewMockTransform("test_transform")
 	testTransform.SetMetadata(TransformMetadata{
-		Name:     "test_transform",
-		Category: CategoryTest,
+		Name:        "test_transform",
+		Version:     "1.0.0",
+		Description: "Test transform",
+		Category:    CategoryTest,
 	})
 
 	// Register transforms
@@ -231,7 +237,7 @@ func TestTransformRegistry_RegisterNilTransform(t *testing.T) {
 
 	err := registry.Register(nil)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "transform cannot be nil")
+	assert.Contains(t, err.Error(), "cannot register nil transform")
 }
 
 func TestTransformRegistry_EmptyNameTransform(t *testing.T) {
@@ -240,5 +246,5 @@ func TestTransformRegistry_EmptyNameTransform(t *testing.T) {
 
 	err := registry.Register(transform)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "transform name cannot be empty")
+	assert.Contains(t, err.Error(), "transform must have a non-empty name")
 }

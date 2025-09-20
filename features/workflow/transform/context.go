@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"reflect"
 	"strconv"
+	"time"
 )
 
 // DefaultTransformContext provides a concrete implementation of TransformContext
@@ -271,6 +272,10 @@ func (ctx *DefaultTransformContext) getStringFromMap(m map[string]interface{}, k
 		return ""
 	}
 
+	if value == nil {
+		return ""
+	}
+
 	switch v := value.(type) {
 	case string:
 		return v
@@ -282,6 +287,8 @@ func (ctx *DefaultTransformContext) getStringFromMap(m map[string]interface{}, k
 		return strconv.FormatFloat(v, 'f', -1, 64)
 	case bool:
 		return strconv.FormatBool(v)
+	case []interface{}, []string, []int, map[string]interface{}, map[string]string:
+		return ""
 	default:
 		return fmt.Sprintf("%v", v)
 	}
@@ -298,6 +305,10 @@ func (ctx *DefaultTransformContext) getIntFromMap(m map[string]interface{}, key 
 		return 0
 	}
 
+	if value == nil {
+		return 0
+	}
+
 	switch v := value.(type) {
 	case int:
 		return v
@@ -305,9 +316,19 @@ func (ctx *DefaultTransformContext) getIntFromMap(m map[string]interface{}, key 
 		return int(v)
 	case float64:
 		return int(v)
+	case bool:
+		if v {
+			return 1
+		}
+		return 0
 	case string:
+		// Try integer first
 		if i, err := strconv.Atoi(v); err == nil {
 			return i
+		}
+		// Try float, then convert to int
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return int(f)
 		}
 		return 0
 	default:
@@ -326,6 +347,10 @@ func (ctx *DefaultTransformContext) getFloatFromMap(m map[string]interface{}, ke
 		return 0.0
 	}
 
+	if value == nil {
+		return 0.0
+	}
+
 	switch v := value.(type) {
 	case float64:
 		return v
@@ -333,6 +358,11 @@ func (ctx *DefaultTransformContext) getFloatFromMap(m map[string]interface{}, ke
 		return float64(v)
 	case int64:
 		return float64(v)
+	case bool:
+		if v {
+			return 1.0
+		}
+		return 0.0
 	case string:
 		if f, err := strconv.ParseFloat(v, 64); err == nil {
 			return f
@@ -406,8 +436,8 @@ func (ctx *DefaultTransformContext) getArrayFromMap(m map[string]interface{}, ke
 		return result
 	}
 
-	// If it's not an array, return a single-element array
-	return []interface{}{value}
+	// If it's not an array, return empty array
+	return []interface{}{}
 }
 
 // getMapFromMap safely gets a map value from a map
@@ -482,3 +512,9 @@ func (l *NoOpTransformLogger) WithField(key string, value interface{}) Transform
 func (l *NoOpTransformLogger) WithFields(fields map[string]interface{}) TransformLogger {
 	return l
 }
+
+// LogExecution logs the completion of a transform execution (no-op)
+func (l *NoOpTransformLogger) LogExecution(transformName string, duration time.Duration, success bool, err error) {}
+
+// LogChainExecution logs the completion of a transform chain execution (no-op)
+func (l *NoOpTransformLogger) LogChainExecution(chainLength int, totalDuration time.Duration, success bool, err error) {}

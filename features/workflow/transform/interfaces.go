@@ -314,6 +314,12 @@ type TransformLogger interface {
 
 	// WithFields returns a logger with additional context fields
 	WithFields(fields map[string]interface{}) TransformLogger
+
+	// LogExecution logs the completion of a transform execution
+	LogExecution(transformName string, duration time.Duration, success bool, err error)
+
+	// LogChainExecution logs the completion of a transform chain execution
+	LogChainExecution(chainLength int, totalDuration time.Duration, success bool, err error)
 }
 
 // BaseTransform provides common functionality for transform implementations

@@ -47,9 +47,10 @@ func TestTransformExecutor_Execute(t *testing.T) {
 
 	// Verify logging
 	testLogger := logger
-	assert.Len(t, testLogger.Logs, 2)
+	assert.Len(t, testLogger.Logs, 3)
 	assert.Contains(t, testLogger.Logs[0], "Started execution")
-	assert.Contains(t, testLogger.Logs[1], "Completed execution")
+	assert.Contains(t, testLogger.Logs[1], "Transform result cached")
+	assert.Contains(t, testLogger.Logs[2], "Completed execution")
 }
 
 func TestTransformExecutor_ExecuteNotFound(t *testing.T) {

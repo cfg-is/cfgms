@@ -266,7 +266,7 @@ func TestTransformContext_ConfigMethods(t *testing.T) {
 		"float_config":  2.71,
 	}
 
-	ctx := NewDefaultTransformContext(nil, config, nil)
+	ctx := NewDefaultTransformContext(nil, nil, config)
 
 	// Test config string
 	assert.Equal(t, "config_value", ctx.GetConfigString("string_config"))
@@ -297,7 +297,7 @@ func TestTransformContext_VariableMethods(t *testing.T) {
 		"float_var":  1.41,
 	}
 
-	ctx := NewDefaultTransformContext(nil, nil, variables)
+	ctx := NewDefaultTransformContext(nil, variables, nil)
 
 	// Test variable string
 	assert.Equal(t, "var_value", ctx.GetVariableString("string_var"))

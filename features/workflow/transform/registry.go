@@ -409,6 +409,7 @@ func (r *DefaultTransformRegistry) isValidCategory(category TransformCategory) b
 		CategoryMath,
 		CategoryTemplate,
 		CategoryCustom,
+		CategoryTest,
 		CategoryUtility,
 	}
 

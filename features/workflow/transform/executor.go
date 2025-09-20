@@ -164,6 +164,9 @@ func (e *DefaultTransformExecutor) Execute(ctx context.Context, transformName st
 		}
 	}
 
+	// Log execution start
+	e.logger.Debug("Started execution of "+transformName, "transform", transformName)
+
 	// Create execution context
 	transformCtx := e.createTransformContext(transformName, config, data, variables)
 
@@ -205,6 +208,9 @@ func (e *DefaultTransformExecutor) Execute(ctx context.Context, transformName st
 			stats.TotalExecutionTime += result.Duration
 		})
 	}
+
+	// Log execution completion
+	e.logger.LogExecution(transformName, result.Duration, result.Success, err)
 
 	return result, err
 }

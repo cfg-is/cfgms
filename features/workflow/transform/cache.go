@@ -68,25 +68,36 @@ func DefaultMemoryTransformCache() *MemoryTransformCache {
 // Get retrieves a cached result
 func (c *MemoryTransformCache) Get(key string) (TransformResult, bool) {
 	c.mutex.RLock()
-	defer c.mutex.RUnlock()
-
 	entry, exists := c.cache[key]
+
 	if !exists {
+		c.mutex.RUnlock()
+		// Update stats with write lock
+		c.mutex.Lock()
 		c.stats.MissCount++
 		c.updateHitRatio()
+		c.mutex.Unlock()
 		return TransformResult{}, false
 	}
 
 	// Check if expired
 	if time.Now().After(entry.expiresAt) {
+		c.mutex.RUnlock()
 		// Don't update stats here - let cleanup handle removal
 		// Just return not found
 		return TransformResult{}, false
 	}
 
+	result := entry.result
+	c.mutex.RUnlock()
+
+	// Update stats with write lock
+	c.mutex.Lock()
 	c.stats.HitCount++
 	c.updateHitRatio()
-	return entry.result, true
+	c.mutex.Unlock()
+
+	return result, true
 }
 
 // Set stores a result in cache
