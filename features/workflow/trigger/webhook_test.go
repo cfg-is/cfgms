@@ -686,7 +686,7 @@ func TestHTTPWebhookHandler_HandleWebhookRequest(t *testing.T) {
 		{
 			name:   "successful webhook request",
 			method: "POST",
-			url:    "/webhook/webhook-1",
+			url:    "/webhook/test",
 			headers: map[string]string{
 				"Content-Type": "application/json",
 				"X-API-Key":    "test-api-key",
@@ -705,7 +705,7 @@ func TestHTTPWebhookHandler_HandleWebhookRequest(t *testing.T) {
 		{
 			name:   "method not allowed",
 			method: "GET",
-			url:    "/webhook/webhook-1",
+			url:    "/webhook/test",
 			headers: map[string]string{
 				"X-API-Key": "test-api-key",
 			},
@@ -715,7 +715,7 @@ func TestHTTPWebhookHandler_HandleWebhookRequest(t *testing.T) {
 		{
 			name:   "authentication failed",
 			method: "POST",
-			url:    "/webhook/webhook-1",
+			url:    "/webhook/test",
 			headers: map[string]string{
 				"Content-Type": "application/json",
 				"X-API-Key":    "wrong-api-key",

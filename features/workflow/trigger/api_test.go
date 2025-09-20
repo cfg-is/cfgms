@@ -487,11 +487,12 @@ func TestAPIHandler_HandleEnableDisableTrigger(t *testing.T) {
 
 	tests := []struct {
 		name           string
-		endpoint       string
-		triggerID      string
-		setupMocks     func()
-		expectedStatus int
-		expectedError  string
+		endpoint           string
+		triggerID          string
+		setupMocks         func()
+		expectedStatus     int
+		expectedError      string
+		expectedTriggerStatus string
 	}{
 		{
 			name:      "enable trigger success",
@@ -501,6 +502,7 @@ func TestAPIHandler_HandleEnableDisableTrigger(t *testing.T) {
 				mockTriggerManager.On("EnableTrigger", mock.Anything, "test-1").Return(nil)
 			},
 			expectedStatus: http.StatusOK,
+			expectedTriggerStatus: "active",
 		},
 		{
 			name:      "disable trigger success",
@@ -510,6 +512,7 @@ func TestAPIHandler_HandleEnableDisableTrigger(t *testing.T) {
 				mockTriggerManager.On("DisableTrigger", mock.Anything, "test-1").Return(nil)
 			},
 			expectedStatus: http.StatusOK,
+			expectedTriggerStatus: "inactive",
 		},
 		{
 			name:      "enable non-existent trigger",
@@ -557,7 +560,7 @@ func TestAPIHandler_HandleEnableDisableTrigger(t *testing.T) {
 				var response map[string]interface{}
 				err := json.Unmarshal(rr.Body.Bytes(), &response)
 				require.NoError(t, err)
-				assert.Equal(t, "success", response["status"])
+				assert.Equal(t, tt.expectedTriggerStatus, response["status"])
 			}
 		})
 	}

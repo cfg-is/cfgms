@@ -113,7 +113,23 @@ func (sp *SIEMProcessor) Stop(ctx context.Context) error {
 	logger.InfoCtx(ctx, "Stopping SIEM processor")
 
 	sp.running = false
-	close(sp.stopChan)
+
+	// Close channels only if they haven't been closed already
+	select {
+	case <-sp.stopChan:
+		// Channel already closed
+	default:
+		close(sp.stopChan)
+	}
+
+	// For logBuffer, we need a different approach since it's a buffered channel
+	defer func() {
+		if r := recover(); r != nil {
+			// Channel was already closed, ignore the panic
+			// This is expected behavior during shutdown
+			_ = r // explicitly ignore the recovered value
+		}
+	}()
 	close(sp.logBuffer)
 
 	logger.InfoCtx(ctx, "SIEM processor stopped successfully")
@@ -346,7 +362,13 @@ func (sp *SIEMProcessor) evaluateCondition(condition *SIEMCondition, entry LogEn
 	case "tenant_id":
 		fieldValue = entry.TenantID
 	default:
-		fieldValue, exists = entry.Fields[condition.Field]
+		// Handle dotted field notation (e.g., "fields.user_id")
+		if strings.HasPrefix(condition.Field, "fields.") {
+			fieldName := strings.TrimPrefix(condition.Field, "fields.")
+			fieldValue, exists = entry.Fields[fieldName]
+		} else {
+			fieldValue, exists = entry.Fields[condition.Field]
+		}
 		if !exists && condition.Operator != SIEMOperatorNotExists {
 			return false
 		}
@@ -697,10 +719,13 @@ func (sp *SIEMProcessor) fireTrigger(ctx context.Context, triggerID string, trig
 	}()
 
 	// Reset aggregation window after firing
+	sp.mutex.Lock()
 	sp.resetAggregationWindow(triggerID)
+	sp.mutex.Unlock()
 }
 
 // resetAggregationWindow resets the aggregation window for a trigger
+// Note: Caller must hold sp.mutex
 func (sp *SIEMProcessor) resetAggregationWindow(triggerID string) {
 	aggData := sp.aggregationData[triggerID]
 	if aggData == nil {
@@ -766,7 +791,7 @@ func (sp *SIEMProcessor) performCleanup(ctx context.Context, logger *logging.Mod
 // validateSIEMConfig validates SIEM trigger configuration
 func (sp *SIEMProcessor) validateSIEMConfig(config *SIEMConfig) error {
 	if config.WindowSize <= 0 {
-		return fmt.Errorf("window_size must be greater than 0")
+		return fmt.Errorf("window size must be greater than zero")
 	}
 
 	if config.WindowSize > 24*time.Hour {
@@ -808,7 +833,8 @@ func (sp *SIEMProcessor) mapToLogEntry(logEntry map[string]interface{}) (LogEntr
 			if parsed, err := time.Parse(time.RFC3339, tsStr); err == nil {
 				entry.Timestamp = parsed
 			} else {
-				entry.Timestamp = time.Now()
+				// Return error for obviously invalid timestamp strings
+				return LogEntry{}, fmt.Errorf("invalid timestamp format: %s", tsStr)
 			}
 		} else {
 			entry.Timestamp = time.Now()
@@ -817,8 +843,14 @@ func (sp *SIEMProcessor) mapToLogEntry(logEntry map[string]interface{}) (LogEntr
 		entry.Timestamp = time.Now()
 	}
 
-	// Extract standard fields
+	// Extract standard fields with validation
 	if level, exists := logEntry["level"]; exists {
+		// Validate level is a proper type (string or nil)
+		if level != nil {
+			if _, ok := level.(string); !ok {
+				return LogEntry{}, fmt.Errorf("invalid level type: expected string, got %T", level)
+			}
+		}
 		entry.Level = sp.toString(level)
 	}
 
@@ -837,7 +869,16 @@ func (sp *SIEMProcessor) mapToLogEntry(logEntry map[string]interface{}) (LogEntr
 	// Copy all other fields
 	for k, v := range logEntry {
 		if k != "timestamp" && k != "level" && k != "message" && k != "source" && k != "tenant_id" {
-			entry.Fields[k] = v
+			if k == "fields" {
+				// Special handling for nested fields
+				if fieldsMap, ok := v.(map[string]interface{}); ok {
+					for fieldKey, fieldValue := range fieldsMap {
+						entry.Fields[fieldKey] = fieldValue
+					}
+				}
+			} else {
+				entry.Fields[k] = v
+			}
 		}
 	}
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"golang.org/x/text/unicode/norm"
 
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/gorilla/mux"
@@ -28,6 +30,7 @@ type HTTPWebhookHandler struct {
 	server          *http.Server
 	router          *mux.Router
 	webhooks        map[string]*Trigger
+	pathToTrigger   map[string]string // Maps webhook paths to trigger IDs
 	rateLimiters    map[string]*rate.Limiter
 	mutex           sync.RWMutex
 	running         bool
@@ -46,6 +49,7 @@ func NewHTTPWebhookHandler(triggerManager TriggerManager, workflowTrigger Workfl
 		workflowTrigger: workflowTrigger,
 		router:          router,
 		webhooks:        make(map[string]*Trigger),
+		pathToTrigger:   make(map[string]string),
 		rateLimiters:    make(map[string]*rate.Limiter),
 		address:         address,
 		port:            port,
@@ -146,6 +150,9 @@ func (wh *HTTPWebhookHandler) RegisterWebhook(ctx context.Context, trigger *Trig
 	// Store webhook configuration
 	wh.webhooks[trigger.ID] = trigger
 
+	// Store path-to-trigger mapping
+	wh.pathToTrigger[trigger.Webhook.Path] = trigger.ID
+
 	// Set up rate limiter if configured
 	if trigger.Webhook.RateLimit != nil {
 		rateLimit := rate.Limit(trigger.Webhook.RateLimit.RequestsPerMinute / 60.0) // Convert to requests per second
@@ -180,6 +187,9 @@ func (wh *HTTPWebhookHandler) UnregisterWebhook(ctx context.Context, triggerID s
 
 	delete(wh.webhooks, triggerID)
 	delete(wh.rateLimiters, triggerID)
+
+	// Clean up path mapping
+	delete(wh.pathToTrigger, trigger.Webhook.Path)
 
 	logger.InfoCtx(ctx, "Webhook endpoint unregistered successfully",
 		"trigger_id", triggerID,
@@ -352,15 +362,22 @@ func (wh *HTTPWebhookHandler) healthCheck(w http.ResponseWriter, r *http.Request
 func (wh *HTTPWebhookHandler) handleWebhookRequest(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	// Extract trigger ID from URL
-	vars := mux.Vars(r)
-	triggerID := vars["trigger_id"]
+	// First try to resolve trigger ID by path (for webhook.Path-based routing)
+	wh.mutex.RLock()
+	triggerID, foundByPath := wh.pathToTrigger[r.URL.Path]
+	wh.mutex.RUnlock()
 
-	// If not found in vars, try to extract from path
-	if triggerID == "" {
-		path := r.URL.Path
-		if strings.HasPrefix(path, "/triggers/webhook/") {
-			triggerID = strings.TrimPrefix(path, "/triggers/webhook/")
+	// If not found by path, extract trigger ID from URL
+	if !foundByPath {
+		vars := mux.Vars(r)
+		triggerID = vars["trigger_id"]
+
+		// If not found in vars, try to extract from path
+		if triggerID == "" {
+			path := r.URL.Path
+			if strings.HasPrefix(path, "/triggers/webhook/") {
+				triggerID = strings.TrimPrefix(path, "/triggers/webhook/")
+			}
 		}
 	}
 
@@ -444,6 +461,7 @@ func (wh *HTTPWebhookHandler) handleWebhookRequest(w http.ResponseWriter, r *htt
 			headers[name] = values[0]
 		}
 	}
+
 
 	// Process webhook
 	execution, err := wh.HandleWebhook(ctx, triggerID, payload, headers)
@@ -582,12 +600,24 @@ func (wh *HTTPWebhookHandler) validateAPIKey(auth *WebhookAuth, headers map[stri
 		keyHeader = "X-API-Key"
 	}
 
+	// Try both the original header name and the canonical form
 	providedKey, exists := headers[keyHeader]
+	if !exists {
+		// Try canonical header form (Go's http.Header canonicalizes headers)
+		canonicalHeader := http.CanonicalHeaderKey(keyHeader)
+		providedKey, exists = headers[canonicalHeader]
+	}
+
 	if !exists {
 		return fmt.Errorf("API key header %s not found", keyHeader)
 	}
 
-	if providedKey != auth.APIKey {
+	// Normalize both keys to prevent Unicode normalization attacks
+	normalizedProvided := norm.NFC.String(providedKey)
+	normalizedExpected := norm.NFC.String(auth.APIKey)
+
+	// Use constant time comparison to prevent timing attacks
+	if subtle.ConstantTimeCompare([]byte(normalizedProvided), []byte(normalizedExpected)) != 1 {
 		return fmt.Errorf("invalid API key")
 	}
 
@@ -692,16 +722,28 @@ func (wh *HTTPWebhookHandler) isIPAllowed(webhook *WebhookConfig, remoteAddr str
 		clientIP = remoteAddr // Fallback if no port
 	}
 
+	parsedIP := net.ParseIP(clientIP)
+	if parsedIP == nil {
+		return false // Invalid IP address
+	}
+
 	for _, allowedIP := range webhook.AllowedIPs {
 		// Support CIDR notation
 		_, cidr, err := net.ParseCIDR(allowedIP)
 		if err == nil {
-			if cidr.Contains(net.ParseIP(clientIP)) {
+			// Prevent IPv4-mapped IPv6 addresses from bypassing IPv4 allowlists
+			// Check if client IP is IPv4-mapped IPv6 and CIDR is IPv4
+			if strings.Contains(clientIP, "::ffff:") && cidr.IP.To4() != nil {
+				continue // Block IPv4-mapped IPv6 from matching IPv4 CIDRs
+			}
+
+			if cidr.Contains(parsedIP) {
 				return true
 			}
 		} else {
 			// Exact IP match
-			if allowedIP == clientIP {
+			allowedParsed := net.ParseIP(allowedIP)
+			if allowedParsed != nil && parsedIP.Equal(allowedParsed) {
 				return true
 			}
 		}
