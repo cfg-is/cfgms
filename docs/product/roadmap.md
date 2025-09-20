@@ -476,7 +476,7 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 
 #### v0.5.0 (Beta) - Advanced Workflows & Core Readiness
 
-**Status**: 🚧 IN PROGRESS - 52/109 story points completed (47.7%) - 5 stories complete, 5 remaining
+**Status**: 🚧 IN PROGRESS - 62/109 story points completed (56.9%) - 6 stories complete, 4 remaining
 
 **Goal**: Transform CFGMS from foundational architecture (v0.4.6.0) to production-ready enterprise platform by implementing global logging provider, advanced workflow capabilities, comprehensive reporting, internal monitoring, lightweight SIEM, and high availability infrastructure while maintaining complete backward compatibility.
 
@@ -506,11 +506,11 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - ✅ Go template engine for dynamic content generation
   - ✅ JSONPath and XPath support for complex data structure querying
   - ✅ Schema validation and format conversion (JSON, XML, YAML, CSV)
-- [ ] **Interactive Workflow Debugging and Inspection** (Story 2.5) - 10 points (Issue #170)
-  - Complete pause/resume implementation for workflow execution control
-  - Step-by-step execution with breakpoint system and live variable inspector
-  - API call inspection with request/response data and replay capabilities
-  - Debug session management with rollback capabilities for safe testing
+- [x] **Interactive Workflow Debugging and Inspection** (Story 2.5) - 10 points (Issue #170) - ✅ COMPLETED
+  - ✅ Complete pause/resume implementation for workflow execution control
+  - ✅ Step-by-step execution with breakpoint system and live variable inspector
+  - ✅ API call inspection with request/response data and replay capabilities
+  - ✅ Debug session management with rollback capabilities for safe testing
 - [ ] **Enhanced Logging for ML Backtesting** (Story 2.6) - 8 points (Issue #171)
   - Structured event logging for all workflow execution data
   - API response logging with complete request/response pairs and timing
