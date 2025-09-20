@@ -1,13 +1,11 @@
 package trigger
 
 import (
-	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -19,23 +17,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// MockWorkflowTrigger implements WorkflowTrigger for testing
-type MockWorkflowTrigger struct {
-	mock.Mock
-}
-
-func (m *MockWorkflowTrigger) TriggerWorkflow(ctx context.Context, trigger *Trigger, data map[string]interface{}) (*WorkflowExecution, error) {
-	args := m.Called(ctx, trigger, data)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-	return args.Get(0).(*WorkflowExecution), args.Error(1)
-}
-
-func (m *MockWorkflowTrigger) ValidateTrigger(ctx context.Context, trigger *Trigger) error {
-	args := m.Called(ctx, trigger)
-	return args.Error(0)
-}
 
 func TestHTTPWebhookHandler_NewHTTPWebhookHandler(t *testing.T) {
 	mockTriggerManager := &MockTriggerManager{}
@@ -705,7 +686,7 @@ func TestHTTPWebhookHandler_HandleWebhookRequest(t *testing.T) {
 		{
 			name:   "successful webhook request",
 			method: "POST",
-			url:    "/webhook/webhook-1",
+			url:    "/webhook/test",
 			headers: map[string]string{
 				"Content-Type": "application/json",
 				"X-API-Key":    "test-api-key",
@@ -724,7 +705,7 @@ func TestHTTPWebhookHandler_HandleWebhookRequest(t *testing.T) {
 		{
 			name:   "method not allowed",
 			method: "GET",
-			url:    "/webhook/webhook-1",
+			url:    "/webhook/test",
 			headers: map[string]string{
 				"X-API-Key": "test-api-key",
 			},
@@ -734,7 +715,7 @@ func TestHTTPWebhookHandler_HandleWebhookRequest(t *testing.T) {
 		{
 			name:   "authentication failed",
 			method: "POST",
-			url:    "/webhook/webhook-1",
+			url:    "/webhook/test",
 			headers: map[string]string{
 				"Content-Type": "application/json",
 				"X-API-Key":    "wrong-api-key",

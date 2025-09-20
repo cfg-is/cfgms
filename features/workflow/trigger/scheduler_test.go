@@ -31,11 +31,17 @@ func (m *MockTriggerManager) DeleteTrigger(ctx context.Context, triggerID string
 
 func (m *MockTriggerManager) GetTrigger(ctx context.Context, triggerID string) (*Trigger, error) {
 	args := m.Called(ctx, triggerID)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
 	return args.Get(0).(*Trigger), args.Error(1)
 }
 
 func (m *MockTriggerManager) ListTriggers(ctx context.Context, filter *TriggerFilter) ([]*Trigger, error) {
 	args := m.Called(ctx, filter)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
 	return args.Get(0).([]*Trigger), args.Error(1)
 }
 
@@ -51,11 +57,17 @@ func (m *MockTriggerManager) DisableTrigger(ctx context.Context, triggerID strin
 
 func (m *MockTriggerManager) ExecuteTrigger(ctx context.Context, triggerID string, data map[string]interface{}) (*TriggerExecution, error) {
 	args := m.Called(ctx, triggerID, data)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
 	return args.Get(0).(*TriggerExecution), args.Error(1)
 }
 
 func (m *MockTriggerManager) GetTriggerExecutions(ctx context.Context, triggerID string, limit int) ([]*TriggerExecution, error) {
 	args := m.Called(ctx, triggerID, limit)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
 	return args.Get(0).([]*TriggerExecution), args.Error(1)
 }
 
@@ -76,6 +88,9 @@ type MockWorkflowTrigger struct {
 
 func (m *MockWorkflowTrigger) TriggerWorkflow(ctx context.Context, trigger *Trigger, data map[string]interface{}) (*WorkflowExecution, error) {
 	args := m.Called(ctx, trigger, data)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
 	return args.Get(0).(*WorkflowExecution), args.Error(1)
 }
 

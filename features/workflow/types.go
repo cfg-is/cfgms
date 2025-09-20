@@ -142,6 +142,8 @@ type Step struct {
 	ErrorWorkflow *ErrorWorkflowConfig `yaml:"error_workflow,omitempty" json:"error_workflow,omitempty"`
 	// Composite configuration for workflow composition steps
 	Composite *CompositeConfig `yaml:"composite,omitempty" json:"composite,omitempty"`
+	// Transform configuration for data transformation steps
+	Transform map[string]interface{} `yaml:"transform,omitempty" json:"transform,omitempty"`
 }
 
 // StepType defines the type of workflow step
@@ -219,6 +221,9 @@ const (
 
 	// StepTypeComposite executes a composed workflow from multiple components
 	StepTypeComposite StepType = "composite"
+
+	// StepTypeTransform executes data transformation operations
+	StepTypeTransform StepType = "transform"
 )
 
 // Condition defines execution conditions for conditional steps

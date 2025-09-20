@@ -66,6 +66,13 @@ func NewCronScheduler(triggerManager TriggerManager, workflowTrigger WorkflowTri
 	}
 }
 
+// SetTickerInterval sets the scheduler check interval (useful for testing)
+func (cs *CronScheduler) SetTickerInterval(interval time.Duration) {
+	cs.mutex.Lock()
+	defer cs.mutex.Unlock()
+	cs.tickerInterval = interval
+}
+
 // Start starts the cron scheduler
 func (cs *CronScheduler) Start(ctx context.Context) error {
 	cs.mutex.Lock()
@@ -473,15 +480,31 @@ func (cs *CronScheduler) parseCronField(field string, min, max int) (CronField, 
 
 // calculateNextRun calculates the next execution time for a cron schedule
 func (cs *CronScheduler) calculateNextRun(schedule *CronSchedule, from time.Time) time.Time {
-	// Start from the next minute to avoid immediate re-execution
-	next := from.In(schedule.timezone).Truncate(time.Minute).Add(time.Minute)
+	// Check if this is a seconds-level cron (has specific seconds defined)
+	hasSecondsLevel := !schedule.second.wildcard || schedule.second.step > 1
+
+	var next time.Time
+	var increment time.Duration
+	var maxAttempts int
+
+	if hasSecondsLevel {
+		// For second-level cron, start from the next second
+		next = from.In(schedule.timezone).Truncate(time.Second).Add(time.Second)
+		increment = time.Second
+		maxAttempts = 366 * 24 * 60 * 60 // Max one year of seconds
+	} else {
+		// For minute-level cron, start from the next minute
+		next = from.In(schedule.timezone).Truncate(time.Minute).Add(time.Minute)
+		increment = time.Minute
+		maxAttempts = 366 * 24 * 60 // Max one year of minutes
+	}
 
 	// Find the next matching time
-	for attempts := 0; attempts < 366*24*60; attempts++ { // Max one year of minutes
+	for attempts := 0; attempts < maxAttempts; attempts++ {
 		if cs.timeMatches(schedule, next) {
 			return next
 		}
-		next = next.Add(time.Minute)
+		next = next.Add(increment)
 	}
 
 	// Fallback: if no match found, schedule for next hour

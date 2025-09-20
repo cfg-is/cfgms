@@ -281,7 +281,7 @@ func TestSIEMProcessor_ProcessLogEntry(t *testing.T) {
 			if tt.running {
 				err := processor.Start(ctx)
 				require.NoError(t, err)
-				defer processor.Stop(ctx)
+				defer func() { _ = processor.Stop(ctx) }()
 			}
 
 			err := processor.ProcessLogEntry(ctx, tt.logEntry)
@@ -581,8 +581,20 @@ func TestSIEMProcessor_AddToAggregation(t *testing.T) {
 	mockWorkflowTrigger := &MockWorkflowTrigger{}
 	processor := NewSIEMProcessor(mockTriggerManager, mockWorkflowTrigger)
 
-	// Initialize aggregation data
+	// Initialize test trigger and aggregation data
 	triggerID := "siem-1"
+	trigger := &Trigger{
+		ID:   triggerID,
+		Type: TriggerTypeSIEM,
+		SIEM: &SIEMConfig{
+			EventTypes: []string{"error"},
+			WindowSize: 5 * time.Minute,
+			Conditions: []*SIEMCondition{},
+		},
+	}
+
+	// Set up the trigger in the processor
+	processor.siemTriggers[triggerID] = trigger
 	processor.aggregationData[triggerID] = &AggregationData{
 		Count:         0,
 		Sum:           make(map[string]float64),
@@ -757,6 +769,9 @@ func TestSIEMProcessor_FireTrigger(t *testing.T) {
 	ctx := context.Background()
 	processor.fireTrigger(ctx, triggerID, trigger)
 
+	// Give the goroutine time to execute
+	time.Sleep(100 * time.Millisecond)
+
 	// Verify workflow trigger was called
 	mockWorkflowTrigger.AssertCalled(t, "TriggerWorkflow", mock.Anything, trigger, mock.Anything)
 
@@ -909,6 +924,10 @@ func TestSIEMProcessor_MapToLogEntry(t *testing.T) {
 			name: "missing timestamp",
 			input: map[string]interface{}{
 				"message": "Test message",
+			},
+			expected: LogEntry{
+				Message: "Test message",
+				Fields:  map[string]interface{}{},
 			},
 			expectError: false, // Should use current time
 		},

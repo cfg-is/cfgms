@@ -1,6 +1,7 @@
 package trigger
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -43,6 +45,10 @@ func NewTestStorageProvider() *TestStorageProvider {
 
 func (t *TestStorageProvider) Initialize(ctx context.Context, config map[string]interface{}) error {
 	return nil
+}
+
+func (t *TestStorageProvider) Available() (bool, error) {
+	return true, nil
 }
 
 func (t *TestStorageProvider) Store(ctx context.Context, key string, data []byte) error {
@@ -90,6 +96,47 @@ func (t *TestStorageProvider) Exists(ctx context.Context, key string) (bool, err
 
 func (t *TestStorageProvider) Close() error {
 	return nil
+}
+
+// Additional methods required by StorageProvider interface
+func (t *TestStorageProvider) Name() string {
+	return "test"
+}
+
+func (t *TestStorageProvider) Description() string {
+	return "Test storage provider for integration tests"
+}
+
+func (t *TestStorageProvider) CreateClientTenantStore(config map[string]interface{}) (interfaces.ClientTenantStore, error) {
+	return nil, fmt.Errorf("not implemented in test provider")
+}
+
+func (t *TestStorageProvider) CreateConfigStore(config map[string]interface{}) (interfaces.ConfigStore, error) {
+	return nil, fmt.Errorf("not implemented in test provider")
+}
+
+func (t *TestStorageProvider) CreateAuditStore(config map[string]interface{}) (interfaces.AuditStore, error) {
+	return nil, fmt.Errorf("not implemented in test provider")
+}
+
+func (t *TestStorageProvider) CreateRBACStore(config map[string]interface{}) (interfaces.RBACStore, error) {
+	return nil, fmt.Errorf("not implemented in test provider")
+}
+
+func (t *TestStorageProvider) CreateRuntimeStore(config map[string]interface{}) (interfaces.RuntimeStore, error) {
+	return nil, fmt.Errorf("not implemented in test provider")
+}
+
+func (t *TestStorageProvider) GetCapabilities() interfaces.ProviderCapabilities {
+	return interfaces.ProviderCapabilities{
+		MaxBatchSize:          100,
+		MaxConfigSize:         1024,
+		MaxAuditRetentionDays: 30,
+	}
+}
+
+func (t *TestStorageProvider) GetVersion() string {
+	return "1.0.0-test"
 }
 
 // TestWorkflowTrigger implements a test workflow trigger that records executions
@@ -149,17 +196,19 @@ func setupIntegrationTest(t *testing.T) *IntegrationTestSuite {
 	storage := NewTestStorageProvider()
 	workflowTrigger := NewTestWorkflowTrigger()
 
-	// Create scheduler
-	scheduler := NewCronScheduler(workflowTrigger)
-
-	// Create manager
+	// Create manager first (we'll create scheduler separately)
 	manager := NewTriggerManager(
 		storage,
-		scheduler,
+		nil, // scheduler will be set later
 		nil, // webhook handler will be set later
 		nil, // siem integration will be set later
 		workflowTrigger,
 	)
+
+	// Create scheduler
+	scheduler := NewCronScheduler(manager, workflowTrigger)
+	// Set a faster tick interval for integration tests
+	scheduler.SetTickerInterval(100 * time.Millisecond)
 
 	// Create webhook handler
 	webhookHandler := NewHTTPWebhookHandler(manager, workflowTrigger, "localhost", 0)
@@ -168,6 +217,7 @@ func setupIntegrationTest(t *testing.T) *IntegrationTestSuite {
 	siemProcessor := NewSIEMProcessor(manager, workflowTrigger)
 
 	// Update manager with all components
+	manager.scheduler = scheduler
 	manager.webhookHandler = webhookHandler
 	manager.siemIntegration = siemProcessor
 
@@ -176,6 +226,7 @@ func setupIntegrationTest(t *testing.T) *IntegrationTestSuite {
 
 	// Set up router
 	router := mux.NewRouter()
+	router.Use(TriggerAPIMiddleware)
 	apiHandler.RegisterRoutes(router)
 
 	// Create test server
@@ -194,6 +245,31 @@ func setupIntegrationTest(t *testing.T) *IntegrationTestSuite {
 	}
 }
 
+// makeRequest makes an HTTP request with the integration tenant header
+func (suite *IntegrationTestSuite) makeRequest(method, path, contentType string, body []byte) (*http.Response, error) {
+	var req *http.Request
+	var err error
+
+	if body != nil {
+		req, err = http.NewRequest(method, suite.server.URL+path, bytes.NewReader(body))
+	} else {
+		req, err = http.NewRequest(method, suite.server.URL+path, nil)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Set tenant header for integration tests
+	req.Header.Set("X-Tenant-ID", "integration-tenant")
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+
+	client := &http.Client{}
+	return client.Do(req)
+}
+
 func (suite *IntegrationTestSuite) cleanup() {
 	if suite.server != nil {
 		suite.server.Close()
@@ -204,12 +280,13 @@ func TestTriggerSystem_FullIntegration(t *testing.T) {
 	suite := setupIntegrationTest(t)
 	defer suite.cleanup()
 
-	ctx := context.Background()
+	// Create tenant-aware context for integration tests to work with tenant isolation
+	ctx := context.WithValue(context.Background(), TenantIDContextKey, "integration-tenant")
 
 	// Start the system
 	err := suite.manager.Start(ctx)
 	require.NoError(t, err)
-	defer suite.manager.Stop(ctx)
+	defer func() { _ = suite.manager.Stop(ctx) }()
 
 	t.Run("Schedule Trigger End-to-End", func(t *testing.T) {
 		// Create a schedule trigger via API
@@ -229,7 +306,7 @@ func TestTriggerSystem_FullIntegration(t *testing.T) {
 		}
 
 		triggerJSON, _ := json.Marshal(trigger)
-		resp, err := http.Post(suite.server.URL+"/triggers", "application/json", strings.NewReader(string(triggerJSON)))
+		resp, err := suite.makeRequest("POST", "/triggers", "application/json", triggerJSON)
 		require.NoError(t, err)
 		require.Equal(t, http.StatusCreated, resp.StatusCode)
 
@@ -339,6 +416,7 @@ func TestTriggerSystem_FullIntegration(t *testing.T) {
 			"source":    "auth-service",
 			"tenant_id": "integration-tenant",
 			"fields": map[string]interface{}{
+				"event_type": "auth_failure",
 				"user_id":    "user-123",
 				"ip_address": "192.168.1.100",
 			},
@@ -351,6 +429,7 @@ func TestTriggerSystem_FullIntegration(t *testing.T) {
 			"source":    "auth-service",
 			"tenant_id": "integration-tenant",
 			"fields": map[string]interface{}{
+				"event_type": "auth_failure",
 				"user_id":    "user-456",
 				"ip_address": "192.168.1.101",
 			},
@@ -387,12 +466,12 @@ func TestTriggerSystem_FullIntegration(t *testing.T) {
 
 		// CREATE via API
 		triggerJSON, _ := json.Marshal(triggerData)
-		resp, err := http.Post(suite.server.URL+"/triggers", "application/json", strings.NewReader(string(triggerJSON)))
+		resp, err := suite.makeRequest("POST", "/triggers", "application/json", triggerJSON)
 		require.NoError(t, err)
 		require.Equal(t, http.StatusCreated, resp.StatusCode)
 
 		// READ via API
-		resp, err = http.Get(suite.server.URL + "/triggers/api-integration-1")
+		resp, err = suite.makeRequest("GET", "/triggers/api-integration-1", "", nil)
 		require.NoError(t, err)
 		require.Equal(t, http.StatusOK, resp.StatusCode)
 
@@ -407,15 +486,12 @@ func TestTriggerSystem_FullIntegration(t *testing.T) {
 		updatedData["name"] = "Updated API Integration Test"
 		updatedJSON, _ := json.Marshal(updatedData)
 
-		req, _ := http.NewRequest("PUT", suite.server.URL+"/triggers/api-integration-1", strings.NewReader(string(updatedJSON)))
-		req.Header.Set("Content-Type", "application/json")
-		client := &http.Client{}
-		resp, err = client.Do(req)
+		resp, err = suite.makeRequest("PUT", "/triggers/api-integration-1", "application/json", updatedJSON)
 		require.NoError(t, err)
 		require.Equal(t, http.StatusOK, resp.StatusCode)
 
 		// Verify update
-		resp, err = http.Get(suite.server.URL + "/triggers/api-integration-1")
+		resp, err = suite.makeRequest("GET", "/triggers/api-integration-1", "", nil)
 		require.NoError(t, err)
 		err = json.NewDecoder(resp.Body).Decode(&retrievedTrigger)
 		require.NoError(t, err)
@@ -428,9 +504,9 @@ func TestTriggerSystem_FullIntegration(t *testing.T) {
 		}
 		executeJSON, _ := json.Marshal(executeData)
 
-		resp, err = http.Post(suite.server.URL+"/triggers/api-integration-1/execute", "application/json", strings.NewReader(string(executeJSON)))
+		resp, err = suite.makeRequest("POST", "/triggers/api-integration-1/execute", "application/json", executeJSON)
 		require.NoError(t, err)
-		require.Equal(t, http.StatusOK, resp.StatusStatus)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
 
 		var execution TriggerExecution
 		err = json.NewDecoder(resp.Body).Decode(&execution)
@@ -438,13 +514,12 @@ func TestTriggerSystem_FullIntegration(t *testing.T) {
 		assert.Equal(t, "api-integration-1", execution.TriggerID)
 
 		// DELETE via API
-		req, _ = http.NewRequest("DELETE", suite.server.URL+"/triggers/api-integration-1", nil)
-		resp, err = client.Do(req)
+		resp, err = suite.makeRequest("DELETE", "/triggers/api-integration-1", "", nil)
 		require.NoError(t, err)
 		require.Equal(t, http.StatusNoContent, resp.StatusCode)
 
 		// Verify deletion
-		resp, err = http.Get(suite.server.URL + "/triggers/api-integration-1")
+		resp, err = suite.makeRequest("GET", "/triggers/api-integration-1", "", nil)
 		require.NoError(t, err)
 		require.Equal(t, http.StatusNotFound, resp.StatusCode)
 	})
@@ -523,9 +598,12 @@ func TestTriggerSystem_FullIntegration(t *testing.T) {
 					"index":      index,
 				})
 
-				assert.NoError(t, err)
-				assert.NotNil(t, execution)
-				assert.Equal(t, triggerIDs[index], execution.TriggerID)
+				if assert.NoError(t, err) {
+					assert.NotNil(t, execution)
+					if execution != nil {
+						assert.Equal(t, triggerIDs[index], execution.TriggerID)
+					}
+				}
 			}(i)
 		}
 

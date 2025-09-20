@@ -3,6 +3,7 @@ package trigger
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -30,6 +31,9 @@ func NewAPIHandler(triggerManager TriggerManager) *APIHandler {
 
 // RegisterRoutes registers all trigger API routes with the router
 func (api *APIHandler) RegisterRoutes(router *mux.Router) {
+	// Health check (must be before {id} routes to avoid conflicts)
+	router.HandleFunc("/triggers/health", api.handleHealthCheck).Methods("GET")
+
 	// Trigger management endpoints
 	router.HandleFunc("/triggers", api.handleCreateTrigger).Methods("POST")
 	router.HandleFunc("/triggers", api.handleListTriggers).Methods("GET")
@@ -44,15 +48,12 @@ func (api *APIHandler) RegisterRoutes(router *mux.Router) {
 
 	// Trigger execution history
 	router.HandleFunc("/triggers/{id}/executions", api.handleGetTriggerExecutions).Methods("GET")
-
-	// Health check
-	router.HandleFunc("/triggers/health", api.handleHealthCheck).Methods("GET")
 }
 
 // handleCreateTrigger creates a new trigger
 func (api *APIHandler) handleCreateTrigger(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID := extractTenantFromContext(ctx)
 	logger := api.logger.WithTenant(tenantID)
 
 	logger.InfoCtx(ctx, "Creating trigger via API")
@@ -77,7 +78,7 @@ func (api *APIHandler) handleCreateTrigger(w http.ResponseWriter, r *http.Reques
 // handleListTriggers lists triggers with optional filtering
 func (api *APIHandler) handleListTriggers(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID := extractTenantFromContext(ctx)
 	logger := api.logger.WithTenant(tenantID)
 
 	// Parse query parameters for filtering
@@ -109,7 +110,7 @@ func (api *APIHandler) handleListTriggers(w http.ResponseWriter, r *http.Request
 // handleGetTrigger retrieves a specific trigger
 func (api *APIHandler) handleGetTrigger(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID := extractTenantFromContext(ctx)
 	logger := api.logger.WithTenant(tenantID)
 
 	vars := mux.Vars(r)
@@ -137,7 +138,7 @@ func (api *APIHandler) handleGetTrigger(w http.ResponseWriter, r *http.Request) 
 // handleUpdateTrigger updates an existing trigger
 func (api *APIHandler) handleUpdateTrigger(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID := extractTenantFromContext(ctx)
 	logger := api.logger.WithTenant(tenantID)
 
 	vars := mux.Vars(r)
@@ -175,7 +176,7 @@ func (api *APIHandler) handleUpdateTrigger(w http.ResponseWriter, r *http.Reques
 // handleDeleteTrigger deletes a trigger
 func (api *APIHandler) handleDeleteTrigger(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID := extractTenantFromContext(ctx)
 	logger := api.logger.WithTenant(tenantID)
 
 	vars := mux.Vars(r)
@@ -196,7 +197,7 @@ func (api *APIHandler) handleDeleteTrigger(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	api.sendJSONResponse(w, http.StatusOK, map[string]string{
+	api.sendJSONResponse(w, http.StatusNoContent, map[string]string{
 		"message":    "Trigger deleted successfully",
 		"trigger_id": triggerID,
 	})
@@ -208,7 +209,7 @@ func (api *APIHandler) handleDeleteTrigger(w http.ResponseWriter, r *http.Reques
 // handleEnableTrigger enables a trigger
 func (api *APIHandler) handleEnableTrigger(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID := extractTenantFromContext(ctx)
 	logger := api.logger.WithTenant(tenantID)
 
 	vars := mux.Vars(r)
@@ -242,7 +243,7 @@ func (api *APIHandler) handleEnableTrigger(w http.ResponseWriter, r *http.Reques
 // handleDisableTrigger disables a trigger
 func (api *APIHandler) handleDisableTrigger(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID := extractTenantFromContext(ctx)
 	logger := api.logger.WithTenant(tenantID)
 
 	vars := mux.Vars(r)
@@ -276,7 +277,7 @@ func (api *APIHandler) handleDisableTrigger(w http.ResponseWriter, r *http.Reque
 // handleExecuteTrigger manually executes a trigger
 func (api *APIHandler) handleExecuteTrigger(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID := extractTenantFromContext(ctx)
 	logger := api.logger.WithTenant(tenantID)
 
 	vars := mux.Vars(r)
@@ -307,7 +308,7 @@ func (api *APIHandler) handleExecuteTrigger(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	api.sendJSONResponse(w, http.StatusAccepted, execution)
+	api.sendJSONResponse(w, http.StatusOK, execution)
 
 	logger.InfoCtx(ctx, "Trigger executed successfully via API",
 		"trigger_id", triggerID,
@@ -317,7 +318,7 @@ func (api *APIHandler) handleExecuteTrigger(w http.ResponseWriter, r *http.Reque
 // handleGetTriggerExecutions retrieves execution history for a trigger
 func (api *APIHandler) handleGetTriggerExecutions(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID := extractTenantFromContext(ctx)
 	logger := api.logger.WithTenant(tenantID)
 
 	vars := mux.Vars(r)
@@ -331,9 +332,16 @@ func (api *APIHandler) handleGetTriggerExecutions(w http.ResponseWriter, r *http
 	// Parse limit parameter
 	limit := 50 // Default limit
 	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
-		if parsedLimit, err := strconv.Atoi(limitStr); err == nil && parsedLimit > 0 {
-			limit = parsedLimit
+		parsedLimit, err := strconv.Atoi(limitStr)
+		if err != nil {
+			api.sendErrorResponse(w, http.StatusBadRequest, "Invalid limit parameter", err)
+			return
 		}
+		if parsedLimit <= 0 {
+			api.sendErrorResponse(w, http.StatusBadRequest, "Invalid limit parameter: must be greater than 0", nil)
+			return
+		}
+		limit = parsedLimit
 	}
 
 	executions, err := api.triggerManager.GetTriggerExecutions(ctx, triggerID, limit)
@@ -342,7 +350,7 @@ func (api *APIHandler) handleGetTriggerExecutions(w http.ResponseWriter, r *http
 			api.sendErrorResponse(w, http.StatusNotFound, "Trigger not found", err)
 		} else {
 			logger.ErrorCtx(ctx, "Failed to get trigger executions", "trigger_id", triggerID, "error", err.Error())
-			api.sendErrorResponse(w, http.StatusInternalServerError, "Failed to get executions", err)
+			api.sendErrorResponse(w, http.StatusInternalServerError, "Failed to get trigger executions", err)
 		}
 		return
 	}
@@ -386,6 +394,11 @@ func (api *APIHandler) parseFilterFromQuery(r *http.Request) (*TriggerFilter, er
 		filter.Status = TriggerStatus(statusStr)
 	}
 
+	// Parse tenant_id filter
+	if tenantID := query.Get("tenant_id"); tenantID != "" {
+		filter.TenantID = tenantID
+	}
+
 	// Parse tags filter
 	if tagsStr := query.Get("tags"); tagsStr != "" {
 		filter.Tags = strings.Split(tagsStr, ",")
@@ -407,16 +420,26 @@ func (api *APIHandler) parseFilterFromQuery(r *http.Request) (*TriggerFilter, er
 
 	// Parse limit
 	if limitStr := query.Get("limit"); limitStr != "" {
-		if limit, err := strconv.Atoi(limitStr); err == nil && limit > 0 {
-			filter.Limit = limit
+		limit, err := strconv.Atoi(limitStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid limit parameter: must be a positive integer")
 		}
+		if limit <= 0 {
+			return nil, fmt.Errorf("invalid limit parameter: must be greater than 0")
+		}
+		filter.Limit = limit
 	}
 
 	// Parse offset
 	if offsetStr := query.Get("offset"); offsetStr != "" {
-		if offset, err := strconv.Atoi(offsetStr); err == nil && offset >= 0 {
-			filter.Offset = offset
+		offset, err := strconv.Atoi(offsetStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid offset parameter: must be a non-negative integer")
 		}
+		if offset < 0 {
+			return nil, fmt.Errorf("invalid offset parameter: must be greater than or equal to 0")
+		}
+		filter.Offset = offset
 	}
 
 	return filter, nil

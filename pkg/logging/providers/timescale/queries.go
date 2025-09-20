@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lib/pq"
 	"github.com/cfgis/cfgms/pkg/logging/interfaces"
 )
 
@@ -303,11 +304,8 @@ func (p *TimescaleProvider) buildLevelCondition(value interface{}, argIndex int)
 		if len(v) == 0 {
 			return "", nil
 		}
-		placeholders := make([]string, len(v))
-		for i := range v {
-			placeholders[i] = fmt.Sprintf("$%d", argIndex+i)
-		}
-		return fmt.Sprintf("level IN (%s)", strings.Join(placeholders, ",")), v
+		// Use PostgreSQL ANY with array parameter for cleaner SQL
+		return fmt.Sprintf("level = ANY($%d)", argIndex), pq.Array(v)
 	case []interface{}:
 		if len(v) == 0 {
 			return "", nil
@@ -322,11 +320,8 @@ func (p *TimescaleProvider) buildLevelCondition(value interface{}, argIndex int)
 		if len(stringValues) == 0 {
 			return "", nil
 		}
-		placeholders := make([]string, len(stringValues))
-		for i := range stringValues {
-			placeholders[i] = fmt.Sprintf("$%d", argIndex+i)
-		}
-		return fmt.Sprintf("level IN (%s)", strings.Join(placeholders, ",")), stringValues
+		// Use PostgreSQL ANY with array parameter for cleaner SQL
+		return fmt.Sprintf("level = ANY($%d)", argIndex), pq.Array(stringValues)
 	}
 	return "", nil
 }
