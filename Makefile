@@ -68,10 +68,10 @@ test:
 	@if [ -f .env.local ]; then \
 		echo "Loading M365 credentials from .env.local for real API tests..."; \
 		export $$(cat .env.local | grep -v '^#' | xargs) && \
-		go test -race -cover -short -timeout=3m ./features/... ./api/... ./cmd/... ./pkg/...; \
+		go test -race -cover -short -timeout=2m ./features/... ./api/... ./cmd/... ./pkg/...; \
 	else \
 		echo "No .env.local found - real M365 tests will be skipped"; \
-		go test -race -cover -short -timeout=3m ./features/... ./api/... ./cmd/... ./pkg/...; \
+		go test -race -cover -short -timeout=2m ./features/... ./api/... ./cmd/... ./pkg/...; \
 	fi
 
 # OPTIMIZED TEST TARGETS (Cache-Aware Strategy)
@@ -192,8 +192,8 @@ test-m365-integration:
 	@echo "⚡ This will FAIL if M365 credentials are not available"
 	@echo "📝 Add credentials to .env.local or set M365_CLIENT_ID, M365_CLIENT_SECRET, M365_TENANT_ID"
 	@echo ""
-	go test -v -race -timeout=10m ./features/modules/m365/entra_application/... -run "Integration"
-	go test -v -race -timeout=10m ./features/modules/m365/entra_admin_unit/... -run "Integration"
+	go test -v -race -timeout=2m ./features/modules/m365/entra_application/... -run "Integration"
+	go test -v -race -timeout=2m ./features/modules/m365/entra_admin_unit/... -run "Integration"
 
 # M365 integration tests - PERMISSIVE mode (skips without credentials) 
 # Use this for development when you don't have M365 credentials
@@ -202,8 +202,8 @@ test-m365-integration-dev:
 	@echo "============================================"
 	@echo "⚡ This will SKIP if M365 credentials are not available"
 	@echo ""
-	ALLOW_SKIP_INTEGRATION=true go test -v -race -timeout=10m ./features/modules/m365/entra_application/... -run "Integration"
-	ALLOW_SKIP_INTEGRATION=true go test -v -race -timeout=10m ./features/modules/m365/entra_admin_unit/... -run "Integration"
+	ALLOW_SKIP_INTEGRATION=true go test -v -race -timeout=2m ./features/modules/m365/entra_application/... -run "Integration"
+	ALLOW_SKIP_INTEGRATION=true go test -v -race -timeout=2m ./features/modules/m365/entra_admin_unit/... -run "Integration"
 
 # M365 unit tests (mocked dependencies, no credentials needed)
 test-m365-unit:
