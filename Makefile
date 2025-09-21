@@ -128,14 +128,14 @@ test-watch:
 # DAILY DEVELOPMENT WORKFLOW TARGETS
 
 # Pre-commit validation (tests + linting + security) - MANDATORY FOR COMMITS
-test-commit: test lint security-scan test-m365-integration-dev
+test-commit: test lint security-scan
 	@echo ""
 	@echo "✅ PRE-COMMIT VALIDATION FINISHED"
 	@echo "===================================="
 	@echo "- ✅ Unit tests passed"
 	@echo "- ✅ Linting passed"
 	@echo "- ✅ Security scanning passed"
-	@echo "- ✅ M365 integration tested (skipped if no credentials)"
+	@echo "- ⏭️  M365 integration tests moved to CI (run 'make test-m365-integration-dev' manually)"
 	@echo ""
 	@echo "🎯 Code is validated and ready for commit/PR"
 
