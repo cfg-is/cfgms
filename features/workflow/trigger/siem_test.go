@@ -214,9 +214,18 @@ func TestSIEMProcessor_UnregisterSIEMTrigger(t *testing.T) {
 				assert.Contains(t, err.Error(), tt.errorMsg)
 			} else {
 				assert.NoError(t, err)
-				assert.NotContains(t, processor.siemTriggers, tt.triggerID)
-				assert.NotContains(t, processor.aggregationData, tt.triggerID)
-				assert.NotContains(t, processor.triggerConditions, tt.triggerID)
+				// Allow time for any concurrent goroutines to finish before checking state
+				time.Sleep(10 * time.Millisecond)
+
+				processor.mutex.RLock()
+				_, existsInSiemTriggers := processor.siemTriggers[tt.triggerID]
+				_, existsInAggregationData := processor.aggregationData[tt.triggerID]
+				_, existsInTriggerConditions := processor.triggerConditions[tt.triggerID]
+				processor.mutex.RUnlock()
+
+				assert.False(t, existsInSiemTriggers, "trigger should not exist in siemTriggers")
+				assert.False(t, existsInAggregationData, "trigger should not exist in aggregationData")
+				assert.False(t, existsInTriggerConditions, "trigger should not exist in triggerConditions")
 			}
 		})
 	}
@@ -281,7 +290,11 @@ func TestSIEMProcessor_ProcessLogEntry(t *testing.T) {
 			if tt.running {
 				err := processor.Start(ctx)
 				require.NoError(t, err)
-				defer func() { _ = processor.Stop(ctx) }()
+				defer func() {
+					_ = processor.Stop(ctx)
+					// Allow time for goroutines to finish
+					time.Sleep(10 * time.Millisecond)
+				}()
 			}
 
 			err := processor.ProcessLogEntry(ctx, tt.logEntry)

@@ -11,6 +11,20 @@ import (
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
+// waitForWorkflowCompletion polls the workflow execution until it completes or times out
+func waitForWorkflowCompletion(t *testing.T, execution *WorkflowExecution, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		status := execution.GetStatus()
+		if status != StatusPending && status != StatusRunning {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("Workflow did not complete within %v, status: %v", timeout, execution.GetStatus())
+}
+
 func TestTrySuccess(t *testing.T) {
 	// Test try block that succeeds - finally should run, catch should not
 	workflow := Workflow{
@@ -73,7 +87,7 @@ func TestTrySuccess(t *testing.T) {
 	require.NotNil(t, execution)
 
 	// Wait for completion
-	time.Sleep(100 * time.Millisecond)
+	waitForWorkflowCompletion(t, execution, 5*time.Second)
 
 	// Verify execution completed successfully
 	assert.Equal(t, StatusCompleted, execution.GetStatus())
@@ -138,7 +152,7 @@ func TestTryCatchHandled(t *testing.T) {
 	require.NotNil(t, execution)
 
 	// Wait for completion
-	time.Sleep(100 * time.Millisecond)
+	waitForWorkflowCompletion(t, execution, 5*time.Second)
 
 	// Verify execution completed successfully (error was caught)
 	assert.Equal(t, StatusCompleted, execution.GetStatus())
@@ -203,7 +217,7 @@ func TestTryCatchNotHandled(t *testing.T) {
 	require.NotNil(t, execution)
 
 	// Wait for completion
-	time.Sleep(100 * time.Millisecond)
+	waitForWorkflowCompletion(t, execution, 5*time.Second)
 
 	// Verify execution failed (error was not caught)
 	assert.Equal(t, StatusFailed, execution.GetStatus())
@@ -268,7 +282,7 @@ func TestTryCatchByErrorType(t *testing.T) {
 	require.NotNil(t, execution)
 
 	// Wait for completion
-	time.Sleep(100 * time.Millisecond)
+	waitForWorkflowCompletion(t, execution, 5*time.Second)
 
 	// Verify execution completed successfully (error was caught by type)
 	assert.Equal(t, StatusCompleted, execution.GetStatus())
@@ -319,7 +333,7 @@ func TestTryFinallyWithoutCatch(t *testing.T) {
 	require.NotNil(t, execution)
 
 	// Wait for completion
-	time.Sleep(100 * time.Millisecond)
+	waitForWorkflowCompletion(t, execution, 5*time.Second)
 
 	// Verify execution failed (no catch block) but finally ran
 	assert.Equal(t, StatusFailed, execution.GetStatus())
@@ -384,7 +398,7 @@ func TestCatchAllErrors(t *testing.T) {
 	require.NotNil(t, execution)
 
 	// Wait for completion
-	time.Sleep(100 * time.Millisecond)
+	waitForWorkflowCompletion(t, execution, 5*time.Second)
 
 	// Verify execution completed successfully (all errors caught)
 	assert.Equal(t, StatusCompleted, execution.GetStatus())
@@ -414,7 +428,7 @@ func TestTryMissingConfiguration(t *testing.T) {
 	require.NotNil(t, execution)
 
 	// Wait for completion
-	time.Sleep(100 * time.Millisecond)
+	waitForWorkflowCompletion(t, execution, 5*time.Second)
 
 	// Verify execution failed due to missing configuration
 	assert.Equal(t, StatusFailed, execution.GetStatus())
