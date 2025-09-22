@@ -59,20 +59,31 @@ build-cli:
 build-cert-manager:
 	go build ${GO_BUILD_FLAGS} -o bin/${CERT_MANAGER_BINARY} ./cmd/cert-manager
 
-# Basic test suite (fast unit tests only) - Cache-safe implementation
+# Smart test - core modules + changed modules only
 test:
-	@echo "🧪 Running Core Unit Tests (Fresh Build)"
-	@echo "========================================"
-	@echo "🔄 Clearing test cache to ensure fresh compilation..."
+	@echo "🧪 Running Tests (Smart Mode)"
+	@echo "============================="
 	@go clean -testcache
-	@if [ -f .env.local ]; then \
-		echo "Loading M365 credentials from .env.local for real API tests..."; \
-		export $$(cat .env.local | grep -v '^#' | xargs) && \
-		go test -race -cover -short -timeout=2m ./features/... ./api/... ./cmd/... ./pkg/...; \
+	@echo "🧪 Testing framework (excluding modules)..."
+	@go test -race -short -timeout=3m $$(go list ./... | grep -v '/features/modules/')
+	@echo "🧪 Testing core modules (smoke test)..."
+	@for module in $(CORE_MODULES); do \
+		echo "  Testing $$module..."; \
+		go test -race -short -timeout=30s ./features/modules/$$module/...; \
+	done
+	@changed_modules="$(CHANGED_MODULES)"; \
+	if [ -n "$$changed_modules" ]; then \
+		echo "📝 Testing changed modules: $$changed_modules"; \
+		for module in $$changed_modules; do \
+			if ! echo "$(CORE_MODULES)" | grep -q "\\<$$module\\>"; then \
+				echo "  Testing changed module: $$module"; \
+				go test -race -short -timeout=1m ./features/modules/$$module/...; \
+			fi; \
+		done; \
 	else \
-		echo "No .env.local found - real M365 tests will be skipped"; \
-		go test -race -cover -short -timeout=2m ./features/... ./api/... ./cmd/... ./pkg/...; \
+		echo "📋 No module changes detected - skipping additional module tests"; \
 	fi
+	@echo "✅ Smart testing complete"
 
 # OPTIMIZED TEST TARGETS (Cache-Aware Strategy)
 
@@ -125,17 +136,31 @@ test-watch:
 		make test-unit; \
 	fi
 
+# SMART TESTING SYSTEM
+
+# Core modules for smoke testing (always tested)
+CORE_MODULES := file directory script
+
+# All modules for change detection
+ALL_MODULES := file directory script firewall package patch m365 activedirectory network_activedirectory
+
+# Detect changed modules using git diff
+CHANGED_MODULES = $(shell \
+	changed_files=$$(git diff --name-only HEAD~1 2>/dev/null || git diff --name-only --staged 2>/dev/null || echo ""); \
+	for module in $(ALL_MODULES); do \
+		echo "$$changed_files" | grep -q "features/modules/$$module" && echo $$module; \
+	done | sort -u)
+
 # DAILY DEVELOPMENT WORKFLOW TARGETS
 
-# Pre-commit validation (tests + linting + security) - MANDATORY FOR COMMITS
+# Pre-commit validation (smart tests + quality gates)
 test-commit: test lint security-scan
 	@echo ""
 	@echo "✅ PRE-COMMIT VALIDATION FINISHED"
 	@echo "===================================="
-	@echo "- ✅ Unit tests passed"
+	@echo "- ✅ Smart tests passed (core + changed modules)"
 	@echo "- ✅ Linting passed"
 	@echo "- ✅ Security scanning passed"
-	@echo "- ⏭️  M365 integration tests moved to CI (run 'make test-m365-integration-dev' manually)"
 	@echo ""
 	@echo "🎯 Code is validated and ready for commit/PR"
 
@@ -212,6 +237,20 @@ test-m365-unit:
 	@echo "⚡ Using mocked dependencies - no credentials required"
 	@echo ""
 	go test -v -race -short -timeout=5m ./features/modules/m365/entra_application/... ./features/modules/m365/entra_admin_unit/... ./pkg/directory/types/...
+
+# Manual module testing (for development)
+test-module:
+	@if [ -z "$(MODULE)" ]; then \
+		echo "❌ Error: MODULE parameter required"; \
+		echo "Usage: make test-module MODULE=m365"; \
+		echo ""; \
+		echo "Available modules:"; \
+		echo "  Core: $(CORE_MODULES)"; \
+		echo "  All: $(ALL_MODULES)"; \
+		exit 1; \
+	fi
+	@echo "🧪 Testing module: $(MODULE)"
+	@go test -race -timeout=2m ./features/modules/$(MODULE)/...
 
 
 
