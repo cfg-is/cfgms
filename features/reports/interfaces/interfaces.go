@@ -30,6 +30,7 @@ const (
 	ReportTypeExecutive   ReportType = "executive"
 	ReportTypeDrift       ReportType = "drift"
 	ReportTypeOperational ReportType = "operational"
+	ReportTypeSecurity    ReportType = "security"
 	ReportTypeCustom      ReportType = "custom"
 )
 
