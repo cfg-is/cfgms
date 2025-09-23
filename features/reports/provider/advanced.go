@@ -28,7 +28,7 @@ type AdvancedProvider struct {
 // NewAdvancedProvider creates a new advanced data provider
 func NewAdvancedProvider(
 	storageManager *storage.Manager,
-	driftDetector *drift.Detector,
+	driftDetector drift.Detector,
 	auditManager *audit.Manager,
 	auditStore storageInterfaces.AuditStore,
 	logger logging.Logger,

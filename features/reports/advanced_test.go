@@ -5,26 +5,127 @@ import (
 	"testing"
 	"time"
 
-	commonpb "github.com/cfgis/cfgms/api/proto/common"
-	"github.com/cfgis/cfgms/features/rbac/memory"
+	"github.com/cfgis/cfgms/features/rbac"
+	"github.com/cfgis/cfgms/features/reports/cache"
 	"github.com/cfgis/cfgms/features/reports/interfaces"
 	"github.com/cfgis/cfgms/features/steward/dna/drift"
+	"github.com/cfgis/cfgms/features/steward/dna/storage"
 	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/logging"
 	storageInterfaces "github.com/cfgis/cfgms/pkg/storage/interfaces"
+	// Import storage providers to register them
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestAdvancedServiceCreation tests the creation of AdvancedService
 func TestAdvancedServiceCreation(t *testing.T) {
-	// Test skipped due to constructor type requirements - constructors expect concrete types
-	// but test setup requires extensive real component initialization
-	t.Skip("Test requires real component implementations - skipping for now")
+	service := createTestAdvancedService(t)
+
+	assert.NotNil(t, service)
+	assert.NotNil(t, service.Service)
+	assert.NotNil(t, service.advancedEngine)
+	assert.NotNil(t, service.advancedProvider)
+	assert.NotNil(t, service.rbacManager)
+	assert.NotNil(t, service.auditManager)
+
+	// Test configuration
+	config := service.GetConfiguration()
+	assert.True(t, config.EnableAuditIntegration)
+	assert.False(t, config.EnableRBACValidation) // Disabled for integration testing
+	assert.True(t, config.EnableCrossSystemMetrics)
+	assert.Equal(t, 50, config.MaxTenantsPerReport)
+	assert.Contains(t, config.ComplianceFrameworks, "CIS")
+	assert.Contains(t, config.ComplianceFrameworks, "HIPAA")
 }
 
 // TestAdvancedServiceWithConfig tests service creation with custom configuration
 func TestAdvancedServiceWithConfig(t *testing.T) {
-	// Test skipped due to constructor interface requirements
-	t.Skip("Test requires real component implementations - skipping for now")
+	logger := &testLogger{}
+
+	// Create DNA storage manager
+	dnaStorageConfig := &storage.Config{
+		Backend:                storage.BackendSQLite,
+		CompressionLevel:       6,
+		CompressionType:        "gzip",
+		TargetCompressionRatio: 0.7, // More relaxed target for testing
+		EnableDeduplication:    true,
+		BlockSize:             64 * 1024,
+		HashAlgorithm:         "sha256",
+		RetentionPeriod:       24 * time.Hour,
+		ArchivalPeriod:        1 * time.Hour,
+		MaxRecordsPerDevice:   100,
+		EnableSharding:        false, // Disable sharding for simplicity
+		ShardCount:           1,
+		ShardingStrategy:     "device_id",
+		BatchSize:            10,
+		FlushInterval:        1 * time.Minute,
+		CacheSize:            100,
+		MaxStoragePerMonth:   10 * 1024 * 1024, // 10MB
+	}
+	dnaStorageManager, err := storage.NewManager(dnaStorageConfig, logger)
+	require.NoError(t, err)
+
+	// Create real components
+	driftDetector, err := drift.NewDetector(drift.DefaultDetectorConfig(), logger)
+	require.NoError(t, err)
+
+	// Create audit components using git storage for testing
+	config := map[string]interface{}{
+		"repository_path": t.TempDir(),
+		"branch":         "main",
+		"auto_init":      true,
+	}
+	globalStorageManager, err := storageInterfaces.CreateAllStoresFromConfig("git", config)
+	require.NoError(t, err)
+
+	auditStore := globalStorageManager.GetAuditStore()
+	auditManager := audit.NewManager(auditStore, "test-reports")
+
+	rbacManager := rbac.NewManagerWithStorage(
+		auditStore,
+		globalStorageManager.GetClientTenantStore(),
+		globalStorageManager.GetRBACStore(),
+	)
+	require.NotNil(t, rbacManager)
+
+	reportCache := cache.NewMemoryCache()
+
+	// Create custom configuration
+	serviceConfig := AdvancedServiceConfig{
+		ServiceConfig:            DefaultServiceConfig(),
+		EnableAuditIntegration:   false,
+		EnableRBACValidation:     false,
+		EnableCrossSystemMetrics: true,
+		MaxTenantsPerReport:      25,
+		ComplianceFrameworks:     []string{"CIS"},
+		SecurityEventRetention:   30 * 24 * time.Hour,
+		AdvancedCacheConfig: AdvancedCacheConfig{
+			EnableAdvancedCaching: true,
+			ComplianceReportTTL:   2 * time.Hour,
+			SecurityReportTTL:     15 * time.Minute,
+			MaxCacheSize:          500,
+		},
+	}
+
+	// Test service creation with config
+	service := NewAdvancedServiceWithConfig(
+		dnaStorageManager, driftDetector, auditManager, auditStore,
+		rbacManager, reportCache, serviceConfig, logger,
+	)
+
+	assert.NotNil(t, service)
+
+	// Verify configuration was applied
+	updatedConfig := service.GetConfiguration()
+	assert.False(t, updatedConfig.EnableAuditIntegration)
+	assert.False(t, updatedConfig.EnableRBACValidation)
+	assert.True(t, updatedConfig.EnableCrossSystemMetrics)
+	assert.Equal(t, 25, updatedConfig.MaxTenantsPerReport)
+	assert.Equal(t, []string{"CIS"}, updatedConfig.ComplianceFrameworks)
+	assert.Equal(t, 30*24*time.Hour, updatedConfig.SecurityEventRetention)
 }
 
 // TestGenerateComplianceReport tests compliance report generation
@@ -461,230 +562,101 @@ func TestGetCrossSystemMetrics(t *testing.T) {
 
 // Helper Functions
 
-// createTestAdvancedService creates a test instance of AdvancedService
+// createTestAdvancedService creates a test instance of AdvancedService using minimal real components
 func createTestAdvancedService(t *testing.T) *AdvancedService {
-	// Skip for now due to constructor interface requirements
-	t.Skip("Helper function requires real component implementations - skipping tests")
-	return nil
-}
+	logger := &testLogger{}
 
-// mockAuditStore is a mock implementation of AuditStore for testing
-type mockAuditStore struct{}
+	// Create minimal real components needed for the service
+	// Create DNA storage manager (which is what the constructor expects)
+	dnaStorageConfig := &storage.Config{
+		Backend:                storage.BackendSQLite,
+		CompressionLevel:       6,
+		CompressionType:        "gzip",
+		TargetCompressionRatio: 0.7, // More relaxed target for testing
+		EnableDeduplication:    true,
+		BlockSize:             64 * 1024,
+		HashAlgorithm:         "sha256",
+		RetentionPeriod:       24 * time.Hour,
+		ArchivalPeriod:        1 * time.Hour,
+		MaxRecordsPerDevice:   100,
+		EnableSharding:        false, // Disable sharding for simplicity
+		ShardCount:           1,
+		ShardingStrategy:     "device_id",
+		BatchSize:            10,
+		FlushInterval:        1 * time.Minute,
+		CacheSize:            100,
+		MaxStoragePerMonth:   10 * 1024 * 1024, // 10MB
+	}
+	dnaStorageManager, err := storage.NewManager(dnaStorageConfig, logger)
+	require.NoError(t, err, "Failed to create DNA storage manager")
 
-func (m *mockAuditStore) StoreAuditEntry(ctx context.Context, entry *storageInterfaces.AuditEntry) error {
-	return nil
-}
+	// Create minimal drift detector
+	driftDetector, err := drift.NewDetector(drift.DefaultDetectorConfig(), logger)
+	require.NoError(t, err, "Failed to create drift detector")
 
-func (m *mockAuditStore) StoreAuditBatch(ctx context.Context, entries []*storageInterfaces.AuditEntry) error {
-	return nil
-}
+	// Create audit components using git storage for testing
+	config := map[string]interface{}{
+		"repository_path": t.TempDir(),
+		"branch":         "main",
+		"auto_init":      true,
+	}
+	globalStorageManager, err := storageInterfaces.CreateAllStoresFromConfig("git", config)
+	require.NoError(t, err, "Failed to create global storage manager")
 
-func (m *mockAuditStore) GetAuditEntry(ctx context.Context, id string) (*storageInterfaces.AuditEntry, error) {
-	return &storageInterfaces.AuditEntry{
-		ID:       id,
-		TenantID: "test-tenant",
-		UserID:   "test-user",
-		Action:   "test-action",
-	}, nil
-}
+	auditStore := globalStorageManager.GetAuditStore()
+	auditManager := audit.NewManager(auditStore, "test-reports")
 
-func (m *mockAuditStore) ListAuditEntries(ctx context.Context, filter *storageInterfaces.AuditFilter) ([]*storageInterfaces.AuditEntry, error) {
-	return []*storageInterfaces.AuditEntry{
-		{
-			ID:           "test-1",
-			TenantID:     "tenant1",
-			UserID:       "user1",
-			Action:       "login",
-			ResourceType: "session",
-			ResourceID:   "session-1",
-			Result:       storageInterfaces.AuditResultSuccess,
-			Timestamp:    time.Now(),
-			EventType:    storageInterfaces.AuditEventAuthentication,
-			Severity:     storageInterfaces.AuditSeverityMedium,
+	// Create RBAC manager
+	rbacManager := rbac.NewManagerWithStorage(
+		auditStore,
+		globalStorageManager.GetClientTenantStore(),
+		globalStorageManager.GetRBACStore(),
+	)
+	require.NotNil(t, rbacManager, "Failed to create RBAC manager")
+
+	// Create real report cache
+	reportCache := cache.NewMemoryCache()
+
+	// Create advanced service with real components and test-friendly config
+	serviceConfig := AdvancedServiceConfig{
+		ServiceConfig:            DefaultServiceConfig(),
+		EnableAuditIntegration:   true,
+		EnableRBACValidation:     false, // Disable RBAC for integration testing
+		EnableCrossSystemMetrics: true,
+		MaxTenantsPerReport:      50,
+		ComplianceFrameworks:     []string{"CIS", "HIPAA", "PCI-DSS"},
+		SecurityEventRetention:   90 * 24 * time.Hour,
+		AdvancedCacheConfig: AdvancedCacheConfig{
+			EnableAdvancedCaching: true,
+			ComplianceReportTTL:   4 * time.Hour,
+			SecurityReportTTL:     30 * time.Minute,
+			ExecutiveReportTTL:    1 * time.Hour,
+			MaxCacheSize:          1000,
 		},
-		{
-			ID:           "test-2",
-			TenantID:     "tenant1",
-			UserID:       "user2",
-			Action:       "config-change",
-			ResourceType: "configuration",
-			ResourceID:   "config-1",
-			Result:       storageInterfaces.AuditResultError,
-			Timestamp:    time.Now(),
-			EventType:    storageInterfaces.AuditEventConfiguration,
-			Severity:     storageInterfaces.AuditSeverityHigh,
-		},
-	}, nil
+	}
+
+	service := NewAdvancedServiceWithConfig(
+		dnaStorageManager, driftDetector, auditManager, auditStore,
+		rbacManager, reportCache, serviceConfig, logger,
+	)
+	require.NotNil(t, service, "Failed to create advanced service")
+
+	return service
 }
 
-func (m *mockAuditStore) GetAuditsByUser(ctx context.Context, userID string, timeRange *storageInterfaces.TimeRange) ([]*storageInterfaces.AuditEntry, error) {
-	return []*storageInterfaces.AuditEntry{}, nil
-}
+// testLogger implements logging.Logger for testing
+type testLogger struct{}
 
-func (m *mockAuditStore) GetAuditsByResource(ctx context.Context, resourceType, resourceID string, timeRange *storageInterfaces.TimeRange) ([]*storageInterfaces.AuditEntry, error) {
-	return []*storageInterfaces.AuditEntry{}, nil
-}
+// Ensure testLogger implements logging.Logger
+var _ logging.Logger = (*testLogger)(nil)
 
-func (m *mockAuditStore) GetFailedActions(ctx context.Context, timeRange *storageInterfaces.TimeRange, limit int) ([]*storageInterfaces.AuditEntry, error) {
-	return []*storageInterfaces.AuditEntry{}, nil
-}
-
-func (m *mockAuditStore) GetSuspiciousActivity(ctx context.Context, tenantID string, timeRange *storageInterfaces.TimeRange) ([]*storageInterfaces.AuditEntry, error) {
-	return []*storageInterfaces.AuditEntry{}, nil
-}
-
-func (m *mockAuditStore) GetAuditStats(ctx context.Context) (*storageInterfaces.AuditStats, error) {
-	now := time.Now()
-	return &storageInterfaces.AuditStats{
-		TotalEntries: 100,
-		TotalSize:    1024,
-		NewestEntry:  &now,
-		OldestEntry:  &now,
-	}, nil
-}
-
-func (m *mockAuditStore) GetAuditsByAction(ctx context.Context, action string, timeRange *storageInterfaces.TimeRange) ([]*storageInterfaces.AuditEntry, error) {
-	return []*storageInterfaces.AuditEntry{}, nil
-}
-
-func (m *mockAuditStore) ArchiveAuditEntries(ctx context.Context, olderThan time.Time) (int64, error) {
-	return 0, nil
-}
-
-func (m *mockAuditStore) PurgeAuditEntries(ctx context.Context, beforeDate time.Time) (int64, error) {
-	return 0, nil
-}
-
-// mockDriftDetector is a mock implementation of drift.Detector for testing
-type mockDriftDetector struct{}
-
-func (m *mockDriftDetector) DetectDrift(ctx context.Context, previous, current *commonpb.DNA) ([]*drift.DriftEvent, error) {
-	return []*drift.DriftEvent{
-		{
-			ID:          "test-drift-1",
-			DeviceID:    "test-device",
-			Description: "Test drift event",
-			Severity:    drift.SeverityWarning,
-			Timestamp:   time.Now(),
-		},
-	}, nil
-}
-
-func (m *mockDriftDetector) DetectDriftBatch(ctx context.Context, comparisons []*drift.DNAComparison) ([]*drift.DriftEvent, error) {
-	return []*drift.DriftEvent{}, nil
-}
-
-func (m *mockDriftDetector) ValidateRules(rules []*drift.DriftRule) error {
-	return nil
-}
-
-func (m *mockDriftDetector) UpdateRules(rules []*drift.DriftRule) error {
-	return nil
-}
-
-func (m *mockDriftDetector) GetStats() *drift.DetectorStats {
-	return &drift.DetectorStats{}
-}
-
-func (m *mockDriftDetector) Close() error {
-	return nil
-}
-
-// mockAuditManager is a mock implementation of audit.Manager for testing
-type mockAuditManager struct{}
-
-func (m *mockAuditManager) RecordEvent(ctx context.Context, event *audit.AuditEventBuilder) error {
-	return nil
-}
-
-func (m *mockAuditManager) RecordBatch(ctx context.Context, events []*audit.AuditEventBuilder) error {
-	return nil
-}
-
-func (m *mockAuditManager) GetEntry(ctx context.Context, id string) (*storageInterfaces.AuditEntry, error) {
-	return nil, nil
-}
-
-func (m *mockAuditManager) QueryEntries(ctx context.Context, filter *storageInterfaces.AuditFilter) ([]*storageInterfaces.AuditEntry, error) {
-	return []*storageInterfaces.AuditEntry{}, nil
-}
-
-func (m *mockAuditManager) GetUserAuditTrail(ctx context.Context, userID string, timeRange *storageInterfaces.TimeRange) ([]*storageInterfaces.AuditEntry, error) {
-	return []*storageInterfaces.AuditEntry{}, nil
-}
-
-// mockRBACManager is a mock implementation of rbac.RBACManager for testing
-type mockRBACManager struct{}
-
-// Implement core authorization interface
-func (m *mockRBACManager) CheckPermission(ctx context.Context, request *commonpb.AccessRequest) (*commonpb.AccessResponse, error) {
-	return &commonpb.AccessResponse{
-		Granted: true,
-		Reason:  "mock approval",
-	}, nil
-}
-
-func (m *mockRBACManager) GetSubjectPermissions(ctx context.Context, subjectID, tenantID string) ([]*commonpb.Permission, error) {
-	return []*commonpb.Permission{}, nil
-}
-
-func (m *mockRBACManager) ValidateAccess(ctx context.Context, authContext *commonpb.AuthorizationContext, requiredPermission string) (*commonpb.AccessResponse, error) {
-	return &commonpb.AccessResponse{Granted: true}, nil
-}
-
-// Mock implementations for other RBAC interfaces (simplified for testing)
-func (m *mockRBACManager) CreatePermission(ctx context.Context, permission *commonpb.Permission) error { return nil }
-func (m *mockRBACManager) GetPermission(ctx context.Context, id string) (*commonpb.Permission, error) { return nil, nil }
-func (m *mockRBACManager) ListPermissions(ctx context.Context, resourceType string) ([]*commonpb.Permission, error) { return nil, nil }
-func (m *mockRBACManager) UpdatePermission(ctx context.Context, permission *commonpb.Permission) error { return nil }
-func (m *mockRBACManager) DeletePermission(ctx context.Context, id string) error { return nil }
-func (m *mockRBACManager) CreateRole(ctx context.Context, role *commonpb.Role) error { return nil }
-func (m *mockRBACManager) GetRole(ctx context.Context, id string) (*commonpb.Role, error) { return nil, nil }
-func (m *mockRBACManager) ListRoles(ctx context.Context, tenantID string) ([]*commonpb.Role, error) { return nil, nil }
-func (m *mockRBACManager) UpdateRole(ctx context.Context, role *commonpb.Role) error { return nil }
-func (m *mockRBACManager) DeleteRole(ctx context.Context, id string) error { return nil }
-func (m *mockRBACManager) GetRolePermissions(ctx context.Context, roleID string) ([]*commonpb.Permission, error) { return nil, nil }
-func (m *mockRBACManager) GetRoleHierarchy(ctx context.Context, roleID string) (*memory.RoleHierarchy, error) { return nil, nil }
-func (m *mockRBACManager) GetChildRoles(ctx context.Context, roleID string) ([]*commonpb.Role, error) { return nil, nil }
-func (m *mockRBACManager) GetParentRole(ctx context.Context, roleID string) (*commonpb.Role, error) { return nil, nil }
-func (m *mockRBACManager) SetRoleParent(ctx context.Context, roleID, parentRoleID string, inheritanceType commonpb.RoleInheritanceType) error { return nil }
-func (m *mockRBACManager) RemoveRoleParent(ctx context.Context, roleID string) error { return nil }
-func (m *mockRBACManager) ValidateRoleHierarchy(ctx context.Context, roleID string) error { return nil }
-func (m *mockRBACManager) CreateSubject(ctx context.Context, subject *commonpb.Subject) error { return nil }
-func (m *mockRBACManager) GetSubject(ctx context.Context, id string) (*commonpb.Subject, error) { return nil, nil }
-func (m *mockRBACManager) ListSubjects(ctx context.Context, tenantID string, subjectType commonpb.SubjectType) ([]*commonpb.Subject, error) { return nil, nil }
-func (m *mockRBACManager) UpdateSubject(ctx context.Context, subject *commonpb.Subject) error { return nil }
-func (m *mockRBACManager) DeleteSubject(ctx context.Context, id string) error { return nil }
-func (m *mockRBACManager) GetSubjectRoles(ctx context.Context, subjectID, tenantID string) ([]*commonpb.Role, error) { return nil, nil }
-func (m *mockRBACManager) AssignRole(ctx context.Context, assignment *commonpb.RoleAssignment) error { return nil }
-func (m *mockRBACManager) RevokeRole(ctx context.Context, subjectID, roleID, tenantID string) error { return nil }
-func (m *mockRBACManager) GetAssignment(ctx context.Context, id string) (*commonpb.RoleAssignment, error) { return nil, nil }
-func (m *mockRBACManager) ListAssignments(ctx context.Context, subjectID, roleID, tenantID string) ([]*commonpb.RoleAssignment, error) { return nil, nil }
-func (m *mockRBACManager) GetSubjectAssignments(ctx context.Context, subjectID, tenantID string) ([]*commonpb.RoleAssignment, error) { return nil, nil }
-func (m *mockRBACManager) Initialize(ctx context.Context) error { return nil }
-func (m *mockRBACManager) CreateTenantDefaultRoles(ctx context.Context, tenantID string) error { return nil }
-func (m *mockRBACManager) GetEffectivePermissions(ctx context.Context, subjectID, tenantID string) ([]*commonpb.Permission, error) { return nil, nil }
-func (m *mockRBACManager) ComputeRolePermissions(ctx context.Context, roleID string) (*memory.EffectivePermissions, error) { return nil, nil }
-func (m *mockRBACManager) CreateRoleWithParent(ctx context.Context, role *commonpb.Role, parentRoleID string, inheritanceType commonpb.RoleInheritanceType) error { return nil }
-func (m *mockRBACManager) GetRoleHierarchyTree(ctx context.Context, rootRoleID string, maxDepth int) (*memory.RoleHierarchy, error) { return nil, nil }
-func (m *mockRBACManager) ValidateHierarchyOperation(ctx context.Context, childRoleID, parentRoleID string) error { return nil }
-func (m *mockRBACManager) ResolvePermissionConflicts(ctx context.Context, roleID string, conflictingPermissions map[string][]*commonpb.Permission) (map[string]*commonpb.Permission, error) { return nil, nil }
-
-// mockReportCache is a mock implementation of interfaces.ReportCache for testing
-type mockReportCache struct{}
-
-func (m *mockReportCache) Get(ctx context.Context, key string) (*interfaces.Report, error) {
-	return nil, nil // No cache hits for testing
-}
-
-func (m *mockReportCache) Set(ctx context.Context, key string, report *interfaces.Report, ttl time.Duration) error {
-	return nil
-}
-
-func (m *mockReportCache) Delete(ctx context.Context, key string) error {
-	return nil
-}
-
-func (m *mockReportCache) Clear(ctx context.Context) error {
-	return nil
-}
+func (l *testLogger) Debug(msg string, keysAndValues ...interface{}) {}
+func (l *testLogger) Info(msg string, keysAndValues ...interface{})  {}
+func (l *testLogger) Warn(msg string, keysAndValues ...interface{})  {}
+func (l *testLogger) Error(msg string, keysAndValues ...interface{}) {}
+func (l *testLogger) Fatal(msg string, keysAndValues ...interface{}) {}
+func (l *testLogger) DebugCtx(ctx context.Context, msg string, keysAndValues ...interface{}) {}
+func (l *testLogger) InfoCtx(ctx context.Context, msg string, keysAndValues ...interface{}) {}
+func (l *testLogger) WarnCtx(ctx context.Context, msg string, keysAndValues ...interface{}) {}
+func (l *testLogger) ErrorCtx(ctx context.Context, msg string, keysAndValues ...interface{}) {}
+func (l *testLogger) FatalCtx(ctx context.Context, msg string, keysAndValues ...interface{}) {}

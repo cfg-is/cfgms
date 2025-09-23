@@ -105,7 +105,7 @@ func DefaultServiceConfig() ServiceConfig {
 // NewService creates a new reports service with the provided dependencies
 func NewService(
 	storageManager *storage.Manager,
-	driftDetector *drift.Detector,
+	driftDetector drift.Detector,
 	cache interfaces.ReportCache,
 	logger logging.Logger,
 ) *Service {
@@ -131,7 +131,7 @@ func NewService(
 // NewServiceWithConfig creates a new reports service with custom configuration
 func NewServiceWithConfig(
 	storageManager *storage.Manager,
-	driftDetector *drift.Detector,
+	driftDetector drift.Detector,
 	cache interfaces.ReportCache,
 	config ServiceConfig,
 	logger logging.Logger,

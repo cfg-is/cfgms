@@ -136,7 +136,7 @@ func DefaultAdvancedCacheConfig() AdvancedCacheConfig {
 // NewAdvancedService creates a new advanced reports service
 func NewAdvancedService(
 	storageManager *storage.Manager,
-	driftDetector *drift.Detector,
+	driftDetector drift.Detector,
 	auditManager *audit.Manager,
 	auditStore storageInterfaces.AuditStore,
 	rbacManager *rbac.Manager,
@@ -176,7 +176,7 @@ func NewAdvancedService(
 // NewAdvancedServiceWithConfig creates a new advanced reports service with custom configuration
 func NewAdvancedServiceWithConfig(
 	storageManager *storage.Manager,
-	driftDetector *drift.Detector,
+	driftDetector drift.Detector,
 	auditManager *audit.Manager,
 	auditStore storageInterfaces.AuditStore,
 	rbacManager *rbac.Manager,
@@ -521,43 +521,3 @@ func (s *AdvancedService) exportAdvancedReport(ctx context.Context, report inter
 	}
 }
 
-// validateTenantAccess validates access to tenants (helper method)
-func (s *AdvancedService) validateTenantAccess(ctx context.Context, tenantIDs []string) error {
-	if !s.config.EnableRBACValidation {
-		return nil
-	}
-
-	// This would typically get the user ID from the context
-	userID := "current-user" // Placeholder
-
-	return s.advancedEngine.ValidateMultiTenantAccess(ctx, userID, tenantIDs)
-}
-
-// getCacheKey generates cache keys for advanced reports
-func (s *AdvancedService) getCacheKey(reportType string, params map[string]interface{}) string {
-	// Generate cache key based on report type and parameters
-	// This is a simplified implementation
-	return fmt.Sprintf("advanced:%s:%v", reportType, params)
-}
-
-// getCacheTTL returns appropriate cache TTL for report type
-func (s *AdvancedService) getCacheTTL(reportType string) time.Duration {
-	switch reportType {
-	case "compliance":
-		return s.config.AdvancedCacheConfig.ComplianceReportTTL
-	case "security":
-		return s.config.AdvancedCacheConfig.SecurityReportTTL
-	case "executive":
-		return s.config.AdvancedCacheConfig.ExecutiveReportTTL
-	case "multi_tenant":
-		return s.config.AdvancedCacheConfig.MultiTenantReportTTL
-	default:
-		return s.config.CacheTTL // Fall back to base cache TTL
-	}
-}
-
-// recordMetric records metrics for monitoring (placeholder)
-func (s *AdvancedService) recordMetric(metric string, value float64, tags map[string]string) {
-	// This would integrate with a metrics system
-	s.logger.Debug("metric recorded", "metric", metric, "value", value, "tags", tags)
-}
