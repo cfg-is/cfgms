@@ -209,30 +209,176 @@ func NewAdvancedServiceWithConfig(
 	}
 }
 
+// RBAC and Tenant Isolation Helper Methods
+
+// getUserIDFromContext extracts user ID from context for RBAC validation
+func (s *AdvancedService) getUserIDFromContext(ctx context.Context) string {
+	// Check for user ID in context (this would be set by middleware)
+	if userID, ok := ctx.Value("user_id").(string); ok && userID != "" {
+		return userID
+	}
+
+	// Fallback to extracting from JWT claims or other auth context
+	if claims, ok := ctx.Value("auth_claims").(map[string]interface{}); ok {
+		if sub, ok := claims["sub"].(string); ok {
+			return sub
+		}
+	}
+
+	// For testing/development - extract from tenant context
+	if tenantID, ok := ctx.Value("tenant_id").(string); ok {
+		return "system-user-" + tenantID
+	}
+
+	// Default fallback for system operations
+	return "system-user"
+}
+
+// validateTenantAccess validates user access to specific tenants with detailed logging
+func (s *AdvancedService) validateTenantAccess(ctx context.Context, tenantIDs []string, operation string) error {
+	if !s.config.EnableRBACValidation || s.rbacManager == nil {
+		s.logger.Debug("RBAC validation disabled or manager not available",
+			"operation", operation,
+			"tenant_count", len(tenantIDs))
+		return nil
+	}
+
+	userID := s.getUserIDFromContext(ctx)
+	s.logger.Debug("validating tenant access",
+		"user_id", userID,
+		"operation", operation,
+		"tenant_ids", tenantIDs,
+		"tenant_count", len(tenantIDs))
+
+	// Validate access for each tenant
+	if err := s.advancedEngine.ValidateMultiTenantAccess(ctx, userID, tenantIDs); err != nil {
+		s.logger.Warn("tenant access validation failed",
+			"user_id", userID,
+			"operation", operation,
+			"tenant_ids", tenantIDs,
+			"error", err)
+		return fmt.Errorf("access denied for %s: %w", operation, err)
+	}
+
+	s.logger.Debug("tenant access validation successful",
+		"user_id", userID,
+		"operation", operation,
+		"tenant_count", len(tenantIDs))
+	return nil
+}
+
+// validateSingleTenantAccess validates access to a single tenant
+func (s *AdvancedService) validateSingleTenantAccess(ctx context.Context, tenantID string, operation string) error {
+	return s.validateTenantAccess(ctx, []string{tenantID}, operation)
+}
+
+// extractTenantsFromRequest extracts tenant IDs from various request types for validation
+func (s *AdvancedService) extractTenantsFromRequest(req interface{}) []string {
+	switch r := req.(type) {
+	case interfaces.ComplianceReportRequest:
+		return r.TenantIDs
+	case interfaces.SecurityReportRequest:
+		return r.TenantIDs
+	case interfaces.ExecutiveReportRequest:
+		return r.TenantIDs
+	case interfaces.MultiTenantReportRequest:
+		return r.TenantIDs
+	case interfaces.AdvancedReportRequest:
+		// Extract from Parameters if present
+		if tenantIDs, ok := r.Parameters["tenant_ids"].([]string); ok {
+			return tenantIDs
+		}
+		// Fallback to single tenant if specified in parameters
+		if tenantID, ok := r.Parameters["tenant_id"].(string); ok {
+			return []string{tenantID}
+		}
+	}
+	return []string{}
+}
+
+// extractTenantIDsFromQuery extracts tenant IDs from various query types for validation
+func (s *AdvancedService) extractTenantIDsFromQuery(query interface{}) []string {
+	// Use reflection-like approach to extract tenant IDs from query objects
+	// This is a generic approach since query types may have different field names
+	switch q := query.(type) {
+	case interfaces.DataQuery:
+		return q.TenantIDs
+	default:
+		// For unknown query types, check if they have a TenantIDs field using type assertion
+		// This is safe and will return empty slice if field doesn't exist
+		if hasField, ok := query.(interface{ GetTenantIDs() []string }); ok {
+			return hasField.GetTenantIDs()
+		}
+		// Fallback to single tenant if available
+		if hasField, ok := query.(interface{ GetTenantID() string }); ok {
+			if tenantID := hasField.GetTenantID(); tenantID != "" {
+				return []string{tenantID}
+			}
+		}
+	}
+	return []string{}
+}
+
 // Advanced Report Generation Methods
 
 // GenerateAdvancedReport generates an advanced report with audit integration
 func (s *AdvancedService) GenerateAdvancedReport(ctx context.Context, req interfaces.AdvancedReportRequest) (*interfaces.AdvancedReport, error) {
+	// Validate tenant access
+	tenantIDs := s.extractTenantsFromRequest(req)
+	if len(tenantIDs) > 0 {
+		if err := s.validateTenantAccess(ctx, tenantIDs, "generate_advanced_report"); err != nil {
+			return nil, err
+		}
+	}
+
 	return s.advancedEngine.GenerateAdvancedReport(ctx, req)
 }
 
 // GenerateComplianceReport generates a comprehensive compliance report
 func (s *AdvancedService) GenerateComplianceReport(ctx context.Context, req interfaces.ComplianceReportRequest) (*interfaces.ComplianceReport, error) {
+	// Validate tenant access
+	if len(req.TenantIDs) > 0 {
+		if err := s.validateTenantAccess(ctx, req.TenantIDs, "generate_compliance_report"); err != nil {
+			return nil, err
+		}
+	}
+
 	return s.advancedEngine.GenerateComplianceReport(ctx, req)
 }
 
 // GenerateSecurityReport generates a comprehensive security report
 func (s *AdvancedService) GenerateSecurityReport(ctx context.Context, req interfaces.SecurityReportRequest) (*interfaces.SecurityReport, error) {
+	// Validate tenant access
+	if len(req.TenantIDs) > 0 {
+		if err := s.validateTenantAccess(ctx, req.TenantIDs, "generate_security_report"); err != nil {
+			return nil, err
+		}
+	}
+
 	return s.advancedEngine.GenerateSecurityReport(ctx, req)
 }
 
 // GenerateExecutiveReport generates an executive-level summary report
 func (s *AdvancedService) GenerateExecutiveReport(ctx context.Context, req interfaces.ExecutiveReportRequest) (*interfaces.ExecutiveReport, error) {
+	// Validate tenant access
+	if len(req.TenantIDs) > 0 {
+		if err := s.validateTenantAccess(ctx, req.TenantIDs, "generate_executive_report"); err != nil {
+			return nil, err
+		}
+	}
+
 	return s.advancedEngine.GenerateExecutiveReport(ctx, req)
 }
 
 // GenerateMultiTenantReport generates a multi-tenant analysis report
 func (s *AdvancedService) GenerateMultiTenantReport(ctx context.Context, req interfaces.MultiTenantReportRequest) (*interfaces.MultiTenantReport, error) {
+	// Validate tenant access - this is critical for multi-tenant reports
+	if len(req.TenantIDs) > 0 {
+		if err := s.validateTenantAccess(ctx, req.TenantIDs, "generate_multi_tenant_report"); err != nil {
+			return nil, err
+		}
+	}
+
 	return s.advancedEngine.GenerateMultiTenantReport(ctx, req)
 }
 
@@ -321,18 +467,19 @@ func (s *AdvancedService) GenerateExecutiveDashboard(
 
 // GetTenantSummary returns comprehensive summary for a single tenant
 func (s *AdvancedService) GetTenantSummary(ctx context.Context, tenantID string, timeRange interfaces.TimeRange) (*interfaces.TenantSummary, error) {
+	// Validate single tenant access
+	if err := s.validateSingleTenantAccess(ctx, tenantID, "get_tenant_summary"); err != nil {
+		return nil, err
+	}
+
 	return s.advancedProvider.GetTenantSummary(ctx, tenantID, timeRange)
 }
 
 // GetMultiTenantAggregation returns aggregated metrics across multiple tenants
 func (s *AdvancedService) GetMultiTenantAggregation(ctx context.Context, tenantIDs []string, timeRange interfaces.TimeRange) (*interfaces.MultiTenantAggregation, error) {
-	// Validate tenant access if RBAC is enabled
-	if s.config.EnableRBACValidation {
-		// This would typically get user ID from context
-		// For now, we'll use the engine's validation
-		if err := s.advancedEngine.ValidateMultiTenantAccess(ctx, "current-user", tenantIDs); err != nil {
-			return nil, err
-		}
+	// Validate tenant access - critical for multi-tenant aggregation
+	if err := s.validateTenantAccess(ctx, tenantIDs, "get_multi_tenant_aggregation"); err != nil {
+		return nil, err
 	}
 
 	return s.advancedProvider.GetMultiTenantAggregation(ctx, tenantIDs, timeRange)
@@ -342,21 +489,49 @@ func (s *AdvancedService) GetMultiTenantAggregation(ctx context.Context, tenantI
 
 // GetComplianceData retrieves compliance assessment data
 func (s *AdvancedService) GetComplianceData(ctx context.Context, query interfaces.ComplianceDataQuery) (*interfaces.ComplianceData, error) {
+	// Validate tenant access if query contains tenant IDs
+	if tenantIDs := s.extractTenantIDsFromQuery(query); len(tenantIDs) > 0 {
+		if err := s.validateTenantAccess(ctx, tenantIDs, "get_compliance_data"); err != nil {
+			return nil, err
+		}
+	}
+
 	return s.advancedProvider.GetComplianceData(ctx, query)
 }
 
 // GetSecurityEvents retrieves security-related events
 func (s *AdvancedService) GetSecurityEvents(ctx context.Context, query interfaces.SecurityEventQuery) ([]interfaces.SecurityEvent, error) {
+	// Validate tenant access if query contains tenant IDs
+	if tenantIDs := s.extractTenantIDsFromQuery(query); len(tenantIDs) > 0 {
+		if err := s.validateTenantAccess(ctx, tenantIDs, "get_security_events"); err != nil {
+			return nil, err
+		}
+	}
+
 	return s.advancedProvider.GetSecurityEvents(ctx, query)
 }
 
 // GetUserActivity retrieves user activity summaries
 func (s *AdvancedService) GetUserActivity(ctx context.Context, query interfaces.UserActivityQuery) ([]interfaces.UserActivity, error) {
+	// Validate tenant access if query contains tenant IDs
+	if tenantIDs := s.extractTenantIDsFromQuery(query); len(tenantIDs) > 0 {
+		if err := s.validateTenantAccess(ctx, tenantIDs, "get_user_activity"); err != nil {
+			return nil, err
+		}
+	}
+
 	return s.advancedProvider.GetUserActivity(ctx, query)
 }
 
 // GetCrossSystemMetrics generates metrics that correlate DNA and audit data
 func (s *AdvancedService) GetCrossSystemMetrics(ctx context.Context, query interfaces.CrossSystemQuery) (*interfaces.CrossSystemMetrics, error) {
+	// Validate tenant access if query contains tenant IDs
+	if tenantIDs := s.extractTenantIDsFromQuery(query); len(tenantIDs) > 0 {
+		if err := s.validateTenantAccess(ctx, tenantIDs, "get_cross_system_metrics"); err != nil {
+			return nil, err
+		}
+	}
+
 	return s.advancedProvider.GetCrossSystemMetrics(ctx, query)
 }
 
