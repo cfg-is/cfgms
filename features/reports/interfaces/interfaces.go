@@ -31,6 +31,8 @@ const (
 	ReportTypeDrift       ReportType = "drift"
 	ReportTypeOperational ReportType = "operational"
 	ReportTypeSecurity    ReportType = "security"
+	ReportTypeAudit       ReportType = "audit"
+	ReportTypeMultiTenant ReportType = "multi_tenant"
 	ReportTypeCustom      ReportType = "custom"
 )
 
@@ -274,4 +276,28 @@ type ReportCache interface {
 	Set(ctx context.Context, key string, report *Report, ttl time.Duration) error
 	Delete(ctx context.Context, key string) error
 	Clear(ctx context.Context) error
+}
+
+// AdvancedCacheConfig contains configuration for advanced caching
+type AdvancedCacheConfig struct {
+	EnableAdvancedCaching bool          `json:"enable_advanced_caching"`
+	ComplianceReportTTL   time.Duration `json:"compliance_report_ttl"`
+	SecurityReportTTL     time.Duration `json:"security_report_ttl"`
+	ExecutiveReportTTL    time.Duration `json:"executive_report_ttl"`
+	MultiTenantReportTTL  time.Duration `json:"multi_tenant_report_ttl"`
+	MaxCacheSize          int           `json:"max_cache_size"`
+	CacheMetricsEnabled   bool          `json:"cache_metrics_enabled"`
+}
+
+// DefaultAdvancedCacheConfig returns default advanced caching configuration
+func DefaultAdvancedCacheConfig() AdvancedCacheConfig {
+	return AdvancedCacheConfig{
+		EnableAdvancedCaching: true,
+		ComplianceReportTTL:   4 * time.Hour,   // Stable data - longer TTL
+		SecurityReportTTL:     30 * time.Minute, // Dynamic threat landscape - shorter TTL
+		ExecutiveReportTTL:    1 * time.Hour,   // Balanced freshness/performance
+		MultiTenantReportTTL:  2 * time.Hour,   // Complex aggregations - moderate TTL
+		MaxCacheSize:          1000,            // Reasonable limit
+		CacheMetricsEnabled:   true,
+	}
 }

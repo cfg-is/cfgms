@@ -102,7 +102,7 @@ func TestAdvancedServiceWithConfig(t *testing.T) {
 		MaxTenantsPerReport:      25,
 		ComplianceFrameworks:     []string{"CIS"},
 		SecurityEventRetention:   30 * 24 * time.Hour,
-		AdvancedCacheConfig: AdvancedCacheConfig{
+		AdvancedCacheConfig: interfaces.AdvancedCacheConfig{
 			EnableAdvancedCaching: true,
 			ComplianceReportTTL:   2 * time.Hour,
 			SecurityReportTTL:     15 * time.Minute,
@@ -626,7 +626,7 @@ func createTestAdvancedService(t *testing.T) *AdvancedService {
 		MaxTenantsPerReport:      50,
 		ComplianceFrameworks:     []string{"CIS", "HIPAA", "PCI-DSS"},
 		SecurityEventRetention:   90 * 24 * time.Hour,
-		AdvancedCacheConfig: AdvancedCacheConfig{
+		AdvancedCacheConfig: interfaces.AdvancedCacheConfig{
 			EnableAdvancedCaching: true,
 			ComplianceReportTTL:   4 * time.Hour,
 			SecurityReportTTL:     30 * time.Minute,

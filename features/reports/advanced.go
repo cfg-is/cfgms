@@ -59,6 +59,7 @@ import (
 	"fmt"
 	"time"
 
+	reportcache "github.com/cfgis/cfgms/features/reports/cache"
 	"github.com/cfgis/cfgms/features/reports/engine"
 	"github.com/cfgis/cfgms/features/reports/exporters"
 	"github.com/cfgis/cfgms/features/reports/interfaces"
@@ -92,19 +93,9 @@ type AdvancedServiceConfig struct {
 	MaxTenantsPerReport       int        `json:"max_tenants_per_report"`
 	ComplianceFrameworks      []string   `json:"compliance_frameworks"`
 	SecurityEventRetention    time.Duration `json:"security_event_retention"`
-	AdvancedCacheConfig       AdvancedCacheConfig `json:"advanced_cache_config"`
+	AdvancedCacheConfig       interfaces.AdvancedCacheConfig `json:"advanced_cache_config"`
 }
 
-// AdvancedCacheConfig contains advanced caching configuration
-type AdvancedCacheConfig struct {
-	EnableAdvancedCaching     bool          `json:"enable_advanced_caching"`
-	ComplianceReportTTL       time.Duration `json:"compliance_report_ttl"`
-	SecurityReportTTL         time.Duration `json:"security_report_ttl"`
-	ExecutiveReportTTL        time.Duration `json:"executive_report_ttl"`
-	MultiTenantReportTTL      time.Duration `json:"multi_tenant_report_ttl"`
-	MaxCacheSize              int           `json:"max_cache_size"`
-	CacheMetricsEnabled       bool          `json:"cache_metrics_enabled"`
-}
 
 // DefaultAdvancedServiceConfig returns default configuration for advanced reporting
 func DefaultAdvancedServiceConfig() AdvancedServiceConfig {
@@ -116,22 +107,10 @@ func DefaultAdvancedServiceConfig() AdvancedServiceConfig {
 		MaxTenantsPerReport:       50,
 		ComplianceFrameworks:      []string{"CIS", "HIPAA", "PCI-DSS"},
 		SecurityEventRetention:    90 * 24 * time.Hour, // 90 days
-		AdvancedCacheConfig:       DefaultAdvancedCacheConfig(),
+		AdvancedCacheConfig:       interfaces.DefaultAdvancedCacheConfig(),
 	}
 }
 
-// DefaultAdvancedCacheConfig returns default advanced caching configuration
-func DefaultAdvancedCacheConfig() AdvancedCacheConfig {
-	return AdvancedCacheConfig{
-		EnableAdvancedCaching: true,
-		ComplianceReportTTL:   4 * time.Hour,   // Compliance reports cached for 4 hours
-		SecurityReportTTL:     30 * time.Minute, // Security reports cached for 30 minutes
-		ExecutiveReportTTL:    2 * time.Hour,   // Executive reports cached for 2 hours
-		MultiTenantReportTTL:  1 * time.Hour,   // Multi-tenant reports cached for 1 hour
-		MaxCacheSize:          1000,            // Maximum cached reports
-		CacheMetricsEnabled:   true,
-	}
-}
 
 // NewAdvancedService creates a new advanced reports service
 func NewAdvancedService(
@@ -201,7 +180,7 @@ func NewAdvancedServiceWithConfig(
 	// Create advanced cache if enabled
 	advancedCache := cache
 	if config.AdvancedCacheConfig.EnableAdvancedCaching {
-		advancedCache = cache // Could wrap with advanced caching layer
+		advancedCache = reportcache.NewAdvancedCache(cache, config.AdvancedCacheConfig, logger)
 	}
 
 	// Create advanced engine with config
