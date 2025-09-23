@@ -3,6 +3,7 @@ package integration
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -72,6 +73,29 @@ func (framework *ComponentFailureSecurityTestFramework) Setup() error {
 		return fmt.Errorf("failed to initialize RBAC manager: %w", err)
 	}
 	
+	// Create system roles first
+	systemRoles := []*common.Role{
+		{
+			Id:          "system.read-only",
+			Name:        "System Read Only",
+			TenantId:    "test-tenant",
+			Description: "Read-only access to system resources",
+		},
+		{
+			Id:          "system.admin",
+			Name:        "System Administrator",
+			TenantId:    "test-tenant",
+			Description: "Full administrative access to system",
+		},
+	}
+
+	for _, role := range systemRoles {
+		err = framework.rbacManager.CreateRole(ctx, role)
+		if err != nil && !strings.Contains(err.Error(), "already exists") {
+			return fmt.Errorf("failed to create system role %s: %w", role.Id, err)
+		}
+	}
+
 	// Create test tenant
 	err = framework.rbacManager.CreateTenantDefaultRoles(ctx, "test-tenant")
 	if err != nil {
