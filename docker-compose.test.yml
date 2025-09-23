@@ -1,8 +1,6 @@
 # Docker Compose configuration for CFGMS integration testing
 # Provides isolated, ephemeral test environments for storage provider validation
 
-version: '3.8'
-
 services:
   # PostgreSQL database for database provider testing
   postgres-test:
