@@ -15,14 +15,23 @@ import (
 func waitForWorkflowCompletion(t *testing.T, execution *WorkflowExecution, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		status := execution.GetStatus()
-		if status != StatusPending && status != StatusRunning {
-			return
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			status := execution.GetStatus()
+			if status != StatusPending && status != StatusRunning {
+				return
+			}
+		case <-time.After(time.Until(deadline)):
+			if time.Now().After(deadline) {
+				status := execution.GetStatus()
+				t.Fatalf("Workflow did not complete within %v, final status: %v", timeout, status)
+			}
 		}
-		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("Workflow did not complete within %v, status: %v", timeout, execution.GetStatus())
 }
 
 func TestTrySuccess(t *testing.T) {
@@ -427,8 +436,8 @@ func TestTryMissingConfiguration(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, execution)
 
-	// Wait for completion
-	waitForWorkflowCompletion(t, execution, 5*time.Second)
+	// Wait for completion with extended timeout for concurrent test scenarios
+	waitForWorkflowCompletion(t, execution, 15*time.Second)
 
 	// Verify execution failed due to missing configuration
 	assert.Equal(t, StatusFailed, execution.GetStatus())

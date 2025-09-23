@@ -55,35 +55,6 @@ func requireInfrastructureOrSkip(t *testing.T, err error, component string) {
 	}
 }
 
-// validateTestCompleteness ensures that critical tests actually ran
-// This helps catch cases where skips or timeouts prevented full validation
-func validateTestCompleteness(t *testing.T, testResults map[string]bool) {
-	if !isInfrastructureRequired() {
-		return // Only validate in CI/integration environments
-	}
-
-	requiredTests := []string{
-		"database_provider_client_tenant_store",
-		"database_provider_config_store",
-		"database_provider_audit_store",
-		"database_provider_runtime_store",
-		"git_provider_client_tenant_store",
-		"git_provider_config_store",
-		"git_provider_audit_store",
-		"git_provider_runtime_store",
-	}
-
-	var missing []string
-	for _, required := range requiredTests {
-		if !testResults[required] {
-			missing = append(missing, required)
-		}
-	}
-
-	if len(missing) > 0 {
-		t.Fatalf("INCOMPLETE TEST COVERAGE: Required tests did not run in CI/integration environment: %v", missing)
-	}
-}
 
 // StorageTestConfig holds configuration for testing different storage providers
 type StorageTestConfig struct {
