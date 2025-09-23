@@ -64,8 +64,8 @@ test:
 	@echo "🧪 Running Tests (Smart Mode)"
 	@echo "============================="
 	@go clean -testcache
-	@echo "🧪 Testing framework (excluding modules)..."
-	@go test -race -short -timeout=3m $$(go list ./... | grep -v '/features/modules/')
+	@echo "🧪 Testing framework (excluding modules and long-running tests)..."
+	@go test -race -short -timeout=1m $$(go list ./... | grep -v '/features/modules/' | grep -v '/test/integration' | grep -v '/test/e2e')
 	@echo "🧪 Testing core modules (smoke test)..."
 	@for module in $(CORE_MODULES); do \
 		echo "  Testing $$module..."; \
@@ -165,6 +165,7 @@ test-commit: test lint security-scan
 	@echo "🎯 Code is validated and ready for commit/PR"
 
 # CI validation (complete validation) - RUNS IN CI/CD
+test-ci: export CI=1
 test-ci: test lint security-scan test-m365-integration test-integration-complete test-integration-factory
 	@echo ""
 	@echo "✅ CI VALIDATION FINISHED"
@@ -1051,6 +1052,7 @@ test-integration-redis:
 	@echo "Current profile: docker compose --profile future"
 
 # Complete integration testing workflow
+test-integration-complete: export CI=1
 test-integration-complete: test-integration-setup test-with-real-storage test-integration-cleanup
 	@echo ""
 	@echo "🎉 Complete integration testing workflow finished!"
