@@ -526,11 +526,13 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - ✅ Built-in report templates for compliance and operational scenarios (8 templates: CIS, HIPAA, PCI-DSS, security assessment, executive dashboards, operational health, change management, audit trails)
   - ✅ Multi-tenant aggregation while respecting access controls with RBAC validation
   - ✅ Caching strategy for expensive queries without impacting real-time operations (Advanced type-specific TTL strategy)
-- [ ] **Custom Report Generation and Export** (Story 6.1) - 13 points (Issue #174)
-  - Custom report generation with user-defined parameters and validation
-  - Export to multiple formats (JSON, CSV, PDF, HTML) with proper formatting
-  - Scheduled report generation with configurable frequency and delivery
-  - Template sharing across tenants with permission controls
+- [x] **Custom Report Generation and Export** (Story 6.1) - 13 points (Issue #174) ✅ COMPLETED
+  - ✅ Custom report generation with user-defined parameters and comprehensive validation
+  - ✅ Export to multiple formats (JSON, CSV, PDF, HTML, Excel) with proper formatting
+  - ✅ Scheduled report generation with configurable frequency and delivery (cron/interval support)
+  - ✅ Template sharing across tenants with permission controls and access validation
+  - ✅ Large dataset handling with pagination and streaming for memory efficiency
+  - ✅ Report builder interface for defining custom queries and formatting
 - [ ] **Internal Platform Monitoring Implementation** (Story 7.1) - 13 points (Issue #175)
   - Comprehensive health, performance, and status metrics for all components
   - Audit log integration using global logging provider
