@@ -476,7 +476,7 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 
 #### v0.5.0 (Beta) - Advanced Workflows & Core Readiness
 
-**Status**: 🚧 IN PROGRESS - 70/109 story points completed (64.2%) - 7 stories complete, 3 remaining
+**Status**: 🚧 IN PROGRESS - 83/109 story points completed (76.1%) - 8 stories complete, 2 remaining
 
 **Goal**: Transform CFGMS from foundational architecture (v0.4.6.0) to production-ready enterprise platform by implementing global logging provider, advanced workflow capabilities, comprehensive reporting, internal monitoring, lightweight SIEM, and high availability infrastructure while maintaining complete backward compatibility.
 
@@ -521,11 +521,11 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - Template system with inheritance capabilities and parameter instantiation
   - Version management with forking, rollback, and conflict resolution
   - Integration with existing storage providers for version storage
-- [ ] **Advanced Reporting Framework Foundation** (Story 5.1) - 13 points (Issue #173)
-  - Comprehensive reporting engine integrating DNA monitoring and audit data
-  - Built-in report templates for compliance and operational scenarios
-  - Multi-tenant aggregation while respecting access controls
-  - Caching strategy for expensive queries without impacting real-time operations
+- [x] **Advanced Reporting Framework Foundation** (Story 5.1) - 13 points (Issue #173) ✅ COMPLETED
+  - ✅ Comprehensive reporting engine integrating DNA monitoring and audit data
+  - ✅ Built-in report templates for compliance and operational scenarios (8 templates: CIS, HIPAA, PCI-DSS, security assessment, executive dashboards, operational health, change management, audit trails)
+  - ✅ Multi-tenant aggregation while respecting access controls with RBAC validation
+  - ✅ Caching strategy for expensive queries without impacting real-time operations (Advanced type-specific TTL strategy)
 - [ ] **Custom Report Generation and Export** (Story 6.1) - 13 points (Issue #174)
   - Custom report generation with user-defined parameters and validation
   - Export to multiple formats (JSON, CSV, PDF, HTML) with proper formatting
