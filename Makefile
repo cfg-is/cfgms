@@ -166,7 +166,14 @@ test-commit: test lint security-scan
 
 # CI validation (complete validation) - RUNS IN CI/CD
 test-ci: export CI=1
-test-ci: test lint security-scan test-m365-integration test-integration-complete test-integration-factory
+test-ci: test-infrastructure-required test lint security-scan test-m365-integration test-integration-complete test-integration-factory
+
+# Robust CI infrastructure test target - ensures infrastructure works every time
+test-infrastructure-required:
+	@echo "🏗️  CFGMS Infrastructure Reliability Test"
+	@echo "========================================"
+	@echo "Ensuring CI infrastructure is set up and working correctly..."
+	@./scripts/test-with-infrastructure.sh go test -v ./pkg/testing/storage/... ./features/controller/server/... -timeout=10m -race
 	@echo ""
 	@echo "✅ CI VALIDATION FINISHED"
 	@echo "=========================="
@@ -990,17 +997,12 @@ test-integration-status:
 	fi
 
 # Run integration tests against real storage providers
-test-with-real-storage: 
+test-with-real-storage:
 	@echo "🧪 Running CFGMS Integration Tests with Real Storage"
 	@echo "=================================================="
 	@echo "Testing with Docker-based PostgreSQL and Gitea..."
 	@echo ""
-	@if [ -f .env.test ]; then \
-		set -a && . ./.env.test && set +a && ./scripts/wait-for-services.sh; \
-	else \
-		echo "⚠️  .env.test not found. Using default credentials."; \
-		./scripts/wait-for-services.sh; \
-	fi
+	@./scripts/test-with-infrastructure.sh go test -v -race ./pkg/testing/storage/... ./features/controller/server/... -timeout=5m
 	@echo ""
 	@echo "🔬 Running storage provider validation tests..."
 	@if [ -f .env.test ]; then \
