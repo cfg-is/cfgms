@@ -195,6 +195,10 @@ func TestSIEMEngine_StartStop(t *testing.T) {
 }
 
 func TestSIEMEngine_ProcessLogEntry(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping SIEM engine test in short mode")
+	}
+
 	triggerManager := NewMockTriggerManager()
 	workflowTrigger := NewMockWorkflowTrigger()
 	config := createTestConfig()

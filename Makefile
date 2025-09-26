@@ -1008,7 +1008,7 @@ test-with-real-storage:
 	@if [ -f .env.test ]; then \
 		echo "Using generated credentials from .env.test"; \
 		set -a && . ./.env.test && set +a && \
-		go test -v -race -cover -tags=integration ./pkg/testing/storage/... ./features/controller/server/... ./pkg/logging/providers/timescale/...; \
+		go test -v -race -cover -tags=integration -timeout=5m ./pkg/testing/storage/... ./features/controller/server/... ./pkg/logging/providers/timescale/...; \
 	else \
 		echo "⚠️  .env.test not found. Run: make test-integration-setup"; \
 		exit 1; \
