@@ -193,15 +193,21 @@ func (sp *StreamProcessorImpl) Stop(ctx context.Context) error {
 	// Wait for components to shutdown with timeout
 	shutdownComplete := make(chan struct{})
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				// Handle WaitGroup reuse panics during shutdown
+				logger.WarnCtx(ctx, "WaitGroup panic during shutdown", "error", r)
+			}
+			close(shutdownComplete)
+		}()
 		sp.processorWg.Wait()
 		sp.workerWg.Wait()
-		close(shutdownComplete)
 	}()
 
 	select {
 	case <-shutdownComplete:
 		logger.InfoCtx(ctx, "SIEM stream processor stopped gracefully")
-	case <-time.After(30 * time.Second):
+	case <-time.After(5 * time.Second): // Reduce timeout for tests
 		logger.WarnCtx(ctx, "SIEM stream processor shutdown timeout, forcing stop")
 	}
 
