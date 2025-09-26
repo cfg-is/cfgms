@@ -363,7 +363,12 @@ func (rm *RuleManagerImpl) UpdateRule(rule *DetectionRule) error {
 	if rm.patternMatcher != nil {
 		// Remove old patterns
 		for _, pattern := range existingRule.Patterns {
-			rm.patternMatcher.RemovePattern(pattern.ID)
+			if err := rm.patternMatcher.RemovePattern(pattern.ID); err != nil {
+				rm.logger.Error("Failed to remove old pattern from matcher",
+					"pattern_id", pattern.ID,
+					"rule_id", rule.ID,
+					"error", err.Error())
+			}
 		}
 		// Add new patterns
 		for _, pattern := range rule.Patterns {
@@ -379,7 +384,12 @@ func (rm *RuleManagerImpl) UpdateRule(rule *DetectionRule) error {
 	// Update correlation rules
 	if rm.eventCorrelator != nil {
 		if existingRule.Correlation != nil {
-			rm.eventCorrelator.RemoveCorrelationRule(existingRule.Correlation.ID)
+			if err := rm.eventCorrelator.RemoveCorrelationRule(existingRule.Correlation.ID); err != nil {
+				rm.logger.Error("Failed to remove old correlation rule",
+					"rule_id", rule.ID,
+					"correlation_id", existingRule.Correlation.ID,
+					"error", err.Error())
+			}
 		}
 		if rule.Correlation != nil {
 			if err := rm.eventCorrelator.AddCorrelationRule(rule.Correlation); err != nil {
@@ -411,13 +421,23 @@ func (rm *RuleManagerImpl) RemoveRule(ruleID string) error {
 	// Remove from pattern matcher
 	if rm.patternMatcher != nil {
 		for _, pattern := range rule.Patterns {
-			rm.patternMatcher.RemovePattern(pattern.ID)
+			if err := rm.patternMatcher.RemovePattern(pattern.ID); err != nil {
+				rm.logger.Error("Failed to remove pattern from matcher",
+					"pattern_id", pattern.ID,
+					"rule_id", ruleID,
+					"error", err.Error())
+			}
 		}
 	}
 
 	// Remove from event correlator
 	if rm.eventCorrelator != nil && rule.Correlation != nil {
-		rm.eventCorrelator.RemoveCorrelationRule(rule.Correlation.ID)
+		if err := rm.eventCorrelator.RemoveCorrelationRule(rule.Correlation.ID); err != nil {
+			rm.logger.Error("Failed to remove correlation rule",
+				"rule_id", ruleID,
+				"correlation_id", rule.Correlation.ID,
+				"error", err.Error())
+		}
 	}
 
 	// Remove from main storage

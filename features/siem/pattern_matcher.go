@@ -21,7 +21,6 @@ type PatternMatcherImpl struct {
 
 	// Performance optimization
 	regexCache map[string]*regexp.Regexp
-	cacheMutex sync.RWMutex
 
 	// Statistics
 	matchCount    int64

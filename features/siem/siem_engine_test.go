@@ -205,7 +205,7 @@ func TestSIEMEngine_ProcessLogEntry(t *testing.T) {
 	ctx := context.Background()
 	err = engine.Start(ctx)
 	require.NoError(t, err)
-	defer engine.Stop(ctx)
+	defer func() { _ = engine.Stop(ctx) }()
 
 	// Process a log entry
 	entry := createTestLogEntry("ERROR", "Test error message", "test-tenant")
@@ -254,7 +254,7 @@ func TestEventCorrelator_BasicCorrelation(t *testing.T) {
 	ctx := context.Background()
 	err := correlator.Start(ctx)
 	require.NoError(t, err)
-	defer correlator.Stop(ctx)
+	defer func() { _ = correlator.Stop(ctx) }()
 
 	// Add correlation rule
 	rule := &CorrelationRule{
@@ -312,14 +312,14 @@ func BenchmarkSIEMEngine_ThroughputTest(b *testing.B) {
 	ctx := context.Background()
 	err = engine.Start(ctx)
 	require.NoError(b, err)
-	defer engine.Stop(ctx)
+	defer func() { _ = engine.Stop(ctx) }()
 
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		i := 0
 		for pb.Next() {
 			entry := createTestLogEntry("INFO", "Benchmark test message", "test-tenant")
-			engine.ProcessLogEntry(ctx, entry)
+			_ = engine.ProcessLogEntry(ctx, entry)
 			i++
 		}
 	})
@@ -354,7 +354,7 @@ func BenchmarkPatternMatcher_BatchProcessing(b *testing.B) {
 	}
 
 	for _, pattern := range patterns {
-		matcher.AddPattern(pattern)
+		_ = matcher.AddPattern(pattern)
 	}
 
 	// Create test entries
@@ -389,7 +389,7 @@ func TestSIEMEngine_EndToEndProcessing(t *testing.T) {
 	ctx := context.Background()
 	err = engine.Start(ctx)
 	require.NoError(t, err)
-	defer engine.Stop(ctx)
+	defer func() { _ = engine.Stop(ctx) }()
 
 	// Add a test pattern
 	pattern := &DetectionPattern{
@@ -457,7 +457,7 @@ func TestSIEMEngine_ThroughputRequirement(t *testing.T) {
 	ctx := context.Background()
 	err = engine.Start(ctx)
 	require.NoError(t, err)
-	defer engine.Stop(ctx)
+	defer func() { _ = engine.Stop(ctx) }()
 
 	// Test processing 10,000+ entries per second
 	startTime := time.Now()
@@ -484,7 +484,7 @@ func TestSIEMEngine_ThroughputRequirement(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for entry := range entryChan {
-				engine.ProcessLogEntry(ctx, entry)
+				_ = engine.ProcessLogEntry(ctx, entry)
 			}
 		}()
 	}
@@ -521,7 +521,7 @@ func TestSIEMEngine_LatencyRequirement(t *testing.T) {
 	ctx := context.Background()
 	err = engine.Start(ctx)
 	require.NoError(t, err)
-	defer engine.Stop(ctx)
+	defer func() { _ = engine.Stop(ctx) }()
 
 	// Add pattern for latency testing
 	pattern := &DetectionPattern{
@@ -590,13 +590,13 @@ func TestSIEMEngine_MemoryUsage(t *testing.T) {
 	// Process entries and check memory growth
 	for i := 0; i < 10000; i++ {
 		entry := createTestLogEntry("INFO", "Memory test message", "test-tenant")
-		engine.ProcessLogEntry(ctx, entry)
+		_ = engine.ProcessLogEntry(ctx, entry)
 	}
 
 	// Wait for processing
 	time.Sleep(1 * time.Second)
 
-	engine.Stop(ctx)
+	_ = engine.Stop(ctx)
 
 	// Force GC and check memory
 	runtime.GC()
@@ -628,7 +628,7 @@ func TestSIEMEngine_StressTest(t *testing.T) {
 	ctx := context.Background()
 	err = engine.Start(ctx)
 	require.NoError(t, err)
-	defer engine.Stop(ctx)
+	defer func() { _ = engine.Stop(ctx) }()
 
 	// Add multiple patterns
 	for i := 0; i < 10; i++ {
@@ -639,7 +639,7 @@ func TestSIEMEngine_StressTest(t *testing.T) {
 			Fields:      []string{"message"},
 			Enabled:     true,
 		}
-		engine.GetPatternMatcher().AddPattern(pattern)
+		_ = engine.GetPatternMatcher().AddPattern(pattern)
 	}
 
 	// Run stress test with multiple producers
@@ -656,7 +656,7 @@ func TestSIEMEngine_StressTest(t *testing.T) {
 			for j := 0; j < entriesPerProducer; j++ {
 				entry := createTestLogEntry("INFO",
 					fmt.Sprintf("Stress test message %d STRESS_%d", j, j%10), "test-tenant")
-				engine.ProcessLogEntry(ctx, entry)
+				_ = engine.ProcessLogEntry(ctx, entry)
 			}
 		}(i)
 	}

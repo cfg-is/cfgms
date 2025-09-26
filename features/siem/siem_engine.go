@@ -40,7 +40,6 @@ type SIEMEngine struct {
 	workerGroup    sync.WaitGroup
 
 	// Performance optimization
-	batchProcessor  *BatchProcessor
 	workers        []*ProcessingWorker
 	loadBalancer   *LoadBalancer
 
@@ -75,8 +74,6 @@ type WorkerMetrics struct {
 // LoadBalancer distributes work across processing workers
 type LoadBalancer struct {
 	workers    []*ProcessingWorker
-	nextWorker int32 // atomic
-	mutex      sync.RWMutex
 }
 
 // SIEMMetrics aggregates all SIEM processing metrics
@@ -288,10 +285,14 @@ func (se *SIEMEngine) Stop(ctx context.Context) error {
 
 	// Stop core components
 	if se.streamProcessor != nil {
-		se.streamProcessor.Stop(ctx)
+		if err := se.streamProcessor.Stop(ctx); err != nil {
+			logger.WarnCtx(ctx, "Failed to stop stream processor", "error", err)
+		}
 	}
 	if se.eventCorrelator != nil {
-		se.eventCorrelator.Stop(ctx)
+		if err := se.eventCorrelator.Stop(ctx); err != nil {
+			logger.WarnCtx(ctx, "Failed to stop event correlator", "error", err)
+		}
 	}
 
 	// Wait for workers with timeout

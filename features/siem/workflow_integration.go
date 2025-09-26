@@ -17,7 +17,6 @@ type WorkflowIntegration struct {
 	logger          *logging.ModuleLogger
 	triggerManager  trigger.TriggerManager
 	workflowTrigger trigger.WorkflowTrigger
-	siemProcessor   *trigger.SIEMProcessor
 
 	// Configuration
 	config WorkflowIntegrationConfig
@@ -331,9 +330,9 @@ func (wi *WorkflowIntegration) executeTrigger(ctx context.Context, triggerConfig
 	}
 
 	// Set timeout
-	execCtx := ctx
+	var execCtx context.Context
+	var cancel context.CancelFunc
 	if triggerConfig.Timeout > 0 {
-		var cancel context.CancelFunc
 		execCtx, cancel = context.WithTimeout(ctx, triggerConfig.Timeout)
 		defer cancel()
 	} else {
