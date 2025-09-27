@@ -193,6 +193,21 @@ func (bd *BreachDetector) GetAlertThresholds() *AlertThresholds {
 	return bd.alertThresholds
 }
 
+// IsAccountTakeoverPattern exposes internal method for testing
+func (bd *BreachDetector) IsAccountTakeoverPattern(profile *TenantAccessProfile) bool {
+	return bd.isAccountTakeoverPattern(profile)
+}
+
+// EstimateLocation exposes internal method for testing
+func (bd *BreachDetector) EstimateLocation(ip string) string {
+	return bd.estimateLocation(ip)
+}
+
+// AnalyzeBreachIndicators exposes internal method for testing
+func (bd *BreachDetector) AnalyzeBreachIndicators(ctx context.Context, profile *TenantAccessProfile) []*BreachIndicator {
+	return bd.analyzeBreachIndicators(ctx, profile)
+}
+
 // RecordAccess processes a new access event and checks for anomalies
 func (bd *BreachDetector) RecordAccess(ctx context.Context, event *AccessEvent) error {
 	// Validate the access event
@@ -878,19 +893,54 @@ func (bd *BreachDetector) isAccountTakeoverPattern(profile *TenantAccessProfile)
 		return false
 	}
 
-	recentEvents := profile.RecentActivity[len(profile.RecentActivity)-5:]
-	hasFailures := false
+	// Simple approach: look for failed login attempts followed by successful login
+	// where the successful login is from a different location than baseline
+	recentEvents := profile.RecentActivity
+	if len(recentEvents) > 10 {
+		recentEvents = profile.RecentActivity[len(profile.RecentActivity)-10:]
+	}
+
+	hasRecentFailures := false
 	hasSuccessFromNewLocation := false
 
-	for _, event := range recentEvents {
-		if !event.Success {
-			hasFailures = true
-		} else if bd.isNewGeographicLocation(event.SourceIP, profile) {
-			hasSuccessFromNewLocation = true
+	// Find the most common baseline location (excluding recent login events)
+	baselineLocations := make(map[string]int)
+	for _, event := range profile.RecentActivity {
+		// Only count non-login events for baseline (normal operations)
+		if event.Operation != "login" && event.Success {
+			location := bd.estimateLocation(event.SourceIP)
+			if location != "" {
+				baselineLocations[location]++
+			}
 		}
 	}
 
-	return hasFailures && hasSuccessFromNewLocation
+	// Find most common baseline location
+	primaryLocation := ""
+	maxBaselineCount := 0
+	for location, count := range baselineLocations {
+		if count > maxBaselineCount {
+			maxBaselineCount = count
+			primaryLocation = location
+		}
+	}
+
+	// Now check recent login events
+	for _, event := range recentEvents {
+		if event.Operation == "login" {
+			if !event.Success {
+				hasRecentFailures = true
+			} else if event.Success {
+				// Check if successful login is from different location than primary baseline
+				location := bd.estimateLocation(event.SourceIP)
+				if location != "" && location != primaryLocation && maxBaselineCount > 5 {
+					hasSuccessFromNewLocation = true
+				}
+			}
+		}
+	}
+
+	return hasRecentFailures && hasSuccessFromNewLocation
 }
 
 func (bd *BreachDetector) isDataExfiltrationPattern(profile *TenantAccessProfile) bool {
