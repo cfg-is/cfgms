@@ -119,9 +119,10 @@ func (s *Server) setupRouter() {
 	s.router.Use(s.corsMiddleware)
 	s.router.Use(s.contentTypeMiddleware)
 
-	// API routes with authentication
+	// API routes with authentication and validation
 	api := s.router.PathPrefix("/api/v1").Subrouter()
 	api.Use(s.authenticationMiddleware)
+	api.Use(s.validationMiddleware)
 
 	// Health check (no auth required)
 	s.router.HandleFunc("/api/v1/health", s.handleHealth).Methods("GET", "OPTIONS")
