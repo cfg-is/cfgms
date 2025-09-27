@@ -444,3 +444,52 @@ type TenantAccessResponse struct {
 	EffectiveRule  *IsolationRule           `json:"effective_rule,omitempty"`
 	ValidationTime time.Time                 `json:"validation_time"`
 }
+
+// ValidateTenantResourceAccess provides a simplified interface for validating tenant access
+// This method is used by the TenantSecretManager and other components that need
+// simple resource access validation within a tenant context
+func (tie *TenantIsolationEngine) ValidateTenantResourceAccess(tenantID, resourceType, permission string) bool {
+	tie.mutex.RLock()
+	defer tie.mutex.RUnlock()
+
+	// Get isolation rule for the tenant
+	rule, exists := tie.isolationRules[tenantID]
+	if !exists {
+		// Use default rule if none exists
+		rule = tie.getDefaultIsolationRule(tenantID)
+	}
+
+	// For secrets management, check resource isolation settings
+	if resourceType == "secrets" {
+		// Check if the resource type is explicitly restricted
+		for _, restricted := range rule.ResourceIsolation.RestrictedResources {
+			if restricted == resourceType {
+				return false
+			}
+		}
+
+		// If isolated storage is required, we allow operations within the tenant
+		// This means each tenant has their own isolated secret storage
+		if rule.ResourceIsolation.IsolatedStorage {
+			return true
+		}
+
+		// Check if resource sharing is allowed
+		if rule.ResourceIsolation.AllowResourceSharing {
+			return true
+		}
+
+		// Default: allow access within tenant for secret operations
+		return true
+	}
+
+	// For other resource types, apply basic validation
+	// Check if the resource type is in the restricted list
+	for _, restricted := range rule.ResourceIsolation.RestrictedResources {
+		if restricted == resourceType {
+			return false
+		}
+	}
+
+	return true
+}
