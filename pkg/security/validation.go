@@ -305,13 +305,14 @@ func (v *Validator) ValidateJSON(result *ValidationResult, field, value string, 
 	depth := 0
 	maxDepth := 10
 	for _, char := range value {
-		if char == '{' || char == '[' {
+		switch char {
+		case '{', '[':
 			depth++
 			if depth > maxDepth {
 				result.AddError(field, "", "max_depth", "JSON structure too deeply nested")
 				return
 			}
-		} else if char == '}' || char == ']' {
+		case '}', ']':
 			depth--
 		}
 	}

@@ -27,8 +27,11 @@ func (s *Server) validationMiddleware(next http.Handler) http.Handler {
 		// Validate query parameters
 		s.validateQueryParameters(validator, result, r)
 
-		// Validate request headers
-		s.validateRequestHeaders(validator, result, r)
+		// Only validate headers for mutating operations to avoid breaking GET requests
+		if r.Method == "POST" || r.Method == "PUT" || r.Method == "PATCH" || r.Method == "DELETE" {
+			// Validate request headers
+			s.validateRequestHeaders(validator, result, r)
+		}
 
 		// Validate request body for POST/PUT requests
 		if r.Method == "POST" || r.Method == "PUT" || r.Method == "PATCH" {
@@ -40,6 +43,8 @@ func (s *Server) validationMiddleware(next http.Handler) http.Handler {
 
 		// If validation failed, return error response
 		if !result.Valid {
+			// Log validation errors for debugging
+			s.logger.Debug("Request validation failed", "errors", result.Errors, "path", r.URL.Path)
 			s.writeValidationErrorResponse(w, result)
 			return
 		}
@@ -169,7 +174,8 @@ func (s *Server) validateRequestHeaders(validator *security.EnhancedValidator, r
 	if auth := r.Header.Get("Authorization"); auth != "" {
 		if strings.HasPrefix(auth, "Bearer ") {
 			token := strings.TrimPrefix(auth, "Bearer ")
-			validator.ValidateString(result, "header.Authorization", token, "charset:base64", "max_length:2048")
+			// API keys can be various formats, just validate basic safety
+			validator.ValidateString(result, "header.Authorization", token, "charset:safe_text", "max_length:2048")
 		}
 	}
 }
@@ -212,18 +218,19 @@ func (s *Server) validateRequestBody(validator *security.EnhancedValidator, resu
 
 // validateJSONBody validates JSON request bodies with endpoint-specific rules
 func (s *Server) validateJSONBody(validator *security.EnhancedValidator, result *security.ValidationResult, body []byte, path string) error {
-	// First validate JSON structure
-	validator.ValidateJSON(result, "body", string(body), "required")
-
-	if !result.Valid {
-		return nil // Don't parse invalid JSON
-	}
-
 	// Parse JSON for field-level validation
 	var jsonData map[string]interface{}
 	if err := json.Unmarshal(body, &jsonData); err != nil {
-		result.AddError("body", "", "json", "invalid JSON format")
+		// This is a JSON parsing error, not a validation error
+		// Let the downstream handler deal with it to maintain existing error codes
 		return nil
+	}
+
+	// First validate JSON structure after successful parsing
+	validator.ValidateJSON(result, "body", string(body), "required")
+
+	if !result.Valid {
+		return nil // Don't continue with invalid JSON structure
 	}
 
 	// Apply endpoint-specific validation rules
@@ -328,9 +335,15 @@ func (s *Server) validateAPIKeyRequest(validator *security.EnhancedValidator, re
 		validator.ValidateSlice(result, "body.permissions", len(permissions), "required", "min_items:1", "max_items:50")
 		for i, perm := range permissions {
 			if permStr, ok := perm.(string); ok {
-				validator.ValidateString(result, fmt.Sprintf("body.permissions[%d]", i), permStr, "charset:alphanumeric_dash", "max_length:128")
+				// Allow colons in permission strings for resource:action format
+				validator.ValidateString(result, fmt.Sprintf("body.permissions[%d]", i), permStr, "charset:safe_text", "max_length:128")
 			}
 		}
+	}
+
+	if tenantID, ok := data["tenant_id"].(string); ok {
+		// Validate tenant ID - allow both UUIDs and simple strings for testing
+		validator.ValidateString(result, "body.tenant_id", tenantID, "charset:alphanumeric_dash", "max_length:128")
 	}
 
 	if expiresAt, ok := data["expires_at"].(string); ok {
