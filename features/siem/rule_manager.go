@@ -133,11 +133,17 @@ func (rm *RuleManagerImpl) loadRulesFromFile(ctx context.Context, filePath, form
 	tenantID := logging.ExtractTenantFromContext(ctx)
 	logger := rm.logger.WithTenant(tenantID)
 
+	// Validate and clean the file path to prevent directory traversal
+	safePath, err := rm.validateAndCleanPath(filePath)
+	if err != nil {
+		return fmt.Errorf("invalid file path: %w", err)
+	}
+
 	logger.DebugCtx(ctx, "Loading rules from file",
-		"file_path", filePath,
+		"file_path", safePath,
 		"format", format)
 
-	data, err := os.ReadFile(filePath)
+	data, err := os.ReadFile(safePath)
 	if err != nil {
 		return fmt.Errorf("failed to read rule file: %w", err)
 	}
@@ -174,10 +180,19 @@ func (rm *RuleManagerImpl) loadRulesFromDirectory(ctx context.Context, dirPath, 
 
 		logger.DebugCtx(ctx, "Loading rules from file", "file", path)
 
-		data, err := os.ReadFile(path)
+		// Validate and clean the file path to prevent directory traversal
+		safePath, err := rm.validateAndCleanPath(path)
+		if err != nil {
+			logger.ErrorCtx(ctx, "Invalid file path",
+				"file", path,
+				"error", err.Error())
+			return nil // Continue with other files
+		}
+
+		data, err := os.ReadFile(safePath)
 		if err != nil {
 			logger.ErrorCtx(ctx, "Failed to read rule file",
-				"file", path,
+				"file", safePath,
 				"error", err.Error())
 			return nil // Continue with other files
 		}
@@ -775,4 +790,41 @@ func (rm *RuleManagerImpl) GetStatistics() map[string]interface{} {
 		"reload_interval":    rm.reloadInterval.String(),
 		"watched_files":      int64(len(rm.watcher.watchedPaths)),
 	}
+}
+
+// validateAndCleanPath validates and cleans a file path to prevent directory traversal attacks
+func (rm *RuleManagerImpl) validateAndCleanPath(inputPath string) (string, error) {
+	// Clean the path to resolve .. and . components
+	cleanPath := filepath.Clean(inputPath)
+
+	// Convert to absolute path for consistent validation
+	absPath, err := filepath.Abs(cleanPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve absolute path: %w", err)
+	}
+
+	// Ensure the path doesn't contain directory traversal attempts
+	if strings.Contains(cleanPath, "..") {
+		return "", fmt.Errorf("path contains directory traversal: %s", inputPath)
+	}
+
+	// Additional security check: ensure path doesn't escape working directory
+	workingDir, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("failed to get working directory: %w", err)
+	}
+
+	// Convert working directory to absolute path
+	absWorkingDir, err := filepath.Abs(workingDir)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve working directory: %w", err)
+	}
+
+	// Check if the target path is within the working directory or its subdirectories
+	relPath, err := filepath.Rel(absWorkingDir, absPath)
+	if err != nil || strings.HasPrefix(relPath, "..") {
+		return "", fmt.Errorf("path attempts to escape working directory: %s", inputPath)
+	}
+
+	return absPath, nil
 }

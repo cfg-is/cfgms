@@ -2,7 +2,7 @@ package cache
 
 import (
 	"context"
-	"crypto/md5"
+	"crypto/sha256"
 	"fmt"
 	"time"
 
@@ -94,11 +94,11 @@ func (ac *AdvancedCache) Clear(ctx context.Context) error {
 	return ac.cache.Clear(ctx)
 }
 
-// GenerateKey creates a cache key from request parameters
+// GenerateKey creates a cache key from request parameters using secure SHA-256 hashing
 func (ac *AdvancedCache) GenerateKey(reportType interfaces.ReportType, params map[string]interface{}) string {
 	// Create deterministic key from report type and parameters
 	keyData := fmt.Sprintf("%s:%v", reportType, params)
-	hash := md5.Sum([]byte(keyData))
+	hash := sha256.Sum256([]byte(keyData))
 	key := fmt.Sprintf("advanced:%s:%x", reportType, hash)
 
 	ac.logger.Debug("generated cache key", "report_type", reportType, "key", key)

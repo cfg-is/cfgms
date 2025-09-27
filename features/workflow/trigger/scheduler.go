@@ -2,8 +2,8 @@ package trigger
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
-	"math/rand"
 	"strconv"
 	"strings"
 	"sync"
@@ -150,10 +150,23 @@ func (cs *CronScheduler) ScheduleWorkflow(ctx context.Context, trigger *Trigger)
 
 	nextRun := cs.calculateNextRun(cronSchedule, now)
 
-	// Apply jitter if configured
+	// Apply jitter if configured using cryptographically secure random
 	if trigger.Schedule.Jitter > 0 {
-		jitter := time.Duration(rand.Intn(trigger.Schedule.Jitter)) * time.Second
-		nextRun = nextRun.Add(jitter)
+		// Generate secure random jitter
+		randBytes := make([]byte, 4)
+		if _, err := rand.Read(randBytes); err != nil {
+			// Fallback: no jitter if crypto/rand fails
+			cs.logger.Warn("Failed to generate secure random for jitter, skipping jitter", "error", err)
+		} else {
+			// Convert to positive int within jitter range
+			randValue := int(randBytes[0])<<24 | int(randBytes[1])<<16 | int(randBytes[2])<<8 | int(randBytes[3])
+			if randValue < 0 {
+				randValue = -randValue
+			}
+			jitterSeconds := randValue % trigger.Schedule.Jitter
+			jitter := time.Duration(jitterSeconds) * time.Second
+			nextRun = nextRun.Add(jitter)
+		}
 	}
 
 	// Create scheduled trigger

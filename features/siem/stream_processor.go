@@ -3,6 +3,7 @@ package siem
 import (
 	"context"
 	"fmt"
+	"math"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -353,10 +354,14 @@ func (sp *StreamProcessorImpl) updateMetrics() {
 		sp.metrics.BufferUtilization = utilization
 	}
 
-	// Update memory usage
+	// Update memory usage with safe conversion
 	var memStats runtime.MemStats
 	runtime.ReadMemStats(&memStats)
-	sp.metrics.MemoryUsage = int64(memStats.Alloc)
+	if memStats.Alloc > math.MaxInt64 {
+		sp.metrics.MemoryUsage = math.MaxInt64
+	} else {
+		sp.metrics.MemoryUsage = int64(memStats.Alloc)
+	}
 	sp.metrics.GoroutineCount = runtime.NumGoroutine()
 }
 

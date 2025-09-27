@@ -3,13 +3,13 @@ package trigger
 import (
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
-	"math/rand"
 	"net"
 	"net/http"
 	"strings"
@@ -824,9 +824,22 @@ func (wh *HTTPWebhookHandler) updateWebhookStatistics(triggerID string, success 
 	}
 }
 
-// generateExecutionID generates a unique execution ID
+// generateExecutionID generates a unique execution ID using cryptographically secure random
 func generateExecutionID() string {
-	return fmt.Sprintf("exec_%d_%d", time.Now().UnixNano(), rand.Int63())
+	// Generate cryptographically secure random bytes
+	randBytes := make([]byte, 8)
+	if _, err := rand.Read(randBytes); err != nil {
+		// Fallback to timestamp only if crypto/rand fails
+		return fmt.Sprintf("exec_%d", time.Now().UnixNano())
+	}
+
+	// Convert to uint64 for consistent formatting
+	randValue := uint64(randBytes[0])<<56 | uint64(randBytes[1])<<48 |
+		uint64(randBytes[2])<<40 | uint64(randBytes[3])<<32 |
+		uint64(randBytes[4])<<24 | uint64(randBytes[5])<<16 |
+		uint64(randBytes[6])<<8 | uint64(randBytes[7])
+
+	return fmt.Sprintf("exec_%d_%d", time.Now().UnixNano(), randValue)
 }
 
 // GetWebhookStatistics returns statistics for all webhooks (for monitoring)

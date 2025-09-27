@@ -3,6 +3,7 @@ package siem
 import (
 	"context"
 	"fmt"
+	"math"
 	"runtime"
 	"runtime/debug"
 	"sync"
@@ -370,7 +371,13 @@ func (se *SIEMEngine) initializeWorkers() {
 		workers: se.workers,
 	}
 
-	atomic.StoreInt32(&se.metrics.ActiveWorkers, int32(len(se.workers)))
+	// Safe conversion to prevent integer overflow
+	workerCount := len(se.workers)
+	if workerCount > math.MaxInt32 {
+		atomic.StoreInt32(&se.metrics.ActiveWorkers, math.MaxInt32)
+	} else {
+		atomic.StoreInt32(&se.metrics.ActiveWorkers, int32(workerCount))
+	}
 }
 
 // processInputLoop processes incoming log entries
@@ -598,9 +605,21 @@ func (se *SIEMEngine) updateMetrics() {
 	// Update system metrics
 	var memStats runtime.MemStats
 	runtime.ReadMemStats(&memStats)
-	se.metrics.MemoryUsage = int64(memStats.Alloc)
+	// Safe conversion to prevent integer overflow
+	if memStats.Alloc > math.MaxInt64 {
+		se.metrics.MemoryUsage = math.MaxInt64
+	} else {
+		se.metrics.MemoryUsage = int64(memStats.Alloc)
+	}
 	se.metrics.GoroutineCount = runtime.NumGoroutine()
-	se.metrics.GCPauseTime = time.Duration(memStats.PauseNs[(memStats.NumGC+255)%256])
+
+	// Safe GC pause time conversion
+	pauseNs := memStats.PauseNs[(memStats.NumGC+255)%256]
+	if pauseNs > math.MaxInt64 {
+		se.metrics.GCPauseTime = time.Duration(math.MaxInt64)
+	} else {
+		se.metrics.GCPauseTime = time.Duration(pauseNs)
+	}
 
 	// Calculate throughput
 	if se.metrics.Uptime > 0 {
