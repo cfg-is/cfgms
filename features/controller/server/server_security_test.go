@@ -222,8 +222,12 @@ func TestServer_StorageProviderValidation(t *testing.T) {
 					// For local testing, use appropriate configuration per provider
 					switch providerInfo.Name {
 					case "database":
-						// Skip database provider if no Docker environment
-						t.Skipf("Database provider requires Docker environment - run 'make test-integration-setup'")
+						// Fail if in CI/integration mode, skip in development
+						if os.Getenv("CI") != "" || os.Getenv("GITHUB_ACTIONS") != "" || os.Getenv("CFGMS_TEST_DB_PASSWORD") != "" {
+							t.Fatalf("REQUIRED INFRASTRUCTURE MISSING: Database provider requires Docker environment in CI/integration mode - run 'make test-integration-setup'")
+						} else {
+							t.Skipf("Database provider requires Docker environment - run 'make test-integration-setup'")
+						}
 						return
 					default:
 						// Use git or other local providers

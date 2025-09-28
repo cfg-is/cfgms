@@ -20,7 +20,7 @@ func TestRegisterRequest_Validation(t *testing.T) {
 			req: &RegisterRequest{
 				Version: "1.0.0",
 				InitialDna: &common.DNA{
-					Id: "test-steward",
+					Id: "550e8400-e29b-41d4-a716-446655440000",
 					Attributes: map[string]string{
 						"os": "linux",
 					},
@@ -37,7 +37,7 @@ func TestRegisterRequest_Validation(t *testing.T) {
 			name: "missing version",
 			req: &RegisterRequest{
 				InitialDna: &common.DNA{
-					Id:          "test-steward",
+					Id:          "550e8400-e29b-41d4-a716-446655440001",
 					LastUpdated: timestamppb.Now(),
 				},
 				Credentials: &common.Credentials{

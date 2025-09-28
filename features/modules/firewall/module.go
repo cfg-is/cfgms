@@ -14,6 +14,8 @@ import (
 type firewallModule struct {
 	mu    sync.RWMutex
 	rules map[string]firewallConfig
+	// Embed default logging support for automatic injection capability
+	modules.DefaultLoggingSupport
 }
 
 // New creates a new instance of the Firewall module

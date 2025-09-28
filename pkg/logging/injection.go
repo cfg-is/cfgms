@@ -282,3 +282,40 @@ func ForComponent(componentName string) *ModuleLogger {
 func GetLogger() Logger {
 	return GetGlobalLoggerFactory().CreateLogger()
 }
+
+// Context utility functions for structured logging
+
+// ExtractTenantFromContext extracts tenant ID from context for external use
+func ExtractTenantFromContext(ctx context.Context) string {
+	return extractTenantID(ctx)
+}
+
+// WithTenant adds tenant ID to context for downstream logging
+func WithTenant(ctx context.Context, tenantID string) context.Context {
+	return context.WithValue(ctx, tenantIDKey{}, tenantID)
+}
+
+// WithSession adds session ID to context for downstream logging
+func WithSession(ctx context.Context, sessionID string) context.Context {
+	return context.WithValue(ctx, sessionIDKey{}, sessionID)
+}
+
+// WithCorrelation adds correlation ID to context for downstream logging
+func WithCorrelation(ctx context.Context, correlationID string) context.Context {
+	return context.WithValue(ctx, correlationIDKey{}, correlationID)
+}
+
+// WithOperation adds operation context for structured logging
+func WithOperation(ctx context.Context, operation string) context.Context {
+	return context.WithValue(ctx, operationKey{}, operation)
+}
+
+// ExtractOperation extracts operation from context
+func ExtractOperation(ctx context.Context) string {
+	if value := ctx.Value(operationKey{}); value != nil {
+		if operation, ok := value.(string); ok {
+			return operation
+		}
+	}
+	return ""
+}

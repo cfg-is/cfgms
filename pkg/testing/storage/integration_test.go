@@ -24,7 +24,11 @@ func TestStorageProviderIntegration_WithDockerEnvironment(t *testing.T) {
 	// Run with: make test-integration-setup && go test -v -tags=integration ./pkg/testing/storage/...
 	
 	if !isDockerEnvironmentAvailable() {
-		t.Skip("Docker integration environment not available - run 'make test-integration-setup'")
+		if isInfrastructureRequired() {
+			t.Fatal("REQUIRED INFRASTRUCTURE MISSING: Docker integration environment not available in CI/integration mode - run 'make test-integration-setup'")
+		} else {
+			t.Skip("Docker integration environment not available - run 'make test-integration-setup'")
+		}
 	}
 
 	logger := logging.NewNoopLogger()

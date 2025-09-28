@@ -2,6 +2,7 @@ package timescale
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging/interfaces"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	_ "github.com/lib/pq" // PostgreSQL driver for cleanup
 )
 
 // TestTimescaleProvider_BasicFunctionality tests basic provider operations
@@ -18,19 +20,14 @@ func TestTimescaleProvider_BasicFunctionality(t *testing.T) {
 		t.Skip("TimescaleDB tests disabled - set CFGMS_TEST_TIMESCALEDB=1 to enable")
 	}
 
-	// Create provider with test configuration
+	// Test availability check before initialization
 	provider := &TimescaleProvider{}
-	config := getTestTimescaleConfig()
-
-	// Test availability check
 	available, err := provider.Available()
 	assert.False(t, available) // Should be false before initialization
 	assert.Error(t, err)
 
-	// Initialize provider
-	err = provider.Initialize(config)
-	require.NoError(t, err)
-	defer func() { _ = provider.Close() }()
+	// Create provider with automatic cleanup
+	provider, _ = createTestProviderWithCleanup(t, "basic")
 
 	// Test availability after initialization
 	available, err = provider.Available()
@@ -51,7 +48,7 @@ func TestTimescaleProvider_BasicFunctionality(t *testing.T) {
 	assert.True(t, capabilities.SupportsTransactions)
 	assert.True(t, capabilities.SupportsPartitioning)
 	assert.True(t, capabilities.SupportsIndexing)
-	assert.Greater(t, capabilities.MaxEntriesPerSecond, int64(50000))
+	assert.Greater(t, capabilities.MaxEntriesPerSecond, 50000)
 }
 
 // TestTimescaleProvider_WriteAndQuery tests writing and querying log entries
@@ -60,12 +57,7 @@ func TestTimescaleProvider_WriteAndQuery(t *testing.T) {
 		t.Skip("TimescaleDB tests disabled - set CFGMS_TEST_TIMESCALEDB=1 to enable")
 	}
 
-	provider := &TimescaleProvider{}
-	config := getTestTimescaleConfig()
-
-	err := provider.Initialize(config)
-	require.NoError(t, err)
-	defer func() { _ = provider.Close() }()
+	provider, _ := createTestProviderWithCleanup(t, "writequery")
 
 	ctx := context.Background()
 
@@ -114,7 +106,7 @@ func TestTimescaleProvider_WriteAndQuery(t *testing.T) {
 	}
 
 	// Test single entry write
-	err = provider.WriteEntry(ctx, testEntries[0])
+	err := provider.WriteEntry(ctx, testEntries[0])
 	assert.NoError(t, err)
 
 	// Test batch write
@@ -188,13 +180,7 @@ func TestTimescaleProvider_LevelFiltering(t *testing.T) {
 		t.Skip("TimescaleDB tests disabled - set CFGMS_TEST_TIMESCALEDB=1 to enable")
 	}
 
-	provider := &TimescaleProvider{}
-	config := getTestTimescaleConfig()
-	config["table_name"] = "level_test_entries"
-
-	err := provider.Initialize(config)
-	require.NoError(t, err)
-	defer func() { _ = provider.Close() }()
+	provider, _ := createTestProviderWithCleanup(t, "level")
 
 	ctx := context.Background()
 	baseTime := time.Now().Truncate(time.Second)
@@ -217,7 +203,7 @@ func TestTimescaleProvider_LevelFiltering(t *testing.T) {
 	}
 
 	// Write all entries
-	err = provider.WriteBatch(ctx, entries)
+	err := provider.WriteBatch(ctx, entries)
 	assert.NoError(t, err)
 
 	time.Sleep(100 * time.Millisecond)
@@ -263,14 +249,8 @@ func TestTimescaleProvider_HighVolume(t *testing.T) {
 		t.Skip("TimescaleDB tests disabled - set CFGMS_TEST_TIMESCALEDB=1 to enable")
 	}
 
-	provider := &TimescaleProvider{}
-	config := getTestTimescaleConfig()
-	config["table_name"] = "high_volume_test_entries"
+	provider, config := createTestProviderWithCleanup(t, "highvolume")
 	config["batch_size"] = 1000
-
-	err := provider.Initialize(config)
-	require.NoError(t, err)
-	defer func() { _ = provider.Close() }()
 
 	ctx := context.Background()
 	baseTime := time.Now().Truncate(time.Second)
@@ -296,7 +276,7 @@ func TestTimescaleProvider_HighVolume(t *testing.T) {
 
 	// Measure write performance
 	start := time.Now()
-	err = provider.WriteBatch(ctx, entries)
+	err := provider.WriteBatch(ctx, entries)
 	writeTime := time.Since(start)
 
 	assert.NoError(t, err)
@@ -349,13 +329,7 @@ func TestTimescaleProvider_Stats(t *testing.T) {
 		t.Skip("TimescaleDB tests disabled - set CFGMS_TEST_TIMESCALEDB=1 to enable")
 	}
 
-	provider := &TimescaleProvider{}
-	config := getTestTimescaleConfig()
-	config["table_name"] = "stats_test_entries"
-
-	err := provider.Initialize(config)
-	require.NoError(t, err)
-	defer func() { _ = provider.Close() }()
+	provider, _ := createTestProviderWithCleanup(t, "stats")
 
 	ctx := context.Background()
 	baseTime := time.Now().Truncate(time.Second)
@@ -378,7 +352,7 @@ func TestTimescaleProvider_Stats(t *testing.T) {
 		},
 	}
 
-	err = provider.WriteBatch(ctx, entries)
+	err := provider.WriteBatch(ctx, entries)
 	assert.NoError(t, err)
 
 	time.Sleep(100 * time.Millisecond)
@@ -417,8 +391,13 @@ func isTimescaleTestEnabled() bool {
 	return os.Getenv("CFGMS_TEST_TIMESCALEDB") == "1"
 }
 
-// getTestTimescaleConfig returns test configuration for TimescaleDB
+// getTestTimescaleConfig returns test configuration for TimescaleDB with unique table names
 func getTestTimescaleConfig() map[string]interface{} {
+	return getTestTimescaleConfigWithTable("")
+}
+
+// getTestTimescaleConfigWithTable returns test configuration with a specific table name suffix
+func getTestTimescaleConfigWithTable(tableSuffix string) map[string]interface{} {
 	// Use environment variables if available, otherwise defaults
 	host := os.Getenv("CFGMS_TEST_TIMESCALEDB_HOST")
 	if host == "" {
@@ -435,14 +414,20 @@ func getTestTimescaleConfig() map[string]interface{} {
 		password = "cfgms_test_password"
 	}
 
+	// Generate unique table name using timestamp and suffix
+	tableName := fmt.Sprintf("log_entries_test_%d", time.Now().UnixNano())
+	if tableSuffix != "" {
+		tableName = fmt.Sprintf("log_entries_test_%s_%d", tableSuffix, time.Now().UnixNano())
+	}
+
 	return map[string]interface{}{
 		"host":              host,
 		"port":              port,
 		"database":          "cfgms_logs_test",
-		"username":          "cfgms_logger_test", 
+		"username":          "cfgms_logger_test",
 		"password":          password,
 		"ssl_mode":          "disable",
-		"table_name":        "log_entries_test",
+		"table_name":        tableName,
 		"schema_name":       "test_logging",
 		"chunk_interval":    "24h",
 		"compression_after": "1h",  // Quick compression for testing
@@ -450,4 +435,49 @@ func getTestTimescaleConfig() map[string]interface{} {
 		"batch_size":        100,
 		"create_schema":     true,
 	}
+}
+
+// cleanupTimescaleTestTable drops a test table and all associated TimescaleDB objects
+func cleanupTimescaleTestTable(t *testing.T, config map[string]interface{}, tableName string) {
+	t.Helper()
+
+	// Build connection string
+	dsn := fmt.Sprintf("host=%s port=%s dbname=%s user=%s password=%s sslmode=%s",
+		config["host"], config["port"], config["database"],
+		config["username"], config["password"], config["ssl_mode"])
+
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		t.Logf("Failed to connect for cleanup: %v", err)
+		return
+	}
+	defer func() { _ = db.Close() }()
+
+	// Drop the hypertable (this also removes compression policies, retention policies, etc.)
+	_, err = db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", tableName))
+	if err != nil {
+		t.Logf("Failed to drop table %s: %v", tableName, err)
+	} else {
+		t.Logf("Successfully cleaned up table: %s", tableName)
+	}
+}
+
+// createTestProviderWithCleanup creates a TimescaleDB provider with automatic cleanup
+func createTestProviderWithCleanup(t *testing.T, tableSuffix string) (*TimescaleProvider, map[string]interface{}) {
+	t.Helper()
+
+	config := getTestTimescaleConfigWithTable(tableSuffix)
+	provider := &TimescaleProvider{}
+
+	err := provider.Initialize(config)
+	require.NoError(t, err)
+
+	// Set up cleanup to run when test finishes
+	tableName := config["table_name"].(string)
+	t.Cleanup(func() {
+		_ = provider.Close()
+		cleanupTimescaleTestTable(t, config, tableName)
+	})
+
+	return provider, config
 }

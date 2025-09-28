@@ -114,6 +114,35 @@ func (framework *DegradedModeSecurityTestFramework) Setup() error {
 		return fmt.Errorf("failed to initialize RBAC manager: %w", err)
 	}
 	
+	// Create system roles first
+	systemRoles := []*common.Role{
+		{
+			Id:          "system.read-only",
+			Name:        "System Read Only",
+			TenantId:    "degraded-tenant",
+			Description: "Read-only access to system resources",
+		},
+		{
+			Id:          "system.admin",
+			Name:        "System Administrator",
+			TenantId:    "degraded-tenant",
+			Description: "Full administrative access to system",
+		},
+		{
+			Id:          "service.basic",
+			Name:        "Basic Service",
+			TenantId:    "degraded-tenant",
+			Description: "Basic service access",
+		},
+	}
+
+	for _, role := range systemRoles {
+		err = framework.rbacManager.CreateRole(ctx, role)
+		if err != nil && !strings.Contains(err.Error(), "already exists") {
+			return fmt.Errorf("failed to create system role %s: %w", role.Id, err)
+		}
+	}
+
 	// Create test tenant and subjects
 	err = framework.rbacManager.CreateTenantDefaultRoles(ctx, "degraded-tenant")
 	if err != nil {

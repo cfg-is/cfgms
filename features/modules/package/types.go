@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cfgis/cfgms/features/modules"
 	"gopkg.in/yaml.v3"
 )
 
@@ -200,4 +201,6 @@ func validateVersion(version string) bool {
 type PackageModule struct {
 	mu             sync.RWMutex
 	packageManager PackageManager
+	// Embed default logging support for automatic injection capability
+	modules.DefaultLoggingSupport
 }

@@ -418,6 +418,50 @@ func (tsal *TenantSecurityAuditLogger) getRetentionPeriod(level ComplianceLevel)
 	}
 }
 
+// LogVulnerabilityStatusChange logs vulnerability status changes
+func (tsal *TenantSecurityAuditLogger) LogVulnerabilityStatusChange(ctx context.Context, vulnerabilityID, tenantID, status string) error {
+	entry := TenantSecurityAuditEntry{
+		ID:         fmt.Sprintf("vuln-status-%d", time.Now().UnixNano()),
+		Timestamp:  time.Now(),
+		EventType:  TenantSecurityEventType("vulnerability_status_change"),
+		TenantID:   tenantID,
+		SubjectID:  "system",
+		ResourceID: vulnerabilityID,
+		Action:     fmt.Sprintf("vulnerability_status_change_%s", status),
+		Result:     "success",
+		Details: map[string]interface{}{
+			"vulnerability_id": vulnerabilityID,
+			"new_status":       status,
+			"change_type":      "status_update",
+		},
+		Severity: AuditSeverityInfo,
+	}
+
+	return tsal.addEntry(entry)
+}
+
+// LogRemediationAction logs remediation action execution
+func (tsal *TenantSecurityAuditLogger) LogRemediationAction(ctx context.Context, vulnerabilityID, action string) error {
+	entry := TenantSecurityAuditEntry{
+		ID:         fmt.Sprintf("remediation-%d", time.Now().UnixNano()),
+		Timestamp:  time.Now(),
+		EventType:  TenantSecurityEventType("remediation_action"),
+		TenantID:   "", // Will be filled from vulnerability context
+		SubjectID:  "system",
+		ResourceID: vulnerabilityID,
+		Action:     fmt.Sprintf("remediation_action_%s", action),
+		Result:     "success",
+		Details: map[string]interface{}{
+			"vulnerability_id":    vulnerabilityID,
+			"remediation_action":  action,
+			"execution_type":      "automated",
+		},
+		Severity: AuditSeverityWarning,
+	}
+
+	return tsal.addEntry(entry)
+}
+
 // Supporting types
 type TenantSecurityAuditFilter struct {
 	TenantID  string    `json:"tenant_id,omitempty"`

@@ -93,6 +93,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Controller, error) {
 		srv.GetTenantManager(),
 		srv.GetRBACManager(),
 		nil, // systemMonitor - will be integrated in Phase 5
+		nil, // platformMonitor - will be integrated in this story completion
 		nil, // tracer - will be integrated in Phase 5
 	)
 	if err != nil {

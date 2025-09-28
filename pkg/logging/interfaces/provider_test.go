@@ -130,8 +130,8 @@ func TestLogEntry_ToSyslogFormat(t *testing.T) {
 
 	result := entry.ToSyslogFormat()
 
-	// Check RFC5424 format components
-	expected := "<30>1 2024-01-15T10:30:00Z test-host cfgms 12345 TEST_INFO [cfgms tenant_id=\"tenant-123\" session_id=\"session-456\" correlation_id=\"corr-789\" trace_id=\"trace-abc\" request_id=\"req-999\" duration=\"150\"] Test syslog message"
+	// Check RFC5424 format components - fields are sorted alphabetically for deterministic output
+	expected := "<30>1 2024-01-15T10:30:00Z test-host cfgms 12345 TEST_INFO [cfgms tenant_id=\"tenant-123\" session_id=\"session-456\" correlation_id=\"corr-789\" trace_id=\"trace-abc\" duration=\"150\" request_id=\"req-999\"] Test syslog message"
 	
 	assert.Equal(t, expected, result)
 }

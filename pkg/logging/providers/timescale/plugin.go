@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -404,6 +405,10 @@ func (p *TimescaleProvider) parseConfig(config map[string]interface{}) error {
 		p.config.Port = int(port)
 	} else if port, ok := config["port"].(int); ok {
 		p.config.Port = port
+	} else if portStr, ok := config["port"].(string); ok {
+		if portInt, err := strconv.Atoi(portStr); err == nil {
+			p.config.Port = portInt
+		}
 	}
 
 	if database, ok := config["database"].(string); ok {

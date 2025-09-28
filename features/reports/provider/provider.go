@@ -14,14 +14,14 @@ import (
 // DataProvider implements the interfaces.DataProvider interface
 type DataProvider struct {
 	storageManager *storage.Manager
-	driftDetector  *drift.Detector
+	driftDetector  drift.Detector
 	logger         logging.Logger
 }
 
 // New creates a new data provider instance
 func New(
 	storageManager *storage.Manager,
-	driftDetector *drift.Detector,
+	driftDetector drift.Detector,
 	logger logging.Logger,
 ) *DataProvider {
 	return &DataProvider{

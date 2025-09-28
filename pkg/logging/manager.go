@@ -369,7 +369,23 @@ func (m *LoggingManager) enhanceLogEntry(entry *interfaces.LogEntry, ctx context
 			entry.TenantID = tenantID
 		}
 	}
-	
+
+	// Extract session ID from context if not already set
+	if entry.SessionID == "" && ctx != nil {
+		if sessionID := extractSessionID(ctx); sessionID != "" {
+			entry.SessionID = sessionID
+		}
+	}
+
+	// Extract operation from context and add to fields if not present
+	if ctx != nil {
+		if operation := extractOperationFromContext(ctx); operation != "" {
+			if _, exists := entry.Fields["operation"]; !exists {
+				entry.Fields["operation"] = operation
+			}
+		}
+	}
+
 	// Merge default fields (don't override existing fields)
 	for key, value := range m.defaultFields {
 		if _, exists := entry.Fields[key]; !exists {
@@ -461,15 +477,14 @@ func (m *LoggingManager) batchingRoutine() {
 
 // extractTenantID attempts to extract tenant ID from context
 func extractTenantID(ctx context.Context) string {
-	// Try to extract tenant ID using the same pattern as correlation ID
-	type tenantIDKey struct{}
+	// Try to extract tenant ID using the same key as injection.go
 	if value := ctx.Value(tenantIDKey{}); value != nil {
 		if tenantID, ok := value.(string); ok {
 			return tenantID
 		}
 	}
-	
-	// Alternative context keys
+
+	// Alternative context keys for backward compatibility
 	for _, key := range []interface{}{
 		"tenant_id",
 		"cfgms_tenant_id",
@@ -480,7 +495,7 @@ func extractTenantID(ctx context.Context) string {
 			}
 		}
 	}
-	
+
 	return ""
 }
 
@@ -596,4 +611,50 @@ func (m *LoggingManager) eventLoop() {
 			return
 		}
 	}
+}
+
+// extractSessionID attempts to extract session ID from context
+func extractSessionID(ctx context.Context) string {
+	if value := ctx.Value(sessionIDKey{}); value != nil {
+		if sessionID, ok := value.(string); ok {
+			return sessionID
+		}
+	}
+
+	// Alternative context keys for backward compatibility
+	for _, key := range []interface{}{
+		"session_id",
+		"cfgms_session_id",
+	} {
+		if value := ctx.Value(key); value != nil {
+			if sessionID, ok := value.(string); ok {
+				return sessionID
+			}
+		}
+	}
+
+	return ""
+}
+
+// extractOperationFromContext attempts to extract operation from context
+func extractOperationFromContext(ctx context.Context) string {
+	if value := ctx.Value(operationKey{}); value != nil {
+		if operation, ok := value.(string); ok {
+			return operation
+		}
+	}
+
+	// Alternative context keys for backward compatibility
+	for _, key := range []interface{}{
+		"operation",
+		"cfgms_operation",
+	} {
+		if value := ctx.Value(key); value != nil {
+			if operation, ok := value.(string); ok {
+				return operation
+			}
+		}
+	}
+
+	return ""
 }

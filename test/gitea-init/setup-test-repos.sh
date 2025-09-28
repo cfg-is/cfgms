@@ -24,7 +24,11 @@ echo "Gitea is ready!"
 # Gitea API credentials - use environment variables or secure defaults
 GITEA_URL="http://localhost:3000"
 USERNAME="${CFGMS_TEST_GITEA_USER:-cfgms_test}"
-PASSWORD="${CFGMS_TEST_GITEA_PASSWORD:-$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-25)}"
+# Get password from Docker environment or fallback
+PASSWORD="${CFGMS_TEST_GITEA_PASSWORD:-$GITEA__admin__PASSWORD}"
+if [ -z "$PASSWORD" ]; then
+    PASSWORD="cfgms_test_password"
+fi
 
 if [ "$PASSWORD" != "${CFGMS_TEST_GITEA_PASSWORD:-}" ]; then
     echo "⚠️  Warning: Using generated password. For production, set CFGMS_TEST_GITEA_PASSWORD"
@@ -63,8 +67,8 @@ setup_repo_content() {
     
     echo "Setting up content for repository: $repo_name"
     
-    # Clone the repository
-    git clone "$GITEA_URL/$USERNAME/$repo_name.git" "$temp_dir" || return 0
+    # Clone the repository (use external port 3001)
+    git clone "http://localhost:3001/$USERNAME/$repo_name.git" "$temp_dir" || return 0
     cd "$temp_dir"
     
     # Configure git user

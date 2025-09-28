@@ -17,6 +17,7 @@ import (
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
+	pkgmonitoring "github.com/cfgis/cfgms/pkg/monitoring"
 	"github.com/cfgis/cfgms/pkg/telemetry"
 	"github.com/gorilla/mux"
 )
@@ -36,6 +37,7 @@ type Server struct {
 	tenantManager           *tenant.Manager
 	rbacManager             *rbac.Manager
 	systemMonitor           *monitoring.SystemMonitor
+	platformMonitor         pkgmonitoring.PlatformMonitor
 	tracer                  *telemetry.Tracer
 	apiKeys                 map[string]*APIKey // Simple API key storage
 }
@@ -71,6 +73,7 @@ func New(
 	tenantManager *tenant.Manager,
 	rbacManager *rbac.Manager,
 	systemMonitor *monitoring.SystemMonitor,
+	platformMonitor pkgmonitoring.PlatformMonitor,
 	tracer *telemetry.Tracer,
 ) (*Server, error) {
 	if cfg == nil {
@@ -88,6 +91,7 @@ func New(
 		tenantManager:           tenantManager,
 		rbacManager:             rbacManager,
 		systemMonitor:           systemMonitor,
+		platformMonitor:         platformMonitor,
 		tracer:                  tracer,
 		apiKeys:                 make(map[string]*APIKey),
 	}
@@ -115,9 +119,10 @@ func (s *Server) setupRouter() {
 	s.router.Use(s.corsMiddleware)
 	s.router.Use(s.contentTypeMiddleware)
 
-	// API routes with authentication
+	// API routes with authentication and validation
 	api := s.router.PathPrefix("/api/v1").Subrouter()
 	api.Use(s.authenticationMiddleware)
+	api.Use(s.validationMiddleware)
 
 	// Health check (no auth required)
 	s.router.HandleFunc("/api/v1/health", s.handleHealth).Methods("GET", "OPTIONS")
@@ -200,6 +205,11 @@ func (s *Server) setupRouter() {
 	
 	// Controller service monitoring
 	monitoring.Handle("/controller/services", s.requirePermission("monitoring", "read-services")(http.HandlerFunc(s.handleControllerServices))).Methods("GET")
+
+	// New platform monitoring endpoints
+	monitoring.Handle("/anomalies", s.requirePermission("monitoring", "read-anomalies")(http.HandlerFunc(s.handleMonitoringAnomalies))).Methods("GET")
+	monitoring.Handle("/components/{component}/health", s.requirePermission("monitoring", "read-component-health")(http.HandlerFunc(s.handleMonitoringComponentHealth))).Methods("GET")
+	monitoring.Handle("/components/{component}/metrics", s.requirePermission("monitoring", "read-component-metrics")(http.HandlerFunc(s.handleMonitoringComponentMetrics))).Methods("GET")
 }
 
 // Start starts the HTTP server

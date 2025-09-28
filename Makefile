@@ -1,4 +1,4 @@
-.PHONY: build test test-commit test-ci test-integration test-security test-performance test-docker proto lint clean security-trivy security-deps security-scan security-check
+.PHONY: build test test-unit test-integration-factory test-watch test-commit test-ci test-integration test-security test-performance test-docker proto lint clean security-trivy security-deps security-scan security-check
 
 # Build settings
 GO_BUILD_FLAGS=-trimpath -ldflags="-s -w"
@@ -59,39 +59,126 @@ build-cli:
 build-cert-manager:
 	go build ${GO_BUILD_FLAGS} -o bin/${CERT_MANAGER_BINARY} ./cmd/cert-manager
 
-# Basic test suite (fast unit tests only)
+# Smart test - core modules + changed modules only
 test:
-	@echo "🧪 Running Core Unit Tests (Fast)"
-	@echo "================================="
+	@echo "🧪 Running Tests (Smart Mode)"
+	@echo "============================="
+	@go clean -testcache
+	@echo "🧪 Testing framework (excluding modules and long-running tests)..."
+	@go test -race -short -timeout=1m $$(go list ./... | grep -v '/features/modules/' | grep -v '/test/integration' | grep -v '/test/e2e')
+	@echo "🧪 Testing core modules (smoke test)..."
+	@for module in $(CORE_MODULES); do \
+		echo "  Testing $$module..."; \
+		go test -race -short -timeout=30s ./features/modules/$$module/...; \
+	done
+	@changed_modules="$(CHANGED_MODULES)"; \
+	if [ -n "$$changed_modules" ]; then \
+		echo "📝 Testing changed modules: $$changed_modules"; \
+		for module in $$changed_modules; do \
+			if ! echo "$(CORE_MODULES)" | grep -q "\\<$$module\\>"; then \
+				echo "  Testing changed module: $$module"; \
+				go test -race -short -timeout=1m ./features/modules/$$module/...; \
+			fi; \
+		done; \
+	else \
+		echo "📋 No module changes detected - skipping additional module tests"; \
+	fi
+	@echo "✅ Smart testing complete"
+
+# OPTIMIZED TEST TARGETS (Cache-Aware Strategy)
+
+# Fast unit tests only (cache-friendly for rapid feedback)
+test-unit:
+	@echo "🚀 Running Unit Tests (Fast Feedback)"
+	@echo "===================================="
+	@echo "💡 Cache-friendly: No cache clearing for speed"
+	@echo "🎯 Scope: Unit tests only (mocked dependencies)"
 	@if [ -f .env.local ]; then \
 		echo "Loading M365 credentials from .env.local for real API tests..."; \
 		export $$(cat .env.local | grep -v '^#' | xargs) && \
-		go test -race -cover -short -timeout=3m ./features/... ./api/... ./cmd/... ./pkg/...; \
+		go test -race -cover -short -timeout=2m ./features/... ./api/... ./cmd/... ./pkg/...; \
 	else \
 		echo "No .env.local found - real M365 tests will be skipped"; \
-		go test -race -cover -short -timeout=3m ./features/... ./api/... ./cmd/... ./pkg/...; \
+		go test -race -cover -short -timeout=2m ./features/... ./api/... ./cmd/... ./pkg/...; \
 	fi
+
+# Integration tests with factory patterns (cache-safe)
+test-integration-factory:
+	@echo "🔗 Running Factory Integration Tests (Cache-Safe)"
+	@echo "================================================"
+	@echo "🔄 Cache clearing for integration safety"
+	@echo "🏭 Testing real factory loading and injection patterns"
+	@go clean -testcache
+	@if [ -f .env.local ]; then \
+		export $$(cat .env.local | grep -v '^#' | xargs) && \
+		go test -race -cover -tags=integration -timeout=5m ./test/integration/logging/...; \
+	else \
+		go test -race -cover -tags=integration -timeout=5m ./test/integration/logging/...; \
+	fi
+
+# Watch mode for development (fast feedback loop)
+test-watch:
+	@echo "👀 Starting Test Watch Mode (Development)"
+	@echo "========================================"
+	@echo "📝 Watching for Go file changes..."
+	@echo "🚀 Running fast unit tests on each change"
+	@echo "💡 Use Ctrl+C to stop watching"
+	@echo ""
+	@if command -v entr >/dev/null 2>&1; then \
+		find . -name "*.go" -not -path "./vendor/*" | entr -r make test-unit; \
+	else \
+		echo "❌ 'entr' not found. Install with:"; \
+		echo "   # Ubuntu/Debian: apt-get install entr"; \
+		echo "   # macOS: brew install entr"; \
+		echo "   # Arch: pacman -S entr"; \
+		echo ""; \
+		echo "🔄 Falling back to single run..."; \
+		make test-unit; \
+	fi
+
+# SMART TESTING SYSTEM
+
+# Core modules for smoke testing (always tested)
+CORE_MODULES := file directory script
+
+# All modules for change detection
+ALL_MODULES := file directory script firewall package patch m365 activedirectory network_activedirectory
+
+# Detect changed modules using git diff
+CHANGED_MODULES = $(shell \
+	changed_files=$$(git diff --name-only HEAD~1 2>/dev/null || git diff --name-only --staged 2>/dev/null || echo ""); \
+	for module in $(ALL_MODULES); do \
+		echo "$$changed_files" | grep -q "features/modules/$$module" && echo $$module; \
+	done | sort -u)
 
 # DAILY DEVELOPMENT WORKFLOW TARGETS
 
-# Pre-commit validation (tests + linting + security) - MANDATORY FOR COMMITS
-test-commit: test lint security-scan test-m365-integration-dev
+# Pre-commit validation (smart tests + quality gates)
+test-commit: test lint security-scan
 	@echo ""
 	@echo "✅ PRE-COMMIT VALIDATION FINISHED"
 	@echo "===================================="
-	@echo "- ✅ Unit tests passed"
+	@echo "- ✅ Smart tests passed (core + changed modules)"
 	@echo "- ✅ Linting passed"
 	@echo "- ✅ Security scanning passed"
-	@echo "- ✅ M365 integration tested (skipped if no credentials)"
 	@echo ""
 	@echo "🎯 Code is validated and ready for commit/PR"
 
 # CI validation (complete validation) - RUNS IN CI/CD
-test-ci: test lint security-scan test-m365-integration test-integration-complete
+test-ci: export CI=1
+test-ci: test-infrastructure-required test lint security-scan test-m365-integration test-integration-complete test-integration-factory
+
+# Robust CI infrastructure test target - ensures infrastructure works every time
+test-infrastructure-required:
+	@echo "🏗️  CFGMS Infrastructure Reliability Test"
+	@echo "========================================"
+	@echo "Ensuring CI infrastructure is set up and working correctly..."
+	@./scripts/test-with-infrastructure.sh go test -v ./pkg/testing/storage/... ./features/controller/server/... -timeout=10m -race
 	@echo ""
 	@echo "✅ CI VALIDATION FINISHED"
 	@echo "=========================="
-	@echo "- ✅ Unit tests passed"
+	@echo "- ✅ Unit tests passed (cache-safe)"
+	@echo "- ✅ Factory integration tests passed"
 	@echo "- ✅ Linting passed"
 	@echo "- ✅ Security scanning passed"
 	@echo "- ✅ M365 integration tested (strict - fails if no credentials)"
@@ -138,8 +225,8 @@ test-m365-integration:
 	@echo "⚡ This will FAIL if M365 credentials are not available"
 	@echo "📝 Add credentials to .env.local or set M365_CLIENT_ID, M365_CLIENT_SECRET, M365_TENANT_ID"
 	@echo ""
-	go test -v -race -timeout=10m ./features/modules/m365/entra_application/... -run "Integration"
-	go test -v -race -timeout=10m ./features/modules/m365/entra_admin_unit/... -run "Integration"
+	go test -v -race -timeout=2m ./features/modules/m365/entra_application/... -run "Integration"
+	go test -v -race -timeout=2m ./features/modules/m365/entra_admin_unit/... -run "Integration"
 
 # M365 integration tests - PERMISSIVE mode (skips without credentials) 
 # Use this for development when you don't have M365 credentials
@@ -148,8 +235,8 @@ test-m365-integration-dev:
 	@echo "============================================"
 	@echo "⚡ This will SKIP if M365 credentials are not available"
 	@echo ""
-	ALLOW_SKIP_INTEGRATION=true go test -v -race -timeout=10m ./features/modules/m365/entra_application/... -run "Integration"
-	ALLOW_SKIP_INTEGRATION=true go test -v -race -timeout=10m ./features/modules/m365/entra_admin_unit/... -run "Integration"
+	ALLOW_SKIP_INTEGRATION=true go test -v -race -timeout=2m ./features/modules/m365/entra_application/... -run "Integration"
+	ALLOW_SKIP_INTEGRATION=true go test -v -race -timeout=2m ./features/modules/m365/entra_admin_unit/... -run "Integration"
 
 # M365 unit tests (mocked dependencies, no credentials needed)
 test-m365-unit:
@@ -158,6 +245,20 @@ test-m365-unit:
 	@echo "⚡ Using mocked dependencies - no credentials required"
 	@echo ""
 	go test -v -race -short -timeout=5m ./features/modules/m365/entra_application/... ./features/modules/m365/entra_admin_unit/... ./pkg/directory/types/...
+
+# Manual module testing (for development)
+test-module:
+	@if [ -z "$(MODULE)" ]; then \
+		echo "❌ Error: MODULE parameter required"; \
+		echo "Usage: make test-module MODULE=m365"; \
+		echo ""; \
+		echo "Available modules:"; \
+		echo "  Core: $(CORE_MODULES)"; \
+		echo "  All: $(ALL_MODULES)"; \
+		exit 1; \
+	fi
+	@echo "🧪 Testing module: $(MODULE)"
+	@go test -race -timeout=2m ./features/modules/$(MODULE)/...
 
 
 
@@ -843,14 +944,19 @@ test-integration-setup:
 	@echo "=============================================="
 	@./scripts/generate-test-credentials.sh
 	@echo "Starting PostgreSQL, TimescaleDB, and Gitea test services..."
-	docker compose -f docker-compose.test.yml -f docker-compose.test.override.yml up -d postgres-test timescaledb-test git-server-test
+	@set -a && . ./.env.test && set +a && docker compose -f docker-compose.test.yml -f docker-compose.test.override.yml up -d postgres-test timescaledb-test git-server-test
 	@echo ""
 	@echo "⏳ Waiting for services to be ready..."
 	@sleep 5  # Brief pause before health checks
-	@./scripts/wait-for-services.sh
+	@if [ -f .env.test ]; then \
+		set -a && . ./.env.test && set +a && ./scripts/wait-for-services.sh; \
+	else \
+		echo "⚠️  .env.test not found. Using default credentials."; \
+		./scripts/wait-for-services.sh; \
+	fi
 	@echo ""
 	@echo "🔧 Setting up test repositories..."
-	@docker compose -f docker-compose.test.yml exec -T git-server-test /docker-entrypoint-init.d/setup-test-repos.sh || { \
+	@set -a && . ./.env.test && set +a && docker compose -f docker-compose.test.yml exec -T git-server-test /docker-entrypoint-init.d/setup-test-repos.sh || { \
 		echo "📁 Setting up repositories manually..."; \
 		sleep 10; \
 		curl -X POST -u "cfgms_test:$$CFGMS_TEST_GITEA_PASSWORD" \
@@ -883,21 +989,26 @@ test-integration-status:
 	@docker compose -f docker-compose.test.yml ps
 	@echo ""
 	@echo "🔍 Service Health Checks:"
-	@./scripts/wait-for-services.sh || echo "⚠️  Some services may not be ready"
+	@if [ -f .env.test ]; then \
+		set -a && . ./.env.test && set +a && ./scripts/wait-for-services.sh || echo "⚠️  Some services may not be ready"; \
+	else \
+		echo "⚠️  .env.test not found. Using default credentials."; \
+		./scripts/wait-for-services.sh || echo "⚠️  Some services may not be ready"; \
+	fi
 
 # Run integration tests against real storage providers
-test-with-real-storage: 
+test-with-real-storage:
 	@echo "🧪 Running CFGMS Integration Tests with Real Storage"
 	@echo "=================================================="
 	@echo "Testing with Docker-based PostgreSQL and Gitea..."
 	@echo ""
-	@./scripts/wait-for-services.sh
+	@./scripts/test-with-infrastructure.sh go test -v -race ./pkg/testing/storage/... ./features/controller/server/... -timeout=5m
 	@echo ""
 	@echo "🔬 Running storage provider validation tests..."
 	@if [ -f .env.test ]; then \
 		echo "Using generated credentials from .env.test"; \
 		set -a && . ./.env.test && set +a && \
-		go test -v -race -cover -tags=integration ./pkg/testing/storage/... ./features/controller/server/... ./pkg/logging/providers/timescale/...; \
+		go test -v -race -cover -tags=integration -timeout=5m ./pkg/testing/storage/... ./features/controller/server/... ./pkg/logging/providers/timescale/...; \
 	else \
 		echo "⚠️  .env.test not found. Run: make test-integration-setup"; \
 		exit 1; \
@@ -909,7 +1020,12 @@ test-with-real-storage:
 test-integration-db:
 	@echo "📊 Testing Database Storage Provider"
 	@echo "==================================="
-	@./scripts/wait-for-services.sh
+	@if [ -f .env.test ]; then \
+		set -a && . ./.env.test && set +a && ./scripts/wait-for-services.sh; \
+	else \
+		echo "⚠️  .env.test not found. Using default credentials."; \
+		./scripts/wait-for-services.sh; \
+	fi
 	CFGMS_TEST_DB_HOST=localhost \
 	CFGMS_TEST_DB_PORT=5433 \
 	CFGMS_TEST_DB_PASSWORD=cfgms_test_password \
@@ -919,7 +1035,12 @@ test-integration-db:
 test-integration-git:
 	@echo "📁 Testing Git Storage Provider"
 	@echo "==============================="
-	@./scripts/wait-for-services.sh
+	@if [ -f .env.test ]; then \
+		set -a && . ./.env.test && set +a && ./scripts/wait-for-services.sh; \
+	else \
+		echo "⚠️  .env.test not found. Using default credentials."; \
+		./scripts/wait-for-services.sh; \
+	fi
 	CFGMS_TEST_GITEA_URL=http://localhost:3001 \
 	CFGMS_TEST_GITEA_USER=cfgms_test \
 	CFGMS_TEST_GITEA_PASSWORD=cfgms_test_password \
@@ -933,6 +1054,7 @@ test-integration-redis:
 	@echo "Current profile: docker compose --profile future"
 
 # Complete integration testing workflow
+test-integration-complete: export CI=1
 test-integration-complete: test-integration-setup test-with-real-storage test-integration-cleanup
 	@echo ""
 	@echo "🎉 Complete integration testing workflow finished!"

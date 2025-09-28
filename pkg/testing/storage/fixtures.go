@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +18,43 @@ import (
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
+
+// isInfrastructureRequired determines if infrastructure should be available
+// Returns true in CI environments or when Docker/infrastructure is explicitly enabled
+func isInfrastructureRequired() bool {
+	// CI environments
+	if os.Getenv("CI") != "" || os.Getenv("GITHUB_ACTIONS") != "" {
+		return true
+	}
+
+	// Docker test environment explicitly set up
+	if os.Getenv("CFGMS_TEST_DB_PASSWORD") != "" {
+		return true
+	}
+
+	// Integration test mode
+	if os.Getenv("CFGMS_TEST_INTEGRATION") == "1" {
+		return true
+	}
+
+	return false
+}
+
+// requireInfrastructureOrSkip fails the test if infrastructure is required but not available
+// In CI or explicit integration modes, missing infrastructure is a test failure
+// In development mode, it's acceptable to skip
+func requireInfrastructureOrSkip(t *testing.T, err error, component string) {
+	if err == nil {
+		return
+	}
+
+	if isInfrastructureRequired() {
+		t.Fatalf("REQUIRED INFRASTRUCTURE MISSING: %s is not available in CI/integration environment: %v", component, err)
+	} else {
+		t.Skipf("%s not available in development environment: %v", component, err)
+	}
+}
+
 
 // StorageTestConfig holds configuration for testing different storage providers
 type StorageTestConfig struct {
@@ -90,6 +128,13 @@ func (f *StorageTestFixture) setupDatabaseConfig(t *testing.T) {
 		testHost = "localhost"
 	}
 
+	testPort := 5432
+	if portStr := os.Getenv("CFGMS_TEST_DB_PORT"); portStr != "" {
+		if port, err := strconv.Atoi(portStr); err == nil {
+			testPort = port
+		}
+	}
+
 	testDB := os.Getenv("CFGMS_TEST_DB_NAME")
 	if testDB == "" {
 		testDB = fmt.Sprintf("cfgms_test_%d", time.Now().Unix())
@@ -99,7 +144,7 @@ func (f *StorageTestFixture) setupDatabaseConfig(t *testing.T) {
 		Provider: "database",
 		Config: map[string]interface{}{
 			"host":     testHost,
-			"port":     5432,
+			"port":     testPort,
 			"database": testDB,
 			"username": "cfgms_test",
 			"password": testPassword,
@@ -177,7 +222,7 @@ func (f *StorageTestFixture) ValidateStorageProvider(t *testing.T, providerName 
 	t.Run(fmt.Sprintf("provider_%s_client_tenant_store", providerName), func(t *testing.T) {
 		store, err := provider.CreateClientTenantStore(testConfig.Config)
 		if err != nil && providerName == "database" {
-			t.Skipf("Database provider requires actual database connection: %v", err)
+			requireInfrastructureOrSkip(t, err, "Database provider")
 			return
 		}
 		require.NoError(t, err, "ClientTenantStore creation should succeed")
@@ -191,7 +236,7 @@ func (f *StorageTestFixture) ValidateStorageProvider(t *testing.T, providerName 
 	t.Run(fmt.Sprintf("provider_%s_config_store", providerName), func(t *testing.T) {
 		store, err := provider.CreateConfigStore(testConfig.Config)
 		if err != nil && providerName == "database" {
-			t.Skipf("Database provider requires actual database connection: %v", err)
+			requireInfrastructureOrSkip(t, err, "Database provider")
 			return
 		}
 		require.NoError(t, err, "ConfigStore creation should succeed")
@@ -205,7 +250,7 @@ func (f *StorageTestFixture) ValidateStorageProvider(t *testing.T, providerName 
 	t.Run(fmt.Sprintf("provider_%s_audit_store", providerName), func(t *testing.T) {
 		store, err := provider.CreateAuditStore(testConfig.Config)
 		if err != nil && providerName == "database" {
-			t.Skipf("Database provider requires actual database connection: %v", err)
+			requireInfrastructureOrSkip(t, err, "Database provider")
 			return
 		}
 		require.NoError(t, err, "AuditStore creation should succeed")
@@ -219,7 +264,7 @@ func (f *StorageTestFixture) ValidateStorageProvider(t *testing.T, providerName 
 	t.Run(fmt.Sprintf("provider_%s_runtime_store", providerName), func(t *testing.T) {
 		store, err := provider.CreateRuntimeStore(testConfig.Config)
 		if err != nil && providerName == "database" {
-			t.Skipf("Database provider requires actual database connection: %v", err)
+			requireInfrastructureOrSkip(t, err, "Database provider")
 			return
 		}
 		require.NoError(t, err, "RuntimeStore creation should succeed")
