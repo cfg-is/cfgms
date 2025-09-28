@@ -9,12 +9,14 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/controller/ha"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/tenant"
@@ -39,6 +41,7 @@ type Server struct {
 	tenantManager           *tenant.Manager
 	rbacManager             *rbac.Manager
 	auditManager            *audit.Manager
+	haManager               *ha.Manager
 }
 
 // New creates a new server instance
@@ -110,6 +113,12 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		}
 	}
 
+	// Initialize HA manager
+	haManager, err := initializeHAManager(cfg, logger, storageManager)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize HA manager: %w", err)
+	}
+
 	return &Server{
 		cfg:                     cfg,
 		logger:                  logger,
@@ -121,6 +130,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		tenantManager:           tenantManager,
 		rbacManager:             rbacManager,
 		auditManager:            auditManager,
+		haManager:               haManager,
 	}, nil
 }
 
@@ -157,6 +167,13 @@ func (s *Server) Start() error {
 	controller.RegisterConfigurationServiceServer(s.grpcServer, s.configService)
 	controller.RegisterRBACServiceServer(s.grpcServer, s.rbacService)
 
+	// Start HA manager
+	if s.haManager != nil {
+		if err := s.haManager.Start(context.Background()); err != nil {
+			return fmt.Errorf("failed to start HA manager: %w", err)
+		}
+	}
+
 	// Start serving in a goroutine
 	go func() {
 		s.mu.RLock()
@@ -170,7 +187,10 @@ func (s *Server) Start() error {
 		}
 	}()
 
-	s.logger.Info("Controller server started", "address", s.cfg.ListenAddr)
+	s.logger.Info("Controller server started",
+		"address", s.cfg.ListenAddr,
+		"ha_mode", s.haManager.GetDeploymentMode().String(),
+		"is_leader", s.haManager.IsLeader())
 	
 	// Record system startup audit event
 	if s.auditManager != nil {
@@ -191,7 +211,14 @@ func (s *Server) Stop() error {
 
 	s.logger.Info("Shutting down controller server")
 
-	// Record system shutdown audit event  
+	// Stop HA manager first
+	if s.haManager != nil {
+		if err := s.haManager.Stop(context.Background()); err != nil {
+			s.logger.Warn("Failed to stop HA manager", "error", err)
+		}
+	}
+
+	// Record system shutdown audit event
 	if s.auditManager != nil {
 		ctx := context.Background()
 		event := audit.SystemEvent("system", "controller_stop", "Controller server shutting down")
@@ -261,6 +288,13 @@ func (s *Server) GetRBACManager() *rbac.Manager {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.rbacManager
+}
+
+// GetHAManager returns the HA manager instance
+func (s *Server) GetHAManager() *ha.Manager {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.haManager
 }
 
 // initializeCertificateManager initializes the certificate manager based on configuration
@@ -436,4 +470,196 @@ func (s *Server) ensureServerCertificate() (*cert.Certificate, error) {
 		"expires", serverCert.ExpiresAt.Format("2006-01-02"))
 
 	return serverCert, nil
+}
+
+// initializeHAManager initializes the HA manager based on configuration
+func initializeHAManager(cfg *config.Config, logger logging.Logger, storageManager *interfaces.StorageManager) (*ha.Manager, error) {
+	// Convert config to HA config
+	haConfig, err := convertToHAConfig(cfg.HA)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert HA configuration: %w", err)
+	}
+
+	// Create HA manager
+	haManager, err := ha.NewManager(haConfig, logger, storageManager)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create HA manager: %w", err)
+	}
+
+	logger.Info("HA Manager initialized",
+		"mode", haConfig.GetModeString(),
+		"node_id", haConfig.Node.ID)
+
+	return haManager, nil
+}
+
+// convertToHAConfig converts controller config HA section to HA package config
+func convertToHAConfig(configHA *config.HAConfig) (*ha.Config, error) {
+	if configHA == nil {
+		return ha.DefaultConfig(), nil
+	}
+
+	haConfig := ha.DefaultConfig()
+
+	// Parse deployment mode
+	switch configHA.Mode {
+	case "single":
+		haConfig.Mode = ha.SingleServerMode
+	case "blue-green":
+		haConfig.Mode = ha.BlueGreenMode
+	case "cluster":
+		haConfig.Mode = ha.ClusterMode
+	default:
+		return nil, fmt.Errorf("invalid HA mode: %s", configHA.Mode)
+	}
+
+	// Convert node configuration
+	if configHA.Node != nil {
+		haConfig.Node.ID = configHA.Node.ID
+		haConfig.Node.Name = configHA.Node.Name
+		haConfig.Node.ExternalAddress = configHA.Node.ExternalAddress
+		haConfig.Node.InternalAddress = configHA.Node.InternalAddress
+		haConfig.Node.Capabilities = configHA.Node.Capabilities
+		haConfig.Node.Metadata = configHA.Node.Metadata
+	}
+
+	// Convert cluster configuration
+	if configHA.Cluster != nil {
+		haConfig.Cluster.ExpectedSize = configHA.Cluster.ExpectedSize
+		haConfig.Cluster.MinQuorum = configHA.Cluster.MinQuorum
+
+		if configHA.Cluster.ElectionTimeout != "" {
+			if timeout, err := time.ParseDuration(configHA.Cluster.ElectionTimeout); err == nil {
+				haConfig.Cluster.ElectionTimeout = timeout
+			}
+		}
+
+		if configHA.Cluster.HeartbeatInterval != "" {
+			if interval, err := time.ParseDuration(configHA.Cluster.HeartbeatInterval); err == nil {
+				haConfig.Cluster.HeartbeatInterval = interval
+			}
+		}
+
+		// Convert discovery configuration
+		if configHA.Cluster.Discovery != nil {
+			haConfig.Cluster.Discovery.Method = configHA.Cluster.Discovery.Method
+			haConfig.Cluster.Discovery.Config = configHA.Cluster.Discovery.Config
+
+			if configHA.Cluster.Discovery.Interval != "" {
+				if interval, err := time.ParseDuration(configHA.Cluster.Discovery.Interval); err == nil {
+					haConfig.Cluster.Discovery.Interval = interval
+				}
+			}
+
+			if configHA.Cluster.Discovery.NodeTimeout != "" {
+				if timeout, err := time.ParseDuration(configHA.Cluster.Discovery.NodeTimeout); err == nil {
+					haConfig.Cluster.Discovery.NodeTimeout = timeout
+				}
+			}
+		}
+
+		// Convert session sync configuration
+		if configHA.Cluster.SessionSync != nil {
+			haConfig.Cluster.SessionSync.Enabled = configHA.Cluster.SessionSync.Enabled
+			haConfig.Cluster.SessionSync.MaxStateSize = configHA.Cluster.SessionSync.MaxStateSize
+
+			if configHA.Cluster.SessionSync.SyncInterval != "" {
+				if interval, err := time.ParseDuration(configHA.Cluster.SessionSync.SyncInterval); err == nil {
+					haConfig.Cluster.SessionSync.SyncInterval = interval
+				}
+			}
+
+			if configHA.Cluster.SessionSync.StateTimeout != "" {
+				if timeout, err := time.ParseDuration(configHA.Cluster.SessionSync.StateTimeout); err == nil {
+					haConfig.Cluster.SessionSync.StateTimeout = timeout
+				}
+			}
+		}
+	}
+
+	// Convert health check configuration
+	if configHA.HealthCheck != nil {
+		haConfig.HealthCheck.FailureThreshold = configHA.HealthCheck.FailureThreshold
+		haConfig.HealthCheck.SuccessThreshold = configHA.HealthCheck.SuccessThreshold
+		haConfig.HealthCheck.EnableInternal = configHA.HealthCheck.EnableInternal
+		haConfig.HealthCheck.EnableExternal = configHA.HealthCheck.EnableExternal
+
+		if configHA.HealthCheck.Interval != "" {
+			if interval, err := time.ParseDuration(configHA.HealthCheck.Interval); err == nil {
+				haConfig.HealthCheck.Interval = interval
+			}
+		}
+
+		if configHA.HealthCheck.Timeout != "" {
+			if timeout, err := time.ParseDuration(configHA.HealthCheck.Timeout); err == nil {
+				haConfig.HealthCheck.Timeout = timeout
+			}
+		}
+	}
+
+	// Convert failover configuration
+	if configHA.Failover != nil {
+		haConfig.Failover.Enabled = configHA.Failover.Enabled
+		haConfig.Failover.MaxSessionMigration = configHA.Failover.MaxSessionMigration
+
+		if configHA.Failover.Timeout != "" {
+			if timeout, err := time.ParseDuration(configHA.Failover.Timeout); err == nil {
+				haConfig.Failover.Timeout = timeout
+			}
+		}
+
+		if configHA.Failover.MaxDuration != "" {
+			if duration, err := time.ParseDuration(configHA.Failover.MaxDuration); err == nil {
+				haConfig.Failover.MaxDuration = duration
+			}
+		}
+
+		if configHA.Failover.GracePeriod != "" {
+			if period, err := time.ParseDuration(configHA.Failover.GracePeriod); err == nil {
+				haConfig.Failover.GracePeriod = period
+			}
+		}
+	}
+
+	// Convert load balancing configuration
+	if configHA.LoadBalancing != nil {
+		switch configHA.LoadBalancing.Strategy {
+		case "round-robin":
+			haConfig.LoadBalancing.Strategy = ha.RoundRobinStrategy
+		case "least-connections":
+			haConfig.LoadBalancing.Strategy = ha.LeastConnectionsStrategy
+		case "health-based":
+			haConfig.LoadBalancing.Strategy = ha.HealthBasedStrategy
+		}
+
+		if configHA.LoadBalancing.HealthBased != nil {
+			haConfig.LoadBalancing.HealthBased.MinHealthScore = configHA.LoadBalancing.HealthBased.MinHealthScore
+			haConfig.LoadBalancing.HealthBased.HealthWeightFactor = configHA.LoadBalancing.HealthBased.HealthWeightFactor
+		}
+
+		if configHA.LoadBalancing.ConnectionBased != nil {
+			haConfig.LoadBalancing.ConnectionBased.MaxConnectionsPerNode = configHA.LoadBalancing.ConnectionBased.MaxConnectionsPerNode
+			haConfig.LoadBalancing.ConnectionBased.ConnectionThreshold = configHA.LoadBalancing.ConnectionBased.ConnectionThreshold
+		}
+	}
+
+	// Convert split-brain configuration
+	if configHA.SplitBrain != nil {
+		haConfig.SplitBrain.Enabled = configHA.SplitBrain.Enabled
+		haConfig.SplitBrain.ResolutionStrategy = configHA.SplitBrain.ResolutionStrategy
+
+		if configHA.SplitBrain.DetectionInterval != "" {
+			if interval, err := time.ParseDuration(configHA.SplitBrain.DetectionInterval); err == nil {
+				haConfig.SplitBrain.DetectionInterval = interval
+			}
+		}
+
+		if configHA.SplitBrain.QuorumInterval != "" {
+			if interval, err := time.ParseDuration(configHA.SplitBrain.QuorumInterval); err == nil {
+				haConfig.SplitBrain.QuorumInterval = interval
+			}
+		}
+	}
+
+	return haConfig, nil
 }
