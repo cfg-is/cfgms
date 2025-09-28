@@ -82,6 +82,15 @@ type ClusterConfig struct {
 	// Heartbeat interval
 	HeartbeatInterval time.Duration `yaml:"heartbeat_interval" json:"heartbeat_interval"`
 
+	// Leader lease duration (how long a leader holds its lease)
+	LeaderLeaseDuration time.Duration `yaml:"leader_lease_duration" json:"leader_lease_duration"`
+
+	// Candidate timeout (how long to wait before becoming candidate)
+	CandidateTimeout time.Duration `yaml:"candidate_timeout" json:"candidate_timeout"`
+
+	// Apply timeout (how long to wait for command application)
+	ApplyTimeout time.Duration `yaml:"apply_timeout" json:"apply_timeout"`
+
 	// Node discovery configuration
 	Discovery *DiscoveryConfig `yaml:"discovery" json:"discovery"`
 
@@ -257,10 +266,13 @@ func DefaultConfig() *Config {
 			Metadata:     make(map[string]string),
 		},
 		Cluster: &ClusterConfig{
-			ExpectedSize:      3,
-			MinQuorum:         2,
-			ElectionTimeout:   10 * time.Second,
-			HeartbeatInterval: 2 * time.Second,
+			ExpectedSize:        3,
+			MinQuorum:           2,
+			ElectionTimeout:     10 * time.Second,
+			HeartbeatInterval:   2 * time.Second,
+			LeaderLeaseDuration: 15 * time.Second,
+			CandidateTimeout:    5 * time.Second,
+			ApplyTimeout:        2 * time.Second,
 			Discovery: &DiscoveryConfig{
 				Method:      "static",
 				Config:      make(map[string]interface{}),
@@ -391,6 +403,30 @@ func (c *Config) LoadFromEnvironment() error {
 		}
 	}
 
+	if leaderLease := os.Getenv("CFGMS_HA_LEADER_LEASE_DURATION"); leaderLease != "" {
+		if duration, err := time.ParseDuration(leaderLease); err == nil {
+			c.Cluster.LeaderLeaseDuration = duration
+		}
+	}
+
+	if candidateTimeout := os.Getenv("CFGMS_HA_CANDIDATE_TIMEOUT"); candidateTimeout != "" {
+		if timeout, err := time.ParseDuration(candidateTimeout); err == nil {
+			c.Cluster.CandidateTimeout = timeout
+		}
+	}
+
+	if applyTimeout := os.Getenv("CFGMS_HA_APPLY_TIMEOUT"); applyTimeout != "" {
+		if timeout, err := time.ParseDuration(applyTimeout); err == nil {
+			c.Cluster.ApplyTimeout = timeout
+		}
+	}
+
+	if healthInterval := os.Getenv("CFGMS_HA_HEALTH_CHECK_INTERVAL"); healthInterval != "" {
+		if interval, err := time.ParseDuration(healthInterval); err == nil {
+			c.HealthCheck.Interval = interval
+		}
+	}
+
 	// Load discovery configuration
 	if discoveryMethod := os.Getenv("CFGMS_HA_DISCOVERY_METHOD"); discoveryMethod != "" {
 		c.Cluster.Discovery.Method = discoveryMethod
@@ -445,6 +481,18 @@ func (c *Config) Validate() error {
 
 		if c.Cluster.HeartbeatInterval <= 0 {
 			return fmt.Errorf("heartbeat interval must be positive")
+		}
+
+		if c.Cluster.LeaderLeaseDuration <= 0 {
+			return fmt.Errorf("leader lease duration must be positive")
+		}
+
+		if c.Cluster.CandidateTimeout <= 0 {
+			return fmt.Errorf("candidate timeout must be positive")
+		}
+
+		if c.Cluster.ApplyTimeout <= 0 {
+			return fmt.Errorf("apply timeout must be positive")
 		}
 
 		if c.Cluster.Discovery == nil {

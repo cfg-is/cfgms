@@ -1,0 +1,451 @@
+# Docker Compose configuration for CFGMS High Availability testing
+# Provides multi-controller cluster testing with geographic distribution simulation
+#
+# AGGRESSIVE TIMING CONFIGURATION for Local Docker Testing:
+# - Election Timeout: 3s (vs 10s production)
+# - Heartbeat Interval: 500ms (vs 2s production)
+# - Health Check Interval: 250ms (vs 1s production)
+# - Leader Lease Duration: 2s (vs 15s production)
+# - Expected failover time: < 10 seconds (vs < 30s production)
+
+version: '3.8'
+
+services:
+  # Shared storage for HA cluster (git-based)
+  git-server-ha:
+    image: gitea/gitea:1.21.0
+    container_name: cfgms-git-ha-test
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      - GITEA__database__DB_TYPE=sqlite3
+      - GITEA__security__INSTALL_LOCK=true
+      - GITEA__security__SECRET_KEY=${GITEA_SECRET_KEY:-cfgms-ha-test-secret-key-12345678901234567890}
+      - GITEA__security__INTERNAL_TOKEN=${GITEA_INTERNAL_TOKEN:-cfgms-ha-test-internal-token-12345678901234567890}
+      - GITEA__server__DISABLE_SSH=true
+      - GITEA__server__HTTP_PORT=3000
+      - GITEA__server__ROOT_URL=http://git-server-ha:3000/
+      - GITEA__service__DISABLE_REGISTRATION=true
+      - GITEA__admin__USERNAME=cfgms_ha_test
+      - GITEA__admin__PASSWORD=${GITEA_ADMIN_PASSWORD:-cfgms_ha_test_password}
+      - GITEA__admin__EMAIL=ha-test@cfgms.local
+    ports:
+      - "3002:3000"
+    volumes:
+      - gitea_ha_data:/data
+      - ./test/integration/ha/git-init:/docker-entrypoint-init.d:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      ha-cluster:
+        ipv4_address: 172.21.1.10
+
+  # Controller East (US East region simulation)
+  controller-east:
+    build:
+      context: .
+      dockerfile: Dockerfile.controller
+    container_name: cfgms-controller-east
+    environment:
+      # HA Configuration
+      - CFGMS_HA_MODE=cluster
+      - CFGMS_HA_NODE_ID=controller-east-1
+      - CFGMS_HA_NODE_NAME=cfgms-east-primary
+      - CFGMS_HA_REGION=us-east
+      - CFGMS_HA_AVAILABILITY_ZONE=us-east-1a
+      - CFGMS_HA_EXTERNAL_ADDRESS=172.21.1.20:8080
+      - CFGMS_HA_INTERNAL_ADDRESS=172.21.1.20:8081
+      - CFGMS_HA_CLUSTER_SIZE=3
+      - CFGMS_HA_MIN_QUORUM=2
+      - CFGMS_HA_DISCOVERY_METHOD=geographic
+      - CFGMS_HA_ELECTION_TIMEOUT=3s
+      - CFGMS_HA_HEARTBEAT_INTERVAL=500ms
+
+      # Storage Configuration (shared git repository)
+      - CFGMS_STORAGE_PROVIDER=git
+      - CFGMS_STORAGE_GIT_URL=http://cfgms_ha_test:cfgms_ha_test_password@git-server-ha:3000/cfgms_ha_test/ha-cluster-config.git
+      - CFGMS_STORAGE_GIT_BRANCH=main
+
+      # Server Configuration
+      - CFGMS_CONTROLLER_BIND_ADDRESS=0.0.0.0:8080
+      - CFGMS_CONTROLLER_METRICS_BIND_ADDRESS=0.0.0.0:9090
+      - CFGMS_LOG_LEVEL=debug
+
+      # Test Environment - Aggressive Timing for Local Docker
+      - CFGMS_TEST_MODE=true
+      - CFGMS_HA_HEALTH_CHECK_INTERVAL=250ms
+      - CFGMS_HA_LEADER_LEASE_DURATION=2s
+      - CFGMS_HA_CANDIDATE_TIMEOUT=1s
+      - CFGMS_HA_APPLY_TIMEOUT=500ms
+    ports:
+      - "8080:8080"   # Controller API
+      - "9090:9090"   # Metrics
+    depends_on:
+      git-server-ha:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 2s
+      timeout: 1s
+      retries: 15
+      start_period: 10s
+    networks:
+      ha-cluster:
+        ipv4_address: 172.21.1.20
+
+  # Controller Central (US Central region simulation)
+  controller-central:
+    build:
+      context: .
+      dockerfile: Dockerfile.controller
+    container_name: cfgms-controller-central
+    environment:
+      # HA Configuration
+      - CFGMS_HA_MODE=cluster
+      - CFGMS_HA_NODE_ID=controller-central-1
+      - CFGMS_HA_NODE_NAME=cfgms-central-primary
+      - CFGMS_HA_REGION=us-central
+      - CFGMS_HA_AVAILABILITY_ZONE=us-central-1a
+      - CFGMS_HA_EXTERNAL_ADDRESS=172.21.1.21:8080
+      - CFGMS_HA_INTERNAL_ADDRESS=172.21.1.21:8081
+      - CFGMS_HA_CLUSTER_SIZE=3
+      - CFGMS_HA_MIN_QUORUM=2
+      - CFGMS_HA_DISCOVERY_METHOD=geographic
+      - CFGMS_HA_ELECTION_TIMEOUT=3s
+      - CFGMS_HA_HEARTBEAT_INTERVAL=500ms
+
+      # Storage Configuration (same shared git repository)
+      - CFGMS_STORAGE_PROVIDER=git
+      - CFGMS_STORAGE_GIT_URL=http://cfgms_ha_test:cfgms_ha_test_password@git-server-ha:3000/cfgms_ha_test/ha-cluster-config.git
+      - CFGMS_STORAGE_GIT_BRANCH=main
+
+      # Server Configuration
+      - CFGMS_CONTROLLER_BIND_ADDRESS=0.0.0.0:8080
+      - CFGMS_CONTROLLER_METRICS_BIND_ADDRESS=0.0.0.0:9090
+      - CFGMS_LOG_LEVEL=debug
+
+      # Test Environment - Aggressive Timing for Local Docker
+      - CFGMS_TEST_MODE=true
+      - CFGMS_HA_HEALTH_CHECK_INTERVAL=250ms
+      - CFGMS_HA_LEADER_LEASE_DURATION=2s
+      - CFGMS_HA_CANDIDATE_TIMEOUT=1s
+      - CFGMS_HA_APPLY_TIMEOUT=500ms
+    ports:
+      - "8081:8080"   # Controller API
+      - "9091:9090"   # Metrics
+    depends_on:
+      git-server-ha:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 2s
+      timeout: 1s
+      retries: 15
+      start_period: 10s
+    networks:
+      ha-cluster:
+        ipv4_address: 172.21.1.21
+
+  # Controller West (US West region simulation)
+  controller-west:
+    build:
+      context: .
+      dockerfile: Dockerfile.controller
+    container_name: cfgms-controller-west
+    environment:
+      # HA Configuration
+      - CFGMS_HA_MODE=cluster
+      - CFGMS_HA_NODE_ID=controller-west-1
+      - CFGMS_HA_NODE_NAME=cfgms-west-primary
+      - CFGMS_HA_REGION=us-west
+      - CFGMS_HA_AVAILABILITY_ZONE=us-west-1a
+      - CFGMS_HA_EXTERNAL_ADDRESS=172.21.1.22:8080
+      - CFGMS_HA_INTERNAL_ADDRESS=172.21.1.22:8081
+      - CFGMS_HA_CLUSTER_SIZE=3
+      - CFGMS_HA_MIN_QUORUM=2
+      - CFGMS_HA_DISCOVERY_METHOD=geographic
+      - CFGMS_HA_ELECTION_TIMEOUT=3s
+      - CFGMS_HA_HEARTBEAT_INTERVAL=500ms
+
+      # Storage Configuration (same shared git repository)
+      - CFGMS_STORAGE_PROVIDER=git
+      - CFGMS_STORAGE_GIT_URL=http://cfgms_ha_test:cfgms_ha_test_password@git-server-ha:3000/cfgms_ha_test/ha-cluster-config.git
+      - CFGMS_STORAGE_GIT_BRANCH=main
+
+      # Server Configuration
+      - CFGMS_CONTROLLER_BIND_ADDRESS=0.0.0.0:8080
+      - CFGMS_CONTROLLER_METRICS_BIND_ADDRESS=0.0.0.0:9090
+      - CFGMS_LOG_LEVEL=debug
+
+      # Test Environment - Aggressive Timing for Local Docker
+      - CFGMS_TEST_MODE=true
+      - CFGMS_HA_HEALTH_CHECK_INTERVAL=250ms
+      - CFGMS_HA_LEADER_LEASE_DURATION=2s
+      - CFGMS_HA_CANDIDATE_TIMEOUT=1s
+      - CFGMS_HA_APPLY_TIMEOUT=500ms
+    ports:
+      - "8082:8080"   # Controller API
+      - "9092:9090"   # Metrics
+    depends_on:
+      git-server-ha:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 2s
+      timeout: 1s
+      retries: 15
+      start_period: 10s
+    networks:
+      ha-cluster:
+        ipv4_address: 172.21.1.22
+
+  # Steward East (connected to HA controller cluster)
+  steward-east:
+    build:
+      context: .
+      dockerfile: Dockerfile.steward
+    container_name: cfgms-steward-east
+    environment:
+      # Controller cluster configuration (HA-aware)
+      - CFGMS_CONTROLLER_URLS=controller-east:8080,controller-central:8080,controller-west:8080
+      - CFGMS_CONTROLLER_GRPC_URLS=controller-east:8081,controller-central:8081,controller-west:8081
+
+      # Steward identification
+      - CFGMS_STEWARD_ID=steward-east-1
+      - CFGMS_STEWARD_NAME=steward-us-east
+      - CFGMS_STEWARD_REGION=us-east
+      - CFGMS_STEWARD_AVAILABILITY_ZONE=us-east-1a
+
+      # HA Configuration
+      - CFGMS_HA_AWARE=true
+      - CFGMS_HA_FAILOVER_ENABLED=true
+      - CFGMS_HA_CONNECTION_RETRY_INTERVAL=2s
+      - CFGMS_HA_CONNECTION_TIMEOUT=10s
+      - CFGMS_HA_HEALTH_CHECK_INTERVAL=5s
+
+      # Testing configuration
+      - CFGMS_TEST_MODE=true
+      - CFGMS_LOG_LEVEL=debug
+    volumes:
+      - steward_east_data:/app/data
+      - steward_east_logs:/app/logs
+    depends_on:
+      controller-east:
+        condition: service_healthy
+      controller-central:
+        condition: service_healthy
+      controller-west:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "pgrep", "steward"]
+      interval: 2s
+      timeout: 1s
+      retries: 15
+      start_period: 15s
+    networks:
+      ha-cluster:
+        ipv4_address: 172.21.1.30
+
+  # Steward Central (connected to HA controller cluster)
+  steward-central:
+    build:
+      context: .
+      dockerfile: Dockerfile.steward
+    container_name: cfgms-steward-central
+    environment:
+      # Controller cluster configuration (HA-aware)
+      - CFGMS_CONTROLLER_URLS=controller-east:8080,controller-central:8080,controller-west:8080
+      - CFGMS_CONTROLLER_GRPC_URLS=controller-east:8081,controller-central:8081,controller-west:8081
+
+      # Steward identification
+      - CFGMS_STEWARD_ID=steward-central-1
+      - CFGMS_STEWARD_NAME=steward-us-central
+      - CFGMS_STEWARD_REGION=us-central
+      - CFGMS_STEWARD_AVAILABILITY_ZONE=us-central-1a
+
+      # HA Configuration
+      - CFGMS_HA_AWARE=true
+      - CFGMS_HA_FAILOVER_ENABLED=true
+      - CFGMS_HA_CONNECTION_RETRY_INTERVAL=2s
+      - CFGMS_HA_CONNECTION_TIMEOUT=10s
+      - CFGMS_HA_HEALTH_CHECK_INTERVAL=5s
+
+      # Testing configuration
+      - CFGMS_TEST_MODE=true
+      - CFGMS_LOG_LEVEL=debug
+    volumes:
+      - steward_central_data:/app/data
+      - steward_central_logs:/app/logs
+    depends_on:
+      controller-east:
+        condition: service_healthy
+      controller-central:
+        condition: service_healthy
+      controller-west:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "pgrep", "steward"]
+      interval: 2s
+      timeout: 1s
+      retries: 15
+      start_period: 15s
+    networks:
+      ha-cluster:
+        ipv4_address: 172.21.1.31
+
+  # Steward West (connected to HA controller cluster)
+  steward-west:
+    build:
+      context: .
+      dockerfile: Dockerfile.steward
+    container_name: cfgms-steward-west
+    environment:
+      # Controller cluster configuration (HA-aware)
+      - CFGMS_CONTROLLER_URLS=controller-east:8080,controller-central:8080,controller-west:8080
+      - CFGMS_CONTROLLER_GRPC_URLS=controller-east:8081,controller-central:8081,controller-west:8081
+
+      # Steward identification
+      - CFGMS_STEWARD_ID=steward-west-1
+      - CFGMS_STEWARD_NAME=steward-us-west
+      - CFGMS_STEWARD_REGION=us-west
+      - CFGMS_STEWARD_AVAILABILITY_ZONE=us-west-1a
+
+      # HA Configuration
+      - CFGMS_HA_AWARE=true
+      - CFGMS_HA_FAILOVER_ENABLED=true
+      - CFGMS_HA_CONNECTION_RETRY_INTERVAL=2s
+      - CFGMS_HA_CONNECTION_TIMEOUT=10s
+      - CFGMS_HA_HEALTH_CHECK_INTERVAL=5s
+
+      # Testing configuration
+      - CFGMS_TEST_MODE=true
+      - CFGMS_LOG_LEVEL=debug
+    volumes:
+      - steward_west_data:/app/data
+      - steward_west_logs:/app/logs
+    depends_on:
+      controller-east:
+        condition: service_healthy
+      controller-central:
+        condition: service_healthy
+      controller-west:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "pgrep", "steward"]
+      interval: 2s
+      timeout: 1s
+      retries: 15
+      start_period: 15s
+    networks:
+      ha-cluster:
+        ipv4_address: 172.21.1.32
+
+  # Network chaos simulation tool (for partition testing)
+  chaos-network:
+    image: alpine:latest
+    container_name: cfgms-chaos-network
+    command: >
+      sh -c "
+        apk add --no-cache iptables tcpdump iproute2 curl &&
+        echo 'Network chaos tools ready' &&
+        tail -f /dev/null
+      "
+    cap_add:
+      - NET_ADMIN
+    networks:
+      ha-cluster:
+        ipv4_address: 172.21.1.100
+    profiles:
+      - chaos
+
+  # Test orchestrator (runs integration tests)
+  test-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    container_name: cfgms-ha-test-runner
+    environment:
+      - CFGMS_HA_TEST_MODE=integration
+      - CONTROLLER_EAST_URL=http://controller-east:8080
+      - CONTROLLER_CENTRAL_URL=http://controller-central:8080
+      - CONTROLLER_WEST_URL=http://controller-west:8080
+      - GIT_SERVER_URL=http://git-server-ha:3000
+    volumes:
+      - .:/workspace
+      - /var/run/docker.sock:/var/run/docker.sock
+    working_dir: /workspace
+    depends_on:
+      controller-east:
+        condition: service_healthy
+      controller-central:
+        condition: service_healthy
+      controller-west:
+        condition: service_healthy
+    networks:
+      ha-cluster:
+        ipv4_address: 172.21.1.200
+    profiles:
+      - testing
+
+volumes:
+  gitea_ha_data:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=256m
+
+  steward_east_data:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=64m
+
+  steward_east_logs:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=32m
+
+  steward_central_data:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=64m
+
+  steward_central_logs:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=32m
+
+  steward_west_data:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=64m
+
+  steward_west_logs:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=32m
+
+networks:
+  ha-cluster:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.21.1.0/24
+          gateway: 172.21.1.1
