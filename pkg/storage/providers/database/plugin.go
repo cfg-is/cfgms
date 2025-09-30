@@ -298,17 +298,35 @@ func NewDatabaseClientTenantStore(dsn string, config map[string]interface{}) (*D
 // initializeSchema creates the necessary database tables and indexes
 func (s *DatabaseClientTenantStore) initializeSchema() error {
 	ctx := context.Background()
-	
+
+	// Use PostgreSQL advisory lock to prevent concurrent schema initialization
+	// Lock ID: 24681357 (different from other store locks)
+	const schemaLockID = 24681357
+
+	// Acquire advisory lock - will wait if another instance is initializing
+	if _, err := s.db.ExecContext(ctx, "SELECT pg_advisory_lock($1)", schemaLockID); err != nil {
+		return fmt.Errorf("failed to acquire client tenant schema initialization lock: %w", err)
+	}
+
+	// Ensure we release the lock when done
+	defer func() {
+		if _, err := s.db.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", schemaLockID); err != nil {
+			// Log but don't fail - lock will be released when connection closes
+			// This is non-critical since PostgreSQL will release advisory locks when connection closes
+			_ = err // Explicitly ignore error to satisfy linter
+		}
+	}()
+
 	// Create client tenants table
 	if err := s.schemas.CreateClientTenantsTable(ctx, s.db); err != nil {
 		return fmt.Errorf("failed to create client_tenants table: %w", err)
 	}
-	
+
 	// Create admin consent requests table
 	if err := s.schemas.CreateAdminConsentRequestsTable(ctx, s.db); err != nil {
 		return fmt.Errorf("failed to create admin_consent_requests table: %w", err)
 	}
-	
+
 	return nil
 }
 

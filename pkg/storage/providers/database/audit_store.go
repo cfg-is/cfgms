@@ -65,17 +65,35 @@ func NewDatabaseAuditStore(dsn string, config map[string]interface{}) (*Database
 // initializeSchema creates the necessary database tables and indexes for audit storage
 func (s *DatabaseAuditStore) initializeSchema() error {
 	ctx := context.Background()
-	
+
+	// Use PostgreSQL advisory lock to prevent concurrent schema initialization
+	// Lock ID: 87654321 (different from config store lock)
+	const schemaLockID = 87654321
+
+	// Acquire advisory lock - will wait if another instance is initializing
+	if _, err := s.db.ExecContext(ctx, "SELECT pg_advisory_lock($1)", schemaLockID); err != nil {
+		return fmt.Errorf("failed to acquire audit schema initialization lock: %w", err)
+	}
+
+	// Ensure we release the lock when done
+	defer func() {
+		if _, err := s.db.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", schemaLockID); err != nil {
+			// Log but don't fail - lock will be released when connection closes
+			// This is non-critical since PostgreSQL will release advisory locks when connection closes
+			_ = err // Explicitly ignore error to satisfy linter
+		}
+	}()
+
 	// Create audit entries table
 	if err := s.schemas.CreateAuditEntriesTable(ctx, s.db); err != nil {
 		return fmt.Errorf("failed to create audit_entries table: %w", err)
 	}
-	
+
 	// Create audit statistics materialized view
 	if err := s.schemas.CreateAuditStatsView(ctx, s.db); err != nil {
 		return fmt.Errorf("failed to create audit_stats materialized view: %w", err)
 	}
-	
+
 	return nil
 }
 

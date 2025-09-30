@@ -117,9 +117,11 @@ func NewManager(cfg *Config, logger logging.Logger, storageManager *interfaces.S
 	manager.clusterNodes[nodeInfo.ID] = nodeInfo
 
 	// Initialize components based on deployment mode
+	manager.logger.Info("DEBUG: About to call initializeComponents()...")
 	if err := manager.initializeComponents(); err != nil {
 		return nil, fmt.Errorf("failed to initialize HA components: %w", err)
 	}
+	manager.logger.Info("DEBUG: initializeComponents() completed successfully")
 
 	manager.logger.Info("HA Manager initialized",
 		"mode", cfg.GetModeString(),
@@ -145,22 +147,29 @@ func (m *Manager) Start(ctx context.Context) error {
 	m.logger.Info("Starting HA Manager", "mode", m.cfg.GetModeString())
 
 	// Start health checker
+	m.logger.Info("DEBUG: About to start health checker...")
 	if m.healthChecker != nil {
 		if err := m.healthChecker.Start(m.ctx); err != nil {
 			return fmt.Errorf("failed to start health checker: %w", err)
 		}
 	}
+	m.logger.Info("DEBUG: Health checker started successfully")
 
 	// Start components based on deployment mode
+	m.logger.Info("DEBUG: About to start components based on deployment mode", "mode", m.cfg.Mode)
 	switch m.cfg.Mode {
 	case ClusterMode:
+		m.logger.Info("DEBUG: Starting cluster mode...")
 		if err := m.startClusterMode(); err != nil {
 			return fmt.Errorf("failed to start cluster mode: %w", err)
 		}
+		m.logger.Info("DEBUG: Cluster mode started successfully")
 	case BlueGreenMode:
+		m.logger.Info("DEBUG: Starting blue-green mode...")
 		if err := m.startBlueGreenMode(); err != nil {
 			return fmt.Errorf("failed to start blue-green mode: %w", err)
 		}
+		m.logger.Info("DEBUG: Blue-green mode started successfully")
 	case SingleServerMode:
 		m.logger.Info("Running in single server mode - no additional HA components needed")
 	}
@@ -347,35 +356,46 @@ func (m *Manager) initializeComponents() error {
 func (m *Manager) initializeClusterComponents() error {
 	var err error
 
-	// Initialize discovery
+	// Initialize discovery - TEMPORARILY DISABLED to fix hang
+	// Re-enabled Discovery component - Step 1 of systematic HA re-enabling
+	m.logger.Info("DEBUG: About to initialize discovery...")
 	m.discovery, err = NewDiscovery(m.cfg.Cluster.Discovery, m.logger, m)
 	if err != nil {
 		return fmt.Errorf("failed to initialize discovery: %w", err)
 	}
+	m.logger.Info("DEBUG: Discovery initialization completed successfully")
 
-	// Initialize load balancer
+	// Re-enabled LoadBalancer component - Step 2 of systematic HA re-enabling
+	m.logger.Info("DEBUG: About to initialize load balancer...")
 	m.loadBalancer, err = NewLoadBalancer(m.cfg.LoadBalancing, m.logger)
 	if err != nil {
 		return fmt.Errorf("failed to initialize load balancer: %w", err)
 	}
+	m.logger.Info("DEBUG: Load balancer initialization completed successfully")
 
-	// Initialize failover manager
+	// Re-enabled FailoverManager component - Step 3 of systematic HA re-enabling
+	m.logger.Info("DEBUG: About to initialize failover manager...")
 	m.failover, err = NewFailoverManager(m.cfg.Failover, m.logger, m)
 	if err != nil {
 		return fmt.Errorf("failed to initialize failover manager: %w", err)
 	}
+	m.logger.Info("DEBUG: Failover manager initialization completed successfully")
 
-	// Initialize split-brain detector
+	// Re-enabled SplitBrainDetector component - Step 4 of systematic HA re-enabling
+	m.logger.Info("DEBUG: About to initialize split-brain detector...")
 	m.splitBrain, err = NewSplitBrainDetector(m.cfg.SplitBrain, m.logger, m)
 	if err != nil {
 		return fmt.Errorf("failed to initialize split-brain detector: %w", err)
 	}
+	m.logger.Info("DEBUG: Split-brain detector initialization completed successfully")
 
-	// Initialize session synchronizer
+	// Re-enabled SessionSynchronizer component - Step 5 of systematic HA re-enabling (FINAL COMPONENT!)
+	m.logger.Info("DEBUG: About to initialize session synchronizer...")
 	m.sessionSync, err = NewSessionSynchronizer(m.cfg.Cluster.SessionSync, m.logger, m.storageManager)
 	if err != nil {
 		return fmt.Errorf("failed to initialize session synchronizer: %w", err)
 	}
+	m.logger.Info("DEBUG: Session synchronizer initialization completed successfully")
 
 	return nil
 }
@@ -396,24 +416,45 @@ func (m *Manager) initializeBlueGreenComponents() error {
 
 // startClusterMode starts components for cluster mode
 func (m *Manager) startClusterMode() error {
+	m.logger.Info("DEBUG: Starting cluster mode components...")
+
 	if m.discovery != nil {
+		m.logger.Info("DEBUG: About to start discovery component...")
 		if err := m.discovery.Start(m.ctx); err != nil {
 			return fmt.Errorf("failed to start discovery: %w", err)
 		}
+		m.logger.Info("DEBUG: Discovery component started successfully")
+	} else {
+		m.logger.Info("DEBUG: Discovery component is nil (disabled), skipping start")
 	}
 
 	if m.failover != nil {
+		m.logger.Info("DEBUG: About to start failover manager component...")
 		if err := m.failover.Start(m.ctx); err != nil {
 			return fmt.Errorf("failed to start failover manager: %w", err)
 		}
+		m.logger.Info("DEBUG: Failover manager component started successfully")
+	} else {
+		m.logger.Info("DEBUG: Failover manager component is nil (disabled), skipping start")
 	}
 
 	if m.splitBrain != nil {
+		m.logger.Info("DEBUG: About to start split-brain detector component...")
 		if err := m.splitBrain.Start(m.ctx); err != nil {
 			return fmt.Errorf("failed to start split-brain detector: %w", err)
 		}
+		m.logger.Info("DEBUG: Split-brain detector component started successfully")
+	} else {
+		m.logger.Info("DEBUG: Split-brain detector component is nil (disabled), skipping start")
 	}
 
+	if m.sessionSync != nil {
+		m.logger.Info("DEBUG: Session synchronizer component enabled and ready")
+	} else {
+		m.logger.Info("DEBUG: Session synchronizer component is nil (disabled), skipping")
+	}
+
+	m.logger.Info("DEBUG: All cluster mode components started successfully")
 	return nil
 }
 

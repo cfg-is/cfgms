@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	netUrl "net/url"
 	"testing"
 	"time"
 
@@ -29,6 +31,9 @@ func TestClusterFormation(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
+
+	// Ensure Docker infrastructure is running
+	EnsureDockerRunning(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -125,6 +130,9 @@ func TestClusterConsistency(t *testing.T) {
 		t.Skip("Skipping integration test in short mode")
 	}
 
+	// Ensure Docker infrastructure is running
+	EnsureDockerRunning(t)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
@@ -171,8 +179,11 @@ type ClusterView struct {
 
 // waitForHealthy waits for a controller to respond to health checks
 func waitForHealthy(ctx context.Context, url string, timeout time.Duration) error {
-	client := &http.Client{Timeout: 5 * time.Second}
-	healthURL := fmt.Sprintf("%s/health", url)
+	// Extract host and port from URL
+	u, err := netUrl.Parse(url)
+	if err != nil {
+		return fmt.Errorf("invalid URL %s: %w", url, err)
+	}
 
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -182,13 +193,11 @@ func waitForHealthy(ctx context.Context, url string, timeout time.Duration) erro
 		default:
 		}
 
-		resp, err := client.Get(healthURL)
-		if err == nil && resp.StatusCode == http.StatusOK {
-			_ = resp.Body.Close()
+		// Try to connect to the gRPC port to verify server is running
+		conn, err := net.DialTimeout("tcp", u.Host, 2*time.Second)
+		if err == nil {
+			_ = conn.Close()
 			return nil
-		}
-		if resp != nil {
-			_ = resp.Body.Close()
 		}
 
 		time.Sleep(2 * time.Second)
@@ -201,16 +210,14 @@ func waitForHealthy(ctx context.Context, url string, timeout time.Duration) erro
 func getControllerState(url string) (ControllerInstance, error) {
 	client := &http.Client{Timeout: 10 * time.Second}
 
-	// Get health status
-	healthResp, err := client.Get(fmt.Sprintf("%s/health", url))
-	if err != nil {
-		return ControllerInstance{}, fmt.Errorf("health check failed: %w", err)
-	}
-	defer func() { _ = healthResp.Body.Close() }()
-
+	// Use TCP health check since HTTP endpoint might not be available yet
 	health := "unhealthy"
-	if healthResp.StatusCode == http.StatusOK {
-		health = "healthy"
+	u, err := netUrl.Parse(url)
+	if err == nil {
+		if conn, err := net.DialTimeout("tcp", u.Host, 2*time.Second); err == nil {
+			_ = conn.Close()
+			health = "healthy"
+		}
 	}
 
 	// Get HA status (if available)

@@ -270,7 +270,7 @@ These tests are designed to run in CI/CD environments:
     sleep 60
 
     # Run tests
-    go test ./test/integration/ha/... -v -timeout=20m
+    go test ./test/integration/ha/... -v -timeout=5m
 
     # Cleanup
     docker-compose -f docker-compose.ha-test.yml down -v

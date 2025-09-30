@@ -1,0 +1,152 @@
+version: '3.8'
+
+services:
+  # TimescaleDB for HA cluster storage and logging
+  timescaledb:
+    image: timescale/timescaledb:latest-pg15
+    environment:
+      POSTGRES_DB: cfgms_ha_test
+      POSTGRES_USER: cfgms_test
+      POSTGRES_PASSWORD: cfgms_test_password
+    ports:
+      - "5434:5432"
+    volumes:
+      - timescaledb_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cfgms_test -d cfgms_ha_test"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Controller East (us-east region)
+  controller-east:
+    build:
+      context: ../../..
+      dockerfile: cmd/controller/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      CFGMS_NODE_ID: "controller-east"
+      CFGMS_NODE_REGION: "us-east"
+      CFGMS_LISTEN_ADDR: "0.0.0.0:8080"
+      CFGMS_STORAGE_PROVIDER: "database"
+      CFGMS_DB_HOST: "timescaledb"
+      CFGMS_DB_PORT: "5432"
+      CFGMS_DB_NAME: "cfgms_ha_test"
+      CFGMS_DB_USER: "cfgms_test"
+      CFGMS_DB_PASSWORD: "cfgms_test_password"
+      CFGMS_DB_SSLMODE: "disable"
+      CFGMS_LOG_LEVEL: "debug"
+      CFGMS_LOG_PROVIDER: "file"
+      CFGMS_LOG_DIR: "/tmp/cfgms"
+      CFGMS_TIMESCALE_HOST: "timescaledb"
+      CFGMS_TIMESCALE_PORT: "5432"
+      CFGMS_TIMESCALE_DATABASE: "cfgms_ha_test"
+      CFGMS_TIMESCALE_USER: "cfgms_test"
+      CFGMS_TIMESCALE_PASSWORD: "cfgms_test_password"
+      CFGMS_HA_ENABLED: "true"
+      CFGMS_HA_CLUSTER_NODES: "controller-east:8080,controller-central:8081,controller-west:8082"
+      CFGMS_HA_DISCOVERY_METHOD: "static"
+      CFGMS_HA_DISCOVERY_INTERVAL: "10s"
+      CFGMS_HA_NODE_TIMEOUT: "30s"
+      CFGMS_HA_ELECTION_TIMEOUT: "5s"
+      CFGMS_HA_HEARTBEAT_INTERVAL: "2s"
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "sh", "-c", "netstat -ln | grep :8080"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Controller Central (us-central region)
+  controller-central:
+    build:
+      context: ../../..
+      dockerfile: cmd/controller/Dockerfile
+    ports:
+      - "8081:8081"
+    environment:
+      CFGMS_NODE_ID: "controller-central"
+      CFGMS_NODE_REGION: "us-central"
+      CFGMS_LISTEN_ADDR: "0.0.0.0:8081"
+      CFGMS_STORAGE_PROVIDER: "database"
+      CFGMS_DB_HOST: "timescaledb"
+      CFGMS_DB_PORT: "5432"
+      CFGMS_DB_NAME: "cfgms_ha_test"
+      CFGMS_DB_USER: "cfgms_test"
+      CFGMS_DB_PASSWORD: "cfgms_test_password"
+      CFGMS_DB_SSLMODE: "disable"
+      CFGMS_LOG_LEVEL: "debug"
+      CFGMS_LOG_PROVIDER: "file"
+      CFGMS_LOG_DIR: "/tmp/cfgms"
+      CFGMS_TIMESCALE_HOST: "timescaledb"
+      CFGMS_TIMESCALE_PORT: "5432"
+      CFGMS_TIMESCALE_DATABASE: "cfgms_ha_test"
+      CFGMS_TIMESCALE_USER: "cfgms_test"
+      CFGMS_TIMESCALE_PASSWORD: "cfgms_test_password"
+      CFGMS_HA_ENABLED: "true"
+      CFGMS_HA_CLUSTER_NODES: "controller-east:8080,controller-central:8081,controller-west:8082"
+      CFGMS_HA_DISCOVERY_METHOD: "static"
+      CFGMS_HA_DISCOVERY_INTERVAL: "10s"
+      CFGMS_HA_NODE_TIMEOUT: "30s"
+      CFGMS_HA_ELECTION_TIMEOUT: "5s"
+      CFGMS_HA_HEARTBEAT_INTERVAL: "2s"
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "sh", "-c", "netstat -ln | grep :8081"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Controller West (us-west region)
+  controller-west:
+    build:
+      context: ../../..
+      dockerfile: cmd/controller/Dockerfile
+    ports:
+      - "8082:8082"
+    environment:
+      CFGMS_NODE_ID: "controller-west"
+      CFGMS_NODE_REGION: "us-west"
+      CFGMS_LISTEN_ADDR: "0.0.0.0:8082"
+      CFGMS_STORAGE_PROVIDER: "database"
+      CFGMS_DB_HOST: "timescaledb"
+      CFGMS_DB_PORT: "5432"
+      CFGMS_DB_NAME: "cfgms_ha_test"
+      CFGMS_DB_USER: "cfgms_test"
+      CFGMS_DB_PASSWORD: "cfgms_test_password"
+      CFGMS_DB_SSLMODE: "disable"
+      CFGMS_LOG_LEVEL: "debug"
+      CFGMS_LOG_PROVIDER: "file"
+      CFGMS_LOG_DIR: "/tmp/cfgms"
+      CFGMS_TIMESCALE_HOST: "timescaledb"
+      CFGMS_TIMESCALE_PORT: "5432"
+      CFGMS_TIMESCALE_DATABASE: "cfgms_ha_test"
+      CFGMS_TIMESCALE_USER: "cfgms_test"
+      CFGMS_TIMESCALE_PASSWORD: "cfgms_test_password"
+      CFGMS_HA_ENABLED: "true"
+      CFGMS_HA_CLUSTER_NODES: "controller-east:8080,controller-central:8081,controller-west:8082"
+      CFGMS_HA_DISCOVERY_METHOD: "static"
+      CFGMS_HA_DISCOVERY_INTERVAL: "10s"
+      CFGMS_HA_NODE_TIMEOUT: "30s"
+      CFGMS_HA_ELECTION_TIMEOUT: "5s"
+      CFGMS_HA_HEARTBEAT_INTERVAL: "2s"
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "sh", "-c", "netstat -ln | grep :8082"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  timescaledb_data:
+
+networks:
+  default:
+    driver: bridge

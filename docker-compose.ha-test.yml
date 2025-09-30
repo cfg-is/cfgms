@@ -11,35 +11,25 @@
 version: '3.8'
 
 services:
-  # Shared storage for HA cluster (git-based)
-  git-server-ha:
-    image: gitea/gitea:1.21.0
-    container_name: cfgms-git-ha-test
+  # Shared database for HA cluster storage
+  postgres-ha:
+    image: postgres:15-alpine
+    container_name: cfgms-postgres-ha-test
     environment:
-      - USER_UID=1000
-      - USER_GID=1000
-      - GITEA__database__DB_TYPE=sqlite3
-      - GITEA__security__INSTALL_LOCK=true
-      - GITEA__security__SECRET_KEY=${GITEA_SECRET_KEY:-cfgms-ha-test-secret-key-12345678901234567890}
-      - GITEA__security__INTERNAL_TOKEN=${GITEA_INTERNAL_TOKEN:-cfgms-ha-test-internal-token-12345678901234567890}
-      - GITEA__server__DISABLE_SSH=true
-      - GITEA__server__HTTP_PORT=3000
-      - GITEA__server__ROOT_URL=http://git-server-ha:3000/
-      - GITEA__service__DISABLE_REGISTRATION=true
-      - GITEA__admin__USERNAME=cfgms_ha_test
-      - GITEA__admin__PASSWORD=${GITEA_ADMIN_PASSWORD:-cfgms_ha_test_password}
-      - GITEA__admin__EMAIL=ha-test@cfgms.local
+      - POSTGRES_DB=cfgms_ha_test
+      - POSTGRES_USER=cfgms_ha_test
+      - POSTGRES_PASSWORD=cfgms_ha_test_password
+      - POSTGRES_INITDB_ARGS=--encoding=UTF-8 --lc-collate=C --lc-ctype=C
     ports:
-      - "3002:3000"
+      - "5433:5432"
     volumes:
-      - gitea_ha_data:/data
-      - ./test/integration/ha/git-init:/docker-entrypoint-init.d:ro
+      - postgres_ha_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000/api/healthz"]
-      interval: 10s
+      test: ["CMD-SHELL", "pg_isready -U cfgms_ha_test -d cfgms_ha_test"]
+      interval: 5s
       timeout: 5s
       retries: 10
-      start_period: 30s
+      start_period: 10s
     networks:
       ha-cluster:
         ipv4_address: 172.21.1.10
@@ -62,18 +52,34 @@ services:
       - CFGMS_HA_CLUSTER_SIZE=3
       - CFGMS_HA_MIN_QUORUM=2
       - CFGMS_HA_DISCOVERY_METHOD=geographic
+      # HTTP API Configuration
+      - CFGMS_LISTEN_ADDR=0.0.0.0:8080
       - CFGMS_HA_ELECTION_TIMEOUT=3s
       - CFGMS_HA_HEARTBEAT_INTERVAL=500ms
 
-      # Storage Configuration (shared git repository)
-      - CFGMS_STORAGE_PROVIDER=git
-      - CFGMS_STORAGE_GIT_URL=http://cfgms_ha_test:cfgms_ha_test_password@git-server-ha:3000/cfgms_ha_test/ha-cluster-config.git
-      - CFGMS_STORAGE_GIT_BRANCH=main
+      # Storage Configuration (database storage required for HA clusters)
+      - CFGMS_STORAGE_PROVIDER=database
+      - CFGMS_STORAGE_DATABASE_HOST=postgres-ha
+      - CFGMS_STORAGE_DATABASE_PORT=5432
+      - CFGMS_STORAGE_DATABASE_NAME=cfgms_ha_test
+      - CFGMS_STORAGE_DATABASE_USER=cfgms_ha_test
+      - CFGMS_STORAGE_DATABASE_PASSWORD=cfgms_ha_test_password
+      - CFGMS_STORAGE_DATABASE_SSLMODE=disable
 
       # Server Configuration
       - CFGMS_CONTROLLER_BIND_ADDRESS=0.0.0.0:8080
       - CFGMS_CONTROLLER_METRICS_BIND_ADDRESS=0.0.0.0:9090
+      - CFGMS_HTTP_LISTEN_ADDR=0.0.0.0:9080
       - CFGMS_LOG_LEVEL=debug
+      - CFGMS_LOG_PROVIDER=file
+      - CFGMS_LOG_DIR=/app/logs
+
+      # mTLS Certificate Configuration
+      - CFGMS_CERT_ENABLE_MANAGEMENT=true
+      - CFGMS_CERT_CA_PATH=/app/certs
+      - CFGMS_CERT_AUTO_GENERATE=true
+      - CFGMS_CERT_SERVER_COMMON_NAME=controller-east
+      - CFGMS_CERT_SERVER_VALIDITY_DAYS=90
 
       # Test Environment - Aggressive Timing for Local Docker
       - CFGMS_TEST_MODE=true
@@ -83,16 +89,17 @@ services:
       - CFGMS_HA_APPLY_TIMEOUT=500ms
     ports:
       - "8080:8080"   # Controller API
+      - "9080:9080"   # HTTP API
       - "9090:9090"   # Metrics
     depends_on:
-      git-server-ha:
+      postgres-ha:
         condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
-      interval: 2s
-      timeout: 1s
-      retries: 15
-      start_period: 10s
+    # healthcheck:
+    #   test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1/health"]
+    #   interval: 2s
+    #   timeout: 1s
+    #   retries: 15
+    #   start_period: 10s
     networks:
       ha-cluster:
         ipv4_address: 172.21.1.20
@@ -115,18 +122,34 @@ services:
       - CFGMS_HA_CLUSTER_SIZE=3
       - CFGMS_HA_MIN_QUORUM=2
       - CFGMS_HA_DISCOVERY_METHOD=geographic
+      # HTTP API Configuration
+      - CFGMS_LISTEN_ADDR=0.0.0.0:8080
       - CFGMS_HA_ELECTION_TIMEOUT=3s
       - CFGMS_HA_HEARTBEAT_INTERVAL=500ms
 
-      # Storage Configuration (same shared git repository)
-      - CFGMS_STORAGE_PROVIDER=git
-      - CFGMS_STORAGE_GIT_URL=http://cfgms_ha_test:cfgms_ha_test_password@git-server-ha:3000/cfgms_ha_test/ha-cluster-config.git
-      - CFGMS_STORAGE_GIT_BRANCH=main
+      # Storage Configuration (database storage required for HA clusters)
+      - CFGMS_STORAGE_PROVIDER=database
+      - CFGMS_STORAGE_DATABASE_HOST=postgres-ha
+      - CFGMS_STORAGE_DATABASE_PORT=5432
+      - CFGMS_STORAGE_DATABASE_NAME=cfgms_ha_test
+      - CFGMS_STORAGE_DATABASE_USER=cfgms_ha_test
+      - CFGMS_STORAGE_DATABASE_PASSWORD=cfgms_ha_test_password
+      - CFGMS_STORAGE_DATABASE_SSLMODE=disable
 
       # Server Configuration
       - CFGMS_CONTROLLER_BIND_ADDRESS=0.0.0.0:8080
       - CFGMS_CONTROLLER_METRICS_BIND_ADDRESS=0.0.0.0:9090
+      - CFGMS_HTTP_LISTEN_ADDR=0.0.0.0:9080
       - CFGMS_LOG_LEVEL=debug
+      - CFGMS_LOG_PROVIDER=file
+      - CFGMS_LOG_DIR=/app/logs
+
+      # mTLS Certificate Configuration
+      - CFGMS_CERT_ENABLE_MANAGEMENT=true
+      - CFGMS_CERT_CA_PATH=/app/certs
+      - CFGMS_CERT_AUTO_GENERATE=true
+      - CFGMS_CERT_SERVER_COMMON_NAME=controller-central
+      - CFGMS_CERT_SERVER_VALIDITY_DAYS=90
 
       # Test Environment - Aggressive Timing for Local Docker
       - CFGMS_TEST_MODE=true
@@ -136,16 +159,17 @@ services:
       - CFGMS_HA_APPLY_TIMEOUT=500ms
     ports:
       - "8081:8080"   # Controller API
+      - "9081:9080"   # HTTP API
       - "9091:9090"   # Metrics
     depends_on:
-      git-server-ha:
+      postgres-ha:
         condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
-      interval: 2s
-      timeout: 1s
-      retries: 15
-      start_period: 10s
+    # healthcheck:
+    #   test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1/health"]
+    #   interval: 2s
+    #   timeout: 1s
+    #   retries: 15
+    #   start_period: 10s
     networks:
       ha-cluster:
         ipv4_address: 172.21.1.21
@@ -168,18 +192,34 @@ services:
       - CFGMS_HA_CLUSTER_SIZE=3
       - CFGMS_HA_MIN_QUORUM=2
       - CFGMS_HA_DISCOVERY_METHOD=geographic
+      # HTTP API Configuration
+      - CFGMS_LISTEN_ADDR=0.0.0.0:8080
       - CFGMS_HA_ELECTION_TIMEOUT=3s
       - CFGMS_HA_HEARTBEAT_INTERVAL=500ms
 
-      # Storage Configuration (same shared git repository)
-      - CFGMS_STORAGE_PROVIDER=git
-      - CFGMS_STORAGE_GIT_URL=http://cfgms_ha_test:cfgms_ha_test_password@git-server-ha:3000/cfgms_ha_test/ha-cluster-config.git
-      - CFGMS_STORAGE_GIT_BRANCH=main
+      # Storage Configuration (database storage required for HA clusters)
+      - CFGMS_STORAGE_PROVIDER=database
+      - CFGMS_STORAGE_DATABASE_HOST=postgres-ha
+      - CFGMS_STORAGE_DATABASE_PORT=5432
+      - CFGMS_STORAGE_DATABASE_NAME=cfgms_ha_test
+      - CFGMS_STORAGE_DATABASE_USER=cfgms_ha_test
+      - CFGMS_STORAGE_DATABASE_PASSWORD=cfgms_ha_test_password
+      - CFGMS_STORAGE_DATABASE_SSLMODE=disable
 
       # Server Configuration
       - CFGMS_CONTROLLER_BIND_ADDRESS=0.0.0.0:8080
       - CFGMS_CONTROLLER_METRICS_BIND_ADDRESS=0.0.0.0:9090
+      - CFGMS_HTTP_LISTEN_ADDR=0.0.0.0:9080
       - CFGMS_LOG_LEVEL=debug
+      - CFGMS_LOG_PROVIDER=file
+      - CFGMS_LOG_DIR=/app/logs
+
+      # mTLS Certificate Configuration
+      - CFGMS_CERT_ENABLE_MANAGEMENT=true
+      - CFGMS_CERT_CA_PATH=/app/certs
+      - CFGMS_CERT_AUTO_GENERATE=true
+      - CFGMS_CERT_SERVER_COMMON_NAME=controller-west
+      - CFGMS_CERT_SERVER_VALIDITY_DAYS=90
 
       # Test Environment - Aggressive Timing for Local Docker
       - CFGMS_TEST_MODE=true
@@ -189,16 +229,17 @@ services:
       - CFGMS_HA_APPLY_TIMEOUT=500ms
     ports:
       - "8082:8080"   # Controller API
+      - "9082:9080"   # HTTP API
       - "9092:9090"   # Metrics
     depends_on:
-      git-server-ha:
+      postgres-ha:
         condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
-      interval: 2s
-      timeout: 1s
-      retries: 15
-      start_period: 10s
+    # healthcheck:
+    #   test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1/health"]
+    #   interval: 2s
+    #   timeout: 1s
+    #   retries: 15
+    #   start_period: 10s
     networks:
       ha-cluster:
         ipv4_address: 172.21.1.22
@@ -230,16 +271,26 @@ services:
       # Testing configuration
       - CFGMS_TEST_MODE=true
       - CFGMS_LOG_LEVEL=debug
+      - CFGMS_LOG_PROVIDER=file
+      - CFGMS_LOG_DIR=/app/logs
+
+      # mTLS Client Certificate Configuration
+      - CFGMS_STEWARD_CERT_PATH=/app/certs
+      - CFGMS_STEWARD_TLS_ENABLED=true
+      - CFGMS_STEWARD_CA_CERT_PATH=/app/certs/ca.pem
+      - CFGMS_STEWARD_CLIENT_CERT_PATH=/app/certs/steward-east.pem
+      - CFGMS_STEWARD_CLIENT_KEY_PATH=/app/certs/steward-east-key.pem
     volumes:
       - steward_east_data:/app/data
       - steward_east_logs:/app/logs
+      - steward_east_certs:/app/certs
     depends_on:
       controller-east:
-        condition: service_healthy
+        condition: service_started
       controller-central:
-        condition: service_healthy
+        condition: service_started
       controller-west:
-        condition: service_healthy
+        condition: service_started
     healthcheck:
       test: ["CMD", "pgrep", "steward"]
       interval: 2s
@@ -277,16 +328,26 @@ services:
       # Testing configuration
       - CFGMS_TEST_MODE=true
       - CFGMS_LOG_LEVEL=debug
+      - CFGMS_LOG_PROVIDER=file
+      - CFGMS_LOG_DIR=/app/logs
+
+      # mTLS Client Certificate Configuration
+      - CFGMS_STEWARD_CERT_PATH=/app/certs
+      - CFGMS_STEWARD_TLS_ENABLED=true
+      - CFGMS_STEWARD_CA_CERT_PATH=/app/certs/ca.pem
+      - CFGMS_STEWARD_CLIENT_CERT_PATH=/app/certs/steward-central.pem
+      - CFGMS_STEWARD_CLIENT_KEY_PATH=/app/certs/steward-central-key.pem
     volumes:
       - steward_central_data:/app/data
       - steward_central_logs:/app/logs
+      - steward_central_certs:/app/certs
     depends_on:
       controller-east:
-        condition: service_healthy
+        condition: service_started
       controller-central:
-        condition: service_healthy
+        condition: service_started
       controller-west:
-        condition: service_healthy
+        condition: service_started
     healthcheck:
       test: ["CMD", "pgrep", "steward"]
       interval: 2s
@@ -324,16 +385,26 @@ services:
       # Testing configuration
       - CFGMS_TEST_MODE=true
       - CFGMS_LOG_LEVEL=debug
+      - CFGMS_LOG_PROVIDER=file
+      - CFGMS_LOG_DIR=/app/logs
+
+      # mTLS Client Certificate Configuration
+      - CFGMS_STEWARD_CERT_PATH=/app/certs
+      - CFGMS_STEWARD_TLS_ENABLED=true
+      - CFGMS_STEWARD_CA_CERT_PATH=/app/certs/ca.pem
+      - CFGMS_STEWARD_CLIENT_CERT_PATH=/app/certs/steward-west.pem
+      - CFGMS_STEWARD_CLIENT_KEY_PATH=/app/certs/steward-west-key.pem
     volumes:
       - steward_west_data:/app/data
       - steward_west_logs:/app/logs
+      - steward_west_certs:/app/certs
     depends_on:
       controller-east:
-        condition: service_healthy
+        condition: service_started
       controller-central:
-        condition: service_healthy
+        condition: service_started
       controller-west:
-        condition: service_healthy
+        condition: service_started
     healthcheck:
       test: ["CMD", "pgrep", "steward"]
       interval: 2s
@@ -380,11 +451,11 @@ services:
     working_dir: /workspace
     depends_on:
       controller-east:
-        condition: service_healthy
+        condition: service_started
       controller-central:
-        condition: service_healthy
+        condition: service_started
       controller-west:
-        condition: service_healthy
+        condition: service_started
     networks:
       ha-cluster:
         ipv4_address: 172.21.1.200
@@ -392,7 +463,7 @@ services:
       - testing
 
 volumes:
-  gitea_ha_data:
+  postgres_ha_data:
     driver: local
     driver_opts:
       type: tmpfs
@@ -440,6 +511,27 @@ volumes:
       type: tmpfs
       device: tmpfs
       o: size=32m
+
+  steward_east_certs:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=16m
+
+  steward_central_certs:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=16m
+
+  steward_west_certs:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=16m
 
 networks:
   ha-cluster:

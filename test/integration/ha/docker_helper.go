@@ -17,14 +17,14 @@ type DockerComposeHelper struct {
 // NewDockerComposeHelper creates a new Docker Compose helper
 func NewDockerComposeHelper() *DockerComposeHelper {
 	return &DockerComposeHelper{
-		ComposeFile: "docker-compose.ha-test.yml",
+		ComposeFile: "../../../docker-compose.ha-test.yml",
 		ProjectName: "cfgms-ha-test",
 	}
 }
 
 // StartCluster starts the HA cluster using Docker Compose
 func (h *DockerComposeHelper) StartCluster(ctx context.Context) error {
-	cmd := exec.CommandContext(ctx, "docker-compose",
+	cmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
 		"-p", h.ProjectName,
 		"up", "-d", "--build")
@@ -39,7 +39,7 @@ func (h *DockerComposeHelper) StartCluster(ctx context.Context) error {
 
 // StopCluster stops the HA cluster and cleans up resources
 func (h *DockerComposeHelper) StopCluster(ctx context.Context) error {
-	cmd := exec.CommandContext(ctx, "docker-compose",
+	cmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
 		"-p", h.ProjectName,
 		"down", "-v", "--remove-orphans")
@@ -54,7 +54,7 @@ func (h *DockerComposeHelper) StopCluster(ctx context.Context) error {
 
 // GetContainerLogs retrieves logs from a specific container
 func (h *DockerComposeHelper) GetContainerLogs(ctx context.Context, service string) (string, error) {
-	cmd := exec.CommandContext(ctx, "docker-compose",
+	cmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
 		"-p", h.ProjectName,
 		"logs", service)
@@ -69,7 +69,7 @@ func (h *DockerComposeHelper) GetContainerLogs(ctx context.Context, service stri
 
 // GetStewardLogs retrieves logs from a steward container with filtering
 func (h *DockerComposeHelper) GetStewardLogs(ctx context.Context, stewardName string, lines int) (string, error) {
-	cmd := exec.CommandContext(ctx, "docker-compose",
+	cmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
 		"-p", h.ProjectName,
 		"logs", "--tail", fmt.Sprintf("%d", lines), stewardName)
@@ -146,7 +146,7 @@ func (h *DockerComposeHelper) WaitForStewardConnections(ctx context.Context, tim
 
 // RestartService restarts a specific service in the cluster
 func (h *DockerComposeHelper) RestartService(ctx context.Context, service string) error {
-	cmd := exec.CommandContext(ctx, "docker-compose",
+	cmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
 		"-p", h.ProjectName,
 		"restart", service)
@@ -161,7 +161,7 @@ func (h *DockerComposeHelper) RestartService(ctx context.Context, service string
 
 // ScaleService scales a service to the specified number of replicas
 func (h *DockerComposeHelper) ScaleService(ctx context.Context, service string, replicas int) error {
-	cmd := exec.CommandContext(ctx, "docker-compose",
+	cmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
 		"-p", h.ProjectName,
 		"up", "-d", "--scale", fmt.Sprintf("%s=%d", service, replicas))
@@ -176,7 +176,7 @@ func (h *DockerComposeHelper) ScaleService(ctx context.Context, service string, 
 
 // GetServiceStatus checks if all specified services are running
 func (h *DockerComposeHelper) GetServiceStatus(ctx context.Context, services ...string) (map[string]bool, error) {
-	cmd := exec.CommandContext(ctx, "docker-compose",
+	cmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
 		"-p", h.ProjectName,
 		"ps", "--services", "--filter", "status=running")

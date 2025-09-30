@@ -59,6 +59,7 @@ func newStaticDiscovery(cfg *DiscoveryConfig, logger logging.Logger, manager *Ma
 
 // Start begins the discovery process
 func (d *staticDiscovery) Start(ctx context.Context) error {
+	d.logger.Info("DEBUG: Entering staticDiscovery.Start()")
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -66,21 +67,29 @@ func (d *staticDiscovery) Start(ctx context.Context) error {
 		return fmt.Errorf("discovery is already started")
 	}
 
+	d.logger.Info("DEBUG: About to set up context and mark as started")
 	d.ctx, d.cancel = context.WithCancel(ctx)
 	d.started = true
 
 	// Register local node by getting it safely
+	d.logger.Info("DEBUG: About to get local node from manager")
 	localNode := d.manager.GetLocalNode()
 	if localNode != nil {
+		d.logger.Info("DEBUG: Got local node, adding to nodes map", "node_id", localNode.ID)
 		d.nodes[localNode.ID] = localNode
+	} else {
+		d.logger.Warn("DEBUG: Local node is nil")
 	}
 
 	// Load static nodes from configuration
+	d.logger.Info("DEBUG: About to load static nodes from configuration")
 	if err := d.loadStaticNodes(); err != nil {
 		d.logger.Warn("Failed to load static nodes", "error", err)
 	}
+	d.logger.Info("DEBUG: Static nodes loaded successfully")
 
 	// Start periodic discovery if interval is configured
+	d.logger.Info("DEBUG: About to start periodic discovery", "interval", d.cfg.Interval)
 	if d.cfg.Interval > 0 {
 		go d.periodicDiscovery()
 	}
@@ -89,6 +98,7 @@ func (d *staticDiscovery) Start(ctx context.Context) error {
 		"interval", d.cfg.Interval,
 		"node_timeout", d.cfg.NodeTimeout)
 
+	d.logger.Info("DEBUG: Exiting staticDiscovery.Start() successfully")
 	return nil
 }
 
@@ -171,23 +181,32 @@ func (d *staticDiscovery) UnregisterNode(nodeID string) error {
 
 // loadStaticNodes loads static node configuration
 func (d *staticDiscovery) loadStaticNodes() error {
+	d.logger.Info("DEBUG: Entering loadStaticNodes()")
 	// Check for static nodes in configuration
 	if staticNodes, ok := d.cfg.Config["nodes"].([]interface{}); ok {
-		for _, nodeData := range staticNodes {
+		d.logger.Info("DEBUG: Found static nodes in configuration", "count", len(staticNodes))
+		for i, nodeData := range staticNodes {
+			d.logger.Info("DEBUG: Processing static node", "index", i)
 			if nodeMap, ok := nodeData.(map[string]interface{}); ok {
+				d.logger.Info("DEBUG: About to parse node from config", "data", nodeMap)
 				node, err := d.parseNodeFromConfig(nodeMap)
 				if err != nil {
 					d.logger.Warn("Failed to parse static node", "error", err, "data", nodeMap)
 					continue
 				}
 
+				d.logger.Info("DEBUG: About to register static node", "node_id", node.ID)
 				if err := d.RegisterNode(node); err != nil {
 					d.logger.Warn("Failed to register static node", "error", err, "node_id", node.ID)
 				}
+				d.logger.Info("DEBUG: Static node registered successfully", "node_id", node.ID)
 			}
 		}
+	} else {
+		d.logger.Info("DEBUG: No static nodes found in configuration")
 	}
 
+	d.logger.Info("DEBUG: Exiting loadStaticNodes() successfully")
 	return nil
 }
 

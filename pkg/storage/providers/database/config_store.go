@@ -63,17 +63,35 @@ func NewDatabaseConfigStore(dsn string, config map[string]interface{}) (*Databas
 // initializeSchema creates the necessary database tables and indexes for configuration storage
 func (s *DatabaseConfigStore) initializeSchema() error {
 	ctx := context.Background()
-	
+
+	// Use PostgreSQL advisory lock to prevent concurrent schema initialization
+	// Lock ID: 12345678 (arbitrary but consistent)
+	const schemaLockID = 12345678
+
+	// Acquire advisory lock - will wait if another instance is initializing
+	if _, err := s.db.ExecContext(ctx, "SELECT pg_advisory_lock($1)", schemaLockID); err != nil {
+		return fmt.Errorf("failed to acquire schema initialization lock: %w", err)
+	}
+
+	// Ensure we release the lock when done
+	defer func() {
+		if _, err := s.db.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", schemaLockID); err != nil {
+			// Log but don't fail - lock will be released when connection closes
+			// This is non-critical since PostgreSQL will release advisory locks when connection closes
+			_ = err // Explicitly ignore error to satisfy linter
+		}
+	}()
+
 	// Create configs table
 	if err := s.schemas.CreateConfigsTable(ctx, s.db); err != nil {
 		return fmt.Errorf("failed to create configs table: %w", err)
 	}
-	
+
 	// Create config history table for versioning
 	if err := s.schemas.CreateConfigHistoryTable(ctx, s.db); err != nil {
 		return fmt.Errorf("failed to create config_history table: %w", err)
 	}
-	
+
 	return nil
 }
 

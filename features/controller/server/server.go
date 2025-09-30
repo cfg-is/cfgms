@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"google.golang.org/grpc/credentials"
 
 	controller "github.com/cfgis/cfgms/api/proto/controller"
+	"github.com/cfgis/cfgms/features/controller/api"
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/ha"
 	"github.com/cfgis/cfgms/features/controller/service"
@@ -33,6 +35,7 @@ type Server struct {
 	cfg                     *config.Config
 	logger                  logging.Logger
 	grpcServer              *grpc.Server
+	httpServer              *api.Server
 	controllerService       *service.ControllerService
 	configService           *service.ConfigurationService
 	rbacService             *service.RBACService
@@ -46,39 +49,64 @@ type Server struct {
 
 // New creates a new server instance
 func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
+	log.Println("DEBUG server.New(): Function entry")
+	logger.Info("DEBUG: Entered server.New() function")
+	log.Println("DEBUG server.New(): About to check cfg nil")
 	if cfg == nil {
+		log.Println("DEBUG server.New(): Config is nil")
+		logger.Info("DEBUG: Config is nil, returning error")
 		return nil, ErrNilConfig
 	}
+	log.Println("DEBUG server.New(): Config validation passed")
+	logger.Info("DEBUG: Config validation passed, starting server initialization...")
+	log.Println("DEBUG server.New(): About to start storage initialization")
+	logger.Info("Config validated, proceeding with storage initialization...")
 
 	// Initialize global storage provider system - REQUIRED for all deployments
+	log.Println("DEBUG server.New(): Checking cfg.Storage for nil")
 	if cfg.Storage == nil {
+		log.Println("DEBUG server.New(): cfg.Storage is nil, returning error")
 		return nil, fmt.Errorf("storage configuration is required for CFGMS operation - configure storage.provider as 'git' (minimum) or 'database' (production). See docs/examples/controller-storage-config.yaml for examples")
 	}
+	log.Println("DEBUG server.New(): cfg.Storage is not nil, provider:", cfg.Storage.Provider)
 
 	logger.Info("Initializing global storage provider", "provider", cfg.Storage.Provider)
+	log.Println("DEBUG server.New(): About to call CreateAllStoresFromConfig with provider:", cfg.Storage.Provider)
 	
 	// Create storage manager with pluggable provider - no fallbacks allowed
+	logger.Info("DEBUG: About to call interfaces.CreateAllStoresFromConfig...", "provider", cfg.Storage.Provider)
+	log.Println("DEBUG server.New(): Calling CreateAllStoresFromConfig now...")
 	storageManager, err := interfaces.CreateAllStoresFromConfig(cfg.Storage.Provider, cfg.Storage.Config)
+	log.Println("DEBUG server.New(): CreateAllStoresFromConfig call completed")
 	if err != nil {
+		log.Println("DEBUG server.New(): CreateAllStoresFromConfig returned error:", err)
 		return nil, fmt.Errorf("failed to initialize storage provider '%s': %w. Verify storage configuration and ensure storage backend is accessible", cfg.Storage.Provider, err)
 	}
+	log.Println("DEBUG server.New(): Storage manager created successfully, proceeding to RBAC initialization")
+	logger.Info("DEBUG: Storage manager created successfully - CreateAllStoresFromConfig completed")
 
 	// Initialize RBAC system with pluggable storage only
+	logger.Info("Creating RBAC manager with storage...")
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
-	
+	logger.Info("RBAC manager created")
+
 	// Initialize unified audit system with pluggable storage only
+	logger.Info("Creating audit manager...")
 	auditManager := audit.NewManager(storageManager.GetAuditStore(), "controller")
-	
+	logger.Info("Audit manager created")
+
 	logger.Info("RBAC and Audit systems initialized with pluggable storage", "provider", cfg.Storage.Provider)
 
 	// Initialize default permissions and roles
+	logger.Info("Starting RBAC initialization...")
 	if err := rbacManager.Initialize(context.Background()); err != nil {
 		logger.Warn("Failed to initialize RBAC configuration", "error", err)
 	}
+	logger.Info("RBAC initialization completed")
 
 	// Initialize tenant management (currently uses memory store)
 	tenantStore := tenantmemory.NewStore()
@@ -114,9 +142,32 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	}
 
 	// Initialize HA manager
+	logger.Info("Initializing HA manager...")
 	haManager, err := initializeHAManager(cfg, logger, storageManager)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize HA manager: %w", err)
+	}
+	logger.Info("HA manager initialized successfully")
+
+	// Initialize HTTP API server with minimal monitoring for now
+	// TODO: Properly initialize monitoring components when needed
+	httpServer, err := api.New(
+		cfg,
+		logger,
+		controllerService,
+		configService,
+		certProvisioningService,
+		rbacService,
+		certManager,
+		tenantManager,
+		rbacManager,
+		nil, // systemMonitor
+		nil, // platformMonitor
+		nil, // tracer
+		haManager,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize HTTP API server: %w", err)
 	}
 
 	return &Server{
@@ -131,23 +182,30 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		rbacManager:             rbacManager,
 		auditManager:            auditManager,
 		haManager:               haManager,
+		httpServer:              httpServer,
 	}, nil
 }
 
 // Start initializes and starts the gRPC server
 func (s *Server) Start() error {
+	log.Println("DEBUG server.Start(): Function entry")
+	s.logger.Info("DEBUG: Entered server.Start() function")
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	log.Println("DEBUG server.Start(): About to create listener")
 	// Create listener
 	listener, err := net.Listen("tcp", s.cfg.ListenAddr)
 	if err != nil {
+		log.Println("DEBUG server.Start(): Failed to create listener")
 		return fmt.Errorf("failed to listen on %s: %w", s.cfg.ListenAddr, err)
 	}
+	log.Println("DEBUG server.Start(): Listener created successfully")
 
 	// Update config with actual bound address (important for :0 ports)
 	s.cfg.ListenAddr = listener.Addr().String()
 
+	log.Println("DEBUG server.Start(): About to configure TLS")
 	// Configure TLS with certificate management
 	var opts []grpc.ServerOption
 	tlsConfig, err := s.setupTLS()
@@ -158,20 +216,48 @@ func (s *Server) Start() error {
 		opts = append(opts, grpc.Creds(creds))
 		s.logger.Info("TLS enabled for gRPC server with certificate management")
 	}
+	log.Println("DEBUG server.Start(): TLS configuration completed")
 
+	log.Println("DEBUG server.Start(): About to create gRPC server")
 	// Create gRPC server
 	s.grpcServer = grpc.NewServer(opts...)
+	log.Println("DEBUG server.Start(): gRPC server created")
 
+	log.Println("DEBUG server.Start(): About to register services")
 	// Register services
 	controller.RegisterControllerServer(s.grpcServer, s.controllerService)
 	controller.RegisterConfigurationServiceServer(s.grpcServer, s.configService)
 	controller.RegisterRBACServiceServer(s.grpcServer, s.rbacService)
+	log.Println("DEBUG server.Start(): Services registered")
 
-	// Start HA manager
+	log.Println("DEBUG server.Start(): About to start HA manager")
+	// Start HA manager with timeout
 	if s.haManager != nil {
-		if err := s.haManager.Start(context.Background()); err != nil {
+		s.logger.Info("Starting HA manager...")
+
+		// Create a context with timeout to prevent infinite hang
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		log.Println("DEBUG server.Start(): About to call haManager.Start() with 30s timeout")
+		if err := s.haManager.Start(ctx); err != nil {
+			log.Println("DEBUG server.Start(): HA manager failed to start:", err)
 			return fmt.Errorf("failed to start HA manager: %w", err)
 		}
+		s.logger.Info("HA manager started successfully")
+		log.Println("DEBUG server.Start(): HA manager started successfully")
+	} else {
+		log.Println("DEBUG server.Start(): HA manager is nil, skipping")
+	}
+
+	// Start HTTP API server
+	if s.httpServer != nil {
+		go func() {
+			if err := s.httpServer.Start(); err != nil {
+				s.logger.Error("HTTP API server failed", "error", err)
+			}
+		}()
+		s.logger.Info("HTTP API server started")
 	}
 
 	// Start serving in a goroutine
@@ -224,6 +310,13 @@ func (s *Server) Stop() error {
 		event := audit.SystemEvent("system", "controller_stop", "Controller server shutting down")
 		if err := s.auditManager.RecordEvent(ctx, event); err != nil {
 			s.logger.Warn("Failed to record shutdown audit event", "error", err)
+		}
+	}
+
+	// Stop HTTP server
+	if s.httpServer != nil {
+		if err := s.httpServer.Stop(); err != nil {
+			s.logger.Warn("Failed to stop HTTP server", "error", err)
 		}
 	}
 
@@ -474,10 +567,10 @@ func (s *Server) ensureServerCertificate() (*cert.Certificate, error) {
 
 // initializeHAManager initializes the HA manager based on configuration
 func initializeHAManager(cfg *config.Config, logger logging.Logger, storageManager *interfaces.StorageManager) (*ha.Manager, error) {
-	// Convert config to HA config
-	haConfig, err := convertToHAConfig(cfg.HA)
-	if err != nil {
-		return nil, fmt.Errorf("failed to convert HA configuration: %w", err)
+	// Load HA config directly from environment variables (bypassing controller config)
+	haConfig := ha.DefaultConfig()
+	if err := haConfig.LoadFromEnvironment(); err != nil {
+		return nil, fmt.Errorf("failed to load HA configuration from environment: %w", err)
 	}
 
 	// Create HA manager
@@ -493,173 +586,3 @@ func initializeHAManager(cfg *config.Config, logger logging.Logger, storageManag
 	return haManager, nil
 }
 
-// convertToHAConfig converts controller config HA section to HA package config
-func convertToHAConfig(configHA *config.HAConfig) (*ha.Config, error) {
-	if configHA == nil {
-		return ha.DefaultConfig(), nil
-	}
-
-	haConfig := ha.DefaultConfig()
-
-	// Parse deployment mode
-	switch configHA.Mode {
-	case "single":
-		haConfig.Mode = ha.SingleServerMode
-	case "blue-green":
-		haConfig.Mode = ha.BlueGreenMode
-	case "cluster":
-		haConfig.Mode = ha.ClusterMode
-	default:
-		return nil, fmt.Errorf("invalid HA mode: %s", configHA.Mode)
-	}
-
-	// Convert node configuration
-	if configHA.Node != nil {
-		haConfig.Node.ID = configHA.Node.ID
-		haConfig.Node.Name = configHA.Node.Name
-		haConfig.Node.ExternalAddress = configHA.Node.ExternalAddress
-		haConfig.Node.InternalAddress = configHA.Node.InternalAddress
-		haConfig.Node.Capabilities = configHA.Node.Capabilities
-		haConfig.Node.Metadata = configHA.Node.Metadata
-	}
-
-	// Convert cluster configuration
-	if configHA.Cluster != nil {
-		haConfig.Cluster.ExpectedSize = configHA.Cluster.ExpectedSize
-		haConfig.Cluster.MinQuorum = configHA.Cluster.MinQuorum
-
-		if configHA.Cluster.ElectionTimeout != "" {
-			if timeout, err := time.ParseDuration(configHA.Cluster.ElectionTimeout); err == nil {
-				haConfig.Cluster.ElectionTimeout = timeout
-			}
-		}
-
-		if configHA.Cluster.HeartbeatInterval != "" {
-			if interval, err := time.ParseDuration(configHA.Cluster.HeartbeatInterval); err == nil {
-				haConfig.Cluster.HeartbeatInterval = interval
-			}
-		}
-
-		// Convert discovery configuration
-		if configHA.Cluster.Discovery != nil {
-			haConfig.Cluster.Discovery.Method = configHA.Cluster.Discovery.Method
-			haConfig.Cluster.Discovery.Config = configHA.Cluster.Discovery.Config
-
-			if configHA.Cluster.Discovery.Interval != "" {
-				if interval, err := time.ParseDuration(configHA.Cluster.Discovery.Interval); err == nil {
-					haConfig.Cluster.Discovery.Interval = interval
-				}
-			}
-
-			if configHA.Cluster.Discovery.NodeTimeout != "" {
-				if timeout, err := time.ParseDuration(configHA.Cluster.Discovery.NodeTimeout); err == nil {
-					haConfig.Cluster.Discovery.NodeTimeout = timeout
-				}
-			}
-		}
-
-		// Convert session sync configuration
-		if configHA.Cluster.SessionSync != nil {
-			haConfig.Cluster.SessionSync.Enabled = configHA.Cluster.SessionSync.Enabled
-			haConfig.Cluster.SessionSync.MaxStateSize = configHA.Cluster.SessionSync.MaxStateSize
-
-			if configHA.Cluster.SessionSync.SyncInterval != "" {
-				if interval, err := time.ParseDuration(configHA.Cluster.SessionSync.SyncInterval); err == nil {
-					haConfig.Cluster.SessionSync.SyncInterval = interval
-				}
-			}
-
-			if configHA.Cluster.SessionSync.StateTimeout != "" {
-				if timeout, err := time.ParseDuration(configHA.Cluster.SessionSync.StateTimeout); err == nil {
-					haConfig.Cluster.SessionSync.StateTimeout = timeout
-				}
-			}
-		}
-	}
-
-	// Convert health check configuration
-	if configHA.HealthCheck != nil {
-		haConfig.HealthCheck.FailureThreshold = configHA.HealthCheck.FailureThreshold
-		haConfig.HealthCheck.SuccessThreshold = configHA.HealthCheck.SuccessThreshold
-		haConfig.HealthCheck.EnableInternal = configHA.HealthCheck.EnableInternal
-		haConfig.HealthCheck.EnableExternal = configHA.HealthCheck.EnableExternal
-
-		if configHA.HealthCheck.Interval != "" {
-			if interval, err := time.ParseDuration(configHA.HealthCheck.Interval); err == nil {
-				haConfig.HealthCheck.Interval = interval
-			}
-		}
-
-		if configHA.HealthCheck.Timeout != "" {
-			if timeout, err := time.ParseDuration(configHA.HealthCheck.Timeout); err == nil {
-				haConfig.HealthCheck.Timeout = timeout
-			}
-		}
-	}
-
-	// Convert failover configuration
-	if configHA.Failover != nil {
-		haConfig.Failover.Enabled = configHA.Failover.Enabled
-		haConfig.Failover.MaxSessionMigration = configHA.Failover.MaxSessionMigration
-
-		if configHA.Failover.Timeout != "" {
-			if timeout, err := time.ParseDuration(configHA.Failover.Timeout); err == nil {
-				haConfig.Failover.Timeout = timeout
-			}
-		}
-
-		if configHA.Failover.MaxDuration != "" {
-			if duration, err := time.ParseDuration(configHA.Failover.MaxDuration); err == nil {
-				haConfig.Failover.MaxDuration = duration
-			}
-		}
-
-		if configHA.Failover.GracePeriod != "" {
-			if period, err := time.ParseDuration(configHA.Failover.GracePeriod); err == nil {
-				haConfig.Failover.GracePeriod = period
-			}
-		}
-	}
-
-	// Convert load balancing configuration
-	if configHA.LoadBalancing != nil {
-		switch configHA.LoadBalancing.Strategy {
-		case "round-robin":
-			haConfig.LoadBalancing.Strategy = ha.RoundRobinStrategy
-		case "least-connections":
-			haConfig.LoadBalancing.Strategy = ha.LeastConnectionsStrategy
-		case "health-based":
-			haConfig.LoadBalancing.Strategy = ha.HealthBasedStrategy
-		}
-
-		if configHA.LoadBalancing.HealthBased != nil {
-			haConfig.LoadBalancing.HealthBased.MinHealthScore = configHA.LoadBalancing.HealthBased.MinHealthScore
-			haConfig.LoadBalancing.HealthBased.HealthWeightFactor = configHA.LoadBalancing.HealthBased.HealthWeightFactor
-		}
-
-		if configHA.LoadBalancing.ConnectionBased != nil {
-			haConfig.LoadBalancing.ConnectionBased.MaxConnectionsPerNode = configHA.LoadBalancing.ConnectionBased.MaxConnectionsPerNode
-			haConfig.LoadBalancing.ConnectionBased.ConnectionThreshold = configHA.LoadBalancing.ConnectionBased.ConnectionThreshold
-		}
-	}
-
-	// Convert split-brain configuration
-	if configHA.SplitBrain != nil {
-		haConfig.SplitBrain.Enabled = configHA.SplitBrain.Enabled
-		haConfig.SplitBrain.ResolutionStrategy = configHA.SplitBrain.ResolutionStrategy
-
-		if configHA.SplitBrain.DetectionInterval != "" {
-			if interval, err := time.ParseDuration(configHA.SplitBrain.DetectionInterval); err == nil {
-				haConfig.SplitBrain.DetectionInterval = interval
-			}
-		}
-
-		if configHA.SplitBrain.QuorumInterval != "" {
-			if interval, err := time.ParseDuration(configHA.SplitBrain.QuorumInterval); err == nil {
-				haConfig.SplitBrain.QuorumInterval = interval
-			}
-		}
-	}
-
-	return haConfig, nil
-}

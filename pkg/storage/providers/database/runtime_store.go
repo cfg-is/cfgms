@@ -21,6 +21,20 @@ type DatabaseRuntimeStore struct {
 
 // createTables creates the necessary tables for runtime storage
 func (s *DatabaseRuntimeStore) createTables() error {
+	ctx := context.Background()
+	const runtimeSchemaLockID = 98765432
+
+	// Acquire advisory lock to prevent race conditions during schema initialization
+	if _, err := s.db.ExecContext(ctx, "SELECT pg_advisory_lock($1)", runtimeSchemaLockID); err != nil {
+		return fmt.Errorf("failed to acquire runtime store schema initialization lock: %w", err)
+	}
+	defer func() {
+		if _, err := s.db.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", runtimeSchemaLockID); err != nil {
+			// Log but don't fail - advisory unlock error is not critical
+			// This is non-critical since PostgreSQL will release advisory locks when connection closes
+			_ = err // Explicitly ignore error to satisfy linter
+		}
+	}()
 	// Create sessions table
 	// #nosec G201 - Table name is validated and sanitized in plugin.go validateTableName()
 	sessionTableSQL := fmt.Sprintf(`

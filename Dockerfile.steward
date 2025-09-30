@@ -1,5 +1,5 @@
 # Multi-stage Dockerfile for CFGMS Steward (HA Testing)
-FROM golang:1.21-alpine AS builder
+FROM golang:1.23-alpine AS builder
 
 # Install build dependencies
 RUN apk add --no-cache git ca-certificates tzdata
@@ -14,11 +14,11 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Build the steward binary
+# Build the steward binary (name it differently to avoid directory conflict)
 RUN CGO_ENABLED=0 GOOS=linux go build \
     -trimpath \
     -ldflags="-s -w" \
-    -o steward \
+    -o steward-bin \
     ./cmd/steward
 
 # Final stage - minimal runtime image
@@ -39,10 +39,11 @@ RUN addgroup -g 1000 cfgms && \
 RUN mkdir -p /app/data /app/logs /app/config && \
     chown -R cfgms:cfgms /app
 
-# Copy binary from builder stage
-COPY --from=builder /build/steward /app/steward
+# Copy binary from builder stage and name it steward
+COPY --from=builder /build/steward-bin /app/steward
+RUN chmod +x /app/steward
 
-# Copy configuration files if they exist
+# Copy configuration files (steward directory conflict is avoided)
 COPY --chown=cfgms:cfgms examples/ /app/examples/
 
 # Switch to non-root user
@@ -60,4 +61,4 @@ HEALTHCHECK --interval=2s --timeout=1s --start-period=10s --retries=15 \
 
 # Run the steward
 ENTRYPOINT ["./steward"]
-CMD ["--config", "/app/examples/steward-config.yaml"]
+CMD []

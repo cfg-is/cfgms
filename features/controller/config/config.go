@@ -81,7 +81,7 @@ type ServerCertificateConfig struct {
 
 // StorageConfig contains global storage provider configuration
 type StorageConfig struct {
-	// Provider specifies which storage provider to use (memory, file, database, git)
+	// Provider specifies which storage provider to use (database, git)
 	Provider string `yaml:"provider"`
 	
 	// Configuration options passed to the storage provider
@@ -435,6 +435,78 @@ func Load() (*Config, error) {
 	// Storage configuration environment variables
 	if storageProvider := os.Getenv("CFGMS_STORAGE_PROVIDER"); storageProvider != "" {
 		cfg.Storage.Provider = storageProvider
+
+		// Initialize storage config map if nil
+		if cfg.Storage.Config == nil {
+			cfg.Storage.Config = make(map[string]interface{})
+		}
+
+		// Map provider-specific environment variables to config
+		switch storageProvider {
+		case "database":
+			// Database storage configuration mapping - support both CFGMS_STORAGE_DATABASE_* and CFGMS_DB_* variants
+			if host := os.Getenv("CFGMS_STORAGE_DATABASE_HOST"); host != "" {
+				cfg.Storage.Config["host"] = host
+			} else if host := os.Getenv("CFGMS_DB_HOST"); host != "" {
+				cfg.Storage.Config["host"] = host
+			}
+
+			if port := os.Getenv("CFGMS_STORAGE_DATABASE_PORT"); port != "" {
+				// Convert port string to int
+				if portInt, err := strconv.Atoi(port); err == nil {
+					cfg.Storage.Config["port"] = portInt
+				}
+			} else if port := os.Getenv("CFGMS_DB_PORT"); port != "" {
+				// Convert port string to int
+				if portInt, err := strconv.Atoi(port); err == nil {
+					cfg.Storage.Config["port"] = portInt
+				}
+			}
+
+			if database := os.Getenv("CFGMS_STORAGE_DATABASE_NAME"); database != "" {
+				cfg.Storage.Config["database"] = database
+			} else if database := os.Getenv("CFGMS_DB_NAME"); database != "" {
+				cfg.Storage.Config["database"] = database
+			}
+
+			if username := os.Getenv("CFGMS_STORAGE_DATABASE_USER"); username != "" {
+				cfg.Storage.Config["username"] = username
+			} else if username := os.Getenv("CFGMS_DB_USER"); username != "" {
+				cfg.Storage.Config["username"] = username
+			}
+
+			if password := os.Getenv("CFGMS_STORAGE_DATABASE_PASSWORD"); password != "" {
+				cfg.Storage.Config["password"] = password
+			} else if password := os.Getenv("CFGMS_DB_PASSWORD"); password != "" {
+				cfg.Storage.Config["password"] = password
+			}
+
+			if sslmode := os.Getenv("CFGMS_STORAGE_DATABASE_SSLMODE"); sslmode != "" {
+				cfg.Storage.Config["sslmode"] = sslmode
+			} else if sslmode := os.Getenv("CFGMS_DB_SSLMODE"); sslmode != "" {
+				cfg.Storage.Config["sslmode"] = sslmode
+			}
+		case "git":
+			// Git storage configuration mapping
+			if path := os.Getenv("CFGMS_STORAGE_GIT_PATH"); path != "" {
+				cfg.Storage.Config["path"] = path
+			}
+			if url := os.Getenv("CFGMS_STORAGE_GIT_URL"); url != "" {
+				cfg.Storage.Config["url"] = url
+			}
+			if branch := os.Getenv("CFGMS_STORAGE_GIT_BRANCH"); branch != "" {
+				cfg.Storage.Config["branch"] = branch
+			}
+			if username := os.Getenv("CFGMS_STORAGE_GIT_USERNAME"); username != "" {
+				cfg.Storage.Config["username"] = username
+			}
+			if password := os.Getenv("CFGMS_STORAGE_GIT_PASSWORD"); password != "" {
+				cfg.Storage.Config["password"] = password
+			}
+			if token := os.Getenv("CFGMS_STORAGE_GIT_TOKEN"); token != "" {
+				cfg.Storage.Config["token"] = token
+			}
+		}
 	}
 	
 	// Logging configuration environment variables
