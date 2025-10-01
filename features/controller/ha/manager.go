@@ -414,7 +414,7 @@ func (m *Manager) initializeClusterComponents() error {
 
 	// Re-enabled SessionSynchronizer component - Step 5 of systematic HA re-enabling (FINAL COMPONENT!)
 	m.logger.Info("DEBUG: About to initialize session synchronizer...")
-	m.sessionSync, err = NewSessionSynchronizer(m.cfg.Cluster.SessionSync, m.logger, m.storageManager)
+	m.sessionSync, err = NewSessionSynchronizer(m.cfg.Cluster.SessionSync, m.logger, m.storageManager, m)
 	if err != nil {
 		return fmt.Errorf("failed to initialize session synchronizer: %w", err)
 	}

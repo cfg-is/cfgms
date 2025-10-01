@@ -17,6 +17,7 @@ type sessionSynchronizer struct {
 	cfg      *SessionSyncConfig
 	logger   logging.Logger
 	storage  *interfaces.StorageManager
+	manager  *Manager // Reference to HA manager for node info
 	ctx      context.Context
 	cancel   context.CancelFunc
 	started  bool
@@ -44,7 +45,7 @@ type sessionState struct {
 }
 
 // NewSessionSynchronizer creates a new session synchronizer
-func NewSessionSynchronizer(cfg *SessionSyncConfig, logger logging.Logger, storage *interfaces.StorageManager) (SessionSynchronizer, error) {
+func NewSessionSynchronizer(cfg *SessionSyncConfig, logger logging.Logger, storage *interfaces.StorageManager, manager *Manager) (SessionSynchronizer, error) {
 	if cfg == nil {
 		cfg = &SessionSyncConfig{
 			Enabled:      true,
@@ -58,6 +59,7 @@ func NewSessionSynchronizer(cfg *SessionSyncConfig, logger logging.Logger, stora
 		cfg:           cfg,
 		logger:        logger,
 		storage:       storage,
+		manager:       manager,
 		localSessions: make(map[string]*sessionState),
 	}, nil
 }
@@ -135,9 +137,13 @@ func (s *sessionSynchronizer) SyncSessionState(ctx context.Context, sessionID st
 
 	// Create or update session state
 	now := time.Now()
+	nodeID := "local"
+	if s.manager != nil && s.manager.nodeInfo != nil {
+		nodeID = s.manager.nodeInfo.ID
+	}
 	sessionState := &sessionState{
 		SessionID: sessionID,
-		NodeID:    "local", // TODO: Get from manager
+		NodeID:    nodeID,
 		State:     state,
 		UpdatedAt: now,
 		ExpiresAt: now.Add(s.cfg.StateTimeout),
@@ -274,9 +280,14 @@ func (s *sessionSynchronizer) performSync() {
 	}
 
 	changedSessions := 0
+	localNodeID := "local"
+	if s.manager != nil && s.manager.nodeInfo != nil {
+		localNodeID = s.manager.nodeInfo.ID
+	}
+
 	for _, sessionState := range sessions {
 		// Skip sessions from this node
-		if sessionState.NodeID == "local" { // TODO: Use actual node ID
+		if sessionState.NodeID == localNodeID {
 			continue
 		}
 
