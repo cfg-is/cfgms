@@ -63,6 +63,11 @@ func NewManager(cfg *Config, logger logging.Logger, storageManager *interfaces.S
 		return nil, fmt.Errorf("failed to load HA configuration from environment: %w", err)
 	}
 
+	// Debug logging for NodeID tracking
+	logger.Info("DEBUG: HA Manager initialization",
+		"node_id_after_env_load", cfg.Node.ID,
+		"node_region", cfg.Node.Region)
+
 	// Generate node ID if not provided
 	if cfg.Node.ID == "" {
 		nodeID, err := generateNodeID()
@@ -70,6 +75,7 @@ func NewManager(cfg *Config, logger logging.Logger, storageManager *interfaces.S
 			return nil, fmt.Errorf("failed to generate node ID: %w", err)
 		}
 		cfg.Node.ID = nodeID
+		logger.Info("DEBUG: Generated node ID", "generated_id", nodeID)
 	}
 
 	// Set default node name if not provided
@@ -91,6 +97,12 @@ func NewManager(cfg *Config, logger logging.Logger, storageManager *interfaces.S
 		Coordinates:      cfg.Node.Coordinates,
 		Latency:          make(map[string]time.Duration),
 	}
+
+	// Debug logging for NodeInfo creation
+	logger.Info("DEBUG: Created NodeInfo",
+		"node_id", nodeInfo.ID,
+		"region", nodeInfo.Region,
+		"address", nodeInfo.Address)
 
 	// For single server mode, this node is always the leader
 	if cfg.Mode == SingleServerMode {
@@ -262,6 +274,17 @@ func (m *Manager) GetClusterNodes() ([]*NodeInfo, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
+	// If discovery is available, use it to get the full cluster view
+	if m.discovery != nil {
+		discoveredNodes, err := m.discovery.DiscoverNodes()
+		if err != nil {
+			m.logger.Warn("Failed to discover nodes, falling back to local view", "error", err)
+		} else if len(discoveredNodes) > 0 {
+			return discoveredNodes, nil
+		}
+	}
+
+	// Fallback to local cluster nodes map
 	nodes := make([]*NodeInfo, 0, len(m.clusterNodes))
 	for _, node := range m.clusterNodes {
 		// Create a copy to prevent modification
@@ -454,6 +477,10 @@ func (m *Manager) startClusterMode() error {
 		m.logger.Info("DEBUG: Session synchronizer component is nil (disabled), skipping")
 	}
 
+	// Perform initial leader election for cluster mode
+	m.logger.Info("DEBUG: Starting initial leader election...")
+	go m.performInitialLeaderElection()
+
 	m.logger.Info("DEBUG: All cluster mode components started successfully")
 	return nil
 }
@@ -536,6 +563,132 @@ func (m *Manager) demoteFromLeader() {
 		m.isLeader = false
 		m.nodeInfo.Role = NodeRoleFollower
 		m.logger.Info("Node demoted from leader", "node_id", m.nodeInfo.ID)
+	}
+}
+
+// performInitialLeaderElection performs the initial leader election for cluster mode
+func (m *Manager) performInitialLeaderElection() {
+	m.logger.Info("DEBUG: Starting initial leader election process...")
+
+	// Wait for discovery to find other nodes in the cluster
+	// We need to wait until we can see other cluster members before electing a leader
+	const maxRetries = 30 // Max wait time is 60 seconds (30 * 2s)
+	const retryDelay = 2 * time.Second
+
+	// Get expected node count - default for 3-node test cluster
+	expectedNodes := 3
+
+	m.logger.Info("DEBUG: Waiting for node discovery before leader election",
+		"expected_nodes", expectedNodes,
+		"max_wait_time", maxRetries*int(retryDelay.Seconds()))
+
+	var nodes []*NodeInfo
+	var err error
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		// Check if any leader is already elected by another node
+		m.mu.RLock()
+		hasLeader := m.currentLeader != ""
+		m.mu.RUnlock()
+
+		if hasLeader {
+			m.logger.Info("DEBUG: Leader already exists, skipping initial election")
+			return
+		}
+
+		// Try to get cluster nodes
+		nodes, err = m.GetClusterNodes()
+		if err != nil {
+			m.logger.Warn("Failed to get cluster nodes, retrying...", "error", err, "attempt", attempt+1)
+			time.Sleep(retryDelay)
+			continue
+		}
+
+		// Count healthy nodes
+		healthyNodes := 0
+		for _, node := range nodes {
+			if node.State == NodeStateHealthy {
+				healthyNodes++
+			}
+		}
+
+		m.logger.Debug("DEBUG: Discovery progress",
+			"discovered_nodes", len(nodes),
+			"healthy_nodes", healthyNodes,
+			"expected_nodes", expectedNodes,
+			"attempt", attempt+1)
+
+		// If we've discovered enough nodes (at least 2 for a 3-node cluster), proceed with election
+		minNodesForElection := (expectedNodes + 1) / 2 // Majority of expected nodes
+		if healthyNodes >= minNodesForElection {
+			m.logger.Info("DEBUG: Sufficient nodes discovered for leader election",
+				"healthy_nodes", healthyNodes,
+				"min_required", minNodesForElection)
+			break
+		}
+
+		time.Sleep(retryDelay)
+	}
+
+	// Final check for existing leader after discovery wait
+	m.mu.RLock()
+	hasLeader := m.currentLeader != ""
+	m.mu.RUnlock()
+
+	if hasLeader {
+		m.logger.Info("DEBUG: Leader already exists after discovery wait, skipping election")
+		return
+	}
+
+	// Proceed with leader election using discovered nodes
+	var candidates []*NodeInfo
+	for _, node := range nodes {
+		if node.State == NodeStateHealthy {
+			candidates = append(candidates, node)
+		}
+	}
+
+	if len(candidates) == 0 {
+		m.logger.Warn("No healthy candidates for initial leader election after discovery")
+		// As fallback, promote self if no other nodes found
+		localNode := m.GetLocalNode()
+		m.logger.Info("DEBUG: No other candidates found, promoting self as leader", "node_id", localNode.ID)
+		m.promoteToLeader()
+		return
+	}
+
+	// Find the candidate with the lowest ID (lexicographically)
+	var chosenLeader *NodeInfo
+	for _, candidate := range candidates {
+		if chosenLeader == nil || candidate.ID < chosenLeader.ID {
+			chosenLeader = candidate
+		}
+	}
+
+	if chosenLeader == nil {
+		m.logger.Error("Failed to select initial leader")
+		return
+	}
+
+	localNode := m.GetLocalNode()
+	m.logger.Info("DEBUG: Leader election result",
+		"chosen_leader", chosenLeader.ID,
+		"local_node", localNode.ID,
+		"total_candidates", len(candidates))
+
+	if chosenLeader.ID == localNode.ID {
+		// This node should become the leader
+		m.logger.Info("DEBUG: Local node selected as initial leader", "node_id", localNode.ID)
+		m.promoteToLeader()
+	} else {
+		// Another node should be the leader
+		m.logger.Info("DEBUG: Remote node selected as initial leader",
+			"leader_id", chosenLeader.ID,
+			"local_id", localNode.ID)
+
+		m.mu.Lock()
+		m.currentLeader = chosenLeader.ID
+		m.mu.Unlock()
 	}
 }
 

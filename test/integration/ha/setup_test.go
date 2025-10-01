@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -16,26 +17,27 @@ var (
 )
 
 // TestMain handles setup and teardown for all HA tests
-func TestMain(m *testing.M) {
-	var exitCode int
-	defer func() {
-		// Cleanup
-		if isDockerRunning {
-			cleanupDocker()
-		}
-		os.Exit(exitCode)
-	}()
-
-	// Setup Docker infrastructure
-	if err := setupDocker(); err != nil {
-		fmt.Printf("Failed to setup Docker infrastructure: %v\n", err)
-		exitCode = 1
-		return
-	}
-
-	// Run tests
-	exitCode = m.Run()
-}
+// NOTE: Disabled in favor of per-test Docker management using DockerComposeHelper
+// func TestMain(m *testing.M) {
+// 	var exitCode int
+// 	defer func() {
+// 		// Cleanup
+// 		if isDockerRunning {
+// 			cleanupDocker()
+// 		}
+// 		os.Exit(exitCode)
+// 	}()
+//
+// 	// Setup Docker infrastructure
+// 	if err := setupDocker(); err != nil {
+// 		fmt.Printf("Failed to setup Docker infrastructure: %v\n", err)
+// 		exitCode = 1
+// 		return
+// 	}
+//
+// 	// Run tests
+// 	exitCode = m.Run()
+// }
 
 // setupDocker starts the Docker Compose infrastructure for HA tests
 func setupDocker() error {
@@ -89,31 +91,6 @@ func setupDocker() error {
 
 	fmt.Println("✓ Docker infrastructure is ready")
 	return nil
-}
-
-// cleanupDocker stops and removes Docker infrastructure
-func cleanupDocker() {
-	if !isDockerRunning {
-		return
-	}
-
-	fmt.Println("Cleaning up Docker infrastructure...")
-
-	testDir, err := getTestDir()
-	if err != nil {
-		fmt.Printf("Failed to get test directory for cleanup: %v\n", err)
-		return
-	}
-
-	// Stop and remove containers
-	cleanupCmd := exec.Command("docker", "compose", "down", "-v", "--remove-orphans")
-	cleanupCmd.Dir = testDir
-	if err := cleanupCmd.Run(); err != nil {
-		fmt.Printf("Warning: failed to cleanup Docker containers: %v\n", err)
-	}
-
-	isDockerRunning = false
-	fmt.Println("✓ Docker infrastructure cleaned up")
 }
 
 // getTestDir returns the directory containing the docker-compose.yml file
@@ -175,7 +152,7 @@ func waitForServices(testDir string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	services := []string{"postgres", "controller-east", "controller-central", "controller-west"}
+	services := []string{"timescaledb", "controller-east", "controller-central", "controller-west"}
 
 	for _, service := range services {
 		fmt.Printf("Waiting for %s to be healthy...\n", service)
@@ -188,7 +165,7 @@ func waitForServices(testDir string) error {
 			}
 
 			// Check service health
-			healthCmd := exec.Command("docker", "compose", "ps", "--services", "--filter", "health=healthy")
+			healthCmd := exec.Command("docker", "compose", "ps", "--format", "table")
 			healthCmd.Dir = testDir
 			output, err := healthCmd.Output()
 			if err != nil {
@@ -196,14 +173,14 @@ func waitForServices(testDir string) error {
 				continue
 			}
 
-			// Simple check if service is in healthy output
-			if containsService(string(output), service) {
+			// Check if service is healthy in the output
+			if isServiceHealthy(string(output), service) {
 				fmt.Printf("✓ %s is healthy\n", service)
 				break
 			}
 
 			// Additional check for controllers - try to connect to their ports
-			if service != "postgres" {
+			if service != "timescaledb" {
 				var port string
 				switch service {
 				case "controller-east":
@@ -233,10 +210,21 @@ func waitForServices(testDir string) error {
 	return nil
 }
 
-// containsService checks if a service name is present in the output
-func containsService(output, service string) bool {
-	// Simple string contains check
-	return len(output) > 0 && service != "postgres" // Skip postgres health check for now
+// isServiceHealthy checks if a service is healthy in docker compose ps output
+func isServiceHealthy(output, service string) bool {
+	if len(output) == 0 {
+		return false
+	}
+
+	lines := strings.Split(output, "\n")
+	for _, line := range lines {
+		// Look for lines containing the service name and (healthy) status
+		if strings.Contains(line, service) && strings.Contains(line, "(healthy)") {
+			return true
+		}
+	}
+
+	return false
 }
 
 // EnsureDockerRunning ensures Docker infrastructure is running (for use in individual tests)
