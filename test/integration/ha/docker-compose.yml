@@ -156,8 +156,39 @@ services:
       timeout: 5s
       retries: 10
 
+  # Git Server for HA testing (Gitea)
+  git-server-ha:
+    image: gitea/gitea:1.21
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      - GITEA__database__DB_TYPE=postgres
+      - GITEA__database__HOST=timescaledb:5432
+      - GITEA__database__NAME=cfgms_ha_test
+      - GITEA__database__USER=cfgms_test
+      - GITEA__database__PASSWD=cfgms_test_password
+      - GITEA__server__HTTP_PORT=3000
+      - GITEA__server__ROOT_URL=http://git-server-ha:3000
+      - GITEA__security__INSTALL_LOCK=true
+      - GITEA__security__SECRET_KEY=gitea-secret-key-for-ha-testing
+      - GITEA__service__DISABLE_REGISTRATION=true
+      - GITEA__service__REQUIRE_SIGNIN_VIEW=false
+    ports:
+      - "3001:3000"
+    volumes:
+      - gitea_data:/data
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/v1/version"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
 volumes:
   timescaledb_data:
+  gitea_data:
 
 networks:
   default:
