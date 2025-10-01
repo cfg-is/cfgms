@@ -263,7 +263,7 @@ func TestConfig_LoadFromEnvironment(t *testing.T) {
 
 	// Set environment variables
 	t.Setenv("CFGMS_HA_MODE", "cluster")
-	t.Setenv("CFGMS_HA_NODE_ID", "test-node-123")
+	t.Setenv("CFGMS_NODE_ID", "test-node-123")
 	t.Setenv("CFGMS_HA_NODE_NAME", "test-controller")
 	t.Setenv("CFGMS_HA_CLUSTER_SIZE", "5")
 	t.Setenv("CFGMS_HA_MIN_QUORUM", "3")

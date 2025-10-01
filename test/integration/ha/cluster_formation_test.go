@@ -2,11 +2,13 @@ package ha
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
 	netUrl "net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,11 +34,29 @@ func TestClusterFormation(t *testing.T) {
 		t.Skip("Skipping integration test in short mode")
 	}
 
-	// Ensure Docker infrastructure is running
-	EnsureDockerRunning(t)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
+
+	helper := NewDockerComposeHelper()
+
+	// Ensure clean environment by stopping any existing containers first
+	t.Log("Ensuring clean test environment...")
+	if err := helper.StopCluster(context.Background()); err != nil {
+		t.Logf("Info: No existing cluster to stop (this is normal): %v", err)
+	}
+
+	// Start the HA cluster
+	t.Log("Starting HA cluster...")
+	require.NoError(t, helper.StartCluster(ctx))
+	defer func() {
+		if err := helper.StopCluster(context.Background()); err != nil {
+			t.Logf("Warning: Failed to stop cluster: %v", err)
+		}
+	}()
+
+	// Wait for services to be running
+	services := []string{"controller-east", "controller-central", "controller-west"}
+	require.NoError(t, helper.WaitForServices(ctx, 3*time.Minute, services...))
 
 	// Expected controller endpoints
 	controllers := []struct {
@@ -44,9 +64,9 @@ func TestClusterFormation(t *testing.T) {
 		url    string
 		region string
 	}{
-		{"controller-east", "http://localhost:8080", "us-east"},
-		{"controller-central", "http://localhost:8081", "us-central"},
-		{"controller-west", "http://localhost:8082", "us-west"},
+		{"controller-east", "https://localhost:9080", "us-east"},
+		{"controller-central", "https://localhost:9081", "us-central"},
+		{"controller-west", "https://localhost:9082", "us-west"},
 	}
 
 	// Wait for all controllers to be healthy
@@ -130,16 +150,34 @@ func TestClusterConsistency(t *testing.T) {
 		t.Skip("Skipping integration test in short mode")
 	}
 
-	// Ensure Docker infrastructure is running
-	EnsureDockerRunning(t)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
+	helper := NewDockerComposeHelper()
+
+	// Ensure clean environment by stopping any existing containers first
+	t.Log("Ensuring clean test environment...")
+	if err := helper.StopCluster(context.Background()); err != nil {
+		t.Logf("Info: No existing cluster to stop (this is normal): %v", err)
+	}
+
+	// Start the HA cluster
+	t.Log("Starting HA cluster...")
+	require.NoError(t, helper.StartCluster(ctx))
+	defer func() {
+		if err := helper.StopCluster(context.Background()); err != nil {
+			t.Logf("Warning: Failed to stop cluster: %v", err)
+		}
+	}()
+
+	// Wait for services to be running
+	services := []string{"controller-east", "controller-central", "controller-west"}
+	require.NoError(t, helper.WaitForServices(ctx, 2*time.Minute, services...))
+
 	controllers := []string{
-		"http://localhost:8080",
-		"http://localhost:8081",
-		"http://localhost:8082",
+		"https://localhost:9080",
+		"https://localhost:9081",
+		"https://localhost:9082",
 	}
 
 	// Wait for all controllers and get their cluster views
@@ -206,9 +244,26 @@ func waitForHealthy(ctx context.Context, url string, timeout time.Duration) erro
 	return fmt.Errorf("controller at %s did not become healthy within %v", url, timeout)
 }
 
+// getAPIKeyForURL returns the appropriate API key based on the controller URL
+func getAPIKeyForURL(url string) string {
+	if strings.Contains(url, "9080") {
+		return "test-api-key-east"
+	} else if strings.Contains(url, "9081") {
+		return "test-api-key-central"
+	} else if strings.Contains(url, "9082") {
+		return "test-api-key-west"
+	}
+	return "test-api-key-east" // default
+}
+
 // getControllerState gets the basic state of a controller
 func getControllerState(url string) (ControllerInstance, error) {
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
 
 	// Use TCP health check since HTTP endpoint might not be available yet
 	health := "unhealthy"
@@ -221,7 +276,15 @@ func getControllerState(url string) (ControllerInstance, error) {
 	}
 
 	// Get HA status (if available)
-	haResp, err := client.Get(fmt.Sprintf("%s/api/v1/ha/status", url))
+	req, err := http.NewRequest("GET", fmt.Sprintf("%s/api/v1/ha/status", url), nil)
+	if err != nil {
+		return ControllerInstance{
+			URL:    url,
+			Health: health,
+		}, nil
+	}
+	req.Header.Set("X-API-Key", getAPIKeyForURL(url))
+	haResp, err := client.Do(req)
 	if err != nil {
 		// HA endpoint might not be available yet
 		return ControllerInstance{
@@ -260,9 +323,19 @@ func getControllerState(url string) (ControllerInstance, error) {
 
 // getClusterView gets the cluster view from a controller
 func getClusterView(url string) (ClusterView, error) {
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
 
-	resp, err := client.Get(fmt.Sprintf("%s/api/v1/ha/cluster", url))
+	req, err := http.NewRequest("GET", fmt.Sprintf("%s/api/v1/ha/cluster", url), nil)
+	if err != nil {
+		return ClusterView{}, fmt.Errorf("cluster view request creation failed: %w", err)
+	}
+	req.Header.Set("X-API-Key", getAPIKeyForURL(url))
+	resp, err := client.Do(req)
 	if err != nil {
 		return ClusterView{}, fmt.Errorf("cluster view request failed: %w", err)
 	}

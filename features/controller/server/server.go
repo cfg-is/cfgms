@@ -569,19 +569,23 @@ func (s *Server) ensureServerCertificate() (*cert.Certificate, error) {
 func initializeHAManager(cfg *config.Config, logger logging.Logger, storageManager *interfaces.StorageManager) (*ha.Manager, error) {
 	// Load HA config directly from environment variables (bypassing controller config)
 	haConfig := ha.DefaultConfig()
+	log.Printf("DEBUG: NodeID Trace - Before LoadFromEnvironment: node_id=%s, node_id_empty=%t", haConfig.Node.ID, haConfig.Node.ID == "")
+
 	if err := haConfig.LoadFromEnvironment(); err != nil {
 		return nil, fmt.Errorf("failed to load HA configuration from environment: %w", err)
 	}
 
+	log.Printf("DEBUG: NodeID Trace - After LoadFromEnvironment: node_id=%s, node_id_empty=%t", haConfig.Node.ID, haConfig.Node.ID == "")
+
 	// Create HA manager
+	log.Printf("DEBUG: NodeID Trace - Before NewManager: node_id=%s, node_id_empty=%t", haConfig.Node.ID, haConfig.Node.ID == "")
+
 	haManager, err := ha.NewManager(haConfig, logger, storageManager)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HA manager: %w", err)
 	}
 
-	logger.Info("HA Manager initialized",
-		"mode", haConfig.GetModeString(),
-		"node_id", haConfig.Node.ID)
+	log.Printf("DEBUG: NodeID Trace - After NewManager (HA Manager initialized): mode=%s, node_id=%s, node_id_empty=%t, manager_node_id=%s, manager_node_id_empty=%t", haConfig.GetModeString(), haConfig.Node.ID, haConfig.Node.ID == "", haManager.GetLocalNode().ID, haManager.GetLocalNode().ID == "")
 
 	return haManager, nil
 }

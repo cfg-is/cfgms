@@ -2,10 +2,13 @@ package ha
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // Config contains high availability configuration
@@ -338,6 +341,9 @@ func DefaultConfig() *Config {
 
 // LoadFromEnvironment loads HA configuration from environment variables
 func (c *Config) LoadFromEnvironment() error {
+	logger := logging.NewLogger("debug")
+	logger.Info("HA Config Loading - Starting LoadFromEnvironment")
+
 	// Load deployment mode
 	if mode := os.Getenv("CFGMS_HA_MODE"); mode != "" {
 		switch strings.ToLower(mode) {
@@ -353,8 +359,13 @@ func (c *Config) LoadFromEnvironment() error {
 	}
 
 	// Load node configuration
-	if nodeID := os.Getenv("CFGMS_HA_NODE_ID"); nodeID != "" {
+	nodeID := os.Getenv("CFGMS_NODE_ID")
+	log.Printf("DEBUG: HA Config Loading - Node ID Environment Variable: CFGMS_NODE_ID=%s, nodeID_empty=%t", nodeID, nodeID == "")
+	if nodeID != "" {
 		c.Node.ID = nodeID
+		log.Printf("DEBUG: HA Config Loading - Node ID Set: node_id=%s", c.Node.ID)
+	} else {
+		log.Printf("DEBUG: HA Config Loading - Node ID Empty: CFGMS_NODE_ID=%s, current_node_id=%s", nodeID, c.Node.ID)
 	}
 
 	if nodeName := os.Getenv("CFGMS_HA_NODE_NAME"); nodeName != "" {
@@ -370,7 +381,7 @@ func (c *Config) LoadFromEnvironment() error {
 	}
 
 	// Load geographic configuration
-	if region := os.Getenv("CFGMS_HA_REGION"); region != "" {
+	if region := os.Getenv("CFGMS_NODE_REGION"); region != "" {
 		c.Node.Region = region
 	}
 
@@ -432,6 +443,47 @@ func (c *Config) LoadFromEnvironment() error {
 		c.Cluster.Discovery.Method = discoveryMethod
 	}
 
+	// Load cluster nodes for static discovery
+	if clusterNodes := os.Getenv("CFGMS_HA_CLUSTER_NODES"); clusterNodes != "" {
+		nodes := strings.Split(clusterNodes, ",")
+		nodeConfigs := make([]map[string]interface{}, 0, len(nodes))
+
+		for _, nodeStr := range nodes {
+			nodeStr = strings.TrimSpace(nodeStr)
+			if nodeStr == "" {
+				continue
+			}
+
+			// Parse node format: "node-id:port" or "node-id"
+			parts := strings.Split(nodeStr, ":")
+			nodeID := strings.TrimSpace(parts[0])
+			if nodeID == "" {
+				continue
+			}
+
+			nodeConfig := map[string]interface{}{
+				"id":     nodeID,
+				"name":   nodeID,
+				"region": "", // Will be set from individual node's region config
+			}
+
+			// If port is specified, construct address
+			if len(parts) > 1 {
+				port := strings.TrimSpace(parts[1])
+				nodeConfig["address"] = fmt.Sprintf("%s:%s", nodeID, port)
+			}
+
+			nodeConfigs = append(nodeConfigs, nodeConfig)
+		}
+
+		if len(nodeConfigs) > 0 {
+			if c.Cluster.Discovery.Config == nil {
+				c.Cluster.Discovery.Config = make(map[string]interface{})
+			}
+			c.Cluster.Discovery.Config["nodes"] = nodeConfigs
+		}
+	}
+
 	// Load failover configuration
 	if failoverEnabled := os.Getenv("CFGMS_HA_FAILOVER_ENABLED"); failoverEnabled != "" {
 		if enabled, err := strconv.ParseBool(failoverEnabled); err == nil {
@@ -451,6 +503,13 @@ func (c *Config) LoadFromEnvironment() error {
 			c.SplitBrain.Enabled = enabled
 		}
 	}
+
+	logger.Info("HA Config Loading - Completed LoadFromEnvironment",
+		"node_id", c.Node.ID,
+		"node_region", c.Node.Region,
+		"node_name", c.Node.Name,
+		"mode", c.GetModeString(),
+		"node_id_empty", c.Node.ID == "")
 
 	return nil
 }

@@ -34,9 +34,9 @@ func TestFailoverTiming(t *testing.T) {
 	require.NoError(t, helper.WaitForServices(ctx, 3*time.Minute, services...))
 
 	controllers := []string{
-		"http://localhost:8080",
-		"http://localhost:8081",
-		"http://localhost:8082",
+		"https://localhost:9080",
+		"https://localhost:9081",
+		"https://localhost:9082",
 	}
 
 	// Wait for initial cluster and identify leader
@@ -139,9 +139,9 @@ func TestSessionContinuity(t *testing.T) {
 	require.NoError(t, helper.WaitForServices(ctx, 3*time.Minute, services...))
 
 	controllers := []string{
-		"http://localhost:8080",
-		"http://localhost:8081",
-		"http://localhost:8082",
+		"https://localhost:9080",
+		"https://localhost:9081",
+		"https://localhost:9082",
 	}
 
 	// Wait for cluster formation
@@ -295,9 +295,9 @@ func TestLoadBalancerFailover(t *testing.T) {
 	require.NoError(t, helper.WaitForServices(ctx, 3*time.Minute, services...))
 
 	controllers := []string{
-		"http://localhost:8080",
-		"http://localhost:8081",
-		"http://localhost:8082",
+		"https://localhost:9080",
+		"https://localhost:9081",
+		"https://localhost:9082",
 	}
 
 	// Wait for cluster formation

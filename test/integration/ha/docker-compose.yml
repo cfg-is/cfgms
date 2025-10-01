@@ -25,10 +25,12 @@ services:
       dockerfile: cmd/controller/Dockerfile
     ports:
       - "8080:8080"
+      - "9080:9080"
     environment:
       CFGMS_NODE_ID: "controller-east"
       CFGMS_NODE_REGION: "us-east"
       CFGMS_LISTEN_ADDR: "0.0.0.0:8080"
+      CFGMS_HTTP_LISTEN_ADDR: "0.0.0.0:9080"
       CFGMS_STORAGE_PROVIDER: "database"
       CFGMS_DB_HOST: "timescaledb"
       CFGMS_DB_PORT: "5432"
@@ -45,12 +47,14 @@ services:
       CFGMS_TIMESCALE_USER: "cfgms_test"
       CFGMS_TIMESCALE_PASSWORD: "cfgms_test_password"
       CFGMS_HA_ENABLED: "true"
+      CFGMS_HA_MODE: "cluster"
       CFGMS_HA_CLUSTER_NODES: "controller-east:8080,controller-central:8081,controller-west:8082"
       CFGMS_HA_DISCOVERY_METHOD: "static"
       CFGMS_HA_DISCOVERY_INTERVAL: "10s"
       CFGMS_HA_NODE_TIMEOUT: "30s"
       CFGMS_HA_ELECTION_TIMEOUT: "5s"
       CFGMS_HA_HEARTBEAT_INTERVAL: "2s"
+      CFGMS_API_KEY: "test-api-key-east"
     depends_on:
       timescaledb:
         condition: service_healthy
@@ -67,10 +71,12 @@ services:
       dockerfile: cmd/controller/Dockerfile
     ports:
       - "8081:8081"
+      - "9081:9081"
     environment:
       CFGMS_NODE_ID: "controller-central"
       CFGMS_NODE_REGION: "us-central"
       CFGMS_LISTEN_ADDR: "0.0.0.0:8081"
+      CFGMS_HTTP_LISTEN_ADDR: "0.0.0.0:9081"
       CFGMS_STORAGE_PROVIDER: "database"
       CFGMS_DB_HOST: "timescaledb"
       CFGMS_DB_PORT: "5432"
@@ -87,12 +93,14 @@ services:
       CFGMS_TIMESCALE_USER: "cfgms_test"
       CFGMS_TIMESCALE_PASSWORD: "cfgms_test_password"
       CFGMS_HA_ENABLED: "true"
+      CFGMS_HA_MODE: "cluster"
       CFGMS_HA_CLUSTER_NODES: "controller-east:8080,controller-central:8081,controller-west:8082"
       CFGMS_HA_DISCOVERY_METHOD: "static"
       CFGMS_HA_DISCOVERY_INTERVAL: "10s"
       CFGMS_HA_NODE_TIMEOUT: "30s"
       CFGMS_HA_ELECTION_TIMEOUT: "5s"
       CFGMS_HA_HEARTBEAT_INTERVAL: "2s"
+      CFGMS_API_KEY: "test-api-key-central"
     depends_on:
       timescaledb:
         condition: service_healthy
@@ -109,10 +117,12 @@ services:
       dockerfile: cmd/controller/Dockerfile
     ports:
       - "8082:8082"
+      - "9082:9082"
     environment:
       CFGMS_NODE_ID: "controller-west"
       CFGMS_NODE_REGION: "us-west"
       CFGMS_LISTEN_ADDR: "0.0.0.0:8082"
+      CFGMS_HTTP_LISTEN_ADDR: "0.0.0.0:9082"
       CFGMS_STORAGE_PROVIDER: "database"
       CFGMS_DB_HOST: "timescaledb"
       CFGMS_DB_PORT: "5432"
@@ -129,12 +139,14 @@ services:
       CFGMS_TIMESCALE_USER: "cfgms_test"
       CFGMS_TIMESCALE_PASSWORD: "cfgms_test_password"
       CFGMS_HA_ENABLED: "true"
+      CFGMS_HA_MODE: "cluster"
       CFGMS_HA_CLUSTER_NODES: "controller-east:8080,controller-central:8081,controller-west:8082"
       CFGMS_HA_DISCOVERY_METHOD: "static"
       CFGMS_HA_DISCOVERY_INTERVAL: "10s"
       CFGMS_HA_NODE_TIMEOUT: "30s"
       CFGMS_HA_ELECTION_TIMEOUT: "5s"
       CFGMS_HA_HEARTBEAT_INTERVAL: "2s"
+      CFGMS_API_KEY: "test-api-key-west"
     depends_on:
       timescaledb:
         condition: service_healthy

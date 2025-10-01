@@ -17,21 +17,33 @@ type DockerComposeHelper struct {
 // NewDockerComposeHelper creates a new Docker Compose helper
 func NewDockerComposeHelper() *DockerComposeHelper {
 	return &DockerComposeHelper{
-		ComposeFile: "../../../docker-compose.ha-test.yml",
+		ComposeFile: "docker-compose.yml",
 		ProjectName: "cfgms-ha-test",
 	}
 }
 
 // StartCluster starts the HA cluster using Docker Compose
 func (h *DockerComposeHelper) StartCluster(ctx context.Context) error {
-	cmd := exec.CommandContext(ctx, "docker", "compose",
+	// First force a clean rebuild with no cache to ensure latest code changes
+	buildCmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
 		"-p", h.ProjectName,
-		"up", "-d", "--build")
+		"build", "--no-cache")
 
-	output, err := cmd.CombinedOutput()
+	buildOutput, err := buildCmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("failed to start cluster: %w\nOutput: %s", err, string(output))
+		return fmt.Errorf("failed to build images: %w\nOutput: %s", err, string(buildOutput))
+	}
+
+	// Start the cluster with the freshly built images
+	startCmd := exec.CommandContext(ctx, "docker", "compose",
+		"-f", h.ComposeFile,
+		"-p", h.ProjectName,
+		"up", "-d")
+
+	startOutput, err := startCmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to start cluster: %w\nOutput: %s", err, string(startOutput))
 	}
 
 	return nil

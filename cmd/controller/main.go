@@ -24,6 +24,16 @@ import (
 
 func main() {
 	log.Println("DEBUG: Starting controller main()")
+
+	// Log all HA-related environment variables at startup
+	log.Printf("DEBUG: Environment Variables at startup:")
+	log.Printf("  CFGMS_NODE_ID=%s", os.Getenv("CFGMS_NODE_ID"))
+	log.Printf("  CFGMS_NODE_REGION=%s", os.Getenv("CFGMS_NODE_REGION"))
+	log.Printf("  CFGMS_HA_ENABLED=%s", os.Getenv("CFGMS_HA_ENABLED"))
+	log.Printf("  CFGMS_HA_MODE=%s", os.Getenv("CFGMS_HA_MODE"))
+	log.Printf("  CFGMS_HA_NODE_NAME=%s", os.Getenv("CFGMS_HA_NODE_NAME"))
+	log.Printf("  CFGMS_HA_CLUSTER_NODES=%s", os.Getenv("CFGMS_HA_CLUSTER_NODES"))
+
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("Failed to load configuration: %v", err)

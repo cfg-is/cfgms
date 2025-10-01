@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 
 	"github.com/cfgis/cfgms/features/controller/ha"
@@ -51,6 +52,10 @@ func (s *Server) handleHAStatus(w http.ResponseWriter, r *http.Request) {
 	if localNode != nil {
 		nodeID = localNode.ID
 	}
+
+	// Critical NodeID trace logging for API response
+	log.Printf("DEBUG: NodeID Trace - API Response Generation: endpoint=/api/v1/ha/status, local_node_nil=%t, node_id=%s, node_id_empty=%t, local_node_id=%s",
+		localNode == nil, nodeID, nodeID == "", func() string { if localNode != nil { return localNode.ID } else { return "NIL" } }())
 	isLeader := haManager.IsLeader()
 	mode := haManager.GetDeploymentMode().String()
 	health := "healthy"

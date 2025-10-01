@@ -56,7 +56,7 @@ func TestGeographicDistribution(t *testing.T) {
 	expectedControllers := []GeographicController{
 		{
 			Name:   "controller-east",
-			URL:    "http://localhost:8080",
+			URL:    "https://localhost:9080",
 			Region: "us-east",
 			Zone:   "us-east-1a",
 			Lat:    39.0458, // Washington DC area
@@ -64,7 +64,7 @@ func TestGeographicDistribution(t *testing.T) {
 		},
 		{
 			Name:   "controller-central",
-			URL:    "http://localhost:8081",
+			URL:    "https://localhost:9081",
 			Region: "us-central",
 			Zone:   "us-central-1a",
 			Lat:    41.8781, // Chicago area
@@ -72,7 +72,7 @@ func TestGeographicDistribution(t *testing.T) {
 		},
 		{
 			Name:   "controller-west",
-			URL:    "http://localhost:8082",
+			URL:    "https://localhost:9082",
 			Region: "us-west",
 			Zone:   "us-west-1a",
 			Lat:    37.7749, // San Francisco area
@@ -267,9 +267,9 @@ func TestGeographicLoadBalancing(t *testing.T) {
 	require.NoError(t, helper.WaitForServices(ctx, 3*time.Minute, services...))
 
 	controllers := []string{
-		"http://localhost:8080",
-		"http://localhost:8081",
-		"http://localhost:8082",
+		"https://localhost:9080",
+		"https://localhost:9081",
+		"https://localhost:9082",
 	}
 
 	// Wait for cluster formation
