@@ -63,10 +63,13 @@ func NewManager(cfg *Config, logger logging.Logger, storageManager *interfaces.S
 		return nil, fmt.Errorf("failed to load HA configuration from environment: %w", err)
 	}
 
-	// Debug logging for NodeID tracking
+	// Debug logging for NodeID tracking and timing configuration
 	logger.Info("DEBUG: HA Manager initialization",
 		"node_id_after_env_load", cfg.Node.ID,
-		"node_region", cfg.Node.Region)
+		"node_region", cfg.Node.Region,
+		"node_timeout", cfg.Cluster.Discovery.NodeTimeout,
+		"election_timeout", cfg.Cluster.ElectionTimeout,
+		"heartbeat_interval", cfg.Cluster.HeartbeatInterval)
 
 	// Generate node ID if not provided
 	if cfg.Node.ID == "" {

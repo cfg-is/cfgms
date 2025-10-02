@@ -156,6 +156,21 @@ func (h *DockerComposeHelper) WaitForStewardConnections(ctx context.Context, tim
 	return fmt.Errorf("stewards did not connect within %v", timeout)
 }
 
+// StopService stops a specific service in the cluster
+func (h *DockerComposeHelper) StopService(ctx context.Context, service string) error {
+	cmd := exec.CommandContext(ctx, "docker", "compose",
+		"-f", h.ComposeFile,
+		"-p", h.ProjectName,
+		"stop", service)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to stop %s: %w\nOutput: %s", service, err, string(output))
+	}
+
+	return nil
+}
+
 // RestartService restarts a specific service in the cluster
 func (h *DockerComposeHelper) RestartService(ctx context.Context, service string) error {
 	cmd := exec.CommandContext(ctx, "docker", "compose",

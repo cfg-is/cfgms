@@ -414,6 +414,18 @@ func (c *Config) LoadFromEnvironment() error {
 		}
 	}
 
+	if nodeTimeout := os.Getenv("CFGMS_HA_NODE_TIMEOUT"); nodeTimeout != "" {
+		if timeout, err := time.ParseDuration(nodeTimeout); err == nil {
+			c.Cluster.Discovery.NodeTimeout = timeout
+		}
+	}
+
+	if discoveryInterval := os.Getenv("CFGMS_HA_DISCOVERY_INTERVAL"); discoveryInterval != "" {
+		if interval, err := time.ParseDuration(discoveryInterval); err == nil {
+			c.Cluster.Discovery.Interval = interval
+		}
+	}
+
 	if leaderLease := os.Getenv("CFGMS_HA_LEADER_LEASE_DURATION"); leaderLease != "" {
 		if duration, err := time.ParseDuration(leaderLease); err == nil {
 			c.Cluster.LeaderLeaseDuration = duration

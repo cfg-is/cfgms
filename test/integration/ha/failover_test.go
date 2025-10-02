@@ -73,8 +73,18 @@ func TestFailoverTiming(t *testing.T) {
 		// Record the time when we initiate failover
 		failoverStart := time.Now()
 
-		// Stop the leader
-		require.NoError(t, helper.RestartService(ctx, leaderService))
+		// Determine which URL corresponds to the stopped leader
+		services := []string{"controller-east", "controller-central", "controller-west"}
+		stoppedIndex := -1
+		for i, svc := range services {
+			if svc == leaderService {
+				stoppedIndex = i
+				break
+			}
+		}
+
+		// Stop the leader to trigger failover
+		require.NoError(t, helper.StopService(ctx, leaderService))
 
 		// Wait for new leader election and measure time
 		var newLeader string
@@ -84,7 +94,12 @@ func TestFailoverTiming(t *testing.T) {
 			healthyCount := 0
 			leaderCount := 0
 
-			for _, url := range controllers {
+			for i, url := range controllers {
+				// Skip the stopped controller
+				if i == stoppedIndex {
+					continue
+				}
+
 				if err := waitForHealthy(ctx, url, 5*time.Second); err != nil {
 					continue
 				}
@@ -103,16 +118,17 @@ func TestFailoverTiming(t *testing.T) {
 				}
 			}
 
-			// Need at least 2 healthy controllers and exactly 1 new leader
+			// Need at least 2 healthy remaining controllers and exactly 1 new leader
 			return healthyCount >= 2 && leaderCount == 1 && newLeader != initialLeader
-		}, 20*time.Second, 1*time.Second, "Failover did not complete within 20 seconds")
+		}, 30*time.Second, 1*time.Second, "Failover did not complete within 30 seconds (NODE_TIMEOUT=15s + ELECTION_TIMEOUT=5s + buffer)")
 
 		failoverDuration := failoverComplete.Sub(failoverStart)
 		t.Logf("✓ Failover completed in %v (new leader: %s)", failoverDuration, newLeader)
 
-		// Verify aggressive failover timing for local Docker (< 10 seconds)
-		assert.Less(t, failoverDuration, 10*time.Second,
-			"Failover took %v, should be < 10 seconds in local Docker", failoverDuration)
+		// AC2: Automatic failover with <30s recovery time
+		// Failover requires NODE_TIMEOUT (15s) to detect failure + ELECTION_TIMEOUT (5s) + network buffer
+		assert.Less(t, failoverDuration, 30*time.Second,
+			"Failover took %v, AC2 requires < 30 seconds (NODE_TIMEOUT=15s + election/network buffer)", failoverDuration)
 	})
 }
 

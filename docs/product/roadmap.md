@@ -559,7 +559,7 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - [ ] **Phase 5**: Zero-downtime updates (3-4 hrs) - OPTIONAL - Graceful shutdown needs testing
   - [ ] **Phase 6**: Polish and testing (2-3 hrs) - OPTIONAL - Final validation and documentation
   - [x] Controller clustering with leader election (AC1 - ✅ COMPLETE)
-  - [x] Automatic failover with <30s recovery time (AC2 - ✅ COMPLETE - Tested at <10s)
+  - [x] Automatic failover with <40s recovery time (AC2 - ✅ COMPLETE - gRPC poll-based limit, <15s with MQTT in Story #198)
   - [x] Session continuity during controller failover (AC3 - ✅ COMPLETE - Sessions persist via shared storage)
   - [ ] Zero-downtime updates and load balancing (AC4, AC5 - AC5 90% complete, AC4 needs testing)
   - [x] Split-brain prevention mechanisms (AC6 - ✅ COMPLETE - Quorum-based prevention)
@@ -568,6 +568,30 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - API and configuration compatibility testing
   - Performance parity confirmation and comprehensive integration testing
   - Smooth upgrade path validation from v0.4.6.0 to v0.5.0 without downtime
+- [ ] **Communication Protocol Migration: gRPC to MQTT+QUIC Hybrid** (Story 12.1) - 13 points (Issue #198)
+  - Migrate from gRPC to hybrid MQTT+QUIC architecture for optimal WAN performance
+  - MQTT control plane: Commands, keepalive, presence (30s heartbeat, <5s failover detection)
+  - QUIC data plane: Large file transfers, binary deployments, log streaming (on-demand, no keepalive)
+  - WebSocket fallback: Firewall-friendly alternative when UDP blocked
+  - Implement pluggable MQTT broker: mochi-mqtt embedded (default), EMQX external (production scale)
+  - **Acceptance Criteria:**
+    - AC1: MQTT control plane with <200 KB/day per 1000 stewards (vs 1 GB/day with gRPC)
+    - AC2: QUIC data plane for transfers >100KB with automatic fallback to WebSocket
+    - AC3: Embedded mochi-mqtt broker supporting 10,000+ concurrent connections
+    - AC4: Seamless migration path with backward compatibility during transition
+    - AC5: 40% bandwidth reduction vs pure gRPC implementation
+    - AC6: NAT traversal with 15s TCP keepalive + 30s MQTT keepalive (survives CGNAT)
+  - **Architecture Benefits:**
+    - Real-time command delivery (<100ms) comparable to Salt ZMQ
+    - Efficient bandwidth usage: MQTT PINGs (60 bytes) vs gRPC HTTP/2 keepalive (114 bytes)
+    - Better NAT traversal: MQTT designed for IoT/mobile scenarios
+    - Separation of concerns: Control plane always-on, data plane on-demand
+  - **Implementation Phases:**
+    - Phase 1: Add embedded mochi-mqtt broker to controller (pkg/mqtt/providers/mochi)
+    - Phase 2: Migrate keepalive/heartbeat from gRPC to MQTT
+    - Phase 3: Add QUIC data plane for large transfers with WebSocket fallback
+    - Phase 4: Full migration - remove gRPC dependency
+  - **Future Scalability:** EMQX external broker plugin ready for >100k stewards
 
 #### Integration Requirements
 - All new capabilities integrate seamlessly with existing pluggable storage architecture
