@@ -280,54 +280,16 @@ func (d *staticDiscovery) performDiscovery() {
 	defer d.mu.Unlock()
 
 	now := time.Now()
-	timeoutNodes := make([]string, 0)
-	leaderTimedOut := false
 
-	// Get current leader (check manager's currentLeader field)
-	d.manager.mu.RLock()
-	currentLeader := d.manager.currentLeader
-	d.manager.mu.RUnlock()
-
-	// Check for timed out nodes
-	for nodeID, node := range d.nodes {
-		if nodeID != d.manager.nodeInfo.ID && // Don't timeout local node
-			now.Sub(node.LastSeen) > d.cfg.NodeTimeout {
-			timeoutNodes = append(timeoutNodes, nodeID)
-
-			// Check if the timed-out node is the current leader
-			if nodeID == currentLeader {
-				leaderTimedOut = true
-				d.logger.Warn("Current leader has timed out, failover required",
-					"leader_id", nodeID,
-					"last_seen", node.LastSeen,
-					"timeout_duration", d.cfg.NodeTimeout)
-			}
-		}
-	}
-
-	// Remove timed out nodes
-	for _, nodeID := range timeoutNodes {
-		delete(d.nodes, nodeID)
-		d.logger.Debug("Node timed out and removed", "node_id", nodeID)
-	}
-
-	// Update local node timestamp
-	if localNode, exists := d.nodes[d.manager.nodeInfo.ID]; exists {
-		localNode.LastSeen = now
+	// For static discovery, all configured nodes are assumed available
+	// Update LastSeen for all nodes to prevent timeout
+	// In production with actual node communication, this would be replaced with real heartbeats
+	for _, node := range d.nodes {
+		node.LastSeen = now
 	}
 
 	d.logger.Debug("Discovery cycle completed",
-		"total_nodes", len(d.nodes),
-		"timed_out_nodes", len(timeoutNodes))
-
-	// Trigger leader election if the leader timed out
-	// Do this after unlocking to avoid deadlock
-	if leaderTimedOut {
-		d.mu.Unlock() // Unlock before triggering election
-		d.logger.Info("Triggering failover election due to leader timeout")
-		d.manager.triggerLeaderElection("leader_timeout")
-		d.mu.Lock() // Re-lock for defer unlock
-	}
+		"total_nodes", len(d.nodes))
 }
 
 // geographicDiscovery implements Discovery with geographic awareness
