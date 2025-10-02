@@ -24,28 +24,52 @@ func NewDockerComposeHelper() *DockerComposeHelper {
 
 // StartCluster starts the HA cluster using Docker Compose
 func (h *DockerComposeHelper) StartCluster(ctx context.Context) error {
-	// First force a clean rebuild with no cache to ensure latest code changes
+	// Step 1: Complete cleanup - remove all containers, networks, volumes, and images
+	fmt.Println("Step 1/4: Cleaning up existing Docker resources...")
+	cleanupCmd := exec.CommandContext(ctx, "docker", "compose",
+		"-f", h.ComposeFile,
+		"-p", h.ProjectName,
+		"down", "-v", "--rmi", "all", "--remove-orphans")
+
+	cleanupOutput, err := cleanupCmd.CombinedOutput()
+	if err != nil {
+		// Don't fail on cleanup errors - might not exist
+		fmt.Printf("Cleanup warnings (non-fatal): %s\n", string(cleanupOutput))
+	}
+
+	// Step 2: Prune Docker build cache for this project to force complete rebuild
+	fmt.Println("Step 2/4: Pruning Docker build cache...")
+	pruneCmd := exec.CommandContext(ctx, "docker", "builder", "prune", "-f")
+	pruneOutput, err := pruneCmd.CombinedOutput()
+	if err != nil {
+		fmt.Printf("Build cache prune warnings (non-fatal): %s\n", string(pruneOutput))
+	}
+
+	// Step 3: Build images from scratch with no cache
+	fmt.Println("Step 3/4: Building fresh Docker images (no cache)...")
 	buildCmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
 		"-p", h.ProjectName,
-		"build", "--no-cache")
+		"build", "--no-cache", "--pull")
 
 	buildOutput, err := buildCmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to build images: %w\nOutput: %s", err, string(buildOutput))
 	}
 
-	// Start the cluster with the freshly built images
+	// Step 4: Start the cluster with freshly built images
+	fmt.Println("Step 4/4: Starting HA cluster...")
 	startCmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
 		"-p", h.ProjectName,
-		"up", "-d")
+		"up", "-d", "--force-recreate")
 
 	startOutput, err := startCmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to start cluster: %w\nOutput: %s", err, string(startOutput))
 	}
 
+	fmt.Println("HA cluster started successfully with fresh images")
 	return nil
 }
 
