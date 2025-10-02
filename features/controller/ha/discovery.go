@@ -2,8 +2,10 @@ package ha
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -277,19 +279,77 @@ func (d *staticDiscovery) periodicDiscovery() {
 	}
 }
 
+// checkNodeHealth performs a simple HTTP health check on a node
+func (d *staticDiscovery) checkNodeHealth(node *NodeInfo) bool {
+	if node.Address == "" {
+		return false
+	}
+
+	// Simple HTTP GET to check if node is responding
+	// Use HTTPS and skip cert verification for testing
+	client := &http.Client{
+		Timeout: 2 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
+
+	url := fmt.Sprintf("https://%s/healthz", node.Address)
+	resp, err := client.Get(url)
+	if err != nil {
+		// Check if it's a TLS handshake error - means server is up but requires client cert
+		if strings.Contains(err.Error(), "tls:") || strings.Contains(err.Error(), "certificate") {
+			log.Printf("HEALTH_CHECK: Node up (TLS handshake), node_id=%s, address=%s", node.ID, node.Address)
+			return true // Server is up, just needs mTLS
+		}
+		log.Printf("HEALTH_CHECK: Node unreachable, node_id=%s, address=%s, error=%v", node.ID, node.Address, err)
+		return false
+	}
+	defer resp.Body.Close()
+
+	isHealthy := resp.StatusCode == 200 || resp.StatusCode == 404 || resp.StatusCode == 401 // Any response means server is up
+	log.Printf("HEALTH_CHECK: Node checked, node_id=%s, address=%s, status=%d, healthy=%v",
+		node.ID, node.Address, resp.StatusCode, isHealthy)
+	return isHealthy
+}
+
 // performDiscovery performs a discovery cycle
 func (d *staticDiscovery) performDiscovery() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
 	now := time.Now()
+	timeoutThreshold := now.Add(-d.cfg.NodeTimeout)
 
-	// For static discovery, all configured nodes are assumed available
-	// Update LastSeen for all nodes to prevent timeout
-	// In production with actual node communication, this would be replaced with real heartbeats
+	// Check for nodes that have timed out and trigger election if leader times out
+	localNode := d.manager.GetLocalNode()
+	currentLeader, _ := d.manager.GetLeader()
+
 	for nodeID, node := range d.nodes {
-		node.LastSeen = now
-		log.Printf("DISCOVERY_CYCLE: Updated node LastSeen, node_id=%s, last_seen=%v", nodeID, now)
+		// Always keep local node alive
+		if localNode != nil && nodeID == localNode.ID {
+			node.LastSeen = now
+			continue
+		}
+
+		// Check if remote node is healthy
+		if d.checkNodeHealth(node) {
+			// Node is reachable, update LastSeen
+			node.LastSeen = now
+		}
+		// If health check fails, don't update LastSeen - let it timeout
+
+		// Check if node has timed out
+		if node.LastSeen.Before(timeoutThreshold) {
+			log.Printf("DISCOVERY_CYCLE: Node timed out, node_id=%s, last_seen=%v, timeout_threshold=%v",
+				nodeID, node.LastSeen, timeoutThreshold)
+
+			// If the timed-out node is the leader, trigger election
+			if currentLeader != nil && nodeID == currentLeader.ID {
+				log.Printf("DISCOVERY_CYCLE: Leader has timed out, triggering election, leader_id=%s", nodeID)
+				go d.manager.triggerLeaderElection("leader timeout detected")
+			}
+		}
 	}
 
 	log.Printf("DISCOVERY_CYCLE: Discovery cycle completed, total_nodes=%d", len(d.nodes))
