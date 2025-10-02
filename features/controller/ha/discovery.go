@@ -281,12 +281,27 @@ func (d *staticDiscovery) performDiscovery() {
 
 	now := time.Now()
 	timeoutNodes := make([]string, 0)
+	leaderTimedOut := false
+
+	// Get current leader (check manager's currentLeader field)
+	d.manager.mu.RLock()
+	currentLeader := d.manager.currentLeader
+	d.manager.mu.RUnlock()
 
 	// Check for timed out nodes
 	for nodeID, node := range d.nodes {
 		if nodeID != d.manager.nodeInfo.ID && // Don't timeout local node
 			now.Sub(node.LastSeen) > d.cfg.NodeTimeout {
 			timeoutNodes = append(timeoutNodes, nodeID)
+
+			// Check if the timed-out node is the current leader
+			if nodeID == currentLeader {
+				leaderTimedOut = true
+				d.logger.Warn("Current leader has timed out, failover required",
+					"leader_id", nodeID,
+					"last_seen", node.LastSeen,
+					"timeout_duration", d.cfg.NodeTimeout)
+			}
 		}
 	}
 
@@ -304,6 +319,15 @@ func (d *staticDiscovery) performDiscovery() {
 	d.logger.Debug("Discovery cycle completed",
 		"total_nodes", len(d.nodes),
 		"timed_out_nodes", len(timeoutNodes))
+
+	// Trigger leader election if the leader timed out
+	// Do this after unlocking to avoid deadlock
+	if leaderTimedOut {
+		d.mu.Unlock() // Unlock before triggering election
+		d.logger.Info("Triggering failover election due to leader timeout")
+		d.manager.triggerLeaderElection("leader_timeout")
+		d.mu.Lock() // Re-lock for defer unlock
+	}
 }
 
 // geographicDiscovery implements Discovery with geographic awareness

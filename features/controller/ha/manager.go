@@ -570,6 +570,70 @@ func (m *Manager) demoteFromLeader() {
 }
 
 // performInitialLeaderElection performs the initial leader election for cluster mode
+// triggerLeaderElection triggers a new leader election with available nodes
+func (m *Manager) triggerLeaderElection(reason string) {
+	m.logger.Info("Triggering leader election", "reason", reason)
+
+	// Get current cluster nodes
+	nodes, err := m.GetClusterNodes()
+	if err != nil {
+		m.logger.Error("Failed to get cluster nodes for election", "error", err)
+		return
+	}
+
+	// Collect healthy candidates
+	var candidates []*NodeInfo
+	for _, node := range nodes {
+		if node.State == NodeStateHealthy {
+			candidates = append(candidates, node)
+		}
+	}
+
+	if len(candidates) == 0 {
+		m.logger.Warn("No healthy candidates for leader election")
+		// As fallback, promote self if no other nodes found
+		localNode := m.GetLocalNode()
+		m.logger.Info("No other candidates found, promoting self as leader", "node_id", localNode.ID)
+		m.promoteToLeader()
+		return
+	}
+
+	// Find the candidate with the lowest ID (lexicographically) - deterministic election
+	var chosenLeader *NodeInfo
+	for _, candidate := range candidates {
+		if chosenLeader == nil || candidate.ID < chosenLeader.ID {
+			chosenLeader = candidate
+		}
+	}
+
+	if chosenLeader == nil {
+		m.logger.Error("Failed to select leader from candidates")
+		return
+	}
+
+	localNode := m.GetLocalNode()
+	m.logger.Info("Leader election result",
+		"chosen_leader", chosenLeader.ID,
+		"local_node", localNode.ID,
+		"total_candidates", len(candidates),
+		"reason", reason)
+
+	if chosenLeader.ID == localNode.ID {
+		// This node should become the leader
+		m.logger.Info("Local node selected as new leader", "node_id", localNode.ID)
+		m.promoteToLeader()
+	} else {
+		// Another node should be the leader
+		m.logger.Info("Remote node selected as new leader",
+			"leader_id", chosenLeader.ID,
+			"local_id", localNode.ID)
+
+		m.mu.Lock()
+		m.currentLeader = chosenLeader.ID
+		m.mu.Unlock()
+	}
+}
+
 func (m *Manager) performInitialLeaderElection() {
 	m.logger.Info("DEBUG: Starting initial leader election process...")
 
@@ -643,56 +707,8 @@ func (m *Manager) performInitialLeaderElection() {
 		return
 	}
 
-	// Proceed with leader election using discovered nodes
-	var candidates []*NodeInfo
-	for _, node := range nodes {
-		if node.State == NodeStateHealthy {
-			candidates = append(candidates, node)
-		}
-	}
-
-	if len(candidates) == 0 {
-		m.logger.Warn("No healthy candidates for initial leader election after discovery")
-		// As fallback, promote self if no other nodes found
-		localNode := m.GetLocalNode()
-		m.logger.Info("DEBUG: No other candidates found, promoting self as leader", "node_id", localNode.ID)
-		m.promoteToLeader()
-		return
-	}
-
-	// Find the candidate with the lowest ID (lexicographically)
-	var chosenLeader *NodeInfo
-	for _, candidate := range candidates {
-		if chosenLeader == nil || candidate.ID < chosenLeader.ID {
-			chosenLeader = candidate
-		}
-	}
-
-	if chosenLeader == nil {
-		m.logger.Error("Failed to select initial leader")
-		return
-	}
-
-	localNode := m.GetLocalNode()
-	m.logger.Info("DEBUG: Leader election result",
-		"chosen_leader", chosenLeader.ID,
-		"local_node", localNode.ID,
-		"total_candidates", len(candidates))
-
-	if chosenLeader.ID == localNode.ID {
-		// This node should become the leader
-		m.logger.Info("DEBUG: Local node selected as initial leader", "node_id", localNode.ID)
-		m.promoteToLeader()
-	} else {
-		// Another node should be the leader
-		m.logger.Info("DEBUG: Remote node selected as initial leader",
-			"leader_id", chosenLeader.ID,
-			"local_id", localNode.ID)
-
-		m.mu.Lock()
-		m.currentLeader = chosenLeader.ID
-		m.mu.Unlock()
-	}
+	// Use the common election logic
+	m.triggerLeaderElection("initial_election")
 }
 
 // getExternalAddress determines the external address for the node (reserved for future use)
