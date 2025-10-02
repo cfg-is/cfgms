@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 
+	"go.etcd.io/raft/v3"
+
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
@@ -21,7 +23,8 @@ type Manager struct {
 	// Core components
 	nodeInfo      *NodeInfo
 	healthChecker *HealthChecker
-	discovery     Discovery
+	raftConsensus *RaftConsensus // NEW: Raft-based consensus (replaces discovery + custom election)
+	discovery     Discovery      // DEPRECATED: Will be removed
 	loadBalancer  LoadBalancer
 	failover      FailoverManager
 	splitBrain    SplitBrainDetector
@@ -277,7 +280,12 @@ func (m *Manager) GetClusterNodes() ([]*NodeInfo, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	// If discovery is available, use it to get the full cluster view
+	// Use Raft consensus if available (NEW)
+	if m.raftConsensus != nil {
+		return m.raftConsensus.GetClusterNodes(), nil
+	}
+
+	// If old discovery is available, use it (DEPRECATED)
 	if m.discovery != nil {
 		discoveredNodes, err := m.discovery.DiscoverNodes()
 		if err != nil {
@@ -302,6 +310,13 @@ func (m *Manager) GetClusterNodes() ([]*NodeInfo, error) {
 func (m *Manager) IsLeader() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+
+	// Use Raft consensus if available (NEW)
+	if m.raftConsensus != nil {
+		return m.raftConsensus.IsLeader()
+	}
+
+	// Fallback to old method (DEPRECATED)
 	return m.isLeader
 }
 
@@ -310,6 +325,12 @@ func (m *Manager) GetLeader() (*NodeInfo, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
+	// Use Raft consensus if available (NEW)
+	if m.raftConsensus != nil {
+		return m.raftConsensus.GetLeaderInfo()
+	}
+
+	// Fallback to old method (DEPRECATED)
 	if m.currentLeader == "" {
 		return nil, fmt.Errorf("no leader elected")
 	}
@@ -382,14 +403,21 @@ func (m *Manager) initializeComponents() error {
 func (m *Manager) initializeClusterComponents() error {
 	var err error
 
-	// Initialize discovery - TEMPORARILY DISABLED to fix hang
-	// Re-enabled Discovery component - Step 1 of systematic HA re-enabling
-	m.logger.Info("DEBUG: About to initialize discovery...")
+	// Initialize Raft consensus (replaces old discovery + custom leader election)
+	m.logger.Info("DEBUG: About to initialize Raft consensus...")
+	if err := m.initializeRaftConsensus(); err != nil {
+		return fmt.Errorf("failed to initialize Raft consensus: %w", err)
+	}
+	m.logger.Info("DEBUG: Raft consensus initialization completed successfully")
+
+	// DEPRECATED: Old discovery - kept temporarily for compatibility
+	// TODO: Remove after full Raft migration
+	m.logger.Info("DEBUG: About to initialize legacy discovery (deprecated)...")
 	m.discovery, err = NewDiscovery(m.cfg.Cluster.Discovery, m.logger, m)
 	if err != nil {
 		return fmt.Errorf("failed to initialize discovery: %w", err)
 	}
-	m.logger.Info("DEBUG: Discovery initialization completed successfully")
+	m.logger.Info("DEBUG: Legacy discovery initialization completed successfully")
 
 	// Re-enabled LoadBalancer component - Step 2 of systematic HA re-enabling
 	m.logger.Info("DEBUG: About to initialize load balancer...")
@@ -426,6 +454,77 @@ func (m *Manager) initializeClusterComponents() error {
 	return nil
 }
 
+// initializeRaftConsensus initializes the Raft consensus layer
+func (m *Manager) initializeRaftConsensus() error {
+	// Parse node ID as uint64 for Raft
+	// Use a simple hash of the node ID string
+	nodeID := hashStringToUint64(m.nodeInfo.ID)
+
+	// Build peer list from cluster configuration
+	peers := make([]raft.Peer, 0)
+
+	// Parse cluster nodes from config
+	if clusterNodes := m.cfg.Cluster.Discovery.Config["nodes"]; clusterNodes != nil {
+		if nodes, ok := clusterNodes.([]interface{}); ok {
+			for _, n := range nodes {
+				if nodeMap, ok := n.(map[string]interface{}); ok {
+					if id, ok := nodeMap["id"].(string); ok {
+						peerID := hashStringToUint64(id)
+						peers = append(peers, raft.Peer{
+							ID:      peerID,
+							Context: []byte(id), // Store original string ID
+						})
+					}
+				}
+			}
+		}
+	}
+
+	// Create Raft consensus
+	var err error
+	m.raftConsensus, err = NewRaftConsensus(context.Background(), nodeID, m.nodeInfo, peers, m.logger)
+	if err != nil {
+		return fmt.Errorf("failed to create Raft consensus: %w", err)
+	}
+
+	// Create and attach transport
+	transport := newRaftTransport(nodeID, m.nodeInfo.Address, m.raftConsensus)
+	m.raftConsensus.transport = transport
+
+	// Add peer addresses to transport
+	if clusterNodes := m.cfg.Cluster.Discovery.Config["nodes"]; clusterNodes != nil {
+		if nodes, ok := clusterNodes.([]interface{}); ok {
+			for _, n := range nodes {
+				if nodeMap, ok := n.(map[string]interface{}); ok {
+					if id, ok := nodeMap["id"].(string); ok {
+						if addr, ok := nodeMap["address"].(string); ok {
+							peerID := hashStringToUint64(id)
+							if peerID != nodeID { // Don't add self
+								transport.AddPeer(peerID, addr)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	m.logger.Info("Raft consensus initialized",
+		"node_id", nodeID,
+		"peer_count", len(peers))
+
+	return nil
+}
+
+// hashStringToUint64 converts a string to a deterministic uint64
+func hashStringToUint64(s string) uint64 {
+	var hash uint64
+	for i := 0; i < len(s); i++ {
+		hash = hash*31 + uint64(s[i])
+	}
+	return hash
+}
+
 // initializeBlueGreenComponents initializes components for blue-green mode
 func (m *Manager) initializeBlueGreenComponents() error {
 	// For blue-green mode, we need minimal components
@@ -444,12 +543,22 @@ func (m *Manager) initializeBlueGreenComponents() error {
 func (m *Manager) startClusterMode() error {
 	m.logger.Info("DEBUG: Starting cluster mode components...")
 
+	// Start Raft consensus (NEW - replaces old leader election)
+	if m.raftConsensus != nil {
+		m.logger.Info("DEBUG: About to start Raft consensus...")
+		if err := m.raftConsensus.Start(); err != nil {
+			return fmt.Errorf("failed to start Raft consensus: %w", err)
+		}
+		m.logger.Info("DEBUG: Raft consensus started successfully")
+	}
+
+	// DEPRECATED: Old discovery - will be removed
 	if m.discovery != nil {
-		m.logger.Info("DEBUG: About to start discovery component...")
+		m.logger.Info("DEBUG: About to start legacy discovery component (deprecated)...")
 		if err := m.discovery.Start(m.ctx); err != nil {
 			return fmt.Errorf("failed to start discovery: %w", err)
 		}
-		m.logger.Info("DEBUG: Discovery component started successfully")
+		m.logger.Info("DEBUG: Legacy discovery component started successfully")
 	} else {
 		m.logger.Info("DEBUG: Discovery component is nil (disabled), skipping start")
 	}
