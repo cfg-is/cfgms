@@ -997,7 +997,7 @@ test-integration-status:
 	fi
 
 # Run unified integration tests with complete Docker infrastructure
-# This starts HA cluster + standalone controller and runs all integration tests
+# This runs HA tests (which manage their own cluster) + standalone/in-process tests
 test-integration-unified:
 	@echo "🚀 Running Unified Integration Tests (HA + Standalone)"
 	@echo "======================================================"
@@ -1005,21 +1005,25 @@ test-integration-unified:
 		echo "❌ .env.test not found. Run: make test-integration-setup"; \
 		exit 1; \
 	fi
-	@echo "🐳 Starting complete test infrastructure (HA cluster + standalone controller)..."
-	@set -a && . ./.env.test && set +a && \
-	docker compose -f docker-compose.test.yml --profile ha --profile timescale up -d
-	@echo "⏳ Waiting for all services to be healthy..."
-	@sleep 15
 	@echo ""
-	@echo "🧪 Running HA cluster tests..."
+	@echo "🧪 Running HA cluster tests (self-managed infrastructure)..."
 	@set -a && . ./.env.test && set +a && \
 	go test -v -race ./test/integration/ha/... -timeout=20m || (echo "❌ HA tests failed"; exit 1)
 	@echo ""
-	@echo "🧪 Running standalone controller tests..."
+	@echo "🐳 Starting standalone controller for Docker integration tests..."
+	@set -a && . ./.env.test && set +a && \
+	docker compose -f docker-compose.test.yml --profile ha --profile timescale up -d controller-standalone
+	@echo "⏳ Waiting for standalone controller to be healthy..."
+	@sleep 10
+	@echo ""
+	@echo "🧪 Running standalone Docker controller tests..."
 	@CFGMS_TEST_DOCKER_CONTROLLER=localhost:50054 go test -v -race ./test/integration -run TestDocker -timeout=10m || (echo "❌ Standalone tests failed"; exit 1)
 	@echo ""
 	@echo "🧪 Running in-process integration tests..."
 	@go test -v -race ./test/integration -run TestDetailedIntegration -timeout=10m || (echo "❌ In-process tests failed"; exit 1)
+	@echo ""
+	@echo "🧹 Cleaning up standalone controller..."
+	@docker compose -f docker-compose.test.yml --profile ha down || true
 	@echo ""
 	@echo "✅ All unified integration tests passed!"
 
