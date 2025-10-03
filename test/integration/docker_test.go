@@ -32,7 +32,7 @@ func (s *DockerIntegrationTestSuite) SetupSuite() {
 		s.T().Skipf("Docker controller not available at %s: %v", dockerAddr, err)
 		return
 	}
-	conn.Close()
+	_ = conn.Close()
 
 	s.T().Logf("Connecting to Docker controller at %s", dockerAddr)
 	s.env = testutil.NewTestEnvWithDocker(s.T(), dockerAddr)
