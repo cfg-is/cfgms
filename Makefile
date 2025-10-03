@@ -996,13 +996,40 @@ test-integration-status:
 		./scripts/wait-for-services.sh || echo "⚠️  Some services may not be ready"; \
 	fi
 
+# Run unified integration tests with complete Docker infrastructure
+# This starts HA cluster + standalone controller and runs all integration tests
+test-integration-unified:
+	@echo "🚀 Running Unified Integration Tests (HA + Standalone)"
+	@echo "======================================================"
+	@if [ ! -f .env.test ]; then \
+		echo "❌ .env.test not found. Run: make test-integration-setup"; \
+		exit 1; \
+	fi
+	@echo "🐳 Starting complete test infrastructure (HA cluster + standalone controller)..."
+	@set -a && . ./.env.test && set +a && \
+	docker compose -f docker-compose.test.yml --profile ha --profile timescale up -d
+	@echo "⏳ Waiting for all services to be healthy..."
+	@sleep 15
+	@echo ""
+	@echo "🧪 Running HA cluster tests..."
+	@set -a && . ./.env.test && set +a && \
+	go test -v -race ./test/integration/ha/... -timeout=20m || (echo "❌ HA tests failed"; exit 1)
+	@echo ""
+	@echo "🧪 Running standalone controller tests..."
+	@CFGMS_TEST_DOCKER_CONTROLLER=localhost:50054 go test -v -race ./test/integration -run TestDocker -timeout=10m || (echo "❌ Standalone tests failed"; exit 1)
+	@echo ""
+	@echo "🧪 Running in-process integration tests..."
+	@go test -v -race ./test/integration -run TestDetailedIntegration -timeout=10m || (echo "❌ In-process tests failed"; exit 1)
+	@echo ""
+	@echo "✅ All unified integration tests passed!"
+
 # Run integration tests against real storage providers
 test-with-real-storage:
 	@echo "🧪 Running CFGMS Integration Tests with Real Storage"
 	@echo "=================================================="
 	@echo "Testing with Docker-based PostgreSQL and Gitea..."
 	@echo ""
-	@./scripts/test-with-infrastructure.sh go test -v -race ./pkg/testing/storage/... ./features/controller/server/... ./test/integration/... -timeout=10m
+	@./scripts/test-with-infrastructure.sh go test -v -race ./pkg/testing/storage/... ./features/controller/server/... ./test/integration/baseline/... ./test/integration/compliance/... ./test/integration/core/... ./test/integration/e2e/... ./test/integration/logging/... ./test/integration/security/... ./test/integration/stress/... -timeout=15m
 	@echo ""
 	@echo "🔬 Running storage provider validation tests..."
 	@if [ -f .env.test ]; then \

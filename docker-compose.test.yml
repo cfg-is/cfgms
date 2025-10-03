@@ -398,6 +398,64 @@ services:
     profiles:
       - ha
 
+  # ============================================================================
+  # STANDALONE CONTROLLER (Non-HA)
+  # Used for integration testing single-controller functionality
+  # Runs alongside HA cluster to validate both architectures in parallel
+  # Start with: docker compose --profile ha up (included in HA profile)
+  # ============================================================================
+
+  controller-standalone:
+    container_name: controller-standalone
+    build:
+      context: .
+      dockerfile: cmd/controller/Dockerfile
+    ports:
+      - "50054:50051"  # gRPC on different port to avoid HA cluster conflicts
+      - "8090:8090"    # HTTP API
+    environment:
+      CFGMS_NODE_ID: "controller-standalone"
+      CFGMS_LISTEN_ADDR: "0.0.0.0:50051"
+      CFGMS_HTTP_LISTEN_ADDR: "0.0.0.0:8090"
+      CFGMS_STORAGE_PROVIDER: "database"
+      CFGMS_DB_HOST: "timescaledb-test"  # Share database with HA cluster
+      CFGMS_DB_PORT: "5432"
+      CFGMS_DB_NAME: "cfgms_ha_test"
+      CFGMS_DB_USER: "cfgms_test"
+      CFGMS_DB_PASSWORD: "${TIMESCALEDB_PASSWORD:-cfgms_test_password}"
+      CFGMS_DB_SSLMODE: "disable"
+      CFGMS_LOG_LEVEL: "debug"
+      CFGMS_LOG_PROVIDER: "file"
+      CFGMS_LOG_DIR: "/tmp/cfgms"
+      CFGMS_TIMESCALE_HOST: "timescaledb-test"
+      CFGMS_TIMESCALE_PORT: "5432"
+      CFGMS_TIMESCALE_DATABASE: "cfgms_ha_test"
+      CFGMS_TIMESCALE_USER: "cfgms_test"
+      CFGMS_TIMESCALE_PASSWORD: "${TIMESCALEDB_PASSWORD:-cfgms_test_password}"
+      # Disable HA to run in standalone mode
+      CFGMS_HA_ENABLED: "false"
+      CFGMS_CERT_PATH: "/app/certs"
+      CFGMS_DATA_DIR: "/app/data"
+      CFGMS_TLS_CERT: "/app/certs/server.crt"
+      CFGMS_TLS_KEY: "/app/certs/server.key"
+      CFGMS_TLS_CA: "/app/certs/ca.crt"
+    volumes:
+      - ./test/certs:/app/certs:ro
+      - controller_standalone_data:/app/data
+    depends_on:
+      timescaledb-test:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "grpc_health_probe", "-addr=:50051", "-connect-timeout=2s"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - cfgms-test
+    profiles:
+      - ha  # Include in HA profile to run everything together
+
 volumes:
   postgres_test_data:
     driver: local
@@ -418,6 +476,12 @@ volumes:
       device: tmpfs
       o: size=256m
   gitea_ha_data:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=256m
+  controller_standalone_data:
     driver: local
     driver_opts:
       type: tmpfs
