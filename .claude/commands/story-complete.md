@@ -47,28 +47,61 @@ gh issue view [story_number] --json body,title,state,assignees
 
 After successful validation, creates comprehensive PR:
 
+### 0. Git Workflow Validation (MANDATORY)
+
+**CRITICAL RULE**: All feature branches MUST create PRs to `develop` branch, NEVER to `main`.
+
+**Branch Validation**:
+```bash
+# Check current branch and validate target
+current_branch=$(git branch --show-current)
+if [[ $current_branch == feature/* ]]; then
+  target_branch="develop"  # ALWAYS develop for feature branches
+else
+  echo "ERROR: Can only complete stories from feature/* branches"
+  exit 1
+fi
+```
+
+**Git Workflow Rules**:
+- ✅ **Feature branches** → `develop` (standard workflow)
+- ✅ **Hotfix branches** → `main` (emergency only)
+- ❌ **Feature to main**: BLOCKED - violates git workflow
+- ❌ **Non-feature branches**: BLOCKED - must be on feature branch
+
+**Automatic Base Correction**:
+- If PR accidentally targets `main`, automatically change to `develop`
+- Log warning about incorrect base branch
+- Update PR with correct base before proceeding
+
 ### 1. Duplicate PR Detection & Smart Handling
 ```bash
 gh pr list --head [current-branch] --state=open
 ```
 **Automatic Behavior**:
-- ✅ **IF no existing PR**: Creates new PR with full template
-- ✅ **IF existing PR found**: Automatically updates existing PR description
+- ✅ **IF no existing PR**: Creates new PR with full template targeting `develop`
+- ✅ **IF existing PR found**: Automatically updates existing PR description and validates base is `develop`
 - ✅ **Prevents** duplicate PR creation entirely
+- ⚠️ **Base Branch Validation**: Ensures PR targets `develop`, not `main`
 - ℹ️ **Informs** user which PR was updated with link
 
 **Commands Used**:
 ```bash
 # If existing PR found:
-gh pr edit [pr-number] --body "[updated-template]"
+gh pr edit [pr-number] --body "[updated-template]" --base develop  # Enforce develop
 # If no existing PR:
-gh pr create --base develop --title "[title]" --body "[template]"
+gh pr create --base develop --title "[title]" --body "[template]"  # ALWAYS develop
 ```
 
 ### 2. PR Template Generation
 ```bash
 gh pr create --base develop --title "Implement Story #[NUMBER]: [title]" --body "[template]"
 ```
+
+**Base Branch Policy**:
+- 🎯 **Default**: `develop` (enforced for all feature branches)
+- ⚠️ **Never**: `main` (blocked by validation)
+- 📋 **Workflow**: Feature → Develop → Main (via release PRs)
 
 **Template includes**:
 ```markdown
