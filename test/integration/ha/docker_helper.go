@@ -15,20 +15,23 @@ type DockerComposeHelper struct {
 }
 
 // NewDockerComposeHelper creates a new Docker Compose helper
+// Uses the unified docker-compose.test.yml with --profile ha
 func NewDockerComposeHelper() *DockerComposeHelper {
 	return &DockerComposeHelper{
-		ComposeFile: "docker-compose.yml",
-		ProjectName: "cfgms-ha-test",
+		ComposeFile: "../../../docker-compose.test.yml",  // Unified test configuration
+		ProjectName: "cfgms-test",  // Use same project name as other integration tests
 	}
 }
 
-// StartCluster starts the HA cluster using Docker Compose
+// StartCluster starts the HA cluster using Docker Compose with --profile ha
 func (h *DockerComposeHelper) StartCluster(ctx context.Context) error {
 	// Step 1: Complete cleanup - remove all containers, networks, volumes, and images
 	fmt.Println("Step 1/4: Cleaning up existing Docker resources...")
 	cleanupCmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
 		"-p", h.ProjectName,
+		"--profile", "ha",
+		"--profile", "timescale",  // Also include timescaledb-test
 		"down", "-v", "--rmi", "all", "--remove-orphans")
 
 	cleanupOutput, err := cleanupCmd.CombinedOutput()
@@ -50,6 +53,8 @@ func (h *DockerComposeHelper) StartCluster(ctx context.Context) error {
 	buildCmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
 		"-p", h.ProjectName,
+		"--profile", "ha",
+		"--profile", "timescale",
 		"build", "--no-cache", "--pull")
 
 	buildOutput, err := buildCmd.CombinedOutput()
@@ -62,6 +67,8 @@ func (h *DockerComposeHelper) StartCluster(ctx context.Context) error {
 	startCmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
 		"-p", h.ProjectName,
+		"--profile", "ha",
+		"--profile", "timescale",
 		"up", "-d", "--force-recreate")
 
 	startOutput, err := startCmd.CombinedOutput()
@@ -78,6 +85,8 @@ func (h *DockerComposeHelper) StopCluster(ctx context.Context) error {
 	cmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
 		"-p", h.ProjectName,
+		"--profile", "ha",
+		"--profile", "timescale",
 		"down", "-v", "--remove-orphans")
 
 	output, err := cmd.CombinedOutput()
