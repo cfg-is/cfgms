@@ -27,6 +27,8 @@ services:
       start_period: 30s
     networks:
       - cfgms-test
+    profiles:
+      - database  # Only start with --profile database
 
   # TimescaleDB database for time-series logging provider testing AND HA cluster storage
   # This service is shared between logging tests and HA integration tests
@@ -94,6 +96,8 @@ services:
       - cfgms-test
     depends_on:
       - postgres-test
+    profiles:
+      - git  # Only start with --profile git
 
   # Redis for session/cache testing (future Epic support)
   redis-test:
