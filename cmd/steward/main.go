@@ -12,6 +12,14 @@ import (
 
 	"github.com/cfgis/cfgms/features/steward"
 	"github.com/cfgis/cfgms/pkg/logging"
+
+	// Import logging providers to register them
+	_ "github.com/cfgis/cfgms/pkg/logging/providers/file"
+	_ "github.com/cfgis/cfgms/pkg/logging/providers/timescale"
+
+	// Import storage providers to register them
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
 )
 
 func main() {

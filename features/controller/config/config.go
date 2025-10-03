@@ -32,6 +32,9 @@ type Config struct {
 	
 	// Logging configuration for global logging provider system
 	Logging *LoggingConfig `yaml:"logging"`
+
+	// High Availability configuration
+	HA *HAConfig `yaml:"ha"`
 }
 
 // CertificateConfig contains certificate management settings
@@ -78,7 +81,7 @@ type ServerCertificateConfig struct {
 
 // StorageConfig contains global storage provider configuration
 type StorageConfig struct {
-	// Provider specifies which storage provider to use (memory, file, database, git)
+	// Provider specifies which storage provider to use (database, git)
 	Provider string `yaml:"provider"`
 	
 	// Configuration options passed to the storage provider
@@ -126,6 +129,112 @@ type SubscriberConfig struct {
 	Type    string                 `yaml:"type"`     // Subscriber type (e.g., "syslog", "webhook")
 	Config  map[string]interface{} `yaml:"config"`   // Subscriber-specific configuration
 	Enabled bool                  `yaml:"enabled"`  // Enable/disable subscriber
+}
+
+// HAConfig contains high availability configuration
+type HAConfig struct {
+	// Deployment mode (single, blue-green, cluster)
+	Mode string `yaml:"mode"`
+
+	// Node configuration
+	Node *HANodeConfig `yaml:"node"`
+
+	// Cluster configuration (used in cluster mode)
+	Cluster *HAClusterConfig `yaml:"cluster"`
+
+	// Health check configuration
+	HealthCheck *HAHealthCheckConfig `yaml:"health_check"`
+
+	// Failover configuration
+	Failover *HAFailoverConfig `yaml:"failover"`
+
+	// Load balancing configuration
+	LoadBalancing *HALoadBalancingConfig `yaml:"load_balancing"`
+
+	// Split-brain prevention configuration
+	SplitBrain *HASplitBrainConfig `yaml:"split_brain"`
+}
+
+// HANodeConfig contains node-specific HA configuration
+type HANodeConfig struct {
+	ID              string            `yaml:"id"`
+	Name            string            `yaml:"name"`
+	ExternalAddress string            `yaml:"external_address"`
+	InternalAddress string            `yaml:"internal_address"`
+	Capabilities    []string          `yaml:"capabilities"`
+	Metadata        map[string]string `yaml:"metadata"`
+}
+
+// HAClusterConfig contains cluster-wide HA configuration
+type HAClusterConfig struct {
+	ExpectedSize      int                    `yaml:"expected_size"`
+	MinQuorum         int                    `yaml:"min_quorum"`
+	ElectionTimeout   string                 `yaml:"election_timeout"`   // Duration string
+	HeartbeatInterval string                 `yaml:"heartbeat_interval"` // Duration string
+	Discovery         *HADiscoveryConfig     `yaml:"discovery"`
+	SessionSync       *HASessionSyncConfig   `yaml:"session_sync"`
+}
+
+// HADiscoveryConfig contains node discovery configuration
+type HADiscoveryConfig struct {
+	Method      string                 `yaml:"method"`
+	Config      map[string]interface{} `yaml:"config"`
+	Interval    string                 `yaml:"interval"`     // Duration string
+	NodeTimeout string                 `yaml:"node_timeout"` // Duration string
+}
+
+// HASessionSyncConfig contains session synchronization configuration
+type HASessionSyncConfig struct {
+	Enabled      bool   `yaml:"enabled"`
+	SyncInterval string `yaml:"sync_interval"` // Duration string
+	StateTimeout string `yaml:"state_timeout"` // Duration string
+	MaxStateSize int    `yaml:"max_state_size"`
+}
+
+// HAHealthCheckConfig contains health check configuration
+type HAHealthCheckConfig struct {
+	Interval         string `yaml:"interval"`          // Duration string
+	Timeout          string `yaml:"timeout"`           // Duration string
+	FailureThreshold int    `yaml:"failure_threshold"`
+	SuccessThreshold int    `yaml:"success_threshold"`
+	EnableInternal   bool   `yaml:"enable_internal"`
+	EnableExternal   bool   `yaml:"enable_external"`
+}
+
+// HAFailoverConfig contains failover configuration
+type HAFailoverConfig struct {
+	Enabled             bool   `yaml:"enabled"`
+	Timeout             string `yaml:"timeout"`              // Duration string
+	MaxDuration         string `yaml:"max_duration"`         // Duration string
+	GracePeriod         string `yaml:"grace_period"`         // Duration string
+	MaxSessionMigration int    `yaml:"max_session_migration"`
+}
+
+// HALoadBalancingConfig contains load balancing configuration
+type HALoadBalancingConfig struct {
+	Strategy        string                      `yaml:"strategy"`
+	HealthBased     *HAHealthBasedConfig        `yaml:"health_based"`
+	ConnectionBased *HAConnectionBasedConfig    `yaml:"connection_based"`
+}
+
+// HAHealthBasedConfig contains health-based load balancing configuration
+type HAHealthBasedConfig struct {
+	MinHealthScore     float64 `yaml:"min_health_score"`
+	HealthWeightFactor float64 `yaml:"health_weight_factor"`
+}
+
+// HAConnectionBasedConfig contains connection-based load balancing configuration
+type HAConnectionBasedConfig struct {
+	MaxConnectionsPerNode int     `yaml:"max_connections_per_node"`
+	ConnectionThreshold   float64 `yaml:"connection_threshold"`
+}
+
+// HASplitBrainConfig contains split-brain prevention configuration
+type HASplitBrainConfig struct {
+	Enabled            bool   `yaml:"enabled"`
+	DetectionInterval  string `yaml:"detection_interval"`  // Duration string
+	QuorumInterval     string `yaml:"quorum_interval"`     // Duration string
+	ResolutionStrategy string `yaml:"resolution_strategy"`
 }
 
 // DefaultConfig returns a Config with reasonable defaults
@@ -180,6 +289,63 @@ func DefaultConfig() *Config {
 			TenantIsolation:   true,
 			EnableCorrelation: true,
 			EnableTracing:     true,
+		},
+		HA: &HAConfig{
+			Mode: "single", // Default to single server mode for seamless operation
+			Node: &HANodeConfig{
+				Capabilities: []string{"config", "rbac", "monitoring", "workflow"},
+				Metadata:     make(map[string]string),
+			},
+			Cluster: &HAClusterConfig{
+				ExpectedSize:      3,
+				MinQuorum:         2,
+				ElectionTimeout:   "10s",
+				HeartbeatInterval: "2s",
+				Discovery: &HADiscoveryConfig{
+					Method:      "static",
+					Config:      make(map[string]interface{}),
+					Interval:    "30s",
+					NodeTimeout: "60s",
+				},
+				SessionSync: &HASessionSyncConfig{
+					Enabled:      true,
+					SyncInterval: "5s",
+					StateTimeout: "300s",
+					MaxStateSize: 1024 * 1024, // 1MB
+				},
+			},
+			HealthCheck: &HAHealthCheckConfig{
+				Interval:         "10s",
+				Timeout:          "5s",
+				FailureThreshold: 3,
+				SuccessThreshold: 2,
+				EnableInternal:   true,
+				EnableExternal:   true,
+			},
+			Failover: &HAFailoverConfig{
+				Enabled:             true,
+				Timeout:             "30s",
+				MaxDuration:         "5m",
+				GracePeriod:         "10s",
+				MaxSessionMigration: 1000,
+			},
+			LoadBalancing: &HALoadBalancingConfig{
+				Strategy: "health-based",
+				HealthBased: &HAHealthBasedConfig{
+					MinHealthScore:     0.7,
+					HealthWeightFactor: 1.0,
+				},
+				ConnectionBased: &HAConnectionBasedConfig{
+					MaxConnectionsPerNode: 1000,
+					ConnectionThreshold:   0.8,
+				},
+			},
+			SplitBrain: &HASplitBrainConfig{
+				Enabled:            true,
+				DetectionInterval:  "15s",
+				QuorumInterval:     "30s",
+				ResolutionStrategy: "quorum-based",
+			},
 		},
 	}
 }
@@ -269,6 +435,78 @@ func Load() (*Config, error) {
 	// Storage configuration environment variables
 	if storageProvider := os.Getenv("CFGMS_STORAGE_PROVIDER"); storageProvider != "" {
 		cfg.Storage.Provider = storageProvider
+
+		// Initialize storage config map if nil
+		if cfg.Storage.Config == nil {
+			cfg.Storage.Config = make(map[string]interface{})
+		}
+
+		// Map provider-specific environment variables to config
+		switch storageProvider {
+		case "database":
+			// Database storage configuration mapping - support both CFGMS_STORAGE_DATABASE_* and CFGMS_DB_* variants
+			if host := os.Getenv("CFGMS_STORAGE_DATABASE_HOST"); host != "" {
+				cfg.Storage.Config["host"] = host
+			} else if host := os.Getenv("CFGMS_DB_HOST"); host != "" {
+				cfg.Storage.Config["host"] = host
+			}
+
+			if port := os.Getenv("CFGMS_STORAGE_DATABASE_PORT"); port != "" {
+				// Convert port string to int
+				if portInt, err := strconv.Atoi(port); err == nil {
+					cfg.Storage.Config["port"] = portInt
+				}
+			} else if port := os.Getenv("CFGMS_DB_PORT"); port != "" {
+				// Convert port string to int
+				if portInt, err := strconv.Atoi(port); err == nil {
+					cfg.Storage.Config["port"] = portInt
+				}
+			}
+
+			if database := os.Getenv("CFGMS_STORAGE_DATABASE_NAME"); database != "" {
+				cfg.Storage.Config["database"] = database
+			} else if database := os.Getenv("CFGMS_DB_NAME"); database != "" {
+				cfg.Storage.Config["database"] = database
+			}
+
+			if username := os.Getenv("CFGMS_STORAGE_DATABASE_USER"); username != "" {
+				cfg.Storage.Config["username"] = username
+			} else if username := os.Getenv("CFGMS_DB_USER"); username != "" {
+				cfg.Storage.Config["username"] = username
+			}
+
+			if password := os.Getenv("CFGMS_STORAGE_DATABASE_PASSWORD"); password != "" {
+				cfg.Storage.Config["password"] = password
+			} else if password := os.Getenv("CFGMS_DB_PASSWORD"); password != "" {
+				cfg.Storage.Config["password"] = password
+			}
+
+			if sslmode := os.Getenv("CFGMS_STORAGE_DATABASE_SSLMODE"); sslmode != "" {
+				cfg.Storage.Config["sslmode"] = sslmode
+			} else if sslmode := os.Getenv("CFGMS_DB_SSLMODE"); sslmode != "" {
+				cfg.Storage.Config["sslmode"] = sslmode
+			}
+		case "git":
+			// Git storage configuration mapping
+			if path := os.Getenv("CFGMS_STORAGE_GIT_PATH"); path != "" {
+				cfg.Storage.Config["path"] = path
+			}
+			if url := os.Getenv("CFGMS_STORAGE_GIT_URL"); url != "" {
+				cfg.Storage.Config["url"] = url
+			}
+			if branch := os.Getenv("CFGMS_STORAGE_GIT_BRANCH"); branch != "" {
+				cfg.Storage.Config["branch"] = branch
+			}
+			if username := os.Getenv("CFGMS_STORAGE_GIT_USERNAME"); username != "" {
+				cfg.Storage.Config["username"] = username
+			}
+			if password := os.Getenv("CFGMS_STORAGE_GIT_PASSWORD"); password != "" {
+				cfg.Storage.Config["password"] = password
+			}
+			if token := os.Getenv("CFGMS_STORAGE_GIT_TOKEN"); token != "" {
+				cfg.Storage.Config["token"] = token
+			}
+		}
 	}
 	
 	// Logging configuration environment variables

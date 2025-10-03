@@ -5,16 +5,20 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
 	controller "github.com/cfgis/cfgms/api/proto/controller"
+	"github.com/cfgis/cfgms/features/controller/api"
 	"github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/controller/ha"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/tenant"
@@ -31,6 +35,7 @@ type Server struct {
 	cfg                     *config.Config
 	logger                  logging.Logger
 	grpcServer              *grpc.Server
+	httpServer              *api.Server
 	controllerService       *service.ControllerService
 	configService           *service.ConfigurationService
 	rbacService             *service.RBACService
@@ -39,43 +44,69 @@ type Server struct {
 	tenantManager           *tenant.Manager
 	rbacManager             *rbac.Manager
 	auditManager            *audit.Manager
+	haManager               *ha.Manager
 }
 
 // New creates a new server instance
 func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
+	log.Println("DEBUG server.New(): Function entry")
+	logger.Info("DEBUG: Entered server.New() function")
+	log.Println("DEBUG server.New(): About to check cfg nil")
 	if cfg == nil {
+		log.Println("DEBUG server.New(): Config is nil")
+		logger.Info("DEBUG: Config is nil, returning error")
 		return nil, ErrNilConfig
 	}
+	log.Println("DEBUG server.New(): Config validation passed")
+	logger.Info("DEBUG: Config validation passed, starting server initialization...")
+	log.Println("DEBUG server.New(): About to start storage initialization")
+	logger.Info("Config validated, proceeding with storage initialization...")
 
 	// Initialize global storage provider system - REQUIRED for all deployments
+	log.Println("DEBUG server.New(): Checking cfg.Storage for nil")
 	if cfg.Storage == nil {
+		log.Println("DEBUG server.New(): cfg.Storage is nil, returning error")
 		return nil, fmt.Errorf("storage configuration is required for CFGMS operation - configure storage.provider as 'git' (minimum) or 'database' (production). See docs/examples/controller-storage-config.yaml for examples")
 	}
+	log.Println("DEBUG server.New(): cfg.Storage is not nil, provider:", cfg.Storage.Provider)
 
 	logger.Info("Initializing global storage provider", "provider", cfg.Storage.Provider)
+	log.Println("DEBUG server.New(): About to call CreateAllStoresFromConfig with provider:", cfg.Storage.Provider)
 	
 	// Create storage manager with pluggable provider - no fallbacks allowed
+	logger.Info("DEBUG: About to call interfaces.CreateAllStoresFromConfig...", "provider", cfg.Storage.Provider)
+	log.Println("DEBUG server.New(): Calling CreateAllStoresFromConfig now...")
 	storageManager, err := interfaces.CreateAllStoresFromConfig(cfg.Storage.Provider, cfg.Storage.Config)
+	log.Println("DEBUG server.New(): CreateAllStoresFromConfig call completed")
 	if err != nil {
+		log.Println("DEBUG server.New(): CreateAllStoresFromConfig returned error:", err)
 		return nil, fmt.Errorf("failed to initialize storage provider '%s': %w. Verify storage configuration and ensure storage backend is accessible", cfg.Storage.Provider, err)
 	}
+	log.Println("DEBUG server.New(): Storage manager created successfully, proceeding to RBAC initialization")
+	logger.Info("DEBUG: Storage manager created successfully - CreateAllStoresFromConfig completed")
 
 	// Initialize RBAC system with pluggable storage only
+	logger.Info("Creating RBAC manager with storage...")
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
-	
+	logger.Info("RBAC manager created")
+
 	// Initialize unified audit system with pluggable storage only
+	logger.Info("Creating audit manager...")
 	auditManager := audit.NewManager(storageManager.GetAuditStore(), "controller")
-	
+	logger.Info("Audit manager created")
+
 	logger.Info("RBAC and Audit systems initialized with pluggable storage", "provider", cfg.Storage.Provider)
 
 	// Initialize default permissions and roles
+	logger.Info("Starting RBAC initialization...")
 	if err := rbacManager.Initialize(context.Background()); err != nil {
 		logger.Warn("Failed to initialize RBAC configuration", "error", err)
 	}
+	logger.Info("RBAC initialization completed")
 
 	// Initialize tenant management (currently uses memory store)
 	tenantStore := tenantmemory.NewStore()
@@ -110,6 +141,35 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		}
 	}
 
+	// Initialize HA manager
+	logger.Info("Initializing HA manager...")
+	haManager, err := initializeHAManager(cfg, logger, storageManager)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize HA manager: %w", err)
+	}
+	logger.Info("HA manager initialized successfully")
+
+	// Initialize HTTP API server with minimal monitoring for now
+	// TODO: Properly initialize monitoring components when needed
+	httpServer, err := api.New(
+		cfg,
+		logger,
+		controllerService,
+		configService,
+		certProvisioningService,
+		rbacService,
+		certManager,
+		tenantManager,
+		rbacManager,
+		nil, // systemMonitor
+		nil, // platformMonitor
+		nil, // tracer
+		haManager,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize HTTP API server: %w", err)
+	}
+
 	return &Server{
 		cfg:                     cfg,
 		logger:                  logger,
@@ -121,23 +181,31 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		tenantManager:           tenantManager,
 		rbacManager:             rbacManager,
 		auditManager:            auditManager,
+		haManager:               haManager,
+		httpServer:              httpServer,
 	}, nil
 }
 
 // Start initializes and starts the gRPC server
 func (s *Server) Start() error {
+	log.Println("DEBUG server.Start(): Function entry")
+	s.logger.Info("DEBUG: Entered server.Start() function")
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	log.Println("DEBUG server.Start(): About to create listener")
 	// Create listener
 	listener, err := net.Listen("tcp", s.cfg.ListenAddr)
 	if err != nil {
+		log.Println("DEBUG server.Start(): Failed to create listener")
 		return fmt.Errorf("failed to listen on %s: %w", s.cfg.ListenAddr, err)
 	}
+	log.Println("DEBUG server.Start(): Listener created successfully")
 
 	// Update config with actual bound address (important for :0 ports)
 	s.cfg.ListenAddr = listener.Addr().String()
 
+	log.Println("DEBUG server.Start(): About to configure TLS")
 	// Configure TLS with certificate management
 	var opts []grpc.ServerOption
 	tlsConfig, err := s.setupTLS()
@@ -148,14 +216,49 @@ func (s *Server) Start() error {
 		opts = append(opts, grpc.Creds(creds))
 		s.logger.Info("TLS enabled for gRPC server with certificate management")
 	}
+	log.Println("DEBUG server.Start(): TLS configuration completed")
 
+	log.Println("DEBUG server.Start(): About to create gRPC server")
 	// Create gRPC server
 	s.grpcServer = grpc.NewServer(opts...)
+	log.Println("DEBUG server.Start(): gRPC server created")
 
+	log.Println("DEBUG server.Start(): About to register services")
 	// Register services
 	controller.RegisterControllerServer(s.grpcServer, s.controllerService)
 	controller.RegisterConfigurationServiceServer(s.grpcServer, s.configService)
 	controller.RegisterRBACServiceServer(s.grpcServer, s.rbacService)
+	log.Println("DEBUG server.Start(): Services registered")
+
+	log.Println("DEBUG server.Start(): About to start HA manager")
+	// Start HA manager with timeout
+	if s.haManager != nil {
+		s.logger.Info("Starting HA manager...")
+
+		// Create a context with timeout to prevent infinite hang
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		log.Println("DEBUG server.Start(): About to call haManager.Start() with 30s timeout")
+		if err := s.haManager.Start(ctx); err != nil {
+			log.Println("DEBUG server.Start(): HA manager failed to start:", err)
+			return fmt.Errorf("failed to start HA manager: %w", err)
+		}
+		s.logger.Info("HA manager started successfully")
+		log.Println("DEBUG server.Start(): HA manager started successfully")
+	} else {
+		log.Println("DEBUG server.Start(): HA manager is nil, skipping")
+	}
+
+	// Start HTTP API server
+	if s.httpServer != nil {
+		go func() {
+			if err := s.httpServer.Start(); err != nil {
+				s.logger.Error("HTTP API server failed", "error", err)
+			}
+		}()
+		s.logger.Info("HTTP API server started")
+	}
 
 	// Start serving in a goroutine
 	go func() {
@@ -170,7 +273,10 @@ func (s *Server) Start() error {
 		}
 	}()
 
-	s.logger.Info("Controller server started", "address", s.cfg.ListenAddr)
+	s.logger.Info("Controller server started",
+		"address", s.cfg.ListenAddr,
+		"ha_mode", s.haManager.GetDeploymentMode().String(),
+		"is_leader", s.haManager.IsLeader())
 	
 	// Record system startup audit event
 	if s.auditManager != nil {
@@ -191,12 +297,26 @@ func (s *Server) Stop() error {
 
 	s.logger.Info("Shutting down controller server")
 
-	// Record system shutdown audit event  
+	// Stop HA manager first
+	if s.haManager != nil {
+		if err := s.haManager.Stop(context.Background()); err != nil {
+			s.logger.Warn("Failed to stop HA manager", "error", err)
+		}
+	}
+
+	// Record system shutdown audit event
 	if s.auditManager != nil {
 		ctx := context.Background()
 		event := audit.SystemEvent("system", "controller_stop", "Controller server shutting down")
 		if err := s.auditManager.RecordEvent(ctx, event); err != nil {
 			s.logger.Warn("Failed to record shutdown audit event", "error", err)
+		}
+	}
+
+	// Stop HTTP server
+	if s.httpServer != nil {
+		if err := s.httpServer.Stop(); err != nil {
+			s.logger.Warn("Failed to stop HTTP server", "error", err)
 		}
 	}
 
@@ -261,6 +381,13 @@ func (s *Server) GetRBACManager() *rbac.Manager {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.rbacManager
+}
+
+// GetHAManager returns the HA manager instance
+func (s *Server) GetHAManager() *ha.Manager {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.haManager
 }
 
 // initializeCertificateManager initializes the certificate manager based on configuration
@@ -437,3 +564,29 @@ func (s *Server) ensureServerCertificate() (*cert.Certificate, error) {
 
 	return serverCert, nil
 }
+
+// initializeHAManager initializes the HA manager based on configuration
+func initializeHAManager(cfg *config.Config, logger logging.Logger, storageManager *interfaces.StorageManager) (*ha.Manager, error) {
+	// Load HA config directly from environment variables (bypassing controller config)
+	haConfig := ha.DefaultConfig()
+	log.Printf("DEBUG: NodeID Trace - Before LoadFromEnvironment: node_id=%s, node_id_empty=%t", haConfig.Node.ID, haConfig.Node.ID == "")
+
+	if err := haConfig.LoadFromEnvironment(); err != nil {
+		return nil, fmt.Errorf("failed to load HA configuration from environment: %w", err)
+	}
+
+	log.Printf("DEBUG: NodeID Trace - After LoadFromEnvironment: node_id=%s, node_id_empty=%t", haConfig.Node.ID, haConfig.Node.ID == "")
+
+	// Create HA manager
+	log.Printf("DEBUG: NodeID Trace - Before NewManager: node_id=%s, node_id_empty=%t", haConfig.Node.ID, haConfig.Node.ID == "")
+
+	haManager, err := ha.NewManager(haConfig, logger, storageManager)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create HA manager: %w", err)
+	}
+
+	log.Printf("DEBUG: NodeID Trace - After NewManager (HA Manager initialized): mode=%s, node_id=%s, node_id_empty=%t, manager_node_id=%s, manager_node_id_empty=%t", haConfig.GetModeString(), haConfig.Node.ID, haConfig.Node.ID == "", haManager.GetLocalNode().ID, haManager.GetLocalNode().ID == "")
+
+	return haManager, nil
+}
+

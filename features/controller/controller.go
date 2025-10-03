@@ -95,6 +95,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Controller, error) {
 		nil, // systemMonitor - will be integrated in Phase 5
 		nil, // platformMonitor - will be integrated in this story completion
 		nil, // tracer - will be integrated in Phase 5
+		srv.GetHAManager(), // HA manager
 	)
 	if err != nil {
 		return nil, err

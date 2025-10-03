@@ -2,6 +2,7 @@ package monitoring
 
 import (
 	"context"
+	"math"
 	"runtime"
 	"time"
 
@@ -39,7 +40,12 @@ func (bmc *BasicMetricsCollector) CollectMetrics(ctx context.Context) (*Componen
 	var memStats runtime.MemStats
 	runtime.ReadMemStats(&memStats)
 
-	metrics.Resource.MemoryBytes = int64(memStats.Alloc)
+	// Safe conversion to prevent integer overflow
+	if memStats.Alloc > math.MaxInt64 {
+		metrics.Resource.MemoryBytes = math.MaxInt64
+	} else {
+		metrics.Resource.MemoryBytes = int64(memStats.Alloc)
+	}
 	metrics.Resource.Goroutines = runtime.NumGoroutine()
 
 	// Basic performance metrics

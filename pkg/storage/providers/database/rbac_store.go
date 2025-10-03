@@ -62,12 +62,30 @@ func NewDatabaseRBACStore(dsn string, config map[string]interface{}) (*DatabaseR
 // initializeSchema creates the necessary database tables and indexes for RBAC
 func (s *DatabaseRBACStore) initializeSchema() error {
 	ctx := context.Background()
-	
+
+	// Use PostgreSQL advisory lock to prevent concurrent schema initialization
+	// Lock ID: 13579246 (different from other store locks)
+	const schemaLockID = 13579246
+
+	// Acquire advisory lock - will wait if another instance is initializing
+	if _, err := s.db.ExecContext(ctx, "SELECT pg_advisory_lock($1)", schemaLockID); err != nil {
+		return fmt.Errorf("failed to acquire RBAC schema initialization lock: %w", err)
+	}
+
+	// Ensure we release the lock when done
+	defer func() {
+		if _, err := s.db.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", schemaLockID); err != nil {
+			// Log but don't fail - lock will be released when connection closes
+			// This is non-critical since PostgreSQL will release advisory locks when connection closes
+			_ = err // Explicitly ignore error to satisfy linter
+		}
+	}()
+
 	// Create RBAC tables
 	if err := s.schemas.CreateRBACTables(ctx, s.db); err != nil {
 		return fmt.Errorf("failed to create RBAC tables: %w", err)
 	}
-	
+
 	return nil
 }
 

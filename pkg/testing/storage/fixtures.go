@@ -323,3 +323,17 @@ func generateSecurePassword() string {
 	
 	return password
 }
+
+// CreateTestStorageManager creates a storage manager for testing purposes
+func CreateTestStorageManager() (*interfaces.StorageManager, error) {
+	// Use git provider as it's always available for testing
+	config := map[string]interface{}{
+		"repository_path": "/tmp/cfgms-test-storage",
+		"branch":          "main",
+		"auto_init":       true,
+		"user_name":       "Test User",
+		"user_email":      "test@cfgms.test",
+	}
+
+	return interfaces.CreateAllStoresFromConfig("git", config)
+}

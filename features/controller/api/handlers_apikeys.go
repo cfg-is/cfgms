@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/google/uuid"
@@ -226,6 +227,76 @@ func (s *Server) generateDefaultAPIKey() error {
 		return nil
 	}
 
+	// All permissions including HA permissions
+	allPermissions := []string{
+		"steward:list",
+		"steward:read",
+		"steward:read-dna",
+		"steward:read-config",
+		"steward:write-config",
+		"steward:validate-config",
+		"steward:read-scripts",
+		"steward:execute-scripts",
+		"certificate:list",
+		"certificate:provision",
+		"certificate:revoke",
+		"rbac:list-permissions",
+		"rbac:read-permission",
+		"rbac:list-roles",
+		"rbac:create-role",
+		"rbac:read-role",
+		"rbac:update-role",
+		"rbac:delete-role",
+		"rbac:list-subjects",
+		"rbac:create-subject",
+		"rbac:read-subject",
+		"rbac:update-subject",
+		"rbac:delete-subject",
+		"rbac:read-assignments",
+		"rbac:assign-role",
+		"rbac:revoke-role",
+		"rbac:read-permissions",
+		"rbac:check-permission",
+		"api-key:list",
+		"api-key:create",
+		"api-key:read",
+		"api-key:delete",
+		"monitoring:read-health",
+		"monitoring:read-metrics",
+		"monitoring:read-resources",
+		"monitoring:read-logs",
+		"monitoring:read-traces",
+		"monitoring:read-events",
+		"monitoring:read-config",
+		"monitoring:read-steward-metrics",
+		"monitoring:read-services",
+		"monitoring:read-anomalies",
+		"monitoring:read-component-health",
+		"monitoring:read-component-metrics",
+		"ha:read-status",
+		"ha:read-cluster",
+		"ha:read-leader",
+		"ha:read-nodes",
+	}
+
+	// Check if CFGMS_API_KEY environment variable is set
+	envAPIKey := os.Getenv("CFGMS_API_KEY")
+	if envAPIKey != "" {
+		// Create API key from environment variable
+		envKey := &APIKey{
+			ID:          uuid.New().String(),
+			Key:         envAPIKey,
+			Name:        "Environment API Key",
+			Permissions: allPermissions,
+			CreatedAt:   time.Now().UTC(),
+			TenantID:    "default",
+		}
+		s.apiKeys[envAPIKey] = envKey
+		s.logger.Info("Registered environment API key",
+			"id", envKey.ID,
+			"key", envAPIKey)
+	}
+
 	// Generate default API key
 	keyBytes := make([]byte, 32)
 	if _, err := rand.Read(keyBytes); err != nil {
@@ -236,54 +307,12 @@ func (s *Server) generateDefaultAPIKey() error {
 
 	// Create default API key with admin permissions
 	defaultKey := &APIKey{
-		ID:   uuid.New().String(),
-		Key:  keyString,
-		Name: "Default Admin Key",
-		Permissions: []string{
-			"steward:list",
-			"steward:read",
-			"steward:read-dna",
-			"steward:read-config",
-			"steward:write-config",
-			"steward:validate-config",
-			"steward:read-scripts",
-			"steward:execute-scripts",
-			"certificate:list",
-			"certificate:provision",
-			"certificate:revoke",
-			"rbac:list-permissions",
-			"rbac:read-permission",
-			"rbac:list-roles",
-			"rbac:create-role",
-			"rbac:read-role",
-			"rbac:update-role",
-			"rbac:delete-role",
-			"rbac:list-subjects",
-			"rbac:create-subject",
-			"rbac:read-subject",
-			"rbac:update-subject",
-			"rbac:delete-subject",
-			"rbac:read-assignments",
-			"rbac:assign-role",
-			"rbac:revoke-role",
-			"rbac:read-permissions",
-			"rbac:check-permission",
-			"api-key:list",
-			"api-key:create",
-			"api-key:read",
-			"api-key:delete",
-			"monitoring:read-health",
-			"monitoring:read-metrics",
-			"monitoring:read-resources",
-			"monitoring:read-logs",
-			"monitoring:read-traces",
-			"monitoring:read-events",
-			"monitoring:read-config",
-			"monitoring:read-steward-metrics",
-			"monitoring:read-services",
-		},
-		CreatedAt: time.Now().UTC(),
-		TenantID:  "default",
+		ID:          uuid.New().String(),
+		Key:         keyString,
+		Name:        "Default Admin Key",
+		Permissions: allPermissions,
+		CreatedAt:   time.Now().UTC(),
+		TenantID:    "default",
 	}
 
 	s.apiKeys[keyString] = defaultKey

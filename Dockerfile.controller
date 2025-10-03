@@ -1,0 +1,64 @@
+# Multi-stage Dockerfile for CFGMS Controller (HA Testing)
+FROM golang:1.23-alpine AS builder
+
+# Install build dependencies
+RUN apk add --no-cache git ca-certificates tzdata
+
+# Set working directory
+WORKDIR /build
+
+# Copy go mod files first (for better layer caching)
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build the controller binary
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -trimpath \
+    -ldflags="-s -w" \
+    -o controller \
+    ./cmd/controller
+
+# Final stage - minimal runtime image
+FROM alpine:latest
+
+# Install runtime dependencies
+RUN apk add --no-cache \
+    ca-certificates \
+    tzdata \
+    curl \
+    git \
+    && update-ca-certificates
+
+# Create non-root user for security
+RUN addgroup -g 1000 cfgms && \
+    adduser -D -s /bin/sh -u 1000 -G cfgms cfgms
+
+# Create necessary directories
+RUN mkdir -p /app/data /app/logs /app/certs && \
+    chown -R cfgms:cfgms /app
+
+# Copy binary from builder stage
+COPY --from=builder /build/controller /app/controller
+
+# Copy configuration files if they exist
+COPY --chown=cfgms:cfgms examples/ /app/examples/
+
+# Switch to non-root user
+USER cfgms
+
+# Set working directory
+WORKDIR /app
+
+# Expose ports
+EXPOSE 8080 8081 9090
+
+# Health check
+HEALTHCHECK --interval=10s --timeout=5s --start-period=20s --retries=3 \
+    CMD curl -f http://localhost:8080/api/v1/health || exit 1
+
+# Run the controller
+ENTRYPOINT ["./controller"]
+CMD []

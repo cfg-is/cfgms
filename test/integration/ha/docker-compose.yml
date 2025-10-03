@@ -1,0 +1,273 @@
+version: '3.8'
+
+services:
+  # TimescaleDB for HA cluster storage and logging
+  timescaledb:
+    image: timescale/timescaledb:latest-pg15
+    environment:
+      POSTGRES_DB: cfgms_ha_test
+      POSTGRES_USER: cfgms_test
+      POSTGRES_PASSWORD: cfgms_test_password
+    ports:
+      - "5434:5432"
+    volumes:
+      - timescaledb_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cfgms_test -d cfgms_ha_test"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Controller East (us-east region)
+  controller-east:
+    container_name: controller-east
+    build:
+      context: ../../..
+      dockerfile: cmd/controller/Dockerfile
+    ports:
+      - "8080:8080"
+      - "9080:9080"
+    environment:
+      CFGMS_NODE_ID: "controller-east"
+      CFGMS_NODE_REGION: "us-east"
+      CFGMS_LISTEN_ADDR: "0.0.0.0:8080"
+      CFGMS_HTTP_LISTEN_ADDR: "0.0.0.0:9080"
+      CFGMS_STORAGE_PROVIDER: "database"
+      CFGMS_DB_HOST: "timescaledb"
+      CFGMS_DB_PORT: "5432"
+      CFGMS_DB_NAME: "cfgms_ha_test"
+      CFGMS_DB_USER: "cfgms_test"
+      CFGMS_DB_PASSWORD: "cfgms_test_password"
+      CFGMS_DB_SSLMODE: "disable"
+      CFGMS_LOG_LEVEL: "debug"
+      CFGMS_LOG_PROVIDER: "file"
+      CFGMS_LOG_DIR: "/tmp/cfgms"
+      CFGMS_TIMESCALE_HOST: "timescaledb"
+      CFGMS_TIMESCALE_PORT: "5432"
+      CFGMS_TIMESCALE_DATABASE: "cfgms_ha_test"
+      CFGMS_TIMESCALE_USER: "cfgms_test"
+      CFGMS_TIMESCALE_PASSWORD: "cfgms_test_password"
+      CFGMS_HA_ENABLED: "true"
+      CFGMS_HA_MODE: "cluster"
+      CFGMS_HA_EXTERNAL_ADDRESS: "controller-east:9080"
+      CFGMS_HA_CLUSTER_NODES: "controller-east:9080,controller-central:9081,controller-west:9082"
+      CFGMS_HA_DISCOVERY_METHOD: "static"
+      CFGMS_HA_DISCOVERY_INTERVAL: "10s"
+      CFGMS_HA_NODE_TIMEOUT: "15s"
+      CFGMS_HA_ELECTION_TIMEOUT: "5s"
+      CFGMS_HA_HEARTBEAT_INTERVAL: "2s"
+      CFGMS_API_KEY: "test-api-key-east"
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "sh", "-c", "netstat -ln | grep :8080"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Controller Central (us-central region)
+  controller-central:
+    container_name: controller-central
+    build:
+      context: ../../..
+      dockerfile: cmd/controller/Dockerfile
+    ports:
+      - "8081:8081"
+      - "9081:9081"
+    environment:
+      CFGMS_NODE_ID: "controller-central"
+      CFGMS_NODE_REGION: "us-central"
+      CFGMS_LISTEN_ADDR: "0.0.0.0:8081"
+      CFGMS_HTTP_LISTEN_ADDR: "0.0.0.0:9081"
+      CFGMS_STORAGE_PROVIDER: "database"
+      CFGMS_DB_HOST: "timescaledb"
+      CFGMS_DB_PORT: "5432"
+      CFGMS_DB_NAME: "cfgms_ha_test"
+      CFGMS_DB_USER: "cfgms_test"
+      CFGMS_DB_PASSWORD: "cfgms_test_password"
+      CFGMS_DB_SSLMODE: "disable"
+      CFGMS_LOG_LEVEL: "debug"
+      CFGMS_LOG_PROVIDER: "file"
+      CFGMS_LOG_DIR: "/tmp/cfgms"
+      CFGMS_TIMESCALE_HOST: "timescaledb"
+      CFGMS_TIMESCALE_PORT: "5432"
+      CFGMS_TIMESCALE_DATABASE: "cfgms_ha_test"
+      CFGMS_TIMESCALE_USER: "cfgms_test"
+      CFGMS_TIMESCALE_PASSWORD: "cfgms_test_password"
+      CFGMS_HA_ENABLED: "true"
+      CFGMS_HA_MODE: "cluster"
+      CFGMS_HA_EXTERNAL_ADDRESS: "controller-central:9081"
+      CFGMS_HA_CLUSTER_NODES: "controller-east:9080,controller-central:9081,controller-west:9082"
+      CFGMS_HA_DISCOVERY_METHOD: "static"
+      CFGMS_HA_DISCOVERY_INTERVAL: "10s"
+      CFGMS_HA_NODE_TIMEOUT: "15s"
+      CFGMS_HA_ELECTION_TIMEOUT: "5s"
+      CFGMS_HA_HEARTBEAT_INTERVAL: "2s"
+      CFGMS_API_KEY: "test-api-key-central"
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "sh", "-c", "netstat -ln | grep :8081"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Controller West (us-west region)
+  controller-west:
+    container_name: controller-west
+    build:
+      context: ../../..
+      dockerfile: cmd/controller/Dockerfile
+    ports:
+      - "8082:8082"
+      - "9082:9082"
+    environment:
+      CFGMS_NODE_ID: "controller-west"
+      CFGMS_NODE_REGION: "us-west"
+      CFGMS_LISTEN_ADDR: "0.0.0.0:8082"
+      CFGMS_HTTP_LISTEN_ADDR: "0.0.0.0:9082"
+      CFGMS_STORAGE_PROVIDER: "database"
+      CFGMS_DB_HOST: "timescaledb"
+      CFGMS_DB_PORT: "5432"
+      CFGMS_DB_NAME: "cfgms_ha_test"
+      CFGMS_DB_USER: "cfgms_test"
+      CFGMS_DB_PASSWORD: "cfgms_test_password"
+      CFGMS_DB_SSLMODE: "disable"
+      CFGMS_LOG_LEVEL: "debug"
+      CFGMS_LOG_PROVIDER: "file"
+      CFGMS_LOG_DIR: "/tmp/cfgms"
+      CFGMS_TIMESCALE_HOST: "timescaledb"
+      CFGMS_TIMESCALE_PORT: "5432"
+      CFGMS_TIMESCALE_DATABASE: "cfgms_ha_test"
+      CFGMS_TIMESCALE_USER: "cfgms_test"
+      CFGMS_TIMESCALE_PASSWORD: "cfgms_test_password"
+      CFGMS_HA_ENABLED: "true"
+      CFGMS_HA_MODE: "cluster"
+      CFGMS_HA_EXTERNAL_ADDRESS: "controller-west:9082"
+      CFGMS_HA_CLUSTER_NODES: "controller-east:9080,controller-central:9081,controller-west:9082"
+      CFGMS_HA_DISCOVERY_METHOD: "static"
+      CFGMS_HA_DISCOVERY_INTERVAL: "10s"
+      CFGMS_HA_NODE_TIMEOUT: "15s"
+      CFGMS_HA_ELECTION_TIMEOUT: "5s"
+      CFGMS_HA_HEARTBEAT_INTERVAL: "2s"
+      CFGMS_API_KEY: "test-api-key-west"
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "sh", "-c", "netstat -ln | grep :8082"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Steward East (connects to controller-east)
+  steward-east:
+    container_name: steward-east
+    build:
+      context: ../../..
+      dockerfile: cmd/steward/Dockerfile
+    environment:
+      CFGMS_STEWARD_ID: "steward-east"
+      CFGMS_STEWARD_NAME: "steward-east"
+      CFGMS_CONTROLLER_URLS: "https://controller-east:9080,https://controller-central:9081,https://controller-west:9082"
+      CFGMS_LOG_LEVEL: "debug"
+      CFGMS_LOG_PROVIDER: "file"
+      CFGMS_LOG_DIR: "/tmp/cfgms"
+      CFGMS_API_KEY: "test-api-key-east"
+      CFGMS_TLS_SKIP_VERIFY: "true"
+    depends_on:
+      controller-east:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "sh", "-c", "ps aux | grep steward | grep -v grep"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Steward Central (connects to controller-central)
+  steward-central:
+    container_name: steward-central
+    build:
+      context: ../../..
+      dockerfile: cmd/steward/Dockerfile
+    environment:
+      CFGMS_STEWARD_ID: "steward-central"
+      CFGMS_STEWARD_NAME: "steward-central"
+      CFGMS_CONTROLLER_URLS: "https://controller-east:9080,https://controller-central:9081,https://controller-west:9082"
+      CFGMS_LOG_LEVEL: "debug"
+      CFGMS_LOG_PROVIDER: "file"
+      CFGMS_LOG_DIR: "/tmp/cfgms"
+      CFGMS_API_KEY: "test-api-key-central"
+      CFGMS_TLS_SKIP_VERIFY: "true"
+    depends_on:
+      controller-central:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "sh", "-c", "ps aux | grep steward | grep -v grep"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Steward West (connects to controller-west)
+  steward-west:
+    container_name: steward-west
+    build:
+      context: ../../..
+      dockerfile: cmd/steward/Dockerfile
+    environment:
+      CFGMS_STEWARD_ID: "steward-west"
+      CFGMS_STEWARD_NAME: "steward-west"
+      CFGMS_CONTROLLER_URLS: "https://controller-east:9080,https://controller-central:9081,https://controller-west:9082"
+      CFGMS_LOG_LEVEL: "debug"
+      CFGMS_LOG_PROVIDER: "file"
+      CFGMS_LOG_DIR: "/tmp/cfgms"
+      CFGMS_API_KEY: "test-api-key-west"
+      CFGMS_TLS_SKIP_VERIFY: "true"
+    depends_on:
+      controller-west:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "sh", "-c", "ps aux | grep steward | grep -v grep"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Git Server for HA testing (Gitea)
+  git-server-ha:
+    image: gitea/gitea:1.21
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      - GITEA__database__DB_TYPE=postgres
+      - GITEA__database__HOST=timescaledb:5432
+      - GITEA__database__NAME=cfgms_ha_test
+      - GITEA__database__USER=cfgms_test
+      - GITEA__database__PASSWD=cfgms_test_password
+      - GITEA__server__HTTP_PORT=3000
+      - GITEA__server__ROOT_URL=http://git-server-ha:3000
+      - GITEA__security__INSTALL_LOCK=true
+      - GITEA__security__SECRET_KEY=gitea-secret-key-for-ha-testing
+      - GITEA__service__DISABLE_REGISTRATION=true
+      - GITEA__service__REQUIRE_SIGNIN_VIEW=false
+    ports:
+      - "3001:3000"
+    volumes:
+      - gitea_data:/data
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/v1/version"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  timescaledb_data:
+  gitea_data:
+
+networks:
+  default:
+    driver: bridge

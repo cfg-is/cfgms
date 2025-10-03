@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"math"
 	"runtime"
 	"sync"
 	"time"
@@ -51,8 +52,13 @@ func (pc *PerformanceCollector) CollectMetrics() *PerformanceMetrics {
 	// Calculate GC pause time from debug.GCStats
 	gcPauseTime := time.Duration(0)
 	if memStats.NumGC > pc.lastMemStats.NumGC {
-		// Use the most recent pause time from memstats
-		gcPauseTime = time.Duration(memStats.PauseNs[(memStats.NumGC+255)%256])
+		// Use the most recent pause time from memstats with safe conversion
+		pauseNs := memStats.PauseNs[(memStats.NumGC+255)%256]
+		if pauseNs > math.MaxInt64 {
+			gcPauseTime = time.Duration(math.MaxInt64)
+		} else {
+			gcPauseTime = time.Duration(pauseNs)
+		}
 	}
 
 	metrics := &PerformanceMetrics{
@@ -115,7 +121,13 @@ func (pc *PerformanceCollector) GetGCStats() (count uint32, pauseTime time.Durat
 
 	pauseTime = time.Duration(0)
 	if memStats.NumGC > 0 {
-		pauseTime = time.Duration(memStats.PauseNs[(memStats.NumGC+255)%256])
+		// Safe conversion to prevent integer overflow
+		pauseNs := memStats.PauseNs[(memStats.NumGC+255)%256]
+		if pauseNs > math.MaxInt64 {
+			pauseTime = time.Duration(math.MaxInt64)
+		} else {
+			pauseTime = time.Duration(pauseNs)
+		}
 	}
 
 	return memStats.NumGC, pauseTime

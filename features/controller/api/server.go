@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/controller/ha"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/monitoring"
 	"github.com/cfgis/cfgms/features/rbac"
@@ -39,6 +40,7 @@ type Server struct {
 	systemMonitor           *monitoring.SystemMonitor
 	platformMonitor         pkgmonitoring.PlatformMonitor
 	tracer                  *telemetry.Tracer
+	haManager               *ha.Manager
 	apiKeys                 map[string]*APIKey // Simple API key storage
 }
 
@@ -75,6 +77,7 @@ func New(
 	systemMonitor *monitoring.SystemMonitor,
 	platformMonitor pkgmonitoring.PlatformMonitor,
 	tracer *telemetry.Tracer,
+	haManager *ha.Manager,
 ) (*Server, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config cannot be nil")
@@ -93,6 +96,7 @@ func New(
 		systemMonitor:           systemMonitor,
 		platformMonitor:         platformMonitor,
 		tracer:                  tracer,
+		haManager:               haManager,
 		apiKeys:                 make(map[string]*APIKey),
 	}
 
@@ -119,9 +123,10 @@ func (s *Server) setupRouter() {
 	s.router.Use(s.corsMiddleware)
 	s.router.Use(s.contentTypeMiddleware)
 
-	// API routes with authentication
+	// API routes with authentication and validation
 	api := s.router.PathPrefix("/api/v1").Subrouter()
 	api.Use(s.authenticationMiddleware)
+	api.Use(s.validationMiddleware)
 
 	// Health check (no auth required)
 	s.router.HandleFunc("/api/v1/health", s.handleHealth).Methods("GET", "OPTIONS")
@@ -209,6 +214,17 @@ func (s *Server) setupRouter() {
 	monitoring.Handle("/anomalies", s.requirePermission("monitoring", "read-anomalies")(http.HandlerFunc(s.handleMonitoringAnomalies))).Methods("GET")
 	monitoring.Handle("/components/{component}/health", s.requirePermission("monitoring", "read-component-health")(http.HandlerFunc(s.handleMonitoringComponentHealth))).Methods("GET")
 	monitoring.Handle("/components/{component}/metrics", s.requirePermission("monitoring", "read-component-metrics")(http.HandlerFunc(s.handleMonitoringComponentMetrics))).Methods("GET")
+
+	// High Availability (HA) endpoints
+	ha := api.PathPrefix("/ha").Subrouter()
+	ha.Handle("/status", s.requirePermission("ha", "read-status")(http.HandlerFunc(s.handleHAStatus))).Methods("GET")
+	ha.Handle("/cluster", s.requirePermission("ha", "read-cluster")(http.HandlerFunc(s.handleHACluster))).Methods("GET")
+	ha.Handle("/leader", s.requirePermission("ha", "read-leader")(http.HandlerFunc(s.handleHALeader))).Methods("GET")
+	ha.Handle("/nodes", s.requirePermission("ha", "read-nodes")(http.HandlerFunc(s.handleHANodes))).Methods("GET")
+
+	// Raft consensus endpoints (no auth required - internal cluster communication)
+	s.router.HandleFunc("/raft/message", s.handleRaftMessage).Methods("POST")
+	s.router.HandleFunc("/raft/status", s.handleRaftStatus).Methods("GET")
 }
 
 // Start starts the HTTP server

@@ -34,7 +34,46 @@ Follows the **Structured Review Methodology** from CLAUDE.md with fresh context 
 gh pr view [pr_number] --json title,body,baseRefName,headRefName,state,author
 ```
 
+**Git Workflow Validation (CRITICAL)**:
+
+**MANDATORY CHECK**: Validate branch workflow before proceeding with review.
+
+```bash
+# Extract branch names
+base_branch=$(gh pr view [pr_number] --json baseRefName -q .baseRefName)
+head_branch=$(gh pr view [pr_number] --json headRefName -q .headRefName)
+
+# Validate workflow
+if [[ $head_branch == feature/* ]] && [[ $base_branch == "main" ]]; then
+  echo "❌ CRITICAL ERROR: Git Workflow Violation"
+  echo ""
+  echo "   Feature branch attempting to merge to main directly"
+  echo "   Head: $head_branch"
+  echo "   Base: $base_branch"
+  echo ""
+  echo "   CFGMS Git Workflow:"
+  echo "   ✅ Feature branches → develop (required)"
+  echo "   ✅ Develop → main (release PRs only)"
+  echo "   ❌ Feature → main (BLOCKED)"
+  echo ""
+  echo "   Required Actions:"
+  echo "   1. Close this PR or change base to develop:"
+  echo "      gh pr edit [pr_number] --base develop"
+  echo "   2. Follow proper git workflow for all future PRs"
+  echo ""
+  echo "   ⛔ REVIEW BLOCKED - Cannot proceed with workflow violation"
+  exit 1
+fi
+```
+
+**Branch Workflow Rules**:
+- ✅ `feature/*` → `develop` (standard development)
+- ✅ `hotfix/*` → `main` (emergency fixes only)
+- ✅ `develop` → `main` (release PRs)
+- ❌ `feature/*` → `main` (BLOCKED - workflow violation)
+
 **Analysis Framework**:
+- **Git Workflow**: Is the PR targeting the correct base branch?
 - Does the PR clearly state its purpose and scope?
 - Are breaking changes properly documented?
 - Is the security review status clear?
@@ -269,6 +308,38 @@ Cannot approve until security issues are resolved.
 ```
 
 ## Error Handling
+
+### Git Workflow Violation (CRITICAL)
+```bash
+/pr-review 199
+
+# Output:
+🧹 Clearing conversation context for objective review...
+✅ Context cleared - starting fresh review
+
+🔍 Starting comprehensive review of PR #199...
+📋 Fetching PR details and changes...
+
+❌ CRITICAL ERROR: Git Workflow Violation
+
+   Feature branch attempting to merge to main directly
+   Head: feature/story-178-high-availability-infrastructure
+   Base: main
+
+   CFGMS Git Workflow:
+   ✅ Feature branches → develop (required)
+   ✅ Develop → main (release PRs only)
+   ❌ Feature → main (BLOCKED)
+
+   Required Actions:
+   1. Close this PR or change base to develop:
+      gh pr edit 199 --base develop
+   2. Follow proper git workflow for all future PRs
+
+   ⛔ REVIEW BLOCKED - Cannot proceed with workflow violation
+
+# Review stops here - will not proceed with other phases
+```
 
 ### Invalid PR Number
 ```bash
