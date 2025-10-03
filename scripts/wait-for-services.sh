@@ -21,8 +21,8 @@ POSTGRES_PASSWORD="${CFGMS_TEST_DB_PASSWORD:-cfgms_test_password}"
 
 TIMESCALEDB_HOST="localhost"
 TIMESCALEDB_PORT="${CFGMS_TEST_TIMESCALEDB_PORT:-5434}"
-TIMESCALEDB_USER="cfgms_logger_test"
-TIMESCALEDB_DB="cfgms_logs_test"
+TIMESCALEDB_USER="cfgms_test"  # Unified user for both logging and HA tests
+TIMESCALEDB_DB="cfgms_ha_test"  # Unified database for both logging and HA tests
 TIMESCALEDB_PASSWORD="${CFGMS_TEST_TIMESCALEDB_PASSWORD:-cfgms_test_password}"
 
 GITEA_URL="http://localhost:3001"
