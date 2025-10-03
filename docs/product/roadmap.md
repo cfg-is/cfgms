@@ -564,11 +564,11 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - [x] Load balancing (AC5 - ✅ COMPLETE - Geographic routing with multiple strategies)
   - [x] Split-brain prevention mechanisms (AC6 - ✅ COMPLETE - Raft quorum-based prevention)
   - ⏸️ Zero-downtime updates (AC4 - DEFERRED for production validation with real traffic)
-- [ ] **Backward Compatibility Validation and System Integration** (Story 11.1) - 13 points (Issue #179)
-  - Complete validation of all v0.4.6.0 functionality with new capabilities
-  - API and configuration compatibility testing
-  - Performance parity confirmation and comprehensive integration testing
-  - Smooth upgrade path validation from v0.4.6.0 to v0.5.0 without downtime
+- [ ] **QA Infrastructure Consolidation and Integration Test Coverage** (Story 11.1) - 13 points (Issue #179)
+  - Unified Docker test infrastructure eliminating port conflicts and duplicate environments
+  - Add 13 missing integration tests to test-ci pipeline (core, security, baseline tests)
+  - Optional: Include HA integration tests in standard CI workflow
+  - CI performance optimization targeting < 15 minute total execution time
 - [ ] **Communication Protocol Migration: gRPC to MQTT+QUIC Hybrid** (Story 12.1) - 13 points (Issue #198)
   - Migrate from gRPC to hybrid MQTT+QUIC architecture for optimal WAN performance
   - MQTT control plane: Commands, keepalive, presence (30s heartbeat, <5s failover detection)
