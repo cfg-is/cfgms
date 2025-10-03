@@ -427,3 +427,4 @@ networks:
       driver: default
       config:
         - subnet: 172.20.0.0/16
+    name: cfgms-test  # Explicit network name to avoid name conflicts
