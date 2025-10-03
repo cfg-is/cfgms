@@ -210,3 +210,40 @@ func (s *Server) respondError(w http.ResponseWriter, status int, message string)
 		s.logger.Error("Failed to encode error response", "error", err)
 	}
 }
+
+// handleRaftMessage handles POST /raft/message - receives Raft messages from peers
+func (s *Server) handleRaftMessage(w http.ResponseWriter, r *http.Request) {
+	haManager := s.getHAManager()
+	if haManager == nil {
+		http.Error(w, "HA manager not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Get Raft transport from HA manager
+	transport := haManager.GetRaftTransport()
+	if transport == nil {
+		http.Error(w, "Raft transport not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Delegate to transport handler
+	transport.HandleMessage(w, r)
+}
+
+// handleRaftStatus handles GET /raft/status - returns Raft cluster status
+func (s *Server) handleRaftStatus(w http.ResponseWriter, r *http.Request) {
+	haManager := s.getHAManager()
+	if haManager == nil {
+		s.respondError(w, http.StatusServiceUnavailable, "HA manager not available")
+		return
+	}
+
+	transport := haManager.GetRaftTransport()
+	if transport == nil {
+		s.respondError(w, http.StatusServiceUnavailable, "Raft transport not available")
+		return
+	}
+
+	// Delegate to transport handler
+	transport.HandleStatus(w, r)
+}

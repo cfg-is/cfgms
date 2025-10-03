@@ -3,6 +3,7 @@ package ha
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -26,7 +27,8 @@ type raftTransport struct {
 	peers map[uint64]string
 
 	// HTTP client for sending messages
-	client *http.Client
+	client       *http.Client
+	useTLS       bool // Whether to use HTTPS for peer communication
 
 	// Consensus engine
 	consensus *RaftConsensus
@@ -39,17 +41,25 @@ type raftTransport struct {
 
 // newRaftTransport creates a new Raft transport
 func newRaftTransport(nodeID uint64, address string, consensus *RaftConsensus) *raftTransport {
+	// Use HTTPS with InsecureSkipVerify for internal cluster communication
+	// In production, this should use proper certificate validation
+	transport := &http.Transport{
+		MaxIdleConnsPerHost: 10,
+		IdleConnTimeout:     30 * time.Second,
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+		},
+	}
+
 	return &raftTransport{
 		nodeID:    nodeID,
 		address:   address,
 		peers:     make(map[uint64]string),
 		consensus: consensus,
+		useTLS:    true, // Default to TLS for cluster communication
 		client: &http.Client{
-			Timeout: 3 * time.Second,
-			Transport: &http.Transport{
-				MaxIdleConnsPerHost: 10,
-				IdleConnTimeout:     30 * time.Second,
-			},
+			Timeout:   3 * time.Second,
+			Transport: transport,
 		},
 		stopC: make(chan struct{}),
 	}
@@ -118,7 +128,11 @@ func (t *raftTransport) sendMessage(msg raftpb.Message) {
 	}
 
 	// Construct URL for peer's Raft endpoint
-	url := fmt.Sprintf("http://%s/raft/message", peerAddr)
+	scheme := "http"
+	if t.useTLS {
+		scheme = "https"
+	}
+	url := fmt.Sprintf("%s://%s/raft/message", scheme, peerAddr)
 
 	// Send HTTP POST
 	req, err := http.NewRequestWithContext(t.ctx, "POST", url, bytes.NewReader(data))
@@ -135,7 +149,11 @@ func (t *raftTransport) sendMessage(msg raftpb.Message) {
 		log.Printf("RAFT_TRANSPORT: Failed to send message to peer %d at %s: %v", msg.To, peerAddr, err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log.Printf("RAFT_TRANSPORT: Failed to close response body for peer %d: %v", msg.To, err)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -145,20 +163,33 @@ func (t *raftTransport) sendMessage(msg raftpb.Message) {
 
 // HandleMessage processes incoming Raft messages (HTTP handler)
 func (t *raftTransport) HandleMessage(w http.ResponseWriter, r *http.Request) {
+	log.Printf("RAFT_TRANSPORT: Received message HTTP request, node_id=%d, remote_addr=%s", t.nodeID, r.RemoteAddr)
+
 	// Read message body
 	data, err := io.ReadAll(r.Body)
 	if err != nil {
+		log.Printf("RAFT_TRANSPORT: Failed to read message body: %v", err)
 		http.Error(w, "Failed to read message", http.StatusBadRequest)
 		return
 	}
-	defer r.Body.Close()
+	defer func() {
+		if err := r.Body.Close(); err != nil {
+			log.Printf("RAFT_TRANSPORT: Failed to close request body: %v", err)
+		}
+	}()
+
+	log.Printf("RAFT_TRANSPORT: Read %d bytes from request body", len(data))
 
 	// Deserialize message
 	var msg raftpb.Message
 	if err := msg.Unmarshal(data); err != nil {
+		log.Printf("RAFT_TRANSPORT: Failed to unmarshal message: %v", err)
 		http.Error(w, "Failed to unmarshal message", http.StatusBadRequest)
 		return
 	}
+
+	log.Printf("RAFT_TRANSPORT: Received Raft message, node_id=%d, from=%d, to=%d, type=%s",
+		t.nodeID, msg.From, msg.To, msg.Type)
 
 	// Process message through Raft
 	if err := t.consensus.Process(r.Context(), msg); err != nil {
@@ -167,22 +198,8 @@ func (t *raftTransport) HandleMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	log.Printf("RAFT_TRANSPORT: Successfully processed message from peer %d", msg.From)
 	w.WriteHeader(http.StatusOK)
-}
-
-// raftHTTPHandler wraps the transport for HTTP serving
-type raftHTTPHandler struct {
-	transport *raftTransport
-}
-
-// ServeHTTP implements http.Handler
-func (h *raftHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	h.transport.HandleMessage(w, r)
 }
 
 // raftStatusResponse is returned by the status endpoint
@@ -205,5 +222,7 @@ func (t *raftTransport) HandleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(status)
+	if err := json.NewEncoder(w).Encode(status); err != nil {
+		log.Printf("RAFT_TRANSPORT: Failed to encode status response: %v", err)
+	}
 }

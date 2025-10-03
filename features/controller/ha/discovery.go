@@ -305,7 +305,11 @@ func (d *staticDiscovery) checkNodeHealth(node *NodeInfo) bool {
 		log.Printf("HEALTH_CHECK: Node unreachable, node_id=%s, address=%s, error=%v", node.ID, node.Address, err)
 		return false
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log.Printf("HEALTH_CHECK: Failed to close response body, node_id=%s, error=%v", node.ID, err)
+		}
+	}()
 
 	isHealthy := resp.StatusCode == 200 || resp.StatusCode == 404 || resp.StatusCode == 401 // Any response means server is up
 	log.Printf("HEALTH_CHECK: Node checked, node_id=%s, address=%s, status=%d, healthy=%v",

@@ -221,6 +221,10 @@ func (s *Server) setupRouter() {
 	ha.Handle("/cluster", s.requirePermission("ha", "read-cluster")(http.HandlerFunc(s.handleHACluster))).Methods("GET")
 	ha.Handle("/leader", s.requirePermission("ha", "read-leader")(http.HandlerFunc(s.handleHALeader))).Methods("GET")
 	ha.Handle("/nodes", s.requirePermission("ha", "read-nodes")(http.HandlerFunc(s.handleHANodes))).Methods("GET")
+
+	// Raft consensus endpoints (no auth required - internal cluster communication)
+	s.router.HandleFunc("/raft/message", s.handleRaftMessage).Methods("POST")
+	s.router.HandleFunc("/raft/status", s.handleRaftStatus).Methods("GET")
 }
 
 // Start starts the HTTP server
