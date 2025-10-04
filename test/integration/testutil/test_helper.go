@@ -43,18 +43,27 @@ func NewTestEnvWithDocker(t *testing.T, dockerAddr string) *TestEnv {
 	return env
 }
 
-// NewTestEnv creates a new test environment
-func NewTestEnv(t *testing.T) *TestEnv {
+// NewTestEnvWithTimeout creates a test environment with custom context timeout
+func NewTestEnvWithTimeout(t *testing.T, timeout time.Duration) *TestEnv {
 	tempDir, err := os.MkdirTemp("", "cfgms-test-")
 	require.NoError(t, err)
 
 	logger := testpkg.NewMockLogger(false)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 
+	return createTestEnv(t, tempDir, logger, ctx, cancel)
+}
+
+// NewTestEnv creates a new test environment
+func NewTestEnv(t *testing.T) *TestEnv {
+	return NewTestEnvWithTimeout(t, 30*time.Second)
+}
+
+func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx context.Context, cancel context.CancelFunc) *TestEnv {
 	// Initialize production certificate manager for testing
 	certStoragePath := filepath.Join(tempDir, "certs")
-	err = os.MkdirAll(certStoragePath, 0755)
+	err := os.MkdirAll(certStoragePath, 0755)
 	require.NoError(t, err)
 
 	certManager, err := cert.NewManager(&cert.ManagerConfig{

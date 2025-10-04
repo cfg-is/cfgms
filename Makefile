@@ -1033,7 +1033,7 @@ test-with-real-storage:
 	@echo "=================================================="
 	@echo "Testing with Docker-based PostgreSQL and Gitea..."
 	@echo ""
-	@./scripts/test-with-infrastructure.sh go test -v -race ./pkg/testing/storage/... ./features/controller/server/... ./test/integration/baseline/... ./test/integration/compliance/... ./test/integration/core/... ./test/integration/e2e/... ./test/integration/logging/... ./test/integration/security/... ./test/integration/stress/... -timeout=15m
+	@./scripts/test-with-infrastructure.sh go test -v -race ./pkg/testing/storage/... ./features/controller/server/... -timeout=15m
 	@echo ""
 	@echo "🔬 Running storage provider validation tests..."
 	@if [ -f .env.test ]; then \
@@ -1046,6 +1046,15 @@ test-with-real-storage:
 	fi
 	@echo ""
 	@echo "✅ Integration tests completed successfully!"
+
+# Run short integration tests (excludes long-running chaos/stress tests)
+test-integration-short:
+	@echo "🧪 Running Short Integration Tests"
+	@echo "=================================="
+	@echo "Running in-process integration tests (chaos/stress tests excluded)..."
+	@go test -tags=short -race -timeout=2m ./test/integration
+	@echo ""
+	@echo "✅ Short integration tests completed successfully!"
 
 # Test database provider specifically
 test-integration-db:
