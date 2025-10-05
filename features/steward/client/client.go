@@ -49,6 +49,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	mqttClient "github.com/cfgis/cfgms/pkg/mqtt/client"
 	mqttTypes "github.com/cfgis/cfgms/pkg/mqtt/types"
+	quicClient "github.com/cfgis/cfgms/pkg/quic/client"
 )
 
 // Client provides gRPC client functionality for steward-controller communication.
@@ -87,6 +88,10 @@ type Client struct {
 	mqttClient *mqttClient.Client
 	mqttEnabled bool
 	commandHandler *commands.Handler
+
+	// QUIC client for data transfers (Story #198)
+	quicClient *quicClient.Client
+	quicConnected bool
 	
 	// Sync tracking
 	lastSyncFingerprint string
@@ -309,8 +314,20 @@ func (c *Client) registerCommandHandlers(handler *commands.Handler) {
 	// Register connect_quic handler
 	handler.RegisterHandler(mqttTypes.CommandConnectQUIC, func(ctx context.Context, cmd mqttTypes.Command) error {
 		c.logger.Info("Received connect_quic command", "command_id", cmd.CommandID)
-		// TODO: Implement QUIC connection establishment
-		return fmt.Errorf("QUIC connection not yet implemented")
+
+		// Extract parameters from command
+		quicAddress, ok := cmd.Params["quic_address"].(string)
+		if !ok || quicAddress == "" {
+			return fmt.Errorf("missing or invalid quic_address parameter")
+		}
+
+		sessionID, ok := cmd.Params["session_id"].(string)
+		if !ok || sessionID == "" {
+			return fmt.Errorf("missing or invalid session_id parameter")
+		}
+
+		// Establish QUIC connection
+		return c.connectQUIC(ctx, quicAddress, sessionID)
 	})
 
 	// Register shutdown handler
@@ -319,6 +336,88 @@ func (c *Client) registerCommandHandlers(handler *commands.Handler) {
 		// Graceful shutdown
 		return c.Disconnect()
 	})
+}
+
+// connectQUIC establishes a QUIC connection to the controller.
+func (c *Client) connectQUIC(ctx context.Context, quicAddress, sessionID string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Check if already connected
+	if c.quicClient != nil && c.quicConnected {
+		c.logger.Info("QUIC already connected, disconnecting existing connection")
+		c.quicClient.Disconnect()
+		c.quicClient = nil
+		c.quicConnected = false
+	}
+
+	c.logger.Info("Establishing QUIC connection",
+		"quic_address", quicAddress,
+		"session_id", sessionID)
+
+	// Build TLS config for QUIC
+	tlsConfig, err := c.buildQUICTLSConfig()
+	if err != nil {
+		return fmt.Errorf("failed to build TLS config: %w", err)
+	}
+
+	// Create QUIC client
+	quicCfg := &quicClient.Config{
+		ServerAddr: quicAddress,
+		TLSConfig:  tlsConfig,
+		SessionID:  sessionID,
+		StewardID:  c.stewardID,
+		Logger:     c.logger,
+	}
+
+	client, err := quicClient.New(quicCfg)
+	if err != nil {
+		return fmt.Errorf("failed to create QUIC client: %w", err)
+	}
+
+	// Connect to controller
+	if err := client.Connect(ctx); err != nil {
+		return fmt.Errorf("failed to connect QUIC: %w", err)
+	}
+
+	c.quicClient = client
+	c.quicConnected = true
+
+	c.logger.Info("QUIC connection established successfully")
+	return nil
+}
+
+// buildQUICTLSConfig builds TLS configuration for QUIC connection.
+func (c *Client) buildQUICTLSConfig() (*tls.Config, error) {
+	// Load client certificate
+	clientCert, err := tls.LoadX509KeyPair(
+		filepath.Join(c.certPath, "client.crt"),
+		filepath.Join(c.certPath, "client.key"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load client certificate: %w", err)
+	}
+
+	// Load CA certificate
+	caCert, err := os.ReadFile(filepath.Join(c.certPath, "ca.crt"))
+	if err != nil {
+		return nil, fmt.Errorf("failed to load CA certificate: %w", err)
+	}
+
+	caCertPool := x509.NewCertPool()
+	if !caCertPool.AppendCertsFromPEM(caCert) {
+		return nil, fmt.Errorf("failed to parse CA certificate")
+	}
+
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{clientCert},
+		RootCAs:      caCertPool,
+		ServerName:   "cfgms-controller", // Should match certificate
+		MinVersion:   tls.VersionTLS13,   // QUIC requires TLS 1.3
+		NextProtos:   []string{"cfgms-quic"}, // Application protocol
+	}
+
+	return tlsConfig, nil
 }
 
 // Disconnect closes the gRPC connection to the controller.
@@ -344,6 +443,14 @@ func (c *Client) Disconnect() error {
 			close(c.heartbeatStop)
 		}
 		c.heartbeatRunning = false
+	}
+
+	// Disconnect QUIC client if connected (Story #198)
+	if c.quicClient != nil {
+		c.logger.Info("Disconnecting QUIC client")
+		c.quicClient.Disconnect()
+		c.quicClient = nil
+		c.quicConnected = false
 	}
 
 	// Disconnect MQTT client if connected (Story #198)

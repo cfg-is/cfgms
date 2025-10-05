@@ -244,3 +244,52 @@ func (p *Publisher) GetPendingCommands() []string {
 
 	return commands
 }
+
+// TriggerQUICConnection sends a connect_quic command to a steward.
+func (p *Publisher) TriggerQUICConnection(ctx context.Context, stewardID string, quicAddress string, sessionID string) (string, error) {
+	params := map[string]interface{}{
+		"quic_address": quicAddress,
+		"session_id":   sessionID,
+	}
+
+	commandID, err := p.PublishCommand(ctx, stewardID, mqttTypes.CommandConnectQUIC, params)
+	if err != nil {
+		return "", fmt.Errorf("failed to trigger QUIC connection: %w", err)
+	}
+
+	p.logger.Info("Triggered QUIC connection",
+		"steward_id", stewardID,
+		"quic_address", quicAddress,
+		"session_id", sessionID,
+		"command_id", commandID)
+
+	return commandID, nil
+}
+
+// TriggerConfigSync sends a sync_config command to a steward.
+func (p *Publisher) TriggerConfigSync(ctx context.Context, stewardID string) (string, error) {
+	commandID, err := p.PublishCommand(ctx, stewardID, mqttTypes.CommandSyncConfig, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to trigger config sync: %w", err)
+	}
+
+	p.logger.Info("Triggered config sync",
+		"steward_id", stewardID,
+		"command_id", commandID)
+
+	return commandID, nil
+}
+
+// TriggerDNASync sends a sync_dna command to a steward.
+func (p *Publisher) TriggerDNASync(ctx context.Context, stewardID string) (string, error) {
+	commandID, err := p.PublishCommand(ctx, stewardID, mqttTypes.CommandSyncDNA, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to trigger DNA sync: %w", err)
+	}
+
+	p.logger.Info("Triggered DNA sync",
+		"steward_id", stewardID,
+		"command_id", commandID)
+
+	return commandID, nil
+}
