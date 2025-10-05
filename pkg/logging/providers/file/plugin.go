@@ -301,7 +301,10 @@ func (p *FileProvider) QueryTimeRange(ctx context.Context, query interfaces.Time
 	
 	start := time.Now()
 	defer func() {
+		// Lock to prevent concurrent access to stats
+		p.mutex.Lock()
 		p.stats.QueryLatencyMs = float64(time.Since(start).Milliseconds())
+		p.mutex.Unlock()
 	}()
 	
 	// Find relevant log files based on time range

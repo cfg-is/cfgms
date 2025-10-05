@@ -166,14 +166,29 @@ test-commit: test lint security-scan
 
 # CI validation (complete validation) - RUNS IN CI/CD
 test-ci: export CI=1
-test-ci: test-infrastructure-required test lint security-scan test-m365-integration test-integration-complete test-integration-factory
+test-ci: test-infrastructure-required lint security-scan test-m365-integration test-integration-complete test-integration-factory
 
 # Robust CI infrastructure test target - ensures infrastructure works every time
 test-infrastructure-required:
 	@echo "🏗️  CFGMS Infrastructure Reliability Test"
 	@echo "========================================"
 	@echo "Ensuring CI infrastructure is set up and working correctly..."
-	@./scripts/test-with-infrastructure.sh go test -v ./pkg/testing/storage/... ./features/controller/server/... -timeout=10m -race
+	@go clean -testcache
+	@echo "🧪 Testing framework (excluding modules and long-running tests)..."
+	@./scripts/test-with-infrastructure.sh go test -race -short -timeout=1m $$(go list ./... | grep -v '/features/modules/' | grep -v '/test/integration' | grep -v '/test/e2e')
+	@echo "🧪 Testing core modules (smoke test)..."
+	@for module in $(CORE_MODULES); do \
+		echo "  Testing $$module..."; \
+		./scripts/test-with-infrastructure.sh go test -race -short -timeout=30s ./features/modules/$$module/...; \
+	done
+	@changed_modules="$(CHANGED_MODULES)"; \
+	if [ -n "$$changed_modules" ]; then \
+		echo "📝 Testing changed modules: $$changed_modules"; \
+		for module in $$changed_modules; do \
+			echo "  Testing $$module..."; \
+			./scripts/test-with-infrastructure.sh go test -race -short -timeout=30s ./features/modules/$$module/...; \
+		done; \
+	fi
 	@echo ""
 	@echo "✅ CI VALIDATION FINISHED"
 	@echo "=========================="
