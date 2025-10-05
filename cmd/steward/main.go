@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"flag"
 	"log"
 	"os"
@@ -22,6 +24,14 @@ import (
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
 )
 
+// RegistrationCode represents the decoded registration code structure.
+type RegistrationCode struct {
+	TenantID      string `json:"tenant_id"`
+	ControllerURL string `json:"controller_url"`
+	Group         string `json:"group,omitempty"`
+	Version       int    `json:"version"`
+}
+
 func main() {
 	// Parse command line arguments
 	var (
@@ -29,6 +39,7 @@ func main() {
 		mode       = flag.String("mode", "", "Operation mode: 'standalone' or 'controller' (optional if config provided)")
 		logLevel   = flag.String("log-level", "info", "Log level: debug, info, warn, error")
 		provider   = flag.String("log-provider", "file", "Logging provider: file, timescale")
+		regCode    = flag.String("regcode", "", "Registration code for automatic tenant registration")
 	)
 	flag.Parse()
 
@@ -55,11 +66,35 @@ func main() {
 	// Initialize global logger factory
 	logging.InitializeGlobalLoggerFactory("steward", "main")
 
-	// Determine operation mode
-	useStandalone := *configPath != "" || *mode == "standalone"
-
 	// Set up logging using global provider
 	logger := logging.ForComponent("steward")
+
+	// Decode registration code if provided
+	var registration *RegistrationCode
+	if *regCode != "" {
+		var err error
+		registration, err = decodeRegistrationCode(*regCode)
+		if err != nil {
+			logger.Fatal("Failed to decode registration code",
+				"operation", "registration_decode",
+				"error", err.Error())
+		}
+
+		logger.Info("Registration code decoded successfully",
+			"operation", "registration_decode",
+			"tenant_id", registration.TenantID,
+			"controller_url", registration.ControllerURL,
+			"group", registration.Group)
+
+		// TODO: Use registration to configure steward
+		// - Set tenant_id for MQTT client credentials
+		// - Set controller URL for MQTT broker connection
+		// - Set group for optional organization
+		// - Generate steward_id with tenant prefix: {tenant_id}-{uuid}
+	}
+
+	// Determine operation mode
+	useStandalone := *configPath != "" || *mode == "standalone"
 	
 	var s *steward.Steward
 	var err error
@@ -143,4 +178,21 @@ func main() {
 	logger.Info("Steward shutdown completed",
 		"operation", "steward_shutdown",
 		"status", "completed")
+}
+
+// decodeRegistrationCode decodes a base64-encoded registration code.
+func decodeRegistrationCode(encoded string) (*RegistrationCode, error) {
+	// Decode from base64
+	jsonData, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, err
+	}
+
+	// Unmarshal JSON
+	var regCode RegistrationCode
+	if err := json.Unmarshal(jsonData, &regCode); err != nil {
+		return nil, err
+	}
+
+	return &regCode, nil
 }
