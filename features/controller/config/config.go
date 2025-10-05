@@ -38,6 +38,9 @@ type Config struct {
 
 	// MQTT broker configuration for control plane communication
 	MQTT *MQTTConfig `yaml:"mqtt"`
+
+	// QUIC server configuration for data plane communication
+	QUIC *QUICConfig `yaml:"quic"`
 }
 
 // CertificateConfig contains certificate management settings
@@ -279,6 +282,30 @@ type MQTTConfig struct {
 	KeepaliveMultiplier float64 `yaml:"keepalive_multiplier"`
 }
 
+// QUICConfig contains QUIC server configuration for data plane
+type QUICConfig struct {
+	// Enable QUIC server
+	Enabled bool `yaml:"enabled"`
+
+	// QUIC listen address (e.g., "0.0.0.0:4433")
+	ListenAddr string `yaml:"listen_addr"`
+
+	// Use certificate manager for QUIC certificates
+	UseCertManager bool `yaml:"use_cert_manager"`
+
+	// TLS certificate path (if not using cert manager)
+	TLSCertPath string `yaml:"tls_cert_path,omitempty"`
+
+	// TLS key path (if not using cert manager)
+	TLSKeyPath string `yaml:"tls_key_path,omitempty"`
+
+	// CA certificate path for client verification
+	TLSCAPath string `yaml:"tls_ca_path,omitempty"`
+
+	// Session timeout in seconds
+	SessionTimeout int `yaml:"session_timeout"`
+}
+
 // DefaultConfig returns a Config with reasonable defaults
 func DefaultConfig() *Config {
 	return &Config{
@@ -399,6 +426,12 @@ func DefaultConfig() *Config {
 			MaxMessageSize:        1024 * 1024, // 1MB
 			SessionExpiryInterval: 3600,        // 1 hour
 			KeepaliveMultiplier:   1.5,         // Disconnect if no activity for keepalive * 1.5
+		},
+		QUIC: &QUICConfig{
+			Enabled:        true,  // Core data plane - enabled by default (Story #198)
+			ListenAddr:     "0.0.0.0:4433",
+			UseCertManager: true,  // Use controller's certificate manager
+			SessionTimeout: 300,   // 5 minutes
 		},
 	}
 }

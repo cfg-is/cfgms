@@ -35,6 +35,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	mqttInterfaces "github.com/cfgis/cfgms/pkg/mqtt/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/mqtt/providers/mochi" // Register mochi-mqtt provider
+	quicServer "github.com/cfgis/cfgms/pkg/quic/server"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
@@ -57,6 +58,7 @@ type Server struct {
 	mqttBroker              mqttInterfaces.Broker
 	heartbeatService        *heartbeat.Service
 	commandPublisher        *commands.Publisher
+	quicServer              *quicServer.Server
 }
 
 // New creates a new server instance
@@ -205,6 +207,17 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		logger.Info("Command publisher initialized successfully")
 	}
 
+	// Initialize QUIC server if enabled (Story #198)
+	var quicSrv *quicServer.Server
+	if cfg.QUIC != nil && cfg.QUIC.Enabled {
+		logger.Info("Initializing QUIC server...")
+		quicSrv, err = initializeQUICServer(cfg, logger, certManager)
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize QUIC server: %w", err)
+		}
+		logger.Info("QUIC server initialized successfully")
+	}
+
 	// Initialize HTTP API server with minimal monitoring for now
 	// TODO: Properly initialize monitoring components when needed
 	httpServer, err := api.New(
@@ -241,6 +254,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		mqttBroker:              mqttBroker,
 		heartbeatService:        heartbeatService,
 		commandPublisher:        commandPublisher,
+		quicServer:              quicSrv,
 		httpServer:              httpServer,
 	}, nil
 }
@@ -341,6 +355,19 @@ func (s *Server) Start() error {
 		}
 	}
 
+	// Start QUIC server (Story #198)
+	if s.quicServer != nil {
+		s.logger.Info("Starting QUIC server...")
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		if err := s.quicServer.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start QUIC server: %w", err)
+		}
+		s.logger.Info("QUIC server started successfully",
+			"listen_addr", s.cfg.QUIC.ListenAddr)
+	}
+
 	// Start HTTP API server
 	if s.httpServer != nil {
 		go func() {
@@ -401,6 +428,15 @@ func (s *Server) Stop() error {
 		event := audit.SystemEvent("system", "controller_stop", "Controller server shutting down")
 		if err := s.auditManager.RecordEvent(ctx, event); err != nil {
 			s.logger.Warn("Failed to record shutdown audit event", "error", err)
+		}
+	}
+
+	// Stop QUIC server (Story #198)
+	if s.quicServer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := s.quicServer.Stop(ctx); err != nil {
+			s.logger.Warn("Failed to stop QUIC server", "error", err)
 		}
 	}
 
@@ -881,5 +917,91 @@ func ensureMQTTTestCertificates(caPath string) error {
 	serverKeyFile.Close()
 
 	return nil
+}
+
+func initializeQUICServer(cfg *config.Config, logger logging.Logger, certManager *cert.Manager) (*quicServer.Server, error) {
+	// Build TLS config for QUIC
+	var tlsConfig *tls.Config
+
+	if cfg.QUIC.UseCertManager && certManager != nil {
+		// Use certificate manager certificates (same as MQTT)
+		serverCertPath := filepath.Join(cfg.Certificate.CAPath, "server", "server.crt")
+		serverKeyPath := filepath.Join(cfg.Certificate.CAPath, "server", "server.key")
+		caPath := filepath.Join(cfg.Certificate.CAPath, "ca.crt")
+
+		// Check if certificates exist
+		if _, err := os.Stat(serverCertPath); os.IsNotExist(err) {
+			logger.Info("QUIC certificates not found, using MQTT certificates")
+			// MQTT cert generation already happened, so these should exist
+			if err := ensureMQTTTestCertificates(cfg.Certificate.CAPath); err != nil {
+				return nil, fmt.Errorf("failed to ensure certificates: %w", err)
+			}
+		}
+
+		// Load certificate
+		cert, err := tls.LoadX509KeyPair(serverCertPath, serverKeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load QUIC certificate: %w", err)
+		}
+
+		// Load CA certificate for client verification
+		caCert, err := os.ReadFile(caPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read CA certificate: %w", err)
+		}
+
+		caCertPool := x509.NewCertPool()
+		if !caCertPool.AppendCertsFromPEM(caCert) {
+			return nil, fmt.Errorf("failed to parse CA certificate")
+		}
+
+		tlsConfig = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			ClientAuth:   tls.RequireAndVerifyClientCert,
+			ClientCAs:    caCertPool,
+			MinVersion:   tls.VersionTLS13, // QUIC requires TLS 1.3
+			NextProtos:   []string{"cfgms-quic"}, // Application protocol
+		}
+
+		logger.Info("QUIC server using certificate manager certificates",
+			"cert_path", serverCertPath,
+			"ca_path", caPath)
+	} else if cfg.QUIC.TLSCertPath != "" && cfg.QUIC.TLSKeyPath != "" {
+		// Use manually configured certificate paths
+		cert, err := tls.LoadX509KeyPair(cfg.QUIC.TLSCertPath, cfg.QUIC.TLSKeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load QUIC certificate: %w", err)
+		}
+
+		tlsConfig = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS13,
+			NextProtos:   []string{"cfgms-quic"},
+		}
+
+		logger.Info("QUIC server using configured certificates",
+			"cert_path", cfg.QUIC.TLSCertPath)
+	} else {
+		return nil, fmt.Errorf("QUIC enabled but no certificates configured")
+	}
+
+	// Create QUIC server
+	sessionTimeout := time.Duration(cfg.QUIC.SessionTimeout) * time.Second
+	quicSrv, err := quicServer.New(&quicServer.Config{
+		ListenAddr:     cfg.QUIC.ListenAddr,
+		TLSConfig:      tlsConfig,
+		SessionTimeout: sessionTimeout,
+		Logger:         logger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create QUIC server: %w", err)
+	}
+
+	logger.Info("QUIC server initialized",
+		"listen_addr", cfg.QUIC.ListenAddr,
+		"session_timeout", sessionTimeout,
+		"tls_version", "TLS 1.3")
+
+	return quicSrv, nil
 }
 
