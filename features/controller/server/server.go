@@ -21,6 +21,7 @@ import (
 	"github.com/quic-go/quic-go"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	common "github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
@@ -38,6 +39,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	mqttInterfaces "github.com/cfgis/cfgms/pkg/mqtt/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/mqtt/providers/mochi" // Register mochi-mqtt provider
+	mqttTypes "github.com/cfgis/cfgms/pkg/mqtt/types"
 	quicServer "github.com/cfgis/cfgms/pkg/quic/server"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
@@ -356,6 +358,13 @@ func (s *Server) Start() error {
 			}
 			s.logger.Info("Command publisher started successfully")
 		}
+
+		// Subscribe to DNA updates from stewards (Story #198)
+		dnaUpdateTopic := "cfgms/steward/+/dna"
+		if err := s.mqttBroker.Subscribe(ctx, dnaUpdateTopic, 1, s.handleDNAUpdate); err != nil {
+			return fmt.Errorf("failed to subscribe to DNA updates: %w", err)
+		}
+		s.logger.Info("Subscribed to DNA updates", "topic", dnaUpdateTopic)
 	}
 
 	// Start QUIC server (Story #198)
@@ -1144,6 +1153,52 @@ func handleDNASyncStream(ctx context.Context, session *quicServer.Session, strea
 	logger.Info("DNA sync response sent",
 		"steward_id", stewardID,
 		"bytes_sent", len(dnaData))
+
+	return nil
+}
+
+
+// handleDNAUpdate processes DNA update messages from stewards via MQTT.
+func (s *Server) handleDNAUpdate(topic string, payload []byte, qos byte, retained bool) error {
+	var dnaUpdate mqttTypes.DNAUpdate
+	if err := json.Unmarshal(payload, &dnaUpdate); err != nil {
+		s.logger.Error("Failed to parse DNA update", "error", err)
+		return fmt.Errorf("failed to parse DNA update: %w", err)
+	}
+
+	s.logger.Info("Received DNA update via MQTT",
+		"steward_id", dnaUpdate.StewardID,
+		"attributes_count", len(dnaUpdate.DNA),
+		"config_hash", dnaUpdate.ConfigHash)
+
+	// Convert to protobuf DNA format
+	dna := &common.DNA{
+		Id:              dnaUpdate.StewardID,
+		Attributes:      dnaUpdate.DNA,
+		ConfigHash:      dnaUpdate.ConfigHash,
+		SyncFingerprint: dnaUpdate.SyncFingerprint,
+		LastUpdated:     timestamppb.New(dnaUpdate.Timestamp),
+	}
+
+	// Update DNA in controller service
+	ctx := context.Background()
+	status, err := s.controllerService.SyncDNA(ctx, dna)
+	if err != nil {
+		s.logger.Error("Failed to sync DNA",
+			"steward_id", dnaUpdate.StewardID,
+			"error", err)
+		return fmt.Errorf("failed to sync DNA: %w", err)
+	}
+
+	if status.Code != common.Status_OK {
+		s.logger.Warn("DNA sync returned non-OK status",
+			"steward_id", dnaUpdate.StewardID,
+			"status_code", status.Code,
+			"message", status.Message)
+	} else {
+		s.logger.Info("DNA synced successfully via MQTT",
+			"steward_id", dnaUpdate.StewardID)
+	}
 
 	return nil
 }

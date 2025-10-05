@@ -116,3 +116,22 @@ type Heartbeat struct {
 	// Metrics contains optional health metrics
 	Metrics map[string]string `json:"metrics,omitempty"`
 }
+
+// DNAUpdate represents a DNA update message from steward to controller.
+// This is published by steward when DNA changes (e.g., hardware change, software install).
+type DNAUpdate struct {
+	// StewardID identifies which steward sent this update
+	StewardID string `json:"steward_id"`
+
+	// Timestamp when the DNA update was created
+	Timestamp time.Time `json:"timestamp"`
+
+	// DNA contains the updated DNA attributes
+	DNA map[string]string `json:"dna"`
+
+	// ConfigHash is the hash of the current configuration
+	ConfigHash string `json:"config_hash,omitempty"`
+
+	// SyncFingerprint is a combined hash of all sync-relevant data
+	SyncFingerprint string `json:"sync_fingerprint,omitempty"`
+}

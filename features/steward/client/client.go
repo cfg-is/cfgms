@@ -295,6 +295,41 @@ func (c *Client) publishStatus(status mqttTypes.StatusUpdate) {
 	}
 }
 
+// PublishDNAUpdate publishes a DNA update to the controller via MQTT.
+// This should be called whenever steward DNA changes (e.g., hardware change, software install).
+func (c *Client) PublishDNAUpdate(dna map[string]string, configHash, syncFingerprint string) error {
+	if c.mqttClient == nil || !c.mqttClient.IsConnected() {
+		return fmt.Errorf("MQTT not connected")
+	}
+
+	dnaUpdate := mqttTypes.DNAUpdate{
+		StewardID:       c.stewardID,
+		Timestamp:       time.Now(),
+		DNA:             dna,
+		ConfigHash:      configHash,
+		SyncFingerprint: syncFingerprint,
+	}
+
+	payload, err := json.Marshal(dnaUpdate)
+	if err != nil {
+		return fmt.Errorf("failed to marshal DNA update: %w", err)
+	}
+
+	topic := fmt.Sprintf("cfgms/steward/%s/dna", c.stewardID)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := c.mqttClient.Publish(ctx, topic, payload, 1, false); err != nil {
+		return fmt.Errorf("failed to publish DNA update: %w", err)
+	}
+
+	c.logger.Info("Published DNA update via MQTT",
+		"attributes_count", len(dna),
+		"config_hash", configHash)
+
+	return nil
+}
+
 // registerCommandHandlers registers default command handlers.
 func (c *Client) registerCommandHandlers(handler *commands.Handler) {
 	// Register sync_config handler
