@@ -41,6 +41,7 @@ func init() {
 	rootCmd.AddCommand(diffCmd)
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(regcodeCmd)
+	rootCmd.AddCommand(tokenCmd)
 }
 
 // versionCmd represents the version command

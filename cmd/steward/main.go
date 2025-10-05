@@ -39,7 +39,8 @@ func main() {
 		mode       = flag.String("mode", "", "Operation mode: 'standalone' or 'controller' (optional if config provided)")
 		logLevel   = flag.String("log-level", "info", "Log level: debug, info, warn, error")
 		provider   = flag.String("log-provider", "file", "Logging provider: file, timescale")
-		regCode    = flag.String("regcode", "", "Registration code for automatic tenant registration")
+		regCode    = flag.String("regcode", "", "Registration code for automatic tenant registration (deprecated, use --regtoken)")
+		regToken   = flag.String("regtoken", "", "Registration token for automatic tenant registration")
 	)
 	flag.Parse()
 
@@ -69,9 +70,32 @@ func main() {
 	// Set up logging using global provider
 	logger := logging.ForComponent("steward")
 
-	// Decode registration code if provided
-	var registration *RegistrationCode
-	if *regCode != "" {
+	// Handle registration token or code
+	var tenantID, controllerURL, group string
+
+	if *regToken != "" {
+		// Registration token (new method - API key style)
+		logger.Info("Using registration token for auto-registration",
+			"operation", "registration_init",
+			"token_prefix", (*regToken)[:min(len(*regToken), 15)]+"...")
+
+		// TODO: Validate token with controller and get tenant info
+		// For now, just log that we have a token
+		// In full implementation:
+		// 1. Connect to MQTT
+		// 2. Publish token to cfgms/register
+		// 3. Controller validates and responds with tenant_id, controller_url, group
+		// 4. Generate steward_id with tenant prefix
+
+		logger.Info("Registration token will be validated on connection",
+			"operation", "registration_init")
+
+	} else if *regCode != "" {
+		// Registration code (legacy method - base64 JSON)
+		logger.Warn("Using deprecated registration code, please use --regtoken instead",
+			"operation", "registration_init")
+
+		var registration *RegistrationCode
 		var err error
 		registration, err = decodeRegistrationCode(*regCode)
 		if err != nil {
@@ -80,11 +104,15 @@ func main() {
 				"error", err.Error())
 		}
 
+		tenantID = registration.TenantID
+		controllerURL = registration.ControllerURL
+		group = registration.Group
+
 		logger.Info("Registration code decoded successfully",
 			"operation", "registration_decode",
-			"tenant_id", registration.TenantID,
-			"controller_url", registration.ControllerURL,
-			"group", registration.Group)
+			"tenant_id", tenantID,
+			"controller_url", controllerURL,
+			"group", group)
 
 		// TODO: Use registration to configure steward
 		// - Set tenant_id for MQTT client credentials
