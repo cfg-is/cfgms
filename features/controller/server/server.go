@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"log"
@@ -21,6 +22,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
+	common "github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/features/controller/api"
 	"github.com/cfgis/cfgms/features/controller/commands"
@@ -212,7 +214,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	var quicSrv *quicServer.Server
 	if cfg.QUIC != nil && cfg.QUIC.Enabled {
 		logger.Info("Initializing QUIC server...")
-		quicSrv, err = initializeQUICServer(cfg, logger, certManager)
+		quicSrv, err = initializeQUICServer(cfg, logger, certManager, configService, controllerService)
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize QUIC server: %w", err)
 		}
@@ -920,7 +922,7 @@ func ensureMQTTTestCertificates(caPath string) error {
 	return nil
 }
 
-func initializeQUICServer(cfg *config.Config, logger logging.Logger, certManager *cert.Manager) (*quicServer.Server, error) {
+func initializeQUICServer(cfg *config.Config, logger logging.Logger, certManager *cert.Manager, configService *service.ConfigurationService, controllerService *service.ControllerService) (*quicServer.Server, error) {
 	// Build TLS config for QUIC
 	var tlsConfig *tls.Config
 
@@ -1001,12 +1003,12 @@ func initializeQUICServer(cfg *config.Config, logger logging.Logger, certManager
 	// Register stream handlers
 	// Stream 1: Configuration sync
 	quicSrv.RegisterStreamHandler(1, func(ctx context.Context, session *quicServer.Session, stream *quic.Stream) error {
-		return handleConfigSyncStream(ctx, session, stream, logger)
+		return handleConfigSyncStream(ctx, session, stream, configService, logger)
 	})
 
 	// Stream 2: DNA sync
 	quicSrv.RegisterStreamHandler(2, func(ctx context.Context, session *quicServer.Session, stream *quic.Stream) error {
-		return handleDNASyncStream(ctx, session, stream, logger)
+		return handleDNASyncStream(ctx, session, stream, controllerService, logger)
 	})
 
 	logger.Info("QUIC server initialized",
@@ -1018,7 +1020,7 @@ func initializeQUICServer(cfg *config.Config, logger logging.Logger, certManager
 }
 
 // handleConfigSyncStream handles configuration sync requests on stream 1.
-func handleConfigSyncStream(ctx context.Context, session *quicServer.Session, stream *quic.Stream, logger logging.Logger) error {
+func handleConfigSyncStream(ctx context.Context, session *quicServer.Session, stream *quic.Stream, configService *service.ConfigurationService, logger logging.Logger) error {
 	logger.Info("Handling config sync request",
 		"session_id", session.ID,
 		"steward_id", session.StewardID)
@@ -1032,29 +1034,62 @@ func handleConfigSyncStream(ctx context.Context, session *quicServer.Session, st
 
 	stewardID := string(buf[:n])
 	// Remove newline if present
-	stewardID = stewardID[:len(stewardID)-1]
+	if len(stewardID) > 0 && stewardID[len(stewardID)-1] == '\n' {
+		stewardID = stewardID[:len(stewardID)-1]
+	}
 
 	logger.Info("Config sync request received",
 		"steward_id", stewardID,
 		"session_id", session.ID)
 
-	// TODO: Fetch configuration for steward from ConfigurationService
-	// For now, send placeholder response
-	response := fmt.Sprintf("CONFIG_DATA_FOR_%s\n", stewardID)
+	// Fetch configuration from ConfigurationService
+	configReq := &controller.ConfigRequest{
+		StewardId: stewardID,
+	}
 
-	if _, err := stream.Write([]byte(response)); err != nil {
+	configResp, err := configService.GetConfiguration(ctx, configReq)
+	if err != nil {
+		logger.Error("Failed to get configuration",
+			"steward_id", stewardID,
+			"error", err)
+		return fmt.Errorf("failed to get configuration: %w", err)
+	}
+
+	// Check if configuration was found
+	if configResp.Status.Code != common.Status_OK {
+		logger.Warn("Configuration not available",
+			"steward_id", stewardID,
+			"status", configResp.Status.Code,
+			"message", configResp.Status.Message)
+
+		// Send error response
+		errorMsg := fmt.Sprintf("ERROR: %s\n", configResp.Status.Message)
+		if _, err := stream.Write([]byte(errorMsg)); err != nil {
+			return fmt.Errorf("failed to write error response: %w", err)
+		}
+		return nil
+	}
+
+	// Marshal configuration to JSON
+	configData, err := json.Marshal(configResp.Config)
+	if err != nil {
+		return fmt.Errorf("failed to marshal configuration: %w", err)
+	}
+
+	// Send configuration data
+	if _, err := stream.Write(configData); err != nil {
 		return fmt.Errorf("failed to write config response: %w", err)
 	}
 
 	logger.Info("Config sync response sent",
 		"steward_id", stewardID,
-		"bytes_sent", len(response))
+		"bytes_sent", len(configData))
 
 	return nil
 }
 
 // handleDNASyncStream handles DNA sync requests on stream 2.
-func handleDNASyncStream(ctx context.Context, session *quicServer.Session, stream *quic.Stream, logger logging.Logger) error {
+func handleDNASyncStream(ctx context.Context, session *quicServer.Session, stream *quic.Stream, controllerService *service.ControllerService, logger logging.Logger) error {
 	logger.Info("Handling DNA sync request",
 		"session_id", session.ID,
 		"steward_id", session.StewardID)
@@ -1068,23 +1103,47 @@ func handleDNASyncStream(ctx context.Context, session *quicServer.Session, strea
 
 	stewardID := string(buf[:n])
 	// Remove newline if present
-	stewardID = stewardID[:len(stewardID)-1]
+	if len(stewardID) > 0 && stewardID[len(stewardID)-1] == '\n' {
+		stewardID = stewardID[:len(stewardID)-1]
+	}
 
 	logger.Info("DNA sync request received",
 		"steward_id", stewardID,
 		"session_id", session.ID)
 
-	// TODO: Fetch DNA for steward from ControllerService
-	// For now, send placeholder response
-	response := fmt.Sprintf("DNA_DATA_FOR_%s\n", stewardID)
+	// Fetch DNA from ControllerService
+	dnaReq := &controller.StewardRequest{
+		StewardId: stewardID,
+	}
 
-	if _, err := stream.Write([]byte(response)); err != nil {
+	dna, err := controllerService.GetStewardDNA(ctx, dnaReq)
+	if err != nil {
+		logger.Error("Failed to get DNA",
+			"steward_id", stewardID,
+			"error", err)
+
+		// Send error response
+		errorMsg := fmt.Sprintf("ERROR: %s\n", err.Error())
+		if _, writeErr := stream.Write([]byte(errorMsg)); writeErr != nil {
+			return fmt.Errorf("failed to write error response: %w", writeErr)
+		}
+		return nil
+	}
+
+	// Marshal DNA to JSON
+	dnaData, err := json.Marshal(dna)
+	if err != nil {
+		return fmt.Errorf("failed to marshal DNA: %w", err)
+	}
+
+	// Send DNA data
+	if _, err := stream.Write(dnaData); err != nil {
 		return fmt.Errorf("failed to write DNA response: %w", err)
 	}
 
 	logger.Info("DNA sync response sent",
 		"steward_id", stewardID,
-		"bytes_sent", len(response))
+		"bytes_sent", len(dnaData))
 
 	return nil
 }

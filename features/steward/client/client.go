@@ -473,9 +473,29 @@ func (c *Client) syncConfigOverQUIC(ctx context.Context) error {
 		"steward_id", stewardID,
 		"size_bytes", n)
 
-	// TODO: Parse and apply configuration
-	// For now, just log that we received it
-	c.logger.Debug("Configuration data received", "data_preview", string(configData[:min(100, len(configData))]))
+	// Check for error response
+	if len(configData) > 6 && string(configData[:6]) == "ERROR:" {
+		return fmt.Errorf("controller error: %s", string(configData[7:]))
+	}
+
+	// Parse JSON configuration
+	var stewardConfig config.StewardConfig
+	if err := json.Unmarshal(configData, &stewardConfig); err != nil {
+		c.logger.Error("Failed to parse configuration JSON",
+			"steward_id", stewardID,
+			"error", err,
+			"data_preview", string(configData[:min(200, len(configData))]))
+		return fmt.Errorf("failed to parse configuration: %w", err)
+	}
+
+	c.logger.Info("Configuration parsed successfully",
+		"steward_id", stewardID,
+		"resources_count", len(stewardConfig.Resources))
+
+	// TODO: Apply configuration to steward
+	// For now, just log that we received and parsed it
+	c.logger.Debug("Configuration received and parsed",
+		"modules_count", len(stewardConfig.Modules))
 
 	return nil
 }
@@ -522,9 +542,31 @@ func (c *Client) syncDNAOverQUIC(ctx context.Context) error {
 		"steward_id", stewardID,
 		"size_bytes", n)
 
-	// TODO: Parse and apply DNA
-	// For now, just log that we received it
-	c.logger.Debug("DNA data received", "data_preview", string(dnaData[:min(100, len(dnaData))]))
+	// Check for error response
+	if len(dnaData) > 6 && string(dnaData[:6]) == "ERROR:" {
+		return fmt.Errorf("controller error: %s", string(dnaData[7:]))
+	}
+
+	// Parse JSON DNA
+	var dna commonpb.DNA
+	if err := json.Unmarshal(dnaData, &dna); err != nil {
+		c.logger.Error("Failed to parse DNA JSON",
+			"steward_id", stewardID,
+			"error", err,
+			"data_preview", string(dnaData[:min(200, len(dnaData))]))
+		return fmt.Errorf("failed to parse DNA: %w", err)
+	}
+
+	c.logger.Info("DNA parsed successfully",
+		"steward_id", stewardID,
+		"dna_id", dna.Id,
+		"attributes_count", len(dna.Attributes))
+
+	// TODO: Apply DNA to steward
+	// For now, just log that we received and parsed it
+	c.logger.Debug("DNA received and parsed",
+		"config_hash", dna.ConfigHash,
+		"sync_fingerprint", dna.SyncFingerprint)
 
 	return nil
 }
