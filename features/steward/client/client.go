@@ -44,9 +44,11 @@ import (
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	controllerpb "github.com/cfgis/cfgms/api/proto/controller"
+	"github.com/cfgis/cfgms/features/steward/commands"
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/pkg/logging"
 	mqttClient "github.com/cfgis/cfgms/pkg/mqtt/client"
+	mqttTypes "github.com/cfgis/cfgms/pkg/mqtt/types"
 )
 
 // Client provides gRPC client functionality for steward-controller communication.
@@ -81,9 +83,10 @@ type Client struct {
 	heartbeatStop chan struct{}
 	heartbeatRunning bool
 
-	// MQTT client for heartbeats (Story #198)
+	// MQTT client for heartbeats and commands (Story #198)
 	mqttClient *mqttClient.Client
 	mqttEnabled bool
+	commandHandler *commands.Handler
 	
 	// Sync tracking
 	lastSyncFingerprint string
@@ -176,7 +179,7 @@ func (c *Client) Connect(ctx context.Context) error {
 	return nil
 }
 
-// initMQTTClient initializes the MQTT client for heartbeat communication (Story #198).
+// initMQTTClient initializes the MQTT client for heartbeat and command communication (Story #198).
 func (c *Client) initMQTTClient(ctx context.Context) error {
 	// Parse controller address to get MQTT broker address
 	// Assuming controller gRPC is on :50051, MQTT is on :1883
@@ -227,7 +230,95 @@ func (c *Client) initMQTTClient(ctx context.Context) error {
 	}
 
 	c.mqttClient = client
+
+	// Initialize command handler (Story #198)
+	commandHandler, err := commands.New(&commands.Config{
+		StewardID: c.stewardID,
+		OnStatus:  c.publishStatus,
+		Logger:    c.logger,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create command handler: %w", err)
+	}
+
+	// Register default command handlers
+	c.registerCommandHandlers(commandHandler)
+
+	c.commandHandler = commandHandler
+
+	// Subscribe to command topic
+	commandTopic := fmt.Sprintf("cfgms/steward/%s/commands", c.stewardID)
+	if err := client.Subscribe(ctx, commandTopic, 1, c.handleMQTTCommand); err != nil {
+		return fmt.Errorf("failed to subscribe to commands: %w", err)
+	}
+
+	c.logger.Info("MQTT command handler initialized", "topic", commandTopic)
+
 	return nil
+}
+
+// handleMQTTCommand receives MQTT command messages and forwards to handler.
+func (c *Client) handleMQTTCommand(topic string, payload []byte) {
+	if c.commandHandler != nil {
+		if err := c.commandHandler.HandleCommand(topic, payload); err != nil {
+			c.logger.Error("Failed to handle command", "error", err, "topic", topic)
+		}
+	}
+}
+
+// publishStatus publishes a status update to the controller via MQTT.
+func (c *Client) publishStatus(status mqttTypes.StatusUpdate) {
+	if c.mqttClient == nil || !c.mqttClient.IsConnected() {
+		c.logger.Warn("Cannot publish status, MQTT not connected", "event", status.Event)
+		return
+	}
+
+	payload, err := json.Marshal(status)
+	if err != nil {
+		c.logger.Error("Failed to marshal status update", "error", err)
+		return
+	}
+
+	topic := fmt.Sprintf("cfgms/steward/%s/status", c.stewardID)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := c.mqttClient.Publish(ctx, topic, payload, 1, false); err != nil {
+		c.logger.Error("Failed to publish status update", "error", err, "topic", topic)
+	} else {
+		c.logger.Debug("Published status update", "event", status.Event, "command_id", status.CommandID)
+	}
+}
+
+// registerCommandHandlers registers default command handlers.
+func (c *Client) registerCommandHandlers(handler *commands.Handler) {
+	// Register sync_config handler
+	handler.RegisterHandler(mqttTypes.CommandSyncConfig, func(ctx context.Context, cmd mqttTypes.Command) error {
+		c.logger.Info("Received sync_config command", "command_id", cmd.CommandID)
+		// TODO: Implement QUIC-based configuration sync
+		return fmt.Errorf("QUIC configuration sync not yet implemented")
+	})
+
+	// Register sync_dna handler
+	handler.RegisterHandler(mqttTypes.CommandSyncDNA, func(ctx context.Context, cmd mqttTypes.Command) error {
+		c.logger.Info("Received sync_dna command", "command_id", cmd.CommandID)
+		// TODO: Implement QUIC-based DNA sync
+		return fmt.Errorf("QUIC DNA sync not yet implemented")
+	})
+
+	// Register connect_quic handler
+	handler.RegisterHandler(mqttTypes.CommandConnectQUIC, func(ctx context.Context, cmd mqttTypes.Command) error {
+		c.logger.Info("Received connect_quic command", "command_id", cmd.CommandID)
+		// TODO: Implement QUIC connection establishment
+		return fmt.Errorf("QUIC connection not yet implemented")
+	})
+
+	// Register shutdown handler
+	handler.RegisterHandler(mqttTypes.CommandShutdown, func(ctx context.Context, cmd mqttTypes.Command) error {
+		c.logger.Info("Received shutdown command", "command_id", cmd.CommandID)
+		// Graceful shutdown
+		return c.Disconnect()
+	})
 }
 
 // Disconnect closes the gRPC connection to the controller.
@@ -426,12 +517,25 @@ func (c *Client) SendHeartbeat(ctx context.Context, status string, metrics map[s
 
 // sendMQTTHeartbeat publishes a heartbeat message to MQTT broker.
 func (c *Client) sendMQTTHeartbeat(ctx context.Context, stewardID, status string, metrics map[string]string) error {
-	// Create heartbeat message
-	heartbeat := map[string]interface{}{
-		"steward_id": stewardID,
-		"status":     status,
-		"timestamp":  time.Now().Format(time.RFC3339),
-		"metrics":    metrics,
+	// Map status string to HeartbeatStatus type
+	var hbStatus mqttTypes.HeartbeatStatus
+	switch status {
+	case "healthy":
+		hbStatus = mqttTypes.StatusHealthy
+	case "degraded":
+		hbStatus = mqttTypes.StatusDegraded
+	case "error":
+		hbStatus = mqttTypes.StatusError
+	default:
+		hbStatus = mqttTypes.StatusHealthy
+	}
+
+	// Create heartbeat message using typed struct
+	heartbeat := mqttTypes.Heartbeat{
+		StewardID: stewardID,
+		Status:    hbStatus,
+		Timestamp: time.Now(),
+		Metrics:   metrics,
 	}
 
 	payload, err := json.Marshal(heartbeat)

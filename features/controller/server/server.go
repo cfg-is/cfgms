@@ -22,6 +22,7 @@ import (
 
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/features/controller/api"
+	"github.com/cfgis/cfgms/features/controller/commands"
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/ha"
 	"github.com/cfgis/cfgms/features/controller/heartbeat"
@@ -55,6 +56,7 @@ type Server struct {
 	haManager               *ha.Manager
 	mqttBroker              mqttInterfaces.Broker
 	heartbeatService        *heartbeat.Service
+	commandPublisher        *commands.Publisher
 }
 
 // New creates a new server instance
@@ -162,6 +164,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// Initialize MQTT broker if enabled
 	var mqttBroker mqttInterfaces.Broker
 	var heartbeatService *heartbeat.Service
+	var commandPublisher *commands.Publisher
 	if cfg.MQTT != nil && cfg.MQTT.Enabled {
 		logger.Info("Initializing MQTT broker...")
 		mqttBroker, err = initializeMQTTBroker(cfg, logger, certManager)
@@ -189,6 +192,17 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			return nil, fmt.Errorf("failed to initialize heartbeat service: %w", err)
 		}
 		logger.Info("Heartbeat monitoring service initialized successfully")
+
+		// Initialize command publisher (Story #198)
+		logger.Info("Initializing command publisher...")
+		commandPublisher, err = commands.New(&commands.Config{
+			Broker: mqttBroker,
+			Logger: logger,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize command publisher: %w", err)
+		}
+		logger.Info("Command publisher initialized successfully")
 	}
 
 	// Initialize HTTP API server with minimal monitoring for now
@@ -226,6 +240,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		haManager:               haManager,
 		mqttBroker:              mqttBroker,
 		heartbeatService:        heartbeatService,
+		commandPublisher:        commandPublisher,
 		httpServer:              httpServer,
 	}, nil
 }
@@ -315,6 +330,15 @@ func (s *Server) Start() error {
 			}
 			s.logger.Info("Heartbeat monitoring service started successfully")
 		}
+
+		// Start command publisher (Story #198)
+		if s.commandPublisher != nil {
+			s.logger.Info("Starting command publisher...")
+			if err := s.commandPublisher.Start(ctx); err != nil {
+				return fmt.Errorf("failed to start command publisher: %w", err)
+			}
+			s.logger.Info("Command publisher started successfully")
+		}
 	}
 
 	// Start HTTP API server
@@ -377,6 +401,15 @@ func (s *Server) Stop() error {
 		event := audit.SystemEvent("system", "controller_stop", "Controller server shutting down")
 		if err := s.auditManager.RecordEvent(ctx, event); err != nil {
 			s.logger.Warn("Failed to record shutdown audit event", "error", err)
+		}
+	}
+
+	// Stop command publisher
+	if s.commandPublisher != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := s.commandPublisher.Stop(ctx); err != nil {
+			s.logger.Warn("Failed to stop command publisher", "error", err)
 		}
 	}
 
