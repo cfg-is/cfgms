@@ -521,13 +521,17 @@ func (p *FileProvider) calculateDiskUsage() (float64, error) {
 
 // updateStats updates provider statistics
 func (p *FileProvider) updateStats(entriesWritten int, latency time.Duration) {
+	// Lock to prevent concurrent access to stats
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+
 	p.stats.TotalEntries += int64(entriesWritten)
 	p.stats.LatestEntry = time.Now()
-	
+
 	// Update rolling average for write latency
 	newLatencyMs := float64(latency.Milliseconds())
 	p.stats.WriteLatencyMs = (p.stats.WriteLatencyMs*0.9) + (newLatencyMs*0.1)
-	
+
 	// Update hourly/daily counters (simplified - would need proper time window tracking in production)
 	now := time.Now()
 	if now.Sub(p.stats.LatestEntry) < time.Hour {

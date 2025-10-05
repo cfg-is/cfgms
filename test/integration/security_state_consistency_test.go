@@ -1,3 +1,6 @@
+//go:build !short
+// +build !short
+
 package integration
 
 import (

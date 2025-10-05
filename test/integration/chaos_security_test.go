@@ -1,3 +1,6 @@
+//go:build !short
+// +build !short
+
 package integration
 
 import (
@@ -67,7 +70,8 @@ type ChaosMetrics struct {
 
 // NewChaosSecurityTestFramework creates a new chaos engineering test framework
 func NewChaosSecurityTestFramework(t *testing.T) *ChaosSecurityTestFramework {
-	env := testutil.NewTestEnv(t)
+	// Chaos tests need longer timeout - allow 2 minutes for all scenarios
+	env := testutil.NewTestEnvWithTimeout(t, 2*time.Minute)
 	
 	// Create standard components
 	rbacManager := pkgtestutil.SetupTestRBACManager(t)

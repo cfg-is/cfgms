@@ -1,4 +1,4 @@
--- Initialize TimescaleDB for CFGMS logging provider testing
+-- Initialize TimescaleDB for CFGMS testing (unified for logging and HA tests)
 -- This script sets up the database with TimescaleDB extension and creates
 -- necessary users and permissions for testing.
 
@@ -7,23 +7,23 @@ CREATE EXTENSION IF NOT EXISTS timescaledb;
 
 -- Create additional user for logging tests (if needed)
 -- Note: Password is set via environment variable in Docker container
--- The cfgms_logger_test user is created by Docker's POSTGRES_USER env var
+-- The cfgms_test user is created by Docker's POSTGRES_USER env var
 
--- Grant necessary permissions
-GRANT ALL PRIVILEGES ON DATABASE cfgms_logs_test TO cfgms_logger_test;
-GRANT ALL PRIVILEGES ON SCHEMA public TO cfgms_logger_test;
+-- Grant necessary permissions to unified cfgms_test user
+GRANT ALL PRIVILEGES ON DATABASE cfgms_ha_test TO cfgms_test;
+GRANT ALL PRIVILEGES ON SCHEMA public TO cfgms_test;
 
 -- Set default privileges for future objects
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO cfgms_logger_test;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO cfgms_logger_test;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON FUNCTIONS TO cfgms_logger_test;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO cfgms_test;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO cfgms_test;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON FUNCTIONS TO cfgms_test;
 
 -- Create test schema for isolated testing
 CREATE SCHEMA IF NOT EXISTS test_logging;
-GRANT ALL PRIVILEGES ON SCHEMA test_logging TO cfgms_logger_test;
-ALTER DEFAULT PRIVILEGES IN SCHEMA test_logging GRANT ALL ON TABLES TO cfgms_logger_test;
-ALTER DEFAULT PRIVILEGES IN SCHEMA test_logging GRANT ALL ON SEQUENCES TO cfgms_logger_test;
-ALTER DEFAULT PRIVILEGES IN SCHEMA test_logging GRANT ALL ON FUNCTIONS TO cfgms_logger_test;
+GRANT ALL PRIVILEGES ON SCHEMA test_logging TO cfgms_test;
+ALTER DEFAULT PRIVILEGES IN SCHEMA test_logging GRANT ALL ON TABLES TO cfgms_test;
+ALTER DEFAULT PRIVILEGES IN SCHEMA test_logging GRANT ALL ON SEQUENCES TO cfgms_test;
+ALTER DEFAULT PRIVILEGES IN SCHEMA test_logging GRANT ALL ON FUNCTIONS TO cfgms_test;
 
 -- Verify TimescaleDB is working (license info may not be available in all versions)
 DO $$

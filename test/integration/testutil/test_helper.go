@@ -30,20 +30,40 @@ type TestEnv struct {
 	CertManager   *cert.Manager
 	ctx           context.Context
 	cancel        context.CancelFunc
+	useDockerController bool // If true, connect to Docker controller instead of in-process
+	dockerControllerAddr string // Address of Docker controller (e.g., "localhost:50054")
 }
 
-// NewTestEnv creates a new test environment
-func NewTestEnv(t *testing.T) *TestEnv {
+// NewTestEnvWithDocker creates a test environment that connects to Docker controller
+// This is used to test against the standalone controller in docker-compose.test.yml
+func NewTestEnvWithDocker(t *testing.T, dockerAddr string) *TestEnv {
+	env := NewTestEnv(t)
+	env.useDockerController = true
+	env.dockerControllerAddr = dockerAddr
+	return env
+}
+
+// NewTestEnvWithTimeout creates a test environment with custom context timeout
+func NewTestEnvWithTimeout(t *testing.T, timeout time.Duration) *TestEnv {
 	tempDir, err := os.MkdirTemp("", "cfgms-test-")
 	require.NoError(t, err)
 
 	logger := testpkg.NewMockLogger(false)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 
+	return createTestEnv(t, tempDir, logger, ctx, cancel)
+}
+
+// NewTestEnv creates a new test environment
+func NewTestEnv(t *testing.T) *TestEnv {
+	return NewTestEnvWithTimeout(t, 30*time.Second)
+}
+
+func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx context.Context, cancel context.CancelFunc) *TestEnv {
 	// Initialize production certificate manager for testing
 	certStoragePath := filepath.Join(tempDir, "certs")
-	err = os.MkdirAll(certStoragePath, 0755)
+	err := os.MkdirAll(certStoragePath, 0755)
 	require.NoError(t, err)
 
 	certManager, err := cert.NewManager(&cert.ManagerConfig{
@@ -190,17 +210,28 @@ func NewTestEnv(t *testing.T) *TestEnv {
 
 // Start starts the controller and steward in the test environment
 func (e *TestEnv) Start() {
-	// Start the controller
-	_ = e.Controller.Start(e.ctx)
+	if e.useDockerController {
+		// Using Docker controller - just update steward config and start steward
+		e.StewardCfg.ControllerAddr = e.dockerControllerAddr
 
-	// Update steward config with actual controller address
-	e.StewardCfg.ControllerAddr = e.Controller.GetListenAddr()
+		// Start the steward
+		_ = e.Steward.Start(e.ctx)
 
-	// Start the steward
-	_ = e.Steward.Start(e.ctx)
+		// Wait longer for Docker controller connection
+		time.Sleep(500 * time.Millisecond)
+	} else {
+		// Start the in-process controller
+		_ = e.Controller.Start(e.ctx)
 
-	// Wait for components to initialize
-	time.Sleep(100 * time.Millisecond)
+		// Update steward config with actual controller address
+		e.StewardCfg.ControllerAddr = e.Controller.GetListenAddr()
+
+		// Start the steward
+		_ = e.Steward.Start(e.ctx)
+
+		// Wait for components to initialize
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 // Stop stops the controller and steward in the test environment
@@ -208,8 +239,10 @@ func (e *TestEnv) Stop() {
 	// Stop the steward
 	_ = e.Steward.Stop(e.ctx)
 
-	// Stop the controller
-	_ = e.Controller.Stop(e.ctx)
+	// Only stop controller if it's in-process (not Docker)
+	if !e.useDockerController && e.Controller != nil {
+		_ = e.Controller.Stop(e.ctx)
+	}
 }
 
 // Cleanup cleans up the test environment

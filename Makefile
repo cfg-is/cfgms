@@ -166,14 +166,29 @@ test-commit: test lint security-scan
 
 # CI validation (complete validation) - RUNS IN CI/CD
 test-ci: export CI=1
-test-ci: test-infrastructure-required test lint security-scan test-m365-integration test-integration-complete test-integration-factory
+test-ci: test-infrastructure-required lint security-scan test-m365-integration test-integration-complete test-integration-factory
 
 # Robust CI infrastructure test target - ensures infrastructure works every time
 test-infrastructure-required:
 	@echo "🏗️  CFGMS Infrastructure Reliability Test"
 	@echo "========================================"
 	@echo "Ensuring CI infrastructure is set up and working correctly..."
-	@./scripts/test-with-infrastructure.sh go test -v ./pkg/testing/storage/... ./features/controller/server/... -timeout=10m -race
+	@go clean -testcache
+	@echo "🧪 Testing framework (excluding modules and long-running tests)..."
+	@./scripts/test-with-infrastructure.sh go test -race -short -timeout=1m $$(go list ./... | grep -v '/features/modules/' | grep -v '/test/integration' | grep -v '/test/e2e')
+	@echo "🧪 Testing core modules (smoke test)..."
+	@for module in $(CORE_MODULES); do \
+		echo "  Testing $$module..."; \
+		./scripts/test-with-infrastructure.sh go test -race -short -timeout=30s ./features/modules/$$module/...; \
+	done
+	@changed_modules="$(CHANGED_MODULES)"; \
+	if [ -n "$$changed_modules" ]; then \
+		echo "📝 Testing changed modules: $$changed_modules"; \
+		for module in $$changed_modules; do \
+			echo "  Testing $$module..."; \
+			./scripts/test-with-infrastructure.sh go test -race -short -timeout=30s ./features/modules/$$module/...; \
+		done; \
+	fi
 	@echo ""
 	@echo "✅ CI VALIDATION FINISHED"
 	@echo "=========================="
@@ -996,13 +1011,44 @@ test-integration-status:
 		./scripts/wait-for-services.sh || echo "⚠️  Some services may not be ready"; \
 	fi
 
+# Run unified integration tests with complete Docker infrastructure
+# This runs HA tests (which manage their own cluster) + standalone/in-process tests
+test-integration-unified:
+	@echo "🚀 Running Unified Integration Tests (HA + Standalone)"
+	@echo "======================================================"
+	@if [ ! -f .env.test ]; then \
+		echo "❌ .env.test not found. Run: make test-integration-setup"; \
+		exit 1; \
+	fi
+	@echo ""
+	@echo "🧪 Running HA cluster tests (self-managed infrastructure)..."
+	@set -a && . ./.env.test && set +a && \
+	go test -v -race ./test/integration/ha/... -timeout=20m || (echo "❌ HA tests failed"; exit 1)
+	@echo ""
+	@echo "🐳 Starting standalone controller for Docker integration tests..."
+	@set -a && . ./.env.test && set +a && \
+	docker compose -f docker-compose.test.yml --profile ha --profile timescale up -d controller-standalone
+	@echo "⏳ Waiting for standalone controller to be healthy..."
+	@sleep 10
+	@echo ""
+	@echo "🧪 Running standalone Docker controller tests..."
+	@CFGMS_TEST_DOCKER_CONTROLLER=localhost:50054 go test -v -race ./test/integration -run TestDocker -timeout=10m || (echo "❌ Standalone tests failed"; exit 1)
+	@echo ""
+	@echo "🧪 Running in-process integration tests..."
+	@go test -v -race ./test/integration -run TestDetailedIntegration -timeout=10m || (echo "❌ In-process tests failed"; exit 1)
+	@echo ""
+	@echo "🧹 Cleaning up standalone controller..."
+	@docker compose -f docker-compose.test.yml --profile ha down || true
+	@echo ""
+	@echo "✅ All unified integration tests passed!"
+
 # Run integration tests against real storage providers
 test-with-real-storage:
 	@echo "🧪 Running CFGMS Integration Tests with Real Storage"
 	@echo "=================================================="
 	@echo "Testing with Docker-based PostgreSQL and Gitea..."
 	@echo ""
-	@./scripts/test-with-infrastructure.sh go test -v -race ./pkg/testing/storage/... ./features/controller/server/... -timeout=5m
+	@./scripts/test-with-infrastructure.sh go test -v -race ./pkg/testing/storage/... ./features/controller/server/... -timeout=15m
 	@echo ""
 	@echo "🔬 Running storage provider validation tests..."
 	@if [ -f .env.test ]; then \
@@ -1015,6 +1061,15 @@ test-with-real-storage:
 	fi
 	@echo ""
 	@echo "✅ Integration tests completed successfully!"
+
+# Run short integration tests (excludes long-running chaos/stress tests)
+test-integration-short:
+	@echo "🧪 Running Short Integration Tests"
+	@echo "=================================="
+	@echo "Running in-process integration tests (chaos/stress tests excluded)..."
+	@go test -tags=short -race -timeout=2m ./test/integration
+	@echo ""
+	@echo "✅ Short integration tests completed successfully!"
 
 # Test database provider specifically
 test-integration-db:

@@ -15,20 +15,32 @@ type DockerComposeHelper struct {
 }
 
 // NewDockerComposeHelper creates a new Docker Compose helper
+// Uses the unified docker-compose.test.yml with --profile ha
 func NewDockerComposeHelper() *DockerComposeHelper {
 	return &DockerComposeHelper{
-		ComposeFile: "docker-compose.yml",
-		ProjectName: "cfgms-ha-test",
+		ComposeFile: "../../../docker-compose.test.yml",  // Unified test configuration
+		ProjectName: "cfgms-test",  // Use same project name as other integration tests
 	}
 }
 
-// StartCluster starts the HA cluster using Docker Compose
+// StartCluster starts the HA cluster using Docker Compose with --profile ha
 func (h *DockerComposeHelper) StartCluster(ctx context.Context) error {
+	// Step 0: Generate test credentials if not already present
+	fmt.Println("Step 0/5: Ensuring test credentials are generated...")
+	credCmd := exec.CommandContext(ctx, "bash", "-c", "cd ../../../ && ./scripts/generate-test-credentials.sh")
+	credOutput, err := credCmd.CombinedOutput()
+	if err != nil {
+		fmt.Printf("Credential generation warnings: %s\n", string(credOutput))
+	}
+
 	// Step 1: Complete cleanup - remove all containers, networks, volumes, and images
-	fmt.Println("Step 1/4: Cleaning up existing Docker resources...")
+	fmt.Println("Step 1/5: Cleaning up existing Docker resources...")
 	cleanupCmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
+		"--env-file", "../../../.env.test",
 		"-p", h.ProjectName,
+		"--profile", "ha",
+		"--profile", "timescale",  // Also include timescaledb-test
 		"down", "-v", "--rmi", "all", "--remove-orphans")
 
 	cleanupOutput, err := cleanupCmd.CombinedOutput()
@@ -38,7 +50,7 @@ func (h *DockerComposeHelper) StartCluster(ctx context.Context) error {
 	}
 
 	// Step 2: Prune Docker build cache for this project to force complete rebuild
-	fmt.Println("Step 2/4: Pruning Docker build cache...")
+	fmt.Println("Step 2/5: Pruning Docker build cache...")
 	pruneCmd := exec.CommandContext(ctx, "docker", "builder", "prune", "-f")
 	pruneOutput, err := pruneCmd.CombinedOutput()
 	if err != nil {
@@ -46,10 +58,13 @@ func (h *DockerComposeHelper) StartCluster(ctx context.Context) error {
 	}
 
 	// Step 3: Build images from scratch with no cache
-	fmt.Println("Step 3/4: Building fresh Docker images (no cache)...")
+	fmt.Println("Step 3/5: Building fresh Docker images (no cache)...")
 	buildCmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
+		"--env-file", "../../../.env.test",  // Use generated test credentials
 		"-p", h.ProjectName,
+		"--profile", "ha",
+		"--profile", "timescale",
 		"build", "--no-cache", "--pull")
 
 	buildOutput, err := buildCmd.CombinedOutput()
@@ -57,11 +72,14 @@ func (h *DockerComposeHelper) StartCluster(ctx context.Context) error {
 		return fmt.Errorf("failed to build images: %w\nOutput: %s", err, string(buildOutput))
 	}
 
-	// Step 4: Start the cluster with freshly built images
-	fmt.Println("Step 4/4: Starting HA cluster...")
+	// Step 4: Start the cluster with freshly built images and test credentials
+	fmt.Println("Step 4/5: Starting HA cluster with credentials...")
 	startCmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
+		"--env-file", "../../../.env.test",  // Use generated test credentials
 		"-p", h.ProjectName,
+		"--profile", "ha",
+		"--profile", "timescale",
 		"up", "-d", "--force-recreate")
 
 	startOutput, err := startCmd.CombinedOutput()
@@ -69,7 +87,7 @@ func (h *DockerComposeHelper) StartCluster(ctx context.Context) error {
 		return fmt.Errorf("failed to start cluster: %w\nOutput: %s", err, string(startOutput))
 	}
 
-	fmt.Println("HA cluster started successfully with fresh images")
+	fmt.Println("Step 5/5: HA cluster started successfully with fresh images")
 	return nil
 }
 
@@ -77,7 +95,10 @@ func (h *DockerComposeHelper) StartCluster(ctx context.Context) error {
 func (h *DockerComposeHelper) StopCluster(ctx context.Context) error {
 	cmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
+		"--env-file", "../../../.env.test",
 		"-p", h.ProjectName,
+		"--profile", "ha",
+		"--profile", "timescale",
 		"down", "-v", "--remove-orphans")
 
 	output, err := cmd.CombinedOutput()
@@ -92,6 +113,7 @@ func (h *DockerComposeHelper) StopCluster(ctx context.Context) error {
 func (h *DockerComposeHelper) GetContainerLogs(ctx context.Context, service string) (string, error) {
 	cmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
+		"--env-file", "../../../.env.test",
 		"-p", h.ProjectName,
 		"logs", service)
 
@@ -107,6 +129,7 @@ func (h *DockerComposeHelper) GetContainerLogs(ctx context.Context, service stri
 func (h *DockerComposeHelper) GetStewardLogs(ctx context.Context, stewardName string, lines int) (string, error) {
 	cmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
+		"--env-file", "../../../.env.test",
 		"-p", h.ProjectName,
 		"logs", "--tail", fmt.Sprintf("%d", lines), stewardName)
 
@@ -184,6 +207,7 @@ func (h *DockerComposeHelper) WaitForStewardConnections(ctx context.Context, tim
 func (h *DockerComposeHelper) StopService(ctx context.Context, service string) error {
 	cmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
+		"--env-file", "../../../.env.test",
 		"-p", h.ProjectName,
 		"stop", service)
 
@@ -199,6 +223,7 @@ func (h *DockerComposeHelper) StopService(ctx context.Context, service string) e
 func (h *DockerComposeHelper) RestartService(ctx context.Context, service string) error {
 	cmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
+		"--env-file", "../../../.env.test",
 		"-p", h.ProjectName,
 		"restart", service)
 
@@ -214,6 +239,7 @@ func (h *DockerComposeHelper) RestartService(ctx context.Context, service string
 func (h *DockerComposeHelper) ScaleService(ctx context.Context, service string, replicas int) error {
 	cmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
+		"--env-file", "../../../.env.test",
 		"-p", h.ProjectName,
 		"up", "-d", "--scale", fmt.Sprintf("%s=%d", service, replicas))
 
@@ -229,6 +255,7 @@ func (h *DockerComposeHelper) ScaleService(ctx context.Context, service string, 
 func (h *DockerComposeHelper) GetServiceStatus(ctx context.Context, services ...string) (map[string]bool, error) {
 	cmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
+		"--env-file", "../../../.env.test",
 		"-p", h.ProjectName,
 		"ps", "--services", "--filter", "status=running")
 
