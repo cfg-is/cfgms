@@ -300,15 +300,59 @@ func (c *Client) registerCommandHandlers(handler *commands.Handler) {
 	// Register sync_config handler
 	handler.RegisterHandler(mqttTypes.CommandSyncConfig, func(ctx context.Context, cmd mqttTypes.Command) error {
 		c.logger.Info("Received sync_config command", "command_id", cmd.CommandID)
-		// TODO: Implement QUIC-based configuration sync
-		return fmt.Errorf("QUIC configuration sync not yet implemented")
+
+		// First establish QUIC connection if needed
+		if c.quicClient == nil || !c.quicConnected {
+			// Extract QUIC connection params
+			quicAddress, ok := cmd.Params["quic_address"].(string)
+			if !ok || quicAddress == "" {
+				return fmt.Errorf("missing quic_address for config sync")
+			}
+
+			sessionID, ok := cmd.Params["session_id"].(string)
+			if !ok || sessionID == "" {
+				return fmt.Errorf("missing session_id for config sync")
+			}
+
+			// Establish QUIC connection
+			if err := c.connectQUIC(ctx, quicAddress, sessionID); err != nil {
+				return fmt.Errorf("failed to establish QUIC connection: %w", err)
+			}
+		}
+
+		// Perform config sync over QUIC
+		return c.syncConfigOverQUIC(ctx)
 	})
 
 	// Register sync_dna handler
 	handler.RegisterHandler(mqttTypes.CommandSyncDNA, func(ctx context.Context, cmd mqttTypes.Command) error {
 		c.logger.Info("Received sync_dna command", "command_id", cmd.CommandID)
-		// TODO: Implement QUIC-based DNA sync
-		return fmt.Errorf("QUIC DNA sync not yet implemented")
+
+		// Check if QUIC is connected, establish if needed
+		c.mu.RLock()
+		quicConnected := c.quicConnected
+		c.mu.RUnlock()
+
+		if !quicConnected {
+			// Extract QUIC address and session ID from command params
+			quicAddress, ok := cmd.Params["quic_address"].(string)
+			if !ok {
+				return fmt.Errorf("missing quic_address in sync_dna command")
+			}
+
+			sessionID, ok := cmd.Params["session_id"].(string)
+			if !ok {
+				return fmt.Errorf("missing session_id in sync_dna command")
+			}
+
+			// Establish QUIC connection
+			if err := c.connectQUIC(ctx, quicAddress, sessionID); err != nil {
+				return fmt.Errorf("failed to establish QUIC connection: %w", err)
+			}
+		}
+
+		// Perform DNA sync over QUIC
+		return c.syncDNAOverQUIC(ctx)
 	})
 
 	// Register connect_quic handler
@@ -384,6 +428,104 @@ func (c *Client) connectQUIC(ctx context.Context, quicAddress, sessionID string)
 	c.quicConnected = true
 
 	c.logger.Info("QUIC connection established successfully")
+	return nil
+}
+
+// syncConfigOverQUIC synchronizes configuration via QUIC stream.
+func (c *Client) syncConfigOverQUIC(ctx context.Context) error {
+	c.mu.RLock()
+	quicClient := c.quicClient
+	stewardID := c.stewardID
+	c.mu.RUnlock()
+
+	if quicClient == nil {
+		return fmt.Errorf("QUIC client not connected")
+	}
+
+	c.logger.Info("Starting config sync over QUIC", "steward_id", stewardID)
+
+	// Open stream 1 for configuration sync
+	stream, err := quicClient.OpenStream(ctx, 1)
+	if err != nil {
+		return fmt.Errorf("failed to open config stream: %w", err)
+	}
+	defer quicClient.CloseStream(1)
+
+	// Send config request (simple format for now)
+	// Format: "steward_id\n"
+	request := fmt.Sprintf("%s\n", stewardID)
+	if _, err := stream.Write([]byte(request)); err != nil {
+		return fmt.Errorf("failed to write config request: %w", err)
+	}
+
+	c.logger.Debug("Sent config request", "steward_id", stewardID)
+
+	// Read configuration response
+	// TODO: Implement proper protobuf message parsing
+	buf := make([]byte, 1024*1024) // 1MB buffer for config
+	n, err := stream.Read(buf)
+	if err != nil {
+		return fmt.Errorf("failed to read config response: %w", err)
+	}
+
+	configData := buf[:n]
+	c.logger.Info("Received configuration via QUIC",
+		"steward_id", stewardID,
+		"size_bytes", n)
+
+	// TODO: Parse and apply configuration
+	// For now, just log that we received it
+	c.logger.Debug("Configuration data received", "data_preview", string(configData[:min(100, len(configData))]))
+
+	return nil
+}
+
+// syncDNAOverQUIC synchronizes DNA over QUIC stream 2.
+func (c *Client) syncDNAOverQUIC(ctx context.Context) error {
+	c.mu.RLock()
+	quicClient := c.quicClient
+	stewardID := c.stewardID
+	c.mu.RUnlock()
+
+	if quicClient == nil {
+		return fmt.Errorf("QUIC client not connected")
+	}
+
+	c.logger.Info("Starting DNA sync over QUIC", "steward_id", stewardID)
+
+	// Open stream 2 for DNA sync
+	stream, err := quicClient.OpenStream(ctx, 2)
+	if err != nil {
+		return fmt.Errorf("failed to open DNA stream: %w", err)
+	}
+	defer quicClient.CloseStream(2)
+
+	// Send DNA request (simple format for now)
+	// Format: "steward_id\n"
+	request := fmt.Sprintf("%s\n", stewardID)
+	if _, err := stream.Write([]byte(request)); err != nil {
+		return fmt.Errorf("failed to write DNA request: %w", err)
+	}
+
+	c.logger.Debug("Sent DNA request", "steward_id", stewardID)
+
+	// Read DNA response
+	// TODO: Implement proper protobuf message parsing
+	buf := make([]byte, 1024*1024) // 1MB buffer for DNA
+	n, err := stream.Read(buf)
+	if err != nil {
+		return fmt.Errorf("failed to read DNA response: %w", err)
+	}
+
+	dnaData := buf[:n]
+	c.logger.Info("Received DNA via QUIC",
+		"steward_id", stewardID,
+		"size_bytes", n)
+
+	// TODO: Parse and apply DNA
+	// For now, just log that we received it
+	c.logger.Debug("DNA data received", "data_preview", string(dnaData[:min(100, len(dnaData))]))
+
 	return nil
 }
 

@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/quic-go/quic-go"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
@@ -997,11 +998,94 @@ func initializeQUICServer(cfg *config.Config, logger logging.Logger, certManager
 		return nil, fmt.Errorf("failed to create QUIC server: %w", err)
 	}
 
+	// Register stream handlers
+	// Stream 1: Configuration sync
+	quicSrv.RegisterStreamHandler(1, func(ctx context.Context, session *quicServer.Session, stream *quic.Stream) error {
+		return handleConfigSyncStream(ctx, session, stream, logger)
+	})
+
+	// Stream 2: DNA sync
+	quicSrv.RegisterStreamHandler(2, func(ctx context.Context, session *quicServer.Session, stream *quic.Stream) error {
+		return handleDNASyncStream(ctx, session, stream, logger)
+	})
+
 	logger.Info("QUIC server initialized",
 		"listen_addr", cfg.QUIC.ListenAddr,
 		"session_timeout", sessionTimeout,
 		"tls_version", "TLS 1.3")
 
 	return quicSrv, nil
+}
+
+// handleConfigSyncStream handles configuration sync requests on stream 1.
+func handleConfigSyncStream(ctx context.Context, session *quicServer.Session, stream *quic.Stream, logger logging.Logger) error {
+	logger.Info("Handling config sync request",
+		"session_id", session.ID,
+		"steward_id", session.StewardID)
+
+	// Read steward ID from stream
+	buf := make([]byte, 256)
+	n, err := stream.Read(buf)
+	if err != nil {
+		return fmt.Errorf("failed to read steward ID: %w", err)
+	}
+
+	stewardID := string(buf[:n])
+	// Remove newline if present
+	stewardID = stewardID[:len(stewardID)-1]
+
+	logger.Info("Config sync request received",
+		"steward_id", stewardID,
+		"session_id", session.ID)
+
+	// TODO: Fetch configuration for steward from ConfigurationService
+	// For now, send placeholder response
+	response := fmt.Sprintf("CONFIG_DATA_FOR_%s\n", stewardID)
+
+	if _, err := stream.Write([]byte(response)); err != nil {
+		return fmt.Errorf("failed to write config response: %w", err)
+	}
+
+	logger.Info("Config sync response sent",
+		"steward_id", stewardID,
+		"bytes_sent", len(response))
+
+	return nil
+}
+
+// handleDNASyncStream handles DNA sync requests on stream 2.
+func handleDNASyncStream(ctx context.Context, session *quicServer.Session, stream *quic.Stream, logger logging.Logger) error {
+	logger.Info("Handling DNA sync request",
+		"session_id", session.ID,
+		"steward_id", session.StewardID)
+
+	// Read steward ID from stream
+	buf := make([]byte, 256)
+	n, err := stream.Read(buf)
+	if err != nil {
+		return fmt.Errorf("failed to read steward ID: %w", err)
+	}
+
+	stewardID := string(buf[:n])
+	// Remove newline if present
+	stewardID = stewardID[:len(stewardID)-1]
+
+	logger.Info("DNA sync request received",
+		"steward_id", stewardID,
+		"session_id", session.ID)
+
+	// TODO: Fetch DNA for steward from ControllerService
+	// For now, send placeholder response
+	response := fmt.Sprintf("DNA_DATA_FOR_%s\n", stewardID)
+
+	if _, err := stream.Write([]byte(response)); err != nil {
+		return fmt.Errorf("failed to write DNA response: %w", err)
+	}
+
+	logger.Info("DNA sync response sent",
+		"steward_id", stewardID,
+		"bytes_sent", len(response))
+
+	return nil
 }
 
