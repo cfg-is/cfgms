@@ -35,6 +35,9 @@ type Config struct {
 
 	// High Availability configuration
 	HA *HAConfig `yaml:"ha"`
+
+	// MQTT broker configuration for control plane communication
+	MQTT *MQTTConfig `yaml:"mqtt"`
 }
 
 // CertificateConfig contains certificate management settings
@@ -237,6 +240,45 @@ type HASplitBrainConfig struct {
 	ResolutionStrategy string `yaml:"resolution_strategy"`
 }
 
+// MQTTConfig contains MQTT broker configuration
+type MQTTConfig struct {
+	// Enable MQTT broker
+	Enabled bool `yaml:"enabled"`
+
+	// MQTT listen address (e.g., "0.0.0.0:1883")
+	ListenAddr string `yaml:"listen_addr"`
+
+	// Enable TLS for MQTT
+	EnableTLS bool `yaml:"enable_tls"`
+
+	// Use certificate manager for MQTT certificates
+	UseCertManager bool `yaml:"use_cert_manager"`
+
+	// TLS certificate path (if not using cert manager)
+	TLSCertPath string `yaml:"tls_cert_path,omitempty"`
+
+	// TLS key path (if not using cert manager)
+	TLSKeyPath string `yaml:"tls_key_path,omitempty"`
+
+	// CA certificate path for client verification
+	TLSCAPath string `yaml:"tls_ca_path,omitempty"`
+
+	// Require client certificates (mTLS)
+	RequireClientCert bool `yaml:"require_client_cert"`
+
+	// Maximum concurrent clients
+	MaxClients int `yaml:"max_clients"`
+
+	// Maximum message size in bytes
+	MaxMessageSize int64 `yaml:"max_message_size"`
+
+	// Session expiry interval in seconds
+	SessionExpiryInterval int64 `yaml:"session_expiry_interval"`
+
+	// Keepalive multiplier for heartbeat detection
+	KeepaliveMultiplier float64 `yaml:"keepalive_multiplier"`
+}
+
 // DefaultConfig returns a Config with reasonable defaults
 func DefaultConfig() *Config {
 	return &Config{
@@ -346,6 +388,17 @@ func DefaultConfig() *Config {
 				QuorumInterval:     "30s",
 				ResolutionStrategy: "quorum-based",
 			},
+		},
+		MQTT: &MQTTConfig{
+			Enabled:               true, // Core communication channel - enabled by default
+			ListenAddr:            "0.0.0.0:1883",
+			EnableTLS:             true,
+			UseCertManager:        true,  // Use controller's certificate manager
+			RequireClientCert:     true,  // mTLS for security
+			MaxClients:            10000,
+			MaxMessageSize:        1024 * 1024, // 1MB
+			SessionExpiryInterval: 3600,        // 1 hour
+			KeepaliveMultiplier:   1.5,         // Disconnect if no activity for keepalive * 1.5
 		},
 	}
 }

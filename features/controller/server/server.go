@@ -2,10 +2,15 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
 	"log"
+	"math/big"
 	"net"
 	"os"
 	"path/filepath"
@@ -26,6 +31,8 @@ import (
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
+	mqttInterfaces "github.com/cfgis/cfgms/pkg/mqtt/interfaces"
+	_ "github.com/cfgis/cfgms/pkg/mqtt/providers/mochi" // Register mochi-mqtt provider
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
@@ -45,6 +52,7 @@ type Server struct {
 	rbacManager             *rbac.Manager
 	auditManager            *audit.Manager
 	haManager               *ha.Manager
+	mqttBroker              mqttInterfaces.Broker
 }
 
 // New creates a new server instance
@@ -149,6 +157,17 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	}
 	logger.Info("HA manager initialized successfully")
 
+	// Initialize MQTT broker if enabled
+	var mqttBroker mqttInterfaces.Broker
+	if cfg.MQTT != nil && cfg.MQTT.Enabled {
+		logger.Info("Initializing MQTT broker...")
+		mqttBroker, err = initializeMQTTBroker(cfg, logger, certManager)
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize MQTT broker: %w", err)
+		}
+		logger.Info("MQTT broker initialized successfully")
+	}
+
 	// Initialize HTTP API server with minimal monitoring for now
 	// TODO: Properly initialize monitoring components when needed
 	httpServer, err := api.New(
@@ -182,6 +201,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		rbacManager:             rbacManager,
 		auditManager:            auditManager,
 		haManager:               haManager,
+		mqttBroker:              mqttBroker,
 		httpServer:              httpServer,
 	}, nil
 }
@@ -250,6 +270,20 @@ func (s *Server) Start() error {
 		log.Println("DEBUG server.Start(): HA manager is nil, skipping")
 	}
 
+	// Start MQTT broker if configured
+	if s.mqttBroker != nil {
+		s.logger.Info("Starting MQTT broker...")
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		if err := s.mqttBroker.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start MQTT broker: %w", err)
+		}
+		s.logger.Info("MQTT broker started successfully",
+			"listen_addr", s.mqttBroker.GetListenAddress(),
+			"provider", s.mqttBroker.Name())
+	}
+
 	// Start HTTP API server
 	if s.httpServer != nil {
 		go func() {
@@ -310,6 +344,15 @@ func (s *Server) Stop() error {
 		event := audit.SystemEvent("system", "controller_stop", "Controller server shutting down")
 		if err := s.auditManager.RecordEvent(ctx, event); err != nil {
 			s.logger.Warn("Failed to record shutdown audit event", "error", err)
+		}
+	}
+
+	// Stop MQTT broker
+	if s.mqttBroker != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := s.mqttBroker.Stop(ctx); err != nil {
+			s.logger.Warn("Failed to stop MQTT broker", "error", err)
 		}
 	}
 
@@ -588,5 +631,180 @@ func initializeHAManager(cfg *config.Config, logger logging.Logger, storageManag
 	log.Printf("DEBUG: NodeID Trace - After NewManager (HA Manager initialized): mode=%s, node_id=%s, node_id_empty=%t, manager_node_id=%s, manager_node_id_empty=%t", haConfig.GetModeString(), haConfig.Node.ID, haConfig.Node.ID == "", haManager.GetLocalNode().ID, haManager.GetLocalNode().ID == "")
 
 	return haManager, nil
+}
+
+func initializeMQTTBroker(cfg *config.Config, logger logging.Logger, certManager *cert.Manager) (mqttInterfaces.Broker, error) {
+	// Get mochi-mqtt broker from registry
+	broker := mqttInterfaces.GetBroker("mochi")
+	if broker == nil {
+		return nil, fmt.Errorf("mochi-mqtt broker not registered")
+	}
+
+	// Build MQTT broker configuration
+	mqttConfig := map[string]interface{}{
+		"listen_addr":             cfg.MQTT.ListenAddr,
+		"enable_tls":              cfg.MQTT.EnableTLS,
+		"require_client_cert":     cfg.MQTT.RequireClientCert,
+		"max_clients":             cfg.MQTT.MaxClients,
+		"max_message_size":        float64(cfg.MQTT.MaxMessageSize),
+		"session_expiry_interval": cfg.MQTT.SessionExpiryInterval,
+	}
+
+	// Configure TLS certificates
+	if cfg.MQTT.EnableTLS {
+		var serverCertPath, serverKeyPath, caPath string
+
+		if cfg.MQTT.UseCertManager && certManager != nil {
+			// Use certificate manager certificates
+			serverCertPath = filepath.Join(cfg.Certificate.CAPath, "server", "server.crt")
+			serverKeyPath = filepath.Join(cfg.Certificate.CAPath, "server", "server.key")
+			caPath = filepath.Join(cfg.Certificate.CAPath, "ca.crt")
+
+			// Check if certificates exist, if not try to generate them (for testing)
+			if _, err := os.Stat(serverCertPath); os.IsNotExist(err) {
+				logger.Info("MQTT certificates not found, generating test certificates for development/testing")
+				if err := ensureMQTTTestCertificates(cfg.Certificate.CAPath); err != nil {
+					return nil, fmt.Errorf("failed to generate test certificates: %w", err)
+				}
+			}
+
+			logger.Info("MQTT broker using certificate manager certificates",
+				"cert_path", serverCertPath,
+				"ca_path", caPath)
+		} else if cfg.MQTT.TLSCertPath != "" && cfg.MQTT.TLSKeyPath != "" {
+			// Use manually configured certificate paths
+			serverCertPath = cfg.MQTT.TLSCertPath
+			serverKeyPath = cfg.MQTT.TLSKeyPath
+			caPath = cfg.MQTT.TLSCAPath
+
+			logger.Info("MQTT broker using configured certificates",
+				"cert_path", cfg.MQTT.TLSCertPath,
+				"ca_path", cfg.MQTT.TLSCAPath)
+		} else {
+			return nil, fmt.Errorf("TLS enabled but no certificates configured")
+		}
+
+		mqttConfig["tls_cert_path"] = serverCertPath
+		mqttConfig["tls_key_path"] = serverKeyPath
+		if caPath != "" {
+			mqttConfig["tls_ca_path"] = caPath
+		}
+	}
+
+	// Initialize broker with configuration
+	if err := broker.Initialize(mqttConfig); err != nil {
+		return nil, fmt.Errorf("failed to initialize MQTT broker: %w", err)
+	}
+
+	// Check if broker is available (has required certificates, etc.)
+	available, err := broker.Available()
+	if !available {
+		return nil, fmt.Errorf("MQTT broker not available: %w", err)
+	}
+
+	logger.Info("MQTT broker initialized and ready",
+		"provider", broker.Name(),
+		"listen_addr", cfg.MQTT.ListenAddr,
+		"tls_enabled", cfg.MQTT.EnableTLS,
+		"mtls_enabled", cfg.MQTT.RequireClientCert)
+
+	return broker, nil
+}
+
+// ensureMQTTTestCertificates generates test certificates for MQTT broker if they don't exist.
+// This follows the same pattern as our other test certificate generation.
+func ensureMQTTTestCertificates(caPath string) error {
+	// Create directory structure
+	serverDir := filepath.Join(caPath, "server")
+	if err := os.MkdirAll(serverDir, 0755); err != nil {
+		return fmt.Errorf("failed to create server cert directory: %w", err)
+	}
+	if err := os.MkdirAll(caPath, 0755); err != nil {
+		return fmt.Errorf("failed to create CA directory: %w", err)
+	}
+
+	// Generate CA certificate
+	caKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return fmt.Errorf("failed to generate CA key: %w", err)
+	}
+
+	caTemplate := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			Organization: []string{"CFGMS MQTT CA"},
+			CommonName:   "CFGMS MQTT CA",
+		},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(365 * 24 * time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+	}
+
+	caCertDER, err := x509.CreateCertificate(rand.Reader, &caTemplate, &caTemplate, &caKey.PublicKey, caKey)
+	if err != nil {
+		return fmt.Errorf("failed to create CA certificate: %w", err)
+	}
+
+	// Save CA certificate
+	caCertFile, err := os.Create(filepath.Join(caPath, "ca.crt"))
+	if err != nil {
+		return fmt.Errorf("failed to create CA cert file: %w", err)
+	}
+	if err := pem.Encode(caCertFile, &pem.Block{Type: "CERTIFICATE", Bytes: caCertDER}); err != nil {
+		caCertFile.Close()
+		return fmt.Errorf("failed to encode CA certificate: %w", err)
+	}
+	caCertFile.Close()
+
+	// Generate server certificate
+	serverKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return fmt.Errorf("failed to generate server key: %w", err)
+	}
+
+	serverTemplate := x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject: pkix.Name{
+			Organization: []string{"CFGMS MQTT Server"},
+			CommonName:   "cfgms-mqtt-server",
+		},
+		NotBefore:   time.Now(),
+		NotAfter:    time.Now().Add(365 * 24 * time.Hour),
+		KeyUsage:    x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1), net.IPv4(0, 0, 0, 0)},
+		DNSNames:    []string{"localhost", "cfgms-mqtt-server"},
+	}
+
+	serverCertDER, err := x509.CreateCertificate(rand.Reader, &serverTemplate, &caTemplate, &serverKey.PublicKey, caKey)
+	if err != nil {
+		return fmt.Errorf("failed to create server certificate: %w", err)
+	}
+
+	// Save server certificate
+	serverCertFile, err := os.Create(filepath.Join(serverDir, "server.crt"))
+	if err != nil {
+		return fmt.Errorf("failed to create server cert file: %w", err)
+	}
+	if err := pem.Encode(serverCertFile, &pem.Block{Type: "CERTIFICATE", Bytes: serverCertDER}); err != nil {
+		serverCertFile.Close()
+		return fmt.Errorf("failed to encode server certificate: %w", err)
+	}
+	serverCertFile.Close()
+
+	// Save server key
+	serverKeyFile, err := os.Create(filepath.Join(serverDir, "server.key"))
+	if err != nil {
+		return fmt.Errorf("failed to create server key file: %w", err)
+	}
+	if err := pem.Encode(serverKeyFile, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(serverKey)}); err != nil {
+		serverKeyFile.Close()
+		return fmt.Errorf("failed to encode server key: %w", err)
+	}
+	serverKeyFile.Close()
+
+	return nil
 }
 
