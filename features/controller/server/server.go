@@ -24,6 +24,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/api"
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/ha"
+	"github.com/cfgis/cfgms/features/controller/heartbeat"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/tenant"
@@ -53,6 +54,7 @@ type Server struct {
 	auditManager            *audit.Manager
 	haManager               *ha.Manager
 	mqttBroker              mqttInterfaces.Broker
+	heartbeatService        *heartbeat.Service
 }
 
 // New creates a new server instance
@@ -159,6 +161,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 	// Initialize MQTT broker if enabled
 	var mqttBroker mqttInterfaces.Broker
+	var heartbeatService *heartbeat.Service
 	if cfg.MQTT != nil && cfg.MQTT.Enabled {
 		logger.Info("Initializing MQTT broker...")
 		mqttBroker, err = initializeMQTTBroker(cfg, logger, certManager)
@@ -166,6 +169,26 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			return nil, fmt.Errorf("failed to initialize MQTT broker: %w", err)
 		}
 		logger.Info("MQTT broker initialized successfully")
+
+		// Initialize heartbeat monitoring service
+		logger.Info("Initializing heartbeat monitoring service...")
+		heartbeatService, err = heartbeat.New(&heartbeat.Config{
+			Broker:           mqttBroker,
+			HeartbeatTimeout: 15 * time.Second, // Story #198 requirement
+			CheckInterval:    5 * time.Second,
+			OnStatusChange: func(stewardID string, healthy bool, status heartbeat.StewardStatus) {
+				if healthy {
+					logger.Info("Steward heartbeat recovered", "steward_id", stewardID)
+				} else {
+					logger.Warn("Steward heartbeat failed", "steward_id", stewardID, "status", status.Status)
+				}
+			},
+			Logger: logger,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize heartbeat service: %w", err)
+		}
+		logger.Info("Heartbeat monitoring service initialized successfully")
 	}
 
 	// Initialize HTTP API server with minimal monitoring for now
@@ -202,6 +225,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		auditManager:            auditManager,
 		haManager:               haManager,
 		mqttBroker:              mqttBroker,
+		heartbeatService:        heartbeatService,
 		httpServer:              httpServer,
 	}, nil
 }
@@ -282,6 +306,15 @@ func (s *Server) Start() error {
 		s.logger.Info("MQTT broker started successfully",
 			"listen_addr", s.mqttBroker.GetListenAddress(),
 			"provider", s.mqttBroker.Name())
+
+		// Start heartbeat monitoring service
+		if s.heartbeatService != nil {
+			s.logger.Info("Starting heartbeat monitoring service...")
+			if err := s.heartbeatService.Start(ctx); err != nil {
+				return fmt.Errorf("failed to start heartbeat service: %w", err)
+			}
+			s.logger.Info("Heartbeat monitoring service started successfully")
+		}
 	}
 
 	// Start HTTP API server
@@ -344,6 +377,15 @@ func (s *Server) Stop() error {
 		event := audit.SystemEvent("system", "controller_stop", "Controller server shutting down")
 		if err := s.auditManager.RecordEvent(ctx, event); err != nil {
 			s.logger.Warn("Failed to record shutdown audit event", "error", err)
+		}
+	}
+
+	// Stop heartbeat service
+	if s.heartbeatService != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := s.heartbeatService.Stop(ctx); err != nil {
+			s.logger.Warn("Failed to stop heartbeat service", "error", err)
 		}
 	}
 

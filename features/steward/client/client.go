@@ -46,6 +46,7 @@ import (
 	controllerpb "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/pkg/logging"
+	mqttClient "github.com/cfgis/cfgms/pkg/mqtt/client"
 )
 
 // Client provides gRPC client functionality for steward-controller communication.
@@ -79,6 +80,10 @@ type Client struct {
 	heartbeatInterval time.Duration
 	heartbeatStop chan struct{}
 	heartbeatRunning bool
+
+	// MQTT client for heartbeats (Story #198)
+	mqttClient *mqttClient.Client
+	mqttEnabled bool
 	
 	// Sync tracking
 	lastSyncFingerprint string
@@ -171,6 +176,60 @@ func (c *Client) Connect(ctx context.Context) error {
 	return nil
 }
 
+// initMQTTClient initializes the MQTT client for heartbeat communication (Story #198).
+func (c *Client) initMQTTClient(ctx context.Context) error {
+	// Parse controller address to get MQTT broker address
+	// Assuming controller gRPC is on :50051, MQTT is on :1883
+	// This should be configurable in production
+	mqttAddr := "tcp://controller:1883" // TODO: Make configurable
+
+	// Create will message for disconnect detection
+	willPayload, err := json.Marshal(map[string]interface{}{
+		"steward_id": c.stewardID,
+		"status":     "disconnected",
+		"timestamp":  time.Now().Format(time.RFC3339),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create will message: %w", err)
+	}
+
+	mqttCfg := &mqttClient.Config{
+		BrokerAddr:   mqttAddr,
+		ClientID:     fmt.Sprintf("steward-%s", c.stewardID),
+		StewardID:    c.stewardID,
+		CertFile:     filepath.Join(c.certPath, "client.crt"),
+		KeyFile:      filepath.Join(c.certPath, "client.key"),
+		CAFile:       filepath.Join(c.certPath, "ca.crt"),
+		CleanSession: false,
+		KeepAlive:    30 * time.Second,
+		AutoReconnect: true,
+		MaxReconnectInt: 60 * time.Second,
+		WillEnabled:  true,
+		WillTopic:    fmt.Sprintf("cfgms/steward/%s/will", c.stewardID),
+		WillPayload:  willPayload,
+		WillQoS:      1,
+		WillRetain:   false,
+		OnConnect: func() {
+			c.logger.Info("MQTT client connected to broker")
+		},
+		OnDisconnect: func() {
+			c.logger.Warn("MQTT client disconnected from broker")
+		},
+	}
+
+	client, err := mqttClient.New(mqttCfg)
+	if err != nil {
+		return fmt.Errorf("failed to create MQTT client: %w", err)
+	}
+
+	if err := client.Connect(ctx); err != nil {
+		return fmt.Errorf("failed to connect MQTT client: %w", err)
+	}
+
+	c.mqttClient = client
+	return nil
+}
+
 // Disconnect closes the gRPC connection to the controller.
 //
 // This method stops the heartbeat mechanism and closes the connection.
@@ -196,13 +255,21 @@ func (c *Client) Disconnect() error {
 		c.heartbeatRunning = false
 	}
 
+	// Disconnect MQTT client if connected (Story #198)
+	if c.mqttClient != nil {
+		c.logger.Info("Disconnecting MQTT client")
+		c.mqttClient.Disconnect()
+		c.mqttClient = nil
+		c.mqttEnabled = false
+	}
+
 	// Close connection
 	if c.conn != nil {
 		err := c.conn.Close()
 		c.conn = nil
 		c.client = nil
 		c.configClient = nil
-		
+
 		if err != nil {
 			return fmt.Errorf("failed to close connection: %w", err)
 		}
@@ -285,6 +352,16 @@ func (c *Client) Register(ctx context.Context, version string, dna *commonpb.DNA
 		// This would be handled by the calling steward
 	}
 
+	// Story #198: Initialize MQTT client for heartbeats (if MQTT broker is available)
+	// Note: MQTT connection is optional - if it fails, we fall back to gRPC heartbeats
+	if err := c.initMQTTClient(ctx); err != nil {
+		c.logger.Warn("Failed to initialize MQTT client, will use gRPC heartbeats", "error", err)
+		c.mqttEnabled = false
+	} else {
+		c.mqttEnabled = true
+		c.logger.Info("MQTT client initialized successfully for heartbeats")
+	}
+
 	// Start heartbeat mechanism if not already running
 	if !c.heartbeatRunning {
 		c.heartbeatStop = make(chan struct{})
@@ -300,11 +377,15 @@ func (c *Client) Register(ctx context.Context, version string, dna *commonpb.DNA
 // This method is called automatically by the heartbeat mechanism but can also
 // be called manually to send immediate status updates.
 //
+// Story #198: Uses MQTT when available for push-based heartbeats, falls back to gRPC.
+//
 // Returns an error if the heartbeat fails or if not registered with the controller.
 func (c *Client) SendHeartbeat(ctx context.Context, status string, metrics map[string]string) error {
 	c.mu.RLock()
 	stewardID := c.stewardID
-	client := c.client
+	mqttClient := c.mqttClient
+	mqttEnabled := c.mqttEnabled
+	grpcClient := c.client
 	connected := c.connected
 	c.mu.RUnlock()
 
@@ -315,19 +396,53 @@ func (c *Client) SendHeartbeat(ctx context.Context, status string, metrics map[s
 		return fmt.Errorf("not registered with controller")
 	}
 
+	// Story #198: Use MQTT for heartbeats when available
+	if mqttEnabled && mqttClient != nil && mqttClient.IsConnected() {
+		return c.sendMQTTHeartbeat(ctx, stewardID, status, metrics)
+	}
+
+	// Fallback to gRPC heartbeat
 	req := &controllerpb.HeartbeatRequest{
 		StewardId: stewardID,
 		Status:    status,
 		Metrics:   metrics,
 	}
 
-	resp, err := client.ProcessHeartbeat(ctx, req)
+	resp, err := grpcClient.ProcessHeartbeat(ctx, req)
 	if err != nil {
 		return fmt.Errorf("heartbeat failed: %w", err)
 	}
 
 	if resp.Code != commonpb.Status_OK {
 		return fmt.Errorf("heartbeat rejected: %s", resp.Message)
+	}
+
+	c.mu.Lock()
+	c.lastHeartbeat = time.Now()
+	c.mu.Unlock()
+
+	return nil
+}
+
+// sendMQTTHeartbeat publishes a heartbeat message to MQTT broker.
+func (c *Client) sendMQTTHeartbeat(ctx context.Context, stewardID, status string, metrics map[string]string) error {
+	// Create heartbeat message
+	heartbeat := map[string]interface{}{
+		"steward_id": stewardID,
+		"status":     status,
+		"timestamp":  time.Now().Format(time.RFC3339),
+		"metrics":    metrics,
+	}
+
+	payload, err := json.Marshal(heartbeat)
+	if err != nil {
+		return fmt.Errorf("failed to marshal heartbeat: %w", err)
+	}
+
+	// Publish to steward-specific heartbeat topic
+	topic := fmt.Sprintf("cfgms/steward/%s/heartbeat", stewardID)
+	if err := c.mqttClient.Publish(ctx, topic, payload, 1, false); err != nil {
+		return fmt.Errorf("failed to publish MQTT heartbeat: %w", err)
 	}
 
 	c.mu.Lock()
