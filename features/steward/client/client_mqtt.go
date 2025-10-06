@@ -16,6 +16,7 @@ import (
 	"github.com/cfgis/cfgms/features/steward/registration"
 	"github.com/cfgis/cfgms/pkg/logging"
 	mqttClient "github.com/cfgis/cfgms/pkg/mqtt/client"
+	mqttTypes "github.com/cfgis/cfgms/pkg/mqtt/types"
 	quicClient "github.com/cfgis/cfgms/pkg/quic/client"
 )
 
@@ -172,14 +173,24 @@ func (c *MQTTClient) Connect(ctx context.Context) error {
 	cmdTopic := fmt.Sprintf("cfgms/steward/%s/commands", stewardID)
 	c.logger.Info("Subscribing to commands", "topic", cmdTopic)
 
-	// Setup command handler
-	commandHandler := func(topic string, payload []byte) {
-		c.logger.Info("Received command", "topic", topic)
-		// TODO: Parse and execute command
-		// For now, just log receipt
+	// Create command handler
+	cmdHandler, err := c.setupCommandHandler(ctx, stewardID, mqtt)
+	if err != nil {
+		return fmt.Errorf("failed to setup command handler: %w", err)
 	}
 
-	if err := mqtt.Subscribe(ctx, cmdTopic, 1, commandHandler); err != nil {
+	c.mu.Lock()
+	c.commandHandler = cmdHandler
+	c.mu.Unlock()
+
+	// Wrap HandleCommand to match MessageHandler signature
+	messageHandler := func(topic string, payload []byte) {
+		if err := cmdHandler.HandleCommand(topic, payload); err != nil {
+			c.logger.Error("Failed to handle command", "error", err, "topic", topic)
+		}
+	}
+
+	if err := mqtt.Subscribe(ctx, cmdTopic, 1, messageHandler); err != nil {
 		return fmt.Errorf("failed to subscribe to commands: %w", err)
 	}
 
@@ -216,6 +227,114 @@ func (c *MQTTClient) Connect(ctx context.Context) error {
 	go c.startHeartbeat()
 
 	c.logger.Info("Connected to controller successfully")
+	return nil
+}
+
+// setupCommandHandler creates and configures the command handler with all command types.
+func (c *MQTTClient) setupCommandHandler(ctx context.Context, stewardID string, mqtt *mqttClient.Client) (*commands.Handler, error) {
+	// Create status callback that publishes to MQTT
+	statusCallback := func(status mqttTypes.StatusUpdate) {
+		payload, err := json.Marshal(status)
+		if err != nil {
+			c.logger.Error("Failed to marshal status update", "error", err)
+			return
+		}
+
+		statusTopic := fmt.Sprintf("cfgms/steward/%s/status", stewardID)
+		if err := mqtt.Publish(ctx, statusTopic, payload, 1, false); err != nil {
+			c.logger.Error("Failed to publish status update", "error", err)
+		}
+	}
+
+	// Create command handler
+	handler, err := commands.New(&commands.Config{
+		StewardID: stewardID,
+		OnStatus:  statusCallback,
+		Logger:    c.logger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create command handler: %w", err)
+	}
+
+	// Register connect_quic handler
+	handler.RegisterHandler(mqttTypes.CommandConnectQUIC, func(ctx context.Context, cmd mqttTypes.Command) error {
+		return c.handleConnectQUIC(ctx, cmd)
+	})
+
+	// Register sync_config handler
+	handler.RegisterHandler(mqttTypes.CommandSyncConfig, func(ctx context.Context, cmd mqttTypes.Command) error {
+		c.logger.Info("Received sync_config command", "command_id", cmd.CommandID)
+		// TODO: Implement config sync trigger
+		return nil
+	})
+
+	// Register sync_dna handler
+	handler.RegisterHandler(mqttTypes.CommandSyncDNA, func(ctx context.Context, cmd mqttTypes.Command) error {
+		c.logger.Info("Received sync_dna command", "command_id", cmd.CommandID)
+		// TODO: Implement DNA sync trigger
+		return nil
+	})
+
+	return handler, nil
+}
+
+// handleConnectQUIC handles the connect_quic command from the controller.
+func (c *MQTTClient) handleConnectQUIC(ctx context.Context, cmd mqttTypes.Command) error {
+	c.logger.Info("Handling connect_quic command", "command_id", cmd.CommandID)
+
+	// Extract parameters
+	quicAddress, ok := cmd.Params["quic_address"].(string)
+	if !ok || quicAddress == "" {
+		return fmt.Errorf("quic_address parameter is required")
+	}
+
+	sessionID, ok := cmd.Params["session_id"].(string)
+	if !ok || sessionID == "" {
+		return fmt.Errorf("session_id parameter is required")
+	}
+
+	c.logger.Info("Connecting to QUIC server",
+		"quic_address", quicAddress,
+		"session_id", sessionID)
+
+	// Get steward ID
+	c.mu.RLock()
+	stewardID := c.stewardID
+	c.mu.RUnlock()
+
+	// TODO: Get TLS config (needs certificate management)
+	// For now, skip TLS initialization
+	c.logger.Warn("QUIC TLS initialization skipped - needs certificate management")
+
+	// Initialize QUIC client
+	quicCfg := &quicClient.Config{
+		ServerAddr: quicAddress,
+		TLSConfig:  nil, // TODO: Add TLS config
+		SessionID:  sessionID,
+		StewardID:  stewardID,
+		Logger:     c.logger,
+	}
+
+	quic, err := quicClient.New(quicCfg)
+	if err != nil {
+		return fmt.Errorf("failed to create QUIC client: %w", err)
+	}
+
+	// Connect to QUIC server
+	if err := quic.Connect(ctx); err != nil {
+		return fmt.Errorf("failed to connect to QUIC server: %w", err)
+	}
+
+	// Store QUIC client
+	c.mu.Lock()
+	c.quic = quic
+	c.quicConnected = true
+	c.mu.Unlock()
+
+	c.logger.Info("QUIC connection established successfully",
+		"quic_address", quicAddress,
+		"session_id", sessionID)
+
 	return nil
 }
 

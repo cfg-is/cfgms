@@ -549,6 +549,50 @@ func (s *Server) GetListenAddr() string {
 	return s.cfg.ListenAddr
 }
 
+// TriggerQUICConnection initiates a QUIC connection to a steward.
+// This generates a session ID and sends a connect_quic command via MQTT.
+func (s *Server) TriggerQUICConnection(ctx context.Context, stewardID string) (string, error) {
+	if s.quicSessionManager == nil {
+		return "", fmt.Errorf("QUIC session manager not available")
+	}
+	if s.commandPublisher == nil {
+		return "", fmt.Errorf("command publisher not available")
+	}
+	if s.cfg.QUIC == nil || !s.cfg.QUIC.Enabled {
+		return "", fmt.Errorf("QUIC is not enabled")
+	}
+
+	// Generate session ID for this QUIC connection
+	session, err := s.quicSessionManager.GenerateSession(stewardID)
+	if err != nil {
+		return "", fmt.Errorf("failed to generate QUIC session: %w", err)
+	}
+
+	s.logger.Info("Generated QUIC session",
+		"steward_id", stewardID,
+		"session_id", session.SessionID,
+		"expires_at", session.ExpiresAt)
+
+	// Send connect_quic command to steward via MQTT
+	commandID, err := s.commandPublisher.TriggerQUICConnection(
+		ctx,
+		stewardID,
+		s.cfg.QUIC.ListenAddr,
+		session.SessionID,
+	)
+	if err != nil {
+		return "", fmt.Errorf("failed to send connect_quic command: %w", err)
+	}
+
+	s.logger.Info("Triggered QUIC connection for steward",
+		"steward_id", stewardID,
+		"session_id", session.SessionID,
+		"command_id", commandID,
+		"quic_address", s.cfg.QUIC.ListenAddr)
+
+	return commandID, nil
+}
+
 // GetCertificateManager returns the certificate manager instance
 func (s *Server) GetCertificateManager() *cert.Manager {
 	s.mu.RLock()
