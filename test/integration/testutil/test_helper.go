@@ -13,6 +13,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller"
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/steward"
+	"github.com/cfgis/cfgms/features/steward/client"
 	"github.com/cfgis/cfgms/pkg/cert"
 	testpkg "github.com/cfgis/cfgms/pkg/testing"
 )
@@ -31,6 +32,7 @@ type TestEnv struct {
 	cancel        context.CancelFunc
 	useDockerController bool // If true, connect to Docker controller instead of in-process
 	dockerControllerAddr string // Address of Docker controller (e.g., "localhost:50054")
+	registrationToken string // MQTT registration token for testing
 }
 
 // NewTestEnvWithDocker creates a test environment that connects to Docker controller
@@ -123,6 +125,18 @@ func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx
 				Organization: "CFGMS Test",
 			},
 		},
+		MQTT: &config.MQTTConfig{
+			Enabled:        true,
+			ListenAddr:     "127.0.0.1:1883",
+			EnableTLS:      false,
+			UseCertManager: true,
+		},
+		QUIC: &config.QUICConfig{
+			Enabled:        true,
+			ListenAddr:     "127.0.0.1:4433",
+			SessionTimeout: 300,
+			UseCertManager: true,
+		},
 	}
 
 	// Create controller data directory
@@ -190,45 +204,84 @@ func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx
 	err = os.MkdirAll(stewardCfg.DataDir, 0755)
 	require.NoError(t, err)
 
-	s, err := steward.New(stewardCfg, logger)
+	// Create steward using new MQTT+QUIC testing mode
+	s, err := steward.NewForControllerTesting(stewardCfg, logger)
 	require.NoError(t, err)
 
+	// Create simple registration token for testing
+	// Format: cfgms_reg_{tenant_id}_{steward_id}_{random}
+	regToken := "cfgms_reg_test_tenant_test_steward_12345"
+
+	// Create MQTT client for steward (will be set up during Start())
+	// Note: We'll create this in Start() since we need the actual controller address
+	// For now, just create the steward with the testing constructor
+
 	return &TestEnv{
-		T:             t,
-		TempDir:       tempDir,
-		Logger:        logger,
-		Controller:    ctrl,
-		ControllerCfg: controllerCfg,
-		Steward:       s,
-		StewardCfg:    stewardCfg,
-		CertManager:   certManager,
-		ctx:           ctx,
-		cancel:        cancel,
+		T:              t,
+		TempDir:        tempDir,
+		Logger:         logger,
+		Controller:     ctrl,
+		ControllerCfg:  controllerCfg,
+		Steward:        s,
+		StewardCfg:     stewardCfg,
+		CertManager:    certManager,
+		ctx:            ctx,
+		cancel:         cancel,
+		registrationToken: regToken,
 	}
 }
 
 // Start starts the controller and steward in the test environment
 func (e *TestEnv) Start() {
+	var mqttBrokerAddr string
+	var quicAddr string
+
 	if e.useDockerController {
-		// Using Docker controller - just update steward config and start steward
+		// Using Docker controller - use docker addresses
+		mqttBrokerAddr = "tcp://localhost:1883"
+		quicAddr = "localhost:4433"
 		e.StewardCfg.ControllerAddr = e.dockerControllerAddr
-
-		// Start the steward
-		_ = e.Steward.Start(e.ctx)
-
-		// Wait longer for Docker controller connection
-		time.Sleep(500 * time.Millisecond)
 	} else {
 		// Start the in-process controller
 		_ = e.Controller.Start(e.ctx)
 
-		// Update steward config with actual controller address
-		e.StewardCfg.ControllerAddr = e.Controller.GetListenAddr()
+		// Get actual controller addresses
+		controllerAddr := e.Controller.GetListenAddr()
+		e.StewardCfg.ControllerAddr = controllerAddr
 
-		// Start the steward
-		_ = e.Steward.Start(e.ctx)
+		// Extract host for MQTT/QUIC (controller provides these on fixed ports)
+		mqttBrokerAddr = "tcp://localhost:1883"  // Controller MQTT broker
+		quicAddr = "localhost:4433"               // Controller QUIC server
+	}
 
-		// Wait for components to initialize
+	// Create MQTT client for steward
+	mqttClient, err := client.NewMQTTClient(&client.MQTTConfig{
+		ControllerURL:     mqttBrokerAddr,
+		QUICAddress:       quicAddr,
+		RegistrationToken: e.registrationToken,
+		TLSCertPath:       e.StewardCfg.CertPath,
+		Logger:            e.Logger,
+	})
+	if err != nil {
+		e.T.Fatalf("Failed to create MQTT client: %v", err)
+	}
+
+	// For integration tests, skip registration and directly set steward ID
+	// This avoids needing the full registration service to be running
+	// The client will be configured when we call Connect() in the steward Start() method
+
+	// Inject MQTT client into steward for testing
+	e.Steward.SetMQTTClientForTesting(mqttClient)
+
+	// Start the steward (will use injected MQTT client)
+	if err := e.Steward.Start(e.ctx); err != nil {
+		e.T.Logf("Warning: Steward start returned error (may be expected for testing): %v", err)
+	}
+
+	// Wait for components to initialize
+	if e.useDockerController {
+		time.Sleep(500 * time.Millisecond)
+	} else {
 		time.Sleep(100 * time.Millisecond)
 	}
 }

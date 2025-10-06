@@ -210,7 +210,7 @@ func (s *Server) handleConnection(conn *quic.Conn) {
 	stream, err := conn.AcceptStream(s.ctx)
 	if err != nil {
 		s.logger.Error("Failed to accept control stream", "error", err)
-		conn.CloseWithError(1, "handshake failed")
+		_ = conn.CloseWithError(1, "handshake failed")
 		return
 	}
 
@@ -218,7 +218,7 @@ func (s *Server) handleConnection(conn *quic.Conn) {
 	sessionID, stewardID, err := s.performHandshake(stream)
 	if err != nil {
 		s.logger.Error("Handshake failed", "error", err)
-		conn.CloseWithError(1, "handshake failed")
+		_ = conn.CloseWithError(1, "handshake failed")
 		return
 	}
 
@@ -302,7 +302,7 @@ func (s *Server) performHandshake(stream *quic.Stream) (string, string, error) {
 
 			// Send error response
 			response := fmt.Sprintf("ERROR: %s\n", err.Error())
-			stream.Write([]byte(response))
+			_, _ = stream.Write([]byte(response))
 			return "", "", fmt.Errorf("session validation failed: %w", err)
 		}
 
@@ -339,7 +339,7 @@ func (s *Server) handleStream(session *Session, stream *quic.Stream) {
 		s.mu.Lock()
 		delete(session.Streams, streamID)
 		s.mu.Unlock()
-		stream.Close()
+		_ = stream.Close()
 	}()
 
 	// Get handler for this stream
@@ -350,7 +350,7 @@ func (s *Server) handleStream(session *Session, stream *quic.Stream) {
 	if !exists {
 		s.logger.Warn("No handler for stream", "stream_id", streamID)
 		// Read and discard data
-		io.Copy(io.Discard, stream)
+		_, _ = io.Copy(io.Discard, stream)
 		return
 	}
 
@@ -381,7 +381,7 @@ func (s *Server) cleanupSessions() {
 						"session_id", sessionID,
 						"steward_id", session.StewardID,
 						"last_active", session.LastActive)
-					session.Connection.CloseWithError(0, "session timeout")
+					_ = session.Connection.CloseWithError(0, "session timeout")
 					delete(s.sessions, sessionID)
 				}
 			}

@@ -115,7 +115,7 @@ func TestBroker_PublishSubscribe(t *testing.T) {
 	// Start broker
 	err = broker.Start(ctx)
 	require.NoError(t, err)
-	defer broker.Stop(ctx)
+	defer func() { _ = broker.Stop(ctx) }()
 
 	// Test publish
 	err = broker.Publish(ctx, "test/topic", []byte("hello"), 0, false)
@@ -155,7 +155,7 @@ func TestBroker_GetStats(t *testing.T) {
 	// Start broker
 	err = broker.Start(ctx)
 	require.NoError(t, err)
-	defer broker.Stop(ctx)
+	defer func() { _ = broker.Stop(ctx) }()
 
 	// Wait briefly for server to fully initialize stats
 	time.Sleep(10 * time.Millisecond)
@@ -241,7 +241,7 @@ func TestBroker_GetListenAddress(t *testing.T) {
 	ctx := context.Background()
 	err = broker.Start(ctx)
 	require.NoError(t, err)
-	defer broker.Stop(ctx)
+	defer func() { _ = broker.Stop(ctx) }()
 
 	addr := broker.GetListenAddress()
 	assert.Equal(t, "127.0.0.1:1883", addr)

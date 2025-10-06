@@ -74,8 +74,8 @@ func init() {
 	tokenCreateCmd.Flags().StringVar(&tokenExpiresIn, "expires", "", "Expiration duration (e.g., 24h, 7d, 30d)")
 	tokenCreateCmd.Flags().BoolVar(&tokenSingleUse, "single-use", false, "Token can only be used once")
 
-	tokenCreateCmd.MarkFlagRequired("tenant-id")
-	tokenCreateCmd.MarkFlagRequired("controller-url")
+	_ = tokenCreateCmd.MarkFlagRequired("tenant-id")
+	_ = tokenCreateCmd.MarkFlagRequired("controller-url")
 
 	tokenCmd.AddCommand(tokenCreateCmd)
 }

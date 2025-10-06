@@ -114,7 +114,7 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	// Perform handshake on control stream
 	if err := c.performHandshake(ctx); err != nil {
-		conn.CloseWithError(1, "handshake failed")
+		_ = conn.CloseWithError(1, "handshake failed")
 		return fmt.Errorf("handshake failed: %w", err)
 	}
 
@@ -218,7 +218,7 @@ func (c *Client) Disconnect() error {
 	// Close all streams
 	for streamID, stream := range c.streams {
 		c.logger.Debug("Closing stream", "stream_id", streamID)
-		stream.Close()
+		_ = stream.Close()
 	}
 	c.streams = make(map[int64]*quic.Stream)
 	c.mu.Unlock()

@@ -977,10 +977,10 @@ func ensureMQTTTestCertificates(caPath string) error {
 		return fmt.Errorf("failed to create CA cert file: %w", err)
 	}
 	if err := pem.Encode(caCertFile, &pem.Block{Type: "CERTIFICATE", Bytes: caCertDER}); err != nil {
-		caCertFile.Close()
+		_ = caCertFile.Close()
 		return fmt.Errorf("failed to encode CA certificate: %w", err)
 	}
-	caCertFile.Close()
+	_ = caCertFile.Close()
 
 	// Generate server certificate
 	serverKey, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -1013,10 +1013,10 @@ func ensureMQTTTestCertificates(caPath string) error {
 		return fmt.Errorf("failed to create server cert file: %w", err)
 	}
 	if err := pem.Encode(serverCertFile, &pem.Block{Type: "CERTIFICATE", Bytes: serverCertDER}); err != nil {
-		serverCertFile.Close()
+		_ = serverCertFile.Close()
 		return fmt.Errorf("failed to encode server certificate: %w", err)
 	}
-	serverCertFile.Close()
+	_ = serverCertFile.Close()
 
 	// Save server key
 	serverKeyFile, err := os.Create(filepath.Join(serverDir, "server.key"))
@@ -1024,10 +1024,10 @@ func ensureMQTTTestCertificates(caPath string) error {
 		return fmt.Errorf("failed to create server key file: %w", err)
 	}
 	if err := pem.Encode(serverKeyFile, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(serverKey)}); err != nil {
-		serverKeyFile.Close()
+		_ = serverKeyFile.Close()
 		return fmt.Errorf("failed to encode server key: %w", err)
 	}
-	serverKeyFile.Close()
+	_ = serverKeyFile.Close()
 
 	return nil
 }
@@ -1136,6 +1136,8 @@ func initializeQUICServer(cfg *config.Config, logger logging.Logger, certManager
 }
 
 // handleConfigSyncStream handles configuration sync requests on stream 1.
+//
+//nolint:unused // Reserved for future use
 func handleConfigSyncStream(ctx context.Context, session *quicServer.Session, stream *quic.Stream, configService *service.ConfigurationService, logger logging.Logger) error {
 	logger.Info("Handling config sync request",
 		"session_id", session.ID,
@@ -1362,7 +1364,7 @@ func (s *Server) handleValidationRequest(topic string, payload []byte, qos byte,
 			Errors:    []string{fmt.Sprintf("Invalid configuration format: %v", err)},
 			Timestamp: time.Now(),
 		}
-		s.sendValidationResponse(request.StewardID, request.RequestID, response)
+		_ = s.sendValidationResponse(request.StewardID, request.RequestID, response)
 		return nil
 	}
 

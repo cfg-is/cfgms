@@ -75,7 +75,7 @@ func (c *Client) Register(ctx context.Context, token string) (*RegistrationRespo
 	if err := c.mqtt.Subscribe(ctx, "cfgms/register/response", 1, handler); err != nil {
 		return nil, fmt.Errorf("failed to subscribe to response: %w", err)
 	}
-	defer c.mqtt.Unsubscribe(ctx, "cfgms/register/response")
+	defer func() { _ = c.mqtt.Unsubscribe(ctx, "cfgms/register/response") }()
 
 	// Publish registration request
 	req := RegistrationRequest{

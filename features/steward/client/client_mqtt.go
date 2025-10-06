@@ -8,8 +8,11 @@ package client
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -36,6 +39,9 @@ type MQTTClient struct {
 	// QUIC client for data plane
 	quic *quicClient.Client
 	quicAddress string
+
+	// Certificate path for mTLS
+	certPath string
 
 	// Command handler
 	commandHandler *commands.Handler
@@ -92,6 +98,7 @@ func NewMQTTClient(cfg *MQTTConfig) (*MQTTClient, error) {
 		heartbeatInterval: heartbeatInterval,
 		heartbeatStop:     make(chan struct{}),
 		quicAddress:       cfg.QUICAddress,
+		certPath:          cfg.TLSCertPath,
 		logger:            cfg.Logger,
 	}, nil
 }
@@ -301,18 +308,17 @@ func (c *MQTTClient) handleConnectQUIC(ctx context.Context, cmd mqttTypes.Comman
 	// Get steward ID
 	c.mu.RLock()
 	stewardID := c.stewardID
+	certPath := c.certPath
 	c.mu.RUnlock()
 
-	// Create TLS config for QUIC
-	// TODO: Use proper mTLS certificates when certificate provisioning is implemented
-	// For now, use InsecureSkipVerify for development/testing
-	tlsConfig := &tls.Config{
-		InsecureSkipVerify: true,
-		NextProtos:         []string{"cfgms-quic"},
+	// Create TLS config for QUIC with proper mTLS
+	tlsConfig, err := c.createQUICtlsConfig(certPath)
+	if err != nil {
+		return fmt.Errorf("failed to create TLS config: %w", err)
 	}
 
-	c.logger.Warn("Using insecure TLS config for QUIC (development only)",
-		"skip_verify", true,
+	c.logger.Info("Using mTLS for QUIC connection",
+		"cert_path", certPath,
 		"next_protos", tlsConfig.NextProtos)
 
 	// Initialize QUIC client
@@ -365,7 +371,7 @@ func (c *MQTTClient) GetConfiguration(ctx context.Context, modules []string) ([]
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to open QUIC stream: %w", err)
 	}
-	defer quic.CloseStream(1)
+	defer func() { _ = quic.CloseStream(1) }()
 
 	// Create request
 	type ConfigRequest struct {
@@ -616,7 +622,7 @@ func (c *MQTTClient) ValidateConfiguration(
 	if err := mqtt.Subscribe(ctx, responseTopic, 1, responseHandler); err != nil {
 		return nil, fmt.Errorf("failed to subscribe to response topic: %w", err)
 	}
-	defer mqtt.Unsubscribe(ctx, responseTopic)
+	defer func() { _ = mqtt.Unsubscribe(ctx, responseTopic) }()
 
 	// Publish validation request
 	requestTopic := fmt.Sprintf("cfgms/steward/%s/validate-request", stewardID)
@@ -702,6 +708,43 @@ func (c *MQTTClient) GetTenantID() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.tenantID
+}
+
+// createQUICtlsConfig creates a TLS configuration for QUIC with proper mTLS.
+func (c *MQTTClient) createQUICtlsConfig(certPath string) (*tls.Config, error) {
+	if certPath == "" {
+		return nil, fmt.Errorf("certificate path is required for mTLS")
+	}
+
+	// Load CA certificate to verify controller's identity
+	caCertPath := filepath.Join(certPath, "ca.crt")
+	caCert, err := os.ReadFile(caCertPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read CA certificate from %s: %w", caCertPath, err)
+	}
+
+	caCertPool := x509.NewCertPool()
+	if !caCertPool.AppendCertsFromPEM(caCert) {
+		return nil, fmt.Errorf("failed to parse CA certificate")
+	}
+
+	// Load client certificate for mTLS authentication
+	clientCertPath := filepath.Join(certPath, "client.crt")
+	clientKeyPath := filepath.Join(certPath, "client.key")
+	clientCert, err := tls.LoadX509KeyPair(clientCertPath, clientKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load client certificate from %s: %w", clientCertPath, err)
+	}
+
+	// Create TLS config with mTLS
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{clientCert},
+		RootCAs:      caCertPool,
+		MinVersion:   tls.VersionTLS13, // QUIC requires TLS 1.3
+		NextProtos:   []string{"cfgms-quic"},
+	}
+
+	return tlsConfig, nil
 }
 
 // startHeartbeat starts the periodic heartbeat goroutine.
