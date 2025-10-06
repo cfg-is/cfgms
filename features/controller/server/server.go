@@ -30,6 +30,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/ha"
 	"github.com/cfgis/cfgms/features/controller/heartbeat"
+	controllerQuic "github.com/cfgis/cfgms/features/controller/quic"
 	"github.com/cfgis/cfgms/features/controller/registration"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/rbac"
@@ -1048,9 +1049,8 @@ func initializeQUICServer(cfg *config.Config, logger logging.Logger, certManager
 
 	// Register stream handlers
 	// Stream 1: Configuration sync
-	quicSrv.RegisterStreamHandler(1, func(ctx context.Context, session *quicServer.Session, stream *quic.Stream) error {
-		return handleConfigSyncStream(ctx, session, stream, configService, logger)
-	})
+	configHandler := controllerQuic.NewConfigHandler(configService, logger)
+	quicSrv.RegisterStreamHandler(controllerQuic.ConfigSyncStreamID, configHandler.Handle)
 
 	// Stream 2: DNA sync
 	quicSrv.RegisterStreamHandler(2, func(ctx context.Context, session *quicServer.Session, stream *quic.Stream) error {
