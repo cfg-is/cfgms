@@ -595,7 +595,12 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
     - ✅ Phase 3-12: QUIC infrastructure, registration tokens, session management
     - ✅ Phase 13-15: QUIC session authentication, connect_quic command, TLS initialization
     - ✅ Phase 16: Complete removal of gRPC from steward (client.go.old archived)
-  - **Alpha Status:** Core functionality complete, production hardening deferred to v0.5.0
+    - ✅ Phase 17: Implement API parity methods (ReportConfigurationStatus, ValidateConfiguration)
+    - ✅ Phase 18: Create integration tests, disable obsolete gRPC tests
+  - **Alpha Status:** Core functionality complete with full API parity, production hardening deferred to v0.5.0
+  - **Final Commits:**
+    - Commit 5daf0f5: Add ReportConfigurationStatus and ValidateConfiguration methods
+    - Commit 169793d: Add MQTT+QUIC API compatibility tests and disable obsolete gRPC tests
   - **Future Scalability:** EMQX external broker plugin ready for >100k stewards
 
 #### Integration Requirements
