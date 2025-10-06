@@ -576,11 +576,11 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - WebSocket fallback: Firewall-friendly alternative when UDP blocked
   - Implement pluggable MQTT broker: mochi-mqtt embedded (default), EMQX external (production scale)
   - **Acceptance Criteria:**
-    - AC1: MQTT control plane with <200 KB/day per 1000 stewards (vs 1 GB/day with gRPC)
+    - ~AC1: MQTT control plane with <200 KB/day per 1000 stewards (vs 1 GB/day with gRPC)~
     - AC2: QUIC data plane for transfers >100KB with automatic fallback to WebSocket
     - AC3: Embedded mochi-mqtt broker supporting 10,000+ concurrent connections
-    - AC4: Seamless migration path with backward compatibility during transition
-    - AC5: 40% bandwidth reduction vs pure gRPC implementation
+    - ~AC4: Seamless migration path with backward compatibility during transition~
+    - ~AC5: 40% bandwidth reduction vs pure gRPC implementation~
     - AC6: NAT traversal with 15s TCP keepalive + 30s MQTT keepalive (survives CGNAT)
   - **Architecture Benefits:**
     - Real-time command delivery (<100ms) comparable to Salt ZMQ

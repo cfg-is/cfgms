@@ -15,6 +15,7 @@ import (
 	"github.com/quic-go/quic-go"
 
 	"github.com/cfgis/cfgms/pkg/logging"
+	quicSession "github.com/cfgis/cfgms/pkg/quic/session"
 )
 
 // Server represents a QUIC server for steward data transfers.
@@ -34,6 +35,9 @@ type Server struct {
 
 	// Stream handlers
 	streamHandlers map[int64]StreamHandler
+
+	// Session validator
+	sessionManager *quicSession.Manager
 
 	// Control
 	ctx    context.Context
@@ -67,6 +71,9 @@ type Config struct {
 	// SessionTimeout for inactive sessions
 	SessionTimeout time.Duration
 
+	// SessionManager for validating QUIC sessions
+	SessionManager *quicSession.Manager
+
 	// Logger for server logging
 	Logger logging.Logger
 }
@@ -96,6 +103,7 @@ func New(cfg *Config) (*Server, error) {
 		sessions:       make(map[string]*Session),
 		sessionTimeout: sessionTimeout,
 		streamHandlers: make(map[int64]StreamHandler),
+		sessionManager: cfg.SessionManager,
 		ctx:            ctx,
 		cancel:         cancel,
 		logger:         cfg.Logger,
@@ -266,7 +274,7 @@ func (s *Server) handleConnection(conn *quic.Conn) {
 
 // performHandshake performs the QUIC handshake on the control stream.
 func (s *Server) performHandshake(stream *quic.Stream) (string, string, error) {
-	// Read handshake message (simple implementation for now)
+	// Read handshake message
 	// Format: "session_id:steward_id\n"
 	buf := make([]byte, 256)
 	n, err := stream.Read(buf)
@@ -277,14 +285,33 @@ func (s *Server) performHandshake(stream *quic.Stream) (string, string, error) {
 	handshake := string(buf[:n])
 	s.logger.Debug("Received handshake", "handshake", handshake)
 
-	// TODO: Parse proper protobuf handshake message
-	// For now, expect simple format: "session_id:steward_id"
+	// Parse handshake: "session_id:steward_id"
 	var sessionID, stewardID string
 	if _, err := fmt.Sscanf(handshake, "%s:%s", &sessionID, &stewardID); err != nil {
 		return "", "", fmt.Errorf("invalid handshake format: %w", err)
 	}
 
-	// Send handshake response
+	// Validate session if session manager is available
+	if s.sessionManager != nil {
+		_, err := s.sessionManager.ValidateSession(sessionID, stewardID)
+		if err != nil {
+			s.logger.Warn("Session validation failed",
+				"session_id", sessionID,
+				"steward_id", stewardID,
+				"error", err)
+
+			// Send error response
+			response := fmt.Sprintf("ERROR: %s\n", err.Error())
+			stream.Write([]byte(response))
+			return "", "", fmt.Errorf("session validation failed: %w", err)
+		}
+
+		s.logger.Info("Session validated successfully",
+			"session_id", sessionID,
+			"steward_id", stewardID)
+	}
+
+	// Send success response
 	response := "OK\n"
 	if _, err := stream.Write([]byte(response)); err != nil {
 		return "", "", fmt.Errorf("failed to write handshake response: %w", err)

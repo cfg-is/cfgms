@@ -43,6 +43,7 @@ import (
 	_ "github.com/cfgis/cfgms/pkg/mqtt/providers/mochi" // Register mochi-mqtt provider
 	mqttTypes "github.com/cfgis/cfgms/pkg/mqtt/types"
 	quicServer "github.com/cfgis/cfgms/pkg/quic/server"
+	quicSession "github.com/cfgis/cfgms/pkg/quic/session"
 	pkgRegistration "github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
@@ -68,6 +69,7 @@ type Server struct {
 	commandPublisher        *commands.Publisher
 	registrationHandler     *registration.Handler
 	quicServer              *quicServer.Server
+	quicSessionManager      *quicSession.Manager
 }
 
 // New creates a new server instance
@@ -233,9 +235,10 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 	// Initialize QUIC server if enabled (Story #198)
 	var quicSrv *quicServer.Server
+	var quicSessionMgr *quicSession.Manager
 	if cfg.QUIC != nil && cfg.QUIC.Enabled {
 		logger.Info("Initializing QUIC server...")
-		quicSrv, err = initializeQUICServer(cfg, logger, certManager, configService, controllerService)
+		quicSrv, quicSessionMgr, err = initializeQUICServer(cfg, logger, certManager, configService, controllerService)
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize QUIC server: %w", err)
 		}
@@ -280,6 +283,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		commandPublisher:        commandPublisher,
 		registrationHandler:     registrationHandler,
 		quicServer:              quicSrv,
+		quicSessionManager:      quicSessionMgr,
 		httpServer:              httpServer,
 	}, nil
 }
@@ -969,7 +973,7 @@ func ensureMQTTTestCertificates(caPath string) error {
 	return nil
 }
 
-func initializeQUICServer(cfg *config.Config, logger logging.Logger, certManager *cert.Manager, configService *service.ConfigurationService, controllerService *service.ControllerService) (*quicServer.Server, error) {
+func initializeQUICServer(cfg *config.Config, logger logging.Logger, certManager *cert.Manager, configService *service.ConfigurationService, controllerService *service.ControllerService) (*quicServer.Server, *quicSession.Manager, error) {
 	// Build TLS config for QUIC
 	var tlsConfig *tls.Config
 
@@ -984,25 +988,25 @@ func initializeQUICServer(cfg *config.Config, logger logging.Logger, certManager
 			logger.Info("QUIC certificates not found, using MQTT certificates")
 			// MQTT cert generation already happened, so these should exist
 			if err := ensureMQTTTestCertificates(cfg.Certificate.CAPath); err != nil {
-				return nil, fmt.Errorf("failed to ensure certificates: %w", err)
+				return nil, nil, fmt.Errorf("failed to ensure certificates: %w", err)
 			}
 		}
 
 		// Load certificate
 		cert, err := tls.LoadX509KeyPair(serverCertPath, serverKeyPath)
 		if err != nil {
-			return nil, fmt.Errorf("failed to load QUIC certificate: %w", err)
+			return nil, nil, fmt.Errorf("failed to load QUIC certificate: %w", err)
 		}
 
 		// Load CA certificate for client verification
 		caCert, err := os.ReadFile(caPath)
 		if err != nil {
-			return nil, fmt.Errorf("failed to read CA certificate: %w", err)
+			return nil, nil, fmt.Errorf("failed to read CA certificate: %w", err)
 		}
 
 		caCertPool := x509.NewCertPool()
 		if !caCertPool.AppendCertsFromPEM(caCert) {
-			return nil, fmt.Errorf("failed to parse CA certificate")
+			return nil, nil, fmt.Errorf("failed to parse CA certificate")
 		}
 
 		tlsConfig = &tls.Config{
@@ -1020,7 +1024,7 @@ func initializeQUICServer(cfg *config.Config, logger logging.Logger, certManager
 		// Use manually configured certificate paths
 		cert, err := tls.LoadX509KeyPair(cfg.QUIC.TLSCertPath, cfg.QUIC.TLSKeyPath)
 		if err != nil {
-			return nil, fmt.Errorf("failed to load QUIC certificate: %w", err)
+			return nil, nil, fmt.Errorf("failed to load QUIC certificate: %w", err)
 		}
 
 		tlsConfig = &tls.Config{
@@ -1032,8 +1036,14 @@ func initializeQUICServer(cfg *config.Config, logger logging.Logger, certManager
 		logger.Info("QUIC server using configured certificates",
 			"cert_path", cfg.QUIC.TLSCertPath)
 	} else {
-		return nil, fmt.Errorf("QUIC enabled but no certificates configured")
+		return nil, nil, fmt.Errorf("QUIC enabled but no certificates configured")
 	}
+
+	// Create QUIC session manager
+	quicSessionMgr := quicSession.NewManager(&quicSession.Config{
+		SessionTTL:      30 * time.Second, // Short-lived sessions
+		CleanupInterval: 1 * time.Minute,
+	})
 
 	// Create QUIC server
 	sessionTimeout := time.Duration(cfg.QUIC.SessionTimeout) * time.Second
@@ -1041,10 +1051,11 @@ func initializeQUICServer(cfg *config.Config, logger logging.Logger, certManager
 		ListenAddr:     cfg.QUIC.ListenAddr,
 		TLSConfig:      tlsConfig,
 		SessionTimeout: sessionTimeout,
+		SessionManager: quicSessionMgr,
 		Logger:         logger,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create QUIC server: %w", err)
+		return nil, nil, fmt.Errorf("failed to create QUIC server: %w", err)
 	}
 
 	// Register stream handlers
@@ -1062,7 +1073,7 @@ func initializeQUICServer(cfg *config.Config, logger logging.Logger, certManager
 		"session_timeout", sessionTimeout,
 		"tls_version", "TLS 1.3")
 
-	return quicSrv, nil
+	return quicSrv, quicSessionMgr, nil
 }
 
 // handleConfigSyncStream handles configuration sync requests on stream 1.
