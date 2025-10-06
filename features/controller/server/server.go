@@ -30,6 +30,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/ha"
 	"github.com/cfgis/cfgms/features/controller/heartbeat"
+	"github.com/cfgis/cfgms/features/controller/registration"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/tenant"
@@ -41,6 +42,7 @@ import (
 	_ "github.com/cfgis/cfgms/pkg/mqtt/providers/mochi" // Register mochi-mqtt provider
 	mqttTypes "github.com/cfgis/cfgms/pkg/mqtt/types"
 	quicServer "github.com/cfgis/cfgms/pkg/quic/server"
+	pkgRegistration "github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
@@ -63,6 +65,7 @@ type Server struct {
 	mqttBroker              mqttInterfaces.Broker
 	heartbeatService        *heartbeat.Service
 	commandPublisher        *commands.Publisher
+	registrationHandler     *registration.Handler
 	quicServer              *quicServer.Server
 }
 
@@ -172,6 +175,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	var mqttBroker mqttInterfaces.Broker
 	var heartbeatService *heartbeat.Service
 	var commandPublisher *commands.Publisher
+	var registrationHandler *registration.Handler
 	if cfg.MQTT != nil && cfg.MQTT.Enabled {
 		logger.Info("Initializing MQTT broker...")
 		mqttBroker, err = initializeMQTTBroker(cfg, logger, certManager)
@@ -210,6 +214,20 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			return nil, fmt.Errorf("failed to initialize command publisher: %w", err)
 		}
 		logger.Info("Command publisher initialized successfully")
+
+		// Initialize registration handler (Story #198)
+		logger.Info("Initializing registration handler...")
+		regStore := pkgRegistration.NewMemoryStore() // TODO: Use persistent storage in production
+		regValidator := pkgRegistration.NewValidator(regStore)
+		registrationHandler, err = registration.New(&registration.Config{
+			Broker:    mqttBroker,
+			Validator: regValidator,
+			Logger:    logger,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize registration handler: %w", err)
+		}
+		logger.Info("Registration handler initialized successfully")
 	}
 
 	// Initialize QUIC server if enabled (Story #198)
@@ -259,6 +277,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		mqttBroker:              mqttBroker,
 		heartbeatService:        heartbeatService,
 		commandPublisher:        commandPublisher,
+		registrationHandler:     registrationHandler,
 		quicServer:              quicSrv,
 		httpServer:              httpServer,
 	}, nil
@@ -357,6 +376,15 @@ func (s *Server) Start() error {
 				return fmt.Errorf("failed to start command publisher: %w", err)
 			}
 			s.logger.Info("Command publisher started successfully")
+		}
+
+		// Start registration handler (Story #198)
+		if s.registrationHandler != nil {
+			s.logger.Info("Starting registration handler...")
+			if err := s.registrationHandler.Start(ctx); err != nil {
+				return fmt.Errorf("failed to start registration handler: %w", err)
+			}
+			s.logger.Info("Registration handler started successfully")
 		}
 
 		// Subscribe to DNA updates from stewards (Story #198)
@@ -458,6 +486,15 @@ func (s *Server) Stop() error {
 		defer cancel()
 		if err := s.commandPublisher.Stop(ctx); err != nil {
 			s.logger.Warn("Failed to stop command publisher", "error", err)
+		}
+	}
+
+	// Stop registration handler
+	if s.registrationHandler != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := s.registrationHandler.Stop(ctx); err != nil {
+			s.logger.Warn("Failed to stop registration handler", "error", err)
 		}
 	}
 
