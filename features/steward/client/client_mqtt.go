@@ -7,6 +7,7 @@ package client
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -302,14 +303,22 @@ func (c *MQTTClient) handleConnectQUIC(ctx context.Context, cmd mqttTypes.Comman
 	stewardID := c.stewardID
 	c.mu.RUnlock()
 
-	// TODO: Get TLS config (needs certificate management)
-	// For now, skip TLS initialization
-	c.logger.Warn("QUIC TLS initialization skipped - needs certificate management")
+	// Create TLS config for QUIC
+	// TODO: Use proper mTLS certificates when certificate provisioning is implemented
+	// For now, use InsecureSkipVerify for development/testing
+	tlsConfig := &tls.Config{
+		InsecureSkipVerify: true,
+		NextProtos:         []string{"cfgms-quic"},
+	}
+
+	c.logger.Warn("Using insecure TLS config for QUIC (development only)",
+		"skip_verify", true,
+		"next_protos", tlsConfig.NextProtos)
 
 	// Initialize QUIC client
 	quicCfg := &quicClient.Config{
 		ServerAddr: quicAddress,
-		TLSConfig:  nil, // TODO: Add TLS config
+		TLSConfig:  tlsConfig,
 		SessionID:  sessionID,
 		StewardID:  stewardID,
 		Logger:     c.logger,
