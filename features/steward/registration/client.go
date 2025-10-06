@@ -8,32 +8,32 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/logging"
-	mqttInterfaces "github.com/cfgis/cfgms/pkg/mqtt/interfaces"
+	mqttClient "github.com/cfgis/cfgms/pkg/mqtt/client"
 )
 
 // Client handles steward registration with the controller using tokens.
 type Client struct {
-	broker mqttInterfaces.Broker
+	mqtt   *mqttClient.Client
 	logger logging.Logger
 }
 
 // Config holds registration client configuration.
 type Config struct {
-	Broker mqttInterfaces.Broker
+	MQTT   *mqttClient.Client
 	Logger logging.Logger
 }
 
 // New creates a new registration client.
 func New(cfg *Config) (*Client, error) {
-	if cfg.Broker == nil {
-		return nil, fmt.Errorf("MQTT broker is required")
+	if cfg.MQTT == nil {
+		return nil, fmt.Errorf("MQTT client is required")
 	}
 	if cfg.Logger == nil {
 		return nil, fmt.Errorf("logger is required")
 	}
 
 	return &Client{
-		broker: cfg.Broker,
+		mqtt:   cfg.MQTT,
 		logger: cfg.Logger,
 	}, nil
 }
@@ -62,21 +62,20 @@ func (c *Client) Register(ctx context.Context, token string) (*RegistrationRespo
 	responseCh := make(chan *RegistrationResponse, 1)
 	errCh := make(chan error, 1)
 
-	handler := func(topic string, payload []byte, qos byte, retained bool) error {
+	handler := func(topic string, payload []byte) {
 		var resp RegistrationResponse
 		if err := json.Unmarshal(payload, &resp); err != nil {
 			errCh <- fmt.Errorf("failed to parse response: %w", err)
-			return nil
+			return
 		}
 		responseCh <- &resp
-		return nil
 	}
 
 	// Subscribe to response topic
-	if err := c.broker.Subscribe(ctx, "cfgms/register/response", 1, handler); err != nil {
+	if err := c.mqtt.Subscribe(ctx, "cfgms/register/response", 1, handler); err != nil {
 		return nil, fmt.Errorf("failed to subscribe to response: %w", err)
 	}
-	defer c.broker.Unsubscribe(ctx, "cfgms/register/response")
+	defer c.mqtt.Unsubscribe(ctx, "cfgms/register/response")
 
 	// Publish registration request
 	req := RegistrationRequest{
@@ -88,7 +87,7 @@ func (c *Client) Register(ctx context.Context, token string) (*RegistrationRespo
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	if err := c.broker.Publish(ctx, "cfgms/register", payload, 1, false); err != nil {
+	if err := c.mqtt.Publish(ctx, "cfgms/register", payload, 1, false); err != nil {
 		return nil, fmt.Errorf("failed to publish registration request: %w", err)
 	}
 

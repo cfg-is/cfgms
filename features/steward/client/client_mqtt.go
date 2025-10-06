@@ -33,9 +33,7 @@ type MQTTClient struct {
 
 	// QUIC client for data plane
 	quic *quicClient.Client
-
-	// Registration client
-	regClient *registration.Client
+	quicAddress string
 
 	// Command handler
 	commandHandler *commands.Handler
@@ -57,6 +55,9 @@ type MQTTClient struct {
 type MQTTConfig struct {
 	// ControllerURL is the MQTT broker URL (from registration token)
 	ControllerURL string
+
+	// QUICAddress is the QUIC server address (e.g., "controller:4433")
+	QUICAddress string
 
 	// RegistrationToken for initial registration
 	RegistrationToken string
@@ -88,6 +89,7 @@ func NewMQTTClient(cfg *MQTTConfig) (*MQTTClient, error) {
 	return &MQTTClient{
 		heartbeatInterval: heartbeatInterval,
 		heartbeatStop:     make(chan struct{}),
+		quicAddress:       cfg.QUICAddress,
 		logger:            cfg.Logger,
 	}, nil
 }
@@ -98,9 +100,10 @@ func (c *MQTTClient) RegisterWithToken(ctx context.Context, token string, mqttBr
 
 	// Initialize MQTT client for registration
 	mqttCfg := &mqttClient.Config{
-		BrokerURL: mqttBroker,
-		ClientID:  "steward-register-" + token[:8], // Temporary client ID
-		Logger:    c.logger,
+		BrokerAddr:   mqttBroker,
+		ClientID:     "steward-register-" + token[:8], // Temporary client ID
+		CleanSession: true,
+		AutoReconnect: true,
 	}
 
 	mqtt, err := mqttClient.New(mqttCfg)
@@ -115,20 +118,20 @@ func (c *MQTTClient) RegisterWithToken(ctx context.Context, token string, mqttBr
 
 	// Create registration client
 	regCfg := &registration.Config{
-		Broker: mqtt,
+		MQTT:   mqtt,
 		Logger: c.logger,
 	}
 
 	regClient, err := registration.New(regCfg)
 	if err != nil {
-		mqtt.Disconnect(ctx)
+		mqtt.Disconnect()
 		return fmt.Errorf("failed to create registration client: %w", err)
 	}
 
 	// Register with token
 	resp, err := regClient.Register(ctx, token)
 	if err != nil {
-		mqtt.Disconnect(ctx)
+		mqtt.Disconnect()
 		return fmt.Errorf("registration failed: %w", err)
 	}
 
@@ -169,11 +172,40 @@ func (c *MQTTClient) Connect(ctx context.Context) error {
 	cmdTopic := fmt.Sprintf("cfgms/steward/%s/commands", stewardID)
 	c.logger.Info("Subscribing to commands", "topic", cmdTopic)
 
-	// TODO: Setup command handler and subscribe
+	// Setup command handler
+	commandHandler := func(topic string, payload []byte) {
+		c.logger.Info("Received command", "topic", topic)
+		// TODO: Parse and execute command
+		// For now, just log receipt
+	}
 
-	// Initialize QUIC client
-	// TODO: Get QUIC address from configuration
-	// TODO: Initialize and connect QUIC client
+	if err := mqtt.Subscribe(ctx, cmdTopic, 1, commandHandler); err != nil {
+		return fmt.Errorf("failed to subscribe to commands: %w", err)
+	}
+
+	// Initialize QUIC client if address configured
+	if c.quicAddress != "" {
+		c.logger.Info("Initializing QUIC connection", "address", c.quicAddress)
+
+		// TODO: For now, skip QUIC initialization since it requires:
+		// 1. TLS config (mTLS certificates)
+		// 2. Session ID (from MQTT connect_quic command)
+		// Will be implemented when full mTLS flow is ready
+		c.logger.Warn("QUIC initialization deferred - needs TLS and session ID")
+
+		// Future implementation:
+		// quicCfg := &quicClient.Config{
+		//     ServerAddr: c.quicAddress,
+		//     TLSConfig:  tlsConfig,
+		//     SessionID:  sessionID,
+		//     StewardID:  stewardID,
+		//     Logger:     c.logger,
+		// }
+		// quicCli, err := quicClient.New(quicCfg)
+		// if err := quicCli.Connect(ctx); err != nil { ... }
+	} else {
+		c.logger.Warn("QUIC address not configured, config sync will not be available")
+	}
 
 	c.mu.Lock()
 	c.connected = true
@@ -369,9 +401,7 @@ func (c *MQTTClient) Disconnect(ctx context.Context) error {
 
 	// Disconnect MQTT
 	if c.mqtt != nil {
-		if err := c.mqtt.Disconnect(ctx); err != nil {
-			c.logger.Warn("Failed to disconnect MQTT", "error", err)
-		}
+		c.mqtt.Disconnect()
 	}
 
 	c.connected = false

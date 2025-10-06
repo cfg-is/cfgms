@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/features/steward"
+	"github.com/cfgis/cfgms/features/steward/client"
 	"github.com/cfgis/cfgms/pkg/logging"
 
 	// Import logging providers to register them
@@ -74,21 +75,30 @@ func main() {
 	var tenantID, controllerURL, group string
 
 	if *regToken != "" {
-		// Registration token (new method - API key style)
-		logger.Info("Using registration token for auto-registration",
+		// Registration token (new method - API key style - Story #198)
+		logger.Info("Using registration token for auto-registration (MQTT+QUIC mode)",
 			"operation", "registration_init",
 			"token_prefix", (*regToken)[:min(len(*regToken), 15)]+"...")
 
-		// TODO: Validate token with controller and get tenant info
-		// For now, just log that we have a token
-		// In full implementation:
-		// 1. Connect to MQTT
-		// 2. Publish token to cfgms/register
-		// 3. Controller validates and responds with tenant_id, controller_url, group
-		// 4. Generate steward_id with tenant prefix
+		// Use new MQTT+QUIC registration flow
+		regCtx, regCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if err := registerWithMQTT(regCtx, *regToken, logger); err != nil {
+			regCancel()
+			logger.Fatal("Failed to register with MQTT",
+				"operation", "registration_mqtt",
+				"error", err.Error())
+		}
 
-		logger.Info("Registration token will be validated on connection",
-			"operation", "registration_init")
+		regCancel()
+
+		logger.Info("Steward registered successfully via MQTT",
+			"operation", "registration_complete")
+
+		// For now, exit after successful registration
+		// Full integration will run the steward after registration
+		logger.Info("Registration complete - full steward integration pending",
+			"operation", "registration_notice")
+		return
 
 	} else if *regCode != "" {
 		// Registration code (legacy method - base64 JSON)
@@ -206,6 +216,50 @@ func main() {
 	logger.Info("Steward shutdown completed",
 		"operation", "steward_shutdown",
 		"status", "completed")
+}
+
+// registerWithMQTT registers the steward using the new MQTT+QUIC client.
+func registerWithMQTT(ctx context.Context, token string, logger logging.Logger) error {
+	logger.Info("Initializing MQTT+QUIC client for registration")
+
+	// Create MQTT+QUIC client
+	mqttClient, err := client.NewMQTTClient(&client.MQTTConfig{
+		ControllerURL:     "tcp://localhost:1883", // TODO: Extract from token or config
+		QUICAddress:       "localhost:4433",       // TODO: Extract from token or config
+		RegistrationToken: token,
+		Logger:            logger,
+	})
+	if err != nil {
+		return err
+	}
+
+	// Register with token
+	if err := mqttClient.RegisterWithToken(ctx, token, "tcp://localhost:1883"); err != nil {
+		return err
+	}
+
+	logger.Info("Registration successful",
+		"steward_id", mqttClient.GetStewardID(),
+		"tenant_id", mqttClient.GetTenantID())
+
+	// Connect to MQTT and QUIC
+	if err := mqttClient.Connect(ctx); err != nil {
+		return err
+	}
+
+	logger.Info("Connected to controller via MQTT+QUIC")
+
+	// Send initial heartbeat
+	if err := mqttClient.SendHeartbeat(ctx, "healthy", nil); err != nil {
+		logger.Warn("Failed to send initial heartbeat", "error", err)
+	}
+
+	// Disconnect
+	if err := mqttClient.Disconnect(ctx); err != nil {
+		logger.Warn("Failed to disconnect cleanly", "error", err)
+	}
+
+	return nil
 }
 
 // decodeRegistrationCode decodes a base64-encoded registration code.

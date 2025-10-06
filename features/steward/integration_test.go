@@ -31,12 +31,12 @@ func TestStewardControllerMode(t *testing.T) {
 	cfg.ControllerAddr = "localhost:9999" // Non-existent controller
 	cfg.CertPath = "/tmp/nonexistent"     // Non-existent certs
 	
-	// This should fail during client creation due to missing certs
+	// This should fail during client creation - Story #198: controller mode deprecated
 	_, err := New(cfg, logger)
-	
-	// We expect this to fail since we don't have certificates
+
+	// We expect this to fail since controller mode is deprecated
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to initialize certificate manager")
+	assert.Contains(t, err.Error(), "deprecated")
 }
 
 func TestHealthMonitorIntegration(t *testing.T) {

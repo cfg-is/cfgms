@@ -36,7 +36,8 @@ import (
 	"time"
 	
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
-	"github.com/cfgis/cfgms/features/steward/client"
+	// NOTE: Old gRPC client removed (Story #198)
+	// "github.com/cfgis/cfgms/features/steward/client"
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
 	"github.com/cfgis/cfgms/features/steward/dna"
@@ -158,8 +159,10 @@ type Steward struct {
 	comparator     *testing.StateComparator
 	executionEngine *execution.ExecutionEngine
 	
-	// Controller mode components (nil in standalone mode)
-	controllerClient *client.Client
+	// Controller mode components - DEPRECATED (Story #198)
+	// The old gRPC-based controller mode is replaced by MQTT+QUIC registration
+	// Use cmd/steward/main.go with --regtoken parameter instead
+	// controllerClient *client.Client
 	dnaCollector     *dna.Collector
 	
 	// Certificate management (for controller mode)
@@ -179,42 +182,9 @@ type Steward struct {
 //
 // Returns an error if controller client or DNA collector initialization fails.
 func New(cfg *Config, logger logging.Logger) (*Steward, error) {
-	if cfg == nil {
-		cfg = DefaultConfig()
-	}
-	
-	// Create health monitor
-	healthMonitor := NewHealthMonitor(logger)
-	
-	// Initialize certificate manager if enabled
-	var certManager *cert.Manager
-	if cfg.Certificate != nil && cfg.Certificate.EnableCertManagement {
-		var err error
-		certManager, err = initializeStewardCertificateManager(cfg, logger)
-		if err != nil {
-			return nil, fmt.Errorf("failed to initialize certificate manager: %w", err)
-		}
-	}
-	
-	// Create controller client (will use certificate manager if available)
-	controllerClient, err := createControllerClient(cfg, certManager, logger)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create controller client: %w", err)
-	}
-	
-	// Create DNA collector
-	dnaCollector := dna.NewCollector(logger)
-	
-	return &Steward{
-		legacyConfig:     cfg,
-		logger:           logger,
-		healthCheck:      healthMonitor,
-		controllerClient: controllerClient,
-		dnaCollector:     dnaCollector,
-		certManager:      certManager,
-		shutdown:         make(chan struct{}),
-		isStandalone:     false,
-	}, nil
+	// DEPRECATED: gRPC-based controller mode removed in Story #198
+	// Use NewStandalone() or cmd/steward --regtoken for MQTT+QUIC mode
+	return nil, fmt.Errorf("steward controller mode with gRPC is deprecated (Story #198) - use NewStandalone() or cmd/steward --regtoken=cfgms_reg_xxx for MQTT+QUIC mode")
 }
 
 // NewStandalone creates a new Steward instance for standalone operation.
@@ -337,14 +307,17 @@ func (s *Steward) startStandalone(ctx context.Context) error {
 
 // startController starts the steward in controller mode with full gRPC integration.
 //
-// This method:
-//   1. Starts health monitoring in background
-//   2. Connects to the controller using mTLS authentication
-//   3. Collects system DNA and registers with the controller
-//   4. Starts the heartbeat mechanism for ongoing communication
+// DEPRECATED: Controller mode removed in Story #198 (MQTT+QUIC Migration)
+// Use cmd/steward --regtoken for MQTT+QUIC registration instead
 //
-// Returns an error if connection, registration, or DNA collection fails.
+// Returns an error indicating the mode is deprecated.
 func (s *Steward) startController(ctx context.Context) error {
+	return fmt.Errorf("controller mode deprecated (Story #198) - use cmd/steward --regtoken for MQTT+QUIC mode")
+}
+
+/*
+// OLD IMPLEMENTATION - Removed in Story #198
+func (s *Steward) startController_OLD(ctx context.Context) error {
 	s.logger.Info("Starting steward in controller mode", "id", s.legacyConfig.ID)
 	
 	// Start health monitoring in background
@@ -398,6 +371,7 @@ func (s *Steward) startController(ctx context.Context) error {
 	s.logger.Info("Steward started successfully in controller mode")
 	return nil
 }
+*/
 
 // Stop gracefully shuts down the steward and cleans up resources.
 //
@@ -435,14 +409,9 @@ func (s *Steward) Stop(ctx context.Context) error {
 			s.moduleFactory.UnloadAllModules()
 		}
 	} else {
-		// Controller mode: disconnect from controller
-		if s.controllerClient != nil {
-			err := s.controllerClient.Disconnect()
-			if err != nil {
-				s.logger.Error("Error disconnecting from controller", "error", err)
-				return fmt.Errorf("failed to disconnect from controller: %w", err)
-			}
-		}
+		// NOTE: Controller mode deprecated (Story #198)
+		// Disconnect now handled by MQTT+QUIC client in main.go
+		s.logger.Info("Controller mode deprecated - no disconnect needed")
 	}
 	
 	s.logger.Info("Steward stopped successfully")
@@ -518,28 +487,8 @@ func (s *Steward) GetSystemDNA(ctx context.Context) (*commonpb.DNA, error) {
 // Returns an error if called on a steward in standalone mode, if not connected
 // to the controller, or if DNA collection or synchronization fails.
 func (s *Steward) SyncDNAWithController(ctx context.Context) error {
-	if s.isStandalone {
-		return fmt.Errorf("SyncDNAWithController is only available in controller mode")
-	}
-	
-	if s.controllerClient == nil || !s.controllerClient.IsConnected() {
-		return fmt.Errorf("not connected to controller")
-	}
-	
-	// Collect fresh DNA
-	systemDNA, err := s.dnaCollector.Collect()
-	if err != nil {
-		return fmt.Errorf("failed to collect system DNA: %w", err)
-	}
-	
-	// Sync with controller
-	err = s.controllerClient.SyncDNA(ctx, systemDNA)
-	if err != nil {
-		return fmt.Errorf("failed to sync DNA with controller: %w", err)
-	}
-	
-	s.logger.Info("DNA synchronized with controller successfully", "id", systemDNA.Id)
-	return nil
+	// DEPRECATED: Controller mode removed (Story #198)
+	return fmt.Errorf("controller mode deprecated (Story #198) - use cmd/steward --regtoken for MQTT+QUIC mode")
 }
 
 // GetControllerConnectionStatus returns the connection status with the controller.
@@ -547,11 +496,8 @@ func (s *Steward) SyncDNAWithController(ctx context.Context) error {
 // Returns true if connected and registered with the controller, false otherwise.
 // Always returns false for stewards in standalone mode.
 func (s *Steward) GetControllerConnectionStatus() bool {
-	if s.isStandalone || s.controllerClient == nil {
-		return false
-	}
-	
-	return s.controllerClient.IsConnected() && s.controllerClient.IsRegistered()
+	// DEPRECATED: Controller mode removed (Story #198)
+	return false
 }
 
 // GetStewardID returns the assigned steward ID from the controller.
@@ -559,11 +505,11 @@ func (s *Steward) GetControllerConnectionStatus() bool {
 // Returns the steward ID assigned by the controller during registration,
 // or empty string if not registered or in standalone mode.
 func (s *Steward) GetStewardID() string {
-	if s.isStandalone || s.controllerClient == nil {
-		return ""
+	// DEPRECATED: Controller mode removed (Story #198)
+	if s.isStandalone {
+		return s.standaloneConfig.Steward.ID
 	}
-	
-	return s.controllerClient.GetStewardID()
+	return ""
 }
 
 // GetCertificateManager returns the certificate manager instance.
@@ -600,6 +546,9 @@ func initializeStewardCertificateManager(cfg *Config, logger logging.Logger) (*c
 }
 
 // createControllerClient creates a controller client with optional certificate management.
+// DEPRECATED: createControllerClient removed in Story #198
+// Use MQTT+QUIC client via cmd/steward --regtoken instead
+/*
 func createControllerClient(cfg *Config, certManager *cert.Manager, logger logging.Logger) (*client.Client, error) {
 	certPath := cfg.CertPath
 	
@@ -623,6 +572,7 @@ func createControllerClient(cfg *Config, certManager *cert.Manager, logger loggi
 	if err != nil {
 		return nil, fmt.Errorf("failed to create controller client: %w", err)
 	}
-	
+
 	return controllerClient, nil
-} 
+}
+*/ 
