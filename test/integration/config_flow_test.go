@@ -1,8 +1,11 @@
 package integration
 
+// TODO(Story #198): This entire file uses obsolete gRPC client - disabled for now
+// Test functionality is now covered by mqtt_quic_flow_test.go
+
+/*
 import (
 	"context"
-	"testing"
 	"time"
 
 	"github.com/stretchr/testify/suite"
@@ -14,7 +17,9 @@ import (
 	testpkg "github.com/cfgis/cfgms/pkg/testing"
 	"github.com/cfgis/cfgms/test/integration/testutil"
 )
+*/
 
+/*
 // ConfigFlowTestSuite tests the configuration data flow between controller and steward
 type ConfigFlowTestSuite struct {
 	suite.Suite
@@ -261,7 +266,4 @@ func (s *ConfigFlowTestSuite) containsLogMessage(logs []testpkg.LogEntry, messag
 	}
 	return false
 }
-
-func TestConfigurationDataFlow(t *testing.T) {
-	suite.Run(t, new(ConfigFlowTestSuite))
-}
+*/

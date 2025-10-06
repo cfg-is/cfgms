@@ -13,7 +13,6 @@ import (
 	"github.com/cfgis/cfgms/features/controller"
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/steward"
-	"github.com/cfgis/cfgms/features/steward/client"
 	"github.com/cfgis/cfgms/pkg/cert"
 	testpkg "github.com/cfgis/cfgms/pkg/testing"
 )
@@ -322,9 +321,10 @@ func (e *TestEnv) GetCertificateInfo(certType cert.CertificateType) ([]*cert.Cer
 	return e.CertManager.GetCertificatesByType(certType)
 }
 
-// CreateStewardClient creates a new steward client for testing
-func (e *TestEnv) CreateStewardClient() (*client.Client, error) {
-	// Use actual server address after binding (important for :0 ports)
-	actualAddr := e.Controller.GetListenAddr()
-	return client.New(actualAddr, e.CertManager.GetStoragePath(), e.Logger)
-}
+// CreateStewardClient is OBSOLETE - removed as part of Story #198 (MQTT+QUIC migration)
+// The old gRPC client.Client no longer exists. Use client.NewMQTTClient() instead.
+// Tests using this method need to be updated for MQTT+QUIC architecture.
+// func (e *TestEnv) CreateStewardClient() (*client.Client, error) {
+// 	actualAddr := e.Controller.GetListenAddr()
+// 	return client.New(actualAddr, e.CertManager.GetStoragePath(), e.Logger)
+// }
