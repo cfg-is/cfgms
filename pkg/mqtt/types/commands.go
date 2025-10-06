@@ -19,6 +19,9 @@ const (
 	// CommandConnectQUIC requests QUIC connection establishment
 	CommandConnectQUIC CommandType = "connect_quic"
 
+	// CommandValidateConfig requests configuration validation (dry-run)
+	CommandValidateConfig CommandType = "validate_config"
+
 	// CommandExecuteTask requests execution of a specific task
 	CommandExecuteTask CommandType = "execute_task"
 
@@ -134,4 +137,82 @@ type DNAUpdate struct {
 
 	// SyncFingerprint is a combined hash of all sync-relevant data
 	SyncFingerprint string `json:"sync_fingerprint,omitempty"`
+}
+
+// ModuleStatus represents the execution status of a single module.
+type ModuleStatus struct {
+	// Name is the module name
+	Name string `json:"name"`
+
+	// Status indicates success/failure (OK, ERROR, WARNING)
+	Status string `json:"status"`
+
+	// Message contains human-readable status description
+	Message string `json:"message"`
+
+	// Timestamp when the module finished executing
+	Timestamp time.Time `json:"timestamp"`
+
+	// Details contains module-specific execution details
+	Details map[string]interface{} `json:"details,omitempty"`
+}
+
+// ConfigStatusReport represents a detailed configuration status report from steward.
+// This provides module-level execution details for MSP visibility.
+type ConfigStatusReport struct {
+	// StewardID identifies which steward sent this report
+	StewardID string `json:"steward_id"`
+
+	// ConfigVersion is the version of the configuration that was applied
+	ConfigVersion string `json:"config_version"`
+
+	// Status is the overall status (OK, ERROR, WARNING)
+	Status string `json:"status"`
+
+	// Message contains overall status message
+	Message string `json:"message"`
+
+	// Modules contains per-module execution status
+	Modules map[string]ModuleStatus `json:"modules"`
+
+	// Timestamp when the report was created
+	Timestamp time.Time `json:"timestamp"`
+
+	// ExecutionTime is how long the configuration took to apply (milliseconds)
+	ExecutionTimeMs int64 `json:"execution_time_ms,omitempty"`
+}
+
+// ValidationRequest represents a configuration validation request.
+// Sent by steward to controller for pre-flight validation.
+type ValidationRequest struct {
+	// RequestID is a unique identifier for this validation request
+	RequestID string `json:"request_id"`
+
+	// StewardID identifies the requesting steward
+	StewardID string `json:"steward_id"`
+
+	// Config is the configuration to validate (JSON-encoded)
+	Config []byte `json:"config"`
+
+	// Version is the configuration version
+	Version string `json:"version"`
+
+	// Timestamp when the request was created
+	Timestamp time.Time `json:"timestamp"`
+}
+
+// ValidationResponse represents a configuration validation response.
+// Sent by controller to steward with validation results.
+type ValidationResponse struct {
+	// RequestID matches the ValidationRequest.RequestID
+	RequestID string `json:"request_id"`
+
+	// Valid indicates if the configuration passed validation
+	Valid bool `json:"valid"`
+
+	// Errors contains validation error messages
+	Errors []string `json:"errors,omitempty"`
+
+	// Timestamp when the response was created
+	Timestamp time.Time `json:"timestamp"`
 }

@@ -34,6 +34,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/registration"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/rbac"
+	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/tenant"
 	tenantmemory "github.com/cfgis/cfgms/features/tenant/memory"
 	"github.com/cfgis/cfgms/pkg/audit"
@@ -398,6 +399,20 @@ func (s *Server) Start() error {
 			return fmt.Errorf("failed to subscribe to DNA updates: %w", err)
 		}
 		s.logger.Info("Subscribed to DNA updates", "topic", dnaUpdateTopic)
+
+		// Subscribe to configuration status reports from stewards (Story #198)
+		configStatusTopic := "cfgms/steward/+/config-status"
+		if err := s.mqttBroker.Subscribe(ctx, configStatusTopic, 1, s.handleConfigStatusReport); err != nil {
+			return fmt.Errorf("failed to subscribe to config status reports: %w", err)
+		}
+		s.logger.Info("Subscribed to config status reports", "topic", configStatusTopic)
+
+		// Subscribe to configuration validation requests from stewards (Story #198)
+		validationRequestTopic := "cfgms/steward/+/validate-request"
+		if err := s.mqttBroker.Subscribe(ctx, validationRequestTopic, 1, s.handleValidationRequest); err != nil {
+			return fmt.Errorf("failed to subscribe to validation requests: %w", err)
+		}
+		s.logger.Info("Subscribed to validation requests", "topic", validationRequestTopic)
 	}
 
 	// Start QUIC server (Story #198)
@@ -1290,6 +1305,113 @@ func (s *Server) handleDNAUpdate(topic string, payload []byte, qos byte, retaine
 	} else {
 		s.logger.Info("DNA synced successfully via MQTT",
 			"steward_id", dnaUpdate.StewardID)
+	}
+
+	return nil
+}
+
+// handleConfigStatusReport processes configuration status reports from stewards via MQTT.
+func (s *Server) handleConfigStatusReport(topic string, payload []byte, qos byte, retained bool) error {
+	var report mqttTypes.ConfigStatusReport
+	if err := json.Unmarshal(payload, &report); err != nil {
+		s.logger.Error("Failed to parse config status report", "error", err)
+		return fmt.Errorf("failed to parse config status report: %w", err)
+	}
+
+	s.logger.Info("Received configuration status report via MQTT",
+		"steward_id", report.StewardID,
+		"config_version", report.ConfigVersion,
+		"overall_status", report.Status,
+		"modules_count", len(report.Modules))
+
+	// Log detailed module status
+	for moduleName, moduleStatus := range report.Modules {
+		s.logger.Info("Module status",
+			"steward_id", report.StewardID,
+			"module", moduleName,
+			"status", moduleStatus.Status,
+			"message", moduleStatus.Message)
+	}
+
+	// TODO: Store status report in database/audit log for MSP admin visibility
+	// This would integrate with the configuration service to track module execution history
+
+	return nil
+}
+
+// handleValidationRequest processes configuration validation requests from stewards via MQTT.
+func (s *Server) handleValidationRequest(topic string, payload []byte, qos byte, retained bool) error {
+	var request mqttTypes.ValidationRequest
+	if err := json.Unmarshal(payload, &request); err != nil {
+		s.logger.Error("Failed to parse validation request", "error", err)
+		return fmt.Errorf("failed to parse validation request: %w", err)
+	}
+
+	s.logger.Info("Received validation request via MQTT",
+		"steward_id", request.StewardID,
+		"request_id", request.RequestID,
+		"version", request.Version)
+
+	// Parse configuration
+	var stewardConfig stewardconfig.StewardConfig
+	if err := json.Unmarshal(request.Config, &stewardConfig); err != nil {
+		// Send validation error response
+		response := mqttTypes.ValidationResponse{
+			RequestID: request.RequestID,
+			Valid:     false,
+			Errors:    []string{fmt.Sprintf("Invalid configuration format: %v", err)},
+			Timestamp: time.Now(),
+		}
+		s.sendValidationResponse(request.StewardID, request.RequestID, response)
+		return nil
+	}
+
+	// Validate using the steward config validation (simpler than full framework for now)
+	var errors []string
+	if err := stewardconfig.ValidateConfiguration(stewardConfig); err != nil {
+		errors = append(errors, err.Error())
+	}
+
+	// TODO: Use comprehensive validation framework like ValidateConfig does
+	// This would require access to s.configService.validator
+
+	// Create response
+	response := mqttTypes.ValidationResponse{
+		RequestID: request.RequestID,
+		Valid:     len(errors) == 0,
+		Errors:    errors,
+		Timestamp: time.Now(),
+	}
+
+	// Send response
+	if err := s.sendValidationResponse(request.StewardID, request.RequestID, response); err != nil {
+		s.logger.Error("Failed to send validation response",
+			"steward_id", request.StewardID,
+			"request_id", request.RequestID,
+			"error", err)
+		return err
+	}
+
+	s.logger.Info("Sent validation response",
+		"steward_id", request.StewardID,
+		"request_id", request.RequestID,
+		"valid", response.Valid,
+		"errors_count", len(response.Errors))
+
+	return nil
+}
+
+// sendValidationResponse sends a validation response to a steward.
+func (s *Server) sendValidationResponse(stewardID string, requestID string, response mqttTypes.ValidationResponse) error {
+	payload, err := json.Marshal(response)
+	if err != nil {
+		return fmt.Errorf("failed to marshal validation response: %w", err)
+	}
+
+	ctx := context.Background()
+	responseTopic := fmt.Sprintf("cfgms/steward/%s/validate-response/%s", stewardID, requestID)
+	if err := s.mqttBroker.Publish(ctx, responseTopic, payload, 1, false); err != nil {
+		return fmt.Errorf("failed to publish validation response: %w", err)
 	}
 
 	return nil

@@ -510,6 +510,149 @@ func (c *MQTTClient) PublishDNAUpdate(ctx context.Context, dna map[string]string
 	return nil
 }
 
+// ReportConfigurationStatus reports detailed configuration execution status to the controller.
+// This provides module-level status information for MSP admin visibility.
+func (c *MQTTClient) ReportConfigurationStatus(
+	ctx context.Context,
+	configVersion string,
+	overallStatus string,
+	message string,
+	moduleStatuses map[string]mqttTypes.ModuleStatus,
+) error {
+	c.mu.RLock()
+	stewardID := c.stewardID
+	mqtt := c.mqtt
+	c.mu.RUnlock()
+
+	if stewardID == "" {
+		return fmt.Errorf("not registered")
+	}
+
+	if mqtt == nil {
+		return fmt.Errorf("MQTT not connected")
+	}
+
+	// Create config status report
+	report := mqttTypes.ConfigStatusReport{
+		StewardID:     stewardID,
+		ConfigVersion: configVersion,
+		Status:        overallStatus,
+		Message:       message,
+		Modules:       moduleStatuses,
+		Timestamp:     time.Now(),
+	}
+
+	payload, err := json.Marshal(report)
+	if err != nil {
+		return fmt.Errorf("failed to marshal config status report: %w", err)
+	}
+
+	// Publish to config-status topic
+	topic := fmt.Sprintf("cfgms/steward/%s/config-status", stewardID)
+	if err := mqtt.Publish(ctx, topic, payload, 1, false); err != nil {
+		return fmt.Errorf("failed to publish config status: %w", err)
+	}
+
+	c.logger.Info("Published configuration status report",
+		"config_version", configVersion,
+		"status", overallStatus,
+		"modules", len(moduleStatuses))
+
+	return nil
+}
+
+// ValidateConfiguration validates a configuration with the controller without applying it.
+// This is a pre-flight check to catch errors before making changes.
+func (c *MQTTClient) ValidateConfiguration(
+	ctx context.Context,
+	config []byte,
+	version string,
+) ([]string, error) {
+	c.mu.RLock()
+	stewardID := c.stewardID
+	mqtt := c.mqtt
+	c.mu.RUnlock()
+
+	if stewardID == "" {
+		return nil, fmt.Errorf("not registered")
+	}
+
+	if mqtt == nil {
+		return nil, fmt.Errorf("MQTT not connected")
+	}
+
+	// Generate unique request ID
+	requestID := fmt.Sprintf("val_%d", time.Now().UnixNano())
+
+	// Create validation request
+	request := mqttTypes.ValidationRequest{
+		RequestID: requestID,
+		StewardID: stewardID,
+		Config:    config,
+		Version:   version,
+		Timestamp: time.Now(),
+	}
+
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal validation request: %w", err)
+	}
+
+	// Create channel to receive response
+	responseChan := make(chan mqttTypes.ValidationResponse, 1)
+	errChan := make(chan error, 1)
+
+	// Subscribe to response topic before publishing request
+	responseTopic := fmt.Sprintf("cfgms/steward/%s/validate-response/%s", stewardID, requestID)
+	responseHandler := func(topic string, responsePayload []byte) {
+		var response mqttTypes.ValidationResponse
+		if err := json.Unmarshal(responsePayload, &response); err != nil {
+			errChan <- fmt.Errorf("failed to parse validation response: %w", err)
+			return
+		}
+		responseChan <- response
+	}
+
+	if err := mqtt.Subscribe(ctx, responseTopic, 1, responseHandler); err != nil {
+		return nil, fmt.Errorf("failed to subscribe to response topic: %w", err)
+	}
+	defer mqtt.Unsubscribe(ctx, responseTopic)
+
+	// Publish validation request
+	requestTopic := fmt.Sprintf("cfgms/steward/%s/validate-request", stewardID)
+	if err := mqtt.Publish(ctx, requestTopic, payload, 1, false); err != nil {
+		return nil, fmt.Errorf("failed to publish validation request: %w", err)
+	}
+
+	c.logger.Info("Published validation request",
+		"request_id", requestID,
+		"version", version)
+
+	// Wait for response with timeout
+	timeout := 10 * time.Second
+	select {
+	case response := <-responseChan:
+		c.logger.Info("Received validation response",
+			"request_id", requestID,
+			"valid", response.Valid,
+			"errors_count", len(response.Errors))
+
+		if response.Valid {
+			return nil, nil
+		}
+		return response.Errors, fmt.Errorf("configuration validation failed")
+
+	case err := <-errChan:
+		return nil, err
+
+	case <-time.After(timeout):
+		return nil, fmt.Errorf("validation request timed out after %v", timeout)
+
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 // Disconnect closes all connections to the controller.
 func (c *MQTTClient) Disconnect(ctx context.Context) error {
 	c.logger.Info("Disconnecting from controller")
