@@ -19,8 +19,6 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	common "github.com/cfgis/cfgms/api/proto/common"
@@ -49,12 +47,11 @@ import (
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
-// Server represents the gRPC server component of the controller
+// Server represents the controller server component (MQTT+QUIC based)
 type Server struct {
 	mu                      sync.RWMutex
 	cfg                     *config.Config
 	logger                  logging.Logger
-	grpcServer              *grpc.Server
 	httpServer              *api.Server
 	controllerService       *service.ControllerService
 	configService           *service.ConfigurationService
@@ -330,49 +327,12 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	}, nil
 }
 
-// Start initializes and starts the gRPC server
+// Start initializes and starts the controller server (MQTT+QUIC mode)
 func (s *Server) Start() error {
 	log.Println("DEBUG server.Start(): Function entry")
 	s.logger.Info("DEBUG: Entered server.Start() function")
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	log.Println("DEBUG server.Start(): About to create listener")
-	// Create listener
-	listener, err := net.Listen("tcp", s.cfg.ListenAddr)
-	if err != nil {
-		log.Println("DEBUG server.Start(): Failed to create listener")
-		return fmt.Errorf("failed to listen on %s: %w", s.cfg.ListenAddr, err)
-	}
-	log.Println("DEBUG server.Start(): Listener created successfully")
-
-	// Update config with actual bound address (important for :0 ports)
-	s.cfg.ListenAddr = listener.Addr().String()
-
-	log.Println("DEBUG server.Start(): About to configure TLS")
-	// Configure TLS with certificate management
-	var opts []grpc.ServerOption
-	tlsConfig, err := s.setupTLS()
-	if err != nil {
-		s.logger.Warn("Failed to setup TLS, starting without TLS", "error", err)
-	} else if tlsConfig != nil {
-		creds := credentials.NewTLS(tlsConfig)
-		opts = append(opts, grpc.Creds(creds))
-		s.logger.Info("TLS enabled for gRPC server with certificate management")
-	}
-	log.Println("DEBUG server.Start(): TLS configuration completed")
-
-	log.Println("DEBUG server.Start(): About to create gRPC server")
-	// Create gRPC server
-	s.grpcServer = grpc.NewServer(opts...)
-	log.Println("DEBUG server.Start(): gRPC server created")
-
-	log.Println("DEBUG server.Start(): About to register services")
-	// Register services
-	controller.RegisterControllerServer(s.grpcServer, s.controllerService)
-	controller.RegisterConfigurationServiceServer(s.grpcServer, s.configService)
-	controller.RegisterRBACServiceServer(s.grpcServer, s.rbacService)
-	log.Println("DEBUG server.Start(): Services registered")
 
 	log.Println("DEBUG server.Start(): About to start HA manager")
 	// Start HA manager with timeout
@@ -479,21 +439,7 @@ func (s *Server) Start() error {
 		s.logger.Info("HTTP API server started")
 	}
 
-	// Start serving in a goroutine
-	go func() {
-		s.mu.RLock()
-		server := s.grpcServer
-		s.mu.RUnlock()
-
-		if server != nil {
-			if err := server.Serve(listener); err != nil {
-				s.logger.Error("gRPC server failed", "error", err)
-			}
-		}
-	}()
-
-	s.logger.Info("Controller server started",
-		"address", s.cfg.ListenAddr,
+	s.logger.Info("Controller server started (MQTT+QUIC mode)",
 		"ha_mode", s.haManager.GetDeploymentMode().String(),
 		"is_leader", s.haManager.IsLeader())
 	
@@ -582,10 +528,6 @@ func (s *Server) Stop() error {
 		if err := s.httpServer.Stop(); err != nil {
 			s.logger.Warn("Failed to stop HTTP server", "error", err)
 		}
-	}
-
-	if s.grpcServer != nil {
-		s.grpcServer.GracefulStop()
 	}
 
 	return nil
@@ -748,7 +690,7 @@ func initializeCertificateManager(cfg *config.Config, logger logging.Logger) (*c
 	return manager, nil
 }
 
-// setupTLS configures TLS for the gRPC server using certificate management
+// setupTLS configures TLS for the server using certificate management
 func (s *Server) setupTLS() (*tls.Config, error) {
 	// If certificate management is disabled, try legacy certificate loading
 	if s.certManager == nil {

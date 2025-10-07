@@ -178,9 +178,15 @@ func TestEngine_CancelExecution(t *testing.T) {
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, variables)
 	require.NoError(t, err)
 
-	// Cancel the execution immediately
+	// Give execution a moment to start before cancelling
+	time.Sleep(10 * time.Millisecond)
+
+	// Cancel the execution
 	err = engine.CancelExecution(execution.ID)
 	assert.NoError(t, err)
+
+	// Give cancellation time to take effect
+	time.Sleep(10 * time.Millisecond)
 
 	// Check status
 	finalExecution, err := engine.GetExecution(execution.ID)
