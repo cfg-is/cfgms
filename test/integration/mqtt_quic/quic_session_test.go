@@ -20,7 +20,7 @@ type QUICSessionTestSuite struct {
 }
 
 func (s *QUICSessionTestSuite) SetupSuite() {
-	s.helper = NewTestHelper("http://localhost:8080")
+	s.helper = NewTestHelper(GetTestHTTPAddr("http://localhost:8080"))
 
 	// Create session manager for testing
 	s.sessionManager = session.NewManager(&session.Config{

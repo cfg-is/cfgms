@@ -22,8 +22,8 @@ type MQTTConnectivityTestSuite struct {
 }
 
 func (s *MQTTConnectivityTestSuite) SetupSuite() {
-	s.helper = NewTestHelper("http://localhost:8080")
-	s.mqttAddr = "tcp://localhost:1886" // Docker controller MQTT broker port
+	s.helper = NewTestHelper(GetTestHTTPAddr("http://localhost:8080"))
+	s.mqttAddr = GetTestMQTTAddr("tcp://localhost:1886") // Docker controller MQTT broker port
 }
 
 func (s *MQTTConnectivityTestSuite) TearDownSuite() {

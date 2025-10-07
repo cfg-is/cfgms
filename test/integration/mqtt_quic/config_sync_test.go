@@ -20,8 +20,8 @@ type ConfigSyncTestSuite struct {
 }
 
 func (s *ConfigSyncTestSuite) SetupSuite() {
-	s.helper = NewTestHelper("http://localhost:8080")
-	s.mqttAddr = "tcp://localhost:1886"
+	s.helper = NewTestHelper(GetTestHTTPAddr("http://localhost:8080"))
+	s.mqttAddr = GetTestMQTTAddr("tcp://localhost:1886")
 }
 
 // TestConfigSyncCommand tests config sync command delivery

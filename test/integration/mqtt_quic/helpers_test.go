@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"testing"
 	"time"
 
@@ -21,7 +22,13 @@ type TestHelper struct {
 }
 
 // NewTestHelper creates a new test helper
+// Uses CFGMS_TEST_HTTP_ADDR environment variable if set, otherwise defaults to baseURL parameter
 func NewTestHelper(baseURL string) *TestHelper {
+	// Allow override via environment variable for Docker integration
+	if envURL := os.Getenv("CFGMS_TEST_HTTP_ADDR"); envURL != "" {
+		baseURL = envURL
+	}
+
 	return &TestHelper{
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
@@ -116,4 +123,31 @@ func WaitForCondition(t *testing.T, timeout time.Duration, checkInterval time.Du
 
 	t.Logf("Timeout waiting for: %s", description)
 	return false
+}
+
+// GetTestHTTPAddr returns the HTTP address for testing
+// Uses CFGMS_TEST_HTTP_ADDR environment variable if set, otherwise returns default
+func GetTestHTTPAddr(defaultAddr string) string {
+	if envAddr := os.Getenv("CFGMS_TEST_HTTP_ADDR"); envAddr != "" {
+		return envAddr
+	}
+	return defaultAddr
+}
+
+// GetTestMQTTAddr returns the MQTT broker address for testing
+// Uses CFGMS_TEST_MQTT_ADDR environment variable if set, otherwise returns default
+func GetTestMQTTAddr(defaultAddr string) string {
+	if envAddr := os.Getenv("CFGMS_TEST_MQTT_ADDR"); envAddr != "" {
+		return envAddr
+	}
+	return defaultAddr
+}
+
+// GetTestQUICAddr returns the QUIC server address for testing
+// Uses CFGMS_TEST_QUIC_ADDR environment variable if set, otherwise returns default
+func GetTestQUICAddr(defaultAddr string) string {
+	if envAddr := os.Getenv("CFGMS_TEST_QUIC_ADDR"); envAddr != "" {
+		return envAddr
+	}
+	return defaultAddr
 }
