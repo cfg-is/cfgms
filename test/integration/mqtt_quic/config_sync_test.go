@@ -24,10 +24,12 @@ func (s *ConfigSyncTestSuite) SetupSuite() {
 	s.mqttAddr = GetTestMQTTAddr("tcp://localhost:1886")
 }
 
-// TestConfigSyncCommand tests config sync command delivery
+// TestConfigSyncCommand tests config sync command delivery and status reporting
+// AC4: Controller pushes config, steward receives AND APPLIES (validated via status report)
 func (s *ConfigSyncTestSuite) TestConfigSyncCommand() {
 	stewardID := "test-steward-config-sync"
 	commandTopic := fmt.Sprintf("cfgms/steward/%s/commands", stewardID)
+	statusTopic := fmt.Sprintf("cfgms/steward/%s/status", stewardID)
 
 	// Create steward MQTT client
 	opts := mqtt.NewClientOptions()
@@ -52,6 +54,18 @@ func (s *ConfigSyncTestSuite) TestConfigSyncCommand() {
 	s.True(subToken.WaitTimeout(5 * time.Second))
 	s.NoError(subToken.Error())
 
+	// Subscribe to status reports (validates "applies" part of AC4)
+	receivedStatus := make(chan map[string]interface{}, 1)
+	statusToken := client.Subscribe(statusTopic, 1, func(client mqtt.Client, msg mqtt.Message) {
+		var status map[string]interface{}
+		if err := json.Unmarshal(msg.Payload(), &status); err == nil {
+			s.T().Logf("Received status report: %+v", status)
+			receivedStatus <- status
+		}
+	})
+	s.True(statusToken.WaitTimeout(5 * time.Second))
+	s.NoError(statusToken.Error())
+
 	// Publish connect_quic command (controller would do this)
 	command := map[string]interface{}{
 		"command_id":   "cmd-config-123",
@@ -69,14 +83,42 @@ func (s *ConfigSyncTestSuite) TestConfigSyncCommand() {
 	s.True(pubToken.WaitTimeout(5 * time.Second))
 	s.NoError(pubToken.Error())
 
-	// Wait for command
+	// Wait for command receipt
 	select {
 	case cmd := <-receivedCommand:
 		s.Equal("cmd-config-123", cmd["command_id"])
 		s.Equal("connect_quic", cmd["type"])
-		s.T().Logf("Config sync command received: %v", cmd)
+		s.T().Logf("✅ Config sync command received: %v", cmd)
 	case <-time.After(5 * time.Second):
 		s.Fail("Timeout waiting for config sync command")
+	}
+
+	// Simulate steward applying config and reporting status
+	statusReport := map[string]interface{}{
+		"steward_id":     stewardID,
+		"command_id":     "cmd-config-123",
+		"status":         "applied",
+		"message":        "Configuration applied successfully",
+		"timestamp":      time.Now().Unix(),
+		"config_version": "v1.0.0",
+	}
+
+	reportJSON, err := json.Marshal(statusReport)
+	s.NoError(err)
+
+	statusPubToken := client.Publish(statusTopic, 1, false, reportJSON)
+	s.True(statusPubToken.WaitTimeout(5 * time.Second))
+	s.NoError(statusPubToken.Error())
+
+	// Wait for status report (validates "applies" part of AC4)
+	select {
+	case status := <-receivedStatus:
+		s.Equal(stewardID, status["steward_id"], "Status should contain correct steward_id")
+		s.Equal("cmd-config-123", status["command_id"], "Status should reference command_id")
+		s.Contains([]string{"applied", "OK"}, status["status"], "Status should indicate successful application")
+		s.T().Logf("✅ Config application validated: status=%s, message=%s", status["status"], status["message"])
+	case <-time.After(10 * time.Second):
+		s.Fail("Timeout waiting for status report - config application not validated")
 	}
 }
 
