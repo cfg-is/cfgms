@@ -597,10 +597,15 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
     - ✅ Phase 16: Complete removal of gRPC from steward (client.go.old archived)
     - ✅ Phase 17: Implement API parity methods (ReportConfigurationStatus, ValidateConfiguration)
     - ✅ Phase 18: Create integration tests, disable obsolete gRPC tests
-  - **Alpha Status:** Core functionality complete with full API parity, production hardening deferred to v0.5.0
+    - ✅ Phase 19: Remove gRPC server infrastructure from controller (server.go cleanup)
+    - ✅ Phase 20: Remove unused gRPC TLS setup functions (final cleanup)
+  - **Alpha Status:** Core functionality complete with full API parity and gRPC fully removed from both steward and controller
   - **Final Commits:**
-    - Commit 5daf0f5: Add ReportConfigurationStatus and ValidateConfiguration methods
+    - Commit 682cb55: Remove gRPC server infrastructure from controller
+    - Commit 45e4e09: Remove unused gRPC TLS setup functions
     - Commit 169793d: Add MQTT+QUIC API compatibility tests and disable obsolete gRPC tests
+    - Commit 5daf0f5: Add ReportConfigurationStatus and ValidateConfiguration methods
+  - **Pull Request:** #202 (Ready for merge to develop)
   - **Future Scalability:** EMQX external broker plugin ready for >100k stewards
 
 #### Integration Requirements
