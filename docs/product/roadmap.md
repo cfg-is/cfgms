@@ -574,7 +574,7 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - Implemented HTTP registration, MQTT control plane (30s heartbeat), QUIC data plane for large transfers, and complete gRPC removal
   - Achieved feature parity (registration, config sync, DNA updates, heartbeats, commands) and NAT traversal support
   - **Status:** Code complete and merged (PR #202). ⚠️ **Production readiness requires Story 12.2 integration testing**
-- [ ] **MQTT+QUIC Integration Testing & Production Readiness** (Story 12.2) - 21 points ⚠️ **URGENT - BLOCKING PRODUCTION**
+- [ ] **MQTT+QUIC Integration Testing & Production Readiness** (Story 12.2) - 21 points (Issue #203) ⚠️ **URGENT - BLOCKING PRODUCTION**
   - **Critical Gap:** Story #198 implementation has ~6% test coverage with NO end-to-end communication tests
   - **Risk:** Zero confidence in registration flow, MQTT connectivity, QUIC sessions, config sync, DNA updates, heartbeats, or failover detection
   - **Blocking Issues:** Cannot deploy to production without validating core communication workflows work end-to-end
