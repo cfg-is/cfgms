@@ -98,12 +98,6 @@ func (s *DockerIntegrationTestSuite) getContainerLogs(containerName string, sinc
 	return string(output)
 }
 
-// logContains checks if container logs contain a specific string
-func (s *DockerIntegrationTestSuite) logContains(containerName, searchString string, since time.Duration) bool {
-	logs := s.getContainerLogs(containerName, since)
-	return strings.Contains(logs, searchString)
-}
-
 // TestMQTTConnection validates MQTT broker is accessible and steward starts successfully
 // NOTE: Full MQTT+QUIC integration between steward and controller is pending (Story #198)
 // This test verifies infrastructure readiness, not actual MQTT communication
