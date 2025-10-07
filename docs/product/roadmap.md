@@ -570,43 +570,43 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - HA integration tests managed independently with dedicated cluster lifecycle
   - CI performance optimization with optimized Docker health checks and startup
 - [x] **Communication Protocol Migration: gRPC to MQTT+QUIC Hybrid** (Story 12.1) - 13 points (Issue #198) ✅ COMPLETED (Alpha)
-  - Migrate from gRPC to hybrid MQTT+QUIC architecture for optimal WAN performance
-  - MQTT control plane: Commands, keepalive, presence (30s heartbeat, <5s failover detection)
-  - QUIC data plane: Large file transfers, binary deployments, log streaming (on-demand, no keepalive)
-  - WebSocket fallback: Firewall-friendly alternative when UDP blocked (deferred to v0.5.0)
-  - Implement pluggable MQTT broker: mochi-mqtt embedded (default), EMQX external (production scale)
+  - Migrated from gRPC to hybrid MQTT+QUIC architecture with embedded mochi-mqtt broker and session-based QUIC authentication
+  - Implemented HTTP registration, MQTT control plane (30s heartbeat), QUIC data plane for large transfers, and complete gRPC removal
+  - Achieved feature parity (registration, config sync, DNA updates, heartbeats, commands) and NAT traversal support
+  - **Status:** Code complete and merged (PR #202). ⚠️ **Production readiness requires Story 12.2 integration testing**
+- [ ] **MQTT+QUIC Integration Testing & Production Readiness** (Story 12.2) - 21 points ⚠️ **URGENT - BLOCKING PRODUCTION**
+  - **Critical Gap:** Story #198 implementation has ~6% test coverage with NO end-to-end communication tests
+  - **Risk:** Zero confidence in registration flow, MQTT connectivity, QUIC sessions, config sync, DNA updates, heartbeats, or failover detection
+  - **Blocking Issues:** Cannot deploy to production without validating core communication workflows work end-to-end
   - **Acceptance Criteria:**
-    - ~AC1: MQTT control plane with <200 KB/day per 1000 stewards (vs 1 GB/day with gRPC)~ (Removed - Alpha)
-    - ✅ AC2: QUIC data plane for transfers >100KB (WebSocket fallback deferred)
-    - ✅ AC3: Embedded mochi-mqtt broker supporting 10,000+ concurrent connections
-    - ~AC4: Seamless migration path with backward compatibility during transition~ (Removed - Alpha)
-    - ~AC5: 40% bandwidth reduction vs pure gRPC implementation~ (Removed - Alpha)
-    - ✅ AC6: NAT traversal with 15s TCP keepalive + 30s MQTT keepalive (survives CGNAT)
-    - ✅ AC7: Controller-steward retain all functionality after migration (Feature Parity)
-    - ✅ AC8: Secure session-based QUIC authentication prevents unauthorized connections
-  - **Architecture Benefits:**
-    - Real-time command delivery (<100ms) comparable to Salt ZMQ
-    - Efficient bandwidth usage: MQTT PINGs (60 bytes) vs gRPC HTTP/2 keepalive (114 bytes)
-    - Better NAT traversal: MQTT designed for IoT/mobile scenarios
-    - Separation of concerns: Control plane always-on, data plane on-demand
-  - **Implementation Phases (All Complete):**
-    - ✅ Phase 1: Add embedded mochi-mqtt broker to controller (pkg/mqtt/providers/mochi)
-    - ✅ Phase 2: Migrate keepalive/heartbeat from gRPC to MQTT
-    - ✅ Phase 3-12: QUIC infrastructure, registration tokens, session management
-    - ✅ Phase 13-15: QUIC session authentication, connect_quic command, TLS initialization
-    - ✅ Phase 16: Complete removal of gRPC from steward (client.go.old archived)
-    - ✅ Phase 17: Implement API parity methods (ReportConfigurationStatus, ValidateConfiguration)
-    - ✅ Phase 18: Create integration tests, disable obsolete gRPC tests
-    - ✅ Phase 19: Remove gRPC server infrastructure from controller (server.go cleanup)
-    - ✅ Phase 20: Remove unused gRPC TLS setup functions (final cleanup)
-  - **Alpha Status:** Core functionality complete with full API parity and gRPC fully removed from both steward and controller
-  - **Final Commits:**
-    - Commit 682cb55: Remove gRPC server infrastructure from controller
-    - Commit 45e4e09: Remove unused gRPC TLS setup functions
-    - Commit 169793d: Add MQTT+QUIC API compatibility tests and disable obsolete gRPC tests
-    - Commit 5daf0f5: Add ReportConfigurationStatus and ValidateConfiguration methods
-  - **Pull Request:** #202 (Ready for merge to develop)
-  - **Future Scalability:** EMQX external broker plugin ready for >100k stewards
+    - ✅ AC1: End-to-end registration test (HTTP → MQTT subscribe → QUIC session → steward ID)
+    - ✅ AC2: MQTT connectivity test (steward connects, subscribes to topics, receives messages)
+    - ✅ AC3: QUIC session authentication test (valid tokens accepted, invalid rejected)
+    - ✅ AC4: Configuration sync test (controller pushes config via QUIC, steward receives and applies)
+    - ✅ AC5: DNA update test (steward collects DNA, transmits via MQTT, controller receives and stores)
+    - ✅ AC6: Heartbeat mechanism test (30s MQTT PINGs, <15s offline detection)
+    - ✅ AC7: Failover detection test (steward disconnect triggers offline within 15s)
+    - ✅ AC8: Command delivery test (controller sends command via MQTT, steward executes and responds)
+    - ✅ AC9: Reconnection test (network failure → automatic reconnection → resume operations)
+    - ✅ AC10: Multi-steward load test (1000+ concurrent stewards, verify stability)
+  - **Implementation Phases:**
+    - Phase 1: Create end-to-end registration test (HTTP → MQTT → QUIC → database)
+    - Phase 2: Create MQTT connectivity tests (connect, subscribe, publish, receive)
+    - Phase 3: Create QUIC session tests (authentication, stream creation, data transfer)
+    - Phase 4: Create configuration sync tests (push config, verify receipt, check application)
+    - Phase 5: Create DNA update tests (collection, transmission, storage, verification)
+    - Phase 6: Create heartbeat/presence tests (PINGREQ/PINGRESP, timeout detection)
+    - Phase 7: Create command delivery tests (send command, execute, return result)
+    - Phase 8: Create failure scenario tests (network failure, reconnection, resume)
+    - Phase 9: Create load/performance tests (1000+ stewards, memory/CPU monitoring)
+    - Phase 10: Update Docker integration tests to validate real communication (not just logs)
+  - **Test Coverage Goal:** Increase MQTT+QUIC coverage from ~6% to >80%
+  - **Deliverables:**
+    - Comprehensive integration test suite in test/integration/mqtt_quic/
+    - Enhanced Docker tests with real communication validation
+    - Load testing framework and performance benchmarks
+    - Production deployment checklist with validated test results
+  - **Production Gate:** This story MUST be completed before any production deployment or customer demos
 
 #### Integration Requirements
 - All new capabilities integrate seamlessly with existing pluggable storage architecture
