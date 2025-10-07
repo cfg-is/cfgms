@@ -200,7 +200,7 @@ func (rc *RaftConsensus) runRaft() {
 			log.Printf("RAFT: Tick %d COMPLETE, node_id=%d", tickCount, rc.nodeID)
 
 		case <-debugTicker.C:
-			log.Printf("RAFT: DEBUG - Still alive after %d ticks, node_id=%d, loopCount=%d", tickCount, rc.nodeID, loopCount)
+			// Periodic health check
 
 		case rd := <-rc.node.Ready():
 			// Process Ready updates from Raft

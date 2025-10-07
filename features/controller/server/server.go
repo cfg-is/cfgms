@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
-	"log"
 	"math/big"
 	"net"
 	"os"
@@ -73,66 +72,39 @@ type Server struct {
 
 // New creates a new server instance
 func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
-	log.Println("DEBUG server.New(): Function entry")
-	logger.Info("DEBUG: Entered server.New() function")
-	log.Println("DEBUG server.New(): About to check cfg nil")
 	if cfg == nil {
-		log.Println("DEBUG server.New(): Config is nil")
-		logger.Info("DEBUG: Config is nil, returning error")
 		return nil, ErrNilConfig
 	}
-	log.Println("DEBUG server.New(): Config validation passed")
-	logger.Info("DEBUG: Config validation passed, starting server initialization...")
-	log.Println("DEBUG server.New(): About to start storage initialization")
+
 	logger.Info("Config validated, proceeding with storage initialization...")
 
 	// Initialize global storage provider system - REQUIRED for all deployments
-	log.Println("DEBUG server.New(): Checking cfg.Storage for nil")
 	if cfg.Storage == nil {
-		log.Println("DEBUG server.New(): cfg.Storage is nil, returning error")
 		return nil, fmt.Errorf("storage configuration is required for CFGMS operation - configure storage.provider as 'git' (minimum) or 'database' (production). See docs/examples/controller-storage-config.yaml for examples")
 	}
-	log.Println("DEBUG server.New(): cfg.Storage is not nil, provider:", cfg.Storage.Provider)
 
 	logger.Info("Initializing global storage provider", "provider", cfg.Storage.Provider)
-	log.Println("DEBUG server.New(): About to call CreateAllStoresFromConfig with provider:", cfg.Storage.Provider)
-	
+
 	// Create storage manager with pluggable provider - no fallbacks allowed
-	logger.Info("DEBUG: About to call interfaces.CreateAllStoresFromConfig...", "provider", cfg.Storage.Provider)
-	log.Println("DEBUG server.New(): Calling CreateAllStoresFromConfig now...")
 	storageManager, err := interfaces.CreateAllStoresFromConfig(cfg.Storage.Provider, cfg.Storage.Config)
-	log.Println("DEBUG server.New(): CreateAllStoresFromConfig call completed")
 	if err != nil {
-		log.Println("DEBUG server.New(): CreateAllStoresFromConfig returned error:", err)
 		return nil, fmt.Errorf("failed to initialize storage provider '%s': %w. Verify storage configuration and ensure storage backend is accessible", cfg.Storage.Provider, err)
 	}
-	log.Println("DEBUG server.New(): Storage manager created successfully, proceeding to RBAC initialization")
-	logger.Info("DEBUG: Storage manager created successfully - CreateAllStoresFromConfig completed")
 
 	// Initialize RBAC system with pluggable storage only
-	log.Println("DEBUG server.New(): About to get stores from storage manager")
 	auditStore := storageManager.GetAuditStore()
-	log.Printf("DEBUG server.New(): Got audit store: %v", auditStore != nil)
 	clientTenantStore := storageManager.GetClientTenantStore()
-	log.Printf("DEBUG server.New(): Got client tenant store: %v", clientTenantStore != nil)
 	rbacStore := storageManager.GetRBACStore()
-	log.Printf("DEBUG server.New(): Got RBAC store: %v", rbacStore != nil)
 
 	logger.Info("Creating RBAC manager with storage...")
-	log.Println("DEBUG server.New(): About to call rbac.NewManagerWithStorage")
 	rbacManager := rbac.NewManagerWithStorage(
 		auditStore,
 		clientTenantStore,
 		rbacStore,
 	)
-	log.Println("DEBUG server.New(): rbac.NewManagerWithStorage returned")
-	log.Println("DEBUG server.New(): About to log RBAC manager created")
-	// logger.Info("RBAC manager created")  // Temporarily disabled to test if logger is the issue
-	log.Println("DEBUG server.New(): Skipped logger.Info call")
-	log.Println("DEBUG server.New(): RBAC manager created log successful")
+	logger.Info("RBAC manager created")
 
 	// Initialize unified audit system with pluggable storage only
-	log.Println("DEBUG server.New(): About to create audit manager")
 	logger.Info("Creating audit manager...")
 	auditManager := audit.NewManager(storageManager.GetAuditStore(), "controller")
 	logger.Info("Audit manager created")
@@ -329,12 +301,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 // Start initializes and starts the controller server (MQTT+QUIC mode)
 func (s *Server) Start() error {
-	log.Println("DEBUG server.Start(): Function entry")
-	s.logger.Info("DEBUG: Entered server.Start() function")
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	log.Println("DEBUG server.Start(): About to start HA manager")
 	// Start HA manager with timeout
 	if s.haManager != nil {
 		s.logger.Info("Starting HA manager...")
@@ -343,15 +312,10 @@ func (s *Server) Start() error {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		log.Println("DEBUG server.Start(): About to call haManager.Start() with 30s timeout")
 		if err := s.haManager.Start(ctx); err != nil {
-			log.Println("DEBUG server.Start(): HA manager failed to start:", err)
 			return fmt.Errorf("failed to start HA manager: %w", err)
 		}
 		s.logger.Info("HA manager started successfully")
-		log.Println("DEBUG server.Start(): HA manager started successfully")
-	} else {
-		log.Println("DEBUG server.Start(): HA manager is nil, skipping")
 	}
 
 	// Start MQTT broker if configured
@@ -694,23 +658,16 @@ func initializeCertificateManager(cfg *config.Config, logger logging.Logger) (*c
 func initializeHAManager(cfg *config.Config, logger logging.Logger, storageManager *interfaces.StorageManager) (*ha.Manager, error) {
 	// Load HA config directly from environment variables (bypassing controller config)
 	haConfig := ha.DefaultConfig()
-	log.Printf("DEBUG: NodeID Trace - Before LoadFromEnvironment: node_id=%s, node_id_empty=%t", haConfig.Node.ID, haConfig.Node.ID == "")
 
 	if err := haConfig.LoadFromEnvironment(); err != nil {
 		return nil, fmt.Errorf("failed to load HA configuration from environment: %w", err)
 	}
 
-	log.Printf("DEBUG: NodeID Trace - After LoadFromEnvironment: node_id=%s, node_id_empty=%t", haConfig.Node.ID, haConfig.Node.ID == "")
-
 	// Create HA manager
-	log.Printf("DEBUG: NodeID Trace - Before NewManager: node_id=%s, node_id_empty=%t", haConfig.Node.ID, haConfig.Node.ID == "")
-
 	haManager, err := ha.NewManager(haConfig, logger, storageManager)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HA manager: %w", err)
 	}
-
-	log.Printf("DEBUG: NodeID Trace - After NewManager (HA Manager initialized): mode=%s, node_id=%s, node_id_empty=%t, manager_node_id=%s, manager_node_id_empty=%t", haConfig.GetModeString(), haConfig.Node.ID, haConfig.Node.ID == "", haManager.GetLocalNode().ID, haManager.GetLocalNode().ID == "")
 
 	return haManager, nil
 }
