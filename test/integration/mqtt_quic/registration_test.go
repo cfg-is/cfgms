@@ -65,7 +65,7 @@ func (s *RegistrationTestSuite) TestInvalidToken() {
 	registrationURL := fmt.Sprintf("%s/api/v1/register", s.helper.baseURL)
 	resp, err := s.helper.httpClient.Post(registrationURL, "application/json", bytes.NewBuffer(reqJSON))
 	s.NoError(err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Should return 401 Unauthorized for invalid token
 	s.Equal(http.StatusUnauthorized, resp.StatusCode, "Invalid token should return 401")
@@ -100,7 +100,7 @@ func (s *RegistrationTestSuite) TestExpiredToken() {
 	registrationURL := fmt.Sprintf("%s/api/v1/register", s.helper.baseURL)
 	resp, err := s.helper.httpClient.Post(registrationURL, "application/json", bytes.NewBuffer(reqJSON))
 	s.NoError(err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Should return 401 Unauthorized
 	s.Equal(http.StatusUnauthorized, resp.StatusCode, "Expired token should return 401")
@@ -136,7 +136,7 @@ func (s *RegistrationTestSuite) TestRevokedToken() {
 	registrationURL := fmt.Sprintf("%s/api/v1/register", s.helper.baseURL)
 	resp, err := s.helper.httpClient.Post(registrationURL, "application/json", bytes.NewBuffer(reqJSON))
 	s.NoError(err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Should return 401 Unauthorized
 	s.Equal(http.StatusUnauthorized, resp.StatusCode, "Revoked token should return 401")
@@ -157,14 +157,14 @@ func (s *RegistrationTestSuite) TestSingleUseToken() {
 	registrationURL := fmt.Sprintf("%s/api/v1/register", s.helper.baseURL)
 	resp1, err := s.helper.httpClient.Post(registrationURL, "application/json", bytes.NewBuffer(reqJSON))
 	s.NoError(err)
-	defer resp1.Body.Close()
+	defer func() { _ = resp1.Body.Close() }()
 
 	s.Equal(http.StatusOK, resp1.StatusCode, "First registration should succeed")
 
 	// Second registration with same token should fail
 	resp2, err := s.helper.httpClient.Post(registrationURL, "application/json", bytes.NewBuffer(reqJSON))
 	s.NoError(err)
-	defer resp2.Body.Close()
+	defer func() { _ = resp2.Body.Close() }()
 
 	s.Equal(http.StatusUnauthorized, resp2.StatusCode, "Second registration with single-use token should fail")
 }
@@ -216,7 +216,7 @@ func (s *RegistrationTestSuite) TestConcurrentRegistrations() {
 				results <- err
 				return
 			}
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 
 			if resp.StatusCode != http.StatusOK {
 				results <- fmt.Errorf("registration %d failed with status %d", idx, resp.StatusCode)
@@ -227,7 +227,7 @@ func (s *RegistrationTestSuite) TestConcurrentRegistrations() {
 			var regResp struct {
 				StewardID string `json:"steward_id"`
 			}
-			json.Unmarshal(body, &regResp)
+			_ = json.Unmarshal(body, &regResp)
 
 			stewardIDs <- regResp.StewardID
 			results <- nil

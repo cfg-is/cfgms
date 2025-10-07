@@ -77,7 +77,7 @@ func (h *TestHelper) RegisterSteward(t *testing.T, token string) *RegistrationRe
 	if err != nil {
 		t.Fatalf("HTTP registration request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
