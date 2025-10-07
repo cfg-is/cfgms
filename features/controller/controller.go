@@ -96,6 +96,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Controller, error) {
 		nil, // platformMonitor - will be integrated in this story completion
 		nil, // tracer - will be integrated in Phase 5
 		srv.GetHAManager(), // HA manager
+		nil, // registrationTokenStore - only used in MQTT+QUIC mode
 	)
 	if err != nil {
 		return nil, err

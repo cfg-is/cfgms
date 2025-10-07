@@ -611,7 +611,58 @@ func Load() (*Config, error) {
 	if component := os.Getenv("CFGMS_LOGGING_COMPONENT"); component != "" {
 		cfg.Logging.Component = component
 	}
-	
+
+	// MQTT configuration environment variables
+	if mqttEnabled := os.Getenv("CFGMS_MQTT_ENABLED"); mqttEnabled != "" {
+		if val, err := strconv.ParseBool(mqttEnabled); err == nil {
+			cfg.MQTT.Enabled = val
+		}
+	}
+
+	if mqttListenAddr := os.Getenv("CFGMS_MQTT_LISTEN_ADDR"); mqttListenAddr != "" {
+		cfg.MQTT.ListenAddr = mqttListenAddr
+	}
+
+	if mqttEnableTLS := os.Getenv("CFGMS_MQTT_ENABLE_TLS"); mqttEnableTLS != "" {
+		if val, err := strconv.ParseBool(mqttEnableTLS); err == nil {
+			cfg.MQTT.EnableTLS = val
+		}
+	}
+
+	if mqttUseCertManager := os.Getenv("CFGMS_MQTT_USE_CERT_MANAGER"); mqttUseCertManager != "" {
+		if val, err := strconv.ParseBool(mqttUseCertManager); err == nil {
+			cfg.MQTT.UseCertManager = val
+		}
+	}
+
+	if mqttRequireClientCert := os.Getenv("CFGMS_MQTT_REQUIRE_CLIENT_CERT"); mqttRequireClientCert != "" {
+		if val, err := strconv.ParseBool(mqttRequireClientCert); err == nil {
+			cfg.MQTT.RequireClientCert = val
+		}
+	}
+
+	// QUIC configuration environment variables
+	if quicEnabled := os.Getenv("CFGMS_QUIC_ENABLED"); quicEnabled != "" {
+		if val, err := strconv.ParseBool(quicEnabled); err == nil {
+			cfg.QUIC.Enabled = val
+		}
+	}
+
+	if quicListenAddr := os.Getenv("CFGMS_QUIC_LISTEN_ADDR"); quicListenAddr != "" {
+		cfg.QUIC.ListenAddr = quicListenAddr
+	}
+
+	if quicUseCertManager := os.Getenv("CFGMS_QUIC_USE_CERT_MANAGER"); quicUseCertManager != "" {
+		if val, err := strconv.ParseBool(quicUseCertManager); err == nil {
+			cfg.QUIC.UseCertManager = val
+		}
+	}
+
+	// HTTP API configuration environment variables
+	if httpListenAddr := os.Getenv("CFGMS_HTTP_LISTEN_ADDR"); httpListenAddr != "" {
+		cfg.ListenAddr = httpListenAddr
+	}
+
 	return cfg, nil
 }
 

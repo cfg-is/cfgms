@@ -51,6 +51,13 @@ type RegistrationResponse struct {
 	ControllerURL string `json:"controller_url,omitempty"`
 	Group         string `json:"group,omitempty"`
 	Error         string `json:"error,omitempty"`
+
+	// HTTP registration fields (Story #198)
+	MQTTBroker    string `json:"mqtt_broker,omitempty"`
+	QUICAddress   string `json:"quic_address,omitempty"`
+	ClientCert    string `json:"client_cert,omitempty"`
+	ClientKey     string `json:"client_key,omitempty"`
+	CACert        string `json:"ca_cert,omitempty"`
 }
 
 // Register registers the steward with the controller using a token.

@@ -78,9 +78,8 @@ func main() {
 	log.Println("DEBUG: Legacy logger obtained, about to create server")
 	srv, err := server.New(cfg, legacyLogger)
 	if err != nil {
-		logger.Fatal("Failed to create controller server",
-			"operation", "server_init",
-			"error", err.Error())
+		log.Println("DEBUG: server.New() returned error:", err)
+		log.Fatalf("FATAL: Failed to create controller server: %v", err)
 	}
 	log.Println("DEBUG: Server created successfully")
 

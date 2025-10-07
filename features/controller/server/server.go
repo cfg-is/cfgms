@@ -69,6 +69,7 @@ type Server struct {
 	heartbeatService        *heartbeat.Service
 	commandPublisher        *commands.Publisher
 	registrationHandler     *registration.Handler
+	registrationTokenStore  pkgRegistration.Store
 	quicServer              *quicServer.Server
 	quicSessionManager      *quicSession.Manager
 }
@@ -112,15 +113,29 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	logger.Info("DEBUG: Storage manager created successfully - CreateAllStoresFromConfig completed")
 
 	// Initialize RBAC system with pluggable storage only
+	log.Println("DEBUG server.New(): About to get stores from storage manager")
+	auditStore := storageManager.GetAuditStore()
+	log.Printf("DEBUG server.New(): Got audit store: %v", auditStore != nil)
+	clientTenantStore := storageManager.GetClientTenantStore()
+	log.Printf("DEBUG server.New(): Got client tenant store: %v", clientTenantStore != nil)
+	rbacStore := storageManager.GetRBACStore()
+	log.Printf("DEBUG server.New(): Got RBAC store: %v", rbacStore != nil)
+
 	logger.Info("Creating RBAC manager with storage...")
+	log.Println("DEBUG server.New(): About to call rbac.NewManagerWithStorage")
 	rbacManager := rbac.NewManagerWithStorage(
-		storageManager.GetAuditStore(),
-		storageManager.GetClientTenantStore(),
-		storageManager.GetRBACStore(),
+		auditStore,
+		clientTenantStore,
+		rbacStore,
 	)
-	logger.Info("RBAC manager created")
+	log.Println("DEBUG server.New(): rbac.NewManagerWithStorage returned")
+	log.Println("DEBUG server.New(): About to log RBAC manager created")
+	// logger.Info("RBAC manager created")  // Temporarily disabled to test if logger is the issue
+	log.Println("DEBUG server.New(): Skipped logger.Info call")
+	log.Println("DEBUG server.New(): RBAC manager created log successful")
 
 	// Initialize unified audit system with pluggable storage only
+	log.Println("DEBUG server.New(): About to create audit manager")
 	logger.Info("Creating audit manager...")
 	auditManager := audit.NewManager(storageManager.GetAuditStore(), "controller")
 	logger.Info("Audit manager created")
@@ -180,6 +195,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	var heartbeatService *heartbeat.Service
 	var commandPublisher *commands.Publisher
 	var registrationHandler *registration.Handler
+	var regStore pkgRegistration.Store
 	if cfg.MQTT != nil && cfg.MQTT.Enabled {
 		logger.Info("Initializing MQTT broker...")
 		mqttBroker, err = initializeMQTTBroker(cfg, logger, certManager)
@@ -221,7 +237,30 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 		// Initialize registration handler (Story #198)
 		logger.Info("Initializing registration handler...")
-		regStore := pkgRegistration.NewMemoryStore() // TODO: Use persistent storage in production
+		// Registration token storage (Story #198)
+		// ALPHA LIMITATION: Using in-memory store - tokens lost on restart
+		// PRODUCTION: Use DatabaseStore(globalStorageProvider) or FileStore(globalStorageProvider)
+		// See pkg/registration/store_database.go and store_file.go for implementations
+		regStore = pkgRegistration.NewMemoryStore()
+
+		// For Docker testing: Create a pre-configured test token
+		// This token matches the one used in docker-compose.test.yml
+		testToken := &pkgRegistration.Token{
+			Token:         "cfgms_reg_dockertest_standalone",
+			TenantID:      "test-tenant",
+			ControllerURL: "tcp://controller-standalone:1883",
+			Group:         "test-group",
+			CreatedAt:     time.Now(),
+			ExpiresAt:     nil,   // Never expires for testing
+			SingleUse:     false, // Can be reused for testing
+			Revoked:       false,
+		}
+		if err := regStore.SaveToken(context.Background(), testToken); err != nil {
+			logger.Warn("Failed to create test token for Docker testing", "error", err)
+		} else {
+			logger.Info("Created test registration token for Docker testing", "token", "cfgms_reg_dockertest_standalone")
+		}
+
 		regValidator := pkgRegistration.NewValidator(regStore)
 		registrationHandler, err = registration.New(&registration.Config{
 			Broker:    mqttBroker,
@@ -262,6 +301,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		nil, // platformMonitor
 		nil, // tracer
 		haManager,
+		regStore, // registrationTokenStore
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize HTTP API server: %w", err)
@@ -283,6 +323,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		heartbeatService:        heartbeatService,
 		commandPublisher:        commandPublisher,
 		registrationHandler:     registrationHandler,
+		registrationTokenStore:  regStore,
 		quicServer:              quicSrv,
 		quicSessionManager:      quicSessionMgr,
 		httpServer:              httpServer,

@@ -2,9 +2,8 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/steward"
 	"github.com/cfgis/cfgms/features/steward/client"
+	"github.com/cfgis/cfgms/features/steward/registration"
 	"github.com/cfgis/cfgms/pkg/logging"
 
 	// Import logging providers to register them
@@ -24,14 +24,6 @@ import (
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
 )
-
-// RegistrationCode represents the decoded registration code structure.
-type RegistrationCode struct {
-	TenantID      string `json:"tenant_id"`
-	ControllerURL string `json:"controller_url"`
-	Group         string `json:"group,omitempty"`
-	Version       int    `json:"version"`
-}
 
 func main() {
 	// Parse command line arguments
@@ -61,6 +53,15 @@ func main() {
 		Config:            make(map[string]interface{}),
 	}
 
+	// Configure file provider if selected (read from environment)
+	if *provider == "file" {
+		logDir := os.Getenv("CFGMS_LOG_DIR")
+		if logDir == "" {
+			logDir = "/var/log/cfgms"
+		}
+		loggingConfig.Config["directory"] = logDir
+	}
+
 	if err := logging.InitializeGlobalLogging(loggingConfig); err != nil {
 		log.Fatalf("Failed to initialize global logging: %v", err)
 	}
@@ -71,72 +72,96 @@ func main() {
 	// Set up logging using global provider
 	logger := logging.ForComponent("steward")
 
-	// Handle registration token or code
-	var tenantID, controllerURL, group string
-
+	// Handle registration token
+	var mqttClient *client.MQTTClient
 	if *regToken != "" {
 		// Registration token (new method - API key style - Story #198)
+		tokenPrefix := *regToken
+		if len(*regToken) > 15 {
+			tokenPrefix = (*regToken)[:15] + "..."
+		}
 		logger.Info("Using registration token for auto-registration (MQTT+QUIC mode)",
 			"operation", "registration_init",
-			"token_prefix", (*regToken)[:min(len(*regToken), 15)]+"...")
+			"token_prefix", tokenPrefix)
 
 		// Use new MQTT+QUIC registration flow
 		regCtx, regCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		if err := registerWithMQTT(regCtx, *regToken, logger); err != nil {
+		mqttCl, err := registerAndConnectMQTT(regCtx, *regToken, logger)
+		if err != nil {
 			regCancel()
 			logger.Fatal("Failed to register with MQTT",
 				"operation", "registration_mqtt",
 				"error", err.Error())
 		}
-
 		regCancel()
 
-		logger.Info("Steward registered successfully via MQTT",
-			"operation", "registration_complete")
+		mqttClient = mqttCl
 
-		// For now, exit after successful registration
-		// Full integration will run the steward after registration
-		logger.Info("Registration complete - full steward integration pending",
-			"operation", "registration_notice")
-		return
+		logger.Info("Steward registered and connected successfully via MQTT",
+			"operation", "registration_complete",
+			"steward_id", mqttClient.GetStewardID(),
+			"tenant_id", mqttClient.GetTenantID())
+
+		// Continue running with MQTT+QUIC mode (controller-connected steward)
+		// The steward will maintain connection, receive commands, and send heartbeats
 
 	} else if *regCode != "" {
-		// Registration code (legacy method - base64 JSON)
-		logger.Warn("Using deprecated registration code, please use --regtoken instead",
-			"operation", "registration_init")
+		// Registration code support removed in Story #198
+		// Use --regtoken for MQTT+QUIC registration
+		logger.Fatal("Registration codes (--regcode) are no longer supported",
+			"operation", "registration_error",
+			"solution", "Use --regtoken with MQTT+QUIC registration tokens")
+	}
 
-		var registration *RegistrationCode
-		var err error
-		registration, err = decodeRegistrationCode(*regCode)
-		if err != nil {
-			logger.Fatal("Failed to decode registration code",
-				"operation", "registration_decode",
+	// Set up context with cancellation
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Set up signal handling
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	// If using MQTT+QUIC mode with registration token, run in controller-connected mode
+	if mqttClient != nil {
+		logger.Info("Running in MQTT+QUIC controller-connected mode",
+			"operation", "steward_mode",
+			"mode", "mqtt_quic")
+
+		// The MQTT client is already connected and will:
+		// - Send automatic heartbeats every 30 seconds
+		// - Listen for commands from controller
+		// - Handle DNA sync requests
+		// - Handle config sync requests (via QUIC)
+
+		logger.Info("Steward running and connected to controller",
+			"operation", "steward_running",
+			"steward_id", mqttClient.GetStewardID())
+
+		// Wait for termination signal
+		sig := <-sigChan
+		logger.Info("Received signal, shutting down...",
+			"operation", "steward_shutdown",
+			"signal", sig.String())
+
+		// Disconnect MQTT client
+		if err := mqttClient.Disconnect(ctx); err != nil {
+			logger.Error("Error during MQTT disconnect",
+				"operation", "mqtt_disconnect",
 				"error", err.Error())
 		}
 
-		tenantID = registration.TenantID
-		controllerURL = registration.ControllerURL
-		group = registration.Group
-
-		logger.Info("Registration code decoded successfully",
-			"operation", "registration_decode",
-			"tenant_id", tenantID,
-			"controller_url", controllerURL,
-			"group", group)
-
-		// TODO: Use registration to configure steward
-		// - Set tenant_id for MQTT client credentials
-		// - Set controller URL for MQTT broker connection
-		// - Set group for optional organization
-		// - Generate steward_id with tenant prefix: {tenant_id}-{uuid}
+		logger.Info("Steward shutdown completed",
+			"operation", "steward_shutdown",
+			"status", "completed")
+		return
 	}
 
-	// Determine operation mode
+	// Determine operation mode (standalone vs legacy controller)
 	useStandalone := *configPath != "" || *mode == "standalone"
-	
+
 	var s *steward.Steward
 	var err error
-	
+
 	if useStandalone {
 		// Standalone mode - use hostname.cfg or provided config path
 		configFile := *configPath
@@ -182,14 +207,6 @@ func main() {
 			"operation", "steward_start",
 			"mode", "controller")
 	}
-	
-	// Set up context with cancellation
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Set up signal handling
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	// Start steward in a goroutine
 	go func() {
@@ -218,63 +235,71 @@ func main() {
 		"status", "completed")
 }
 
-// registerWithMQTT registers the steward using the new MQTT+QUIC client.
-func registerWithMQTT(ctx context.Context, token string, logger logging.Logger) error {
-	logger.Info("Initializing MQTT+QUIC client for registration")
+// registerAndConnectMQTT registers the steward using HTTP REST API
+// and then establishes MQTT+QUIC connections for ongoing communication.
+func registerAndConnectMQTT(ctx context.Context, token string, logger logging.Logger) (*client.MQTTClient, error) {
+	logger.Info("Registering steward via HTTP API")
 
-	// Create MQTT+QUIC client
+	// Read controller HTTP URL from environment
+	controllerURL := os.Getenv("CFGMS_CONTROLLER_URL")
+	if controllerURL == "" {
+		controllerURL = "http://controller-standalone:9080"
+	}
+
+	// Create HTTP registration client
+	httpClient, err := registration.NewHTTPClient(&registration.HTTPConfig{
+		ControllerURL: controllerURL,
+		Timeout:       30 * time.Second,
+		Logger:        logger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create HTTP registration client: %w", err)
+	}
+
+	// Register via HTTP
+	regResp, err := httpClient.Register(ctx, token)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP registration failed: %w", err)
+	}
+
+	logger.Info("Registration successful via HTTP",
+		"steward_id", regResp.StewardID,
+		"tenant_id", regResp.TenantID,
+		"group", regResp.Group,
+		"mqtt_broker", regResp.MQTTBroker)
+
+	// Now create MQTT+QUIC client with credentials from registration
+	mqttBroker := regResp.MQTTBroker
+	quicAddress := regResp.QUICAddress
+
 	mqttClient, err := client.NewMQTTClient(&client.MQTTConfig{
-		ControllerURL:     "tcp://localhost:1883", // TODO: Extract from token or config
-		QUICAddress:       "localhost:4433",       // TODO: Extract from token or config
+		ControllerURL:     mqttBroker,
+		QUICAddress:       quicAddress,
 		RegistrationToken: token,
 		Logger:            logger,
 	})
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("failed to create MQTT client: %w", err)
 	}
 
-	// Register with token
-	if err := mqttClient.RegisterWithToken(ctx, token, "tcp://localhost:1883"); err != nil {
-		return err
-	}
+	// Set steward ID and tenant ID from registration response
+	mqttClient.SetStewardID(regResp.StewardID)
+	mqttClient.SetTenantID(regResp.TenantID)
 
-	logger.Info("Registration successful",
-		"steward_id", mqttClient.GetStewardID(),
-		"tenant_id", mqttClient.GetTenantID())
-
-	// Connect to MQTT and QUIC
+	// Connect to MQTT
 	if err := mqttClient.Connect(ctx); err != nil {
-		return err
+		return nil, fmt.Errorf("failed to connect to MQTT: %w", err)
 	}
 
-	logger.Info("Connected to controller via MQTT+QUIC")
+	logger.Info("Connected to controller via MQTT+QUIC",
+		"mqtt_broker", mqttBroker,
+		"quic_address", quicAddress)
 
 	// Send initial heartbeat
 	if err := mqttClient.SendHeartbeat(ctx, "healthy", nil); err != nil {
 		logger.Warn("Failed to send initial heartbeat", "error", err)
 	}
 
-	// Disconnect
-	if err := mqttClient.Disconnect(ctx); err != nil {
-		logger.Warn("Failed to disconnect cleanly", "error", err)
-	}
-
-	return nil
-}
-
-// decodeRegistrationCode decodes a base64-encoded registration code.
-func decodeRegistrationCode(encoded string) (*RegistrationCode, error) {
-	// Decode from base64
-	jsonData, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil {
-		return nil, err
-	}
-
-	// Unmarshal JSON
-	var regCode RegistrationCode
-	if err := json.Unmarshal(jsonData, &regCode); err != nil {
-		return nil, err
-	}
-
-	return &regCode, nil
+	// Return connected client (do NOT disconnect - maintain connection)
+	return mqttClient, nil
 }

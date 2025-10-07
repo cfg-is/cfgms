@@ -147,7 +147,8 @@ func (c *Client) performHandshake(ctx context.Context) error {
 	response := string(buf[:n])
 	c.logger.Debug("Received handshake response", "response", response)
 
-	// TODO: Parse proper protobuf handshake response
+	// Simple text-based handshake for alpha release
+	// Future: Implement protobuf-based handshake with session metadata
 	if response != "OK\n" {
 		return fmt.Errorf("handshake rejected: %s", response)
 	}

@@ -19,6 +19,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
 	pkgmonitoring "github.com/cfgis/cfgms/pkg/monitoring"
+	"github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/telemetry"
 	"github.com/gorilla/mux"
 )
@@ -42,6 +43,7 @@ type Server struct {
 	tracer                  *telemetry.Tracer
 	haManager               *ha.Manager
 	apiKeys                 map[string]*APIKey // Simple API key storage
+	registrationTokenStore  registration.Store  // Registration token store for steward registration
 }
 
 // APIKey represents an API key for external authentication
@@ -78,6 +80,7 @@ func New(
 	platformMonitor pkgmonitoring.PlatformMonitor,
 	tracer *telemetry.Tracer,
 	haManager *ha.Manager,
+	registrationTokenStore registration.Store,
 ) (*Server, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config cannot be nil")
@@ -97,6 +100,7 @@ func New(
 		platformMonitor:         platformMonitor,
 		tracer:                  tracer,
 		haManager:               haManager,
+		registrationTokenStore:  registrationTokenStore,
 		apiKeys:                 make(map[string]*APIKey),
 	}
 
@@ -130,6 +134,9 @@ func (s *Server) setupRouter() {
 
 	// Health check (no auth required)
 	s.router.HandleFunc("/api/v1/health", s.handleHealth).Methods("GET", "OPTIONS")
+
+	// Steward registration (no auth required - uses registration token)
+	s.router.HandleFunc("/api/v1/register", s.handleRegister).Methods("POST", "OPTIONS")
 
 	// Steward management endpoints
 	stewards := api.PathPrefix("/stewards").Subrouter()
@@ -309,11 +316,16 @@ func (s *Server) getHTTPListenAddr() string {
 	}
 
 	// Default to port 9080 for HTTP API (gRPC typically on 8080)
-	return "127.0.0.1:9080"
+	// Bind to 0.0.0.0 for Docker compatibility
+	return "0.0.0.0:9080"
 }
 
 // shouldUseTLS determines if TLS should be enabled for the HTTP server
 func (s *Server) shouldUseTLS() bool {
+	// Alpha (Story #198): Disable TLS for HTTP API if MQTT TLS is disabled
+	if s.cfg.MQTT != nil && !s.cfg.MQTT.EnableTLS {
+		return false
+	}
 	return s.certManager != nil || s.hasLegacyCertificates()
 }
 

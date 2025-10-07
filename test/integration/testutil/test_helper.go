@@ -238,8 +238,9 @@ func (e *TestEnv) Start() {
 
 	if e.useDockerController {
 		// Using Docker controller - use docker addresses
-		mqttBrokerAddr = "tcp://localhost:1883"
-		quicAddr = "localhost:4433"
+		// Docker standalone controller uses ports 1886 (MQTT) and 4436 (QUIC)
+		mqttBrokerAddr = "tcp://localhost:1886"
+		quicAddr = "localhost:4436"
 		e.StewardCfg.ControllerAddr = e.dockerControllerAddr
 	} else {
 		// Start the in-process controller

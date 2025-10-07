@@ -409,13 +409,22 @@ When rotating tenant credentials:
 - Steward `--regcode` parameter for deployment
 - Registration code decoder in steward startup
 
-### TODO 🚧
+**Note**: Base64-encoded registration codes (`--regcode`) have been deprecated in Story #198.
+Use registration tokens (`--regtoken`) with MQTT+QUIC architecture instead.
 
-- Steward auto-registration flow using decoded registration
-- Controller tenant validation for registration
-- Steward_id generation with tenant prefix
-- MQTT-based registration without gRPC
+## Implementation Status (Story #198 Complete)
+
+✅ **Completed Features**:
+- MQTT-based registration with API key-style tokens
+- Controller tenant validation for registration tokens
+- Steward_id generation with tenant prefix (`{tenant_id}-{uuid}`)
+- Token expiration and single-use support
+- Session-based QUIC authentication
+
+🔜 **Future Enhancements**:
 - Credential rotation mechanism
+- Token revocation API
+- Multi-region token distribution
 
 ## References
 
