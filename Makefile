@@ -1031,8 +1031,8 @@ test-integration-unified:
 	@echo "⏳ Waiting for standalone controller to be healthy..."
 	@sleep 10
 	@echo ""
-	@echo "🧪 Running standalone Docker controller tests..."
-	@CFGMS_TEST_DOCKER_CONTROLLER=localhost:50054 go test -v -race ./test/integration -run TestDocker -timeout=10m || (echo "❌ Standalone tests failed"; exit 1)
+	@echo "🧪 Running standalone Docker controller tests (MQTT+QUIC)..."
+	@CFGMS_TEST_DOCKER_MQTT=localhost:1883 go test -v -race ./test/integration -run TestDocker -timeout=10m || (echo "❌ Standalone tests failed"; exit 1)
 	@echo ""
 	@echo "🧪 Running in-process integration tests..."
 	@go test -v -race ./test/integration -run TestDetailedIntegration -timeout=10m || (echo "❌ In-process tests failed"; exit 1)

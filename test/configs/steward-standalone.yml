@@ -1,0 +1,17 @@
+# Steward configuration for Docker integration testing
+# This file configures a steward to connect to the controller-standalone container
+# via MQTT+QUIC for real-world integration testing
+
+steward:
+  id: steward-test-docker
+  mode: standalone
+  logging:
+    level: debug
+    format: text
+  error_handling:
+    module_load_failure: continue
+    resource_failure: warn
+    configuration_error: fail
+
+# Minimal resources list for testing - can be empty for basic connectivity tests
+resources: []

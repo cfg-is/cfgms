@@ -2,7 +2,6 @@ package ha
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -360,12 +359,8 @@ func (c *Config) LoadFromEnvironment() error {
 
 	// Load node configuration
 	nodeID := os.Getenv("CFGMS_NODE_ID")
-	log.Printf("DEBUG: HA Config Loading - Node ID Environment Variable: CFGMS_NODE_ID=%s, nodeID_empty=%t", nodeID, nodeID == "")
 	if nodeID != "" {
 		c.Node.ID = nodeID
-		log.Printf("DEBUG: HA Config Loading - Node ID Set: node_id=%s", c.Node.ID)
-	} else {
-		log.Printf("DEBUG: HA Config Loading - Node ID Empty: CFGMS_NODE_ID=%s, current_node_id=%s", nodeID, c.Node.ID)
 	}
 
 	if nodeName := os.Getenv("CFGMS_HA_NODE_NAME"); nodeName != "" {

@@ -1260,7 +1260,8 @@ func (s *E2ETestSuite) printTestSummary() {
 		}
 	}
 	
-	if _, err := fmt.Printf("\n" + strings.Repeat("=", 60) + "\n"); err != nil {
+	separator := "\n" + strings.Repeat("=", 60) + "\n"
+	if _, err := fmt.Print(separator); err != nil {
 		// Continue on print error - best effort output
 		_ = err // Explicitly ignore print errors for best effort output
 	}
@@ -1268,7 +1269,8 @@ func (s *E2ETestSuite) printTestSummary() {
 		// Continue on print error - best effort output
 		_ = err // Explicitly ignore print errors for best effort output
 	}
-	if _, err := fmt.Printf(strings.Repeat("=", 60) + "\n"); err != nil {
+	separator2 := strings.Repeat("=", 60) + "\n"
+	if _, err := fmt.Print(separator2); err != nil {
 		// Continue on print error - best effort output
 		_ = err // Explicitly ignore print errors for best effort output
 	}
@@ -1292,7 +1294,8 @@ func (s *E2ETestSuite) printTestSummary() {
 		// Continue on print error - best effort output
 		_ = err // Explicitly ignore print errors for best effort output
 	}
-	if _, err := fmt.Printf(strings.Repeat("=", 60) + "\n"); err != nil {
+	separator3 := strings.Repeat("=", 60) + "\n"
+	if _, err := fmt.Print(separator3); err != nil {
 		// Continue on print error - best effort output
 		_ = err // Explicitly ignore print errors for best effort output
 	}
@@ -1311,12 +1314,13 @@ func (s *E2ETestSuite) printTestSummary() {
 				}
 			}
 		}
-		if _, printErr := fmt.Printf(strings.Repeat("=", 60) + "\n"); printErr != nil {
+		separator4 := strings.Repeat("=", 60) + "\n"
+		if _, printErr := fmt.Print(separator4); printErr != nil {
 			// Continue on print error - best effort output
 			_ = printErr
 		}
 	}
-	
+
 	// Print performance metrics if available
 	if metrics.PerformanceMetrics.TotalRequests > 0 {
 		if _, printErr := fmt.Printf("PERFORMANCE METRICS:\n"); printErr != nil {
@@ -1344,7 +1348,8 @@ func (s *E2ETestSuite) printTestSummary() {
 			// Continue on print error - best effort output
 			_ = printErr
 		}
-		if _, printErr := fmt.Printf(strings.Repeat("=", 60) + "\n"); printErr != nil {
+		separator5 := strings.Repeat("=", 60) + "\n"
+		if _, printErr := fmt.Print(separator5); printErr != nil {
 			// Continue on print error - best effort output
 			_ = printErr
 		}

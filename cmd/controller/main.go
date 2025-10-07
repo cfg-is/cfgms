@@ -23,22 +23,10 @@ import (
 )
 
 func main() {
-	log.Println("DEBUG: Starting controller main()")
-
-	// Log all HA-related environment variables at startup
-	log.Printf("DEBUG: Environment Variables at startup:")
-	log.Printf("  CFGMS_NODE_ID=%s", os.Getenv("CFGMS_NODE_ID"))
-	log.Printf("  CFGMS_NODE_REGION=%s", os.Getenv("CFGMS_NODE_REGION"))
-	log.Printf("  CFGMS_HA_ENABLED=%s", os.Getenv("CFGMS_HA_ENABLED"))
-	log.Printf("  CFGMS_HA_MODE=%s", os.Getenv("CFGMS_HA_MODE"))
-	log.Printf("  CFGMS_HA_NODE_NAME=%s", os.Getenv("CFGMS_HA_NODE_NAME"))
-	log.Printf("  CFGMS_HA_CLUSTER_NODES=%s", os.Getenv("CFGMS_HA_CLUSTER_NODES"))
-
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
-	log.Println("DEBUG: Configuration loaded successfully")
 
 	// Initialize global logging provider for central hub
 	loggingConfig := &logging.LoggingConfig{
@@ -56,33 +44,22 @@ func main() {
 		Config:            getLogProviderConfig(cfg),
 	}
 
-	log.Println("DEBUG: About to initialize global logging")
 	if err := logging.InitializeGlobalLogging(loggingConfig); err != nil {
 		log.Fatalf("Failed to initialize global logging: %v", err)
 	}
-	log.Println("DEBUG: Global logging initialized")
 
 	// Initialize global logger factory
-	log.Println("DEBUG: About to initialize global logger factory")
 	logging.InitializeGlobalLoggerFactory("controller", "main")
-	log.Println("DEBUG: Global logger factory initialized")
 
 	// Use global logging provider
-	log.Println("DEBUG: About to get logger for component")
 	logger := logging.ForComponent("controller")
-	log.Println("DEBUG: Logger obtained")
 
 	// For backward compatibility, create legacy logger for server
-	log.Println("DEBUG: About to get legacy logger")
 	legacyLogger := logging.GetLogger()
-	log.Println("DEBUG: Legacy logger obtained, about to create server")
 	srv, err := server.New(cfg, legacyLogger)
 	if err != nil {
-		logger.Fatal("Failed to create controller server",
-			"operation", "server_init",
-			"error", err.Error())
+		log.Fatalf("FATAL: Failed to create controller server: %v", err)
 	}
-	log.Println("DEBUG: Server created successfully")
 
 	logger.Info("Starting controller server",
 		"operation", "server_start",
@@ -95,15 +72,11 @@ func main() {
 
 	// Start server in a goroutine
 	go func() {
-		log.Println("DEBUG: About to call srv.Start()")
-		log.Println("DEBUG: Calling srv.Start() now...")
 		if err := srv.Start(); err != nil {
-			log.Println("DEBUG: srv.Start() failed with error:", err)
 			logger.Fatal("Controller server failed",
 				"operation", "server_run",
 				"error", err.Error())
 		}
-		log.Println("DEBUG: srv.Start() completed successfully")
 	}()
 
 	// Wait for termination signal

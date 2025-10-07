@@ -35,6 +35,12 @@ type Config struct {
 
 	// High Availability configuration
 	HA *HAConfig `yaml:"ha"`
+
+	// MQTT broker configuration for control plane communication
+	MQTT *MQTTConfig `yaml:"mqtt"`
+
+	// QUIC server configuration for data plane communication
+	QUIC *QUICConfig `yaml:"quic"`
 }
 
 // CertificateConfig contains certificate management settings
@@ -237,6 +243,69 @@ type HASplitBrainConfig struct {
 	ResolutionStrategy string `yaml:"resolution_strategy"`
 }
 
+// MQTTConfig contains MQTT broker configuration
+type MQTTConfig struct {
+	// Enable MQTT broker
+	Enabled bool `yaml:"enabled"`
+
+	// MQTT listen address (e.g., "0.0.0.0:1883")
+	ListenAddr string `yaml:"listen_addr"`
+
+	// Enable TLS for MQTT
+	EnableTLS bool `yaml:"enable_tls"`
+
+	// Use certificate manager for MQTT certificates
+	UseCertManager bool `yaml:"use_cert_manager"`
+
+	// TLS certificate path (if not using cert manager)
+	TLSCertPath string `yaml:"tls_cert_path,omitempty"`
+
+	// TLS key path (if not using cert manager)
+	TLSKeyPath string `yaml:"tls_key_path,omitempty"`
+
+	// CA certificate path for client verification
+	TLSCAPath string `yaml:"tls_ca_path,omitempty"`
+
+	// Require client certificates (mTLS)
+	RequireClientCert bool `yaml:"require_client_cert"`
+
+	// Maximum concurrent clients
+	MaxClients int `yaml:"max_clients"`
+
+	// Maximum message size in bytes
+	MaxMessageSize int64 `yaml:"max_message_size"`
+
+	// Session expiry interval in seconds
+	SessionExpiryInterval int64 `yaml:"session_expiry_interval"`
+
+	// Keepalive multiplier for heartbeat detection
+	KeepaliveMultiplier float64 `yaml:"keepalive_multiplier"`
+}
+
+// QUICConfig contains QUIC server configuration for data plane
+type QUICConfig struct {
+	// Enable QUIC server
+	Enabled bool `yaml:"enabled"`
+
+	// QUIC listen address (e.g., "0.0.0.0:4433")
+	ListenAddr string `yaml:"listen_addr"`
+
+	// Use certificate manager for QUIC certificates
+	UseCertManager bool `yaml:"use_cert_manager"`
+
+	// TLS certificate path (if not using cert manager)
+	TLSCertPath string `yaml:"tls_cert_path,omitempty"`
+
+	// TLS key path (if not using cert manager)
+	TLSKeyPath string `yaml:"tls_key_path,omitempty"`
+
+	// CA certificate path for client verification
+	TLSCAPath string `yaml:"tls_ca_path,omitempty"`
+
+	// Session timeout in seconds
+	SessionTimeout int `yaml:"session_timeout"`
+}
+
 // DefaultConfig returns a Config with reasonable defaults
 func DefaultConfig() *Config {
 	return &Config{
@@ -346,6 +415,23 @@ func DefaultConfig() *Config {
 				QuorumInterval:     "30s",
 				ResolutionStrategy: "quorum-based",
 			},
+		},
+		MQTT: &MQTTConfig{
+			Enabled:               true, // Core communication channel - enabled by default
+			ListenAddr:            "0.0.0.0:1883",
+			EnableTLS:             true,
+			UseCertManager:        true,  // Use controller's certificate manager
+			RequireClientCert:     true,  // mTLS for security
+			MaxClients:            10000,
+			MaxMessageSize:        1024 * 1024, // 1MB
+			SessionExpiryInterval: 3600,        // 1 hour
+			KeepaliveMultiplier:   1.5,         // Disconnect if no activity for keepalive * 1.5
+		},
+		QUIC: &QUICConfig{
+			Enabled:        true,  // Core data plane - enabled by default (Story #198)
+			ListenAddr:     "0.0.0.0:4433",
+			UseCertManager: true,  // Use controller's certificate manager
+			SessionTimeout: 300,   // 5 minutes
 		},
 	}
 }
@@ -525,7 +611,58 @@ func Load() (*Config, error) {
 	if component := os.Getenv("CFGMS_LOGGING_COMPONENT"); component != "" {
 		cfg.Logging.Component = component
 	}
-	
+
+	// MQTT configuration environment variables
+	if mqttEnabled := os.Getenv("CFGMS_MQTT_ENABLED"); mqttEnabled != "" {
+		if val, err := strconv.ParseBool(mqttEnabled); err == nil {
+			cfg.MQTT.Enabled = val
+		}
+	}
+
+	if mqttListenAddr := os.Getenv("CFGMS_MQTT_LISTEN_ADDR"); mqttListenAddr != "" {
+		cfg.MQTT.ListenAddr = mqttListenAddr
+	}
+
+	if mqttEnableTLS := os.Getenv("CFGMS_MQTT_ENABLE_TLS"); mqttEnableTLS != "" {
+		if val, err := strconv.ParseBool(mqttEnableTLS); err == nil {
+			cfg.MQTT.EnableTLS = val
+		}
+	}
+
+	if mqttUseCertManager := os.Getenv("CFGMS_MQTT_USE_CERT_MANAGER"); mqttUseCertManager != "" {
+		if val, err := strconv.ParseBool(mqttUseCertManager); err == nil {
+			cfg.MQTT.UseCertManager = val
+		}
+	}
+
+	if mqttRequireClientCert := os.Getenv("CFGMS_MQTT_REQUIRE_CLIENT_CERT"); mqttRequireClientCert != "" {
+		if val, err := strconv.ParseBool(mqttRequireClientCert); err == nil {
+			cfg.MQTT.RequireClientCert = val
+		}
+	}
+
+	// QUIC configuration environment variables
+	if quicEnabled := os.Getenv("CFGMS_QUIC_ENABLED"); quicEnabled != "" {
+		if val, err := strconv.ParseBool(quicEnabled); err == nil {
+			cfg.QUIC.Enabled = val
+		}
+	}
+
+	if quicListenAddr := os.Getenv("CFGMS_QUIC_LISTEN_ADDR"); quicListenAddr != "" {
+		cfg.QUIC.ListenAddr = quicListenAddr
+	}
+
+	if quicUseCertManager := os.Getenv("CFGMS_QUIC_USE_CERT_MANAGER"); quicUseCertManager != "" {
+		if val, err := strconv.ParseBool(quicUseCertManager); err == nil {
+			cfg.QUIC.UseCertManager = val
+		}
+	}
+
+	// HTTP API configuration environment variables
+	if httpListenAddr := os.Getenv("CFGMS_HTTP_LISTEN_ADDR"); httpListenAddr != "" {
+		cfg.ListenAddr = httpListenAddr
+	}
+
 	return cfg, nil
 }
 

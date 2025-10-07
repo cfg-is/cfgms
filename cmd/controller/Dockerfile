@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.23-alpine AS builder
+FROM golang:1.24-alpine AS builder
 
 # Install build dependencies
 RUN apk add --no-cache git ca-certificates
@@ -42,7 +42,11 @@ RUN chown -R cfgms:cfgms /app
 USER cfgms
 
 # Expose default ports
-EXPOSE 8080
+# 1883: MQTT control plane
+# 4433: QUIC data plane (UDP)
+# 8080: HTTP API (legacy)
+# 9080: HTTP API (default)
+EXPOSE 1883 4433/udp 8080 9080
 
 # Set default command
 CMD ["./controller"]

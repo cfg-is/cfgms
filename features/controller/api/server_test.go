@@ -73,6 +73,7 @@ func setupTestServer(t *testing.T) *Server {
 		nil, // No platform monitor for basic tests
 		nil, // No tracer for basic tests
 		nil, // No HA manager for basic tests
+		nil, // No registration token store for basic tests
 	)
 	require.NoError(t, err)
 

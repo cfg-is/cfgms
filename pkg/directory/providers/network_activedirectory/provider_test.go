@@ -32,7 +32,7 @@ func NewMockStewardClient() *MockStewardClient {
 
 func (m *MockStewardClient) GetModuleState(ctx context.Context, stewardID, moduleType, resourceID string) (map[string]interface{}, error) {
 	if m.shouldError {
-		return nil, fmt.Errorf(m.errorMessage)
+		return nil, fmt.Errorf("%s", m.errorMessage)
 	}
 	
 	key := stewardID + ":" + resourceID
@@ -78,7 +78,7 @@ func (m *MockStewardClient) GetModuleState(ctx context.Context, stewardID, modul
 
 func (m *MockStewardClient) SetModuleConfig(ctx context.Context, stewardID, moduleType, resourceID string, config map[string]interface{}) error {
 	if m.shouldError {
-		return fmt.Errorf(m.errorMessage)
+		return fmt.Errorf("%s", m.errorMessage)
 	}
 	
 	key := stewardID + ":" + resourceID
@@ -88,14 +88,14 @@ func (m *MockStewardClient) SetModuleConfig(ctx context.Context, stewardID, modu
 
 func (m *MockStewardClient) GetConnectedStewards(ctx context.Context) ([]StewardInfo, error) {
 	if m.shouldError {
-		return nil, fmt.Errorf(m.errorMessage)
+		return nil, fmt.Errorf("%s", m.errorMessage)
 	}
 	return m.stewards, nil
 }
 
 func (m *MockStewardClient) GetStewardHealth(ctx context.Context, stewardID string) (*StewardHealth, error) {
 	if m.shouldError {
-		return nil, fmt.Errorf(m.errorMessage)
+		return nil, fmt.Errorf("%s", m.errorMessage)
 	}
 	
 	return &StewardHealth{

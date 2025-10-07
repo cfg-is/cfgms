@@ -72,23 +72,18 @@ func TestControllerLifecycle(t *testing.T) {
 	assert.Contains(t, messages, "Loaded existing Certificate Authority")
 	assert.Contains(t, messages, "Generated default API key")
 	assert.Contains(t, messages, "Starting controller")
-	assert.Contains(t, messages, "TLS enabled for gRPC server with certificate management")
-	assert.Contains(t, messages, "Controller server started")
+	assert.Contains(t, messages, "Controller server started (MQTT+QUIC mode)")
 	assert.Contains(t, messages, "REST API server started")
 	assert.Contains(t, messages, "Controller started successfully")
 	
 	// Certificate message can be either "Using existing" or "Generating new" depending on environment
-	certificateFound := false
+	// With gRPC removed, we only check for HTTP server certificates
 	httpCertificateFound := false
 	for _, msg := range messages {
-		if msg == "Using existing server certificate" || msg == "Generating new server certificate" || msg == "Generated new server certificate" {
-			certificateFound = true
-		}
 		if msg == "Using existing server certificate for HTTP server" || msg == "Generated new server certificate for HTTP server" {
 			httpCertificateFound = true
 		}
 	}
-	assert.True(t, certificateFound, "Expected certificate management message not found in logs: %v", messages)
 	assert.True(t, httpCertificateFound, "Expected HTTP certificate message not found in logs: %v", messages)
 
 	// Stop the controller
@@ -107,7 +102,7 @@ func TestControllerLifecycle(t *testing.T) {
 	
 	// Verify required startup messages are present
 	assert.Contains(t, messages, "Starting controller")
-	assert.Contains(t, messages, "Controller server started")
+	assert.Contains(t, messages, "Controller server started (MQTT+QUIC mode)")
 	assert.Contains(t, messages, "REST API server started")
 	assert.Contains(t, messages, "Controller started successfully")
 	
