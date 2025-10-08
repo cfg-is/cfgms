@@ -1,0 +1,31 @@
+# Test configuration for AC6 - module execution with intentional errors
+# This configuration includes operations that will fail
+
+version: "1.0"
+
+modules:
+  file:
+    - name: "invalid-permissions-file"
+      resource_id: "/test-workspace/invalid-perms.txt"
+      state: "present"
+      config:
+        content: "This file has invalid permissions\n"
+        permissions: 999999  # Invalid permission value - will cause error
+
+  directory:
+    - name: "valid-directory"
+      resource_id: "/test-workspace/valid-dir"
+      state: "present"
+      config:
+        permissions: 0755
+
+  script:
+    - name: "failing-script"
+      resource_id: "/test-workspace/failing-script.sh"
+      state: "present"
+      config:
+        content: |
+          #!/bin/sh
+          echo "This script will fail"
+          exit 1
+        permissions: 0755

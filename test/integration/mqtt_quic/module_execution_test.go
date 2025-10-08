@@ -1,7 +1,9 @@
 package mqtt_quic
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -210,16 +212,89 @@ exit 1
 
 // TestConfigStatusReporting tests that status reports reflect actual execution (AC4)
 func (s *ModuleExecutionTestSuite) TestConfigStatusReporting() {
-	s.T().Skip("Requires full MQTT+QUIC integration with actual configuration push")
+	containerName := "steward-standalone"
+	testFilePath := GetAbsoluteTestPath("test-file.txt")
+	testDirPath := GetAbsoluteTestPath("test-dir")
 
-	// This test would:
-	// 1. Subscribe to cfgms/steward/+/config-status topic
-	// 2. Send configuration via controller API
-	// 3. Wait for status message
-	// 4. Verify status reflects actual module execution (not just receipt)
-	// 5. Verify module-specific status fields
+	// Cleanup before test
+	s.helper.CleanupTestFiles(s.T(), containerName, testFilePath, testDirPath)
 
-	s.T().Log("✅ AC4: Config status reporting (placeholder)")
+	// Load test configuration
+	configData, err := os.ReadFile("../../testdata/configurations/module-test-success.yaml")
+	s.NoError(err, "Failed to load test configuration")
+
+	// Subscribe to config status topic
+	statusReceived := make(chan *ConfigStatusMessage, 1)
+	stewardID := "steward-standalone"  // Must match container name
+
+	s.helper.SubscribeToConfigStatus(s.T(), stewardID, func(msg *ConfigStatusMessage) {
+		s.T().Logf("Received config status: version=%s, status=%s, modules=%d",
+			msg.ConfigVersion, msg.Status, len(msg.Modules))
+		statusReceived <- msg
+	})
+
+	// Trigger configuration sync by publishing sync_config command
+	// NOTE: In a real deployment, this would be done by the controller
+	// For testing, we simulate the controller command
+	commandTopic := fmt.Sprintf("cfgms/steward/%s/commands", stewardID)
+	command := map[string]interface{}{
+		"command_id": "test-cmd-ac4",
+		"type":       "sync_config",
+		"timestamp":  time.Now().Format(time.RFC3339),
+		"params": map[string]interface{}{
+			"version": "test-v1.0",
+		},
+	}
+
+	commandJSON, err := json.Marshal(command)
+	s.NoError(err, "Failed to marshal command")
+
+	// Publish command to steward
+	token := s.helper.mqttClient.Connect()
+	s.True(token.WaitTimeout(5*time.Second), "MQTT connection timeout")
+	s.NoError(token.Error(), "MQTT connection error")
+
+	token = s.helper.mqttClient.Publish(commandTopic, 1, false, commandJSON)
+	s.True(token.WaitTimeout(5*time.Second), "Command publish timeout")
+	s.NoError(token.Error(), "Command publish error")
+
+	s.T().Log("✅ Published sync_config command to steward")
+
+	// Wait for config status report (with timeout)
+	select {
+	case msg := <-statusReceived:
+		// Verify overall status
+		s.NotEmpty(msg.StewardID, "Steward ID should be set")
+		s.NotEmpty(msg.ConfigVersion, "Config version should be set")
+		s.NotEmpty(msg.Status, "Status should be set")
+
+		// Verify module-level status
+		s.NotEmpty(msg.Modules, "Module statuses should be reported")
+
+		// Check that file module executed
+		if fileStatus, ok := msg.Modules["file"]; ok {
+			s.NotEmpty(fileStatus.Status, "File module status should be set")
+			s.NotEmpty(fileStatus.Message, "File module message should be set")
+			s.T().Logf("File module: status=%s, message=%s", fileStatus.Status, fileStatus.Message)
+		}
+
+		// Verify actual files were created (not just status reported)
+		fileInfo, err := s.helper.CheckFileInContainer(s.T(), containerName, testFilePath)
+		s.NoError(err, "Should be able to check created file")
+		s.True(fileInfo.Exists, "File should actually exist in container")
+
+		dirInfo, err := s.helper.CheckDirectoryInContainer(s.T(), containerName, testDirPath)
+		s.NoError(err, "Should be able to check created directory")
+		s.True(dirInfo.Exists, "Directory should actually exist in container")
+
+		s.T().Log("✅ AC4: Config status reporting verified - status matches actual execution")
+
+	case <-time.After(30 * time.Second):
+		s.T().Fatal("Timeout waiting for config status report")
+	}
+
+	// Cleanup after test
+	s.helper.CleanupTestFiles(s.T(), containerName, testFilePath, testDirPath)
 }
 
 // TestIdempotency tests that applying config twice produces same result (AC5)
@@ -272,16 +347,97 @@ func (s *ModuleExecutionTestSuite) TestIdempotency() {
 
 // TestModuleFailureReporting tests that module failures are reported via MQTT (AC6)
 func (s *ModuleExecutionTestSuite) TestModuleFailureReporting() {
-	s.T().Skip("Requires full MQTT+QUIC integration with actual configuration push")
+	containerName := "steward-standalone"
+	testFilePath := GetAbsoluteTestPath("invalid-perms.txt")
+	testDirPath := GetAbsoluteTestPath("valid-dir")
 
-	// This test would:
-	// 1. Subscribe to cfgms/steward/+/config-status topic
-	// 2. Send configuration with intentional error (e.g., invalid permissions)
-	// 3. Wait for status message
-	// 4. Verify status contains error details
-	// 5. Verify error messages are descriptive
+	// Cleanup before test
+	s.helper.CleanupTestFiles(s.T(), containerName, testFilePath, testDirPath)
 
-	s.T().Log("✅ AC6: Module failure reporting (placeholder)")
+	// Load test configuration with intentional error
+	configData, err := os.ReadFile("../../testdata/configurations/module-test-failure.yaml")
+	s.NoError(err, "Failed to load test configuration")
+
+	// Subscribe to config status topic
+	statusReceived := make(chan *ConfigStatusMessage, 1)
+	stewardID := "steward-standalone"
+
+	s.helper.SubscribeToConfigStatus(s.T(), stewardID, func(msg *ConfigStatusMessage) {
+		s.T().Logf("Received config status: version=%s, status=%s, modules=%d",
+			msg.ConfigVersion, msg.Status, len(msg.Modules))
+		statusReceived <- msg
+	})
+
+	// Trigger configuration sync with failing config
+	commandTopic := fmt.Sprintf("cfgms/steward/%s/commands", stewardID)
+	command := map[string]interface{}{
+		"command_id": "test-cmd-ac6",
+		"type":       "sync_config",
+		"timestamp":  time.Now().Format(time.RFC3339),
+		"params": map[string]interface{}{
+			"version": "test-v1.0-fail",
+		},
+	}
+
+	commandJSON, err := json.Marshal(command)
+	s.NoError(err, "Failed to marshal command")
+
+	// Publish command
+	token := s.helper.mqttClient.Connect()
+	s.True(token.WaitTimeout(5*time.Second), "MQTT connection timeout")
+	s.NoError(token.Error(), "MQTT connection error")
+
+	token = s.helper.mqttClient.Publish(commandTopic, 1, false, commandJSON)
+	s.True(token.WaitTimeout(5*time.Second), "Command publish timeout")
+	s.NoError(token.Error(), "Command publish error")
+
+	s.T().Log("✅ Published sync_config command with failing configuration")
+
+	// Wait for config status report with errors
+	select {
+	case msg := <-statusReceived:
+		// Verify overall status indicates error
+		s.Equal("ERROR", msg.Status, "Overall status should be ERROR")
+		s.NotEmpty(msg.Message, "Error message should be present")
+
+		// Verify module-level status includes error details
+		s.NotEmpty(msg.Modules, "Module statuses should be reported")
+
+		// Check that file module reported error (invalid permissions)
+		if fileStatus, ok := msg.Modules["file"]; ok {
+			s.Equal("ERROR", fileStatus.Status, "File module should report ERROR")
+			s.NotEmpty(fileStatus.Message, "File module error message should be present")
+			s.T().Logf("File module error: status=%s, message=%s", fileStatus.Status, fileStatus.Message)
+		} else {
+			s.T().Error("File module status not found in report")
+		}
+
+		// Check that script module reported error (exit code 1)
+		if scriptStatus, ok := msg.Modules["script"]; ok {
+			s.Equal("ERROR", scriptStatus.Status, "Script module should report ERROR")
+			s.NotEmpty(scriptStatus.Message, "Script module error message should be present")
+			s.T().Logf("Script module error: status=%s, message=%s", scriptStatus.Status, scriptStatus.Message)
+		}
+
+		// Verify that successful module (directory) still executed
+		if dirStatus, ok := msg.Modules["directory"]; ok {
+			s.Equal("OK", dirStatus.Status, "Directory module should succeed")
+			s.T().Logf("Directory module: status=%s, message=%s", dirStatus.Status, dirStatus.Message)
+
+			// Verify directory was actually created despite other failures
+			dirInfo, err := s.helper.CheckDirectoryInContainer(s.T(), containerName, testDirPath)
+			s.NoError(err)
+			s.True(dirInfo.Exists, "Valid directory should be created despite other module failures")
+		}
+
+		s.T().Log("✅ AC6: Module failure reporting verified - errors are descriptive and per-module")
+
+	case <-time.After(30 * time.Second):
+		s.T().Fatal("Timeout waiting for config status report")
+	}
+
+	// Cleanup after test
+	s.helper.CleanupTestFiles(s.T(), containerName, testFilePath, testDirPath)
 }
 
 // TestMultipleModulesExecution tests executing multiple modules in one configuration
