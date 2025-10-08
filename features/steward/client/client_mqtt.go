@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/features/steward/commands"
+	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/registration"
 	"github.com/cfgis/cfgms/pkg/logging"
 	mqttClient "github.com/cfgis/cfgms/pkg/mqtt/client"
@@ -48,6 +49,9 @@ type MQTTClient struct {
 
 	// Command handler
 	commandHandler *commands.Handler
+
+	// Configuration executor
+	configExecutor *config.Executor
 
 	// Connection state
 	connected     bool
@@ -156,6 +160,21 @@ func (c *MQTTClient) RegisterWithToken(ctx context.Context, token string, mqttBr
 	c.tenantID = resp.TenantID
 	c.group = resp.Group
 	c.mqtt = mqtt
+	c.mu.Unlock()
+
+	// Initialize configuration executor
+	execCfg := &config.Config{
+		TenantID: resp.TenantID,
+		Logger:   c.logger,
+	}
+	executor, err := config.New(execCfg)
+	if err != nil {
+		mqtt.Disconnect()
+		return fmt.Errorf("failed to create config executor: %w", err)
+	}
+
+	c.mu.Lock()
+	c.configExecutor = executor
 	c.mu.Unlock()
 
 	c.logger.Info("Registration successful",
@@ -317,13 +336,45 @@ func (c *MQTTClient) setupCommandHandler(ctx context.Context, stewardID string, 
 			return fmt.Errorf("config retrieval failed: %w", err)
 		}
 
-		c.logger.Info("Configuration sync completed",
+		c.logger.Info("Configuration retrieved",
 			"command_id", cmd.CommandID,
 			"version", version,
 			"config_size", len(configData))
 
-		// Configuration is retrieved and ready for application
-		// Actual application happens in steward's config service
+		// Apply configuration using executor
+		c.mu.RLock()
+		executor := c.configExecutor
+		stewardID := c.stewardID
+		c.mu.RUnlock()
+
+		if executor == nil {
+			c.logger.Error("Configuration executor not initialized")
+			return fmt.Errorf("configuration executor not available")
+		}
+
+		report, err := executor.ApplyConfiguration(ctx, configData, version)
+		if err != nil {
+			c.logger.Error("Configuration application failed", "error", err)
+			// Even if application fails, try to send status report
+			if report != nil {
+				report.StewardID = stewardID
+				c.publishConfigStatus(report)
+			}
+			return fmt.Errorf("config application failed: %w", err)
+		}
+
+		// Publish configuration status report
+		report.StewardID = stewardID
+		if err := c.publishConfigStatus(report); err != nil {
+			c.logger.Error("Failed to publish config status", "error", err)
+			// Don't return error - config was applied successfully
+		}
+
+		c.logger.Info("Configuration sync completed",
+			"command_id", cmd.CommandID,
+			"version", version,
+			"status", report.Status)
+
 		return nil
 	})
 
@@ -587,6 +638,12 @@ func (c *MQTTClient) PublishDNAUpdate(ctx context.Context, dna map[string]string
 
 	c.logger.Info("Published DNA update", "attributes_count", len(dna))
 	return nil
+}
+
+// publishConfigStatus publishes a config status report (internal helper).
+func (c *MQTTClient) publishConfigStatus(report *mqttTypes.ConfigStatusReport) error {
+	ctx := context.Background()
+	return c.ReportConfigurationStatus(ctx, report.ConfigVersion, report.Status, report.Message, report.Modules)
 }
 
 // ReportConfigurationStatus reports detailed configuration execution status to the controller.
