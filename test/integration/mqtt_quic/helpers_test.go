@@ -2,13 +2,18 @@ package mqtt_quic
 
 import (
 	"bytes"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
+
+	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
 // TestHelper provides utilities for MQTT+QUIC integration testing
@@ -135,4 +140,119 @@ func GetTestQUICAddr(defaultAddr string) string {
 		return envAddr
 	}
 	return defaultAddr
+}
+
+// GetTestCertsPath returns the path to test certificates directory
+// Uses CFGMS_TEST_CERTS_PATH environment variable if set, otherwise returns default
+func GetTestCertsPath(defaultPath string) string {
+	if envPath := os.Getenv("CFGMS_TEST_CERTS_PATH"); envPath != "" {
+		return envPath
+	}
+	return defaultPath
+}
+
+// LoadTLSConfig loads TLS configuration for MQTT client testing
+// This function loads the CA certificate, client certificate, and client key
+// from the test certificates directory for mTLS authentication
+func LoadTLSConfig(t *testing.T, certsPath string) *tls.Config {
+	t.Helper()
+
+	// Load CA certificate
+	caCertPath := filepath.Join(certsPath, "ca-cert.pem")
+	caCert, err := os.ReadFile(caCertPath)
+	if err != nil {
+		t.Fatalf("Failed to read CA certificate: %v", err)
+	}
+
+	caCertPool := x509.NewCertPool()
+	if !caCertPool.AppendCertsFromPEM(caCert) {
+		t.Fatal("Failed to parse CA certificate")
+	}
+
+	// Load client certificate and key
+	clientCertPath := filepath.Join(certsPath, "client-cert.pem")
+	clientKeyPath := filepath.Join(certsPath, "client-key.pem")
+	clientCert, err := tls.LoadX509KeyPair(clientCertPath, clientKeyPath)
+	if err != nil {
+		t.Fatalf("Failed to load client certificate: %v", err)
+	}
+
+	// Create TLS config
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{clientCert},
+		RootCAs:      caCertPool,
+		MinVersion:   tls.VersionTLS12,
+		// For testing, we may need to accept any server name
+		// In production, this should verify the server hostname
+		InsecureSkipVerify: false,
+		ServerName:         "controller-standalone",
+	}
+
+	return tlsConfig
+}
+
+// LoadInvalidTLSConfig loads invalid TLS configuration for negative testing
+// certType can be: "expired", "selfsigned", "wrong-ca"
+func LoadInvalidTLSConfig(t *testing.T, certsPath string, certType string) *tls.Config {
+	t.Helper()
+
+	// Load CA certificate (same for all)
+	caCertPath := filepath.Join(certsPath, "ca-cert.pem")
+	caCert, err := os.ReadFile(caCertPath)
+	if err != nil {
+		t.Fatalf("Failed to read CA certificate: %v", err)
+	}
+
+	caCertPool := x509.NewCertPool()
+	if !caCertPool.AppendCertsFromPEM(caCert) {
+		t.Fatal("Failed to parse CA certificate")
+	}
+
+	// Load invalid client certificate based on type
+	var clientCertPath, clientKeyPath string
+	switch certType {
+	case "expired":
+		clientCertPath = filepath.Join(certsPath, "expired-cert.pem")
+		clientKeyPath = filepath.Join(certsPath, "expired-key.pem")
+	case "selfsigned":
+		clientCertPath = filepath.Join(certsPath, "selfsigned-cert.pem")
+		clientKeyPath = filepath.Join(certsPath, "selfsigned-key.pem")
+	case "wrong-ca":
+		clientCertPath = filepath.Join(certsPath, "wrong-ca-client-cert.pem")
+		clientKeyPath = filepath.Join(certsPath, "wrong-ca-client-key.pem")
+	default:
+		t.Fatalf("Unknown invalid cert type: %s", certType)
+	}
+
+	clientCert, err := tls.LoadX509KeyPair(clientCertPath, clientKeyPath)
+	if err != nil {
+		t.Fatalf("Failed to load invalid client certificate: %v", err)
+	}
+
+	tlsConfig := &tls.Config{
+		Certificates:       []tls.Certificate{clientCert},
+		RootCAs:            caCertPool,
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: false,
+		ServerName:         "controller-standalone",
+	}
+
+	return tlsConfig
+}
+
+// CreateMQTTClientOptions creates MQTT client options with TLS support
+// If tlsConfig is nil, creates a non-TLS connection
+func CreateMQTTClientOptions(brokerAddr string, clientID string, tlsConfig *tls.Config) *mqtt.ClientOptions {
+	opts := mqtt.NewClientOptions()
+	opts.AddBroker(brokerAddr)
+	opts.SetClientID(clientID)
+	opts.SetConnectTimeout(10 * time.Second)
+	opts.SetAutoReconnect(false)
+
+	// Add TLS config if provided
+	if tlsConfig != nil {
+		opts.SetTLSConfig(tlsConfig)
+	}
+
+	return opts
 }

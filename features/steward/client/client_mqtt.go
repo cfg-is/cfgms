@@ -117,12 +117,20 @@ func NewMQTTClient(cfg *MQTTConfig) (*MQTTClient, error) {
 func (c *MQTTClient) RegisterWithToken(ctx context.Context, token string, mqttBroker string) error {
 	c.logger.Info("Starting registration with token", "broker", mqttBroker)
 
+	// Load TLS configuration if available (Story 12.4)
+	tlsConfig, err := c.createMQTTTLSConfig()
+	if err != nil {
+		c.logger.Warn("Failed to load MQTT TLS config, continuing without TLS", "error", err)
+		tlsConfig = nil
+	}
+
 	// Initialize MQTT client for registration
 	mqttCfg := &mqttClient.Config{
-		BrokerAddr:   mqttBroker,
-		ClientID:     "steward-register-" + token[:8], // Temporary client ID
-		CleanSession: true,
+		BrokerAddr:    mqttBroker,
+		ClientID:      "steward-register-" + token[:8], // Temporary client ID
+		CleanSession:  true,
 		AutoReconnect: true,
+		TLSConfig:     tlsConfig, // Story 12.4: Enable TLS if configured
 	}
 
 	mqtt, err := mqttClient.New(mqttCfg)
@@ -202,14 +210,22 @@ func (c *MQTTClient) Connect(ctx context.Context) error {
 	// Create MQTT client if not already created
 	if mqtt == nil {
 		c.logger.Info("Creating MQTT client", "broker", controllerURL, "client_id", stewardID)
+
+		// Load TLS configuration if available (Story 12.4)
+		tlsConfig, err := c.createMQTTTLSConfig()
+		if err != nil {
+			c.logger.Warn("Failed to load MQTT TLS config, continuing without TLS", "error", err)
+			tlsConfig = nil
+		}
+
 		mqttCfg := &mqttClient.Config{
 			BrokerAddr:    controllerURL,
 			ClientID:      stewardID,
 			CleanSession:  false,
 			AutoReconnect: true,
+			TLSConfig:     tlsConfig, // Story 12.4: Enable TLS if configured
 		}
 
-		var err error
 		mqtt, err = mqttClient.New(mqttCfg)
 		if err != nil {
 			return fmt.Errorf("failed to create MQTT client: %w", err)
@@ -852,6 +868,62 @@ func (c *MQTTClient) SetTenantID(id string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.tenantID = id
+}
+
+// createMQTTTLSConfig creates a TLS configuration for MQTT with mTLS.
+// It loads TLS certificates from environment variables or the cert path.
+func (c *MQTTClient) createMQTTTLSConfig() (*tls.Config, error) {
+	// Try environment variables first (Story 12.4: TLS support)
+	certFile := os.Getenv("CFGMS_MQTT_TLS_CERT_PATH")
+	keyFile := os.Getenv("CFGMS_MQTT_TLS_KEY_PATH")
+	caFile := os.Getenv("CFGMS_MQTT_TLS_CA_PATH")
+
+	// If environment variables are not set, try using certPath
+	if certFile == "" || keyFile == "" || caFile == "" {
+		c.mu.RLock()
+		certPath := c.certPath
+		c.mu.RUnlock()
+
+		if certPath == "" {
+			// No TLS configuration available
+			return nil, nil
+		}
+
+		certFile = filepath.Join(certPath, "client-cert.pem")
+		keyFile = filepath.Join(certPath, "client-key.pem")
+		caFile = filepath.Join(certPath, "ca-cert.pem")
+	}
+
+	// Load client certificate
+	clientCert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load client certificate: %w", err)
+	}
+
+	// Load CA certificate
+	caCert, err := os.ReadFile(caFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read CA certificate: %w", err)
+	}
+
+	caCertPool := x509.NewCertPool()
+	if !caCertPool.AppendCertsFromPEM(caCert) {
+		return nil, fmt.Errorf("failed to parse CA certificate")
+	}
+
+	// Create TLS config for MQTT with mTLS
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{clientCert},
+		RootCAs:      caCertPool,
+		MinVersion:   tls.VersionTLS12, // MQTT supports TLS 1.2+
+	}
+
+	c.logger.Info("Loaded MQTT TLS configuration",
+		"cert_file", certFile,
+		"key_file", keyFile,
+		"ca_file", caFile)
+
+	return tlsConfig, nil
 }
 
 // createQUICtlsConfig creates a TLS configuration for QUIC with proper mTLS.
