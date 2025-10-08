@@ -510,6 +510,7 @@ services:
     command: ["./steward", "--log-level", "debug", "--log-provider", "file", "--regtoken", "cfgms_reg_dockertest_standalone"]
     volumes:
       - steward_standalone_data:/app/data
+      - ./test/module-execution:/test-workspace:rw  # Module execution test workspace (Story 12.3)
     depends_on:
       controller-standalone:
         condition: service_healthy
