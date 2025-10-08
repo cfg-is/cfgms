@@ -212,22 +212,70 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// See pkg/registration/store_database.go and store_file.go for implementations
 		regStore = pkgRegistration.NewMemoryStore()
 
-		// For Docker testing: Create a pre-configured test token
-		// This token matches the one used in docker-compose.test.yml
-		testToken := &pkgRegistration.Token{
-			Token:         "cfgms_reg_dockertest_standalone",
-			TenantID:      "test-tenant",
-			ControllerURL: "tcp://controller-standalone:1883",
-			Group:         "test-group",
-			CreatedAt:     time.Now(),
-			ExpiresAt:     nil,   // Never expires for testing
-			SingleUse:     false, // Can be reused for testing
-			Revoked:       false,
+		// For Docker testing: Create pre-configured test tokens
+		// These tokens are used by integration tests in test/integration/mqtt_quic/
+		now := time.Now()
+		expiredTime := now.Add(-1 * time.Hour)
+		testTokens := []*pkgRegistration.Token{
+			{
+				Token:         "cfgms_reg_dockertest_standalone",
+				TenantID:      "test-tenant",
+				ControllerURL: "tcp://controller-standalone:1883",
+				Group:         "test-group",
+				CreatedAt:     now,
+				ExpiresAt:     nil,   // Never expires for testing
+				SingleUse:     false, // Can be reused for testing
+				Revoked:       false,
+			},
+			{
+				Token:         "cfgms_reg_integration_reusable",
+				TenantID:      "test-tenant-integration",
+				ControllerURL: "tcp://localhost:1886",
+				Group:         "production",
+				CreatedAt:     now,
+				ExpiresAt:     nil,   // Never expires for testing
+				SingleUse:     false, // Can be reused for integration tests
+				Revoked:       false,
+			},
+			{
+				Token:         "cfgms_reg_integration_expired",
+				TenantID:      "test-tenant-integration",
+				ControllerURL: "tcp://localhost:1886",
+				Group:         "production",
+				CreatedAt:     now.Add(-2 * time.Hour),
+				ExpiresAt:     &expiredTime, // Expired 1 hour ago
+				SingleUse:     true,
+				Revoked:       false,
+			},
+			{
+				Token:         "cfgms_reg_integration_revoked",
+				TenantID:      "test-tenant-integration",
+				ControllerURL: "tcp://localhost:1886",
+				Group:         "production",
+				CreatedAt:     now,
+				ExpiresAt:     nil,
+				SingleUse:     true,
+				Revoked:       true, // Revoked token
+				RevokedAt:     &now,
+			},
+			{
+				Token:         "cfgms_reg_integration_singleuse",
+				TenantID:      "test-tenant-integration",
+				ControllerURL: "tcp://localhost:1886",
+				Group:         "production",
+				CreatedAt:     now,
+				ExpiresAt:     nil,
+				SingleUse:     true, // Single-use token
+				Revoked:       false,
+			},
 		}
-		if err := regStore.SaveToken(context.Background(), testToken); err != nil {
-			logger.Warn("Failed to create test token for Docker testing", "error", err)
-		} else {
-			logger.Info("Created test registration token for Docker testing", "token", "cfgms_reg_dockertest_standalone")
+
+		for _, testToken := range testTokens {
+			if err := regStore.SaveToken(context.Background(), testToken); err != nil {
+				logger.Warn("Failed to create test token for Docker testing", "error", err, "token", testToken.Token)
+			} else {
+				logger.Info("Created test registration token for Docker testing", "token", testToken.Token, "tenant", testToken.TenantID)
+			}
 		}
 
 		regValidator := pkgRegistration.NewValidator(regStore)

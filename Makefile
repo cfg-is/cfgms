@@ -166,7 +166,7 @@ test-commit: test lint security-scan
 
 # CI validation (complete validation) - RUNS IN CI/CD
 test-ci: export CI=1
-test-ci: test-infrastructure-required lint security-scan test-m365-integration test-integration-complete test-integration-factory
+test-ci: test-infrastructure-required lint security-scan test-m365-integration test-integration-complete test-integration-factory test-mqtt-quic
 
 # Robust CI infrastructure test target - ensures infrastructure works every time
 test-infrastructure-required:
@@ -1116,6 +1116,74 @@ test-integration-complete: test-integration-setup test-with-real-storage test-in
 	@echo "   - Docker services started"
 	@echo "   - Real storage provider tests executed"
 	@echo "   - Environment cleaned up"
+
+# MQTT+QUIC Integration Testing (Story #12.2)
+# Tests MQTT+QUIC architecture with real Docker infrastructure
+.PHONY: test-mqtt-quic test-mqtt-quic-setup test-mqtt-quic-cleanup
+test-mqtt-quic: test-mqtt-quic-setup
+	@echo ""
+	@echo "🔌 Running MQTT+QUIC Integration Tests"
+	@echo "======================================"
+	@echo "Testing against controller-standalone (MQTT: 1886, QUIC: 4436, HTTP: 9080)"
+	@echo ""
+	@echo "🧪 Running all MQTT+QUIC test suites..."
+	@if [ -f .env.test ]; then \
+		set -a && . ./.env.test && set +a && \
+		CFGMS_TEST_HTTP_ADDR=http://localhost:9080 \
+		CFGMS_TEST_MQTT_ADDR=tcp://localhost:1886 \
+		CFGMS_TEST_QUIC_ADDR=localhost:4436 \
+		go test -v -race -timeout=15m ./test/integration/mqtt_quic/... || { \
+			echo ""; \
+			echo "❌ MQTT+QUIC tests failed"; \
+			make test-mqtt-quic-cleanup; \
+			exit 1; \
+		}; \
+	else \
+		echo "❌ .env.test not found. Run 'make test-integration-setup' first"; \
+		exit 1; \
+	fi
+	@make test-mqtt-quic-cleanup
+	@echo ""
+	@echo "✅ MQTT+QUIC Integration Tests Passed!"
+	@echo "   - Registration flow validated"
+	@echo "   - MQTT connectivity tested"
+	@echo "   - QUIC session authentication verified"
+	@echo "   - Config sync, DNA updates, heartbeat/failover tested"
+	@echo "   - Load testing completed (100+ concurrent stewards)"
+
+test-mqtt-quic-setup:
+	@echo "🐳 Setting up MQTT+QUIC Docker Test Environment"
+	@echo "==============================================="
+	@if [ ! -f .env.test ]; then \
+		echo "Generating test credentials..."; \
+		./scripts/generate-test-credentials.sh; \
+	fi
+	@echo "Starting TimescaleDB and standalone controller with MQTT+QUIC..."
+	@set -a && . ./.env.test && set +a && \
+	docker compose -f docker-compose.test.yml --profile ha up -d timescaledb-test controller-standalone
+	@echo ""
+	@echo "⏳ Waiting for services to be ready..."
+	@sleep 10
+	@echo "🔍 Checking controller health..."
+	@for i in 1 2 3 4 5; do \
+		if docker exec controller-standalone sh -c "netstat -ln | grep :1883" >/dev/null 2>&1; then \
+			echo "✅ MQTT broker ready on port 1886"; \
+			break; \
+		fi; \
+		echo "⏳ Waiting for MQTT broker (attempt $$i/5)..."; \
+		sleep 5; \
+	done
+	@echo ""
+	@echo "✅ MQTT+QUIC Docker environment ready!"
+	@echo "   MQTT: localhost:1886"
+	@echo "   QUIC: localhost:4436"
+	@echo "   HTTP: localhost:9080"
+
+test-mqtt-quic-cleanup:
+	@echo ""
+	@echo "🧹 Cleaning up MQTT+QUIC Docker environment..."
+	@docker compose -f docker-compose.test.yml --profile ha down --remove-orphans 2>/dev/null || true
+	@echo "✅ MQTT+QUIC environment cleaned up"
 
 
 clean:
