@@ -83,6 +83,13 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check if single-use token was already used
+	if token.SingleUse && token.UsedAt != nil {
+		s.logger.Warn("Attempted reuse of single-use token", "token", req.Token, "used_at", token.UsedAt, "used_by", token.UsedBy)
+		http.Error(w, "Registration token has already been used", http.StatusUnauthorized)
+		return
+	}
+
 	// Generate steward ID
 	stewardID := fmt.Sprintf("steward-%d", time.Now().UnixNano())
 

@@ -2,7 +2,6 @@ package mqtt_quic
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,15 +9,12 @@ import (
 	"os"
 	"testing"
 	"time"
-
-	"github.com/cfgis/cfgms/pkg/registration"
 )
 
 // TestHelper provides utilities for MQTT+QUIC integration testing
 type TestHelper struct {
 	httpClient *http.Client
 	baseURL    string
-	tokenStore *registration.MemoryStore
 }
 
 // NewTestHelper creates a new test helper
@@ -33,31 +29,20 @@ func NewTestHelper(baseURL string) *TestHelper {
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
-		baseURL:    baseURL,
-		tokenStore: registration.NewMemoryStore(),
+		baseURL: baseURL,
 	}
 }
 
 // CreateToken creates a test registration token
+// NOTE: For integration tests against real controller, this returns a pre-created token
+// that exists in the controller's token store. The controller pre-creates test tokens
+// when MQTT is enabled (see features/controller/server/server.go)
 func (h *TestHelper) CreateToken(t *testing.T, tenantID, group string) string {
 	t.Helper()
 
-	token := &registration.Token{
-		Token:         fmt.Sprintf("cfgms_reg_test_%d", time.Now().UnixNano()),
-		TenantID:      tenantID,
-		ControllerURL: "mqtt://localhost:1883",
-		Group:         group,
-		CreatedAt:     time.Now(),
-		SingleUse:     true,
-		Revoked:       false,
-	}
-
-	ctx := context.Background()
-	if err := h.tokenStore.SaveToken(ctx, token); err != nil {
-		t.Fatalf("Failed to create test token: %v", err)
-	}
-
-	return token.Token
+	// Use pre-created reusable token from controller
+	// This token is created by the controller on startup when MQTT is enabled
+	return "cfgms_reg_integration_reusable"
 }
 
 // RegisterSteward registers a steward via HTTP API

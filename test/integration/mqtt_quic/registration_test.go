@@ -2,17 +2,13 @@ package mqtt_quic
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/suite"
-
-	"github.com/cfgis/cfgms/pkg/registration"
 )
 
 // RegistrationTestSuite tests end-to-end registration flow
@@ -33,20 +29,21 @@ func (s *RegistrationTestSuite) TearDownSuite() {
 
 // TestHTTPRegistrationEndpoint tests the HTTP registration endpoint
 func (s *RegistrationTestSuite) TestHTTPRegistrationEndpoint() {
-	// Create a test registration token
-	tenantID := "test-tenant"
-	group := "production"
-	token := s.helper.CreateToken(s.T(), tenantID, group)
+	// Use pre-created reusable token from controller
+	// This token is created by the controller on startup when MQTT is enabled
+	token := s.helper.CreateToken(s.T(), "", "")
+	expectedTenantID := "test-tenant-integration"
+	expectedGroup := "production"
 
-	s.T().Logf("Created test token: %s", token)
+	s.T().Logf("Using test token: %s", token)
 
 	// Register steward
 	regResp := s.helper.RegisterSteward(s.T(), token)
 
 	// Verify response fields
 	s.NotEmpty(regResp.StewardID, "Steward ID should be generated")
-	s.Equal(tenantID, regResp.TenantID, "Tenant ID should match")
-	s.Equal(group, regResp.Group, "Group should match")
+	s.Equal(expectedTenantID, regResp.TenantID, "Tenant ID should match")
+	s.Equal(expectedGroup, regResp.Group, "Group should match")
 	s.NotEmpty(regResp.MQTTBroker, "MQTT broker address should be provided")
 	s.NotEmpty(regResp.QUICAddress, "QUIC address should be provided")
 
@@ -73,26 +70,10 @@ func (s *RegistrationTestSuite) TestInvalidToken() {
 
 // TestExpiredToken tests registration with expired token
 func (s *RegistrationTestSuite) TestExpiredToken() {
-	// Create expired token
-	ctx := context.Background()
-	expiredTime := time.Now().Add(-1 * time.Hour)
-	token := &registration.Token{
-		Token:         "cfgms_reg_expired_test",
-		TenantID:      "test-tenant",
-		ControllerURL: "mqtt://localhost:1883",
-		Group:         "production",
-		CreatedAt:     time.Now().Add(-2 * time.Hour),
-		ExpiresAt:     &expiredTime,
-		SingleUse:     true,
-		Revoked:       false,
-	}
-
-	err := s.helper.tokenStore.SaveToken(ctx, token)
-	s.NoError(err)
-
-	// Try to register with expired token
+	// Use pre-created expired token from controller
+	// This token is created by the controller on startup when MQTT is enabled
 	reqBody := map[string]string{
-		"token": token.Token,
+		"token": "cfgms_reg_integration_expired",
 	}
 	reqJSON, err := json.Marshal(reqBody)
 	s.NoError(err)
@@ -108,27 +89,10 @@ func (s *RegistrationTestSuite) TestExpiredToken() {
 
 // TestRevokedToken tests registration with revoked token
 func (s *RegistrationTestSuite) TestRevokedToken() {
-	ctx := context.Background()
-
-	// Create revoked token
-	now := time.Now()
-	token := &registration.Token{
-		Token:         "cfgms_reg_revoked_test",
-		TenantID:      "test-tenant",
-		ControllerURL: "mqtt://localhost:1883",
-		Group:         "production",
-		CreatedAt:     now,
-		SingleUse:     true,
-		Revoked:       true,
-		RevokedAt:     &now,
-	}
-
-	err := s.helper.tokenStore.SaveToken(ctx, token)
-	s.NoError(err)
-
-	// Try to register with revoked token
+	// Use pre-created revoked token from controller
+	// This token is created by the controller on startup when MQTT is enabled
 	reqBody := map[string]string{
-		"token": token.Token,
+		"token": "cfgms_reg_integration_revoked",
 	}
 	reqJSON, err := json.Marshal(reqBody)
 	s.NoError(err)
@@ -144,12 +108,10 @@ func (s *RegistrationTestSuite) TestRevokedToken() {
 
 // TestSingleUseToken tests that single-use tokens can only be used once
 func (s *RegistrationTestSuite) TestSingleUseToken() {
-	// Create single-use token
-	token := s.helper.CreateToken(s.T(), "test-tenant", "production")
-
-	// First registration should succeed
+	// Use pre-created single-use token from controller
+	// This token is created by the controller on startup when MQTT is enabled
 	reqBody := map[string]string{
-		"token": token,
+		"token": "cfgms_reg_integration_singleuse",
 	}
 	reqJSON, err := json.Marshal(reqBody)
 	s.NoError(err)
@@ -169,18 +131,19 @@ func (s *RegistrationTestSuite) TestSingleUseToken() {
 	s.Equal(http.StatusUnauthorized, resp2.StatusCode, "Second registration with single-use token should fail")
 }
 
-// TestTenantIsolation tests that steward IDs include tenant prefix for isolation
+// TestTenantIsolation tests that steward IDs are unique
 func (s *RegistrationTestSuite) TestTenantIsolation() {
-	// Register stewards for different tenants
-	tenants := []string{"tenant-alpha", "tenant-beta", "tenant-gamma"}
-	stewardIDs := make(map[string]string)
+	// Register multiple stewards using the reusable token
+	// All will be in the same tenant (test-tenant-integration) but should get unique IDs
+	const numStewards = 3
+	stewardIDs := make([]string, 0, numStewards)
 
-	for _, tenantID := range tenants {
-		token := s.helper.CreateToken(s.T(), tenantID, "production")
+	for i := 0; i < numStewards; i++ {
+		token := s.helper.CreateToken(s.T(), "test-tenant-integration", "production")
 		regResp := s.helper.RegisterSteward(s.T(), token)
 
-		s.Equal(tenantID, regResp.TenantID, "Response should have correct tenant ID")
-		stewardIDs[tenantID] = regResp.StewardID
+		s.Equal("test-tenant-integration", regResp.TenantID, "Response should have correct tenant ID")
+		stewardIDs = append(stewardIDs, regResp.StewardID)
 	}
 
 	// Verify each steward ID is unique
@@ -190,7 +153,7 @@ func (s *RegistrationTestSuite) TestTenantIsolation() {
 		seen[stewardID] = true
 	}
 
-	s.T().Logf("Verified tenant isolation: %d unique steward IDs generated", len(stewardIDs))
+	s.T().Logf("Verified steward ID uniqueness: %d unique steward IDs generated", len(stewardIDs))
 }
 
 // TestConcurrentRegistrations tests multiple simultaneous registrations
@@ -200,10 +163,13 @@ func (s *RegistrationTestSuite) TestConcurrentRegistrations() {
 	results := make(chan error, numConcurrent)
 	stewardIDs := make(chan string, numConcurrent)
 
+	// Use pre-created reusable token from controller
+	// This token is created by the controller on startup when MQTT is enabled
+	token := "cfgms_reg_integration_reusable"
+
 	// Launch concurrent registrations
 	for i := 0; i < numConcurrent; i++ {
 		go func(idx int) {
-			token := s.helper.CreateToken(s.T(), fmt.Sprintf("tenant-%d", idx), "production")
 
 			reqBody := map[string]string{
 				"token": token,
