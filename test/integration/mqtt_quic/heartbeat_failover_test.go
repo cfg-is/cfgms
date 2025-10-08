@@ -128,7 +128,8 @@ func (s *HeartbeatFailoverTestSuite) TestFailoverDetectionTiming() {
 
 	// Track LWT delivery
 	lwtReceived := make(chan bool, 1)
-	lwtPublishTime := time.Now()
+	var lwtPublishTime time.Time
+	var lwtTimeMutex sync.Mutex
 
 	// Create observer client to monitor LWT
 	observerOpts := mqtt.NewClientOptions()
@@ -145,7 +146,10 @@ func (s *HeartbeatFailoverTestSuite) TestFailoverDetectionTiming() {
 	// Subscribe to LWT topic
 	subToken := observer.Subscribe(lwtTopic, 1, func(client mqtt.Client, msg mqtt.Message) {
 		deliveryTime := time.Now()
-		latency := deliveryTime.Sub(lwtPublishTime)
+		lwtTimeMutex.Lock()
+		publishTime := lwtPublishTime
+		lwtTimeMutex.Unlock()
+		latency := deliveryTime.Sub(publishTime)
 		s.T().Logf("LWT received after %.2fs", latency.Seconds())
 		lwtReceived <- true
 	})
@@ -175,7 +179,9 @@ func (s *HeartbeatFailoverTestSuite) TestFailoverDetectionTiming() {
 
 	// Simulate abrupt disconnection (broker will publish LWT)
 	time.Sleep(1 * time.Second) // Ensure connection is stable
+	lwtTimeMutex.Lock()
 	lwtPublishTime = time.Now()
+	lwtTimeMutex.Unlock()
 
 	// Force disconnect without clean disconnect packet
 	steward.Disconnect(0) // 0 = immediate disconnect, triggers LWT
