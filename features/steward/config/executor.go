@@ -208,18 +208,28 @@ func (e *Executor) applyResource(ctx context.Context, moduleName string, module 
 
 	// Handle state: present vs absent
 	if resource.State == "absent" {
-		// For "absent" state, we would need to implement deletion
-		// For now, just log that this is not yet supported
-		e.logger.Warn("Resource deletion not yet implemented",
+		// Resource deletion is not yet implemented
+		// Return error to prevent configuration drift (resources expected to be deleted remain)
+		e.logger.Error("Resource deletion not yet implemented",
 			"resource", resource.Name,
-			"resource_id", resource.ResourceID)
-		return nil
+			"resource_id", resource.ResourceID,
+			"state", resource.State)
+		return fmt.Errorf("resource state 'absent' is not yet implemented (resource: %s)", resource.Name)
 	}
 
 	// Module-specific config adjustments
 	config := resource.Config
 	if config == nil {
 		config = make(map[string]interface{})
+	}
+
+	// Validate permissions for file and directory modules
+	if moduleName == "file" || moduleName == "directory" {
+		if perms, hasPerms := config["permissions"]; hasPerms {
+			if err := validatePermissions(perms); err != nil {
+				return fmt.Errorf("permissions validation failed: %w", err)
+			}
+		}
 	}
 
 	// For directory module, ensure 'path' field is set from resource_id
@@ -282,6 +292,30 @@ func normalizeValue(v interface{}) interface{} {
 	default:
 		return val
 	}
+}
+
+// validatePermissions validates that a permissions value is within valid range (0-0777 octal)
+func validatePermissions(perms interface{}) error {
+	var permValue int
+
+	switch v := perms.(type) {
+	case int:
+		permValue = v
+	case int64:
+		permValue = int(v)
+	case float64:
+		permValue = int(v)
+	default:
+		return fmt.Errorf("invalid permissions type: %T", perms)
+	}
+
+	// Check range: permissions must be between 0 and 0777 (octal)
+	// In decimal, 0777 octal = 511 decimal
+	if permValue < 0 || permValue > 0777 {
+		return fmt.Errorf("invalid permissions value: %d (must be between 0 and 0777 octal)", permValue)
+	}
+
+	return nil
 }
 
 func (g *genericConfigState) ToYAML() ([]byte, error) {
