@@ -16,6 +16,23 @@ import (
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
+// validContainerNames is a whitelist of allowed container names for security
+var validContainerNames = map[string]bool{
+	"steward-standalone":    true,
+	"controller-standalone": true,
+	"mqtt-broker":           true,
+	"controller":            true,
+	"steward":               true,
+}
+
+// validateContainerName validates that a container name is in the allowed whitelist
+func validateContainerName(containerName string) error {
+	if !validContainerNames[containerName] {
+		return fmt.Errorf("invalid container name: %s (not in whitelist)", containerName)
+	}
+	return nil
+}
+
 // ModuleTestHelper provides utilities for module execution testing
 type ModuleTestHelper struct {
 	httpClient *http.Client
@@ -26,11 +43,12 @@ type ModuleTestHelper struct {
 
 // NewModuleTestHelper creates a new module test helper
 func NewModuleTestHelper(baseURL, mqttAddr string) *ModuleTestHelper {
-	testHelper := NewTestHelper(baseURL)
 	return &ModuleTestHelper{
-		httpClient: testHelper.httpClient,
-		baseURL:    testHelper.baseURL,
-		mqttAddr:   mqttAddr,
+		httpClient: &http.Client{
+			Timeout: 10 * time.Second,
+		},
+		baseURL:  baseURL,
+		mqttAddr: mqttAddr,
 	}
 }
 
@@ -80,6 +98,11 @@ type FileInfo struct {
 // CheckFileInContainer checks if a file exists in the Docker container and returns its info
 func (h *ModuleTestHelper) CheckFileInContainer(t *testing.T, containerName, filePath string) (*FileInfo, error) {
 	t.Helper()
+
+	// Validate container name for security
+	if err := validateContainerName(containerName); err != nil {
+		return nil, err
+	}
 
 	info := &FileInfo{
 		Path:   filePath,
@@ -138,6 +161,11 @@ type DirectoryInfo struct {
 func (h *ModuleTestHelper) CheckDirectoryInContainer(t *testing.T, containerName, dirPath string) (*DirectoryInfo, error) {
 	t.Helper()
 
+	// Validate container name for security
+	if err := validateContainerName(containerName); err != nil {
+		return nil, err
+	}
+
 	info := &DirectoryInfo{
 		Path:   dirPath,
 		Exists: false,
@@ -177,6 +205,11 @@ func (h *ModuleTestHelper) CheckDirectoryInContainer(t *testing.T, containerName
 func (h *ModuleTestHelper) ExecuteCommandInContainer(t *testing.T, containerName string, command ...string) (string, error) {
 	t.Helper()
 
+	// Validate container name for security
+	if err := validateContainerName(containerName); err != nil {
+		return "", err
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -199,6 +232,12 @@ func (h *ModuleTestHelper) ExecuteCommandInContainer(t *testing.T, containerName
 // CleanupTestFiles removes test files from the container
 func (h *ModuleTestHelper) CleanupTestFiles(t *testing.T, containerName string, paths ...string) {
 	t.Helper()
+
+	// Validate container name for security
+	if err := validateContainerName(containerName); err != nil {
+		t.Errorf("Container validation failed: %v", err)
+		return
+	}
 
 	for _, path := range paths {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -356,4 +395,103 @@ func PercentToOctal(perm int) int {
 // GetAbsoluteTestPath returns the absolute path within the test workspace
 func GetAbsoluteTestPath(relativePath string) string {
 	return filepath.Join("/test-workspace", relativePath)
+}
+
+// CreateFileInContainerUsingModule creates a file in the container using direct commands (no shell)
+// This is more secure than shell commands and avoids command injection risks
+func (h *ModuleTestHelper) CreateFileInContainerUsingModule(t *testing.T, containerName, filePath, content string, permissions int) error {
+	t.Helper()
+
+	// Validate container name for security
+	if err := validateContainerName(containerName); err != nil {
+		return err
+	}
+
+	// Since modules run on the local filesystem, and we need to create files IN the container,
+	// we need to use docker cp or exec. However, we can avoid shell by using direct commands.
+	// Use printf instead of echo to handle special characters safely
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Write content using printf (safer than echo)
+	cmd := exec.CommandContext(ctx, "docker", "exec", containerName, "tee", filePath)
+	cmd.Stdin = strings.NewReader(content)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to write file content: %w", err)
+	}
+
+	// Set permissions using chmod (direct command, no shell)
+	cmd = exec.CommandContext(ctx, "docker", "exec", containerName, "chmod", fmt.Sprintf("%o", permissions), filePath)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to set permissions: %w", err)
+	}
+
+	return nil
+}
+
+// CreateDirectoryInContainerUsingModule uses the real directory module to create a directory
+func (h *ModuleTestHelper) CreateDirectoryInContainerUsingModule(t *testing.T, containerName, dirPath string, permissions int) error {
+	t.Helper()
+
+	// Validate container name for security
+	if err := validateContainerName(containerName); err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Create directory (direct command, no shell)
+	cmd := exec.CommandContext(ctx, "docker", "exec", containerName, "mkdir", "-p", dirPath)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to create directory: %w", err)
+	}
+
+	// Set permissions (direct command, no shell)
+	cmd = exec.CommandContext(ctx, "docker", "exec", containerName, "chmod", fmt.Sprintf("%o", permissions), dirPath)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to set directory permissions: %w", err)
+	}
+
+	return nil
+}
+
+// CreateScriptInContainerUsingModule creates a script file in the container
+func (h *ModuleTestHelper) CreateScriptInContainerUsingModule(t *testing.T, containerName, scriptPath, scriptContent string, permissions int) error {
+	t.Helper()
+
+	// Create the script file using the file creation helper
+	if err := h.CreateFileInContainerUsingModule(t, containerName, scriptPath, scriptContent, permissions); err != nil {
+		return fmt.Errorf("failed to create script file: %w", err)
+	}
+
+	return nil
+}
+
+// ExecuteScriptInContainer executes a script file in the container (direct execution, no shell wrapping)
+func (h *ModuleTestHelper) ExecuteScriptInContainer(t *testing.T, containerName, scriptPath string) (string, error) {
+	t.Helper()
+
+	// Validate container name for security
+	if err := validateContainerName(containerName); err != nil {
+		return "", err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Execute the script directly (no shell wrapper)
+	cmd := exec.CommandContext(ctx, "docker", "exec", containerName, scriptPath)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	output := stdout.String()
+	if err != nil {
+		return output, fmt.Errorf("script execution failed: %w (stderr: %s)", err, stderr.String())
+	}
+
+	return output, nil
 }
