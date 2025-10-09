@@ -374,7 +374,9 @@ func (c *MQTTClient) setupCommandHandler(ctx context.Context, stewardID string, 
 			// Even if application fails, try to send status report
 			if report != nil {
 				report.StewardID = stewardID
-				c.publishConfigStatus(report)
+				if pubErr := c.publishConfigStatus(report); pubErr != nil {
+					c.logger.Error("Failed to publish config status after error", "error", pubErr)
+				}
 			}
 			return fmt.Errorf("config application failed: %w", err)
 		}

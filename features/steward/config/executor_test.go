@@ -116,7 +116,7 @@ modules:
 
 	// Apply configuration
 	ctx := context.Background()
-	report, err := executor.ApplyConfiguration(ctx, []byte(configYAML), "v1.0-fail")
+	report, _ := executor.ApplyConfiguration(ctx, []byte(configYAML), "v1.0-fail")
 
 	// Configuration parsing should succeed but application should report errors
 	require.NotNil(t, report, "Report should not be nil even with errors")
