@@ -565,6 +565,102 @@ services:
     profiles:
       - ha  # Include in HA profile to run with controller-standalone
 
+  # ============================================================================
+  # Multi-Tenant Stewards - Story 12.5: Multi-Tenant Isolation Testing
+  # ============================================================================
+  # Three tenant-specific stewards for multi-tenant isolation validation
+  # Each connects to controller-standalone with unique tenant ID
+  # Used to validate MQTT topic isolation and tenant boundary enforcement
+  # Start with: docker compose --profile ha up
+  # ============================================================================
+
+  steward-tenant1:
+    container_name: steward-tenant1
+    build:
+      context: .
+      dockerfile: cmd/steward/Dockerfile
+    environment:
+      CFGMS_TENANT_ID: "tenant1"  # Story 12.5: Tenant isolation
+      CFGMS_REGISTRATION_TOKEN: "cfgms_reg_tenant1"
+      CFGMS_CONTROLLER_URL: "http://controller-standalone:9080"
+      # Story 12.4: TLS client certificate configuration
+      CFGMS_MQTT_TLS_CERT_PATH: "/app/test-certs/client-cert.pem"
+      CFGMS_MQTT_TLS_KEY_PATH: "/app/test-certs/client-key.pem"
+      CFGMS_MQTT_TLS_CA_PATH: "/app/test-certs/ca-cert.pem"
+      CFGMS_LOG_LEVEL: "debug"
+      CFGMS_LOG_PROVIDER: "file"
+      CFGMS_LOG_DIR: "/tmp/cfgms"
+    command: ["./steward", "--log-level", "debug", "--log-provider", "file", "--regtoken", "cfgms_reg_tenant1", "--tenant-id", "tenant1"]
+    volumes:
+      - steward_tenant1_data:/app/data
+      - ./test/module-execution:/test-workspace:rw
+      - ./test/integration/mqtt_quic/certs:/app/test-certs:ro
+    depends_on:
+      controller-standalone:
+        condition: service_healthy
+    networks:
+      - cfgms-test
+    profiles:
+      - ha
+
+  steward-tenant2:
+    container_name: steward-tenant2
+    build:
+      context: .
+      dockerfile: cmd/steward/Dockerfile
+    environment:
+      CFGMS_TENANT_ID: "tenant2"  # Story 12.5: Tenant isolation
+      CFGMS_REGISTRATION_TOKEN: "cfgms_reg_tenant2"
+      CFGMS_CONTROLLER_URL: "http://controller-standalone:9080"
+      # Story 12.4: TLS client certificate configuration
+      CFGMS_MQTT_TLS_CERT_PATH: "/app/test-certs/client-cert.pem"
+      CFGMS_MQTT_TLS_KEY_PATH: "/app/test-certs/client-key.pem"
+      CFGMS_MQTT_TLS_CA_PATH: "/app/test-certs/ca-cert.pem"
+      CFGMS_LOG_LEVEL: "debug"
+      CFGMS_LOG_PROVIDER: "file"
+      CFGMS_LOG_DIR: "/tmp/cfgms"
+    command: ["./steward", "--log-level", "debug", "--log-provider", "file", "--regtoken", "cfgms_reg_tenant2", "--tenant-id", "tenant2"]
+    volumes:
+      - steward_tenant2_data:/app/data
+      - ./test/module-execution:/test-workspace:rw
+      - ./test/integration/mqtt_quic/certs:/app/test-certs:ro
+    depends_on:
+      controller-standalone:
+        condition: service_healthy
+    networks:
+      - cfgms-test
+    profiles:
+      - ha
+
+  steward-tenant3:
+    container_name: steward-tenant3
+    build:
+      context: .
+      dockerfile: cmd/steward/Dockerfile
+    environment:
+      CFGMS_TENANT_ID: "tenant3"  # Story 12.5: Tenant isolation
+      CFGMS_REGISTRATION_TOKEN: "cfgms_reg_tenant3"
+      CFGMS_CONTROLLER_URL: "http://controller-standalone:9080"
+      # Story 12.4: TLS client certificate configuration
+      CFGMS_MQTT_TLS_CERT_PATH: "/app/test-certs/client-cert.pem"
+      CFGMS_MQTT_TLS_KEY_PATH: "/app/test-certs/client-key.pem"
+      CFGMS_MQTT_TLS_CA_PATH: "/app/test-certs/ca-cert.pem"
+      CFGMS_LOG_LEVEL: "debug"
+      CFGMS_LOG_PROVIDER: "file"
+      CFGMS_LOG_DIR: "/tmp/cfgms"
+    command: ["./steward", "--log-level", "debug", "--log-provider", "file", "--regtoken", "cfgms_reg_tenant3", "--tenant-id", "tenant3"]
+    volumes:
+      - steward_tenant3_data:/app/data
+      - ./test/module-execution:/test-workspace:rw
+      - ./test/integration/mqtt_quic/certs:/app/test-certs:ro
+    depends_on:
+      controller-standalone:
+        condition: service_healthy
+    networks:
+      - cfgms-test
+    profiles:
+      - ha
+
 volumes:
   postgres_test_data:
     driver: local
@@ -603,6 +699,24 @@ volumes:
       device: tmpfs
       o: size=64m
   steward_standalone_data:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=128m
+  steward_tenant1_data:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=128m
+  steward_tenant2_data:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=128m
+  steward_tenant3_data:
     driver: local
     driver_opts:
       type: tmpfs
