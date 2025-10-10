@@ -505,11 +505,79 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 
 #### v0.6.0 (Alpha) - Finalizing Foundational Endpoint CMS
 
-- [ ] Implement script execution capabilities (advanced)
-- [ ] Implement advanced configuration management
-- [ ] Add support for configuration templates (advanced)
-- [ ] Strong windows patch compliance capabilities including Major version updates (eg Win 11 23H2 to 24H2 upgrades), as well as major version upgrades (eg Win 10 to Win 11)
-- [ ] Implement performance monitoring.
+**Goal**: Complete the foundational endpoint configuration management capabilities with advanced script execution, configuration templates, Windows patch compliance, and comprehensive performance monitoring for both endpoints and controller infrastructure.
+
+**✅ Epic: v0.6.0 - Finalizing Foundational Endpoint CMS**
+
+- [ ] **Advanced Script Execution Capabilities** (Story 1) - 13 points
+  - Script versioning and revision control with rollback capabilities
+  - Advanced parameter handling with type validation and default values
+  - Execution environment isolation with sandboxing and resource limits
+  - Multi-platform script support (PowerShell, Bash, Python, batch)
+  - Script execution scheduling with cron-like syntax and dependencies
+  - Real-time execution monitoring with stdout/stderr streaming
+  - Script library management with reusable templates and sharing
+  - Exit code handling and automatic retry mechanisms
+  - Integration with workflow engine for complex orchestration
+
+- [ ] **Advanced Configuration Management** (Story 2) - 13 points
+  - Enhanced configuration validation with schema enforcement
+  - Configuration dependency tracking and impact analysis
+  - Atomic configuration updates with transaction support
+  - Configuration testing framework (dry-run, validation, simulation)
+  - Configuration comparison and merge capabilities
+  - Advanced conflict resolution with manual override support
+  - Configuration locking to prevent concurrent modifications
+  - Integration with DNA system for configuration compliance
+  - Multi-environment configuration promotion workflows
+
+- [ ] **Configuration Templates (Advanced)** (Story 3) - 13 points
+  - Template marketplace with community-contributed configurations
+  - Advanced template inheritance with multi-level cascading
+  - Template parameterization with complex validation rules
+  - Conditional template sections based on DNA attributes
+  - Template versioning with semantic versioning support
+  - Template testing framework with validation scenarios
+  - Template documentation and usage examples
+  - Integration with compliance frameworks (CIS, NIST, PCI-DSS)
+  - Template sharing and collaboration workflows
+
+- [ ] **Windows Patch Compliance (Advanced)** (Story 4) - 13 points
+  - Major version upgrade orchestration (Win 10 → Win 11, 23H2 → 24H2)
+  - Pre-upgrade compatibility validation using DNA system
+  - Automated rollback on failed major version upgrades
+  - Maintenance window enforcement with business hours awareness
+  - Patch testing framework with canary deployment support
+  - Advanced patch scheduling with dependency-aware ordering
+  - WSUS/Windows Update integration with approval workflows
+  - Compliance reporting for patch status across fleet
+  - Integration with change management workflows
+
+- [ ] **Endpoint Performance Monitoring** (Story 5) - 13 points
+  - Real-time endpoint performance metrics collection
+  - Performance baseline establishment and anomaly detection
+  - Resource utilization tracking (CPU, memory, disk, network)
+  - Application performance monitoring with process-level detail
+  - Performance trend analysis and predictive alerting
+  - Integration with DNA system for historical correlation
+  - Performance dashboards and reporting
+  - Automated remediation workflows for performance issues
+  - Multi-platform support (Windows, Linux, macOS)
+
+- [ ] **Server/Controller Performance Monitoring** (Story 6) - 13-21 points (HIGH PRIORITY - MSP Operations)
+  - Proactive controller performance detection before MSP impact
+  - Real-time cluster performance metrics (MQTT, gRPC, database, memory, CPU)
+  - Performance baseline and anomaly detection with predictive alerting
+  - MSP-focused impact classification (Critical/High/Medium)
+  - Per-tenant performance tracking with SLA risk assessment
+  - Automated self-healing (connection pool expansion, load shedding, cache warming)
+  - Cluster load balancing with tenant migration and circuit breakers
+  - Alert escalation automation with runbook integration
+  - Performance dashboards for MSP administrators with drill-down
+  - Distributed tracing and diagnostic data collection
+  - Integration with existing HA infrastructure and monitoring tools
+  - OpenTelemetry export and webhook notifications
+  - 90-day historical performance retention
 
 #### v0.7.0 (Pre-OSS / Alpha) - Open Source Preparation
 
