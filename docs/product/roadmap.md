@@ -502,19 +502,13 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 - [x] **TLS/mTLS Security Validation** (Story 12.4) - 8 points ✅ - Certificate infrastructure, TLS 1.2+ enforcement, security hardening (98/100 rating)
 - [x] **Multi-Tenant Isolation Testing** (Story 12.5) - 8 points ✅ - 3 tenant Docker infrastructure, comprehensive MQTT topic isolation tests, all acceptance criteria validated
 
-#### Integration Requirements
-- All new capabilities integrate seamlessly with existing pluggable storage architecture
-- Multi-tenant configuration inheritance preserved and extended for new features
-- Steward-controller communication protocol remains compatible with new capabilities
-- Performance characteristics: 99.9% uptime, 10,000+ concurrent steward connections
-- Security standards: Zero-trust tenant isolation, encrypted data at rest and in transit
 
 #### v0.6.0 (Beta) - Finalizing Foundational Endpoint CMS & Outpost
 
 - [ ] Implement script execution capabilities (advanced)
 - [ ] Implement advanced configuration management
 - [ ] Add support for configuration templates (advanced)
-- [ ] Implement Outpost functionality (Basic)
+- [ ] Implement Outpost functionality (Basic
 - [ ] Strong windows patch compliance capabiliteis including Major version updates (eg Win 11 23H2 to 24H2 upgrades), as well as major version upgrades (eg Win 10 to Win 11)
 - [ ] Implement performance monitoring.
 
