@@ -503,13 +503,12 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 - [x] **Multi-Tenant Isolation Testing** (Story 12.5) - 8 points ✅ - 3 tenant Docker infrastructure, comprehensive MQTT topic isolation tests, all acceptance criteria validated
 
 
-#### v0.6.0 (Beta) - Finalizing Foundational Endpoint CMS & Outpost
+#### v0.6.0 (Alpha) - Finalizing Foundational Endpoint CMS
 
 - [ ] Implement script execution capabilities (advanced)
 - [ ] Implement advanced configuration management
 - [ ] Add support for configuration templates (advanced)
-- [ ] Implement Outpost functionality (Basic
-- [ ] Strong windows patch compliance capabiliteis including Major version updates (eg Win 11 23H2 to 24H2 upgrades), as well as major version upgrades (eg Win 10 to Win 11)
+- [ ] Strong windows patch compliance capabilities including Major version updates (eg Win 11 23H2 to 24H2 upgrades), as well as major version upgrades (eg Win 10 to Win 11)
 - [ ] Implement performance monitoring.
 
 #### v0.7.0 (Pre-OSS / Alpha) - Open Source Preparation
