@@ -9,11 +9,12 @@ import (
 
 // ExecutionQueue manages pending script executions for offline devices
 type ExecutionQueue struct {
-	queue      map[string][]*QueuedExecution // deviceID -> executions
-	mu         sync.RWMutex
-	monitor    *ExecutionMonitor
-	keyManager *EphemeralKeyManager
-	maxAge     time.Duration // Maximum time to keep queued executions
+	queue         map[string][]*QueuedExecution // deviceID -> executions
+	mu            sync.RWMutex
+	monitor       *ExecutionMonitor
+	keyManager    *EphemeralKeyManager
+	maxAge        time.Duration // Maximum time to keep queued executions
+	controllerURL string        // Controller external URL for script callbacks
 }
 
 // QueuedExecution represents a script execution waiting for device to come online
@@ -35,16 +36,21 @@ type QueuedExecution struct {
 }
 
 // NewExecutionQueue creates a new execution queue
-func NewExecutionQueue(monitor *ExecutionMonitor, keyManager *EphemeralKeyManager, maxAge time.Duration) *ExecutionQueue {
+func NewExecutionQueue(monitor *ExecutionMonitor, keyManager *EphemeralKeyManager, maxAge time.Duration, controllerURL string) *ExecutionQueue {
 	if maxAge == 0 {
 		maxAge = 24 * time.Hour // Default: keep queued executions for 24 hours
 	}
 
+	if controllerURL == "" {
+		controllerURL = "https://localhost:8080" // Default controller URL if not specified
+	}
+
 	queue := &ExecutionQueue{
-		queue:      make(map[string][]*QueuedExecution),
-		monitor:    monitor,
-		keyManager: keyManager,
-		maxAge:     maxAge,
+		queue:         make(map[string][]*QueuedExecution),
+		monitor:       monitor,
+		keyManager:    keyManager,
+		maxAge:        maxAge,
+		controllerURL: controllerURL,
 	}
 
 	// Start cleanup goroutine
@@ -260,7 +266,7 @@ func (q *ExecutionQueue) PrepareExecutionForDevice(ctx context.Context, deviceID
 		prepared.Environment["CFGMS_EXECUTION_ID"] = execution.ExecutionID
 		prepared.Environment["CFGMS_DEVICE_ID"] = deviceID
 		prepared.Environment["CFGMS_TENANT_ID"] = tenantID
-		prepared.Environment["CFGMS_CONTROLLER_URL"] = "" // TODO: Get from config
+		prepared.Environment["CFGMS_CONTROLLER_URL"] = q.controllerURL
 
 		prepared.EphemeralKey = apiKey.Key
 		prepared.KeyExpiresAt = apiKey.ExpiresAt

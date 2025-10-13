@@ -330,8 +330,14 @@ func NewScriptStepExecutor(repository script.ScriptRepository, monitor *script.E
 // ExecuteStep implements workflow.StepExecutor interface
 func (e *ScriptStepExecutor) ExecuteStep(ctx context.Context, step workflow.Step, variables map[string]interface{}) (workflow.StepResult, error) {
 	// Parse script config from step config
-	config := &ScriptStepConfig{}
-	// TODO: Parse step.Config into ScriptStepConfig
+	config, err := parseScriptStepConfig(step.Config)
+	if err != nil {
+		return workflow.StepResult{
+			Status:    workflow.StatusFailed,
+			StartTime: time.Now(),
+			Error:     fmt.Sprintf("failed to parse script step config: %v", err),
+		}, err
+	}
 
 	// Create script node
 	node := NewScriptNode(step.Name, step.Name, config, e.repository, e.monitor, e.keyManager)
@@ -370,4 +376,84 @@ func (e *ScriptStepExecutor) SetDNAProvider(provider script.DNAProvider) {
 // SetConfigProvider sets the config provider
 func (e *ScriptStepExecutor) SetConfigProvider(provider script.ConfigProvider) {
 	e.configProvider = provider
+}
+
+// parseScriptStepConfig converts a map[string]interface{} to ScriptStepConfig
+func parseScriptStepConfig(configMap map[string]interface{}) (*ScriptStepConfig, error) {
+	if configMap == nil {
+		return &ScriptStepConfig{}, nil
+	}
+
+	config := &ScriptStepConfig{}
+
+	// Parse string fields
+	if scriptID, ok := configMap["script_id"].(string); ok {
+		config.ScriptID = scriptID
+	}
+	if scriptVersion, ok := configMap["script_version"].(string); ok {
+		config.ScriptVersion = scriptVersion
+	}
+	if inlineScript, ok := configMap["inline_script"].(string); ok {
+		config.InlineScript = inlineScript
+	}
+	if shell, ok := configMap["shell"].(string); ok {
+		config.Shell = script.ShellType(shell)
+	}
+
+	// Parse parameters map
+	if params, ok := configMap["parameters"].(map[string]interface{}); ok {
+		config.Parameters = make(map[string]string)
+		for k, v := range params {
+			if strVal, ok := v.(string); ok {
+				config.Parameters[k] = strVal
+			} else {
+				config.Parameters[k] = fmt.Sprintf("%v", v)
+			}
+		}
+	}
+
+	// Parse devices slice
+	if devices, ok := configMap["devices"].([]interface{}); ok {
+		config.Devices = make([]string, 0, len(devices))
+		for _, d := range devices {
+			if devStr, ok := d.(string); ok {
+				config.Devices = append(config.Devices, devStr)
+			}
+		}
+	}
+
+	// Parse timeout duration
+	if timeout, ok := configMap["timeout"].(string); ok {
+		if duration, err := time.ParseDuration(timeout); err == nil {
+			config.Timeout = duration
+		}
+	} else if timeoutInt, ok := configMap["timeout"].(int64); ok {
+		config.Timeout = time.Duration(timeoutInt)
+	} else if timeoutInt, ok := configMap["timeout"].(int); ok {
+		config.Timeout = time.Duration(timeoutInt)
+	}
+
+	// Parse boolean fields
+	if captureOutput, ok := configMap["capture_output"].(bool); ok {
+		config.CaptureOutput = captureOutput
+	}
+	if generateAPIKey, ok := configMap["generate_api_key"].(bool); ok {
+		config.GenerateAPIKey = generateAPIKey
+	}
+	if waitForCompletion, ok := configMap["wait_for_completion"].(bool); ok {
+		config.WaitForCompletion = waitForCompletion
+	}
+
+	// Parse API key TTL
+	if apiKeyTTL, ok := configMap["api_key_ttl"].(string); ok {
+		if duration, err := time.ParseDuration(apiKeyTTL); err == nil {
+			config.APIKeyTTL = duration
+		}
+	} else if apiKeyTTLInt, ok := configMap["api_key_ttl"].(int64); ok {
+		config.APIKeyTTL = time.Duration(apiKeyTTLInt)
+	} else if apiKeyTTLInt, ok := configMap["api_key_ttl"].(int); ok {
+		config.APIKeyTTL = time.Duration(apiKeyTTLInt)
+	}
+
+	return config, nil
 }

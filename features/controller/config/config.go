@@ -14,22 +14,25 @@ import (
 type Config struct {
 	// Controller listen address
 	ListenAddr string `yaml:"listen_addr"`
-	
+
+	// External URL for controller API callbacks (used by scripts and external integrations)
+	ExternalURL string `yaml:"external_url"`
+
 	// Path to TLS certificates (legacy support)
 	CertPath string `yaml:"cert_path"`
-	
+
 	// Data directory
 	DataDir string `yaml:"data_dir"`
-	
+
 	// Log level (debug, info, warn, error)
 	LogLevel string `yaml:"log_level"`
-	
+
 	// Certificate management configuration
 	Certificate *CertificateConfig `yaml:"certificate"`
-	
+
 	// Storage configuration for global storage provider system
 	Storage *StorageConfig `yaml:"storage"`
-	
+
 	// Logging configuration for global logging provider system
 	Logging *LoggingConfig `yaml:"logging"`
 
@@ -309,10 +312,11 @@ type QUICConfig struct {
 // DefaultConfig returns a Config with reasonable defaults
 func DefaultConfig() *Config {
 	return &Config{
-		ListenAddr: "127.0.0.1:8080",
-		CertPath:   "certs/",
-		DataDir:    "data/",
-		LogLevel:   "info",
+		ListenAddr:  "127.0.0.1:8080",
+		ExternalURL: "https://localhost:8080", // Default external URL
+		CertPath:    "certs/",
+		DataDir:     "data/",
+		LogLevel:    "info",
 		Certificate: &CertificateConfig{
 			EnableCertManagement:   true,
 			CAPath:                "certs/ca",
@@ -456,7 +460,11 @@ func Load() (*Config, error) {
 	if addr := os.Getenv("CFGMS_LISTEN_ADDR"); addr != "" {
 		cfg.ListenAddr = addr
 	}
-	
+
+	if externalURL := os.Getenv("CFGMS_EXTERNAL_URL"); externalURL != "" {
+		cfg.ExternalURL = externalURL
+	}
+
 	if certPath := os.Getenv("CFGMS_CERT_PATH"); certPath != "" {
 		cfg.CertPath = certPath
 	}

@@ -15,7 +15,7 @@ func TestExecutionQueueBasics(t *testing.T) {
 	keyManager := NewEphemeralKeyManager()
 	defer keyManager.Stop()
 
-	queue := NewExecutionQueue(monitor, keyManager, 1*time.Hour)
+	queue := NewExecutionQueue(monitor, keyManager, 1*time.Hour, "https://localhost:8080")
 
 	execution := &QueuedExecution{
 		ExecutionID:   "exec-001",
@@ -55,7 +55,7 @@ func TestExecutionQueueMultipleDevices(t *testing.T) {
 	keyManager := NewEphemeralKeyManager()
 	defer keyManager.Stop()
 
-	queue := NewExecutionQueue(monitor, keyManager, 1*time.Hour)
+	queue := NewExecutionQueue(monitor, keyManager, 1*time.Hour, "https://localhost:8080")
 
 	// Queue executions for multiple devices
 	for i := 1; i <= 3; i++ {
@@ -97,7 +97,7 @@ func TestExecutionQueueExpiration(t *testing.T) {
 	keyManager := NewEphemeralKeyManager()
 	defer keyManager.Stop()
 
-	queue := NewExecutionQueue(monitor, keyManager, 100*time.Millisecond)
+	queue := NewExecutionQueue(monitor, keyManager, 100*time.Millisecond, "https://localhost:8080")
 
 	execution := &QueuedExecution{
 		ExecutionID:   "exec-001",
@@ -124,7 +124,7 @@ func TestExecutionQueueCancellation(t *testing.T) {
 	keyManager := NewEphemeralKeyManager()
 	defer keyManager.Stop()
 
-	queue := NewExecutionQueue(monitor, keyManager, 1*time.Hour)
+	queue := NewExecutionQueue(monitor, keyManager, 1*time.Hour, "https://localhost:8080")
 
 	// Queue multiple executions
 	for i := 1; i <= 3; i++ {
@@ -164,7 +164,7 @@ func TestExecutionQueueCancelNonExistent(t *testing.T) {
 	keyManager := NewEphemeralKeyManager()
 	defer keyManager.Stop()
 
-	queue := NewExecutionQueue(monitor, keyManager, 1*time.Hour)
+	queue := NewExecutionQueue(monitor, keyManager, 1*time.Hour, "https://localhost:8080")
 
 	// Try to cancel from empty queue
 	err := queue.CancelExecution("device-001", "exec-001")
@@ -193,7 +193,7 @@ func TestPrepareExecutionWithoutAPIKey(t *testing.T) {
 	keyManager := NewEphemeralKeyManager()
 	defer keyManager.Stop()
 
-	queue := NewExecutionQueue(monitor, keyManager, 1*time.Hour)
+	queue := NewExecutionQueue(monitor, keyManager, 1*time.Hour, "https://localhost:8080")
 
 	execution := &QueuedExecution{
 		ExecutionID:    "exec-001",
@@ -228,7 +228,7 @@ func TestPrepareExecutionWithAPIKey(t *testing.T) {
 	keyManager := NewEphemeralKeyManager()
 	defer keyManager.Stop()
 
-	queue := NewExecutionQueue(monitor, keyManager, 1*time.Hour)
+	queue := NewExecutionQueue(monitor, keyManager, 1*time.Hour, "https://localhost:8080")
 
 	execution := &QueuedExecution{
 		ExecutionID:       "exec-001",
@@ -278,7 +278,7 @@ func TestPrepareExecutionDefaultAPIKeySettings(t *testing.T) {
 	keyManager := NewEphemeralKeyManager()
 	defer keyManager.Stop()
 
-	queue := NewExecutionQueue(monitor, keyManager, 1*time.Hour)
+	queue := NewExecutionQueue(monitor, keyManager, 1*time.Hour, "https://localhost:8080")
 
 	execution := &QueuedExecution{
 		ExecutionID:    "exec-001",
@@ -319,7 +319,7 @@ func TestQueueStatistics(t *testing.T) {
 	keyManager := NewEphemeralKeyManager()
 	defer keyManager.Stop()
 
-	queue := NewExecutionQueue(monitor, keyManager, 100*time.Millisecond)
+	queue := NewExecutionQueue(monitor, keyManager, 100*time.Millisecond, "https://localhost:8080")
 
 	// Queue some executions
 	for i := 1; i <= 3; i++ {
@@ -365,7 +365,7 @@ func TestListQueuedExecutions(t *testing.T) {
 	keyManager := NewEphemeralKeyManager()
 	defer keyManager.Stop()
 
-	queue := NewExecutionQueue(monitor, keyManager, 1*time.Hour)
+	queue := NewExecutionQueue(monitor, keyManager, 1*time.Hour, "https://localhost:8080")
 
 	// Queue executions
 	for i := 1; i <= 2; i++ {
@@ -398,7 +398,7 @@ func TestCleanupExpired(t *testing.T) {
 	keyManager := NewEphemeralKeyManager()
 	defer keyManager.Stop()
 
-	queue := NewExecutionQueue(monitor, keyManager, 100*time.Millisecond)
+	queue := NewExecutionQueue(monitor, keyManager, 100*time.Millisecond, "https://localhost:8080")
 
 	// Queue executions with short expiry
 	for i := 1; i <= 5; i++ {
@@ -431,7 +431,7 @@ func TestDequeuePartialExpiration(t *testing.T) {
 	keyManager := NewEphemeralKeyManager()
 	defer keyManager.Stop()
 
-	queue := NewExecutionQueue(monitor, keyManager, 1*time.Hour)
+	queue := NewExecutionQueue(monitor, keyManager, 1*time.Hour, "https://localhost:8080")
 
 	// Queue 3 executions
 	for i := 1; i <= 3; i++ {
@@ -472,7 +472,7 @@ func TestQueueExecutionAutoTimestamps(t *testing.T) {
 	keyManager := NewEphemeralKeyManager()
 	defer keyManager.Stop()
 
-	queue := NewExecutionQueue(monitor, keyManager, 2*time.Hour)
+	queue := NewExecutionQueue(monitor, keyManager, 2*time.Hour, "https://localhost:8080")
 
 	execution := &QueuedExecution{
 		ExecutionID:   "exec-001",
@@ -506,7 +506,7 @@ func TestPeekReturnsDeepCopy(t *testing.T) {
 	keyManager := NewEphemeralKeyManager()
 	defer keyManager.Stop()
 
-	queue := NewExecutionQueue(monitor, keyManager, 1*time.Hour)
+	queue := NewExecutionQueue(monitor, keyManager, 1*time.Hour, "https://localhost:8080")
 
 	execution := &QueuedExecution{
 		ExecutionID:   "exec-001",

@@ -78,7 +78,7 @@ func (m *ExecutionMonitor) StartExecution(ctx context.Context, scriptID, scriptN
 	for i, deviceID := range deviceIDs {
 		devices[i] = DeviceExecution{
 			DeviceID:   deviceID,
-			DeviceName: deviceID, // TODO: Look up device name from directory
+			DeviceName: deviceID, // Use deviceID as name until directory service integration is available
 			Status:     StatusPending,
 			StartTime:  time.Now(),
 		}
