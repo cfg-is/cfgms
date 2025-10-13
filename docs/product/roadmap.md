@@ -505,79 +505,76 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 
 #### v0.6.0 (Alpha) - Finalizing Foundational Endpoint CMS
 
-**Goal**: Complete the foundational endpoint configuration management capabilities with advanced script execution, configuration templates, Windows patch compliance, and comprehensive performance monitoring for both endpoints and controller infrastructure.
+**Status**: 📋 Planned - 65 story points (5 stories)
+**Goal**: Complete foundational endpoint CMS with policy-driven automation, compliance templates, and proactive performance management
+**Epic Document**: [v0.6.0-epic.md](./v0.6.0-epic.md)
+**Timeline**: 12 weeks (3 months) - Target Q2 2026
 
-**✅ Epic: v0.6.0 - Finalizing Foundational Endpoint CMS**
+**Design Principle**: Configuration as policy, CFGMS as continuous enforcement
+
+**Epic: v0.6.0 - Finalizing Foundational Endpoint CMS**
 
 - [ ] **Advanced Script Execution Capabilities** (Story 1) - 13 points
-  - Script versioning and revision control with rollback capabilities
-  - Advanced parameter handling with type validation and default values
-  - Execution environment isolation with sandboxing and resource limits
-  - Multi-platform script support (PowerShell, Bash, Python, batch)
-  - Script execution scheduling with cron-like syntax and dependencies
-  - Real-time execution monitoring with stdout/stderr streaming
-  - Script library management with reusable templates and sharing
-  - Exit code handling and automatic retry mechanisms
-  - Integration with workflow engine for complex orchestration
+  - Git-versioned scripts with semantic versioning
+  - DNA-based parameter injection (`$DNA.OS.Version`, `$CompanySettings.BackupPath`)
+  - Ephemeral API keys for script-to-controller callbacks
+  - Multi-platform support (PowerShell, Bash/zsh, Python, batch/cmd)
+  - Workflow engine integration (scheduling, orchestration, dependencies)
+  - Real-time monitoring (aggregated view for bulk, drill-down for individuals)
+  - Global template library + per-MSP git repositories
+  - Exit code capture and workflow-based retry logic
+  - No execution sandboxing (endpoint management scripts, not untrusted code)
 
-- [ ] **Advanced Configuration Management** (Story 2) - 13 points
-  - Enhanced configuration validation with schema enforcement
-  - Configuration dependency tracking and impact analysis
-  - Atomic configuration updates with transaction support
-  - Configuration testing framework (dry-run, validation, simulation)
-  - Configuration comparison and merge capabilities
-  - Advanced conflict resolution with manual override support
-  - Configuration locking to prevent concurrent modifications
-  - Integration with DNA system for configuration compliance
-  - Multi-environment configuration promotion workflows
+- [ ] **Configuration Templates (Advanced)** (Story 2) - 13 points
+  - 5 core compliance templates (CIS Level 1 + CMMC Level 1)
+    - CIS Windows 10/11 Enterprise Level 1
+    - CIS Windows Server 2019/2022 Level 1
+    - CIS macOS Ventura/Sonoma Level 1
+    - CIS Ubuntu/Debian Level 1
+    - CMMC Level 1 Windows (all versions)
+  - OSS template marketplace (GitHub-based, community contributions)
+  - Template testing framework (unit tests, test scenarios)
+  - Compliance validation via DNA + drift detection
+  - Template versioning and collaboration workflows
+  - Extends Story 76 basic templates
 
-- [ ] **Configuration Templates (Advanced)** (Story 3) - 13 points
-  - Template marketplace with community-contributed configurations
-  - Advanced template inheritance with multi-level cascading
-  - Template parameterization with complex validation rules
-  - Conditional template sections based on DNA attributes
-  - Template versioning with semantic versioning support
-  - Template testing framework with validation scenarios
-  - Template documentation and usage examples
-  - Integration with compliance frameworks (CIS, NIST, PCI-DSS)
-  - Template sharing and collaboration workflows
+- [ ] **Windows Patch Compliance (Advanced)** (Story 3) - 13 points
+  - Policy-driven patching (declarative config, automatic enforcement)
+  - Patch type policies (Critical: 7 days, Important: 14 days, etc.)
+  - Major version upgrades (Win 10→11, 23H2→24H2) with DNA compatibility checks
+  - Windows Update COM API integration (no WSUS/WUfB dependency)
+  - Generic maintenance windows (honored by ALL reboot operations, not just patching)
+  - Proactive compliance alerting (7 days warning, 1 day critical)
+  - Basic compliance reporting (patch status, days until breach)
+  - Windows built-in rollback handles failed upgrades
+  - No canary deployment (deferred to global ring system backlog)
 
-- [ ] **Windows Patch Compliance (Advanced)** (Story 4) - 13 points
-  - Major version upgrade orchestration (Win 10 → Win 11, 23H2 → 24H2)
-  - Pre-upgrade compatibility validation using DNA system
-  - Automated rollback on failed major version upgrades
-  - Maintenance window enforcement with business hours awareness
-  - Patch testing framework with canary deployment support
-  - Advanced patch scheduling with dependency-aware ordering
-  - WSUS/Windows Update integration with approval workflows
-  - Compliance reporting for patch status across fleet
-  - Integration with change management workflows
+- [ ] **Endpoint Performance Monitoring** (Story 4) - 13 points
+  - Performance metrics (separate from DNA system)
+    - DNA: System "blueprint" (hardware specs, installed software)
+    - Performance: System "vital signs" (CPU/memory/disk/network utilization)
+  - Basic resource metrics (CPU overall, memory, disk I/O, network, online status)
+  - Top 10 CPU/memory consumers per device
+  - Process/service watchlist (alert if missing/stopped, optional auto-start)
+  - Threshold-based alerting (warning/critical levels, sustained duration)
+  - Time-series storage (InfluxDB/TimescaleDB, 30-day retention, configurable)
+  - Workflow-triggered remediation (no automatic service restarts)
+  - Multi-platform support (Windows/Linux/macOS) from day 1
+  - Collection: 60 seconds default (configurable), <1% CPU overhead
 
-- [ ] **Endpoint Performance Monitoring** (Story 5) - 13 points
-  - Real-time endpoint performance metrics collection
-  - Performance baseline establishment and anomaly detection
-  - Resource utilization tracking (CPU, memory, disk, network)
-  - Application performance monitoring with process-level detail
-  - Performance trend analysis and predictive alerting
-  - Integration with DNA system for historical correlation
-  - Performance dashboards and reporting
-  - Automated remediation workflows for performance issues
-  - Multi-platform support (Windows, Linux, macOS)
-
-- [ ] **Server/Controller Performance Monitoring** (Story 6) - 13-21 points (HIGH PRIORITY - MSP Operations)
-  - Proactive controller performance detection before MSP impact
-  - Real-time cluster performance metrics (MQTT, gRPC, database, memory, CPU)
-  - Performance baseline and anomaly detection with predictive alerting
-  - MSP-focused impact classification (Critical/High/Medium)
-  - Per-tenant performance tracking with SLA risk assessment
-  - Automated self-healing (connection pool expansion, load shedding, cache warming)
-  - Cluster load balancing with tenant migration and circuit breakers
-  - Alert escalation automation with runbook integration
-  - Performance dashboards for MSP administrators with drill-down
-  - Distributed tracing and diagnostic data collection
-  - Integration with existing HA infrastructure and monitoring tools
-  - OpenTelemetry export and webhook notifications
-  - 90-day historical performance retention
+- [ ] **Server/Controller Performance Monitoring** (Story 5) - 13 points (HIGH PRIORITY - MSP Operations)
+  - Proactive MSP impact detection (detect issues within 30 seconds, before customer impact)
+  - Controller metrics (MQTT broker, database, application queues, system resources)
+  - Focus: Workflow/script queue depth monitoring (MSPs feel delays immediately)
+  - MSP impact classification (Critical/High/Medium)
+  - Automated self-healing (conservative: expand connection pools, cache warming, defer non-critical ops)
+  - Admin-approved tenant migration (automatic detection, manual approval, <60 second migration)
+  - Circuit breaker patterns (database, external API, MQTT broker)
+  - Email-based alert escalation (warning/critical/emergency tiers)
+  - Basic request logging for tracing (request ID propagation, CLI tool for reconstruction)
+  - API endpoints + CLI tools (`cfgctl controller status`, `cfgctl trace <request_id>`)
+  - 90-day performance retention (10-second intervals for 7 days, 1-minute for 90 days)
+  - No per-tenant tracking, no full OpenTelemetry (deferred to future)
 
 #### v0.7.0 (Pre-OSS / Alpha) - Open Source Preparation
 
