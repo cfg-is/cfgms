@@ -505,7 +505,7 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 
 #### v0.6.0 (Alpha) - Finalizing Foundational Endpoint CMS
 
-**Status**: 📋 Planned - 60 story points (5 stories)
+**Status**: 🚧 IN PROGRESS - 13/60 story points (5 stories) - 22% complete
 **Goal**: Complete foundational endpoint CMS with policy-driven automation, compliance templates, and proactive performance management
 **Epic Document**: [v0.6.0-epic.md](./v0.6.0-epic.md)
 **Timeline**: 12 weeks (3 months) - Target Q2 2026
@@ -514,7 +514,7 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 
 **Epic: v0.6.0 - Finalizing Foundational Endpoint CMS**
 
-- [ ] **Advanced Script Execution Capabilities** (Issue #210) - 13 points
+- [x] **Advanced Script Execution Capabilities** (Issue #210) - 13 points ✅ COMPLETED
   - Git-versioned scripts with semantic versioning
   - DNA-based parameter injection (`$DNA.OS.Version`, `$CompanySettings.BackupPath`)
   - Ephemeral API keys for script-to-controller callbacks
