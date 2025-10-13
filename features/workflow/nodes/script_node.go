@@ -1,10 +1,11 @@
-package script
+package nodes
 
 import (
 	"context"
 	"fmt"
 	"time"
 
+	"github.com/cfgis/cfgms/features/modules/script"
 	"github.com/cfgis/cfgms/features/workflow"
 )
 
@@ -20,7 +21,7 @@ type ScriptStepConfig struct {
 	InlineScript string `yaml:"inline_script,omitempty" json:"inline_script,omitempty"`
 
 	// Shell is the shell type to use
-	Shell ShellType `yaml:"shell" json:"shell"`
+	Shell script.ShellType `yaml:"shell" json:"shell"`
 
 	// Parameters are custom parameters to pass to the script
 	Parameters map[string]string `yaml:"parameters,omitempty" json:"parameters,omitempty"`
@@ -96,16 +97,16 @@ type NotificationConfig struct {
 type ScriptNode struct {
 	workflow.BaseNode
 	config          *ScriptStepConfig
-	repository      ScriptRepository
-	executor        *Executor
-	monitor         *ExecutionMonitor
-	keyManager      *EphemeralKeyManager
-	dnaProvider     DNAProvider
-	configProvider  ConfigProvider
+	repository      script.ScriptRepository
+	executor        *script.Executor
+	monitor         *script.ExecutionMonitor
+	keyManager      *script.EphemeralKeyManager
+	dnaProvider     script.DNAProvider
+	configProvider  script.ConfigProvider
 }
 
 // NewScriptNode creates a new script execution node
-func NewScriptNode(id, name string, config *ScriptStepConfig, repository ScriptRepository, monitor *ExecutionMonitor, keyManager *EphemeralKeyManager) *ScriptNode {
+func NewScriptNode(id, name string, config *ScriptStepConfig, repository script.ScriptRepository, monitor *script.ExecutionMonitor, keyManager *script.EphemeralKeyManager) *ScriptNode {
 	return &ScriptNode{
 		BaseNode: workflow.BaseNode{
 			ID:   id,
@@ -123,7 +124,7 @@ func NewScriptNode(id, name string, config *ScriptStepConfig, repository ScriptR
 func (n *ScriptNode) Execute(ctx context.Context, input workflow.NodeInput) (workflow.NodeOutput, error) {
 	// Get script content
 	var scriptContent string
-	var metadata *ScriptMetadata
+	var metadata *script.ScriptMetadata
 
 	if n.config.InlineScript != "" {
 		// Use inline script
@@ -148,7 +149,7 @@ func (n *ScriptNode) Execute(ctx context.Context, input workflow.NodeInput) (wor
 
 	// Inject parameters
 	if n.dnaProvider != nil || n.configProvider != nil {
-		injector := NewParameterInjector(n.dnaProvider, n.configProvider)
+		injector := script.NewParameterInjector(n.dnaProvider, n.configProvider)
 		injectedContent, err := injector.InjectParameters(scriptContent, n.config.Parameters)
 		if err != nil {
 			return workflow.NodeOutput{
@@ -179,7 +180,7 @@ func (n *ScriptNode) Execute(ctx context.Context, input workflow.NodeInput) (wor
 	}
 
 	// Generate ephemeral API key if requested
-	var apiKey *EphemeralAPIKey
+	var apiKey *script.EphemeralAPIKey
 	if n.config.GenerateAPIKey && n.keyManager != nil {
 		ttl := n.config.APIKeyTTL
 		if ttl == 0 {
@@ -191,7 +192,7 @@ func (n *ScriptNode) Execute(ctx context.Context, input workflow.NodeInput) (wor
 			"", // tenantID
 			deviceIDs[0],
 			ttl,
-			ScriptCallbackPermissions(),
+			script.ScriptCallbackPermissions(),
 			0, // unlimited usage
 		)
 		if err != nil {
@@ -203,10 +204,10 @@ func (n *ScriptNode) Execute(ctx context.Context, input workflow.NodeInput) (wor
 	}
 
 	// Execute script on each device
-	results := make(map[string]*ExecutionResult)
+	results := make(map[string]*script.ExecutionResult)
 	for _, deviceID := range deviceIDs {
 		// Create script config
-		scriptConfig := &ScriptConfig{
+		scriptConfig := &script.ScriptConfig{
 			Content:     scriptContent,
 			Shell:       n.config.Shell,
 			Timeout:     n.config.Timeout,
@@ -221,13 +222,13 @@ func (n *ScriptNode) Execute(ctx context.Context, input workflow.NodeInput) (wor
 		}
 
 		// Execute script
-		executor := NewExecutor(scriptConfig)
+		executor := script.NewExecutor(scriptConfig)
 		result, execErr := executor.Execute(ctx)
 
 		// Update execution monitor
-		status := StatusCompleted
+		status := script.StatusCompleted
 		if execErr != nil {
-			status = StatusFailed
+			status = script.StatusFailed
 		}
 		_ = n.monitor.UpdateDeviceStatus(execution.ID, deviceID, status, result, execErr)
 
@@ -258,7 +259,7 @@ func (n *ScriptNode) Execute(ctx context.Context, input workflow.NodeInput) (wor
 				if err != nil {
 					continue
 				}
-				if exec.Status == StatusCompleted || exec.Status == StatusFailed {
+				if exec.Status == script.StatusCompleted || exec.Status == script.StatusFailed {
 					goto ExecutionComplete
 				}
 			}
@@ -286,7 +287,7 @@ ExecutionComplete:
 		outputData["api_key"] = apiKey.Key
 	}
 
-	success := finalExecution.Status == StatusCompleted
+	success := finalExecution.Status == script.StatusCompleted
 	errorMsg := ""
 	if !success {
 		errorMsg = fmt.Sprintf("script execution failed: %d devices failed", finalExecution.Summary.Failed)
@@ -300,26 +301,26 @@ ExecutionComplete:
 }
 
 // SetDNAProvider sets the DNA provider for parameter injection
-func (n *ScriptNode) SetDNAProvider(provider DNAProvider) {
+func (n *ScriptNode) SetDNAProvider(provider script.DNAProvider) {
 	n.dnaProvider = provider
 }
 
 // SetConfigProvider sets the config provider for parameter injection
-func (n *ScriptNode) SetConfigProvider(provider ConfigProvider) {
+func (n *ScriptNode) SetConfigProvider(provider script.ConfigProvider) {
 	n.configProvider = provider
 }
 
 // ScriptStepExecutor executes script workflow steps
 type ScriptStepExecutor struct {
-	repository  ScriptRepository
-	monitor     *ExecutionMonitor
-	keyManager  *EphemeralKeyManager
-	dnaProvider DNAProvider
-	configProvider ConfigProvider
+	repository  script.ScriptRepository
+	monitor     *script.ExecutionMonitor
+	keyManager  *script.EphemeralKeyManager
+	dnaProvider script.DNAProvider
+	configProvider script.ConfigProvider
 }
 
 // NewScriptStepExecutor creates a new script step executor
-func NewScriptStepExecutor(repository ScriptRepository, monitor *ExecutionMonitor, keyManager *EphemeralKeyManager) *ScriptStepExecutor {
+func NewScriptStepExecutor(repository script.ScriptRepository, monitor *script.ExecutionMonitor, keyManager *script.EphemeralKeyManager) *ScriptStepExecutor {
 	return &ScriptStepExecutor{
 		repository: repository,
 		monitor:    monitor,
@@ -363,11 +364,11 @@ func (e *ScriptStepExecutor) ExecuteStep(ctx context.Context, step workflow.Step
 }
 
 // SetDNAProvider sets the DNA provider
-func (e *ScriptStepExecutor) SetDNAProvider(provider DNAProvider) {
+func (e *ScriptStepExecutor) SetDNAProvider(provider script.DNAProvider) {
 	e.dnaProvider = provider
 }
 
 // SetConfigProvider sets the config provider
-func (e *ScriptStepExecutor) SetConfigProvider(provider ConfigProvider) {
+func (e *ScriptStepExecutor) SetConfigProvider(provider script.ConfigProvider) {
 	e.configProvider = provider
 }
