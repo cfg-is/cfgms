@@ -1,0 +1,178 @@
+metadata:
+  id: system-health-check
+  name: System Health Check
+  description: Performs comprehensive system health check including disk, CPU, memory, and services
+  version:
+    major: 1
+    minor: 0
+    patch: 0
+  author: cfgms-team@cfg.is
+  tags:
+    - monitoring
+    - health-check
+    - diagnostics
+    - cross-platform
+  category: monitoring
+  platform:
+    - linux
+    - darwin
+  shell: bash
+  parameters:
+    - name: DISK_THRESHOLD
+      type: number
+      description: Disk usage warning threshold (percentage)
+      required: false
+      default: "85"
+    - name: MEMORY_THRESHOLD
+      type: number
+      description: Memory usage warning threshold (percentage)
+      required: false
+      default: "90"
+    - name: CPU_THRESHOLD
+      type: number
+      description: CPU usage warning threshold (percentage)
+      required: false
+      default: "90"
+  created_at: 2025-10-13T00:00:00Z
+  updated_at: 2025-10-13T00:00:00Z
+
+content: |
+  #!/bin/bash
+  set -euo pipefail
+
+  # System Health Check Script
+  # Compatible with Linux and macOS
+
+  DISK_THRESHOLD=${DISK_THRESHOLD:-85}
+  MEMORY_THRESHOLD=${MEMORY_THRESHOLD:-90}
+  CPU_THRESHOLD=${CPU_THRESHOLD:-90}
+
+  WARNINGS=0
+  CRITICALS=0
+
+  echo "========================================="
+  echo "  SYSTEM HEALTH CHECK"
+  echo "========================================="
+  echo ""
+  echo "Timestamp: $(date)"
+  echo "Hostname: $(hostname)"
+  echo "Uptime: $(uptime | awk '{print $3, $4}' | sed 's/,//')"
+  echo ""
+
+  # Disk Space Check
+  echo "--- Disk Space ---"
+  df -h | grep -vE '^Filesystem|tmpfs|cdrom|loop' | awk '{print $5 " " $1 " " $6}' | while read output; do
+      usage=$(echo "$output" | awk '{print $1}' | sed 's/%//')
+      partition=$(echo "$output" | awk '{print $2}')
+      mountpoint=$(echo "$output" | awk '{print $3}')
+
+      if [ "$usage" -ge "$DISK_THRESHOLD" ]; then
+          echo "  [WARNING] $mountpoint ($partition): ${usage}% used (threshold: ${DISK_THRESHOLD}%)"
+          ((WARNINGS++))
+      else
+          echo "  [OK] $mountpoint ($partition): ${usage}% used"
+      fi
+  done
+
+  # Memory Check
+  echo ""
+  echo "--- Memory Usage ---"
+  if [ "$(uname)" = "Darwin" ]; then
+      # macOS
+      memory_usage=$(vm_stat | perl -ne '/page size of (\d+)/ and $size=$1; /Pages\s+([^:]+)[^\d]+(\d+)/ and printf("%-16s % 16.2f Mi\n", "$1:", $2 * $size / 1048576);' | awk '/free:/{free=$2} /active:/{active=$2} /inactive:/{inactive=$2} /wired:/{wired=$2} END{used=active+wired; total=used+free+inactive; printf "%.0f", (used/total)*100}')
+  else
+      # Linux
+      memory_usage=$(free | grep Mem | awk '{printf "%.0f", ($3/$2) * 100.0}')
+  fi
+
+  if [ "$memory_usage" -ge "$MEMORY_THRESHOLD" ]; then
+      echo "  [WARNING] Memory usage: ${memory_usage}% (threshold: ${MEMORY_THRESHOLD}%)"
+      ((WARNINGS++))
+  else
+      echo "  [OK] Memory usage: ${memory_usage}%"
+  fi
+
+  # CPU Load Check
+  echo ""
+  echo "--- CPU Load ---"
+  if [ "$(uname)" = "Darwin" ]; then
+      load_avg=$(sysctl -n vm.loadavg | awk '{print $2}')
+      cpu_count=$(sysctl -n hw.ncpu)
+  else
+      load_avg=$(cat /proc/loadavg | awk '{print $1}')
+      cpu_count=$(nproc)
+  fi
+
+  load_percent=$(echo "scale=0; ($load_avg / $cpu_count) * 100" | bc)
+
+  if [ "$load_percent" -ge "$CPU_THRESHOLD" ]; then
+      echo "  [WARNING] CPU load: ${load_percent}% (${load_avg} on ${cpu_count} cores, threshold: ${CPU_THRESHOLD}%)"
+      ((WARNINGS++))
+  else
+      echo "  [OK] CPU load: ${load_percent}% (${load_avg} on ${cpu_count} cores)"
+  fi
+
+  # Critical Services Check (if systemd is available)
+  echo ""
+  echo "--- Critical Services ---"
+  if command -v systemctl >/dev/null 2>&1; then
+      failed_services=$(systemctl list-units --type=service --state=failed --no-pager --no-legend | wc -l)
+      if [ "$failed_services" -gt 0 ]; then
+          echo "  [CRITICAL] $failed_services service(s) in failed state:"
+          systemctl list-units --type=service --state=failed --no-pager --no-legend | awk '{print "    - " $1}'
+          ((CRITICALS++))
+      else
+          echo "  [OK] All services running normally"
+      fi
+  else
+      echo "  [SKIP] systemctl not available"
+  fi
+
+  # Security Updates Check (Linux only)
+  if [ "$(uname)" = "Linux" ]; then
+      echo ""
+      echo "--- Security Updates ---"
+      if command -v apt-get >/dev/null 2>&1; then
+          security_updates=$(apt-get upgrade -s 2>/dev/null | grep -i security | wc -l)
+          if [ "$security_updates" -gt 0 ]; then
+              echo "  [WARNING] $security_updates security update(s) available"
+              ((WARNINGS++))
+          else
+              echo "  [OK] No pending security updates"
+          fi
+      elif command -v yum >/dev/null 2>&1; then
+          security_updates=$(yum list updates --security 2>/dev/null | grep -v "^Loaded plugins" | grep -v "^Updated" | wc -l)
+          if [ "$security_updates" -gt 0 ]; then
+              echo "  [WARNING] $security_updates security update(s) available"
+              ((WARNINGS++))
+          else
+              echo "  [OK] No pending security updates"
+          fi
+      else
+          echo "  [SKIP] Package manager not supported"
+      fi
+  fi
+
+  # Summary
+  echo ""
+  echo "========================================="
+  echo "  SUMMARY"
+  echo "========================================="
+  echo "Warnings: $WARNINGS"
+  echo "Critical: $CRITICALS"
+
+  if [ "$CRITICALS" -gt 0 ]; then
+      echo ""
+      echo "Result: CRITICAL"
+      exit 2
+  elif [ "$WARNINGS" -gt 0 ]; then
+      echo ""
+      echo "Result: WARNING"
+      exit 1
+  else
+      echo ""
+      echo "Result: OK"
+      exit 0
+  fi
+
+hash: placeholder
