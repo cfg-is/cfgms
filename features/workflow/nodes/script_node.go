@@ -98,7 +98,6 @@ type ScriptNode struct {
 	workflow.BaseNode
 	config          *ScriptStepConfig
 	repository      script.ScriptRepository
-	executor        *script.Executor
 	monitor         *script.ExecutionMonitor
 	keyManager      *script.EphemeralKeyManager
 	dnaProvider     script.DNAProvider
