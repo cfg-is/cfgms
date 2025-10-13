@@ -1,0 +1,373 @@
+package script
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/cfgis/cfgms/features/workflow"
+)
+
+// ScriptStepConfig defines configuration for script execution workflow steps
+type ScriptStepConfig struct {
+	// ScriptID is the ID of the script to execute (from repository)
+	ScriptID string `yaml:"script_id,omitempty" json:"script_id,omitempty"`
+
+	// ScriptVersion is the specific version to execute (empty = latest)
+	ScriptVersion string `yaml:"script_version,omitempty" json:"script_version,omitempty"`
+
+	// InlineScript allows specifying script content directly
+	InlineScript string `yaml:"inline_script,omitempty" json:"inline_script,omitempty"`
+
+	// Shell is the shell type to use
+	Shell ShellType `yaml:"shell" json:"shell"`
+
+	// Parameters are custom parameters to pass to the script
+	Parameters map[string]string `yaml:"parameters,omitempty" json:"parameters,omitempty"`
+
+	// Devices specifies which devices to run the script on
+	Devices []string `yaml:"devices,omitempty" json:"devices,omitempty"`
+
+	// DeviceFilter allows filtering devices by criteria
+	DeviceFilter *DeviceFilter `yaml:"device_filter,omitempty" json:"device_filter,omitempty"`
+
+	// Timeout for script execution
+	Timeout time.Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+
+	// CaptureOutput determines if stdout/stderr should be captured
+	CaptureOutput bool `yaml:"capture_output,omitempty" json:"capture_output,omitempty"`
+
+	// GenerateAPIKey determines if an ephemeral API key should be generated
+	GenerateAPIKey bool `yaml:"generate_api_key,omitempty" json:"generate_api_key,omitempty"`
+
+	// APIKeyTTL is the time-to-live for the ephemeral API key
+	APIKeyTTL time.Duration `yaml:"api_key_ttl,omitempty" json:"api_key_ttl,omitempty"`
+
+	// WaitForCompletion determines if workflow should wait for script to complete
+	WaitForCompletion bool `yaml:"wait_for_completion,omitempty" json:"wait_for_completion,omitempty"`
+
+	// OnSuccess defines actions to take on successful execution
+	OnSuccess *ScriptActionConfig `yaml:"on_success,omitempty" json:"on_success,omitempty"`
+
+	// OnFailure defines actions to take on failed execution
+	OnFailure *ScriptActionConfig `yaml:"on_failure,omitempty" json:"on_failure,omitempty"`
+}
+
+// DeviceFilter defines criteria for filtering devices
+type DeviceFilter struct {
+	// Platform filters by platform (windows, linux, darwin)
+	Platform string `yaml:"platform,omitempty" json:"platform,omitempty"`
+
+	// DNAQuery filters by DNA properties
+	DNAQuery map[string]interface{} `yaml:"dna_query,omitempty" json:"dna_query,omitempty"`
+
+	// Tags filters by device tags
+	Tags []string `yaml:"tags,omitempty" json:"tags,omitempty"`
+
+	// Groups filters by device groups
+	Groups []string `yaml:"groups,omitempty" json:"groups,omitempty"`
+}
+
+// ScriptActionConfig defines actions to take based on script results
+type ScriptActionConfig struct {
+	// SetVariable sets workflow variables based on script output
+	SetVariable map[string]string `yaml:"set_variable,omitempty" json:"set_variable,omitempty"`
+
+	// TriggerWorkflow triggers another workflow
+	TriggerWorkflow string `yaml:"trigger_workflow,omitempty" json:"trigger_workflow,omitempty"`
+
+	// SendNotification sends a notification
+	SendNotification *NotificationConfig `yaml:"send_notification,omitempty" json:"send_notification,omitempty"`
+}
+
+// NotificationConfig defines notification configuration
+type NotificationConfig struct {
+	// Type is the notification type (email, webhook, slack, etc.)
+	Type string `yaml:"type" json:"type"`
+
+	// Recipients are the notification recipients
+	Recipients []string `yaml:"recipients" json:"recipients"`
+
+	// Message is the notification message
+	Message string `yaml:"message" json:"message"`
+}
+
+// ScriptNode implements the workflow.Node interface for script execution
+type ScriptNode struct {
+	workflow.BaseNode
+	config          *ScriptStepConfig
+	repository      ScriptRepository
+	executor        *Executor
+	monitor         *ExecutionMonitor
+	keyManager      *EphemeralKeyManager
+	dnaProvider     DNAProvider
+	configProvider  ConfigProvider
+}
+
+// NewScriptNode creates a new script execution node
+func NewScriptNode(id, name string, config *ScriptStepConfig, repository ScriptRepository, monitor *ExecutionMonitor, keyManager *EphemeralKeyManager) *ScriptNode {
+	return &ScriptNode{
+		BaseNode: workflow.BaseNode{
+			ID:   id,
+			Type: "script",
+			Name: name,
+		},
+		config:     config,
+		repository: repository,
+		monitor:    monitor,
+		keyManager: keyManager,
+	}
+}
+
+// Execute implements workflow.Node interface
+func (n *ScriptNode) Execute(ctx context.Context, input workflow.NodeInput) (workflow.NodeOutput, error) {
+	// Get script content
+	var scriptContent string
+	var metadata *ScriptMetadata
+
+	if n.config.InlineScript != "" {
+		// Use inline script
+		scriptContent = n.config.InlineScript
+	} else if n.config.ScriptID != "" {
+		// Get script from repository
+		script, err := n.repository.Get(n.config.ScriptID, n.config.ScriptVersion)
+		if err != nil {
+			return workflow.NodeOutput{
+				Success: false,
+				Error:   fmt.Sprintf("failed to get script: %v", err),
+			}, err
+		}
+		scriptContent = script.Content
+		metadata = script.Metadata
+	} else {
+		return workflow.NodeOutput{
+			Success: false,
+			Error:   "either script_id or inline_script must be specified",
+		}, fmt.Errorf("no script specified")
+	}
+
+	// Inject parameters
+	if n.dnaProvider != nil || n.configProvider != nil {
+		injector := NewParameterInjector(n.dnaProvider, n.configProvider)
+		injectedContent, err := injector.InjectParameters(scriptContent, n.config.Parameters)
+		if err != nil {
+			return workflow.NodeOutput{
+				Success: false,
+				Error:   fmt.Sprintf("failed to inject parameters: %v", err),
+			}, err
+		}
+		scriptContent = injectedContent
+	}
+
+	// Start execution monitoring
+	deviceIDs := n.config.Devices
+	if len(deviceIDs) == 0 {
+		deviceIDs = []string{"localhost"} // Default to localhost
+	}
+
+	scriptName := n.Name
+	if metadata != nil {
+		scriptName = metadata.Name
+	}
+
+	execution, err := n.monitor.StartExecution(ctx, n.config.ScriptID, scriptName, "", deviceIDs)
+	if err != nil {
+		return workflow.NodeOutput{
+			Success: false,
+			Error:   fmt.Sprintf("failed to start execution monitoring: %v", err),
+		}, err
+	}
+
+	// Generate ephemeral API key if requested
+	var apiKey *EphemeralAPIKey
+	if n.config.GenerateAPIKey && n.keyManager != nil {
+		ttl := n.config.APIKeyTTL
+		if ttl == 0 {
+			ttl = 1 * time.Hour // Default TTL
+		}
+		apiKey, err = n.keyManager.GenerateKey(
+			n.config.ScriptID,
+			execution.ID,
+			"", // tenantID
+			deviceIDs[0],
+			ttl,
+			ScriptCallbackPermissions(),
+			0, // unlimited usage
+		)
+		if err != nil {
+			return workflow.NodeOutput{
+				Success: false,
+				Error:   fmt.Sprintf("failed to generate API key: %v", err),
+			}, err
+		}
+	}
+
+	// Execute script on each device
+	results := make(map[string]*ExecutionResult)
+	for _, deviceID := range deviceIDs {
+		// Create script config
+		scriptConfig := &ScriptConfig{
+			Content:     scriptContent,
+			Shell:       n.config.Shell,
+			Timeout:     n.config.Timeout,
+			Environment: make(map[string]string),
+		}
+
+		// Add API key to environment if generated
+		if apiKey != nil {
+			scriptConfig.Environment["CFGMS_API_KEY"] = apiKey.Key
+			scriptConfig.Environment["CFGMS_EXECUTION_ID"] = execution.ID
+			scriptConfig.Environment["CFGMS_DEVICE_ID"] = deviceID
+		}
+
+		// Execute script
+		executor := NewExecutor(scriptConfig)
+		result, execErr := executor.Execute(ctx)
+
+		// Update execution monitor
+		status := StatusCompleted
+		if execErr != nil {
+			status = StatusFailed
+		}
+		_ = n.monitor.UpdateDeviceStatus(execution.ID, deviceID, status, result, execErr)
+
+		results[deviceID] = result
+	}
+
+	// Wait for completion if requested
+	if n.config.WaitForCompletion {
+		// Poll execution status until complete
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+
+		timeout := time.After(n.config.Timeout)
+		for {
+			select {
+			case <-ctx.Done():
+				return workflow.NodeOutput{
+					Success: false,
+					Error:   "execution cancelled",
+				}, ctx.Err()
+			case <-timeout:
+				return workflow.NodeOutput{
+					Success: false,
+					Error:   "execution timeout",
+				}, fmt.Errorf("timeout waiting for script completion")
+			case <-ticker.C:
+				exec, err := n.monitor.GetExecution(execution.ID)
+				if err != nil {
+					continue
+				}
+				if exec.Status == StatusCompleted || exec.Status == StatusFailed {
+					goto ExecutionComplete
+				}
+			}
+		}
+	}
+
+ExecutionComplete:
+	// Get final execution status
+	finalExecution, err := n.monitor.GetExecution(execution.ID)
+	if err != nil {
+		return workflow.NodeOutput{
+			Success: false,
+			Error:   fmt.Sprintf("failed to get execution status: %v", err),
+		}, err
+	}
+
+	// Build output
+	outputData := map[string]interface{}{
+		"execution_id": execution.ID,
+		"summary":      finalExecution.Summary,
+		"results":      results,
+	}
+
+	if apiKey != nil {
+		outputData["api_key"] = apiKey.Key
+	}
+
+	success := finalExecution.Status == StatusCompleted
+	errorMsg := ""
+	if !success {
+		errorMsg = fmt.Sprintf("script execution failed: %d devices failed", finalExecution.Summary.Failed)
+	}
+
+	return workflow.NodeOutput{
+		Data:    outputData,
+		Success: success,
+		Error:   errorMsg,
+	}, nil
+}
+
+// SetDNAProvider sets the DNA provider for parameter injection
+func (n *ScriptNode) SetDNAProvider(provider DNAProvider) {
+	n.dnaProvider = provider
+}
+
+// SetConfigProvider sets the config provider for parameter injection
+func (n *ScriptNode) SetConfigProvider(provider ConfigProvider) {
+	n.configProvider = provider
+}
+
+// ScriptStepExecutor executes script workflow steps
+type ScriptStepExecutor struct {
+	repository  ScriptRepository
+	monitor     *ExecutionMonitor
+	keyManager  *EphemeralKeyManager
+	dnaProvider DNAProvider
+	configProvider ConfigProvider
+}
+
+// NewScriptStepExecutor creates a new script step executor
+func NewScriptStepExecutor(repository ScriptRepository, monitor *ExecutionMonitor, keyManager *EphemeralKeyManager) *ScriptStepExecutor {
+	return &ScriptStepExecutor{
+		repository: repository,
+		monitor:    monitor,
+		keyManager: keyManager,
+	}
+}
+
+// ExecuteStep implements workflow.StepExecutor interface
+func (e *ScriptStepExecutor) ExecuteStep(ctx context.Context, step workflow.Step, variables map[string]interface{}) (workflow.StepResult, error) {
+	// Parse script config from step config
+	config := &ScriptStepConfig{}
+	// TODO: Parse step.Config into ScriptStepConfig
+
+	// Create script node
+	node := NewScriptNode(step.Name, step.Name, config, e.repository, e.monitor, e.keyManager)
+	node.SetDNAProvider(e.dnaProvider)
+	node.SetConfigProvider(e.configProvider)
+
+	// Execute node
+	startTime := time.Now()
+	output, err := node.Execute(ctx, workflow.NodeInput{
+		Data:    variables,
+		Context: make(map[string]interface{}),
+	})
+	endTime := time.Now()
+
+	// Build step result
+	status := workflow.StatusCompleted
+	if !output.Success {
+		status = workflow.StatusFailed
+	}
+
+	return workflow.StepResult{
+		Status:    status,
+		StartTime: startTime,
+		EndTime:   &endTime,
+		Duration:  endTime.Sub(startTime),
+		Output:    output.Data,
+		Error:     output.Error,
+	}, err
+}
+
+// SetDNAProvider sets the DNA provider
+func (e *ScriptStepExecutor) SetDNAProvider(provider DNAProvider) {
+	e.dnaProvider = provider
+}
+
+// SetConfigProvider sets the config provider
+func (e *ScriptStepExecutor) SetConfigProvider(provider ConfigProvider) {
+	e.configProvider = provider
+}
