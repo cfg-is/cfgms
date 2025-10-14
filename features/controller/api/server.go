@@ -229,6 +229,15 @@ func (s *Server) setupRouter() {
 	ha.Handle("/leader", s.requirePermission("ha", "read-leader")(http.HandlerFunc(s.handleHALeader))).Methods("GET")
 	ha.Handle("/nodes", s.requirePermission("ha", "read-nodes")(http.HandlerFunc(s.handleHANodes))).Methods("GET")
 
+	// Compliance reporting endpoints (Story #212)
+	// Steward-specific compliance endpoints
+	stewards.Handle("/{id}/compliance", s.requirePermission("steward", "read-compliance")(http.HandlerFunc(s.handleGetStewardCompliance))).Methods("GET")
+	stewards.Handle("/{id}/compliance/report", s.requirePermission("steward", "read-compliance")(http.HandlerFunc(s.handleGetStewardComplianceReport))).Methods("GET")
+
+	// System-wide compliance endpoints
+	compliance := api.PathPrefix("/compliance").Subrouter()
+	compliance.Handle("/summary", s.requirePermission("compliance", "read-summary")(http.HandlerFunc(s.handleGetComplianceSummary))).Methods("GET")
+
 	// Raft consensus endpoints (no auth required - internal cluster communication)
 	s.router.HandleFunc("/raft/message", s.handleRaftMessage).Methods("POST")
 	s.router.HandleFunc("/raft/status", s.handleRaftStatus).Methods("GET")
