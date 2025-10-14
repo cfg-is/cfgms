@@ -290,11 +290,7 @@ func (am *AlertingManager) shouldSuppressAlert(deviceID string, level AlertLevel
 
 	// Check if alert interval has elapsed
 	lastAlert := history[len(history)-1]
-	if now.Sub(lastAlert) < am.config.AlertInterval {
-		return true
-	}
-
-	return false
+	return now.Sub(lastAlert) < am.config.AlertInterval
 }
 
 // generateAlertMessage generates a human-readable alert message
@@ -515,10 +511,8 @@ func (cs *ComplianceScheduler) Start(ctx context.Context) error {
 	ticker := time.NewTicker(cs.checkInterval)
 	defer ticker.Stop()
 
-	// Run immediate check
-	if err := cs.runCheck(ctx); err != nil {
-		// Log error but don't fail startup
-	}
+	// Run immediate check (errors logged internally)
+	_ = cs.runCheck(ctx)
 
 	for {
 		select {
@@ -526,9 +520,8 @@ func (cs *ComplianceScheduler) Start(ctx context.Context) error {
 			return ctx.Err()
 
 		case <-ticker.C:
-			if err := cs.runCheck(ctx); err != nil {
-				// Log error but continue checking
-			}
+			// Continue checking even on errors (errors logged internally)
+			_ = cs.runCheck(ctx)
 		}
 	}
 }
