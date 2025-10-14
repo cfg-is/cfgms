@@ -3,17 +3,125 @@ name: pr-review
 description: Structured PR review following mandatory CFGMS methodology with fresh context
 parameters:
   - name: pr_number
-    description: Pull request number to review
-    required: true
+    description: Pull request number to review (optional - will show selection menu if omitted)
+    required: false
 ---
 
 # PR Review Command
 
 This command executes the comprehensive 5-phase PR review methodology required by CFGMS development workflow, ensuring objective and thorough code review with fresh context.
 
+## Interactive PR Selection (Optional Mode)
+
+**ENHANCEMENT**: When run without a PR number, provides interactive selection menu.
+
+**PR Discovery Flow**:
+```bash
+# When /pr-review is called without arguments:
+/pr-review
+
+# 1. Fetch all open PRs
+gh pr list --state=open --json number,title,author,headRefName,isDraft --limit 20
+
+# 2. Display selection menu
+echo "📋 Open Pull Requests:"
+echo ""
+echo "a) PR #218: Story #214: Controller Health Monitoring & Alerting"
+echo "   Author: jrdnr | Branch: feature/story-214-controller-health-monitoring"
+echo ""
+echo "b) PR #217: Story #213: Endpoint Performance Monitoring"
+echo "   Author: jrdnr | Branch: feature/story-213-endpoint-monitoring"
+echo ""
+echo "c) PR #216: Fix logging integration tests"
+echo "   Author: jrdnr | Branch: fix/logging-tests"
+echo ""
+echo "d) [List more PRs if available]"
+echo ""
+echo "Select PR to review (a-z), or enter PR number directly:"
+echo "Or type 'cancel' to exit"
+
+# 3. Process user selection
+# - Letter selection: Map to corresponding PR number
+# - Number entry: Use PR number directly
+# - 'cancel': Exit without reviewing
+
+# 4. Proceed with selected PR using normal review flow
+```
+
+**Selection Behavior**:
+- **Letter options (a-z)**: Quick selection from list (supports up to 26 PRs)
+- **Direct number**: Enter PR number directly (e.g., "218")
+- **Cancel**: Type 'cancel' or 'exit' to abort
+- **Invalid input**: Re-prompt with error message
+
+**Display Priority**:
+1. Show non-draft PRs first
+2. Sort by PR number (newest first)
+3. Indicate draft PRs with `[DRAFT]` tag
+4. Show author and branch name for context
+
+**Output Example**:
+```bash
+/pr-review
+
+# Output:
+📋 Discovering open pull requests...
+
+Found 4 open PRs:
+
+a) PR #218: Story #214: Controller Health Monitoring & Alerting (8 points)
+   👤 Author: jrdnr
+   🌿 Branch: feature/story-214-controller-health-monitoring
+   📊 Status: Ready for review
+
+b) PR #217: Story #213: Endpoint Performance Monitoring (13 points)
+   👤 Author: jrdnr
+   🌿 Branch: feature/story-213-endpoint-monitoring
+   📊 Status: Ready for review
+
+c) PR #216: Fix logging integration tests
+   👤 Author: jrdnr
+   🌿 Branch: fix/logging-tests
+   📊 Status: Ready for review
+
+d) PR #215: Update documentation for v0.6.0 [DRAFT]
+   👤 Author: jrdnr
+   🌿 Branch: docs/v0.6.0-updates
+   📊 Status: Draft
+
+Select a PR to review:
+• Enter letter (a-d) for quick selection
+• Enter PR number directly (e.g., 218)
+• Type 'cancel' to exit
+
+Your choice:
+```
+
+**Error Handling**:
+```bash
+# No open PRs found
+📋 Discovering open pull requests...
+
+⚠️ No open pull requests found
+
+   The repository has no PRs awaiting review.
+
+   💡 Tip: Use '/pr-review [number]' to review a specific closed PR
+
+# Invalid selection
+❌ Invalid selection: 'x'
+
+   Please enter:
+   • A valid letter (a-d)
+   • A PR number (e.g., 218)
+   • 'cancel' to exit
+
+Your choice:
+```
+
 ## Pre-Review Git Synchronization (MANDATORY)
 
-**CRITICAL**: Before starting the review, ensure git branch is fully synchronized.
+**CRITICAL**: After PR selection, ensure git branch is fully synchronized.
 
 **Git Sync Sequence**:
 ```bash
@@ -319,7 +427,54 @@ the required functionality with no identified risks or concerns.
 
 ## Usage Examples
 
-### Standard PR Review
+### Interactive Mode (No PR Number)
+```bash
+/pr-review
+
+# Output:
+📋 Discovering open pull requests...
+
+Found 3 open PRs:
+
+a) PR #218: Story #214: Controller Health Monitoring & Alerting (8 points)
+   👤 Author: jrdnr
+   🌿 Branch: feature/story-214-controller-health-monitoring
+   📊 Status: Ready for review
+
+b) PR #217: Story #213: Endpoint Performance Monitoring (13 points)
+   👤 Author: jrdnr
+   🌿 Branch: feature/story-213-endpoint-monitoring
+   📊 Status: Ready for review
+
+c) PR #216: Fix logging integration tests
+   👤 Author: jrdnr
+   🌿 Branch: fix/logging-tests
+   📊 Status: Ready for review
+
+Select a PR to review:
+• Enter letter (a-c) for quick selection
+• Enter PR number directly (e.g., 218)
+• Type 'cancel' to exit
+
+Your choice: a
+
+✅ Selected PR #218
+
+🔄 Synchronizing git branch with remote...
+   ✅ No uncommitted changes
+   ✅ Branch is up to date with remote
+   ✅ No unpushed commits
+
+🧹 Clearing conversation context for objective review...
+✅ Context cleared - starting fresh review
+
+🔍 Starting comprehensive review of PR #218...
+📋 Fetching PR details and changes...
+
+[Complete 5-phase review execution with detailed analysis]
+```
+
+### Direct PR Number Mode
 ```bash
 /pr-review 182
 
@@ -427,19 +582,57 @@ Cannot approve until security issues are resolved.
 # Review stops here - will not proceed with other phases
 ```
 
-### Invalid PR Number
+### Invalid PR Number (Direct Mode)
 ```bash
 /pr-review 999
 
 # Output:
 ❌ PR Review Error: PR #999 not found
 
-   Available PRs:
-   • #182: Implement Story #166: Logging Provider Migration
-   • #181: Fix CI infrastructure and testing reliability issues
-   • #180: Merge pull request #179
+   Available open PRs:
+   • #218: Story #214: Controller Health Monitoring & Alerting
+   • #217: Story #213: Endpoint Performance Monitoring
+   • #216: Fix logging integration tests
+
+   💡 Tip: Run '/pr-review' without arguments for interactive selection
 
    Usage: /pr-review [valid_pr_number]
+```
+
+### No Open PRs (Interactive Mode)
+```bash
+/pr-review
+
+# Output:
+📋 Discovering open pull requests...
+
+⚠️ No open pull requests found
+
+   The repository has no PRs awaiting review.
+
+   Recent closed PRs:
+   • #217: Story #213: Endpoint Performance Monitoring (merged 2 days ago)
+   • #216: Fix logging integration tests (merged 3 days ago)
+   • #215: Update documentation for v0.6.0 (merged 1 week ago)
+
+   💡 Tip: Use '/pr-review [number]' to review a specific PR
+```
+
+### User Cancellation (Interactive Mode)
+```bash
+/pr-review
+
+# Output:
+📋 Discovering open pull requests...
+
+Found 3 open PRs:
+[... PR list ...]
+
+Your choice: cancel
+
+✅ PR review cancelled
+
+   No PR was reviewed.
 ```
 
 ### GitHub Access Issues
