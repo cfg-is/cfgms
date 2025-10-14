@@ -1,0 +1,230 @@
+name: Template Validation
+
+# This workflow validates template marketplace contributions
+# Status: DISABLED (will be enabled in v0.8.0 when repo goes public)
+# See: .github/README-workflows-disabled.md
+
+on:
+  pull_request:
+    paths:
+      - 'features/templates/marketplace/**'
+      - 'features/templates/*.go'
+      - '.github/workflows/template-validation.yml'
+      - 'scripts/validate-templates.sh'
+  push:
+    branches:
+      - develop
+      - main
+    paths:
+      - 'features/templates/marketplace/**'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  validate-templates:
+    name: Validate Templates
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache: true
+
+      - name: Install dependencies
+        run: |
+          go mod download
+          go install gopkg.in/yaml.v3@latest
+
+      - name: Validate template structure
+        run: |
+          echo "🔍 Validating template structure..."
+          bash scripts/validate-templates.sh structure
+
+      - name: Validate template manifests
+        run: |
+          echo "📋 Validating template manifests..."
+          bash scripts/validate-templates.sh manifests
+
+      - name: Run template tests
+        run: |
+          echo "🧪 Running template tests..."
+          go test ./features/templates/... -v -run TestValidate
+
+      - name: Check template security
+        run: |
+          echo "🔒 Checking template security..."
+          bash scripts/validate-templates.sh security
+
+      - name: Validate example templates
+        run: |
+          echo "✅ Validating example templates..."
+          bash scripts/validate-templates.sh examples
+
+      - name: Generate validation report
+        if: always()
+        run: |
+          echo "📊 Generating validation report..."
+          bash scripts/validate-templates.sh report > template-validation-report.txt
+
+      - name: Upload validation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: template-validation-report
+          path: template-validation-report.txt
+          retention-days: 30
+
+      - name: Comment PR with validation results
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('template-validation-report.txt', 'utf8');
+
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## 🔍 Template Validation Report\n\n${report}`
+            });
+
+  test-template-rendering:
+    name: Test Template Rendering
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    strategy:
+      matrix:
+        template:
+          - ssh-hardening
+          - baseline-security
+          - backup-config
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache: true
+
+      - name: Test template rendering
+        run: |
+          echo "🎨 Testing rendering for ${{ matrix.template }}..."
+          go test ./features/templates/... -v -run TestRender
+
+      - name: Validate rendered output
+        run: |
+          echo "✅ Validating rendered output for ${{ matrix.template }}..."
+          bash scripts/validate-templates.sh render ${{ matrix.template }}
+
+  security-scan-templates:
+    name: Security Scan Templates
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run gosec on templates
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          gosec -fmt json -out gosec-templates.json ./features/templates/... || true
+
+      - name: Check for hardcoded secrets in templates
+        run: |
+          echo "🔍 Checking for hardcoded secrets in template files..."
+          bash scripts/validate-templates.sh secrets
+
+      - name: Validate template permissions
+        run: |
+          echo "🔐 Validating file permissions in templates..."
+          bash scripts/validate-templates.sh permissions
+
+  compliance-validation:
+    name: Validate Compliance Claims
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate compliance framework tags
+        run: |
+          echo "📋 Validating compliance framework tags..."
+          bash scripts/validate-templates.sh compliance
+
+      - name: Check CIS benchmark alignment
+        run: |
+          echo "✅ Checking CIS benchmark alignment..."
+          bash scripts/validate-templates.sh cis-check
+
+      - name: Validate security level claims
+        run: |
+          echo "🔒 Validating security level claims..."
+          bash scripts/validate-templates.sh security-level
+
+  documentation-check:
+    name: Documentation Quality Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check README completeness
+        run: |
+          echo "📚 Checking README completeness..."
+          bash scripts/validate-templates.sh readme
+
+      - name: Validate manifest completeness
+        run: |
+          echo "📋 Validating manifest completeness..."
+          bash scripts/validate-templates.sh manifest-complete
+
+      - name: Check for required documentation sections
+        run: |
+          echo "✅ Checking required documentation sections..."
+          bash scripts/validate-templates.sh doc-sections
+
+  summary:
+    name: Validation Summary
+    runs-on: ubuntu-latest
+    needs: [validate-templates, test-template-rendering, security-scan-templates, compliance-validation, documentation-check]
+    if: always()
+
+    steps:
+      - name: Check validation results
+        run: |
+          echo "📊 Template Validation Summary"
+          echo "=============================="
+          echo ""
+          echo "All validation jobs completed."
+          echo "Review individual job results above."
+          echo ""
+          if [ "${{ needs.validate-templates.result }}" != "success" ] || \
+             [ "${{ needs.test-template-rendering.result }}" != "success" ] || \
+             [ "${{ needs.security-scan-templates.result }}" != "success" ] || \
+             [ "${{ needs.compliance-validation.result }}" != "success" ] || \
+             [ "${{ needs.documentation-check.result }}" != "success" ]; then
+            echo "❌ Some validation checks failed. Please review and fix."
+            exit 1
+          else
+            echo "✅ All template validation checks passed!"
+          fi

@@ -505,7 +505,7 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 
 #### v0.6.0 (Alpha) - Finalizing Foundational Endpoint CMS
 
-**Status**: 🚧 IN PROGRESS - 13/60 story points (5 stories) - 22% complete
+**Status**: 🚧 IN PROGRESS - 26/60 story points (5 stories) - 43% complete
 **Goal**: Complete foundational endpoint CMS with policy-driven automation, compliance templates, and proactive performance management
 **Epic Document**: [v0.6.0-epic.md](./v0.6.0-epic.md)
 **Timeline**: 12 weeks (3 months) - Target Q2 2026
@@ -525,15 +525,16 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - Exit code capture and workflow-based retry logic
   - No execution sandboxing (endpoint management scripts, not untrusted code)
 
-- [ ] **Configuration Templates (Advanced)** (Issue #211) - 13 points
+- [x] **Configuration Templates (Advanced)** (Issue #211) - 13 points ✅ COMPLETED
   - Template marketplace infrastructure with 3 example templates using existing modules
-    - Example 1: SSH hardening template (file-based config)
-    - Example 2: Baseline security template (file + directory + script)
-    - Example 3: Backup configuration template (directory + script)
-  - OSS template marketplace (GitHub-based, community contributions)
-  - Template testing framework (unit tests, test scenarios)
-  - Compliance validation via DNA + drift detection
-  - Template versioning and collaboration workflows
+    - Example 1: SSH hardening template (file-based config) ✅
+    - Example 2: Baseline security template (file + directory + script) ✅
+    - Example 3: Backup configuration template (directory + script) ✅
+  - OSS template marketplace (GitHub-based, community contributions) ✅
+  - Template testing framework (unit tests, test scenarios) ✅
+  - Compliance validation via DNA + drift detection ✅
+  - Template versioning and collaboration workflows ✅
+  - CI/CD validation for template PRs ✅
   - **Backlog**: Comprehensive CIS/CMMC templates deferred to v0.7.0+ (requires module development)
 
 - [ ] **Windows Patch Compliance (Advanced)** (Issue #212) - 13 points
