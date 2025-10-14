@@ -1,7 +1,6 @@
 ---
 name: story-complete
 description: Complete story with all mandatory gates and create PR
-aliases: [pr-create]
 parameters:
   - name: story_number
     description: Story number to complete (optional - auto-detects from branch)
@@ -47,7 +46,42 @@ gh issue view [story_number] --json body,title,state,assignees
 
 After successful validation, creates comprehensive PR:
 
-### 0. Git Workflow Validation (MANDATORY)
+### 0. Git Push to Remote (MANDATORY)
+
+**CRITICAL**: All changes must be pushed to remote before creating PR.
+
+**Push Sequence**:
+```bash
+# Ensure all changes are committed
+git status --porcelain  # Should be empty
+
+# Push current branch to remote
+git push origin $(git branch --show-current)
+
+# Verify push succeeded
+if [ $? -ne 0 ]; then
+  echo "❌ ERROR: Failed to push changes to remote"
+  echo "   Cannot create PR until changes are pushed"
+  exit 1
+fi
+```
+
+**Error Handling**:
+```bash
+❌ PUSH FAILED: Unable to push changes to remote
+
+   Reason: [error message from git]
+
+   Required Actions:
+   1. Review git push error
+   2. Resolve any conflicts or issues
+   3. Retry: git push origin $(git branch --show-current)
+   4. Retry: /story-complete
+
+   📋 PR CREATION BLOCKED: Cannot create PR with unpushed changes
+```
+
+### 1. Git Workflow Validation (MANDATORY)
 
 **CRITICAL RULE**: All feature branches MUST create PRs to `develop` branch, NEVER to `main`.
 
@@ -74,7 +108,7 @@ fi
 - Log warning about incorrect base branch
 - Update PR with correct base before proceeding
 
-### 1. Duplicate PR Detection & Smart Handling
+### 2. Duplicate PR Detection & Smart Handling
 ```bash
 gh pr list --head [current-branch] --state=open
 ```
@@ -93,7 +127,7 @@ gh pr edit [pr-number] --body "[updated-template]" --base develop  # Enforce dev
 gh pr create --base develop --title "[title]" --body "[template]"  # ALWAYS develop
 ```
 
-### 2. PR Template Generation
+### 3. PR Template Generation
 ```bash
 gh pr create --base develop --title "Implement Story #[NUMBER]: [title]" --body "[template]"
 ```
@@ -141,7 +175,7 @@ gh pr create --base develop --title "Implement Story #[NUMBER]: [title]" --body 
 Co-Authored-By: Claude <noreply@anthropic.com>
 ```
 
-### 2. Branch Context Analysis
+### 4. Branch Context Analysis
 - **Commit Analysis**: Reviews all commits on story branch
 - **File Changes**: Identifies modified files and change scope
 - **Breaking Changes**: Detects potential breaking changes
@@ -199,6 +233,9 @@ git branch -D feature/story-[NUMBER]-[description]  # Clean up local branch
 📊 Story Completeness Check:
    ✅ All 8/8 acceptance criteria completed
    ✅ Issue ready for completion
+
+🚀 Pushing changes to remote...
+   ✅ Changes pushed successfully
 
 🚀 Creating Pull Request...
    ℹ️ Existing PR detected: #181
@@ -332,15 +369,22 @@ git branch -D feature/story-[NUMBER]-[description]  # Clean up local branch
 
 ---
 
-## Aliases and Variations
+## Command Execution Flow
 
-This command supports multiple invocation patterns:
+This command follows a strict execution sequence:
 
 ```bash
-/story-complete     # Standard completion
-/pr-create          # Alias - same functionality
-/story-complete 166 # Manual story specification
-/pr-create 166      # Alias with manual story
+/story-complete
+
+# Execution Order:
+1. Run make test-commit (BLOCKING)
+2. Analyze story completeness (BLOCKING if <100%)
+3. Push changes to remote (BLOCKING)
+4. Validate git workflow (BLOCKING if feature→main)
+5. Check for duplicate PRs (auto-update if exists)
+6. Create or update PR
+7. Update GitHub project status
+8. Update roadmap
 ```
 
-All variations provide identical functionality with natural command naming for different user preferences.
+Each step is blocking - failure prevents progression to next step.

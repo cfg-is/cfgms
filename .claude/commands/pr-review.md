@@ -11,15 +11,74 @@ parameters:
 
 This command executes the comprehensive 5-phase PR review methodology required by CFGMS development workflow, ensuring objective and thorough code review with fresh context.
 
+## Pre-Review Git Synchronization (MANDATORY)
+
+**CRITICAL**: Before starting the review, ensure git branch is fully synchronized.
+
+**Git Sync Sequence**:
+```bash
+# 1. Check for uncommitted changes
+if [ -n "$(git status --porcelain)" ]; then
+  echo "⚠️ WARNING: Uncommitted changes detected"
+  echo "   Recommendation: Commit or stash changes before reviewing"
+  echo ""
+  git status
+  echo ""
+fi
+
+# 2. Fetch latest from remote
+git fetch origin
+
+# 3. Check if local branch is behind remote
+current_branch=$(git branch --show-current)
+local_commit=$(git rev-parse HEAD)
+remote_commit=$(git rev-parse origin/$current_branch 2>/dev/null || echo "")
+
+if [ -n "$remote_commit" ] && [ "$local_commit" != "$remote_commit" ]; then
+  echo "⚠️ WARNING: Local branch is out of sync with remote"
+  echo "   Local:  $local_commit"
+  echo "   Remote: $remote_commit"
+  echo ""
+  echo "   Recommended actions:"
+  echo "   1. If behind: git pull origin $current_branch"
+  echo "   2. If ahead: git push origin $current_branch"
+  echo "   3. If diverged: Review and merge/rebase as needed"
+  echo ""
+fi
+
+# 4. Push any unpushed commits (if on feature branch)
+if [[ $current_branch == feature/* ]]; then
+  unpushed=$(git log origin/$current_branch..HEAD --oneline 2>/dev/null | wc -l)
+  if [ "$unpushed" -gt 0 ]; then
+    echo "📤 Found $unpushed unpushed commit(s)"
+    echo "   Pushing to remote before review..."
+    git push origin $current_branch
+    if [ $? -eq 0 ]; then
+      echo "   ✅ Successfully pushed to remote"
+    else
+      echo "   ⚠️ Push failed - review will continue but may not reflect latest code"
+    fi
+    echo ""
+  fi
+fi
+```
+
+**Why This Matters**:
+- Ensures PR reflects the actual code being reviewed
+- Prevents review of outdated code
+- Catches situations where work was done but not pushed
+- Helps maintain clean git history
+
 ## Fresh Context Initialization
 
-**CRITICAL**: This command automatically starts by clearing all conversation context to ensure objectivity and prevent development bias from affecting the review.
+**CRITICAL**: After git sync, this command clears all conversation context to ensure objectivity and prevent development bias from affecting the review.
 
 **Execution Flow**:
-1. **Clear Context**: Automatically runs `/clear` to eliminate development history
-2. **Fresh Review**: Begins review with no prior context or assumptions
-3. **Objective Analysis**: Reviews code purely based on what's presented in the PR
-4. **Structured Methodology**: Follows all 5 review phases systematically
+1. **Git Sync**: Ensure local branch is synchronized with remote
+2. **Clear Context**: Automatically runs `/clear` to eliminate development history
+3. **Fresh Review**: Begins review with no prior context or assumptions
+4. **Objective Analysis**: Reviews code purely based on what's presented in the PR
+5. **Structured Methodology**: Follows all 5 review phases systematically
 
 ## Review Methodology
 
@@ -265,6 +324,11 @@ the required functionality with no identified risks or concerns.
 /pr-review 182
 
 # Output:
+🔄 Synchronizing git branch with remote...
+   ✅ No uncommitted changes
+   ✅ Branch is up to date with remote
+   ✅ No unpushed commits
+
 🧹 Clearing conversation context for objective review...
 ✅ Context cleared - starting fresh review
 
@@ -283,9 +347,31 @@ the required functionality with no identified risks or concerns.
 **Final Recommendation**: ✅ **APPROVED FOR MERGE**
 ```
 
-### Review with Issues Found
+### Review with Unpushed Changes
 ```bash
 /pr-review 183
+
+# Output:
+🔄 Synchronizing git branch with remote...
+   ⚠️ WARNING: Uncommitted changes detected
+   Recommendation: Commit or stash changes before reviewing
+
+   On branch feature/story-183-new-feature
+   Changes not staged for commit:
+     modified:   features/module/handler.go
+     modified:   features/module/handler_test.go
+
+   📤 Found 2 unpushed commit(s)
+   Pushing to remote before review...
+   ✅ Successfully pushed to remote
+
+🧹 Clearing conversation context for objective review...
+✅ Context cleared - starting fresh review
+```
+
+### Review with Issues Found
+```bash
+/pr-review 184
 
 # Output would include:
 🧹 Clearing conversation context for objective review...

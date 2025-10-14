@@ -26,7 +26,6 @@ Use these commands to enforce mandatory development workflow:
 - **`/story-start`** - Begin new story with pre-flight checks and roadmap auto-detection
 - **`/story-commit`** - Commit with validation and GitHub issue progress tracking
 - **`/story-complete`** - Complete story with final validation gates and PR creation
-- **`/pr-create`** - Alias for `/story-complete` (same functionality)
 - **`/pr-review [number]`** - Execute structured 5-phase PR review methodology
 - **`/dev-status`** - Quick development environment and current story status
 
@@ -118,6 +117,28 @@ See [docs/development/commands-reference.md](docs/development/commands-reference
 - **Memory Usage**: Internal component optimization only (write-through caching)
 - **Security**: All providers ALWAYS use encryption - no cleartext secrets
 
+### Central Provider System (CRITICAL)
+**MANDATORY**: Before implementing any new functionality, check if it belongs in a central provider.
+
+**Existing Central Providers**:
+1. **`pkg/storage`** - All data persistence (git, database, in-memory cache)
+2. **`pkg/logging`** - All logging and observability
+3. **`pkg/notifications`** - All notification delivery (SMTP, webhook, Slack, Teams)
+4. **`pkg/telemetry`** - All tracing, metrics, and distributed tracing (OpenTelemetry)
+5. **`pkg/rbac`** - All authorization and role-based access control
+
+**Development Rule**:
+- ❌ **PROHIBITED**: Creating new functionality that overlaps with central providers
+- ✅ **REQUIRED**: Extend existing central providers or propose new central provider
+- ✅ **REQUIRED**: Use dependency injection to consume central providers
+- ⚠️ **WARNING**: Duplicate functionality will be rejected in PR review
+
+**Before Starting Work**:
+1. Review `pkg/` directory for existing central providers
+2. Check if your feature overlaps with existing provider functionality
+3. If overlap exists: extend the central provider instead of creating new code
+4. If new provider needed: discuss architecture before implementation
+
 ## Critical Development Rules
 
 ### Must Follow
@@ -127,6 +148,7 @@ See [docs/development/commands-reference.md](docs/development/commands-reference
 - **Pluggable Storage**: Import `pkg/storage/interfaces` only
 - **Feature Branches**: Never commit directly to develop/main
 - **Tenant Isolation**: Maintain strict tenant boundaries
+- **Use Central Providers**: ALWAYS check if functionality exists in central providers before creating new code
 
 ### Security Requirements
 - Mutual TLS for all internal communication
