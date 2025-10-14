@@ -13,7 +13,10 @@ import (
 // New creates a new instance of the Patch module
 func New() modules.Module {
 	return &PatchModule{
-		patchManager: NewMockPatchManager(),
+		patchManager:  NewMockPatchManager(),
+		policyEngine:  NewPolicyEngine(DefaultPolicy()),
+		windowManager: nil, // Optional - can be set later
+		deviceID:      "default",
 	}
 }
 
@@ -24,8 +27,50 @@ func NewPatchModule(patchManager PatchManager) (*PatchModule, error) {
 	}
 
 	return &PatchModule{
-		patchManager: patchManager,
+		patchManager:  patchManager,
+		policyEngine:  NewPolicyEngine(DefaultPolicy()),
+		windowManager: nil, // Optional - can be set later
+		deviceID:      "default",
 	}, nil
+}
+
+// NewPatchModuleWithPolicy creates a new patch module with custom policy and window manager
+func NewPatchModuleWithPolicy(patchManager PatchManager, policy PatchPolicy, windowManager WindowManager, deviceID string) (*PatchModule, error) {
+	if patchManager == nil {
+		return nil, ErrInvalidConfig
+	}
+
+	if deviceID == "" {
+		deviceID = "default"
+	}
+
+	return &PatchModule{
+		patchManager:  patchManager,
+		policyEngine:  NewPolicyEngine(policy),
+		windowManager: windowManager,
+		deviceID:      deviceID,
+	}, nil
+}
+
+// SetPolicy updates the patch policy
+func (m *PatchModule) SetPolicy(policy PatchPolicy) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.policyEngine = NewPolicyEngine(policy)
+}
+
+// SetWindowManager updates the maintenance window manager
+func (m *PatchModule) SetWindowManager(windowManager WindowManager) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.windowManager = windowManager
+}
+
+// SetDeviceID updates the device ID for maintenance window checks
+func (m *PatchModule) SetDeviceID(deviceID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.deviceID = deviceID
 }
 
 // Get returns the current patch status of the system
@@ -179,7 +224,7 @@ func (m *PatchModule) Set(ctx context.Context, resourceID string, config modules
 
 	// Check if we're in a maintenance window (if specified)
 	if cfg.Maintenance.Window != "" || cfg.Maintenance.Schedule != "" {
-		if !m.isInMaintenanceWindow(cfg) {
+		if !m.isInMaintenanceWindow(ctx, cfg) {
 			m.mu.Unlock()
 			return ErrMaintenanceWindowNotActive
 		}
@@ -209,6 +254,12 @@ func (m *PatchModule) Set(ctx context.Context, resourceID string, config modules
 
 	if rebootRequired {
 		if cfg.AutoReboot {
+			// Check if reboot is allowed by maintenance window policy
+			if !m.canReboot(ctx) {
+				m.mu.Unlock()
+				return ErrMaintenanceWindowNotActive
+			}
+
 			// In a real implementation, this would trigger a system reboot
 			// For now, we'll just log it
 			fmt.Println("Auto-reboot would be triggered here")
@@ -306,11 +357,39 @@ func (m *PatchModule) executeScript(ctx context.Context, script string) error {
 }
 
 // isInMaintenanceWindow checks if the current time is within the maintenance window
-func (m *PatchModule) isInMaintenanceWindow(config *Config) bool {
-	// In a real implementation, this would parse the maintenance window
-	// and check if the current time falls within it
-	// For now, we'll just return true as a placeholder
-	return true
+func (m *PatchModule) isInMaintenanceWindow(ctx context.Context, config *Config) bool {
+	// If no window manager is configured, allow operations (backwards compatibility)
+	if m.windowManager == nil {
+		return true
+	}
+
+	// Check if we're in a maintenance window
+	inWindow, err := m.windowManager.IsInWindow(ctx, m.deviceID)
+	if err != nil {
+		// Log error but don't block operation (fail open for safety)
+		fmt.Printf("Warning: failed to check maintenance window: %v\n", err)
+		return true
+	}
+
+	return inWindow
+}
+
+// canReboot checks if a reboot is allowed at the current time
+func (m *PatchModule) canReboot(ctx context.Context) bool {
+	// If no window manager is configured, allow reboots (backwards compatibility)
+	if m.windowManager == nil {
+		return true
+	}
+
+	// Check if we can reboot
+	canReboot, err := m.windowManager.CanReboot(ctx, m.deviceID)
+	if err != nil {
+		// Log error but don't block operation (fail open for safety)
+		fmt.Printf("Warning: failed to check reboot permission: %v\n", err)
+		return true
+	}
+
+	return canReboot
 }
 
 // GetPatchStatus returns the current patch status
@@ -329,4 +408,57 @@ func (m *PatchModule) GetPatchStatus(ctx context.Context) (*PatchStatus, error) 
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.cachedStatus, nil
+}
+
+// GetComplianceReport returns the current compliance status based on the configured policy
+func (m *PatchModule) GetComplianceReport(ctx context.Context) (*ComplianceReport, error) {
+	// Get current patch status
+	status, err := m.GetPatchStatus(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get patch status: %w", err)
+	}
+
+	m.mu.RLock()
+	policyEngine := m.policyEngine
+	m.mu.RUnlock()
+
+	// Check compliance using policy engine
+	if policyEngine == nil {
+		return nil, fmt.Errorf("policy engine not configured")
+	}
+
+	report, err := policyEngine.CheckCompliance(ctx, status)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check compliance: %w", err)
+	}
+
+	return report, nil
+}
+
+// GetNextMaintenanceWindow returns the next scheduled maintenance window
+func (m *PatchModule) GetNextMaintenanceWindow(ctx context.Context) (time.Time, error) {
+	m.mu.RLock()
+	windowManager := m.windowManager
+	deviceID := m.deviceID
+	m.mu.RUnlock()
+
+	if windowManager == nil {
+		return time.Time{}, fmt.Errorf("maintenance window manager not configured")
+	}
+
+	nextWindow, err := windowManager.GetNextWindow(ctx, deviceID)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("failed to get next maintenance window: %w", err)
+	}
+
+	return nextWindow, nil
+}
+
+// CheckCompliance is a convenience method that returns just the compliance status
+func (m *PatchModule) CheckCompliance(ctx context.Context) (ComplianceStatus, error) {
+	report, err := m.GetComplianceReport(ctx)
+	if err != nil {
+		return "", err
+	}
+	return report.Status, nil
 }
