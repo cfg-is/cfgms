@@ -73,7 +73,6 @@ func TestCollectorPerformanceOverhead(t *testing.T) {
 
 	// Measure overhead by running collector for a short period
 	const testDuration = 5 * time.Second
-	const numGoroutinesSamples = 10
 
 	// Baseline goroutine count
 	runtime.GC()
