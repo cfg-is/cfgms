@@ -1,0 +1,66 @@
+id: backup-config
+name: Backup Configuration Template
+version: 1.0.0
+description: |
+  Comprehensive backup configuration template that sets up automated file and
+  directory backups with retention policies, encryption, and monitoring. Uses
+  directory and script modules to create backup infrastructure with support for
+  local and remote backup destinations.
+
+author: CFGMS Team
+author_email: team@cfgms.io
+license: MIT
+repository: https://github.com/cfg-is/cfgms-templates
+homepage: https://cfgms.io/templates/backup-config
+
+category: system
+keywords:
+  - backup
+  - disaster-recovery
+  - data-protection
+  - automation
+  - retention
+
+tags:
+  - backup
+  - system
+  - automation
+  - disaster-recovery
+
+compliance_frameworks:
+  - SOC2
+  - GDPR
+  - HIPAA
+
+security_level: medium
+
+tested_platforms:
+  - linux-ubuntu-20.04
+  - linux-ubuntu-22.04
+  - linux-debian-11
+  - linux-debian-12
+  - linux-centos-8
+  - linux-rhel-8
+  - linux-rhel-9
+
+min_version: "0.6.0"
+
+required_modules:
+  - directory
+  - script
+
+required_features:
+  - templates
+  - dna
+
+dependencies: []
+
+template_file: template.yaml
+readme_file: README.md
+
+changelog:
+  - version: 1.0.0
+    date: 2025-10-13T00:00:00Z
+    description: Initial release with automated backup configuration
+    breaking: false
+    author: CFGMS Team

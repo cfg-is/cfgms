@@ -1,0 +1,142 @@
+# SSH Hardening Template
+# Implements CIS benchmark recommendations for SSH configuration
+
+variables:
+  # SSH Port (default 22, but can be customized)
+  ssh_port: 22
+
+  # Allow root login (default: no for security)
+  permit_root_login: "no"
+
+  # Enable public key authentication
+  pubkey_authentication: "yes"
+
+  # Disable password authentication (force key-based auth)
+  password_authentication: "no"
+
+  # Maximum authentication attempts
+  max_auth_tries: 3
+
+  # Client alive interval (seconds) - detect dead connections
+  client_alive_interval: 300
+
+  # Client alive count max - disconnect after this many failed checks
+  client_alive_count_max: 2
+
+  # Login grace time (seconds) - time allowed for authentication
+  login_grace_time: 60
+
+  # Allow TCP forwarding
+  allow_tcp_forwarding: "no"
+
+  # Allow agent forwarding
+  allow_agent_forwarding: "no"
+
+  # X11 forwarding
+  x11_forwarding: "no"
+
+  # Banner message file
+  banner_enabled: true
+  banner_file: "/etc/ssh/sshd_banner"
+
+# SSH configuration file
+$if "$DNA.System.OS" == "linux"
+modules:
+  - type: file
+    path: /etc/ssh/sshd_config
+    owner: root
+    group: root
+    mode: "0600"
+    content: |
+      # SSH Configuration - Hardened by CFGMS
+      # Template: ssh-hardening v1.0.0
+      # Applied: $(date)
+      # Hostname: $DNA.System.Hostname
+
+      # Network Configuration
+      Port $ssh_port
+      AddressFamily any
+      ListenAddress 0.0.0.0
+      ListenAddress ::
+
+      # Host Keys
+      HostKey /etc/ssh/ssh_host_rsa_key
+      HostKey /etc/ssh/ssh_host_ecdsa_key
+      HostKey /etc/ssh/ssh_host_ed25519_key
+
+      # Strong Ciphers Only
+      Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr
+
+      # Strong MACs Only
+      MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256
+
+      # Strong Key Exchange Algorithms
+      KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,ecdh-sha2-nistp521,ecdh-sha2-nistp384,ecdh-sha2-nistp256,diffie-hellman-group-exchange-sha256
+
+      # Authentication Settings
+      PermitRootLogin $permit_root_login
+      PubkeyAuthentication $pubkey_authentication
+      PasswordAuthentication $password_authentication
+      PermitEmptyPasswords no
+      ChallengeResponseAuthentication no
+      KerberosAuthentication no
+      GSSAPIAuthentication no
+      UsePAM yes
+      MaxAuthTries $max_auth_tries
+      MaxSessions 10
+
+      # Connection Settings
+      ClientAliveInterval $client_alive_interval
+      ClientAliveCountMax $client_alive_count_max
+      LoginGraceTime $login_grace_time
+      TCPKeepAlive yes
+
+      # Security Settings
+      AllowTcpForwarding $allow_tcp_forwarding
+      AllowAgentForwarding $allow_agent_forwarding
+      X11Forwarding $x11_forwarding
+      PrintMotd no
+      PrintLastLog yes
+      PermitUserEnvironment no
+      PermitTunnel no
+      StrictModes yes
+
+      # Logging
+      SyslogFacility AUTH
+      LogLevel VERBOSE
+
+      # Banner
+      $if $banner_enabled
+      Banner $banner_file
+      $else
+      Banner none
+      $endif
+
+      # Subsystem
+      Subsystem sftp /usr/lib/openssh/sftp-server -f AUTHPRIV -l INFO
+
+      # Only allow specific users/groups (customize as needed)
+      # AllowUsers user1 user2
+      # AllowGroups ssh-users
+
+  # Create SSH banner file
+  $if $banner_enabled
+  - type: file
+    path: $banner_file
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      **************************************************************************
+      *                                                                        *
+      *  WARNING: Unauthorized access to this system is forbidden and will    *
+      *  be prosecuted by law. By accessing this system, you agree that your  *
+      *  actions may be monitored if unauthorized usage is suspected.         *
+      *                                                                        *
+      *  System: $DNA.System.Hostname                                         *
+      *  Organization: $client_name                                           *
+      *                                                                        *
+      **************************************************************************
+  $endif
+
+$endif

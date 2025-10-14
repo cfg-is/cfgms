@@ -1,0 +1,479 @@
+# Backup Configuration Template
+# Automated backup setup using directory and script modules
+
+variables:
+  # Backup configuration
+  backup_enabled: true
+  backup_schedule: "0 2 * * *"  # 2 AM daily
+
+  # Backup directories
+  backup_base_dir: "/var/backups/cfgms"
+  backup_script_dir: "/usr/local/bin/cfgms-backup"
+  backup_log_dir: "/var/log/cfgms-backup"
+  backup_config_dir: "/etc/cfgms/backup"
+
+  # Paths to backup (customize as needed)
+  backup_paths:
+    - /etc
+    - /home
+    - /var/www
+    - /opt
+
+  # Exclusions (paths to skip)
+  backup_exclusions:
+    - "*.tmp"
+    - "*.cache"
+    - "/home/*/.cache"
+    - "/var/cache"
+
+  # Retention policy
+  daily_retention: 7
+  weekly_retention: 4
+  monthly_retention: 12
+
+  # Backup compression
+  compression_enabled: true
+  compression_level: 6  # 1-9, higher = better compression but slower
+
+  # Backup encryption
+  encryption_enabled: false
+  encryption_key_path: "/etc/cfgms/backup/backup.key"
+
+  # Remote backup
+  remote_backup_enabled: false
+  remote_backup_host: ""
+  remote_backup_path: ""
+  remote_backup_user: "backup"
+
+  # Monitoring and alerting
+  backup_notifications_enabled: true
+  backup_notification_email: "admin@example.com"
+  backup_success_notification: false
+  backup_failure_notification: true
+
+  # Storage management
+  max_backup_size_gb: 100
+  auto_cleanup_enabled: true
+
+$if "$DNA.System.OS" == "linux"
+modules:
+  # Create backup directory structure
+  - type: directory
+    path: $backup_base_dir
+    owner: root
+    group: root
+    mode: "0700"
+    recursive: true
+
+  - type: directory
+    path: $backup_script_dir
+    owner: root
+    group: root
+    mode: "0755"
+    recursive: true
+
+  - type: directory
+    path: $backup_log_dir
+    owner: root
+    group: root
+    mode: "0700"
+    recursive: true
+
+  - type: directory
+    path: $backup_config_dir
+    owner: root
+    group: root
+    mode: "0700"
+    recursive: true
+
+  - type: directory
+    path: $backup_base_dir/daily
+    owner: root
+    group: root
+    mode: "0700"
+    recursive: true
+
+  - type: directory
+    path: $backup_base_dir/weekly
+    owner: root
+    group: root
+    mode: "0700"
+    recursive: true
+
+  - type: directory
+    path: $backup_base_dir/monthly
+    owner: root
+    group: root
+    mode: "0700"
+    recursive: true
+
+  # Backup script - main backup execution
+  - type: script
+    name: perform-backup
+    description: Perform system backup with retention and cleanup
+    platform: linux
+    interpreter: bash
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+
+      # Configuration
+      BACKUP_BASE="$backup_base_dir"
+      BACKUP_LOG="$backup_log_dir/backup-$(date +%Y%m%d-%H%M%S).log"
+      HOSTNAME="$DNA.System.Hostname"
+      TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+      BACKUP_TYPE="${1:-daily}"  # daily, weekly, or monthly
+
+      # Logging function
+      log() {
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$BACKUP_LOG"
+      }
+
+      log "========================================"
+      log "Starting $BACKUP_TYPE backup for $HOSTNAME"
+      log "========================================"
+
+      # Determine backup destination
+      case "$BACKUP_TYPE" in
+        daily)
+          BACKUP_DIR="$BACKUP_BASE/daily"
+          RETENTION=$daily_retention
+          ;;
+        weekly)
+          BACKUP_DIR="$BACKUP_BASE/weekly"
+          RETENTION=$weekly_retention
+          ;;
+        monthly)
+          BACKUP_DIR="$BACKUP_BASE/monthly"
+          RETENTION=$monthly_retention
+          ;;
+        *)
+          log "ERROR: Invalid backup type: $BACKUP_TYPE"
+          exit 1
+          ;;
+      esac
+
+      BACKUP_NAME="${HOSTNAME}_${BACKUP_TYPE}_${TIMESTAMP}.tar"
+
+      # Check available disk space
+      AVAILABLE_SPACE=$(df -BG "$BACKUP_BASE" | awk 'NR==2 {print $4}' | sed 's/G//')
+      if [ "$AVAILABLE_SPACE" -lt 10 ]; then
+        log "WARNING: Low disk space - only ${AVAILABLE_SPACE}GB available"
+      fi
+
+      # Create tar archive
+      log "Creating backup archive..."
+      BACKUP_PATH="$BACKUP_DIR/$BACKUP_NAME"
+
+      # Build exclusion parameters
+      EXCLUDE_ARGS=""
+      for pattern in $backup_exclusions; do
+        EXCLUDE_ARGS="$EXCLUDE_ARGS --exclude=$pattern"
+      done
+
+      # Create backup
+      if $compression_enabled; then
+        BACKUP_PATH="${BACKUP_PATH}.gz"
+        log "Compression enabled (level $compression_level)"
+
+        tar czf "$BACKUP_PATH" \
+          --level=$compression_level \
+          $EXCLUDE_ARGS \
+          ${backup_paths[@]} \
+          2>> "$BACKUP_LOG"
+      else
+        tar cf "$BACKUP_PATH" \
+          $EXCLUDE_ARGS \
+          ${backup_paths[@]} \
+          2>> "$BACKUP_LOG"
+      fi
+
+      # Check if backup was successful
+      if [ $? -eq 0 ]; then
+        BACKUP_SIZE=$(du -sh "$BACKUP_PATH" | cut -f1)
+        log "Backup created successfully: $BACKUP_PATH ($BACKUP_SIZE)"
+      else
+        log "ERROR: Backup failed"
+        exit 1
+      fi
+
+      # Encrypt backup if enabled
+      if $encryption_enabled && [ -f "$encryption_key_path" ]; then
+        log "Encrypting backup..."
+        openssl enc -aes-256-cbc -salt -pbkdf2 \
+          -in "$BACKUP_PATH" \
+          -out "${BACKUP_PATH}.enc" \
+          -pass file:"$encryption_key_path"
+
+        if [ $? -eq 0 ]; then
+          rm -f "$BACKUP_PATH"
+          BACKUP_PATH="${BACKUP_PATH}.enc"
+          log "Backup encrypted successfully"
+        else
+          log "WARNING: Encryption failed, keeping unencrypted backup"
+        fi
+      fi
+
+      # Sync to remote if enabled
+      if $remote_backup_enabled && [ -n "$remote_backup_host" ]; then
+        log "Syncing to remote backup location..."
+        rsync -avz --progress \
+          "$BACKUP_PATH" \
+          "$remote_backup_user@$remote_backup_host:$remote_backup_path/" \
+          >> "$BACKUP_LOG" 2>&1
+
+        if [ $? -eq 0 ]; then
+          log "Remote sync completed successfully"
+        else
+          log "WARNING: Remote sync failed"
+        fi
+      fi
+
+      # Apply retention policy
+      log "Applying retention policy (keep last $RETENTION backups)..."
+      cd "$BACKUP_DIR"
+      ls -t | tail -n +$((RETENTION + 1)) | xargs -r rm -f
+      log "Retention policy applied"
+
+      # Cleanup old logs (keep last 30 days)
+      log "Cleaning up old backup logs..."
+      find "$backup_log_dir" -name "backup-*.log" -mtime +30 -delete
+
+      # Report statistics
+      TOTAL_BACKUPS=$(ls -1 "$BACKUP_DIR" | wc -l)
+      TOTAL_SIZE=$(du -sh "$BACKUP_DIR" | cut -f1)
+
+      log "========================================"
+      log "Backup Summary:"
+      log "  Type: $BACKUP_TYPE"
+      log "  Status: SUCCESS"
+      log "  Backup File: $BACKUP_PATH"
+      log "  Backup Size: $BACKUP_SIZE"
+      log "  Total Backups: $TOTAL_BACKUPS"
+      log "  Total Storage: $TOTAL_SIZE"
+      log "========================================"
+
+      # Send notification if enabled
+      if $backup_notifications_enabled && $backup_success_notification; then
+        if command -v mail &> /dev/null; then
+          echo "Backup completed successfully on $HOSTNAME at $(date)" | \
+            mail -s "[$HOSTNAME] Backup Success - $BACKUP_TYPE" "$backup_notification_email"
+        fi
+      fi
+
+      exit 0
+    run_on_apply: false
+    run_on_change: false
+
+  # Backup restore script
+  - type: script
+    name: restore-backup
+    description: Restore from backup archive
+    platform: linux
+    interpreter: bash
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+
+      BACKUP_FILE="${1:-}"
+      RESTORE_DIR="${2:-/}"
+
+      if [ -z "$BACKUP_FILE" ]; then
+        echo "Usage: $0 <backup_file> [restore_directory]"
+        echo ""
+        echo "Available backups:"
+        find $backup_base_dir -name "*.tar*" -type f | sort -r | head -10
+        exit 1
+      fi
+
+      if [ ! -f "$BACKUP_FILE" ]; then
+        echo "ERROR: Backup file not found: $BACKUP_FILE"
+        exit 1
+      fi
+
+      echo "========================================"
+      echo "Backup Restore for $DNA.System.Hostname"
+      echo "========================================"
+      echo "Backup file: $BACKUP_FILE"
+      echo "Restore to: $RESTORE_DIR"
+      echo ""
+      echo "WARNING: This will overwrite existing files!"
+      read -p "Continue? (yes/no): " CONFIRM
+
+      if [ "$CONFIRM" != "yes" ]; then
+        echo "Restore cancelled."
+        exit 0
+      fi
+
+      # Decrypt if needed
+      if [[ "$BACKUP_FILE" == *.enc ]]; then
+        echo "Decrypting backup..."
+        DECRYPTED_FILE="${BACKUP_FILE%.enc}"
+
+        openssl enc -aes-256-cbc -d -pbkdf2 \
+          -in "$BACKUP_FILE" \
+          -out "$DECRYPTED_FILE" \
+          -pass file:"$encryption_key_path"
+
+        BACKUP_FILE="$DECRYPTED_FILE"
+      fi
+
+      # Extract backup
+      echo "Extracting backup..."
+      if [[ "$BACKUP_FILE" == *.gz ]]; then
+        tar xzf "$BACKUP_FILE" -C "$RESTORE_DIR" --verbose
+      else
+        tar xf "$BACKUP_FILE" -C "$RESTORE_DIR" --verbose
+      fi
+
+      if [ $? -eq 0 ]; then
+        echo "========================================"
+        echo "Restore completed successfully!"
+        echo "========================================"
+      else
+        echo "ERROR: Restore failed!"
+        exit 1
+      fi
+    run_on_apply: false
+    run_on_change: false
+
+  # Backup scheduling script - sets up cron job
+  $if $backup_enabled
+  - type: script
+    name: setup-backup-schedule
+    description: Configure automated backup schedule
+    platform: linux
+    interpreter: bash
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+
+      echo "Configuring backup schedule for $DNA.System.Hostname..."
+
+      # Create cron jobs for backups
+      CRON_FILE="/etc/cron.d/cfgms-backup"
+
+      cat > "$CRON_FILE" << EOF
+      # CFGMS Automated Backup Schedule
+      # Managed by backup-config template
+
+      # Daily backup at 2 AM
+      $backup_schedule root $backup_script_dir/perform-backup.sh daily
+
+      # Weekly backup on Sunday at 3 AM
+      0 3 * * 0 root $backup_script_dir/perform-backup.sh weekly
+
+      # Monthly backup on 1st of month at 4 AM
+      0 4 1 * * root $backup_script_dir/perform-backup.sh monthly
+
+      EOF
+
+      chmod 0644 "$CRON_FILE"
+
+      echo "Backup schedule configured successfully."
+      echo "  Daily: $backup_schedule"
+      echo "  Weekly: Sunday 3 AM"
+      echo "  Monthly: 1st of month 4 AM"
+    run_on_apply: true
+    run_on_change: true
+  $endif
+
+  # Backup verification script
+  - type: script
+    name: verify-backup-config
+    description: Verify backup configuration and test backup
+    platform: linux
+    interpreter: bash
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+
+      echo "Verifying backup configuration..."
+      echo "=========================================="
+
+      PASS=0
+      FAIL=0
+
+      # Check directories exist
+      echo "Checking backup directories..."
+      for dir in "$backup_base_dir" "$backup_script_dir" "$backup_log_dir"; do
+        if [ -d "$dir" ]; then
+          echo "✓ Directory exists: $dir"
+          ((PASS++))
+        else
+          echo "✗ Directory missing: $dir"
+          ((FAIL++))
+        fi
+      done
+
+      # Check scripts are executable
+      echo ""
+      echo "Checking backup scripts..."
+      if [ -x "$backup_script_dir/perform-backup.sh" ]; then
+        echo "✓ Backup script is executable"
+        ((PASS++))
+      else
+        echo "✗ Backup script is not executable"
+        ((FAIL++))
+      fi
+
+      # Check cron configuration
+      if $backup_enabled; then
+        echo ""
+        echo "Checking backup schedule..."
+        if [ -f "/etc/cron.d/cfgms-backup" ]; then
+          echo "✓ Cron schedule configured"
+          ((PASS++))
+        else
+          echo "✗ Cron schedule not configured"
+          ((FAIL++))
+        fi
+      fi
+
+      # Check disk space
+      echo ""
+      echo "Checking disk space..."
+      AVAILABLE_SPACE=$(df -BG "$backup_base_dir" | awk 'NR==2 {print $4}' | sed 's/G//')
+      echo "  Available space: ${AVAILABLE_SPACE}GB"
+
+      if [ "$AVAILABLE_SPACE" -ge 50 ]; then
+        echo "✓ Sufficient disk space"
+        ((PASS++))
+      elif [ "$AVAILABLE_SPACE" -ge 20 ]; then
+        echo "⚠ Low disk space warning"
+        ((PASS++))
+      else
+        echo "✗ Critical disk space - less than 20GB"
+        ((FAIL++))
+      fi
+
+      # Test backup (dry run)
+      echo ""
+      echo "Testing backup execution (dry run)..."
+      if tar cf /dev/null ${backup_paths[0]} 2>/dev/null; then
+        echo "✓ Backup test successful"
+        ((PASS++))
+      else
+        echo "✗ Backup test failed"
+        ((FAIL++))
+      fi
+
+      # Summary
+      echo ""
+      echo "=========================================="
+      echo "Verification Summary:"
+      echo "  PASS: $PASS"
+      echo "  FAIL: $FAIL"
+      echo "=========================================="
+
+      if [ $FAIL -eq 0 ]; then
+        echo "✓ Backup configuration verified successfully!"
+        exit 0
+      else
+        echo "✗ Some verification checks failed."
+        exit 1
+      fi
+    run_on_apply: true
+    run_on_change: false
+
+$endif

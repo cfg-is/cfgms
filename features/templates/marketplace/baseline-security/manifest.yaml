@@ -1,0 +1,74 @@
+id: baseline-security
+name: Baseline Security Template
+version: 1.0.0
+description: |
+  Comprehensive baseline security template that implements fundamental security
+  controls for endpoints. Includes firewall configuration, audit logging,
+  security updates automation, and user account hardening. Uses file, directory,
+  and script modules for complete security posture.
+
+author: CFGMS Team
+author_email: team@cfgms.io
+license: MIT
+repository: https://github.com/cfg-is/cfgms-templates
+homepage: https://cfgms.io/templates/baseline-security
+
+category: security
+keywords:
+  - security
+  - baseline
+  - hardening
+  - firewall
+  - audit
+  - compliance
+
+tags:
+  - security
+  - baseline
+  - linux
+  - compliance
+  - multi-module
+
+compliance_frameworks:
+  - CIS
+  - NIST
+  - SOC2
+  - PCI-DSS
+
+security_level: high
+
+tested_platforms:
+  - linux-ubuntu-20.04
+  - linux-ubuntu-22.04
+  - linux-debian-11
+  - linux-debian-12
+  - linux-centos-8
+  - linux-rhel-8
+  - linux-rhel-9
+
+min_version: "0.6.0"
+
+required_modules:
+  - file
+  - directory
+  - script
+
+required_features:
+  - templates
+  - dna
+
+dependencies:
+  - template_id: ssh-hardening
+    version: "1.0.0"
+    version_constraint: ">=1.0.0"
+    required: false
+
+template_file: template.yaml
+readme_file: README.md
+
+changelog:
+  - version: 1.0.0
+    date: 2025-10-13T00:00:00Z
+    description: Initial release with multi-module baseline security controls
+    breaking: false
+    author: CFGMS Team

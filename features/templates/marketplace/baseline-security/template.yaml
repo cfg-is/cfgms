@@ -1,0 +1,520 @@
+# Baseline Security Template
+# Implements fundamental security controls using file, directory, and script modules
+
+variables:
+  # Security directories
+  security_config_dir: "/etc/cfgms/security"
+  audit_log_dir: "/var/log/cfgms/audit"
+
+  # Firewall settings
+  firewall_enabled: true
+  allowed_ssh_port: 22
+  allowed_services:
+    - ssh
+    - http
+    - https
+
+  # Automatic security updates
+  auto_security_updates: true
+  update_schedule: "daily"
+
+  # Audit logging
+  audit_enabled: true
+  audit_retention_days: 90
+
+  # User security settings
+  password_max_age: 90
+  password_min_length: 14
+  failed_login_lockout: 5
+
+$if "$DNA.System.OS" == "linux"
+modules:
+  # Create security configuration directory structure
+  - type: directory
+    path: $security_config_dir
+    owner: root
+    group: root
+    mode: "0700"
+    recursive: true
+
+  - type: directory
+    path: $audit_log_dir
+    owner: root
+    group: root
+    mode: "0700"
+    recursive: true
+
+  # Configure system-wide security settings
+  - type: file
+    path: $security_config_dir/security.conf
+    owner: root
+    group: root
+    mode: "0600"
+    content: |
+      # CFGMS Baseline Security Configuration
+      # Hostname: $DNA.System.Hostname
+      # Applied: $(date)
+
+      SECURITY_LEVEL=high
+      AUTO_UPDATES=$auto_security_updates
+      UPDATE_SCHEDULE=$update_schedule
+      AUDIT_ENABLED=$audit_enabled
+      AUDIT_RETENTION_DAYS=$audit_retention_days
+      FIREWALL_ENABLED=$firewall_enabled
+
+  # Configure password policy
+  - type: file
+    path: /etc/security/pwquality.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Password Quality Requirements
+      # Managed by CFGMS - baseline-security template
+
+      minlen = $password_min_length
+      dcredit = -1
+      ucredit = -1
+      lcredit = -1
+      ocredit = -1
+      minclass = 3
+      maxrepeat = 2
+      maxsequence = 3
+      gecoscheck = 1
+      dictcheck = 1
+      usercheck = 1
+      enforcing = 1
+
+  # Configure login security
+  - type: file
+    path: /etc/security/faillock.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Faillock Configuration
+      # Managed by CFGMS - baseline-security template
+
+      deny = $failed_login_lockout
+      unlock_time = 900
+      fail_interval = 900
+      audit
+      even_deny_root
+      root_unlock_time = 900
+
+  # Configure PAM password aging
+  - type: file
+    path: /etc/login.defs
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Login Definitions
+      # Managed by CFGMS - baseline-security template
+
+      PASS_MAX_DAYS   $password_max_age
+      PASS_MIN_DAYS   1
+      PASS_MIN_LEN    $password_min_length
+      PASS_WARN_AGE   7
+
+      UID_MIN         1000
+      UID_MAX         60000
+      SYS_UID_MIN     100
+      SYS_UID_MAX     999
+
+      GID_MIN         1000
+      GID_MAX         60000
+      SYS_GID_MIN     100
+      SYS_GID_MAX     999
+
+      LOGIN_RETRIES   3
+      LOGIN_TIMEOUT   60
+
+      UMASK           027
+
+      CREATE_HOME     yes
+
+      ENCRYPT_METHOD  SHA512
+
+  # Configure kernel security parameters
+  - type: file
+    path: /etc/sysctl.d/99-cfgms-security.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Kernel Security Parameters
+      # Managed by CFGMS - baseline-security template
+
+      # IP Forwarding
+      net.ipv4.ip_forward = 0
+      net.ipv6.conf.all.forwarding = 0
+
+      # Disable source packet routing
+      net.ipv4.conf.all.send_redirects = 0
+      net.ipv4.conf.default.send_redirects = 0
+      net.ipv4.conf.all.accept_source_route = 0
+      net.ipv4.conf.default.accept_source_route = 0
+      net.ipv6.conf.all.accept_source_route = 0
+      net.ipv6.conf.default.accept_source_route = 0
+
+      # Disable ICMP redirects
+      net.ipv4.conf.all.accept_redirects = 0
+      net.ipv4.conf.default.accept_redirects = 0
+      net.ipv6.conf.all.accept_redirects = 0
+      net.ipv6.conf.default.accept_redirects = 0
+      net.ipv4.conf.all.secure_redirects = 0
+      net.ipv4.conf.default.secure_redirects = 0
+
+      # Enable bad error message Protection
+      net.ipv4.icmp_ignore_bogus_error_responses = 1
+
+      # Enable RFC-recommended Source Route Validation
+      net.ipv4.conf.all.rp_filter = 1
+      net.ipv4.conf.default.rp_filter = 1
+
+      # Log Martians
+      net.ipv4.conf.all.log_martians = 1
+      net.ipv4.conf.default.log_martians = 1
+
+      # Ignore ICMP ping requests
+      net.ipv4.icmp_echo_ignore_all = 0
+
+      # Ignore Broadcast Request
+      net.ipv4.icmp_echo_ignore_broadcasts = 1
+
+      # Enable TCP SYN Cookie Protection
+      net.ipv4.tcp_syncookies = 1
+      net.ipv4.tcp_max_syn_backlog = 2048
+      net.ipv4.tcp_synack_retries = 2
+      net.ipv4.tcp_syn_retries = 5
+
+      # Disable IPv6 if not needed
+      # net.ipv6.conf.all.disable_ipv6 = 1
+      # net.ipv6.conf.default.disable_ipv6 = 1
+
+      # Restrict kernel pointers
+      kernel.kptr_restrict = 2
+
+      # Restrict dmesg access
+      kernel.dmesg_restrict = 1
+
+      # Restrict ptrace scope
+      kernel.yama.ptrace_scope = 1
+
+      # Enable ASLR
+      kernel.randomize_va_space = 2
+
+  # Firewall configuration script
+  $if $firewall_enabled
+  - type: script
+    name: configure-firewall
+    description: Configure host-based firewall with baseline rules
+    platform: linux
+    interpreter: bash
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+
+      echo "Configuring firewall for $DNA.System.Hostname..."
+
+      # Detect firewall management tool
+      if command -v ufw &> /dev/null; then
+        # Ubuntu/Debian - UFW
+        echo "Using UFW firewall..."
+
+        # Reset to defaults
+        ufw --force reset
+
+        # Default policies
+        ufw default deny incoming
+        ufw default allow outgoing
+
+        # Allow SSH
+        ufw allow $allowed_ssh_port/tcp comment 'SSH'
+
+        # Allow HTTP/HTTPS if needed
+        ufw allow 80/tcp comment 'HTTP'
+        ufw allow 443/tcp comment 'HTTPS'
+
+        # Enable firewall
+        ufw --force enable
+
+        # Show status
+        ufw status verbose
+
+      elif command -v firewall-cmd &> /dev/null; then
+        # RHEL/CentOS - firewalld
+        echo "Using firewalld..."
+
+        # Start firewalld
+        systemctl start firewalld
+        systemctl enable firewalld
+
+        # Set default zone
+        firewall-cmd --set-default-zone=public
+
+        # Allow SSH
+        firewall-cmd --permanent --add-service=ssh
+
+        # Allow HTTP/HTTPS
+        firewall-cmd --permanent --add-service=http
+        firewall-cmd --permanent --add-service=https
+
+        # Reload configuration
+        firewall-cmd --reload
+
+        # Show status
+        firewall-cmd --list-all
+
+      else
+        echo "No supported firewall found (ufw or firewalld)"
+        exit 1
+      fi
+
+      echo "Firewall configuration complete."
+    run_on_apply: true
+    run_on_change: true
+  $endif
+
+  # Security updates script
+  $if $auto_security_updates
+  - type: script
+    name: configure-auto-updates
+    description: Configure automatic security updates
+    platform: linux
+    interpreter: bash
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+
+      echo "Configuring automatic security updates..."
+
+      if [ -f /etc/debian_version ]; then
+        # Debian/Ubuntu
+        apt-get update
+        apt-get install -y unattended-upgrades apt-listchanges
+
+        # Configure unattended-upgrades
+        cat > /etc/apt/apt.conf.d/50unattended-upgrades << 'EOUF'
+      Unattended-Upgrade::Allowed-Origins {
+        "${distro_id}:${distro_codename}-security";
+        "${distro_id}ESMApps:${distro_codename}-apps-security";
+        "${distro_id}ESM:${distro_codename}-infra-security";
+      };
+      Unattended-Upgrade::AutoFixInterruptedDpkg "true";
+      Unattended-Upgrade::MinimalSteps "true";
+      Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+      Unattended-Upgrade::Remove-Unused-Dependencies "true";
+      Unattended-Upgrade::Automatic-Reboot "false";
+      Unattended-Upgrade::Automatic-Reboot-WithUsers "false";
+      Unattended-Upgrade::Automatic-Reboot-Time "03:00";
+      EOUF
+
+        # Enable automatic updates
+        cat > /etc/apt/apt.conf.d/20auto-upgrades << 'EOAU'
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Download-Upgradeable-Packages "1";
+      APT::Periodic::AutocleanInterval "7";
+      APT::Periodic::Unattended-Upgrade "1";
+      EOAU
+
+      elif [ -f /etc/redhat-release ]; then
+        # RHEL/CentOS
+        yum install -y yum-cron
+
+        # Configure yum-cron for security updates only
+        sed -i 's/^update_cmd =.*/update_cmd = security/' /etc/yum/yum-cron.conf
+        sed -i 's/^apply_updates =.*/apply_updates = yes/' /etc/yum/yum-cron.conf
+
+        # Enable and start yum-cron
+        systemctl enable yum-cron
+        systemctl start yum-cron
+      fi
+
+      echo "Automatic security updates configured successfully."
+    run_on_apply: true
+    run_on_change: true
+  $endif
+
+  # Audit configuration script
+  $if $audit_enabled
+  - type: script
+    name: configure-audit-logging
+    description: Configure system audit logging
+    platform: linux
+    interpreter: bash
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+
+      echo "Configuring audit logging..."
+
+      # Install auditd if not present
+      if ! command -v auditd &> /dev/null; then
+        if [ -f /etc/debian_version ]; then
+          apt-get update && apt-get install -y auditd audispd-plugins
+        elif [ -f /etc/redhat-release ]; then
+          yum install -y audit audit-libs
+        fi
+      fi
+
+      # Configure audit rules for security monitoring
+      cat > /etc/audit/rules.d/cfgms-security.rules << 'EORULES'
+      # CFGMS Baseline Security Audit Rules
+
+      # Remove any existing rules
+      -D
+
+      # Buffer size
+      -b 8192
+
+      # Failure mode (0=silent 1=printk 2=panic)
+      -f 1
+
+      # Monitor authentication files
+      -w /etc/passwd -p wa -k identity
+      -w /etc/group -p wa -k identity
+      -w /etc/shadow -p wa -k identity
+      -w /etc/gshadow -p wa -k identity
+      -w /etc/security/opasswd -p wa -k identity
+
+      # Monitor sudo configuration
+      -w /etc/sudoers -p wa -k sudo_config
+      -w /etc/sudoers.d/ -p wa -k sudo_config
+
+      # Monitor SSH configuration
+      -w /etc/ssh/sshd_config -p wa -k sshd_config
+
+      # Monitor login/logout events
+      -w /var/log/lastlog -p wa -k logins
+      -w /var/run/faillock/ -p wa -k logins
+
+      # Monitor system calls
+      -a always,exit -F arch=b64 -S adjtimex -S settimeofday -k time-change
+      -a always,exit -F arch=b32 -S adjtimex -S settimeofday -S stime -k time-change
+      -a always,exit -F arch=b64 -S clock_settime -k time-change
+      -a always,exit -F arch=b32 -S clock_settime -k time-change
+
+      # Make configuration immutable
+      -e 2
+      EORULES
+
+      # Reload audit rules
+      augenrules --load
+
+      # Enable and start auditd
+      systemctl enable auditd
+      systemctl restart auditd
+
+      # Configure log rotation
+      cat > /etc/logrotate.d/cfgms-audit << 'EOROT'
+      $audit_log_dir/*.log {
+        daily
+        rotate $audit_retention_days
+        compress
+        delaycompress
+        missingok
+        notifempty
+        create 0600 root root
+      }
+      EOROT
+
+      echo "Audit logging configured successfully."
+    run_on_apply: true
+    run_on_change: true
+  $endif
+
+  # System hardening verification script
+  - type: script
+    name: verify-baseline-security
+    description: Verify baseline security configuration is properly applied
+    platform: linux
+    interpreter: bash
+    content: |
+      #!/bin/bash
+
+      echo "Verifying baseline security configuration..."
+      echo "=========================================="
+
+      PASS=0
+      FAIL=0
+
+      # Check sysctl settings
+      echo "Checking kernel security parameters..."
+      sysctl_checks=(
+        "net.ipv4.ip_forward=0"
+        "net.ipv4.conf.all.rp_filter=1"
+        "net.ipv4.tcp_syncookies=1"
+        "kernel.randomize_va_space=2"
+      )
+
+      for check in "${sysctl_checks[@]}"; do
+        key="${check%=*}"
+        expected="${check#*=}"
+        actual=$(sysctl -n "$key" 2>/dev/null || echo "missing")
+
+        if [ "$actual" = "$expected" ]; then
+          echo "✓ $key = $expected"
+          ((PASS++))
+        else
+          echo "✗ $key = $actual (expected $expected)"
+          ((FAIL++))
+        fi
+      done
+
+      # Check firewall status
+      if $firewall_enabled; then
+        echo ""
+        echo "Checking firewall status..."
+        if command -v ufw &> /dev/null; then
+          if ufw status | grep -q "Status: active"; then
+            echo "✓ UFW firewall is active"
+            ((PASS++))
+          else
+            echo "✗ UFW firewall is not active"
+            ((FAIL++))
+          fi
+        elif command -v firewall-cmd &> /dev/null; then
+          if systemctl is-active --quiet firewalld; then
+            echo "✓ firewalld is active"
+            ((PASS++))
+          else
+            echo "✗ firewalld is not active"
+            ((FAIL++))
+          fi
+        fi
+      fi
+
+      # Check audit daemon
+      if $audit_enabled; then
+        echo ""
+        echo "Checking audit daemon..."
+        if systemctl is-active --quiet auditd; then
+          echo "✓ auditd is active"
+          ((PASS++))
+        else
+          echo "✗ auditd is not active"
+          ((FAIL++))
+        fi
+      fi
+
+      # Summary
+      echo ""
+      echo "=========================================="
+      echo "Verification Summary:"
+      echo "  PASS: $PASS"
+      echo "  FAIL: $FAIL"
+      echo "=========================================="
+
+      if [ $FAIL -eq 0 ]; then
+        echo "✓ All baseline security checks passed!"
+        exit 0
+      else
+        echo "✗ Some baseline security checks failed."
+        exit 1
+      fi
+    run_on_apply: true
+    run_on_change: false
+
+$endif
