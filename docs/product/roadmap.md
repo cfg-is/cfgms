@@ -505,7 +505,7 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 
 #### v0.6.0 (Alpha) - Finalizing Foundational Endpoint CMS
 
-**Status**: 📋 Planned - 65 story points (5 stories)
+**Status**: 🚧 IN PROGRESS - 13/60 story points (5 stories) - 22% complete
 **Goal**: Complete foundational endpoint CMS with policy-driven automation, compliance templates, and proactive performance management
 **Epic Document**: [v0.6.0-epic.md](./v0.6.0-epic.md)
 **Timeline**: 12 weeks (3 months) - Target Q2 2026
@@ -514,7 +514,7 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 
 **Epic: v0.6.0 - Finalizing Foundational Endpoint CMS**
 
-- [ ] **Advanced Script Execution Capabilities** (Story 1) - 13 points
+- [x] **Advanced Script Execution Capabilities** (Issue #210) - 13 points ✅ COMPLETED
   - Git-versioned scripts with semantic versioning
   - DNA-based parameter injection (`$DNA.OS.Version`, `$CompanySettings.BackupPath`)
   - Ephemeral API keys for script-to-controller callbacks
@@ -525,20 +525,18 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - Exit code capture and workflow-based retry logic
   - No execution sandboxing (endpoint management scripts, not untrusted code)
 
-- [ ] **Configuration Templates (Advanced)** (Story 2) - 13 points
-  - 5 core compliance templates (CIS Level 1 + CMMC Level 1)
-    - CIS Windows 10/11 Enterprise Level 1
-    - CIS Windows Server 2019/2022 Level 1
-    - CIS macOS Ventura/Sonoma Level 1
-    - CIS Ubuntu/Debian Level 1
-    - CMMC Level 1 Windows (all versions)
+- [ ] **Configuration Templates (Advanced)** (Issue #211) - 13 points
+  - Template marketplace infrastructure with 3 example templates using existing modules
+    - Example 1: SSH hardening template (file-based config)
+    - Example 2: Baseline security template (file + directory + script)
+    - Example 3: Backup configuration template (directory + script)
   - OSS template marketplace (GitHub-based, community contributions)
   - Template testing framework (unit tests, test scenarios)
   - Compliance validation via DNA + drift detection
   - Template versioning and collaboration workflows
-  - Extends Story 76 basic templates
+  - **Backlog**: Comprehensive CIS/CMMC templates deferred to v0.7.0+ (requires module development)
 
-- [ ] **Windows Patch Compliance (Advanced)** (Story 3) - 13 points
+- [ ] **Windows Patch Compliance (Advanced)** (Issue #212) - 13 points
   - Policy-driven patching (declarative config, automatic enforcement)
   - Patch type policies (Critical: 7 days, Important: 14 days, etc.)
   - Major version upgrades (Win 10→11, 23H2→24H2) with DNA compatibility checks
@@ -549,7 +547,7 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - Windows built-in rollback handles failed upgrades
   - No canary deployment (deferred to global ring system backlog)
 
-- [ ] **Endpoint Performance Monitoring** (Story 4) - 13 points
+- [ ] **Endpoint Performance Monitoring** (Issue #213) - 13 points
   - Performance metrics (separate from DNA system)
     - DNA: System "blueprint" (hardware specs, installed software)
     - Performance: System "vital signs" (CPU/memory/disk/network utilization)
@@ -562,19 +560,19 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - Multi-platform support (Windows/Linux/macOS) from day 1
   - Collection: 60 seconds default (configurable), <1% CPU overhead
 
-- [ ] **Server/Controller Performance Monitoring** (Story 5) - 13 points (HIGH PRIORITY - MSP Operations)
-  - Proactive MSP impact detection (detect issues within 30 seconds, before customer impact)
-  - Controller metrics (MQTT broker, database, application queues, system resources)
-  - Focus: Workflow/script queue depth monitoring (MSPs feel delays immediately)
-  - MSP impact classification (Critical/High/Medium)
-  - Automated self-healing (conservative: expand connection pools, cache warming, defer non-critical ops)
-  - Admin-approved tenant migration (automatic detection, manual approval, <60 second migration)
-  - Circuit breaker patterns (database, external API, MQTT broker)
-  - Email-based alert escalation (warning/critical/emergency tiers)
-  - Basic request logging for tracing (request ID propagation, CLI tool for reconstruction)
-  - API endpoints + CLI tools (`cfgctl controller status`, `cfgctl trace <request_id>`)
-  - 90-day performance retention (10-second intervals for 7 days, 1-minute for 90 days)
-  - No per-tenant tracking, no full OpenTelemetry (deferred to future)
+- [ ] **Controller Health Monitoring & Alerting** (Issue #214) - 8 points (HIGH PRIORITY - MSP Operations)
+  - Observability and alerting for small-medium deployments (10-1000 stewards)
+  - Controller metrics (MQTT broker, existing storage providers, application queues, system resources)
+  - Workflow/script queue depth monitoring (proactive alerting before MSP impact)
+  - Threshold-based alerting (CRITICAL alerts only for alpha→beta)
+  - Email alerting via SMTP (simple alerts, no tiered escalation)
+  - Request tracing for troubleshooting (request ID propagation, CLI reconstruction)
+  - Health API endpoints (simple + detailed + Prometheus)
+  - CLI tools (`cfgctl controller status`, `cfgctl trace <request_id>`)
+  - 7-day performance retention (30-second collection interval)
+  - Uses existing storage providers (Git/PostgreSQL/SQLite)
+  - <1% overhead on controller performance
+  - **Deferred to v0.7.0**: Self-healing, circuit breakers, tenant migration (5 points)
 
 #### v0.7.0 (Pre-OSS / Alpha) - Open Source Preparation
 

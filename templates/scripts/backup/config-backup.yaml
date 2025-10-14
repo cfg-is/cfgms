@@ -1,0 +1,86 @@
+metadata:
+  id: config-backup
+  name: Configuration Files Backup
+  description: Backs up critical system configuration files to specified location
+  version:
+    major: 1
+    minor: 0
+    patch: 0
+  author: cfgms-team@cfg.is
+  tags:
+    - backup
+    - configuration
+    - disaster-recovery
+  category: backup
+  platform:
+    - linux
+    - darwin
+  shell: bash
+  parameters:
+    - name: BACKUP_PATH
+      type: string
+      description: Backup destination path
+      required: true
+    - name: RETENTION_DAYS
+      type: number
+      description: Number of days to keep old backups
+      required: false
+      default: "30"
+  created_at: 2025-10-13T00:00:00Z
+  updated_at: 2025-10-13T00:00:00Z
+
+content: |
+  #!/bin/bash
+  set -euo pipefail
+
+  BACKUP_PATH="${BACKUP_PATH:?BACKUP_PATH is required}"
+  RETENTION_DAYS="${RETENTION_DAYS:-30}"
+  TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+  HOSTNAME=$(hostname)
+  BACKUP_DIR="$BACKUP_PATH/${HOSTNAME}_${TIMESTAMP}"
+
+  echo "Configuration Backup Script"
+  echo "Backup path: $BACKUP_PATH"
+  echo "Retention: $RETENTION_DAYS days"
+
+  # Create backup directory
+  mkdir -p "$BACKUP_DIR"
+
+  # Define critical configuration paths
+  CONFIG_PATHS=(
+      "/etc/fstab"
+      "/etc/hosts"
+      "/etc/hostname"
+      "/etc/resolv.conf"
+      "/etc/ssh/sshd_config"
+      "/etc/network"
+      "/etc/netplan"
+      "/etc/systemd/system"
+      "/etc/cron.d"
+      "/etc/crontab"
+  )
+
+  # Backup each path
+  for path in "${CONFIG_PATHS[@]}"; do
+      if [ -e "$path" ]; then
+          echo "Backing up: $path"
+          parent_dir=$(dirname "$path")
+          mkdir -p "$BACKUP_DIR$parent_dir"
+          cp -pr "$path" "$BACKUP_DIR$path" 2>/dev/null || true
+      fi
+  done
+
+  # Create archive
+  cd "$BACKUP_PATH"
+  tar -czf "${HOSTNAME}_${TIMESTAMP}.tar.gz" "${HOSTNAME}_${TIMESTAMP}"
+  rm -rf "$BACKUP_DIR"
+
+  echo "Backup created: ${HOSTNAME}_${TIMESTAMP}.tar.gz"
+
+  # Cleanup old backups
+  find "$BACKUP_PATH" -name "${HOSTNAME}_*.tar.gz" -type f -mtime +$RETENTION_DAYS -delete
+  echo "Cleanup completed (kept last $RETENTION_DAYS days)"
+
+  exit 0
+
+hash: placeholder

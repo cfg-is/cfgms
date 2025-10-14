@@ -1,0 +1,86 @@
+metadata:
+  id: log-rotation
+  name: Manual Log Rotation
+  description: Manually rotates and compresses log files
+  version:
+    major: 1
+    minor: 0
+    patch: 0
+  author: cfgms-team@cfg.is
+  tags:
+    - logs
+    - maintenance
+    - disk-space
+  category: system-maintenance
+  platform:
+    - linux
+  shell: bash
+  parameters:
+    - name: LOG_PATH
+      type: string
+      description: Path to log file or directory
+      required: true
+    - name: KEEP_DAYS
+      type: number
+      description: Number of days to keep rotated logs
+      required: false
+      default: "30"
+  created_at: 2025-10-13T00:00:00Z
+  updated_at: 2025-10-13T00:00:00Z
+
+content: |
+  #!/bin/bash
+  set -euo pipefail
+
+  LOG_PATH="${LOG_PATH:?LOG_PATH is required}"
+  KEEP_DAYS="${KEEP_DAYS:-30}"
+  TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+
+  echo "Log Rotation Script"
+  echo "Log path: $LOG_PATH"
+  echo "Retention: $KEEP_DAYS days"
+  echo ""
+
+  if [ ! -e "$LOG_PATH" ]; then
+      echo "Error: $LOG_PATH does not exist"
+      exit 1
+  fi
+
+  rotate_file() {
+      local file=$1
+      local rotated="${file}.${TIMESTAMP}"
+
+      if [ ! -f "$file" ]; then
+          return
+      fi
+
+      echo "Rotating: $file"
+
+      # Copy and truncate
+      cp "$file" "$rotated"
+      > "$file"
+
+      # Compress
+      gzip "$rotated"
+      echo "  Created: ${rotated}.gz"
+  }
+
+  if [ -f "$LOG_PATH" ]; then
+      # Single file
+      rotate_file "$LOG_PATH"
+  elif [ -d "$LOG_PATH" ]; then
+      # Directory
+      find "$LOG_PATH" -type f -name "*.log" | while read logfile; do
+          rotate_file "$logfile"
+      done
+  fi
+
+  # Cleanup old rotated logs
+  echo ""
+  echo "Cleaning up logs older than $KEEP_DAYS days..."
+  find "$(dirname "$LOG_PATH")" -name "*.gz" -type f -mtime +$KEEP_DAYS -delete
+
+  echo "Log rotation completed"
+  exit 0
+
+hash: placeholder

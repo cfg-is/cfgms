@@ -1,0 +1,161 @@
+metadata:
+  id: security-baseline-check
+  name: Security Baseline Check
+  description: Verifies system security baseline compliance
+  version:
+    major: 1
+    minor: 0
+    patch: 0
+  author: cfgms-team@cfg.is
+  tags:
+    - security
+    - compliance
+    - audit
+    - linux
+  category: security
+  platform:
+    - linux
+  shell: bash
+  parameters: []
+  created_at: 2025-10-13T00:00:00Z
+  updated_at: 2025-10-13T00:00:00Z
+
+content: |
+  #!/bin/bash
+  set -euo pipefail
+
+  PASS=0
+  FAIL=0
+  WARN=0
+
+  check_pass() {
+      echo "  [PASS] $1"
+      ((PASS++))
+  }
+
+  check_fail() {
+      echo "  [FAIL] $1"
+      ((FAIL++))
+  }
+
+  check_warn() {
+      echo "  [WARN] $1"
+      ((WARN++))
+  }
+
+  echo "========================================="
+  echo "  SECURITY BASELINE CHECK"
+  echo "========================================="
+  echo ""
+
+  # SSH Security
+  echo "--- SSH Configuration ---"
+  if [ -f /etc/ssh/sshd_config ]; then
+      if grep -q "^PermitRootLogin no" /etc/ssh/sshd_config; then
+          check_pass "Root login disabled"
+      else
+          check_fail "Root login is enabled"
+      fi
+
+      if grep -q "^PasswordAuthentication no" /etc/ssh/sshd_config; then
+          check_pass "Password authentication disabled"
+      else
+          check_warn "Password authentication is enabled"
+      fi
+
+      if grep -q "^PermitEmptyPasswords no" /etc/ssh/sshd_config; then
+          check_pass "Empty passwords not permitted"
+      else
+          check_fail "Empty passwords are permitted"
+      fi
+  else
+      check_warn "SSH not installed or config not found"
+  fi
+
+  # Firewall Status
+  echo ""
+  echo "--- Firewall Status ---"
+  if systemctl is-active --quiet ufw; then
+      check_pass "UFW firewall is active"
+  elif systemctl is-active --quiet firewalld; then
+      check_pass "Firewalld is active"
+  elif systemctl is-active --quiet iptables; then
+      check_pass "iptables is active"
+  else
+      check_fail "No firewall service is active"
+  fi
+
+  # Automatic Updates
+  echo ""
+  echo "--- Automatic Updates ---"
+  if systemctl is-enabled --quiet unattended-upgrades 2>/dev/null; then
+      check_pass "Unattended upgrades enabled"
+  elif [ -f /etc/yum/yum-cron.conf ]; then
+      check_pass "Yum-cron configured"
+  else
+      check_warn "Automatic updates not configured"
+  fi
+
+  # File Permissions
+  echo ""
+  echo "--- Critical File Permissions ---"
+  if [ "$(stat -c %a /etc/passwd)" = "644" ]; then
+      check_pass "/etc/passwd has correct permissions (644)"
+  else
+      check_fail "/etc/passwd has incorrect permissions"
+  fi
+
+  if [ "$(stat -c %a /etc/shadow)" = "640" ] || [ "$(stat -c %a /etc/shadow)" = "000" ]; then
+      check_pass "/etc/shadow has correct permissions"
+  else
+      check_fail "/etc/shadow has incorrect permissions"
+  fi
+
+  # Kernel Parameters
+  echo ""
+  echo "--- Kernel Security Parameters ---"
+  if sysctl net.ipv4.ip_forward | grep -q "= 0"; then
+      check_pass "IP forwarding disabled"
+  else
+      check_warn "IP forwarding is enabled"
+  fi
+
+  if sysctl net.ipv4.conf.all.accept_redirects | grep -q "= 0"; then
+      check_pass "ICMP redirects disabled"
+  else
+      check_warn "ICMP redirects are enabled"
+  fi
+
+  # Unnecessary Services
+  echo ""
+  echo "--- Unnecessary Services Check ---"
+  RISKY_SERVICES=("telnet" "rsh" "rlogin" "vsftpd" "ftpd")
+  for service in "${RISKY_SERVICES[@]}"; do
+      if systemctl is-active --quiet "$service" 2>/dev/null; then
+          check_fail "Risky service '$service' is running"
+      fi
+  done
+  check_pass "No risky services detected"
+
+  # Summary
+  echo ""
+  echo "========================================="
+  echo "  SUMMARY"
+  echo "========================================="
+  echo "Passed:   $PASS"
+  echo "Failed:   $FAIL"
+  echo "Warnings: $WARN"
+  echo ""
+
+  if [ "$FAIL" -gt 0 ]; then
+      echo "Result: FAIL"
+      exit 1
+  elif [ "$WARN" -gt 0 ]; then
+      echo "Result: PASS WITH WARNINGS"
+      exit 0
+  else
+      echo "Result: PASS"
+      exit 0
+  fi
+
+hash: placeholder
