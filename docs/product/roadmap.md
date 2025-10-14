@@ -505,7 +505,7 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 
 #### v0.6.0 (Alpha) - Finalizing Foundational Endpoint CMS
 
-**Status**: 🚧 IN PROGRESS - 26/60 story points (5 stories) - 43% complete
+**Status**: 🚧 IN PROGRESS - 39/60 story points (5 stories) - 65% complete
 **Goal**: Complete foundational endpoint CMS with policy-driven automation, compliance templates, and proactive performance management
 **Epic Document**: [v0.6.0-epic.md](./v0.6.0-epic.md)
 **Timeline**: 12 weeks (3 months) - Target Q2 2026
@@ -537,16 +537,16 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - CI/CD validation for template PRs ✅
   - **Backlog**: Comprehensive CIS/CMMC templates deferred to v0.7.0+ (requires module development)
 
-- [ ] **Windows Patch Compliance (Advanced)** (Issue #212) - 13 points
-  - Policy-driven patching (declarative config, automatic enforcement)
-  - Patch type policies (Critical: 7 days, Important: 14 days, etc.)
-  - Major version upgrades (Win 10→11, 23H2→24H2) with DNA compatibility checks
-  - Windows Update COM API integration (no WSUS/WUfB dependency)
-  - Generic maintenance windows (honored by ALL reboot operations, not just patching)
-  - Proactive compliance alerting (7 days warning, 1 day critical)
-  - Basic compliance reporting (patch status, days until breach)
-  - Windows built-in rollback handles failed upgrades
-  - No canary deployment (deferred to global ring system backlog)
+- [x] **Windows Patch Compliance (Advanced)** (Issue #212) - 13 points ✅ COMPLETED
+  - Policy-driven patching (declarative config, automatic enforcement) ✅
+  - Patch type policies (Critical: 7 days, Important: 14 days, etc.) ✅
+  - Major version upgrades (Win 10→11, 23H2→24H2) with DNA compatibility checks ✅
+  - Windows Update COM API integration (no WSUS/WUfB dependency) ✅
+  - Generic maintenance windows (honored by ALL reboot operations, not just patching) ✅
+  - Proactive compliance alerting (7 days warning, 1 day critical) ✅
+  - Basic compliance reporting (patch status, days until breach) ✅
+  - Windows built-in rollback handles failed upgrades ✅
+  - No canary deployment (deferred to global ring system backlog) ✅
 
 - [ ] **Endpoint Performance Monitoring** (Issue #213) - 13 points
   - Performance metrics (separate from DNA system)
