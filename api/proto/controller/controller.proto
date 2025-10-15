@@ -8,19 +8,6 @@ import "common/common.proto";
 import "common/auth.proto";
 import "google/protobuf/timestamp.proto";
 
-service Controller {
-  // Authentication
-  rpc Authenticate(common.Credentials) returns (common.Token);
-  
-  // Steward management
-  rpc AcceptRegistration(RegisterRequest) returns (RegisterResponse);
-  rpc ProcessHeartbeat(HeartbeatRequest) returns (common.Status);
-  
-  // DNA management
-  rpc SyncDNA(common.DNA) returns (common.Status);
-  rpc GetStewardDNA(StewardRequest) returns (common.DNA);
-}
-
 message RegisterRequest {
   string version = 1;
   common.DNA initial_dna = 2;

@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	common "github.com/cfgis/cfgms/api/proto/common"
@@ -49,16 +48,14 @@ type EffectiveValue struct {
 	Level  int         `json:"level"`  // Hierarchy level
 }
 
-// ConfigurationService implements the Configuration gRPC service
+// ConfigurationService implements the Configuration service
 type ConfigurationService struct {
-	controller.UnimplementedConfigurationServiceServer
-	
 	logger        logging.Logger
 	mu            sync.RWMutex
 	configurations map[string]*StoredConfiguration
 	controllerSvc *ControllerService
 	validator     *validation.Validator
-	
+
 	// Configuration streaming
 	subscribers map[string]chan *controller.ConfigurationUpdate
 }
@@ -333,98 +330,9 @@ func (s *ConfigurationService) filterConfigByModules(config *stewardconfig.Stewa
 }
 
 // StreamConfigurationUpdates streams configuration updates to stewards
-func (s *ConfigurationService) StreamConfigurationUpdates(req *controller.ConfigStreamRequest, stream controller.ConfigurationService_StreamConfigurationUpdatesServer) error {
-	s.logger.Debug("Configuration stream request received", "steward_id", req.StewardId, "modules", req.Modules)
-	
-	// Verify steward exists
-	if s.controllerSvc != nil {
-		if _, exists := s.controllerSvc.GetStewardInfo(req.StewardId); !exists {
-			return fmt.Errorf("steward %s not found", req.StewardId)
-		}
-	}
-	
-	// Create subscriber channel
-	s.mu.Lock()
-	updateChan := make(chan *controller.ConfigurationUpdate, 10)
-	s.subscribers[req.StewardId] = updateChan
-	s.mu.Unlock()
-	
-	// Clean up subscriber when done
-	defer func() {
-		s.mu.Lock()
-		delete(s.subscribers, req.StewardId)
-		close(updateChan)
-		s.mu.Unlock()
-	}()
-	
-	// Send initial configuration if it exists
-	s.mu.RLock()
-	storedConfig, exists := s.configurations[req.StewardId]
-	s.mu.RUnlock()
-	
-	if exists {
-		// Filter configuration by modules if specified
-		var configBytes []byte
-		var err error
-		
-		if len(req.Modules) > 0 {
-			filtered := s.filterConfigByModules(storedConfig.Config, req.Modules)
-			configBytes, err = json.Marshal(filtered)
-		} else {
-			configBytes, err = json.Marshal(storedConfig.Config)
-		}
-		
-		if err != nil {
-			s.logger.Error("Failed to marshal configuration", "error", err)
-			return fmt.Errorf("failed to marshal configuration: %w", err)
-		}
-		
-		initialUpdate := &controller.ConfigurationUpdate{
-			StewardId:  req.StewardId,
-			Config:     configBytes,
-			Version:    storedConfig.Version,
-			Timestamp:  timestamppb.Now(),
-			UpdateType: controller.ConfigurationUpdate_INITIAL,
-		}
-		
-		if err := stream.Send(initialUpdate); err != nil {
-			s.logger.Error("Failed to send initial configuration", "error", err)
-			return fmt.Errorf("failed to send initial configuration: %w", err)
-		}
-		
-		s.logger.Debug("Initial configuration sent", "steward_id", req.StewardId)
-	}
-	
-	// Listen for updates
-	for {
-		select {
-		case update, ok := <-updateChan:
-			if !ok {
-				return nil
-			}
-			
-			// Filter by modules if specified
-			if len(req.Modules) > 0 {
-				// Parse the configuration to filter it
-				var config stewardconfig.StewardConfig
-				if err := json.Unmarshal(update.Config, &config); err == nil {
-					filtered := s.filterConfigByModules(&config, req.Modules)
-					if filteredBytes, err := json.Marshal(filtered); err == nil {
-						update.Config = filteredBytes
-					}
-				}
-			}
-			
-			if err := stream.Send(update); err != nil {
-				s.logger.Error("Failed to send configuration update", "error", err)
-				return fmt.Errorf("failed to send configuration update: %w", err)
-			}
-			
-		case <-stream.Context().Done():
-			s.logger.Debug("Configuration stream context done", "steward_id", req.StewardId)
-			return nil
-		}
-	}
+// NOTE: Disabled - gRPC streaming removed. Use MQTT for real-time updates.
+func (s *ConfigurationService) StreamConfigurationUpdates(req *controller.ConfigStreamRequest, stream interface{}) error {
+	return fmt.Errorf("streaming not supported: gRPC removed, use MQTT for real-time configuration updates")
 }
 
 // notifyConfigurationUpdate notifies subscribers of a configuration update
@@ -671,19 +579,13 @@ func (s *ConfigurationService) generateVersion() string {
 	return fmt.Sprintf("v%d", time.Now().Unix())
 }
 
-// extractTenantID extracts tenant ID from gRPC metadata
+// extractTenantID extracts tenant ID from context
 func (s *ConfigurationService) extractTenantID(ctx context.Context) string {
-	md, ok := metadata.FromIncomingContext(ctx)
-	if !ok {
-		s.logger.Debug("No metadata found in context, using default tenant")
-		return "default"
+	// Extract tenant ID from context value (set by MQTT/HTTP handlers)
+	if tenantID, ok := ctx.Value("tenant-id").(string); ok && tenantID != "" {
+		return tenantID
 	}
-	
-	values := md.Get("tenant-id")
-	if len(values) > 0 && values[0] != "" {
-		return values[0]
-	}
-	
-	s.logger.Debug("No tenant-id in metadata, using default tenant")
+
+	s.logger.Debug("No tenant-id in context, using default tenant")
 	return "default"
 }

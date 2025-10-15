@@ -7,9 +7,6 @@ import (
 	"fmt"
 	"time"
 
-	"google.golang.org/grpc/metadata"
-	"google.golang.org/protobuf/types/known/timestamppb"
-
 	common "github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/pkg/config"
@@ -19,11 +16,9 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
-// ConfigurationServiceV2 implements Epic 6 compliant Configuration gRPC service
+// ConfigurationServiceV2 implements Epic 6 compliant Configuration service
 // This replaces the in-memory storage with persistent ConfigStore
 type ConfigurationServiceV2 struct {
-	controller.UnimplementedConfigurationServiceServer
-	
 	logger           logging.Logger
 	configManager    *config.Manager
 	rollbackManager  *config.RollbackManager
@@ -323,65 +318,10 @@ func (s *ConfigurationServiceV2) ValidateConfig(ctx context.Context, req *contro
 }
 
 // StreamConfigurationUpdates streams configuration updates to stewards
+// NOTE: Disabled - gRPC streaming removed. Use MQTT for real-time updates.
 // This would need to be enhanced with storage-based change notifications
-func (s *ConfigurationServiceV2) StreamConfigurationUpdates(req *controller.ConfigStreamRequest, stream controller.ConfigurationService_StreamConfigurationUpdatesServer) error {
-	s.logger.Debug("Configuration stream request received", "steward_id", req.StewardId, "modules", req.Modules)
-	
-	// Verify steward exists
-	if s.controllerSvc != nil {
-		if _, exists := s.controllerSvc.GetStewardInfo(req.StewardId); !exists {
-			return fmt.Errorf("steward %s not found", req.StewardId)
-		}
-	}
-	
-	tenantID := s.extractTenantID(stream.Context())
-	
-	// Send initial configuration if it exists
-	stewardConfig, err := s.configManager.GetConfigurationWithInheritance(stream.Context(), tenantID, req.StewardId)
-	if err == nil {
-		// Filter configuration by modules if specified
-		var configBytes []byte
-		
-		if len(req.Modules) > 0 {
-			filtered := s.filterConfigByModules(stewardConfig, req.Modules)
-			configBytes, err = json.Marshal(filtered)
-		} else {
-			configBytes, err = json.Marshal(stewardConfig)
-		}
-		
-		if err != nil {
-			s.logger.Error("Failed to marshal configuration", "error", err)
-			return fmt.Errorf("failed to marshal configuration: %w", err)
-		}
-		
-		// Get version
-		history, _ := s.configManager.GetConfigurationHistory(stream.Context(), tenantID, req.StewardId, 1)
-		version := "unknown"
-		if len(history) > 0 {
-			version = fmt.Sprintf("v%d", history[0].Version)
-		}
-		
-		initialUpdate := &controller.ConfigurationUpdate{
-			StewardId:  req.StewardId,
-			Config:     configBytes,
-			Version:    version,
-			Timestamp:  timestamppb.Now(),
-			UpdateType: controller.ConfigurationUpdate_INITIAL,
-		}
-		
-		if err := stream.Send(initialUpdate); err != nil {
-			s.logger.Error("Failed to send initial configuration", "error", err)
-			return fmt.Errorf("failed to send initial configuration: %w", err)
-		}
-		
-		s.logger.Debug("Initial configuration sent", "steward_id", req.StewardId)
-	}
-	
-	// For now, keep connection open but don't send updates
-	// In a full implementation, this would listen for storage change notifications
-	<-stream.Context().Done()
-	s.logger.Debug("Configuration stream context done", "steward_id", req.StewardId)
-	return nil
+func (s *ConfigurationServiceV2) StreamConfigurationUpdates(req *controller.ConfigStreamRequest, stream interface{}) error {
+	return fmt.Errorf("streaming not supported: gRPC removed, use MQTT for real-time configuration updates")
 }
 
 // Helper methods
@@ -427,20 +367,14 @@ func (s *ConfigurationServiceV2) convertValidationLevel(level string) controller
 	}
 }
 
-// extractTenantID extracts tenant ID from gRPC metadata
+// extractTenantID extracts tenant ID from context
 func (s *ConfigurationServiceV2) extractTenantID(ctx context.Context) string {
-	md, ok := metadata.FromIncomingContext(ctx)
-	if !ok {
-		s.logger.Debug("No metadata found in context, using default tenant")
-		return "default"
+	// Extract tenant ID from context value (set by MQTT/HTTP handlers)
+	if tenantID, ok := ctx.Value("tenant-id").(string); ok && tenantID != "" {
+		return tenantID
 	}
-	
-	values := md.Get("tenant-id")
-	if len(values) > 0 && values[0] != "" {
-		return values[0]
-	}
-	
-	s.logger.Debug("No tenant-id in metadata, using default tenant")
+
+	s.logger.Debug("No tenant-id in context, using default tenant")
 	return "default"
 }
 

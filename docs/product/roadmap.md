@@ -586,15 +586,15 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 **GitHub Issues**: #220-232 (13 tasks across 4 phases)
 
 **Phase 1: Code Cleanup (Weeks 1-2)**
-- [ ] **Task 1: gRPC Removal** (Issue #220) - 2-3 days
+- [x] **Task 1: gRPC Removal** (Issue #220) - 2-3 days ✅ COMPLETED
   - [x] Document current gRPC usage and justification analysis (see `docs/architecture/grpc-usage-analysis.md`)
-  - [ ] Remove service definitions from .proto files (keep message definitions)
-  - [ ] Delete auto-generated *_grpc.pb.go files
-  - [ ] Refactor service implementations to remove gRPC interface conformance
-  - [ ] Redesign RBAC middleware for HTTP/MQTT (remove gRPC interceptors)
-  - [ ] Remove google.golang.org/grpc from go.mod
-  - [ ] Update Makefile proto generation to skip gRPC
-  - [ ] Validate all tests pass after removal
+  - [x] Remove service definitions from .proto files (keep message definitions)
+  - [x] Delete auto-generated *_grpc.pb.go files
+  - [x] Refactor service implementations to remove gRPC interface conformance
+  - [x] Redesign RBAC middleware for HTTP/MQTT (remove gRPC interceptors)
+  - [x] Remove google.golang.org/grpc from go.mod
+  - [x] Update Makefile proto generation to skip gRPC
+  - [x] Validate all tests pass after removal
 - [ ] **Task 2: Rename cfgctl to cfgcli** (Issue #221) - 1 day
   - [ ] Rename cmd/cfgctl directory to cmd/cfgcli
   - [ ] Update all import paths referencing cfgctl
