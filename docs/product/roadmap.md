@@ -502,7 +502,6 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 - [x] **TLS/mTLS Security Validation** (Story 12.4) - 8 points ✅ - Certificate infrastructure, TLS 1.2+ enforcement, security hardening (98/100 rating)
 - [x] **Multi-Tenant Isolation Testing** (Story 12.5) - 8 points ✅ - 3 tenant Docker infrastructure, comprehensive MQTT topic isolation tests, all acceptance criteria validated
 
-
 #### v0.6.0 (Alpha) - Finalizing Foundational Endpoint CMS
 
 **Status**: ✅ COMPLETE - 60/60 story points (5/5 stories complete) - 100% complete
@@ -580,27 +579,111 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 
 #### v0.7.0 (Pre-OSS / Alpha) - Open Source Preparation
 
-- [ ] Conduct comprehensive security code review
-- [ ] Finalize GTM strategy, open-core vs full OSS, select license etc
-- [ ] Define open-core vs commercial feature boundaries
-- [ ] Renumber roadmap for proper semantic versioning alignment
-  - [ ] Reassess all version numbers for semantic versioning compliance
-  - [ ] Align v1.0.0 with first truly production-ready, API-stable release
-  - [ ] Update documentation and marketing materials with new version strategy
-  - [ ] Ensure open-source v1.0.0 represents stable, backwards-compatible public API
-- [ ] Perform branch cleanup (e.g., ensure `main` and `develop` are clean, remove old feature branches)
-- [ ] Review repository for any sensitive data or leftover internal artifacts
-- [ ] Clean up `README.md`, `CONTRIBUTING.md`, and other project meta-files for public consumption
-- [ ] Create quick start guides for using cfgms.
+**Goal**: Prepare codebase for open source launch with proper licensing, clean architecture, and production-ready security
+
+**Epic Document**: [v0.7.0-epic.md](./v0.7.0-epic.md)
+**Feature Boundaries**: [feature-boundaries.md](./feature-boundaries.md)
+**GitHub Issues**: #220-232 (13 tasks across 4 phases)
+
+**Phase 1: Code Cleanup (Weeks 1-2)**
+- [ ] **Task 1: gRPC Removal** (Issue #220) - 2-3 days
+  - [x] Document current gRPC usage and justification analysis (see `docs/architecture/grpc-usage-analysis.md`)
+  - [ ] Remove service definitions from .proto files (keep message definitions)
+  - [ ] Delete auto-generated *_grpc.pb.go files
+  - [ ] Refactor service implementations to remove gRPC interface conformance
+  - [ ] Redesign RBAC middleware for HTTP/MQTT (remove gRPC interceptors)
+  - [ ] Remove google.golang.org/grpc from go.mod
+  - [ ] Update Makefile proto generation to skip gRPC
+  - [ ] Validate all tests pass after removal
+- [ ] **Task 2: Rename cfgctl to cfgcli** (Issue #221) - 1 day
+  - [ ] Rename cmd/cfgctl directory to cmd/cfgcli
+  - [ ] Update all import paths referencing cfgctl
+  - [ ] Update documentation and examples
+  - [ ] Update build scripts and Makefile targets
+- [ ] **Task 3: Move HA Code to Commercial Tier** (Issue #222) - 2 days
+  - [ ] Move features/controller/ha/ to commercial repository
+  - [ ] Create placeholder/stub implementation for OSS
+  - [ ] Update documentation about HA availability
+  - [ ] Ensure graceful degradation in OSS version
+- [ ] **Task 4: Repository Cleanup** (Issue #223) - 1-2 days
+  - [ ] Perform branch cleanup (main and develop only)
+  - [ ] Review repository for sensitive data or internal artifacts
+  - [ ] Remove any internal documentation or notes
+  - [ ] Clean up test fixtures and example data
+- [ ] **Task 5: Sensitive Data Scan** (Issue #224) - 3-5 days [CRITICAL]
+  - [ ] Run gitleaks against entire repository history
+  - [ ] Run truffleHog against entire repository history
+  - [ ] Manually review configuration files for API keys, tokens
+  - [ ] Check commit messages for sensitive information
+  - [ ] Verify no customer names, internal URLs, or proprietary info
+  - [ ] Remove any findings using git-filter-repo (if needed)
+  - [ ] Document scan results and remediation actions
+
+**Phase 2: Security Review (Weeks 3-5)**
+- [ ] **Task 6: Security Code Review (External Audit)** (Issue #225) - 2-3 weeks [CRITICAL]
+  - [ ] Static analysis with gosec, staticcheck
+  - [ ] Dependency vulnerability scan with govulncheck
+  - [ ] Manual code review focusing on auth/authz, input validation, SQL/command injection
+  - [ ] Engage external security firm for independent audit
+  - [ ] Remediate all critical/high findings
+  - [ ] Document security posture for users
+
+**Phase 3: Licensing & Documentation (Weeks 6-8)**
+- [ ] **Task 7: Licensing Implementation** (Issue #226) - 3-5 days
+  - [x] Finalize licensing model (Apache 2.0 + Elastic License v2 open core)
+  - [x] Define open-core vs commercial feature boundaries (see `docs/product/feature-boundaries.md`)
+  - [ ] Create LICENSE-APACHE-2.0 file in repository root
+  - [ ] Create LICENSE-ELASTIC-2.0 file for commercial reference
+  - [ ] Add Apache 2.0 license headers to all source files (.go, .proto)
+  - [ ] Add license header verification to CI/CD pipeline
+- [ ] **Task 8: Feature Boundary Documentation** (Issue #227) - 2-3 days
+  - [ ] Create user-friendly version of feature-boundaries.md
+  - [ ] Add feature comparison table to README
+  - [ ] Document upgrade path from OSS to Commercial
+  - [ ] Create FAQ about licensing and features
+- [ ] **Task 9: Documentation Cleanup & Creation** (Issue #228) - 1-2 weeks
+  - [x] Finalize GTM strategy (see `docs/product/v0.7.0-epic.md`)
+  - [ ] Create CONTRIBUTING.md for open source contributors
+  - [ ] Create CODE_OF_CONDUCT.md (use Contributor Covenant)
+  - [ ] Create SECURITY.md with vulnerability reporting process
+  - [ ] Update README.md for public consumption
+  - [ ] Create ARCHITECTURE.md for contributors
+  - [ ] Create DEVELOPMENT.md for local setup
+
+**Phase 4: Community & Launch Prep (Weeks 9-10)**
+- [ ] **Task 10: Community Infrastructure Setup** (Issue #229) - 3-5 days
+  - [ ] Create issue/PR templates
+  - [ ] Set up GitHub Discussions
+  - [ ] Configure branch protection rules
+  - [ ] Set up Discord/Slack community server
+  - [ ] Create GitHub Projects for public roadmap
+- [ ] **Task 11: Versioning & Roadmap Update** (Issue #230) - 2-3 days
+  - [ ] Document semantic versioning policy
+  - [ ] Create v0.7.0 release tag
+  - [ ] Set up automated release process
+  - [ ] Create CHANGELOG.md
+  - [ ] Create public-facing roadmap
+- [ ] **Task 12: Marketing & Positioning Materials** (Issue #231) - 1 week
+  - [ ] Craft positioning statement
+  - [ ] Write launch blog post announcement
+  - [ ] Create feature highlights with screenshots
+  - [ ] Create comparison tables
+  - [ ] Identify OSS communities for launch announcement
+- [ ] **Task 13: Legal & Business Setup** (Issue #232) - 1-2 weeks
+  - [ ] Review dual licensing with legal counsel
+  - [ ] Establish Contributor License Agreement (CLA) if needed
+  - [ ] Review trademark considerations
+  - [ ] Register business entity if not already done
+  - [ ] Set up payment processing for commercial tier
 
 #### v0.8.0 Go public
 
+- [ ] Convert repository to Public
 - [ ] Re-enable GitHub Actions workflows (move workflows-disabled/ back to workflows/) (issue 109)
 - [ ] Set Up GitHub Actions and Acceptance Tests #15
 - [ ] Set up github CI CD pipeline  
 - [ ] Review Automated secure code scanning tooling implementation
 - [ ] Validate all workflows function properly on public repository
-- [ ] Convert repository to Public
 
 ### Phase 2: Enhancement (v1.0.0 - v1.5.0)
 
