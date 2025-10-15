@@ -99,7 +99,7 @@ The project follows a feature-based organization:
 - `cmd/` - Command-line applications
   - `controller/` - Controller binary
   - `steward/` - Steward binary
-  - `cfgctl/` - CLI for interacting with the system
+  - `cfgcli/` - CLI for interacting with the system
 
 - `features/` - Core feature implementations
   - `controller/` - Controller component

@@ -112,10 +112,10 @@ Before deploying to production, test in a safe environment:
 
 ```bash
 # Apply template
-cfgctl config apply --template ssh-hardening --device test-server
+cfgcli config apply --template ssh-hardening --device test-server
 
 # Verify SSH configuration
-cfgctl exec --device test-server -- sshd -t
+cfgcli exec --device test-server -- sshd -t
 
 # Test SSH connection
 ssh -p 2222 user@test-server
@@ -128,7 +128,7 @@ If SSH connectivity is lost:
 1. Access via console or other means
 2. Rollback configuration:
    ```bash
-   cfgctl config rollback --device affected-server --version previous
+   cfgcli config rollback --device affected-server --version previous
    ```
 
 ## Security Notes

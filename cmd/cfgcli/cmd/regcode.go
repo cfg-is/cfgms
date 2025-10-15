@@ -1,4 +1,4 @@
-// Package cmd implements the CLI commands for cfgctl
+// Package cmd implements the CLI commands for cfgcli
 package cmd
 
 import (
@@ -45,13 +45,13 @@ to the steward installer.
 
 Examples:
   # Generate a registration code
-  cfgctl regcode --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883
+  cfgcli regcode --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883
 
   # Generate with optional group
-  cfgctl regcode --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883 --group=production
+  cfgcli regcode --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883 --group=production
 
   # Decode a registration code
-  cfgctl regcode --decode eyJ0ZW5hbnRfaWQi...`,
+  cfgcli regcode --decode eyJ0ZW5hbnRfaWQi...`,
 	RunE: runRegCode,
 }
 

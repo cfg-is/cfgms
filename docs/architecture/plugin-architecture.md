@@ -206,7 +206,7 @@ func (sm *StorageManager) GetClientTenantStore() interfaces.ClientTenantStore {
 ### List Available Plugins
 
 ```bash
-cfgctl plugins list storage
+cfgcli plugins list storage
 ```
 
 ```

@@ -271,26 +271,26 @@ change_metadata:
 ```bash
 #!/bin/bash
 # Validate configuration syntax
-cfgctl validate --file="$1"
+cfgcli validate --file="$1"
 
 # Check against MSP policies
-cfgctl policy check --file="$1" --policies=/etc/cfgms/policies
+cfgcli policy check --file="$1" --policies=/etc/cfgms/policies
 
 # Ensure metadata is present
-cfgctl metadata verify --file="$1"
+cfgcli metadata verify --file="$1"
 ```
 
 ### Pre-Receive Hook (Server-side)
 ```bash
 #!/bin/bash
 # Verify actor permissions
-cfgctl auth verify --actor="$GIT_AUTHOR" --repository="$GIT_REPO"
+cfgcli auth verify --actor="$GIT_AUTHOR" --repository="$GIT_REPO"
 
 # Run security scans
-cfgctl security scan --changes="$GIT_DIFF"
+cfgcli security scan --changes="$GIT_DIFF"
 
 # Check resource limits
-cfgctl limits check --tenant="$TENANT_ID"
+cfgcli limits check --tenant="$TENANT_ID"
 ```
 
 ## Branch Strategy

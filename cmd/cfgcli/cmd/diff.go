@@ -1,4 +1,4 @@
-// Package cmd implements the diff command for cfgctl
+// Package cmd implements the diff command for cfgcli
 package cmd
 
 import (
@@ -45,19 +45,19 @@ understanding of configuration structures.
 
 Examples:
   # Compare two files
-  cfgctl diff config-old.yaml config-new.yaml
+  cfgcli diff config-old.yaml config-new.yaml
 
   # Compare with different output format
-  cfgctl diff --output json config-old.yaml config-new.yaml
+  cfgcli diff --output json config-old.yaml config-new.yaml
 
   # Three-way comparison
-  cfgctl diff --three-way --base-ref main config-branch-1.yaml config-branch-2.yaml
+  cfgcli diff --three-way --base-ref main config-branch-1.yaml config-branch-2.yaml
 
   # Show only high impact changes
-  cfgctl diff --filter-by-impact high,critical config-old.yaml config-new.yaml
+  cfgcli diff --filter-by-impact high,critical config-old.yaml config-new.yaml
 
   # Include impact analysis
-  cfgctl diff --impact-analysis config-old.yaml config-new.yaml`,
+  cfgcli diff --impact-analysis config-old.yaml config-new.yaml`,
 	Args: cobra.RangeArgs(2, 3), // 2 for two-way, 3 for three-way
 	RunE: runDiff,
 }

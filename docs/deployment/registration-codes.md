@@ -54,11 +54,11 @@ eyJ0ZW5hbnRfaWQiOiJhY21lLWNvcnAiLCJjb250cm9sbGVyX3VybCI6Im1xdHQ6Ly9jb250cm9sbGVy
 
 ## Generating Registration Codes
 
-### Using cfgctl
+### Using cfgcli
 
 ```bash
 # Generate registration code
-cfgctl regcode \
+cfgcli regcode \
   --tenant-id=acme-corp \
   --controller-url=mqtt://controller.acme.com:8883 \
   --group=production
@@ -79,7 +79,7 @@ cfgctl regcode \
 
 ```bash
 # Decode to verify contents
-cfgctl regcode --decode eyJ0ZW5hbnRfaWQi...
+cfgcli regcode --decode eyJ0ZW5hbnRfaWQi...
 
 # Output:
 # Decoded Registration Code:
@@ -257,21 +257,21 @@ MSP admin generates unique registration codes for each tenant:
 
 ```bash
 # Tenant A - Production
-cfgctl regcode \
+cfgcli regcode \
   --tenant-id=tenant-a \
   --controller-url=mqtt://controller.msp.com:8883 \
   --group=production \
   > tenant-a-prod-regcode.txt
 
 # Tenant A - Development
-cfgctl regcode \
+cfgcli regcode \
   --tenant-id=tenant-a \
   --controller-url=mqtt://controller.msp.com:8883 \
   --group=development \
   > tenant-a-dev-regcode.txt
 
 # Tenant B - Production
-cfgctl regcode \
+cfgcli regcode \
   --tenant-id=tenant-b \
   --controller-url=mqtt://controller.msp.com:8883 \
   --group=production \
@@ -405,7 +405,7 @@ When rotating tenant credentials:
 ### Completed ✅
 
 - Registration code format design
-- `cfgctl regcode` command for generation/decoding
+- `cfgcli regcode` command for generation/decoding
 - Steward `--regcode` parameter for deployment
 - Registration code decoder in steward startup
 
