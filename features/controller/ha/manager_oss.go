@@ -264,7 +264,7 @@ func DefaultConfig() *Config {
 		Node: NodeConfig{
 			Region: "default",
 		},
-		HealthCheck: HealthCheckConfig{
+		HealthCheck: &HealthCheckConfig{
 			Enabled:  true,
 			Interval: 30 * time.Second,
 			Timeout:  5 * time.Second,

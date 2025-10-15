@@ -15,16 +15,16 @@ type Config struct {
 	Cluster ClusterConfig `yaml:"cluster" json:"cluster"`
 
 	// Load balancing configuration (only used in commercial builds)
-	LoadBalancing LoadBalancingConfig `yaml:"load_balancing" json:"load_balancing"`
+	LoadBalancing *LoadBalancingConfig `yaml:"load_balancing,omitempty" json:"load_balancing,omitempty"`
 
 	// Failover configuration (only used in commercial builds)
-	Failover FailoverConfig `yaml:"failover" json:"failover"`
+	Failover *FailoverConfig `yaml:"failover,omitempty" json:"failover,omitempty"`
 
 	// Split-brain detection configuration (only used in commercial builds)
-	SplitBrain SplitBrainConfig `yaml:"split_brain" json:"split_brain"`
+	SplitBrain *SplitBrainConfig `yaml:"split_brain,omitempty" json:"split_brain,omitempty"`
 
 	// Health check configuration
-	HealthCheck HealthCheckConfig `yaml:"health_check" json:"health_check"`
+	HealthCheck *HealthCheckConfig `yaml:"health_check,omitempty" json:"health_check,omitempty"`
 }
 
 // NodeConfig contains configuration for this controller node
@@ -94,35 +94,71 @@ type SessionSyncConfig struct {
 	SyncInterval      time.Duration `yaml:"sync_interval" json:"sync_interval"`
 	StateTimeout      time.Duration `yaml:"state_timeout" json:"state_timeout"`
 	ReplicationFactor int           `yaml:"replication_factor" json:"replication_factor"`
+	MaxStateSize      int           `yaml:"max_state_size" json:"max_state_size"` // Maximum session state size
 }
 
 // LoadBalancingConfig contains load balancing configuration (commercial only)
 type LoadBalancingConfig struct {
-	Strategy           LoadBalancingStrategy `yaml:"strategy" json:"strategy"`
-	HealthCheckEnabled bool                  `yaml:"health_check_enabled" json:"health_check_enabled"`
-	SessionAffinity    bool                  `yaml:"session_affinity" json:"session_affinity"`
+	Strategy           LoadBalancingStrategy          `yaml:"strategy" json:"strategy"`
+	HealthCheckEnabled bool                           `yaml:"health_check_enabled" json:"health_check_enabled"`
+	SessionAffinity    bool                           `yaml:"session_affinity" json:"session_affinity"`
+	HealthBased        *HealthBasedConfig             `yaml:"health_based,omitempty" json:"health_based,omitempty"`
+	ConnectionBased    *ConnectionBasedConfig         `yaml:"connection_based,omitempty" json:"connection_based,omitempty"`
+	Geographic         *GeographicLoadBalancingConfig `yaml:"geographic,omitempty" json:"geographic,omitempty"`
+}
+
+// HealthBasedConfig contains health-based load balancing configuration
+type HealthBasedConfig struct {
+	MinHealthScore     float64 `yaml:"min_health_score" json:"min_health_score"`
+	HealthWeightFactor float64 `yaml:"health_weight_factor" json:"health_weight_factor"`
+}
+
+// ConnectionBasedConfig contains connection-based load balancing configuration
+type ConnectionBasedConfig struct {
+	MaxConnectionsPerNode int     `yaml:"max_connections_per_node" json:"max_connections_per_node"`
+	ConnectionThreshold   float64 `yaml:"connection_threshold" json:"connection_threshold"`
+}
+
+// GeographicLoadBalancingConfig contains geographic load balancing settings
+type GeographicLoadBalancingConfig struct {
+	EnableRegionAffinity    bool               `yaml:"enable_region_affinity" json:"enable_region_affinity"`
+	RegionAffinityWeight    float64            `yaml:"region_affinity_weight" json:"region_affinity_weight"`
+	LatencyWeightFactor     float64            `yaml:"latency_weight_factor" json:"latency_weight_factor"`
+	MaxLatencyThreshold     time.Duration      `yaml:"max_latency_threshold" json:"max_latency_threshold"`
+	CrossRegionFallback     bool               `yaml:"cross_region_fallback" json:"cross_region_fallback"`
+	RegionalCapacityWeights map[string]float64 `yaml:"regional_capacity_weights,omitempty" json:"regional_capacity_weights,omitempty"`
 }
 
 // FailoverConfig contains automatic failover configuration (commercial only)
 type FailoverConfig struct {
-	Enabled             bool          `yaml:"enabled" json:"enabled"`
-	DetectionInterval   time.Duration `yaml:"detection_interval" json:"detection_interval"`
-	FailureThreshold    int           `yaml:"failure_threshold" json:"failure_threshold"`
-	RecoveryThreshold   int           `yaml:"recovery_threshold" json:"recovery_threshold"`
-	MaxFailoversPerHour int           `yaml:"max_failovers_per_hour" json:"max_failovers_per_hour"`
+	Enabled              bool          `yaml:"enabled" json:"enabled"`
+	DetectionInterval    time.Duration `yaml:"detection_interval" json:"detection_interval"`
+	FailureThreshold     int           `yaml:"failure_threshold" json:"failure_threshold"`
+	RecoveryThreshold    int           `yaml:"recovery_threshold" json:"recovery_threshold"`
+	MaxFailoversPerHour  int           `yaml:"max_failovers_per_hour" json:"max_failovers_per_hour"`
+	Timeout              time.Duration `yaml:"timeout" json:"timeout"`                             // Failover operation timeout
+	MaxDuration          time.Duration `yaml:"max_duration" json:"max_duration"`                   // Maximum time for failover
+	GracePeriod          time.Duration `yaml:"grace_period" json:"grace_period"`                   // Grace period before failover
+	MaxSessionMigration  int           `yaml:"max_session_migration" json:"max_session_migration"` // Max sessions to migrate
 }
 
 // SplitBrainConfig contains split-brain detection configuration (commercial only)
 type SplitBrainConfig struct {
-	Enabled           bool          `yaml:"enabled" json:"enabled"`
-	DetectionInterval time.Duration `yaml:"detection_interval" json:"detection_interval"`
-	QuorumCheck       bool          `yaml:"quorum_check" json:"quorum_check"`
-	AutoResolve       bool          `yaml:"auto_resolve" json:"auto_resolve"`
+	Enabled            bool          `yaml:"enabled" json:"enabled"`
+	DetectionInterval  time.Duration `yaml:"detection_interval" json:"detection_interval"`
+	QuorumCheck        bool          `yaml:"quorum_check" json:"quorum_check"`
+	AutoResolve        bool          `yaml:"auto_resolve" json:"auto_resolve"`
+	QuorumInterval     time.Duration `yaml:"quorum_interval" json:"quorum_interval"`         // Quorum validation interval
+	ResolutionStrategy string        `yaml:"resolution_strategy" json:"resolution_strategy"` // Split-brain resolution strategy
 }
 
 // HealthCheckConfig contains health check configuration
 type HealthCheckConfig struct {
-	Enabled  bool          `yaml:"enabled" json:"enabled"`
-	Interval time.Duration `yaml:"interval" json:"interval"`
-	Timeout  time.Duration `yaml:"timeout" json:"timeout"`
+	Enabled          bool          `yaml:"enabled" json:"enabled"`
+	Interval         time.Duration `yaml:"interval" json:"interval"`
+	Timeout          time.Duration `yaml:"timeout" json:"timeout"`
+	FailureThreshold int           `yaml:"failure_threshold" json:"failure_threshold"` // Consecutive failures before unhealthy
+	SuccessThreshold int           `yaml:"success_threshold" json:"success_threshold"` // Consecutive successes before healthy
+	EnableInternal   bool          `yaml:"enable_internal" json:"enable_internal"`     // Enable internal health checks
+	EnableExternal   bool          `yaml:"enable_external" json:"enable_external"`     // Enable external health checks
 }

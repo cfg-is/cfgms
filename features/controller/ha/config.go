@@ -13,264 +13,18 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
-// Config contains high availability configuration
-type Config struct {
-	// Deployment mode configuration
-	Mode DeploymentMode `yaml:"mode" json:"mode"`
-
-	// Node configuration
-	Node *NodeConfig `yaml:"node" json:"node"`
-
-	// Cluster configuration (used in cluster mode)
-	Cluster *ClusterConfig `yaml:"cluster" json:"cluster"`
-
-	// Health check configuration
-	HealthCheck *HealthCheckConfig `yaml:"health_check" json:"health_check"`
-
-	// Failover configuration
-	Failover *FailoverConfig `yaml:"failover" json:"failover"`
-
-	// Load balancing configuration
-	LoadBalancing *LoadBalancingConfig `yaml:"load_balancing" json:"load_balancing"`
-
-	// Split-brain prevention configuration
-	SplitBrain *SplitBrainConfig `yaml:"split_brain" json:"split_brain"`
-}
-
-// NodeConfig contains node-specific configuration
-type NodeConfig struct {
-	// Unique node identifier (auto-generated if empty)
-	ID string `yaml:"id" json:"id"`
-
-	// Node name for display purposes
-	Name string `yaml:"name" json:"name"`
-
-	// External address for inter-node communication
-	ExternalAddress string `yaml:"external_address" json:"external_address"`
-
-	// Internal address for cluster communication
-	InternalAddress string `yaml:"internal_address" json:"internal_address"`
-
-	// Geographic region (e.g., "us-east", "us-central", "us-west")
-	Region string `yaml:"region" json:"region"`
-
-	// Availability zone within region (e.g., "us-east-1a")
-	AvailabilityZone string `yaml:"availability_zone" json:"availability_zone"`
-
-	// Geographic coordinates for latency calculations
-	Coordinates *GeographicCoordinates `yaml:"coordinates,omitempty" json:"coordinates,omitempty"`
-
-	// Node capabilities
-	Capabilities []string `yaml:"capabilities" json:"capabilities"`
-
-	// Metadata for node identification
-	Metadata map[string]string `yaml:"metadata" json:"metadata"`
-}
-
-// GeographicCoordinates represents lat/long for distance calculations
-type GeographicCoordinates struct {
-	Latitude  float64 `yaml:"latitude" json:"latitude"`
-	Longitude float64 `yaml:"longitude" json:"longitude"`
-}
-
-// ClusterConfig contains cluster-wide configuration
-type ClusterConfig struct {
-	// Expected cluster size (for quorum calculations)
-	ExpectedSize int `yaml:"expected_size" json:"expected_size"`
-
-	// Minimum quorum size
-	MinQuorum int `yaml:"min_quorum" json:"min_quorum"`
-
-	// Leader election timeout
-	ElectionTimeout time.Duration `yaml:"election_timeout" json:"election_timeout"`
-
-	// Heartbeat interval
-	HeartbeatInterval time.Duration `yaml:"heartbeat_interval" json:"heartbeat_interval"`
-
-	// Leader lease duration (how long a leader holds its lease)
-	LeaderLeaseDuration time.Duration `yaml:"leader_lease_duration" json:"leader_lease_duration"`
-
-	// Candidate timeout (how long to wait before becoming candidate)
-	CandidateTimeout time.Duration `yaml:"candidate_timeout" json:"candidate_timeout"`
-
-	// Apply timeout (how long to wait for command application)
-	ApplyTimeout time.Duration `yaml:"apply_timeout" json:"apply_timeout"`
-
-	// Node discovery configuration
-	Discovery *DiscoveryConfig `yaml:"discovery" json:"discovery"`
-
-	// Session synchronization configuration
-	SessionSync *SessionSyncConfig `yaml:"session_sync" json:"session_sync"`
-}
-
-// DiscoveryConfig contains node discovery configuration
-type DiscoveryConfig struct {
-	// Discovery method (static, dns, consul, kubernetes, geographic)
-	Method string `yaml:"method" json:"method"`
-
-	// Configuration specific to discovery method
-	Config map[string]interface{} `yaml:"config" json:"config"`
-
-	// Discovery interval
-	Interval time.Duration `yaml:"interval" json:"interval"`
-
-	// Node timeout before marking as offline
-	NodeTimeout time.Duration `yaml:"node_timeout" json:"node_timeout"`
-
-	// Geographic discovery configuration
-	Geographic *GeographicDiscoveryConfig `yaml:"geographic,omitempty" json:"geographic,omitempty"`
-}
-
-// GeographicDiscoveryConfig contains geographic-aware discovery settings
-type GeographicDiscoveryConfig struct {
-	// Enable geographic routing preferences
-	EnableRegionAffinity bool `yaml:"enable_region_affinity" json:"enable_region_affinity"`
-
-	// Cross-region timeout multiplier (e.g., 2.0 = double timeout for cross-region)
-	CrossRegionTimeoutMultiplier float64 `yaml:"cross_region_timeout_multiplier" json:"cross_region_timeout_multiplier"`
-
-	// Maximum acceptable latency for cross-region communication (milliseconds)
-	MaxCrossRegionLatency time.Duration `yaml:"max_cross_region_latency" json:"max_cross_region_latency"`
-
-	// Latency check interval
-	LatencyCheckInterval time.Duration `yaml:"latency_check_interval" json:"latency_check_interval"`
-
-	// Regional node priority weights
-	RegionalWeights map[string]float64 `yaml:"regional_weights,omitempty" json:"regional_weights,omitempty"`
-}
-
-// SessionSyncConfig contains session synchronization configuration
-type SessionSyncConfig struct {
-	// Enable session synchronization
-	Enabled bool `yaml:"enabled" json:"enabled"`
-
-	// Synchronization interval
-	SyncInterval time.Duration `yaml:"sync_interval" json:"sync_interval"`
-
-	// Session state timeout
-	StateTimeout time.Duration `yaml:"state_timeout" json:"state_timeout"`
-
-	// Maximum session state size
-	MaxStateSize int `yaml:"max_state_size" json:"max_state_size"`
-}
-
-// HealthCheckConfig contains health check configuration
-type HealthCheckConfig struct {
-	// Health check interval
-	Interval time.Duration `yaml:"interval" json:"interval"`
-
-	// Health check timeout
-	Timeout time.Duration `yaml:"timeout" json:"timeout"`
-
-	// Number of consecutive failures before marking unhealthy
-	FailureThreshold int `yaml:"failure_threshold" json:"failure_threshold"`
-
-	// Number of consecutive successes before marking healthy
-	SuccessThreshold int `yaml:"success_threshold" json:"success_threshold"`
-
-	// Enable internal health checks
-	EnableInternal bool `yaml:"enable_internal" json:"enable_internal"`
-
-	// Enable external health checks
-	EnableExternal bool `yaml:"enable_external" json:"enable_external"`
-}
-
-// FailoverConfig contains failover configuration
-type FailoverConfig struct {
-	// Enable automatic failover
-	Enabled bool `yaml:"enabled" json:"enabled"`
-
-	// Failover timeout
-	Timeout time.Duration `yaml:"timeout" json:"timeout"`
-
-	// Maximum failover duration
-	MaxDuration time.Duration `yaml:"max_duration" json:"max_duration"`
-
-	// Grace period before initiating failover
-	GracePeriod time.Duration `yaml:"grace_period" json:"grace_period"`
-
-	// Maximum sessions to migrate during failover
-	MaxSessionMigration int `yaml:"max_session_migration" json:"max_session_migration"`
-}
-
-// LoadBalancingConfig contains load balancing configuration
-type LoadBalancingConfig struct {
-	// Load balancing strategy
-	Strategy LoadBalancingStrategy `yaml:"strategy" json:"strategy"`
-
-	// Health-based routing configuration
-	HealthBased *HealthBasedConfig `yaml:"health_based" json:"health_based"`
-
-	// Connection-based routing configuration
-	ConnectionBased *ConnectionBasedConfig `yaml:"connection_based" json:"connection_based"`
-
-	// Geographic routing configuration
-	Geographic *GeographicLoadBalancingConfig `yaml:"geographic,omitempty" json:"geographic,omitempty"`
-}
-
-// GeographicLoadBalancingConfig contains geographic load balancing settings
-type GeographicLoadBalancingConfig struct {
-	// Enable region affinity (prefer same region)
-	EnableRegionAffinity bool `yaml:"enable_region_affinity" json:"enable_region_affinity"`
-
-	// Region affinity weight (0.0-1.0, higher means stronger preference)
-	RegionAffinityWeight float64 `yaml:"region_affinity_weight" json:"region_affinity_weight"`
-
-	// Latency weight factor (how much latency affects routing decisions)
-	LatencyWeightFactor float64 `yaml:"latency_weight_factor" json:"latency_weight_factor"`
-
-	// Maximum acceptable latency difference before rejecting node (milliseconds)
-	MaxLatencyThreshold time.Duration `yaml:"max_latency_threshold" json:"max_latency_threshold"`
-
-	// Cross-region fallback enabled (allow cross-region routing when local region unhealthy)
-	CrossRegionFallback bool `yaml:"cross_region_fallback" json:"cross_region_fallback"`
-
-	// Regional capacity weights (for proportional distribution across regions)
-	RegionalCapacityWeights map[string]float64 `yaml:"regional_capacity_weights,omitempty" json:"regional_capacity_weights,omitempty"`
-}
-
-// HealthBasedConfig contains health-based load balancing configuration
-type HealthBasedConfig struct {
-	// Minimum health score for routing
-	MinHealthScore float64 `yaml:"min_health_score" json:"min_health_score"`
-
-	// Weight adjustment based on health
-	HealthWeightFactor float64 `yaml:"health_weight_factor" json:"health_weight_factor"`
-}
-
-// ConnectionBasedConfig contains connection-based load balancing configuration
-type ConnectionBasedConfig struct {
-	// Maximum connections per node
-	MaxConnectionsPerNode int `yaml:"max_connections_per_node" json:"max_connections_per_node"`
-
-	// Connection threshold for load balancing
-	ConnectionThreshold float64 `yaml:"connection_threshold" json:"connection_threshold"`
-}
-
-// SplitBrainConfig contains split-brain prevention configuration
-type SplitBrainConfig struct {
-	// Enable split-brain detection
-	Enabled bool `yaml:"enabled" json:"enabled"`
-
-	// Detection interval
-	DetectionInterval time.Duration `yaml:"detection_interval" json:"detection_interval"`
-
-	// Quorum validation interval
-	QuorumInterval time.Duration `yaml:"quorum_interval" json:"quorum_interval"`
-
-	// Split-brain resolution strategy
-	ResolutionStrategy string `yaml:"resolution_strategy" json:"resolution_strategy"`
-}
+// NOTE: All type definitions (Config, NodeConfig, ClusterConfig, etc.) are now in types.go
+// This file contains only the commercial-specific implementation methods.
 
 // DefaultConfig returns a Config with reasonable defaults
+// This function must match the type definitions in types.go
 func DefaultConfig() *Config {
 	return &Config{
 		Mode: SingleServerMode,
-		Node: &NodeConfig{
+		Node: NodeConfig{
 			Capabilities: []string{"config", "rbac", "monitoring", "workflow"},
-			Metadata:     make(map[string]string),
 		},
-		Cluster: &ClusterConfig{
+		Cluster: ClusterConfig{
 			ExpectedSize:        3,
 			MinQuorum:           2,
 			ElectionTimeout:     10 * time.Second,
@@ -292,13 +46,15 @@ func DefaultConfig() *Config {
 				},
 			},
 			SessionSync: &SessionSyncConfig{
-				Enabled:      true,
-				SyncInterval: 5 * time.Second,
-				StateTimeout: 300 * time.Second, // 5 minutes
-				MaxStateSize: 1024 * 1024,       // 1MB
+				Enabled:           true,
+				SyncInterval:      5 * time.Second,
+				StateTimeout:      300 * time.Second, // 5 minutes
+				ReplicationFactor: 3,
+				MaxStateSize:      1024 * 1024, // 1MB
 			},
 		},
 		HealthCheck: &HealthCheckConfig{
+			Enabled:          true,
 			Interval:         10 * time.Second,
 			Timeout:          5 * time.Second,
 			FailureThreshold: 3,
@@ -308,13 +64,19 @@ func DefaultConfig() *Config {
 		},
 		Failover: &FailoverConfig{
 			Enabled:             true,
+			DetectionInterval:   30 * time.Second,
+			FailureThreshold:    3,
+			RecoveryThreshold:   2,
+			MaxFailoversPerHour: 10,
 			Timeout:             30 * time.Second,
 			MaxDuration:         5 * time.Minute,
 			GracePeriod:         10 * time.Second,
 			MaxSessionMigration: 1000,
 		},
 		LoadBalancing: &LoadBalancingConfig{
-			Strategy: HealthBasedStrategy,
+			Strategy:           HealthBasedStrategy,
+			HealthCheckEnabled: true,
+			SessionAffinity:    true,
 			HealthBased: &HealthBasedConfig{
 				MinHealthScore:     0.7,
 				HealthWeightFactor: 1.0,
@@ -324,17 +86,19 @@ func DefaultConfig() *Config {
 				ConnectionThreshold:   0.8,
 			},
 			Geographic: &GeographicLoadBalancingConfig{
-				EnableRegionAffinity:        true,
-				RegionAffinityWeight:        0.8,
-				LatencyWeightFactor:         0.5,
-				MaxLatencyThreshold:         250 * time.Millisecond,
-				CrossRegionFallback:         true,
-				RegionalCapacityWeights:     make(map[string]float64),
+				EnableRegionAffinity:    true,
+				RegionAffinityWeight:    0.8,
+				LatencyWeightFactor:     0.5,
+				MaxLatencyThreshold:     250 * time.Millisecond,
+				CrossRegionFallback:     true,
+				RegionalCapacityWeights: make(map[string]float64),
 			},
 		},
 		SplitBrain: &SplitBrainConfig{
 			Enabled:            true,
 			DetectionInterval:  15 * time.Second,
+			QuorumCheck:        true,
+			AutoResolve:        true,
 			QuorumInterval:     30 * time.Second,
 			ResolutionStrategy: "quorum-based",
 		},
@@ -374,9 +138,7 @@ func (c *Config) LoadFromEnvironment() error {
 		c.Node.ExternalAddress = externalAddr
 	}
 
-	if internalAddr := os.Getenv("CFGMS_HA_INTERNAL_ADDRESS"); internalAddr != "" {
-		c.Node.InternalAddress = internalAddr
-	}
+	// NOTE: InternalAddress field removed from types.go (OSS simplification)
 
 	// Load geographic configuration
 	if region := os.Getenv("CFGMS_NODE_REGION"); region != "" {
@@ -501,9 +263,9 @@ func (c *Config) LoadFromEnvironment() error {
 		}
 	}
 
-	if failoverTimeout := os.Getenv("CFGMS_HA_FAILOVER_TIMEOUT"); failoverTimeout != "" {
-		if timeout, err := time.ParseDuration(failoverTimeout); err == nil {
-			c.Failover.Timeout = timeout
+	if failoverDetectionInterval := os.Getenv("CFGMS_HA_FAILOVER_DETECTION_INTERVAL"); failoverDetectionInterval != "" {
+		if interval, err := time.ParseDuration(failoverDetectionInterval); err == nil {
+			c.Failover.DetectionInterval = interval
 		}
 	}
 
@@ -525,17 +287,15 @@ func (c *Config) LoadFromEnvironment() error {
 }
 
 // Validate validates the HA configuration
+// Updated to match types.go structure (value types, not pointers)
 func (c *Config) Validate() error {
-	if c.Node == nil {
-		return fmt.Errorf("node configuration is required")
+	// Node is a value type, always exists - just validate ID
+	if c.Node.ID == "" && c.Mode != SingleServerMode {
+		return fmt.Errorf("node ID is required for cluster/blue-green modes")
 	}
 
 	// Validate cluster configuration for cluster mode
 	if c.Mode == ClusterMode {
-		if c.Cluster == nil {
-			return fmt.Errorf("cluster configuration is required for cluster mode")
-		}
-
 		if c.Cluster.ExpectedSize < 1 {
 			return fmt.Errorf("cluster expected size must be at least 1")
 		}
@@ -569,7 +329,7 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	// Validate health check configuration
+	// Validate health check configuration (HealthCheck is now a pointer)
 	if c.HealthCheck != nil {
 		if c.HealthCheck.Interval <= 0 {
 			return fmt.Errorf("health check interval must be positive")
@@ -588,8 +348,20 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	// Validate failover configuration
+	// Validate failover configuration (Failover is now a pointer)
 	if c.Failover != nil && c.Failover.Enabled {
+		if c.Failover.DetectionInterval <= 0 {
+			return fmt.Errorf("failover detection interval must be positive")
+		}
+
+		if c.Failover.FailureThreshold < 1 {
+			return fmt.Errorf("failover failure threshold must be at least 1")
+		}
+
+		if c.Failover.RecoveryThreshold < 1 {
+			return fmt.Errorf("failover recovery threshold must be at least 1")
+		}
+
 		if c.Failover.Timeout <= 0 {
 			return fmt.Errorf("failover timeout must be positive")
 		}

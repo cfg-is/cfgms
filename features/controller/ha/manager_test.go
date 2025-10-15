@@ -243,16 +243,17 @@ func TestManager_ConfigValidation(t *testing.T) {
 	// Test invalid config
 	cfg := &Config{
 		Mode: ClusterMode,
-		Node: nil, // Invalid - node config required
+		Node: NodeConfig{}, // Invalid - node ID is empty
 	}
 
 	_, err = NewManager(cfg, logger, storageManager)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "node configuration is required")
+	assert.Contains(t, err.Error(), "node ID is required")
 
 	// Test invalid cluster config
 	cfg = DefaultConfig()
 	cfg.Mode = ClusterMode
+	cfg.Node.ID = "test-node-123" // Set valid node ID to test quorum validation
 	cfg.Cluster.MinQuorum = 10
 	cfg.Cluster.ExpectedSize = 3 // Invalid - quorum > expected size
 
