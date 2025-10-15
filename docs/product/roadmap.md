@@ -600,11 +600,11 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - [x] Update all import paths referencing cfgctl
   - [x] Update documentation and examples
   - [x] Update build scripts and Makefile targets
-- [ ] **Task 3: Move HA Code to Commercial Tier** (Issue #222) - 2 days
-  - [ ] Move features/controller/ha/ to commercial repository
-  - [ ] Create placeholder/stub implementation for OSS
-  - [ ] Update documentation about HA availability
-  - [ ] Ensure graceful degradation in OSS version
+- [x] **Task 3: Move HA Code to Commercial Tier** (Issue #222) - 2 days ✅ COMPLETED
+  - [x] Separate HA code using Go build tags (commercial vs OSS)
+  - [x] Create OSS stub implementation for SingleServerMode
+  - [x] Update documentation about HA build tags and availability
+  - [x] Ensure graceful degradation in OSS version
 - [ ] **Task 4: Repository Cleanup** (Issue #223) - 1-2 days
   - [ ] Perform branch cleanup (main and develop only)
   - [ ] Review repository for sensitive data or internal artifacts

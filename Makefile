@@ -3,6 +3,10 @@
 # Build settings
 GO_BUILD_FLAGS=-trimpath -ldflags="-s -w"
 
+# Build tags (optional - use TAGS=commercial for commercial builds)
+# Example: make build-controller TAGS=commercial
+BUILD_TAGS=$(if $(TAGS),-tags $(TAGS),)
+
 # Binary names
 STEWARD_BINARY=cfgms-steward
 CONTROLLER_BINARY=controller
@@ -43,25 +47,26 @@ build: build-steward build-controller build-cli build-cert-manager
 # Build individual binaries
 .PHONY: build-steward build-controller build-cli build-cert-manager
 build-steward:
-	go build ${GO_BUILD_FLAGS} -o bin/${STEWARD_BINARY} ./cmd/steward
+	go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o bin/${STEWARD_BINARY} ./cmd/steward
 
 build-controller:
-	go build ${GO_BUILD_FLAGS} -o bin/${CONTROLLER_BINARY} ./cmd/controller
+	go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o bin/${CONTROLLER_BINARY} ./cmd/controller
 
 build-cli:
-	go build ${GO_BUILD_FLAGS} -o bin/${CLI_BINARY} ./cmd/cfgcli
+	go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o bin/${CLI_BINARY} ./cmd/cfgcli
 
 build-cert-manager:
-	go build ${GO_BUILD_FLAGS} -o bin/${CERT_MANAGER_BINARY} ./cmd/cert-manager
+	go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o bin/${CERT_MANAGER_BINARY} ./cmd/cert-manager
 
 # Smart test - core modules + changed modules only
 test:
 	@echo "🧪 Running Tests (Smart Mode)"
 	@echo "============================="
 	@go clean -testcache
-	@echo "🧪 Testing framework (excluding modules and long-running tests)..."
+	@echo "🧪 Testing OSS Build..."
+	@echo "  Testing framework (excluding modules and long-running tests)..."
 	@go test -race -short -timeout=1m $$(go list ./... | grep -v '/features/modules/' | grep -v '/test/integration' | grep -v '/test/e2e')
-	@echo "🧪 Testing core modules (smoke test)..."
+	@echo "  Testing core modules (smoke test)..."
 	@for module in $(CORE_MODULES); do \
 		echo "  Testing $$module..."; \
 		go test -race -short -timeout=30s ./features/modules/$$module/...; \
@@ -78,7 +83,18 @@ test:
 	else \
 		echo "📋 No module changes detected - skipping additional module tests"; \
 	fi
-	@echo "✅ Smart testing complete"
+	@echo "✅ OSS build tests complete"
+	@echo ""
+	@echo "🏢 Testing Commercial Build..."
+	@echo "  Compiling commercial controller..."
+	@go build -tags commercial -o /tmp/controller-commercial ./cmd/controller > /dev/null 2>&1 || { echo "❌ Commercial controller build failed"; exit 1; }
+	@echo "  ✅ Commercial controller compiles"
+	@echo "  Testing commercial HA features..."
+	@go test -tags commercial -race -short -timeout=1m ./features/controller/ha/... || { echo "❌ Commercial HA tests failed"; exit 1; }
+	@echo "  ✅ Commercial HA tests pass"
+	@rm -f /tmp/controller-commercial
+	@echo ""
+	@echo "✅ BOTH TIERS VALIDATED (OSS + Commercial)"
 
 # OPTIMIZED TEST TARGETS (Cache-Aware Strategy)
 
@@ -169,9 +185,10 @@ test-infrastructure-required:
 	@echo "========================================"
 	@echo "Ensuring CI infrastructure is set up and working correctly..."
 	@go clean -testcache
-	@echo "🧪 Testing framework (excluding modules and long-running tests)..."
+	@echo "🧪 Testing OSS Build..."
+	@echo "  Testing framework (excluding modules and long-running tests)..."
 	@./scripts/test-with-infrastructure.sh go test -race -short -timeout=1m $$(go list ./... | grep -v '/features/modules/' | grep -v '/test/integration' | grep -v '/test/e2e')
-	@echo "🧪 Testing core modules (smoke test)..."
+	@echo "  Testing core modules (smoke test)..."
 	@for module in $(CORE_MODULES); do \
 		echo "  Testing $$module..."; \
 		./scripts/test-with-infrastructure.sh go test -race -short -timeout=30s ./features/modules/$$module/...; \
@@ -184,10 +201,21 @@ test-infrastructure-required:
 			./scripts/test-with-infrastructure.sh go test -race -short -timeout=30s ./features/modules/$$module/...; \
 		done; \
 	fi
+	@echo "✅ OSS build tests complete"
+	@echo ""
+	@echo "🏢 Testing Commercial Build..."
+	@echo "  Compiling commercial controller..."
+	@go build -tags commercial -o /tmp/controller-commercial ./cmd/controller > /dev/null 2>&1 || { echo "❌ Commercial controller build failed"; exit 1; }
+	@echo "  ✅ Commercial controller compiles"
+	@echo "  Testing commercial HA features..."
+	@./scripts/test-with-infrastructure.sh go test -tags commercial -race -short -timeout=1m ./features/controller/ha/... || { echo "❌ Commercial HA tests failed"; exit 1; }
+	@echo "  ✅ Commercial HA tests pass"
+	@rm -f /tmp/controller-commercial
 	@echo ""
 	@echo "✅ CI VALIDATION FINISHED"
 	@echo "=========================="
-	@echo "- ✅ Unit tests passed (cache-safe)"
+	@echo "- ✅ OSS build tests passed"
+	@echo "- ✅ Commercial build tests passed"
 	@echo "- ✅ Factory integration tests passed"
 	@echo "- ✅ Linting passed"
 	@echo "- ✅ Security scanning passed"

@@ -131,9 +131,67 @@ This maximizes trust, community velocity for integrations, and follows proven mo
 - **vs RMMs**: "Fill RMM gaps" initially → eventual replacement
 - **vs Terraform**: Similar model - CLI/providers OSS, Cloud UI commercial
 
+## Building OSS vs Commercial
+
+### OSS Build (Default)
+
+```bash
+# Build OSS version (SingleServerMode only)
+go build ./cmd/controller
+make build-controller
+
+# Run OSS tests (HA cluster tests excluded automatically)
+go test ./...
+make test
+```
+
+**OSS Includes**:
+- Single controller deployment
+- All modules and integrations
+- Full CLI/API functionality
+- Basic health monitoring
+
+**OSS Excludes**:
+- HA clustering (BlueGreenMode, ClusterMode)
+- Raft consensus
+- Automatic failover
+- Load balancing
+- Split-brain detection
+- Session synchronization
+
+### Commercial Build
+
+```bash
+# Build Commercial version (Full HA clustering)
+go build -tags commercial ./cmd/controller
+make build-controller TAGS=commercial
+
+# Run all tests including HA cluster tests
+go test -tags commercial ./...
+make test TAGS=commercial
+```
+
+**Commercial Adds**:
+- Full HA clustering capabilities
+- Raft-based consensus
+- Automatic failover
+- Geographic load balancing
+- Split-brain detection and resolution
+- Cross-node session synchronization
+- Blue-green deployments
+
+### Technical Implementation
+
+The codebase uses Go build tags to separate OSS and commercial functionality:
+
+- **No build tag**: OSS stub in `features/controller/ha/manager_oss.go`
+- **`-tags commercial`**: Full implementation in `features/controller/ha/manager.go` and related files
+
+All code remains in the same repository with clean interface boundaries defined in `features/controller/ha/interfaces.go`.
+
 ## Migration Tasks
 
-1. **Move HA code** from `features/controller/ha/` to commercial repository
+1. ✅ **Move HA code** - Completed (Story #222) - Uses build tags for separation
 2. **License headers**: Apache 2.0 for all current code
 3. **Create LICENSE files**: LICENSE-APACHE-2.0 and LICENSE-ELASTIC-2.0
 4. **Web UI development**: Early beta feature, commercial tier

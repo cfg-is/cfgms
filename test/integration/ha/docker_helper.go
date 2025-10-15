@@ -1,3 +1,6 @@
+//go:build commercial
+// +build commercial
+
 package ha
 
 import (

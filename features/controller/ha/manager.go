@@ -1,3 +1,6 @@
+//go:build commercial
+// +build commercial
+
 package ha
 
 import (
@@ -379,7 +382,7 @@ func (m *Manager) GetHealth() *HealthStatus {
 }
 
 // GetRaftTransport returns the Raft transport for HTTP endpoint handling
-func (m *Manager) GetRaftTransport() *raftTransport {
+func (m *Manager) GetRaftTransport() RaftTransport {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
