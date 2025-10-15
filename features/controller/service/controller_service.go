@@ -8,17 +8,13 @@ import (
 	"sync"
 	"time"
 
-	"google.golang.org/grpc/metadata"
-
 	common "github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
-// ControllerService implements the Controller gRPC service
+// ControllerService implements the Controller service
 type ControllerService struct {
-	controller.UnimplementedControllerServer
-	
 	logger   logging.Logger
 	mu       sync.RWMutex
 	stewards map[string]*StewardInfo
@@ -341,19 +337,13 @@ func (s *ControllerService) verifySyncStatus(existingSteward *StewardInfo, req *
 	return syncStatus, requiresDNAResync, requiresConfigResync
 }
 
-// extractTenantID extracts tenant ID from gRPC metadata
+// extractTenantID extracts tenant ID from context
 func (s *ControllerService) extractTenantID(ctx context.Context) string {
-	md, ok := metadata.FromIncomingContext(ctx)
-	if !ok {
-		s.logger.Debug("No metadata found in context, using default tenant")
-		return "default"
+	// Extract tenant ID from context value (set by MQTT/HTTP handlers)
+	if tenantID, ok := ctx.Value("tenant-id").(string); ok && tenantID != "" {
+		return tenantID
 	}
-	
-	values := md.Get("tenant-id")
-	if len(values) > 0 && values[0] != "" {
-		return values[0]
-	}
-	
-	s.logger.Debug("No tenant-id in metadata, using default tenant")
+
+	s.logger.Debug("No tenant-id in context, using default tenant")
 	return "default"
 }

@@ -25,19 +25,14 @@ check-proto-tools:
 		echo "Error: protoc-gen-go is not installed..."; \
 		exit 1; \
 	}
-	@which protoc-gen-go-grpc > /dev/null || { \
-		echo "Error: protoc-gen-go-grpc is not installed..."; \
-		exit 1; \
-	}
 
-# Generate Go code from proto files
+# Generate Go code from proto files (message definitions only, no gRPC services)
 .PHONY: proto
 proto: check-proto-tools
-	@echo "Generating proto files..."
+	@echo "Generating proto files (messages only, no gRPC services)..."
 	@for file in $(PROTO_FILES); do \
 		protoc $(PROTO_INCLUDES) \
 			--go_out=. --go_opt=paths=source_relative \
-			--go-grpc_out=. --go-grpc_opt=paths=source_relative \
 			$$file; \
 	done
 
