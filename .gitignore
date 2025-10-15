@@ -58,3 +58,4 @@ docker-compose.test.override.yml
 *.sqlite3
 *.db-shm
 *.db-wal
+docs/product/v*-epic.md
