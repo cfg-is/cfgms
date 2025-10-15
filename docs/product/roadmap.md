@@ -595,11 +595,11 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - [x] Remove google.golang.org/grpc from go.mod
   - [x] Update Makefile proto generation to skip gRPC
   - [x] Validate all tests pass after removal
-- [ ] **Task 2: Rename cfgcli to cfgcli** (Issue #221) - 1 day
-  - [ ] Rename cmd/cfgcli directory to cmd/cfgcli
-  - [ ] Update all import paths referencing cfgcli
-  - [ ] Update documentation and examples
-  - [ ] Update build scripts and Makefile targets
+- [x] **Task 2: Rename cfgctl to cfgcli** (Issue #221) - 1 day ✅ COMPLETED
+  - [x] Rename cmd/cfgctl directory to cmd/cfgcli
+  - [x] Update all import paths referencing cfgctl
+  - [x] Update documentation and examples
+  - [x] Update build scripts and Makefile targets
 - [ ] **Task 3: Move HA Code to Commercial Tier** (Issue #222) - 2 days
   - [ ] Move features/controller/ha/ to commercial repository
   - [ ] Create placeholder/stub implementation for OSS
