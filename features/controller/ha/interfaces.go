@@ -2,6 +2,7 @@ package ha
 
 import (
 	"context"
+	"net/http"
 	"time"
 )
 
@@ -274,8 +275,8 @@ type SplitBrainStatus struct {
 // This is only used in commercial builds with clustering
 type RaftTransport interface {
 	// HandleMessage handles incoming Raft messages
-	HandleMessage(w interface{}, r interface{})
+	HandleMessage(w http.ResponseWriter, r *http.Request)
 
 	// HandleStatus returns Raft cluster status
-	HandleStatus(w interface{}, r interface{})
+	HandleStatus(w http.ResponseWriter, r *http.Request)
 }
