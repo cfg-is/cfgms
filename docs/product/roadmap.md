@@ -610,6 +610,7 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - [ ] Review repository for sensitive data or internal artifacts
   - [ ] Remove any internal documentation or notes
   - [ ] Clean up test fixtures and example data
+  - [ ] Review code for unfinished features (todo etc), unused code or packages
 - [ ] **Task 5: Sensitive Data Scan** (Issue #224) - 3-5 days [CRITICAL]
   - [ ] Run gitleaks against entire repository history
   - [ ] Run truffleHog against entire repository history
