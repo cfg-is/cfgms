@@ -158,12 +158,12 @@ After applying, verify security posture:
 
 ```bash
 # Run built-in verification script
-cfgctl exec --device server-01 -- /usr/local/bin/verify-baseline-security.sh
+cfgcli exec --device server-01 -- /usr/local/bin/verify-baseline-security.sh
 
 # Manual checks
-cfgctl exec --device server-01 -- sysctl net.ipv4.tcp_syncookies
-cfgctl exec --device server-01 -- systemctl status auditd
-cfgctl exec --device server-01 -- ufw status verbose
+cfgcli exec --device server-01 -- sysctl net.ipv4.tcp_syncookies
+cfgcli exec --device server-01 -- systemctl status auditd
+cfgcli exec --device server-01 -- ufw status verbose
 ```
 
 ## Dependencies
@@ -176,16 +176,16 @@ Test in safe environment before production:
 
 ```bash
 # Apply to test server
-cfgctl config apply --template baseline-security --device test-server
+cfgcli config apply --template baseline-security --device test-server
 
 # Verify security controls
-cfgctl exec --device test-server -- /usr/local/bin/verify-baseline-security.sh
+cfgcli exec --device test-server -- /usr/local/bin/verify-baseline-security.sh
 
 # Check firewall rules
-cfgctl exec --device test-server -- ufw status numbered
+cfgcli exec --device test-server -- ufw status numbered
 
 # Review audit rules
-cfgctl exec --device test-server -- auditctl -l
+cfgcli exec --device test-server -- auditctl -l
 ```
 
 ## Rollback
@@ -194,10 +194,10 @@ If issues occur:
 
 ```bash
 # Rollback configuration
-cfgctl config rollback --device affected-server --version previous
+cfgcli config rollback --device affected-server --version previous
 
 # Disable firewall temporarily (emergency access)
-cfgctl exec --device affected-server -- ufw disable
+cfgcli exec --device affected-server -- ufw disable
 ```
 
 ## Security Notes
@@ -214,13 +214,13 @@ Regular maintenance tasks:
 
 ```bash
 # Review audit logs
-cfgctl exec --device server-01 -- aureport -au
+cfgcli exec --device server-01 -- aureport -au
 
 # Check for security updates
-cfgctl exec --device server-01 -- apt-get update && apt-get -s upgrade | grep -i security
+cfgcli exec --device server-01 -- apt-get update && apt-get -s upgrade | grep -i security
 
 # Verify firewall rules
-cfgctl exec --device server-01 -- ufw status numbered
+cfgcli exec --device server-01 -- ufw status numbered
 ```
 
 ## License

@@ -1,4 +1,4 @@
-// Package cmd implements the CLI commands for cfgctl
+// Package cmd implements the CLI commands for cfgcli
 package cmd
 
 import (
@@ -34,13 +34,13 @@ Provides operational visibility into controller status including:
 
 Examples:
   # Check controller health status
-  cfgctl controller status --url=https://controller.example.com
+  cfgcli controller status --url=https://controller.example.com
 
   # View detailed metrics
-  cfgctl controller metrics --url=https://controller.example.com
+  cfgcli controller metrics --url=https://controller.example.com
 
   # Export metrics in JSON format
-  cfgctl controller metrics --url=https://controller.example.com --format=json`,
+  cfgcli controller metrics --url=https://controller.example.com --format=json`,
 }
 
 // controllerStatusCmd represents the controller status command
@@ -55,10 +55,10 @@ var controllerStatusCmd = &cobra.Command{
 
 Examples:
   # Check controller status
-  cfgctl controller status --url=https://controller.example.com
+  cfgcli controller status --url=https://controller.example.com
 
   # With API key authentication
-  cfgctl controller status --url=https://controller.example.com --api-key=your-key`,
+  cfgcli controller status --url=https://controller.example.com --api-key=your-key`,
 	RunE: runControllerStatus,
 }
 
@@ -76,10 +76,10 @@ Output formats: text (default), json
 
 Examples:
   # View metrics in human-readable format
-  cfgctl controller metrics --url=https://controller.example.com
+  cfgcli controller metrics --url=https://controller.example.com
 
   # Export metrics as JSON
-  cfgctl controller metrics --url=https://controller.example.com --format=json`,
+  cfgcli controller metrics --url=https://controller.example.com --format=json`,
 	RunE: runControllerMetrics,
 }
 

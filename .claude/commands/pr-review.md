@@ -3,7 +3,7 @@ name: pr-review
 description: Structured PR review following mandatory CFGMS methodology with fresh context
 parameters:
   - name: pr_number
-    description: Pull request number to review (optional - will show selection menu if omitted)
+    description: Pull request number to review (optional - auto-starts if 1 PR, shows menu if multiple)
     required: false
 ---
 
@@ -13,7 +13,7 @@ This command executes the comprehensive 5-phase PR review methodology required b
 
 ## Interactive PR Selection (Optional Mode)
 
-**ENHANCEMENT**: When run without a PR number, provides interactive selection menu.
+**ENHANCEMENT**: When run without a PR number, provides interactive selection menu. **Auto-starts review if only one PR exists.**
 
 **PR Discovery Flow**:
 ```bash
@@ -23,7 +23,22 @@ This command executes the comprehensive 5-phase PR review methodology required b
 # 1. Fetch all open PRs
 gh pr list --state=open --json number,title,author,headRefName,isDraft --limit 20
 
-# 2. Display selection menu
+# 2. Check count and auto-start if only one PR
+pr_count=$(gh pr list --state=open --json number --jq 'length')
+if [ "$pr_count" -eq 1 ]; then
+  pr_number=$(gh pr list --state=open --json number --jq '.[0].number')
+  echo "📋 Found 1 open pull request"
+  echo ""
+  echo "✅ Auto-selecting PR #$pr_number for review..."
+  echo ""
+  # Proceed directly to review (skip selection menu)
+  # Continue to git sync and review phases
+elif [ "$pr_count" -eq 0 ]; then
+  echo "⚠️ No open pull requests found"
+  exit 0
+fi
+
+# 3. Display selection menu (only if multiple PRs)
 echo "📋 Open Pull Requests:"
 echo ""
 echo "a) PR #218: Story #214: Controller Health Monitoring & Alerting"
@@ -427,11 +442,31 @@ the required functionality with no identified risks or concerns.
 
 ## Usage Examples
 
-### Interactive Mode (No PR Number)
+### Auto-Start Mode (Single PR)
 ```bash
 /pr-review
 
-# Output:
+# Output when only 1 PR exists:
+📋 Found 1 open pull request
+
+✅ Auto-selecting PR #233 for review...
+
+🔄 Synchronizing git branch with remote...
+   ✅ No uncommitted changes
+   ✅ Branch is up to date with remote
+   ✅ No unpushed commits
+
+🔍 Starting comprehensive review of PR #233...
+📋 Fetching PR details and changes...
+
+[Complete 5-phase review execution with detailed analysis]
+```
+
+### Interactive Mode (Multiple PRs)
+```bash
+/pr-review
+
+# Output when multiple PRs exist:
 📋 Discovering open pull requests...
 
 Found 3 open PRs:

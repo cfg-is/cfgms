@@ -626,13 +626,13 @@ curl -X GET /api/v1/stewards/{id}/config/effective?trace=true
 #### Validation Tool
 ```bash
 # Validate configuration syntax and inheritance
-cfgctl config validate --file config.yaml --trace
+cfgcli config validate --file config.yaml --trace
 ```
 
 #### Inheritance Visualizer
 ```bash
 # Show configuration inheritance tree
-cfgctl config tree --steward-id {id} --format json
+cfgcli config tree --steward-id {id} --format json
 ```
 
 ## Advanced Topics
@@ -715,7 +715,7 @@ modules:
 3. **Test Inheritance**
    ```bash
    # Verify effective configuration
-   cfgctl config preview --steward-id {id}
+   cfgcli config preview --steward-id {id}
    ```
 
 ### Best Migration Practices

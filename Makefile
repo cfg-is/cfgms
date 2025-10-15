@@ -6,7 +6,7 @@ GO_BUILD_FLAGS=-trimpath -ldflags="-s -w"
 # Binary names
 STEWARD_BINARY=cfgms-steward
 CONTROLLER_BINARY=controller
-CLI_BINARY=cfgctl
+CLI_BINARY=cfgcli
 CERT_MANAGER_BINARY=cert-manager
 
 # Protocol buffer variables
@@ -49,7 +49,7 @@ build-controller:
 	go build ${GO_BUILD_FLAGS} -o bin/${CONTROLLER_BINARY} ./cmd/controller
 
 build-cli:
-	go build ${GO_BUILD_FLAGS} -o bin/${CLI_BINARY} ./cmd/cfgctl
+	go build ${GO_BUILD_FLAGS} -o bin/${CLI_BINARY} ./cmd/cfgcli
 
 build-cert-manager:
 	go build ${GO_BUILD_FLAGS} -o bin/${CERT_MANAGER_BINARY} ./cmd/cert-manager

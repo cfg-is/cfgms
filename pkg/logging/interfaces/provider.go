@@ -60,7 +60,7 @@ type LogEntry struct {
 	MsgID    string `json:"msg_id,omitempty"`     // Message type identifier
 	
 	// CFGMS context fields - critical for multi-tenant operations
-	ServiceName string `json:"service_name,omitempty"` // controller, steward, cfgctl
+	ServiceName string `json:"service_name,omitempty"` // controller, steward, cfgcli
 	Component   string `json:"component,omitempty"`    // module name, service component
 	TenantID    string `json:"tenant_id,omitempty"`    // Multi-tenant isolation
 	

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/cfgis/cfgms/cmd/cfgctl/cmd"
+	"github.com/cfgis/cfgms/cmd/cfgcli/cmd"
 )
 
 func main() {

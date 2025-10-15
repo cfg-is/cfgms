@@ -1,4 +1,4 @@
-// Package cmd implements the CLI commands for cfgctl
+// Package cmd implements the CLI commands for cfgcli
 package cmd
 
 import (
@@ -31,13 +31,13 @@ can be time-limited, single-use, and revocable.
 
 Examples:
   # Create a token that expires in 7 days
-  cfgctl token create --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883 --expires=7d
+  cfgcli token create --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883 --expires=7d
 
   # Create a single-use token for production group
-  cfgctl token create --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883 --group=production --single-use
+  cfgcli token create --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883 --group=production --single-use
 
   # Create a token that never expires
-  cfgctl token create --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883`,
+  cfgcli token create --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883`,
 }
 
 // tokenCreateCmd represents the token create command
@@ -57,13 +57,13 @@ Expiration formats:
 
 Examples:
   # 7-day expiring token
-  cfgctl token create --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883 --expires=7d
+  cfgcli token create --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883 --expires=7d
 
   # Single-use token
-  cfgctl token create --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883 --single-use
+  cfgcli token create --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883 --single-use
 
   # Token for specific group
-  cfgctl token create --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883 --group=production`,
+  cfgcli token create --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883 --group=production`,
 	RunE: runTokenCreate,
 }
 

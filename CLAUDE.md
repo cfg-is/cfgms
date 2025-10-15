@@ -168,7 +168,7 @@ See [docs/development/commands-reference.md](docs/development/commands-reference
 
 ### Directory Structure
 ```
-cmd/           # Command-line applications (controller, steward, cfgctl)
+cmd/           # Command-line applications (controller, steward, cfgcli)
 api/proto/     # Protocol buffer definitions
 pkg/           # Shared packages and global plugin interfaces
   storage/interfaces/  # Global storage contracts (import these)

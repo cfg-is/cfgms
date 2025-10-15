@@ -156,7 +156,7 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - [x] Highlight breaking changes and security impacts
   - [x] Export diffs in multiple formats (text, JSON, HTML, unified, side-by-side, markdown)
   - [x] Integration with approval workflows for change review
-  - [x] CLI integration via cfgctl diff command with advanced filtering
+  - [x] CLI integration via cfgcli diff command with advanced filtering
   - [x] Three-way comparison support with conflict detection
   - [x] Comprehensive test suite with edge case handling
 
@@ -571,7 +571,7 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - ✅ Email alerting via SMTP (simple alerts, no tiered escalation)
   - ✅ Request tracing for troubleshooting (request ID propagation, CLI reconstruction)
   - ✅ Health API endpoints (simple + detailed + Prometheus)
-  - ✅ CLI tools (`cfgctl controller status`, `cfgctl trace <request_id>`)
+  - ✅ CLI tools (`cfgcli controller status`, `cfgcli trace <request_id>`)
   - ✅ 7-day performance retention (30-second collection interval)
   - ✅ Uses existing storage providers (in-memory for alpha, pluggable architecture ready)
   - ✅ <1% overhead validated (0 goroutine growth, 9.31 KB memory for 30 snapshots)
@@ -595,11 +595,11 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - [x] Remove google.golang.org/grpc from go.mod
   - [x] Update Makefile proto generation to skip gRPC
   - [x] Validate all tests pass after removal
-- [ ] **Task 2: Rename cfgctl to cfgcli** (Issue #221) - 1 day
-  - [ ] Rename cmd/cfgctl directory to cmd/cfgcli
-  - [ ] Update all import paths referencing cfgctl
-  - [ ] Update documentation and examples
-  - [ ] Update build scripts and Makefile targets
+- [x] **Task 2: Rename cfgctl to cfgcli** (Issue #221) - 1 day ✅ COMPLETED
+  - [x] Rename cmd/cfgctl directory to cmd/cfgcli
+  - [x] Update all import paths referencing cfgctl
+  - [x] Update documentation and examples
+  - [x] Update build scripts and Makefile targets
 - [ ] **Task 3: Move HA Code to Commercial Tier** (Issue #222) - 2 days
   - [ ] Move features/controller/ha/ to commercial repository
   - [ ] Create placeholder/stub implementation for OSS

@@ -25,7 +25,7 @@ Story #198 has successfully migrated **90% of gRPC functionality** to MQTT+QUIC 
 **Token System:**
 ```bash
 # Generate short registration token
-cfgctl token create --tenant-id=acme-corp \
+cfgcli token create --tenant-id=acme-corp \
   --controller-url=mqtt://controller.acme.com:8883 \
   --expires=7d
 
@@ -159,8 +159,8 @@ Data Plane (QUIC):
 - `cmd/steward/main.go` - Registration token support
 
 **Tools:**
-- `cmd/cfgctl/cmd/token.go` - Token generation CLI
-- `cmd/cfgctl/cmd/regcode.go` - Legacy base64 codes (deprecated)
+- `cmd/cfgcli/cmd/token.go` - Token generation CLI
+- `cmd/cfgcli/cmd/regcode.go` - Legacy base64 codes (deprecated)
 
 ### Protocol Specifications
 
@@ -209,7 +209,7 @@ Stream 2: DNA sync (reserved)
 - [ ] Connection resilience/reconnection
 
 ### Manual Testing Checklist
-- [ ] Generate token with cfgctl
+- [ ] Generate token with cfgcli
 - [ ] Start controller with MQTT+QUIC enabled
 - [ ] Start steward with `--regtoken`
 - [ ] Verify registration succeeds
@@ -252,7 +252,7 @@ config, hash, err := client.GetConfiguration(ctx, modules)
 **After:**
 ```bash
 # 1. Generate token
-cfgctl token create --tenant-id=acme --controller-url=mqtt://... --expires=7d
+cfgcli token create --tenant-id=acme --controller-url=mqtt://... --expires=7d
 
 # 2. Deploy with token
 msiexec /i cfgms-steward.msi /quiet REGTOKEN="cfgms_reg_abc123"

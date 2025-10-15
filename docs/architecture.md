@@ -194,7 +194,7 @@ features/
 ```
 
 ### Key Directories
-- `cmd/` - Command-line applications (controller, steward, cfgctl)
+- `cmd/` - Command-line applications (controller, steward, cfgcli)
 - `api/proto/` - Protocol buffer definitions for gRPC
 - `pkg/` - Shared packages (logging utilities)
 - `test/` - Integration and end-to-end tests

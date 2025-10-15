@@ -1,4 +1,4 @@
-// Package cmd implements the CLI commands for cfgctl
+// Package cmd implements the CLI commands for cfgcli
 package cmd
 
 import (
@@ -34,10 +34,10 @@ Request IDs are included in controller logs and API responses for debugging.
 
 Examples:
   # View trace for a specific request
-  cfgctl trace abc123def456 --url=https://controller.example.com
+  cfgcli trace abc123def456 --url=https://controller.example.com
 
   # Export trace as JSON
-  cfgctl trace abc123def456 --url=https://controller.example.com --format=json`,
+  cfgcli trace abc123def456 --url=https://controller.example.com --format=json`,
 	Args: cobra.ExactArgs(1),
 	RunE: runTrace,
 }
