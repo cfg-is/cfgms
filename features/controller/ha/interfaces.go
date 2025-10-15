@@ -125,6 +125,9 @@ type ClusterManager interface {
 
 	// GetHealth returns the current health status
 	GetHealth() *HealthStatus
+
+	// GetRaftTransport returns the Raft HTTP transport (commercial only, returns nil in OSS)
+	GetRaftTransport() RaftTransport
 }
 
 // HealthCheckFunc is a function that checks the health of a component
@@ -265,4 +268,14 @@ type SplitBrainStatus struct {
 	PartitionIDs []string  `json:"partition_ids,omitempty"`
 	Resolution   string    `json:"resolution,omitempty"`
 	Details      map[string]interface{} `json:"details,omitempty"`
+}
+
+// RaftTransport handles HTTP transport for Raft messages
+// This is only used in commercial builds with clustering
+type RaftTransport interface {
+	// HandleMessage handles incoming Raft messages
+	HandleMessage(w interface{}, r interface{})
+
+	// HandleStatus returns Raft cluster status
+	HandleStatus(w interface{}, r interface{})
 }

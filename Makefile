@@ -3,6 +3,10 @@
 # Build settings
 GO_BUILD_FLAGS=-trimpath -ldflags="-s -w"
 
+# Build tags (optional - use TAGS=commercial for commercial builds)
+# Example: make build-controller TAGS=commercial
+BUILD_TAGS=$(if $(TAGS),-tags $(TAGS),)
+
 # Binary names
 STEWARD_BINARY=cfgms-steward
 CONTROLLER_BINARY=controller
@@ -43,16 +47,16 @@ build: build-steward build-controller build-cli build-cert-manager
 # Build individual binaries
 .PHONY: build-steward build-controller build-cli build-cert-manager
 build-steward:
-	go build ${GO_BUILD_FLAGS} -o bin/${STEWARD_BINARY} ./cmd/steward
+	go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o bin/${STEWARD_BINARY} ./cmd/steward
 
 build-controller:
-	go build ${GO_BUILD_FLAGS} -o bin/${CONTROLLER_BINARY} ./cmd/controller
+	go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o bin/${CONTROLLER_BINARY} ./cmd/controller
 
 build-cli:
-	go build ${GO_BUILD_FLAGS} -o bin/${CLI_BINARY} ./cmd/cfgcli
+	go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o bin/${CLI_BINARY} ./cmd/cfgcli
 
 build-cert-manager:
-	go build ${GO_BUILD_FLAGS} -o bin/${CERT_MANAGER_BINARY} ./cmd/cert-manager
+	go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o bin/${CERT_MANAGER_BINARY} ./cmd/cert-manager
 
 # Smart test - core modules + changed modules only
 test:
