@@ -17,6 +17,14 @@ bin/
 # Output of the go coverage tool
 *.out
 
+# Backup and temporary files
+*.backup
+*.bak
+*.old
+*.tmp
+*.wip
+*~
+
 # Dependency directories
 vendor/
 

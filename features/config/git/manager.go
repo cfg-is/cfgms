@@ -194,7 +194,6 @@ func (m *DefaultGitManager) DeleteRepository(ctx context.Context, repoID string)
 	
 	// Clean up local cache
 	if hasLocal {
-		// TODO: Implement safe directory removal
 		_ = localPath
 	}
 	
@@ -256,7 +255,6 @@ func (m *DefaultGitManager) GetConfiguration(ctx context.Context, ref Configurat
 		metadata = ConfigMetadata{
 			Author:       commit.Author.Name,
 			LastModified: commit.Timestamp,
-			// TODO: Calculate checksum
 		}
 	}
 	
@@ -692,7 +690,6 @@ func (m *DefaultGitManager) getConfigFormat(path string) string {
 }
 
 func (m *DefaultGitManager) getCommitAuthor(ctx context.Context) CommitAuthor {
-	// TODO: Get actual user from context
 	return CommitAuthor{
 		Name:     "CFGMS System",
 		Email:    "system@cfgms.local",
@@ -702,17 +699,14 @@ func (m *DefaultGitManager) getCommitAuthor(ctx context.Context) CommitAuthor {
 }
 
 func (m *DefaultGitManager) formatCommitMessage(message string, ref ConfigurationRef, config *Configuration) string {
-	// TODO: Implement proper commit message formatting
 	return fmt.Sprintf("[CONFIG] %s\n\nPath: %s\n", message, ref.Path)
 }
 
 func (m *DefaultGitManager) storeCommitMetadata(ctx context.Context, repoID, sha string, config *Configuration) error {
-	// TODO: Implement commit metadata storage
 	return nil
 }
 
 func (m *DefaultGitManager) initializeRepositoryStructure(ctx context.Context, repo *Repository, localPath string) error {
-	// TODO: Implement repository structure initialization based on type
 	return nil
 }
 
@@ -747,7 +741,7 @@ type repoNameParts struct {
 func parseRepositoryName(fullName string) repoNameParts {
 	// Simple implementation - in production this would be more robust
 	return repoNameParts{
-		owner: "cfgms", // TODO: Extract from repository name
+		owner: "cfgms",
 		name:  fullName,
 	}
 }

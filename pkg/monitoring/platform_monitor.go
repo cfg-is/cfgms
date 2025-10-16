@@ -8,6 +8,7 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/telemetry"
+	"github.com/cfgis/cfgms/pkg/version"
 )
 
 // platformMonitor implements the PlatformMonitor interface.
@@ -545,6 +546,5 @@ func (pm *platformMonitor) cleanupResolvedAnomalies() {
 
 // getVersion returns the current system version
 func getVersion() string {
-	// TODO: Get actual version from build info
-	return "0.5.0-beta"
+	return version.ShortWithoutPrefix()
 }

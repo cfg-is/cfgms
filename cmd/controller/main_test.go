@@ -70,11 +70,7 @@ func TestGracefulShutdown(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), tt.timeout)
 			defer cancel()
 
-			// TODO: Create mock server
-			// TODO: Start server
-			// TODO: Trigger shutdown
-			// TODO: Verify shutdown behavior
-			
+			// Test skeleton - requires server implementation to complete
 			// Use ctx to avoid unused variable error
 			_ = ctx
 		})
