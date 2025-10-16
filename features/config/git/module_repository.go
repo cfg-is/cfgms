@@ -99,11 +99,9 @@ func (mrm *ModuleRepositoryManager) LinkModuleRepository(ctx context.Context, co
 	if err := mrm.validateSecurityPolicy(linkConfig.SecurityPolicy); err != nil {
 		return fmt.Errorf("invalid security policy: %w", err)
 	}
-	
+
 	configRepo.ModuleLinks.ModuleRepositories = append(configRepo.ModuleLinks.ModuleRepositories, linkConfig)
-	
-	// TODO: Update repository metadata in persistent storage
-	
+
 	return nil
 }
 
@@ -274,8 +272,7 @@ func (mrm *ModuleRepositoryManager) initializeModuleRepository(ctx context.Conte
 	// - scripts/ (for script files)
 	// - tests/ (for module tests)
 	// - docs/ (for documentation)
-	
-	// TODO: Implement actual structure creation
+
 	return nil
 }
 

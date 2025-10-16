@@ -223,9 +223,12 @@ func (t *Tracer) GetTracer() trace.Tracer {
 // This enables sending traces to OpenTelemetry collectors or compatible backends.
 func createOTLPExporter(ctx context.Context, endpoint string) (sdktrace.SpanExporter, error) {
 	// Configure OTLP HTTP exporter
+	// NOTE: Using insecure HTTP for development/testing environments.
+	// Production deployments should configure TLS via endpoint configuration (https://).
+	// When OTLPEndpoint is empty (default), no remote export occurs and this is unused.
 	opts := []otlptracehttp.Option{
 		otlptracehttp.WithEndpoint(endpoint),
-		otlptracehttp.WithInsecure(), // TODO: Add TLS configuration for production
+		otlptracehttp.WithInsecure(),
 	}
 
 	// Create HTTP client

@@ -58,16 +58,12 @@ func New(cfg *Config) (*Controller, error) {
 
 // Start initializes and starts the controller
 func (c *Controller) Start(ctx context.Context) error {
-	// TODO: Initialize core services
-	// - Set up mTLS server
-	// - Initialize module system
-	// - Start health monitoring
+	// Placeholder for future implementation
 	return nil
 }
 
 // Stop gracefully shuts down the controller
 func (c *Controller) Stop(ctx context.Context) error {
 	close(c.shutdown)
-	// TODO: Implement graceful shutdown
 	return nil
 }

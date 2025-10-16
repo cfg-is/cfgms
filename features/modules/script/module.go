@@ -259,10 +259,14 @@ func (m *Module) validateSignature(config *ScriptConfig) error {
 }
 
 // verifySignature performs the actual signature verification
+// NOTE: This is a placeholder implementation that validates signature metadata only.
+// Future enhancement: Implement full cryptographic signature verification including:
+//   - Parsing public key or retrieving certificate by thumbprint
+//   - Verifying signature against script content using specified algorithm
+//   - Returning appropriate error if verification fails
+// Until implemented, scripts with signing policies will pass validation if signature
+// metadata is present and correctly formatted.
 func (m *Module) verifySignature(config *ScriptConfig) error {
-	// TODO: Implement actual signature verification
-	// This is a placeholder implementation
-
 	if config.Signature == nil {
 		return fmt.Errorf("%w: signature is required but not provided", modules.ErrInvalidInput)
 	}
@@ -277,11 +281,6 @@ func (m *Module) verifySignature(config *ScriptConfig) error {
 	if config.Signature.PublicKey == "" && config.Signature.Thumbprint == "" {
 		return fmt.Errorf("%w: either public key or certificate thumbprint is required", modules.ErrInvalidInput)
 	}
-
-	// TODO: Implement cryptographic signature verification
-	// - Parse public key or retrieve certificate by thumbprint
-	// - Verify signature against script content using specified algorithm
-	// - Return appropriate error if verification fails
 
 	return nil
 }

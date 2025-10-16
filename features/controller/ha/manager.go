@@ -16,6 +16,7 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	"github.com/cfgis/cfgms/pkg/version"
 )
 
 // Manager implements the ClusterManager interface and coordinates all HA operations
@@ -100,7 +101,7 @@ func NewManager(cfg *Config, logger logging.Logger, storageManager *interfaces.S
 		State:            NodeStateHealthy,
 		Role:             NodeRoleFollower,
 		StartedAt:        time.Now(),
-		Version:          "v0.5.0", // TODO: Get from build info
+		Version:          version.Short(),
 		Capabilities:     cfg.Node.Capabilities,
 		Region:           cfg.Node.Region,
 		AvailabilityZone: cfg.Node.AvailabilityZone,
