@@ -26,21 +26,30 @@ make test
 - ✅ Must achieve 100% test success
 - **ZERO TOLERANCE POLICY**: Fix all failures first
 
-### 2. Security Validation (BLOCKING)
-```bash
-make security-scan
-```
-- ❌ **BLOCKS** commit if critical/high vulnerabilities found
-- ✅ Must pass all security tools (Trivy, Nancy, gosec, staticcheck)
-- **PRODUCTION GATES**: Critical issues prevent deployment
-
-### 3. Code Quality Validation (BLOCKING)
+### 2. Linting Validation (BLOCKING)
 ```bash
 make lint
 ```
 - ❌ **BLOCKS** commit if linting errors exist
 - ✅ Must meet code quality standards
 - **CONSISTENT QUALITY**: Maintains codebase standards
+
+### 3. Secret Scanning (BLOCKING) - NEW!
+```bash
+make security-precommit
+```
+- ❌ **BLOCKS** commit if secrets detected in staged files
+- ✅ Scans ONLY staged files (fast, ~1-2 seconds)
+- **TWO-LAYER PROTECTION**: gitleaks (patterns) + truffleHog (verification)
+- **PREVENTS CREDENTIAL LEAKS**: Catches secrets BEFORE they enter git history
+
+### 4. Security Validation (BLOCKING)
+```bash
+make security-scan
+```
+- ❌ **BLOCKS** commit if critical/high vulnerabilities found
+- ✅ Must pass all security tools (Trivy, Nancy, gosec, staticcheck)
+- **PRODUCTION GATES**: Critical issues prevent deployment
 
 ## Story Progress Tracking (Enhanced Feature)
 
@@ -79,7 +88,7 @@ Progress: 40% complete (3/8 acceptance criteria)
 - **< 50% complete**: "Continue development - significant work remains"
 - **50-89% complete**: "Making good progress! Focus on [next major item]"
 - **90-99% complete**: "Almost done! Consider final testing and documentation"
-- **100% complete**: "🎉 Ready for completion! Run `/story-complete` or `/pr-create`"
+- **100% complete**: "🎉 Ready for completion! Run `/story-complete`"
 
 ## Commit Message Intelligence
 
@@ -136,8 +145,9 @@ Progress: 37.5% → displayed as 38%
 # Output:
 🧪 Running mandatory validation checks...
    ✅ Tests: 486 passed, 0 failed
-   ✅ Security: All scans clean
    ✅ Linting: 0 issues found
+   ✅ Secret Scanning: No secrets in staged files
+   ✅ Security: All scans clean
 
 📝 Auto-generating commit message...
 📊 Analyzing progress for Story #166...
