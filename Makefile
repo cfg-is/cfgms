@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-integration-factory test-watch test-commit test-ci test-integration test-security test-performance test-docker proto lint clean security-trivy security-deps security-scan security-check
+.PHONY: build test test-unit test-integration-factory test-watch test-commit test-ci test-integration test-security test-performance test-docker proto lint clean security-trivy security-deps security-scan security-check security-precommit
 
 # Use bash for all recipe commands (required for credential loading scripts)
 SHELL := /bin/bash
@@ -167,14 +167,99 @@ CHANGED_MODULES = $(shell \
 
 # DAILY DEVELOPMENT WORKFLOW TARGETS
 
-# Pre-commit validation (smart tests + quality gates)
-test-commit: test lint security-scan
+# Pre-commit secret scanning (BLOCKING - scans ONLY staged files for secrets)
+.PHONY: security-precommit
+security-precommit:
+	@echo "🔐 Running Pre-Commit Secret Scan"
+	@echo "================================="
+	@echo "Scanning staged files for secrets before commit..."
+	@echo ""
+	@# Check for staged files first
+	@if ! git diff --cached --quiet; then \
+		echo "📝 Files to scan:"; \
+		git diff --cached --name-only | head -10; \
+		if [ $$(git diff --cached --name-only | wc -l) -gt 10 ]; then \
+			echo "   ... and $$(( $$(git diff --cached --name-only | wc -l) - 10 )) more files"; \
+		fi; \
+		echo ""; \
+		\
+		if command -v gitleaks >/dev/null 2>&1; then \
+			echo "🔍 Running gitleaks on staged files..."; \
+			if gitleaks protect --staged --redact --verbose 2>&1; then \
+				echo "✅ gitleaks: No secrets detected in staged files"; \
+			else \
+				echo ""; \
+				echo "❌ SECRETS DETECTED IN STAGED FILES"; \
+				echo "===================================="; \
+				echo ""; \
+				echo "🚨 COMMIT BLOCKED: Secrets found in files you're trying to commit"; \
+				echo ""; \
+				echo "🔧 Required Actions:"; \
+				echo "   1. Review the findings above"; \
+				echo "   2. Remove secrets from staged files"; \
+				echo "   3. If secrets are test/example values, add to .gitleaks.toml allowlist"; \
+				echo "   4. Unstage files: git reset HEAD <file>"; \
+				echo "   5. Edit files to remove secrets"; \
+				echo "   6. Re-stage files: git add <file>"; \
+				echo "   7. Retry: make test-commit"; \
+				echo ""; \
+				echo "⚠️  If real secrets were exposed:"; \
+				echo "   - Rotate/revoke the exposed credentials immediately"; \
+				echo "   - Document the incident"; \
+				echo ""; \
+				exit 1; \
+			fi; \
+		else \
+			echo "⚠️  gitleaks not found - secret scanning SKIPPED"; \
+			echo ""; \
+			echo "Install gitleaks:"; \
+			echo "  go install github.com/zricethezav/gitleaks/v8@latest"; \
+			echo ""; \
+			echo "❌ COMMIT BLOCKED: gitleaks must be installed"; \
+			exit 1; \
+		fi; \
+		\
+		if command -v trufflehog >/dev/null 2>&1; then \
+			echo ""; \
+			echo "🔍 Running truffleHog verification scan..."; \
+			if trufflehog git file://. --since-commit HEAD --only-verified --fail --no-update 2>/dev/null; then \
+				echo "✅ truffleHog: No verified secrets detected"; \
+			else \
+				exit_code=$$?; \
+				if [ $$exit_code -eq 183 ]; then \
+					echo ""; \
+					echo "❌ VERIFIED SECRETS DETECTED"; \
+					echo "============================="; \
+					echo ""; \
+					echo "🚨 COMMIT BLOCKED: TruffleHog found VERIFIED (active) secrets"; \
+					echo ""; \
+					echo "⚠️  These are REAL, WORKING credentials that must be rotated:"; \
+					echo "   - Remove secrets from staged files immediately"; \
+					echo "   - Rotate/revoke the credentials in the source system"; \
+					echo "   - Document the exposure"; \
+					echo ""; \
+					exit 1; \
+				else \
+					echo "✅ truffleHog: No verified secrets detected"; \
+				fi; \
+			fi; \
+		fi; \
+	else \
+		echo "ℹ️  No staged files to scan"; \
+	fi
+	@echo ""
+	@echo "✅ PRE-COMMIT SECRET SCAN PASSED"
+	@echo "   Safe to commit - no secrets detected in staged files"
+
+# Pre-commit validation (smart tests + quality gates + SECRET SCANNING)
+test-commit: test lint security-precommit security-scan
 	@echo ""
 	@echo "✅ PRE-COMMIT VALIDATION FINISHED"
 	@echo "===================================="
 	@echo "- ✅ Smart tests passed (core + changed modules)"
 	@echo "- ✅ Linting passed"
-	@echo "- ✅ Security scanning passed"
+	@echo "- ✅ Secret scanning passed (no secrets in staged files)"
+	@echo "- ✅ Security scanning passed (vulnerabilities)"
 	@echo ""
 	@echo "🎯 Code is validated and ready for commit/PR"
 
