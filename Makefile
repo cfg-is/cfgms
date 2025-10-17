@@ -1,5 +1,8 @@
 .PHONY: build test test-unit test-integration-factory test-watch test-commit test-ci test-integration test-security test-performance test-docker proto lint clean security-trivy security-deps security-scan security-check
 
+# Use bash for all recipe commands (required for credential loading scripts)
+SHELL := /bin/bash
+
 # Build settings
 GO_BUILD_FLAGS=-trimpath -ldflags="-s -w"
 
@@ -176,8 +179,22 @@ test-commit: test lint security-scan
 	@echo "🎯 Code is validated and ready for commit/PR"
 
 # CI validation (complete validation) - RUNS IN CI/CD
+# Automatically loads M365 credentials from OS keychain if available
 test-ci: export CI=1
-test-ci: test-infrastructure-required lint security-scan test-m365-integration test-integration-complete test-integration-factory test-mqtt-quic
+test-ci:
+	@if [ -f ./scripts/load-credentials-from-keychain.sh ] && command -v secret-tool >/dev/null 2>&1; then \
+		echo "🔐 Loading M365 credentials from OS keychain..."; \
+		. ./scripts/load-credentials-from-keychain.sh && \
+		export M365_CLIENT_ID M365_CLIENT_SECRET M365_TENANT_ID M365_TENANT_DOMAIN M365_MSP_CLIENT_ID M365_MSP_CLIENT_SECRET M365_MSP_TENANT_ID M365_INTEGRATION_ENABLED M365_MSP_INTEGRATION_ENABLED && \
+		$(MAKE) test-infrastructure-required lint security-scan test-m365-integration test-integration-complete test-integration-factory test-mqtt-quic; \
+	elif [ -n "$$M365_CLIENT_SECRET" ]; then \
+		echo "🔐 Using M365 credentials from environment..."; \
+		$(MAKE) test-infrastructure-required lint security-scan test-m365-integration test-integration-complete test-integration-factory test-mqtt-quic; \
+	else \
+		echo "⚠️  No M365 credentials found (keychain or environment)"; \
+		echo "   M365 integration tests may fail"; \
+		$(MAKE) test-infrastructure-required lint security-scan test-m365-integration test-integration-complete test-integration-factory test-mqtt-quic; \
+	fi
 
 # Robust CI infrastructure test target - ensures infrastructure works every time
 test-infrastructure-required:

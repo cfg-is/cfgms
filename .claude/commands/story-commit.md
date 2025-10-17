@@ -79,7 +79,7 @@ Progress: 40% complete (3/8 acceptance criteria)
 - **< 50% complete**: "Continue development - significant work remains"
 - **50-89% complete**: "Making good progress! Focus on [next major item]"
 - **90-99% complete**: "Almost done! Consider final testing and documentation"
-- **100% complete**: "🎉 Ready for completion! Run `/story-complete` or `/pr-create`"
+- **100% complete**: "🎉 Ready for completion! Run `/story-complete`"
 
 ## Commit Message Intelligence
 
