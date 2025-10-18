@@ -67,3 +67,8 @@ docker-compose.test.override.yml
 *.db-shm
 *.db-wal
 docs/product/v*-epic.md
+
+# Security audit reports (WIP audit reports with unfixed vulnerabilities)
+# Note: Remediation summaries and completed audits should be committed
+docs/security/audits/*-wip.md
+docs/security/audits/draft-*.md
