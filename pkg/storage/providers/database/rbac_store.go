@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -12,6 +13,9 @@ import (
 	"github.com/cfgis/cfgms/api/proto/common"
 	_ "github.com/lib/pq" // PostgreSQL driver
 )
+
+// ErrCrossTenantAccessDenied is returned when attempting to access a resource from a different tenant
+var ErrCrossTenantAccessDenied = errors.New("cross-tenant access denied")
 
 // DatabaseRBACStore implements RBACStore using PostgreSQL for persistence
 type DatabaseRBACStore struct {
@@ -99,6 +103,37 @@ func (s *DatabaseRBACStore) Close() error {
 	if s.db != nil {
 		return s.db.Close()
 	}
+	return nil
+}
+
+// H-TENANT-1: Tenant boundary validation helper (security audit finding)
+// validateTenantAccess checks if the authenticated tenant matches the resource's tenant
+// System roles are allowed to bypass tenant validation
+func (s *DatabaseRBACStore) validateTenantAccess(ctx context.Context, resourceTenantID string, isSystemResource bool) error {
+	// System resources (is_system_role=true, etc.) can be accessed by any tenant
+	if isSystemResource {
+		return nil
+	}
+
+	// Extract authenticated tenant ID from context
+	authTenantIDValue := ctx.Value("tenant_id")
+	if authTenantIDValue == nil {
+		// If no tenant_id in context, allow operation (backwards compatibility)
+		// This supports operations from internal system components
+		return nil
+	}
+
+	authTenantID, ok := authTenantIDValue.(string)
+	if !ok {
+		return fmt.Errorf("invalid tenant_id type in context")
+	}
+
+	// H-TENANT-1: Block cross-tenant access (security audit finding)
+	if authTenantID != resourceTenantID {
+		return fmt.Errorf("%w: authenticated tenant=%s, resource tenant=%s",
+			ErrCrossTenantAccessDenied, authTenantID, resourceTenantID)
+	}
+
 	return nil
 }
 
@@ -303,20 +338,25 @@ func (s *DatabaseRBACStore) DeletePermission(ctx context.Context, id string) err
 func (s *DatabaseRBACStore) StoreRole(ctx context.Context, role *common.Role) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	
+
+	// H-TENANT-1: Validate tenant access before storing role (security audit finding)
+	if err := s.validateTenantAccess(ctx, role.TenantId, role.IsSystemRole); err != nil {
+		return err
+	}
+
 	// Begin transaction
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	
+
 	// Serialize permission IDs array to JSON
 	permissionIDsJSON, err := json.Marshal(role.PermissionIds)
 	if err != nil {
 		return fmt.Errorf("failed to serialize permission IDs: %w", err)
 	}
-	
+
 	query := `
 		INSERT INTO rbac_roles (id, name, description, permission_ids, is_system_role, tenant_id, parent_role_id, inheritance_type)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -330,7 +370,7 @@ func (s *DatabaseRBACStore) StoreRole(ctx context.Context, role *common.Role) er
 			inheritance_type = EXCLUDED.inheritance_type,
 			updated_at = NOW()
 	`
-	
+
 	_, err = tx.ExecContext(ctx, query,
 		role.Id,
 		role.Name,
@@ -341,16 +381,16 @@ func (s *DatabaseRBACStore) StoreRole(ctx context.Context, role *common.Role) er
 		role.ParentRoleId,
 		int32(role.InheritanceType),
 	)
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to store role: %w", err)
 	}
-	
+
 	// Commit transaction
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -358,20 +398,20 @@ func (s *DatabaseRBACStore) StoreRole(ctx context.Context, role *common.Role) er
 func (s *DatabaseRBACStore) GetRole(ctx context.Context, id string) (*common.Role, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
-	
+
 	query := `
 		SELECT id, name, description, permission_ids, is_system_role, tenant_id, parent_role_id, inheritance_type
 		FROM rbac_roles
 		WHERE id = $1
 	`
-	
+
 	row := s.db.QueryRowContext(ctx, query, id)
-	
+
 	role := &common.Role{}
 	var permissionIDsJSON []byte
 	var parentRoleID sql.NullString
 	var inheritanceType sql.NullInt32
-	
+
 	err := row.Scan(
 		&role.Id,
 		&role.Name,
@@ -382,19 +422,24 @@ func (s *DatabaseRBACStore) GetRole(ctx context.Context, id string) (*common.Rol
 		&parentRoleID,
 		&inheritanceType,
 	)
-	
+
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("role not found: %s", id)
 		}
 		return nil, fmt.Errorf("failed to get role: %w", err)
 	}
-	
+
+	// H-TENANT-1: Validate tenant access before returning role (security audit finding)
+	if err := s.validateTenantAccess(ctx, role.TenantId, role.IsSystemRole); err != nil {
+		return nil, err
+	}
+
 	// Deserialize permission IDs from JSON
 	if err := json.Unmarshal(permissionIDsJSON, &role.PermissionIds); err != nil {
 		return nil, fmt.Errorf("failed to deserialize permission IDs: %w", err)
 	}
-	
+
 	// Handle nullable fields
 	if parentRoleID.Valid {
 		role.ParentRoleId = parentRoleID.String
@@ -402,7 +447,7 @@ func (s *DatabaseRBACStore) GetRole(ctx context.Context, id string) (*common.Rol
 	if inheritanceType.Valid {
 		role.InheritanceType = common.RoleInheritanceType(inheritanceType.Int32)
 	}
-	
+
 	return role, nil
 }
 
@@ -492,35 +537,44 @@ func (s *DatabaseRBACStore) UpdateRole(ctx context.Context, role *common.Role) e
 func (s *DatabaseRBACStore) DeleteRole(ctx context.Context, id string) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	
+
+	// H-TENANT-1: Fetch role first to validate tenant access (security audit finding)
+	_, err := s.GetRole(ctx, id)
+	if err != nil {
+		return err
+	}
+
+	// Tenant validation already performed in GetRole
+	// Proceed with deletion
+
 	// Begin transaction
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	
+
 	query := `DELETE FROM rbac_roles WHERE id = $1`
-	
+
 	result, err := tx.ExecContext(ctx, query, id)
 	if err != nil {
 		return fmt.Errorf("failed to delete role: %w", err)
 	}
-	
+
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("failed to get rows affected: %w", err)
 	}
-	
+
 	if rowsAffected == 0 {
 		return fmt.Errorf("role not found: %s", id)
 	}
-	
+
 	// Commit transaction
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -530,25 +584,31 @@ func (s *DatabaseRBACStore) DeleteRole(ctx context.Context, id string) error {
 func (s *DatabaseRBACStore) StoreSubject(ctx context.Context, subject *common.Subject) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	
+
+	// H-TENANT-1: Validate tenant access before storing subject (security audit finding)
+	// Subjects are never system-wide, always tenant-specific
+	if err := s.validateTenantAccess(ctx, subject.TenantId, false); err != nil {
+		return err
+	}
+
 	// Begin transaction
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	
+
 	// Serialize role IDs and attributes to JSON
 	roleIDsJSON, err := json.Marshal(subject.RoleIds)
 	if err != nil {
 		return fmt.Errorf("failed to serialize role IDs: %w", err)
 	}
-	
+
 	attributesJSON, err := json.Marshal(subject.Attributes)
 	if err != nil {
 		return fmt.Errorf("failed to serialize attributes: %w", err)
 	}
-	
+
 	query := `
 		INSERT INTO rbac_subjects (id, type, display_name, tenant_id, role_ids, is_active, attributes)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -561,7 +621,7 @@ func (s *DatabaseRBACStore) StoreSubject(ctx context.Context, subject *common.Su
 			attributes = EXCLUDED.attributes,
 			updated_at = NOW()
 	`
-	
+
 	_, err = tx.ExecContext(ctx, query,
 		subject.Id,
 		int32(subject.Type),
@@ -571,16 +631,16 @@ func (s *DatabaseRBACStore) StoreSubject(ctx context.Context, subject *common.Su
 		subject.IsActive,
 		attributesJSON,
 	)
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to store subject: %w", err)
 	}
-	
+
 	// Commit transaction
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -588,19 +648,19 @@ func (s *DatabaseRBACStore) StoreSubject(ctx context.Context, subject *common.Su
 func (s *DatabaseRBACStore) GetSubject(ctx context.Context, id string) (*common.Subject, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
-	
+
 	query := `
 		SELECT id, type, display_name, tenant_id, role_ids, is_active, attributes
 		FROM rbac_subjects
 		WHERE id = $1
 	`
-	
+
 	row := s.db.QueryRowContext(ctx, query, id)
-	
+
 	subject := &common.Subject{}
 	var subjectType int32
 	var roleIDsJSON, attributesJSON []byte
-	
+
 	err := row.Scan(
 		&subject.Id,
 		&subjectType,
@@ -610,25 +670,31 @@ func (s *DatabaseRBACStore) GetSubject(ctx context.Context, id string) (*common.
 		&subject.IsActive,
 		&attributesJSON,
 	)
-	
+
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("subject not found: %s", id)
 		}
 		return nil, fmt.Errorf("failed to get subject: %w", err)
 	}
-	
+
+	// H-TENANT-1: Validate tenant access before returning subject (security audit finding)
+	// Subjects are never system-wide, always tenant-specific
+	if err := s.validateTenantAccess(ctx, subject.TenantId, false); err != nil {
+		return nil, err
+	}
+
 	subject.Type = common.SubjectType(subjectType)
-	
+
 	// Deserialize role IDs and attributes from JSON
 	if err := json.Unmarshal(roleIDsJSON, &subject.RoleIds); err != nil {
 		return nil, fmt.Errorf("failed to deserialize role IDs: %w", err)
 	}
-	
+
 	if err := json.Unmarshal(attributesJSON, &subject.Attributes); err != nil {
 		return nil, fmt.Errorf("failed to deserialize attributes: %w", err)
 	}
-	
+
 	return subject, nil
 }
 
@@ -730,35 +796,44 @@ func (s *DatabaseRBACStore) UpdateSubject(ctx context.Context, subject *common.S
 func (s *DatabaseRBACStore) DeleteSubject(ctx context.Context, id string) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	
+
+	// H-TENANT-1: Fetch subject first to validate tenant access (security audit finding)
+	_, err := s.GetSubject(ctx, id)
+	if err != nil {
+		return err
+	}
+
+	// Tenant validation already performed in GetSubject
+	// Proceed with deletion
+
 	// Begin transaction
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	
+
 	query := `DELETE FROM rbac_subjects WHERE id = $1`
-	
+
 	result, err := tx.ExecContext(ctx, query, id)
 	if err != nil {
 		return fmt.Errorf("failed to delete subject: %w", err)
 	}
-	
+
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("failed to get rows affected: %w", err)
 	}
-	
+
 	if rowsAffected == 0 {
 		return fmt.Errorf("subject not found: %s", id)
 	}
-	
+
 	// Commit transaction
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
-	
+
 	return nil
 }
 
