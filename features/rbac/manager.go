@@ -2,6 +2,7 @@ package rbac
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/cfgis/cfgms/api/proto/common"
@@ -286,6 +287,47 @@ func (m *Manager) DeletePermission(ctx context.Context, id string) error {
 
 // Role Store Methods
 func (m *Manager) CreateRole(ctx context.Context, role *common.Role) error {
+	// M-TENANT-2: Validate tenant boundary for role inheritance (security audit finding)
+	// Prevent cross-tenant role inheritance which could allow privilege escalation across tenants
+	if role.ParentRoleId != "" {
+		parentRole, err := m.GetRole(ctx, role.ParentRoleId)
+		if err != nil {
+			// Record audit failure
+			if m.auditManager != nil {
+				event := audit.UserManagementEvent(role.TenantId, "system", role.Id, "create_role").
+					Resource("role", role.Id, role.Name).
+					Result(interfaces.AuditResultError).
+					Error("RBAC_PARENT_ROLE_NOT_FOUND", fmt.Sprintf("parent role %s not found: %v", role.ParentRoleId, err)).
+					Detail("parent_role_id", role.ParentRoleId).
+					Severity(interfaces.AuditSeverityCritical)
+				_ = m.auditManager.RecordEvent(ctx, event)
+			}
+			return fmt.Errorf("parent role %s not found: %w", role.ParentRoleId, err)
+		}
+
+		// M-TENANT-2: Block cross-tenant role inheritance (security audit finding)
+		if parentRole.TenantId != role.TenantId {
+			errMsg := fmt.Sprintf("cross-tenant role inheritance not allowed: parent tenant=%s, child tenant=%s (security finding M-TENANT-2)",
+				parentRole.TenantId, role.TenantId)
+
+			// Record critical audit event for cross-tenant inheritance attempt
+			if m.auditManager != nil {
+				event := audit.UserManagementEvent(role.TenantId, "system", role.Id, "create_role").
+					Resource("role", role.Id, role.Name).
+					Result(interfaces.AuditResultError).
+					Error("RBAC_CROSS_TENANT_INHERITANCE_BLOCKED", errMsg).
+					Detail("child_tenant", role.TenantId).
+					Detail("parent_tenant", parentRole.TenantId).
+					Detail("parent_role_id", role.ParentRoleId).
+					Detail("security_finding", "M-TENANT-2").
+					Severity(interfaces.AuditSeverityCritical)
+				_ = m.auditManager.RecordEvent(ctx, event)
+			}
+
+			return errors.New(errMsg)
+		}
+	}
+
 	// Write-through: persist to both ephemeral and persistent storage
 	err := m.store.CreateRole(ctx, role)
 	if err != nil {
