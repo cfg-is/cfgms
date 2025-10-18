@@ -52,7 +52,8 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logger.Info("Processing steward registration request", "token_prefix", req.Token[:min(len(req.Token), 15)])
+	// H-AUTH-4: Reduce token prefix to 6 chars to prevent brute force (security audit finding)
+	s.logger.Info("Processing steward registration request", "token_prefix", req.Token[:min(len(req.Token), 6)])
 
 	// Check if registration token store is available
 	if s.registrationTokenStore == nil {

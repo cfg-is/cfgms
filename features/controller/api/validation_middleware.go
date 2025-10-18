@@ -107,16 +107,20 @@ func (s *Server) validateQueryParameters(validator *security.EnhancedValidator, 
 
 			switch param {
 			case "limit":
-				if limit, err := strconv.Atoi(value); err == nil {
-					validator.ValidateInteger(result, fieldName, int64(limit), "positive", "max:1000")
-				} else {
+				// M-INPUT-1: Use ParseInt instead of Atoi to prevent integer overflow (security audit finding)
+				limit, err := strconv.ParseInt(value, 10, 64)
+				if err != nil {
 					result.AddError(fieldName, value, "integer", "must be a valid integer")
+				} else if limit < 0 || limit > 1000 {
+					result.AddError(fieldName, value, "range", "must be between 0 and 1000")
 				}
 			case "offset":
-				if offset, err := strconv.Atoi(value); err == nil {
-					validator.ValidateInteger(result, fieldName, int64(offset), "min:0")
-				} else {
+				// M-INPUT-1: Use ParseInt instead of Atoi to prevent integer overflow (security audit finding)
+				offset, err := strconv.ParseInt(value, 10, 64)
+				if err != nil {
 					result.AddError(fieldName, value, "integer", "must be a valid integer")
+				} else if offset < 0 {
+					result.AddError(fieldName, value, "range", "must be greater than or equal to 0")
 				}
 			case "sort":
 				// Sort parameter validation
