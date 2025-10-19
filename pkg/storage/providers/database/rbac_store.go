@@ -1373,3 +1373,46 @@ func (s *DatabaseRBACStore) GetRolePermissions(ctx context.Context, roleID strin
 func (s *DatabaseRBACStore) GetSubjectAssignments(ctx context.Context, subjectID, tenantID string) ([]*common.RoleAssignment, error) {
 	return s.ListRoleAssignments(ctx, subjectID, "", tenantID)
 }
+
+// M-TENANT-1: Set tenant context for RLS
+// setTenantContext configures the PostgreSQL session variable for Row-Level Security
+func (s *DatabaseRBACStore) setTenantContext(ctx context.Context, tenantID string) error {
+	if tenantID == "" {
+		// No tenant context - system operation
+		return nil
+	}
+
+	// M-TENANT-1: Set session variable for RLS policies
+	_, err := s.db.ExecContext(ctx, "SET LOCAL app.current_tenant = $1", tenantID)
+	if err != nil {
+		return fmt.Errorf("failed to set tenant context for RLS: %w", err)
+	}
+
+	return nil
+}
+
+// M-TENANT-1: Execute operation within tenant context
+// withTenantContext wraps a database operation with tenant context for RLS
+func (s *DatabaseRBACStore) withTenantContext(ctx context.Context, tenantID string, operation func(context.Context, *sql.Tx) error) error {
+	// Begin transaction
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// M-TENANT-1: Set tenant context for this transaction
+	if tenantID != "" {
+		if _, err := tx.ExecContext(ctx, "SET LOCAL app.current_tenant = $1", tenantID); err != nil {
+			return fmt.Errorf("failed to set tenant context: %w", err)
+		}
+	}
+
+	// Execute operation
+	if err := operation(ctx, tx); err != nil {
+		return err
+	}
+
+	// Commit transaction
+	return tx.Commit()
+}

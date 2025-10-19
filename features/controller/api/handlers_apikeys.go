@@ -9,6 +9,8 @@ import (
 	"os"
 	"time"
 
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	"github.com/cfgis/cfgms/pkg/storage/providers/file"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 )
@@ -70,10 +72,28 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		TenantID:    createReq.TenantID,
 	}
 
-	// Store API key
+	// Store API key in memory
 	s.mu.Lock()
 	s.apiKeys[keyString] = apiKey
 	s.mu.Unlock()
+
+	// M-AUTH-1: Persist to durable storage
+	if s.apiKeyStore != nil {
+		keyHash := file.HashAPIKey(keyString)
+		storedKey := &interfaces.StoredAPIKey{
+			ID:          apiKey.ID,
+			KeyHash:     keyHash,
+			Name:        apiKey.Name,
+			Permissions: apiKey.Permissions,
+			TenantID:    apiKey.TenantID,
+			CreatedAt:   apiKey.CreatedAt,
+			ExpiresAt:   apiKey.ExpiresAt,
+		}
+		if err := s.apiKeyStore.StoreKey(r.Context(), storedKey); err != nil {
+			s.logger.Error("Failed to persist API key to storage", "error", err, "id", apiKey.ID)
+			// Continue anyway - key is in memory
+		}
+	}
 
 	// Create response (includes the actual key only on creation)
 	result := APIKeyCreateResult{

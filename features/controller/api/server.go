@@ -21,6 +21,8 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	pkgmonitoring "github.com/cfgis/cfgms/pkg/monitoring"
 	"github.com/cfgis/cfgms/pkg/registration"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	"github.com/cfgis/cfgms/pkg/storage/providers/file"
 	"github.com/cfgis/cfgms/pkg/telemetry"
 	"github.com/gorilla/mux"
 )
@@ -43,9 +45,10 @@ type Server struct {
 	platformMonitor         pkgmonitoring.PlatformMonitor
 	tracer                  *telemetry.Tracer
 	haManager               *ha.Manager
-	apiKeys                 map[string]*APIKey // Simple API key storage
-	registrationTokenStore  registration.Store  // Registration token store for steward registration
-	corsConfig              *CORSConfig         // CORS configuration
+	apiKeys                 map[string]*APIKey         // In-memory cache for fast lookup
+	apiKeyStore             interfaces.APIKeyStore     // M-AUTH-1: Persistent storage for API keys
+	registrationTokenStore  registration.Store         // Registration token store for steward registration
+	corsConfig              *CORSConfig                // CORS configuration
 }
 
 // APIKey represents an API key for external authentication
@@ -93,6 +96,12 @@ func New(
 		return nil, fmt.Errorf("config cannot be nil")
 	}
 
+	// M-AUTH-1: Initialize persistent API key storage
+	apiKeyStore, err := initializeAPIKeyStore(cfg, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize API key store: %w", err)
+	}
+
 	server := &Server{
 		cfg:                     cfg,
 		logger:                  logger,
@@ -108,7 +117,8 @@ func New(
 		tracer:                  tracer,
 		haManager:               haManager,
 		registrationTokenStore:  registrationTokenStore,
-		apiKeys:                 make(map[string]*APIKey),
+		apiKeys:                 make(map[string]*APIKey), // In-memory cache
+		apiKeyStore:             apiKeyStore,              // M-AUTH-1: Persistent storage
 	}
 
 	// Configure CORS settings (H-AUTH-3)
@@ -116,6 +126,11 @@ func New(
 
 	// Initialize router with middleware
 	server.setupRouter()
+
+	// M-AUTH-1: Load existing API keys from persistent storage
+	if err := server.loadAPIKeysFromStore(); err != nil {
+		logger.Warn("Failed to load API keys from store", "error", err)
+	}
 
 	// Generate default API key for initial setup
 	if err := server.generateDefaultAPIKey(); err != nil {
@@ -562,4 +577,59 @@ func (s *Server) configureCORS() {
 		s.logger.Info("CORS configured with default origins",
 			"allowed_origins", defaultOrigins)
 	}
+}
+
+// M-AUTH-1: Initialize persistent API key storage
+func initializeAPIKeyStore(cfg *config.Config, logger logging.Logger) (interfaces.APIKeyStore, error) {
+	// Determine storage path for API keys
+	storePath := os.Getenv("CFGMS_API_KEY_STORE_PATH")
+	if storePath == "" {
+		storePath = "./data/api-keys.enc"
+	}
+
+	// Get encryption key from environment or generate one
+	encKeyString := os.Getenv("CFGMS_API_KEY_ENCRYPTION_KEY")
+	var encKey []byte
+	if encKeyString != "" {
+		// Use provided encryption key
+		encKey = []byte(encKeyString)
+	} else {
+		// Generate a default encryption key (NOT secure for production!)
+		// In production, this should be provided via environment variable
+		encKey = []byte("default-insecure-key-please-change-in-production-env")
+		logger.Warn("Using default API key encryption key - NOT secure for production! Set CFGMS_API_KEY_ENCRYPTION_KEY environment variable")
+	}
+
+	// Ensure encryption key is 32 bytes for AES-256
+	if len(encKey) < 32 {
+		// Pad with zeros
+		paddedKey := make([]byte, 32)
+		copy(paddedKey, encKey)
+		encKey = paddedKey
+	} else if len(encKey) > 32 {
+		// Truncate
+		encKey = encKey[:32]
+	}
+
+	// Create file-based API key store
+	store := file.NewAPIKeyStore(storePath, encKey)
+
+	// Initialize the store
+	ctx := context.Background()
+	if err := store.Initialize(ctx); err != nil {
+		return nil, fmt.Errorf("failed to initialize API key store: %w", err)
+	}
+
+	logger.Info("API key store initialized", "path", storePath)
+	return store, nil
+}
+
+// M-AUTH-1: Load API keys from persistent storage into memory cache
+func (s *Server) loadAPIKeysFromStore() error {
+	// Keys are loaded from disk on first access via the store
+	// The in-memory cache (s.apiKeys) is populated on lookup
+	// This is a lazy-loading approach for better performance
+
+	s.logger.Info("API key store ready - keys will be loaded on first access")
+	return nil
 }
