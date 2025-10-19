@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -44,6 +45,7 @@ type Server struct {
 	haManager               *ha.Manager
 	apiKeys                 map[string]*APIKey // Simple API key storage
 	registrationTokenStore  registration.Store  // Registration token store for steward registration
+	corsConfig              *CORSConfig         // CORS configuration
 }
 
 // APIKey represents an API key for external authentication
@@ -63,6 +65,11 @@ type ServerConfig struct {
 	TLSEnabled bool
 	CertFile   string
 	KeyFile    string
+}
+
+// CORSConfig contains CORS configuration for the API server
+type CORSConfig struct {
+	AllowedOrigins []string
 }
 
 // New creates a new REST API server instance
@@ -103,6 +110,9 @@ func New(
 		registrationTokenStore:  registrationTokenStore,
 		apiKeys:                 make(map[string]*APIKey),
 	}
+
+	// Configure CORS settings (H-AUTH-3)
+	server.configureCORS()
 
 	// Initialize router with middleware
 	server.setupRouter()
@@ -524,5 +534,32 @@ func (s *Server) cleanupExpiredAPIKeys() {
 	} else {
 		s.logger.Debug("API key cleanup completed - no expired keys found",
 			"remaining_keys", len(s.apiKeys))
+	}
+}
+
+// configureCORS sets up CORS allowed origins configuration
+// H-AUTH-3: Replace wildcard CORS with configurable allowed origins list
+func (s *Server) configureCORS() {
+	// Default allowed origins for development and production
+	defaultOrigins := []string{
+		"http://localhost:3000",    // Development frontend
+		"http://localhost:3001",    // Alternative dev frontend
+		"http://localhost:9080",    // API itself (for testing)
+	}
+
+	// Load from environment variable if specified
+	// Format: CFGMS_ALLOWED_ORIGINS="https://app.cfgms.com,https://admin.cfgms.com"
+	if envOrigins := os.Getenv("CFGMS_ALLOWED_ORIGINS"); envOrigins != "" {
+		s.corsConfig = &CORSConfig{
+			AllowedOrigins: strings.Split(envOrigins, ","),
+		}
+		s.logger.Info("CORS configured from environment",
+			"allowed_origins", s.corsConfig.AllowedOrigins)
+	} else {
+		s.corsConfig = &CORSConfig{
+			AllowedOrigins: defaultOrigins,
+		}
+		s.logger.Info("CORS configured with default origins",
+			"allowed_origins", defaultOrigins)
 	}
 }

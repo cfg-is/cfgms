@@ -293,17 +293,44 @@ func TestAPIKeyManagement(t *testing.T) {
 func TestCORSHeaders(t *testing.T) {
 	server := setupTestServer(t)
 
-	// Test OPTIONS request (preflight)
-	req := httptest.NewRequest("OPTIONS", "/api/v1/health", nil)
-	req.Header.Set("Origin", "https://example.com")
-	rec := httptest.NewRecorder()
+	// H-AUTH-3: Test CORS with allowed origin (security audit finding)
+	t.Run("allowed origin returns correct CORS headers", func(t *testing.T) {
+		req := httptest.NewRequest("OPTIONS", "/api/v1/health", nil)
+		req.Header.Set("Origin", "http://localhost:3000") // Default allowed origin
+		rec := httptest.NewRecorder()
 
-	server.router.ServeHTTP(rec, req)
+		server.router.ServeHTTP(rec, req)
 
-	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, "*", rec.Header().Get("Access-Control-Allow-Origin"))
-	assert.Contains(t, rec.Header().Get("Access-Control-Allow-Methods"), "GET")
-	assert.Contains(t, rec.Header().Get("Access-Control-Allow-Headers"), "X-API-Key")
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, "http://localhost:3000", rec.Header().Get("Access-Control-Allow-Origin"))
+		assert.Contains(t, rec.Header().Get("Access-Control-Allow-Methods"), "GET")
+		assert.Contains(t, rec.Header().Get("Access-Control-Allow-Headers"), "X-API-Key")
+	})
+
+	// H-AUTH-3: Test CORS with disallowed origin (security audit finding)
+	t.Run("disallowed origin is rejected", func(t *testing.T) {
+		req := httptest.NewRequest("OPTIONS", "/api/v1/health", nil)
+		req.Header.Set("Origin", "https://evil.com")
+		rec := httptest.NewRecorder()
+
+		server.router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+		assert.Empty(t, rec.Header().Get("Access-Control-Allow-Origin"))
+		assert.Empty(t, rec.Header().Get("Access-Control-Allow-Methods"))
+	})
+
+	// H-AUTH-3: Test request without origin header
+	t.Run("request without origin header", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/api/v1/health", nil)
+		// No Origin header
+		rec := httptest.NewRecorder()
+
+		server.router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Empty(t, rec.Header().Get("Access-Control-Allow-Origin"))
+	})
 }
 
 func TestConfigurationValidation(t *testing.T) {

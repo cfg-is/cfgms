@@ -57,17 +57,37 @@ func (rw *responseWriter) WriteHeader(code int) {
 }
 
 // corsMiddleware handles CORS headers
+// H-AUTH-3: Validate origin against allowed origins list (security audit finding)
 func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Set CORS headers
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
-		w.Header().Set("Access-Control-Expose-Headers", "X-Total-Count")
+		origin := r.Header.Get("Origin")
+
+		// Check if origin is in allowed list
+		allowed := false
+		if s.corsConfig != nil && origin != "" {
+			for _, allowedOrigin := range s.corsConfig.AllowedOrigins {
+				if origin == allowedOrigin {
+					allowed = true
+					break
+				}
+			}
+		}
+
+		// Only set CORS headers if origin is allowed
+		if allowed {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
+			w.Header().Set("Access-Control-Expose-Headers", "X-Total-Count")
+		}
 
 		// Handle preflight requests
 		if r.Method == "OPTIONS" {
-			w.WriteHeader(http.StatusOK)
+			if allowed {
+				w.WriteHeader(http.StatusOK)
+			} else {
+				w.WriteHeader(http.StatusForbidden)
+			}
 			return
 		}
 

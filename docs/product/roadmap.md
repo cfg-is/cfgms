@@ -621,28 +621,34 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - [x] Document scan results and remediation actions
 
 **Phase 2: Security Review (Weeks 3-5)**
-- [ ] **Task 6: Security Code Review (External Audit)** (Issue #225) - 2-3 weeks [CRITICAL]
-  - [ ] Static analysis with gosec, staticcheck
-  - [ ] Dependency vulnerability scan with govulncheck
-  - [ ] Manual code review focusing on auth/authz, input validation, SQL/command injection
-  - [ ] Engage external security firm for independent audit
-  - [ ] Remediate all critical/high findings
-  - [ ] Document security posture for users
+- [x] **Task 6: Security Code Review (External Audit)** (Issue #225) - 2-3 weeks ✅ COMPLETED [CRITICAL]
+  - [x] Static analysis with gosec, staticcheck
+  - [x] Dependency vulnerability scan with govulncheck
+  - [x] Manual code review focusing on auth/authz, input validation, SQL/command injection
+  - [x] **Internal Review Complete**: 9/9 findings remediated (100%)
+  - [x] Document security posture for users
+  - [ ] **Next**: Engage external security firm for independent audit (ready for external review)
+- [ ] **Task 7: Security Hardening - Infrastructure Changes** (Issue #239) - 2-3 days [MEDIUM]
+  - [ ] Implement PostgreSQL Row-Level Security (RLS) for tenant isolation
+  - [ ] Add database-level session management infrastructure
+  - [ ] Implement rate limiting middleware
+  - [ ] Add audit trail enhancements for compliance
+  - [ ] Develop security monitoring dashboard
 
 **Phase 3: Licensing & Documentation (Weeks 6-8)**
-- [ ] **Task 7: Licensing Implementation** (Issue #226) - 3-5 days
+- [ ] **Task 8: Licensing Implementation** (Issue #226) - 3-5 days
   - [x] Finalize licensing model (Apache 2.0 + Elastic License v2 open core)
   - [x] Define open-core vs commercial feature boundaries (see `docs/product/feature-boundaries.md`)
   - [ ] Create LICENSE-APACHE-2.0 file in repository root
   - [ ] Create LICENSE-ELASTIC-2.0 file for commercial reference
   - [ ] Add Apache 2.0 license headers to all source files (.go, .proto)
   - [ ] Add license header verification to CI/CD pipeline
-- [ ] **Task 8: Feature Boundary Documentation** (Issue #227) - 2-3 days
+- [ ] **Task 9: Feature Boundary Documentation** (Issue #227) - 2-3 days
   - [ ] Create user-friendly version of feature-boundaries.md
   - [ ] Add feature comparison table to README
   - [ ] Document upgrade path from OSS to Commercial
   - [ ] Create FAQ about licensing and features
-- [ ] **Task 9: Documentation Cleanup & Creation** (Issue #228) - 1-2 weeks
+- [ ] **Task 10: Documentation Cleanup & Creation** (Issue #228) - 1-2 weeks
   - [x] Finalize GTM strategy (see `docs/product/v0.7.0-epic.md`)
   - [ ] Create CONTRIBUTING.md for open source contributors
   - [ ] Create CODE_OF_CONDUCT.md (use Contributor Covenant)
@@ -652,25 +658,25 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - [ ] Create DEVELOPMENT.md for local setup
 
 **Phase 4: Community & Launch Prep (Weeks 9-10)**
-- [ ] **Task 10: Community Infrastructure Setup** (Issue #229) - 3-5 days
+- [ ] **Task 11: Community Infrastructure Setup** (Issue #229) - 3-5 days
   - [ ] Create issue/PR templates
   - [ ] Set up GitHub Discussions
   - [ ] Configure branch protection rules
   - [ ] Set up Discord/Slack community server
   - [ ] Create GitHub Projects for public roadmap
-- [ ] **Task 11: Versioning & Roadmap Update** (Issue #230) - 2-3 days
+- [ ] **Task 12: Versioning & Roadmap Update** (Issue #230) - 2-3 days
   - [ ] Document semantic versioning policy
   - [ ] Create v0.7.0 release tag
   - [ ] Set up automated release process
   - [ ] Create CHANGELOG.md
   - [ ] Create public-facing roadmap
-- [ ] **Task 12: Marketing & Positioning Materials** (Issue #231) - 1 week
+- [ ] **Task 13: Marketing & Positioning Materials** (Issue #231) - 1 week
   - [ ] Craft positioning statement
   - [ ] Write launch blog post announcement
   - [ ] Create feature highlights with screenshots
   - [ ] Create comparison tables
   - [ ] Identify OSS communities for launch announcement
-- [ ] **Task 13: Legal & Business Setup** (Issue #232) - 1-2 weeks
+- [ ] **Task 14: Legal & Business Setup** (Issue #232) - 1-2 weeks
   - [ ] Review dual licensing with legal counsel
   - [ ] Establish Contributor License Agreement (CLA) if needed
   - [ ] Review trademark considerations

@@ -292,9 +292,10 @@ func (s *Server) generateDefaultAPIKey() error {
 			TenantID:    "default",
 		}
 		s.apiKeys[envAPIKey] = envKey
+		// H-AUTH-1: Only log key ID, not the actual key (security audit finding)
 		s.logger.Info("Registered environment API key",
 			"id", envKey.ID,
-			"key", envAPIKey)
+			"created_at", envKey.CreatedAt)
 	}
 
 	// Generate default API key
@@ -317,9 +318,10 @@ func (s *Server) generateDefaultAPIKey() error {
 
 	s.apiKeys[keyString] = defaultKey
 
+	// H-AUTH-1: Only log key ID, not the actual key (security audit finding)
 	s.logger.Info("Generated default API key",
 		"id", defaultKey.ID,
-		"key", keyString) // Log the key for initial setup
+		"created_at", defaultKey.CreatedAt)
 
 	return nil
 }
