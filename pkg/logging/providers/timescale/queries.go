@@ -174,6 +174,8 @@ func (p *TimescaleProvider) buildTimeRangeQuery(query interfaces.TimeRangeQuery)
 	var args []interface{}
 	argIndex := 1
 
+	// M-INPUT-3: Schema and table names already validated during initialization
+	// This provides defense-in-depth against SQL injection even though identifiers come from config
 	tableName := fmt.Sprintf("%s.%s", p.config.SchemaName, p.config.TableName)
 
 	// Base SELECT

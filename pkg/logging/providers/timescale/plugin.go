@@ -154,6 +154,11 @@ func (p *TimescaleProvider) Initialize(config map[string]interface{}) error {
 		return fmt.Errorf("invalid configuration: %w", err)
 	}
 
+	// M-INPUT-3: Validate SQL identifiers to prevent SQL injection (security audit finding)
+	if err := ValidateSchemaTablePair(p.config.SchemaName, p.config.TableName); err != nil {
+		return fmt.Errorf("invalid SQL identifiers in configuration: %w", err)
+	}
+
 	// Create database connection
 	db, err := p.createConnection()
 	if err != nil {

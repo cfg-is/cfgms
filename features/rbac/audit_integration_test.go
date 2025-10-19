@@ -142,9 +142,11 @@ func TestRBACManager_AuditIntegration(t *testing.T) {
 		
 		err := manager.CreateRole(ctx, roleToDelete)
 		require.NoError(t, err)
-		
+
 		// Delete the role
-		err = manager.DeleteRole(ctx, "test-role-delete-audit")
+		// M-AUTH-2: Add justification for sensitive operation
+		ctxWithJustification := WithSensitiveOperationJustification(ctx, "Test role deletion for audit integration testing")
+		err = manager.DeleteRole(ctxWithJustification, "test-role-delete-audit")
 		require.NoError(t, err)
 		
 		// Query audit entries for the deletion

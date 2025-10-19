@@ -473,7 +473,28 @@ func (m *Manager) DeleteRole(ctx context.Context, id string) error {
 	if m.auditManager != nil {
 		deletedRole, _ = m.store.GetRole(ctx, id) // Ignore error for audit purposes
 	}
-	
+
+	// M-AUTH-2: Validate justification for sensitive operation (security audit finding)
+	justification := GetSensitiveOperationJustification(ctx)
+	tenantID := "system"
+	if deletedRole != nil {
+		tenantID = deletedRole.TenantId
+	}
+
+	opCtx := &SensitiveOperationContext{
+		OperationType: SensitiveOpDeleteRole,
+		SubjectID:     "system", // Should be extracted from auth context
+		TenantID:      tenantID,
+		ResourceID:    id,
+		Justification: justification,
+	}
+
+	// M-AUTH-2: Require justification for role deletion
+	if validateErr := ValidateSensitiveOperation(opCtx); validateErr != nil {
+		m.AuditSensitiveOperation(ctx, opCtx, interfaces.AuditResultError, validateErr)
+		return validateErr
+	}
+
 	// Write-through: remove from both ephemeral and persistent storage
 	err := m.store.DeleteRole(ctx, id)
 	if err != nil {

@@ -60,6 +60,8 @@ message UpdateRoleResponse {
 
 message DeleteRoleRequest {
   string role_id = 1;
+  // M-AUTH-2: Justification required for sensitive delete operations
+  string justification = 2;
 }
 
 message DeleteRoleResponse {

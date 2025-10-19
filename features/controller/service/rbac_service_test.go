@@ -107,8 +107,10 @@ func TestRBACService_Integration(t *testing.T) {
 		assert.Equal(t, "Updated description", updateResp.Role.Description)
 
 		// Delete the role
+		// M-AUTH-2: Provide justification for sensitive delete operation
 		deleteResp, err := service.DeleteRole(ctx, &controller.DeleteRoleRequest{
-			RoleId: customRole.Id,
+			RoleId:        customRole.Id,
+			Justification: "Test role deletion for integration testing",
 		})
 		require.NoError(t, err)
 		assert.True(t, deleteResp.Success)
