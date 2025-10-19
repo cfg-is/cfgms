@@ -55,7 +55,7 @@ config.yaml
 .obsidian/
 
 # Test/development storage data
-features/controller/data/
+features/controller/**/data/
 **/cfgms-storage/
 .env.test
 docker-compose.test.override.yml
