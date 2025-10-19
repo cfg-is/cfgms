@@ -152,14 +152,22 @@ func (m *Manager) AuditSensitiveOperation(ctx context.Context, opCtx *SensitiveO
 // GetSensitiveOperationJustification retrieves justification from context
 // M-AUTH-2: Helper to extract justification from request context
 func GetSensitiveOperationJustification(ctx context.Context) string {
-	if justification, ok := ctx.Value("operation_justification").(string); ok {
+	if justification, ok := ctx.Value(operationJustificationKey).(string); ok {
 		return justification
 	}
 	return ""
 }
 
+// contextKey is a private type for context keys to avoid collisions
+type contextKey string
+
+const (
+	// operationJustificationKey is the context key for operation justification
+	operationJustificationKey contextKey = "operation_justification"
+)
+
 // WithSensitiveOperationJustification adds justification to context
 // M-AUTH-2: Helper to add justification to request context
 func WithSensitiveOperationJustification(ctx context.Context, justification string) context.Context {
-	return context.WithValue(ctx, "operation_justification", justification)
+	return context.WithValue(ctx, operationJustificationKey, justification)
 }
