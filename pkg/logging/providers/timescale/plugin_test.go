@@ -440,7 +440,7 @@ func getTestTimescaleConfigWithTable(tableSuffix string) map[string]interface{} 
 		"password":          password,
 		"ssl_mode":          "disable",
 		"table_name":        tableName,
-		"schema_name":       "test_logging",
+		"schema_name":       "cfgms_logs", // M-INPUT-3: Use whitelisted schema name
 		"chunk_interval":    "24h",
 		"compression_after": "1h",  // Quick compression for testing
 		"retention_after":   "48h", // Short retention for testing
