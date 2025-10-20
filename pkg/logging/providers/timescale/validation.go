@@ -4,6 +4,7 @@ package timescale
 import (
 	"fmt"
 	"regexp"
+	"strings"
 )
 
 // M-INPUT-3: SQL identifier whitelist validation (security audit finding)
@@ -36,6 +37,14 @@ var (
 		"application_logs":   true, // Application log entries
 		"security_logs":      true, // Security log entries
 		"performance_logs":   true, // Performance log entries
+	}
+
+	// allowedTablePrefixes defines allowed table name prefixes for testing
+	// M-INPUT-3: Allow test tables with specific prefixes
+	allowedTablePrefixes = []string{
+		"log_entries_test_", // Test tables for unit/integration tests
+		"logs_test_",        // Alternative test table prefix
+		"audit_test_",       // Audit test tables
 	}
 )
 
@@ -78,12 +87,19 @@ func ValidateTableName(tableName string) error {
 		return err
 	}
 
-	// M-INPUT-3: Check against whitelist
-	if !allowedTableNames[tableName] {
-		return fmt.Errorf("table name '%s' not in allowed list (allowed: log_entries, logs, audit_logs, system_logs, etc.)", tableName)
+	// M-INPUT-3: Check against exact whitelist first
+	if allowedTableNames[tableName] {
+		return nil
 	}
 
-	return nil
+	// M-INPUT-3: Check if name starts with allowed prefix (for test tables)
+	for _, prefix := range allowedTablePrefixes {
+		if strings.HasPrefix(tableName, prefix) {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("table name '%s' not in allowed list (allowed: log_entries, logs, audit_logs, system_logs, etc.)", tableName)
 }
 
 // ValidateSchemaTablePair validates both schema and table name
