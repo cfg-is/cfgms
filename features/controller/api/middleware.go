@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -108,6 +109,7 @@ func (s *Server) contentTypeMiddleware(next http.Handler) http.Handler {
 }
 
 // authenticationMiddleware validates API keys for protected endpoints
+// M-AUTH-1: Load API keys from secret store on-demand if not in cache
 func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Extract API key from header
@@ -125,14 +127,20 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Validate API key
+		// Check memory cache first
 		s.mu.RLock()
 		keyInfo, exists := s.apiKeys[apiKey]
 		s.mu.RUnlock()
 
+		// M-AUTH-1: If not in cache, try to load from secret store
 		if !exists {
-			s.writeErrorResponse(w, http.StatusUnauthorized, "Invalid API key", "INVALID_API_KEY")
-			return
+			loadedKey, err := s.loadAPIKeyFromStore(r.Context(), apiKey)
+			if err != nil {
+				s.logger.Debug("Failed to load API key from store", "error", err)
+				s.writeErrorResponse(w, http.StatusUnauthorized, "Invalid API key", "INVALID_API_KEY")
+				return
+			}
+			keyInfo = loadedKey
 		}
 
 		// Check if key is expired
@@ -148,6 +156,48 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// M-AUTH-1: loadAPIKeyFromStore loads an API key from the secret store and caches it
+func (s *Server) loadAPIKeyFromStore(ctx context.Context, apiKey string) (*APIKey, error) {
+	// Hash the API key for lookup
+	keyHash := hashAPIKey(apiKey)
+
+	// Search for the API key in secret store across all tenants
+	// We need to search all tenants since we don't know which tenant the key belongs to
+	tenants := []string{"default"} // Start with default tenant
+
+	for _, tenantID := range tenants {
+		secretKey := fmt.Sprintf("%s/%s", tenantID, keyHash)
+		secret, err := s.secretStore.GetSecret(ctx, secretKey)
+		if err != nil {
+			continue // Try next tenant
+		}
+
+		// Found the API key! Parse metadata and create APIKey object
+		keyInfo := &APIKey{
+			ID:          secret.Metadata["id"],
+			Key:         apiKey, // Store plaintext key in memory for fast lookup
+			Name:        secret.Description,
+			Permissions: parsePermissions(secret.Metadata["permissions"]),
+			CreatedAt:   secret.CreatedAt,
+			ExpiresAt:   secret.ExpiresAt,
+			TenantID:    secret.TenantID,
+		}
+
+		// Cache in memory for future requests
+		s.mu.Lock()
+		s.apiKeys[apiKey] = keyInfo
+		s.mu.Unlock()
+
+		s.logger.Debug("Loaded API key from secret store",
+			"id", keyInfo.ID,
+			"tenant_id", keyInfo.TenantID)
+
+		return keyInfo, nil
+	}
+
+	return nil, fmt.Errorf("API key not found in secret store")
 }
 
 // writeErrorResponse writes a standardized error response
@@ -451,11 +501,9 @@ func (s *Server) hasAPIKeyPermission(apiKey *APIKey, permissionID string) bool {
 func (s *Server) auditToRBACManager(decision *AuthorizationDecision, r *http.Request) {
 	// This would integrate with the RBAC manager's audit trail
 	// For now, we'll just log that we would send it
-	s.logger.Debug("Would audit to RBAC manager", 
+	s.logger.Debug("Would audit to RBAC manager",
 		"subject_id", decision.SubjectID,
 		"decision", decision.Decision,
 		"resource", decision.Resource,
 	)
 }
-
-

@@ -126,6 +126,8 @@ See [docs/development/commands-reference.md](docs/development/commands-reference
 3. **`pkg/notifications`** - All notification delivery (SMTP, webhook, Slack, Teams)
 4. **`pkg/telemetry`** - All tracing, metrics, and distributed tracing (OpenTelemetry)
 5. **`pkg/rbac`** - All authorization and role-based access control
+6. **`pkg/cache`** - General-purpose caching with TTL, eviction, and statistics
+7. **`pkg/secrets`** - Secure secret storage with encryption and versioning (SOPS, Vault, KeyVault, AWS Secrets Manager)
 
 **Development Rule**:
 - ❌ **PROHIBITED**: Creating new functionality that overlaps with central providers
