@@ -1255,7 +1255,7 @@ test-mqtt-quic: test-mqtt-quic-setup
 	@if [ -f .env.test ]; then \
 		set -a && . ./.env.test && set +a && \
 		CFGMS_TEST_HTTP_ADDR=https://localhost:9080 \
-		CFGMS_TEST_MQTT_ADDR=tcp://localhost:1886 \
+		CFGMS_TEST_MQTT_ADDR=ssl://localhost:1886 \
 		CFGMS_TEST_QUIC_ADDR=localhost:4436 \
 		go test -v -race -timeout=15m ./test/integration/mqtt_quic/... || { \
 			echo ""; \
