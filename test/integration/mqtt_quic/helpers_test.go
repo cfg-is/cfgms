@@ -30,9 +30,15 @@ func NewTestHelper(baseURL string) *TestHelper {
 		baseURL = envURL
 	}
 
+	// Create HTTP client that skips SSL verification for test certificates
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+
 	return &TestHelper{
 		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
+			Timeout:   10 * time.Second,
+			Transport: transport,
 		},
 		baseURL: baseURL,
 	}
