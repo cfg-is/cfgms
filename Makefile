@@ -1257,6 +1257,7 @@ test-mqtt-quic: test-mqtt-quic-setup
 		CFGMS_TEST_HTTP_ADDR=https://localhost:9080 \
 		CFGMS_TEST_MQTT_ADDR=ssl://localhost:1886 \
 		CFGMS_TEST_QUIC_ADDR=localhost:4436 \
+		CFGMS_TEST_CERTS_PATH=test/integration/mqtt_quic/certs \
 		go test -v -race -timeout=15m ./test/integration/mqtt_quic/... || { \
 			echo ""; \
 			echo "❌ MQTT+QUIC tests failed"; \
