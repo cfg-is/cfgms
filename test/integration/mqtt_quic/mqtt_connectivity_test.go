@@ -34,14 +34,27 @@ func (s *MQTTConnectivityTestSuite) TearDownSuite() {
 
 // TestMQTTBrokerConnectivity tests basic MQTT broker connection
 func (s *MQTTConnectivityTestSuite) TestMQTTBrokerConnectivity() {
-	// Load TLS configuration
-	certsPath := GetTestCertsPath("test/integration/mqtt_quic/certs")
-	tlsConfig := LoadTLSConfig(s.T(), certsPath)
+	// Register steward to get certificates (mirrors real-world flow)
+	regToken := s.helper.CreateToken(s.T(), "test-tenant", "production")
+	regResp := s.helper.RegisterSteward(s.T(), regToken)
+
+	s.T().Logf("Registered steward: %s", regResp.StewardID)
+	s.NotEmpty(regResp.ClientCert, "Should receive client certificate")
+	s.NotEmpty(regResp.ClientKey, "Should receive client key")
+	s.NotEmpty(regResp.CACert, "Should receive CA certificate")
+
+	// Create TLS config from registration response (like real steward)
+	tlsConfig, err := LoadTLSConfigFromPEM(
+		[]byte(regResp.CACert),
+		[]byte(regResp.ClientCert),
+		[]byte(regResp.ClientKey),
+	)
+	s.Require().NoError(err, "Should create TLS config from registration response")
 
 	// Create MQTT client options with TLS
 	opts := CreateMQTTClientOptions(
 		s.mqttAddr,
-		fmt.Sprintf("test-client-%d", time.Now().UnixNano()),
+		regResp.StewardID,
 		tlsConfig,
 	)
 
@@ -49,10 +62,10 @@ func (s *MQTTConnectivityTestSuite) TestMQTTBrokerConnectivity() {
 	client := mqtt.NewClient(opts)
 
 	// Connect to broker
-	token := client.Connect()
-	success := token.WaitTimeout(10 * time.Second)
+	connectToken := client.Connect()
+	success := connectToken.WaitTimeout(10 * time.Second)
 	s.True(success, "Should connect to MQTT broker within timeout")
-	s.NoError(token.Error(), "Connection should succeed without error")
+	s.NoError(connectToken.Error(), "Connection should succeed without error")
 
 	// Verify connection
 	s.True(client.IsConnected(), "Client should be connected")

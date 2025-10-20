@@ -1288,7 +1288,18 @@ test-mqtt-quic-setup:
 	@set -a && . ./.env.test && set +a && \
 	docker compose -f docker-compose.test.yml --profile ha up -d timescaledb-test controller-standalone
 	@echo ""
-	@echo "⏳ Waiting for services to be ready..."
+	@echo "⏳ Waiting for controller to initialize..."
+	@sleep 5
+	@echo "📋 Seeding controller with test CA for consistent certificate chain..."
+	@docker exec -u root controller-standalone sh -c "rm -rf /app/certs/ca /app/certs/1 && mkdir -p /app/certs/ca/server /app/certs/1" 2>/dev/null || true
+	@docker exec -u root controller-standalone sh -c "cat /app/test-certs/ca-cert.pem > /app/certs/ca/ca.crt"
+	@docker exec -u root controller-standalone sh -c "cat /app/test-certs/ca-key.pem > /app/certs/ca/ca.key" 2>/dev/null || echo "⚠️  CA key copy failed"
+	@docker exec -u root controller-standalone sh -c "cat /app/test-certs/server-cert.pem > /app/certs/ca/server/server.crt"
+	@docker exec -u root controller-standalone sh -c "cat /app/test-certs/server-key.pem > /app/certs/ca/server/server.key"
+	@docker exec -u root controller-standalone sh -c "cat /app/test-certs/ca-cert.pem > /app/certs/1/cert.pem"
+	@docker exec -u root controller-standalone sh -c "chown -R cfgms:cfgms /app/certs"
+	@docker restart controller-standalone >/dev/null
+	@echo "⏳ Waiting for controller to restart with test CA..."
 	@sleep 10
 	@echo "🔍 Checking controller health..."
 	@for i in 1 2 3 4 5; do \
@@ -1299,13 +1310,6 @@ test-mqtt-quic-setup:
 		echo "⏳ Waiting for MQTT broker (attempt $$i/5)..."; \
 		sleep 5; \
 	done
-	@echo "📋 Extracting controller's CA certificate for tests..."
-	@docker exec controller-standalone cat /app/certs/ca/ca.crt > test/integration/mqtt_quic/certs/controller-ca.pem 2>/dev/null || true
-	@if [ -f test/integration/mqtt_quic/certs/controller-ca.pem ]; then \
-		echo "✅ Controller CA extracted to test/integration/mqtt_quic/certs/controller-ca.pem"; \
-	else \
-		echo "⚠️  Could not extract controller CA - tests may fail"; \
-	fi
 	@echo ""
 	@echo "✅ MQTT+QUIC Docker environment ready!"
 	@echo "   MQTT: localhost:1886 (TLS)"
@@ -1315,7 +1319,7 @@ test-mqtt-quic-setup:
 test-mqtt-quic-cleanup:
 	@echo ""
 	@echo "🧹 Cleaning up MQTT+QUIC Docker environment..."
-	@docker compose -f docker-compose.test.yml --profile ha down --remove-orphans 2>/dev/null || true
+	@docker compose -f docker-compose.test.yml --profile ha down --remove-orphans -v 2>/dev/null || true
 	@echo "✅ MQTT+QUIC environment cleaned up"
 
 

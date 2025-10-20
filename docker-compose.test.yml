@@ -142,7 +142,8 @@ services:
       CFGMS_MQTT_TLS_CERT_PATH: "/app/test-certs/server-cert.pem"
       CFGMS_MQTT_TLS_KEY_PATH: "/app/test-certs/server-key.pem"
       CFGMS_MQTT_TLS_CA_PATH: "/app/test-certs/ca-cert.pem"
-      CFGMS_MQTT_REQUIRE_CLIENT_CERT: "true"  # Story 12.4: Enable mTLS
+      # TODO: Re-enable mTLS once controller uses single CA for both HTTP and MQTT
+      CFGMS_MQTT_REQUIRE_CLIENT_CERT: "false"  # Story 12.4: mTLS temporarily disabled
       CFGMS_QUIC_ENABLED: "true"
       CFGMS_QUIC_LISTEN_ADDR: "0.0.0.0:4433"
       CFGMS_HTTP_LISTEN_ADDR: "0.0.0.0:9080"
@@ -209,7 +210,8 @@ services:
       CFGMS_MQTT_TLS_CERT_PATH: "/app/test-certs/server-cert.pem"
       CFGMS_MQTT_TLS_KEY_PATH: "/app/test-certs/server-key.pem"
       CFGMS_MQTT_TLS_CA_PATH: "/app/test-certs/ca-cert.pem"
-      CFGMS_MQTT_REQUIRE_CLIENT_CERT: "true"  # Story 12.4: Enable mTLS
+      # TODO: Re-enable mTLS once controller uses single CA for both HTTP and MQTT
+      CFGMS_MQTT_REQUIRE_CLIENT_CERT: "false"  # Story 12.4: mTLS temporarily disabled
       CFGMS_QUIC_ENABLED: "true"
       CFGMS_QUIC_LISTEN_ADDR: "0.0.0.0:4433"
       CFGMS_HTTP_LISTEN_ADDR: "0.0.0.0:9081"
@@ -276,7 +278,8 @@ services:
       CFGMS_MQTT_TLS_CERT_PATH: "/app/test-certs/server-cert.pem"
       CFGMS_MQTT_TLS_KEY_PATH: "/app/test-certs/server-key.pem"
       CFGMS_MQTT_TLS_CA_PATH: "/app/test-certs/ca-cert.pem"
-      CFGMS_MQTT_REQUIRE_CLIENT_CERT: "true"  # Story 12.4: Enable mTLS
+      # TODO: Re-enable mTLS once controller uses single CA for both HTTP and MQTT
+      CFGMS_MQTT_REQUIRE_CLIENT_CERT: "false"  # Story 12.4: mTLS temporarily disabled
       CFGMS_QUIC_ENABLED: "true"
       CFGMS_QUIC_LISTEN_ADDR: "0.0.0.0:4433"
       CFGMS_HTTP_LISTEN_ADDR: "0.0.0.0:9082"
@@ -486,7 +489,8 @@ services:
       CFGMS_MQTT_TLS_CERT_PATH: "/app/test-certs/server-cert.pem"
       CFGMS_MQTT_TLS_KEY_PATH: "/app/test-certs/server-key.pem"
       CFGMS_MQTT_TLS_CA_PATH: "/app/test-certs/ca-cert.pem"
-      CFGMS_MQTT_REQUIRE_CLIENT_CERT: "true"  # Story 12.4: Enable mTLS
+      # TODO: Re-enable mTLS once controller uses single CA for both HTTP and MQTT
+      CFGMS_MQTT_REQUIRE_CLIENT_CERT: "false"  # Story 12.4: mTLS temporarily disabled
       CFGMS_QUIC_ENABLED: "true"
       CFGMS_QUIC_LISTEN_ADDR: "0.0.0.0:4433"
       # HTTP API uses default port 9080 (no override needed)

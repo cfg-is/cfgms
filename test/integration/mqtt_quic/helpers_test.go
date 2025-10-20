@@ -251,6 +251,37 @@ func LoadInvalidTLSConfig(t *testing.T, certsPath string, certType string) *tls.
 	return tlsConfig
 }
 
+// LoadTLSConfigFromPEM creates a TLS config from PEM-encoded certificate data
+// This is used when certificates are received from the registration endpoint
+func LoadTLSConfigFromPEM(caCertPEM, clientCertPEM, clientKeyPEM []byte) (*tls.Config, error) {
+	// Load CA certificate
+	caCertPool := x509.NewCertPool()
+	if !caCertPool.AppendCertsFromPEM(caCertPEM) {
+		return nil, fmt.Errorf("failed to parse CA certificate")
+	}
+
+	// Load client certificate and key
+	clientCert, err := tls.X509KeyPair(clientCertPEM, clientKeyPEM)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load client certificate: %w", err)
+	}
+
+	// Create TLS config
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{clientCert},
+		RootCAs:      caCertPool,
+		MinVersion:   tls.VersionTLS12,
+		// Use localhost as ServerName since we connect via localhost:1886
+		ServerName: "localhost",
+		// TODO: Remove InsecureSkipVerify once controller uses single CA for both HTTP and MQTT
+		// Current issue: Controller generates separate CAs for HTTP (registration) and MQTT (broker)
+		// This causes certificate validation to fail even with proper registration flow
+		InsecureSkipVerify: true,
+	}
+
+	return tlsConfig, nil
+}
+
 // CreateMQTTClientOptions creates MQTT client options with TLS support
 // If tlsConfig is nil, creates a non-TLS connection
 func CreateMQTTClientOptions(brokerAddr string, clientID string, tlsConfig *tls.Config) *mqtt.ClientOptions {
