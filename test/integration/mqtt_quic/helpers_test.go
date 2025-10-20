@@ -163,11 +163,16 @@ func GetTestCertsPath(defaultPath string) string {
 func LoadTLSConfig(t *testing.T, certsPath string) *tls.Config {
 	t.Helper()
 
-	// Load CA certificate
-	caCertPath := filepath.Join(certsPath, "ca-cert.pem")
+	// Load CA certificate (prefer controller-ca.pem if available, fall back to ca-cert.pem)
+	caCertPath := filepath.Join(certsPath, "controller-ca.pem")
 	caCert, err := os.ReadFile(caCertPath)
 	if err != nil {
-		t.Fatalf("Failed to read CA certificate: %v", err)
+		// Fallback to static test CA if controller CA not available
+		caCertPath = filepath.Join(certsPath, "ca-cert.pem")
+		caCert, err = os.ReadFile(caCertPath)
+		if err != nil {
+			t.Fatalf("Failed to read CA certificate: %v", err)
+		}
 	}
 
 	caCertPool := x509.NewCertPool()
@@ -188,10 +193,10 @@ func LoadTLSConfig(t *testing.T, certsPath string) *tls.Config {
 		Certificates: []tls.Certificate{clientCert},
 		RootCAs:      caCertPool,
 		MinVersion:   tls.VersionTLS12,
-		// For testing, we may need to accept any server name
-		// In production, this should verify the server hostname
+		// Use localhost as ServerName since we connect via localhost:1886
+		// The server certificate is valid for "localhost" and "cfgms-mqtt-server"
 		InsecureSkipVerify: false,
-		ServerName:         "controller-standalone",
+		ServerName:         "localhost",
 	}
 
 	return tlsConfig

@@ -1257,7 +1257,7 @@ test-mqtt-quic: test-mqtt-quic-setup
 		CFGMS_TEST_HTTP_ADDR=https://localhost:9080 \
 		CFGMS_TEST_MQTT_ADDR=ssl://localhost:1886 \
 		CFGMS_TEST_QUIC_ADDR=localhost:4436 \
-		CFGMS_TEST_CERTS_PATH=test/integration/mqtt_quic/certs \
+		CFGMS_TEST_CERTS_PATH=$(PWD)/test/integration/mqtt_quic/certs \
 		go test -v -race -timeout=15m ./test/integration/mqtt_quic/... || { \
 			echo ""; \
 			echo "❌ MQTT+QUIC tests failed"; \
@@ -1292,18 +1292,25 @@ test-mqtt-quic-setup:
 	@sleep 10
 	@echo "🔍 Checking controller health..."
 	@for i in 1 2 3 4 5; do \
-		if docker exec controller-standalone sh -c "netstat -ln | grep :1883" >/dev/null 2>&1; then \
-			echo "✅ MQTT broker ready on port 1886"; \
+		if docker exec controller-standalone sh -c "netstat -ln | grep :8883" >/dev/null 2>&1; then \
+			echo "✅ MQTT broker ready on port 8883 (mapped to 1886)"; \
 			break; \
 		fi; \
 		echo "⏳ Waiting for MQTT broker (attempt $$i/5)..."; \
 		sleep 5; \
 	done
+	@echo "📋 Extracting controller's CA certificate for tests..."
+	@docker exec controller-standalone cat /app/certs/ca/ca.crt > test/integration/mqtt_quic/certs/controller-ca.pem 2>/dev/null || true
+	@if [ -f test/integration/mqtt_quic/certs/controller-ca.pem ]; then \
+		echo "✅ Controller CA extracted to test/integration/mqtt_quic/certs/controller-ca.pem"; \
+	else \
+		echo "⚠️  Could not extract controller CA - tests may fail"; \
+	fi
 	@echo ""
 	@echo "✅ MQTT+QUIC Docker environment ready!"
-	@echo "   MQTT: localhost:1886"
+	@echo "   MQTT: localhost:1886 (TLS)"
 	@echo "   QUIC: localhost:4436"
-	@echo "   HTTP: localhost:9080"
+	@echo "   HTTPS: localhost:9080"
 
 test-mqtt-quic-cleanup:
 	@echo ""

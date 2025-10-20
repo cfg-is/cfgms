@@ -23,7 +23,7 @@ type MQTTConnectivityTestSuite struct {
 
 func (s *MQTTConnectivityTestSuite) SetupSuite() {
 	s.helper = NewTestHelper(GetTestHTTPAddr("http://localhost:8080"))
-	s.mqttAddr = GetTestMQTTAddr("tcp://localhost:1886") // Docker controller MQTT broker port
+	s.mqttAddr = GetTestMQTTAddr("ssl://localhost:1886") // Docker controller MQTT broker port with TLS
 }
 
 func (s *MQTTConnectivityTestSuite) TearDownSuite() {
@@ -34,14 +34,16 @@ func (s *MQTTConnectivityTestSuite) TearDownSuite() {
 
 // TestMQTTBrokerConnectivity tests basic MQTT broker connection
 func (s *MQTTConnectivityTestSuite) TestMQTTBrokerConnectivity() {
-	// Create MQTT client options
-	opts := mqtt.NewClientOptions()
-	opts.AddBroker(s.mqttAddr)
-	opts.SetClientID(fmt.Sprintf("test-client-%d", time.Now().UnixNano()))
-	opts.SetUsername("") // No auth for alpha
-	opts.SetPassword("")
-	opts.SetConnectTimeout(10 * time.Second)
-	opts.SetAutoReconnect(false)
+	// Load TLS configuration
+	certsPath := GetTestCertsPath("test/integration/mqtt_quic/certs")
+	tlsConfig := LoadTLSConfig(s.T(), certsPath)
+
+	// Create MQTT client options with TLS
+	opts := CreateMQTTClientOptions(
+		s.mqttAddr,
+		fmt.Sprintf("test-client-%d", time.Now().UnixNano()),
+		tlsConfig,
+	)
 
 	// Create client
 	client := mqtt.NewClient(opts)
