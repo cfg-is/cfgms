@@ -124,7 +124,7 @@ test-integration-factory:
 	@echo "🏭 Testing real factory loading and injection patterns"
 	@go clean -testcache
 	@if [ -f .env.local ]; then \
-		export $$(cat .env.local | grep -v '^#' | xargs) && \
+		export $$(cat .env.local | grep -v '^#' | grep -v '^$$' | sed 's/#.*//' | xargs) && \
 		go test -race -cover -tags=integration -timeout=5m ./test/integration/logging/...; \
 	else \
 		go test -race -cover -tags=integration -timeout=5m ./test/integration/logging/...; \
