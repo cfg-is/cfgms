@@ -590,8 +590,9 @@ func initializeSecretStore(cfg *config.Config, logger logging.Logger) (secretsif
 	}
 
 	// Create secrets provider configuration
+	// M-AUTH-1: Use global storage provider for secrets (git or database)
 	secretsConfig := map[string]interface{}{
-		"storage_provider": "git", // Use git provider with SOPS encryption
+		"storage_provider": cfg.Storage.Provider, // Use controller's global storage provider
 		"storage_config": map[string]interface{}{
 			"repository_path": repoPath,
 		},
@@ -622,7 +623,7 @@ func initializeSecretStore(cfg *config.Config, logger logging.Logger) (secretsif
 
 	logger.Info("Secret store initialized",
 		"provider", "sops",
-		"backend", "git",
+		"backend", cfg.Storage.Provider,
 		"repo_path", repoPath,
 		"encryption", "SOPS (AES-256-GCM)")
 	return store, nil

@@ -1289,18 +1289,7 @@ test-mqtt-quic-setup:
 	docker compose -f docker-compose.test.yml --profile ha up -d timescaledb-test controller-standalone
 	@echo ""
 	@echo "⏳ Waiting for controller to initialize..."
-	@sleep 5
-	@echo "📋 Seeding controller with test CA for consistent certificate chain..."
-	@docker exec -u root controller-standalone sh -c "rm -rf /app/certs/ca /app/certs/1 && mkdir -p /app/certs/ca/server /app/certs/1" 2>/dev/null || true
-	@docker exec -u root controller-standalone sh -c "cat /app/test-certs/ca-cert.pem > /app/certs/ca/ca.crt"
-	@docker exec -u root controller-standalone sh -c "cat /app/test-certs/ca-key.pem > /app/certs/ca/ca.key" 2>/dev/null || echo "⚠️  CA key copy failed"
-	@docker exec -u root controller-standalone sh -c "cat /app/test-certs/server-cert.pem > /app/certs/ca/server/server.crt"
-	@docker exec -u root controller-standalone sh -c "cat /app/test-certs/server-key.pem > /app/certs/ca/server/server.key"
-	@docker exec -u root controller-standalone sh -c "cat /app/test-certs/ca-cert.pem > /app/certs/1/cert.pem"
-	@docker exec -u root controller-standalone sh -c "chown -R cfgms:cfgms /app/certs"
-	@docker restart controller-standalone >/dev/null
-	@echo "⏳ Waiting for controller to restart with test CA..."
-	@sleep 10
+	@sleep 15
 	@echo "🔍 Checking controller health..."
 	@for i in 1 2 3 4 5; do \
 		if docker exec controller-standalone sh -c "netstat -ln | grep :8883" >/dev/null 2>&1; then \

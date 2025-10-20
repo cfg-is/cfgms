@@ -2,16 +2,10 @@ package server
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/json"
-	"encoding/pem"
 	"fmt"
-	"math/big"
-	"net"
 	"os"
 	"path/filepath"
 	"sync"
@@ -747,11 +741,11 @@ func initializeMQTTBroker(cfg *config.Config, logger logging.Logger, certManager
 			serverKeyPath = filepath.Join(cfg.Certificate.CAPath, "server", "server.key")
 			caPath = filepath.Join(cfg.Certificate.CAPath, "ca.crt")
 
-			// Check if certificates exist, if not try to generate them (for testing)
+			// Check if certificates exist, if not generate them using certManager
 			if _, err := os.Stat(serverCertPath); os.IsNotExist(err) {
-				logger.Info("MQTT certificates not found, generating test certificates for development/testing")
-				if err := ensureMQTTTestCertificates(cfg.Certificate.CAPath); err != nil {
-					return nil, fmt.Errorf("failed to generate test certificates: %w", err)
+				logger.Info("MQTT certificates not found, generating using certificate manager")
+				if err := ensureMQTTCertificatesFromManager(cfg.Certificate.CAPath, certManager, logger); err != nil {
+					return nil, fmt.Errorf("failed to generate MQTT certificates: %w", err)
 				}
 			}
 
@@ -798,99 +792,53 @@ func initializeMQTTBroker(cfg *config.Config, logger logging.Logger, certManager
 	return broker, nil
 }
 
-// ensureMQTTTestCertificates generates test certificates for MQTT broker if they don't exist.
-// This follows the same pattern as our other test certificate generation.
-func ensureMQTTTestCertificates(caPath string) error {
+// ensureMQTTCertificatesFromManager generates MQTT server certificates using the certificate manager.
+// This ensures MQTT uses the same CA as the HTTP/REST API, enabling proper mTLS with unified certificate chain.
+func ensureMQTTCertificatesFromManager(caPath string, certManager *cert.Manager, logger logging.Logger) error {
 	// Create directory structure
 	serverDir := filepath.Join(caPath, "server")
 	if err := os.MkdirAll(serverDir, 0755); err != nil {
 		return fmt.Errorf("failed to create server cert directory: %w", err)
 	}
-	if err := os.MkdirAll(caPath, 0755); err != nil {
-		return fmt.Errorf("failed to create CA directory: %w", err)
-	}
 
-	// Generate CA certificate
-	caKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	// Generate MQTT server certificate using certManager (same CA as HTTP)
+	serverCert, err := certManager.GenerateServerCertificate(&cert.ServerCertConfig{
+		CommonName:   "cfgms-mqtt-server",
+		Organization: "CFGMS",
+		DNSNames:     []string{"localhost", "cfgms-mqtt-server", "controller-standalone"},
+		IPAddresses:  []string{"127.0.0.1", "0.0.0.0"},
+		ValidityDays: 365,
+	})
 	if err != nil {
-		return fmt.Errorf("failed to generate CA key: %w", err)
-	}
-
-	caTemplate := x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject: pkix.Name{
-			Organization: []string{"CFGMS MQTT CA"},
-			CommonName:   "CFGMS MQTT CA",
-		},
-		NotBefore:             time.Now(),
-		NotAfter:              time.Now().Add(365 * 24 * time.Hour),
-		IsCA:                  true,
-		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
-		BasicConstraintsValid: true,
-	}
-
-	caCertDER, err := x509.CreateCertificate(rand.Reader, &caTemplate, &caTemplate, &caKey.PublicKey, caKey)
-	if err != nil {
-		return fmt.Errorf("failed to create CA certificate: %w", err)
-	}
-
-	// Save CA certificate
-	caCertFile, err := os.Create(filepath.Join(caPath, "ca.crt"))
-	if err != nil {
-		return fmt.Errorf("failed to create CA cert file: %w", err)
-	}
-	if err := pem.Encode(caCertFile, &pem.Block{Type: "CERTIFICATE", Bytes: caCertDER}); err != nil {
-		_ = caCertFile.Close()
-		return fmt.Errorf("failed to encode CA certificate: %w", err)
-	}
-	_ = caCertFile.Close()
-
-	// Generate server certificate
-	serverKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		return fmt.Errorf("failed to generate server key: %w", err)
-	}
-
-	serverTemplate := x509.Certificate{
-		SerialNumber: big.NewInt(2),
-		Subject: pkix.Name{
-			Organization: []string{"CFGMS MQTT Server"},
-			CommonName:   "cfgms-mqtt-server",
-		},
-		NotBefore:   time.Now(),
-		NotAfter:    time.Now().Add(365 * 24 * time.Hour),
-		KeyUsage:    x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
-		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1), net.IPv4(0, 0, 0, 0)},
-		DNSNames:    []string{"localhost", "cfgms-mqtt-server"},
-	}
-
-	serverCertDER, err := x509.CreateCertificate(rand.Reader, &serverTemplate, &caTemplate, &serverKey.PublicKey, caKey)
-	if err != nil {
-		return fmt.Errorf("failed to create server certificate: %w", err)
+		return fmt.Errorf("failed to generate MQTT server certificate: %w", err)
 	}
 
 	// Save server certificate
-	serverCertFile, err := os.Create(filepath.Join(serverDir, "server.crt"))
-	if err != nil {
-		return fmt.Errorf("failed to create server cert file: %w", err)
+	serverCertPath := filepath.Join(serverDir, "server.crt")
+	if err := os.WriteFile(serverCertPath, serverCert.CertificatePEM, 0644); err != nil {
+		return fmt.Errorf("failed to write server certificate: %w", err)
 	}
-	if err := pem.Encode(serverCertFile, &pem.Block{Type: "CERTIFICATE", Bytes: serverCertDER}); err != nil {
-		_ = serverCertFile.Close()
-		return fmt.Errorf("failed to encode server certificate: %w", err)
-	}
-	_ = serverCertFile.Close()
 
 	// Save server key
-	serverKeyFile, err := os.Create(filepath.Join(serverDir, "server.key"))
+	serverKeyPath := filepath.Join(serverDir, "server.key")
+	if err := os.WriteFile(serverKeyPath, serverCert.PrivateKeyPEM, 0600); err != nil {
+		return fmt.Errorf("failed to write server key: %w", err)
+	}
+
+	// Export CA certificate to caPath for MQTT broker
+	caCert, err := certManager.GetCACertificate()
 	if err != nil {
-		return fmt.Errorf("failed to create server key file: %w", err)
+		return fmt.Errorf("failed to get CA certificate: %w", err)
 	}
-	if err := pem.Encode(serverKeyFile, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(serverKey)}); err != nil {
-		_ = serverKeyFile.Close()
-		return fmt.Errorf("failed to encode server key: %w", err)
+
+	caPath = filepath.Join(caPath, "ca.crt")
+	if err := os.WriteFile(caPath, caCert, 0644); err != nil {
+		return fmt.Errorf("failed to write CA certificate: %w", err)
 	}
-	_ = serverKeyFile.Close()
+
+	logger.Info("Generated MQTT certificates using unified certificate manager",
+		"server_cert", serverCertPath,
+		"ca_cert", caPath)
 
 	return nil
 }
@@ -909,7 +857,7 @@ func initializeQUICServer(cfg *config.Config, logger logging.Logger, certManager
 		if _, err := os.Stat(serverCertPath); os.IsNotExist(err) {
 			logger.Info("QUIC certificates not found, using MQTT certificates")
 			// MQTT cert generation already happened, so these should exist
-			if err := ensureMQTTTestCertificates(cfg.Certificate.CAPath); err != nil {
+			if err := ensureMQTTCertificatesFromManager(cfg.Certificate.CAPath, certManager, logger); err != nil {
 				return nil, nil, fmt.Errorf("failed to ensure certificates: %w", err)
 			}
 		}

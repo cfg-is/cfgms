@@ -273,10 +273,6 @@ func LoadTLSConfigFromPEM(caCertPEM, clientCertPEM, clientKeyPEM []byte) (*tls.C
 		MinVersion:   tls.VersionTLS12,
 		// Use localhost as ServerName since we connect via localhost:1886
 		ServerName: "localhost",
-		// TODO: Remove InsecureSkipVerify once controller uses single CA for both HTTP and MQTT
-		// Current issue: Controller generates separate CAs for HTTP (registration) and MQTT (broker)
-		// This causes certificate validation to fail even with proper registration flow
-		InsecureSkipVerify: true,
 	}
 
 	return tlsConfig, nil
