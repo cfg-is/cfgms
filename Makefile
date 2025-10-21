@@ -325,6 +325,37 @@ check-architecture:
 	fi
 	@echo "   Safe to commit - no secrets detected in staged files"
 
+# Validate Central Provider Documentation
+# Helps keep CLAUDE.md provider list current
+.PHONY: validate-providers
+validate-providers:
+	@echo "📋 Validating Central Provider Documentation..."
+	@echo "================================================"
+	@pkg_dirs=$$(ls -d pkg/*/ 2>/dev/null | sed 's|pkg/||g' | sed 's|/||g' | sort); \
+	missing=0; \
+	echo ""; \
+	echo "🔍 Checking if all pkg/ directories are documented in CLAUDE.md..."; \
+	for dir in $$pkg_dirs; do \
+		if ! grep -q "pkg/$$dir" CLAUDE.md 2>/dev/null; then \
+			echo "  ⚠️  pkg/$$dir - Not found in CLAUDE.md"; \
+			missing=$$((missing + 1)); \
+		fi; \
+	done; \
+	echo ""; \
+	if [ $$missing -eq 0 ]; then \
+		echo "✅ All pkg/ directories are documented in CLAUDE.md"; \
+	else \
+		echo "⚠️  Found $$missing undocumented pkg/ director(ies)"; \
+		echo ""; \
+		echo "💡 Action Required:"; \
+		echo "   1. Review the missing directories above"; \
+		echo "   2. Add them to CLAUDE.md Central Provider System section"; \
+		echo "   3. Categorize as: Pluggable, Direct, or Utility"; \
+		echo ""; \
+		echo "ℹ️  This is a warning - not blocking commits"; \
+	fi; \
+	echo ""
+
 # Pre-commit validation (smart tests + quality gates + SECRET SCANNING + ARCHITECTURE)
 test-commit: test lint security-precommit check-architecture security-scan
 	@echo ""

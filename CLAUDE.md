@@ -120,26 +120,53 @@ See [docs/development/commands-reference.md](docs/development/commands-reference
 ### Central Provider System (CRITICAL)
 **MANDATORY**: Before implementing any new functionality, check if it belongs in a central provider.
 
-**Existing Central Providers**:
-1. **`pkg/storage`** - All data persistence (git, database, in-memory cache)
-2. **`pkg/logging`** - All logging and observability
-3. **`pkg/notifications`** - All notification delivery (SMTP, webhook, Slack, Teams)
-4. **`pkg/telemetry`** - All tracing, metrics, and distributed tracing (OpenTelemetry)
-5. **`pkg/rbac`** - All authorization and role-based access control
-6. **`pkg/cache`** - General-purpose caching with TTL, eviction, and statistics
-7. **`pkg/secrets`** - Secure secret storage with encryption and versioning (SOPS, Vault, KeyVault, AWS Secrets Manager)
+**Golden Rule**: If functionality is needed by >1 feature, it MUST use or become a central provider.
 
-**Development Rule**:
+**Identifying Providers**:
+- **Pluggable** (has `pkg/{name}/interfaces/`) - Multiple implementations, auto-registration
+- **Direct** (no `interfaces/`) - Single implementation, direct import
+- See `pkg/README.md` for detailed rules and patterns
+
+**Current Central Providers** (as of Story #239):
+
+**Pluggable Providers** (Multiple Implementations):
+1. **`pkg/storage`** - Data persistence (git, database, in-memory cache)
+2. **`pkg/logging`** - Structured logging (file, timescale)
+3. **`pkg/secrets`** - Secret storage with encryption (SOPS backend)
+4. **`pkg/directory`** - Directory services (M365, Active Directory)
+5. **`pkg/mqtt`** - MQTT broker abstraction (mochi-mqtt)
+
+**Direct Providers** (Single Implementation):
+6. **`pkg/cert`** - Certificate/TLS management (prevents dual-CA bugs)
+7. **`pkg/telemetry`** - Observability (metrics, tracing, OpenTelemetry)
+8. **`pkg/cache`** - Write-through caching with TTL
+9. **`pkg/session`** - Session management
+10. **`pkg/registration`** - Steward registration
+11. **`pkg/monitoring`** - Health monitoring
+12. **`pkg/maintenance`** - Maintenance window scheduling
+13. **`pkg/security`** - Security utilities (input validation)
+14. **`pkg/quic`** - QUIC protocol support
+
+**Not Providers** (Utilities):
+- `pkg/config`, `pkg/testing`, `pkg/testutil`, `pkg/version`, `pkg/audit`
+
+**Development Rules**:
 - ❌ **PROHIBITED**: Creating new functionality that overlaps with central providers
-- ✅ **REQUIRED**: Extend existing central providers or propose new central provider
+- ✅ **REQUIRED**: Extend existing central providers or propose new one
 - ✅ **REQUIRED**: Use dependency injection to consume central providers
-- ⚠️ **WARNING**: Duplicate functionality will be rejected in PR review
+- ⚠️ **WARNING**: Duplicate functionality will be rejected in PR review and blocked by `make check-architecture`
 
 **Before Starting Work**:
-1. Review `pkg/` directory for existing central providers
+1. Review `pkg/README.md` for provider identification rules
 2. Check if your feature overlaps with existing provider functionality
 3. If overlap exists: extend the central provider instead of creating new code
 4. If new provider needed: discuss architecture before implementation
+5. Update CLAUDE.md and `pkg/README.md` when adding new provider
+
+**Enforcement**:
+- `make check-architecture` - Automated pre-commit violation detection
+- `/story-commit` - Blocks commits with violations
+- `/pr-review` Phase 2 - Validates central provider compliance
 
 ## Critical Development Rules
 
