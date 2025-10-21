@@ -159,15 +159,12 @@ linters:
 
     # Core Quality Linters (REQUIRED)
     - errcheck       # Check error handling
-    - gosimple       # Simplify code
     - govet          # Go vet checks
     - ineffassign    # Detect ineffectual assignments
-    - staticcheck    # Advanced static analysis
+    - staticcheck    # Advanced static analysis (includes gosimple in v2.x)
     - unused         # Detect unused code
 
     # Code Quality (RECOMMENDED)
-    - gofmt          # Format checking
-    - goimports      # Import formatting
     - gocritic       # Comprehensive checks
     - revive         # Fast, configurable linter
     - misspell       # Spell checking
@@ -179,6 +176,12 @@ linters:
 
     # Security (IMPORTANT)
     - gosec          # Security checks (also run separately in make security-gosec)
+
+formatters:
+  disable-all: true
+  enable:
+    - gofmt          # Format checking
+    - goimports      # Import formatting
 
 issues:
   exclude-use-default: false
@@ -220,10 +223,3 @@ issues:
   max-same-issues: 0
   new: false
   fix: false
-
-severity:
-  default-severity: error
-  rules:
-    - linters:
-        - depguard
-      severity: error  # Central provider violations are errors, not warnings
