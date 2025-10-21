@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -862,46 +861,57 @@ func initializeQUICServer(cfg *config.Config, logger logging.Logger, certManager
 			}
 		}
 
-		// Load certificate
-		cert, err := tls.LoadX509KeyPair(serverCertPath, serverKeyPath)
+		// Load certificate and key from disk
+		// #nosec G304 - Certificate paths are controlled via configuration
+		serverCertPEM, err := os.ReadFile(serverCertPath)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to load QUIC certificate: %w", err)
+			return nil, nil, fmt.Errorf("failed to read server certificate: %w", err)
 		}
-
-		// Load CA certificate for client verification
-		caCert, err := os.ReadFile(caPath)
+		// #nosec G304 - Certificate paths are controlled via configuration
+		serverKeyPEM, err := os.ReadFile(serverKeyPath)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to read CA certificate: %w", err)
+			return nil, nil, fmt.Errorf("failed to read server key: %w", err)
 		}
 
-		caCertPool := x509.NewCertPool()
-		if !caCertPool.AppendCertsFromPEM(caCert) {
-			return nil, nil, fmt.Errorf("failed to parse CA certificate")
+		// Get CA certificate from cert manager
+		caCertPEM, err := certManager.GetCACertificate()
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to get CA certificate: %w", err)
 		}
 
-		tlsConfig = &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			ClientAuth:   tls.RequireAndVerifyClientCert,
-			ClientCAs:    caCertPool,
-			MinVersion:   tls.VersionTLS13, // QUIC requires TLS 1.3
-			NextProtos:   []string{"cfgms-quic"}, // Application protocol
+		// Create TLS config using pkg/cert helper
+		tlsConfig, err = cert.CreateServerTLSConfig(serverCertPEM, serverKeyPEM, caCertPEM, tls.VersionTLS13)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to create QUIC TLS config: %w", err)
 		}
+
+		// QUIC-specific configuration
+		tlsConfig.NextProtos = []string{"cfgms-quic"}
 
 		logger.Info("QUIC server using certificate manager certificates",
 			"cert_path", serverCertPath,
 			"ca_path", caPath)
 	} else if cfg.QUIC.TLSCertPath != "" && cfg.QUIC.TLSKeyPath != "" {
 		// Use manually configured certificate paths
-		cert, err := tls.LoadX509KeyPair(cfg.QUIC.TLSCertPath, cfg.QUIC.TLSKeyPath)
+		// #nosec G304 - Certificate paths are controlled via configuration
+		serverCertPEM, err := os.ReadFile(cfg.QUIC.TLSCertPath)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to load QUIC certificate: %w", err)
+			return nil, nil, fmt.Errorf("failed to read QUIC certificate: %w", err)
+		}
+		// #nosec G304 - Certificate paths are controlled via configuration
+		serverKeyPEM, err := os.ReadFile(cfg.QUIC.TLSKeyPath)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to read QUIC key: %w", err)
 		}
 
-		tlsConfig = &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			MinVersion:   tls.VersionTLS13,
-			NextProtos:   []string{"cfgms-quic"},
+		// Create basic TLS config using pkg/cert helper (no client auth for manual certs)
+		tlsConfig, err = cert.CreateBasicTLSConfig(serverCertPEM, serverKeyPEM, tls.VersionTLS13)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to create QUIC TLS config: %w", err)
 		}
+
+		// QUIC-specific configuration
+		tlsConfig.NextProtos = []string{"cfgms-quic"}
 
 		logger.Info("QUIC server using configured certificates",
 			"cert_path", cfg.QUIC.TLSCertPath)

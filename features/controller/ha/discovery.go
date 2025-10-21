@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -289,11 +290,19 @@ func (d *staticDiscovery) checkNodeHealth(node *NodeInfo) bool {
 	}
 
 	// Simple HTTP GET to check if node is responding
-	// Use HTTPS and skip cert verification for testing
+	// Use HTTPS with basic TLS config from pkg/cert
+	// TODO: Add proper certificate validation with cert manager
+	tlsConfig, err := cert.CreateBasicTLSConfig(nil, nil, tls.VersionTLS12)
+	if err != nil {
+		log.Printf("DISCOVERY: Failed to create TLS config for health check: %v", err)
+		return false
+	}
+	tlsConfig.InsecureSkipVerify = true // TODO: Remove after implementing proper cert validation
+
 	client := &http.Client{
 		Timeout: 2 * time.Second,
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			TLSClientConfig: tlsConfig,
 		},
 	}
 

@@ -8,7 +8,6 @@ package client
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -19,6 +18,7 @@ import (
 	"github.com/cfgis/cfgms/features/steward/commands"
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/registration"
+	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
 	mqttClient "github.com/cfgis/cfgms/pkg/mqtt/client"
 	mqttTypes "github.com/cfgis/cfgms/pkg/mqtt/types"
@@ -896,28 +896,29 @@ func (c *MQTTClient) createMQTTTLSConfig() (*tls.Config, error) {
 		caFile = filepath.Join(certPath, "ca-cert.pem")
 	}
 
-	// Load client certificate
-	clientCert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	// Load client certificate PEM data
+	// #nosec G304 - Certificate paths are controlled via configuration
+	clientCertPEM, err := os.ReadFile(certFile)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load client certificate: %w", err)
+		return nil, fmt.Errorf("failed to read client certificate: %w", err)
+	}
+	// #nosec G304 - Certificate paths are controlled via configuration
+	clientKeyPEM, err := os.ReadFile(keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read client key: %w", err)
 	}
 
 	// Load CA certificate
-	caCert, err := os.ReadFile(caFile)
+	// #nosec G304 - Certificate paths are controlled via configuration
+	caCertPEM, err := os.ReadFile(caFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read CA certificate: %w", err)
 	}
 
-	caCertPool := x509.NewCertPool()
-	if !caCertPool.AppendCertsFromPEM(caCert) {
-		return nil, fmt.Errorf("failed to parse CA certificate")
-	}
-
-	// Create TLS config for MQTT with mTLS
-	tlsConfig := &tls.Config{
-		Certificates: []tls.Certificate{clientCert},
-		RootCAs:      caCertPool,
-		MinVersion:   tls.VersionTLS12, // MQTT supports TLS 1.2+
+	// Create TLS config for MQTT with mTLS using pkg/cert helper
+	tlsConfig, err := cert.CreateClientTLSConfig(clientCertPEM, clientKeyPEM, caCertPEM, "", tls.VersionTLS12)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create MQTT TLS config: %w", err)
 	}
 
 	c.logger.Info("Loaded MQTT TLS configuration",
@@ -936,31 +937,34 @@ func (c *MQTTClient) createQUICtlsConfig(certPath string) (*tls.Config, error) {
 
 	// Load CA certificate to verify controller's identity
 	caCertPath := filepath.Join(certPath, "ca.crt")
-	caCert, err := os.ReadFile(caCertPath)
+	// #nosec G304 - Certificate paths are controlled via configuration
+	caCertPEM, err := os.ReadFile(caCertPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read CA certificate from %s: %w", caCertPath, err)
-	}
-
-	caCertPool := x509.NewCertPool()
-	if !caCertPool.AppendCertsFromPEM(caCert) {
-		return nil, fmt.Errorf("failed to parse CA certificate")
 	}
 
 	// Load client certificate for mTLS authentication
 	clientCertPath := filepath.Join(certPath, "client.crt")
 	clientKeyPath := filepath.Join(certPath, "client.key")
-	clientCert, err := tls.LoadX509KeyPair(clientCertPath, clientKeyPath)
+	// #nosec G304 - Certificate paths are controlled via configuration
+	clientCertPEM, err := os.ReadFile(clientCertPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load client certificate from %s: %w", clientCertPath, err)
+		return nil, fmt.Errorf("failed to read client certificate from %s: %w", clientCertPath, err)
+	}
+	// #nosec G304 - Certificate paths are controlled via configuration
+	clientKeyPEM, err := os.ReadFile(clientKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read client key from %s: %w", clientKeyPath, err)
 	}
 
-	// Create TLS config with mTLS
-	tlsConfig := &tls.Config{
-		Certificates: []tls.Certificate{clientCert},
-		RootCAs:      caCertPool,
-		MinVersion:   tls.VersionTLS13, // QUIC requires TLS 1.3
-		NextProtos:   []string{"cfgms-quic"},
+	// Create TLS config with mTLS using pkg/cert helper
+	tlsConfig, err := cert.CreateClientTLSConfig(clientCertPEM, clientKeyPEM, caCertPEM, "", tls.VersionTLS13)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create QUIC TLS config: %w", err)
 	}
+
+	// QUIC-specific configuration
+	tlsConfig.NextProtos = []string{"cfgms-quic"}
 
 	return tlsConfig, nil
 }

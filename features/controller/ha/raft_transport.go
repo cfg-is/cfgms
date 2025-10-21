@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cfgis/cfgms/pkg/cert"
 	"go.etcd.io/raft/v3/raftpb"
 )
 
@@ -44,14 +45,15 @@ type raftTransport struct {
 
 // newRaftTransport creates a new Raft transport
 func newRaftTransport(nodeID uint64, address string, consensus *RaftConsensus) *raftTransport {
-	// Use HTTPS with InsecureSkipVerify for internal cluster communication
-	// In production, this should use proper certificate validation
+	// Use HTTPS with basic TLS config from pkg/cert
+	// TODO: Add proper certificate validation with cert manager
+	tlsConfig, _ := cert.CreateBasicTLSConfig(nil, nil, tls.VersionTLS12)
+	tlsConfig.InsecureSkipVerify = true // TODO: Remove after implementing proper cert validation
+
 	transport := &http.Transport{
 		MaxIdleConnsPerHost: 10,
 		IdleConnTimeout:     30 * time.Second,
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true,
-		},
+		TLSClientConfig:     tlsConfig,
 	}
 
 	return &raftTransport{

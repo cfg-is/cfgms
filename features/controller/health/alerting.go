@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/google/uuid"
 )
 
@@ -359,10 +360,12 @@ This is an automated alert from CFGMS Controller Health Monitoring.
 	addr := fmt.Sprintf("%s:%d", m.smtpConfig.Host, m.smtpConfig.Port)
 
 	if m.smtpConfig.UseTLS {
-		// Use TLS connection
-		tlsConfig := &tls.Config{
-			ServerName: m.smtpConfig.Host,
+		// Use TLS connection with basic TLS config from pkg/cert
+		tlsConfig, err := cert.CreateBasicTLSConfig(nil, nil, tls.VersionTLS12)
+		if err != nil {
+			return fmt.Errorf("failed to create TLS config: %w", err)
 		}
+		tlsConfig.ServerName = m.smtpConfig.Host
 
 		conn, err := tls.Dial("tcp", addr, tlsConfig)
 		if err != nil {

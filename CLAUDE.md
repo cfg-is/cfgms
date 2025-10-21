@@ -184,9 +184,25 @@ See [docs/development/commands-reference.md](docs/development/commands-reference
 5. Update CLAUDE.md and `pkg/README.md` when adding new provider
 
 **Enforcement**:
-- `make check-architecture` - Automated pre-commit violation detection
+- `make check-architecture` - Automated pre-commit violation detection (enhanced detection as of bugfix/central-provider-violations)
 - `/story-commit` - Blocks commits with violations
 - `/pr-review` Phase 2 - Validates central provider compliance
+
+**Known Technical Debt** (Documented as of 2025-10-20):
+The following custom cache implementations exist and should be migrated to `pkg/cache`:
+- `features/rbac/zerotrust/cache.go` (364 lines) - Custom L1/L2 cache with LRU eviction
+- `features/rbac/continuous/cache_manager.go` (970 lines) - Extensive multi-tier cache manager
+- `features/reports/cache/` (346 lines across 3 files) - Custom cache package
+
+**Total**: ~1,678 lines of duplicate caching logic that should use `pkg/cache.Cache`
+
+**Why not migrated yet**: These are complex, feature-specific cache implementations with custom eviction
+policies and statistics tracking. Migration requires careful refactoring to preserve behavior while
+using `pkg/cache` primitives. Recommended approach: Create separate story for each migration to ensure
+proper testing and validation.
+
+**Detection**: Enhanced `make check-architecture` now detects custom cache implementations and will
+prevent new violations from being committed.
 
 ## Critical Development Rules
 
@@ -233,6 +249,10 @@ docs/          # Comprehensive documentation
 - Mocking CFGMS components in tests
 - Storing cleartext secrets anywhere
 - Bypassing global storage configuration
+- **Duplicating TLS configuration code** - Use `pkg/cert` helpers (CreateServerTLSConfig, CreateClientTLSConfig)
+- **Creating custom cache implementations** - Use `pkg/cache.Cache` with TTL and eviction
+- **Manual certificate loading** - Use `pkg/cert.LoadTLSCertificate()` instead of `tls.LoadX509KeyPair()`
+- **Manual CA pool creation** - TLS helpers handle this automatically
 
 ## Quick Reference
 

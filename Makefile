@@ -263,8 +263,18 @@ check-architecture:
 	files=$$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null | grep "\.go$$" | grep -v "_test.go$$" | grep -v "^pkg/cert/" || true); \
 	if [ -n "$$files" ]; then \
 		if echo "$$files" | xargs grep -l "tls\.Config{" 2>/dev/null | grep -v "^pkg/cert/"; then \
-			echo "  ❌ Found direct TLS usage - should use pkg/cert.Manager"; \
-			echo "     See CLAUDE.md Central Provider System section"; \
+			echo "  ❌ Found direct tls.Config{} creation - should use pkg/cert helpers"; \
+			echo "     Use: cert.CreateServerTLSConfig() or cert.CreateClientTLSConfig()"; \
+			violations=$$((violations + 1)); \
+		fi; \
+		if echo "$$files" | xargs grep -l "tls\.LoadX509KeyPair" 2>/dev/null | grep -v "^pkg/cert/"; then \
+			echo "  ❌ Found tls.LoadX509KeyPair() - should use pkg/cert.LoadTLSCertificate()"; \
+			echo "     Or use higher-level cert.CreateServerTLSConfig() / cert.CreateClientTLSConfig()"; \
+			violations=$$((violations + 1)); \
+		fi; \
+		if echo "$$files" | xargs grep -l "x509\.NewCertPool" 2>/dev/null | grep -v "^pkg/cert/"; then \
+			echo "  ❌ Found x509.NewCertPool() - should use pkg/cert TLS config helpers"; \
+			echo "     Manual cert pool creation duplicates pkg/cert functionality"; \
 			violations=$$((violations + 1)); \
 		fi; \
 		if echo "$$files" | xargs grep -l "x509\.Certificate{" 2>/dev/null | grep -v "^pkg/cert/"; then \
@@ -304,6 +314,28 @@ check-architecture:
 	fi; \
 	\
 	echo ""; \
+	echo "📦 Checking custom cache implementations outside pkg/cache..."; \
+	if [ -n "$$files" ]; then \
+		feature_files=$$(echo "$$files" | grep "^features/" || true); \
+		if [ -n "$$feature_files" ]; then \
+			if echo "$$feature_files" | xargs grep -l "type.*Cache.*struct" 2>/dev/null; then \
+				echo "  ❌ Found custom Cache type in features/ - should use pkg/cache.Cache"; \
+				echo "     pkg/cache provides general-purpose caching with TTL and eviction"; \
+				violations=$$((violations + 1)); \
+			fi; \
+			if echo "$$feature_files" | xargs grep -l "type.*L1.*struct\|type.*L2.*struct" 2>/dev/null; then \
+				echo "  ❌ Found custom L1/L2 cache implementation - should use pkg/cache.Cache"; \
+				echo "     Multi-tier caching should be implemented in pkg/cache if needed"; \
+				violations=$$((violations + 1)); \
+			fi; \
+			if echo "$$feature_files" | xargs grep -l "func.*NewCache\|func.*NewL[12]Cache" 2>/dev/null; then \
+				echo "  ❌ Found custom cache constructor - should use pkg/cache.NewCache()"; \
+				violations=$$((violations + 1)); \
+			fi; \
+		fi; \
+	fi; \
+	\
+	echo ""; \
 	if [ $$violations -eq 0 ]; then \
 		echo "✅ No central provider violations found"; \
 		echo ""; \
@@ -314,10 +346,11 @@ check-architecture:
 		echo "📖 Central Provider System (CLAUDE.md):"; \
 		echo "   1. Data Persistence → pkg/storage"; \
 		echo "   2. Logging → pkg/logging"; \
-		echo "   3. Notifications → pkg/notifications"; \
-		echo "   4. Certificates/TLS → pkg/cert"; \
-		echo "   5. Authorization → pkg/rbac"; \
-		echo "   6. Observability → pkg/telemetry"; \
+		echo "   3. Caching → pkg/cache"; \
+		echo "   4. Notifications → pkg/notifications"; \
+		echo "   5. Certificates/TLS → pkg/cert"; \
+		echo "   6. Authorization → pkg/rbac"; \
+		echo "   7. Observability → pkg/telemetry"; \
 		echo ""; \
 		echo "💡 Before adding new functionality, check if it belongs in a central provider!"; \
 		echo ""; \
