@@ -47,14 +47,16 @@ func (m *Manager) CreateTenant(ctx context.Context, req *TenantRequest) (*Tenant
 	if err := m.store.CreateTenant(ctx, tenant); err != nil {
 		return nil, fmt.Errorf("failed to create tenant: %w", err)
 	}
-	
-	// Create default RBAC roles for the tenant
-	if err := m.rbacManager.CreateTenantDefaultRoles(ctx, tenantID); err != nil {
-		// Rollback tenant creation if RBAC setup fails
-		_ = m.store.DeleteTenant(ctx, tenantID)
-		return nil, fmt.Errorf("failed to create tenant RBAC roles: %w", err)
+
+	// Create default RBAC roles for the tenant (if RBAC is enabled)
+	if m.rbacManager != nil {
+		if err := m.rbacManager.CreateTenantDefaultRoles(ctx, tenantID); err != nil {
+			// Rollback tenant creation if RBAC setup fails
+			_ = m.store.DeleteTenant(ctx, tenantID)
+			return nil, fmt.Errorf("failed to create tenant RBAC roles: %w", err)
+		}
 	}
-	
+
 	return tenant, nil
 }
 

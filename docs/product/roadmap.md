@@ -708,8 +708,8 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 #### v1.1.0 - v1.3.0: SaaS Steward Implementation & MSP Integrations
 
 **Phase 1: M365 Foundation (v1.1.0)**
-- [ ] **Complete M365 Multi-Tenant Enterprise App Support** (18 story points from v0.4.0):
-  - [ ] Enhanced Tenant Management (Issue #118) - 8 points *(requires CSP sandbox setup)*
+- [ ] **Complete M365 Multi-Tenant Enterprise App Support** (10/18 story points from v0.4.0):
+  - [x] Enhanced Tenant Management (Issue #118) - 8 points ✅ COMPLETED
   - [ ] Per-Tenant Token Storage and Management (Issue #119) - 10 points *(requires CSP sandbox setup)*
 - [ ] Implement SaaS Steward using workflow engine foundation
 - [ ] Core M365 modules for CSP management (15+ modules):
