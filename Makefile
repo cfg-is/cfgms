@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-integration-factory test-watch test-commit test-ci test-integration test-security test-performance test-docker proto lint clean security-trivy security-deps security-scan security-check security-precommit
+.PHONY: build test test-unit test-integration-factory test-watch test-commit test-ci test-integration test-security test-performance test-docker proto lint clean security-trivy security-deps security-scan security-check security-precommit check-architecture
 
 # Use bash for all recipe commands (required for credential loading scripts)
 SHELL := /bin/bash
@@ -249,16 +249,91 @@ security-precommit:
 	fi
 	@echo ""
 	@echo "✅ PRE-COMMIT SECRET SCAN PASSED"
+
+# Central Provider Architecture Compliance Check
+# Prevents duplicate implementations of cross-cutting concerns
+.PHONY: check-architecture
+check-architecture:
+	@echo "🏗️  Checking Central Provider Compliance..."
+	@echo "=================================================="
+	@violations=0; \
+	\
+	echo ""; \
+	echo "📦 Checking TLS/Certificate usage outside pkg/cert..."; \
+	files=$$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null | grep "\.go$$" | grep -v "_test.go$$" | grep -v "^pkg/cert/" || true); \
+	if [ -n "$$files" ]; then \
+		if echo "$$files" | xargs grep -l "tls\.Config{" 2>/dev/null | grep -v "^pkg/cert/"; then \
+			echo "  ❌ Found direct TLS usage - should use pkg/cert.Manager"; \
+			echo "     See CLAUDE.md Central Provider System section"; \
+			violations=$$((violations + 1)); \
+		fi; \
+		if echo "$$files" | xargs grep -l "x509\.Certificate{" 2>/dev/null | grep -v "^pkg/cert/"; then \
+			echo "  ❌ Found direct certificate generation - should use pkg/cert.Manager"; \
+			violations=$$((violations + 1)); \
+		fi; \
+	fi; \
+	\
+	echo ""; \
+	echo "📦 Checking storage implementations outside pkg/storage..."; \
+	if [ -n "$$files" ]; then \
+		if echo "$$files" | xargs grep -l "sql\.Open\|git\.PlainInit" 2>/dev/null | grep -v "^pkg/storage/"; then \
+			echo "  ❌ Found storage implementation - should use pkg/storage interfaces"; \
+			echo "     See CLAUDE.md Central Provider System section"; \
+			violations=$$((violations + 1)); \
+		fi; \
+	fi; \
+	\
+	echo ""; \
+	echo "📦 Checking logging implementations outside pkg/logging..."; \
+	if [ -n "$$files" ]; then \
+		if echo "$$files" | xargs grep -l "logrus\.New\|zap\.New" 2>/dev/null | grep -v "^pkg/logging/"; then \
+			echo "  ❌ Found logger creation - should use pkg/logging interfaces"; \
+			echo "     See CLAUDE.md Central Provider System section"; \
+			violations=$$((violations + 1)); \
+		fi; \
+	fi; \
+	\
+	echo ""; \
+	echo "📦 Checking notification implementations outside pkg/notifications..."; \
+	if [ -n "$$files" ]; then \
+		if echo "$$files" | xargs grep -l "smtp\.SendMail\|gomail\.\|slack\." 2>/dev/null | grep -v "^pkg/notifications/"; then \
+			echo "  ❌ Found notification implementation - should use pkg/notifications"; \
+			echo "     See CLAUDE.md Central Provider System section"; \
+			violations=$$((violations + 1)); \
+		fi; \
+	fi; \
+	\
+	echo ""; \
+	if [ $$violations -eq 0 ]; then \
+		echo "✅ No central provider violations found"; \
+		echo ""; \
+	else \
+		echo ""; \
+		echo "❌ Found $$violations central provider violation(s)"; \
+		echo ""; \
+		echo "📖 Central Provider System (CLAUDE.md):"; \
+		echo "   1. Data Persistence → pkg/storage"; \
+		echo "   2. Logging → pkg/logging"; \
+		echo "   3. Notifications → pkg/notifications"; \
+		echo "   4. Certificates/TLS → pkg/cert"; \
+		echo "   5. Authorization → pkg/rbac"; \
+		echo "   6. Observability → pkg/telemetry"; \
+		echo ""; \
+		echo "💡 Before adding new functionality, check if it belongs in a central provider!"; \
+		echo ""; \
+		exit 1; \
+	fi
 	@echo "   Safe to commit - no secrets detected in staged files"
 
-# Pre-commit validation (smart tests + quality gates + SECRET SCANNING)
-test-commit: test lint security-precommit security-scan
+# Pre-commit validation (smart tests + quality gates + SECRET SCANNING + ARCHITECTURE)
+test-commit: test lint security-precommit check-architecture security-scan
 	@echo ""
 	@echo "✅ PRE-COMMIT VALIDATION FINISHED"
 	@echo "===================================="
 	@echo "- ✅ Smart tests passed (core + changed modules)"
 	@echo "- ✅ Linting passed"
 	@echo "- ✅ Secret scanning passed (no secrets in staged files)"
+	@echo "- ✅ Architecture compliance passed (no central provider violations)"
 	@echo "- ✅ Security scanning passed (vulnerabilities)"
 	@echo ""
 	@echo "🎯 Code is validated and ready for commit/PR"

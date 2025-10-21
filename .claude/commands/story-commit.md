@@ -34,7 +34,7 @@ make lint
 - ✅ Must meet code quality standards
 - **CONSISTENT QUALITY**: Maintains codebase standards
 
-### 3. Secret Scanning (BLOCKING) - NEW!
+### 3. Secret Scanning (BLOCKING)
 ```bash
 make security-precommit
 ```
@@ -43,7 +43,26 @@ make security-precommit
 - **TWO-LAYER PROTECTION**: gitleaks (patterns) + truffleHog (verification)
 - **PREVENTS CREDENTIAL LEAKS**: Catches secrets BEFORE they enter git history
 
-### 4. Security Validation (BLOCKING)
+### 4. Architecture Compliance (BLOCKING) - NEW!
+```bash
+make check-architecture
+```
+- ❌ **BLOCKS** commit if central provider violations found
+- ✅ Ensures no duplicate implementations of cross-cutting concerns
+- **PREVENTS TECH DEBT**: Catches reinvention of central providers early
+- **What it checks**:
+  - TLS/crypto usage outside `pkg/cert/`
+  - Storage implementations outside `pkg/storage/`
+  - Logging implementations outside `pkg/logging/`
+  - Notification implementations outside `pkg/notifications/`
+
+**Why This Matters**:
+- Prevents bugs like the dual-CA issue (separate CAs causing mTLS failures)
+- Maintains architectural consistency across the codebase
+- Catches problems before code review
+- Guides developers to correct patterns immediately
+
+### 5. Security Validation (BLOCKING)
 ```bash
 make security-scan
 ```
@@ -147,6 +166,7 @@ Progress: 37.5% → displayed as 38%
    ✅ Tests: 486 passed, 0 failed
    ✅ Linting: 0 issues found
    ✅ Secret Scanning: No secrets in staged files
+   ✅ Architecture: No central provider violations
    ✅ Security: All scans clean
 
 📝 Auto-generating commit message...

@@ -280,6 +280,43 @@ fi
 
 **Objective**: Comprehensive security and code quality analysis
 
+**Central Provider Compliance (CRITICAL - NEW)**:
+- No duplicate TLS/certificate generation outside `pkg/cert/`
+- No storage implementations outside `pkg/storage/` interfaces
+- No logging implementations outside `pkg/logging/` interfaces
+- No notification implementations outside `pkg/notifications/`
+- No RBAC implementations outside `pkg/rbac/`
+- If adding new cross-cutting concern, is it in `pkg/`?
+
+**How to Check**:
+```bash
+# Run architecture compliance check on PR changes
+git fetch origin
+git diff origin/main...HEAD --name-only | grep "\.go$" | \
+  while read file; do
+    # Check for TLS usage outside pkg/cert
+    if [[ ! "$file" =~ ^pkg/cert/ ]] && grep -q "tls\.Config{" "$file" 2>/dev/null; then
+      echo "⚠️  $file: Direct TLS usage - should use pkg/cert.Manager"
+    fi
+    # Check for storage outside pkg/storage
+    if [[ ! "$file" =~ ^pkg/storage/ ]] && grep -q "sql\.Open\|git\.PlainInit" "$file" 2>/dev/null; then
+      echo "⚠️  $file: Storage implementation - should use pkg/storage"
+    fi
+    # Check for logging outside pkg/logging
+    if [[ ! "$file" =~ ^pkg/logging/ ]] && grep -q "logrus\.New\|zap\.New" "$file" 2>/dev/null; then
+      echo "⚠️  $file: Logger creation - should use pkg/logging"
+    fi
+  done
+```
+
+**Red Flags**:
+- `tls.Config{}` outside `pkg/cert/`
+- `crypto/x509.Certificate` generation outside `pkg/cert/`
+- `sql.Open()` or `git.PlainInit()` outside `pkg/storage/`
+- `logrus.New()` or `zap.New()` outside `pkg/logging/`
+- SMTP/email implementations outside `pkg/notifications/`
+- Custom cache implementations (should extend `pkg/storage`)
+
 **Security Analysis (CRITICAL)**:
 - Authentication/Authorization bypass potential
 - Input validation and injection prevention
@@ -308,6 +345,12 @@ gh pr view [pr_number] --json files | jq '.files[].filename' | head -10
 **Output Example**:
 ```markdown
 ## Phase 2: Security & Code Quality Review ✅
+
+### Central Provider Compliance:
+- ✅ **Certificate Management**: All TLS via pkg/cert.Manager
+- ✅ **Storage**: Uses pkg/storage interfaces consistently
+- ✅ **Logging**: Proper use of pkg/logging throughout
+- ✅ **Architecture**: No duplicate cross-cutting implementations
 
 ### Security Analysis:
 - ✅ **Input Validation**: All logging calls properly sanitized
