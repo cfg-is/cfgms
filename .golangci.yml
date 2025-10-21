@@ -163,7 +163,6 @@ linters:
     - govet          # Go vet checks
     - ineffassign    # Detect ineffectual assignments
     - staticcheck    # Advanced static analysis
-    - typecheck      # Type checking
     - unused         # Detect unused code
 
     # Code Quality (RECOMMENDED)
