@@ -15,14 +15,17 @@ import (
 type CacheConfig struct {
 	// Name identifies the cache instance (for logging/debugging)
 	Name string
-	
+
 	// Size limits to prevent memory exhaustion in large deployments
 	MaxSessions       int           // Maximum number of sessions to store
 	MaxRuntimeItems   int           // Maximum number of runtime state items
-	
+
 	// TTL/Expiration settings for automatic cleanup
 	DefaultTTL        time.Duration // Default expiration time for items
 	CleanupInterval   time.Duration // How often to run background cleanup
+
+	// Eviction strategy when cache is full
+	EvictionPolicy    EvictionPolicy // FIFO, LRU, or LFU eviction policy
 }
 
 // DefaultCacheConfig returns a sensible default configuration
@@ -33,13 +36,29 @@ func DefaultCacheConfig() CacheConfig {
 		MaxRuntimeItems:   500,
 		DefaultTTL:        2 * time.Hour,
 		CleanupInterval:   5 * time.Minute,
+		EvictionPolicy:    EvictionLRU, // Use LRU for production workloads
 	}
 }
 
-// CacheEntry represents a cached item with expiration
+// EvictionPolicy defines the cache eviction strategy
+type EvictionPolicy int
+
+const (
+	// EvictionFIFO removes oldest items first (simple, fast)
+	EvictionFIFO EvictionPolicy = iota
+	// EvictionLRU removes least recently used items (access-time based)
+	EvictionLRU
+	// EvictionLFU removes least frequently used items (access-count based)
+	EvictionLFU
+)
+
+// CacheEntry represents a cached item with expiration and access tracking
 type CacheEntry struct {
-	Value     interface{}
-	ExpiresAt time.Time
+	Value        interface{}
+	ExpiresAt    time.Time
+	CreatedAt    time.Time // When the entry was created
+	LastAccessed time.Time // When the entry was last accessed (for LRU)
+	AccessCount  int64     // Number of times accessed (for LFU)
 }
 
 // IsExpired checks if the cache entry has expired
