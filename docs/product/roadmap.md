@@ -712,7 +712,7 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - [ ] Microsoft CSP Partner Center sandbox environment configuration - 2 points
   - [ ] GDAP relationship setup for test customer tenants - 1 point
   - [ ] Multi-tenant enterprise app registration with admin consent - 2 points
-- [ ] **Complete M365 Multi-Tenant Enterprise App Support** (18 story points from v0.4.0):
+- [ ] **Complete M365 Multi-Tenant Enterprise App Support** (10/18 story points from v0.4.0):
   - [x] Enhanced Tenant Management (Issue #118 / PR #238) - 8 points ✅ COMPLETED
     - ✅ M365TenantManager with tenant discovery (admin consent + GDAP)
     - ✅ Tenant metadata management and health monitoring
