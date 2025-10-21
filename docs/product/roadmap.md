@@ -628,12 +628,16 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - [x] **Internal Review Complete**: 9/9 findings remediated (100%)
   - [x] Document security posture for users
   - [ ] **Next**: Engage external security firm for independent audit (ready for external review)
-- [ ] **Task 7: Security Hardening - Infrastructure Changes** (Issue #239) - 2-3 days 🚧 IN PROGRESS [MEDIUM]
-  - [ ] M-INPUT-3: SQL identifier whitelist validation (1 hour)
-  - [ ] M-INPUT-2: Regex timeout mechanism (2 hours)
-  - [ ] M-AUTH-2: Admin operation audit controls (3 hours)
-  - [ ] M-AUTH-1: API key persistence to durable storage (4 hours)
-  - [ ] M-TENANT-1: PostgreSQL Row-Level Security (RLS) for tenant isolation (4 hours)
+- [x] **Task 7: Security Hardening - Infrastructure Changes** (Issue #239 / PR #241) - 2-3 days ✅ COMPLETED [MEDIUM]
+  - [x] M-INPUT-3: SQL identifier whitelist validation (1 hour)
+  - [x] M-INPUT-2: Regex timeout mechanism (2 hours)
+  - [x] M-AUTH-2: Admin operation audit controls (3 hours)
+  - [x] M-AUTH-1: API key persistence to durable storage (4 hours)
+  - [x] M-TENANT-1: PostgreSQL Row-Level Security (RLS) for tenant isolation (4 hours)
+  - [x] **BONUS**: Dual-CA bug fix (production-blocking mTLS failures)
+  - [x] **BONUS**: SOPS storage provider configuration fix
+  - [x] **BONUS**: Central Provider Compliance Enforcement System (6-layer defense)
+  - [x] **Security Rating**: A- → A (0 High/Medium vulnerabilities remaining)
 
 **Phase 3: Licensing & Documentation (Weeks 6-8)**
 - [ ] **Task 8: Licensing Implementation** (Issue #226) - 3-5 days
