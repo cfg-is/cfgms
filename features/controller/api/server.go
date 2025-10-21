@@ -392,17 +392,10 @@ func (s *Server) setupManagedTLS() (*tls.Config, error) {
 	}
 
 	// Load the certificate and key
-	cert, err := tls.X509KeyPair(serverCert.CertificatePEM, serverCert.PrivateKeyPEM)
+	// Create TLS config using pkg/cert helper (no client auth for API server)
+	tlsConfig, err := cert.CreateServerTLSConfig(serverCert.CertificatePEM, serverCert.PrivateKeyPEM, nil, tls.VersionTLS12)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load server certificate: %w", err)
-	}
-
-	// For REST API, we'll use TLS but not require client certificates by default
-	// This allows for API key authentication instead
-	tlsConfig := &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS12,
-		ClientAuth:   tls.NoClientCert, // API key auth instead
+		return nil, fmt.Errorf("failed to create TLS config: %w", err)
 	}
 
 	return tlsConfig, nil
@@ -413,17 +406,22 @@ func (s *Server) setupLegacyTLS() (*tls.Config, error) {
 	certFile := filepath.Join(s.cfg.CertPath, "server.crt")
 	keyFile := filepath.Join(s.cfg.CertPath, "server.key")
 
-	// Load certificate
-	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	// Load certificate PEM data from files
+	// #nosec G304 - Certificate paths are controlled via configuration
+	certPEM, err := os.ReadFile(certFile)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load legacy certificates: %w", err)
+		return nil, fmt.Errorf("failed to read certificate file: %w", err)
+	}
+	// #nosec G304 - Certificate paths are controlled via configuration
+	keyPEM, err := os.ReadFile(keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read key file: %w", err)
 	}
 
-	// Basic TLS configuration for legacy mode
-	tlsConfig := &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS12,
-		ClientAuth:   tls.NoClientCert,
+	// Create TLS config using pkg/cert helper (no client auth for legacy mode)
+	tlsConfig, err := cert.CreateBasicTLSConfig(certPEM, keyPEM, tls.VersionTLS12)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create TLS config: %w", err)
 	}
 
 	return tlsConfig, nil
