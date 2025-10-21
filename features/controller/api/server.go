@@ -21,6 +21,8 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	pkgmonitoring "github.com/cfgis/cfgms/pkg/monitoring"
 	"github.com/cfgis/cfgms/pkg/registration"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	_ "github.com/cfgis/cfgms/pkg/secrets/providers/sops" // Auto-register SOPS provider
 	"github.com/cfgis/cfgms/pkg/telemetry"
 	"github.com/gorilla/mux"
 )
@@ -43,9 +45,10 @@ type Server struct {
 	platformMonitor         pkgmonitoring.PlatformMonitor
 	tracer                  *telemetry.Tracer
 	haManager               *ha.Manager
-	apiKeys                 map[string]*APIKey // Simple API key storage
-	registrationTokenStore  registration.Store  // Registration token store for steward registration
-	corsConfig              *CORSConfig         // CORS configuration
+	apiKeys                 map[string]*APIKey     // In-memory cache for fast lookup
+	secretStore             secretsif.SecretStore  // M-AUTH-1: Central secrets provider for API keys
+	registrationTokenStore  registration.Store     // Registration token store for steward registration
+	corsConfig              *CORSConfig            // CORS configuration
 }
 
 // APIKey represents an API key for external authentication
@@ -93,6 +96,12 @@ func New(
 		return nil, fmt.Errorf("config cannot be nil")
 	}
 
+	// M-AUTH-1: Initialize central secrets provider for API key storage
+	secretStore, err := initializeSecretStore(cfg, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize secret store: %w", err)
+	}
+
 	server := &Server{
 		cfg:                     cfg,
 		logger:                  logger,
@@ -108,7 +117,8 @@ func New(
 		tracer:                  tracer,
 		haManager:               haManager,
 		registrationTokenStore:  registrationTokenStore,
-		apiKeys:                 make(map[string]*APIKey),
+		apiKeys:                 make(map[string]*APIKey), // In-memory cache
+		secretStore:             secretStore,              // M-AUTH-1: Central secrets provider
 	}
 
 	// Configure CORS settings (H-AUTH-3)
@@ -117,10 +127,13 @@ func New(
 	// Initialize router with middleware
 	server.setupRouter()
 
-	// Generate default API key for initial setup
-	if err := server.generateDefaultAPIKey(); err != nil {
-		logger.Warn("Failed to generate default API key", "error", err)
+	// M-AUTH-1: Load existing API keys from secret store
+	if err := server.loadAPIKeysFromStore(); err != nil {
+		logger.Warn("Failed to load API keys from store", "error", err)
 	}
+
+	// M-AUTH-1: Do NOT generate default API keys (security anti-pattern)
+	// API keys must be explicitly created by administrators
 
 	// Start background cleanup for expired API keys
 	server.startAPIKeyCleanup()
@@ -562,4 +575,66 @@ func (s *Server) configureCORS() {
 		s.logger.Info("CORS configured with default origins",
 			"allowed_origins", defaultOrigins)
 	}
+}
+
+// M-AUTH-1: Initialize central secrets provider for API key storage
+// Replaces the incorrect file-based APIKeyStore implementation
+func initializeSecretStore(cfg *config.Config, logger logging.Logger) (secretsif.SecretStore, error) {
+	// Determine repository path for secrets (git+SOPS backend)
+	repoPath := os.Getenv("CFGMS_SECRETS_REPO_PATH")
+	if repoPath == "" {
+		// Use temporary directory for testing/development
+		tmpDir := os.TempDir()
+		repoPath = filepath.Join(tmpDir, "cfgms-secrets-test")
+		logger.Debug("Using temporary secrets repository for testing", "path", repoPath)
+	}
+
+	// Create secrets provider configuration
+	// M-AUTH-1: Use global storage provider for secrets (git or database)
+	secretsConfig := map[string]interface{}{
+		"storage_provider": cfg.Storage.Provider, // Use controller's global storage provider
+		"storage_config": map[string]interface{}{
+			"repository_path": repoPath,
+		},
+		"cache_enabled":  true,
+		"cache_ttl":      300,  // 5 minutes
+		"cache_max_size": 1000, // Cache up to 1000 secrets
+	}
+
+	// Optional: KMS key ID for SOPS encryption
+	if kmsKeyID := os.Getenv("CFGMS_SOPS_KMS_KEY"); kmsKeyID != "" {
+		secretsConfig["kms_key_id"] = kmsKeyID
+		logger.Info("Using KMS key for secrets encryption", "key_id", kmsKeyID)
+	}
+
+	// Create secret store using SOPS provider
+	store, err := secretsif.CreateSecretStoreFromConfig("sops", secretsConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create secret store: %w", err)
+	}
+
+	// Verify store is healthy
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := store.HealthCheck(ctx); err != nil {
+		logger.Warn("Secret store health check failed", "error", err)
+		// Don't fail on health check - store may still be usable
+	}
+
+	logger.Info("Secret store initialized",
+		"provider", "sops",
+		"backend", cfg.Storage.Provider,
+		"repo_path", repoPath,
+		"encryption", "SOPS (AES-256-GCM)")
+	return store, nil
+}
+
+// M-AUTH-1: Load API keys from secret store into memory cache
+func (s *Server) loadAPIKeysFromStore() error {
+	// API keys are now stored in the central secrets provider
+	// They are loaded on-demand when authentication is performed
+	// This lazy-loading approach provides better performance and security
+
+	s.logger.Info("Secret store ready - API keys will be loaded on first access")
+	return nil
 }

@@ -17,6 +17,8 @@ type Validator struct {
 	maxSliceLength      int
 	allowedCharsets     map[string]*regexp.Regexp
 	prohibitedPatterns  []*regexp.Regexp
+	// M-INPUT-2: Regex matcher with timeout protection (security audit finding)
+	regexMatcher        *RegexMatcher
 }
 
 // ValidationError represents a validation failure with context
@@ -88,6 +90,9 @@ func NewValidator() *Validator {
 	v.allowedCharsets["safe_text"] = regexp.MustCompile(`^[a-zA-Z0-9\s\.\-_,;:!?\(\)\[\]]+$`)
 	v.allowedCharsets["base64"] = regexp.MustCompile(`^[A-Za-z0-9+/]*={0,2}$`)
 
+	// M-INPUT-2: Initialize regex matcher with timeout protection (security audit finding)
+	v.regexMatcher = NewRegexMatcher(DefaultRegexTimeout)
+
 	return v
 }
 
@@ -120,18 +125,29 @@ func (v *Validator) ValidateString(result *ValidationResult, field, value string
 		return
 	}
 
-	// Check for prohibited patterns (injection attacks)
+	// M-INPUT-2: Check for prohibited patterns with timeout protection (security audit finding)
 	for _, pattern := range v.prohibitedPatterns {
-		if pattern.MatchString(value) {
+		matched, err := v.regexMatcher.MatchStringWithTimeout(pattern, value)
+		if err != nil {
+			// M-INPUT-2: Regex timeout - potential ReDoS attack
+			result.AddError(field, "", "security_timeout", "regex validation timeout (potential ReDoS attack)")
+			return
+		}
+		if matched {
 			result.AddError(field, "", "security", "contains prohibited pattern")
 			return
 		}
 	}
 
-	// Character set validation
+	// M-INPUT-2: Character set validation with timeout protection (security audit finding)
 	if charset := v.getRuleString(rules, "charset"); charset != "" {
 		if pattern, exists := v.allowedCharsets[charset]; exists {
-			if !pattern.MatchString(value) {
+			matched, err := v.regexMatcher.MatchStringWithTimeout(pattern, value)
+			if err != nil {
+				result.AddError(field, "", "security_timeout", "regex validation timeout (potential ReDoS attack)")
+				return
+			}
+			if !matched {
 				result.AddErrorf(field, "", "charset", "contains invalid characters for charset '%s'", charset)
 				return
 			}
@@ -148,23 +164,38 @@ func (v *Validator) ValidateString(result *ValidationResult, field, value string
 		}
 	}
 
-	// Custom format validation
+	// M-INPUT-2: Custom format validation with timeout protection (security audit finding)
 	if v.hasRule(rules, "email") {
-		if !v.allowedCharsets["email"].MatchString(value) {
+		matched, err := v.regexMatcher.MatchStringWithTimeout(v.allowedCharsets["email"], value)
+		if err != nil {
+			result.AddError(field, "", "security_timeout", "regex validation timeout")
+			return
+		}
+		if !matched {
 			result.AddError(field, "", "email", "invalid email format")
 			return
 		}
 	}
 
 	if v.hasRule(rules, "uuid") {
-		if !v.allowedCharsets["uuid"].MatchString(value) {
+		matched, err := v.regexMatcher.MatchStringWithTimeout(v.allowedCharsets["uuid"], value)
+		if err != nil {
+			result.AddError(field, "", "security_timeout", "regex validation timeout")
+			return
+		}
+		if !matched {
 			result.AddError(field, "", "uuid", "invalid UUID format")
 			return
 		}
 	}
 
 	if v.hasRule(rules, "hostname") {
-		if !v.allowedCharsets["hostname"].MatchString(value) {
+		matched, err := v.regexMatcher.MatchStringWithTimeout(v.allowedCharsets["hostname"], value)
+		if err != nil {
+			result.AddError(field, "", "security_timeout", "regex validation timeout")
+			return
+		}
+		if !matched {
 			result.AddError(field, "", "hostname", "invalid hostname format")
 			return
 		}
@@ -267,9 +298,14 @@ func (v *Validator) ValidateURL(result *ValidationResult, field, value string, r
 		return
 	}
 
-	// Basic URL format check (more permissive to allow localhost validation)
+	// M-INPUT-2: Basic URL format check with timeout protection (security audit finding)
 	urlPattern := regexp.MustCompile(`^https?://[a-zA-Z0-9.-]+[a-zA-Z0-9]+(:[0-9]+)?(/[a-zA-Z0-9\-._~:/?#[\]@!$&'()*+,;=%]*)?$`)
-	if !urlPattern.MatchString(value) {
+	matched, err := v.regexMatcher.MatchStringWithTimeout(urlPattern, value)
+	if err != nil {
+		result.AddError(field, value, "security_timeout", "regex validation timeout")
+		return
+	}
+	if !matched {
 		result.AddError(field, value, "url", "invalid URL format")
 		return
 	}

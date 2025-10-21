@@ -1,24 +1,31 @@
 package api
 
 import (
+	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
+	"strings"
 	"time"
 
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 )
 
 // handleListAPIKeys handles GET /api/v1/api-keys
+// M-AUTH-1: List API keys from central secret store
 func (s *Server) handleListAPIKeys(w http.ResponseWriter, r *http.Request) {
+	// M-AUTH-1: For now, list ALL API keys across all tenants from memory cache
+	// TODO: Add proper tenant filtering based on RBAC permissions
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	var apiKeys []APIKeyInfo
+	apiKeys := make([]APIKeyInfo, 0, len(s.apiKeys))
 	for _, key := range s.apiKeys {
 		apiKeys = append(apiKeys, APIKeyInfo{
 			ID:          key.ID,
@@ -34,6 +41,7 @@ func (s *Server) handleListAPIKeys(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleCreateAPIKey handles POST /api/v1/api-keys
+// M-AUTH-1: Create API key and store in central secret store
 func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	// Parse request body
 	var createReq APIKeyCreateRequest
@@ -48,8 +56,14 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate new API key
-	keyBytes := make([]byte, 32) // 256-bit key
+	// Set default tenant if not specified
+	tenantID := createReq.TenantID
+	if tenantID == "" {
+		tenantID = "default"
+	}
+
+	// Generate new API key (256-bit cryptographically secure)
+	keyBytes := make([]byte, 32)
 	if _, err := rand.Read(keyBytes); err != nil {
 		s.logger.Error("Failed to generate API key", "error", err)
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to generate API key", "INTERNAL_ERROR")
@@ -58,45 +72,80 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 
 	// Encode as base64
 	keyString := base64.URLEncoding.EncodeToString(keyBytes)
+	keyID := uuid.New().String()
 
-	// Create API key object
+	// Hash the key for storage (SHA-256)
+	keyHash := hashAPIKey(keyString)
+
+	// Create API key object for in-memory cache
 	apiKey := &APIKey{
-		ID:          uuid.New().String(),
+		ID:          keyID,
 		Key:         keyString,
 		Name:        createReq.Name,
 		Permissions: createReq.Permissions,
 		CreatedAt:   time.Now().UTC(),
 		ExpiresAt:   createReq.ExpiresAt,
-		TenantID:    createReq.TenantID,
+		TenantID:    tenantID,
 	}
 
-	// Store API key
+	// Store API key in memory cache
 	s.mu.Lock()
 	s.apiKeys[keyString] = apiKey
 	s.mu.Unlock()
 
+	// M-AUTH-1: Store API key hash in secret store with metadata
+	secretReq := &secretsif.SecretRequest{
+		Key:         keyHash,      // Store hash as key for lookup
+		Value:       keyHash,      // Store hash as value (we never store plaintext keys)
+		TenantID:    tenantID,
+		CreatedBy:   "api-admin", // TODO: Get from authenticated user context
+		Description: createReq.Name,
+		Tags:        []string{"api-key"},
+		Metadata: map[string]string{
+			secretsif.MetadataKeySecretType: string(secretsif.SecretTypeAPIKey),
+			"id":                            keyID,
+			"permissions":                   serializePermissions(createReq.Permissions),
+		},
+	}
+
+	// Set TTL if expiration is specified
+	if createReq.ExpiresAt != nil {
+		secretReq.TTL = time.Until(*createReq.ExpiresAt)
+	}
+
+	if err := s.secretStore.StoreSecret(r.Context(), secretReq); err != nil {
+		s.logger.Error("Failed to persist API key to secret store", "error", err, "id", keyID)
+		// Remove from memory cache since we couldn't persist
+		s.mu.Lock()
+		delete(s.apiKeys, keyString)
+		s.mu.Unlock()
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to persist API key", "STORE_ERROR")
+		return
+	}
+
 	// Create response (includes the actual key only on creation)
 	result := APIKeyCreateResult{
 		APIKeyInfo: APIKeyInfo{
-			ID:          apiKey.ID,
-			Name:        apiKey.Name,
-			Permissions: apiKey.Permissions,
+			ID:          keyID,
+			Name:        createReq.Name,
+			Permissions: createReq.Permissions,
 			CreatedAt:   apiKey.CreatedAt,
-			ExpiresAt:   apiKey.ExpiresAt,
-			TenantID:    apiKey.TenantID,
+			ExpiresAt:   createReq.ExpiresAt,
+			TenantID:    tenantID,
 		},
 		Key: keyString,
 	}
 
 	s.logger.Info("Created new API key",
-		"id", apiKey.ID,
-		"name", apiKey.Name,
-		"tenant_id", apiKey.TenantID)
+		"id", keyID,
+		"name", createReq.Name,
+		"tenant_id", tenantID)
 
 	s.writeResponse(w, http.StatusCreated, result)
 }
 
 // handleGetAPIKey handles GET /api/v1/api-keys/{id}
+// M-AUTH-1: Get API key from memory cache by ID
 func (s *Server) handleGetAPIKey(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	keyID := vars["id"]
@@ -109,7 +158,7 @@ func (s *Server) handleGetAPIKey(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	// Find API key by ID
+	// Find API key by ID in memory cache
 	var foundKey *APIKey
 	for _, key := range s.apiKeys {
 		if key.ID == keyID {
@@ -137,6 +186,7 @@ func (s *Server) handleGetAPIKey(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleDeleteAPIKey handles DELETE /api/v1/api-keys/{id}
+// M-AUTH-1: Delete API key from memory cache and secret store
 func (s *Server) handleDeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	keyID := vars["id"]
@@ -149,7 +199,7 @@ func (s *Server) handleDeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Find and delete API key by ID
+	// Find and delete API key by ID from memory cache
 	var keyToDelete string
 	var foundKey *APIKey
 	for keyString, key := range s.apiKeys {
@@ -165,12 +215,22 @@ func (s *Server) handleDeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Delete the key
+	// Delete from memory cache
 	delete(s.apiKeys, keyToDelete)
+
+	// M-AUTH-1: Also delete from secret store
+	keyHash := hashAPIKey(keyToDelete)
+	secretKey := fmt.Sprintf("%s/%s", foundKey.TenantID, keyHash)
+	if err := s.secretStore.DeleteSecret(r.Context(), secretKey); err != nil {
+		s.logger.Warn("Failed to delete API key from secret store (memory cache already cleared)",
+			"error", err, "id", keyID)
+		// Continue anyway - key is removed from memory
+	}
 
 	s.logger.Info("Deleted API key",
 		"id", foundKey.ID,
-		"name", foundKey.Name)
+		"name", foundKey.Name,
+		"tenant_id", foundKey.TenantID)
 
 	s.writeSuccessResponse(w, map[string]interface{}{
 		"id":      keyID,
@@ -179,10 +239,8 @@ func (s *Server) handleDeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 }
 
 // generateEphemeralKey creates an API key with a specified TTL
+// M-AUTH-1: Generate ephemeral API key and store in secret store
 func (s *Server) generateEphemeralKey(name string, permissions []string, ttl time.Duration, tenantID string) (*APIKey, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	// Generate cryptographically secure API key
 	keyBytes := make([]byte, 32) // 256-bit key
 	if _, err := rand.Read(keyBytes); err != nil {
@@ -190,11 +248,13 @@ func (s *Server) generateEphemeralKey(name string, permissions []string, ttl tim
 	}
 
 	keyString := base64.URLEncoding.EncodeToString(keyBytes)
+	keyID := uuid.New().String()
+	keyHash := hashAPIKey(keyString)
 	expiresAt := time.Now().UTC().Add(ttl)
 
 	// Create ephemeral API key
 	apiKey := &APIKey{
-		ID:          uuid.New().String(),
+		ID:          keyID,
 		Key:         keyString,
 		Name:        name,
 		Permissions: permissions,
@@ -203,8 +263,35 @@ func (s *Server) generateEphemeralKey(name string, permissions []string, ttl tim
 		TenantID:    tenantID,
 	}
 
-	// Store the key
+	// Store in memory cache
+	s.mu.Lock()
 	s.apiKeys[keyString] = apiKey
+	s.mu.Unlock()
+
+	// M-AUTH-1: Store in secret store with TTL
+	secretReq := &secretsif.SecretRequest{
+		Key:         keyHash,
+		Value:       keyHash,
+		TenantID:    tenantID,
+		CreatedBy:   "system",
+		Description: name,
+		Tags:        []string{"api-key", "ephemeral"},
+		TTL:         ttl,
+		Metadata: map[string]string{
+			secretsif.MetadataKeySecretType: string(secretsif.SecretTypeAPIKey),
+			"id":                            keyID,
+			"permissions":                   serializePermissions(permissions),
+		},
+	}
+
+	ctx := context.Background()
+	if err := s.secretStore.StoreSecret(ctx, secretReq); err != nil {
+		// Remove from memory on storage failure
+		s.mu.Lock()
+		delete(s.apiKeys, keyString)
+		s.mu.Unlock()
+		return nil, fmt.Errorf("failed to store ephemeral key: %w", err)
+	}
 
 	s.logger.Info("Generated ephemeral API key",
 		"id", apiKey.ID,
@@ -216,112 +303,23 @@ func (s *Server) generateEphemeralKey(name string, permissions []string, ttl tim
 	return apiKey, nil
 }
 
+// M-AUTH-1: Helper functions for API key management
 
-// generateDefaultAPIKey creates a default API key for initial setup
-func (s *Server) generateDefaultAPIKey() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// hashAPIKey creates a SHA-256 hash of an API key for secure storage
+func hashAPIKey(key string) string {
+	hash := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(hash[:])
+}
 
-	// Don't create if keys already exist
-	if len(s.apiKeys) > 0 {
-		return nil
+// serializePermissions converts permissions slice to comma-separated string
+func serializePermissions(permissions []string) string {
+	return strings.Join(permissions, ",")
+}
+
+// parsePermissions converts comma-separated string to permissions slice
+func parsePermissions(permissionsStr string) []string {
+	if permissionsStr == "" {
+		return []string{}
 	}
-
-	// All permissions including HA permissions
-	allPermissions := []string{
-		"steward:list",
-		"steward:read",
-		"steward:read-dna",
-		"steward:read-config",
-		"steward:write-config",
-		"steward:validate-config",
-		"steward:read-scripts",
-		"steward:execute-scripts",
-		"certificate:list",
-		"certificate:provision",
-		"certificate:revoke",
-		"rbac:list-permissions",
-		"rbac:read-permission",
-		"rbac:list-roles",
-		"rbac:create-role",
-		"rbac:read-role",
-		"rbac:update-role",
-		"rbac:delete-role",
-		"rbac:list-subjects",
-		"rbac:create-subject",
-		"rbac:read-subject",
-		"rbac:update-subject",
-		"rbac:delete-subject",
-		"rbac:read-assignments",
-		"rbac:assign-role",
-		"rbac:revoke-role",
-		"rbac:read-permissions",
-		"rbac:check-permission",
-		"api-key:list",
-		"api-key:create",
-		"api-key:read",
-		"api-key:delete",
-		"monitoring:read-health",
-		"monitoring:read-metrics",
-		"monitoring:read-resources",
-		"monitoring:read-logs",
-		"monitoring:read-traces",
-		"monitoring:read-events",
-		"monitoring:read-config",
-		"monitoring:read-steward-metrics",
-		"monitoring:read-services",
-		"monitoring:read-anomalies",
-		"monitoring:read-component-health",
-		"monitoring:read-component-metrics",
-		"ha:read-status",
-		"ha:read-cluster",
-		"ha:read-leader",
-		"ha:read-nodes",
-	}
-
-	// Check if CFGMS_API_KEY environment variable is set
-	envAPIKey := os.Getenv("CFGMS_API_KEY")
-	if envAPIKey != "" {
-		// Create API key from environment variable
-		envKey := &APIKey{
-			ID:          uuid.New().String(),
-			Key:         envAPIKey,
-			Name:        "Environment API Key",
-			Permissions: allPermissions,
-			CreatedAt:   time.Now().UTC(),
-			TenantID:    "default",
-		}
-		s.apiKeys[envAPIKey] = envKey
-		// H-AUTH-1: Only log key ID, not the actual key (security audit finding)
-		s.logger.Info("Registered environment API key",
-			"id", envKey.ID,
-			"created_at", envKey.CreatedAt)
-	}
-
-	// Generate default API key
-	keyBytes := make([]byte, 32)
-	if _, err := rand.Read(keyBytes); err != nil {
-		return err
-	}
-
-	keyString := base64.URLEncoding.EncodeToString(keyBytes)
-
-	// Create default API key with admin permissions
-	defaultKey := &APIKey{
-		ID:          uuid.New().String(),
-		Key:         keyString,
-		Name:        "Default Admin Key",
-		Permissions: allPermissions,
-		CreatedAt:   time.Now().UTC(),
-		TenantID:    "default",
-	}
-
-	s.apiKeys[keyString] = defaultKey
-
-	// H-AUTH-1: Only log key ID, not the actual key (security audit finding)
-	s.logger.Info("Generated default API key",
-		"id", defaultKey.ID,
-		"created_at", defaultKey.CreatedAt)
-
-	return nil
+	return strings.Split(permissionsStr, ",")
 }

@@ -23,7 +23,7 @@ type MQTTConnectivityTestSuite struct {
 
 func (s *MQTTConnectivityTestSuite) SetupSuite() {
 	s.helper = NewTestHelper(GetTestHTTPAddr("http://localhost:8080"))
-	s.mqttAddr = GetTestMQTTAddr("tcp://localhost:1886") // Docker controller MQTT broker port
+	s.mqttAddr = GetTestMQTTAddr("ssl://localhost:1886") // Docker controller MQTT broker port with TLS
 }
 
 func (s *MQTTConnectivityTestSuite) TearDownSuite() {
@@ -34,23 +34,38 @@ func (s *MQTTConnectivityTestSuite) TearDownSuite() {
 
 // TestMQTTBrokerConnectivity tests basic MQTT broker connection
 func (s *MQTTConnectivityTestSuite) TestMQTTBrokerConnectivity() {
-	// Create MQTT client options
-	opts := mqtt.NewClientOptions()
-	opts.AddBroker(s.mqttAddr)
-	opts.SetClientID(fmt.Sprintf("test-client-%d", time.Now().UnixNano()))
-	opts.SetUsername("") // No auth for alpha
-	opts.SetPassword("")
-	opts.SetConnectTimeout(10 * time.Second)
-	opts.SetAutoReconnect(false)
+	// Register steward to get certificates (mirrors real-world flow)
+	regToken := s.helper.CreateToken(s.T(), "test-tenant", "production")
+	regResp := s.helper.RegisterSteward(s.T(), regToken)
+
+	s.T().Logf("Registered steward: %s", regResp.StewardID)
+	s.NotEmpty(regResp.ClientCert, "Should receive client certificate")
+	s.NotEmpty(regResp.ClientKey, "Should receive client key")
+	s.NotEmpty(regResp.CACert, "Should receive CA certificate")
+
+	// Create TLS config from registration response (like real steward)
+	tlsConfig, err := LoadTLSConfigFromPEM(
+		[]byte(regResp.CACert),
+		[]byte(regResp.ClientCert),
+		[]byte(regResp.ClientKey),
+	)
+	s.Require().NoError(err, "Should create TLS config from registration response")
+
+	// Create MQTT client options with TLS
+	opts := CreateMQTTClientOptions(
+		s.mqttAddr,
+		regResp.StewardID,
+		tlsConfig,
+	)
 
 	// Create client
 	client := mqtt.NewClient(opts)
 
 	// Connect to broker
-	token := client.Connect()
-	success := token.WaitTimeout(10 * time.Second)
+	connectToken := client.Connect()
+	success := connectToken.WaitTimeout(10 * time.Second)
 	s.True(success, "Should connect to MQTT broker within timeout")
-	s.NoError(token.Error(), "Connection should succeed without error")
+	s.NoError(connectToken.Error(), "Connection should succeed without error")
 
 	// Verify connection
 	s.True(client.IsConnected(), "Client should be connected")

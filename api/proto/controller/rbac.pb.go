@@ -551,8 +551,10 @@ func (x *UpdateRoleResponse) GetRole() *common.Role {
 }
 
 type DeleteRoleRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	RoleId        string                 `protobuf:"bytes,1,opt,name=role_id,json=roleId,proto3" json:"role_id,omitempty"`
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	RoleId string                 `protobuf:"bytes,1,opt,name=role_id,json=roleId,proto3" json:"role_id,omitempty"`
+	// M-AUTH-2: Justification required for sensitive delete operations
+	Justification string `protobuf:"bytes,2,opt,name=justification,proto3" json:"justification,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -590,6 +592,13 @@ func (*DeleteRoleRequest) Descriptor() ([]byte, []int) {
 func (x *DeleteRoleRequest) GetRoleId() string {
 	if x != nil {
 		return x.RoleId
+	}
+	return ""
+}
+
+func (x *DeleteRoleRequest) GetJustification() string {
+	if x != nil {
+		return x.Justification
 	}
 	return ""
 }
@@ -2420,9 +2429,10 @@ const file_controller_rbac_proto_rawDesc = "" +
 	"\x11UpdateRoleRequest\x12*\n" +
 	"\x04role\x18\x01 \x01(\v2\x16.cfgms.api.common.RoleR\x04role\"@\n" +
 	"\x12UpdateRoleResponse\x12*\n" +
-	"\x04role\x18\x01 \x01(\v2\x16.cfgms.api.common.RoleR\x04role\",\n" +
+	"\x04role\x18\x01 \x01(\v2\x16.cfgms.api.common.RoleR\x04role\"R\n" +
 	"\x11DeleteRoleRequest\x12\x17\n" +
-	"\arole_id\x18\x01 \x01(\tR\x06roleId\".\n" +
+	"\arole_id\x18\x01 \x01(\tR\x06roleId\x12$\n" +
+	"\rjustification\x18\x02 \x01(\tR\rjustification\".\n" +
 	"\x12DeleteRoleResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\"K\n" +
 	"\x14CreateSubjectRequest\x123\n" +
@@ -2537,37 +2547,7 @@ const file_controller_rbac_proto_rawDesc = "" +
 	"\arole_id\x18\x01 \x01(\tR\x06roleId\"b\n" +
 	"\x1dValidateRoleHierarchyResponse\x12\x14\n" +
 	"\x05valid\x18\x01 \x01(\bR\x05valid\x12+\n" +
-	"\x11validation_errors\x18\x02 \x03(\tR\x10validationErrors2\xd2\x13\n" +
-	"\vRBACService\x12h\n" +
-	"\rGetPermission\x12*.cfgms.api.controller.GetPermissionRequest\x1a+.cfgms.api.controller.GetPermissionResponse\x12n\n" +
-	"\x0fListPermissions\x12,.cfgms.api.controller.ListPermissionsRequest\x1a-.cfgms.api.controller.ListPermissionsResponse\x12_\n" +
-	"\n" +
-	"CreateRole\x12'.cfgms.api.controller.CreateRoleRequest\x1a(.cfgms.api.controller.CreateRoleResponse\x12V\n" +
-	"\aGetRole\x12$.cfgms.api.controller.GetRoleRequest\x1a%.cfgms.api.controller.GetRoleResponse\x12\\\n" +
-	"\tListRoles\x12&.cfgms.api.controller.ListRolesRequest\x1a'.cfgms.api.controller.ListRolesResponse\x12_\n" +
-	"\n" +
-	"UpdateRole\x12'.cfgms.api.controller.UpdateRoleRequest\x1a(.cfgms.api.controller.UpdateRoleResponse\x12_\n" +
-	"\n" +
-	"DeleteRole\x12'.cfgms.api.controller.DeleteRoleRequest\x1a(.cfgms.api.controller.DeleteRoleResponse\x12h\n" +
-	"\rCreateSubject\x12*.cfgms.api.controller.CreateSubjectRequest\x1a+.cfgms.api.controller.CreateSubjectResponse\x12_\n" +
-	"\n" +
-	"GetSubject\x12'.cfgms.api.controller.GetSubjectRequest\x1a(.cfgms.api.controller.GetSubjectResponse\x12e\n" +
-	"\fListSubjects\x12).cfgms.api.controller.ListSubjectsRequest\x1a*.cfgms.api.controller.ListSubjectsResponse\x12h\n" +
-	"\rUpdateSubject\x12*.cfgms.api.controller.UpdateSubjectRequest\x1a+.cfgms.api.controller.UpdateSubjectResponse\x12h\n" +
-	"\rDeleteSubject\x12*.cfgms.api.controller.DeleteSubjectRequest\x1a+.cfgms.api.controller.DeleteSubjectResponse\x12_\n" +
-	"\n" +
-	"AssignRole\x12'.cfgms.api.controller.AssignRoleRequest\x1a(.cfgms.api.controller.AssignRoleResponse\x12_\n" +
-	"\n" +
-	"RevokeRole\x12'.cfgms.api.controller.RevokeRoleRequest\x1a(.cfgms.api.controller.RevokeRoleResponse\x12n\n" +
-	"\x0fGetSubjectRoles\x12,.cfgms.api.controller.GetSubjectRolesRequest\x1a-.cfgms.api.controller.GetSubjectRolesResponse\x12n\n" +
-	"\x0fCheckPermission\x12,.cfgms.api.controller.CheckPermissionRequest\x1a-.cfgms.api.controller.CheckPermissionResponse\x12\x80\x01\n" +
-	"\x15GetSubjectPermissions\x122.cfgms.api.controller.GetSubjectPermissionsRequest\x1a3.cfgms.api.controller.GetSubjectPermissionsResponse\x12}\n" +
-	"\x14CreateRoleWithParent\x121.cfgms.api.controller.CreateRoleWithParentRequest\x1a2.cfgms.api.controller.CreateRoleWithParentResponse\x12q\n" +
-	"\x10GetRoleHierarchy\x12-.cfgms.api.controller.GetRoleHierarchyRequest\x1a..cfgms.api.controller.GetRoleHierarchyResponse\x12h\n" +
-	"\rSetRoleParent\x12*.cfgms.api.controller.SetRoleParentRequest\x1a+.cfgms.api.controller.SetRoleParentResponse\x12q\n" +
-	"\x10RemoveRoleParent\x12-.cfgms.api.controller.RemoveRoleParentRequest\x1a..cfgms.api.controller.RemoveRoleParentResponse\x12\x92\x01\n" +
-	"\x1bComputeEffectivePermissions\x128.cfgms.api.controller.ComputeEffectivePermissionsRequest\x1a9.cfgms.api.controller.ComputeEffectivePermissionsResponse\x12\x80\x01\n" +
-	"\x15ValidateRoleHierarchy\x122.cfgms.api.controller.ValidateRoleHierarchyRequest\x1a3.cfgms.api.controller.ValidateRoleHierarchyResponseB-Z+github.com/cfgis/cfgms/api/proto/controllerb\x06proto3"
+	"\x11validation_errors\x18\x02 \x03(\tR\x10validationErrorsB-Z+github.com/cfgis/cfgms/api/proto/controllerb\x06proto3"
 
 var (
 	file_controller_rbac_proto_rawDescOnce sync.Once
@@ -2682,54 +2662,8 @@ var file_controller_rbac_proto_depIdxs = []int32{
 	44, // 34: cfgms.api.controller.ComputeEffectivePermissionsResponse.effective_permissions:type_name -> cfgms.api.controller.EffectivePermissions
 	45, // 35: cfgms.api.controller.EffectivePermissions.InheritedPermissionsEntry.value:type_name -> cfgms.api.controller.PermissionList
 	46, // 36: cfgms.api.controller.EffectivePermissions.ConflictResolutionEntry.value:type_name -> cfgms.api.controller.ConflictResult
-	0,  // 37: cfgms.api.controller.RBACService.GetPermission:input_type -> cfgms.api.controller.GetPermissionRequest
-	2,  // 38: cfgms.api.controller.RBACService.ListPermissions:input_type -> cfgms.api.controller.ListPermissionsRequest
-	4,  // 39: cfgms.api.controller.RBACService.CreateRole:input_type -> cfgms.api.controller.CreateRoleRequest
-	6,  // 40: cfgms.api.controller.RBACService.GetRole:input_type -> cfgms.api.controller.GetRoleRequest
-	8,  // 41: cfgms.api.controller.RBACService.ListRoles:input_type -> cfgms.api.controller.ListRolesRequest
-	10, // 42: cfgms.api.controller.RBACService.UpdateRole:input_type -> cfgms.api.controller.UpdateRoleRequest
-	12, // 43: cfgms.api.controller.RBACService.DeleteRole:input_type -> cfgms.api.controller.DeleteRoleRequest
-	14, // 44: cfgms.api.controller.RBACService.CreateSubject:input_type -> cfgms.api.controller.CreateSubjectRequest
-	16, // 45: cfgms.api.controller.RBACService.GetSubject:input_type -> cfgms.api.controller.GetSubjectRequest
-	18, // 46: cfgms.api.controller.RBACService.ListSubjects:input_type -> cfgms.api.controller.ListSubjectsRequest
-	20, // 47: cfgms.api.controller.RBACService.UpdateSubject:input_type -> cfgms.api.controller.UpdateSubjectRequest
-	22, // 48: cfgms.api.controller.RBACService.DeleteSubject:input_type -> cfgms.api.controller.DeleteSubjectRequest
-	24, // 49: cfgms.api.controller.RBACService.AssignRole:input_type -> cfgms.api.controller.AssignRoleRequest
-	26, // 50: cfgms.api.controller.RBACService.RevokeRole:input_type -> cfgms.api.controller.RevokeRoleRequest
-	28, // 51: cfgms.api.controller.RBACService.GetSubjectRoles:input_type -> cfgms.api.controller.GetSubjectRolesRequest
-	30, // 52: cfgms.api.controller.RBACService.CheckPermission:input_type -> cfgms.api.controller.CheckPermissionRequest
-	32, // 53: cfgms.api.controller.RBACService.GetSubjectPermissions:input_type -> cfgms.api.controller.GetSubjectPermissionsRequest
-	34, // 54: cfgms.api.controller.RBACService.CreateRoleWithParent:input_type -> cfgms.api.controller.CreateRoleWithParentRequest
-	36, // 55: cfgms.api.controller.RBACService.GetRoleHierarchy:input_type -> cfgms.api.controller.GetRoleHierarchyRequest
-	39, // 56: cfgms.api.controller.RBACService.SetRoleParent:input_type -> cfgms.api.controller.SetRoleParentRequest
-	41, // 57: cfgms.api.controller.RBACService.RemoveRoleParent:input_type -> cfgms.api.controller.RemoveRoleParentRequest
-	43, // 58: cfgms.api.controller.RBACService.ComputeEffectivePermissions:input_type -> cfgms.api.controller.ComputeEffectivePermissionsRequest
-	48, // 59: cfgms.api.controller.RBACService.ValidateRoleHierarchy:input_type -> cfgms.api.controller.ValidateRoleHierarchyRequest
-	1,  // 60: cfgms.api.controller.RBACService.GetPermission:output_type -> cfgms.api.controller.GetPermissionResponse
-	3,  // 61: cfgms.api.controller.RBACService.ListPermissions:output_type -> cfgms.api.controller.ListPermissionsResponse
-	5,  // 62: cfgms.api.controller.RBACService.CreateRole:output_type -> cfgms.api.controller.CreateRoleResponse
-	7,  // 63: cfgms.api.controller.RBACService.GetRole:output_type -> cfgms.api.controller.GetRoleResponse
-	9,  // 64: cfgms.api.controller.RBACService.ListRoles:output_type -> cfgms.api.controller.ListRolesResponse
-	11, // 65: cfgms.api.controller.RBACService.UpdateRole:output_type -> cfgms.api.controller.UpdateRoleResponse
-	13, // 66: cfgms.api.controller.RBACService.DeleteRole:output_type -> cfgms.api.controller.DeleteRoleResponse
-	15, // 67: cfgms.api.controller.RBACService.CreateSubject:output_type -> cfgms.api.controller.CreateSubjectResponse
-	17, // 68: cfgms.api.controller.RBACService.GetSubject:output_type -> cfgms.api.controller.GetSubjectResponse
-	19, // 69: cfgms.api.controller.RBACService.ListSubjects:output_type -> cfgms.api.controller.ListSubjectsResponse
-	21, // 70: cfgms.api.controller.RBACService.UpdateSubject:output_type -> cfgms.api.controller.UpdateSubjectResponse
-	23, // 71: cfgms.api.controller.RBACService.DeleteSubject:output_type -> cfgms.api.controller.DeleteSubjectResponse
-	25, // 72: cfgms.api.controller.RBACService.AssignRole:output_type -> cfgms.api.controller.AssignRoleResponse
-	27, // 73: cfgms.api.controller.RBACService.RevokeRole:output_type -> cfgms.api.controller.RevokeRoleResponse
-	29, // 74: cfgms.api.controller.RBACService.GetSubjectRoles:output_type -> cfgms.api.controller.GetSubjectRolesResponse
-	31, // 75: cfgms.api.controller.RBACService.CheckPermission:output_type -> cfgms.api.controller.CheckPermissionResponse
-	33, // 76: cfgms.api.controller.RBACService.GetSubjectPermissions:output_type -> cfgms.api.controller.GetSubjectPermissionsResponse
-	35, // 77: cfgms.api.controller.RBACService.CreateRoleWithParent:output_type -> cfgms.api.controller.CreateRoleWithParentResponse
-	38, // 78: cfgms.api.controller.RBACService.GetRoleHierarchy:output_type -> cfgms.api.controller.GetRoleHierarchyResponse
-	40, // 79: cfgms.api.controller.RBACService.SetRoleParent:output_type -> cfgms.api.controller.SetRoleParentResponse
-	42, // 80: cfgms.api.controller.RBACService.RemoveRoleParent:output_type -> cfgms.api.controller.RemoveRoleParentResponse
-	47, // 81: cfgms.api.controller.RBACService.ComputeEffectivePermissions:output_type -> cfgms.api.controller.ComputeEffectivePermissionsResponse
-	49, // 82: cfgms.api.controller.RBACService.ValidateRoleHierarchy:output_type -> cfgms.api.controller.ValidateRoleHierarchyResponse
-	60, // [60:83] is the sub-list for method output_type
-	37, // [37:60] is the sub-list for method input_type
+	37, // [37:37] is the sub-list for method output_type
+	37, // [37:37] is the sub-list for method input_type
 	37, // [37:37] is the sub-list for extension type_name
 	37, // [37:37] is the sub-list for extension extendee
 	0,  // [0:37] is the sub-list for field type_name
@@ -2748,7 +2682,7 @@ func file_controller_rbac_proto_init() {
 			NumEnums:      0,
 			NumMessages:   52,
 			NumExtensions: 0,
-			NumServices:   1,
+			NumServices:   0,
 		},
 		GoTypes:           file_controller_rbac_proto_goTypes,
 		DependencyIndexes: file_controller_rbac_proto_depIdxs,

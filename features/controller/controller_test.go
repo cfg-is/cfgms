@@ -70,7 +70,7 @@ func TestControllerLifecycle(t *testing.T) {
 	
 	// Verify required messages are present (order may vary based on certificate state)
 	assert.Contains(t, messages, "Loaded existing Certificate Authority")
-	assert.Contains(t, messages, "Generated default API key")
+	// M-AUTH-1: No longer generating default API keys (security anti-pattern removed)
 	assert.Contains(t, messages, "Starting controller")
 	assert.Contains(t, messages, "Controller server started (MQTT+QUIC mode)")
 	assert.Contains(t, messages, "REST API server started")

@@ -1373,3 +1373,12 @@ func (s *DatabaseRBACStore) GetRolePermissions(ctx context.Context, roleID strin
 func (s *DatabaseRBACStore) GetSubjectAssignments(ctx context.Context, subjectID, tenantID string) ([]*common.RoleAssignment, error) {
 	return s.ListRoleAssignments(ctx, subjectID, "", tenantID)
 }
+
+// M-TENANT-1: RLS helper functions
+// These functions will be used when integrating RLS into database operations.
+// Currently unused but documented in migrations/003_enable_rls.sql
+// Example usage:
+//   err := s.withTenantContext(ctx, tenantID, func(ctx context.Context, tx *sql.Tx) error {
+//       // Perform database operations with RLS enforced
+//       return nil
+//   })

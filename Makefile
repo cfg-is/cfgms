@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-integration-factory test-watch test-commit test-ci test-integration test-security test-performance test-docker proto lint clean security-trivy security-deps security-scan security-check security-precommit
+.PHONY: build test test-unit test-integration-factory test-watch test-commit test-ci test-integration test-security test-performance test-docker proto lint clean security-trivy security-deps security-scan security-check security-precommit check-architecture
 
 # Use bash for all recipe commands (required for credential loading scripts)
 SHELL := /bin/bash
@@ -124,7 +124,7 @@ test-integration-factory:
 	@echo "🏭 Testing real factory loading and injection patterns"
 	@go clean -testcache
 	@if [ -f .env.local ]; then \
-		export $$(cat .env.local | grep -v '^#' | xargs) && \
+		export $$(cat .env.local | grep -v '^#' | grep -v '^$$' | sed 's/#.*//' | xargs) && \
 		go test -race -cover -tags=integration -timeout=5m ./test/integration/logging/...; \
 	else \
 		go test -race -cover -tags=integration -timeout=5m ./test/integration/logging/...; \
@@ -249,16 +249,122 @@ security-precommit:
 	fi
 	@echo ""
 	@echo "✅ PRE-COMMIT SECRET SCAN PASSED"
+
+# Central Provider Architecture Compliance Check
+# Prevents duplicate implementations of cross-cutting concerns
+.PHONY: check-architecture
+check-architecture:
+	@echo "🏗️  Checking Central Provider Compliance..."
+	@echo "=================================================="
+	@violations=0; \
+	\
+	echo ""; \
+	echo "📦 Checking TLS/Certificate usage outside pkg/cert..."; \
+	files=$$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null | grep "\.go$$" | grep -v "_test.go$$" | grep -v "^pkg/cert/" || true); \
+	if [ -n "$$files" ]; then \
+		if echo "$$files" | xargs grep -l "tls\.Config{" 2>/dev/null | grep -v "^pkg/cert/"; then \
+			echo "  ❌ Found direct TLS usage - should use pkg/cert.Manager"; \
+			echo "     See CLAUDE.md Central Provider System section"; \
+			violations=$$((violations + 1)); \
+		fi; \
+		if echo "$$files" | xargs grep -l "x509\.Certificate{" 2>/dev/null | grep -v "^pkg/cert/"; then \
+			echo "  ❌ Found direct certificate generation - should use pkg/cert.Manager"; \
+			violations=$$((violations + 1)); \
+		fi; \
+	fi; \
+	\
+	echo ""; \
+	echo "📦 Checking storage implementations outside pkg/storage..."; \
+	if [ -n "$$files" ]; then \
+		if echo "$$files" | xargs grep -l "sql\.Open\|git\.PlainInit" 2>/dev/null | grep -v "^pkg/storage/"; then \
+			echo "  ❌ Found storage implementation - should use pkg/storage interfaces"; \
+			echo "     See CLAUDE.md Central Provider System section"; \
+			violations=$$((violations + 1)); \
+		fi; \
+	fi; \
+	\
+	echo ""; \
+	echo "📦 Checking logging implementations outside pkg/logging..."; \
+	if [ -n "$$files" ]; then \
+		if echo "$$files" | xargs grep -l "logrus\.New\|zap\.New" 2>/dev/null | grep -v "^pkg/logging/"; then \
+			echo "  ❌ Found logger creation - should use pkg/logging interfaces"; \
+			echo "     See CLAUDE.md Central Provider System section"; \
+			violations=$$((violations + 1)); \
+		fi; \
+	fi; \
+	\
+	echo ""; \
+	echo "📦 Checking notification implementations outside pkg/notifications..."; \
+	if [ -n "$$files" ]; then \
+		if echo "$$files" | xargs grep -l "smtp\.SendMail\|gomail\.\|slack\." 2>/dev/null | grep -v "^pkg/notifications/"; then \
+			echo "  ❌ Found notification implementation - should use pkg/notifications"; \
+			echo "     See CLAUDE.md Central Provider System section"; \
+			violations=$$((violations + 1)); \
+		fi; \
+	fi; \
+	\
+	echo ""; \
+	if [ $$violations -eq 0 ]; then \
+		echo "✅ No central provider violations found"; \
+		echo ""; \
+	else \
+		echo ""; \
+		echo "❌ Found $$violations central provider violation(s)"; \
+		echo ""; \
+		echo "📖 Central Provider System (CLAUDE.md):"; \
+		echo "   1. Data Persistence → pkg/storage"; \
+		echo "   2. Logging → pkg/logging"; \
+		echo "   3. Notifications → pkg/notifications"; \
+		echo "   4. Certificates/TLS → pkg/cert"; \
+		echo "   5. Authorization → pkg/rbac"; \
+		echo "   6. Observability → pkg/telemetry"; \
+		echo ""; \
+		echo "💡 Before adding new functionality, check if it belongs in a central provider!"; \
+		echo ""; \
+		exit 1; \
+	fi
 	@echo "   Safe to commit - no secrets detected in staged files"
 
-# Pre-commit validation (smart tests + quality gates + SECRET SCANNING)
-test-commit: test lint security-precommit security-scan
+# Validate Central Provider Documentation
+# Helps keep CLAUDE.md provider list current
+.PHONY: validate-providers
+validate-providers:
+	@echo "📋 Validating Central Provider Documentation..."
+	@echo "================================================"
+	@pkg_dirs=$$(ls -d pkg/*/ 2>/dev/null | sed 's|pkg/||g' | sed 's|/||g' | sort); \
+	missing=0; \
+	echo ""; \
+	echo "🔍 Checking if all pkg/ directories are documented in CLAUDE.md..."; \
+	for dir in $$pkg_dirs; do \
+		if ! grep -q "pkg/$$dir" CLAUDE.md 2>/dev/null; then \
+			echo "  ⚠️  pkg/$$dir - Not found in CLAUDE.md"; \
+			missing=$$((missing + 1)); \
+		fi; \
+	done; \
+	echo ""; \
+	if [ $$missing -eq 0 ]; then \
+		echo "✅ All pkg/ directories are documented in CLAUDE.md"; \
+	else \
+		echo "⚠️  Found $$missing undocumented pkg/ director(ies)"; \
+		echo ""; \
+		echo "💡 Action Required:"; \
+		echo "   1. Review the missing directories above"; \
+		echo "   2. Add them to CLAUDE.md Central Provider System section"; \
+		echo "   3. Categorize as: Pluggable, Direct, or Utility"; \
+		echo ""; \
+		echo "ℹ️  This is a warning - not blocking commits"; \
+	fi; \
+	echo ""
+
+# Pre-commit validation (smart tests + quality gates + SECRET SCANNING + ARCHITECTURE)
+test-commit: test lint security-precommit check-architecture security-scan
 	@echo ""
 	@echo "✅ PRE-COMMIT VALIDATION FINISHED"
 	@echo "===================================="
 	@echo "- ✅ Smart tests passed (core + changed modules)"
 	@echo "- ✅ Linting passed"
 	@echo "- ✅ Secret scanning passed (no secrets in staged files)"
+	@echo "- ✅ Architecture compliance passed (no central provider violations)"
 	@echo "- ✅ Security scanning passed (vulnerabilities)"
 	@echo ""
 	@echo "🎯 Code is validated and ready for commit/PR"
@@ -1249,14 +1355,15 @@ test-mqtt-quic: test-mqtt-quic-setup
 	@echo ""
 	@echo "🔌 Running MQTT+QUIC Integration Tests"
 	@echo "======================================"
-	@echo "Testing against controller-standalone (MQTT: 1886, QUIC: 4436, HTTP: 9080)"
+	@echo "Testing against controller-standalone (MQTT: 1886, QUIC: 4436, HTTPS: 9080)"
 	@echo ""
 	@echo "🧪 Running all MQTT+QUIC test suites..."
 	@if [ -f .env.test ]; then \
 		set -a && . ./.env.test && set +a && \
-		CFGMS_TEST_HTTP_ADDR=http://localhost:9080 \
-		CFGMS_TEST_MQTT_ADDR=tcp://localhost:1886 \
+		CFGMS_TEST_HTTP_ADDR=https://localhost:9080 \
+		CFGMS_TEST_MQTT_ADDR=ssl://localhost:1886 \
 		CFGMS_TEST_QUIC_ADDR=localhost:4436 \
+		CFGMS_TEST_CERTS_PATH=$(PWD)/test/integration/mqtt_quic/certs \
 		go test -v -race -timeout=15m ./test/integration/mqtt_quic/... || { \
 			echo ""; \
 			echo "❌ MQTT+QUIC tests failed"; \
@@ -1287,12 +1394,12 @@ test-mqtt-quic-setup:
 	@set -a && . ./.env.test && set +a && \
 	docker compose -f docker-compose.test.yml --profile ha up -d timescaledb-test controller-standalone
 	@echo ""
-	@echo "⏳ Waiting for services to be ready..."
-	@sleep 10
+	@echo "⏳ Waiting for controller to initialize..."
+	@sleep 15
 	@echo "🔍 Checking controller health..."
 	@for i in 1 2 3 4 5; do \
-		if docker exec controller-standalone sh -c "netstat -ln | grep :1883" >/dev/null 2>&1; then \
-			echo "✅ MQTT broker ready on port 1886"; \
+		if docker exec controller-standalone sh -c "netstat -ln | grep :8883" >/dev/null 2>&1; then \
+			echo "✅ MQTT broker ready on port 8883 (mapped to 1886)"; \
 			break; \
 		fi; \
 		echo "⏳ Waiting for MQTT broker (attempt $$i/5)..."; \
@@ -1300,14 +1407,14 @@ test-mqtt-quic-setup:
 	done
 	@echo ""
 	@echo "✅ MQTT+QUIC Docker environment ready!"
-	@echo "   MQTT: localhost:1886"
+	@echo "   MQTT: localhost:1886 (TLS)"
 	@echo "   QUIC: localhost:4436"
-	@echo "   HTTP: localhost:9080"
+	@echo "   HTTPS: localhost:9080"
 
 test-mqtt-quic-cleanup:
 	@echo ""
 	@echo "🧹 Cleaning up MQTT+QUIC Docker environment..."
-	@docker compose -f docker-compose.test.yml --profile ha down --remove-orphans 2>/dev/null || true
+	@docker compose -f docker-compose.test.yml --profile ha down --remove-orphans -v 2>/dev/null || true
 	@echo "✅ MQTT+QUIC environment cleaned up"
 
 

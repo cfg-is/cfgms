@@ -30,9 +30,15 @@ func NewTestHelper(baseURL string) *TestHelper {
 		baseURL = envURL
 	}
 
+	// Create HTTP client that skips SSL verification for test certificates
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+
 	return &TestHelper{
 		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
+			Timeout:   10 * time.Second,
+			Transport: transport,
 		},
 		baseURL: baseURL,
 	}
@@ -157,11 +163,16 @@ func GetTestCertsPath(defaultPath string) string {
 func LoadTLSConfig(t *testing.T, certsPath string) *tls.Config {
 	t.Helper()
 
-	// Load CA certificate
-	caCertPath := filepath.Join(certsPath, "ca-cert.pem")
+	// Load CA certificate (prefer controller-ca.pem if available, fall back to ca-cert.pem)
+	caCertPath := filepath.Join(certsPath, "controller-ca.pem")
 	caCert, err := os.ReadFile(caCertPath)
 	if err != nil {
-		t.Fatalf("Failed to read CA certificate: %v", err)
+		// Fallback to static test CA if controller CA not available
+		caCertPath = filepath.Join(certsPath, "ca-cert.pem")
+		caCert, err = os.ReadFile(caCertPath)
+		if err != nil {
+			t.Fatalf("Failed to read CA certificate: %v", err)
+		}
 	}
 
 	caCertPool := x509.NewCertPool()
@@ -182,10 +193,10 @@ func LoadTLSConfig(t *testing.T, certsPath string) *tls.Config {
 		Certificates: []tls.Certificate{clientCert},
 		RootCAs:      caCertPool,
 		MinVersion:   tls.VersionTLS12,
-		// For testing, we may need to accept any server name
-		// In production, this should verify the server hostname
+		// Use localhost as ServerName since we connect via localhost:1886
+		// The server certificate is valid for "localhost" and "cfgms-mqtt-server"
 		InsecureSkipVerify: false,
-		ServerName:         "controller-standalone",
+		ServerName:         "localhost",
 	}
 
 	return tlsConfig
@@ -238,6 +249,33 @@ func LoadInvalidTLSConfig(t *testing.T, certsPath string, certType string) *tls.
 	}
 
 	return tlsConfig
+}
+
+// LoadTLSConfigFromPEM creates a TLS config from PEM-encoded certificate data
+// This is used when certificates are received from the registration endpoint
+func LoadTLSConfigFromPEM(caCertPEM, clientCertPEM, clientKeyPEM []byte) (*tls.Config, error) {
+	// Load CA certificate
+	caCertPool := x509.NewCertPool()
+	if !caCertPool.AppendCertsFromPEM(caCertPEM) {
+		return nil, fmt.Errorf("failed to parse CA certificate")
+	}
+
+	// Load client certificate and key
+	clientCert, err := tls.X509KeyPair(clientCertPEM, clientKeyPEM)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load client certificate: %w", err)
+	}
+
+	// Create TLS config
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{clientCert},
+		RootCAs:      caCertPool,
+		MinVersion:   tls.VersionTLS12,
+		// Use localhost as ServerName since we connect via localhost:1886
+		ServerName: "localhost",
+	}
+
+	return tlsConfig, nil
 }
 
 // CreateMQTTClientOptions creates MQTT client options with TLS support

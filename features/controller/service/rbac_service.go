@@ -120,6 +120,11 @@ func (s *RBACService) DeleteRole(ctx context.Context, req *controller.DeleteRole
 		return nil, fmt.Errorf("role_id is required")
 	}
 
+	// M-AUTH-2: Add justification to context for sensitive operation
+	if req.Justification != "" {
+		ctx = rbac.WithSensitiveOperationJustification(ctx, req.Justification)
+	}
+
 	err := s.rbacManager.DeleteRole(ctx, req.RoleId)
 	if err != nil {
 		return nil, fmt.Errorf("%w", err)
