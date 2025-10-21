@@ -708,9 +708,22 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 #### v1.1.0 - v1.3.0: SaaS Steward Implementation & MSP Integrations
 
 **Phase 1: M365 Foundation (v1.1.0)**
+- [ ] **M365 CSP Infrastructure Setup** (5 story points):
+  - [ ] Microsoft CSP Partner Center sandbox environment configuration - 2 points
+  - [ ] GDAP relationship setup for test customer tenants - 1 point
+  - [ ] Multi-tenant enterprise app registration with admin consent - 2 points
 - [ ] **Complete M365 Multi-Tenant Enterprise App Support** (18 story points from v0.4.0):
-  - [ ] Enhanced Tenant Management (Issue #118) - 8 points *(requires CSP sandbox setup)*
+  - [x] Enhanced Tenant Management (Issue #118 / PR #238) - 8 points ✅ COMPLETED
+    - ✅ M365TenantManager with tenant discovery (admin consent + GDAP)
+    - ✅ Tenant metadata management and health monitoring
+    - ✅ Bulk operations for MSP scale
+    - ✅ Comprehensive test suite (545 lines, real components)
+    - ⚠️ **Requires live CSP sandbox for GDAP integration testing**
   - [ ] Per-Tenant Token Storage and Management (Issue #119) - 10 points *(requires CSP sandbox setup)*
+- [ ] **M365 Integration Validation** (8 story points):
+  - [ ] GDAP customer discovery end-to-end testing - 3 points
+  - [ ] Multi-tenant consent flow validation with real M365 tenants - 3 points
+  - [ ] Tenant health monitoring live integration tests - 2 points
 - [ ] Implement SaaS Steward using workflow engine foundation
 - [ ] Core M365 modules for CSP management (15+ modules):
   - [ ] Entra ID modules (user, group, license, conditional access)
@@ -835,6 +848,6 @@ Multi-layered validation approach:
 
 ## Version Information
 
-- **Version**: 2.6 (v0.6.0 Complete - Finalizing Foundational Endpoint CMS)
-- **Last Updated**: 2025-10-14
-- **Status**: v0.2.0 COMPLETE ✅ - v0.2.1 COMPLETE ✅ - Epic #65 COMPLETE ✅ - Epic #66 COMPLETE ✅ - Epic #67 COMPLETE ✅ - Epic #68 COMPLETE ✅ - **v0.3.0 PRODUCTION READY** ✅ - **v0.3.1 COMPLETE** ✅ - **v0.3.2 COMPLETE** ✅ - **EPIC 6 COMPLETE** ✅ - **v0.4.6.0 STORAGE MIGRATION COMPLETE** ✅ - **v0.5.0 COMPLETE** ✅ - **v0.6.0 COMPLETE** ✅
+- **Version**: 2.7 (v0.6.0 Complete + v1.1.0 M365 Foundation Progress)
+- **Last Updated**: 2025-10-21
+- **Status**: v0.2.0 COMPLETE ✅ - v0.2.1 COMPLETE ✅ - Epic #65 COMPLETE ✅ - Epic #66 COMPLETE ✅ - Epic #67 COMPLETE ✅ - Epic #68 COMPLETE ✅ - **v0.3.0 PRODUCTION READY** ✅ - **v0.3.1 COMPLETE** ✅ - **v0.3.2 COMPLETE** ✅ - **EPIC 6 COMPLETE** ✅ - **v0.4.6.0 STORAGE MIGRATION COMPLETE** ✅ - **v0.5.0 COMPLETE** ✅ - **v0.6.0 COMPLETE** ✅ - **v1.1.0 Enhanced Tenant Management (Story #118)** ✅
