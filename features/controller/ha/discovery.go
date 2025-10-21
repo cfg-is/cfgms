@@ -294,7 +294,8 @@ func (d *staticDiscovery) checkNodeHealth(node *NodeInfo) bool {
 	// TODO: Add proper certificate validation with cert manager
 	tlsConfig, err := cert.CreateBasicTLSConfig(nil, nil, tls.VersionTLS12)
 	if err != nil {
-		return err
+		log.Printf("DISCOVERY: Failed to create TLS config for health check: %v", err)
+		return false
 	}
 	tlsConfig.InsecureSkipVerify = true // TODO: Remove after implementing proper cert validation
 
