@@ -638,6 +638,16 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - [x] **BONUS**: SOPS storage provider configuration fix
   - [x] **BONUS**: Central Provider Compliance Enforcement System (6-layer defense)
   - [x] **Security Rating**: A- → A (0 High/Medium vulnerabilities remaining)
+- [ ] **Task 7A: Eliminate Duplicate Caching Implementations** - 2-3 days [MEDIUM]
+  - [ ] Migrate `features/rbac/zerotrust/cache.go` (364 lines) to use `pkg/cache.Cache`
+  - [ ] Migrate `features/rbac/continuous/cache_manager.go` (970 lines) to use `pkg/cache.Cache`
+  - [ ] Migrate `features/reports/cache/` (346 lines) to use `pkg/cache.Cache`
+  - [ ] Remove ~1,678 lines of duplicate caching logic
+  - [ ] Update tests to use `pkg/cache` instead of custom implementations
+  - [ ] Verify all cache functionality maintained with centralized provider
+  - **Note**: No backwards compatibility required - no production deployments exist
+  - **Impact**: Eliminates technical debt identified in central provider audit
+  - **Story Points**: 8-13 points (3 complex migrations with custom eviction policies)
 
 **Phase 3: Licensing & Documentation (Weeks 6-8)**
 - [ ] **Task 8: Licensing Implementation** (Issue #226) - 3-5 days
