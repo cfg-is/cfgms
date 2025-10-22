@@ -185,7 +185,7 @@ func (jim *JITIntegrationManager) checkJITAccess(ctx context.Context, request *c
 							// Convert ElevationConditions to AccessConditions
 							for _, elevationCondition := range session.Conditions {
 								accessCondition := AccessCondition{
-									Type:        ConditionType(elevationCondition.Type),
+									Type:        elevationCondition.Type,
 									Value:       elevationCondition.Value,
 									Description: elevationCondition.Description,
 								}

@@ -160,7 +160,7 @@ func (wh *HTTPWebhookHandler) RegisterWebhook(ctx context.Context, trigger *Trig
 		rateLimit := rate.Limit(trigger.Webhook.RateLimit.RequestsPerMinute / 60.0) // Convert to requests per second
 		burstSize := trigger.Webhook.RateLimit.BurstSize
 		if burstSize <= 0 {
-			burstSize = int(trigger.Webhook.RateLimit.RequestsPerMinute)
+			burstSize = trigger.Webhook.RateLimit.RequestsPerMinute
 		}
 		wh.rateLimiters[trigger.ID] = rate.NewLimiter(rateLimit, burstSize)
 	}

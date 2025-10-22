@@ -145,7 +145,7 @@ func (c *DefaultProcessCollector) getProcessMetrics(ctx context.Context, p *proc
 	statusCodes, _ := p.StatusWithContext(ctx)
 	status := ""
 	if len(statusCodes) > 0 {
-		status = string(statusCodes[0])
+		status = statusCodes[0]
 	}
 
 	// Get create time (may fail on some systems)
