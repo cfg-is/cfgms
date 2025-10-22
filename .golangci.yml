@@ -155,7 +155,8 @@ linters:
   disable-all: true
   enable:
     # Central Provider Architecture Enforcement (CRITICAL)
-    - depguard       # Enforce central provider import rules
+    # NOTE: depguard disabled - architectural enforcement via make check-architecture
+    # - depguard       # Enforce central provider import rules
 
     # Core Quality Linters (REQUIRED)
     - errcheck       # Check error handling
