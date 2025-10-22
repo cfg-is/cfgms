@@ -181,7 +181,8 @@ linters:
     - goconst        # Repeated strings that could be constants
 
     # Security (IMPORTANT)
-    - gosec          # Security checks (also run separately in make security-gosec)
+    # NOTE: gosec disabled in golangci-lint - comprehensive security scanning via make security-gosec
+    # - gosec          # Security checks (also run separately in make security-gosec)
 
 formatters:
   disable-all: true
@@ -220,6 +221,12 @@ issues:
         - goconst
         - unparam
         - depguard
+        - gosec
+
+    # Exclude gosec for test/ directory (integration/e2e tests)
+    - path: test/.*
+      linters:
+        - gosec
 
     # Exclude linters for generated code
     - path: .pb.go$
