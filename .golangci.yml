@@ -175,7 +175,8 @@ linters:
     # - revive         # Fast, configurable linter
     - misspell       # Spell checking
     - unconvert      # Remove unnecessary conversions
-    - unparam        # Detect unused parameters
+    # NOTE: unparam disabled - mostly framework requirements (cobra, HTTP handlers, gRPC)
+    # - unparam        # Detect unused parameters
     - nakedret       # Naked returns in long functions
     - prealloc       # Slice preallocations
     - goconst        # Repeated strings that could be constants
