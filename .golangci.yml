@@ -182,8 +182,10 @@ linters:
     # NOTE: unparam disabled - mostly framework requirements (cobra, HTTP handlers, gRPC)
     # - unparam        # Detect unused parameters
     - nakedret       # Naked returns in long functions
-    - prealloc       # Slice preallocations
-    - goconst        # Repeated strings that could be constants
+    # NOTE: prealloc disabled - micro-optimizations with limited impact
+    # - prealloc       # Slice preallocations
+    # NOTE: goconst disabled - maintainability improvement but tedious to fix
+    # - goconst        # Repeated strings that could be constants
 
     # Security (IMPORTANT)
     # NOTE: gosec disabled in golangci-lint - comprehensive security scanning via make security-gosec

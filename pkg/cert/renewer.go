@@ -259,9 +259,9 @@ func (r *Renewer) GetCertificatesByExpirationPriority(withinDays int) (map[strin
 	}
 
 	priorityGroups := map[string][]*CertificateInfo{
-		"high":   []*CertificateInfo{},
-		"medium": []*CertificateInfo{},
-		"low":    []*CertificateInfo{},
+		"high":   {},
+		"medium": {},
+		"low":    {},
 	}
 
 	for _, candidate := range renewalCandidates {
