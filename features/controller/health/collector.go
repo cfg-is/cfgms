@@ -316,7 +316,7 @@ func (c *DefaultSystemCollector) CollectMetrics(ctx context.Context) error {
 	// Build metrics
 	metrics := &SystemMetrics{
 		CPUPercent:          cpuPercent[0],
-		MemoryUsedBytes:     int64(vmem.Used),      // #nosec G115 -- Memory size cannot exceed int64 max (8 exabytes)
+		MemoryUsedBytes:     int64(vmem.Used), // #nosec G115 -- Memory size cannot exceed int64 max (8 exabytes)
 		MemoryPercent:       vmem.UsedPercent,
 		HeapBytes:           int64(memStats.HeapAlloc), // #nosec G115 -- Heap size cannot exceed int64 max (8 exabytes)
 		RSSBytes:            int64(memStats.Sys),       // #nosec G115 -- RSS size cannot exceed int64 max (8 exabytes)
