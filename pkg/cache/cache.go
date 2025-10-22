@@ -40,8 +40,8 @@ func NewCache(config CacheConfig) *Cache {
 // Get retrieves a value from the cache
 // Returns (value, true) if found and not expired, (nil, false) if not found or expired
 func (c *Cache) Get(key string) (interface{}, bool) {
-	c.mutex.RLock()
-	defer c.mutex.RUnlock()
+	c.mutex.Lock() // Use write lock to update access tracking
+	defer c.mutex.Unlock()
 
 	entry, exists := c.items[key]
 	if !exists {
@@ -54,6 +54,10 @@ func (c *Cache) Get(key string) (interface{}, bool) {
 		c.stats.Misses++
 		return nil, false
 	}
+
+	// Update access tracking for LRU/LFU eviction
+	entry.LastAccessed = time.Now()
+	entry.AccessCount++
 
 	c.stats.Hits++
 	return entry.Value, true
@@ -69,9 +73,13 @@ func (c *Cache) Set(key string, value interface{}, ttl time.Duration) error {
 		ttl = c.config.DefaultTTL
 	}
 
+	now := time.Now()
 	c.items[key] = &CacheEntry{
-		Value:     value,
-		ExpiresAt: time.Now().Add(ttl),
+		Value:        value,
+		ExpiresAt:    now.Add(ttl),
+		CreatedAt:    now,
+		LastAccessed: now,
+		AccessCount:  0,
 	}
 
 	// Enforce size limits
@@ -145,12 +153,17 @@ func (c *Cache) Close() {
 // GetMany retrieves multiple values from the cache in a single call
 // Returns a map of key -> value for found items
 func (c *Cache) GetMany(keys []string) map[string]interface{} {
-	c.mutex.RLock()
-	defer c.mutex.RUnlock()
+	c.mutex.Lock() // Use write lock to update access tracking
+	defer c.mutex.Unlock()
 
 	result := make(map[string]interface{})
+	now := time.Now()
 	for _, key := range keys {
 		if entry, exists := c.items[key]; exists && !entry.IsExpired() {
+			// Update access tracking for LRU/LFU eviction
+			entry.LastAccessed = now
+			entry.AccessCount++
+
 			result[key] = entry.Value
 			c.stats.Hits++
 		} else {
@@ -171,11 +184,15 @@ func (c *Cache) SetMany(items map[string]interface{}, ttl time.Duration) error {
 		ttl = c.config.DefaultTTL
 	}
 
-	expiresAt := time.Now().Add(ttl)
+	now := time.Now()
+	expiresAt := now.Add(ttl)
 	for key, value := range items {
 		c.items[key] = &CacheEntry{
-			Value:     value,
-			ExpiresAt: expiresAt,
+			Value:        value,
+			ExpiresAt:    expiresAt,
+			CreatedAt:    now,
+			LastAccessed: now,
+			AccessCount:  0,
 		}
 	}
 
@@ -248,8 +265,9 @@ func (c *Cache) updateSizeStats() {
 	c.stats.Size = len(c.items)
 }
 
-// enforceMaxSize removes oldest items if we exceed the limit (must be called while holding mutex)
-// Uses simple FIFO eviction - in production, could be LRU
+// enforceMaxSize removes items based on eviction policy if we exceed the limit
+// (must be called while holding mutex)
+// Supports FIFO, LRU (Least Recently Used), and LFU (Least Frequently Used)
 func (c *Cache) enforceMaxSize() {
 	maxSize := c.config.MaxRuntimeItems
 	if maxSize <= 0 {
@@ -260,20 +278,106 @@ func (c *Cache) enforceMaxSize() {
 		return
 	}
 
-	// Simple eviction: remove items until we're under the limit
-	// In production, could track access times for LRU
 	count := len(c.items) - maxSize
-	evicted := 0
 
-	for key := range c.items {
-		if evicted >= count {
-			break
-		}
-		delete(c.items, key)
-		evicted++
+	switch c.config.EvictionPolicy {
+	case EvictionLRU:
+		c.evictLRU(count)
+	case EvictionLFU:
+		c.evictLFU(count)
+	default: // EvictionFIFO or unspecified
+		c.evictFIFO(count)
+	}
+}
+
+// evictFIFO removes the oldest created items (simple FIFO eviction)
+func (c *Cache) evictFIFO(count int) {
+	type entry struct {
+		key       string
+		createdAt time.Time
 	}
 
-	c.stats.Evictions += int64(evicted)
+	// Collect all entries with creation times
+	entries := make([]entry, 0, len(c.items))
+	for key, item := range c.items {
+		entries = append(entries, entry{key: key, createdAt: item.CreatedAt})
+	}
+
+	// Sort by creation time (oldest first)
+	for i := 0; i < len(entries)-1; i++ {
+		for j := i + 1; j < len(entries); j++ {
+			if entries[i].createdAt.After(entries[j].createdAt) {
+				entries[i], entries[j] = entries[j], entries[i]
+			}
+		}
+	}
+
+	// Remove oldest entries
+	for i := 0; i < count && i < len(entries); i++ {
+		delete(c.items, entries[i].key)
+	}
+
+	c.stats.Evictions += int64(count)
+}
+
+// evictLRU removes the least recently accessed items
+func (c *Cache) evictLRU(count int) {
+	type entry struct {
+		key          string
+		lastAccessed time.Time
+	}
+
+	// Collect all entries with last access times
+	entries := make([]entry, 0, len(c.items))
+	for key, item := range c.items {
+		entries = append(entries, entry{key: key, lastAccessed: item.LastAccessed})
+	}
+
+	// Sort by last access time (least recently accessed first)
+	for i := 0; i < len(entries)-1; i++ {
+		for j := i + 1; j < len(entries); j++ {
+			if entries[i].lastAccessed.After(entries[j].lastAccessed) {
+				entries[i], entries[j] = entries[j], entries[i]
+			}
+		}
+	}
+
+	// Remove least recently accessed entries
+	for i := 0; i < count && i < len(entries); i++ {
+		delete(c.items, entries[i].key)
+	}
+
+	c.stats.Evictions += int64(count)
+}
+
+// evictLFU removes the least frequently accessed items
+func (c *Cache) evictLFU(count int) {
+	type entry struct {
+		key         string
+		accessCount int64
+	}
+
+	// Collect all entries with access counts
+	entries := make([]entry, 0, len(c.items))
+	for key, item := range c.items {
+		entries = append(entries, entry{key: key, accessCount: item.AccessCount})
+	}
+
+	// Sort by access count (least frequently accessed first)
+	for i := 0; i < len(entries)-1; i++ {
+		for j := i + 1; j < len(entries); j++ {
+			if entries[i].accessCount > entries[j].accessCount {
+				entries[i], entries[j] = entries[j], entries[i]
+			}
+		}
+	}
+
+	// Remove least frequently accessed entries
+	for i := 0; i < count && i < len(entries); i++ {
+		delete(c.items, entries[i].key)
+	}
+
+	c.stats.Evictions += int64(count)
 }
 
 // Helper functions for debugging
