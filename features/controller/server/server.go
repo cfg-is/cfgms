@@ -796,7 +796,7 @@ func initializeMQTTBroker(cfg *config.Config, logger logging.Logger, certManager
 func ensureMQTTCertificatesFromManager(caPath string, certManager *cert.Manager, logger logging.Logger) error {
 	// Create directory structure
 	serverDir := filepath.Join(caPath, "server")
-	if err := os.MkdirAll(serverDir, 0755); err != nil {
+	if err := os.MkdirAll(serverDir, 0750); err != nil { // Restrict to owner+group only
 		return fmt.Errorf("failed to create server cert directory: %w", err)
 	}
 
@@ -814,7 +814,7 @@ func ensureMQTTCertificatesFromManager(caPath string, certManager *cert.Manager,
 
 	// Save server certificate
 	serverCertPath := filepath.Join(serverDir, "server.crt")
-	if err := os.WriteFile(serverCertPath, serverCert.CertificatePEM, 0644); err != nil {
+	if err := os.WriteFile(serverCertPath, serverCert.CertificatePEM, 0600); err != nil { // Restrict to owner only
 		return fmt.Errorf("failed to write server certificate: %w", err)
 	}
 
@@ -831,7 +831,7 @@ func ensureMQTTCertificatesFromManager(caPath string, certManager *cert.Manager,
 	}
 
 	caPath = filepath.Join(caPath, "ca.crt")
-	if err := os.WriteFile(caPath, caCert, 0644); err != nil {
+	if err := os.WriteFile(caPath, caCert, 0600); err != nil { // Restrict to owner only
 		return fmt.Errorf("failed to write CA certificate: %w", err)
 	}
 

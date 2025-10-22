@@ -618,7 +618,7 @@ type TemplateManifest struct {
 
 // LoadManifest loads a template manifest from a YAML file
 func LoadManifest(path string) (*TemplateManifest, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- Path from internal template management system
 	if err != nil {
 		return nil, fmt.Errorf("failed to read manifest: %w", err)
 	}

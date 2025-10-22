@@ -276,7 +276,7 @@ func loadTLSConfig(certFile, keyFile, caFile string) (*tls.Config, error) {
 	}
 
 	// Load CA cert
-	caCert, err := os.ReadFile(caFile)
+	caCert, err := os.ReadFile(caFile) // #nosec G304 -- Path from trusted configuration file
 	if err != nil {
 		return nil, fmt.Errorf("failed to read CA certificate: %w", err)
 	}

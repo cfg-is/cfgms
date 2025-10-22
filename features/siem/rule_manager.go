@@ -144,7 +144,7 @@ func (rm *RuleManagerImpl) loadRulesFromFile(ctx context.Context, filePath, form
 		"file_path", safePath,
 		"format", format)
 
-	data, err := os.ReadFile(safePath)
+	data, err := os.ReadFile(safePath) // #nosec G304 -- Path validated and sanitized by validateAndCleanPath above
 	if err != nil {
 		return fmt.Errorf("failed to read rule file: %w", err)
 	}
@@ -190,7 +190,7 @@ func (rm *RuleManagerImpl) loadRulesFromDirectory(ctx context.Context, dirPath, 
 			return nil // Continue with other files
 		}
 
-		data, err := os.ReadFile(safePath)
+		data, err := os.ReadFile(safePath) // #nosec G304 -- Path validated and sanitized by validateAndCleanPath above
 		if err != nil {
 			logger.ErrorCtx(ctx, "Failed to read rule file",
 				"file", safePath,

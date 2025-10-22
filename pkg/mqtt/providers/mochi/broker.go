@@ -99,7 +99,13 @@ func (b *Broker) Start(ctx context.Context) error {
 	// Set custom capabilities
 	options.Capabilities.MaximumMessageExpiryInterval = int64(b.config.InflightExpiry.Seconds())
 	options.Capabilities.MaximumClientWritesPending = 1024
-	options.Capabilities.MaximumSessionExpiryInterval = uint32(b.config.SessionExpiryInterval)
+
+	// Cap SessionExpiryInterval at uint32 max per MQTT spec (4,294,967,295 seconds ~= 136 years)
+	sessionExpiry := b.config.SessionExpiryInterval
+	if sessionExpiry > 0xFFFFFFFF {
+		sessionExpiry = 0xFFFFFFFF // Cap at uint32 max to prevent overflow
+	}
+	options.Capabilities.MaximumSessionExpiryInterval = uint32(sessionExpiry) //#nosec G115 -- Bounds checked above
 	options.Capabilities.Compatibilities.ObscureNotAuthorized = true
 
 	b.server = mqtt.New(options)

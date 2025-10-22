@@ -22,6 +22,11 @@ func LoadTLSCertificate(certPEM, keyPEM []byte) (tls.Certificate, error) {
 // - caCertPEM: CA certificate for client verification (optional, nil to disable client auth)
 // - minVersion: Minimum TLS version (e.g., tls.VersionTLS12, tls.VersionTLS13)
 func CreateServerTLSConfig(serverCertPEM, serverKeyPEM, caCertPEM []byte, minVersion uint16) (*tls.Config, error) {
+	// Enforce minimum TLS 1.2 for security
+	if minVersion < tls.VersionTLS12 {
+		return nil, fmt.Errorf("minimum TLS version must be 1.2 or higher, got 0x%04x", minVersion)
+	}
+
 	// Load server certificate
 	cert, err := LoadTLSCertificate(serverCertPEM, serverKeyPEM)
 	if err != nil {
@@ -30,7 +35,7 @@ func CreateServerTLSConfig(serverCertPEM, serverKeyPEM, caCertPEM []byte, minVer
 
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{cert},
-		MinVersion:   minVersion,
+		MinVersion:   minVersion, // #nosec G402 -- TLS 1.2+ enforced by validation above (line 26-28)
 	}
 
 	// Configure client authentication if CA cert is provided
@@ -57,8 +62,13 @@ func CreateServerTLSConfig(serverCertPEM, serverKeyPEM, caCertPEM []byte, minVer
 // - serverName: Server name for SNI and certificate verification
 // - minVersion: Minimum TLS version (e.g., tls.VersionTLS12, tls.VersionTLS13)
 func CreateClientTLSConfig(clientCertPEM, clientKeyPEM, caCertPEM []byte, serverName string, minVersion uint16) (*tls.Config, error) {
+	// Enforce minimum TLS 1.2 for security
+	if minVersion < tls.VersionTLS12 {
+		return nil, fmt.Errorf("minimum TLS version must be 1.2 or higher, got 0x%04x", minVersion)
+	}
+
 	tlsConfig := &tls.Config{
-		MinVersion: minVersion,
+		MinVersion: minVersion, // #nosec G402 -- TLS 1.2+ enforced by validation above (line 66-68)
 		ServerName: serverName,
 	}
 
@@ -86,6 +96,11 @@ func CreateClientTLSConfig(clientCertPEM, clientKeyPEM, caCertPEM []byte, server
 // CreateBasicTLSConfig creates a basic TLS config with custom settings
 // This is useful when you need more control over the TLS configuration
 func CreateBasicTLSConfig(certPEM, keyPEM []byte, minVersion uint16) (*tls.Config, error) {
+	// Enforce minimum TLS 1.2 for security
+	if minVersion < tls.VersionTLS12 {
+		return nil, fmt.Errorf("minimum TLS version must be 1.2 or higher, got 0x%04x", minVersion)
+	}
+
 	if certPEM != nil && keyPEM != nil {
 		cert, err := LoadTLSCertificate(certPEM, keyPEM)
 		if err != nil {
@@ -94,12 +109,12 @@ func CreateBasicTLSConfig(certPEM, keyPEM []byte, minVersion uint16) (*tls.Confi
 
 		return &tls.Config{
 			Certificates: []tls.Certificate{cert},
-			MinVersion:   minVersion,
+			MinVersion:   minVersion, // #nosec G402 -- TLS 1.2+ enforced by validation above (line 100-102)
 		}, nil
 	}
 
 	return &tls.Config{
-		MinVersion: minVersion,
+		MinVersion: minVersion, // #nosec G402 -- TLS 1.2+ enforced by validation above (line 100-102)
 	}, nil
 }
 
