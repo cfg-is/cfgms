@@ -298,8 +298,12 @@ func (cm *CacheManager) CacheAuth(request *ContinuousAuthRequest, response *Cont
 		return nil // Already expired
 	}
 
-	cm.l1Cache.Set(cacheKey, cached, ttl)
-	cm.l2Cache.Set(cacheKey, cached, ttl*2) // L2 has longer TTL
+	if err := cm.l1Cache.Set(cacheKey, cached, ttl); err != nil {
+		return fmt.Errorf("failed to cache auth in L1: %w", err)
+	}
+	if err := cm.l2Cache.Set(cacheKey, cached, ttl*2); err != nil {
+		return fmt.Errorf("failed to cache auth in L2: %w", err)
+	}
 
 	// Update session index for O(1) session invalidation
 	cm.indexMutex.Lock()
@@ -421,7 +425,8 @@ func (cm *CacheManager) GetCacheStats() *CacheStats {
 func (cm *CacheManager) promoteToL1(cacheKey string, cached *CachedAuthDecision) {
 	ttl := time.Until(cached.ValidUntil)
 	if ttl > 0 {
-		cm.l1Cache.Set(cacheKey, cached, ttl)
+		// Ignore error - L1 promotion is a performance optimization, not critical
+		_ = cm.l1Cache.Set(cacheKey, cached, ttl)
 	}
 }
 
