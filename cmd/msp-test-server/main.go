@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/features/modules/m365/auth"
-	
+
 	// Import git plugin for storage
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 )
@@ -21,9 +21,9 @@ import (
 func main() {
 	// Load MSP credentials from environment
 	clientID := os.Getenv("M365_MSP_CLIENT_ID")
-	clientSecret := os.Getenv("M365_MSP_CLIENT_SECRET") 
+	clientSecret := os.Getenv("M365_MSP_CLIENT_SECRET")
 	tenantID := os.Getenv("M365_MSP_TENANT_ID")
-	
+
 	// Fallback to regular M365 vars if MSP vars not set
 	if clientID == "" {
 		clientID = os.Getenv("M365_CLIENT_ID")
@@ -34,11 +34,11 @@ func main() {
 	if tenantID == "" {
 		tenantID = os.Getenv("M365_TENANT_ID")
 	}
-	
+
 	if clientID == "" || clientSecret == "" || tenantID == "" {
 		log.Fatal("Missing M365 MSP credentials. Add M365_MSP_* variables to .env.local or run: source .env.local")
 	}
-	
+
 	// Create MSP configuration
 	mspConfig := &auth.MultiTenantConfig{
 		ClientID:         clientID,
@@ -47,25 +47,25 @@ func main() {
 		AdminCallbackURI: "http://localhost:8080/admin/callback",
 		ApplicationPermissions: []string{
 			"User.ReadWrite.All",
-			"Directory.ReadWrite.All", 
+			"Directory.ReadWrite.All",
 			"Group.ReadWrite.All",
 			"Policy.ReadWrite.ConditionalAccess",
 			"DeviceManagementConfiguration.ReadWrite.All",
 			"Organization.Read.All",
 		},
 	}
-	
+
 	// Create storage using git provider
 	config := &auth.ClientStoreConfig{Type: auth.ClientStoreGit}
 	clientStore, err := auth.NewClientTenantStore(config, nil)
 	if err != nil {
 		log.Fatal("Failed to create client store:", err)
 	}
-	
+
 	// Create admin consent flow
 	flow := auth.NewAdminConsentFlow(mspConfig, clientStore)
 	ctx := context.Background()
-	
+
 	// HTTP handlers
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		html := `<!DOCTYPE html>
@@ -121,37 +121,37 @@ func main() {
 			http.Error(w, "Failed to write response", http.StatusInternalServerError)
 		}
 	})
-	
+
 	http.HandleFunc("/test-consent", func(w http.ResponseWriter, r *http.Request) {
 		// Get parameters
 		clientIdentifier := r.URL.Query().Get("client_id")
 		if clientIdentifier == "" {
 			clientIdentifier = "test-client-001"
 		}
-		
-		clientName := r.URL.Query().Get("client_name")  
+
+		clientName := r.URL.Query().Get("client_name")
 		if clientName == "" {
 			clientName = "Test Client Corp"
 		}
-		
+
 		mspEmployee := r.URL.Query().Get("msp_employee")
 		if mspEmployee == "" {
 			mspEmployee = "admin@cfgms.com"
 		}
-		
+
 		// Start consent flow
 		request, adminURL, err := flow.StartAdminConsentFlow(
 			ctx,
 			clientIdentifier,
-			clientName, 
+			clientName,
 			mspEmployee,
 		)
-		
+
 		if err != nil {
 			http.Error(w, fmt.Sprintf("Error: %v", err), http.StatusInternalServerError)
 			return
 		}
-		
+
 		html := fmt.Sprintf(`<!DOCTYPE html>
 <html>
 <head>
@@ -202,25 +202,25 @@ func main() {
     
     <p><a href="/">&larr; Back to main page</a></p>
 </body>
-</html>`, 
-			clientName, clientIdentifier, clientName, mspEmployee, 
+</html>`,
+			clientName, clientIdentifier, clientName, mspEmployee,
 			request.State[:16]+"...", request.ExpiresAt.Format("2006-01-02 15:04:05"),
 			adminURL, adminURL)
-		
+
 		w.Header().Set("Content-Type", "text/html")
 		if _, err := fmt.Fprint(w, html); err != nil {
 			http.Error(w, "Failed to write response", http.StatusInternalServerError)
 		}
 	})
-	
+
 	http.HandleFunc("/admin/callback", func(w http.ResponseWriter, r *http.Request) {
 		// Handle the callback from Microsoft
 		callbackURL := fmt.Sprintf("http://localhost:8080%s", r.URL.RequestURI())
-		
+
 		log.Printf("Received callback: %s", callbackURL)
-		
+
 		result, err := flow.HandleAdminConsentCallback(ctx, callbackURL)
-		
+
 		var html string
 		if err != nil {
 			log.Printf("Callback error: %v", err)
@@ -316,20 +316,20 @@ func main() {
 </body>
 </html>`
 		}
-		
+
 		w.Header().Set("Content-Type", "text/html")
 		if _, err := fmt.Fprint(w, html); err != nil {
 			http.Error(w, "Failed to write response", http.StatusInternalServerError)
 		}
 	})
-	
+
 	http.HandleFunc("/list-clients", func(w http.ResponseWriter, r *http.Request) {
 		clients, err := clientStore.ListClientTenants("")
 		if err != nil {
 			http.Error(w, fmt.Sprintf("Error: %v", err), http.StatusInternalServerError)
 			return
 		}
-		
+
 		html := `<!DOCTYPE html>
 <html>
 <head>
@@ -346,7 +346,7 @@ func main() {
 </head>
 <body>
     <h1>👥 Onboarded Clients</h1>`
-		
+
 		if len(clients) == 0 {
 			html += `<p>No clients onboarded yet. <a href="/">Start admin consent flow</a></p>`
 		} else {
@@ -360,7 +360,7 @@ func main() {
 					<th>Consented</th>
 					<th>Actions</th>
 				</tr>`, len(clients))
-				
+
 			for _, client := range clients {
 				statusClass := fmt.Sprintf("status-%s", client.Status)
 				html += fmt.Sprintf(`
@@ -379,15 +379,15 @@ func main() {
 			}
 			html += `</table>`
 		}
-		
+
 		html += `<p><a href="/">&larr; Back to main page</a></p></body></html>`
-		
+
 		w.Header().Set("Content-Type", "text/html")
 		if _, err := fmt.Fprint(w, html); err != nil {
 			http.Error(w, "Failed to write response", http.StatusInternalServerError)
 		}
 	})
-	
+
 	// API testing handler
 	http.HandleFunc("/test-api", func(w http.ResponseWriter, r *http.Request) {
 		tenantID := r.URL.Query().Get("tenant")
@@ -395,10 +395,10 @@ func main() {
 			http.Error(w, "tenant parameter required", http.StatusBadRequest)
 			return
 		}
-		
+
 		// Test Microsoft Graph API access
 		results := testGraphAPIAccess(mspConfig, tenantID)
-		
+
 		html := fmt.Sprintf(`<!DOCTYPE html>
 <html>
 <head>
@@ -423,20 +423,20 @@ func main() {
     <p><a href="/list-clients" class="btn">Back to Clients</a> | <a href="/" class="btn">Home</a></p>
 </body>
 </html>`, tenantID, results)
-		
+
 		w.Header().Set("Content-Type", "text/html")
 		if _, err := fmt.Fprint(w, html); err != nil {
 			http.Error(w, "Failed to write response", http.StatusInternalServerError)
 		}
 	})
-	
+
 	// Start server
 	log.Printf("CFGMS MSP Test Server starting...")
 	log.Printf("Open browser: http://localhost:8080")
 	log.Printf("Client ID: %s", clientID[:8]+"...")
 	log.Printf("Tenant: %s", tenantID)
 	log.Printf("Storage: Git-backed")
-	
+
 	if err := http.ListenAndServe(":8080", nil); err != nil {
 		log.Fatal("Server failed:", err)
 	}
@@ -449,7 +449,7 @@ func testGraphAPIAccess(config *auth.MultiTenantConfig, clientTenantID string) s
 	if err != nil {
 		return fmt.Sprintf(`<div class="error"><h3>Token Error</h3><p>%s</p></div>`, err.Error())
 	}
-	
+
 	// Test various API endpoints
 	tests := []struct {
 		name     string
@@ -461,29 +461,29 @@ func testGraphAPIAccess(config *auth.MultiTenantConfig, clientTenantID string) s
 		{"Groups", "https://graph.microsoft.com/v1.0/groups?$top=5", "List groups (sample)"},
 		{"Applications", "https://graph.microsoft.com/v1.0/applications?$top=5", "List applications"},
 	}
-	
+
 	var results strings.Builder
 	results.WriteString(fmt.Sprintf(`<div class="success"><h3>Access Token Acquired</h3><p>Successfully obtained token for tenant %s</p></div>`, clientTenantID))
-	
+
 	for _, test := range tests {
 		result := testAPIEndpoint(test.endpoint, token.Token, test.name, test.desc)
 		results.WriteString(result)
 	}
-	
+
 	return results.String()
 }
 
 // getMSPToken gets an access token for the specified client tenant
 func getMSPToken(config *auth.MultiTenantConfig, clientTenantID string) (*auth.AccessToken, error) {
 	tokenURL := fmt.Sprintf("https://login.microsoftonline.com/%s/oauth2/v2.0/token", clientTenantID)
-	
+
 	data := url.Values{
 		"grant_type":    {"client_credentials"},
 		"client_id":     {config.ClientID},
 		"client_secret": {config.ClientSecret},
 		"scope":         {"https://graph.microsoft.com/.default"},
 	}
-	
+
 	resp, err := http.PostForm(tokenURL, data)
 	if err != nil {
 		return nil, fmt.Errorf("token request failed: %w", err)
@@ -493,26 +493,26 @@ func getMSPToken(config *auth.MultiTenantConfig, clientTenantID string) (*auth.A
 			log.Printf("Failed to close response body: %v", err)
 		}
 	}()
-	
+
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read token response: %w", err)
 	}
-	
+
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("token request failed (%d): %s", resp.StatusCode, string(body))
 	}
-	
+
 	var tokenResponse struct {
 		AccessToken string `json:"access_token"`
 		TokenType   string `json:"token_type"`
 		ExpiresIn   int    `json:"expires_in"`
 	}
-	
+
 	if err := json.Unmarshal(body, &tokenResponse); err != nil {
 		return nil, fmt.Errorf("failed to parse token response: %w", err)
 	}
-	
+
 	return &auth.AccessToken{
 		Token:     tokenResponse.AccessToken,
 		TokenType: tokenResponse.TokenType,
@@ -524,15 +524,15 @@ func getMSPToken(config *auth.MultiTenantConfig, clientTenantID string) (*auth.A
 // testAPIEndpoint tests a specific Microsoft Graph API endpoint
 func testAPIEndpoint(endpoint, token, name, description string) string {
 	client := &http.Client{Timeout: 10 * time.Second}
-	
+
 	req, err := http.NewRequest("GET", endpoint, nil)
 	if err != nil {
 		return fmt.Sprintf(`<div class="api-test error"><h4>%s - %s</h4><p>Request creation failed: %s</p></div>`, name, description, err.Error())
 	}
-	
+
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
-	
+
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Sprintf(`<div class="api-test error"><h4>%s - %s</h4><p>Request failed: %s</p></div>`, name, description, err.Error())
@@ -542,24 +542,24 @@ func testAPIEndpoint(endpoint, token, name, description string) string {
 			log.Printf("Failed to close response body: %v", err)
 		}
 	}()
-	
+
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return fmt.Sprintf(`<div class="api-test error"><h4>%s - %s</h4><p>Response read failed: %s</p></div>`, name, description, err.Error())
 	}
-	
+
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		// Pretty print JSON
 		var jsonData interface{}
 		if err := json.Unmarshal(body, &jsonData); err == nil {
 			prettyJSON, _ := json.MarshalIndent(jsonData, "", "  ")
-			return fmt.Sprintf(`<div class="api-test success"><h4>%s - %s</h4><p>Status: %d SUCCESS</p><pre>%s</pre></div>`, 
+			return fmt.Sprintf(`<div class="api-test success"><h4>%s - %s</h4><p>Status: %d SUCCESS</p><pre>%s</pre></div>`,
 				name, description, resp.StatusCode, string(prettyJSON))
 		}
-		return fmt.Sprintf(`<div class="api-test success"><h4>%s - %s</h4><p>Status: %d SUCCESS</p><pre>%s</pre></div>`, 
+		return fmt.Sprintf(`<div class="api-test success"><h4>%s - %s</h4><p>Status: %d SUCCESS</p><pre>%s</pre></div>`,
 			name, description, resp.StatusCode, string(body))
 	} else {
-		return fmt.Sprintf(`<div class="api-test error"><h4>%s - %s</h4><p>Status: %d FAILED</p><pre>%s</pre></div>`, 
+		return fmt.Sprintf(`<div class="api-test error"><h4>%s - %s</h4><p>Status: %d FAILED</p><pre>%s</pre></div>`,
 			name, description, resp.StatusCode, string(body))
 	}
 }

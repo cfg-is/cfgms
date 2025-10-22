@@ -3,10 +3,11 @@ package modules
 
 import (
 	"fmt"
-	"gopkg.in/yaml.v3"
 	"io"
 	"os"
 	"path/filepath"
+
+	"gopkg.in/yaml.v3"
 )
 
 // ModuleMetadata represents the complete metadata for a module

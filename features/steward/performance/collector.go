@@ -22,9 +22,9 @@ type DefaultCollector struct {
 	config *CollectorConfig
 
 	// Metrics storage
-	metricsMu       sync.RWMutex
-	currentMetrics  *PerformanceMetrics
-	metricsHistory  []*PerformanceMetrics
+	metricsMu      sync.RWMutex
+	currentMetrics *PerformanceMetrics
+	metricsHistory []*PerformanceMetrics
 
 	// Control
 	ctx        context.Context

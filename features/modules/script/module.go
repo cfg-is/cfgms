@@ -264,6 +264,7 @@ func (m *Module) validateSignature(config *ScriptConfig) error {
 //   - Parsing public key or retrieving certificate by thumbprint
 //   - Verifying signature against script content using specified algorithm
 //   - Returning appropriate error if verification fails
+//
 // Until implemented, scripts with signing policies will pass validation if signature
 // metadata is present and correctly formatted.
 func (m *Module) verifySignature(config *ScriptConfig) error {

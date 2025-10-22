@@ -5,10 +5,11 @@ import (
 	"testing"
 	"time"
 
-	commonpb "github.com/cfgis/cfgms/api/proto/common"
-	"github.com/cfgis/cfgms/features/modules/patch"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	commonpb "github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/features/modules/patch"
 )
 
 // TestE2E_ComplianceWorkflow_CompliantSystem tests the full compliance workflow

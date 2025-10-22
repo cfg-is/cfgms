@@ -34,7 +34,7 @@ func NewLocalRepositoryStore(username, password string) *LocalRepositoryStore {
 			Password: password,
 		}
 	}
-	
+
 	return &LocalRepositoryStore{
 		auth: auth,
 	}
@@ -46,11 +46,11 @@ func (s *LocalRepositoryStore) Clone(ctx context.Context, cloneURL, localPath st
 		URL:  cloneURL,
 		Auth: s.auth,
 	})
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to clone repository: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -60,25 +60,25 @@ func (s *LocalRepositoryStore) Pull(ctx context.Context, localPath string) error
 	if err != nil {
 		return fmt.Errorf("failed to open repository: %w", err)
 	}
-	
+
 	w, err := repo.Worktree()
 	if err != nil {
 		return fmt.Errorf("failed to get worktree: %w", err)
 	}
-	
+
 	err = w.PullContext(ctx, &git.PullOptions{
 		Auth: s.auth,
 	})
-	
+
 	// No changes is not an error
 	if err == git.NoErrAlreadyUpToDate {
 		return nil
 	}
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to pull changes: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -88,27 +88,27 @@ func (s *LocalRepositoryStore) Push(ctx context.Context, localPath string) error
 	if err != nil {
 		return fmt.Errorf("failed to open repository: %w", err)
 	}
-	
+
 	err = repo.PushContext(ctx, &git.PushOptions{
 		Auth: s.auth,
 	})
-	
+
 	// No changes is not an error
 	if err == git.NoErrAlreadyUpToDate {
 		return nil
 	}
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to push changes: %w", err)
 	}
-	
+
 	return nil
 }
 
 // ReadFile reads a file from the repository
 func (s *LocalRepositoryStore) ReadFile(ctx context.Context, localPath, filePath string) ([]byte, error) {
 	fullPath := filepath.Join(localPath, filePath)
-	
+
 	data, err := os.ReadFile(fullPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -116,74 +116,74 @@ func (s *LocalRepositoryStore) ReadFile(ctx context.Context, localPath, filePath
 		}
 		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
-	
+
 	return data, nil
 }
 
 // WriteFile writes a file to the repository
 func (s *LocalRepositoryStore) WriteFile(ctx context.Context, localPath, filePath string, content []byte) error {
 	fullPath := filepath.Join(localPath, filePath)
-	
+
 	// Create directory if needed
 	dir := filepath.Dir(fullPath)
 	if err := os.MkdirAll(dir, 0750); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
-	
+
 	// Write file
 	if err := os.WriteFile(fullPath, content, 0600); err != nil {
 		return fmt.Errorf("failed to write file: %w", err)
 	}
-	
+
 	// Stage the file
 	repo, err := git.PlainOpen(localPath)
 	if err != nil {
 		return fmt.Errorf("failed to open repository: %w", err)
 	}
-	
+
 	w, err := repo.Worktree()
 	if err != nil {
 		return fmt.Errorf("failed to get worktree: %w", err)
 	}
-	
+
 	_, err = w.Add(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to stage file: %w", err)
 	}
-	
+
 	return nil
 }
 
 // DeleteFile deletes a file from the repository
 func (s *LocalRepositoryStore) DeleteFile(ctx context.Context, localPath, filePath string) error {
 	fullPath := filepath.Join(localPath, filePath)
-	
+
 	// Check if file exists
 	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
 		return fmt.Errorf("file not found: %s", filePath)
 	}
-	
+
 	// Delete file
 	if err := os.Remove(fullPath); err != nil {
 		return fmt.Errorf("failed to delete file: %w", err)
 	}
-	
+
 	// Stage the deletion
 	repo, err := git.PlainOpen(localPath)
 	if err != nil {
 		return fmt.Errorf("failed to open repository: %w", err)
 	}
-	
+
 	w, err := repo.Worktree()
 	if err != nil {
 		return fmt.Errorf("failed to get worktree: %w", err)
 	}
-	
+
 	_, err = w.Remove(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to stage deletion: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -193,22 +193,22 @@ func (s *LocalRepositoryStore) Commit(ctx context.Context, localPath string, mes
 	if err != nil {
 		return "", fmt.Errorf("failed to open repository: %w", err)
 	}
-	
+
 	w, err := repo.Worktree()
 	if err != nil {
 		return "", fmt.Errorf("failed to get worktree: %w", err)
 	}
-	
+
 	// Check if there are changes to commit
 	status, err := w.Status()
 	if err != nil {
 		return "", fmt.Errorf("failed to get status: %w", err)
 	}
-	
+
 	if status.IsClean() {
 		return "", fmt.Errorf("no changes to commit")
 	}
-	
+
 	// Create commit
 	hash, err := w.Commit(message, &git.CommitOptions{
 		Author: &object.Signature{
@@ -217,11 +217,11 @@ func (s *LocalRepositoryStore) Commit(ctx context.Context, localPath string, mes
 			When:  time.Now(),
 		},
 	})
-	
+
 	if err != nil {
 		return "", fmt.Errorf("failed to create commit: %w", err)
 	}
-	
+
 	return hash.String(), nil
 }
 
@@ -231,7 +231,7 @@ func (s *LocalRepositoryStore) GetHistory(ctx context.Context, localPath, filePa
 	if err != nil {
 		return nil, fmt.Errorf("failed to open repository: %w", err)
 	}
-	
+
 	// Get commit iterator
 	iter, err := repo.Log(&git.LogOptions{
 		FileName: &filePath,
@@ -240,21 +240,21 @@ func (s *LocalRepositoryStore) GetHistory(ctx context.Context, localPath, filePa
 		return nil, fmt.Errorf("failed to get log: %w", err)
 	}
 	defer iter.Close()
-	
+
 	var commits []*cfgit.Commit
 	count := 0
-	
+
 	err = iter.ForEach(func(c *object.Commit) error {
 		if limit > 0 && count >= limit {
 			return io.EOF
 		}
-		
+
 		// Get parent SHAs
 		var parents []string
 		for _, p := range c.ParentHashes {
 			parents = append(parents, p.String())
 		}
-		
+
 		// Get file changes
 		var files []cfgit.FileChange
 		if len(c.ParentHashes) > 0 {
@@ -264,7 +264,7 @@ func (s *LocalRepositoryStore) GetHistory(ctx context.Context, localPath, filePa
 				if err == nil {
 					for _, fp := range changes.FilePatches() {
 						from, to := fp.Files()
-						
+
 						var path, oldPath, action string
 						if to != nil {
 							path = to.Path()
@@ -272,7 +272,7 @@ func (s *LocalRepositoryStore) GetHistory(ctx context.Context, localPath, filePa
 						if from != nil {
 							oldPath = from.Path()
 						}
-						
+
 						if from == nil {
 							action = "added"
 						} else if to == nil {
@@ -282,7 +282,7 @@ func (s *LocalRepositoryStore) GetHistory(ctx context.Context, localPath, filePa
 						} else {
 							action = "modified"
 						}
-						
+
 						files = append(files, cfgit.FileChange{
 							Path:    path,
 							Action:  action,
@@ -292,7 +292,7 @@ func (s *LocalRepositoryStore) GetHistory(ctx context.Context, localPath, filePa
 				}
 			}
 		}
-		
+
 		commits = append(commits, &cfgit.Commit{
 			SHA:       c.Hash.String(),
 			Message:   c.Message,
@@ -304,15 +304,15 @@ func (s *LocalRepositoryStore) GetHistory(ctx context.Context, localPath, filePa
 				Email: c.Author.Email,
 			},
 		})
-		
+
 		count++
 		return nil
 	})
-	
+
 	if err != nil && err != io.EOF {
 		return nil, fmt.Errorf("failed to iterate commits: %w", err)
 	}
-	
+
 	return commits, nil
 }
 
@@ -322,38 +322,38 @@ func (s *LocalRepositoryStore) GetDiff(ctx context.Context, localPath string, fr
 	if err != nil {
 		return nil, fmt.Errorf("failed to open repository: %w", err)
 	}
-	
+
 	// Resolve references to commits
 	fromHash, err := repo.ResolveRevision(plumbing.Revision(fromRef))
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve from ref: %w", err)
 	}
-	
+
 	toHash, err := repo.ResolveRevision(plumbing.Revision(toRef))
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve to ref: %w", err)
 	}
-	
+
 	fromCommit, err := repo.CommitObject(*fromHash)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get from commit: %w", err)
 	}
-	
+
 	toCommit, err := repo.CommitObject(*toHash)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get to commit: %w", err)
 	}
-	
+
 	// Get the patch between commits
 	patch, err := fromCommit.Patch(toCommit)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get patch: %w", err)
 	}
-	
+
 	var changes []cfgit.FileChange
 	for _, fp := range patch.FilePatches() {
 		from, to := fp.Files()
-		
+
 		var path, oldPath, action string
 		if to != nil {
 			path = to.Path()
@@ -361,7 +361,7 @@ func (s *LocalRepositoryStore) GetDiff(ctx context.Context, localPath string, fr
 		if from != nil {
 			oldPath = from.Path()
 		}
-		
+
 		if from == nil {
 			action = "added"
 		} else if to == nil {
@@ -371,14 +371,14 @@ func (s *LocalRepositoryStore) GetDiff(ctx context.Context, localPath string, fr
 		} else {
 			action = "modified"
 		}
-		
+
 		changes = append(changes, cfgit.FileChange{
 			Path:    path,
 			Action:  action,
 			OldPath: oldPath,
 		})
 	}
-	
+
 	return changes, nil
 }
 
@@ -388,20 +388,20 @@ func (s *LocalRepositoryStore) CreateBranch(ctx context.Context, localPath, bran
 	if err != nil {
 		return fmt.Errorf("failed to open repository: %w", err)
 	}
-	
+
 	// Get current HEAD
 	head, err := repo.Head()
 	if err != nil {
 		return fmt.Errorf("failed to get HEAD: %w", err)
 	}
-	
+
 	// Create new branch reference
 	ref := plumbing.NewBranchReferenceName(branchName)
 	err = repo.Storer.SetReference(plumbing.NewHashReference(ref, head.Hash()))
 	if err != nil {
 		return fmt.Errorf("failed to create branch: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -411,16 +411,16 @@ func (s *LocalRepositoryStore) CheckoutBranch(ctx context.Context, localPath, br
 	if err != nil {
 		return fmt.Errorf("failed to open repository: %w", err)
 	}
-	
+
 	w, err := repo.Worktree()
 	if err != nil {
 		return fmt.Errorf("failed to get worktree: %w", err)
 	}
-	
+
 	// Check if branch exists locally
 	branchRef := plumbing.NewBranchReferenceName(branchName)
 	_, err = repo.Reference(branchRef, false)
-	
+
 	if err != nil {
 		// Try to create branch from remote
 		remoteRef := plumbing.NewRemoteReferenceName("origin", branchName)
@@ -428,7 +428,7 @@ func (s *LocalRepositoryStore) CheckoutBranch(ctx context.Context, localPath, br
 		if refErr != nil {
 			return fmt.Errorf("branch not found: %s", branchName)
 		}
-		
+
 		// Create local branch from remote
 		err = w.Checkout(&git.CheckoutOptions{
 			Branch: branchRef,
@@ -441,11 +441,11 @@ func (s *LocalRepositoryStore) CheckoutBranch(ctx context.Context, localPath, br
 			Branch: branchRef,
 		})
 	}
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to checkout branch: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -455,24 +455,24 @@ func (s *LocalRepositoryStore) ListBranches(ctx context.Context, localPath strin
 	if err != nil {
 		return nil, fmt.Errorf("failed to open repository: %w", err)
 	}
-	
+
 	// Get all branches
 	iter, err := repo.Branches()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get branches: %w", err)
 	}
 	defer iter.Close()
-	
+
 	var branches []string
 	err = iter.ForEach(func(ref *plumbing.Reference) error {
 		branches = append(branches, ref.Name().Short())
 		return nil
 	})
-	
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to iterate branches: %w", err)
 	}
-	
+
 	// Also get remote branches
 	remotes, err := repo.Remotes()
 	if err == nil && len(remotes) > 0 {
@@ -503,7 +503,7 @@ func (s *LocalRepositoryStore) ListBranches(ctx context.Context, localPath strin
 			}
 		}
 	}
-	
+
 	return branches, nil
 }
 
@@ -525,7 +525,7 @@ func (s *LocalRepositoryStore) InitRepository(ctx context.Context, localPath str
 	if err != nil {
 		return fmt.Errorf("failed to init repository: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -535,15 +535,15 @@ func (s *LocalRepositoryStore) AddRemote(ctx context.Context, localPath, name, u
 	if err != nil {
 		return fmt.Errorf("failed to open repository: %w", err)
 	}
-	
+
 	_, err = repo.CreateRemote(&config.RemoteConfig{
 		Name: name,
 		URLs: []string{url},
 	})
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to add remote: %w", err)
 	}
-	
+
 	return nil
 }

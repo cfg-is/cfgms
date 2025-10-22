@@ -441,4 +441,3 @@ type SessionInfo struct {
 	CreatedAt time.Time         `json:"created_at"`
 	Data      map[string]string `json:"data"`
 }
-

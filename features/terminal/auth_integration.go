@@ -19,116 +19,116 @@ import (
 
 // AuthenticatedTerminalManager manages terminal sessions with mTLS authentication and continuous authorization
 type AuthenticatedTerminalManager struct {
-	baseManager         SessionManager
-	rbacManager         rbac.RBACManager
-	certValidator       *cert.Validator
-	securityValidator   *SecurityValidator
-	auditLogger         *AuditLogger
-	sessionMonitor      *SessionMonitor
+	baseManager          SessionManager
+	rbacManager          rbac.RBACManager
+	certValidator        *cert.Validator
+	securityValidator    *SecurityValidator
+	auditLogger          *AuditLogger
+	sessionMonitor       *SessionMonitor
 	continuousAuthEngine *continuous.ContinuousAuthorizationEngine
-	
+
 	// Anti-hijacking measures
-	sessionTokens       map[string]*SessionToken
-	tokenMutex          sync.RWMutex
-	
+	sessionTokens map[string]*SessionToken
+	tokenMutex    sync.RWMutex
+
 	// Configuration
-	config              *AuthConfig
+	config               *AuthConfig
 	continuousAuthConfig *ContinuousAuthConfig
 }
 
 // AuthConfig contains authentication and security configuration
 type AuthConfig struct {
 	// mTLS Configuration
-	RequireMTLS         bool          `json:"require_mtls"`
-	ClientCertRequired  bool          `json:"client_cert_required"`
-	CertValidationMode  string        `json:"cert_validation_mode"` // strict, relaxed, disabled
-	
+	RequireMTLS        bool   `json:"require_mtls"`
+	ClientCertRequired bool   `json:"client_cert_required"`
+	CertValidationMode string `json:"cert_validation_mode"` // strict, relaxed, disabled
+
 	// Session Security
-	SessionTimeout      time.Duration `json:"session_timeout"`
+	SessionTimeout        time.Duration `json:"session_timeout"`
 	TokenRotationInterval time.Duration `json:"token_rotation_interval"`
-	MaxConcurrentSessions int         `json:"max_concurrent_sessions"`
-	
+	MaxConcurrentSessions int           `json:"max_concurrent_sessions"`
+
 	// Anti-Hijacking
 	IPBindingEnabled    bool          `json:"ip_binding_enabled"`
 	TLSFingerprintCheck bool          `json:"tls_fingerprint_check"`
 	TokenValidation     bool          `json:"token_validation"`
 	HeartbeatInterval   time.Duration `json:"heartbeat_interval"`
-	
+
 	// Additional Security
-	GeofencingEnabled   bool          `json:"geofencing_enabled"`
-	AllowedCountries    []string      `json:"allowed_countries"`
-	TimeBasedAccess     bool          `json:"time_based_access"`
-	AllowedHours        []int         `json:"allowed_hours"`
+	GeofencingEnabled bool     `json:"geofencing_enabled"`
+	AllowedCountries  []string `json:"allowed_countries"`
+	TimeBasedAccess   bool     `json:"time_based_access"`
+	AllowedHours      []int    `json:"allowed_hours"`
 }
 
 // ContinuousAuthConfig contains continuous authorization configuration
 type ContinuousAuthConfig struct {
 	// Continuous Authorization
-	EnableContinuousAuth     bool          `json:"enable_continuous_auth"`
-	AuthorizePerCommand      bool          `json:"authorize_per_command"`
-	CommandAuthTimeout       time.Duration `json:"command_auth_timeout"`
+	EnableContinuousAuth        bool          `json:"enable_continuous_auth"`
+	AuthorizePerCommand         bool          `json:"authorize_per_command"`
+	CommandAuthTimeout          time.Duration `json:"command_auth_timeout"`
 	SessionRevalidationInterval time.Duration `json:"session_revalidation_interval"`
-	
+
 	// Per-command authorization settings
-	RequireAuthCommands      []string      `json:"require_auth_commands"`
-	HighRiskCommands         []string      `json:"high_risk_commands"`
-	CriticalCommands         []string      `json:"critical_commands"`
-	
+	RequireAuthCommands []string `json:"require_auth_commands"`
+	HighRiskCommands    []string `json:"high_risk_commands"`
+	CriticalCommands    []string `json:"critical_commands"`
+
 	// Session monitoring
-	MonitorSessionContext    bool          `json:"monitor_session_context"`
-	ContextChangeThreshold   float64       `json:"context_change_threshold"`
-	MaxAuthLatencyMs         int           `json:"max_auth_latency_ms"`
-	
+	MonitorSessionContext  bool    `json:"monitor_session_context"`
+	ContextChangeThreshold float64 `json:"context_change_threshold"`
+	MaxAuthLatencyMs       int     `json:"max_auth_latency_ms"`
+
 	// Fallback behavior
-	ContinuousAuthFallback   string        `json:"continuous_auth_fallback"` // "allow", "deny", "traditional"
+	ContinuousAuthFallback string `json:"continuous_auth_fallback"` // "allow", "deny", "traditional"
 }
 
 // SessionToken represents a secure session token with anti-hijacking properties
 type SessionToken struct {
-	Token           string            `json:"token"`
-	SessionID       string            `json:"session_id"`
-	UserID          string            `json:"user_id"`
-	IssuedAt        time.Time         `json:"issued_at"`
-	ExpiresAt       time.Time         `json:"expires_at"`
-	LastRotated     time.Time         `json:"last_rotated"`
-	
+	Token       string    `json:"token"`
+	SessionID   string    `json:"session_id"`
+	UserID      string    `json:"user_id"`
+	IssuedAt    time.Time `json:"issued_at"`
+	ExpiresAt   time.Time `json:"expires_at"`
+	LastRotated time.Time `json:"last_rotated"`
+
 	// Security Properties
-	ClientIP        string            `json:"client_ip"`
-	TLSFingerprint  string            `json:"tls_fingerprint"`
-	UserAgent       string            `json:"user_agent"`
-	CertificateHash string            `json:"certificate_hash"`
-	
+	ClientIP        string `json:"client_ip"`
+	TLSFingerprint  string `json:"tls_fingerprint"`
+	UserAgent       string `json:"user_agent"`
+	CertificateHash string `json:"certificate_hash"`
+
 	// State
-	Active          bool              `json:"active"`
-	FailedChecks    int               `json:"failed_checks"`
-	LastHeartbeat   time.Time         `json:"last_heartbeat"`
-	
+	Active        bool      `json:"active"`
+	FailedChecks  int       `json:"failed_checks"`
+	LastHeartbeat time.Time `json:"last_heartbeat"`
+
 	// Metadata
-	Metadata        map[string]string `json:"metadata"`
+	Metadata map[string]string `json:"metadata"`
 }
 
 // AuthenticationResult contains the result of authentication
 type AuthenticationResult struct {
-	Success         bool              `json:"success"`
-	UserID          string            `json:"user_id"`
-	TenantID        string            `json:"tenant_id"`
-	Permissions     []string          `json:"permissions"`
-	SessionToken    *SessionToken     `json:"session_token"`
+	Success         bool                    `json:"success"`
+	UserID          string                  `json:"user_id"`
+	TenantID        string                  `json:"tenant_id"`
+	Permissions     []string                `json:"permissions"`
+	SessionToken    *SessionToken           `json:"session_token"`
 	SecurityContext *SessionSecurityContext `json:"security_context"`
 	Restrictions    *AccessRestrictions     `json:"restrictions"`
-	ErrorMessage    string            `json:"error_message,omitempty"`
+	ErrorMessage    string                  `json:"error_message,omitempty"`
 }
 
 // AccessRestrictions defines restrictions on terminal access
 type AccessRestrictions struct {
-	AllowedCommands     []string          `json:"allowed_commands"`
-	BlockedCommands     []string          `json:"blocked_commands"`
-	MaxSessionDuration  time.Duration     `json:"max_session_duration"`
-	MaxIdleTime         time.Duration     `json:"max_idle_time"`
-	AllowedDirectories  []string          `json:"allowed_directories"`
-	BlockedDirectories  []string          `json:"blocked_directories"`
-	RequireApproval     bool              `json:"require_approval"`
-	MonitoringLevel     SecurityLevel     `json:"monitoring_level"`
+	AllowedCommands    []string      `json:"allowed_commands"`
+	BlockedCommands    []string      `json:"blocked_commands"`
+	MaxSessionDuration time.Duration `json:"max_session_duration"`
+	MaxIdleTime        time.Duration `json:"max_idle_time"`
+	AllowedDirectories []string      `json:"allowed_directories"`
+	BlockedDirectories []string      `json:"blocked_directories"`
+	RequireApproval    bool          `json:"require_approval"`
+	MonitoringLevel    SecurityLevel `json:"monitoring_level"`
 }
 
 // NewAuthenticatedTerminalManager creates a new authenticated terminal manager
@@ -141,28 +141,28 @@ func NewAuthenticatedTerminalManager(
 	if config == nil {
 		config = DefaultAuthConfig()
 	}
-	
+
 	securityValidator := NewSecurityValidator(rbacManager)
 	auditLogger, err := NewAuditLogger(DefaultAuditConfig(), NewFileAuditStorage("/var/log/cfgms/terminal-audit"))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create audit logger: %w", err)
 	}
-	
+
 	sessionMonitor := NewSessionMonitor(securityValidator, DefaultMonitorConfig())
-	
+
 	manager := &AuthenticatedTerminalManager{
-		baseManager:         baseManager,
-		rbacManager:         rbacManager,
-		certValidator:       certValidator,
-		securityValidator:   securityValidator,
-		auditLogger:         auditLogger,
-		sessionMonitor:      sessionMonitor,
+		baseManager:          baseManager,
+		rbacManager:          rbacManager,
+		certValidator:        certValidator,
+		securityValidator:    securityValidator,
+		auditLogger:          auditLogger,
+		sessionMonitor:       sessionMonitor,
 		continuousAuthEngine: nil, // Will be set when enabled
-		sessionTokens:       make(map[string]*SessionToken),
-		config:              config,
+		sessionTokens:        make(map[string]*SessionToken),
+		config:               config,
 		continuousAuthConfig: DefaultContinuousAuthConfig(),
 	}
-	
+
 	// Start background services
 	ctx := context.Background()
 	if err := auditLogger.Start(ctx); err != nil {
@@ -173,10 +173,10 @@ func NewAuthenticatedTerminalManager(
 		// Log error but continue - monitoring failures shouldn't block auth
 		_ = err // Explicitly ignore monitoring startup errors
 	}
-	
+
 	// Start token rotation and cleanup
 	go manager.tokenMaintenanceLoop(ctx)
-	
+
 	return manager, nil
 }
 
@@ -190,7 +190,7 @@ func (atm *AuthenticatedTerminalManager) AuthenticateAndCreateSession(ctx contex
 			ErrorMessage: fmt.Sprintf("Client certificate extraction failed: %v", err),
 		}, nil
 	}
-	
+
 	// Validate client certificate
 	if atm.config.RequireMTLS && clientCert == nil {
 		return &AuthenticationResult{
@@ -198,7 +198,7 @@ func (atm *AuthenticatedTerminalManager) AuthenticateAndCreateSession(ctx contex
 			ErrorMessage: "Client certificate required for terminal access",
 		}, nil
 	}
-	
+
 	// Extract user identity from certificate
 	userID, tenantID, err := atm.extractUserIdentity(clientCert)
 	if err != nil {
@@ -207,22 +207,22 @@ func (atm *AuthenticatedTerminalManager) AuthenticateAndCreateSession(ctx contex
 			ErrorMessage: fmt.Sprintf("User identity extraction failed: %v", err),
 		}, nil
 	}
-	
+
 	// Validate session request against RBAC
 	securityContext, err := atm.securityValidator.ValidateSessionAccess(ctx, userID, req.StewardID, tenantID)
 	if err != nil {
-		if logErr := atm.auditLogger.LogSecurityViolation(ctx, "", userID, req.StewardID, tenantID, 
+		if logErr := atm.auditLogger.LogSecurityViolation(ctx, "", userID, req.StewardID, tenantID,
 			"terminal_access_denied", err.Error(), FilterSeverityHigh); logErr != nil {
 			// Log error but continue - audit failures shouldn't block auth decision
 			_ = logErr // Explicitly ignore audit failures for resilience
 		}
-		
+
 		return &AuthenticationResult{
 			Success:      false,
 			ErrorMessage: fmt.Sprintf("Access denied: %v", err),
 		}, nil
 	}
-	
+
 	// Check for additional security restrictions
 	restrictions, err := atm.getAccessRestrictions(ctx, userID, tenantID, req.StewardID)
 	if err != nil {
@@ -231,7 +231,7 @@ func (atm *AuthenticatedTerminalManager) AuthenticateAndCreateSession(ctx contex
 			ErrorMessage: fmt.Sprintf("Failed to get access restrictions: %v", err),
 		}, nil
 	}
-	
+
 	// Validate time-based access if enabled
 	if atm.config.TimeBasedAccess {
 		if !atm.isAccessAllowedAtTime(time.Now(), restrictions) {
@@ -240,14 +240,14 @@ func (atm *AuthenticatedTerminalManager) AuthenticateAndCreateSession(ctx contex
 				// Log error but continue - audit failures shouldn't block auth decision
 				_ = logErr // Explicitly ignore audit failures for resilience
 			}
-			
+
 			return &AuthenticationResult{
 				Success:      false,
 				ErrorMessage: "Access not allowed at this time",
 			}, nil
 		}
 	}
-	
+
 	// Check concurrent session limits
 	if atm.getActiveSessionCount(userID) >= atm.config.MaxConcurrentSessions {
 		return &AuthenticationResult{
@@ -255,7 +255,7 @@ func (atm *AuthenticatedTerminalManager) AuthenticateAndCreateSession(ctx contex
 			ErrorMessage: "Maximum concurrent sessions exceeded",
 		}, nil
 	}
-	
+
 	// Create the actual terminal session
 	session, err := atm.baseManager.CreateSession(ctx, req)
 	if err != nil {
@@ -264,22 +264,22 @@ func (atm *AuthenticatedTerminalManager) AuthenticateAndCreateSession(ctx contex
 			ErrorMessage: fmt.Sprintf("Session creation failed: %v", err),
 		}, nil
 	}
-	
+
 	// Generate session token with anti-hijacking properties
 	sessionToken := atm.generateSessionToken(session.ID, userID, r, clientCert)
-	
+
 	// Store session token
 	atm.tokenMutex.Lock()
 	atm.sessionTokens[sessionToken.Token] = sessionToken
 	atm.tokenMutex.Unlock()
-	
+
 	// Add session to monitoring
 	securityContext.SessionID = session.ID
 	if err := atm.sessionMonitor.AddSession(session, securityContext); err != nil {
 		// Log error but continue - monitoring failures shouldn't block auth
 		_ = err // Explicitly ignore monitoring failures for resilience
 	}
-	
+
 	// Register session for continuous authorization if enabled
 	if atm.continuousAuthConfig.EnableContinuousAuth && atm.continuousAuthEngine != nil {
 		if regErr := atm.RegisterSessionForContinuousAuth(ctx, session.ID, userID, tenantID, "terminal"); regErr != nil {
@@ -297,7 +297,7 @@ func (atm *AuthenticatedTerminalManager) AuthenticateAndCreateSession(ctx contex
 		// Log error but continue - audit failures shouldn't prevent successful auth
 		_ = logErr // Explicitly ignore audit failures for resilience
 	}
-	
+
 	return &AuthenticationResult{
 		Success:         true,
 		UserID:          userID,
@@ -314,22 +314,22 @@ func (atm *AuthenticatedTerminalManager) ValidateSessionToken(ctx context.Contex
 	atm.tokenMutex.RLock()
 	token, exists := atm.sessionTokens[tokenString]
 	atm.tokenMutex.RUnlock()
-	
+
 	if !exists {
 		return nil, fmt.Errorf("invalid session token")
 	}
-	
+
 	// Check if token is active
 	if !token.Active {
 		return nil, fmt.Errorf("session token is inactive")
 	}
-	
+
 	// Check token expiration
 	if time.Now().After(token.ExpiresAt) {
 		atm.invalidateToken(token.Token)
 		return nil, fmt.Errorf("session token expired")
 	}
-	
+
 	// Anti-hijacking checks
 	if atm.config.IPBindingEnabled {
 		clientIP := atm.getClientIP(r)
@@ -339,12 +339,12 @@ func (atm *AuthenticatedTerminalManager) ValidateSessionToken(ctx context.Contex
 				// Log error but continue - audit failures shouldn't prevent security action
 				_ = logErr // Explicitly ignore audit failures for resilience
 			}
-			
+
 			atm.invalidateToken(token.Token)
 			return nil, fmt.Errorf("session hijacking detected: IP address mismatch")
 		}
 	}
-	
+
 	// TLS fingerprint check
 	if atm.config.TLSFingerprintCheck && r.TLS != nil {
 		currentFingerprint := atm.generateTLSFingerprint(r.TLS)
@@ -354,17 +354,17 @@ func (atm *AuthenticatedTerminalManager) ValidateSessionToken(ctx context.Contex
 				// Log error but continue with security response
 				_ = err // Explicitly ignore audit failures for resilience
 			}
-			
+
 			atm.invalidateToken(token.Token)
 			return nil, fmt.Errorf("session hijacking detected: TLS fingerprint mismatch")
 		}
 	}
-	
+
 	// Update heartbeat
 	atm.tokenMutex.Lock()
 	token.LastHeartbeat = time.Now()
 	atm.tokenMutex.Unlock()
-	
+
 	return token, nil
 }
 
@@ -379,30 +379,30 @@ func (atm *AuthenticatedTerminalManager) TerminateSession(ctx context.Context, s
 		}
 	}
 	atm.tokenMutex.Unlock()
-	
+
 	// Remove from monitoring
 	if err := atm.sessionMonitor.RemoveSession(sessionID); err != nil {
 		// Log error but continue with termination
 		_ = err // Explicitly ignore monitoring errors during termination
 	}
-	
+
 	// Unregister from continuous authorization
 	if err := atm.UnregisterSessionFromContinuousAuth(ctx, sessionID); err != nil {
 		// Log error but continue with termination
 		_ = err // Explicitly ignore continuous auth errors during termination
 	}
-	
+
 	// Terminate the actual session
 	if err := atm.baseManager.TerminateSession(ctx, sessionID); err != nil {
 		return fmt.Errorf("failed to terminate session: %w", err)
 	}
-	
+
 	// Log session termination
 	if logErr := atm.auditLogger.LogSessionEnd(ctx, sessionID, "", 0, 0, 0); logErr != nil { // TODO: Get actual metrics
 		// Log error but continue - audit failures shouldn't prevent termination
 		_ = logErr // Explicitly ignore audit failures for resilience
 	}
-	
+
 	return nil
 }
 
@@ -415,9 +415,9 @@ func (atm *AuthenticatedTerminalManager) extractClientCertificate(r *http.Reques
 		}
 		return nil, nil
 	}
-	
+
 	clientCert := r.TLS.PeerCertificates[0]
-	
+
 	// Validate certificate with our validator
 	if atm.certValidator != nil {
 		result, err := atm.certValidator.ValidateCertificate(clientCert)
@@ -425,7 +425,7 @@ func (atm *AuthenticatedTerminalManager) extractClientCertificate(r *http.Reques
 			return nil, fmt.Errorf("certificate validation failed: %w", err)
 		}
 	}
-	
+
 	return clientCert, nil
 }
 
@@ -433,22 +433,22 @@ func (atm *AuthenticatedTerminalManager) extractUserIdentity(cert *x509.Certific
 	if cert == nil {
 		return "", "", fmt.Errorf("no certificate provided")
 	}
-	
+
 	// Extract user ID from certificate subject
 	userID = cert.Subject.CommonName
 	if userID == "" {
 		return "", "", fmt.Errorf("no user ID found in certificate")
 	}
-	
+
 	// Extract tenant ID from certificate extensions or organizational unit
 	if len(cert.Subject.OrganizationalUnit) > 0 {
 		tenantID = cert.Subject.OrganizationalUnit[0]
 	}
-	
+
 	if tenantID == "" {
 		return "", "", fmt.Errorf("no tenant ID found in certificate")
 	}
-	
+
 	return userID, tenantID, nil
 }
 
@@ -458,13 +458,13 @@ func (atm *AuthenticatedTerminalManager) getAccessRestrictions(ctx context.Conte
 	if err != nil {
 		return nil, fmt.Errorf("failed to get user permissions: %w", err)
 	}
-	
+
 	restrictions := &AccessRestrictions{
 		MaxSessionDuration: atm.config.SessionTimeout,
 		MaxIdleTime:        30 * time.Minute,
 		MonitoringLevel:    SecurityLevelEnhanced,
 	}
-	
+
 	// Apply restrictions based on permissions
 	hasAdminPermissions := false
 	for _, perm := range permissions {
@@ -473,7 +473,7 @@ func (atm *AuthenticatedTerminalManager) getAccessRestrictions(ctx context.Conte
 			break
 		}
 	}
-	
+
 	if !hasAdminPermissions {
 		restrictions.BlockedCommands = []string{
 			"rm -rf",
@@ -485,7 +485,7 @@ func (atm *AuthenticatedTerminalManager) getAccessRestrictions(ctx context.Conte
 		restrictions.MonitoringLevel = SecurityLevelMaximum
 		restrictions.RequireApproval = true
 	}
-	
+
 	return restrictions, nil
 }
 
@@ -493,55 +493,55 @@ func (atm *AuthenticatedTerminalManager) isAccessAllowedAtTime(now time.Time, re
 	if !atm.config.TimeBasedAccess {
 		return true
 	}
-	
+
 	currentHour := now.Hour()
 	for _, allowedHour := range atm.config.AllowedHours {
 		if currentHour == allowedHour {
 			return true
 		}
 	}
-	
+
 	return false
 }
 
 func (atm *AuthenticatedTerminalManager) getActiveSessionCount(userID string) int {
 	atm.tokenMutex.RLock()
 	defer atm.tokenMutex.RUnlock()
-	
+
 	count := 0
 	for _, token := range atm.sessionTokens {
 		if token.UserID == userID && token.Active {
 			count++
 		}
 	}
-	
+
 	return count
 }
 
 func (atm *AuthenticatedTerminalManager) generateSessionToken(sessionID, userID string, r *http.Request, cert *x509.Certificate) *SessionToken {
 	now := time.Now()
 	token := &SessionToken{
-		Token:           generateSecureToken(),
-		SessionID:       sessionID,
-		UserID:          userID,
-		IssuedAt:        now,
-		ExpiresAt:       now.Add(atm.config.SessionTimeout),
-		LastRotated:     now,
-		ClientIP:        atm.getClientIP(r),
-		UserAgent:       r.UserAgent(),
-		Active:          true,
-		LastHeartbeat:   now,
-		Metadata:        make(map[string]string),
+		Token:         generateSecureToken(),
+		SessionID:     sessionID,
+		UserID:        userID,
+		IssuedAt:      now,
+		ExpiresAt:     now.Add(atm.config.SessionTimeout),
+		LastRotated:   now,
+		ClientIP:      atm.getClientIP(r),
+		UserAgent:     r.UserAgent(),
+		Active:        true,
+		LastHeartbeat: now,
+		Metadata:      make(map[string]string),
 	}
-	
+
 	if r.TLS != nil {
 		token.TLSFingerprint = atm.generateTLSFingerprint(r.TLS)
 	}
-	
+
 	if cert != nil {
 		token.CertificateHash = fmt.Sprintf("%x", cert.Raw)
 	}
-	
+
 	return token
 }
 
@@ -551,18 +551,18 @@ func (atm *AuthenticatedTerminalManager) getClientIP(r *http.Request) string {
 		ips := strings.Split(xff, ",")
 		return strings.TrimSpace(ips[0])
 	}
-	
+
 	// Check X-Real-IP header
 	if xri := r.Header.Get("X-Real-IP"); xri != "" {
 		return strings.TrimSpace(xri)
 	}
-	
+
 	// Fall back to RemoteAddr
 	addr := r.RemoteAddr
 	if colon := strings.LastIndex(addr, ":"); colon != -1 {
 		addr = addr[:colon]
 	}
-	
+
 	return addr
 }
 
@@ -570,7 +570,7 @@ func (atm *AuthenticatedTerminalManager) generateTLSFingerprint(connState *tls.C
 	if len(connState.PeerCertificates) == 0 {
 		return ""
 	}
-	
+
 	cert := connState.PeerCertificates[0]
 	return fmt.Sprintf("%x", cert.Signature)
 }
@@ -578,7 +578,7 @@ func (atm *AuthenticatedTerminalManager) generateTLSFingerprint(connState *tls.C
 func (atm *AuthenticatedTerminalManager) invalidateToken(tokenString string) {
 	atm.tokenMutex.Lock()
 	defer atm.tokenMutex.Unlock()
-	
+
 	if token, exists := atm.sessionTokens[tokenString]; exists {
 		token.Active = false
 		delete(atm.sessionTokens, tokenString)
@@ -588,7 +588,7 @@ func (atm *AuthenticatedTerminalManager) invalidateToken(tokenString string) {
 func (atm *AuthenticatedTerminalManager) tokenMaintenanceLoop(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
-	
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -603,7 +603,7 @@ func (atm *AuthenticatedTerminalManager) tokenMaintenanceLoop(ctx context.Contex
 func (atm *AuthenticatedTerminalManager) cleanupExpiredTokens() {
 	atm.tokenMutex.Lock()
 	defer atm.tokenMutex.Unlock()
-	
+
 	now := time.Now()
 	for tokenString, token := range atm.sessionTokens {
 		if now.After(token.ExpiresAt) || !token.Active {
@@ -615,7 +615,7 @@ func (atm *AuthenticatedTerminalManager) cleanupExpiredTokens() {
 func (atm *AuthenticatedTerminalManager) rotateTokensIfNeeded() {
 	atm.tokenMutex.Lock()
 	defer atm.tokenMutex.Unlock()
-	
+
 	now := time.Now()
 	for _, token := range atm.sessionTokens {
 		if now.Sub(token.LastRotated) > atm.config.TokenRotationInterval {
@@ -668,10 +668,10 @@ func DefaultContinuousAuthConfig() *ContinuousAuthConfig {
 			"format", "fdisk -l", "parted", "gparted", "cfdisk",
 			"mkfs.ext4", "mkfs.ntfs", "dd if=/dev/zero", "shred",
 		},
-		MonitorSessionContext:     true,
-		ContextChangeThreshold:    0.3, // 30% context change triggers reauth
-		MaxAuthLatencyMs:          10,
-		ContinuousAuthFallback:    "traditional", // Fall back to traditional auth
+		MonitorSessionContext:  true,
+		ContextChangeThreshold: 0.3, // 30% context change triggers reauth
+		MaxAuthLatencyMs:       10,
+		ContinuousAuthFallback: "traditional", // Fall back to traditional auth
 	}
 }
 
@@ -707,13 +707,13 @@ func (atm *AuthenticatedTerminalManager) AuthorizeCommand(ctx context.Context, s
 			TenantId:     extractTenantID(token),
 			ResourceId:   command,
 		},
-		SessionID:       sessionID,
-		OperationType:   operationType,
+		SessionID:     sessionID,
+		OperationType: operationType,
 		ResourceContext: map[string]string{
-			"session_id":     sessionID,
-			"command":        command,
-			"risk_level":     string(riskLevel),
-			"command_type":   string(operationType),
+			"session_id":   sessionID,
+			"command":      command,
+			"risk_level":   string(riskLevel),
+			"command_type": string(operationType),
 		},
 		RequestTime: time.Now(),
 	}
@@ -727,7 +727,7 @@ func (atm *AuthenticatedTerminalManager) AuthorizeCommand(ctx context.Context, s
 	if authLatency.Milliseconds() > int64(atm.continuousAuthConfig.MaxAuthLatencyMs) {
 		// Log performance violation but don't fail the request
 		if logErr := atm.auditLogger.LogSecurityViolation(ctx, sessionID, token.UserID, "", "",
-			"authorization_latency_sla_violation", 
+			"authorization_latency_sla_violation",
 			fmt.Sprintf("Authorization latency %v exceeds SLA %dms", authLatency, atm.continuousAuthConfig.MaxAuthLatencyMs),
 			FilterSeverityMedium); logErr != nil {
 			_ = logErr // Ignore audit failures
@@ -781,7 +781,7 @@ func (atm *AuthenticatedTerminalManager) AuthorizeCommand(ctx context.Context, s
 func (atm *AuthenticatedTerminalManager) authorizeCommandTraditional(ctx context.Context, sessionID, command string, token *SessionToken) (*continuous.ContinuousAuthResponse, error) {
 	// Check if command requires special authorization
 	requiresAuth := atm.doesCommandRequireAuth(command)
-	
+
 	if !requiresAuth {
 		return &continuous.ContinuousAuthResponse{
 			AccessResponse: &common.AccessResponse{
@@ -799,14 +799,14 @@ func (atm *AuthenticatedTerminalManager) authorizeCommandTraditional(ctx context
 		TenantId:     extractTenantID(token),
 		ResourceId:   command,
 	})
-	
+
 	if err != nil {
 		return nil, fmt.Errorf("traditional authorization check failed: %w", err)
 	}
 
 	return &continuous.ContinuousAuthResponse{
 		AccessResponse: hasPermission,
-		ValidUntil: time.Now().Add(1 * time.Minute),
+		ValidUntil:     time.Now().Add(1 * time.Minute),
 	}, nil
 }
 
@@ -829,8 +829,8 @@ func (atm *AuthenticatedTerminalManager) RevalidateSession(ctx context.Context, 
 			TenantId:     extractTenantID(token),
 			ResourceId:   sessionID,
 		},
-		SessionID:       sessionID,
-		OperationType:   continuous.OperationTypeStandard,
+		SessionID:     sessionID,
+		OperationType: continuous.OperationTypeStandard,
 		ResourceContext: map[string]string{
 			"session_id": sessionID,
 			"action":     "revalidate",
@@ -850,7 +850,7 @@ func (atm *AuthenticatedTerminalManager) RevalidateSession(ctx context.Context, 
 		if termErr := atm.TerminateSession(ctx, sessionID, terminationReason); termErr != nil {
 			_ = termErr // Log but don't fail on termination error
 		}
-		
+
 		return fmt.Errorf("session terminated due to revalidation failure: %s", response.AccessResponse.Reason)
 	}
 
@@ -908,7 +908,7 @@ func (atm *AuthenticatedTerminalManager) getOperationType(riskLevel continuous.R
 func (atm *AuthenticatedTerminalManager) doesCommandRequireAuth(command string) bool {
 	allRequiredCommands := append(atm.continuousAuthConfig.RequireAuthCommands,
 		append(atm.continuousAuthConfig.HighRiskCommands, atm.continuousAuthConfig.CriticalCommands...)...)
-	
+
 	for _, requiredCmd := range allRequiredCommands {
 		if strings.Contains(command, requiredCmd) {
 			return true
@@ -958,7 +958,7 @@ func (atm *AuthenticatedTerminalManager) HandlePermissionRevocation(ctx context.
 		if atm.sessionRequiresPermissions(token, permissions) {
 			// Schedule session for termination
 			terminationReason := fmt.Sprintf("Permission revoked: %s", strings.Join(permissions, ", "))
-			
+
 			if logErr := atm.auditLogger.LogSecurityViolation(ctx, token.SessionID, userID, "", tenantID,
 				"permission_revocation_termination", terminationReason, FilterSeverityCritical); logErr != nil {
 				_ = logErr // Ignore audit failures for resilience
@@ -974,8 +974,8 @@ func (atm *AuthenticatedTerminalManager) HandlePermissionRevocation(ctx context.
 
 	// Log successful permission revocation
 	if logErr := atm.auditLogger.LogSecurityViolation(ctx, "", userID, "", tenantID,
-		"permission_revocation_completed", 
-		fmt.Sprintf("Revoked permissions %s, propagation time: %v", strings.Join(permissions, ", "), propagationTime), 
+		"permission_revocation_completed",
+		fmt.Sprintf("Revoked permissions %s, propagation time: %v", strings.Join(permissions, ", "), propagationTime),
 		FilterSeverityHigh); logErr != nil {
 		_ = logErr // Ignore audit failures for resilience
 	}
@@ -988,7 +988,7 @@ func (atm *AuthenticatedTerminalManager) sessionRequiresPermissions(token *Sessi
 	// Check if any of the revoked permissions are critical for terminal sessions
 	criticalPermissions := []string{
 		"terminal.session.create",
-		"terminal.session.continue", 
+		"terminal.session.continue",
 		"terminal.execute",
 	}
 
@@ -1022,12 +1022,12 @@ func (atm *AuthenticatedTerminalManager) EnhanceJITIntegration(ctx context.Conte
 				"operation_type": "terminal_command",
 			},
 		},
-		SessionID:       sessionID,
-		OperationType:   continuous.OperationTypeTerminal,
+		SessionID:     sessionID,
+		OperationType: continuous.OperationTypeTerminal,
 		ResourceContext: map[string]string{
-			"command":           command,
+			"command":            command,
 			"requires_elevation": "true",
-			"session_type":      "terminal",
+			"session_type":       "terminal",
 		},
 		RequestTime: time.Now(),
 	}
@@ -1042,8 +1042,8 @@ func (atm *AuthenticatedTerminalManager) EnhanceJITIntegration(ctx context.Conte
 
 	// Log JIT access attempt
 	if logErr := atm.auditLogger.LogSecurityViolation(ctx, sessionID, token.UserID, "", extractTenantID(token),
-		"jit_access_attempt", 
-		fmt.Sprintf("Command: %s, Result: %t, Latency: %v", command, response != nil && response.AccessResponse.Granted, authLatency), 
+		"jit_access_attempt",
+		fmt.Sprintf("Command: %s, Result: %t, Latency: %v", command, response != nil && response.AccessResponse.Granted, authLatency),
 		FilterSeverityMedium); logErr != nil {
 		_ = logErr // Ignore audit failures for resilience
 	}
@@ -1108,10 +1108,10 @@ func (atm *AuthenticatedTerminalManager) UnregisterSessionFromContinuousAuth(ctx
 func (atm *AuthenticatedTerminalManager) GetSessionRBACStatus(ctx context.Context, sessionID string) (*TerminalRBACStatus, error) {
 	if !atm.continuousAuthConfig.EnableContinuousAuth || atm.continuousAuthEngine == nil {
 		return &TerminalRBACStatus{
-			SessionID:           sessionID,
+			SessionID:             sessionID,
 			ContinuousAuthEnabled: false,
-			LastValidated:       time.Now(),
-			Status:              "traditional_auth",
+			LastValidated:         time.Now(),
+			Status:                "traditional_auth",
 		}, nil
 	}
 
@@ -1122,15 +1122,15 @@ func (atm *AuthenticatedTerminalManager) GetSessionRBACStatus(ctx context.Contex
 	}
 
 	rbacStatus := &TerminalRBACStatus{
-		SessionID:            sessionID,
+		SessionID:             sessionID,
 		ContinuousAuthEnabled: true,
-		LastValidated:        status.LastValidation,
-		Status:              status.Status,
-		ActivePermissions:    status.ActivePermissions,
-		RequiresReauth:      status.RequiresReauth,
-		SecurityAlerts:      status.SecurityAlerts,
-		ComplianceStatus:    status.ComplianceStatus,
-		RecommendedActions:  status.RecommendedActions,
+		LastValidated:         status.LastValidation,
+		Status:                status.Status,
+		ActivePermissions:     status.ActivePermissions,
+		RequiresReauth:        status.RequiresReauth,
+		SecurityAlerts:        status.SecurityAlerts,
+		ComplianceStatus:      status.ComplianceStatus,
+		RecommendedActions:    status.RecommendedActions,
 	}
 
 	return rbacStatus, nil

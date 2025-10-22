@@ -40,7 +40,7 @@ func TestExecuteConfiguration_EmptyResources(t *testing.T) {
 	moduleFactory := factory.New(registry, errorConfig)
 	comparator := stewardtesting.NewStateComparator()
 	logger := logging.NewLogger("info")
-	
+
 	engine := New(moduleFactory, comparator, errorConfig, logger)
 
 	// Create empty configuration
@@ -70,7 +70,7 @@ func TestExecuteConfiguration_WithUnknownModule(t *testing.T) {
 	moduleFactory := factory.New(registry, errorConfig)
 	comparator := stewardtesting.NewStateComparator()
 	logger := logging.NewLogger("info")
-	
+
 	engine := New(moduleFactory, comparator, errorConfig, logger)
 
 	// Create configuration with unknown module
@@ -93,7 +93,7 @@ func TestExecuteConfiguration_WithUnknownModule(t *testing.T) {
 	assert.Equal(t, 0, report.FailedCount)
 	assert.Equal(t, 1, report.SkippedCount)
 	assert.Len(t, report.ResourceResults, 1)
-	
+
 	result := report.ResourceResults[0]
 	assert.Equal(t, "test-resource", result.ResourceName)
 	assert.Equal(t, "unknown-module", result.ModuleName)
@@ -108,7 +108,7 @@ func TestExecuteConfiguration_CanceledContext(t *testing.T) {
 	moduleFactory := factory.New(registry, errorConfig)
 	comparator := stewardtesting.NewStateComparator()
 	logger := logging.NewLogger("info")
-	
+
 	engine := New(moduleFactory, comparator, errorConfig, logger)
 
 	// Create configuration with a resource

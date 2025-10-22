@@ -7,8 +7,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/cfgis/cfgms/features/modules"
 	"gopkg.in/yaml.v3"
+
+	"github.com/cfgis/cfgms/features/modules"
 )
 
 // createConfigFromYAML creates a directoryConfig from YAML string

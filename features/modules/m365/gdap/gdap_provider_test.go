@@ -125,7 +125,7 @@ func newMockGDAPClient() *mockGDAPClientWithEmbedded {
 						RoleDescription:  "User Admin Role",
 					},
 				},
-				ExpiresAt:    time.Now().Add(30 * 24 * time.Hour), // 30 days from now
+				ExpiresAt:    time.Now().Add(30 * 24 * time.Hour),  // 30 days from now
 				CreatedAt:    time.Now().Add(-30 * 24 * time.Hour), // 30 days ago
 				LastModified: time.Now().Add(-24 * time.Hour),      // 1 day ago
 			},
@@ -141,7 +141,7 @@ func newMockGDAPClient() *mockGDAPClientWithEmbedded {
 						RoleDescription:  "Directory Reader Role",
 					},
 				},
-				ExpiresAt:    time.Now().Add(60 * 24 * time.Hour), // 60 days from now
+				ExpiresAt:    time.Now().Add(60 * 24 * time.Hour),  // 60 days from now
 				CreatedAt:    time.Now().Add(-60 * 24 * time.Hour), // 60 days ago
 				LastModified: time.Now().Add(-48 * time.Hour),      // 2 days ago
 			},
@@ -157,9 +157,9 @@ func newMockGDAPClient() *mockGDAPClientWithEmbedded {
 						RoleDescription:  "Global Admin Role",
 					},
 				},
-				ExpiresAt:    time.Now().Add(-24 * time.Hour), // Expired 1 day ago
+				ExpiresAt:    time.Now().Add(-24 * time.Hour),      // Expired 1 day ago
 				CreatedAt:    time.Now().Add(-90 * 24 * time.Hour), // 90 days ago
-				LastModified: time.Now().Add(-24 * time.Hour),       // 1 day ago
+				LastModified: time.Now().Add(-24 * time.Hour),      // 1 day ago
 			},
 		},
 	}
@@ -177,7 +177,7 @@ func TestGDAPProvider_Skipped(t *testing.T) {
 	// Replace the GDAP client with our mock
 	mockClient := newMockGDAPClient()
 	provider.gdapClient = mockClient.GDAPClient
-	
+
 	// Set up the mock to bypass the real client
 	originalGDAPClient := provider.gdapClient
 	provider.gdapClient = &GDAPClient{}
@@ -186,7 +186,7 @@ func TestGDAPProvider_Skipped(t *testing.T) {
 		return mockClient.GetGDAPRelationships(ctx)
 	}
 	_ = getGDAPRelationshipsFunc // Use the func as needed
-	_ = originalGDAPClient      // Keep original for potential restoration
+	_ = originalGDAPClient       // Keep original for potential restoration
 
 	ctx := context.Background()
 
@@ -208,7 +208,7 @@ func TestGDAPProvider_Skipped(t *testing.T) {
 
 	t.Run("ValidateGDAPAccessSuccess", func(t *testing.T) {
 		requiredRoles := []string{"Global Administrator"}
-		
+
 		relationship, err := provider.ValidateGDAPAccess(ctx, "customer-tenant-1", requiredRoles)
 		require.NoError(t, err)
 		require.NotNil(t, relationship)
@@ -224,7 +224,7 @@ func TestGDAPProvider_Skipped(t *testing.T) {
 
 	t.Run("ValidateGDAPAccessInsufficientRoles", func(t *testing.T) {
 		requiredRoles := []string{"Security Administrator"} // Not granted
-		
+
 		_, err := provider.ValidateGDAPAccess(ctx, "customer-tenant-1", requiredRoles)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "lacks required role")
@@ -271,8 +271,8 @@ func TestGDAPConfig(t *testing.T) {
 
 	t.Run("ValidateGDAPConfigSuccess", func(t *testing.T) {
 		config := &GDAPConfig{
-			ClientID:     "test-client-id",
-			ClientSecret: "test-client-secret",
+			ClientID:        "test-client-id",
+			ClientSecret:    "test-client-secret",
 			PartnerTenantID: "test-partner-tenant",
 			PartnerCenterScopes: []string{
 				"https://api.partnercenter.microsoft.com/user_impersonation",
@@ -320,7 +320,7 @@ func TestGDAPMetrics_Skipped(t *testing.T) {
 	mockClient := newMockGDAPClient()
 	// Use a test helper to mock the client
 	provider.gdapClient = &GDAPClient{}
-	
+
 	// Create a simple test wrapper
 	testGDAPProvider := &testGDAPProviderWrapper{
 		GDAPProvider: provider,
@@ -336,7 +336,7 @@ func TestGDAPMetrics_Skipped(t *testing.T) {
 		require.NotNil(t, metrics)
 
 		assert.Equal(t, 3, metrics.TotalRelationships)
-		
+
 		// Check status counts
 		assert.Equal(t, 2, metrics.StatusCounts[GDAPStatusActive])
 		assert.Equal(t, 1, metrics.StatusCounts[GDAPStatusExpired])
@@ -356,7 +356,7 @@ func TestGDAPMetrics_Skipped(t *testing.T) {
 	t.Run("GetGDAPMetricsWithExpiringRelationships", func(t *testing.T) {
 		// Modify mock to have an expiring relationship
 		mockClient.relationships[0].ExpiresAt = time.Now().Add(15 * 24 * time.Hour) // 15 days from now
-		
+
 		metrics, err := provider.GetGDAPMetrics(ctx)
 		require.NoError(t, err)
 
@@ -365,7 +365,7 @@ func TestGDAPMetrics_Skipped(t *testing.T) {
 
 	t.Run("GetGDAPMetricsError", func(t *testing.T) {
 		mockClient.returnError = true
-		
+
 		_, err := provider.GetGDAPMetrics(ctx)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to get GDAP relationships")
@@ -469,7 +469,7 @@ func TestGDAPIntegrationWithMultiTenant_Skipped(t *testing.T) {
 	// Create GDAP provider
 	gdapProvider := NewGDAPProvider(credStore, httpClient, partnerTenantID)
 	mockClient := newMockGDAPClient()
-	
+
 	// Create test wrapper
 	testProvider := &testGDAPProviderWrapper{
 		GDAPProvider: gdapProvider,
@@ -503,15 +503,14 @@ func TestGDAPIntegrationSimple(t *testing.T) {
 	httpClient := &http.Client{}
 	partnerTenantID := "partner-tenant-123"
 
-	// Create GDAP provider  
+	// Create GDAP provider
 	gdapProvider := NewGDAPProvider(credStore, httpClient, partnerTenantID)
 	mockClient := newMockGDAPClient()
-
 
 	// Basic functionality test - the mock client should work
 	assert.NotNil(t, gdapProvider)
 	assert.NotNil(t, mockClient)
-	
+
 	// Test that we can call methods without panics
 	_, err := mockClient.GetGDAPRelationships(context.Background())
 	assert.NoError(t, err)

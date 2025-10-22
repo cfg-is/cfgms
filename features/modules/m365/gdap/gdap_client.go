@@ -61,7 +61,7 @@ func (c *GDAPClient) GetGDAPRelationships(ctx context.Context) ([]GDAPRelationsh
 
 	// Build request URL
 	reqURL := fmt.Sprintf("%s/customers/relationships/delegatedAdminRelationships", c.baseURL)
-	
+
 	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -93,9 +93,9 @@ func (c *GDAPClient) GetGDAPRelationships(ctx context.Context) ([]GDAPRelationsh
 	var apiResponse struct {
 		TotalCount int `json:"totalCount"`
 		Items      []struct {
-			ID                 string    `json:"id"`
-			DisplayName        string    `json:"displayName"`
-			Customer           struct {
+			ID          string `json:"id"`
+			DisplayName string `json:"displayName"`
+			Customer    struct {
 				TenantID    string `json:"tenantId"`
 				DisplayName string `json:"displayName"`
 			} `json:"customer"`
@@ -106,10 +106,10 @@ func (c *GDAPClient) GetGDAPRelationships(ctx context.Context) ([]GDAPRelationsh
 					Description      string `json:"description"`
 				} `json:"unifiedRoles"`
 			} `json:"details"`
-			Status           string    `json:"status"`
-			CreatedDateTime  time.Time `json:"createdDateTime"`
+			Status               string    `json:"status"`
+			CreatedDateTime      time.Time `json:"createdDateTime"`
 			LastModifiedDateTime time.Time `json:"lastModifiedDateTime"`
-			EndDateTime      time.Time `json:"endDateTime"`
+			EndDateTime          time.Time `json:"endDateTime"`
 		} `json:"items"`
 	}
 
@@ -155,9 +155,9 @@ func (c *GDAPClient) GetGDAPRelationship(ctx context.Context, relationshipID str
 	}
 
 	// Build request URL
-	reqURL := fmt.Sprintf("%s/customers/relationships/delegatedAdminRelationships/%s", 
+	reqURL := fmt.Sprintf("%s/customers/relationships/delegatedAdminRelationships/%s",
 		c.baseURL, url.PathEscape(relationshipID))
-	
+
 	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -189,9 +189,9 @@ func (c *GDAPClient) GetGDAPRelationship(ctx context.Context, relationshipID str
 
 	// Parse single relationship response
 	var apiItem struct {
-		ID                 string    `json:"id"`
-		DisplayName        string    `json:"displayName"`
-		Customer           struct {
+		ID          string `json:"id"`
+		DisplayName string `json:"displayName"`
+		Customer    struct {
 			TenantID    string `json:"tenantId"`
 			DisplayName string `json:"displayName"`
 		} `json:"customer"`
@@ -258,7 +258,7 @@ func (c *GDAPClient) ValidatePartnerAccess(ctx context.Context, customerTenantID
 			if rel.Status == GDAPStatusActive && time.Now().Before(rel.ExpiresAt) {
 				validation.HasAccess = true
 				validation.ActiveRelationships = append(validation.ActiveRelationships, rel.RelationshipID)
-				
+
 				// Collect all available roles
 				for _, role := range rel.Roles {
 					validation.AvailableRoles = append(validation.AvailableRoles, role.RoleName)
@@ -294,7 +294,7 @@ func (c *GDAPClient) GetCustomerInformation(ctx context.Context, customerTenantI
 
 	// Get customer profile information
 	reqURL := fmt.Sprintf("%s/customers/%s", c.baseURL, url.PathEscape(customerTenantID))
-	
+
 	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -319,10 +319,10 @@ func (c *GDAPClient) GetCustomerInformation(ctx context.Context, customerTenantI
 	}
 
 	var customerProfile struct {
-		ID          string `json:"id"`
-		CompanyName string `json:"companyName"`
-		Domain      string `json:"domain"`
-		TenantID    string `json:"tenantId"`
+		ID             string `json:"id"`
+		CompanyName    string `json:"companyName"`
+		Domain         string `json:"domain"`
+		TenantID       string `json:"tenantId"`
 		BillingProfile struct {
 			CompanyName string `json:"companyName"`
 			Address     struct {
@@ -398,11 +398,11 @@ type CustomerInfo struct {
 
 // GDAPClientConfig represents configuration for the GDAP client
 type GDAPClientConfig struct {
-	PartnerTenantID     string `json:"partner_tenant_id"`
-	PartnerClientID     string `json:"partner_client_id"`
-	PartnerClientSecret string `json:"partner_client_secret"`
+	PartnerTenantID     string   `json:"partner_tenant_id"`
+	PartnerClientID     string   `json:"partner_client_id"`
+	PartnerClientSecret string   `json:"partner_client_secret"`
 	PartnerCenterScopes []string `json:"partner_center_scopes"`
-	BaseURL             string `json:"base_url,omitempty"`
+	BaseURL             string   `json:"base_url,omitempty"`
 }
 
 // ValidateGDAPClientConfig validates GDAP client configuration

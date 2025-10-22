@@ -41,7 +41,7 @@ type MQTTClient struct {
 	mqtt *mqttClient.Client
 
 	// QUIC client for data plane
-	quic *quicClient.Client
+	quic        *quicClient.Client
 	quicAddress string
 
 	// Certificate path for mTLS

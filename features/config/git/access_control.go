@@ -27,7 +27,7 @@ func (acm *AccessControlManager) ValidateAccess(ctx context.Context, repo *Repos
 	if repo.AccessControl == nil {
 		return nil // No access control configured
 	}
-	
+
 	switch repo.AccessControl.Mode {
 	case AccessModeReadOnly:
 		if operation == "write" || operation == "delete" {
@@ -35,24 +35,24 @@ func (acm *AccessControlManager) ValidateAccess(ctx context.Context, repo *Repos
 				Message: fmt.Sprintf("Repository %s is in read-only mode. All modifications must be made through Git.", repo.Name),
 			}
 		}
-	
+
 	case AccessModeValidateOnly:
 		if operation == "write" || operation == "delete" {
 			return &ValidationOnlyError{
 				Message: fmt.Sprintf("Repository %s is in validate-only mode. Controller can only validate configurations.", repo.Name),
 			}
 		}
-	
+
 	case AccessModeHybrid:
 		return acm.validateHybridAccess(repo, operation, path)
-	
+
 	case AccessModeReadWrite:
 		// Full access - check for drift protection
 		if repo.AccessControl.WriteProtection.PreventDrift {
 			return acm.checkDriftProtection(ctx, repo, path)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -61,7 +61,7 @@ func (acm *AccessControlManager) validateHybridAccess(repo *Repository, operatio
 	if operation == "read" {
 		return nil // Read always allowed
 	}
-	
+
 	// Check if path is read-only
 	for _, readOnlyPath := range repo.AccessControl.ReadOnlyPaths {
 		if matched, _ := filepath.Match(readOnlyPath, path); matched {
@@ -71,7 +71,7 @@ func (acm *AccessControlManager) validateHybridAccess(repo *Repository, operatio
 			}
 		}
 	}
-	
+
 	// Check if path requires controller management
 	controllerManaged := false
 	for _, managedPath := range repo.AccessControl.ControllerManagedPaths {
@@ -80,14 +80,14 @@ func (acm *AccessControlManager) validateHybridAccess(repo *Repository, operatio
 			break
 		}
 	}
-	
+
 	if !controllerManaged && (operation == "write" || operation == "delete") {
 		return &PathProtectedError{
 			Path:    path,
 			Message: "This path is not managed by the controller",
 		}
 	}
-	
+
 	return nil
 }
 
@@ -97,7 +97,7 @@ func (acm *AccessControlManager) checkDriftProtection(ctx context.Context, repo 
 	if err != nil {
 		return fmt.Errorf("failed to check for drift: %w", err)
 	}
-	
+
 	if drift != nil {
 		if repo.AccessControl.WriteProtection.AutoRevertChanges {
 			// Attempt to auto-revert
@@ -106,7 +106,7 @@ func (acm *AccessControlManager) checkDriftProtection(ctx context.Context, repo 
 			}
 			drift.AutoReverted = true
 		}
-		
+
 		return &ConfigurationDriftError{
 			Message:           fmt.Sprintf("Configuration drift detected: %s", drift.DriftType),
 			Repository:        repo.Name,
@@ -114,7 +114,7 @@ func (acm *AccessControlManager) checkDriftProtection(ctx context.Context, repo 
 			RecommendedAction: "Review changes and ensure they comply with policies",
 		}
 	}
-	
+
 	return nil
 }
 
@@ -134,27 +134,27 @@ func NewDriftDetector() *DriftDetector {
 func (dd *DriftDetector) DetectDrift(ctx context.Context, repo *Repository, path string) (*DriftDetection, error) {
 	// This is a simplified implementation
 	// In production, this would compare against Git history and validate checksums
-	
+
 	expectedHash, exists := dd.baselineHashes[path]
 	if !exists {
 		// No baseline - consider establishing one
 		return nil, nil
 	}
-	
+
 	// Calculate current hash (simplified - would use actual file content)
 	actualHash := "current-hash"
 
 	if expectedHash != actualHash {
 		return &DriftDetection{
-			Path:           path,
-			ExpectedHash:   expectedHash,
-			ActualHash:     actualHash,
-			DriftType:      DriftTypeUnauthorizedChange,
-			DetectedAt:     time.Now(),
-			AutoReverted:   false,
+			Path:         path,
+			ExpectedHash: expectedHash,
+			ActualHash:   actualHash,
+			DriftType:    DriftTypeUnauthorizedChange,
+			DetectedAt:   time.Now(),
+			AutoReverted: false,
 		}, nil
 	}
-	
+
 	return nil, nil
 }
 
@@ -188,15 +188,15 @@ func (gmm *GitModeManager) ValidateReadOnlyMode(ctx context.Context, repo *Repos
 	if repo.AccessControl == nil || repo.AccessControl.Mode != AccessModeReadOnly {
 		return fmt.Errorf("repository is not configured for read-only mode")
 	}
-	
+
 	// Validate that protected branches are configured
 	if len(repo.AccessControl.ProtectedBranches) == 0 {
 		return fmt.Errorf("read-only repositories must have protected branches configured")
 	}
-	
+
 	// Validate that appropriate webhooks are configured for Git-driven updates
 	// This would check for webhook configuration in production
-	
+
 	return nil
 }
 
@@ -207,7 +207,7 @@ func (gmm *GitModeManager) ProcessGitWebhook(ctx context.Context, repo *Reposito
 	if !ok {
 		return fmt.Errorf("invalid webhook data: missing action")
 	}
-	
+
 	switch action {
 	case "push":
 		return gmm.processPushEvent(ctx, repo, webhookData)
@@ -217,7 +217,7 @@ func (gmm *GitModeManager) ProcessGitWebhook(ctx context.Context, repo *Reposito
 		// Log but don't error on unknown actions
 		fmt.Printf("Unknown webhook action: %s\n", action)
 	}
-	
+
 	return nil
 }
 
@@ -225,17 +225,17 @@ func (gmm *GitModeManager) ProcessGitWebhook(ctx context.Context, repo *Reposito
 func (gmm *GitModeManager) processPushEvent(ctx context.Context, repo *Repository, data map[string]interface{}) error {
 	// Extract changed files and trigger configuration reload
 	// This would integrate with the controller to reload configurations
-	
+
 	fmt.Printf("Processing push event for repository %s\n", repo.Name)
-	
+
 	// Validate that push is to a protected branch
 	ref, ok := data["ref"].(string)
 	if !ok {
 		return fmt.Errorf("invalid push event: missing ref")
 	}
-	
+
 	branchName := strings.TrimPrefix(ref, "refs/heads/")
-	
+
 	// Check if this is a protected branch that should trigger updates
 	isProtected := false
 	for _, protection := range repo.AccessControl.ProtectedBranches {
@@ -244,7 +244,7 @@ func (gmm *GitModeManager) processPushEvent(ctx context.Context, repo *Repositor
 			break
 		}
 	}
-	
+
 	if !isProtected {
 		return nil // Not a branch we care about
 	}
@@ -258,7 +258,7 @@ func (gmm *GitModeManager) processPullRequestEvent(ctx context.Context, repo *Re
 	if !ok {
 		return fmt.Errorf("invalid PR event: missing action")
 	}
-	
+
 	switch action {
 	case "opened", "synchronize":
 		return gmm.validatePullRequest(ctx, repo, data)
@@ -268,7 +268,7 @@ func (gmm *GitModeManager) processPullRequestEvent(ctx context.Context, repo *Re
 			return gmm.processPushEvent(ctx, repo, data)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -290,7 +290,7 @@ func (gmm *GitModeManager) SyncFromGit(ctx context.Context, repo *Repository, st
 	if repo.AccessControl == nil || repo.AccessControl.Mode == AccessModeReadWrite {
 		return nil // Not a Git-driven repository
 	}
-	
+
 	// This would implement the actual sync logic
 	// For now, just validate the mode
 	return gmm.ValidateReadOnlyMode(ctx, repo)

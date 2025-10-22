@@ -10,8 +10,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	"github.com/lib/pq"
+
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
 // DatabaseConfigStore implements ConfigStore using PostgreSQL for persistence
@@ -29,34 +30,34 @@ func NewDatabaseConfigStore(dsn string, config map[string]interface{}) (*Databas
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database connection: %w", err)
 	}
-	
+
 	// Configure connection pool
 	maxOpenConns := getIntFromConfig(config, "max_open_connections", 25)
 	maxIdleConns := getIntFromConfig(config, "max_idle_connections", 5)
 	connMaxLifetime := time.Duration(getIntFromConfig(config, "connection_max_lifetime_minutes", 30)) * time.Minute
-	
+
 	db.SetMaxOpenConns(maxOpenConns)
 	db.SetMaxIdleConns(maxIdleConns)
 	db.SetConnMaxLifetime(connMaxLifetime)
-	
+
 	// Test connection
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
-	
+
 	store := &DatabaseConfigStore{
 		db:      db,
 		config:  config,
 		schemas: NewDatabaseSchemas(),
 	}
-	
+
 	// Initialize database schema
 	if err := store.initializeSchema(); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("failed to initialize database schema: %w", err)
 	}
-	
+
 	return store, nil
 }
 
@@ -99,19 +100,19 @@ func (s *DatabaseConfigStore) initializeSchema() error {
 func (s *DatabaseConfigStore) StoreConfig(ctx context.Context, config *interfaces.ConfigEntry) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	
+
 	// Validate required fields
 	if err := s.validateConfigEntry(config); err != nil {
 		return err
 	}
-	
+
 	// Begin transaction for atomic operations
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	
+
 	// Set metadata
 	now := time.Now()
 	if config.CreatedAt.IsZero() {
@@ -119,28 +120,28 @@ func (s *DatabaseConfigStore) StoreConfig(ctx context.Context, config *interface
 	}
 	config.UpdatedAt = now
 	config.Format = interfaces.ConfigFormatYAML
-	
+
 	// Calculate checksum
 	hasher := sha256.New()
 	hasher.Write(config.Data)
 	config.Checksum = hex.EncodeToString(hasher.Sum(nil))
-	
+
 	// Check if configuration already exists to determine version and operation
 	existingConfig, err := s.getConfigInternal(ctx, tx, config.Key)
 	isUpdate := err == nil && existingConfig != nil
-	
+
 	if isUpdate {
 		config.Version = existingConfig.Version + 1
 	} else {
 		config.Version = 1
 	}
-	
+
 	// Serialize metadata and tags
 	metadataJSON, err := serializeMetadata(config.Metadata)
 	if err != nil {
 		return fmt.Errorf("failed to serialize metadata: %w", err)
 	}
-	
+
 	// Insert or update configuration
 	query := `
 		INSERT INTO configs (tenant_id, namespace, name, scope, version, format, data, checksum, metadata, tags, source, created_at, updated_at, created_by, updated_by)
@@ -157,7 +158,7 @@ func (s *DatabaseConfigStore) StoreConfig(ctx context.Context, config *interface
 			updated_by = EXCLUDED.updated_by
 		RETURNING id
 	`
-	
+
 	var configID int
 	err = tx.QueryRowContext(ctx, query,
 		config.Key.TenantID,
@@ -176,22 +177,22 @@ func (s *DatabaseConfigStore) StoreConfig(ctx context.Context, config *interface
 		config.CreatedBy,
 		config.UpdatedBy,
 	).Scan(&configID)
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to store configuration: %w", err)
 	}
-	
+
 	// Store history entry for audit trail
 	operation := "create"
 	if isUpdate {
 		operation = "update"
 	}
-	
+
 	historyQuery := `
 		INSERT INTO config_history (config_id, tenant_id, namespace, name, scope, version, format, data, checksum, metadata, tags, source, created_at, created_by, operation)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 	`
-	
+
 	_, err = tx.ExecContext(ctx, historyQuery,
 		configID,
 		config.Key.TenantID,
@@ -209,16 +210,16 @@ func (s *DatabaseConfigStore) StoreConfig(ctx context.Context, config *interface
 		config.CreatedBy,
 		operation,
 	)
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to store configuration history: %w", err)
 	}
-	
+
 	// Commit transaction
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -226,7 +227,7 @@ func (s *DatabaseConfigStore) StoreConfig(ctx context.Context, config *interface
 func (s *DatabaseConfigStore) GetConfig(ctx context.Context, key *interfaces.ConfigKey) (*interfaces.ConfigEntry, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
-	
+
 	return s.getConfigInternal(ctx, s.db, key)
 }
 
@@ -239,16 +240,16 @@ func (s *DatabaseConfigStore) getConfigInternal(ctx context.Context, querier int
 		FROM configs
 		WHERE tenant_id = $1 AND namespace = $2 AND name = $3 AND scope = $4
 	`
-	
+
 	row := querier.QueryRowContext(ctx, query, key.TenantID, key.Namespace, key.Name, key.Scope)
-	
+
 	config := &interfaces.ConfigEntry{
 		Key: &interfaces.ConfigKey{},
 	}
 	var formatStr string
 	var metadataJSON []byte
 	var tags pq.StringArray
-	
+
 	err := row.Scan(
 		&config.Key.TenantID,
 		&config.Key.Namespace,
@@ -266,17 +267,17 @@ func (s *DatabaseConfigStore) getConfigInternal(ctx context.Context, querier int
 		&config.CreatedBy,
 		&config.UpdatedBy,
 	)
-	
+
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, interfaces.ErrConfigNotFound
 		}
 		return nil, fmt.Errorf("failed to get configuration: %w", err)
 	}
-	
+
 	config.Format = interfaces.ConfigFormat(formatStr)
 	config.Tags = []string(tags)
-	
+
 	if len(metadataJSON) > 0 {
 		metadata, err := deserializeMetadata(metadataJSON)
 		if err != nil {
@@ -284,7 +285,7 @@ func (s *DatabaseConfigStore) getConfigInternal(ctx context.Context, querier int
 		}
 		config.Metadata = metadata
 	}
-	
+
 	return config, nil
 }
 
@@ -292,45 +293,45 @@ func (s *DatabaseConfigStore) getConfigInternal(ctx context.Context, querier int
 func (s *DatabaseConfigStore) DeleteConfig(ctx context.Context, key *interfaces.ConfigKey) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	
+
 	// Begin transaction
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	
+
 	// Get the configuration before deletion for history
 	existingConfig, err := s.getConfigInternal(ctx, tx, key)
 	if err != nil {
 		return err // Will return ErrConfigNotFound if not found
 	}
-	
+
 	// Delete the configuration
 	query := `DELETE FROM configs WHERE tenant_id = $1 AND namespace = $2 AND name = $3 AND scope = $4`
-	
+
 	result, err := tx.ExecContext(ctx, query, key.TenantID, key.Namespace, key.Name, key.Scope)
 	if err != nil {
 		return fmt.Errorf("failed to delete configuration: %w", err)
 	}
-	
+
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("failed to get rows affected: %w", err)
 	}
-	
+
 	if rowsAffected == 0 {
 		return interfaces.ErrConfigNotFound
 	}
-	
+
 	// Store deletion in history
 	historyQuery := `
 		INSERT INTO config_history (config_id, tenant_id, namespace, name, scope, version, format, data, checksum, metadata, tags, source, created_at, created_by, operation)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 	`
-	
+
 	metadataJSON, _ := serializeMetadata(existingConfig.Metadata)
-	
+
 	_, err = tx.ExecContext(ctx, historyQuery,
 		-1, // Special ID for deleted configs
 		existingConfig.Key.TenantID,
@@ -348,16 +349,16 @@ func (s *DatabaseConfigStore) DeleteConfig(ctx context.Context, key *interfaces.
 		"", // Could be set to user who performed deletion
 		"delete",
 	)
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to store deletion history: %w", err)
 	}
-	
+
 	// Commit transaction
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -365,28 +366,28 @@ func (s *DatabaseConfigStore) DeleteConfig(ctx context.Context, key *interfaces.
 func (s *DatabaseConfigStore) ListConfigs(ctx context.Context, filter *interfaces.ConfigFilter) ([]*interfaces.ConfigEntry, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
-	
+
 	// Build query with filters
 	baseQuery := `
 		SELECT tenant_id, namespace, name, scope, version, format, data, checksum, metadata, tags, source, created_at, updated_at, created_by, updated_by
 		FROM configs
 	`
-	
+
 	var args []interface{}
 	whereClause, args := buildConfigFilterQuery(filter, args)
 	orderClause := buildConfigOrderByClause(filter)
 	limitClause := buildConfigLimitOffsetClause(filter)
-	
+
 	query := baseQuery + " " + whereClause + " " + orderClause + limitClause
-	
+
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list configurations: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
-	
+
 	var configs []*interfaces.ConfigEntry
-	
+
 	for rows.Next() {
 		config := &interfaces.ConfigEntry{
 			Key: &interfaces.ConfigKey{},
@@ -394,7 +395,7 @@ func (s *DatabaseConfigStore) ListConfigs(ctx context.Context, filter *interface
 		var formatStr string
 		var metadataJSON []byte
 		var tags pq.StringArray
-		
+
 		err := rows.Scan(
 			&config.Key.TenantID,
 			&config.Key.Namespace,
@@ -412,14 +413,14 @@ func (s *DatabaseConfigStore) ListConfigs(ctx context.Context, filter *interface
 			&config.CreatedBy,
 			&config.UpdatedBy,
 		)
-		
+
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan configuration: %w", err)
 		}
-		
+
 		config.Format = interfaces.ConfigFormat(formatStr)
 		config.Tags = []string(tags)
-		
+
 		if len(metadataJSON) > 0 {
 			metadata, err := deserializeMetadata(metadataJSON)
 			if err != nil {
@@ -427,14 +428,14 @@ func (s *DatabaseConfigStore) ListConfigs(ctx context.Context, filter *interface
 			}
 			config.Metadata = metadata
 		}
-		
+
 		configs = append(configs, config)
 	}
-	
+
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("error iterating configurations: %w", err)
 	}
-	
+
 	return configs, nil
 }
 
@@ -442,7 +443,7 @@ func (s *DatabaseConfigStore) ListConfigs(ctx context.Context, filter *interface
 func (s *DatabaseConfigStore) GetConfigHistory(ctx context.Context, key *interfaces.ConfigKey, limit int) ([]*interfaces.ConfigEntry, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
-	
+
 	query := `
 		SELECT tenant_id, namespace, name, scope, version, format, data, checksum, metadata, tags, source, created_at, created_by
 		FROM config_history
@@ -450,15 +451,15 @@ func (s *DatabaseConfigStore) GetConfigHistory(ctx context.Context, key *interfa
 		ORDER BY version DESC
 		LIMIT $5
 	`
-	
+
 	rows, err := s.db.QueryContext(ctx, query, key.TenantID, key.Namespace, key.Name, key.Scope, limit)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get configuration history: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
-	
+
 	var configs []*interfaces.ConfigEntry
-	
+
 	for rows.Next() {
 		config := &interfaces.ConfigEntry{
 			Key: &interfaces.ConfigKey{},
@@ -466,7 +467,7 @@ func (s *DatabaseConfigStore) GetConfigHistory(ctx context.Context, key *interfa
 		var formatStr string
 		var metadataJSON []byte
 		var tags pq.StringArray
-		
+
 		err := rows.Scan(
 			&config.Key.TenantID,
 			&config.Key.Namespace,
@@ -482,14 +483,14 @@ func (s *DatabaseConfigStore) GetConfigHistory(ctx context.Context, key *interfa
 			&config.CreatedAt,
 			&config.CreatedBy,
 		)
-		
+
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan configuration history: %w", err)
 		}
-		
+
 		config.Format = interfaces.ConfigFormat(formatStr)
 		config.Tags = []string(tags)
-		
+
 		if len(metadataJSON) > 0 {
 			metadata, err := deserializeMetadata(metadataJSON)
 			if err != nil {
@@ -497,14 +498,14 @@ func (s *DatabaseConfigStore) GetConfigHistory(ctx context.Context, key *interfa
 			}
 			config.Metadata = metadata
 		}
-		
+
 		configs = append(configs, config)
 	}
-	
+
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("error iterating configuration history: %w", err)
 	}
-	
+
 	return configs, nil
 }
 
@@ -512,22 +513,22 @@ func (s *DatabaseConfigStore) GetConfigHistory(ctx context.Context, key *interfa
 func (s *DatabaseConfigStore) GetConfigVersion(ctx context.Context, key *interfaces.ConfigKey, version int64) (*interfaces.ConfigEntry, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
-	
+
 	query := `
 		SELECT tenant_id, namespace, name, scope, version, format, data, checksum, metadata, tags, source, created_at, created_by
 		FROM config_history
 		WHERE tenant_id = $1 AND namespace = $2 AND name = $3 AND scope = $4 AND version = $5
 	`
-	
+
 	row := s.db.QueryRowContext(ctx, query, key.TenantID, key.Namespace, key.Name, key.Scope, version)
-	
+
 	config := &interfaces.ConfigEntry{
 		Key: &interfaces.ConfigKey{},
 	}
 	var formatStr string
 	var metadataJSON []byte
 	var tags pq.StringArray
-	
+
 	err := row.Scan(
 		&config.Key.TenantID,
 		&config.Key.Namespace,
@@ -543,17 +544,17 @@ func (s *DatabaseConfigStore) GetConfigVersion(ctx context.Context, key *interfa
 		&config.CreatedAt,
 		&config.CreatedBy,
 	)
-	
+
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, interfaces.ErrConfigNotFound
 		}
 		return nil, fmt.Errorf("failed to get configuration version: %w", err)
 	}
-	
+
 	config.Format = interfaces.ConfigFormat(formatStr)
 	config.Tags = []string(tags)
-	
+
 	if len(metadataJSON) > 0 {
 		metadata, err := deserializeMetadata(metadataJSON)
 		if err != nil {
@@ -561,7 +562,7 @@ func (s *DatabaseConfigStore) GetConfigVersion(ctx context.Context, key *interfa
 		}
 		config.Metadata = metadata
 	}
-	
+
 	return config, nil
 }
 
@@ -569,26 +570,26 @@ func (s *DatabaseConfigStore) GetConfigVersion(ctx context.Context, key *interfa
 func (s *DatabaseConfigStore) StoreConfigBatch(ctx context.Context, configs []*interfaces.ConfigEntry) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	
+
 	// Begin transaction for atomic batch operation
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	
+
 	// Store each configuration
 	for _, config := range configs {
 		if err := s.storeConfigInTransaction(ctx, tx, config); err != nil {
 			return fmt.Errorf("failed to store configuration %s: %w", config.Key.String(), err)
 		}
 	}
-	
+
 	// Commit transaction
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("failed to commit batch transaction: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -596,26 +597,26 @@ func (s *DatabaseConfigStore) StoreConfigBatch(ctx context.Context, configs []*i
 func (s *DatabaseConfigStore) DeleteConfigBatch(ctx context.Context, keys []*interfaces.ConfigKey) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	
+
 	// Begin transaction for atomic batch operation
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	
+
 	// Delete each configuration
 	for _, key := range keys {
 		if err := s.deleteConfigInTransaction(ctx, tx, key); err != nil {
 			return fmt.Errorf("failed to delete configuration %s: %w", key.String(), err)
 		}
 	}
-	
+
 	// Commit transaction
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("failed to commit batch deletion transaction: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -635,14 +636,14 @@ func (s *DatabaseConfigStore) ValidateConfig(ctx context.Context, config *interf
 func (s *DatabaseConfigStore) GetConfigStats(ctx context.Context) (*interfaces.ConfigStats, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
-	
+
 	stats := &interfaces.ConfigStats{
 		ConfigsByTenant:    make(map[string]int64),
 		ConfigsByFormat:    make(map[string]int64),
 		ConfigsByNamespace: make(map[string]int64),
 		LastUpdated:        time.Now(),
 	}
-	
+
 	// Get overall statistics
 	overallQuery := `
 		SELECT 
@@ -653,13 +654,13 @@ func (s *DatabaseConfigStore) GetConfigStats(ctx context.Context) (*interfaces.C
 			MAX(updated_at) as newest_config
 		FROM configs
 	`
-	
+
 	row := s.db.QueryRowContext(ctx, overallQuery)
 	err := row.Scan(&stats.TotalConfigs, &stats.TotalSize, &stats.AverageSize, &stats.OldestConfig, &stats.NewestConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get overall statistics: %w", err)
 	}
-	
+
 	// Get statistics by tenant
 	tenantQuery := `SELECT tenant_id, COUNT(*) FROM configs GROUP BY tenant_id`
 	rows, err := s.db.QueryContext(ctx, tenantQuery)
@@ -667,7 +668,7 @@ func (s *DatabaseConfigStore) GetConfigStats(ctx context.Context) (*interfaces.C
 		return nil, fmt.Errorf("failed to get tenant statistics: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
-	
+
 	for rows.Next() {
 		var tenantID string
 		var count int64
@@ -676,7 +677,7 @@ func (s *DatabaseConfigStore) GetConfigStats(ctx context.Context) (*interfaces.C
 		}
 		stats.ConfigsByTenant[tenantID] = count
 	}
-	
+
 	// Get statistics by format
 	formatQuery := `SELECT format, COUNT(*) FROM configs GROUP BY format`
 	rows, err = s.db.QueryContext(ctx, formatQuery)
@@ -684,7 +685,7 @@ func (s *DatabaseConfigStore) GetConfigStats(ctx context.Context) (*interfaces.C
 		return nil, fmt.Errorf("failed to get format statistics: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
-	
+
 	for rows.Next() {
 		var format string
 		var count int64
@@ -693,7 +694,7 @@ func (s *DatabaseConfigStore) GetConfigStats(ctx context.Context) (*interfaces.C
 		}
 		stats.ConfigsByFormat[format] = count
 	}
-	
+
 	// Get statistics by namespace
 	namespaceQuery := `SELECT namespace, COUNT(*) FROM configs GROUP BY namespace`
 	rows, err = s.db.QueryContext(ctx, namespaceQuery)
@@ -701,7 +702,7 @@ func (s *DatabaseConfigStore) GetConfigStats(ctx context.Context) (*interfaces.C
 		return nil, fmt.Errorf("failed to get namespace statistics: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
-	
+
 	for rows.Next() {
 		var namespace string
 		var count int64
@@ -710,7 +711,7 @@ func (s *DatabaseConfigStore) GetConfigStats(ctx context.Context) (*interfaces.C
 		}
 		stats.ConfigsByNamespace[namespace] = count
 	}
-	
+
 	return stats, nil
 }
 
@@ -733,7 +734,7 @@ func (s *DatabaseConfigStore) validateConfigEntry(config *interfaces.ConfigEntry
 	if len(config.Data) == 0 {
 		return fmt.Errorf("configuration data cannot be empty")
 	}
-	
+
 	return nil
 }
 
@@ -743,7 +744,7 @@ func (s *DatabaseConfigStore) storeConfigInTransaction(ctx context.Context, tx *
 	if err := s.validateConfigEntry(config); err != nil {
 		return err
 	}
-	
+
 	// Set metadata
 	now := time.Now()
 	if config.CreatedAt.IsZero() {
@@ -751,28 +752,28 @@ func (s *DatabaseConfigStore) storeConfigInTransaction(ctx context.Context, tx *
 	}
 	config.UpdatedAt = now
 	config.Format = interfaces.ConfigFormatYAML
-	
+
 	// Calculate checksum
 	hasher := sha256.New()
 	hasher.Write(config.Data)
 	config.Checksum = hex.EncodeToString(hasher.Sum(nil))
-	
+
 	// Check if configuration already exists
 	existingConfig, err := s.getConfigInternal(ctx, tx, config.Key)
 	isUpdate := err == nil && existingConfig != nil
-	
+
 	if isUpdate {
 		config.Version = existingConfig.Version + 1
 	} else {
 		config.Version = 1
 	}
-	
+
 	// Serialize metadata
 	metadataJSON, err := serializeMetadata(config.Metadata)
 	if err != nil {
 		return fmt.Errorf("failed to serialize metadata: %w", err)
 	}
-	
+
 	// Insert or update configuration
 	query := `
 		INSERT INTO configs (tenant_id, namespace, name, scope, version, format, data, checksum, metadata, tags, source, created_at, updated_at, created_by, updated_by)
@@ -789,7 +790,7 @@ func (s *DatabaseConfigStore) storeConfigInTransaction(ctx context.Context, tx *
 			updated_by = EXCLUDED.updated_by
 		RETURNING id
 	`
-	
+
 	var configID int
 	err = tx.QueryRowContext(ctx, query,
 		config.Key.TenantID,
@@ -808,22 +809,22 @@ func (s *DatabaseConfigStore) storeConfigInTransaction(ctx context.Context, tx *
 		config.CreatedBy,
 		config.UpdatedBy,
 	).Scan(&configID)
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to store configuration: %w", err)
 	}
-	
+
 	// Store history entry
 	operation := "create"
 	if isUpdate {
 		operation = "update"
 	}
-	
+
 	historyQuery := `
 		INSERT INTO config_history (config_id, tenant_id, namespace, name, scope, version, format, data, checksum, metadata, tags, source, created_at, created_by, operation)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 	`
-	
+
 	_, err = tx.ExecContext(ctx, historyQuery,
 		configID,
 		config.Key.TenantID,
@@ -841,11 +842,11 @@ func (s *DatabaseConfigStore) storeConfigInTransaction(ctx context.Context, tx *
 		config.CreatedBy,
 		operation,
 	)
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to store configuration history: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -856,32 +857,32 @@ func (s *DatabaseConfigStore) deleteConfigInTransaction(ctx context.Context, tx 
 	if err != nil {
 		return err // Will return ErrConfigNotFound if not found
 	}
-	
+
 	// Delete the configuration
 	query := `DELETE FROM configs WHERE tenant_id = $1 AND namespace = $2 AND name = $3 AND scope = $4`
-	
+
 	result, err := tx.ExecContext(ctx, query, key.TenantID, key.Namespace, key.Name, key.Scope)
 	if err != nil {
 		return fmt.Errorf("failed to delete configuration: %w", err)
 	}
-	
+
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("failed to get rows affected: %w", err)
 	}
-	
+
 	if rowsAffected == 0 {
 		return interfaces.ErrConfigNotFound
 	}
-	
+
 	// Store deletion in history
 	historyQuery := `
 		INSERT INTO config_history (config_id, tenant_id, namespace, name, scope, version, format, data, checksum, metadata, tags, source, created_at, created_by, operation)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 	`
-	
+
 	metadataJSON, _ := serializeMetadata(existingConfig.Metadata)
-	
+
 	_, err = tx.ExecContext(ctx, historyQuery,
 		-1, // Special ID for deleted configs
 		existingConfig.Key.TenantID,
@@ -899,11 +900,11 @@ func (s *DatabaseConfigStore) deleteConfigInTransaction(ctx context.Context, tx 
 		"", // Could be set to user who performed deletion
 		"delete",
 	)
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to store deletion history: %w", err)
 	}
-	
+
 	return nil
 }
 

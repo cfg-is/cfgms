@@ -5,10 +5,11 @@ import (
 	"fmt"
 	"strings"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/modules/m365/auth"
 	"github.com/cfgis/cfgms/features/modules/m365/graph"
-	"gopkg.in/yaml.v3"
 )
 
 // intunePolicyModule implements the Module interface for Intune device configuration management

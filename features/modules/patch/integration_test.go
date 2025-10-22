@@ -5,9 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/features/modules/patch"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/features/modules/patch"
 )
 
 // TestPatchModule_WithPolicyEngine tests the patch module with policy engine integration
@@ -148,14 +149,14 @@ func TestPatchModule_SetPolicy(t *testing.T) {
 
 // mockWindowManager is a test implementation of WindowManager
 type mockWindowManager struct {
-	canReboot         bool
-	canPerformMaint   bool
-	isInWindow        bool
-	nextWindow        time.Time
-	rebootErr         error
-	maintenanceErr    error
-	inWindowErr       error
-	nextWindowErr     error
+	canReboot       bool
+	canPerformMaint bool
+	isInWindow      bool
+	nextWindow      time.Time
+	rebootErr       error
+	maintenanceErr  error
+	inWindowErr     error
+	nextWindowErr   error
 }
 
 func (m *mockWindowManager) CanReboot(ctx context.Context, deviceID string) (bool, error) {

@@ -38,58 +38,58 @@ func NewRiskAssessmentEngine() *RiskAssessmentEngine {
 
 // RiskAssessmentRequest contains all information needed for risk evaluation
 type RiskAssessmentRequest struct {
-	AccessRequest     *common.AccessRequest      `json:"access_request"`
-	UserContext       *UserContext               `json:"user_context"`
-	SessionContext    *SessionContext            `json:"session_context"`
-	ResourceContext   *ResourceContext           `json:"resource_context"`
-	EnvironmentContext *EnvironmentContext       `json:"environment_context"`
-	HistoricalData    *HistoricalAccessData      `json:"historical_data,omitempty"`
-	TenantPolicies    []RiskPolicy               `json:"tenant_policies"`
-	RequiredConfidence float64                   `json:"required_confidence"`
+	AccessRequest      *common.AccessRequest `json:"access_request"`
+	UserContext        *UserContext          `json:"user_context"`
+	SessionContext     *SessionContext       `json:"session_context"`
+	ResourceContext    *ResourceContext      `json:"resource_context"`
+	EnvironmentContext *EnvironmentContext   `json:"environment_context"`
+	HistoricalData     *HistoricalAccessData `json:"historical_data,omitempty"`
+	TenantPolicies     []RiskPolicy          `json:"tenant_policies"`
+	RequiredConfidence float64               `json:"required_confidence"`
 }
 
 // RiskAssessmentResult contains the comprehensive risk evaluation
 type RiskAssessmentResult struct {
-	RequestID              string                    `json:"request_id"`
-	OverallRiskScore       float64                   `json:"overall_risk_score"`
-	RiskLevel              RiskLevel                 `json:"risk_level"`
-	ConfidenceScore        float64                   `json:"confidence_score"`
-	RiskFactors            []EvaluatedRiskFactor     `json:"risk_factors"`
-	BehavioralRisk         *BehavioralRiskResult     `json:"behavioral_risk"`
-	EnvironmentalRisk      *EnvironmentalRiskResult  `json:"environmental_risk"`
-	ResourceRisk           *ResourceRiskResult       `json:"resource_risk"`
-	RecommendedActions     []RiskMitigationAction    `json:"recommended_actions"`
-	AccessDecision         AccessDecision            `json:"access_decision"`
-	RequiredControls       []AdaptiveControl         `json:"required_controls"`
-	AssessedAt             time.Time                 `json:"assessed_at"`
-	ValidityPeriod         time.Duration             `json:"validity_period"`
-	NextAssessmentTime     time.Time                 `json:"next_assessment_time"`
-	Metadata               map[string]interface{}    `json:"metadata,omitempty"`
+	RequestID          string                   `json:"request_id"`
+	OverallRiskScore   float64                  `json:"overall_risk_score"`
+	RiskLevel          RiskLevel                `json:"risk_level"`
+	ConfidenceScore    float64                  `json:"confidence_score"`
+	RiskFactors        []EvaluatedRiskFactor    `json:"risk_factors"`
+	BehavioralRisk     *BehavioralRiskResult    `json:"behavioral_risk"`
+	EnvironmentalRisk  *EnvironmentalRiskResult `json:"environmental_risk"`
+	ResourceRisk       *ResourceRiskResult      `json:"resource_risk"`
+	RecommendedActions []RiskMitigationAction   `json:"recommended_actions"`
+	AccessDecision     AccessDecision           `json:"access_decision"`
+	RequiredControls   []AdaptiveControl        `json:"required_controls"`
+	AssessedAt         time.Time                `json:"assessed_at"`
+	ValidityPeriod     time.Duration            `json:"validity_period"`
+	NextAssessmentTime time.Time                `json:"next_assessment_time"`
+	Metadata           map[string]interface{}   `json:"metadata,omitempty"`
 }
 
 // RiskLevel defines the overall risk assessment levels
 type RiskLevel string
 
 const (
-	RiskLevelMinimal    RiskLevel = "minimal"     // 0-25: Very low risk, standard access
-	RiskLevelLow        RiskLevel = "low"         // 26-45: Low risk, minimal additional controls
-	RiskLevelModerate   RiskLevel = "moderate"    // 46-65: Medium risk, enhanced monitoring
-	RiskLevelHigh       RiskLevel = "high"        // 66-80: High risk, strong additional controls
-	RiskLevelCritical   RiskLevel = "critical"    // 81-95: Critical risk, maximum controls
-	RiskLevelExtreme    RiskLevel = "extreme"     // 96-100: Extreme risk, deny or break-glass only
+	RiskLevelMinimal  RiskLevel = "minimal"  // 0-25: Very low risk, standard access
+	RiskLevelLow      RiskLevel = "low"      // 26-45: Low risk, minimal additional controls
+	RiskLevelModerate RiskLevel = "moderate" // 46-65: Medium risk, enhanced monitoring
+	RiskLevelHigh     RiskLevel = "high"     // 66-80: High risk, strong additional controls
+	RiskLevelCritical RiskLevel = "critical" // 81-95: Critical risk, maximum controls
+	RiskLevelExtreme  RiskLevel = "extreme"  // 96-100: Extreme risk, deny or break-glass only
 )
 
 // AccessDecision defines the decision outcomes based on risk assessment
 type AccessDecision string
 
 const (
-	AccessDecisionAllow          AccessDecision = "allow"              // Normal access granted
+	AccessDecisionAllow             AccessDecision = "allow"               // Normal access granted
 	AccessDecisionAllowWithControls AccessDecision = "allow_with_controls" // Access granted with additional controls
-	AccessDecisionChallenge      AccessDecision = "challenge"          // Require additional authentication
-	AccessDecisionStepUp         AccessDecision = "step_up"            // Require privilege elevation
-	AccessDecisionDeny           AccessDecision = "deny"               // Access denied due to high risk
-	AccessDecisionBreakGlass     AccessDecision = "break_glass_only"   // Only break-glass access allowed
-	AccessDecisionQuarantine     AccessDecision = "quarantine"         // Access requires quarantine controls
+	AccessDecisionChallenge         AccessDecision = "challenge"           // Require additional authentication
+	AccessDecisionStepUp            AccessDecision = "step_up"             // Require privilege elevation
+	AccessDecisionDeny              AccessDecision = "deny"                // Access denied due to high risk
+	AccessDecisionBreakGlass        AccessDecision = "break_glass_only"    // Only break-glass access allowed
+	AccessDecisionQuarantine        AccessDecision = "quarantine"          // Access requires quarantine controls
 )
 
 // EvaluateRisk performs comprehensive risk assessment for an access request
@@ -153,7 +153,6 @@ func (rae *RiskAssessmentEngine) EvaluateRisk(ctx context.Context, request *Risk
 	overallScore := rae.calculateOverallRiskScore(behavioralRisk, environmentalRisk, resourceRisk)
 	result.OverallRiskScore = overallScore
 	result.RiskLevel = rae.determineRiskLevel(overallScore)
-	
 
 	// Calculate confidence score based on data quality and completeness
 	result.ConfidenceScore = rae.calculateConfidenceScore(request, behavioralRisk, environmentalRisk, resourceRisk)
@@ -196,24 +195,24 @@ func (rae *RiskAssessmentEngine) EvaluateRisk(ctx context.Context, request *Risk
 // calculateOverallRiskScore combines individual risk scores using weighted formula
 func (rae *RiskAssessmentEngine) calculateOverallRiskScore(behavioral *BehavioralRiskResult, environmental *EnvironmentalRiskResult, resource *ResourceRiskResult) float64 {
 	// Dynamic risk calculation with configurable weights
-	behavioralWeight := 0.35  // User behavior patterns
+	behavioralWeight := 0.35    // User behavior patterns
 	environmentalWeight := 0.30 // Location, time, device factors
-	resourceWeight := 0.35    // Resource sensitivity and classification
+	resourceWeight := 0.35      // Resource sensitivity and classification
 
 	// Adjust weights for high-threat scenarios
 	if environmental != nil && environmental.ThreatEnvironment.ReputationScore > 80.0 {
 		// High threat intelligence: increase environmental weight significantly
-		environmentalWeight = 0.50  // 50% weight for high-threat scenarios
-		behavioralWeight = 0.25     // 25% weight
-		resourceWeight = 0.25       // 25% weight
+		environmentalWeight = 0.50 // 50% weight for high-threat scenarios
+		behavioralWeight = 0.25    // 25% weight
+		resourceWeight = 0.25      // 25% weight
 	}
 
 	// Adjust weights for high behavioral risk scenarios
 	if behavioral != nil && (len(behavioral.PatternAnomalies) > 3 || len(behavioral.BehaviorDeviations) > 3) {
 		// Multiple behavioral anomalies: increase behavioral weight significantly
-		behavioralWeight = 0.55     // 55% weight for high behavioral risk
-		environmentalWeight = 0.25  // 25% weight
-		resourceWeight = 0.20       // 20% weight
+		behavioralWeight = 0.55    // 55% weight for high behavioral risk
+		environmentalWeight = 0.25 // 25% weight
+		resourceWeight = 0.20      // 20% weight
 	}
 
 	weightedScore := (behavioral.RiskScore * behavioralWeight) +
@@ -274,7 +273,7 @@ func (rae *RiskAssessmentEngine) calculateConfidenceScore(request *RiskAssessmen
 
 	// Data completeness factor
 	completeness := rae.calculateDataCompleteness(request)
-	
+
 	// Calculate weighted average confidence
 	totalConfidence := 0.0
 	for _, factor := range confidenceFactors {
@@ -391,7 +390,7 @@ func (rae *RiskAssessmentEngine) generateRiskFactors(result *RiskAssessmentResul
 				} else if anomaly.Severity >= 0.6 {
 					severity = RiskFactorSeverityHigh
 				}
-				
+
 				factors = append(factors, EvaluatedRiskFactor{
 					FactorID:      fmt.Sprintf("behavioral-%d", len(factors)),
 					FactorName:    "behavioral_anomaly",
@@ -405,7 +404,7 @@ func (rae *RiskAssessmentEngine) generateRiskFactors(result *RiskAssessmentResul
 				})
 			}
 		}
-		
+
 		// Check for behavior deviations
 		if len(result.BehavioralRisk.BehaviorDeviations) > 0 {
 			for _, deviation := range result.BehavioralRisk.BehaviorDeviations {
@@ -415,7 +414,7 @@ func (rae *RiskAssessmentEngine) generateRiskFactors(result *RiskAssessmentResul
 				} else if deviation.Significance >= 0.6 {
 					severity = RiskFactorSeverityHigh
 				}
-				
+
 				factors = append(factors, EvaluatedRiskFactor{
 					FactorID:      fmt.Sprintf("behavioral-deviation-%d", len(factors)),
 					FactorName:    "behavior_deviation",
@@ -431,7 +430,7 @@ func (rae *RiskAssessmentEngine) generateRiskFactors(result *RiskAssessmentResul
 		}
 	}
 
-	// Environmental risk factors  
+	// Environmental risk factors
 	if result.EnvironmentalRisk != nil {
 		// Location-based risk factors
 		if result.EnvironmentalRisk.LocationRisk.RiskScore > 25 {
@@ -444,7 +443,7 @@ func (rae *RiskAssessmentEngine) generateRiskFactors(result *RiskAssessmentResul
 			} else if countryRisk >= 0.3 {
 				severity = RiskFactorSeverityMedium
 			}
-			
+
 			factors = append(factors, EvaluatedRiskFactor{
 				FactorID:      fmt.Sprintf("geographic-%d", len(factors)),
 				FactorName:    "geographic_location",
@@ -457,7 +456,7 @@ func (rae *RiskAssessmentEngine) generateRiskFactors(result *RiskAssessmentResul
 				Confidence:    0.9,
 			})
 		}
-		
+
 		// Time-based risk factors
 		if result.EnvironmentalRisk.TimeRisk.RiskScore > 25 {
 			if !result.EnvironmentalRisk.TimeRisk.IsBusinessHours {
@@ -474,7 +473,7 @@ func (rae *RiskAssessmentEngine) generateRiskFactors(result *RiskAssessmentResul
 				})
 			}
 		}
-		
+
 		// Network security factors
 		if result.EnvironmentalRisk.NetworkRisk.RiskScore > 25 {
 			networkRisk := result.EnvironmentalRisk.NetworkRisk.RiskScore
@@ -484,7 +483,7 @@ func (rae *RiskAssessmentEngine) generateRiskFactors(result *RiskAssessmentResul
 			} else if networkRisk >= 50 {
 				severity = RiskFactorSeverityHigh
 			}
-			
+
 			factors = append(factors, EvaluatedRiskFactor{
 				FactorID:      fmt.Sprintf("network-%d", len(factors)),
 				FactorName:    "network_security",
@@ -508,7 +507,7 @@ func (rae *RiskAssessmentEngine) generateRiskFactors(result *RiskAssessmentResul
 			if sensitivity == ResourceSensitivitySecret {
 				severity = RiskFactorSeverityCritical
 			}
-			
+
 			factors = append(factors, EvaluatedRiskFactor{
 				FactorID:      fmt.Sprintf("resource-%d", len(factors)),
 				FactorName:    "sensitive_resource",
@@ -563,17 +562,17 @@ func (rae *RiskAssessmentEngine) generateAdaptiveControls(result *RiskAssessment
 func (rae *RiskAssessmentEngine) calculateValidityPeriod(riskLevel RiskLevel) time.Duration {
 	switch riskLevel {
 	case RiskLevelMinimal:
-		return 4 * time.Hour   // Low risk can be cached longer
+		return 4 * time.Hour // Low risk can be cached longer
 	case RiskLevelLow:
-		return 2 * time.Hour   
+		return 2 * time.Hour
 	case RiskLevelModerate:
-		return 1 * time.Hour   
+		return 1 * time.Hour
 	case RiskLevelHigh:
 		return 30 * time.Minute // High risk needs frequent re-evaluation
 	case RiskLevelCritical:
 		return 15 * time.Minute
 	case RiskLevelExtreme:
-		return 5 * time.Minute  // Extreme risk needs constant re-evaluation
+		return 5 * time.Minute // Extreme risk needs constant re-evaluation
 	default:
 		return 30 * time.Minute
 	}

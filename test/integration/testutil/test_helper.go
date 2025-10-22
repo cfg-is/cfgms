@@ -20,19 +20,19 @@ import (
 
 // TestEnv provides a test environment for integration testing
 type TestEnv struct {
-	T             *testing.T
-	TempDir       string
-	Logger        *testpkg.MockLogger
-	Controller    *controller.Controller
-	ControllerCfg *config.Config
-	Steward       *steward.Steward
-	StewardCfg    *steward.Config
-	CertManager   *cert.Manager
-	ctx           context.Context
-	cancel        context.CancelFunc
-	useDockerController bool // If true, connect to Docker controller instead of in-process
+	T                    *testing.T
+	TempDir              string
+	Logger               *testpkg.MockLogger
+	Controller           *controller.Controller
+	ControllerCfg        *config.Config
+	Steward              *steward.Steward
+	StewardCfg           *steward.Config
+	CertManager          *cert.Manager
+	ctx                  context.Context
+	cancel               context.CancelFunc
+	useDockerController  bool   // If true, connect to Docker controller instead of in-process
 	dockerControllerAddr string // Address of Docker controller (e.g., "localhost:50054")
-	registrationToken string // MQTT registration token for testing
+	registrationToken    string // MQTT registration token for testing
 }
 
 // NewTestEnvWithDocker creates a test environment that connects to Docker controller
@@ -71,12 +71,12 @@ func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx
 		StoragePath: certStoragePath,
 		CAConfig: &cert.CAConfig{
 			Organization:       "CFGMS Test CA",
-			Country:           "US",
-			State:             "Test",
-			City:              "Test",
+			Country:            "US",
+			State:              "Test",
+			City:               "Test",
 			OrganizationalUnit: "Integration Tests",
-			ValidityDays:      365,
-			KeySize:           2048,
+			ValidityDays:       365,
+			KeySize:            2048,
 		},
 		LoadExistingCA:       false, // Create new CA for each test
 		RenewalThresholdDays: 30,
@@ -97,7 +97,7 @@ func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx
 	t.Logf("Generated server certificate: %s", serverCert.SerialNumber)
 
 	controllerCfg := &config.Config{
-		ListenAddr: "127.0.0.1:0", // Use random port
+		ListenAddr: "127.0.0.1:0",   // Use random port
 		CertPath:   certStoragePath, // Legacy cert path for backward compatibility
 		DataDir:    filepath.Join(tempDir, "controller-data"),
 		LogLevel:   "debug",
@@ -112,12 +112,12 @@ func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx
 		},
 		Certificate: &config.CertificateConfig{
 			EnableCertManagement:   true,
-			CAPath:                filepath.Join(certStoragePath, "ca"),
-			AutoGenerate:          true,
-			RenewalThresholdDays:  30,
+			CAPath:                 filepath.Join(certStoragePath, "ca"),
+			AutoGenerate:           true,
+			RenewalThresholdDays:   30,
 			ServerCertValidityDays: 365,
 			ClientCertValidityDays: 365,
-			EnableAutoRenewal:     false, // Disable for tests
+			EnableAutoRenewal:      false, // Disable for tests
 			Server: &config.ServerCertificateConfig{
 				CommonName:   "cfgms-controller",
 				DNSNames:     []string{"localhost", "cfgms-controller"},
@@ -142,7 +142,7 @@ func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx
 	// Create controller data directory
 	err = os.MkdirAll(controllerCfg.DataDir, 0755)
 	require.NoError(t, err)
-	
+
 	// Create storage directory
 	storageDir := filepath.Join(tempDir, "storage-git")
 	err = os.MkdirAll(storageDir, 0755)
@@ -164,13 +164,13 @@ func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx
 	t.Logf("Generated client certificate: %s", clientCert.SerialNumber)
 
 	// Save certificates to files for backward compatibility with legacy client
-	err = certManager.SaveCertificateFiles(serverCert.SerialNumber, 
-		filepath.Join(certStoragePath, "server.crt"), 
+	err = certManager.SaveCertificateFiles(serverCert.SerialNumber,
+		filepath.Join(certStoragePath, "server.crt"),
 		filepath.Join(certStoragePath, "server.key"))
 	require.NoError(t, err)
 
 	err = certManager.SaveCertificateFiles(clientCert.SerialNumber,
-		filepath.Join(certStoragePath, "client.crt"), 
+		filepath.Join(certStoragePath, "client.crt"),
 		filepath.Join(certStoragePath, "client.key"))
 	require.NoError(t, err)
 
@@ -187,7 +187,7 @@ func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx
 		LogLevel:       "debug",
 		ID:             "test-steward",
 		Certificate: &steward.CertificateConfig{
-			EnableCertManagement:  false, // Disable cert management for steward in tests
+			EnableCertManagement: false, // Disable cert management for steward in tests
 			CertStoragePath:      certStoragePath,
 			EnableAutoRenewal:    false, // Disable for tests
 			RenewalThresholdDays: 30,
@@ -217,16 +217,16 @@ func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx
 	// For now, just create the steward with the testing constructor
 
 	return &TestEnv{
-		T:              t,
-		TempDir:        tempDir,
-		Logger:         logger,
-		Controller:     ctrl,
-		ControllerCfg:  controllerCfg,
-		Steward:        s,
-		StewardCfg:     stewardCfg,
-		CertManager:    certManager,
-		ctx:            ctx,
-		cancel:         cancel,
+		T:                 t,
+		TempDir:           tempDir,
+		Logger:            logger,
+		Controller:        ctrl,
+		ControllerCfg:     controllerCfg,
+		Steward:           s,
+		StewardCfg:        stewardCfg,
+		CertManager:       certManager,
+		ctx:               ctx,
+		cancel:            cancel,
 		registrationToken: regToken,
 	}
 }
@@ -251,8 +251,8 @@ func (e *TestEnv) Start() {
 		e.StewardCfg.ControllerAddr = controllerAddr
 
 		// Extract host for MQTT/QUIC (controller provides these on fixed ports)
-		mqttBrokerAddr = "tcp://localhost:1883"  // Controller MQTT broker
-		quicAddr = "localhost:4433"               // Controller QUIC server
+		mqttBrokerAddr = "tcp://localhost:1883" // Controller MQTT broker
+		quicAddr = "localhost:4433"             // Controller QUIC server
 	}
 
 	// Create MQTT client for steward

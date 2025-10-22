@@ -15,7 +15,7 @@ type CallbackHandler struct {
 	// In-memory flow state storage (replace with Redis/DB in production)
 	flowStates map[string]*AuthFlowState
 	mutex      sync.RWMutex
-	
+
 	// HTTP server for handling callbacks
 	server     *http.Server
 	serverPort string
@@ -34,36 +34,36 @@ func (h *CallbackHandler) StartCallbackServer(ctx context.Context, port string) 
 	if port != "" {
 		h.serverPort = port
 	}
-	
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/auth/callback", h.handleCallback)
 	mux.HandleFunc("/auth/status", h.handleStatus)
 	mux.HandleFunc("/health", h.handleHealth)
-	
+
 	// Create listener to get actual port when using "0"
 	listener, err := net.Listen("tcp", ":"+h.serverPort)
 	if err != nil {
 		return fmt.Errorf("failed to create listener: %w", err)
 	}
-	
+
 	// Update serverPort with actual port (important when using "0")
 	h.serverPort = fmt.Sprintf("%d", listener.Addr().(*net.TCPAddr).Port)
-	
+
 	h.server = &http.Server{
 		Handler:      mux,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 30 * time.Second,
 	}
-	
+
 	go func() {
 		if err := h.server.Serve(listener); err != nil && err != http.ErrServerClosed {
 			fmt.Printf("Callback server error: %v\n", err)
 		}
 	}()
-	
+
 	// Wait for server to start
 	time.Sleep(100 * time.Millisecond)
-	
+
 	return nil
 }
 
@@ -72,7 +72,7 @@ func (h *CallbackHandler) StopCallbackServer(ctx context.Context) error {
 	if h.server == nil {
 		return nil
 	}
-	
+
 	return h.server.Shutdown(ctx)
 }
 
@@ -80,9 +80,9 @@ func (h *CallbackHandler) StopCallbackServer(ctx context.Context) error {
 func (h *CallbackHandler) StoreFlowState(state string, flowState *AuthFlowState) error {
 	h.mutex.Lock()
 	defer h.mutex.Unlock()
-	
+
 	h.flowStates[state] = flowState
-	
+
 	// Start cleanup timer
 	go func() {
 		time.Sleep(15 * time.Minute) // Cleanup after 15 minutes
@@ -90,7 +90,7 @@ func (h *CallbackHandler) StoreFlowState(state string, flowState *AuthFlowState)
 		delete(h.flowStates, state)
 		h.mutex.Unlock()
 	}()
-	
+
 	return nil
 }
 
@@ -98,12 +98,12 @@ func (h *CallbackHandler) StoreFlowState(state string, flowState *AuthFlowState)
 func (h *CallbackHandler) GetFlowState(state string) (*AuthFlowState, error) {
 	h.mutex.RLock()
 	defer h.mutex.RUnlock()
-	
+
 	flowState, exists := h.flowStates[state]
 	if !exists {
 		return nil, fmt.Errorf("flow state not found or expired")
 	}
-	
+
 	return flowState, nil
 }
 
@@ -111,7 +111,7 @@ func (h *CallbackHandler) GetFlowState(state string) (*AuthFlowState, error) {
 func (h *CallbackHandler) CleanupFlowState(state string) {
 	h.mutex.Lock()
 	defer h.mutex.Unlock()
-	
+
 	delete(h.flowStates, state)
 }
 
@@ -122,25 +122,25 @@ func (h *CallbackHandler) handleCallback(w http.ResponseWriter, r *http.Request)
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-	
+
 	if r.Method == "OPTIONS" {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	
+
 	// Extract parameters from URL
 	query := r.URL.Query()
 	state := query.Get("state")
 	code := query.Get("code")
 	errorCode := query.Get("error")
 	errorDescription := query.Get("error_description")
-	
+
 	// Build response
 	response := map[string]interface{}{
 		"timestamp": time.Now().Format(time.RFC3339),
 		"state":     state,
 	}
-	
+
 	if errorCode != "" {
 		response["success"] = false
 		response["error"] = errorCode
@@ -150,20 +150,20 @@ func (h *CallbackHandler) handleCallback(w http.ResponseWriter, r *http.Request)
 		response["success"] = true
 		response["code"] = code
 		response["message"] = "Authorization successful! Processing your request..."
-		
+
 		// Store the callback information for retrieval
 		h.storeCallbackResult(state, &CallbackResult{
-			Success:          true,
+			Success:           true,
 			AuthorizationCode: code,
-			State:           state,
-			ReceivedAt:      time.Now(),
+			State:             state,
+			ReceivedAt:        time.Now(),
 		})
 	} else {
 		response["success"] = false
 		response["error"] = "invalid_request"
 		response["message"] = "Missing authorization code. Please close this window and try again."
 	}
-	
+
 	// Return JSON response for API clients
 	if r.Header.Get("Accept") == "application/json" {
 		w.Header().Set("Content-Type", "application/json")
@@ -174,7 +174,7 @@ func (h *CallbackHandler) handleCallback(w http.ResponseWriter, r *http.Request)
 		}
 		return
 	}
-	
+
 	// Return HTML page for browser clients
 	html := h.generateCallbackHTML(response)
 	w.Header().Set("Content-Type", "text/html")
@@ -190,10 +190,10 @@ func (h *CallbackHandler) handleStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Missing state parameter", http.StatusBadRequest)
 		return
 	}
-	
+
 	// Check if we have a result for this state
 	result := h.getCallbackResult(state)
-	
+
 	w.Header().Set("Content-Type", "application/json")
 	if result != nil {
 		if err := json.NewEncoder(w).Encode(map[string]interface{}{
@@ -248,9 +248,9 @@ var (
 func (h *CallbackHandler) storeCallbackResult(state string, result *CallbackResult) {
 	callbackMutex.Lock()
 	defer callbackMutex.Unlock()
-	
+
 	callbackResults[state] = result
-	
+
 	// Cleanup after 5 minutes
 	go func() {
 		time.Sleep(5 * time.Minute)
@@ -263,7 +263,7 @@ func (h *CallbackHandler) storeCallbackResult(state string, result *CallbackResu
 func (h *CallbackHandler) getCallbackResult(state string) *CallbackResult {
 	callbackMutex.RLock()
 	defer callbackMutex.RUnlock()
-	
+
 	return callbackResults[state]
 }
 
@@ -274,7 +274,7 @@ func (h *CallbackHandler) generateCallbackHTML(response map[string]interface{}) 
 	message, _ := response["message"].(string)
 	errorCode, _ := response["error"].(string)
 	errorDescription, _ := response["error_description"].(string)
-	
+
 	var statusClass, statusIcon, details string
 	if success {
 		statusClass = "success"
@@ -288,7 +288,7 @@ func (h *CallbackHandler) generateCallbackHTML(response map[string]interface{}) 
 			details = fmt.Sprintf("<strong>Error:</strong> %s<br>%s<br><br><strong>Next Steps:</strong><br>Return to the CFGMS application to continue setup.", errorCode, errorDescription)
 		}
 	}
-	
+
 	return fmt.Sprintf(`
 <!DOCTYPE html>
 <html lang="en">
@@ -412,12 +412,12 @@ func (h *CallbackHandler) GetCallbackURL() string {
 // WaitForCallback waits for the OAuth2 callback with a timeout
 func (h *CallbackHandler) WaitForCallback(ctx context.Context, state string, timeout time.Duration) (*CallbackResult, error) {
 	deadline := time.Now().Add(timeout)
-	
+
 	for time.Now().Before(deadline) {
 		if result := h.getCallbackResult(state); result != nil {
 			return result, nil
 		}
-		
+
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -425,6 +425,6 @@ func (h *CallbackHandler) WaitForCallback(ctx context.Context, state string, tim
 			// Continue polling
 		}
 	}
-	
+
 	return nil, fmt.Errorf("timeout waiting for callback")
 }

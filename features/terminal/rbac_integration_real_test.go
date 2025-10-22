@@ -24,7 +24,7 @@ func TestTerminalRBACIntegrationReal(t *testing.T) {
 	t.Run("RealRBACMemoryStore", func(t *testing.T) {
 		// Use the real in-memory RBAC store instead of mocking
 		store := memory.NewStore()
-		
+
 		// Initialize with basic permissions
 		err := store.CreatePermission(ctx, &common.Permission{
 			Id:          "terminal.session.create",
@@ -32,7 +32,7 @@ func TestTerminalRBACIntegrationReal(t *testing.T) {
 			Description: "Permission to create terminal sessions",
 		})
 		require.NoError(t, err)
-		
+
 		err = store.CreatePermission(ctx, &common.Permission{
 			Id:          "terminal.execute",
 			Name:        "Execute Commands",
@@ -43,7 +43,7 @@ func TestTerminalRBACIntegrationReal(t *testing.T) {
 		// Create a test role with permissions
 		err = store.CreateRole(ctx, &common.Role{
 			Id:            "terminal-user",
-			Name:          "Terminal User", 
+			Name:          "Terminal User",
 			Description:   "Basic terminal access role",
 			PermissionIds: []string{"terminal.session.create", "terminal.execute"},
 			TenantId:      "test-tenant", // Set the tenant ID to match our test
@@ -63,16 +63,16 @@ func TestTerminalRBACIntegrationReal(t *testing.T) {
 		err = store.AssignRole(ctx, &common.RoleAssignment{
 			Id:        "test-assignment",
 			SubjectId: "test-user",
-			RoleId:    "terminal-user", 
+			RoleId:    "terminal-user",
 			TenantId:  "test-tenant",
 		})
 		require.NoError(t, err)
-		
+
 		// Test that we can retrieve the permissions
 		permissions, err := store.GetRolePermissions(ctx, "terminal-user")
 		require.NoError(t, err)
 		assert.Len(t, permissions, 2)
-		
+
 		// Test that we can get subject roles
 		roles, err := store.GetSubjectRoles(ctx, "test-user", "test-tenant")
 		require.NoError(t, err)
@@ -223,9 +223,9 @@ func TestTerminalRBACIntegrationReal(t *testing.T) {
 
 		avgLatency := duration / time.Duration(iterations)
 		t.Logf("Real command rule evaluation average latency: %v", avgLatency)
-		
+
 		// Verify performance requirement (should be much faster than 5ms)
-		assert.Less(t, avgLatency.Milliseconds(), int64(5), 
+		assert.Less(t, avgLatency.Milliseconds(), int64(5),
 			"Real command rule evaluation should be under 5ms, got %v", avgLatency)
 	})
 }

@@ -44,7 +44,7 @@ func (v *DefaultRollbackValidator) ValidateRollback(ctx context.Context, request
 		Errors:   []ValidationIssue{},
 		Metadata: make(map[string]interface{}),
 	}
-	
+
 	// Validate target exists and is accessible
 	if err := v.validateTarget(ctx, request.TargetType, request.TargetID); err != nil {
 		results.Errors = append(results.Errors, ValidationIssue{
@@ -54,7 +54,7 @@ func (v *DefaultRollbackValidator) ValidateRollback(ctx context.Context, request
 		})
 		results.Passed = false
 	}
-	
+
 	// Validate rollback type and options
 	if err := v.validateRollbackType(request); err != nil {
 		results.Errors = append(results.Errors, ValidationIssue{
@@ -64,7 +64,7 @@ func (v *DefaultRollbackValidator) ValidateRollback(ctx context.Context, request
 		})
 		results.Passed = false
 	}
-	
+
 	// If we have a preview, validate the changes
 	if preview != nil {
 		// Check for breaking changes
@@ -81,7 +81,7 @@ func (v *DefaultRollbackValidator) ValidateRollback(ctx context.Context, request
 					Resolvable: true,
 					Resolution: "Use --force flag to proceed with breaking changes",
 				}
-				
+
 				// Breaking changes are errors unless force is set
 				if !request.Options.Force {
 					issue.Severity = "error"
@@ -92,7 +92,7 @@ func (v *DefaultRollbackValidator) ValidateRollback(ctx context.Context, request
 				}
 			}
 		}
-		
+
 		// Validate module compatibility
 		if err := v.ValidateModuleCompatibility(ctx, preview.AffectedModules, request.RollbackTo); err != nil {
 			results.Errors = append(results.Errors, ValidationIssue{
@@ -102,7 +102,7 @@ func (v *DefaultRollbackValidator) ValidateRollback(ctx context.Context, request
 			})
 			results.Passed = false
 		}
-		
+
 		// Check dependencies
 		if err := v.CheckDependencies(ctx, request.TargetType, request.TargetID, preview.Changes); err != nil {
 			results.Errors = append(results.Errors, ValidationIssue{
@@ -113,7 +113,7 @@ func (v *DefaultRollbackValidator) ValidateRollback(ctx context.Context, request
 			results.Passed = false
 		}
 	}
-	
+
 	// Validate permissions
 	if err := v.validatePermissions(ctx, request); err != nil {
 		results.Errors = append(results.Errors, ValidationIssue{
@@ -123,17 +123,17 @@ func (v *DefaultRollbackValidator) ValidateRollback(ctx context.Context, request
 		})
 		results.Passed = false
 	}
-	
+
 	// Check system health
 	healthIssues := v.checkSystemHealth(ctx, request.TargetType, request.TargetID)
 	if len(healthIssues) > 0 {
 		results.Warnings = append(results.Warnings, healthIssues...)
 	}
-	
+
 	// Add validation metadata
 	results.Metadata["validation_time"] = time.Now()
 	results.Metadata["validator_version"] = "1.0.0"
-	
+
 	return results, nil
 }
 
@@ -147,7 +147,7 @@ func (v *DefaultRollbackValidator) AssessRisk(ctx context.Context, request Rollb
 		AffectedUsers:    0,
 		RiskFactors:      []RiskFactor{},
 	}
-	
+
 	// Assess risk based on number of changes
 	if len(changes) > 10 {
 		assessment.RiskFactors = append(assessment.RiskFactors, RiskFactor{
@@ -158,7 +158,7 @@ func (v *DefaultRollbackValidator) AssessRisk(ctx context.Context, request Rollb
 		})
 		assessment.OverallRisk = RiskLevelMedium
 	}
-	
+
 	// Check for critical module changes
 	criticalModules := []string{"authentication", "security", "network", "database"}
 	for _, change := range changes {
@@ -176,7 +176,7 @@ func (v *DefaultRollbackValidator) AssessRisk(ctx context.Context, request Rollb
 			}
 		}
 	}
-	
+
 	// Assess data loss risk
 	for _, change := range changes {
 		if strings.Contains(change.Path, "schema") || strings.Contains(change.Path, "migration") {
@@ -190,7 +190,7 @@ func (v *DefaultRollbackValidator) AssessRisk(ctx context.Context, request Rollb
 			assessment.OverallRisk = RiskLevelCritical
 		}
 	}
-	
+
 	// Estimate downtime
 	assessment.DowntimeEstimate = v.estimateDowntime(changes)
 	if assessment.DowntimeEstimate > 5*time.Minute {
@@ -201,7 +201,7 @@ func (v *DefaultRollbackValidator) AssessRisk(ctx context.Context, request Rollb
 			Mitigation:  "Schedule during maintenance window",
 		})
 	}
-	
+
 	// Estimate affected users based on target type
 	assessment.AffectedUsers = v.estimateAffectedUsers(request.TargetType, request.TargetID)
 	if assessment.AffectedUsers > 1000 {
@@ -215,7 +215,7 @@ func (v *DefaultRollbackValidator) AssessRisk(ctx context.Context, request Rollb
 			assessment.OverallRisk = RiskLevelHigh
 		}
 	}
-	
+
 	// Emergency rollbacks are always high risk
 	if request.Emergency {
 		assessment.RiskFactors = append(assessment.RiskFactors, RiskFactor{
@@ -228,7 +228,7 @@ func (v *DefaultRollbackValidator) AssessRisk(ctx context.Context, request Rollb
 			assessment.OverallRisk = RiskLevelHigh
 		}
 	}
-	
+
 	return assessment, nil
 }
 
@@ -241,39 +241,39 @@ func (v *DefaultRollbackValidator) CheckDependencies(ctx context.Context, target
 			modules[change.Module] = true
 		}
 	}
-	
+
 	// Check each module's dependencies
 	for module := range modules {
 		deps, err := v.moduleRegistry.GetModuleDependencies(ctx, module)
 		if err != nil {
 			return fmt.Errorf("failed to get dependencies for module %s: %w", module, err)
 		}
-		
+
 		// Verify each dependency
 		for _, dep := range deps {
 			// Check if dependency is also being rolled back
 			if modules[dep] {
 				continue // OK - both module and dependency are being rolled back
 			}
-			
+
 			// Check if dependency will remain compatible
 			currentVersion, err := v.moduleRegistry.GetModuleVersion(ctx, dep)
 			if err != nil {
 				return fmt.Errorf("failed to get version for dependency %s: %w", dep, err)
 			}
-			
+
 			// This is simplified - in reality would check actual compatibility
 			compatible, err := v.moduleRegistry.IsModuleCompatible(ctx, dep, currentVersion)
 			if err != nil {
 				return fmt.Errorf("failed to check compatibility for %s: %w", dep, err)
 			}
-			
+
 			if !compatible {
 				return fmt.Errorf("module %s depends on %s which would be incompatible after rollback", module, dep)
 			}
 		}
 	}
-	
+
 	return nil
 }
 
@@ -284,12 +284,12 @@ func (v *DefaultRollbackValidator) ValidateModuleCompatibility(ctx context.Conte
 		if err != nil {
 			return fmt.Errorf("failed to check compatibility for module %s: %w", module, err)
 		}
-		
+
 		if !compatible {
 			return fmt.Errorf("module %s is not compatible with target version %s", module, targetVersion)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -301,7 +301,7 @@ func (v *DefaultRollbackValidator) validateTarget(ctx context.Context, targetTyp
 	if targetID == "" {
 		return fmt.Errorf("target ID cannot be empty")
 	}
-	
+
 	// Validate target type
 	switch targetType {
 	case TargetTypeDevice, TargetTypeGroup, TargetTypeClient, TargetTypeMSP:
@@ -309,7 +309,7 @@ func (v *DefaultRollbackValidator) validateTarget(ctx context.Context, targetTyp
 	default:
 		return fmt.Errorf("invalid target type: %s", targetType)
 	}
-	
+
 	return nil
 }
 
@@ -317,82 +317,82 @@ func (v *DefaultRollbackValidator) validateRollbackType(request RollbackRequest)
 	switch request.RollbackType {
 	case RollbackTypeFull:
 		// No additional validation needed
-		
+
 	case RollbackTypePartial:
 		if len(request.Configurations) == 0 {
 			return fmt.Errorf("partial rollback requires at least one configuration")
 		}
-		
+
 	case RollbackTypeModule:
 		if len(request.Modules) == 0 {
 			return fmt.Errorf("module rollback requires at least one module")
 		}
-		
+
 	case RollbackTypeEmergency:
 		if request.Reason == "" {
 			return fmt.Errorf("emergency rollback requires a reason")
 		}
-		
+
 	default:
 		return fmt.Errorf("invalid rollback type: %s", request.RollbackType)
 	}
-	
+
 	return nil
 }
 
 func (v *DefaultRollbackValidator) checkBreakingChanges(ctx context.Context, changes []ConfigurationChange) []string {
 	breakingChanges := []string{}
-	
+
 	for _, change := range changes {
 		// Check for schema changes
 		if strings.Contains(change.Path, "schema") {
-			breakingChanges = append(breakingChanges, 
+			breakingChanges = append(breakingChanges,
 				fmt.Sprintf("Schema change detected in %s", change.Path))
 		}
-		
+
 		// Check for API version changes
 		if strings.Contains(change.Diff, "apiVersion") {
 			breakingChanges = append(breakingChanges,
 				fmt.Sprintf("API version change detected in %s", change.Path))
 		}
-		
+
 		// Check for removed required fields
 		if strings.Contains(change.Diff, "required:") && strings.Contains(change.Diff, "-") {
 			breakingChanges = append(breakingChanges,
 				fmt.Sprintf("Required field removal detected in %s", change.Path))
 		}
 	}
-	
+
 	return breakingChanges
 }
 
 func (v *DefaultRollbackValidator) validatePermissions(ctx context.Context, request RollbackRequest) error {
 	// In a real implementation, this would check actual permissions
 	// For now, we'll simulate some basic checks
-	
+
 	// Emergency rollbacks require special permission
 	if request.Emergency {
 		// Check for emergency rollback permission
 		// return error if not authorized
 		_ = request.Emergency // Placeholder for emergency permission check implementation
 	}
-	
+
 	// MSP-level rollbacks require admin permission
 	if request.TargetType == TargetTypeMSP {
 		// Check for MSP admin permission
 		// return error if not authorized
 		_ = request.TargetType // Placeholder for MSP admin permission check implementation
 	}
-	
+
 	return nil
 }
 
 func (v *DefaultRollbackValidator) checkSystemHealth(ctx context.Context, targetType TargetType, targetID string) []ValidationIssue {
 	issues := []ValidationIssue{}
-	
+
 	// In a real implementation, this would check actual system health
 	// For now, we'll simulate some checks
-	
+
 	// Check CPU usage
 	cpuUsage := 75 // Simulated
 	if cpuUsage > 80 {
@@ -404,7 +404,7 @@ func (v *DefaultRollbackValidator) checkSystemHealth(ctx context.Context, target
 			Resolution: "Wait for CPU usage to decrease or proceed with caution",
 		})
 	}
-	
+
 	// Check available disk space
 	diskFree := 15 // Simulated percentage
 	if diskFree < 20 {
@@ -416,31 +416,31 @@ func (v *DefaultRollbackValidator) checkSystemHealth(ctx context.Context, target
 			Resolution: "Free up disk space before proceeding",
 		})
 	}
-	
+
 	return issues
 }
 
 func (v *DefaultRollbackValidator) estimateDowntime(changes []ConfigurationChange) time.Duration {
 	// Base downtime for rollback operation
 	downtime := 30 * time.Second
-	
+
 	// Add time for each change
 	downtime += time.Duration(len(changes)) * 5 * time.Second
-	
+
 	// Add extra time for critical changes
 	for _, change := range changes {
 		if strings.Contains(change.Path, "network") || strings.Contains(change.Path, "database") {
 			downtime += 30 * time.Second
 		}
 	}
-	
+
 	return downtime
 }
 
 func (v *DefaultRollbackValidator) estimateAffectedUsers(targetType TargetType, targetID string) int {
 	// In a real implementation, this would query actual user counts
 	// For now, we'll use estimates based on target type
-	
+
 	switch targetType {
 	case TargetTypeDevice:
 		return 1

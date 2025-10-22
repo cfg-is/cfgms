@@ -1,7 +1,8 @@
 // Package version provides build-time version information for CFGMS components.
 //
 // Version information can be injected at build time using ldflags:
-//   go build -ldflags "-X github.com/cfgis/cfgms/pkg/version.Version=v0.5.0"
+//
+//	go build -ldflags "-X github.com/cfgis/cfgms/pkg/version.Version=v0.5.0"
 package version
 
 import "fmt"

@@ -5,9 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/features/reports/interfaces"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/features/reports/interfaces"
 )
 
 func TestScheduledReportManager(t *testing.T) {
@@ -23,9 +24,9 @@ func TestScheduledReportManager(t *testing.T) {
 		}
 
 		req := interfaces.ScheduleReportRequest{
-			Name:         "Weekly Compliance Report",
-			TemplateID:   "template-123",
-			Parameters:   map[string]interface{}{"threshold": 90.0},
+			Name:       "Weekly Compliance Report",
+			TemplateID: "template-123",
+			Parameters: map[string]interface{}{"threshold": 90.0},
 			Schedule: interfaces.ReportSchedule{
 				Type:       interfaces.ScheduleTypeInterval,
 				Expression: "168h", // Every 7 days (7 * 24 hours)

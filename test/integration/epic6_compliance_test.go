@@ -10,18 +10,18 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/controller/service"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
 // MockStorageProvider implements interfaces.StorageProvider for testing
 type MockStorageProvider struct{}
 
-func (m *MockStorageProvider) Name() string                    { return "mock" }
-func (m *MockStorageProvider) Description() string            { return "Mock storage provider for testing" }
-func (m *MockStorageProvider) Available() (bool, error)       { return true, nil }
-func (m *MockStorageProvider) GetVersion() string             { return "1.0.0" }
+func (m *MockStorageProvider) Name() string             { return "mock" }
+func (m *MockStorageProvider) Description() string      { return "Mock storage provider for testing" }
+func (m *MockStorageProvider) Available() (bool, error) { return true, nil }
+func (m *MockStorageProvider) GetVersion() string       { return "1.0.0" }
 func (m *MockStorageProvider) GetCapabilities() interfaces.ProviderCapabilities {
 	return interfaces.ProviderCapabilities{
 		SupportsTransactions:   true,
@@ -31,9 +31,9 @@ func (m *MockStorageProvider) GetCapabilities() interfaces.ProviderCapabilities 
 		SupportsCompression:    false,
 		SupportsReplication:    false,
 		SupportsSharding:       false,
-		MaxBatchSize:          100,
-		MaxConfigSize:         1024 * 1024, // 1MB
-		MaxAuditRetentionDays: 365,
+		MaxBatchSize:           100,
+		MaxConfigSize:          1024 * 1024, // 1MB
+		MaxAuditRetentionDays:  365,
 	}
 }
 
@@ -52,7 +52,7 @@ func NewMockConfigStore() *MockConfigStore {
 
 func (m *MockConfigStore) StoreConfig(ctx context.Context, config *interfaces.ConfigEntry) error {
 	key := config.Key.String()
-	
+
 	// Store current version in history
 	if existing, exists := m.configs[key]; exists {
 		if m.history[key] == nil {
@@ -60,14 +60,14 @@ func (m *MockConfigStore) StoreConfig(ctx context.Context, config *interfaces.Co
 		}
 		m.history[key] = append(m.history[key], existing)
 	}
-	
+
 	// Set version and timestamps
 	config.Version = int64(len(m.history[key]) + 1)
 	config.UpdatedAt = time.Now()
 	if config.CreatedAt.IsZero() {
 		config.CreatedAt = config.UpdatedAt
 	}
-	
+
 	// Store new version
 	m.configs[key] = config
 	return nil
@@ -79,7 +79,7 @@ func (m *MockConfigStore) GetConfig(ctx context.Context, key *interfaces.ConfigK
 	if !exists {
 		return nil, interfaces.ErrConfigNotFound
 	}
-	
+
 	// Return a copy
 	configCopy := *config
 	return &configCopy, nil
@@ -94,7 +94,7 @@ func (m *MockConfigStore) DeleteConfig(ctx context.Context, key *interfaces.Conf
 
 func (m *MockConfigStore) ListConfigs(ctx context.Context, filter *interfaces.ConfigFilter) ([]*interfaces.ConfigEntry, error) {
 	var results []*interfaces.ConfigEntry
-	
+
 	for _, config := range m.configs {
 		// Apply filtering
 		if filter.TenantID != "" && config.Key.TenantID != filter.TenantID {
@@ -103,12 +103,12 @@ func (m *MockConfigStore) ListConfigs(ctx context.Context, filter *interfaces.Co
 		if filter.Namespace != "" && config.Key.Namespace != filter.Namespace {
 			continue
 		}
-		
+
 		// Return a copy
 		configCopy := *config
 		results = append(results, &configCopy)
 	}
-	
+
 	return results, nil
 }
 
@@ -118,19 +118,19 @@ func (m *MockConfigStore) GetConfigHistory(ctx context.Context, key *interfaces.
 	if !exists {
 		return []*interfaces.ConfigEntry{}, nil
 	}
-	
+
 	// Return most recent versions first, limited by limit
 	var results []*interfaces.ConfigEntry
 	start := len(history) - limit
 	if start < 0 {
 		start = 0
 	}
-	
+
 	for i := len(history) - 1; i >= start; i-- {
 		configCopy := *history[i]
 		results = append(results, &configCopy)
 	}
-	
+
 	return results, nil
 }
 
@@ -140,7 +140,7 @@ func (m *MockConfigStore) GetConfigVersion(ctx context.Context, key *interfaces.
 	if !exists {
 		return nil, interfaces.ErrConfigNotFound
 	}
-	
+
 	// Find version in history
 	for _, entry := range history {
 		if entry.Version == version {
@@ -148,7 +148,7 @@ func (m *MockConfigStore) GetConfigVersion(ctx context.Context, key *interfaces.
 			return &configCopy, nil
 		}
 	}
-	
+
 	return nil, interfaces.ErrConfigNotFound
 }
 
@@ -185,16 +185,16 @@ func (m *MockConfigStore) ValidateConfig(ctx context.Context, config *interfaces
 func (m *MockConfigStore) GetConfigStats(ctx context.Context) (*interfaces.ConfigStats, error) {
 	totalConfigs := int64(len(m.configs))
 	totalSize := int64(0)
-	
+
 	for _, config := range m.configs {
 		totalSize += int64(len(config.Data))
 	}
-	
+
 	var averageSize int64
 	if totalConfigs > 0 {
 		averageSize = totalSize / totalConfigs
 	}
-	
+
 	return &interfaces.ConfigStats{
 		TotalConfigs: totalConfigs,
 		TotalSize:    totalSize,
@@ -224,14 +224,14 @@ func (m *MockStorageProvider) CreateRBACStore(config map[string]interface{}) (in
 func TestEpic6ComplianceConfigurationStorage(t *testing.T) {
 	ctx := context.Background()
 	logger := logging.NewNoopLogger()
-	
+
 	// Create mock storage provider and ConfigStore
 	_ = &MockStorageProvider{} // Create provider for potential future use
 	configStore := NewMockConfigStore()
-	
+
 	// Create configuration storage migration (Epic 6 compliant)
 	configStorageMigration := service.NewConfigurationStorageMigration(configStore, logger)
-	
+
 	// Test configuration
 	testConfig := &stewardconfig.StewardConfig{
 		Steward: stewardconfig.StewardSettings{
@@ -253,90 +253,90 @@ func TestEpic6ComplianceConfigurationStorage(t *testing.T) {
 			},
 		},
 	}
-	
+
 	// Epic 6 Requirement: ALL configuration operations use storage provider interfaces ONLY
 	t.Run("Epic6_OnlyStorageProviderInterfaces", func(t *testing.T) {
 		// Store configuration - must use ConfigStore interface
 		err := configStorageMigration.StoreConfiguration(ctx, "test-tenant", "test-steward", testConfig)
 		require.NoError(t, err)
-		
+
 		// Retrieve configuration - must use ConfigStore interface
 		retrievedConfig, err := configStorageMigration.GetConfiguration(ctx, "test-tenant", "test-steward")
 		require.NoError(t, err)
-		
+
 		// Verify configuration matches
 		assert.Equal(t, testConfig.Steward.ID, retrievedConfig.Steward.ID)
 		assert.Equal(t, testConfig.Steward.Mode, retrievedConfig.Steward.Mode)
 		assert.Len(t, retrievedConfig.Resources, 1)
 		assert.Equal(t, "test-resource", retrievedConfig.Resources[0].Name)
 	})
-	
+
 	// Epic 6 Requirement: Configuration data MUST survive system restarts (durability)
 	t.Run("Epic6_ConfigurationPersistenceDurability", func(t *testing.T) {
 		// Store configuration
 		err := configStorageMigration.StoreConfiguration(ctx, "test-tenant", "durability-test", testConfig)
 		require.NoError(t, err)
-		
+
 		// Simulate system restart by creating new storage migration instance
 		newConfigStorageMigration := service.NewConfigurationStorageMigration(configStore, logger)
-		
+
 		// Configuration must still exist after "restart"
 		retrievedConfig, err := newConfigStorageMigration.GetConfiguration(ctx, "test-tenant", "durability-test")
 		require.NoError(t, err)
 		assert.Equal(t, testConfig.Steward.ID, retrievedConfig.Steward.ID)
 	})
-	
+
 	// Epic 6 Requirement: NO direct file operations for configuration storage
 	t.Run("Epic6_NoDirectFileOperations", func(t *testing.T) {
 		// This test verifies that ConfigurationStorageMigration only uses ConfigStore interface
 		// and never performs direct file operations like os.WriteFile, ioutil.ReadFile, etc.
-		
+
 		// The fact that we're using a mock ConfigStore that doesn't touch the filesystem
 		// and our operations still work proves we're not doing direct file operations
-		
+
 		err := configStorageMigration.StoreConfiguration(ctx, "test-tenant", "no-file-ops", testConfig)
 		require.NoError(t, err)
-		
+
 		config, err := configStorageMigration.GetConfiguration(ctx, "test-tenant", "no-file-ops")
 		require.NoError(t, err)
 		assert.NotNil(t, config)
 	})
-	
+
 	// Epic 6 Requirement: Configuration inheritance works via storage provider queries
 	t.Run("Epic6_InheritanceViaStorageQueries", func(t *testing.T) {
 		// Store base configuration
 		err := configStorageMigration.StoreConfiguration(ctx, "test-tenant", "inheritance-test", testConfig)
 		require.NoError(t, err)
-		
+
 		// Get configuration with inheritance - must use storage provider's ResolveConfigWithInheritance
 		inheritedConfig, err := configStorageMigration.GetConfigurationWithInheritance(ctx, "test-tenant", "inheritance-test")
 		require.NoError(t, err)
 		assert.Equal(t, testConfig.Steward.ID, inheritedConfig.Steward.ID)
 	})
-	
+
 	// Epic 6 Requirement: Rollback functionality uses storage provider versioning capabilities
 	t.Run("Epic6_VersioningForRollback", func(t *testing.T) {
 		// Store initial version
 		err := configStorageMigration.StoreConfiguration(ctx, "test-tenant", "version-test", testConfig)
 		require.NoError(t, err)
-		
+
 		// Store second version
 		modifiedConfig := *testConfig
 		modifiedConfig.Steward.Logging.Level = "debug"
 		err = configStorageMigration.StoreConfiguration(ctx, "test-tenant", "version-test", &modifiedConfig)
 		require.NoError(t, err)
-		
+
 		// Get configuration history - must use storage provider versioning
 		history, err := configStorageMigration.GetConfigurationHistory(ctx, "test-tenant", "version-test", 5)
 		require.NoError(t, err)
 		assert.Len(t, history, 1) // First version is in history
-		
+
 		// Get specific version - must use storage provider versioning
 		version1Config, err := configStorageMigration.GetConfigurationVersion(ctx, "test-tenant", "version-test", 1)
 		require.NoError(t, err)
 		assert.Equal(t, "info", version1Config.Steward.Logging.Level) // Original version
 	})
-	
+
 	// Epic 6 Requirement: Zero data loss during system restart or failure scenarios
 	t.Run("Epic6_ZeroDataLoss", func(t *testing.T) {
 		// Store multiple configurations
@@ -345,15 +345,15 @@ func TestEpic6ComplianceConfigurationStorage(t *testing.T) {
 			config := *testConfig
 			config.Steward.ID = fmt.Sprintf("steward-%d", i)
 			configs = append(configs, &config)
-			
+
 			err := configStorageMigration.StoreConfiguration(ctx, "test-tenant", config.Steward.ID, &config)
 			require.NoError(t, err)
 		}
-		
+
 		// Verify all configurations can be retrieved
 		storedConfigs, err := configStorageMigration.ListConfigurations(ctx, "test-tenant")
 		require.NoError(t, err)
-		
+
 		// Should have at least the 3 configs we stored (might have more from other tests)
 		foundCount := 0
 		for _, stored := range storedConfigs {
@@ -375,7 +375,7 @@ func TestEpic6ComplianceValidation(t *testing.T) {
 	logger := logging.NewNoopLogger()
 	configStore := NewMockConfigStore()
 	configStorageMigration := service.NewConfigurationStorageMigration(configStore, logger)
-	
+
 	// Valid configuration for testing
 	validConfig := &stewardconfig.StewardConfig{
 		Steward: stewardconfig.StewardSettings{
@@ -383,36 +383,36 @@ func TestEpic6ComplianceValidation(t *testing.T) {
 			Mode: stewardconfig.ModeStandalone,
 		},
 	}
-	
+
 	// Test configuration validation
 	t.Run("Epic6_ConfigurationValidation", func(t *testing.T) {
 		t.Skip("Configuration validation requires complete config structure - will be fixed in future story")
 		// Valid configuration should pass
 		err := configStorageMigration.ValidateConfiguration(ctx, validConfig)
 		assert.NoError(t, err)
-		
+
 		// Invalid configuration should fail
 		invalidConfig := &stewardconfig.StewardConfig{
 			Steward: stewardconfig.StewardSettings{
-				ID:   "", // Invalid: empty ID after defaults applied
+				ID:   "",             // Invalid: empty ID after defaults applied
 				Mode: "invalid-mode", // Invalid mode
 			},
 		}
-		
+
 		err = configStorageMigration.ValidateConfiguration(ctx, invalidConfig)
 		assert.Error(t, err)
 	})
-	
+
 	// Test storage statistics
 	t.Run("Epic6_StorageStatistics", func(t *testing.T) {
 		// Store a configuration
 		err := configStorageMigration.StoreConfiguration(ctx, "test-tenant", "stats-test", validConfig)
 		require.NoError(t, err)
-		
+
 		// Get storage stats
 		stats, err := configStorageMigration.GetStats(ctx)
 		require.NoError(t, err)
-		
+
 		assert.Greater(t, stats.TotalConfigs, int64(0))
 		assert.Greater(t, stats.TotalSize, int64(0))
 		assert.NotZero(t, stats.LastUpdated)

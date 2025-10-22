@@ -90,7 +90,7 @@ func NewCollector(
 		storageCollector:     storageCollector,
 		applicationCollector: applicationCollector,
 		systemCollector:      systemCollector,
-		retentionPeriod:      7 * 24 * time.Hour, // 7 days
+		retentionPeriod:      7 * 24 * time.Hour,                   // 7 days
 		metricsHistory:       make([]*ControllerMetrics, 0, 20160), // 7 days * 24 hours * 60 minutes * 2 (30-second intervals)
 		startTime:            time.Now(),
 	}
@@ -272,7 +272,7 @@ type DefaultSystemCollector struct {
 
 // NewDefaultSystemCollector creates a new system metrics collector
 func NewDefaultSystemCollector() (*DefaultSystemCollector, error) {
-	proc, err := process.NewProcess(int32(runtime.GOMAXPROCS(0)))
+	proc, err := process.NewProcess(int32(runtime.GOMAXPROCS(0))) // #nosec G115 -- CPU count will never exceed int32 max (2 billion)
 	if err != nil {
 		// Fall back to self process
 		proc = nil
@@ -316,10 +316,10 @@ func (c *DefaultSystemCollector) CollectMetrics(ctx context.Context) error {
 	// Build metrics
 	metrics := &SystemMetrics{
 		CPUPercent:          cpuPercent[0],
-		MemoryUsedBytes:     int64(vmem.Used),
+		MemoryUsedBytes:     int64(vmem.Used), // #nosec G115 -- Memory size cannot exceed int64 max (8 exabytes)
 		MemoryPercent:       vmem.UsedPercent,
-		HeapBytes:           int64(memStats.HeapAlloc),
-		RSSBytes:            int64(memStats.Sys),
+		HeapBytes:           int64(memStats.HeapAlloc), // #nosec G115 -- Heap size cannot exceed int64 max (8 exabytes)
+		RSSBytes:            int64(memStats.Sys),       // #nosec G115 -- RSS size cannot exceed int64 max (8 exabytes)
 		GoroutineCount:      int64(runtime.NumGoroutine()),
 		OpenFileDescriptors: openFDs,
 		CollectedAt:         timestamp,

@@ -90,8 +90,8 @@ func (pi *ParameterInjector) injectDNAProperties(content string) (string, error)
 			continue
 		}
 
-		placeholder := match[0]           // Full match: $DNA.OS.Version
-		propertyPath := match[1]          // Property path: OS.Version
+		placeholder := match[0]  // Full match: $DNA.OS.Version
+		propertyPath := match[1] // Property path: OS.Version
 
 		// Get DNA property
 		value, err := pi.dnaProvider.GetProperty(propertyPath)
@@ -130,9 +130,9 @@ func (pi *ParameterInjector) injectConfigSettings(content string) (string, error
 			continue
 		}
 
-		placeholder := match[0]           // Full match: $CompanySettings.BackupPath
-		configType := match[1]            // CompanySettings or TenantPolicy
-		propertyPath := match[2]          // BackupPath
+		placeholder := match[0]  // Full match: $CompanySettings.BackupPath
+		configType := match[1]   // CompanySettings or TenantPolicy
+		propertyPath := match[2] // BackupPath
 
 		// Construct full config path
 		fullPath := fmt.Sprintf("%s.%s", configType, propertyPath)

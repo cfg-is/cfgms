@@ -8,7 +8,7 @@ import (
 
 // DefaultVariableResolver implements the VariableResolver interface
 type DefaultVariableResolver struct {
-	dnaProvider DNAProvider
+	dnaProvider   DNAProvider
 	configService ConfigService // Interface to config inheritance system
 }
 
@@ -37,7 +37,7 @@ func (r *DefaultVariableResolver) Resolve(ctx context.Context, template *Templat
 		TargetType:         targetType,
 		TargetID:           targetID,
 	}
-	
+
 	// 1. Load DNA properties (lowest precedence for conflicts)
 	if r.dnaProvider != nil {
 		dna, err := r.dnaProvider.GetDNA(ctx, targetType, targetID)
@@ -48,7 +48,7 @@ func (r *DefaultVariableResolver) Resolve(ctx context.Context, template *Templat
 			context.DNA = dna
 		}
 	}
-	
+
 	// 2. Load inherited variables (medium precedence)
 	if r.configService != nil {
 		inherited, err := r.configService.GetInheritedVariables(ctx, targetType, targetID)
@@ -59,10 +59,10 @@ func (r *DefaultVariableResolver) Resolve(ctx context.Context, template *Templat
 			context.InheritedVariables = inherited
 		}
 	}
-	
+
 	// 3. Use local template variables (highest precedence)
 	context.LocalVariables = template.Variables
-	
+
 	// 4. Merge variables in precedence order
 	// Start with DNA properties (but don't include DNA.* keys directly)
 	for key, value := range context.DNA {
@@ -70,17 +70,17 @@ func (r *DefaultVariableResolver) Resolve(ctx context.Context, template *Templat
 			context.Variables[key] = value
 		}
 	}
-	
+
 	// Override with inherited variables
 	for key, value := range context.InheritedVariables {
 		context.Variables[key] = value
 	}
-	
+
 	// Override with local variables (highest precedence)
 	for key, value := range context.LocalVariables {
 		context.Variables[key] = value
 	}
-	
+
 	return context, nil
 }
 
@@ -90,20 +90,20 @@ func (r *DefaultVariableResolver) ResolveVariable(ctx context.Context, name stri
 	if strings.HasPrefix(name, "DNA.") {
 		return r.resolveDNAProperty(name[4:], context.DNA)
 	}
-	
+
 	// Check variables in precedence order
 	if value, exists := context.LocalVariables[name]; exists {
 		return value, nil
 	}
-	
+
 	if value, exists := context.InheritedVariables[name]; exists {
 		return value, nil
 	}
-	
+
 	if value, exists := context.DNA[name]; exists {
 		return value, nil
 	}
-	
+
 	return nil, &TemplateError{
 		Type:    "UNDEFINED_VARIABLE",
 		Message: fmt.Sprintf("Variable '%s' is undefined", name),
@@ -114,7 +114,7 @@ func (r *DefaultVariableResolver) ResolveVariable(ctx context.Context, name stri
 func (r *DefaultVariableResolver) GetPrecedence() []string {
 	return []string{
 		"local_variables",
-		"inherited_variables", 
+		"inherited_variables",
 		"dna_properties",
 	}
 }
@@ -124,7 +124,7 @@ func (r *DefaultVariableResolver) GetPrecedence() []string {
 func (r *DefaultVariableResolver) resolveDNAProperty(property string, dna map[string]interface{}) (interface{}, error) {
 	parts := strings.Split(property, ".")
 	current := dna
-	
+
 	for i, part := range parts {
 		if current == nil {
 			return nil, &TemplateError{
@@ -132,13 +132,13 @@ func (r *DefaultVariableResolver) resolveDNAProperty(property string, dna map[st
 				Message: fmt.Sprintf("DNA property '%s' is undefined", property),
 			}
 		}
-		
+
 		if value, exists := current[part]; exists {
 			if i == len(parts)-1 {
 				// Last part - return the value
 				return value, nil
 			}
-			
+
 			// Navigate deeper
 			if next, ok := value.(map[string]interface{}); ok {
 				current = next
@@ -155,7 +155,7 @@ func (r *DefaultVariableResolver) resolveDNAProperty(property string, dna map[st
 			}
 		}
 	}
-	
+
 	return nil, &TemplateError{
 		Type:    "UNDEFINED_VARIABLE",
 		Message: fmt.Sprintf("DNA property '%s' is undefined", property),
@@ -186,7 +186,7 @@ func (m *MockDNAProvider) GetDNA(ctx context.Context, targetType, targetID strin
 	if data, exists := m.data[key]; exists {
 		return data, nil
 	}
-	
+
 	// Return empty DNA if not found
 	return make(map[string]interface{}), nil
 }
@@ -197,15 +197,15 @@ func (m *MockDNAProvider) GetProperty(ctx context.Context, targetType, targetID,
 	if err != nil {
 		return nil, err
 	}
-	
+
 	parts := strings.Split(property, ".")
 	current := dna
-	
+
 	for _, part := range parts {
 		if current == nil {
 			return nil, fmt.Errorf("property not found: %s", property)
 		}
-		
+
 		if value, exists := current[part]; exists {
 			if next, ok := value.(map[string]interface{}); ok {
 				current = next
@@ -216,7 +216,7 @@ func (m *MockDNAProvider) GetProperty(ctx context.Context, targetType, targetID,
 			return nil, fmt.Errorf("property not found: %s", property)
 		}
 	}
-	
+
 	return current, nil
 }
 
@@ -226,7 +226,7 @@ func (m *MockDNAProvider) ListProperties(ctx context.Context, targetType, target
 	if err != nil {
 		return nil, err
 	}
-	
+
 	var properties []string
 	m.collectProperties("", dna, &properties)
 	return properties, nil
@@ -238,9 +238,9 @@ func (m *MockDNAProvider) collectProperties(prefix string, data map[string]inter
 		if prefix != "" {
 			fullKey = prefix + "." + key
 		}
-		
+
 		*properties = append(*properties, fullKey)
-		
+
 		if nested, ok := value.(map[string]interface{}); ok {
 			m.collectProperties(fullKey, nested, properties)
 		}
@@ -271,7 +271,7 @@ func (m *MockConfigService) GetInheritedVariables(ctx context.Context, targetTyp
 	if data, exists := m.data[key]; exists {
 		return data, nil
 	}
-	
+
 	// Return empty variables if not found
 	return make(map[string]interface{}), nil
 }

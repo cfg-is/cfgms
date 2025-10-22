@@ -8,8 +8,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	"github.com/google/uuid"
+
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
 // Manager provides centralized audit functionality using pluggable storage
@@ -26,7 +27,7 @@ func NewManager(store interfaces.AuditStore, source string) *Manager {
 	if source == "" {
 		panic("audit manager requires non-empty source identifier")
 	}
-	
+
 	return &Manager{
 		store:  store,
 		source: source,
@@ -42,18 +43,18 @@ func (m *Manager) RecordEvent(ctx context.Context, event *AuditEventBuilder) err
 		Source:    m.source,
 		Version:   "1.0",
 	}
-	
+
 	// Apply the builder to the entry
 	event.build(entry)
-	
+
 	// Validate required fields
 	if err := m.validateEntry(entry); err != nil {
 		return fmt.Errorf("audit validation failed: %w", err)
 	}
-	
+
 	// Generate integrity checksum
 	entry.Checksum = m.generateChecksum(entry)
-	
+
 	// Store the audit entry
 	return m.store.StoreAuditEntry(ctx, entry)
 }
@@ -61,7 +62,7 @@ func (m *Manager) RecordEvent(ctx context.Context, event *AuditEventBuilder) err
 // RecordBatch records multiple audit events atomically
 func (m *Manager) RecordBatch(ctx context.Context, events []*AuditEventBuilder) error {
 	entries := make([]*interfaces.AuditEntry, len(events))
-	
+
 	for i, event := range events {
 		entry := &interfaces.AuditEntry{
 			ID:        uuid.New().String(),
@@ -69,17 +70,17 @@ func (m *Manager) RecordBatch(ctx context.Context, events []*AuditEventBuilder) 
 			Source:    m.source,
 			Version:   "1.0",
 		}
-		
+
 		event.build(entry)
-		
+
 		if err := m.validateEntry(entry); err != nil {
 			return fmt.Errorf("audit validation failed for entry %d: %w", i, err)
 		}
-		
+
 		entry.Checksum = m.generateChecksum(entry)
 		entries[i] = entry
 	}
-	
+
 	return m.store.StoreAuditBatch(ctx, entries)
 }
 
@@ -135,7 +136,7 @@ func (m *Manager) validateEntry(entry *interfaces.AuditEntry) error {
 	if entry.ResourceID == "" {
 		return interfaces.ErrResourceIDRequired
 	}
-	
+
 	return nil
 }
 
@@ -144,7 +145,7 @@ func (m *Manager) generateChecksum(entry *interfaces.AuditEntry) string {
 	// Create a copy of the entry without the checksum field for hashing
 	temp := *entry
 	temp.Checksum = ""
-	
+
 	// Create a stable representation for hashing using only immutable core fields
 	// Note: We use Unix timestamp to avoid precision issues with time formatting
 	hashInput := fmt.Sprintf("%s|%s|%d|%s|%s|%s|%s|%s|%s",
@@ -158,7 +159,7 @@ func (m *Manager) generateChecksum(entry *interfaces.AuditEntry) string {
 		temp.ResourceID,
 		temp.Result,
 	)
-	
+
 	hash := sha256.Sum256([]byte(hashInput))
 	return hex.EncodeToString(hash[:])
 }
@@ -354,7 +355,7 @@ func AuthenticationEvent(tenantID, userID, action string, result interfaces.Audi
 		Severity(interfaces.AuditSeverityHigh)
 }
 
-// AuthorizationEvent creates an authorization event builder  
+// AuthorizationEvent creates an authorization event builder
 func AuthorizationEvent(tenantID, userID, resourceType, resourceID, action string, result interfaces.AuditResult) *AuditEventBuilder {
 	return NewEventBuilder().
 		Tenant(tenantID).

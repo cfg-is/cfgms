@@ -13,15 +13,15 @@ import (
 
 // TenantIsolationEngine enforces strict tenant data isolation
 type TenantIsolationEngine struct {
-	tenantManager       *tenant.Manager
-	isolationRules      map[string]*IsolationRule
-	accessValidator     *CrossTenantAccessValidator
-	auditLogger         *TenantSecurityAuditLogger
-	vulnerabilities     map[string][]Vulnerability // tenantID -> vulnerabilities
-	remediationPlans    map[string]*RemediationPlan // vulnerabilityID -> plan
-	zeroTrustProfiles   map[string]*ZeroTrustProfile // tenantID -> zero-trust profile
-	adaptiveControls    map[string]*AdaptiveSecurityControl // tenantID -> adaptive controls
-	mutex               sync.RWMutex
+	tenantManager     *tenant.Manager
+	isolationRules    map[string]*IsolationRule
+	accessValidator   *CrossTenantAccessValidator
+	auditLogger       *TenantSecurityAuditLogger
+	vulnerabilities   map[string][]Vulnerability          // tenantID -> vulnerabilities
+	remediationPlans  map[string]*RemediationPlan         // vulnerabilityID -> plan
+	zeroTrustProfiles map[string]*ZeroTrustProfile        // tenantID -> zero-trust profile
+	adaptiveControls  map[string]*AdaptiveSecurityControl // tenantID -> adaptive controls
+	mutex             sync.RWMutex
 }
 
 // IsolationRule defines data isolation rules for a tenant
@@ -88,28 +88,28 @@ const (
 type ComplianceLevel string
 
 const (
-	ComplianceLevelBasic      ComplianceLevel = "basic"
-	ComplianceLevelHIPAA      ComplianceLevel = "hipaa"
-	ComplianceLevelSOX        ComplianceLevel = "sox"
-	ComplianceLevelPCIDSS     ComplianceLevel = "pci_dss"
-	ComplianceLevelFedRAMP    ComplianceLevel = "fedramp"
-	ComplianceLevelGDPR       ComplianceLevel = "gdpr"
-	ComplianceLevelCCPA       ComplianceLevel = "ccpa"
-	ComplianceLevelCustom     ComplianceLevel = "custom"
+	ComplianceLevelBasic   ComplianceLevel = "basic"
+	ComplianceLevelHIPAA   ComplianceLevel = "hipaa"
+	ComplianceLevelSOX     ComplianceLevel = "sox"
+	ComplianceLevelPCIDSS  ComplianceLevel = "pci_dss"
+	ComplianceLevelFedRAMP ComplianceLevel = "fedramp"
+	ComplianceLevelGDPR    ComplianceLevel = "gdpr"
+	ComplianceLevelCCPA    ComplianceLevel = "ccpa"
+	ComplianceLevelCustom  ComplianceLevel = "custom"
 )
 
 // ZeroTrustProfile defines zero-trust security profile for a tenant
 type ZeroTrustProfile struct {
-	TenantID              string                    `json:"tenant_id"`
-	TrustLevel            ZeroTrustLevel            `json:"trust_level"`
-	DeviceFingerprints    map[string]*ZeroTrustDeviceProfile `json:"device_fingerprints"`
-	BehavioralBaseline    *BehavioralBaseline       `json:"behavioral_baseline"`
-	AccessPatterns        []AccessPattern           `json:"access_patterns"`
-	RiskScore             float64                   `json:"risk_score"`
-	ContinuousVerification bool                     `json:"continuous_verification"`
-	AdaptiveAuthentication *AdaptiveAuthConfig      `json:"adaptive_authentication"`
-	ContextualControls    []ContextualControl       `json:"contextual_controls"`
-	LastUpdated           time.Time                 `json:"last_updated"`
+	TenantID               string                             `json:"tenant_id"`
+	TrustLevel             ZeroTrustLevel                     `json:"trust_level"`
+	DeviceFingerprints     map[string]*ZeroTrustDeviceProfile `json:"device_fingerprints"`
+	BehavioralBaseline     *BehavioralBaseline                `json:"behavioral_baseline"`
+	AccessPatterns         []AccessPattern                    `json:"access_patterns"`
+	RiskScore              float64                            `json:"risk_score"`
+	ContinuousVerification bool                               `json:"continuous_verification"`
+	AdaptiveAuthentication *AdaptiveAuthConfig                `json:"adaptive_authentication"`
+	ContextualControls     []ContextualControl                `json:"contextual_controls"`
+	LastUpdated            time.Time                          `json:"last_updated"`
 }
 
 // ZeroTrustLevel defines trust levels in zero-trust model
@@ -125,26 +125,26 @@ const (
 
 // ZeroTrustDeviceProfile stores device fingerprinting information for zero-trust
 type ZeroTrustDeviceProfile struct {
-	DeviceID          string                 `json:"device_id"`
-	DeviceType        string                 `json:"device_type"`
-	OSVersion         string                 `json:"os_version"`
-	BrowserFingerprint string                `json:"browser_fingerprint,omitempty"`
-	NetworkFingerprint string                `json:"network_fingerprint"`
-	TrustScore        float64                `json:"trust_score"`
-	LastSeen          time.Time              `json:"last_seen"`
-	Attributes        map[string]interface{} `json:"attributes"`
-	RiskIndicators    []string               `json:"risk_indicators"`
+	DeviceID           string                 `json:"device_id"`
+	DeviceType         string                 `json:"device_type"`
+	OSVersion          string                 `json:"os_version"`
+	BrowserFingerprint string                 `json:"browser_fingerprint,omitempty"`
+	NetworkFingerprint string                 `json:"network_fingerprint"`
+	TrustScore         float64                `json:"trust_score"`
+	LastSeen           time.Time              `json:"last_seen"`
+	Attributes         map[string]interface{} `json:"attributes"`
+	RiskIndicators     []string               `json:"risk_indicators"`
 }
 
 // BehavioralBaseline defines normal behavior patterns for a tenant
 type BehavioralBaseline struct {
-	TypicalAccessHours    []TimeWindow      `json:"typical_access_hours"`
-	CommonLocations       []GeographicZone  `json:"common_locations"`
-	UsualResources        []string          `json:"usual_resources"`
-	AverageSessionLength  time.Duration     `json:"average_session_length"`
-	NormalDataVolume      DataVolumePattern `json:"normal_data_volume"`
-	EstablishedAt         time.Time         `json:"established_at"`
-	ConfidenceLevel       float64           `json:"confidence_level"`
+	TypicalAccessHours   []TimeWindow      `json:"typical_access_hours"`
+	CommonLocations      []GeographicZone  `json:"common_locations"`
+	UsualResources       []string          `json:"usual_resources"`
+	AverageSessionLength time.Duration     `json:"average_session_length"`
+	NormalDataVolume     DataVolumePattern `json:"normal_data_volume"`
+	EstablishedAt        time.Time         `json:"established_at"`
+	ConfidenceLevel      float64           `json:"confidence_level"`
 }
 
 // TimeWindow defines a time range for access patterns
@@ -173,34 +173,34 @@ type DataVolumePattern struct {
 
 // AccessPattern defines observed access patterns
 type AccessPattern struct {
-	PatternID   string                 `json:"pattern_id"`
-	Type        AccessPatternType      `json:"type"`
-	Frequency   int                    `json:"frequency"`
-	LastSeen    time.Time              `json:"last_seen"`
-	Confidence  float64                `json:"confidence"`
-	Context     map[string]interface{} `json:"context"`
-	RiskLevel   string                 `json:"risk_level"`
+	PatternID  string                 `json:"pattern_id"`
+	Type       AccessPatternType      `json:"type"`
+	Frequency  int                    `json:"frequency"`
+	LastSeen   time.Time              `json:"last_seen"`
+	Confidence float64                `json:"confidence"`
+	Context    map[string]interface{} `json:"context"`
+	RiskLevel  string                 `json:"risk_level"`
 }
 
 // AccessPatternType defines types of access patterns
 type AccessPatternType string
 
 const (
-	AccessPatternTypeNormal      AccessPatternType = "normal"
-	AccessPatternTypeSuspicious  AccessPatternType = "suspicious"
-	AccessPatternTypeAnomaly     AccessPatternType = "anomaly"
-	AccessPatternTypeBaseline    AccessPatternType = "baseline"
+	AccessPatternTypeNormal     AccessPatternType = "normal"
+	AccessPatternTypeSuspicious AccessPatternType = "suspicious"
+	AccessPatternTypeAnomaly    AccessPatternType = "anomaly"
+	AccessPatternTypeBaseline   AccessPatternType = "baseline"
 )
 
 // AdaptiveAuthConfig defines adaptive authentication settings
 type AdaptiveAuthConfig struct {
-	MFARequired           bool                      `json:"mfa_required"`
-	RiskBasedMFA          bool                      `json:"risk_based_mfa"`
-	RiskThreshold         float64                   `json:"risk_threshold"`
-	AdditionalFactors     []AuthenticationFactor    `json:"additional_factors"`
-	ContinuousAuth        bool                      `json:"continuous_auth"`
-	SessionTimeout        time.Duration             `json:"session_timeout"`
-	ReauthenticationRules []ReauthenticationRule   `json:"reauthentication_rules"`
+	MFARequired           bool                   `json:"mfa_required"`
+	RiskBasedMFA          bool                   `json:"risk_based_mfa"`
+	RiskThreshold         float64                `json:"risk_threshold"`
+	AdditionalFactors     []AuthenticationFactor `json:"additional_factors"`
+	ContinuousAuth        bool                   `json:"continuous_auth"`
+	SessionTimeout        time.Duration          `json:"session_timeout"`
+	ReauthenticationRules []ReauthenticationRule `json:"reauthentication_rules"`
 }
 
 // AuthenticationFactor defines authentication factors
@@ -224,37 +224,37 @@ type ReauthenticationRule struct {
 
 // ContextualControl defines context-based security controls
 type ContextualControl struct {
-	ControlID   string                 `json:"control_id"`
-	Type        ContextualControlType  `json:"type"`
-	Condition   string                 `json:"condition"`
-	Action      string                 `json:"action"`
-	Parameters  map[string]interface{} `json:"parameters"`
-	Enabled     bool                   `json:"enabled"`
-	Priority    int                    `json:"priority"`
+	ControlID  string                 `json:"control_id"`
+	Type       ContextualControlType  `json:"type"`
+	Condition  string                 `json:"condition"`
+	Action     string                 `json:"action"`
+	Parameters map[string]interface{} `json:"parameters"`
+	Enabled    bool                   `json:"enabled"`
+	Priority   int                    `json:"priority"`
 }
 
 // ContextualControlType defines types of contextual controls
 type ContextualControlType string
 
 const (
-	ContextualControlTypeLocation    ContextualControlType = "location"
-	ContextualControlTypeTime        ContextualControlType = "time"
-	ContextualControlTypeDevice      ContextualControlType = "device"
-	ContextualControlTypeRisk        ContextualControlType = "risk"
-	ContextualControlTypeData        ContextualControlType = "data"
-	ContextualControlTypeBehavior    ContextualControlType = "behavior"
+	ContextualControlTypeLocation ContextualControlType = "location"
+	ContextualControlTypeTime     ContextualControlType = "time"
+	ContextualControlTypeDevice   ContextualControlType = "device"
+	ContextualControlTypeRisk     ContextualControlType = "risk"
+	ContextualControlTypeData     ContextualControlType = "data"
+	ContextualControlTypeBehavior ContextualControlType = "behavior"
 )
 
 // AdaptiveSecurityControl defines adaptive security controls that adjust based on risk
 type AdaptiveSecurityControl struct {
-	TenantID           string                     `json:"tenant_id"`
-	CurrentRiskLevel   RiskLevel                  `json:"current_risk_level"`
-	AdaptationRules    []AdaptationRule           `json:"adaptation_rules"`
-	SecurityPosture    SecurityPosture            `json:"security_posture"`
-	AutomatedResponses []AutomatedResponse        `json:"automated_responses"`
-	EscalationPolicy   *EscalationPolicy          `json:"escalation_policy"`
-	LastAdaptation     time.Time                  `json:"last_adaptation"`
-	AdaptationHistory  []AdaptationEvent          `json:"adaptation_history"`
+	TenantID           string              `json:"tenant_id"`
+	CurrentRiskLevel   RiskLevel           `json:"current_risk_level"`
+	AdaptationRules    []AdaptationRule    `json:"adaptation_rules"`
+	SecurityPosture    SecurityPosture     `json:"security_posture"`
+	AutomatedResponses []AutomatedResponse `json:"automated_responses"`
+	EscalationPolicy   *EscalationPolicy   `json:"escalation_policy"`
+	LastAdaptation     time.Time           `json:"last_adaptation"`
+	AdaptationHistory  []AdaptationEvent   `json:"adaptation_history"`
 }
 
 // RiskLevel defines risk assessment levels
@@ -281,9 +281,9 @@ type AdaptationRule struct {
 type AdaptationTriggerType string
 
 const (
-	AdaptationTriggerRiskIncrease    AdaptationTriggerType = "risk_increase"
-	AdaptationTriggerThreatDetection AdaptationTriggerType = "threat_detection"
-	AdaptationTriggerAnomalyDetected AdaptationTriggerType = "anomaly_detected"
+	AdaptationTriggerRiskIncrease     AdaptationTriggerType = "risk_increase"
+	AdaptationTriggerThreatDetection  AdaptationTriggerType = "threat_detection"
+	AdaptationTriggerAnomalyDetected  AdaptationTriggerType = "anomaly_detected"
 	AdaptationTriggerComplianceChange AdaptationTriggerType = "compliance_change"
 )
 
@@ -291,32 +291,32 @@ const (
 type AdaptationAction string
 
 const (
-	AdaptationActionTightenControls   AdaptationAction = "tighten_controls"
-	AdaptationActionRequireMFA        AdaptationAction = "require_mfa"
-	AdaptationActionLimitAccess       AdaptationAction = "limit_access"
+	AdaptationActionTightenControls    AdaptationAction = "tighten_controls"
+	AdaptationActionRequireMFA         AdaptationAction = "require_mfa"
+	AdaptationActionLimitAccess        AdaptationAction = "limit_access"
 	AdaptationActionIncreaseMonitoring AdaptationAction = "increase_monitoring"
-	AdaptationActionIsolateSession    AdaptationAction = "isolate_session"
-	AdaptationActionEscalateAlert     AdaptationAction = "escalate_alert"
+	AdaptationActionIsolateSession     AdaptationAction = "isolate_session"
+	AdaptationActionEscalateAlert      AdaptationAction = "escalate_alert"
 )
 
 // SecurityPosture defines the current security stance
 type SecurityPosture struct {
-	PostureLevel  SecurityPostureLevel `json:"posture_level"`
-	Controls      []string             `json:"active_controls"`
-	Restrictions  []string             `json:"active_restrictions"`
-	MonitoringLevel string             `json:"monitoring_level"`
-	LastUpdate    time.Time            `json:"last_update"`
+	PostureLevel    SecurityPostureLevel `json:"posture_level"`
+	Controls        []string             `json:"active_controls"`
+	Restrictions    []string             `json:"active_restrictions"`
+	MonitoringLevel string               `json:"monitoring_level"`
+	LastUpdate      time.Time            `json:"last_update"`
 }
 
 // SecurityPostureLevel defines security posture levels
 type SecurityPostureLevel string
 
 const (
-	SecurityPostureRelaxed     SecurityPostureLevel = "relaxed"
-	SecurityPostureNormal      SecurityPostureLevel = "normal"
-	SecurityPostureHeightened  SecurityPostureLevel = "heightened"
-	SecurityPostureRestricted  SecurityPostureLevel = "restricted"
-	SecurityPostureLockdown    SecurityPostureLevel = "lockdown"
+	SecurityPostureRelaxed    SecurityPostureLevel = "relaxed"
+	SecurityPostureNormal     SecurityPostureLevel = "normal"
+	SecurityPostureHeightened SecurityPostureLevel = "heightened"
+	SecurityPostureRestricted SecurityPostureLevel = "restricted"
+	SecurityPostureLockdown   SecurityPostureLevel = "lockdown"
 )
 
 // AutomatedResponse defines automated security responses
@@ -330,9 +330,9 @@ type AutomatedResponse struct {
 
 // EscalationPolicy defines escalation procedures
 type EscalationPolicy struct {
-	Levels    []EscalationLevel `json:"levels"`
-	Enabled   bool              `json:"enabled"`
-	MaxLevel  int               `json:"max_level"`
+	Levels   []EscalationLevel `json:"levels"`
+	Enabled  bool              `json:"enabled"`
+	MaxLevel int               `json:"max_level"`
 }
 
 // EscalationLevel defines an escalation level
@@ -346,11 +346,11 @@ type EscalationLevel struct {
 
 // AdaptationEvent records adaptation history
 type AdaptationEvent struct {
-	EventID   string    `json:"event_id"`
-	Timestamp time.Time `json:"timestamp"`
-	Trigger   string    `json:"trigger"`
-	Action    string    `json:"action"`
-	Result    string    `json:"result"`
+	EventID   string                 `json:"event_id"`
+	Timestamp time.Time              `json:"timestamp"`
+	Trigger   string                 `json:"trigger"`
+	Action    string                 `json:"action"`
+	Result    string                 `json:"result"`
 	Context   map[string]interface{} `json:"context"`
 }
 
@@ -358,13 +358,13 @@ type AdaptationEvent struct {
 type VulnerabilityType string
 
 const (
-	VulnerabilityMissingPatches     VulnerabilityType = "missing_patches"
-	VulnerabilityWeakCredentials    VulnerabilityType = "weak_credentials"
-	VulnerabilityOpenPorts          VulnerabilityType = "open_ports"
-	VulnerabilityOutdatedSoftware   VulnerabilityType = "outdated_software"
-	VulnerabilityMisconfiguration   VulnerabilityType = "misconfiguration"
+	VulnerabilityMissingPatches      VulnerabilityType = "missing_patches"
+	VulnerabilityWeakCredentials     VulnerabilityType = "weak_credentials"
+	VulnerabilityOpenPorts           VulnerabilityType = "open_ports"
+	VulnerabilityOutdatedSoftware    VulnerabilityType = "outdated_software"
+	VulnerabilityMisconfiguration    VulnerabilityType = "misconfiguration"
 	VulnerabilityPrivilegeEscalation VulnerabilityType = "privilege_escalation"
-	VulnerabilityDataExposure       VulnerabilityType = "data_exposure"
+	VulnerabilityDataExposure        VulnerabilityType = "data_exposure"
 )
 
 // VulnerabilitySeverity defines vulnerability severity levels
@@ -409,27 +409,27 @@ type Vulnerability struct {
 
 // RemediationPlan defines how to remediate a vulnerability
 type RemediationPlan struct {
-	Actions         []RemediationAction `json:"actions"`
-	AutoRemediate   bool                `json:"auto_remediate"`
-	ManualSteps     []string            `json:"manual_steps"`
-	EstimatedTime   time.Duration       `json:"estimated_time"`
-	Priority        int                 `json:"priority"` // 1-10, where 1 is highest priority
-	Dependencies    []string            `json:"dependencies"`
-	RollbackPlan    []string            `json:"rollback_plan"`
-	CreatedAt       time.Time           `json:"created_at"`
-	ScheduledAt     *time.Time          `json:"scheduled_at,omitempty"`
-	CompletedAt     *time.Time          `json:"completed_at,omitempty"`
+	Actions       []RemediationAction `json:"actions"`
+	AutoRemediate bool                `json:"auto_remediate"`
+	ManualSteps   []string            `json:"manual_steps"`
+	EstimatedTime time.Duration       `json:"estimated_time"`
+	Priority      int                 `json:"priority"` // 1-10, where 1 is highest priority
+	Dependencies  []string            `json:"dependencies"`
+	RollbackPlan  []string            `json:"rollback_plan"`
+	CreatedAt     time.Time           `json:"created_at"`
+	ScheduledAt   *time.Time          `json:"scheduled_at,omitempty"`
+	CompletedAt   *time.Time          `json:"completed_at,omitempty"`
 }
 
 // VulnerabilityAssessment contains the result of vulnerability scanning
 type VulnerabilityAssessment struct {
-	TenantID         string           `json:"tenant_id"`
-	ScanID           string           `json:"scan_id"`
-	ScanTime         time.Time        `json:"scan_time"`
-	Vulnerabilities  []Vulnerability  `json:"vulnerabilities"`
-	RiskScore        float64          `json:"risk_score"`
-	ComplianceStatus map[string]bool  `json:"compliance_status"`
-	Recommendations  []string         `json:"recommendations"`
+	TenantID         string          `json:"tenant_id"`
+	ScanID           string          `json:"scan_id"`
+	ScanTime         time.Time       `json:"scan_time"`
+	Vulnerabilities  []Vulnerability `json:"vulnerabilities"`
+	RiskScore        float64         `json:"risk_score"`
+	ComplianceStatus map[string]bool `json:"compliance_status"`
+	Recommendations  []string        `json:"recommendations"`
 }
 
 // NewTenantIsolationEngine creates a new tenant isolation engine
@@ -691,7 +691,7 @@ func (tie *TenantIsolationEngine) validateNetworkRestrictions(networkRule Networ
 	return nil
 }
 
-// validateResourceRestrictions validates resource-level access restrictions  
+// validateResourceRestrictions validates resource-level access restrictions
 func (tie *TenantIsolationEngine) validateResourceRestrictions(resourceRule ResourceRule, resourceID string) error {
 	// Check if resource is restricted
 	for _, restricted := range resourceRule.RestrictedResources {
@@ -720,19 +720,19 @@ func (tie *TenantIsolationEngine) isAccessLevelSufficient(maxLevel, requestedLev
 func (tie *TenantIsolationEngine) isIPInRange(ip, cidrRange string) bool {
 	// Simplified CIDR matching for test purposes
 	// In production, use net.ParseCIDR and proper subnet matching
-	
+
 	if cidrRange == "0.0.0.0/0" {
 		return true // Match all IPs
 	}
-	
+
 	if cidrRange == "192.168.1.0/24" {
 		return strings.HasPrefix(ip, "192.168.1.")
 	}
-	
+
 	if cidrRange == "10.0.0.0/8" {
 		return strings.HasPrefix(ip, "10.")
 	}
-	
+
 	// Exact match
 	return ip == cidrRange
 }
@@ -766,25 +766,25 @@ func (tie *TenantIsolationEngine) getDefaultIsolationRule(tenantID string) *Isol
 
 // TenantAccessRequest represents a request to access tenant resources
 type TenantAccessRequest struct {
-	SubjectID       string                    `json:"subject_id"`
-	SubjectTenantID string                    `json:"subject_tenant_id"`
-	TargetTenantID  string                    `json:"target_tenant_id"`
-	ResourceID      string                    `json:"resource_id"`
-	AccessLevel     CrossTenantLevel          `json:"access_level"`
-	Context         map[string]string         `json:"context"`
+	SubjectID       string                       `json:"subject_id"`
+	SubjectTenantID string                       `json:"subject_tenant_id"`
+	TargetTenantID  string                       `json:"target_tenant_id"`
+	ResourceID      string                       `json:"resource_id"`
+	AccessLevel     CrossTenantLevel             `json:"access_level"`
+	Context         map[string]string            `json:"context"`
 	AuthContext     *common.AuthorizationContext `json:"auth_context,omitempty"`
 }
 
 // TenantAccessResponse represents the response to a tenant access request
 type TenantAccessResponse struct {
-	Granted        bool                      `json:"granted"`
-	TenantID       string                    `json:"tenant_id"`
-	SubjectID      string                    `json:"subject_id"`
-	ResourceID     string                    `json:"resource_id"`
-	RequestedLevel CrossTenantLevel          `json:"requested_level"`
-	Reason         string                    `json:"reason"`
-	EffectiveRule  *IsolationRule           `json:"effective_rule,omitempty"`
-	ValidationTime time.Time                 `json:"validation_time"`
+	Granted        bool             `json:"granted"`
+	TenantID       string           `json:"tenant_id"`
+	SubjectID      string           `json:"subject_id"`
+	ResourceID     string           `json:"resource_id"`
+	RequestedLevel CrossTenantLevel `json:"requested_level"`
+	Reason         string           `json:"reason"`
+	EffectiveRule  *IsolationRule   `json:"effective_rule,omitempty"`
+	ValidationTime time.Time        `json:"validation_time"`
 }
 
 // ValidateTenantResourceAccess provides a simplified interface for validating tenant access
@@ -1202,16 +1202,16 @@ func (tie *TenantIsolationEngine) InitializeZeroTrustProfile(ctx context.Context
 	}
 
 	profile := &ZeroTrustProfile{
-		TenantID:           tenantID,
-		TrustLevel:         ZeroTrustLevelUntrusted,
-		DeviceFingerprints: make(map[string]*ZeroTrustDeviceProfile),
-		BehavioralBaseline: tie.createDefaultBehavioralBaseline(),
-		AccessPatterns:     []AccessPattern{},
-		RiskScore:          50.0, // Start with medium risk
+		TenantID:               tenantID,
+		TrustLevel:             ZeroTrustLevelUntrusted,
+		DeviceFingerprints:     make(map[string]*ZeroTrustDeviceProfile),
+		BehavioralBaseline:     tie.createDefaultBehavioralBaseline(),
+		AccessPatterns:         []AccessPattern{},
+		RiskScore:              50.0, // Start with medium risk
 		ContinuousVerification: true,
 		AdaptiveAuthentication: tie.createDefaultAdaptiveAuthConfig(),
 		ContextualControls:     tie.createDefaultContextualControls(),
-		LastUpdated:       time.Now(),
+		LastUpdated:            time.Now(),
 	}
 
 	tie.zeroTrustProfiles[tenantID] = profile
@@ -1305,10 +1305,10 @@ func (tie *TenantIsolationEngine) EvaluateZeroTrustAccess(ctx context.Context, r
 	profile, exists := tie.zeroTrustProfiles[request.TenantID]
 	if !exists {
 		return &ZeroTrustAccessResponse{
-			Granted:     false,
-			TrustLevel:  ZeroTrustLevelUntrusted,
-			RiskScore:   100.0,
-			Reason:      "No zero-trust profile established",
+			Granted:      false,
+			TrustLevel:   ZeroTrustLevelUntrusted,
+			RiskScore:    100.0,
+			Reason:       "No zero-trust profile established",
 			RequiredAuth: []AuthenticationFactor{AuthFactorPassword, AuthFactorTOTP},
 		}, nil
 	}
@@ -1418,8 +1418,8 @@ func (tie *TenantIsolationEngine) createDefaultBehavioralBaseline() *BehavioralB
 		TypicalAccessHours: []TimeWindow{
 			{StartHour: 9, EndHour: 17, DayOfWeek: "weekday", Timezone: "UTC"},
 		},
-		CommonLocations: []GeographicZone{},
-		UsualResources:  []string{},
+		CommonLocations:      []GeographicZone{},
+		UsualResources:       []string{},
 		AverageSessionLength: time.Hour,
 		NormalDataVolume: DataVolumePattern{
 			AverageReadMB:  10.0,
@@ -1434,12 +1434,12 @@ func (tie *TenantIsolationEngine) createDefaultBehavioralBaseline() *BehavioralB
 
 func (tie *TenantIsolationEngine) createDefaultAdaptiveAuthConfig() *AdaptiveAuthConfig {
 	return &AdaptiveAuthConfig{
-		MFARequired:      true,
-		RiskBasedMFA:     true,
-		RiskThreshold:    0.7,
+		MFARequired:       true,
+		RiskBasedMFA:      true,
+		RiskThreshold:     0.7,
 		AdditionalFactors: []AuthenticationFactor{AuthFactorTOTP},
-		ContinuousAuth:   false,
-		SessionTimeout:   time.Hour * 8,
+		ContinuousAuth:    false,
+		SessionTimeout:    time.Hour * 8,
 		ReauthenticationRules: []ReauthenticationRule{
 			{Trigger: "high_risk_detected", Condition: "risk_score > 0.8", GracePeriod: time.Minute * 5},
 		},
@@ -1743,18 +1743,18 @@ func (tie *TenantIsolationEngine) escalateSecurityAlert(ctx context.Context, ten
 
 // ZeroTrustAccessEvent represents an access event for behavioral analysis
 type ZeroTrustAccessEvent struct {
-	EventID     string                 `json:"event_id"`
-	TenantID    string                 `json:"tenant_id"`
-	UserID      string                 `json:"user_id"`
-	DeviceID    string                 `json:"device_id"`
-	ResourceID  string                 `json:"resource_id"`
-	Action      string                 `json:"action"`
-	Timestamp   time.Time              `json:"timestamp"`
-	Location    string                 `json:"location,omitempty"`
-	Success     bool                   `json:"success"`
-	Duration    time.Duration          `json:"duration,omitempty"`
-	DataVolume  float64                `json:"data_volume,omitempty"`
-	Context     map[string]interface{} `json:"context,omitempty"`
+	EventID    string                 `json:"event_id"`
+	TenantID   string                 `json:"tenant_id"`
+	UserID     string                 `json:"user_id"`
+	DeviceID   string                 `json:"device_id"`
+	ResourceID string                 `json:"resource_id"`
+	Action     string                 `json:"action"`
+	Timestamp  time.Time              `json:"timestamp"`
+	Location   string                 `json:"location,omitempty"`
+	Success    bool                   `json:"success"`
+	Duration   time.Duration          `json:"duration,omitempty"`
+	DataVolume float64                `json:"data_volume,omitempty"`
+	Context    map[string]interface{} `json:"context,omitempty"`
 }
 
 // ZeroTrustAccessRequest represents a zero-trust access request
@@ -1773,14 +1773,14 @@ type ZeroTrustAccessRequest struct {
 
 // ZeroTrustAccessResponse represents the response to a zero-trust access request
 type ZeroTrustAccessResponse struct {
-	RequestID    string                  `json:"request_id"`
-	TenantID     string                  `json:"tenant_id"`
-	Granted      bool                    `json:"granted"`
-	TrustLevel   ZeroTrustLevel          `json:"trust_level"`
-	RiskScore    float64                 `json:"risk_score"`
-	Reason       string                  `json:"reason"`
-	RequiredAuth []AuthenticationFactor  `json:"required_auth"`
-	EvaluatedAt  time.Time               `json:"evaluated_at"`
-	Constraints  []string                `json:"constraints,omitempty"`
-	SessionData  map[string]interface{}  `json:"session_data,omitempty"`
+	RequestID    string                 `json:"request_id"`
+	TenantID     string                 `json:"tenant_id"`
+	Granted      bool                   `json:"granted"`
+	TrustLevel   ZeroTrustLevel         `json:"trust_level"`
+	RiskScore    float64                `json:"risk_score"`
+	Reason       string                 `json:"reason"`
+	RequiredAuth []AuthenticationFactor `json:"required_auth"`
+	EvaluatedAt  time.Time              `json:"evaluated_at"`
+	Constraints  []string               `json:"constraints,omitempty"`
+	SessionData  map[string]interface{} `json:"session_data,omitempty"`
 }

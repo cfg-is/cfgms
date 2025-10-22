@@ -19,21 +19,21 @@ import (
 
 // EffectiveConfig represents the final configuration after applying inheritance
 type EffectiveConfig struct {
-	StewardID   string                           `json:"steward_id"`
-	TenantID    string                           `json:"tenant_id"`
-	Resources   map[string]*EffectiveResource    `json:"resources"`
-	Steward     *EffectiveSection                `json:"steward"`
-	Modules     map[string]*EffectiveValue       `json:"modules"`
-	GeneratedAt time.Time                        `json:"generated_at"`
+	StewardID   string                        `json:"steward_id"`
+	TenantID    string                        `json:"tenant_id"`
+	Resources   map[string]*EffectiveResource `json:"resources"`
+	Steward     *EffectiveSection             `json:"steward"`
+	Modules     map[string]*EffectiveValue    `json:"modules"`
+	GeneratedAt time.Time                     `json:"generated_at"`
 }
 
 // EffectiveResource represents a resource configuration with inheritance tracking
 type EffectiveResource struct {
-	Name   string                   `json:"name"`
-	Module string                   `json:"module"`
+	Name   string                     `json:"name"`
+	Module string                     `json:"module"`
 	Config map[string]*EffectiveValue `json:"config"`
-	Source string                   `json:"source"` // Which level provided this resource
-	Level  int                      `json:"level"`  // Hierarchy level (0=msp, 1=client, 2=group, 3=device)
+	Source string                     `json:"source"` // Which level provided this resource
+	Level  int                        `json:"level"`  // Hierarchy level (0=msp, 1=client, 2=group, 3=device)
 }
 
 // EffectiveSection represents a configuration section with inheritance tracking
@@ -50,11 +50,11 @@ type EffectiveValue struct {
 
 // ConfigurationService implements the Configuration service
 type ConfigurationService struct {
-	logger        logging.Logger
-	mu            sync.RWMutex
+	logger         logging.Logger
+	mu             sync.RWMutex
 	configurations map[string]*StoredConfiguration
-	controllerSvc *ControllerService
-	validator     *validation.Validator
+	controllerSvc  *ControllerService
+	validator      *validation.Validator
 
 	// Configuration streaming
 	subscribers map[string]chan *controller.ConfigurationUpdate
@@ -62,12 +62,12 @@ type ConfigurationService struct {
 
 // StoredConfiguration represents a configuration stored in the controller
 type StoredConfiguration struct {
-	StewardID     string
-	TenantID      string  // Multi-tenant support
-	Version       string
-	Config        *stewardconfig.StewardConfig
-	LastUpdated   time.Time
-	CreatedAt     time.Time
+	StewardID   string
+	TenantID    string // Multi-tenant support
+	Version     string
+	Config      *stewardconfig.StewardConfig
+	LastUpdated time.Time
+	CreatedAt   time.Time
 }
 
 // NewConfigurationService creates a new Configuration service
@@ -84,10 +84,10 @@ func NewConfigurationService(logger logging.Logger, controllerSvc *ControllerSer
 // GetConfiguration retrieves configuration for a specific steward
 func (s *ConfigurationService) GetConfiguration(ctx context.Context, req *controller.ConfigRequest) (*controller.ConfigResponse, error) {
 	s.logger.Debug("Configuration request received", "steward_id", req.StewardId, "modules", req.Modules)
-	
+
 	// Extract tenant context
 	tenantID := s.extractTenantID(ctx)
-	
+
 	// Verify steward exists and belongs to the tenant
 	if s.controllerSvc != nil {
 		stewardInfo, exists := s.controllerSvc.GetStewardInfo(req.StewardId)
@@ -100,10 +100,10 @@ func (s *ConfigurationService) GetConfiguration(ctx context.Context, req *contro
 				},
 			}, nil
 		}
-		
+
 		// Check tenant isolation
 		if stewardInfo.TenantID != tenantID {
-			s.logger.Warn("Configuration request cross-tenant access denied", 
+			s.logger.Warn("Configuration request cross-tenant access denied",
 				"steward_id", req.StewardId,
 				"steward_tenant", stewardInfo.TenantID,
 				"request_tenant", tenantID)
@@ -115,10 +115,10 @@ func (s *ConfigurationService) GetConfiguration(ctx context.Context, req *contro
 			}, nil
 		}
 	}
-	
+
 	// Use tenant-aware configuration retrieval
 	storedConfig, exists := s.GetTenantConfiguration(tenantID, req.StewardId)
-	
+
 	if !exists {
 		s.logger.Debug("No configuration found for steward", "steward_id", req.StewardId)
 		return &controller.ConfigResponse{
@@ -128,10 +128,10 @@ func (s *ConfigurationService) GetConfiguration(ctx context.Context, req *contro
 			},
 		}, nil
 	}
-	
+
 	// Filter configuration by requested modules if specified
 	filteredConfig := s.filterConfigByModules(storedConfig.Config, req.Modules)
-	
+
 	// Convert to JSON
 	configData, err := json.Marshal(filteredConfig)
 	if err != nil {
@@ -143,9 +143,9 @@ func (s *ConfigurationService) GetConfiguration(ctx context.Context, req *contro
 			},
 		}, nil
 	}
-	
+
 	s.logger.Debug("Configuration retrieved successfully", "steward_id", req.StewardId, "version", storedConfig.Version)
-	
+
 	return &controller.ConfigResponse{
 		Status: &common.Status{
 			Code:    common.Status_OK,
@@ -158,12 +158,12 @@ func (s *ConfigurationService) GetConfiguration(ctx context.Context, req *contro
 
 // ReportConfigStatus handles configuration status reports from stewards
 func (s *ConfigurationService) ReportConfigStatus(ctx context.Context, req *controller.ConfigStatusReport) (*common.Status, error) {
-	s.logger.Debug("Configuration status report received", 
+	s.logger.Debug("Configuration status report received",
 		"steward_id", req.StewardId,
 		"config_version", req.ConfigVersion,
 		"status", req.Status.Code,
 		"modules", len(req.Modules))
-	
+
 	// Verify steward exists
 	if s.controllerSvc != nil {
 		if _, exists := s.controllerSvc.GetStewardInfo(req.StewardId); !exists {
@@ -174,7 +174,7 @@ func (s *ConfigurationService) ReportConfigStatus(ctx context.Context, req *cont
 			}, nil
 		}
 	}
-	
+
 	// Log module status details
 	for _, moduleStatus := range req.Modules {
 		s.logger.Debug("Module status reported",
@@ -183,12 +183,12 @@ func (s *ConfigurationService) ReportConfigStatus(ctx context.Context, req *cont
 			"status", moduleStatus.Status.Code,
 			"message", moduleStatus.Message)
 	}
-	
-	s.logger.Info("Configuration status report processed", 
+
+	s.logger.Info("Configuration status report processed",
 		"steward_id", req.StewardId,
 		"config_version", req.ConfigVersion,
 		"overall_status", req.Status.Code)
-	
+
 	return &common.Status{
 		Code:    common.Status_OK,
 		Message: "Status report processed successfully",
@@ -198,7 +198,7 @@ func (s *ConfigurationService) ReportConfigStatus(ctx context.Context, req *cont
 // ValidateConfig validates a configuration using the comprehensive validation framework
 func (s *ConfigurationService) ValidateConfig(ctx context.Context, req *controller.ConfigValidationRequest) (*controller.ConfigValidationResponse, error) {
 	s.logger.Debug("Configuration validation request received", "version", req.Version)
-	
+
 	// Parse configuration
 	var stewardConfig stewardconfig.StewardConfig
 	if err := json.Unmarshal(req.Config, &stewardConfig); err != nil {
@@ -218,10 +218,10 @@ func (s *ConfigurationService) ValidateConfig(ctx context.Context, req *controll
 			},
 		}, nil
 	}
-	
+
 	// Use comprehensive validation framework
 	validationResult := s.validator.ValidateConfiguration(stewardConfig)
-	
+
 	// Convert validation issues to proto format
 	var validationErrors []*controller.ValidationError
 	for _, issue := range validationResult.Issues {
@@ -234,7 +234,7 @@ func (s *ConfigurationService) ValidateConfig(ctx context.Context, req *controll
 			Suggestion: issue.Suggestion,
 		})
 	}
-	
+
 	// Determine response status
 	var status *common.Status
 	if validationResult.HasCriticalErrors() {
@@ -258,20 +258,20 @@ func (s *ConfigurationService) ValidateConfig(ctx context.Context, req *controll
 			Message: "Configuration is fully valid",
 		}
 	}
-	
-	s.logger.Debug("Configuration validation completed", 
+
+	s.logger.Debug("Configuration validation completed",
 		"version", req.Version,
 		"valid", validationResult.Valid,
 		"issues", len(validationResult.Issues),
 		"duration", validationResult.Duration)
-	
+
 	return &controller.ConfigValidationResponse{
 		Status: status,
 		Errors: validationErrors,
 		Metadata: map[string]string{
-			"validation_duration": validationResult.Duration.String(),
+			"validation_duration":  validationResult.Duration.String(),
 			"validation_timestamp": validationResult.StartTime.Format(time.RFC3339),
-			"total_issues": fmt.Sprintf("%d", len(validationResult.Issues)),
+			"total_issues":         fmt.Sprintf("%d", len(validationResult.Issues)),
 		},
 	}, nil
 }
@@ -309,23 +309,23 @@ func (s *ConfigurationService) filterConfigByModules(config *stewardconfig.Stewa
 	if len(modules) == 0 {
 		return config
 	}
-	
+
 	// Create a set of requested modules
 	moduleSet := make(map[string]bool)
 	for _, module := range modules {
 		moduleSet[module] = true
 	}
-	
+
 	// Filter resources
 	filteredConfig := *config
 	filteredConfig.Resources = nil
-	
+
 	for _, resource := range config.Resources {
 		if moduleSet[resource.Module] {
 			filteredConfig.Resources = append(filteredConfig.Resources, resource)
 		}
 	}
-	
+
 	return &filteredConfig
 }
 
@@ -340,17 +340,17 @@ func (s *ConfigurationService) notifyConfigurationUpdate(stewardID string, confi
 	s.mu.RLock()
 	updateChan, exists := s.subscribers[stewardID]
 	s.mu.RUnlock()
-	
+
 	if !exists {
 		return
 	}
-	
+
 	configBytes, err := json.Marshal(config.Config)
 	if err != nil {
 		s.logger.Error("Failed to marshal configuration for update", "error", err)
 		return
 	}
-	
+
 	update := &controller.ConfigurationUpdate{
 		StewardId:  stewardID,
 		Config:     configBytes,
@@ -358,7 +358,7 @@ func (s *ConfigurationService) notifyConfigurationUpdate(stewardID string, confi
 		Timestamp:  timestamppb.Now(),
 		UpdateType: controller.ConfigurationUpdate_UPDATE,
 	}
-	
+
 	// Send update non-blocking
 	select {
 	case updateChan <- update:
@@ -374,7 +374,7 @@ func (s *ConfigurationService) notifyConfigurationUpdate(stewardID string, confi
 func (s *ConfigurationService) SetTenantConfiguration(tenantID, stewardID string, config *stewardconfig.StewardConfig) error {
 	key := s.makeTenantStewardKey(tenantID, stewardID)
 	now := time.Now()
-	
+
 	storedConfig := &StoredConfiguration{
 		StewardID:   stewardID,
 		TenantID:    tenantID,
@@ -382,27 +382,27 @@ func (s *ConfigurationService) SetTenantConfiguration(tenantID, stewardID string
 		Config:      config,
 		LastUpdated: now,
 	}
-	
+
 	s.mu.Lock()
 	existingConfig, exists := s.configurations[key]
-	
+
 	if exists {
 		storedConfig.CreatedAt = existingConfig.CreatedAt
 	} else {
 		storedConfig.CreatedAt = now
 	}
-	
+
 	s.configurations[key] = storedConfig
 	s.mu.Unlock()
-	
-	s.logger.Info("Configuration stored for tenant steward", 
+
+	s.logger.Info("Configuration stored for tenant steward",
 		"tenant_id", tenantID,
 		"steward_id", stewardID,
 		"version", storedConfig.Version)
-	
+
 	// Notify if steward is subscribed (after releasing lock to avoid deadlock)
 	s.notifyConfigurationUpdate(stewardID, storedConfig)
-	
+
 	return nil
 }
 
@@ -410,13 +410,13 @@ func (s *ConfigurationService) SetTenantConfiguration(tenantID, stewardID string
 func (s *ConfigurationService) GetTenantConfiguration(tenantID, stewardID string) (*StoredConfiguration, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	
+
 	key := s.makeTenantStewardKey(tenantID, stewardID)
 	config, exists := s.configurations[key]
 	if !exists {
 		return nil, false
 	}
-	
+
 	// Return a copy to prevent external modification
 	configCopy := *config
 	return &configCopy, true
@@ -426,9 +426,9 @@ func (s *ConfigurationService) GetTenantConfiguration(tenantID, stewardID string
 func (s *ConfigurationService) ListTenantConfigurations(tenantID string) []*StoredConfiguration {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	
+
 	var configs []*StoredConfiguration
-	
+
 	for _, config := range s.configurations {
 		if config.TenantID == tenantID {
 			// Return a copy to prevent external modification
@@ -436,7 +436,7 @@ func (s *ConfigurationService) ListTenantConfigurations(tenantID string) []*Stor
 			configs = append(configs, &configCopy)
 		}
 	}
-	
+
 	return configs
 }
 
@@ -454,10 +454,10 @@ func (s *ConfigurationService) GetEffectiveConfiguration(stewardID string) (*Eff
 
 	// For now, implement basic inheritance from tenant config to device config
 	// This is a simplified version - full hierarchy will be implemented later
-	
+
 	// Start with device-specific config
 	deviceConfig, deviceExists := s.configurations[stewardID]
-	
+
 	// Get tenant-level config as base
 	tenantKey := fmt.Sprintf("%s:", stewardInfo.TenantID)
 	var tenantConfig *StoredConfiguration
@@ -505,7 +505,7 @@ func (s *ConfigurationService) applyConfigurationLayer(effective *EffectiveConfi
 	// Apply resources
 	for _, resource := range stored.Config.Resources {
 		resourceName := resource.Name
-		
+
 		// Create or update resource (declarative - entire resource replaces)
 		effective.Resources[resourceName] = &EffectiveResource{
 			Name:   resource.Name,
@@ -556,16 +556,16 @@ func (s *ConfigurationService) applyConfigurationLayer(effective *EffectiveConfi
 func (s *ConfigurationService) DeleteTenantConfiguration(tenantID, stewardID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	
+
 	key := s.makeTenantStewardKey(tenantID, stewardID)
 	_, exists := s.configurations[key]
 	if exists {
 		delete(s.configurations, key)
-		s.logger.Info("Configuration deleted for tenant steward", 
+		s.logger.Info("Configuration deleted for tenant steward",
 			"tenant_id", tenantID,
 			"steward_id", stewardID)
 	}
-	
+
 	return exists
 }
 

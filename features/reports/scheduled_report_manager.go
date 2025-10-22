@@ -5,9 +5,10 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/cfgis/cfgms/features/reports/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging"
-	"github.com/google/uuid"
 )
 
 // ScheduledReportManager implements the ScheduledReportManager interface

@@ -437,4 +437,3 @@ func (l *TestTransformLogger) WithField(key string, value interface{}) Transform
 func (l *TestTransformLogger) WithFields(fields map[string]interface{}) TransformLogger {
 	return l // Return same logger for simplicity in tests
 }
-

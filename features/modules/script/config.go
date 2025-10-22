@@ -6,8 +6,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cfgis/cfgms/features/modules"
 	"gopkg.in/yaml.v3"
+
+	"github.com/cfgis/cfgms/features/modules"
 )
 
 // ScriptConfig represents the configuration for a script resource

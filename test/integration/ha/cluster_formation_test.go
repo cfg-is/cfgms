@@ -213,9 +213,9 @@ func TestClusterConsistency(t *testing.T) {
 
 // ClusterView represents the cluster state as seen by a controller
 type ClusterView struct {
-	Leader string              `json:"leader"`
-	Nodes  []ha.NodeInfo       `json:"nodes"`
-	Health string              `json:"health"`
+	Leader string        `json:"leader"`
+	Nodes  []ha.NodeInfo `json:"nodes"`
+	Health string        `json:"health"`
 }
 
 // waitForHealthy waits for a controller to respond to health checks

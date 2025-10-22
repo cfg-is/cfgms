@@ -23,14 +23,14 @@ type MultiTenantConfig struct {
 	ClientID     string `yaml:"client_id"`
 	ClientSecret string `yaml:"client_secret,omitempty"`
 	TenantID     string `yaml:"tenant_id"` // cfgis tenant ID
-	
+
 	// Multi-tenant settings
 	SupportedAccountTypes string `yaml:"supported_account_types"` // "AzureADMultipleOrgs"
 	RequireAdminConsent   bool   `yaml:"require_admin_consent"`   // true for MSP
-	
+
 	// Production URLs
 	AdminCallbackURI string `yaml:"admin_callback_uri"` // https://auth.cfgms.com/admin/callback
-	
+
 	// Application permissions (no delegated permissions for MSP)
 	ApplicationPermissions []string `yaml:"application_permissions"`
 }
@@ -38,10 +38,10 @@ type MultiTenantConfig struct {
 // ClientTenant represents a client organization that has consented to CFGMS
 type ClientTenant struct {
 	ID               string                 `json:"id"`
-	TenantID         string                 `json:"tenant_id"`         // Client's Azure AD tenant ID
-	TenantName       string                 `json:"tenant_name"`       // Client organization name
-	DomainName       string                 `json:"domain_name"`       // Primary domain (e.g., client.com)
-	AdminEmail       string                 `json:"admin_email"`       // Admin who consented
+	TenantID         string                 `json:"tenant_id"`   // Client's Azure AD tenant ID
+	TenantName       string                 `json:"tenant_name"` // Client organization name
+	DomainName       string                 `json:"domain_name"` // Primary domain (e.g., client.com)
+	AdminEmail       string                 `json:"admin_email"` // Admin who consented
 	ConsentedAt      time.Time              `json:"consented_at"`
 	Status           ClientTenantStatus     `json:"status"`
 	ClientIdentifier string                 `json:"client_identifier"` // CFGMS internal client ID
@@ -74,20 +74,20 @@ type AdminConsentRequest struct {
 
 // AdminConsentResult represents the result of an admin consent flow
 type AdminConsentResult struct {
-	Success          bool           `json:"success"`
-	ClientTenant     *ClientTenant  `json:"client_tenant,omitempty"`
-	Error            string         `json:"error,omitempty"`
-	ErrorDetails     string         `json:"error_details,omitempty"`
+	Success          bool              `json:"success"`
+	ClientTenant     *ClientTenant     `json:"client_tenant,omitempty"`
+	Error            string            `json:"error,omitempty"`
+	ErrorDetails     string            `json:"error_details,omitempty"`
 	AdminConsentInfo *AdminConsentInfo `json:"admin_consent_info,omitempty"`
 }
 
 // AdminConsentInfo contains information from the admin consent callback
 type AdminConsentInfo struct {
-	TenantID        string `json:"tenant_id"`         // Client tenant ID from Microsoft
-	AdminConsented  bool   `json:"admin_consented"`   // Whether admin granted consent
-	State           string `json:"state"`             // OAuth2 state parameter
-	AdminObjectID   string `json:"admin_object_id"`   // Admin user object ID
-	ConsentedAt     time.Time `json:"consented_at"`
+	TenantID       string    `json:"tenant_id"`       // Client tenant ID from Microsoft
+	AdminConsented bool      `json:"admin_consented"` // Whether admin granted consent
+	State          string    `json:"state"`           // OAuth2 state parameter
+	AdminObjectID  string    `json:"admin_object_id"` // Admin user object ID
+	ConsentedAt    time.Time `json:"consented_at"`
 }
 
 // ClientTenantStore defines the interface for storing client tenant information
@@ -99,7 +99,7 @@ type ClientTenantStore interface {
 	ListClientTenants(status ClientTenantStatus) ([]*ClientTenant, error)
 	UpdateClientTenantStatus(tenantID string, status ClientTenantStatus) error
 	DeleteClientTenant(tenantID string) error
-	
+
 	// Admin consent request management
 	StoreAdminConsentRequest(request *AdminConsentRequest) error
 	GetAdminConsentRequest(state string) (*AdminConsentRequest, error)
@@ -122,7 +122,7 @@ func (f *AdminConsentFlow) StartAdminConsentFlow(ctx context.Context, clientIden
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to generate state: %w", err)
 	}
-	
+
 	// Create admin consent request
 	request := &AdminConsentRequest{
 		ClientIdentifier: clientIdentifier,
@@ -136,18 +136,18 @@ func (f *AdminConsentFlow) StartAdminConsentFlow(ctx context.Context, clientIden
 			"initiated_at": time.Now().Format(time.RFC3339),
 		},
 	}
-	
+
 	// Store the request
 	if err := f.clientStore.StoreAdminConsentRequest(request); err != nil {
 		return nil, "", fmt.Errorf("failed to store admin consent request: %w", err)
 	}
-	
+
 	// Generate admin consent URL
 	adminConsentURL, err := f.buildAdminConsentURL(state)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to build admin consent URL: %w", err)
 	}
-	
+
 	return request, adminConsentURL, nil
 }
 
@@ -162,9 +162,9 @@ func (f *AdminConsentFlow) HandleAdminConsentCallback(ctx context.Context, callb
 			ErrorDetails: fmt.Sprintf("Failed to parse callback URL: %v", err),
 		}, nil
 	}
-	
+
 	query := parsedURL.Query()
-	
+
 	// Check for error in callback
 	if errorCode := query.Get("error"); errorCode != "" {
 		return &AdminConsentResult{
@@ -173,12 +173,12 @@ func (f *AdminConsentFlow) HandleAdminConsentCallback(ctx context.Context, callb
 			ErrorDetails: query.Get("error_description"),
 		}, nil
 	}
-	
+
 	// Extract admin consent information
 	tenantID := query.Get("tenant")
 	adminConsented := query.Get("admin_consent") == "True"
 	state := query.Get("state")
-	
+
 	if !adminConsented || tenantID == "" || state == "" {
 		return &AdminConsentResult{
 			Success:      false,
@@ -186,7 +186,7 @@ func (f *AdminConsentFlow) HandleAdminConsentCallback(ctx context.Context, callb
 			ErrorDetails: "Missing required parameters or admin consent not granted",
 		}, nil
 	}
-	
+
 	// Retrieve admin consent request
 	request, err := f.clientStore.GetAdminConsentRequest(state)
 	if err != nil {
@@ -196,7 +196,7 @@ func (f *AdminConsentFlow) HandleAdminConsentCallback(ctx context.Context, callb
 			ErrorDetails: fmt.Sprintf("Failed to retrieve admin consent request: %v", err),
 		}, nil
 	}
-	
+
 	// Validate request hasn't expired
 	if time.Now().After(request.ExpiresAt) {
 		return &AdminConsentResult{
@@ -205,7 +205,7 @@ func (f *AdminConsentFlow) HandleAdminConsentCallback(ctx context.Context, callb
 			ErrorDetails: "Admin consent request has expired",
 		}, nil
 	}
-	
+
 	// Create client tenant record
 	clientTenant := &ClientTenant{
 		ID:               f.generateClientID(),
@@ -222,7 +222,7 @@ func (f *AdminConsentFlow) HandleAdminConsentCallback(ctx context.Context, callb
 			"admin_consent_url":    f.config.AdminCallbackURI,
 		},
 	}
-	
+
 	// Store client tenant
 	if err := f.clientStore.StoreClientTenant(clientTenant); err != nil {
 		return &AdminConsentResult{
@@ -231,13 +231,13 @@ func (f *AdminConsentFlow) HandleAdminConsentCallback(ctx context.Context, callb
 			ErrorDetails: fmt.Sprintf("Failed to store client tenant: %v", err),
 		}, nil
 	}
-	
+
 	// Clean up admin consent request
 	if err := f.clientStore.DeleteAdminConsentRequest(state); err != nil {
 		// Log warning - we could add a logger field to AdminConsentFlow in the future
 		_ = err // Acknowledge error but continue
 	}
-	
+
 	// Create admin consent info
 	adminConsentInfo := &AdminConsentInfo{
 		TenantID:       tenantID,
@@ -245,7 +245,7 @@ func (f *AdminConsentFlow) HandleAdminConsentCallback(ctx context.Context, callb
 		State:          state,
 		ConsentedAt:    time.Now(),
 	}
-	
+
 	return &AdminConsentResult{
 		Success:          true,
 		ClientTenant:     clientTenant,
@@ -259,7 +259,7 @@ func (f *AdminConsentFlow) GetClientTenantStatus(ctx context.Context, clientIden
 	if err != nil {
 		return nil, fmt.Errorf("failed to get client tenant: %w", err)
 	}
-	
+
 	return client, nil
 }
 
@@ -288,20 +288,20 @@ func (f *AdminConsentFlow) ListClientTenants(ctx context.Context, status ClientT
 // buildAdminConsentURL generates the Microsoft admin consent URL
 func (f *AdminConsentFlow) buildAdminConsentURL(state string) (string, error) {
 	baseURL := "https://login.microsoftonline.com/common/adminconsent"
-	
+
 	params := url.Values{
 		"client_id":    {f.config.ClientID},
 		"redirect_uri": {f.config.AdminCallbackURI},
 		"state":        {state},
 	}
-	
+
 	// Add specific scopes if configured (otherwise Microsoft will use app registration permissions)
 	if len(f.config.ApplicationPermissions) > 0 {
 		// Note: For admin consent, scopes are usually determined by app registration
 		// but can be specified for clarity
 		params.Set("scope", "https://graph.microsoft.com/.default")
 	}
-	
+
 	adminConsentURL := fmt.Sprintf("%s?%s", baseURL, params.Encode())
 	return adminConsentURL, nil
 }
@@ -312,7 +312,7 @@ func (f *AdminConsentFlow) generateState() (string, error) {
 	if _, err := rand.Read(randomBytes); err != nil {
 		return "", err
 	}
-	
+
 	state := base64.RawURLEncoding.EncodeToString(randomBytes)
 	return state, nil
 }
@@ -338,7 +338,7 @@ func (f *AdminConsentFlow) ValidateClientTenant(ctx context.Context, tenantID st
 	if err != nil {
 		return fmt.Errorf("client tenant not found: %w", err)
 	}
-	
+
 	switch client.Status {
 	case ClientTenantStatusActive:
 		return nil

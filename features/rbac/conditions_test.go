@@ -5,8 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/cfgis/cfgms/api/proto/common"
 )
 
 func TestConditionEngine(t *testing.T) {
@@ -15,7 +16,7 @@ func TestConditionEngine(t *testing.T) {
 
 	t.Run("TimeConditions", func(t *testing.T) {
 		now := time.Now()
-		
+
 		// Test TIME_WITHIN condition
 		condition := &common.Condition{
 			Type:     "time",

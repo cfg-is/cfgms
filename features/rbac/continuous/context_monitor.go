@@ -10,170 +10,170 @@ import (
 // ContextMonitor provides continuous monitoring of authorization context and compliance
 type ContextMonitor struct {
 	// Core dependencies
-	riskManager     RiskManager
-	
+	riskManager RiskManager
+
 	// Context tracking
-	contextStore    map[string]*AuthorizationContext // sessionID -> context
-	contextMutex    sync.RWMutex
-	
+	contextStore map[string]*AuthorizationContext // sessionID -> context
+	contextMutex sync.RWMutex
+
 	// Monitoring configuration
 	checkInterval   time.Duration
 	complianceRules []ComplianceRule
 	contextRules    []ContextRule
-	
+
 	// Change detection
-	changeDetector  *ContextChangeDetector
-	
+	changeDetector *ContextChangeDetector
+
 	// Control
 	started         bool
 	stopChannel     chan struct{}
 	monitoringGroup sync.WaitGroup
-	
+
 	// Statistics
-	stats           ContextMonitorStats
+	stats ContextMonitorStats
 }
 
 // AuthorizationContext represents the complete authorization context for a session
 type AuthorizationContext struct {
-	SessionID       string            `json:"session_id"`
-	SubjectID       string            `json:"subject_id"`
-	TenantID        string            `json:"tenant_id"`
-	
+	SessionID string `json:"session_id"`
+	SubjectID string `json:"subject_id"`
+	TenantID  string `json:"tenant_id"`
+
 	// Environment context
-	Environment     EnvironmentContext `json:"environment"`
-	
+	Environment EnvironmentContext `json:"environment"`
+
 	// Security context
-	SecurityContext SecurityContext   `json:"security_context"`
-	
+	SecurityContext SecurityContext `json:"security_context"`
+
 	// Compliance context
 	ComplianceContext ComplianceContext `json:"compliance_context"`
-	
+
 	// Risk context
-	RiskContext     RiskContext       `json:"risk_context"`
-	
+	RiskContext RiskContext `json:"risk_context"`
+
 	// Temporal context
-	CreatedAt       time.Time         `json:"created_at"`
-	LastUpdated     time.Time         `json:"last_updated"`
-	LastChecked     time.Time         `json:"last_checked"`
-	
+	CreatedAt   time.Time `json:"created_at"`
+	LastUpdated time.Time `json:"last_updated"`
+	LastChecked time.Time `json:"last_checked"`
+
 	// Change tracking
-	Changes         []ContextChange   `json:"changes"`
-	ChangeCounter   int               `json:"change_counter"`
-	
-	mutex          sync.RWMutex
+	Changes       []ContextChange `json:"changes"`
+	ChangeCounter int             `json:"change_counter"`
+
+	mutex sync.RWMutex
 }
 
 // EnvironmentContext contains environmental factors affecting authorization
 type EnvironmentContext struct {
-	IPAddress       string            `json:"ip_address"`
-	Location        *GeoLocation      `json:"location,omitempty"`
-	Device          *DeviceInfo       `json:"device,omitempty"`
-	Network         *NetworkInfo      `json:"network,omitempty"`
-	UserAgent       string            `json:"user_agent"`
-	Platform        string            `json:"platform"`
-	TimeZone        string            `json:"time_zone"`
-	BusinessHours   bool              `json:"business_hours"`
-	TrustedNetwork  bool              `json:"trusted_network"`
-	
+	IPAddress      string       `json:"ip_address"`
+	Location       *GeoLocation `json:"location,omitempty"`
+	Device         *DeviceInfo  `json:"device,omitempty"`
+	Network        *NetworkInfo `json:"network,omitempty"`
+	UserAgent      string       `json:"user_agent"`
+	Platform       string       `json:"platform"`
+	TimeZone       string       `json:"time_zone"`
+	BusinessHours  bool         `json:"business_hours"`
+	TrustedNetwork bool         `json:"trusted_network"`
+
 	// VPN/Proxy detection
-	VPNDetected     bool              `json:"vpn_detected"`
-	ProxyDetected   bool              `json:"proxy_detected"`
-	TorDetected     bool              `json:"tor_detected"`
-	
-	LastVerified    time.Time         `json:"last_verified"`
+	VPNDetected   bool `json:"vpn_detected"`
+	ProxyDetected bool `json:"proxy_detected"`
+	TorDetected   bool `json:"tor_detected"`
+
+	LastVerified time.Time `json:"last_verified"`
 }
 
 // SecurityContext contains security-specific context information
 type SecurityContext struct {
-	AuthMethod      string            `json:"auth_method"`
-	MFAVerified     bool              `json:"mfa_verified"`
-	MFAMethod       string            `json:"mfa_method,omitempty"`
-	CertificateValid bool             `json:"certificate_valid"`
-	SessionAge      time.Duration     `json:"session_age"`
-	
+	AuthMethod       string        `json:"auth_method"`
+	MFAVerified      bool          `json:"mfa_verified"`
+	MFAMethod        string        `json:"mfa_method,omitempty"`
+	CertificateValid bool          `json:"certificate_valid"`
+	SessionAge       time.Duration `json:"session_age"`
+
 	// Device trust
-	DeviceTrusted   bool              `json:"device_trusted"`
-	DeviceRegistered bool             `json:"device_registered"`
-	DeviceCompliant bool              `json:"device_compliant"`
-	
+	DeviceTrusted    bool `json:"device_trusted"`
+	DeviceRegistered bool `json:"device_registered"`
+	DeviceCompliant  bool `json:"device_compliant"`
+
 	// Behavioral indicators
-	BehaviorScore   float64           `json:"behavior_score"`
-	AnomalousActivity bool            `json:"anomalous_activity"`
-	SuspiciousPatterns []string       `json:"suspicious_patterns"`
-	
+	BehaviorScore      float64  `json:"behavior_score"`
+	AnomalousActivity  bool     `json:"anomalous_activity"`
+	SuspiciousPatterns []string `json:"suspicious_patterns"`
+
 	// Threat intelligence
 	ThreatIndicators []ThreatIndicator `json:"threat_indicators"`
-	
-	LastAssessment  time.Time         `json:"last_assessment"`
+
+	LastAssessment time.Time `json:"last_assessment"`
 }
 
 // ComplianceContext contains regulatory and policy compliance information
 type ComplianceContext struct {
-	RequiredFrameworks []string        `json:"required_frameworks"`
-	ActiveFrameworks   []string        `json:"active_frameworks"`
-	ComplianceStatus   ComplianceStatus `json:"compliance_status"`
+	RequiredFrameworks []string          `json:"required_frameworks"`
+	ActiveFrameworks   []string          `json:"active_frameworks"`
+	ComplianceStatus   ComplianceStatus  `json:"compliance_status"`
 	PolicyViolations   []PolicyViolation `json:"policy_violations"`
-	
+
 	// Data handling requirements
-	DataClassification string          `json:"data_classification"`
-	DataRetention     time.Duration    `json:"data_retention"`
-	EncryptionRequired bool            `json:"encryption_required"`
-	
+	DataClassification string        `json:"data_classification"`
+	DataRetention      time.Duration `json:"data_retention"`
+	EncryptionRequired bool          `json:"encryption_required"`
+
 	// Audit requirements
-	AuditLevel        AuditLevel       `json:"audit_level"`
-	AuditRetention    time.Duration    `json:"audit_retention"`
-	
-	LastCompliance    time.Time        `json:"last_compliance_check"`
+	AuditLevel     AuditLevel    `json:"audit_level"`
+	AuditRetention time.Duration `json:"audit_retention"`
+
+	LastCompliance time.Time `json:"last_compliance_check"`
 }
 
 // RiskContext contains risk assessment information
 type RiskContext struct {
-	CurrentRiskLevel  RiskLevel        `json:"current_risk_level"`
-	RiskScore         float64          `json:"risk_score"`
-	RiskFactors       []RiskFactor     `json:"risk_factors"`
-	RiskTrends        []RiskTrend      `json:"risk_trends"`
-	
+	CurrentRiskLevel RiskLevel    `json:"current_risk_level"`
+	RiskScore        float64      `json:"risk_score"`
+	RiskFactors      []RiskFactor `json:"risk_factors"`
+	RiskTrends       []RiskTrend  `json:"risk_trends"`
+
 	// Risk thresholds
-	RiskThresholds    RiskThresholds   `json:"risk_thresholds"`
-	ThresholdBreach   bool             `json:"threshold_breach"`
-	
-	LastAssessment    time.Time        `json:"last_assessment"`
-	NextAssessment    time.Time        `json:"next_assessment"`
+	RiskThresholds  RiskThresholds `json:"risk_thresholds"`
+	ThresholdBreach bool           `json:"threshold_breach"`
+
+	LastAssessment time.Time `json:"last_assessment"`
+	NextAssessment time.Time `json:"next_assessment"`
 }
 
 // Supporting types
 
 type GeoLocation struct {
-	Country       string  `json:"country"`
-	Region        string  `json:"region"`
-	City          string  `json:"city"`
-	Latitude      float64 `json:"latitude"`
-	Longitude     float64 `json:"longitude"`
-	Accuracy      int     `json:"accuracy"`
-	ISP           string  `json:"isp"`
-	Organization  string  `json:"organization"`
+	Country      string  `json:"country"`
+	Region       string  `json:"region"`
+	City         string  `json:"city"`
+	Latitude     float64 `json:"latitude"`
+	Longitude    float64 `json:"longitude"`
+	Accuracy     int     `json:"accuracy"`
+	ISP          string  `json:"isp"`
+	Organization string  `json:"organization"`
 }
 
 type DeviceInfo struct {
-	DeviceID      string `json:"device_id"`
-	DeviceType    string `json:"device_type"`
-	OS            string `json:"os"`
-	OSVersion     string `json:"os_version"`
-	Browser       string `json:"browser"`
-	BrowserVersion string `json:"browser_version"`
-	Fingerprint   string `json:"fingerprint"`
-	Registered    bool   `json:"registered"`
-	Trusted       bool   `json:"trusted"`
-	LastSeen      time.Time `json:"last_seen"`
+	DeviceID       string    `json:"device_id"`
+	DeviceType     string    `json:"device_type"`
+	OS             string    `json:"os"`
+	OSVersion      string    `json:"os_version"`
+	Browser        string    `json:"browser"`
+	BrowserVersion string    `json:"browser_version"`
+	Fingerprint    string    `json:"fingerprint"`
+	Registered     bool      `json:"registered"`
+	Trusted        bool      `json:"trusted"`
+	LastSeen       time.Time `json:"last_seen"`
 }
 
 type NetworkInfo struct {
-	ISP           string `json:"isp"`
-	ASN           string `json:"asn"`
-	Organization  string `json:"organization"`
-	ConnectionType string `json:"connection_type"`
-	ThreatScore   float64 `json:"threat_score"`
-	Blacklisted   bool   `json:"blacklisted"`
+	ISP            string  `json:"isp"`
+	ASN            string  `json:"asn"`
+	Organization   string  `json:"organization"`
+	ConnectionType string  `json:"connection_type"`
+	ThreatScore    float64 `json:"threat_score"`
+	Blacklisted    bool    `json:"blacklisted"`
 }
 
 type ThreatIndicator struct {
@@ -186,87 +186,87 @@ type ThreatIndicator struct {
 }
 
 type ComplianceStatus struct {
-	Overall       bool              `json:"overall"`
-	Frameworks    map[string]bool   `json:"frameworks"`
-	Requirements  map[string]bool   `json:"requirements"`
-	LastCheck     time.Time         `json:"last_check"`
+	Overall      bool            `json:"overall"`
+	Frameworks   map[string]bool `json:"frameworks"`
+	Requirements map[string]bool `json:"requirements"`
+	LastCheck    time.Time       `json:"last_check"`
 }
 
 type AuditLevel string
 
 const (
-	AuditLevelMinimal     AuditLevel = "minimal"
-	AuditLevelStandard    AuditLevel = "standard"
-	AuditLevelDetailed    AuditLevel = "detailed"
+	AuditLevelMinimal       AuditLevel = "minimal"
+	AuditLevelStandard      AuditLevel = "standard"
+	AuditLevelDetailed      AuditLevel = "detailed"
 	AuditLevelComprehensive AuditLevel = "comprehensive"
 )
 
 type RiskTrend struct {
-	Timestamp   time.Time `json:"timestamp"`
-	RiskLevel   RiskLevel      `json:"risk_level"`
-	Score       float64   `json:"score"`
-	Change      float64   `json:"change"`
+	Timestamp time.Time `json:"timestamp"`
+	RiskLevel RiskLevel `json:"risk_level"`
+	Score     float64   `json:"score"`
+	Change    float64   `json:"change"`
 }
 
 type RiskThresholds struct {
-	Low         float64 `json:"low"`
-	Medium      float64 `json:"medium"`
-	High        float64 `json:"high"`
-	Critical    float64 `json:"critical"`
-	Extreme     float64 `json:"extreme"`
+	Low      float64 `json:"low"`
+	Medium   float64 `json:"medium"`
+	High     float64 `json:"high"`
+	Critical float64 `json:"critical"`
+	Extreme  float64 `json:"extreme"`
 }
 
 // Context change tracking
 type ContextChange struct {
-	ChangeID    string                 `json:"change_id"`
-	ChangeType  ContextChangeType      `json:"change_type"`
-	Field       string                 `json:"field"`
-	OldValue    interface{}            `json:"old_value"`
-	NewValue    interface{}            `json:"new_value"`
-	Timestamp   time.Time              `json:"timestamp"`
-	Impact      ChangeImpact           `json:"impact"`
-	Details     map[string]interface{} `json:"details"`
+	ChangeID   string                 `json:"change_id"`
+	ChangeType ContextChangeType      `json:"change_type"`
+	Field      string                 `json:"field"`
+	OldValue   interface{}            `json:"old_value"`
+	NewValue   interface{}            `json:"new_value"`
+	Timestamp  time.Time              `json:"timestamp"`
+	Impact     ChangeImpact           `json:"impact"`
+	Details    map[string]interface{} `json:"details"`
 }
 
 type ContextChangeType string
 
 const (
-	ContextChangeEnvironment  ContextChangeType = "environment"
-	ContextChangeSecurity     ContextChangeType = "security"
-	ContextChangeCompliance   ContextChangeType = "compliance"
-	ContextChangeRisk         ContextChangeType = "risk"
+	ContextChangeEnvironment ContextChangeType = "environment"
+	ContextChangeSecurity    ContextChangeType = "security"
+	ContextChangeCompliance  ContextChangeType = "compliance"
+	ContextChangeRisk        ContextChangeType = "risk"
 )
 
 type ChangeImpact string
 
 const (
-	ChangeImpactMinimal    ChangeImpact = "minimal"
-	ChangeImpactLow        ChangeImpact = "low"
-	ChangeImpactMedium     ChangeImpact = "medium"
-	ChangeImpactHigh       ChangeImpact = "high"
-	ChangeImpactCritical   ChangeImpact = "critical"
+	ChangeImpactMinimal  ChangeImpact = "minimal"
+	ChangeImpactLow      ChangeImpact = "low"
+	ChangeImpactMedium   ChangeImpact = "medium"
+	ChangeImpactHigh     ChangeImpact = "high"
+	ChangeImpactCritical ChangeImpact = "critical"
 )
 
 // Rules for context monitoring
 type ComplianceRule struct {
-	RuleID      string            `json:"rule_id"`
-	Name        string            `json:"name"`
-	Framework   string            `json:"framework"`
-	Requirement string            `json:"requirement"`
-	Condition   string            `json:"condition"`
-	Action      ComplianceAction  `json:"action"`
-	Severity    string            `json:"severity"`
-	Enabled     bool              `json:"enabled"`
+	RuleID      string           `json:"rule_id"`
+	Name        string           `json:"name"`
+	Framework   string           `json:"framework"`
+	Requirement string           `json:"requirement"`
+	Condition   string           `json:"condition"`
+	Action      ComplianceAction `json:"action"`
+	Severity    string           `json:"severity"`
+	Enabled     bool             `json:"enabled"`
 }
 
 type ContextRule struct {
-	RuleID      string            `json:"rule_id"`
-	Name        string            `json:"name"`
-	Category    string            `json:"category"`
-	Condition   string            `json:"condition"`
-	Threshold   float64           `json:"threshold"`
-	Action      ContextAction     `json:"action"`
-	Enabled     bool              `json:"enabled"`
+	RuleID    string        `json:"rule_id"`
+	Name      string        `json:"name"`
+	Category  string        `json:"category"`
+	Condition string        `json:"condition"`
+	Threshold float64       `json:"threshold"`
+	Action    ContextAction `json:"action"`
+	Enabled   bool          `json:"enabled"`
 }
 
 type ComplianceAction string
@@ -281,22 +281,22 @@ const (
 type ContextAction string
 
 const (
-	ContextActionMonitor      ContextAction = "monitor"
-	ContextActionAlert        ContextAction = "alert"
-	ContextActionReassess     ContextAction = "reassess"
-	ContextActionChallenge    ContextAction = "challenge"
-	ContextActionTerminate    ContextAction = "terminate"
+	ContextActionMonitor   ContextAction = "monitor"
+	ContextActionAlert     ContextAction = "alert"
+	ContextActionReassess  ContextAction = "reassess"
+	ContextActionChallenge ContextAction = "challenge"
+	ContextActionTerminate ContextAction = "terminate"
 )
 
 // Context change detector
 type ContextChangeDetector struct {
-	thresholds   ChangeDetectionThresholds
-	patterns     []ChangePattern
-	analyzer     *ChangeAnalyzer
+	thresholds ChangeDetectionThresholds
+	patterns   []ChangePattern
+	analyzer   *ChangeAnalyzer
 }
 
 type ChangeDetectionThresholds struct {
-	LocationChange    float64 `json:"location_change"`    // km
+	LocationChange    float64 `json:"location_change"` // km
 	IPAddressChange   bool    `json:"ip_address_change"`
 	DeviceChange      bool    `json:"device_change"`
 	BehaviorDeviation float64 `json:"behavior_deviation"` // score threshold
@@ -304,12 +304,12 @@ type ChangeDetectionThresholds struct {
 }
 
 type ChangePattern struct {
-	PatternID   string `json:"pattern_id"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
+	PatternID   string   `json:"pattern_id"`
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
 	Indicators  []string `json:"indicators"`
-	Threshold   float64 `json:"threshold"`
-	Action      string `json:"action"`
+	Threshold   float64  `json:"threshold"`
+	Action      string   `json:"action"`
 }
 
 type ChangeAnalyzer struct {
@@ -318,28 +318,28 @@ type ChangeAnalyzer struct {
 }
 
 type ChangeAnalysis struct {
-	ChangeID      string      `json:"change_id"`
-	Risk          float64     `json:"risk"`
-	Confidence    float64     `json:"confidence"`
-	Anomalous     bool        `json:"anomalous"`
-	Patterns      []string    `json:"patterns"`
+	ChangeID        string    `json:"change_id"`
+	Risk            float64   `json:"risk"`
+	Confidence      float64   `json:"confidence"`
+	Anomalous       bool      `json:"anomalous"`
+	Patterns        []string  `json:"patterns"`
 	Recommendations []string  `json:"recommendations"`
-	AnalyzedAt    time.Time   `json:"analyzed_at"`
+	AnalyzedAt      time.Time `json:"analyzed_at"`
 }
 
 // Statistics
 type ContextMonitorStats struct {
-	TotalContexts          int                              `json:"total_contexts"`
-	ActiveContexts         int                              `json:"active_contexts"`
-	ContextChanges         int64                            `json:"context_changes"`
-	ComplianceViolations   int64                            `json:"compliance_violations"`
-	RiskThresholdBreaches  int64                            `json:"risk_threshold_breaches"`
-	AverageCheckLatencyMs  float64                          `json:"average_check_latency_ms"`
-	ChangesByType          map[ContextChangeType]int64      `json:"changes_by_type"`
-	ViolationsByFramework  map[string]int64                 `json:"violations_by_framework"`
-	LastMonitoringRun      time.Time                        `json:"last_monitoring_run"`
-	
-	mutex                 sync.RWMutex
+	TotalContexts         int                         `json:"total_contexts"`
+	ActiveContexts        int                         `json:"active_contexts"`
+	ContextChanges        int64                       `json:"context_changes"`
+	ComplianceViolations  int64                       `json:"compliance_violations"`
+	RiskThresholdBreaches int64                       `json:"risk_threshold_breaches"`
+	AverageCheckLatencyMs float64                     `json:"average_check_latency_ms"`
+	ChangesByType         map[ContextChangeType]int64 `json:"changes_by_type"`
+	ViolationsByFramework map[string]int64            `json:"violations_by_framework"`
+	LastMonitoringRun     time.Time                   `json:"last_monitoring_run"`
+
+	mutex sync.RWMutex
 }
 
 // NewContextMonitor creates a new context monitor
@@ -403,10 +403,10 @@ func (cm *ContextMonitor) RegisterContext(ctx context.Context, sessionID string,
 
 	if initialContext == nil {
 		initialContext = &AuthorizationContext{
-			SessionID:    sessionID,
-			CreatedAt:    time.Now(),
-			LastUpdated:  time.Now(),
-			Changes:      make([]ContextChange, 0),
+			SessionID:   sessionID,
+			CreatedAt:   time.Now(),
+			LastUpdated: time.Now(),
+			Changes:     make([]ContextChange, 0),
 		}
 	}
 
@@ -437,7 +437,7 @@ func (cm *ContextMonitor) UpdateContext(ctx context.Context, sessionID string, u
 
 	// Track changes
 	changes := make([]ContextChange, 0)
-	
+
 	for field, newValue := range updates {
 		oldValue := cm.getFieldValue(authContext, field)
 		if cm.hasValueChanged(oldValue, newValue) {
@@ -451,7 +451,7 @@ func (cm *ContextMonitor) UpdateContext(ctx context.Context, sessionID string, u
 				Impact:     cm.assessChangeImpact(field, oldValue, newValue),
 			}
 			changes = append(changes, change)
-			
+
 			// Apply the change
 			cm.setFieldValue(authContext, field, newValue)
 		}
@@ -563,15 +563,15 @@ func (cm *ContextMonitor) GetMonitoringStats() *ContextMonitorStats {
 
 	// Return a copy
 	stats := ContextMonitorStats{
-		TotalContexts:          cm.stats.TotalContexts,
-		ActiveContexts:         cm.stats.ActiveContexts,
-		ContextChanges:         cm.stats.ContextChanges,
-		ComplianceViolations:   cm.stats.ComplianceViolations,
-		RiskThresholdBreaches:  cm.stats.RiskThresholdBreaches,
-		AverageCheckLatencyMs:  cm.stats.AverageCheckLatencyMs,
-		ChangesByType:          make(map[ContextChangeType]int64),
-		ViolationsByFramework:  make(map[string]int64),
-		LastMonitoringRun:      cm.stats.LastMonitoringRun,
+		TotalContexts:         cm.stats.TotalContexts,
+		ActiveContexts:        cm.stats.ActiveContexts,
+		ContextChanges:        cm.stats.ContextChanges,
+		ComplianceViolations:  cm.stats.ComplianceViolations,
+		RiskThresholdBreaches: cm.stats.RiskThresholdBreaches,
+		AverageCheckLatencyMs: cm.stats.AverageCheckLatencyMs,
+		ChangesByType:         make(map[ContextChangeType]int64),
+		ViolationsByFramework: make(map[string]int64),
+		LastMonitoringRun:     cm.stats.LastMonitoringRun,
 	}
 
 	// Copy maps
@@ -725,7 +725,6 @@ func (cm *ContextMonitor) isContextValid(context *AuthorizationContext) bool {
 	return true
 }
 
-
 // Factory functions
 
 func NewContextChangeDetector() *ContextChangeDetector {
@@ -749,12 +748,12 @@ func NewChangeAnalyzer() *ChangeAnalyzer {
 			// Default analyzer implementation
 			return &ChangeAnalysis{
 				ChangeID:        change.ChangeID,
-				Risk:           0.5,
-				Confidence:     0.8,
-				Anomalous:      false,
-				Patterns:       []string{},
+				Risk:            0.5,
+				Confidence:      0.8,
+				Anomalous:       false,
+				Patterns:        []string{},
 				Recommendations: []string{},
-				AnalyzedAt:     time.Now(),
+				AnalyzedAt:      time.Now(),
 			}, nil
 		},
 	}
@@ -803,4 +802,3 @@ func getDefaultChangePatterns() []ChangePattern {
 		},
 	}
 }
-

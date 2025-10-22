@@ -83,20 +83,19 @@ func (r NodeRole) String() string {
 
 // NodeInfo represents information about a controller node
 type NodeInfo struct {
-	ID               string                 `json:"id"`
-	Address          string                 `json:"address"`
-	State            NodeState              `json:"state"`
-	Role             NodeRole               `json:"role"`
-	LastSeen         time.Time              `json:"last_seen"`
-	Version          string                 `json:"version"`
-	StartedAt        time.Time              `json:"started_at"`
-	Capabilities     []string               `json:"capabilities"`
-	Region           string                 `json:"region,omitempty"`
-	AvailabilityZone string                 `json:"availability_zone,omitempty"`
-	Coordinates      *GeographicCoordinates `json:"coordinates,omitempty"`
+	ID               string                   `json:"id"`
+	Address          string                   `json:"address"`
+	State            NodeState                `json:"state"`
+	Role             NodeRole                 `json:"role"`
+	LastSeen         time.Time                `json:"last_seen"`
+	Version          string                   `json:"version"`
+	StartedAt        time.Time                `json:"started_at"`
+	Capabilities     []string                 `json:"capabilities"`
+	Region           string                   `json:"region,omitempty"`
+	AvailabilityZone string                   `json:"availability_zone,omitempty"`
+	Coordinates      *GeographicCoordinates   `json:"coordinates,omitempty"`
 	Latency          map[string]time.Duration `json:"latency,omitempty"` // Latency to other nodes
 }
-
 
 // ClusterManager handles high availability operations
 type ClusterManager interface {
@@ -230,14 +229,14 @@ type FailoverHandler interface {
 
 // FailoverEvent represents a failover event
 type FailoverEvent struct {
-	ID               string    `json:"id"`
-	Timestamp        time.Time `json:"timestamp"`
-	Reason           string    `json:"reason"`
-	PreviousLeader   string    `json:"previous_leader,omitempty"`
-	NewLeader        string    `json:"new_leader,omitempty"`
-	Duration         time.Duration `json:"duration"`
-	SessionsMigrated int       `json:"sessions_migrated"`
-	Status           string    `json:"status"`
+	ID               string                 `json:"id"`
+	Timestamp        time.Time              `json:"timestamp"`
+	Reason           string                 `json:"reason"`
+	PreviousLeader   string                 `json:"previous_leader,omitempty"`
+	NewLeader        string                 `json:"new_leader,omitempty"`
+	Duration         time.Duration          `json:"duration"`
+	SessionsMigrated int                    `json:"sessions_migrated"`
+	Status           string                 `json:"status"`
 	Details          map[string]interface{} `json:"details,omitempty"`
 }
 
@@ -264,10 +263,10 @@ type SplitBrainHandler interface {
 
 // SplitBrainStatus represents the status of split-brain detection
 type SplitBrainStatus struct {
-	Detected     bool      `json:"detected"`
-	Timestamp    time.Time `json:"timestamp"`
-	PartitionIDs []string  `json:"partition_ids,omitempty"`
-	Resolution   string    `json:"resolution,omitempty"`
+	Detected     bool                   `json:"detected"`
+	Timestamp    time.Time              `json:"timestamp"`
+	PartitionIDs []string               `json:"partition_ids,omitempty"`
+	Resolution   string                 `json:"resolution,omitempty"`
 	Details      map[string]interface{} `json:"details,omitempty"`
 }
 

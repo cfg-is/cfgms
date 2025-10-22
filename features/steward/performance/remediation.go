@@ -16,9 +16,9 @@ type DefaultRemediationEngine struct {
 	mu sync.RWMutex
 
 	// Remediation state
-	actions        map[string]*RemediationAction // key: action ID
-	actionHistory  []RemediationAction
-	alertToAction  map[string]string // key: alert ID, value: action ID
+	actions       map[string]*RemediationAction // key: action ID
+	actionHistory []RemediationAction
+	alertToAction map[string]string // key: alert ID, value: action ID
 
 	// Control
 	ctx        context.Context

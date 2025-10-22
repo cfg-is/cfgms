@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
 	"github.com/cfgis/cfgms/features/templates"
 )
 
@@ -24,8 +25,8 @@ func TestTemplateTestRunner_BasicTest(t *testing.T) {
 
 	// Create simple template
 	template := &templates.Template{
-		ID:      "test-template",
-		Name:    "Test Template",
+		ID:   "test-template",
+		Name: "Test Template",
 		Content: []byte(`variables:
   hostname: "server-01"
 
@@ -86,8 +87,8 @@ func TestTemplateTestRunner_FailedExpectations(t *testing.T) {
 
 	// Create template
 	template := &templates.Template{
-		ID:      "test-template",
-		Name:    "Test Template",
+		ID:   "test-template",
+		Name: "Test Template",
 		Content: []byte(`config:
   value: "actual-value"`),
 		CreatedAt: time.Now(),
@@ -106,10 +107,10 @@ func TestTemplateTestRunner_FailedExpectations(t *testing.T) {
 		},
 		Expected: templates.TemplateTestExpected{
 			Contains: []string{
-				"expected-value",  // This won't be found
+				"expected-value", // This won't be found
 			},
 			NotContains: []string{
-				"actual-value",    // This will be found but shouldn't
+				"actual-value", // This will be found but shouldn't
 			},
 		},
 	}
@@ -136,8 +137,8 @@ func TestTemplateTestRunner_CustomValidator(t *testing.T) {
 
 	// Create template
 	template := &templates.Template{
-		ID:      "test-template",
-		Name:    "Test Template",
+		ID:   "test-template",
+		Name: "Test Template",
 		Content: []byte(`config:
   port: 8080`),
 		CreatedAt: time.Now(),
@@ -184,8 +185,8 @@ func TestTemplateTestSuite(t *testing.T) {
 
 	// Create template
 	template := &templates.Template{
-		ID:      "test-template",
-		Name:    "Test Template",
+		ID:   "test-template",
+		Name: "Test Template",
 		Content: []byte(`variables:
   env: "production"
 

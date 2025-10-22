@@ -10,13 +10,13 @@ import (
 type NetworkCollector interface {
 	// CollectInterfaces gathers network interface details
 	CollectInterfaces(attributes map[string]string) error
-	
+
 	// CollectRouting gathers routing table information
 	CollectRouting(attributes map[string]string) error
-	
+
 	// CollectDNS gathers DNS configuration
 	CollectDNS(attributes map[string]string) error
-	
+
 	// CollectFirewall gathers firewall rules and configuration
 	CollectFirewall(attributes map[string]string) error
 }
@@ -150,4 +150,3 @@ func (l *LinuxNetworkCollector) CollectFirewall(attributes map[string]string) er
 
 // DarwinNetworkCollector handles macOS-specific network collection
 type DarwinNetworkCollector struct{}
-

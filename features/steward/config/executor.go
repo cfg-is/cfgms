@@ -73,7 +73,7 @@ func (e *Executor) registerModule(name string, module modules.Module) {
 
 // ConfigurationSpec represents a YAML configuration structure.
 type ConfigurationSpec struct {
-	Version string                   `yaml:"version"`
+	Version string                    `yaml:"version"`
 	Modules map[string][]ResourceSpec `yaml:"modules"`
 }
 

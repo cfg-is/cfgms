@@ -7,9 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/logging/interfaces"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/pkg/logging/interfaces"
 
 	// Import providers for testing
 	_ "github.com/cfgis/cfgms/pkg/logging/providers/file"
@@ -104,8 +105,8 @@ func TestGlobalLoggingManager(t *testing.T) {
 	config := &LoggingConfig{
 		Provider: "file",
 		Config: map[string]interface{}{
-			"directory":     tmpDir,
-			"file_prefix":   "global-test",
+			"directory":      tmpDir,
+			"file_prefix":    "global-test",
 			"retention_days": 1,
 		},
 		Level:       "DEBUG",
@@ -163,8 +164,8 @@ func TestModuleLogger(t *testing.T) {
 	config := &LoggingConfig{
 		Provider: "file",
 		Config: map[string]interface{}{
-			"directory":     tmpDir,
-			"file_prefix":   "module-test",
+			"directory":      tmpDir,
+			"file_prefix":    "module-test",
 			"retention_days": 1,
 		},
 		Level:       "INFO",
@@ -175,7 +176,7 @@ func TestModuleLogger(t *testing.T) {
 
 	err = InitializeGlobalLogging(config)
 	require.NoError(t, err)
-	
+
 	defer func() {
 		if manager := GetGlobalLoggingManager(); manager != nil {
 			_ = manager.Close()
@@ -269,8 +270,8 @@ func TestLoggingLevelFiltering(t *testing.T) {
 	config := &LoggingConfig{
 		Provider: "file",
 		Config: map[string]interface{}{
-			"directory":     tmpDir,
-			"file_prefix":   "level-test",
+			"directory":      tmpDir,
+			"file_prefix":    "level-test",
 			"retention_days": 1,
 		},
 		Level:       "WARN", // Only WARN, ERROR, FATAL should be logged

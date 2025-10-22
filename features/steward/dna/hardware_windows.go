@@ -15,17 +15,17 @@ func (w *WindowsHardwareCollector) CollectCPU(attributes map[string]string) erro
 	// Basic CPU count
 	attributes["cpu_count"] = fmt.Sprintf("%d", runtime.NumCPU())
 	attributes["cpu_arch"] = runtime.GOARCH
-	
+
 	// Get detailed CPU info using WMI
 	if output, err := exec.Command("wmic", "cpu", "get", "Name,Manufacturer,MaxClockSpeed,NumberOfCores,NumberOfLogicalProcessors,Architecture", "/format:csv").Output(); err == nil {
 		w.parseWMICPUOutput(string(output), attributes)
 	}
-	
+
 	// Alternative: PowerShell approach for more detailed info
 	if output, err := exec.Command("powershell", "-Command", "Get-WmiObject -Class Win32_Processor | Select-Object Name,Manufacturer,MaxClockSpeed,NumberOfCores,NumberOfLogicalProcessors,Architecture | ConvertTo-Csv -NoTypeInformation").Output(); err == nil {
 		w.parsePowerShellCPUOutput(string(output), attributes)
 	}
-	
+
 	return nil
 }
 
@@ -35,17 +35,17 @@ func (w *WindowsHardwareCollector) CollectMemory(attributes map[string]string) e
 	if output, err := exec.Command("wmic", "computersystem", "get", "TotalPhysicalMemory", "/format:csv").Output(); err == nil {
 		w.parseWMIMemoryOutput(string(output), attributes)
 	}
-	
+
 	// Memory modules information
 	if output, err := exec.Command("wmic", "memorychip", "get", "Capacity,Speed,MemoryType,FormFactor", "/format:csv").Output(); err == nil {
 		w.parseWMIMemoryModulesOutput(string(output), attributes)
 	}
-	
+
 	// Virtual memory information using PowerShell
 	if output, err := exec.Command("powershell", "-Command", "Get-WmiObject -Class Win32_PageFileUsage | Select-Object AllocatedBaseSize,CurrentUsage | ConvertTo-Csv -NoTypeInformation").Output(); err == nil {
 		w.parsePowerShellVirtualMemoryOutput(string(output), attributes)
 	}
-	
+
 	return nil
 }
 
@@ -55,17 +55,17 @@ func (w *WindowsHardwareCollector) CollectDisk(attributes map[string]string) err
 	if output, err := exec.Command("wmic", "diskdrive", "get", "Model,Size,MediaType,InterfaceType", "/format:csv").Output(); err == nil {
 		w.parseWMIDiskOutput(string(output), attributes)
 	}
-	
+
 	// Logical disk information (drive letters)
 	if output, err := exec.Command("wmic", "logicaldisk", "get", "Size,FreeSpace,FileSystem,DriveType,DeviceID", "/format:csv").Output(); err == nil {
 		w.parseWMILogicalDiskOutput(string(output), attributes)
 	}
-	
+
 	// Disk usage using PowerShell
 	if output, err := exec.Command("powershell", "-Command", "Get-WmiObject -Class Win32_LogicalDisk | Select-Object DeviceID,Size,FreeSpace,FileSystem | ConvertTo-Csv -NoTypeInformation").Output(); err == nil {
 		w.parsePowerShellDiskUsageOutput(string(output), attributes)
 	}
-	
+
 	return nil
 }
 
@@ -75,27 +75,27 @@ func (w *WindowsHardwareCollector) CollectMotherboard(attributes map[string]stri
 	if output, err := exec.Command("wmic", "computersystem", "get", "Manufacturer,Model,TotalPhysicalMemory", "/format:csv").Output(); err == nil {
 		w.parseWMIComputerSystemOutput(string(output), attributes)
 	}
-	
+
 	// BIOS information
 	if output, err := exec.Command("wmic", "bios", "get", "Manufacturer,SMBIOSBIOSVersion,ReleaseDate", "/format:csv").Output(); err == nil {
 		w.parseWMIBIOSOutput(string(output), attributes)
 	}
-	
+
 	// Motherboard information
 	if output, err := exec.Command("wmic", "baseboard", "get", "Manufacturer,Product,Version,SerialNumber", "/format:csv").Output(); err == nil {
 		w.parseWMIMotherboardOutput(string(output), attributes)
 	}
-	
+
 	// System UUID
 	if output, err := exec.Command("wmic", "csproduct", "get", "UUID", "/format:csv").Output(); err == nil {
 		w.parseWMIUUIDOutput(string(output), attributes)
 	}
-	
+
 	// Windows version information
 	if output, err := exec.Command("powershell", "-Command", "Get-WmiObject -Class Win32_OperatingSystem | Select-Object Caption,Version,BuildNumber | ConvertTo-Csv -NoTypeInformation").Output(); err == nil {
 		w.parsePowerShellOSOutput(string(output), attributes)
 	}
-	
+
 	return nil
 }
 
@@ -107,7 +107,7 @@ func (w *WindowsHardwareCollector) parseWMICPUOutput(output string, attributes m
 		if line == "" || strings.HasPrefix(line, "Node") {
 			continue
 		}
-		
+
 		fields := strings.Split(line, ",")
 		if len(fields) >= 7 {
 			// Skip the Node field (first field)
@@ -144,7 +144,7 @@ func (w *WindowsHardwareCollector) parsePowerShellCPUOutput(output string, attri
 		if line == "" {
 			continue
 		}
-		
+
 		// Parse CSV format from PowerShell
 		fields := w.parseCSVLine(line)
 		if len(fields) >= 6 {
@@ -179,7 +179,7 @@ func (w *WindowsHardwareCollector) parseWMIMemoryOutput(output string, attribute
 		if line == "" || strings.HasPrefix(line, "Node") {
 			continue
 		}
-		
+
 		fields := strings.Split(line, ",")
 		if len(fields) >= 2 && fields[1] != "" {
 			if totalMem, err := strconv.ParseInt(fields[1], 10, 64); err == nil {
@@ -195,20 +195,20 @@ func (w *WindowsHardwareCollector) parseWMIMemoryModulesOutput(output string, at
 	lines := strings.Split(output, "\n")
 	var moduleCount int
 	var totalCapacity int64
-	
+
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "Node") {
 			continue
 		}
-		
+
 		fields := strings.Split(line, ",")
 		if len(fields) >= 5 {
 			moduleCount++
 			if capacity, err := strconv.ParseInt(fields[1], 10, 64); err == nil {
 				totalCapacity += capacity
 			}
-			
+
 			// Store first module details as sample
 			if moduleCount == 1 {
 				if fields[1] != "" {
@@ -226,7 +226,7 @@ func (w *WindowsHardwareCollector) parseWMIMemoryModulesOutput(output string, at
 			}
 		}
 	}
-	
+
 	if moduleCount > 0 {
 		attributes["memory_module_count"] = fmt.Sprintf("%d", moduleCount)
 		attributes["memory_modules_total_capacity"] = fmt.Sprintf("%d", totalCapacity)
@@ -244,7 +244,7 @@ func (w *WindowsHardwareCollector) parsePowerShellVirtualMemoryOutput(output str
 		if line == "" {
 			continue
 		}
-		
+
 		fields := w.parseCSVLine(line)
 		if len(fields) >= 2 {
 			if fields[0] != "" {
@@ -262,18 +262,18 @@ func (w *WindowsHardwareCollector) parsePowerShellVirtualMemoryOutput(output str
 func (w *WindowsHardwareCollector) parseWMIDiskOutput(output string, attributes map[string]string) {
 	lines := strings.Split(output, "\n")
 	var diskCount int
-	
+
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "Node") {
 			continue
 		}
-		
+
 		fields := strings.Split(line, ",")
 		if len(fields) >= 5 {
 			diskCount++
 			prefix := fmt.Sprintf("physical_disk_%d", diskCount)
-			
+
 			if fields[1] != "" {
 				attributes[prefix+"_interface"] = fields[1]
 			}
@@ -291,7 +291,7 @@ func (w *WindowsHardwareCollector) parseWMIDiskOutput(output string, attributes 
 			}
 		}
 	}
-	
+
 	if diskCount > 0 {
 		attributes["physical_disk_count"] = fmt.Sprintf("%d", diskCount)
 	}
@@ -301,18 +301,18 @@ func (w *WindowsHardwareCollector) parseWMIDiskOutput(output string, attributes 
 func (w *WindowsHardwareCollector) parseWMILogicalDiskOutput(output string, attributes map[string]string) {
 	lines := strings.Split(output, "\n")
 	var driveCount int
-	
+
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "Node") {
 			continue
 		}
-		
+
 		fields := strings.Split(line, ",")
 		if len(fields) >= 6 && fields[1] != "" {
 			driveCount++
 			prefix := fmt.Sprintf("logical_drive_%s", strings.Replace(fields[1], ":", "", -1))
-			
+
 			attributes[prefix+"_device"] = fields[1]
 			if fields[2] != "" {
 				attributes[prefix+"_drive_type"] = fields[2]
@@ -332,7 +332,7 @@ func (w *WindowsHardwareCollector) parseWMILogicalDiskOutput(output string, attr
 			}
 		}
 	}
-	
+
 	if driveCount > 0 {
 		attributes["logical_drive_count"] = fmt.Sprintf("%d", driveCount)
 	}
@@ -349,11 +349,11 @@ func (w *WindowsHardwareCollector) parsePowerShellDiskUsageOutput(output string,
 		if line == "" {
 			continue
 		}
-		
+
 		fields := w.parseCSVLine(line)
 		if len(fields) >= 4 && fields[0] != "" {
 			prefix := fmt.Sprintf("ps_drive_%s", strings.Replace(fields[0], ":", "", -1))
-			
+
 			if fields[1] != "" {
 				attributes[prefix+"_filesystem"] = fields[1]
 			}
@@ -380,7 +380,7 @@ func (w *WindowsHardwareCollector) parseWMIComputerSystemOutput(output string, a
 		if line == "" || strings.HasPrefix(line, "Node") {
 			continue
 		}
-		
+
 		fields := strings.Split(line, ",")
 		if len(fields) >= 4 {
 			if fields[1] != "" {
@@ -405,7 +405,7 @@ func (w *WindowsHardwareCollector) parseWMIBIOSOutput(output string, attributes 
 		if line == "" || strings.HasPrefix(line, "Node") {
 			continue
 		}
-		
+
 		fields := strings.Split(line, ",")
 		if len(fields) >= 4 {
 			if fields[1] != "" {
@@ -428,7 +428,7 @@ func (w *WindowsHardwareCollector) parseWMIMotherboardOutput(output string, attr
 		if line == "" || strings.HasPrefix(line, "Node") {
 			continue
 		}
-		
+
 		fields := strings.Split(line, ",")
 		if len(fields) >= 5 {
 			if fields[1] != "" {
@@ -454,7 +454,7 @@ func (w *WindowsHardwareCollector) parseWMIUUIDOutput(output string, attributes 
 		if line == "" || strings.HasPrefix(line, "Node") {
 			continue
 		}
-		
+
 		fields := strings.Split(line, ",")
 		if len(fields) >= 2 && fields[1] != "" {
 			attributes["system_uuid"] = fields[1]
@@ -472,7 +472,7 @@ func (w *WindowsHardwareCollector) parsePowerShellOSOutput(output string, attrib
 		if line == "" {
 			continue
 		}
-		
+
 		fields := w.parseCSVLine(line)
 		if len(fields) >= 3 {
 			if fields[0] != "" {
@@ -494,7 +494,7 @@ func (w *WindowsHardwareCollector) parseCSVLine(line string) []string {
 	var fields []string
 	var current strings.Builder
 	inQuotes := false
-	
+
 	for _, char := range line {
 		switch char {
 		case '"':
@@ -510,9 +510,9 @@ func (w *WindowsHardwareCollector) parseCSVLine(line string) []string {
 			current.WriteRune(char)
 		}
 	}
-	
+
 	// Add the last field
 	fields = append(fields, strings.TrimSpace(current.String()))
-	
+
 	return fields
 }

@@ -59,33 +59,33 @@ type GeographicCoordinates struct {
 
 // ClusterConfig contains cluster-wide configuration (commercial only)
 type ClusterConfig struct {
-	ExpectedSize          int                 `yaml:"expected_size" json:"expected_size"`
-	MinQuorum             int                 `yaml:"min_quorum" json:"min_quorum"`
-	ElectionTimeout       time.Duration       `yaml:"election_timeout" json:"election_timeout"`
-	HeartbeatInterval     time.Duration       `yaml:"heartbeat_interval" json:"heartbeat_interval"`
-	LeaderLeaseDuration   time.Duration       `yaml:"leader_lease_duration" json:"leader_lease_duration"`
-	CandidateTimeout      time.Duration       `yaml:"candidate_timeout" json:"candidate_timeout"`
-	ApplyTimeout          time.Duration       `yaml:"apply_timeout" json:"apply_timeout"`
-	Discovery             *DiscoveryConfig    `yaml:"discovery" json:"discovery"`
-	SessionSync           *SessionSyncConfig  `yaml:"session_sync" json:"session_sync"`
+	ExpectedSize        int                `yaml:"expected_size" json:"expected_size"`
+	MinQuorum           int                `yaml:"min_quorum" json:"min_quorum"`
+	ElectionTimeout     time.Duration      `yaml:"election_timeout" json:"election_timeout"`
+	HeartbeatInterval   time.Duration      `yaml:"heartbeat_interval" json:"heartbeat_interval"`
+	LeaderLeaseDuration time.Duration      `yaml:"leader_lease_duration" json:"leader_lease_duration"`
+	CandidateTimeout    time.Duration      `yaml:"candidate_timeout" json:"candidate_timeout"`
+	ApplyTimeout        time.Duration      `yaml:"apply_timeout" json:"apply_timeout"`
+	Discovery           *DiscoveryConfig   `yaml:"discovery" json:"discovery"`
+	SessionSync         *SessionSyncConfig `yaml:"session_sync" json:"session_sync"`
 }
 
 // DiscoveryConfig contains node discovery configuration (commercial only)
 type DiscoveryConfig struct {
-	Method      string                      `yaml:"method" json:"method"`
-	Config      map[string]interface{}      `yaml:"config" json:"config"`
-	Interval    time.Duration               `yaml:"interval" json:"interval"`
-	NodeTimeout time.Duration               `yaml:"node_timeout" json:"node_timeout"`
-	Geographic  *GeographicDiscoveryConfig  `yaml:"geographic,omitempty" json:"geographic,omitempty"`
+	Method      string                     `yaml:"method" json:"method"`
+	Config      map[string]interface{}     `yaml:"config" json:"config"`
+	Interval    time.Duration              `yaml:"interval" json:"interval"`
+	NodeTimeout time.Duration              `yaml:"node_timeout" json:"node_timeout"`
+	Geographic  *GeographicDiscoveryConfig `yaml:"geographic,omitempty" json:"geographic,omitempty"`
 }
 
 // GeographicDiscoveryConfig contains geographic-aware discovery settings (commercial only)
 type GeographicDiscoveryConfig struct {
-	EnableRegionAffinity         bool                  `yaml:"enable_region_affinity" json:"enable_region_affinity"`
-	CrossRegionTimeoutMultiplier float64               `yaml:"cross_region_timeout_multiplier" json:"cross_region_timeout_multiplier"`
-	MaxCrossRegionLatency        time.Duration         `yaml:"max_cross_region_latency" json:"max_cross_region_latency"`
-	LatencyCheckInterval         time.Duration         `yaml:"latency_check_interval" json:"latency_check_interval"`
-	RegionalWeights              map[string]float64    `yaml:"regional_weights,omitempty" json:"regional_weights,omitempty"`
+	EnableRegionAffinity         bool               `yaml:"enable_region_affinity" json:"enable_region_affinity"`
+	CrossRegionTimeoutMultiplier float64            `yaml:"cross_region_timeout_multiplier" json:"cross_region_timeout_multiplier"`
+	MaxCrossRegionLatency        time.Duration      `yaml:"max_cross_region_latency" json:"max_cross_region_latency"`
+	LatencyCheckInterval         time.Duration      `yaml:"latency_check_interval" json:"latency_check_interval"`
+	RegionalWeights              map[string]float64 `yaml:"regional_weights,omitempty" json:"regional_weights,omitempty"`
 }
 
 // SessionSyncConfig contains session synchronization configuration (commercial only)
@@ -131,15 +131,15 @@ type GeographicLoadBalancingConfig struct {
 
 // FailoverConfig contains automatic failover configuration (commercial only)
 type FailoverConfig struct {
-	Enabled              bool          `yaml:"enabled" json:"enabled"`
-	DetectionInterval    time.Duration `yaml:"detection_interval" json:"detection_interval"`
-	FailureThreshold     int           `yaml:"failure_threshold" json:"failure_threshold"`
-	RecoveryThreshold    int           `yaml:"recovery_threshold" json:"recovery_threshold"`
-	MaxFailoversPerHour  int           `yaml:"max_failovers_per_hour" json:"max_failovers_per_hour"`
-	Timeout              time.Duration `yaml:"timeout" json:"timeout"`                             // Failover operation timeout
-	MaxDuration          time.Duration `yaml:"max_duration" json:"max_duration"`                   // Maximum time for failover
-	GracePeriod          time.Duration `yaml:"grace_period" json:"grace_period"`                   // Grace period before failover
-	MaxSessionMigration  int           `yaml:"max_session_migration" json:"max_session_migration"` // Max sessions to migrate
+	Enabled             bool          `yaml:"enabled" json:"enabled"`
+	DetectionInterval   time.Duration `yaml:"detection_interval" json:"detection_interval"`
+	FailureThreshold    int           `yaml:"failure_threshold" json:"failure_threshold"`
+	RecoveryThreshold   int           `yaml:"recovery_threshold" json:"recovery_threshold"`
+	MaxFailoversPerHour int           `yaml:"max_failovers_per_hour" json:"max_failovers_per_hour"`
+	Timeout             time.Duration `yaml:"timeout" json:"timeout"`                             // Failover operation timeout
+	MaxDuration         time.Duration `yaml:"max_duration" json:"max_duration"`                   // Maximum time for failover
+	GracePeriod         time.Duration `yaml:"grace_period" json:"grace_period"`                   // Grace period before failover
+	MaxSessionMigration int           `yaml:"max_session_migration" json:"max_session_migration"` // Max sessions to migrate
 }
 
 // SplitBrainConfig contains split-brain detection configuration (commercial only)

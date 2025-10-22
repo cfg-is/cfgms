@@ -69,7 +69,7 @@ func TestPopulateRFC5424Fields(t *testing.T) {
 	assert.Equal(t, appName, entry.AppName)
 	assert.Equal(t, procID, entry.ProcID)
 	assert.Equal(t, 30, entry.Priority) // daemon(3)*8 + info(6) = 30
-	
+
 	// Test that existing fields are not overwritten
 	existingEntry := LogEntry{
 		Level:    "ERROR",
@@ -105,12 +105,12 @@ func TestPopulateRFC5424Fields_WithComponent(t *testing.T) {
 
 func TestLogEntry_ToSyslogFormat(t *testing.T) {
 	timestamp := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
-	
+
 	entry := LogEntry{
 		Timestamp:     timestamp,
 		Level:         "INFO",
 		Message:       "Test syslog message",
-		Priority:      30,  // daemon.info
+		Priority:      30, // daemon.info
 		Version:       1,
 		Hostname:      "test-host",
 		AppName:       "cfgms",
@@ -132,13 +132,13 @@ func TestLogEntry_ToSyslogFormat(t *testing.T) {
 
 	// Check RFC5424 format components - fields are sorted alphabetically for deterministic output
 	expected := "<30>1 2024-01-15T10:30:00Z test-host cfgms 12345 TEST_INFO [cfgms tenant_id=\"tenant-123\" session_id=\"session-456\" correlation_id=\"corr-789\" trace_id=\"trace-abc\" duration=\"150\" request_id=\"req-999\"] Test syslog message"
-	
+
 	assert.Equal(t, expected, result)
 }
 
 func TestLogEntry_ToSyslogFormat_WithDefaults(t *testing.T) {
 	timestamp := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
-	
+
 	entry := LogEntry{
 		Timestamp:   timestamp,
 		Level:       "ERROR",
@@ -152,13 +152,13 @@ func TestLogEntry_ToSyslogFormat_WithDefaults(t *testing.T) {
 
 	// Check that missing fields are replaced with defaults
 	expected := "<27>1 2024-01-15T10:30:00Z - cfgms-controller - - [cfgms] Error message"
-	
+
 	assert.Equal(t, expected, result)
 }
 
 func TestLogEntry_ToSyslogFormat_EmptyFields(t *testing.T) {
 	timestamp := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
-	
+
 	entry := LogEntry{
 		Timestamp: timestamp,
 		Level:     "INFO",
@@ -171,13 +171,13 @@ func TestLogEntry_ToSyslogFormat_EmptyFields(t *testing.T) {
 
 	// Check minimal format
 	expected := "<30>1 2024-01-15T10:30:00Z - - - - [cfgms] Simple message"
-	
+
 	assert.Equal(t, expected, result)
 }
 
 func TestLogEntry_ToSyslogFormat_OnlyTenant(t *testing.T) {
 	timestamp := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
-	
+
 	entry := LogEntry{
 		Timestamp: timestamp,
 		Level:     "WARN",
@@ -192,7 +192,7 @@ func TestLogEntry_ToSyslogFormat_OnlyTenant(t *testing.T) {
 
 	// Check structured data with only tenant
 	expected := "<28>1 2024-01-15T10:30:00Z server1 - - - [cfgms tenant_id=\"tenant-456\"] Warning with tenant"
-	
+
 	assert.Equal(t, expected, result)
 }
 
@@ -218,12 +218,12 @@ func TestSyslogSeverityConstants(t *testing.T) {
 func TestLogEntry_StructureValidation(t *testing.T) {
 	// Test that LogEntry has all required fields for RFC5424
 	entry := LogEntry{}
-	
+
 	// Core fields
 	require.IsType(t, time.Time{}, entry.Timestamp)
 	require.IsType(t, "", entry.Level)
 	require.IsType(t, "", entry.Message)
-	
+
 	// RFC5424 fields
 	require.IsType(t, 0, entry.Priority)
 	require.IsType(t, 0, entry.Version)
@@ -231,7 +231,7 @@ func TestLogEntry_StructureValidation(t *testing.T) {
 	require.IsType(t, "", entry.AppName)
 	require.IsType(t, "", entry.ProcID)
 	require.IsType(t, "", entry.MsgID)
-	
+
 	// CFGMS context fields
 	require.IsType(t, "", entry.ServiceName)
 	require.IsType(t, "", entry.Component)
@@ -240,7 +240,7 @@ func TestLogEntry_StructureValidation(t *testing.T) {
 	require.IsType(t, "", entry.CorrelationID)
 	require.IsType(t, "", entry.TraceID)
 	require.IsType(t, "", entry.SpanID)
-	
+
 	// Structured fields
 	require.IsType(t, map[string]interface{}(nil), entry.Fields)
 }
@@ -252,12 +252,12 @@ func BenchmarkPopulateRFC5424Fields(b *testing.B) {
 		Message:   "Benchmark message",
 		Component: "benchmark-component",
 	}
-	
+
 	hostname := "benchmark-host"
 	appName := "benchmark-app"
 	procID := "12345"
 	facility := FacilityDaemon
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		PopulateRFC5424Fields(&entry, hostname, appName, procID, facility)
@@ -283,7 +283,7 @@ func BenchmarkToSyslogFormat(b *testing.B) {
 			"iteration": 0,
 		},
 	}
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		entry.Fields["iteration"] = i

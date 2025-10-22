@@ -394,4 +394,3 @@ func TestCronField_Parsing(t *testing.T) {
 		})
 	}
 }
-

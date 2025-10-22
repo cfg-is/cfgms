@@ -42,7 +42,7 @@ func TestStewardCreation(t *testing.T) {
 			logger := logging.NewLogger("info")
 
 			var testCfg *Config
-			
+
 			if tt.cfg == nil {
 				// Use test configuration with certificates
 				if tt.name == "with custom config" {

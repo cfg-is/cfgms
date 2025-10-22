@@ -10,9 +10,9 @@ import (
 
 // ContextStatus represents the current context status
 type ContextStatus struct {
-	Valid         bool      `json:"valid"`
-	LastValidated time.Time `json:"last_validated"`
-	ChangeDetected bool     `json:"change_detected"`
+	Valid          bool      `json:"valid"`
+	LastValidated  time.Time `json:"last_validated"`
+	ChangeDetected bool      `json:"change_detected"`
 }
 
 // Additional missing types referenced in the main engine

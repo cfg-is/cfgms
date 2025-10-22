@@ -12,16 +12,16 @@ type MSPOAuth2Config struct {
 	ClientID     string `yaml:"client_id"`
 	ClientSecret string `yaml:"client_secret,omitempty"`
 	TenantID     string `yaml:"tenant_id"` // MSP tenant ID (cfgis tenant)
-	
+
 	// Client tenant being accessed (dynamic per request)
 	ClientTenantID string `yaml:"client_tenant_id,omitempty"`
-	
+
 	// Application permissions only (no delegated permissions for MSP)
 	ApplicationPermissions []string `yaml:"application_permissions"`
-	
+
 	// Admin consent callback URI
 	AdminCallbackURI string `yaml:"admin_callback_uri"`
-	
+
 	// Optional: Custom authority URL for testing
 	AuthorityURL string `yaml:"authority_url,omitempty"`
 }
@@ -34,23 +34,23 @@ func DefaultMSPApplicationPermissions() []string {
 		"Directory.ReadWrite.All",
 		"Group.ReadWrite.All",
 		"GroupMember.ReadWrite.All",
-		
+
 		// Security and compliance
-		"Policy.ReadWrite.All",                                    // Conditional Access policies
-		"Policy.ReadWrite.ConditionalAccess",                     // CA policies (specific)
-		"SecurityEvents.ReadWrite.All",                           // Security events
-		
+		"Policy.ReadWrite.All",               // Conditional Access policies
+		"Policy.ReadWrite.ConditionalAccess", // CA policies (specific)
+		"SecurityEvents.ReadWrite.All",       // Security events
+
 		// Device management (Intune)
-		"DeviceManagementConfiguration.ReadWrite.All",            // Device configurations
-		"DeviceManagementManagedDevices.ReadWrite.All",           // Managed devices
-		"DeviceManagementServiceConfig.ReadWrite.All",            // Service configuration
-		"DeviceManagementApps.ReadWrite.All",                     // App management
-		
+		"DeviceManagementConfiguration.ReadWrite.All",  // Device configurations
+		"DeviceManagementManagedDevices.ReadWrite.All", // Managed devices
+		"DeviceManagementServiceConfig.ReadWrite.All",  // Service configuration
+		"DeviceManagementApps.ReadWrite.All",           // App management
+
 		// Organization and reporting
-		"Organization.ReadWrite.All",                              // Tenant settings
-		"Reports.Read.All",                                        // Usage reports
-		"AuditLog.Read.All",                                       // Audit logs
-		
+		"Organization.ReadWrite.All", // Tenant settings
+		"Reports.Read.All",           // Usage reports
+		"AuditLog.Read.All",          // Audit logs
+
 		// Optional: Advanced permissions
 		// "Application.ReadWrite.All",                            // App registrations (careful!)
 		// "RoleManagement.ReadWrite.Directory",                   // Role assignments (careful!)
@@ -106,13 +106,13 @@ func (c *MSPOAuth2Config) ToLegacyOAuth2Config(clientTenantID string) *OAuth2Con
 		ClientID:             c.ClientID,
 		ClientSecret:         c.ClientSecret,
 		TenantID:             clientTenantID, // Use client tenant ID for token requests
-		Scopes:              []string{"https://graph.microsoft.com/.default"},
+		Scopes:               []string{"https://graph.microsoft.com/.default"},
 		UseClientCredentials: true, // Always use client credentials for MSP
 		AuthorityURL:         c.GetAuthorityURL(clientTenantID),
-		
+
 		// Disable delegated auth features for MSP
 		SupportDelegatedAuth:     false,
-		FallbackToAppPermissions: false, // Not needed since we only use app permissions
+		FallbackToAppPermissions: false,      // Not needed since we only use app permissions
 		DelegatedScopes:          []string{}, // Empty for MSP
 		RequiredDelegatedScopes:  []string{}, // Empty for MSP
 	}
@@ -123,23 +123,23 @@ func (c *MSPOAuth2Config) ValidateConfig() error {
 	if c.ClientID == "" {
 		return fmt.Errorf("client_id is required")
 	}
-	
+
 	if c.ClientSecret == "" {
 		return fmt.Errorf("client_secret is required for confidential client")
 	}
-	
+
 	if c.TenantID == "" {
 		return fmt.Errorf("tenant_id (MSP tenant) is required")
 	}
-	
+
 	if c.AdminCallbackURI == "" {
 		return fmt.Errorf("admin_callback_uri is required")
 	}
-	
+
 	if len(c.ApplicationPermissions) == 0 {
 		return fmt.Errorf("application_permissions cannot be empty")
 	}
-	
+
 	return nil
 }
 
@@ -157,11 +157,11 @@ func (c *MSPOAuth2Config) GetRequiredPermissionsDescription() map[string]string 
 		"DeviceManagementManagedDevices.ReadWrite.All": "Manage Intune enrolled devices",
 		"DeviceManagementServiceConfig.ReadWrite.All":  "Manage Intune service configuration",
 		"DeviceManagementApps.ReadWrite.All":           "Manage Intune applications",
-		"Organization.ReadWrite.All":                    "Manage tenant organization settings",
+		"Organization.ReadWrite.All":                   "Manage tenant organization settings",
 		"Reports.Read.All":                             "Read usage and activity reports",
 		"AuditLog.Read.All":                            "Read audit logs and sign-in reports",
 	}
-	
+
 	result := make(map[string]string)
 	for _, permission := range c.ApplicationPermissions {
 		if desc, exists := descriptions[permission]; exists {
@@ -170,7 +170,7 @@ func (c *MSPOAuth2Config) GetRequiredPermissionsDescription() map[string]string 
 			result[permission] = "Custom permission"
 		}
 	}
-	
+
 	return result
 }
 
@@ -204,7 +204,7 @@ func (c *MSPOAuth2Config) GetPermissionsByCategory() map[string][]string {
 			"Organization.ReadWrite.All",
 		},
 	}
-	
+
 	// Filter categories to only include permissions we're requesting
 	result := make(map[string][]string)
 	for category, permissions := range categories {
@@ -218,7 +218,7 @@ func (c *MSPOAuth2Config) GetPermissionsByCategory() map[string][]string {
 			result[category] = categoryPerms
 		}
 	}
-	
+
 	return result
 }
 
@@ -267,7 +267,7 @@ func (c *MSPOAuth2Config) UpdateApplicationPermissions(permissions []string) err
 	if len(permissions) == 0 {
 		return fmt.Errorf("permissions list cannot be empty")
 	}
-	
+
 	c.ApplicationPermissions = permissions
 	return c.ValidateConfig()
 }
@@ -282,11 +282,11 @@ func (c *MSPOAuth2Config) Clone() *MSPOAuth2Config {
 		AdminCallbackURI: c.AdminCallbackURI,
 		AuthorityURL:     c.AuthorityURL,
 	}
-	
+
 	// Deep copy permissions slice
 	clone.ApplicationPermissions = make([]string, len(c.ApplicationPermissions))
 	copy(clone.ApplicationPermissions, c.ApplicationPermissions)
-	
+
 	return clone
 }
 

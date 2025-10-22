@@ -5,9 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/features/reports/interfaces"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/features/reports/interfaces"
 )
 
 func TestCustomReportBuilder(t *testing.T) {
@@ -22,7 +23,7 @@ func TestCustomReportBuilder(t *testing.T) {
 		req := interfaces.CustomReportRequest{
 			Name:        "Test Custom Report",
 			Description: "Test description",
-			Query:       interfaces.CustomQuery{
+			Query: interfaces.CustomQuery{
 				DataSources: []string{"dna", "audit"},
 				Filters: map[string]interface{}{
 					"device_type": "server",
@@ -254,10 +255,10 @@ func TestCustomReportTemplate(t *testing.T) {
 		store.templates = []*interfaces.CustomReportTemplate{template}
 
 		shareReq := interfaces.ShareTemplateRequest{
-			TemplateID:    templateID,
+			TemplateID:        templateID,
 			SharedWithTenants: []string{"tenant-456", "tenant-789"},
-			Permissions:   []string{"read", "execute"},
-			SharedBy:      "user-123",
+			Permissions:       []string{"read", "execute"},
+			SharedBy:          "user-123",
 		}
 
 		err := manager.ShareTemplate(context.Background(), shareReq)
@@ -375,16 +376,16 @@ func TestPaginatedReportGeneration(t *testing.T) {
 
 type MockLogger struct{}
 
-func (m *MockLogger) Debug(msg string, fields ...interface{})                            {}
-func (m *MockLogger) Info(msg string, fields ...interface{})                             {}
-func (m *MockLogger) Warn(msg string, fields ...interface{})                             {}
-func (m *MockLogger) Error(msg string, fields ...interface{})                            {}
-func (m *MockLogger) Fatal(msg string, fields ...interface{})                            {}
-func (m *MockLogger) DebugCtx(ctx context.Context, msg string, fields ...interface{})    {}
-func (m *MockLogger) InfoCtx(ctx context.Context, msg string, fields ...interface{})     {}
-func (m *MockLogger) WarnCtx(ctx context.Context, msg string, fields ...interface{})     {}
-func (m *MockLogger) ErrorCtx(ctx context.Context, msg string, fields ...interface{})    {}
-func (m *MockLogger) FatalCtx(ctx context.Context, msg string, fields ...interface{})    {}
+func (m *MockLogger) Debug(msg string, fields ...interface{})                         {}
+func (m *MockLogger) Info(msg string, fields ...interface{})                          {}
+func (m *MockLogger) Warn(msg string, fields ...interface{})                          {}
+func (m *MockLogger) Error(msg string, fields ...interface{})                         {}
+func (m *MockLogger) Fatal(msg string, fields ...interface{})                         {}
+func (m *MockLogger) DebugCtx(ctx context.Context, msg string, fields ...interface{}) {}
+func (m *MockLogger) InfoCtx(ctx context.Context, msg string, fields ...interface{})  {}
+func (m *MockLogger) WarnCtx(ctx context.Context, msg string, fields ...interface{})  {}
+func (m *MockLogger) ErrorCtx(ctx context.Context, msg string, fields ...interface{}) {}
+func (m *MockLogger) FatalCtx(ctx context.Context, msg string, fields ...interface{}) {}
 
 type MockCustomTemplateStore struct {
 	templates []*interfaces.CustomReportTemplate

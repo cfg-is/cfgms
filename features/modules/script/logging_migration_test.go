@@ -5,10 +5,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/logging"
-	_ "github.com/cfgis/cfgms/pkg/logging/providers/file" // Register file provider
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/pkg/logging"
+	_ "github.com/cfgis/cfgms/pkg/logging/providers/file" // Register file provider
 )
 
 // TestLoggingMigration validates that the script module uses the global logging provider correctly
@@ -26,7 +27,7 @@ func TestLoggingMigration(t *testing.T) {
 		AsyncWrites:       false, // Synchronous for testing
 		BatchSize:         1,
 		Config: map[string]interface{}{
-			"directory": tempDir,
+			"directory":     tempDir,
 			"max_file_size": 10 * 1024 * 1024, // 10MB
 			"max_files":     5,
 		},
@@ -92,7 +93,7 @@ func TestStructuredLoggingFields(t *testing.T) {
 		TenantIsolation:   true,
 		EnableCorrelation: true,
 		Config: map[string]interface{}{
-			"directory": tempDir,
+			"directory":     tempDir,
 			"max_file_size": 10 * 1024 * 1024,
 			"max_files":     5,
 		},
@@ -157,7 +158,7 @@ func TestTenantIsolation(t *testing.T) {
 		TenantIsolation:   true, // Enable tenant isolation
 		EnableCorrelation: true,
 		Config: map[string]interface{}{
-			"directory": tempDir,
+			"directory":     tempDir,
 			"max_file_size": 10 * 1024 * 1024,
 			"max_files":     5,
 		},

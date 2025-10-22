@@ -22,25 +22,25 @@ type MicrosoftProvider struct {
 // NewMicrosoftProvider creates a new Microsoft Graph provider
 func NewMicrosoftProvider() saas.Provider {
 	info := saas.ProviderInfo{
-		Name:        "microsoft",
-		DisplayName: "Microsoft Graph",
-		Version:     "1.0.0",
-		Description: "Microsoft Graph API provider for M365 services",
+		Name:               "microsoft",
+		DisplayName:        "Microsoft Graph",
+		Version:            "1.0.0",
+		Description:        "Microsoft Graph API provider for M365 services",
 		SupportedAuthTypes: []string{"oauth2"},
-		BaseURL:     "https://graph.microsoft.com/v1.0",
-		DocumentationURL: "https://docs.microsoft.com/en-us/graph/",
+		BaseURL:            "https://graph.microsoft.com/v1.0",
+		DocumentationURL:   "https://docs.microsoft.com/en-us/graph/",
 		Capabilities: saas.ProviderCapabilities{
 			NormalizedOperations: []string{"create", "read", "update", "delete", "list"},
-			RawAPISupport:       true,
-			SchemaSupport:       false,
-			PaginationSupport:   true,
-			WebhookSupport:      true,
-			BatchOperations:     true,
+			RawAPISupport:        true,
+			SchemaSupport:        false,
+			PaginationSupport:    true,
+			WebhookSupport:       true,
+			BatchOperations:      true,
 		},
 	}
-	
+
 	httpClient := &http.Client{}
-	
+
 	return &MicrosoftProvider{
 		BaseProvider: saas.NewBaseProvider(info, httpClient),
 		baseURL:      "https://graph.microsoft.com/v1.0",
@@ -104,7 +104,7 @@ func (p *MicrosoftProvider) Delete(ctx context.Context, resourceType string, res
 // List retrieves multiple resources
 func (p *MicrosoftProvider) List(ctx context.Context, resourceType string, filters map[string]interface{}) (*saas.ProviderResult, error) {
 	path := "/" + resourceType
-	
+
 	// Add OData query parameters
 	queryParams := make([]string, 0)
 	if filter, exists := filters["filter"]; exists {
@@ -116,11 +116,11 @@ func (p *MicrosoftProvider) List(ctx context.Context, resourceType string, filte
 	if select_, exists := filters["select"]; exists {
 		queryParams = append(queryParams, fmt.Sprintf("$select=%v", select_))
 	}
-	
+
 	if len(queryParams) > 0 {
 		path += "?" + strings.Join(queryParams, "&")
 	}
-	
+
 	return p.RawAPI(ctx, "GET", path, nil)
 }
 
@@ -128,7 +128,7 @@ func (p *MicrosoftProvider) List(ctx context.Context, resourceType string, filte
 func (p *MicrosoftProvider) RawAPI(ctx context.Context, method, path string, body interface{}) (*saas.ProviderResult, error) {
 	// Build full URL (for actual implementation)
 	_ = p.baseURL + path
-	
+
 	// This would make the actual HTTP request
 	// For demonstration, return a mock successful result
 	return &saas.ProviderResult{
@@ -212,14 +212,14 @@ func (p *MicrosoftProvider) ValidateResource(resourceType string, data map[strin
 	if err != nil {
 		return err
 	}
-	
+
 	// Check required fields
 	for _, field := range schema.Required {
 		if _, exists := data[field]; !exists {
 			return fmt.Errorf("required field %s is missing", field)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -228,11 +228,11 @@ func (p *MicrosoftProvider) ValidateConfig(config saas.ProviderConfig) error {
 	if config.ClientID == "" {
 		return fmt.Errorf("client_id is required")
 	}
-	
+
 	if config.TenantID == "" {
 		return fmt.Errorf("tenant_id is required")
 	}
-	
+
 	return nil
 }
 
@@ -241,7 +241,7 @@ func (p *MicrosoftProvider) ValidateConfig(config saas.ProviderConfig) error {
 func (p *MicrosoftProvider) createUser(ctx context.Context, data map[string]interface{}) (*saas.ProviderResult, error) {
 	// Transform normalized user data to Microsoft Graph format
 	graphData := make(map[string]interface{})
-	
+
 	if displayName, exists := data["name"]; exists {
 		graphData["displayName"] = displayName
 	}
@@ -258,31 +258,31 @@ func (p *MicrosoftProvider) createUser(ctx context.Context, data map[string]inte
 	if active, exists := data["active"]; exists {
 		graphData["accountEnabled"] = active
 	}
-	
+
 	// Add required password profile for new users
 	graphData["passwordProfile"] = map[string]interface{}{
 		"forceChangePasswordNextSignIn": true,
 		"password":                      "TempPassword123!",
 	}
-	
+
 	return p.RawAPI(ctx, "POST", "/users", graphData)
 }
 
 func (p *MicrosoftProvider) createGroup(ctx context.Context, data map[string]interface{}) (*saas.ProviderResult, error) {
 	// Transform normalized group data to Microsoft Graph format
 	graphData := make(map[string]interface{})
-	
+
 	if name, exists := data["name"]; exists {
 		graphData["displayName"] = name
 	}
 	if description, exists := data["description"]; exists {
 		graphData["description"] = description
 	}
-	
+
 	// Set default group properties
 	graphData["mailEnabled"] = false
 	graphData["securityEnabled"] = true
-	
+
 	return p.RawAPI(ctx, "POST", "/groups", graphData)
 }
 
@@ -290,21 +290,21 @@ func (p *MicrosoftProvider) createGroup(ctx context.Context, data map[string]int
 func ExampleUsage() {
 	// Create provider registry
 	registry := saas.NewProviderRegistry()
-	
+
 	// Register Microsoft provider
 	microsoftProvider := NewMicrosoftProvider()
 	if err := registry.RegisterProvider(microsoftProvider); err != nil {
 		log.Printf("Failed to register Microsoft provider: %v", err)
 		return
 	}
-	
+
 	// Create universal authenticator (would need actual credential store)
 	// authenticator := saas.NewUniversalAuthenticator(credStore, httpClient)
-	
+
 	// Example: Create a user using normalized operations
 	ctx := context.Background()
 	provider, _ := registry.GetProvider("microsoft")
-	
+
 	userData := map[string]interface{}{
 		"name":       "John Doe",
 		"email":      "john.doe@company.com",
@@ -312,33 +312,33 @@ func ExampleUsage() {
 		"last_name":  "Doe",
 		"active":     true,
 	}
-	
+
 	result, err := provider.Create(ctx, "users", userData)
 	if err != nil {
 		fmt.Printf("Error creating user: %v\n", err)
 		return
 	}
-	
+
 	fmt.Printf("User created successfully: %+v\n", result.Data)
-	
+
 	// Example: Raw API call for advanced operations
 	customData := map[string]interface{}{
-		"@odata.type": "#microsoft.graph.user",
-		"displayName": "Jane Smith",
+		"@odata.type":       "#microsoft.graph.user",
+		"displayName":       "Jane Smith",
 		"userPrincipalName": "jane.smith@company.com",
-		"accountEnabled": true,
+		"accountEnabled":    true,
 		"passwordProfile": map[string]interface{}{
 			"forceChangePasswordNextSignIn": true,
-			"password": "TempPassword456!",
+			"password":                      "TempPassword456!",
 		},
 	}
-	
+
 	rawResult, err := provider.RawAPI(ctx, "POST", "/users", customData)
 	if err != nil {
 		fmt.Printf("Error with raw API call: %v\n", err)
 		return
 	}
-	
+
 	fmt.Printf("Raw API call successful: %+v\n", rawResult.Data)
 }
 
@@ -346,24 +346,24 @@ func ExampleUsage() {
 func WorkflowExample() {
 	// This would be used in a workflow configuration like:
 	/*
-	workflow:
-	  steps:
-	    - type: saas_action
-	      provider: microsoft
-	      operation: create
-	      resource_type: users
-	      data:
-	        name: "${user.name}"
-	        email: "${user.email}"
-	        active: true
-	    
-	    - type: api
-	      provider: microsoft
-	      method: POST
-	      path: "/users/${previous.id}/memberOf/$ref"
-	      body:
-	        "@odata.id": "https://graph.microsoft.com/v1.0/groups/${group.id}"
+		workflow:
+		  steps:
+		    - type: saas_action
+		      provider: microsoft
+		      operation: create
+		      resource_type: users
+		      data:
+		        name: "${user.name}"
+		        email: "${user.email}"
+		        active: true
+
+		    - type: api
+		      provider: microsoft
+		      method: POST
+		      path: "/users/${previous.id}/memberOf/$ref"
+		      body:
+		        "@odata.id": "https://graph.microsoft.com/v1.0/groups/${group.id}"
 	*/
-	
+
 	fmt.Println("Workflow example configuration shown in comments above")
 }

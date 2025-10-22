@@ -30,10 +30,10 @@ type FileCredentialStore struct {
 
 // StoredCredentials represents the structure of data stored in credential files
 type StoredCredentials struct {
-	Tokens           map[string]*AccessToken  `json:"tokens"`
-	DelegatedTokens  map[string]*AccessToken  `json:"delegated_tokens,omitempty"`
-	UserContexts     map[string]*UserContext  `json:"user_contexts,omitempty"`
-	Configs          map[string]*OAuth2Config `json:"configs"`
+	Tokens          map[string]*AccessToken  `json:"tokens"`
+	DelegatedTokens map[string]*AccessToken  `json:"delegated_tokens,omitempty"`
+	UserContexts    map[string]*UserContext  `json:"user_contexts,omitempty"`
+	Configs         map[string]*OAuth2Config `json:"configs"`
 }
 
 // NewFileCredentialStore creates a new file-based credential store

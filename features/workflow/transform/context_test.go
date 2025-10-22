@@ -29,14 +29,14 @@ func TestNewDefaultTransformContext(t *testing.T) {
 
 func TestTransformContext_GetString(t *testing.T) {
 	data := map[string]interface{}{
-		"string_val":  "hello",
-		"int_val":     42,
-		"bool_val":    true,
-		"float_val":   3.14,
-		"nil_val":     nil,
-		"empty_val":   "",
-		"slice_val":   []string{"a", "b"},
-		"map_val":     map[string]string{"key": "value"},
+		"string_val": "hello",
+		"int_val":    42,
+		"bool_val":   true,
+		"float_val":  3.14,
+		"nil_val":    nil,
+		"empty_val":  "",
+		"slice_val":  []string{"a", "b"},
+		"map_val":    map[string]string{"key": "value"},
 	}
 
 	ctx := NewDefaultTransformContext(data, nil, nil)
@@ -185,13 +185,13 @@ func TestTransformContext_GetBool(t *testing.T) {
 
 func TestTransformContext_GetArray(t *testing.T) {
 	data := map[string]interface{}{
-		"slice_val":       []interface{}{"a", "b", "c"},
-		"string_slice":    []string{"x", "y", "z"},
-		"int_slice":       []int{1, 2, 3},
-		"mixed_slice":     []interface{}{1, "hello", true},
-		"single_val":      "hello",
-		"nil_val":         nil,
-		"map_val":         map[string]string{"key": "value"},
+		"slice_val":    []interface{}{"a", "b", "c"},
+		"string_slice": []string{"x", "y", "z"},
+		"int_slice":    []int{1, 2, 3},
+		"mixed_slice":  []interface{}{1, "hello", true},
+		"single_val":   "hello",
+		"nil_val":      nil,
+		"map_val":      map[string]string{"key": "value"},
 	}
 
 	ctx := NewDefaultTransformContext(data, nil, nil)

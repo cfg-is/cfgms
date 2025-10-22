@@ -1,3 +1,4 @@
+//go:build windows
 // +build windows
 
 package patch_test
@@ -7,9 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/features/modules/patch"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/features/modules/patch"
 )
 
 // TestWindowsUpdateManager_New tests creating a new Windows Update manager

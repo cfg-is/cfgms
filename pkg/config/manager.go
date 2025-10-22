@@ -9,8 +9,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
 // Manager handles all configuration operations using the ConfigStore interface
@@ -150,14 +150,14 @@ func (m *Manager) ListConfigurations(ctx context.Context, tenantID string) ([]*C
 	var summaries []*ConfigurationSummary
 	for _, entry := range configEntries {
 		summary := &ConfigurationSummary{
-			TenantID:    entry.Key.TenantID,
-			StewardID:   entry.Key.Name,
-			Version:     entry.Version,
-			UpdatedAt:   entry.UpdatedAt,
-			UpdatedBy:   entry.UpdatedBy,
-			Source:      entry.Source,
-			Checksum:    entry.Checksum,
-			Tags:        entry.Tags,
+			TenantID:  entry.Key.TenantID,
+			StewardID: entry.Key.Name,
+			Version:   entry.Version,
+			UpdatedAt: entry.UpdatedAt,
+			UpdatedBy: entry.UpdatedBy,
+			Source:    entry.Source,
+			Checksum:  entry.Checksum,
+			Tags:      entry.Tags,
 		}
 		summaries = append(summaries, summary)
 	}
@@ -285,14 +285,14 @@ func (m *Manager) GetConfigurationStats(ctx context.Context) (*interfaces.Config
 
 // ConfigurationSummary provides a summary of a stored configuration
 type ConfigurationSummary struct {
-	TenantID    string    `json:"tenant_id"`
-	StewardID   string    `json:"steward_id"`
-	Version     int64     `json:"version"`
-	UpdatedAt   time.Time `json:"updated_at"`
-	UpdatedBy   string    `json:"updated_by"`
-	Source      string    `json:"source"`
-	Checksum    string    `json:"checksum"`
-	Tags        []string  `json:"tags"`
+	TenantID  string    `json:"tenant_id"`
+	StewardID string    `json:"steward_id"`
+	Version   int64     `json:"version"`
+	UpdatedAt time.Time `json:"updated_at"`
+	UpdatedBy string    `json:"updated_by"`
+	Source    string    `json:"source"`
+	Checksum  string    `json:"checksum"`
+	Tags      []string  `json:"tags"`
 }
 
 // ConfigurationVersion represents a version in configuration history
@@ -306,7 +306,7 @@ type ConfigurationVersion struct {
 
 // BatchConfigurationEntry represents a configuration for batch operations
 type BatchConfigurationEntry struct {
-	TenantID  string                      `json:"tenant_id"`
-	StewardID string                      `json:"steward_id"`
+	TenantID  string                       `json:"tenant_id"`
+	StewardID string                       `json:"steward_id"`
 	Config    *stewardconfig.StewardConfig `json:"config"`
 }

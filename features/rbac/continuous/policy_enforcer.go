@@ -24,7 +24,6 @@ type SecurityPolicyResult struct {
 	Allowed            bool              `json:"allowed"`
 }
 
-
 // SecurityEvaluationRequest represents a request for security evaluation
 type SecurityEvaluationRequest struct {
 	TenantID     string                 `json:"tenant_id"`
@@ -39,99 +38,97 @@ type SecurityEvaluationRequest struct {
 // PolicyEnforcer handles policy violation detection and enforcement actions
 type PolicyEnforcer struct {
 	// Core dependencies
-	tenantSecurity     TenantSecurityMiddleware
-	
+	tenantSecurity TenantSecurityMiddleware
+
 	// Policy management
-	policyEngine       TenantSecurityPolicyEngine
-	enforcementRules   []EnforcementRule
-	violationHandlers  map[ViolationType]ViolationHandler
-	
+	policyEngine      TenantSecurityPolicyEngine
+	enforcementRules  []EnforcementRule
+	violationHandlers map[ViolationType]ViolationHandler
+
 	// Enforcement configuration
-	autoTermination    bool
+	autoTermination   bool
 	gracePeriod       time.Duration
 	escalationEnabled bool
-	
-	// Violation tracking
-	violations        map[string][]*PolicyViolationRecord // sessionID -> violations
-	violationsMutex   sync.RWMutex
-	
-	// Control
-	started           bool
-	stopChannel       chan struct{}
-	enforcementGroup  sync.WaitGroup
-	
-	// Statistics
-	stats            PolicyEnforcementStats
-}
 
+	// Violation tracking
+	violations      map[string][]*PolicyViolationRecord // sessionID -> violations
+	violationsMutex sync.RWMutex
+
+	// Control
+	started          bool
+	stopChannel      chan struct{}
+	enforcementGroup sync.WaitGroup
+
+	// Statistics
+	stats PolicyEnforcementStats
+}
 
 // PolicyViolationRecord represents a recorded policy violation
 type PolicyViolationRecord struct {
-	ViolationID       string                 `json:"violation_id"`
-	SessionID         string                 `json:"session_id"`
-	PolicyID          string                 `json:"policy_id"`
-	ViolationType     ViolationType          `json:"violation_type"`
-	Severity          RuleSeverity           `json:"severity"`
-	Description       string                 `json:"description"`
-	Context           map[string]interface{} `json:"context"`
-	
+	ViolationID   string                 `json:"violation_id"`
+	SessionID     string                 `json:"session_id"`
+	PolicyID      string                 `json:"policy_id"`
+	ViolationType ViolationType          `json:"violation_type"`
+	Severity      RuleSeverity           `json:"severity"`
+	Description   string                 `json:"description"`
+	Context       map[string]interface{} `json:"context"`
+
 	// Timing
-	DetectedAt        time.Time              `json:"detected_at"`
-	FirstOccurrence   time.Time              `json:"first_occurrence"`
-	LastOccurrence    time.Time              `json:"last_occurrence"`
-	OccurrenceCount   int                    `json:"occurrence_count"`
-	
+	DetectedAt      time.Time `json:"detected_at"`
+	FirstOccurrence time.Time `json:"first_occurrence"`
+	LastOccurrence  time.Time `json:"last_occurrence"`
+	OccurrenceCount int       `json:"occurrence_count"`
+
 	// Status
-	Status            ViolationStatus        `json:"status"`
-	Resolution        ViolationResolution    `json:"resolution"`
-	ResolvedAt        time.Time              `json:"resolved_at,omitempty"`
-	ResolvedBy        string                 `json:"resolved_by,omitempty"`
-	
+	Status     ViolationStatus     `json:"status"`
+	Resolution ViolationResolution `json:"resolution"`
+	ResolvedAt time.Time           `json:"resolved_at,omitempty"`
+	ResolvedBy string              `json:"resolved_by,omitempty"`
+
 	// Enforcement
-	EnforcementActions []EnforcementAction   `json:"enforcement_actions"`
-	GracePeriodExpiry  time.Time             `json:"grace_period_expiry,omitempty"`
-	
-	mutex             sync.RWMutex
+	EnforcementActions []EnforcementAction `json:"enforcement_actions"`
+	GracePeriodExpiry  time.Time           `json:"grace_period_expiry,omitempty"`
+
+	mutex sync.RWMutex
 }
 
 // ViolationType defines types of policy violations
 type ViolationType string
 
 const (
-	ViolationTypeDataAccess        ViolationType = "data_access"
+	ViolationTypeDataAccess           ViolationType = "data_access"
 	ViolationTypePermissionEscalation ViolationType = "permission_escalation"
-	ViolationTypeUnauthorizedAction ViolationType = "unauthorized_action"
-	ViolationTypeComplianceBreach   ViolationType = "compliance_breach"
-	ViolationTypeSecurityPolicy     ViolationType = "security_policy"
-	ViolationTypeResourceAccess     ViolationType = "resource_access"
-	ViolationTypeTimeBasedAccess    ViolationType = "time_based_access"
-	ViolationTypeLocationRestriction ViolationType = "location_restriction"
-	ViolationTypeBehavioralAnomaly   ViolationType = "behavioral_anomaly"
-	ViolationTypeRiskThreshold       ViolationType = "risk_threshold"
+	ViolationTypeUnauthorizedAction   ViolationType = "unauthorized_action"
+	ViolationTypeComplianceBreach     ViolationType = "compliance_breach"
+	ViolationTypeSecurityPolicy       ViolationType = "security_policy"
+	ViolationTypeResourceAccess       ViolationType = "resource_access"
+	ViolationTypeTimeBasedAccess      ViolationType = "time_based_access"
+	ViolationTypeLocationRestriction  ViolationType = "location_restriction"
+	ViolationTypeBehavioralAnomaly    ViolationType = "behavioral_anomaly"
+	ViolationTypeRiskThreshold        ViolationType = "risk_threshold"
 )
 
 // ViolationStatus represents the current status of a violation
 type ViolationStatus string
 
 const (
-	ViolationStatusActive     ViolationStatus = "active"
-	ViolationStatusPending    ViolationStatus = "pending"
-	ViolationStatusEscalated  ViolationStatus = "escalated"
-	ViolationStatusResolved   ViolationStatus = "resolved"
-	ViolationStatusIgnored    ViolationStatus = "ignored"
+	ViolationStatusActive    ViolationStatus = "active"
+	ViolationStatusPending   ViolationStatus = "pending"
+	ViolationStatusEscalated ViolationStatus = "escalated"
+	ViolationStatusResolved  ViolationStatus = "resolved"
+	ViolationStatusIgnored   ViolationStatus = "ignored"
 )
 
 // ViolationResolution represents how a violation was resolved
 type ViolationResolution string
 
 const (
-	ViolationResolutionAutomatic     ViolationResolution = "automatic"
-	ViolationResolutionManual        ViolationResolution = "manual"
-	ViolationResolutionSystemExpiry  ViolationResolution = "system_expiry"
-	ViolationResolutionPolicyUpdate  ViolationResolution = "policy_update"
-	ViolationResolutionException     ViolationResolution = "exception"
+	ViolationResolutionAutomatic    ViolationResolution = "automatic"
+	ViolationResolutionManual       ViolationResolution = "manual"
+	ViolationResolutionSystemExpiry ViolationResolution = "system_expiry"
+	ViolationResolutionPolicyUpdate ViolationResolution = "policy_update"
+	ViolationResolutionException    ViolationResolution = "exception"
 )
-
 
 // EnforcementActionType defines types of enforcement actions
 type EnforcementActionType string
@@ -182,59 +179,58 @@ const (
 
 // EnforcementRule defines rules for policy enforcement
 type EnforcementRule struct {
-	RuleID          string                `json:"rule_id"`
-	Name            string                `json:"name"`
-	Description     string                `json:"description"`
-	ViolationType   ViolationType         `json:"violation_type"`
-	Severity        RuleSeverity          `json:"severity"`
-	
+	RuleID        string        `json:"rule_id"`
+	Name          string        `json:"name"`
+	Description   string        `json:"description"`
+	ViolationType ViolationType `json:"violation_type"`
+	Severity      RuleSeverity  `json:"severity"`
+
 	// Conditions
-	Conditions      []EnforcementCondition `json:"conditions"`
-	Threshold       int                    `json:"threshold"`      // Number of violations before action
-	TimeWindow      time.Duration          `json:"time_window"`    // Time window for threshold
-	
+	Conditions []EnforcementCondition `json:"conditions"`
+	Threshold  int                    `json:"threshold"`   // Number of violations before action
+	TimeWindow time.Duration          `json:"time_window"` // Time window for threshold
+
 	// Actions
 	Actions         []EnforcementActionType `json:"actions"`
-	GracePeriod     time.Duration          `json:"grace_period"`
-	EscalationDelay time.Duration          `json:"escalation_delay"`
-	
+	GracePeriod     time.Duration           `json:"grace_period"`
+	EscalationDelay time.Duration           `json:"escalation_delay"`
+
 	// Configuration
-	Enabled         bool                   `json:"enabled"`
-	AutoEscalate    bool                   `json:"auto_escalate"`
-	RequireApproval bool                   `json:"require_approval"`
+	Enabled         bool `json:"enabled"`
+	AutoEscalate    bool `json:"auto_escalate"`
+	RequireApproval bool `json:"require_approval"`
 }
 
 // EnforcementCondition defines conditions for rule application
 type EnforcementCondition struct {
-	Field       string      `json:"field"`
-	Operator    string      `json:"operator"`
-	Value       interface{} `json:"value"`
-	DataType    string      `json:"data_type"`
+	Field    string      `json:"field"`
+	Operator string      `json:"operator"`
+	Value    interface{} `json:"value"`
+	DataType string      `json:"data_type"`
 }
 
 // ViolationHandler defines a handler for specific violation types
 type ViolationHandler func(context.Context, *PolicyViolationRecord) (*EnforcementAction, error)
 
-
 // PolicyEnforcementStats tracks enforcement statistics
 type PolicyEnforcementStats struct {
-	TotalViolations          int64                              `json:"total_violations"`
-	ActiveViolations         int64                              `json:"active_violations"`
-	ResolvedViolations       int64                              `json:"resolved_violations"`
-	ViolationsByType         map[ViolationType]int64            `json:"violations_by_type"`
-	ViolationsBySeverity     map[RuleSeverity]int64             `json:"violations_by_severity"`
-	
-	TotalEnforcementActions  int64                              `json:"total_enforcement_actions"`
-	ActionsByType           map[EnforcementActionType]int64     `json:"actions_by_type"`
-	ActionSuccessRate       float64                             `json:"action_success_rate"`
-	
-	AverageResolutionTime   time.Duration                       `json:"average_resolution_time"`
-	EscalationRate          float64                             `json:"escalation_rate"`
-	ComplianceRate          float64                             `json:"compliance_rate"`
-	
-	LastEnforcementRun      time.Time                           `json:"last_enforcement_run"`
-	
-	mutex                  sync.RWMutex
+	TotalViolations      int64                   `json:"total_violations"`
+	ActiveViolations     int64                   `json:"active_violations"`
+	ResolvedViolations   int64                   `json:"resolved_violations"`
+	ViolationsByType     map[ViolationType]int64 `json:"violations_by_type"`
+	ViolationsBySeverity map[RuleSeverity]int64  `json:"violations_by_severity"`
+
+	TotalEnforcementActions int64                           `json:"total_enforcement_actions"`
+	ActionsByType           map[EnforcementActionType]int64 `json:"actions_by_type"`
+	ActionSuccessRate       float64                         `json:"action_success_rate"`
+
+	AverageResolutionTime time.Duration `json:"average_resolution_time"`
+	EscalationRate        float64       `json:"escalation_rate"`
+	ComplianceRate        float64       `json:"compliance_rate"`
+
+	LastEnforcementRun time.Time `json:"last_enforcement_run"`
+
+	mutex sync.RWMutex
 }
 
 // NewPolicyEnforcer creates a new policy enforcer
@@ -242,16 +238,16 @@ func NewPolicyEnforcer(tenantSecurity TenantSecurityMiddleware, autoTermination 
 	pe := &PolicyEnforcer{
 		tenantSecurity:    tenantSecurity,
 		autoTermination:   autoTermination,
-		gracePeriod:      30 * time.Second,
+		gracePeriod:       30 * time.Second,
 		escalationEnabled: true,
-		enforcementRules: getDefaultEnforcementRules(),
+		enforcementRules:  getDefaultEnforcementRules(),
 		violationHandlers: make(map[ViolationType]ViolationHandler),
-		violations:       make(map[string][]*PolicyViolationRecord),
-		stopChannel:      make(chan struct{}),
+		violations:        make(map[string][]*PolicyViolationRecord),
+		stopChannel:       make(chan struct{}),
 		stats: PolicyEnforcementStats{
 			ViolationsByType:     make(map[ViolationType]int64),
 			ViolationsBySeverity: make(map[RuleSeverity]int64),
-			ActionsByType:       make(map[EnforcementActionType]int64),
+			ActionsByType:        make(map[EnforcementActionType]int64),
 		},
 	}
 
@@ -326,13 +322,13 @@ func (pe *PolicyEnforcer) EvaluatePolicies(ctx context.Context, request *Continu
 		}
 
 		securityRequest := &SecurityEvaluationRequest{
-			TenantID:        request.TenantId,
-			SubjectID:       request.SubjectId,
-			Action:          "authorization_request",
-			ResourceType:    "resource", // Default resource type
-			ResourceID:      request.ResourceId,
-			Context:         resourceContext,
-			Permissions:     []string{request.PermissionId},
+			TenantID:     request.TenantId,
+			SubjectID:    request.SubjectId,
+			Action:       "authorization_request",
+			ResourceType: "resource", // Default resource type
+			ResourceID:   request.ResourceId,
+			Context:      resourceContext,
+			Permissions:  []string{request.PermissionId},
 		}
 
 		securityResult, err := pe.policyEngine.EvaluateSecurityPolicy(ctx, securityRequest)
@@ -391,18 +387,18 @@ func (pe *PolicyEnforcer) RecordViolation(ctx context.Context, sessionID string,
 
 	// Create violation record
 	record := &PolicyViolationRecord{
-		ViolationID:      fmt.Sprintf("violation-%d", time.Now().UnixNano()),
-		SessionID:        sessionID,
-		PolicyID:         violation.PolicyID,
-		ViolationType:    violation.ViolationType,
-		Severity:         violation.Severity,
-		Description:      violation.Description,
-		Context:          violation.Context,
-		DetectedAt:       time.Now(),
-		FirstOccurrence:  time.Now(),
-		LastOccurrence:   time.Now(),
-		OccurrenceCount:  1,
-		Status:           ViolationStatusActive,
+		ViolationID:        fmt.Sprintf("violation-%d", time.Now().UnixNano()),
+		SessionID:          sessionID,
+		PolicyID:           violation.PolicyID,
+		ViolationType:      violation.ViolationType,
+		Severity:           violation.Severity,
+		Description:        violation.Description,
+		Context:            violation.Context,
+		DetectedAt:         time.Now(),
+		FirstOccurrence:    time.Now(),
+		LastOccurrence:     time.Now(),
+		OccurrenceCount:    1,
+		Status:             ViolationStatusActive,
 		EnforcementActions: make([]EnforcementAction, 0),
 	}
 
@@ -415,7 +411,7 @@ func (pe *PolicyEnforcer) RecordViolation(ctx context.Context, sessionID string,
 				existing.LastOccurrence = time.Now()
 				existing.OccurrenceCount++
 				existing.mutex.Unlock()
-				
+
 				// Apply enforcement based on escalation
 				pe.applyViolationEnforcement(ctx, existing)
 				return nil
@@ -529,12 +525,12 @@ func (pe *PolicyEnforcer) GetEnforcementStats() *PolicyEnforcementStats {
 		ViolationsByType:        make(map[ViolationType]int64),
 		ViolationsBySeverity:    make(map[RuleSeverity]int64),
 		TotalEnforcementActions: pe.stats.TotalEnforcementActions,
-		ActionsByType:          make(map[EnforcementActionType]int64),
-		ActionSuccessRate:      pe.stats.ActionSuccessRate,
-		AverageResolutionTime:  pe.stats.AverageResolutionTime,
-		EscalationRate:         pe.stats.EscalationRate,
-		ComplianceRate:         pe.stats.ComplianceRate,
-		LastEnforcementRun:     pe.stats.LastEnforcementRun,
+		ActionsByType:           make(map[EnforcementActionType]int64),
+		ActionSuccessRate:       pe.stats.ActionSuccessRate,
+		AverageResolutionTime:   pe.stats.AverageResolutionTime,
+		EscalationRate:          pe.stats.EscalationRate,
+		ComplianceRate:          pe.stats.ComplianceRate,
+		LastEnforcementRun:      pe.stats.LastEnforcementRun,
 	}
 
 	// Copy maps
@@ -608,7 +604,7 @@ func (pe *PolicyEnforcer) applyEnforcementRules(ctx context.Context, request *Co
 			if rule.ViolationType == violation.ViolationType && rule.Enabled {
 				action := pe.createEnforcementAction(rule, violation, request.SessionID)
 				actions = append(actions, action)
-				
+
 				// Execute immediate actions - ignore errors to prevent blocking authorization
 				if pe.shouldExecuteImmediately(rule) {
 					_ = pe.executeAction(ctx, &action)
@@ -627,11 +623,11 @@ func (pe *PolicyEnforcer) applyViolationEnforcement(ctx context.Context, violati
 			// Check if threshold is met
 			if violation.OccurrenceCount >= rule.Threshold {
 				action := pe.createEnforcementActionFromRecord(rule, violation)
-				
+
 				violation.mutex.Lock()
 				violation.EnforcementActions = append(violation.EnforcementActions, action)
 				violation.mutex.Unlock()
-				
+
 				// Execute action - ignore errors to prevent blocking enforcement
 				_ = pe.executeAction(ctx, &action)
 			}
@@ -669,7 +665,7 @@ func (pe *PolicyEnforcer) createEnforcementActionFromRecord(rule EnforcementRule
 
 func (pe *PolicyEnforcer) executeAction(ctx context.Context, action *EnforcementAction) error {
 	action.Status = string(ActionStatusExecuting)
-	
+
 	var err error
 	switch action.ActionType {
 	case string(ActionTypeAlert):
@@ -735,7 +731,7 @@ func (pe *PolicyEnforcer) cleanupOldViolations(ctx context.Context) {
 
 	// Clean up resolved violations older than 24 hours
 	cutoff := time.Now().Add(-24 * time.Hour)
-	
+
 	for sessionID, violations := range pe.violations {
 		filtered := make([]*PolicyViolationRecord, 0)
 		for _, violation := range violations {
@@ -743,7 +739,7 @@ func (pe *PolicyEnforcer) cleanupOldViolations(ctx context.Context) {
 				filtered = append(filtered, violation)
 			}
 		}
-		
+
 		if len(filtered) == 0 {
 			delete(pe.violations, sessionID)
 		} else {
@@ -891,7 +887,7 @@ func (pe *PolicyEnforcer) updateEnforcementStats(result *PolicyEvaluationResult)
 	if len(result.Violations) > 0 {
 		pe.stats.TotalViolations += int64(len(result.Violations))
 		pe.stats.ActiveViolations += int64(len(result.Violations))
-		
+
 		for _, violation := range result.Violations {
 			pe.stats.ViolationsByType[violation.ViolationType]++
 			pe.stats.ViolationsBySeverity[violation.Severity]++
@@ -900,7 +896,7 @@ func (pe *PolicyEnforcer) updateEnforcementStats(result *PolicyEvaluationResult)
 
 	if len(result.EnforcementActions) > 0 {
 		pe.stats.TotalEnforcementActions += int64(len(result.EnforcementActions))
-		
+
 		for _, action := range result.EnforcementActions {
 			pe.stats.ActionsByType[EnforcementActionType(action.ActionType)]++
 		}
@@ -950,4 +946,3 @@ func getDefaultEnforcementRules() []EnforcementRule {
 		},
 	}
 }
-

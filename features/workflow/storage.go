@@ -7,8 +7,9 @@ import (
 	"sort"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	"gopkg.in/yaml.v3"
+
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
 // WorkflowStore handles workflow storage using the global storage provider system
@@ -47,9 +48,9 @@ func (ws *WorkflowStore) StoreWorkflow(ctx context.Context, workflow *VersionedW
 	}
 
 	entry := &interfaces.ConfigEntry{
-		Key:       key,
-		Data:      data,
-		Format:    interfaces.ConfigFormatYAML,
+		Key:    key,
+		Data:   data,
+		Format: interfaces.ConfigFormatYAML,
 		Metadata: map[string]interface{}{
 			"workflow_version": workflow.SemanticVersion.String(),
 			"workflow_name":    workflow.Name,
@@ -382,10 +383,10 @@ func (ws *WorkflowStore) StoreInstance(ctx context.Context, instance *TemplateIn
 		Data:   data,
 		Format: interfaces.ConfigFormatJSON,
 		Metadata: map[string]interface{}{
-			"instance_id":     instance.ID,
-			"template_id":     instance.TemplateID,
-			"template_name":   instance.TemplateName,
-			"workflow_name":   instance.Workflow.Name,
+			"instance_id":   instance.ID,
+			"template_id":   instance.TemplateID,
+			"template_name": instance.TemplateName,
+			"workflow_name": instance.Workflow.Name,
 		},
 		Tags:   []string{"instance", "template:" + instance.TemplateID},
 		Source: "workflow_engine",

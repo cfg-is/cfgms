@@ -18,7 +18,7 @@ func TestSOPSManager_NewSOPSManager(t *testing.T) {
 
 func TestSOPSManager_IsSOPSEncrypted(t *testing.T) {
 	manager := NewSOPSManager()
-	
+
 	tests := []struct {
 		name     string
 		content  string
@@ -48,7 +48,7 @@ description: "This talks about sops but isn't encrypted"`,
 			expected: false,
 		},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := manager.IsSOPSEncrypted([]byte(tt.content))
@@ -59,7 +59,7 @@ description: "This talks about sops but isn't encrypted"`,
 
 func TestSOPSManager_ShouldEncryptFile(t *testing.T) {
 	manager := NewSOPSManager()
-	
+
 	config := &SOPSConfig{
 		Enabled: true,
 		KMSProviders: map[string]KMSProvider{
@@ -76,39 +76,39 @@ func TestSOPSManager_ShouldEncryptFile(t *testing.T) {
 		},
 		AutoEncrypt: true,
 	}
-	
+
 	tests := []struct {
-		name         string
-		filePath     string
+		name          string
+		filePath      string
 		expectEncrypt bool
-		expectKey    string
+		expectKey     string
 	}{
 		{
-			name:         "Secret file matching rule",
-			filePath:     "config/secret-config.yaml",
+			name:          "Secret file matching rule",
+			filePath:      "config/secret-config.yaml",
 			expectEncrypt: true,
-			expectKey:    "arn:aws:kms:us-east-1:123456789012:key/12345678-1234-1234-1234-123456789012",
+			expectKey:     "arn:aws:kms:us-east-1:123456789012:key/12345678-1234-1234-1234-123456789012",
 		},
 		{
-			name:         "Regular config file",
-			filePath:     "config/app-config.yaml",
+			name:          "Regular config file",
+			filePath:      "config/app-config.yaml",
 			expectEncrypt: false,
-			expectKey:    "",
+			expectKey:     "",
 		},
 		{
-			name:         "File with password in name (auto-encrypt)",
-			filePath:     "config/password-config.yaml",
+			name:          "File with password in name (auto-encrypt)",
+			filePath:      "config/password-config.yaml",
 			expectEncrypt: true,
-			expectKey:    "arn:aws:kms:us-east-1:123456789012:key/12345678-1234-1234-1234-123456789012",
+			expectKey:     "arn:aws:kms:us-east-1:123456789012:key/12345678-1234-1234-1234-123456789012",
 		},
 		{
-			name:         "SOPS file extension",
-			filePath:     "config/app.sops.yaml",
+			name:          "SOPS file extension",
+			filePath:      "config/app.sops.yaml",
 			expectEncrypt: true,
-			expectKey:    "arn:aws:kms:us-east-1:123456789012:key/12345678-1234-1234-1234-123456789012",
+			expectKey:     "arn:aws:kms:us-east-1:123456789012:key/12345678-1234-1234-1234-123456789012",
 		},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			shouldEncrypt, key := manager.ShouldEncryptFile(tt.filePath, config)
@@ -121,7 +121,7 @@ func TestSOPSManager_ShouldEncryptFile(t *testing.T) {
 func TestSOPSManager_ValidateSOPSConfig(t *testing.T) {
 	manager := NewSOPSManager()
 	ctx := context.Background()
-	
+
 	tests := []struct {
 		name      string
 		config    *SOPSConfig
@@ -199,7 +199,7 @@ func TestSOPSManager_ValidateSOPSConfig(t *testing.T) {
 			expectErr: false,
 		},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := manager.ValidateSOPSConfig(ctx, tt.config)
@@ -215,7 +215,7 @@ func TestSOPSManager_ValidateSOPSConfig(t *testing.T) {
 func TestSOPSManager_PreCommitSOPSCheck(t *testing.T) {
 	manager := NewSOPSManager()
 	ctx := context.Background()
-	
+
 	// Create a temporary directory for testing
 	tmpDir, err := os.MkdirTemp("", "sops-test-")
 	require.NoError(t, err)
@@ -224,7 +224,7 @@ func TestSOPSManager_PreCommitSOPSCheck(t *testing.T) {
 			t.Logf("Failed to remove temp dir: %v", err)
 		}
 	}()
-	
+
 	// Test file with sensitive content
 	sensitiveContent := `
 password: secret123
@@ -233,7 +233,7 @@ database:
   host: localhost
   user: admin
 `
-	
+
 	// Test file without sensitive content
 	normalContent := `
 app:
@@ -241,17 +241,17 @@ app:
   port: 8080
   debug: false
 `
-	
+
 	// Create test files
 	sensitiveFile := "sensitive-config.yaml"
 	normalFile := "app-config.yaml"
-	
+
 	err = os.WriteFile(tmpDir+"/"+sensitiveFile, []byte(sensitiveContent), 0644)
 	require.NoError(t, err)
-	
+
 	err = os.WriteFile(tmpDir+"/"+normalFile, []byte(normalContent), 0644)
 	require.NoError(t, err)
-	
+
 	tests := []struct {
 		name      string
 		files     []string
@@ -276,7 +276,7 @@ app:
 			errMsg:    "contains sensitive data but is not SOPS encrypted",
 		},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := manager.PreCommitSOPSCheck(ctx, tt.files, tmpDir)
@@ -294,7 +294,7 @@ app:
 
 func TestSOPSManager_shouldBeEncrypted(t *testing.T) {
 	manager := NewSOPSManager()
-	
+
 	tests := []struct {
 		name     string
 		filePath string
@@ -332,7 +332,7 @@ func TestSOPSManager_shouldBeEncrypted(t *testing.T) {
 			expected: false,
 		},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := manager.shouldBeEncrypted(tt.filePath, []byte(tt.content))
@@ -343,7 +343,7 @@ func TestSOPSManager_shouldBeEncrypted(t *testing.T) {
 
 func TestSOPSManager_GetSOPSMetadata(t *testing.T) {
 	manager := NewSOPSManager()
-	
+
 	// Sample SOPS encrypted content
 	sopsContent := `test: value
 sops:
@@ -360,7 +360,7 @@ sops:
     pgp: []
     encrypted_regex: ^(password|api_key|secret)$
     version: 3.7.3`
-	
+
 	tests := []struct {
 		name      string
 		content   string
@@ -394,7 +394,7 @@ sops:
 			expectErr: true,
 		},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			metadata, err := manager.GetSOPSMetadata([]byte(tt.content))
@@ -414,9 +414,9 @@ sops:
 
 func TestSOPSManager_createTempFile(t *testing.T) {
 	manager := NewSOPSManager()
-	
+
 	content := []byte("test: configuration\nvalue: 123")
-	
+
 	tests := []struct {
 		name     string
 		filePath string
@@ -443,18 +443,18 @@ func TestSOPSManager_createTempFile(t *testing.T) {
 			expected: ".yaml",
 		},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tmpFile, err := manager.createTempFile(content, tt.filePath)
 			assert.NoError(t, err)
 			assert.True(t, strings.HasSuffix(tmpFile, tt.expected))
-			
+
 			// Verify content was written correctly
 			fileContent, err := os.ReadFile(tmpFile)
 			assert.NoError(t, err)
 			assert.Equal(t, content, fileContent)
-			
+
 			// Clean up
 			if err := os.Remove(tmpFile); err != nil {
 				t.Logf("Failed to remove temp file: %v", err)
@@ -465,7 +465,7 @@ func TestSOPSManager_createTempFile(t *testing.T) {
 
 func TestSOPSManager_selectKMSKey(t *testing.T) {
 	manager := NewSOPSManager()
-	
+
 	config := &SOPSConfig{
 		KMSProviders: map[string]KMSProvider{
 			"aws-prod": {
@@ -488,7 +488,7 @@ func TestSOPSManager_selectKMSKey(t *testing.T) {
 			},
 		},
 	}
-	
+
 	tests := []struct {
 		name        string
 		filePath    string
@@ -514,7 +514,7 @@ func TestSOPSManager_selectKMSKey(t *testing.T) {
 			expectErr:   false,
 		},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			key, err := manager.selectKMSKey(tt.filePath, config)
@@ -543,12 +543,12 @@ func TestSOPSManager_selectKMSKey(t *testing.T) {
 // Test empty config (no providers)
 func TestSOPSManager_selectKMSKey_NoProviders(t *testing.T) {
 	manager := NewSOPSManager()
-	
+
 	config := &SOPSConfig{
 		KMSProviders:    map[string]KMSProvider{},
 		EncryptionRules: []EncryptionRule{},
 	}
-	
+
 	_, err := manager.selectKMSKey("test.yaml", config)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "no KMS key found")

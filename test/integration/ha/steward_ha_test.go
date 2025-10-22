@@ -21,8 +21,8 @@ type StewardStatus struct {
 	StewardID         string    `json:"steward_id"`
 	Name              string    `json:"name"`
 	Region            string    `json:"region"`
-	ConnectedTo       string    `json:"connected_to"`       // Current controller connection
-	ConnectionState   string    `json:"connection_state"`   // connected, disconnected, reconnecting
+	ConnectedTo       string    `json:"connected_to"`     // Current controller connection
+	ConnectionState   string    `json:"connection_state"` // connected, disconnected, reconnecting
 	LastHeartbeat     time.Time `json:"last_heartbeat"`
 	ConfigurationHash string    `json:"configuration_hash"` // Hash of current configuration
 	ActiveSessions    int       `json:"active_sessions"`    // Number of active gRPC streams
@@ -30,13 +30,13 @@ type StewardStatus struct {
 
 // StewardConfiguration represents a configuration push to steward
 type StewardConfiguration struct {
-	ConfigID    string                 `json:"config_id"`
-	Version     string                 `json:"version"`
-	TenantID    string                 `json:"tenant_id"`
-	Policies    map[string]interface{} `json:"policies"`
-	Modules     []string               `json:"modules"`
-	AppliedAt   time.Time              `json:"applied_at"`
-	Source      string                 `json:"source"` // Which controller applied it
+	ConfigID  string                 `json:"config_id"`
+	Version   string                 `json:"version"`
+	TenantID  string                 `json:"tenant_id"`
+	Policies  map[string]interface{} `json:"policies"`
+	Modules   []string               `json:"modules"`
+	AppliedAt time.Time              `json:"applied_at"`
+	Source    string                 `json:"source"` // Which controller applied it
 }
 
 // TestStewardControllerHA tests steward High Availability with real controller cluster
@@ -196,7 +196,7 @@ func testStewardControllerFailover(t *testing.T, ctx context.Context, helper *Do
 
 			// Steward should be connected to a different controller now
 			if status.ConnectionState == "connected" &&
-			   !strings.Contains(status.ConnectedTo, leaderService) {
+				!strings.Contains(status.ConnectedTo, leaderService) {
 				reconnectedCount++
 				t.Logf("Steward %s reconnected to %s", stewardName, status.ConnectedTo)
 			}
@@ -467,7 +467,7 @@ func getStewardStatus(stewardName string) (*StewardStatus, error) {
 		StewardID:         fmt.Sprintf("%s-1", stewardName),
 		Name:              stewardName,
 		Region:            strings.Split(stewardName, "-")[1], // Extract region from name
-		ConnectedTo:       "controller-east:8081", // Mock - would be actual connection
+		ConnectedTo:       "controller-east:8081",             // Mock - would be actual connection
 		ConnectionState:   "connected",
 		LastHeartbeat:     time.Now(),
 		ConfigurationHash: "abc123def456", // Mock hash

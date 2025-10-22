@@ -19,7 +19,7 @@ import (
 	tenantmemory "github.com/cfgis/cfgms/features/tenant/memory"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-	
+
 	// Import storage providers for testing
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 )
@@ -35,12 +35,12 @@ func setupTestServer(t *testing.T) *Server {
 	// Initialize RBAC system with git storage
 	config := map[string]interface{}{
 		"repository_path": t.TempDir(),
-		"branch":         "main",
-		"auto_init":      true,
+		"branch":          "main",
+		"auto_init":       true,
 	}
 	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
 	require.NoError(t, err)
-	
+
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
@@ -79,7 +79,6 @@ func setupTestServer(t *testing.T) *Server {
 
 	return server
 }
-
 
 // NewEphemeralTestKey creates a short-lived API key for test scenarios
 func NewEphemeralTestKey(t *testing.T, server *Server, permissions []string, tenantID string, ttl time.Duration) string {
@@ -641,7 +640,6 @@ func TestResponseFormat(t *testing.T) {
 	assert.False(t, response.Timestamp.IsZero())
 }
 
-
 func TestAPIKeyExpiration(t *testing.T) {
 	server := setupTestServer(t)
 
@@ -680,23 +678,23 @@ func TestEphemeralAPIKeys(t *testing.T) {
 	server := setupTestServer(t)
 
 	t.Run("create ephemeral key with TTL", func(t *testing.T) {
-		permissions := []string{"steward:list"}  // Correct permission for /api/v1/stewards endpoint
-		
+		permissions := []string{"steward:list"} // Correct permission for /api/v1/stewards endpoint
+
 		// Create ephemeral key with 1 minute TTL
 		ephemeralKey := NewEphemeralTestKey(t, server, permissions, "test-tenant", 1*time.Minute)
-		
+
 		// Verify key works immediately
 		req := httptest.NewRequest("GET", "/api/v1/stewards", nil)
 		req.Header.Set("X-API-Key", ephemeralKey)
 		rec := httptest.NewRecorder()
 		server.router.ServeHTTP(rec, req)
 		assert.Equal(t, http.StatusOK, rec.Code, "Ephemeral key should work immediately")
-		
+
 		// Verify key has expiration set
 		server.mu.RLock()
 		keyInfo, exists := server.apiKeys[ephemeralKey]
 		server.mu.RUnlock()
-		
+
 		require.True(t, exists, "Ephemeral key should exist")
 		require.NotNil(t, keyInfo.ExpiresAt, "Ephemeral key should have expiration")
 		assert.True(t, keyInfo.ExpiresAt.After(time.Now()), "Key should not be expired yet")
@@ -704,11 +702,11 @@ func TestEphemeralAPIKeys(t *testing.T) {
 	})
 
 	t.Run("test key convenience function", func(t *testing.T) {
-		permissions := []string{"api-key:list"}  // Correct permission for /api/v1/api-keys endpoint
-		
+		permissions := []string{"api-key:list"} // Correct permission for /api/v1/api-keys endpoint
+
 		// Use convenience function for 5-minute test key
 		testKey := NewTestKey(t, server, permissions)
-		
+
 		// Verify it works
 		req := httptest.NewRequest("GET", "/api/v1/api-keys", nil)
 		req.Header.Set("X-API-Key", testKey)
@@ -719,18 +717,18 @@ func TestEphemeralAPIKeys(t *testing.T) {
 
 	t.Run("JIT key convenience function", func(t *testing.T) {
 		permissions := []string{"stewards:execute-scripts"}
-		
+
 		// Use convenience function for 1-hour JIT key
 		jitKey := NewJITTestKey(t, server, permissions)
-		
+
 		// Verify key has 1-hour TTL
 		server.mu.RLock()
 		keyInfo, exists := server.apiKeys[jitKey]
 		server.mu.RUnlock()
-		
+
 		require.True(t, exists, "JIT key should exist")
 		require.NotNil(t, keyInfo.ExpiresAt, "JIT key should have expiration")
-		
+
 		// Should expire in approximately 1 hour (within 5 seconds tolerance)
 		expectedExpiry := time.Now().Add(1 * time.Hour)
 		assert.WithinDuration(t, expectedExpiry, *keyInfo.ExpiresAt, 5*time.Second)
@@ -739,19 +737,19 @@ func TestEphemeralAPIKeys(t *testing.T) {
 	t.Run("automatic cleanup removes expired keys", func(t *testing.T) {
 		// Create a key that expires in 1 second
 		ephemeralKey := NewEphemeralTestKey(t, server, []string{"test"}, "test", 1*time.Second)
-		
+
 		// Verify key exists
 		server.mu.RLock()
 		_, exists := server.apiKeys[ephemeralKey]
 		server.mu.RUnlock()
 		require.True(t, exists, "Key should exist initially")
-		
+
 		// Wait for key to expire
 		time.Sleep(2 * time.Second)
-		
+
 		// Manually trigger cleanup (normally happens every 10 minutes)
 		server.cleanupExpiredAPIKeys()
-		
+
 		// Verify key is cleaned up
 		server.mu.RLock()
 		_, exists = server.apiKeys[ephemeralKey]
@@ -761,17 +759,17 @@ func TestEphemeralAPIKeys(t *testing.T) {
 
 	t.Run("helper functions generate different keys", func(t *testing.T) {
 		permissions := []string{"test"}
-		
+
 		// Generate multiple keys
 		key1 := NewTestKey(t, server, permissions)
-		key2 := NewTestKey(t, server, permissions) 
+		key2 := NewTestKey(t, server, permissions)
 		key3 := NewJITTestKey(t, server, permissions)
-		
+
 		// All keys should be different
 		assert.NotEqual(t, key1, key2, "Each test key should be unique")
 		assert.NotEqual(t, key1, key3, "Test and JIT keys should be different")
 		assert.NotEqual(t, key2, key3, "Each key should be unique")
-		
+
 		// All should work
 		for i, key := range []string{key1, key2, key3} {
 			req := httptest.NewRequest("GET", "/api/v1/health", nil)

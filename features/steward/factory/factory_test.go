@@ -27,7 +27,6 @@ func (m *mockModule) Set(ctx context.Context, resourceID string, config modules.
 	return args.Error(0)
 }
 
-
 func TestNew(t *testing.T) {
 	registry := discovery.ModuleRegistry{
 		"test-module": discovery.ModuleInfo{
@@ -36,7 +35,7 @@ func TestNew(t *testing.T) {
 			Path:    "/test/path",
 		},
 	}
-	
+
 	errorConfig := config.ErrorHandlingConfig{
 		ModuleLoadFailure: config.ActionFail,
 	}
@@ -98,28 +97,28 @@ func TestCreateModuleInstance(t *testing.T) {
 		expectErr    bool
 	}{
 		{
-			name:       "module not in registry - fail action",
-			moduleName: "non-existent",
-			registry:   discovery.ModuleRegistry{},
-			errorAction: config.ActionFail,
+			name:         "module not in registry - fail action",
+			moduleName:   "non-existent",
+			registry:     discovery.ModuleRegistry{},
+			errorAction:  config.ActionFail,
 			expectModule: false,
-			expectErr:   true,
+			expectErr:    true,
 		},
 		{
-			name:       "module not in registry - continue action",
-			moduleName: "non-existent",
-			registry:   discovery.ModuleRegistry{},
-			errorAction: config.ActionContinue,
+			name:         "module not in registry - continue action",
+			moduleName:   "non-existent",
+			registry:     discovery.ModuleRegistry{},
+			errorAction:  config.ActionContinue,
 			expectModule: false,
-			expectErr:   false,
+			expectErr:    false,
 		},
 		{
-			name:       "module not in registry - warn action",
-			moduleName: "non-existent",
-			registry:   discovery.ModuleRegistry{},
-			errorAction: config.ActionWarn,
+			name:         "module not in registry - warn action",
+			moduleName:   "non-existent",
+			registry:     discovery.ModuleRegistry{},
+			errorAction:  config.ActionWarn,
 			expectModule: false,
-			expectErr:   false,
+			expectErr:    false,
 		},
 	}
 
@@ -128,7 +127,7 @@ func TestCreateModuleInstance(t *testing.T) {
 			errorConfig := config.ErrorHandlingConfig{
 				ModuleLoadFailure: tt.errorAction,
 			}
-			
+
 			factory := New(tt.registry, errorConfig)
 
 			module, err := factory.CreateModuleInstance(tt.moduleName)
@@ -203,11 +202,11 @@ func TestGetModuleInfo(t *testing.T) {
 		Version: "1.0.0",
 		Path:    "/test/path",
 	}
-	
+
 	registry := discovery.ModuleRegistry{
 		"test-module": moduleInfo,
 	}
-	
+
 	errorConfig := config.ErrorHandlingConfig{}
 	factory := New(registry, errorConfig)
 

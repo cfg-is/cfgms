@@ -5,10 +5,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/api/proto/common"
-	"github.com/cfgis/cfgms/features/rbac/memory"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/features/rbac/memory"
 )
 
 func TestHierarchyEngine_ComputeEffectivePermissions(t *testing.T) {
@@ -20,12 +21,12 @@ func TestHierarchyEngine_ComputeEffectivePermissions(t *testing.T) {
 	setupHierarchyTestData(t, store)
 
 	tests := []struct {
-		name                     string
-		roleID                   string
-		expectedDirectCount      int
-		expectedInheritedRoles   []string
-		expectedConflicts        int
-		expectError              bool
+		name                   string
+		roleID                 string
+		expectedDirectCount    int
+		expectedInheritedRoles []string
+		expectedConflicts      int
+		expectError            bool
 	}{
 		{
 			name:                   "Role with no parent",
@@ -54,9 +55,9 @@ func TestHierarchyEngine_ComputeEffectivePermissions(t *testing.T) {
 		{
 			name:                   "Role with restrictive inheritance",
 			roleID:                 "child.restrictive",
-			expectedDirectCount:    1, // Only shared.permission intersection
+			expectedDirectCount:    1,                       // Only shared.permission intersection
 			expectedInheritedRoles: []string{"parent.role"}, // Inherited permissions are also restricted
-			expectedConflicts:      0, // No conflicts in restrictive mode
+			expectedConflicts:      0,                       // No conflicts in restrictive mode
 			expectError:            false,
 		},
 		{
@@ -197,8 +198,8 @@ func TestHierarchyEngine_ConflictResolution(t *testing.T) {
 
 	// Test merge permissions
 	directPerm := &common.Permission{
-		Id:       "test.permission",
-		Actions:  []string{"read", "write"},
+		Id:      "test.permission",
+		Actions: []string{"read", "write"},
 	}
 	inheritedPerms := []*common.Permission{
 		{
@@ -209,7 +210,7 @@ func TestHierarchyEngine_ConflictResolution(t *testing.T) {
 
 	merged := engine.mergePermissions(directPerm, inheritedPerms)
 	actions := merged.Actions
-	
+
 	assert.Contains(t, actions, "read")
 	assert.Contains(t, actions, "write")
 	assert.Contains(t, actions, "delete")
@@ -218,9 +219,9 @@ func TestHierarchyEngine_ConflictResolution(t *testing.T) {
 	// Test restrict permissions
 	restricted := engine.restrictPermissions(directPerm, inheritedPerms)
 	restrictedActions := restricted.Actions
-	
-	assert.Contains(t, restrictedActions, "write") // Common action
-	assert.NotContains(t, restrictedActions, "read") // Only in direct
+
+	assert.Contains(t, restrictedActions, "write")     // Common action
+	assert.NotContains(t, restrictedActions, "read")   // Only in direct
 	assert.NotContains(t, restrictedActions, "delete") // Only in inherited
 	assert.Len(t, restrictedActions, 1)
 }
@@ -354,7 +355,7 @@ func setupInheritanceTypeTestData(t *testing.T, store *memory.Store) {
 		},
 		{
 			Id:              "child.override",
-			Name:            "Child Override", 
+			Name:            "Child Override",
 			PermissionIds:   []string{"child.permission", "shared.permission"}, // Shared permission conflicts
 			ParentRoleId:    "parent.role",
 			InheritanceType: common.RoleInheritanceType_ROLE_INHERITANCE_OVERRIDE,

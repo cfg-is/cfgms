@@ -471,8 +471,8 @@ func (am *AlertingManager) sendWebhook(ctx context.Context, url string, alert *C
 func DefaultAlertConfig() AlertConfig {
 	return AlertConfig{
 		Enabled:           true,
-		WarningThreshold:  7,  // 7 days warning
-		CriticalThreshold: 1,  // 1 day critical
+		WarningThreshold:  7, // 7 days warning
+		CriticalThreshold: 1, // 1 day critical
 		AlertInterval:     24 * time.Hour,
 		MaxAlertsPerDay:   3,
 		SuppressInfo:      true,

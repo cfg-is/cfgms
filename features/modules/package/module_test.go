@@ -4,10 +4,11 @@ import (
 	"context"
 	"testing"
 
-	"github.com/cfgis/cfgms/features/modules"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
+
+	"github.com/cfgis/cfgms/features/modules"
 )
 
 // Helper function to create Config from YAML string

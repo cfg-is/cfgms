@@ -4,10 +4,11 @@ import (
 	"context"
 	"testing"
 
-	commonpb "github.com/cfgis/cfgms/api/proto/common"
-	"github.com/cfgis/cfgms/features/modules/patch"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	commonpb "github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/features/modules/patch"
 )
 
 func TestDefaultWindows11Requirements(t *testing.T) {
@@ -440,8 +441,8 @@ func TestUpgradeManager_CanUpgradeNow_OutsideWindow(t *testing.T) {
 	policy := patch.DefaultUpgradePolicy()
 	policy.Enabled = true
 	policy.UpgradeWindow = &patch.TimeWindow{
-		StartHour:  2,  // 2 AM
-		EndHour:    4,  // 4 AM
+		StartHour:  2,           // 2 AM
+		EndHour:    4,           // 4 AM
 		DaysOfWeek: []int{0, 6}, // Sunday and Saturday only
 	}
 

@@ -299,17 +299,17 @@ func IsNotFoundError(err error) bool {
 	if err == nil {
 		return false
 	}
-	
+
 	// Check if it's a direct GraphError
 	if graphErr, ok := err.(*GraphError); ok {
 		return graphErr.Code == "Request_ResourceNotFound" || graphErr.StatusCode == 404
 	}
-	
+
 	// Check if the error string contains not found patterns (for wrapped errors)
 	errStr := err.Error()
-	return strings.Contains(errStr, "Request_ResourceNotFound") || 
-		   strings.Contains(errStr, "does not exist") ||
-		   strings.Contains(errStr, "404")
+	return strings.Contains(errStr, "Request_ResourceNotFound") ||
+		strings.Contains(errStr, "does not exist") ||
+		strings.Contains(errStr, "404")
 }
 
 // IsConflictError checks if the error is a conflict error (resource already exists)
@@ -360,21 +360,21 @@ func DefaultRetryConfig() *RetryConfig {
 
 // Application represents a Microsoft Graph application object
 type Application struct {
-	ID                         string                      `json:"id"`
-	AppID                      string                      `json:"appId"`
-	DisplayName                string                      `json:"displayName"`
-	Description                string                      `json:"description,omitempty"`
-	SignInAudience             string                      `json:"signInAudience"`
-	IdentifierUris             []string                    `json:"identifierUris"`
-	Web                        *ApplicationWeb             `json:"web,omitempty"`
-	Spa                        *ApplicationSpa             `json:"spa,omitempty"`
-	RequiredResourceAccess     []ApplicationResourceAccess `json:"requiredResourceAccess"`
-	AppRoles                   []ApplicationAppRole        `json:"appRoles"`
-	Oauth2PermissionScopes     []ApplicationOAuth2Scope    `json:"oauth2PermissionScopes"`
-	KeyCredentials             []ApplicationKeyCredential  `json:"keyCredentials"`
-	PasswordCredentials        []ApplicationPasswordCredential `json:"passwordCredentials"`
-	OptionalClaims             *ApplicationOptionalClaims  `json:"optionalClaims,omitempty"`
-	Tags                       []string                    `json:"tags"`
+	ID                     string                          `json:"id"`
+	AppID                  string                          `json:"appId"`
+	DisplayName            string                          `json:"displayName"`
+	Description            string                          `json:"description,omitempty"`
+	SignInAudience         string                          `json:"signInAudience"`
+	IdentifierUris         []string                        `json:"identifierUris"`
+	Web                    *ApplicationWeb                 `json:"web,omitempty"`
+	Spa                    *ApplicationSpa                 `json:"spa,omitempty"`
+	RequiredResourceAccess []ApplicationResourceAccess     `json:"requiredResourceAccess"`
+	AppRoles               []ApplicationAppRole            `json:"appRoles"`
+	Oauth2PermissionScopes []ApplicationOAuth2Scope        `json:"oauth2PermissionScopes"`
+	KeyCredentials         []ApplicationKeyCredential      `json:"keyCredentials"`
+	PasswordCredentials    []ApplicationPasswordCredential `json:"passwordCredentials"`
+	OptionalClaims         *ApplicationOptionalClaims      `json:"optionalClaims,omitempty"`
+	Tags                   []string                        `json:"tags"`
 }
 
 // ApplicationWeb represents web settings for an application
@@ -390,8 +390,8 @@ type ApplicationSpa struct {
 
 // ApplicationResourceAccess represents required resource access
 type ApplicationResourceAccess struct {
-	ResourceAppId  string                             `json:"resourceAppId"`
-	ResourceAccess []ApplicationPermissionScope       `json:"resourceAccess"`
+	ResourceAppId  string                       `json:"resourceAppId"`
+	ResourceAccess []ApplicationPermissionScope `json:"resourceAccess"`
 }
 
 // ApplicationPermissionScope represents a permission scope
@@ -473,17 +473,17 @@ type CreateApplicationRequest struct {
 
 // UpdateApplicationRequest represents a request to update an application
 type UpdateApplicationRequest struct {
-	DisplayName            *string                      `json:"displayName,omitempty"`
-	Description            *string                      `json:"description,omitempty"`
-	SignInAudience         *string                      `json:"signInAudience,omitempty"`
-	IdentifierUris         []string                     `json:"identifierUris,omitempty"`
-	Web                    *ApplicationWeb              `json:"web,omitempty"`
-	Spa                    *ApplicationSpa              `json:"spa,omitempty"`
-	RequiredResourceAccess []ApplicationResourceAccess  `json:"requiredResourceAccess,omitempty"`
-	AppRoles               []ApplicationAppRole         `json:"appRoles,omitempty"`
-	Oauth2PermissionScopes []ApplicationOAuth2Scope     `json:"oauth2PermissionScopes,omitempty"`
-	OptionalClaims         *ApplicationOptionalClaims   `json:"optionalClaims,omitempty"`
-	Tags                   []string                     `json:"tags,omitempty"`
+	DisplayName            *string                     `json:"displayName,omitempty"`
+	Description            *string                     `json:"description,omitempty"`
+	SignInAudience         *string                     `json:"signInAudience,omitempty"`
+	IdentifierUris         []string                    `json:"identifierUris,omitempty"`
+	Web                    *ApplicationWeb             `json:"web,omitempty"`
+	Spa                    *ApplicationSpa             `json:"spa,omitempty"`
+	RequiredResourceAccess []ApplicationResourceAccess `json:"requiredResourceAccess,omitempty"`
+	AppRoles               []ApplicationAppRole        `json:"appRoles,omitempty"`
+	Oauth2PermissionScopes []ApplicationOAuth2Scope    `json:"oauth2PermissionScopes,omitempty"`
+	OptionalClaims         *ApplicationOptionalClaims  `json:"optionalClaims,omitempty"`
+	Tags                   []string                    `json:"tags,omitempty"`
 }
 
 // AdministrativeUnit represents a Microsoft Graph administrative unit object
@@ -522,39 +522,39 @@ type UpdateAdministrativeUnitRequest struct {
 
 // Group represents a Microsoft Graph group object
 type Group struct {
-	ID                   string   `json:"id"`
-	DisplayName          string   `json:"displayName"`
-	Description          string   `json:"description,omitempty"`
-	GroupTypes           []string `json:"groupTypes"`
-	SecurityEnabled      bool     `json:"securityEnabled"`
-	MailEnabled          bool     `json:"mailEnabled"`
-	MailNickname         string   `json:"mailNickname"`
-	Mail                 string   `json:"mail,omitempty"`
-	Visibility           string   `json:"visibility,omitempty"`
-	MembershipRule       string   `json:"membershipRule,omitempty"`
-	MembershipRuleProcessingState string `json:"membershipRuleProcessingState,omitempty"`
+	ID                            string   `json:"id"`
+	DisplayName                   string   `json:"displayName"`
+	Description                   string   `json:"description,omitempty"`
+	GroupTypes                    []string `json:"groupTypes"`
+	SecurityEnabled               bool     `json:"securityEnabled"`
+	MailEnabled                   bool     `json:"mailEnabled"`
+	MailNickname                  string   `json:"mailNickname"`
+	Mail                          string   `json:"mail,omitempty"`
+	Visibility                    string   `json:"visibility,omitempty"`
+	MembershipRule                string   `json:"membershipRule,omitempty"`
+	MembershipRuleProcessingState string   `json:"membershipRuleProcessingState,omitempty"`
 }
 
 // CreateGroupRequest represents a request to create a group
 type CreateGroupRequest struct {
-	DisplayName         string   `json:"displayName"`
-	Description         string   `json:"description,omitempty"`
-	GroupTypes          []string `json:"groupTypes,omitempty"`
-	SecurityEnabled     bool     `json:"securityEnabled"`
-	MailEnabled         bool     `json:"mailEnabled"`
-	MailNickname        string   `json:"mailNickname"`
-	Visibility          string   `json:"visibility,omitempty"`
-	MembershipRule      string   `json:"membershipRule,omitempty"`
+	DisplayName     string   `json:"displayName"`
+	Description     string   `json:"description,omitempty"`
+	GroupTypes      []string `json:"groupTypes,omitempty"`
+	SecurityEnabled bool     `json:"securityEnabled"`
+	MailEnabled     bool     `json:"mailEnabled"`
+	MailNickname    string   `json:"mailNickname"`
+	Visibility      string   `json:"visibility,omitempty"`
+	MembershipRule  string   `json:"membershipRule,omitempty"`
 }
 
 // UpdateGroupRequest represents a request to update a group
 type UpdateGroupRequest struct {
-	DisplayName    *string  `json:"displayName,omitempty"`
-	Description    *string  `json:"description,omitempty"`
-	GroupTypes     []string `json:"groupTypes,omitempty"`
-	SecurityEnabled *bool   `json:"securityEnabled,omitempty"`
-	MailEnabled    *bool    `json:"mailEnabled,omitempty"`
-	MailNickname   *string  `json:"mailNickname,omitempty"`
-	Visibility     *string  `json:"visibility,omitempty"`
-	MembershipRule *string  `json:"membershipRule,omitempty"`
+	DisplayName     *string  `json:"displayName,omitempty"`
+	Description     *string  `json:"description,omitempty"`
+	GroupTypes      []string `json:"groupTypes,omitempty"`
+	SecurityEnabled *bool    `json:"securityEnabled,omitempty"`
+	MailEnabled     *bool    `json:"mailEnabled,omitempty"`
+	MailNickname    *string  `json:"mailNickname,omitempty"`
+	Visibility      *string  `json:"visibility,omitempty"`
+	MembershipRule  *string  `json:"membershipRule,omitempty"`
 }

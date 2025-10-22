@@ -24,8 +24,8 @@ type ConfigurationPushEvent struct {
 	Status      string                 `json:"status"` // pending, in_progress, completed, failed
 	StartedAt   time.Time              `json:"started_at"`
 	CompletedAt *time.Time             `json:"completed_at,omitempty"`
-	Source      string                 `json:"source"`      // Which controller initiated
-	Failover    bool                   `json:"failover"`    // Whether failover occurred during push
+	Source      string                 `json:"source"`   // Which controller initiated
+	Failover    bool                   `json:"failover"` // Whether failover occurred during push
 	Data        map[string]interface{} `json:"data"`
 }
 
@@ -353,7 +353,7 @@ func createLargeTestConfiguration(configID string) StewardConfiguration {
 
 	for i := 0; i < 100; i++ {
 		policies[fmt.Sprintf("policy_%d", i)] = map[string]interface{}{
-			"enabled": true,
+			"enabled":  true,
 			"priority": i,
 			"rules": []string{
 				fmt.Sprintf("rule_%d_1", i),

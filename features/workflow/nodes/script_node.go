@@ -96,12 +96,12 @@ type NotificationConfig struct {
 // ScriptNode implements the workflow.Node interface for script execution
 type ScriptNode struct {
 	workflow.BaseNode
-	config          *ScriptStepConfig
-	repository      script.ScriptRepository
-	monitor         *script.ExecutionMonitor
-	keyManager      *script.EphemeralKeyManager
-	dnaProvider     script.DNAProvider
-	configProvider  script.ConfigProvider
+	config         *ScriptStepConfig
+	repository     script.ScriptRepository
+	monitor        *script.ExecutionMonitor
+	keyManager     *script.EphemeralKeyManager
+	dnaProvider    script.DNAProvider
+	configProvider script.ConfigProvider
 }
 
 // NewScriptNode creates a new script execution node
@@ -311,10 +311,10 @@ func (n *ScriptNode) SetConfigProvider(provider script.ConfigProvider) {
 
 // ScriptStepExecutor executes script workflow steps
 type ScriptStepExecutor struct {
-	repository  script.ScriptRepository
-	monitor     *script.ExecutionMonitor
-	keyManager  *script.EphemeralKeyManager
-	dnaProvider script.DNAProvider
+	repository     script.ScriptRepository
+	monitor        *script.ExecutionMonitor
+	keyManager     *script.EphemeralKeyManager
+	dnaProvider    script.DNAProvider
 	configProvider script.ConfigProvider
 }
 

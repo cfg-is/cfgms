@@ -132,7 +132,7 @@ type ControllerHealthChecker struct {
 func NewControllerHealthChecker(logger logging.Logger) *ControllerHealthChecker {
 	return &ControllerHealthChecker{
 		BasicHealthChecker: NewBasicHealthChecker("controller", logger),
-		services:          make(map[string]interface{}),
+		services:           make(map[string]interface{}),
 	}
 }
 
@@ -246,7 +246,7 @@ type DatabaseHealthChecker struct {
 func NewDatabaseHealthChecker(logger logging.Logger, db interface{}) *DatabaseHealthChecker {
 	return &DatabaseHealthChecker{
 		BasicHealthChecker: NewBasicHealthChecker("database", logger),
-		db:                db,
+		db:                 db,
 	}
 }
 

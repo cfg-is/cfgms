@@ -24,9 +24,9 @@ type EventCorrelatorImpl struct {
 	mutex            sync.RWMutex
 
 	// Configuration
-	defaultWindow    time.Duration
+	defaultWindow      time.Duration
 	maxEventsPerWindow int
-	cleanupInterval  time.Duration
+	cleanupInterval    time.Duration
 
 	// Background processing
 	stopChan    chan struct{}
@@ -36,7 +36,7 @@ type EventCorrelatorImpl struct {
 	totalCorrelations    int64
 	totalEventsProcessed int64
 	activeWindows        int64
-	statsLock           sync.RWMutex
+	statsLock            sync.RWMutex
 }
 
 // EventWindow represents a sliding window of events for correlation
@@ -68,8 +68,8 @@ func NewEventCorrelator(defaultWindow time.Duration) *EventCorrelatorImpl {
 		defaultWindow:      defaultWindow,
 		maxEventsPerWindow: 1000, // Prevent memory exhaustion
 		cleanupInterval:    1 * time.Minute,
-		stopChan:          make(chan struct{}),
-		cleanupDone:       make(chan struct{}),
+		stopChan:           make(chan struct{}),
+		cleanupDone:        make(chan struct{}),
 	}
 }
 
@@ -482,11 +482,11 @@ func (ec *EventCorrelatorImpl) createCorrelatedEvent(window *EventWindow, rule *
 
 	// Create metadata
 	metadata := map[string]interface{}{
-		"rule_name":       rule.Name,
-		"window_start":    window.StartTime,
-		"window_end":      window.EndTime,
-		"group_key":       window.GroupKey,
-		"event_count":     len(sortedEvents),
+		"rule_name":        rule.Name,
+		"window_start":     window.StartTime,
+		"window_end":       window.EndTime,
+		"group_key":        window.GroupKey,
+		"event_count":      len(sortedEvents),
 		"correlation_time": time.Now(),
 	}
 

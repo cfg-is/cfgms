@@ -45,7 +45,7 @@ func (a *credentialStoreAdapter) GetTokenSet(provider string) (*saas.TokenSet, e
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Convert auth.AccessToken to saas.TokenSet
 	tokenSet := &saas.TokenSet{
 		AccessToken:  token.Token,
@@ -86,7 +86,7 @@ func NewGDAPProvider(credStore auth.CredentialStore, httpClient *http.Client, pa
 	// Adapt auth.CredentialStore to saas.CredentialStore
 	adaptedCredStore := &credentialStoreAdapter{credStore}
 	multiTenant := saas.NewMicrosoftMultiTenantProvider(adaptedCredStore, httpClient)
-	
+
 	return &GDAPProvider{
 		MicrosoftMultiTenantProvider: multiTenant,
 		partnerTenantID:              partnerTenantID,
@@ -97,17 +97,17 @@ func NewGDAPProvider(credStore auth.CredentialStore, httpClient *http.Client, pa
 // GDAPConfig extends the multi-tenant config with GDAP-specific settings
 type GDAPConfig struct {
 	// Base multi-tenant configuration
-	ClientID     string   `json:"client_id"`
-	ClientSecret string   `json:"client_secret"`
-	RedirectURI  string   `json:"redirect_uri"`
-	
+	ClientID     string `json:"client_id"`
+	ClientSecret string `json:"client_secret"`
+	RedirectURI  string `json:"redirect_uri"`
+
 	// Partner-specific configuration
 	PartnerTenantID string `json:"partner_tenant_id"`
-	
+
 	// GDAP-specific scopes (Partner Center + Microsoft Graph)
 	PartnerCenterScopes []string `json:"partner_center_scopes"`
 	GraphScopes         []string `json:"graph_scopes"`
-	
+
 	// GDAP behavior configuration
 	ValidateGDAPRelationships bool `json:"validate_gdap_relationships"`
 	EnforceRoleBasedAccess    bool `json:"enforce_role_based_access"`
@@ -130,10 +130,10 @@ type GDAPRelationship struct {
 type GDAPRelationshipStatus string
 
 const (
-	GDAPStatusPending     GDAPRelationshipStatus = "pending"
-	GDAPStatusActive      GDAPRelationshipStatus = "active"
-	GDAPStatusExpired     GDAPRelationshipStatus = "expired"
-	GDAPStatusTerminated  GDAPRelationshipStatus = "terminated"
+	GDAPStatusPending    GDAPRelationshipStatus = "pending"
+	GDAPStatusActive     GDAPRelationshipStatus = "active"
+	GDAPStatusExpired    GDAPRelationshipStatus = "expired"
+	GDAPStatusTerminated GDAPRelationshipStatus = "terminated"
 )
 
 // GDAPRole represents a role assignment within a GDAP relationship
@@ -494,9 +494,9 @@ func (p *GDAPProvider) GetGDAPMetrics(ctx context.Context) (*GDAPMetrics, error)
 
 // GDAPMetrics provides insights into GDAP relationship health
 type GDAPMetrics struct {
-	TotalRelationships int                              `json:"total_relationships"`
-	StatusCounts       map[GDAPRelationshipStatus]int   `json:"status_counts"`
-	RoleCounts         map[string]int                   `json:"role_counts"`
-	ExpiringWithin30   int                              `json:"expiring_within_30_days"`
-	CollectedAt        time.Time                        `json:"collected_at"`
+	TotalRelationships int                            `json:"total_relationships"`
+	StatusCounts       map[GDAPRelationshipStatus]int `json:"status_counts"`
+	RoleCounts         map[string]int                 `json:"role_counts"`
+	ExpiringWithin30   int                            `json:"expiring_within_30_days"`
+	CollectedAt        time.Time                      `json:"collected_at"`
 }

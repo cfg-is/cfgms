@@ -9,9 +9,9 @@ import (
 // MLEnhancedEngine wraps the standard workflow engine with ML logging capabilities
 type MLEnhancedEngine struct {
 	*Engine
-	mlLogger        *MLLogger
-	perfCollector   *WorkflowPerformanceCollector
-	mlEnabled       bool
+	mlLogger      *MLLogger
+	perfCollector *WorkflowPerformanceCollector
+	mlEnabled     bool
 }
 
 // NewMLEnhancedEngine creates a new workflow engine with ML logging capabilities
@@ -70,24 +70,24 @@ func (e *MLEnhancedEngine) Close() error {
 // MLLoggingConfig provides configuration for ML logging features
 type MLLoggingConfig struct {
 	Enabled                bool   `json:"enabled"`
-	BufferSize            int    `json:"buffer_size"`
-	FlushIntervalSeconds  int    `json:"flush_interval_seconds"`
-	IncludeVariableStates bool   `json:"include_variable_states"`
-	IncludeAPIData        bool   `json:"include_api_data"`
-	IncludePerformanceData bool  `json:"include_performance_data"`
-	LoggingProviderName   string `json:"logging_provider_name"`
+	BufferSize             int    `json:"buffer_size"`
+	FlushIntervalSeconds   int    `json:"flush_interval_seconds"`
+	IncludeVariableStates  bool   `json:"include_variable_states"`
+	IncludeAPIData         bool   `json:"include_api_data"`
+	IncludePerformanceData bool   `json:"include_performance_data"`
+	LoggingProviderName    string `json:"logging_provider_name"`
 }
 
 // DefaultMLLoggingConfig returns default ML logging configuration
 func DefaultMLLoggingConfig() MLLoggingConfig {
 	return MLLoggingConfig{
-		Enabled:               true,
-		BufferSize:           1000,
-		FlushIntervalSeconds: 5,
-		IncludeVariableStates: true,
-		IncludeAPIData:       true,
+		Enabled:                true,
+		BufferSize:             1000,
+		FlushIntervalSeconds:   5,
+		IncludeVariableStates:  true,
+		IncludeAPIData:         true,
 		IncludePerformanceData: true,
-		LoggingProviderName:  "file", // Default to file provider
+		LoggingProviderName:    "file", // Default to file provider
 	}
 }
 

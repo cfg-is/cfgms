@@ -32,14 +32,14 @@ type platformMonitor struct {
 	cancel    context.CancelFunc
 
 	// Background workers
-	healthCheckTicker   *time.Ticker
-	metricsTicket      *time.Ticker
-	anomalyTicker      *time.Ticker
+	healthCheckTicker *time.Ticker
+	metricsTicket     *time.Ticker
+	anomalyTicker     *time.Ticker
 
 	// Data storage
 	lastHealthResults map[string]*ComponentHealth
-	lastMetrics      map[string]*ComponentMetrics
-	activeAnomalies  []*Anomaly
+	lastMetrics       map[string]*ComponentMetrics
+	activeAnomalies   []*Anomaly
 }
 
 // NewPlatformMonitor creates a new platform monitoring instance.
@@ -56,8 +56,8 @@ func NewPlatformMonitor(logger logging.Logger, tracer *telemetry.Tracer, config 
 		metricsCollectors: make(map[string]MetricsCollector),
 		anomalyDetectors:  make(map[string]AnomalyDetector),
 		lastHealthResults: make(map[string]*ComponentHealth),
-		lastMetrics:      make(map[string]*ComponentMetrics),
-		activeAnomalies:  make([]*Anomaly, 0),
+		lastMetrics:       make(map[string]*ComponentMetrics),
+		activeAnomalies:   make([]*Anomaly, 0),
 	}
 }
 
@@ -536,7 +536,7 @@ func (pm *platformMonitor) cleanupResolvedAnomalies() {
 
 	for _, anomaly := range pm.activeAnomalies {
 		if anomaly.Status == AnomalyStatusActive ||
-		   (anomaly.ResolvedAt != nil && anomaly.ResolvedAt.After(cutoff)) {
+			(anomaly.ResolvedAt != nil && anomaly.ResolvedAt.After(cutoff)) {
 			activeAnomalies = append(activeAnomalies, anomaly)
 		}
 	}

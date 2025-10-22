@@ -17,13 +17,13 @@ import (
 type DirectoryProviderFactory interface {
 	// CreateProvider creates a new provider instance with the given configuration
 	CreateProvider(ctx context.Context, config ProviderConfig) (DirectoryProvider, error)
-	
+
 	// GetSupportedProviders returns the names of all supported providers
 	GetSupportedProviders() []string
-	
+
 	// ValidateConfig validates a provider configuration without creating the provider
 	ValidateConfig(config ProviderConfig) error
-	
+
 	// GetProviderInfo returns information about a specific provider type
 	GetProviderInfo(providerName string) (*ProviderInfo, error)
 }
@@ -49,7 +49,7 @@ func NewDirectoryProviderFactory() *DefaultDirectoryProviderFactory {
 func (f *DefaultDirectoryProviderFactory) RegisterProviderConstructor(providerName string, constructor ProviderConstructor) {
 	f.mutex.Lock()
 	defer f.mutex.Unlock()
-	
+
 	f.constructors[providerName] = constructor
 }
 
@@ -58,28 +58,28 @@ func (f *DefaultDirectoryProviderFactory) CreateProvider(ctx context.Context, co
 	f.mutex.RLock()
 	constructor, exists := f.constructors[config.ProviderName]
 	f.mutex.RUnlock()
-	
+
 	if !exists {
 		available := f.GetSupportedProviders()
 		return nil, fmt.Errorf("directory provider '%s' not supported. Available providers: %v", config.ProviderName, available)
 	}
-	
+
 	// Validate configuration first
 	if err := f.ValidateConfig(config); err != nil {
 		return nil, fmt.Errorf("invalid configuration for provider '%s': %w", config.ProviderName, err)
 	}
-	
+
 	// Create provider instance
 	provider := constructor()
-	
+
 	// Connect to the directory service
 	connectCtx, cancel := context.WithTimeout(ctx, config.ConnectionTimeout)
 	defer cancel()
-	
+
 	if err := provider.Connect(connectCtx, config); err != nil {
 		return nil, fmt.Errorf("failed to connect to directory provider '%s': %w", config.ProviderName, err)
 	}
-	
+
 	// Verify connection health
 	if health, err := provider.HealthCheck(connectCtx); err != nil || !health.IsHealthy {
 		_ = provider.Disconnect(connectCtx) // Ignore error during cleanup
@@ -88,7 +88,7 @@ func (f *DefaultDirectoryProviderFactory) CreateProvider(ctx context.Context, co
 		}
 		return nil, fmt.Errorf("health check failed for provider '%s': %v", config.ProviderName, health.Errors)
 	}
-	
+
 	return provider, nil
 }
 
@@ -96,12 +96,12 @@ func (f *DefaultDirectoryProviderFactory) CreateProvider(ctx context.Context, co
 func (f *DefaultDirectoryProviderFactory) GetSupportedProviders() []string {
 	f.mutex.RLock()
 	defer f.mutex.RUnlock()
-	
+
 	providers := make([]string, 0, len(f.constructors))
 	for name := range f.constructors {
 		providers = append(providers, name)
 	}
-	
+
 	return providers
 }
 
@@ -110,24 +110,24 @@ func (f *DefaultDirectoryProviderFactory) ValidateConfig(config ProviderConfig) 
 	if config.ProviderName == "" {
 		return fmt.Errorf("provider_name is required")
 	}
-	
+
 	if config.ServerAddress == "" {
 		return fmt.Errorf("server_address is required")
 	}
-	
+
 	if config.ConnectionTimeout <= 0 {
 		return fmt.Errorf("connection_timeout must be positive")
 	}
-	
+
 	if config.MaxConnections <= 0 {
 		return fmt.Errorf("max_connections must be positive")
 	}
-	
+
 	// Validate authentication method
 	if config.AuthMethod == "" {
 		return fmt.Errorf("auth_method is required")
 	}
-	
+
 	switch config.AuthMethod {
 	case AuthMethodKerberos, AuthMethodLDAP:
 		if config.Username == "" {
@@ -150,7 +150,7 @@ func (f *DefaultDirectoryProviderFactory) ValidateConfig(config ProviderConfig) 
 	default:
 		return fmt.Errorf("unsupported auth_method: %s", config.AuthMethod)
 	}
-	
+
 	return nil
 }
 
@@ -159,15 +159,15 @@ func (f *DefaultDirectoryProviderFactory) GetProviderInfo(providerName string) (
 	f.mutex.RLock()
 	constructor, exists := f.constructors[providerName]
 	f.mutex.RUnlock()
-	
+
 	if !exists {
 		return nil, fmt.Errorf("provider '%s' not found", providerName)
 	}
-	
+
 	// Create temporary instance to get info (without connecting)
 	provider := constructor()
 	info := provider.GetProviderInfo()
-	
+
 	return &info, nil
 }
 
@@ -212,7 +212,7 @@ func NewDirectoryProviderManager(factory DirectoryProviderFactory) *DirectoryPro
 	if factory == nil {
 		factory = GetGlobalDirectoryProviderFactory()
 	}
-	
+
 	return &DirectoryProviderManager{
 		providers: make(map[string]DirectoryProvider),
 		factory:   factory,
@@ -223,15 +223,15 @@ func NewDirectoryProviderManager(factory DirectoryProviderFactory) *DirectoryPro
 func (m *DirectoryProviderManager) AddProvider(name string, config ProviderConfig) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
-	
+
 	ctx, cancel := context.WithTimeout(context.Background(), config.ConnectionTimeout)
 	defer cancel()
-	
+
 	provider, err := m.factory.CreateProvider(ctx, config)
 	if err != nil {
 		return fmt.Errorf("failed to create provider '%s': %w", name, err)
 	}
-	
+
 	m.providers[name] = provider
 	return nil
 }
@@ -240,12 +240,12 @@ func (m *DirectoryProviderManager) AddProvider(name string, config ProviderConfi
 func (m *DirectoryProviderManager) GetProvider(name string) (DirectoryProvider, error) {
 	m.mutex.RLock()
 	defer m.mutex.RUnlock()
-	
+
 	provider, exists := m.providers[name]
 	if !exists {
 		return nil, fmt.Errorf("provider '%s' not found in manager", name)
 	}
-	
+
 	return provider, nil
 }
 
@@ -253,23 +253,23 @@ func (m *DirectoryProviderManager) GetProvider(name string) (DirectoryProvider, 
 func (m *DirectoryProviderManager) RemoveProvider(name string) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
-	
+
 	provider, exists := m.providers[name]
 	if !exists {
 		return fmt.Errorf("provider '%s' not found in manager", name)
 	}
-	
+
 	// Disconnect the provider
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	
+
 	if err := provider.Disconnect(ctx); err != nil {
 		// Log warning but continue with removal - disconnect errors are non-fatal
 		// as the provider is being removed from the registry regardless
 		// In a real implementation, this would use structured logging
 		_ = err // Acknowledge error but continue with removal
 	}
-	
+
 	delete(m.providers, name)
 	return nil
 }
@@ -278,12 +278,12 @@ func (m *DirectoryProviderManager) RemoveProvider(name string) error {
 func (m *DirectoryProviderManager) ListProviders() []string {
 	m.mutex.RLock()
 	defer m.mutex.RUnlock()
-	
+
 	names := make([]string, 0, len(m.providers))
 	for name := range m.providers {
 		names = append(names, name)
 	}
-	
+
 	return names
 }
 
@@ -291,9 +291,9 @@ func (m *DirectoryProviderManager) ListProviders() []string {
 func (m *DirectoryProviderManager) GetProviderStatuses(ctx context.Context) map[string]*HealthStatus {
 	m.mutex.RLock()
 	defer m.mutex.RUnlock()
-	
+
 	statuses := make(map[string]*HealthStatus)
-	
+
 	for name, provider := range m.providers {
 		if health, err := provider.HealthCheck(ctx); err != nil {
 			statuses[name] = &HealthStatus{
@@ -305,7 +305,7 @@ func (m *DirectoryProviderManager) GetProviderStatuses(ctx context.Context) map[
 			statuses[name] = health
 		}
 	}
-	
+
 	return statuses
 }
 
@@ -313,23 +313,23 @@ func (m *DirectoryProviderManager) GetProviderStatuses(ctx context.Context) map[
 func (m *DirectoryProviderManager) Close(ctx context.Context) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
-	
+
 	var errors []error
-	
+
 	for name, provider := range m.providers {
 		if err := provider.Disconnect(ctx); err != nil {
 			errors = append(errors, fmt.Errorf("failed to disconnect provider '%s': %w", name, err))
 		}
 	}
-	
+
 	// Clear the providers map
 	m.providers = make(map[string]DirectoryProvider)
-	
+
 	if len(errors) > 0 {
 		// In a real implementation, this would be a multi-error type
 		return fmt.Errorf("errors occurred while closing providers: %v", errors)
 	}
-	
+
 	return nil
 }
 
@@ -349,29 +349,29 @@ func (m *DirectoryProviderManager) ExecuteCrossDirectoryOperation(ctx context.Co
 	if err != nil {
 		return fmt.Errorf("source provider error: %w", err)
 	}
-	
+
 	targetProvider, err := m.GetProvider(operation.TargetProvider)
 	if err != nil {
 		return fmt.Errorf("target provider error: %w", err)
 	}
-	
+
 	switch operation.Operation {
 	case "sync_user":
 		userID, ok := operation.Parameters["user_id"].(string)
 		if !ok {
 			return fmt.Errorf("user_id parameter required for sync_user operation")
 		}
-		
+
 		return sourceProvider.SyncUser(ctx, userID, targetProvider)
-		
+
 	case "sync_group":
 		groupID, ok := operation.Parameters["group_id"].(string)
 		if !ok {
 			return fmt.Errorf("group_id parameter required for sync_group operation")
 		}
-		
+
 		return sourceProvider.SyncGroup(ctx, groupID, targetProvider)
-		
+
 	default:
 		return fmt.Errorf("unsupported cross-directory operation: %s", operation.Operation)
 	}
@@ -388,19 +388,19 @@ func (m *DirectoryProviderManager) DiscoverProviders(ctx context.Context, discov
 
 // DiscoveryConfig configures provider discovery
 type DiscoveryConfig struct {
-	Networks        []string      `json:"networks"`         // Network ranges to scan
-	Protocols       []string      `json:"protocols"`        // Protocols to test (LDAP, LDAPS)
-	Timeout         time.Duration `json:"timeout"`          // Discovery timeout
-	MaxConcurrency  int           `json:"max_concurrency"`  // Max concurrent discovery operations
+	Networks       []string      `json:"networks"`        // Network ranges to scan
+	Protocols      []string      `json:"protocols"`       // Protocols to test (LDAP, LDAPS)
+	Timeout        time.Duration `json:"timeout"`         // Discovery timeout
+	MaxConcurrency int           `json:"max_concurrency"` // Max concurrent discovery operations
 }
 
 // DiscoveredProvider represents a discovered directory provider
 type DiscoveredProvider struct {
-	Address     string                 `json:"address"`      // Server address
-	Type        string                 `json:"type"`         // Provider type (AD, LDAP, etc.)
-	Port        int                    `json:"port"`         // Port number
-	TLS         bool                   `json:"tls"`          // TLS support
-	Information map[string]interface{} `json:"information"`  // Additional information
+	Address     string                 `json:"address"`     // Server address
+	Type        string                 `json:"type"`        // Provider type (AD, LDAP, etc.)
+	Port        int                    `json:"port"`        // Port number
+	TLS         bool                   `json:"tls"`         // TLS support
+	Information map[string]interface{} `json:"information"` // Additional information
 }
 
 // Configuration Validation Helpers
@@ -409,25 +409,25 @@ type DiscoveredProvider struct {
 func ValidateProviderConfigurations(configs map[string]ProviderConfig) map[string]error {
 	factory := GetGlobalDirectoryProviderFactory()
 	errors := make(map[string]error)
-	
+
 	for name, config := range configs {
 		if err := factory.ValidateConfig(config); err != nil {
 			errors[name] = err
 		}
 	}
-	
+
 	return errors
 }
 
 // GetProviderConfigurationTemplate returns a configuration template for a provider type
 func GetProviderConfigurationTemplate(providerName string) (*ProviderConfig, error) {
 	factory := GetGlobalDirectoryProviderFactory()
-	
+
 	info, err := factory.GetProviderInfo(providerName)
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Create template with default values
 	template := &ProviderConfig{
 		ProviderName:      providerName,
@@ -438,11 +438,11 @@ func GetProviderConfigurationTemplate(providerName string) (*ProviderConfig, err
 		IdleTimeout:       5 * time.Minute,
 		PageSize:          100,
 	}
-	
+
 	// Set provider-specific defaults based on capabilities
 	if len(info.Capabilities.SupportedAuthMethods) > 0 {
 		template.AuthMethod = info.Capabilities.SupportedAuthMethods[0]
 	}
-	
+
 	return template, nil
 }

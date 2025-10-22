@@ -23,7 +23,7 @@ type JITManager interface {
 	// Add JIT methods as needed
 }
 
-// RiskManager interface defines risk operations needed by continuous authorization  
+// RiskManager interface defines risk operations needed by continuous authorization
 type RiskManager interface {
 	EnhancedRiskAccessCheck(ctx context.Context, request *common.AccessRequest) (*RiskAccessResult, error)
 	// Add risk methods as needed
@@ -46,7 +46,7 @@ type RiskLevel string
 
 const (
 	RiskLevelLow      RiskLevel = "low"
-	RiskLevelModerate RiskLevel = "moderate" 
+	RiskLevelModerate RiskLevel = "moderate"
 	RiskLevelHigh     RiskLevel = "high"
 	RiskLevelCritical RiskLevel = "critical"
 )
@@ -56,7 +56,7 @@ type RuleSeverity string
 
 const (
 	RuleSeverityLow      RuleSeverity = "low"
-	RuleSeverityMedium   RuleSeverity = "medium" 
+	RuleSeverityMedium   RuleSeverity = "medium"
 	RuleSeverityHigh     RuleSeverity = "high"
 	RuleSeverityCritical RuleSeverity = "critical"
 )
@@ -65,20 +65,20 @@ const (
 type AuthorizationMode string
 
 const (
-	AuthorizationModeContinuous AuthorizationMode = "continuous"
+	AuthorizationModeContinuous  AuthorizationMode = "continuous"
 	AuthorizationModeTraditional AuthorizationMode = "traditional"
 )
 
 // PolicyEvaluationResult represents policy evaluation results
 type PolicyEvaluationResult struct {
-	SessionID           string            `json:"session_id"`
-	EvaluationTime      time.Time         `json:"evaluation_time"`
-	ComplianceStatus    bool              `json:"compliance_status"`
-	AppliedPolicies     []string          `json:"applied_policies"`
-	Violations          []PolicyViolation `json:"violations"`
-	EnforcementActions  []EnforcementAction `json:"enforcement_actions"`
-	RiskAssessment      *PolicyRiskAssessment `json:"risk_assessment"`
-	RecommendedActions  []string          `json:"recommended_actions"`
+	SessionID          string                `json:"session_id"`
+	EvaluationTime     time.Time             `json:"evaluation_time"`
+	ComplianceStatus   bool                  `json:"compliance_status"`
+	AppliedPolicies    []string              `json:"applied_policies"`
+	Violations         []PolicyViolation     `json:"violations"`
+	EnforcementActions []EnforcementAction   `json:"enforcement_actions"`
+	RiskAssessment     *PolicyRiskAssessment `json:"risk_assessment"`
+	RecommendedActions []string              `json:"recommended_actions"`
 }
 
 // ContextStatus represents context validation status
@@ -90,18 +90,18 @@ type ContextStatus struct {
 
 // RiskAssessmentData represents risk assessment results
 type RiskAssessmentData struct {
-	CurrentRiskLevel RiskLevel   `json:"current_risk_level"`
-	RiskScore        float64     `json:"risk_score"`
+	CurrentRiskLevel RiskLevel    `json:"current_risk_level"`
+	RiskScore        float64      `json:"risk_score"`
 	RiskFactors      []RiskFactor `json:"risk_factors"`
 }
 
 // AdaptiveControl represents applied adaptive controls
 type AdaptiveControl struct {
-	ID          string                 `json:"id"`
-	Type        string                 `json:"type"`
-	Status      string                 `json:"status"`
-	AppliedAt   time.Time             `json:"applied_at"`
-	Parameters  map[string]interface{} `json:"parameters"`
+	ID         string                 `json:"id"`
+	Type       string                 `json:"type"`
+	Status     string                 `json:"status"`
+	AppliedAt  time.Time              `json:"applied_at"`
+	Parameters map[string]interface{} `json:"parameters"`
 }
 
 // EnforcementAction represents a policy enforcement action
@@ -121,12 +121,12 @@ type EnforcementAction struct {
 
 // PolicyRiskAssessment represents risk assessment from policy evaluation
 type PolicyRiskAssessment struct {
-	OverallRisk        float64           `json:"overall_risk"`
+	OverallRisk        float64            `json:"overall_risk"`
 	RiskFactors        []PolicyRiskFactor `json:"risk_factors"`
-	ComplianceImpact   float64           `json:"compliance_impact"`
-	BusinessImpact     float64           `json:"business_impact"`
-	SecurityImpact     float64           `json:"security_impact"`
-	RecommendedActions []string          `json:"recommended_actions"`
+	ComplianceImpact   float64            `json:"compliance_impact"`
+	BusinessImpact     float64            `json:"business_impact"`
+	SecurityImpact     float64            `json:"security_impact"`
+	RecommendedActions []string           `json:"recommended_actions"`
 }
 
 // PolicyRiskFactor represents a risk factor in policy evaluation
@@ -152,147 +152,147 @@ type RiskFactor struct {
 // with dynamic permission updates and immediate revocation capabilities
 type ContinuousAuthorizationEngine struct {
 	// Core dependencies
-	rbacManager         RBACManager
-	jitManager         JITManager
-	riskManager        RiskManager
-	tenantSecurity     TenantSecurityMiddleware
+	rbacManager    RBACManager
+	jitManager     JITManager
+	riskManager    RiskManager
+	tenantSecurity TenantSecurityMiddleware
 
 	// Core components
-	sessionRegistry    *SessionRegistry
-	permissionCache    *CacheManager
-	eventBus          *PermissionEventBus
-	contextMonitor     *ContextMonitor
-	policyEnforcer     *PolicyEnforcer
+	sessionRegistry *SessionRegistry
+	permissionCache *CacheManager
+	eventBus        *PermissionEventBus
+	contextMonitor  *ContextMonitor
+	policyEnforcer  *PolicyEnforcer
 
 	// Configuration
-	config            *ContinuousAuthConfig
-	
+	config *ContinuousAuthConfig
+
 	// Control
-	stopChannel       chan struct{}
-	running           bool
-	mutex            sync.RWMutex
+	stopChannel chan struct{}
+	running     bool
+	mutex       sync.RWMutex
 
 	// Statistics
-	stats            *AuthorizationStats
+	stats *AuthorizationStats
 }
 
 // ContinuousAuthConfig contains configuration for the continuous authorization engine
 type ContinuousAuthConfig struct {
 	// Performance settings
-	MaxAuthLatencyMs        int           `json:"max_auth_latency_ms"`        // Target < 10ms
-	PermissionCacheTTL      time.Duration `json:"permission_cache_ttl"`       // Cache TTL
-	SessionUpdateInterval   time.Duration `json:"session_update_interval"`    // Session monitoring interval
-	
+	MaxAuthLatencyMs      int           `json:"max_auth_latency_ms"`     // Target < 10ms
+	PermissionCacheTTL    time.Duration `json:"permission_cache_ttl"`    // Cache TTL
+	SessionUpdateInterval time.Duration `json:"session_update_interval"` // Session monitoring interval
+
 	// Permission propagation
-	PropagationTimeoutMs    int           `json:"propagation_timeout_ms"`     // Target < 1000ms
-	MaxRetryAttempts        int           `json:"max_retry_attempts"`         // Permission update retries
-	
+	PropagationTimeoutMs int `json:"propagation_timeout_ms"` // Target < 1000ms
+	MaxRetryAttempts     int `json:"max_retry_attempts"`     // Permission update retries
+
 	// Risk integration
-	EnableRiskReassessment  bool          `json:"enable_risk_reassessment"`   // Continuous risk monitoring
-	RiskCheckInterval       time.Duration `json:"risk_check_interval"`        // Risk reassessment frequency
-	
+	EnableRiskReassessment bool          `json:"enable_risk_reassessment"` // Continuous risk monitoring
+	RiskCheckInterval      time.Duration `json:"risk_check_interval"`      // Risk reassessment frequency
+
 	// Policy enforcement
-	EnableAutoTermination   bool          `json:"enable_auto_termination"`    // Auto-terminate on violations
-	ViolationGracePeriod    time.Duration `json:"violation_grace_period"`     // Grace period before termination
-	
+	EnableAutoTermination bool          `json:"enable_auto_termination"` // Auto-terminate on violations
+	ViolationGracePeriod  time.Duration `json:"violation_grace_period"`  // Grace period before termination
+
 	// Audit and monitoring
-	EnableComprehensiveAudit bool         `json:"enable_comprehensive_audit"` // Log all authorization decisions
-	AuditBufferSize         int           `json:"audit_buffer_size"`          // Audit event buffer
+	EnableComprehensiveAudit bool `json:"enable_comprehensive_audit"` // Log all authorization decisions
+	AuditBufferSize          int  `json:"audit_buffer_size"`          // Audit event buffer
 }
 
 // AuthorizationStats tracks authorization engine statistics
 type AuthorizationStats struct {
 	// Authorization metrics
-	TotalAuthChecks        int64         `json:"total_auth_checks"`
-	AverageLatencyMs       float64       `json:"average_latency_ms"`
-	AuthorizedRequests     int64         `json:"authorized_requests"`
-	DeniedRequests         int64         `json:"denied_requests"`
-	
+	TotalAuthChecks    int64   `json:"total_auth_checks"`
+	AverageLatencyMs   float64 `json:"average_latency_ms"`
+	AuthorizedRequests int64   `json:"authorized_requests"`
+	DeniedRequests     int64   `json:"denied_requests"`
+
 	// Session metrics
-	ActiveSessions         int           `json:"active_sessions"`
-	SessionsTerminated     int64         `json:"sessions_terminated"`
-	PermissionRevocations  int64         `json:"permission_revocations"`
-	
+	ActiveSessions        int   `json:"active_sessions"`
+	SessionsTerminated    int64 `json:"sessions_terminated"`
+	PermissionRevocations int64 `json:"permission_revocations"`
+
 	// Performance metrics
-	CacheHitRate          float64       `json:"cache_hit_rate"`
-	PropagationLatencyMs  float64       `json:"propagation_latency_ms"`
-	PolicyViolations      int64         `json:"policy_violations"`
-	
+	CacheHitRate         float64 `json:"cache_hit_rate"`
+	PropagationLatencyMs float64 `json:"propagation_latency_ms"`
+	PolicyViolations     int64   `json:"policy_violations"`
+
 	// Update tracking
-	LastUpdated           time.Time     `json:"last_updated"`
-	
-	mutex                 sync.RWMutex
+	LastUpdated time.Time `json:"last_updated"`
+
+	mutex sync.RWMutex
 }
 
 // ContinuousAuthRequest represents a per-action authorization request
 type ContinuousAuthRequest struct {
 	// Standard access request fields
 	*common.AccessRequest
-	
+
 	// Continuous authorization specific fields
-	SessionID           string            `json:"session_id"`
-	OperationType       OperationType     `json:"operation_type"`
-	ResourceContext     map[string]string `json:"resource_context"`
-	PreviousDecisionID  string            `json:"previous_decision_id,omitempty"`
-	
+	SessionID          string            `json:"session_id"`
+	OperationType      OperationType     `json:"operation_type"`
+	ResourceContext    map[string]string `json:"resource_context"`
+	PreviousDecisionID string            `json:"previous_decision_id,omitempty"`
+
 	// Risk context (optional)
-	CurrentRiskLevel    RiskLevel         `json:"current_risk_level,omitempty"`
-	ContextChanged      bool              `json:"context_changed"`
-	
+	CurrentRiskLevel RiskLevel `json:"current_risk_level,omitempty"`
+	ContextChanged   bool      `json:"context_changed"`
+
 	// Timing
-	RequestTime         time.Time         `json:"request_time"`
+	RequestTime time.Time `json:"request_time"`
 }
 
 // ContinuousAuthResponse represents the authorization decision with continuous context
 type ContinuousAuthResponse struct {
 	// Standard authorization response
-	AccessResponse      *common.AccessResponse `json:"access_response"`
-	
+	AccessResponse *common.AccessResponse `json:"access_response"`
+
 	// Continuous authorization specific fields
-	DecisionID          string            `json:"decision_id"`
-	DecisionTime        time.Time         `json:"decision_time"`
-	ValidUntil          time.Time         `json:"valid_until"`
-	SessionValid        bool              `json:"session_valid"`
-	
+	DecisionID   string    `json:"decision_id"`
+	DecisionTime time.Time `json:"decision_time"`
+	ValidUntil   time.Time `json:"valid_until"`
+	SessionValid bool      `json:"session_valid"`
+
 	// Policy information
-	AppliedPolicies     []string          `json:"applied_policies"`
-	PolicyViolations    []PolicyViolation `json:"policy_violations"`
-	PolicyEvaluation    *PolicyEvaluationResult `json:"policy_evaluation"`
-	ContextStatus       *ContextStatus    `json:"context_status"`
-	CacheHit            bool              `json:"cache_hit"`
-	
+	AppliedPolicies  []string                `json:"applied_policies"`
+	PolicyViolations []PolicyViolation       `json:"policy_violations"`
+	PolicyEvaluation *PolicyEvaluationResult `json:"policy_evaluation"`
+	ContextStatus    *ContextStatus          `json:"context_status"`
+	CacheHit         bool                    `json:"cache_hit"`
+
 	// Risk assessment information
-	RiskAssessment      *RiskAssessmentData `json:"risk_assessment,omitempty"`
-	
+	RiskAssessment *RiskAssessmentData `json:"risk_assessment,omitempty"`
+
 	// Adaptive controls
-	AdaptiveControls    []AdaptiveControl `json:"adaptive_controls,omitempty"`
-	
+	AdaptiveControls []AdaptiveControl `json:"adaptive_controls,omitempty"`
+
 	// Performance metrics
-	ProcessingLatencyMs int               `json:"processing_latency_ms"`
-	CacheUsed           bool              `json:"cache_used"`
-	
+	ProcessingLatencyMs int  `json:"processing_latency_ms"`
+	CacheUsed           bool `json:"cache_used"`
+
 	// Next check requirements
-	RequiresContinuousCheck bool          `json:"requires_continuous_check"`
-	NextCheckTime          time.Time      `json:"next_check_time,omitempty"`
-	
+	RequiresContinuousCheck bool      `json:"requires_continuous_check"`
+	NextCheckTime           time.Time `json:"next_check_time,omitempty"`
+
 	// Action recommendations
-	RecommendedActions  []ActionRecommendation `json:"recommended_actions"`
+	RecommendedActions []ActionRecommendation `json:"recommended_actions"`
 }
 
 // OperationType defines the type of operation being authorized
 type OperationType string
 
 const (
-	OperationTypeAPI        OperationType = "api"           // API call authorization
-	OperationTypeResource   OperationType = "resource"      // Resource access
-	OperationTypeData       OperationType = "data"          // Data access
-	OperationTypeAdmin      OperationType = "admin"         // Administrative operation
-	OperationTypeTerminal   OperationType = "terminal"      // Terminal session operation
-	OperationTypeService    OperationType = "service"       // Service-to-service
-	OperationTypeStandard   OperationType = "standard"      // Standard operation
-	OperationTypeModerate   OperationType = "moderate"      // Moderate risk operation
-	OperationTypeHighRisk   OperationType = "high_risk"     // High risk operation
-	OperationTypeCritical   OperationType = "critical"      // Critical operation
+	OperationTypeAPI      OperationType = "api"       // API call authorization
+	OperationTypeResource OperationType = "resource"  // Resource access
+	OperationTypeData     OperationType = "data"      // Data access
+	OperationTypeAdmin    OperationType = "admin"     // Administrative operation
+	OperationTypeTerminal OperationType = "terminal"  // Terminal session operation
+	OperationTypeService  OperationType = "service"   // Service-to-service
+	OperationTypeStandard OperationType = "standard"  // Standard operation
+	OperationTypeModerate OperationType = "moderate"  // Moderate risk operation
+	OperationTypeHighRisk OperationType = "high_risk" // High risk operation
+	OperationTypeCritical OperationType = "critical"  // Critical operation
 )
 
 // PolicyViolation represents a detected policy violation
@@ -311,21 +311,21 @@ type PolicyViolation struct {
 // ActionRecommendation provides recommendations for improving security posture
 type ActionRecommendation struct {
 	Type        RecommendationType `json:"type"`
-	Priority    string            `json:"priority"`
-	Description string            `json:"description"`
-	Action      string            `json:"action"`
-	Deadline    time.Time         `json:"deadline,omitempty"`
+	Priority    string             `json:"priority"`
+	Description string             `json:"description"`
+	Action      string             `json:"action"`
+	Deadline    time.Time          `json:"deadline,omitempty"`
 }
 
 // RecommendationType defines types of security recommendations
 type RecommendationType string
 
 const (
-	RecommendationTypeSessionReauth     RecommendationType = "session_reauth"
-	RecommendationTypePermissionReview  RecommendationType = "permission_review"
-	RecommendationTypeRiskMitigation    RecommendationType = "risk_mitigation"
-	RecommendationTypeComplianceAction  RecommendationType = "compliance_action"
-	RecommendationTypePolicyUpdate      RecommendationType = "policy_update"
+	RecommendationTypeSessionReauth    RecommendationType = "session_reauth"
+	RecommendationTypePermissionReview RecommendationType = "permission_review"
+	RecommendationTypeRiskMitigation   RecommendationType = "risk_mitigation"
+	RecommendationTypeComplianceAction RecommendationType = "compliance_action"
+	RecommendationTypePolicyUpdate     RecommendationType = "policy_update"
 )
 
 // NewContinuousAuthorizationEngine creates a new continuous authorization engine
@@ -354,12 +354,12 @@ func NewContinuousAuthorizationEngine(
 		tenantSecurity:  tenantSecurity,
 		sessionRegistry: sessionRegistry,
 		permissionCache: permissionCache,
-		eventBus:       eventBus,
+		eventBus:        eventBus,
 		contextMonitor:  contextMonitor,
 		policyEnforcer:  policyEnforcer,
-		config:         config,
-		stopChannel:    make(chan struct{}),
-		stats:          &AuthorizationStats{LastUpdated: time.Now()},
+		config:          config,
+		stopChannel:     make(chan struct{}),
+		stats:           &AuthorizationStats{LastUpdated: time.Now()},
 	}
 }
 
@@ -430,24 +430,24 @@ func (cae *ContinuousAuthorizationEngine) Stop() error {
 // AuthorizeAction performs per-action continuous authorization
 func (cae *ContinuousAuthorizationEngine) AuthorizeAction(ctx context.Context, request *ContinuousAuthRequest) (*ContinuousAuthResponse, error) {
 	startTime := time.Now()
-	
+
 	// Validate request
 	if request == nil {
 		return nil, fmt.Errorf("authorization request cannot be nil")
 	}
-	
+
 	if request.AccessRequest == nil {
 		return nil, fmt.Errorf("access request cannot be nil")
 	}
-	
+
 	if request.SubjectId == "" {
 		return nil, fmt.Errorf("subject ID is required")
 	}
-	
+
 	if request.SessionID == "" {
 		return nil, fmt.Errorf("session ID is required")
 	}
-	
+
 	// Update statistics
 	cae.updateStatsOnRequest()
 
@@ -457,7 +457,7 @@ func (cae *ContinuousAuthorizationEngine) AuthorizeAction(ctx context.Context, r
 
 	// Generate decision ID for tracking
 	decisionID := fmt.Sprintf("auth-%d-%s", time.Now().UnixNano(), request.SessionID)
-	
+
 	// Create response structure
 	response := &ContinuousAuthResponse{
 		DecisionID:   decisionID,
@@ -466,8 +466,8 @@ func (cae *ContinuousAuthorizationEngine) AuthorizeAction(ctx context.Context, r
 			Granted: false,
 			Reason:  "",
 		},
-		AppliedPolicies:  make([]string, 0),
-		PolicyViolations: make([]PolicyViolation, 0),
+		AppliedPolicies:    make([]string, 0),
+		PolicyViolations:   make([]PolicyViolation, 0),
 		RecommendedActions: make([]ActionRecommendation, 0),
 	}
 
@@ -476,7 +476,7 @@ func (cae *ContinuousAuthorizationEngine) AuthorizeAction(ctx context.Context, r
 	if err != nil {
 		return cae.createErrorResponse(decisionID, fmt.Sprintf("session validation failed: %v", err), startTime), nil
 	}
-	
+
 	response.SessionValid = sessionValid
 	if !sessionValid {
 		return cae.createDeniedResponse(decisionID, "session invalid or expired", startTime), nil
@@ -525,13 +525,13 @@ func (cae *ContinuousAuthorizationEngine) AuthorizeAction(ctx context.Context, r
 
 	// 10. Publish authorization event - ignore event publishing errors, they're non-critical
 	_ = cae.eventBus.PublishAuthorizationEvent(&AuthorizationEvent{
-		DecisionID:    decisionID,
-		SessionID:     request.SessionID,
-		SubjectID:     request.SubjectId,
-		PermissionID:  request.PermissionId,
-		Granted:       authDecision.Granted,
-		Timestamp:     time.Now(),
-		LatencyMs:     response.ProcessingLatencyMs,
+		DecisionID:   decisionID,
+		SessionID:    request.SessionID,
+		SubjectID:    request.SubjectId,
+		PermissionID: request.PermissionId,
+		Granted:      authDecision.Granted,
+		Timestamp:    time.Now(),
+		LatencyMs:    response.ProcessingLatencyMs,
 	})
 
 	// Update statistics
@@ -544,7 +544,7 @@ func (cae *ContinuousAuthorizationEngine) AuthorizeAction(ctx context.Context, r
 func (cae *ContinuousAuthorizationEngine) performAuthorizationCheck(ctx context.Context, request *ContinuousAuthRequest) (*common.AccessResponse, error) {
 	// Use existing integrated access control for comprehensive evaluation
 	accessRequest := request.AccessRequest
-	
+
 	// First check RBAC
 	rbacResponse, err := cae.rbacManager.CheckPermission(ctx, accessRequest)
 	if err != nil {
@@ -585,7 +585,7 @@ func (cae *ContinuousAuthorizationEngine) RegisterSession(ctx context.Context, s
 func (cae *ContinuousAuthorizationEngine) UnregisterSession(ctx context.Context, sessionID string) error {
 	// Clean up cached permissions for the session
 	cae.permissionCache.EvictSessionCache(sessionID)
-	
+
 	// Remove from session registry
 	return cae.sessionRegistry.UnregisterSession(ctx, sessionID)
 }
@@ -652,10 +652,10 @@ func (cae *ContinuousAuthorizationEngine) GetAuthorizationStats() *Authorization
 		ActiveSessions:        cae.stats.ActiveSessions,
 		SessionsTerminated:    cae.stats.SessionsTerminated,
 		PermissionRevocations: cae.stats.PermissionRevocations,
-		CacheHitRate:         cae.stats.CacheHitRate,
-		PropagationLatencyMs: cae.stats.PropagationLatencyMs,
-		PolicyViolations:     cae.stats.PolicyViolations,
-		LastUpdated:          cae.stats.LastUpdated,
+		CacheHitRate:          cae.stats.CacheHitRate,
+		PropagationLatencyMs:  cae.stats.PropagationLatencyMs,
+		PolicyViolations:      cae.stats.PolicyViolations,
+		LastUpdated:           cae.stats.LastUpdated,
 	}
 }
 
@@ -854,16 +854,16 @@ func (cae *ContinuousAuthorizationEngine) updateStatsOnDecision(granted bool, st
 // DefaultContinuousAuthConfig returns default configuration for continuous authorization
 func DefaultContinuousAuthConfig() *ContinuousAuthConfig {
 	return &ContinuousAuthConfig{
-		MaxAuthLatencyMs:        10,                    // 10ms target latency
-		PermissionCacheTTL:      5 * time.Minute,       // 5 minute cache TTL
-		SessionUpdateInterval:   30 * time.Second,      // 30 second session monitoring
-		PropagationTimeoutMs:    1000,                  // 1 second propagation target
-		MaxRetryAttempts:        3,                     // 3 retry attempts
-		EnableRiskReassessment:  true,                  // Enable continuous risk monitoring
-		RiskCheckInterval:       2 * time.Minute,       // 2 minute risk checks
-		EnableAutoTermination:   true,                  // Enable auto-termination
-		ViolationGracePeriod:    30 * time.Second,      // 30 second grace period
-		EnableComprehensiveAudit: true,                 // Enable comprehensive audit logging
-		AuditBufferSize:         10000,                 // 10k audit event buffer
+		MaxAuthLatencyMs:         10,               // 10ms target latency
+		PermissionCacheTTL:       5 * time.Minute,  // 5 minute cache TTL
+		SessionUpdateInterval:    30 * time.Second, // 30 second session monitoring
+		PropagationTimeoutMs:     1000,             // 1 second propagation target
+		MaxRetryAttempts:         3,                // 3 retry attempts
+		EnableRiskReassessment:   true,             // Enable continuous risk monitoring
+		RiskCheckInterval:        2 * time.Minute,  // 2 minute risk checks
+		EnableAutoTermination:    true,             // Enable auto-termination
+		ViolationGracePeriod:     30 * time.Second, // 30 second grace period
+		EnableComprehensiveAudit: true,             // Enable comprehensive audit logging
+		AuditBufferSize:          10000,            // 10k audit event buffer
 	}
 }

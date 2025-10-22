@@ -10,67 +10,67 @@ import (
 // SessionRegistry manages active sessions for continuous authorization
 type SessionRegistry struct {
 	// Session storage
-	sessions        map[string]*AuthorizedSession  // sessionID -> session
-	userSessions    map[string][]string            // userID -> []sessionID
-	tenantSessions  map[string][]string            // tenantID -> []sessionID
-	
+	sessions       map[string]*AuthorizedSession // sessionID -> session
+	userSessions   map[string][]string           // userID -> []sessionID
+	tenantSessions map[string][]string           // tenantID -> []sessionID
+
 	// Permission mappings
 	sessionPermissions map[string]map[string]time.Time // sessionID -> permissionID -> expiry
-	
+
 	// Control
-	mutex           sync.RWMutex
-	started         bool
-	stopChannel     chan struct{}
-	
+	mutex       sync.RWMutex
+	started     bool
+	stopChannel chan struct{}
+
 	// Configuration
 	sessionTimeout  time.Duration
 	cleanupInterval time.Duration
-	
+
 	// Statistics
-	stats           SessionRegistryStats
+	stats SessionRegistryStats
 }
 
 // AuthorizedSession represents a session in the continuous authorization system
 type AuthorizedSession struct {
-	SessionID       string            `json:"session_id"`
-	SubjectID       string            `json:"subject_id"`
-	TenantID        string            `json:"tenant_id"`
-	CreatedAt       time.Time         `json:"created_at"`
-	LastActivity    time.Time         `json:"last_activity"`
-	ExpiresAt       time.Time         `json:"expires_at"`
-	
+	SessionID    string    `json:"session_id"`
+	SubjectID    string    `json:"subject_id"`
+	TenantID     string    `json:"tenant_id"`
+	CreatedAt    time.Time `json:"created_at"`
+	LastActivity time.Time `json:"last_activity"`
+	ExpiresAt    time.Time `json:"expires_at"`
+
 	// Session context
-	SessionType     SessionType       `json:"session_type"`
-	ClientInfo      *ClientInfo       `json:"client_info"`
-	Metadata        map[string]string `json:"metadata"`
-	
+	SessionType SessionType       `json:"session_type"`
+	ClientInfo  *ClientInfo       `json:"client_info"`
+	Metadata    map[string]string `json:"metadata"`
+
 	// Permission state
-	GrantedPermissions   map[string]PermissionGrant `json:"granted_permissions"`
-	ActiveDelegations    []string                   `json:"active_delegations"`
-	JITPermissions       map[string]time.Time       `json:"jit_permissions"`
-	
+	GrantedPermissions map[string]PermissionGrant `json:"granted_permissions"`
+	ActiveDelegations  []string                   `json:"active_delegations"`
+	JITPermissions     map[string]time.Time       `json:"jit_permissions"`
+
 	// Security state
-	ThreatLevel          ThreatLevel          `json:"threat_level"`
-	SecurityViolations   []SecurityViolation  `json:"security_violations"`
-	ComplianceStatus     string               `json:"compliance_status"`
-	
+	ThreatLevel        ThreatLevel         `json:"threat_level"`
+	SecurityViolations []SecurityViolation `json:"security_violations"`
+	ComplianceStatus   string              `json:"compliance_status"`
+
 	// Control flags
-	RequiresContinuousAuth bool              `json:"requires_continuous_auth"`
-	AutoTerminate          bool              `json:"auto_terminate"`
-	TerminationScheduled   time.Time         `json:"termination_scheduled,omitempty"`
-	
-	mutex               sync.RWMutex
+	RequiresContinuousAuth bool      `json:"requires_continuous_auth"`
+	AutoTerminate          bool      `json:"auto_terminate"`
+	TerminationScheduled   time.Time `json:"termination_scheduled,omitempty"`
+
+	mutex sync.RWMutex
 }
 
 // SessionType defines different types of sessions
 type SessionType string
 
 const (
-	SessionTypeAPI        SessionType = "api"         // API session
-	SessionTypeTerminal   SessionType = "terminal"    // Terminal session
-	SessionTypeService    SessionType = "service"     // Service-to-service
-	SessionTypeWeb        SessionType = "web"         // Web interface session
-	SessionTypeBatch      SessionType = "batch"       // Batch/automated process
+	SessionTypeAPI      SessionType = "api"      // API session
+	SessionTypeTerminal SessionType = "terminal" // Terminal session
+	SessionTypeService  SessionType = "service"  // Service-to-service
+	SessionTypeWeb      SessionType = "web"      // Web interface session
+	SessionTypeBatch    SessionType = "batch"    // Batch/automated process
 )
 
 // ClientInfo contains client-specific information
@@ -85,64 +85,64 @@ type ClientInfo struct {
 
 // PermissionGrant represents a granted permission with context
 type PermissionGrant struct {
-	PermissionID  string                 `json:"permission_id"`
-	GrantedAt     time.Time              `json:"granted_at"`
-	ExpiresAt     time.Time              `json:"expires_at"`
-	GrantedBy     string                 `json:"granted_by"`   // "rbac", "jit", "delegation"
-	Conditions    map[string]interface{} `json:"conditions"`
-	UsageCount    int                    `json:"usage_count"`
-	LastUsed      time.Time              `json:"last_used"`
+	PermissionID string                 `json:"permission_id"`
+	GrantedAt    time.Time              `json:"granted_at"`
+	ExpiresAt    time.Time              `json:"expires_at"`
+	GrantedBy    string                 `json:"granted_by"` // "rbac", "jit", "delegation"
+	Conditions   map[string]interface{} `json:"conditions"`
+	UsageCount   int                    `json:"usage_count"`
+	LastUsed     time.Time              `json:"last_used"`
 }
 
 // SecurityViolation represents a security violation for a session
 type SecurityViolation struct {
-	ViolationID   string                 `json:"violation_id"`
-	Type          string                 `json:"type"`
-	Severity      string                 `json:"severity"`
-	Description   string                 `json:"description"`
-	DetectedAt    time.Time              `json:"detected_at"`
-	Context       map[string]interface{} `json:"context"`
-	Resolved      bool                   `json:"resolved"`
-	ResolvedAt    time.Time              `json:"resolved_at,omitempty"`
+	ViolationID string                 `json:"violation_id"`
+	Type        string                 `json:"type"`
+	Severity    string                 `json:"severity"`
+	Description string                 `json:"description"`
+	DetectedAt  time.Time              `json:"detected_at"`
+	Context     map[string]interface{} `json:"context"`
+	Resolved    bool                   `json:"resolved"`
+	ResolvedAt  time.Time              `json:"resolved_at,omitempty"`
 }
 
 // SessionStatus represents the current status of a session
 type SessionStatus struct {
-	SessionID            string            `json:"session_id"`
-	Status               string            `json:"status"`              // "active", "expired", "terminated", "suspended"
-	IsValid              bool              `json:"is_valid"`
-	LastValidation       time.Time         `json:"last_validation"`
-	ActivePermissions    int               `json:"active_permissions"`
-	ExpiresIn            time.Duration     `json:"expires_in"`
-	RequiresReauth       bool              `json:"requires_reauth"`
-	SecurityAlerts       int               `json:"security_alerts"`
-	ComplianceStatus     string            `json:"compliance_status"`
-	RecommendedActions   []string          `json:"recommended_actions"`
+	SessionID          string        `json:"session_id"`
+	Status             string        `json:"status"` // "active", "expired", "terminated", "suspended"
+	IsValid            bool          `json:"is_valid"`
+	LastValidation     time.Time     `json:"last_validation"`
+	ActivePermissions  int           `json:"active_permissions"`
+	ExpiresIn          time.Duration `json:"expires_in"`
+	RequiresReauth     bool          `json:"requires_reauth"`
+	SecurityAlerts     int           `json:"security_alerts"`
+	ComplianceStatus   string        `json:"compliance_status"`
+	RecommendedActions []string      `json:"recommended_actions"`
 }
 
 // SessionRegistryStats contains statistics about the session registry
 type SessionRegistryStats struct {
-	TotalSessions       int       `json:"total_sessions"`
-	ActiveSessions      int       `json:"active_sessions"`
-	ExpiredSessions     int       `json:"expired_sessions"`
-	TerminatedSessions  int       `json:"terminated_sessions"`
-	AverageSessionTime  time.Duration `json:"average_session_time"`
-	SessionsByType      map[SessionType]int `json:"sessions_by_type"`
-	SessionsByTenant    map[string]int `json:"sessions_by_tenant"`
-	LastCleanup         time.Time `json:"last_cleanup"`
-	
-	mutex              sync.RWMutex
+	TotalSessions      int                 `json:"total_sessions"`
+	ActiveSessions     int                 `json:"active_sessions"`
+	ExpiredSessions    int                 `json:"expired_sessions"`
+	TerminatedSessions int                 `json:"terminated_sessions"`
+	AverageSessionTime time.Duration       `json:"average_session_time"`
+	SessionsByType     map[SessionType]int `json:"sessions_by_type"`
+	SessionsByTenant   map[string]int      `json:"sessions_by_tenant"`
+	LastCleanup        time.Time           `json:"last_cleanup"`
+
+	mutex sync.RWMutex
 }
 
 // ThreatLevel represents the security threat level of a session
 type ThreatLevel string
 
 const (
-	ThreatLevelMinimal  ThreatLevel = "minimal"   // Very low risk
-	ThreatLevelLow      ThreatLevel = "low"       // Normal operations
-	ThreatLevelMedium   ThreatLevel = "medium"    // Some concern
-	ThreatLevelHigh     ThreatLevel = "high"      // Elevated risk
-	ThreatLevelCritical ThreatLevel = "critical"  // Immediate threat
+	ThreatLevelMinimal  ThreatLevel = "minimal"  // Very low risk
+	ThreatLevelLow      ThreatLevel = "low"      // Normal operations
+	ThreatLevelMedium   ThreatLevel = "medium"   // Some concern
+	ThreatLevelHigh     ThreatLevel = "high"     // Elevated risk
+	ThreatLevelCritical ThreatLevel = "critical" // Immediate threat
 )
 
 // NewSessionRegistry creates a new session registry
@@ -203,24 +203,24 @@ func (sr *SessionRegistry) RegisterSession(ctx context.Context, sessionID, subje
 	}
 
 	now := time.Now()
-	
+
 	// Create new authorized session
 	session := &AuthorizedSession{
-		SessionID:           sessionID,
-		SubjectID:           subjectID,
-		TenantID:            tenantID,
-		CreatedAt:           now,
-		LastActivity:        now,
-		ExpiresAt:           now.Add(sr.sessionTimeout),
-		SessionType:         sr.determineSessionType(metadata),
-		ClientInfo:          sr.extractClientInfo(metadata),
-		Metadata:            metadata,
-		GrantedPermissions:  make(map[string]PermissionGrant),
-		ActiveDelegations:   make([]string, 0),
-		JITPermissions:      make(map[string]time.Time),
-		ThreatLevel:         ThreatLevelLow,
-		SecurityViolations:  make([]SecurityViolation, 0),
-		ComplianceStatus:    "compliant",
+		SessionID:              sessionID,
+		SubjectID:              subjectID,
+		TenantID:               tenantID,
+		CreatedAt:              now,
+		LastActivity:           now,
+		ExpiresAt:              now.Add(sr.sessionTimeout),
+		SessionType:            sr.determineSessionType(metadata),
+		ClientInfo:             sr.extractClientInfo(metadata),
+		Metadata:               metadata,
+		GrantedPermissions:     make(map[string]PermissionGrant),
+		ActiveDelegations:      make([]string, 0),
+		JITPermissions:         make(map[string]time.Time),
+		ThreatLevel:            ThreatLevelLow,
+		SecurityViolations:     make([]SecurityViolation, 0),
+		ComplianceStatus:       "compliant",
 		RequiresContinuousAuth: sr.requiresContinuousAuth(metadata),
 	}
 
@@ -452,24 +452,24 @@ func (sr *SessionRegistry) GetUserSessions(ctx context.Context, subjectID, tenan
 			if tenantID == "" || session.TenantID == tenantID {
 				// Return a copy to prevent external modifications - copy fields individually to avoid copying mutex
 				sessionCopy := &AuthorizedSession{
-					SessionID:            session.SessionID,
-					SubjectID:            session.SubjectID,
-					TenantID:             session.TenantID,
-					CreatedAt:            session.CreatedAt,
-					LastActivity:         session.LastActivity,
-					ExpiresAt:            session.ExpiresAt,
-					SessionType:          session.SessionType,
-					ClientInfo:           session.ClientInfo,
-					Metadata:             session.Metadata,
-					GrantedPermissions:   session.GrantedPermissions,
-					ActiveDelegations:    append([]string{}, session.ActiveDelegations...),
-					JITPermissions:       session.JITPermissions,
-					ThreatLevel:          session.ThreatLevel,
-					SecurityViolations:   append([]SecurityViolation{}, session.SecurityViolations...),
-					ComplianceStatus:     session.ComplianceStatus,
+					SessionID:              session.SessionID,
+					SubjectID:              session.SubjectID,
+					TenantID:               session.TenantID,
+					CreatedAt:              session.CreatedAt,
+					LastActivity:           session.LastActivity,
+					ExpiresAt:              session.ExpiresAt,
+					SessionType:            session.SessionType,
+					ClientInfo:             session.ClientInfo,
+					Metadata:               session.Metadata,
+					GrantedPermissions:     session.GrantedPermissions,
+					ActiveDelegations:      append([]string{}, session.ActiveDelegations...),
+					JITPermissions:         session.JITPermissions,
+					ThreatLevel:            session.ThreatLevel,
+					SecurityViolations:     append([]SecurityViolation{}, session.SecurityViolations...),
+					ComplianceStatus:       session.ComplianceStatus,
 					RequiresContinuousAuth: session.RequiresContinuousAuth,
-					AutoTerminate:        session.AutoTerminate,
-					TerminationScheduled: session.TerminationScheduled,
+					AutoTerminate:          session.AutoTerminate,
+					TerminationScheduled:   session.TerminationScheduled,
 				}
 				sessions = append(sessions, sessionCopy)
 			}
@@ -494,24 +494,24 @@ func (sr *SessionRegistry) GetTenantSessions(ctx context.Context, tenantID strin
 		if session, ok := sr.sessions[sessionID]; ok {
 			// Return a copy to prevent external modifications - copy fields individually to avoid copying mutex
 			sessionCopy := &AuthorizedSession{
-				SessionID:            session.SessionID,
-				SubjectID:            session.SubjectID,
-				TenantID:             session.TenantID,
-				CreatedAt:            session.CreatedAt,
-				LastActivity:         session.LastActivity,
-				ExpiresAt:            session.ExpiresAt,
-				SessionType:          session.SessionType,
-				ClientInfo:           session.ClientInfo,
-				Metadata:             session.Metadata,
-				GrantedPermissions:   session.GrantedPermissions,
-				ActiveDelegations:    append([]string{}, session.ActiveDelegations...),
-				JITPermissions:       session.JITPermissions,
-				ThreatLevel:          session.ThreatLevel,
-				SecurityViolations:   append([]SecurityViolation{}, session.SecurityViolations...),
-				ComplianceStatus:     session.ComplianceStatus,
+				SessionID:              session.SessionID,
+				SubjectID:              session.SubjectID,
+				TenantID:               session.TenantID,
+				CreatedAt:              session.CreatedAt,
+				LastActivity:           session.LastActivity,
+				ExpiresAt:              session.ExpiresAt,
+				SessionType:            session.SessionType,
+				ClientInfo:             session.ClientInfo,
+				Metadata:               session.Metadata,
+				GrantedPermissions:     session.GrantedPermissions,
+				ActiveDelegations:      append([]string{}, session.ActiveDelegations...),
+				JITPermissions:         session.JITPermissions,
+				ThreatLevel:            session.ThreatLevel,
+				SecurityViolations:     append([]SecurityViolation{}, session.SecurityViolations...),
+				ComplianceStatus:       session.ComplianceStatus,
 				RequiresContinuousAuth: session.RequiresContinuousAuth,
-				AutoTerminate:        session.AutoTerminate,
-				TerminationScheduled: session.TerminationScheduled,
+				AutoTerminate:          session.AutoTerminate,
+				TerminationScheduled:   session.TerminationScheduled,
 			}
 			sessions = append(sessions, sessionCopy)
 		}
@@ -529,24 +529,24 @@ func (sr *SessionRegistry) GetAllSessions() []*AuthorizedSession {
 	for _, session := range sr.sessions {
 		// Return a copy to prevent external modifications - copy fields individually to avoid copying mutex
 		sessionCopy := &AuthorizedSession{
-			SessionID:            session.SessionID,
-			SubjectID:            session.SubjectID,
-			TenantID:             session.TenantID,
-			CreatedAt:            session.CreatedAt,
-			LastActivity:         session.LastActivity,
-			ExpiresAt:            session.ExpiresAt,
-			SessionType:          session.SessionType,
-			ClientInfo:           session.ClientInfo,
-			Metadata:             session.Metadata,
-			GrantedPermissions:   session.GrantedPermissions,
-			ActiveDelegations:    append([]string{}, session.ActiveDelegations...),
-			JITPermissions:       session.JITPermissions,
-			ThreatLevel:          session.ThreatLevel,
-			SecurityViolations:   append([]SecurityViolation{}, session.SecurityViolations...),
-			ComplianceStatus:     session.ComplianceStatus,
+			SessionID:              session.SessionID,
+			SubjectID:              session.SubjectID,
+			TenantID:               session.TenantID,
+			CreatedAt:              session.CreatedAt,
+			LastActivity:           session.LastActivity,
+			ExpiresAt:              session.ExpiresAt,
+			SessionType:            session.SessionType,
+			ClientInfo:             session.ClientInfo,
+			Metadata:               session.Metadata,
+			GrantedPermissions:     session.GrantedPermissions,
+			ActiveDelegations:      append([]string{}, session.ActiveDelegations...),
+			JITPermissions:         session.JITPermissions,
+			ThreatLevel:            session.ThreatLevel,
+			SecurityViolations:     append([]SecurityViolation{}, session.SecurityViolations...),
+			ComplianceStatus:       session.ComplianceStatus,
 			RequiresContinuousAuth: session.RequiresContinuousAuth,
-			AutoTerminate:        session.AutoTerminate,
-			TerminationScheduled: session.TerminationScheduled,
+			AutoTerminate:          session.AutoTerminate,
+			TerminationScheduled:   session.TerminationScheduled,
 		}
 		sessions = append(sessions, sessionCopy)
 	}

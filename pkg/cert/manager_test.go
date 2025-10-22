@@ -65,7 +65,7 @@ func TestNewManager(t *testing.T) {
 						t.Logf("Failed to remove temp directory: %v", err)
 					}
 				}()
-				
+
 				tt.config.StoragePath = tempDir
 			}
 
@@ -227,7 +227,7 @@ func TestManager_CertificateRenewal(t *testing.T) {
 	}()
 
 	manager, err := NewManager(&ManagerConfig{
-		StoragePath:      tempDir,
+		StoragePath:       tempDir,
 		EnableAutoRenewal: true,
 		CAConfig: &CAConfig{
 			Organization: "Test",

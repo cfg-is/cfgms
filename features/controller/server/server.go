@@ -447,7 +447,7 @@ func (s *Server) Start() error {
 	s.logger.Info("Controller server started (MQTT+QUIC mode)",
 		"ha_mode", s.haManager.GetDeploymentMode().String(),
 		"is_leader", s.haManager.IsLeader())
-	
+
 	// Record system startup audit event
 	if s.auditManager != nil {
 		ctx := context.Background()
@@ -456,7 +456,7 @@ func (s *Server) Start() error {
 			s.logger.Warn("Failed to record startup audit event", "error", err)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -796,7 +796,7 @@ func initializeMQTTBroker(cfg *config.Config, logger logging.Logger, certManager
 func ensureMQTTCertificatesFromManager(caPath string, certManager *cert.Manager, logger logging.Logger) error {
 	// Create directory structure
 	serverDir := filepath.Join(caPath, "server")
-	if err := os.MkdirAll(serverDir, 0755); err != nil {
+	if err := os.MkdirAll(serverDir, 0750); err != nil { // Restrict to owner+group only
 		return fmt.Errorf("failed to create server cert directory: %w", err)
 	}
 
@@ -814,7 +814,7 @@ func ensureMQTTCertificatesFromManager(caPath string, certManager *cert.Manager,
 
 	// Save server certificate
 	serverCertPath := filepath.Join(serverDir, "server.crt")
-	if err := os.WriteFile(serverCertPath, serverCert.CertificatePEM, 0644); err != nil {
+	if err := os.WriteFile(serverCertPath, serverCert.CertificatePEM, 0600); err != nil { // Restrict to owner only
 		return fmt.Errorf("failed to write server certificate: %w", err)
 	}
 
@@ -831,7 +831,7 @@ func ensureMQTTCertificatesFromManager(caPath string, certManager *cert.Manager,
 	}
 
 	caPath = filepath.Join(caPath, "ca.crt")
-	if err := os.WriteFile(caPath, caCert, 0644); err != nil {
+	if err := os.WriteFile(caPath, caCert, 0600); err != nil { // Restrict to owner only
 		return fmt.Errorf("failed to write CA certificate: %w", err)
 	}
 
@@ -1087,7 +1087,6 @@ func handleDNASyncStream(ctx context.Context, session *quicServer.Session, strea
 	return nil
 }
 
-
 // handleDNAUpdate processes DNA update messages from stewards via MQTT.
 func (s *Server) handleDNAUpdate(topic string, payload []byte, qos byte, retained bool) error {
 	var dnaUpdate mqttTypes.DNAUpdate
@@ -1239,4 +1238,3 @@ func (s *Server) sendValidationResponse(stewardID string, requestID string, resp
 
 	return nil
 }
-

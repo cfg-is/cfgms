@@ -22,20 +22,20 @@ type PolicyCache struct {
 func NewPolicyCache(ttl time.Duration) *PolicyCache {
 	// L1 cache: Small, fast cache for frequently accessed data
 	l1Config := cache.CacheConfig{
-		Name:              "zerotrust-l1",
-		MaxRuntimeItems:   1000,
-		DefaultTTL:        ttl,
-		CleanupInterval:   1 * time.Minute,
-		EvictionPolicy:    cache.EvictionLRU,
+		Name:            "zerotrust-l1",
+		MaxRuntimeItems: 1000,
+		DefaultTTL:      ttl,
+		CleanupInterval: 1 * time.Minute,
+		EvictionPolicy:  cache.EvictionLRU,
 	}
 
 	// L2 cache: Larger cache for less frequently accessed data
 	l2Config := cache.CacheConfig{
-		Name:              "zerotrust-l2",
-		MaxRuntimeItems:   10000,
-		DefaultTTL:        ttl,
-		CleanupInterval:   1 * time.Minute,
-		EvictionPolicy:    cache.EvictionLRU,
+		Name:            "zerotrust-l2",
+		MaxRuntimeItems: 10000,
+		DefaultTTL:      ttl,
+		CleanupInterval: 1 * time.Minute,
+		EvictionPolicy:  cache.EvictionLRU,
 	}
 
 	return &PolicyCache{
@@ -82,7 +82,8 @@ func (p *PolicyCache) Put(key string, result *PolicyEvaluationResult) {
 
 	// Store in L2 cache initially
 	// Will be promoted to L1 on subsequent accesses
-	p.l2Cache.Set(key, result, p.cacheTTL)
+	// Ignore error - cache failures are non-critical
+	_ = p.l2Cache.Set(key, result, p.cacheTTL)
 }
 
 // promoteToL1 moves an entry from L2 to L1 for frequently accessed data
@@ -90,7 +91,8 @@ func (p *PolicyCache) promoteToL1(key string, result *PolicyEvaluationResult) {
 	// Note: This is called while holding read lock, so we don't modify L2
 	// Just add to L1 - pkg/cache's LRU will handle eviction
 	// We accept the small overhead of duplicates across L1/L2 for thread safety
-	p.l1Cache.Set(key, result, p.cacheTTL)
+	// Ignore error - L1 promotion is a performance optimization
+	_ = p.l1Cache.Set(key, result, p.cacheTTL)
 }
 
 // GetStats returns cache statistics

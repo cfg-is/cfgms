@@ -158,9 +158,9 @@ func TestDefaultModuleVersionRegistry_GetCompatibleVersions(t *testing.T) {
 	}
 
 	tests := []struct {
-		name               string
-		constraint         string
-		expectedVersions   []string
+		name             string
+		constraint       string
+		expectedVersions []string
 	}{
 		{
 			name:             "exact version",
@@ -229,7 +229,7 @@ func TestDefaultModuleVersionRegistry_UnregisterVersion(t *testing.T) {
 	t.Run("unregister non-existent version", func(t *testing.T) {
 		// Re-register for this test
 		require.NoError(t, registry.RegisterVersion(metadata))
-		
+
 		err := registry.UnregisterVersion("test-module", "2.0.0")
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "is not registered")
@@ -267,12 +267,12 @@ func TestDefaultModuleVersionRegistry_ResolveVersionConstraints(t *testing.T) {
 		resolution, err := registry.ResolveVersionConstraints(requirements)
 		require.NoError(t, err)
 		assert.NotNil(t, resolution)
-		
+
 		assert.Equal(t, 3, len(resolution.Resolved))
 		assert.Equal(t, "1.2.0", resolution.Resolved["module-a"]) // Latest compatible
 		assert.Equal(t, "2.1.0", resolution.Resolved["module-b"]) // Latest compatible
 		assert.Equal(t, "2.0.0", resolution.Resolved["module-c"]) // Only tilde compatible
-		
+
 		assert.Equal(t, 0, len(resolution.Conflicts))
 		assert.Equal(t, 3, resolution.TotalModules)
 		assert.Greater(t, resolution.ResolutionTime, time.Duration(0))
@@ -286,7 +286,7 @@ func TestDefaultModuleVersionRegistry_ResolveVersionConstraints(t *testing.T) {
 		resolution, err := registry.ResolveVersionConstraints(requirements)
 		require.NoError(t, err)
 		assert.NotNil(t, resolution)
-		
+
 		assert.Equal(t, 1, len(resolution.Conflicts))
 		assert.Equal(t, 0, len(resolution.Resolved))
 	})
@@ -300,7 +300,7 @@ func TestDefaultModuleVersionRegistry_ResolveVersionConstraints(t *testing.T) {
 		resolution, err := registry.ResolveVersionConstraints(requirements)
 		require.NoError(t, err)
 		assert.NotNil(t, resolution)
-		
+
 		assert.Equal(t, 1, len(resolution.Resolved))
 		assert.Equal(t, "1.2.0", resolution.Resolved["module-a"])
 		assert.Equal(t, 0, len(resolution.Conflicts)) // Optional requirement doesn't create conflict
@@ -321,11 +321,11 @@ func TestDefaultModuleVersionRegistry_VersionHistory(t *testing.T) {
 		history, err := registry.GetVersionHistory("test-module")
 		require.NoError(t, err)
 		assert.NotNil(t, history)
-		
+
 		assert.Equal(t, "test-module", history.ModuleName)
 		assert.Equal(t, "1.0.0", history.CurrentVersion)
 		assert.Equal(t, 1, len(history.Transitions)) // Should have install transition
-		
+
 		transition := history.Transitions[0]
 		assert.Equal(t, "", transition.FromVersion)
 		assert.Equal(t, "1.0.0", transition.ToVersion)
@@ -349,7 +349,7 @@ func TestDefaultModuleVersionRegistry_VersionHistory(t *testing.T) {
 
 		history, err := registry.GetVersionHistory("test-module")
 		require.NoError(t, err)
-		
+
 		assert.Equal(t, 3, len(history.Transitions)) // install 1.0.0, install 1.1.0, upgrade 1.0.0->1.1.0
 		assert.Equal(t, "1.1.0", history.CurrentVersion)
 
@@ -361,7 +361,7 @@ func TestDefaultModuleVersionRegistry_VersionHistory(t *testing.T) {
 				break
 			}
 		}
-		
+
 		require.NotNil(t, upgradeTransition)
 		assert.Equal(t, "1.0.0", upgradeTransition.FromVersion)
 		assert.Equal(t, "1.1.0", upgradeTransition.ToVersion)
@@ -381,7 +381,7 @@ func TestDefaultModuleVersionRegistry_RegistryStatus(t *testing.T) {
 	t.Run("empty registry status", func(t *testing.T) {
 		status := registry.GetRegistryStatus()
 		assert.NotNil(t, status)
-		
+
 		assert.Equal(t, 0, status.TotalModules)
 		assert.Equal(t, 0, status.TotalVersions)
 		assert.Equal(t, 0, len(status.ActiveVersions))
@@ -410,7 +410,7 @@ func TestDefaultModuleVersionRegistry_RegistryStatus(t *testing.T) {
 
 		status := registry.GetRegistryStatus()
 		assert.NotNil(t, status)
-		
+
 		assert.Equal(t, 2, status.TotalModules)
 		assert.Equal(t, 3, status.TotalVersions)
 		assert.Equal(t, 2, len(status.ActiveVersions))
@@ -443,7 +443,7 @@ func TestDefaultModuleVersionRegistry_ListAllVersions(t *testing.T) {
 	t.Run("list all versions", func(t *testing.T) {
 		allVersions := registry.ListAllVersions()
 		assert.NotNil(t, allVersions)
-		
+
 		assert.Equal(t, 2, len(allVersions))
 		assert.Equal(t, modules["module-a"], allVersions["module-a"])
 		assert.Equal(t, modules["module-b"], allVersions["module-b"])
@@ -508,7 +508,7 @@ func TestDefaultModuleVersionRegistry_ConcurrencyBasics(t *testing.T) {
 			Version:     "1.0.0",
 			Description: "Concurrent test",
 		}
-		
+
 		metadata2 := &ModuleMetadata{
 			Name:        "concurrent-module",
 			Version:     "1.1.0",
@@ -517,11 +517,11 @@ func TestDefaultModuleVersionRegistry_ConcurrencyBasics(t *testing.T) {
 
 		// Register versions concurrently
 		done := make(chan error, 2)
-		
+
 		go func() {
 			done <- registry.RegisterVersion(metadata1)
 		}()
-		
+
 		go func() {
 			done <- registry.RegisterVersion(metadata2)
 		}()
@@ -543,7 +543,7 @@ func TestDefaultModuleVersionRegistry_ConcurrencyBasics(t *testing.T) {
 // Benchmark tests for performance
 func BenchmarkVersionRegistry_RegisterVersion(b *testing.B) {
 	registry := NewDefaultModuleVersionRegistry()
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		metadata := &ModuleMetadata{
@@ -567,7 +567,7 @@ func BenchmarkVersionRegistry_GetAvailableVersions(b *testing.B) {
 		}
 		_ = registry.RegisterVersion(metadata) // Ignore error in test setup
 	}
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_, _ = registry.GetAvailableVersions("bench-module") // Ignore error in benchmark
@@ -594,7 +594,7 @@ func BenchmarkVersionRegistry_ResolveVersionConstraints(b *testing.B) {
 		{ModuleName: "bench-module-1", Constraint: ">=1.5.0"},
 		{ModuleName: "bench-module-2", Constraint: "~1.3.0"},
 	}
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_, _ = registry.ResolveVersionConstraints(requirements) // Ignore error in benchmark

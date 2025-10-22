@@ -15,8 +15,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/cert"
 	"go.etcd.io/raft/v3/raftpb"
+
+	"github.com/cfgis/cfgms/pkg/cert"
 )
 
 // raftTransport handles network communication between Raft nodes
@@ -31,8 +32,8 @@ type raftTransport struct {
 	peers map[uint64]string
 
 	// HTTP client for sending messages
-	client       *http.Client
-	useTLS       bool // Whether to use HTTPS for peer communication
+	client *http.Client
+	useTLS bool // Whether to use HTTPS for peer communication
 
 	// Consensus engine
 	consensus *RaftConsensus

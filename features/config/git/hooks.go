@@ -32,12 +32,12 @@ func NewHookManager() HookManager {
 // InstallHooks installs Git hooks in a repository
 func (m *DefaultHookManager) InstallHooks(ctx context.Context, repoPath string) error {
 	hooksDir := filepath.Join(repoPath, ".git", "hooks")
-	
+
 	// Create hooks directory if it doesn't exist
 	if err := os.MkdirAll(hooksDir, 0750); err != nil {
 		return fmt.Errorf("failed to create hooks directory: %w", err)
 	}
-	
+
 	// Install pre-commit hook
 	preCommitHook := m.generatePreCommitHook()
 	preCommitPath := filepath.Join(hooksDir, "pre-commit")
@@ -45,7 +45,7 @@ func (m *DefaultHookManager) InstallHooks(ctx context.Context, repoPath string) 
 	if err := os.WriteFile(preCommitPath, []byte(preCommitHook), 0700); err != nil {
 		return fmt.Errorf("failed to install pre-commit hook: %w", err)
 	}
-	
+
 	// Install pre-push hook
 	prePushHook := m.generatePrePushHook()
 	prePushPath := filepath.Join(hooksDir, "pre-push")
@@ -53,7 +53,7 @@ func (m *DefaultHookManager) InstallHooks(ctx context.Context, repoPath string) 
 	if err := os.WriteFile(prePushPath, []byte(prePushHook), 0700); err != nil {
 		return fmt.Errorf("failed to install pre-push hook: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -69,20 +69,20 @@ func (m *DefaultHookManager) RunPreCommitHooks(ctx context.Context, repoPath str
 			if err != nil {
 				return fmt.Errorf("failed to read file %s: %w", file, err)
 			}
-			
+
 			config := &Configuration{
 				Path:    file,
 				Content: content,
 				Format:  m.getConfigFormat(file),
 			}
-			
+
 			// Validate the configuration
 			if err := m.ValidateConfiguration(ctx, config); err != nil {
 				return fmt.Errorf("validation failed for %s: %w", file, err)
 			}
 		}
 	}
-	
+
 	// Run custom pre-commit script if it exists
 	customHookPath := filepath.Join(repoPath, ".cfgms", "hooks", "pre-commit")
 	if _, err := os.Stat(customHookPath); err == nil {
@@ -93,7 +93,7 @@ func (m *DefaultHookManager) RunPreCommitHooks(ctx context.Context, repoPath str
 			return fmt.Errorf("custom pre-commit hook failed: %s", string(output))
 		}
 	}
-	
+
 	return nil
 }
 
@@ -101,7 +101,7 @@ func (m *DefaultHookManager) RunPreCommitHooks(ctx context.Context, repoPath str
 func (m *DefaultHookManager) RunPreReceiveHooks(ctx context.Context, repoPath string, commits []string) error {
 	// This would be implemented on the Git server side
 	// For now, we'll validate all changed files in the commits
-	
+
 	for _, commit := range commits {
 		// Get files changed in this commit
 		// #nosec G204 - Git repository management requires git command execution
@@ -111,13 +111,13 @@ func (m *DefaultHookManager) RunPreReceiveHooks(ctx context.Context, repoPath st
 		if err != nil {
 			return fmt.Errorf("failed to get changed files: %w", err)
 		}
-		
+
 		files := strings.Split(strings.TrimSpace(string(output)), "\n")
 		for _, file := range files {
 			if file == "" {
 				continue
 			}
-			
+
 			if m.isConfigurationFile(file) {
 				// Get file content at this commit
 				// #nosec G204 - Git repository management requires git command execution
@@ -128,13 +128,13 @@ func (m *DefaultHookManager) RunPreReceiveHooks(ctx context.Context, repoPath st
 					// File might be deleted, skip
 					continue
 				}
-				
+
 				config := &Configuration{
 					Path:    file,
 					Content: content,
 					Format:  m.getConfigFormat(file),
 				}
-				
+
 				// Validate the configuration
 				if err := m.ValidateConfiguration(ctx, config); err != nil {
 					return fmt.Errorf("validation failed for %s in commit %s: %w", file, commit, err)
@@ -142,7 +142,7 @@ func (m *DefaultHookManager) RunPreReceiveHooks(ctx context.Context, repoPath st
 			}
 		}
 	}
-	
+
 	return nil
 }
 
@@ -152,7 +152,7 @@ func (m *DefaultHookManager) ValidateConfiguration(ctx context.Context, config *
 	if validator, exists := m.validators[config.Format]; exists {
 		return validator.Validate(ctx, config)
 	}
-	
+
 	// Basic validation based on format
 	switch config.Format {
 	case "yaml":
@@ -290,12 +290,12 @@ func (m *DefaultHookManager) validateYAML(config *Configuration) error {
 	if err := yaml.Unmarshal(config.Content, &data); err != nil {
 		return fmt.Errorf("invalid YAML syntax: %w", err)
 	}
-	
+
 	// Additional CFGMS-specific validation
 	if err := m.validateCFGMSStructure(config.Path, data); err != nil {
 		return err
 	}
-	
+
 	return nil
 }
 
@@ -305,12 +305,12 @@ func (m *DefaultHookManager) validateJSON(config *Configuration) error {
 	if err := json.Unmarshal(config.Content, &data); err != nil {
 		return fmt.Errorf("invalid JSON syntax: %w", err)
 	}
-	
+
 	// Additional CFGMS-specific validation
 	if err := m.validateCFGMSStructure(config.Path, data); err != nil {
 		return err
 	}
-	
+
 	return nil
 }
 
@@ -325,16 +325,16 @@ func (m *DefaultHookManager) validateCFGMSStructure(path string, data interface{
 	switch {
 	case strings.HasPrefix(path, "groups/") && strings.HasSuffix(path, "/config.yaml"):
 		return m.validateGroupConfig(data)
-		
+
 	case strings.HasPrefix(path, "templates/"):
 		return m.validateTemplate(data)
-		
+
 	case strings.HasPrefix(path, "policies/"):
 		return m.validatePolicy(data)
-		
+
 	case path == "config.yaml":
 		return m.validateRootConfig(data)
-		
+
 	default:
 		// No specific validation rules
 		return nil
@@ -347,12 +347,12 @@ func (m *DefaultHookManager) validateGroupConfig(data interface{}) error {
 	if !ok {
 		return fmt.Errorf("group config must be a map")
 	}
-	
+
 	// Check required fields
 	if _, exists := config["version"]; !exists {
 		return fmt.Errorf("group config missing required field: version")
 	}
-	
+
 	return nil
 }
 
@@ -362,12 +362,12 @@ func (m *DefaultHookManager) validateTemplate(data interface{}) error {
 	if !ok {
 		return fmt.Errorf("template must be a map")
 	}
-	
+
 	// Check for template metadata
 	if _, exists := template["metadata"]; !exists {
 		return fmt.Errorf("template missing metadata section")
 	}
-	
+
 	return nil
 }
 
@@ -377,7 +377,7 @@ func (m *DefaultHookManager) validatePolicy(data interface{}) error {
 	if !ok {
 		return fmt.Errorf("policy must be a map")
 	}
-	
+
 	// Check required policy fields
 	required := []string{"name", "description", "rules"}
 	for _, field := range required {
@@ -385,7 +385,7 @@ func (m *DefaultHookManager) validatePolicy(data interface{}) error {
 			return fmt.Errorf("policy missing required field: %s", field)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -395,7 +395,7 @@ func (m *DefaultHookManager) validateRootConfig(data interface{}) error {
 	if !ok {
 		return fmt.Errorf("root config must be a map")
 	}
-	
+
 	// Check version compatibility
 	if version, exists := config["version"]; exists {
 		if v, ok := version.(string); ok {
@@ -404,7 +404,7 @@ func (m *DefaultHookManager) validateRootConfig(data interface{}) error {
 			}
 		}
 	}
-	
+
 	return nil
 }
 

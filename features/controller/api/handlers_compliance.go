@@ -19,16 +19,16 @@ type ComplianceStatusResponse struct {
 
 // ComplianceReportResponse represents detailed compliance information
 type ComplianceReportResponse struct {
-	DeviceID           string                     `json:"device_id"`
-	DeviceName         string                     `json:"device_name"`
-	Status             string                     `json:"status"`
-	DaysUntilBreach    int                        `json:"days_until_breach"`
-	MissingPatches     []MissingPatchResponse     `json:"missing_patches"`
-	OSVersion          string                     `json:"os_version"`
-	LastPatchDate      string                     `json:"last_patch_date"` // ISO 8601
-	ReportGeneratedAt  string                     `json:"report_generated_at"`
-	Policy             PatchPolicyResponse        `json:"policy"`
-	CompatibilityInfo  *CompatibilityInfoResponse `json:"compatibility_info,omitempty"`
+	DeviceID          string                     `json:"device_id"`
+	DeviceName        string                     `json:"device_name"`
+	Status            string                     `json:"status"`
+	DaysUntilBreach   int                        `json:"days_until_breach"`
+	MissingPatches    []MissingPatchResponse     `json:"missing_patches"`
+	OSVersion         string                     `json:"os_version"`
+	LastPatchDate     string                     `json:"last_patch_date"` // ISO 8601
+	ReportGeneratedAt string                     `json:"report_generated_at"`
+	Policy            PatchPolicyResponse        `json:"policy"`
+	CompatibilityInfo *CompatibilityInfoResponse `json:"compatibility_info,omitempty"`
 }
 
 // MissingPatchResponse represents a missing patch
@@ -44,13 +44,13 @@ type MissingPatchResponse struct {
 
 // PatchPolicyResponse represents the applied patch policy
 type PatchPolicyResponse struct {
-	CriticalDeadlineDays          int `json:"critical_deadline_days"`
-	ImportantDeadlineDays         int `json:"important_deadline_days"`
-	ModerateDeadlineDays          int `json:"moderate_deadline_days"`
-	LowDeadlineDays               int `json:"low_deadline_days"`
-	WarningThresholdDays          int `json:"warning_threshold_days"`
-	CriticalThresholdDays         int `json:"critical_threshold_days"`
-	MaintenanceWindowsConfigured  bool `json:"maintenance_windows_configured"`
+	CriticalDeadlineDays         int  `json:"critical_deadline_days"`
+	ImportantDeadlineDays        int  `json:"important_deadline_days"`
+	ModerateDeadlineDays         int  `json:"moderate_deadline_days"`
+	LowDeadlineDays              int  `json:"low_deadline_days"`
+	WarningThresholdDays         int  `json:"warning_threshold_days"`
+	CriticalThresholdDays        int  `json:"critical_threshold_days"`
+	MaintenanceWindowsConfigured bool `json:"maintenance_windows_configured"`
 }
 
 // CompatibilityInfoResponse represents Windows 11 upgrade compatibility
@@ -63,13 +63,13 @@ type CompatibilityInfoResponse struct {
 
 // ComplianceSummaryResponse represents system-wide compliance status
 type ComplianceSummaryResponse struct {
-	TotalDevices      int                      `json:"total_devices"`
-	CompliantDevices  int                      `json:"compliant_devices"`
-	WarningDevices    int                      `json:"warning_devices"`
-	CriticalDevices   int                      `json:"critical_devices"`
-	BreachedDevices   int                      `json:"breached_devices"`
-	ByTenant          []TenantComplianceStatus `json:"by_tenant"`
-	GeneratedAt       string                   `json:"generated_at"`
+	TotalDevices     int                      `json:"total_devices"`
+	CompliantDevices int                      `json:"compliant_devices"`
+	WarningDevices   int                      `json:"warning_devices"`
+	CriticalDevices  int                      `json:"critical_devices"`
+	BreachedDevices  int                      `json:"breached_devices"`
+	ByTenant         []TenantComplianceStatus `json:"by_tenant"`
+	GeneratedAt      string                   `json:"generated_at"`
 }
 
 // TenantComplianceStatus represents compliance status for a tenant
@@ -88,14 +88,15 @@ type TenantComplianceStatus struct {
 // GET /api/v1/stewards/{id}/compliance
 //
 // Response:
-// {
-//   "device_id": "steward-123",
-//   "device_name": "DESKTOP-WIN11",
-//   "status": "warning",
-//   "days_until_breach": 4,
-//   "last_checked": "2024-01-15T10:30:00Z",
-//   "alert_level": "warning"
-// }
+//
+//	{
+//	  "device_id": "steward-123",
+//	  "device_name": "DESKTOP-WIN11",
+//	  "status": "warning",
+//	  "days_until_breach": 4,
+//	  "last_checked": "2024-01-15T10:30:00Z",
+//	  "alert_level": "warning"
+//	}
 func (s *Server) handleGetStewardCompliance(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	stewardID := vars["id"]
@@ -130,40 +131,41 @@ func (s *Server) handleGetStewardCompliance(w http.ResponseWriter, r *http.Reque
 // GET /api/v1/stewards/{id}/compliance/report
 //
 // Response:
-// {
-//   "device_id": "steward-123",
-//   "device_name": "DESKTOP-WIN11",
-//   "status": "warning",
-//   "days_until_breach": 4,
-//   "missing_patches": [
-//     {
-//       "id": "KB8888888",
-//       "title": "Critical Security Update",
-//       "severity": "critical",
-//       "category": "security",
-//       "release_date": "2024-01-10T00:00:00Z",
-//       "days_overdue": 0,
-//       "days_until_due": 4
-//     }
-//   ],
-//   "os_version": "Windows 11 23H2",
-//   "last_patch_date": "2024-01-01T12:00:00Z",
-//   "report_generated_at": "2024-01-15T10:30:00Z",
-//   "policy": {
-//     "critical_deadline_days": 7,
-//     "important_deadline_days": 14,
-//     "moderate_deadline_days": 30,
-//     "low_deadline_days": 60,
-//     "warning_threshold_days": 7,
-//     "critical_threshold_days": 1,
-//     "maintenance_windows_configured": true
-//   },
-//   "compatibility_info": {
-//     "windows11_compatible": true,
-//     "missing_requirements": [],
-//     "last_checked": "2024-01-15T09:00:00Z"
-//   }
-// }
+//
+//	{
+//	  "device_id": "steward-123",
+//	  "device_name": "DESKTOP-WIN11",
+//	  "status": "warning",
+//	  "days_until_breach": 4,
+//	  "missing_patches": [
+//	    {
+//	      "id": "KB8888888",
+//	      "title": "Critical Security Update",
+//	      "severity": "critical",
+//	      "category": "security",
+//	      "release_date": "2024-01-10T00:00:00Z",
+//	      "days_overdue": 0,
+//	      "days_until_due": 4
+//	    }
+//	  ],
+//	  "os_version": "Windows 11 23H2",
+//	  "last_patch_date": "2024-01-01T12:00:00Z",
+//	  "report_generated_at": "2024-01-15T10:30:00Z",
+//	  "policy": {
+//	    "critical_deadline_days": 7,
+//	    "important_deadline_days": 14,
+//	    "moderate_deadline_days": 30,
+//	    "low_deadline_days": 60,
+//	    "warning_threshold_days": 7,
+//	    "critical_threshold_days": 1,
+//	    "maintenance_windows_configured": true
+//	  },
+//	  "compatibility_info": {
+//	    "windows11_compatible": true,
+//	    "missing_requirements": [],
+//	    "last_checked": "2024-01-15T09:00:00Z"
+//	  }
+//	}
 func (s *Server) handleGetStewardComplianceReport(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	stewardID := vars["id"]
@@ -227,25 +229,26 @@ func (s *Server) handleGetStewardComplianceReport(w http.ResponseWriter, r *http
 // - tenant_id: Filter by specific tenant (optional)
 //
 // Response:
-// {
-//   "total_devices": 100,
-//   "compliant_devices": 75,
-//   "warning_devices": 15,
-//   "critical_devices": 8,
-//   "breached_devices": 2,
-//   "by_tenant": [
-//     {
-//       "tenant_id": "tenant-1",
-//       "tenant_name": "Acme Corp",
-//       "total_devices": 50,
-//       "compliant_devices": 40,
-//       "warning_devices": 7,
-//       "critical_devices": 2,
-//       "breached_devices": 1
-//     }
-//   ],
-//   "generated_at": "2024-01-15T10:30:00Z"
-// }
+//
+//	{
+//	  "total_devices": 100,
+//	  "compliant_devices": 75,
+//	  "warning_devices": 15,
+//	  "critical_devices": 8,
+//	  "breached_devices": 2,
+//	  "by_tenant": [
+//	    {
+//	      "tenant_id": "tenant-1",
+//	      "tenant_name": "Acme Corp",
+//	      "total_devices": 50,
+//	      "compliant_devices": 40,
+//	      "warning_devices": 7,
+//	      "critical_devices": 2,
+//	      "breached_devices": 1
+//	    }
+//	  ],
+//	  "generated_at": "2024-01-15T10:30:00Z"
+//	}
 func (s *Server) handleGetComplianceSummary(w http.ResponseWriter, r *http.Request) {
 	// Get optional tenant_id filter from query params
 	tenantID := r.URL.Query().Get("tenant_id")

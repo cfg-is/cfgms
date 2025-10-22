@@ -7,8 +7,9 @@ import (
 	"sort"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	"gopkg.in/yaml.v3"
+
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
 // GitScriptRepository implements ScriptRepository using the global git storage provider via ConfigStore

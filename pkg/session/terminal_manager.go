@@ -19,7 +19,7 @@ type TerminalSessionManager struct {
 	config         *terminal.Config
 	logger         logging.Logger
 	recorder       terminal.Recorder
-	
+
 	// Session mapping for existing terminal interface compatibility
 	activeSessions map[string]*terminal.Session
 	mutex          sync.RWMutex
@@ -116,7 +116,7 @@ func (m *TerminalSessionManager) CreateSession(ctx context.Context, req *termina
 			TenantID:    "default", // TODO: Extract from request or context
 			SessionType: interfaces.SessionTypeTerminal,
 			Timeout:     m.config.SessionTimeout,
-			ClientInfo: &interfaces.ClientInfo{
+			ClientInfo:  &interfaces.ClientInfo{
 				// TODO: Extract from request context
 			},
 			Metadata: map[string]string{
@@ -385,8 +385,8 @@ func (m *TerminalSessionManager) restoreActiveSessions(ctx context.Context) erro
 		// Restore terminal session
 		terminalSession, err := m.restoreTerminalSession(runtimeSession)
 		if err != nil {
-			m.logger.Warn("Failed to restore terminal session", 
-				"session_id", runtimeSession.SessionID, 
+			m.logger.Warn("Failed to restore terminal session",
+				"session_id", runtimeSession.SessionID,
 				"error", err)
 			continue
 		}
@@ -396,7 +396,7 @@ func (m *TerminalSessionManager) restoreActiveSessions(ctx context.Context) erro
 	}
 
 	if restoredCount > 0 {
-		m.logger.Info("Restored active terminal sessions", 
+		m.logger.Info("Restored active terminal sessions",
 			"count", restoredCount,
 			"total_active", len(m.activeSessions))
 	}

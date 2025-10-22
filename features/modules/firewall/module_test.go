@@ -4,8 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/cfgis/cfgms/features/modules"
 	"gopkg.in/yaml.v3"
+
+	"github.com/cfgis/cfgms/features/modules"
 )
 
 // createConfigFromYAML creates a firewallConfig from YAML string

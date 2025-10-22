@@ -64,7 +64,7 @@ func NewEngine(moduleFactory *factory.ModuleFactory, logger logging.Logger) *Eng
 // ExecuteWorkflow starts execution of a workflow
 func (e *Engine) ExecuteWorkflow(ctx context.Context, workflow Workflow, variables map[string]interface{}) (*WorkflowExecution, error) {
 	executionID := generateExecutionID()
-	
+
 	// Create execution context with timeout if specified
 	var execCtx context.Context
 	var cancel context.CancelFunc
@@ -142,7 +142,7 @@ func (e *Engine) executeWorkflowAsync(execution *WorkflowExecution, workflow Wor
 
 	// Execute all root steps
 	err := e.executeSteps(execution.Context, workflow.Steps, execution)
-	
+
 	endTime := time.Now()
 	execution.SetEndTime(&endTime)
 	e.mutex.Lock()
@@ -228,25 +228,25 @@ func (e *Engine) executeStepsWithRetry(ctx context.Context, steps []Step, execut
 							"decision", decision.Message)
 						continue
 					case ErrorActionRetry:
-					// Implement retry with backoff
-					if decision.RetryDelay > 0 {
-						e.logger.Info("Retrying step after delay",
-							"step", step.Name,
-							"delay", decision.RetryDelay,
-							"decision", decision.Message)
-						select {
-						case <-ctx.Done():
-							return ctx.Err()
-						case <-time.After(decision.RetryDelay):
+						// Implement retry with backoff
+						if decision.RetryDelay > 0 {
+							e.logger.Info("Retrying step after delay",
+								"step", step.Name,
+								"delay", decision.RetryDelay,
+								"decision", decision.Message)
+							select {
+							case <-ctx.Done():
+								return ctx.Err()
+							case <-time.After(decision.RetryDelay):
+							}
 						}
-					}
-					// Retry the step (this would need more sophisticated retry tracking)
-					e.logger.Info("Retrying failed step",
-						"step", step.Name,
-						"decision", decision.Message)
-					if retryErr := e.executeStep(ctx, step, execution); retryErr != nil {
-						return workflowErr // Return original error if retry fails
-					}
+						// Retry the step (this would need more sophisticated retry tracking)
+						e.logger.Info("Retrying failed step",
+							"step", step.Name,
+							"decision", decision.Message)
+						if retryErr := e.executeStep(ctx, step, execution); retryErr != nil {
+							return workflowErr // Return original error if retry fails
+						}
 					default:
 						return workflowErr
 					}
@@ -506,7 +506,7 @@ func (e *Engine) executeConditionalStep(ctx context.Context, step Step, executio
 		variablesCopy[k] = v
 	}
 	e.mutex.Unlock()
-	
+
 	shouldExecute, err := e.evaluateCondition(step.Condition, variablesCopy)
 	if err != nil {
 		return fmt.Errorf("failed to evaluate condition: %w", err)
@@ -556,7 +556,7 @@ func (e *Engine) evaluateCondition(condition *Condition, variables map[string]in
 // evaluateVariableCondition evaluates a variable-based condition
 func (e *Engine) evaluateVariableCondition(condition *Condition, variables map[string]interface{}) (bool, error) {
 	value, exists := variables[condition.Variable]
-	
+
 	switch condition.Operator {
 	case OperatorExists:
 		return exists, nil
@@ -654,7 +654,7 @@ func (e *Engine) evaluateExpressionCondition(condition *Condition, variables map
 func (e *Engine) evaluateExpression(expression string, variables map[string]interface{}) (bool, error) {
 	// Replace variables in the expression
 	resolvedExpression := e.replaceVariables(expression, variables)
-	
+
 	// Parse and evaluate the expression
 	return e.parseExpression(resolvedExpression, variables)
 }
@@ -662,14 +662,14 @@ func (e *Engine) evaluateExpression(expression string, variables map[string]inte
 // replaceVariables replaces ${variable} placeholders with actual values
 func (e *Engine) replaceVariables(expression string, variables map[string]interface{}) string {
 	result := expression
-	
+
 	// Simple variable replacement for ${variable_name}
 	for varName, varValue := range variables {
 		placeholder := fmt.Sprintf("${%s}", varName)
 		valueStr := fmt.Sprintf("%v", varValue)
 		result = strings.ReplaceAll(result, placeholder, valueStr)
 	}
-	
+
 	return result
 }
 
@@ -677,7 +677,7 @@ func (e *Engine) replaceVariables(expression string, variables map[string]interf
 func (e *Engine) parseExpression(expression string, variables map[string]interface{}) (bool, error) {
 	// Remove whitespace
 	expr := strings.TrimSpace(expression)
-	
+
 	// Handle simple boolean values
 	if expr == "true" {
 		return true, nil
@@ -685,7 +685,7 @@ func (e *Engine) parseExpression(expression string, variables map[string]interfa
 	if expr == "false" {
 		return false, nil
 	}
-	
+
 	// Handle AND operations
 	if strings.Contains(expr, " && ") {
 		parts := strings.Split(expr, " && ")
@@ -700,7 +700,7 @@ func (e *Engine) parseExpression(expression string, variables map[string]interfa
 		}
 		return true, nil
 	}
-	
+
 	// Handle OR operations
 	if strings.Contains(expr, " || ") {
 		parts := strings.Split(expr, " || ")
@@ -715,7 +715,7 @@ func (e *Engine) parseExpression(expression string, variables map[string]interfa
 		}
 		return false, nil
 	}
-	
+
 	// Handle NOT operations
 	if strings.HasPrefix(expr, "!") {
 		innerExpr := strings.TrimSpace(expr[1:])
@@ -725,7 +725,7 @@ func (e *Engine) parseExpression(expression string, variables map[string]interfa
 		}
 		return !result, nil
 	}
-	
+
 	// Handle comparison operations
 	return e.parseComparison(expr, variables)
 }
@@ -734,21 +734,21 @@ func (e *Engine) parseExpression(expression string, variables map[string]interfa
 func (e *Engine) parseComparison(expression string, variables map[string]interface{}) (bool, error) {
 	// Support different comparison operators
 	operators := []string{"==", "!=", ">=", "<=", ">", "<", "contains"}
-	
+
 	for _, op := range operators {
 		if strings.Contains(expression, fmt.Sprintf(" %s ", op)) {
 			parts := strings.SplitN(expression, fmt.Sprintf(" %s ", op), 2)
 			if len(parts) != 2 {
 				continue
 			}
-			
+
 			left := strings.TrimSpace(parts[0])
 			right := strings.TrimSpace(parts[1])
-			
+
 			// Get variable value or use literal
 			leftValue := e.getValueFromExpression(left, variables)
 			rightValue := e.getValueFromExpression(right, variables)
-			
+
 			// Perform comparison
 			switch op {
 			case "==":
@@ -768,7 +768,7 @@ func (e *Engine) parseComparison(expression string, variables map[string]interfa
 			}
 		}
 	}
-	
+
 	return false, fmt.Errorf("unable to parse expression: %s", expression)
 }
 
@@ -779,12 +779,12 @@ func (e *Engine) getValueFromExpression(expr string, variables map[string]interf
 		(strings.HasPrefix(expr, "'") && strings.HasSuffix(expr, "'")) {
 		return expr[1 : len(expr)-1]
 	}
-	
+
 	// Try to get from variables
 	if value, exists := variables[expr]; exists {
 		return value
 	}
-	
+
 	// Try to parse as number
 	if expr == "true" {
 		return true
@@ -792,7 +792,7 @@ func (e *Engine) getValueFromExpression(expr string, variables map[string]interf
 	if expr == "false" {
 		return false
 	}
-	
+
 	// Try to parse as integer
 	if len(expr) > 0 && (expr[0] >= '0' && expr[0] <= '9') {
 		// Simple integer parsing
@@ -807,7 +807,7 @@ func (e *Engine) getValueFromExpression(expr string, variables map[string]interf
 		}
 		return result
 	}
-	
+
 	// Return as string literal
 	return expr
 }
@@ -840,7 +840,7 @@ func (e *Engine) compareValues(left, right interface{}, operator string) bool {
 func (e *Engine) numericCompare(left, right interface{}) int {
 	leftFloat := e.toFloat64(left)
 	rightFloat := e.toFloat64(right)
-	
+
 	if leftFloat < rightFloat {
 		return -1
 	} else if leftFloat > rightFloat {
@@ -869,12 +869,12 @@ func (e *Engine) toFloat64(val interface{}) float64 {
 func (e *Engine) containsCompare(left, right interface{}) bool {
 	leftStr := fmt.Sprintf("%v", left)
 	rightStr := fmt.Sprintf("%v", right)
-	
+
 	// Empty string is contained in everything
 	if len(rightStr) == 0 {
 		return true
 	}
-	
+
 	// Check string containment using strings.Contains
 	return strings.Contains(leftStr, rightStr)
 }
@@ -905,7 +905,7 @@ func (e *Engine) GetExecution(executionID string) (*WorkflowExecution, error) {
 		Context:        execution.Context,
 		Cancel:         execution.Cancel,
 	}
-	
+
 	// Copy EndTime if it exists (GetEndTime returns the pointer, so copy the value)
 	if executionCopy.EndTime != nil {
 		endTimeCopy := *executionCopy.EndTime
@@ -1267,10 +1267,6 @@ func (e *Engine) executeDelayStep(ctx context.Context, step Step, execution *Wor
 }
 
 // convertAPIConfigToHTTP converts API configuration to HTTP configuration
-
-
-
-
 
 // executeForStep executes a for loop workflow step
 func (e *Engine) executeForStep(ctx context.Context, step Step, execution *WorkflowExecution) error {
@@ -2835,7 +2831,6 @@ func (e *Engine) executeErrorWorkflowAsync(ctx context.Context, workflow Workflo
 	// Return immediately for async execution
 	return execution, nil
 }
-
 
 // executeCompositeStep executes a workflow composition step
 func (e *Engine) executeCompositeStep(ctx context.Context, step Step, execution *WorkflowExecution) error {

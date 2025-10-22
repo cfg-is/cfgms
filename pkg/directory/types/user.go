@@ -18,43 +18,43 @@ import (
 // attributes handled via ProviderAttributes map for extensibility.
 type DirectoryUser struct {
 	// Core Identity
-	ID                string `json:"id" yaml:"id"`                                         // Unique identifier in source directory
-	UserPrincipalName string `json:"user_principal_name" yaml:"user_principal_name"`      // UPN (user@domain.com)
-	SAMAccountName    string `json:"sam_account_name,omitempty" yaml:"sam_account_name"`  // For AD compatibility
+	ID                string `json:"id" yaml:"id"`                                       // Unique identifier in source directory
+	UserPrincipalName string `json:"user_principal_name" yaml:"user_principal_name"`     // UPN (user@domain.com)
+	SAMAccountName    string `json:"sam_account_name,omitempty" yaml:"sam_account_name"` // For AD compatibility
 	DisplayName       string `json:"display_name" yaml:"display_name"`                   // Full display name
 	MailNickname      string `json:"mail_nickname,omitempty" yaml:"mail_nickname"`       // Mail alias (Graph API)
 
 	// Authentication
-	AccountEnabled bool      `json:"account_enabled" yaml:"account_enabled"`             // Is account enabled
+	AccountEnabled bool       `json:"account_enabled" yaml:"account_enabled"`           // Is account enabled
 	PasswordExpiry *time.Time `json:"password_expiry,omitempty" yaml:"password_expiry"` // When password expires
 	LastLogon      *time.Time `json:"last_logon,omitempty" yaml:"last_logon"`           // Last successful logon
 
 	// Contact Information
-	EmailAddress string `json:"email_address,omitempty" yaml:"email_address"`          // Primary email
-	Mail         string `json:"mail,omitempty" yaml:"mail"`                            // Graph API mail field
-	PhoneNumber  string `json:"phone_number,omitempty" yaml:"phone_number"`            // Primary phone
-	MobilePhone  string `json:"mobile_phone,omitempty" yaml:"mobile_phone"`            // Mobile phone
+	EmailAddress string `json:"email_address,omitempty" yaml:"email_address"` // Primary email
+	Mail         string `json:"mail,omitempty" yaml:"mail"`                   // Graph API mail field
+	PhoneNumber  string `json:"phone_number,omitempty" yaml:"phone_number"`   // Primary phone
+	MobilePhone  string `json:"mobile_phone,omitempty" yaml:"mobile_phone"`   // Mobile phone
 
 	// Organizational Information
-	Department      string `json:"department,omitempty" yaml:"department"`               // Department name
-	JobTitle        string `json:"job_title,omitempty" yaml:"job_title"`                 // Job title
-	Manager         string `json:"manager,omitempty" yaml:"manager"`                     // Manager's ID
-	OfficeLocation  string `json:"office_location,omitempty" yaml:"office_location"`     // Office location
-	Company         string `json:"company,omitempty" yaml:"company"`                     // Company name
-	CompanyName     string `json:"company_name,omitempty" yaml:"company_name"`           // Graph API company field
+	Department     string `json:"department,omitempty" yaml:"department"`           // Department name
+	JobTitle       string `json:"job_title,omitempty" yaml:"job_title"`             // Job title
+	Manager        string `json:"manager,omitempty" yaml:"manager"`                 // Manager's ID
+	OfficeLocation string `json:"office_location,omitempty" yaml:"office_location"` // Office location
+	Company        string `json:"company,omitempty" yaml:"company"`                 // Company name
+	CompanyName    string `json:"company_name,omitempty" yaml:"company_name"`       // Graph API company field
 
 	// Directory Structure
 	DistinguishedName string   `json:"distinguished_name,omitempty" yaml:"distinguished_name"` // Full DN (for AD)
-	OU               string   `json:"ou,omitempty" yaml:"ou"`                                 // Parent OU
-	Groups           []string `json:"groups,omitempty" yaml:"groups"`                         // Group memberships
+	OU                string   `json:"ou,omitempty" yaml:"ou"`                                 // Parent OU
+	Groups            []string `json:"groups,omitempty" yaml:"groups"`                         // Group memberships
 
 	// Provider-Specific Attributes (extensibility)
 	ProviderAttributes map[string]interface{} `json:"provider_attributes,omitempty" yaml:"provider_attributes"`
 
 	// Metadata
-	Created  *time.Time `json:"created,omitempty" yaml:"created"`     // When created
-	Modified *time.Time `json:"modified,omitempty" yaml:"modified"`   // When last modified
-	Source   string     `json:"source" yaml:"source"`                 // Source provider name
+	Created  *time.Time `json:"created,omitempty" yaml:"created"`   // When created
+	Modified *time.Time `json:"modified,omitempty" yaml:"modified"` // When last modified
+	Source   string     `json:"source" yaml:"source"`               // Source provider name
 }
 
 // Conversion Methods for Microsoft Graph API
@@ -155,16 +155,16 @@ func (u *DirectoryUser) Validate() error {
 	if u.UserPrincipalName == "" {
 		return ErrInvalidUserPrincipalName
 	}
-	
+
 	if u.DisplayName == "" {
 		return ErrInvalidDisplayName
 	}
-	
+
 	// Validate UPN format (basic)
 	if !isValidUPN(u.UserPrincipalName) {
 		return ErrInvalidUserPrincipalNameFormat
 	}
-	
+
 	return nil
 }
 

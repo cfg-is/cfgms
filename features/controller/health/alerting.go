@@ -8,8 +8,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/google/uuid"
+
+	"github.com/cfgis/cfgms/pkg/cert"
 )
 
 // AlertManager manages threshold-based alerting and notifications

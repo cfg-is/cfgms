@@ -6,15 +6,16 @@ import (
 	"fmt"
 	"net/http"
 
-	controller "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/gorilla/mux"
+
+	controller "github.com/cfgis/cfgms/api/proto/controller"
 )
 
 // handleListStewards handles GET /api/v1/stewards
 func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 	// Get all stewards from the controller service
 	stewards := s.controllerService.GetAllStewards()
-	
+
 	// Convert to API response format
 	stewardList := make([]StewardInfo, 0, len(stewards))
 	for _, steward := range stewards {
@@ -26,7 +27,7 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 			ConnectedAt: steward.LastHeartbeat, // Using LastHeartbeat as ConnectedAt for now
 			Metrics:     steward.Metrics,
 		}
-		
+
 		// Convert DNA if available
 		if steward.DNA != nil {
 			info.DNA = &DNAInfo{
@@ -36,7 +37,7 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 				Attributes:   steward.DNA.Attributes,
 			}
 		}
-		
+
 		stewardList = append(stewardList, info)
 	}
 
@@ -277,13 +278,13 @@ func (s *Server) handleGetEffectiveConfig(w http.ResponseWriter, r *http.Request
 	effectiveConfig, err := s.configService.GetEffectiveConfiguration(stewardID)
 	if err != nil {
 		s.logger.Error("Failed to get effective configuration", "steward_id", stewardID, "error", err)
-		
+
 		// Check if steward not found
 		if err.Error() == fmt.Sprintf("steward not found: %s", stewardID) {
 			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
 			return
 		}
-		
+
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve effective configuration", "INTERNAL_ERROR")
 		return
 	}

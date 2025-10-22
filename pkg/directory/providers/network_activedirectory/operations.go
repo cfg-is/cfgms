@@ -13,25 +13,25 @@ import (
 // GetUser retrieves a user from Active Directory
 func (p *ActiveDirectoryProvider) GetUser(ctx context.Context, userID string) (*interfaces.DirectoryUser, error) {
 	p.logger.Debug("Getting AD user", "user_id", userID)
-	
+
 	result, err := p.executeADQuery(ctx, fmt.Sprintf("query:user:%s", userID))
 	if err != nil {
 		return nil, fmt.Errorf("failed to query user %s: %w", userID, err)
 	}
-	
+
 	queryResult, err := p.parseADQueryResult(result)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse user query result: %w", err)
 	}
-	
+
 	if !queryResult.Success {
 		return nil, fmt.Errorf("user query failed: %s", queryResult.Error)
 	}
-	
+
 	if queryResult.User == nil {
 		return nil, fmt.Errorf("user %s not found", userID)
 	}
-	
+
 	return queryResult.User, nil
 }
 
@@ -54,31 +54,31 @@ func (p *ActiveDirectoryProvider) DeleteUser(ctx context.Context, userID string)
 // ListUsers lists users from Active Directory
 func (p *ActiveDirectoryProvider) ListUsers(ctx context.Context, filters *interfaces.SearchFilters) (*interfaces.UserList, error) {
 	p.logger.Debug("Listing AD users", "filters", filters)
-	
+
 	result, err := p.executeADQuery(ctx, "list:user")
 	if err != nil {
 		return nil, fmt.Errorf("failed to list users: %w", err)
 	}
-	
+
 	queryResult, err := p.parseADQueryResult(result)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse user list result: %w", err)
 	}
-	
+
 	if !queryResult.Success {
 		return nil, fmt.Errorf("user list failed: %s", queryResult.Error)
 	}
-	
+
 	users := queryResult.Users
 	if users == nil {
 		users = []interfaces.DirectoryUser{}
 	}
-	
+
 	// Apply client-side filtering if needed
 	if filters != nil {
 		users = p.filterUsers(users, filters)
 	}
-	
+
 	return &interfaces.UserList{
 		Users:      users,
 		TotalCount: queryResult.TotalCount,
@@ -92,25 +92,25 @@ func (p *ActiveDirectoryProvider) ListUsers(ctx context.Context, filters *interf
 // GetGroup retrieves a group from Active Directory
 func (p *ActiveDirectoryProvider) GetGroup(ctx context.Context, groupID string) (*interfaces.DirectoryGroup, error) {
 	p.logger.Debug("Getting AD group", "group_id", groupID)
-	
+
 	result, err := p.executeADQuery(ctx, fmt.Sprintf("query:group:%s", groupID))
 	if err != nil {
 		return nil, fmt.Errorf("failed to query group %s: %w", groupID, err)
 	}
-	
+
 	queryResult, err := p.parseADQueryResult(result)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse group query result: %w", err)
 	}
-	
+
 	if !queryResult.Success {
 		return nil, fmt.Errorf("group query failed: %s", queryResult.Error)
 	}
-	
+
 	if queryResult.Group == nil {
 		return nil, fmt.Errorf("group %s not found", groupID)
 	}
-	
+
 	return queryResult.Group, nil
 }
 
@@ -132,31 +132,31 @@ func (p *ActiveDirectoryProvider) DeleteGroup(ctx context.Context, groupID strin
 // ListGroups lists groups from Active Directory
 func (p *ActiveDirectoryProvider) ListGroups(ctx context.Context, filters *interfaces.SearchFilters) (*interfaces.GroupList, error) {
 	p.logger.Debug("Listing AD groups", "filters", filters)
-	
+
 	result, err := p.executeADQuery(ctx, "list:group")
 	if err != nil {
 		return nil, fmt.Errorf("failed to list groups: %w", err)
 	}
-	
+
 	queryResult, err := p.parseADQueryResult(result)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse group list result: %w", err)
 	}
-	
+
 	if !queryResult.Success {
 		return nil, fmt.Errorf("group list failed: %s", queryResult.Error)
 	}
-	
+
 	groups := queryResult.Groups
 	if groups == nil {
 		groups = []interfaces.DirectoryGroup{}
 	}
-	
+
 	// Apply client-side filtering if needed
 	if filters != nil {
 		groups = p.filterGroups(groups, filters)
 	}
-	
+
 	return &interfaces.GroupList{
 		Groups:     groups,
 		TotalCount: queryResult.TotalCount,
@@ -184,13 +184,13 @@ func (p *ActiveDirectoryProvider) GetUserGroups(ctx context.Context, userID stri
 	if err != nil {
 		return nil, fmt.Errorf("failed to get user for group lookup: %w", err)
 	}
-	
+
 	if len(user.Groups) == 0 {
 		return []interfaces.DirectoryGroup{}, nil
 	}
-	
+
 	var userGroups []interfaces.DirectoryGroup
-	
+
 	// Query each group by DN
 	for _, groupDN := range user.Groups {
 		// Extract group name from DN for query
@@ -198,16 +198,16 @@ func (p *ActiveDirectoryProvider) GetUserGroups(ctx context.Context, userID stri
 		if groupName == "" {
 			continue
 		}
-		
+
 		group, err := p.GetGroup(ctx, groupName)
 		if err != nil {
 			p.logger.Warn("Failed to get group details", "group_dn", groupDN, "error", err)
 			continue
 		}
-		
+
 		userGroups = append(userGroups, *group)
 	}
-	
+
 	return userGroups, nil
 }
 
@@ -218,13 +218,13 @@ func (p *ActiveDirectoryProvider) GetGroupMembers(ctx context.Context, groupID s
 	if err != nil {
 		return nil, fmt.Errorf("failed to get group for member lookup: %w", err)
 	}
-	
+
 	if len(group.Members) == 0 {
 		return []interfaces.DirectoryUser{}, nil
 	}
-	
+
 	var groupMembers []interfaces.DirectoryUser
-	
+
 	// Query each member by DN
 	for _, memberDN := range group.Members {
 		// Extract user name from DN for query
@@ -232,16 +232,16 @@ func (p *ActiveDirectoryProvider) GetGroupMembers(ctx context.Context, groupID s
 		if userName == "" {
 			continue
 		}
-		
+
 		user, err := p.GetUser(ctx, userName)
 		if err != nil {
 			p.logger.Warn("Failed to get member details", "member_dn", memberDN, "error", err)
 			continue
 		}
-		
+
 		groupMembers = append(groupMembers, *user)
 	}
-	
+
 	return groupMembers, nil
 }
 
@@ -250,25 +250,25 @@ func (p *ActiveDirectoryProvider) GetGroupMembers(ctx context.Context, groupID s
 // GetOU retrieves an organizational unit from Active Directory
 func (p *ActiveDirectoryProvider) GetOU(ctx context.Context, ouID string) (*interfaces.OrganizationalUnit, error) {
 	p.logger.Debug("Getting AD OU", "ou_id", ouID)
-	
+
 	result, err := p.executeADQuery(ctx, fmt.Sprintf("query:ou:%s", ouID))
 	if err != nil {
 		return nil, fmt.Errorf("failed to query OU %s: %w", ouID, err)
 	}
-	
+
 	queryResult, err := p.parseADQueryResult(result)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse OU query result: %w", err)
 	}
-	
+
 	if !queryResult.Success {
 		return nil, fmt.Errorf("OU query failed: %s", queryResult.Error)
 	}
-	
+
 	if queryResult.OU == nil {
 		return nil, fmt.Errorf("OU %s not found", ouID)
 	}
-	
+
 	return queryResult.OU, nil
 }
 
@@ -290,31 +290,31 @@ func (p *ActiveDirectoryProvider) DeleteOU(ctx context.Context, ouID string) err
 // ListOUs lists organizational units from Active Directory
 func (p *ActiveDirectoryProvider) ListOUs(ctx context.Context, filters *interfaces.SearchFilters) (*interfaces.OUList, error) {
 	p.logger.Debug("Listing AD OUs", "filters", filters)
-	
+
 	result, err := p.executeADQuery(ctx, "list:ou")
 	if err != nil {
 		return nil, fmt.Errorf("failed to list OUs: %w", err)
 	}
-	
+
 	queryResult, err := p.parseADQueryResult(result)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse OU list result: %w", err)
 	}
-	
+
 	if !queryResult.Success {
 		return nil, fmt.Errorf("OU list failed: %s", queryResult.Error)
 	}
-	
+
 	ous := queryResult.OUs
 	if ous == nil {
 		ous = []interfaces.OrganizationalUnit{}
 	}
-	
+
 	// Apply client-side filtering if needed
 	if filters != nil {
 		ous = p.filterOUs(ous, filters)
 	}
-	
+
 	return &interfaces.OUList{
 		OUs:        ous,
 		TotalCount: queryResult.TotalCount,
@@ -330,9 +330,9 @@ func (p *ActiveDirectoryProvider) filterUsers(users []interfaces.DirectoryUser, 
 	if filters == nil {
 		return users
 	}
-	
+
 	var filtered []interfaces.DirectoryUser
-	
+
 	for _, user := range users {
 		// Apply filters
 		if filters.Department != "" && user.Department != filters.Department {
@@ -356,20 +356,20 @@ func (p *ActiveDirectoryProvider) filterUsers(users []interfaces.DirectoryUser, 
 				continue
 			}
 		}
-		
+
 		filtered = append(filtered, user)
-		
+
 		// Apply limit
 		if filters.Limit > 0 && len(filtered) >= filters.Limit {
 			break
 		}
 	}
-	
+
 	// Apply offset
 	if filters.Offset > 0 && filters.Offset < len(filtered) {
 		filtered = filtered[filters.Offset:]
 	}
-	
+
 	return filtered
 }
 
@@ -378,9 +378,9 @@ func (p *ActiveDirectoryProvider) filterGroups(groups []interfaces.DirectoryGrou
 	if filters == nil {
 		return groups
 	}
-	
+
 	var filtered []interfaces.DirectoryGroup
-	
+
 	for _, group := range groups {
 		// Apply filters
 		if filters.OU != "" && group.OU != filters.OU {
@@ -395,20 +395,20 @@ func (p *ActiveDirectoryProvider) filterGroups(groups []interfaces.DirectoryGrou
 				continue
 			}
 		}
-		
+
 		filtered = append(filtered, group)
-		
+
 		// Apply limit
 		if filters.Limit > 0 && len(filtered) >= filters.Limit {
 			break
 		}
 	}
-	
+
 	// Apply offset
 	if filters.Offset > 0 && filters.Offset < len(filtered) {
 		filtered = filtered[filters.Offset:]
 	}
-	
+
 	return filtered
 }
 
@@ -417,9 +417,9 @@ func (p *ActiveDirectoryProvider) filterOUs(ous []interfaces.OrganizationalUnit,
 	if filters == nil {
 		return ous
 	}
-	
+
 	var filtered []interfaces.OrganizationalUnit
-	
+
 	for _, ou := range ous {
 		// Apply filters
 		if filters.Query != "" {
@@ -431,20 +431,20 @@ func (p *ActiveDirectoryProvider) filterOUs(ous []interfaces.OrganizationalUnit,
 				continue
 			}
 		}
-		
+
 		filtered = append(filtered, ou)
-		
+
 		// Apply limit
 		if filters.Limit > 0 && len(filtered) >= filters.Limit {
 			break
 		}
 	}
-	
+
 	// Apply offset
 	if filters.Offset > 0 && filters.Offset < len(filtered) {
 		filtered = filtered[filters.Offset:]
 	}
-	
+
 	return filtered
 }
 
@@ -453,15 +453,15 @@ func (p *ActiveDirectoryProvider) extractNameFromDN(dn string) string {
 	if dn == "" {
 		return ""
 	}
-	
+
 	// Split DN and get the first component
 	parts := strings.Split(dn, ",")
 	if len(parts) == 0 {
 		return ""
 	}
-	
+
 	firstPart := strings.TrimSpace(parts[0])
-	
+
 	// Handle different DN component types
 	if strings.HasPrefix(strings.ToUpper(firstPart), "CN=") {
 		return strings.TrimPrefix(firstPart, "CN=")
@@ -469,6 +469,6 @@ func (p *ActiveDirectoryProvider) extractNameFromDN(dn string) string {
 	if strings.HasPrefix(strings.ToUpper(firstPart), "OU=") {
 		return strings.TrimPrefix(firstPart, "OU=")
 	}
-	
+
 	return firstPart
 }

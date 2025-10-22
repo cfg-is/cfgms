@@ -29,8 +29,8 @@ type CertificateProvisioningResponse struct {
 
 // CertificateProvisioningService provides certificate provisioning functionality
 type CertificateProvisioningService struct {
-	certManager        *cert.Manager
-	logger            logging.Logger
+	certManager         *cert.Manager
+	logger              logging.Logger
 	defaultValidityDays int
 	defaultOrganization string
 }
@@ -38,8 +38,8 @@ type CertificateProvisioningService struct {
 // NewCertificateProvisioningService creates a new certificate provisioning service
 func NewCertificateProvisioningService(certManager *cert.Manager, logger logging.Logger) *CertificateProvisioningService {
 	return &CertificateProvisioningService{
-		certManager:        certManager,
-		logger:            logger,
+		certManager:         certManager,
+		logger:              logger,
 		defaultValidityDays: 365, // Default to 1 year
 		defaultOrganization: "CFGMS Stewards",
 	}
@@ -93,8 +93,8 @@ func (s *CertificateProvisioningService) ProvisionCertificate(req *CertificatePr
 		Organization:       organization,
 		OrganizationalUnit: "Stewards",
 		ValidityDays:       validityDays,
-		KeySize:           2048,
-		ClientID:          req.StewardID,
+		KeySize:            2048,
+		ClientID:           req.StewardID,
 	}
 
 	s.logger.Info("Provisioning certificate for steward",

@@ -14,7 +14,7 @@ import (
 // TestFullDelegatedPermissionsIntegration validates the complete delegated permissions implementation
 func TestFullDelegatedPermissionsIntegration(t *testing.T) {
 	tempDir := t.TempDir()
-	
+
 	t.Run("TestProviderInterfaceExtension", func(t *testing.T) {
 		credStore, err := NewFileCredentialStore(filepath.Join(tempDir, "provider"), "test-pass")
 		require.NoError(t, err)
@@ -29,16 +29,16 @@ func TestFullDelegatedPermissionsIntegration(t *testing.T) {
 		}
 
 		provider := NewOAuth2Provider(credStore, config)
-		
+
 		// Verify provider implements enhanced interface
 		assert.NotNil(t, provider)
-		
+
 		// Test that all new methods exist (even if they fail without real credentials)
 		userContext := &UserContext{
 			UserID:            "test-user",
 			UserPrincipalName: "test@example.com",
 		}
-		
+
 		_, err = provider.GetDelegatedAccessToken(context.Background(), "test-tenant", userContext)
 		// Should fail without real credentials, but method should exist and return meaningful error
 		assert.Error(t, err)
@@ -65,7 +65,7 @@ func TestFullDelegatedPermissionsIntegration(t *testing.T) {
 		// Test retrieving user context
 		retrievedContext, err := credStore.GetUserContext("test-tenant", userContext.UserID)
 		require.NoError(t, err)
-		
+
 		assert.Equal(t, userContext.UserID, retrievedContext.UserID)
 		assert.Equal(t, userContext.UserPrincipalName, retrievedContext.UserPrincipalName)
 		assert.Equal(t, userContext.DisplayName, retrievedContext.DisplayName)
@@ -252,7 +252,7 @@ func TestFullDelegatedPermissionsIntegration(t *testing.T) {
 		// This should work when loading old credential files
 		// The loadCredentials method should initialize missing fields
 		tenantID := "compat-tenant"
-		
+
 		// Store a regular token first to create the file
 		err = credStore.StoreToken(tenantID, &AccessToken{Token: "test"})
 		require.NoError(t, err)
@@ -289,7 +289,7 @@ func TestInteractiveAuthenticatorCreation(t *testing.T) {
 	}
 
 	provider := NewOAuth2Provider(credStore, config)
-	
+
 	// Should be able to create interactive authenticator
 	interactiveAuth := NewInteractiveAuthenticator(provider, ":8080")
 	assert.NotNil(t, interactiveAuth)
@@ -319,7 +319,7 @@ func TestRealWorldCredentialFlow(t *testing.T) {
 
 	config := &OAuth2Config{
 		ClientID:                 "integration-client-id",
-		ClientSecret:             "integration-client-secret", 
+		ClientSecret:             "integration-client-secret",
 		TenantID:                 "integration-tenant-id",
 		RedirectURI:              "http://localhost:8080/callback",
 		SupportDelegatedAuth:     true,
@@ -333,7 +333,7 @@ func TestRealWorldCredentialFlow(t *testing.T) {
 
 	// Test that the flow would work with real credentials
 	// (This doesn't make network calls but tests the logic)
-	
+
 	// Create mock user context
 	userContext := &UserContext{
 		UserID:            "integration-user-123",
@@ -390,7 +390,7 @@ func TestRealWorldCredentialFlow(t *testing.T) {
 		// Test fallback logic when delegated auth is not available
 		// This would normally call GetDelegatedAccessToken which would fall back to GetAccessToken
 		token, err := provider.GetDelegatedAccessToken(ctx, config.TenantID, userContext)
-		
+
 		// Should fail with our mock setup, but should attempt fallback
 		// The error is expected because we don't have real credentials
 		if err != nil {
@@ -443,7 +443,7 @@ func BenchmarkDelegatedOperations(b *testing.B) {
 
 	b.Run("DelegatedTokenCacheOperations", func(b *testing.B) {
 		cacheKey := config.TenantID + ":" + userContext.UserID
-		
+
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			provider.setDelegatedCachedToken(cacheKey, token)

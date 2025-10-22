@@ -20,8 +20,8 @@ func TestTemplateEngine_ValidateTemplate(t *testing.T) {
 		{
 			name: "valid template",
 			template: &WorkflowTemplate{
-				ID:   "test-template",
-				Name: "Test Template",
+				ID:      "test-template",
+				Name:    "Test Template",
 				Version: SemanticVersion{1, 0, 0, "", ""},
 				Parameters: []TemplateParameter{
 					{
@@ -40,7 +40,7 @@ func TestTemplateEngine_ValidateTemplate(t *testing.T) {
 		{
 			name: "missing ID",
 			template: &WorkflowTemplate{
-				Name: "Test Template",
+				Name:    "Test Template",
 				Version: SemanticVersion{1, 0, 0, "", ""},
 				Workflow: Workflow{
 					Name:  "test-workflow",
@@ -64,8 +64,8 @@ func TestTemplateEngine_ValidateTemplate(t *testing.T) {
 		{
 			name: "duplicate parameter names",
 			template: &WorkflowTemplate{
-				ID:   "test-template",
-				Name: "Test Template",
+				ID:      "test-template",
+				Name:    "Test Template",
 				Version: SemanticVersion{1, 0, 0, "", ""},
 				Parameters: []TemplateParameter{
 					{Name: "param1", Type: ParameterTypeString},
@@ -81,8 +81,8 @@ func TestTemplateEngine_ValidateTemplate(t *testing.T) {
 		{
 			name: "invalid parameter type",
 			template: &WorkflowTemplate{
-				ID:   "test-template",
-				Name: "Test Template",
+				ID:      "test-template",
+				Name:    "Test Template",
 				Version: SemanticVersion{1, 0, 0, "", ""},
 				Parameters: []TemplateParameter{
 					{Name: "param1", Type: ParameterType("invalid")},
@@ -125,8 +125,8 @@ func TestTemplateEngine_RegisterTemplate(t *testing.T) {
 	engine := NewTemplateEngine()
 
 	template := &WorkflowTemplate{
-		ID:   "test-template",
-		Name: "Test Template",
+		ID:      "test-template",
+		Name:    "Test Template",
 		Version: SemanticVersion{1, 0, 0, "", ""},
 		Workflow: Workflow{
 			Name:  "test-workflow",
@@ -290,7 +290,7 @@ func TestTemplateEngine_MergeWithDefaults(t *testing.T) {
 	}
 
 	parameters := map[string]interface{}{
-		"override_me":    "user_value",
+		"override_me":   "user_value",
 		"user_provided": "user_value",
 	}
 

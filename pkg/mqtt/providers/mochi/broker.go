@@ -31,7 +31,7 @@ type Broker struct {
 	server *mqtt.Server
 
 	// Connection state
-	running bool
+	running   bool
 	startTime time.Time
 
 	// Authentication and authorization hooks
@@ -99,7 +99,13 @@ func (b *Broker) Start(ctx context.Context) error {
 	// Set custom capabilities
 	options.Capabilities.MaximumMessageExpiryInterval = int64(b.config.InflightExpiry.Seconds())
 	options.Capabilities.MaximumClientWritesPending = 1024
-	options.Capabilities.MaximumSessionExpiryInterval = uint32(b.config.SessionExpiryInterval)
+
+	// Cap SessionExpiryInterval at uint32 max per MQTT spec (4,294,967,295 seconds ~= 136 years)
+	sessionExpiry := b.config.SessionExpiryInterval
+	if sessionExpiry > 0xFFFFFFFF {
+		sessionExpiry = 0xFFFFFFFF // Cap at uint32 max to prevent overflow
+	}
+	options.Capabilities.MaximumSessionExpiryInterval = uint32(sessionExpiry) //#nosec G115 -- Bounds checked above
 	options.Capabilities.Compatibilities.ObscureNotAuthorized = true
 
 	b.server = mqtt.New(options)
@@ -307,18 +313,18 @@ func (b *Broker) Available() (bool, error) {
 // GetCapabilities returns broker feature support.
 func (b *Broker) GetCapabilities() interfaces.BrokerCapabilities {
 	return interfaces.BrokerCapabilities{
-		MaxClients:               b.config.MaxClients,
-		SupportsMQTT311:          true,
-		SupportsMQTT5:            true,
-		SupportsWebSocket:        b.config.WebSocketAddr != "",
-		SupportsTLS:              true,
-		SupportsPersistence:      false, // mochi-mqtt doesn't support persistence
-		SupportsClustering:       false, // Single-node only
+		MaxClients:                  b.config.MaxClients,
+		SupportsMQTT311:             true,
+		SupportsMQTT5:               true,
+		SupportsWebSocket:           b.config.WebSocketAddr != "",
+		SupportsTLS:                 true,
+		SupportsPersistence:         false, // mochi-mqtt doesn't support persistence
+		SupportsClustering:          false, // Single-node only
 		SupportsSharedSubscriptions: true,
-		MaxMessageSize:           b.config.MaxMessageSize,
-		MaxQoS:                   2, // Supports QoS 0, 1, and 2
-		SupportsRetainedMessages: true,
-		SupportsWillMessages:     true,
+		MaxMessageSize:              b.config.MaxMessageSize,
+		MaxQoS:                      2, // Supports QoS 0, 1, and 2
+		SupportsRetainedMessages:    true,
+		SupportsWillMessages:        true,
 	}
 }
 

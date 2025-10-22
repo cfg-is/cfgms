@@ -409,17 +409,17 @@ func (s *MQTTQUICIntegrationTestSuite) TestMQTTQUICFailover() {
 func (s *MQTTQUICIntegrationTestSuite) TestMQTTQUICReconnection() {
 	// Test reconnection scenario
 	reconnectTest := struct {
-		InitialConnection  time.Time
-		DisconnectTime     time.Time
-		ReconnectTime      time.Time
-		SessionPersisted   bool
-		QueuedMessages     int
+		InitialConnection time.Time
+		DisconnectTime    time.Time
+		ReconnectTime     time.Time
+		SessionPersisted  bool
+		QueuedMessages    int
 	}{
-		InitialConnection:  time.Now(),
-		DisconnectTime:     time.Now().Add(5 * time.Minute),
-		ReconnectTime:      time.Now().Add(6 * time.Minute),
-		SessionPersisted:   true,
-		QueuedMessages:     3,
+		InitialConnection: time.Now(),
+		DisconnectTime:    time.Now().Add(5 * time.Minute),
+		ReconnectTime:     time.Now().Add(6 * time.Minute),
+		SessionPersisted:  true,
+		QueuedMessages:    3,
 	}
 
 	s.True(reconnectTest.SessionPersisted)

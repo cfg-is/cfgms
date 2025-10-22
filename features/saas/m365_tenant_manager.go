@@ -141,10 +141,10 @@ func (m *M365TenantManager) PerformHealthCheck(ctx context.Context, cfgmsTenantI
 	}
 
 	healthResult := &TenantHealthResult{
-		TenantID:    cfgmsTenantID,
+		TenantID:     cfgmsTenantID,
 		M365TenantID: m365Metadata.M365TenantID,
-		CheckedAt:   time.Now(),
-		Checks:      make(map[string]HealthCheckResult),
+		CheckedAt:    time.Now(),
+		Checks:       make(map[string]HealthCheckResult),
 	}
 
 	// Check 1: Token validity
@@ -189,20 +189,20 @@ func (m *M365TenantManager) BulkHealthCheck(ctx context.Context) (*BulkHealthChe
 	}
 
 	result := &BulkHealthCheckResult{
-		TotalTenants:    len(m365Tenants),
-		CheckedAt:       time.Now(),
-		TenantResults:   make(map[string]*TenantHealthResult),
-		HealthySummary:  &HealthSummary{},
+		TotalTenants:   len(m365Tenants),
+		CheckedAt:      time.Now(),
+		TenantResults:  make(map[string]*TenantHealthResult),
+		HealthySummary: &HealthSummary{},
 	}
 
 	for _, cfgmsTenant := range m365Tenants {
 		healthResult, err := m.PerformHealthCheck(ctx, cfgmsTenant.ID)
 		if err != nil {
 			result.TenantResults[cfgmsTenant.ID] = &TenantHealthResult{
-				TenantID:       cfgmsTenant.ID,
-				CheckedAt:      time.Now(),
-				OverallStatus:  tenant.HealthStatusUnknown,
-				HealthDetails:  fmt.Sprintf("Health check failed: %v", err),
+				TenantID:      cfgmsTenant.ID,
+				CheckedAt:     time.Now(),
+				OverallStatus: tenant.HealthStatusUnknown,
+				HealthDetails: fmt.Sprintf("Health check failed: %v", err),
 			}
 			result.HealthySummary.UnknownCount++
 			continue

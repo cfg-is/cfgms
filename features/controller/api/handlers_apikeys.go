@@ -12,9 +12,10 @@ import (
 	"strings"
 	"time"
 
-	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
+
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
 // handleListAPIKeys handles GET /api/v1/api-keys
@@ -95,8 +96,8 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 
 	// M-AUTH-1: Store API key hash in secret store with metadata
 	secretReq := &secretsif.SecretRequest{
-		Key:         keyHash,      // Store hash as key for lookup
-		Value:       keyHash,      // Store hash as value (we never store plaintext keys)
+		Key:         keyHash, // Store hash as key for lookup
+		Value:       keyHash, // Store hash as value (we never store plaintext keys)
 		TenantID:    tenantID,
 		CreatedBy:   "api-admin", // TODO: Get from authenticated user context
 		Description: createReq.Name,

@@ -15,10 +15,10 @@ func TestFactory(t *testing.T) {
 	require.NotNil(t, factory)
 
 	tests := []struct {
-		name       string
-		config     *Config
-		wantErr    bool
-		skipOnOS   string
+		name     string
+		config   *Config
+		wantErr  bool
+		skipOnOS string
 	}{
 		{
 			name: "bash config (platform dependent)",
@@ -105,7 +105,7 @@ func TestShellExecutorLifecycle(t *testing.T) {
 	}
 
 	factory := NewFactory()
-	
+
 	// Use default shell for the platform
 	config := &Config{
 		Shell: GetDefaultShell(),
@@ -167,7 +167,7 @@ func TestShellExecutorMultipleCommands(t *testing.T) {
 	}
 
 	factory := NewFactory()
-	
+
 	config := &Config{
 		Shell: GetDefaultShell(),
 		Cols:  80,
@@ -189,10 +189,10 @@ func TestShellExecutorMultipleCommands(t *testing.T) {
 	}()
 
 	commands := getTestCommands()
-	
+
 	for i, cmd := range commands {
 		t.Logf("Executing command %d: %s", i+1, cmd)
-		
+
 		err = executor.WriteData(ctx, []byte(cmd))
 		assert.NoError(t, err)
 
@@ -245,7 +245,7 @@ func TestShellExecutorError(t *testing.T) {
 	}
 
 	factory := NewFactory()
-	
+
 	config := &Config{
 		Shell: GetDefaultShell(),
 		Cols:  80,

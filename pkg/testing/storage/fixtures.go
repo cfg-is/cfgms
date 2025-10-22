@@ -55,7 +55,6 @@ func requireInfrastructureOrSkip(t *testing.T, err error, component string) {
 	}
 }
 
-
 // StorageTestConfig holds configuration for testing different storage providers
 type StorageTestConfig struct {
 	Provider string
@@ -65,9 +64,9 @@ type StorageTestConfig struct {
 
 // StorageTestFixture provides a complete testing environment for storage providers
 type StorageTestFixture struct {
-	TempDir    string
-	Configs    map[string]*StorageTestConfig
-	Cleanup    func()
+	TempDir string
+	Configs map[string]*StorageTestConfig
+	Cleanup func()
 }
 
 // NewStorageTestFixture creates a comprehensive test fixture supporting all storage providers
@@ -188,7 +187,7 @@ func (f *StorageTestFixture) ValidateStorageProvider(t *testing.T, providerName 
 		t.Skipf("Storage provider '%s' not available: %v", providerName, err)
 		return
 	}
-	
+
 	require.NotNil(t, provider, "Storage provider '%s' not found in registry", providerName)
 
 	// Get test configuration
@@ -227,7 +226,7 @@ func (f *StorageTestFixture) ValidateStorageProvider(t *testing.T, providerName 
 		}
 		require.NoError(t, err, "ClientTenantStore creation should succeed")
 		require.NotNil(t, store, "ClientTenantStore should not be nil")
-		
+
 		if closer, ok := store.(interface{ Close() error }); ok {
 			defer func() { _ = closer.Close() }()
 		}
@@ -241,7 +240,7 @@ func (f *StorageTestFixture) ValidateStorageProvider(t *testing.T, providerName 
 		}
 		require.NoError(t, err, "ConfigStore creation should succeed")
 		require.NotNil(t, store, "ConfigStore should not be nil")
-		
+
 		if closer, ok := store.(interface{ Close() error }); ok {
 			defer func() { _ = closer.Close() }()
 		}
@@ -255,7 +254,7 @@ func (f *StorageTestFixture) ValidateStorageProvider(t *testing.T, providerName 
 		}
 		require.NoError(t, err, "AuditStore creation should succeed")
 		require.NotNil(t, store, "AuditStore should not be nil")
-		
+
 		if closer, ok := store.(interface{ Close() error }); ok {
 			defer func() { _ = closer.Close() }()
 		}
@@ -269,7 +268,7 @@ func (f *StorageTestFixture) ValidateStorageProvider(t *testing.T, providerName 
 		}
 		require.NoError(t, err, "RuntimeStore creation should succeed")
 		require.NotNil(t, store, "RuntimeStore should not be nil")
-		
+
 		if closer, ok := store.(interface{ Close() error }); ok {
 			defer func() { _ = closer.Close() }()
 		}
@@ -309,18 +308,18 @@ func generateSecurePassword() string {
 		// Fallback to timestamp-based password if crypto/rand fails
 		return fmt.Sprintf("test-password-%d", time.Now().Unix())
 	}
-	
+
 	// Encode as base64 and clean up for password usage
 	password := base64.StdEncoding.EncodeToString(randomBytes)
 	password = strings.ReplaceAll(password, "=", "")
 	password = strings.ReplaceAll(password, "+", "")
 	password = strings.ReplaceAll(password, "/", "")
-	
+
 	// Truncate to reasonable length
 	if len(password) > 25 {
 		password = password[:25]
 	}
-	
+
 	return password
 }
 

@@ -11,19 +11,19 @@ import (
 
 func TestLoadConfiguration(t *testing.T) {
 	tests := []struct {
-		name           string
-		setupFunc      func(t *testing.T) (string, func())
-		expectedID     string
-		expectedMode   OperationMode
+		name              string
+		setupFunc         func(t *testing.T) (string, func())
+		expectedID        string
+		expectedMode      OperationMode
 		expectedResources int
-		wantErr        bool
+		wantErr           bool
 	}{
 		{
 			name: "valid configuration file",
 			setupFunc: func(t *testing.T) (string, func()) {
 				tempDir := t.TempDir()
 				configFile := filepath.Join(tempDir, "test.cfg")
-				
+
 				configData := `steward:
   id: test-steward
   mode: standalone
@@ -50,17 +50,17 @@ resources:
 				require.NoError(t, os.WriteFile(configFile, []byte(configData), 0644))
 				return configFile, func() {}
 			},
-			expectedID: "test-steward",
-			expectedMode: ModeStandalone,
+			expectedID:        "test-steward",
+			expectedMode:      ModeStandalone,
 			expectedResources: 2,
-			wantErr: false,
+			wantErr:           false,
 		},
 		{
 			name: "configuration with defaults applied",
 			setupFunc: func(t *testing.T) (string, func()) {
 				tempDir := t.TempDir()
 				configFile := filepath.Join(tempDir, "minimal.cfg")
-				
+
 				configData := `steward:
   id: minimal-steward
 
@@ -73,17 +73,17 @@ resources:
 				require.NoError(t, os.WriteFile(configFile, []byte(configData), 0644))
 				return configFile, func() {}
 			},
-			expectedID: "minimal-steward",
-			expectedMode: ModeStandalone, // default
+			expectedID:        "minimal-steward",
+			expectedMode:      ModeStandalone, // default
 			expectedResources: 1,
-			wantErr: false,
+			wantErr:           false,
 		},
 		{
 			name: "invalid YAML",
 			setupFunc: func(t *testing.T) (string, func()) {
 				tempDir := t.TempDir()
 				configFile := filepath.Join(tempDir, "invalid.cfg")
-				
+
 				configData := `invalid: yaml: content: [unclosed`
 				require.NoError(t, os.WriteFile(configFile, []byte(configData), 0644))
 				return configFile, func() {}
@@ -150,7 +150,7 @@ func TestValidateConfiguration(t *testing.T) {
 			name: "missing steward ID",
 			config: StewardConfig{
 				Steward: StewardSettings{
-					Mode: ModeStandalone,
+					Mode:    ModeStandalone,
 					Logging: LoggingConfig{Level: "info"},
 				},
 			},
@@ -160,8 +160,8 @@ func TestValidateConfiguration(t *testing.T) {
 			name: "invalid operation mode",
 			config: StewardConfig{
 				Steward: StewardSettings{
-					ID:   "test-steward",
-					Mode: "invalid-mode",
+					ID:      "test-steward",
+					Mode:    "invalid-mode",
 					Logging: LoggingConfig{Level: "info"},
 				},
 			},
@@ -171,8 +171,8 @@ func TestValidateConfiguration(t *testing.T) {
 			name: "invalid log level",
 			config: StewardConfig{
 				Steward: StewardSettings{
-					ID:   "test-steward",
-					Mode: ModeStandalone,
+					ID:      "test-steward",
+					Mode:    ModeStandalone,
 					Logging: LoggingConfig{Level: "invalid"},
 				},
 			},

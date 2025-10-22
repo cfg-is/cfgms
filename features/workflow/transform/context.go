@@ -55,9 +55,9 @@ func NewDefaultTransformContext(data, variables, config map[string]interface{}) 
 	return &DefaultTransformContext{
 		data:               data,
 		variables:          variables,
-		config:            config,
+		config:             config,
 		temporaryVariables: make(map[string]interface{}),
-		metadata:          make(map[string]interface{}),
+		metadata:           make(map[string]interface{}),
 	}
 }
 
@@ -514,7 +514,9 @@ func (l *NoOpTransformLogger) WithFields(fields map[string]interface{}) Transfor
 }
 
 // LogExecution logs the completion of a transform execution (no-op)
-func (l *NoOpTransformLogger) LogExecution(transformName string, duration time.Duration, success bool, err error) {}
+func (l *NoOpTransformLogger) LogExecution(transformName string, duration time.Duration, success bool, err error) {
+}
 
 // LogChainExecution logs the completion of a transform chain execution (no-op)
-func (l *NoOpTransformLogger) LogChainExecution(chainLength int, totalDuration time.Duration, success bool, err error) {}
+func (l *NoOpTransformLogger) LogChainExecution(chainLength int, totalDuration time.Duration, success bool, err error) {
+}

@@ -30,19 +30,19 @@ func (p *SOPSProvider) GetVersion() string {
 // GetCapabilities returns the provider's capabilities
 func (p *SOPSProvider) GetCapabilities() interfaces.ProviderCapabilities {
 	return interfaces.ProviderCapabilities{
-		SupportsVersioning:     true,  // Git provides version history
-		SupportsRotation:       true,  // We implement secret rotation
-		SupportsEncryption:     true,  // SOPS provides AES-256-GCM encryption
-		SupportsAuditTrail:     true,  // Git commits provide full audit trail
-		SupportsLeasing:        false, // SOPS doesn't support dynamic leasing
-		SupportsRenewal:        false, // No lease renewal support
-		SupportsRevocation:     true,  // Can delete secrets immediately
-		SupportsMetadata:       true,  // Support custom metadata
-		SupportsTags:           true,  // Support tagging secrets
-		SupportsAccessPolicies: false, // Access control handled by git/RBAC
+		SupportsVersioning:     true,            // Git provides version history
+		SupportsRotation:       true,            // We implement secret rotation
+		SupportsEncryption:     true,            // SOPS provides AES-256-GCM encryption
+		SupportsAuditTrail:     true,            // Git commits provide full audit trail
+		SupportsLeasing:        false,           // SOPS doesn't support dynamic leasing
+		SupportsRenewal:        false,           // No lease renewal support
+		SupportsRevocation:     true,            // Can delete secrets immediately
+		SupportsMetadata:       true,            // Support custom metadata
+		SupportsTags:           true,            // Support tagging secrets
+		SupportsAccessPolicies: false,           // Access control handled by git/RBAC
 		MaxSecretSize:          1 * 1024 * 1024, // 1MB max secret size
-		MaxKeyLength:           256,   // 256 character key names
-		EncryptionAlgorithm:    "AES-256-GCM", // SOPS uses AES-256-GCM
+		MaxKeyLength:           256,             // 256 character key names
+		EncryptionAlgorithm:    "AES-256-GCM",   // SOPS uses AES-256-GCM
 	}
 }
 

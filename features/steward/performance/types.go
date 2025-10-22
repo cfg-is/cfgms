@@ -24,7 +24,7 @@ type PerformanceMetrics struct {
 // SystemMetrics represents system-wide performance metrics
 type SystemMetrics struct {
 	// CPU metrics
-	CPUPercent       float64   `json:"cpu_percent"`        // Overall CPU usage percentage (0-100)
+	CPUPercent        float64   `json:"cpu_percent"`                    // Overall CPU usage percentage (0-100)
 	CPUPercentPerCore []float64 `json:"cpu_percent_per_core,omitempty"` // Per-core CPU usage
 
 	// Memory metrics
@@ -59,17 +59,17 @@ type ProcessMetrics struct {
 	Username string `json:"username,omitempty"`
 
 	// Resource usage
-	CPUPercent    float64 `json:"cpu_percent"`     // CPU usage percentage
-	MemoryBytes   int64   `json:"memory_bytes"`    // Memory usage in bytes
-	MemoryPercent float64 `json:"memory_percent"`  // Memory usage percentage
+	CPUPercent    float64 `json:"cpu_percent"`    // CPU usage percentage
+	MemoryBytes   int64   `json:"memory_bytes"`   // Memory usage in bytes
+	MemoryPercent float64 `json:"memory_percent"` // Memory usage percentage
 
 	// Additional metrics
-	ThreadCount   int32     `json:"thread_count,omitempty"`
-	CreateTime    time.Time `json:"create_time,omitempty"`
-	Status        string    `json:"status,omitempty"` // running, sleeping, stopped, zombie, etc.
+	ThreadCount int32     `json:"thread_count,omitempty"`
+	CreateTime  time.Time `json:"create_time,omitempty"`
+	Status      string    `json:"status,omitempty"` // running, sleeping, stopped, zombie, etc.
 
 	// Watchlist specific
-	IsWatchlisted bool `json:"is_watchlisted,omitempty"`
+	IsWatchlisted bool   `json:"is_watchlisted,omitempty"`
 	ServiceName   string `json:"service_name,omitempty"` // For service watchlist entries
 }
 
@@ -111,18 +111,18 @@ type Threshold struct {
 
 // Alert represents a triggered threshold alert
 type Alert struct {
-	ID              string    `json:"id"`
-	StewardID       string    `json:"steward_id"`
-	Timestamp       time.Time `json:"timestamp"`
-	Severity        string    `json:"severity"` // "warning" or "critical"
-	Title           string    `json:"title"`
-	Description     string    `json:"description"`
-	MetricName      string    `json:"metric_name"`
-	CurrentValue    float64   `json:"current_value"`
-	ThresholdValue  float64   `json:"threshold_value"`
-	Status          string    `json:"status"` // "active" or "resolved"
-	FirstBreachTime time.Time `json:"first_breach_time"`
-	LastBreachTime  time.Time `json:"last_breach_time"`
+	ID              string     `json:"id"`
+	StewardID       string     `json:"steward_id"`
+	Timestamp       time.Time  `json:"timestamp"`
+	Severity        string     `json:"severity"` // "warning" or "critical"
+	Title           string     `json:"title"`
+	Description     string     `json:"description"`
+	MetricName      string     `json:"metric_name"`
+	CurrentValue    float64    `json:"current_value"`
+	ThresholdValue  float64    `json:"threshold_value"`
+	Status          string     `json:"status"` // "active" or "resolved"
+	FirstBreachTime time.Time  `json:"first_breach_time"`
+	LastBreachTime  time.Time  `json:"last_breach_time"`
 	ResolvedAt      *time.Time `json:"resolved_at,omitempty"`
 
 	// Process-specific alerts

@@ -31,44 +31,44 @@ type MicrosoftMultiTenantProvider struct {
 // NewMicrosoftMultiTenantProvider creates a new multi-tenant Microsoft provider
 func NewMicrosoftMultiTenantProvider(credStore CredentialStore, httpClient *http.Client) *MicrosoftMultiTenantProvider {
 	info := ProviderInfo{
-		Name:        "microsoft-multitenant",
-		DisplayName: "Microsoft Graph Multi-Tenant",
-		Version:     "1.0.0",
-		Description: "Multi-tenant Microsoft Graph API provider for MSP M365 management",
+		Name:               "microsoft-multitenant",
+		DisplayName:        "Microsoft Graph Multi-Tenant",
+		Version:            "1.0.0",
+		Description:        "Multi-tenant Microsoft Graph API provider for MSP M365 management",
 		SupportedAuthTypes: []string{"oauth2-multitenant"},
-		BaseURL:     "https://graph.microsoft.com/v1.0",
-		DocumentationURL: "https://docs.microsoft.com/en-us/graph/auth-v2-service",
+		BaseURL:            "https://graph.microsoft.com/v1.0",
+		DocumentationURL:   "https://docs.microsoft.com/en-us/graph/auth-v2-service",
 		Capabilities: ProviderCapabilities{
 			NormalizedOperations: []string{"create", "read", "update", "delete", "list"},
-			RawAPISupport:       true,
-			SchemaSupport:       false,
-			PaginationSupport:   true,
-			WebhookSupport:      true,
-			BatchOperations:     true,
+			RawAPISupport:        true,
+			SchemaSupport:        false,
+			PaginationSupport:    true,
+			WebhookSupport:       true,
+			BatchOperations:      true,
 		},
 	}
-	
+
 	baseProvider := NewBaseProvider(info, httpClient)
 	baseProvider.SetCredentialStore(credStore)
-	
+
 	return &MicrosoftMultiTenantProvider{
 		BaseProvider:       baseProvider,
 		multiTenantManager: NewMultiTenantManager(credStore, httpClient),
-		baseURL:           "https://graph.microsoft.com/v1.0",
+		baseURL:            "https://graph.microsoft.com/v1.0",
 	}
 }
 
 // Multi-Tenant specific configuration
 type MicrosoftMultiTenantConfig struct {
 	// Base configuration
-	ClientID     string   `json:"client_id"`
-	ClientSecret string   `json:"client_secret"`
-	RedirectURI  string   `json:"redirect_uri"`
-	
+	ClientID     string `json:"client_id"`
+	ClientSecret string `json:"client_secret"`
+	RedirectURI  string `json:"redirect_uri"`
+
 	// Multi-tenant specific
-	TenantID     string   `json:"tenant_id,omitempty"` // Leave empty for multi-tenant
-	Scopes       []string `json:"scopes"`
-	
+	TenantID string   `json:"tenant_id,omitempty"` // Leave empty for multi-tenant
+	Scopes   []string `json:"scopes"`
+
 	// Admin consent scopes (typically broader than user scopes)
 	AdminConsentScopes []string `json:"admin_consent_scopes"`
 }
@@ -87,9 +87,9 @@ func (p *MicrosoftMultiTenantProvider) StartAdminConsent(ctx context.Context, co
 		IsMultiTenant:           true,
 		AdminConsentScopes:      config.AdminConsentScopes,
 		TenantDiscoveryEndpoint: "https://graph.microsoft.com/v1.0/organization",
-		ConsentPrompt:          "admin_consent",
+		ConsentPrompt:           "admin_consent",
 	}
-	
+
 	return p.multiTenantManager.StartAdminConsent(ctx, p.GetInfo().Name, mtConfig)
 }
 
@@ -116,7 +116,7 @@ func (p *MicrosoftMultiTenantProvider) CreateInTenant(ctx context.Context, tenan
 	if err != nil {
 		return nil, fmt.Errorf("failed to get tenant token: %w", err)
 	}
-	
+
 	return p.createWithToken(ctx, resourceType, data, token, tenantID)
 }
 
@@ -126,7 +126,7 @@ func (p *MicrosoftMultiTenantProvider) ReadFromTenant(ctx context.Context, tenan
 	if err != nil {
 		return nil, fmt.Errorf("failed to get tenant token: %w", err)
 	}
-	
+
 	return p.readWithToken(ctx, resourceType, resourceID, token, tenantID)
 }
 
@@ -136,7 +136,7 @@ func (p *MicrosoftMultiTenantProvider) UpdateInTenant(ctx context.Context, tenan
 	if err != nil {
 		return nil, fmt.Errorf("failed to get tenant token: %w", err)
 	}
-	
+
 	return p.updateWithToken(ctx, resourceType, resourceID, data, token, tenantID)
 }
 
@@ -146,7 +146,7 @@ func (p *MicrosoftMultiTenantProvider) DeleteFromTenant(ctx context.Context, ten
 	if err != nil {
 		return nil, fmt.Errorf("failed to get tenant token: %w", err)
 	}
-	
+
 	return p.deleteWithToken(ctx, resourceType, resourceID, token, tenantID)
 }
 
@@ -156,7 +156,7 @@ func (p *MicrosoftMultiTenantProvider) ListInTenant(ctx context.Context, tenantI
 	if err != nil {
 		return nil, fmt.Errorf("failed to get tenant token: %w", err)
 	}
-	
+
 	return p.listWithToken(ctx, resourceType, filters, token, tenantID)
 }
 
@@ -166,7 +166,7 @@ func (p *MicrosoftMultiTenantProvider) RawAPIInTenant(ctx context.Context, tenan
 	if err != nil {
 		return nil, fmt.Errorf("failed to get tenant token: %w", err)
 	}
-	
+
 	return p.rawAPIWithToken(ctx, method, path, body, token, tenantID)
 }
 
@@ -178,17 +178,17 @@ func (p *MicrosoftMultiTenantProvider) ListUsersAcrossAllTenants(ctx context.Con
 	if err != nil {
 		return nil, fmt.Errorf("failed to get accessible tenants: %w", err)
 	}
-	
+
 	result := &CrossTenantResult{
 		TenantResults: make(map[string]*ProviderResult),
 		Summary:       &CrossTenantSummary{},
 	}
-	
+
 	for _, tenant := range tenants {
 		if !tenant.HasAccess {
 			continue
 		}
-		
+
 		tenantResult, err := p.ListInTenant(ctx, tenant.TenantID, "users", filters)
 		if err != nil {
 			result.TenantResults[tenant.TenantID] = &ProviderResult{
@@ -199,7 +199,7 @@ func (p *MicrosoftMultiTenantProvider) ListUsersAcrossAllTenants(ctx context.Con
 		} else {
 			result.TenantResults[tenant.TenantID] = tenantResult
 			result.Summary.SuccessfulTenants++
-			
+
 			// Count users in this tenant
 			if users, ok := tenantResult.Data.(map[string]interface{}); ok {
 				if value, exists := users["value"].([]interface{}); exists {
@@ -208,7 +208,7 @@ func (p *MicrosoftMultiTenantProvider) ListUsersAcrossAllTenants(ctx context.Con
 			}
 		}
 	}
-	
+
 	return result, nil
 }
 
@@ -221,10 +221,10 @@ func (p *MicrosoftMultiTenantProvider) DiscoverTenantsFromMicrosoft(ctx context.
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-	
+
 	req.Header.Set("Authorization", tokenSet.GetAuthorizationHeader())
 	req.Header.Set("Content-Type", "application/json")
-	
+
 	resp, err := p.GetHTTPClient().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to make request: %w", err)
@@ -235,30 +235,30 @@ func (p *MicrosoftMultiTenantProvider) DiscoverTenantsFromMicrosoft(ctx context.
 			_ = closeErr
 		}
 	}()
-	
+
 	if resp.StatusCode != http.StatusOK {
 		return &TenantDiscoveryResult{
 			Success: false,
 			Error:   fmt.Sprintf("API request failed with status: %d", resp.StatusCode),
 		}, nil
 	}
-	
+
 	var graphResponse struct {
 		Value []struct {
-			ID                  string   `json:"id"`
-			DisplayName         string   `json:"displayName"`
-			VerifiedDomains     []struct {
+			ID              string `json:"id"`
+			DisplayName     string `json:"displayName"`
+			VerifiedDomains []struct {
 				Name      string `json:"name"`
 				IsDefault bool   `json:"isDefault"`
 			} `json:"verifiedDomains"`
 			CountryLetterCode string `json:"countryLetterCode"`
 		} `json:"value"`
 	}
-	
+
 	if err := json.NewDecoder(resp.Body).Decode(&graphResponse); err != nil {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
-	
+
 	tenants := make([]TenantInfo, len(graphResponse.Value))
 	for i, org := range graphResponse.Value {
 		tenant := TenantInfo{
@@ -268,7 +268,7 @@ func (p *MicrosoftMultiTenantProvider) DiscoverTenantsFromMicrosoft(ctx context.
 			TenantType:  "AAD",
 			HasAccess:   true,
 		}
-		
+
 		// Find the default domain
 		for _, domain := range org.VerifiedDomains {
 			if domain.IsDefault {
@@ -276,10 +276,10 @@ func (p *MicrosoftMultiTenantProvider) DiscoverTenantsFromMicrosoft(ctx context.
 				break
 			}
 		}
-		
+
 		tenants[i] = tenant
 	}
-	
+
 	return &TenantDiscoveryResult{
 		Tenants:      tenants,
 		DiscoveredAt: time.Now(),
@@ -311,7 +311,7 @@ func (p *MicrosoftMultiTenantProvider) deleteWithToken(ctx context.Context, reso
 
 func (p *MicrosoftMultiTenantProvider) listWithToken(ctx context.Context, resourceType string, filters map[string]interface{}, token *TokenSet, tenantID string) (*ProviderResult, error) {
 	path := "/" + resourceType
-	
+
 	// Add OData query parameters
 	queryParams := make([]string, 0)
 	if filter, exists := filters["filter"]; exists {
@@ -323,37 +323,37 @@ func (p *MicrosoftMultiTenantProvider) listWithToken(ctx context.Context, resour
 	if select_, exists := filters["select"]; exists {
 		queryParams = append(queryParams, fmt.Sprintf("$select=%v", select_))
 	}
-	
+
 	if len(queryParams) > 0 {
 		path += "?" + strings.Join(queryParams, "&")
 	}
-	
+
 	return p.rawAPIWithToken(ctx, "GET", path, nil, token, tenantID)
 }
 
 func (p *MicrosoftMultiTenantProvider) rawAPIWithToken(ctx context.Context, method, path string, body interface{}, token *TokenSet, tenantID string) (*ProviderResult, error) {
 	// Build the full URL
 	fullURL := p.baseURL + path
-	
+
 	var reqBody []byte
 	var err error
-	
+
 	if body != nil {
 		reqBody, err = json.Marshal(body)
 		if err != nil {
 			return nil, fmt.Errorf("failed to marshal request body: %w", err)
 		}
 	}
-	
+
 	req, err := http.NewRequestWithContext(ctx, method, fullURL, strings.NewReader(string(reqBody)))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-	
+
 	// Set authentication headers
 	req.Header.Set("Authorization", token.GetAuthorizationHeader())
 	req.Header.Set("Content-Type", "application/json")
-	
+
 	// Execute the request
 	resp, err := p.GetHTTPClient().Do(req)
 	if err != nil {
@@ -365,13 +365,13 @@ func (p *MicrosoftMultiTenantProvider) rawAPIWithToken(ctx context.Context, meth
 			_ = closeErr
 		}
 	}()
-	
+
 	// Parse response
 	var responseData interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&responseData); err != nil && resp.StatusCode < 400 {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
-	
+
 	success := resp.StatusCode >= 200 && resp.StatusCode < 300
 	result := &ProviderResult{
 		Success:    success,
@@ -385,7 +385,7 @@ func (p *MicrosoftMultiTenantProvider) rawAPIWithToken(ctx context.Context, meth
 			"path":     path,
 		},
 	}
-	
+
 	if !success {
 		if data, ok := responseData.(map[string]interface{}); ok {
 			if errMsg, exists := data["error"]; exists {
@@ -393,14 +393,14 @@ func (p *MicrosoftMultiTenantProvider) rawAPIWithToken(ctx context.Context, meth
 			}
 		}
 	}
-	
+
 	// Copy relevant headers
 	for _, header := range []string{"Content-Type", "X-RateLimit-Limit", "X-RateLimit-Remaining"} {
 		if value := resp.Header.Get(header); value != "" {
 			result.Headers[header] = value
 		}
 	}
-	
+
 	return result, nil
 }
 
@@ -435,7 +435,7 @@ func (p *MicrosoftMultiTenantProvider) Create(ctx context.Context, resourceType 
 	if len(tenants) == 0 {
 		return nil, fmt.Errorf("no accessible tenants found")
 	}
-	
+
 	return p.CreateInTenant(ctx, tenants[0].TenantID, resourceType, data)
 }
 
@@ -448,7 +448,7 @@ func (p *MicrosoftMultiTenantProvider) Read(ctx context.Context, resourceType st
 	if len(tenants) == 0 {
 		return nil, fmt.Errorf("no accessible tenants found")
 	}
-	
+
 	return p.ReadFromTenant(ctx, tenants[0].TenantID, resourceType, resourceID)
 }
 
@@ -461,7 +461,7 @@ func (p *MicrosoftMultiTenantProvider) Update(ctx context.Context, resourceType 
 	if len(tenants) == 0 {
 		return nil, fmt.Errorf("no accessible tenants found")
 	}
-	
+
 	return p.UpdateInTenant(ctx, tenants[0].TenantID, resourceType, resourceID, data)
 }
 
@@ -474,7 +474,7 @@ func (p *MicrosoftMultiTenantProvider) Delete(ctx context.Context, resourceType 
 	if len(tenants) == 0 {
 		return nil, fmt.Errorf("no accessible tenants found")
 	}
-	
+
 	return p.DeleteFromTenant(ctx, tenants[0].TenantID, resourceType, resourceID)
 }
 
@@ -484,7 +484,7 @@ func (p *MicrosoftMultiTenantProvider) List(ctx context.Context, resourceType st
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Aggregate results from all tenants
 	allResources := make([]interface{}, 0)
 	for _, result := range crossTenantResult.TenantResults {
@@ -496,7 +496,7 @@ func (p *MicrosoftMultiTenantProvider) List(ctx context.Context, resourceType st
 			}
 		}
 	}
-	
+
 	return &ProviderResult{
 		Success: true,
 		Data: map[string]interface{}{
@@ -521,7 +521,7 @@ func (p *MicrosoftMultiTenantProvider) RawAPI(ctx context.Context, method, path 
 	if len(tenants) == 0 {
 		return nil, fmt.Errorf("no accessible tenants found")
 	}
-	
+
 	return p.RawAPIInTenant(ctx, tenants[0].TenantID, method, path, body)
 }
 
@@ -544,7 +544,7 @@ func (p *MicrosoftMultiTenantProvider) GetSupportedResources() []ResourceType {
 		},
 		{
 			Name:                "groups",
-			DisplayName:         "Groups", 
+			DisplayName:         "Groups",
 			Description:         "Azure AD groups across all accessible tenants",
 			SupportedOperations: []string{"create", "read", "update", "delete", "list"},
 			RequiredFields:      []string{"displayName"},
@@ -590,14 +590,14 @@ func (p *MicrosoftMultiTenantProvider) ValidateResource(resourceType string, dat
 	if err != nil {
 		return err
 	}
-	
+
 	// Check required fields
 	for _, field := range schema.Required {
 		if _, exists := data[field]; !exists {
 			return fmt.Errorf("required field %s is missing", field)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -606,12 +606,12 @@ func (p *MicrosoftMultiTenantProvider) ValidateConfig(config ProviderConfig) err
 	if config.ClientID == "" {
 		return fmt.Errorf("client_id is required for multi-tenant provider")
 	}
-	
+
 	// For multi-tenant, tenant_id should be empty or "common"
 	if config.TenantID != "" && config.TenantID != "common" {
 		return fmt.Errorf("multi-tenant provider should not specify tenant_id or use 'common'")
 	}
-	
+
 	return nil
 }
 
@@ -619,7 +619,7 @@ func (p *MicrosoftMultiTenantProvider) ValidateConfig(config ProviderConfig) err
 type CrossTenantResult struct {
 	// TenantResults maps tenant ID to the result from that tenant
 	TenantResults map[string]*ProviderResult `json:"tenant_results"`
-	
+
 	// Summary provides aggregate statistics
 	Summary *CrossTenantSummary `json:"summary"`
 }
@@ -628,10 +628,10 @@ type CrossTenantResult struct {
 type CrossTenantSummary struct {
 	// SuccessfulTenants count of tenants that returned successful results
 	SuccessfulTenants int `json:"successful_tenants"`
-	
+
 	// FailedTenants count of tenants that returned errors
 	FailedTenants int `json:"failed_tenants"`
-	
+
 	// TotalResources aggregate count of resources across all tenants
 	TotalResources int `json:"total_resources"`
 }

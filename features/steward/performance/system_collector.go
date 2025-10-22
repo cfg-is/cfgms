@@ -70,11 +70,11 @@ func (c *DefaultSystemCollector) CollectMetrics(ctx context.Context) (*SystemMet
 	metrics := &SystemMetrics{
 		CPUPercent:           cpuPercentValue,
 		CPUPercentPerCore:    cpuPercentPerCore,
-		MemoryUsedBytes:      int64(vmem.Used),
-		MemoryTotalBytes:     int64(vmem.Total),
+		MemoryUsedBytes:      int64(vmem.Used),  // #nosec G115 -- Memory size cannot exceed int64 max (8 exabytes)
+		MemoryTotalBytes:     int64(vmem.Total), // #nosec G115 -- Memory size cannot exceed int64 max (8 exabytes)
 		MemoryPercent:        vmem.UsedPercent,
-		SwapUsedBytes:        int64(swap.Used),
-		SwapTotalBytes:       int64(swap.Total),
+		SwapUsedBytes:        int64(swap.Used),  // #nosec G115 -- Swap size cannot exceed int64 max (8 exabytes)
+		SwapTotalBytes:       int64(swap.Total), // #nosec G115 -- Swap size cannot exceed int64 max (8 exabytes)
 		DiskReadBytesPerSec:  diskReadRate,
 		DiskWriteBytesPerSec: diskWriteRate,
 		DiskReadOpsPerSec:    diskReadOps,

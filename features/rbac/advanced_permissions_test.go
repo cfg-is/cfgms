@@ -5,11 +5,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/api/proto/common"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	
+
+	"github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+
 	// Import storage providers for testing
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 )
@@ -18,19 +19,19 @@ func TestAdvancedPermissionManagement(t *testing.T) {
 	// Use git storage for durable testing - minimum storage requirement
 	config := map[string]interface{}{
 		"repository_path": t.TempDir(),
-		"branch":         "main",
-		"auto_init":      true,
+		"branch":          "main",
+		"auto_init":       true,
 	}
 	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
 	require.NoError(t, err)
-	
+
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	ctx := context.Background()
-	
+
 	err = manager.Initialize(ctx)
 	require.NoError(t, err)
 
@@ -366,7 +367,7 @@ func TestAdvancedPermissionManagement(t *testing.T) {
 		// Check for security alerts
 		alerts, err := manager.GetSecurityAlerts(ctx, 1)
 		require.NoError(t, err)
-		
+
 		// Should have alert for excessive failed attempts
 		hasFailedAttemptsAlert := false
 		for _, alert := range alerts {

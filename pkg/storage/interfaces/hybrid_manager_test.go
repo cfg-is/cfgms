@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
 	"github.com/cfgis/cfgms/api/proto/common"
 )
 
@@ -80,7 +81,7 @@ func TestHybridStorageConfig_Validation(t *testing.T) {
 			}
 
 			err := ValidateHybridConfig(tt.config)
-			
+
 			if tt.wantErr {
 				assert.Error(t, err)
 				if tt.errMsg != "" {
@@ -104,7 +105,7 @@ func TestHybridStorageManager_Creation(t *testing.T) {
 			Config:   map[string]interface{}{"test": "operational"},
 		},
 		Configuration: StorageBackendConfig{
-			Provider: "mock", 
+			Provider: "mock",
 			Config:   map[string]interface{}{"test": "configuration"},
 		},
 	}
@@ -160,7 +161,7 @@ func TestCreateHybridStorageFromConfig(t *testing.T) {
 
 	// Verify all storage interfaces are available
 	assert.NotNil(t, manager.GetClientTenantStore())
-	assert.NotNil(t, manager.GetAuditStore()) 
+	assert.NotNil(t, manager.GetAuditStore())
 	assert.NotNil(t, manager.GetConfigStore())
 }
 
@@ -187,11 +188,10 @@ func TestCreateHybridStorageManagerFromConfig(t *testing.T) {
 	// Test that it returns the same type as the direct function
 	directManager, err := CreateHybridStorageFromConfig(config)
 	require.NoError(t, err)
-	
+
 	assert.Equal(t, manager.GetOperationalProvider().Name(), directManager.GetOperationalProvider().Name())
 	assert.Equal(t, manager.GetConfigurationProvider().Name(), directManager.GetConfigurationProvider().Name())
 }
-
 
 func TestGetRecommendedHybridConfig(t *testing.T) {
 	config := GetRecommendedHybridConfig()
@@ -207,7 +207,7 @@ func TestGetRecommendedHybridConfig(t *testing.T) {
 	assert.Contains(t, opConfig, "database")
 	assert.Contains(t, opConfig, "max_open_connections")
 
-	// Verify configuration config has git-specific settings  
+	// Verify configuration config has git-specific settings
 	cfgConfig := config.Configuration.Config
 	assert.Contains(t, cfgConfig, "repository_path")
 	assert.Contains(t, cfgConfig, "remote_url")
@@ -338,13 +338,13 @@ func (p *mockProvider) CreateRuntimeStore(config map[string]interface{}) (Runtim
 
 func (p *mockProvider) GetCapabilities() ProviderCapabilities {
 	return ProviderCapabilities{
-		SupportsTransactions:    true,
-		SupportsVersioning:      true,
-		SupportsFullTextSearch:  false,
-		SupportsEncryption:      false,
-		SupportsCompression:     false,
-		SupportsReplication:     false,
-		SupportsSharding:        false,
+		SupportsTransactions:   true,
+		SupportsVersioning:     true,
+		SupportsFullTextSearch: false,
+		SupportsEncryption:     false,
+		SupportsCompression:    false,
+		SupportsReplication:    false,
+		SupportsSharding:       false,
 		MaxBatchSize:           100,
 		MaxConfigSize:          1024 * 1024, // 1MB
 		MaxAuditRetentionDays:  90,
@@ -438,12 +438,12 @@ func (s *mockConfigStore) ValidateConfig(ctx context.Context, config *ConfigEntr
 
 func (s *mockConfigStore) GetConfigStats(ctx context.Context) (*ConfigStats, error) {
 	return &ConfigStats{
-		TotalConfigs:     1,
-		TotalSize:        100,
-		ConfigsByTenant:  map[string]int64{"test": 1},
-		ConfigsByFormat:  map[string]int64{"yaml": 1},
+		TotalConfigs:       1,
+		TotalSize:          100,
+		ConfigsByTenant:    map[string]int64{"test": 1},
+		ConfigsByFormat:    map[string]int64{"yaml": 1},
 		ConfigsByNamespace: map[string]int64{"default": 1},
-		AverageSize:      100,
+		AverageSize:        100,
 	}, nil
 }
 
@@ -487,16 +487,16 @@ func (s *mockAuditStore) GetSuspiciousActivity(ctx context.Context, tenantID str
 
 func (s *mockAuditStore) GetAuditStats(ctx context.Context) (*AuditStats, error) {
 	return &AuditStats{
-		TotalEntries:     1,
-		TotalSize:        100,
-		EntriesByTenant:  map[string]int64{"test": 1},
-		EntriesByType:    map[string]int64{"system_event": 1},
-		EntriesByResult:  map[string]int64{"success": 1},
+		TotalEntries:      1,
+		TotalSize:         100,
+		EntriesByTenant:   map[string]int64{"test": 1},
+		EntriesByType:     map[string]int64{"system_event": 1},
+		EntriesByResult:   map[string]int64{"success": 1},
 		EntriesBySeverity: map[string]int64{"low": 1},
-		EntriesLast24h:   1,
-		EntriesLast7d:    1,
-		EntriesLast30d:   1,
-		AverageSize:      100,
+		EntriesLast24h:    1,
+		EntriesLast7d:     1,
+		EntriesLast30d:    1,
+		AverageSize:       100,
 	}, nil
 }
 
@@ -510,69 +510,127 @@ func (s *mockAuditStore) PurgeAuditEntries(ctx context.Context, beforeDate time.
 
 type mockRBACStore struct{}
 
-func (s *mockRBACStore) StorePermission(ctx context.Context, permission *common.Permission) error { return nil }
-func (s *mockRBACStore) GetPermission(ctx context.Context, id string) (*common.Permission, error) { return nil, nil }
-func (s *mockRBACStore) ListPermissions(ctx context.Context, resourceType string) ([]*common.Permission, error) { return nil, nil }
-func (s *mockRBACStore) UpdatePermission(ctx context.Context, permission *common.Permission) error { return nil }
-func (s *mockRBACStore) DeletePermission(ctx context.Context, id string) error { return nil }
+func (s *mockRBACStore) StorePermission(ctx context.Context, permission *common.Permission) error {
+	return nil
+}
+func (s *mockRBACStore) GetPermission(ctx context.Context, id string) (*common.Permission, error) {
+	return nil, nil
+}
+func (s *mockRBACStore) ListPermissions(ctx context.Context, resourceType string) ([]*common.Permission, error) {
+	return nil, nil
+}
+func (s *mockRBACStore) UpdatePermission(ctx context.Context, permission *common.Permission) error {
+	return nil
+}
+func (s *mockRBACStore) DeletePermission(ctx context.Context, id string) error  { return nil }
 func (s *mockRBACStore) StoreRole(ctx context.Context, role *common.Role) error { return nil }
-func (s *mockRBACStore) GetRole(ctx context.Context, id string) (*common.Role, error) { return nil, nil }
-func (s *mockRBACStore) ListRoles(ctx context.Context, tenantID string) ([]*common.Role, error) { return nil, nil }
-func (s *mockRBACStore) UpdateRole(ctx context.Context, role *common.Role) error { return nil }
-func (s *mockRBACStore) DeleteRole(ctx context.Context, id string) error { return nil }
+func (s *mockRBACStore) GetRole(ctx context.Context, id string) (*common.Role, error) {
+	return nil, nil
+}
+func (s *mockRBACStore) ListRoles(ctx context.Context, tenantID string) ([]*common.Role, error) {
+	return nil, nil
+}
+func (s *mockRBACStore) UpdateRole(ctx context.Context, role *common.Role) error         { return nil }
+func (s *mockRBACStore) DeleteRole(ctx context.Context, id string) error                 { return nil }
 func (s *mockRBACStore) StoreSubject(ctx context.Context, subject *common.Subject) error { return nil }
-func (s *mockRBACStore) GetSubject(ctx context.Context, id string) (*common.Subject, error) { return nil, nil }
-func (s *mockRBACStore) ListSubjects(ctx context.Context, tenantID string, subjectType common.SubjectType) ([]*common.Subject, error) { return nil, nil }
+func (s *mockRBACStore) GetSubject(ctx context.Context, id string) (*common.Subject, error) {
+	return nil, nil
+}
+func (s *mockRBACStore) ListSubjects(ctx context.Context, tenantID string, subjectType common.SubjectType) ([]*common.Subject, error) {
+	return nil, nil
+}
 func (s *mockRBACStore) UpdateSubject(ctx context.Context, subject *common.Subject) error { return nil }
-func (s *mockRBACStore) DeleteSubject(ctx context.Context, id string) error { return nil }
-func (s *mockRBACStore) StoreRoleAssignment(ctx context.Context, assignment *common.RoleAssignment) error { return nil }
-func (s *mockRBACStore) GetRoleAssignment(ctx context.Context, id string) (*common.RoleAssignment, error) { return nil, nil }
-func (s *mockRBACStore) ListRoleAssignments(ctx context.Context, subjectID, roleID, tenantID string) ([]*common.RoleAssignment, error) { return nil, nil }
-func (s *mockRBACStore) DeleteRoleAssignment(ctx context.Context, subjectID, roleID, tenantID string) error { return nil }
-func (s *mockRBACStore) StoreBulkPermissions(ctx context.Context, permissions []*common.Permission) error { return nil }
+func (s *mockRBACStore) DeleteSubject(ctx context.Context, id string) error               { return nil }
+func (s *mockRBACStore) StoreRoleAssignment(ctx context.Context, assignment *common.RoleAssignment) error {
+	return nil
+}
+func (s *mockRBACStore) GetRoleAssignment(ctx context.Context, id string) (*common.RoleAssignment, error) {
+	return nil, nil
+}
+func (s *mockRBACStore) ListRoleAssignments(ctx context.Context, subjectID, roleID, tenantID string) ([]*common.RoleAssignment, error) {
+	return nil, nil
+}
+func (s *mockRBACStore) DeleteRoleAssignment(ctx context.Context, subjectID, roleID, tenantID string) error {
+	return nil
+}
+func (s *mockRBACStore) StoreBulkPermissions(ctx context.Context, permissions []*common.Permission) error {
+	return nil
+}
 func (s *mockRBACStore) StoreBulkRoles(ctx context.Context, roles []*common.Role) error { return nil }
-func (s *mockRBACStore) StoreBulkSubjects(ctx context.Context, subjects []*common.Subject) error { return nil }
-func (s *mockRBACStore) GetSubjectRoles(ctx context.Context, subjectID, tenantID string) ([]*common.Role, error) { return nil, nil }
-func (s *mockRBACStore) GetRolePermissions(ctx context.Context, roleID string) ([]*common.Permission, error) { return nil, nil }
-func (s *mockRBACStore) GetSubjectAssignments(ctx context.Context, subjectID, tenantID string) ([]*common.RoleAssignment, error) { return nil, nil }
+func (s *mockRBACStore) StoreBulkSubjects(ctx context.Context, subjects []*common.Subject) error {
+	return nil
+}
+func (s *mockRBACStore) GetSubjectRoles(ctx context.Context, subjectID, tenantID string) ([]*common.Role, error) {
+	return nil, nil
+}
+func (s *mockRBACStore) GetRolePermissions(ctx context.Context, roleID string) ([]*common.Permission, error) {
+	return nil, nil
+}
+func (s *mockRBACStore) GetSubjectAssignments(ctx context.Context, subjectID, tenantID string) ([]*common.RoleAssignment, error) {
+	return nil, nil
+}
 func (s *mockRBACStore) Initialize(ctx context.Context) error { return nil }
-func (s *mockRBACStore) Close() error { return nil }
+func (s *mockRBACStore) Close() error                         { return nil }
 
 type mockRuntimeStore struct{}
 
 // Session Management
 func (s *mockRuntimeStore) CreateSession(ctx context.Context, session *Session) error { return nil }
-func (s *mockRuntimeStore) GetSession(ctx context.Context, sessionID string) (*Session, error) { 
-	return &Session{SessionID: sessionID}, nil 
+func (s *mockRuntimeStore) GetSession(ctx context.Context, sessionID string) (*Session, error) {
+	return &Session{SessionID: sessionID}, nil
 }
-func (s *mockRuntimeStore) UpdateSession(ctx context.Context, sessionID string, session *Session) error { return nil }
+func (s *mockRuntimeStore) UpdateSession(ctx context.Context, sessionID string, session *Session) error {
+	return nil
+}
 func (s *mockRuntimeStore) DeleteSession(ctx context.Context, sessionID string) error { return nil }
-func (s *mockRuntimeStore) ListSessions(ctx context.Context, filters *SessionFilter) ([]*Session, error) { return nil, nil }
+func (s *mockRuntimeStore) ListSessions(ctx context.Context, filters *SessionFilter) ([]*Session, error) {
+	return nil, nil
+}
 
-// Session Lifecycle Management  
-func (s *mockRuntimeStore) SetSessionTTL(ctx context.Context, sessionID string, ttl time.Duration) error { return nil }
+// Session Lifecycle Management
+func (s *mockRuntimeStore) SetSessionTTL(ctx context.Context, sessionID string, ttl time.Duration) error {
+	return nil
+}
 func (s *mockRuntimeStore) CleanupExpiredSessions(ctx context.Context) (int, error) { return 0, nil }
-func (s *mockRuntimeStore) ListExpiredSessions(ctx context.Context, cutoff time.Time) ([]string, error) { return nil, nil }
+func (s *mockRuntimeStore) ListExpiredSessions(ctx context.Context, cutoff time.Time) ([]string, error) {
+	return nil, nil
+}
 
 // Runtime State Management
-func (s *mockRuntimeStore) SetRuntimeState(ctx context.Context, key string, value interface{}) error { return nil }
-func (s *mockRuntimeStore) GetRuntimeState(ctx context.Context, key string) (interface{}, error) { return nil, fmt.Errorf("not found") }
+func (s *mockRuntimeStore) SetRuntimeState(ctx context.Context, key string, value interface{}) error {
+	return nil
+}
+func (s *mockRuntimeStore) GetRuntimeState(ctx context.Context, key string) (interface{}, error) {
+	return nil, fmt.Errorf("not found")
+}
 func (s *mockRuntimeStore) DeleteRuntimeState(ctx context.Context, key string) error { return nil }
-func (s *mockRuntimeStore) ListRuntimeKeys(ctx context.Context, prefix string) ([]string, error) { return nil, nil }
+func (s *mockRuntimeStore) ListRuntimeKeys(ctx context.Context, prefix string) ([]string, error) {
+	return nil, nil
+}
 
 // Batch Operations
-func (s *mockRuntimeStore) CreateSessionsBatch(ctx context.Context, sessions []*Session) error { return nil }
-func (s *mockRuntimeStore) DeleteSessionsBatch(ctx context.Context, sessionIDs []string) error { return nil }
+func (s *mockRuntimeStore) CreateSessionsBatch(ctx context.Context, sessions []*Session) error {
+	return nil
+}
+func (s *mockRuntimeStore) DeleteSessionsBatch(ctx context.Context, sessionIDs []string) error {
+	return nil
+}
 
 // Session Queries
-func (s *mockRuntimeStore) GetSessionsByUser(ctx context.Context, userID string) ([]*Session, error) { return nil, nil }
-func (s *mockRuntimeStore) GetSessionsByTenant(ctx context.Context, tenantID string) ([]*Session, error) { return nil, nil }
-func (s *mockRuntimeStore) GetSessionsByType(ctx context.Context, sessionType SessionType) ([]*Session, error) { return nil, nil }
+func (s *mockRuntimeStore) GetSessionsByUser(ctx context.Context, userID string) ([]*Session, error) {
+	return nil, nil
+}
+func (s *mockRuntimeStore) GetSessionsByTenant(ctx context.Context, tenantID string) ([]*Session, error) {
+	return nil, nil
+}
+func (s *mockRuntimeStore) GetSessionsByType(ctx context.Context, sessionType SessionType) ([]*Session, error) {
+	return nil, nil
+}
 func (s *mockRuntimeStore) GetActiveSessionsCount(ctx context.Context) (int64, error) { return 0, nil }
 
 // Health and Maintenance
 func (s *mockRuntimeStore) HealthCheck(ctx context.Context) error { return nil }
-func (s *mockRuntimeStore) GetStats(ctx context.Context) (*RuntimeStoreStats, error) { 
-	return &RuntimeStoreStats{}, nil 
+func (s *mockRuntimeStore) GetStats(ctx context.Context) (*RuntimeStoreStats, error) {
+	return &RuntimeStoreStats{}, nil
 }
 func (s *mockRuntimeStore) Vacuum(ctx context.Context) error { return nil }

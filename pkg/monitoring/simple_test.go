@@ -5,10 +5,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/logging"
-	"github.com/cfgis/cfgms/pkg/telemetry"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/telemetry"
 )
 
 func TestBasicFunctionality(t *testing.T) {

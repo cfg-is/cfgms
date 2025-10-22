@@ -34,38 +34,38 @@ func NewDefaultEngine(semantic SemanticAnalyzer, impact ImpactAnalyzer, exporter
 // Compare performs a two-way comparison between configurations
 func (e *DefaultEngine) Compare(ctx context.Context, from, to ConfigurationReference, options DiffOptions) (*ComparisonResult, error) {
 	start := time.Now()
-	
+
 	// Generate unique comparison ID
 	comparisonID := generateComparisonID(from, to)
-	
+
 	// Load configuration content
 	fromContent, err := e.loadConfiguration(ctx, from)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load source configuration: %w", err)
 	}
-	
+
 	toContent, err := e.loadConfiguration(ctx, to)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load target configuration: %w", err)
 	}
-	
+
 	// Parse configurations based on format
 	fromData, err := e.parseConfiguration(fromContent, detectFormat(from.Path))
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse source configuration: %w", err)
 	}
-	
+
 	toData, err := e.parseConfiguration(toContent, detectFormat(to.Path))
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse target configuration: %w", err)
 	}
-	
+
 	// Perform the comparison
 	entries := e.compareData("", fromData, toData, options)
-	
+
 	// Calculate summary
 	summary := e.calculateSummary(entries)
-	
+
 	// Create comparison result
 	result := &ComparisonResult{
 		ID:      comparisonID,
@@ -81,37 +81,37 @@ func (e *DefaultEngine) Compare(ctx context.Context, from, to ConfigurationRefer
 			Options:   options,
 		},
 	}
-	
+
 	// Perform impact analysis if enabled
 	if options.ImpactAnalysis && e.impactAnalyzer != nil {
 		if err := e.AnalyzeImpact(ctx, result); err != nil {
-			result.Metadata.Warnings = append(result.Metadata.Warnings, 
+			result.Metadata.Warnings = append(result.Metadata.Warnings,
 				fmt.Sprintf("Impact analysis failed: %v", err))
 		}
 	}
-	
+
 	return result, nil
 }
 
 // ThreeWayCompare performs a three-way comparison
 func (e *DefaultEngine) ThreeWayCompare(ctx context.Context, base, left, right ConfigurationReference, options DiffOptions) (*ThreeWayDiffResult, error) {
 	start := time.Now()
-	
+
 	// Perform base to left comparison
 	baseToLeft, err := e.Compare(ctx, base, left, options)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compare base to left: %w", err)
 	}
-	
+
 	// Perform base to right comparison
 	baseToRight, err := e.Compare(ctx, base, right, options)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compare base to right: %w", err)
 	}
-	
+
 	// Detect conflicts
 	conflicts := e.detectConflicts(baseToLeft.Entries, baseToRight.Entries)
-	
+
 	// Calculate three-way summary
 	summary := ThreeWayDiffSummary{
 		LeftChanges:      len(baseToLeft.Entries),
@@ -120,7 +120,7 @@ func (e *DefaultEngine) ThreeWayCompare(ctx context.Context, base, left, right C
 		AutoResolvable:   e.countAutoResolvable(conflicts),
 		ManualResolution: e.countManualResolution(conflicts),
 	}
-	
+
 	return &ThreeWayDiffResult{
 		BaseRef:     base,
 		LeftRef:     left,
@@ -144,7 +144,7 @@ func (e *DefaultEngine) AnalyzeImpact(ctx context.Context, result *ComparisonRes
 	if e.impactAnalyzer == nil {
 		return fmt.Errorf("no impact analyzer configured")
 	}
-	
+
 	// Get configuration structure for analysis
 	var structure *ConfigStructure
 	if e.semanticAnalyzer != nil {
@@ -152,13 +152,13 @@ func (e *DefaultEngine) AnalyzeImpact(ctx context.Context, result *ComparisonRes
 		if err != nil {
 			return fmt.Errorf("failed to load configuration for impact analysis: %w", err)
 		}
-		
+
 		structure, err = e.semanticAnalyzer.AnalyzeStructure(ctx, fromContent, detectFormat(result.FromRef.Path))
 		if err != nil {
 			return fmt.Errorf("failed to analyze configuration structure: %w", err)
 		}
 	}
-	
+
 	// Analyze impact for each entry
 	for i := range result.Entries {
 		impact, err := e.impactAnalyzer.AnalyzeChange(ctx, &result.Entries[i], structure)
@@ -169,10 +169,10 @@ func (e *DefaultEngine) AnalyzeImpact(ctx context.Context, result *ComparisonRes
 		}
 		result.Entries[i].Impact = *impact
 	}
-	
+
 	// Update summary with impact information
 	result.Summary = e.calculateSummaryWithImpact(result.Entries)
-	
+
 	return nil
 }
 
@@ -181,7 +181,7 @@ func (e *DefaultEngine) Export(ctx context.Context, result *ComparisonResult, op
 	if e.exporter == nil {
 		return nil, fmt.Errorf("no exporter configured")
 	}
-	
+
 	switch options.Format {
 	case ExportFormatText:
 		return e.exporter.ExportText(ctx, result, options)
@@ -204,7 +204,7 @@ func (e *DefaultEngine) Export(ctx context.Context, result *ComparisonResult, op
 func (e *DefaultEngine) ExportThreeWay(ctx context.Context, result *ThreeWayDiffResult, options ExportOptions) ([]byte, error) {
 	// Convert three-way result to comparison result for export
 	comparisonResult := &ComparisonResult{
-		ID:      fmt.Sprintf("3way-%x", sha256.Sum256([]byte(fmt.Sprintf("%s-%s-%s", 
+		ID: fmt.Sprintf("3way-%x", sha256.Sum256([]byte(fmt.Sprintf("%s-%s-%s",
 			result.BaseRef.Commit, result.LeftRef.Commit, result.RightRef.Commit)))),
 		FromRef: result.LeftRef,
 		ToRef:   result.RightRef,
@@ -214,14 +214,14 @@ func (e *DefaultEngine) ExportThreeWay(ctx context.Context, result *ThreeWayDiff
 		Entries:  append(result.BaseToLeft, result.BaseToRight...),
 		Metadata: result.Metadata,
 	}
-	
+
 	return e.Export(ctx, comparisonResult, options)
 }
 
 // compareData recursively compares two data structures
 func (e *DefaultEngine) compareData(path string, from, to interface{}, options DiffOptions) []DiffEntry {
 	var entries []DiffEntry
-	
+
 	// Handle nil cases
 	if from == nil && to == nil {
 		return entries
@@ -248,11 +248,11 @@ func (e *DefaultEngine) compareData(path string, from, to interface{}, options D
 		})
 		return entries
 	}
-	
+
 	// Get reflection values
 	fromVal := reflect.ValueOf(from)
 	toVal := reflect.ValueOf(to)
-	
+
 	// Handle different types
 	if fromVal.Type() != toVal.Type() {
 		entries = append(entries, DiffEntry{
@@ -266,7 +266,7 @@ func (e *DefaultEngine) compareData(path string, from, to interface{}, options D
 		})
 		return entries
 	}
-	
+
 	switch fromVal.Kind() {
 	case reflect.Map:
 		entries = append(entries, e.compareMaps(path, fromVal, toVal, options)...)
@@ -286,17 +286,17 @@ func (e *DefaultEngine) compareData(path string, from, to interface{}, options D
 			})
 		}
 	}
-	
+
 	return entries
 }
 
 // compareMaps compares two maps
 func (e *DefaultEngine) compareMaps(path string, from, to reflect.Value, options DiffOptions) []DiffEntry {
 	var entries []DiffEntry
-	
+
 	fromMap := from.Interface().(map[string]interface{})
 	toMap := to.Interface().(map[string]interface{})
-	
+
 	// Track all keys
 	allKeys := make(map[string]bool)
 	for key := range fromMap {
@@ -305,13 +305,13 @@ func (e *DefaultEngine) compareMaps(path string, from, to reflect.Value, options
 	for key := range toMap {
 		allKeys[key] = true
 	}
-	
+
 	// Compare each key
 	for key := range allKeys {
 		keyPath := buildPath(path, key)
 		fromVal, fromExists := fromMap[key]
 		toVal, toExists := toMap[key]
-		
+
 		if !fromExists {
 			// Key added
 			entries = append(entries, DiffEntry{
@@ -339,30 +339,30 @@ func (e *DefaultEngine) compareMaps(path string, from, to reflect.Value, options
 			entries = append(entries, e.compareData(keyPath, fromVal, toVal, options)...)
 		}
 	}
-	
+
 	return entries
 }
 
 // compareSlices compares two slices
 func (e *DefaultEngine) compareSlices(path string, from, to reflect.Value, options DiffOptions) []DiffEntry {
 	var entries []DiffEntry
-	
+
 	fromLen := from.Len()
 	toLen := to.Len()
 	maxLen := fromLen
 	if toLen > maxLen {
 		maxLen = toLen
 	}
-	
+
 	// Handle ignore order option
 	if options.IgnoreOrder {
 		return e.compareSlicesIgnoreOrder(path, from, to, options)
 	}
-	
+
 	// Compare each element by index
 	for i := 0; i < maxLen; i++ {
 		indexPath := fmt.Sprintf("%s[%d]", path, i)
-		
+
 		if i >= fromLen {
 			// Element added
 			entries = append(entries, DiffEntry{
@@ -385,32 +385,32 @@ func (e *DefaultEngine) compareSlices(path string, from, to reflect.Value, optio
 			})
 		} else {
 			// Element exists in both, compare
-			entries = append(entries, e.compareData(indexPath, 
+			entries = append(entries, e.compareData(indexPath,
 				from.Index(i).Interface(), to.Index(i).Interface(), options)...)
 		}
 	}
-	
+
 	return entries
 }
 
 // compareSlicesIgnoreOrder compares slices while ignoring order
 func (e *DefaultEngine) compareSlicesIgnoreOrder(path string, from, to reflect.Value, options DiffOptions) []DiffEntry {
 	var entries []DiffEntry
-	
+
 	// Convert slices to comparable format
 	fromItems := make([]interface{}, from.Len())
 	toItems := make([]interface{}, to.Len())
-	
+
 	for i := 0; i < from.Len(); i++ {
 		fromItems[i] = from.Index(i).Interface()
 	}
 	for i := 0; i < to.Len(); i++ {
 		toItems[i] = to.Index(i).Interface()
 	}
-	
+
 	// Find matching items
 	used := make([]bool, len(toItems))
-	
+
 	for i, fromItem := range fromItems {
 		found := false
 		for j, toItem := range toItems {
@@ -423,7 +423,7 @@ func (e *DefaultEngine) compareSlicesIgnoreOrder(path string, from, to reflect.V
 				break
 			}
 		}
-		
+
 		if !found {
 			// Item deleted
 			entries = append(entries, DiffEntry{
@@ -436,7 +436,7 @@ func (e *DefaultEngine) compareSlicesIgnoreOrder(path string, from, to reflect.V
 			})
 		}
 	}
-	
+
 	// Find added items
 	for j, toItem := range toItems {
 		if !used[j] {
@@ -450,25 +450,25 @@ func (e *DefaultEngine) compareSlicesIgnoreOrder(path string, from, to reflect.V
 			})
 		}
 	}
-	
+
 	return entries
 }
 
 // detectConflicts detects conflicts between left and right changes
 func (e *DefaultEngine) detectConflicts(leftEntries, rightEntries []DiffEntry) []MergeConflict {
 	var conflicts []MergeConflict
-	
+
 	// Group entries by path
 	leftByPath := make(map[string]DiffEntry)
 	rightByPath := make(map[string]DiffEntry)
-	
+
 	for _, entry := range leftEntries {
 		leftByPath[entry.Path] = entry
 	}
 	for _, entry := range rightEntries {
 		rightByPath[entry.Path] = entry
 	}
-	
+
 	// Find conflicting paths
 	for path, leftEntry := range leftByPath {
 		if rightEntry, exists := rightByPath[path]; exists {
@@ -478,7 +478,7 @@ func (e *DefaultEngine) detectConflicts(leftEntries, rightEntries []DiffEntry) [
 			}
 		}
 	}
-	
+
 	return conflicts
 }
 
@@ -488,10 +488,10 @@ func (e *DefaultEngine) analyzeConflict(path string, left, right DiffEntry) *Mer
 	if reflect.DeepEqual(left, right) {
 		return nil
 	}
-	
+
 	var conflictType ConflictType
 	var strategy ResolutionStrategy
-	
+
 	switch {
 	case left.Type == DiffTypeModify && right.Type == DiffTypeModify:
 		conflictType = ConflictTypeModifyModify
@@ -512,7 +512,7 @@ func (e *DefaultEngine) analyzeConflict(path string, left, right DiffEntry) *Mer
 	default:
 		return nil
 	}
-	
+
 	return &MergeConflict{
 		Path:               path,
 		LeftValue:          getChangeValue(left),
@@ -539,7 +539,7 @@ func (e *DefaultEngine) loadConfiguration(ctx context.Context, ref Configuration
 		}
 		return content, nil
 	}
-	
+
 	// For Git repositories, this would integrate with Git backend
 	// For now, return error for unsupported repositories
 	return nil, fmt.Errorf("repository loading not implemented for: %s", ref.Repository)
@@ -547,7 +547,7 @@ func (e *DefaultEngine) loadConfiguration(ctx context.Context, ref Configuration
 
 func (e *DefaultEngine) parseConfiguration(content []byte, format string) (interface{}, error) {
 	var data interface{}
-	
+
 	switch strings.ToLower(format) {
 	case "json":
 		if err := json.Unmarshal(content, &data); err != nil {
@@ -560,7 +560,7 @@ func (e *DefaultEngine) parseConfiguration(content []byte, format string) (inter
 	default:
 		return nil, fmt.Errorf("unsupported format: %s", format)
 	}
-	
+
 	return data, nil
 }
 
@@ -580,7 +580,7 @@ func (e *DefaultEngine) calculateSummary(entries []DiffEntry) DiffSummary {
 		ImpactBreakdown:   make(map[ImpactLevel]int),
 		CategoryBreakdown: make(map[ChangeCategory]int),
 	}
-	
+
 	for _, entry := range entries {
 		switch entry.Type {
 		case DiffTypeAdd:
@@ -592,11 +592,11 @@ func (e *DefaultEngine) calculateSummary(entries []DiffEntry) DiffSummary {
 		case DiffTypeMove:
 			summary.MovedItems++
 		}
-		
+
 		// Count impact and category (will be filled by impact analysis)
 		summary.ImpactBreakdown[entry.Impact.Level]++
 		summary.CategoryBreakdown[entry.Impact.Category]++
-		
+
 		if entry.Impact.BreakingChange {
 			summary.BreakingChanges++
 		}
@@ -604,7 +604,7 @@ func (e *DefaultEngine) calculateSummary(entries []DiffEntry) DiffSummary {
 			summary.SecurityChanges++
 		}
 	}
-	
+
 	return summary
 }
 

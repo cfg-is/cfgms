@@ -8,8 +8,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
 // ValidationManager handles configuration validation before storage
@@ -26,21 +26,21 @@ func NewValidationManager(configStore interfaces.ConfigStore) *ValidationManager
 
 // ValidationResult represents the result of configuration validation
 type ValidationResult struct {
-	Valid            bool                          `json:"valid"`
-	Errors           []ValidationError             `json:"errors"`
-	Warnings         []ValidationError             `json:"warnings"`
-	TenantChecks     *TenantValidationResult       `json:"tenant_checks,omitempty"`
-	DependencyChecks *DependencyValidationResult   `json:"dependency_checks,omitempty"`
-	StorageChecks    *StorageValidationResult      `json:"storage_checks,omitempty"`
+	Valid            bool                        `json:"valid"`
+	Errors           []ValidationError           `json:"errors"`
+	Warnings         []ValidationError           `json:"warnings"`
+	TenantChecks     *TenantValidationResult     `json:"tenant_checks,omitempty"`
+	DependencyChecks *DependencyValidationResult `json:"dependency_checks,omitempty"`
+	StorageChecks    *StorageValidationResult    `json:"storage_checks,omitempty"`
 }
 
 // ValidationError represents a specific validation error or warning
 type ValidationError struct {
-	Field       string `json:"field"`
-	Message     string `json:"message"`
-	Code        string `json:"code"`
-	Level       string `json:"level"`       // error, warning, info
-	Suggestion  string `json:"suggestion,omitempty"`
+	Field      string `json:"field"`
+	Message    string `json:"message"`
+	Code       string `json:"code"`
+	Level      string `json:"level"` // error, warning, info
+	Suggestion string `json:"suggestion,omitempty"`
 }
 
 // TenantValidationResult represents tenant-specific validation results
@@ -53,17 +53,17 @@ type TenantValidationResult struct {
 
 // DependencyValidationResult represents module dependency validation
 type DependencyValidationResult struct {
-	MissingModules    []string `json:"missing_modules"`
+	MissingModules     []string `json:"missing_modules"`
 	ConflictingModules []string `json:"conflicting_modules"`
-	UnusedModules     []string `json:"unused_modules"`
+	UnusedModules      []string `json:"unused_modules"`
 }
 
 // StorageValidationResult represents storage-level validation
 type StorageValidationResult struct {
-	FormatValid    bool   `json:"format_valid"`
-	ChecksumValid  bool   `json:"checksum_valid"`
+	FormatValid      bool `json:"format_valid"`
+	ChecksumValid    bool `json:"checksum_valid"`
 	SizeWithinLimits bool `json:"size_within_limits"`
-	DataSize       int    `json:"data_size"`
+	DataSize         int  `json:"data_size"`
 }
 
 // ValidateConfiguration performs comprehensive configuration validation
@@ -90,10 +90,10 @@ func (vm *ValidationManager) ValidateConfiguration(ctx context.Context, tenantID
 	if !result.TenantChecks.TenantExists {
 		result.Valid = false
 		result.Errors = append(result.Errors, ValidationError{
-			Field:   "tenant_id",
-			Message: fmt.Sprintf("Tenant '%s' does not exist", tenantID),
-			Code:    "TENANT_NOT_FOUND",
-			Level:   "error",
+			Field:      "tenant_id",
+			Message:    fmt.Sprintf("Tenant '%s' does not exist", tenantID),
+			Code:       "TENANT_NOT_FOUND",
+			Level:      "error",
 			Suggestion: "Ensure the tenant exists before storing configuration",
 		})
 	}
@@ -102,10 +102,10 @@ func (vm *ValidationManager) ValidateConfiguration(ctx context.Context, tenantID
 	result.DependencyChecks = vm.validateDependencies(ctx, config)
 	if len(result.DependencyChecks.MissingModules) > 0 {
 		result.Warnings = append(result.Warnings, ValidationError{
-			Field:   "modules",
-			Message: fmt.Sprintf("Missing modules: %s", strings.Join(result.DependencyChecks.MissingModules, ", ")),
-			Code:    "MISSING_MODULES",
-			Level:   "warning",
+			Field:      "modules",
+			Message:    fmt.Sprintf("Missing modules: %s", strings.Join(result.DependencyChecks.MissingModules, ", ")),
+			Code:       "MISSING_MODULES",
+			Level:      "warning",
 			Suggestion: "Ensure all required modules are available on the target system",
 		})
 	}
@@ -115,10 +115,10 @@ func (vm *ValidationManager) ValidateConfiguration(ctx context.Context, tenantID
 	if !result.StorageChecks.SizeWithinLimits {
 		result.Valid = false
 		result.Errors = append(result.Errors, ValidationError{
-			Field:   "config_size",
-			Message: fmt.Sprintf("Configuration size (%d bytes) exceeds storage limits", result.StorageChecks.DataSize),
-			Code:    "CONFIG_TOO_LARGE",
-			Level:   "error",
+			Field:      "config_size",
+			Message:    fmt.Sprintf("Configuration size (%d bytes) exceeds storage limits", result.StorageChecks.DataSize),
+			Code:       "CONFIG_TOO_LARGE",
+			Level:      "error",
 			Suggestion: "Reduce configuration size or contact administrator to increase limits",
 		})
 	}
@@ -126,10 +126,10 @@ func (vm *ValidationManager) ValidateConfiguration(ctx context.Context, tenantID
 	// Validate inheritance conflicts
 	if result.TenantChecks.ConflictsDetected > 0 {
 		result.Warnings = append(result.Warnings, ValidationError{
-			Field:   "inheritance",
-			Message: fmt.Sprintf("Detected %d inheritance conflicts", result.TenantChecks.ConflictsDetected),
-			Code:    "INHERITANCE_CONFLICTS",
-			Level:   "warning",
+			Field:      "inheritance",
+			Message:    fmt.Sprintf("Detected %d inheritance conflicts", result.TenantChecks.ConflictsDetected),
+			Code:       "INHERITANCE_CONFLICTS",
+			Level:      "warning",
 			Suggestion: "Review tenant hierarchy configuration for conflicting settings",
 		})
 	}
@@ -233,10 +233,10 @@ func (vm *ValidationManager) validateResources(result *ValidationResult, config 
 		if resourceNames[resource.Name] {
 			result.Valid = false
 			result.Errors = append(result.Errors, ValidationError{
-				Field:   fmt.Sprintf("resources[%d].name", i),
-				Message: fmt.Sprintf("Duplicate resource name: %s", resource.Name),
-				Code:    "DUPLICATE_RESOURCE_NAME",
-				Level:   "error",
+				Field:      fmt.Sprintf("resources[%d].name", i),
+				Message:    fmt.Sprintf("Duplicate resource name: %s", resource.Name),
+				Code:       "DUPLICATE_RESOURCE_NAME",
+				Level:      "error",
 				Suggestion: "Ensure all resource names are unique within the configuration",
 			})
 		}
@@ -246,10 +246,10 @@ func (vm *ValidationManager) validateResources(result *ValidationResult, config 
 		if !isValidResourceName(resource.Name) {
 			result.Valid = false
 			result.Errors = append(result.Errors, ValidationError{
-				Field:   fmt.Sprintf("resources[%d].name", i),
-				Message: fmt.Sprintf("Invalid resource name format: %s", resource.Name),
-				Code:    "INVALID_RESOURCE_NAME",
-				Level:   "error",
+				Field:      fmt.Sprintf("resources[%d].name", i),
+				Message:    fmt.Sprintf("Invalid resource name format: %s", resource.Name),
+				Code:       "INVALID_RESOURCE_NAME",
+				Level:      "error",
 				Suggestion: "Resource names must contain only alphanumeric characters, hyphens, and underscores",
 			})
 		}
@@ -268,10 +268,10 @@ func (vm *ValidationManager) validateResources(result *ValidationResult, config 
 		// Validate resource configuration
 		if len(resource.Config) == 0 {
 			result.Warnings = append(result.Warnings, ValidationError{
-				Field:   fmt.Sprintf("resources[%d].config", i),
-				Message: fmt.Sprintf("Resource '%s' has empty configuration", resource.Name),
-				Code:    "EMPTY_RESOURCE_CONFIG",
-				Level:   "warning",
+				Field:      fmt.Sprintf("resources[%d].config", i),
+				Message:    fmt.Sprintf("Resource '%s' has empty configuration", resource.Name),
+				Code:       "EMPTY_RESOURCE_CONFIG",
+				Level:      "warning",
 				Suggestion: "Consider providing configuration for this resource or removing it",
 			})
 		}
@@ -283,10 +283,10 @@ func (vm *ValidationManager) validateStewardSettings(result *ValidationResult, c
 	// Validate steward ID
 	if config.Steward.ID == "" {
 		result.Warnings = append(result.Warnings, ValidationError{
-			Field:   "steward.id",
-			Message: "Steward ID is empty - will use hostname as default",
-			Code:    "EMPTY_STEWARD_ID",
-			Level:   "warning",
+			Field:      "steward.id",
+			Message:    "Steward ID is empty - will use hostname as default",
+			Code:       "EMPTY_STEWARD_ID",
+			Level:      "warning",
 			Suggestion: "Consider setting an explicit steward ID for better identification",
 		})
 	}
@@ -304,10 +304,10 @@ func (vm *ValidationManager) validateStewardSettings(result *ValidationResult, c
 	if !modeValid && config.Steward.Mode != "" {
 		result.Valid = false
 		result.Errors = append(result.Errors, ValidationError{
-			Field:   "steward.mode",
-			Message: fmt.Sprintf("Invalid operation mode: %s", config.Steward.Mode),
-			Code:    "INVALID_OPERATION_MODE",
-			Level:   "error",
+			Field:      "steward.mode",
+			Message:    fmt.Sprintf("Invalid operation mode: %s", config.Steward.Mode),
+			Code:       "INVALID_OPERATION_MODE",
+			Level:      "error",
 			Suggestion: "Use 'standalone' or 'controller' as operation mode",
 		})
 	}
@@ -326,10 +326,10 @@ func (vm *ValidationManager) validateStewardSettings(result *ValidationResult, c
 		if !levelValid {
 			result.Valid = false
 			result.Errors = append(result.Errors, ValidationError{
-				Field:   "steward.logging.level",
-				Message: fmt.Sprintf("Invalid log level: %s", config.Steward.Logging.Level),
-				Code:    "INVALID_LOG_LEVEL",
-				Level:   "error",
+				Field:      "steward.logging.level",
+				Message:    fmt.Sprintf("Invalid log level: %s", config.Steward.Logging.Level),
+				Code:       "INVALID_LOG_LEVEL",
+				Level:      "error",
 				Suggestion: "Use debug, info, warn, or error as log level",
 			})
 		}
@@ -337,15 +337,15 @@ func (vm *ValidationManager) validateStewardSettings(result *ValidationResult, c
 
 	// Validate error handling settings
 	validActions := []stewardconfig.ErrorAction{stewardconfig.ActionContinue, stewardconfig.ActionFail, stewardconfig.ActionWarn}
-	
+
 	if config.Steward.ErrorHandling.ModuleLoadFailure != "" {
 		if !isValidErrorAction(config.Steward.ErrorHandling.ModuleLoadFailure, validActions) {
 			result.Valid = false
 			result.Errors = append(result.Errors, ValidationError{
-				Field:   "steward.error_handling.module_load_failure",
-				Message: fmt.Sprintf("Invalid error action: %s", config.Steward.ErrorHandling.ModuleLoadFailure),
-				Code:    "INVALID_ERROR_ACTION",
-				Level:   "error",
+				Field:      "steward.error_handling.module_load_failure",
+				Message:    fmt.Sprintf("Invalid error action: %s", config.Steward.ErrorHandling.ModuleLoadFailure),
+				Code:       "INVALID_ERROR_ACTION",
+				Level:      "error",
 				Suggestion: "Use continue, fail, or warn as error action",
 			})
 		}
@@ -359,10 +359,10 @@ func isValidResourceName(name string) bool {
 	}
 
 	for _, char := range name {
-		if (char < 'a' || char > 'z') && 
-			 (char < 'A' || char > 'Z') && 
-			 (char < '0' || char > '9') && 
-			 char != '-' && char != '_' {
+		if (char < 'a' || char > 'z') &&
+			(char < 'A' || char > 'Z') &&
+			(char < '0' || char > '9') &&
+			char != '-' && char != '_' {
 			return false
 		}
 	}

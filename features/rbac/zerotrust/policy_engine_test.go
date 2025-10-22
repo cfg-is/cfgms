@@ -15,21 +15,21 @@ import (
 
 func TestNewZeroTrustPolicyEngine(t *testing.T) {
 	config := &ZeroTrustConfig{
-		MaxEvaluationTime:            5 * time.Second,
-		CacheEnabled:                 true,
-		CacheTTL:                     10 * time.Minute,
-		DefaultEnforcementMode:       PolicyEnforcementModeEnforcing,
-		FailSecure:                   true,
-		EnableRBACIntegration:        true,
-		EnableJITIntegration:         true,
-		EnableRiskIntegration:        true,
-		EnableTenantIntegration:      true,
-		EnableContinuousAuth:         true,
-		EnableComplianceValidation:   true,
-		ComplianceFrameworks:         []ComplianceFramework{ComplianceFrameworkSOC2, ComplianceFrameworkGDPR},
-		EnableMetrics:                true,
-		EnableAuditing:               true,
-		MetricsInterval:              1 * time.Minute,
+		MaxEvaluationTime:          5 * time.Second,
+		CacheEnabled:               true,
+		CacheTTL:                   10 * time.Minute,
+		DefaultEnforcementMode:     PolicyEnforcementModeEnforcing,
+		FailSecure:                 true,
+		EnableRBACIntegration:      true,
+		EnableJITIntegration:       true,
+		EnableRiskIntegration:      true,
+		EnableTenantIntegration:    true,
+		EnableContinuousAuth:       true,
+		EnableComplianceValidation: true,
+		ComplianceFrameworks:       []ComplianceFramework{ComplianceFrameworkSOC2, ComplianceFrameworkGDPR},
+		EnableMetrics:              true,
+		EnableAuditing:             true,
+		MetricsInterval:            1 * time.Minute,
 	}
 
 	engine := NewZeroTrustPolicyEngine(config)
@@ -50,7 +50,7 @@ func TestZeroTrustPolicyEngineStartStop(t *testing.T) {
 		MaxEvaluationTime: 5 * time.Second,
 		MetricsInterval:   100 * time.Millisecond,
 	}
-	
+
 	engine := NewZeroTrustPolicyEngine(config)
 	ctx := context.Background()
 
@@ -108,7 +108,7 @@ func TestEvaluateAccessBasic(t *testing.T) {
 		FailSecure:        true,
 		MetricsInterval:   1 * time.Second,
 	}
-	
+
 	engine := NewZeroTrustPolicyEngine(config)
 	ctx := context.Background()
 
@@ -128,7 +128,7 @@ func TestEvaluateAccessBasic(t *testing.T) {
 	assert.Contains(t, response.EvaluationID, "eval-")
 	assert.NotZero(t, response.EvaluationTime)
 	assert.NotZero(t, response.ProcessingTime)
-	
+
 	// Should have audit trail
 	assert.NotEmpty(t, response.AuditTrail)
 }
@@ -138,9 +138,9 @@ func TestZeroTrustStatsTracking(t *testing.T) {
 		MaxEvaluationTime: 5 * time.Second,
 		EnableMetrics:     true,
 	}
-	
+
 	engine := NewZeroTrustPolicyEngine(config)
-	
+
 	// Get initial stats
 	initialStats := engine.GetStats()
 	assert.Equal(t, int64(0), initialStats.TotalEvaluations)
@@ -152,9 +152,9 @@ func TestZeroTrustStatsTracking(t *testing.T) {
 		Granted: true,
 	}
 	processingTime := 10 * time.Millisecond
-	
+
 	engine.updateStatistics(testResponse, processingTime)
-	
+
 	// Check updated stats
 	updatedStats := engine.GetStats()
 	assert.Equal(t, int64(1), updatedStats.TotalEvaluations)
@@ -166,7 +166,7 @@ func TestZeroTrustStatsTracking(t *testing.T) {
 	// Test denied request
 	testResponse.Granted = false
 	engine.updateStatistics(testResponse, processingTime)
-	
+
 	updatedStats2 := engine.GetStats()
 	assert.Equal(t, int64(2), updatedStats2.TotalEvaluations)
 	assert.Equal(t, int64(1), updatedStats2.SuccessfulEvaluations)
@@ -175,9 +175,9 @@ func TestZeroTrustStatsTracking(t *testing.T) {
 
 func TestZeroTrustPolicyPrioritySystem(t *testing.T) {
 	tests := []struct {
-		name           string
-		policies       []*ZeroTrustPolicy
-		expectedOrder  []string
+		name          string
+		policies      []*ZeroTrustPolicy
+		expectedOrder []string
 	}{
 		{
 			name: "Priority ordering",
@@ -208,7 +208,7 @@ func TestZeroTrustPolicyPrioritySystem(t *testing.T) {
 			// Sort policies by priority (would be done by policy engine)
 			sortedPolicies := make([]*ZeroTrustPolicy, len(tt.policies))
 			copy(sortedPolicies, tt.policies)
-			
+
 			// Simple bubble sort by priority (descending)
 			for i := 0; i < len(sortedPolicies); i++ {
 				for j := i + 1; j < len(sortedPolicies); j++ {
@@ -217,7 +217,7 @@ func TestZeroTrustPolicyPrioritySystem(t *testing.T) {
 					}
 				}
 			}
-			
+
 			// Verify order
 			for i, expected := range tt.expectedOrder {
 				assert.Equal(t, expected, sortedPolicies[i].ID)
@@ -276,14 +276,14 @@ func TestZeroTrustAccessRequestValidation(t *testing.T) {
 		MaxEvaluationTime: 5 * time.Second,
 		FailSecure:        true,
 	}
-	
+
 	engine := NewZeroTrustPolicyEngine(config)
 	ctx := context.Background()
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			response, err := engine.EvaluateAccess(ctx, tt.request)
-			
+
 			if tt.expectError {
 				assert.Error(t, err)
 			} else {
@@ -311,10 +311,10 @@ func TestEnvironmentContextExtraction(t *testing.T) {
 				City:    "San Francisco",
 			},
 			Network: &NetworkInfo{
-				ISP:          "Example ISP",
-				ASN:          "AS12345",
-				ThreatScore:  0.1,
-				VPNDetected:  false,
+				ISP:           "Example ISP",
+				ASN:           "AS12345",
+				ThreatScore:   0.1,
+				VPNDetected:   false,
 				ProxyDetected: false,
 			},
 			Device: &DeviceInfo{
@@ -330,9 +330,9 @@ func TestEnvironmentContextExtraction(t *testing.T) {
 		SecurityContext: &SecurityContext{
 			AuthenticationMethod:   "oauth2",
 			AuthenticationStrength: AuthStrengthStrong,
-			MFAVerified:           true,
-			CertificateValidated:  true,
-			TrustLevel:           TrustLevelHigh,
+			MFAVerified:            true,
+			CertificateValidated:   true,
+			TrustLevel:             TrustLevelHigh,
 		},
 	}
 
@@ -343,7 +343,7 @@ func TestEnvironmentContextExtraction(t *testing.T) {
 	assert.Equal(t, "Example ISP", request.EnvironmentContext.Network.ISP)
 	assert.Equal(t, "device-123", request.EnvironmentContext.Device.DeviceID)
 	assert.True(t, request.EnvironmentContext.Device.Trusted)
-	
+
 	assert.Equal(t, "oauth2", request.SecurityContext.AuthenticationMethod)
 	assert.Equal(t, AuthStrengthStrong, request.SecurityContext.AuthenticationStrength)
 	assert.True(t, request.SecurityContext.MFAVerified)
@@ -407,12 +407,12 @@ func TestThreatDetectionIntegration(t *testing.T) {
 
 	// Verify threat indicators are properly structured
 	assert.Len(t, request.SecurityContext.ThreatIndicators, 2)
-	
+
 	malwareThreat := request.SecurityContext.ThreatIndicators[0]
 	assert.Equal(t, ThreatTypeMalware, malwareThreat.Type)
 	assert.Equal(t, ThreatSeverityHigh, malwareThreat.Severity)
 	assert.Equal(t, 0.9, malwareThreat.Confidence)
-	
+
 	anomalousThreat := request.SecurityContext.ThreatIndicators[1]
 	assert.Equal(t, ThreatTypeAnomalous, anomalousThreat.Type)
 	assert.Equal(t, ThreatSeverityMedium, anomalousThreat.Severity)
@@ -421,9 +421,9 @@ func TestThreatDetectionIntegration(t *testing.T) {
 
 func TestEvaluateAccessWithSecurityThreats(t *testing.T) {
 	tests := []struct {
-		name                string
-		request             *ZeroTrustAccessRequest
-		expectedGranted     bool
+		name                   string
+		request                *ZeroTrustAccessRequest
+		expectedGranted        bool
 		expectedReasonContains string
 	}{
 		{
@@ -497,7 +497,7 @@ func TestEvaluateAccessWithSecurityThreats(t *testing.T) {
 				FailSecure:        true,
 				MetricsInterval:   1 * time.Second,
 			}
-			
+
 			engine := NewZeroTrustPolicyEngine(config)
 			ctx := context.Background()
 
@@ -506,7 +506,7 @@ func TestEvaluateAccessWithSecurityThreats(t *testing.T) {
 			assert.Equal(t, tt.expectedGranted, response.Granted)
 			assert.Contains(t, response.Reason, tt.expectedReasonContains)
 			assert.NotEmpty(t, response.AuditTrail)
-			
+
 			// Verify security context is preserved in evaluation
 			if tt.request.SecurityContext != nil && len(tt.request.SecurityContext.ThreatIndicators) > 0 {
 				assert.NotEmpty(t, tt.request.SecurityContext.ThreatIndicators)
@@ -517,9 +517,9 @@ func TestEvaluateAccessWithSecurityThreats(t *testing.T) {
 
 func TestEvaluateAccessWithSystemIntegrationFailures(t *testing.T) {
 	tests := []struct {
-		name               string
-		setupMocks         func(*mockRBACManagerWithError, *mockJITManagerWithError, *mockRiskManagerWithError, *mockTenantSecurityManagerWithError)
-		expectedGranted    bool
+		name                   string
+		setupMocks             func(*mockRBACManagerWithError, *mockJITManagerWithError, *mockRiskManagerWithError, *mockTenantSecurityManagerWithError)
+		expectedGranted        bool
 		expectedReasonContains string
 	}{
 		{
@@ -553,17 +553,17 @@ func TestEvaluateAccessWithSystemIntegrationFailures(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			config := &ZeroTrustConfig{
-				MaxEvaluationTime:      5 * time.Second,
-				FailSecure:             true,
-				EnableRBACIntegration:  true,
-				EnableJITIntegration:   true,
-				EnableRiskIntegration:  true,
+				MaxEvaluationTime:       5 * time.Second,
+				FailSecure:              true,
+				EnableRBACIntegration:   true,
+				EnableJITIntegration:    true,
+				EnableRiskIntegration:   true,
 				EnableTenantIntegration: true,
-				MetricsInterval:        1 * time.Second,
+				MetricsInterval:         1 * time.Second,
 			}
-			
+
 			engine := NewZeroTrustPolicyEngine(config)
-			
+
 			// Setup mock managers with error capability
 			rbacManager := &mockRBACManagerWithError{}
 			jitManager := &mockJITManagerWithError{}
@@ -662,14 +662,14 @@ func TestEvaluateAccessInputValidation(t *testing.T) {
 		FailSecure:        true,
 		MetricsInterval:   1 * time.Second,
 	}
-	
+
 	engine := NewZeroTrustPolicyEngine(config)
 	ctx := context.Background()
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			response, err := engine.EvaluateAccess(ctx, tt.request)
-			
+
 			if tt.expectError {
 				assert.Error(t, err, tt.description)
 			} else {
@@ -688,7 +688,7 @@ func TestConcurrentEvaluateAccess(t *testing.T) {
 		CacheTTL:          1 * time.Minute,
 		MetricsInterval:   1 * time.Second,
 	}
-	
+
 	engine := NewZeroTrustPolicyEngine(config)
 	ctx := context.Background()
 
@@ -721,7 +721,7 @@ func TestConcurrentEvaluateAccess(t *testing.T) {
 	// Collect results
 	successCount := 0
 	errorCount := 0
-	
+
 	for i := 0; i < numConcurrent; i++ {
 		select {
 		case response := <-results:
@@ -738,7 +738,7 @@ func TestConcurrentEvaluateAccess(t *testing.T) {
 
 	assert.Equal(t, numConcurrent, successCount)
 	assert.Equal(t, 0, errorCount)
-	
+
 	// Verify statistics were updated correctly
 	stats := engine.GetStats()
 	assert.Equal(t, int64(numConcurrent), stats.TotalEvaluations)
@@ -750,7 +750,7 @@ func TestZeroTrustPolicyEngine_PerformanceRequirement(t *testing.T) {
 		FailSecure:        true,
 		MetricsInterval:   1 * time.Second,
 	}
-	
+
 	engine := NewZeroTrustPolicyEngine(config)
 	ctx := context.Background()
 
@@ -772,20 +772,20 @@ func TestZeroTrustPolicyEngine_PerformanceRequirement(t *testing.T) {
 		start := time.Now()
 		response, err := engine.EvaluateAccess(ctx, request)
 		elapsed := time.Since(start)
-		
+
 		require.NoError(t, err)
 		assert.NotNil(t, response)
-		
+
 		// Verify processing time meets requirement
 		assert.Less(t, response.ProcessingTime, 5*time.Millisecond,
 			"Evaluation %d took %v, exceeds 5ms requirement", i+1, response.ProcessingTime)
-		
+
 		totalTime += elapsed
 	}
 
 	averageTime := totalTime / numTests
 	t.Logf("Average evaluation time: %v (requirement: <5ms)", averageTime)
-	
+
 	// Performance requirement: <5ms for policy evaluation
 	assert.Less(t, averageTime, 5*time.Millisecond,
 		"Average evaluation time %v exceeds 5ms performance requirement", averageTime)

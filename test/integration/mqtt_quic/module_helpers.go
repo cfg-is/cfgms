@@ -249,11 +249,11 @@ func (h *ModuleTestHelper) CleanupTestFiles(t *testing.T, containerName string, 
 
 // ConfigStatusMessage represents a configuration status message from MQTT
 type ConfigStatusMessage struct {
-	StewardID     string                   `json:"steward_id"`
-	ConfigVersion string                   `json:"config_version"`
-	Status        string                   `json:"status"`
-	Modules       map[string]ModuleStatus  `json:"modules"`
-	Timestamp     time.Time                `json:"timestamp"`
+	StewardID     string                  `json:"steward_id"`
+	ConfigVersion string                  `json:"config_version"`
+	Status        string                  `json:"status"`
+	Modules       map[string]ModuleStatus `json:"modules"`
+	Timestamp     time.Time               `json:"timestamp"`
 }
 
 // ModuleStatus represents the status of a single module

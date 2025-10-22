@@ -8,8 +8,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	"github.com/lib/pq"
+
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
 // DatabaseRuntimeStore implements RuntimeStore interface using PostgreSQL
@@ -289,7 +290,7 @@ func (s *DatabaseRuntimeStore) UpdateSession(ctx context.Context, sessionID stri
 func (s *DatabaseRuntimeStore) DeleteSession(ctx context.Context, sessionID string) error {
 	// #nosec G201 - Table name is validated and sanitized in plugin.go validateTableName()
 	query := fmt.Sprintf("DELETE FROM %s WHERE session_id = $1", s.tableName)
-	
+
 	result, err := s.db.ExecContext(ctx, query, sessionID)
 	if err != nil {
 		return fmt.Errorf("failed to delete session: %w", err)
@@ -471,7 +472,7 @@ func (s *DatabaseRuntimeStore) SetSessionTTL(ctx context.Context, sessionID stri
 func (s *DatabaseRuntimeStore) CleanupExpiredSessions(ctx context.Context) (int, error) {
 	// #nosec G201 - Table name is validated and sanitized in plugin.go validateTableName()
 	query := fmt.Sprintf("DELETE FROM %s WHERE expires_at < $1", s.tableName)
-	
+
 	result, err := s.db.ExecContext(ctx, query, time.Now())
 	if err != nil {
 		return 0, fmt.Errorf("failed to cleanup expired sessions: %w", err)
@@ -489,7 +490,7 @@ func (s *DatabaseRuntimeStore) CleanupExpiredSessions(ctx context.Context) (int,
 func (s *DatabaseRuntimeStore) ListExpiredSessions(ctx context.Context, cutoff time.Time) ([]string, error) {
 	// #nosec G201 - Table name is validated and sanitized in plugin.go validateTableName()
 	query := fmt.Sprintf("SELECT session_id FROM %s WHERE expires_at < $1", s.tableName)
-	
+
 	rows, err := s.db.QueryContext(ctx, query, cutoff)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query expired sessions: %w", err)
@@ -546,7 +547,7 @@ func (s *DatabaseRuntimeStore) SetRuntimeState(ctx context.Context, key string, 
 func (s *DatabaseRuntimeStore) GetRuntimeState(ctx context.Context, key string) (interface{}, error) {
 	// #nosec G201 - Table name is validated and sanitized in plugin.go validateTableName()
 	query := fmt.Sprintf("SELECT value FROM %s WHERE key = $1", s.stateTableName)
-	
+
 	var valueJSON []byte
 	err := s.db.QueryRowContext(ctx, query, key).Scan(&valueJSON)
 	if err != nil {
@@ -568,7 +569,7 @@ func (s *DatabaseRuntimeStore) GetRuntimeState(ctx context.Context, key string) 
 func (s *DatabaseRuntimeStore) DeleteRuntimeState(ctx context.Context, key string) error {
 	// #nosec G201 - Table name is validated and sanitized in plugin.go validateTableName()
 	query := fmt.Sprintf("DELETE FROM %s WHERE key = $1", s.stateTableName)
-	
+
 	result, err := s.db.ExecContext(ctx, query, key)
 	if err != nil {
 		return fmt.Errorf("failed to delete runtime state: %w", err)
@@ -593,10 +594,10 @@ func (s *DatabaseRuntimeStore) ListRuntimeKeys(ctx context.Context, prefix strin
 
 	if prefix == "" {
 		// #nosec G201 - Table name is validated and sanitized in plugin.go validateTableName()
-	query = fmt.Sprintf("SELECT key FROM %s ORDER BY key", s.stateTableName)
+		query = fmt.Sprintf("SELECT key FROM %s ORDER BY key", s.stateTableName)
 	} else {
 		// #nosec G201 - Table name is validated and sanitized in plugin.go validateTableName()
-	query = fmt.Sprintf("SELECT key FROM %s WHERE key LIKE $1 ORDER BY key", s.stateTableName)
+		query = fmt.Sprintf("SELECT key FROM %s WHERE key LIKE $1 ORDER BY key", s.stateTableName)
 		args = append(args, prefix+"%")
 	}
 
@@ -717,7 +718,7 @@ func (s *DatabaseRuntimeStore) DeleteSessionsBatch(ctx context.Context, sessionI
 	// Use ANY operator for efficient bulk delete
 	// #nosec G201 - Table name is validated and sanitized in plugin.go validateTableName()
 	query := fmt.Sprintf("DELETE FROM %s WHERE session_id = ANY($1)", s.tableName)
-	
+
 	_, err := s.db.ExecContext(ctx, query, pq.Array(sessionIDs))
 	if err != nil {
 		return fmt.Errorf("failed to delete sessions batch: %w", err)

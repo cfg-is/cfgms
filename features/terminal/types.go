@@ -60,7 +60,7 @@ type Session struct {
 	closed       bool
 	recorder     Recorder
 	executor     shell.Executor
-	mu           sync.RWMutex      // Mutex for thread-safe access to session fields
+	mu           sync.RWMutex // Mutex for thread-safe access to session fields
 }
 
 // SessionMetadata contains metadata about a terminal session

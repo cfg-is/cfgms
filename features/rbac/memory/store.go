@@ -6,8 +6,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/google/uuid"
+
+	"github.com/cfgis/cfgms/api/proto/common"
 )
 
 // Import the actual protobuf types
@@ -23,32 +24,32 @@ type RoleHierarchy struct {
 
 // EffectivePermissions represents the computed permissions for a role considering hierarchy
 type EffectivePermissions struct {
-	RoleID             string                      `json:"role_id"`
-	DirectPermissions  []*common.Permission        `json:"direct_permissions"`
+	RoleID               string                          `json:"role_id"`
+	DirectPermissions    []*common.Permission            `json:"direct_permissions"`
 	InheritedPermissions map[string][]*common.Permission `json:"inherited_permissions"` // roleID -> permissions
-	ConflictResolution map[string]ConflictResult   `json:"conflict_resolution,omitempty"`
-	ComputedAt         time.Time                   `json:"computed_at"`
+	ConflictResolution   map[string]ConflictResult       `json:"conflict_resolution,omitempty"`
+	ComputedAt           time.Time                       `json:"computed_at"`
 }
 
 // ConflictResult represents how a permission conflict was resolved
 type ConflictResult struct {
-	Permission    *common.Permission `json:"permission"`
-	SourceRoleID  string             `json:"source_role_id"`
-	Resolution    string             `json:"resolution"` // "override", "merge", "restrict"
-	ConflictedWith []string          `json:"conflicted_with"`
+	Permission     *common.Permission `json:"permission"`
+	SourceRoleID   string             `json:"source_role_id"`
+	Resolution     string             `json:"resolution"` // "override", "merge", "restrict"
+	ConflictedWith []string           `json:"conflicted_with"`
 }
 
 // Policy represents an ABAC policy
 type Policy struct {
-	ID          string            `json:"id"`
-	Name        string            `json:"name"`
-	Description string            `json:"description"`
-	TenantID    string            `json:"tenant_id"`
-	ResourceType string           `json:"resource_type"`
-	Effect      PolicyEffect      `json:"effect"`
-	Conditions  []PolicyCondition `json:"conditions"`
-	CreatedAt   time.Time         `json:"created_at"`
-	UpdatedAt   time.Time         `json:"updated_at"`
+	ID           string            `json:"id"`
+	Name         string            `json:"name"`
+	Description  string            `json:"description"`
+	TenantID     string            `json:"tenant_id"`
+	ResourceType string            `json:"resource_type"`
+	Effect       PolicyEffect      `json:"effect"`
+	Conditions   []PolicyCondition `json:"conditions"`
+	CreatedAt    time.Time         `json:"created_at"`
+	UpdatedAt    time.Time         `json:"updated_at"`
 }
 
 // PolicyEffect defines whether a policy allows or denies access
@@ -67,20 +68,20 @@ type PolicyCondition struct {
 }
 
 const (
-	RoleInheritanceNone = common.RoleInheritanceType_ROLE_INHERITANCE_NONE
-	RoleInheritanceAdditive = common.RoleInheritanceType_ROLE_INHERITANCE_ADDITIVE
-	RoleInheritanceOverride = common.RoleInheritanceType_ROLE_INHERITANCE_OVERRIDE
+	RoleInheritanceNone        = common.RoleInheritanceType_ROLE_INHERITANCE_NONE
+	RoleInheritanceAdditive    = common.RoleInheritanceType_ROLE_INHERITANCE_ADDITIVE
+	RoleInheritanceOverride    = common.RoleInheritanceType_ROLE_INHERITANCE_OVERRIDE
 	RoleInheritanceRestrictive = common.RoleInheritanceType_ROLE_INHERITANCE_RESTRICTIVE
 )
 
 // Store provides an in-memory implementation of all RBAC stores
 type Store struct {
-	mu           sync.RWMutex
-	permissions  map[string]*common.Permission
-	roles        map[string]*common.Role
-	subjects     map[string]*common.Subject
-	assignments  map[string]*common.RoleAssignment
-	initialized  bool
+	mu          sync.RWMutex
+	permissions map[string]*common.Permission
+	roles       map[string]*common.Role
+	subjects    map[string]*common.Subject
+	assignments map[string]*common.RoleAssignment
+	initialized bool
 }
 
 // NewStore creates a new in-memory RBAC store
@@ -113,7 +114,7 @@ func (s *Store) Initialize(ctx context.Context) error {
 func (s *Store) LoadPermissions(permissions []*common.Permission) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	
+
 	for _, perm := range permissions {
 		s.permissions[perm.Id] = perm
 	}
@@ -123,18 +124,18 @@ func (s *Store) LoadPermissions(permissions []*common.Permission) {
 func (s *Store) LoadRoles(roles []*common.Role) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	
+
 	now := time.Now().Unix()
 	for _, role := range roles {
 		// Create a copy to avoid race conditions on shared role objects
 		roleCopy := &common.Role{
-			Id:            role.Id,
-			Name:          role.Name,
-			Description:   role.Description,
-			PermissionIds: append([]string{}, role.PermissionIds...),
-			TenantId:      role.TenantId,
-			ParentRoleId:  role.ParentRoleId,
-			ChildRoleIds:  append([]string{}, role.ChildRoleIds...),
+			Id:              role.Id,
+			Name:            role.Name,
+			Description:     role.Description,
+			PermissionIds:   append([]string{}, role.PermissionIds...),
+			TenantId:        role.TenantId,
+			ParentRoleId:    role.ParentRoleId,
+			ChildRoleIds:    append([]string{}, role.ChildRoleIds...),
 			InheritanceType: role.InheritanceType,
 			IsSystemRole:    role.IsSystemRole,
 			CreatedAt:       now,
@@ -142,7 +143,7 @@ func (s *Store) LoadRoles(roles []*common.Role) {
 		}
 		s.roles[roleCopy.Id] = roleCopy
 	}
-	
+
 	// Second pass: establish bidirectional parent-child relationships
 	for _, inputRole := range roles {
 		if inputRole.ParentRoleId != "" {

@@ -6,10 +6,11 @@ import (
 	"strings"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/modules/m365/auth"
 	"github.com/cfgis/cfgms/features/modules/m365/graph"
-	"gopkg.in/yaml.v3"
 )
 
 // entraApplicationModule implements the Module interface for Entra ID application management
@@ -34,9 +35,9 @@ type EntraApplicationConfig struct {
 	SignInAudience string `yaml:"sign_in_audience"` // AzureADMyOrg, AzureADMultipleOrgs, AzureADandPersonalMicrosoftAccount, PersonalMicrosoftAccount
 
 	// Application URLs
-	IdentifierUris []string     `yaml:"identifier_uris,omitempty"`
+	IdentifierUris []string      `yaml:"identifier_uris,omitempty"`
 	RedirectUris   *RedirectUris `yaml:"redirect_uris,omitempty"`
-	LogoutUrl      string       `yaml:"logout_url,omitempty"`
+	LogoutUrl      string        `yaml:"logout_url,omitempty"`
 
 	// API permissions and scopes
 	RequiredResourceAccess []ResourceAccess `yaml:"required_resource_access,omitempty"`
@@ -61,8 +62,8 @@ type EntraApplicationConfig struct {
 	Tags            []string `yaml:"tags,omitempty"`
 
 	// Service Principal settings
-	CreateServicePrincipal         bool                     `yaml:"create_service_principal,omitempty"`
-	ServicePrincipalSettings       *ServicePrincipalConfig  `yaml:"service_principal_settings,omitempty"`
+	CreateServicePrincipal   bool                    `yaml:"create_service_principal,omitempty"`
+	ServicePrincipalSettings *ServicePrincipalConfig `yaml:"service_principal_settings,omitempty"`
 
 	// Tenant configuration
 	TenantID string `yaml:"tenant_id"`
@@ -73,15 +74,15 @@ type EntraApplicationConfig struct {
 
 // RedirectUris represents redirect URIs for different platforms
 type RedirectUris struct {
-	Web    []string `yaml:"web,omitempty"`
-	Spa    []string `yaml:"spa,omitempty"`
-	Mobile []string `yaml:"mobile,omitempty"`
+	Web     []string `yaml:"web,omitempty"`
+	Spa     []string `yaml:"spa,omitempty"`
+	Mobile  []string `yaml:"mobile,omitempty"`
 	Desktop []string `yaml:"desktop,omitempty"`
 }
 
 // ResourceAccess represents required permissions to a resource (API)
 type ResourceAccess struct {
-	ResourceAppId string           `yaml:"resource_app_id"`
+	ResourceAppId  string            `yaml:"resource_app_id"`
 	ResourceAccess []PermissionScope `yaml:"resource_access"`
 }
 
@@ -105,12 +106,12 @@ type OAuth2Scope struct {
 
 // AppRole represents an application role that can be assigned to users, groups, or service principals
 type AppRole struct {
-	ID                   string   `yaml:"id"`
-	DisplayName          string   `yaml:"display_name"`
-	Description          string   `yaml:"description"`
-	Value                string   `yaml:"value"`
-	AllowedMemberTypes   []string `yaml:"allowed_member_types"` // "User", "Application"
-	IsEnabled            bool     `yaml:"is_enabled"`
+	ID                 string   `yaml:"id"`
+	DisplayName        string   `yaml:"display_name"`
+	Description        string   `yaml:"description"`
+	Value              string   `yaml:"value"`
+	AllowedMemberTypes []string `yaml:"allowed_member_types"` // "User", "Application"
+	IsEnabled          bool     `yaml:"is_enabled"`
 }
 
 // PasswordCredential represents a password (client secret) credential
@@ -122,12 +123,12 @@ type PasswordCredential struct {
 
 // KeyCredential represents a certificate credential
 type KeyCredential struct {
-	DisplayName   string `yaml:"display_name"`
-	EndDateTime   string `yaml:"end_date_time,omitempty"`
-	Type          string `yaml:"type"`           // "AsymmetricX509Cert", "X509CertAndPassword"
-	Usage         string `yaml:"usage"`         // "Sign", "Verify"
-	Key           string `yaml:"key,omitempty"` // Base64-encoded certificate
-	KeyId         string `yaml:"key_id,omitempty"`
+	DisplayName string `yaml:"display_name"`
+	EndDateTime string `yaml:"end_date_time,omitempty"`
+	Type        string `yaml:"type"`          // "AsymmetricX509Cert", "X509CertAndPassword"
+	Usage       string `yaml:"usage"`         // "Sign", "Verify"
+	Key         string `yaml:"key,omitempty"` // Base64-encoded certificate
+	KeyId       string `yaml:"key_id,omitempty"`
 }
 
 // OptionalClaims represents optional claims configuration
@@ -139,10 +140,10 @@ type OptionalClaims struct {
 
 // OptionalClaim represents a single optional claim
 type OptionalClaim struct {
-	Name                 string                    `yaml:"name"`
-	Source               string                    `yaml:"source,omitempty"`
-	Essential            bool                      `yaml:"essential,omitempty"`
-	AdditionalProperties []OptionalClaimProperty  `yaml:"additional_properties,omitempty"`
+	Name                 string                  `yaml:"name"`
+	Source               string                  `yaml:"source,omitempty"`
+	Essential            bool                    `yaml:"essential,omitempty"`
+	AdditionalProperties []OptionalClaimProperty `yaml:"additional_properties,omitempty"`
 }
 
 // OptionalClaimProperty represents additional properties for optional claims
@@ -153,13 +154,13 @@ type OptionalClaimProperty struct {
 
 // ServicePrincipalConfig represents configuration for the associated service principal
 type ServicePrincipalConfig struct {
-	AccountEnabled               bool     `yaml:"account_enabled"`
-	AppRoleAssignmentRequired    bool     `yaml:"app_role_assignment_required,omitempty"`
-	ServicePrincipalType         string   `yaml:"service_principal_type,omitempty"` // "Application", "Legacy", "SocialIdp"
-	Tags                         []string `yaml:"tags,omitempty"`
-	PreferredSingleSignOnMode    string   `yaml:"preferred_single_sign_on_mode,omitempty"`
-	ReplyUrls                    []string `yaml:"reply_urls,omitempty"`
-	NotificationEmailAddresses   []string `yaml:"notification_email_addresses,omitempty"`
+	AccountEnabled             bool     `yaml:"account_enabled"`
+	AppRoleAssignmentRequired  bool     `yaml:"app_role_assignment_required,omitempty"`
+	ServicePrincipalType       string   `yaml:"service_principal_type,omitempty"` // "Application", "Legacy", "SocialIdp"
+	Tags                       []string `yaml:"tags,omitempty"`
+	PreferredSingleSignOnMode  string   `yaml:"preferred_single_sign_on_mode,omitempty"`
+	ReplyUrls                  []string `yaml:"reply_urls,omitempty"`
+	NotificationEmailAddresses []string `yaml:"notification_email_addresses,omitempty"`
 }
 
 // AsMap returns the configuration as a map for efficient field-by-field comparison
@@ -257,10 +258,10 @@ func (c *EntraApplicationConfig) Validate() error {
 
 	// Validate sign-in audience
 	validAudiences := map[string]bool{
-		"AzureADMyOrg":                          true,
-		"AzureADMultipleOrgs":                   true,
-		"AzureADandPersonalMicrosoftAccount":    true,
-		"PersonalMicrosoftAccount":              true,
+		"AzureADMyOrg":                       true,
+		"AzureADMultipleOrgs":                true,
+		"AzureADandPersonalMicrosoftAccount": true,
+		"PersonalMicrosoftAccount":           true,
 	}
 	if !validAudiences[c.SignInAudience] {
 		return fmt.Errorf("invalid sign_in_audience: %s", c.SignInAudience)
@@ -455,7 +456,7 @@ func (m *entraApplicationModule) createApplication(ctx context.Context, token *a
 	if err != nil {
 		return fmt.Errorf("failed to create application via Graph API: %w", err)
 	}
-	
+
 	// Wait for application creation to propagate
 	time.Sleep(2 * time.Second)
 
@@ -513,7 +514,7 @@ func (m *entraApplicationModule) updateApplication(ctx context.Context, token *a
 	if len(updates) > 0 {
 		// Build the update request
 		updateRequest := &graph.UpdateApplicationRequest{}
-		
+
 		if displayName, ok := updates["displayName"].(string); ok {
 			updateRequest.DisplayName = &displayName
 		}
@@ -523,7 +524,7 @@ func (m *entraApplicationModule) updateApplication(ctx context.Context, token *a
 		if signInAudience, ok := updates["signInAudience"].(string); ok {
 			updateRequest.SignInAudience = &signInAudience
 		}
-		
+
 		// Update application via Graph API
 		if err := m.graphClient.UpdateApplication(ctx, token, existingApp.ID, updateRequest); err != nil {
 			return fmt.Errorf("failed to update application via Graph API: %w", err)

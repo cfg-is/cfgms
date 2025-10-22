@@ -197,9 +197,9 @@ var ExampleWorkflows = map[string]interface{}{
 						},
 					},
 					"output_mapping": map[string]string{
-						"name_upper":   "processed_name",
-						"age_numeric":  "processed_age",
-						"active":       "is_active",
+						"name_upper":  "processed_name",
+						"age_numeric": "processed_age",
+						"active":      "is_active",
 					},
 				},
 			},

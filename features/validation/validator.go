@@ -16,13 +16,12 @@
 //
 //	validator := validation.NewValidator()
 //	result := validator.ValidateConfiguration(config)
-//	
+//
 //	if result.HasErrors() {
 //		for _, err := range result.Errors {
 //			fmt.Printf("Error: %s\n", err.Message)
 //		}
 //	}
-//
 package validation
 
 import (
@@ -63,21 +62,21 @@ func (vl ValidationLevel) String() string {
 
 // ValidationIssue represents a single validation problem
 type ValidationIssue struct {
-	Level       ValidationLevel `json:"level"`
-	Field       string          `json:"field"`
-	Message     string          `json:"message"`
-	Suggestion  string          `json:"suggestion,omitempty"`
-	Code        string          `json:"code"`
-	Context     map[string]interface{} `json:"context,omitempty"`
+	Level      ValidationLevel        `json:"level"`
+	Field      string                 `json:"field"`
+	Message    string                 `json:"message"`
+	Suggestion string                 `json:"suggestion,omitempty"`
+	Code       string                 `json:"code"`
+	Context    map[string]interface{} `json:"context,omitempty"`
 }
 
 // ValidationResult contains the complete validation outcome
 type ValidationResult struct {
-	Valid      bool               `json:"valid"`
-	Issues     []ValidationIssue  `json:"issues"`
-	StartTime  time.Time          `json:"start_time"`
-	Duration   time.Duration      `json:"duration"`
-	Metadata   map[string]interface{} `json:"metadata,omitempty"`
+	Valid     bool                   `json:"valid"`
+	Issues    []ValidationIssue      `json:"issues"`
+	StartTime time.Time              `json:"start_time"`
+	Duration  time.Duration          `json:"duration"`
+	Metadata  map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // HasErrors returns true if there are any error or critical level issues
@@ -113,10 +112,10 @@ func (vr *ValidationResult) GetIssuesByLevel(level ValidationLevel) []Validation
 
 // Validator provides comprehensive configuration validation
 type Validator struct {
-	businessRules   []BusinessRule
-	enableCaching   bool
-	cache          map[string]*ValidationResult
-	metrics        *ValidationMetrics
+	businessRules []BusinessRule
+	enableCaching bool
+	cache         map[string]*ValidationResult
+	metrics       *ValidationMetrics
 }
 
 // BusinessRule represents a custom validation rule
@@ -127,12 +126,12 @@ type BusinessRule interface {
 
 // ValidationMetrics tracks validation performance and statistics
 type ValidationMetrics struct {
-	TotalValidations    int64         `json:"total_validations"`
-	CacheHits          int64         `json:"cache_hits"`
-	CacheMisses        int64         `json:"cache_misses"`
+	TotalValidations      int64         `json:"total_validations"`
+	CacheHits             int64         `json:"cache_hits"`
+	CacheMisses           int64         `json:"cache_misses"`
 	AverageValidationTime time.Duration `json:"average_validation_time"`
 	SchemaValidationTime  time.Duration `json:"schema_validation_time"`
-	BusinessRuleTime     time.Duration `json:"business_rule_time"`
+	BusinessRuleTime      time.Duration `json:"business_rule_time"`
 }
 
 // NewValidator creates a new configuration validator
@@ -145,8 +144,8 @@ func NewValidator() *Validator {
 			&SecurityBestPracticesRule{},
 		},
 		enableCaching: true,
-		cache:        make(map[string]*ValidationResult),
-		metrics:      &ValidationMetrics{},
+		cache:         make(map[string]*ValidationResult),
+		metrics:       &ValidationMetrics{},
 	}
 }
 
@@ -279,7 +278,7 @@ func (v *Validator) validateModuleConfigs(cfg config.StewardConfig) []Validation
 
 	for i, resource := range cfg.Resources {
 		fieldPrefix := fmt.Sprintf("resources[%d]", i)
-		
+
 		// Validate module exists
 		if !v.isValidModule(resource.Module) {
 			issues = append(issues, ValidationIssue{
@@ -299,7 +298,6 @@ func (v *Validator) validateModuleConfigs(cfg config.StewardConfig) []Validation
 
 	return issues
 }
-
 
 // generateCacheKey generates a cache key for the configuration
 func (v *Validator) generateCacheKey(cfg config.StewardConfig) string {

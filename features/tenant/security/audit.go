@@ -15,35 +15,35 @@ type TenantSecurityAuditLogger struct {
 
 // TenantSecurityAuditEntry represents a single tenant security audit entry
 type TenantSecurityAuditEntry struct {
-	ID             string                 `json:"id"`
-	Timestamp      time.Time              `json:"timestamp"`
+	ID             string                  `json:"id"`
+	Timestamp      time.Time               `json:"timestamp"`
 	EventType      TenantSecurityEventType `json:"event_type"`
-	TenantID       string                 `json:"tenant_id"`
-	SubjectID      string                 `json:"subject_id,omitempty"`
-	ResourceID     string                 `json:"resource_id,omitempty"`
-	Action         string                 `json:"action"`
-	Result         string                 `json:"result"`
-	Details        map[string]interface{} `json:"details,omitempty"`
-	SourceIP       string                 `json:"source_ip,omitempty"`
-	UserAgent      string                 `json:"user_agent,omitempty"`
-	SessionID      string                 `json:"session_id,omitempty"`
-	Severity       AuditSeverity          `json:"severity"`
-	ComplianceInfo *ComplianceAuditInfo   `json:"compliance_info,omitempty"`
+	TenantID       string                  `json:"tenant_id"`
+	SubjectID      string                  `json:"subject_id,omitempty"`
+	ResourceID     string                  `json:"resource_id,omitempty"`
+	Action         string                  `json:"action"`
+	Result         string                  `json:"result"`
+	Details        map[string]interface{}  `json:"details,omitempty"`
+	SourceIP       string                  `json:"source_ip,omitempty"`
+	UserAgent      string                  `json:"user_agent,omitempty"`
+	SessionID      string                  `json:"session_id,omitempty"`
+	Severity       AuditSeverity           `json:"severity"`
+	ComplianceInfo *ComplianceAuditInfo    `json:"compliance_info,omitempty"`
 }
 
 // TenantSecurityEventType defines types of tenant security events
 type TenantSecurityEventType string
 
 const (
-	TenantSecurityEventIsolationRuleChange TenantSecurityEventType = "isolation_rule_change"
-	TenantSecurityEventAccessAttempt       TenantSecurityEventType = "access_attempt"
-	TenantSecurityEventPolicyViolation     TenantSecurityEventType = "policy_violation"
-	TenantSecurityEventCrossTenantAccess   TenantSecurityEventType = "cross_tenant_access"
-	TenantSecurityEventDataExfiltration    TenantSecurityEventType = "data_exfiltration"
-	TenantSecurityEventUnauthorizedAccess  TenantSecurityEventType = "unauthorized_access"
-	TenantSecurityEventComplianceViolation TenantSecurityEventType = "compliance_violation"
+	TenantSecurityEventIsolationRuleChange  TenantSecurityEventType = "isolation_rule_change"
+	TenantSecurityEventAccessAttempt        TenantSecurityEventType = "access_attempt"
+	TenantSecurityEventPolicyViolation      TenantSecurityEventType = "policy_violation"
+	TenantSecurityEventCrossTenantAccess    TenantSecurityEventType = "cross_tenant_access"
+	TenantSecurityEventDataExfiltration     TenantSecurityEventType = "data_exfiltration"
+	TenantSecurityEventUnauthorizedAccess   TenantSecurityEventType = "unauthorized_access"
+	TenantSecurityEventComplianceViolation  TenantSecurityEventType = "compliance_violation"
 	TenantSecurityEventSecurityPolicyChange TenantSecurityEventType = "security_policy_change"
-	TenantSecurityEventZeroTrustOverlay    TenantSecurityEventType = "zero_trust_overlay"
+	TenantSecurityEventZeroTrustOverlay     TenantSecurityEventType = "zero_trust_overlay"
 )
 
 // AuditSeverity defines the severity levels for audit events
@@ -120,22 +120,22 @@ func (tsal *TenantSecurityAuditLogger) LogAccessAttempt(ctx context.Context, req
 	}
 
 	entry := TenantSecurityAuditEntry{
-		ID:        fmt.Sprintf("access-%d", time.Now().UnixNano()),
-		Timestamp: time.Now(),
-		EventType: TenantSecurityEventAccessAttempt,
-		TenantID:  request.TargetTenantID,
-		SubjectID: request.SubjectID,
+		ID:         fmt.Sprintf("access-%d", time.Now().UnixNano()),
+		Timestamp:  time.Now(),
+		EventType:  TenantSecurityEventAccessAttempt,
+		TenantID:   request.TargetTenantID,
+		SubjectID:  request.SubjectID,
 		ResourceID: request.ResourceID,
-		Action:    fmt.Sprintf("access_%s", request.AccessLevel),
-		Result:    tsal.getResultString(response.Granted),
-		Severity:  severity,
-		SourceIP:  request.Context["source_ip"],
-		UserAgent: request.Context["user_agent"],
-		SessionID: request.Context["session_id"],
+		Action:     fmt.Sprintf("access_%s", request.AccessLevel),
+		Result:     tsal.getResultString(response.Granted),
+		Severity:   severity,
+		SourceIP:   request.Context["source_ip"],
+		UserAgent:  request.Context["user_agent"],
+		SessionID:  request.Context["session_id"],
 		Details: map[string]interface{}{
 			"requested_level": request.AccessLevel,
 			"source_tenant":   request.SubjectTenantID,
-			"reason":         response.Reason,
+			"reason":          response.Reason,
 		},
 	}
 
@@ -161,9 +161,9 @@ func (tsal *TenantSecurityAuditLogger) LogPolicyViolation(ctx context.Context, t
 		Result:    "blocked",
 		Severity:  AuditSeverityError,
 		Details: map[string]interface{}{
-			"policy_id":  policyID,
-			"violation":  violation,
-			"context":    context,
+			"policy_id": policyID,
+			"violation": violation,
+			"context":   context,
 		},
 	}
 
@@ -240,13 +240,13 @@ func (tsal *TenantSecurityAuditLogger) GetSecurityReport(ctx context.Context, te
 	}
 
 	report := &TenantSecurityReport{
-		TenantID:       tenantID,
-		ReportPeriod:   period,
-		GeneratedAt:    time.Now(),
-		TotalEntries:   len(entries),
-		EventSummary:   make(map[TenantSecurityEventType]int),
-		SeveritySummary: make(map[AuditSeverity]int),
-		SecurityAlerts: []SecurityAlert{},
+		TenantID:         tenantID,
+		ReportPeriod:     period,
+		GeneratedAt:      time.Now(),
+		TotalEntries:     len(entries),
+		EventSummary:     make(map[TenantSecurityEventType]int),
+		SeveritySummary:  make(map[AuditSeverity]int),
+		SecurityAlerts:   []SecurityAlert{},
 		ComplianceStatus: ComplianceStatus{},
 	}
 
@@ -257,7 +257,7 @@ func (tsal *TenantSecurityAuditLogger) GetSecurityReport(ctx context.Context, te
 	for _, entry := range entries {
 		// Count by event type
 		report.EventSummary[entry.EventType]++
-		
+
 		// Count by severity
 		report.SeveritySummary[entry.Severity]++
 
@@ -452,9 +452,9 @@ func (tsal *TenantSecurityAuditLogger) LogRemediationAction(ctx context.Context,
 		Action:     fmt.Sprintf("remediation_action_%s", action),
 		Result:     "success",
 		Details: map[string]interface{}{
-			"vulnerability_id":    vulnerabilityID,
-			"remediation_action":  action,
-			"execution_type":      "automated",
+			"vulnerability_id":   vulnerabilityID,
+			"remediation_action": action,
+			"execution_type":     "automated",
 		},
 		Severity: AuditSeverityWarning,
 	}
@@ -475,14 +475,14 @@ type TenantSecurityAuditFilter struct {
 }
 
 type TenantSecurityReport struct {
-	TenantID         string                                  `json:"tenant_id"`
-	ReportPeriod     time.Duration                           `json:"report_period"`
-	GeneratedAt      time.Time                               `json:"generated_at"`
-	TotalEntries     int                                     `json:"total_entries"`
-	EventSummary     map[TenantSecurityEventType]int         `json:"event_summary"`
-	SeveritySummary  map[AuditSeverity]int                   `json:"severity_summary"`
-	SecurityAlerts   []SecurityAlert                         `json:"security_alerts"`
-	ComplianceStatus ComplianceStatus                        `json:"compliance_status"`
+	TenantID         string                          `json:"tenant_id"`
+	ReportPeriod     time.Duration                   `json:"report_period"`
+	GeneratedAt      time.Time                       `json:"generated_at"`
+	TotalEntries     int                             `json:"total_entries"`
+	EventSummary     map[TenantSecurityEventType]int `json:"event_summary"`
+	SeveritySummary  map[AuditSeverity]int           `json:"severity_summary"`
+	SecurityAlerts   []SecurityAlert                 `json:"security_alerts"`
+	ComplianceStatus ComplianceStatus                `json:"compliance_status"`
 }
 
 type SecurityAlert struct {
@@ -494,9 +494,9 @@ type SecurityAlert struct {
 }
 
 type ComplianceStatus struct {
-	Framework        string    `json:"framework,omitempty"`
-	Status           string    `json:"status,omitempty"`
-	LastAssessment   time.Time `json:"last_assessment,omitempty"`
-	RequirementsMet  int       `json:"requirements_met"`
-	TotalRequirements int      `json:"total_requirements"`
+	Framework         string    `json:"framework,omitempty"`
+	Status            string    `json:"status,omitempty"`
+	LastAssessment    time.Time `json:"last_assessment,omitempty"`
+	RequirementsMet   int       `json:"requirements_met"`
+	TotalRequirements int       `json:"total_requirements"`
 }

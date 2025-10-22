@@ -15,11 +15,13 @@ import (
 	"strings"
 	"sync"
 	"time"
+
 	"golang.org/x/text/unicode/norm"
 
-	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/gorilla/mux"
 	"golang.org/x/time/rate"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // HTTPWebhookHandler implements the WebhookHandler interface using HTTP endpoints
@@ -158,7 +160,7 @@ func (wh *HTTPWebhookHandler) RegisterWebhook(ctx context.Context, trigger *Trig
 		rateLimit := rate.Limit(trigger.Webhook.RateLimit.RequestsPerMinute / 60.0) // Convert to requests per second
 		burstSize := trigger.Webhook.RateLimit.BurstSize
 		if burstSize <= 0 {
-			burstSize = int(trigger.Webhook.RateLimit.RequestsPerMinute)
+			burstSize = trigger.Webhook.RateLimit.RequestsPerMinute
 		}
 		wh.rateLimiters[trigger.ID] = rate.NewLimiter(rateLimit, burstSize)
 	}
@@ -277,10 +279,10 @@ func (wh *HTTPWebhookHandler) HandleWebhook(ctx context.Context, triggerID strin
 
 	// Add trigger data to variables
 	triggerData := map[string]interface{}{
-		"trigger_type": "webhook",
-		"trigger_id":   triggerID,
+		"trigger_type":    "webhook",
+		"trigger_id":      triggerID,
 		"webhook_headers": headers,
-		"execution_id": execution.ID,
+		"execution_id":    execution.ID,
 	}
 
 	// Merge variables
@@ -461,7 +463,6 @@ func (wh *HTTPWebhookHandler) handleWebhookRequest(w http.ResponseWriter, r *htt
 			headers[name] = values[0]
 		}
 	}
-
 
 	// Process webhook
 	execution, err := wh.HandleWebhook(ctx, triggerID, payload, headers)

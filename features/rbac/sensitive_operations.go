@@ -23,30 +23,30 @@ type SensitiveOperationType string
 
 const (
 	// Permission management operations
-	SensitiveOpCreateRole   SensitiveOperationType = "create_role"
-	SensitiveOpDeleteRole   SensitiveOperationType = "delete_role"
-	SensitiveOpModifyRole   SensitiveOperationType = "modify_role"
-	SensitiveOpAssignRole   SensitiveOperationType = "assign_role"
-	SensitiveOpRevokeRole   SensitiveOperationType = "revoke_role"
+	SensitiveOpCreateRole SensitiveOperationType = "create_role"
+	SensitiveOpDeleteRole SensitiveOperationType = "delete_role"
+	SensitiveOpModifyRole SensitiveOperationType = "modify_role"
+	SensitiveOpAssignRole SensitiveOperationType = "assign_role"
+	SensitiveOpRevokeRole SensitiveOperationType = "revoke_role"
 
 	// Permission operations
 	SensitiveOpCreatePermission SensitiveOperationType = "create_permission"
 	SensitiveOpDeletePermission SensitiveOperationType = "delete_permission"
 
 	// User management operations
-	SensitiveOpCreateUser   SensitiveOperationType = "create_user"
-	SensitiveOpDeleteUser   SensitiveOperationType = "delete_user"
-	SensitiveOpModifyUser   SensitiveOperationType = "modify_user"
+	SensitiveOpCreateUser SensitiveOperationType = "create_user"
+	SensitiveOpDeleteUser SensitiveOperationType = "delete_user"
+	SensitiveOpModifyUser SensitiveOperationType = "modify_user"
 
 	// System configuration operations
-	SensitiveOpModifyConfig     SensitiveOperationType = "modify_config"
-	SensitiveOpDisableSecurity  SensitiveOperationType = "disable_security"
-	SensitiveOpViewAuditLogs    SensitiveOperationType = "view_audit_logs"
-	SensitiveOpModifyAuditLogs  SensitiveOperationType = "modify_audit_logs"
+	SensitiveOpModifyConfig    SensitiveOperationType = "modify_config"
+	SensitiveOpDisableSecurity SensitiveOperationType = "disable_security"
+	SensitiveOpViewAuditLogs   SensitiveOperationType = "view_audit_logs"
+	SensitiveOpModifyAuditLogs SensitiveOperationType = "modify_audit_logs"
 
 	// Data operations
-	SensitiveOpBulkDelete  SensitiveOperationType = "bulk_delete"
-	SensitiveOpDataExport  SensitiveOperationType = "data_export"
+	SensitiveOpBulkDelete SensitiveOperationType = "bulk_delete"
+	SensitiveOpDataExport SensitiveOperationType = "data_export"
 )
 
 // SensitiveOperationContext contains context for a sensitive operation
@@ -55,8 +55,8 @@ type SensitiveOperationContext struct {
 	OperationType SensitiveOperationType
 	SubjectID     string // User performing the operation
 	TenantID      string
-	ResourceID    string // Resource being operated on
-	Justification string // Required justification for the operation
+	ResourceID    string                 // Resource being operated on
+	Justification string                 // Required justification for the operation
 	Metadata      map[string]interface{} // Additional context
 }
 

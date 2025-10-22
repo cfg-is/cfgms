@@ -198,8 +198,8 @@ func TestWebSocketAuthentication(t *testing.T) {
 			// Create test server
 			server := httptest.NewServer(http.HandlerFunc(handler.HandleWebSocket))
 			defer func() {
-		server.Close() // Test server close doesn't return error
-	}()
+				server.Close() // Test server close doesn't return error
+			}()
 
 			wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + tt.queryPath
 
@@ -210,8 +210,8 @@ func TestWebSocketAuthentication(t *testing.T) {
 				require.NoError(t, err)
 				require.NotNil(t, conn)
 				if err := conn.Close(); err != nil {
-				t.Logf("Failed to close connection: %v", err)
-			}
+					t.Logf("Failed to close connection: %v", err)
+				}
 			} else {
 				require.Error(t, err)
 				require.NotNil(t, resp)

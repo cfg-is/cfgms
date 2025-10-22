@@ -19,26 +19,26 @@ type EnvironmentRiskAnalyzer struct {
 
 // GeoRiskAssessor assesses geographic and location-based risks
 type GeoRiskAssessor struct {
-	countryRiskScores   map[string]float64
-	regionRiskScores    map[string]float64
-	vpnDetector         *VPNDetector
-	proxyDetector       *ProxyDetector
-	torDetector         *TorDetector
+	countryRiskScores map[string]float64
+	regionRiskScores  map[string]float64
+	vpnDetector       *VPNDetector
+	proxyDetector     *ProxyDetector
+	torDetector       *TorDetector
 }
 
 // TimeRiskAssessor assesses time-based risks
 type TimeRiskAssessor struct {
-	businessHours       BusinessHoursConfig
-	timezoneValidator   *TimezoneValidator
-	holidayCalendar     *HolidayCalendar
+	businessHours     BusinessHoursConfig
+	timezoneValidator *TimezoneValidator
+	holidayCalendar   *HolidayCalendar
 }
 
 // NetworkRiskAssessor assesses network-based risks
 type NetworkRiskAssessor struct {
-	knownNetworks       map[string]NetworkInfo
-	securityScanner     *NetworkSecurityScanner
-	bandwidthAnalyzer   *BandwidthAnalyzer
-	latencyAnalyzer     *LatencyAnalyzer
+	knownNetworks     map[string]NetworkInfo
+	securityScanner   *NetworkSecurityScanner
+	bandwidthAnalyzer *BandwidthAnalyzer
+	latencyAnalyzer   *LatencyAnalyzer
 }
 
 // DeviceRiskAssessor assesses device-based risks
@@ -50,9 +50,9 @@ type DeviceRiskAssessor struct {
 
 // ThreatIntelligenceService provides threat intelligence data
 type ThreatIntelligenceService struct {
-	ipReputationDB      *IPReputationDatabase
-	threatFeedService   *ThreatFeedService
-	malwareDetector     *MalwareDetector
+	ipReputationDB    *IPReputationDatabase
+	threatFeedService *ThreatFeedService
+	malwareDetector   *MalwareDetector
 }
 
 // Supporting configuration and data types
@@ -88,16 +88,16 @@ type NetworkInfo struct {
 
 // DeviceInfo contains information about known devices
 type DeviceInfo struct {
-	DeviceID          string                 `json:"device_id"`
-	DeviceType        string                 `json:"device_type"`
-	OS                string                 `json:"os"`
-	OSVersion         string                 `json:"os_version"`
-	Browser           string                 `json:"browser"`
-	BrowserVersion    string                 `json:"browser_version"`
-	ComplianceStatus  DeviceComplianceStatus `json:"compliance_status"`
-	TrustScore        float64                `json:"trust_score"`
-	LastSeen          time.Time              `json:"last_seen"`
-	RiskFactors       []string               `json:"risk_factors"`
+	DeviceID         string                 `json:"device_id"`
+	DeviceType       string                 `json:"device_type"`
+	OS               string                 `json:"os"`
+	OSVersion        string                 `json:"os_version"`
+	Browser          string                 `json:"browser"`
+	BrowserVersion   string                 `json:"browser_version"`
+	ComplianceStatus DeviceComplianceStatus `json:"compliance_status"`
+	TrustScore       float64                `json:"trust_score"`
+	LastSeen         time.Time              `json:"last_seen"`
+	RiskFactors      []string               `json:"risk_factors"`
 }
 
 // NewEnvironmentRiskAnalyzer creates a new environment risk analyzer
@@ -156,23 +156,23 @@ func (era *EnvironmentRiskAnalyzer) EvaluateEnvironmentalRisk(ctx context.Contex
 	networkWeight := 0.25
 	deviceWeight := 0.20
 	threatWeight := 0.15
-	
+
 	// For high threat intelligence, increase threat weight significantly
 	if threatRisk.RiskScore > 70.0 {
-		threatWeight = 0.55      // 55% weight for high threat scenarios
-		locationWeight = 0.15    // 15% weight
-		timeWeight = 0.10        // 10% weight
-		networkWeight = 0.10     // 10% weight
-		deviceWeight = 0.10      // 10% weight
+		threatWeight = 0.55   // 55% weight for high threat scenarios
+		locationWeight = 0.15 // 15% weight
+		timeWeight = 0.10     // 10% weight
+		networkWeight = 0.10  // 10% weight
+		deviceWeight = 0.10   // 10% weight
 	} else if timeRisk.RiskScore > 40.0 {
 		// For high time risk (after hours, unusual times), increase time weight
-		timeWeight = 0.35        // 35% weight for time-based risk
-		locationWeight = 0.20    // 20% weight
-		threatWeight = 0.20      // 20% weight
-		networkWeight = 0.15     // 15% weight
-		deviceWeight = 0.10      // 10% weight
+		timeWeight = 0.35     // 35% weight for time-based risk
+		locationWeight = 0.20 // 20% weight
+		threatWeight = 0.20   // 20% weight
+		networkWeight = 0.15  // 15% weight
+		deviceWeight = 0.10   // 10% weight
 	}
-	
+
 	riskComponents := []float64{
 		locationRisk.RiskScore * locationWeight,
 		timeRisk.RiskScore * timeWeight,
@@ -206,11 +206,11 @@ func (era *EnvironmentRiskAnalyzer) assessLocationRisk(ctx context.Context, requ
 	}
 
 	geoLocation := request.EnvironmentContext.GeoLocation
-	
+
 	// Assess country risk
 	countryRisk := era.geoRiskAssessor.getCountryRisk(geoLocation.Country)
 	locationRisk.CountryRisk = countryRisk
-	
+
 	// Assess region risk
 	regionKey := fmt.Sprintf("%s:%s", geoLocation.Country, geoLocation.Region)
 	regionRisk := era.geoRiskAssessor.getRegionRisk(regionKey)
@@ -373,15 +373,15 @@ func (era *EnvironmentRiskAnalyzer) assessThreatEnvironment(ctx context.Context,
 	// Use threat intelligence from request context if available, otherwise query service
 	if request.EnvironmentContext != nil && request.EnvironmentContext.ThreatIntelligence != nil {
 		threatIntel := request.EnvironmentContext.ThreatIntelligence
-		
+
 		// Use provided threat intelligence data
 		threatRisk.ReputationScore = threatIntel.IPReputationScore * 100.0 // Convert from 0-1 scale to 0-100 scale
 		threatRisk.ThreatCategories = threatIntel.ThreatCategories
 		threatRisk.ThreatLevel = threatIntel.ThreatLevel
-		
+
 		// Count recent threats as active threats
 		threatRisk.ActiveThreats = len(threatIntel.RecentThreats)
-		
+
 		// Recent incidents based on recent threats
 		threatRisk.RecentIncidents = len(threatIntel.RecentThreats)
 	} else {
@@ -416,7 +416,7 @@ func (era *EnvironmentRiskAnalyzer) calculateLocationRiskScore(locationRisk *Loc
 	// Country risk contribution (0-25 points)
 	score += locationRisk.CountryRisk * 25.0
 
-	// Region risk contribution (0-15 points)  
+	// Region risk contribution (0-15 points)
 	score += locationRisk.RegionRisk * 15.0
 
 	// Unusual location penalty (0-30 points)
@@ -449,8 +449,8 @@ func (era *EnvironmentRiskAnalyzer) calculateTimeRiskScore(timeRisk *TimeRisk, a
 
 	// Typical time factor
 	if !timeRisk.IsTypicalTime {
-		score += timeRisk.HourDeviation * 25.0    // Increased from 20 to 25 points
-		score += timeRisk.DayDeviation * 15.0     // Increased from 10 to 15 points
+		score += timeRisk.HourDeviation * 25.0 // Increased from 20 to 25 points
+		score += timeRisk.DayDeviation * 15.0  // Increased from 10 to 15 points
 	}
 
 	// Extreme hour penalty for very late/early access (midnight to 6 AM)
@@ -467,7 +467,7 @@ func (era *EnvironmentRiskAnalyzer) calculateTimeRiskScore(timeRisk *TimeRisk, a
 	}
 
 	// Timezone risk
-	score += timeRisk.TimezoneRisk * 15.0        // 0-15 points
+	score += timeRisk.TimezoneRisk * 15.0 // 0-15 points
 
 	return math.Min(score, 100.0)
 }
@@ -577,7 +577,7 @@ func (era *EnvironmentRiskAnalyzer) calculateEnvironmentalAmplification(location
 	if threatRisk.RiskScore > 70.0 {
 		amplification = math.Max(amplification, 1.25) // 25% amplification for high threat
 	}
-	
+
 	// Amplify risk for high-risk combinations
 	switch highRiskCount {
 	case 2:
@@ -649,7 +649,7 @@ func (era *EnvironmentRiskAnalyzer) calculateLocationDistance(geoLocation *GeoLo
 	if len(typicalLocations) == 0 {
 		return 1000.0
 	}
-	
+
 	// For simplicity, return a moderate distance
 	// Real implementation would calculate geographic distance
 	return 500.0
@@ -719,11 +719,11 @@ func NewGeoRiskAssessor() *GeoRiskAssessor {
 	return &GeoRiskAssessor{
 		countryRiskScores: map[string]float64{
 			// Sample country risk scores (0.0 = lowest risk, 1.0 = highest risk)
-			"United States": 0.1, "US": 0.1, "CA": 0.1, "Canada": 0.1, 
-			"GB": 0.1, "United Kingdom": 0.1, "DE": 0.1, "Germany": 0.1, 
+			"United States": 0.1, "US": 0.1, "CA": 0.1, "Canada": 0.1,
+			"GB": 0.1, "United Kingdom": 0.1, "DE": 0.1, "Germany": 0.1,
 			"FR": 0.1, "France": 0.1, "AU": 0.1, "Australia": 0.1,
-			"CN": 0.6, "China": 0.6, "RU": 0.7, "Russia": 0.7, 
-			"KP": 0.9, "North Korea": 0.9, "IR": 0.8, "Iran": 0.8, 
+			"CN": 0.6, "China": 0.6, "RU": 0.7, "Russia": 0.7,
+			"KP": 0.9, "North Korea": 0.9, "IR": 0.8, "Iran": 0.8,
 			"SY": 0.9, "Syria": 0.9, "AF": 0.8, "Afghanistan": 0.8,
 		},
 		regionRiskScores: make(map[string]float64),
@@ -804,23 +804,23 @@ func (dra *DeviceRiskAssessor) getDeviceInfo(deviceID string) (DeviceInfo, bool)
 
 func (dra *DeviceRiskAssessor) analyzeUserAgent(userAgent string) (float64, float64) {
 	// Simplified user agent analysis
-	osRisk := 0.2   // Default low OS risk
+	osRisk := 0.2      // Default low OS risk
 	browserRisk := 0.2 // Default low browser risk
 
 	userAgent = strings.ToLower(userAgent)
-	
+
 	// Check for outdated OS indicators
 	if strings.Contains(userAgent, "windows xp") || strings.Contains(userAgent, "windows vista") {
 		osRisk = 0.9
 	} else if strings.Contains(userAgent, "windows 7") {
 		osRisk = 0.6
 	}
-	
-	// Check for outdated browser indicators  
+
+	// Check for outdated browser indicators
 	if strings.Contains(userAgent, "msie") || strings.Contains(userAgent, "internet explorer") {
 		browserRisk = 0.8
 	}
-	
+
 	return osRisk, browserRisk
 }
 
@@ -859,21 +859,26 @@ func parseTime(timeStr string) time.Time {
 
 // Supporting types (simplified implementations)
 type VPNDetector struct{}
+
 func (vd *VPNDetector) IsVPN(ipAddress string) bool { return false }
 
 type ProxyDetector struct{}
+
 func (pd *ProxyDetector) IsProxy(ipAddress string) bool { return false }
 
 type TorDetector struct{}
+
 func (td *TorDetector) IsTor(ipAddress string) bool { return false }
 
 type TimezoneValidator struct{}
 type HolidayCalendar struct{}
 type NetworkSecurityScanner struct{}
 type BandwidthAnalyzer struct{}
+
 func (ba *BandwidthAnalyzer) detectAnomaly(ipAddress string) bool { return false }
 
 type LatencyAnalyzer struct{}
+
 func (la *LatencyAnalyzer) detectAnomaly(ipAddress string) bool { return false }
 
 type DeviceComplianceChecker struct{}

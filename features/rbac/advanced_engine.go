@@ -16,20 +16,20 @@ type ZeroTrustMode string
 const (
 	// ZeroTrustModeDisabled disables zero-trust policy evaluation
 	ZeroTrustModeDisabled ZeroTrustMode = "disabled"
-	
+
 	// ZeroTrustModeAugmented uses zero-trust policies to augment RBAC decisions
 	// RBAC must pass AND zero-trust policies must pass
 	ZeroTrustModeAugmented ZeroTrustMode = "augmented"
-	
+
 	// ZeroTrustModeEnforced uses zero-trust policies as the primary authorization
 	// Zero-trust policies override RBAC decisions
 	ZeroTrustModeEnforced ZeroTrustMode = "enforced"
-	
+
 	// ZeroTrustModeAuditing logs zero-trust policy decisions but doesn't enforce them
 	ZeroTrustModeAuditing ZeroTrustMode = "auditing"
 )
 
-// AdvancedAuthEngine provides enhanced authorization with conditional permissions, 
+// AdvancedAuthEngine provides enhanced authorization with conditional permissions,
 // delegation, zero-trust policy validation, and comprehensive audit logging
 type AdvancedAuthEngine struct {
 	baseEngine        *AuthEngine
@@ -37,11 +37,11 @@ type AdvancedAuthEngine struct {
 	scopeEngine       *ScopeEngine
 	delegationManager *DelegationManager
 	auditLogger       *AuditLogger
-	
+
 	// Zero-trust policy integration
-	zeroTrustEngine   *zerotrust.ZeroTrustPolicyEngine
-	zeroTrustEnabled  bool
-	zeroTrustMode     ZeroTrustMode
+	zeroTrustEngine  *zerotrust.ZeroTrustPolicyEngine
+	zeroTrustEnabled bool
+	zeroTrustMode    ZeroTrustMode
 }
 
 // NewAdvancedAuthEngine creates a new advanced authorization engine
@@ -52,18 +52,18 @@ func NewAdvancedAuthEngine(
 	assignmentStore RoleAssignmentStore,
 ) *AdvancedAuthEngine {
 	baseEngine := NewAuthEngine(permStore, roleStore, subjectStore, assignmentStore)
-	
+
 	return &AdvancedAuthEngine{
 		baseEngine:        baseEngine,
 		conditionEngine:   NewConditionEngine(),
 		scopeEngine:       NewScopeEngine(),
 		delegationManager: NewDelegationManager(nil), // Will be set via SetRBACManager
 		auditLogger:       NewAuditLogger(),
-		
+
 		// Zero-trust defaults
-		zeroTrustEngine:   nil, // Will be set via SetZeroTrustEngine
-		zeroTrustEnabled:  false,
-		zeroTrustMode:     ZeroTrustModeDisabled,
+		zeroTrustEngine:  nil, // Will be set via SetZeroTrustEngine
+		zeroTrustEnabled: false,
+		zeroTrustMode:    ZeroTrustModeDisabled,
 	}
 }
 
@@ -237,8 +237,8 @@ func (a *AdvancedAuthEngine) CheckConditionalPermission(ctx context.Context, req
 
 	// All checks passed
 	return &common.AccessResponse{
-		Granted: true,
-		Reason:  fmt.Sprintf("Conditional permission granted. Conditions: %s", conditionReason),
+		Granted:            true,
+		Reason:             fmt.Sprintf("Conditional permission granted. Conditions: %s", conditionReason),
 		AppliedPermissions: []string{conditionalPerm.PermissionId},
 	}, nil
 }
@@ -271,7 +271,7 @@ func (a *AdvancedAuthEngine) GetSubjectPermissions(ctx context.Context, subjectI
 
 	// Create a map to avoid duplicates
 	permissionMap := make(map[string]*common.Permission)
-	
+
 	// Add base permissions
 	for _, perm := range basePermissions {
 		permissionMap[perm.Id] = perm
@@ -350,7 +350,7 @@ func (a *AdvancedAuthEngine) CreateTemporaryPermission(ctx context.Context, req 
 		"expires_at": fmt.Sprintf("%d", req.ExpiresAt),
 		"granted_by": req.GrantedBy,
 	}
-	
+
 	_ = a.auditLogger.LogPermissionGrant(ctx, req.SubjectID, req.PermissionID, req.ResourceID, req.TenantID, req.GrantedBy, context)
 
 	return conditionalPerm, nil
@@ -361,15 +361,15 @@ func (a *AdvancedAuthEngine) validateTemporaryPermissionRequest(ctx context.Cont
 	if req.SubjectID == "" {
 		return fmt.Errorf("subject ID cannot be empty")
 	}
-	
+
 	if req.PermissionID == "" {
 		return fmt.Errorf("permission ID cannot be empty")
 	}
-	
+
 	if req.GrantedBy == "" {
 		return fmt.Errorf("granted by cannot be empty")
 	}
-	
+
 	if req.ExpiresAt <= req.GrantedAt {
 		return fmt.Errorf("expiration time must be after granted time")
 	}
@@ -413,7 +413,7 @@ type TemporaryPermissionRequest struct {
 func (a *AdvancedAuthEngine) evaluateZeroTrustPolicies(ctx context.Context, request *common.AccessRequest, rbacGranted bool, rbacReason string) (*common.AccessResponse, error) {
 	// Convert common.AccessRequest to zerotrust.ZeroTrustAccessRequest
 	zeroTrustRequest := a.convertToZeroTrustRequest(request)
-	
+
 	// Evaluate zero-trust policies
 	zeroTrustResponse, err := a.zeroTrustEngine.EvaluateAccess(ctx, zeroTrustRequest)
 	if err != nil {
@@ -428,14 +428,14 @@ func (a *AdvancedAuthEngine) evaluateZeroTrustPolicies(ctx context.Context, requ
 // convertToZeroTrustRequest converts a common AccessRequest to a ZeroTrustAccessRequest
 func (a *AdvancedAuthEngine) convertToZeroTrustRequest(request *common.AccessRequest) *zerotrust.ZeroTrustAccessRequest {
 	zeroTrustRequest := &zerotrust.ZeroTrustAccessRequest{
-		AccessRequest:    request,
-		RequestID:        fmt.Sprintf("rbac-%d", time.Now().UnixNano()),
-		RequestTime:      time.Now(),
-		SubjectType:      zerotrust.SubjectTypeUser, // Default to user
-		ResourceType:     extractResourceType(request.ResourceId),
-		SourceSystem:     "rbac-engine",
-		RequestSource:    zerotrust.RequestSourceSystem,
-		Priority:         zerotrust.RequestPriorityNormal,
+		AccessRequest: request,
+		RequestID:     fmt.Sprintf("rbac-%d", time.Now().UnixNano()),
+		RequestTime:   time.Now(),
+		SubjectType:   zerotrust.SubjectTypeUser, // Default to user
+		ResourceType:  extractResourceType(request.ResourceId),
+		SourceSystem:  "rbac-engine",
+		RequestSource: zerotrust.RequestSourceSystem,
+		Priority:      zerotrust.RequestPriorityNormal,
 	}
 
 	// Extract environmental context from request context
@@ -443,12 +443,12 @@ func (a *AdvancedAuthEngine) convertToZeroTrustRequest(request *common.AccessReq
 		zeroTrustRequest.EnvironmentContext = &zerotrust.EnvironmentContext{
 			IPAddress: request.Context["source_ip"],
 		}
-		
+
 		zeroTrustRequest.SecurityContext = &zerotrust.SecurityContext{
 			AuthenticationMethod: request.Context["auth_method"],
-			TrustLevel:          zerotrust.TrustLevelMedium, // Default trust level
+			TrustLevel:           zerotrust.TrustLevelMedium, // Default trust level
 		}
-		
+
 		// Set MFA verified if available
 		if mfaStr := request.Context["mfa_verified"]; mfaStr == "true" {
 			zeroTrustRequest.SecurityContext.MFAVerified = true
@@ -507,14 +507,14 @@ func extractResourceType(resourceID string) string {
 	if resourceID == "" {
 		return "unknown"
 	}
-	
+
 	// Simple heuristic: take the first part before a dot or slash
 	for _, sep := range []string{".", "/", ":"} {
 		if idx := strings.Index(resourceID, sep); idx != -1 {
 			return resourceID[:idx]
 		}
 	}
-	
+
 	return resourceID
 }
 

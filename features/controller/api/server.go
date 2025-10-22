@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gorilla/mux"
+
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/ha"
 	"github.com/cfgis/cfgms/features/controller/service"
@@ -24,7 +26,6 @@ import (
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/secrets/providers/sops" // Auto-register SOPS provider
 	"github.com/cfgis/cfgms/pkg/telemetry"
-	"github.com/gorilla/mux"
 )
 
 // Server represents the REST API server component of the controller
@@ -45,10 +46,10 @@ type Server struct {
 	platformMonitor         pkgmonitoring.PlatformMonitor
 	tracer                  *telemetry.Tracer
 	haManager               *ha.Manager
-	apiKeys                 map[string]*APIKey     // In-memory cache for fast lookup
-	secretStore             secretsif.SecretStore  // M-AUTH-1: Central secrets provider for API keys
-	registrationTokenStore  registration.Store     // Registration token store for steward registration
-	corsConfig              *CORSConfig            // CORS configuration
+	apiKeys                 map[string]*APIKey    // In-memory cache for fast lookup
+	secretStore             secretsif.SecretStore // M-AUTH-1: Central secrets provider for API keys
+	registrationTokenStore  registration.Store    // Registration token store for steward registration
+	corsConfig              *CORSConfig           // CORS configuration
 }
 
 // APIKey represents an API key for external authentication
@@ -233,10 +234,10 @@ func (s *Server) setupRouter() {
 	monitoring.Handle("/traces", s.requirePermission("monitoring", "read-traces")(http.HandlerFunc(s.handleMonitoringTraces))).Methods("GET")
 	monitoring.Handle("/events", s.requirePermission("monitoring", "read-events")(http.HandlerFunc(s.handleMonitoringEvents))).Methods("GET")
 	monitoring.Handle("/config", s.requirePermission("monitoring", "read-config")(http.HandlerFunc(s.handleMonitoringConfig))).Methods("GET")
-	
+
 	// Steward-specific monitoring
 	monitoring.Handle("/stewards/{id}/metrics", s.requirePermission("monitoring", "read-steward-metrics")(http.HandlerFunc(s.handleStewardMetrics))).Methods("GET")
-	
+
 	// Controller service monitoring
 	monitoring.Handle("/controller/services", s.requirePermission("monitoring", "read-services")(http.HandlerFunc(s.handleControllerServices))).Methods("GET")
 
@@ -553,9 +554,9 @@ func (s *Server) cleanupExpiredAPIKeys() {
 func (s *Server) configureCORS() {
 	// Default allowed origins for development and production
 	defaultOrigins := []string{
-		"http://localhost:3000",    // Development frontend
-		"http://localhost:3001",    // Alternative dev frontend
-		"http://localhost:9080",    // API itself (for testing)
+		"http://localhost:3000", // Development frontend
+		"http://localhost:3001", // Alternative dev frontend
+		"http://localhost:9080", // API itself (for testing)
 	}
 
 	// Load from environment variable if specified

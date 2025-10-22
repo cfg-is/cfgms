@@ -5,9 +5,10 @@ import (
 	"context"
 	"testing"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
 // TestValidateSensitiveOperation tests validation of sensitive operations

@@ -3,7 +3,7 @@ package mochi
 import (
 	"log/slog"
 
-	"github.com/mochi-mqtt/server/v2"
+	mqtt "github.com/mochi-mqtt/server/v2"
 	"github.com/mochi-mqtt/server/v2/hooks/storage"
 	"github.com/mochi-mqtt/server/v2/packets"
 	"github.com/mochi-mqtt/server/v2/system"
@@ -90,13 +90,13 @@ func (h *cfgmsAuthHook) OnACLCheck(cl *mqtt.Client, topic string, write bool) bo
 
 // The following methods are no-ops but required by the Hook interface
 
-func (h *cfgmsAuthHook) OnStarted()                                             {}
-func (h *cfgmsAuthHook) OnStopped()                                             {}
-func (h *cfgmsAuthHook) OnSysInfoTick(*system.Info)                             {}
-func (h *cfgmsAuthHook) OnConnect(cl *mqtt.Client, pk packets.Packet) error    { return nil }
-func (h *cfgmsAuthHook) OnSessionEstablish(cl *mqtt.Client, pk packets.Packet) {}
+func (h *cfgmsAuthHook) OnStarted()                                              {}
+func (h *cfgmsAuthHook) OnStopped()                                              {}
+func (h *cfgmsAuthHook) OnSysInfoTick(*system.Info)                              {}
+func (h *cfgmsAuthHook) OnConnect(cl *mqtt.Client, pk packets.Packet) error      { return nil }
+func (h *cfgmsAuthHook) OnSessionEstablish(cl *mqtt.Client, pk packets.Packet)   {}
 func (h *cfgmsAuthHook) OnSessionEstablished(cl *mqtt.Client, pk packets.Packet) {}
-func (h *cfgmsAuthHook) OnDisconnect(cl *mqtt.Client, err error, expire bool)  {}
+func (h *cfgmsAuthHook) OnDisconnect(cl *mqtt.Client, err error, expire bool)    {}
 func (h *cfgmsAuthHook) OnAuthPacket(cl *mqtt.Client, pk packets.Packet) (packets.Packet, error) {
 	return pk, nil
 }
@@ -106,7 +106,7 @@ func (h *cfgmsAuthHook) OnPacketRead(cl *mqtt.Client, pk packets.Packet) (packet
 func (h *cfgmsAuthHook) OnPacketEncode(cl *mqtt.Client, pk packets.Packet) packets.Packet {
 	return pk
 }
-func (h *cfgmsAuthHook) OnPacketSent(cl *mqtt.Client, pk packets.Packet, b []byte) {}
+func (h *cfgmsAuthHook) OnPacketSent(cl *mqtt.Client, pk packets.Packet, b []byte)       {}
 func (h *cfgmsAuthHook) OnPacketProcessed(cl *mqtt.Client, pk packets.Packet, err error) {}
 func (h *cfgmsAuthHook) OnSubscribe(cl *mqtt.Client, pk packets.Packet) packets.Packet {
 	return pk
@@ -122,22 +122,22 @@ func (h *cfgmsAuthHook) OnUnsubscribed(cl *mqtt.Client, pk packets.Packet) {}
 func (h *cfgmsAuthHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packets.Packet, error) {
 	return pk, nil
 }
-func (h *cfgmsAuthHook) OnPublished(cl *mqtt.Client, pk packets.Packet)                    {}
-func (h *cfgmsAuthHook) OnPublishDropped(cl *mqtt.Client, pk packets.Packet)               {}
-func (h *cfgmsAuthHook) OnRetainMessage(cl *mqtt.Client, pk packets.Packet, r int64)       {}
-func (h *cfgmsAuthHook) OnRetainPublished(cl *mqtt.Client, pk packets.Packet)              {}
+func (h *cfgmsAuthHook) OnPublished(cl *mqtt.Client, pk packets.Packet)              {}
+func (h *cfgmsAuthHook) OnPublishDropped(cl *mqtt.Client, pk packets.Packet)         {}
+func (h *cfgmsAuthHook) OnRetainMessage(cl *mqtt.Client, pk packets.Packet, r int64) {}
+func (h *cfgmsAuthHook) OnRetainPublished(cl *mqtt.Client, pk packets.Packet)        {}
 func (h *cfgmsAuthHook) OnQosPublish(cl *mqtt.Client, pk packets.Packet, sent int64, resends int) {
 }
-func (h *cfgmsAuthHook) OnQosComplete(cl *mqtt.Client, pk packets.Packet)         {}
-func (h *cfgmsAuthHook) OnQosDropped(cl *mqtt.Client, pk packets.Packet)          {}
-func (h *cfgmsAuthHook) OnPacketIDExhausted(cl *mqtt.Client, pk packets.Packet)   {}
+func (h *cfgmsAuthHook) OnQosComplete(cl *mqtt.Client, pk packets.Packet)       {}
+func (h *cfgmsAuthHook) OnQosDropped(cl *mqtt.Client, pk packets.Packet)        {}
+func (h *cfgmsAuthHook) OnPacketIDExhausted(cl *mqtt.Client, pk packets.Packet) {}
 func (h *cfgmsAuthHook) OnWill(cl *mqtt.Client, will mqtt.Will) (mqtt.Will, error) {
 	return will, nil
 }
-func (h *cfgmsAuthHook) OnWillSent(cl *mqtt.Client, pk packets.Packet)  {}
-func (h *cfgmsAuthHook) OnClientExpired(cl *mqtt.Client)                {}
-func (h *cfgmsAuthHook) OnRetainedExpired(filter string)                {}
-func (h *cfgmsAuthHook) StoredClients() ([]storage.Client, error)       { return nil, nil }
+func (h *cfgmsAuthHook) OnWillSent(cl *mqtt.Client, pk packets.Packet) {}
+func (h *cfgmsAuthHook) OnClientExpired(cl *mqtt.Client)               {}
+func (h *cfgmsAuthHook) OnRetainedExpired(filter string)               {}
+func (h *cfgmsAuthHook) StoredClients() ([]storage.Client, error)      { return nil, nil }
 func (h *cfgmsAuthHook) StoredSubscriptions() ([]storage.Subscription, error) {
 	return nil, nil
 }

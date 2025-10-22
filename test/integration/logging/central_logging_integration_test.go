@@ -9,13 +9,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
 	"github.com/cfgis/cfgms/features/steward/factory"
 	"github.com/cfgis/cfgms/pkg/logging"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 // MockLogger implements logging.Logger for testing factory injection
@@ -345,9 +346,9 @@ func (c *TestDirectoryConfig) AsMap() map[string]interface{} {
 	}
 }
 
-func (c *TestDirectoryConfig) ToYAML() ([]byte, error)   { return nil, nil }
-func (c *TestDirectoryConfig) FromYAML([]byte) error     { return nil }
-func (c *TestDirectoryConfig) Validate() error          { return nil }
+func (c *TestDirectoryConfig) ToYAML() ([]byte, error)    { return nil, nil }
+func (c *TestDirectoryConfig) FromYAML([]byte) error      { return nil }
+func (c *TestDirectoryConfig) Validate() error            { return nil }
 func (c *TestDirectoryConfig) GetManagedFields() []string { return []string{"path", "permissions"} }
 
 type TestScriptConfig struct {
@@ -362,7 +363,7 @@ func (c *TestScriptConfig) AsMap() map[string]interface{} {
 	}
 }
 
-func (c *TestScriptConfig) ToYAML() ([]byte, error)   { return nil, nil }
-func (c *TestScriptConfig) FromYAML([]byte) error     { return nil }
-func (c *TestScriptConfig) Validate() error          { return nil }
+func (c *TestScriptConfig) ToYAML() ([]byte, error)    { return nil, nil }
+func (c *TestScriptConfig) FromYAML([]byte) error      { return nil }
+func (c *TestScriptConfig) Validate() error            { return nil }
 func (c *TestScriptConfig) GetManagedFields() []string { return []string{"content", "signing_policy"} }

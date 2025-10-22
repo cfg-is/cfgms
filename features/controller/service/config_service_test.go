@@ -33,16 +33,25 @@ func (m *mockLogger) Info(msg string, fields ...interface{})  { m.appendLog(msg)
 func (m *mockLogger) Warn(msg string, fields ...interface{})  { m.appendLog(msg) }
 func (m *mockLogger) Error(msg string, fields ...interface{}) { m.appendLog(msg) }
 func (m *mockLogger) Fatal(msg string, fields ...interface{}) { m.appendLog(msg) }
-func (m *mockLogger) DebugCtx(ctx context.Context, msg string, fields ...interface{}) { m.Debug(msg, fields...) }
-func (m *mockLogger) InfoCtx(ctx context.Context, msg string, fields ...interface{})  { m.Info(msg, fields...) }
-func (m *mockLogger) WarnCtx(ctx context.Context, msg string, fields ...interface{})  { m.Warn(msg, fields...) }
-func (m *mockLogger) ErrorCtx(ctx context.Context, msg string, fields ...interface{}) { m.Error(msg, fields...) }
-func (m *mockLogger) FatalCtx(ctx context.Context, msg string, fields ...interface{}) { m.Fatal(msg, fields...) }
+func (m *mockLogger) DebugCtx(ctx context.Context, msg string, fields ...interface{}) {
+	m.Debug(msg, fields...)
+}
+func (m *mockLogger) InfoCtx(ctx context.Context, msg string, fields ...interface{}) {
+	m.Info(msg, fields...)
+}
+func (m *mockLogger) WarnCtx(ctx context.Context, msg string, fields ...interface{}) {
+	m.Warn(msg, fields...)
+}
+func (m *mockLogger) ErrorCtx(ctx context.Context, msg string, fields ...interface{}) {
+	m.Error(msg, fields...)
+}
+func (m *mockLogger) FatalCtx(ctx context.Context, msg string, fields ...interface{}) {
+	m.Fatal(msg, fields...)
+}
 
 func newMockLogger() *mockLogger {
 	return &mockLogger{logs: make([]string, 0)}
 }
-
 
 func createTestStewardConfig(stewardID string) *stewardconfig.StewardConfig {
 	return &stewardconfig.StewardConfig{
@@ -240,7 +249,7 @@ func TestReportConfigStatus(t *testing.T) {
 	stewardID := "test-steward"
 
 	t.Run("successful status report", func(t *testing.T) {
-		
+
 		moduleStatuses := []*controller.ModuleStatus{
 			{
 				Name:      "directory",
@@ -273,7 +282,7 @@ func TestReportConfigStatus(t *testing.T) {
 	})
 
 	t.Run("error status report", func(t *testing.T) {
-		
+
 		moduleStatuses := []*controller.ModuleStatus{
 			{
 				Name:      "directory",
@@ -421,7 +430,7 @@ func TestConfigurationServiceConcurrency(t *testing.T) {
 
 	// Test concurrent access
 	done := make(chan bool)
-	
+
 	// Goroutine 1: Set configuration
 	go func() {
 		for i := 0; i < 10; i++ {

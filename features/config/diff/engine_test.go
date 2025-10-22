@@ -18,9 +18,9 @@ func TestDefaultEngine_Compare(t *testing.T) {
 		toData   map[string]interface{}
 		options  DiffOptions
 		want     struct {
-			entryCount  int
-			addedCount  int
-			deletedCount int
+			entryCount    int
+			addedCount    int
+			deletedCount  int
 			modifiedCount int
 		}
 	}{
@@ -131,7 +131,7 @@ func TestDefaultEngine_Compare(t *testing.T) {
 
 			toRef := ConfigurationReference{
 				Repository: "test-repo",
-				Branch:     "main", 
+				Branch:     "main",
 				Commit:     "def456ghi789",
 				Path:       "config.json",
 				Timestamp:  time.Now(),
@@ -162,7 +162,7 @@ func TestDefaultEngine_ThreeWayCompare(t *testing.T) {
 			"port": 8080,
 		},
 		rightData: map[string]interface{}{
-			"host": "right.example.com", 
+			"host": "right.example.com",
 			"port": 9090,
 		},
 	}
@@ -177,7 +177,7 @@ func TestDefaultEngine_ThreeWayCompare(t *testing.T) {
 	leftRef := ConfigurationReference{
 		Repository: "test-repo",
 		Commit:     "left456",
-		Path:       "config.json", 
+		Path:       "config.json",
 		Timestamp:  time.Now(),
 	}
 
@@ -211,7 +211,7 @@ func TestDefaultEngine_DetectConflicts(t *testing.T) {
 
 	rightEntries := []DiffEntry{
 		{
-			Path:     "host", 
+			Path:     "host",
 			Type:     DiffTypeModify,
 			OldValue: "localhost",
 			NewValue: "right.example.com",
@@ -236,7 +236,7 @@ func TestDefaultEngine_CompareSlicesIgnoreOrder(t *testing.T) {
 	fromValue := reflect.ValueOf(fromSlice)
 	toValue := reflect.ValueOf(toSlice)
 
-	entries := engine.compareSlicesIgnoreOrder("items", fromValue, toValue, 
+	entries := engine.compareSlicesIgnoreOrder("items", fromValue, toValue,
 		DiffOptions{IgnoreOrder: true})
 
 	require.Len(t, entries, 2) // "b" deleted, "d" added
@@ -264,18 +264,18 @@ type mockEngine struct {
 	baseData  map[string]interface{}
 	leftData  map[string]interface{}
 	rightData map[string]interface{}
-	
+
 	*DefaultEngine
 }
 
 func (m *mockEngine) Compare(ctx context.Context, from, to ConfigurationReference, options DiffOptions) (*ComparisonResult, error) {
 	// Use DefaultEngine's logic but with mock data loading
 	engine := NewDefaultEngine(nil, nil, nil)
-	
+
 	// Simulate the comparison logic
 	entries := engine.compareData("", m.fromData, m.toData, options)
 	summary := engine.calculateSummary(entries)
-	
+
 	return &ComparisonResult{
 		ID:      "mock-comparison",
 		FromRef: from,
@@ -294,16 +294,16 @@ func (m *mockEngine) Compare(ctx context.Context, from, to ConfigurationReferenc
 
 func (m *mockEngine) ThreeWayCompare(ctx context.Context, base, left, right ConfigurationReference, options DiffOptions) (*ThreeWayDiffResult, error) {
 	engine := NewDefaultEngine(nil, nil, nil)
-	
+
 	// Compare base to left
 	baseToLeftEntries := engine.compareData("", m.baseData, m.leftData, options)
-	
+
 	// Compare base to right
 	baseToRightEntries := engine.compareData("", m.baseData, m.rightData, options)
-	
+
 	// Detect conflicts
 	conflicts := engine.detectConflicts(baseToLeftEntries, baseToRightEntries)
-	
+
 	summary := ThreeWayDiffSummary{
 		LeftChanges:      len(baseToLeftEntries),
 		RightChanges:     len(baseToRightEntries),
@@ -311,7 +311,7 @@ func (m *mockEngine) ThreeWayCompare(ctx context.Context, base, left, right Conf
 		AutoResolvable:   engine.countAutoResolvable(conflicts),
 		ManualResolution: engine.countManualResolution(conflicts),
 	}
-	
+
 	return &ThreeWayDiffResult{
 		BaseRef:     base,
 		LeftRef:     left,
@@ -329,7 +329,6 @@ func (m *mockEngine) ThreeWayCompare(ctx context.Context, base, left, right Conf
 		},
 	}, nil
 }
-
 
 func TestFormatValue(t *testing.T) {
 	tests := []struct {
@@ -387,15 +386,15 @@ func TestGenerateComparisonID(t *testing.T) {
 		Repository: "repo1",
 		Commit:     "abc123",
 	}
-	
+
 	to := ConfigurationReference{
-		Repository: "repo1", 
+		Repository: "repo1",
 		Commit:     "def456",
 	}
 
 	id1 := generateComparisonID(from, to)
 	id2 := generateComparisonID(from, to)
-	
+
 	// Should be deterministic
 	assert.Equal(t, id1, id2)
 	assert.Len(t, id1, 16) // 8 bytes hex encoded
@@ -437,7 +436,7 @@ func TestGetParentPath(t *testing.T) {
 // Benchmark tests
 func BenchmarkCompareData(b *testing.B) {
 	engine := NewDefaultEngine(nil, nil, nil)
-	
+
 	fromData := generateLargeConfig(100)
 	toData := generateLargeConfig(100)
 	// Make some changes
@@ -455,11 +454,11 @@ func BenchmarkCompareData(b *testing.B) {
 
 func generateLargeConfig(size int) map[string]interface{} {
 	config := make(map[string]interface{})
-	
+
 	for i := 0; i < size; i++ {
 		config[fmt.Sprintf("field_%d", i)] = fmt.Sprintf("value_%d", i)
 	}
-	
+
 	// Add some nested structures
 	config["nested"] = map[string]interface{}{
 		"level1": map[string]interface{}{
@@ -468,10 +467,10 @@ func generateLargeConfig(size int) map[string]interface{} {
 			},
 		},
 	}
-	
+
 	// Add an array
 	config["array_field"] = []interface{}{"item1", "item2", "item3"}
-	
+
 	return config
 }
 
@@ -503,7 +502,7 @@ port: 8080`
 	// Test JSON parsing
 	jsonResult, err := engine.parseConfiguration([]byte(jsonData), "json")
 	require.NoError(t, err)
-	
+
 	jsonMap := jsonResult.(map[string]interface{})
 	assert.Equal(t, "localhost", jsonMap["host"])
 	assert.Equal(t, float64(8080), jsonMap["port"]) // JSON numbers are float64
@@ -511,7 +510,7 @@ port: 8080`
 	// Test YAML parsing
 	yamlResult, err := engine.parseConfiguration([]byte(yamlData), "yaml")
 	require.NoError(t, err)
-	
+
 	yamlMap := yamlResult.(map[string]interface{})
 	assert.Equal(t, "localhost", yamlMap["host"])
 	assert.Equal(t, 8080, yamlMap["port"]) // YAML preserves int type

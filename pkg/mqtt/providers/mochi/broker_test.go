@@ -30,17 +30,17 @@ func TestBroker_Initialize(t *testing.T) {
 		{
 			name: "valid config",
 			config: map[string]interface{}{
-				"listen_addr":    "127.0.0.1:0",
-				"enable_tls":     false,
-				"inline_client":  true,
-				"max_clients":    1000,
+				"listen_addr":      "127.0.0.1:0",
+				"enable_tls":       false,
+				"inline_client":    true,
+				"max_clients":      1000,
 				"max_message_size": 1048576,
 			},
 			wantErr: false,
 		},
 		{
-			name: "empty config uses defaults",
-			config: map[string]interface{}{},
+			name:    "empty config uses defaults",
+			config:  map[string]interface{}{},
 			wantErr: false,
 		},
 		{
@@ -70,8 +70,8 @@ func TestBroker_StartStop(t *testing.T) {
 
 	// Initialize with non-TLS for testing
 	err := broker.Initialize(map[string]interface{}{
-		"listen_addr":   "127.0.0.1:0",
-		"enable_tls":    false,
+		"listen_addr": "127.0.0.1:0",
+		"enable_tls":  false,
 	})
 	require.NoError(t, err)
 
@@ -105,8 +105,8 @@ func TestBroker_PublishSubscribe(t *testing.T) {
 
 	// Initialize with non-TLS
 	err := broker.Initialize(map[string]interface{}{
-		"listen_addr":   "127.0.0.1:0",
-		"enable_tls":    false,
+		"listen_addr": "127.0.0.1:0",
+		"enable_tls":  false,
 	})
 	require.NoError(t, err)
 
@@ -141,8 +141,8 @@ func TestBroker_GetStats(t *testing.T) {
 
 	// Initialize
 	err := broker.Initialize(map[string]interface{}{
-		"listen_addr":   "127.0.0.1:0",
-		"enable_tls":    false,
+		"listen_addr": "127.0.0.1:0",
+		"enable_tls":  false,
 	})
 	require.NoError(t, err)
 
@@ -212,7 +212,7 @@ func TestBroker_GetCapabilities(t *testing.T) {
 	broker := New()
 
 	err := broker.Initialize(map[string]interface{}{
-		"max_clients": 5000,
+		"max_clients":      5000,
 		"max_message_size": float64(2097152),
 	})
 	require.NoError(t, err)

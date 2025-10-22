@@ -7,10 +7,11 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	// Import storage providers to register them
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 )
 
 // TestNewManager tests audit manager creation
@@ -25,8 +26,8 @@ func TestNewManager(t *testing.T) {
 			setupStorage: func(t *testing.T) (interfaces.AuditStore, error) {
 				config := map[string]interface{}{
 					"repository_path": t.TempDir(),
-					"branch":         "main",
-					"auto_init":      true,
+					"branch":          "main",
+					"auto_init":       true,
 				}
 				storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
 				if err != nil {
@@ -88,8 +89,8 @@ func TestManager_RecordEvent(t *testing.T) {
 	// Setup git storage for testing
 	config := map[string]interface{}{
 		"repository_path": t.TempDir(),
-		"branch":         "main",
-		"auto_init":      true,
+		"branch":          "main",
+		"auto_init":       true,
 	}
 	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
 	require.NoError(t, err)
@@ -116,8 +117,8 @@ func TestManager_RecordBatch(t *testing.T) {
 	// Setup git storage for testing
 	config := map[string]interface{}{
 		"repository_path": t.TempDir(),
-		"branch":         "main",
-		"auto_init":      true,
+		"branch":          "main",
+		"auto_init":       true,
 	}
 	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
 	require.NoError(t, err)
@@ -394,7 +395,7 @@ func (m *mockAuditStore) ListAuditEntries(ctx context.Context, filter *interface
 	if m.entries == nil {
 		return []*interfaces.AuditEntry{}, nil
 	}
-	
+
 	result := make([]*interfaces.AuditEntry, 0, len(m.entries))
 	for _, entry := range m.entries {
 		result = append(result, entry)

@@ -14,14 +14,14 @@ import (
 
 // CronScheduler implements the Scheduler interface for cron-based scheduling
 type CronScheduler struct {
-	logger           *logging.ModuleLogger
-	triggerManager   TriggerManager
-	workflowTrigger  WorkflowTrigger
+	logger            *logging.ModuleLogger
+	triggerManager    TriggerManager
+	workflowTrigger   WorkflowTrigger
 	scheduledTriggers map[string]*scheduledTrigger
-	mutex            sync.RWMutex
-	running          bool
-	stopChan         chan struct{}
-	tickerInterval   time.Duration
+	mutex             sync.RWMutex
+	running           bool
+	stopChan          chan struct{}
+	tickerInterval    time.Duration
 }
 
 // scheduledTrigger represents a scheduled trigger with its next execution time
@@ -300,7 +300,7 @@ func (cs *CronScheduler) executeDueTrigger(ctx context.Context, scheduled *sched
 
 	// Prepare trigger data
 	triggerData := map[string]interface{}{
-		"trigger_type":     "schedule",
+		"trigger_type":    "schedule",
 		"trigger_id":      trigger.ID,
 		"scheduled_time":  scheduled.nextRun,
 		"execution_time":  now,

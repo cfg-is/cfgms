@@ -12,11 +12,11 @@ import (
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-	
+
 	// Import storage providers for Epic 6 compliance testing
 	// Note: memory provider is NOT imported as it's not a global provider
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 )
 
 // Security-focused tests for the controller server
@@ -177,12 +177,12 @@ func TestServer_New_SecurityValidation(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 				assert.NotNil(t, server)
-				
+
 				// Verify security components are initialized
 				assert.NotNil(t, server.rbacManager)
 				assert.NotNil(t, server.tenantManager)
 				assert.NotNil(t, server.rbacService)
-				
+
 				// Note: if certificate management is enabled, certManager might be nil if CA setup fails, which is expected in test environment
 				_ = tt.config.Certificate != nil && tt.config.Certificate.EnableCertManagement
 			}
@@ -193,7 +193,7 @@ func TestServer_New_SecurityValidation(t *testing.T) {
 // TestServer_StorageProviderValidation dynamically validates storage provider configuration
 // against all registered global storage providers
 func TestServer_StorageProviderValidation(t *testing.T) {
-	
+
 	logger := logging.NewNoopLogger()
 	tempDir, err := os.MkdirTemp("", "storage_provider_test")
 	require.NoError(t, err)
@@ -213,7 +213,7 @@ func TestServer_StorageProviderValidation(t *testing.T) {
 
 			t.Run("provider_"+providerInfo.Name, func(t *testing.T) {
 				var storageConfig *config.StorageConfig
-				
+
 				// Use Docker test configuration if available, otherwise fall back to local test
 				if isDockerTestEnvironment() {
 					storageConfig = createDockerTestStorageConfig(providerInfo.Name)
@@ -250,10 +250,10 @@ func TestServer_StorageProviderValidation(t *testing.T) {
 					assert.Contains(t, err.Error(), "password", "Error should mention password requirement")
 					return
 				}
-				
+
 				assert.NoError(t, err, "Valid storage provider '%s' should not cause server creation to fail", providerInfo.Name)
 				assert.NotNil(t, server, "Server should be created with valid provider '%s'", providerInfo.Name)
-				
+
 				if server != nil {
 					// Verify all storage interfaces are properly initialized
 					assert.NotNil(t, server.rbacManager, "RBAC manager should be initialized with provider '%s'", providerInfo.Name)
@@ -266,7 +266,7 @@ func TestServer_StorageProviderValidation(t *testing.T) {
 	t.Run("InvalidProviderShouldFail", func(t *testing.T) {
 		// Generate an invalid provider name that's guaranteed not to be registered
 		invalidProvider := "definitely-not-a-real-provider-name"
-		
+
 		// Verify it's actually not registered
 		isRegistered := false
 		for _, providerInfo := range registeredProviders {
@@ -302,10 +302,10 @@ func TestServer_StorageProviderValidation(t *testing.T) {
 		}
 
 		t.Logf("Currently registered storage providers: %v", providerNames)
-		
+
 		// These are the providers we expect to exist based on our architecture
 		expectedProviders := []string{"git", "database"}
-		
+
 		for _, expected := range expectedProviders {
 			found := false
 			for _, actual := range providerNames {
@@ -316,7 +316,7 @@ func TestServer_StorageProviderValidation(t *testing.T) {
 			}
 			assert.True(t, found, "Expected storage provider '%s' is not registered", expected)
 		}
-		
+
 		// Alert if unexpected providers are registered (could indicate foot-gun memory provider)
 		for _, actual := range providerNames {
 			if actual == "memory" {
@@ -417,7 +417,7 @@ func TestServer_SecurityConfiguration(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			server, err := New(tt.config, logger)
 			require.NoError(t, err)
-			
+
 			// Run security checks
 			for _, check := range tt.securityChecks {
 				check(t, server)
@@ -580,15 +580,15 @@ func TestServer_SecurityEdgeCases_And_AttackVectors(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			config := tt.configFunc()
-			
+
 			server, err := New(config, logger)
-			
+
 			if tt.expectError {
 				assert.Error(t, err, tt.description)
 			} else {
 				assert.NoError(t, err, tt.description)
 				assert.NotNil(t, server)
-				
+
 				// Validate security components are still initialized
 				assert.NotNil(t, server.rbacManager)
 				assert.NotNil(t, server.tenantManager)
@@ -678,7 +678,7 @@ func TestServer_RBAC_SecurityIntegration(t *testing.T) {
 	// Verify RBAC integration
 	assert.NotNil(t, server.rbacManager)
 	assert.NotNil(t, server.rbacService)
-	
+
 	// Verify tenant security integration
 	assert.NotNil(t, server.tenantManager)
 }
@@ -725,7 +725,7 @@ func TestServer_NetworkSecurity_And_Binding(t *testing.T) {
 			tempDir, err := os.MkdirTemp("", "network_test")
 			require.NoError(t, err)
 			defer func() { _ = os.RemoveAll(tempDir) }()
-			
+
 			config := &config.Config{
 				ListenAddr: tt.listenAddr,
 				Certificate: &config.CertificateConfig{
@@ -829,10 +829,10 @@ func TestServer_CertificateSecurityValidation(t *testing.T) {
 			storageDir, err := os.MkdirTemp("", "cert_test")
 			require.NoError(t, err)
 			defer func() { _ = os.RemoveAll(storageDir) }()
-			
+
 			// Add storage configuration to test config
 			tt.config.Storage = createTestStorageConfig(storageDir, "cert")
-			
+
 			server, err := New(tt.config, logger)
 			require.NoError(t, err)
 			require.NotNil(t, server)

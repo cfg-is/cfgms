@@ -409,7 +409,7 @@ workflow:
 			assert.Equal(t, tt.want.Version, got.Version)
 			assert.Equal(t, tt.want.Timeout, got.Timeout)
 			assert.Equal(t, tt.want.Variables, got.Variables)
-			
+
 			// Compare steps recursively
 			assertStepsEqual(t, tt.want.Steps, got.Steps)
 		})
@@ -451,7 +451,7 @@ func TestParser_ValidateWorkflow(t *testing.T) {
 				},
 			},
 			wantErr: true,
-			errMsg: "workflow name is required",
+			errMsg:  "workflow name is required",
 		},
 		{
 			name: "no steps",
@@ -460,7 +460,7 @@ func TestParser_ValidateWorkflow(t *testing.T) {
 				Steps: []Step{},
 			},
 			wantErr: true,
-			errMsg: "workflow must have at least one step",
+			errMsg:  "workflow must have at least one step",
 		},
 		{
 			name: "duplicate step names",
@@ -482,7 +482,7 @@ func TestParser_ValidateWorkflow(t *testing.T) {
 				},
 			},
 			wantErr: true,
-			errMsg: "duplicate step name",
+			errMsg:  "duplicate step name",
 		},
 		{
 			name: "invalid step type",
@@ -496,7 +496,7 @@ func TestParser_ValidateWorkflow(t *testing.T) {
 				},
 			},
 			wantErr: true,
-			errMsg: "invalid step type",
+			errMsg:  "invalid step type",
 		},
 		{
 			name: "task step missing module",
@@ -511,7 +511,7 @@ func TestParser_ValidateWorkflow(t *testing.T) {
 				},
 			},
 			wantErr: true,
-			errMsg: "module is required for task steps",
+			errMsg:  "module is required for task steps",
 		},
 		{
 			name: "task step missing config",
@@ -526,7 +526,7 @@ func TestParser_ValidateWorkflow(t *testing.T) {
 				},
 			},
 			wantErr: true,
-			errMsg: "config is required for task steps",
+			errMsg:  "config is required for task steps",
 		},
 		{
 			name: "sequential step without children",
@@ -541,7 +541,7 @@ func TestParser_ValidateWorkflow(t *testing.T) {
 				},
 			},
 			wantErr: true,
-			errMsg: "sequential steps must have child steps",
+			errMsg:  "sequential steps must have child steps",
 		},
 		{
 			name: "conditional step missing condition",
@@ -563,7 +563,7 @@ func TestParser_ValidateWorkflow(t *testing.T) {
 				},
 			},
 			wantErr: true,
-			errMsg: "condition is required for conditional steps",
+			errMsg:  "condition is required for conditional steps",
 		},
 		{
 			name: "negative timeout",
@@ -580,7 +580,7 @@ func TestParser_ValidateWorkflow(t *testing.T) {
 				},
 			},
 			wantErr: true,
-			errMsg: "workflow timeout cannot be negative",
+			errMsg:  "workflow timeout cannot be negative",
 		},
 	}
 
@@ -614,16 +614,16 @@ func TestValidationHelpers(t *testing.T) {
 		{"valid parallel step type", func() bool { return isValidStepType(StepTypeParallel) }, true},
 		{"valid conditional step type", func() bool { return isValidStepType(StepTypeConditional) }, true},
 		{"invalid step type", func() bool { return isValidStepType("invalid") }, false},
-		
+
 		{"valid stop action", func() bool { return isValidFailureAction(ActionStop) }, true},
 		{"valid continue action", func() bool { return isValidFailureAction(ActionContinue) }, true},
 		{"valid retry action", func() bool { return isValidFailureAction(ActionRetry) }, true},
 		{"invalid failure action", func() bool { return isValidFailureAction("invalid") }, false},
-		
+
 		{"valid variable condition", func() bool { return isValidConditionType(ConditionTypeVariable) }, true},
 		{"valid expression condition", func() bool { return isValidConditionType(ConditionTypeExpression) }, true},
 		{"invalid condition type", func() bool { return isValidConditionType("invalid") }, false},
-		
+
 		{"valid equal operator", func() bool { return isValidComparisonOperator(OperatorEqual) }, true},
 		{"valid not equal operator", func() bool { return isValidComparisonOperator(OperatorNotEqual) }, true},
 		{"valid exists operator", func() bool { return isValidComparisonOperator(OperatorExists) }, true},
@@ -641,12 +641,12 @@ func TestValidationHelpers(t *testing.T) {
 // Helper function to recursively compare steps
 func assertStepsEqual(t *testing.T, expected, actual []Step) {
 	assert.Len(t, actual, len(expected))
-	
+
 	for i, expectedStep := range expected {
 		if i >= len(actual) {
 			break
 		}
-		
+
 		actualStep := actual[i]
 		assert.Equal(t, expectedStep.Name, actualStep.Name)
 		assert.Equal(t, expectedStep.Type, actualStep.Type)
@@ -655,14 +655,14 @@ func assertStepsEqual(t *testing.T, expected, actual []Step) {
 		assert.Equal(t, expectedStep.Timeout, actualStep.Timeout)
 		assert.Equal(t, expectedStep.OnFailure, actualStep.OnFailure)
 		assert.Equal(t, expectedStep.Variables, actualStep.Variables)
-		
+
 		if expectedStep.Condition != nil {
 			require.NotNil(t, actualStep.Condition)
 			assert.Equal(t, *expectedStep.Condition, *actualStep.Condition)
 		} else {
 			assert.Nil(t, actualStep.Condition)
 		}
-		
+
 		if len(expectedStep.Steps) > 0 {
 			assertStepsEqual(t, expectedStep.Steps, actualStep.Steps)
 		}

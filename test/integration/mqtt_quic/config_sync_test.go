@@ -185,7 +185,7 @@ func (s *ConfigSyncTestSuite) TestLargeConfigPayload() {
 			"name":   fmt.Sprintf("resource-%d", i),
 			"module": "file",
 			"config": map[string]interface{}{
-				"path":    fmt.Sprintf("/tmp/test/file%d.txt", i),
+				"path": fmt.Sprintf("/tmp/test/file%d.txt", i),
 				"content": "Lorem ipsum dolor sit amet, consectetur adipiscing elit. " +
 					"Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.",
 			},

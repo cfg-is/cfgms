@@ -27,9 +27,9 @@ type SOPSSecretStoreConfig struct {
 // SOPSSecretStore implements SecretStore using git ConfigStore with SOPS encryption
 // M-AUTH-1: Secrets are stored as ConfigEntry objects in git, automatically encrypted by SOPS
 type SOPSSecretStore struct {
-	configStore storageif.ConfigStore // Underlying config store (git with SOPS)
-	cache       *cache.Cache          // Secret cache
-	config      *SOPSSecretStoreConfig
+	configStore  storageif.ConfigStore // Underlying config store (git with SOPS)
+	cache        *cache.Cache          // Secret cache
+	config       *SOPSSecretStoreConfig
 	providerName string
 }
 
@@ -51,10 +51,10 @@ func NewSOPSSecretStore(config *SOPSSecretStoreConfig) (*SOPSSecretStore, error)
 	// Initialize cache if enabled
 	if config.CacheEnabled {
 		cacheConfig := cache.CacheConfig{
-			Name:             "sops-secrets",
-			DefaultTTL:       time.Duration(config.CacheTTL) * time.Second,
-			MaxRuntimeItems:  config.CacheMaxSize,
-			CleanupInterval:  5 * time.Minute,
+			Name:            "sops-secrets",
+			DefaultTTL:      time.Duration(config.CacheTTL) * time.Second,
+			MaxRuntimeItems: config.CacheMaxSize,
+			CleanupInterval: 5 * time.Minute,
 		}
 		store.cache = cache.NewCache(cacheConfig)
 	}
@@ -103,9 +103,9 @@ func (s *SOPSSecretStore) StoreSecret(ctx context.Context, req *secretsif.Secret
 	// Store as ConfigEntry (will be automatically encrypted by SOPS)
 	configKey := &storageif.ConfigKey{
 		TenantID:  req.TenantID,
-		Namespace: "secrets",           // Use "secrets" namespace for all secrets
-		Name:      req.Key,              // Secret key is the config name
-		Scope:     "",                   // No scope needed for secrets
+		Namespace: "secrets", // Use "secrets" namespace for all secrets
+		Name:      req.Key,   // Secret key is the config name
+		Scope:     "",        // No scope needed for secrets
 	}
 
 	configEntry := &storageif.ConfigEntry{

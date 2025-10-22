@@ -40,11 +40,11 @@ type ConfigSyncRequest struct {
 
 // ConfigSyncResponse represents the configuration sync response.
 type ConfigSyncResponse struct {
-	Success      bool              `json:"success"`
-	Configuration string            `json:"configuration,omitempty"`
-	ConfigHash    string            `json:"config_hash,omitempty"`
-	Error         string            `json:"error,omitempty"`
-	StatusCode    string            `json:"status_code,omitempty"`
+	Success       bool   `json:"success"`
+	Configuration string `json:"configuration,omitempty"`
+	ConfigHash    string `json:"config_hash,omitempty"`
+	Error         string `json:"error,omitempty"`
+	StatusCode    string `json:"status_code,omitempty"`
 }
 
 // Handle processes configuration sync requests on a QUIC stream.

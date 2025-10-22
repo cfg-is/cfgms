@@ -6,9 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/features/steward/performance"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/features/steward/performance"
 )
 
 func TestMemoryStorageBackend(t *testing.T) {

@@ -111,10 +111,10 @@ func (h *Handler) HandleDetailedHealth(w http.ResponseWriter, r *http.Request) {
 			Message:   storageMessage,
 			LastCheck: metrics.Storage.CollectedAt,
 			Details: map[string]interface{}{
-				"provider":          metrics.Storage.Provider,
-				"pool_utilization":  metrics.Storage.PoolUtilization,
-				"avg_latency_ms":    metrics.Storage.AvgQueryLatencyMs,
-				"p95_latency_ms":    metrics.Storage.P95QueryLatencyMs,
+				"provider":         metrics.Storage.Provider,
+				"pool_utilization": metrics.Storage.PoolUtilization,
+				"avg_latency_ms":   metrics.Storage.AvgQueryLatencyMs,
+				"p95_latency_ms":   metrics.Storage.P95QueryLatencyMs,
 			},
 		}
 	}

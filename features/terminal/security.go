@@ -61,13 +61,13 @@ type CommandFilterRule struct {
 	ID          string            `json:"id"`
 	Name        string            `json:"name"`
 	Description string            `json:"description"`
-	Pattern     string            `json:"pattern"`         // Regex pattern to match
-	Action      FilterAction      `json:"action"`          // Allow, block, or audit
-	Severity    FilterSeverity    `json:"severity"`        // Risk level
-	TenantID    string            `json:"tenant_id"`       // Tenant scope
-	DeviceID    string            `json:"device_id"`       // Device scope (optional)
-	GroupID     string            `json:"group_id"`        // Group scope (optional)
-	Metadata    map[string]string `json:"metadata"`        // Additional rule metadata
+	Pattern     string            `json:"pattern"`   // Regex pattern to match
+	Action      FilterAction      `json:"action"`    // Allow, block, or audit
+	Severity    FilterSeverity    `json:"severity"`  // Risk level
+	TenantID    string            `json:"tenant_id"` // Tenant scope
+	DeviceID    string            `json:"device_id"` // Device scope (optional)
+	GroupID     string            `json:"group_id"`  // Group scope (optional)
+	Metadata    map[string]string `json:"metadata"`  // Additional rule metadata
 	CreatedAt   time.Time         `json:"created_at"`
 	UpdatedAt   time.Time         `json:"updated_at"`
 	compiledRx  *regexp.Regexp    // Compiled regex for performance
@@ -77,9 +77,9 @@ type CommandFilterRule struct {
 type FilterAction string
 
 const (
-	FilterActionAllow FilterAction = "allow"  // Allow command execution
-	FilterActionBlock FilterAction = "block"  // Block command execution
-	FilterActionAudit FilterAction = "audit"  // Allow but log for audit
+	FilterActionAllow FilterAction = "allow" // Allow command execution
+	FilterActionBlock FilterAction = "block" // Block command execution
+	FilterActionAudit FilterAction = "audit" // Allow but log for audit
 )
 
 // FilterSeverity defines the risk level of a command filter rule
@@ -94,16 +94,16 @@ const (
 
 // SessionSecurityContext contains security information for a terminal session
 type SessionSecurityContext struct {
-	SessionID    string            `json:"session_id"`
-	UserID       string            `json:"user_id"`
-	StewardID    string            `json:"steward_id"`
-	TenantID     string            `json:"tenant_id"`
-	Permissions  []string          `json:"permissions"`    // User's terminal permissions
-	FilterRules  []CommandFilterRule `json:"filter_rules"` // Applicable command filter rules
-	AuditEnabled bool              `json:"audit_enabled"`  // Whether session is being audited
-	MonitoringLevel SecurityLevel  `json:"monitoring_level"` // Level of session monitoring
-	CreatedAt    time.Time         `json:"created_at"`
-	ExpiresAt    *time.Time        `json:"expires_at,omitempty"` // Optional session expiration
+	SessionID       string              `json:"session_id"`
+	UserID          string              `json:"user_id"`
+	StewardID       string              `json:"steward_id"`
+	TenantID        string              `json:"tenant_id"`
+	Permissions     []string            `json:"permissions"`      // User's terminal permissions
+	FilterRules     []CommandFilterRule `json:"filter_rules"`     // Applicable command filter rules
+	AuditEnabled    bool                `json:"audit_enabled"`    // Whether session is being audited
+	MonitoringLevel SecurityLevel       `json:"monitoring_level"` // Level of session monitoring
+	CreatedAt       time.Time           `json:"created_at"`
+	ExpiresAt       *time.Time          `json:"expires_at,omitempty"` // Optional session expiration
 }
 
 // SecurityLevel defines the level of security monitoring for a session
@@ -118,29 +118,29 @@ const (
 
 // CommandAuditEvent represents an audit event for a terminal command
 type CommandAuditEvent struct {
-	SessionID   string            `json:"session_id"`
-	UserID      string            `json:"user_id"`
-	StewardID   string            `json:"steward_id"`
-	TenantID    string            `json:"tenant_id"`
-	Command     string            `json:"command"`
-	Action      FilterAction      `json:"action"`      // Action taken (allow/block/audit)
-	RuleID      string            `json:"rule_id"`     // Filter rule that triggered
-	Severity    FilterSeverity    `json:"severity"`    // Risk level
-	Output      string            `json:"output"`      // Command output (if captured)
-	ExitCode    int               `json:"exit_code"`   // Command exit code
-	Duration    time.Duration     `json:"duration"`    // Command execution time
-	Metadata    map[string]string `json:"metadata"`    // Additional context
-	Timestamp   time.Time         `json:"timestamp"`
-	IPAddress   string            `json:"ip_address"`  // Client IP address
-	UserAgent   string            `json:"user_agent"`  // Client user agent
+	SessionID string            `json:"session_id"`
+	UserID    string            `json:"user_id"`
+	StewardID string            `json:"steward_id"`
+	TenantID  string            `json:"tenant_id"`
+	Command   string            `json:"command"`
+	Action    FilterAction      `json:"action"`    // Action taken (allow/block/audit)
+	RuleID    string            `json:"rule_id"`   // Filter rule that triggered
+	Severity  FilterSeverity    `json:"severity"`  // Risk level
+	Output    string            `json:"output"`    // Command output (if captured)
+	ExitCode  int               `json:"exit_code"` // Command exit code
+	Duration  time.Duration     `json:"duration"`  // Command execution time
+	Metadata  map[string]string `json:"metadata"`  // Additional context
+	Timestamp time.Time         `json:"timestamp"`
+	IPAddress string            `json:"ip_address"` // Client IP address
+	UserAgent string            `json:"user_agent"` // Client user agent
 }
 
 // SecurityValidator validates security requirements for terminal operations
 type SecurityValidator struct {
-	rbacManager   rbac.RBACManager
-	filterRules   []CommandFilterRule
-	auditEnabled  bool
-	defaultRules  []CommandFilterRule
+	rbacManager  rbac.RBACManager
+	filterRules  []CommandFilterRule
+	auditEnabled bool
+	defaultRules []CommandFilterRule
 }
 
 // NewSecurityValidator creates a new security validator with default rules
@@ -150,14 +150,14 @@ func NewSecurityValidator(rbacManager rbac.RBACManager) *SecurityValidator {
 		auditEnabled: true,
 		defaultRules: getDefaultCommandFilterRules(),
 	}
-	
+
 	// Compile regex patterns for performance
 	for i := range validator.defaultRules {
 		if rx, err := regexp.Compile(validator.defaultRules[i].Pattern); err == nil {
 			validator.defaultRules[i].compiledRx = rx
 		}
 	}
-	
+
 	return validator
 }
 
@@ -223,7 +223,7 @@ func (sv *SecurityValidator) ValidateCommand(ctx context.Context, securityContex
 	for _, rule := range securityContext.FilterRules {
 		if rule.compiledRx != nil && rule.compiledRx.MatchString(command) {
 			result.MatchedRules = append(result.MatchedRules, rule)
-			
+
 			// Take the most restrictive action
 			if rule.Action == FilterActionBlock {
 				result.Allowed = false
@@ -233,7 +233,7 @@ func (sv *SecurityValidator) ValidateCommand(ctx context.Context, securityContex
 				result.Action = FilterActionAudit
 				result.AuditReason = fmt.Sprintf("Command flagged for audit by rule: %s", rule.Name)
 			}
-			
+
 			// Track highest severity
 			if result.Severity == "" || isHigherSeverity(rule.Severity, result.Severity) {
 				result.Severity = rule.Severity
@@ -253,11 +253,11 @@ func (sv *SecurityValidator) ValidateCommand(ctx context.Context, securityContex
 			Severity:  result.Severity,
 			Timestamp: time.Now(),
 		}
-		
+
 		if len(result.MatchedRules) > 0 {
 			auditEvent.RuleID = result.MatchedRules[0].ID
 		}
-		
+
 		result.AuditEvent = auditEvent
 	}
 
@@ -266,15 +266,15 @@ func (sv *SecurityValidator) ValidateCommand(ctx context.Context, securityContex
 
 // CommandValidationResult represents the result of command validation
 type CommandValidationResult struct {
-	Command      string                `json:"command"`
-	Allowed      bool                  `json:"allowed"`
-	Action       FilterAction          `json:"action"`
-	Severity     FilterSeverity        `json:"severity"`
-	MatchedRules []CommandFilterRule   `json:"matched_rules"`
-	BlockReason  string                `json:"block_reason,omitempty"`
-	AuditReason  string                `json:"audit_reason,omitempty"`
-	AuditEvent   *CommandAuditEvent    `json:"audit_event,omitempty"`
-	Timestamp    time.Time             `json:"timestamp"`
+	Command      string              `json:"command"`
+	Allowed      bool                `json:"allowed"`
+	Action       FilterAction        `json:"action"`
+	Severity     FilterSeverity      `json:"severity"`
+	MatchedRules []CommandFilterRule `json:"matched_rules"`
+	BlockReason  string              `json:"block_reason,omitempty"`
+	AuditReason  string              `json:"audit_reason,omitempty"`
+	AuditEvent   *CommandAuditEvent  `json:"audit_event,omitempty"`
+	Timestamp    time.Time           `json:"timestamp"`
 }
 
 // getUserTerminalPermissions gets terminal-related permissions for a user
@@ -297,7 +297,7 @@ func (sv *SecurityValidator) getUserTerminalPermissions(ctx context.Context, use
 // getApplicableFilterRules gets command filter rules applicable to the session
 func (sv *SecurityValidator) getApplicableFilterRules(tenantID, stewardID string) []CommandFilterRule {
 	var applicableRules []CommandFilterRule
-	
+
 	// Add default system rules
 	for _, rule := range sv.defaultRules {
 		if rule.TenantID == "" || rule.TenantID == tenantID {
@@ -306,10 +306,10 @@ func (sv *SecurityValidator) getApplicableFilterRules(tenantID, stewardID string
 			}
 		}
 	}
-	
+
 	// Add tenant-specific rules (would be loaded from storage in real implementation)
 	applicableRules = append(applicableRules, sv.filterRules...)
-	
+
 	return applicableRules
 }
 
@@ -321,14 +321,14 @@ func (sv *SecurityValidator) determineMonitoringLevel(permissions []string, filt
 			return SecurityLevelMaximum
 		}
 	}
-	
+
 	// Check if any critical rules apply
 	for _, rule := range filterRules {
 		if rule.Severity == FilterSeverityCritical {
 			return SecurityLevelMaximum
 		}
 	}
-	
+
 	// Default to enhanced monitoring for terminal access
 	return SecurityLevelEnhanced
 }
@@ -341,7 +341,7 @@ func isHigherSeverity(severity1, severity2 FilterSeverity) bool {
 		FilterSeverityHigh:     3,
 		FilterSeverityCritical: 4,
 	}
-	
+
 	return severityOrder[severity1] > severityOrder[severity2]
 }
 

@@ -13,8 +13,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/logging/interfaces"
 	_ "github.com/lib/pq" // PostgreSQL driver
+
+	"github.com/cfgis/cfgms/pkg/logging/interfaces"
 )
 
 // TimescaleProvider implements the LoggingProvider interface using TimescaleDB
@@ -38,11 +39,11 @@ type TimescaleConfig struct {
 	SSLMode  string `json:"ssl_mode"` // SSL mode (disable, require, verify-ca, verify-full)
 
 	// TimescaleDB-specific settings
-	TableName         string        `json:"table_name"`         // Log entries table name (default: log_entries)
-	ChunkInterval     time.Duration `json:"chunk_interval"`     // Time interval for chunks (default: 7 days)
-	CompressionAfter  time.Duration `json:"compression_after"`  // Compress chunks older than this (default: 7 days)
-	RetentionAfter    time.Duration `json:"retention_after"`    // Drop chunks older than this (default: 30 days)
-	CompressionRatio  int           `json:"compression_ratio"`  // Target compression ratio (1-20)
+	TableName        string        `json:"table_name"`        // Log entries table name (default: log_entries)
+	ChunkInterval    time.Duration `json:"chunk_interval"`    // Time interval for chunks (default: 7 days)
+	CompressionAfter time.Duration `json:"compression_after"` // Compress chunks older than this (default: 7 days)
+	RetentionAfter   time.Duration `json:"retention_after"`   // Drop chunks older than this (default: 30 days)
+	CompressionRatio int           `json:"compression_ratio"` // Target compression ratio (1-20)
 
 	// Performance settings
 	BatchSize         int           `json:"batch_size"`         // Batch insert size
@@ -51,30 +52,30 @@ type TimescaleConfig struct {
 	QueryTimeout      time.Duration `json:"query_timeout"`      // Query timeout
 
 	// Schema settings
-	CreateSchema bool `json:"create_schema"` // Auto-create schema if it doesn't exist
-	SchemaName   string `json:"schema_name"`  // Schema name (default: public)
+	CreateSchema bool   `json:"create_schema"` // Auto-create schema if it doesn't exist
+	SchemaName   string `json:"schema_name"`   // Schema name (default: public)
 }
 
 // DefaultTimescaleConfig returns a sensible default configuration
 func DefaultTimescaleConfig() *TimescaleConfig {
 	return &TimescaleConfig{
-		Host:             "localhost",
-		Port:             5432,
-		Database:         "cfgms_logs",
-		Username:         "cfgms_logger",
-		Password:         "",
-		SSLMode:          "prefer",
-		TableName:        "log_entries",
-		ChunkInterval:    7 * 24 * time.Hour,  // 7 days
-		CompressionAfter: 7 * 24 * time.Hour,  // 7 days
-		RetentionAfter:   30 * 24 * time.Hour, // 30 days
-		CompressionRatio: 10,
-		BatchSize:        1000,
-		MaxConnections:   10,
+		Host:              "localhost",
+		Port:              5432,
+		Database:          "cfgms_logs",
+		Username:          "cfgms_logger",
+		Password:          "",
+		SSLMode:           "prefer",
+		TableName:         "log_entries",
+		ChunkInterval:     7 * 24 * time.Hour,  // 7 days
+		CompressionAfter:  7 * 24 * time.Hour,  // 7 days
+		RetentionAfter:    30 * 24 * time.Hour, // 30 days
+		CompressionRatio:  10,
+		BatchSize:         1000,
+		MaxConnections:    10,
 		ConnectionTimeout: 10 * time.Second,
-		QueryTimeout:     30 * time.Second,
-		CreateSchema:     true,
-		SchemaName:       "public",
+		QueryTimeout:      30 * time.Second,
+		CreateSchema:      true,
+		SchemaName:        "public",
 	}
 }
 
@@ -96,12 +97,12 @@ func (p *TimescaleProvider) GetVersion() string {
 // GetCapabilities returns the provider's capabilities
 func (p *TimescaleProvider) GetCapabilities() interfaces.LoggingCapabilities {
 	return interfaces.LoggingCapabilities{
-		SupportsCompression:       true,  // Native TimescaleDB compression
-		SupportsRetentionPolicies: true,  // Automated data retention
-		SupportsRealTimeQueries:   true,  // Fast SQL-based queries
-		SupportsBatchWrites:       true,  // Batch inserts for performance
-		SupportsTimeRangeQueries:  true,  // Optimized time-series queries
-		SupportsFullTextSearch:    true,  // PostgreSQL full-text search
+		SupportsCompression:       true,   // Native TimescaleDB compression
+		SupportsRetentionPolicies: true,   // Automated data retention
+		SupportsRealTimeQueries:   true,   // Fast SQL-based queries
+		SupportsBatchWrites:       true,   // Batch inserts for performance
+		SupportsTimeRangeQueries:  true,   // Optimized time-series queries
+		SupportsFullTextSearch:    true,   // PostgreSQL full-text search
 		MaxEntriesPerSecond:       100000, // High throughput with batch inserts
 		MaxBatchSize:              10000,  // Large batch support
 		DefaultRetentionDays:      30,     // 30-day retention
@@ -312,7 +313,7 @@ func (p *TimescaleProvider) WriteBatch(ctx context.Context, entries []interfaces
 	if err != nil {
 		return fmt.Errorf("failed to build safe batch query: %w", err)
 	}
-	
+
 	stmt, err := tx.PrepareContext(ctx, query)
 	if err != nil {
 		return fmt.Errorf("failed to prepare batch statement: %w", err)
@@ -485,29 +486,29 @@ func validateSQLIdentifier(identifier string) error {
 	if identifier == "" {
 		return fmt.Errorf("SQL identifier cannot be empty")
 	}
-	
+
 	// Check length (PostgreSQL limit is 63 characters)
 	if len(identifier) > 63 {
 		return fmt.Errorf("SQL identifier too long (max 63 characters): %s", identifier)
 	}
-	
+
 	// Must start with letter or underscore
-	if (identifier[0] < 'a' || identifier[0] > 'z') && 
-		 (identifier[0] < 'A' || identifier[0] > 'Z') && 
-		 identifier[0] != '_' {
+	if (identifier[0] < 'a' || identifier[0] > 'z') &&
+		(identifier[0] < 'A' || identifier[0] > 'Z') &&
+		identifier[0] != '_' {
 		return fmt.Errorf("SQL identifier must start with letter or underscore: %s", identifier)
 	}
-	
+
 	// Can only contain letters, digits, underscores, and dollar signs
 	for _, char := range identifier {
-		if (char < 'a' || char > 'z') && 
-			 (char < 'A' || char > 'Z') && 
-			 (char < '0' || char > '9') && 
-			 char != '_' && char != '$' {
+		if (char < 'a' || char > 'z') &&
+			(char < 'A' || char > 'Z') &&
+			(char < '0' || char > '9') &&
+			char != '_' && char != '$' {
 			return fmt.Errorf("SQL identifier contains invalid character: %s", identifier)
 		}
 	}
-	
+
 	// Check against SQL reserved words (basic list)
 	reservedWords := map[string]bool{
 		"select": true, "insert": true, "update": true, "delete": true,
@@ -516,11 +517,11 @@ func validateSQLIdentifier(identifier string) error {
 		"union": true, "where": true, "from": true, "join": true,
 		"order": true, "group": true, "having": true, "limit": true,
 	}
-	
+
 	if reservedWords[strings.ToLower(identifier)] {
 		return fmt.Errorf("SQL identifier cannot be a reserved word: %s", identifier)
 	}
-	
+
 	return nil
 }
 
@@ -531,11 +532,11 @@ func (p *TimescaleProvider) buildSafeQuery(template string) (string, error) {
 	if err := validateSQLIdentifier(p.config.SchemaName); err != nil {
 		return "", fmt.Errorf("invalid schema name: %w", err)
 	}
-	
+
 	if err := validateSQLIdentifier(p.config.TableName); err != nil {
 		return "", fmt.Errorf("invalid table name: %w", err)
 	}
-	
+
 	// Build query with validated identifiers
 	return fmt.Sprintf(template, p.config.SchemaName, p.config.TableName), nil
 }
@@ -550,7 +551,7 @@ func (p *TimescaleProvider) updateStats(entriesWritten int, latency time.Duratio
 
 	// Update rolling average for write latency
 	newLatencyMs := float64(latency.Milliseconds())
-	p.stats.WriteLatencyMs = (p.stats.WriteLatencyMs*0.9) + (newLatencyMs*0.1)
+	p.stats.WriteLatencyMs = (p.stats.WriteLatencyMs * 0.9) + (newLatencyMs * 0.1)
 }
 
 // init registers the timescale provider

@@ -200,10 +200,10 @@ func TestGDAPCredentialStoreAdapter(t *testing.T) {
 		// Test that we can create the adapter (even with nil CredentialStore)
 		adapter := &credentialStoreAdapter{nil}
 		assert.NotNil(t, adapter)
-		
+
 		// Test IsAvailable method
 		assert.True(t, adapter.IsAvailable())
-		
+
 		// Test error methods return meaningful errors
 		err := adapter.StoreClientSecret("test", "secret")
 		assert.Error(t, err)
@@ -217,17 +217,17 @@ func TestGDAPCredentialStoreAdapter(t *testing.T) {
 
 func TestGDAPProviderCreation(t *testing.T) {
 	// Test that we can create a GDAP provider (focusing on structure, not functionality)
-	
+
 	t.Run("NewGDAPProviderStructure", func(t *testing.T) {
 		// This test validates the provider can be created
 		// Even though we can't easily test the full functionality without complex mocking
-		
+
 		// Note: We can't create a real provider in unit tests without mocking saas.NewMicrosoftMultiTenantProvider
 		// But we can test the structure and constants
-		
+
 		partnerTenantID := "test-partner-tenant"
 		assert.NotEmpty(t, partnerTenantID)
-		
+
 		// Test that we have the required types and constants
 		assert.Equal(t, GDAPStatusActive, GDAPStatusActive)
 		assert.Equal(t, GDAPStatusPending, GDAPStatusPending)
@@ -248,19 +248,19 @@ func TestGDAPImplementationComplete(t *testing.T) {
 		var _ = PartnerAccessValidation{}
 		var _ = CustomerInfo{}
 		var _ = GDAPClientConfig{}
-		
+
 		// This test will fail at compile time if any of these types don't exist
 		assert.True(t, true)
 	})
 
 	t.Run("RequiredFunctionsExist", func(t *testing.T) {
 		// Validate that key functions are defined
-		
+
 		// NewGDAPClient function exists (we test by calling it with nil - it should handle gracefully)
 		client := NewGDAPClient(nil, "test-tenant")
 		assert.NotNil(t, client)
 		assert.Equal(t, "test-tenant", client.partnerTenantID)
-		
+
 		// ValidateGDAPClientConfig function exists
 		config := &GDAPClientConfig{
 			PartnerTenantID:     "test",

@@ -86,23 +86,23 @@ type SecretMetadata struct {
 // SecretVersion represents a historical version of a secret
 // M-AUTH-1: Support for secret versioning and rollback
 type SecretVersion struct {
-	Version   int       `json:"version"`
-	CreatedAt time.Time `json:"created_at"`
-	CreatedBy string    `json:"created_by"`
+	Version   int        `json:"version"`
+	CreatedAt time.Time  `json:"created_at"`
+	CreatedBy string     `json:"created_by"`
 	DeletedAt *time.Time `json:"deleted_at,omitempty"` // Soft delete timestamp
 }
 
 // SecretFilter defines filtering criteria for listing secrets
 // M-AUTH-1: Support for efficient secret discovery
 type SecretFilter struct {
-	TenantID   string            `json:"tenant_id,omitempty"`   // Filter by tenant
-	Tags       []string          `json:"tags,omitempty"`        // Filter by tags (AND logic)
-	Metadata   map[string]string `json:"metadata,omitempty"`    // Filter by metadata (AND logic)
-	KeyPrefix  string            `json:"key_prefix,omitempty"`  // Filter by key prefix
-	CreatedBy  string            `json:"created_by,omitempty"`  // Filter by creator
-	IncludeExpired bool          `json:"include_expired,omitempty"` // Include expired secrets in results
-	Limit      int               `json:"limit,omitempty"`       // Maximum results to return
-	Offset     int               `json:"offset,omitempty"`      // Pagination offset
+	TenantID       string            `json:"tenant_id,omitempty"`       // Filter by tenant
+	Tags           []string          `json:"tags,omitempty"`            // Filter by tags (AND logic)
+	Metadata       map[string]string `json:"metadata,omitempty"`        // Filter by metadata (AND logic)
+	KeyPrefix      string            `json:"key_prefix,omitempty"`      // Filter by key prefix
+	CreatedBy      string            `json:"created_by,omitempty"`      // Filter by creator
+	IncludeExpired bool              `json:"include_expired,omitempty"` // Include expired secrets in results
+	Limit          int               `json:"limit,omitempty"`           // Maximum results to return
+	Offset         int               `json:"offset,omitempty"`          // Pagination offset
 }
 
 // SecretType defines common secret types for standardization
@@ -110,25 +110,25 @@ type SecretFilter struct {
 type SecretType string
 
 const (
-	SecretTypeAPIKey          SecretType = "api_key"
-	SecretTypePassword        SecretType = "password"
-	SecretTypeCertificate     SecretType = "certificate"
-	SecretTypePrivateKey      SecretType = "private_key"
-	SecretTypeToken           SecretType = "token"
-	SecretTypeOAuthCredential SecretType = "oauth_credential"
+	SecretTypeAPIKey           SecretType = "api_key"
+	SecretTypePassword         SecretType = "password"
+	SecretTypeCertificate      SecretType = "certificate"
+	SecretTypePrivateKey       SecretType = "private_key"
+	SecretTypeToken            SecretType = "token"
+	SecretTypeOAuthCredential  SecretType = "oauth_credential"
 	SecretTypeConnectionString SecretType = "connection_string"
-	SecretTypeEncryptionKey   SecretType = "encryption_key"
-	SecretTypeGeneric         SecretType = "generic"
+	SecretTypeEncryptionKey    SecretType = "encryption_key"
+	SecretTypeGeneric          SecretType = "generic"
 )
 
 // Common metadata keys for standardization
 const (
-	MetadataKeySecretType = "secret_type" // Type of secret (SecretType)
-	MetadataKeyService    = "service"     // Service this secret is for
-	MetadataKeyEnvironment = "environment" // Environment (dev, staging, prod)
+	MetadataKeySecretType     = "secret_type"     // Type of secret (SecretType)
+	MetadataKeyService        = "service"         // Service this secret is for
+	MetadataKeyEnvironment    = "environment"     // Environment (dev, staging, prod)
 	MetadataKeyRotationPolicy = "rotation_policy" // Rotation policy identifier
-	MetadataKeyLastRotated = "last_rotated" // Last rotation timestamp
-	MetadataKeyOwner      = "owner"       // Team/person responsible
+	MetadataKeyLastRotated    = "last_rotated"    // Last rotation timestamp
+	MetadataKeyOwner          = "owner"           // Team/person responsible
 )
 
 // SecretStoreConfig provides configuration for secret store creation
@@ -138,12 +138,12 @@ type SecretStoreConfig struct {
 	Config map[string]interface{} `json:"config"`
 
 	// Cache configuration
-	CacheTTL          time.Duration `json:"cache_ttl"`           // How long to cache secrets
-	CacheEnabled      bool          `json:"cache_enabled"`       // Enable caching
-	CacheMaxSize      int           `json:"cache_max_size"`      // Maximum cache size
+	CacheTTL     time.Duration `json:"cache_ttl"`      // How long to cache secrets
+	CacheEnabled bool          `json:"cache_enabled"`  // Enable caching
+	CacheMaxSize int           `json:"cache_max_size"` // Maximum cache size
 
 	// Security settings
-	RequireEncryption bool `json:"require_encryption"` // Enforce encryption (should always be true)
+	RequireEncryption bool   `json:"require_encryption"`          // Enforce encryption (should always be true)
 	EncryptionKeyID   string `json:"encryption_key_id,omitempty"` // KMS key ID for encryption
 
 	// Default TTL for secrets without explicit expiration

@@ -8,32 +8,33 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/cfgis/cfgms/api/proto/common"
-	"github.com/cfgis/cfgms/features/reports/interfaces"
-	"github.com/cfgis/cfgms/features/rbac"
-	storageInterfaces "github.com/cfgis/cfgms/pkg/storage/interfaces"
-	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/google/uuid"
+
+	"github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/features/rbac"
+	"github.com/cfgis/cfgms/features/reports/interfaces"
+	"github.com/cfgis/cfgms/pkg/logging"
+	storageInterfaces "github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
 // AdvancedEngine implements AdvancedReportEngine interface
 type AdvancedEngine struct {
-	*Engine                                    // Embed existing engine
+	*Engine          // Embed existing engine
 	advancedProvider interfaces.AdvancedDataProvider
-	rbacManager      *rbac.Manager            // RBAC integration for access control
+	rbacManager      *rbac.Manager // RBAC integration for access control
 	logger           logging.Logger
 	config           AdvancedConfig
 }
 
 // AdvancedConfig contains configuration for advanced reporting
 type AdvancedConfig struct {
-	Config                               // Embed base config
-	EnableAuditIntegration    bool       `json:"enable_audit_integration"`
-	EnableRBACValidation      bool       `json:"enable_rbac_validation"`
-	EnableCrossSystemMetrics  bool       `json:"enable_cross_system_metrics"`
-	MaxTenantsPerReport       int        `json:"max_tenants_per_report"`
-	ComplianceFrameworks      []string   `json:"compliance_frameworks"`
-	SecurityEventRetention    time.Duration `json:"security_event_retention"`
+	Config                                 // Embed base config
+	EnableAuditIntegration   bool          `json:"enable_audit_integration"`
+	EnableRBACValidation     bool          `json:"enable_rbac_validation"`
+	EnableCrossSystemMetrics bool          `json:"enable_cross_system_metrics"`
+	MaxTenantsPerReport      int           `json:"max_tenants_per_report"`
+	ComplianceFrameworks     []string      `json:"compliance_frameworks"`
+	SecurityEventRetention   time.Duration `json:"security_event_retention"`
 }
 
 // DefaultAdvancedConfig returns default configuration for advanced reporting
@@ -359,16 +360,16 @@ func (e *AdvancedEngine) GenerateExecutiveReport(ctx context.Context, req interf
 	}
 
 	report := &interfaces.ExecutiveReport{
-		ID:              uuid.New().String(),
-		GeneratedAt:     time.Now(),
-		TimeRange:       req.TimeRange,
-		TenantIDs:       req.TenantIDs,
+		ID:               uuid.New().String(),
+		GeneratedAt:      time.Now(),
+		TimeRange:        req.TimeRange,
+		TenantIDs:        req.TenantIDs,
 		ExecutiveSummary: executiveSummary,
-		KPIs:            kpis,
-		Trends:          trends,
-		RiskSummary:     riskSummary,
-		ActionItems:     actionItems,
-		Charts:          charts,
+		KPIs:             kpis,
+		Trends:           trends,
+		RiskSummary:      riskSummary,
+		ActionItems:      actionItems,
+		Charts:           charts,
 	}
 
 	e.logger.Info("generated executive report",

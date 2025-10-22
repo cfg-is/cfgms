@@ -43,7 +43,7 @@ type Manager struct {
 	cancel         context.CancelFunc
 
 	// Cluster state
-	clusterNodes map[string]*NodeInfo
+	clusterNodes  map[string]*NodeInfo
 	currentLeader string
 	isLeader      bool
 

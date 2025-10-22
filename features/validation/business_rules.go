@@ -31,10 +31,10 @@ func (r *ResourceNameUniquenessRule) Validate(configInterface interface{}) []Val
 	for i, resource := range cfg.Resources {
 		if prevIndex, exists := nameMap[resource.Name]; exists {
 			issues = append(issues, ValidationIssue{
-				Level:   ValidationLevelError,
-				Field:   fmt.Sprintf("resources[%d].name", i),
-				Message: fmt.Sprintf("Duplicate resource name '%s' (also used in resources[%d])", resource.Name, prevIndex),
-				Code:    "DUPLICATE_RESOURCE_NAME",
+				Level:      ValidationLevelError,
+				Field:      fmt.Sprintf("resources[%d].name", i),
+				Message:    fmt.Sprintf("Duplicate resource name '%s' (also used in resources[%d])", resource.Name, prevIndex),
+				Code:       "DUPLICATE_RESOURCE_NAME",
 				Suggestion: fmt.Sprintf("Use a unique name for this resource, such as '%s-2' or '%s-%s'", resource.Name, resource.Name, resource.Module),
 				Context: map[string]interface{}{
 					"duplicate_name":   resource.Name,
@@ -269,15 +269,15 @@ func (r *ResourceDependencyRule) Validate(configInterface interface{}) []Validat
 					if parentDir != "/" && parentDir != "" {
 						if _, hasParentDir := directoryPaths[parentDir]; !hasParentDir {
 							issues = append(issues, ValidationIssue{
-								Level:   ValidationLevelWarning,
-								Field:   fmt.Sprintf("resources[%d].config.path", i),
-								Message: fmt.Sprintf("File path '%s' does not have a corresponding directory resource for '%s'", pathStr, parentDir),
-								Code:    "MISSING_PARENT_DIRECTORY",
+								Level:      ValidationLevelWarning,
+								Field:      fmt.Sprintf("resources[%d].config.path", i),
+								Message:    fmt.Sprintf("File path '%s' does not have a corresponding directory resource for '%s'", pathStr, parentDir),
+								Code:       "MISSING_PARENT_DIRECTORY",
 								Suggestion: fmt.Sprintf("Consider adding a directory resource for '%s' to ensure the parent directory exists", parentDir),
 								Context: map[string]interface{}{
-									"file_path":   pathStr,
-									"parent_dir":  parentDir,
-									"file_index":  i,
+									"file_path":  pathStr,
+									"parent_dir": parentDir,
+									"file_index": i,
 								},
 							})
 						}

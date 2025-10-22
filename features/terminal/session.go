@@ -139,7 +139,7 @@ func (s *Session) HandleOutput(ctx context.Context, data []byte) error {
 func (s *Session) Resize(ctx context.Context, cols, rows int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	
+
 	if s.closed {
 		return fmt.Errorf("session is closed")
 	}
@@ -166,7 +166,7 @@ func (s *Session) Resize(ctx context.Context, cols, rows int) error {
 func (s *Session) Close(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	
+
 	if s.closed {
 		return nil // Already closed
 	}
@@ -224,7 +224,7 @@ func (s *Session) IsTimedOut(timeout time.Duration) bool {
 func (s *Session) GetMetadata() *SessionMetadata {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	
+
 	metadata := &SessionMetadata{
 		SessionID:   s.ID,
 		StewardID:   s.StewardID,
@@ -294,18 +294,18 @@ func (s *Session) handleShellOutput(ctx context.Context) {
 			if !ok {
 				return // Channel closed
 			}
-			
+
 			// Handle the output data (send to WebSocket, record, etc.)
 			if err := s.HandleOutput(ctx, data); err != nil {
 				// Log error but continue processing output
 				_ = err // Explicitly ignore output handling errors for resilience
 			}
-			
+
 		case err, ok := <-errorChan:
 			if !ok {
 				return // Channel closed
 			}
-			
+
 			// Handle errors (could send error message to WebSocket)
 			_ = err // For now, just ignore errors
 		}
@@ -322,7 +322,7 @@ func (s *Session) GetOutputChannel() <-chan []byte {
 	return s.executor.OutputChannel()
 }
 
-// GetErrorChannel returns the shell error channel  
+// GetErrorChannel returns the shell error channel
 func (s *Session) GetErrorChannel() <-chan error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

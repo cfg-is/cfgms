@@ -410,13 +410,13 @@ func (s *RBACService) ValidateRoleHierarchy(ctx context.Context, req *controller
 	err := s.rbacManager.ValidateRoleHierarchy(ctx, req.RoleId)
 	if err != nil {
 		return &controller.ValidateRoleHierarchyResponse{
-			Valid: false,
+			Valid:            false,
 			ValidationErrors: []string{err.Error()},
 		}, nil
 	}
 
 	return &controller.ValidateRoleHierarchyResponse{
-		Valid: true,
+		Valid:            true,
 		ValidationErrors: []string{},
 	}, nil
 }
@@ -432,7 +432,7 @@ func (s *RBACService) convertToProtoHierarchy(hierarchy *memory.RoleHierarchy) *
 	if hierarchy.Depth < 0 || hierarchy.Depth > 2147483647 {
 		hierarchy.Depth = 0 // Default to root level for invalid depth
 	}
-	
+
 	protoHierarchy := &controller.RoleHierarchy{
 		Role:  hierarchy.Role,
 		Depth: int32(hierarchy.Depth), // Safe: bounds validated above
@@ -455,11 +455,11 @@ func (s *RBACService) convertToProtoEffectivePermissions(effectivePerms *memory.
 	}
 
 	protoEffective := &controller.EffectivePermissions{
-		RoleId:            effectivePerms.RoleID,
-		DirectPermissions: effectivePerms.DirectPermissions,
+		RoleId:               effectivePerms.RoleID,
+		DirectPermissions:    effectivePerms.DirectPermissions,
 		InheritedPermissions: make(map[string]*controller.PermissionList),
-		ConflictResolution: make(map[string]*controller.ConflictResult),
-		ComputedAt: effectivePerms.ComputedAt.Unix(),
+		ConflictResolution:   make(map[string]*controller.ConflictResult),
+		ComputedAt:           effectivePerms.ComputedAt.Unix(),
 	}
 
 	// Convert inherited permissions

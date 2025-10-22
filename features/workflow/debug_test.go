@@ -40,11 +40,11 @@ func TestDebugEngine_StartDebugSession(t *testing.T) {
 
 	// Start debug session
 	settings := DebugSettings{
-		AutoStepMode:          false,
-		BreakOnError:          true,
-		CaptureAPIDetails:     true,
-		MaxHistorySize:        100,
-		TenantIsolation:       true,
+		AutoStepMode:      false,
+		BreakOnError:      true,
+		CaptureAPIDetails: true,
+		MaxHistorySize:    100,
+		TenantIsolation:   true,
 	}
 
 	session, err := debugEngine.StartDebugSession(ctx, execution.ID, settings)
@@ -441,14 +441,14 @@ func TestDebugEngine_SecurityAndTenantIsolation(t *testing.T) {
 // mockLogger implements a simple test logger
 type mockLogger struct{}
 
-func (l *mockLogger) Debug(msg string, fields ...interface{})                      {}
-func (l *mockLogger) Info(msg string, fields ...interface{})                       {}
-func (l *mockLogger) Warn(msg string, fields ...interface{})                       {}
-func (l *mockLogger) Error(msg string, fields ...interface{})                      {}
-func (l *mockLogger) Fatal(msg string, fields ...interface{})                      {}
+func (l *mockLogger) Debug(msg string, fields ...interface{})                         {}
+func (l *mockLogger) Info(msg string, fields ...interface{})                          {}
+func (l *mockLogger) Warn(msg string, fields ...interface{})                          {}
+func (l *mockLogger) Error(msg string, fields ...interface{})                         {}
+func (l *mockLogger) Fatal(msg string, fields ...interface{})                         {}
 func (l *mockLogger) DebugCtx(ctx context.Context, msg string, fields ...interface{}) {}
-func (l *mockLogger) InfoCtx(ctx context.Context, msg string, fields ...interface{}) {}
-func (l *mockLogger) WarnCtx(ctx context.Context, msg string, fields ...interface{}) {}
+func (l *mockLogger) InfoCtx(ctx context.Context, msg string, fields ...interface{})  {}
+func (l *mockLogger) WarnCtx(ctx context.Context, msg string, fields ...interface{})  {}
 func (l *mockLogger) ErrorCtx(ctx context.Context, msg string, fields ...interface{}) {}
 func (l *mockLogger) FatalCtx(ctx context.Context, msg string, fields ...interface{}) {}
 

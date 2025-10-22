@@ -24,9 +24,9 @@ type PatchPolicy struct {
 
 // MajorVersionPolicy defines the major version upgrade policy
 type MajorVersionPolicy struct {
-	Enabled            bool     `yaml:"enabled"`              // Enable automatic major version upgrades
-	TargetVersion      string   `yaml:"target_version"`       // Target Windows version (e.g., "11", "23H2")
-	RequireCompatible  bool     `yaml:"require_compatible"`   // Only upgrade compatible devices
+	Enabled             bool     `yaml:"enabled"`              // Enable automatic major version upgrades
+	TargetVersion       string   `yaml:"target_version"`       // Target Windows version (e.g., "11", "23H2")
+	RequireCompatible   bool     `yaml:"require_compatible"`   // Only upgrade compatible devices
 	CompatibilityChecks []string `yaml:"compatibility_checks"` // DNA checks required (TPM, UEFI, CPU, RAM, disk)
 }
 
@@ -35,28 +35,28 @@ type ComplianceStatus string
 
 const (
 	ComplianceStatusCompliant    ComplianceStatus = "Compliant"
-	ComplianceStatusWarning      ComplianceStatus = "Warning"     // Within warning threshold
-	ComplianceStatusCritical     ComplianceStatus = "Critical"    // Within critical threshold
+	ComplianceStatusWarning      ComplianceStatus = "Warning"      // Within warning threshold
+	ComplianceStatusCritical     ComplianceStatus = "Critical"     // Within critical threshold
 	ComplianceStatusNonCompliant ComplianceStatus = "NonCompliant" // Past deadline
 )
 
 // ComplianceReport represents the compliance status of a device
 type ComplianceReport struct {
-	DeviceName            string              `json:"device_name"`
-	OSVersion             string              `json:"os_version"`
-	PatchLevel            string              `json:"patch_level"`
-	Status                ComplianceStatus    `json:"status"`
-	MissingPatches        []MissingPatchInfo  `json:"missing_patches"`
-	DaysUntilBreach       int                 `json:"days_until_breach"`       // Days until non-compliant
-	Win11UpgradeEligible  bool                `json:"win11_upgrade_eligible"`
-	CompatibilityIssues   []string            `json:"compatibility_issues,omitempty"`
-	LastChecked           time.Time           `json:"last_checked"`
+	DeviceName           string             `json:"device_name"`
+	OSVersion            string             `json:"os_version"`
+	PatchLevel           string             `json:"patch_level"`
+	Status               ComplianceStatus   `json:"status"`
+	MissingPatches       []MissingPatchInfo `json:"missing_patches"`
+	DaysUntilBreach      int                `json:"days_until_breach"` // Days until non-compliant
+	Win11UpgradeEligible bool               `json:"win11_upgrade_eligible"`
+	CompatibilityIssues  []string           `json:"compatibility_issues,omitempty"`
+	LastChecked          time.Time          `json:"last_checked"`
 }
 
 // MissingPatchInfo represents a missing patch with compliance information
 type MissingPatchInfo struct {
 	PatchInfo
-	DaysOverdue       int       `json:"days_overdue"`       // Days since deadline passed (negative if not yet due)
+	DaysOverdue        int       `json:"days_overdue"`        // Days since deadline passed (negative if not yet due)
 	ComplianceDeadline time.Time `json:"compliance_deadline"` // When the patch must be installed
 }
 

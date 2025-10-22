@@ -4,11 +4,12 @@ import (
 	"context"
 	"testing"
 
-	"github.com/cfgis/cfgms/features/modules/m365/auth"
-	"github.com/cfgis/cfgms/features/modules/m365/graph"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"gopkg.in/yaml.v3"
+
+	"github.com/cfgis/cfgms/features/modules/m365/auth"
+	"github.com/cfgis/cfgms/features/modules/m365/graph"
 )
 
 // Mock implementations for testing
@@ -673,17 +674,17 @@ func TestEntraAdminUnitConfig_ExtensionAttributes(t *testing.T) {
 		DisplayName: "Test Admin Unit",
 		TenantID:    "test-tenant-id",
 		ExtensionAttributes: map[string]interface{}{
-			"department":    "IT",
-			"costCenter":    12345,
-			"isProduction":  true,
-			"customFields":  []string{"field1", "field2"},
+			"department":   "IT",
+			"costCenter":   12345,
+			"isProduction": true,
+			"customFields": []string{"field1", "field2"},
 		},
 	}
 
 	// Test AsMap includes extension attributes
 	result := config.AsMap()
 	assert.Contains(t, result, "extension_attributes")
-	
+
 	extensionAttrs := result["extension_attributes"].(map[string]interface{})
 	assert.Equal(t, "IT", extensionAttrs["department"])
 	assert.Equal(t, 12345, extensionAttrs["costCenter"])
@@ -696,12 +697,12 @@ func TestEntraAdminUnitConfig_ExtensionAttributes(t *testing.T) {
 	var deserializedConfig EntraAdminUnitConfig
 	err = deserializedConfig.FromYAML(yamlData)
 	assert.NoError(t, err)
-	
+
 	// Check individual attributes (YAML deserialization may change slice types)
 	assert.Equal(t, "IT", deserializedConfig.ExtensionAttributes["department"])
 	assert.Equal(t, 12345, deserializedConfig.ExtensionAttributes["costCenter"])
 	assert.Equal(t, true, deserializedConfig.ExtensionAttributes["isProduction"])
-	
+
 	// Check that custom fields array exists and has correct length
 	customFields := deserializedConfig.ExtensionAttributes["customFields"]
 	assert.NotNil(t, customFields)

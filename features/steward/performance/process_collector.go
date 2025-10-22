@@ -145,7 +145,7 @@ func (c *DefaultProcessCollector) getProcessMetrics(ctx context.Context, p *proc
 	statusCodes, _ := p.StatusWithContext(ctx)
 	status := ""
 	if len(statusCodes) > 0 {
-		status = string(statusCodes[0])
+		status = statusCodes[0]
 	}
 
 	// Get create time (may fail on some systems)
@@ -158,7 +158,7 @@ func (c *DefaultProcessCollector) getProcessMetrics(ctx context.Context, p *proc
 		Cmdline:       cmdline,
 		Username:      username,
 		CPUPercent:    cpuPercent,
-		MemoryBytes:   int64(memInfo.RSS),
+		MemoryBytes:   int64(memInfo.RSS), // #nosec G115 -- Process memory cannot exceed int64 max (8 exabytes)
 		MemoryPercent: float64(memPercent),
 		ThreadCount:   threadCount,
 		CreateTime:    createTime,

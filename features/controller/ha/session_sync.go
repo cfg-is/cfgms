@@ -16,14 +16,14 @@ import (
 
 // sessionSynchronizer implements SessionSynchronizer interface
 type sessionSynchronizer struct {
-	mu       sync.RWMutex
-	cfg      *SessionSyncConfig
-	logger   logging.Logger
-	storage  *interfaces.StorageManager
-	manager  *Manager // Reference to HA manager for node info
-	ctx      context.Context
-	cancel   context.CancelFunc
-	started  bool
+	mu      sync.RWMutex
+	cfg     *SessionSyncConfig
+	logger  logging.Logger
+	storage *interfaces.StorageManager
+	manager *Manager // Reference to HA manager for node info
+	ctx     context.Context
+	cancel  context.CancelFunc
+	started bool
 
 	// Session state management
 	localSessions   map[string]*sessionState
@@ -35,16 +35,16 @@ type sessionSynchronizer struct {
 
 // sessionState represents the state of a session
 type sessionState struct {
-	SessionID   string                 `json:"session_id"`
-	NodeID      string                 `json:"node_id"`
-	UserID      string                 `json:"user_id,omitempty"`
-	TenantID    string                 `json:"tenant_id,omitempty"`
-	State       interface{}            `json:"state"`
-	Metadata    map[string]interface{} `json:"metadata,omitempty"`
-	CreatedAt   time.Time              `json:"created_at"`
-	UpdatedAt   time.Time              `json:"updated_at"`
-	ExpiresAt   time.Time              `json:"expires_at"`
-	Size        int                    `json:"size"`
+	SessionID string                 `json:"session_id"`
+	NodeID    string                 `json:"node_id"`
+	UserID    string                 `json:"user_id,omitempty"`
+	TenantID  string                 `json:"tenant_id,omitempty"`
+	State     interface{}            `json:"state"`
+	Metadata  map[string]interface{} `json:"metadata,omitempty"`
+	CreatedAt time.Time              `json:"created_at"`
+	UpdatedAt time.Time              `json:"updated_at"`
+	ExpiresAt time.Time              `json:"expires_at"`
+	Size      int                    `json:"size"`
 }
 
 // NewSessionSynchronizer creates a new session synchronizer
