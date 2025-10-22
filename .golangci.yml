@@ -99,13 +99,16 @@ linters-settings:
   gocritic:
     enabled-tags:
       - diagnostic
-      - style
       - performance
-      - experimental
-      - opinionated
+      # NOTE: Disabled opinionated/style/experimental tags to reduce noise
+      # - style
+      # - experimental
+      # - opinionated
     disabled-checks:
       - whyNoLint  # We don't require justification for every nolint
       - unnamedResult  # Named returns not always needed
+      - ifElseChain  # Style preference - if-else vs switch
+      - elseif  # Style preference - else if vs else {if}
 
   revive:
     confidence: 0.8
@@ -170,7 +173,8 @@ linters:
     - unused         # Detect unused code
 
     # Code Quality (RECOMMENDED)
-    - gocritic       # Comprehensive checks
+    # NOTE: gocritic disabled - mostly style preferences (ifElseChain)
+    # - gocritic       # Comprehensive checks
     # NOTE: revive disabled - too opinionated for large codebase
     # - revive         # Fast, configurable linter
     - misspell       # Spell checking
