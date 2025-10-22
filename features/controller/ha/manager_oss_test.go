@@ -9,10 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/logging"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
 // mockLogger implements a minimal logger for testing
@@ -95,7 +96,7 @@ func TestNewManager_DefaultConfig(t *testing.T) {
 // TestNewManager_SingleServerModeEnforcement tests that OSS enforces SingleServerMode
 func TestNewManager_SingleServerModeEnforcement(t *testing.T) {
 	tests := []struct {
-		name         string
+		name          string
 		requestedMode DeploymentMode
 	}{
 		{"BlueGreenMode_Blocked", BlueGreenMode},

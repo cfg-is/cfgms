@@ -5,9 +5,10 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/cfgis/cfgms/pkg/logging/providers/file" // Register file provider
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	_ "github.com/cfgis/cfgms/pkg/logging/providers/file" // Register file provider
 )
 
 // TestSystemWideMigration validates the comprehensive logging migration across all components
@@ -236,10 +237,10 @@ func TestGlobalProviderAvailability(t *testing.T) {
 	// Initialize global logging provider
 	tempDir := t.TempDir()
 	loggingConfig := &LoggingConfig{
-		Provider:  "file",
-		Level:     "INFO",
+		Provider:    "file",
+		Level:       "INFO",
 		ServiceName: "availability_test",
-		Component: "test",
+		Component:   "test",
 		Config: map[string]interface{}{
 			"directory": tempDir,
 		},
@@ -282,10 +283,10 @@ func TestMigrationBackwardCompatibility(t *testing.T) {
 	// Initialize global logging
 	tempDir := t.TempDir()
 	loggingConfig := &LoggingConfig{
-		Provider:  "file",
-		Level:     "INFO",
+		Provider:    "file",
+		Level:       "INFO",
 		ServiceName: "compatibility_test",
-		Component: "test",
+		Component:   "test",
 		Config: map[string]interface{}{
 			"directory": tempDir,
 		},

@@ -10,10 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	_ "github.com/lib/pq" // PostgreSQL driver
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	_ "github.com/lib/pq" // PostgreSQL driver
+
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
 // buildTestDSN creates a DSN string from test configuration
@@ -30,15 +31,14 @@ func getTestConfig() map[string]interface{} {
 	if password == "" {
 		password = "cfgms_test" // fallback for non-Docker tests
 	}
-	
+
 	port := 5432
 	if portStr := os.Getenv("CFGMS_TEST_DB_PORT"); portStr != "" {
 		if p, err := strconv.Atoi(portStr); err == nil {
 			port = p
 		}
 	}
-	
-	
+
 	return map[string]interface{}{
 		"host":     "localhost",
 		"port":     port,
@@ -54,53 +54,52 @@ func getTestDB(t *testing.T) *sql.DB {
 	if testing.Short() {
 		t.Skip("Skipping database tests in short mode")
 	}
-	
+
 	// Get fresh config each time to pick up environment variables
 	testDBConfig := getTestConfig()
-	
+
 	// Check if test database is available
 	dsn := fmt.Sprintf("host=%s port=%d dbname=%s user=%s password=%s sslmode=%s",
 		testDBConfig["host"], testDBConfig["port"], testDBConfig["database"],
 		testDBConfig["username"], testDBConfig["password"], testDBConfig["sslmode"])
-	
-	
+
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Skip("PostgreSQL test database not available:", err)
 	}
-	
+
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
 		t.Skip("PostgreSQL test database not reachable:", err)
 	}
-	
+
 	return db
 }
 
 // setupTestDatabase creates a clean test database
 func setupTestDatabase(t *testing.T) *sql.DB {
 	db := getTestDB(t)
-	
+
 	// Clean up any existing tables
 	schemas := NewDatabaseSchemas()
 	ctx := context.Background()
-	
+
 	if err := schemas.DropAllTables(ctx, db); err != nil {
 		// Ignore errors on cleanup
 		_ = err
 	}
-	
+
 	return db
 }
 
 func TestDatabaseProvider_Basic(t *testing.T) {
 	provider := &DatabaseProvider{}
-	
+
 	// Test basic provider information
 	assert.Equal(t, "database", provider.Name())
 	assert.Contains(t, provider.Description(), "PostgreSQL")
 	assert.NotEmpty(t, provider.GetVersion())
-	
+
 	capabilities := provider.GetCapabilities()
 	assert.True(t, capabilities.SupportsTransactions)
 	assert.True(t, capabilities.SupportsVersioning)
@@ -110,7 +109,7 @@ func TestDatabaseProvider_Basic(t *testing.T) {
 	assert.Greater(t, capabilities.MaxBatchSize, 0)
 	assert.Greater(t, capabilities.MaxConfigSize, 0)
 	assert.Greater(t, capabilities.MaxAuditRetentionDays, 0)
-	
+
 	// Test availability
 	available, err := provider.Available()
 	assert.True(t, available)
@@ -121,20 +120,20 @@ func TestDatabaseProvider_CreateClientTenantStore(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping database integration tests in short mode")
 	}
-	
+
 	db := setupTestDatabase(t)
 	defer func() { _ = db.Close() }()
-	
+
 	provider := &DatabaseProvider{}
-	
+
 	// Test creating client tenant store
 	store, err := provider.CreateClientTenantStore(getTestConfig())
 	require.NoError(t, err)
 	require.NotNil(t, store)
-	
+
 	// Verify store is not nil - interface compliance verified at compile time
 	assert.NotNil(t, store)
-	
+
 	// Clean up
 	if dbStore, ok := store.(*DatabaseClientTenantStore); ok {
 		_ = dbStore.Close()
@@ -145,20 +144,20 @@ func TestDatabaseProvider_CreateConfigStore(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping database integration tests in short mode")
 	}
-	
+
 	db := setupTestDatabase(t)
 	defer func() { _ = db.Close() }()
-	
+
 	provider := &DatabaseProvider{}
-	
+
 	// Test creating config store
 	store, err := provider.CreateConfigStore(getTestConfig())
 	require.NoError(t, err)
 	require.NotNil(t, store)
-	
+
 	// Verify store is not nil - interface compliance verified at compile time
 	assert.NotNil(t, store)
-	
+
 	// Clean up
 	if dbStore, ok := store.(*DatabaseConfigStore); ok {
 		_ = dbStore.Close()
@@ -169,20 +168,20 @@ func TestDatabaseProvider_CreateAuditStore(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping database integration tests in short mode")
 	}
-	
+
 	db := setupTestDatabase(t)
 	defer func() { _ = db.Close() }()
-	
+
 	provider := &DatabaseProvider{}
-	
+
 	// Test creating audit store
 	store, err := provider.CreateAuditStore(getTestConfig())
 	require.NoError(t, err)
 	require.NotNil(t, store)
-	
+
 	// Verify store is not nil - interface compliance verified at compile time
 	assert.NotNil(t, store)
-	
+
 	// Clean up
 	if dbStore, ok := store.(*DatabaseAuditStore); ok {
 		_ = dbStore.Close()
@@ -191,7 +190,7 @@ func TestDatabaseProvider_CreateAuditStore(t *testing.T) {
 
 func TestDatabaseProvider_DSNGeneration(t *testing.T) {
 	provider := &DatabaseProvider{}
-	
+
 	tests := []struct {
 		name     string
 		config   map[string]interface{}
@@ -237,7 +236,7 @@ func TestDatabaseProvider_DSNGeneration(t *testing.T) {
 			wantErr:  false,
 		},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dsn, err := provider.getDSN(tt.config)
@@ -255,17 +254,17 @@ func TestDatabaseSchemas_CreateTables(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping database integration tests in short mode")
 	}
-	
+
 	db := setupTestDatabase(t)
 	defer func() { _ = db.Close() }()
-	
+
 	schemas := NewDatabaseSchemas()
 	ctx := context.Background()
-	
+
 	// Test creating all tables
 	err := schemas.CreateAllTables(ctx, db)
 	require.NoError(t, err)
-	
+
 	// Verify tables exist
 	tables := []string{
 		"client_tenants",
@@ -275,7 +274,7 @@ func TestDatabaseSchemas_CreateTables(t *testing.T) {
 		"audit_entries",
 		"storage_health",
 	}
-	
+
 	for _, table := range tables {
 		var exists bool
 		query := `SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = $1)`
@@ -283,7 +282,7 @@ func TestDatabaseSchemas_CreateTables(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, exists, "Table %s should exist", table)
 	}
-	
+
 	// Verify materialized view exists
 	var viewExists bool
 	viewQuery := `SELECT EXISTS (SELECT 1 FROM pg_matviews WHERE matviewname = 'audit_stats')`
@@ -296,14 +295,14 @@ func TestDatabaseClientTenantStore_CRUD(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping database integration tests in short mode")
 	}
-	
+
 	db := setupTestDatabase(t)
 	defer func() { _ = db.Close() }()
-	
+
 	store, err := NewDatabaseClientTenantStore(buildTestDSN(), getTestConfig())
 	require.NoError(t, err)
 	defer func() { _ = store.Close() }()
-	
+
 	// Create a test client tenant
 	tenant := &interfaces.ClientTenant{
 		TenantID:         "test-tenant-123",
@@ -318,11 +317,11 @@ func TestDatabaseClientTenantStore_CRUD(t *testing.T) {
 			"plan":   "enterprise",
 		},
 	}
-	
+
 	// Test Store
 	err = store.StoreClientTenant(tenant)
 	require.NoError(t, err)
-	
+
 	// Test Get by tenant ID
 	retrieved, err := store.GetClientTenant("test-tenant-123")
 	require.NoError(t, err)
@@ -330,38 +329,38 @@ func TestDatabaseClientTenantStore_CRUD(t *testing.T) {
 	assert.Equal(t, tenant.TenantName, retrieved.TenantName)
 	assert.Equal(t, tenant.Status, retrieved.Status)
 	assert.Equal(t, tenant.Metadata["region"], retrieved.Metadata["region"])
-	
+
 	// Test Get by client identifier
 	byIdentifier, err := store.GetClientTenantByIdentifier("client-123")
 	require.NoError(t, err)
 	assert.Equal(t, tenant.TenantID, byIdentifier.TenantID)
-	
+
 	// Test List all tenants
 	allTenants, err := store.ListClientTenants("")
 	require.NoError(t, err)
 	assert.Len(t, allTenants, 1)
-	
+
 	// Test List by status
 	activeTenants, err := store.ListClientTenants(interfaces.ClientTenantStatusActive)
 	require.NoError(t, err)
 	assert.Len(t, activeTenants, 1)
-	
+
 	pendingTenants, err := store.ListClientTenants(interfaces.ClientTenantStatusPending)
 	require.NoError(t, err)
 	assert.Len(t, pendingTenants, 0)
-	
+
 	// Test Update status
 	err = store.UpdateClientTenantStatus("test-tenant-123", interfaces.ClientTenantStatusSuspended)
 	require.NoError(t, err)
-	
+
 	updated, err := store.GetClientTenant("test-tenant-123")
 	require.NoError(t, err)
 	assert.Equal(t, interfaces.ClientTenantStatusSuspended, updated.Status)
-	
+
 	// Test Delete
 	err = store.DeleteClientTenant("test-tenant-123")
 	require.NoError(t, err)
-	
+
 	_, err = store.GetClientTenant("test-tenant-123")
 	assert.Error(t, err)
 }
@@ -370,14 +369,14 @@ func TestDatabaseClientTenantStore_AdminConsent(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping database integration tests in short mode")
 	}
-	
+
 	db := setupTestDatabase(t)
 	defer func() { _ = db.Close() }()
-	
+
 	store, err := NewDatabaseClientTenantStore(buildTestDSN(), getTestConfig())
 	require.NoError(t, err)
 	defer func() { _ = store.Close() }()
-	
+
 	// Create a test admin consent request
 	request := &interfaces.AdminConsentRequest{
 		ClientIdentifier: "client-456",
@@ -389,22 +388,22 @@ func TestDatabaseClientTenantStore_AdminConsent(t *testing.T) {
 			"flow": "delegated",
 		},
 	}
-	
+
 	// Test Store
 	err = store.StoreAdminConsentRequest(request)
 	require.NoError(t, err)
-	
+
 	// Test Get
 	retrieved, err := store.GetAdminConsentRequest("test-state-789")
 	require.NoError(t, err)
 	assert.Equal(t, request.ClientIdentifier, retrieved.ClientIdentifier)
 	assert.Equal(t, request.State, retrieved.State)
 	assert.Equal(t, request.Metadata["flow"], retrieved.Metadata["flow"])
-	
+
 	// Test Delete
 	err = store.DeleteAdminConsentRequest("test-state-789")
 	require.NoError(t, err)
-	
+
 	_, err = store.GetAdminConsentRequest("test-state-789")
 	assert.Error(t, err)
 }
@@ -413,61 +412,61 @@ func TestDatabaseProvider_Integration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping database integration tests in short mode")
 	}
-	
+
 	// Skip if DATABASE_URL is not set (CI/CD environments)
 	if os.Getenv("DATABASE_URL") == "" {
 		t.Skip("DATABASE_URL not set, skipping integration test")
 	}
-	
+
 	db := setupTestDatabase(t)
 	defer func() { _ = db.Close() }()
-	
+
 	// Test provider registration
 	providerNames := interfaces.GetRegisteredProviderNames()
 	assert.Contains(t, providerNames, "database")
-	
+
 	// Test getting the provider
 	provider, err := interfaces.GetStorageProvider("database")
 	require.NoError(t, err)
 	assert.NotNil(t, provider)
-	
+
 	// Test creating storage manager
 	storageManager, err := interfaces.CreateAllStoresFromConfig("database", getTestConfig())
 	require.NoError(t, err)
 	require.NotNil(t, storageManager)
-	
+
 	assert.Equal(t, "database", storageManager.GetProviderName())
 	assert.NotNil(t, storageManager.GetClientTenantStore())
 	assert.NotNil(t, storageManager.GetConfigStore())
 	assert.NotNil(t, storageManager.GetAuditStore())
-	
+
 	capabilities := storageManager.GetCapabilities()
 	assert.True(t, capabilities.SupportsTransactions)
 }
 
 func TestDatabaseProvider_ErrorHandling(t *testing.T) {
 	provider := &DatabaseProvider{}
-	
+
 	// Test invalid DSN
 	invalidConfig := map[string]interface{}{
 		"dsn": "invalid://connection/string",
 	}
-	
+
 	_, err := provider.CreateClientTenantStore(invalidConfig)
 	assert.Error(t, err)
-	
+
 	_, err = provider.CreateConfigStore(invalidConfig)
 	assert.Error(t, err)
-	
+
 	_, err = provider.CreateAuditStore(invalidConfig)
 	assert.Error(t, err)
-	
+
 	// Test missing password
 	missingPasswordConfig := map[string]interface{}{
 		"host":     "localhost",
 		"username": "test",
 	}
-	
+
 	_, err = provider.CreateClientTenantStore(missingPasswordConfig)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "password is required")
@@ -480,15 +479,15 @@ func TestUtilityFunctions(t *testing.T) {
 		"int_val":     123,
 		"missing_val": nil,
 	}
-	
+
 	assert.Equal(t, "test", getStringFromConfig(config, "string_val", "default"))
 	assert.Equal(t, "default", getStringFromConfig(config, "missing_val", "default"))
 	assert.Equal(t, "default", getStringFromConfig(config, "nonexistent", "default"))
-	
+
 	// Test getIntFromConfig
 	assert.Equal(t, 123, getIntFromConfig(config, "int_val", 0))
 	assert.Equal(t, 456, getIntFromConfig(config, "missing_val", 456))
-	
+
 	// Test getBoolFromConfig
 	boolConfig := map[string]interface{}{
 		"bool_val": true,
@@ -503,9 +502,9 @@ func BenchmarkDatabaseProvider_CreateStores(b *testing.B) {
 	if testing.Short() {
 		b.Skip("Skipping benchmark in short mode")
 	}
-	
+
 	provider := &DatabaseProvider{}
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		store, err := provider.CreateClientTenantStore(getTestConfig())

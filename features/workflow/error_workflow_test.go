@@ -304,9 +304,9 @@ func TestErrorWorkflowParameterAndOutputMappings(t *testing.T) {
 						"system":   "system_id",
 					},
 					OutputMappings: map[string]string{
-						"resolution":    "error_resolution",
-						"remediation":   "remediation_steps",
-						"next_action":   "recommended_action",
+						"resolution":  "error_resolution",
+						"remediation": "remediation_steps",
+						"next_action": "recommended_action",
 					},
 					RecoveryAction: RecoveryActionContinue,
 				},

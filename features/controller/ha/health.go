@@ -14,13 +14,13 @@ import (
 
 // HealthChecker manages health checking for the HA system
 type HealthChecker struct {
-	mu       sync.RWMutex
-	cfg      *HealthCheckConfig
-	logger   logging.Logger
-	manager  *Manager
-	ctx      context.Context
-	cancel   context.CancelFunc
-	started  bool
+	mu      sync.RWMutex
+	cfg     *HealthCheckConfig
+	logger  logging.Logger
+	manager *Manager
+	ctx     context.Context
+	cancel  context.CancelFunc
+	started bool
 
 	// Health check state
 	checkStates map[string]*healthCheckState
@@ -28,12 +28,12 @@ type HealthChecker struct {
 
 // healthCheckState tracks the state of a specific health check
 type healthCheckState struct {
-	name             string
-	consecutiveOK    int
-	consecutiveFail  int
-	lastCheck        time.Time
-	lastResult       error
-	currentState     NodeState
+	name            string
+	consecutiveOK   int
+	consecutiveFail int
+	lastCheck       time.Time
+	lastResult      error
+	currentState    NodeState
 }
 
 // NewHealthChecker creates a new health checker

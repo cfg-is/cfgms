@@ -117,7 +117,7 @@ type CustomReportRequest struct {
 
 // CustomQuery defines a custom data query specification
 type CustomQuery struct {
-	DataSources  []string               `json:"data_sources"`  // "dna", "audit", "compliance", etc.
+	DataSources  []string               `json:"data_sources"` // "dna", "audit", "compliance", etc.
 	Filters      map[string]interface{} `json:"filters"`
 	Aggregations []QueryAggregation     `json:"aggregations,omitempty"`
 	Sorting      []QuerySort            `json:"sorting,omitempty"`
@@ -148,17 +148,17 @@ type PaginationConfig struct {
 
 // CustomParameter defines a parameter that can be provided by users
 type CustomParameter struct {
-	Name         string      `json:"name"`
-	Type         string      `json:"type"`         // string, number, boolean, date, array
-	Description  string      `json:"description"`
-	Required     bool        `json:"required"`
-	Default      interface{} `json:"default,omitempty"`
-	Options      []string    `json:"options,omitempty"`      // For enum-type parameters
-	MinValue     *float64    `json:"min_value,omitempty"`    // For numeric parameters
-	MaxValue     *float64    `json:"max_value,omitempty"`    // For numeric parameters
-	Pattern      string      `json:"pattern,omitempty"`      // Regex pattern for string validation
-	MinLength    *int        `json:"min_length,omitempty"`   // For string parameters
-	MaxLength    *int        `json:"max_length,omitempty"`   // For string parameters
+	Name        string      `json:"name"`
+	Type        string      `json:"type"` // string, number, boolean, date, array
+	Description string      `json:"description"`
+	Required    bool        `json:"required"`
+	Default     interface{} `json:"default,omitempty"`
+	Options     []string    `json:"options,omitempty"`    // For enum-type parameters
+	MinValue    *float64    `json:"min_value,omitempty"`  // For numeric parameters
+	MaxValue    *float64    `json:"max_value,omitempty"`  // For numeric parameters
+	Pattern     string      `json:"pattern,omitempty"`    // Regex pattern for string validation
+	MinLength   *int        `json:"min_length,omitempty"` // For string parameters
+	MaxLength   *int        `json:"max_length,omitempty"` // For string parameters
 }
 
 // CustomReport represents a generated custom report
@@ -174,15 +174,15 @@ type CustomReport struct {
 	UserParams  map[string]interface{} `json:"user_params,omitempty"`
 
 	// Report data
-	Data        interface{}   `json:"data"`
-	Summary     ReportSummary `json:"summary"`
-	Charts      []ChartData   `json:"charts,omitempty"`
+	Data    interface{}   `json:"data"`
+	Summary ReportSummary `json:"summary"`
+	Charts  []ChartData   `json:"charts,omitempty"`
 
 	// Generation metadata
-	GeneratedAt   time.Time      `json:"generated_at"`
-	GenerationMS  int64          `json:"generation_ms"`
-	DataPoints    int            `json:"data_points"`
-	Format        ExportFormat   `json:"format"`
+	GeneratedAt  time.Time    `json:"generated_at"`
+	GenerationMS int64        `json:"generation_ms"`
+	DataPoints   int          `json:"data_points"`
+	Format       ExportFormat `json:"format"`
 
 	// Streaming support for large datasets
 	IsStreamed  bool   `json:"is_streamed"`
@@ -207,19 +207,19 @@ type CustomReportTemplate struct {
 	SharedWith []TemplateShare `json:"shared_with,omitempty"`
 
 	// Template metadata
-	Tags        []string `json:"tags,omitempty"`
-	Category    string   `json:"category,omitempty"`
-	Version     string   `json:"version,omitempty"`
-	UsageCount  int      `json:"usage_count"`
-	LastUsed    *time.Time `json:"last_used,omitempty"`
+	Tags       []string   `json:"tags,omitempty"`
+	Category   string     `json:"category,omitempty"`
+	Version    string     `json:"version,omitempty"`
+	UsageCount int        `json:"usage_count"`
+	LastUsed   *time.Time `json:"last_used,omitempty"`
 }
 
 // TemplateShare defines sharing permissions for a template
 type TemplateShare struct {
-	TenantID    string    `json:"tenant_id"`
-	SharedBy    string    `json:"shared_by"`
-	SharedAt    time.Time `json:"shared_at"`
-	Permissions []string  `json:"permissions"` // read, execute, modify
+	TenantID    string     `json:"tenant_id"`
+	SharedBy    string     `json:"shared_by"`
+	SharedAt    time.Time  `json:"shared_at"`
+	Permissions []string   `json:"permissions"` // read, execute, modify
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 }
 
@@ -272,8 +272,8 @@ type ScheduleReportRequest struct {
 
 // ReportSchedule defines when and how often to generate a report
 type ReportSchedule struct {
-	Type       ScheduleType `json:"type"`        // cron, interval
-	Expression string       `json:"expression"`  // cron expression or interval duration
+	Type       ScheduleType `json:"type"`       // cron, interval
+	Expression string       `json:"expression"` // cron expression or interval duration
 	Timezone   string       `json:"timezone"`
 	StartDate  *time.Time   `json:"start_date,omitempty"`
 	EndDate    *time.Time   `json:"end_date,omitempty"`
@@ -291,7 +291,7 @@ const (
 type DeliveryMode string
 
 const (
-	DeliveryModeEmail  DeliveryMode = "email"
+	DeliveryModeEmail   DeliveryMode = "email"
 	DeliveryModeWebhook DeliveryMode = "webhook"
 	DeliveryModeStorage DeliveryMode = "storage"
 )
@@ -322,29 +322,29 @@ type ScheduledReport struct {
 	IsActive  bool      `json:"is_active"`
 
 	// Execution tracking
-	LastRun       *time.Time `json:"last_run,omitempty"`
-	NextRun       *time.Time `json:"next_run,omitempty"`
-	RunCount      int        `json:"run_count"`
-	FailureCount  int        `json:"failure_count"`
-	LastError     string     `json:"last_error,omitempty"`
+	LastRun      *time.Time `json:"last_run,omitempty"`
+	NextRun      *time.Time `json:"next_run,omitempty"`
+	RunCount     int        `json:"run_count"`
+	FailureCount int        `json:"failure_count"`
+	LastError    string     `json:"last_error,omitempty"`
 }
 
 // Report builder configuration
 
 // CustomReportConfig contains configuration for custom report generation
 type CustomReportConfig struct {
-	MaxDataSources   int           `json:"max_data_sources"`
-	MaxParameters    int           `json:"max_parameters"`
-	MaxFilters       int           `json:"max_filters"`
-	MaxAggregations  int           `json:"max_aggregations"`
-	DefaultPageSize  int           `json:"default_page_size"`
-	MaxPageSize      int           `json:"max_page_size"`
-	DefaultTimeout   time.Duration `json:"default_timeout"`
-	MaxTimeout       time.Duration `json:"max_timeout"`
-	EnableStreaming  bool          `json:"enable_streaming"`
-	StreamThreshold  int           `json:"stream_threshold"` // Records threshold for streaming
-	CacheEnabled     bool          `json:"cache_enabled"`
-	CacheTTL         time.Duration `json:"cache_ttl"`
+	MaxDataSources  int           `json:"max_data_sources"`
+	MaxParameters   int           `json:"max_parameters"`
+	MaxFilters      int           `json:"max_filters"`
+	MaxAggregations int           `json:"max_aggregations"`
+	DefaultPageSize int           `json:"default_page_size"`
+	MaxPageSize     int           `json:"max_page_size"`
+	DefaultTimeout  time.Duration `json:"default_timeout"`
+	MaxTimeout      time.Duration `json:"max_timeout"`
+	EnableStreaming bool          `json:"enable_streaming"`
+	StreamThreshold int           `json:"stream_threshold"` // Records threshold for streaming
+	CacheEnabled    bool          `json:"cache_enabled"`
+	CacheTTL        time.Duration `json:"cache_ttl"`
 }
 
 // DefaultCustomReportConfig returns default configuration
@@ -382,7 +382,7 @@ type ParameterValidationRule struct {
 
 // ParameterValidationResult represents the result of parameter validation
 type ParameterValidationResult struct {
-	Valid   bool     `json:"valid"`
-	Errors  []string `json:"errors,omitempty"`
-	Value   interface{} `json:"value,omitempty"`
+	Valid  bool        `json:"valid"`
+	Errors []string    `json:"errors,omitempty"`
+	Value  interface{} `json:"value,omitempty"`
 }

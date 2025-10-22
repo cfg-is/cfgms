@@ -28,9 +28,9 @@ const (
 // TenantHierarchy represents the hierarchical relationship between tenants
 type TenantHierarchy struct {
 	TenantID string   `json:"tenant_id"`
-	Path     []string `json:"path"`      // Full path from root to this tenant
-	Depth    int      `json:"depth"`     // Depth in hierarchy (0 = root)
-	Children []string `json:"children"`  // Direct child tenant IDs
+	Path     []string `json:"path"`     // Full path from root to this tenant
+	Depth    int      `json:"depth"`    // Depth in hierarchy (0 = root)
+	Children []string `json:"children"` // Direct child tenant IDs
 }
 
 // TenantRequest represents a request to create or update a tenant
@@ -55,23 +55,23 @@ type M365TenantMetadata struct {
 	PrimaryDomain string `json:"primary_domain"`
 
 	// Authentication and access
-	TokenExpiresAt      time.Time `json:"token_expires_at"`
-	ConsentedAt         time.Time `json:"consented_at"`
-	AdminEmail          string    `json:"admin_email,omitempty"`
-	GDAPRelationshipID  string    `json:"gdap_relationship_id,omitempty"`
+	TokenExpiresAt     time.Time `json:"token_expires_at"`
+	ConsentedAt        time.Time `json:"consented_at"`
+	AdminEmail         string    `json:"admin_email,omitempty"`
+	GDAPRelationshipID string    `json:"gdap_relationship_id,omitempty"`
 
 	// Health monitoring
-	LastHealthCheck     time.Time    `json:"last_health_check"`
-	HealthStatus        HealthStatus `json:"health_status"`
-	HealthDetails       string       `json:"health_details,omitempty"`
+	LastHealthCheck time.Time    `json:"last_health_check"`
+	HealthStatus    HealthStatus `json:"health_status"`
+	HealthDetails   string       `json:"health_details,omitempty"`
 
 	// Organization info from Microsoft Graph
-	CountryCode         string `json:"country_code,omitempty"`
-	TenantType          string `json:"tenant_type,omitempty"` // e.g., "AAD"
+	CountryCode string `json:"country_code,omitempty"`
+	TenantType  string `json:"tenant_type,omitempty"` // e.g., "AAD"
 
 	// Discovery metadata
-	DiscoveredAt        time.Time `json:"discovered_at"`
-	DiscoveryMethod     string    `json:"discovery_method"` // "admin_consent", "gdap", "manual"
+	DiscoveredAt    time.Time `json:"discovered_at"`
+	DiscoveryMethod string    `json:"discovery_method"` // "admin_consent", "gdap", "manual"
 }
 
 // HealthStatus represents the health status of an M365 tenant

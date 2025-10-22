@@ -3,9 +3,10 @@ package validation
 import (
 	"testing"
 
-	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/features/steward/config"
 )
 
 func TestValidator_ValidateConfiguration(t *testing.T) {
@@ -175,7 +176,7 @@ func TestValidator_ValidateConfiguration(t *testing.T) {
 			result := validator.ValidateConfiguration(tt.config)
 
 			assert.Equal(t, tt.expectValid, result.Valid, "Validation result should match expected validity")
-			
+
 			if tt.expectCritical {
 				assert.True(t, result.HasCriticalErrors(), "Should have critical errors")
 			} else {
@@ -201,7 +202,7 @@ func TestValidator_ValidateConfiguration(t *testing.T) {
 func TestBusinessRules(t *testing.T) {
 	t.Run("ResourceNameUniquenessRule", func(t *testing.T) {
 		rule := &ResourceNameUniquenessRule{}
-		
+
 		config := config.StewardConfig{
 			Resources: []config.ResourceConfig{
 				{Name: "unique-1", Module: "directory"},
@@ -220,7 +221,7 @@ func TestBusinessRules(t *testing.T) {
 
 	t.Run("ModuleCompatibilityRule", func(t *testing.T) {
 		rule := &ModuleCompatibilityRule{}
-		
+
 		config := config.StewardConfig{
 			Resources: []config.ResourceConfig{
 				{
@@ -243,7 +244,7 @@ func TestBusinessRules(t *testing.T) {
 
 	t.Run("SecurityBestPracticesRule", func(t *testing.T) {
 		rule := &SecurityBestPracticesRule{}
-		
+
 		config := config.StewardConfig{
 			Resources: []config.ResourceConfig{
 				{
@@ -251,7 +252,7 @@ func TestBusinessRules(t *testing.T) {
 					Module: "file",
 					Config: map[string]interface{}{
 						"path":        "/tmp/unsafe.txt",
-						"permissions": 0646, // World writable (octal)
+						"permissions": 0646,                 // World writable (octal)
 						"content":     "password=secret123", // Sensitive content
 					},
 				},
@@ -260,7 +261,7 @@ func TestBusinessRules(t *testing.T) {
 
 		issues := rule.Validate(config)
 		require.Len(t, issues, 2) // Both permission and content warnings
-		
+
 		// Check for world-writable warning
 		foundPermissionWarning := false
 		foundContentWarning := false
@@ -274,7 +275,7 @@ func TestBusinessRules(t *testing.T) {
 				assert.Equal(t, ValidationLevelWarning, issue.Level)
 			}
 		}
-		
+
 		assert.True(t, foundPermissionWarning, "Should detect world-writable permissions")
 		assert.True(t, foundContentWarning, "Should detect potential sensitive data")
 	})
@@ -312,7 +313,7 @@ func TestValidationResult(t *testing.T) {
 
 func TestValidationCaching(t *testing.T) {
 	validator := NewValidator()
-	
+
 	config := config.StewardConfig{
 		Steward: config.StewardSettings{
 			ID:   "cache-test",
@@ -331,7 +332,7 @@ func TestValidationCaching(t *testing.T) {
 
 	// First validation
 	result1 := validator.ValidateConfiguration(config)
-	
+
 	// Second validation (should use cache)
 	result2 := validator.ValidateConfiguration(config)
 	metrics2 := validator.GetMetrics()
@@ -347,7 +348,7 @@ func TestValidationCaching(t *testing.T) {
 
 func TestValidationMetrics(t *testing.T) {
 	validator := NewValidator()
-	
+
 	config := config.StewardConfig{
 		Steward: config.StewardSettings{
 			ID:   "metrics-test",

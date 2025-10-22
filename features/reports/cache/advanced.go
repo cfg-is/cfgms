@@ -17,7 +17,6 @@ type AdvancedCache struct {
 	logger logging.Logger
 }
 
-
 // NewAdvancedCache creates a new advanced cache wrapper
 func NewAdvancedCache(baseCache interfaces.ReportCache, config interfaces.AdvancedCacheConfig, logger logging.Logger) *AdvancedCache {
 	return &AdvancedCache{
@@ -112,16 +111,16 @@ func (ac *AdvancedCache) GetCacheMetrics(ctx context.Context) map[string]interfa
 	}
 
 	baseMetrics := map[string]interface{}{
-		"enabled":                ac.config.EnableAdvancedCaching,
-		"compliance_report_ttl":  ac.config.ComplianceReportTTL.String(),
-		"security_report_ttl":    ac.config.SecurityReportTTL.String(),
-		"executive_report_ttl":   ac.config.ExecutiveReportTTL.String(),
+		"enabled":                 ac.config.EnableAdvancedCaching,
+		"compliance_report_ttl":   ac.config.ComplianceReportTTL.String(),
+		"security_report_ttl":     ac.config.SecurityReportTTL.String(),
+		"executive_report_ttl":    ac.config.ExecutiveReportTTL.String(),
 		"multi_tenant_report_ttl": ac.config.MultiTenantReportTTL.String(),
-		"max_cache_size":         ac.config.MaxCacheSize,
+		"max_cache_size":          ac.config.MaxCacheSize,
 	}
 
 	// Try to get additional metrics from underlying cache if supported
-	if metricProvider, ok := ac.cache.(interface{
+	if metricProvider, ok := ac.cache.(interface {
 		GetMetrics(context.Context) map[string]interface{}
 	}); ok {
 		underlyingMetrics := metricProvider.GetMetrics(ctx)

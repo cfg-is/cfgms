@@ -16,14 +16,14 @@ type CommandInterceptor struct {
 	securityValidator *SecurityValidator
 	securityContext   *SessionSecurityContext
 	auditChannel      chan<- *CommandAuditEvent
-	
+
 	// Command buffering for incomplete commands
 	commandBuffer strings.Builder
 	bufferMutex   sync.Mutex
-	
+
 	// State tracking
-	commandStart  time.Time
-	
+	commandStart time.Time
+
 	// Callbacks
 	onCommandBlocked func(command string, reason string) error
 	onCommandAudit   func(event *CommandAuditEvent) error
@@ -51,10 +51,10 @@ func (ci *CommandInterceptor) SetCallbacks(
 func (ci *CommandInterceptor) InterceptInput(ctx context.Context, input []byte) ([]byte, error) {
 	ci.bufferMutex.Lock()
 	defer ci.bufferMutex.Unlock()
-	
+
 	// Process each byte of input
 	var processedOutput bytes.Buffer
-	
+
 	for _, b := range input {
 		switch b {
 		case '\n', '\r':
@@ -66,20 +66,20 @@ func (ci *CommandInterceptor) InterceptInput(ctx context.Context, input []byte) 
 					if err != nil {
 						return nil, fmt.Errorf("command validation failed: %w", err)
 					}
-					
+
 					if !allowed {
 						// Command blocked - don't forward it
 						ci.commandBuffer.Reset()
 						continue
 					}
-					
+
 					// Forward the (potentially modified) command
 					processedOutput.WriteString(filteredCommand)
 				}
 				ci.commandBuffer.Reset()
 			}
 			processedOutput.WriteByte(b)
-			
+
 		case 0x7F, 0x08: // DEL or backspace
 			// Handle command editing
 			if ci.commandBuffer.Len() > 0 {
@@ -90,19 +90,19 @@ func (ci *CommandInterceptor) InterceptInput(ctx context.Context, input []byte) 
 				}
 			}
 			processedOutput.WriteByte(b)
-			
+
 		case 0x03: // Ctrl+C
 			// Command cancelled
 			ci.commandBuffer.Reset()
 			processedOutput.WriteByte(b)
-			
+
 		default:
 			// Regular character - add to buffer
 			ci.commandBuffer.WriteByte(b)
 			processedOutput.WriteByte(b)
 		}
 	}
-	
+
 	return processedOutput.Bytes(), nil
 }
 
@@ -117,13 +117,13 @@ func (ci *CommandInterceptor) InterceptOutput(ctx context.Context, output []byte
 func (ci *CommandInterceptor) validateAndFilterCommand(ctx context.Context, command string) (bool, string, error) {
 	// Record command start time
 	ci.commandStart = time.Now()
-	
+
 	// Validate command against security rules
 	result, err := ci.securityValidator.ValidateCommand(ctx, ci.securityContext, command)
 	if err != nil {
 		return false, "", fmt.Errorf("command validation error: %w", err)
 	}
-	
+
 	// Handle blocked commands
 	if !result.Allowed {
 		if ci.onCommandBlocked != nil {
@@ -131,7 +131,7 @@ func (ci *CommandInterceptor) validateAndFilterCommand(ctx context.Context, comm
 				return false, "", fmt.Errorf("command block callback failed: %w", err)
 			}
 		}
-		
+
 		// Send audit event
 		if result.AuditEvent != nil && ci.auditChannel != nil {
 			select {
@@ -140,10 +140,10 @@ func (ci *CommandInterceptor) validateAndFilterCommand(ctx context.Context, comm
 				// Channel full, log warning but don't block
 			}
 		}
-		
+
 		return false, "", nil
 	}
-	
+
 	// Handle audit-required commands
 	if result.Action == FilterActionAudit {
 		if ci.onCommandAudit != nil {
@@ -151,7 +151,7 @@ func (ci *CommandInterceptor) validateAndFilterCommand(ctx context.Context, comm
 				return false, "", fmt.Errorf("command audit callback failed: %w", err)
 			}
 		}
-		
+
 		// Send audit event
 		if result.AuditEvent != nil && ci.auditChannel != nil {
 			select {
@@ -161,24 +161,24 @@ func (ci *CommandInterceptor) validateAndFilterCommand(ctx context.Context, comm
 			}
 		}
 	}
-	
+
 	return true, command, nil
 }
 
 // CommandFilter provides a high-level interface for command filtering
 type CommandFilter struct {
-	interceptor       *CommandInterceptor
-	inputReader       io.Reader
-	outputWriter      io.Writer
-	shellInput        io.Writer
-	shellOutput       io.Reader
-	
-	ctx               context.Context
-	cancel            context.CancelFunc
-	
+	interceptor  *CommandInterceptor
+	inputReader  io.Reader
+	outputWriter io.Writer
+	shellInput   io.Writer
+	shellOutput  io.Reader
+
+	ctx    context.Context
+	cancel context.CancelFunc
+
 	// Control channels
-	done              chan struct{}
-	errors            chan error
+	done   chan struct{}
+	errors chan error
 }
 
 // NewCommandFilter creates a new command filter that sits between user and shell
@@ -192,9 +192,9 @@ func NewCommandFilter(
 ) *CommandFilter {
 	ctx, cancel := context.WithCancel(context.Background())
 	auditChan := make(chan *CommandAuditEvent, 100) // Buffered channel for audit events
-	
+
 	interceptor := NewCommandInterceptor(validator, securityContext, auditChan)
-	
+
 	return &CommandFilter{
 		interceptor:  interceptor,
 		inputReader:  userInput,
@@ -215,20 +215,20 @@ func (cf *CommandFilter) Start() error {
 		cf.handleBlockedCommand,
 		cf.handleAuditCommand,
 	)
-	
+
 	// Start input filtering goroutine (user -> shell)
 	go cf.filterInput()
-	
+
 	// Start output filtering goroutine (shell -> user)
 	go cf.filterOutput()
-	
+
 	return nil
 }
 
 // Stop stops the command filter
 func (cf *CommandFilter) Stop() error {
 	cf.cancel()
-	
+
 	// Wait for goroutines to finish with timeout
 	select {
 	case <-cf.done:
@@ -246,10 +246,10 @@ func (cf *CommandFilter) GetErrors() <-chan error {
 // filterInput filters input from user to shell
 func (cf *CommandFilter) filterInput() {
 	defer close(cf.done)
-	
+
 	buffer := make([]byte, 4096)
 	reader := bufio.NewReader(cf.inputReader)
-	
+
 	for {
 		select {
 		case <-cf.ctx.Done():
@@ -266,7 +266,7 @@ func (cf *CommandFilter) filterInput() {
 				}
 				return
 			}
-			
+
 			// Apply security filtering
 			filtered, err := cf.interceptor.InterceptInput(cf.ctx, buffer[:n])
 			if err != nil {
@@ -276,7 +276,7 @@ func (cf *CommandFilter) filterInput() {
 				}
 				continue
 			}
-			
+
 			// Write filtered input to shell
 			if len(filtered) > 0 {
 				if _, err := cf.shellInput.Write(filtered); err != nil {
@@ -295,7 +295,7 @@ func (cf *CommandFilter) filterInput() {
 func (cf *CommandFilter) filterOutput() {
 	buffer := make([]byte, 4096)
 	reader := bufio.NewReader(cf.shellOutput)
-	
+
 	for {
 		select {
 		case <-cf.ctx.Done():
@@ -312,7 +312,7 @@ func (cf *CommandFilter) filterOutput() {
 				}
 				return
 			}
-			
+
 			// Apply output filtering (currently pass-through)
 			filtered, err := cf.interceptor.InterceptOutput(cf.ctx, buffer[:n])
 			if err != nil {
@@ -322,7 +322,7 @@ func (cf *CommandFilter) filterOutput() {
 				}
 				continue
 			}
-			
+
 			// Write filtered output to user
 			if _, err := cf.outputWriter.Write(filtered); err != nil {
 				select {
@@ -342,13 +342,13 @@ func (cf *CommandFilter) handleBlockedCommand(command string, reason string) err
 	if _, err := cf.outputWriter.Write([]byte(warningMsg)); err != nil {
 		return fmt.Errorf("failed to write security warning: %w", err)
 	}
-	
+
 	// Send new prompt
 	promptMsg := "$ "
 	if _, err := cf.outputWriter.Write([]byte(promptMsg)); err != nil {
 		return fmt.Errorf("failed to write prompt: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -363,11 +363,11 @@ func (cf *CommandFilter) handleAuditCommand(event *CommandAuditEvent) error {
 type StreamInterceptor struct {
 	validator       *SecurityValidator
 	securityContext *SessionSecurityContext
-	
+
 	// Stream processing
 	inputProcessor  *CommandProcessor
 	outputProcessor *OutputProcessor
-	
+
 	// Security events
 	auditChannel chan<- *CommandAuditEvent
 	alertChannel chan<- *SecurityAlert

@@ -90,7 +90,7 @@ func NewCollector(
 		storageCollector:     storageCollector,
 		applicationCollector: applicationCollector,
 		systemCollector:      systemCollector,
-		retentionPeriod:      7 * 24 * time.Hour, // 7 days
+		retentionPeriod:      7 * 24 * time.Hour,                   // 7 days
 		metricsHistory:       make([]*ControllerMetrics, 0, 20160), // 7 days * 24 hours * 60 minutes * 2 (30-second intervals)
 		startTime:            time.Now(),
 	}

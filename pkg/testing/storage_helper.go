@@ -8,7 +8,7 @@ import (
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-	
+
 	// Import storage providers for testing
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 )
@@ -18,35 +18,35 @@ import (
 func SetupTestStorage(t *testing.T) *interfaces.StorageManager {
 	config := map[string]interface{}{
 		"repository_path": t.TempDir(),
-		"branch":         "main", 
-		"auto_init":      true,
+		"branch":          "main",
+		"auto_init":       true,
 	}
-	
+
 	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
 	if err != nil {
 		t.Fatalf("Failed to create test storage: %v", err)
 	}
-	
+
 	return storageManager
 }
 
 // SetupTestRBACManager creates an RBAC manager with git storage for testing
 func SetupTestRBACManager(t *testing.T) *rbac.Manager {
 	storageManager := SetupTestStorage(t)
-	
+
 	manager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
-	
+
 	// Initialize with default permissions and roles
 	ctx := context.Background()
-	
+
 	if err := manager.Initialize(ctx); err != nil {
 		t.Fatalf("Failed to initialize test RBAC manager: %v", err)
 	}
-	
+
 	return manager
 }
 

@@ -7,12 +7,14 @@
 package controller
 
 import (
-	common "github.com/cfgis/cfgms/api/proto/common"
-	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
-	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
 	sync "sync"
 	unsafe "unsafe"
+
+	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
+	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
+
+	common "github.com/cfgis/cfgms/api/proto/common"
 )
 
 const (

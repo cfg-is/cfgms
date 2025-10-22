@@ -5,10 +5,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/logging"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+
+	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
 // MockStorageProvider implements StorageProvider for testing
@@ -546,7 +547,7 @@ func TestTriggerManagerImpl_UpdateTrigger(t *testing.T) {
 				Type:         TriggerTypeSchedule,
 				WorkflowName: "invalid-workflow",
 				Schedule: &ScheduleConfig{
-					CronExpression: "",  // Empty cron expression will fail validation
+					CronExpression: "", // Empty cron expression will fail validation
 					Enabled:        true,
 				},
 			},
@@ -843,11 +844,11 @@ func TestTriggerManagerImpl_ListTriggers(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name         string
-		filter       *TriggerFilter
-		expectedLen  int
-		expectedIDs  []string
-		expectError  bool
+		name        string
+		filter      *TriggerFilter
+		expectedLen int
+		expectedIDs []string
+		expectError bool
 	}{
 		{
 			name:        "list all triggers",

@@ -33,17 +33,16 @@ func NewBackend(backendType BackendType, config *Config, logger logging.Logger) 
 	}
 }
 
-
 // FileBackend implements a file-based storage backend for DNA data
 //
 // This backend stores DNA records as files on the local filesystem,
 // organized by shards and content hash for efficient access.
 type FileBackend struct {
-	logger      logging.Logger
-	config      *Config
-	basePath    string
-	stats       *StorageStats
-	statsMutex  sync.RWMutex
+	logger     logging.Logger
+	config     *Config
+	basePath   string
+	stats      *StorageStats
+	statsMutex sync.RWMutex
 }
 
 // NewFileBackend creates a new file-based storage backend
@@ -118,7 +117,7 @@ func (b *FileBackend) StoreRecord(ctx context.Context, record *DNARecord, compre
 	if len(hashDisplay) > 16 {
 		hashDisplay = hashDisplay[:16]
 	}
-	
+
 	b.logger.Debug("DNA record stored to file",
 		"device_id", record.DeviceID,
 		"content_hash", hashDisplay,
@@ -154,7 +153,7 @@ func (b *FileBackend) StoreReference(ctx context.Context, record *DNARecord) err
 	if len(hashDisplay) > 16 {
 		hashDisplay = hashDisplay[:16]
 	}
-	
+
 	b.logger.Debug("DNA reference stored to file",
 		"device_id", record.DeviceID,
 		"content_hash", hashDisplay,
@@ -251,7 +250,7 @@ func (b *FileBackend) calculateFileSystemStats() {
 	// Walk the filesystem to calculate statistics
 	// This is a simplified implementation
 	var totalSize int64
-	
+
 	if err := filepath.Walk(b.basePath, func(path string, info os.FileInfo, err error) error {
 		if err == nil && !info.IsDir() {
 			totalSize += info.Size()
@@ -268,7 +267,6 @@ func (b *FileBackend) calculateFileSystemStats() {
 	b.stats.CompressedSize = totalSize // Assume all data is compressed
 }
 
-
 // DatabaseBackend implements a PostgreSQL database storage backend for DNA data
 //
 // This backend provides production-ready persistent storage with:
@@ -279,13 +277,13 @@ func (b *FileBackend) calculateFileSystemStats() {
 // - Horizontal scaling support with database replication
 // - Migration support from SQLite → PostgreSQL
 type DatabaseBackend struct {
-	logger       logging.Logger
-	config       *Config
-	db           *sql.DB
-	connString   string
-	stats        *StorageStats
-	statsMutex   sync.RWMutex
-	
+	logger     logging.Logger
+	config     *Config
+	db         *sql.DB
+	connString string
+	stats      *StorageStats
+	statsMutex sync.RWMutex
+
 	// Prepared statements for performance
 	stmts struct {
 		insertRecord    *sql.Stmt
@@ -312,14 +310,14 @@ func NewDatabaseBackend(config *Config, logger logging.Logger) (*DatabaseBackend
 	}
 
 	// Configure connection pool for PostgreSQL
-	db.SetMaxOpenConns(10)    // Allow multiple concurrent connections
-	db.SetMaxIdleConns(5)     // Keep some connections idle
+	db.SetMaxOpenConns(10)                 // Allow multiple concurrent connections
+	db.SetMaxIdleConns(5)                  // Keep some connections idle
 	db.SetConnMaxLifetime(5 * time.Minute) // Rotate connections
 
 	// Test connection
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	
+
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close() // Ignore close error in error path
 		return nil, fmt.Errorf("failed to connect to PostgreSQL database: %w", err)
@@ -520,7 +518,7 @@ func (b *DatabaseBackend) Optimize() error {
 			0
 		)
 	`).Scan(&indexBloat)
-	
+
 	if err == nil && indexBloat > 100 { // Arbitrary threshold
 		b.logger.Info("Consider reindexing PostgreSQL tables", "index_count", indexBloat)
 	}
@@ -741,7 +739,7 @@ func (b *DatabaseBackend) calculateStats() error {
 
 	b.stats.TotalSize = b.stats.CompressedSize
 	b.stats.ActiveDevices = b.stats.TotalDevices
-	
+
 	if b.stats.TotalDevices > 0 {
 		b.stats.AverageRecordsPerDevice = float64(b.stats.TotalBlocks) / float64(b.stats.TotalDevices)
 	}
@@ -776,4 +774,3 @@ func (b *DatabaseBackend) updateStats(record *DNARecord) {
 	}
 	b.stats.ShardSizes[record.ShardID] = b.stats.TotalSize
 }
-

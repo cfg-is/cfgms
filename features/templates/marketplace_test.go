@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
 	"github.com/cfgis/cfgms/features/templates"
 )
 
@@ -367,17 +368,17 @@ func TestTemplateManifest(t *testing.T) {
 
 	// Create test manifest
 	manifest := &templates.TemplateManifest{
-		ID:               "test-template",
-		Name:             "Test Template",
-		Version:          "1.0.0",
-		Description:      "A test template",
-		Author:           "Test Author",
-		License:          "MIT",
-		Category:         "security",
-		Keywords:         []string{"test", "security"},
-		RequiredModules:  []string{"file"},
-		TemplateFile:     "template.yaml",
-		ReadmeFile:       "README.md",
+		ID:              "test-template",
+		Name:            "Test Template",
+		Version:         "1.0.0",
+		Description:     "A test template",
+		Author:          "Test Author",
+		License:         "MIT",
+		Category:        "security",
+		Keywords:        []string{"test", "security"},
+		RequiredModules: []string{"file"},
+		TemplateFile:    "template.yaml",
+		ReadmeFile:      "README.md",
 	}
 
 	// Test: Save manifest

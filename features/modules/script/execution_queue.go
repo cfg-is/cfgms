@@ -19,20 +19,20 @@ type ExecutionQueue struct {
 
 // QueuedExecution represents a script execution waiting for device to come online
 type QueuedExecution struct {
-	ExecutionID      string                 `json:"execution_id"`
-	ScriptID         string                 `json:"script_id"`
-	ScriptVersion    string                 `json:"script_version"`
-	ScriptContent    string                 `json:"script_content"`
-	Shell            ShellType              `json:"shell"`
-	Parameters       map[string]string      `json:"parameters"`
-	Environment      map[string]string      `json:"environment"`
-	Timeout          time.Duration          `json:"timeout"`
-	QueuedAt         time.Time              `json:"queued_at"`
-	ExpiresAt        time.Time              `json:"expires_at"`
-	GenerateAPIKey   bool                   `json:"generate_api_key"`
-	APIKeyTTL        time.Duration          `json:"api_key_ttl"`
-	APIKeyPermissions []string              `json:"api_key_permissions"`
-	Metadata         map[string]interface{} `json:"metadata"`
+	ExecutionID       string                 `json:"execution_id"`
+	ScriptID          string                 `json:"script_id"`
+	ScriptVersion     string                 `json:"script_version"`
+	ScriptContent     string                 `json:"script_content"`
+	Shell             ShellType              `json:"shell"`
+	Parameters        map[string]string      `json:"parameters"`
+	Environment       map[string]string      `json:"environment"`
+	Timeout           time.Duration          `json:"timeout"`
+	QueuedAt          time.Time              `json:"queued_at"`
+	ExpiresAt         time.Time              `json:"expires_at"`
+	GenerateAPIKey    bool                   `json:"generate_api_key"`
+	APIKeyTTL         time.Duration          `json:"api_key_ttl"`
+	APIKeyPermissions []string               `json:"api_key_permissions"`
+	Metadata          map[string]interface{} `json:"metadata"`
 }
 
 // NewExecutionQueue creates a new execution queue

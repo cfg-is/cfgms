@@ -8,8 +8,9 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/cfgis/cfgms/features/modules"
 	"gopkg.in/yaml.v3"
+
+	"github.com/cfgis/cfgms/features/modules"
 )
 
 // createConfigFromYAML creates a FileConfig from YAML string

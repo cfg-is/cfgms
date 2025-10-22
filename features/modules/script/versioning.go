@@ -100,29 +100,29 @@ func (v *Version) IsCompatibleWith(required *Version) bool {
 
 // ScriptMetadata contains metadata about a versioned script
 type ScriptMetadata struct {
-	ID          string            `json:"id" yaml:"id"`                     // Unique script ID
-	Name        string            `json:"name" yaml:"name"`                 // Human-readable name
-	Description string            `json:"description" yaml:"description"`   // Script description
-	Version     *Version          `json:"version" yaml:"version"`           // Current version
-	Author      string            `json:"author" yaml:"author"`             // Script author
-	Tags        []string          `json:"tags,omitempty" yaml:"tags,omitempty"` // Classification tags
-	Category    string            `json:"category,omitempty" yaml:"category,omitempty"` // Script category
-	Platform    []string          `json:"platform" yaml:"platform"`         // Supported platforms (windows, linux, darwin)
-	Shell       ShellType         `json:"shell" yaml:"shell"`               // Required shell
+	ID          string            `json:"id" yaml:"id"`                                     // Unique script ID
+	Name        string            `json:"name" yaml:"name"`                                 // Human-readable name
+	Description string            `json:"description" yaml:"description"`                   // Script description
+	Version     *Version          `json:"version" yaml:"version"`                           // Current version
+	Author      string            `json:"author" yaml:"author"`                             // Script author
+	Tags        []string          `json:"tags,omitempty" yaml:"tags,omitempty"`             // Classification tags
+	Category    string            `json:"category,omitempty" yaml:"category,omitempty"`     // Script category
+	Platform    []string          `json:"platform" yaml:"platform"`                         // Supported platforms (windows, linux, darwin)
+	Shell       ShellType         `json:"shell" yaml:"shell"`                               // Required shell
 	Parameters  []ScriptParameter `json:"parameters,omitempty" yaml:"parameters,omitempty"` // Script parameters
-	CreatedAt   time.Time         `json:"created_at" yaml:"created_at"`     // Creation timestamp
-	UpdatedAt   time.Time         `json:"updated_at" yaml:"updated_at"`     // Last update timestamp
+	CreatedAt   time.Time         `json:"created_at" yaml:"created_at"`                     // Creation timestamp
+	UpdatedAt   time.Time         `json:"updated_at" yaml:"updated_at"`                     // Last update timestamp
 }
 
 // ScriptParameter defines a parameter that can be passed to the script
 type ScriptParameter struct {
-	Name         string      `json:"name" yaml:"name"`                                     // Parameter name
-	Description  string      `json:"description,omitempty" yaml:"description,omitempty"`   // Parameter description
-	Type         string      `json:"type" yaml:"type"`                                     // Data type (string, int, bool, etc.)
-	Required     bool        `json:"required" yaml:"required"`                             // Whether parameter is required
-	Default      interface{} `json:"default,omitempty" yaml:"default,omitempty"`           // Default value
-	AllowedValues []string   `json:"allowed_values,omitempty" yaml:"allowed_values,omitempty"` // Enum values
-	DNAPath      string      `json:"dna_path,omitempty" yaml:"dna_path,omitempty"`         // Auto-inject from DNA (e.g., "OS.Version")
+	Name          string      `json:"name" yaml:"name"`                                         // Parameter name
+	Description   string      `json:"description,omitempty" yaml:"description,omitempty"`       // Parameter description
+	Type          string      `json:"type" yaml:"type"`                                         // Data type (string, int, bool, etc.)
+	Required      bool        `json:"required" yaml:"required"`                                 // Whether parameter is required
+	Default       interface{} `json:"default,omitempty" yaml:"default,omitempty"`               // Default value
+	AllowedValues []string    `json:"allowed_values,omitempty" yaml:"allowed_values,omitempty"` // Enum values
+	DNAPath       string      `json:"dna_path,omitempty" yaml:"dna_path,omitempty"`             // Auto-inject from DNA (e.g., "OS.Version")
 }
 
 // VersionedScript represents a complete versioned script

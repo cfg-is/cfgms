@@ -13,12 +13,12 @@ import (
 // Validator provides comprehensive input validation for security-sensitive data
 type Validator struct {
 	// Configuration
-	maxStringLength     int
-	maxSliceLength      int
-	allowedCharsets     map[string]*regexp.Regexp
-	prohibitedPatterns  []*regexp.Regexp
+	maxStringLength    int
+	maxSliceLength     int
+	allowedCharsets    map[string]*regexp.Regexp
+	prohibitedPatterns []*regexp.Regexp
 	// M-INPUT-2: Regex matcher with timeout protection (security audit finding)
-	regexMatcher        *RegexMatcher
+	regexMatcher *RegexMatcher
 }
 
 // ValidationError represents a validation failure with context
@@ -61,8 +61,8 @@ func (vr *ValidationResult) AddErrorf(field, value, rule, format string, args ..
 // NewValidator creates a new validator with secure defaults
 func NewValidator() *Validator {
 	v := &Validator{
-		maxStringLength: 4096,  // 4KB max string length
-		maxSliceLength:  1000,  // Max 1000 items in arrays/slices
+		maxStringLength: 4096, // 4KB max string length
+		maxSliceLength:  1000, // Max 1000 items in arrays/slices
 		allowedCharsets: make(map[string]*regexp.Regexp),
 		prohibitedPatterns: []*regexp.Regexp{
 			// Common injection patterns
@@ -73,7 +73,7 @@ func NewValidator() *Validator {
 			regexp.MustCompile(`(?i)(union\s+select|drop\s+table|delete\s+from|insert\s+into|update\s+set)`),
 			regexp.MustCompile(`(?i)(\'\s*;\s*drop|\'\s*or\s*1\s*=\s*1|--\s*$)`),
 			// Command injection patterns
-			regexp.MustCompile(`(?i)(&&|\|\||;|`+"`"+`|\$\(|\${)`),
+			regexp.MustCompile(`(?i)(&&|\|\||;|` + "`" + `|\$\(|\${)`),
 			// Path traversal patterns
 			regexp.MustCompile(`\.\.[/\\]|[/\\]\.\.[/\\]|[/\\]\.\.$`),
 			// LDAP injection patterns

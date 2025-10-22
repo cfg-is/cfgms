@@ -36,33 +36,33 @@ type tenantEncryptionKey struct {
 
 // EncryptedSecret represents an encrypted secret with metadata
 type EncryptedSecret struct {
-	ID          string            `json:"id"`
-	TenantID    string            `json:"tenant_id"`
-	Name        string            `json:"name"`
-	SecretType  SecretType        `json:"secret_type"`
-	EncryptedData string          `json:"encrypted_data"`
-	KeyID       string            `json:"key_id"`
-	KeyVersion  int               `json:"key_version"`
-	Metadata    map[string]string `json:"metadata,omitempty"`
-	CreatedAt   time.Time         `json:"created_at"`
-	UpdatedAt   time.Time         `json:"updated_at"`
-	ExpiresAt   *time.Time        `json:"expires_at,omitempty"`
-	AccessCount int64             `json:"access_count"`
-	LastAccess  *time.Time        `json:"last_access,omitempty"`
+	ID            string            `json:"id"`
+	TenantID      string            `json:"tenant_id"`
+	Name          string            `json:"name"`
+	SecretType    SecretType        `json:"secret_type"`
+	EncryptedData string            `json:"encrypted_data"`
+	KeyID         string            `json:"key_id"`
+	KeyVersion    int               `json:"key_version"`
+	Metadata      map[string]string `json:"metadata,omitempty"`
+	CreatedAt     time.Time         `json:"created_at"`
+	UpdatedAt     time.Time         `json:"updated_at"`
+	ExpiresAt     *time.Time        `json:"expires_at,omitempty"`
+	AccessCount   int64             `json:"access_count"`
+	LastAccess    *time.Time        `json:"last_access,omitempty"`
 }
 
 // SecretType represents the type of secret being stored
 type SecretType string
 
 const (
-	SecretTypeAPIKey       SecretType = "api_key"
-	SecretTypePassword     SecretType = "password"
-	SecretTypeCertificate  SecretType = "certificate"
-	SecretTypePrivateKey   SecretType = "private_key"
-	SecretTypeToken        SecretType = "token"
+	SecretTypeAPIKey           SecretType = "api_key"
+	SecretTypePassword         SecretType = "password"
+	SecretTypeCertificate      SecretType = "certificate"
+	SecretTypePrivateKey       SecretType = "private_key"
+	SecretTypeToken            SecretType = "token"
 	SecretTypeConnectionString SecretType = "connection_string"
-	SecretTypeOAuth        SecretType = "oauth_credentials"
-	SecretTypeEncryptionKey SecretType = "encryption_key"
+	SecretTypeOAuth            SecretType = "oauth_credentials"
+	SecretTypeEncryptionKey    SecretType = "encryption_key"
 )
 
 // SecretRequest represents a request to store or retrieve a secret

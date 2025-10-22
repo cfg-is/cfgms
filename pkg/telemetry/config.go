@@ -22,7 +22,7 @@ import (
 //
 //	export CFGMS_TELEMETRY_OTLP_ENDPOINT="http://jaeger:14268/api/traces"
 //	export CFGMS_TELEMETRY_SAMPLE_RATE="0.1"
-//	
+//
 //	config := telemetry.ConfigFromEnvironment("cfgms-controller", "v0.2.0")
 func ConfigFromEnvironment(defaultServiceName, defaultVersion string) *Config {
 	config := &Config{

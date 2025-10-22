@@ -629,8 +629,8 @@ func BenchmarkModuleLifecycleManager_GetSystemHealth(b *testing.B) {
 		config := DefaultModuleConfig()
 
 		if _, err := manager.RegisterModule(metadata, module, config); err != nil {
-		b.Fatalf("RegisterModule() error = %v", err)
-	}
+			b.Fatalf("RegisterModule() error = %v", err)
+		}
 	}
 
 	b.ResetTimer()
@@ -655,8 +655,8 @@ func BenchmarkModuleLifecycleManager_ListModuleInstances(b *testing.B) {
 		config := DefaultModuleConfig()
 
 		if _, err := manager.RegisterModule(metadata, module, config); err != nil {
-		b.Fatalf("RegisterModule() error = %v", err)
-	}
+			b.Fatalf("RegisterModule() error = %v", err)
+		}
 	}
 
 	b.ResetTimer()

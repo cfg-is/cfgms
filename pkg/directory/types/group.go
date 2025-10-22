@@ -9,33 +9,33 @@ import (
 // This is the canonical representation used internally by CFGMS for all group operations.
 type DirectoryGroup struct {
 	// Core Identity
-	ID              string `json:"id" yaml:"id"`                                         // Unique identifier
-	Name            string `json:"name" yaml:"name"`                                     // Group name
-	DisplayName     string `json:"display_name" yaml:"display_name"`                   // Display name
-	Description     string `json:"description,omitempty" yaml:"description"`            // Group description
+	ID          string `json:"id" yaml:"id"`                             // Unique identifier
+	Name        string `json:"name" yaml:"name"`                         // Group name
+	DisplayName string `json:"display_name" yaml:"display_name"`         // Display name
+	Description string `json:"description,omitempty" yaml:"description"` // Group description
 
 	// Group Properties
-	GroupType   GroupType  `json:"group_type" yaml:"group_type"`         // Security vs Distribution
-	GroupScope  GroupScope `json:"group_scope,omitempty" yaml:"group_scope"` // Domain, Global, Universal
+	GroupType  GroupType  `json:"group_type" yaml:"group_type"`             // Security vs Distribution
+	GroupScope GroupScope `json:"group_scope,omitempty" yaml:"group_scope"` // Domain, Global, Universal
 
 	// Microsoft 365 specific properties
-	MailEnabled     bool   `json:"mail_enabled,omitempty" yaml:"mail_enabled"`           // Is mail-enabled (M365)
-	SecurityEnabled bool   `json:"security_enabled,omitempty" yaml:"security_enabled"`   // Is security-enabled (M365)
-	MailNickname    string `json:"mail_nickname,omitempty" yaml:"mail_nickname"`         // Mail alias (M365)
-	Mail            string `json:"mail,omitempty" yaml:"mail"`                           // Group email address
+	MailEnabled     bool   `json:"mail_enabled,omitempty" yaml:"mail_enabled"`         // Is mail-enabled (M365)
+	SecurityEnabled bool   `json:"security_enabled,omitempty" yaml:"security_enabled"` // Is security-enabled (M365)
+	MailNickname    string `json:"mail_nickname,omitempty" yaml:"mail_nickname"`       // Mail alias (M365)
+	Mail            string `json:"mail,omitempty" yaml:"mail"`                         // Group email address
 
 	// Directory Structure
 	DistinguishedName string   `json:"distinguished_name,omitempty" yaml:"distinguished_name"` // Full DN (for AD)
-	OU               string   `json:"ou,omitempty" yaml:"ou"`                                 // Parent OU
-	Members          []string `json:"members,omitempty" yaml:"members"`                       // Member user IDs
+	OU                string   `json:"ou,omitempty" yaml:"ou"`                                 // Parent OU
+	Members           []string `json:"members,omitempty" yaml:"members"`                       // Member user IDs
 
 	// Provider-Specific Attributes (extensibility)
 	ProviderAttributes map[string]interface{} `json:"provider_attributes,omitempty" yaml:"provider_attributes"`
 
 	// Metadata
-	Created  *time.Time `json:"created,omitempty" yaml:"created"`     // When created
-	Modified *time.Time `json:"modified,omitempty" yaml:"modified"`   // When last modified
-	Source   string     `json:"source" yaml:"source"`                 // Source provider name
+	Created  *time.Time `json:"created,omitempty" yaml:"created"`   // When created
+	Modified *time.Time `json:"modified,omitempty" yaml:"modified"` // When last modified
+	Source   string     `json:"source" yaml:"source"`               // Source provider name
 }
 
 // GroupType represents the type of group

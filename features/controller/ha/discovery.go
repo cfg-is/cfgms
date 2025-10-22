@@ -28,14 +28,14 @@ type Discovery interface {
 
 // staticDiscovery implements Discovery for static node configuration
 type staticDiscovery struct {
-	mu       sync.RWMutex
-	cfg      *DiscoveryConfig
-	logger   logging.Logger
-	manager  *Manager
-	nodes    map[string]*NodeInfo
-	ctx      context.Context
-	cancel   context.CancelFunc
-	started  bool
+	mu      sync.RWMutex
+	cfg     *DiscoveryConfig
+	logger  logging.Logger
+	manager *Manager
+	nodes   map[string]*NodeInfo
+	ctx     context.Context
+	cancel  context.CancelFunc
+	started bool
 }
 
 // NewDiscovery creates a new Discovery instance based on configuration
@@ -83,7 +83,7 @@ func (d *staticDiscovery) Start(ctx context.Context) error {
 	// Register local node - avoid deadlock by accessing nodeInfo directly
 	log.Printf("DISCOVERY_START: About to get local node info directly")
 	// Access nodeInfo directly to avoid GetLocalNode() deadlock during startup
-	nodeInfo := *d.manager.nodeInfo  // Create a copy
+	nodeInfo := *d.manager.nodeInfo // Create a copy
 	nodeInfo.LastSeen = time.Now()
 	log.Printf("DISCOVERY_START: Got local node info, adding to nodes map, node_id=%s", nodeInfo.ID)
 	d.nodes[nodeInfo.ID] = &nodeInfo
@@ -561,7 +561,7 @@ func (d *geographicDiscovery) estimateLatency(localNode, targetNode *NodeInfo) t
 		},
 		"us-central": {
 			"us-east": 50 * time.Millisecond,
-			"us-west":  60 * time.Millisecond,
+			"us-west": 60 * time.Millisecond,
 		},
 		"us-west": {
 			"us-east":    100 * time.Millisecond,

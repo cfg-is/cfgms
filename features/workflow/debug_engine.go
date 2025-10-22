@@ -503,7 +503,6 @@ func (de *DebugEngineImpl) checkBreakpoint(session *DebugSession, stepName strin
 	return nil, false
 }
 
-
 // Helper functions for ID generation
 func generateDebugSessionID() string {
 	return fmt.Sprintf("debug_session_%d", time.Now().UnixNano())

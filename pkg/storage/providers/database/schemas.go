@@ -33,11 +33,11 @@ func (s DatabaseSchemas) CreateClientTenantsTable(ctx context.Context, db *sql.D
 			updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
 		);
 	`
-	
+
 	if _, err := db.ExecContext(ctx, createTableQuery); err != nil {
 		return fmt.Errorf("failed to create client_tenants table: %w", err)
 	}
-	
+
 	// Create indexes for performance
 	indexes := []string{
 		"CREATE INDEX IF NOT EXISTS idx_client_tenants_tenant_id ON client_tenants(tenant_id);",
@@ -46,13 +46,13 @@ func (s DatabaseSchemas) CreateClientTenantsTable(ctx context.Context, db *sql.D
 		"CREATE INDEX IF NOT EXISTS idx_client_tenants_created_at ON client_tenants(created_at);",
 		"CREATE INDEX IF NOT EXISTS idx_client_tenants_domain_name ON client_tenants(domain_name);",
 	}
-	
+
 	for _, indexQuery := range indexes {
 		if _, err := db.ExecContext(ctx, indexQuery); err != nil {
 			return fmt.Errorf("failed to create index: %w", err)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -70,24 +70,24 @@ func (s DatabaseSchemas) CreateAdminConsentRequestsTable(ctx context.Context, db
 			metadata JSONB DEFAULT '{}'
 		);
 	`
-	
+
 	if _, err := db.ExecContext(ctx, createTableQuery); err != nil {
 		return fmt.Errorf("failed to create admin_consent_requests table: %w", err)
 	}
-	
+
 	// Create indexes for performance
 	indexes := []string{
 		"CREATE INDEX IF NOT EXISTS idx_admin_consent_requests_client_identifier ON admin_consent_requests(client_identifier);",
 		"CREATE INDEX IF NOT EXISTS idx_admin_consent_requests_expires_at ON admin_consent_requests(expires_at);",
 		"CREATE INDEX IF NOT EXISTS idx_admin_consent_requests_requested_by ON admin_consent_requests(requested_by);",
 	}
-	
+
 	for _, indexQuery := range indexes {
 		if _, err := db.ExecContext(ctx, indexQuery); err != nil {
 			return fmt.Errorf("failed to create index: %w", err)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -117,11 +117,11 @@ func (s DatabaseSchemas) CreateConfigsTable(ctx context.Context, db *sql.DB) err
 			UNIQUE(tenant_id, namespace, name, scope)
 		);
 	`
-	
+
 	if _, err := db.ExecContext(ctx, createTableQuery); err != nil {
 		return fmt.Errorf("failed to create configs table: %w", err)
 	}
-	
+
 	// Create indexes for performance and tenant isolation
 	indexes := []string{
 		"CREATE INDEX IF NOT EXISTS idx_configs_tenant_id ON configs(tenant_id);",
@@ -135,13 +135,13 @@ func (s DatabaseSchemas) CreateConfigsTable(ctx context.Context, db *sql.DB) err
 		"CREATE INDEX IF NOT EXISTS idx_configs_created_by ON configs(created_by);",
 		"CREATE INDEX IF NOT EXISTS idx_configs_updated_by ON configs(updated_by);",
 	}
-	
+
 	for _, indexQuery := range indexes {
 		if _, err := db.ExecContext(ctx, indexQuery); err != nil {
 			return fmt.Errorf("failed to create index: %w", err)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -168,11 +168,11 @@ func (s DatabaseSchemas) CreateConfigHistoryTable(ctx context.Context, db *sql.D
 			operation VARCHAR(50) NOT NULL DEFAULT 'update' -- 'create', 'update', 'delete'
 		);
 	`
-	
+
 	if _, err := db.ExecContext(ctx, createTableQuery); err != nil {
 		return fmt.Errorf("failed to create config_history table: %w", err)
 	}
-	
+
 	// Create indexes for historical queries
 	indexes := []string{
 		"CREATE INDEX IF NOT EXISTS idx_config_history_config_id ON config_history(config_id);",
@@ -182,13 +182,13 @@ func (s DatabaseSchemas) CreateConfigHistoryTable(ctx context.Context, db *sql.D
 		"CREATE INDEX IF NOT EXISTS idx_config_history_created_at ON config_history(created_at);",
 		"CREATE INDEX IF NOT EXISTS idx_config_history_operation ON config_history(operation);",
 	}
-	
+
 	for _, indexQuery := range indexes {
 		if _, err := db.ExecContext(ctx, indexQuery); err != nil {
 			return fmt.Errorf("failed to create index: %w", err)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -225,62 +225,62 @@ func (s DatabaseSchemas) CreateAuditEntriesTable(ctx context.Context, db *sql.DB
 			checksum VARCHAR(64) NOT NULL
 		);
 	`
-	
+
 	if _, err := db.ExecContext(ctx, createTableQuery); err != nil {
 		return fmt.Errorf("failed to create audit_entries table: %w", err)
 	}
-	
+
 	// Create indexes for efficient audit queries and tenant isolation
 	indexes := []string{
 		// Primary query patterns
 		"CREATE INDEX IF NOT EXISTS idx_audit_entries_tenant_id ON audit_entries(tenant_id);",
 		"CREATE INDEX IF NOT EXISTS idx_audit_entries_timestamp ON audit_entries(timestamp);",
 		"CREATE INDEX IF NOT EXISTS idx_audit_entries_tenant_timestamp ON audit_entries(tenant_id, timestamp);",
-		
+
 		// User and session tracking
 		"CREATE INDEX IF NOT EXISTS idx_audit_entries_user_id ON audit_entries(user_id);",
 		"CREATE INDEX IF NOT EXISTS idx_audit_entries_session_id ON audit_entries(session_id);",
 		"CREATE INDEX IF NOT EXISTS idx_audit_entries_user_type ON audit_entries(user_type);",
-		
+
 		// Event and action analysis
 		"CREATE INDEX IF NOT EXISTS idx_audit_entries_event_type ON audit_entries(event_type);",
 		"CREATE INDEX IF NOT EXISTS idx_audit_entries_action ON audit_entries(action);",
 		"CREATE INDEX IF NOT EXISTS idx_audit_entries_event_action ON audit_entries(event_type, action);",
-		
+
 		// Resource tracking
 		"CREATE INDEX IF NOT EXISTS idx_audit_entries_resource_type ON audit_entries(resource_type);",
 		"CREATE INDEX IF NOT EXISTS idx_audit_entries_resource_id ON audit_entries(resource_id);",
 		"CREATE INDEX IF NOT EXISTS idx_audit_entries_resource_type_id ON audit_entries(resource_type, resource_id);",
-		
+
 		// Security monitoring
 		"CREATE INDEX IF NOT EXISTS idx_audit_entries_result ON audit_entries(result);",
 		"CREATE INDEX IF NOT EXISTS idx_audit_entries_severity ON audit_entries(severity);",
 		"CREATE INDEX IF NOT EXISTS idx_audit_entries_failed_actions ON audit_entries(result) WHERE result IN ('failure', 'error', 'denied');",
 		"CREATE INDEX IF NOT EXISTS idx_audit_entries_security_events ON audit_entries(event_type, severity) WHERE event_type = 'security_event';",
-		
+
 		// Network and request tracking
 		"CREATE INDEX IF NOT EXISTS idx_audit_entries_ip_address ON audit_entries(ip_address);",
 		"CREATE INDEX IF NOT EXISTS idx_audit_entries_request_id ON audit_entries(request_id);",
-		
+
 		// Full-text search and tags
-		"CREATE INDEX IF NOT EXISTS idx_audit_entries_tags ON audit_entries USING GIN(tags);", // GIN index for array search
+		"CREATE INDEX IF NOT EXISTS idx_audit_entries_tags ON audit_entries USING GIN(tags);",       // GIN index for array search
 		"CREATE INDEX IF NOT EXISTS idx_audit_entries_details ON audit_entries USING GIN(details);", // GIN index for JSONB search
-		
+
 		// Compliance and reporting
 		"CREATE INDEX IF NOT EXISTS idx_audit_entries_source ON audit_entries(source);",
 		"CREATE INDEX IF NOT EXISTS idx_audit_entries_tenant_event_timestamp ON audit_entries(tenant_id, event_type, timestamp);",
-		
+
 		// Time-based partitioning support (for future sharding) - temporarily disabled
 		// Complex date functions in indexes require careful IMMUTABLE handling
 		// "CREATE INDEX IF NOT EXISTS idx_audit_entries_daily_partition ON audit_entries(tenant_id, date_trunc('day', timestamp));",
 	}
-	
+
 	for _, indexQuery := range indexes {
 		if _, err := db.ExecContext(ctx, indexQuery); err != nil {
 			return fmt.Errorf("failed to create index: %w", err)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -301,11 +301,11 @@ func (s DatabaseSchemas) CreateAuditStatsView(ctx context.Context, db *sql.DB) e
 		FROM audit_entries
 		GROUP BY tenant_id, event_type, result, severity, DATE(timestamp);
 	`
-	
+
 	if _, err := db.ExecContext(ctx, createViewQuery); err != nil {
 		return fmt.Errorf("failed to create audit_stats materialized view: %w", err)
 	}
-	
+
 	// Create indexes on the materialized view
 	viewIndexes := []string{
 		"CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_stats_unique ON audit_stats(tenant_id, event_type, result, severity, audit_date);",
@@ -313,24 +313,24 @@ func (s DatabaseSchemas) CreateAuditStatsView(ctx context.Context, db *sql.DB) e
 		"CREATE INDEX IF NOT EXISTS idx_audit_stats_audit_date ON audit_stats(audit_date);",
 		"CREATE INDEX IF NOT EXISTS idx_audit_stats_event_type ON audit_stats(event_type);",
 	}
-	
+
 	for _, indexQuery := range viewIndexes {
 		if _, err := db.ExecContext(ctx, indexQuery); err != nil {
 			return fmt.Errorf("failed to create materialized view index: %w", err)
 		}
 	}
-	
+
 	return nil
 }
 
 // RefreshAuditStatsView refreshes the materialized view (should be called periodically)
 func (s DatabaseSchemas) RefreshAuditStatsView(ctx context.Context, db *sql.DB) error {
 	refreshQuery := "REFRESH MATERIALIZED VIEW CONCURRENTLY audit_stats;"
-	
+
 	if _, err := db.ExecContext(ctx, refreshQuery); err != nil {
 		return fmt.Errorf("failed to refresh audit_stats materialized view: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -347,17 +347,17 @@ func (s DatabaseSchemas) SetupHealthMonitoring(ctx context.Context, db *sql.DB) 
 			response_time_ms INTEGER DEFAULT 0
 		);
 	`
-	
+
 	if _, err := db.ExecContext(ctx, createHealthTableQuery); err != nil {
 		return fmt.Errorf("failed to create storage_health table: %w", err)
 	}
-	
+
 	// Create index for health monitoring
 	healthIndexQuery := "CREATE INDEX IF NOT EXISTS idx_storage_health_provider ON storage_health(provider_name, last_check);"
 	if _, err := db.ExecContext(ctx, healthIndexQuery); err != nil {
 		return fmt.Errorf("failed to create health monitoring index: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -367,22 +367,22 @@ func (s DatabaseSchemas) CreateRBACTables(ctx context.Context, db *sql.DB) error
 	if err := s.CreateRBACPermissionsTable(ctx, db); err != nil {
 		return err
 	}
-	
+
 	// Create roles table
 	if err := s.CreateRBACRolesTable(ctx, db); err != nil {
 		return err
 	}
-	
+
 	// Create subjects table
 	if err := s.CreateRBACSubjectsTable(ctx, db); err != nil {
 		return err
 	}
-	
+
 	// Create role assignments table
 	if err := s.CreateRBACRoleAssignmentsTable(ctx, db); err != nil {
 		return err
 	}
-	
+
 	return nil
 }
 
@@ -399,24 +399,24 @@ func (s DatabaseSchemas) CreateRBACPermissionsTable(ctx context.Context, db *sql
 			updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
 		);
 	`
-	
+
 	if _, err := db.ExecContext(ctx, createTableQuery); err != nil {
 		return fmt.Errorf("failed to create rbac_permissions table: %w", err)
 	}
-	
+
 	// Create indexes for performance
 	indexes := []string{
 		"CREATE INDEX IF NOT EXISTS idx_rbac_permissions_resource_type ON rbac_permissions(resource_type);",
 		"CREATE INDEX IF NOT EXISTS idx_rbac_permissions_name ON rbac_permissions(name);",
 		"CREATE INDEX IF NOT EXISTS idx_rbac_permissions_actions ON rbac_permissions USING GIN(actions);",
 	}
-	
+
 	for _, indexQuery := range indexes {
 		if _, err := db.ExecContext(ctx, indexQuery); err != nil {
 			return fmt.Errorf("failed to create rbac_permissions index: %w", err)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -437,11 +437,11 @@ func (s DatabaseSchemas) CreateRBACRolesTable(ctx context.Context, db *sql.DB) e
 			FOREIGN KEY (parent_role_id) REFERENCES rbac_roles(id) ON DELETE SET NULL
 		);
 	`
-	
+
 	if _, err := db.ExecContext(ctx, createTableQuery); err != nil {
 		return fmt.Errorf("failed to create rbac_roles table: %w", err)
 	}
-	
+
 	// Create indexes for performance and tenant isolation
 	indexes := []string{
 		"CREATE INDEX IF NOT EXISTS idx_rbac_roles_tenant_id ON rbac_roles(tenant_id);",
@@ -450,13 +450,13 @@ func (s DatabaseSchemas) CreateRBACRolesTable(ctx context.Context, db *sql.DB) e
 		"CREATE INDEX IF NOT EXISTS idx_rbac_roles_parent_role_id ON rbac_roles(parent_role_id);",
 		"CREATE INDEX IF NOT EXISTS idx_rbac_roles_permission_ids ON rbac_roles USING GIN(permission_ids);",
 	}
-	
+
 	for _, indexQuery := range indexes {
 		if _, err := db.ExecContext(ctx, indexQuery); err != nil {
 			return fmt.Errorf("failed to create rbac_roles index: %w", err)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -475,11 +475,11 @@ func (s DatabaseSchemas) CreateRBACSubjectsTable(ctx context.Context, db *sql.DB
 			updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
 		);
 	`
-	
+
 	if _, err := db.ExecContext(ctx, createTableQuery); err != nil {
 		return fmt.Errorf("failed to create rbac_subjects table: %w", err)
 	}
-	
+
 	// Create indexes for performance and tenant isolation
 	indexes := []string{
 		"CREATE INDEX IF NOT EXISTS idx_rbac_subjects_tenant_id ON rbac_subjects(tenant_id);",
@@ -489,13 +489,13 @@ func (s DatabaseSchemas) CreateRBACSubjectsTable(ctx context.Context, db *sql.DB
 		"CREATE INDEX IF NOT EXISTS idx_rbac_subjects_role_ids ON rbac_subjects USING GIN(role_ids);",
 		"CREATE INDEX IF NOT EXISTS idx_rbac_subjects_attributes ON rbac_subjects USING GIN(attributes);",
 	}
-	
+
 	for _, indexQuery := range indexes {
 		if _, err := db.ExecContext(ctx, indexQuery); err != nil {
 			return fmt.Errorf("failed to create rbac_subjects index: %w", err)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -516,11 +516,11 @@ func (s DatabaseSchemas) CreateRBACRoleAssignmentsTable(ctx context.Context, db 
 			UNIQUE(subject_id, role_id, tenant_id)
 		);
 	`
-	
+
 	if _, err := db.ExecContext(ctx, createTableQuery); err != nil {
 		return fmt.Errorf("failed to create rbac_role_assignments table: %w", err)
 	}
-	
+
 	// Create indexes for performance and tenant isolation
 	indexes := []string{
 		"CREATE INDEX IF NOT EXISTS idx_rbac_assignments_subject_id ON rbac_role_assignments(subject_id);",
@@ -532,13 +532,13 @@ func (s DatabaseSchemas) CreateRBACRoleAssignmentsTable(ctx context.Context, db 
 		// "CREATE INDEX IF NOT EXISTS idx_rbac_assignments_active ON rbac_role_assignments(subject_id, tenant_id) WHERE expires_at IS NULL OR expires_at > NOW();",
 		"CREATE INDEX IF NOT EXISTS idx_rbac_assignments_expires_null ON rbac_role_assignments(subject_id, tenant_id) WHERE expires_at IS NULL;",
 	}
-	
+
 	for _, indexQuery := range indexes {
 		if _, err := db.ExecContext(ctx, indexQuery); err != nil {
 			return fmt.Errorf("failed to create rbac_role_assignments index: %w", err)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -548,35 +548,35 @@ func (s DatabaseSchemas) CreateAllTables(ctx context.Context, db *sql.DB) error 
 	if err := s.CreateClientTenantsTable(ctx, db); err != nil {
 		return err
 	}
-	
+
 	if err := s.CreateAdminConsentRequestsTable(ctx, db); err != nil {
 		return err
 	}
-	
+
 	if err := s.CreateConfigsTable(ctx, db); err != nil {
 		return err
 	}
-	
+
 	if err := s.CreateConfigHistoryTable(ctx, db); err != nil {
 		return err
 	}
-	
+
 	if err := s.CreateAuditEntriesTable(ctx, db); err != nil {
 		return err
 	}
-	
+
 	if err := s.CreateAuditStatsView(ctx, db); err != nil {
 		return err
 	}
-	
+
 	if err := s.SetupHealthMonitoring(ctx, db); err != nil {
 		return err
 	}
-	
+
 	if err := s.CreateRBACTables(ctx, db); err != nil {
 		return err
 	}
-	
+
 	return nil
 }
 
@@ -596,12 +596,12 @@ func (s DatabaseSchemas) DropAllTables(ctx context.Context, db *sql.DB) error {
 		"DROP TABLE IF EXISTS rbac_roles;", // Has self-reference foreign key
 		"DROP TABLE IF EXISTS rbac_permissions;",
 	}
-	
+
 	for _, query := range dropQueries {
 		if _, err := db.ExecContext(ctx, query); err != nil {
 			return fmt.Errorf("failed to drop table: %w", err)
 		}
 	}
-	
+
 	return nil
 }

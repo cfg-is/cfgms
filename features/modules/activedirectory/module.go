@@ -2,17 +2,18 @@ package activedirectory
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os/exec"
-	"encoding/json"
 	"strings"
 	"sync"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/pkg/directory/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging"
-	"gopkg.in/yaml.v3"
 )
 
 // ADModuleConfig represents the configuration for the system-context AD module
@@ -71,7 +72,7 @@ func (c *ADModuleConfig) FromYAML(data []byte) error {
 
 // ADSystemStatus represents the current status of the system-context AD module
 type ADSystemStatus struct {
-	SystemContext       bool      `json:"system_context"`
+	SystemContext      bool      `json:"system_context"`
 	Hostname           string    `json:"hostname"`
 	Domain             string    `json:"domain"`
 	DomainController   string    `json:"domain_controller"`
@@ -88,18 +89,18 @@ type ADSystemStatus struct {
 // AsMap implements the ConfigState interface
 func (s *ADSystemStatus) AsMap() map[string]interface{} {
 	return map[string]interface{}{
-		"system_context":        s.SystemContext,
-		"hostname":              s.Hostname,
-		"domain":                s.Domain,
-		"domain_controller":     s.DomainController,
-		"forest_root":           s.ForestRoot,
-		"health_status":         s.HealthStatus,
-		"error":                 s.Error,
-		"request_count":         s.RequestCount,
-		"error_count":           s.ErrorCount,
-		"last_health_check":     s.LastHealthCheck,
-		"dna_collection_count":  s.DNACollectionCount,
-		"last_dna_collection":   s.LastDNACollection,
+		"system_context":       s.SystemContext,
+		"hostname":             s.Hostname,
+		"domain":               s.Domain,
+		"domain_controller":    s.DomainController,
+		"forest_root":          s.ForestRoot,
+		"health_status":        s.HealthStatus,
+		"error":                s.Error,
+		"request_count":        s.RequestCount,
+		"error_count":          s.ErrorCount,
+		"last_health_check":    s.LastHealthCheck,
+		"dna_collection_count": s.DNACollectionCount,
+		"last_dna_collection":  s.LastDNACollection,
 	}
 }
 
@@ -125,18 +126,18 @@ func (s *ADSystemStatus) Validate() error {
 
 // ADQueryResult represents the result of an AD query operation
 type ADQueryResult struct {
-	QueryType    string                      `json:"query_type"`
-	ObjectID     string                      `json:"object_id,omitempty"`
-	ExecutedAt   time.Time                   `json:"executed_at"`
-	ResponseTime time.Duration               `json:"response_time"`
-	Success      bool                        `json:"success"`
-	Error        string                      `json:"error,omitempty"`
-	TotalCount   int                         `json:"total_count,omitempty"`
-	User         *interfaces.DirectoryUser   `json:"user,omitempty"`
-	Users        []interfaces.DirectoryUser  `json:"users,omitempty"`
-	Group        *interfaces.DirectoryGroup  `json:"group,omitempty"`
-	Groups       []interfaces.DirectoryGroup `json:"groups,omitempty"`
-	OU           *interfaces.OrganizationalUnit `json:"ou,omitempty"`
+	QueryType    string                          `json:"query_type"`
+	ObjectID     string                          `json:"object_id,omitempty"`
+	ExecutedAt   time.Time                       `json:"executed_at"`
+	ResponseTime time.Duration                   `json:"response_time"`
+	Success      bool                            `json:"success"`
+	Error        string                          `json:"error,omitempty"`
+	TotalCount   int                             `json:"total_count,omitempty"`
+	User         *interfaces.DirectoryUser       `json:"user,omitempty"`
+	Users        []interfaces.DirectoryUser      `json:"users,omitempty"`
+	Group        *interfaces.DirectoryGroup      `json:"group,omitempty"`
+	Groups       []interfaces.DirectoryGroup     `json:"groups,omitempty"`
+	OU           *interfaces.OrganizationalUnit  `json:"ou,omitempty"`
 	OUs          []interfaces.OrganizationalUnit `json:"ous,omitempty"`
 }
 
@@ -151,7 +152,7 @@ func (r *ADQueryResult) AsMap() map[string]interface{} {
 		"error":         r.Error,
 		"total_count":   r.TotalCount,
 	}
-	
+
 	if r.User != nil {
 		result["user"] = r.User
 	}
@@ -170,7 +171,7 @@ func (r *ADQueryResult) AsMap() map[string]interface{} {
 	if len(r.OUs) > 0 {
 		result["ous"] = r.OUs
 	}
-	
+
 	return result
 }
 
@@ -246,17 +247,17 @@ type DomainInfo struct {
 // using Windows system context and native AD APIs
 type activeDirectoryModule struct {
 	logger logging.Logger
-	
+
 	// Configuration management
-	config   *ADModuleConfig
+	config    *ADModuleConfig
 	configMux sync.RWMutex
-	
+
 	// Statistics tracking
 	stats struct {
 		sync.RWMutex
-		requestCount int64
-		errorCount   int64
-		lastRequest  time.Time
+		requestCount       int64
+		errorCount         int64
+		lastRequest        time.Time
 		dnaCollectionCount int64
 		lastDNACollection  time.Time
 	}
@@ -267,7 +268,7 @@ func New(logger logging.Logger) modules.Module {
 	if logger == nil {
 		logger = logging.NewNoopLogger()
 	}
-	
+
 	return &activeDirectoryModule{
 		logger: logger,
 	}
@@ -276,15 +277,15 @@ func New(logger logging.Logger) modules.Module {
 // Get retrieves the current state of Active Directory objects using system context
 func (m *activeDirectoryModule) Get(ctx context.Context, resourceID string) (modules.ConfigState, error) {
 	m.logger.Debug("Getting local AD object", "resource_id", resourceID)
-	
+
 	// Parse resourceID to determine operation type
 	parts := strings.Split(resourceID, ":")
 	if len(parts) < 1 {
 		return nil, fmt.Errorf("invalid resource ID format: %s", resourceID)
 	}
-	
+
 	operation := parts[0]
-	
+
 	switch operation {
 	case "status":
 		return m.getSystemStatus(ctx)
@@ -311,11 +312,11 @@ func (m *activeDirectoryModule) Get(ctx context.Context, resourceID string) (mod
 // Set configures the system-context Active Directory module
 func (m *activeDirectoryModule) Set(ctx context.Context, resourceID string, config modules.ConfigState) error {
 	m.logger.Debug("Setting local AD module configuration", "resource_id", resourceID)
-	
+
 	// Convert ConfigState to ADModuleConfig
 	configMap := config.AsMap()
 	adConfig := &ADModuleConfig{}
-	
+
 	// Extract configuration fields (minimal for system context)
 	if opType, ok := configMap["operation_type"].(string); ok {
 		adConfig.OperationType = opType
@@ -335,7 +336,7 @@ func (m *activeDirectoryModule) Set(ctx context.Context, resourceID string, conf
 	if enableDNA, ok := configMap["enable_dna_collection"].(bool); ok {
 		adConfig.EnableDNACollection = enableDNA
 	}
-	
+
 	// Set defaults
 	if adConfig.PageSize == 0 {
 		adConfig.PageSize = 100
@@ -346,26 +347,26 @@ func (m *activeDirectoryModule) Set(ctx context.Context, resourceID string, conf
 	if adConfig.OperationType == "" {
 		adConfig.OperationType = "read"
 	}
-	
+
 	// Validate configuration
 	if err := adConfig.Validate(); err != nil {
 		return fmt.Errorf("invalid AD configuration: %w", err)
 	}
-	
+
 	// Store configuration
 	m.configMux.Lock()
 	m.config = adConfig
 	m.configMux.Unlock()
-	
+
 	// Verify system context AD access
 	if err := m.verifySystemAccess(ctx); err != nil {
 		return fmt.Errorf("failed to verify system AD access: %w", err)
 	}
-	
+
 	m.logger.Info("Local AD module configured successfully using system context",
 		"operation_type", adConfig.OperationType,
 		"dna_collection", adConfig.EnableDNACollection)
-	
+
 	return nil
 }
 
@@ -375,23 +376,23 @@ func (m *activeDirectoryModule) Test(ctx context.Context, resourceID string, con
 	m.configMux.RLock()
 	currentConfig := m.config
 	m.configMux.RUnlock()
-	
+
 	if currentConfig == nil {
 		return false, fmt.Errorf("module not configured")
 	}
-	
+
 	// Test system AD access
 	if err := m.verifySystemAccess(ctx); err != nil {
 		return false, fmt.Errorf("system AD access test failed: %w", err)
 	}
-	
+
 	// Test basic AD query capability
 	_, err := m.queryADObjectSystem(ctx, "user", "Administrator")
 	if err != nil {
 		m.logger.Warn("AD query test failed", "error", err)
 		return false, nil
 	}
-	
+
 	return true, nil
 }
 
@@ -399,9 +400,9 @@ func (m *activeDirectoryModule) Test(ctx context.Context, resourceID string, con
 func (m *activeDirectoryModule) getSystemStatus(ctx context.Context) (modules.ConfigState, error) {
 	status := &ADSystemStatus{
 		SystemContext: true,
-		Hostname: m.getHostname(),
+		Hostname:      m.getHostname(),
 	}
-	
+
 	// Get domain information using system context
 	domainInfo, err := m.getDomainInfo(ctx)
 	if err != nil {
@@ -413,7 +414,7 @@ func (m *activeDirectoryModule) getSystemStatus(ctx context.Context) (modules.Co
 		status.ForestRoot = domainInfo.ForestRoot
 		status.HealthStatus = "healthy"
 	}
-	
+
 	m.stats.RLock()
 	status.RequestCount = m.stats.requestCount
 	status.ErrorCount = m.stats.errorCount
@@ -421,7 +422,7 @@ func (m *activeDirectoryModule) getSystemStatus(ctx context.Context) (modules.Co
 	status.DNACollectionCount = m.stats.dnaCollectionCount
 	status.LastDNACollection = m.stats.lastDNACollection
 	m.stats.RUnlock()
-	
+
 	return status, nil
 }
 
@@ -429,13 +430,13 @@ func (m *activeDirectoryModule) getSystemStatus(ctx context.Context) (modules.Co
 func (m *activeDirectoryModule) queryADObjectSystem(ctx context.Context, objectType, objectID string) (modules.ConfigState, error) {
 	m.updateStats(true)
 	startTime := time.Now()
-	
+
 	result := &ADQueryResult{
-		QueryType:    objectType,
-		ObjectID:     objectID,
-		ExecutedAt:   startTime,
+		QueryType:  objectType,
+		ObjectID:   objectID,
+		ExecutedAt: startTime,
 	}
-	
+
 	// Use PowerShell with system context to query AD
 	var psScript string
 	switch objectType {
@@ -470,7 +471,7 @@ func (m *activeDirectoryModule) queryADObjectSystem(ctx context.Context, objectT
 				ConvertTo-Json $error
 			}
 		`, objectID)
-		
+
 	case "group":
 		psScript = fmt.Sprintf(`
 			try {
@@ -500,7 +501,7 @@ func (m *activeDirectoryModule) queryADObjectSystem(ctx context.Context, objectT
 				ConvertTo-Json $error
 			}
 		`, objectID)
-		
+
 	case "organizational_unit", "ou":
 		psScript = fmt.Sprintf(`
 			try {
@@ -528,7 +529,7 @@ func (m *activeDirectoryModule) queryADObjectSystem(ctx context.Context, objectT
 				ConvertTo-Json $error
 			}
 		`, objectID)
-		
+
 	case "computer":
 		psScript = fmt.Sprintf(`
 			try {
@@ -560,7 +561,7 @@ func (m *activeDirectoryModule) queryADObjectSystem(ctx context.Context, objectT
 				ConvertTo-Json $error
 			}
 		`, objectID)
-		
+
 	default:
 		result.Success = false
 		result.Error = fmt.Sprintf("unsupported object type: %s", objectType)
@@ -568,7 +569,7 @@ func (m *activeDirectoryModule) queryADObjectSystem(ctx context.Context, objectT
 		m.updateStats(false)
 		return result, nil
 	}
-	
+
 	// Execute PowerShell script with system context
 	output, err := m.executePowerShellWithSystemContext(ctx, psScript)
 	if err != nil {
@@ -578,7 +579,7 @@ func (m *activeDirectoryModule) queryADObjectSystem(ctx context.Context, objectT
 		m.updateStats(false)
 		return result, nil
 	}
-	
+
 	// Parse JSON response
 	var psResult map[string]interface{}
 	if err := json.Unmarshal([]byte(output), &psResult); err != nil {
@@ -588,7 +589,7 @@ func (m *activeDirectoryModule) queryADObjectSystem(ctx context.Context, objectT
 		m.updateStats(false)
 		return result, nil
 	}
-	
+
 	// Check if PowerShell operation succeeded
 	if success, ok := psResult["success"].(bool); !ok || !success {
 		result.Success = false
@@ -601,11 +602,11 @@ func (m *activeDirectoryModule) queryADObjectSystem(ctx context.Context, objectT
 		m.updateStats(false)
 		return result, nil
 	}
-	
+
 	// Convert PowerShell result to CFGMS directory objects
 	result.Success = true
 	result.ResponseTime = time.Since(startTime)
-	
+
 	switch objectType {
 	case "user", "computer":
 		if userObj, ok := psResult["user"].(map[string]interface{}); ok {
@@ -623,12 +624,12 @@ func (m *activeDirectoryModule) queryADObjectSystem(ctx context.Context, objectT
 			result.OU = ou
 		}
 	}
-	
-	m.logger.Debug("Local AD query completed successfully", 
+
+	m.logger.Debug("Local AD query completed successfully",
 		"object_type", objectType,
 		"object_id", objectID,
 		"response_time", result.ResponseTime)
-	
+
 	return result, nil
 }
 
@@ -636,21 +637,21 @@ func (m *activeDirectoryModule) queryADObjectSystem(ctx context.Context, objectT
 func (m *activeDirectoryModule) listADObjectsSystem(ctx context.Context, objectType string) (modules.ConfigState, error) {
 	m.updateStats(true)
 	startTime := time.Now()
-	
+
 	result := &ADQueryResult{
 		QueryType:  "list_" + objectType,
 		ExecutedAt: startTime,
 	}
-	
+
 	m.configMux.RLock()
 	config := m.config
 	m.configMux.RUnlock()
-	
+
 	pageSize := 100
 	if config != nil && config.PageSize > 0 {
 		pageSize = config.PageSize
 	}
-	
+
 	// Build PowerShell script for listing objects
 	var psScript string
 	switch objectType {
@@ -686,7 +687,7 @@ func (m *activeDirectoryModule) listADObjectsSystem(ctx context.Context, objectT
 				ConvertTo-Json $error
 			}
 		`, pageSize)
-		
+
 	case "group":
 		psScript = fmt.Sprintf(`
 			try {
@@ -719,7 +720,7 @@ func (m *activeDirectoryModule) listADObjectsSystem(ctx context.Context, objectT
 				ConvertTo-Json $error
 			}
 		`, pageSize)
-		
+
 	case "computer":
 		psScript = fmt.Sprintf(`
 			try {
@@ -752,7 +753,7 @@ func (m *activeDirectoryModule) listADObjectsSystem(ctx context.Context, objectT
 				ConvertTo-Json $error
 			}
 		`, pageSize)
-		
+
 	case "organizational_unit", "ou":
 		psScript = fmt.Sprintf(`
 			try {
@@ -784,7 +785,7 @@ func (m *activeDirectoryModule) listADObjectsSystem(ctx context.Context, objectT
 				ConvertTo-Json $error
 			}
 		`, pageSize)
-		
+
 	default:
 		result.Success = false
 		result.Error = fmt.Sprintf("unsupported object type: %s", objectType)
@@ -792,7 +793,7 @@ func (m *activeDirectoryModule) listADObjectsSystem(ctx context.Context, objectT
 		m.updateStats(false)
 		return result, nil
 	}
-	
+
 	// Execute PowerShell script
 	output, err := m.executePowerShellWithSystemContext(ctx, psScript)
 	if err != nil {
@@ -802,7 +803,7 @@ func (m *activeDirectoryModule) listADObjectsSystem(ctx context.Context, objectT
 		m.updateStats(false)
 		return result, nil
 	}
-	
+
 	// Parse JSON response
 	var psResult map[string]interface{}
 	if err := json.Unmarshal([]byte(output), &psResult); err != nil {
@@ -812,7 +813,7 @@ func (m *activeDirectoryModule) listADObjectsSystem(ctx context.Context, objectT
 		m.updateStats(false)
 		return result, nil
 	}
-	
+
 	// Check if operation succeeded
 	if success, ok := psResult["success"].(bool); !ok || !success {
 		result.Success = false
@@ -823,15 +824,15 @@ func (m *activeDirectoryModule) listADObjectsSystem(ctx context.Context, objectT
 		m.updateStats(false)
 		return result, nil
 	}
-	
+
 	// Extract results
 	result.Success = true
 	result.ResponseTime = time.Since(startTime)
-	
+
 	if totalCount, ok := psResult["total_count"].(float64); ok {
 		result.TotalCount = int(totalCount)
 	}
-	
+
 	// Convert PowerShell objects to CFGMS directory objects
 	switch objectType {
 	case "user", "computer":
@@ -865,12 +866,12 @@ func (m *activeDirectoryModule) listADObjectsSystem(ctx context.Context, objectT
 			}
 		}
 	}
-	
-	m.logger.Debug("Local AD list completed successfully", 
+
+	m.logger.Debug("Local AD list completed successfully",
 		"object_type", objectType,
 		"count", result.TotalCount,
 		"response_time", result.ResponseTime)
-	
+
 	return result, nil
 }
 
@@ -880,9 +881,9 @@ func (m *activeDirectoryModule) collectDirectoryDNA(ctx context.Context) (module
 	m.stats.dnaCollectionCount++
 	m.stats.lastDNACollection = time.Now()
 	m.stats.Unlock()
-	
+
 	startTime := time.Now()
-	
+
 	// PowerShell script to collect comprehensive AD DNA
 	psScript := `
 		try {
@@ -980,19 +981,19 @@ func (m *activeDirectoryModule) collectDirectoryDNA(ctx context.Context) (module
 			ConvertTo-Json $error
 		}
 	`
-	
+
 	// Execute DNA collection script
 	output, err := m.executePowerShellWithSystemContext(ctx, psScript)
 	if err != nil {
 		return nil, fmt.Errorf("DNA collection failed: %w", err)
 	}
-	
+
 	// Parse DNA result
 	var dnaResult map[string]interface{}
 	if err := json.Unmarshal([]byte(output), &dnaResult); err != nil {
 		return nil, fmt.Errorf("failed to parse DNA collection output: %w", err)
 	}
-	
+
 	if success, ok := dnaResult["success"].(bool); !ok || !success {
 		errorMsg := "unknown DNA collection error"
 		if err, ok := dnaResult["error"].(string); ok {
@@ -1000,21 +1001,21 @@ func (m *activeDirectoryModule) collectDirectoryDNA(ctx context.Context) (module
 		}
 		return nil, fmt.Errorf("DNA collection failed: %s", errorMsg)
 	}
-	
+
 	// Create DNA result structure
 	dna := &ADDirectoryDNA{
 		CollectionTime: time.Now(),
-		Success:       true,
-		Source:        "activedirectory_system",
-		DNA:          dnaResult,
+		Success:        true,
+		Source:         "activedirectory_system",
+		DNA:            dnaResult,
 	}
-	
+
 	m.logger.Info("AD DNA collection completed successfully",
 		"collection_time", time.Since(startTime),
 		"total_users", m.extractStatInt(dnaResult, "statistics", "total_users"),
 		"total_groups", m.extractStatInt(dnaResult, "statistics", "total_groups"),
 		"total_computers", m.extractStatInt(dnaResult, "statistics", "total_computers"))
-	
+
 	return dna, nil
 }
 
@@ -1039,17 +1040,17 @@ func (m *activeDirectoryModule) verifySystemAccess(ctx context.Context) error {
 			ConvertTo-Json $error
 		}
 	`
-	
+
 	output, err := m.executePowerShellWithSystemContext(ctx, psScript)
 	if err != nil {
 		return fmt.Errorf("system context verification failed: %w", err)
 	}
-	
+
 	var result map[string]interface{}
 	if err := json.Unmarshal([]byte(output), &result); err != nil {
 		return fmt.Errorf("failed to parse verification result: %w", err)
 	}
-	
+
 	if success, ok := result["success"].(bool); !ok || !success {
 		errorMsg := "unknown verification error"
 		if err, ok := result["error"].(string); ok {
@@ -1057,11 +1058,11 @@ func (m *activeDirectoryModule) verifySystemAccess(ctx context.Context) error {
 		}
 		return fmt.Errorf("system AD access verification failed: %s", errorMsg)
 	}
-	
+
 	m.logger.Debug("System AD access verified successfully",
 		"domain", result["domain"],
 		"access_level", result["access_level"])
-	
+
 	return nil
 }
 
@@ -1070,7 +1071,7 @@ func (m *activeDirectoryModule) executePowerShellWithSystemContext(ctx context.C
 	// Create PowerShell command that runs with current system context
 	// The steward should already be running as SYSTEM, so this inherits those permissions
 	cmd := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script)
-	
+
 	// Execute command
 	output, err := cmd.Output()
 	if err != nil {
@@ -1079,7 +1080,7 @@ func (m *activeDirectoryModule) executePowerShellWithSystemContext(ctx context.C
 		}
 		return "", fmt.Errorf("failed to execute PowerShell: %w", err)
 	}
-	
+
 	return string(output), nil
 }
 
@@ -1107,17 +1108,17 @@ func (m *activeDirectoryModule) getDomainInfo(ctx context.Context) (*DomainInfo,
 			ConvertTo-Json $error
 		}
 	`
-	
+
 	output, err := m.executePowerShellWithSystemContext(ctx, psScript)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get domain info: %w", err)
 	}
-	
+
 	var result map[string]interface{}
 	if err := json.Unmarshal([]byte(output), &result); err != nil {
 		return nil, fmt.Errorf("failed to parse domain info: %w", err)
 	}
-	
+
 	if success, ok := result["success"].(bool); !ok || !success {
 		errorMsg := "unknown error"
 		if err, ok := result["error"].(string); ok {
@@ -1125,7 +1126,7 @@ func (m *activeDirectoryModule) getDomainInfo(ctx context.Context) (*DomainInfo,
 		}
 		return nil, fmt.Errorf("domain info query failed: %s", errorMsg)
 	}
-	
+
 	domainInfo := &DomainInfo{}
 	if domain, ok := result["domain"].(string); ok {
 		domainInfo.Domain = domain
@@ -1139,7 +1140,7 @@ func (m *activeDirectoryModule) getDomainInfo(ctx context.Context) (*DomainInfo,
 	if netbios, ok := result["netbios_name"].(string); ok {
 		domainInfo.NetBIOSName = netbios
 	}
-	
+
 	return domainInfo, nil
 }
 
@@ -1157,7 +1158,7 @@ func (m *activeDirectoryModule) getHostname() string {
 func (m *activeDirectoryModule) updateStats(isRequest bool) {
 	m.stats.Lock()
 	defer m.stats.Unlock()
-	
+
 	if isRequest {
 		m.stats.requestCount++
 		m.stats.lastRequest = time.Now()
@@ -1188,18 +1189,18 @@ func (m *activeDirectoryModule) extractStatInt(data map[string]interface{}, keys
 // GetCapabilities returns the capabilities of this system-context module
 func (m *activeDirectoryModule) GetCapabilities() map[string]interface{} {
 	return map[string]interface{}{
-		"supports_read":       true,
-		"supports_write":      true,
-		"supports_monitor":    false, // Not yet implemented
-		"supports_bulk":       true,
-		"object_types":        []string{"user", "group", "organizational_unit", "computer", "gpo", "group_policy", "domain_trust", "trust"},
-		"auth_methods":        []string{"system_context"},
-		"platforms":           []string{"windows"},
-		"requires_domain":     false, // Auto-discovers local domain
-		"supports_discovery":  true,
-		"system_context":      true,
-		"credential_free":     true,
-		"advanced_features":   []string{"system_context_access", "dna_collection", "computer_objects", "group_policies", "domain_info"},
+		"supports_read":      true,
+		"supports_write":     true,
+		"supports_monitor":   false, // Not yet implemented
+		"supports_bulk":      true,
+		"object_types":       []string{"user", "group", "organizational_unit", "computer", "gpo", "group_policy", "domain_trust", "trust"},
+		"auth_methods":       []string{"system_context"},
+		"platforms":          []string{"windows"},
+		"requires_domain":    false, // Auto-discovers local domain
+		"supports_discovery": true,
+		"system_context":     true,
+		"credential_free":    true,
+		"advanced_features":  []string{"system_context_access", "dna_collection", "computer_objects", "group_policies", "domain_info"},
 	}
 }
 
@@ -1208,7 +1209,7 @@ func (m *activeDirectoryModule) convertPSObjectToDirectoryUser(psObj map[string]
 	user := &interfaces.DirectoryUser{
 		Source: "activedirectory_system",
 	}
-	
+
 	if id, ok := psObj["id"].(string); ok {
 		user.ID = id
 	}
@@ -1253,12 +1254,12 @@ func (m *activeDirectoryModule) convertPSObjectToDirectoryUser(psObj map[string]
 			user.LastLogon = &parsedTime
 		}
 	}
-	
+
 	// Store AD-specific attributes in ProviderAttributes
 	if user.ProviderAttributes == nil {
 		user.ProviderAttributes = make(map[string]interface{})
 	}
-	
+
 	if guid, ok := psObj["object_guid"].(string); ok {
 		user.ProviderAttributes["object_guid"] = guid
 	}
@@ -1279,7 +1280,7 @@ func (m *activeDirectoryModule) convertPSObjectToDirectoryUser(psObj map[string]
 	if spns, ok := psObj["service_principal_names"].([]interface{}); ok {
 		user.ProviderAttributes["service_principal_names"] = spns
 	}
-	
+
 	return user
 }
 
@@ -1288,7 +1289,7 @@ func (m *activeDirectoryModule) convertPSObjectToDirectoryGroup(psObj map[string
 	group := &interfaces.DirectoryGroup{
 		Source: "activedirectory_system",
 	}
-	
+
 	if id, ok := psObj["id"].(string); ok {
 		group.ID = id
 	}
@@ -1310,12 +1311,12 @@ func (m *activeDirectoryModule) convertPSObjectToDirectoryGroup(psObj map[string
 			}
 		}
 	}
-	
+
 	// Store AD-specific attributes in ProviderAttributes
 	if group.ProviderAttributes == nil {
 		group.ProviderAttributes = make(map[string]interface{})
 	}
-	
+
 	if sam, ok := psObj["sam_account_name"].(string); ok {
 		group.ProviderAttributes["sam_account_name"] = sam
 	}
@@ -1344,7 +1345,7 @@ func (m *activeDirectoryModule) convertPSObjectToDirectoryGroup(psObj map[string
 			group.GroupType = interfaces.GroupTypeDistribution
 		}
 	}
-	
+
 	return group
 }
 
@@ -1353,7 +1354,7 @@ func (m *activeDirectoryModule) convertPSObjectToOrganizationalUnit(psObj map[st
 	ou := &interfaces.OrganizationalUnit{
 		Source: "activedirectory_system",
 	}
-	
+
 	if id, ok := psObj["id"].(string); ok {
 		ou.ID = id
 	}
@@ -1369,18 +1370,18 @@ func (m *activeDirectoryModule) convertPSObjectToOrganizationalUnit(psObj map[st
 	if dn, ok := psObj["distinguished_name"].(string); ok {
 		ou.DistinguishedName = dn
 	}
-	
+
 	// Store AD-specific attributes in ProviderAttributes
 	if ou.ProviderAttributes == nil {
 		ou.ProviderAttributes = make(map[string]interface{})
 	}
-	
+
 	if guid, ok := psObj["object_guid"].(string); ok {
 		ou.ProviderAttributes["object_guid"] = guid
 	}
 	if managedBy, ok := psObj["managed_by"].(string); ok {
 		ou.ProviderAttributes["managed_by"] = managedBy
 	}
-	
+
 	return ou
 }

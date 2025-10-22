@@ -25,7 +25,7 @@ func NewInMemoryTemplateStore() TemplateStore {
 func (s *InMemoryTemplateStore) Get(ctx context.Context, id string) (*Template, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	
+
 	template, exists := s.templates[id]
 	if !exists {
 		return nil, &TemplateError{
@@ -33,7 +33,7 @@ func (s *InMemoryTemplateStore) Get(ctx context.Context, id string) (*Template, 
 			Message: fmt.Sprintf("Template '%s' not found", id),
 		}
 	}
-	
+
 	// Return a copy to prevent external modifications
 	return s.copyTemplate(template), nil
 }
@@ -42,20 +42,20 @@ func (s *InMemoryTemplateStore) Get(ctx context.Context, id string) (*Template, 
 func (s *InMemoryTemplateStore) Save(ctx context.Context, template *Template) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	
+
 	if template.ID == "" {
 		return &TemplateError{
 			Type:    "INVALID_TEMPLATE",
 			Message: "Template ID cannot be empty",
 		}
 	}
-	
+
 	// Update timestamp
 	template.UpdatedAt = time.Now()
-	
+
 	// Store a copy to prevent external modifications
 	s.templates[template.ID] = s.copyTemplate(template)
-	
+
 	return nil
 }
 
@@ -63,14 +63,14 @@ func (s *InMemoryTemplateStore) Save(ctx context.Context, template *Template) er
 func (s *InMemoryTemplateStore) Delete(ctx context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	
+
 	if _, exists := s.templates[id]; !exists {
 		return &TemplateError{
 			Type:    "TEMPLATE_NOT_FOUND",
 			Message: fmt.Sprintf("Template '%s' not found", id),
 		}
 	}
-	
+
 	delete(s.templates, id)
 	return nil
 }
@@ -79,25 +79,25 @@ func (s *InMemoryTemplateStore) Delete(ctx context.Context, id string) error {
 func (s *InMemoryTemplateStore) List(ctx context.Context, filter TemplateFilter) ([]*Template, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	
+
 	var results []*Template
-	
+
 	for _, template := range s.templates {
 		if s.matchesFilter(template, filter) {
 			results = append(results, s.copyTemplate(template))
 		}
-		
+
 		// Apply limit
 		if filter.Limit > 0 && len(results) >= filter.Limit {
 			break
 		}
 	}
-	
+
 	// Apply offset
 	if filter.Offset > 0 && filter.Offset < len(results) {
 		results = results[filter.Offset:]
 	}
-	
+
 	return results, nil
 }
 
@@ -105,7 +105,7 @@ func (s *InMemoryTemplateStore) List(ctx context.Context, filter TemplateFilter)
 func (s *InMemoryTemplateStore) Exists(ctx context.Context, id string) (bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	
+
 	_, exists := s.templates[id]
 	return exists, nil
 }
@@ -119,7 +119,7 @@ func (s *InMemoryTemplateStore) matchesFilter(template *Template, filter Templat
 			return false
 		}
 	}
-	
+
 	// Check tags
 	if len(filter.Tags) > 0 {
 		hasMatchingTag := false
@@ -138,17 +138,17 @@ func (s *InMemoryTemplateStore) matchesFilter(template *Template, filter Templat
 			return false
 		}
 	}
-	
+
 	// Check created after
 	if filter.CreatedAfter != nil && template.CreatedAt.Before(*filter.CreatedAfter) {
 		return false
 	}
-	
+
 	// Check created before
 	if filter.CreatedBefore != nil && template.CreatedAt.After(*filter.CreatedBefore) {
 		return false
 	}
-	
+
 	return true
 }
 
@@ -156,7 +156,7 @@ func (s *InMemoryTemplateStore) copyTemplate(template *Template) *Template {
 	if template == nil {
 		return nil
 	}
-	
+
 	// Deep copy the template
 	copyTemplate := &Template{
 		ID:          template.ID,
@@ -172,26 +172,26 @@ func (s *InMemoryTemplateStore) copyTemplate(template *Template) *Template {
 		UpdatedAt:   template.UpdatedAt,
 		Metadata:    make(map[string]interface{}),
 	}
-	
+
 	// Copy byte slice
 	copy(copyTemplate.Content, template.Content)
-	
+
 	// Copy variables
 	for k, v := range template.Variables {
 		copyTemplate.Variables[k] = v
 	}
-	
+
 	// Copy includes
 	copy(copyTemplate.Includes, template.Includes)
-	
+
 	// Copy tags
 	copy(copyTemplate.Tags, template.Tags)
-	
+
 	// Copy metadata
 	for k, v := range template.Metadata {
 		copyTemplate.Metadata[k] = v
 	}
-	
+
 	return copyTemplate
 }
 
@@ -218,7 +218,7 @@ func (s *GitTemplateStore) Get(ctx context.Context, id string) (*Template, error
 	// 2. Use gitManager.GetConfiguration() to read the template
 	// 3. Parse the template content
 	// 4. Return the Template object
-	
+
 	return nil, &TemplateError{
 		Type:    "NOT_IMPLEMENTED",
 		Message: "Git template store not yet implemented",
@@ -231,7 +231,7 @@ func (s *GitTemplateStore) Save(ctx context.Context, template *Template) error {
 	// 1. Serialize the template to YAML/JSON
 	// 2. Use gitManager.SaveConfiguration() to write the template
 	// 3. Commit the changes
-	
+
 	return &TemplateError{
 		Type:    "NOT_IMPLEMENTED",
 		Message: "Git template store not yet implemented",
@@ -243,7 +243,7 @@ func (s *GitTemplateStore) Delete(ctx context.Context, id string) error {
 	// In a real implementation, this would:
 	// 1. Use gitManager.DeleteConfiguration() to remove the template
 	// 2. Commit the changes
-	
+
 	return &TemplateError{
 		Type:    "NOT_IMPLEMENTED",
 		Message: "Git template store not yet implemented",
@@ -257,7 +257,7 @@ func (s *GitTemplateStore) List(ctx context.Context, filter TemplateFilter) ([]*
 	// 2. Load and parse each template
 	// 3. Apply filters
 	// 4. Return matching templates
-	
+
 	return nil, &TemplateError{
 		Type:    "NOT_IMPLEMENTED",
 		Message: "Git template store not yet implemented",
@@ -267,7 +267,7 @@ func (s *GitTemplateStore) List(ctx context.Context, filter TemplateFilter) ([]*
 // Exists checks if a template exists in Git
 func (s *GitTemplateStore) Exists(ctx context.Context, id string) (bool, error) {
 	// In a real implementation, this would check if the template file exists
-	
+
 	return false, &TemplateError{
 		Type:    "NOT_IMPLEMENTED",
 		Message: "Git template store not yet implemented",

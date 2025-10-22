@@ -4,9 +4,10 @@ import (
 	"context"
 	"testing"
 	"time"
-	
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+
 	"github.com/cfgis/cfgms/features/config/git"
 	"github.com/cfgis/cfgms/features/config/rollback"
 )
@@ -209,15 +210,15 @@ func (m *MockRollbackNotifier) NotifyRollbackFailed(ctx context.Context, operati
 
 func TestRollbackManager_ListRollbackPoints(t *testing.T) {
 	ctx := context.Background()
-	
+
 	// Setup mocks
 	gitManager := new(MockGitManager)
 	validator := new(MockRollbackValidator)
 	store := rollback.NewInMemoryRollbackStore()
 	notifier := new(MockRollbackNotifier)
-	
+
 	manager := rollback.NewRollbackManager(gitManager, validator, store, notifier)
-	
+
 	// Mock commit history
 	commits := []*git.Commit{
 		{
@@ -252,12 +253,12 @@ func TestRollbackManager_ListRollbackPoints(t *testing.T) {
 			},
 		},
 	}
-	
+
 	gitManager.On("GetCommitHistory", ctx, "device-123-repo", "", 50).Return(commits, nil)
-	
+
 	// Test
 	points, err := manager.ListRollbackPoints(ctx, rollback.TargetTypeDevice, "123", 50)
-	
+
 	// Assertions
 	assert.NoError(t, err)
 	assert.Len(t, points, 2)
@@ -265,21 +266,21 @@ func TestRollbackManager_ListRollbackPoints(t *testing.T) {
 	assert.Equal(t, "John Doe", points[0].Author)
 	assert.Contains(t, points[0].Configurations, "firewall.yaml")
 	assert.Contains(t, points[0].Configurations, "network.yaml")
-	
+
 	gitManager.AssertExpectations(t)
 }
 
 func TestRollbackManager_PreviewRollback(t *testing.T) {
 	ctx := context.Background()
-	
+
 	// Setup mocks
 	gitManager := new(MockGitManager)
 	validator := new(MockRollbackValidator)
 	store := rollback.NewInMemoryRollbackStore()
 	notifier := new(MockRollbackNotifier)
-	
+
 	manager := rollback.NewRollbackManager(gitManager, validator, store, notifier)
-	
+
 	// Test request
 	request := rollback.RollbackRequest{
 		TargetType:   rollback.TargetTypeDevice,
@@ -288,11 +289,11 @@ func TestRollbackManager_PreviewRollback(t *testing.T) {
 		RollbackTo:   "abc123",
 		Reason:       "Revert problematic update",
 	}
-	
+
 	// Mock current commit
 	currentCommit := []*git.Commit{{SHA: "current123"}}
 	gitManager.On("GetCommitHistory", ctx, "device-123-repo", "", 1).Return(currentCommit, nil)
-	
+
 	// Mock diff
 	diffs := []git.ConfigChange{
 		{
@@ -302,7 +303,7 @@ func TestRollbackManager_PreviewRollback(t *testing.T) {
 		},
 	}
 	gitManager.On("GetDiff", ctx, "device-123-repo", "abc123", "current123").Return(diffs, nil)
-	
+
 	// Mock validation
 	validationResults := &rollback.ValidationResults{
 		Passed:   true,
@@ -310,17 +311,17 @@ func TestRollbackManager_PreviewRollback(t *testing.T) {
 		Errors:   []rollback.ValidationIssue{},
 	}
 	validator.On("ValidateRollback", ctx, request, mock.Anything).Return(validationResults, nil)
-	
+
 	// Mock risk assessment
 	riskAssessment := &rollback.RiskAssessment{
-		OverallRisk: rollback.RiskLevelMedium,
+		OverallRisk:   rollback.RiskLevelMedium,
 		ServiceImpact: "minimal",
 	}
 	validator.On("AssessRisk", ctx, request, mock.Anything).Return(riskAssessment, nil)
-	
+
 	// Test
 	preview, err := manager.PreviewRollback(ctx, request)
-	
+
 	// Assertions
 	assert.NoError(t, err)
 	assert.NotNil(t, preview)
@@ -328,22 +329,22 @@ func TestRollbackManager_PreviewRollback(t *testing.T) {
 	assert.Equal(t, "firewall.yaml", preview.Changes[0].Path)
 	assert.True(t, preview.ValidationResults.Passed)
 	assert.Equal(t, rollback.RiskLevelMedium, preview.RiskAssessment.OverallRisk)
-	
+
 	gitManager.AssertExpectations(t)
 	validator.AssertExpectations(t)
 }
 
 func TestRollbackManager_ExecuteRollback_RequiresApproval(t *testing.T) {
 	ctx := context.Background()
-	
+
 	// Setup mocks
 	gitManager := new(MockGitManager)
 	validator := new(MockRollbackValidator)
 	store := rollback.NewInMemoryRollbackStore()
 	notifier := new(MockRollbackNotifier)
-	
+
 	manager := rollback.NewRollbackManager(gitManager, validator, store, notifier)
-	
+
 	// Test request without approval
 	request := rollback.RollbackRequest{
 		TargetType:   rollback.TargetTypeDevice,
@@ -352,42 +353,42 @@ func TestRollbackManager_ExecuteRollback_RequiresApproval(t *testing.T) {
 		RollbackTo:   "abc123",
 		Reason:       "Revert problematic update",
 	}
-	
+
 	// Mock preview that requires approval
 	currentCommit := []*git.Commit{{SHA: "current123"}}
 	gitManager.On("GetCommitHistory", ctx, "device-123-repo", "", 1).Return(currentCommit, nil)
-	
+
 	diffs := []git.ConfigChange{{Path: "critical.yaml", Action: "update"}}
 	gitManager.On("GetDiff", ctx, "device-123-repo", "abc123", "current123").Return(diffs, nil)
-	
+
 	validationResults := &rollback.ValidationResults{Passed: true}
 	validator.On("ValidateRollback", ctx, request, mock.Anything).Return(validationResults, nil)
-	
+
 	// High risk requires approval
 	riskAssessment := &rollback.RiskAssessment{OverallRisk: rollback.RiskLevelHigh}
 	validator.On("AssessRisk", ctx, request, mock.Anything).Return(riskAssessment, nil)
-	
+
 	// Test
 	_, err := manager.ExecuteRollback(ctx, request)
-	
+
 	// Assertions
 	assert.Error(t, err)
 	rollbackErr, ok := err.(*rollback.RollbackError)
 	assert.True(t, ok)
 	assert.Equal(t, "APPROVAL_REQUIRED", rollbackErr.Code)
-	
+
 	gitManager.AssertExpectations(t)
 	validator.AssertExpectations(t)
 }
 
 func TestRollbackValidator_ValidateRollback(t *testing.T) {
 	ctx := context.Background()
-	
+
 	// Create validator with mocks
 	moduleRegistry := new(MockModuleRegistry)
 	configParser := new(MockConfigParser)
 	validator := rollback.NewRollbackValidator(moduleRegistry, configParser)
-	
+
 	// Test cases
 	tests := []struct {
 		name        string
@@ -432,17 +433,17 @@ func TestRollbackValidator_ValidateRollback(t *testing.T) {
 			expectError: false,
 		},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			results, err := validator.ValidateRollback(ctx, tt.request, nil)
-			
+
 			if tt.expectError {
 				assert.Error(t, err)
 			} else {
 				assert.NoError(t, err)
 				assert.Equal(t, tt.expectPass, results.Passed)
-				
+
 				if !tt.expectPass {
 					assert.NotEmpty(t, results.Errors)
 				}
@@ -474,7 +475,7 @@ func (m *MockModuleRegistry) IsModuleCompatible(ctx context.Context, moduleName,
 	return args.Bool(0), args.Error(1)
 }
 
-// Mock config parser for validator tests  
+// Mock config parser for validator tests
 type MockConfigParser struct {
 	mock.Mock
 }

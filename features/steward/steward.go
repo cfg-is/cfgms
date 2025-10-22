@@ -15,7 +15,7 @@
 //	if err != nil {
 //		log.Fatal(err)
 //	}
-//	
+//
 //	ctx := context.Background()
 //	err = steward.Start(ctx)
 //	if err != nil {
@@ -26,7 +26,6 @@
 //
 //	cfg := steward.DefaultConfig()
 //	steward, err := steward.New(cfg, logger)
-//
 package steward
 
 import (
@@ -34,7 +33,7 @@ import (
 	"fmt"
 	"sync"
 	"time"
-	
+
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	// NOTE: Old gRPC client removed (Story #198)
 	// "github.com/cfgis/cfgms/features/steward/client"
@@ -55,19 +54,19 @@ import (
 type Config struct {
 	// ControllerAddr is the address of the CFGMS controller to connect to
 	ControllerAddr string `yaml:"controller_addr"`
-	
+
 	// CertPath is the directory containing TLS certificates for mTLS authentication (legacy)
 	CertPath string `yaml:"cert_path"`
-	
+
 	// DataDir is the directory for local storage and caching
 	DataDir string `yaml:"data_dir"`
-	
+
 	// LogLevel sets the logging verbosity (debug, info, warn, error)
 	LogLevel string `yaml:"log_level"`
-	
+
 	// ID is the unique identifier for this steward instance
 	ID string `yaml:"id"`
-	
+
 	// Certificate management configuration
 	Certificate *CertificateConfig `yaml:"certificate"`
 }
@@ -76,16 +75,16 @@ type Config struct {
 type CertificateConfig struct {
 	// Enable automated certificate management
 	EnableCertManagement bool `yaml:"enable_cert_management"`
-	
+
 	// Path for certificate storage
 	CertStoragePath string `yaml:"cert_storage_path"`
-	
+
 	// Enable automatic certificate renewal
 	EnableAutoRenewal bool `yaml:"enable_auto_renewal"`
-	
+
 	// Certificate renewal threshold in days
 	RenewalThresholdDays int `yaml:"renewal_threshold_days"`
-	
+
 	// Certificate provisioning configuration
 	Provisioning *ProvisioningConfig `yaml:"provisioning"`
 }
@@ -94,13 +93,13 @@ type CertificateConfig struct {
 type ProvisioningConfig struct {
 	// Enable automatic certificate provisioning during registration
 	EnableAutoProvisioning bool `yaml:"enable_auto_provisioning"`
-	
+
 	// Provisioning endpoint on the controller
 	ProvisioningEndpoint string `yaml:"provisioning_endpoint"`
-	
+
 	// Client certificate validity period in days
 	ValidityDays int `yaml:"validity_days"`
-	
+
 	// Organization name for certificates
 	Organization string `yaml:"organization"`
 }
@@ -117,7 +116,7 @@ func DefaultConfig() *Config {
 		LogLevel:       "info",
 		ID:             "",
 		Certificate: &CertificateConfig{
-			EnableCertManagement:  true,
+			EnableCertManagement: true,
 			CertStoragePath:      "certs/steward",
 			EnableAutoRenewal:    true,
 			RenewalThresholdDays: 30,
@@ -140,40 +139,40 @@ func DefaultConfig() *Config {
 // All operations are thread-safe and support graceful shutdown via context cancellation.
 type Steward struct {
 	mu sync.RWMutex
-	
+
 	// Legacy configuration (for controller mode)
 	legacyConfig *Config
-	
+
 	// Standalone configuration loaded from hostname.cfg
 	standaloneConfig config.StewardConfig
-	
+
 	// Logger for structured logging
 	logger logging.Logger
-	
+
 	// Health monitoring and metrics collection
 	healthCheck *HealthMonitor
-	
+
 	// Standalone components (nil in controller mode)
-	moduleRegistry discovery.ModuleRegistry
-	moduleFactory  *factory.ModuleFactory
-	comparator     *testing.StateComparator
+	moduleRegistry  discovery.ModuleRegistry
+	moduleFactory   *factory.ModuleFactory
+	comparator      *testing.StateComparator
 	executionEngine *execution.ExecutionEngine
-	
+
 	// Controller mode components - DEPRECATED (Story #198)
 	// The old gRPC-based controller mode is replaced by MQTT+QUIC registration
 	// Use cmd/steward/main.go with --regtoken parameter instead
 	// controllerClient *client.Client
-	dnaCollector     *dna.Collector
+	dnaCollector *dna.Collector
 
 	// MQTT+QUIC client for controller testing mode (Story #198)
-	mqttClient       interface{} // *client.MQTTClient - interface{} to avoid import cycle
+	mqttClient interface{} // *client.MQTTClient - interface{} to avoid import cycle
 
 	// Certificate management (for controller mode)
-	certManager      *cert.Manager
-	
+	certManager *cert.Manager
+
 	// Shutdown coordination
 	shutdown chan struct{}
-	
+
 	// Operation mode flag
 	isStandalone bool
 }
@@ -234,15 +233,15 @@ func NewForControllerTesting(cfg *Config, logger logging.Logger) (*Steward, erro
 // searches platform-specific locations for hostname.cfg.
 //
 // Configuration search order:
-//   1. Provided configPath (if not empty)
-//   2. Current working directory
-//   3. User configuration directories
-//   4. System configuration directories
+//  1. Provided configPath (if not empty)
+//  2. Current working directory
+//  3. User configuration directories
+//  4. System configuration directories
 //
 // Module discovery searches:
-//   1. Custom paths from configuration
-//   2. Directory relative to binary
-//   3. Platform-specific system paths
+//  1. Custom paths from configuration
+//  2. Directory relative to binary
+//  3. Platform-specific system paths
 //
 // Returns an error if configuration loading, module discovery, or component
 // initialization fails.
@@ -252,39 +251,39 @@ func NewStandalone(configPath string, logger logging.Logger) (*Steward, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to load configuration: %w", err)
 	}
-	
+
 	// Discover available modules from filesystem
 	registry, err := discovery.DiscoverModules(cfg.Steward.ModulePaths)
 	if err != nil {
 		return nil, fmt.Errorf("failed to discover modules: %w", err)
 	}
-	
+
 	// Create module factory for dynamic loading with steward ID for central logging
 	stewardID := cfg.Steward.ID
 	if stewardID == "" {
 		stewardID = "steward-standalone" // Default ID for standalone mode
 	}
 	moduleFactory := factory.NewWithStewardID(registry, cfg.Steward.ErrorHandling, stewardID)
-	
+
 	// Create state comparator for configuration drift detection
 	comparator := testing.NewStateComparator()
-	
+
 	// Create execution engine for resource orchestration
 	executionEngine := execution.New(moduleFactory, comparator, cfg.Steward.ErrorHandling, logger)
-	
+
 	// Create health monitor for metrics collection
 	healthMonitor := NewHealthMonitor(logger)
-	
+
 	return &Steward{
 		standaloneConfig: cfg,
-		logger:          logger,
-		healthCheck:     healthMonitor,
-		moduleRegistry:  registry,
-		moduleFactory:   moduleFactory,
-		comparator:      comparator,
-		executionEngine: executionEngine,
-		shutdown:        make(chan struct{}),
-		isStandalone:    true,
+		logger:           logger,
+		healthCheck:      healthMonitor,
+		moduleRegistry:   registry,
+		moduleFactory:    moduleFactory,
+		comparator:       comparator,
+		executionEngine:  executionEngine,
+		shutdown:         make(chan struct{}),
+		isStandalone:     true,
 	}, nil
 }
 
@@ -308,41 +307,41 @@ func (s *Steward) Start(ctx context.Context) error {
 // startStandalone starts the steward in standalone mode with immediate execution.
 //
 // This method:
-//   1. Starts health monitoring in a background goroutine
-//   2. Executes the configuration immediately on startup  
-//   3. Logs execution results and any errors
+//  1. Starts health monitoring in a background goroutine
+//  2. Executes the configuration immediately on startup
+//  3. Logs execution results and any errors
 //
 // Configuration execution errors are logged but do not cause startup to fail,
 // allowing the steward to continue operating and retry later.
 func (s *Steward) startStandalone(ctx context.Context) error {
-    s.logger.Info("Starting steward in standalone mode",
-        "id", s.standaloneConfig.Steward.ID,
-        "resources", len(s.standaloneConfig.Resources))
-    
-    // Start health monitoring in background
-    go func() {
-        s.healthCheck.Start(ctx)
-    }()
-    
-    // Give health monitor a moment to start
-    time.Sleep(50 * time.Millisecond)
-    
-    // Execute configuration immediately on startup
-    report := s.executionEngine.ExecuteConfiguration(ctx, s.standaloneConfig)
-    
-    s.logger.Info("Initial configuration execution completed",
-        "total", report.TotalResources,
-        "successful", report.SuccessfulCount,
-        "failed", report.FailedCount,
-        "skipped", report.SkippedCount)
-    
-    // Log configuration execution errors but don't fail startup
-    for _, err := range report.Errors {
-        s.logger.Error("Configuration execution error", "error", err)
-    }
-    
-    s.logger.Info("Steward started successfully in standalone mode")
-    return nil
+	s.logger.Info("Starting steward in standalone mode",
+		"id", s.standaloneConfig.Steward.ID,
+		"resources", len(s.standaloneConfig.Resources))
+
+	// Start health monitoring in background
+	go func() {
+		s.healthCheck.Start(ctx)
+	}()
+
+	// Give health monitor a moment to start
+	time.Sleep(50 * time.Millisecond)
+
+	// Execute configuration immediately on startup
+	report := s.executionEngine.ExecuteConfiguration(ctx, s.standaloneConfig)
+
+	s.logger.Info("Initial configuration execution completed",
+		"total", report.TotalResources,
+		"successful", report.SuccessfulCount,
+		"failed", report.FailedCount,
+		"skipped", report.SkippedCount)
+
+	// Log configuration execution errors but don't fail startup
+	for _, err := range report.Errors {
+		s.logger.Error("Configuration execution error", "error", err)
+	}
+
+	s.logger.Info("Steward started successfully in standalone mode")
+	return nil
 }
 
 // startController starts the steward in controller mode with full gRPC integration.
@@ -463,15 +462,15 @@ func (s *Steward) heartbeatLoopTesting(ctx context.Context, mqttClient interface
 // OLD IMPLEMENTATION - Removed in Story #198
 func (s *Steward) startController_OLD(ctx context.Context) error {
 	s.logger.Info("Starting steward in controller mode", "id", s.legacyConfig.ID)
-	
+
 	// Start health monitoring in background
 	go func() {
 		s.healthCheck.Start(ctx)
 	}()
-	
+
 	// Give health monitor a moment to start
 	time.Sleep(50 * time.Millisecond)
-	
+
 	// Set up health monitoring callback for controller connectivity
 	s.controllerClient.SetHealthCallback(func(connected bool, success bool) {
 		s.healthCheck.UpdateControllerConnectivity(connected)
@@ -481,37 +480,37 @@ func (s *Steward) startController_OLD(ctx context.Context) error {
 			s.healthCheck.RecordHeartbeatError()
 		}
 	})
-	
+
 	// Connect to controller using mTLS
 	err := s.controllerClient.Connect(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to connect to controller: %w", err)
 	}
-	
+
 	s.logger.Info("Connected to controller successfully")
-	
+
 	// Update health monitoring with successful connection
 	s.healthCheck.UpdateControllerConnectivity(true)
-	
+
 	// Collect system DNA for registration
 	systemDNA, err := s.dnaCollector.Collect()
 	if err != nil {
 		return fmt.Errorf("failed to collect system DNA: %w", err)
 	}
-	
+
 	s.logger.Info("System DNA collected", "id", systemDNA.Id, "attributes", len(systemDNA.Attributes))
-	
+
 	// Register with controller
 	stewardID, err := s.controllerClient.Register(ctx, "v0.1.0", systemDNA)
 	if err != nil {
 		return fmt.Errorf("failed to register with controller: %w", err)
 	}
-	
+
 	s.logger.Info("Registered with controller successfully", "steward_id", stewardID)
-	
+
 	// Update legacy config with assigned ID
 	s.legacyConfig.ID = stewardID
-	
+
 	s.logger.Info("Steward started successfully in controller mode")
 	return nil
 }
@@ -520,11 +519,11 @@ func (s *Steward) startController_OLD(ctx context.Context) error {
 // Stop gracefully shuts down the steward and cleans up resources.
 //
 // This method:
-//   1. Signals shutdown to all background goroutines
-//   2. Stops health monitoring
-//   3. Disconnects from controller (in controller mode)
-//   4. Unloads all modules (in standalone mode)
-//   5. Waits for graceful cleanup to complete
+//  1. Signals shutdown to all background goroutines
+//  2. Stops health monitoring
+//  3. Disconnects from controller (in controller mode)
+//  4. Unloads all modules (in standalone mode)
+//  5. Waits for graceful cleanup to complete
 //
 // The context can be used to set a timeout for shutdown operations.
 // Returns an error only if cleanup operations fail.
@@ -534,7 +533,7 @@ func (s *Steward) Stop(ctx context.Context) error {
 	} else {
 		s.logger.Info("Stopping steward in controller mode", "id", s.legacyConfig.ID)
 	}
-	
+
 	// Signal shutdown to all background goroutines
 	select {
 	case <-s.shutdown:
@@ -542,10 +541,10 @@ func (s *Steward) Stop(ctx context.Context) error {
 	default:
 		close(s.shutdown)
 	}
-	
+
 	// Stop health monitoring
 	s.healthCheck.Stop()
-	
+
 	// Cleanup based on mode
 	if s.isStandalone {
 		// Standalone mode: unload modules
@@ -569,7 +568,7 @@ func (s *Steward) Stop(ctx context.Context) error {
 			s.logger.Info("Controller mode deprecated - no disconnect needed")
 		}
 	}
-	
+
 	s.logger.Info("Steward stopped successfully")
 	return nil
 }
@@ -587,7 +586,7 @@ func (s *Steward) ExecuteConfiguration(ctx context.Context) (execution.Execution
 	if !s.isStandalone {
 		return execution.ExecutionReport{}, fmt.Errorf("ExecuteConfiguration is only available in standalone mode")
 	}
-	
+
 	report := s.executionEngine.ExecuteConfiguration(ctx, s.standaloneConfig)
 	return report, nil
 }
@@ -627,11 +626,11 @@ func (s *Steward) GetSystemDNA(ctx context.Context) (*commonpb.DNA, error) {
 	if s.isStandalone {
 		return nil, fmt.Errorf("GetSystemDNA is only available in controller mode")
 	}
-	
+
 	if s.dnaCollector == nil {
 		return nil, fmt.Errorf("DNA collector not initialized")
 	}
-	
+
 	return s.dnaCollector.Collect()
 }
 
@@ -683,7 +682,7 @@ func (s *Steward) GetCertificateManager() *cert.Manager {
 func initializeStewardCertificateManager(cfg *Config, logger logging.Logger) (*cert.Manager, error) {
 	// For stewards, we typically don't create a CA, but use an existing one
 	// The CA information would come from the controller or be pre-configured
-	
+
 	// For now, create a simple certificate store for managing steward certificates
 	// In a full implementation, this would connect to the controller's CA
 	manager, err := cert.NewManager(&cert.ManagerConfig{
@@ -695,11 +694,11 @@ func initializeStewardCertificateManager(cfg *Config, logger logging.Logger) (*c
 	if err != nil {
 		return nil, fmt.Errorf("failed to create certificate manager: %w", err)
 	}
-	
-	logger.Info("Initialized steward certificate manager", 
+
+	logger.Info("Initialized steward certificate manager",
 		"storage_path", cfg.Certificate.CertStoragePath,
 		"auto_renewal", cfg.Certificate.EnableAutoRenewal)
-	
+
 	return manager, nil
 }
 
@@ -709,11 +708,11 @@ func initializeStewardCertificateManager(cfg *Config, logger logging.Logger) (*c
 /*
 func createControllerClient(cfg *Config, certManager *cert.Manager, logger logging.Logger) (*client.Client, error) {
 	certPath := cfg.CertPath
-	
+
 	// If certificate management is enabled, use the managed certificate path
 	if certManager != nil {
 		certPath = cfg.Certificate.CertStoragePath
-		
+
 		// Check if we have a valid client certificate, if not request provisioning
 		if cfg.Certificate.Provisioning != nil && cfg.Certificate.Provisioning.EnableAutoProvisioning {
 			// TODO: Implement certificate provisioning during client creation
@@ -724,7 +723,7 @@ func createControllerClient(cfg *Config, certManager *cert.Manager, logger loggi
 			logger.Info("Certificate auto-provisioning enabled, will request certificate during registration")
 		}
 	}
-	
+
 	// Create the controller client
 	controllerClient, err := client.New(cfg.ControllerAddr, certPath, logger)
 	if err != nil {
@@ -740,4 +739,4 @@ func createControllerClient(cfg *Config, certManager *cert.Manager, logger loggi
 // FOR TESTING ONLY - not for production use.
 func (s *Steward) SetMQTTClientForTesting(mqttClient interface{}) {
 	s.mqttClient = mqttClient
-} 
+}

@@ -8,9 +8,10 @@ import (
 	"path/filepath"
 	"strconv"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/pkg/logging"
-	"gopkg.in/yaml.v3"
 )
 
 // directoryModule implements the Module interface for directory management

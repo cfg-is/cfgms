@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	pkgcache "github.com/cfgis/cfgms/pkg/cache"
 	"github.com/cfgis/cfgms/features/reports/interfaces"
+	pkgcache "github.com/cfgis/cfgms/pkg/cache"
 )
 
 // MemoryCache implements an in-memory cache for reports using pkg/cache
@@ -16,11 +16,11 @@ type MemoryCache struct {
 // NewMemoryCache creates a new in-memory cache
 func NewMemoryCache() *MemoryCache {
 	config := pkgcache.CacheConfig{
-		Name:             "reports-memory",
-		MaxRuntimeItems:  10000, // Reasonable default for report caching
-		DefaultTTL:       15 * time.Minute,
-		CleanupInterval:  5 * time.Minute,
-		EvictionPolicy:   pkgcache.EvictionLRU,
+		Name:            "reports-memory",
+		MaxRuntimeItems: 10000, // Reasonable default for report caching
+		DefaultTTL:      15 * time.Minute,
+		CleanupInterval: 5 * time.Minute,
+		EvictionPolicy:  pkgcache.EvictionLRU,
 	}
 
 	return &MemoryCache{

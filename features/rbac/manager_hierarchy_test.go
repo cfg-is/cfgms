@@ -4,11 +4,12 @@ import (
 	"context"
 	"testing"
 
-	"github.com/cfgis/cfgms/api/proto/common"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	
+
+	"github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+
 	// Import storage providers for testing
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 )
@@ -17,19 +18,19 @@ func TestManager_CreateRoleWithParent(t *testing.T) {
 	// Use git storage for durable testing - minimum storage requirement
 	config := map[string]interface{}{
 		"repository_path": t.TempDir(),
-		"branch":         "main",
-		"auto_init":      true,
+		"branch":          "main",
+		"auto_init":       true,
 	}
 	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
 	require.NoError(t, err)
-	
+
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	ctx := context.Background()
-	
+
 	// Initialize manager
 	err = manager.Initialize(ctx)
 	require.NoError(t, err)
@@ -57,12 +58,12 @@ func TestManager_CreateRoleWithParent(t *testing.T) {
 		{
 			name: "Valid role with parent",
 			role: &common.Role{
-				Id:              "child.test",
-				Name:            "Child Test Role",
-				Description:     "Test child role",
-				PermissionIds:   []string{"write.permission"},
-				IsSystemRole:    false,
-				TenantId:        "tenant-1",
+				Id:            "child.test",
+				Name:          "Child Test Role",
+				Description:   "Test child role",
+				PermissionIds: []string{"write.permission"},
+				IsSystemRole:  false,
+				TenantId:      "tenant-1",
 			},
 			parentRoleID:    "parent.test",
 			inheritanceType: common.RoleInheritanceType_ROLE_INHERITANCE_ADDITIVE,
@@ -71,12 +72,12 @@ func TestManager_CreateRoleWithParent(t *testing.T) {
 		{
 			name: "Role without parent",
 			role: &common.Role{
-				Id:              "standalone.test",
-				Name:            "Standalone Test Role",
-				Description:     "Test standalone role",
-				PermissionIds:   []string{"delete.permission"},
-				IsSystemRole:    false,
-				TenantId:        "tenant-1",
+				Id:            "standalone.test",
+				Name:          "Standalone Test Role",
+				Description:   "Test standalone role",
+				PermissionIds: []string{"delete.permission"},
+				IsSystemRole:  false,
+				TenantId:      "tenant-1",
 			},
 			parentRoleID:    "",
 			inheritanceType: common.RoleInheritanceType_ROLE_INHERITANCE_NONE,
@@ -85,12 +86,12 @@ func TestManager_CreateRoleWithParent(t *testing.T) {
 		{
 			name: "Role with non-existent parent",
 			role: &common.Role{
-				Id:              "orphan.test",
-				Name:            "Orphan Test Role",
-				Description:     "Test orphan role",
-				PermissionIds:   []string{},
-				IsSystemRole:    false,
-				TenantId:        "tenant-1",
+				Id:            "orphan.test",
+				Name:          "Orphan Test Role",
+				Description:   "Test orphan role",
+				PermissionIds: []string{},
+				IsSystemRole:  false,
+				TenantId:      "tenant-1",
 			},
 			parentRoleID:    "non.existent.parent",
 			inheritanceType: common.RoleInheritanceType_ROLE_INHERITANCE_ADDITIVE,
@@ -100,12 +101,12 @@ func TestManager_CreateRoleWithParent(t *testing.T) {
 		{
 			name: "Self-referencing role",
 			role: &common.Role{
-				Id:              "self.ref.test",
-				Name:            "Self Reference Test Role",
-				Description:     "Test self-referencing role",
-				PermissionIds:   []string{},
-				IsSystemRole:    false,
-				TenantId:        "tenant-1",
+				Id:            "self.ref.test",
+				Name:          "Self Reference Test Role",
+				Description:   "Test self-referencing role",
+				PermissionIds: []string{},
+				IsSystemRole:  false,
+				TenantId:      "tenant-1",
 			},
 			parentRoleID:    "self.ref.test",
 			inheritanceType: common.RoleInheritanceType_ROLE_INHERITANCE_ADDITIVE,
@@ -139,7 +140,7 @@ func TestManager_CreateRoleWithParent(t *testing.T) {
 			if tt.parentRoleID != "" {
 				children, err := manager.GetChildRoles(ctx, tt.parentRoleID)
 				require.NoError(t, err)
-				
+
 				found := false
 				for _, child := range children {
 					if child.Id == tt.role.Id {
@@ -157,19 +158,19 @@ func TestManager_GetRoleHierarchy(t *testing.T) {
 	// Use git storage for durable testing - minimum storage requirement
 	config := map[string]interface{}{
 		"repository_path": t.TempDir(),
-		"branch":         "main",
-		"auto_init":      true,
+		"branch":          "main",
+		"auto_init":       true,
 	}
 	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
 	require.NoError(t, err)
-	
+
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	ctx := context.Background()
-	
+
 	// Initialize and set up test hierarchy
 	err = manager.Initialize(ctx)
 	require.NoError(t, err)
@@ -250,36 +251,36 @@ func TestManager_SetAndRemoveRoleParent(t *testing.T) {
 	// Use git storage for durable testing - minimum storage requirement
 	config := map[string]interface{}{
 		"repository_path": t.TempDir(),
-		"branch":         "main",
-		"auto_init":      true,
+		"branch":          "main",
+		"auto_init":       true,
 	}
 	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
 	require.NoError(t, err)
-	
+
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	ctx := context.Background()
-	
+
 	err = manager.Initialize(ctx)
 	require.NoError(t, err)
 
 	// Create test roles
 	parentRole := &common.Role{
-		Id:           "parent.role",
-		Name:         "Parent Role",
+		Id:            "parent.role",
+		Name:          "Parent Role",
 		PermissionIds: []string{},
-		TenantId:     "tenant-1",
+		TenantId:      "tenant-1",
 	}
 	require.NoError(t, manager.CreateRole(ctx, parentRole))
 
 	childRole := &common.Role{
-		Id:           "child.role", 
-		Name:         "Child Role",
+		Id:            "child.role",
+		Name:          "Child Role",
 		PermissionIds: []string{},
-		TenantId:     "tenant-1",
+		TenantId:      "tenant-1",
 	}
 	require.NoError(t, manager.CreateRole(ctx, childRole))
 
@@ -323,30 +324,30 @@ func TestManager_ComputeRolePermissions(t *testing.T) {
 	// Use git storage for durable testing - minimum storage requirement
 	config := map[string]interface{}{
 		"repository_path": t.TempDir(),
-		"branch":         "main",
-		"auto_init":      true,
+		"branch":          "main",
+		"auto_init":       true,
 	}
 	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
 	require.NoError(t, err)
-	
+
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	ctx := context.Background()
-	
+
 	err = manager.Initialize(ctx)
 	require.NoError(t, err)
 	setupManagerPermissionTestData(t, manager)
 
 	tests := []struct {
-		name                    string
-		roleID                  string
-		expectedDirectCount     int
-		expectedInheritedRoles  int
-		expectedConflicts       int
-		expectError             bool
+		name                   string
+		roleID                 string
+		expectedDirectCount    int
+		expectedInheritedRoles int
+		expectedConflicts      int
+		expectError            bool
 	}{
 		{
 			name:                   "Role with additive inheritance",
@@ -395,19 +396,19 @@ func TestManager_ValidateHierarchyOperation(t *testing.T) {
 	// Use git storage for durable testing - minimum storage requirement
 	config := map[string]interface{}{
 		"repository_path": t.TempDir(),
-		"branch":         "main",
-		"auto_init":      true,
+		"branch":          "main",
+		"auto_init":       true,
 	}
 	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
 	require.NoError(t, err)
-	
+
 	manager := NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	ctx := context.Background()
-	
+
 	err = manager.Initialize(ctx)
 	require.NoError(t, err)
 
@@ -463,28 +464,28 @@ func setupManagerHierarchyTestData(t *testing.T, manager *Manager) {
 	// Create a 3-level hierarchy: root -> middle -> leaf
 	roles := []*common.Role{
 		{
-			Id:           "root.role",
-			Name:         "Root Role",
+			Id:            "root.role",
+			Name:          "Root Role",
 			PermissionIds: []string{},
-			TenantId:     "tenant-1",
+			TenantId:      "tenant-1",
 		},
 		{
-			Id:           "middle.role",
-			Name:         "Middle Role", 
+			Id:            "middle.role",
+			Name:          "Middle Role",
 			PermissionIds: []string{},
-			TenantId:     "tenant-1",
+			TenantId:      "tenant-1",
 		},
 		{
-			Id:           "leaf.role",
-			Name:         "Leaf Role",
+			Id:            "leaf.role",
+			Name:          "Leaf Role",
 			PermissionIds: []string{},
-			TenantId:     "tenant-1",
+			TenantId:      "tenant-1",
 		},
 		{
-			Id:           "another.child",
-			Name:         "Another Child",
+			Id:            "another.child",
+			Name:          "Another Child",
 			PermissionIds: []string{},
-			TenantId:     "tenant-1",
+			TenantId:      "tenant-1",
 		},
 	}
 
@@ -507,33 +508,33 @@ func setupManagerPermissionTestData(t *testing.T, manager *Manager) {
 		{Id: "child.perm", Name: "Child Permission", Actions: []string{"child_action"}},
 		{Id: "shared.perm", Name: "Shared Permission", Actions: []string{"shared"}},
 	}
-	
+
 	for _, perm := range permissions {
 		require.NoError(t, manager.CreatePermission(ctx, perm))
 	}
 
 	// Create roles with permissions
 	parentRole := &common.Role{
-		Id:           "parent.role",
-		Name:         "Parent Role",
+		Id:            "parent.role",
+		Name:          "Parent Role",
 		PermissionIds: []string{"parent.perm", "shared.perm"},
-		TenantId:     "tenant-1",
+		TenantId:      "tenant-1",
 	}
 	require.NoError(t, manager.CreateRole(ctx, parentRole))
 
 	childAdditiveRole := &common.Role{
-		Id:           "child.additive",
-		Name:         "Child Additive Role",
+		Id:            "child.additive",
+		Name:          "Child Additive Role",
 		PermissionIds: []string{"child.perm"},
-		TenantId:     "tenant-1",
+		TenantId:      "tenant-1",
 	}
 	require.NoError(t, manager.CreateRoleWithParent(ctx, childAdditiveRole, "parent.role", common.RoleInheritanceType_ROLE_INHERITANCE_ADDITIVE))
 
 	childOverrideRole := &common.Role{
-		Id:           "child.override",
-		Name:         "Child Override Role",
+		Id:            "child.override",
+		Name:          "Child Override Role",
 		PermissionIds: []string{"child.perm", "shared.perm"}, // shared.perm conflicts with parent
-		TenantId:     "tenant-1",
+		TenantId:      "tenant-1",
 	}
 	require.NoError(t, manager.CreateRoleWithParent(ctx, childOverrideRole, "parent.role", common.RoleInheritanceType_ROLE_INHERITANCE_OVERRIDE))
 }

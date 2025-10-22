@@ -46,93 +46,93 @@ func NewJITAccessMonitor(
 
 // AlertRule defines rules for generating alerts
 type AlertRule struct {
-	ID                string                 `json:"id"`
-	Name              string                 `json:"name"`
-	TenantID          string                 `json:"tenant_id,omitempty"`
-	Type              AlertType              `json:"type"`
-	Severity          AlertSeverity          `json:"severity"`
-	Condition         string                 `json:"condition"`
-	Threshold         interface{}            `json:"threshold"`
-	TimeWindow        time.Duration          `json:"time_window"`
-	Enabled           bool                   `json:"enabled"`
-	NotifyOnTrigger   bool                   `json:"notify_on_trigger"`
-	NotifyOnResolve   bool                   `json:"notify_on_resolve"`
-	Recipients        []string               `json:"recipients"`
-	Cooldown          time.Duration          `json:"cooldown"`
-	LastTriggered     *time.Time             `json:"last_triggered,omitempty"`
-	TriggerCount      int                    `json:"trigger_count"`
-	CreatedAt         time.Time              `json:"created_at"`
-	UpdatedAt         time.Time              `json:"updated_at"`
+	ID              string        `json:"id"`
+	Name            string        `json:"name"`
+	TenantID        string        `json:"tenant_id,omitempty"`
+	Type            AlertType     `json:"type"`
+	Severity        AlertSeverity `json:"severity"`
+	Condition       string        `json:"condition"`
+	Threshold       interface{}   `json:"threshold"`
+	TimeWindow      time.Duration `json:"time_window"`
+	Enabled         bool          `json:"enabled"`
+	NotifyOnTrigger bool          `json:"notify_on_trigger"`
+	NotifyOnResolve bool          `json:"notify_on_resolve"`
+	Recipients      []string      `json:"recipients"`
+	Cooldown        time.Duration `json:"cooldown"`
+	LastTriggered   *time.Time    `json:"last_triggered,omitempty"`
+	TriggerCount    int           `json:"trigger_count"`
+	CreatedAt       time.Time     `json:"created_at"`
+	UpdatedAt       time.Time     `json:"updated_at"`
 }
 
 // ActiveAlert represents an active alert
 type ActiveAlert struct {
-	ID              string                 `json:"id"`
-	RuleID          string                 `json:"rule_id"`
-	TenantID        string                 `json:"tenant_id,omitempty"`
-	Type            AlertType              `json:"type"`
-	Severity        AlertSeverity          `json:"severity"`
-	Title           string                 `json:"title"`
-	Description     string                 `json:"description"`
-	TriggeredAt     time.Time              `json:"triggered_at"`
-	LastUpdated     time.Time              `json:"last_updated"`
-	Status          AlertStatus            `json:"status"`
-	AffectedGrants  []string               `json:"affected_grants,omitempty"`
-	AffectedUsers   []string               `json:"affected_users,omitempty"`
-	MetricValue     interface{}            `json:"metric_value,omitempty"`
-	Threshold       interface{}            `json:"threshold,omitempty"`
-	AutoResolved    bool                   `json:"auto_resolved"`
-	ResolvedAt      *time.Time             `json:"resolved_at,omitempty"`
-	ResolvedBy      string                 `json:"resolved_by,omitempty"`
-	ResolutionNote  string                 `json:"resolution_note,omitempty"`
-	Context         map[string]interface{} `json:"context,omitempty"`
+	ID             string                 `json:"id"`
+	RuleID         string                 `json:"rule_id"`
+	TenantID       string                 `json:"tenant_id,omitempty"`
+	Type           AlertType              `json:"type"`
+	Severity       AlertSeverity          `json:"severity"`
+	Title          string                 `json:"title"`
+	Description    string                 `json:"description"`
+	TriggeredAt    time.Time              `json:"triggered_at"`
+	LastUpdated    time.Time              `json:"last_updated"`
+	Status         AlertStatus            `json:"status"`
+	AffectedGrants []string               `json:"affected_grants,omitempty"`
+	AffectedUsers  []string               `json:"affected_users,omitempty"`
+	MetricValue    interface{}            `json:"metric_value,omitempty"`
+	Threshold      interface{}            `json:"threshold,omitempty"`
+	AutoResolved   bool                   `json:"auto_resolved"`
+	ResolvedAt     *time.Time             `json:"resolved_at,omitempty"`
+	ResolvedBy     string                 `json:"resolved_by,omitempty"`
+	ResolutionNote string                 `json:"resolution_note,omitempty"`
+	Context        map[string]interface{} `json:"context,omitempty"`
 }
 
 // MonitoringStats tracks monitoring statistics
 type MonitoringStats struct {
-	ActiveGrants              int                          `json:"active_grants"`
-	TotalRequests             int                          `json:"total_requests"`
-	PendingRequests           int                          `json:"pending_requests"`
-	ApprovedRequests          int                          `json:"approved_requests"`
-	DeniedRequests            int                          `json:"denied_requests"`
-	ExpiredGrants             int                          `json:"expired_grants"`
-	RevokedGrants             int                          `json:"revoked_grants"`
-	ActiveElevations          int                          `json:"active_elevations"`
-	BreakGlassAccesses        int                          `json:"break_glass_accesses"`
-	HighRiskActivities        int                          `json:"high_risk_activities"`
-	ActiveAlerts              int                          `json:"active_alerts"`
-	AlertsByType              map[AlertType]int            `json:"alerts_by_type"`
-	AlertsBySeverity          map[AlertSeverity]int        `json:"alerts_by_severity"`
-	ComplianceViolations      int                          `json:"compliance_violations"`
-	AverageRequestTime        time.Duration                `json:"average_request_time"`
-	AverageGrantDuration      time.Duration                `json:"average_grant_duration"`
-	TopRequesters             []UserActivityStat           `json:"top_requesters"`
-	TopApprovers              []UserActivityStat           `json:"top_approvers"`
-	PermissionUsageStats      map[string]int               `json:"permission_usage_stats"`
-	LastUpdated               time.Time                    `json:"last_updated"`
+	ActiveGrants         int                   `json:"active_grants"`
+	TotalRequests        int                   `json:"total_requests"`
+	PendingRequests      int                   `json:"pending_requests"`
+	ApprovedRequests     int                   `json:"approved_requests"`
+	DeniedRequests       int                   `json:"denied_requests"`
+	ExpiredGrants        int                   `json:"expired_grants"`
+	RevokedGrants        int                   `json:"revoked_grants"`
+	ActiveElevations     int                   `json:"active_elevations"`
+	BreakGlassAccesses   int                   `json:"break_glass_accesses"`
+	HighRiskActivities   int                   `json:"high_risk_activities"`
+	ActiveAlerts         int                   `json:"active_alerts"`
+	AlertsByType         map[AlertType]int     `json:"alerts_by_type"`
+	AlertsBySeverity     map[AlertSeverity]int `json:"alerts_by_severity"`
+	ComplianceViolations int                   `json:"compliance_violations"`
+	AverageRequestTime   time.Duration         `json:"average_request_time"`
+	AverageGrantDuration time.Duration         `json:"average_grant_duration"`
+	TopRequesters        []UserActivityStat    `json:"top_requesters"`
+	TopApprovers         []UserActivityStat    `json:"top_approvers"`
+	PermissionUsageStats map[string]int        `json:"permission_usage_stats"`
+	LastUpdated          time.Time             `json:"last_updated"`
 }
 
 // UserActivityStat represents user activity statistics
 type UserActivityStat struct {
-	UserID        string `json:"user_id"`
-	TenantID      string `json:"tenant_id"`
-	Count         int    `json:"count"`
-	LastActivity  time.Time `json:"last_activity"`
+	UserID       string    `json:"user_id"`
+	TenantID     string    `json:"tenant_id"`
+	Count        int       `json:"count"`
+	LastActivity time.Time `json:"last_activity"`
 }
 
 // AlertType defines types of alerts
 type AlertType string
 
 const (
-	AlertTypeUnusualActivity        AlertType = "unusual_activity"
-	AlertTypeHighVolumeRequests     AlertType = "high_volume_requests"
-	AlertTypeBreakGlassUsage        AlertType = "break_glass_usage"
-	AlertTypeElevationAnomaly       AlertType = "elevation_anomaly"
-	AlertTypeComplianceViolation    AlertType = "compliance_violation"
-	AlertTypeSuspiciousPattern      AlertType = "suspicious_pattern"
-	AlertTypeExpiredGrantsExcess    AlertType = "expired_grants_excess"
-	AlertTypeFailedApprovals        AlertType = "failed_approvals"
-	AlertTypePermissionEscalation   AlertType = "permission_escalation"
+	AlertTypeUnusualActivity          AlertType = "unusual_activity"
+	AlertTypeHighVolumeRequests       AlertType = "high_volume_requests"
+	AlertTypeBreakGlassUsage          AlertType = "break_glass_usage"
+	AlertTypeElevationAnomaly         AlertType = "elevation_anomaly"
+	AlertTypeComplianceViolation      AlertType = "compliance_violation"
+	AlertTypeSuspiciousPattern        AlertType = "suspicious_pattern"
+	AlertTypeExpiredGrantsExcess      AlertType = "expired_grants_excess"
+	AlertTypeFailedApprovals          AlertType = "failed_approvals"
+	AlertTypePermissionEscalation     AlertType = "permission_escalation"
 	AlertTypeTimeRestrictionViolation AlertType = "time_restriction_violation"
 )
 
@@ -213,11 +213,11 @@ func (jam *JITAccessMonitor) updateMonitoringStats(ctx context.Context) {
 	// Count requests by status
 	allRequests, _ := jam.accessManager.ListRequests(ctx, nil)
 	stats.TotalRequests = len(allRequests)
-	
+
 	stats.PendingRequests = 0
 	stats.ApprovedRequests = 0
 	stats.DeniedRequests = 0
-	
+
 	for _, request := range allRequests {
 		switch request.Status {
 		case JITAccessRequestStatusPending:
@@ -234,7 +234,7 @@ func (jam *JITAccessMonitor) updateMonitoringStats(ctx context.Context) {
 		elevatedSessions, _ := jam.elevationManager.GetElevatedSessions(ctx, &ElevationFilter{})
 		stats.ActiveElevations = 0
 		stats.BreakGlassAccesses = 0
-		
+
 		for _, session := range elevatedSessions {
 			if session.Status == ElevationStatusActive {
 				stats.ActiveElevations++
@@ -249,7 +249,7 @@ func (jam *JITAccessMonitor) updateMonitoringStats(ctx context.Context) {
 	stats.ActiveAlerts = 0
 	stats.AlertsByType = make(map[AlertType]int)
 	stats.AlertsBySeverity = make(map[AlertSeverity]int)
-	
+
 	for _, alert := range jam.activeAlerts {
 		if alert.Status == AlertStatusActive {
 			stats.ActiveAlerts++
@@ -361,7 +361,7 @@ func (jam *JITAccessMonitor) evaluateBreakGlassUsage(ctx context.Context, rule *
 func (jam *JITAccessMonitor) evaluateUnusualActivity(ctx context.Context, rule *AlertRule) (bool, interface{}, error) {
 	// This is a simplified implementation
 	// In production, this would use machine learning or statistical analysis
-	
+
 	cutoff := time.Now().Add(-rule.TimeWindow)
 	filter := &JITAccessRequestFilter{
 		TenantID: rule.TenantID,
@@ -417,8 +417,8 @@ func (jam *JITAccessMonitor) evaluateElevationAnomaly(ctx context.Context, rule 
 	// Check for anomalies in elevation patterns
 	highLevelElevations := 0
 	for _, session := range sessions {
-		if session.ElevationLevel == ElevationLevelMaximum || 
-		   session.ElevationLevel == ElevationLevelBreakGlass {
+		if session.ElevationLevel == ElevationLevelMaximum ||
+			session.ElevationLevel == ElevationLevelBreakGlass {
 			highLevelElevations++
 		}
 	}
@@ -434,7 +434,7 @@ func (jam *JITAccessMonitor) evaluateElevationAnomaly(ctx context.Context, rule 
 // triggerAlert triggers an alert when a rule condition is met
 func (jam *JITAccessMonitor) triggerAlert(ctx context.Context, rule *AlertRule, value interface{}) {
 	alertID := fmt.Sprintf("alert-%s-%d", rule.ID, time.Now().UnixNano())
-	
+
 	alert := &ActiveAlert{
 		ID:          alertID,
 		RuleID:      rule.ID,
@@ -513,17 +513,17 @@ func (jam *JITAccessMonitor) detectUnusualPatterns(ctx context.Context) {
 // flagComplianceViolation flags a potential compliance violation
 func (jam *JITAccessMonitor) flagComplianceViolation(ctx context.Context, entry JITAuditEntry) {
 	alertID := fmt.Sprintf("compliance-%d", time.Now().UnixNano())
-	
+
 	alert := &ActiveAlert{
-		ID:          alertID,
-		TenantID:    entry.TenantID,
-		Type:        AlertTypeComplianceViolation,
-		Severity:    AlertSeverityCritical,
-		Title:       "Potential Compliance Violation Detected",
-		Description: fmt.Sprintf("High-risk JIT access activity detected: %s", entry.Action),
-		TriggeredAt: time.Now(),
-		LastUpdated: time.Now(),
-		Status:      AlertStatusActive,
+		ID:            alertID,
+		TenantID:      entry.TenantID,
+		Type:          AlertTypeComplianceViolation,
+		Severity:      AlertSeverityCritical,
+		Title:         "Potential Compliance Violation Detected",
+		Description:   fmt.Sprintf("High-risk JIT access activity detected: %s", entry.Action),
+		TriggeredAt:   time.Now(),
+		LastUpdated:   time.Now(),
+		Status:        AlertStatusActive,
 		AffectedUsers: []string{entry.SubjectID},
 		Context: map[string]interface{}{
 			"audit_entry_id": entry.ID,
@@ -551,9 +551,9 @@ func (jam *JITAccessMonitor) cleanupResolvedAlerts() {
 	cutoff := time.Now().Add(-7 * 24 * time.Hour) // Keep alerts for 7 days
 
 	for alertID, alert := range jam.activeAlerts {
-		if alert.Status == AlertStatusResolved && 
-		   alert.ResolvedAt != nil && 
-		   alert.ResolvedAt.Before(cutoff) {
+		if alert.Status == AlertStatusResolved &&
+			alert.ResolvedAt != nil &&
+			alert.ResolvedAt.Before(cutoff) {
 			delete(jam.activeAlerts, alertID)
 		}
 	}

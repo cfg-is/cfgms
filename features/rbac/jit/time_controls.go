@@ -9,12 +9,12 @@ import (
 
 // TimeBasedAccessController manages time-based access controls and automatic expiration
 type TimeBasedAccessController struct {
-	accessManager       *JITAccessManager
-	scheduledTasks      map[string]*ScheduledTask
-	expirationWarnings  map[string]*ExpirationWarning
-	mutex               sync.RWMutex
-	stopChannel         chan struct{}
-	tickerInterval      time.Duration
+	accessManager      *JITAccessManager
+	scheduledTasks     map[string]*ScheduledTask
+	expirationWarnings map[string]*ExpirationWarning
+	mutex              sync.RWMutex
+	stopChannel        chan struct{}
+	tickerInterval     time.Duration
 }
 
 // NewTimeBasedAccessController creates a new time-based access controller
@@ -31,29 +31,29 @@ func NewTimeBasedAccessController(accessManager *JITAccessManager) *TimeBasedAcc
 
 // ScheduledTask represents a scheduled task for JIT access management
 type ScheduledTask struct {
-	ID            string           `json:"id"`
-	Type          TaskType         `json:"type"`
-	ScheduledAt   time.Time        `json:"scheduled_at"`
-	GrantID       string           `json:"grant_id,omitempty"`
-	RequestID     string           `json:"request_id,omitempty"`
-	Action        string           `json:"action"`
-	Status        TaskStatus       `json:"status"`
-	Retries       int              `json:"retries"`
-	MaxRetries    int              `json:"max_retries"`
-	LastAttempt   *time.Time       `json:"last_attempt,omitempty"`
-	LastError     string           `json:"last_error,omitempty"`
-	Metadata      map[string]interface{} `json:"metadata,omitempty"`
+	ID          string                 `json:"id"`
+	Type        TaskType               `json:"type"`
+	ScheduledAt time.Time              `json:"scheduled_at"`
+	GrantID     string                 `json:"grant_id,omitempty"`
+	RequestID   string                 `json:"request_id,omitempty"`
+	Action      string                 `json:"action"`
+	Status      TaskStatus             `json:"status"`
+	Retries     int                    `json:"retries"`
+	MaxRetries  int                    `json:"max_retries"`
+	LastAttempt *time.Time             `json:"last_attempt,omitempty"`
+	LastError   string                 `json:"last_error,omitempty"`
+	Metadata    map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // ExpirationWarning represents a warning about upcoming access expiration
 type ExpirationWarning struct {
-	ID              string    `json:"id"`
-	GrantID         string    `json:"grant_id"`
-	WarningTime     time.Time `json:"warning_time"`
-	ExpirationTime  time.Time `json:"expiration_time"`
+	ID              string        `json:"id"`
+	GrantID         string        `json:"grant_id"`
+	WarningTime     time.Time     `json:"warning_time"`
+	ExpirationTime  time.Time     `json:"expiration_time"`
 	TimeUntilExpiry time.Duration `json:"time_until_expiry"`
-	Sent            bool      `json:"sent"`
-	SentAt          *time.Time `json:"sent_at,omitempty"`
+	Sent            bool          `json:"sent"`
+	SentAt          *time.Time    `json:"sent_at,omitempty"`
 }
 
 // TaskType defines types of scheduled tasks
@@ -131,15 +131,15 @@ func (tbac *TimeBasedAccessController) ScheduleAccessExpiration(ctx context.Cont
 func (tbac *TimeBasedAccessController) scheduleExpirationWarnings(ctx context.Context, grant *JITAccessGrant) error {
 	// Schedule warnings at different intervals before expiration
 	warningIntervals := []time.Duration{
-		24 * time.Hour, // 24 hours before
-		4 * time.Hour,  // 4 hours before
-		1 * time.Hour,  // 1 hour before
+		24 * time.Hour,   // 24 hours before
+		4 * time.Hour,    // 4 hours before
+		1 * time.Hour,    // 1 hour before
 		15 * time.Minute, // 15 minutes before
 	}
 
 	for i, interval := range warningIntervals {
 		warningTime := grant.ExpiresAt.Add(-interval)
-		
+
 		// Only schedule if warning time is in the future
 		if warningTime.After(time.Now()) {
 			warningID := fmt.Sprintf("warning-%s-%d", grant.ID, i)
@@ -378,7 +378,7 @@ func (tbac *TimeBasedAccessController) executeRequestCleanup(ctx context.Context
 	// Only clean up pending requests that have expired
 	if request.Status == JITAccessRequestStatusPending && time.Now().After(request.RequestTTL) {
 		request.Status = JITAccessRequestStatusExpired
-		
+
 		// Audit the expiration
 		_ = tbac.accessManager.auditLogger.LogAccessRequest(ctx, request, "expired")
 	}
@@ -415,8 +415,8 @@ func (tbac *TimeBasedAccessController) cleanupCompletedTasks() {
 	cutoff := time.Now().Add(-24 * time.Hour) // Keep tasks for 24 hours
 
 	for taskID, task := range tbac.scheduledTasks {
-		if (task.Status == TaskStatusCompleted || task.Status == TaskStatusFailed) && 
-		   task.LastAttempt != nil && task.LastAttempt.Before(cutoff) {
+		if (task.Status == TaskStatusCompleted || task.Status == TaskStatusFailed) &&
+			task.LastAttempt != nil && task.LastAttempt.Before(cutoff) {
 			delete(tbac.scheduledTasks, taskID)
 		}
 	}
@@ -492,14 +492,14 @@ type TaskFilter struct {
 
 // TimeBasedAccessStats provides statistics about time-based access control
 type TimeBasedAccessStats struct {
-	ActiveTasks           int                      `json:"active_tasks"`
-	CompletedTasks        int                      `json:"completed_tasks"`
-	FailedTasks          int                      `json:"failed_tasks"`
-	PendingWarnings      int                      `json:"pending_warnings"`
-	SentWarnings         int                      `json:"sent_warnings"`
-	TaskTypeBreakdown    map[TaskType]int         `json:"task_type_breakdown"`
-	TaskStatusBreakdown  map[TaskStatus]int       `json:"task_status_breakdown"`
-	GeneratedAt          time.Time                `json:"generated_at"`
+	ActiveTasks         int                `json:"active_tasks"`
+	CompletedTasks      int                `json:"completed_tasks"`
+	FailedTasks         int                `json:"failed_tasks"`
+	PendingWarnings     int                `json:"pending_warnings"`
+	SentWarnings        int                `json:"sent_warnings"`
+	TaskTypeBreakdown   map[TaskType]int   `json:"task_type_breakdown"`
+	TaskStatusBreakdown map[TaskStatus]int `json:"task_status_breakdown"`
+	GeneratedAt         time.Time          `json:"generated_at"`
 }
 
 // GetTimeBasedAccessStats generates statistics about time-based access control

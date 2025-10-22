@@ -10,10 +10,10 @@ import (
 
 // AuthEngine implements the AuthorizationEngine interface
 type AuthEngine struct {
-	permissionStore     PermissionStore
-	roleStore          RoleStore
-	subjectStore       SubjectStore
-	assignmentStore    RoleAssignmentStore
+	permissionStore PermissionStore
+	roleStore       RoleStore
+	subjectStore    SubjectStore
+	assignmentStore RoleAssignmentStore
 }
 
 // NewAuthEngine creates a new authorization engine
@@ -24,7 +24,7 @@ func NewAuthEngine(
 	assignmentStore RoleAssignmentStore,
 ) *AuthEngine {
 	return &AuthEngine{
-		permissionStore:  permissionStore,
+		permissionStore: permissionStore,
 		roleStore:       roleStore,
 		subjectStore:    subjectStore,
 		assignmentStore: assignmentStore,
@@ -65,7 +65,7 @@ func (e *AuthEngine) CheckPermission(ctx context.Context, request *common.Access
 	// Check each role for the required permission
 	for _, role := range roles {
 		appliedRoles = append(appliedRoles, role.Name)
-		
+
 		// Get role permissions
 		permissions, err := e.roleStore.GetRolePermissions(ctx, role.Id)
 		if err != nil {
@@ -77,10 +77,10 @@ func (e *AuthEngine) CheckPermission(ctx context.Context, request *common.Access
 			if e.permissionMatches(perm, request.PermissionId) {
 				appliedPermissions = append(appliedPermissions, perm.Name)
 				return &common.AccessResponse{
-					Granted:              true,
-					Reason:               fmt.Sprintf("Access granted via role '%s' with permission '%s'", role.Name, perm.Name),
-					AppliedRoles:         appliedRoles,
-					AppliedPermissions:   appliedPermissions,
+					Granted:            true,
+					Reason:             fmt.Sprintf("Access granted via role '%s' with permission '%s'", role.Name, perm.Name),
+					AppliedRoles:       appliedRoles,
+					AppliedPermissions: appliedPermissions,
 				}, nil
 			}
 		}
@@ -102,7 +102,7 @@ func (e *AuthEngine) GetSubjectPermissions(ctx context.Context, subjectID, tenan
 
 	// Collect all permissions from all roles (deduplicating)
 	permissionMap := make(map[string]*common.Permission)
-	
+
 	for _, role := range roles {
 		permissions, err := e.roleStore.GetRolePermissions(ctx, role.Id)
 		if err != nil {

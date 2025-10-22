@@ -6,46 +6,46 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/features/rbac/zerotrust"
+	"github.com/cfgis/cfgms/features/tenant"
 )
 
 // TenantSecurityPolicyEngine manages and enforces tenant-specific security policies with zero-trust overlay
 type TenantSecurityPolicyEngine struct {
-	tenantManager    *tenant.Manager
-	policies         map[string]*TenantSecurityPolicy
-	policyRules      map[string][]SecurityRule
-	auditLogger      *TenantSecurityAuditLogger
-	isolationEngine  *TenantIsolationEngine
-	mutex            sync.RWMutex
-	
+	tenantManager   *tenant.Manager
+	policies        map[string]*TenantSecurityPolicy
+	policyRules     map[string][]SecurityRule
+	auditLogger     *TenantSecurityAuditLogger
+	isolationEngine *TenantIsolationEngine
+	mutex           sync.RWMutex
+
 	// Zero-trust policy overlay integration
-	zeroTrustEngine     *zerotrust.ZeroTrustPolicyEngine
-	zeroTrustEnabled    bool
-	zeroTrustMode       TenantZeroTrustMode
-	policyCoordination  *TenantPolicyCoordination
+	zeroTrustEngine    *zerotrust.ZeroTrustPolicyEngine
+	zeroTrustEnabled   bool
+	zeroTrustMode      TenantZeroTrustMode
+	policyCoordination *TenantPolicyCoordination
 }
 
 // TenantSecurityPolicy defines comprehensive security policies for a tenant
 type TenantSecurityPolicy struct {
-	ID                    string                     `json:"id"`
-	TenantID              string                     `json:"tenant_id"`
-	Name                  string                     `json:"name"`
-	Description           string                     `json:"description"`
-	Version               string                     `json:"version"`
-	DataSecurityRules     []DataSecurityRule         `json:"data_security_rules"`
-	AccessControlRules    []AccessControlRule        `json:"access_control_rules"`
-	NetworkSecurityRules  []NetworkSecurityRule      `json:"network_security_rules"`
-	ComplianceRules       []ComplianceRule           `json:"compliance_rules"`
-	IncidentResponseRules []IncidentResponseRule     `json:"incident_response_rules"`
-	MonitoringRules       []MonitoringRule           `json:"monitoring_rules"`
-	Status                PolicyStatus               `json:"status"`
-	EnforcementMode       PolicyEnforcementMode      `json:"enforcement_mode"`
-	CreatedBy             string                     `json:"created_by"`
-	CreatedAt             time.Time                  `json:"created_at"`
-	UpdatedAt             time.Time                  `json:"updated_at"`
-	EffectiveFrom         time.Time                  `json:"effective_from"`
-	ExpiresAt             *time.Time                 `json:"expires_at,omitempty"`
+	ID                    string                 `json:"id"`
+	TenantID              string                 `json:"tenant_id"`
+	Name                  string                 `json:"name"`
+	Description           string                 `json:"description"`
+	Version               string                 `json:"version"`
+	DataSecurityRules     []DataSecurityRule     `json:"data_security_rules"`
+	AccessControlRules    []AccessControlRule    `json:"access_control_rules"`
+	NetworkSecurityRules  []NetworkSecurityRule  `json:"network_security_rules"`
+	ComplianceRules       []ComplianceRule       `json:"compliance_rules"`
+	IncidentResponseRules []IncidentResponseRule `json:"incident_response_rules"`
+	MonitoringRules       []MonitoringRule       `json:"monitoring_rules"`
+	Status                PolicyStatus           `json:"status"`
+	EnforcementMode       PolicyEnforcementMode  `json:"enforcement_mode"`
+	CreatedBy             string                 `json:"created_by"`
+	CreatedAt             time.Time              `json:"created_at"`
+	UpdatedAt             time.Time              `json:"updated_at"`
+	EffectiveFrom         time.Time              `json:"effective_from"`
+	ExpiresAt             *time.Time             `json:"expires_at,omitempty"`
 }
 
 // SecurityRule is the base interface for all security rules
@@ -59,54 +59,54 @@ type SecurityRule interface {
 
 // DataSecurityRule defines rules for data protection and classification
 type DataSecurityRule struct {
-	ID                string            `json:"id"`
-	Name              string            `json:"name"`
-	Description       string            `json:"description"`
-	Severity          RuleSeverity      `json:"severity"`
-	DataTypes         []string          `json:"data_types"`         // "pii", "phi", "financial", etc.
-	Classification    DataClassification `json:"classification"`
-	EncryptionRequired bool             `json:"encryption_required"`
-	EncryptionLevel   string            `json:"encryption_level"`   // "aes128", "aes256", "fips"
-	AccessRestrictions []string         `json:"access_restrictions"`
-	RetentionPeriod   int               `json:"retention_period"`   // Days
-	Conditions        []RuleCondition   `json:"conditions"`
+	ID                 string             `json:"id"`
+	Name               string             `json:"name"`
+	Description        string             `json:"description"`
+	Severity           RuleSeverity       `json:"severity"`
+	DataTypes          []string           `json:"data_types"` // "pii", "phi", "financial", etc.
+	Classification     DataClassification `json:"classification"`
+	EncryptionRequired bool               `json:"encryption_required"`
+	EncryptionLevel    string             `json:"encryption_level"` // "aes128", "aes256", "fips"
+	AccessRestrictions []string           `json:"access_restrictions"`
+	RetentionPeriod    int                `json:"retention_period"` // Days
+	Conditions         []RuleCondition    `json:"conditions"`
 }
 
 // AccessControlRule defines rules for access control and authorization
 type AccessControlRule struct {
-	ID                    string          `json:"id"`
-	Name                  string          `json:"name"`
-	Description           string          `json:"description"`
-	Severity              RuleSeverity    `json:"severity"`
-	ResourceTypes         []string        `json:"resource_types"`
-	RequiredPermissions   []string        `json:"required_permissions"`
-	ForbiddenActions      []string        `json:"forbidden_actions"`
-	MaxConcurrentSessions int             `json:"max_concurrent_sessions"`
-	SessionTimeout        time.Duration   `json:"session_timeout"`
-	MFARequired           bool            `json:"mfa_required"`
-	IPWhitelist           []string        `json:"ip_whitelist"`
-	IPBlacklist           []string        `json:"ip_blacklist"`
+	ID                    string           `json:"id"`
+	Name                  string           `json:"name"`
+	Description           string           `json:"description"`
+	Severity              RuleSeverity     `json:"severity"`
+	ResourceTypes         []string         `json:"resource_types"`
+	RequiredPermissions   []string         `json:"required_permissions"`
+	ForbiddenActions      []string         `json:"forbidden_actions"`
+	MaxConcurrentSessions int              `json:"max_concurrent_sessions"`
+	SessionTimeout        time.Duration    `json:"session_timeout"`
+	MFARequired           bool             `json:"mfa_required"`
+	IPWhitelist           []string         `json:"ip_whitelist"`
+	IPBlacklist           []string         `json:"ip_blacklist"`
 	TimeRestrictions      *TimeRestriction `json:"time_restrictions,omitempty"`
-	Conditions            []RuleCondition `json:"conditions"`
+	Conditions            []RuleCondition  `json:"conditions"`
 }
 
 // NetworkSecurityRule defines rules for network-level security
 type NetworkSecurityRule struct {
-	ID                     string          `json:"id"`
-	Name                   string          `json:"name"`
-	Description            string          `json:"description"`
-	Severity               RuleSeverity    `json:"severity"`
-	RequireTLS             bool            `json:"require_tls"`
-	MinTLSVersion          string          `json:"min_tls_version"`
-	RequireMutualTLS       bool            `json:"require_mutual_tls"`
-	AllowedProtocols       []string        `json:"allowed_protocols"`
-	BlockedProtocols       []string        `json:"blocked_protocols"`
-	AllowedPorts           []int           `json:"allowed_ports"`
-	BlockedPorts           []int           `json:"blocked_ports"`
-	RateLimits             []RateLimit     `json:"rate_limits"`
-	RequireVPNAccess       bool            `json:"require_vpn_access"`
-	GeoRestrictions        []GeoRestriction `json:"geo_restrictions"`
-	Conditions             []RuleCondition `json:"conditions"`
+	ID               string           `json:"id"`
+	Name             string           `json:"name"`
+	Description      string           `json:"description"`
+	Severity         RuleSeverity     `json:"severity"`
+	RequireTLS       bool             `json:"require_tls"`
+	MinTLSVersion    string           `json:"min_tls_version"`
+	RequireMutualTLS bool             `json:"require_mutual_tls"`
+	AllowedProtocols []string         `json:"allowed_protocols"`
+	BlockedProtocols []string         `json:"blocked_protocols"`
+	AllowedPorts     []int            `json:"allowed_ports"`
+	BlockedPorts     []int            `json:"blocked_ports"`
+	RateLimits       []RateLimit      `json:"rate_limits"`
+	RequireVPNAccess bool             `json:"require_vpn_access"`
+	GeoRestrictions  []GeoRestriction `json:"geo_restrictions"`
+	Conditions       []RuleCondition  `json:"conditions"`
 }
 
 // ComplianceRule defines rules for regulatory compliance
@@ -115,9 +115,9 @@ type ComplianceRule struct {
 	Name                 string          `json:"name"`
 	Description          string          `json:"description"`
 	Severity             RuleSeverity    `json:"severity"`
-	Framework            string          `json:"framework"`        // "hipaa", "gdpr", "sox", etc.
-	Requirement          string          `json:"requirement"`      // Specific requirement ID
-	Controls             []string        `json:"controls"`         // Control IDs
+	Framework            string          `json:"framework"`   // "hipaa", "gdpr", "sox", etc.
+	Requirement          string          `json:"requirement"` // Specific requirement ID
+	Controls             []string        `json:"controls"`    // Control IDs
 	EvidenceRequired     bool            `json:"evidence_required"`
 	AuditFrequency       time.Duration   `json:"audit_frequency"`
 	AutoRemediation      bool            `json:"auto_remediation"`
@@ -128,18 +128,18 @@ type ComplianceRule struct {
 
 // IncidentResponseRule defines rules for incident response and remediation
 type IncidentResponseRule struct {
-	ID                  string              `json:"id"`
-	Name                string              `json:"name"`
-	Description         string              `json:"description"`
-	Severity            RuleSeverity        `json:"severity"`
-	TriggerEvents       []string            `json:"trigger_events"`
-	ResponseActions     []ResponseAction    `json:"response_actions"`
-	EscalationRules     []EscalationRule    `json:"escalation_rules"`
-	NotificationRules   []NotificationRule  `json:"notification_rules"`
-	AutoRemediation     bool                `json:"auto_remediation"`
-	MaxResponseTime     time.Duration       `json:"max_response_time"`
-	RequireManualApproval bool              `json:"require_manual_approval"`
-	Conditions          []RuleCondition     `json:"conditions"`
+	ID                    string             `json:"id"`
+	Name                  string             `json:"name"`
+	Description           string             `json:"description"`
+	Severity              RuleSeverity       `json:"severity"`
+	TriggerEvents         []string           `json:"trigger_events"`
+	ResponseActions       []ResponseAction   `json:"response_actions"`
+	EscalationRules       []EscalationRule   `json:"escalation_rules"`
+	NotificationRules     []NotificationRule `json:"notification_rules"`
+	AutoRemediation       bool               `json:"auto_remediation"`
+	MaxResponseTime       time.Duration      `json:"max_response_time"`
+	RequireManualApproval bool               `json:"require_manual_approval"`
+	Conditions            []RuleCondition    `json:"conditions"`
 }
 
 // MonitoringRule defines rules for security monitoring and alerting
@@ -158,18 +158,20 @@ type MonitoringRule struct {
 
 // Supporting types
 type PolicyStatus string
+
 const (
-	PolicyStatusDraft    PolicyStatus = "draft"
-	PolicyStatusActive   PolicyStatus = "active"
+	PolicyStatusDraft     PolicyStatus = "draft"
+	PolicyStatusActive    PolicyStatus = "active"
 	PolicyStatusSuspended PolicyStatus = "suspended"
-	PolicyStatusArchived PolicyStatus = "archived"
+	PolicyStatusArchived  PolicyStatus = "archived"
 )
 
 type PolicyEnforcementMode string
+
 const (
-	PolicyEnforcementModeMonitor PolicyEnforcementMode = "monitor"  // Log only
-	PolicyEnforcementModeWarn   PolicyEnforcementMode = "warn"     // Warn but allow
-	PolicyEnforcementModeBlock  PolicyEnforcementMode = "block"    // Block action
+	PolicyEnforcementModeMonitor PolicyEnforcementMode = "monitor" // Log only
+	PolicyEnforcementModeWarn    PolicyEnforcementMode = "warn"    // Warn but allow
+	PolicyEnforcementModeBlock   PolicyEnforcementMode = "block"   // Block action
 )
 
 // TenantZeroTrustMode defines how zero-trust policies overlay tenant security policies
@@ -178,28 +180,28 @@ type TenantZeroTrustMode string
 const (
 	// TenantZeroTrustModeDisabled disables zero-trust policy overlay for tenant security
 	TenantZeroTrustModeDisabled TenantZeroTrustMode = "disabled"
-	
+
 	// TenantZeroTrustModeOverlay applies zero-trust policies as an additional security layer
 	TenantZeroTrustModeOverlay TenantZeroTrustMode = "overlay"
-	
-	// TenantZeroTrustModeEnforced uses zero-trust policies to override tenant security decisions  
+
+	// TenantZeroTrustModeEnforced uses zero-trust policies to override tenant security decisions
 	TenantZeroTrustModeEnforced TenantZeroTrustMode = "enforced"
-	
+
 	// TenantZeroTrustModeGoverning makes zero-trust policies the primary security control with tenant policies as fallback
 	TenantZeroTrustModeGoverning TenantZeroTrustMode = "governing"
-	
+
 	// TenantZeroTrustModeIntegrated deeply integrates zero-trust and tenant policies into unified decisions
 	TenantZeroTrustModeIntegrated TenantZeroTrustMode = "integrated"
 )
 
 // TenantPolicyCoordination manages coordination between tenant security policies and zero-trust policies
 type TenantPolicyCoordination struct {
-	CoordinationMode      TenantCoordinationMode     `json:"coordination_mode"`
-	PolicyPriority        PolicyPriority             `json:"policy_priority"`
-	ConflictResolution    ConflictResolutionStrategy `json:"conflict_resolution"`
-	ValidationRules       []CoordinationRule         `json:"validation_rules"`
-	AuditingEnabled       bool                       `json:"auditing_enabled"`
-	FailSecure           bool                       `json:"fail_secure"`
+	CoordinationMode   TenantCoordinationMode     `json:"coordination_mode"`
+	PolicyPriority     PolicyPriority             `json:"policy_priority"`
+	ConflictResolution ConflictResolutionStrategy `json:"conflict_resolution"`
+	ValidationRules    []CoordinationRule         `json:"validation_rules"`
+	AuditingEnabled    bool                       `json:"auditing_enabled"`
+	FailSecure         bool                       `json:"fail_secure"`
 }
 
 // TenantCoordinationMode defines how tenant and zero-trust policies coordinate
@@ -215,9 +217,9 @@ const (
 type PolicyPriority string
 
 const (
-	PolicyPriorityTenantFirst     PolicyPriority = "tenant_first"     // Tenant policies take precedence
-	PolicyPriorityZeroTrustFirst  PolicyPriority = "zero_trust_first" // Zero-trust policies take precedence
-	PolicyPriorityBothRequired    PolicyPriority = "both_required"    // Both policies must pass
+	PolicyPriorityTenantFirst      PolicyPriority = "tenant_first"      // Tenant policies take precedence
+	PolicyPriorityZeroTrustFirst   PolicyPriority = "zero_trust_first"  // Zero-trust policies take precedence
+	PolicyPriorityBothRequired     PolicyPriority = "both_required"     // Both policies must pass
 	PolicyPriorityEitherSufficient PolicyPriority = "either_sufficient" // Either policy passing is sufficient
 )
 
@@ -233,16 +235,17 @@ const (
 
 // CoordinationRule defines rules for policy coordination
 type CoordinationRule struct {
-	ID           string          `json:"id"`
-	Name         string          `json:"name"`
-	Description  string          `json:"description"`
-	Condition    string          `json:"condition"`
-	Action       string          `json:"action"`
-	Priority     int             `json:"priority"`
-	Parameters   map[string]interface{} `json:"parameters"`
+	ID          string                 `json:"id"`
+	Name        string                 `json:"name"`
+	Description string                 `json:"description"`
+	Condition   string                 `json:"condition"`
+	Action      string                 `json:"action"`
+	Priority    int                    `json:"priority"`
+	Parameters  map[string]interface{} `json:"parameters"`
 }
 
 type RuleSeverity string
+
 const (
 	RuleSeverityLow      RuleSeverity = "low"
 	RuleSeverityMedium   RuleSeverity = "medium"
@@ -251,6 +254,7 @@ const (
 )
 
 type DataClassification string
+
 const (
 	DataClassificationPublic       DataClassification = "public"
 	DataClassificationInternal     DataClassification = "internal"
@@ -271,16 +275,16 @@ type RateLimit struct {
 }
 
 type GeoRestriction struct {
-	Type      string   `json:"type"`      // "allow" or "block"
+	Type      string   `json:"type"` // "allow" or "block"
 	Countries []string `json:"countries"`
 	Regions   []string `json:"regions"`
 }
 
 type ResponseAction struct {
-	Type        string            `json:"type"`
-	Parameters  map[string]string `json:"parameters"`
-	Priority    int               `json:"priority"`
-	Timeout     time.Duration     `json:"timeout"`
+	Type       string            `json:"type"`
+	Parameters map[string]string `json:"parameters"`
+	Priority   int               `json:"priority"`
+	Timeout    time.Duration     `json:"timeout"`
 }
 
 type EscalationRule struct {
@@ -290,17 +294,17 @@ type EscalationRule struct {
 }
 
 type Threshold struct {
-	Metric    string      `json:"metric"`
-	Operator  string      `json:"operator"`
-	Value     interface{} `json:"value"`
+	Metric     string        `json:"metric"`
+	Operator   string        `json:"operator"`
+	Value      interface{}   `json:"value"`
 	TimeWindow time.Duration `json:"time_window"`
 }
 
 type AlertRule struct {
-	Condition   string   `json:"condition"`
-	Recipients  []string `json:"recipients"`
-	Channels    []string `json:"channels"`
-	Template    string   `json:"template"`
+	Condition  string   `json:"condition"`
+	Recipients []string `json:"recipients"`
+	Channels   []string `json:"channels"`
+	Template   string   `json:"template"`
 }
 
 // NewTenantSecurityPolicyEngine creates a new tenant security policy engine
@@ -312,7 +316,7 @@ func NewTenantSecurityPolicyEngine(tenantManager *tenant.Manager, auditLogger *T
 		auditLogger:     auditLogger,
 		isolationEngine: isolationEngine,
 		mutex:           sync.RWMutex{},
-		
+
 		// Zero-trust defaults
 		zeroTrustEngine:    nil,
 		zeroTrustEnabled:   false,
@@ -325,11 +329,11 @@ func NewTenantSecurityPolicyEngine(tenantManager *tenant.Manager, auditLogger *T
 func (tspe *TenantSecurityPolicyEngine) EnableZeroTrustOverlay(engine *zerotrust.ZeroTrustPolicyEngine, mode TenantZeroTrustMode, coordination *TenantPolicyCoordination) {
 	tspe.mutex.Lock()
 	defer tspe.mutex.Unlock()
-	
+
 	tspe.zeroTrustEngine = engine
 	tspe.zeroTrustMode = mode
 	tspe.zeroTrustEnabled = (mode != TenantZeroTrustModeDisabled && engine != nil)
-	
+
 	if coordination != nil {
 		tspe.policyCoordination = coordination
 	}
@@ -339,7 +343,7 @@ func (tspe *TenantSecurityPolicyEngine) EnableZeroTrustOverlay(engine *zerotrust
 func (tspe *TenantSecurityPolicyEngine) SetZeroTrustMode(mode TenantZeroTrustMode) {
 	tspe.mutex.Lock()
 	defer tspe.mutex.Unlock()
-	
+
 	tspe.zeroTrustMode = mode
 	tspe.zeroTrustEnabled = (mode != TenantZeroTrustModeDisabled && tspe.zeroTrustEngine != nil)
 }
@@ -395,7 +399,7 @@ func (tspe *TenantSecurityPolicyEngine) CreateSecurityPolicy(ctx context.Context
 // EvaluateSecurityPolicy evaluates a security request against tenant policies with zero-trust overlay
 func (tspe *TenantSecurityPolicyEngine) EvaluateSecurityPolicy(ctx context.Context, request *SecurityEvaluationRequest) (*SecurityEvaluationResult, error) {
 	startTime := time.Now()
-	
+
 	// Step 1: Evaluate standard tenant security policy
 	tenantResult, err := tspe.evaluateTenantSecurityPolicy(ctx, request)
 	if err != nil {
@@ -521,64 +525,64 @@ func (tspe *TenantSecurityPolicyEngine) evaluateTenantSecurityPolicy(ctx context
 func (tspe *TenantSecurityPolicyEngine) evaluateZeroTrustOverlay(ctx context.Context, request *SecurityEvaluationRequest, tenantResult *SecurityEvaluationResult) (*ZeroTrustOverlayResult, error) {
 	// Convert security evaluation request to zero-trust access request
 	zeroTrustRequest := tspe.convertToZeroTrustRequest(request, tenantResult)
-	
+
 	// Evaluate zero-trust policies
 	zeroTrustResponse, err := tspe.zeroTrustEngine.EvaluateAccess(ctx, zeroTrustRequest)
 	if err != nil {
 		return nil, fmt.Errorf("zero-trust policy evaluation failed: %w", err)
 	}
-	
+
 	// Create overlay result
 	overlayResult := &ZeroTrustOverlayResult{
-		OverlayMode:         tspe.zeroTrustMode,
-		ZeroTrustResponse:   zeroTrustResponse,
-		TenantGranted:       tenantResult.Allowed,
-		ZeroTrustGranted:    zeroTrustResponse.Granted,
-		ConflictDetected:    tenantResult.Allowed != zeroTrustResponse.Granted,
-		EvaluationTime:      time.Now(),
-		ProcessingTime:      time.Duration(zeroTrustResponse.ProcessingTime.Nanoseconds()),
+		OverlayMode:       tspe.zeroTrustMode,
+		ZeroTrustResponse: zeroTrustResponse,
+		TenantGranted:     tenantResult.Allowed,
+		ZeroTrustGranted:  zeroTrustResponse.Granted,
+		ConflictDetected:  tenantResult.Allowed != zeroTrustResponse.Granted,
+		EvaluationTime:    time.Now(),
+		ProcessingTime:    time.Duration(zeroTrustResponse.ProcessingTime.Nanoseconds()),
 	}
-	
+
 	// Calculate alignment score between tenant and zero-trust policies
 	overlayResult.AlignmentScore = tspe.calculatePolicyAlignment(tenantResult, zeroTrustResponse)
-	
+
 	// Determine recommended action based on overlay mode
 	overlayResult.RecommendedAction = tspe.determineOverlayAction(tenantResult.Allowed, zeroTrustResponse.Granted)
 	overlayResult.OverlayReason = tspe.buildOverlayReason(tenantResult, zeroTrustResponse, overlayResult.AlignmentScore)
-	
+
 	return overlayResult, nil
 }
 
 // coordinatePolicyResults coordinates tenant and zero-trust policy results into a final decision
 func (tspe *TenantSecurityPolicyEngine) coordinatePolicyResults(ctx context.Context, tenantResult *SecurityEvaluationResult, overlayResult *ZeroTrustOverlayResult) *SecurityEvaluationResult {
 	var finalResult *SecurityEvaluationResult
-	
+
 	// Apply coordination logic based on mode and priority
 	switch tspe.zeroTrustMode {
 	case TenantZeroTrustModeOverlay:
 		finalResult = tspe.applyOverlayMode(tenantResult, overlayResult)
-		
+
 	case TenantZeroTrustModeEnforced:
 		finalResult = tspe.applyEnforcedMode(tenantResult, overlayResult)
-		
+
 	case TenantZeroTrustModeGoverning:
 		finalResult = tspe.applyGoverningMode(tenantResult, overlayResult)
-		
+
 	case TenantZeroTrustModeIntegrated:
 		finalResult = tspe.applyIntegratedMode(tenantResult, overlayResult)
-		
+
 	default: // TenantZeroTrustModeDisabled
 		finalResult = tenantResult
 	}
-	
+
 	// Apply conflict resolution if there's a conflict
 	if overlayResult.ConflictDetected {
 		finalResult = tspe.applyConflictResolution(finalResult, tenantResult, overlayResult)
 	}
-	
+
 	// Audit the coordinated evaluation
 	_ = tspe.auditLogger.LogZeroTrustOverlayEvaluation(ctx, tenantResult.Request, finalResult)
-	
+
 	return finalResult
 }
 
@@ -672,28 +676,28 @@ func (tspe *TenantSecurityPolicyEngine) validateSecurityPolicy(ctx context.Conte
 
 // Supporting evaluation types
 type SecurityEvaluationRequest struct {
-	TenantID        string            `json:"tenant_id"`
-	SubjectID       string            `json:"subject_id"`
-	Action          string            `json:"action"`
-	ResourceType    string            `json:"resource_type"`
-	ResourceID      string            `json:"resource_id"`
-	Context         map[string]string `json:"context"`
-	Permissions     []string          `json:"permissions"`
-	DataClassification string         `json:"data_classification,omitempty"`
+	TenantID           string            `json:"tenant_id"`
+	SubjectID          string            `json:"subject_id"`
+	Action             string            `json:"action"`
+	ResourceType       string            `json:"resource_type"`
+	ResourceID         string            `json:"resource_id"`
+	Context            map[string]string `json:"context"`
+	Permissions        []string          `json:"permissions"`
+	DataClassification string            `json:"data_classification,omitempty"`
 }
 
 // ZeroTrustOverlayResult contains the results of zero-trust policy overlay evaluation
 type ZeroTrustOverlayResult struct {
-	OverlayMode         TenantZeroTrustMode                `json:"overlay_mode"`
-	ZeroTrustResponse   *zerotrust.ZeroTrustAccessResponse `json:"zero_trust_response"`
-	TenantGranted       bool                               `json:"tenant_granted"`
-	ZeroTrustGranted    bool                               `json:"zero_trust_granted"`
-	ConflictDetected    bool                               `json:"conflict_detected"`
-	AlignmentScore      float64                            `json:"alignment_score"`
-	RecommendedAction   string                             `json:"recommended_action"`
-	OverlayReason       string                             `json:"overlay_reason"`
-	EvaluationTime      time.Time                          `json:"evaluation_time"`
-	ProcessingTime      time.Duration                      `json:"processing_time"`
+	OverlayMode       TenantZeroTrustMode                `json:"overlay_mode"`
+	ZeroTrustResponse *zerotrust.ZeroTrustAccessResponse `json:"zero_trust_response"`
+	TenantGranted     bool                               `json:"tenant_granted"`
+	ZeroTrustGranted  bool                               `json:"zero_trust_granted"`
+	ConflictDetected  bool                               `json:"conflict_detected"`
+	AlignmentScore    float64                            `json:"alignment_score"`
+	RecommendedAction string                             `json:"recommended_action"`
+	OverlayReason     string                             `json:"overlay_reason"`
+	EvaluationTime    time.Time                          `json:"evaluation_time"`
+	ProcessingTime    time.Duration                      `json:"processing_time"`
 }
 
 // HasPermission checks if the request has a specific permission
@@ -707,16 +711,16 @@ func (ser *SecurityEvaluationRequest) HasPermission(permission string) bool {
 }
 
 type SecurityEvaluationResult struct {
-	Request        *SecurityEvaluationRequest `json:"request"`
-	EvaluationTime time.Time                  `json:"evaluation_time"`
-	Allowed        bool                       `json:"allowed"`
-	Decision       string                     `json:"decision"`
-	BlockReason    string                     `json:"block_reason,omitempty"`
-	WarningMessage string                     `json:"warning_message,omitempty"`
-	AppliedRules   []string                   `json:"applied_rules"`
-	Violations     []RuleViolation            `json:"violations"`
-	ZeroTrustOverlay *ZeroTrustOverlayResult  `json:"zero_trust_overlay,omitempty"`
-	ProcessingTime time.Duration              `json:"processing_time"`
+	Request          *SecurityEvaluationRequest `json:"request"`
+	EvaluationTime   time.Time                  `json:"evaluation_time"`
+	Allowed          bool                       `json:"allowed"`
+	Decision         string                     `json:"decision"`
+	BlockReason      string                     `json:"block_reason,omitempty"`
+	WarningMessage   string                     `json:"warning_message,omitempty"`
+	AppliedRules     []string                   `json:"applied_rules"`
+	Violations       []RuleViolation            `json:"violations"`
+	ZeroTrustOverlay *ZeroTrustOverlayResult    `json:"zero_trust_overlay,omitempty"`
+	ProcessingTime   time.Duration              `json:"processing_time"`
 }
 
 type RuleViolation struct {
@@ -741,9 +745,9 @@ type BaseRule struct {
 	Severity    RuleSeverity `json:"severity"`
 }
 
-func (br *BaseRule) GetID() string          { return br.ID }
-func (br *BaseRule) GetName() string        { return br.Name }
-func (br *BaseRule) GetDescription() string { return br.Description }
+func (br *BaseRule) GetID() string             { return br.ID }
+func (br *BaseRule) GetName() string           { return br.Name }
+func (br *BaseRule) GetDescription() string    { return br.Description }
 func (br *BaseRule) GetSeverity() RuleSeverity { return br.Severity }
 
 // Compiled rule implementations
@@ -785,7 +789,7 @@ func (cacr *CompiledAccessControlRule) Evaluate(ctx context.Context, request *Se
 		result.Passed = false
 		result.Description = "Multi-factor authentication is required"
 		result.Details = map[string]interface{}{
-			"mfa_required":  true,
+			"mfa_required": true,
 			"mfa_verified": request.Context["mfa_verified"],
 		}
 	}
@@ -819,15 +823,15 @@ func (tsal *TenantSecurityAuditLogger) LogPolicyEvaluation(ctx context.Context, 
 	}
 
 	entry := TenantSecurityAuditEntry{
-		ID:        fmt.Sprintf("eval-%d", time.Now().UnixNano()),
-		Timestamp: time.Now(),
-		EventType: TenantSecurityEventAccessAttempt,
-		TenantID:  request.TenantID,
-		SubjectID: request.SubjectID,
+		ID:         fmt.Sprintf("eval-%d", time.Now().UnixNano()),
+		Timestamp:  time.Now(),
+		EventType:  TenantSecurityEventAccessAttempt,
+		TenantID:   request.TenantID,
+		SubjectID:  request.SubjectID,
 		ResourceID: request.ResourceID,
-		Action:    request.Action,
-		Result:    result.Decision,
-		Severity:  severity,
+		Action:     request.Action,
+		Result:     result.Decision,
+		Severity:   severity,
 		Details: map[string]interface{}{
 			"allowed":       result.Allowed,
 			"violations":    len(result.Violations),
@@ -843,15 +847,15 @@ func (tsal *TenantSecurityAuditLogger) LogZeroTrustOverlayEvaluation(ctx context
 	if !result.Allowed {
 		severity = AuditSeverityWarning
 	}
-	
+
 	details := map[string]interface{}{
-		"final_allowed":     result.Allowed,
-		"final_decision":    result.Decision,
-		"violations":        len(result.Violations),
-		"applied_rules":     result.AppliedRules,
+		"final_allowed":      result.Allowed,
+		"final_decision":     result.Decision,
+		"violations":         len(result.Violations),
+		"applied_rules":      result.AppliedRules,
 		"processing_time_ms": result.ProcessingTime.Milliseconds(),
 	}
-	
+
 	if result.ZeroTrustOverlay != nil {
 		details["overlay_mode"] = result.ZeroTrustOverlay.OverlayMode
 		details["tenant_granted"] = result.ZeroTrustOverlay.TenantGranted
@@ -907,14 +911,14 @@ func (tspe *TenantSecurityPolicyEngine) convertToZeroTrustRequest(request *Secur
 	if zeroTrustRequest.SubjectAttributes == nil {
 		zeroTrustRequest.SubjectAttributes = make(map[string]interface{})
 	}
-	
+
 	zeroTrustRequest.SubjectAttributes["tenant_id"] = request.TenantID
 	zeroTrustRequest.SubjectAttributes["subject_id"] = request.SubjectID
 	zeroTrustRequest.SubjectAttributes["tenant_granted"] = tenantResult.Allowed
 	zeroTrustRequest.SubjectAttributes["tenant_decision"] = tenantResult.Decision
 	zeroTrustRequest.SubjectAttributes["tenant_violations"] = len(tenantResult.Violations)
 	zeroTrustRequest.SubjectAttributes["permissions"] = request.Permissions
-	
+
 	if request.DataClassification != "" {
 		zeroTrustRequest.SubjectAttributes["data_classification"] = request.DataClassification
 	}
@@ -922,19 +926,19 @@ func (tspe *TenantSecurityPolicyEngine) convertToZeroTrustRequest(request *Secur
 	// Extract environmental context from request context
 	if len(request.Context) > 0 {
 		zeroTrustRequest.EnvironmentContext = &zerotrust.EnvironmentContext{}
-		
+
 		if ip, exists := request.Context["source_ip"]; exists {
 			zeroTrustRequest.EnvironmentContext.IPAddress = ip
 		}
-		
+
 		zeroTrustRequest.SecurityContext = &zerotrust.SecurityContext{
 			TrustLevel: zerotrust.TrustLevelMedium, // Default trust level
 		}
-		
+
 		if authMethod, exists := request.Context["auth_method"]; exists {
 			zeroTrustRequest.SecurityContext.AuthenticationMethod = authMethod
 		}
-		
+
 		if mfaVerified := request.Context["mfa_verified"]; mfaVerified == "true" {
 			zeroTrustRequest.SecurityContext.MFAVerified = true
 		}
@@ -949,29 +953,29 @@ func (tspe *TenantSecurityPolicyEngine) calculatePolicyAlignment(tenantResult *S
 	if tenantResult.Allowed == ztResponse.Granted {
 		return 1.0
 	}
-	
+
 	// Partial alignment based on violations and policy confidence
 	baseAlignment := 0.2 // Base misalignment penalty
-	
+
 	// Factor in tenant policy violations
 	if len(tenantResult.Violations) > 0 && !ztResponse.Granted {
 		// Zero-trust denying with tenant violations indicates good alignment
 		violationAlignment := 0.4
 		baseAlignment += violationAlignment
 	}
-	
+
 	// Factor in zero-trust policy confidence (based on applied policies)
 	policyConfidence := float64(len(ztResponse.AppliedPolicies)) * 0.1
 	if policyConfidence > 0.4 {
 		policyConfidence = 0.4 // Cap at 0.4
 	}
 	baseAlignment += policyConfidence
-	
+
 	// Cap final alignment score
 	if baseAlignment > 1.0 {
 		baseAlignment = 1.0
 	}
-	
+
 	return baseAlignment
 }
 
@@ -984,14 +988,14 @@ func (tspe *TenantSecurityPolicyEngine) determineOverlayAction(tenantGranted, ze
 			return "allow"
 		}
 		return "deny"
-		
+
 	case TenantZeroTrustModeEnforced:
 		// Enforced mode - zero-trust decision overrides tenant decision
 		if zeroTrustGranted {
 			return "allow"
 		}
 		return "deny"
-		
+
 	case TenantZeroTrustModeGoverning:
 		// Governing mode - zero-trust first, tenant as fallback
 		if zeroTrustGranted {
@@ -1001,11 +1005,11 @@ func (tspe *TenantSecurityPolicyEngine) determineOverlayAction(tenantGranted, ze
 			return "allow_fallback"
 		}
 		return "deny"
-		
+
 	case TenantZeroTrustModeIntegrated:
 		// Integrated mode - use policy priority to determine action
 		return tspe.determineIntegratedAction(tenantGranted, zeroTrustGranted)
-		
+
 	default:
 		// Default - use tenant decision
 		if tenantGranted {
@@ -1023,25 +1027,25 @@ func (tspe *TenantSecurityPolicyEngine) determineIntegratedAction(tenantGranted,
 			return "allow"
 		}
 		return "deny"
-		
+
 	case PolicyPriorityZeroTrustFirst:
 		if zeroTrustGranted {
 			return "allow"
 		}
 		return "deny"
-		
+
 	case PolicyPriorityBothRequired:
 		if tenantGranted && zeroTrustGranted {
 			return "allow"
 		}
 		return "deny"
-		
+
 	case PolicyPriorityEitherSufficient:
 		if tenantGranted || zeroTrustGranted {
 			return "allow"
 		}
 		return "deny"
-		
+
 	default:
 		// Default to requiring both
 		if tenantGranted && zeroTrustGranted {
@@ -1053,7 +1057,7 @@ func (tspe *TenantSecurityPolicyEngine) determineIntegratedAction(tenantGranted,
 
 // buildOverlayReason creates a descriptive reason for the overlay decision
 func (tspe *TenantSecurityPolicyEngine) buildOverlayReason(tenantResult *SecurityEvaluationResult, ztResponse *zerotrust.ZeroTrustAccessResponse, alignmentScore float64) string {
-	return fmt.Sprintf("Tenant: %t, ZeroTrust: %t, Alignment: %.2f, Mode: %s", 
+	return fmt.Sprintf("Tenant: %t, ZeroTrust: %t, Alignment: %.2f, Mode: %s",
 		tenantResult.Allowed, ztResponse.Granted, alignmentScore, tspe.zeroTrustMode)
 }
 
@@ -1068,20 +1072,20 @@ func (tspe *TenantSecurityPolicyEngine) applyOverlayMode(tenantResult *SecurityE
 		AppliedRules:     tenantResult.AppliedRules,
 		ZeroTrustOverlay: overlayResult,
 	}
-	
+
 	// Overlay mode - both policies must pass for allow
 	finalResult.Allowed = tenantResult.Allowed && overlayResult.ZeroTrustGranted
-	
+
 	if finalResult.Allowed {
 		finalResult.Decision = "allow_overlay"
 	} else if !tenantResult.Allowed {
-		finalResult.Decision = "deny_tenant_policy" 
+		finalResult.Decision = "deny_tenant_policy"
 		finalResult.BlockReason = tenantResult.BlockReason
 	} else {
 		finalResult.Decision = "deny_zero_trust_overlay"
 		finalResult.BlockReason = "Zero-trust overlay denied access"
 	}
-	
+
 	return finalResult
 }
 
@@ -1094,17 +1098,17 @@ func (tspe *TenantSecurityPolicyEngine) applyEnforcedMode(tenantResult *Security
 		AppliedRules:     tenantResult.AppliedRules,
 		ZeroTrustOverlay: overlayResult,
 	}
-	
+
 	// Enforced mode - zero-trust decision overrides tenant decision
 	finalResult.Allowed = overlayResult.ZeroTrustGranted
-	
+
 	if finalResult.Allowed {
 		finalResult.Decision = "allow_zero_trust_enforced"
 	} else {
 		finalResult.Decision = "deny_zero_trust_enforced"
 		finalResult.BlockReason = "Zero-trust enforcement denied access"
 	}
-	
+
 	return finalResult
 }
 
@@ -1117,7 +1121,7 @@ func (tspe *TenantSecurityPolicyEngine) applyGoverningMode(tenantResult *Securit
 		AppliedRules:     tenantResult.AppliedRules,
 		ZeroTrustOverlay: overlayResult,
 	}
-	
+
 	// Governing mode - zero-trust first, tenant as fallback
 	if overlayResult.ZeroTrustGranted {
 		finalResult.Allowed = true
@@ -1130,7 +1134,7 @@ func (tspe *TenantSecurityPolicyEngine) applyGoverningMode(tenantResult *Securit
 		finalResult.Decision = "deny_both_governing"
 		finalResult.BlockReason = "Both zero-trust and tenant policies denied access"
 	}
-	
+
 	return finalResult
 }
 
@@ -1143,35 +1147,35 @@ func (tspe *TenantSecurityPolicyEngine) applyIntegratedMode(tenantResult *Securi
 		AppliedRules:     tenantResult.AppliedRules,
 		ZeroTrustOverlay: overlayResult,
 	}
-	
+
 	// Integrated mode - use policy priority and coordination rules
 	switch tspe.policyCoordination.PolicyPriority {
 	case PolicyPriorityTenantFirst:
 		finalResult.Allowed = tenantResult.Allowed
 		finalResult.Decision = "integrated_tenant_first"
-		
+
 	case PolicyPriorityZeroTrustFirst:
 		finalResult.Allowed = overlayResult.ZeroTrustGranted
 		finalResult.Decision = "integrated_zero_trust_first"
-		
+
 	case PolicyPriorityBothRequired:
 		finalResult.Allowed = tenantResult.Allowed && overlayResult.ZeroTrustGranted
 		finalResult.Decision = "integrated_both_required"
-		
+
 	case PolicyPriorityEitherSufficient:
 		finalResult.Allowed = tenantResult.Allowed || overlayResult.ZeroTrustGranted
 		finalResult.Decision = "integrated_either_sufficient"
-		
+
 	default:
 		// Default to both required
 		finalResult.Allowed = tenantResult.Allowed && overlayResult.ZeroTrustGranted
 		finalResult.Decision = "integrated_default"
 	}
-	
+
 	if !finalResult.Allowed {
 		finalResult.BlockReason = "Integrated policy evaluation denied access"
 	}
-	
+
 	return finalResult
 }
 
@@ -1185,7 +1189,7 @@ func (tspe *TenantSecurityPolicyEngine) applyConflictResolution(finalResult, ten
 			finalResult.Decision = "deny_conflict_resolution"
 			finalResult.BlockReason = "Conflict resolution: deny wins"
 		}
-		
+
 	case ConflictResolutionAllowWins:
 		// Any allow decision wins
 		if tenantResult.Allowed || overlayResult.ZeroTrustGranted {
@@ -1193,7 +1197,7 @@ func (tspe *TenantSecurityPolicyEngine) applyConflictResolution(finalResult, ten
 			finalResult.Decision = "allow_conflict_resolution"
 			finalResult.BlockReason = ""
 		}
-		
+
 	case ConflictResolutionHigherSecurity:
 		// More restrictive decision wins (deny over allow)
 		if !tenantResult.Allowed || !overlayResult.ZeroTrustGranted {
@@ -1201,13 +1205,13 @@ func (tspe *TenantSecurityPolicyEngine) applyConflictResolution(finalResult, ten
 			finalResult.Decision = "deny_higher_security"
 			finalResult.BlockReason = "Conflict resolution: higher security wins"
 		}
-		
+
 	case ConflictResolutionManualReview:
 		// Flag for manual review
 		finalResult.Allowed = false
 		finalResult.Decision = "pending_manual_review"
 		finalResult.BlockReason = "Policy conflict requires manual review"
-		
+
 		// Add manual review flag to violations
 		manualReviewViolation := RuleViolation{
 			RuleID:      "conflict_resolution",
@@ -1215,13 +1219,13 @@ func (tspe *TenantSecurityPolicyEngine) applyConflictResolution(finalResult, ten
 			Severity:    RuleSeverityHigh,
 			Description: "Policy conflict detected between tenant and zero-trust policies",
 			Details: map[string]interface{}{
-				"tenant_decision":     tenantResult.Decision,
-				"zero_trust_granted":  overlayResult.ZeroTrustGranted,
-				"alignment_score":     overlayResult.AlignmentScore,
+				"tenant_decision":    tenantResult.Decision,
+				"zero_trust_granted": overlayResult.ZeroTrustGranted,
+				"alignment_score":    overlayResult.AlignmentScore,
 			},
 		}
 		finalResult.Violations = append(finalResult.Violations, manualReviewViolation)
 	}
-	
+
 	return finalResult
 }

@@ -8,12 +8,12 @@ func TestValidator_ValidateString(t *testing.T) {
 	validator := NewValidator()
 
 	tests := []struct {
-		name     string
-		field    string
-		value    string
-		rules    []string
-		wantErr  bool
-		errRule  string
+		name    string
+		field   string
+		value   string
+		rules   []string
+		wantErr bool
+		errRule string
 	}{
 		{
 			name:    "valid alphanumeric string",

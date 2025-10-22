@@ -563,31 +563,31 @@ func TestPredefinedErrors(t *testing.T) {
 func TestErrorWrapping(t *testing.T) {
 	// Test error wrapping behavior with errors.Is and errors.As
 	originalErr := errors.New("original error")
-	
+
 	conversionErr := &ConversionError{
 		SourceType: "Type1",
 		TargetType: "Type2",
 		Message:    "conversion failed",
 		Cause:      originalErr,
 	}
-	
+
 	providerErr := &ProviderError{
 		ProviderName: "test",
 		Operation:    "test_op",
 		Message:      "provider failed",
 		Cause:        conversionErr,
 	}
-	
+
 	// Test errors.Is
 	assert.True(t, errors.Is(conversionErr, originalErr))
 	assert.True(t, errors.Is(providerErr, conversionErr))
 	assert.True(t, errors.Is(providerErr, originalErr))
-	
+
 	// Test errors.As
 	var ce *ConversionError
 	assert.True(t, errors.As(providerErr, &ce))
 	assert.Equal(t, conversionErr, ce)
-	
+
 	var pe *ProviderError
 	assert.True(t, errors.As(providerErr, &pe))
 	assert.Equal(t, providerErr, pe)

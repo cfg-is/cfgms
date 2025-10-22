@@ -31,7 +31,7 @@ type Broker struct {
 	server *mqtt.Server
 
 	// Connection state
-	running bool
+	running   bool
 	startTime time.Time
 
 	// Authentication and authorization hooks
@@ -307,18 +307,18 @@ func (b *Broker) Available() (bool, error) {
 // GetCapabilities returns broker feature support.
 func (b *Broker) GetCapabilities() interfaces.BrokerCapabilities {
 	return interfaces.BrokerCapabilities{
-		MaxClients:               b.config.MaxClients,
-		SupportsMQTT311:          true,
-		SupportsMQTT5:            true,
-		SupportsWebSocket:        b.config.WebSocketAddr != "",
-		SupportsTLS:              true,
-		SupportsPersistence:      false, // mochi-mqtt doesn't support persistence
-		SupportsClustering:       false, // Single-node only
+		MaxClients:                  b.config.MaxClients,
+		SupportsMQTT311:             true,
+		SupportsMQTT5:               true,
+		SupportsWebSocket:           b.config.WebSocketAddr != "",
+		SupportsTLS:                 true,
+		SupportsPersistence:         false, // mochi-mqtt doesn't support persistence
+		SupportsClustering:          false, // Single-node only
 		SupportsSharedSubscriptions: true,
-		MaxMessageSize:           b.config.MaxMessageSize,
-		MaxQoS:                   2, // Supports QoS 0, 1, and 2
-		SupportsRetainedMessages: true,
-		SupportsWillMessages:     true,
+		MaxMessageSize:              b.config.MaxMessageSize,
+		MaxQoS:                      2, // Supports QoS 0, 1, and 2
+		SupportsRetainedMessages:    true,
+		SupportsWillMessages:        true,
 	}
 }
 

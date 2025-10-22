@@ -1,7 +1,6 @@
 package e2e
 
 import (
-	testutil "github.com/cfgis/cfgms/pkg/testing"
 	"context"
 	"fmt"
 	"runtime"
@@ -9,6 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	testutil "github.com/cfgis/cfgms/pkg/testing"
 
 	"github.com/stretchr/testify/suite"
 
@@ -24,47 +25,47 @@ type ConcurrentAuthorizationPerformanceSuite struct {
 	framework *E2ETestFramework
 
 	// Real CFGMS components (no mocking)
-	rbacManager           *rbac.Manager
-	continuousEngine      *continuous.ContinuousAuthorizationEngine
+	rbacManager      *rbac.Manager
+	continuousEngine *continuous.ContinuousAuthorizationEngine
 
 	// Test configuration
-	maxConcurrentUsers    int
-	targetLatencyMs      int
-	cacheHitRateTarget   float64
-	testDurationMinutes  int
+	maxConcurrentUsers  int
+	targetLatencyMs     int
+	cacheHitRateTarget  float64
+	testDurationMinutes int
 
 	// Performance metrics tracking
-	authMetrics          *AuthorizationMetrics
-	memoryBaseline       runtime.MemStats
+	authMetrics    *AuthorizationMetrics
+	memoryBaseline runtime.MemStats
 }
 
 // AuthorizationMetrics tracks detailed authorization performance metrics
 type AuthorizationMetrics struct {
-	totalRequests       int64
-	successfulRequests  int64
-	failedRequests      int64
-	totalLatencyNs      int64
-	maxLatencyNs        int64
-	minLatencyNs        int64
-	
-	cacheHits          int64
-	cacheMisses        int64
-	
-	concurrentPeak     int64
-	throughputRPS      float64
-	
-	p50LatencyNs       int64
-	p95LatencyNs       int64
-	p99LatencyNs       int64
-	
+	totalRequests      int64
+	successfulRequests int64
+	failedRequests     int64
+	totalLatencyNs     int64
+	maxLatencyNs       int64
+	minLatencyNs       int64
+
+	cacheHits   int64
+	cacheMisses int64
+
+	concurrentPeak int64
+	throughputRPS  float64
+
+	p50LatencyNs int64
+	p95LatencyNs int64
+	p99LatencyNs int64
+
 	memoryLeakMB       float64
 	goroutineLeakCount int
-	
-	latencies          []time.Duration
-	mutex              sync.RWMutex
-	
-	startTime          time.Time
-	endTime            time.Time
+
+	latencies []time.Duration
+	mutex     sync.RWMutex
+
+	startTime time.Time
+	endTime   time.Time
 }
 
 // SetupSuite initializes the concurrent authorization performance test suite
@@ -72,10 +73,10 @@ func (s *ConcurrentAuthorizationPerformanceSuite) SetupSuite() {
 	// Use performance-optimized configuration
 	config := CIOptimizedConfig()
 	config.PerformanceMode = true
-	config.TestDataSize = "large" // Need substantial data for concurrent testing
+	config.TestDataSize = "large"         // Need substantial data for concurrent testing
 	config.TestTimeout = 30 * time.Minute // Extended timeout for load testing
 	config.EnableRBAC = true
-	config.EnableTLS = true // Test with full security enabled
+	config.EnableTLS = true     // Test with full security enabled
 	config.MaxConnections = 200 // Support 100+ concurrent users with headroom
 
 	framework, err := NewE2EFramework(s.T(), config)
@@ -87,11 +88,11 @@ func (s *ConcurrentAuthorizationPerformanceSuite) SetupSuite() {
 	s.framework = framework
 
 	// Initialize test parameters based on Story #131 requirements
-	s.maxConcurrentUsers = 150    // Test beyond minimum requirement
-	s.targetLatencyMs = 10        // <10ms authorization latency requirement
-	s.cacheHitRateTarget = 0.90   // >90% cache hit rate requirement
-	s.testDurationMinutes = 5     // Extended load testing
-	
+	s.maxConcurrentUsers = 150  // Test beyond minimum requirement
+	s.targetLatencyMs = 10      // <10ms authorization latency requirement
+	s.cacheHitRateTarget = 0.90 // >90% cache hit rate requirement
+	s.testDurationMinutes = 5   // Extended load testing
+
 	// Reduce parameters for CI to avoid resource exhaustion
 	if s.framework.config.OptimizeForCI {
 		s.maxConcurrentUsers = 50
@@ -160,7 +161,7 @@ func (s *ConcurrentAuthorizationPerformanceSuite) initializeAuthorizationCompone
 		EnableAutoTermination:    false, // Disable for performance testing
 		ViolationGracePeriod:     30 * time.Second,
 		EnableComprehensiveAudit: true,
-		AuditBufferSize:         s.maxConcurrentUsers * 10,
+		AuditBufferSize:          s.maxConcurrentUsers * 10,
 	}
 
 	s.continuousEngine = continuous.NewContinuousAuthorizationEngine(
@@ -184,7 +185,7 @@ func (s *ConcurrentAuthorizationPerformanceSuite) TestConcurrentAuthorizationLat
 			"concurrent_users", s.maxConcurrentUsers,
 			"target_latency_ms", s.targetLatencyMs)
 
-		ctx, cancel := context.WithTimeout(context.Background(), 
+		ctx, cancel := context.WithTimeout(context.Background(),
 			time.Duration(s.testDurationMinutes+2)*time.Minute)
 		defer cancel()
 
@@ -211,7 +212,7 @@ func (s *ConcurrentAuthorizationPerformanceSuite) TestConcurrentAuthorizationLat
 		// Wait for all users to complete
 		wg.Wait()
 		close(userResults)
-		
+
 		s.authMetrics.endTime = time.Now()
 		totalTestDuration := s.authMetrics.endTime.Sub(s.authMetrics.startTime)
 
@@ -236,7 +237,7 @@ func (s *ConcurrentAuthorizationPerformanceSuite) TestPermissionCachePerformance
 		// Test cache performance with repeated access patterns
 		cacheTestUsers := min(s.maxConcurrentUsers, 75)
 		requestsPerUser := 20
-		
+
 		var wg sync.WaitGroup
 		cacheResults := make(chan CachePerformanceResult, cacheTestUsers*requestsPerUser)
 
@@ -279,7 +280,7 @@ func (s *ConcurrentAuthorizationPerformanceSuite) TestAuthorizationThroughputSca
 		scalingResults := make(map[int]ThroughputResult)
 
 		for _, concurrency := range concurrencyLevels {
-			s.framework.logger.Info("Testing throughput scaling", 
+			s.framework.logger.Info("Testing throughput scaling",
 				"concurrency_level", concurrency)
 
 			result := s.measureThroughputAtConcurrency(ctx, concurrency)
@@ -326,7 +327,7 @@ func (s *ConcurrentAuthorizationPerformanceSuite) TestDatabaseConnectionPoolExha
 		for userID := 0; userID < exhaustionTestUsers; userID++ {
 			wg.Add(1)
 			go s.simulateConnectionPoolUser(ctx, userID, connectionResults, &wg)
-			
+
 			// Stagger launches to simulate real load buildup
 			if userID%10 == 0 {
 				time.Sleep(100 * time.Millisecond)
@@ -335,7 +336,7 @@ func (s *ConcurrentAuthorizationPerformanceSuite) TestDatabaseConnectionPoolExha
 
 		wg.Wait()
 		close(connectionResults)
-		
+
 		testDuration := time.Since(startTime)
 
 		// Analyze connection pool behavior
@@ -378,7 +379,7 @@ func (s *ConcurrentAuthorizationPerformanceSuite) TestMemoryStabilityDuringAutho
 		}
 
 		memorySnapshots := make([]MemorySnapshot, 0, len(stormPatterns)+1)
-		
+
 		// Initial snapshot
 		memorySnapshots = append(memorySnapshots, s.takeMemorySnapshot("Initial"))
 
@@ -390,7 +391,7 @@ func (s *ConcurrentAuthorizationPerformanceSuite) TestMemoryStabilityDuringAutho
 				"duration", pattern.Duration)
 
 			s.executeAuthorizationStorm(ctx, pattern)
-			
+
 			// Take memory snapshot after each storm
 			snapshot := s.takeMemorySnapshot(pattern.Name)
 			memorySnapshots = append(memorySnapshots, snapshot)
@@ -403,7 +404,7 @@ func (s *ConcurrentAuthorizationPerformanceSuite) TestMemoryStabilityDuringAutho
 		var finalMem runtime.MemStats
 		runtime.GC()
 		runtime.ReadMemStats(&finalMem)
-		
+
 		finalSnapshot := s.takeMemorySnapshot("Final")
 		memorySnapshots = append(memorySnapshots, finalSnapshot)
 
@@ -465,32 +466,32 @@ type UserAuthResult struct {
 
 // CachePerformanceResult represents cache performance test results
 type CachePerformanceResult struct {
-	UserID      int
-	CacheHits   int
-	CacheMisses int
+	UserID        int
+	CacheHits     int
+	CacheMisses   int
 	TotalRequests int
-	AvgLatency  time.Duration
+	AvgLatency    time.Duration
 }
 
 // ThroughputResult represents throughput measurement results
 type ThroughputResult struct {
-	Concurrency     int
-	ThroughputRPS   float64
-	AvgLatencyMs    float64
-	P95LatencyMs    float64
-	P99LatencyMs    float64
-	SuccessRate     float64
-	MemoryUsageMB   float64
+	Concurrency   int
+	ThroughputRPS float64
+	AvgLatencyMs  float64
+	P95LatencyMs  float64
+	P99LatencyMs  float64
+	SuccessRate   float64
+	MemoryUsageMB float64
 }
 
 // ConnectionTestResult represents connection pool test results
 type ConnectionTestResult struct {
-	UserID          int
+	UserID             int
 	ConnectionAttempts int
 	ConnectionFailures int
 	AvgConnectionTime  time.Duration
-	TimeoutCount      int
-	Errors           []error
+	TimeoutCount       int
+	Errors             []error
 }
 
 // StormPattern defines an authorization load storm pattern
@@ -502,12 +503,12 @@ type StormPattern struct {
 
 // MemorySnapshot captures memory usage at a point in time
 type MemorySnapshot struct {
-	Label        string
-	Timestamp    time.Time
-	AllocMB      float64
-	TotalAllocMB float64
-	SysMB        float64
-	NumGC        uint32
+	Label          string
+	Timestamp      time.Time
+	AllocMB        float64
+	TotalAllocMB   float64
+	SysMB          float64
+	NumGC          uint32
 	GoroutineCount int
 }
 
@@ -520,17 +521,17 @@ type MonitoringScenario struct {
 
 // MonitoringResult captures monitoring test results
 type MonitoringResult struct {
-	Scenario         MonitoringScenario
-	MetricsCollected int
-	AlertsGenerated  int
-	LatencyMetrics   map[string]float64
+	Scenario          MonitoringScenario
+	MetricsCollected  int
+	AlertsGenerated   int
+	LatencyMetrics    map[string]float64
 	ThroughputMetrics map[string]float64
 }
 
 // simulateConcurrentUser simulates a concurrent user performing authorization requests
-func (s *ConcurrentAuthorizationPerformanceSuite) simulateConcurrentUser(ctx context.Context, userID int, 
+func (s *ConcurrentAuthorizationPerformanceSuite) simulateConcurrentUser(ctx context.Context, userID int,
 	testDuration time.Duration, results chan<- UserAuthResult, wg *sync.WaitGroup) {
-	
+
 	defer wg.Done()
 
 	result := UserAuthResult{
@@ -548,7 +549,7 @@ func (s *ConcurrentAuthorizationPerformanceSuite) simulateConcurrentUser(ctx con
 		"test_type": "concurrent_performance",
 		"user_id":   subjectID,
 	}
-	
+
 	if err := s.continuousEngine.RegisterSession(ctx, sessionID, subjectID, tenantID, sessionMetadata); err != nil {
 		result.Errors = append(result.Errors, fmt.Errorf("failed to register session: %w", err))
 		results <- result
@@ -590,16 +591,16 @@ func (s *ConcurrentAuthorizationPerformanceSuite) simulateConcurrentUser(ctx con
 					ResourceId:   resourceID,
 					TenantId:     tenantID,
 					Context: map[string]string{
-						"source":      "performance_test",
-						"operation":   "concurrent_auth",
-						"request_id":  fmt.Sprintf("req-%d-%d", userID, result.TotalRequests),
+						"source":     "performance_test",
+						"operation":  "concurrent_auth",
+						"request_id": fmt.Sprintf("req-%d-%d", userID, result.TotalRequests),
 					},
 				},
 				SessionID:     sessionID,
 				OperationType: continuous.OperationTypeAPI,
 				ResourceContext: map[string]string{
 					"resource_type": "steward",
-					"action":       "read",
+					"action":        "read",
 				},
 				RequestTime: time.Now(),
 			}
@@ -610,7 +611,7 @@ func (s *ConcurrentAuthorizationPerformanceSuite) simulateConcurrentUser(ctx con
 			latency := time.Since(startTime)
 
 			// Track request metrics
-			s.updateAuthMetrics(latency, response != nil && response.AccessResponse != nil && response.AccessResponse.Granted, 
+			s.updateAuthMetrics(latency, response != nil && response.AccessResponse != nil && response.AccessResponse.Granted,
 				response != nil && response.CacheUsed)
 
 			result.TotalRequests++
@@ -636,7 +637,7 @@ func (s *ConcurrentAuthorizationPerformanceSuite) simulateConcurrentUser(ctx con
 
 			// Validate latency requirement immediately
 			if latency > time.Duration(s.targetLatencyMs)*time.Millisecond {
-				result.Errors = append(result.Errors, 
+				result.Errors = append(result.Errors,
 					fmt.Errorf("latency SLA violation: %v > %dms", latency, s.targetLatencyMs))
 			}
 
@@ -700,7 +701,7 @@ func (s *ConcurrentAuthorizationPerformanceSuite) collectAuthorizationResults(re
 	for result := range results {
 		if result.TotalRequests > 0 {
 			atomic.AddInt64(&activeSessions, 1)
-			
+
 			// Track peak concurrency
 			for {
 				currentPeak := atomic.LoadInt64(&s.authMetrics.concurrentPeak)
@@ -790,7 +791,7 @@ func (s *ConcurrentAuthorizationPerformanceSuite) validateLatencyAcceptanceCrite
 	}
 
 	if time.Duration(s.authMetrics.p95LatencyNs) > targetLatency {
-		return fmt.Errorf("P95 latency SLA violation: %v > %v", 
+		return fmt.Errorf("P95 latency SLA violation: %v > %v",
 			time.Duration(s.authMetrics.p95LatencyNs), targetLatency)
 	}
 
@@ -823,7 +824,7 @@ func (s *ConcurrentAuthorizationPerformanceSuite) setupProductionLikeAuthorizati
 	// Create realistic tenants, users, roles, and permissions
 	tenants := []string{"tenant-1", "tenant-2", "performance-test-tenant"}
 	roles := []string{"admin", "user", "steward", "service", "readonly"}
-	
+
 	for _, tenantID := range tenants {
 		// Create tenant-specific roles
 		err := s.rbacManager.CreateTenantDefaultRoles(ctx, tenantID)
@@ -841,7 +842,7 @@ func (s *ConcurrentAuthorizationPerformanceSuite) setupProductionLikeAuthorizati
 				TenantId:    tenantID,
 				IsActive:    true,
 			}
-			
+
 			if err := s.rbacManager.CreateSubject(ctx, subject); err != nil {
 				s.framework.logger.Debug("Subject creation error (may exist)", "subject", userID, "error", err)
 			}
@@ -853,7 +854,7 @@ func (s *ConcurrentAuthorizationPerformanceSuite) setupProductionLikeAuthorizati
 				RoleId:    fmt.Sprintf("%s.%s", tenantID, roleID),
 				TenantId:  tenantID,
 			}
-			
+
 			if err := s.rbacManager.AssignRole(ctx, assignment); err != nil {
 				s.framework.logger.Debug("Role assignment error (may exist)", "assignment", assignment, "error", err)
 			}
@@ -865,17 +866,17 @@ func (s *ConcurrentAuthorizationPerformanceSuite) setupProductionLikeAuthorizati
 
 // Additional test helper methods...
 
-func (s *ConcurrentAuthorizationPerformanceSuite) testUserCachePerformance(ctx context.Context, userID int, requestsPerUser int, 
+func (s *ConcurrentAuthorizationPerformanceSuite) testUserCachePerformance(ctx context.Context, userID int, requestsPerUser int,
 	results chan<- CachePerformanceResult, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	result := CachePerformanceResult{UserID: userID}
-	
+
 	// Test cache performance with repeated identical requests
 	baseRequest := &continuous.ContinuousAuthRequest{
 		AccessRequest: &common.AccessRequest{
 			SubjectId:    fmt.Sprintf("cache-test-user-%d", userID),
-			PermissionId: "steward.read", // Same permission for cache testing
+			PermissionId: "steward.read",                             // Same permission for cache testing
 			ResourceId:   fmt.Sprintf("cache-resource-%d", userID%5), // Limited resources for cache hits
 			TenantId:     "performance-test-tenant",
 		},
@@ -890,7 +891,7 @@ func (s *ConcurrentAuthorizationPerformanceSuite) testUserCachePerformance(ctx c
 		startTime := time.Now()
 		response, err := s.continuousEngine.AuthorizeAction(ctx, baseRequest)
 		latency := time.Since(startTime)
-		
+
 		totalLatency += latency
 		result.TotalRequests++
 
@@ -915,7 +916,7 @@ func (s *ConcurrentAuthorizationPerformanceSuite) testUserCachePerformance(ctx c
 
 func (s *ConcurrentAuthorizationPerformanceSuite) collectCachePerformanceResults(results <-chan CachePerformanceResult) CacheStats {
 	var stats CacheStats
-	
+
 	for result := range results {
 		stats.TotalRequests += result.TotalRequests
 		stats.TotalCacheHits += result.CacheHits
@@ -982,13 +983,13 @@ func (s *ConcurrentAuthorizationPerformanceSuite) calculatePercentile(latencies 
 	if len(latencies) == 0 {
 		return 0
 	}
-	
+
 	// This is a simplified implementation
 	index := int(float64(len(latencies)) * percentile)
 	if index >= len(latencies) {
 		index = len(latencies) - 1
 	}
-	
+
 	return latencies[index]
 }
 
@@ -1026,7 +1027,7 @@ func (s *ConcurrentAuthorizationPerformanceSuite) executeAuthorizationStorm(ctx 
 func (s *ConcurrentAuthorizationPerformanceSuite) takeMemorySnapshot(label string) MemorySnapshot {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
-	
+
 	return MemorySnapshot{
 		Label:          label,
 		Timestamp:      time.Now(),
@@ -1042,12 +1043,12 @@ func (s *ConcurrentAuthorizationPerformanceSuite) validateMemoryStability(initia
 	// Implementation would validate memory stability across storm patterns
 	memoryGrowth := float64(final.Alloc-initial.Alloc) / 1024 / 1024
 	maxAcceptableGrowth := 100.0 // 100MB max growth
-	
+
 	if memoryGrowth > maxAcceptableGrowth {
-		return fmt.Errorf("memory growth exceeds acceptable limit: %.2f MB > %.2f MB", 
+		return fmt.Errorf("memory growth exceeds acceptable limit: %.2f MB > %.2f MB",
 			memoryGrowth, maxAcceptableGrowth)
 	}
-	
+
 	return nil
 }
 
@@ -1067,7 +1068,7 @@ type ConnectionPoolStats struct {
 
 func (s *ConcurrentAuthorizationPerformanceSuite) printPerformanceSummary() {
 	s.framework.logger.Info("=== CONCURRENT AUTHORIZATION PERFORMANCE TEST SUMMARY ===")
-	
+
 	// Print comprehensive performance metrics
 	s.framework.logger.Info("Final Performance Metrics",
 		"total_requests", atomic.LoadInt64(&s.authMetrics.totalRequests),
@@ -1089,6 +1090,6 @@ func TestConcurrentAuthorizationPerformance(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping concurrent authorization performance tests in short mode")
 	}
-	
+
 	suite.Run(t, &ConcurrentAuthorizationPerformanceSuite{})
 }

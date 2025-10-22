@@ -6,10 +6,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/rbac/zerotrust"
-	"github.com/google/uuid"
 )
 
 // JITAccessManager manages Just-In-Time access requests and grants with zero-trust policy integration
@@ -20,12 +21,12 @@ type JITAccessManager struct {
 	approvalWorkflows   map[string]*ApprovalWorkflow
 	auditLogger         *JITAuditLogger
 	notificationService NotificationService
-	
+
 	// Zero-trust policy integration
-	zeroTrustEngine     *zerotrust.ZeroTrustPolicyEngine
-	zeroTrustEnabled    bool
-	zeroTrustMode       ZeroTrustJITMode
-	mutex               sync.RWMutex
+	zeroTrustEngine  *zerotrust.ZeroTrustPolicyEngine
+	zeroTrustEnabled bool
+	zeroTrustMode    ZeroTrustJITMode
+	mutex            sync.RWMutex
 }
 
 // ZeroTrustJITMode defines how zero-trust policies are applied to JIT access
@@ -34,16 +35,16 @@ type ZeroTrustJITMode string
 const (
 	// ZeroTrustJITModeDisabled disables zero-trust policy evaluation for JIT access
 	ZeroTrustJITModeDisabled ZeroTrustJITMode = "disabled"
-	
+
 	// ZeroTrustJITModeRequestValidation evaluates zero-trust policies during JIT request creation
 	ZeroTrustJITModeRequestValidation ZeroTrustJITMode = "request_validation"
-	
+
 	// ZeroTrustJITModeApprovalGating requires zero-trust policy approval before JIT approval
 	ZeroTrustJITModeApprovalGating ZeroTrustJITMode = "approval_gating"
-	
+
 	// ZeroTrustJITModeGrantValidation evaluates zero-trust policies when JIT access is activated
 	ZeroTrustJITModeGrantValidation ZeroTrustJITMode = "grant_validation"
-	
+
 	// ZeroTrustJITModeComprehensive applies zero-trust validation at all JIT lifecycle stages
 	ZeroTrustJITModeComprehensive ZeroTrustJITMode = "comprehensive"
 )
@@ -57,12 +58,12 @@ func NewJITAccessManager(rbacManager rbac.RBACManager, notificationService Notif
 		approvalWorkflows:   make(map[string]*ApprovalWorkflow),
 		auditLogger:         NewJITAuditLogger(),
 		notificationService: notificationService,
-		
+
 		// Zero-trust defaults
 		zeroTrustEngine:  nil,
 		zeroTrustEnabled: false,
 		zeroTrustMode:    ZeroTrustJITModeDisabled,
-		mutex:           sync.RWMutex{},
+		mutex:            sync.RWMutex{},
 	}
 }
 
@@ -70,7 +71,7 @@ func NewJITAccessManager(rbacManager rbac.RBACManager, notificationService Notif
 func (jam *JITAccessManager) EnableZeroTrustPolicies(engine *zerotrust.ZeroTrustPolicyEngine, mode ZeroTrustJITMode) {
 	jam.mutex.Lock()
 	defer jam.mutex.Unlock()
-	
+
 	jam.zeroTrustEngine = engine
 	jam.zeroTrustMode = mode
 	jam.zeroTrustEnabled = (mode != ZeroTrustJITModeDisabled && engine != nil)
@@ -80,7 +81,7 @@ func (jam *JITAccessManager) EnableZeroTrustPolicies(engine *zerotrust.ZeroTrust
 func (jam *JITAccessManager) SetZeroTrustMode(mode ZeroTrustJITMode) {
 	jam.mutex.Lock()
 	defer jam.mutex.Unlock()
-	
+
 	jam.zeroTrustMode = mode
 	jam.zeroTrustEnabled = (mode != ZeroTrustJITModeDisabled && jam.zeroTrustEngine != nil)
 }
@@ -124,25 +125,25 @@ func (jam *JITAccessManager) RequestAccess(ctx context.Context, req *JITAccessRe
 
 	// Create the access request
 	request := &JITAccessRequest{
-		ID:           uuid.New().String(),
-		RequesterID:  req.RequesterID,
-		TargetID:     req.TargetID,
-		TenantID:     req.TenantID,
-		Permissions:  req.Permissions,
-		Roles:        req.Roles,
-		ResourceIDs:  req.ResourceIDs,
-		RequestedFor: req.RequestedFor,
-		Duration:     req.Duration,
-		MaxDuration:  req.MaxDuration,
-		Priority:     req.Priority,
-		Justification: req.Justification,
-		AutoApprove:  req.AutoApprove,
-		EmergencyAccess: req.EmergencyAccess,
+		ID:                uuid.New().String(),
+		RequesterID:       req.RequesterID,
+		TargetID:          req.TargetID,
+		TenantID:          req.TenantID,
+		Permissions:       req.Permissions,
+		Roles:             req.Roles,
+		ResourceIDs:       req.ResourceIDs,
+		RequestedFor:      req.RequestedFor,
+		Duration:          req.Duration,
+		MaxDuration:       req.MaxDuration,
+		Priority:          req.Priority,
+		Justification:     req.Justification,
+		AutoApprove:       req.AutoApprove,
+		EmergencyAccess:   req.EmergencyAccess,
 		RequesterMetadata: req.RequesterMetadata,
-		Status:       JITAccessRequestStatusPending,
-		CreatedAt:    time.Now(),
-		ExpiresAt:    time.Now().Add(req.Duration),
-		RequestTTL:   time.Now().Add(24 * time.Hour), // Request expires in 24 hours if not processed
+		Status:            JITAccessRequestStatusPending,
+		CreatedAt:         time.Now(),
+		ExpiresAt:         time.Now().Add(req.Duration),
+		RequestTTL:        time.Now().Add(24 * time.Hour), // Request expires in 24 hours if not processed
 	}
 
 	// Determine approval workflow
@@ -216,24 +217,24 @@ func (jam *JITAccessManager) approveRequest(ctx context.Context, requestID, appr
 
 	// Create the access grant
 	grant := &JITAccessGrant{
-		ID:               uuid.New().String(),
-		RequestID:        requestID,
-		RequesterID:      request.RequesterID,
-		TargetID:         request.TargetID,
-		TenantID:         request.TenantID,
-		Permissions:      request.Permissions,
-		Roles:            request.Roles,
-		ResourceIDs:      request.ResourceIDs,
-		ApprovedBy:       approverID,
-		ApprovalReason:   reason,
-		GrantedAt:        time.Now(),
-		ExpiresAt:        request.ExpiresAt,
-		Status:           JITAccessGrantStatusActive,
-		MaxExtensions:    3, // Allow up to 3 extensions
-		ExtensionsUsed:   0,
-		ActivationMethod: ActivationMethodImmediate,
+		ID:                 uuid.New().String(),
+		RequestID:          requestID,
+		RequesterID:        request.RequesterID,
+		TargetID:           request.TargetID,
+		TenantID:           request.TenantID,
+		Permissions:        request.Permissions,
+		Roles:              request.Roles,
+		ResourceIDs:        request.ResourceIDs,
+		ApprovedBy:         approverID,
+		ApprovalReason:     reason,
+		GrantedAt:          time.Now(),
+		ExpiresAt:          request.ExpiresAt,
+		Status:             JITAccessGrantStatusActive,
+		MaxExtensions:      3, // Allow up to 3 extensions
+		ExtensionsUsed:     0,
+		ActivationMethod:   ActivationMethodImmediate,
 		DeactivationMethod: DeactivationMethodAutomatic,
-		Conditions:       jam.generateAccessConditions(ctx, request),
+		Conditions:         jam.generateAccessConditions(ctx, request),
 	}
 
 	// Store the grant
@@ -487,7 +488,7 @@ func (jam *JITAccessManager) checkCurrentAccess(ctx context.Context, subjectID s
 			PermissionId: permID,
 			TenantId:     tenantID,
 		}
-		
+
 		response, err := jam.rbacManager.CheckPermission(ctx, accessRequest)
 		if err != nil {
 			return false, err
@@ -507,9 +508,9 @@ func (jam *JITAccessManager) determineApprovalWorkflow(ctx context.Context, requ
 		Type: ApprovalTypeSequential,
 		Approvers: []ApprovalStage{
 			{
-				ID:          "stage-1",
-				Type:        ApprovalStageTypeRole,
-				Approvers:   []string{"admin", "security_officer"},
+				ID:           "stage-1",
+				Type:         ApprovalStageTypeRole,
+				Approvers:    []string{"admin", "security_officer"},
 				MinApprovals: 1,
 				TimeoutHours: 2,
 			},
@@ -602,7 +603,7 @@ func (jam *JITAccessManager) validateApprover(ctx context.Context, request *JITA
 		PermissionId: "jit_access.approve",
 		TenantId:     request.TenantID,
 	}
-	
+
 	response, err := jam.rbacManager.CheckPermission(ctx, accessRequest)
 	if err != nil {
 		return fmt.Errorf("failed to check approver permission: %w", err)
@@ -626,7 +627,7 @@ func (jam *JITAccessManager) validateRevoker(ctx context.Context, grant *JITAcce
 		PermissionId: "jit_access.revoke",
 		TenantId:     grant.TenantID,
 	}
-	
+
 	response, err := jam.rbacManager.CheckPermission(ctx, accessRequest)
 	if err != nil {
 		return fmt.Errorf("failed to check revoker permission: %w", err)
@@ -644,12 +645,12 @@ func (jam *JITAccessManager) checkExtensionPermission(ctx context.Context, reque
 		PermissionId: "jit_access.extend",
 		TenantId:     grant.TenantID,
 	}
-	
+
 	response, err := jam.rbacManager.CheckPermission(ctx, accessRequest)
 	if err != nil {
 		return false, err
 	}
-	
+
 	return response.Granted, nil
 }
 
@@ -707,11 +708,11 @@ func (jam *JITAccessManager) scheduleDeactivation(ctx context.Context, grant *JI
 		jam.mutex.RLock()
 		expiresAt := grant.ExpiresAt
 		jam.mutex.RUnlock()
-		
+
 		duration := time.Until(expiresAt)
 		if duration > 0 {
 			time.Sleep(duration)
-			
+
 			// Check if grant is still active
 			jam.mutex.Lock()
 			currentGrant, exists := jam.activeGrants[grant.ID]
@@ -756,19 +757,19 @@ func (jam *JITAccessManager) sendRevocationNotifications(ctx context.Context, gr
 
 // shouldEvaluateZeroTrustForRequest determines if zero-trust evaluation is needed for request creation
 func (jam *JITAccessManager) shouldEvaluateZeroTrustForRequest() bool {
-	return jam.zeroTrustEnabled && jam.zeroTrustEngine != nil && 
+	return jam.zeroTrustEnabled && jam.zeroTrustEngine != nil &&
 		(jam.zeroTrustMode == ZeroTrustJITModeRequestValidation || jam.zeroTrustMode == ZeroTrustJITModeComprehensive)
 }
 
 // shouldEvaluateZeroTrustForApproval determines if zero-trust evaluation is needed for approval gating
 func (jam *JITAccessManager) shouldEvaluateZeroTrustForApproval() bool {
-	return jam.zeroTrustEnabled && jam.zeroTrustEngine != nil && 
+	return jam.zeroTrustEnabled && jam.zeroTrustEngine != nil &&
 		(jam.zeroTrustMode == ZeroTrustJITModeApprovalGating || jam.zeroTrustMode == ZeroTrustJITModeComprehensive)
 }
 
 // shouldEvaluateZeroTrustForGrant determines if zero-trust evaluation is needed for grant activation
 func (jam *JITAccessManager) shouldEvaluateZeroTrustForGrant() bool {
-	return jam.zeroTrustEnabled && jam.zeroTrustEngine != nil && 
+	return jam.zeroTrustEnabled && jam.zeroTrustEngine != nil &&
 		(jam.zeroTrustMode == ZeroTrustJITModeGrantValidation || jam.zeroTrustMode == ZeroTrustJITModeComprehensive)
 }
 
@@ -776,19 +777,19 @@ func (jam *JITAccessManager) shouldEvaluateZeroTrustForGrant() bool {
 func (jam *JITAccessManager) evaluateZeroTrustForJITRequest(ctx context.Context, req *JITAccessRequestSpec) (*zerotrust.ZeroTrustAccessResponse, error) {
 	// Convert JIT request to access request for zero-trust evaluation
 	accessRequest := jam.convertJITRequestToAccessRequest(req)
-	
+
 	// Create zero-trust request with JIT-specific context
 	zeroTrustRequest := &zerotrust.ZeroTrustAccessRequest{
-		AccessRequest:    accessRequest,
-		RequestID:        fmt.Sprintf("jit-request-%d", time.Now().UnixNano()),
-		RequestTime:      time.Now(),
-		SubjectType:      zerotrust.SubjectTypeUser,
-		ResourceType:     "jit_access",
-		SourceSystem:     "jit-access-manager",
-		RequestSource:    zerotrust.RequestSourceUI,
-		Priority:         jam.determineZeroTrustPriority(req),
+		AccessRequest: accessRequest,
+		RequestID:     fmt.Sprintf("jit-request-%d", time.Now().UnixNano()),
+		RequestTime:   time.Now(),
+		SubjectType:   zerotrust.SubjectTypeUser,
+		ResourceType:  "jit_access",
+		SourceSystem:  "jit-access-manager",
+		RequestSource: zerotrust.RequestSourceUI,
+		Priority:      jam.determineZeroTrustPriority(req),
 	}
-	
+
 	// Set JIT-specific context in subject attributes
 	zeroTrustRequest.SubjectAttributes = map[string]interface{}{
 		"request_type":     "jit_access_request",
@@ -798,7 +799,7 @@ func (jam *JITAccessManager) evaluateZeroTrustForJITRequest(ctx context.Context,
 		"emergency_access": req.EmergencyAccess,
 		"auto_approve":     req.AutoApprove,
 	}
-	
+
 	// Evaluate with zero-trust engine
 	return jam.zeroTrustEngine.EvaluateAccess(ctx, zeroTrustRequest)
 }
@@ -807,19 +808,19 @@ func (jam *JITAccessManager) evaluateZeroTrustForJITRequest(ctx context.Context,
 func (jam *JITAccessManager) evaluateZeroTrustForJITApproval(ctx context.Context, request *JITAccessRequest, approverID string) (*zerotrust.ZeroTrustAccessResponse, error) {
 	// Convert JIT request to access request for zero-trust evaluation
 	accessRequest := jam.convertJITRequestToAccessRequestFromRequest(request)
-	
+
 	// Create zero-trust request with approval-specific context
 	zeroTrustRequest := &zerotrust.ZeroTrustAccessRequest{
-		AccessRequest:    accessRequest,
-		RequestID:        fmt.Sprintf("jit-approval-%s", request.ID),
-		RequestTime:      time.Now(),
-		SubjectType:      zerotrust.SubjectTypeUser,
-		ResourceType:     "jit_access",
-		SourceSystem:     "jit-access-manager",
-		RequestSource:    zerotrust.RequestSourceSystem, // Approval is system-initiated
-		Priority:         jam.determineZeroTrustPriorityFromRequest(request),
+		AccessRequest: accessRequest,
+		RequestID:     fmt.Sprintf("jit-approval-%s", request.ID),
+		RequestTime:   time.Now(),
+		SubjectType:   zerotrust.SubjectTypeUser,
+		ResourceType:  "jit_access",
+		SourceSystem:  "jit-access-manager",
+		RequestSource: zerotrust.RequestSourceSystem, // Approval is system-initiated
+		Priority:      jam.determineZeroTrustPriorityFromRequest(request),
 	}
-	
+
 	// Set JIT approval-specific context in subject attributes
 	zeroTrustRequest.SubjectAttributes = map[string]interface{}{
 		"request_type":     "jit_access_approval",
@@ -830,7 +831,7 @@ func (jam *JITAccessManager) evaluateZeroTrustForJITApproval(ctx context.Context
 		"auto_approve":     request.AutoApprove,
 		"approver_id":      approverID,
 	}
-	
+
 	// Evaluate with zero-trust engine
 	return jam.zeroTrustEngine.EvaluateAccess(ctx, zeroTrustRequest)
 }
@@ -842,22 +843,22 @@ func (jam *JITAccessManager) evaluateZeroTrustForJITGrant(ctx context.Context, g
 	if originalRequest == nil {
 		return nil, fmt.Errorf("original request %s not found for grant %s", grant.RequestID, grant.ID)
 	}
-	
+
 	// Convert grant to access request for zero-trust evaluation
 	accessRequest := jam.convertJITGrantToAccessRequest(grant)
-	
+
 	// Create zero-trust request with grant-specific context
 	zeroTrustRequest := &zerotrust.ZeroTrustAccessRequest{
-		AccessRequest:    accessRequest,
-		RequestID:        fmt.Sprintf("jit-grant-%s", grant.ID),
-		RequestTime:      time.Now(),
-		SubjectType:      zerotrust.SubjectTypeUser,
-		ResourceType:     "jit_access",
-		SourceSystem:     "jit-access-manager",
-		RequestSource:    zerotrust.RequestSourceSystem, // Grant activation is system-initiated
-		Priority:         jam.determineZeroTrustPriorityFromRequest(originalRequest),
+		AccessRequest: accessRequest,
+		RequestID:     fmt.Sprintf("jit-grant-%s", grant.ID),
+		RequestTime:   time.Now(),
+		SubjectType:   zerotrust.SubjectTypeUser,
+		ResourceType:  "jit_access",
+		SourceSystem:  "jit-access-manager",
+		RequestSource: zerotrust.RequestSourceSystem, // Grant activation is system-initiated
+		Priority:      jam.determineZeroTrustPriorityFromRequest(originalRequest),
 	}
-	
+
 	// Set JIT grant-specific context in subject attributes
 	zeroTrustRequest.SubjectAttributes = map[string]interface{}{
 		"request_type":     "jit_access_grant",
@@ -869,7 +870,7 @@ func (jam *JITAccessManager) evaluateZeroTrustForJITGrant(ctx context.Context, g
 		"approver_id":      grant.ApprovedBy,
 		"grant_id":         grant.ID,
 	}
-	
+
 	// Evaluate with zero-trust engine
 	return jam.zeroTrustEngine.EvaluateAccess(ctx, zeroTrustRequest)
 }
@@ -882,24 +883,24 @@ func (jam *JITAccessManager) convertJITRequestToAccessRequest(req *JITAccessRequ
 	if len(req.Permissions) > 0 {
 		permissionID = req.Permissions[0]
 	}
-	
+
 	// Convert resource IDs to a single resource (take first or empty)
 	resourceID := ""
 	if len(req.ResourceIDs) > 0 {
 		resourceID = req.ResourceIDs[0]
 	}
-	
+
 	return &common.AccessRequest{
 		SubjectId:    req.RequesterID,
 		PermissionId: permissionID,
 		ResourceId:   resourceID,
 		TenantId:     req.TenantID,
 		Context: map[string]string{
-			"access_type":    "jit",
-			"target_id":      req.TargetID,
-			"duration":       req.Duration.String(),
-			"justification":  req.Justification,
-			"emergency":      fmt.Sprintf("%v", req.EmergencyAccess),
+			"access_type":   "jit",
+			"target_id":     req.TargetID,
+			"duration":      req.Duration.String(),
+			"justification": req.Justification,
+			"emergency":     fmt.Sprintf("%v", req.EmergencyAccess),
 		},
 	}
 }
@@ -910,25 +911,25 @@ func (jam *JITAccessManager) convertJITRequestToAccessRequestFromRequest(request
 	if len(request.Permissions) > 0 {
 		permissionID = request.Permissions[0]
 	}
-	
+
 	// Convert resource IDs to a single resource (take first or empty)
 	resourceID := ""
 	if len(request.ResourceIDs) > 0 {
 		resourceID = request.ResourceIDs[0]
 	}
-	
+
 	return &common.AccessRequest{
 		SubjectId:    request.RequesterID,
 		PermissionId: permissionID,
 		ResourceId:   resourceID,
 		TenantId:     request.TenantID,
 		Context: map[string]string{
-			"access_type":    "jit",
-			"target_id":      request.TargetID,
-			"duration":       request.Duration.String(),
-			"justification":  request.Justification,
-			"emergency":      fmt.Sprintf("%v", request.EmergencyAccess),
-			"request_id":     request.ID,
+			"access_type":   "jit",
+			"target_id":     request.TargetID,
+			"duration":      request.Duration.String(),
+			"justification": request.Justification,
+			"emergency":     fmt.Sprintf("%v", request.EmergencyAccess),
+			"request_id":    request.ID,
 		},
 	}
 }
@@ -939,25 +940,25 @@ func (jam *JITAccessManager) convertJITGrantToAccessRequest(grant *JITAccessGran
 	if len(grant.Permissions) > 0 {
 		permissionID = grant.Permissions[0]
 	}
-	
+
 	// Convert resource IDs to a single resource (take first or empty)
 	resourceID := ""
 	if len(grant.ResourceIDs) > 0 {
 		resourceID = grant.ResourceIDs[0]
 	}
-	
+
 	return &common.AccessRequest{
 		SubjectId:    grant.RequesterID,
 		PermissionId: permissionID,
 		ResourceId:   resourceID,
 		TenantId:     grant.TenantID,
 		Context: map[string]string{
-			"access_type":      "jit",
-			"target_id":        grant.TargetID,
-			"duration":         time.Until(grant.ExpiresAt).String(),
-			"approval_reason":  grant.ApprovalReason,
-			"approved_by":      grant.ApprovedBy,
-			"grant_id":         grant.ID,
+			"access_type":     "jit",
+			"target_id":       grant.TargetID,
+			"duration":        time.Until(grant.ExpiresAt).String(),
+			"approval_reason": grant.ApprovalReason,
+			"approved_by":     grant.ApprovedBy,
+			"grant_id":        grant.ID,
 		},
 	}
 }

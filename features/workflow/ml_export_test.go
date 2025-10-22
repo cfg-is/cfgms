@@ -26,15 +26,15 @@ func TestMLDataExporter_ExportJSON(t *testing.T) {
 
 	// Create export request
 	request := ExportRequest{
-		StartTime:               time.Now().Add(-24 * time.Hour),
-		EndTime:                 time.Now(),
-		Format:                  ExportFormatJSON,
-		IncludeHeaders:          true,
-		IncludeVariableStates:   true,
-		IncludeAPIData:          true,
-		IncludePerformanceData:  true,
-		IncludeErrorPatterns:    true,
-		IncludeOnlyMLEvents:     true,
+		StartTime:              time.Now().Add(-24 * time.Hour),
+		EndTime:                time.Now(),
+		Format:                 ExportFormatJSON,
+		IncludeHeaders:         true,
+		IncludeVariableStates:  true,
+		IncludeAPIData:         true,
+		IncludePerformanceData: true,
+		IncludeErrorPatterns:   true,
+		IncludeOnlyMLEvents:    true,
 	}
 
 	// Export data
@@ -76,15 +76,15 @@ func TestMLDataExporter_ExportCSV(t *testing.T) {
 
 	// Create export request
 	request := ExportRequest{
-		StartTime:               time.Now().Add(-24 * time.Hour),
-		EndTime:                 time.Now(),
-		Format:                  ExportFormatCSV,
-		IncludeHeaders:          true,
-		IncludeVariableStates:   true,
-		IncludeAPIData:          true,
-		IncludePerformanceData:  true,
-		IncludeErrorPatterns:    true,
-		IncludeOnlyMLEvents:     true,
+		StartTime:              time.Now().Add(-24 * time.Hour),
+		EndTime:                time.Now(),
+		Format:                 ExportFormatCSV,
+		IncludeHeaders:         true,
+		IncludeVariableStates:  true,
+		IncludeAPIData:         true,
+		IncludePerformanceData: true,
+		IncludeErrorPatterns:   true,
+		IncludeOnlyMLEvents:    true,
 	}
 
 	// Export data
@@ -131,13 +131,13 @@ func TestMLDataExporter_ExportJSONLines(t *testing.T) {
 
 	// Create export request
 	request := ExportRequest{
-		StartTime:               time.Now().Add(-24 * time.Hour),
-		EndTime:                 time.Now(),
-		Format:                  ExportFormatJSONL,
-		IncludeVariableStates:   true,
-		IncludeAPIData:          true,
-		IncludePerformanceData:  true,
-		IncludeOnlyMLEvents:     true,
+		StartTime:              time.Now().Add(-24 * time.Hour),
+		EndTime:                time.Now(),
+		Format:                 ExportFormatJSONL,
+		IncludeVariableStates:  true,
+		IncludeAPIData:         true,
+		IncludePerformanceData: true,
+		IncludeOnlyMLEvents:    true,
 	}
 
 	// Export data
@@ -181,11 +181,11 @@ func TestMLDataExporter_Filtering(t *testing.T) {
 
 	// Test workflow name filtering
 	request := ExportRequest{
-		StartTime:               time.Now().Add(-24 * time.Hour),
-		EndTime:                 time.Now(),
-		Format:                  ExportFormatJSON,
-		WorkflowNames:           []string{"test-workflow-1"},
-		IncludeOnlyMLEvents:     true,
+		StartTime:           time.Now().Add(-24 * time.Hour),
+		EndTime:             time.Now(),
+		Format:              ExportFormatJSON,
+		WorkflowNames:       []string{"test-workflow-1"},
+		IncludeOnlyMLEvents: true,
 	}
 
 	var buf bytes.Buffer
@@ -224,14 +224,14 @@ func TestMLDataExporter_DataSelection(t *testing.T) {
 
 	// Test selective data inclusion
 	request := ExportRequest{
-		StartTime:               time.Now().Add(-24 * time.Hour),
-		EndTime:                 time.Now(),
-		Format:                  ExportFormatJSON,
-		IncludeVariableStates:   false, // Exclude variable states
-		IncludeAPIData:          true,
-		IncludePerformanceData:  false, // Exclude performance data
-		IncludeErrorPatterns:    true,
-		IncludeOnlyMLEvents:     true,
+		StartTime:              time.Now().Add(-24 * time.Hour),
+		EndTime:                time.Now(),
+		Format:                 ExportFormatJSON,
+		IncludeVariableStates:  false, // Exclude variable states
+		IncludeAPIData:         true,
+		IncludePerformanceData: false, // Exclude performance data
+		IncludeErrorPatterns:   true,
+		IncludeOnlyMLEvents:    true,
 	}
 
 	var buf bytes.Buffer
@@ -299,7 +299,7 @@ func TestMLDataExporter_CSVColumnDetermination(t *testing.T) {
 
 	// Create a sample ML entry
 	entry := MLLogEntry{
-		EventType: "test_event",
+		EventType:      "test_event",
 		VariableStates: map[string]interface{}{"var1": "value1"},
 		APIRequestData: &APIRequestData{
 			URL:    "https://api.example.com",
@@ -376,10 +376,10 @@ func TestMLDataExporter_CSVRowFlattening(t *testing.T) {
 			GCCount:          5,
 		},
 		ErrorPattern: &ErrorPattern{
-			ErrorCode:    "TEST_ERROR",
-			ErrorMessage: "Test error message",
+			ErrorCode:       "TEST_ERROR",
+			ErrorMessage:    "Test error message",
 			FailureCategory: "test",
-			IsRecoverable: true,
+			IsRecoverable:   true,
 		},
 	}
 

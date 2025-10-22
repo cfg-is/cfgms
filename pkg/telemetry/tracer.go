@@ -84,7 +84,7 @@ func DefaultConfig(serviceName, version string) *Config {
 		ServiceName:    serviceName,
 		ServiceVersion: version,
 		Environment:    "development",
-		OTLPEndpoint:   "", // No remote export by default
+		OTLPEndpoint:   "",  // No remote export by default
 		SampleRate:     1.0, // Sample all traces in development
 		Enabled:        true,
 	}
@@ -108,7 +108,7 @@ func Initialize(ctx context.Context, config *Config) (*Tracer, func(), error) {
 	if config == nil {
 		config = DefaultConfig("cfgms", "v0.2.0")
 	}
-	
+
 	if !config.Enabled {
 		// Return a no-op tracer when disabled
 		noopTracer := &Tracer{

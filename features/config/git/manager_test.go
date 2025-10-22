@@ -146,15 +146,15 @@ func TestGitManager_CreateRepository(t *testing.T) {
 	// Setup mocks
 	mockProvider := &MockGitProvider{}
 	mockStore := &MockRepositoryStore{}
-	
+
 	config := GitManagerConfig{
 		CacheDir:      "/tmp/test-cache",
 		DefaultBranch: "main",
 		EnableHooks:   false, // Disable hooks for simple test
 	}
-	
+
 	manager := NewGitManager(mockProvider, mockStore, config)
-	
+
 	// Test repository configuration
 	repoConfig := RepositoryConfig{
 		Type:        RepositoryTypeClient,
@@ -164,11 +164,11 @@ func TestGitManager_CreateRepository(t *testing.T) {
 		Provider:    "github",
 		Private:     true,
 	}
-	
+
 	// Expected config after manager processing (with default branch set)
 	expectedConfig := repoConfig
 	expectedConfig.InitialBranch = "main"
-	
+
 	// Expected repository response
 	expectedRepo := &Repository{
 		ID:            "github:test-owner/test-repo",
@@ -181,22 +181,22 @@ func TestGitManager_CreateRepository(t *testing.T) {
 		CreatedAt:     time.Now(),
 		UpdatedAt:     time.Now(),
 	}
-	
+
 	// Setup mock expectations
 	mockProvider.On("CreateRepository", mock.Anything, expectedConfig).Return(expectedRepo, nil)
 	mockStore.On("Clone", mock.Anything, expectedRepo.CloneURL, mock.AnythingOfType("string")).Return(nil)
-	
+
 	// Execute test
 	ctx := context.Background()
 	result, err := manager.CreateRepository(ctx, repoConfig)
-	
+
 	// Assertions
 	assert.NoError(t, err)
 	assert.NotNil(t, result)
 	assert.Equal(t, expectedRepo.ID, result.ID)
 	assert.Equal(t, expectedRepo.Name, result.Name)
 	assert.Equal(t, expectedRepo.Type, result.Type)
-	
+
 	// Verify mock calls
 	mockProvider.AssertExpectations(t)
 	mockStore.AssertExpectations(t)
@@ -206,15 +206,15 @@ func TestGitManager_SaveConfiguration(t *testing.T) {
 	// Setup mocks
 	mockProvider := &MockGitProvider{}
 	mockStore := &MockRepositoryStore{}
-	
+
 	config := GitManagerConfig{
 		CacheDir:      "/tmp/test-cache",
 		DefaultBranch: "main",
 		EnableHooks:   false,
 	}
-	
+
 	manager := NewGitManager(mockProvider, mockStore, config)
-	
+
 	// Add a test repository to the manager
 	testRepo := &Repository{
 		ID:            "test-repo-1",
@@ -224,32 +224,32 @@ func TestGitManager_SaveConfiguration(t *testing.T) {
 	}
 	manager.repositories["test-repo-1"] = testRepo
 	manager.localCache["test-repo-1"] = "/tmp/test-cache/test-repo-1"
-	
+
 	// Test configuration
 	configRef := ConfigurationRef{
 		RepositoryID: "test-repo-1",
 		Path:         "config.yaml",
 	}
-	
+
 	testConfig := &Configuration{
 		Path:    "config.yaml",
 		Content: []byte("test: configuration"),
 		Format:  "yaml",
 	}
-	
+
 	// Setup mock expectations
 	mockStore.On("Pull", mock.Anything, "/tmp/test-cache/test-repo-1").Return(nil)
 	mockStore.On("WriteFile", mock.Anything, "/tmp/test-cache/test-repo-1", "config.yaml", testConfig.Content).Return(nil)
 	mockStore.On("Commit", mock.Anything, "/tmp/test-cache/test-repo-1", mock.AnythingOfType("string"), mock.AnythingOfType("CommitAuthor")).Return("abc123", nil)
 	mockStore.On("Push", mock.Anything, "/tmp/test-cache/test-repo-1").Return(nil)
-	
+
 	// Execute test
 	ctx := context.Background()
 	err := manager.SaveConfiguration(ctx, configRef, testConfig, "Update configuration")
-	
+
 	// Assertions
 	assert.NoError(t, err)
-	
+
 	// Verify mock calls
 	mockStore.AssertExpectations(t)
 }
@@ -258,14 +258,14 @@ func TestGitManager_GetConfiguration(t *testing.T) {
 	// Setup mocks
 	mockProvider := &MockGitProvider{}
 	mockStore := &MockRepositoryStore{}
-	
+
 	config := GitManagerConfig{
 		CacheDir:      "/tmp/test-cache",
 		DefaultBranch: "main",
 	}
-	
+
 	manager := NewGitManager(mockProvider, mockStore, config)
-	
+
 	// Add a test repository to the manager
 	testRepo := &Repository{
 		ID:   "test-repo-1",
@@ -273,13 +273,13 @@ func TestGitManager_GetConfiguration(t *testing.T) {
 	}
 	manager.repositories["test-repo-1"] = testRepo
 	manager.localCache["test-repo-1"] = "/tmp/test-cache/test-repo-1"
-	
+
 	// Test configuration reference
 	configRef := ConfigurationRef{
 		RepositoryID: "test-repo-1",
 		Path:         "config.yaml",
 	}
-	
+
 	// Expected file content
 	expectedContent := []byte("test: configuration")
 	expectedCommits := []*Commit{
@@ -293,16 +293,16 @@ func TestGitManager_GetConfiguration(t *testing.T) {
 			},
 		},
 	}
-	
+
 	// Setup mock expectations
 	mockStore.On("Pull", mock.Anything, "/tmp/test-cache/test-repo-1").Return(nil)
 	mockStore.On("ReadFile", mock.Anything, "/tmp/test-cache/test-repo-1", "config.yaml").Return(expectedContent, nil)
 	mockStore.On("GetHistory", mock.Anything, "/tmp/test-cache/test-repo-1", "config.yaml", 1).Return(expectedCommits, nil)
-	
+
 	// Execute test
 	ctx := context.Background()
 	result, err := manager.GetConfiguration(ctx, configRef)
-	
+
 	// Assertions
 	assert.NoError(t, err)
 	assert.NotNil(t, result)
@@ -310,7 +310,7 @@ func TestGitManager_GetConfiguration(t *testing.T) {
 	assert.Equal(t, expectedContent, result.Content)
 	assert.Equal(t, "yaml", result.Format)
 	assert.Equal(t, "Test Author", result.Metadata.Author)
-	
+
 	// Verify mock calls
 	mockStore.AssertExpectations(t)
 }
@@ -319,13 +319,13 @@ func TestGitManager_ListRepositories(t *testing.T) {
 	// Setup mocks
 	mockProvider := &MockGitProvider{}
 	mockStore := &MockRepositoryStore{}
-	
+
 	config := GitManagerConfig{
 		CacheDir: "/tmp/test-cache",
 	}
-	
+
 	manager := NewGitManager(mockProvider, mockStore, config)
-	
+
 	// Add test repositories
 	repo1 := &Repository{
 		ID:    "repo-1",
@@ -342,24 +342,24 @@ func TestGitManager_ListRepositories(t *testing.T) {
 		Type:  RepositoryTypeClient,
 		Owner: "client-2",
 	}
-	
+
 	manager.repositories["repo-1"] = repo1
 	manager.repositories["repo-2"] = repo2
 	manager.repositories["repo-3"] = repo3
-	
+
 	// Test filter for client repositories
 	filter := RepositoryFilter{
 		Type: RepositoryTypeClient,
 	}
-	
+
 	// Execute test
 	ctx := context.Background()
 	results, err := manager.ListRepositories(ctx, filter)
-	
+
 	// Assertions
 	assert.NoError(t, err)
 	assert.Len(t, results, 2) // Should return repo-1 and repo-3
-	
+
 	// Verify all returned repos are client type
 	for _, repo := range results {
 		assert.Equal(t, RepositoryTypeClient, repo.Type)
@@ -370,13 +370,13 @@ func TestGitManager_CreateBranch(t *testing.T) {
 	// Setup mocks
 	mockProvider := &MockGitProvider{}
 	mockStore := &MockRepositoryStore{}
-	
+
 	config := GitManagerConfig{
 		CacheDir: "/tmp/test-cache",
 	}
-	
+
 	manager := NewGitManager(mockProvider, mockStore, config)
-	
+
 	// Add test repository
 	testRepo := &Repository{
 		ID:            "test-repo-1",
@@ -384,17 +384,17 @@ func TestGitManager_CreateBranch(t *testing.T) {
 		DefaultBranch: "main",
 	}
 	manager.repositories["test-repo-1"] = testRepo
-	
+
 	// Setup mock expectations
 	mockProvider.On("CreateBranch", mock.Anything, "cfgms", "test-repo", "feature-branch", "main").Return(nil)
-	
+
 	// Execute test
 	ctx := context.Background()
 	err := manager.CreateBranch(ctx, "test-repo-1", "feature-branch", "")
-	
+
 	// Assertions
 	assert.NoError(t, err)
-	
+
 	// Verify mock calls
 	mockProvider.AssertExpectations(t)
 }
@@ -402,10 +402,10 @@ func TestGitManager_CreateBranch(t *testing.T) {
 func TestGitManager_GenerateRepositoryName(t *testing.T) {
 	mockProvider := &MockGitProvider{}
 	mockStore := &MockRepositoryStore{}
-	
+
 	config := GitManagerConfig{}
 	manager := NewGitManager(mockProvider, mockStore, config)
-	
+
 	tests := []struct {
 		name     string
 		config   RepositoryConfig
@@ -436,11 +436,11 @@ func TestGitManager_GenerateRepositoryName(t *testing.T) {
 			expected: "cfgms-msp-123-shared-", // UUID will be appended
 		},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := manager.generateRepositoryName(tt.config)
-			
+
 			if tt.config.Type == RepositoryTypeMSPGlobal {
 				assert.Equal(t, tt.expected, result)
 			} else {

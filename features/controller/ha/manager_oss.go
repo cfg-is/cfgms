@@ -60,14 +60,14 @@ func NewManager(cfg *Config, logger logging.Logger, storageManager *interfaces.S
 
 	// Create node info
 	nodeInfo := &NodeInfo{
-		ID:          cfg.Node.ID,
-		Address:     cfg.Node.ExternalAddress,
-		State:       NodeStateHealthy,
-		Role:        NodeRoleLeader, // Single server is always the leader
-		StartedAt:   time.Now(),
-		Version:     "v0.7.0-oss",
-		Region:      cfg.Node.Region,
-		Latency:     make(map[string]time.Duration),
+		ID:        cfg.Node.ID,
+		Address:   cfg.Node.ExternalAddress,
+		State:     NodeStateHealthy,
+		Role:      NodeRoleLeader, // Single server is always the leader
+		StartedAt: time.Now(),
+		Version:   "v0.7.0-oss",
+		Region:    cfg.Node.Region,
+		Latency:   make(map[string]time.Duration),
 	}
 
 	manager := &Manager{

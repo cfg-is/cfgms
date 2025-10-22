@@ -140,7 +140,7 @@ func (s *DockerIntegrationTestSuite) TestStewardHeartbeat() {
 		}
 	})
 
-	s.True(token.WaitTimeout(5 * time.Second), "Subscribe should not timeout")
+	s.True(token.WaitTimeout(5*time.Second), "Subscribe should not timeout")
 	s.NoError(token.Error(), "Subscribe should succeed")
 
 	// Wait for heartbeat message (stewards send every 30s, but we'll wait up to 45s)
@@ -191,7 +191,7 @@ func (s *DockerIntegrationTestSuite) TestStewardDNACollection() {
 		}
 	})
 
-	s.True(token.WaitTimeout(5 * time.Second), "Subscribe should not timeout")
+	s.True(token.WaitTimeout(5*time.Second), "Subscribe should not timeout")
 	s.NoError(token.Error(), "Subscribe should succeed")
 
 	// Wait for DNA message (stewards send periodically, wait up to 60s)
@@ -246,7 +246,7 @@ func (s *DockerIntegrationTestSuite) TestStewardStatusReporting() {
 		}
 	})
 
-	s.True(token.WaitTimeout(5 * time.Second), "Subscribe should not timeout")
+	s.True(token.WaitTimeout(5*time.Second), "Subscribe should not timeout")
 	s.NoError(token.Error(), "Subscribe should succeed")
 
 	// Wait for status message (may not be sent immediately, wait up to 30s)

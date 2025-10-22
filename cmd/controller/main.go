@@ -18,8 +18,8 @@ import (
 	_ "github.com/cfgis/cfgms/pkg/logging/providers/timescale"
 
 	// Import storage providers to register them
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 )
 
 func main() {

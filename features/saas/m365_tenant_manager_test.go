@@ -7,10 +7,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/features/modules/m365/auth"
-	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/features/modules/m365/auth"
+	"github.com/cfgis/cfgms/features/tenant"
 )
 
 // Mock implementations

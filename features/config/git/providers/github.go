@@ -15,11 +15,11 @@ import (
 
 // GitHubProvider implements the GitProvider interface for GitHub
 type GitHubProvider struct {
-	client     *http.Client
-	baseURL    string
-	token      string
-	owner      string
-	userAgent  string
+	client    *http.Client
+	baseURL   string
+	token     string
+	owner     string
+	userAgent string
 }
 
 // NewGitHubProvider creates a new GitHub provider
@@ -41,22 +41,22 @@ func (p *GitHubProvider) CreateRepository(ctx context.Context, config cfgit.Repo
 		"private":     config.Private,
 		"auto_init":   true,
 	}
-	
+
 	if config.InitialBranch != "" && config.InitialBranch != "main" {
 		// GitHub uses "main" as default, we'll handle other branches after creation
 		_ = config.InitialBranch // Will be handled in post-creation logic
 	}
-	
+
 	respBody, err := p.makeRequest(ctx, "POST", "/user/repos", payload)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create repository: %w", err)
 	}
-	
+
 	var repoResp gitHubRepository
 	if err := json.Unmarshal(respBody, &repoResp); err != nil {
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
-	
+
 	// Convert to our Repository type
 	repo := &cfgit.Repository{
 		ID:            fmt.Sprintf("github:%s/%s", p.owner, repoResp.Name),
@@ -69,18 +69,18 @@ func (p *GitHubProvider) CreateRepository(ctx context.Context, config cfgit.Repo
 		CreatedAt:     repoResp.CreatedAt,
 		UpdatedAt:     repoResp.UpdatedAt,
 		Metadata: map[string]interface{}{
-			"github_id":  repoResp.ID,
-			"full_name":  repoResp.FullName,
-			"html_url":   repoResp.HTMLURL,
+			"github_id": repoResp.ID,
+			"full_name": repoResp.FullName,
+			"html_url":  repoResp.HTMLURL,
 		},
 	}
-	
+
 	// Set up branch protection for important branches
 	if err := p.setupInitialBranchProtection(ctx, repo); err != nil {
 		// Log but don't fail - this is not critical
 		fmt.Printf("warning: failed to set up branch protection: %v\n", err)
 	}
-	
+
 	return repo, nil
 }
 
@@ -91,12 +91,12 @@ func (p *GitHubProvider) GetRepository(ctx context.Context, owner, name string) 
 	if err != nil {
 		return nil, fmt.Errorf("failed to get repository: %w", err)
 	}
-	
+
 	var repoResp gitHubRepository
 	if err := json.Unmarshal(respBody, &repoResp); err != nil {
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
-	
+
 	// Determine repository type from name pattern
 	repoType := cfgit.RepositoryTypeClient // default
 	if strings.Contains(repoResp.Name, "global") {
@@ -104,7 +104,7 @@ func (p *GitHubProvider) GetRepository(ctx context.Context, owner, name string) 
 	} else if strings.Contains(repoResp.Name, "shared") {
 		repoType = cfgit.RepositoryTypeShared
 	}
-	
+
 	return &cfgit.Repository{
 		ID:            fmt.Sprintf("github:%s/%s", owner, repoResp.Name),
 		Type:          repoType,
@@ -116,9 +116,9 @@ func (p *GitHubProvider) GetRepository(ctx context.Context, owner, name string) 
 		CreatedAt:     repoResp.CreatedAt,
 		UpdatedAt:     repoResp.UpdatedAt,
 		Metadata: map[string]interface{}{
-			"github_id":  repoResp.ID,
-			"full_name":  repoResp.FullName,
-			"html_url":   repoResp.HTMLURL,
+			"github_id": repoResp.ID,
+			"full_name": repoResp.FullName,
+			"html_url":  repoResp.HTMLURL,
 		},
 	}, nil
 }
@@ -130,7 +130,7 @@ func (p *GitHubProvider) DeleteRepository(ctx context.Context, owner, name strin
 	if err != nil {
 		return fmt.Errorf("failed to delete repository: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -142,24 +142,24 @@ func (p *GitHubProvider) CreateBranch(ctx context.Context, owner, repo, branch, 
 	if err != nil {
 		return fmt.Errorf("failed to get reference SHA: %w", err)
 	}
-	
+
 	var refResp gitHubReference
 	if err := json.Unmarshal(respBody, &refResp); err != nil {
 		return fmt.Errorf("failed to parse reference response: %w", err)
 	}
-	
+
 	// Create the new branch
 	payload := map[string]interface{}{
 		"ref": fmt.Sprintf("refs/heads/%s", branch),
 		"sha": refResp.Object.SHA,
 	}
-	
+
 	path := fmt.Sprintf("/repos/%s/%s/git/refs", owner, repo)
 	_, err = p.makeRequest(ctx, "POST", path, payload)
 	if err != nil {
 		return fmt.Errorf("failed to create branch: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -170,7 +170,7 @@ func (p *GitHubProvider) DeleteBranch(ctx context.Context, owner, repo, branch s
 	if err != nil {
 		return fmt.Errorf("failed to delete branch: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -181,12 +181,12 @@ func (p *GitHubProvider) GetDefaultBranch(ctx context.Context, owner, repo strin
 	if err != nil {
 		return "", fmt.Errorf("failed to get repository: %w", err)
 	}
-	
+
 	var repoResp gitHubRepository
 	if err := json.Unmarshal(respBody, &repoResp); err != nil {
 		return "", fmt.Errorf("failed to parse response: %w", err)
 	}
-	
+
 	return repoResp.DefaultBranch, nil
 }
 
@@ -198,18 +198,18 @@ func (p *GitHubProvider) CreatePullRequest(ctx context.Context, owner, repo stri
 		"head":  config.SourceBranch,
 		"base":  config.TargetBranch,
 	}
-	
+
 	path := fmt.Sprintf("/repos/%s/%s/pulls", owner, repo)
 	respBody, err := p.makeRequest(ctx, "POST", path, payload)
 	if err != nil {
 		return "", fmt.Errorf("failed to create pull request: %w", err)
 	}
-	
+
 	var prResp gitHubPullRequest
 	if err := json.Unmarshal(respBody, &prResp); err != nil {
 		return "", fmt.Errorf("failed to parse response: %w", err)
 	}
-	
+
 	// Add labels if specified
 	if len(config.Labels) > 0 {
 		labelsPayload := map[string]interface{}{
@@ -218,7 +218,7 @@ func (p *GitHubProvider) CreatePullRequest(ctx context.Context, owner, repo stri
 		labelsPath := fmt.Sprintf("/repos/%s/%s/issues/%d/labels", owner, repo, prResp.Number)
 		_, _ = p.makeRequest(ctx, "POST", labelsPath, labelsPayload) // Non-critical
 	}
-	
+
 	// Request reviewers if specified
 	if len(config.Reviewers) > 0 {
 		reviewersPayload := map[string]interface{}{
@@ -227,23 +227,23 @@ func (p *GitHubProvider) CreatePullRequest(ctx context.Context, owner, repo stri
 		reviewersPath := fmt.Sprintf("/repos/%s/%s/pulls/%d/requested_reviewers", owner, repo, prResp.Number)
 		_, _ = p.makeRequest(ctx, "POST", reviewersPath, reviewersPayload) // Non-critical
 	}
-	
+
 	return fmt.Sprintf("%d", prResp.Number), nil
 }
 
 // MergePullRequest merges a pull request
 func (p *GitHubProvider) MergePullRequest(ctx context.Context, owner, repo, prID string) error {
 	payload := map[string]interface{}{
-		"commit_title":   fmt.Sprintf("Merge pull request #%s", prID),
-		"merge_method":   "squash", // Use squash merge for cleaner history
+		"commit_title": fmt.Sprintf("Merge pull request #%s", prID),
+		"merge_method": "squash", // Use squash merge for cleaner history
 	}
-	
+
 	path := fmt.Sprintf("/repos/%s/%s/pulls/%s/merge", owner, repo, prID)
 	_, err := p.makeRequest(ctx, "PUT", path, payload)
 	if err != nil {
 		return fmt.Errorf("failed to merge pull request: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -259,18 +259,18 @@ func (p *GitHubProvider) CreateWebhook(ctx context.Context, owner, repo string, 
 			"secret":       config.Secret,
 		},
 	}
-	
+
 	path := fmt.Sprintf("/repos/%s/%s/hooks", owner, repo)
 	respBody, err := p.makeRequest(ctx, "POST", path, payload)
 	if err != nil {
 		return "", fmt.Errorf("failed to create webhook: %w", err)
 	}
-	
+
 	var hookResp gitHubWebhook
 	if err := json.Unmarshal(respBody, &hookResp); err != nil {
 		return "", fmt.Errorf("failed to parse response: %w", err)
 	}
-	
+
 	return fmt.Sprintf("%d", hookResp.ID), nil
 }
 
@@ -281,7 +281,7 @@ func (p *GitHubProvider) DeleteWebhook(ctx context.Context, owner, repo, webhook
 	if err != nil {
 		return fmt.Errorf("failed to delete webhook: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -299,20 +299,20 @@ func (p *GitHubProvider) SetBranchProtection(ctx context.Context, owner, repo st
 		},
 		"restrictions": nil, // Open to all for now
 	}
-	
+
 	if rule.RestrictPushAccess {
 		payload["restrictions"] = map[string]interface{}{
 			"users": rule.PushAccessUsers,
 			"teams": rule.PushAccessTeams,
 		}
 	}
-	
+
 	path := fmt.Sprintf("/repos/%s/%s/branches/%s/protection", owner, repo, rule.Pattern)
 	_, err := p.makeRequest(ctx, "PUT", path, payload)
 	if err != nil {
 		return fmt.Errorf("failed to set branch protection: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -323,7 +323,7 @@ func (p *GitHubProvider) RemoveBranchProtection(ctx context.Context, owner, repo
 	if err != nil {
 		return fmt.Errorf("failed to remove branch protection: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -331,7 +331,7 @@ func (p *GitHubProvider) RemoveBranchProtection(ctx context.Context, owner, repo
 
 func (p *GitHubProvider) makeRequest(ctx context.Context, method, path string, payload interface{}) ([]byte, error) {
 	url := p.baseURL + path
-	
+
 	var body *bytes.Buffer
 	if payload != nil {
 		jsonPayload, err := json.Marshal(payload)
@@ -340,7 +340,7 @@ func (p *GitHubProvider) makeRequest(ctx context.Context, method, path string, p
 		}
 		body = bytes.NewBuffer(jsonPayload)
 	}
-	
+
 	var req *http.Request
 	var err error
 	if body != nil {
@@ -348,11 +348,11 @@ func (p *GitHubProvider) makeRequest(ctx context.Context, method, path string, p
 	} else {
 		req, err = http.NewRequestWithContext(ctx, method, url, nil)
 	}
-	
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-	
+
 	// Set headers
 	req.Header.Set("Authorization", "token "+p.token)
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
@@ -360,7 +360,7 @@ func (p *GitHubProvider) makeRequest(ctx context.Context, method, path string, p
 	if payload != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	
+
 	resp, err := p.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
@@ -371,12 +371,12 @@ func (p *GitHubProvider) makeRequest(ctx context.Context, method, path string, p
 			_ = err // Explicitly ignore error for cleanup operation
 		}
 	}()
-	
+
 	respBody := &bytes.Buffer{}
 	if _, err := respBody.ReadFrom(resp.Body); err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
-	
+
 	if resp.StatusCode >= 400 {
 		var errorResp gitHubError
 		if err := json.Unmarshal(respBody.Bytes(), &errorResp); err == nil {
@@ -384,7 +384,7 @@ func (p *GitHubProvider) makeRequest(ctx context.Context, method, path string, p
 		}
 		return nil, fmt.Errorf("GitHub API error: status %d", resp.StatusCode)
 	}
-	
+
 	return respBody.Bytes(), nil
 }
 
@@ -397,18 +397,18 @@ func (p *GitHubProvider) setupInitialBranchProtection(ctx context.Context, repo 
 		RequireUpToDate:   true,
 		RequiredChecks:    []string{},
 	}
-	
+
 	// For client repositories, be more restrictive
 	if repo.Type == cfgit.RepositoryTypeClient {
 		rule.RequiredReviewers = 2
 		rule.DismissStaleReviews = true
 	}
-	
+
 	parts := strings.Split(strings.TrimPrefix(repo.ID, "github:"), "/")
 	if len(parts) != 2 {
 		return fmt.Errorf("invalid repository ID format")
 	}
-	
+
 	return p.SetBranchProtection(ctx, parts[0], parts[1], rule)
 }
 

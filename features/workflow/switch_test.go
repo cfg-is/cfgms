@@ -11,7 +11,6 @@ import (
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
-
 func TestSwitchStep_BasicFunctionality(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -200,8 +199,8 @@ func TestSwitchStep_DefaultCase(t *testing.T) {
 							Value: "prod",
 							Steps: []Step{
 								{
-									Name: "prod-step",
-									Type: StepTypeDelay,
+									Name:  "prod-step",
+									Type:  StepTypeDelay,
 									Delay: &DelayConfig{Duration: 10 * time.Millisecond},
 								},
 							},
@@ -210,8 +209,8 @@ func TestSwitchStep_DefaultCase(t *testing.T) {
 							Value: "staging",
 							Steps: []Step{
 								{
-									Name: "staging-step",
-									Type: StepTypeDelay,
+									Name:  "staging-step",
+									Type:  StepTypeDelay,
 									Delay: &DelayConfig{Duration: 10 * time.Millisecond},
 								},
 							},
@@ -273,8 +272,8 @@ func TestSwitchStep_NoMatchNoDefault(t *testing.T) {
 							Value: "prod",
 							Steps: []Step{
 								{
-									Name: "prod-step",
-									Type: StepTypeDelay,
+									Name:  "prod-step",
+									Type:  StepTypeDelay,
 									Delay: &DelayConfig{Duration: 10 * time.Millisecond},
 								},
 							},
@@ -403,8 +402,8 @@ func TestSwitchStep_VariableResolutionError(t *testing.T) {
 							Value: "test",
 							Steps: []Step{
 								{
-									Name: "test-step",
-									Type: StepTypeDelay,
+									Name:  "test-step",
+									Type:  StepTypeDelay,
 									Delay: &DelayConfig{Duration: 10 * time.Millisecond},
 								},
 							},

@@ -125,8 +125,8 @@ func (bmc *BasicMetricsCollector) GetMetricsSchema() MetricsSchema {
 // ControllerMetricsCollector provides metrics collection for controller components.
 type ControllerMetricsCollector struct {
 	*BasicMetricsCollector
-	requestCount    int64
-	errorCount      int64
+	requestCount      int64
+	errorCount        int64
 	totalResponseTime time.Duration
 	activeConnections int64
 }
@@ -189,11 +189,11 @@ func (cmc *ControllerMetricsCollector) CollectMetrics(ctx context.Context) (*Com
 // StewardMetricsCollector provides metrics collection for steward components.
 type StewardMetricsCollector struct {
 	*BasicMetricsCollector
-	configExecutions  int64
-	configErrors      int64
-	moduleExecutions  map[string]int64
-	lastHeartbeat     time.Time
-	connectionUptime  time.Duration
+	configExecutions int64
+	configErrors     int64
+	moduleExecutions map[string]int64
+	lastHeartbeat    time.Time
+	connectionUptime time.Duration
 }
 
 // NewStewardMetricsCollector creates a metrics collector for steward components.

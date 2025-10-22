@@ -10,8 +10,9 @@ import (
 	"sync"
 	"time"
 
-	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"google.golang.org/protobuf/proto"
+
+	commonpb "github.com/cfgis/cfgms/api/proto/common"
 )
 
 // ZstdCompressor implements Zstandard compression for DNA data
@@ -199,13 +200,13 @@ func (c *ZstdCompressor) Compress(dna *commonpb.DNA) ([]byte, int64, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	
+
 	compressed, originalSize, err := gzipCompressor.Compress(dna)
 	if err == nil {
 		// Update our stats
 		c.updateStats(originalSize, int64(len(compressed)), 0)
 	}
-	
+
 	return compressed, originalSize, err
 }
 
@@ -216,7 +217,7 @@ func (c *ZstdCompressor) Decompress(data []byte) (*commonpb.DNA, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	return gzipCompressor.Decompress(data)
 }
 
@@ -283,12 +284,12 @@ func (c *LZ4Compressor) Compress(dna *commonpb.DNA) ([]byte, int64, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	
+
 	compressed, originalSize, err := gzipCompressor.Compress(dna)
 	if err == nil {
 		c.updateStats(originalSize, int64(len(compressed)), 0)
 	}
-	
+
 	return compressed, originalSize, err
 }
 
@@ -299,7 +300,7 @@ func (c *LZ4Compressor) Decompress(data []byte) (*commonpb.DNA, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	return gzipCompressor.Decompress(data)
 }
 
@@ -356,12 +357,12 @@ func (c *LZ4Compressor) updateStats(originalSize, compressedSize int64, duration
 // - Similar attribute values (OS versions, software versions, etc.)
 // - Predictable data structure patterns
 type OptimizedDNACompressor struct {
-	attributeDict map[string]int    // Dictionary for attribute keys
-	valueDict     map[string]int    // Dictionary for common values
-	dictMutex     sync.RWMutex
-	baseCompressor Compressor       // Underlying compressor
-	stats         *CompressionStats
-	statsMutex    sync.RWMutex
+	attributeDict  map[string]int // Dictionary for attribute keys
+	valueDict      map[string]int // Dictionary for common values
+	dictMutex      sync.RWMutex
+	baseCompressor Compressor // Underlying compressor
+	stats          *CompressionStats
+	statsMutex     sync.RWMutex
 }
 
 // NewOptimizedDNACompressor creates a new optimized DNA compressor
@@ -384,14 +385,14 @@ func NewOptimizedDNACompressor(algorithm string, level int) (*OptimizedDNACompre
 
 // OptimizedDNAData represents DNA data optimized for compression
 type OptimizedDNAData struct {
-	ID              string            `json:"id"`
-	AttributeKeys   []int             `json:"attribute_keys"`    // Indices into attribute dictionary
-	AttributeValues []int             `json:"attribute_values"`  // Indices into value dictionary
-	LastUpdated     int64             `json:"last_updated"`      // Unix timestamp
-	ConfigHash      string            `json:"config_hash"`
-	LastSyncTime    int64             `json:"last_sync_time"`    // Unix timestamp
-	AttributeCount  int32             `json:"attribute_count"`
-	SyncFingerprint string            `json:"sync_fingerprint"`
+	ID              string `json:"id"`
+	AttributeKeys   []int  `json:"attribute_keys"`   // Indices into attribute dictionary
+	AttributeValues []int  `json:"attribute_values"` // Indices into value dictionary
+	LastUpdated     int64  `json:"last_updated"`     // Unix timestamp
+	ConfigHash      string `json:"config_hash"`
+	LastSyncTime    int64  `json:"last_sync_time"` // Unix timestamp
+	AttributeCount  int32  `json:"attribute_count"`
+	SyncFingerprint string `json:"sync_fingerprint"`
 }
 
 // Compress compresses DNA data using dictionary-based optimization

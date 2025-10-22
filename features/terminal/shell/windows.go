@@ -12,17 +12,17 @@ import (
 
 // WindowsExecutor implements shell execution for Windows systems
 type WindowsExecutor struct {
-	mu         sync.RWMutex
-	config     *Config
-	cmd        *exec.Cmd
-	stdin      io.WriteCloser
-	stdout     io.ReadCloser
-	stderr     io.ReadCloser
-	outputCh   chan []byte
-	errorCh    chan error
-	running    bool
-	ctx        context.Context
-	cancel     context.CancelFunc
+	mu       sync.RWMutex
+	config   *Config
+	cmd      *exec.Cmd
+	stdin    io.WriteCloser
+	stdout   io.ReadCloser
+	stderr   io.ReadCloser
+	outputCh chan []byte
+	errorCh  chan error
+	running  bool
+	ctx      context.Context
+	cancel   context.CancelFunc
 }
 
 // NewWindowsExecutor creates a new Windows shell executor
@@ -65,11 +65,11 @@ func (e *WindowsExecutor) Start(ctx context.Context, config *Config) error {
 	case "powershell":
 		cmdPath = "powershell.exe"
 		args = []string{
-			"-NoExit",           // Don't exit after running commands
-			"-NoLogo",           // Don't show PowerShell logo
-			"-OutputFormat",     // Set output format
+			"-NoExit",       // Don't exit after running commands
+			"-NoLogo",       // Don't show PowerShell logo
+			"-OutputFormat", // Set output format
 			"Text",
-			"-InputFormat",      // Set input format
+			"-InputFormat", // Set input format
 			"Text",
 		}
 	case "cmd":
@@ -82,7 +82,7 @@ func (e *WindowsExecutor) Start(ctx context.Context, config *Config) error {
 	// Create command
 	// #nosec G204 - Terminal requires shell execution with validated shell paths
 	e.cmd = exec.CommandContext(e.ctx, cmdPath, args...)
-	
+
 	// Set environment variables
 	e.cmd.Env = os.Environ()
 	for key, value := range e.config.Environment {
@@ -165,7 +165,7 @@ func (e *WindowsExecutor) Resize(ctx context.Context, cols, rows int) error {
 	// Windows console resizing is more complex and requires Windows API calls
 	// For now, we'll just update the config values
 	// Full implementation would require syscalls to SetConsoleScreenBufferSize
-	
+
 	return nil
 }
 
@@ -292,7 +292,7 @@ func (e *WindowsExecutor) monitorProcess() {
 	}
 
 	err := e.cmd.Wait()
-	
+
 	e.mu.Lock()
 	e.running = false
 	e.mu.Unlock()

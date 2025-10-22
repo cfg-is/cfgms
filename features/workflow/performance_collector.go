@@ -9,10 +9,10 @@ import (
 
 // PerformanceCollector gathers system performance metrics during workflow execution
 type PerformanceCollector struct {
-	mutex         sync.RWMutex
-	lastMemStats  runtime.MemStats
-	lastCPUTime   time.Time
-	initialized   bool
+	mutex        sync.RWMutex
+	lastMemStats runtime.MemStats
+	lastCPUTime  time.Time
+	initialized  bool
 }
 
 // NewPerformanceCollector creates a new performance metrics collector
@@ -141,17 +141,17 @@ func (pc *PerformanceCollector) GetGoroutineCount() int {
 // Enhanced performance metrics with workflow context
 type WorkflowPerformanceCollector struct {
 	*PerformanceCollector
-	activeSteps       map[string]time.Time
+	activeSteps        map[string]time.Time
 	stepExecutionCount int
-	mutex             sync.RWMutex
+	mutex              sync.RWMutex
 }
 
 // NewWorkflowPerformanceCollector creates a performance collector with workflow context
 func NewWorkflowPerformanceCollector() *WorkflowPerformanceCollector {
 	return &WorkflowPerformanceCollector{
 		PerformanceCollector: NewPerformanceCollector(),
-		activeSteps:         make(map[string]time.Time),
-		stepExecutionCount:  0,
+		activeSteps:          make(map[string]time.Time),
+		stepExecutionCount:   0,
 	}
 }
 

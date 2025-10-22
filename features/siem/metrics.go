@@ -8,26 +8,26 @@ import (
 
 // LatencyTracker tracks processing latency with percentile calculations
 type LatencyTracker struct {
-	samples   []float64
-	mutex     sync.RWMutex
-	maxSamples int
+	samples      []float64
+	mutex        sync.RWMutex
+	maxSamples   int
 	totalSamples int64
 	totalLatency time.Duration
 }
 
 // ThroughputTracker tracks processing throughput over time windows
 type ThroughputTracker struct {
-	windows     []ThroughputWindow
-	mutex       sync.RWMutex
-	windowSize  time.Duration
-	maxWindows  int
+	windows    []ThroughputWindow
+	mutex      sync.RWMutex
+	windowSize time.Duration
+	maxWindows int
 }
 
 // ThroughputWindow represents a time window for throughput measurement
 type ThroughputWindow struct {
-	Start  time.Time
-	End    time.Time
-	Count  int64
+	Start time.Time
+	End   time.Time
+	Count int64
 }
 
 // NewLatencyTracker creates a new latency tracker
@@ -144,14 +144,14 @@ func (lt *LatencyTracker) GetStats() map[string]interface{} {
 	}
 
 	return map[string]interface{}{
-		"sample_count": len(lt.samples),
+		"sample_count":  len(lt.samples),
 		"total_samples": lt.totalSamples,
-		"average_ms":   lt.GetAverage(),
-		"min_ms":       min,
-		"max_ms":       max,
-		"p50_ms":       lt.GetPercentile(0.50),
-		"p95_ms":       lt.GetPercentile(0.95),
-		"p99_ms":       lt.GetPercentile(0.99),
+		"average_ms":    lt.GetAverage(),
+		"min_ms":        min,
+		"max_ms":        max,
+		"p50_ms":        lt.GetPercentile(0.50),
+		"p95_ms":        lt.GetPercentile(0.95),
+		"p99_ms":        lt.GetPercentile(0.99),
 	}
 }
 
@@ -263,10 +263,10 @@ func (tt *ThroughputTracker) GetStats() map[string]interface{} {
 	}
 
 	return map[string]interface{}{
-		"current_rate":  currentRate,
-		"peak_rate":     peakRate,
-		"total_items":   totalItems,
-		"window_count":  len(tt.windows),
+		"current_rate":   currentRate,
+		"peak_rate":      peakRate,
+		"total_items":    totalItems,
+		"window_count":   len(tt.windows),
 		"window_size_ms": tt.windowSize.Milliseconds(),
 	}
 }

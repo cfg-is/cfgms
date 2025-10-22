@@ -14,11 +14,11 @@ type VersionMigrator interface {
 	CanMigrate(moduleName, fromVersion, toVersion string) (bool, error)
 	GetMigrationPath(moduleName, fromVersion, toVersion string) (*MigrationPath, error)
 	ValidateMigrationPath(path *MigrationPath) error
-	
+
 	// Migration Execution
 	ExecuteMigration(ctx context.Context, path *MigrationPath) (*MigrationResult, error)
 	RollbackMigration(ctx context.Context, migrationID string) (*MigrationResult, error)
-	
+
 	// Migration Status
 	GetMigrationStatus(migrationID string) (*MigrationStatus, error)
 	ListActiveMigrations() ([]*MigrationStatus, error)
@@ -63,33 +63,33 @@ func (c VersionMigrationComplexity) String() string {
 
 // MigrationPath represents a planned migration between versions
 type MigrationPath struct {
-	ID               string                      `json:"id"`
-	ModuleName       string                      `json:"module_name"`
-	FromVersion      string                      `json:"from_version"`
-	ToVersion        string                      `json:"to_version"`
-	Steps            []MigrationStep             `json:"steps"`
-	Complexity       VersionMigrationComplexity `json:"complexity"`
-	EstimatedTime    time.Duration               `json:"estimated_time"`
-	RequiresBackup   bool                        `json:"requires_backup"`
-	RollbackSupported bool                        `json:"rollback_supported"`
-	Warnings         []string                    `json:"warnings"`
-	Prerequisites    []string                    `json:"prerequisites"`
-	CreatedAt        time.Time                   `json:"created_at"`
+	ID                string                     `json:"id"`
+	ModuleName        string                     `json:"module_name"`
+	FromVersion       string                     `json:"from_version"`
+	ToVersion         string                     `json:"to_version"`
+	Steps             []MigrationStep            `json:"steps"`
+	Complexity        VersionMigrationComplexity `json:"complexity"`
+	EstimatedTime     time.Duration              `json:"estimated_time"`
+	RequiresBackup    bool                       `json:"requires_backup"`
+	RollbackSupported bool                       `json:"rollback_supported"`
+	Warnings          []string                   `json:"warnings"`
+	Prerequisites     []string                   `json:"prerequisites"`
+	CreatedAt         time.Time                  `json:"created_at"`
 }
 
 // MigrationStep represents a single step in a migration path
 type MigrationStep struct {
-	ID              string                `json:"id"`
-	Type            MigrationStepType     `json:"type"`
-	FromVersion     string                `json:"from_version"`
-	ToVersion       string                `json:"to_version"`
-	Description     string                `json:"description"`
-	EstimatedTime   time.Duration         `json:"estimated_time"`
+	ID              string                     `json:"id"`
+	Type            MigrationStepType          `json:"type"`
+	FromVersion     string                     `json:"from_version"`
+	ToVersion       string                     `json:"to_version"`
+	Description     string                     `json:"description"`
+	EstimatedTime   time.Duration              `json:"estimated_time"`
 	Complexity      VersionMigrationComplexity `json:"complexity"`
-	RequiresRestart bool                  `json:"requires_restart"`
-	ValidationType  MigrationValidationType `json:"validation_type"`
-	RollbackAction  string                `json:"rollback_action,omitempty"`
-	Metadata        map[string]interface{} `json:"metadata,omitempty"`
+	RequiresRestart bool                       `json:"requires_restart"`
+	ValidationType  MigrationValidationType    `json:"validation_type"`
+	RollbackAction  string                     `json:"rollback_action,omitempty"`
+	Metadata        map[string]interface{}     `json:"metadata,omitempty"`
 }
 
 // MigrationStepType defines types of migration steps
@@ -159,16 +159,16 @@ func (v MigrationValidationType) String() string {
 
 // MigrationExecution tracks an active migration
 type MigrationExecution struct {
-	Path           *MigrationPath        `json:"path"`
+	Path           *MigrationPath           `json:"path"`
 	Status         MigrationExecutionStatus `json:"status"`
-	CurrentStep    int                   `json:"current_step"`
-	StartTime      time.Time             `json:"start_time"`
-	EndTime        *time.Time            `json:"end_time,omitempty"`
-	Progress       float64               `json:"progress"` // 0.0 to 1.0
-	ErrorMessage   string                `json:"error_message,omitempty"`
-	CompletedSteps []StepResult          `json:"completed_steps"`
-	Context        context.Context       `json:"-"`
-	CancelFunc     context.CancelFunc    `json:"-"`
+	CurrentStep    int                      `json:"current_step"`
+	StartTime      time.Time                `json:"start_time"`
+	EndTime        *time.Time               `json:"end_time,omitempty"`
+	Progress       float64                  `json:"progress"` // 0.0 to 1.0
+	ErrorMessage   string                   `json:"error_message,omitempty"`
+	CompletedSteps []StepResult             `json:"completed_steps"`
+	Context        context.Context          `json:"-"`
+	CancelFunc     context.CancelFunc       `json:"-"`
 }
 
 // MigrationExecutionStatus represents the status of a migration execution
@@ -207,13 +207,13 @@ func (s MigrationExecutionStatus) String() string {
 
 // StepResult represents the result of executing a migration step
 type StepResult struct {
-	Step         MigrationStep   `json:"step"`
-	Status       StepStatus      `json:"status"`
-	StartTime    time.Time       `json:"start_time"`
-	EndTime      time.Time       `json:"end_time"`
-	Duration     time.Duration   `json:"duration"`
-	ErrorMessage string          `json:"error_message,omitempty"`
-	Output       string          `json:"output,omitempty"`
+	Step         MigrationStep          `json:"step"`
+	Status       StepStatus             `json:"status"`
+	StartTime    time.Time              `json:"start_time"`
+	EndTime      time.Time              `json:"end_time"`
+	Duration     time.Duration          `json:"duration"`
+	ErrorMessage string                 `json:"error_message,omitempty"`
+	Output       string                 `json:"output,omitempty"`
 	Metadata     map[string]interface{} `json:"metadata,omitempty"`
 }
 
@@ -247,17 +247,17 @@ func (s StepStatus) String() string {
 
 // MigrationResult represents the final result of a migration
 type MigrationResult struct {
-	ID               string                    `json:"id"`
-	Path             *MigrationPath            `json:"path"`
-	Status           MigrationExecutionStatus  `json:"status"`
-	StartTime        time.Time                 `json:"start_time"`
-	EndTime          time.Time                 `json:"end_time"`
-	Duration         time.Duration             `json:"duration"`
-	StepResults      []StepResult              `json:"step_results"`
-	ErrorMessage     string                    `json:"error_message,omitempty"`
-	RollbackRequired bool                      `json:"rollback_required"`
-	RollbackResult   *MigrationResult          `json:"rollback_result,omitempty"`
-	Metadata         map[string]interface{}    `json:"metadata,omitempty"`
+	ID               string                   `json:"id"`
+	Path             *MigrationPath           `json:"path"`
+	Status           MigrationExecutionStatus `json:"status"`
+	StartTime        time.Time                `json:"start_time"`
+	EndTime          time.Time                `json:"end_time"`
+	Duration         time.Duration            `json:"duration"`
+	StepResults      []StepResult             `json:"step_results"`
+	ErrorMessage     string                   `json:"error_message,omitempty"`
+	RollbackRequired bool                     `json:"rollback_required"`
+	RollbackResult   *MigrationResult         `json:"rollback_result,omitempty"`
+	Metadata         map[string]interface{}   `json:"metadata,omitempty"`
 }
 
 // MigrationStatus provides the current status of a migration
@@ -446,7 +446,7 @@ func (m *DefaultVersionMigrator) generateMigrationSteps(moduleName, fromVersion,
 	// Step 4: Main migration
 	var mainStepType MigrationStepType
 	var mainDescription string
-	
+
 	if isUpgrade {
 		mainStepType = MigrationStepUpgrade
 		mainDescription = fmt.Sprintf("Upgrade module from %s to %s", fromVersion, toVersion)
@@ -609,8 +609,8 @@ func (m *DefaultVersionMigrator) ExecuteMigration(ctx context.Context, path *Mig
 	// Check if there's already an active migration for this module
 	m.mu.Lock()
 	for _, execution := range m.activeMigrations {
-		if execution.Path.ModuleName == path.ModuleName && 
-		   (execution.Status == MigrationStatusRunning || execution.Status == MigrationStatusReady) {
+		if execution.Path.ModuleName == path.ModuleName &&
+			(execution.Status == MigrationStatusRunning || execution.Status == MigrationStatusReady) {
 			m.mu.Unlock()
 			return nil, fmt.Errorf("migration already in progress for module %s", path.ModuleName)
 		}
@@ -652,11 +652,11 @@ func (m *DefaultVersionMigrator) executeMigrationSteps(execution *MigrationExecu
 	m.mu.Lock()
 	execution.Status = MigrationStatusRunning
 	m.mu.Unlock()
-	
+
 	defer func() {
 		endTime := time.Now()
 		execution.EndTime = &endTime
-		
+
 		// Create final result
 		result := &MigrationResult{
 			ID:          execution.Path.ID,
@@ -667,7 +667,7 @@ func (m *DefaultVersionMigrator) executeMigrationSteps(execution *MigrationExecu
 			Duration:    endTime.Sub(execution.StartTime),
 			StepResults: execution.CompletedSteps,
 		}
-		
+
 		if execution.ErrorMessage != "" {
 			result.ErrorMessage = execution.ErrorMessage
 		}
@@ -680,7 +680,7 @@ func (m *DefaultVersionMigrator) executeMigrationSteps(execution *MigrationExecu
 	}()
 
 	totalSteps := len(execution.Path.Steps)
-	
+
 	for i, step := range execution.Path.Steps {
 		// Check if migration was cancelled
 		select {
@@ -722,7 +722,7 @@ func (m *DefaultVersionMigrator) executeMigrationSteps(execution *MigrationExecu
 	var transitionType VersionTransitionType
 	fromSemVer, _ := ParseVersion(execution.Path.FromVersion)
 	toSemVer, _ := ParseVersion(execution.Path.ToVersion)
-	
+
 	if toSemVer.Compare(fromSemVer) > 0 {
 		transitionType = TransitionUpgrade
 	} else {
@@ -763,7 +763,7 @@ func (m *DefaultVersionMigrator) executeStep(ctx context.Context, step Migration
 	case MigrationStepValidation:
 		result.Output = "Validation completed successfully"
 		result.Status = StepStatusCompleted
-		
+
 	case MigrationStepBackup:
 		// Simulate backup time
 		select {
@@ -775,7 +775,7 @@ func (m *DefaultVersionMigrator) executeStep(ctx context.Context, step Migration
 			result.Output = "Backup created successfully"
 			result.Status = StepStatusCompleted
 		}
-		
+
 	case MigrationStepUpgrade, MigrationStepDowngrade:
 		// Simulate main migration work
 		select {
@@ -787,7 +787,7 @@ func (m *DefaultVersionMigrator) executeStep(ctx context.Context, step Migration
 			result.Output = fmt.Sprintf("Version transition completed: %s -> %s", step.FromVersion, step.ToVersion)
 			result.Status = StepStatusCompleted
 		}
-		
+
 	default:
 		// For other steps, simulate quick completion
 		select {
@@ -844,7 +844,7 @@ func (m *DefaultVersionMigrator) GetMigrationStatus(migrationID string) (*Migrat
 
 	elapsedTime := time.Since(startTime)
 	var estimatedETA time.Duration
-	
+
 	if progress > 0 {
 		totalEstimatedTime := time.Duration(float64(elapsedTime) / progress)
 		estimatedETA = totalEstimatedTime - elapsedTime
@@ -868,7 +868,7 @@ func (m *DefaultVersionMigrator) GetMigrationStatus(migrationID string) (*Migrat
 // ListActiveMigrations returns all currently active migrations
 func (m *DefaultVersionMigrator) ListActiveMigrations() ([]*MigrationStatus, error) {
 	var activeMigrations []*MigrationStatus
-	
+
 	// Take a snapshot of migration IDs while holding the lock
 	m.mu.RLock()
 	migrationIDs := make([]string, 0, len(m.activeMigrations))
@@ -876,7 +876,7 @@ func (m *DefaultVersionMigrator) ListActiveMigrations() ([]*MigrationStatus, err
 		migrationIDs = append(migrationIDs, migrationID)
 	}
 	m.mu.RUnlock()
-	
+
 	// Get status for each migration (this safely handles concurrency)
 	for _, migrationID := range migrationIDs {
 		status, err := m.GetMigrationStatus(migrationID)

@@ -9,9 +9,9 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
 // ConfigurationStorageMigration provides Epic 6 compliant storage for ConfigurationService

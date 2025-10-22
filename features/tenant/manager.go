@@ -29,10 +29,10 @@ func (m *Manager) CreateTenant(ctx context.Context, req *TenantRequest) (*Tenant
 	if err := m.validateTenantRequest(req); err != nil {
 		return nil, fmt.Errorf("validation failed: %w", err)
 	}
-	
+
 	// Generate tenant ID from name
 	tenantID := m.generateTenantID(req.Name)
-	
+
 	// Create tenant object
 	tenant := &Tenant{
 		ID:          tenantID,
@@ -42,7 +42,7 @@ func (m *Manager) CreateTenant(ctx context.Context, req *TenantRequest) (*Tenant
 		Metadata:    req.Metadata,
 		Status:      TenantStatusActive,
 	}
-	
+
 	// Create the tenant in storage
 	if err := m.store.CreateTenant(ctx, tenant); err != nil {
 		return nil, fmt.Errorf("failed to create tenant: %w", err)
@@ -72,23 +72,23 @@ func (m *Manager) UpdateTenant(ctx context.Context, tenantID string, req *Tenant
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Validate the request
 	if err := m.validateTenantRequest(req); err != nil {
 		return nil, fmt.Errorf("validation failed: %w", err)
 	}
-	
+
 	// Update fields
 	existing.Name = req.Name
 	existing.Description = req.Description
 	existing.Metadata = req.Metadata
 	// Note: ParentID cannot be changed after creation to maintain hierarchy integrity
-	
+
 	// Update in storage
 	if err := m.store.UpdateTenant(ctx, existing); err != nil {
 		return nil, fmt.Errorf("failed to update tenant: %w", err)
 	}
-	
+
 	return existing, nil
 }
 
@@ -98,7 +98,7 @@ func (m *Manager) DeleteTenant(ctx context.Context, tenantID string) error {
 	if tenantID == "default" {
 		return fmt.Errorf("cannot delete default tenant")
 	}
-	
+
 	// Check if tenant has child tenants
 	children, err := m.store.GetChildTenants(ctx, tenantID)
 	if err != nil {
@@ -107,7 +107,7 @@ func (m *Manager) DeleteTenant(ctx context.Context, tenantID string) error {
 	if len(children) > 0 {
 		return ErrTenantHasChildren
 	}
-	
+
 	// Delete the tenant (soft delete)
 	return m.store.DeleteTenant(ctx, tenantID)
 }
@@ -142,21 +142,21 @@ func (m *Manager) validateTenantRequest(req *TenantRequest) error {
 	if req.Name == "" {
 		return fmt.Errorf("tenant name is required")
 	}
-	
+
 	// Validate name format (alphanumeric, hyphens, underscores)
 	nameRegex := regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 	if !nameRegex.MatchString(req.Name) {
 		return fmt.Errorf("tenant name must contain only alphanumeric characters, hyphens, and underscores")
 	}
-	
+
 	if len(req.Name) > 64 {
 		return fmt.Errorf("tenant name must be 64 characters or less")
 	}
-	
+
 	if len(req.Description) > 255 {
 		return fmt.Errorf("tenant description must be 255 characters or less")
 	}
-	
+
 	return nil
 }
 
@@ -166,7 +166,7 @@ func (m *Manager) generateTenantID(name string) string {
 	id := regexp.MustCompile(`[^a-zA-Z0-9_-]`).ReplaceAllString(name, "-")
 	id = regexp.MustCompile(`-+`).ReplaceAllString(id, "-")
 	id = regexp.MustCompile(`^-|-$`).ReplaceAllString(id, "")
-	
+
 	// Add timestamp suffix to ensure uniqueness
 	timestamp := time.Now().Unix()
 	return fmt.Sprintf("%s-%d", id, timestamp)

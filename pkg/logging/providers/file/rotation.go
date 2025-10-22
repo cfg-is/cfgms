@@ -23,14 +23,14 @@ func (p *FileProvider) needsRotation() bool {
 	if p.currentFile == nil {
 		return true
 	}
-	
+
 	// Check file size
 	if info, err := p.currentFile.Stat(); err == nil {
 		if info.Size() >= p.config.MaxFileSize {
 			return true
 		}
 	}
-	
+
 	return false
 }
 
@@ -42,35 +42,35 @@ func (p *FileProvider) rotateLogFile() error {
 		_ = p.writer.Flush() // Ignore flush error during rotation
 		p.writer = nil
 	}
-	
+
 	if p.currentFile != nil {
 		_ = p.currentFile.Close() // Ignore close error during rotation
 		p.currentFile = nil
 	}
-	
+
 	// Create new log file with timestamp
 	timestamp := time.Now().Format("2006-01-02-15-04-05")
 	filename := fmt.Sprintf("%s-%s.log", p.config.FilePrefix, timestamp)
-	
+
 	// Build secure file path
 	filepath, err := p.buildSecureFilePath(filename)
 	if err != nil {
 		return fmt.Errorf("failed to build secure file path: %w", err)
 	}
-	
+
 	// Open new file
 	// #nosec G304 - filepath is validated via buildSecureFilePath above
 	file, err := os.OpenFile(filepath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, p.config.FileMode)
 	if err != nil {
 		return fmt.Errorf("failed to open log file %s: %w", filepath, err)
 	}
-	
+
 	p.currentFile = file
 	p.writer = bufio.NewWriterSize(file, p.config.BufferSize)
-	
+
 	// Start compression of old files in background (pass needed config to avoid race)
 	go p.compressOldFiles(p.config.CompressRotated, p.config.Directory, p.config.FilePrefix)
-	
+
 	return nil
 }
 
@@ -79,13 +79,13 @@ func (p *FileProvider) compressOldFiles(compressRotated bool, directory, filePre
 	if !compressRotated {
 		return
 	}
-	
+
 	pattern := filepath.Join(directory, filePrefix+"*.log")
 	files, err := filepath.Glob(pattern)
 	if err != nil {
 		return
 	}
-	
+
 	// Get current file name safely
 	p.mutex.RLock()
 	var currentFileName string
@@ -93,25 +93,25 @@ func (p *FileProvider) compressOldFiles(compressRotated bool, directory, filePre
 		currentFileName = p.currentFile.Name()
 	}
 	p.mutex.RUnlock()
-	
+
 	for _, filename := range files {
 		// Skip current log file
 		if currentFileName != "" && filename == currentFileName {
 			continue
 		}
-		
+
 		// Skip already compressed files
 		if strings.HasSuffix(filename, ".gz") {
 			continue
 		}
-		
+
 		// Check if file is old enough to compress (e.g., more than 1 hour old)
 		if info, err := os.Stat(filename); err == nil {
 			if time.Since(info.ModTime()) < time.Hour {
 				continue
 			}
 		}
-		
+
 		if err := p.compressFile(filename); err != nil {
 			fmt.Printf("Warning: failed to compress log file %s: %v\n", filename, err)
 		}
@@ -126,19 +126,19 @@ func (p *FileProvider) compressFile(filename string) error {
 	directory := p.config.Directory
 	compressionLevel := p.config.CompressionLevel
 	p.mutex.RUnlock()
-	
+
 	// Validate the file path is within our directory
 	if err := validateFilePath(directory, filename); err != nil {
 		return fmt.Errorf("invalid file path for compression: %w", err)
 	}
-	
+
 	// Open source file
 	src, err := os.Open(filename)
 	if err != nil {
 		return fmt.Errorf("failed to open source file: %w", err)
 	}
 	defer func() { _ = src.Close() }()
-	
+
 	// Create compressed file
 	compressedFilename := filename + ".gz"
 	dst, err := os.Create(compressedFilename)
@@ -146,34 +146,34 @@ func (p *FileProvider) compressFile(filename string) error {
 		return fmt.Errorf("failed to create compressed file: %w", err)
 	}
 	defer func() { _ = dst.Close() }()
-	
+
 	// Create GZIP writer
 	gzWriter, err := gzip.NewWriterLevel(dst, compressionLevel)
 	if err != nil {
 		return fmt.Errorf("failed to create gzip writer: %w", err)
 	}
 	defer func() { _ = gzWriter.Close() }()
-	
+
 	// Copy data
 	if _, err := io.Copy(gzWriter, src); err != nil {
 		return fmt.Errorf("failed to compress data: %w", err)
 	}
-	
+
 	if err := gzWriter.Close(); err != nil {
 		return fmt.Errorf("failed to close gzip writer: %w", err)
 	}
-	
+
 	if err := dst.Close(); err != nil {
 		return fmt.Errorf("failed to close compressed file: %w", err)
 	}
-	
+
 	// Remove original file after successful compression
 	if err := os.Remove(filename); err != nil {
 		fmt.Printf("Warning: failed to remove original file %s after compression: %v\n", filename, err)
 	} else {
 		fmt.Printf("Compressed log file: %s -> %s\n", filename, compressedFilename)
 	}
-	
+
 	return nil
 }
 
@@ -184,23 +184,23 @@ func (p *FileProvider) findRelevantLogFiles(startTime, endTime time.Time) ([]str
 	if err != nil {
 		return nil, fmt.Errorf("failed to find log files: %w", err)
 	}
-	
+
 	var relevantFiles []string
-	
+
 	for _, filename := range allFiles {
 		// Get file modification time as a proxy for content time range
 		info, err := os.Stat(filename)
 		if err != nil {
 			continue
 		}
-		
+
 		// Include file if it was modified during or after the start time
 		// This is a conservative approach - we may include some files that don't contain relevant entries
 		if info.ModTime().After(startTime.Add(-24 * time.Hour)) { // Include files from 24h before start time
 			relevantFiles = append(relevantFiles, filename)
 		}
 	}
-	
+
 	// Sort files by modification time (newest first for better performance on recent queries)
 	sort.Slice(relevantFiles, func(i, j int) bool {
 		infoI, errI := os.Stat(relevantFiles[i])
@@ -210,7 +210,7 @@ func (p *FileProvider) findRelevantLogFiles(startTime, endTime time.Time) ([]str
 		}
 		return infoI.ModTime().After(infoJ.ModTime())
 	})
-	
+
 	return relevantFiles, nil
 }
 
@@ -221,9 +221,9 @@ func (p *FileProvider) parseLogFile(filename string, query interfaces.TimeRangeQ
 	if err := validateFilePath(p.config.Directory, filename); err != nil {
 		return nil, fmt.Errorf("invalid file path for parsing: %w", err)
 	}
-	
+
 	var reader io.Reader
-	
+
 	// Open file (handle compressed files)
 	if strings.HasSuffix(filename, ".gz") {
 		file, err := os.Open(filename)
@@ -231,13 +231,13 @@ func (p *FileProvider) parseLogFile(filename string, query interfaces.TimeRangeQ
 			return nil, fmt.Errorf("failed to open compressed file: %w", err)
 		}
 		defer func() { _ = file.Close() }()
-		
+
 		gzReader, err := gzip.NewReader(file)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create gzip reader: %w", err)
 		}
 		defer func() { _ = gzReader.Close() }()
-		
+
 		reader = gzReader
 	} else {
 		file, err := os.Open(filename)
@@ -245,52 +245,52 @@ func (p *FileProvider) parseLogFile(filename string, query interfaces.TimeRangeQ
 			return nil, fmt.Errorf("failed to open file: %w", err)
 		}
 		defer func() { _ = file.Close() }()
-		
+
 		reader = file
 	}
-	
+
 	var entries []interfaces.LogEntry
 	scanner := bufio.NewScanner(reader)
-	
+
 	// Increase scanner buffer size for large log entries
 	const maxCapacity = 512 * 1024 // 512KB max line size
 	buf := make([]byte, maxCapacity)
 	scanner.Buffer(buf, maxCapacity)
-	
+
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
 			continue
 		}
-		
+
 		var entry interfaces.LogEntry
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
 			// Skip malformed entries rather than failing the entire query
 			continue
 		}
-		
+
 		// Apply time filter
 		if entry.Timestamp.Before(query.StartTime) || entry.Timestamp.After(query.EndTime) {
 			continue
 		}
-		
+
 		// Apply field filters
 		if !p.matchesFilters(entry, query.Filters) {
 			continue
 		}
-		
+
 		entries = append(entries, entry)
-		
+
 		// Check limit
 		if query.Limit > 0 && len(entries) >= query.Limit {
 			break
 		}
 	}
-	
+
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("error scanning file: %w", err)
 	}
-	
+
 	return entries, nil
 }
 
@@ -299,10 +299,10 @@ func (p *FileProvider) matchesFilters(entry interfaces.LogEntry, filters map[str
 	if len(filters) == 0 {
 		return true
 	}
-	
+
 	for key, expectedValue := range filters {
 		var actualValue interface{}
-		
+
 		// Map filter keys to log entry fields
 		switch key {
 		case "level":
@@ -329,7 +329,7 @@ func (p *FileProvider) matchesFilters(entry interfaces.LogEntry, filters map[str
 				actualValue = entry.Fields[key]
 			}
 		}
-		
+
 		// Handle different filter types
 		switch expected := expectedValue.(type) {
 		case string:
@@ -375,7 +375,7 @@ func (p *FileProvider) matchesFilters(entry interfaces.LogEntry, filters map[str
 			}
 		}
 	}
-	
+
 	return true
 }
 
@@ -383,18 +383,18 @@ func (p *FileProvider) matchesFilters(entry interfaces.LogEntry, filters map[str
 func (p *FileProvider) backgroundMaintenance(flushInterval time.Duration) {
 	ticker := time.NewTicker(flushInterval)
 	defer ticker.Stop()
-	
+
 	for {
 		// Check if still initialized and get stop channel safely
 		p.mutex.RLock()
 		initialized := p.initialized
 		stopChan := p.stopRotation
 		p.mutex.RUnlock()
-		
+
 		if !initialized || stopChan == nil {
 			return
 		}
-		
+
 		select {
 		case <-ticker.C:
 			// Check again if still initialized before doing work
@@ -404,22 +404,22 @@ func (p *FileProvider) backgroundMaintenance(flushInterval time.Duration) {
 			directory := p.config.Directory
 			filePrefix := p.config.FilePrefix
 			p.mutex.RUnlock()
-			
+
 			if !stillInitialized {
 				return
 			}
-			
+
 			// Periodic flush
 			if err := p.Flush(context.TODO()); err != nil {
 				fmt.Printf("Warning: periodic flush failed: %v\n", err)
 			}
-			
+
 			// Compress old files
 			p.compressOldFiles(compressRotated, directory, filePrefix)
-			
+
 			// Clean up old files based on max files limit
 			p.cleanupOldFiles()
-			
+
 		case <-stopChan:
 			return
 		}
@@ -431,13 +431,13 @@ func (p *FileProvider) cleanupOldFiles() {
 	if p.config.MaxFiles <= 0 {
 		return
 	}
-	
+
 	pattern := filepath.Join(p.config.Directory, p.config.FilePrefix+"*")
 	files, err := filepath.Glob(pattern)
 	if err != nil {
 		return
 	}
-	
+
 	// Sort files by modification time (oldest first)
 	sort.Slice(files, func(i, j int) bool {
 		infoI, errI := os.Stat(files[i])
@@ -447,7 +447,7 @@ func (p *FileProvider) cleanupOldFiles() {
 		}
 		return infoI.ModTime().Before(infoJ.ModTime())
 	})
-	
+
 	// Remove excess files
 	if len(files) > p.config.MaxFiles {
 		// Get current file name safely
@@ -457,14 +457,14 @@ func (p *FileProvider) cleanupOldFiles() {
 			currentFileName = p.currentFile.Name()
 		}
 		p.mutex.RUnlock()
-		
+
 		excessFiles := files[:len(files)-p.config.MaxFiles]
 		for _, filename := range excessFiles {
 			// Skip current log file
 			if currentFileName != "" && filename == currentFileName {
 				continue
 			}
-			
+
 			if err := os.Remove(filename); err != nil {
 				fmt.Printf("Warning: failed to remove excess log file %s: %v\n", filename, err)
 			} else {
@@ -481,7 +481,7 @@ func (p *FileProvider) calculateTotalStorageSize() (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("failed to find log files: %w", err)
 	}
-	
+
 	var totalSize int64
 	for _, filename := range files {
 		info, err := os.Stat(filename)
@@ -490,7 +490,7 @@ func (p *FileProvider) calculateTotalStorageSize() (int64, error) {
 		}
 		totalSize += info.Size()
 	}
-	
+
 	return totalSize, nil
 }
 
@@ -500,22 +500,22 @@ func (p *FileProvider) calculateDiskUsage() (float64, error) {
 	if err := syscall.Statfs(p.config.Directory, &stat); err != nil {
 		return 0, fmt.Errorf("failed to get filesystem stats: %w", err)
 	}
-	
+
 	// Calculate usage percentage with bounds checking
 	if stat.Bsize < 0 {
 		return 0, fmt.Errorf("invalid block size: %d", stat.Bsize)
 	}
 	// #nosec G115 - Block size is validated above to be non-negative
 	blockSize := uint64(stat.Bsize)
-	
+
 	totalBytes := stat.Blocks * blockSize
 	freeBytes := stat.Bavail * blockSize
 	usedBytes := totalBytes - freeBytes
-	
+
 	if totalBytes == 0 {
 		return 0, nil
 	}
-	
+
 	return float64(usedBytes) / float64(totalBytes) * 100.0, nil
 }
 
@@ -530,7 +530,7 @@ func (p *FileProvider) updateStats(entriesWritten int, latency time.Duration) {
 
 	// Update rolling average for write latency
 	newLatencyMs := float64(latency.Milliseconds())
-	p.stats.WriteLatencyMs = (p.stats.WriteLatencyMs*0.9) + (newLatencyMs*0.1)
+	p.stats.WriteLatencyMs = (p.stats.WriteLatencyMs * 0.9) + (newLatencyMs * 0.1)
 
 	// Update hourly/daily counters (simplified - would need proper time window tracking in production)
 	now := time.Now()

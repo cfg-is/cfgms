@@ -12,8 +12,8 @@ import (
 type contextKey string
 
 const (
-	watcherNameKey    contextKey = "watcher_name"
-	correlationIDKey  contextKey = "correlation_id"
+	watcherNameKey   contextKey = "watcher_name"
+	correlationIDKey contextKey = "correlation_id"
 )
 
 // LoggingWatcher logs all system events to the configured logger.
@@ -34,12 +34,12 @@ func NewLoggingWatcher(logger logging.Logger, name string) *LoggingWatcher {
 // OnSystemEvent implements the SystemEventWatcher interface.
 func (lw *LoggingWatcher) OnSystemEvent(event SystemEvent) {
 	ctx := context.Background()
-	
+
 	// Add correlation context if available
 	if event.CorrelationID != "" {
 		ctx = context.WithValue(ctx, correlationIDKey, event.CorrelationID)
 	}
-	
+
 	switch event.Severity {
 	case SeverityInfo:
 		lw.logger.InfoCtx(ctx, "System event",
@@ -50,7 +50,7 @@ func (lw *LoggingWatcher) OnSystemEvent(event SystemEvent) {
 			"correlation_id", event.CorrelationID,
 			"trace_id", event.TraceID,
 			"data", event.Data)
-			
+
 	case SeverityWarning:
 		lw.logger.WarnCtx(ctx, "System event (warning)",
 			"event_id", event.ID,
@@ -60,7 +60,7 @@ func (lw *LoggingWatcher) OnSystemEvent(event SystemEvent) {
 			"correlation_id", event.CorrelationID,
 			"trace_id", event.TraceID,
 			"data", event.Data)
-			
+
 	case SeverityError, SeverityCritical:
 		lw.logger.ErrorCtx(ctx, "System event (error)",
 			"event_id", event.ID,
@@ -71,7 +71,7 @@ func (lw *LoggingWatcher) OnSystemEvent(event SystemEvent) {
 			"trace_id", event.TraceID,
 			"data", event.Data,
 			"severity", event.Severity)
-			
+
 	default:
 		lw.logger.DebugCtx(ctx, "System event",
 			"event_id", event.ID,
@@ -113,7 +113,7 @@ func (mw *MetricsWatcher) OnSystemEvent(event SystemEvent) {
 	// Update event counters
 	mw.eventCounts[event.Type]++
 	mw.eventTimes[event.Type] = event.Timestamp
-	
+
 	// Log metrics updates for high-severity events
 	if event.Severity == SeverityError || event.Severity == SeverityCritical {
 		mw.logger.InfoCtx(context.Background(), "Event metrics updated",
@@ -162,7 +162,7 @@ type AlertingWatcher struct {
 type AlertSender interface {
 	// SendAlert sends an alert for the given event
 	SendAlert(ctx context.Context, event SystemEvent) error
-	
+
 	// GetSenderName returns the name of the alert sender
 	GetSenderName() string
 }
@@ -171,15 +171,15 @@ type AlertSender interface {
 func NewAlertingWatcher(logger logging.Logger, name string, alerter AlertSender) *AlertingWatcher {
 	// Default thresholds - only alert on warnings and above
 	defaultThresholds := map[SystemEventType]EventSeverity{
-		EventStewardDisconnected:  SeverityWarning,
-		EventStewardHealthChange:  SeverityWarning,
-		EventConfigurationFailed:  SeverityError,
-		EventConfigurationDrift:   SeverityWarning,
-		EventSystemShutdown:       SeverityInfo,
-		EventResourceAlert:        SeverityWarning,
-		EventWorkflowFailed:       SeverityError,
+		EventStewardDisconnected: SeverityWarning,
+		EventStewardHealthChange: SeverityWarning,
+		EventConfigurationFailed: SeverityError,
+		EventConfigurationDrift:  SeverityWarning,
+		EventSystemShutdown:      SeverityInfo,
+		EventResourceAlert:       SeverityWarning,
+		EventWorkflowFailed:      SeverityError,
 	}
-	
+
 	return &AlertingWatcher{
 		logger:    logger,
 		name:      name,
@@ -195,18 +195,18 @@ func (aw *AlertingWatcher) OnSystemEvent(event SystemEvent) {
 	if !hasThreshold {
 		return
 	}
-	
+
 	// Check if the event severity meets the threshold
 	if !aw.shouldAlert(event.Severity, threshold) {
 		return
 	}
-	
+
 	// Send the alert
 	ctx := context.Background()
 	if event.CorrelationID != "" {
 		ctx = context.WithValue(ctx, correlationIDKey, event.CorrelationID)
 	}
-	
+
 	if err := aw.alerter.SendAlert(ctx, event); err != nil {
 		aw.logger.ErrorCtx(ctx, "Failed to send alert",
 			"event_id", event.ID,
@@ -240,14 +240,14 @@ func (aw *AlertingWatcher) shouldAlert(eventSeverity, threshold EventSeverity) b
 		SeverityError:    3,
 		SeverityCritical: 4,
 	}
-	
+
 	eventLevel, eventExists := severityLevels[eventSeverity]
 	thresholdLevel, thresholdExists := severityLevels[threshold]
-	
+
 	if !eventExists || !thresholdExists {
 		return false
 	}
-	
+
 	return eventLevel >= thresholdLevel
 }
 
@@ -274,12 +274,12 @@ func (ca *ConsoleAlerter) SendAlert(ctx context.Context, event SystemEvent) erro
 		event.Source,
 		event.Component,
 		event.Data)
-	
+
 	ca.logger.WarnCtx(ctx, alertMessage,
 		"alert_type", "console",
 		"event_id", event.ID,
 		"correlation_id", event.CorrelationID)
-	
+
 	return nil
 }
 

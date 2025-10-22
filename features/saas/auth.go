@@ -104,19 +104,19 @@ func (ua *UniversalAuthenticator) GetAuthHeaders(ctx context.Context, provider s
 		return map[string]string{
 			"Authorization": tokenSet.GetAuthorizationHeader(),
 		}, nil
-		
+
 	case AuthMethodAPIKey:
 		return ua.getAPIKeyHeaders(provider)
-		
+
 	case AuthMethodBasicAuth:
 		return ua.getBasicAuthHeaders(provider)
-		
+
 	case AuthMethodBearerToken:
 		return ua.getBearerTokenHeaders(provider)
-		
+
 	case AuthMethodJWT:
 		return ua.getJWTHeaders(provider)
-		
+
 	default:
 		return nil, fmt.Errorf("auth headers not implemented for method: %s", method)
 	}
@@ -129,23 +129,23 @@ func (ua *UniversalAuthenticator) authenticateOAuth2(ctx context.Context, provid
 	if err != nil {
 		return fmt.Errorf("invalid OAuth2 config: %w", err)
 	}
-	
+
 	// Start OAuth2 flow
 	flow, err := ua.oauth2Client.StartFlow(ctx, oauth2Config)
 	if err != nil {
 		return fmt.Errorf("failed to start OAuth2 flow: %w", err)
 	}
-	
+
 	// For client credentials flow, complete immediately
 	if oauth2Config.GrantType == "client_credentials" {
 		tokenSet, err := ua.oauth2Client.ClientCredentialsGrant(ctx, oauth2Config)
 		if err != nil {
 			return fmt.Errorf("client credentials grant failed: %w", err)
 		}
-		
+
 		return ua.credStore.StoreTokenSet(provider, tokenSet)
 	}
-	
+
 	// For authorization code flow, return the authorization URL
 	// (In a real implementation, this would be handled differently)
 	return fmt.Errorf("authorization code flow requires user interaction: %s", flow.AuthURL)
@@ -156,16 +156,16 @@ func (ua *UniversalAuthenticator) refreshOAuth2Token(ctx context.Context, provid
 	if err != nil {
 		return fmt.Errorf("failed to get token set: %w", err)
 	}
-	
+
 	if tokenSet.RefreshToken == "" {
 		return fmt.Errorf("no refresh token available")
 	}
-	
+
 	newTokenSet, err := ua.oauth2Client.RefreshToken(ctx, tokenSet.RefreshToken)
 	if err != nil {
 		return fmt.Errorf("failed to refresh token: %w", err)
 	}
-	
+
 	return ua.credStore.StoreTokenSet(provider, newTokenSet)
 }
 
@@ -176,7 +176,7 @@ func (ua *UniversalAuthenticator) authenticateAPIKey(ctx context.Context, provid
 	if err != nil {
 		return fmt.Errorf("invalid API key config: %w", err)
 	}
-	
+
 	// Store the API key configuration
 	configData := fmt.Sprintf("%s:%s:%s", apiKeyConfig.Key, apiKeyConfig.Header, apiKeyConfig.QueryParam)
 	return ua.credStore.StoreClientSecret(provider, configData)
@@ -187,17 +187,17 @@ func (ua *UniversalAuthenticator) getAPIKeyHeaders(provider string) (map[string]
 	if err != nil {
 		return nil, fmt.Errorf("failed to get API key config: %w", err)
 	}
-	
+
 	parts := strings.Split(configData, ":")
 	if len(parts) < 3 {
 		return nil, fmt.Errorf("invalid API key config format")
 	}
-	
+
 	key, header := parts[0], parts[1]
 	if header != "" {
 		return map[string]string{header: key}, nil
 	}
-	
+
 	// Default to X-API-Key header
 	return map[string]string{"X-API-Key": key}, nil
 }
@@ -209,7 +209,7 @@ func (ua *UniversalAuthenticator) authenticateBasicAuth(ctx context.Context, pro
 	if err != nil {
 		return fmt.Errorf("invalid basic auth config: %w", err)
 	}
-	
+
 	// Store username:password
 	configData := fmt.Sprintf("%s:%s", basicConfig.Username, basicConfig.Password)
 	return ua.credStore.StoreClientSecret(provider, configData)
@@ -220,7 +220,7 @@ func (ua *UniversalAuthenticator) getBasicAuthHeaders(provider string) (map[stri
 	if err != nil {
 		return nil, fmt.Errorf("failed to get basic auth config: %w", err)
 	}
-	
+
 	return map[string]string{
 		"Authorization": "Basic " + configData, // Should be base64 encoded
 	}, nil
@@ -233,7 +233,7 @@ func (ua *UniversalAuthenticator) authenticateBearerToken(ctx context.Context, p
 	if err != nil {
 		return fmt.Errorf("invalid bearer token config: %w", err)
 	}
-	
+
 	return ua.credStore.StoreClientSecret(provider, bearerConfig.Token)
 }
 
@@ -242,7 +242,7 @@ func (ua *UniversalAuthenticator) getBearerTokenHeaders(provider string) (map[st
 	if err != nil {
 		return nil, fmt.Errorf("failed to get bearer token: %w", err)
 	}
-	
+
 	return map[string]string{
 		"Authorization": "Bearer " + token,
 	}, nil
@@ -255,13 +255,13 @@ func (ua *UniversalAuthenticator) authenticateJWT(ctx context.Context, provider 
 	if err != nil {
 		return fmt.Errorf("invalid JWT config: %w", err)
 	}
-	
+
 	// Generate JWT token
 	token, err := ua.generateJWT(jwtConfig)
 	if err != nil {
 		return fmt.Errorf("failed to generate JWT: %w", err)
 	}
-	
+
 	return ua.credStore.StoreClientSecret(provider, token)
 }
 
@@ -270,7 +270,7 @@ func (ua *UniversalAuthenticator) getJWTHeaders(provider string) (map[string]str
 	if err != nil {
 		return nil, fmt.Errorf("failed to get JWT token: %w", err)
 	}
-	
+
 	return map[string]string{
 		"Authorization": "Bearer " + token,
 	}, nil
@@ -302,7 +302,7 @@ func (ua *UniversalAuthenticator) authenticateCustom(ctx context.Context, provid
 
 func parseOAuth2Config(config map[string]interface{}) (*ExtendedOAuth2Config, error) {
 	oauth2Config := &ExtendedOAuth2Config{}
-	
+
 	if clientID, ok := config["client_id"].(string); ok {
 		oauth2Config.ClientID = clientID
 	}
@@ -321,13 +321,13 @@ func parseOAuth2Config(config map[string]interface{}) (*ExtendedOAuth2Config, er
 	if scopes, ok := config["scopes"].([]string); ok {
 		oauth2Config.Scopes = scopes
 	}
-	
+
 	return oauth2Config, nil
 }
 
 func parseAPIKeyConfig(config map[string]interface{}) (*APIKeyConfig, error) {
 	apiKeyConfig := &APIKeyConfig{}
-	
+
 	if key, ok := config["key"].(string); ok {
 		apiKeyConfig.Key = key
 	}
@@ -337,36 +337,36 @@ func parseAPIKeyConfig(config map[string]interface{}) (*APIKeyConfig, error) {
 	if queryParam, ok := config["query_param"].(string); ok {
 		apiKeyConfig.QueryParam = queryParam
 	}
-	
+
 	return apiKeyConfig, nil
 }
 
 func parseBasicAuthConfig(config map[string]interface{}) (*BasicAuthConfig, error) {
 	basicConfig := &BasicAuthConfig{}
-	
+
 	if username, ok := config["username"].(string); ok {
 		basicConfig.Username = username
 	}
 	if password, ok := config["password"].(string); ok {
 		basicConfig.Password = password
 	}
-	
+
 	return basicConfig, nil
 }
 
 func parseBearerTokenConfig(config map[string]interface{}) (*BearerTokenConfig, error) {
 	bearerConfig := &BearerTokenConfig{}
-	
+
 	if token, ok := config["token"].(string); ok {
 		bearerConfig.Token = token
 	}
-	
+
 	return bearerConfig, nil
 }
 
 func parseJWTConfig(config map[string]interface{}) (*JWTConfig, error) {
 	jwtConfig := &JWTConfig{}
-	
+
 	if token, ok := config["token"].(string); ok {
 		jwtConfig.Token = token
 	}
@@ -379,7 +379,7 @@ func parseJWTConfig(config map[string]interface{}) (*JWTConfig, error) {
 	if claims, ok := config["claims"].(map[string]interface{}); ok {
 		jwtConfig.Claims = claims
 	}
-	
+
 	return jwtConfig, nil
 }
 
@@ -425,14 +425,14 @@ func (c *DefaultOAuth2Client) ClientCredentialsGrant(ctx context.Context, config
 	data.Set("client_id", config.ClientID)
 	data.Set("client_secret", config.ClientSecret)
 	data.Set("scope", strings.Join(config.Scopes, " "))
-	
+
 	req, err := http.NewRequestWithContext(ctx, "POST", config.TokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
 		return nil, err
 	}
-	
+
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	
+
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -443,11 +443,11 @@ func (c *DefaultOAuth2Client) ClientCredentialsGrant(ctx context.Context, config
 			_ = err // Explicitly ignore error for cleanup operation
 		}
 	}()
-	
+
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("token request failed with status: %d", resp.StatusCode)
 	}
-	
+
 	// Parse response and return TokenSet
 	// This is a simplified implementation
 	return &TokenSet{
@@ -502,29 +502,29 @@ func (rt *authRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get auth headers: %w", err)
 	}
-	
+
 	for key, value := range headers {
 		req.Header.Set(key, value)
 	}
-	
+
 	// Handle token refresh for OAuth2
 	if rt.method == AuthMethodOAuth2 {
 		if !rt.auth.IsAuthenticated(req.Context(), rt.provider, rt.method) {
 			if err := rt.auth.RefreshAuth(req.Context(), rt.provider, rt.method); err != nil {
 				return nil, fmt.Errorf("failed to refresh auth: %w", err)
 			}
-			
+
 			// Get updated headers after refresh
 			headers, err := rt.auth.GetAuthHeaders(req.Context(), rt.provider, rt.method)
 			if err != nil {
 				return nil, fmt.Errorf("failed to get refreshed auth headers: %w", err)
 			}
-			
+
 			for key, value := range headers {
 				req.Header.Set(key, value)
 			}
 		}
 	}
-	
+
 	return rt.next.RoundTrip(req)
 }

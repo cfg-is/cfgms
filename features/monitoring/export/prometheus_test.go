@@ -28,8 +28,8 @@ func TestPrometheusExporter(t *testing.T) {
 			Enabled:  true,
 			Endpoint: "0.0.0.0:9090",
 			Config: map[string]interface{}{
-				"metrics_path":     "/custom-metrics",
-				"metric_prefix":    "test",
+				"metrics_path":      "/custom-metrics",
+				"metric_prefix":     "test",
 				"enable_go_metrics": false,
 			},
 		}
@@ -153,7 +153,7 @@ func TestPrometheusExporterHealthCheck(t *testing.T) {
 
 		ctx := context.Background()
 		health := exporter.HealthCheck(ctx)
-		
+
 		assert.Equal(t, "prometheus", health.Name)
 		assert.Equal(t, "unhealthy", health.Status)
 		assert.Contains(t, health.Message, "not started")
@@ -224,7 +224,7 @@ func TestPrometheusMetricsFormatting(t *testing.T) {
 		// We can't directly test the internal sanitization function
 		// but we can verify that different metric names are handled
 		ctx := context.Background()
-		
+
 		for _, tc := range testCases {
 			exportData := export.ExportData{
 				SystemMetrics: map[string]interface{}{
@@ -256,14 +256,14 @@ func TestPrometheusMetricsFormatting(t *testing.T) {
 		exportData := export.ExportData{
 			SystemMetrics: map[string]interface{}{
 				// Should be detected as counters
-				"requests_total":   1000,
-				"errors_count":     25,
-				"bytes_sent":       1024000,
-				
+				"requests_total": 1000,
+				"errors_count":   25,
+				"bytes_sent":     1024000,
+
 				// Should be detected as gauges
-				"temperature":      23.5,
-				"queue_size":       10,
-				"connection_pool":  50,
+				"temperature":     23.5,
+				"queue_size":      10,
+				"connection_pool": 50,
 			},
 			Timestamp: time.Now(),
 		}
@@ -545,7 +545,7 @@ func TestPrometheusConfiguration(t *testing.T) {
 		config := export.ExporterConfig{
 			Enabled: true,
 			Config: map[string]interface{}{
-				"metrics_path":      123, // Should be string
+				"metrics_path":      123,   // Should be string
 				"enable_go_metrics": "yes", // Should be bool
 			},
 		}

@@ -20,11 +20,11 @@ import (
 func TestTerminalRBACComprehensiveIntegration(t *testing.T) {
 	ctx := context.Background()
 	logger := logging.NewLogger("test")
-	
+
 	// Setup real RBAC system with memory store
 	rbacStore := memory.NewStore()
 	require.NoError(t, rbacStore.Initialize(ctx))
-	
+
 	// Setup real continuous auth registry
 	authRegistry := continuous.NewSessionRegistry()
 	require.NoError(t, authRegistry.Start(ctx))
@@ -52,12 +52,12 @@ func TestTerminalRBACComprehensiveIntegration(t *testing.T) {
 				ResourceType: "terminal",
 			},
 		}
-		
+
 		for _, perm := range terminalPermissions {
 			err := rbacStore.CreatePermission(ctx, perm)
 			require.NoError(t, err)
 		}
-		
+
 		// 2. Create real roles with different permission levels
 		basicRole := &common.Role{
 			Id:            "terminal-basic",
@@ -66,15 +66,15 @@ func TestTerminalRBACComprehensiveIntegration(t *testing.T) {
 			PermissionIds: []string{"terminal.session.create"},
 			TenantId:      "test-tenant",
 		}
-		
+
 		powerRole := &common.Role{
 			Id:            "terminal-power",
-			Name:          "Power Terminal User", 
+			Name:          "Power Terminal User",
 			Description:   "Full terminal access",
 			PermissionIds: []string{"terminal.session.create", "terminal.execute"},
 			TenantId:      "test-tenant",
 		}
-		
+
 		adminRole := &common.Role{
 			Id:            "terminal-admin",
 			Name:          "Terminal Administrator",
@@ -82,12 +82,12 @@ func TestTerminalRBACComprehensiveIntegration(t *testing.T) {
 			PermissionIds: []string{"terminal.session.create", "terminal.execute", "terminal.admin"},
 			TenantId:      "test-tenant",
 		}
-		
+
 		for _, role := range []*common.Role{basicRole, powerRole, adminRole} {
 			err := rbacStore.CreateRole(ctx, role)
 			require.NoError(t, err)
 		}
-		
+
 		// 3. Create real test subjects
 		testUsers := []*common.Subject{
 			{
@@ -98,7 +98,7 @@ func TestTerminalRBACComprehensiveIntegration(t *testing.T) {
 				IsActive:    true,
 			},
 			{
-				Id:          "power-user", 
+				Id:          "power-user",
 				Type:        common.SubjectType_SUBJECT_TYPE_USER,
 				DisplayName: "Power User",
 				TenantId:    "test-tenant",
@@ -107,17 +107,17 @@ func TestTerminalRBACComprehensiveIntegration(t *testing.T) {
 			{
 				Id:          "admin-user",
 				Type:        common.SubjectType_SUBJECT_TYPE_USER,
-				DisplayName: "Admin User", 
+				DisplayName: "Admin User",
 				TenantId:    "test-tenant",
 				IsActive:    true,
 			},
 		}
-		
+
 		for _, user := range testUsers {
 			err := rbacStore.CreateSubject(ctx, user)
 			require.NoError(t, err)
 		}
-		
+
 		// 4. Assign roles using real role assignment store
 		assignments := []*common.RoleAssignment{
 			{
@@ -128,23 +128,23 @@ func TestTerminalRBACComprehensiveIntegration(t *testing.T) {
 			},
 			{
 				Id:        "assignment-power",
-				SubjectId: "power-user", 
+				SubjectId: "power-user",
 				RoleId:    "terminal-power",
 				TenantId:  "test-tenant",
 			},
 			{
 				Id:        "assignment-admin",
 				SubjectId: "admin-user",
-				RoleId:    "terminal-admin", 
+				RoleId:    "terminal-admin",
 				TenantId:  "test-tenant",
 			},
 		}
-		
+
 		for _, assignment := range assignments {
 			err := rbacStore.AssignRole(ctx, assignment)
 			require.NoError(t, err)
 		}
-		
+
 		// 5. Test real permission resolution through RBAC store
 		t.Run("VerifyPermissionResolution", func(t *testing.T) {
 			// Basic user should only have session creation
@@ -152,22 +152,22 @@ func TestTerminalRBACComprehensiveIntegration(t *testing.T) {
 			require.NoError(t, err)
 			assert.Len(t, basicPerms, 1)
 			assert.Equal(t, "terminal.session.create", basicPerms[0].Id)
-			
+
 			// Power user should have session + execute
 			powerPerms, err := rbacStore.GetRolePermissions(ctx, "terminal-power")
 			require.NoError(t, err)
 			assert.Len(t, powerPerms, 2)
-			
+
 			// Admin user should have all permissions
 			adminPerms, err := rbacStore.GetRolePermissions(ctx, "terminal-admin")
 			require.NoError(t, err)
 			assert.Len(t, adminPerms, 3)
 		})
-		
+
 		// 6. Test real terminal session creation with actual session objects
 		t.Run("VerifyTerminalSessionCreation", func(t *testing.T) {
 			sessions := make([]*Session, 0, 3)
-			
+
 			for _, userID := range []string{"basic-user", "power-user", "admin-user"} {
 				req := &SessionRequest{
 					StewardID: "test-steward",
@@ -176,62 +176,62 @@ func TestTerminalRBACComprehensiveIntegration(t *testing.T) {
 					Cols:      80,
 					Rows:      24,
 				}
-				
+
 				session, err := NewSession(req, logger)
 				require.NoError(t, err)
 				require.NotNil(t, session)
-				
+
 				// Verify session properties
 				assert.Equal(t, userID, session.UserID)
 				assert.Equal(t, "test-steward", session.StewardID)
 				assert.Equal(t, "bash", session.Shell)
 				assert.True(t, session.IsActive())
 				assert.False(t, session.IsClosed())
-				
+
 				sessions = append(sessions, session)
-				
+
 				// Register with real continuous auth system
 				metadata := map[string]string{
 					"session_type":             "terminal",
 					"requires_continuous_auth": "true",
-					"user_role":               getUserRole(userID),
+					"user_role":                getUserRole(userID),
 				}
-				
+
 				err = authRegistry.RegisterSession(ctx, session.ID, userID, "test-tenant", metadata)
 				require.NoError(t, err)
-				
+
 				// Verify session is registered
 				valid, err := authRegistry.ValidateSession(ctx, session.ID, userID)
 				require.NoError(t, err)
 				assert.True(t, valid)
 			}
-			
+
 			// Clean up sessions
 			for _, session := range sessions {
 				err := session.Close(ctx)
 				require.NoError(t, err)
 				assert.False(t, session.IsActive())
 				assert.True(t, session.IsClosed())
-				
+
 				err = authRegistry.UnregisterSession(ctx, session.ID)
 				require.NoError(t, err)
 			}
 		})
-		
+
 		// 7. Test real command security validation with actual filter rules
 		t.Run("VerifyCommandSecurityValidation", func(t *testing.T) {
 			filterRules := getDefaultCommandFilterRules()
 			require.NotEmpty(t, filterRules)
-			
+
 			// Test real dangerous command detection with commands that match existing rules
 			dangerousCommands := []string{
 				"rm -rf /",                    // Matches: block-rm-rf
 				"format c:",                   // Matches: block-format-commands
 				"dd if=/dev/zero of=/dev/sda", // Matches: block-format-commands
-				"nmap -sS 192.168.1.0/24",    // Matches: block-network-tools
+				"nmap -sS 192.168.1.0/24",     // Matches: block-network-tools
 				"chmod 777 /etc/passwd",       // Matches: block-privilege-escalation
 			}
-			
+
 			for _, cmd := range dangerousCommands {
 				blocked := false
 				for _, rule := range filterRules {
@@ -250,7 +250,7 @@ func TestTerminalRBACComprehensiveIntegration(t *testing.T) {
 				}
 				assert.True(t, blocked, "Command '%s' should be blocked by security rules", cmd)
 			}
-			
+
 			// Test real safe command allowance
 			safeCommands := []string{
 				"ls -la",
@@ -259,7 +259,7 @@ func TestTerminalRBACComprehensiveIntegration(t *testing.T) {
 				"ps aux",
 				"df -h",
 			}
-			
+
 			for _, cmd := range safeCommands {
 				blocked := false
 				for _, rule := range filterRules {
@@ -276,7 +276,7 @@ func TestTerminalRBACComprehensiveIntegration(t *testing.T) {
 				assert.False(t, blocked, "Safe command '%s' should not be blocked", cmd)
 			}
 		})
-		
+
 		// 8. Test real session termination scenarios
 		t.Run("VerifySessionTermination", func(t *testing.T) {
 			// Create test session
@@ -287,41 +287,41 @@ func TestTerminalRBACComprehensiveIntegration(t *testing.T) {
 				Cols:      80,
 				Rows:      24,
 			}
-			
+
 			session, err := NewSession(req, logger)
 			require.NoError(t, err)
-			
+
 			// Register with continuous auth
 			metadata := map[string]string{
-				"session_type": "terminal",
+				"session_type":             "terminal",
 				"requires_continuous_auth": "true",
 			}
 			err = authRegistry.RegisterSession(ctx, session.ID, "power-user", "test-tenant", metadata)
 			require.NoError(t, err)
-			
+
 			// Verify session is active
 			status, err := authRegistry.GetSessionStatus(ctx, session.ID)
 			require.NoError(t, err)
 			assert.Equal(t, "active", status.Status)
 			assert.True(t, status.IsValid)
-			
+
 			// Test termination
 			err = authRegistry.UnregisterSession(ctx, session.ID)
 			require.NoError(t, err)
-			
+
 			// Verify session is terminated
 			_, err = authRegistry.GetSessionStatus(ctx, session.ID)
 			assert.Error(t, err) // Should error because session no longer exists
-			
+
 			// Clean up
 			err = session.Close(ctx)
 			require.NoError(t, err)
 		})
-		
+
 		// 9. Test performance with real components
 		t.Run("VerifyRealSystemPerformance", func(t *testing.T) {
 			iterations := 1000
-			
+
 			// Test RBAC permission lookup performance
 			start := time.Now()
 			for i := 0; i < iterations; i++ {
@@ -329,7 +329,7 @@ func TestTerminalRBACComprehensiveIntegration(t *testing.T) {
 				require.NoError(t, err)
 			}
 			rbacLatency := time.Since(start) / time.Duration(iterations)
-			
+
 			// Test session registry performance
 			start = time.Now()
 			for i := 0; i < iterations; i++ {
@@ -338,7 +338,7 @@ func TestTerminalRBACComprehensiveIntegration(t *testing.T) {
 				_ = err
 			}
 			sessionLatency := time.Since(start) / time.Duration(iterations)
-			
+
 			// Test command filter performance
 			filterRules := getDefaultCommandFilterRules()
 			testCommand := "sudo systemctl restart nginx"
@@ -349,12 +349,12 @@ func TestTerminalRBACComprehensiveIntegration(t *testing.T) {
 				}
 			}
 			filterLatency := time.Since(start) / time.Duration(iterations)
-			
+
 			t.Logf("Performance Results:")
 			t.Logf("  RBAC permission lookup: %v", rbacLatency)
 			t.Logf("  Session validation: %v", sessionLatency)
 			t.Logf("  Command filtering: %v", filterLatency)
-			
+
 			// All operations should be well under 5ms requirement
 			assert.Less(t, rbacLatency.Milliseconds(), int64(5), "RBAC lookup should be under 5ms")
 			assert.Less(t, sessionLatency.Milliseconds(), int64(5), "Session validation should be under 5ms")
@@ -376,4 +376,3 @@ func getUserRole(userID string) string {
 		return "unknown"
 	}
 }
-

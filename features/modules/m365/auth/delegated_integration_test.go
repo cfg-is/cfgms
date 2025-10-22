@@ -64,12 +64,12 @@ func TestDelegatedPermissionsIntegration(t *testing.T) {
 
 	t.Run("TestUserContextStorage", func(t *testing.T) {
 		userContext := &UserContext{
-			UserID:               "test-user-123",
-			UserPrincipalName:    "testuser@example.com",
-			DisplayName:          "Test User",
-			Roles:                []string{"User", "GlobalAdmin"},
-			LastAuthenticated:    time.Now(),
-			SessionID:            "session-123",
+			UserID:            "test-user-123",
+			UserPrincipalName: "testuser@example.com",
+			DisplayName:       "Test User",
+			Roles:             []string{"User", "GlobalAdmin"},
+			LastAuthenticated: time.Now(),
+			SessionID:         "session-123",
 		}
 
 		// Store user context
@@ -97,10 +97,10 @@ func TestDelegatedPermissionsIntegration(t *testing.T) {
 		if err != nil {
 			// If delegated flow fails, it should fail gracefully with a specific error
 			// Could be "delegated", "NO_REFRESH_TOKEN", or "authentication failed"
-			assert.True(t, 
-				strings.Contains(err.Error(), "delegated") || 
-				strings.Contains(err.Error(), "NO_REFRESH_TOKEN") ||
-				strings.Contains(err.Error(), "authentication failed"),
+			assert.True(t,
+				strings.Contains(err.Error(), "delegated") ||
+					strings.Contains(err.Error(), "NO_REFRESH_TOKEN") ||
+					strings.Contains(err.Error(), "authentication failed"),
 				"Error should be about delegated auth, refresh token, or authentication: %v", err)
 		} else {
 			// If token is obtained, verify it's properly configured
@@ -174,7 +174,7 @@ func TestDelegatedPermissionsIntegration(t *testing.T) {
 
 	t.Run("TestCredentialStoreCleanup", func(t *testing.T) {
 		userID := "cleanup-test-user"
-		
+
 		// Store test data
 		testToken := &AccessToken{
 			Token:     "cleanup-token",
@@ -267,7 +267,7 @@ func TestDelegatedPermissionsScenarios(t *testing.T) {
 			assert.NotNil(t, token)
 			assert.True(t, token.IsDelegated)
 			assert.Equal(t, userContext, token.UserContext)
-			
+
 			// Test permission validation for user operations
 			err = provider.ValidatePermissions(ctx, token, []string{"User.Read"})
 			if err != nil {
@@ -357,7 +357,7 @@ func TestTokenRefreshFlow(t *testing.T) {
 		// Attempt to get a delegated token - should try to refresh but fail with mock token
 		// This tests the refresh flow logic even though the actual refresh will fail
 		_, err = provider.GetDelegatedAccessToken(ctx, config.TenantID, userContext)
-		
+
 		// We expect this to fail since we're using a mock refresh token
 		// But it should attempt refresh and then fall back to app permissions
 		if config.FallbackToAppPermissions {
@@ -465,7 +465,7 @@ func BenchmarkDelegatedTokenOperations(b *testing.B) {
 
 	b.Run("BenchmarkDelegatedTokenCaching", func(b *testing.B) {
 		cacheKey := config.TenantID + ":" + userContext.UserID
-		
+
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			provider.setDelegatedCachedToken(cacheKey, testToken)

@@ -13,8 +13,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/logging"
-	"github.com/cfgis/cfgms/pkg/testing/storage"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/git" // Register git provider
+	"github.com/cfgis/cfgms/pkg/testing/storage"
 )
 
 func TestManager_SingleServerMode(t *testing.T) {

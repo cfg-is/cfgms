@@ -202,7 +202,7 @@ func (s *ModuleExecutionTestSuite) TestConfigStatusReporting() {
 
 	// Subscribe to config status topic
 	statusReceived := make(chan *ConfigStatusMessage, 1)
-	stewardID := "steward-standalone"  // Must match container name
+	stewardID := "steward-standalone" // Must match container name
 
 	s.helper.SubscribeToConfigStatus(s.T(), stewardID, func(msg *ConfigStatusMessage) {
 		s.T().Logf("Received config status: version=%s, status=%s, modules=%d",

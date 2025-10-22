@@ -13,37 +13,37 @@ import (
 type Template struct {
 	// ID is the unique template identifier
 	ID string `json:"id"`
-	
+
 	// Name is the human-readable template name
 	Name string `json:"name"`
-	
+
 	// Content is the raw template content
 	Content []byte `json:"content"`
-	
+
 	// Variables are the declared variables in the template
 	Variables map[string]interface{} `json:"variables"`
-	
+
 	// Extends references parent template for inheritance
 	Extends string `json:"extends,omitempty"`
-	
+
 	// Includes are templates included by this template
 	Includes []string `json:"includes"`
-	
+
 	// Version is the template version
 	Version string `json:"version"`
-	
+
 	// Description describes the template purpose
 	Description string `json:"description"`
-	
+
 	// Tags are metadata tags for the template
 	Tags []string `json:"tags"`
-	
+
 	// CreatedAt is when the template was created
 	CreatedAt time.Time `json:"created_at"`
-	
+
 	// UpdatedAt is when the template was last updated
 	UpdatedAt time.Time `json:"updated_at"`
-	
+
 	// Metadata contains additional template information
 	Metadata map[string]interface{} `json:"metadata,omitempty"`
 }
@@ -52,22 +52,22 @@ type Template struct {
 type TemplateContext struct {
 	// Variables are the resolved variables (local + inherited + DNA)
 	Variables map[string]interface{}
-	
+
 	// DNA contains real-time system properties
 	DNA map[string]interface{}
-	
+
 	// InheritedVariables from parent configurations
 	InheritedVariables map[string]interface{}
-	
+
 	// LocalVariables declared in the current template
 	LocalVariables map[string]interface{}
-	
+
 	// Functions are available template functions
 	Functions map[string]interface{}
-	
+
 	// TargetType is what type of entity this template targets
 	TargetType string
-	
+
 	// TargetID is the ID of the target entity
 	TargetID string
 }
@@ -76,19 +76,19 @@ type TemplateContext struct {
 type RenderOptions struct {
 	// MaxDepth limits template inheritance depth
 	MaxDepth int
-	
+
 	// MaxIncludes limits number of included templates
 	MaxIncludes int
-	
+
 	// Timeout for template rendering
 	Timeout time.Duration
-	
+
 	// StrictMode fails on undefined variables
 	StrictMode bool
-	
+
 	// ValidateOutput validates rendered configuration
 	ValidateOutput bool
-	
+
 	// SandboxMode enables security sandbox
 	SandboxMode bool
 }
@@ -97,19 +97,19 @@ type RenderOptions struct {
 type RenderResult struct {
 	// Content is the rendered configuration
 	Content []byte
-	
+
 	// Variables used during rendering
 	Variables map[string]interface{}
-	
+
 	// Templates that were processed
 	Templates []string
-	
+
 	// Duration of rendering
 	Duration time.Duration
-	
+
 	// Warnings generated during rendering
 	Warnings []TemplateWarning
-	
+
 	// Metadata about the rendering process
 	Metadata map[string]interface{}
 }
@@ -118,16 +118,16 @@ type RenderResult struct {
 type TemplateWarning struct {
 	// Type of warning
 	Type string
-	
+
 	// Message describing the warning
 	Message string
-	
+
 	// Line number in the template (if applicable)
 	Line int
-	
+
 	// Column number in the template (if applicable)
 	Column int
-	
+
 	// Context provides additional information
 	Context map[string]interface{}
 }
@@ -136,16 +136,16 @@ type TemplateWarning struct {
 type TemplateEngine interface {
 	// Parse parses a template and returns a Template object
 	Parse(ctx context.Context, content []byte, options ParseOptions) (*Template, error)
-	
+
 	// Render renders a template with the given context
 	Render(ctx context.Context, template *Template, context *TemplateContext, options RenderOptions) (*RenderResult, error)
-	
+
 	// Validate validates a template for syntax and semantic errors
 	Validate(ctx context.Context, template *Template) (*ValidationResult, error)
-	
+
 	// RegisterFunction adds a custom function to the engine
 	RegisterFunction(name string, fn interface{}) error
-	
+
 	// ListFunctions returns available template functions
 	ListFunctions() []string
 }
@@ -154,10 +154,10 @@ type TemplateEngine interface {
 type ParseOptions struct {
 	// AllowUndefinedVariables permits undefined variable references
 	AllowUndefinedVariables bool
-	
+
 	// MaxVariableDepth limits variable reference depth
 	MaxVariableDepth int
-	
+
 	// StrictSyntax enforces strict template syntax
 	StrictSyntax bool
 }
@@ -166,19 +166,19 @@ type ParseOptions struct {
 type ValidationResult struct {
 	// Valid indicates if the template is valid
 	Valid bool
-	
+
 	// Errors are validation errors that prevent rendering
 	Errors []ValidationError
-	
+
 	// Warnings are non-fatal validation issues
 	Warnings []ValidationWarning
-	
+
 	// UsedVariables are variables referenced in the template
 	UsedVariables []string
-	
+
 	// RequiredFunctions are functions required by the template
 	RequiredFunctions []string
-	
+
 	// Dependencies are templates this template depends on
 	Dependencies []string
 }
@@ -187,16 +187,16 @@ type ValidationResult struct {
 type ValidationError struct {
 	// Type of error
 	Type string
-	
+
 	// Message describing the error
 	Message string
-	
+
 	// Line number where error occurred
 	Line int
-	
+
 	// Column number where error occurred
 	Column int
-	
+
 	// Context provides additional error information
 	Context map[string]interface{}
 }
@@ -205,16 +205,16 @@ type ValidationError struct {
 type ValidationWarning struct {
 	// Type of warning
 	Type string
-	
+
 	// Message describing the warning
 	Message string
-	
+
 	// Line number where warning occurred
 	Line int
-	
+
 	// Column number where warning occurred
 	Column int
-	
+
 	// Context provides additional warning information
 	Context map[string]interface{}
 }
@@ -223,16 +223,16 @@ type ValidationWarning struct {
 type TemplateStore interface {
 	// Get retrieves a template by ID
 	Get(ctx context.Context, id string) (*Template, error)
-	
+
 	// Save saves a template
 	Save(ctx context.Context, template *Template) error
-	
+
 	// Delete deletes a template
 	Delete(ctx context.Context, id string) error
-	
+
 	// List lists templates matching the filter
 	List(ctx context.Context, filter TemplateFilter) ([]*Template, error)
-	
+
 	// Exists checks if a template exists
 	Exists(ctx context.Context, id string) (bool, error)
 }
@@ -241,19 +241,19 @@ type TemplateStore interface {
 type TemplateFilter struct {
 	// Tags to filter by
 	Tags []string
-	
+
 	// NamePattern to match template names
 	NamePattern string
-	
+
 	// CreatedAfter filters templates created after this time
 	CreatedAfter *time.Time
-	
+
 	// CreatedBefore filters templates created before this time
 	CreatedBefore *time.Time
-	
+
 	// Limit results
 	Limit int
-	
+
 	// Offset for pagination
 	Offset int
 }
@@ -262,10 +262,10 @@ type TemplateFilter struct {
 type DNAProvider interface {
 	// GetDNA returns DNA properties for a target
 	GetDNA(ctx context.Context, targetType, targetID string) (map[string]interface{}, error)
-	
+
 	// GetProperty returns a specific DNA property
 	GetProperty(ctx context.Context, targetType, targetID, property string) (interface{}, error)
-	
+
 	// ListProperties returns available DNA properties for a target
 	ListProperties(ctx context.Context, targetType, targetID string) ([]string, error)
 }
@@ -274,10 +274,10 @@ type DNAProvider interface {
 type VariableResolver interface {
 	// Resolve resolves all variables for a template context
 	Resolve(ctx context.Context, template *Template, targetType, targetID string) (*TemplateContext, error)
-	
+
 	// ResolveVariable resolves a specific variable
 	ResolveVariable(ctx context.Context, name string, context *TemplateContext) (interface{}, error)
-	
+
 	// GetPrecedence returns variable precedence order
 	GetPrecedence() []string
 }
@@ -286,10 +286,10 @@ type VariableResolver interface {
 type TemplateInheritance interface {
 	// GetParent returns the parent template
 	GetParent(ctx context.Context, template *Template) (*Template, error)
-	
+
 	// MergeTemplates merges child template with parent
 	MergeTemplates(ctx context.Context, child, parent *Template) (*Template, error)
-	
+
 	// ResolveInheritance resolves the full inheritance chain
 	ResolveInheritance(ctx context.Context, template *Template) (*Template, error)
 }
@@ -373,27 +373,27 @@ var (
 		Type:    "TEMPLATE_NOT_FOUND",
 		Message: "Template not found",
 	}
-	
+
 	ErrInvalidSyntax = &TemplateError{
 		Type:    "INVALID_SYNTAX",
 		Message: "Invalid template syntax",
 	}
-	
+
 	ErrUndefinedVariable = &TemplateError{
 		Type:    "UNDEFINED_VARIABLE",
 		Message: "Undefined variable",
 	}
-	
+
 	ErrCircularDependency = &TemplateError{
 		Type:    "CIRCULAR_DEPENDENCY",
 		Message: "Circular template dependency",
 	}
-	
+
 	ErrRenderTimeout = &TemplateError{
 		Type:    "RENDER_TIMEOUT",
 		Message: "Template rendering timeout",
 	}
-	
+
 	ErrInvalidFunction = &TemplateError{
 		Type:    "INVALID_FUNCTION",
 		Message: "Invalid template function",

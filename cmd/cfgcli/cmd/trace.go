@@ -76,26 +76,26 @@ func runTrace(cmd *cobra.Command, args []string) error {
 
 	// Parse response
 	var trace struct {
-		RequestID       string     `json:"request_id"`
-		TraceID         string     `json:"trace_id"`
-		ParentRequestID string     `json:"parent_request_id,omitempty"`
-		StartTime       time.Time  `json:"start_time"`
-		EndTime         *time.Time `json:"end_time,omitempty"`
-		DurationMs      float64    `json:"duration_ms,omitempty"`
-		Operation       string     `json:"operation"`
-		Component       string     `json:"component"`
-		Status          string     `json:"status"`
-		Error           string     `json:"error,omitempty"`
+		RequestID       string                 `json:"request_id"`
+		TraceID         string                 `json:"trace_id"`
+		ParentRequestID string                 `json:"parent_request_id,omitempty"`
+		StartTime       time.Time              `json:"start_time"`
+		EndTime         *time.Time             `json:"end_time,omitempty"`
+		DurationMs      float64                `json:"duration_ms,omitempty"`
+		Operation       string                 `json:"operation"`
+		Component       string                 `json:"component"`
+		Status          string                 `json:"status"`
+		Error           string                 `json:"error,omitempty"`
 		Metadata        map[string]interface{} `json:"metadata,omitempty"`
 		Spans           []struct {
-			SpanID       string                 `json:"span_id"`
-			ParentSpanID string                 `json:"parent_span_id,omitempty"`
-			Operation    string                 `json:"operation"`
-			StartTime    time.Time              `json:"start_time"`
-			EndTime      *time.Time             `json:"end_time,omitempty"`
-			DurationMs   float64                `json:"duration_ms,omitempty"`
-			Status       string                 `json:"status"`
-			Tags         map[string]string      `json:"tags,omitempty"`
+			SpanID       string            `json:"span_id"`
+			ParentSpanID string            `json:"parent_span_id,omitempty"`
+			Operation    string            `json:"operation"`
+			StartTime    time.Time         `json:"start_time"`
+			EndTime      *time.Time        `json:"end_time,omitempty"`
+			DurationMs   float64           `json:"duration_ms,omitempty"`
+			Status       string            `json:"status"`
+			Tags         map[string]string `json:"tags,omitempty"`
 		} `json:"spans,omitempty"`
 	}
 
@@ -170,14 +170,14 @@ func runTrace(cmd *cobra.Command, args []string) error {
 
 // spanType represents a trace span for printing
 type spanType struct {
-	SpanID       string                 `json:"span_id"`
-	ParentSpanID string                 `json:"parent_span_id,omitempty"`
-	Operation    string                 `json:"operation"`
-	StartTime    time.Time              `json:"start_time"`
-	EndTime      *time.Time             `json:"end_time,omitempty"`
-	DurationMs   float64                `json:"duration_ms,omitempty"`
-	Status       string                 `json:"status"`
-	Tags         map[string]string      `json:"tags,omitempty"`
+	SpanID       string            `json:"span_id"`
+	ParentSpanID string            `json:"parent_span_id,omitempty"`
+	Operation    string            `json:"operation"`
+	StartTime    time.Time         `json:"start_time"`
+	EndTime      *time.Time        `json:"end_time,omitempty"`
+	DurationMs   float64           `json:"duration_ms,omitempty"`
+	Status       string            `json:"status"`
+	Tags         map[string]string `json:"tags,omitempty"`
 }
 
 func printSpans(spans []spanType, indent string, printed map[string]bool) {

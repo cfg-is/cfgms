@@ -14,13 +14,13 @@ import (
 
 // splitBrainDetector implements SplitBrainDetector interface
 type splitBrainDetector struct {
-	mu       sync.RWMutex
-	cfg      *SplitBrainConfig
-	logger   logging.Logger
-	manager  *Manager
-	ctx      context.Context
-	cancel   context.CancelFunc
-	started  bool
+	mu      sync.RWMutex
+	cfg     *SplitBrainConfig
+	logger  logging.Logger
+	manager *Manager
+	ctx     context.Context
+	cancel  context.CancelFunc
+	started bool
 
 	// Split-brain detection state
 	handlers       []SplitBrainHandler
@@ -323,8 +323,8 @@ func (sbd *splitBrainDetector) performQuorumValidation() {
 			Timestamp:  time.Now(),
 			Resolution: "stepped_down_no_quorum",
 			Details: map[string]interface{}{
-				"healthy_nodes":    healthyNodes,
-				"required_quorum":  requiredQuorum,
+				"healthy_nodes":   healthyNodes,
+				"required_quorum": requiredQuorum,
 				"action":          "step_down",
 			},
 		}

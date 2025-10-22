@@ -15,13 +15,13 @@ import (
 
 // failoverManager implements FailoverManager interface
 type failoverManager struct {
-	mu       sync.RWMutex
-	cfg      *FailoverConfig
-	logger   logging.Logger
-	manager  *Manager
-	ctx      context.Context
-	cancel   context.CancelFunc
-	started  bool
+	mu      sync.RWMutex
+	cfg     *FailoverConfig
+	logger  logging.Logger
+	manager *Manager
+	ctx     context.Context
+	cancel  context.CancelFunc
+	started bool
 
 	// Failover state
 	handlers       []FailoverHandler

@@ -4,9 +4,10 @@ import (
 	"context"
 	"testing"
 
-	"github.com/cfgis/cfgms/features/steward/performance"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/features/steward/performance"
 )
 
 func TestSystemCollector_CollectMetrics(t *testing.T) {

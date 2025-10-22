@@ -4,10 +4,11 @@ import (
 	"context"
 	"testing"
 
-	"github.com/cfgis/cfgms/features/modules/m365/auth"
-	"github.com/cfgis/cfgms/features/modules/m365/graph"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+
+	"github.com/cfgis/cfgms/features/modules/m365/auth"
+	"github.com/cfgis/cfgms/features/modules/m365/graph"
 )
 
 // Mock implementations
@@ -859,7 +860,7 @@ func TestManagedFieldsEdgeCases(t *testing.T) {
 	assert.NotContains(t, fields, "redirect_uris")
 }
 
-// Test validation edge cases  
+// Test validation edge cases
 func TestValidationEdgeCases(t *testing.T) {
 	// Test with valid complete configuration
 	config := &EntraApplicationConfig{

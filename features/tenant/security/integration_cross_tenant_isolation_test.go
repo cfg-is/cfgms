@@ -8,14 +8,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/tenant"
 	tenantMemory "github.com/cfgis/cfgms/features/tenant/memory"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-	
+
 	// Import storage providers for testing
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 )
@@ -24,16 +25,16 @@ import (
 // This is an integration test that validates the complete authorization pipeline
 func TestCrossTenantPermissionIsolationIntegration(t *testing.T) {
 	ctx := context.Background()
-	
+
 	// Setup REAL RBAC and tenant infrastructure with git storage
 	config := map[string]interface{}{
 		"repository_path": t.TempDir(),
-		"branch":         "main",
-		"auto_init":      true,
+		"branch":          "main",
+		"auto_init":       true,
 	}
 	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
 	require.NoError(t, err)
-	
+
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
@@ -41,7 +42,7 @@ func TestCrossTenantPermissionIsolationIntegration(t *testing.T) {
 	)
 	err = rbacManager.Initialize(ctx)
 	require.NoError(t, err)
-	
+
 	tenantStore := tenantMemory.NewStore()
 	tenantManager := tenant.NewManager(tenantStore, rbacManager)
 	auditLogger := NewTenantSecurityAuditLogger()
@@ -75,7 +76,7 @@ func TestCrossTenantPermissionIsolationIntegration(t *testing.T) {
 				name:               "Finance User Accessing Healthcare Data",
 				subjectID:          "finance-user",
 				subjectTenant:      "msp-finance",
-				targetTenant:       "msp-healthcare", 
+				targetTenant:       "msp-healthcare",
 				permissionID:       "healthcare.patient.read",
 				resourceID:         "patient/records/12345",
 				shouldBeBlocked:    true,
@@ -86,7 +87,7 @@ func TestCrossTenantPermissionIsolationIntegration(t *testing.T) {
 				subjectID:          "healthcare-user",
 				subjectTenant:      "msp-healthcare",
 				targetTenant:       "msp-finance",
-				permissionID:       "finance.transactions.read", 
+				permissionID:       "finance.transactions.read",
 				resourceID:         "transactions/sensitive/67890",
 				shouldBeBlocked:    true,
 				expectedAuditEvent: TenantSecurityEventCrossTenantAccess,
@@ -122,9 +123,9 @@ func TestCrossTenantPermissionIsolationIntegration(t *testing.T) {
 					TenantId:     scenario.targetTenant,
 					ResourceId:   scenario.resourceID,
 					Context: map[string]string{
-						"source_ip":    "192.168.1.100",
-						"user_agent":   "CFGMS-Client/1.0",
-						"session_id":   fmt.Sprintf("session-%s", scenario.subjectID),
+						"source_ip":     "192.168.1.100",
+						"user_agent":    "CFGMS-Client/1.0",
+						"session_id":    fmt.Sprintf("session-%s", scenario.subjectID),
 						"source_tenant": scenario.subjectTenant,
 					},
 				}
@@ -149,7 +150,7 @@ func TestCrossTenantPermissionIsolationIntegration(t *testing.T) {
 				if scenario.shouldBeBlocked {
 					// Cross-tenant access should be blocked at some level
 					blocked := !rbacResponse.Granted || !isolationResponse.Granted
-					assert.True(t, blocked, 
+					assert.True(t, blocked,
 						"Cross-tenant access should be blocked by RBAC or isolation engine")
 
 					// Verify audit logging occurred
@@ -157,15 +158,15 @@ func TestCrossTenantPermissionIsolationIntegration(t *testing.T) {
 						SubjectID: scenario.subjectID,
 						TenantID:  scenario.targetTenant,
 					}
-					
+
 					entries, err := auditLogger.GetAuditEntries(ctx, filter)
 					require.NoError(t, err)
 
 					// Should have audit entries from the access attempt
 					foundAuditEntry := false
 					for _, entry := range entries {
-						if entry.SubjectID == scenario.subjectID && 
-						   entry.TenantID == scenario.targetTenant {
+						if entry.SubjectID == scenario.subjectID &&
+							entry.TenantID == scenario.targetTenant {
 							foundAuditEntry = true
 							break
 						}
@@ -177,7 +178,7 @@ func TestCrossTenantPermissionIsolationIntegration(t *testing.T) {
 						require.NoError(t, err, "Should be able to audit access attempt")
 					}
 
-					t.Logf("✅ Cross-tenant access blocked: %s -> %s", 
+					t.Logf("✅ Cross-tenant access blocked: %s -> %s",
 						scenario.subjectTenant, scenario.targetTenant)
 				} else {
 					// Same-tenant access should work if user has permissions
@@ -193,7 +194,7 @@ func TestCrossTenantPermissionIsolationIntegration(t *testing.T) {
 
 	t.Run("Integration_HierarchicalRoleInheritance", func(t *testing.T) {
 		// Test that role hierarchy operations respect tenant boundaries in real RBAC system
-		
+
 		t.Run("CrossTenantRoleInheritanceBlocked", func(t *testing.T) {
 			// Attempt to create role inheritance across tenant boundaries
 			parentRole := &common.Role{
@@ -208,16 +209,16 @@ func TestCrossTenantPermissionIsolationIntegration(t *testing.T) {
 			// Attempt cross-tenant child role (should be blocked)
 			childRole := &common.Role{
 				Id:              "child-admin-role",
-				Name:            "Child Administrator", 
+				Name:            "Child Administrator",
 				TenantId:        "client-subsidiary-a", // Different tenant
 				ParentRoleId:    "parent-admin-role",
 				PermissionIds:   []string{"subsidiary.manage"},
 				InheritanceType: common.RoleInheritanceType_ROLE_INHERITANCE_ADDITIVE,
 			}
 
-			err = rbacManager.CreateRoleWithParent(ctx, childRole, "parent-admin-role", 
+			err = rbacManager.CreateRoleWithParent(ctx, childRole, "parent-admin-role",
 				common.RoleInheritanceType_ROLE_INHERITANCE_ADDITIVE)
-			
+
 			// Current RBAC system doesn't enforce cross-tenant role restrictions yet
 			// This test documents the current behavior for future enhancement
 			if err != nil {
@@ -249,7 +250,7 @@ func TestCrossTenantPermissionIsolationIntegration(t *testing.T) {
 
 			err = rbacManager.CreateRoleWithParent(ctx, analystRole, "finance-manager-role",
 				common.RoleInheritanceType_ROLE_INHERITANCE_ADDITIVE)
-			
+
 			// This should succeed
 			assert.NoError(t, err, "Same-tenant role inheritance should work")
 			t.Logf("✅ Same-tenant role inheritance allowed")
@@ -290,20 +291,20 @@ func TestCrossTenantPermissionIsolationIntegration(t *testing.T) {
 
 			// At least one of the expected permissions should be found
 			assert.True(t, hasDirectPerm || hasInheritedPerm, "Should have role permissions (direct or inherited)")
-			t.Logf("✅ Permission inheritance verified: direct=%v, inherited=%v", 
+			t.Logf("✅ Permission inheritance verified: direct=%v, inherited=%v",
 				hasDirectPerm, hasInheritedPerm)
 		})
 	})
 
 	t.Run("Integration_TenantAdministratorScoping", func(t *testing.T) {
 		// Test that tenant administrators are properly scoped using real RBAC
-		
+
 		// Create tenant admin roles and assignments
 		adminTests := []struct {
-			adminID       string
-			adminTenant   string
-			targetTenant  string
-			permission    string
+			adminID          string
+			adminTenant      string
+			targetTenant     string
+			permission       string
 			shouldHaveAccess bool
 		}{
 			{"finance-admin", "msp-finance", "msp-finance", "finance.admin", true},
@@ -325,13 +326,13 @@ func TestCrossTenantPermissionIsolationIntegration(t *testing.T) {
 				require.NoError(t, err, "Permission check should not error")
 
 				if test.shouldHaveAccess {
-					assert.True(t, response.Granted, 
-						"Admin should have access to own tenant: %s -> %s", 
+					assert.True(t, response.Granted,
+						"Admin should have access to own tenant: %s -> %s",
 						test.adminTenant, test.targetTenant)
 					t.Logf("✅ Tenant admin access granted: %s in %s", test.adminID, test.targetTenant)
 				} else {
 					assert.False(t, response.Granted,
-						"Admin should NOT have access to other tenant: %s -> %s", 
+						"Admin should NOT have access to other tenant: %s -> %s",
 						test.adminTenant, test.targetTenant)
 					t.Logf("✅ Cross-tenant admin access blocked: %s trying %s", test.adminID, test.targetTenant)
 				}
@@ -341,10 +342,10 @@ func TestCrossTenantPermissionIsolationIntegration(t *testing.T) {
 
 	t.Run("Integration_ConcurrentLoadTesting", func(t *testing.T) {
 		// Test tenant isolation under realistic concurrent load with real RBAC
-		
+
 		const numUsers = 25 // Reduced for race-free testing
 		const operationsPerUser = 10
-		
+
 		var (
 			totalOperations   int64
 			blockedOperations int64
@@ -361,7 +362,7 @@ func TestCrossTenantPermissionIsolationIntegration(t *testing.T) {
 
 				subjectID := fmt.Sprintf("concurrent-user-%d", id)
 				subjectTenant := fmt.Sprintf("tenant-%d", id%3) // 3 tenants total
-				
+
 				for op := 0; op < operationsPerUser; op++ {
 					// Mix of same-tenant and cross-tenant operations
 					var targetTenant string
@@ -393,8 +394,8 @@ func TestCrossTenantPermissionIsolationIntegration(t *testing.T) {
 						AccessLevel:     CrossTenantLevelRead,
 						Context: map[string]string{
 							"concurrent_test": "true",
-							"user_id":        fmt.Sprintf("%d", id),
-							"operation":      fmt.Sprintf("%d", op),
+							"user_id":         fmt.Sprintf("%d", id),
+							"operation":       fmt.Sprintf("%d", op),
 						},
 					}
 
@@ -410,7 +411,7 @@ func TestCrossTenantPermissionIsolationIntegration(t *testing.T) {
 						atomic.AddInt64(&allowedOperations, 1)
 					} else {
 						atomic.AddInt64(&blockedOperations, 1)
-						
+
 						// Audit the blocked attempt
 						err = auditLogger.LogAccessAttempt(ctx, tenantRequest, isolationResponse)
 						if err == nil {
@@ -436,7 +437,7 @@ func TestCrossTenantPermissionIsolationIntegration(t *testing.T) {
 
 		// Should have blocked some cross-tenant attempts
 		assert.Greater(t, blocked, int64(0), "Some operations should be blocked")
-		
+
 		// Should have audit entries for blocked attempts
 		assert.Greater(t, audited, int64(0), "Blocked attempts should be audited")
 
@@ -445,11 +446,11 @@ func TestCrossTenantPermissionIsolationIntegration(t *testing.T) {
 
 		t.Logf("🚀 Concurrent Load Test Results:")
 		t.Logf("   Total Operations: %d", total)
-		t.Logf("   Allowed: %d, Blocked: %d (%.1f%% blocked)", 
+		t.Logf("   Allowed: %d, Blocked: %d (%.1f%% blocked)",
 			allowed, blocked, blockRate*100)
-		t.Logf("   Audit Entries: %d (%.1f%% of blocked)", 
+		t.Logf("   Audit Entries: %d (%.1f%% of blocked)",
 			audited, auditRate*100)
-		
+
 		// Validate tenant isolation maintained under load
 		assert.GreaterOrEqual(t, blockRate, 0.10, "At least 10% of operations should be blocked (cross-tenant)")
 		assert.GreaterOrEqual(t, auditRate, 0.50, "At least 50% of blocked operations should be audited")
@@ -459,13 +460,13 @@ func TestCrossTenantPermissionIsolationIntegration(t *testing.T) {
 
 	t.Run("Integration_CrossTenantDataQueries", func(t *testing.T) {
 		// Test that data queries respect tenant boundaries in practice
-		
+
 		queryScenarios := []struct {
-			name           string
-			subjectID      string
-			subjectTenant  string
-			queryTenant    string
-			expectedRows   int
+			name          string
+			subjectID     string
+			subjectTenant string
+			queryTenant   string
+			expectedRows  int
 		}{
 			{"Same tenant query", "finance-user", "msp-finance", "msp-finance", 1},
 			{"Cross tenant query", "finance-user", "msp-finance", "msp-healthcare", 0},
@@ -510,7 +511,7 @@ func TestCrossTenantPermissionIsolationIntegration(t *testing.T) {
 				assert.Equal(t, scenario.expectedRows, actualRows,
 					"Query should return expected number of rows based on tenant boundaries")
 
-				t.Logf("✅ Query result: %s -> %d rows (expected %d)", 
+				t.Logf("✅ Query result: %s -> %d rows (expected %d)",
 					scenario.name, actualRows, scenario.expectedRows)
 			})
 		}
@@ -528,7 +529,7 @@ func setupRealTenantHierarchy(t *testing.T, ctx context.Context, tenantStore *te
 	}{
 		{"parent-corp", "Parent Corporation", ""},
 		{"msp-finance", "Finance Division", "parent-corp"},
-		{"msp-healthcare", "Healthcare Division", "parent-corp"}, 
+		{"msp-healthcare", "Healthcare Division", "parent-corp"},
 		{"msp-it", "IT Division", "parent-corp"},
 		{"client-subsidiary-a", "Subsidiary A", "parent-corp"},
 		{"client-subsidiary-b", "Subsidiary B", "parent-corp"},
@@ -536,12 +537,12 @@ func setupRealTenantHierarchy(t *testing.T, ctx context.Context, tenantStore *te
 
 	for _, tenantInfo := range tenants {
 		tnnt := &tenant.Tenant{
-			ID:          tenantInfo.id,
-			Name:        tenantInfo.name,
-			ParentID:    tenantInfo.parentID,
-			Status:      tenant.TenantStatusActive,
-			CreatedAt:   time.Now(),
-			UpdatedAt:   time.Now(),
+			ID:        tenantInfo.id,
+			Name:      tenantInfo.name,
+			ParentID:  tenantInfo.parentID,
+			Status:    tenant.TenantStatusActive,
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
 		}
 
 		err := tenantStore.CreateTenant(ctx, tnnt)
@@ -555,7 +556,7 @@ func setupRealTenantHierarchy(t *testing.T, ctx context.Context, tenantStore *te
 
 func setupRealIsolationRules(t *testing.T, ctx context.Context, isolationEngine *TenantIsolationEngine) error {
 	// Create real isolation rules with strict tenant boundaries
-	tenantIDs := []string{"parent-corp", "msp-finance", "msp-healthcare", "msp-it", 
+	tenantIDs := []string{"parent-corp", "msp-finance", "msp-healthcare", "msp-it",
 		"client-subsidiary-a", "client-subsidiary-b"}
 
 	for _, tenantID := range tenantIDs {
@@ -576,7 +577,7 @@ func setupRealIsolationRules(t *testing.T, ctx context.Context, isolationEngine 
 		if tenantID == "parent-corp" {
 			rule.CrossTenantAccess.AllowCrossTenantAccess = true
 			rule.CrossTenantAccess.AllowedTenants = []string{
-				"msp-finance", "msp-healthcare", "msp-it", 
+				"msp-finance", "msp-healthcare", "msp-it",
 				"client-subsidiary-a", "client-subsidiary-b",
 			}
 		}
@@ -619,7 +620,7 @@ func setupRealRBACComponents(t *testing.T, ctx context.Context, rbacManager *rba
 			PermissionIds: []string{"finance.reports.read", "resource.read", "data.query"},
 		},
 		{
-			Id:            "finance-admin-role", 
+			Id:            "finance-admin-role",
 			Name:          "Finance Administrator",
 			TenantId:      "msp-finance",
 			PermissionIds: []string{"finance.admin", "finance.reports.read", "finance.transactions.read", "resource.read", "data.query"},
@@ -632,7 +633,7 @@ func setupRealRBACComponents(t *testing.T, ctx context.Context, rbacManager *rba
 		},
 		{
 			Id:            "healthcare-admin-role",
-			Name:          "Healthcare Administrator", 
+			Name:          "Healthcare Administrator",
 			TenantId:      "msp-healthcare",
 			PermissionIds: []string{"healthcare.admin", "healthcare.patient.read", "resource.read", "data.query"},
 		},
@@ -697,15 +698,14 @@ func setupRealRBACComponents(t *testing.T, ctx context.Context, rbacManager *rba
 
 // contains checks if a string contains a substring
 func contains(s, substr string) bool {
-	return len(s) > 0 && len(substr) > 0 && 
-		(s == substr || (len(s) >= len(substr) && 
-		func() bool {
-			for i := 0; i <= len(s)-len(substr); i++ {
-				if s[i:i+len(substr)] == substr {
-					return true
+	return len(s) > 0 && len(substr) > 0 &&
+		(s == substr || (len(s) >= len(substr) &&
+			func() bool {
+				for i := 0; i <= len(s)-len(substr); i++ {
+					if s[i:i+len(substr)] == substr {
+						return true
+					}
 				}
-			}
-			return false
-		}()))
+				return false
+			}()))
 }
-

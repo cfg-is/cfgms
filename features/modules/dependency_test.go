@@ -435,4 +435,3 @@ func BenchmarkDependencyGraph_TopologicalSort(b *testing.B) {
 		}
 	}
 }
-

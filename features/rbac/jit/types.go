@@ -7,7 +7,7 @@ import (
 // JITAccessRequestSpec defines the specification for requesting JIT access
 type JITAccessRequestSpec struct {
 	RequesterID       string            `json:"requester_id"`
-	TargetID          string            `json:"target_id,omitempty"`    // If different from requester
+	TargetID          string            `json:"target_id,omitempty"` // If different from requester
 	TenantID          string            `json:"tenant_id"`
 	Permissions       []string          `json:"permissions"`
 	Roles             []string          `json:"roles"`
@@ -24,83 +24,83 @@ type JITAccessRequestSpec struct {
 
 // JITAccessRequest represents a JIT access request
 type JITAccessRequest struct {
-	ID                string                     `json:"id"`
-	RequesterID       string                     `json:"requester_id"`
-	TargetID          string                     `json:"target_id,omitempty"`
-	TenantID          string                     `json:"tenant_id"`
-	Permissions       []string                   `json:"permissions"`
-	Roles             []string                   `json:"roles"`
-	ResourceIDs       []string                   `json:"resource_ids,omitempty"`
-	RequestedFor      string                     `json:"requested_for,omitempty"`
-	Duration          time.Duration              `json:"duration"`
-	MaxDuration       time.Duration              `json:"max_duration,omitempty"`
-	Priority          AccessPriority             `json:"priority"`
-	Justification     string                     `json:"justification"`
-	AutoApprove       bool                       `json:"auto_approve,omitempty"`
-	EmergencyAccess   bool                       `json:"emergency_access,omitempty"`
-	RequesterMetadata map[string]string          `json:"requester_metadata,omitempty"`
-	
+	ID                string            `json:"id"`
+	RequesterID       string            `json:"requester_id"`
+	TargetID          string            `json:"target_id,omitempty"`
+	TenantID          string            `json:"tenant_id"`
+	Permissions       []string          `json:"permissions"`
+	Roles             []string          `json:"roles"`
+	ResourceIDs       []string          `json:"resource_ids,omitempty"`
+	RequestedFor      string            `json:"requested_for,omitempty"`
+	Duration          time.Duration     `json:"duration"`
+	MaxDuration       time.Duration     `json:"max_duration,omitempty"`
+	Priority          AccessPriority    `json:"priority"`
+	Justification     string            `json:"justification"`
+	AutoApprove       bool              `json:"auto_approve,omitempty"`
+	EmergencyAccess   bool              `json:"emergency_access,omitempty"`
+	RequesterMetadata map[string]string `json:"requester_metadata,omitempty"`
+
 	// Request lifecycle
-	Status            JITAccessRequestStatus `json:"status"`
-	ApprovalWorkflow  string                 `json:"approval_workflow"`
-	ApprovedBy        string                 `json:"approved_by,omitempty"`
-	ApprovedAt        *time.Time             `json:"approved_at,omitempty"`
-	ApprovalReason    string                 `json:"approval_reason,omitempty"`
-	ReviewedBy        string                 `json:"reviewed_by,omitempty"`
-	ReviewedAt        *time.Time             `json:"reviewed_at,omitempty"`
-	DenialReason      string                 `json:"denial_reason,omitempty"`
-	
+	Status           JITAccessRequestStatus `json:"status"`
+	ApprovalWorkflow string                 `json:"approval_workflow"`
+	ApprovedBy       string                 `json:"approved_by,omitempty"`
+	ApprovedAt       *time.Time             `json:"approved_at,omitempty"`
+	ApprovalReason   string                 `json:"approval_reason,omitempty"`
+	ReviewedBy       string                 `json:"reviewed_by,omitempty"`
+	ReviewedAt       *time.Time             `json:"reviewed_at,omitempty"`
+	DenialReason     string                 `json:"denial_reason,omitempty"`
+
 	// Timestamps
-	CreatedAt         time.Time              `json:"created_at"`
-	ExpiresAt         time.Time              `json:"expires_at"`
-	RequestTTL        time.Time              `json:"request_ttl"`
-	
+	CreatedAt  time.Time `json:"created_at"`
+	ExpiresAt  time.Time `json:"expires_at"`
+	RequestTTL time.Time `json:"request_ttl"`
+
 	// Grant reference
-	GrantedAccess     *JITAccessGrant        `json:"granted_access,omitempty"`
+	GrantedAccess *JITAccessGrant `json:"granted_access,omitempty"`
 }
 
 // JITAccessGrant represents an active JIT access grant
 type JITAccessGrant struct {
-	ID                 string                     `json:"id"`
-	RequestID          string                     `json:"request_id"`
-	RequesterID        string                     `json:"requester_id"`
-	TargetID           string                     `json:"target_id,omitempty"`
-	TenantID           string                     `json:"tenant_id"`
-	Permissions        []string                   `json:"permissions"`
-	Roles              []string                   `json:"roles"`
-	ResourceIDs        []string                   `json:"resource_ids,omitempty"`
-	
+	ID          string   `json:"id"`
+	RequestID   string   `json:"request_id"`
+	RequesterID string   `json:"requester_id"`
+	TargetID    string   `json:"target_id,omitempty"`
+	TenantID    string   `json:"tenant_id"`
+	Permissions []string `json:"permissions"`
+	Roles       []string `json:"roles"`
+	ResourceIDs []string `json:"resource_ids,omitempty"`
+
 	// Approval details
-	ApprovedBy         string                     `json:"approved_by"`
-	ApprovalReason     string                     `json:"approval_reason"`
-	GrantedAt          time.Time                  `json:"granted_at"`
-	ExpiresAt          time.Time                  `json:"expires_at"`
-	
+	ApprovedBy     string    `json:"approved_by"`
+	ApprovalReason string    `json:"approval_reason"`
+	GrantedAt      time.Time `json:"granted_at"`
+	ExpiresAt      time.Time `json:"expires_at"`
+
 	// Status and lifecycle
-	Status             JITAccessGrantStatus       `json:"status"`
-	ActivatedAt        *time.Time                 `json:"activated_at,omitempty"`
-	DeactivatedAt      *time.Time                 `json:"deactivated_at,omitempty"`
-	RevokedAt          *time.Time                 `json:"revoked_at,omitempty"`
-	RevokedBy          string                     `json:"revoked_by,omitempty"`
-	RevocationReason   string                     `json:"revocation_reason,omitempty"`
-	
+	Status           JITAccessGrantStatus `json:"status"`
+	ActivatedAt      *time.Time           `json:"activated_at,omitempty"`
+	DeactivatedAt    *time.Time           `json:"deactivated_at,omitempty"`
+	RevokedAt        *time.Time           `json:"revoked_at,omitempty"`
+	RevokedBy        string               `json:"revoked_by,omitempty"`
+	RevocationReason string               `json:"revocation_reason,omitempty"`
+
 	// Extensions
-	MaxExtensions      int                        `json:"max_extensions"`
-	ExtensionsUsed     int                        `json:"extensions_used"`
-	LastExtensionAt    *time.Time                 `json:"last_extension_at,omitempty"`
-	LastExtensionBy    string                     `json:"last_extension_by,omitempty"`
-	ExtensionReasons   []ExtensionRecord          `json:"extension_reasons,omitempty"`
-	
+	MaxExtensions    int               `json:"max_extensions"`
+	ExtensionsUsed   int               `json:"extensions_used"`
+	LastExtensionAt  *time.Time        `json:"last_extension_at,omitempty"`
+	LastExtensionBy  string            `json:"last_extension_by,omitempty"`
+	ExtensionReasons []ExtensionRecord `json:"extension_reasons,omitempty"`
+
 	// Activation/Deactivation
-	ActivationMethod   ActivationMethod           `json:"activation_method"`
-	DeactivationMethod DeactivationMethod         `json:"deactivation_method"`
-	
+	ActivationMethod   ActivationMethod   `json:"activation_method"`
+	DeactivationMethod DeactivationMethod `json:"deactivation_method"`
+
 	// Conditions and constraints
-	Conditions         []AccessCondition          `json:"conditions,omitempty"`
-	
+	Conditions []AccessCondition `json:"conditions,omitempty"`
+
 	// RBAC integration
-	DelegationID       string                     `json:"delegation_id,omitempty"`
-	TemporaryRoleAssignments []string             `json:"temporary_role_assignments,omitempty"`
+	DelegationID             string   `json:"delegation_id,omitempty"`
+	TemporaryRoleAssignments []string `json:"temporary_role_assignments,omitempty"`
 }
 
 // ExtensionRecord tracks access grant extensions
@@ -120,12 +120,12 @@ type AccessCondition struct {
 
 // ApprovalWorkflow defines the approval process for JIT access requests
 type ApprovalWorkflow struct {
-	ID              string          `json:"id"`
-	Name            string          `json:"name"`
-	Description     string          `json:"description,omitempty"`
-	Type            ApprovalType    `json:"type"`
-	Approvers       []ApprovalStage `json:"approvers"`
-	TimeoutHours    float64         `json:"timeout_hours,omitempty"`
+	ID              string           `json:"id"`
+	Name            string           `json:"name"`
+	Description     string           `json:"description,omitempty"`
+	Type            ApprovalType     `json:"type"`
+	Approvers       []ApprovalStage  `json:"approvers"`
+	TimeoutHours    float64          `json:"timeout_hours,omitempty"`
 	EscalationRules []EscalationRule `json:"escalation_rules,omitempty"`
 }
 
@@ -134,7 +134,7 @@ type ApprovalStage struct {
 	ID           string            `json:"id"`
 	Name         string            `json:"name,omitempty"`
 	Type         ApprovalStageType `json:"type"`
-	Approvers    []string          `json:"approvers"`    // User IDs or role names
+	Approvers    []string          `json:"approvers"` // User IDs or role names
 	MinApprovals int               `json:"min_approvals"`
 	TimeoutHours float64           `json:"timeout_hours"`
 	Conditions   map[string]string `json:"conditions,omitempty"`
@@ -142,17 +142,17 @@ type ApprovalStage struct {
 
 // EscalationRule defines escalation behavior for approval workflows
 type EscalationRule struct {
-	TriggerCondition string        `json:"trigger_condition"`
-	DelayHours       float64       `json:"delay_hours"`
-	EscalateTo       []string      `json:"escalate_to"`
-	Action           string        `json:"action"`
+	TriggerCondition string   `json:"trigger_condition"`
+	DelayHours       float64  `json:"delay_hours"`
+	EscalateTo       []string `json:"escalate_to"`
+	Action           string   `json:"action"`
 }
 
 // JITAccessRequestFilter for filtering access requests
 type JITAccessRequestFilter struct {
-	RequesterID string `json:"requester_id,omitempty"`
-	TenantID    string `json:"tenant_id,omitempty"`
-	Status      string `json:"status,omitempty"`
+	RequesterID string     `json:"requester_id,omitempty"`
+	TenantID    string     `json:"tenant_id,omitempty"`
+	Status      string     `json:"status,omitempty"`
 	DateFrom    *time.Time `json:"date_from,omitempty"`
 	DateTo      *time.Time `json:"date_to,omitempty"`
 }
@@ -230,12 +230,12 @@ const (
 type ConditionType string
 
 const (
-	ConditionTypeTimeWindow     ConditionType = "time_window"     // Access limited to time window
-	ConditionTypeIPRestriction  ConditionType = "ip_restriction"  // IP-based restrictions
-	ConditionTypeLocationLimit  ConditionType = "location_limit"  // Geographic restrictions
-	ConditionTypeMFARequired    ConditionType = "mfa_required"    // MFA required for access
-	ConditionTypeAuditEnhanced  ConditionType = "audit_enhanced"  // Enhanced audit logging
-	ConditionTypeResourceScope  ConditionType = "resource_scope"  // Limited to specific resources
+	ConditionTypeTimeWindow      ConditionType = "time_window"      // Access limited to time window
+	ConditionTypeIPRestriction   ConditionType = "ip_restriction"   // IP-based restrictions
+	ConditionTypeLocationLimit   ConditionType = "location_limit"   // Geographic restrictions
+	ConditionTypeMFARequired     ConditionType = "mfa_required"     // MFA required for access
+	ConditionTypeAuditEnhanced   ConditionType = "audit_enhanced"   // Enhanced audit logging
+	ConditionTypeResourceScope   ConditionType = "resource_scope"   // Limited to specific resources
 	ConditionTypeEmergencyAccess ConditionType = "emergency_access" // Emergency access controls
-	ConditionTypeFailsafeMode   ConditionType = "failsafe_mode"   // Failsafe mode restrictions
+	ConditionTypeFailsafeMode    ConditionType = "failsafe_mode"    // Failsafe mode restrictions
 )

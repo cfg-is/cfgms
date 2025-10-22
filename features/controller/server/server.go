@@ -447,7 +447,7 @@ func (s *Server) Start() error {
 	s.logger.Info("Controller server started (MQTT+QUIC mode)",
 		"ha_mode", s.haManager.GetDeploymentMode().String(),
 		"is_leader", s.haManager.IsLeader())
-	
+
 	// Record system startup audit event
 	if s.auditManager != nil {
 		ctx := context.Background()
@@ -456,7 +456,7 @@ func (s *Server) Start() error {
 			s.logger.Warn("Failed to record startup audit event", "error", err)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -1087,7 +1087,6 @@ func handleDNASyncStream(ctx context.Context, session *quicServer.Session, strea
 	return nil
 }
 
-
 // handleDNAUpdate processes DNA update messages from stewards via MQTT.
 func (s *Server) handleDNAUpdate(topic string, payload []byte, qos byte, retained bool) error {
 	var dnaUpdate mqttTypes.DNAUpdate
@@ -1239,4 +1238,3 @@ func (s *Server) sendValidationResponse(stewardID string, requestID string, resp
 
 	return nil
 }
-

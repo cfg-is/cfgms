@@ -61,13 +61,13 @@ func TestControllerLifecycle(t *testing.T) {
 	// Verify start logged properly - certificate management and REST API adds extra logs
 	infoLogs := logger.GetLogs("info")
 	assert.GreaterOrEqual(t, len(infoLogs), 8)
-	
+
 	// Convert logs to messages for easier checking
 	messages := make([]string, len(infoLogs))
 	for i, log := range infoLogs {
 		messages[i] = log.Message
 	}
-	
+
 	// Verify required messages are present (order may vary based on certificate state)
 	assert.Contains(t, messages, "Loaded existing Certificate Authority")
 	// M-AUTH-1: No longer generating default API keys (security anti-pattern removed)
@@ -75,7 +75,7 @@ func TestControllerLifecycle(t *testing.T) {
 	assert.Contains(t, messages, "Controller server started (MQTT+QUIC mode)")
 	assert.Contains(t, messages, "REST API server started")
 	assert.Contains(t, messages, "Controller started successfully")
-	
+
 	// Certificate message can be either "Using existing" or "Generating new" depending on environment
 	// With gRPC removed, we only check for HTTP server certificates
 	httpCertificateFound := false
@@ -93,19 +93,19 @@ func TestControllerLifecycle(t *testing.T) {
 	// Verify stop logged properly - check that required messages exist
 	infoLogs = logger.GetLogs("info")
 	assert.GreaterOrEqual(t, len(infoLogs), 10)
-	
+
 	// Update messages slice with all current logs
 	messages = make([]string, len(infoLogs))
 	for i, log := range infoLogs {
 		messages[i] = log.Message
 	}
-	
+
 	// Verify required startup messages are present
 	assert.Contains(t, messages, "Starting controller")
 	assert.Contains(t, messages, "Controller server started (MQTT+QUIC mode)")
 	assert.Contains(t, messages, "REST API server started")
 	assert.Contains(t, messages, "Controller started successfully")
-	
+
 	// Verify required shutdown messages are present
 	assert.Contains(t, messages, "Stopping controller")
 	assert.Contains(t, messages, "Shutting down REST API server")

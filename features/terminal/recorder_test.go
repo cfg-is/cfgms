@@ -125,11 +125,11 @@ func TestRecordingMetadata(t *testing.T) {
 
 	sessionID := "test-session-002"
 	metadata := &SessionMetadata{
-		SessionID:  sessionID,
-		StewardID:  "test-steward-001",
-		UserID:     "test-user",
-		Shell:      "bash",
-		CreatedAt:  time.Now(),
+		SessionID: sessionID,
+		StewardID: "test-steward-001",
+		UserID:    "test-user",
+		Shell:     "bash",
+		CreatedAt: time.Now(),
 		Environment: map[string]string{
 			"TERM": "xterm-256color",
 			"PATH": "/usr/bin:/bin",
@@ -187,10 +187,10 @@ func TestRecordingCompression(t *testing.T) {
 			recorder, err := NewSessionRecorder(config, logger)
 			require.NoError(t, err)
 			defer func() {
-		if err := recorder.Close(); err != nil {
-			t.Logf("Failed to close recorder: %v", err)
-		}
-	}()
+				if err := recorder.Close(); err != nil {
+					t.Logf("Failed to close recorder: %v", err)
+				}
+			}()
 
 			sessionID := "test-session-compression"
 
@@ -215,7 +215,7 @@ func TestRecordingCompression(t *testing.T) {
 
 			// Just verify we can read the data back regardless of compression
 			assert.True(t, len(recording.Data) > 0, "Recording should contain data")
-			
+
 			// For now, just verify the compression config was applied
 			// Full compression testing would require more complex file analysis
 			if tt.compression {

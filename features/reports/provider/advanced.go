@@ -13,14 +13,14 @@ import (
 	"github.com/cfgis/cfgms/features/steward/dna/drift"
 	"github.com/cfgis/cfgms/features/steward/dna/storage"
 	"github.com/cfgis/cfgms/pkg/audit"
-	storageInterfaces "github.com/cfgis/cfgms/pkg/storage/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging"
+	storageInterfaces "github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
 // AdvancedProvider implements AdvancedDataProvider interface
 type AdvancedProvider struct {
-	*DataProvider                 // Embed existing DNA provider
-	auditManager  *audit.Manager  // Audit system integration
+	*DataProvider                              // Embed existing DNA provider
+	auditManager  *audit.Manager               // Audit system integration
 	auditStore    storageInterfaces.AuditStore // Direct audit store access for advanced queries
 	logger        logging.Logger
 }
@@ -371,7 +371,7 @@ func (p *AdvancedProvider) calculateGeneralComplianceScore(
 	failedAuditCount := 0
 	for _, entry := range auditEntries {
 		if entry.Result == storageInterfaces.AuditResultError ||
-		   entry.Result == storageInterfaces.AuditResultFailure {
+			entry.Result == storageInterfaces.AuditResultFailure {
 			failedAuditCount++
 		}
 	}
@@ -454,7 +454,7 @@ func (p *AdvancedProvider) findComplianceViolations(
 	// Find violations based on failed audit entries
 	for _, entry := range auditEntries {
 		if entry.Result == storageInterfaces.AuditResultError ||
-		   entry.Result == storageInterfaces.AuditResultFailure {
+			entry.Result == storageInterfaces.AuditResultFailure {
 			violation := interfaces.ComplianceViolation{
 				ControlID:   "CTRL-002", // Would map to specific control
 				DeviceID:    entry.ResourceID,
@@ -508,7 +508,7 @@ func (p *AdvancedProvider) calculateDailyComplianceScore(entries []storageInterf
 	failedCount := 0
 	for _, entry := range entries {
 		if entry.Result == storageInterfaces.AuditResultError ||
-		   entry.Result == storageInterfaces.AuditResultFailure {
+			entry.Result == storageInterfaces.AuditResultFailure {
 			failedCount++
 		}
 	}
@@ -604,7 +604,7 @@ func (p *AdvancedProvider) aggregateUserActivities(auditEntries []storageInterfa
 
 		for _, entry := range userEntries {
 			if entry.Result == storageInterfaces.AuditResultError ||
-			   entry.Result == storageInterfaces.AuditResultFailure {
+				entry.Result == storageInterfaces.AuditResultFailure {
 				failureCount++
 			}
 
@@ -660,12 +660,12 @@ func (p *AdvancedProvider) calculateUserRiskScore(entries []storageInterfaces.Au
 
 	for _, entry := range entries {
 		if entry.Result == storageInterfaces.AuditResultError ||
-		   entry.Result == storageInterfaces.AuditResultFailure {
+			entry.Result == storageInterfaces.AuditResultFailure {
 			failureCount++
 		}
 
 		if entry.Severity == storageInterfaces.AuditSeverityHigh ||
-		   entry.Severity == storageInterfaces.AuditSeverityCritical {
+			entry.Severity == storageInterfaces.AuditSeverityCritical {
 			highSeverityCount++
 		}
 	}
@@ -901,7 +901,7 @@ func (p *AdvancedProvider) calculateFailureRate(entries []storageInterfaces.Audi
 	failureCount := 0
 	for _, entry := range entries {
 		if entry.Result == storageInterfaces.AuditResultError ||
-		   entry.Result == storageInterfaces.AuditResultFailure {
+			entry.Result == storageInterfaces.AuditResultFailure {
 			failureCount++
 		}
 	}
@@ -913,8 +913,8 @@ func (p *AdvancedProvider) countSecurityEvents(entries []storageInterfaces.Audit
 	count := 0
 	for _, entry := range entries {
 		if entry.EventType == storageInterfaces.AuditEventAuthentication ||
-		   entry.EventType == storageInterfaces.AuditEventAuthorization ||
-		   entry.EventType == storageInterfaces.AuditEventSecurityEvent {
+			entry.EventType == storageInterfaces.AuditEventAuthorization ||
+			entry.EventType == storageInterfaces.AuditEventSecurityEvent {
 			count++
 		}
 	}
@@ -978,7 +978,7 @@ func (p *AdvancedProvider) correlateAccessWithEvents(entries []storageInterfaces
 
 	for _, entry := range entries {
 		if entry.EventType == storageInterfaces.AuditEventSystemAccess ||
-		   entry.EventType == storageInterfaces.AuditEventAuthentication {
+			entry.EventType == storageInterfaces.AuditEventAuthentication {
 			accessEvents++
 		} else {
 			systemEvents++
@@ -998,7 +998,7 @@ func (p *AdvancedProvider) correlateFailuresWithDrift(entries []storageInterface
 	failures := 0
 	for _, entry := range entries {
 		if entry.Result == storageInterfaces.AuditResultError ||
-		   entry.Result == storageInterfaces.AuditResultFailure {
+			entry.Result == storageInterfaces.AuditResultFailure {
 			failures++
 		}
 	}
@@ -1022,11 +1022,11 @@ func (p *AdvancedProvider) calculateSecurityScore(entries []storageInterfaces.Au
 
 	for _, entry := range entries {
 		if entry.EventType == storageInterfaces.AuditEventAuthentication ||
-		   entry.EventType == storageInterfaces.AuditEventAuthorization ||
-		   entry.EventType == storageInterfaces.AuditEventSecurityEvent {
+			entry.EventType == storageInterfaces.AuditEventAuthorization ||
+			entry.EventType == storageInterfaces.AuditEventSecurityEvent {
 			securityEvents++
 			if entry.Result == storageInterfaces.AuditResultError ||
-			   entry.Result == storageInterfaces.AuditResultFailure {
+				entry.Result == storageInterfaces.AuditResultFailure {
 				failedSecurityEvents++
 			}
 		}
@@ -1121,7 +1121,7 @@ func (p *AdvancedProvider) countFailedAudits(entries []storageInterfaces.AuditEn
 	count := 0
 	for _, entry := range entries {
 		if entry.Result == storageInterfaces.AuditResultError ||
-		   entry.Result == storageInterfaces.AuditResultFailure {
+			entry.Result == storageInterfaces.AuditResultFailure {
 			count++
 		}
 	}

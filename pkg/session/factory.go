@@ -23,15 +23,15 @@ func NewSessionManagerWithGlobalStorage(storageManager *interfaces.StorageManage
 	// Epic 6 Compliance: Blindly use the global storage provider
 	// The session manager has NO knowledge of which provider it is using
 	globalRuntimeStore := storageManager.GetRuntimeStore()
-	
+
 	// Create shared cache for ephemeral sessions (always needed for performance)
 	// Epic 6 Compliance: No external memory provider dependency
 	cacheConfig := cache.CacheConfig{
-		Name:              "session-ephemeral",
-		MaxSessions:       10000,  // Large limit for production use
-		MaxRuntimeItems:   5000,   // Reasonable limit for runtime state
-		DefaultTTL:        2 * time.Hour,  // Default session timeout
-		CleanupInterval:   5 * time.Minute,  // Regular cleanup
+		Name:            "session-ephemeral",
+		MaxSessions:     10000,           // Large limit for production use
+		MaxRuntimeItems: 5000,            // Reasonable limit for runtime state
+		DefaultTTL:      2 * time.Hour,   // Default session timeout
+		CleanupInterval: 5 * time.Minute, // Regular cleanup
 	}
 	ephemeralStore := cache.NewRuntimeCache(cacheConfig)
 
@@ -59,7 +59,7 @@ func NewSessionManagerWithStorage(config *SessionManagerConfig, logger logging.L
 
 	// Create ephemeral store (required)
 	ephemeralStore, err := interfaces.CreateRuntimeStoreFromConfig(
-		config.EphemeralProviderName, 
+		config.EphemeralProviderName,
 		config.StorageConfig,
 	)
 	if err != nil {
@@ -74,8 +74,8 @@ func NewSessionManagerWithStorage(config *SessionManagerConfig, logger logging.L
 			config.StorageConfig,
 		)
 		if err != nil {
-			logger.Warn("Failed to create persistent store, continuing with ephemeral only", 
-				"provider", config.PersistentProviderName, 
+			logger.Warn("Failed to create persistent store, continuing with ephemeral only",
+				"provider", config.PersistentProviderName,
 				"error", err)
 		}
 	}
@@ -105,12 +105,12 @@ func NewProductionSessionManager(databaseConfig map[string]interface{}, config *
 // Allows full control over which providers to use for ephemeral vs persistent storage
 func NewHybridSessionManager(
 	ephemeralProvider string,
-	persistentProvider string, 
-	storageConfig map[string]interface{}, 
-	config *Config, 
+	persistentProvider string,
+	storageConfig map[string]interface{},
+	config *Config,
 	logger logging.Logger,
 ) (SessionManager, error) {
-	
+
 	sessionManagerConfig := &SessionManagerConfig{
 		EphemeralProviderName:  ephemeralProvider,
 		PersistentProviderName: persistentProvider,
@@ -196,7 +196,7 @@ func ExampleControllerIntegration(storageManager *interfaces.StorageManager, log
 	config := DefaultConfig()
 	config.MaxSessions = 10000
 	config.DefaultSessionTimeout = 1 * time.Hour
-	
+
 	return NewSessionManagerWithGlobalStorage(storageManager, config, logger)
 }
 
@@ -208,14 +208,14 @@ func ExampleDevelopmentSetup(storageManager *interfaces.StorageManager, logger l
 	return NewSessionManagerWithGlobalStorage(storageManager, DefaultConfig(), logger)
 }
 
-// ExampleProductionSetup shows production setup using global storage (Epic 6 compliant)  
+// ExampleProductionSetup shows production setup using global storage (Epic 6 compliant)
 func ExampleProductionSetup(storageManager *interfaces.StorageManager, logger logging.Logger) (SessionManager, error) {
 	// Production: Uses global storage provider (typically database)
 	config := DefaultConfig()
-	config.MaxSessions = 50000         // High limit for production
-	config.DefaultSessionTimeout = 2 * time.Hour  // Longer sessions
-	config.CleanupInterval = 1 * time.Minute      // Frequent cleanup
-	
+	config.MaxSessions = 50000                   // High limit for production
+	config.DefaultSessionTimeout = 2 * time.Hour // Longer sessions
+	config.CleanupInterval = 1 * time.Minute     // Frequent cleanup
+
 	// Epic 6 Compliance: Uses same provider as RBAC/Audit/Config
 	return NewSessionManagerWithGlobalStorage(storageManager, config, logger)
 }
@@ -227,4 +227,3 @@ func ExampleProductionSetup(storageManager *interfaces.StorageManager, logger lo
 func ExampleCustomSetup(logger logging.Logger) (SessionManager, error) {
 	return nil, fmt.Errorf("ExampleCustomSetup is deprecated: memory provider eliminated in Epic 6. Use ExampleControllerIntegration with global storage manager instead")
 }
-

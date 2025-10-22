@@ -12,20 +12,20 @@ type ModuleVersionRegistry interface {
 	// Version Registration
 	RegisterVersion(metadata *ModuleMetadata) error
 	UnregisterVersion(moduleName, version string) error
-	
+
 	// Version Discovery
 	GetAvailableVersions(moduleName string) ([]string, error)
 	GetLatestVersion(moduleName string) (*SemanticVersion, error)
 	GetCompatibleVersions(moduleName, constraint string) ([]string, error)
 	IsVersionInstalled(moduleName, version string) bool
-	
+
 	// Version Resolution
 	ResolveVersionConstraints(requirements []ModuleVersionRequirement) (*VersionResolution, error)
-	
+
 	// Version History
 	GetVersionHistory(moduleName string) (*ModuleVersionHistory, error)
 	RecordVersionTransition(moduleName, fromVersion, toVersion string, transitionType VersionTransitionType, metadata map[string]interface{}) error
-	
+
 	// Registry Status
 	GetRegistryStatus() *VersionRegistryStatus
 	ListAllVersions() map[string][]string
@@ -34,25 +34,25 @@ type ModuleVersionRegistry interface {
 // DefaultModuleVersionRegistry implements the ModuleVersionRegistry interface
 type DefaultModuleVersionRegistry struct {
 	mu sync.RWMutex
-	
+
 	// versions maps module names to their available versions
 	// Format: versions["module_name"]["1.2.3"] = *ModuleVersionInfo
 	versions map[string]map[string]*ModuleVersionInfo
-	
+
 	// history tracks version transitions for each module
 	history map[string]*ModuleVersionHistory
-	
+
 	// activeVersions tracks which version is currently active for each module
 	activeVersions map[string]string
 }
 
 // ModuleVersionInfo contains comprehensive information about a specific module version
 type ModuleVersionInfo struct {
-	Metadata        *ModuleMetadata           `json:"metadata"`
-	SemanticVersion *SemanticVersion          `json:"semantic_version"`
-	InstallTime     time.Time                 `json:"install_time"`
-	Status          ModuleVersionStatus       `json:"status"`
-	Compatibility   *VersionCompatibilityInfo `json:"compatibility,omitempty"`
+	Metadata        *ModuleMetadata            `json:"metadata"`
+	SemanticVersion *SemanticVersion           `json:"semantic_version"`
+	InstallTime     time.Time                  `json:"install_time"`
+	Status          ModuleVersionStatus        `json:"status"`
+	Compatibility   *VersionCompatibilityInfo  `json:"compatibility,omitempty"`
 	Dependencies    []ModuleVersionRequirement `json:"dependencies"`
 	Dependents      []string                   `json:"dependents"` // Modules that depend on this version
 }
@@ -87,58 +87,57 @@ func (s ModuleVersionStatus) String() string {
 
 // VersionCompatibilityInfo tracks compatibility between module versions
 type VersionCompatibilityInfo struct {
-	BackwardsCompatible []string                `json:"backwards_compatible"`
-	ForwardsCompatible  []string                `json:"forwards_compatible"`
-	BreakingChanges     []BreakingChange        `json:"breaking_changes"`
-	APIChanges          []APIChange             `json:"api_changes"`
-	MigrationRequired   bool                    `json:"migration_required"`
+	BackwardsCompatible []string                   `json:"backwards_compatible"`
+	ForwardsCompatible  []string                   `json:"forwards_compatible"`
+	BreakingChanges     []BreakingChange           `json:"breaking_changes"`
+	APIChanges          []APIChange                `json:"api_changes"`
+	MigrationRequired   bool                       `json:"migration_required"`
 	MigrationComplexity VersionMigrationComplexity `json:"migration_complexity"`
 }
 
-
 // ModuleVersionRequirement represents a requirement for a specific module version
 type ModuleVersionRequirement struct {
-	ModuleName    string `json:"module_name"`
-	Constraint    string `json:"constraint"`
-	Optional      bool   `json:"optional"`
-	Reason        string `json:"reason,omitempty"`
+	ModuleName string `json:"module_name"`
+	Constraint string `json:"constraint"`
+	Optional   bool   `json:"optional"`
+	Reason     string `json:"reason,omitempty"`
 }
 
 // VersionResolution contains the result of version constraint resolution
 type VersionResolution struct {
-	Resolved          map[string]string          `json:"resolved"` // module_name -> selected_version
-	Conflicts         []VersionConflict          `json:"conflicts"`
-	Warnings          []string                   `json:"warnings"`
-	ResolutionPath    []ResolutionStep           `json:"resolution_path"`
-	TotalModules      int                        `json:"total_modules"`
-	ResolutionTime    time.Duration              `json:"resolution_time"`
+	Resolved       map[string]string `json:"resolved"` // module_name -> selected_version
+	Conflicts      []VersionConflict `json:"conflicts"`
+	Warnings       []string          `json:"warnings"`
+	ResolutionPath []ResolutionStep  `json:"resolution_path"`
+	TotalModules   int               `json:"total_modules"`
+	ResolutionTime time.Duration     `json:"resolution_time"`
 }
 
 // VersionConflict represents a conflict during version resolution
 type VersionConflict struct {
-	ModuleName      string   `json:"module_name"`
-	Constraints     []string `json:"constraints"`
-	RequestedBy     []string `json:"requested_by"`
-	ConflictReason  string   `json:"conflict_reason"`
-	Suggestions     []string `json:"suggestions"`
+	ModuleName     string   `json:"module_name"`
+	Constraints    []string `json:"constraints"`
+	RequestedBy    []string `json:"requested_by"`
+	ConflictReason string   `json:"conflict_reason"`
+	Suggestions    []string `json:"suggestions"`
 }
 
 // ResolutionStep tracks the steps taken during version resolution
 type ResolutionStep struct {
-	Step        int    `json:"step"`
-	ModuleName  string `json:"module_name"`
-	Constraint  string `json:"constraint"`
-	Selected    string `json:"selected"`
-	Reason      string `json:"reason"`
+	Step       int    `json:"step"`
+	ModuleName string `json:"module_name"`
+	Constraint string `json:"constraint"`
+	Selected   string `json:"selected"`
+	Reason     string `json:"reason"`
 }
 
 // ModuleVersionHistory tracks the version transition history for a module
 type ModuleVersionHistory struct {
-	ModuleName     string                 `json:"module_name"`
-	Transitions    []VersionTransition    `json:"transitions"`
-	CurrentVersion string                 `json:"current_version"`
-	CreatedAt      time.Time              `json:"created_at"`
-	UpdatedAt      time.Time              `json:"updated_at"`
+	ModuleName     string              `json:"module_name"`
+	Transitions    []VersionTransition `json:"transitions"`
+	CurrentVersion string              `json:"current_version"`
+	CreatedAt      time.Time           `json:"created_at"`
+	UpdatedAt      time.Time           `json:"updated_at"`
 }
 
 // VersionTransition records a single version transition
@@ -215,14 +214,14 @@ func (s TransitionStatus) String() string {
 
 // VersionRegistryStatus provides an overview of the version registry
 type VersionRegistryStatus struct {
-	TotalModules          int               `json:"total_modules"`
-	TotalVersions         int               `json:"total_versions"`
-	ActiveVersions        map[string]string `json:"active_versions"`
-	DeprecatedVersions    []string          `json:"deprecated_versions"`
-	PendingMigrations     []string          `json:"pending_migrations"`
-	ConflictingModules    []string          `json:"conflicting_modules"`
-	RegistryHealthScore   float64           `json:"registry_health_score"`
-	LastUpdate            time.Time         `json:"last_update"`
+	TotalModules        int               `json:"total_modules"`
+	TotalVersions       int               `json:"total_versions"`
+	ActiveVersions      map[string]string `json:"active_versions"`
+	DeprecatedVersions  []string          `json:"deprecated_versions"`
+	PendingMigrations   []string          `json:"pending_migrations"`
+	ConflictingModules  []string          `json:"conflicting_modules"`
+	RegistryHealthScore float64           `json:"registry_health_score"`
+	LastUpdate          time.Time         `json:"last_update"`
 }
 
 // NewDefaultModuleVersionRegistry creates a new version registry
@@ -340,7 +339,7 @@ func (r *DefaultModuleVersionRegistry) UnregisterVersion(moduleName, version str
 
 	// Check if any modules depend on this version
 	if len(versionInfo.Dependents) > 0 {
-		return fmt.Errorf("cannot unregister version %s of module %s: it is required by %v", 
+		return fmt.Errorf("cannot unregister version %s of module %s: it is required by %v",
 			version, moduleName, versionInfo.Dependents)
 	}
 
@@ -528,7 +527,7 @@ func (r *DefaultModuleVersionRegistry) GetRegistryStatus() *VersionRegistryStatu
 
 	totalVersions := 0
 	var deprecatedVersions []string
-	
+
 	for moduleName, moduleVersions := range r.versions {
 		totalVersions += len(moduleVersions)
 		for version, versionInfo := range moduleVersions {
@@ -539,14 +538,14 @@ func (r *DefaultModuleVersionRegistry) GetRegistryStatus() *VersionRegistryStatu
 	}
 
 	return &VersionRegistryStatus{
-		TotalModules:          len(r.versions),
-		TotalVersions:         totalVersions,
-		ActiveVersions:        r.copyActiveVersions(),
-		DeprecatedVersions:    deprecatedVersions,
-		PendingMigrations:     make([]string, 0), // TODO: implement migration tracking
-		ConflictingModules:    make([]string, 0), // TODO: implement conflict detection
-		RegistryHealthScore:   r.calculateHealthScore(),
-		LastUpdate:            time.Now(),
+		TotalModules:        len(r.versions),
+		TotalVersions:       totalVersions,
+		ActiveVersions:      r.copyActiveVersions(),
+		DeprecatedVersions:  deprecatedVersions,
+		PendingMigrations:   make([]string, 0), // TODO: implement migration tracking
+		ConflictingModules:  make([]string, 0), // TODO: implement conflict detection
+		RegistryHealthScore: r.calculateHealthScore(),
+		LastUpdate:          time.Now(),
 	}
 }
 
@@ -567,7 +566,7 @@ func (r *DefaultModuleVersionRegistry) ListAllVersions() map[string][]string {
 // ResolveVersionConstraints resolves version constraints for multiple modules
 func (r *DefaultModuleVersionRegistry) ResolveVersionConstraints(requirements []ModuleVersionRequirement) (*VersionResolution, error) {
 	startTime := time.Now()
-	
+
 	resolution := &VersionResolution{
 		Resolved:       make(map[string]string),
 		Conflicts:      make([]VersionConflict, 0),
@@ -655,7 +654,7 @@ func (r *DefaultModuleVersionRegistry) calculateHealthScore() float64 {
 		// Reduce score based on deprecated and failed versions
 		deprecatedRatio := float64(deprecatedVersions) / float64(totalVersions)
 		failedRatio := float64(failedVersions) / float64(totalVersions)
-		
+
 		healthScore -= (deprecatedRatio * 20) // Deprecated versions reduce score by up to 20%
 		healthScore -= (failedRatio * 30)     // Failed versions reduce score by up to 30%
 	}

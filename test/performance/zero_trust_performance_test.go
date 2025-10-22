@@ -17,8 +17,8 @@ import (
 func TestZeroTrustPolicyEvaluationPerformance(t *testing.T) {
 	// Set up zero-trust policy engine with performance-optimized configuration
 	config := &zerotrust.ZeroTrustConfig{
-		MaxEvaluationTime:        5 * time.Millisecond, // Strict requirement
-		CacheEnabled:             true,
+		MaxEvaluationTime:       5 * time.Millisecond, // Strict requirement
+		CacheEnabled:            true,
 		CacheTTL:                10 * time.Minute,
 		EnableMetrics:           true,
 		MetricsInterval:         1 * time.Second,
@@ -58,11 +58,11 @@ func TestZeroTrustPolicyEvaluationPerformance(t *testing.T) {
 
 		require.NoError(t, err)
 		assert.NotNil(t, response)
-		
+
 		// Validate <5ms requirement
-		assert.Less(t, duration, 5*time.Millisecond, 
+		assert.Less(t, duration, 5*time.Millisecond,
 			"Single request should complete in <5ms, took %v", duration)
-		
+
 		// Validate reported processing time
 		assert.Less(t, response.ProcessingTime, 5*time.Millisecond,
 			"Reported processing time should be <5ms, was %v", response.ProcessingTime)
@@ -72,7 +72,7 @@ func TestZeroTrustPolicyEvaluationPerformance(t *testing.T) {
 
 	t.Run("Batch Performance Testing", func(t *testing.T) {
 		batchSizes := []int{10, 50, 100}
-		
+
 		for _, batchSize := range batchSizes {
 			t.Run(fmt.Sprintf("Batch_%d", batchSize), func(t *testing.T) {
 				totalDuration := time.Duration(0)
@@ -101,7 +101,7 @@ func TestZeroTrustPolicyEvaluationPerformance(t *testing.T) {
 
 					assert.NotNil(t, response)
 					successCount++
-					
+
 					totalDuration += duration
 					if duration > maxDuration {
 						maxDuration = duration
@@ -113,7 +113,7 @@ func TestZeroTrustPolicyEvaluationPerformance(t *testing.T) {
 				}
 
 				avgDuration := totalDuration / time.Duration(successCount)
-				
+
 				// Validate batch performance metrics
 				assert.Equal(t, batchSize, successCount, "All requests should succeed")
 				assert.Less(t, avgDuration, 3*time.Millisecond,
@@ -143,7 +143,7 @@ func TestZeroTrustPolicyEvaluationPerformance(t *testing.T) {
 		startTime := time.Now()
 		response1, err := engine.EvaluateAccess(ctx, request)
 		firstDuration := time.Since(startTime)
-		
+
 		require.NoError(t, err)
 		assert.NotNil(t, response1)
 		assert.Less(t, firstDuration, 5*time.Millisecond)
@@ -152,7 +152,7 @@ func TestZeroTrustPolicyEvaluationPerformance(t *testing.T) {
 		startTime = time.Now()
 		response2, err := engine.EvaluateAccess(ctx, request)
 		secondDuration := time.Since(startTime)
-		
+
 		require.NoError(t, err)
 		assert.NotNil(t, response2)
 		assert.Less(t, secondDuration, 5*time.Millisecond)
@@ -198,7 +198,7 @@ func TestZeroTrustPolicyEvaluationPerformance(t *testing.T) {
 
 		for i := 0; i < concurrentRequests; i++ {
 			result := <-results
-			
+
 			if result.error != nil {
 				t.Logf("Concurrent request failed: %v", result.error)
 				continue
@@ -228,7 +228,7 @@ func TestZeroTrustPolicyEvaluationPerformance(t *testing.T) {
 		}
 
 		t.Logf("Concurrent performance: %d/%d success, avg=%v, max=%v",
-			successCount, concurrentRequests, 
+			successCount, concurrentRequests,
 			totalDuration/time.Duration(successCount), maxDuration)
 	})
 
@@ -236,7 +236,7 @@ func TestZeroTrustPolicyEvaluationPerformance(t *testing.T) {
 		// Sustained load testing
 		loadDuration := 5 * time.Second
 		requestInterval := 10 * time.Millisecond
-		
+
 		startTime := time.Now()
 		requestCount := 0
 		successCount := 0
@@ -259,7 +259,7 @@ func TestZeroTrustPolicyEvaluationPerformance(t *testing.T) {
 			reqDuration := time.Since(reqStartTime)
 
 			requestCount++
-			
+
 			if err == nil && response != nil {
 				successCount++
 				totalDuration += reqDuration
@@ -295,7 +295,7 @@ func TestZeroTrustPolicyEvaluationPerformance(t *testing.T) {
 	t.Run("Engine Statistics Validation", func(t *testing.T) {
 		// Get performance statistics from the engine
 		stats := engine.GetStats()
-		
+
 		// Validate that statistics are being tracked
 		assert.Greater(t, stats.TotalEvaluations, int64(0))
 		assert.GreaterOrEqual(t, stats.SuccessfulEvaluations, int64(0))
@@ -308,7 +308,7 @@ func TestZeroTrustPolicyEvaluationPerformance(t *testing.T) {
 			"Average evaluation time should be <5ms, was %v", stats.AverageEvaluationTime)
 
 		t.Logf("Engine statistics: total=%d, success=%d, failed=%d, avg=%v",
-			stats.TotalEvaluations, stats.SuccessfulEvaluations, 
+			stats.TotalEvaluations, stats.SuccessfulEvaluations,
 			stats.FailedEvaluations, stats.AverageEvaluationTime)
 	})
 }

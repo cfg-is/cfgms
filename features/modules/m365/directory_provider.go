@@ -21,15 +21,15 @@ import (
 // EntraIDDirectoryProvider implements the controller's directory.Provider interface
 // for Microsoft Entra ID (formerly Azure AD) operations.
 type EntraIDDirectoryProvider struct {
-	name            string
-	displayName     string
-	description     string
-	logger          logging.Logger
-	authProvider    auth.Provider
-	graphClient     graph.Client
-	connected       bool
-	config          *ProviderConfig
-	capabilities    directory.ProviderCapabilities
+	name         string
+	displayName  string
+	description  string
+	logger       logging.Logger
+	authProvider auth.Provider
+	graphClient  graph.Client
+	connected    bool
+	config       *ProviderConfig
+	capabilities directory.ProviderCapabilities
 }
 
 // ProviderConfig contains Entra ID specific configuration
@@ -56,10 +56,10 @@ func NewEntraIDDirectoryProvider(logger logging.Logger, authProvider auth.Provid
 			BulkOperations:       false, // Not yet implemented
 			RealTimeSync:         false, // Not yet implemented
 			CrossDirectoryOps:    true,
-			OUSupport:           false, // Entra ID doesn't have OUs
-			AdminUnitSupport:    true,  // Entra ID specific
+			OUSupport:            false, // Entra ID doesn't have OUs
+			AdminUnitSupport:     true,  // Entra ID specific
 			SupportedAuthMethods: []string{"oauth2", "client_credentials"},
-			MaxSearchResults:     999,  // Microsoft Graph default limit
+			MaxSearchResults:     999, // Microsoft Graph default limit
 			RateLimit: &directory.RateLimitInfo{
 				RequestsPerSecond: 10,
 				RequestsPerMinute: 600,

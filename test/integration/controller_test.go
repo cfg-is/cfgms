@@ -49,7 +49,7 @@ func (s *ControllerTestSuite) TestControllerStartStop() {
 	// Verify the controller logged shutdown
 	infoLogs = s.env.Logger.GetLogs("info")
 	s.Require().GreaterOrEqual(len(infoLogs), 3)
-	
+
 	// Find the "Stopping controller" message
 	found := false
 	for _, log := range infoLogs {

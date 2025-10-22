@@ -23,20 +23,20 @@ type PatternMatcherImpl struct {
 	regexCache map[string]*regexp.Regexp
 
 	// Statistics
-	matchCount    int64
-	processCount  int64
-	errorCount    int64
-	statsLock     sync.RWMutex
+	matchCount   int64
+	processCount int64
+	errorCount   int64
+	statsLock    sync.RWMutex
 }
 
 // CompiledPattern represents a compiled pattern for efficient matching
 type CompiledPattern struct {
 	*DetectionPattern
-	CompiledRegex   *regexp.Regexp
-	FieldMatchers   map[string]*regexp.Regexp
-	LastUsed        time.Time
-	MatchCount      int64
-	ProcessingTime  time.Duration
+	CompiledRegex  *regexp.Regexp
+	FieldMatchers  map[string]*regexp.Regexp
+	LastUsed       time.Time
+	MatchCount     int64
+	ProcessingTime time.Duration
 }
 
 // NewPatternMatcher creates a new pattern matcher with optimization features
@@ -410,23 +410,23 @@ func (pm *PatternMatcherImpl) GetStatistics() map[string]interface{} {
 	defer pm.mutex.RUnlock()
 
 	stats := map[string]interface{}{
-		"total_patterns":     len(pm.patterns),
-		"total_matches":      pm.matchCount,
-		"total_processed":    pm.processCount,
-		"total_errors":       pm.errorCount,
-		"pattern_details":    make(map[string]interface{}),
+		"total_patterns":  len(pm.patterns),
+		"total_matches":   pm.matchCount,
+		"total_processed": pm.processCount,
+		"total_errors":    pm.errorCount,
+		"pattern_details": make(map[string]interface{}),
 	}
 
 	// Add per-pattern statistics
 	patternDetails := make(map[string]interface{})
 	for id, pattern := range pm.patterns {
 		patternDetails[id] = map[string]interface{}{
-			"name":           pattern.Name,
-			"type":           pattern.PatternType,
-			"match_count":    pattern.MatchCount,
-			"last_used":      pattern.LastUsed,
+			"name":            pattern.Name,
+			"type":            pattern.PatternType,
+			"match_count":     pattern.MatchCount,
+			"last_used":       pattern.LastUsed,
 			"processing_time": pattern.ProcessingTime,
-			"enabled":        pattern.Enabled,
+			"enabled":         pattern.Enabled,
 		}
 	}
 	stats["pattern_details"] = patternDetails

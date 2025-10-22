@@ -4,9 +4,9 @@ import (
 	"os"
 	"strconv"
 	"time"
-	
+
 	"gopkg.in/yaml.v3"
-	
+
 	loggingPkg "github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -50,25 +50,25 @@ type Config struct {
 type CertificateConfig struct {
 	// Enable automated certificate management
 	EnableCertManagement bool `yaml:"enable_cert_management"`
-	
+
 	// Path to Certificate Authority storage
 	CAPath string `yaml:"ca_path"`
-	
+
 	// Automatically generate server certificates if missing
 	AutoGenerate bool `yaml:"auto_generate"`
-	
+
 	// Certificate renewal threshold in days
 	RenewalThresholdDays int `yaml:"renewal_threshold_days"`
-	
+
 	// Server certificate validity period in days
 	ServerCertValidityDays int `yaml:"server_cert_validity_days"`
-	
+
 	// Client certificate validity period in days for stewards
 	ClientCertValidityDays int `yaml:"client_cert_validity_days"`
-	
+
 	// Enable automatic certificate renewal
 	EnableAutoRenewal bool `yaml:"enable_auto_renewal"`
-	
+
 	// Server certificate configuration
 	Server *ServerCertificateConfig `yaml:"server"`
 }
@@ -77,13 +77,13 @@ type CertificateConfig struct {
 type ServerCertificateConfig struct {
 	// Common name for server certificate
 	CommonName string `yaml:"common_name"`
-	
+
 	// DNS names for Subject Alternative Names
 	DNSNames []string `yaml:"dns_names"`
-	
+
 	// IP addresses for Subject Alternative Names
 	IPAddresses []string `yaml:"ip_addresses"`
-	
+
 	// Organization name
 	Organization string `yaml:"organization"`
 }
@@ -92,7 +92,7 @@ type ServerCertificateConfig struct {
 type StorageConfig struct {
 	// Provider specifies which storage provider to use (database, git)
 	Provider string `yaml:"provider"`
-	
+
 	// Configuration options passed to the storage provider
 	// The structure depends on the specific provider being used
 	Config map[string]interface{} `yaml:"config"`
@@ -102,42 +102,42 @@ type StorageConfig struct {
 type LoggingConfig struct {
 	// Provider specifies which logging provider to use (file, timescale, clickhouse)
 	Provider string `yaml:"provider"`
-	
+
 	// Configuration options passed to the logging provider
 	// The structure depends on the specific provider being used
 	Config map[string]interface{} `yaml:"config"`
-	
+
 	// Global logging settings
-	Level         string `yaml:"level"`                       // Minimum log level (DEBUG, INFO, WARN, ERROR, FATAL)
-	ServiceName   string `yaml:"service_name"`               // Service identifier
-	Component     string `yaml:"component"`                  // Component identifier
-	
+	Level       string `yaml:"level"`        // Minimum log level (DEBUG, INFO, WARN, ERROR, FATAL)
+	ServiceName string `yaml:"service_name"` // Service identifier
+	Component   string `yaml:"component"`    // Component identifier
+
 	// Performance settings
-	BatchSize      int    `yaml:"batch_size"`                // Batch size for bulk writes
-	FlushInterval  string `yaml:"flush_interval"`            // Auto-flush interval (duration string)
-	AsyncWrites    bool   `yaml:"async_writes"`              // Enable asynchronous writes
-	BufferSize     int    `yaml:"buffer_size"`               // Internal buffer size
-	
+	BatchSize     int    `yaml:"batch_size"`     // Batch size for bulk writes
+	FlushInterval string `yaml:"flush_interval"` // Auto-flush interval (duration string)
+	AsyncWrites   bool   `yaml:"async_writes"`   // Enable asynchronous writes
+	BufferSize    int    `yaml:"buffer_size"`    // Internal buffer size
+
 	// Retention settings (provider-dependent)
-	RetentionDays  int  `yaml:"retention_days"`             // Log retention period
-	CompressLogs   bool `yaml:"compress_logs"`              // Enable log compression
-	
+	RetentionDays int  `yaml:"retention_days"` // Log retention period
+	CompressLogs  bool `yaml:"compress_logs"`  // Enable log compression
+
 	// Multi-tenant settings
-	TenantIsolation bool `yaml:"tenant_isolation"`          // Enable tenant isolation in logs
-	
+	TenantIsolation bool `yaml:"tenant_isolation"` // Enable tenant isolation in logs
+
 	// Enhanced correlation tracking
-	EnableCorrelation bool `yaml:"enable_correlation"`      // Enable automatic correlation IDs
-	EnableTracing     bool `yaml:"enable_tracing"`          // Enable OpenTelemetry integration
-	
+	EnableCorrelation bool `yaml:"enable_correlation"` // Enable automatic correlation IDs
+	EnableTracing     bool `yaml:"enable_tracing"`     // Enable OpenTelemetry integration
+
 	// Event subscriber configuration (optional)
-	Subscribers []SubscriberConfig `yaml:"subscribers"`     // Event subscribers for real-time forwarding
+	Subscribers []SubscriberConfig `yaml:"subscribers"` // Event subscribers for real-time forwarding
 }
 
 // SubscriberConfig holds configuration for event subscribers
 type SubscriberConfig struct {
-	Type    string                 `yaml:"type"`     // Subscriber type (e.g., "syslog", "webhook")
-	Config  map[string]interface{} `yaml:"config"`   // Subscriber-specific configuration
-	Enabled bool                  `yaml:"enabled"`  // Enable/disable subscriber
+	Type    string                 `yaml:"type"`    // Subscriber type (e.g., "syslog", "webhook")
+	Config  map[string]interface{} `yaml:"config"`  // Subscriber-specific configuration
+	Enabled bool                   `yaml:"enabled"` // Enable/disable subscriber
 }
 
 // HAConfig contains high availability configuration
@@ -176,12 +176,12 @@ type HANodeConfig struct {
 
 // HAClusterConfig contains cluster-wide HA configuration
 type HAClusterConfig struct {
-	ExpectedSize      int                    `yaml:"expected_size"`
-	MinQuorum         int                    `yaml:"min_quorum"`
-	ElectionTimeout   string                 `yaml:"election_timeout"`   // Duration string
-	HeartbeatInterval string                 `yaml:"heartbeat_interval"` // Duration string
-	Discovery         *HADiscoveryConfig     `yaml:"discovery"`
-	SessionSync       *HASessionSyncConfig   `yaml:"session_sync"`
+	ExpectedSize      int                  `yaml:"expected_size"`
+	MinQuorum         int                  `yaml:"min_quorum"`
+	ElectionTimeout   string               `yaml:"election_timeout"`   // Duration string
+	HeartbeatInterval string               `yaml:"heartbeat_interval"` // Duration string
+	Discovery         *HADiscoveryConfig   `yaml:"discovery"`
+	SessionSync       *HASessionSyncConfig `yaml:"session_sync"`
 }
 
 // HADiscoveryConfig contains node discovery configuration
@@ -202,8 +202,8 @@ type HASessionSyncConfig struct {
 
 // HAHealthCheckConfig contains health check configuration
 type HAHealthCheckConfig struct {
-	Interval         string `yaml:"interval"`          // Duration string
-	Timeout          string `yaml:"timeout"`           // Duration string
+	Interval         string `yaml:"interval"` // Duration string
+	Timeout          string `yaml:"timeout"`  // Duration string
 	FailureThreshold int    `yaml:"failure_threshold"`
 	SuccessThreshold int    `yaml:"success_threshold"`
 	EnableInternal   bool   `yaml:"enable_internal"`
@@ -213,17 +213,17 @@ type HAHealthCheckConfig struct {
 // HAFailoverConfig contains failover configuration
 type HAFailoverConfig struct {
 	Enabled             bool   `yaml:"enabled"`
-	Timeout             string `yaml:"timeout"`              // Duration string
-	MaxDuration         string `yaml:"max_duration"`         // Duration string
-	GracePeriod         string `yaml:"grace_period"`         // Duration string
+	Timeout             string `yaml:"timeout"`      // Duration string
+	MaxDuration         string `yaml:"max_duration"` // Duration string
+	GracePeriod         string `yaml:"grace_period"` // Duration string
 	MaxSessionMigration int    `yaml:"max_session_migration"`
 }
 
 // HALoadBalancingConfig contains load balancing configuration
 type HALoadBalancingConfig struct {
-	Strategy        string                      `yaml:"strategy"`
-	HealthBased     *HAHealthBasedConfig        `yaml:"health_based"`
-	ConnectionBased *HAConnectionBasedConfig    `yaml:"connection_based"`
+	Strategy        string                   `yaml:"strategy"`
+	HealthBased     *HAHealthBasedConfig     `yaml:"health_based"`
+	ConnectionBased *HAConnectionBasedConfig `yaml:"connection_based"`
 }
 
 // HAHealthBasedConfig contains health-based load balancing configuration
@@ -241,8 +241,8 @@ type HAConnectionBasedConfig struct {
 // HASplitBrainConfig contains split-brain prevention configuration
 type HASplitBrainConfig struct {
 	Enabled            bool   `yaml:"enabled"`
-	DetectionInterval  string `yaml:"detection_interval"`  // Duration string
-	QuorumInterval     string `yaml:"quorum_interval"`     // Duration string
+	DetectionInterval  string `yaml:"detection_interval"` // Duration string
+	QuorumInterval     string `yaml:"quorum_interval"`    // Duration string
 	ResolutionStrategy string `yaml:"resolution_strategy"`
 }
 
@@ -319,12 +319,12 @@ func DefaultConfig() *Config {
 		LogLevel:    "info",
 		Certificate: &CertificateConfig{
 			EnableCertManagement:   true,
-			CAPath:                "certs/ca",
-			AutoGenerate:          true,
-			RenewalThresholdDays:  30,
+			CAPath:                 "certs/ca",
+			AutoGenerate:           true,
+			RenewalThresholdDays:   30,
 			ServerCertValidityDays: 365,
 			ClientCertValidityDays: 365,
-			EnableAutoRenewal:     true,
+			EnableAutoRenewal:      true,
 			Server: &ServerCertificateConfig{
 				CommonName:   "cfgms-controller",
 				DNSNames:     []string{"localhost", "cfgms-controller"},
@@ -341,7 +341,7 @@ func DefaultConfig() *Config {
 			},
 		},
 		Logging: &LoggingConfig{
-			Provider:          "file", // Default to file-based time-series logging
+			Provider: "file", // Default to file-based time-series logging
 			Config: map[string]interface{}{
 				"directory":        "/var/log/cfgms",
 				"file_prefix":      "cfgms",
@@ -424,18 +424,18 @@ func DefaultConfig() *Config {
 			Enabled:               true, // Core communication channel - enabled by default
 			ListenAddr:            "0.0.0.0:1883",
 			EnableTLS:             true,
-			UseCertManager:        true,  // Use controller's certificate manager
-			RequireClientCert:     true,  // mTLS for security
+			UseCertManager:        true, // Use controller's certificate manager
+			RequireClientCert:     true, // mTLS for security
 			MaxClients:            10000,
 			MaxMessageSize:        1024 * 1024, // 1MB
 			SessionExpiryInterval: 3600,        // 1 hour
 			KeepaliveMultiplier:   1.5,         // Disconnect if no activity for keepalive * 1.5
 		},
 		QUIC: &QUICConfig{
-			Enabled:        true,  // Core data plane - enabled by default (Story #198)
+			Enabled:        true, // Core data plane - enabled by default (Story #198)
 			ListenAddr:     "0.0.0.0:4433",
-			UseCertManager: true,  // Use controller's certificate manager
-			SessionTimeout: 300,   // 5 minutes
+			UseCertManager: true, // Use controller's certificate manager
+			SessionTimeout: 300,  // 5 minutes
 		},
 	}
 }
@@ -443,19 +443,19 @@ func DefaultConfig() *Config {
 // Load loads the configuration from file and environment variables
 func Load() (*Config, error) {
 	cfg := DefaultConfig()
-	
+
 	// Try to load from config file if it exists
 	if _, err := os.Stat("config.yaml"); err == nil {
 		data, err := os.ReadFile("config.yaml")
 		if err != nil {
 			return nil, err
 		}
-		
+
 		if err := yaml.Unmarshal(data, cfg); err != nil {
 			return nil, err
 		}
 	}
-	
+
 	// Override with environment variables if set
 	if addr := os.Getenv("CFGMS_LISTEN_ADDR"); addr != "" {
 		cfg.ListenAddr = addr
@@ -468,64 +468,64 @@ func Load() (*Config, error) {
 	if certPath := os.Getenv("CFGMS_CERT_PATH"); certPath != "" {
 		cfg.CertPath = certPath
 	}
-	
+
 	if dataDir := os.Getenv("CFGMS_DATA_DIR"); dataDir != "" {
 		cfg.DataDir = dataDir
 	}
-	
+
 	if logLevel := os.Getenv("CFGMS_LOG_LEVEL"); logLevel != "" {
 		cfg.LogLevel = logLevel
 	}
-	
+
 	// Certificate management environment variables
 	if enableCertMgmt := os.Getenv("CFGMS_CERT_ENABLE_MANAGEMENT"); enableCertMgmt != "" {
 		if val, err := strconv.ParseBool(enableCertMgmt); err == nil {
 			cfg.Certificate.EnableCertManagement = val
 		}
 	}
-	
+
 	if caPath := os.Getenv("CFGMS_CERT_CA_PATH"); caPath != "" {
 		cfg.Certificate.CAPath = caPath
 	}
-	
+
 	if autoGen := os.Getenv("CFGMS_CERT_AUTO_GENERATE"); autoGen != "" {
 		if val, err := strconv.ParseBool(autoGen); err == nil {
 			cfg.Certificate.AutoGenerate = val
 		}
 	}
-	
+
 	if renewalThreshold := os.Getenv("CFGMS_CERT_RENEWAL_THRESHOLD_DAYS"); renewalThreshold != "" {
 		if val, err := strconv.Atoi(renewalThreshold); err == nil {
 			cfg.Certificate.RenewalThresholdDays = val
 		}
 	}
-	
+
 	if serverValidity := os.Getenv("CFGMS_CERT_SERVER_VALIDITY_DAYS"); serverValidity != "" {
 		if val, err := strconv.Atoi(serverValidity); err == nil {
 			cfg.Certificate.ServerCertValidityDays = val
 		}
 	}
-	
+
 	if clientValidity := os.Getenv("CFGMS_CERT_CLIENT_VALIDITY_DAYS"); clientValidity != "" {
 		if val, err := strconv.Atoi(clientValidity); err == nil {
 			cfg.Certificate.ClientCertValidityDays = val
 		}
 	}
-	
+
 	if enableAutoRenewal := os.Getenv("CFGMS_CERT_ENABLE_AUTO_RENEWAL"); enableAutoRenewal != "" {
 		if val, err := strconv.ParseBool(enableAutoRenewal); err == nil {
 			cfg.Certificate.EnableAutoRenewal = val
 		}
 	}
-	
+
 	if serverCommonName := os.Getenv("CFGMS_CERT_SERVER_COMMON_NAME"); serverCommonName != "" {
 		cfg.Certificate.Server.CommonName = serverCommonName
 	}
-	
+
 	if serverOrg := os.Getenv("CFGMS_CERT_SERVER_ORGANIZATION"); serverOrg != "" {
 		cfg.Certificate.Server.Organization = serverOrg
 	}
-	
+
 	// Storage configuration environment variables
 	if storageProvider := os.Getenv("CFGMS_STORAGE_PROVIDER"); storageProvider != "" {
 		cfg.Storage.Provider = storageProvider
@@ -602,20 +602,20 @@ func Load() (*Config, error) {
 			}
 		}
 	}
-	
+
 	// Logging configuration environment variables
 	if loggingProvider := os.Getenv("CFGMS_LOGGING_PROVIDER"); loggingProvider != "" {
 		cfg.Logging.Provider = loggingProvider
 	}
-	
+
 	if logLevel := os.Getenv("CFGMS_LOG_LEVEL"); logLevel != "" {
 		cfg.Logging.Level = logLevel
 	}
-	
+
 	if serviceName := os.Getenv("CFGMS_LOGGING_SERVICE_NAME"); serviceName != "" {
 		cfg.Logging.ServiceName = serviceName
 	}
-	
+
 	if component := os.Getenv("CFGMS_LOGGING_COMPONENT"); component != "" {
 		cfg.Logging.Component = component
 	}
@@ -679,7 +679,7 @@ func (lc *LoggingConfig) ToLoggingManagerConfig() *loggingPkg.LoggingConfig {
 	if lc == nil {
 		return loggingPkg.DefaultLoggingConfig("cfgms-controller", "controller")
 	}
-	
+
 	// Parse flush interval duration
 	flushInterval := 5 * time.Second
 	if lc.FlushInterval != "" {
@@ -687,7 +687,7 @@ func (lc *LoggingConfig) ToLoggingManagerConfig() *loggingPkg.LoggingConfig {
 			flushInterval = duration
 		}
 	}
-	
+
 	// Convert subscribers configuration
 	var subscribers []loggingPkg.SubscriberConfig
 	for _, sub := range lc.Subscribers {
@@ -697,7 +697,7 @@ func (lc *LoggingConfig) ToLoggingManagerConfig() *loggingPkg.LoggingConfig {
 			Enabled: sub.Enabled,
 		})
 	}
-	
+
 	return &loggingPkg.LoggingConfig{
 		Provider:          lc.Provider,
 		Config:            lc.Config,
@@ -715,4 +715,4 @@ func (lc *LoggingConfig) ToLoggingManagerConfig() *loggingPkg.LoggingConfig {
 		EnableTracing:     lc.EnableTracing,
 		Subscribers:       subscribers,
 	}
-} 
+}

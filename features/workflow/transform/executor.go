@@ -222,9 +222,9 @@ func (e *DefaultTransformExecutor) ExecuteChain(ctx context.Context, chain []Tra
 	// Validate chain length
 	if len(chain) > e.config.MaxChainLength {
 		return TransformResult{
-			Success:   false,
-			Error:     fmt.Sprintf("Transform chain exceeds maximum length of %d", e.config.MaxChainLength),
-			Duration:  time.Since(startTime),
+			Success:  false,
+			Error:    fmt.Sprintf("Transform chain exceeds maximum length of %d", e.config.MaxChainLength),
+			Duration: time.Since(startTime),
 		}, fmt.Errorf("transform chain too long")
 	}
 
@@ -282,11 +282,11 @@ func (e *DefaultTransformExecutor) ExecuteChain(ctx context.Context, chain []Tra
 			switch step.OnError {
 			case ErrorActionStop:
 				return TransformResult{
-					Success:   false,
-					Error:     fmt.Sprintf("Transform chain stopped at step %d (%s): %s", i+1, step.Name, stepResult.Error),
-					Duration:  time.Since(startTime),
-					Warnings:  allWarnings,
-					Metadata:  allMetadata,
+					Success:  false,
+					Error:    fmt.Sprintf("Transform chain stopped at step %d (%s): %s", i+1, step.Name, stepResult.Error),
+					Duration: time.Since(startTime),
+					Warnings: allWarnings,
+					Metadata: allMetadata,
 				}, err
 
 			case ErrorActionContinue:
@@ -411,10 +411,10 @@ func (e *DefaultTransformExecutor) createTransformContext(transformName string, 
 	return &DefaultTransformContext{
 		data:               data,
 		variables:          variables,
-		config:            config,
-		transformName:     transformName,
+		config:             config,
+		transformName:      transformName,
 		temporaryVariables: make(map[string]interface{}),
-		logger:            e.logger.WithField("transform", transformName),
+		logger:             e.logger.WithField("transform", transformName),
 	}
 }
 

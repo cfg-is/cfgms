@@ -38,13 +38,13 @@ func NewDriftService(
 	monitorConfig *MonitorConfig,
 	logger logging.Logger,
 ) (*DriftService, error) {
-	
+
 	// Create detector
 	detector, err := NewDetector(detectorConfig, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create detector: %w", err)
 	}
-	
+
 	// Create filter (if needed by detector implementation)
 	if filterConfig != nil {
 		_, err = NewFilterFromConfig(filterConfig, logger)
@@ -52,7 +52,7 @@ func NewDriftService(
 			return nil, fmt.Errorf("failed to create filter: %w", err)
 		}
 	}
-	
+
 	// Create rule engine (if needed by detector implementation)
 	if ruleEngineConfig != nil {
 		_, err = NewRuleEngineFromConfig(ruleEngineConfig, logger)
@@ -60,12 +60,12 @@ func NewDriftService(
 			return nil, fmt.Errorf("failed to create rule engine: %w", err)
 		}
 	}
-	
+
 	service := &DriftService{
 		detector: detector,
 		logger:   logger,
 	}
-	
+
 	return service, nil
 }
 
@@ -89,22 +89,22 @@ func (ds *DriftService) GetMonitor() Monitor {
 // Close releases all service resources.
 func (ds *DriftService) Close() error {
 	var errs []error
-	
+
 	if ds.detector != nil {
 		if err := ds.detector.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("failed to close detector: %w", err))
 		}
 	}
-	
+
 	if ds.monitor != nil {
 		if err := ds.monitor.Stop(); err != nil {
 			errs = append(errs, fmt.Errorf("failed to stop monitor: %w", err))
 		}
 	}
-	
+
 	if len(errs) > 0 {
 		return fmt.Errorf("errors closing drift service: %v", errs)
 	}
-	
+
 	return nil
 }

@@ -16,41 +16,41 @@ type ExecutionMonitor struct {
 
 // MonitoredExecution represents a tracked script execution
 type MonitoredExecution struct {
-	ID          string           `json:"id"`
-	ScriptID    string           `json:"script_id"`
-	ScriptName  string           `json:"script_name"`
-	TenantID    string           `json:"tenant_id"`
-	Devices     []DeviceExecution `json:"devices"`
-	Status      ExecutionStatus   `json:"status"`
-	StartTime   time.Time         `json:"start_time"`
-	EndTime     *time.Time        `json:"end_time,omitempty"`
-	Summary     *ExecutionSummary `json:"summary"`
-	Metadata    map[string]string `json:"metadata,omitempty"`
+	ID         string            `json:"id"`
+	ScriptID   string            `json:"script_id"`
+	ScriptName string            `json:"script_name"`
+	TenantID   string            `json:"tenant_id"`
+	Devices    []DeviceExecution `json:"devices"`
+	Status     ExecutionStatus   `json:"status"`
+	StartTime  time.Time         `json:"start_time"`
+	EndTime    *time.Time        `json:"end_time,omitempty"`
+	Summary    *ExecutionSummary `json:"summary"`
+	Metadata   map[string]string `json:"metadata,omitempty"`
 }
 
 // DeviceExecution represents execution on a single device
 type DeviceExecution struct {
-	DeviceID    string          `json:"device_id"`
-	DeviceName  string          `json:"device_name"`
-	Status      ExecutionStatus `json:"status"`
-	Result      *ExecutionResult `json:"result,omitempty"`
-	Stdout      string          `json:"stdout,omitempty"`
-	Stderr      string          `json:"stderr,omitempty"`
-	StartTime   time.Time       `json:"start_time"`
-	EndTime     *time.Time      `json:"end_time,omitempty"`
-	EphemeralKey string         `json:"ephemeral_key,omitempty"`
-	Error       string          `json:"error,omitempty"`
+	DeviceID     string           `json:"device_id"`
+	DeviceName   string           `json:"device_name"`
+	Status       ExecutionStatus  `json:"status"`
+	Result       *ExecutionResult `json:"result,omitempty"`
+	Stdout       string           `json:"stdout,omitempty"`
+	Stderr       string           `json:"stderr,omitempty"`
+	StartTime    time.Time        `json:"start_time"`
+	EndTime      *time.Time       `json:"end_time,omitempty"`
+	EphemeralKey string           `json:"ephemeral_key,omitempty"`
+	Error        string           `json:"error,omitempty"`
 }
 
 // ExecutionSummary provides aggregate statistics
 type ExecutionSummary struct {
-	Total      int `json:"total"`
-	Completed  int `json:"completed"`
-	Running    int `json:"running"`
-	Failed     int `json:"failed"`
-	Timeout    int `json:"timeout"`
-	Pending    int `json:"pending"`
-	Cancelled  int `json:"cancelled"`
+	Total     int `json:"total"`
+	Completed int `json:"completed"`
+	Running   int `json:"running"`
+	Failed    int `json:"failed"`
+	Timeout   int `json:"timeout"`
+	Pending   int `json:"pending"`
+	Cancelled int `json:"cancelled"`
 }
 
 // ExecutionListener receives execution events

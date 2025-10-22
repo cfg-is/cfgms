@@ -14,4 +14,4 @@ var (
 
 	// ErrNotRunning is returned when attempting to stop a controller that's not running
 	ErrNotRunning = errors.New("controller not running")
-) 
+)

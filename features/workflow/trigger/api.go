@@ -9,8 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/gorilla/mux"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // APIHandler provides REST API endpoints for trigger management

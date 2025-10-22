@@ -20,7 +20,7 @@ type Logger interface {
 	Warn(msg string, keysAndValues ...interface{})
 	Error(msg string, keysAndValues ...interface{})
 	Fatal(msg string, keysAndValues ...interface{})
-	
+
 	// Context-aware logging methods that automatically inject correlation IDs
 	DebugCtx(ctx context.Context, msg string, keysAndValues ...interface{})
 	InfoCtx(ctx context.Context, msg string, keysAndValues ...interface{})
@@ -59,16 +59,16 @@ const (
 type Config struct {
 	// Level controls which log messages are output
 	Level Level
-	
+
 	// Format controls the output format (text or JSON)
 	Format Format
-	
+
 	// EnableCorrelation automatically injects correlation IDs from context
 	EnableCorrelation bool
-	
+
 	// ServiceName is included in structured logs for service identification
 	ServiceName string
-	
+
 	// Component identifies the component within the service (e.g., "controller", "steward")
 	Component string
 }
@@ -100,8 +100,8 @@ type LogEntry struct {
 // DefaultLogger is an enhanced implementation of Logger with correlation support
 // It can use either the legacy stdout logging or the new provider system
 type DefaultLogger struct {
-	config           *Config
-	log              *log.Logger
+	config            *Config
+	log               *log.Logger
 	useProviderSystem bool // Use new provider system if available
 }
 
@@ -142,14 +142,14 @@ func NewLogger(levelStr string) Logger {
 		ServiceName:       "",
 		Component:         "",
 	}
-	
+
 	// Check if global provider system is available
 	manager := GetGlobalLoggingManager()
 	useProvider := (manager != nil)
-	
+
 	return &DefaultLogger{
-		config:           config,
-		log:              log.New(os.Stdout, "", log.LstdFlags),
+		config:            config,
+		log:               log.New(os.Stdout, "", log.LstdFlags),
 		useProviderSystem: useProvider,
 	}
 }
@@ -160,14 +160,14 @@ func NewLoggerWithConfig(config *Config) Logger {
 	if config == nil {
 		config = DefaultConfig("cfgms", "unknown")
 	}
-	
+
 	// Check if global provider system is available
 	manager := GetGlobalLoggingManager()
 	useProvider := (manager != nil)
-	
+
 	return &DefaultLogger{
-		config:           config,
-		log:              log.New(os.Stdout, "", 0), // No timestamp for JSON format
+		config:            config,
+		log:               log.New(os.Stdout, "", 0), // No timestamp for JSON format
 		useProviderSystem: useProvider,
 	}
 }
@@ -175,13 +175,13 @@ func NewLoggerWithConfig(config *Config) Logger {
 // keysAndValuesToMap converts key-value pairs to a map for structured logging.
 func keysAndValuesToMap(keysAndValues []interface{}) map[string]interface{} {
 	fields := make(map[string]interface{})
-	
+
 	for i := 0; i < len(keysAndValues)-1; i += 2 {
 		if key, ok := keysAndValues[i].(string); ok {
 			fields[key] = keysAndValues[i+1]
 		}
 	}
-	
+
 	return fields
 }
 
@@ -190,7 +190,7 @@ func (l *DefaultLogger) logEntry(ctx context.Context, level Level, levelStr, msg
 	if l.config.Level > level {
 		return
 	}
-	
+
 	// Use global provider system if available and enabled
 	if l.useProviderSystem {
 		manager := GetGlobalLoggingManager()
@@ -202,7 +202,7 @@ func (l *DefaultLogger) logEntry(ctx context.Context, level Level, levelStr, msg
 				Component:   l.config.Component,
 				Fields:      keysAndValuesToMap(keysAndValues),
 			}
-			
+
 			// Write via provider system (handles correlation, tenant isolation, etc. automatically)
 			if err := manager.WriteEntry(ctx, entry); err != nil {
 				// Fallback to stdout if provider fails
@@ -211,7 +211,7 @@ func (l *DefaultLogger) logEntry(ctx context.Context, level Level, levelStr, msg
 			return
 		}
 	}
-	
+
 	// Fallback to legacy stdout logging
 	if l.config.Format == JSONFormat {
 		l.logJSON(ctx, levelStr, msg, keysAndValues...)
@@ -230,20 +230,20 @@ func (l *DefaultLogger) logJSON(ctx context.Context, level, msg string, keysAndV
 		Component:   l.config.Component,
 		Fields:      keysAndValuesToMap(keysAndValues),
 	}
-	
+
 	// Inject correlation and trace information if enabled and context is available
 	if l.config.EnableCorrelation && ctx != nil {
 		entry.CorrelationID = extractCorrelationID(ctx)
 		entry.TraceID, entry.SpanID = extractTraceInfo(ctx)
 	}
-	
+
 	jsonBytes, err := json.Marshal(entry)
 	if err != nil {
 		// Fallback to text format if JSON marshaling fails
 		l.log.Printf("[ERROR] Failed to marshal log entry: %v - Original: [%s] %s %v", err, level, msg, keysAndValues)
 		return
 	}
-	
+
 	l.log.Println(string(jsonBytes))
 }
 
@@ -255,7 +255,7 @@ func (l *DefaultLogger) logText(ctx context.Context, level, msg string, keysAndV
 			correlationPart = fmt.Sprintf(" [correlation_id=%s]", correlationID)
 		}
 	}
-	
+
 	l.log.Printf("[%s]%s %s %v", level, correlationPart, msg, keysAndValues)
 }
 

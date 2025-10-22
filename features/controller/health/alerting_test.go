@@ -5,9 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/features/controller/health"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/features/controller/health"
 )
 
 func TestNewAlertManager(t *testing.T) {
@@ -70,10 +71,10 @@ func TestAlertManager_ThresholdBreach(t *testing.T) {
 	metrics := &health.ControllerMetrics{
 		Timestamp: time.Now(),
 		System: &health.SystemMetrics{
-			CPUPercent:      90, // Above threshold
-			MemoryPercent:   50,
-			GoroutineCount:  100,
-			CollectedAt:     time.Now(),
+			CPUPercent:     90, // Above threshold
+			MemoryPercent:  50,
+			GoroutineCount: 100,
+			CollectedAt:    time.Now(),
 		},
 	}
 
@@ -122,10 +123,10 @@ func TestAlertManager_ThresholdResolution(t *testing.T) {
 	metricsBreached := &health.ControllerMetrics{
 		Timestamp: time.Now(),
 		System: &health.SystemMetrics{
-			CPUPercent:      50,
-			MemoryPercent:   90, // Above threshold
-			GoroutineCount:  100,
-			CollectedAt:     time.Now(),
+			CPUPercent:     50,
+			MemoryPercent:  90, // Above threshold
+			GoroutineCount: 100,
+			CollectedAt:    time.Now(),
 		},
 	}
 
@@ -146,10 +147,10 @@ func TestAlertManager_ThresholdResolution(t *testing.T) {
 	metricsNormal := &health.ControllerMetrics{
 		Timestamp: time.Now(),
 		System: &health.SystemMetrics{
-			CPUPercent:      50,
-			MemoryPercent:   70, // Below threshold
-			GoroutineCount:  100,
-			CollectedAt:     time.Now(),
+			CPUPercent:     50,
+			MemoryPercent:  70, // Below threshold
+			GoroutineCount: 100,
+			CollectedAt:    time.Now(),
 		},
 	}
 
@@ -246,10 +247,10 @@ func TestAlertManager_MultipleThresholds(t *testing.T) {
 	metrics := &health.ControllerMetrics{
 		Timestamp: time.Now(),
 		System: &health.SystemMetrics{
-			CPUPercent:      90, // Above threshold
-			MemoryPercent:   90, // Above threshold
-			GoroutineCount:  100,
-			CollectedAt:     time.Now(),
+			CPUPercent:     90, // Above threshold
+			MemoryPercent:  90, // Above threshold
+			GoroutineCount: 100,
+			CollectedAt:    time.Now(),
 		},
 	}
 
@@ -311,10 +312,10 @@ func TestAlertManager_GetAlertHistory(t *testing.T) {
 	metrics := &health.ControllerMetrics{
 		Timestamp: time.Now(),
 		MQTT: &health.MQTTMetrics{
-			ActiveConnections:  50,
-			MessageQueueDepth:  600, // Above threshold
-			MessageThroughput:  100.0,
-			CollectedAt:        time.Now(),
+			ActiveConnections: 50,
+			MessageQueueDepth: 600, // Above threshold
+			MessageThroughput: 100.0,
+			CollectedAt:       time.Now(),
 		},
 	}
 
@@ -383,10 +384,10 @@ func TestAlertManager_OperatorEvaluation(t *testing.T) {
 			metrics := &health.ControllerMetrics{
 				Timestamp: time.Now(),
 				System: &health.SystemMetrics{
-					CPUPercent:      tt.value,
-					MemoryPercent:   50,
-					GoroutineCount:  100,
-					CollectedAt:     time.Now(),
+					CPUPercent:     tt.value,
+					MemoryPercent:  50,
+					GoroutineCount: 100,
+					CollectedAt:    time.Now(),
 				},
 			}
 

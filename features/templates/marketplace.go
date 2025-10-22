@@ -19,18 +19,18 @@ type MarketplaceTemplate struct {
 	*Template
 
 	// Author information
-	Author      string   `json:"author" yaml:"author"`
-	AuthorEmail string   `json:"author_email,omitempty" yaml:"author_email,omitempty"`
-	License     string   `json:"license" yaml:"license"`
-	Repository  string   `json:"repository,omitempty" yaml:"repository,omitempty"`
-	Homepage    string   `json:"homepage,omitempty" yaml:"homepage,omitempty"`
+	Author      string `json:"author" yaml:"author"`
+	AuthorEmail string `json:"author_email,omitempty" yaml:"author_email,omitempty"`
+	License     string `json:"license" yaml:"license"`
+	Repository  string `json:"repository,omitempty" yaml:"repository,omitempty"`
+	Homepage    string `json:"homepage,omitempty" yaml:"homepage,omitempty"`
 
 	// Marketplace metadata
-	Category    string   `json:"category" yaml:"category"`
-	Keywords    []string `json:"keywords,omitempty" yaml:"keywords,omitempty"`
-	Downloads   int64    `json:"downloads" yaml:"downloads"`
-	Stars       int64    `json:"stars" yaml:"stars"`
-	Featured    bool     `json:"featured" yaml:"featured"`
+	Category  string   `json:"category" yaml:"category"`
+	Keywords  []string `json:"keywords,omitempty" yaml:"keywords,omitempty"`
+	Downloads int64    `json:"downloads" yaml:"downloads"`
+	Stars     int64    `json:"stars" yaml:"stars"`
+	Featured  bool     `json:"featured" yaml:"featured"`
 
 	// Compliance and security
 	ComplianceFrameworks []string `json:"compliance_frameworks,omitempty" yaml:"compliance_frameworks,omitempty"`
@@ -38,24 +38,24 @@ type MarketplaceTemplate struct {
 	TestedPlatforms      []string `json:"tested_platforms,omitempty" yaml:"tested_platforms,omitempty"`
 
 	// Requirements
-	MinVersion       string            `json:"min_version,omitempty" yaml:"min_version,omitempty"`
-	RequiredModules  []string          `json:"required_modules,omitempty" yaml:"required_modules,omitempty"`
-	RequiredFeatures []string          `json:"required_features,omitempty" yaml:"required_features,omitempty"`
+	MinVersion       string               `json:"min_version,omitempty" yaml:"min_version,omitempty"`
+	RequiredModules  []string             `json:"required_modules,omitempty" yaml:"required_modules,omitempty"`
+	RequiredFeatures []string             `json:"required_features,omitempty" yaml:"required_features,omitempty"`
 	Dependencies     []TemplateDependency `json:"dependencies,omitempty" yaml:"dependencies,omitempty"`
 
 	// Versioning
-	SemanticVersion string    `json:"semantic_version" yaml:"semantic_version"`
-	Changelog       []Change  `json:"changelog,omitempty" yaml:"changelog,omitempty"`
+	SemanticVersion string     `json:"semantic_version" yaml:"semantic_version"`
+	Changelog       []Change   `json:"changelog,omitempty" yaml:"changelog,omitempty"`
 	DeprecatedAt    *time.Time `json:"deprecated_at,omitempty" yaml:"deprecated_at,omitempty"`
-	DeprecationNote string    `json:"deprecation_note,omitempty" yaml:"deprecation_note,omitempty"`
+	DeprecationNote string     `json:"deprecation_note,omitempty" yaml:"deprecation_note,omitempty"`
 }
 
 // TemplateDependency represents a dependency on another template
 type TemplateDependency struct {
-	TemplateID      string `json:"template_id" yaml:"template_id"`
-	Version         string `json:"version" yaml:"version"`
+	TemplateID        string `json:"template_id" yaml:"template_id"`
+	Version           string `json:"version" yaml:"version"`
 	VersionConstraint string `json:"version_constraint,omitempty" yaml:"version_constraint,omitempty"`
-	Required        bool   `json:"required" yaml:"required"`
+	Required          bool   `json:"required" yaml:"required"`
 }
 
 // Change represents a changelog entry
@@ -90,12 +90,12 @@ type MarketplaceConfig struct {
 
 // Marketplace manages template discovery, distribution, and collaboration
 type Marketplace struct {
-	config        MarketplaceConfig
-	registry      *TemplateRegistry
-	store         TemplateStore
-	catalogCache  map[string]*MarketplaceTemplate
-	cacheMutex    sync.RWMutex
-	lastRefresh   time.Time
+	config       MarketplaceConfig
+	registry     *TemplateRegistry
+	store        TemplateStore
+	catalogCache map[string]*MarketplaceTemplate
+	cacheMutex   sync.RWMutex
+	lastRefresh  time.Time
 }
 
 // NewMarketplace creates a new template marketplace
@@ -592,28 +592,28 @@ func (r *TemplateRegistry) getLatestVersion(versions map[string]*MarketplaceTemp
 
 // TemplateManifest represents a template manifest file for marketplace distribution
 type TemplateManifest struct {
-	ID                   string                 `yaml:"id"`
-	Name                 string                 `yaml:"name"`
-	Version              string                 `yaml:"version"`
-	Description          string                 `yaml:"description"`
-	Author               string                 `yaml:"author"`
-	AuthorEmail          string                 `yaml:"author_email,omitempty"`
-	License              string                 `yaml:"license"`
-	Repository           string                 `yaml:"repository,omitempty"`
-	Homepage             string                 `yaml:"homepage,omitempty"`
-	Category             string                 `yaml:"category"`
-	Keywords             []string               `yaml:"keywords,omitempty"`
-	Tags                 []string               `yaml:"tags,omitempty"`
-	ComplianceFrameworks []string               `yaml:"compliance_frameworks,omitempty"`
-	SecurityLevel        string                 `yaml:"security_level,omitempty"`
-	TestedPlatforms      []string               `yaml:"tested_platforms,omitempty"`
-	MinVersion           string                 `yaml:"min_version,omitempty"`
-	RequiredModules      []string               `yaml:"required_modules,omitempty"`
-	RequiredFeatures     []string               `yaml:"required_features,omitempty"`
-	Dependencies         []TemplateDependency   `yaml:"dependencies,omitempty"`
-	TemplateFile         string                 `yaml:"template_file"`
-	ReadmeFile           string                 `yaml:"readme_file,omitempty"`
-	Changelog            []Change               `yaml:"changelog,omitempty"`
+	ID                   string               `yaml:"id"`
+	Name                 string               `yaml:"name"`
+	Version              string               `yaml:"version"`
+	Description          string               `yaml:"description"`
+	Author               string               `yaml:"author"`
+	AuthorEmail          string               `yaml:"author_email,omitempty"`
+	License              string               `yaml:"license"`
+	Repository           string               `yaml:"repository,omitempty"`
+	Homepage             string               `yaml:"homepage,omitempty"`
+	Category             string               `yaml:"category"`
+	Keywords             []string             `yaml:"keywords,omitempty"`
+	Tags                 []string             `yaml:"tags,omitempty"`
+	ComplianceFrameworks []string             `yaml:"compliance_frameworks,omitempty"`
+	SecurityLevel        string               `yaml:"security_level,omitempty"`
+	TestedPlatforms      []string             `yaml:"tested_platforms,omitempty"`
+	MinVersion           string               `yaml:"min_version,omitempty"`
+	RequiredModules      []string             `yaml:"required_modules,omitempty"`
+	RequiredFeatures     []string             `yaml:"required_features,omitempty"`
+	Dependencies         []TemplateDependency `yaml:"dependencies,omitempty"`
+	TemplateFile         string               `yaml:"template_file"`
+	ReadmeFile           string               `yaml:"readme_file,omitempty"`
+	Changelog            []Change             `yaml:"changelog,omitempty"`
 }
 
 // LoadManifest loads a template manifest from a YAML file

@@ -30,13 +30,13 @@ var (
 	// allowedTableNames defines the whitelist of valid table names
 	// M-INPUT-3: Only predefined table names are allowed for security
 	allowedTableNames = map[string]bool{
-		"log_entries":        true, // Default log entries table
-		"logs":               true, // Alternative log table name
-		"audit_logs":         true, // Audit log entries
-		"system_logs":        true, // System log entries
-		"application_logs":   true, // Application log entries
-		"security_logs":      true, // Security log entries
-		"performance_logs":   true, // Performance log entries
+		"log_entries":      true, // Default log entries table
+		"logs":             true, // Alternative log table name
+		"audit_logs":       true, // Audit log entries
+		"system_logs":      true, // System log entries
+		"application_logs": true, // Application log entries
+		"security_logs":    true, // Security log entries
+		"performance_logs": true, // Performance log entries
 	}
 
 	// allowedTablePrefixes defines allowed table name prefixes for testing

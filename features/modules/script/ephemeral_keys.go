@@ -10,16 +10,16 @@ import (
 
 // EphemeralAPIKey represents a time-limited API key for script callbacks
 type EphemeralAPIKey struct {
-	Key        string    `json:"key"`                   // The API key
-	ScriptID   string    `json:"script_id"`             // Associated script ID
-	ExecutionID string   `json:"execution_id"`          // Associated execution ID
-	TenantID   string    `json:"tenant_id"`             // Tenant ID
-	DeviceID   string    `json:"device_id"`             // Device ID
-	CreatedAt  time.Time `json:"created_at"`            // Creation timestamp
-	ExpiresAt  time.Time `json:"expires_at"`            // Expiration timestamp
-	Permissions []string `json:"permissions,omitempty"` // Allowed API permissions
-	UsageCount int       `json:"usage_count"`           // Number of times used
-	MaxUsage   int       `json:"max_usage"`             // Maximum allowed usage (0 = unlimited)
+	Key         string    `json:"key"`                   // The API key
+	ScriptID    string    `json:"script_id"`             // Associated script ID
+	ExecutionID string    `json:"execution_id"`          // Associated execution ID
+	TenantID    string    `json:"tenant_id"`             // Tenant ID
+	DeviceID    string    `json:"device_id"`             // Device ID
+	CreatedAt   time.Time `json:"created_at"`            // Creation timestamp
+	ExpiresAt   time.Time `json:"expires_at"`            // Expiration timestamp
+	Permissions []string  `json:"permissions,omitempty"` // Allowed API permissions
+	UsageCount  int       `json:"usage_count"`           // Number of times used
+	MaxUsage    int       `json:"max_usage"`             // Maximum allowed usage (0 = unlimited)
 }
 
 // IsValid checks if the API key is still valid
@@ -53,10 +53,10 @@ func (k *EphemeralAPIKey) HasPermission(permission string) bool {
 
 // EphemeralKeyManager manages ephemeral API keys
 type EphemeralKeyManager struct {
-	keys     map[string]*EphemeralAPIKey
-	mu       sync.RWMutex
+	keys            map[string]*EphemeralAPIKey
+	mu              sync.RWMutex
 	cleanupInterval time.Duration
-	stopCleanup chan struct{}
+	stopCleanup     chan struct{}
 }
 
 // NewEphemeralKeyManager creates a new ephemeral key manager
@@ -270,12 +270,12 @@ func DefaultKeyOptions() *KeyGenerationOptions {
 // ScriptCallbackPermissions returns permissions for script callback operations
 func ScriptCallbackPermissions() []string {
 	return []string{
-		"script:callback",    // Call back to controller
-		"script:status",      // Update execution status
-		"script:log",         // Send log messages
-		"script:result",      // Send execution result
-		"device:dna:read",    // Read device DNA
-		"config:read",        // Read configuration
+		"script:callback", // Call back to controller
+		"script:status",   // Update execution status
+		"script:log",      // Send log messages
+		"script:result",   // Send execution result
+		"device:dna:read", // Read device DNA
+		"config:read",     // Read configuration
 	}
 }
 

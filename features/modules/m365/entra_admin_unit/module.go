@@ -6,10 +6,11 @@ import (
 	"strings"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/modules/m365/auth"
 	"github.com/cfgis/cfgms/features/modules/m365/graph"
-	"gopkg.in/yaml.v3"
 )
 
 // entraAdminUnitModule implements the Module interface for Entra ID Administrative Unit management
@@ -63,16 +64,16 @@ type ScopedRoleMember struct {
 	// Principal (user or service principal) being assigned the role
 	PrincipalID   string `yaml:"principal_id"`
 	PrincipalType string `yaml:"principal_type"` // "User", "ServicePrincipal"
-	
+
 	// Role being assigned
 	RoleDefinitionID string `yaml:"role_definition_id"`
 	RoleName         string `yaml:"role_name,omitempty"` // For convenience/documentation
-	
+
 	// Assignment details
 	AssignmentType string `yaml:"assignment_type,omitempty"` // "Eligible", "Active"
 	StartDateTime  string `yaml:"start_date_time,omitempty"`
 	EndDateTime    string `yaml:"end_date_time,omitempty"`
-	
+
 	// Justification for the assignment
 	Justification string `yaml:"justification,omitempty"`
 }
@@ -384,7 +385,7 @@ func (m *entraAdminUnitModule) createAdminUnit(ctx context.Context, token *auth.
 	if err != nil {
 		return fmt.Errorf("failed to create administrative unit via Graph API: %w", err)
 	}
-	
+
 	// Wait for creation to propagate
 	time.Sleep(2 * time.Second)
 
@@ -448,7 +449,7 @@ func (m *entraAdminUnitModule) updateAdminUnit(ctx context.Context, token *auth.
 	if len(updates) > 0 {
 		// Build the update request
 		updateRequest := &graph.UpdateAdministrativeUnitRequest{}
-		
+
 		if displayName, ok := updates["displayName"].(string); ok {
 			updateRequest.DisplayName = &displayName
 		}
@@ -461,7 +462,7 @@ func (m *entraAdminUnitModule) updateAdminUnit(ctx context.Context, token *auth.
 		if membershipRule, ok := updates["membershipRule"].(string); ok {
 			updateRequest.MembershipRule = &membershipRule
 		}
-		
+
 		// Update administrative unit via Graph API
 		if err := m.graphClient.UpdateAdministrativeUnit(ctx, token, existingAU.ID, updateRequest); err != nil {
 			return fmt.Errorf("failed to update administrative unit via Graph API: %w", err)

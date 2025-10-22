@@ -40,7 +40,7 @@ func TestRiskAssessmentEngine_EvaluateRisk_MinimalRisk(t *testing.T) {
 	assert.NotZero(t, result.AssessedAt)
 	assert.Positive(t, result.ValidityPeriod)
 	assert.NotZero(t, result.NextAssessmentTime)
-	
+
 	// Minimal risk should result in low risk scores
 	assert.True(t, result.OverallRiskScore < 50, "Minimal risk request should have low risk score")
 	assert.Contains(t, []RiskLevel{RiskLevelMinimal, RiskLevelLow}, result.RiskLevel)
@@ -57,17 +57,17 @@ func TestRiskAssessmentEngine_EvaluateRisk_HighRisk(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.NotNil(t, result)
-	
+
 	// High risk should result in higher risk scores and more restrictive decisions
 	assert.True(t, result.OverallRiskScore > 50, "High risk request should have elevated risk score")
 	assert.Contains(t, []RiskLevel{RiskLevelModerate, RiskLevelHigh, RiskLevelCritical}, result.RiskLevel)
-	
+
 	// Should have risk factors identified
 	assert.NotEmpty(t, result.RiskFactors)
-	
+
 	// Should have recommended mitigation actions
 	assert.NotEmpty(t, result.RecommendedActions)
-	
+
 	// May require additional controls
 	if result.AccessDecision == AccessDecisionAllowWithControls {
 		assert.NotEmpty(t, result.RequiredControls)
@@ -84,18 +84,17 @@ func TestRiskAssessmentEngine_EvaluateRisk_ExtremeRisk(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.NotNil(t, result)
-	
-	
+
 	// Extreme risk should result in very high scores and denial/break-glass decisions
 	assert.True(t, result.OverallRiskScore > 70, "Extreme risk request should have very high risk score")
 	assert.Contains(t, []RiskLevel{RiskLevelHigh, RiskLevelCritical, RiskLevelExtreme}, result.RiskLevel)
-	
+
 	// Should have restrictive access decision
 	assert.Contains(t, []AccessDecision{AccessDecisionDeny, AccessDecisionBreakGlass, AccessDecisionChallenge, AccessDecisionStepUp}, result.AccessDecision)
-	
+
 	// Should have multiple risk factors
 	assert.GreaterOrEqual(t, len(result.RiskFactors), 2)
-	
+
 	// Should have mitigation actions
 	assert.NotEmpty(t, result.RecommendedActions)
 }
@@ -111,7 +110,7 @@ func TestRiskAssessmentEngine_EvaluateRisk_WithHistoricalData(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotNil(t, result)
 	assert.NotNil(t, result.BehavioralRisk)
-	
+
 	// Should have behavioral analysis
 	if result.BehavioralRisk != nil {
 		assert.NotEmpty(t, result.BehavioralRisk.BehaviorDeviations)
@@ -216,16 +215,16 @@ func TestRiskAssessmentEngine_ResourceSensitivityImpact(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			request := createTestRequest("user1", "resource1", "read", tt.sensitivity)
-			
+
 			result, err := engine.EvaluateRisk(ctx, request)
 			require.NoError(t, err)
-			
+
 			// Higher sensitivity should generally result in higher risk scores
 			if tt.expectedImpactOnScore {
-				assert.True(t, result.OverallRiskScore > 10, 
+				assert.True(t, result.OverallRiskScore > 10,
 					"Sensitive resources should increase risk score")
 			}
-			
+
 			// Resource sensitivity should be reflected in resource risk analysis
 			assert.NotNil(t, result.ResourceRisk)
 			assert.Equal(t, tt.sensitivity, result.ResourceRisk.SensitivityRisk.Sensitivity)
@@ -259,19 +258,19 @@ func TestRiskAssessmentEngine_ThreatIntelligenceIntegration(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.NotNil(t, result)
-	
+
 	// High threat intelligence should significantly increase risk
-	assert.True(t, result.OverallRiskScore > 60, 
+	assert.True(t, result.OverallRiskScore > 60,
 		"High threat intelligence should significantly increase risk score")
-	
+
 	// Should have environmental risk analysis
 	assert.NotNil(t, result.EnvironmentalRisk)
 	assert.True(t, result.EnvironmentalRisk.ThreatEnvironment.ReputationScore > 0.5)
-	
+
 	// Should recommend additional controls or deny access
 	assert.Contains(t, []AccessDecision{
-		AccessDecisionDeny, 
-		AccessDecisionChallenge, 
+		AccessDecisionDeny,
+		AccessDecisionChallenge,
 		AccessDecisionStepUp,
 		AccessDecisionAllowWithControls,
 	}, result.AccessDecision)
@@ -282,7 +281,7 @@ func TestRiskAssessmentEngine_BehavioralAnomalyDetection(t *testing.T) {
 	ctx := context.Background()
 
 	request := createMinimalRiskRequest()
-	
+
 	// Add anomalous behavioral data
 	request.HistoricalData = &HistoricalAccessData{
 		AnomalyHistory: []AnomalyRecord{
@@ -304,8 +303,8 @@ func TestRiskAssessmentEngine_BehavioralAnomalyDetection(t *testing.T) {
 			},
 		},
 		AccessPatterns: &AccessPatternAnalysis{
-			TypicalHours:     []int{9, 10, 11, 14, 15, 16},
-			TypicalLocations: []string{"New York", "Boston"},
+			TypicalHours:      []int{9, 10, 11, 14, 15, 16},
+			TypicalLocations:  []string{"New York", "Boston"},
 			PatternConfidence: 0.9,
 		},
 	}
@@ -314,15 +313,15 @@ func TestRiskAssessmentEngine_BehavioralAnomalyDetection(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.NotNil(t, result)
-	
+
 	// Behavioral anomalies should increase risk
-	assert.True(t, result.OverallRiskScore > 30, 
+	assert.True(t, result.OverallRiskScore > 30,
 		"Behavioral anomalies should increase risk score")
-	
+
 	// Should have behavioral risk analysis
 	assert.NotNil(t, result.BehavioralRisk)
 	assert.NotEmpty(t, result.BehavioralRisk.BehaviorDeviations)
-	
+
 	// Should identify anomalies as risk factors
 	hasAnomalyFactor := false
 	for _, factor := range result.RiskFactors {
@@ -336,34 +335,34 @@ func TestRiskAssessmentEngine_BehavioralAnomalyDetection(t *testing.T) {
 
 func TestRiskAssessmentEngine_TimeBasedRiskEvaluation(t *testing.T) {
 	tests := []struct {
-		name         string
-		accessTime   time.Time
+		name          string
+		accessTime    time.Time
 		businessHours bool
-		expectedRisk string
+		expectedRisk  string
 	}{
 		{
-			name:         "Business hours access",
-			accessTime:   time.Date(2023, 12, 15, 14, 0, 0, 0, time.UTC), // Friday 2 PM
+			name:          "Business hours access",
+			accessTime:    time.Date(2023, 12, 15, 14, 0, 0, 0, time.UTC), // Friday 2 PM
 			businessHours: true,
-			expectedRisk: "lower",
+			expectedRisk:  "lower",
 		},
 		{
-			name:         "After hours access",
-			accessTime:   time.Date(2023, 12, 15, 22, 0, 0, 0, time.UTC), // Friday 10 PM
+			name:          "After hours access",
+			accessTime:    time.Date(2023, 12, 15, 22, 0, 0, 0, time.UTC), // Friday 10 PM
 			businessHours: false,
-			expectedRisk: "higher",
+			expectedRisk:  "higher",
 		},
 		{
-			name:         "Weekend access",
-			accessTime:   time.Date(2023, 12, 16, 14, 0, 0, 0, time.UTC), // Saturday 2 PM
+			name:          "Weekend access",
+			accessTime:    time.Date(2023, 12, 16, 14, 0, 0, 0, time.UTC), // Saturday 2 PM
 			businessHours: false,
-			expectedRisk: "higher",
+			expectedRisk:  "higher",
 		},
 		{
-			name:         "Very early morning access",
-			accessTime:   time.Date(2023, 12, 15, 3, 0, 0, 0, time.UTC), // Friday 3 AM
+			name:          "Very early morning access",
+			accessTime:    time.Date(2023, 12, 15, 3, 0, 0, 0, time.UTC), // Friday 3 AM
 			businessHours: false,
-			expectedRisk: "much_higher",
+			expectedRisk:  "much_higher",
 		},
 	}
 
@@ -405,10 +404,10 @@ func TestRiskAssessmentEngine_TimeBasedRiskEvaluation(t *testing.T) {
 
 func TestRiskAssessmentEngine_GeographicLocationRisk(t *testing.T) {
 	tests := []struct {
-		name            string
-		country         string
-		expectedHigher  bool
-		description     string
+		name           string
+		country        string
+		expectedHigher bool
+		description    string
 	}{
 		{
 			name:           "Trusted location",
@@ -520,10 +519,10 @@ func createMinimalRiskRequest() *RiskAssessmentRequest {
 		SessionContext:  createTestSessionContext("session1"),
 		ResourceContext: createTestResourceContext("resource1", ResourceSensitivityPublic),
 		EnvironmentContext: &EnvironmentContext{
-			AccessTime:         time.Now(),
-			BusinessHours:      true,
-			NetworkSecurity:    NetworkSecurityLevelHigh,
-			VPNConnected:       true,
+			AccessTime:      time.Now(),
+			BusinessHours:   true,
+			NetworkSecurity: NetworkSecurityLevelHigh,
+			VPNConnected:    true,
 			GeoLocation: &GeoLocation{
 				Country: "United States",
 				Region:  "California",
@@ -541,7 +540,7 @@ func createMinimalRiskRequest() *RiskAssessmentRequest {
 
 func createHighRiskRequest() *RiskAssessmentRequest {
 	request := createMinimalRiskRequest()
-	
+
 	// Make it high risk
 	request.ResourceContext.Sensitivity = ResourceSensitivityConfidential
 	request.ResourceContext.Classification = DataClassificationConfidential
@@ -550,14 +549,14 @@ func createHighRiskRequest() *RiskAssessmentRequest {
 	request.EnvironmentContext.VPNConnected = false
 	request.EnvironmentContext.NetworkSecurity = NetworkSecurityLevelMedium
 	request.EnvironmentContext.ThreatIntelligence.IPReputationScore = 0.6 // Medium risk IP
-	request.AccessRequest.PermissionId = "admin" // High privilege
-	
+	request.AccessRequest.PermissionId = "admin"                          // High privilege
+
 	return request
 }
 
 func createExtremeRiskRequest() *RiskAssessmentRequest {
 	request := createHighRiskRequest()
-	
+
 	// Make it extreme risk
 	request.ResourceContext.Sensitivity = ResourceSensitivitySecret
 	request.ResourceContext.Classification = DataClassificationRestricted
@@ -565,15 +564,15 @@ func createExtremeRiskRequest() *RiskAssessmentRequest {
 	request.EnvironmentContext.ThreatIntelligence.IPReputationScore = 0.95 // Very high risk IP
 	request.EnvironmentContext.ThreatIntelligence.ThreatLevel = ThreatLevelCritical
 	request.EnvironmentContext.ThreatIntelligence.ThreatCategories = []string{"malware", "apt", "botnet"}
-	request.UserContext.MFAEnabled = false // No MFA
+	request.UserContext.MFAEnabled = false              // No MFA
 	request.AccessRequest.PermissionId = "system_admin" // Critical privilege
-	
+
 	return request
 }
 
 func createRequestWithHistoricalData() *RiskAssessmentRequest {
 	request := createMinimalRiskRequest()
-	
+
 	request.HistoricalData = &HistoricalAccessData{
 		RecentAccess: []AccessRecord{
 			{
@@ -602,7 +601,7 @@ func createRequestWithHistoricalData() *RiskAssessmentRequest {
 			LastUpdated:        time.Now().Add(-24 * time.Hour),
 		},
 	}
-	
+
 	return request
 }
 
@@ -684,15 +683,14 @@ func createTestResourceContext(resourceID string, sensitivity ResourceSensitivit
 	}
 
 	return &ResourceContext{
-		ResourceID:      resourceID,
-		ResourceType:    "database",
-		ResourceName:    "Test Database",
-		Sensitivity:     sensitivity,
-		Classification:  classification,
-		Owner:           "data-team",
-		LastAccessed:    time.Now().Add(-24 * time.Hour),
-		AccessFrequency: 50,
+		ResourceID:       resourceID,
+		ResourceType:     "database",
+		ResourceName:     "Test Database",
+		Sensitivity:      sensitivity,
+		Classification:   classification,
+		Owner:            "data-team",
+		LastAccessed:     time.Now().Add(-24 * time.Hour),
+		AccessFrequency:  50,
 		ResourceLocation: "us-west-2",
 	}
 }
-

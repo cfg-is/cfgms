@@ -11,7 +11,7 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
-	
+
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -27,15 +27,15 @@ import (
 // - Content-based deduplication support
 // - Built-in data integrity and corruption recovery
 type SQLiteBackend struct {
-	logger    logging.Logger
-	config    *Config
-	db        *sql.DB
-	migrator  *SQLiteMigrator
-	dbPath    string
-	mutex     sync.RWMutex
-	stats     *StorageStats
+	logger     logging.Logger
+	config     *Config
+	db         *sql.DB
+	migrator   *SQLiteMigrator
+	dbPath     string
+	mutex      sync.RWMutex
+	stats      *StorageStats
 	statsMutex sync.RWMutex
-	
+
 	// Prepared statements for performance
 	stmts struct {
 		insertRecord    *sql.Stmt
@@ -64,8 +64,8 @@ func NewSQLiteBackend(config *Config, logger logging.Logger) (*SQLiteBackend, er
 	}
 
 	// Configure connection pool for SQLite
-	db.SetMaxOpenConns(1)  // SQLite works best with single connection
-	db.SetMaxIdleConns(1)  
+	db.SetMaxOpenConns(1) // SQLite works best with single connection
+	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(0) // No connection lifetime limit
 
 	backend := &SQLiteBackend{
@@ -109,7 +109,7 @@ func NewSQLiteBackend(config *Config, logger logging.Logger) (*SQLiteBackend, er
 		logger.Warn("Failed to calculate initial statistics", "error", err)
 	}
 
-	logger.Info("SQLite DNA storage backend initialized", 
+	logger.Info("SQLite DNA storage backend initialized",
 		"database_path", dbPath,
 		"schema_version", "1",
 		"wal_mode", "enabled")
@@ -411,7 +411,7 @@ func (b *SQLiteBackend) calculateStats() error {
 
 	b.stats.TotalSize = b.stats.CompressedSize
 	b.stats.ActiveDevices = b.stats.TotalDevices // All devices are active in SQLite
-	
+
 	if b.stats.TotalDevices > 0 {
 		b.stats.AverageRecordsPerDevice = float64(b.stats.TotalBlocks) / float64(b.stats.TotalDevices)
 	}

@@ -15,27 +15,27 @@ import (
 
 // AuthenticationState represents the authentication state of a steward
 type AuthenticationState struct {
-	StewardID           string    `json:"steward_id"`
-	Authenticated       bool      `json:"authenticated"`
-	TokenValid          bool      `json:"token_valid"`
-	CertificateValid    bool      `json:"certificate_valid"`
-	LastAuthentication  time.Time `json:"last_authentication"`
-	AuthenticationMethod string   `json:"authentication_method"` // mTLS, JWT, etc.
-	ConnectionCount     int       `json:"connection_count"`     // Number of reconnections
+	StewardID            string    `json:"steward_id"`
+	Authenticated        bool      `json:"authenticated"`
+	TokenValid           bool      `json:"token_valid"`
+	CertificateValid     bool      `json:"certificate_valid"`
+	LastAuthentication   time.Time `json:"last_authentication"`
+	AuthenticationMethod string    `json:"authentication_method"` // mTLS, JWT, etc.
+	ConnectionCount      int       `json:"connection_count"`      // Number of reconnections
 }
 
 // WorkflowExecution represents a workflow execution during HA testing
 type WorkflowExecution struct {
-	WorkflowID   string                 `json:"workflow_id"`
-	ExecutionID  string                 `json:"execution_id"`
-	StewardID    string                 `json:"steward_id"`
-	Status       string                 `json:"status"` // running, completed, failed, interrupted
-	StartedAt    time.Time              `json:"started_at"`
-	CompletedAt  *time.Time             `json:"completed_at,omitempty"`
-	Steps        []WorkflowStep         `json:"steps"`
-	Failover     bool                   `json:"failover"`     // Whether failover occurred during execution
-	Resume       bool                   `json:"resume"`       // Whether execution was resumed after failover
-	Data         map[string]interface{} `json:"data"`
+	WorkflowID  string                 `json:"workflow_id"`
+	ExecutionID string                 `json:"execution_id"`
+	StewardID   string                 `json:"steward_id"`
+	Status      string                 `json:"status"` // running, completed, failed, interrupted
+	StartedAt   time.Time              `json:"started_at"`
+	CompletedAt *time.Time             `json:"completed_at,omitempty"`
+	Steps       []WorkflowStep         `json:"steps"`
+	Failover    bool                   `json:"failover"` // Whether failover occurred during execution
+	Resume      bool                   `json:"resume"`   // Whether execution was resumed after failover
+	Data        map[string]interface{} `json:"data"`
 }
 
 // WorkflowStep represents a step in a workflow execution

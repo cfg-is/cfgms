@@ -8,8 +8,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
 // InheritanceResolver handles configuration inheritance across tenant hierarchy
@@ -36,31 +36,31 @@ func NewInheritanceResolverWithStorageManager(storageManager *interfaces.Storage
 
 // EffectiveConfiguration represents the final configuration after inheritance
 type EffectiveConfiguration struct {
-	StewardID   string                      `json:"steward_id"`
-	TenantID    string                      `json:"tenant_id"`
-	Config      *stewardconfig.StewardConfig `json:"config"`
-	Sources     map[string]*InheritanceSource `json:"sources"`       // Tracks source of each configuration element
-	GeneratedAt time.Time                   `json:"generated_at"`
+	StewardID   string                        `json:"steward_id"`
+	TenantID    string                        `json:"tenant_id"`
+	Config      *stewardconfig.StewardConfig  `json:"config"`
+	Sources     map[string]*InheritanceSource `json:"sources"` // Tracks source of each configuration element
+	GeneratedAt time.Time                     `json:"generated_at"`
 }
 
 // InheritanceSource tracks where a configuration element came from
 type InheritanceSource struct {
-	Level       int       `json:"level"`        // 0=MSP, 1=Client, 2=Group, 3=Device
-	TenantID    string    `json:"tenant_id"`
-	ConfigName  string    `json:"config_name"`
-	Version     int64     `json:"version"`
-	UpdatedAt   time.Time `json:"updated_at"`
-	Source      string    `json:"source"`       // Description of the source
+	Level      int       `json:"level"` // 0=MSP, 1=Client, 2=Group, 3=Device
+	TenantID   string    `json:"tenant_id"`
+	ConfigName string    `json:"config_name"`
+	Version    int64     `json:"version"`
+	UpdatedAt  time.Time `json:"updated_at"`
+	Source     string    `json:"source"` // Description of the source
 }
 
 // InheritanceLevel represents the hierarchy levels in multi-tenant configuration
 type InheritanceLevel int
 
 const (
-	LevelMSP    InheritanceLevel = 0  // MSP-wide policies
-	LevelClient InheritanceLevel = 1  // Client-specific overrides
-	LevelGroup  InheritanceLevel = 2  // Group configurations
-	LevelDevice InheritanceLevel = 3  // Device-specific configurations
+	LevelMSP    InheritanceLevel = 0 // MSP-wide policies
+	LevelClient InheritanceLevel = 1 // Client-specific overrides
+	LevelGroup  InheritanceLevel = 2 // Group configurations
+	LevelDevice InheritanceLevel = 3 // Device-specific configurations
 )
 
 // ResolveConfiguration resolves configuration with full tenant hierarchy inheritance
@@ -99,7 +99,7 @@ func (ir *InheritanceResolver) ResolveConfiguration(ctx context.Context, tenantI
 func (ir *InheritanceResolver) getTenantPath(ctx context.Context, tenantID string) ([]string, error) {
 	// Get the tenant hierarchy using ClientTenantStore
 	// This is a simplified implementation - full implementation would traverse the hierarchy
-	
+
 	// For now, return a basic path structure
 	// In full implementation, this would query the tenant store for the complete hierarchy
 	return []string{"msp", tenantID}, nil
@@ -110,13 +110,13 @@ func (ir *InheritanceResolver) applyConfigurationLevel(ctx context.Context, effe
 	// Try to get configuration at this level
 	var configNamespace string
 	var configName string
-	
+
 	switch InheritanceLevel(level) {
 	case LevelMSP:
 		configNamespace = "msp-policies"
 		configName = "global"
 	case LevelClient:
-		configNamespace = "client-policies"  
+		configNamespace = "client-policies"
 		configName = tenantID
 	case LevelGroup:
 		configNamespace = "group-policies"
@@ -367,11 +367,11 @@ func (ir *InheritanceResolver) GetInheritanceTrace(ctx context.Context, tenantID
 
 // InheritanceTrace provides detailed tracing of configuration inheritance
 type InheritanceTrace struct {
-	StewardID   string                      `json:"steward_id"`
-	TenantID    string                      `json:"tenant_id"`
+	StewardID   string                        `json:"steward_id"`
+	TenantID    string                        `json:"tenant_id"`
 	Sources     map[string]*InheritanceSource `json:"sources"`
-	Elements    map[string]*TraceElement    `json:"elements"`
-	GeneratedAt time.Time                   `json:"generated_at"`
+	Elements    map[string]*TraceElement      `json:"elements"`
+	GeneratedAt time.Time                     `json:"generated_at"`
 }
 
 // TraceElement represents a single traced configuration element
@@ -402,13 +402,13 @@ func (ir *InheritanceResolver) getConfigValue(config *stewardconfig.StewardConfi
 // getPathDescription returns a human-readable description of a configuration path
 func (ir *InheritanceResolver) getPathDescription(path string) string {
 	descriptions := map[string]string{
-		"steward.id":                                    "Unique identifier for this steward instance",
-		"steward.mode":                                  "Operation mode (standalone or controller)",
-		"steward.logging.level":                         "Logging verbosity level",
-		"steward.logging.format":                        "Log output format",
-		"steward.error_handling.module_load_failure":    "How to handle module loading errors",
-		"steward.error_handling.resource_failure":       "How to handle resource execution errors", 
-		"steward.error_handling.configuration_error":    "How to handle configuration validation errors",
+		"steward.id":             "Unique identifier for this steward instance",
+		"steward.mode":           "Operation mode (standalone or controller)",
+		"steward.logging.level":  "Logging verbosity level",
+		"steward.logging.format": "Log output format",
+		"steward.error_handling.module_load_failure": "How to handle module loading errors",
+		"steward.error_handling.resource_failure":    "How to handle resource execution errors",
+		"steward.error_handling.configuration_error": "How to handle configuration validation errors",
 	}
 
 	if desc, exists := descriptions[path]; exists {

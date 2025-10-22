@@ -666,7 +666,7 @@ func TestDirectoryGroup_TypeChecks(t *testing.T) {
 				MailEnabled:     true,
 				SecurityEnabled: true,
 			},
-			expectedSecurityGroup:     true, // SecurityEnabled = true
+			expectedSecurityGroup:     true,  // SecurityEnabled = true
 			expectedDistributionGroup: false, // !(MailEnabled && !SecurityEnabled)
 			expectedMicrosoft365Group: true,
 		},

@@ -15,11 +15,11 @@
 // Basic usage:
 //
 //	registry := NewProviderRegistry()
-//	
+//
 //	// Register built-in providers
 //	registry.RegisterProvider("microsoft", &MicrosoftProvider{})
 //	registry.RegisterProvider("google", &GoogleProvider{})
-//	
+//
 //	// Execute API operation
 //	result, err := registry.ExecuteOperation(ctx, "microsoft", "users", "create", params)
 package workflow
@@ -89,12 +89,12 @@ type APIResponse struct {
 
 // ProviderInfo contains information about a registered provider
 type ProviderInfo struct {
-	Name                   string
-	Services               []string
-	SupportedAuth          []AuthType
-	ConfigurationSchema    map[string]interface{}
-	DocumentationURL       string
-	Version                string
+	Name                string
+	Services            []string
+	SupportedAuth       []AuthType
+	ConfigurationSchema map[string]interface{}
+	DocumentationURL    string
+	Version             string
 }
 
 // NewProviderRegistry creates a new provider registry

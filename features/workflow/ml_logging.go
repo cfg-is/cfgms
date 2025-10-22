@@ -24,8 +24,8 @@ type MLLogEntry struct {
 	// "variable_change", "api_request", "api_response", "performance_snapshot", "error_pattern"
 
 	// Variable state tracking
-	VariableStates map[string]interface{} `json:"variable_states,omitempty"`
-	VariableChanges []MLVariableChange    `json:"variable_changes,omitempty"`
+	VariableStates  map[string]interface{} `json:"variable_states,omitempty"`
+	VariableChanges []MLVariableChange     `json:"variable_changes,omitempty"`
 
 	// API interaction logging
 	APIRequestData  *APIRequestData  `json:"api_request_data,omitempty"`
@@ -38,17 +38,17 @@ type MLLogEntry struct {
 	ErrorPattern *ErrorPattern `json:"error_pattern,omitempty"`
 
 	// Execution flow tracking
-	ExecutionPath    []string               `json:"execution_path,omitempty"`
-	LoopIteration    int                   `json:"loop_iteration,omitempty"`
-	ParentStepName   string                `json:"parent_step_name,omitempty"`
+	ExecutionPath  []string `json:"execution_path,omitempty"`
+	LoopIteration  int      `json:"loop_iteration,omitempty"`
+	ParentStepName string   `json:"parent_step_name,omitempty"`
 
 	// Timing and duration data
-	StartTime        time.Time             `json:"start_time,omitempty"`
-	EndTime          time.Time             `json:"end_time,omitempty"`
-	Duration         time.Duration         `json:"duration,omitempty"`
+	StartTime time.Time     `json:"start_time,omitempty"`
+	EndTime   time.Time     `json:"end_time,omitempty"`
+	Duration  time.Duration `json:"duration,omitempty"`
 
 	// Additional structured fields for ML analysis
-	MLMetadata       map[string]interface{} `json:"ml_metadata,omitempty"`
+	MLMetadata map[string]interface{} `json:"ml_metadata,omitempty"`
 }
 
 // MLVariableChange tracks individual variable state changes for ML analysis
@@ -63,90 +63,90 @@ type MLVariableChange struct {
 
 // APIRequestData captures complete API request information
 type APIRequestData struct {
-	URL            string                 `json:"url"`
-	Method         string                 `json:"method"`
-	Headers        map[string]string      `json:"headers"`
-	Body           interface{}            `json:"body,omitempty"`
-	Authentication string                 `json:"authentication_type,omitempty"`
-	Timestamp      time.Time              `json:"timestamp"`
-	Timeout        time.Duration          `json:"timeout,omitempty"`
-	RetryAttempt   int                   `json:"retry_attempt,omitempty"`
-	RequestID      string                `json:"request_id,omitempty"`
+	URL            string            `json:"url"`
+	Method         string            `json:"method"`
+	Headers        map[string]string `json:"headers"`
+	Body           interface{}       `json:"body,omitempty"`
+	Authentication string            `json:"authentication_type,omitempty"`
+	Timestamp      time.Time         `json:"timestamp"`
+	Timeout        time.Duration     `json:"timeout,omitempty"`
+	RetryAttempt   int               `json:"retry_attempt,omitempty"`
+	RequestID      string            `json:"request_id,omitempty"`
 }
 
 // APIResponseData captures complete API response information
 type APIResponseData struct {
-	StatusCode       int                    `json:"status_code"`
-	Headers          map[string]string      `json:"headers"`
-	Body             interface{}            `json:"body,omitempty"`
-	ResponseSize     int64                  `json:"response_size_bytes"`
-	ResponseTime     time.Duration          `json:"response_time"`
-	Timestamp        time.Time              `json:"timestamp"`
-	ErrorMessage     string                 `json:"error_message,omitempty"`
-	RequestID        string                 `json:"request_id,omitempty"`
-	NetworkLatency   time.Duration          `json:"network_latency,omitempty"`
-	ProcessingTime   time.Duration          `json:"processing_time,omitempty"`
+	StatusCode     int               `json:"status_code"`
+	Headers        map[string]string `json:"headers"`
+	Body           interface{}       `json:"body,omitempty"`
+	ResponseSize   int64             `json:"response_size_bytes"`
+	ResponseTime   time.Duration     `json:"response_time"`
+	Timestamp      time.Time         `json:"timestamp"`
+	ErrorMessage   string            `json:"error_message,omitempty"`
+	RequestID      string            `json:"request_id,omitempty"`
+	NetworkLatency time.Duration     `json:"network_latency,omitempty"`
+	ProcessingTime time.Duration     `json:"processing_time,omitempty"`
 }
 
 // PerformanceMetrics captures system performance during workflow execution
 type PerformanceMetrics struct {
 	// CPU metrics
-	CPUUsagePercent    float64 `json:"cpu_usage_percent"`
-	GoRoutineCount     int     `json:"goroutine_count"`
-	ThreadCount        int     `json:"thread_count"`
+	CPUUsagePercent float64 `json:"cpu_usage_percent"`
+	GoRoutineCount  int     `json:"goroutine_count"`
+	ThreadCount     int     `json:"thread_count"`
 
 	// Memory metrics
-	MemoryUsageBytes   uint64  `json:"memory_usage_bytes"`
-	MemoryAllocBytes   uint64  `json:"memory_alloc_bytes"`
-	MemorySystemBytes  uint64  `json:"memory_system_bytes"`
-	GCCount            uint32  `json:"gc_count"`
-	GCPauseTime        time.Duration `json:"gc_pause_time"`
+	MemoryUsageBytes  uint64        `json:"memory_usage_bytes"`
+	MemoryAllocBytes  uint64        `json:"memory_alloc_bytes"`
+	MemorySystemBytes uint64        `json:"memory_system_bytes"`
+	GCCount           uint32        `json:"gc_count"`
+	GCPauseTime       time.Duration `json:"gc_pause_time"`
 
 	// Network metrics (when available)
-	NetworkBytesIn     uint64  `json:"network_bytes_in,omitempty"`
-	NetworkBytesOut    uint64  `json:"network_bytes_out,omitempty"`
-	NetworkConnections int     `json:"network_connections,omitempty"`
+	NetworkBytesIn     uint64 `json:"network_bytes_in,omitempty"`
+	NetworkBytesOut    uint64 `json:"network_bytes_out,omitempty"`
+	NetworkConnections int    `json:"network_connections,omitempty"`
 
 	// Disk I/O metrics (when available)
-	DiskReadBytes      uint64  `json:"disk_read_bytes,omitempty"`
-	DiskWriteBytes     uint64  `json:"disk_write_bytes,omitempty"`
+	DiskReadBytes  uint64 `json:"disk_read_bytes,omitempty"`
+	DiskWriteBytes uint64 `json:"disk_write_bytes,omitempty"`
 
 	// Workflow-specific metrics
-	StepExecutionCount int     `json:"step_execution_count"`
-	ActiveStepCount    int     `json:"active_step_count"`
-	QueueDepth         int     `json:"queue_depth,omitempty"`
+	StepExecutionCount int `json:"step_execution_count"`
+	ActiveStepCount    int `json:"active_step_count"`
+	QueueDepth         int `json:"queue_depth,omitempty"`
 
-	Timestamp          time.Time `json:"timestamp"`
+	Timestamp time.Time `json:"timestamp"`
 }
 
 // ErrorPattern captures structured error information for pattern analysis
 type ErrorPattern struct {
-	ErrorCode        string                 `json:"error_code"`
-	ErrorMessage     string                 `json:"error_message"`
-	ErrorType        string                 `json:"error_type"`
-	StackTrace       []string               `json:"stack_trace,omitempty"`
-	ContextData      map[string]interface{} `json:"context_data,omitempty"`
-	PreviousErrors   []string               `json:"previous_errors,omitempty"`
-	RecoveryActions  []string               `json:"recovery_actions,omitempty"`
-	RetryAttempt     int                   `json:"retry_attempt"`
-	IsFatal          bool                  `json:"is_fatal"`
-	IsRecoverable    bool                  `json:"is_recoverable"`
-	FailureCategory  string                `json:"failure_category"` // "network", "auth", "data", "logic", "resource"
-	Timestamp        time.Time             `json:"timestamp"`
+	ErrorCode       string                 `json:"error_code"`
+	ErrorMessage    string                 `json:"error_message"`
+	ErrorType       string                 `json:"error_type"`
+	StackTrace      []string               `json:"stack_trace,omitempty"`
+	ContextData     map[string]interface{} `json:"context_data,omitempty"`
+	PreviousErrors  []string               `json:"previous_errors,omitempty"`
+	RecoveryActions []string               `json:"recovery_actions,omitempty"`
+	RetryAttempt    int                    `json:"retry_attempt"`
+	IsFatal         bool                   `json:"is_fatal"`
+	IsRecoverable   bool                   `json:"is_recoverable"`
+	FailureCategory string                 `json:"failure_category"` // "network", "auth", "data", "logic", "resource"
+	Timestamp       time.Time              `json:"timestamp"`
 }
 
 // MLLogger provides enhanced logging capabilities for machine learning analysis
 type MLLogger struct {
-	globalLogger     *logging.ModuleLogger
-	loggingProvider  interfaces.LoggingProvider
-	perfCollector    *PerformanceCollector
-	enabled          bool
-	bufferSize       int
-	flushInterval    time.Duration
-	entryBuffer      []MLLogEntry
-	bufferMutex      sync.RWMutex
-	stopCh           chan struct{}
-	wg               sync.WaitGroup
+	globalLogger    *logging.ModuleLogger
+	loggingProvider interfaces.LoggingProvider
+	perfCollector   *PerformanceCollector
+	enabled         bool
+	bufferSize      int
+	flushInterval   time.Duration
+	entryBuffer     []MLLogEntry
+	bufferMutex     sync.RWMutex
+	stopCh          chan struct{}
+	wg              sync.WaitGroup
 }
 
 // NewMLLogger creates a new ML-enhanced logger for workflow execution
@@ -176,13 +176,13 @@ func (ml *MLLogger) LogExecutionStart(execution *WorkflowExecution, workflow Wor
 	}
 
 	entry := MLLogEntry{
-		Timestamp:        time.Now(),
-		ExecutionID:      execution.ID,
-		WorkflowName:     execution.WorkflowName,
-		EventType:        "execution_start",
-		VariableStates:   execution.GetVariables(),
+		Timestamp:          time.Now(),
+		ExecutionID:        execution.ID,
+		WorkflowName:       execution.WorkflowName,
+		EventType:          "execution_start",
+		VariableStates:     execution.GetVariables(),
 		PerformanceMetrics: ml.perfCollector.CollectMetrics(),
-		StartTime:        execution.StartTime,
+		StartTime:          execution.StartTime,
 		MLMetadata: map[string]interface{}{
 			"workflow_version": workflow.Version,
 			"total_steps":      len(workflow.Steps),
@@ -205,19 +205,19 @@ func (ml *MLLogger) LogExecutionEnd(execution *WorkflowExecution) {
 	}
 
 	entry := MLLogEntry{
-		Timestamp:        time.Now(),
-		ExecutionID:      execution.ID,
-		WorkflowName:     execution.WorkflowName,
-		EventType:        "execution_end",
-		VariableStates:   execution.GetVariables(),
+		Timestamp:          time.Now(),
+		ExecutionID:        execution.ID,
+		WorkflowName:       execution.WorkflowName,
+		EventType:          "execution_end",
+		VariableStates:     execution.GetVariables(),
 		PerformanceMetrics: ml.perfCollector.CollectMetrics(),
-		StartTime:        execution.StartTime,
-		EndTime:          endTime,
-		Duration:         endTime.Sub(execution.StartTime),
+		StartTime:          execution.StartTime,
+		EndTime:            endTime,
+		Duration:           endTime.Sub(execution.StartTime),
 		MLMetadata: map[string]interface{}{
-			"final_status":     execution.GetStatus(),
-			"total_steps":      len(execution.GetStepResults()),
-			"error_message":    execution.GetError(),
+			"final_status":  execution.GetStatus(),
+			"total_steps":   len(execution.GetStepResults()),
+			"error_message": execution.GetError(),
 		},
 	}
 
@@ -231,15 +231,15 @@ func (ml *MLLogger) LogStepStart(execution *WorkflowExecution, step Step, execut
 	}
 
 	entry := MLLogEntry{
-		Timestamp:        time.Now(),
-		ExecutionID:      execution.ID,
-		WorkflowName:     execution.WorkflowName,
-		StepName:         step.Name,
-		EventType:        "step_start",
-		VariableStates:   execution.GetVariables(),
-		ExecutionPath:    executionPath,
+		Timestamp:          time.Now(),
+		ExecutionID:        execution.ID,
+		WorkflowName:       execution.WorkflowName,
+		StepName:           step.Name,
+		EventType:          "step_start",
+		VariableStates:     execution.GetVariables(),
+		ExecutionPath:      executionPath,
 		PerformanceMetrics: ml.perfCollector.CollectMetrics(),
-		StartTime:        time.Now(),
+		StartTime:          time.Now(),
 		MLMetadata: map[string]interface{}{
 			"step_type":   step.Type,
 			"step_config": step.Config,
@@ -257,26 +257,26 @@ func (ml *MLLogger) LogStepEnd(execution *WorkflowExecution, step Step, result S
 	}
 
 	entry := MLLogEntry{
-		Timestamp:        time.Now(),
-		ExecutionID:      execution.ID,
-		WorkflowName:     execution.WorkflowName,
-		StepName:         step.Name,
-		EventType:        "step_end",
-		VariableStates:   execution.GetVariables(),
-		ExecutionPath:    executionPath,
+		Timestamp:          time.Now(),
+		ExecutionID:        execution.ID,
+		WorkflowName:       execution.WorkflowName,
+		StepName:           step.Name,
+		EventType:          "step_end",
+		VariableStates:     execution.GetVariables(),
+		ExecutionPath:      executionPath,
 		PerformanceMetrics: ml.perfCollector.CollectMetrics(),
-		StartTime:        result.StartTime,
-		EndTime:          func() time.Time {
+		StartTime:          result.StartTime,
+		EndTime: func() time.Time {
 			if result.EndTime != nil {
 				return *result.EndTime
 			}
 			return time.Time{}
 		}(),
-		Duration:         result.Duration,
+		Duration: result.Duration,
 		MLMetadata: map[string]interface{}{
-			"step_status":   result.Status,
-			"retry_count":   result.RetryCount,
-			"step_output":   result.Output,
+			"step_status": result.Status,
+			"retry_count": result.RetryCount,
+			"step_output": result.Output,
 		},
 	}
 
@@ -334,11 +334,11 @@ func (ml *MLLogger) LogAPIRequest(execution *WorkflowExecution, stepName, url, m
 	}
 
 	entry := MLLogEntry{
-		Timestamp:   time.Now(),
-		ExecutionID: execution.ID,
+		Timestamp:    time.Now(),
+		ExecutionID:  execution.ID,
 		WorkflowName: execution.WorkflowName,
-		StepName:    stepName,
-		EventType:   "api_request",
+		StepName:     stepName,
+		EventType:    "api_request",
 		APIRequestData: &APIRequestData{
 			URL:       url,
 			Method:    method,
@@ -366,11 +366,11 @@ func (ml *MLLogger) LogAPIResponse(execution *WorkflowExecution, stepName string
 	}
 
 	entry := MLLogEntry{
-		Timestamp:   time.Now(),
-		ExecutionID: execution.ID,
+		Timestamp:    time.Now(),
+		ExecutionID:  execution.ID,
 		WorkflowName: execution.WorkflowName,
-		StepName:    stepName,
-		EventType:   "api_response",
+		StepName:     stepName,
+		EventType:    "api_response",
 		APIResponseData: &APIResponseData{
 			StatusCode:   statusCode,
 			Headers:      headers,
@@ -410,11 +410,11 @@ func (ml *MLLogger) LogErrorPattern(execution *WorkflowExecution, stepName strin
 	}
 
 	entry := MLLogEntry{
-		Timestamp:   time.Now(),
-		ExecutionID: execution.ID,
+		Timestamp:    time.Now(),
+		ExecutionID:  execution.ID,
 		WorkflowName: execution.WorkflowName,
-		StepName:    stepName,
-		EventType:   "error_pattern",
+		StepName:     stepName,
+		EventType:    "error_pattern",
 		ErrorPattern: &ErrorPattern{
 			ErrorCode:       string(err.Code),
 			ErrorMessage:    err.Message,
@@ -503,11 +503,11 @@ func (ml *MLLogger) convertToLogEntry(mlEntry MLLogEntry) interfaces.LogEntry {
 		ServiceName: "workflow_engine",
 		Component:   "ml_logger",
 		Fields: map[string]interface{}{
-			"ml_event_type":    mlEntry.EventType,
-			"execution_id":     mlEntry.ExecutionID,
-			"workflow_name":    mlEntry.WorkflowName,
-			"step_name":        mlEntry.StepName,
-			"ml_data":          string(mlData),
+			"ml_event_type": mlEntry.EventType,
+			"execution_id":  mlEntry.ExecutionID,
+			"workflow_name": mlEntry.WorkflowName,
+			"step_name":     mlEntry.StepName,
+			"ml_data":       string(mlData),
 		},
 	}
 }

@@ -61,9 +61,9 @@ type CachedAuthDecision struct {
 type CacheLevel string
 
 const (
-	CacheLevelL1      CacheLevel = "l1"       // Fast in-memory cache
-	CacheLevelL2      CacheLevel = "l2"       // Session-based cache
-	CacheLevelL3      CacheLevel = "l3"       // Distributed cache (future)
+	CacheLevelL1 CacheLevel = "l1" // Fast in-memory cache
+	CacheLevelL2 CacheLevel = "l2" // Session-based cache
+	CacheLevelL3 CacheLevel = "l3" // Distributed cache (future)
 )
 
 // CacheSource defines the source of cached data
@@ -71,7 +71,7 @@ type CacheSource string
 
 const (
 	CacheSourceRBAC       CacheSource = "rbac"
-	CacheSourceJIT        CacheSource = "jit"  
+	CacheSourceJIT        CacheSource = "jit"
 	CacheSourceRisk       CacheSource = "risk"
 	CacheSourceContinuous CacheSource = "continuous"
 	CacheSourceExternal   CacheSource = "external"
@@ -83,67 +83,67 @@ type CacheConfig struct {
 	L1MaxSize         int           `json:"l1_max_size"`
 	L1TTL             time.Duration `json:"l1_ttl"`
 	L1CleanupInterval time.Duration `json:"l1_cleanup_interval"`
-	
+
 	// L2 Cache settings
 	L2MaxSize         int           `json:"l2_max_size"`
 	L2TTL             time.Duration `json:"l2_ttl"`
 	L2CleanupInterval time.Duration `json:"l2_cleanup_interval"`
-	
+
 	// Performance settings
-	MaxLatencyMs      int           `json:"max_latency_ms"`
-	EnableCompression bool          `json:"enable_compression"`
-	EnableEncryption  bool          `json:"enable_encryption"`
-	
+	MaxLatencyMs      int  `json:"max_latency_ms"`
+	EnableCompression bool `json:"enable_compression"`
+	EnableEncryption  bool `json:"enable_encryption"`
+
 	// Cache behavior
-	CacheNegativeResults bool        `json:"cache_negative_results"`
-	CacheFailures       bool          `json:"cache_failures"`
-	RefreshThreshold    float64       `json:"refresh_threshold"`  // Refresh when TTL < threshold
-	
+	CacheNegativeResults bool    `json:"cache_negative_results"`
+	CacheFailures        bool    `json:"cache_failures"`
+	RefreshThreshold     float64 `json:"refresh_threshold"` // Refresh when TTL < threshold
+
 	// Distributed cache (future)
-	EnableDistributed   bool          `json:"enable_distributed"`
-	RedisURL           string         `json:"redis_url,omitempty"`
-	RedisPassword      string         `json:"redis_password,omitempty"`
+	EnableDistributed bool   `json:"enable_distributed"`
+	RedisURL          string `json:"redis_url,omitempty"`
+	RedisPassword     string `json:"redis_password,omitempty"`
 }
 
 // CacheStats tracks cache performance statistics
 type CacheStats struct {
 	// Hit/Miss statistics
-	TotalRequests     int64     `json:"total_requests"`
-	CacheHits         int64     `json:"cache_hits"`
-	CacheMisses       int64     `json:"cache_misses"`
-	HitRate           float64   `json:"hit_rate"`
-	
+	TotalRequests int64   `json:"total_requests"`
+	CacheHits     int64   `json:"cache_hits"`
+	CacheMisses   int64   `json:"cache_misses"`
+	HitRate       float64 `json:"hit_rate"`
+
 	// Performance statistics
-	AverageLatencyMs  float64   `json:"average_latency_ms"`
-	L1LatencyMs       float64   `json:"l1_latency_ms"`
-	L2LatencyMs       float64   `json:"l2_latency_ms"`
-	
+	AverageLatencyMs float64 `json:"average_latency_ms"`
+	L1LatencyMs      float64 `json:"l1_latency_ms"`
+	L2LatencyMs      float64 `json:"l2_latency_ms"`
+
 	// Cache level statistics
-	L1Hits            int64     `json:"l1_hits"`
-	L1Misses          int64     `json:"l1_misses"`
-	L2Hits            int64     `json:"l2_hits"`
-	L2Misses          int64     `json:"l2_misses"`
-	
+	L1Hits   int64 `json:"l1_hits"`
+	L1Misses int64 `json:"l1_misses"`
+	L2Hits   int64 `json:"l2_hits"`
+	L2Misses int64 `json:"l2_misses"`
+
 	// Cache size and memory
-	L1Size            int       `json:"l1_size"`
-	L2Size            int       `json:"l2_size"`
-	TotalSize         int       `json:"total_size"`
-	MemoryUsageMB     float64   `json:"memory_usage_mb"`
-	
+	L1Size        int     `json:"l1_size"`
+	L2Size        int     `json:"l2_size"`
+	TotalSize     int     `json:"total_size"`
+	MemoryUsageMB float64 `json:"memory_usage_mb"`
+
 	// Eviction statistics
-	L1Evictions       int64     `json:"l1_evictions"`
-	L2Evictions       int64     `json:"l2_evictions"`
-	ExpiredEntries    int64     `json:"expired_entries"`
-	
+	L1Evictions    int64 `json:"l1_evictions"`
+	L2Evictions    int64 `json:"l2_evictions"`
+	ExpiredEntries int64 `json:"expired_entries"`
+
 	// Invalidation statistics
-	Invalidations     int64     `json:"invalidations"`
-	BulkInvalidations int64     `json:"bulk_invalidations"`
-	
+	Invalidations     int64 `json:"invalidations"`
+	BulkInvalidations int64 `json:"bulk_invalidations"`
+
 	// Time tracking
-	LastCleanup       time.Time `json:"last_cleanup"`
-	LastStats         time.Time `json:"last_stats"`
-	
-	mutex            sync.RWMutex
+	LastCleanup time.Time `json:"last_cleanup"`
+	LastStats   time.Time `json:"last_stats"`
+
+	mutex sync.RWMutex
 }
 
 // CacheInvalidationRequest represents a request to invalidate cache entries
@@ -162,21 +162,21 @@ type CacheInvalidationRequest struct {
 type InvalidationType string
 
 const (
-	InvalidationTypeSession    InvalidationType = "session"     // Invalidate all entries for a session
-	InvalidationTypeSubject    InvalidationType = "subject"     // Invalidate all entries for a subject
-	InvalidationTypeTenant     InvalidationType = "tenant"      // Invalidate all entries for a tenant
-	InvalidationTypePermission InvalidationType = "permission"  // Invalidate specific permission
-	InvalidationTypeAll        InvalidationType = "all"         // Invalidate all cache entries
+	InvalidationTypeSession    InvalidationType = "session"    // Invalidate all entries for a session
+	InvalidationTypeSubject    InvalidationType = "subject"    // Invalidate all entries for a subject
+	InvalidationTypeTenant     InvalidationType = "tenant"     // Invalidate all entries for a tenant
+	InvalidationTypePermission InvalidationType = "permission" // Invalidate specific permission
+	InvalidationTypeAll        InvalidationType = "all"        // Invalidate all cache entries
 )
 
 // NewCacheManager creates a new cache manager using centralized pkg/cache
 func NewCacheManager(ttl time.Duration, maxLatencyMs int) *CacheManager {
 	config := &CacheConfig{
-		L1MaxSize:            10000,         // 10k entries in L1
-		L1TTL:                ttl,           // Use provided TTL
+		L1MaxSize:            10000, // 10k entries in L1
+		L1TTL:                ttl,   // Use provided TTL
 		L1CleanupInterval:    1 * time.Minute,
-		L2MaxSize:            100000,        // 100k entries in L2
-		L2TTL:                ttl * 2,       // L2 has longer TTL
+		L2MaxSize:            100000,  // 100k entries in L2
+		L2TTL:                ttl * 2, // L2 has longer TTL
 		L2CleanupInterval:    5 * time.Minute,
 		MaxLatencyMs:         maxLatencyMs,
 		CacheNegativeResults: false, // Don't cache denials by default
@@ -314,7 +314,7 @@ func (cm *CacheManager) CacheAuth(request *ContinuousAuthRequest, response *Cont
 // InvalidateCache invalidates cache entries based on the request
 func (cm *CacheManager) InvalidateCache(request *CacheInvalidationRequest) error {
 	request.Timestamp = time.Now()
-	
+
 	switch request.InvalidationType {
 	case InvalidationTypeSession:
 		return cm.invalidateSession(request.SessionID, request.Reason)
@@ -397,22 +397,22 @@ func (cm *CacheManager) GetCacheStats() *CacheStats {
 	}
 
 	return &CacheStats{
-		TotalRequests:     totalRequests,
-		CacheHits:         totalHits,
-		CacheMisses:       totalMisses,
-		HitRate:           hitRate,
-		L1Hits:            l1Stats.Hits,
-		L1Misses:          l1Stats.Misses,
-		L2Hits:            l2Stats.Hits,
-		L2Misses:          l2Stats.Misses,
-		L1Size:            l1Stats.Size,
-		L2Size:            l2Stats.Size,
-		TotalSize:         l1Stats.Size + l2Stats.Size,
-		L1Evictions:       l1Stats.Evictions,
-		L2Evictions:       l2Stats.Evictions,
-		ExpiredEntries:    l1Stats.ItemsExpired + l2Stats.ItemsExpired,
-		LastCleanup:       l1Stats.LastCleanup,
-		LastStats:         time.Now(),
+		TotalRequests:  totalRequests,
+		CacheHits:      totalHits,
+		CacheMisses:    totalMisses,
+		HitRate:        hitRate,
+		L1Hits:         l1Stats.Hits,
+		L1Misses:       l1Stats.Misses,
+		L2Hits:         l2Stats.Hits,
+		L2Misses:       l2Stats.Misses,
+		L1Size:         l1Stats.Size,
+		L2Size:         l2Stats.Size,
+		TotalSize:      l1Stats.Size + l2Stats.Size,
+		L1Evictions:    l1Stats.Evictions,
+		L2Evictions:    l2Stats.Evictions,
+		ExpiredEntries: l1Stats.ItemsExpired + l2Stats.ItemsExpired,
+		LastCleanup:    l1Stats.LastCleanup,
+		LastStats:      time.Now(),
 	}
 }
 

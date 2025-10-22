@@ -41,14 +41,14 @@ func (m *MockLoggingProvider) GetVersion() string {
 
 func (m *MockLoggingProvider) GetCapabilities() interfaces.LoggingCapabilities {
 	return interfaces.LoggingCapabilities{
-		SupportsCompression:      true,
+		SupportsCompression:       true,
 		SupportsRetentionPolicies: true,
 		SupportsRealTimeQueries:   true,
-		SupportsBatchWrites:      true,
-		SupportsTimeRangeQueries: true,
-		MaxEntriesPerSecond:     10000,
-		MaxBatchSize:            1000,
-		DefaultRetentionDays:    30,
+		SupportsBatchWrites:       true,
+		SupportsTimeRangeQueries:  true,
+		MaxEntriesPerSecond:       10000,
+		MaxBatchSize:              1000,
+		DefaultRetentionDays:      30,
 	}
 }
 
@@ -326,13 +326,13 @@ func TestMLLogger_LogErrorPattern(t *testing.T) {
 
 	// Create a workflow error
 	workflowErr := &WorkflowError{
-		Code:        ErrorCodeHTTPRequest,
-		Message:     "API call failed",
-		StepName:    "api_step",
-		StepType:    StepTypeHTTP,
-		Details:     map[string]interface{}{"status_code": 500},
-		Timestamp:   time.Now(),
-		Recoverable: true,
+		Code:         ErrorCodeHTTPRequest,
+		Message:      "API call failed",
+		StepName:     "api_step",
+		StepType:     StepTypeHTTP,
+		Details:      map[string]interface{}{"status_code": 500},
+		Timestamp:    time.Now(),
+		Recoverable:  true,
 		RetryAttempt: 1,
 	}
 

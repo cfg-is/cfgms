@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/lib/pq"
+
 	"github.com/cfgis/cfgms/pkg/logging/interfaces"
 )
 

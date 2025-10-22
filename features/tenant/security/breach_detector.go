@@ -13,57 +13,57 @@ import (
 
 // BreachDetector monitors tenant activities for unusual access patterns
 type BreachDetector struct {
-	tenantProfiles    map[string]*TenantAccessProfile
-	alertThresholds   *AlertThresholds
-	validator         *security.Validator
-	auditLogger       *TenantSecurityAuditLogger
-	isolationEngine   *TenantIsolationEngine
-	mutex             sync.RWMutex
-	alertCallbacks    []AlertCallback
+	tenantProfiles  map[string]*TenantAccessProfile
+	alertThresholds *AlertThresholds
+	validator       *security.Validator
+	auditLogger     *TenantSecurityAuditLogger
+	isolationEngine *TenantIsolationEngine
+	mutex           sync.RWMutex
+	alertCallbacks  []AlertCallback
 }
 
 // TenantAccessProfile stores historical access patterns for a tenant
 type TenantAccessProfile struct {
-	TenantID              string                    `json:"tenant_id"`
-	BaselineMetrics       *BaselineMetrics          `json:"baseline_metrics"`
-	RecentActivity        []*AccessEvent            `json:"recent_activity"`
-	SuspiciousActivities  []*SuspiciousActivity     `json:"suspicious_activities"`
-	GeographicBaseline    map[string]int            `json:"geographic_baseline"`
-	DeviceFingerprints    map[string]*DeviceProfile `json:"device_fingerprints"`
-	TimePatterns          *TimePatternProfile       `json:"time_patterns"`
-	LastUpdated           time.Time                 `json:"last_updated"`
-	RiskScore             float64                   `json:"risk_score"`
-	BreachIndicators      []*BreachIndicator        `json:"breach_indicators"`
+	TenantID             string                    `json:"tenant_id"`
+	BaselineMetrics      *BaselineMetrics          `json:"baseline_metrics"`
+	RecentActivity       []*AccessEvent            `json:"recent_activity"`
+	SuspiciousActivities []*SuspiciousActivity     `json:"suspicious_activities"`
+	GeographicBaseline   map[string]int            `json:"geographic_baseline"`
+	DeviceFingerprints   map[string]*DeviceProfile `json:"device_fingerprints"`
+	TimePatterns         *TimePatternProfile       `json:"time_patterns"`
+	LastUpdated          time.Time                 `json:"last_updated"`
+	RiskScore            float64                   `json:"risk_score"`
+	BreachIndicators     []*BreachIndicator        `json:"breach_indicators"`
 }
 
 // BaselineMetrics represents normal behavior patterns for a tenant
 type BaselineMetrics struct {
-	AvgRequestsPerHour    float64   `json:"avg_requests_per_hour"`
-	PeakRequestsPerHour   int       `json:"peak_requests_per_hour"`
-	TypicalIPAddresses    []string  `json:"typical_ip_addresses"`
-	TypicalUserAgents     []string  `json:"typical_user_agents"`
-	TypicalOperations     []string  `json:"typical_operations"`
-	TypicalTimezones      []string  `json:"typical_timezones"`
-	EstablishedDate       time.Time `json:"established_date"`
-	UpdateCount           int       `json:"update_count"`
-	ConfidenceScore       float64   `json:"confidence_score"`
+	AvgRequestsPerHour  float64   `json:"avg_requests_per_hour"`
+	PeakRequestsPerHour int       `json:"peak_requests_per_hour"`
+	TypicalIPAddresses  []string  `json:"typical_ip_addresses"`
+	TypicalUserAgents   []string  `json:"typical_user_agents"`
+	TypicalOperations   []string  `json:"typical_operations"`
+	TypicalTimezones    []string  `json:"typical_timezones"`
+	EstablishedDate     time.Time `json:"established_date"`
+	UpdateCount         int       `json:"update_count"`
+	ConfidenceScore     float64   `json:"confidence_score"`
 }
 
 // AccessEvent represents a single access attempt or operation
 type AccessEvent struct {
-	ID            string            `json:"id"`
-	TenantID      string            `json:"tenant_id"`
-	UserID        string            `json:"user_id,omitempty"`
-	Operation     string            `json:"operation"`
-	Resource      string            `json:"resource"`
-	SourceIP      string            `json:"source_ip"`
-	UserAgent     string            `json:"user_agent"`
-	Timestamp     time.Time         `json:"timestamp"`
-	Success       bool              `json:"success"`
-	ResponseTime  time.Duration     `json:"response_time"`
-	DataSize      int64             `json:"data_size"`
-	Metadata      map[string]string `json:"metadata,omitempty"`
-	AnomalyScore  float64           `json:"anomaly_score"`
+	ID           string            `json:"id"`
+	TenantID     string            `json:"tenant_id"`
+	UserID       string            `json:"user_id,omitempty"`
+	Operation    string            `json:"operation"`
+	Resource     string            `json:"resource"`
+	SourceIP     string            `json:"source_ip"`
+	UserAgent    string            `json:"user_agent"`
+	Timestamp    time.Time         `json:"timestamp"`
+	Success      bool              `json:"success"`
+	ResponseTime time.Duration     `json:"response_time"`
+	DataSize     int64             `json:"data_size"`
+	Metadata     map[string]string `json:"metadata,omitempty"`
+	AnomalyScore float64           `json:"anomaly_score"`
 }
 
 // SuspiciousActivity represents detected suspicious behavior
@@ -83,23 +83,23 @@ type SuspiciousActivity struct {
 
 // DeviceProfile represents characteristics of a device/client
 type DeviceProfile struct {
-	Fingerprint   string            `json:"fingerprint"`
-	UserAgent     string            `json:"user_agent"`
-	IPAddresses   []string          `json:"ip_addresses"`
-	FirstSeen     time.Time         `json:"first_seen"`
-	LastSeen      time.Time         `json:"last_seen"`
-	AccessCount   int               `json:"access_count"`
-	TrustScore    float64           `json:"trust_score"`
+	Fingerprint     string            `json:"fingerprint"`
+	UserAgent       string            `json:"user_agent"`
+	IPAddresses     []string          `json:"ip_addresses"`
+	FirstSeen       time.Time         `json:"first_seen"`
+	LastSeen        time.Time         `json:"last_seen"`
+	AccessCount     int               `json:"access_count"`
+	TrustScore      float64           `json:"trust_score"`
 	Characteristics map[string]string `json:"characteristics"`
 }
 
 // TimePatternProfile represents temporal access patterns
 type TimePatternProfile struct {
-	HourlyDistribution [24]int           `json:"hourly_distribution"`
-	DailyDistribution  [7]int            `json:"daily_distribution"`
-	MonthlyTrends      map[string]int    `json:"monthly_trends"`
-	TimezonePreference string            `json:"timezone_preference"`
-	ActiveHours        *ActiveHoursRange `json:"active_hours"`
+	HourlyDistribution [24]int            `json:"hourly_distribution"`
+	DailyDistribution  [7]int             `json:"daily_distribution"`
+	MonthlyTrends      map[string]int     `json:"monthly_trends"`
+	TimezonePreference string             `json:"timezone_preference"`
+	ActiveHours        *ActiveHoursRange  `json:"active_hours"`
 	Seasonality        map[string]float64 `json:"seasonality"`
 }
 
@@ -111,26 +111,26 @@ type ActiveHoursRange struct {
 
 // BreachIndicator represents potential security breach indicators
 type BreachIndicator struct {
-	ID          string                `json:"id"`
-	Type        BreachIndicatorType   `json:"type"`
-	Severity    SeverityLevel         `json:"severity"`
-	Description string                `json:"description"`
-	Confidence  float64               `json:"confidence"`
-	Evidence    []string              `json:"evidence"`
-	DetectedAt  time.Time             `json:"detected_at"`
-	Mitigated   bool                  `json:"mitigated"`
+	ID          string              `json:"id"`
+	Type        BreachIndicatorType `json:"type"`
+	Severity    SeverityLevel       `json:"severity"`
+	Description string              `json:"description"`
+	Confidence  float64             `json:"confidence"`
+	Evidence    []string            `json:"evidence"`
+	DetectedAt  time.Time           `json:"detected_at"`
+	Mitigated   bool                `json:"mitigated"`
 }
 
 // AlertThresholds defines detection sensitivity
 type AlertThresholds struct {
-	RequestVolumeMultiplier    float64 `json:"request_volume_multiplier"`     // 3.0 = 300% of baseline
-	NewIPAddressWindow         int     `json:"new_ip_address_window"`         // Minutes to consider IP "new"
-	GeographicDistanceKm       float64 `json:"geographic_distance_km"`        // Suspicious geographic distance
-	FailedLoginThreshold       int     `json:"failed_login_threshold"`        // Failed attempts before alert
-	UnusualTimeWindow          int     `json:"unusual_time_window"`           // Hours outside normal activity
-	DataExfiltrationSizeMB     int64   `json:"data_exfiltration_size_mb"`     // MB threshold for data access
-	ConcurrentSessionThreshold int     `json:"concurrent_session_threshold"`  // Max concurrent sessions
-	VelocityCheckWindow        int     `json:"velocity_check_window"`         // Minutes for velocity checks
+	RequestVolumeMultiplier    float64 `json:"request_volume_multiplier"`    // 3.0 = 300% of baseline
+	NewIPAddressWindow         int     `json:"new_ip_address_window"`        // Minutes to consider IP "new"
+	GeographicDistanceKm       float64 `json:"geographic_distance_km"`       // Suspicious geographic distance
+	FailedLoginThreshold       int     `json:"failed_login_threshold"`       // Failed attempts before alert
+	UnusualTimeWindow          int     `json:"unusual_time_window"`          // Hours outside normal activity
+	DataExfiltrationSizeMB     int64   `json:"data_exfiltration_size_mb"`    // MB threshold for data access
+	ConcurrentSessionThreshold int     `json:"concurrent_session_threshold"` // Max concurrent sessions
+	VelocityCheckWindow        int     `json:"velocity_check_window"`        // Minutes for velocity checks
 }
 
 // Enum types
@@ -140,16 +140,16 @@ type BreachIndicatorType string
 
 const (
 	// Suspicious Activity Types
-	SuspiciousVolumeSpike     SuspiciousActivityType = "volume_spike"
-	SuspiciousNewLocation     SuspiciousActivityType = "new_location"
-	SuspiciousTimeAccess      SuspiciousActivityType = "unusual_time"
-	SuspiciousFailedLogins    SuspiciousActivityType = "failed_logins"
-	SuspiciousDataAccess      SuspiciousActivityType = "excessive_data_access"
-	SuspiciousVelocity        SuspiciousActivityType = "impossible_velocity"
-	SuspiciousUserAgent       SuspiciousActivityType = "suspicious_user_agent"
-	SuspiciousPrivilegeEsc    SuspiciousActivityType = "privilege_escalation"
-	SuspiciousNewDevice       SuspiciousActivityType = "new_device"
-	SuspiciousConcurrentSess  SuspiciousActivityType = "concurrent_sessions"
+	SuspiciousVolumeSpike    SuspiciousActivityType = "volume_spike"
+	SuspiciousNewLocation    SuspiciousActivityType = "new_location"
+	SuspiciousTimeAccess     SuspiciousActivityType = "unusual_time"
+	SuspiciousFailedLogins   SuspiciousActivityType = "failed_logins"
+	SuspiciousDataAccess     SuspiciousActivityType = "excessive_data_access"
+	SuspiciousVelocity       SuspiciousActivityType = "impossible_velocity"
+	SuspiciousUserAgent      SuspiciousActivityType = "suspicious_user_agent"
+	SuspiciousPrivilegeEsc   SuspiciousActivityType = "privilege_escalation"
+	SuspiciousNewDevice      SuspiciousActivityType = "new_device"
+	SuspiciousConcurrentSess SuspiciousActivityType = "concurrent_sessions"
 
 	// Severity Levels
 	SeverityLow      SeverityLevel = "low"
@@ -374,7 +374,7 @@ func (bd *BreachDetector) detectSuspiciousActivities(ctx context.Context, event 
 			Severity:    SeverityMedium,
 			Description: "Access from new geographic location",
 			Evidence: map[string]interface{}{
-				"source_ip":        event.SourceIP,
+				"source_ip":          event.SourceIP,
 				"estimated_location": bd.estimateLocation(event.SourceIP),
 			},
 			FirstSeen: event.Timestamp,
@@ -393,8 +393,8 @@ func (bd *BreachDetector) detectSuspiciousActivities(ctx context.Context, event 
 			Severity:    SeverityLow,
 			Description: "Access outside typical hours",
 			Evidence: map[string]interface{}{
-				"access_time":     event.Timestamp.Format("15:04 MST"),
-				"typical_hours":   profile.TimePatterns.ActiveHours,
+				"access_time":   event.Timestamp.Format("15:04 MST"),
+				"typical_hours": profile.TimePatterns.ActiveHours,
 			},
 			FirstSeen: event.Timestamp,
 			LastSeen:  event.Timestamp,
@@ -412,9 +412,9 @@ func (bd *BreachDetector) detectSuspiciousActivities(ctx context.Context, event 
 			Severity:    SeverityCritical,
 			Description: "Impossible travel velocity detected",
 			Evidence: map[string]interface{}{
-				"current_ip":    event.SourceIP,
-				"previous_ip":   bd.getLastDifferentIP(profile),
-				"time_between":  bd.getTimeBetweenLocations(profile),
+				"current_ip":   event.SourceIP,
+				"previous_ip":  bd.getLastDifferentIP(profile),
+				"time_between": bd.getTimeBetweenLocations(profile),
 			},
 			FirstSeen: event.Timestamp,
 			LastSeen:  event.Timestamp,
@@ -500,7 +500,7 @@ func (bd *BreachDetector) getTenantProfile(tenantID string) *TenantAccessProfile
 		SuspiciousActivities: make([]*SuspiciousActivity, 0),
 		GeographicBaseline:   make(map[string]int),
 		DeviceFingerprints:   make(map[string]*DeviceProfile),
-		TimePatterns:         &TimePatternProfile{
+		TimePatterns: &TimePatternProfile{
 			MonthlyTrends: make(map[string]int),
 			Seasonality:   make(map[string]float64),
 		},
@@ -669,16 +669,16 @@ func (bd *BreachDetector) updateDeviceFingerprints(profile *TenantAccessProfile,
 		device.LastSeen = event.Timestamp
 		device.AccessCount++
 		// Update trust score based on consistent behavior
-		device.TrustScore = math.Min(1.0, device.TrustScore + 0.01)
+		device.TrustScore = math.Min(1.0, device.TrustScore+0.01)
 	} else {
 		profile.DeviceFingerprints[fingerprint] = &DeviceProfile{
-			Fingerprint:   fingerprint,
-			UserAgent:     event.UserAgent,
-			IPAddresses:   []string{event.SourceIP},
-			FirstSeen:     event.Timestamp,
-			LastSeen:      event.Timestamp,
-			AccessCount:   1,
-			TrustScore:    0.1, // Low trust for new devices
+			Fingerprint: fingerprint,
+			UserAgent:   event.UserAgent,
+			IPAddresses: []string{event.SourceIP},
+			FirstSeen:   event.Timestamp,
+			LastSeen:    event.Timestamp,
+			AccessCount: 1,
+			TrustScore:  0.1, // Low trust for new devices
 			Characteristics: map[string]string{
 				"user_agent": event.UserAgent,
 				"first_ip":   event.SourceIP,
@@ -776,8 +776,8 @@ func (bd *BreachDetector) getCurrentHourRequestCount(profile *TenantAccessProfil
 
 	for _, event := range profile.RecentActivity {
 		if event.Timestamp.Hour() == currentHour &&
-		   event.Timestamp.Day() == now.Day() &&
-		   event.Timestamp.Month() == now.Month() {
+			event.Timestamp.Day() == now.Day() &&
+			event.Timestamp.Month() == now.Month() {
 			count++
 		}
 	}

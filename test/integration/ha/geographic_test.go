@@ -355,9 +355,9 @@ func TestGeographicLoadBalancing(t *testing.T) {
 			lat    float64
 			lng    float64
 		}{
-			{"us-east", 39.0458, -76.6413},     // Washington DC
-			{"us-central", 41.8781, -87.6298},  // Chicago
-			{"us-west", 37.7749, -122.4194},    // San Francisco
+			{"us-east", 39.0458, -76.6413},    // Washington DC
+			{"us-central", 41.8781, -87.6298}, // Chicago
+			{"us-west", 37.7749, -122.4194},   // San Francisco
 		}
 
 		// Calculate expected distances
@@ -396,11 +396,11 @@ func TestGeographicLoadBalancing(t *testing.T) {
 
 // NodeInfoResponse represents the response from node info API
 type NodeInfoResponse struct {
-	NodeID           string                       `json:"node_id"`
-	Region           string                       `json:"region"`
-	AvailabilityZone string                       `json:"availability_zone"`
-	Coordinates      *ha.GeographicCoordinates    `json:"coordinates,omitempty"`
-	Latency          map[string]time.Duration     `json:"latency,omitempty"`
+	NodeID           string                    `json:"node_id"`
+	Region           string                    `json:"region"`
+	AvailabilityZone string                    `json:"availability_zone"`
+	Coordinates      *ha.GeographicCoordinates `json:"coordinates,omitempty"`
+	Latency          map[string]time.Duration  `json:"latency,omitempty"`
 }
 
 // ClusterNodesResponse represents the response from cluster nodes API

@@ -17,26 +17,26 @@ type CacheConfig struct {
 	Name string
 
 	// Size limits to prevent memory exhaustion in large deployments
-	MaxSessions       int           // Maximum number of sessions to store
-	MaxRuntimeItems   int           // Maximum number of runtime state items
+	MaxSessions     int // Maximum number of sessions to store
+	MaxRuntimeItems int // Maximum number of runtime state items
 
 	// TTL/Expiration settings for automatic cleanup
-	DefaultTTL        time.Duration // Default expiration time for items
-	CleanupInterval   time.Duration // How often to run background cleanup
+	DefaultTTL      time.Duration // Default expiration time for items
+	CleanupInterval time.Duration // How often to run background cleanup
 
 	// Eviction strategy when cache is full
-	EvictionPolicy    EvictionPolicy // FIFO, LRU, or LFU eviction policy
+	EvictionPolicy EvictionPolicy // FIFO, LRU, or LFU eviction policy
 }
 
 // DefaultCacheConfig returns a sensible default configuration
 func DefaultCacheConfig() CacheConfig {
 	return CacheConfig{
-		Name:              "runtime-cache",
-		MaxSessions:       1000,
-		MaxRuntimeItems:   500,
-		DefaultTTL:        2 * time.Hour,
-		CleanupInterval:   5 * time.Minute,
-		EvictionPolicy:    EvictionLRU, // Use LRU for production workloads
+		Name:            "runtime-cache",
+		MaxSessions:     1000,
+		MaxRuntimeItems: 500,
+		DefaultTTL:      2 * time.Hour,
+		CleanupInterval: 5 * time.Minute,
+		EvictionPolicy:  EvictionLRU, // Use LRU for production workloads
 	}
 }
 
@@ -69,17 +69,17 @@ func (e *CacheEntry) IsExpired() bool {
 // CacheStats provides operational visibility for cache performance
 type CacheStats struct {
 	// Basic metrics
-	Hits            int64     // Cache hits
-	Misses          int64     // Cache misses
-	Evictions       int64     // Items evicted due to size limits
-	
+	Hits      int64 // Cache hits
+	Misses    int64 // Cache misses
+	Evictions int64 // Items evicted due to size limits
+
 	// Size information
-	Size            int       // Current number of items
-	MaxSize         int       // Maximum configured size
-	
+	Size    int // Current number of items
+	MaxSize int // Maximum configured size
+
 	// Cleanup information
-	LastCleanup     time.Time // Last cleanup run time
-	ItemsExpired    int64     // Total items expired during cleanup
+	LastCleanup  time.Time // Last cleanup run time
+	ItemsExpired int64     // Total items expired during cleanup
 }
 
 // RuntimeCache implements RuntimeStore interface with MSP-scale features
@@ -104,12 +104,12 @@ func NewRuntimeCache(config CacheConfig) *RuntimeCache {
 		stopCleanup:  make(chan struct{}),
 		cleanupDone:  &sync.WaitGroup{},
 	}
-	
+
 	// Start background cleanup if cleanup interval is configured
 	if config.CleanupInterval > 0 {
 		cache.startCleanupRoutine()
 	}
-	
+
 	return cache
 }
 
@@ -128,7 +128,7 @@ func (c *RuntimeCache) startCleanupRoutine() {
 		defer c.cleanupDone.Done()
 		ticker := time.NewTicker(c.config.CleanupInterval)
 		defer ticker.Stop()
-		
+
 		for {
 			select {
 			case <-c.stopCleanup:
@@ -144,10 +144,10 @@ func (c *RuntimeCache) startCleanupRoutine() {
 func (c *RuntimeCache) cleanupExpiredItems() {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	
+
 	now := time.Now()
 	expired := int64(0)
-	
+
 	// Clean expired sessions
 	for id, entry := range c.sessions {
 		if entry.IsExpired() {
@@ -155,7 +155,7 @@ func (c *RuntimeCache) cleanupExpiredItems() {
 			expired++
 		}
 	}
-	
+
 	// Clean expired runtime state items
 	for key, entry := range c.runtimeState {
 		if entry.IsExpired() {
@@ -163,7 +163,7 @@ func (c *RuntimeCache) cleanupExpiredItems() {
 			expired++
 		}
 	}
-	
+
 	c.stats.LastCleanup = now
 	c.stats.ItemsExpired += expired
 	c.updateSizeStats()
@@ -179,12 +179,12 @@ func (c *RuntimeCache) enforceMaxSessions() {
 	if len(c.sessions) <= c.config.MaxSessions {
 		return
 	}
-	
+
 	// Simple eviction: remove oldest sessions first
 	// In a production system, might want LRU or other policies
 	count := len(c.sessions) - c.config.MaxSessions
 	evicted := 0
-	
+
 	for id := range c.sessions {
 		if evicted >= count {
 			break
@@ -192,7 +192,7 @@ func (c *RuntimeCache) enforceMaxSessions() {
 		delete(c.sessions, id)
 		evicted++
 	}
-	
+
 	c.stats.Evictions += int64(evicted)
 }
 
@@ -201,10 +201,10 @@ func (c *RuntimeCache) enforceMaxRuntimeItems() {
 	if len(c.runtimeState) <= c.config.MaxRuntimeItems {
 		return
 	}
-	
+
 	count := len(c.runtimeState) - c.config.MaxRuntimeItems
 	evicted := 0
-	
+
 	for key := range c.runtimeState {
 		if evicted >= count {
 			break
@@ -212,7 +212,7 @@ func (c *RuntimeCache) enforceMaxRuntimeItems() {
 		delete(c.runtimeState, key)
 		evicted++
 	}
-	
+
 	c.stats.Evictions += int64(evicted)
 }
 
@@ -220,7 +220,7 @@ func (c *RuntimeCache) enforceMaxRuntimeItems() {
 func (c *RuntimeCache) GetCacheStats() CacheStats {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
-	
+
 	stats := c.stats
 	stats.Size = len(c.sessions) + len(c.runtimeState)
 	return stats
@@ -232,37 +232,37 @@ func (c *RuntimeCache) GetCacheStats() CacheStats {
 func (c *RuntimeCache) CreateSession(ctx context.Context, session *interfaces.Session) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	
+
 	if session == nil {
 		c.stats.Misses++
 		return fmt.Errorf("session cannot be nil")
 	}
-	
+
 	if err := session.Validate(); err != nil {
 		c.stats.Misses++
 		return fmt.Errorf("invalid session: %w", err)
 	}
-	
+
 	if _, exists := c.sessions[session.SessionID]; exists {
 		c.stats.Misses++
 		return fmt.Errorf("session already exists: %s", session.SessionID)
 	}
-	
+
 	// Use session's ExpiresAt or default TTL
 	expiresAt := session.ExpiresAt
 	if expiresAt.IsZero() {
 		expiresAt = time.Now().Add(c.config.DefaultTTL)
 	}
-	
+
 	c.sessions[session.SessionID] = &CacheEntry{
 		Value:     session,
 		ExpiresAt: expiresAt,
 	}
-	
+
 	c.enforceMaxSessions()
 	c.updateSizeStats()
 	c.stats.Hits++
-	
+
 	return nil
 }
 
@@ -270,18 +270,18 @@ func (c *RuntimeCache) CreateSession(ctx context.Context, session *interfaces.Se
 func (c *RuntimeCache) GetSession(ctx context.Context, sessionID string) (*interfaces.Session, error) {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
-	
+
 	entry, exists := c.sessions[sessionID]
 	if !exists {
 		c.stats.Misses++
 		return nil, fmt.Errorf("session not found: %s", sessionID)
 	}
-	
+
 	if entry.IsExpired() {
 		c.stats.Misses++
 		return nil, fmt.Errorf("session not found: %s", sessionID)
 	}
-	
+
 	c.stats.Hits++
 	return entry.Value.(*interfaces.Session), nil
 }
@@ -290,32 +290,32 @@ func (c *RuntimeCache) GetSession(ctx context.Context, sessionID string) (*inter
 func (c *RuntimeCache) UpdateSession(ctx context.Context, sessionID string, session *interfaces.Session) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	
+
 	if session == nil {
 		return fmt.Errorf("session cannot be nil")
 	}
-	
+
 	if err := session.Validate(); err != nil {
 		return fmt.Errorf("invalid session: %w", err)
 	}
-	
+
 	entry, exists := c.sessions[sessionID]
 	if !exists || entry.IsExpired() {
 		c.stats.Misses++
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
-	
+
 	// Use session's ExpiresAt or keep existing expiration
 	expiresAt := session.ExpiresAt
 	if expiresAt.IsZero() {
 		expiresAt = entry.ExpiresAt
 	}
-	
+
 	c.sessions[sessionID] = &CacheEntry{
 		Value:     session,
 		ExpiresAt: expiresAt,
 	}
-	
+
 	c.stats.Hits++
 	return nil
 }
@@ -324,12 +324,12 @@ func (c *RuntimeCache) UpdateSession(ctx context.Context, sessionID string, sess
 func (c *RuntimeCache) DeleteSession(ctx context.Context, sessionID string) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	
+
 	if _, exists := c.sessions[sessionID]; !exists {
 		c.stats.Misses++
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
-	
+
 	delete(c.sessions, sessionID)
 	c.updateSizeStats()
 	c.stats.Hits++
@@ -340,20 +340,20 @@ func (c *RuntimeCache) DeleteSession(ctx context.Context, sessionID string) erro
 func (c *RuntimeCache) ListSessions(ctx context.Context, filters *interfaces.SessionFilter) ([]*interfaces.Session, error) {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
-	
+
 	var result []*interfaces.Session
-	
+
 	for _, entry := range c.sessions {
 		if entry.IsExpired() {
 			continue
 		}
-		
+
 		session := entry.Value.(*interfaces.Session)
 		if c.matchesFilter(session, filters) {
 			result = append(result, session)
 		}
 	}
-	
+
 	c.stats.Hits++
 	return result, nil
 }
@@ -362,17 +362,17 @@ func (c *RuntimeCache) ListSessions(ctx context.Context, filters *interfaces.Ses
 func (c *RuntimeCache) SetSessionTTL(ctx context.Context, sessionID string, ttl time.Duration) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	
+
 	entry, exists := c.sessions[sessionID]
 	if !exists || entry.IsExpired() {
 		c.stats.Misses++
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
-	
+
 	session := entry.Value.(*interfaces.Session)
 	session.ExpiresAt = time.Now().Add(ttl)
 	entry.ExpiresAt = session.ExpiresAt
-	
+
 	c.stats.Hits++
 	return nil
 }
@@ -381,16 +381,16 @@ func (c *RuntimeCache) SetSessionTTL(ctx context.Context, sessionID string, ttl 
 func (c *RuntimeCache) CleanupExpiredSessions(ctx context.Context) (int, error) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	
+
 	count := 0
-	
+
 	for id, entry := range c.sessions {
 		if entry.IsExpired() {
 			delete(c.sessions, id)
 			count++
 		}
 	}
-	
+
 	c.updateSizeStats()
 	c.stats.ItemsExpired += int64(count)
 	return count, nil
@@ -400,15 +400,15 @@ func (c *RuntimeCache) CleanupExpiredSessions(ctx context.Context) (int, error) 
 func (c *RuntimeCache) ListExpiredSessions(ctx context.Context, cutoff time.Time) ([]string, error) {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
-	
+
 	var result []string
-	
+
 	for id, entry := range c.sessions {
 		if entry.ExpiresAt.Before(cutoff) {
 			result = append(result, id)
 		}
 	}
-	
+
 	return result, nil
 }
 
@@ -418,16 +418,16 @@ func (c *RuntimeCache) ListExpiredSessions(ctx context.Context, cutoff time.Time
 func (c *RuntimeCache) SetRuntimeState(ctx context.Context, key string, value interface{}) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	
+
 	c.runtimeState[key] = &CacheEntry{
 		Value:     value,
 		ExpiresAt: time.Now().Add(c.config.DefaultTTL),
 	}
-	
+
 	c.enforceMaxRuntimeItems()
 	c.updateSizeStats()
 	c.stats.Hits++
-	
+
 	return nil
 }
 
@@ -435,18 +435,18 @@ func (c *RuntimeCache) SetRuntimeState(ctx context.Context, key string, value in
 func (c *RuntimeCache) GetRuntimeState(ctx context.Context, key string) (interface{}, error) {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
-	
+
 	entry, exists := c.runtimeState[key]
 	if !exists {
 		c.stats.Misses++
 		return nil, fmt.Errorf("runtime state key not found: %s", key)
 	}
-	
+
 	if entry.IsExpired() {
 		c.stats.Misses++
 		return nil, fmt.Errorf("runtime state key not found: %s", key)
 	}
-	
+
 	c.stats.Hits++
 	return entry.Value, nil
 }
@@ -455,7 +455,7 @@ func (c *RuntimeCache) GetRuntimeState(ctx context.Context, key string) (interfa
 func (c *RuntimeCache) DeleteRuntimeState(ctx context.Context, key string) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	
+
 	delete(c.runtimeState, key)
 	c.updateSizeStats()
 	return nil
@@ -465,19 +465,19 @@ func (c *RuntimeCache) DeleteRuntimeState(ctx context.Context, key string) error
 func (c *RuntimeCache) ListRuntimeKeys(ctx context.Context, prefix string) ([]string, error) {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
-	
+
 	var result []string
-	
+
 	for key, entry := range c.runtimeState {
 		if entry.IsExpired() {
 			continue
 		}
-		
+
 		if strings.HasPrefix(key, prefix) {
 			result = append(result, key)
 		}
 	}
-	
+
 	return result, nil
 }
 
@@ -487,39 +487,39 @@ func (c *RuntimeCache) ListRuntimeKeys(ctx context.Context, prefix string) ([]st
 func (c *RuntimeCache) CreateSessionsBatch(ctx context.Context, sessions []*interfaces.Session) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	
+
 	// Validate all sessions first
 	for _, session := range sessions {
 		if session == nil {
 			return fmt.Errorf("session cannot be nil")
 		}
-		
+
 		if err := session.Validate(); err != nil {
 			return fmt.Errorf("invalid session: %w", err)
 		}
-		
+
 		if _, exists := c.sessions[session.SessionID]; exists {
 			return fmt.Errorf("session already exists: %s", session.SessionID)
 		}
 	}
-	
+
 	// Create all sessions
 	for _, session := range sessions {
 		expiresAt := session.ExpiresAt
 		if expiresAt.IsZero() {
 			expiresAt = time.Now().Add(c.config.DefaultTTL)
 		}
-		
+
 		c.sessions[session.SessionID] = &CacheEntry{
 			Value:     session,
 			ExpiresAt: expiresAt,
 		}
 	}
-	
+
 	c.enforceMaxSessions()
 	c.updateSizeStats()
 	c.stats.Hits++
-	
+
 	return nil
 }
 
@@ -527,11 +527,11 @@ func (c *RuntimeCache) CreateSessionsBatch(ctx context.Context, sessions []*inte
 func (c *RuntimeCache) DeleteSessionsBatch(ctx context.Context, sessionIDs []string) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	
+
 	for _, id := range sessionIDs {
 		delete(c.sessions, id)
 	}
-	
+
 	c.updateSizeStats()
 	return nil
 }
@@ -560,19 +560,19 @@ func (c *RuntimeCache) GetSessionsByType(ctx context.Context, sessionType interf
 func (c *RuntimeCache) GetActiveSessionsCount(ctx context.Context) (int64, error) {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
-	
+
 	count := int64(0)
 	for _, entry := range c.sessions {
 		if entry.IsExpired() {
 			continue
 		}
-		
+
 		session := entry.Value.(*interfaces.Session)
 		if session.IsActive() {
 			count++
 		}
 	}
-	
+
 	return count, nil
 }
 
@@ -587,7 +587,7 @@ func (c *RuntimeCache) HealthCheck(ctx context.Context) error {
 func (c *RuntimeCache) GetStats(ctx context.Context) (*interfaces.RuntimeStoreStats, error) {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
-	
+
 	stats := &interfaces.RuntimeStoreStats{
 		TotalSessions:    int64(len(c.sessions)),
 		ActiveSessions:   0,
@@ -598,22 +598,22 @@ func (c *RuntimeCache) GetStats(ctx context.Context) (*interfaces.RuntimeStoreSt
 		StorageSize:      0, // Not calculated for in-memory
 		LastCleanupAt:    &c.stats.LastCleanup,
 	}
-	
+
 	for _, entry := range c.sessions {
 		if entry.IsExpired() {
 			stats.ExpiredSessions++
 			continue
 		}
-		
+
 		session := entry.Value.(*interfaces.Session)
 		if session.IsActive() {
 			stats.ActiveSessions++
 		}
-		
+
 		stats.SessionsByType[string(session.SessionType)]++
 		stats.SessionsByStatus[string(session.Status)]++
 	}
-	
+
 	return stats, nil
 }
 
@@ -628,7 +628,7 @@ func (c *RuntimeCache) matchesFilter(session *interfaces.Session, filter *interf
 	if filter == nil {
 		return true
 	}
-	
+
 	if filter.UserID != "" && session.UserID != filter.UserID {
 		return false
 	}
@@ -641,6 +641,6 @@ func (c *RuntimeCache) matchesFilter(session *interfaces.Session, filter *interf
 	if filter.Status != "" && session.Status != filter.Status {
 		return false
 	}
-	
+
 	return true
 }

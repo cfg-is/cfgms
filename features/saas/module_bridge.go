@@ -15,7 +15,7 @@
 //	type salesforceUserModule struct {
 //		bridge *saas.ModuleBridge
 //	}
-//	
+//
 //	func (m *salesforceUserModule) Set(ctx context.Context, resourceID string, config modules.ConfigState) error {
 //		// Use normalized operation
 //		result, err := m.bridge.Create(ctx, "salesforce", "users", configData)
@@ -31,8 +31,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/cfgis/cfgms/features/modules"
 	"gopkg.in/yaml.v3"
+
+	"github.com/cfgis/cfgms/features/modules"
 )
 
 // ModuleBridge provides a bridge between SaaS providers and CFGMS modules
@@ -72,7 +73,7 @@ func (mb *ModuleBridge) Create(ctx context.Context, providerName, resourceType s
 	if err != nil {
 		return nil, fmt.Errorf("failed to get authenticated provider: %w", err)
 	}
-	
+
 	return provider.Create(ctx, resourceType, data)
 }
 
@@ -82,7 +83,7 @@ func (mb *ModuleBridge) Read(ctx context.Context, providerName, resourceType, re
 	if err != nil {
 		return nil, fmt.Errorf("failed to get authenticated provider: %w", err)
 	}
-	
+
 	return provider.Read(ctx, resourceType, resourceID)
 }
 
@@ -92,7 +93,7 @@ func (mb *ModuleBridge) Update(ctx context.Context, providerName, resourceType, 
 	if err != nil {
 		return nil, fmt.Errorf("failed to get authenticated provider: %w", err)
 	}
-	
+
 	return provider.Update(ctx, resourceType, resourceID, data)
 }
 
@@ -102,7 +103,7 @@ func (mb *ModuleBridge) Delete(ctx context.Context, providerName, resourceType, 
 	if err != nil {
 		return nil, fmt.Errorf("failed to get authenticated provider: %w", err)
 	}
-	
+
 	return provider.Delete(ctx, resourceType, resourceID)
 }
 
@@ -112,7 +113,7 @@ func (mb *ModuleBridge) List(ctx context.Context, providerName, resourceType str
 	if err != nil {
 		return nil, fmt.Errorf("failed to get authenticated provider: %w", err)
 	}
-	
+
 	return provider.List(ctx, resourceType, filters)
 }
 
@@ -122,7 +123,7 @@ func (mb *ModuleBridge) RawAPI(ctx context.Context, providerName, method, path s
 	if err != nil {
 		return nil, fmt.Errorf("failed to get authenticated provider: %w", err)
 	}
-	
+
 	return provider.RawAPI(ctx, method, path, body)
 }
 
@@ -134,7 +135,7 @@ func (mb *ModuleBridge) GetProviderInfo(providerName string) (ProviderInfo, erro
 	if err != nil {
 		return ProviderInfo{}, fmt.Errorf("failed to get provider: %w", err)
 	}
-	
+
 	return provider.GetInfo(), nil
 }
 
@@ -144,7 +145,7 @@ func (mb *ModuleBridge) GetSupportedResources(providerName string) ([]ResourceTy
 	if err != nil {
 		return nil, fmt.Errorf("failed to get provider: %w", err)
 	}
-	
+
 	return provider.GetSupportedResources(), nil
 }
 
@@ -154,7 +155,7 @@ func (mb *ModuleBridge) GetResourceSchema(providerName, resourceType string) (*R
 	if err != nil {
 		return nil, fmt.Errorf("failed to get provider: %w", err)
 	}
-	
+
 	return provider.GetResourceSchema(resourceType)
 }
 
@@ -166,17 +167,17 @@ func (mb *ModuleBridge) EnsureAuthenticated(ctx context.Context, providerName st
 	if !exists {
 		return fmt.Errorf("no configuration found for provider %s", providerName)
 	}
-	
+
 	authConfig := AuthConfig{
 		Method: AuthMethod(config.AuthType),
 		Config: mb.buildAuthConfig(config),
 	}
-	
+
 	// Check if already authenticated
 	if mb.authenticator.IsAuthenticated(ctx, providerName, authConfig.Method) {
 		return nil
 	}
-	
+
 	// Perform authentication
 	return mb.authenticator.Authenticate(ctx, providerName, authConfig)
 }
@@ -187,7 +188,7 @@ func (mb *ModuleBridge) IsAuthenticated(ctx context.Context, providerName string
 	if !exists {
 		return false
 	}
-	
+
 	return mb.authenticator.IsAuthenticated(ctx, providerName, AuthMethod(config.AuthType))
 }
 
@@ -197,7 +198,7 @@ func (mb *ModuleBridge) RefreshAuthentication(ctx context.Context, providerName 
 	if !exists {
 		return fmt.Errorf("no configuration found for provider %s", providerName)
 	}
-	
+
 	return mb.authenticator.RefreshAuth(ctx, providerName, AuthMethod(config.AuthType))
 }
 
@@ -247,7 +248,7 @@ func (m *MapConfigState) GetManagedFields() []string {
 	if m.data == nil {
 		return []string{}
 	}
-	
+
 	fields := make([]string, 0, len(m.data))
 	for key := range m.data {
 		fields = append(fields, key)
@@ -261,7 +262,7 @@ func (mb *ModuleBridge) ValidateProviderOperation(providerName, resourceType, op
 	if err != nil {
 		return fmt.Errorf("failed to get provider: %w", err)
 	}
-	
+
 	resources := provider.GetSupportedResources()
 	for _, resource := range resources {
 		if resource.Name == resourceType {
@@ -273,7 +274,7 @@ func (mb *ModuleBridge) ValidateProviderOperation(providerName, resourceType, op
 			return fmt.Errorf("operation %s not supported for resource type %s", operation, resourceType)
 		}
 	}
-	
+
 	return fmt.Errorf("resource type %s not supported by provider %s", resourceType, providerName)
 }
 
@@ -296,7 +297,7 @@ type ModuleAdapter struct {
 // SetResource creates or updates a resource using the module bridge
 func (ma *ModuleAdapter) SetResource(ctx context.Context, resourceType, resourceID string, config modules.ConfigState, managedFields []string) error {
 	data := config.AsMap()
-	
+
 	// Filter to only managed fields if specified
 	if len(managedFields) > 0 {
 		filteredData := make(map[string]interface{})
@@ -307,7 +308,7 @@ func (ma *ModuleAdapter) SetResource(ctx context.Context, resourceType, resource
 		}
 		data = filteredData
 	}
-	
+
 	// Try to read existing resource first
 	existingResult, err := ma.bridge.Read(ctx, ma.providerName, resourceType, resourceID)
 	if err != nil {
@@ -315,13 +316,13 @@ func (ma *ModuleAdapter) SetResource(ctx context.Context, resourceType, resource
 		_, err = ma.bridge.Create(ctx, ma.providerName, resourceType, data)
 		return err
 	}
-	
+
 	// Resource exists, update it
 	if existingResult.Success {
 		_, err = ma.bridge.Update(ctx, ma.providerName, resourceType, resourceID, data)
 		return err
 	}
-	
+
 	return fmt.Errorf("failed to determine resource state")
 }
 
@@ -331,16 +332,16 @@ func (ma *ModuleAdapter) GetResource(ctx context.Context, resourceType, resource
 	if err != nil {
 		return nil, err
 	}
-	
+
 	if !result.Success {
 		return nil, fmt.Errorf("failed to read resource: %s", result.Error)
 	}
-	
+
 	// Convert result data to ConfigState
 	if dataMap, ok := result.Data.(map[string]interface{}); ok {
 		return &MapConfigState{data: dataMap}, nil
 	}
-	
+
 	return nil, fmt.Errorf("unexpected result data type: %T", result.Data)
 }
 
@@ -350,11 +351,11 @@ func (ma *ModuleAdapter) DeleteResource(ctx context.Context, resourceType, resou
 	if err != nil {
 		return err
 	}
-	
+
 	if !result.Success {
 		return fmt.Errorf("failed to delete resource: %s", result.Error)
 	}
-	
+
 	return nil
 }
 
@@ -364,11 +365,11 @@ func (ma *ModuleAdapter) ListResources(ctx context.Context, resourceType string,
 	if err != nil {
 		return nil, err
 	}
-	
+
 	if !result.Success {
 		return nil, fmt.Errorf("failed to list resources: %s", result.Error)
 	}
-	
+
 	// Convert result data to slice of ConfigState
 	if dataSlice, ok := result.Data.([]interface{}); ok {
 		configs := make([]modules.ConfigState, len(dataSlice))
@@ -381,7 +382,7 @@ func (ma *ModuleAdapter) ListResources(ctx context.Context, resourceType string,
 		}
 		return configs, nil
 	}
-	
+
 	return nil, fmt.Errorf("unexpected result data type: %T", result.Data)
 }
 
@@ -394,19 +395,19 @@ func (mb *ModuleBridge) getAuthenticatedProvider(ctx context.Context, providerNa
 	if err != nil {
 		return nil, fmt.Errorf("failed to get provider: %w", err)
 	}
-	
+
 	// Ensure authentication
 	if err := mb.EnsureAuthenticated(ctx, providerName); err != nil {
 		return nil, fmt.Errorf("failed to authenticate provider: %w", err)
 	}
-	
+
 	return provider, nil
 }
 
 // buildAuthConfig builds authentication configuration from provider config
 func (mb *ModuleBridge) buildAuthConfig(config ProviderConfig) map[string]interface{} {
 	authConfig := make(map[string]interface{})
-	
+
 	switch config.AuthType {
 	case "oauth2":
 		authConfig["client_id"] = config.ClientID
@@ -415,7 +416,7 @@ func (mb *ModuleBridge) buildAuthConfig(config ProviderConfig) map[string]interf
 		}
 		authConfig["scopes"] = config.Scopes
 		authConfig["grant_type"] = "client_credentials" // Default
-		
+
 		// Add provider-specific URLs from custom config
 		if tokenURL, exists := config.Custom["token_url"]; exists {
 			authConfig["token_url"] = tokenURL
@@ -423,7 +424,7 @@ func (mb *ModuleBridge) buildAuthConfig(config ProviderConfig) map[string]interf
 		if authURL, exists := config.Custom["auth_url"]; exists {
 			authConfig["auth_url"] = authURL
 		}
-		
+
 	case "api_key":
 		if apiKey, err := mb.credStore.GetClientSecret(config.ClientID); err == nil {
 			authConfig["key"] = apiKey
@@ -431,26 +432,26 @@ func (mb *ModuleBridge) buildAuthConfig(config ProviderConfig) map[string]interf
 		if header, exists := config.Custom["header"]; exists {
 			authConfig["header"] = header
 		}
-		
+
 	case "basic_auth":
 		authConfig["username"] = config.ClientID
 		if password, err := mb.credStore.GetClientSecret(config.ClientID); err == nil {
 			authConfig["password"] = password
 		}
-		
+
 	case "bearer_token":
 		if token, err := mb.credStore.GetClientSecret(config.ClientID); err == nil {
 			authConfig["token"] = token
 		}
 	}
-	
+
 	// Add any custom configuration
 	for key, value := range config.Custom {
 		if _, exists := authConfig[key]; !exists {
 			authConfig[key] = value
 		}
 	}
-	
+
 	return authConfig
 }
 
@@ -478,7 +479,7 @@ func (mb *ModuleBridge) WrapProviderError(providerName, operation string, err er
 	if err == nil {
 		return nil
 	}
-	
+
 	return fmt.Errorf("provider %s operation %s failed: %w", providerName, operation, err)
 }
 
@@ -487,13 +488,13 @@ func (mb *ModuleBridge) IsAuthenticationError(err error) bool {
 	if err == nil {
 		return false
 	}
-	
+
 	// Check if it's our AuthenticationError type
 	_, isAuthError := err.(*AuthenticationError)
 	if isAuthError {
 		return true
 	}
-	
+
 	// Check for common authentication error messages
 	errMsg := err.Error()
 	authErrorStrings := []string{
@@ -504,7 +505,7 @@ func (mb *ModuleBridge) IsAuthenticationError(err error) bool {
 		"401",
 		"403",
 	}
-	
+
 	for _, authStr := range authErrorStrings {
 		if fmt.Sprintf("%v", errMsg) != "" && len(errMsg) > 0 {
 			// Simple string contains check (in real implementation, might use regex)
@@ -513,7 +514,7 @@ func (mb *ModuleBridge) IsAuthenticationError(err error) bool {
 			}
 		}
 	}
-	
+
 	return false
 }
 
@@ -525,7 +526,7 @@ func (mb *ModuleBridge) ValidateProviderConfig(providerName string, config Provi
 	if err != nil {
 		return fmt.Errorf("failed to get provider: %w", err)
 	}
-	
+
 	return provider.ValidateConfig(config)
 }
 
@@ -535,23 +536,23 @@ func (mb *ModuleBridge) TestConnection(ctx context.Context, providerName string)
 	if err := mb.EnsureAuthenticated(ctx, providerName); err != nil {
 		return fmt.Errorf("authentication test failed: %w", err)
 	}
-	
+
 	// Try a simple API call (list with minimal filters)
 	provider, err := mb.getAuthenticatedProvider(ctx, providerName)
 	if err != nil {
 		return fmt.Errorf("failed to get provider: %w", err)
 	}
-	
+
 	// Get supported resources and try to list the first one
 	resources := provider.GetSupportedResources()
 	if len(resources) == 0 {
 		return fmt.Errorf("provider has no supported resources")
 	}
-	
+
 	// Try to list resources (with small limit)
 	_, err = provider.List(ctx, resources[0].Name, map[string]interface{}{
 		"limit": 1,
 	})
-	
+
 	return err
 }

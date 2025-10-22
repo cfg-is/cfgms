@@ -7,9 +7,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-	"github.com/google/uuid"
 )
 
 // extractTenantFromContext extracts tenant ID from context, trying both logging and trigger context keys

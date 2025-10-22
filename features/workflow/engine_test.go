@@ -16,21 +16,21 @@ import (
 
 func createTestFactory() *factory.ModuleFactory {
 	registry := make(discovery.ModuleRegistry)
-	
+
 	// Add built-in modules to registry
 	registry["directory"] = discovery.ModuleInfo{
 		Name: "directory",
 		Path: "/builtin/directory",
 	}
 	registry["file"] = discovery.ModuleInfo{
-		Name: "file", 
+		Name: "file",
 		Path: "/builtin/file",
 	}
-	
+
 	errorConfig := config.ErrorHandlingConfig{
 		ModuleLoadFailure: config.ActionContinue,
 	}
-	
+
 	return factory.New(registry, errorConfig)
 }
 

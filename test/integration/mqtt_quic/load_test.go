@@ -85,7 +85,7 @@ func (s *LoadTestSuite) TestMultiStewardLoad() {
 
 			heartbeatJSON, _ := json.Marshal(heartbeat)
 			pubToken := client.Publish(heartbeatTopic, 1, false, heartbeatJSON)
-			if pubToken.WaitTimeout(10 * time.Second) && pubToken.Error() == nil {
+			if pubToken.WaitTimeout(10*time.Second) && pubToken.Error() == nil {
 				messagesPublished.Add(1)
 			}
 
@@ -156,7 +156,7 @@ func (s *LoadTestSuite) TestConcurrentMessagePublishing() {
 
 			client := mqtt.NewClient(opts)
 			token := client.Connect()
-			if !token.WaitTimeout(10 * time.Second) || token.Error() != nil {
+			if !token.WaitTimeout(10*time.Second) || token.Error() != nil {
 				failedCount.Add(int64(messagesPerPublisher))
 				return
 			}
@@ -173,7 +173,7 @@ func (s *LoadTestSuite) TestConcurrentMessagePublishing() {
 
 				msgJSON, _ := json.Marshal(message)
 				pubToken := client.Publish(topic, 1, false, msgJSON)
-				if pubToken.WaitTimeout(5 * time.Second) && pubToken.Error() == nil {
+				if pubToken.WaitTimeout(5*time.Second) && pubToken.Error() == nil {
 					publishedCount.Add(1)
 				} else {
 					failedCount.Add(1)
@@ -229,7 +229,7 @@ func (s *LoadTestSuite) TestSustainedLoad() {
 
 			client := mqtt.NewClient(opts)
 			token := client.Connect()
-			if !token.WaitTimeout(10 * time.Second) || token.Error() != nil {
+			if !token.WaitTimeout(10*time.Second) || token.Error() != nil {
 				return
 			}
 			defer client.Disconnect(250)
@@ -251,7 +251,7 @@ func (s *LoadTestSuite) TestSustainedLoad() {
 					}
 					heartbeatJSON, _ := json.Marshal(heartbeat)
 					pubToken := client.Publish(topic, 1, false, heartbeatJSON)
-					if pubToken.WaitTimeout(5 * time.Second) && pubToken.Error() == nil {
+					if pubToken.WaitTimeout(5*time.Second) && pubToken.Error() == nil {
 						totalHeartbeats.Add(1)
 					}
 				}
@@ -307,7 +307,7 @@ func (s *LoadTestSuite) TestResourceUsageUnderLoad() {
 
 				client := mqtt.NewClient(opts)
 				token := client.Connect()
-				if token.WaitTimeout(10 * time.Second) && token.Error() == nil {
+				if token.WaitTimeout(10*time.Second) && token.Error() == nil {
 					time.Sleep(1 * time.Second)
 					client.Disconnect(250)
 				}

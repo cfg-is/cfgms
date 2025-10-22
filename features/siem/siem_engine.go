@@ -22,10 +22,10 @@ type SIEMEngine struct {
 	logger *logging.ModuleLogger
 
 	// Core components
-	streamProcessor   StreamProcessor
-	patternMatcher    PatternMatcher
-	eventCorrelator   EventCorrelator
-	ruleManager      RuleManager
+	streamProcessor     StreamProcessor
+	patternMatcher      PatternMatcher
+	eventCorrelator     EventCorrelator
+	ruleManager         RuleManager
 	workflowIntegration *WorkflowIntegration
 
 	// Configuration
@@ -36,31 +36,31 @@ type SIEMEngine struct {
 	inputBuffer     chan interfaces.LogEntry
 
 	// State management
-	running         int32 // atomic
-	stopChan       chan struct{}
-	workerGroup    sync.WaitGroup
+	running     int32 // atomic
+	stopChan    chan struct{}
+	workerGroup sync.WaitGroup
 
 	// Performance optimization
-	workers        []*ProcessingWorker
-	loadBalancer   *LoadBalancer
+	workers      []*ProcessingWorker
+	loadBalancer *LoadBalancer
 
 	// Metrics and monitoring
-	metrics        *SIEMMetrics
-	metricsLock    sync.RWMutex
-	startTime      time.Time
+	metrics     *SIEMMetrics
+	metricsLock sync.RWMutex
+	startTime   time.Time
 
 	// Memory management
-	memoryMonitor  *MemoryMonitor
-	gcController   *GCController
+	memoryMonitor *MemoryMonitor
+	gcController  *GCController
 }
 
 // ProcessingWorker handles parallel processing of log entry batches
 type ProcessingWorker struct {
-	id              int
-	engine          *SIEMEngine
-	inputChan       chan *ProcessingBatch
-	logger          *logging.ModuleLogger
-	workerMetrics   *WorkerMetrics
+	id            int
+	engine        *SIEMEngine
+	inputChan     chan *ProcessingBatch
+	logger        *logging.ModuleLogger
+	workerMetrics *WorkerMetrics
 }
 
 // WorkerMetrics tracks individual worker performance
@@ -74,63 +74,63 @@ type WorkerMetrics struct {
 
 // LoadBalancer distributes work across processing workers
 type LoadBalancer struct {
-	workers    []*ProcessingWorker
+	workers []*ProcessingWorker
 }
 
 // SIEMMetrics aggregates all SIEM processing metrics
 type SIEMMetrics struct {
 	// Throughput metrics
-	TotalEntriesProcessed     int64
-	EntriesProcessedLastHour  int64
-	EntriesProcessedLastDay   int64
-	CurrentThroughput         float64
+	TotalEntriesProcessed    int64
+	EntriesProcessedLastHour int64
+	EntriesProcessedLastDay  int64
+	CurrentThroughput        float64
 	PeakThroughput           float64
 
 	// Latency metrics
-	AverageLatency           float64
-	P95Latency              float64
-	P99Latency              float64
-	MaxLatency              float64
+	AverageLatency float64
+	P95Latency     float64
+	P99Latency     float64
+	MaxLatency     float64
 
 	// Detection metrics
-	SecurityEventsGenerated  int64
+	SecurityEventsGenerated   int64
 	CorrelatedEventsGenerated int64
-	WorkflowsTriggered       int64
-	PatternsMatched          int64
+	WorkflowsTriggered        int64
+	PatternsMatched           int64
 
 	// Performance metrics
-	ActiveWorkers            int32
-	BufferUtilization        float64
-	MemoryUsage             int64
-	CPUUsage                float64
-	GoroutineCount          int
-	GCPauseTime             time.Duration
+	ActiveWorkers     int32
+	BufferUtilization float64
+	MemoryUsage       int64
+	CPUUsage          float64
+	GoroutineCount    int
+	GCPauseTime       time.Duration
 
 	// Error metrics
-	ProcessingErrors         int64
-	DroppedEntries           int64
-	WorkerTimeouts           int64
-	MemoryPressureEvents     int64
+	ProcessingErrors     int64
+	DroppedEntries       int64
+	WorkerTimeouts       int64
+	MemoryPressureEvents int64
 
 	// Time tracking
-	StartTime               time.Time
-	LastUpdateTime          time.Time
-	Uptime                  time.Duration
+	StartTime      time.Time
+	LastUpdateTime time.Time
+	Uptime         time.Duration
 }
 
 // MemoryMonitor tracks memory usage and prevents OOM
 type MemoryMonitor struct {
-	maxMemoryBytes   int64
-	warningThreshold float64
+	maxMemoryBytes    int64
+	warningThreshold  float64
 	criticalThreshold float64
-	lastGC           time.Time
+	lastGC            time.Time
 }
 
 // GCController manages garbage collection optimization
 type GCController struct {
-	targetGCPercent  int
-	lastAdjustment   time.Time
-	adjustmentCount  int64
+	targetGCPercent int
+	lastAdjustment  time.Time
+	adjustmentCount int64
 }
 
 // NewSIEMEngine creates a new SIEM processing engine with all components
@@ -169,9 +169,9 @@ func NewSIEMEngine(config ProcessingConfig, triggerManager trigger.TriggerManage
 
 	// Create workflow integration
 	workflowConfig := WorkflowIntegrationConfig{
-		EnableWorkflowTriggers:  true,
-		DefaultTimeout:          5 * time.Minute,
-		MaxConcurrentWorkflows:  50,
+		EnableWorkflowTriggers: true,
+		DefaultTimeout:         5 * time.Minute,
+		MaxConcurrentWorkflows: 50,
 		RetryAttempts:          3,
 		RetryDelay:             1 * time.Second,
 		ThrottleLimit:          200,
@@ -200,8 +200,8 @@ func NewSIEMEngine(config ProcessingConfig, triggerManager trigger.TriggerManage
 		workflowIntegration: workflowIntegration,
 		config:              config,
 		logEntryChannel:     make(chan interfaces.LogEntry, config.BufferSize),
-		inputBuffer:        make(chan interfaces.LogEntry, config.BufferSize*2),
-		stopChan:           make(chan struct{}),
+		inputBuffer:         make(chan interfaces.LogEntry, config.BufferSize*2),
+		stopChan:            make(chan struct{}),
 		metrics: &SIEMMetrics{
 			StartTime: time.Now(),
 		},
@@ -744,4 +744,3 @@ func validateProcessingConfig(config ProcessingConfig) error {
 	}
 	return nil
 }
-

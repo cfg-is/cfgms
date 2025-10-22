@@ -6,8 +6,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/google/uuid"
+
+	"github.com/cfgis/cfgms/api/proto/common"
 )
 
 // TemplateManager handles permission template operations
@@ -29,14 +30,14 @@ func NewTemplateManager(rbacManager RBACManager) *TemplateManager {
 func (t *TemplateManager) Initialize(ctx context.Context) error {
 	// Load system templates
 	systemTemplates := t.getSystemTemplates()
-	
+
 	t.mutex.Lock()
 	defer t.mutex.Unlock()
-	
+
 	for _, template := range systemTemplates {
 		t.templates[template.Id] = template
 	}
-	
+
 	return nil
 }
 
@@ -47,17 +48,17 @@ func (t *TemplateManager) CreateTemplate(ctx context.Context, req *TemplateCreat
 	}
 
 	template := &common.PermissionTemplate{
-		Id:                      uuid.New().String(),
-		Name:                    req.Name,
-		Description:             req.Description,
-		Category:                req.Category,
-		PermissionIds:           req.PermissionIDs,
-		ConditionalPermissions:  req.ConditionalPermissions,
-		DefaultConditions:       req.DefaultConditions,
-		IsSystemTemplate:        false,
-		TenantId:                req.TenantID,
-		CreatedAt:               time.Now().Unix(),
-		UpdatedAt:               time.Now().Unix(),
+		Id:                     uuid.New().String(),
+		Name:                   req.Name,
+		Description:            req.Description,
+		Category:               req.Category,
+		PermissionIds:          req.PermissionIDs,
+		ConditionalPermissions: req.ConditionalPermissions,
+		DefaultConditions:      req.DefaultConditions,
+		IsSystemTemplate:       false,
+		TenantId:               req.TenantID,
+		CreatedAt:              time.Now().Unix(),
+		UpdatedAt:              time.Now().Unix(),
 	}
 
 	t.mutex.Lock()
@@ -113,14 +114,14 @@ func (t *TemplateManager) ApplyTemplate(ctx context.Context, templateID, subject
 	}
 	roleName := fmt.Sprintf("%s-%s", template.Name, subjectSuffix)
 	role := &common.Role{
-		Id:             uuid.New().String(),
-		Name:           roleName,
-		Description:    fmt.Sprintf("Role created from template: %s", template.Description),
-		PermissionIds:  template.PermissionIds,
-		IsSystemRole:   false,
-		TenantId:       tenantID,
-		CreatedAt:      time.Now().Unix(),
-		UpdatedAt:      time.Now().Unix(),
+		Id:            uuid.New().String(),
+		Name:          roleName,
+		Description:   fmt.Sprintf("Role created from template: %s", template.Description),
+		PermissionIds: template.PermissionIds,
+		IsSystemRole:  false,
+		TenantId:      tenantID,
+		CreatedAt:     time.Now().Unix(),
+		UpdatedAt:     time.Now().Unix(),
 	}
 
 	// Create the role
@@ -294,11 +295,11 @@ func (t *TemplateManager) getSystemTemplates() []*common.PermissionTemplate {
 			UpdatedAt:        time.Now().Unix(),
 		},
 		{
-			Id:               "compliance.hipaa",
-			Name:             "HIPAA Compliance",
-			Description:      "HIPAA-compliant access controls with audit requirements",
-			Category:         "compliance",
-			PermissionIds:    []string{"audit.read", "configuration.read"},
+			Id:            "compliance.hipaa",
+			Name:          "HIPAA Compliance",
+			Description:   "HIPAA-compliant access controls with audit requirements",
+			Category:      "compliance",
+			PermissionIds: []string{"audit.read", "configuration.read"},
 			ConditionalPermissions: []*common.ConditionalPermission{
 				{
 					Id:           "hipaa-mfa-required",
@@ -320,11 +321,11 @@ func (t *TemplateManager) getSystemTemplates() []*common.PermissionTemplate {
 			UpdatedAt:        time.Now().Unix(),
 		},
 		{
-			Id:               "emergency.break-glass",
-			Name:             "Emergency Break-Glass Access",
-			Description:      "Emergency access template with time-limited full privileges",
-			Category:         "emergency",
-			PermissionIds:    []string{"*"}, // All permissions
+			Id:            "emergency.break-glass",
+			Name:          "Emergency Break-Glass Access",
+			Description:   "Emergency access template with time-limited full privileges",
+			Category:      "emergency",
+			PermissionIds: []string{"*"}, // All permissions
 			ConditionalPermissions: []*common.ConditionalPermission{
 				{
 					Id:           "emergency-time-limited",
@@ -375,21 +376,21 @@ func (t *TemplateManager) validateTemplateRequest(ctx context.Context, req *Temp
 
 // TemplateCreateRequest represents a request to create a permission template
 type TemplateCreateRequest struct {
-	Name                   string                           `json:"name"`
-	Description            string                           `json:"description"`
-	Category               string                           `json:"category"`
-	PermissionIDs          []string                         `json:"permission_ids"`
+	Name                   string                          `json:"name"`
+	Description            string                          `json:"description"`
+	Category               string                          `json:"category"`
+	PermissionIDs          []string                        `json:"permission_ids"`
 	ConditionalPermissions []*common.ConditionalPermission `json:"conditional_permissions"`
-	DefaultConditions      map[string]string                `json:"default_conditions"`
-	TenantID               string                           `json:"tenant_id"`
+	DefaultConditions      map[string]string               `json:"default_conditions"`
+	TenantID               string                          `json:"tenant_id"`
 }
 
 // TemplateUpdateRequest represents a request to update a permission template
 type TemplateUpdateRequest struct {
-	Name                   string                           `json:"name,omitempty"`
-	Description            string                           `json:"description,omitempty"`
-	Category               string                           `json:"category,omitempty"`
-	PermissionIDs          []string                         `json:"permission_ids,omitempty"`
+	Name                   string                          `json:"name,omitempty"`
+	Description            string                          `json:"description,omitempty"`
+	Category               string                          `json:"category,omitempty"`
+	PermissionIDs          []string                        `json:"permission_ids,omitempty"`
 	ConditionalPermissions []*common.ConditionalPermission `json:"conditional_permissions,omitempty"`
-	DefaultConditions      map[string]string                `json:"default_conditions,omitempty"`
+	DefaultConditions      map[string]string               `json:"default_conditions,omitempty"`
 }

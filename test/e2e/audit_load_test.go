@@ -1,7 +1,6 @@
 package e2e
 
 import (
-	testutil "github.com/cfgis/cfgms/pkg/testing"
 	"context"
 	"fmt"
 	"runtime"
@@ -9,6 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	testutil "github.com/cfgis/cfgms/pkg/testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -68,9 +69,9 @@ func (s *AuditLoadTestSuite) TestAuditCompletenessUnderLoad() {
 
 		// Test configuration
 		const (
-			concurrentUsers       = 50   // Number of concurrent users
-			operationsPerUser     = 100  // Operations per user
-			testDurationMinutes   = 5    // Test duration
+			concurrentUsers     = 50  // Number of concurrent users
+			operationsPerUser   = 100 // Operations per user
+			testDurationMinutes = 5   // Test duration
 		)
 
 		totalExpectedEvents := concurrentUsers * operationsPerUser
@@ -159,9 +160,9 @@ func (s *AuditLoadTestSuite) TestAuditEventLossDetectionAndPrevention() {
 
 		// Create test scenario with intentional stress
 		const (
-			burstUsers      = 20  // Number of users in burst
-			burstOperations = 50  // Operations per burst user
-			burstCount      = 5   // Number of bursts
+			burstUsers      = 20 // Number of users in burst
+			burstOperations = 50 // Operations per burst user
+			burstCount      = 5  // Number of bursts
 		)
 
 		var (
@@ -186,8 +187,8 @@ func (s *AuditLoadTestSuite) TestAuditEventLossDetectionAndPrevention() {
 				wg.Add(1)
 				go func(uid int) {
 					defer wg.Done()
-					s.runBurstAuditOperations(ctx, rbacManager, auditLogger, 
-						fmt.Sprintf("burst-%d-user-%d", burstNum, uid), 
+					s.runBurstAuditOperations(ctx, rbacManager, auditLogger,
+						fmt.Sprintf("burst-%d-user-%d", burstNum, uid),
 						burstOperations, &burstGenerated, &burstAudited, &timestampErrors)
 				}(userID)
 			}
@@ -276,10 +277,10 @@ func (s *AuditLoadTestSuite) TestAuditLogDurabilityAcrossFailures() {
 			sessionID := fmt.Sprintf("durable-session-%d", i)
 			sessionIDs = append(sessionIDs, sessionID)
 
-			err := auditLogger.LogSessionStart(ctx, sessionID, 
-				fmt.Sprintf("user-%d", i), 
-				fmt.Sprintf("steward-%d", i), 
-				fmt.Sprintf("tenant-%d", i), 
+			err := auditLogger.LogSessionStart(ctx, sessionID,
+				fmt.Sprintf("user-%d", i),
+				fmt.Sprintf("steward-%d", i),
+				fmt.Sprintf("tenant-%d", i),
 				fmt.Sprintf("192.168.1.%d", i+100))
 			if err != nil {
 				return fmt.Errorf("failed to log session start: %w", err)
@@ -328,8 +329,8 @@ func (s *AuditLoadTestSuite) TestAuditLogDurabilityAcrossFailures() {
 		// Phase 3: Generate more audit events after restart
 		s.framework.logger.Info("Phase 3: Generating audit events after restart")
 		for _, sessionID := range sessionIDs {
-			err := auditLogger2.LogSessionEnd(ctx, sessionID, 
-				fmt.Sprintf("user-%s", sessionID[len(sessionID)-1:]), 
+			err := auditLogger2.LogSessionEnd(ctx, sessionID,
+				fmt.Sprintf("user-%s", sessionID[len(sessionID)-1:]),
 				5*time.Minute, 5, 1024)
 			if err != nil {
 				return fmt.Errorf("failed to log session end after restart: %w", err)
@@ -341,11 +342,11 @@ func (s *AuditLoadTestSuite) TestAuditLogDurabilityAcrossFailures() {
 
 		// Phase 4: Validate audit log completeness
 		s.framework.logger.Info("Phase 4: Validating audit log completeness")
-		
+
 		// In a real implementation, we would read the persistent storage
 		// and verify all events are present
 		expectedEvents := testSessions * (1 + 5 + 1) // start + commands + end per session
-		
+
 		s.framework.logger.Info("Audit durability test completed",
 			"expected_events", expectedEvents,
 			"test_sessions", testSessions)
@@ -400,7 +401,7 @@ func (s *AuditLoadTestSuite) TestAuditLogRotationAndRetention() {
 			// Log various types of events
 			switch i % 4 {
 			case 0:
-				err := auditLogger.LogSessionStart(ctx, sessionID, userID, 
+				err := auditLogger.LogSessionStart(ctx, sessionID, userID,
 					"rotation-steward", "rotation-tenant", "192.168.1.100")
 				if err == nil {
 					atomic.AddInt64(&eventsGenerated, 1)
@@ -545,30 +546,30 @@ func (s *AuditLoadTestSuite) TestComplianceReportAccuracyUnderLoad() {
 func (s *AuditLoadTestSuite) createTestRBACManager(auditLogger *rbac.AuditLogger) *rbac.Manager {
 	// Create a real RBAC manager with audit logging
 	manager := testutil.SetupTestRBACManager(s.T())
-	
+
 	// In a real implementation, we would set the audit logger
 	// manager.SetAuditLogger(auditLogger)
-	
+
 	return manager
 }
 
-func (s *AuditLoadTestSuite) runConcurrentAuditLoad(ctx context.Context, rbacManager *rbac.Manager, 
-	auditLogger *rbac.AuditLogger, userID, operations int, 
+func (s *AuditLoadTestSuite) runConcurrentAuditLoad(ctx context.Context, rbacManager *rbac.Manager,
+	auditLogger *rbac.AuditLogger, userID, operations int,
 	eventsGenerated, eventsAudited, errorCount *int64) {
-	
+
 	subjectID := fmt.Sprintf("load-test-user-%d", userID)
 	tenantID := fmt.Sprintf("load-test-tenant-%d", userID%5) // 5 tenants
-	
+
 	for i := 0; i < operations; i++ {
 		if ctx.Err() != nil {
 			return
 		}
-		
+
 		permissionID := fmt.Sprintf("permission-%d", i%10) // 10 different permissions
 		resourceID := fmt.Sprintf("resource-%d", i%20)     // 20 different resources
-		
+
 		// Log permission grant
-		err := auditLogger.LogPermissionGrant(ctx, subjectID, permissionID, resourceID, 
+		err := auditLogger.LogPermissionGrant(ctx, subjectID, permissionID, resourceID,
 			tenantID, "system", map[string]string{"reason": "load test"})
 		atomic.AddInt64(eventsGenerated, 1)
 		if err == nil {
@@ -576,10 +577,10 @@ func (s *AuditLoadTestSuite) runConcurrentAuditLoad(ctx context.Context, rbacMan
 		} else {
 			atomic.AddInt64(errorCount, 1)
 		}
-		
+
 		// Brief pause to simulate realistic load
 		time.Sleep(10 * time.Millisecond)
-		
+
 		// Log permission revocation
 		err = auditLogger.LogPermissionRevoke(ctx, subjectID, permissionID, resourceID,
 			tenantID, "system", map[string]string{"reason": "load test cleanup"})
@@ -595,28 +596,28 @@ func (s *AuditLoadTestSuite) runConcurrentAuditLoad(ctx context.Context, rbacMan
 func (s *AuditLoadTestSuite) runBurstAuditOperations(ctx context.Context, rbacManager *rbac.Manager,
 	auditLogger *rbac.AuditLogger, userID string, operations int,
 	eventsGenerated, eventsAudited, timestampErrors *int64) {
-	
+
 	for i := 0; i < operations; i++ {
 		if ctx.Err() != nil {
 			return
 		}
-		
+
 		startTime := time.Now()
-		
+
 		// Generate audit event
-		err := auditLogger.LogPermissionGrant(ctx, userID, 
+		err := auditLogger.LogPermissionGrant(ctx, userID,
 			fmt.Sprintf("burst-permission-%d", i),
 			fmt.Sprintf("burst-resource-%d", i),
 			"burst-tenant",
 			"burst-system",
 			map[string]string{"burst": "true"})
-		
+
 		endTime := time.Now()
 		atomic.AddInt64(eventsGenerated, 1)
-		
+
 		if err == nil {
 			atomic.AddInt64(eventsAudited, 1)
-			
+
 			// Check timestamp precision (should be within reasonable bounds)
 			if endTime.Sub(startTime) > 100*time.Millisecond {
 				atomic.AddInt64(timestampErrors, 1)
@@ -633,24 +634,24 @@ func (s *AuditLoadTestSuite) validateAuditTimestampPrecision(auditLogger *rbac.A
 	if err != nil {
 		return fmt.Errorf("failed to retrieve audit entries: %w", err)
 	}
-	
+
 	// Check timestamp precision
 	for i := 1; i < len(entries); i++ {
 		prev := entries[i-1]
 		curr := entries[i]
-		
+
 		// Timestamps should be in chronological order
 		if curr.Timestamp < prev.Timestamp {
 			return fmt.Errorf("timestamp order violation: %d < %d", curr.Timestamp, prev.Timestamp)
 		}
-		
+
 		// Timestamps should have reasonable precision (nanosecond level)
 		if curr.Timestamp == prev.Timestamp {
 			// Same timestamp is acceptable for very fast operations
 			continue
 		}
 	}
-	
+
 	return nil
 }
 
@@ -674,7 +675,7 @@ func (s *AuditLoadTestSuite) generateComplianceTestData() *ComplianceTestData {
 	data := &ComplianceTestData{
 		Operations: make([]ComplianceTestOperation, 0, 200),
 	}
-	
+
 	// Generate mix of operations with known outcomes
 	for i := 0; i < 200; i++ {
 		op := ComplianceTestOperation{
@@ -683,7 +684,7 @@ func (s *AuditLoadTestSuite) generateComplianceTestData() *ComplianceTestData {
 			ResourceID:   fmt.Sprintf("compliance-resource-%d", i%8),
 			TenantID:     fmt.Sprintf("compliance-tenant-%d", i%3),
 		}
-		
+
 		switch i % 4 {
 		case 0:
 			op.Type = "grant"
@@ -706,19 +707,19 @@ func (s *AuditLoadTestSuite) generateComplianceTestData() *ComplianceTestData {
 			op.ShouldGrant = true
 			data.ExpectedGrants++
 		}
-		
+
 		data.Operations = append(data.Operations, op)
 	}
-	
+
 	return data
 }
 
-func (s *AuditLoadTestSuite) runContinuousComplianceReporting(ctx context.Context, 
+func (s *AuditLoadTestSuite) runContinuousComplianceReporting(ctx context.Context,
 	auditLogger *rbac.AuditLogger, reportErrors *int64) {
-	
+
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
-	
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -735,12 +736,12 @@ func (s *AuditLoadTestSuite) runContinuousComplianceReporting(ctx context.Contex
 
 func (s *AuditLoadTestSuite) executeComplianceTestOperations(ctx context.Context,
 	rbacManager *rbac.Manager, testData *ComplianceTestData) {
-	
+
 	for _, op := range testData.Operations {
 		if ctx.Err() != nil {
 			return
 		}
-		
+
 		switch op.Type {
 		case "grant":
 			// In real implementation, would call rbacManager.GrantPermission
@@ -755,7 +756,7 @@ func (s *AuditLoadTestSuite) executeComplianceTestOperations(ctx context.Context
 			// In real implementation, would call rbacManager.DelegatePermission
 			time.Sleep(8 * time.Millisecond) // Simulate operation
 		}
-		
+
 		// Brief pause between operations
 		time.Sleep(2 * time.Millisecond)
 	}
@@ -769,7 +770,7 @@ func (s *AuditLoadTestSuite) printAuditLoadTestSummary() {
 	s.framework.logger.Info("✅ Audit log durability across failures validated")
 	s.framework.logger.Info("✅ Audit log rotation and retention validated")
 	s.framework.logger.Info("✅ Compliance report accuracy under load validated")
-	
+
 	// Print memory usage
 	var m runtime.MemStats
 	runtime.GC()

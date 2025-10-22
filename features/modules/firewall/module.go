@@ -6,8 +6,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/cfgis/cfgms/features/modules"
 	"gopkg.in/yaml.v3"
+
+	"github.com/cfgis/cfgms/features/modules"
 )
 
 // firewallModule implements the Module interface for firewall management

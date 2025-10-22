@@ -325,11 +325,11 @@ func (cc *CompatibilityChecker) checkSecureBoot(dna *commonpb.DNA, result *Compa
 
 // UpgradeManager manages major version upgrades
 type UpgradeManager struct {
-	patchModule         *PatchModule
+	patchModule          *PatchModule
 	compatibilityChecker *CompatibilityChecker
-	policy              UpgradePolicy
-	windowManager       WindowManager
-	deviceID            string
+	policy               UpgradePolicy
+	windowManager        WindowManager
+	deviceID             string
 }
 
 // NewUpgradeManager creates a new upgrade manager

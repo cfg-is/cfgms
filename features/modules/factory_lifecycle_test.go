@@ -52,7 +52,6 @@ func (ml *mockModuleLoader) GetModuleInfo(moduleName string) (discovery.ModuleIn
 	return discovery.ModuleInfo{}, false
 }
 
-
 func TestNewLifecycleAwareModuleFactory(t *testing.T) {
 	discoveryRegistry := make(discovery.ModuleRegistry)
 	moduleRegistry := NewModuleRegistry()

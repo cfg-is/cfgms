@@ -22,10 +22,10 @@ type WorkflowIntegration struct {
 	config WorkflowIntegrationConfig
 
 	// Statistics
-	workflowsTriggered   int64
-	triggerFailures      int64
-	lastTriggerTime      time.Time
-	averageResponseTime  time.Duration
+	workflowsTriggered  int64
+	triggerFailures     int64
+	lastTriggerTime     time.Time
+	averageResponseTime time.Duration
 }
 
 // WorkflowIntegrationConfig defines configuration for SIEM workflow integration
@@ -137,17 +137,17 @@ func (wi *WorkflowIntegration) ProcessCorrelatedEvent(ctx context.Context, event
 
 	// Create SIEM trigger data for correlated event
 	triggerData := map[string]interface{}{
-		"trigger_type":        "siem_correlation",
-		"correlation_id":      event.ID,
-		"rule_id":             event.RuleID,
-		"event_count":         len(event.Events),
-		"severity":            string(event.Severity),
-		"window_start":        event.WindowStart,
-		"window_end":          event.WindowEnd,
-		"description":         event.Description,
-		"tenant_id":           event.TenantID,
-		"correlated_events":   wi.eventsToTriggerData(event.Events),
-		"metadata":            event.Metadata,
+		"trigger_type":      "siem_correlation",
+		"correlation_id":    event.ID,
+		"rule_id":           event.RuleID,
+		"event_count":       len(event.Events),
+		"severity":          string(event.Severity),
+		"window_start":      event.WindowStart,
+		"window_end":        event.WindowEnd,
+		"description":       event.Description,
+		"tenant_id":         event.TenantID,
+		"correlated_events": wi.eventsToTriggerData(event.Events),
+		"metadata":          event.Metadata,
 	}
 
 	// Find SIEM triggers for correlation events
@@ -407,17 +407,17 @@ func (wi *WorkflowIntegration) executeCorrelationTrigger(ctx context.Context, tr
 // securityEventToTriggerData converts a security event to trigger data
 func (wi *WorkflowIntegration) securityEventToTriggerData(event *SecurityEvent) map[string]interface{} {
 	return map[string]interface{}{
-		"trigger_type":   "siem_event",
-		"event_id":       event.ID,
-		"event_type":     event.EventType,
-		"severity":       string(event.Severity),
-		"source":         event.Source,
-		"description":    event.Description,
-		"rule_id":        event.RuleID,
-		"tenant_id":      event.TenantID,
-		"timestamp":      event.Timestamp,
-		"fields":         event.Fields,
-		"raw_log":        wi.logEntryToMap(event.RawLog),
+		"trigger_type": "siem_event",
+		"event_id":     event.ID,
+		"event_type":   event.EventType,
+		"severity":     string(event.Severity),
+		"source":       event.Source,
+		"description":  event.Description,
+		"rule_id":      event.RuleID,
+		"tenant_id":    event.TenantID,
+		"timestamp":    event.Timestamp,
+		"fields":       event.Fields,
+		"raw_log":      wi.logEntryToMap(event.RawLog),
 	}
 }
 
@@ -462,14 +462,13 @@ func (wi *WorkflowIntegration) updateAverageResponseTime(responseTime time.Durat
 // GetStatistics returns workflow integration statistics
 func (wi *WorkflowIntegration) GetStatistics() map[string]interface{} {
 	return map[string]interface{}{
-		"workflows_triggered":     wi.workflowsTriggered,
-		"trigger_failures":        wi.triggerFailures,
-		"last_trigger_time":       wi.lastTriggerTime,
-		"average_response_time":   wi.averageResponseTime.String(),
+		"workflows_triggered":      wi.workflowsTriggered,
+		"trigger_failures":         wi.triggerFailures,
+		"last_trigger_time":        wi.lastTriggerTime,
+		"average_response_time":    wi.averageResponseTime.String(),
 		"enable_workflow_triggers": wi.config.EnableWorkflowTriggers,
 		"max_concurrent_workflows": wi.config.MaxConcurrentWorkflows,
-		"retry_attempts":          wi.config.RetryAttempts,
-		"throttle_limit":          wi.config.ThrottleLimit,
+		"retry_attempts":           wi.config.RetryAttempts,
+		"throttle_limit":           wi.config.ThrottleLimit,
 	}
 }
-

@@ -11,10 +11,10 @@ import (
 type LoggingIntegration interface {
 	// InitializeBridge sets up the telemetry bridge in the logging package
 	InitializeBridge()
-	
+
 	// ExtractCorrelationID extracts correlation ID from context
 	ExtractCorrelationID(ctx context.Context) string
-	
+
 	// ExtractTraceInfo extracts trace information from context
 	ExtractTraceInfo(ctx context.Context) (traceID, spanID string)
 }
@@ -30,11 +30,11 @@ type DefaultLoggingIntegration struct {
 func (d *DefaultLoggingIntegration) InitializeBridge() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	
+
 	if d.initialized {
 		return
 	}
-	
+
 	// Initialize the bridge (this will be implemented when we connect the packages)
 	d.initialized = true
 }

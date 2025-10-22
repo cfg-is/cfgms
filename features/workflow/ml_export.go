@@ -29,10 +29,10 @@ func NewMLDataExporter(provider interfaces.LoggingProvider) *MLDataExporter {
 type ExportFormat string
 
 const (
-	ExportFormatJSON     ExportFormat = "json"
-	ExportFormatCSV      ExportFormat = "csv"
-	ExportFormatJSONL    ExportFormat = "jsonl"  // JSON Lines format
-	ExportFormatParquet  ExportFormat = "parquet" // Future: Parquet for large datasets
+	ExportFormatJSON    ExportFormat = "json"
+	ExportFormatCSV     ExportFormat = "csv"
+	ExportFormatJSONL   ExportFormat = "jsonl"   // JSON Lines format
+	ExportFormatParquet ExportFormat = "parquet" // Future: Parquet for large datasets
 )
 
 // ExportRequest defines parameters for data export
@@ -42,10 +42,10 @@ type ExportRequest struct {
 	EndTime   time.Time `json:"end_time"`
 
 	// Filters
-	WorkflowNames  []string `json:"workflow_names,omitempty"`
-	ExecutionIDs   []string `json:"execution_ids,omitempty"`
-	EventTypes     []string `json:"event_types,omitempty"`
-	StepNames      []string `json:"step_names,omitempty"`
+	WorkflowNames []string `json:"workflow_names,omitempty"`
+	ExecutionIDs  []string `json:"execution_ids,omitempty"`
+	EventTypes    []string `json:"event_types,omitempty"`
+	StepNames     []string `json:"step_names,omitempty"`
 
 	// Export configuration
 	Format         ExportFormat `json:"format"`
@@ -53,16 +53,16 @@ type ExportRequest struct {
 	MaxRecords     int          `json:"max_records,omitempty"` // 0 = no limit
 
 	// Data selection
-	IncludeVariableStates    bool `json:"include_variable_states"`
-	IncludeAPIData          bool `json:"include_api_data"`
-	IncludePerformanceData  bool `json:"include_performance_data"`
-	IncludeErrorPatterns    bool `json:"include_error_patterns"`
+	IncludeVariableStates  bool `json:"include_variable_states"`
+	IncludeAPIData         bool `json:"include_api_data"`
+	IncludePerformanceData bool `json:"include_performance_data"`
+	IncludeErrorPatterns   bool `json:"include_error_patterns"`
 
 	// ML-specific options
-	FlattenNestedData       bool     `json:"flatten_nested_data"`
-	IncludeOnlyMLEvents     bool     `json:"include_only_ml_events"`
-	ExcludeFields          []string `json:"exclude_fields,omitempty"`
-	CustomFields           []string `json:"custom_fields,omitempty"`
+	FlattenNestedData   bool     `json:"flatten_nested_data"`
+	IncludeOnlyMLEvents bool     `json:"include_only_ml_events"`
+	ExcludeFields       []string `json:"exclude_fields,omitempty"`
+	CustomFields        []string `json:"custom_fields,omitempty"`
 }
 
 // ExportResult contains the result of an export operation
@@ -273,10 +273,10 @@ func (exporter *MLDataExporter) exportJSON(entries []MLLogEntry, writer io.Write
 
 	data := map[string]interface{}{
 		"export_metadata": map[string]interface{}{
-			"exported_at":    time.Now(),
-			"record_count":   len(entries),
-			"format":         request.Format,
-			"time_range":     map[string]time.Time{"start": request.StartTime, "end": request.EndTime},
+			"exported_at":  time.Now(),
+			"record_count": len(entries),
+			"format":       request.Format,
+			"time_range":   map[string]time.Time{"start": request.StartTime, "end": request.EndTime},
 		},
 		"ml_log_entries": entries,
 	}
@@ -550,10 +550,10 @@ func (exporter *MLDataExporter) GetAvailableDataSummary(ctx context.Context, sta
 	}
 
 	summary := &DataSummary{
-		TotalRecords:   count,
-		TimeRange:      TimeRange{Start: startTime, End: endTime},
-		WorkflowNames:  make(map[string]int64),
-		EventTypes:     make(map[string]int64),
+		TotalRecords:    count,
+		TimeRange:       TimeRange{Start: startTime, End: endTime},
+		WorkflowNames:   make(map[string]int64),
+		EventTypes:      make(map[string]int64),
 		AvailableFields: make([]string, 0),
 	}
 
@@ -580,11 +580,11 @@ func (exporter *MLDataExporter) GetAvailableDataSummary(ctx context.Context, sta
 
 // DataSummary provides information about available ML data
 type DataSummary struct {
-	TotalRecords    int64              `json:"total_records"`
-	TimeRange       TimeRange          `json:"time_range"`
-	WorkflowNames   map[string]int64   `json:"workflow_names"`
-	EventTypes      map[string]int64   `json:"event_types"`
-	AvailableFields []string           `json:"available_fields"`
+	TotalRecords    int64            `json:"total_records"`
+	TimeRange       TimeRange        `json:"time_range"`
+	WorkflowNames   map[string]int64 `json:"workflow_names"`
+	EventTypes      map[string]int64 `json:"event_types"`
+	AvailableFields []string         `json:"available_fields"`
 }
 
 // TimeRange represents a time range

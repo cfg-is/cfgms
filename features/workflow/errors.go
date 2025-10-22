@@ -74,28 +74,28 @@ func (e *WorkflowError) AddChildError(childErr *WorkflowError) {
 // Error implements the error interface
 func (e *WorkflowError) Error() string {
 	var parts []string
-	
+
 	parts = append(parts, fmt.Sprintf("[%s] %s", e.Code, e.Message))
-	
+
 	if e.StepName != "" {
 		parts = append(parts, fmt.Sprintf("step: %s", e.StepName))
 	}
-	
+
 	if e.RetryAttempt > 0 {
 		parts = append(parts, fmt.Sprintf("retry: %d", e.RetryAttempt))
 	}
-	
+
 	if e.CauseMessage != "" {
 		parts = append(parts, fmt.Sprintf("cause: %s", e.CauseMessage))
 	}
-	
+
 	return strings.Join(parts, ", ")
 }
 
 // FullError returns a comprehensive error string with all debugging information
 func (e *WorkflowError) FullError() string {
 	var builder strings.Builder
-	
+
 	builder.WriteString(fmt.Sprintf("WorkflowError: %s\n", e.Error()))
 	builder.WriteString(fmt.Sprintf("  Code: %s\n", e.Code))
 	builder.WriteString(fmt.Sprintf("  Message: %s\n", e.Message))
@@ -103,32 +103,32 @@ func (e *WorkflowError) FullError() string {
 	builder.WriteString(fmt.Sprintf("  Step: %s (%s)\n", e.StepName, e.StepType))
 	builder.WriteString(fmt.Sprintf("  Recoverable: %t\n", e.Recoverable))
 	builder.WriteString(fmt.Sprintf("  Retry Attempt: %d\n", e.RetryAttempt))
-	
+
 	if len(e.ExecutionPath) > 0 {
 		builder.WriteString(fmt.Sprintf("  Execution Path: %s\n", strings.Join(e.ExecutionPath, " -> ")))
 	}
-	
+
 	if len(e.VariableState) > 0 {
 		builder.WriteString("  Variable State:\n")
 		for k, v := range e.VariableState {
 			builder.WriteString(fmt.Sprintf("    %s: %v\n", k, v))
 		}
 	}
-	
+
 	if len(e.Details) > 0 {
 		builder.WriteString("  Details:\n")
 		for k, v := range e.Details {
 			builder.WriteString(fmt.Sprintf("    %s: %v\n", k, v))
 		}
 	}
-	
+
 	if len(e.StackTrace) > 0 {
 		builder.WriteString("  Stack Trace:\n")
 		for _, frame := range e.StackTrace {
 			builder.WriteString(fmt.Sprintf("    %s:%d in %s()\n", frame.File, frame.Line, frame.Function))
 		}
 	}
-	
+
 	if len(e.ChildErrors) > 0 {
 		builder.WriteString("  Child Errors:\n")
 		for i, childErr := range e.ChildErrors {
@@ -142,7 +142,7 @@ func (e *WorkflowError) FullError() string {
 			}
 		}
 	}
-	
+
 	return builder.String()
 }
 
@@ -150,50 +150,50 @@ func (e *WorkflowError) FullError() string {
 func captureStackTrace(skip int) []StackFrame {
 	const maxFrames = 32
 	frames := make([]StackFrame, 0, maxFrames)
-	
+
 	pcs := make([]uintptr, maxFrames)
 	n := runtime.Callers(skip, pcs)
-	
+
 	if n == 0 {
 		return frames
 	}
-	
+
 	runtimeFrames := runtime.CallersFrames(pcs[:n])
-	
+
 	for {
 		frame, more := runtimeFrames.Next()
-		
+
 		// Skip runtime and testing frames for cleaner stack traces
-		if !strings.Contains(frame.Function, "runtime.") && 
-		   !strings.Contains(frame.Function, "testing.") {
+		if !strings.Contains(frame.Function, "runtime.") &&
+			!strings.Contains(frame.Function, "testing.") {
 			frames = append(frames, StackFrame{
 				Function: frame.Function,
 				File:     frame.File,
 				Line:     frame.Line,
 			})
 		}
-		
+
 		if !more {
 			break
 		}
 	}
-	
+
 	return frames
 }
 
 // isRecoverableErrorCode determines if an error code represents a recoverable error
 func isRecoverableErrorCode(code ErrorCode) bool {
 	recoverableErrors := map[ErrorCode]bool{
-		ErrorCodeStepExecution:        true, // Many step execution errors are recoverable
-		ErrorCodeTimeout:              true,
-		ErrorCodeHTTPRequest:          true,
-		ErrorCodeAPIRequest:           true,
-		ErrorCodeWebhookDelivery:      true,
-		ErrorCodeRateLimitExceeded:    true,
-		ErrorCodeModuleExecution:      true, // May be recoverable depending on the specific error
+		ErrorCodeStepExecution:         true, // Many step execution errors are recoverable
+		ErrorCodeTimeout:               true,
+		ErrorCodeHTTPRequest:           true,
+		ErrorCodeAPIRequest:            true,
+		ErrorCodeWebhookDelivery:       true,
+		ErrorCodeRateLimitExceeded:     true,
+		ErrorCodeModuleExecution:       true, // May be recoverable depending on the specific error
 		ErrorCodeAuthenticationFailure: true, // May be temporary auth issues
 	}
-	
+
 	return recoverableErrors[code]
 }
 
@@ -201,13 +201,13 @@ func isRecoverableErrorCode(code ErrorCode) bool {
 type DefaultErrorHandler struct {
 	// MaxRetries is the default maximum number of retries
 	MaxRetries int
-	
+
 	// BaseDelay is the base delay for exponential backoff
 	BaseDelay time.Duration
-	
+
 	// MaxDelay is the maximum delay between retries
 	MaxDelay time.Duration
-	
+
 	// BackoffMultiplier is the multiplier for exponential backoff
 	BackoffMultiplier float64
 }
@@ -231,7 +231,7 @@ func (h *DefaultErrorHandler) HandleError(ctx context.Context, err *WorkflowErro
 			Message: "Workflow was cancelled",
 		}
 	}
-	
+
 	// Check if error is recoverable and should be retried
 	if err.Recoverable && err.RetryAttempt < h.MaxRetries {
 		delay := h.CalculateRetryDelay(err.RetryAttempt, nil)
@@ -241,7 +241,7 @@ func (h *DefaultErrorHandler) HandleError(ctx context.Context, err *WorkflowErro
 			RetryDelay: delay,
 		}
 	}
-	
+
 	// For non-recoverable errors or exhausted retries, check error type
 	switch err.Code {
 	case ErrorCodeValidation, ErrorCodeConditionEvaluation, ErrorCodeVariableResolution:
@@ -286,7 +286,7 @@ func (h *DefaultErrorHandler) CalculateRetryDelay(retryCount int, config *RetryC
 		}
 		return delay
 	}
-	
+
 	// Use default exponential backoff
 	delay := h.BaseDelay
 	for i := 0; i < retryCount; i++ {
@@ -304,7 +304,7 @@ func BuildExecutionPath(currentStep string, parentPath []string) []string {
 	if len(parentPath) == 0 {
 		return []string{currentStep}
 	}
-	
+
 	path := make([]string, len(parentPath)+1)
 	copy(path, parentPath)
 	path[len(parentPath)] = currentStep
@@ -316,14 +316,14 @@ func RecordRetryAttempt(result *StepResult, attemptNumber int, err *WorkflowErro
 	if result.RetryAttempts == nil {
 		result.RetryAttempts = make([]RetryAttempt, 0)
 	}
-	
+
 	attempt := RetryAttempt{
 		AttemptNumber: attemptNumber,
 		Timestamp:     time.Now(),
 		Error:         err,
 		Delay:         delay,
 	}
-	
+
 	// Copy variables
 	if variables != nil {
 		attempt.Variables = make(map[string]interface{})
@@ -331,7 +331,7 @@ func RecordRetryAttempt(result *StepResult, attemptNumber int, err *WorkflowErro
 			attempt.Variables[k] = v
 		}
 	}
-	
+
 	result.RetryAttempts = append(result.RetryAttempts, attempt)
 }
 
@@ -346,7 +346,7 @@ func AddExecutionTrace(execution *WorkflowExecution, stepName string, stepType S
 		ParentStep:    parentStep,
 		LoopIteration: loopIteration,
 	}
-	
+
 	// Copy variables
 	if variables != nil {
 		step.Variables = make(map[string]interface{})
@@ -354,13 +354,13 @@ func AddExecutionTrace(execution *WorkflowExecution, stepName string, stepType S
 			step.Variables[k] = v
 		}
 	}
-	
+
 	execution.AddExecutionTrace(step)
 }
 
 // LoopControlError represents a break or continue statement in a loop
 type LoopControlError struct {
-	Type    LoopControlType
+	Type     LoopControlType
 	StepName string
 }
 
@@ -383,7 +383,7 @@ func (e *LoopControlError) Error() string {
 // NewBreakError creates a break control flow error
 func NewBreakError(stepName string) *LoopControlError {
 	return &LoopControlError{
-		Type:    LoopControlBreak,
+		Type:     LoopControlBreak,
 		StepName: stepName,
 	}
 }
@@ -391,7 +391,7 @@ func NewBreakError(stepName string) *LoopControlError {
 // NewContinueError creates a continue control flow error
 func NewContinueError(stepName string) *LoopControlError {
 	return &LoopControlError{
-		Type:    LoopControlContinue,
+		Type:     LoopControlContinue,
 		StepName: stepName,
 	}
 }

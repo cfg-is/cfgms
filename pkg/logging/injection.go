@@ -12,21 +12,21 @@ import (
 // ModuleLogger provides a specialized logger interface for CFGMS modules
 // It automatically adds module-specific context and integrates with the global provider system
 type ModuleLogger struct {
-	moduleName      string
-	component       string
-	defaultFields   map[string]interface{}
-	manager         *LoggingManager
-	fallbackLogger  Logger // Legacy logger for fallback
+	moduleName     string
+	component      string
+	defaultFields  map[string]interface{}
+	manager        *LoggingManager
+	fallbackLogger Logger // Legacy logger for fallback
 }
 
 // NewModuleLogger creates a logger specifically configured for a CFGMS module
 func NewModuleLogger(moduleName, component string) *ModuleLogger {
 	// Get global manager if available
 	manager := GetGlobalLoggingManager()
-	
+
 	// Create fallback logger for compatibility
 	fallback := NewLoggerWithConfig(DefaultConfig("cfgms", component))
-	
+
 	logger := &ModuleLogger{
 		moduleName:     moduleName,
 		component:      component,
@@ -34,11 +34,11 @@ func NewModuleLogger(moduleName, component string) *ModuleLogger {
 		manager:        manager,
 		fallbackLogger: fallback,
 	}
-	
+
 	// Set default fields for the module
 	logger.defaultFields["module"] = moduleName
 	logger.defaultFields["component"] = component
-	
+
 	return logger
 }
 
@@ -48,7 +48,7 @@ func (ml *ModuleLogger) WithField(key string, value interface{}) *ModuleLogger {
 	return ml
 }
 
-// WithFields adds multiple default fields that will be included in all log entries from this module  
+// WithFields adds multiple default fields that will be included in all log entries from this module
 func (ml *ModuleLogger) WithFields(fields map[string]interface{}) *ModuleLogger {
 	for key, value := range fields {
 		ml.defaultFields[key] = value
@@ -77,24 +77,24 @@ func (ml *ModuleLogger) logWithProvider(ctx context.Context, level, message stri
 	if ml.manager == nil {
 		return fmt.Errorf("global logging manager not available")
 	}
-	
+
 	// Convert keysAndValues to map and merge with default fields
 	fields := keysAndValuesToMap(keysAndValues)
-	
+
 	// Add default module fields (don't override if already present)
 	for key, value := range ml.defaultFields {
 		if _, exists := fields[key]; !exists {
 			fields[key] = value
 		}
 	}
-	
+
 	// Create log entry
 	entry := interfaces.LogEntry{
 		Level:   level,
 		Message: message,
 		Fields:  fields,
 	}
-	
+
 	// Add component info if not already set by global manager
 	if entry.ServiceName == "" {
 		entry.ServiceName = "cfgms"
@@ -102,20 +102,20 @@ func (ml *ModuleLogger) logWithProvider(ctx context.Context, level, message stri
 	if entry.Component == "" {
 		entry.Component = ml.component
 	}
-	
+
 	// Extract special fields and set them directly on the LogEntry
 	if tenantID, ok := ml.defaultFields["tenant_id"].(string); ok && tenantID != "" {
 		entry.TenantID = tenantID
 		// Remove from fields to avoid duplication
 		delete(fields, "tenant_id")
 	}
-	
+
 	if sessionID, ok := ml.defaultFields["session_id"].(string); ok && sessionID != "" {
 		entry.SessionID = sessionID
 		// Remove from fields to avoid duplication
 		delete(fields, "session_id")
 	}
-	
+
 	return ml.manager.WriteEntry(ctx, entry)
 }
 
@@ -188,7 +188,7 @@ func (ml *ModuleLogger) FatalCtx(ctx context.Context, msg string, keysAndValues 
 		ml.fallbackLogger.FatalCtx(ctx, msg, keysAndValues...)
 		return
 	}
-	
+
 	// If provider system is available, we still need to exit for fatal logs
 	if ml.manager != nil {
 		// Flush any pending logs before exiting
@@ -196,7 +196,7 @@ func (ml *ModuleLogger) FatalCtx(ctx context.Context, msg string, keysAndValues 
 			fmt.Printf("Warning: failed to flush logs before fatal exit: %v\n", err)
 		}
 	}
-	
+
 	// Exit for fatal logs
 	os.Exit(1)
 }

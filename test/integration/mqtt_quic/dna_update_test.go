@@ -48,16 +48,16 @@ func (s *DNAUpdateTestSuite) TestDNAUpdateMessage() {
 		"sync_fingerprint": "xyz789",
 		"timestamp":        time.Now().Unix(),
 		"dna": map[string]string{
-			"hostname":      "test-host",
-			"os":            "linux",
-			"os_version":    "Ubuntu 22.04",
-			"arch":          "amd64",
-			"kernel":        "5.15.0-76-generic",
-			"cpu_cores":     "4",
-			"memory_mb":     "8192",
-			"disk_gb":       "256",
-			"ip_address":    "192.168.1.100",
-			"mac_address":   "00:11:22:33:44:55",
+			"hostname":        "test-host",
+			"os":              "linux",
+			"os_version":      "Ubuntu 22.04",
+			"arch":            "amd64",
+			"kernel":          "5.15.0-76-generic",
+			"cpu_cores":       "4",
+			"memory_mb":       "8192",
+			"disk_gb":         "256",
+			"ip_address":      "192.168.1.100",
+			"mac_address":     "00:11:22:33:44:55",
 			"steward_version": "0.5.0",
 		},
 	}
@@ -81,20 +81,20 @@ func (s *DNAUpdateTestSuite) TestExtendedDNACollection() {
 		"timestamp":  time.Now().Unix(),
 		"dna": map[string]interface{}{
 			// System Info
-			"hostname":    "production-server-01",
-			"domain":      "example.com",
-			"os":          "linux",
-			"os_version":  "Ubuntu 22.04.3 LTS",
-			"kernel":      "5.15.0-76-generic",
-			"arch":        "x86_64",
+			"hostname":   "production-server-01",
+			"domain":     "example.com",
+			"os":         "linux",
+			"os_version": "Ubuntu 22.04.3 LTS",
+			"kernel":     "5.15.0-76-generic",
+			"arch":       "x86_64",
 
 			// Hardware
-			"cpu_model":     "Intel Xeon E5-2670",
-			"cpu_cores":     "16",
-			"cpu_threads":   "32",
-			"memory_total":  "65536",
-			"disk_total":    "2048",
-			"motherboard":   "Dell Inc. PowerEdge R720",
+			"cpu_model":    "Intel Xeon E5-2670",
+			"cpu_cores":    "16",
+			"cpu_threads":  "32",
+			"memory_total": "65536",
+			"disk_total":   "2048",
+			"motherboard":  "Dell Inc. PowerEdge R720",
 
 			// Network
 			"ip_addresses":  []string{"192.168.1.100", "10.0.0.50"},
@@ -177,9 +177,9 @@ func (s *DNAUpdateTestSuite) TestDNAChangeDetection() {
 	}
 
 	currentDNA := map[string]string{
-		"cpu_percent": "45.2",    // Changed
-		"memory_used": "4096",    // Same
-		"disk_used":   "105000",  // Changed
+		"cpu_percent": "45.2",   // Changed
+		"memory_used": "4096",   // Same
+		"disk_used":   "105000", // Changed
 	}
 
 	// Calculate delta

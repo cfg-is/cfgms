@@ -38,68 +38,68 @@ const (
 
 // LocalSecurityPolicyCache maintains a local cache of security policies for partition tolerance
 type LocalSecurityPolicyCache struct {
-	permissions    map[string]*common.Permission
-	roles          map[string]*common.Role
-	subjects       map[string]*common.Subject
-	assignments    map[string]*common.RoleAssignment
-	policies       map[string]*CachedSecurityPolicy
-	lastSync       time.Time
-	cacheExpiry    time.Duration
-	maxCacheAge    time.Duration
-	Metadata       map[string]interface{}
-	mutex          sync.RWMutex
+	permissions map[string]*common.Permission
+	roles       map[string]*common.Role
+	subjects    map[string]*common.Subject
+	assignments map[string]*common.RoleAssignment
+	policies    map[string]*CachedSecurityPolicy
+	lastSync    time.Time
+	cacheExpiry time.Duration
+	maxCacheAge time.Duration
+	Metadata    map[string]interface{}
+	mutex       sync.RWMutex
 }
 
 // CachedSecurityPolicy represents a cached security policy for offline enforcement
 type CachedSecurityPolicy struct {
-	SubjectID        string                    `json:"subject_id"`
-	TenantID         string                    `json:"tenant_id"`
-	Permissions      []*common.Permission      `json:"permissions"`
-	Roles           []*common.Role            `json:"roles"`
-	EffectivePermissions map[string]bool       `json:"effective_permissions"`
-	CachedAt         time.Time                 `json:"cached_at"`
-	ExpiresAt        time.Time                 `json:"expires_at"`
-	Metadata         map[string]interface{}    `json:"metadata,omitempty"`
+	SubjectID            string                 `json:"subject_id"`
+	TenantID             string                 `json:"tenant_id"`
+	Permissions          []*common.Permission   `json:"permissions"`
+	Roles                []*common.Role         `json:"roles"`
+	EffectivePermissions map[string]bool        `json:"effective_permissions"`
+	CachedAt             time.Time              `json:"cached_at"`
+	ExpiresAt            time.Time              `json:"expires_at"`
+	Metadata             map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // NetworkConnectivityMonitor monitors network connectivity to primary RBAC services
 type NetworkConnectivityMonitor struct {
-	primaryRBAC          rbac.RBACManager
-	connectivityCheck    func(ctx context.Context) error
-	lastSuccessfulCheck  time.Time
-	consecutiveFailures  int
+	primaryRBAC            rbac.RBACManager
+	connectivityCheck      func(ctx context.Context) error
+	lastSuccessfulCheck    time.Time
+	consecutiveFailures    int
 	maxConsecutiveFailures int
-	checkInterval        time.Duration
-	isConnected          bool
-	partitionDetected    bool
-	partitionStartTime   time.Time
-	mutex                sync.RWMutex
+	checkInterval          time.Duration
+	isConnected            bool
+	partitionDetected      bool
+	partitionStartTime     time.Time
+	mutex                  sync.RWMutex
 }
 
 // PartitionMetrics tracks network partition tolerance metrics
 type PartitionMetrics struct {
-	TotalRequests              int64
-	CacheHits                  int64
-	CacheMisses               int64
-	PartitionedRequests       int64
-	ConnectivityFailures      int64
-	PartitionRecoveries       int64
-	PolicySynchronizations    int64
-	CacheExpirations          int64
-	mutex                     sync.RWMutex
+	TotalRequests          int64
+	CacheHits              int64
+	CacheMisses            int64
+	PartitionedRequests    int64
+	ConnectivityFailures   int64
+	PartitionRecoveries    int64
+	PolicySynchronizations int64
+	CacheExpirations       int64
+	mutex                  sync.RWMutex
 }
 
 // NewNetworkPartitionTolerantManager creates a new network partition tolerant RBAC manager
 func NewNetworkPartitionTolerantManager(primaryRBAC rbac.RBACManager) *NetworkPartitionTolerantManager {
 	localCache := &LocalSecurityPolicyCache{
-		permissions:    make(map[string]*common.Permission),
-		roles:          make(map[string]*common.Role),
-		subjects:       make(map[string]*common.Subject),
-		assignments:    make(map[string]*common.RoleAssignment),
-		policies:       make(map[string]*CachedSecurityPolicy),
-		cacheExpiry:    2 * time.Hour,  // Policies expire after 2 hours
-		maxCacheAge:    24 * time.Hour, // Maximum cache age before forced refresh
-		mutex:          sync.RWMutex{},
+		permissions: make(map[string]*common.Permission),
+		roles:       make(map[string]*common.Role),
+		subjects:    make(map[string]*common.Subject),
+		assignments: make(map[string]*common.RoleAssignment),
+		policies:    make(map[string]*CachedSecurityPolicy),
+		cacheExpiry: 2 * time.Hour,  // Policies expire after 2 hours
+		maxCacheAge: 24 * time.Hour, // Maximum cache age before forced refresh
+		mutex:       sync.RWMutex{},
 	}
 
 	networkMonitor := &NetworkConnectivityMonitor{
@@ -167,14 +167,14 @@ func (nptm *NetworkPartitionTolerantManager) GetPartitionMetrics() *PartitionMet
 	nptm.metrics.mutex.RLock()
 	defer nptm.metrics.mutex.RUnlock()
 	return &PartitionMetrics{
-		TotalRequests:           nptm.metrics.TotalRequests,
-		CacheHits:               nptm.metrics.CacheHits,
-		CacheMisses:             nptm.metrics.CacheMisses,
-		PartitionedRequests:     nptm.metrics.PartitionedRequests,
-		ConnectivityFailures:    nptm.metrics.ConnectivityFailures,
-		PartitionRecoveries:     nptm.metrics.PartitionRecoveries,
+		TotalRequests:          nptm.metrics.TotalRequests,
+		CacheHits:              nptm.metrics.CacheHits,
+		CacheMisses:            nptm.metrics.CacheMisses,
+		PartitionedRequests:    nptm.metrics.PartitionedRequests,
+		ConnectivityFailures:   nptm.metrics.ConnectivityFailures,
+		PartitionRecoveries:    nptm.metrics.PartitionRecoveries,
 		PolicySynchronizations: nptm.metrics.PolicySynchronizations,
-		CacheExpirations:        nptm.metrics.CacheExpirations,
+		CacheExpirations:       nptm.metrics.CacheExpirations,
 	}
 }
 
@@ -229,7 +229,7 @@ func (nptm *NetworkPartitionTolerantManager) handlePartitionedPermissionCheck(ct
 func (nptm *NetworkPartitionTolerantManager) checkPermissionFromCache(ctx context.Context, request *common.AccessRequest) (*common.AccessResponse, error) {
 	// Look up cached policy for the subject
 	cacheKey := fmt.Sprintf("%s:%s", request.SubjectId, request.TenantId)
-	
+
 	nptm.localCache.mutex.RLock()
 	cachedPolicy, exists := nptm.localCache.policies[cacheKey]
 	nptm.localCache.mutex.RUnlock()
@@ -310,7 +310,7 @@ func (nptm *NetworkPartitionTolerantManager) cachePermissionResult(request *comm
 			EffectivePermissions: make(map[string]bool),
 			CachedAt:             time.Now(),
 			ExpiresAt:            time.Now().Add(nptm.localCache.cacheExpiry),
-			Metadata:            make(map[string]interface{}),
+			Metadata:             make(map[string]interface{}),
 		}
 		nptm.localCache.policies[cacheKey] = policy
 	}
@@ -349,12 +349,12 @@ func (nptm *NetworkPartitionTolerantManager) performConnectivityCheck() {
 		if nptm.networkMonitor.consecutiveFailures >= nptm.networkMonitor.maxConsecutiveFailures {
 			wasConnected := nptm.networkMonitor.isConnected
 			nptm.networkMonitor.isConnected = false
-			
+
 			if !nptm.networkMonitor.partitionDetected {
 				nptm.networkMonitor.partitionDetected = true
 				nptm.networkMonitor.partitionStartTime = time.Now()
 			}
-			
+
 			if wasConnected {
 				// Network just became partitioned
 				nptm.handlePartitionDetected()
@@ -365,17 +365,17 @@ func (nptm *NetworkPartitionTolerantManager) performConnectivityCheck() {
 		wasPartitioned := nptm.networkMonitor.partitionDetected
 		nptm.networkMonitor.consecutiveFailures = 0
 		nptm.networkMonitor.isConnected = true
-		
+
 		if wasPartitioned {
 			// Network recovered from partition
 			nptm.networkMonitor.partitionDetected = false
 			nptm.metrics.mutex.Lock()
 			nptm.metrics.PartitionRecoveries++
 			nptm.metrics.mutex.Unlock()
-			
+
 			nptm.handlePartitionRecovery()
 		}
-		
+
 		nptm.networkMonitor.lastSuccessfulCheck = time.Now()
 	}
 }
@@ -384,7 +384,7 @@ func (nptm *NetworkPartitionTolerantManager) performConnectivityCheck() {
 func (nptm *NetworkPartitionTolerantManager) markConnectivityFailure() {
 	nptm.networkMonitor.mutex.Lock()
 	defer nptm.networkMonitor.mutex.Unlock()
-	
+
 	nptm.networkMonitor.consecutiveFailures++
 	if nptm.networkMonitor.consecutiveFailures >= nptm.networkMonitor.maxConsecutiveFailures {
 		nptm.networkMonitor.isConnected = false
@@ -399,7 +399,7 @@ func (nptm *NetworkPartitionTolerantManager) markConnectivityFailure() {
 func (nptm *NetworkPartitionTolerantManager) handlePartitionDetected() {
 	// Log partition detection (would use proper logging in production)
 	// Could trigger alerts, notifications, etc.
-	
+
 	// For read-only cache mode, prevent any cache modifications
 	if nptm.partitionMode == PartitionModeReadOnlyCache {
 		// Mark cache as read-only
@@ -416,10 +416,10 @@ func (nptm *NetworkPartitionTolerantManager) handlePartitionDetected() {
 // handlePartitionRecovery handles recovery from network partition
 func (nptm *NetworkPartitionTolerantManager) handlePartitionRecovery() {
 	// Log partition recovery (would use proper logging in production)
-	
+
 	// Synchronize local cache with primary RBAC system
 	go nptm.synchronizeLocalCache()
-	
+
 	// Remove read-only mode restrictions
 	nptm.localCache.mutex.Lock()
 	if nptm.localCache.Metadata != nil {
@@ -442,7 +442,7 @@ func (nptm *NetworkPartitionTolerantManager) startCacheMaintenance() {
 // performCacheMaintenance cleans up expired cache entries and synchronizes when connected
 func (nptm *NetworkPartitionTolerantManager) performCacheMaintenance() {
 	now := time.Now()
-	
+
 	nptm.localCache.mutex.Lock()
 	defer nptm.localCache.mutex.Unlock()
 
@@ -491,7 +491,7 @@ func (nptm *NetworkPartitionTolerantManager) synchronizeLocalCache() {
 	// 3. Updating the local cache with fresh data
 }
 
-// Delegate other RBACManager methods to primary RBAC when connected, 
+// Delegate other RBACManager methods to primary RBAC when connected,
 // or provide appropriate partition-tolerant behavior
 
 func (nptm *NetworkPartitionTolerantManager) Initialize(ctx context.Context) error {

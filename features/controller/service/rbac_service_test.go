@@ -4,13 +4,14 @@ import (
 	"context"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-	
+
 	// Import storage providers for testing
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 )
@@ -19,19 +20,19 @@ func TestRBACService_Integration(t *testing.T) {
 	// Setup RBAC manager and service with git storage
 	config := map[string]interface{}{
 		"repository_path": t.TempDir(),
-		"branch":         "main",
-		"auto_init":      true,
+		"branch":          "main",
+		"auto_init":       true,
 	}
 	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
 	require.NoError(t, err)
-	
+
 	rbacManager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
 	ctx := context.Background()
-	
+
 	err = rbacManager.Initialize(ctx)
 	require.NoError(t, err)
 
@@ -61,11 +62,11 @@ func TestRBACService_Integration(t *testing.T) {
 	t.Run("role_management", func(t *testing.T) {
 		// Create a custom role
 		customRole := &common.Role{
-			Id:          tenantID + ".custom.role",
-			Name:        "Custom Role",
-			Description: "A test custom role",
+			Id:            tenantID + ".custom.role",
+			Name:          "Custom Role",
+			Description:   "A test custom role",
 			PermissionIds: []string{"steward.read", "config.read"},
-			TenantId:    tenantID,
+			TenantId:      tenantID,
 		}
 
 		createResp, err := service.CreateRole(ctx, &controller.CreateRoleRequest{

@@ -8,8 +8,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
 // RollbackManager handles configuration rollback operations
@@ -37,26 +37,26 @@ func NewRollbackManagerWithStorageManager(storageManager *interfaces.StorageMana
 
 // RollbackRequest represents a configuration rollback request
 type RollbackRequest struct {
-	TenantID         string    `json:"tenant_id"`
-	StewardID        string    `json:"steward_id"`
-	TargetVersion    int64     `json:"target_version"`
-	Reason           string    `json:"reason"`
-	RequestedBy      string    `json:"requested_by"`
-	RequestedAt      time.Time `json:"requested_at"`
-	ValidateOnly     bool      `json:"validate_only"`     // If true, only validate rollback feasibility
-	SkipValidation   bool      `json:"skip_validation"`   // Emergency rollback without validation
+	TenantID       string    `json:"tenant_id"`
+	StewardID      string    `json:"steward_id"`
+	TargetVersion  int64     `json:"target_version"`
+	Reason         string    `json:"reason"`
+	RequestedBy    string    `json:"requested_by"`
+	RequestedAt    time.Time `json:"requested_at"`
+	ValidateOnly   bool      `json:"validate_only"`   // If true, only validate rollback feasibility
+	SkipValidation bool      `json:"skip_validation"` // Emergency rollback without validation
 }
 
 // RollbackResponse represents the result of a rollback operation
 type RollbackResponse struct {
-	Success         bool                         `json:"success"`
-	RollbackID      string                       `json:"rollback_id"`
-	PreviousVersion int64                        `json:"previous_version"`
-	NewVersion      int64                        `json:"new_version"`
-	RiskLevel       RollbackRiskLevel            `json:"risk_level"`
-	Warnings        []string                     `json:"warnings"`
-	Errors          []string                     `json:"errors"`
-	ExecutedAt      time.Time                    `json:"executed_at"`
+	Success          bool                            `json:"success"`
+	RollbackID       string                          `json:"rollback_id"`
+	PreviousVersion  int64                           `json:"previous_version"`
+	NewVersion       int64                           `json:"new_version"`
+	RiskLevel        RollbackRiskLevel               `json:"risk_level"`
+	Warnings         []string                        `json:"warnings"`
+	Errors           []string                        `json:"errors"`
+	ExecutedAt       time.Time                       `json:"executed_at"`
 	ValidationIssues []*ConfigurationValidationError `json:"validation_issues,omitempty"`
 }
 
@@ -72,35 +72,35 @@ const (
 
 // ConfigurationValidationError represents validation errors for rollback
 type ConfigurationValidationError struct {
-	Field       string `json:"field"`
-	Message     string `json:"message"`
-	Code        string `json:"code"`
-	Severity    string `json:"severity"`
-	Suggestion  string `json:"suggestion,omitempty"`
+	Field      string `json:"field"`
+	Message    string `json:"message"`
+	Code       string `json:"code"`
+	Severity   string `json:"severity"`
+	Suggestion string `json:"suggestion,omitempty"`
 }
 
 // RollbackHistory represents a historical rollback operation
 type RollbackHistory struct {
-	RollbackID      string            `json:"rollback_id"`
-	TenantID        string            `json:"tenant_id"`
-	StewardID       string            `json:"steward_id"`
-	FromVersion     int64             `json:"from_version"`
-	ToVersion       int64             `json:"to_version"`
-	Reason          string            `json:"reason"`
-	ExecutedBy      string            `json:"executed_by"`
-	ExecutedAt      time.Time         `json:"executed_at"`
-	RiskLevel       RollbackRiskLevel `json:"risk_level"`
-	Success         bool              `json:"success"`
-	ErrorMessage    string            `json:"error_message,omitempty"`
+	RollbackID   string            `json:"rollback_id"`
+	TenantID     string            `json:"tenant_id"`
+	StewardID    string            `json:"steward_id"`
+	FromVersion  int64             `json:"from_version"`
+	ToVersion    int64             `json:"to_version"`
+	Reason       string            `json:"reason"`
+	ExecutedBy   string            `json:"executed_by"`
+	ExecutedAt   time.Time         `json:"executed_at"`
+	RiskLevel    RollbackRiskLevel `json:"risk_level"`
+	Success      bool              `json:"success"`
+	ErrorMessage string            `json:"error_message,omitempty"`
 }
 
 // PerformRollback rolls back a configuration to a specific version
 func (rm *RollbackManager) PerformRollback(ctx context.Context, request *RollbackRequest) (*RollbackResponse, error) {
 	response := &RollbackResponse{
-		RollbackID:  rm.generateRollbackID(),
-		ExecutedAt:  time.Now(),
-		Warnings:    []string{},
-		Errors:      []string{},
+		RollbackID: rm.generateRollbackID(),
+		ExecutedAt: time.Now(),
+		Warnings:   []string{},
+		Errors:     []string{},
 	}
 
 	// Get current configuration for comparison
@@ -137,7 +137,7 @@ func (rm *RollbackManager) PerformRollback(ctx context.Context, request *Rollbac
 	if !request.SkipValidation {
 		validationErrors := rm.validateRollback(ctx, currentConfig, targetConfig, request)
 		response.ValidationIssues = validationErrors
-		
+
 		// Check for critical validation errors
 		hasCriticalErrors := false
 		for _, err := range validationErrors {
@@ -197,9 +197,9 @@ func (rm *RollbackManager) PerformRollback(ctx context.Context, request *Rollbac
 
 // RollbackRiskAssessment represents the result of rollback risk analysis
 type RollbackRiskAssessment struct {
-	Level     RollbackRiskLevel
-	Warnings  []string
-	Factors   []string
+	Level    RollbackRiskLevel
+	Warnings []string
+	Factors  []string
 }
 
 // assessRollbackRisk analyzes the risk level of rolling back from current to target config
@@ -294,10 +294,10 @@ func (rm *RollbackManager) validateRollback(ctx context.Context, current, target
 	for module := range currentModules {
 		if !targetModules[module] {
 			errors = append(errors, &ConfigurationValidationError{
-				Field:    "module_dependencies",
-				Message:  fmt.Sprintf("Module '%s' will no longer be used after rollback", module),
-				Code:     "MODULE_REMOVED",
-				Severity: "warning",
+				Field:      "module_dependencies",
+				Message:    fmt.Sprintf("Module '%s' will no longer be used after rollback", module),
+				Code:       "MODULE_REMOVED",
+				Severity:   "warning",
 				Suggestion: "Ensure that removing this module won't break system functionality",
 			})
 		}
@@ -329,7 +329,7 @@ func (rm *RollbackManager) validateRollback(ctx context.Context, current, target
 func (rm *RollbackManager) GetRollbackHistory(ctx context.Context, tenantID, stewardID string) ([]*RollbackHistory, error) {
 	// For now, we'll store rollback history as configs in a special namespace
 	// In a full implementation, this might use a dedicated audit store
-	
+
 	filter := &interfaces.ConfigFilter{
 		TenantID:  tenantID,
 		Namespace: "rollback-history",
@@ -377,10 +377,10 @@ func (rm *RollbackManager) storeRollbackHistory(ctx context.Context, rollbackHis
 		Source:    "rollback-manager",
 		Tags:      []string{"rollback-history", string(rollbackHistory.RiskLevel)},
 		Metadata: map[string]interface{}{
-			"rollback_id":   rollbackHistory.RollbackID,
-			"from_version":  rollbackHistory.FromVersion,
-			"to_version":    rollbackHistory.ToVersion,
-			"risk_level":    string(rollbackHistory.RiskLevel),
+			"rollback_id":  rollbackHistory.RollbackID,
+			"from_version": rollbackHistory.FromVersion,
+			"to_version":   rollbackHistory.ToVersion,
+			"risk_level":   string(rollbackHistory.RiskLevel),
 		},
 	}
 
@@ -420,12 +420,12 @@ func (rm *RollbackManager) CanRollback(ctx context.Context, tenantID, stewardID 
 		TargetVersion: targetVersion,
 		ValidateOnly:  true,
 	}
-	
+
 	validationErrors := rm.validateRollback(ctx, currentConfig, targetConfig, validationRequest)
-	
+
 	var issues []string
 	issues = append(issues, riskAssessment.Warnings...)
-	
+
 	for _, err := range validationErrors {
 		if err.Severity == "critical" {
 			return false, append(issues, fmt.Sprintf("Critical: %s", err.Message)), nil

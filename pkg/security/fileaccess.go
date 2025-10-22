@@ -8,10 +8,9 @@
 //
 //	// Secure file reading with path validation
 //	data, err := security.SecureReadFile("/safe/base/path", userProvidedPath)
-//	
+//
 //	// Secure file writing with proper permissions
 //	err := security.SecureWriteFile("/safe/base/path", userProvidedPath, data)
-//
 package security
 
 import (
@@ -35,7 +34,7 @@ func SecureReadFile(basePath, userPath string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("path validation failed: %w", err)
 	}
-	
+
 	// #nosec G304 - Secure file access wrapper with comprehensive path validation
 	// This function specifically prevents directory traversal attacks
 	return os.ReadFile(validatedPath)
@@ -50,13 +49,13 @@ func SecureWriteFile(basePath, userPath string, data []byte) error {
 	if err != nil {
 		return fmt.Errorf("path validation failed: %w", err)
 	}
-	
+
 	// Ensure parent directory exists with secure permissions
 	dir := filepath.Dir(validatedPath)
 	if err := os.MkdirAll(dir, 0750); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
-	
+
 	return os.WriteFile(validatedPath, data, 0600)
 }
 
@@ -68,13 +67,13 @@ func SecureWriteFileWithPerms(basePath, userPath string, data []byte, perm os.Fi
 	if err != nil {
 		return fmt.Errorf("path validation failed: %w", err)
 	}
-	
+
 	// Ensure parent directory exists with secure permissions
 	dir := filepath.Dir(validatedPath)
 	if err := os.MkdirAll(dir, 0750); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
-	
+
 	return os.WriteFile(validatedPath, data, perm)
 }
 
@@ -86,7 +85,7 @@ func SecureOpenFile(basePath, userPath string, flag int, perm os.FileMode) (*os.
 	if err != nil {
 		return nil, fmt.Errorf("path validation failed: %w", err)
 	}
-	
+
 	// #nosec G304 - Secure file access wrapper with comprehensive path validation
 	// This function specifically prevents directory traversal attacks
 	return os.OpenFile(validatedPath, flag, perm)
@@ -108,16 +107,16 @@ func ValidateAndCleanPath(basePath, userPath string) (string, error) {
 	if userPath == "" {
 		return "", fmt.Errorf("user path cannot be empty")
 	}
-	
+
 	// Clean the user-provided path to resolve . and .. elements
 	cleanUserPath := filepath.Clean(userPath)
-	
+
 	// Convert both paths to absolute paths
 	absBasePath, err := filepath.Abs(basePath)
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve base path: %w", err)
 	}
-	
+
 	// Handle relative vs absolute user paths
 	var absUserPath string
 	if filepath.IsAbs(cleanUserPath) {
@@ -127,18 +126,18 @@ func ValidateAndCleanPath(basePath, userPath string) (string, error) {
 		// User provided relative path - join with base path
 		absUserPath = filepath.Join(absBasePath, cleanUserPath)
 	}
-	
+
 	// Resolve any remaining symlinks or path elements
 	absUserPath, err = filepath.Abs(absUserPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve user path: %w", err)
 	}
-	
+
 	// Ensure the resolved path is within the base directory
 	if !strings.HasPrefix(absUserPath, absBasePath) {
 		return "", fmt.Errorf("path traversal attempt detected: %s is outside %s", userPath, basePath)
 	}
-	
+
 	return absUserPath, nil
 }
 

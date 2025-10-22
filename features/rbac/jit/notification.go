@@ -21,44 +21,44 @@ func NewSimpleNotificationService() *SimpleNotificationService {
 
 // NotificationRecord represents a notification that was sent
 type NotificationRecord struct {
-	ID        string                 `json:"id"`
-	Timestamp time.Time              `json:"timestamp"`
-	Type      NotificationType       `json:"type"`
-	Recipients []string              `json:"recipients"`
-	Subject   string                 `json:"subject"`
-	Message   string                 `json:"message"`
-	Channel   NotificationChannel    `json:"channel"`
-	Status    NotificationStatus     `json:"status"`
-	Metadata  map[string]interface{} `json:"metadata,omitempty"`
+	ID         string                 `json:"id"`
+	Timestamp  time.Time              `json:"timestamp"`
+	Type       NotificationType       `json:"type"`
+	Recipients []string               `json:"recipients"`
+	Subject    string                 `json:"subject"`
+	Message    string                 `json:"message"`
+	Channel    NotificationChannel    `json:"channel"`
+	Status     NotificationStatus     `json:"status"`
+	Metadata   map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // NotificationType defines types of notifications
 type NotificationType string
 
 const (
-	NotificationTypeRequestCreated       NotificationType = "request_created"
-	NotificationTypeRequestApproved      NotificationType = "request_approved"
-	NotificationTypeRequestDenied        NotificationType = "request_denied"
-	NotificationTypeApprovalRequired     NotificationType = "approval_required"
-	NotificationTypeApprovalReminder     NotificationType = "approval_reminder"
-	NotificationTypeAccessGranted        NotificationType = "access_granted"
-	NotificationTypeAccessExpiring       NotificationType = "access_expiring"
-	NotificationTypeAccessRevoked        NotificationType = "access_revoked"
-	NotificationTypeAccessExtended       NotificationType = "access_extended"
-	NotificationTypeEscalation           NotificationType = "escalation"
-	NotificationTypePolicyViolation      NotificationType = "policy_violation"
-	NotificationTypeComplianceAlert      NotificationType = "compliance_alert"
+	NotificationTypeRequestCreated   NotificationType = "request_created"
+	NotificationTypeRequestApproved  NotificationType = "request_approved"
+	NotificationTypeRequestDenied    NotificationType = "request_denied"
+	NotificationTypeApprovalRequired NotificationType = "approval_required"
+	NotificationTypeApprovalReminder NotificationType = "approval_reminder"
+	NotificationTypeAccessGranted    NotificationType = "access_granted"
+	NotificationTypeAccessExpiring   NotificationType = "access_expiring"
+	NotificationTypeAccessRevoked    NotificationType = "access_revoked"
+	NotificationTypeAccessExtended   NotificationType = "access_extended"
+	NotificationTypeEscalation       NotificationType = "escalation"
+	NotificationTypePolicyViolation  NotificationType = "policy_violation"
+	NotificationTypeComplianceAlert  NotificationType = "compliance_alert"
 )
 
 // NotificationChannel defines notification delivery channels
 type NotificationChannel string
 
 const (
-	NotificationChannelEmail    NotificationChannel = "email"
-	NotificationChannelSlack    NotificationChannel = "slack"
-	NotificationChannelWebhook  NotificationChannel = "webhook"
-	NotificationChannelInApp    NotificationChannel = "in_app"
-	NotificationChannelSMS      NotificationChannel = "sms"
+	NotificationChannelEmail   NotificationChannel = "email"
+	NotificationChannelSlack   NotificationChannel = "slack"
+	NotificationChannelWebhook NotificationChannel = "webhook"
+	NotificationChannelInApp   NotificationChannel = "in_app"
+	NotificationChannelSMS     NotificationChannel = "sms"
 )
 
 // NotificationStatus defines notification delivery status
@@ -127,10 +127,10 @@ func (sns *SimpleNotificationService) SendApprovalNotification(ctx context.Conte
 	}
 
 	return sns.sendNotification(ctx, NotificationTypeApprovalRequired, approvers, subject, message, map[string]interface{}{
-		"request_id":      request.ID,
-		"tenant_id":       request.TenantID,
-		"emergency":       request.EmergencyAccess,
-		"priority":        request.Priority,
+		"request_id":         request.ID,
+		"tenant_id":          request.TenantID,
+		"emergency":          request.EmergencyAccess,
+		"priority":           request.Priority,
 		"requested_duration": request.Duration.String(),
 	})
 }
@@ -199,11 +199,11 @@ func (sns *SimpleNotificationService) SendExpirationWarning(ctx context.Context,
 	}
 
 	return sns.sendNotification(ctx, NotificationTypeAccessExpiring, recipients, subject, message, map[string]interface{}{
-		"grant_id":           grant.ID,
-		"tenant_id":          grant.TenantID,
-		"expires_at":         grant.ExpiresAt,
-		"time_until_expiry":  timeUntilExpiry,
-		"can_extend":         grant.ExtensionsUsed < grant.MaxExtensions,
+		"grant_id":             grant.ID,
+		"tenant_id":            grant.TenantID,
+		"expires_at":           grant.ExpiresAt,
+		"time_until_expiry":    timeUntilExpiry,
+		"can_extend":           grant.ExtensionsUsed < grant.MaxExtensions,
 		"extensions_remaining": grant.MaxExtensions - grant.ExtensionsUsed,
 	})
 }
@@ -246,11 +246,11 @@ func (sns *SimpleNotificationService) SendEscalationNotification(ctx context.Con
 	recipients := []string{"security-admin", "compliance-officer"}
 
 	return sns.sendNotification(ctx, NotificationTypeEscalation, recipients, subject, message, map[string]interface{}{
-		"request_id":       request.ID,
-		"tenant_id":        request.TenantID,
-		"escalation_level": escalationLevel,
+		"request_id":         request.ID,
+		"tenant_id":          request.TenantID,
+		"escalation_level":   escalationLevel,
 		"original_requester": request.RequesterID,
-		"emergency_access": request.EmergencyAccess,
+		"emergency_access":   request.EmergencyAccess,
 	})
 }
 
@@ -295,12 +295,12 @@ func (sns *SimpleNotificationService) GetNotificationHistory(ctx context.Context
 
 // NotificationFilter for filtering notifications
 type NotificationFilter struct {
-	RecipientID string                `json:"recipient_id,omitempty"`
-	Type        string                `json:"type,omitempty"`
-	Channel     string                `json:"channel,omitempty"`
-	Status      string                `json:"status,omitempty"`
-	DateFrom    *time.Time            `json:"date_from,omitempty"`
-	DateTo      *time.Time            `json:"date_to,omitempty"`
+	RecipientID string     `json:"recipient_id,omitempty"`
+	Type        string     `json:"type,omitempty"`
+	Channel     string     `json:"channel,omitempty"`
+	Status      string     `json:"status,omitempty"`
+	DateFrom    *time.Time `json:"date_from,omitempty"`
+	DateTo      *time.Time `json:"date_to,omitempty"`
 }
 
 func (sns *SimpleNotificationService) matchesNotificationFilter(record NotificationRecord, filter *NotificationFilter) bool {
@@ -370,12 +370,12 @@ func (sns *SimpleNotificationService) GetUnreadNotifications(ctx context.Context
 
 // NotificationStats provides statistics about notifications
 type NotificationStats struct {
-	TotalSent       int                               `json:"total_sent"`
-	TotalDelivered  int                               `json:"total_delivered"`
-	TotalFailed     int                               `json:"total_failed"`
-	TypeBreakdown   map[NotificationType]int          `json:"type_breakdown"`
-	ChannelBreakdown map[NotificationChannel]int      `json:"channel_breakdown"`
-	GeneratedAt     time.Time                         `json:"generated_at"`
+	TotalSent        int                         `json:"total_sent"`
+	TotalDelivered   int                         `json:"total_delivered"`
+	TotalFailed      int                         `json:"total_failed"`
+	TypeBreakdown    map[NotificationType]int    `json:"type_breakdown"`
+	ChannelBreakdown map[NotificationChannel]int `json:"channel_breakdown"`
+	GeneratedAt      time.Time                   `json:"generated_at"`
 }
 
 // GetNotificationStats generates notification statistics

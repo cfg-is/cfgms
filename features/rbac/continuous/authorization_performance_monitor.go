@@ -12,13 +12,13 @@ import (
 type AuthorizationPerformanceMonitor struct {
 	// Configuration
 	config *PerformanceMonitorConfig
-	
+
 	// Metrics tracking
 	metrics *LivePerformanceMetrics
-	
+
 	// SLA monitoring
 	slaTracker *SLATracker
-	
+
 	// Control
 	stopChannel chan struct{}
 	running     bool
@@ -28,114 +28,114 @@ type AuthorizationPerformanceMonitor struct {
 // PerformanceMonitorConfig contains performance monitoring configuration
 type PerformanceMonitorConfig struct {
 	// SLA thresholds
-	MaxLatencyMs          int           `json:"max_latency_ms"`           // Target <10ms
-	MinCacheHitRate       float64       `json:"min_cache_hit_rate"`       // Target >90%
-	MaxMemoryUsageMB      float64       `json:"max_memory_usage_mb"`      // Memory limit
-	MaxGoroutineCount     int           `json:"max_goroutine_count"`      // Goroutine limit
-	
+	MaxLatencyMs      int     `json:"max_latency_ms"`      // Target <10ms
+	MinCacheHitRate   float64 `json:"min_cache_hit_rate"`  // Target >90%
+	MaxMemoryUsageMB  float64 `json:"max_memory_usage_mb"` // Memory limit
+	MaxGoroutineCount int     `json:"max_goroutine_count"` // Goroutine limit
+
 	// Monitoring intervals
-	MetricsInterval       time.Duration `json:"metrics_interval"`         // Metrics collection frequency
-	SLACheckInterval      time.Duration `json:"sla_check_interval"`       // SLA validation frequency
-	AlertCooldownPeriod   time.Duration `json:"alert_cooldown_period"`    // Alert throttling
-	
+	MetricsInterval     time.Duration `json:"metrics_interval"`      // Metrics collection frequency
+	SLACheckInterval    time.Duration `json:"sla_check_interval"`    // SLA validation frequency
+	AlertCooldownPeriod time.Duration `json:"alert_cooldown_period"` // Alert throttling
+
 	// Thresholds for alerting
-	LatencyP95Threshold   time.Duration `json:"latency_p95_threshold"`    // P95 latency alert threshold
-	ThroughputMinRPS      float64       `json:"throughput_min_rps"`       // Minimum throughput
-	ErrorRateMaxPercent   float64       `json:"error_rate_max_percent"`   // Maximum error rate
-	
+	LatencyP95Threshold time.Duration `json:"latency_p95_threshold"`  // P95 latency alert threshold
+	ThroughputMinRPS    float64       `json:"throughput_min_rps"`     // Minimum throughput
+	ErrorRateMaxPercent float64       `json:"error_rate_max_percent"` // Maximum error rate
+
 	// Monitoring features
-	EnableRealTimeAlerts  bool          `json:"enable_real_time_alerts"`  // Enable real-time alerting
-	EnableTrendAnalysis   bool          `json:"enable_trend_analysis"`    // Enable trend analysis
-	EnableCapacityPlanning bool         `json:"enable_capacity_planning"` // Enable capacity planning
-	
+	EnableRealTimeAlerts   bool `json:"enable_real_time_alerts"`  // Enable real-time alerting
+	EnableTrendAnalysis    bool `json:"enable_trend_analysis"`    // Enable trend analysis
+	EnableCapacityPlanning bool `json:"enable_capacity_planning"` // Enable capacity planning
+
 	// Export settings
-	MetricsExportEnabled  bool          `json:"metrics_export_enabled"`   // Enable metrics export
-	MetricsExportInterval time.Duration `json:"metrics_export_interval"`  // Export frequency
-	MetricsExportFormat   string        `json:"metrics_export_format"`    // Export format (prometheus, json)
+	MetricsExportEnabled  bool          `json:"metrics_export_enabled"`  // Enable metrics export
+	MetricsExportInterval time.Duration `json:"metrics_export_interval"` // Export frequency
+	MetricsExportFormat   string        `json:"metrics_export_format"`   // Export format (prometheus, json)
 }
 
 // LivePerformanceMetrics tracks real-time authorization performance metrics
 type LivePerformanceMetrics struct {
 	// Request metrics
-	RequestsPerSecond     float64       `json:"requests_per_second"`
-	TotalRequests         int64         `json:"total_requests"`
-	SuccessfulRequests    int64         `json:"successful_requests"`
-	FailedRequests        int64         `json:"failed_requests"`
-	
+	RequestsPerSecond  float64 `json:"requests_per_second"`
+	TotalRequests      int64   `json:"total_requests"`
+	SuccessfulRequests int64   `json:"successful_requests"`
+	FailedRequests     int64   `json:"failed_requests"`
+
 	// Latency metrics
-	CurrentLatencyMs      float64       `json:"current_latency_ms"`
-	AverageLatencyMs      float64       `json:"average_latency_ms"`
-	P50LatencyMs          float64       `json:"p50_latency_ms"`
-	P95LatencyMs          float64       `json:"p95_latency_ms"`
-	P99LatencyMs          float64       `json:"p99_latency_ms"`
-	MaxLatencyMs          float64       `json:"max_latency_ms"`
-	
+	CurrentLatencyMs float64 `json:"current_latency_ms"`
+	AverageLatencyMs float64 `json:"average_latency_ms"`
+	P50LatencyMs     float64 `json:"p50_latency_ms"`
+	P95LatencyMs     float64 `json:"p95_latency_ms"`
+	P99LatencyMs     float64 `json:"p99_latency_ms"`
+	MaxLatencyMs     float64 `json:"max_latency_ms"`
+
 	// Cache metrics
-	CacheHitRate          float64       `json:"cache_hit_rate"`
-	CacheHits             int64         `json:"cache_hits"`
-	CacheMisses           int64         `json:"cache_misses"`
-	CacheSize             int           `json:"cache_size"`
-	CacheEvictions        int64         `json:"cache_evictions"`
-	
+	CacheHitRate   float64 `json:"cache_hit_rate"`
+	CacheHits      int64   `json:"cache_hits"`
+	CacheMisses    int64   `json:"cache_misses"`
+	CacheSize      int     `json:"cache_size"`
+	CacheEvictions int64   `json:"cache_evictions"`
+
 	// Concurrency metrics
-	ActiveSessions        int           `json:"active_sessions"`
-	ConcurrentRequests    int           `json:"concurrent_requests"`
-	PeakConcurrency       int           `json:"peak_concurrency"`
-	
+	ActiveSessions     int `json:"active_sessions"`
+	ConcurrentRequests int `json:"concurrent_requests"`
+	PeakConcurrency    int `json:"peak_concurrency"`
+
 	// Resource metrics
-	MemoryUsageMB         float64       `json:"memory_usage_mb"`
-	GoroutineCount        int           `json:"goroutine_count"`
-	CPUUsagePercent       float64       `json:"cpu_usage_percent"`
-	
+	MemoryUsageMB   float64 `json:"memory_usage_mb"`
+	GoroutineCount  int     `json:"goroutine_count"`
+	CPUUsagePercent float64 `json:"cpu_usage_percent"`
+
 	// Error metrics
-	ErrorRate             float64       `json:"error_rate"`
-	TimeoutCount          int64         `json:"timeout_count"`
-	CircuitBreakerTrips   int64         `json:"circuit_breaker_trips"`
-	
+	ErrorRate           float64 `json:"error_rate"`
+	TimeoutCount        int64   `json:"timeout_count"`
+	CircuitBreakerTrips int64   `json:"circuit_breaker_trips"`
+
 	// Business metrics
-	PermissionDenials     int64         `json:"permission_denials"`
-	PolicyViolations      int64         `json:"policy_violations"`
-	SecurityAlerts        int64         `json:"security_alerts"`
-	
+	PermissionDenials int64 `json:"permission_denials"`
+	PolicyViolations  int64 `json:"policy_violations"`
+	SecurityAlerts    int64 `json:"security_alerts"`
+
 	// Time tracking
-	LastUpdated           time.Time     `json:"last_updated"`
-	MonitoringUptime      time.Duration `json:"monitoring_uptime"`
-	
+	LastUpdated      time.Time     `json:"last_updated"`
+	MonitoringUptime time.Duration `json:"monitoring_uptime"`
+
 	// Trend data
-	LatencyTrend          []float64     `json:"latency_trend"`
-	ThroughputTrend       []float64     `json:"throughput_trend"`
-	ErrorRateTrend        []float64     `json:"error_rate_trend"`
-	
-	mutex                 sync.RWMutex
+	LatencyTrend    []float64 `json:"latency_trend"`
+	ThroughputTrend []float64 `json:"throughput_trend"`
+	ErrorRateTrend  []float64 `json:"error_rate_trend"`
+
+	mutex sync.RWMutex
 }
 
 // SLATracker monitors and tracks SLA compliance
 type SLATracker struct {
 	// SLA definitions
-	slaTargets           map[string]SLATarget
-	
+	slaTargets map[string]SLATarget
+
 	// SLA compliance tracking
-	complianceHistory    []SLAComplianceRecord
-	currentCompliance    map[string]float64
-	
+	complianceHistory []SLAComplianceRecord
+	currentCompliance map[string]float64
+
 	// Alert management
-	activeAlerts         map[string]*SLAAlert
-	alertHistory         []SLAAlert
-	lastAlertTime        map[string]time.Time
-	
-	mutex               sync.RWMutex
+	activeAlerts  map[string]*SLAAlert
+	alertHistory  []SLAAlert
+	lastAlertTime map[string]time.Time
+
+	mutex sync.RWMutex
 }
 
 // SLATarget defines an SLA target metric
 type SLATarget struct {
-	Name            string        `json:"name"`
-	Description     string        `json:"description"`
-	MetricType      string        `json:"metric_type"`      // latency, throughput, availability
-	TargetValue     float64       `json:"target_value"`
-	TargetOperator  string        `json:"target_operator"`  // <, >, <=, >=, ==
-	MeasurementUnit string        `json:"measurement_unit"` // ms, rps, percent
+	Name             string        `json:"name"`
+	Description      string        `json:"description"`
+	MetricType       string        `json:"metric_type"` // latency, throughput, availability
+	TargetValue      float64       `json:"target_value"`
+	TargetOperator   string        `json:"target_operator"`  // <, >, <=, >=, ==
+	MeasurementUnit  string        `json:"measurement_unit"` // ms, rps, percent
 	CompliancePeriod time.Duration `json:"compliance_period"`
-	Severity        AlertSeverity `json:"severity"`
+	Severity         AlertSeverity `json:"severity"`
 }
 
 // SLAComplianceRecord records SLA compliance over time
@@ -150,29 +150,29 @@ type SLAComplianceRecord struct {
 
 // SLAAlert represents an SLA violation alert
 type SLAAlert struct {
-	ID              string        `json:"id"`
-	SLAName         string        `json:"sla_name"`
-	AlertType       AlertType     `json:"alert_type"`
-	Severity        AlertSeverity `json:"severity"`
-	Message         string        `json:"message"`
-	ActualValue     float64       `json:"actual_value"`
-	TargetValue     float64       `json:"target_value"`
-	Timestamp       time.Time     `json:"timestamp"`
-	Acknowledged    bool          `json:"acknowledged"`
-	ResolvedAt      time.Time     `json:"resolved_at,omitempty"`
-	Duration        time.Duration `json:"duration"`
+	ID           string        `json:"id"`
+	SLAName      string        `json:"sla_name"`
+	AlertType    AlertType     `json:"alert_type"`
+	Severity     AlertSeverity `json:"severity"`
+	Message      string        `json:"message"`
+	ActualValue  float64       `json:"actual_value"`
+	TargetValue  float64       `json:"target_value"`
+	Timestamp    time.Time     `json:"timestamp"`
+	Acknowledged bool          `json:"acknowledged"`
+	ResolvedAt   time.Time     `json:"resolved_at,omitempty"`
+	Duration     time.Duration `json:"duration"`
 }
 
 // AlertType defines the type of alert
 type AlertType string
 
 const (
-	AlertTypeLatencyViolation    AlertType = "latency_violation"
+	AlertTypeLatencyViolation      AlertType = "latency_violation"
 	AlertTypeThroughputDegradation AlertType = "throughput_degradation"
-	AlertTypeCachePerformance    AlertType = "cache_performance"
-	AlertTypeMemoryUsage         AlertType = "memory_usage"
-	AlertTypeErrorRate           AlertType = "error_rate"
-	AlertTypeCapacityLimit       AlertType = "capacity_limit"
+	AlertTypeCachePerformance      AlertType = "cache_performance"
+	AlertTypeMemoryUsage           AlertType = "memory_usage"
+	AlertTypeErrorRate             AlertType = "error_rate"
+	AlertTypeCapacityLimit         AlertType = "capacity_limit"
 )
 
 // AlertSeverity defines alert severity levels
@@ -194,10 +194,10 @@ func NewAuthorizationPerformanceMonitor(config *PerformanceMonitorConfig) *Autho
 	return &AuthorizationPerformanceMonitor{
 		config: config,
 		metrics: &LivePerformanceMetrics{
-			LastUpdated:      time.Now(),
-			LatencyTrend:     make([]float64, 0, 100),
-			ThroughputTrend:  make([]float64, 0, 100),
-			ErrorRateTrend:   make([]float64, 0, 100),
+			LastUpdated:     time.Now(),
+			LatencyTrend:    make([]float64, 0, 100),
+			ThroughputTrend: make([]float64, 0, 100),
+			ErrorRateTrend:  make([]float64, 0, 100),
 		},
 		slaTracker: &SLATracker{
 			slaTargets:        createDefaultSLATargets(),
@@ -287,35 +287,35 @@ func (apm *AuthorizationPerformanceMonitor) GetCurrentMetrics() *LivePerformance
 
 	// Return a copy to prevent data races - copy fields individually to avoid copying mutex
 	metricsCopy := &LivePerformanceMetrics{
-		RequestsPerSecond:     apm.metrics.RequestsPerSecond,
-		TotalRequests:         apm.metrics.TotalRequests,
-		SuccessfulRequests:    apm.metrics.SuccessfulRequests,
-		FailedRequests:        apm.metrics.FailedRequests,
-		CurrentLatencyMs:      apm.metrics.CurrentLatencyMs,
-		AverageLatencyMs:      apm.metrics.AverageLatencyMs,
-		P50LatencyMs:          apm.metrics.P50LatencyMs,
-		P95LatencyMs:          apm.metrics.P95LatencyMs,
-		P99LatencyMs:          apm.metrics.P99LatencyMs,
-		MaxLatencyMs:          apm.metrics.MaxLatencyMs,
-		CacheHitRate:          apm.metrics.CacheHitRate,
-		CacheHits:             apm.metrics.CacheHits,
-		CacheMisses:           apm.metrics.CacheMisses,
-		CacheSize:             apm.metrics.CacheSize,
-		CacheEvictions:        apm.metrics.CacheEvictions,
-		ErrorRate:             apm.metrics.ErrorRate,
-		MemoryUsageMB:         apm.metrics.MemoryUsageMB,
-		GoroutineCount:        apm.metrics.GoroutineCount,
-		CPUUsagePercent:       apm.metrics.CPUUsagePercent,
-		ActiveSessions:        apm.metrics.ActiveSessions,
-		ConcurrentRequests:    apm.metrics.ConcurrentRequests,
-		PeakConcurrency:       apm.metrics.PeakConcurrency,
-		TimeoutCount:          apm.metrics.TimeoutCount,
-		CircuitBreakerTrips:   apm.metrics.CircuitBreakerTrips,
-		PermissionDenials:     apm.metrics.PermissionDenials,
-		PolicyViolations:      apm.metrics.PolicyViolations,
-		SecurityAlerts:        apm.metrics.SecurityAlerts,
-		MonitoringUptime:      apm.metrics.MonitoringUptime,
-		LastUpdated:           apm.metrics.LastUpdated,
+		RequestsPerSecond:   apm.metrics.RequestsPerSecond,
+		TotalRequests:       apm.metrics.TotalRequests,
+		SuccessfulRequests:  apm.metrics.SuccessfulRequests,
+		FailedRequests:      apm.metrics.FailedRequests,
+		CurrentLatencyMs:    apm.metrics.CurrentLatencyMs,
+		AverageLatencyMs:    apm.metrics.AverageLatencyMs,
+		P50LatencyMs:        apm.metrics.P50LatencyMs,
+		P95LatencyMs:        apm.metrics.P95LatencyMs,
+		P99LatencyMs:        apm.metrics.P99LatencyMs,
+		MaxLatencyMs:        apm.metrics.MaxLatencyMs,
+		CacheHitRate:        apm.metrics.CacheHitRate,
+		CacheHits:           apm.metrics.CacheHits,
+		CacheMisses:         apm.metrics.CacheMisses,
+		CacheSize:           apm.metrics.CacheSize,
+		CacheEvictions:      apm.metrics.CacheEvictions,
+		ErrorRate:           apm.metrics.ErrorRate,
+		MemoryUsageMB:       apm.metrics.MemoryUsageMB,
+		GoroutineCount:      apm.metrics.GoroutineCount,
+		CPUUsagePercent:     apm.metrics.CPUUsagePercent,
+		ActiveSessions:      apm.metrics.ActiveSessions,
+		ConcurrentRequests:  apm.metrics.ConcurrentRequests,
+		PeakConcurrency:     apm.metrics.PeakConcurrency,
+		TimeoutCount:        apm.metrics.TimeoutCount,
+		CircuitBreakerTrips: apm.metrics.CircuitBreakerTrips,
+		PermissionDenials:   apm.metrics.PermissionDenials,
+		PolicyViolations:    apm.metrics.PolicyViolations,
+		SecurityAlerts:      apm.metrics.SecurityAlerts,
+		MonitoringUptime:    apm.metrics.MonitoringUptime,
+		LastUpdated:         apm.metrics.LastUpdated,
 	}
 	return metricsCopy
 }
@@ -416,7 +416,7 @@ func (apm *AuthorizationPerformanceMonitor) metricsExportLoop(ctx context.Contex
 func (apm *AuthorizationPerformanceMonitor) updateLatencyMetrics(latencyMs float64) {
 	// Update current and average latency
 	apm.metrics.CurrentLatencyMs = latencyMs
-	
+
 	// Update max latency
 	if latencyMs > apm.metrics.MaxLatencyMs {
 		apm.metrics.MaxLatencyMs = latencyMs
@@ -452,13 +452,13 @@ func (apm *AuthorizationPerformanceMonitor) calculatePercentile(data []float64, 
 	if len(data) == 0 {
 		return 0
 	}
-	
+
 	// Simplified percentile calculation
 	index := int(float64(len(data)) * percentile)
 	if index >= len(data) {
 		index = len(data) - 1
 	}
-	
+
 	return data[index]
 }
 
@@ -481,7 +481,7 @@ func (apm *AuthorizationPerformanceMonitor) checkSLACompliance() {
 
 	for slaName, target := range apm.slaTracker.slaTargets {
 		compliance := apm.evaluateSLATarget(target, currentMetrics)
-		
+
 		// Record compliance
 		record := SLAComplianceRecord{
 			Timestamp:       currentTime,
@@ -491,7 +491,7 @@ func (apm *AuthorizationPerformanceMonitor) checkSLACompliance() {
 			IsCompliant:     compliance.IsCompliant,
 			ComplianceScore: compliance.ComplianceScore,
 		}
-		
+
 		apm.slaTracker.complianceHistory = append(apm.slaTracker.complianceHistory, record)
 		apm.slaTracker.currentCompliance[slaName] = compliance.ComplianceScore
 
@@ -536,7 +536,7 @@ type SLACompliance struct {
 
 func (apm *AuthorizationPerformanceMonitor) evaluateSLATarget(target SLATarget, metrics *LivePerformanceMetrics) SLACompliance {
 	var actualValue float64
-	
+
 	// Extract actual value based on metric type
 	switch target.MetricType {
 	case "latency":
@@ -553,14 +553,14 @@ func (apm *AuthorizationPerformanceMonitor) evaluateSLATarget(target SLATarget, 
 
 	// Evaluate compliance
 	isCompliant := apm.evaluateTargetOperator(actualValue, target.TargetValue, target.TargetOperator)
-	
+
 	// Calculate compliance score (0-100)
 	var complianceScore float64
 	if isCompliant {
 		complianceScore = 100.0
 	} else {
 		// Calculate partial compliance based on how far off we are
-		deviation := abs(actualValue - target.TargetValue) / target.TargetValue
+		deviation := abs(actualValue-target.TargetValue) / target.TargetValue
 		complianceScore = max(0, 100.0*(1-deviation))
 	}
 
@@ -617,66 +617,66 @@ func (apm *AuthorizationPerformanceMonitor) generateSLAAlert(target SLATarget, c
 // DefaultPerformanceMonitorConfig returns default performance monitor configuration
 func DefaultPerformanceMonitorConfig() *PerformanceMonitorConfig {
 	return &PerformanceMonitorConfig{
-		MaxLatencyMs:          10,
-		MinCacheHitRate:       0.90,
-		MaxMemoryUsageMB:      512,
-		MaxGoroutineCount:     1000,
-		MetricsInterval:       5 * time.Second,
-		SLACheckInterval:      30 * time.Second,
-		AlertCooldownPeriod:   5 * time.Minute,
-		LatencyP95Threshold:   15 * time.Millisecond,
-		ThroughputMinRPS:      50,
-		ErrorRateMaxPercent:   5.0,
-		EnableRealTimeAlerts:  true,
-		EnableTrendAnalysis:   true,
+		MaxLatencyMs:           10,
+		MinCacheHitRate:        0.90,
+		MaxMemoryUsageMB:       512,
+		MaxGoroutineCount:      1000,
+		MetricsInterval:        5 * time.Second,
+		SLACheckInterval:       30 * time.Second,
+		AlertCooldownPeriod:    5 * time.Minute,
+		LatencyP95Threshold:    15 * time.Millisecond,
+		ThroughputMinRPS:       50,
+		ErrorRateMaxPercent:    5.0,
+		EnableRealTimeAlerts:   true,
+		EnableTrendAnalysis:    true,
 		EnableCapacityPlanning: true,
-		MetricsExportEnabled:  true,
-		MetricsExportInterval: 1 * time.Minute,
-		MetricsExportFormat:   "prometheus",
+		MetricsExportEnabled:   true,
+		MetricsExportInterval:  1 * time.Minute,
+		MetricsExportFormat:    "prometheus",
 	}
 }
 
 func createDefaultSLATargets() map[string]SLATarget {
 	return map[string]SLATarget{
 		"authorization_latency": {
-			Name:            "authorization_latency",
-			Description:     "Authorization requests must complete within 10ms",
-			MetricType:      "latency",
-			TargetValue:     10.0,
-			TargetOperator:  "<",
-			MeasurementUnit: "ms",
+			Name:             "authorization_latency",
+			Description:      "Authorization requests must complete within 10ms",
+			MetricType:       "latency",
+			TargetValue:      10.0,
+			TargetOperator:   "<",
+			MeasurementUnit:  "ms",
 			CompliancePeriod: 5 * time.Minute,
-			Severity:        AlertSeverityError,
+			Severity:         AlertSeverityError,
 		},
 		"cache_hit_rate": {
-			Name:            "cache_hit_rate",
-			Description:     "Permission cache hit rate must exceed 90%",
-			MetricType:      "cache_hit_rate",
-			TargetValue:     90.0,
-			TargetOperator:  ">",
-			MeasurementUnit: "percent",
+			Name:             "cache_hit_rate",
+			Description:      "Permission cache hit rate must exceed 90%",
+			MetricType:       "cache_hit_rate",
+			TargetValue:      90.0,
+			TargetOperator:   ">",
+			MeasurementUnit:  "percent",
 			CompliancePeriod: 5 * time.Minute,
-			Severity:        AlertSeverityWarning,
+			Severity:         AlertSeverityWarning,
 		},
 		"throughput": {
-			Name:            "throughput",
-			Description:     "System must maintain minimum 50 RPS throughput",
-			MetricType:      "throughput",
-			TargetValue:     50.0,
-			TargetOperator:  ">",
-			MeasurementUnit: "rps",
+			Name:             "throughput",
+			Description:      "System must maintain minimum 50 RPS throughput",
+			MetricType:       "throughput",
+			TargetValue:      50.0,
+			TargetOperator:   ">",
+			MeasurementUnit:  "rps",
 			CompliancePeriod: 5 * time.Minute,
-			Severity:        AlertSeverityError,
+			Severity:         AlertSeverityError,
 		},
 		"error_rate": {
-			Name:            "error_rate",
-			Description:     "Error rate must remain below 5%",
-			MetricType:      "error_rate",
-			TargetValue:     5.0,
-			TargetOperator:  "<",
-			MeasurementUnit: "percent",
+			Name:             "error_rate",
+			Description:      "Error rate must remain below 5%",
+			MetricType:       "error_rate",
+			TargetValue:      5.0,
+			TargetOperator:   "<",
+			MeasurementUnit:  "percent",
 			CompliancePeriod: 5 * time.Minute,
-			Severity:        AlertSeverityCritical,
+			Severity:         AlertSeverityCritical,
 		},
 	}
 }

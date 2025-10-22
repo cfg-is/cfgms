@@ -21,8 +21,8 @@ type DockerComposeHelper struct {
 // Uses the unified docker-compose.test.yml with --profile ha
 func NewDockerComposeHelper() *DockerComposeHelper {
 	return &DockerComposeHelper{
-		ComposeFile: "../../../docker-compose.test.yml",  // Unified test configuration
-		ProjectName: "cfgms-test",  // Use same project name as other integration tests
+		ComposeFile: "../../../docker-compose.test.yml", // Unified test configuration
+		ProjectName: "cfgms-test",                       // Use same project name as other integration tests
 	}
 }
 
@@ -43,7 +43,7 @@ func (h *DockerComposeHelper) StartCluster(ctx context.Context) error {
 		"--env-file", "../../../.env.test",
 		"-p", h.ProjectName,
 		"--profile", "ha",
-		"--profile", "timescale",  // Also include timescaledb-test
+		"--profile", "timescale", // Also include timescaledb-test
 		"down", "-v", "--rmi", "all", "--remove-orphans")
 
 	cleanupOutput, err := cleanupCmd.CombinedOutput()
@@ -64,7 +64,7 @@ func (h *DockerComposeHelper) StartCluster(ctx context.Context) error {
 	fmt.Println("Step 3/5: Building fresh Docker images (no cache)...")
 	buildCmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
-		"--env-file", "../../../.env.test",  // Use generated test credentials
+		"--env-file", "../../../.env.test", // Use generated test credentials
 		"-p", h.ProjectName,
 		"--profile", "ha",
 		"--profile", "timescale",
@@ -79,7 +79,7 @@ func (h *DockerComposeHelper) StartCluster(ctx context.Context) error {
 	fmt.Println("Step 4/5: Starting HA cluster with credentials...")
 	startCmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
-		"--env-file", "../../../.env.test",  // Use generated test credentials
+		"--env-file", "../../../.env.test", // Use generated test credentials
 		"-p", h.ProjectName,
 		"--profile", "ha",
 		"--profile", "timescale",
@@ -153,8 +153,8 @@ func (h *DockerComposeHelper) CheckStewardConnection(ctx context.Context, stewar
 
 	// Look for connection indicators in logs
 	if strings.Contains(logs, "Connected to controller") ||
-	   strings.Contains(logs, "gRPC connection established") ||
-	   strings.Contains(logs, "Heartbeat successful") {
+		strings.Contains(logs, "gRPC connection established") ||
+		strings.Contains(logs, "Heartbeat successful") {
 
 		// Extract controller connection info from logs
 		lines := strings.Split(logs, "\n")

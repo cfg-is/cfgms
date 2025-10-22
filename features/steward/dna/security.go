@@ -1,17 +1,16 @@
 package dna
 
-
 // SecurityCollector defines the interface for platform-specific security attribute collection
 type SecurityCollector interface {
 	// CollectUsers gathers user account information
 	CollectUsers(attributes map[string]string) error
-	
+
 	// CollectGroups gathers group information
 	CollectGroups(attributes map[string]string) error
-	
+
 	// CollectPermissions gathers file/directory permission information
 	CollectPermissions(attributes map[string]string) error
-	
+
 	// CollectCertificates gathers installed certificate information
 	CollectCertificates(attributes map[string]string) error
 }
@@ -91,4 +90,3 @@ func (l *LinuxSecurityCollector) CollectCertificates(attributes map[string]strin
 
 // DarwinSecurityCollector handles macOS-specific security collection
 type DarwinSecurityCollector struct{}
-

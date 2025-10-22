@@ -26,11 +26,10 @@
 //	}
 //
 // The comparison process:
-//   1. Extract managed fields from the desired state
-//   2. Get field values for both current and desired states
-//   3. Compare only the managed fields using deep equality
-//   4. Generate detailed diff with change information
-//
+//  1. Extract managed fields from the desired state
+//  2. Get field values for both current and desired states
+//  3. Compare only the managed fields using deep equality
+//  4. Generate detailed diff with change information
 package testing
 
 import (
@@ -55,10 +54,10 @@ type StateComparator struct {
 type StateDiff struct {
 	// ChangedFields maps field names to their specific differences
 	ChangedFields map[string]FieldDiff
-	
+
 	// AddedFields contains fields present in desired but not in current
-	AddedFields   map[string]interface{}
-	
+	AddedFields map[string]interface{}
+
 	// RemovedFields contains fields present in current but not in desired
 	RemovedFields map[string]interface{}
 }
@@ -70,12 +69,12 @@ type StateDiff struct {
 type FieldDiff struct {
 	// Current is the existing field value
 	Current interface{}
-	
+
 	// Desired is the target field value
 	Desired interface{}
-	
+
 	// Type indicates the kind of difference detected
-	Type    DiffType
+	Type DiffType
 }
 
 // DiffType represents the type of difference detected between field values.
@@ -84,13 +83,13 @@ type DiffType int
 const (
 	// DiffTypeChanged indicates the field value changed but type remained the same
 	DiffTypeChanged DiffType = iota
-	
+
 	// DiffTypeAdded indicates the field was added to the configuration
 	DiffTypeAdded
-	
+
 	// DiffTypeRemoved indicates the field was removed from the configuration
 	DiffTypeRemoved
-	
+
 	// DiffTypeTypeChanged indicates both the value and type changed
 	DiffTypeTypeChanged
 )
@@ -106,9 +105,9 @@ func NewStateComparator() *StateComparator {
 // CompareStates compares current and desired states and detects configuration drift.
 //
 // This method implements the core comparison logic:
-//   1. Extracts managed fields from the desired state
-//   2. Compares only those fields between current and desired states
-//   3. Generates detailed diff information for any differences
+//  1. Extracts managed fields from the desired state
+//  2. Compares only those fields between current and desired states
+//  3. Generates detailed diff information for any differences
 //
 // Returns true if drift is detected (any managed fields differ), along with
 // a detailed StateDiff containing information about all differences found.

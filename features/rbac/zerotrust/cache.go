@@ -22,20 +22,20 @@ type PolicyCache struct {
 func NewPolicyCache(ttl time.Duration) *PolicyCache {
 	// L1 cache: Small, fast cache for frequently accessed data
 	l1Config := cache.CacheConfig{
-		Name:              "zerotrust-l1",
-		MaxRuntimeItems:   1000,
-		DefaultTTL:        ttl,
-		CleanupInterval:   1 * time.Minute,
-		EvictionPolicy:    cache.EvictionLRU,
+		Name:            "zerotrust-l1",
+		MaxRuntimeItems: 1000,
+		DefaultTTL:      ttl,
+		CleanupInterval: 1 * time.Minute,
+		EvictionPolicy:  cache.EvictionLRU,
 	}
 
 	// L2 cache: Larger cache for less frequently accessed data
 	l2Config := cache.CacheConfig{
-		Name:              "zerotrust-l2",
-		MaxRuntimeItems:   10000,
-		DefaultTTL:        ttl,
-		CleanupInterval:   1 * time.Minute,
-		EvictionPolicy:    cache.EvictionLRU,
+		Name:            "zerotrust-l2",
+		MaxRuntimeItems: 10000,
+		DefaultTTL:      ttl,
+		CleanupInterval: 1 * time.Minute,
+		EvictionPolicy:  cache.EvictionLRU,
 	}
 
 	return &PolicyCache{

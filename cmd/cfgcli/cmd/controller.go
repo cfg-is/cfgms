@@ -15,9 +15,9 @@ import (
 
 var (
 	// Controller command flags
-	healthURL string
-	healthAPIKey        string
-	healthFormat        string
+	healthURL    string
+	healthAPIKey string
+	healthFormat string
 )
 
 // controllerCmd represents the controller command
@@ -209,8 +209,8 @@ func runControllerMetrics(cmd *cobra.Command, args []string) error {
 
 	// Parse response
 	var metrics struct {
-		Timestamp   time.Time `json:"timestamp"`
-		MQTT        *struct {
+		Timestamp time.Time `json:"timestamp"`
+		MQTT      *struct {
 			ActiveConnections     int64     `json:"active_connections"`
 			MessageQueueDepth     int64     `json:"message_queue_depth"`
 			MessageThroughput     float64   `json:"message_throughput"`

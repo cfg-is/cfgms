@@ -71,13 +71,13 @@ func (c *DefaultStorageCollector) GetMetrics() *StorageMetrics {
 
 // MockStorageProviderStats implements StorageProviderStats for testing
 type MockStorageProviderStats struct {
-	ProviderName      string
-	PoolUtilization   float64
-	AvgLatencyMs      float64
-	P95LatencyMs      float64
-	TotalQueries      int64
-	SlowQueries       int64
-	QueryErrors       int64
+	ProviderName    string
+	PoolUtilization float64
+	AvgLatencyMs    float64
+	P95LatencyMs    float64
+	TotalQueries    int64
+	SlowQueries     int64
+	QueryErrors     int64
 }
 
 // GetProviderName returns the storage provider name

@@ -1086,10 +1086,10 @@ type ErrorHandlingConfig struct {
 type Node interface {
 	// Execute runs the node with given inputs and returns outputs
 	Execute(ctx context.Context, inputs NodeInput) (NodeOutput, error)
-	
+
 	// GetID returns the unique identifier for this node
 	GetID() string
-	
+
 	// GetType returns the node type
 	GetType() string
 }
@@ -1098,13 +1098,13 @@ type Node interface {
 type BaseNode struct {
 	// ID is the unique identifier for this node
 	ID string `yaml:"id" json:"id"`
-	
+
 	// Type specifies the node type
 	Type string `yaml:"type" json:"type"`
-	
+
 	// Name is a human-readable name for the node
 	Name string `yaml:"name" json:"name"`
-	
+
 	// Description provides additional context about the node
 	Description string `yaml:"description,omitempty" json:"description,omitempty"`
 }
@@ -1123,7 +1123,7 @@ func (bn *BaseNode) GetType() string {
 type NodeInput struct {
 	// Data contains the input data as key-value pairs
 	Data map[string]interface{} `json:"data"`
-	
+
 	// Context provides additional context information
 	Context map[string]interface{} `json:"context,omitempty"`
 }
@@ -1132,13 +1132,13 @@ type NodeInput struct {
 type NodeOutput struct {
 	// Data contains the output data as key-value pairs
 	Data map[string]interface{} `json:"data"`
-	
+
 	// Success indicates whether the node executed successfully
 	Success bool `json:"success"`
-	
+
 	// Error contains error information if execution failed
 	Error string `json:"error,omitempty"`
-	
+
 	// Metadata provides additional information about the execution
 	Metadata map[string]interface{} `json:"metadata,omitempty"`
 }

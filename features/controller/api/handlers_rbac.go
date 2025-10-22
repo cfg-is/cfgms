@@ -6,9 +6,10 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/gorilla/mux"
+
 	"github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
-	"github.com/gorilla/mux"
 )
 
 // handleListPermissions handles GET /api/v1/rbac/permissions

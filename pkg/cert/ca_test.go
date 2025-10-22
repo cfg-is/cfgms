@@ -32,7 +32,7 @@ func TestNewCA(t *testing.T) {
 			expectError: false,
 		},
 		{
-			name: "config with defaults",
+			name:   "config with defaults",
 			config: &CAConfig{
 				// Only required fields, others should use defaults
 			},

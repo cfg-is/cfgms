@@ -19,9 +19,9 @@ type DefaultAlertManager struct {
 	thresholds map[string]Threshold // key: metric name
 
 	// Alert state
-	activeAlerts   map[string]*Alert        // key: alert ID
-	alertHistory   []Alert                  // all alerts (including resolved)
-	breachTracking map[string]time.Time     // key: metric name, value: first breach time
+	activeAlerts   map[string]*Alert    // key: alert ID
+	alertHistory   []Alert              // all alerts (including resolved)
+	breachTracking map[string]time.Time // key: metric name, value: first breach time
 
 	// Rate limiting
 	lastNotification map[string]time.Time // key: metric name, value: last notification time
