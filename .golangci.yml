@@ -191,6 +191,16 @@ issues:
       linters:
         - depguard
 
+    # Exclude depguard for cmd/ (main packages need to import providers for registration)
+    - path: cmd/.*
+      linters:
+        - depguard
+
+    # Exclude depguard for api/proto (protocol buffer definitions and tests)
+    - path: api/proto/.*
+      linters:
+        - depguard
+
     # Exclude crypto imports for pkg/cert (it manages certificates)
     - path: pkg/cert/.*
       text: "crypto/tls|crypto/x509"
@@ -203,6 +213,7 @@ issues:
         - errcheck
         - goconst
         - unparam
+        - depguard
 
     # Exclude linters for generated code
     - path: .pb.go$
