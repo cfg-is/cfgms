@@ -142,8 +142,6 @@ type CacheStats struct {
 	// Time tracking
 	LastCleanup time.Time `json:"last_cleanup"`
 	LastStats   time.Time `json:"last_stats"`
-
-	mutex sync.RWMutex
 }
 
 // CacheInvalidationRequest represents a request to invalidate cache entries
