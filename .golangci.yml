@@ -117,19 +117,23 @@ linters-settings:
       - name: error-return
       - name: error-strings
       - name: error-naming
-      - name: exported
+      # Disable: exported - too noisy for large codebase
+      # - name: exported
       - name: increment-decrement
-      - name: var-naming
+      # Disable: var-naming - too opinionated
+      # - name: var-naming
       - name: var-declaration
       - name: range
       - name: receiver-naming
       - name: time-naming
       - name: unexported-return
-      - name: indent-error-flow
+      # Disable: indent-error-flow - style preference
+      # - name: indent-error-flow
       - name: errorf
       - name: empty-block
       - name: superfluous-else
-      - name: unused-parameter
+      # Disable: unused-parameter - many false positives from framework requirements (cobra, etc)
+      # - name: unused-parameter
       - name: unreachable-code
       - name: redefines-builtin-id
 
@@ -167,7 +171,8 @@ linters:
 
     # Code Quality (RECOMMENDED)
     - gocritic       # Comprehensive checks
-    - revive         # Fast, configurable linter
+    # NOTE: revive disabled - too opinionated for large codebase
+    # - revive         # Fast, configurable linter
     - misspell       # Spell checking
     - unconvert      # Remove unnecessary conversions
     - unparam        # Detect unused parameters
