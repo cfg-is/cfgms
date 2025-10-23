@@ -651,13 +651,16 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - **Story Points**: 13 points (actual - 3 complex migrations completed)
 
 **Phase 3: Licensing & Documentation (Weeks 6-8)**
-- [ ] **Task 8: Licensing Implementation** (Issue #226) - 3-5 days
+- [x] **Task 8: Licensing Implementation** (Issue #226) - 3-5 days ✅ COMPLETED
   - [x] Finalize licensing model (Apache 2.0 + Elastic License v2 open core)
   - [x] Define open-core vs commercial feature boundaries (see `docs/product/feature-boundaries.md`)
-  - [ ] Create LICENSE-APACHE-2.0 file in repository root
-  - [ ] Create LICENSE-ELASTIC-2.0 file for commercial reference
-  - [ ] Add Apache 2.0 license headers to all source files (.go, .proto)
-  - [ ] Add license header verification to CI/CD pipeline
+  - [x] Create LICENSE-APACHE-2.0 file in repository root
+  - [x] Create LICENSE-ELASTIC-2.0 file for commercial reference
+  - [x] Add SPDX license headers to all 802 source files (.go, .proto)
+  - [x] Add license header verification to CI/CD pipeline (`make check-license-headers`)
+  - [x] Create comprehensive LICENSING.md documentation (210 lines)
+  - [x] Reorganize commercial code to `commercial/ha/` directory
+  - [x] Update README.md with licensing section
 - [ ] **Task 9: Feature Boundary Documentation** (Issue #227) - 2-3 days
   - [ ] Create user-friendly version of feature-boundaries.md
   - [ ] Add feature comparison table to README
