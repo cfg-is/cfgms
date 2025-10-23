@@ -180,6 +180,99 @@ Reach out to discuss your use case. We may have options for non-profits, educati
 
 Yes! Apache 2.0 components can be freely forked. Elastic License 2.0 components are source-available and can be viewed/modified but cannot be offered as a competing hosted service.
 
+### Which version should I use: OSS or Commercial?
+
+**Use OSS if**:
+- Running a single MSP with one controller
+- Don't need Web UI (CLI/API is sufficient)
+- Want maximum flexibility and no licensing restrictions
+- Evaluating CFGMS for your environment
+
+**Upgrade to Commercial if**:
+- Need 99.99% uptime with automatic failover
+- Want Web UI for workflow building and dashboards (when available)
+- Running SaaS platform hosting multiple MSPs
+- Need predictive analytics and ML-based monitoring (future)
+
+You can start with OSS and upgrade anytime - it's the same codebase with features enabled via build tags.
+
+### How does CFGMS compare to other tools?
+
+**vs Traditional RMMs** (Datto, ConnectWise, N-able):
+- CFGMS: Policy-as-code, GitOps workflows, DNA-based drift detection
+- RMMs: GUI-driven, manual changes, limited automation
+- **Philosophy**: CFGMS is "configuration as policy, continuous enforcement"
+
+**vs Workflow Tools** (Rewst, N8N):
+- CFGMS: MSP-focused, endpoint + SaaS management, built-in security
+- Workflow tools: General automation, requires extensive setup for MSP use cases
+- **Difference**: CFGMS is purpose-built for MSP operations
+
+**vs Configuration Management** (Ansible, Puppet, Chef):
+- CFGMS: Multi-tenant, SaaS-aware, MSP workflows, DNA drift detection
+- Traditional CM: Single-tenant, infrastructure-focused
+- **Niche**: CFGMS bridges endpoint + SaaS management for MSPs
+
+### What support options are available?
+
+**Community Support** (OSS):
+- GitHub Issues and Discussions
+- Community-driven troubleshooting
+- Public roadmap and feature requests
+
+**Commercial Support** (Paid):
+- Priority email support
+- SLA-backed response times
+- Direct access to maintainers
+- Custom feature development (contact us)
+
+**Professional Services**:
+- Deployment assistance
+- Workflow development
+- Integration building
+- Training and best practices
+
+Contact licensing@cfg.is for commercial support pricing.
+
+### Is the roadmap public?
+
+Yes! Our development roadmap is completely transparent:
+- **GitHub Project**: https://github.com/orgs/cfg-is/projects/1
+- **Roadmap Document**: `docs/product/roadmap.md`
+- **Feature Boundaries**: `docs/product/feature-boundaries.md`
+
+We plan features in public, accept community input, and maintain open sprint planning. OSS and commercial features are clearly marked.
+
+### Can I contribute to commercial features?
+
+Yes, with caveats:
+- **Commercial code contributions**: Licensed under Elastic License 2.0
+- **OSS code contributions**: Licensed under Apache 2.0
+- **Contributor Agreement**: Required for commercial contributions
+
+We welcome contributions to all parts of CFGMS. By contributing, you agree your contributions will be licensed under the same license as the component you're contributing to.
+
+For major commercial feature contributions, please open a GitHub Discussion first to align on approach.
+
+### Will features move from OSS to Commercial?
+
+**No.** Our commitment:
+- Features that are OSS will **remain OSS**
+- We will never take existing OSS features and make them commercial-only
+- New features follow the boundary: "Code that touches client environments is OSS"
+
+This is documented in our [feature boundaries](docs/product/feature-boundaries.md) and is a core principle of the project.
+
+### How do you sustain development without gatekeeping integrations?
+
+Our sustainable revenue model:
+1. **SaaS Platform**: $250/month for hosted multi-MSP deployments
+2. **Self-Hosted Commercial**: HA clustering licensing
+3. **Professional Services**: Implementation, training, custom development
+4. **Future Web UI**: Commercial tier (CLI/API always free)
+
+We don't monetize integrations or module development - those are community-driven OSS. We monetize platform scale and convenience (HA, Web UI, managed SaaS).
+
 ## License Compatibility
 
 ### Apache 2.0 is Compatible With:

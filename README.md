@@ -29,6 +29,141 @@ CFGMS uses a **dual licensing model** to balance open source community benefits 
 
 For complete licensing details, feature boundaries, and FAQ, see [LICENSING.md](LICENSING.md).
 
+## Why Open Source?
+
+CFGMS uses an **open core** model that balances community benefits with sustainable development:
+
+### Our Philosophy
+
+**"All code that touches client environments and APIs is open source"**
+
+This principle means:
+- ✅ **All integrations are OSS** - M365, Active Directory, endpoint modules, PSA/RMM connectors
+- ✅ **Complete automation engine** - Full workflow capabilities, no feature gating
+- ✅ **Production-ready security** - RBAC, audit logging, compliance reporting, zero-trust controls
+- ✅ **Community-driven modules** - Anyone can contribute integrations and modules
+
+We believe integrations should be transparent, auditable, and community-driven. Our competitive advantage is the **platform experience** (DNA system, drift detection, unified management), not gatekeeping integrations.
+
+### Why This Matters for MSPs
+
+1. **Trust** - Audit all code that touches your client environments
+2. **Flexibility** - Start free, upgrade when you need HA or Web UI
+3. **No Vendor Lock-in** - Self-host the OSS version forever
+4. **Community Velocity** - More contributors = faster integrations
+5. **Sustainable** - Commercial features fund continued OSS development
+
+## Features: OSS vs Commercial
+
+| Category | Open Source (Apache 2.0) | Commercial (Elastic 2.0) |
+|----------|-------------------------|--------------------------|
+| **Core Platform** | | |
+| Architecture | ✅ Single controller | ✅ HA clustering (Raft consensus, auto-failover) |
+| CLI/API | ✅ Complete functionality | ❌ CLI/API always OSS |
+| Web UI | ❌ None | ✅ Drag-and-drop workflow builder, dashboards |
+| Storage | ✅ Git, SQLite, PostgreSQL | ✅ Same (HA-optimized PostgreSQL) |
+| **Modules & Integrations** | | |
+| Endpoint Management | ✅ File, directory, package, script, firewall | ❌ All modules are OSS |
+| M365 Integration | ✅ Entra ID, Teams, Exchange, SharePoint, Intune | ❌ All modules are OSS |
+| Active Directory | ✅ User/group management, GPO, LDAP | ❌ All modules are OSS |
+| PSA/RMM Connectors | ✅ All (when built) | ❌ All modules are OSS |
+| **Automation** | | |
+| Workflow Engine | ✅ YAML workflows, loops, conditions, error handling | ❌ Engine is OSS |
+| Debugging | ✅ Breakpoints, step-through, variable inspection | ❌ Debugging is OSS |
+| Orchestration | ❌ None | ✅ Multi-stage workflows, approval gates |
+| Visual Editor | ❌ None | ✅ Web UI workflow builder |
+| **DNA & Drift Detection** | | |
+| DNA Collection | ✅ Hardware, software, network, security attributes | ❌ All DNA is OSS |
+| Drift Detection | ✅ Real-time, configurable, remediation workflows | ❌ All DNA is OSS |
+| System Blueprints | ✅ Templates, comparisons, compliance | ❌ All DNA is OSS |
+| **Security & Compliance** | | |
+| RBAC | ✅ Role-based access control (CLI-managed) | ✅ Advanced (Web UI, conditional access) |
+| Audit Logging | ✅ Complete audit trail | ❌ Audit is OSS |
+| Compliance Reporting | ✅ CIS, HIPAA, PCI-DSS templates | ❌ Reporting is OSS |
+| Zero-Trust Controls | ✅ JIT access, continuous authorization | ❌ Security is OSS |
+| **Monitoring & Alerting** | | |
+| Performance Metrics | ✅ Endpoint & controller monitoring | ❌ Monitoring is OSS |
+| Threshold Alerts | ✅ Email, webhook notifications | ❌ Alerting is OSS |
+| SIEM Integration | ✅ Real-time event correlation | ❌ SIEM is OSS |
+| Predictive Analytics | ❌ None | ✅ ML-based anomaly detection, forecasting |
+| **Multi-Tenancy** | | |
+| Single MSP | ✅ Unlimited hierarchy (MSP→Client→Group→Device) | ❌ OSS supports single MSP |
+| Multiple MSPs | ❌ None | ✅ SaaS-scale multi-MSP deployments |
+| **Reporting** | | |
+| Data Reports | ✅ Generate all reports via CLI (JSON, CSV, PDF, Excel) | ❌ Reporting engine is OSS |
+| Visual Dashboards | ❌ None | ✅ Web UI charts and graphs |
+| **Terminal Access** | | |
+| Remote Terminal | ✅ Full remote shell capabilities | ❌ Terminal is OSS |
+
+### Key Takeaway
+
+**99% of CFGMS is open source.** The only commercial features are:
+- High Availability clustering (for enterprise scale)
+- Web UI (future - graphical interface)
+- Multi-MSP support (for SaaS providers)
+- ML-based predictive analytics (future)
+
+Everything else - all integrations, modules, automation, security, and monitoring - is **completely open source**.
+
+## Upgrade Path: OSS → Commercial
+
+Upgrading from open source to commercial features is seamless:
+
+### When to Upgrade
+
+Consider commercial features when you need:
+- **High Availability**: Multiple controllers for 99.99% uptime
+- **Web UI**: Graphical workflow builder and dashboards (when released)
+- **Multi-MSP**: Hosting multiple MSP customers in a single deployment
+- **Predictive Analytics**: ML-based anomaly detection and forecasting (when released)
+
+### How to Upgrade
+
+#### Self-Hosted Commercial
+
+1. **Build with commercial tags**:
+   ```bash
+   # Instead of standard build
+   go build ./cmd/controller
+
+   # Use commercial build
+   go build -tags commercial ./cmd/controller
+   ```
+
+2. **Configure HA clustering**:
+   ```yaml
+   # config.yaml
+   ha:
+     mode: cluster  # or blue-green
+     nodes:
+       - id: controller-1
+         address: controller-1.example.com:7000
+       - id: controller-2
+         address: controller-2.example.com:7000
+       - id: controller-3
+         address: controller-3.example.com:7000
+   ```
+
+3. **Deploy and test**:
+   ```bash
+   # All your existing workflows, configurations, and data work immediately
+   # No migration required - it's the same codebase!
+   ```
+
+#### SaaS Commercial
+
+Contact licensing@cfg.is for commercial licensing:
+- **SaaS Pricing**: $250/month for 250 "managed units"
+  - 1 endpoint = 1 unit
+  - 1 M365 user = 0.1 unit
+- **Includes**: Web UI, HA clustering, multi-MSP support, priority support, managed infrastructure
+
+### No Migration Required
+
+The commercial version is the **same codebase** with additional features enabled via build tags. Your configurations, workflows, and data work identically.
+
+For complete licensing details, feature boundaries, and FAQ, see [LICENSING.md](LICENSING.md).
+
 ## Platform Support
 
 CFGMS is designed for cross-platform deployment across diverse infrastructure environments:
