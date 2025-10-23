@@ -661,11 +661,13 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - [x] Create comprehensive LICENSING.md documentation (210 lines)
   - [x] Reorganize commercial code to `commercial/ha/` directory
   - [x] Update README.md with licensing section
-- [ ] **Task 9: Feature Boundary Documentation** (Issue #227) - 2-3 days
-  - [ ] Create user-friendly version of feature-boundaries.md
-  - [ ] Add feature comparison table to README
-  - [ ] Document upgrade path from OSS to Commercial
-  - [ ] Create FAQ about licensing and features
+- [x] **Task 9: Feature Boundary Documentation** (Issue #227) - 2-3 days ✅ COMPLETED
+  - [x] Create user-friendly version of feature-boundaries.md
+  - [x] Add feature comparison table to README (10 categories, 30+ comparisons)
+  - [x] Document upgrade path from OSS to Commercial
+  - [x] Create FAQ about licensing and features (8 new entries)
+  - [x] Add "Why Open Source?" philosophy section
+  - [x] 228 lines of user-friendly documentation (135 README, 93 LICENSING)
 - [ ] **Task 10: Documentation Cleanup & Creation** (Issue #228) - 1-2 weeks
   - [x] Finalize GTM strategy (see `docs/product/v0.7.0-epic.md`)
   - [ ] Create CONTRIBUTING.md for open source contributors
