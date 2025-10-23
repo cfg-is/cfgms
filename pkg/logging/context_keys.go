@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 package logging
 
 // Shared context keys used by logging manager and injection functions

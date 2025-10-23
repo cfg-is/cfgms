@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package transform provides extensible data transformation capabilities for workflows
 //
 // This package implements a plugin-based data transformation framework that allows

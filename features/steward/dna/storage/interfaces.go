@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package storage defines interfaces for DNA storage backends and components.
 
 package storage

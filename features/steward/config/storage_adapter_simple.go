@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package config provides simplified adapter to use ConfigStore for steward configuration loading
 // This avoids circular imports while maintaining Epic 6 compliance
 package config

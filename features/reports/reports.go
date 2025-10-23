@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package reports provides comprehensive DNA monitoring and reporting capabilities for CFGMS.
 //
 // This package implements Story #81: DNA Monitoring - Comprehensive Reporting System.

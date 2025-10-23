@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package dna provides DNA collection and drift detection for directory objects.
 //
 // This package extends CFGMS's DNA framework to treat directory objects (users, groups, OUs)

@@ -184,10 +184,10 @@ make test TAGS=commercial
 
 The codebase uses Go build tags to separate OSS and commercial functionality:
 
-- **No build tag**: OSS stub in `features/controller/ha/manager_oss.go`
-- **`-tags commercial`**: Full implementation in `features/controller/ha/manager.go` and related files
+- **No build tag**: OSS stub in `commercial/ha/manager_oss.go`
+- **`-tags commercial`**: Full implementation in `commercial/ha/manager.go` and related files
 
-All code remains in the same repository with clean interface boundaries defined in `features/controller/ha/interfaces.go`.
+All code remains in the same repository with clean interface boundaries defined in `commercial/ha/interfaces.go`.
 
 ## Migration Tasks
 

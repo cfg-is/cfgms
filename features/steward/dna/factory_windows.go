@@ -1,5 +1,8 @@
 //go:build windows
 
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
+
 package dna
 
 // Platform-specific factory implementations for Windows

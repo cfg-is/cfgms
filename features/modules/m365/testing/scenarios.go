@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package testing provides comprehensive test scenarios for M365 delegated permissions
 package testing
 

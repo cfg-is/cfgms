@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package templates provides a configuration template engine for CFGMS.
 // It enables dynamic, reusable configurations with variable substitution,
 // conditionals, loops, and integration with DNA properties and config inheritance.

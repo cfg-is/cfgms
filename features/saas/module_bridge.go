@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package saas module_bridge provides a bridge between the new API Module Framework
 // and existing CFGMS module system, enabling SaaS Steward modules to use
 // the unified Provider interface while maintaining compatibility with

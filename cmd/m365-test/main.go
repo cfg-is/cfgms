@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Command m365-test provides interactive testing for M365 delegated permissions
 package main
 

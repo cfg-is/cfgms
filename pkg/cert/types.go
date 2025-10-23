@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package cert provides certificate management functionality for CFGMS.
 //
 // This package implements automated certificate management for mTLS authentication

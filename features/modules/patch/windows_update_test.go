@@ -1,4 +1,7 @@
 //go:build windows
+
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // +build windows
 
 package patch_test

@@ -1,4 +1,7 @@
 //go:build commercial
+
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // +build commercial
 
 package ha
@@ -18,7 +21,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/features/controller/ha"
+	"github.com/cfgis/cfgms/commercial/ha"
 )
 
 // ControllerInstance represents a running controller instance

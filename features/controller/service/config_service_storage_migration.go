@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package service provides configuration service migration from in-memory to ConfigStore
 package service
 

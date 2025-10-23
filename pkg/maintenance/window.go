@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package maintenance provides system-wide maintenance window management.
 // This enables all operations (patching, reboots, updates) to honor maintenance windows.
 package maintenance

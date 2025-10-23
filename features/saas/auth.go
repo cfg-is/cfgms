@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package saas auth implements universal authentication abstraction
 // for SaaS provider integrations.
 //

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package interfaces provides custom report generation interfaces for Story #174.
 // This extends the existing reporting framework to support user-defined custom reports
 // with parameters, validation, template sharing, and large dataset handling.

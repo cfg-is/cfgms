@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package saas multitenant_integration provides workflow integration and
 // tenant onboarding capabilities for multi-tenant SaaS providers.
 //

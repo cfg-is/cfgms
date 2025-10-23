@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // #nosec G304 - Terminal audit system requires file access for session recording and compliance
 package terminal
 

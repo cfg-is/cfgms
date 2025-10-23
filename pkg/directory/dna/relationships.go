@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package dna - Directory Relationships Collection
 //
 // This file implements relationship collection for directory objects,

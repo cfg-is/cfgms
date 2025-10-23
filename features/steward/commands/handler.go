@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package commands provides MQTT command handling for steward operations.
 //
 // This package implements the command handler that processes MQTT commands

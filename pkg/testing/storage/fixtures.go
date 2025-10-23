@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package storage provides comprehensive testing infrastructure for all storage providers
 // Addresses Epic 6 testing requirements by creating standardized test fixtures and helpers
 package storage

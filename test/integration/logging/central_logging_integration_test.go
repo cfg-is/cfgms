@@ -1,4 +1,7 @@
 //go:build integration
+
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // +build integration
 
 package logging_test

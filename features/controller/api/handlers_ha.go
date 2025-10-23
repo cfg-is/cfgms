@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 package api
 
 import (
@@ -5,7 +7,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/cfgis/cfgms/features/controller/ha"
+	"github.com/cfgis/cfgms/commercial/ha"
 )
 
 // HAStatusResponse represents the response for HA status endpoint

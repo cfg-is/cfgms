@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package heartbeat provides MQTT-based heartbeat monitoring for steward connections.
 //
 // This service monitors steward heartbeats via MQTT and provides failover detection

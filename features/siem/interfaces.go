@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package siem provides lightweight SIEM stream processing capabilities for CFGMS.
 //
 // This package implements a high-performance stream processing engine that can handle

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package logging - Global logging provider manager for CFGMS time-series logging
 package logging
 

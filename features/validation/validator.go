@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package validation provides comprehensive configuration validation for CFGMS.
 //
 // This package implements a multi-layered validation framework that includes:

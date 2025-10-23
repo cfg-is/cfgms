@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package interfaces defines global storage contracts used by all CFGMS modules
 package interfaces
 

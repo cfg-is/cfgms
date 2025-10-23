@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package timescale implements a TimescaleDB-based logging provider for CFGMS time-series logging.
 // This provider leverages TimescaleDB's time-series optimization features for high-performance
 // log storage, compression, and querying with PostgreSQL compatibility.

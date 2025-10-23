@@ -16,6 +16,19 @@ This project board provides real-time visibility into:
 - Sprint planning and task organization
 - Overall project completion status
 
+## License
+
+CFGMS uses a **dual licensing model** to balance open source community benefits with sustainable commercial development:
+
+- **[Apache License 2.0](LICENSE-APACHE-2.0)** - The vast majority of CFGMS, including all modules, integrations, CLI/API, workflow engine, DNA system, RBAC, and monitoring
+- **[Elastic License 2.0](LICENSE-ELASTIC-2.0)** - A small subset of enterprise features (HA clustering, future Web UI)
+
+**Quick Summary:**
+- ✅ **Open Source (Apache 2.0)**: Free forever, use commercially, modify and distribute freely
+- ✅ **Commercial (Elastic 2.0)**: Free to use in your infrastructure, cannot offer as a hosted service to third parties
+
+For complete licensing details, feature boundaries, and FAQ, see [LICENSING.md](LICENSING.md).
+
 ## Platform Support
 
 CFGMS is designed for cross-platform deployment across diverse infrastructure environments:

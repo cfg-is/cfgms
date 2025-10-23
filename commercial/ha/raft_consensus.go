@@ -1,4 +1,7 @@
 //go:build commercial
+
+// SPDX-License-Identifier: Elastic-2.0
+// Copyright 2025 CFGMS Contributors
 // +build commercial
 
 package ha

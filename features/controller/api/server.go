@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 package api
 
 import (
@@ -13,8 +15,8 @@ import (
 
 	"github.com/gorilla/mux"
 
+	"github.com/cfgis/cfgms/commercial/ha"
 	"github.com/cfgis/cfgms/features/controller/config"
-	"github.com/cfgis/cfgms/features/controller/ha"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/monitoring"
 	"github.com/cfgis/cfgms/features/rbac"
