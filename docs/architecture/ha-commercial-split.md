@@ -18,7 +18,7 @@ Per `docs/product/feature-boundaries.md`:
 
 ### Interface Boundaries
 
-All HA code remains in `features/controller/ha/` with Go build tags controlling which implementation is used:
+All HA code is located in `commercial/ha/` with Go build tags controlling which implementation is used:
 
 **Available in Both OSS and Commercial**:
 - `interfaces.go` - All interface definitions and types (no build tag)
