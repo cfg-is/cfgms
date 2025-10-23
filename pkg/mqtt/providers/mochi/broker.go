@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package mochi implements an embedded MQTT broker using mochi-mqtt v2.
 //
 // This provider offers a lightweight, high-performance MQTT broker suitable

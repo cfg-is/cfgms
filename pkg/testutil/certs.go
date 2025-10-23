@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package testutil provides shared testing utilities for unit and integration tests.
 //
 // This package contains helper functions for setting up test environments,

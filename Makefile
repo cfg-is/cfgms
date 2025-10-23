@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-integration-factory test-watch test-commit test-ci test-integration test-security test-performance test-docker proto lint clean security-trivy security-deps security-scan security-check security-precommit check-architecture
+.PHONY: build test test-unit test-integration-factory test-watch test-commit test-ci test-integration test-security test-performance test-docker proto lint clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers
 
 # Use bash for all recipe commands (required for credential loading scripts)
 SHELL := /bin/bash
@@ -93,7 +93,7 @@ test:
 	@go build -tags commercial -o /tmp/controller-commercial ./cmd/controller > /dev/null 2>&1 || { echo "❌ Commercial controller build failed"; exit 1; }
 	@echo "  ✅ Commercial controller compiles"
 	@echo "  Testing commercial HA features..."
-	@go test -tags commercial -race -short -timeout=1m ./features/controller/ha/... || { echo "❌ Commercial HA tests failed"; exit 1; }
+	@go test -tags commercial -race -short -timeout=1m ./commercial/ha/... || { echo "❌ Commercial HA tests failed"; exit 1; }
 	@echo "  ✅ Commercial HA tests pass"
 	@rm -f /tmp/controller-commercial
 	@echo ""
@@ -358,6 +358,12 @@ check-architecture:
 	fi
 	@echo "   Safe to commit - no secrets detected in staged files"
 
+# License Header Verification
+# Ensures all source files have SPDX license headers
+.PHONY: check-license-headers
+check-license-headers:
+	@./scripts/check-license-headers.sh
+
 # Validate Central Provider Documentation
 # Helps keep CLAUDE.md provider list current
 .PHONY: validate-providers
@@ -449,7 +455,7 @@ test-infrastructure-required:
 	@go build -tags commercial -o /tmp/controller-commercial ./cmd/controller > /dev/null 2>&1 || { echo "❌ Commercial controller build failed"; exit 1; }
 	@echo "  ✅ Commercial controller compiles"
 	@echo "  Testing commercial HA features..."
-	@./scripts/test-with-infrastructure.sh go test -tags commercial -race -short -timeout=1m ./features/controller/ha/... || { echo "❌ Commercial HA tests failed"; exit 1; }
+	@./scripts/test-with-infrastructure.sh go test -tags commercial -race -short -timeout=1m ./commercial/ha/... || { echo "❌ Commercial HA tests failed"; exit 1; }
 	@echo "  ✅ Commercial HA tests pass"
 	@rm -f /tmp/controller-commercial
 	@echo ""

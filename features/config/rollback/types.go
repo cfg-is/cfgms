@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package rollback provides configuration rollback capabilities for CFGMS.
 // It integrates with the Git backend to enable safe, auditable rollback
 // of configurations at various levels (device, group, client, MSP).

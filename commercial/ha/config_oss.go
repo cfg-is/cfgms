@@ -1,6 +1,9 @@
 //go:build !commercial
 // +build !commercial
 
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
+
 package ha
 
 // LoadFromEnvironment provides a stub implementation for OSS builds

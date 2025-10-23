@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package logging - Dependency injection mechanisms for module logging integration
 package logging
 

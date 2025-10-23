@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package dna provides system DNA (system attributes) collection for stewards.
 //
 // DNA represents the digital fingerprint of a system, containing hardware,

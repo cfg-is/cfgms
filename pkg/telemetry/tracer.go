@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package telemetry provides OpenTelemetry tracing and correlation capabilities for CFGMS.
 //
 // This package enables distributed tracing across steward-controller communications and provides

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package timescale - Query functionality for TimescaleDB logging provider
 package timescale
 

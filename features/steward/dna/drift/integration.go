@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package drift provides integration with the DNA storage system for drift detection.
 
 package drift

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package quic provides QUIC stream handlers for controller operations.
 package quic
 

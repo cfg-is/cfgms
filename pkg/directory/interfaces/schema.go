@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package interfaces - Directory Schema Normalization Layer
 //
 // This file implements a schema normalization layer for cross-provider compatibility.

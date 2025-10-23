@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package dna - Directory Drift Detection Implementation
 //
 // This file implements drift detection for directory objects, integrating with

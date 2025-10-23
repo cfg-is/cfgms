@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package provider implements advanced data provider for Story #173.
 // This extends the existing DNA-focused provider to include audit data integration
 // and comprehensive multi-tenant reporting capabilities.

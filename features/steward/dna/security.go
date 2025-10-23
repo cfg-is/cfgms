@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 package dna
 
 // SecurityCollector defines the interface for platform-specific security attribute collection

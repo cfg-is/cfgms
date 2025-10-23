@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package execution provides resource configuration orchestration for steward.
 //
 // This package implements the execution engine that orchestrates the complete

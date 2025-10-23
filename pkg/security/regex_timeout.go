@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package security - Regex timeout mechanism to prevent ReDoS attacks
 package security
 

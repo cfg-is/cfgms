@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package interfaces - Bulk Operations with Batching and Rate Limiting
 //
 // This file implements bulk operations support with intelligent batching, rate limiting,

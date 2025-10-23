@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package saas provides SaaS platform integration capabilities for CFGMS.
 //
 // The SaaS package implements a lightweight steward agent that can manage

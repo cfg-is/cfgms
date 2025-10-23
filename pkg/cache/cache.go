@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package cache provides general-purpose in-memory caching with TTL and eviction
 package cache
 

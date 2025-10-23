@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 package examples
 
 // This file demonstrates common security vulnerabilities and their fixes

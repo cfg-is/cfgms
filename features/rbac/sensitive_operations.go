@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package rbac - Sensitive operation controls for admin actions
 package rbac
 

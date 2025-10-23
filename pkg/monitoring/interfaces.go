@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package monitoring provides internal platform monitoring interfaces and types.
 //
 // This package defines the core interfaces for comprehensive platform monitoring

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package config provides configuration loading and validation for standalone steward operation.
 //
 // This package handles hostname.cfg files that define steward settings, resource

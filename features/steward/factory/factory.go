@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package factory provides module instantiation and lifecycle management for steward.
 //
 // This package handles dynamic loading of CFGMS modules and manages their lifecycle

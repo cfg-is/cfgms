@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package gdap implements Microsoft GDAP (Granular Delegated Admin Privileges)
 // integration for MSP scenarios with partner tenant relationships.
 //

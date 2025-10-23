@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package types provides unified directory object types and conversion utilities
 // to eliminate duplication across CFGMS directory providers and M365 modules.
 //

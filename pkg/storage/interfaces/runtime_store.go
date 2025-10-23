@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package interfaces defines the runtime storage interface for session and runtime state management
 package interfaces
 

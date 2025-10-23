@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package client provides QUIC client functionality for CFGMS steward.
 //
 // This package implements the QUIC client that connects to the controller

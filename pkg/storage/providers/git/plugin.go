@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package git implements production-ready git-based storage provider for CFGMS
 // Provides git-based storage with versioning, audit trails, and SOPS encryption
 package git

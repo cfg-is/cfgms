@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package saas workflow implements workflow engine integration
 // for SaaS provider operations in CFGMS.
 //
