@@ -71,10 +71,10 @@ If you're new to the project, start with these essential documents:
 - [Automated Remediation Guide](development/automated-remediation-guide.md) - Security automation
 
 ### Logging Development
+- [Logging Architecture Guide](development/logging-architecture-guide.md) - CFGMS logging system architecture and usage
+- [Logging Dependency Injection Guide](development/logging-dependency-injection-guide.md) - Module dependency injection patterns
 - [Module Logging Development Guide](development/module-logging-development-guide.md) - Implementing logging in modules
 - [Logging Migration Standards](development/logging-migration-standards.md) - Migrating to new logging system
-- [Logging Migration Summary](development/logging-migration-summary.md) - Migration progress tracking
-- [Logging Interface Injection Implementation](development/logging-interface-injection-implementation-summary.md)
 
 ## Security
 
