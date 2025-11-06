@@ -35,7 +35,7 @@ This module provides:
 The AD module follows CFGMS's security-first design:
 - **Steward Deployment**: Runs on Windows servers with AD access
 - **Local Access**: Uses LDAP to access local/nearby domain controllers
-- **gRPC Communication**: Controller accesses AD via secure steward communication
+- **MQTT+QUIC Communication**: Controller accesses AD via secure steward communication
 - **Zero Trust**: All communication uses mTLS authentication
 
 ## Configuration options

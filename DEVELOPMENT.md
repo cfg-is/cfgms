@@ -356,14 +356,28 @@ M365 integration tests require credentials. Either:
 make test  # M365 tests are skipped gracefully
 ```
 
-**Option 2**: Set up credentials
+**Option 2**: Set up credentials with OS keychain (REQUIRED - secure storage)
 ```bash
-# Create .env.local with your M365 credentials
-cp .env.example .env.local
-# Edit .env.local with your values
+# 1. Create .env.local from example template
+cp .env.local.example .env.local
+
+# 2. Edit .env.local with your Azure App Registration details
+#    - Fill in M365_CLIENT_ID, M365_TENANT_ID, M365_TENANT_DOMAIN
+#    - Leave M365_CLIENT_SECRET=USE_KEYCHAIN (placeholder)
+
+# 3. Store client secret securely in OS keychain
+./scripts/migrate-credentials-to-keychain.sh
+
+# 4. Load credentials for testing (config from file, secrets from keychain)
+source ./scripts/load-credentials-from-keychain.sh
+
+# 5. Run tests
+make test
 ```
 
-See [docs/M365_INTEGRATION_GUIDE.md](docs/M365_INTEGRATION_GUIDE.md) for details.
+**IMPORTANT**: Client secrets are NEVER stored in plaintext files. The OS keychain provides encrypted storage that's automatically secured by your operating system.
+
+See [docs/M365_INTEGRATION_GUIDE.md](docs/M365_INTEGRATION_GUIDE.md) for complete setup details.
 
 #### "go.sum: checksum mismatch"
 
@@ -451,7 +465,7 @@ Recommended plugins:
 
 CFGMS can be run in three modes. Start with the simplest:
 
-#### Option A: Standalone Steward (Simplest - Like Ansible)
+#### Option A: Standalone Steward
 
 **Perfect for**: Learning CFGMS, local development, single-server management
 

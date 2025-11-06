@@ -95,10 +95,13 @@ When deploying CFGMS in production:
 
 When contributing to CFGMS:
 
+- **No Foot-guns in Development (CRITICAL PRINCIPLE)** - Never build insecure options for development convenience. If it requires durable storage in production, it MUST use durable storage in development. Insecure dev options inevitably leak into production.
 - **No hardcoded secrets** - Never commit credentials, API keys, or secrets
+- **Secure credential storage** - Secrets MUST use OS keychain or encrypted storage, never plaintext files
 - **Input validation** - Validate and sanitize all user input
 - **Parameterized queries** - Use parameterized SQL queries, never string concatenation
 - **Secure defaults** - Choose secure defaults for all configuration options
+- **No insecure documentation** - Never document unsafe alternatives, even as "quick start" options
 - **Error handling** - Don't expose sensitive information in error messages
 - **Dependency management** - Keep dependencies updated, review security advisories
 - **Run security scans** - Use `make security-scan` before every commit

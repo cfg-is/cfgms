@@ -690,18 +690,78 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - [ ] Set up automated release process
   - [ ] Create CHANGELOG.md
   - [ ] Create public-facing roadmap
-- [ ] **Task 13: Marketing & Positioning Materials** (Issue #231) - 1 week
-  - [ ] Craft positioning statement
-  - [ ] Write launch blog post announcement
-  - [ ] Create feature highlights with screenshots
-  - [ ] Create comparison tables
-  - [ ] Identify OSS communities for launch announcement
-- [ ] **Task 14: Legal & Business Setup** (Issue #232) - 1-2 weeks
-  - [ ] Review dual licensing with legal counsel
-  - [ ] Establish Contributor License Agreement (CLA) if needed
-  - [ ] Review trademark considerations
-  - [ ] Register business entity if not already done
-  - [ ] Set up payment processing for commercial tier
+- [ ] **Task 13: Review and Create All Referenced Email Addresses & Web Pages** (Issue #248) - 2-3 days
+  - [ ] Audit all documentation for email addresses and web URLs
+  - [ ] Create comprehensive inventory of referenced resources
+  - [ ] Set up all email addresses (security@cfg.is, licensing@cfg.is, etc.)
+  - [ ] Create web pages (https://cfg.is/security/, PGP key page, etc.)
+  - [ ] Configure email infrastructure with proper security
+  - [ ] Set up web hosting with SSL certificates
+  - [ ] Test all email addresses and URLs
+  - [ ] Update documentation with any corrections
+
+#### v0.7.5: Security Foot-gun Elimination (CRITICAL)
+(Issue #247)
+
+**Goal**: Eliminate all development convenience patterns that could leak into production, enforcing the "No Foot-guns in Development" principle.
+
+**Epic: Security Foot-gun Elimination** (18 story points)
+
+**Background**: The "No Foot-guns in Development" principle states that we NEVER build insecure options for development convenience. If a feature requires durable storage in production, it MUST use durable storage in development and testing. Insecure dev options inevitably leak into production through laziness, time pressure, or copy-paste documentation.
+
+**Critical Violations Identified**:
+
+1. **Registration Token Storage (CRITICAL)** - 5 story points
+   - **Current State**: `features/controller/server/server.go:208` uses `NewMemoryStore()` with comment "ALPHA LIMITATION: Using in-memory store - tokens lost on restart"
+   - **Impact**: Registration tokens are lost on controller restart, breaking steward registration in production
+   - **Fix**: Implement `registration.Store` backed by `pkg/storage` (git/database)
+   - **Testing**: MUST test with actual storage backend, not in-memory mock
+   - **Files**: `pkg/registration/store.go`, `features/controller/server/server.go`
+
+2. **Tenant Management Storage (CRITICAL)** - 5 story points
+   - **Current State**: `features/controller/server/server.go:117` uses `tenantmemory.NewStore()` with comment "currently uses memory store"
+   - **Impact**: All tenant data lost on controller restart, breaking multi-tenancy in production
+   - **Fix**: Implement tenant storage backed by `pkg/storage` (git/database)
+   - **Testing**: MUST test with actual storage backend
+   - **Files**: `features/tenant/`, `features/controller/server/server.go`
+
+3. **RBAC Storage (HIGH)** - 4 story points
+   - **Current State**: `features/rbac/memory/store.go` provides in-memory RBAC store, used in multiple places
+   - **Impact**: All roles, permissions, and policies lost on restart
+   - **Fix**: Implement RBAC storage backed by `pkg/storage`
+   - **Testing**: MUST test with actual storage backend
+   - **Files**: `features/rbac/memory/`, `features/rbac/manager.go:63`
+
+4. **Rollback Operation Storage (MEDIUM)** - 3 story points
+   - **Current State**: `features/config/rollback/store.go` has `InMemoryRollbackStore`
+   - **Impact**: Rollback history lost on restart, no audit trail for configuration changes
+   - **Fix**: Implement rollback storage backed by `pkg/storage`
+   - **Testing**: MUST test with actual storage backend
+   - **Files**: `features/config/rollback/store.go`
+
+5. **CLI Token Storage (LOW)** - 1 story point
+   - **Current State**: `cmd/cfgcli/cmd/token.go:102` uses `NewMemoryStore()` with comment "in-memory for now, will be controller API in future"
+   - **Impact**: CLI-generated tokens not persisted, but CLI is ephemeral so acceptable
+   - **Fix**: Remove in-memory store, connect directly to controller API
+   - **Files**: `cmd/cfgcli/cmd/token.go`
+
+**Acceptance Criteria**:
+- [ ] All production code paths use durable storage (git/database) for persistent data
+- [ ] All in-memory stores removed from `cmd/` and `features/` (except tests and ephemeral caches)
+- [ ] `make check-architecture` detects and blocks new in-memory storage foot-guns
+- [ ] Documentation updated to remove any references to "temporary" insecure setups
+- [ ] All tests use real storage backends (via Docker test infrastructure)
+- [ ] Script verification: `scripts/migrate-credentials-to-keychain.sh` never writes secrets to disk
+
+**Definition of Done**:
+- [ ] Zero in-memory stores for durable data in production code
+- [ ] All storage uses `pkg/storage/interfaces` with pluggable backends
+- [ ] `make test` passes with real storage backends
+- [ ] Documentation audit complete (no insecure alternatives documented)
+- [ ] Security scan passes with no foot-gun violations
+- [ ] PR review checklist includes foot-gun verification
+
+**Technical Debt**: This work pays down critical technical debt from v0.1-v0.6 alpha development phase where "ALPHA LIMITATION" comments indicated temporary in-memory storage.
 
 #### v0.8.0 Go public
 
@@ -724,6 +784,43 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 - [ ] Finalize advanced configuration management
 - [ ] Finalize advanced workflow engine and templates
 - [ ] Finalize advanced reporting
+
+#### v1.0.1: Launch Preparation & Business Setup
+
+**Goal**: Complete final business, legal, and marketing preparation for public launch.
+
+**Tasks Moved from v0.7.0:**
+
+1. **Marketing & Positioning Materials** (Issue #231) - 1 week
+   - [ ] Craft positioning statement (vs. RMMs, workflow platforms)
+   - [ ] Define key differentiators (OSS modules, MQTT+QUIC, MSP-focused)
+   - [ ] Write elevator pitch (30 sec, 2 min versions)
+   - [ ] Document target audience personas
+   - [ ] Launch blog post announcement
+   - [ ] README hero section with compelling pitch
+   - [ ] Feature highlights with screenshots/demos
+   - [ ] Comparison tables (vs. traditional config management, vs. workflow platforms)
+   - [ ] Use case examples and success stories
+   - [ ] Visual assets (architecture diagrams, feature screenshots, demo videos)
+   - [ ] Identify OSS communities to announce in (Reddit, HN, etc.)
+   - [ ] Draft social media posts (Twitter/X, LinkedIn)
+
+2. **Legal & Business Setup** (Issue #232) - 1-2 weeks
+   - [ ] Review dual licensing with legal counsel
+   - [ ] Establish Contributor License Agreement (CLA) if needed
+   - [ ] Review trademark considerations for "CFGMS" name
+   - [ ] Ensure compliance with open source license obligations
+   - [ ] Review any third-party license dependencies
+   - [ ] Register business entity if not already done
+   - [ ] Set up business bank account
+   - [ ] Establish payment processing for commercial tier
+   - [ ] Set up invoicing/billing system for SaaS
+   - [ ] Define project governance model
+   - [ ] Identify initial core maintainers
+   - [ ] Document decision-making process
+   - [ ] Consider open source project insurance
+
+**Rationale**: These tasks are post-v1.0.0 activities that prepare for public launch. They don't block technical stability but are essential for successful market entry.
 
 #### v1.1.0 - v1.3.0: SaaS Steward Implementation & MSP Integrations
 
