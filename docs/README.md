@@ -135,9 +135,6 @@ If you're new to the project, start with these essential documents:
 ### Terminology
 - [Terminology](terminology.md) - Standardized terminology and definitions
 
-### Release Notes
-- [v0.2.0 Release Notes](releases/v0.2.0-release-notes.md)
-
 ### GitHub Integration
 - [GitHub Actions Fixes](github-actions-fixes.md) - CI/CD troubleshooting
 - [GitHub CLI Reference](github-cli-reference.md) - Using gh CLI with CFGMS
