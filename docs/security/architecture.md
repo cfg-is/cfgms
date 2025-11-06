@@ -67,7 +67,9 @@ graph TD
 
 ### Internal Communication
 
-- gRPC with mTLS for all internal communication
+- MQTT+QUIC hybrid protocol with mTLS for all steward-controller communication
+  - MQTT control plane for real-time commands, heartbeats, and failover detection
+  - QUIC data plane for high-performance configuration and DNA synchronization
 - Certificate-based authentication
 - Strong encryption for all traffic
 - Rate limiting and DoS protection
@@ -179,7 +181,7 @@ For detailed information about our security decisions, see:
 
 ## Implementation Examples
 
-### gRPC with mTLS Configuration
+### MQTT+QUIC with mTLS Configuration
 
 ```yaml
 # Example Steward TLS configuration
@@ -191,6 +193,18 @@ tls:
   cipher_suites:
     - "TLS_AES_256_GCM_SHA384"
     - "TLS_CHACHA20_POLY1305_SHA256"
+
+# MQTT control plane configuration
+mqtt:
+  broker_address: "controller.example.com:1883"
+  keep_alive: 30s
+  qos: 1
+
+# QUIC data plane configuration
+quic:
+  server_address: "controller.example.com:443"
+  max_idle_timeout: 60s
+  max_streams: 100
 ```
 
 ### REST API Security Configuration

@@ -148,7 +148,7 @@ Standard deployment with direct communication between Controller and Steward:
 
 ```mermaid
 graph LR
-    C[Controller] -->|gRPC + mTLS| S[Steward]
+    C[Controller] -->|MQTT+QUIC + mTLS| S[Steward]
     C -->|HTTPS + API Key| E[External API]
     style C fill:#bbf,stroke:#333,stroke-width:2px
     style S fill:#f9f,stroke:#333,stroke-width:2px
@@ -161,10 +161,10 @@ Large deployments with Outpost acting as a local proxy-cache:
 
 ```mermaid
 graph LR
-    C[Controller] -->|gRPC + mTLS| O[Outpost]
-    O -->|gRPC + mTLS| S1[Steward 1]
-    O -->|gRPC + mTLS| S2[Steward 2]
-    O -->|gRPC + mTLS| S3[Steward 3]
+    C[Controller] -->|MQTT+QUIC + mTLS| O[Outpost]
+    O -->|MQTT+QUIC + mTLS| S1[Steward 1]
+    O -->|MQTT+QUIC + mTLS| S2[Steward 2]
+    O -->|MQTT+QUIC + mTLS| S3[Steward 3]
     C -->|HTTPS + API Key| E[External API]
     style C fill:#bbf,stroke:#333,stroke-width:2px
     style O fill:#fbb,stroke:#333,stroke-width:2px

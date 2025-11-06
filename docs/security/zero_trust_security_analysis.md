@@ -225,10 +225,10 @@ type AuditEntry struct {
 - Certificate revocation checking
 - Mutual authentication enforced
 
-**gRPC Endpoint Security**
-- All gRPC endpoints require mTLS
-- Service-to-service authentication
-- Request/response encryption
+**MQTT+QUIC Endpoint Security**
+- All MQTT+QUIC endpoints require mTLS
+- Service-to-service authentication (certificate-based)
+- Request/response encryption (MQTT control plane + QUIC data plane)
 
 ## Vulnerability Assessment
 
