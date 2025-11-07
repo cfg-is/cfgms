@@ -72,14 +72,16 @@ type Module interface {
 
 ### Controller-Integrated Mode
 - **Use Case**: Enterprise fleets, centralized management
-- **Configuration**: Controller distribution via gRPC
+- **Configuration**: Controller distribution via MQTT+QUIC
 - **Module Discovery**: Controller registry with versioning
 - **Benefits**: Centralized control, fleet orchestration
 
 ## Communication Architecture
 
 ### Internal Communication
-- **Protocol**: gRPC with mutual TLS
+- **Protocol**: MQTT+QUIC hybrid with mutual TLS
+  - **MQTT Control Plane**: Real-time commands, heartbeats, failover detection
+  - **QUIC Data Plane**: High-performance configuration and DNA synchronization
 - **Authentication**: Certificate-based identity
 - **Connection Model**: Stewards initiate all connections (no open ports)
 
@@ -124,7 +126,7 @@ CFGMS implements a **platform-agnostic core** with **platform-specific optimizat
 - **Unified Business Logic**: Core configuration management logic works identically across platforms
 - **Platform-Specific Collectors**: Native system information gathering (WMI on Windows, syscalls on Unix)
 - **Adaptive Module System**: Modules automatically adapt to platform capabilities and constraints
-- **Consistent API**: Same REST and gRPC interfaces regardless of underlying platform
+- **Consistent API**: Same REST API and MQTT+QUIC protocol regardless of underlying platform
 
 ### Platform-Specific Implementations
 
@@ -195,8 +197,9 @@ features/
 
 ### Key Directories
 - `cmd/` - Command-line applications (controller, steward, cfgcli)
-- `api/proto/` - Protocol buffer definitions for gRPC
-- `pkg/` - Shared packages (logging utilities)
+- `api/proto/` - Protocol buffer definitions (used for data serialization)
+- `pkg/` - Shared packages and central providers (logging, storage, security)
+- `features/` - Feature implementations organized by component
 - `test/` - Integration and end-to-end tests
 - `docs/` - Architecture and development documentation
 

@@ -97,29 +97,40 @@ Before submitting code:
 
 #### Security Best Practices
 
-1. **Authentication & Authorization**
+1. **No Foot-guns in Development (CRITICAL)**
+   - **NEVER build insecure options for development convenience**
+   - **NEVER document unsafe alternatives**, even temporarily
+   - **NEVER create in-memory-only storage** for features requiring durability in production
+   - **Rationale**: Insecure dev options inevitably leak into production through laziness, time pressure, or copy-paste documentation
+   - **Rule**: If a feature requires durable storage in production, it MUST use durable storage in development and testing
+   - **Allowed**: In-memory write-through caches for ephemeral data (sessions, temporary state)
+   - **Forbidden**: In-memory-only stores for data that should survive restarts (configurations, users, policies)
+
+2. **Authentication & Authorization**
    - Use mTLS for internal agent communication
    - Implement proper API key validation
    - Follow principle of least privilege
    - Never store credentials in code or configuration
+   - Secrets MUST use OS keychain or encrypted storage, never plaintext files
 
-2. **Network Security**
+3. **Network Security**
    - Use HTTPS for all external communication
    - Implement proper TLS configuration
    - Validate all network inputs
    - Sanitize all logging output
 
-3. **Code Security**
+4. **Code Security**
    - Run security linters (gosec, etc.)
    - Keep dependencies updated
    - Follow secure coding practices
    - Document security considerations
 
-4. **Testing Security**
+5. **Testing Security**
    - Include security-focused test cases
    - Test authentication and authorization
    - Validate input sanitization
    - Test error handling for security scenarios
+   - Use same storage backends in tests as production
 
 #### Security Review Process
 

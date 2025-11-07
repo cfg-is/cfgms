@@ -202,8 +202,10 @@ The roadmap provides detailed milestone planning from v0.1.0 through v3.5.0+, in
 CFGMS implements a robust security architecture:
 
 - **Internal Communication**
-  - gRPC with mutual TLS for steward-controller communication
-  - Certificate-based authentication for stewards
+  - MQTT+QUIC hybrid protocol for steward-controller communication
+  - MQTT (control plane) with mutual TLS for real-time commands and heartbeats
+  - QUIC (data plane) with mutual TLS for high-performance configuration/DNA sync
+  - Certificate-based authentication for all steward connections
   - Optional OpenZiti integration for zero-trust networking
 
 - **External Access**

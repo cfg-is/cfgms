@@ -7,7 +7,7 @@ The Terminal module provides secure remote terminal access to managed Stewards t
 
 ### Component Design
 ```
-[Web Client] <--WebSocket--> [Controller Terminal API] <--gRPC--> [Steward Terminal Handler]
+[Web Client] <--WebSocket--> [Controller Terminal API] <--QUIC--> [Steward Terminal Handler]
      |                              |                                    |
      |                              |                                    |
  xterm.js                    Session Manager                      Process Manager
@@ -19,8 +19,8 @@ The Terminal module provides secure remote terminal access to managed Stewards t
 
 ### Integration Points
 1. **Controller REST API** (`features/controller/api/server.go:200`): Add terminal WebSocket endpoints
-2. **gRPC Services** (`api/proto/controller/controller.proto:22`): Extend with terminal operations
-3. **Steward Service** (`api/proto/steward/steward.proto:18`): Add terminal execution support
+2. **QUIC Data Plane** (via `pkg/quic`): Terminal data streaming over existing QUIC connections
+3. **MQTT Control Plane**: Terminal session management commands
 4. **RBAC System** (`features/rbac/manager.go`): Terminal access permissions
 5. **Certificate Management** (`pkg/cert/manager.go`): mTLS for terminal streams
 
@@ -58,20 +58,19 @@ const (
 )
 ```
 
-### gRPC Extensions
-```protobuf
-service Controller {
-  // Terminal management
-  rpc StartTerminal(StartTerminalRequest) returns (StartTerminalResponse);
-  rpc TerminalData(stream TerminalDataRequest) returns (stream TerminalDataResponse);
-  rpc EndTerminal(EndTerminalRequest) returns (common.Status);
-}
+### MQTT+QUIC Protocol Extensions
 
-service Steward {
-  // Terminal execution
-  rpc ExecuteTerminal(stream TerminalExecuteRequest) returns (stream TerminalExecuteResponse);
-}
+**MQTT Control Messages** (Session Management):
 ```
+cfgms/steward/{id}/terminal/start   - Start terminal session command
+cfgms/steward/{id}/terminal/end     - End terminal session command
+cfgms/steward/{id}/terminal/status  - Terminal session status updates
+```
+
+**QUIC Data Streams** (Terminal I/O):
+- Bi-directional QUIC streams for terminal data transfer
+- Low-latency terminal I/O over existing QUIC connection
+- Multiplexed streams for concurrent terminal sessions
 
 ## Performance Targets
 - **Latency**: <100ms for typical terminal commands
@@ -81,7 +80,7 @@ service Steward {
 
 ## Implementation Phases
 1. **Core Terminal Module**: Session management, WebSocket handling
-2. **gRPC Integration**: Controller-Steward terminal communication
+2. **MQTT+QUIC Integration**: Controller-Steward terminal communication via existing protocol
 3. **Shell Support**: Multi-platform shell execution (bash, zsh, PowerShell, cmd)
 4. **Security Features**: Session recording, access control, encryption
 5. **Performance Optimization**: Session multiplexing, resource cleanup

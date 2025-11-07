@@ -15,17 +15,20 @@ CFGMS uses a hybrid approach for local development credentials:
 
 2. **Edit `.env.local` with your Azure credentials:**
    - Get your Azure App Registration details from Azure Portal
-   - Fill in client IDs, tenant IDs, and domain
-   - Put actual secrets in the file temporarily
+   - Fill in `M365_CLIENT_ID`, `M365_TENANT_ID`, `M365_TENANT_DOMAIN`
+   - **IMPORTANT**: Leave `M365_CLIENT_SECRET=USE_KEYCHAIN` (placeholder - never use actual secret)
 
-3. **Migrate secrets to OS keychain:**
+3. **Store your client secret securely in OS keychain:**
    ```bash
    ./scripts/migrate-credentials-to-keychain.sh
    ```
+
+   **You will be prompted to enter your client secret securely.**
+
    This will:
-   - Extract secrets from `.env.local`
-   - Store them in OS-encrypted keychain
-   - Replace secrets in `.env.local` with `USE_KEYCHAIN` placeholder
+   - Prompt for your client secret (hidden input)
+   - Store it in OS-encrypted keychain
+   - Never write the secret to disk in plaintext
 
 4. **Load credentials for testing:**
    ```bash
@@ -36,6 +39,8 @@ CFGMS uses a hybrid approach for local development credentials:
    ```bash
    go test ./features/modules/m365/...
    ```
+
+**SECURITY PRINCIPLE**: Client secrets are NEVER stored in plaintext files, even temporarily. The keychain is the ONLY acceptable storage location for secrets in development.
 
 ### Why This Approach?
 

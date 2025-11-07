@@ -1,6 +1,15 @@
 # gRPC Usage Analysis
 
-**Date**: 2025-10-15
+> **⚠️ HISTORICAL DOCUMENT**
+>
+> This document is preserved for historical reference and explains the decision to migrate from gRPC to MQTT+QUIC.
+>
+> **Date**: 2025-10-15
+> **Context**: v0.7.0 Pre-OSS preparation - Analysis that led to gRPC removal (Story #220)
+> **Current Protocol**: MQTT+QUIC hybrid (see [mqtt-quic-protocol.md](mqtt-quic-protocol.md))
+>
+> ---
+
 **Context**: v0.7.0 Pre-OSS preparation - Task to review gRPC usage and remove if not justified
 
 ## Executive Summary

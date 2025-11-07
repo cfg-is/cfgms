@@ -91,7 +91,9 @@ See [docs/development/commands-reference.md](docs/development/commands-reference
 - **Outpost**: Proxy cache component for network device monitoring
 
 **Communication:**
-- **Internal**: gRPC with mutual TLS between components
+- **Internal**: MQTT+QUIC hybrid protocol with mutual TLS between components
+  - MQTT control plane for real-time commands, heartbeats, and failover detection
+  - QUIC data plane for high-performance configuration/DNA synchronization
 - **External**: REST API with HTTPS and API key authentication
 
 ### Module Deployment Decision Matrix
@@ -116,6 +118,7 @@ See [docs/development/commands-reference.md](docs/development/commands-reference
 - **Default**: Git with SOPS encryption for security and GitOps workflows
 - **Memory Usage**: Internal component optimization only (write-through caching)
 - **Security**: All providers ALWAYS use encryption - no cleartext secrets
+- **No Memory-Only Storage**: Features requiring durability MUST use durable storage in dev/test/prod
 
 ### Central Provider System (CRITICAL)
 **MANDATORY**: Before implementing any new functionality, check if it belongs in a central provider.
@@ -143,7 +146,7 @@ See [docs/development/commands-reference.md](docs/development/commands-reference
 **Current Central Providers** (as of Story #239):
 
 **Pluggable Providers** (Multiple Implementations):
-1. **`pkg/storage`** - Data persistence (git, database, in-memory cache)
+1. **`pkg/storage`** - Data persistence (git, database) with write-through caching
 2. **`pkg/logging`** - Structured logging (file, timescale)
 3. **`pkg/secrets`** - Secret storage with encryption (SOPS backend)
 4. **`pkg/directory`** - Directory services (M365, Active Directory)
@@ -207,9 +210,10 @@ prevent new violations from being committed.
 ## Critical Development Rules
 
 ### Must Follow
+- **No Foot-guns in Development (MANDATORY)**: Never build insecure options for convenience. If a feature requires durable storage in production, it MUST use durable storage in development and testing. Never document unsafe alternatives.
 - **TDD with Real Components**: Test actual program, not mocks
 - **Zero Failing Tests**: 100% pass rate required before any commits
-- **Security First**: All scans pass, no hardcoded secrets
+- **Security First**: All scans pass, no hardcoded secrets, credentials use OS keychain only
 - **Pluggable Storage**: Import `pkg/storage/interfaces` only
 - **Feature Branches**: Never commit directly to develop/main
 - **Tenant Isolation**: Maintain strict tenant boundaries
@@ -286,7 +290,8 @@ The system implements recursive parent-child tenant model:
 ## Dependencies
 - `github.com/spf13/cobra` - CLI framework
 - `github.com/stretchr/testify` - Testing utilities
-- `google.golang.org/grpc` - gRPC communication
+- `github.com/mochi-mqtt/server` - MQTT broker for control plane
+- `github.com/quic-go/quic-go` - QUIC protocol for data plane
 - `google.golang.org/protobuf` - Protocol buffer support
 
 ---

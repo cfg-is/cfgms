@@ -34,7 +34,102 @@ make test-commit
 - ❌ **DO NOT** create PR on failures
 - ✅ Must achieve 100% success across all validation types
 
-### 2. Story Completeness Check
+### 2. Documentation Review (BLOCKING)
+
+**CRITICAL**: All internal tracking documents must be removed before PR creation.
+
+**Automated Scan**:
+```bash
+# Scan for internal tracking patterns in docs/
+git diff --name-only develop...HEAD -- docs/ | grep -iE '(status|summary|validation|report|review|sprint|milestone|story-[0-9]+)'
+```
+
+**Manual Review Checklist**:
+- ❌ **REMOVE**: Internal progress tracking (e.g., DOCUMENTATION_REVIEW_STATUS.md)
+- ❌ **REMOVE**: Sprint/milestone completion reports (e.g., v0.3.2-validation.md)
+- ❌ **REMOVE**: Story-specific summaries (e.g., Story #166 Implementation Summary)
+- ❌ **REMOVE**: Internal review notes not useful for contributors
+- ✅ **KEEP**: Security audits (demonstrates due diligence for OSS)
+- ✅ **KEEP**: Architecture decision records (ADRs)
+- ✅ **KEEP**: Contributor-facing guides and documentation
+- ✅ **KEEP**: Historical design documents (marked with "HISTORICAL DOCUMENT" header)
+
+**Document Classification Decision Tree**:
+```
+Does this document help future contributors?
+├─ YES → Keep (contributor-facing)
+│  Examples:
+│  • Development guides (getting-started.md)
+│  • Architecture decisions (ADR-001-*.md)
+│  • Security audits (shows due diligence)
+│  • API documentation
+│  • Module guides
+│
+└─ NO → Does it document completed work?
+   ├─ YES → Remove (internal tracking)
+   │  Examples:
+   │  • Story completion summaries
+   │  • Sprint validation reports
+   │  • Progress tracking documents
+   │  • Internal review notes
+   │
+   └─ NO → Keep but mark as historical
+      Examples:
+      • Old design documents (grpc-usage-analysis.md)
+      • Deprecated architecture docs
+```
+
+**Files to Always Remove**:
+1. **Progress Tracking**: `*-status.md`, `*-progress.md`
+2. **Internal Reviews**: `INTERNAL_*.md`, `*_REVIEW_STATUS.md`
+3. **Sprint Reports**: `v[0-9].*-validation.md`, `sprint-*.md`
+4. **Story Summaries**: `story-*-summary.md`, `*-implementation-summary.md`
+5. **Version-Specific Reports**: Not actual release notes (pre-v1.0 "releases" are internal)
+
+**Transformation Strategy**:
+- **Option 1**: Remove entirely (internal tracking with no technical value)
+- **Option 2**: Rename and rewrite as contributor guide (has technical content)
+  - Remove story references and completion checkboxes
+  - Focus on "how to" rather than "what we did"
+  - Add practical examples and best practices
+
+**Validation Commands**:
+```bash
+# Find potentially problematic files
+git ls-files docs/ | grep -iE '(validation|report|status|summary|review|sprint|milestone|story-[0-9]+)' | grep -v 'DOCUMENTATION_REVIEW_REPORT\|pr-review-methodology\|test_coverage_analysis\|remediation'
+
+# Check for version-specific internal reports
+git ls-files docs/ | grep -E 'v[0-9]+\.[0-9]+\.[0-9]+'
+
+# Look for "Story #" references in docs (may indicate internal tracking)
+git grep -l "Story #[0-9]" docs/ | grep -v DOCUMENTATION_REVIEW_REPORT.md
+```
+
+**Blocking Policy**:
+- ❌ **BLOCKS** PR creation if internal tracking documents found
+- ❌ **BLOCKS** PR creation if story-specific summaries present
+- ❌ **BLOCKS** PR creation if sprint validation reports exist
+- ℹ️ **WARNS** if version-specific files without proper context
+- ✅ **PASSES** only when all internal documents cleaned
+
+**Example Cleanup (Story #228)**:
+```bash
+# Removed:
+❌ docs/DOCUMENTATION_REVIEW_STATUS.md (progress tracking)
+❌ docs/INTERNAL_CONTENT_REVIEW.md (internal notes)
+❌ docs/v0.3.2-validation.md (sprint validation)
+❌ docs/releases/v0.2.0-release-notes.md (pre-release internal milestone)
+
+# Transformed:
+✅ logging-migration-summary.md → logging-architecture-guide.md
+✅ logging-interface-injection-implementation-summary.md → logging-dependency-injection-guide.md
+
+# Kept with context:
+✅ docs/architecture/grpc-usage-analysis.md (added "HISTORICAL DOCUMENT" header)
+✅ docs/security/audits/*.md (demonstrates security due diligence)
+```
+
+### 3. Story Completeness Check
 ```bash
 gh issue view [story_number] --json body,title,state,assignees
 ```
@@ -378,13 +473,36 @@ This command follows a strict execution sequence:
 
 # Execution Order:
 1. Run make test-commit (BLOCKING)
-2. Analyze story completeness (BLOCKING if <100%)
-3. Push changes to remote (BLOCKING)
-4. Validate git workflow (BLOCKING if feature→main)
-5. Check for duplicate PRs (auto-update if exists)
-6. Create or update PR
-7. Update GitHub project status
-8. Update roadmap
+2. Documentation review (BLOCKING if internal tracking found)
+3. Analyze story completeness (BLOCKING if <100%)
+4. Push changes to remote (BLOCKING)
+5. Validate git workflow (BLOCKING if feature→main)
+6. Check for duplicate PRs (auto-update if exists)
+7. Create or update PR
+8. Update GitHub project status
+9. Update roadmap
 ```
 
 Each step is blocking - failure prevents progression to next step.
+
+### Documentation Review Error Example
+
+```bash
+❌ DOCUMENTATION REVIEW FAILED
+
+   Internal tracking documents detected:
+   • docs/story-228-implementation-summary.md
+   • docs/PROGRESS_TRACKING.md
+   • docs/v0.6.5-validation.md
+
+   🛠️ Required Actions:
+   1. Review each file using decision tree above
+   2. Remove internal tracking documents
+   3. Transform technical summaries into contributor guides
+   4. Add historical headers to deprecated design docs
+   5. Commit cleanup changes
+   6. Retry: /story-complete
+
+   📋 PR CREATION BLOCKED
+   Cannot create PR with internal tracking documents
+```
