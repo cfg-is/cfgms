@@ -6,13 +6,13 @@ CFGMS is flexible - you can use it three different ways. Pick the one that match
 
 ## Table of Contents
 
-- [Option A: Standalone Steward](#option-a-standalone-steward-like-ansible) (5 minutes) - **Start here if you're new!**
+- [Option A: Standalone Steward](#option-a-standalone-steward) (5 minutes) - **Start here if you're new!**
 - [Option B: Standalone Controller](#option-b-standalone-controller-cloud-apis) (10 minutes) - Cloud automation only
 - [Option C: Controller + Stewards](#option-c-controller--stewards-full-platform) (15 minutes) - Fleet management
 
 ---
 
-## Option A: Standalone Steward (Like Ansible)
+## Option A: Standalone Steward
 
 **Perfect for**: Learning CFGMS, single-server management, edge devices, development
 
