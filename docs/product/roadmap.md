@@ -689,12 +689,9 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - [ ] Create issue/PR templates
   - [ ] Set up GitHub Discussions
   - [ ] Configure branch protection rules
-  - [ ] Set up Discord/Slack community server
-  - [ ] Create GitHub Projects for public roadmap
 - [ ] **Task 12: Versioning & Roadmap Update** (Issue #230) - 2-3 days
   - [ ] Document semantic versioning policy
-  - [ ] Create v0.7.0 release tag
-  - [ ] Set up automated release process
+  - [ ] Update roadmap versions v1.0 -> v0.10, re-evaluate whe v1 should be (or if it should even be listed on the roadmap now).
   - [ ] Create CHANGELOG.md
   - [ ] Create public-facing roadmap
 - [ ] **Task 13: Review and Create All Referenced Email Addresses & Web Pages** (Issue #248) - 2-3 days
@@ -707,14 +704,22 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - [ ] Test all email addresses and URLs
   - [ ] Update documentation with any corrections
 
-#### v0.7.5: Security Foot-gun Elimination (CRITICAL)
+#### v0.7.5: Testing Infrastructure & Security Hardening (CRITICAL)
+
 (Issue #247)
 
-**Goal**: Eliminate all development convenience patterns that could leak into production, enforcing the "No Foot-guns in Development" principle.
+**Goal**: Ensure tests represent real-world deployment exactly as documented, eliminating development convenience patterns that could leak into production.
 
-**Epic: Security Foot-gun Elimination** (18 story points)
+**Dual Objectives**:
 
-**Background**: The "No Foot-guns in Development" principle states that we NEVER build insecure options for development convenience. If a feature requires durable storage in production, it MUST use durable storage in development and testing. Insecure dev options inevitably leak into production through laziness, time pressure, or copy-paste documentation.
+1. **Eliminate Development Foot-guns** - Remove insecure convenience shortcuts from production code
+2. **Production-Realistic Testing** - Ensure all tests use configuration matching QUICK_START.md deployment
+
+**Combined Epic** (30-35 story points)
+
+**Philosophy**: "Test what you ship, ship what you test" - If a feature requires durable storage in production, it MUST use durable storage in development and testing. Tests must validate the exact deployment methods documented in QUICK_START.md and DEVELOPMENT.md.
+
+**Why Combined**: Fixing storage foot-guns REQUIRES fixing test infrastructure (can't test durable storage with in-memory mocks). Production-realistic testing EXPOSES foot-guns (tests fail when configuration doesn't match deployment reality). Both enforce the same core principle.
 
 **Critical Violations Identified**:
 
@@ -752,23 +757,72 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
    - **Fix**: Remove in-memory store, connect directly to controller API
    - **Files**: `cmd/cfgcli/cmd/token.go`
 
-**Acceptance Criteria**:
-- [ ] All production code paths use durable storage (git/database) for persistent data
-- [ ] All in-memory stores removed from `cmd/` and `features/` (except tests and ephemeral caches)
-- [ ] `make check-architecture` detects and blocks new in-memory storage foot-guns
-- [ ] Documentation updated to remove any references to "temporary" insecure setups
-- [ ] All tests use real storage backends (via Docker test infrastructure)
-- [ ] Script verification: `scripts/migrate-credentials-to-keychain.sh` never writes secrets to disk
+**Phase 2: Production-Realistic Testing** (12-15 story points)
+
+**Goal**: Ensure all tests validate the exact deployment methods documented in QUICK_START.md and DEVELOPMENT.md
+
+6. **QUICK_START Option A Validation (CRITICAL)** - 5 story points
+   - **Current Gap**: Standalone steward (5-minute setup) never validated end-to-end
+   - **Impact**: New users following QUICK_START Option A might encounter undocumented issues
+   - **Fix**: Create `test/integration/standalone_steward_test.go`
+   - **Testing**: Validate exact QUICK_START workflow with YAML config files
+   - **Files**: `test/integration/standalone_steward_test.go`
+
+7. **Certificate Registration Flow Testing (HIGH)** - 4 story points
+   - **Current Gap**: Auto-approval documented but not tested; tests use pre-generated certs
+   - **Impact**: Key feature (`--register` flag) untested in real-world scenario
+   - **Fix**: Add integration tests for dev-mode auto-approval and production manual approval
+   - **Testing**: Test full registration flow as shown in QUICK_START
+   - **Files**: `test/integration/certificate_registration_test.go`
+
+8. **YAML Configuration File Validation (MEDIUM)** - 3 story points
+   - **Current Gap**: Tests use environment variables; YAML config parsing untested
+   - **Impact**: Users can't debug YAML configuration issues
+   - **Fix**: Add config file validation tests with helpful error messages
+   - **Testing**: Test valid/invalid YAML, missing fields, resource references
+   - **Files**: `test/integration/config_validation_test.go`
+
+9. **Cross-Platform Build Validation (MEDIUM)** - 2-3 story points
+   - **Current Gap**: Build-from-source flow not tested in CI
+   - **Impact**: DEVELOPMENT.md build instructions might break for some platforms
+   - **Fix**: Add CI targets for cross-platform builds
+   - **Testing**: Linux AMD64/ARM64, Windows AMD64/ARM64, macOS ARM64
+   - **Files**: `.github/workflows/build.yml`, Makefile
+
+10. **Productize Test Infrastructure Tooling (LOW)** - 2-3 story points
+   - **Current Gap**: Excellent scripts exist but not part of core system
+   - **Impact**: Users manually replicate test infrastructure for production
+   - **Fix**: Move `wait-for-services.sh` to `bin/cfgms-wait-for-services`
+   - **Testing**: Document in operations runbooks
+   - **Files**: `scripts/wait-for-services.sh`, `docs/operations/production-runbooks.md`
+
+**Combined Acceptance Criteria**:
+
+- [ ] **Storage Foot-guns Eliminated**: All production code uses durable storage (git/database)
+- [ ] **In-Memory Stores Removed**: Zero in-memory stores in `cmd/` and `features/` (except tests/caches)
+- [ ] **Architecture Enforcement**: `make check-architecture` detects and blocks new foot-guns
+- [ ] **QUICK_START Validation**: All three deployment options tested end-to-end with YAML configs
+- [ ] **Certificate Registration**: Dev-mode auto-approval and production manual approval tested
+- [ ] **Config File Parsing**: YAML validation tests with helpful error messages
+- [ ] **Cross-Platform Builds**: Linux/Windows/macOS × AMD64/ARM64 builds validated
+- [ ] **Production Tooling**: Test scripts productized (wait-for-services → bin/)
+- [ ] **Documentation Audit**: No insecure alternatives or "temporary" setups documented
+- [ ] **Security Validation**: All security scans pass with no foot-gun violations
 
 **Definition of Done**:
+
 - [ ] Zero in-memory stores for durable data in production code
 - [ ] All storage uses `pkg/storage/interfaces` with pluggable backends
-- [ ] `make test` passes with real storage backends
-- [ ] Documentation audit complete (no insecure alternatives documented)
-- [ ] Security scan passes with no foot-gun violations
-- [ ] PR review checklist includes foot-gun verification
+- [ ] `make test` passes with real storage backends matching deployment
+- [ ] QUICK_START Options A, B, C validated in integration tests
+- [ ] Certificate registration flow tested (auto-approval + manual approval)
+- [ ] YAML config parsing tested with production-like files
+- [ ] Cross-platform builds tested in CI
+- [ ] Documentation audit complete (no insecure patterns)
+- [ ] Security scan passes with no violations
+- [ ] PR review checklist includes foot-gun and deployment-match verification
 
-**Technical Debt**: This work pays down critical technical debt from v0.1-v0.6 alpha development phase where "ALPHA LIMITATION" comments indicated temporary in-memory storage.
+**Technical Debt Resolution**: This work pays down critical technical debt from v0.1-v0.6 alpha development phase where "ALPHA LIMITATION" comments indicated temporary in-memory storage, and aligns test infrastructure with documented deployment methods.
 
 #### v0.8.0 Go public
 
