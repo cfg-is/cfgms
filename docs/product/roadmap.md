@@ -757,7 +757,37 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
    - **Fix**: Remove in-memory store, connect directly to controller API
    - **Files**: `cmd/cfgcli/cmd/token.go`
 
-**Phase 2: Production-Realistic Testing** (12-15 story points)
+**Phase 1.5: Environment Variable Security Hardening** (Issue #250, #251) (6 story points)
+
+**Goal**: Prevent environment variable hijacking in hostile environments by using explicit YAML references and configuration signing
+
+1. **Configuration Signing Infrastructure (CRITICAL)** (Issue #250) - 3 story points
+
+   - **Current Gap**: Configurations sent from controller to steward are not cryptographically signed, allowing MITM attacks despite mTLS
+   - **Security Risk**: Compromised controller or MITM attacker could send malicious configurations to stewards
+   - **Implementation**: Extend existing script signing framework to full configuration signing
+   - **Signing Flow**: Controller signs configs with private key → Steward verifies with controller's public key from mTLS certificate
+   - **Verification**: Steward validates signature before applying ANY configuration changes
+   - **Algorithms**: RSA-SHA256, ECDSA-SHA256 (reuse existing script signature infrastructure)
+   - **Signature Storage**: Embedded in configuration YAML as `_signature` metadata field
+   - **Key Management**: Controller uses same private key as mTLS certificate for signing
+   - **Backward Compatibility**: Signature validation optional in v0.7.5, required in v0.8.0+
+   - **Files**: `features/config/signature/`, `features/steward/config_receiver.go`, `pkg/config/loader.go`
+
+2. **Explicit Environment Variable References (HIGH)** (Issue #251) - 3 story points
+
+   - **Current Gap**: Code uses `os.Getenv()` to read `CFGMS_LOG_DIR`, `CFGMS_CONTROLLER_URL` allowing silent env var hijacking
+   - **Security Risk**: Attacker with env var control can redirect steward to malicious controller or manipulate operational settings
+   - **Fix**: Remove all implicit `os.Getenv()` calls from `cmd/steward/main.go` and `cmd/controller/main.go`
+   - **Implementation**: Use `os.ExpandEnv()` in config loader to support `${ENV_VAR}` syntax in YAML files
+   - **Benefit**: Configuration file is source of truth; env vars only used when explicitly declared
+   - **Security**: Attacker must modify both config file (ACL-protected, signature validation planned) AND env var to hijack
+   - **Validation**: Add startup failure if referenced env var is unset (fail-safe, not silent hijacking)
+   - **Documentation**: Update QUICK_START.md with `${ENV_VAR:-default}` syntax examples
+   - **SECURITY.md**: Document "Environment variables only used when explicitly declared in config files"
+   - **Files**: `pkg/config/loader.go`, `cmd/steward/main.go`, `cmd/controller/main.go`, `QUICK_START.md`, `SECURITY.md`
+
+**Phase 2: Production-Realistic Testing** (Issue #252) (12-15 story points)
 
 **Goal**: Ensure all tests validate the exact deployment methods documented in QUICK_START.md and DEVELOPMENT.md
 
