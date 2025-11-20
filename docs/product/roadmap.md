@@ -768,7 +768,7 @@ For complete version history and release notes, see [CHANGELOG.md](../../CHANGEL
 
 **Goal**: Prevent environment variable hijacking in hostile environments by using explicit YAML references and configuration signing
 
-1. **Configuration Signing Infrastructure (CRITICAL)** (Issue #250) - 3 story points
+1. **Configuration Signing Infrastructure (CRITICAL)** (Issue #250) - 3 story points ✅ COMPLETED
 
    - **Current Gap**: Configurations sent from controller to steward are not cryptographically signed, allowing MITM attacks despite mTLS
    - **Security Risk**: Compromised controller or MITM attacker could send malicious configurations to stewards
