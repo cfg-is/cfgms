@@ -692,10 +692,13 @@ For complete version history and release notes, see [CHANGELOG.md](../../CHANGEL
 
 #### v0.7.4: Community & Launch Prep (Weeks 9-10)
 
-- [ ] **Community Infrastructure Setup** (Issue #229) - 3-5 days
-  - [ ] Create issue/PR templates
-  - [ ] Set up GitHub Discussions
-  - [ ] Configure branch protection rules
+- [x] **Community Infrastructure Setup** (Issue #229) - 3-5 days ✅ COMPLETED
+  - [x] Create issue/PR templates (bug, feature, question)
+  - [x] Create CODEOWNERS file
+  - [x] Add repository topics for discoverability
+  - [x] Create good first issue tasks (#253, #254, #255)
+  - [x] Document issue triage process
+  - [x] Set up GitHub Discussions (manual - GitHub UI)
 - [x] **Versioning & Roadmap Update** (Issue #230) - 2-3 days ✅ COMPLETED
   - [x] Document semantic versioning policy (see `docs/development/versioning-policy.md`)
   - [x] Update roadmap versions v1.0 -> v0.10, with clear path to v1.0
@@ -865,6 +868,7 @@ For complete version history and release notes, see [CHANGELOG.md](../../CHANGEL
 
 - [ ] Convert repository to Public
 - [ ] Re-enable GitHub Actions workflows (move workflows-disabled/ back to workflows/) (issue 109)
+- [ ] Configure branch protection rules
 - [ ] Set Up GitHub Actions and Acceptance Tests #15
 - [ ] Set up github CI CD pipeline  
 - [ ] Review Automated secure code scanning tooling implementation
