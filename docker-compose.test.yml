@@ -181,7 +181,7 @@ services:
       timescaledb-test:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "sh", "-c", "netstat -ln | grep :1883"]
+      test: ["CMD", "sh", "-c", "netstat -ln | grep :8883"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -249,7 +249,7 @@ services:
       timescaledb-test:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "sh", "-c", "netstat -ln | grep :1883"]
+      test: ["CMD", "sh", "-c", "netstat -ln | grep :8883"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -317,7 +317,7 @@ services:
       timescaledb-test:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "sh", "-c", "netstat -ln | grep :1883"]
+      test: ["CMD", "sh", "-c", "netstat -ln | grep :8883"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -479,7 +479,7 @@ services:
     ports:
       - "1886:8883"   # MQTT control plane with TLS (unique host port)
       - "4436:4433/udp"   # QUIC data plane (unique host port)
-      - "9080:9080"    # HTTP API
+      - "8080:9080"    # HTTP API (unique host port to avoid conflict with controller-east)
     environment:
       CFGMS_NODE_ID: "controller-standalone"
       # MQTT+QUIC Configuration (Story #198, Story 12.4)
@@ -521,7 +521,7 @@ services:
       timescaledb-test:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "sh", "-c", "netstat -ln | grep :1883"]
+      test: ["CMD", "sh", "-c", "netstat -ln | grep :8883"]
       interval: 10s
       timeout: 5s
       retries: 5

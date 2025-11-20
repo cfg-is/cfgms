@@ -429,22 +429,11 @@ func (f *E2ETestFramework) CreateSteward(stewardID string) (*steward.Steward, er
 		},
 	}
 
-	s, err := steward.New(stewardConfig, f.logger)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create steward: %w", err)
-	}
-
-	f.stewards[stewardID] = s
-
-	// Add cleanup for this steward
-	f.addCleanup(func() error {
-		f.mu.Lock()
-		delete(f.stewards, stewardID)
-		f.mu.Unlock()
-		return s.Stop(context.Background())
-	})
-
-	return s, nil
+	// DEPRECATED: steward.New() is deprecated (Story #198)
+	// E2E steward creation requires implementation with MQTT+QUIC mode
+	// This is a known limitation - E2E tests should use integration tests instead
+	_ = stewardConfig // Mark config as used to avoid unused variable error
+	return nil, fmt.Errorf("E2E steward creation not yet implemented for MQTT+QUIC mode (Story #198 deprecation) - use integration tests for config signature verification")
 }
 
 // RunTest executes a single test scenario with metrics collection and smart retry
