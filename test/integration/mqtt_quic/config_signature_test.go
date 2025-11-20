@@ -299,7 +299,7 @@ func (s *ConfigSignatureTestSuite) TestE2EConfigSyncWithSignature() {
 		s.T().Logf("Received command on topic %s", msg.Topic())
 		commandReceived <- true
 	})
-	s.Require().True(subToken.WaitTimeout(5*time.Second))
+	s.Require().True(subToken.WaitTimeout(5 * time.Second))
 	s.Require().NoError(subToken.Error())
 
 	// Create signed config
@@ -330,7 +330,7 @@ modules:
 	s.Require().NoError(err)
 
 	pubToken := client.Publish(commandTopic, 1, false, cmdJSON)
-	s.Require().True(pubToken.WaitTimeout(5*time.Second))
+	s.Require().True(pubToken.WaitTimeout(5 * time.Second))
 	s.Require().NoError(pubToken.Error())
 
 	// Wait for command delivery
@@ -360,7 +360,7 @@ modules:
 	s.Require().NoError(err)
 
 	statusPubToken := client.Publish(statusTopic, 1, false, statusJSON)
-	s.Require().True(statusPubToken.WaitTimeout(5*time.Second))
+	s.Require().True(statusPubToken.WaitTimeout(5 * time.Second))
 	s.Require().NoError(statusPubToken.Error())
 
 	s.T().Log("✅ E2E config sync with signature test completed")
