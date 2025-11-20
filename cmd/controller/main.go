@@ -6,7 +6,6 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -100,86 +99,45 @@ func main() {
 }
 
 // getLogProvider determines the logging provider from configuration
+// Note: To customize, use config file with provider: ${CFGMS_LOG_PROVIDER:-file} syntax
 func getLogProvider(cfg *config.Config) string {
-	// Check environment variable for provider
-	if provider := os.Getenv("CFGMS_LOG_PROVIDER"); provider != "" {
-		return provider
+	// Use config value if available, otherwise default to file
+	if cfg.Logging != nil && cfg.Logging.Provider != "" {
+		return cfg.Logging.Provider
 	}
-
-	// Default to file provider for controller (central hub)
 	return "file"
 }
 
 // getLogProviderConfig creates provider-specific configuration
+// Note: To customize, use config file with logging.config section and ${ENV_VAR:-default} syntax
 func getLogProviderConfig(cfg *config.Config) map[string]interface{} {
-	providerConfig := make(map[string]interface{})
+	// Use config values if available
+	if cfg.Logging != nil && cfg.Logging.Config != nil && len(cfg.Logging.Config) > 0 {
+		return cfg.Logging.Config
+	}
 
-	// Determine the provider type
+	// Return sensible defaults if no config provided
 	provider := getLogProvider(cfg)
 
 	switch provider {
 	case "timescale":
-		// TimescaleDB configuration
-		host := os.Getenv("CFGMS_TIMESCALE_HOST")
-		if host == "" {
-			host = "localhost"
+		// TimescaleDB defaults
+		return map[string]interface{}{
+			"host":     "localhost",
+			"port":     "5432",
+			"database": "cfgms",
+			"username": "cfgms",
+			"password": "cfgms",
+			"ssl_mode": "disable",
 		}
-
-		port := os.Getenv("CFGMS_TIMESCALE_PORT")
-		if port == "" {
-			port = "5432"
-		}
-
-		database := os.Getenv("CFGMS_TIMESCALE_DATABASE")
-		if database == "" {
-			database = "cfgms"
-		}
-
-		user := os.Getenv("CFGMS_TIMESCALE_USER")
-		if user == "" {
-			user = "cfgms"
-		}
-
-		password := os.Getenv("CFGMS_TIMESCALE_PASSWORD")
-		if password == "" {
-			password = "cfgms"
-		}
-
-		providerConfig["host"] = host
-		providerConfig["port"] = port
-		providerConfig["database"] = database
-		providerConfig["username"] = user
-		providerConfig["password"] = password
-		providerConfig["ssl_mode"] = "disable" // For Docker environments
 
 	default:
-		// File provider configuration (default)
-		logDir := os.Getenv("CFGMS_LOG_DIR")
-		if logDir == "" {
-			logDir = "/var/log/cfgms"
+		// File provider defaults
+		return map[string]interface{}{
+			"directory":        "/var/log/cfgms",
+			"max_file_size":    int64(100 * 1024 * 1024), // 100MB
+			"max_files":        10,
+			"compress_rotated": true,
 		}
-
-		maxFileSizeStr := os.Getenv("CFGMS_LOG_MAX_FILE_SIZE")
-		maxFileSize := int64(100 * 1024 * 1024) // 100MB default
-		if maxFileSizeStr != "" {
-			if parsed, err := strconv.ParseInt(maxFileSizeStr, 10, 64); err == nil {
-				maxFileSize = parsed
-			}
-		}
-
-		maxFilesStr := os.Getenv("CFGMS_LOG_MAX_FILES")
-		maxFiles := 10 // default
-		if maxFilesStr != "" {
-			if parsed, err := strconv.Atoi(maxFilesStr); err == nil {
-				maxFiles = parsed
-			}
-		}
-
-		providerConfig["directory"] = logDir
-		providerConfig["max_file_size"] = maxFileSize
-		providerConfig["max_files"] = maxFiles
-		providerConfig["compress_rotated"] = true
 	}
-
-	return providerConfig
 }
