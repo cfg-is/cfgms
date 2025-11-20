@@ -589,7 +589,7 @@ For complete version history and release notes, see [CHANGELOG.md](../../CHANGEL
 **Feature Boundaries**: [feature-boundaries.md](./feature-boundaries.md)
 **GitHub Issues**: #220-232 (13 tasks across 4 phases)
 
-**v0.7.1: Code Cleanup (Weeks 1-2)**
+#### v0.7.1: Code Cleanup (Weeks 1-2)
 - [x] **gRPC Removal** (Issue #220) - 2-3 days ✅ COMPLETED
   - [x] Document current gRPC usage and justification analysis (see `docs/architecture/grpc-usage-analysis.md`)
   - [x] Remove service definitions from .proto files (keep message definitions)
@@ -624,7 +624,7 @@ For complete version history and release notes, see [CHANGELOG.md](../../CHANGEL
   - [x] Remove any findings using git-filter-repo (NOT NEEDED - no secrets in history)
   - [x] Document scan results and remediation actions
 
-**v0.7.2: Security Review (Weeks 3-5)**
+#### v0.7.2: Security Review (Weeks 3-5)
 
 - [x] **Security Code Review (External Audit)** (Issue #225) - 2-3 weeks ✅ COMPLETED [CRITICAL]
   - [x] Static analysis with gosec, staticcheck
@@ -655,7 +655,7 @@ For complete version history and release notes, see [CHANGELOG.md](../../CHANGEL
   - **Known Issue**: golangci-lint config needs v2.x migration (separate story required)
   - **Story Points**: 13 points (actual - 3 complex migrations completed)
 
-**v0.7.3: Licensing & Documentation (Weeks 6-8)**
+#### v0.7.3: Licensing & Documentation (Weeks 6-8)
 
 - [x] **Licensing Implementation** (Issue #226) - 3-5 days ✅ COMPLETED
   - [x] Finalize licensing model (Apache 2.0 + Elastic License v2 open core)
@@ -690,7 +690,7 @@ For complete version history and release notes, see [CHANGELOG.md](../../CHANGEL
   - [x] Add mandatory documentation review gate to /story-complete
   - [x] Transform 2 internal summaries into contributor guides
 
-**v0.7.4: Community & Launch Prep (Weeks 9-10)**
+#### v0.7.4: Community & Launch Prep (Weeks 9-10)
 
 - [ ] **Community Infrastructure Setup** (Issue #229) - 3-5 days
   - [ ] Create issue/PR templates
