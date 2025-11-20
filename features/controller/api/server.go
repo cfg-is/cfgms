@@ -594,12 +594,20 @@ func initializeSecretStore(cfg *config.Config, logger logging.Logger) (secretsif
 	// M-AUTH-1: Use global storage provider for secrets (git or database)
 	secretsConfig := map[string]interface{}{
 		"storage_provider": cfg.Storage.Provider, // Use controller's global storage provider
-		"storage_config": map[string]interface{}{
+		"cache_enabled":    true,
+		"cache_ttl":        300,  // 5 minutes
+		"cache_max_size":   1000, // Cache up to 1000 secrets
+	}
+
+	// Pass storage config based on provider type
+	if cfg.Storage.Provider == "database" {
+		// For database provider, use the full database configuration
+		secretsConfig["storage_config"] = cfg.Storage.Config
+	} else {
+		// For git provider, set the repository path
+		secretsConfig["storage_config"] = map[string]interface{}{
 			"repository_path": repoPath,
-		},
-		"cache_enabled":  true,
-		"cache_ttl":      300,  // 5 minutes
-		"cache_max_size": 1000, // Cache up to 1000 secrets
+		}
 	}
 
 	// Optional: KMS key ID for SOPS encryption
