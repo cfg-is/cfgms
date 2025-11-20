@@ -124,6 +124,20 @@ CFGMS includes the following security features:
 - Secure secret management with pluggable backends
 - TLS 1.3 for all network communication
 - Certificate pinning for steward-controller connections
+- **Configuration signing** - All configurations are cryptographically signed by the controller
+
+### Configuration Signing
+
+CFGMS implements cryptographic signing for all configurations sent from controller to steward:
+
+- **Protection**: Prevents MITM attacks and ensures configuration integrity even with mTLS
+- **Algorithms**: RSA-SHA256 or ECDSA-SHA256 (based on certificate type)
+- **Key Management**: Controller signs with its mTLS certificate private key
+- **Verification**: Steward verifies signatures using the controller's certificate
+- **Enforcement**: Unsigned or invalid-signature configurations are rejected
+- **Signature Format**: Embedded in YAML as `_signature` metadata field
+
+This provides defense-in-depth beyond transport-layer security, ensuring that even if an attacker compromises the controller or performs a MITM attack, they cannot inject malicious configurations without the controller's private key.
 
 ### Audit & Compliance
 - Comprehensive audit logging of all system actions

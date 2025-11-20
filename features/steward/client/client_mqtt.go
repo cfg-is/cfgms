@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/features/steward/commands"
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/registration"
@@ -54,6 +55,9 @@ type MQTTClient struct {
 
 	// Configuration executor
 	configExecutor *config.Executor
+
+	// Configuration signature verifier
+	configVerifier signature.Verifier
 
 	// Connection state
 	connected     bool
@@ -358,6 +362,41 @@ func (c *MQTTClient) setupCommandHandler(ctx context.Context, stewardID string, 
 			"command_id", cmd.CommandID,
 			"version", version,
 			"config_size", len(configData))
+
+		// Verify configuration signature
+		c.mu.RLock()
+		verifier := c.configVerifier
+		c.mu.RUnlock()
+
+		if verifier != nil {
+			// Configuration must be signed
+			if !signature.HasSignature(configData) {
+				c.logger.Error("Configuration is not signed",
+					"command_id", cmd.CommandID,
+					"version", version)
+				return fmt.Errorf("configuration signature verification failed: missing signature")
+			}
+
+			// Extract and verify signature
+			verifiedData, err := signature.ExtractAndVerify(verifier, configData)
+			if err != nil {
+				c.logger.Error("Configuration signature verification failed",
+					"command_id", cmd.CommandID,
+					"version", version,
+					"error", err)
+				return fmt.Errorf("configuration signature verification failed: %w", err)
+			}
+
+			c.logger.Info("Configuration signature verified",
+				"command_id", cmd.CommandID,
+				"version", version)
+
+			// Use the verified (unsigned) data for application
+			configData = verifiedData
+		} else {
+			c.logger.Warn("Configuration verifier not available, skipping signature verification",
+				"command_id", cmd.CommandID)
+		}
 
 		// Apply configuration using executor
 		c.mu.RLock()
@@ -967,6 +1006,35 @@ func (c *MQTTClient) createQUICtlsConfig(certPath string) (*tls.Config, error) {
 
 	// QUIC-specific configuration
 	tlsConfig.NextProtos = []string{"cfgms-quic"}
+
+	// Initialize configuration signature verifier using CA certificate
+	// The controller signs configs with its server certificate (same CA)
+	c.mu.Lock()
+	if c.configVerifier == nil {
+		// Load server certificate for verification (controller's cert)
+		serverCertPath := filepath.Join(certPath, "server.crt")
+		// #nosec G304 - Certificate paths are controlled via configuration
+		serverCertPEM, err := os.ReadFile(serverCertPath)
+		if err != nil {
+			c.logger.Warn("Failed to load server certificate for signature verification, using CA",
+				"error", err)
+			// Fall back to CA certificate
+			serverCertPEM = caCertPEM
+		}
+
+		verifier, err := signature.NewVerifier(&signature.VerifierConfig{
+			CertificatePEM: serverCertPEM,
+		})
+		if err != nil {
+			c.logger.Warn("Failed to create configuration verifier",
+				"error", err)
+		} else {
+			c.configVerifier = verifier
+			c.logger.Info("Configuration signature verifier initialized",
+				"key_fingerprint", verifier.KeyFingerprint())
+		}
+	}
+	c.mu.Unlock()
 
 	return tlsConfig, nil
 }

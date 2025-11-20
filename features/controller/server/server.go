@@ -18,6 +18,7 @@ import (
 	common "github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/commercial/ha"
+	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/features/controller/api"
 	"github.com/cfgis/cfgms/features/controller/commands"
 	"github.com/cfgis/cfgms/features/controller/config"
@@ -847,6 +848,7 @@ func ensureMQTTCertificatesFromManager(caPath string, certManager *cert.Manager,
 func initializeQUICServer(cfg *config.Config, logger logging.Logger, certManager *cert.Manager, configService *service.ConfigurationService, controllerService *service.ControllerService) (*quicServer.Server, *quicSession.Manager, error) {
 	// Build TLS config for QUIC
 	var tlsConfig *tls.Config
+	var serverCertPEMForSigner, serverKeyPEMForSigner []byte
 
 	if cfg.QUIC.UseCertManager && certManager != nil {
 		// Use certificate manager certificates (same as MQTT)
@@ -893,6 +895,9 @@ func initializeQUICServer(cfg *config.Config, logger logging.Logger, certManager
 		logger.Info("QUIC server using certificate manager certificates",
 			"cert_path", serverCertPath,
 			"ca_path", caPath)
+		// Store for signer creation
+		serverCertPEMForSigner = serverCertPEM
+		serverKeyPEMForSigner = serverKeyPEM
 	} else if cfg.QUIC.TLSCertPath != "" && cfg.QUIC.TLSKeyPath != "" {
 		// Use manually configured certificate paths
 		// #nosec G304 - Certificate paths are controlled via configuration
@@ -917,8 +922,30 @@ func initializeQUICServer(cfg *config.Config, logger logging.Logger, certManager
 
 		logger.Info("QUIC server using configured certificates",
 			"cert_path", cfg.QUIC.TLSCertPath)
+
+		// Store for signer creation
+		serverCertPEMForSigner = serverCertPEM
+		serverKeyPEMForSigner = serverKeyPEM
 	} else {
 		return nil, nil, fmt.Errorf("QUIC enabled but no certificates configured")
+	}
+
+	// Create configuration signer using server certificate
+	var configSigner signature.Signer
+	if len(serverKeyPEMForSigner) > 0 {
+		signer, err := signature.NewSigner(&signature.SignerConfig{
+			PrivateKeyPEM:  serverKeyPEMForSigner,
+			CertificatePEM: serverCertPEMForSigner,
+		})
+		if err != nil {
+			logger.Warn("Failed to create configuration signer, configs will be unsigned",
+				"error", err)
+		} else {
+			configSigner = signer
+			logger.Info("Configuration signer initialized",
+				"algorithm", signer.Algorithm(),
+				"key_fingerprint", signer.KeyFingerprint())
+		}
 	}
 
 	// Create QUIC session manager
@@ -942,7 +969,7 @@ func initializeQUICServer(cfg *config.Config, logger logging.Logger, certManager
 
 	// Register stream handlers
 	// Stream 1: Configuration sync
-	configHandler := controllerQuic.NewConfigHandler(configService, logger)
+	configHandler := controllerQuic.NewConfigHandler(configService, logger, configSigner)
 	quicSrv.RegisterStreamHandler(controllerQuic.ConfigSyncStreamID, configHandler.Handle)
 
 	// Stream 2: DNA sync

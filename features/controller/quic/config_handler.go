@@ -12,6 +12,7 @@ import (
 	"github.com/quic-go/quic-go"
 
 	controller "github.com/cfgis/cfgms/api/proto/controller"
+	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/pkg/logging"
 	quicServer "github.com/cfgis/cfgms/pkg/quic/server"
@@ -24,13 +25,15 @@ const ConfigSyncStreamID = 1
 type ConfigHandler struct {
 	configService *service.ConfigurationService
 	logger        logging.Logger
+	signer        signature.Signer
 }
 
 // NewConfigHandler creates a new config sync handler.
-func NewConfigHandler(configService *service.ConfigurationService, logger logging.Logger) *ConfigHandler {
+func NewConfigHandler(configService *service.ConfigurationService, logger logging.Logger, signer signature.Signer) *ConfigHandler {
 	return &ConfigHandler{
 		configService: configService,
 		logger:        logger,
+		signer:        signer,
 	}
 }
 
@@ -116,17 +119,41 @@ func (h *ConfigHandler) Handle(ctx context.Context, session *quicServer.Session,
 		return h.sendResponse(stream, resp)
 	}
 
+	// Sign the configuration if signer is available
+	configData := grpcResp.Config
+	if h.signer != nil {
+		signedConfig, err := signature.SignAndEmbed(h.signer, configData)
+		if err != nil {
+			h.logger.Error("Failed to sign configuration",
+				"steward_id", req.StewardID,
+				"error", err)
+
+			resp := &ConfigSyncResponse{
+				Success:    false,
+				Error:      "failed to sign configuration",
+				StatusCode: "INTERNAL_ERROR",
+			}
+			return h.sendResponse(stream, resp)
+		}
+		configData = signedConfig
+		h.logger.Info("Configuration signed successfully",
+			"steward_id", req.StewardID,
+			"algorithm", h.signer.Algorithm(),
+			"key_fingerprint", h.signer.KeyFingerprint())
+	}
+
 	// Send successful response
 	resp := &ConfigSyncResponse{
 		Success:       true,
-		Configuration: string(grpcResp.Config), // Convert bytes to string
-		ConfigHash:    grpcResp.Version,        // Use version as config hash
+		Configuration: string(configData), // Convert bytes to string
+		ConfigHash:    grpcResp.Version,   // Use version as config hash
 		StatusCode:    "OK",
 	}
 
 	h.logger.Info("Configuration sync successful",
 		"steward_id", req.StewardID,
-		"version", grpcResp.Version)
+		"version", grpcResp.Version,
+		"signed", h.signer != nil)
 
 	return h.sendResponse(stream, resp)
 }
