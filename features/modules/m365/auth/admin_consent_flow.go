@@ -31,7 +31,7 @@ type MultiTenantConfig struct {
 	RequireAdminConsent   bool   `yaml:"require_admin_consent"`   // true for MSP
 
 	// Production URLs
-	AdminCallbackURI string `yaml:"admin_callback_uri"` // https://auth.cfgms.com/admin/callback
+	AdminCallbackURI string `yaml:"admin_callback_uri"` // https://portal.example.com/admin/callback
 
 	// Application permissions (no delegated permissions for MSP)
 	ApplicationPermissions []string `yaml:"application_permissions"`

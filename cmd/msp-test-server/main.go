@@ -104,7 +104,7 @@ func main() {
         </p>
         <p>
             <label>MSP Employee:</label><br>
-            <input type="text" name="msp_employee" value="admin@cfgms.com" style="width: 300px;">
+            <input type="text" name="msp_employee" value="admin@example.com" style="width: 300px;">
         </p>
         <p><button type="submit" class="btn">Generate Consent URL</button></p>
     </form>
@@ -138,7 +138,7 @@ func main() {
 
 		mspEmployee := r.URL.Query().Get("msp_employee")
 		if mspEmployee == "" {
-			mspEmployee = "admin@cfgms.com"
+			mspEmployee = "admin@example.com"
 		}
 
 		// Start consent flow

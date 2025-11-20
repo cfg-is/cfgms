@@ -1,5 +1,6 @@
 # Example geographic HA configuration for CFGMS
 # This shows how to configure a 4-node cluster across US regions
+# Replace 'example.com' with your actual domain
 
 # Node 1: US East (Primary)
 # Environment variables for first controller:
@@ -8,7 +9,7 @@
 # CFGMS_HA_NODE_NAME=cfgms-east-primary
 # CFGMS_HA_REGION=us-east
 # CFGMS_HA_AVAILABILITY_ZONE=us-east-1a
-# CFGMS_HA_EXTERNAL_ADDRESS=controller-east.cfgms.com:8080
+# CFGMS_HA_EXTERNAL_ADDRESS=controller-east.example.com:8080
 # CFGMS_HA_CLUSTER_SIZE=4
 # CFGMS_HA_MIN_QUORUM=3
 # CFGMS_HA_DISCOVERY_METHOD=geographic
@@ -22,7 +23,7 @@
 # CFGMS_HA_NODE_NAME=cfgms-central-primary
 # CFGMS_HA_REGION=us-central
 # CFGMS_HA_AVAILABILITY_ZONE=us-central-1a
-# CFGMS_HA_EXTERNAL_ADDRESS=controller-central.cfgms.com:8080
+# CFGMS_HA_EXTERNAL_ADDRESS=controller-central.example.com:8080
 # CFGMS_HA_CLUSTER_SIZE=4
 # CFGMS_HA_MIN_QUORUM=3
 # CFGMS_HA_DISCOVERY_METHOD=geographic
@@ -36,7 +37,7 @@
 # CFGMS_HA_NODE_NAME=cfgms-west-primary
 # CFGMS_HA_REGION=us-west
 # CFGMS_HA_AVAILABILITY_ZONE=us-west-1a
-# CFGMS_HA_EXTERNAL_ADDRESS=controller-west.cfgms.com:8080
+# CFGMS_HA_EXTERNAL_ADDRESS=controller-west.example.com:8080
 # CFGMS_HA_CLUSTER_SIZE=4
 # CFGMS_HA_MIN_QUORUM=3
 # CFGMS_HA_DISCOVERY_METHOD=geographic
@@ -50,7 +51,7 @@
 # CFGMS_HA_NODE_NAME=cfgms-east-secondary
 # CFGMS_HA_REGION=us-east
 # CFGMS_HA_AVAILABILITY_ZONE=us-east-1b
-# CFGMS_HA_EXTERNAL_ADDRESS=controller-east-2.cfgms.com:8080
+# CFGMS_HA_EXTERNAL_ADDRESS=controller-east-2.example.com:8080
 # CFGMS_HA_CLUSTER_SIZE=4
 # CFGMS_HA_MIN_QUORUM=3
 # CFGMS_HA_DISCOVERY_METHOD=geographic
@@ -129,21 +130,21 @@ steward_routing:
   regions:
     us-east:
       controllers:
-        - controller-east.cfgms.com:8080
-        - controller-east-2.cfgms.com:8080
+        - controller-east.example.com:8080
+        - controller-east-2.example.com:8080
       fallback:
-        - controller-central.cfgms.com:8080
+        - controller-central.example.com:8080
     us-central:
       controllers:
-        - controller-central.cfgms.com:8080
+        - controller-central.example.com:8080
       fallback:
-        - controller-east.cfgms.com:8080
-        - controller-west.cfgms.com:8080
+        - controller-east.example.com:8080
+        - controller-west.example.com:8080
     us-west:
       controllers:
-        - controller-west.cfgms.com:8080
+        - controller-west.example.com:8080
       fallback:
-        - controller-central.cfgms.com:8080
+        - controller-central.example.com:8080
 
 # Expected Behavior:
 # 1. Controllers prefer to communicate within their region
