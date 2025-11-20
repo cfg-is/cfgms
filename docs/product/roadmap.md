@@ -12,6 +12,10 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 - **Minor Version (0.X.0)**: New features with backward compatibility
 - **Patch Version (0.0.X)**: Bug fixes and minor improvements
 
+For detailed versioning policy, support timelines, and upgrade guidance, see [Versioning Policy](../development/versioning-policy.md).
+
+For complete version history and release notes, see [CHANGELOG.md](../../CHANGELOG.md).
+
 ## Current Status
 
 - **Current Version**: 0.6.0 (Alpha) - ✅ v0.6.0 COMPLETE (Finalizing Foundational Endpoint CMS)
@@ -585,8 +589,8 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 **Feature Boundaries**: [feature-boundaries.md](./feature-boundaries.md)
 **GitHub Issues**: #220-232 (13 tasks across 4 phases)
 
-**Phase 1: Code Cleanup (Weeks 1-2)**
-- [x] **Task 1: gRPC Removal** (Issue #220) - 2-3 days ✅ COMPLETED
+**v0.7.1: Code Cleanup (Weeks 1-2)**
+- [x] **gRPC Removal** (Issue #220) - 2-3 days ✅ COMPLETED
   - [x] Document current gRPC usage and justification analysis (see `docs/architecture/grpc-usage-analysis.md`)
   - [x] Remove service definitions from .proto files (keep message definitions)
   - [x] Delete auto-generated *_grpc.pb.go files
@@ -595,23 +599,23 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - [x] Remove google.golang.org/grpc from go.mod
   - [x] Update Makefile proto generation to skip gRPC
   - [x] Validate all tests pass after removal
-- [x] **Task 2: Rename cfgctl to cfgcli** (Issue #221) - 1 day ✅ COMPLETED
+- [x] **Rename cfgctl to cfgcli** (Issue #221) - 1 day ✅ COMPLETED
   - [x] Rename cmd/cfgctl directory to cmd/cfgcli
   - [x] Update all import paths referencing cfgctl
   - [x] Update documentation and examples
   - [x] Update build scripts and Makefile targets
-- [x] **Task 3: Move HA Code to Commercial Tier** (Issue #222) - 2 days ✅ COMPLETED
+- [x] **Move HA Code to Commercial Tier** (Issue #222) - 2 days ✅ COMPLETED
   - [x] Separate HA code using Go build tags (commercial vs OSS)
   - [x] Create OSS stub implementation for SingleServerMode
   - [x] Update documentation about HA build tags and availability
   - [x] Ensure graceful degradation in OSS version
-- [x] **Task 4: Repository Cleanup** (Issue #223) - 1-2 days ✅ COMPLETED
+- [x] **Repository Cleanup** (Issue #223) - 1-2 days ✅ COMPLETED
   - [x] Perform branch cleanup (verified clean - all stale branches removed)
   - [x] Review repository for sensitive data or internal artifacts (18 files removed)
   - [x] Remove any internal documentation or notes (6 internal docs cleaned)
   - [x] Clean up test fixtures and example data (9 test binaries removed)
   - [x] Review code for unfinished features (24 TODOs addressed: 6 fixed, 18 removed)
-- [x] **Task 5: Sensitive Data Scan** (Issue #224) - 3-5 days ✅ COMPLETED
+- [x] **Sensitive Data Scan** (Issue #224) - 3-5 days ✅ COMPLETED
   - [x] Run gitleaks against entire repository history
   - [x] Run truffleHog against entire repository history
   - [x] Manually review configuration files for API keys, tokens
@@ -620,15 +624,16 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - [x] Remove any findings using git-filter-repo (NOT NEEDED - no secrets in history)
   - [x] Document scan results and remediation actions
 
-**Phase 2: Security Review (Weeks 3-5)**
-- [x] **Task 6: Security Code Review (External Audit)** (Issue #225) - 2-3 weeks ✅ COMPLETED [CRITICAL]
+**v0.7.2: Security Review (Weeks 3-5)**
+
+- [x] **Security Code Review (External Audit)** (Issue #225) - 2-3 weeks ✅ COMPLETED [CRITICAL]
   - [x] Static analysis with gosec, staticcheck
   - [x] Dependency vulnerability scan with govulncheck
   - [x] Manual code review focusing on auth/authz, input validation, SQL/command injection
   - [x] **Internal Review Complete**: 9/9 findings remediated (100%)
   - [x] Document security posture for users
   - [ ] **Next**: Engage external security firm for independent audit (ready for external review)
-- [x] **Task 7: Security Hardening - Infrastructure Changes** (Issue #239 / PR #241) - 2-3 days ✅ COMPLETED [MEDIUM]
+- [x] **Security Hardening - Infrastructure Changes** (Issue #239 / PR #241) - 2-3 days ✅ COMPLETED [MEDIUM]
   - [x] M-INPUT-3: SQL identifier whitelist validation (1 hour)
   - [x] M-INPUT-2: Regex timeout mechanism (2 hours)
   - [x] M-AUTH-2: Admin operation audit controls (3 hours)
@@ -638,7 +643,7 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - [x] **BONUS**: SOPS storage provider configuration fix
   - [x] **BONUS**: Central Provider Compliance Enforcement System (6-layer defense)
   - [x] **Security Rating**: A- → A (0 High/Medium vulnerabilities remaining)
-- [x] **Task 7A: Eliminate Duplicate Caching Implementations** - 2-3 days [MEDIUM] - ✅ COMPLETED
+- [x] **Eliminate Duplicate Caching Implementations** - 2-3 days [MEDIUM] - ✅ COMPLETED
   - [x] Migrate `features/rbac/zerotrust/cache.go` (363→130 lines, -64%) to use `pkg/cache.Cache`
   - [x] Migrate `features/rbac/continuous/cache_manager.go` (970→574 lines, -41%) to use `pkg/cache.Cache`
   - [x] Migrate `features/reports/cache/memory.go` (136→84 lines, -38%) to use `pkg/cache.Cache`
@@ -650,8 +655,9 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - **Known Issue**: golangci-lint config needs v2.x migration (separate story required)
   - **Story Points**: 13 points (actual - 3 complex migrations completed)
 
-**Phase 3: Licensing & Documentation (Weeks 6-8)**
-- [x] **Task 8: Licensing Implementation** (Issue #226) - 3-5 days ✅ COMPLETED
+**v0.7.3: Licensing & Documentation (Weeks 6-8)**
+
+- [x] **Licensing Implementation** (Issue #226) - 3-5 days ✅ COMPLETED
   - [x] Finalize licensing model (Apache 2.0 + Elastic License v2 open core)
   - [x] Define open-core vs commercial feature boundaries (see `docs/product/feature-boundaries.md`)
   - [x] Create LICENSE-APACHE-2.0 file in repository root
@@ -661,14 +667,14 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - [x] Create comprehensive LICENSING.md documentation (210 lines)
   - [x] Reorganize commercial code to `commercial/ha/` directory
   - [x] Update README.md with licensing section
-- [x] **Task 9: Feature Boundary Documentation** (Issue #227) - 2-3 days ✅ COMPLETED
+- [x] **Feature Boundary Documentation** (Issue #227) - 2-3 days ✅ COMPLETED
   - [x] Create user-friendly version of feature-boundaries.md
   - [x] Add feature comparison table to README (10 categories, 30+ comparisons)
   - [x] Document upgrade path from OSS to Commercial
   - [x] Create FAQ about licensing and features (8 new entries)
   - [x] Add "Why Open Source?" philosophy section
   - [x] 228 lines of user-friendly documentation (135 README, 93 LICENSING)
-- [x] **Task 10: Documentation Cleanup & Creation** (Issue #228) - 1-2 weeks ✅ COMPLETED
+- [x] **Documentation Cleanup & Creation** (Issue #228) - 1-2 weeks ✅ COMPLETED
   - [x] Finalize GTM strategy (see `docs/product/v0.7.0-epic.md`)
   - [x] Create CONTRIBUTING.md for open source contributors
   - [x] Create CODE_OF_CONDUCT.md (use Contributor Covenant)
@@ -684,17 +690,18 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
   - [x] Add mandatory documentation review gate to /story-complete
   - [x] Transform 2 internal summaries into contributor guides
 
-**Phase 4: Community & Launch Prep (Weeks 9-10)**
-- [ ] **Task 11: Community Infrastructure Setup** (Issue #229) - 3-5 days
+**v0.7.4: Community & Launch Prep (Weeks 9-10)**
+
+- [ ] **Community Infrastructure Setup** (Issue #229) - 3-5 days
   - [ ] Create issue/PR templates
   - [ ] Set up GitHub Discussions
   - [ ] Configure branch protection rules
-- [ ] **Task 12: Versioning & Roadmap Update** (Issue #230) - 2-3 days
-  - [ ] Document semantic versioning policy
-  - [ ] Update roadmap versions v1.0 -> v0.10, re-evaluate whe v1 should be (or if it should even be listed on the roadmap now).
-  - [ ] Create CHANGELOG.md
-  - [ ] Create public-facing roadmap
-- [ ] **Task 13: Review and Create All Referenced Email Addresses & Web Pages** (Issue #248) - 2-3 days
+- [x] **Versioning & Roadmap Update** (Issue #230) - 2-3 days ✅ COMPLETED
+  - [x] Document semantic versioning policy (see `docs/development/versioning-policy.md`)
+  - [x] Update roadmap versions v1.0 -> v0.10, with clear path to v1.0
+  - [x] Create CHANGELOG.md (see `CHANGELOG.md`)
+  - [x] Create public-facing roadmap (see `docs/product/public-roadmap.md`)
+- [ ] **Review and Create All Referenced Email Addresses & Web Pages** (Issue #248) - 2-3 days
   - [ ] Audit all documentation for email addresses and web URLs
   - [ ] Create comprehensive inventory of referenced resources
   - [ ] Set up all email addresses (security@cfg.is, licensing@cfg.is, etc.)
@@ -863,59 +870,37 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 - [ ] Review Automated secure code scanning tooling implementation
 - [ ] Validate all workflows function properly on public repository
 
-### Phase 2: Enhancement (v1.0.0 - v1.5.0)
+### Phase 2: Production Stability & Feature Completion (v0.9.0 - v1.0.0)
 
-**Goal**: Introduce comprehensive SaaS management capabilities and further enhance core functionalities.
+**Goal**: Achieve production stability, complete core platform features, and prepare for stable release with LTS guarantees.
 
-#### v1.0.0 (Stable)
+#### v0.9.0 (Beta) - Production Stability
 
-- [ ] Release stable core functionality
-- [ ] Finalize production-ready security
-- [ ] Finalize high availability
+- [ ] Complete production validation with real MSP deployments
+- [ ] Finalize production-ready security hardening
+- [ ] Complete high availability validation
 - [ ] Finalize advanced configuration management
 - [ ] Finalize advanced workflow engine and templates
 - [ ] Finalize advanced reporting
 
-#### v1.0.1: Launch Preparation & Business Setup
+#### v0.10.0 - Web Interface Foundation
 
-**Goal**: Complete final business, legal, and marketing preparation for public launch.
+- [ ] Web UI framework and authentication
+- [ ] Dashboard with fleet overview
+- [ ] Configuration management interface
+- [ ] User and role management
+- [ ] Workflow Management
+- [ ] Basic reporting and visualization
 
-**Tasks Moved from v0.7.0:**
+#### v0.11.0 - Outpost Foundation
 
-1. **Marketing & Positioning Materials** (Issue #231) - 1 week
-   - [ ] Craft positioning statement (vs. RMMs, workflow platforms)
-   - [ ] Define key differentiators (OSS modules, MQTT+QUIC, MSP-focused)
-   - [ ] Write elevator pitch (30 sec, 2 min versions)
-   - [ ] Document target audience personas
-   - [ ] Launch blog post announcement
-   - [ ] README hero section with compelling pitch
-   - [ ] Feature highlights with screenshots/demos
-   - [ ] Comparison tables (vs. traditional config management, vs. workflow platforms)
-   - [ ] Use case examples and success stories
-   - [ ] Visual assets (architecture diagrams, feature screenshots, demo videos)
-   - [ ] Identify OSS communities to announce in (Reddit, HN, etc.)
-   - [ ] Draft social media posts (Twitter/X, LinkedIn)
+- [ ] Basic Outpost component implementation
+- [ ] Proxy cache for configuration distribution
+- [ ] Network device monitoring foundation
+- [ ] Outpost-Controller communication
 
-2. **Legal & Business Setup** (Issue #232) - 1-2 weeks
-   - [ ] Review dual licensing with legal counsel
-   - [ ] Establish Contributor License Agreement (CLA) if needed
-   - [ ] Review trademark considerations for "CFGMS" name
-   - [ ] Ensure compliance with open source license obligations
-   - [ ] Review any third-party license dependencies
-   - [ ] Register business entity if not already done
-   - [ ] Set up business bank account
-   - [ ] Establish payment processing for commercial tier
-   - [ ] Set up invoicing/billing system for SaaS
-   - [ ] Define project governance model
-   - [ ] Identify initial core maintainers
-   - [ ] Document decision-making process
-   - [ ] Consider open source project insurance
+#### v0.12.0 - M365 Foundation
 
-**Rationale**: These tasks are post-v1.0.0 activities that prepare for public launch. They don't block technical stability but are essential for successful market entry.
-
-#### v1.1.0 - v1.3.0: SaaS Steward Implementation & MSP Integrations
-
-**Phase 1: M365 Foundation (v1.1.0)**
 - [ ] **M365 CSP Infrastructure Setup** (5 story points):
   - [ ] Microsoft CSP Partner Center sandbox environment configuration - 2 points
   - [ ] GDAP relationship setup for test customer tenants - 1 point
@@ -942,7 +927,8 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 - [ ] M365 security baseline workflows
 - [ ] M365 user lifecycle automation workflows
 
-**Phase 2: MSP PSA Integration (v1.2.0)**
+#### v0.13.0 - MSP PSA Integration
+
 - [ ] ConnectWise Manage integration modules
   - [ ] Company/customer management
   - [ ] Contact synchronization
@@ -961,7 +947,8 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 - [ ] Customer onboarding automation workflows
 - [ ] User lifecycle management workflows
 
-**Phase 3: MSP RMM & Documentation (v1.3.0)**
+#### v0.14.0 - MSP RMM & Documentation
+
 - [ ] SyncroMSP integration module
 - [ ] Connectwise Screenconnect integration modules
 - [ ] ConnectWise Azio/RMM integration modules
@@ -973,16 +960,37 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 - [ ] Security monitoring and compliance workflows
 - [ ] Multi-tenant management workflows
 
-#### v1.4.0 - v1.5.0: Advanced SaaS Management & Ecosystem Expansion
+#### v1.0.0-rc.1 - Pre-1.0 Validation
 
-**v1.4.0: Advanced SaaS Capabilities**
+- [ ] Extended production testing period
+- [ ] Performance optimization and benchmarking
+- [ ] Complete documentation review
+- [ ] Security audit completion
+- [ ] Migration guide for v1.0.0
+- [ ] API stability freeze (no breaking changes after this point)
+
+#### v1.0.0 (Stable) - General Availability
+
+- [ ] Feature-complete core platform
+- [ ] Fully functional web interface
+- [ ] Basic outpost functionality
+- [ ] LTS (Long-Term Support) designation
+- [ ] Backward compatibility guarantees
+- [ ] Complete API documentation
+- [ ] Production deployment guides
+
+### v1.1.0 - v1.2.0: Advanced SaaS Management & Ecosystem Expansion (Consider moving to Beta pre v1.0)
+
+#### v1.1.0: Advanced SaaS Capabilities
+
 - [ ] Advanced M365 management modules (Power Platform, Purview, etc.)
 - [ ] Multi-SaaS platform support (Google Workspace, Salesforce)
 - [ ] SaaS configuration templates and best practices library
 - [ ] Advanced security policy automation
 - [ ] Cross-platform SaaS identity management
 
-**v1.5.0: MSP Ecosystem & Controller Enhancement**
+#### v1.2.0: MSP Ecosystem & Controller Enhancement
+
 - [ ] Additional MSP tool integrations (N-able, SolarWinds, etc.)
 - [ ] Workflow template marketplace for MSPs
 - [ ] Advanced multi-tenant SaaS management
@@ -990,24 +998,24 @@ CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
 - [ ] Advanced Outpost functionality for SaaS traffic optimization
 - [ ] Advanced Steward functionality
 
-### Phase 3: Digital Twin & Expansion (v1.6.0 - v3.5.0+)
+### Future Features
 
 **Goal**: Realize the full potential of DNA-based system identification and expand into advanced resource management and specialized capabilities.
 
-#### v1.6.0 - v2.0.0: Digital Twin Implementation
+#### Digital Twin Implementation
 
 - [ ] Implement comprehensive Digital Twin model
 - [ ] Add support for real-time asset inventory
 - [ ] Develop predictive analytics capabilities
 - [ ] Implement root cause analysis based on Digital Twin
 
-#### v2.1.0 - v2.5.0: LLM Integration Evaluation
+#### LLM Integration Evaluation
 
 - [ ] Research and evaluate LLM integration for natural language queries
 - [ ] Implement AI-assisted script generation
 - [ ] Develop AI-driven anomaly detection
 
-#### v3.0.0 - v3.5.0: Further Expansion & Specialization
+#### Further Expansion & Specialization
 
 - [ ] Implement advanced resource management capabilities
 - [ ] Develop Digital Employee Experience (DEX) monitoring
@@ -1021,6 +1029,7 @@ The following concepts represent the foundation for future architectural decisio
 ### Scalability and Performance
 
 #### Distributed Architecture
+
 - Modular, distributed components for high availability
 - Event-driven communication for responsiveness
 - Horizontal scaling for increased capacity
@@ -1028,13 +1037,16 @@ The following concepts represent the foundation for future architectural decisio
 - Comprehensive resource monitoring and alerting
 
 #### Hierarchical Scaling Architecture
+
 - Controller clustering with intelligent load balancing
 - Hierarchical controller management with parent-child relationships
 - Efficient task delegation and distributed processing
 - Database sharding strategies for massive scale
 
 #### Comprehensive Validation Framework
+
 Multi-layered validation approach:
+
 - Schema validation for structural correctness
 - Constraint checking for business rules
 - Dependency validation for complex relationships
@@ -1043,12 +1055,14 @@ Multi-layered validation approach:
 ### Configuration Management Insights
 
 #### Steward Connection Architecture
+
 - Stewards initiate all connections (no open ports on endpoints)
 - Persistent connections for instant command processing
 - Connection resilience with retry backoff and circuit breakers
 - Heartbeat-based connection management and health monitoring
 
 #### Advanced Configuration Storage
+
 - Git-based configuration storage with atomic operations
 - Automatic state validation and reconciliation
 - Comprehensive version history and rollback capabilities
@@ -1056,6 +1070,11 @@ Multi-layered validation approach:
 
 ## Version Information
 
-- **Version**: 2.7 (v0.6.0 Complete + v1.1.0 M365 Foundation Progress)
-- **Last Updated**: 2025-10-21
-- **Status**: v0.2.0 COMPLETE ✅ - v0.2.1 COMPLETE ✅ - Epic #65 COMPLETE ✅ - Epic #66 COMPLETE ✅ - Epic #67 COMPLETE ✅ - Epic #68 COMPLETE ✅ - **v0.3.0 PRODUCTION READY** ✅ - **v0.3.1 COMPLETE** ✅ - **v0.3.2 COMPLETE** ✅ - **EPIC 6 COMPLETE** ✅ - **v0.4.6.0 STORAGE MIGRATION COMPLETE** ✅ - **v0.5.0 COMPLETE** ✅ - **v0.6.0 COMPLETE** ✅ - **v1.1.0 Enhanced Tenant Management (Story #118)** ✅
+- **Document Version**: 2.8
+- **Last Updated**: 2025-11-19
+
+### Related Documentation
+
+- [Versioning Policy](../development/versioning-policy.md) - Semantic versioning details
+- [CHANGELOG.md](../../CHANGELOG.md) - Complete version history
+- [Feature Boundaries](./feature-boundaries.md) - OSS vs Commercial features
