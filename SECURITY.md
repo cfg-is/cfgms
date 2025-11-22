@@ -25,8 +25,8 @@ Instead, please report security issues to:
 
 **PGP Encrypted Email** (recommended for sensitive reports):
 - **Public Key**: [https://cfg.is/security/pgp-key.asc](https://cfg.is/security/pgp-key.asc)
-- **Fingerprint**: `F792 D2A4 53EF 48AF 3A5C  8B4F 1EC3 49C0 74D6 A500`
-- **Key ID**: `1EC349C074D6A500`
+- **Fingerprint**: `B489 6960 2965 C241 E851  71F9 258D 1EDC F411 6969`
+- **Key ID**: `258D1EDCF4116969`
 - **Guide**: See [PGP Email Guide](docs/security/pgp-email-guide.md) for instructions on sending encrypted email
 
 ### What to Include
