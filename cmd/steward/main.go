@@ -55,13 +55,10 @@ func main() {
 		Config:            make(map[string]interface{}),
 	}
 
-	// Configure file provider if selected (read from environment)
+	// Configure file provider if selected
+	// Note: To customize log directory, use config file with ${CFGMS_LOG_DIR:-/var/log/cfgms} syntax
 	if *provider == "file" {
-		logDir := os.Getenv("CFGMS_LOG_DIR")
-		if logDir == "" {
-			logDir = "/var/log/cfgms"
-		}
-		loggingConfig.Config["directory"] = logDir
+		loggingConfig.Config["directory"] = "/var/log/cfgms"
 	}
 
 	if err := logging.InitializeGlobalLogging(loggingConfig); err != nil {
@@ -242,11 +239,9 @@ func main() {
 func registerAndConnectMQTT(ctx context.Context, token string, logger logging.Logger) (*client.MQTTClient, error) {
 	logger.Info("Registering steward via HTTP API")
 
-	// Read controller HTTP URL from environment
-	controllerURL := os.Getenv("CFGMS_CONTROLLER_URL")
-	if controllerURL == "" {
-		controllerURL = "http://controller-standalone:9080"
-	}
+	// Use default controller URL
+	// Note: To customize, use config file with controller_url: ${CFGMS_CONTROLLER_URL:-http://controller-standalone:9080} syntax
+	controllerURL := "http://controller-standalone:9080"
 
 	// Create HTTP registration client
 	httpClient, err := registration.NewHTTPClient(&registration.HTTPConfig{

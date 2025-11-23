@@ -450,6 +450,83 @@ EOF
 - **Like Salt**: Auto-certificate management, master-minion architecture
 - **Unique**: Workflow engine for cloud APIs, DNA/drift detection, MSP multi-tenancy
 
+## Environment Variables in Configuration
+
+CFGMS supports explicit environment variable references in configuration files using shell-style syntax. This provides better security than implicit environment variable usage.
+
+### Basic Syntax
+
+```yaml
+steward:
+  id: ${HOSTNAME}                           # Expands to hostname env var
+  log_dir: ${CFGMS_LOG_DIR:-/var/log/cfgms} # Default if unset
+  controller_url: https://fixed.example.com # Literal value (no env var)
+
+resources:
+  - name: app-config
+    module: file
+    config:
+      path: /etc/myapp/config.json
+      content: |
+        {
+          "api_key": "${API_KEY}",
+          "environment": "${ENVIRONMENT:-production}"
+        }
+```
+
+### Syntax Options
+
+| Pattern | Behavior |
+|---------|----------|
+| `${VAR}` | Expands to VAR value. **Fails at startup if VAR is unset** |
+| `${VAR:-default}` | Uses default if VAR is unset. Safe for optional values |
+| `${VAR:=default}` | Sets VAR to default if unset, then expands |
+
+### Security Benefits
+
+1. **Audit Trail**: `cat config.yaml` shows exactly which values come from env vars
+2. **Attack Surface**: Attacker must modify both config file AND env var to hijack settings
+3. **Fail-Safe**: Missing required env vars cause immediate startup failure (no silent hijacking)
+
+### Example: Database Configuration
+
+```yaml
+logging:
+  provider: timescale
+  config:
+    host: ${CFGMS_TIMESCALE_HOST:-localhost}
+    port: ${CFGMS_TIMESCALE_PORT:-5432}
+    database: ${CFGMS_TIMESCALE_DATABASE:-cfgms}
+    username: ${CFGMS_DB_USER}              # Required - must be set
+    password: ${CFGMS_DB_PASSWORD}          # Required - must be set
+```
+
+With this configuration:
+- `host`, `port`, `database` use sensible defaults if not set
+- `username` and `password` are required and will fail startup if missing
+
+### Migration from Implicit Env Vars
+
+If you were previously relying on implicit environment variables like `CFGMS_LOG_DIR`:
+
+**Before** (implicit, no longer supported):
+```bash
+export CFGMS_LOG_DIR=/custom/log/path
+./bin/cfgms-steward  # Would pick up env var implicitly
+```
+
+**After** (explicit, recommended):
+```yaml
+# In your config.yaml or hostname.cfg:
+logging:
+  config:
+    directory: ${CFGMS_LOG_DIR:-/var/log/cfgms}
+```
+
+This makes your configuration self-documenting and more secure.
+
+---
+
 ## Troubleshooting
 
 ### "Permission denied" when writing to /etc/cfgms

@@ -303,3 +303,185 @@ func TestGetConfigSearchPaths(t *testing.T) {
 	expectedFirst := filepath.Join(cwd, hostname+".cfg")
 	assert.Equal(t, expectedFirst, paths[0])
 }
+
+func TestEnvironmentVariableExpansion(t *testing.T) {
+	tests := []struct {
+		name           string
+		configContent  string
+		envVars        map[string]string
+		expectedID     string
+		expectedLogDir string
+		wantErr        bool
+	}{
+		{
+			name: "expand env var with default",
+			configContent: `steward:
+  id: ${TEST_STEWARD_ID:-default-steward}
+  mode: standalone
+  logging:
+    level: info
+    format: text
+
+resources:
+  - name: test-resource
+    module: test-module
+    config:
+      path: ${TEST_PATH:-/tmp/default}
+`,
+			envVars:    map[string]string{}, // no env vars set
+			expectedID: "default-steward",
+			wantErr:    false,
+		},
+		{
+			name: "expand env var when set",
+			configContent: `steward:
+  id: ${TEST_STEWARD_ID:-default-steward}
+  mode: standalone
+  logging:
+    level: info
+    format: text
+
+resources:
+  - name: test-resource
+    module: test-module
+    config:
+      path: /tmp/test
+`,
+			envVars:    map[string]string{"TEST_STEWARD_ID": "custom-steward"},
+			expectedID: "custom-steward",
+			wantErr:    false,
+		},
+		{
+			name: "fail on missing env var without default",
+			configContent: `steward:
+  id: ${MISSING_VAR}
+  mode: standalone
+  logging:
+    level: info
+    format: text
+
+resources:
+  - name: test-resource
+    module: test-module
+    config:
+      path: /tmp/test
+`,
+			envVars: map[string]string{},
+			wantErr: true, // Should fail because MISSING_VAR is not set and has no default
+		},
+		{
+			name: "pass when env var without default is set",
+			configContent: `steward:
+  id: ${REQUIRED_VAR}
+  mode: standalone
+  logging:
+    level: info
+    format: text
+
+resources:
+  - name: test-resource
+    module: test-module
+    config:
+      path: /tmp/test
+`,
+			envVars:    map[string]string{"REQUIRED_VAR": "required-steward"},
+			expectedID: "required-steward",
+			wantErr:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Set up environment variables
+			for k, v := range tt.envVars {
+				t.Setenv(k, v)
+			}
+
+			// Create temporary config file
+			tempDir := t.TempDir()
+			configFile := filepath.Join(tempDir, "test.cfg")
+			require.NoError(t, os.WriteFile(configFile, []byte(tt.configContent), 0644))
+
+			// Load configuration
+			config, err := LoadConfiguration(configFile)
+
+			if tt.wantErr {
+				assert.Error(t, err)
+				return
+			}
+
+			assert.NoError(t, err)
+			assert.Equal(t, tt.expectedID, config.Steward.ID)
+		})
+	}
+}
+
+func TestValidateEnvVars(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		envVars map[string]string
+		wantErr bool
+	}{
+		{
+			name:    "no env vars",
+			content: "key: value",
+			envVars: map[string]string{},
+			wantErr: false,
+		},
+		{
+			name:    "env var with default - no validation needed",
+			content: "key: ${VAR:-default}",
+			envVars: map[string]string{},
+			wantErr: false, // ${VAR:-default} pattern doesn't trigger validation
+		},
+		{
+			name:    "env var without default - not set",
+			content: "key: ${MISSING_VAR}",
+			envVars: map[string]string{},
+			wantErr: true,
+		},
+		{
+			name:    "env var without default - is set",
+			content: "key: ${SET_VAR}",
+			envVars: map[string]string{"SET_VAR": "value"},
+			wantErr: false,
+		},
+		{
+			name:    "multiple env vars - all set",
+			content: "key1: ${VAR1}\nkey2: ${VAR2}",
+			envVars: map[string]string{"VAR1": "val1", "VAR2": "val2"},
+			wantErr: false,
+		},
+		{
+			name:    "multiple env vars - one missing",
+			content: "key1: ${VAR1}\nkey2: ${VAR2}",
+			envVars: map[string]string{"VAR1": "val1"},
+			wantErr: true,
+		},
+		{
+			name:    "mixed env vars with and without defaults",
+			content: "key1: ${VAR1:-default}\nkey2: ${VAR2}",
+			envVars: map[string]string{"VAR2": "val2"},
+			wantErr: false, // VAR1 has default, VAR2 is set
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Set up environment variables
+			for k, v := range tt.envVars {
+				t.Setenv(k, v)
+			}
+
+			err := validateEnvVars(tt.content)
+
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), "missing required environment variables")
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}

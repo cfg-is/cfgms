@@ -139,6 +139,40 @@ CFGMS implements cryptographic signing for all configurations sent from controll
 
 This provides defense-in-depth beyond transport-layer security, ensuring that even if an attacker compromises the controller or performs a MITM attack, they cannot inject malicious configurations without the controller's private key.
 
+### Explicit Environment Variable Policy
+
+CFGMS enforces an explicit environment variable policy to prevent environment variable hijacking attacks:
+
+**Policy**: Environment variables are only used when explicitly declared in configuration files using `${VAR}` or `${VAR:-default}` syntax.
+
+**Why This Matters**:
+- **Prevents Silent Hijacking**: An attacker with env var control cannot redirect the steward to a malicious controller without also modifying the configuration file
+- **Defense in Depth**: Configuration files are protected by ACLs and cryptographic signatures (Story #250), so modifying config requires additional privileges
+- **Audit Trail**: `cat config.yaml` shows exactly which values come from env vars
+- **Fail-Safe**: Missing required env vars (without defaults) cause immediate startup failure
+
+**How It Works**:
+```yaml
+# In config.yaml:
+controller_url: ${CFGMS_CONTROLLER_URL:-https://controller.example.com:9080}
+log_dir: ${CFGMS_LOG_DIR:-/var/log/cfgms}
+db_password: ${CFGMS_DB_PASSWORD}  # Required - fails if not set
+```
+
+**Validation Behavior**:
+- `${VAR:-default}` - Uses default if VAR is unset (safe for optional values)
+- `${VAR}` without default - **Fails at startup** if VAR is not set (fail-safe for required values)
+
+This approach ensures that environment variable usage is intentional, documented, and auditable.
+
+### Configuration Signing
+
+- All configurations are cryptographically signed by the controller
+- Stewards verify signatures before applying ANY configuration changes
+- Prevents MITM attacks and malicious configuration injection
+- Uses RSA-SHA256 and ECDSA-SHA256 algorithms
+- Signatures embedded in configuration YAML as `_signature` metadata
+
 ### Audit & Compliance
 - Comprehensive audit logging of all system actions
 - Tamper-evident audit trails

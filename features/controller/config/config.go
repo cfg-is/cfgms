@@ -3,7 +3,9 @@
 package config
 
 import (
+	"fmt"
 	"os"
+	"regexp"
 	"strconv"
 	"time"
 
@@ -11,6 +13,58 @@ import (
 
 	loggingPkg "github.com/cfgis/cfgms/pkg/logging"
 )
+
+// envVarPattern matches ${VAR} patterns without defaults
+// It excludes ${VAR:-default} and ${VAR:=default} patterns
+var envVarPattern = regexp.MustCompile(`\$\{([^}:]+)\}`)
+
+// envVarWithDefaultPattern matches ${VAR:-default} and ${VAR:=default} patterns
+var envVarWithDefaultPattern = regexp.MustCompile(`\$\{([^}:]+):-([^}]*)\}`)
+
+// validateEnvVars checks that all referenced environment variables (without defaults) are set.
+// This provides fail-safe behavior: if a config references ${VAR} and VAR is not set,
+// the application fails fast instead of silently using an empty value.
+func validateEnvVars(content string) error {
+	matches := envVarPattern.FindAllStringSubmatch(content, -1)
+	var missing []string
+
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+		varName := match[1]
+		if _, exists := os.LookupEnv(varName); !exists {
+			missing = append(missing, varName)
+		}
+	}
+
+	if len(missing) > 0 {
+		return fmt.Errorf("missing required environment variables: %v (use ${VAR:-default} syntax to provide defaults)", missing)
+	}
+
+	return nil
+}
+
+// expandEnvWithDefaults expands environment variables with support for ${VAR:-default} syntax.
+// This extends Go's os.ExpandEnv to support shell-style defaults.
+func expandEnvWithDefaults(content string) string {
+	// First, expand ${VAR:-default} patterns
+	result := envVarWithDefaultPattern.ReplaceAllStringFunc(content, func(match string) string {
+		parts := envVarWithDefaultPattern.FindStringSubmatch(match)
+		if len(parts) < 3 {
+			return match
+		}
+		varName := parts[1]
+		defaultValue := parts[2]
+		if value, exists := os.LookupEnv(varName); exists {
+			return value
+		}
+		return defaultValue
+	})
+
+	// Then expand remaining ${VAR} patterns using os.ExpandEnv
+	return os.ExpandEnv(result)
+}
 
 // Config holds the controller configuration
 type Config struct {
@@ -453,7 +507,19 @@ func Load() (*Config, error) {
 			return nil, err
 		}
 
-		if err := yaml.Unmarshal(data, cfg); err != nil {
+		content := string(data)
+
+		// Validate that all referenced env vars (without defaults) are set
+		// This provides fail-safe behavior for missing env vars
+		if err := validateEnvVars(content); err != nil {
+			return nil, fmt.Errorf("configuration validation failed: %w", err)
+		}
+
+		// Expand environment variables in the configuration content
+		// This supports ${VAR} and ${VAR:-default} syntax for explicit env var references
+		expandedData := expandEnvWithDefaults(content)
+
+		if err := yaml.Unmarshal([]byte(expandedData), cfg); err != nil {
 			return nil, err
 		}
 	}

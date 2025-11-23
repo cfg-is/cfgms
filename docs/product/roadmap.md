@@ -784,7 +784,7 @@ For complete version history and release notes, see [CHANGELOG.md](../../CHANGEL
    - **Backward Compatibility**: Signature validation optional in v0.7.5, required in v0.8.0+
    - **Files**: `features/config/signature/`, `features/steward/config_receiver.go`, `pkg/config/loader.go`
 
-2. **Explicit Environment Variable References (HIGH)** (Issue #251) - 3 story points
+2. **Explicit Environment Variable References (HIGH)** (Issue #251) - 3 story points ✅ COMPLETED
 
    - **Current Gap**: Code uses `os.Getenv()` to read `CFGMS_LOG_DIR`, `CFGMS_CONTROLLER_URL` allowing silent env var hijacking
    - **Security Risk**: Attacker with env var control can redirect steward to malicious controller or manipulate operational settings
