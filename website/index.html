@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="CFGMS - Modern, secure configuration management system for enterprise IT infrastructure">
+    <title>CFGMS - Configuration Management System</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background: #f5f5f5;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 20px;
+        }
+
+        header {
+            background: linear-gradient(135deg, #2c3e50 0%, #3498db 100%);
+            color: white;
+            padding: 80px 0;
+            text-align: center;
+        }
+
+        header h1 {
+            font-size: 3em;
+            margin-bottom: 20px;
+            font-weight: 700;
+        }
+
+        header p {
+            font-size: 1.4em;
+            opacity: 0.95;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+
+        .hero-buttons {
+            margin-top: 40px;
+        }
+
+        .btn {
+            display: inline-block;
+            background: white;
+            color: #2c3e50;
+            padding: 15px 35px;
+            text-decoration: none;
+            border-radius: 5px;
+            margin: 10px;
+            font-size: 1.1em;
+            font-weight: 600;
+            transition: all 0.3s;
+            border: 2px solid white;
+        }
+
+        .btn:hover {
+            background: transparent;
+            color: white;
+        }
+
+        .btn-secondary {
+            background: transparent;
+            color: white;
+            border: 2px solid white;
+        }
+
+        .btn-secondary:hover {
+            background: white;
+            color: #2c3e50;
+        }
+
+        .features {
+            padding: 80px 0;
+            background: white;
+        }
+
+        .features h2 {
+            text-align: center;
+            font-size: 2.5em;
+            margin-bottom: 60px;
+            color: #2c3e50;
+        }
+
+        .feature-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 40px;
+            margin-top: 40px;
+        }
+
+        .feature-card {
+            padding: 30px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            transition: transform 0.3s;
+        }
+
+        .feature-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 5px 20px rgba(0,0,0,0.1);
+        }
+
+        .feature-card h3 {
+            font-size: 1.5em;
+            margin-bottom: 15px;
+            color: #3498db;
+        }
+
+        .feature-card p {
+            color: #666;
+            line-height: 1.8;
+        }
+
+        .cta-section {
+            background: #ecf0f1;
+            padding: 80px 0;
+            text-align: center;
+        }
+
+        .cta-section h2 {
+            font-size: 2.5em;
+            margin-bottom: 30px;
+            color: #2c3e50;
+        }
+
+        .cta-section p {
+            font-size: 1.2em;
+            color: #666;
+            max-width: 700px;
+            margin: 0 auto 40px;
+        }
+
+        .status-badge {
+            display: inline-block;
+            background: #ffc107;
+            color: #333;
+            padding: 8px 20px;
+            border-radius: 20px;
+            font-weight: 600;
+            margin-bottom: 20px;
+        }
+
+        footer {
+            background: #2c3e50;
+            color: white;
+            padding: 40px 0;
+            text-align: center;
+        }
+
+        footer a {
+            color: #3498db;
+            text-decoration: none;
+        }
+
+        footer a:hover {
+            text-decoration: underline;
+        }
+
+        .footer-links {
+            margin: 20px 0;
+        }
+
+        .footer-links a {
+            margin: 0 15px;
+        }
+
+        @media (max-width: 768px) {
+            header h1 {
+                font-size: 2em;
+            }
+
+            header p {
+                font-size: 1.1em;
+            }
+
+            .features h2, .cta-section h2 {
+                font-size: 1.8em;
+            }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="container">
+            <div class="status-badge">Pre-Release (v0.7.x)</div>
+            <h1>CFGMS</h1>
+            <p>Modern, secure configuration management system designed for resilience, security, and clean architecture</p>
+            <div class="hero-buttons">
+                <a href="https://github.com/cfg-is/cfgms" class="btn">View on GitHub</a>
+                <a href="https://github.com/cfg-is/cfgms#readme" class="btn btn-secondary">Documentation</a>
+            </div>
+        </div>
+    </header>
+
+    <section class="features">
+        <div class="container">
+            <h2>Key Features</h2>
+            <div class="feature-grid">
+                <div class="feature-card">
+                    <h3>🔒 Zero-Trust Security</h3>
+                    <p>Mutual TLS authentication, continuous authorization, and cryptographic configuration signing for defense-in-depth protection.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>🏢 Multi-Tenant Architecture</h3>
+                    <p>Hierarchical tenant model (MSP → Client → Group → Device) designed to scale to 50k+ endpoints.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>⚡ Hybrid Communication</h3>
+                    <p>MQTT control plane for real-time commands with QUIC data plane for high-performance synchronization.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>🔌 Pluggable Architecture</h3>
+                    <p>Modular storage, logging, secrets management, and directory services with clean interfaces.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>☁️ Microsoft 365 Integration</h3>
+                    <p>Native Entra ID, Conditional Access, and Microsoft 365 management for MSP deployments.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>🎯 Declarative Configuration</h3>
+                    <p>GitOps-ready with encrypted secret storage (SOPS) and full audit trails for compliance.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="cta-section">
+        <div class="container">
+            <h2>Get Started</h2>
+            <p>CFGMS is currently in pre-release (v0.7.x) and under active development. We're working toward v1.0 with enhanced security, testing infrastructure, and production readiness.</p>
+            <div class="hero-buttons">
+                <a href="https://github.com/cfg-is/cfgms/blob/main/README.md" class="btn">Quick Start Guide</a>
+                <a href="/security/" class="btn btn-secondary">Security Policy</a>
+            </div>
+        </div>
+    </section>
+
+    <footer>
+        <div class="container">
+            <div class="footer-links">
+                <a href="https://github.com/cfg-is/cfgms">GitHub</a>
+                <a href="https://github.com/cfg-is/cfgms/blob/main/CONTRIBUTING.md">Contributing</a>
+                <a href="/security/">Security</a>
+                <a href="https://github.com/cfg-is/cfgms/blob/main/CODE_OF_CONDUCT.md">Code of Conduct</a>
+                <a href="https://github.com/cfg-is/cfgms/blob/main/LICENSING.md">Licensing</a>
+            </div>
+            <p>&copy; 2025 CFGMS Contributors. Licensed under Apache 2.0 (Open Source) & Commercial License.</p>
+            <p style="margin-top: 10px; font-size: 0.9em;">
+                Contact: <a href="mailto:licensing@cfg.is">licensing@cfg.is</a> (commercial) |
+                <a href="mailto:security@cfg.is">security@cfg.is</a> (security reports)
+            </p>
+        </div>
+    </footer>
+</body>
+</html>

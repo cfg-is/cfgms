@@ -1,0 +1,13 @@
+# Cloudflare Pages local development
+.dev.vars
+.wrangler/
+wrangler.toml
+
+# Editor files
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
