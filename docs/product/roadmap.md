@@ -733,39 +733,40 @@ For complete version history and release notes, see [CHANGELOG.md](../../CHANGEL
 
 **Critical Violations Identified**:
 
-1. **Registration Token Storage (CRITICAL)** - 5 story points
-   - **Current State**: `features/controller/server/server.go:208` uses `NewMemoryStore()` with comment "ALPHA LIMITATION: Using in-memory store - tokens lost on restart"
-   - **Impact**: Registration tokens are lost on controller restart, breaking steward registration in production
-   - **Fix**: Implement `registration.Store` backed by `pkg/storage` (git/database)
-   - **Testing**: MUST test with actual storage backend, not in-memory mock
-   - **Files**: `pkg/registration/store.go`, `features/controller/server/server.go`
-
-2. **Tenant Management Storage (CRITICAL)** - 5 story points
+1. **Tenant Management Storage (CRITICAL)** (Issue #262) - 5 story points
    - **Current State**: `features/controller/server/server.go:117` uses `tenantmemory.NewStore()` with comment "currently uses memory store"
    - **Impact**: All tenant data lost on controller restart, breaking multi-tenancy in production
    - **Fix**: Implement tenant storage backed by `pkg/storage` (git/database)
    - **Testing**: MUST test with actual storage backend
    - **Files**: `features/tenant/`, `features/controller/server/server.go`
+   - **Status**: 🔴 **CRITICAL - START HERE** (foundational dependency)
 
-3. **RBAC Storage (HIGH)** - 4 story points
-   - **Current State**: `features/rbac/memory/store.go` provides in-memory RBAC store, used in multiple places
-   - **Impact**: All roles, permissions, and policies lost on restart
-   - **Fix**: Implement RBAC storage backed by `pkg/storage`
-   - **Testing**: MUST test with actual storage backend
-   - **Files**: `features/rbac/memory/`, `features/rbac/manager.go:63`
+2. **Registration Token Storage (CRITICAL)** (Issue #263) - 5 story points
+   - **Current State**: `features/controller/server/server.go:208` uses `NewMemoryStore()` with comment "ALPHA LIMITATION: Using in-memory store - tokens lost on restart"
+   - **Impact**: Registration tokens are lost on controller restart, breaking steward registration in production
+   - **Fix**: Implement `registration.Store` backed by `pkg/storage` (git/database)
+   - **Testing**: MUST test with actual storage backend, not in-memory mock
+   - **Files**: `pkg/registration/store.go`, `features/controller/server/server.go`
+   - **Depends on**: Issue #262 (tokens need tenant context)
 
-4. **Rollback Operation Storage (MEDIUM)** - 3 story points
+3. **RBAC Storage (HIGH)** - 4 story points ✅ **ALREADY MIGRATED**
+   - **Current State**: `features/controller/server/server.go:96-100` uses `rbac.NewManagerWithStorage()` with pluggable storage
+   - **Status**: ✅ **COMPLETE** - Already migrated to `pkg/storage` in Epic 6 (v0.4.6.0)
+   - **Note**: `features/rbac/memory/store.go` exists but is not used in production code
+
+4. **Rollback Operation Storage (MEDIUM)** - 3 story points ✅ **NOT IN PRODUCTION PATH**
    - **Current State**: `features/config/rollback/store.go` has `InMemoryRollbackStore`
-   - **Impact**: Rollback history lost on restart, no audit trail for configuration changes
-   - **Fix**: Implement rollback storage backed by `pkg/storage`
-   - **Testing**: MUST test with actual storage backend
-   - **Files**: `features/config/rollback/store.go`
+   - **Status**: ✅ **NOT NEEDED** - Only used in tests (`manager_test.go`), not in production code
+   - **Note**: No action required for production deployment
 
-5. **CLI Token Storage (LOW)** - 1 story point
+5. **CLI Token Storage (LOW)** (Issue #264) - 1 story point
    - **Current State**: `cmd/cfgcli/cmd/token.go:102` uses `NewMemoryStore()` with comment "in-memory for now, will be controller API in future"
    - **Impact**: CLI-generated tokens not persisted, but CLI is ephemeral so acceptable
    - **Fix**: Remove in-memory store, connect directly to controller API
    - **Files**: `cmd/cfgcli/cmd/token.go`
+   - **Depends on**: Issue #263 (controller API must exist first)
+
+**Actual Remaining Work**: 11 story points (Items #262, #263, #264)
 
 **Phase 1.5: Environment Variable Security Hardening** (Issue #250, #251) (6 story points)
 
