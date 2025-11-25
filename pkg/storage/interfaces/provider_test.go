@@ -82,6 +82,10 @@ func (m *MockStorageProvider) CreateRuntimeStore(config map[string]interface{}) 
 	return &MockRuntimeStore{}, nil
 }
 
+func (m *MockStorageProvider) CreateTenantStore(config map[string]interface{}) (TenantStore, error) {
+	return &MockTenantStore{}, nil
+}
+
 // Mock implementations of store interfaces
 type MockClientTenantStore struct{}
 
@@ -298,6 +302,33 @@ func (m *MockRuntimeStore) GetStats(ctx context.Context) (*RuntimeStoreStats, er
 	return &RuntimeStoreStats{}, nil
 }
 func (m *MockRuntimeStore) Vacuum(ctx context.Context) error { return nil }
+
+// MockTenantStore implements TenantStore for testing
+type MockTenantStore struct{}
+
+func (m *MockTenantStore) CreateTenant(ctx context.Context, tenant *TenantData) error { return nil }
+func (m *MockTenantStore) GetTenant(ctx context.Context, tenantID string) (*TenantData, error) {
+	return &TenantData{ID: tenantID, Name: "Test Tenant"}, nil
+}
+func (m *MockTenantStore) UpdateTenant(ctx context.Context, tenant *TenantData) error { return nil }
+func (m *MockTenantStore) DeleteTenant(ctx context.Context, tenantID string) error   { return nil }
+func (m *MockTenantStore) ListTenants(ctx context.Context, filter *TenantFilter) ([]*TenantData, error) {
+	return nil, nil
+}
+func (m *MockTenantStore) GetTenantHierarchy(ctx context.Context, tenantID string) (*TenantHierarchy, error) {
+	return &TenantHierarchy{TenantID: tenantID}, nil
+}
+func (m *MockTenantStore) GetChildTenants(ctx context.Context, parentID string) ([]*TenantData, error) {
+	return nil, nil
+}
+func (m *MockTenantStore) GetTenantPath(ctx context.Context, tenantID string) ([]string, error) {
+	return []string{tenantID}, nil
+}
+func (m *MockTenantStore) IsTenantAncestor(ctx context.Context, ancestorID, descendantID string) (bool, error) {
+	return false, nil
+}
+func (m *MockTenantStore) Initialize(ctx context.Context) error { return nil }
+func (m *MockTenantStore) Close() error                         { return nil }
 
 // Test provider registration
 func TestRegisterStorageProvider(t *testing.T) {

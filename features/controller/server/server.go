@@ -29,7 +29,6 @@ import (
 	"github.com/cfgis/cfgms/features/rbac"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/tenant"
-	tenantmemory "github.com/cfgis/cfgms/features/tenant/memory"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -114,8 +113,8 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	}
 	logger.Info("RBAC initialization completed")
 
-	// Initialize tenant management (currently uses memory store)
-	tenantStore := tenantmemory.NewStore()
+	// Initialize tenant management with durable storage
+	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
 	tenantManager := tenant.NewManager(tenantStore, rbacManager)
 
 	// Create the controller service

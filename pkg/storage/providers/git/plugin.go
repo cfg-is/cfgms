@@ -191,6 +191,32 @@ func (p *GitProvider) CreateRBACStore(config map[string]interface{}) (interfaces
 	return store, nil
 }
 
+func (p *GitProvider) CreateTenantStore(config map[string]interface{}) (interfaces.TenantStore, error) {
+	// Get repository path from config
+	repoPathStr := "/tmp/cfgms-git-tenant"
+	if repoPath, ok := config["repository_path"]; ok {
+		if pathStr, ok := repoPath.(string); ok && pathStr != "" {
+			repoPathStr = pathStr + "/tenants"
+		}
+	}
+
+	// Optional remote URL for distributed deployments
+	remoteURL := ""
+	if remote, ok := config["remote_url"]; ok {
+		if remoteStr, ok := remote.(string); ok {
+			remoteURL = remoteStr
+		}
+	}
+
+	// Create the git tenant store
+	store, err := NewGitTenantStore(repoPathStr, remoteURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create git tenant store: %w", err)
+	}
+
+	return store, nil
+}
+
 // Auto-register this provider (Salt-style)
 func init() {
 	interfaces.RegisterStorageProvider(&GitProvider{})

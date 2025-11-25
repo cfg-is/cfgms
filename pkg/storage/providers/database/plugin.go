@@ -164,6 +164,22 @@ func (p *DatabaseProvider) CreateRBACStore(config map[string]interface{}) (inter
 	return store, nil
 }
 
+func (p *DatabaseProvider) CreateTenantStore(config map[string]interface{}) (interfaces.TenantStore, error) {
+	// Get database connection string from config
+	dsn, err := p.getDSN(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+
+	// Create the database tenant store
+	store, err := NewDatabaseTenantStore(dsn, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database tenant store: %w", err)
+	}
+
+	return store, nil
+}
+
 // getDSN extracts and validates the database connection string from configuration
 func (p *DatabaseProvider) getDSN(config map[string]interface{}) (string, error) {
 	// First, try to get a complete DSN
