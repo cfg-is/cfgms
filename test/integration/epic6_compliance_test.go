@@ -15,6 +15,7 @@ import (
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/git" // Register git provider for tenant persistence test
 )
 
 // MockStorageProvider implements interfaces.StorageProvider for testing
@@ -222,6 +223,14 @@ func (m *MockStorageProvider) CreateRBACStore(config map[string]interface{}) (in
 	return nil, nil // Not needed for this test
 }
 
+func (m *MockStorageProvider) CreateRuntimeStore(config map[string]interface{}) (interfaces.RuntimeStore, error) {
+	return nil, nil // Not needed for this test
+}
+
+func (m *MockStorageProvider) CreateTenantStore(config map[string]interface{}) (interfaces.TenantStore, error) {
+	return nil, nil // Not needed for this test
+}
+
 // TestEpic6ComplianceConfigurationStorage validates Epic 6 compliance requirements
 func TestEpic6ComplianceConfigurationStorage(t *testing.T) {
 	ctx := context.Background()
@@ -418,5 +427,172 @@ func TestEpic6ComplianceValidation(t *testing.T) {
 		assert.Greater(t, stats.TotalConfigs, int64(0))
 		assert.Greater(t, stats.TotalSize, int64(0))
 		assert.NotZero(t, stats.LastUpdated)
+	})
+}
+
+// TestEpic6TenantStoragePersistence validates tenant data persistence (Story #262)
+// This test ensures that tenant management uses durable storage and survives restarts
+func TestEpic6TenantStoragePersistence(t *testing.T) {
+	ctx := context.Background()
+
+	// Create a temporary directory for test git storage
+	tempDir := t.TempDir()
+
+	// Create git-backed tenant store (git provider is auto-registered via blank import)
+	config := map[string]interface{}{
+		"repository_path": tempDir,
+	}
+
+	tenantStore, err := interfaces.CreateTenantStoreFromConfig("git", config)
+	require.NoError(t, err, "Should create git tenant store")
+	defer tenantStore.Close()
+
+	// Initialize the store
+	err = tenantStore.Initialize(ctx)
+	require.NoError(t, err, "Should initialize tenant store")
+
+	// Test: Create tenant with hierarchy
+	t.Run("CreateTenantHierarchy", func(t *testing.T) {
+		// Create root tenant (MSP level)
+		rootTenant := &interfaces.TenantData{
+			ID:          "msp-root",
+			Name:        "Test MSP",
+			Description: "Root MSP tenant for testing",
+			Status:      interfaces.TenantStatusActive,
+			Metadata:    map[string]string{"tier": "msp"},
+			CreatedAt:   time.Now(),
+			UpdatedAt:   time.Now(),
+		}
+		err := tenantStore.CreateTenant(ctx, rootTenant)
+		require.NoError(t, err, "Should create root tenant")
+
+		// Create child tenant (Client level)
+		childTenant := &interfaces.TenantData{
+			ID:          "client-1",
+			Name:        "Test Client",
+			Description: "Client under MSP",
+			ParentID:    "msp-root",
+			Status:      interfaces.TenantStatusActive,
+			Metadata:    map[string]string{"tier": "client"},
+			CreatedAt:   time.Now(),
+			UpdatedAt:   time.Now(),
+		}
+		err = tenantStore.CreateTenant(ctx, childTenant)
+		require.NoError(t, err, "Should create child tenant")
+
+		// Create grandchild tenant (Group level)
+		groupTenant := &interfaces.TenantData{
+			ID:          "group-1",
+			Name:        "Test Group",
+			Description: "Group under client",
+			ParentID:    "client-1",
+			Status:      interfaces.TenantStatusActive,
+			Metadata:    map[string]string{"tier": "group"},
+			CreatedAt:   time.Now(),
+			UpdatedAt:   time.Now(),
+		}
+		err = tenantStore.CreateTenant(ctx, groupTenant)
+		require.NoError(t, err, "Should create group tenant")
+	})
+
+	// Test: Verify tenant hierarchy
+	t.Run("VerifyTenantHierarchy", func(t *testing.T) {
+		// Get tenant path
+		path, err := tenantStore.GetTenantPath(ctx, "group-1")
+		require.NoError(t, err, "Should get tenant path")
+		require.Equal(t, []string{"msp-root", "client-1", "group-1"}, path, "Path should be correct")
+
+		// Verify ancestor relationship
+		isAncestor, err := tenantStore.IsTenantAncestor(ctx, "msp-root", "group-1")
+		require.NoError(t, err)
+		require.True(t, isAncestor, "MSP should be ancestor of group")
+
+		isAncestor, err = tenantStore.IsTenantAncestor(ctx, "client-1", "group-1")
+		require.NoError(t, err)
+		require.True(t, isAncestor, "Client should be ancestor of group")
+
+		// Get child tenants
+		children, err := tenantStore.GetChildTenants(ctx, "msp-root")
+		require.NoError(t, err)
+		require.Len(t, children, 1, "MSP should have one direct child")
+		require.Equal(t, "client-1", children[0].ID)
+	})
+
+	// Test: Persistence - Close and reopen store
+	t.Run("PersistenceAcrossRestart", func(t *testing.T) {
+		// Close the current store
+		err := tenantStore.Close()
+		require.NoError(t, err)
+
+		// Create a new store instance pointing to same directory (simulating restart)
+		newStore, err := interfaces.CreateTenantStoreFromConfig("git", config)
+		require.NoError(t, err, "Should create new store instance")
+		defer newStore.Close()
+
+		err = newStore.Initialize(ctx)
+		require.NoError(t, err)
+
+		// Verify all data persisted
+		tenant, err := newStore.GetTenant(ctx, "msp-root")
+		require.NoError(t, err, "Root tenant should persist")
+		assert.Equal(t, "Test MSP", tenant.Name)
+
+		tenant, err = newStore.GetTenant(ctx, "client-1")
+		require.NoError(t, err, "Child tenant should persist")
+		assert.Equal(t, "Test Client", tenant.Name)
+		assert.Equal(t, "msp-root", tenant.ParentID)
+
+		tenant, err = newStore.GetTenant(ctx, "group-1")
+		require.NoError(t, err, "Group tenant should persist")
+		assert.Equal(t, "Test Group", tenant.Name)
+
+		// Verify hierarchy persisted
+		path, err := newStore.GetTenantPath(ctx, "group-1")
+		require.NoError(t, err)
+		assert.Equal(t, []string{"msp-root", "client-1", "group-1"}, path)
+
+		// Update the tenantStore reference for subsequent tests
+		tenantStore = newStore
+	})
+
+	// Test: Update tenant
+	t.Run("UpdateTenant", func(t *testing.T) {
+		tenant, err := tenantStore.GetTenant(ctx, "msp-root")
+		require.NoError(t, err)
+
+		tenant.Description = "Updated description"
+		tenant.UpdatedAt = time.Now()
+
+		err = tenantStore.UpdateTenant(ctx, tenant)
+		require.NoError(t, err)
+
+		// Verify update
+		updated, err := tenantStore.GetTenant(ctx, "msp-root")
+		require.NoError(t, err)
+		assert.Equal(t, "Updated description", updated.Description)
+	})
+
+	// Test: List and filter tenants
+	t.Run("ListAndFilterTenants", func(t *testing.T) {
+		// List all tenants
+		all, err := tenantStore.ListTenants(ctx, nil)
+		require.NoError(t, err)
+		assert.GreaterOrEqual(t, len(all), 3, "Should have at least 3 tenants")
+
+		// Filter by parent
+		filter := &interfaces.TenantFilter{ParentID: "msp-root"}
+		children, err := tenantStore.ListTenants(ctx, filter)
+		require.NoError(t, err)
+		assert.Len(t, children, 1)
+		assert.Equal(t, "client-1", children[0].ID)
+	})
+
+	// Test: Delete tenant
+	t.Run("DeleteTenant", func(t *testing.T) {
+		err := tenantStore.DeleteTenant(ctx, "group-1")
+		require.NoError(t, err)
+
+		_, err = tenantStore.GetTenant(ctx, "group-1")
+		assert.Error(t, err, "Deleted tenant should not be found")
 	})
 }
