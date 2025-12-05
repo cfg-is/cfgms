@@ -733,13 +733,14 @@ For complete version history and release notes, see [CHANGELOG.md](../../CHANGEL
 
 **Critical Violations Identified**:
 
-1. **Tenant Management Storage (CRITICAL)** (Issue #262) - 5 story points
-   - **Current State**: `features/controller/server/server.go:117` uses `tenantmemory.NewStore()` with comment "currently uses memory store"
-   - **Impact**: All tenant data lost on controller restart, breaking multi-tenancy in production
-   - **Fix**: Implement tenant storage backed by `pkg/storage` (git/database)
-   - **Testing**: MUST test with actual storage backend
-   - **Files**: `features/tenant/`, `features/controller/server/server.go`
-   - **Status**: 🔴 **CRITICAL - START HERE** (foundational dependency)
+1. **Tenant Management Storage (CRITICAL)** (Issue #262) - 5 story points ✅ COMPLETED
+   - **Implemented**: TenantStore interface in `pkg/storage/interfaces/tenant_store.go`
+   - **Git Provider**: `pkg/storage/providers/git/tenant_store.go` - JSON file persistence
+   - **Database Provider**: `pkg/storage/providers/database/tenant_store.go` - PostgreSQL with hierarchy support
+   - **Adapter**: `features/tenant/storage_adapter.go` bridges storage interfaces
+   - **Integration**: `features/controller/server/server.go` now uses durable storage
+   - **Testing**: Comprehensive integration tests validate persistence across restarts
+   - **Status**: ✅ **COMPLETE** (PR #266)
 
 2. **Registration Token Storage (CRITICAL)** (Issue #263) - 5 story points
    - **Current State**: `features/controller/server/server.go:208` uses `NewMemoryStore()` with comment "ALPHA LIMITATION: Using in-memory store - tokens lost on restart"
@@ -766,7 +767,7 @@ For complete version history and release notes, see [CHANGELOG.md](../../CHANGEL
    - **Files**: `cmd/cfgcli/cmd/token.go`
    - **Depends on**: Issue #263 (controller API must exist first)
 
-**Actual Remaining Work**: 11 story points (Items #262, #263, #264)
+**Actual Remaining Work**: 6 story points (Items #263, #264) - Issue #262 completed
 
 **Phase 1.5: Environment Variable Security Hardening** (Issue #250, #251) (6 story points)
 
@@ -1075,8 +1076,8 @@ Multi-layered validation approach:
 
 ## Version Information
 
-- **Document Version**: 2.8
-- **Last Updated**: 2025-11-19
+- **Document Version**: 2.9
+- **Last Updated**: 2025-11-26
 
 ### Related Documentation
 
