@@ -165,9 +165,9 @@ func (s *MultiTenantScaleValidationSuite) SetupSuite() {
 	storageConfig := map[string]interface{}{
 		"repository_path": s.T().TempDir(),
 	}
-	var err error
-	s.storageManager, err = interfaces.CreateAllStoresFromConfig("git", storageConfig)
-	s.Require().NoError(err, "Failed to create storage manager")
+	var storageErr error
+	s.storageManager, storageErr = interfaces.CreateAllStoresFromConfig("git", storageConfig)
+	s.Require().NoError(storageErr, "Failed to create storage manager")
 
 	s.tenantStore = tenant.NewStorageAdapter(s.storageManager.GetTenantStore())
 	s.tenantManager = tenant.NewManager(s.tenantStore, nil)

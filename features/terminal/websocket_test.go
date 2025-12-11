@@ -303,6 +303,9 @@ func TestWebSocketSessionCleanup(t *testing.T) {
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL+"?steward_id=test-steward&user_id=test-user&shell=bash", nil)
 	require.NoError(t, err)
 
+	// Wait for session to be created (session creation is asynchronous)
+	time.Sleep(50 * time.Millisecond)
+
 	// Check that session was created
 	activeSessions := manager.GetActiveSessions()
 	assert.Len(t, activeSessions, 1)
