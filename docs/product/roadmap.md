@@ -704,15 +704,15 @@ For complete version history and release notes, see [CHANGELOG.md](../../CHANGEL
   - [x] Update roadmap versions v1.0 -> v0.10, with clear path to v1.0
   - [x] Create CHANGELOG.md (see `CHANGELOG.md`)
   - [x] Create public-facing roadmap (see `docs/product/public-roadmap.md`)
-- [ ] **Review and Create All Referenced Email Addresses & Web Pages** (Issue #248) - 2-3 days
-  - [ ] Audit all documentation for email addresses and web URLs
-  - [ ] Create comprehensive inventory of referenced resources
-  - [ ] Set up all email addresses (security@cfg.is, licensing@cfg.is, etc.)
-  - [ ] Create web pages (https://cfg.is/security/, PGP key page, etc.)
-  - [ ] Configure email infrastructure with proper security
-  - [ ] Set up web hosting with SSL certificates
-  - [ ] Test all email addresses and URLs
-  - [ ] Update documentation with any corrections
+- [x] **Review and Create All Referenced Email Addresses & Web Pages** (Issue #248) - 2-3 days ✅ COMPLETED
+  - [x] Audit all documentation for email addresses and web URLs
+  - [x] Create comprehensive inventory of referenced resources
+  - [x] Set up all email addresses (security@, licensing@, conduct@ cfg.is)
+  - [x] Create web pages (security page, PGP key page, landing page)
+  - [x] Configure email infrastructure with proper security (Zoho Mail)
+  - [x] Generate PGP key for encrypted security reports
+  - [x] Create website repository ([cfg-is/cfg.is](https://github.com/cfg-is/cfg.is))
+  - [x] Update documentation with example.com placeholders for self-hosters
 
 #### v0.7.5: Testing Infrastructure & Security Hardening (CRITICAL)
 
