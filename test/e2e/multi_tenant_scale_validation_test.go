@@ -20,7 +20,10 @@ import (
 	"github.com/cfgis/cfgms/features/rbac/continuous"
 	"github.com/cfgis/cfgms/features/rbac/memory"
 	"github.com/cfgis/cfgms/features/tenant"
-	tenantMemory "github.com/cfgis/cfgms/features/tenant/memory"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+
+	// Import storage providers for testing
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 )
 
 // MultiTenantScaleValidationSuite tests authorization performance scaling with 100+ tenants
@@ -34,7 +37,8 @@ type MultiTenantScaleValidationSuite struct {
 	rbacStore        *memory.Store
 	continuousEngine *continuous.ContinuousAuthorizationEngine
 	tenantManager    *tenant.Manager
-	tenantStore      *tenantMemory.Store
+	tenantStore      tenant.Store
+	storageManager   *interfaces.StorageManager
 
 	// Test configuration
 	targetTenantCount   int
@@ -153,10 +157,19 @@ func (s *MultiTenantScaleValidationSuite) SetupSuite() {
 
 	s.tenantMetrics = make(map[string]*TenantPerformanceMetrics)
 
-	// Initialize real CFGMS components for scale testing
+	// Initialize real CFGMS components for scale testing with durable storage
 	s.rbacStore = memory.NewStore()
 	s.rbacManager = testutil.SetupTestRBACManager(s.T())
-	s.tenantStore = tenantMemory.NewStore()
+
+	// Create git-backed storage for tenant management
+	storageConfig := map[string]interface{}{
+		"repository_path": s.T().TempDir(),
+	}
+	var err error
+	s.storageManager, err = interfaces.CreateAllStoresFromConfig("git", storageConfig)
+	s.Require().NoError(err, "Failed to create storage manager")
+
+	s.tenantStore = tenant.NewStorageAdapter(s.storageManager.GetTenantStore())
 	s.tenantManager = tenant.NewManager(s.tenantStore, nil)
 
 	// Configure continuous authorization for scale testing

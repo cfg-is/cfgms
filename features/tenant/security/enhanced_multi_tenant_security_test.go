@@ -11,14 +11,23 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/tenant"
-	"github.com/cfgis/cfgms/features/tenant/memory"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+
+	// Import storage providers for testing
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 )
 
 func TestEnhancedMultiTenantSecurity(t *testing.T) {
 	ctx := context.Background()
 
-	// Setup test infrastructure
-	tenantStore := memory.NewStore()
+	// Setup test infrastructure with durable storage (git-backed)
+	config := map[string]interface{}{
+		"repository_path": t.TempDir(),
+	}
+	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	require.NoError(t, err)
+
+	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
 	tenantManager := tenant.NewManager(tenantStore, nil)
 	auditLogger := NewTenantSecurityAuditLogger()
 	isolationEngine := NewTenantIsolationEngine(tenantManager)

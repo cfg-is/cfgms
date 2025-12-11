@@ -889,6 +889,27 @@ For complete version history and release notes, see [CHANGELOG.md](../../CHANGEL
 - [ ] Finalize advanced workflow engine and templates
 - [ ] Finalize advanced reporting
 
+**Epic: Communication Layer Abstraction (Issue #267) - 47 story points**
+
+Refactor MQTT and QUIC into semantic Control Plane and Data Plane provider abstractions for improved modularity, testability, and future transport alternatives (gRPC, WebSocket).
+
+- [ ] **Control Plane Provider Interface** - 8 points
+  - ControlPlaneProvider interface for commands, events, heartbeats
+  - MQTT provider implementation wrapping existing code
+  - Provider registration and factory pattern
+- [ ] **Data Plane Provider Interface** - 8 points
+  - DataPlaneProvider interface for bulk data transfers
+  - QUIC provider implementation wrapping existing code
+  - Session management abstraction
+- [ ] **Migrate Controller to Communication Providers** - 13 points
+  - Update server, commands, heartbeat, registration to use new interfaces
+  - Backward compatibility maintained
+- [ ] **Migrate Steward to Communication Providers** - 13 points
+  - Update client, commands, registration, config executor to use new interfaces
+- [ ] **Deprecate Direct MQTT/QUIC Imports** - 5 points
+  - Architecture checks to prevent direct pkg/mqtt and pkg/quic imports in features/
+  - Migration guide and documentation updates
+
 #### v0.10.0 - Web Interface Foundation
 
 - [ ] Web UI framework and authentication

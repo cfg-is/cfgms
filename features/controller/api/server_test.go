@@ -18,7 +18,6 @@ import (
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/tenant"
-	tenantmemory "github.com/cfgis/cfgms/features/tenant/memory"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 
@@ -51,8 +50,8 @@ func setupTestServer(t *testing.T) *Server {
 	err = rbacManager.Initialize(context.Background())
 	require.NoError(t, err)
 
-	// Initialize tenant management
-	tenantStore := tenantmemory.NewStore()
+	// Initialize tenant management with durable storage (git-backed)
+	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
 	tenantManager := tenant.NewManager(tenantStore, rbacManager)
 
 	// Create mock services
