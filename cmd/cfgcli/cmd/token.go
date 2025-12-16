@@ -20,9 +20,9 @@ var (
 	tokenSingleUse     bool
 
 	// API connection flags
-	tokenAPIURL     string
-	tokenAPIKey     string
-	tokenTLSCACert  string
+	tokenAPIURL      string
+	tokenAPIKey      string
+	tokenTLSCACert   string
 	tokenTLSInsecure bool
 )
 

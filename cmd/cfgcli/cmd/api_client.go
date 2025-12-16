@@ -24,11 +24,11 @@ type APIClient struct {
 
 // APIClientConfig contains configuration for creating an API client
 type APIClientConfig struct {
-	BaseURL      string
-	APIKey       string
-	CACertPEM    []byte // CA certificate for server verification (nil to skip verification)
-	TLSInsecure  bool   // Skip TLS verification (development only)
-	ServerName   string // Server name for TLS verification (extracted from URL if empty)
+	BaseURL     string
+	APIKey      string
+	CACertPEM   []byte // CA certificate for server verification (nil to skip verification)
+	TLSInsecure bool   // Skip TLS verification (development only)
+	ServerName  string // Server name for TLS verification (extracted from URL if empty)
 }
 
 // TokenCreateRequest represents the request body for creating a registration token
