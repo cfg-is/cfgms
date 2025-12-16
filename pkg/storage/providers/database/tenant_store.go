@@ -293,7 +293,7 @@ func (s *DatabaseTenantStore) ListTenants(ctx context.Context, filter *interface
 		if filter.Name != "" {
 			query += fmt.Sprintf(" AND name ILIKE $%d", argCount)
 			args = append(args, "%"+filter.Name+"%")
-			argCount++
+			// argCount not incremented as it's the last filter condition
 		}
 	}
 
@@ -303,7 +303,7 @@ func (s *DatabaseTenantStore) ListTenants(ctx context.Context, filter *interface
 	if err != nil {
 		return nil, fmt.Errorf("failed to list tenants: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var tenants []*interfaces.TenantData
 	for rows.Next() {

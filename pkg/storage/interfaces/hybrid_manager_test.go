@@ -649,7 +649,7 @@ func (s *mockTenantStore) GetTenant(ctx context.Context, tenantID string) (*Tena
 	return &TenantData{ID: tenantID, Name: "Test Tenant"}, nil
 }
 func (s *mockTenantStore) UpdateTenant(ctx context.Context, tenant *TenantData) error { return nil }
-func (s *mockTenantStore) DeleteTenant(ctx context.Context, tenantID string) error   { return nil }
+func (s *mockTenantStore) DeleteTenant(ctx context.Context, tenantID string) error    { return nil }
 func (s *mockTenantStore) ListTenants(ctx context.Context, filter *TenantFilter) ([]*TenantData, error) {
 	return nil, nil
 }

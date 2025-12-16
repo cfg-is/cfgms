@@ -445,7 +445,7 @@ func TestEpic6TenantStoragePersistence(t *testing.T) {
 
 	tenantStore, err := interfaces.CreateTenantStoreFromConfig("git", config)
 	require.NoError(t, err, "Should create git tenant store")
-	defer tenantStore.Close()
+	defer func() { _ = tenantStore.Close() }()
 
 	// Initialize the store
 	err = tenantStore.Initialize(ctx)
@@ -527,7 +527,7 @@ func TestEpic6TenantStoragePersistence(t *testing.T) {
 		// Create a new store instance pointing to same directory (simulating restart)
 		newStore, err := interfaces.CreateTenantStoreFromConfig("git", config)
 		require.NoError(t, err, "Should create new store instance")
-		defer newStore.Close()
+		defer func() { _ = newStore.Close() }()
 
 		err = newStore.Initialize(ctx)
 		require.NoError(t, err)
