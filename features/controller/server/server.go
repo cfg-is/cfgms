@@ -199,13 +199,15 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		}
 		logger.Info("Command publisher initialized successfully")
 
-		// Initialize registration handler (Story #198)
+		// Initialize registration handler (Story #198, updated Story #263)
 		logger.Info("Initializing registration handler...")
-		// Registration token storage (Story #198)
-		// ALPHA LIMITATION: Using in-memory store - tokens lost on restart
-		// PRODUCTION: Use DatabaseStore(globalStorageProvider) or FileStore(globalStorageProvider)
-		// See pkg/registration/store_database.go and store_file.go for implementations
-		regStore = pkgRegistration.NewMemoryStore()
+		// Registration token storage - now uses durable storage from storage manager
+		// Story #263: Migrated from in-memory to pluggable durable storage (git/database)
+		regTokenStore := storageManager.GetRegistrationTokenStore()
+		if err := regTokenStore.Initialize(context.Background()); err != nil {
+			return nil, fmt.Errorf("failed to initialize registration token store: %w", err)
+		}
+		regStore = pkgRegistration.NewStorageAdapter(regTokenStore)
 
 		// For Docker testing: Create pre-configured test tokens
 		// These tokens are used by integration tests in test/integration/mqtt_quic/

@@ -582,6 +582,50 @@ func (s DatabaseSchemas) CreateRBACRoleAssignmentsTable(ctx context.Context, db 
 	return nil
 }
 
+// CreateRegistrationTokensTable creates the registration_tokens table for token persistence
+func (s DatabaseSchemas) CreateRegistrationTokensTable(ctx context.Context, db *sql.DB) error {
+	createTableQuery := `
+		CREATE TABLE IF NOT EXISTS cfgms_registration_tokens (
+			token VARCHAR(255) PRIMARY KEY,
+			tenant_id VARCHAR(255) NOT NULL,
+			controller_url VARCHAR(1000) NOT NULL,
+			group_name VARCHAR(255) DEFAULT '',
+			created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+			expires_at TIMESTAMP WITH TIME ZONE DEFAULT NULL,
+			single_use BOOLEAN NOT NULL DEFAULT FALSE,
+			used_at TIMESTAMP WITH TIME ZONE DEFAULT NULL,
+			used_by VARCHAR(255) DEFAULT '',
+			revoked BOOLEAN NOT NULL DEFAULT FALSE,
+			revoked_at TIMESTAMP WITH TIME ZONE DEFAULT NULL
+		);
+	`
+
+	if _, err := db.ExecContext(ctx, createTableQuery); err != nil {
+		return fmt.Errorf("failed to create cfgms_registration_tokens table: %w", err)
+	}
+
+	// Create indexes for performance and tenant isolation
+	indexes := []string{
+		"CREATE INDEX IF NOT EXISTS idx_cfgms_reg_tokens_tenant_id ON cfgms_registration_tokens(tenant_id);",
+		"CREATE INDEX IF NOT EXISTS idx_cfgms_reg_tokens_group_name ON cfgms_registration_tokens(group_name);",
+		"CREATE INDEX IF NOT EXISTS idx_cfgms_reg_tokens_created_at ON cfgms_registration_tokens(created_at);",
+		"CREATE INDEX IF NOT EXISTS idx_cfgms_reg_tokens_expires_at ON cfgms_registration_tokens(expires_at);",
+		"CREATE INDEX IF NOT EXISTS idx_cfgms_reg_tokens_revoked ON cfgms_registration_tokens(revoked);",
+		"CREATE INDEX IF NOT EXISTS idx_cfgms_reg_tokens_single_use ON cfgms_registration_tokens(single_use);",
+		"CREATE INDEX IF NOT EXISTS idx_cfgms_reg_tokens_used_at ON cfgms_registration_tokens(used_at);",
+		// Composite index for filtering unused, non-revoked tokens by tenant
+		"CREATE INDEX IF NOT EXISTS idx_cfgms_reg_tokens_tenant_active ON cfgms_registration_tokens(tenant_id) WHERE revoked = FALSE;",
+	}
+
+	for _, indexQuery := range indexes {
+		if _, err := db.ExecContext(ctx, indexQuery); err != nil {
+			return fmt.Errorf("failed to create cfgms_registration_tokens index: %w", err)
+		}
+	}
+
+	return nil
+}
+
 // CreateAllTables creates all necessary database tables and indexes
 func (s DatabaseSchemas) CreateAllTables(ctx context.Context, db *sql.DB) error {
 	// Create tables in dependency order
@@ -631,6 +675,7 @@ func (s DatabaseSchemas) DropAllTables(ctx context.Context, db *sql.DB) error {
 		"DROP TABLE IF EXISTS configs;",
 		"DROP TABLE IF EXISTS admin_consent_requests;",
 		"DROP TABLE IF EXISTS client_tenants;",
+		"DROP TABLE IF EXISTS cfgms_registration_tokens;",
 		"DROP TABLE IF EXISTS rbac_role_assignments;", // Has foreign keys to subjects and roles
 		"DROP TABLE IF EXISTS rbac_subjects;",
 		"DROP TABLE IF EXISTS rbac_roles;", // Has self-reference foreign key
