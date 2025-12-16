@@ -761,14 +761,17 @@ For complete version history and release notes, see [CHANGELOG.md](../../CHANGEL
    - **Status**: ✅ **NOT NEEDED** - Only used in tests (`manager_test.go`), not in production code
    - **Note**: No action required for production deployment
 
-5. **CLI Token Storage (LOW)** (Issue #264) - 1 story point
-   - **Current State**: `cmd/cfgcli/cmd/token.go:102` uses `NewMemoryStore()` with comment "in-memory for now, will be controller API in future"
-   - **Impact**: CLI-generated tokens not persisted, but CLI is ephemeral so acceptable
-   - **Fix**: Remove in-memory store, connect directly to controller API
-   - **Files**: `cmd/cfgcli/cmd/token.go`
-   - **Depends on**: Issue #263 (controller API must exist first)
+5. **CLI Token Storage (LOW)** (Issue #264) - 1 story point ✅ COMPLETED
+   - **Implemented**: CLI now uses controller REST API for all token operations
+   - **API Endpoints**: Added `/api/v1/registration/tokens` endpoints (create, list, get, delete, revoke)
+   - **API Client**: `cmd/cfgcli/cmd/api_client.go` provides HTTP client for controller API
+   - **CLI Commands**: `cfgcli token create|list|revoke|delete` all use controller API
+   - **Configuration**: `CFGMS_API_URL` and `CFGMS_API_KEY` env vars or `--api-url`/`--api-key` flags
+   - **Files Modified**: `cmd/cfgcli/cmd/token.go`, `features/controller/api/server.go`
+   - **Files Added**: `cmd/cfgcli/cmd/api_client.go`, `features/controller/api/handlers_registration_tokens.go`
+   - **Status**: ✅ **COMPLETE** (PR #270)
 
-**Actual Remaining Work**: 1 story point (Item #264) - Issues #262 and #263 completed
+**Actual Remaining Work**: 0 story points - All EPIC #247 items completed! 🎉
 
 **Phase 1.5: Environment Variable Security Hardening** (Issue #250, #251) (6 story points)
 
