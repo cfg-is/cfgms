@@ -20,8 +20,10 @@ var (
 	tokenSingleUse     bool
 
 	// API connection flags
-	tokenAPIURL string
-	tokenAPIKey string
+	tokenAPIURL     string
+	tokenAPIKey     string
+	tokenTLSCACert  string
+	tokenTLSInsecure bool
 )
 
 // tokenCmd represents the token command
@@ -38,6 +40,8 @@ This command communicates with the controller's REST API to manage tokens.
 The controller URL and API key can be provided via flags or environment variables:
   - CFGMS_API_URL: Controller REST API URL (default: http://localhost:9080)
   - CFGMS_API_KEY: API key for authentication
+  - CFGMS_TLS_CA_CERT: Path to CA certificate for TLS verification
+  - CFGMS_TLS_INSECURE: Skip TLS verification (development only)
 
 Examples:
   # Create a token that expires in 7 days
@@ -131,6 +135,8 @@ func init() {
 	// Global token command flags (for API connection)
 	tokenCmd.PersistentFlags().StringVar(&tokenAPIURL, "api-url", "", "Controller REST API URL (env: CFGMS_API_URL)")
 	tokenCmd.PersistentFlags().StringVar(&tokenAPIKey, "api-key", "", "API key for authentication (env: CFGMS_API_KEY)")
+	tokenCmd.PersistentFlags().StringVar(&tokenTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
+	tokenCmd.PersistentFlags().BoolVar(&tokenTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
 
 	// Create command flags
 	tokenCreateCmd.Flags().StringVar(&tokenTenantID, "tenant-id", "", "Tenant ID (required)")
@@ -153,7 +159,8 @@ func init() {
 }
 
 // getAPIClient creates an API client using flags or environment variables
-func getAPIClient() *APIClient {
+func getAPIClient() (*APIClient, error) {
+	// Resolve API URL
 	apiURL := tokenAPIURL
 	if apiURL == "" {
 		apiURL = os.Getenv("CFGMS_API_URL")
@@ -162,16 +169,49 @@ func getAPIClient() *APIClient {
 		apiURL = "http://localhost:9080"
 	}
 
+	// Resolve API key
 	apiKey := tokenAPIKey
 	if apiKey == "" {
 		apiKey = os.Getenv("CFGMS_API_KEY")
 	}
 
-	return NewAPIClient(apiURL, apiKey)
+	// Resolve TLS settings
+	tlsInsecure := tokenTLSInsecure
+	if !tlsInsecure && os.Getenv("CFGMS_TLS_INSECURE") == "true" {
+		tlsInsecure = true
+	}
+
+	tlsCACertPath := tokenTLSCACert
+	if tlsCACertPath == "" {
+		tlsCACertPath = os.Getenv("CFGMS_TLS_CA_CERT")
+	}
+
+	// Load CA certificate if provided
+	var caCertPEM []byte
+	if tlsCACertPath != "" {
+		var err error
+		// #nosec G304 - CA certificate path is intentionally provided by user via CLI flag or env var
+		caCertPEM, err = os.ReadFile(tlsCACertPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read CA certificate: %w", err)
+		}
+	}
+
+	cfg := &APIClientConfig{
+		BaseURL:     apiURL,
+		APIKey:      apiKey,
+		CACertPEM:   caCertPEM,
+		TLSInsecure: tlsInsecure,
+	}
+
+	return NewAPIClient(cfg)
 }
 
 func runTokenCreate(cmd *cobra.Command, args []string) error {
-	client := getAPIClient()
+	client, err := getAPIClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
 
 	// Create token via API
 	req := &APITokenCreateRequest{
@@ -219,7 +259,10 @@ func runTokenCreate(cmd *cobra.Command, args []string) error {
 }
 
 func runTokenList(cmd *cobra.Command, args []string) error {
-	client := getAPIClient()
+	client, err := getAPIClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
 
 	resp, err := client.ListTokens(context.Background(), tokenTenantID)
 	if err != nil {
@@ -268,7 +311,10 @@ func runTokenList(cmd *cobra.Command, args []string) error {
 
 func runTokenRevoke(cmd *cobra.Command, args []string) error {
 	tokenStr := args[0]
-	client := getAPIClient()
+	client, err := getAPIClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
 
 	token, err := client.RevokeToken(context.Background(), tokenStr)
 	if err != nil {
@@ -285,7 +331,10 @@ func runTokenRevoke(cmd *cobra.Command, args []string) error {
 
 func runTokenDelete(cmd *cobra.Command, args []string) error {
 	tokenStr := args[0]
-	client := getAPIClient()
+	client, err := getAPIClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
 
 	if err := client.DeleteToken(context.Background(), tokenStr); err != nil {
 		return fmt.Errorf("failed to delete token: %w", err)

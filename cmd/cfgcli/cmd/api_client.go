@@ -11,6 +11,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/cert"
 )
 
 // APIClient provides HTTP client functionality for communicating with the controller API
@@ -18,6 +20,15 @@ type APIClient struct {
 	baseURL    string
 	apiKey     string
 	httpClient *http.Client
+}
+
+// APIClientConfig contains configuration for creating an API client
+type APIClientConfig struct {
+	BaseURL      string
+	APIKey       string
+	CACertPEM    []byte // CA certificate for server verification (nil to skip verification)
+	TLSInsecure  bool   // Skip TLS verification (development only)
+	ServerName   string // Server name for TLS verification (extracted from URL if empty)
 }
 
 // TokenCreateRequest represents the request body for creating a registration token
@@ -50,23 +61,48 @@ type APITokenListResponse struct {
 	Total  int                `json:"total"`
 }
 
-// NewAPIClient creates a new API client for communicating with the controller
-func NewAPIClient(baseURL, apiKey string) *APIClient {
+// NewAPIClient creates a new API client with the given configuration
+// Uses pkg/cert for TLS configuration to comply with central provider patterns
+func NewAPIClient(cfg *APIClientConfig) (*APIClient, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("config cannot be nil")
+	}
+
+	// Build TLS configuration using pkg/cert
+	var tlsConfig *tls.Config
+	var err error
+
+	if cfg.TLSInsecure {
+		// Development mode: skip verification (requires explicit opt-in)
+		// #nosec G402 - TLS InsecureSkipVerify explicitly requested via --tls-insecure flag
+		tlsConfig = &tls.Config{
+			MinVersion:         tls.VersionTLS12,
+			InsecureSkipVerify: true,
+		}
+	} else if cfg.CACertPEM != nil {
+		// Production mode: use CA cert for verification via pkg/cert helper
+		tlsConfig, err = cert.CreateClientTLSConfig(nil, nil, cfg.CACertPEM, cfg.ServerName, tls.VersionTLS12)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create TLS config: %w", err)
+		}
+	} else {
+		// Default: use system CA pool
+		tlsConfig = &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			ServerName: cfg.ServerName,
+		}
+	}
+
 	return &APIClient{
-		baseURL: baseURL,
-		apiKey:  apiKey,
+		baseURL: cfg.BaseURL,
+		apiKey:  cfg.APIKey,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{
-					MinVersion: tls.VersionTLS12,
-					// Allow insecure for development - production should use proper certs
-					// #nosec G402 - TLS InsecureSkipVerify is configurable for development
-					InsecureSkipVerify: true,
-				},
+				TLSClientConfig: tlsConfig,
 			},
 		},
-	}
+	}, nil
 }
 
 // CreateToken creates a new registration token via the controller API
