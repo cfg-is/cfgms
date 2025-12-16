@@ -74,8 +74,14 @@ In your **MSP tenant (cfgis.onmicrosoft.com)**:
    ```
    Name: CFGMS MSP Production
    Account types: Multi-tenant (REQUIRED for MSP)
-   Redirect URI: https://auth.cfgms.com/admin/callback
+   Redirect URI: https://portal.example.com/admin/callback
    ```
+
+   **Note**: Replace `portal.example.com` with your actual CFGMS controller domain.
+
+   **Examples**:
+   - Self-hosted: `https://cfgms.yourcompany.com/admin/callback`
+   - cfg.is hosted beta: `https://portal.cfg.is/admin/callback`
 
 3. **Add Same Application Permissions** as development
 4. **DO NOT grant admin consent** (each client will consent individually)
@@ -325,10 +331,10 @@ if report.OverallSuccess {
 ```go
 type MSPConfig struct {
     ClientID                string   `yaml:"client_id"`
-    ClientSecret            string   `yaml:"client_secret"`  
-    MSPTenantID            string   `yaml:"msp_tenant_id"`    // cfgis tenant
+    ClientSecret            string   `yaml:"client_secret"`
+    MSPTenantID            string   `yaml:"msp_tenant_id"`    // Your MSP tenant ID
     ApplicationPermissions  []string `yaml:"app_permissions"`
-    AdminCallbackURI        string   `yaml:"admin_callback"`   // https://auth.cfgms.com/admin/callback
+    AdminCallbackURI        string   `yaml:"admin_callback"`   // https://portal.example.com/admin/callback
 }
 
 // Default MSP permissions

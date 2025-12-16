@@ -28,7 +28,7 @@ func TestMSPCompleteFlow(t *testing.T) {
 		ClientID:         "12345678-1234-1234-1234-123456789012",
 		ClientSecret:     "test-client-secret",
 		TenantID:         "cfgis-tenant-id",
-		AdminCallbackURI: "https://auth.cfgms.com/admin/callback",
+		AdminCallbackURI: "https://portal.example.com/admin/callback",
 		ApplicationPermissions: []string{
 			"User.ReadWrite.All",
 			"Directory.ReadWrite.All",
@@ -234,7 +234,7 @@ func TestMSPConfigurationValidation(t *testing.T) {
 			ClientID:         "prod-client-id",
 			ClientSecret:     "prod-client-secret",
 			TenantID:         "cfgis-prod-tenant",
-			AdminCallbackURI: "https://auth.cfgms.com/admin/callback",
+			AdminCallbackURI: "https://portal.example.com/admin/callback",
 			ApplicationPermissions: []string{
 				"User.ReadWrite.All",
 				"Directory.ReadWrite.All",
@@ -415,7 +415,7 @@ func TestMSPWithGlobalStorage(t *testing.T) {
 			ClientID:               "git-test-client-id",
 			ClientSecret:           "git-test-secret",
 			TenantID:               "cfgis-tenant",
-			AdminCallbackURI:       "https://auth.cfgms.com/admin/callback",
+			AdminCallbackURI:       "https://portal.example.com/admin/callback",
 			ApplicationPermissions: []string{"User.ReadWrite.All"},
 		}
 
@@ -428,7 +428,7 @@ func TestMSPWithGlobalStorage(t *testing.T) {
 			ctx,
 			"git-test-client",
 			"Git Test Client",
-			"admin@cfgms.com",
+			"admin@example.com",
 		)
 
 		require.NoError(t, err, "Git storage should support admin consent initiation")

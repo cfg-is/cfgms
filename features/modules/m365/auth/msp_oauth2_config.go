@@ -66,7 +66,7 @@ func NewMSPOAuth2Config(clientID, clientSecret, mspTenantID string) *MSPOAuth2Co
 		ClientSecret:           clientSecret,
 		TenantID:               mspTenantID,
 		ApplicationPermissions: DefaultMSPApplicationPermissions(),
-		AdminCallbackURI:       "https://auth.cfgms.com/admin/callback", // Default production URI
+		AdminCallbackURI:       "", // Must be configured by user - no default
 	}
 }
 

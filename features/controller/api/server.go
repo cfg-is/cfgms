@@ -562,7 +562,7 @@ func (s *Server) configureCORS() {
 	}
 
 	// Load from environment variable if specified
-	// Format: CFGMS_ALLOWED_ORIGINS="https://app.cfgms.com,https://admin.cfgms.com"
+	// Format: CFGMS_ALLOWED_ORIGINS="https://portal.example.com,https://app.example.com"
 	if envOrigins := os.Getenv("CFGMS_ALLOWED_ORIGINS"); envOrigins != "" {
 		s.corsConfig = &CORSConfig{
 			AllowedOrigins: strings.Split(envOrigins, ","),

@@ -24,7 +24,7 @@ func TestMSPEndToEndClientOnboarding(t *testing.T) {
 	// Scenario: CFGMS MSP onboards "Acme Corp" as a new client
 	clientIdentifier := "acme-corp-001"
 	clientName := "Acme Corporation"
-	mspEmployee := "sarah.admin@cfgms.com"
+	mspEmployee := "sarah.admin@example.com"
 
 	t.Logf("📋 Scenario Details:")
 	t.Logf("   MSP: CFGMS (Configuration Management Services)")
@@ -74,7 +74,7 @@ func TestMSPEndToEndClientOnboarding(t *testing.T) {
 				ClientID:         "12345678-abcd-ef00-1234-567890abcdef", // Realistic GUID
 				ClientSecret:     "msp-production-secret-key-2024",
 				TenantID:         "cfgms-msp-tenant-id",
-				AdminCallbackURI: "https://auth.cfgms.com/admin/callback",
+				AdminCallbackURI: "https://portal.example.com/admin/callback",
 				ApplicationPermissions: []string{
 					// Core permissions for MSP operations
 					"User.ReadWrite.All",

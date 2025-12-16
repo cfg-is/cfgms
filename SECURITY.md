@@ -23,7 +23,11 @@ Instead, please report security issues to:
 
 **Email**: security@cfg.is
 
-**PGP Key**: Available at [https://cfg.is/security/pgp-key.asc](https://cfg.is/security/pgp-key.asc) (if encryption is desired)
+**PGP Encrypted Email** (recommended for sensitive reports):
+- **Public Key**: [https://cfg.is/security/pgp-key.asc](https://cfg.is/security/pgp-key.asc)
+- **Fingerprint**: `B489 6960 2965 C241 E851  71F9 258D 1EDC F411 6969`
+- **Key ID**: `258D1EDCF4116969`
+- **Guide**: See [PGP Email Guide](docs/security/pgp-email-guide.md) for instructions on sending encrypted email
 
 ### What to Include
 
