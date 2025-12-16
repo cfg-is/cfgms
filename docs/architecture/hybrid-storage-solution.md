@@ -34,6 +34,7 @@ controller:
 | - Audit logs | Database | High write volume, compliance queries |
 | - Client tenant data | Database | Relational data, fast lookups |
 | - Session management | Database | Real-time access patterns |
+| - Registration tokens | Database/Git | Token persistence across restarts |
 | **Configuration Data** | Git Repository | GitOps workflow, change management |
 | - Configuration templates | Git | Version control, peer review |
 | - Certificate management | Git | Audit trail via Git history |
