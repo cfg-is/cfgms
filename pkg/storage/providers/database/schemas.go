@@ -388,6 +388,44 @@ func (s DatabaseSchemas) CreateRBACTables(ctx context.Context, db *sql.DB) error
 	return nil
 }
 
+// CreateTenantTables creates all tenant-related tables with proper indexing
+func (s DatabaseSchemas) CreateTenantTables(ctx context.Context, db *sql.DB) error {
+	createTableQuery := `
+		CREATE TABLE IF NOT EXISTS cfgms_tenants (
+			id VARCHAR(255) PRIMARY KEY,
+			name VARCHAR(500) NOT NULL,
+			description TEXT DEFAULT '',
+			parent_id VARCHAR(255) DEFAULT NULL,
+			metadata JSONB DEFAULT '{}',
+			status VARCHAR(50) NOT NULL DEFAULT 'active',
+			created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+			FOREIGN KEY (parent_id) REFERENCES cfgms_tenants(id) ON DELETE RESTRICT
+		);
+	`
+
+	if _, err := db.ExecContext(ctx, createTableQuery); err != nil {
+		return fmt.Errorf("failed to create cfgms_tenants table: %w", err)
+	}
+
+	// Create indexes for performance and hierarchy queries
+	indexes := []string{
+		"CREATE INDEX IF NOT EXISTS idx_cfgms_tenants_parent_id ON cfgms_tenants(parent_id);",
+		"CREATE INDEX IF NOT EXISTS idx_cfgms_tenants_status ON cfgms_tenants(status);",
+		"CREATE INDEX IF NOT EXISTS idx_cfgms_tenants_name ON cfgms_tenants(name);",
+		"CREATE INDEX IF NOT EXISTS idx_cfgms_tenants_created_at ON cfgms_tenants(created_at);",
+		"CREATE INDEX IF NOT EXISTS idx_cfgms_tenants_metadata ON cfgms_tenants USING GIN(metadata);",
+	}
+
+	for _, indexQuery := range indexes {
+		if _, err := db.ExecContext(ctx, indexQuery); err != nil {
+			return fmt.Errorf("failed to create cfgms_tenants index: %w", err)
+		}
+	}
+
+	return nil
+}
+
 // CreateRBACPermissionsTable creates the rbac_permissions table
 func (s DatabaseSchemas) CreateRBACPermissionsTable(ctx context.Context, db *sql.DB) error {
 	createTableQuery := `

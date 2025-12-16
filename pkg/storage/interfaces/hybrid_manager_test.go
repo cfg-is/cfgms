@@ -338,6 +338,10 @@ func (p *mockProvider) CreateRuntimeStore(config map[string]interface{}) (Runtim
 	return &mockRuntimeStore{}, nil
 }
 
+func (p *mockProvider) CreateTenantStore(config map[string]interface{}) (TenantStore, error) {
+	return &mockTenantStore{}, nil
+}
+
 func (p *mockProvider) GetCapabilities() ProviderCapabilities {
 	return ProviderCapabilities{
 		SupportsTransactions:   true,
@@ -636,3 +640,30 @@ func (s *mockRuntimeStore) GetStats(ctx context.Context) (*RuntimeStoreStats, er
 	return &RuntimeStoreStats{}, nil
 }
 func (s *mockRuntimeStore) Vacuum(ctx context.Context) error { return nil }
+
+// mockTenantStore implements TenantStore for testing
+type mockTenantStore struct{}
+
+func (s *mockTenantStore) CreateTenant(ctx context.Context, tenant *TenantData) error { return nil }
+func (s *mockTenantStore) GetTenant(ctx context.Context, tenantID string) (*TenantData, error) {
+	return &TenantData{ID: tenantID, Name: "Test Tenant"}, nil
+}
+func (s *mockTenantStore) UpdateTenant(ctx context.Context, tenant *TenantData) error { return nil }
+func (s *mockTenantStore) DeleteTenant(ctx context.Context, tenantID string) error    { return nil }
+func (s *mockTenantStore) ListTenants(ctx context.Context, filter *TenantFilter) ([]*TenantData, error) {
+	return nil, nil
+}
+func (s *mockTenantStore) GetTenantHierarchy(ctx context.Context, tenantID string) (*TenantHierarchy, error) {
+	return &TenantHierarchy{TenantID: tenantID}, nil
+}
+func (s *mockTenantStore) GetChildTenants(ctx context.Context, parentID string) ([]*TenantData, error) {
+	return nil, nil
+}
+func (s *mockTenantStore) GetTenantPath(ctx context.Context, tenantID string) ([]string, error) {
+	return []string{tenantID}, nil
+}
+func (s *mockTenantStore) IsTenantAncestor(ctx context.Context, ancestorID, descendantID string) (bool, error) {
+	return false, nil
+}
+func (s *mockTenantStore) Initialize(ctx context.Context) error { return nil }
+func (s *mockTenantStore) Close() error                         { return nil }

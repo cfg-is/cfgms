@@ -130,6 +130,10 @@ func (t *TestStorageProvider) CreateRuntimeStore(config map[string]interface{}) 
 	return nil, fmt.Errorf("not implemented in test provider")
 }
 
+func (t *TestStorageProvider) CreateTenantStore(config map[string]interface{}) (interfaces.TenantStore, error) {
+	return nil, fmt.Errorf("not implemented in test provider")
+}
+
 func (t *TestStorageProvider) GetCapabilities() interfaces.ProviderCapabilities {
 	return interfaces.ProviderCapabilities{
 		MaxBatchSize:          100,

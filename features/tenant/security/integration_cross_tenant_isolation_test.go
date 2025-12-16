@@ -16,7 +16,6 @@ import (
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/tenant"
-	tenantMemory "github.com/cfgis/cfgms/features/tenant/memory"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 
 	// Import storage providers for testing
@@ -45,7 +44,7 @@ func TestCrossTenantPermissionIsolationIntegration(t *testing.T) {
 	err = rbacManager.Initialize(ctx)
 	require.NoError(t, err)
 
-	tenantStore := tenantMemory.NewStore()
+	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
 	tenantManager := tenant.NewManager(tenantStore, rbacManager)
 	auditLogger := NewTenantSecurityAuditLogger()
 	isolationEngine := NewTenantIsolationEngine(tenantManager)
@@ -522,7 +521,7 @@ func TestCrossTenantPermissionIsolationIntegration(t *testing.T) {
 
 // Helper functions for real integration setup
 
-func setupRealTenantHierarchy(t *testing.T, ctx context.Context, tenantStore *tenantMemory.Store, tenantManager *tenant.Manager) error {
+func setupRealTenantHierarchy(t *testing.T, ctx context.Context, tenantStore tenant.Store, tenantManager *tenant.Manager) error {
 	// Create realistic tenant hierarchy
 	tenants := []struct {
 		id       string
