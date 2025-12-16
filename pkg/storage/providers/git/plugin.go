@@ -217,6 +217,32 @@ func (p *GitProvider) CreateTenantStore(config map[string]interface{}) (interfac
 	return store, nil
 }
 
+func (p *GitProvider) CreateRegistrationTokenStore(config map[string]interface{}) (interfaces.RegistrationTokenStore, error) {
+	// Get repository path from config
+	repoPathStr := "/tmp/cfgms-git-registration"
+	if repoPath, ok := config["repository_path"]; ok {
+		if pathStr, ok := repoPath.(string); ok && pathStr != "" {
+			repoPathStr = pathStr + "/registration"
+		}
+	}
+
+	// Optional remote URL for distributed deployments
+	remoteURL := ""
+	if remote, ok := config["remote_url"]; ok {
+		if remoteStr, ok := remote.(string); ok {
+			remoteURL = remoteStr
+		}
+	}
+
+	// Create the git registration token store
+	store, err := NewGitRegistrationTokenStore(repoPathStr, remoteURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create git registration token store: %w", err)
+	}
+
+	return store, nil
+}
+
 // Auto-register this provider (Salt-style)
 func init() {
 	interfaces.RegisterStorageProvider(&GitProvider{})

@@ -342,6 +342,10 @@ func (p *mockProvider) CreateTenantStore(config map[string]interface{}) (TenantS
 	return &mockTenantStore{}, nil
 }
 
+func (p *mockProvider) CreateRegistrationTokenStore(config map[string]interface{}) (RegistrationTokenStore, error) {
+	return &mockRegistrationTokenStore{}, nil
+}
+
 func (p *mockProvider) GetCapabilities() ProviderCapabilities {
 	return ProviderCapabilities{
 		SupportsTransactions:   true,
@@ -667,3 +671,24 @@ func (s *mockTenantStore) IsTenantAncestor(ctx context.Context, ancestorID, desc
 }
 func (s *mockTenantStore) Initialize(ctx context.Context) error { return nil }
 func (s *mockTenantStore) Close() error                         { return nil }
+
+// mockRegistrationTokenStore implements RegistrationTokenStore for testing
+type mockRegistrationTokenStore struct{}
+
+func (s *mockRegistrationTokenStore) SaveToken(ctx context.Context, token *RegistrationTokenData) error {
+	return nil
+}
+func (s *mockRegistrationTokenStore) GetToken(ctx context.Context, tokenStr string) (*RegistrationTokenData, error) {
+	return &RegistrationTokenData{Token: tokenStr, TenantID: "test-tenant"}, nil
+}
+func (s *mockRegistrationTokenStore) UpdateToken(ctx context.Context, token *RegistrationTokenData) error {
+	return nil
+}
+func (s *mockRegistrationTokenStore) DeleteToken(ctx context.Context, tokenStr string) error {
+	return nil
+}
+func (s *mockRegistrationTokenStore) ListTokens(ctx context.Context, filter *RegistrationTokenFilter) ([]*RegistrationTokenData, error) {
+	return nil, nil
+}
+func (s *mockRegistrationTokenStore) Initialize(ctx context.Context) error { return nil }
+func (s *mockRegistrationTokenStore) Close() error                         { return nil }

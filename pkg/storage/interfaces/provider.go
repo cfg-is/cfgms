@@ -23,6 +23,7 @@ type StorageProvider interface {
 	CreateRBACStore(config map[string]interface{}) (RBACStore, error)
 	CreateRuntimeStore(config map[string]interface{}) (RuntimeStore, error)
 	CreateTenantStore(config map[string]interface{}) (TenantStore, error)
+	CreateRegistrationTokenStore(config map[string]interface{}) (RegistrationTokenStore, error)
 
 	// Future: CreateDNAStore for DNA storage integration (Epic 6)
 	// CreateDNAStore(config map[string]interface{}) (DNAStore, error)
@@ -146,6 +147,10 @@ func RegisterStorageProviderWithValidation(provider StorageProvider, testConfig 
 
 		if _, err := provider.CreateTenantStore(testConfig); err != nil {
 			return fmt.Errorf("failed to create TenantStore: %w", err)
+		}
+
+		if _, err := provider.CreateRegistrationTokenStore(testConfig); err != nil {
+			return fmt.Errorf("failed to create RegistrationTokenStore: %w", err)
 		}
 	}
 
@@ -334,6 +339,16 @@ func CreateTenantStoreFromConfig(providerName string, config map[string]interfac
 	return provider.CreateTenantStore(config)
 }
 
+// CreateRegistrationTokenStoreFromConfig creates a RegistrationTokenStore from configuration
+func CreateRegistrationTokenStoreFromConfig(providerName string, config map[string]interface{}) (RegistrationTokenStore, error) {
+	provider, err := GetStorageProvider(providerName)
+	if err != nil {
+		return nil, fmt.Errorf("storage provider '%s' not available: %w", providerName, err)
+	}
+
+	return provider.CreateRegistrationTokenStore(config)
+}
+
 // CreateAllStoresFromConfig creates all storage interfaces from a single configuration
 // This is the main entry point for unified storage configuration (legacy single-backend)
 func CreateAllStoresFromConfig(providerName string, config map[string]interface{}) (*StorageManager, error) {
@@ -379,28 +394,35 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 		return nil, fmt.Errorf("failed to create tenant store: %w", err)
 	}
 
+	registrationTokenStore, err := provider.CreateRegistrationTokenStore(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create registration token store: %w", err)
+	}
+
 	return &StorageManager{
-		providerName:      providerName,
-		provider:          provider,
-		clientTenantStore: clientTenantStore,
-		configStore:       configStore,
-		auditStore:        auditStore,
-		rbacStore:         rbacStore,
-		runtimeStore:      runtimeStore,
-		tenantStore:       tenantStore,
+		providerName:           providerName,
+		provider:               provider,
+		clientTenantStore:      clientTenantStore,
+		configStore:            configStore,
+		auditStore:             auditStore,
+		rbacStore:              rbacStore,
+		runtimeStore:           runtimeStore,
+		tenantStore:            tenantStore,
+		registrationTokenStore: registrationTokenStore,
 	}, nil
 }
 
 // StorageManager provides unified access to all storage interfaces
 type StorageManager struct {
-	providerName      string
-	provider          StorageProvider
-	clientTenantStore ClientTenantStore
-	configStore       ConfigStore
-	auditStore        AuditStore
-	rbacStore         RBACStore
-	runtimeStore      RuntimeStore
-	tenantStore       TenantStore
+	providerName           string
+	provider               StorageProvider
+	clientTenantStore      ClientTenantStore
+	configStore            ConfigStore
+	auditStore             AuditStore
+	rbacStore              RBACStore
+	runtimeStore           RuntimeStore
+	tenantStore            TenantStore
+	registrationTokenStore RegistrationTokenStore
 }
 
 // GetProviderName returns the name of the storage provider
@@ -441,6 +463,11 @@ func (sm *StorageManager) GetRuntimeStore() RuntimeStore {
 // GetTenantStore returns the tenant storage interface
 func (sm *StorageManager) GetTenantStore() TenantStore {
 	return sm.tenantStore
+}
+
+// GetRegistrationTokenStore returns the registration token storage interface
+func (sm *StorageManager) GetRegistrationTokenStore() RegistrationTokenStore {
+	return sm.registrationTokenStore
 }
 
 // GetCapabilities returns the provider's capabilities

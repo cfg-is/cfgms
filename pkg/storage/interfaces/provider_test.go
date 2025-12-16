@@ -86,6 +86,10 @@ func (m *MockStorageProvider) CreateTenantStore(config map[string]interface{}) (
 	return &MockTenantStore{}, nil
 }
 
+func (m *MockStorageProvider) CreateRegistrationTokenStore(config map[string]interface{}) (RegistrationTokenStore, error) {
+	return &MockRegistrationTokenStore{}, nil
+}
+
 // Mock implementations of store interfaces
 type MockClientTenantStore struct{}
 
@@ -329,6 +333,27 @@ func (m *MockTenantStore) IsTenantAncestor(ctx context.Context, ancestorID, desc
 }
 func (m *MockTenantStore) Initialize(ctx context.Context) error { return nil }
 func (m *MockTenantStore) Close() error                         { return nil }
+
+// MockRegistrationTokenStore implements RegistrationTokenStore for testing
+type MockRegistrationTokenStore struct{}
+
+func (m *MockRegistrationTokenStore) SaveToken(ctx context.Context, token *RegistrationTokenData) error {
+	return nil
+}
+func (m *MockRegistrationTokenStore) GetToken(ctx context.Context, tokenStr string) (*RegistrationTokenData, error) {
+	return nil, fmt.Errorf("token not found")
+}
+func (m *MockRegistrationTokenStore) UpdateToken(ctx context.Context, token *RegistrationTokenData) error {
+	return nil
+}
+func (m *MockRegistrationTokenStore) DeleteToken(ctx context.Context, tokenStr string) error {
+	return nil
+}
+func (m *MockRegistrationTokenStore) ListTokens(ctx context.Context, filter *RegistrationTokenFilter) ([]*RegistrationTokenData, error) {
+	return nil, nil
+}
+func (m *MockRegistrationTokenStore) Initialize(ctx context.Context) error { return nil }
+func (m *MockRegistrationTokenStore) Close() error                         { return nil }
 
 // Test provider registration
 func TestRegisterStorageProvider(t *testing.T) {

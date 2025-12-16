@@ -742,13 +742,14 @@ For complete version history and release notes, see [CHANGELOG.md](../../CHANGEL
    - **Testing**: Comprehensive integration tests validate persistence across restarts
    - **Status**: ✅ **COMPLETE** (PR #266)
 
-2. **Registration Token Storage (CRITICAL)** (Issue #263) - 5 story points
-   - **Current State**: `features/controller/server/server.go:208` uses `NewMemoryStore()` with comment "ALPHA LIMITATION: Using in-memory store - tokens lost on restart"
-   - **Impact**: Registration tokens are lost on controller restart, breaking steward registration in production
-   - **Fix**: Implement `registration.Store` backed by `pkg/storage` (git/database)
-   - **Testing**: MUST test with actual storage backend, not in-memory mock
-   - **Files**: `pkg/registration/store.go`, `features/controller/server/server.go`
-   - **Depends on**: Issue #262 (tokens need tenant context)
+2. **Registration Token Storage (CRITICAL)** (Issue #263) - 5 story points ✅ COMPLETED
+   - **Implemented**: RegistrationTokenStore interface in `pkg/storage/interfaces/registration_store.go`
+   - **Git Provider**: `pkg/storage/providers/git/registration_store.go` - JSON file persistence with path traversal protection
+   - **Database Provider**: `pkg/storage/providers/database/registration_store.go` - PostgreSQL with connection pooling
+   - **Adapter**: `pkg/registration/adapter.go` bridges storage interfaces to registration.Store
+   - **Integration**: `features/controller/server/server.go` now uses durable storage via StorageManager
+   - **Testing**: Comprehensive integration tests validate persistence across restarts
+   - **Status**: ✅ **COMPLETE** (PR #269)
 
 3. **RBAC Storage (HIGH)** - 4 story points ✅ **ALREADY MIGRATED**
    - **Current State**: `features/controller/server/server.go:96-100` uses `rbac.NewManagerWithStorage()` with pluggable storage
@@ -767,7 +768,7 @@ For complete version history and release notes, see [CHANGELOG.md](../../CHANGEL
    - **Files**: `cmd/cfgcli/cmd/token.go`
    - **Depends on**: Issue #263 (controller API must exist first)
 
-**Actual Remaining Work**: 6 story points (Items #263, #264) - Issue #262 completed
+**Actual Remaining Work**: 1 story point (Item #264) - Issues #262 and #263 completed
 
 **Phase 1.5: Environment Variable Security Hardening** (Issue #250, #251) (6 story points)
 

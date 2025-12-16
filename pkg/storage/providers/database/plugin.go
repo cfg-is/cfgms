@@ -180,6 +180,22 @@ func (p *DatabaseProvider) CreateTenantStore(config map[string]interface{}) (int
 	return store, nil
 }
 
+func (p *DatabaseProvider) CreateRegistrationTokenStore(config map[string]interface{}) (interfaces.RegistrationTokenStore, error) {
+	// Get database connection string from config
+	dsn, err := p.getDSN(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+
+	// Create the database registration token store
+	store, err := NewDatabaseRegistrationTokenStore(dsn, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database registration token store: %w", err)
+	}
+
+	return store, nil
+}
+
 // getDSN extracts and validates the database connection string from configuration
 func (p *DatabaseProvider) getDSN(config map[string]interface{}) (string, error) {
 	// First, try to get a complete DSN
