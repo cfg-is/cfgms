@@ -116,8 +116,8 @@ type CORSConfig struct {
 func (s *Server) configureCORS() {
     s.corsConfig = &CORSConfig{
         AllowedOrigins: []string{
-            "https://app.cfgms.com",
-            "https://admin.cfgms.com",
+            "https://portal.example.com",
+            "https://portal.example.com",
             "http://localhost:3000",  // Development
         },
     }
