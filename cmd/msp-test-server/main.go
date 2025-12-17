@@ -326,7 +326,7 @@ func main() {
 	})
 
 	http.HandleFunc("/list-clients", func(w http.ResponseWriter, r *http.Request) {
-		clients, err := clientStore.ListClientTenants("")
+		clients, err := clientStore.ListClientTenants(r.Context(), "")
 		if err != nil {
 			http.Error(w, fmt.Sprintf("Error: %v", err), http.StatusInternalServerError)
 			return

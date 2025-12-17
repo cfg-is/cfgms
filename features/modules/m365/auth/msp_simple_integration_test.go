@@ -110,23 +110,23 @@ func TestMSPCompleteFlow(t *testing.T) {
 			// Test Step 3: Verify storage
 			t.Run("VerifyClientStorage", func(t *testing.T) {
 				// Retrieve by tenant ID
-				stored, err := clientStore.GetClientTenant(client.TenantID)
+				stored, err := clientStore.GetClientTenant(context.Background(), client.TenantID)
 				require.NoError(t, err, "Should retrieve stored client")
 				assert.Equal(t, client.ClientIdentifier, stored.ClientIdentifier)
 				assert.Equal(t, client.TenantName, stored.TenantName)
 
 				// Retrieve by client identifier
-				storedByID, err := clientStore.GetClientTenantByIdentifier(clientIdentifier)
+				storedByID, err := clientStore.GetClientTenantByIdentifier(context.Background(), clientIdentifier)
 				require.NoError(t, err, "Should retrieve by identifier")
 				assert.Equal(t, client.TenantID, storedByID.TenantID)
 
 				// List all clients
-				allClients, err := clientStore.ListClientTenants("")
+				allClients, err := clientStore.ListClientTenants(context.Background(), "")
 				require.NoError(t, err, "Should list all clients")
 				assert.Len(t, allClients, 1, "Should have one client")
 
 				// List active clients
-				activeClients, err := clientStore.ListClientTenants(ClientTenantStatusActive)
+				activeClients, err := clientStore.ListClientTenants(context.Background(), ClientTenantStatusActive)
 				require.NoError(t, err, "Should list active clients")
 				assert.Len(t, activeClients, 1, "Should have one active client")
 
@@ -135,20 +135,20 @@ func TestMSPCompleteFlow(t *testing.T) {
 				// Test Step 4: Client management operations
 				t.Run("ClientManagementOperations", func(t *testing.T) {
 					// Suspend client
-					err := clientStore.UpdateClientTenantStatus(client.TenantID, ClientTenantStatusSuspended)
+					err := clientStore.UpdateClientTenantStatus(context.Background(), client.TenantID, ClientTenantStatusSuspended)
 					require.NoError(t, err, "Should update client status")
 
 					// Verify suspension
-					suspended, err := clientStore.GetClientTenant(client.TenantID)
+					suspended, err := clientStore.GetClientTenant(context.Background(), client.TenantID)
 					require.NoError(t, err, "Should retrieve suspended client")
 					assert.Equal(t, ClientTenantStatusSuspended, suspended.Status)
 
 					// Reactivate client
-					err = clientStore.UpdateClientTenantStatus(client.TenantID, ClientTenantStatusActive)
+					err = clientStore.UpdateClientTenantStatus(context.Background(), client.TenantID, ClientTenantStatusActive)
 					require.NoError(t, err, "Should reactivate client")
 
 					// Verify reactivation
-					reactivated, err := clientStore.GetClientTenant(client.TenantID)
+					reactivated, err := clientStore.GetClientTenant(context.Background(), client.TenantID)
 					require.NoError(t, err, "Should retrieve reactivated client")
 					assert.Equal(t, ClientTenantStatusActive, reactivated.Status)
 
@@ -215,11 +215,11 @@ func TestMSPErrorScenarios(t *testing.T) {
 			CreatedAt:        time.Now().Add(-2 * time.Hour),
 		}
 
-		err := clientStore.StoreAdminConsentRequest(expiredRequest)
+		err := clientStore.StoreAdminConsentRequest(context.Background(), expiredRequest)
 		require.NoError(t, err)
 
 		// Try to retrieve expired request
-		_, err = clientStore.GetAdminConsentRequest(expiredRequest.State)
+		_, err = clientStore.GetAdminConsentRequest(context.Background(), expiredRequest.State)
 		assert.Error(t, err, "Should reject expired request")
 		assert.Contains(t, err.Error(), "expired", "Error should mention expiration")
 

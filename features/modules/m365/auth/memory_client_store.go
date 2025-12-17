@@ -3,13 +3,16 @@
 package auth
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
 )
 
 // MemoryClientTenantStore provides an in-memory implementation of ClientTenantStore
-// This is suitable for development and testing. For production, use a database implementation.
+// ⚠️ TEST ONLY: This implementation is for testing purposes only and should NEVER be used in production.
+// For production deployments, use StorageClientTenantStoreAdapter with pkg/storage providers.
+// Story #274: This is a test-only implementation that should be migrated to storage-backed stores.
 type MemoryClientTenantStore struct {
 	// Client tenant storage
 	clientTenants      map[string]*ClientTenant // tenantID -> ClientTenant
@@ -38,7 +41,7 @@ func NewMemoryClientTenantStore() *MemoryClientTenantStore {
 // Client tenant management
 
 // StoreClientTenant stores a client tenant
-func (s *MemoryClientTenantStore) StoreClientTenant(client *ClientTenant) error {
+func (s *MemoryClientTenantStore) StoreClientTenant(ctx context.Context, client *ClientTenant) error {
 	s.clientTenantsMutex.Lock()
 	defer s.clientTenantsMutex.Unlock()
 
@@ -53,7 +56,7 @@ func (s *MemoryClientTenantStore) StoreClientTenant(client *ClientTenant) error 
 }
 
 // GetClientTenant retrieves a client tenant by tenant ID
-func (s *MemoryClientTenantStore) GetClientTenant(tenantID string) (*ClientTenant, error) {
+func (s *MemoryClientTenantStore) GetClientTenant(ctx context.Context, tenantID string) (*ClientTenant, error) {
 	s.clientTenantsMutex.RLock()
 	defer s.clientTenantsMutex.RUnlock()
 
@@ -68,7 +71,7 @@ func (s *MemoryClientTenantStore) GetClientTenant(tenantID string) (*ClientTenan
 }
 
 // GetClientTenantByIdentifier retrieves a client tenant by client identifier
-func (s *MemoryClientTenantStore) GetClientTenantByIdentifier(clientIdentifier string) (*ClientTenant, error) {
+func (s *MemoryClientTenantStore) GetClientTenantByIdentifier(ctx context.Context, clientIdentifier string) (*ClientTenant, error) {
 	s.clientTenantsMutex.RLock()
 	defer s.clientTenantsMutex.RUnlock()
 
@@ -83,7 +86,7 @@ func (s *MemoryClientTenantStore) GetClientTenantByIdentifier(clientIdentifier s
 }
 
 // ListClientTenants returns all client tenants, optionally filtered by status
-func (s *MemoryClientTenantStore) ListClientTenants(status ClientTenantStatus) ([]*ClientTenant, error) {
+func (s *MemoryClientTenantStore) ListClientTenants(ctx context.Context, status ClientTenantStatus) ([]*ClientTenant, error) {
 	s.clientTenantsMutex.RLock()
 	defer s.clientTenantsMutex.RUnlock()
 
@@ -104,7 +107,7 @@ func (s *MemoryClientTenantStore) ListClientTenants(status ClientTenantStatus) (
 }
 
 // UpdateClientTenantStatus updates the status of a client tenant
-func (s *MemoryClientTenantStore) UpdateClientTenantStatus(tenantID string, status ClientTenantStatus) error {
+func (s *MemoryClientTenantStore) UpdateClientTenantStatus(ctx context.Context, tenantID string, status ClientTenantStatus) error {
 	s.clientTenantsMutex.Lock()
 	defer s.clientTenantsMutex.Unlock()
 
@@ -121,7 +124,7 @@ func (s *MemoryClientTenantStore) UpdateClientTenantStatus(tenantID string, stat
 }
 
 // DeleteClientTenant removes a client tenant
-func (s *MemoryClientTenantStore) DeleteClientTenant(tenantID string) error {
+func (s *MemoryClientTenantStore) DeleteClientTenant(ctx context.Context, tenantID string) error {
 	s.clientTenantsMutex.Lock()
 	defer s.clientTenantsMutex.Unlock()
 
@@ -140,7 +143,7 @@ func (s *MemoryClientTenantStore) DeleteClientTenant(tenantID string) error {
 // Admin consent request management
 
 // StoreAdminConsentRequest stores an admin consent request
-func (s *MemoryClientTenantStore) StoreAdminConsentRequest(request *AdminConsentRequest) error {
+func (s *MemoryClientTenantStore) StoreAdminConsentRequest(ctx context.Context, request *AdminConsentRequest) error {
 	s.consentRequestsMutex.Lock()
 	defer s.consentRequestsMutex.Unlock()
 
@@ -149,7 +152,7 @@ func (s *MemoryClientTenantStore) StoreAdminConsentRequest(request *AdminConsent
 }
 
 // GetAdminConsentRequest retrieves an admin consent request by state
-func (s *MemoryClientTenantStore) GetAdminConsentRequest(state string) (*AdminConsentRequest, error) {
+func (s *MemoryClientTenantStore) GetAdminConsentRequest(ctx context.Context, state string) (*AdminConsentRequest, error) {
 	s.consentRequestsMutex.RLock()
 	defer s.consentRequestsMutex.RUnlock()
 
@@ -169,7 +172,7 @@ func (s *MemoryClientTenantStore) GetAdminConsentRequest(state string) (*AdminCo
 }
 
 // DeleteAdminConsentRequest removes an admin consent request
-func (s *MemoryClientTenantStore) DeleteAdminConsentRequest(state string) error {
+func (s *MemoryClientTenantStore) DeleteAdminConsentRequest(ctx context.Context, state string) error {
 	s.consentRequestsMutex.Lock()
 	defer s.consentRequestsMutex.Unlock()
 
