@@ -637,7 +637,9 @@ func TestJITAccessManager_ExtendAccess_Errors(t *testing.T) {
 			err := jam.ExtendAccess(ctx, grantID, tt.extensionDur, tt.requesterID, "Test extension")
 
 			assert.Error(t, err)
-			assert.Contains(t, err.Error(), tt.expectedErr)
+			if err != nil {
+				assert.Contains(t, err.Error(), tt.expectedErr)
+			}
 		})
 	}
 }
