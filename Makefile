@@ -79,7 +79,7 @@ build-cross-platform:
 		mkdir -p $$OUTDIR; \
 		go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o $$OUTDIR/${STEWARD_BINARY}$$EXT ./cmd/steward && \
 		go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o $$OUTDIR/${CONTROLLER_BINARY}$$EXT ./cmd/controller && \
-		go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o $$OUTDIR/${CLI_BINARY}$$EXT ./cmd/cfgcli && \
+		go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o $$OUTDIR/${CLI_BINARY}$$EXT ./cmd/cfg && \
 		go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o $$OUTDIR/${CERT_MANAGER_BINARY}$$EXT ./cmd/cert-manager || exit 1; \
 		echo "  ✅ $$GOOS/$$GOARCH complete"; \
 	done
@@ -100,7 +100,7 @@ build-cross-validate:
 		ERROR_LOG=$$(mktemp); \
 		if go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o /dev/null ./cmd/steward 2>$$ERROR_LOG && \
 		   go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o /dev/null ./cmd/controller 2>>$$ERROR_LOG && \
-		   go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o /dev/null ./cmd/cfgcli 2>>$$ERROR_LOG && \
+		   go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o /dev/null ./cmd/cfg 2>>$$ERROR_LOG && \
 		   go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o /dev/null ./cmd/cert-manager 2>>$$ERROR_LOG; then \
 			echo "✅ PASS"; \
 			rm -f $$ERROR_LOG; \
