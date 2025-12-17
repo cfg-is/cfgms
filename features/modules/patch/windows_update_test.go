@@ -90,7 +90,7 @@ func TestWindowsUpdateManager_ListInstalledPatches(t *testing.T) {
 	for _, p := range patches {
 		assert.NotEmpty(t, p.ID, "Patch ID should not be empty")
 		assert.NotEmpty(t, p.Title, "Patch title should not be empty")
-		assert.False(t, p.InstallDate.IsZero(), "Install date should be set")
+		assert.False(t, p.ReleaseDate.IsZero(), "Release date should be set")
 	}
 }
 
@@ -138,8 +138,8 @@ func TestWindowsUpdateManager_InstallPatches_TestMode(t *testing.T) {
 
 	// Create config in test mode (won't actually install)
 	config := &patch.Config{
-		Type:     "security",
-		TestMode: true,
+		PatchType: "security",
+		TestMode:  true,
 	}
 
 	// This should not fail even if patches are available
