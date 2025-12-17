@@ -129,10 +129,13 @@ jobs:
         echo "✅ Docker services ready"
 
     - name: Run Integration Tests
-      env:
-        CFGMS_TEST_INTEGRATION: "1"  # Enable integration tests
       run: |
         echo "🧪 Running integration tests with Docker infrastructure..."
+        # Source test environment variables from make test-integration-setup
+        set -a
+        source .env.test
+        set +a
+        export CFGMS_TEST_INTEGRATION=1
         go test -race -timeout=10m ./pkg/testing/storage/... ./features/controller/server/...
         echo "✅ Integration tests completed"
 
