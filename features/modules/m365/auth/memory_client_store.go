@@ -12,7 +12,7 @@ import (
 // ⚠️ TEST ONLY: This implementation is for testing purposes only and should NEVER be used in production.
 // For production deployments, use StorageClientTenantStoreAdapter with pkg/storage providers.
 // Story #274: This is a test-only implementation that should be migrated to storage-backed stores.
-type MemoryClientTenantStore struct{
+type MemoryClientTenantStore struct {
 	// Client tenant storage
 	clientTenants      map[string]*ClientTenant // tenantID -> ClientTenant
 	clientTenantsByID  map[string]*ClientTenant // clientIdentifier -> ClientTenant

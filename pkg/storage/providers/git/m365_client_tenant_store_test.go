@@ -107,7 +107,7 @@ func TestGitM365ClientTenantStore_ClientTenant_CRUD(t *testing.T) {
 
 	store, err := NewGitM365ClientTenantStore(tempDir, "", secretStore)
 	require.NoError(t, err)
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	ctx := context.Background()
 
@@ -177,7 +177,7 @@ func TestGitM365ClientTenantStore_ListClientTenants(t *testing.T) {
 
 	store, err := NewGitM365ClientTenantStore(tempDir, "", secretStore)
 	require.NoError(t, err)
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	ctx := context.Background()
 
@@ -242,7 +242,7 @@ func TestGitM365ClientTenantStore_UpdateClientTenantStatus(t *testing.T) {
 
 	store, err := NewGitM365ClientTenantStore(tempDir, "", secretStore)
 	require.NoError(t, err)
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	ctx := context.Background()
 
@@ -276,7 +276,7 @@ func TestGitM365ClientTenantStore_AdminConsentRequest_CRUD(t *testing.T) {
 
 	store, err := NewGitM365ClientTenantStore(tempDir, "", secretStore)
 	require.NoError(t, err)
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	ctx := context.Background()
 
@@ -321,7 +321,7 @@ func TestGitM365ClientTenantStore_GetAdminConsentRequest_Expired(t *testing.T) {
 
 	store, err := NewGitM365ClientTenantStore(tempDir, "", secretStore)
 	require.NoError(t, err)
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	ctx := context.Background()
 
@@ -350,7 +350,7 @@ func TestGitM365ClientTenantStore_CleanupExpiredRequests(t *testing.T) {
 
 	store, err := NewGitM365ClientTenantStore(tempDir, "", secretStore)
 	require.NoError(t, err)
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	ctx := context.Background()
 
@@ -398,7 +398,7 @@ func TestGitM365ClientTenantStore_GetStats(t *testing.T) {
 
 	store, err := NewGitM365ClientTenantStore(tempDir, "", secretStore)
 	require.NoError(t, err)
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	ctx := context.Background()
 
@@ -458,7 +458,7 @@ func TestGitM365ClientTenantStore_PathTraversalPrevention(t *testing.T) {
 
 	store, err := NewGitM365ClientTenantStore(tempDir, "", secretStore)
 	require.NoError(t, err)
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	ctx := context.Background()
 
@@ -500,7 +500,7 @@ func TestGitM365ClientTenantStore_Initialize(t *testing.T) {
 
 	store, err := NewGitM365ClientTenantStore(tempDir, "", secretStore)
 	require.NoError(t, err)
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	ctx := context.Background()
 
@@ -546,7 +546,7 @@ func TestGitM365ClientTenantStore_DataPersistence(t *testing.T) {
 	{
 		store, err := NewGitM365ClientTenantStore(tempDir, "", secretStore)
 		require.NoError(t, err)
-		defer store.Close()
+		defer func() { _ = store.Close() }()
 
 		retrieved, err := store.GetClientTenant(ctx, "persistent-tenant")
 		require.NoError(t, err)

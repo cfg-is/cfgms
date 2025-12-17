@@ -268,7 +268,9 @@ func (s *DatabaseM365ClientTenantStore) ListClientTenants(ctx context.Context, s
 	if err != nil {
 		return nil, fmt.Errorf("failed to list client tenants: %w", err)
 	}
-	defer rows.Close()
+	defer func() {
+		_ = rows.Close()
+	}()
 
 	var clients []*storageInterfaces.M365ClientTenant
 
@@ -500,7 +502,7 @@ func (s *DatabaseM365ClientTenantStore) GetStats(ctx context.Context) (*storageI
 	if err != nil {
 		return nil, fmt.Errorf("failed to get client counts by status: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var status string

@@ -37,10 +37,10 @@ type M365ClientTenantStore interface {
 // OAuth client credentials are stored separately in encrypted form
 type M365ClientTenant struct {
 	ID               string                 `json:"id"`
-	TenantID         string                 `json:"tenant_id"`         // Client's Azure AD tenant ID
-	TenantName       string                 `json:"tenant_name"`       // Client organization name
-	DomainName       string                 `json:"domain_name"`       // Primary domain (e.g., client.com)
-	AdminEmail       string                 `json:"admin_email"`       // Admin who consented
+	TenantID         string                 `json:"tenant_id"`   // Client's Azure AD tenant ID
+	TenantName       string                 `json:"tenant_name"` // Client organization name
+	DomainName       string                 `json:"domain_name"` // Primary domain (e.g., client.com)
+	AdminEmail       string                 `json:"admin_email"` // Admin who consented
 	ConsentedAt      time.Time              `json:"consented_at"`
 	Status           M365ClientTenantStatus `json:"status"`
 	ClientIdentifier string                 `json:"client_identifier"` // CFGMS internal client ID
@@ -73,8 +73,8 @@ type M365AdminConsentRequest struct {
 
 // M365ClientTenantStats provides statistics about stored M365 client tenant data
 type M365ClientTenantStats struct {
-	TotalClients           int                               `json:"total_clients"`
-	PendingConsentRequests int                               `json:"pending_consent_requests"`
-	ClientsByStatus        map[M365ClientTenantStatus]int    `json:"clients_by_status"`
-	LastUpdated            time.Time                         `json:"last_updated"`
+	TotalClients           int                            `json:"total_clients"`
+	PendingConsentRequests int                            `json:"pending_consent_requests"`
+	ClientsByStatus        map[M365ClientTenantStatus]int `json:"clients_by_status"`
+	LastUpdated            time.Time                      `json:"last_updated"`
 }
