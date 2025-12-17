@@ -79,9 +79,16 @@ func TestLoggingMigration(t *testing.T) {
 	assert.Equal(t, tenantID, extractedTenant, "Tenant ID should be extracted correctly from context")
 
 	// Create a test script configuration
+	// Use platform-appropriate shell
+	shell := ShellBash
+	scriptContent := "echo 'Hello World'"
+	if runtime.GOOS == "windows" {
+		shell = ShellPowerShell
+		scriptContent = "Write-Output 'Hello World'"
+	}
 	scriptConfig := &ScriptConfig{
-		Content:       "echo 'Hello World'",
-		Shell:         "bash", // Use simple shell name for cross-platform compatibility
+		Content:       scriptContent,
+		Shell:         shell,
 		Timeout:       30 * time.Second,
 		SigningPolicy: SigningPolicyNone,
 	}
