@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2025 CFGMS Contributors
-// Package cmd implements the CLI commands for cfgcli
+// Package cmd implements the CLI commands for cfg
 package cmd
 
 import (
@@ -18,9 +18,9 @@ var (
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
-	Use:   "cfgcli",
+	Use:   "cfg",
 	Short: "CFGMS Configuration Management CLI",
-	Long: `cfgcli is the command-line interface for CFGMS (Config Management System).
+	Long: `cfg is the command-line interface for CFGMS (Config Management System).
 It provides tools for comparing, validating, and managing configuration files
 across different environments and versions.`,
 	SilenceUsage:  true,
@@ -53,7 +53,7 @@ var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Show version information",
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("cfgcli version 0.3.0-alpha")
+		fmt.Println("cfg version 0.3.0-alpha")
 		fmt.Println("CFGMS Configuration Management System")
 	},
 }

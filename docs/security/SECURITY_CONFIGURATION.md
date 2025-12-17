@@ -66,13 +66,13 @@ Implement regular API key rotation (recommended: every 90 days):
 
 ```bash
 # Generate new API key
-./cfgcli api-keys create --name "production-key-2025-Q1" --ttl 90d
+./cfg api-keys create --name "production-key-2025-Q1" --ttl 90d
 
 # Update secret management system
 vault kv put secret/cfgms/production api_key="<new-key>"
 
 # Revoke old key after validation
-./cfgcli api-keys revoke <old-key-id>
+./cfg api-keys revoke <old-key-id>
 ```
 
 #### Logging Security

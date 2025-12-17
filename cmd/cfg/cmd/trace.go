@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2025 CFGMS Contributors
-// Package cmd implements the CLI commands for cfgcli
+// Package cmd implements the CLI commands for cfg
 package cmd
 
 import (
@@ -36,10 +36,10 @@ Request IDs are included in controller logs and API responses for debugging.
 
 Examples:
   # View trace for a specific request
-  cfgcli trace abc123def456 --url=https://controller.example.com
+  cfg trace abc123def456 --url=https://controller.example.com
 
   # Export trace as JSON
-  cfgcli trace abc123def456 --url=https://controller.example.com --format=json`,
+  cfg trace abc123def456 --url=https://controller.example.com --format=json`,
 	Args: cobra.ExactArgs(1),
 	RunE: runTrace,
 }

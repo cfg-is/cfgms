@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2025 CFGMS Contributors
-// Package cmd implements the CLI commands for cfgcli
+// Package cmd implements the CLI commands for cfg
 package cmd
 
 import (
@@ -45,16 +45,16 @@ The controller URL and API key can be provided via flags or environment variable
 
 Examples:
   # Create a token that expires in 7 days
-  cfgcli token create --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883 --expires=7d
+  cfg token create --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883 --expires=7d
 
   # Create a single-use token for production group
-  cfgcli token create --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883 --group=production --single-use
+  cfg token create --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883 --group=production --single-use
 
   # List all tokens for a tenant
-  cfgcli token list --tenant-id=acme-corp
+  cfg token list --tenant-id=acme-corp
 
   # Revoke a token
-  cfgcli token revoke cfgms_reg_abc123def456`,
+  cfg token revoke cfgms_reg_abc123def456`,
 }
 
 // tokenCreateCmd represents the token create command
@@ -74,13 +74,13 @@ Expiration formats:
 
 Examples:
   # 7-day expiring token
-  cfgcli token create --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883 --expires=7d
+  cfg token create --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883 --expires=7d
 
   # Single-use token
-  cfgcli token create --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883 --single-use
+  cfg token create --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883 --single-use
 
   # Token for specific group
-  cfgcli token create --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883 --group=production`,
+  cfg token create --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883 --group=production`,
 	RunE: runTokenCreate,
 }
 
@@ -94,10 +94,10 @@ By default, lists all tokens. Use --tenant-id to filter by tenant.
 
 Examples:
   # List all tokens
-  cfgcli token list
+  cfg token list
 
   # List tokens for a specific tenant
-  cfgcli token list --tenant-id=acme-corp`,
+  cfg token list --tenant-id=acme-corp`,
 	RunE: runTokenList,
 }
 
@@ -111,7 +111,7 @@ The token will be marked as revoked but not deleted from storage.
 This allows for audit trail of token usage.
 
 Examples:
-  cfgcli token revoke cfgms_reg_abc123def456`,
+  cfg token revoke cfgms_reg_abc123def456`,
 	Args: cobra.ExactArgs(1),
 	RunE: runTokenRevoke,
 }
@@ -126,7 +126,7 @@ This permanently removes the token. Use 'revoke' instead if you want
 to maintain an audit trail.
 
 Examples:
-  cfgcli token delete cfgms_reg_abc123def456`,
+  cfg token delete cfgms_reg_abc123def456`,
 	Args: cobra.ExactArgs(1),
 	RunE: runTokenDelete,
 }

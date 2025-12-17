@@ -160,7 +160,7 @@ For complete version history and release notes, see [CHANGELOG.md](../../CHANGEL
   - [x] Highlight breaking changes and security impacts
   - [x] Export diffs in multiple formats (text, JSON, HTML, unified, side-by-side, markdown)
   - [x] Integration with approval workflows for change review
-  - [x] CLI integration via cfgcli diff command with advanced filtering
+  - [x] CLI integration via cfg diff command with advanced filtering
   - [x] Three-way comparison support with conflict detection
   - [x] Comprehensive test suite with edge case handling
 
@@ -575,7 +575,7 @@ For complete version history and release notes, see [CHANGELOG.md](../../CHANGEL
   - ✅ Email alerting via SMTP (simple alerts, no tiered escalation)
   - ✅ Request tracing for troubleshooting (request ID propagation, CLI reconstruction)
   - ✅ Health API endpoints (simple + detailed + Prometheus)
-  - ✅ CLI tools (`cfgcli controller status`, `cfgcli trace <request_id>`)
+  - ✅ CLI tools (`cfg controller status`, `cfg trace <request_id>`)
   - ✅ 7-day performance retention (30-second collection interval)
   - ✅ Uses existing storage providers (in-memory for alpha, pluggable architecture ready)
   - ✅ <1% overhead validated (0 goroutine growth, 9.31 KB memory for 30 snapshots)
@@ -599,8 +599,8 @@ For complete version history and release notes, see [CHANGELOG.md](../../CHANGEL
   - [x] Remove google.golang.org/grpc from go.mod
   - [x] Update Makefile proto generation to skip gRPC
   - [x] Validate all tests pass after removal
-- [x] **Rename cfgctl to cfgcli** (Issue #221) - 1 day ✅ COMPLETED
-  - [x] Rename cmd/cfgctl directory to cmd/cfgcli
+- [x] **Rename cfgctl to cfg** (Issue #221) - 1 day ✅ COMPLETED
+  - [x] Rename cmd/cfgctl directory to cmd/cfg
   - [x] Update all import paths referencing cfgctl
   - [x] Update documentation and examples
   - [x] Update build scripts and Makefile targets
@@ -764,11 +764,11 @@ For complete version history and release notes, see [CHANGELOG.md](../../CHANGEL
 5. **CLI Token Storage (LOW)** (Issue #264) - 1 story point ✅ COMPLETED
    - **Implemented**: CLI now uses controller REST API for all token operations
    - **API Endpoints**: Added `/api/v1/registration/tokens` endpoints (create, list, get, delete, revoke)
-   - **API Client**: `cmd/cfgcli/cmd/api_client.go` provides HTTP client for controller API
-   - **CLI Commands**: `cfgcli token create|list|revoke|delete` all use controller API
+   - **API Client**: `cmd/cfg/cmd/api_client.go` provides HTTP client for controller API
+   - **CLI Commands**: `cfg token create|list|revoke|delete` all use controller API
    - **Configuration**: `CFGMS_API_URL` and `CFGMS_API_KEY` env vars or `--api-url`/`--api-key` flags
-   - **Files Modified**: `cmd/cfgcli/cmd/token.go`, `features/controller/api/server.go`
-   - **Files Added**: `cmd/cfgcli/cmd/api_client.go`, `features/controller/api/handlers_registration_tokens.go`
+   - **Files Modified**: `cmd/cfg/cmd/token.go`, `features/controller/api/server.go`
+   - **Files Added**: `cmd/cfg/cmd/api_client.go`, `features/controller/api/handlers_registration_tokens.go`
    - **Status**: ✅ **COMPLETE** (PR #270)
 
 **Actual Remaining Work**: 0 story points - All EPIC #247 items completed! 🎉

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/cfgis/cfgms/cmd/cfgcli/cmd"
+	"github.com/cfgis/cfgms/cmd/cfg/cmd"
 )
 
 func main() {
