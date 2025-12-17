@@ -771,16 +771,16 @@ For complete version history and release notes, see [CHANGELOG.md](../../CHANGEL
    - **Location**: `features/templates/store.go:19`
    - **Action**: No action needed - test-only code
 
-**🚧 REMAINING WORK (8 story points)**:
+**🚧 REMAINING WORK (3 story points)**:
 
-6. **M365 Auth Client Tenant Storage (CRITICAL)** (Issue #274) - 5 story points 🚨 IN PROGRESS
-   - **Current State**: `features/modules/m365/auth/memory_client_store.go:24` uses `NewMemoryClientTenantStore()` with comment "suitable for development and testing"
-   - **Impact**: OAuth client credentials and admin consent requests lost on controller restart
-   - **Severity**: CRITICAL - OAuth credential loss is a security incident
-   - **Fix Required**: Implement storage-backed `ClientTenantStore` using `pkg/storage` + `pkg/secrets` encryption
-   - **Files**: `features/modules/m365/auth/memory_client_store.go`
+6. **M365 Auth Client Tenant Storage (CRITICAL)** (Issue #274) - 5 story points ✅ COMPLETED
+   - **Current State**: ✅ Migrated to durable storage with `pkg/storage` + `pkg/secrets` encryption
+   - **Implementation**: Git and database providers with comprehensive tests (12 test cases)
+   - **Security**: OAuth credentials encrypted, path traversal protection, no cleartext storage
+   - **Files**: `pkg/storage/providers/git/m365_client_tenant_store.go`, `pkg/storage/providers/database/m365_client_tenant_store.go`
    - **Issue**: #274
-   - **Status**: Story created, ready to work
+   - **PR**: #276
+   - **Status**: ✅ COMPLETED - All acceptance criteria met
 
 7. **Rollback Operation Storage (MEDIUM)** (Issue #275) - 3 story points 🚨 IN PROGRESS
    - **Current State**: `features/config/rollback/store.go:178` has `DatabaseRollbackStore` that is NOT IMPLEMENTED (just wraps `InMemoryRollbackStore`)
@@ -796,7 +796,7 @@ For complete version history and release notes, see [CHANGELOG.md](../../CHANGEL
 
 Comprehensive codebase scan completed:
 
-- **Verified Foot-guns Found**: 2 (#274, #275)
+- **Verified Foot-guns Found**: 2 (#274 ✅ FIXED, #275)
 - **Test-Only Memory Stores** (Legitimate):
   - `features/templates/store.go` - Only used in tests
   - `pkg/registration/store.go` - NewMemoryStore() exists but unused
@@ -807,10 +807,12 @@ Comprehensive codebase scan completed:
 
 **Next Steps**:
 
-1. Complete Story #274 (M365 Auth Storage) - 5 points
+1. ✅ ~~Complete Story #274 (M365 Auth Storage) - 5 points~~ COMPLETED
 2. Complete Story #275 (Rollback Storage) - 3 points
 3. Run final `make check-architecture` validation
 4. Close Epic #247 when all stories complete
+
+**Epic #247 Progress**: 1/2 stories complete (50%)
 
 **Phase 1.5: Environment Variable Security Hardening** (Issue #250, #251) (6 story points)
 
