@@ -13,19 +13,17 @@ import (
 // Story #274: M365 Auth Client Tenant Storage Migration
 type StorageClientTenantStoreAdapter struct {
 	store interfaces.M365ClientTenantStore
-	ctx   context.Context
 }
 
 // NewStorageClientTenantStoreAdapter creates a new storage adapter
 func NewStorageClientTenantStoreAdapter(store interfaces.M365ClientTenantStore) *StorageClientTenantStoreAdapter {
 	return &StorageClientTenantStoreAdapter{
 		store: store,
-		ctx:   context.Background(),
 	}
 }
 
 // StoreClientTenant implements ClientTenantStore.StoreClientTenant
-func (a *StorageClientTenantStoreAdapter) StoreClientTenant(client *ClientTenant) error {
+func (a *StorageClientTenantStoreAdapter) StoreClientTenant(ctx context.Context, client *ClientTenant) error {
 	// Convert to storage interface type
 	storageClient := &interfaces.M365ClientTenant{
 		ID:               client.ID,
@@ -41,12 +39,12 @@ func (a *StorageClientTenantStoreAdapter) StoreClientTenant(client *ClientTenant
 		UpdatedAt:        client.UpdatedAt,
 	}
 
-	return a.store.StoreClientTenant(a.ctx, storageClient)
+	return a.store.StoreClientTenant(ctx, storageClient)
 }
 
 // GetClientTenant implements ClientTenantStore.GetClientTenant
-func (a *StorageClientTenantStoreAdapter) GetClientTenant(tenantID string) (*ClientTenant, error) {
-	storageClient, err := a.store.GetClientTenant(a.ctx, tenantID)
+func (a *StorageClientTenantStoreAdapter) GetClientTenant(ctx context.Context, tenantID string) (*ClientTenant, error) {
+	storageClient, err := a.store.GetClientTenant(ctx, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -68,8 +66,8 @@ func (a *StorageClientTenantStoreAdapter) GetClientTenant(tenantID string) (*Cli
 }
 
 // GetClientTenantByIdentifier implements ClientTenantStore.GetClientTenantByIdentifier
-func (a *StorageClientTenantStoreAdapter) GetClientTenantByIdentifier(clientIdentifier string) (*ClientTenant, error) {
-	storageClient, err := a.store.GetClientTenantByIdentifier(a.ctx, clientIdentifier)
+func (a *StorageClientTenantStoreAdapter) GetClientTenantByIdentifier(ctx context.Context, clientIdentifier string) (*ClientTenant, error) {
+	storageClient, err := a.store.GetClientTenantByIdentifier(ctx, clientIdentifier)
 	if err != nil {
 		return nil, err
 	}
@@ -91,9 +89,9 @@ func (a *StorageClientTenantStoreAdapter) GetClientTenantByIdentifier(clientIden
 }
 
 // ListClientTenants implements ClientTenantStore.ListClientTenants
-func (a *StorageClientTenantStoreAdapter) ListClientTenants(status ClientTenantStatus) ([]*ClientTenant, error) {
+func (a *StorageClientTenantStoreAdapter) ListClientTenants(ctx context.Context, status ClientTenantStatus) ([]*ClientTenant, error) {
 	storageStatus := interfaces.M365ClientTenantStatus(status)
-	storageClients, err := a.store.ListClientTenants(a.ctx, storageStatus)
+	storageClients, err := a.store.ListClientTenants(ctx, storageStatus)
 	if err != nil {
 		return nil, err
 	}
@@ -120,18 +118,18 @@ func (a *StorageClientTenantStoreAdapter) ListClientTenants(status ClientTenantS
 }
 
 // UpdateClientTenantStatus implements ClientTenantStore.UpdateClientTenantStatus
-func (a *StorageClientTenantStoreAdapter) UpdateClientTenantStatus(tenantID string, status ClientTenantStatus) error {
+func (a *StorageClientTenantStoreAdapter) UpdateClientTenantStatus(ctx context.Context, tenantID string, status ClientTenantStatus) error {
 	storageStatus := interfaces.M365ClientTenantStatus(status)
-	return a.store.UpdateClientTenantStatus(a.ctx, tenantID, storageStatus)
+	return a.store.UpdateClientTenantStatus(ctx, tenantID, storageStatus)
 }
 
 // DeleteClientTenant implements ClientTenantStore.DeleteClientTenant
-func (a *StorageClientTenantStoreAdapter) DeleteClientTenant(tenantID string) error {
-	return a.store.DeleteClientTenant(a.ctx, tenantID)
+func (a *StorageClientTenantStoreAdapter) DeleteClientTenant(ctx context.Context, tenantID string) error {
+	return a.store.DeleteClientTenant(ctx, tenantID)
 }
 
 // StoreAdminConsentRequest implements ClientTenantStore.StoreAdminConsentRequest
-func (a *StorageClientTenantStoreAdapter) StoreAdminConsentRequest(request *AdminConsentRequest) error {
+func (a *StorageClientTenantStoreAdapter) StoreAdminConsentRequest(ctx context.Context, request *AdminConsentRequest) error {
 	// Convert to storage interface type
 	storageRequest := &interfaces.M365AdminConsentRequest{
 		ClientIdentifier: request.ClientIdentifier,
@@ -143,12 +141,12 @@ func (a *StorageClientTenantStoreAdapter) StoreAdminConsentRequest(request *Admi
 		CreatedAt:        request.CreatedAt,
 	}
 
-	return a.store.StoreAdminConsentRequest(a.ctx, storageRequest)
+	return a.store.StoreAdminConsentRequest(ctx, storageRequest)
 }
 
 // GetAdminConsentRequest implements ClientTenantStore.GetAdminConsentRequest
-func (a *StorageClientTenantStoreAdapter) GetAdminConsentRequest(state string) (*AdminConsentRequest, error) {
-	storageRequest, err := a.store.GetAdminConsentRequest(a.ctx, state)
+func (a *StorageClientTenantStoreAdapter) GetAdminConsentRequest(ctx context.Context, state string) (*AdminConsentRequest, error) {
+	storageRequest, err := a.store.GetAdminConsentRequest(ctx, state)
 	if err != nil {
 		return nil, err
 	}
@@ -166,6 +164,6 @@ func (a *StorageClientTenantStoreAdapter) GetAdminConsentRequest(state string) (
 }
 
 // DeleteAdminConsentRequest implements ClientTenantStore.DeleteAdminConsentRequest
-func (a *StorageClientTenantStoreAdapter) DeleteAdminConsentRequest(state string) error {
-	return a.store.DeleteAdminConsentRequest(a.ctx, state)
+func (a *StorageClientTenantStoreAdapter) DeleteAdminConsentRequest(ctx context.Context, state string) error {
+	return a.store.DeleteAdminConsentRequest(ctx, state)
 }

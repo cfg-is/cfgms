@@ -201,7 +201,7 @@ func TestMSPEndToEndClientOnboarding(t *testing.T) {
 						}
 
 						// Store the client tenant using our git storage
-						err := testContext.ClientStore.StoreClientTenant(clientTenant)
+						err := testContext.ClientStore.StoreClientTenant(context.Background(), clientTenant)
 						require.NoError(t, err, "Should store client tenant")
 
 						testContext.ClientTenant = clientTenant
@@ -225,18 +225,18 @@ func TestMSPEndToEndClientOnboarding(t *testing.T) {
 							t.Log("💾 Step 6: Verifying data persistence in git storage")
 
 							// Test 1: Retrieve client by tenant ID
-							storedClient, err := testContext.ClientStore.GetClientTenant(clientTenantID)
+							storedClient, err := testContext.ClientStore.GetClientTenant(context.Background(), clientTenantID)
 							require.NoError(t, err, "Should retrieve client by tenant ID")
 							assert.Equal(t, clientTenant.ClientIdentifier, storedClient.ClientIdentifier)
 							assert.Equal(t, clientTenant.TenantName, storedClient.TenantName)
 
 							// Test 2: Retrieve client by identifier
-							storedByID, err := testContext.ClientStore.GetClientTenantByIdentifier(clientIdentifier)
+							storedByID, err := testContext.ClientStore.GetClientTenantByIdentifier(context.Background(), clientIdentifier)
 							require.NoError(t, err, "Should retrieve client by identifier")
 							assert.Equal(t, clientTenant.TenantID, storedByID.TenantID)
 
 							// Test 3: List all active clients
-							activeClients, err := testContext.ClientStore.ListClientTenants(ClientTenantStatusActive)
+							activeClients, err := testContext.ClientStore.ListClientTenants(context.Background(), ClientTenantStatusActive)
 							require.NoError(t, err, "Should list active clients")
 							assert.GreaterOrEqual(t, len(activeClients), 1, "Should have at least one active client")
 
@@ -260,24 +260,24 @@ func TestMSPEndToEndClientOnboarding(t *testing.T) {
 								t.Log("🔧 Step 7: Testing client management operations")
 
 								// Test suspend client (e.g., for maintenance)
-								err := testContext.ClientStore.UpdateClientTenantStatus(
+								err := testContext.ClientStore.UpdateClientTenantStatus(context.Background(), 
 									clientTenantID,
 									ClientTenantStatusSuspended,
 								)
 								require.NoError(t, err, "Should suspend client")
 
-								suspended, err := testContext.ClientStore.GetClientTenant(clientTenantID)
+								suspended, err := testContext.ClientStore.GetClientTenant(context.Background(), clientTenantID)
 								require.NoError(t, err, "Should retrieve suspended client")
 								assert.Equal(t, ClientTenantStatusSuspended, suspended.Status)
 
 								// Test reactivate client
-								err = testContext.ClientStore.UpdateClientTenantStatus(
+								err = testContext.ClientStore.UpdateClientTenantStatus(context.Background(), 
 									clientTenantID,
 									ClientTenantStatusActive,
 								)
 								require.NoError(t, err, "Should reactivate client")
 
-								reactivated, err := testContext.ClientStore.GetClientTenant(clientTenantID)
+								reactivated, err := testContext.ClientStore.GetClientTenant(context.Background(), clientTenantID)
 								require.NoError(t, err, "Should retrieve reactivated client")
 								assert.Equal(t, ClientTenantStatusActive, reactivated.Status)
 
@@ -290,16 +290,16 @@ func TestMSPEndToEndClientOnboarding(t *testing.T) {
 									t.Log("🧹 Step 8: Cleaning up temporary consent request")
 
 									// Verify consent request still exists
-									storedRequest, err := testContext.ClientStore.GetAdminConsentRequest(request.State)
+									storedRequest, err := testContext.ClientStore.GetAdminConsentRequest(context.Background(), request.State)
 									require.NoError(t, err, "Consent request should still exist")
 									assert.Equal(t, request.ClientIdentifier, storedRequest.ClientIdentifier)
 
 									// Clean up the consent request (normal flow after successful consent)
-									err = testContext.ClientStore.DeleteAdminConsentRequest(request.State)
+									err = testContext.ClientStore.DeleteAdminConsentRequest(context.Background(), request.State)
 									require.NoError(t, err, "Should delete consent request")
 
 									// Verify it's gone
-									_, err = testContext.ClientStore.GetAdminConsentRequest(request.State)
+									_, err = testContext.ClientStore.GetAdminConsentRequest(context.Background(), request.State)
 									assert.Error(t, err, "Consent request should be deleted")
 
 									t.Logf("   ✅ Consent request cleaned up")
@@ -415,13 +415,13 @@ func TestMSPMultiClientScenario(t *testing.T) {
 	}
 
 	// Verify all clients are stored
-	allClients, err := clientStore.ListClientTenants("")
+	allClients, err := clientStore.ListClientTenants(context.Background(), "")
 	require.NoError(t, err)
 	assert.Len(t, allClients, 3, "Should have 3 clients stored")
 
 	// Verify each client can be retrieved
 	for _, client := range clients {
-		stored, err := clientStore.GetClientTenantByIdentifier(client.identifier)
+		stored, err := clientStore.GetClientTenantByIdentifier(context.Background(), client.identifier)
 		require.NoError(t, err, "Should retrieve %s", client.identifier)
 		assert.Equal(t, client.name, stored.TenantName)
 		assert.Equal(t, ClientTenantStatusActive, stored.Status)

@@ -3,6 +3,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -173,7 +174,7 @@ type GlobalStorageAdapter struct {
 	store interfaces.ClientTenantStore
 }
 
-func (g *GlobalStorageAdapter) StoreClientTenant(client *ClientTenant) error {
+func (g *GlobalStorageAdapter) StoreClientTenant(ctx context.Context, client *ClientTenant) error {
 	globalClient := &interfaces.ClientTenant{
 		ID:               client.ID,
 		TenantID:         client.TenantID,
@@ -190,7 +191,7 @@ func (g *GlobalStorageAdapter) StoreClientTenant(client *ClientTenant) error {
 	return g.store.StoreClientTenant(globalClient)
 }
 
-func (g *GlobalStorageAdapter) GetClientTenant(tenantID string) (*ClientTenant, error) {
+func (g *GlobalStorageAdapter) GetClientTenant(ctx context.Context, tenantID string) (*ClientTenant, error) {
 	globalClient, err := g.store.GetClientTenant(tenantID)
 	if err != nil {
 		return nil, err
@@ -210,7 +211,7 @@ func (g *GlobalStorageAdapter) GetClientTenant(tenantID string) (*ClientTenant, 
 	}, nil
 }
 
-func (g *GlobalStorageAdapter) GetClientTenantByIdentifier(clientIdentifier string) (*ClientTenant, error) {
+func (g *GlobalStorageAdapter) GetClientTenantByIdentifier(ctx context.Context, clientIdentifier string) (*ClientTenant, error) {
 	globalClient, err := g.store.GetClientTenantByIdentifier(clientIdentifier)
 	if err != nil {
 		return nil, err
@@ -230,7 +231,7 @@ func (g *GlobalStorageAdapter) GetClientTenantByIdentifier(clientIdentifier stri
 	}, nil
 }
 
-func (g *GlobalStorageAdapter) ListClientTenants(status ClientTenantStatus) ([]*ClientTenant, error) {
+func (g *GlobalStorageAdapter) ListClientTenants(ctx context.Context, status ClientTenantStatus) ([]*ClientTenant, error) {
 	globalStatus := interfaces.ClientTenantStatus(status)
 	globalClients, err := g.store.ListClientTenants(globalStatus)
 	if err != nil {
@@ -256,16 +257,16 @@ func (g *GlobalStorageAdapter) ListClientTenants(status ClientTenantStatus) ([]*
 	return clients, nil
 }
 
-func (g *GlobalStorageAdapter) UpdateClientTenantStatus(tenantID string, status ClientTenantStatus) error {
+func (g *GlobalStorageAdapter) UpdateClientTenantStatus(ctx context.Context, tenantID string, status ClientTenantStatus) error {
 	globalStatus := interfaces.ClientTenantStatus(status)
 	return g.store.UpdateClientTenantStatus(tenantID, globalStatus)
 }
 
-func (g *GlobalStorageAdapter) DeleteClientTenant(tenantID string) error {
+func (g *GlobalStorageAdapter) DeleteClientTenant(ctx context.Context, tenantID string) error {
 	return g.store.DeleteClientTenant(tenantID)
 }
 
-func (g *GlobalStorageAdapter) StoreAdminConsentRequest(request *AdminConsentRequest) error {
+func (g *GlobalStorageAdapter) StoreAdminConsentRequest(ctx context.Context, request *AdminConsentRequest) error {
 	globalRequest := &interfaces.AdminConsentRequest{
 		ClientIdentifier: request.ClientIdentifier,
 		ClientName:       request.ClientName,
@@ -278,7 +279,7 @@ func (g *GlobalStorageAdapter) StoreAdminConsentRequest(request *AdminConsentReq
 	return g.store.StoreAdminConsentRequest(globalRequest)
 }
 
-func (g *GlobalStorageAdapter) GetAdminConsentRequest(state string) (*AdminConsentRequest, error) {
+func (g *GlobalStorageAdapter) GetAdminConsentRequest(ctx context.Context, state string) (*AdminConsentRequest, error) {
 	globalRequest, err := g.store.GetAdminConsentRequest(state)
 	if err != nil {
 		return nil, err
@@ -294,7 +295,7 @@ func (g *GlobalStorageAdapter) GetAdminConsentRequest(state string) (*AdminConse
 	}, nil
 }
 
-func (g *GlobalStorageAdapter) DeleteAdminConsentRequest(state string) error {
+func (g *GlobalStorageAdapter) DeleteAdminConsentRequest(ctx context.Context, state string) error {
 	return g.store.DeleteAdminConsentRequest(state)
 }
 
