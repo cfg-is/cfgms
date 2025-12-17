@@ -3,6 +3,7 @@
 package security
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -270,4 +271,159 @@ func TestIsPathWithinBase(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Story #253: Additional tests for 90%+ coverage
+
+func TestSecureOpenFile(t *testing.T) {
+	tempDir := t.TempDir()
+
+	t.Run("successful open for reading", func(t *testing.T) {
+		// Create a test file first
+		testData := []byte("test content")
+		testFile := filepath.Join(tempDir, "test.txt")
+		err := os.WriteFile(testFile, testData, 0600)
+		if err != nil {
+			t.Fatalf("Failed to create test file: %v", err)
+		}
+
+		// Open the file using SecureOpenFile
+		file, err := SecureOpenFile(tempDir, "test.txt", os.O_RDONLY, 0)
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+		defer func() { _ = file.Close() }()
+
+		// Verify we can read from it
+		content, err := io.ReadAll(file)
+		if err != nil {
+			t.Fatalf("Failed to read file: %v", err)
+		}
+
+		if string(content) != string(testData) {
+			t.Errorf("Content mismatch. Expected %s, got %s", testData, content)
+		}
+	})
+
+	t.Run("successful open for writing", func(t *testing.T) {
+		file, err := SecureOpenFile(tempDir, "new.txt", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+		defer func() { _ = file.Close() }()
+
+		// Write some data
+		testData := []byte("new content")
+		_, err = file.Write(testData)
+		if err != nil {
+			t.Fatalf("Failed to write: %v", err)
+		}
+
+		// Close and verify
+		_ = file.Close()
+
+		// Read back to verify
+		content, err := os.ReadFile(filepath.Join(tempDir, "new.txt"))
+		if err != nil {
+			t.Fatalf("Failed to read back: %v", err)
+		}
+
+		if string(content) != string(testData) {
+			t.Errorf("Content mismatch. Expected %s, got %s", testData, content)
+		}
+	})
+
+	t.Run("path traversal prevention", func(t *testing.T) {
+		file, err := SecureOpenFile(tempDir, "../../../etc/passwd", os.O_RDONLY, 0)
+		if err == nil {
+			_ = file.Close()
+			t.Error("Expected error for path traversal attempt")
+		}
+		if !strings.Contains(err.Error(), "path traversal") {
+			t.Errorf("Expected path traversal error, got %v", err)
+		}
+	})
+
+	t.Run("nonexistent file with O_RDONLY fails", func(t *testing.T) {
+		file, err := SecureOpenFile(tempDir, "nonexistent.txt", os.O_RDONLY, 0)
+		if err == nil {
+			_ = file.Close()
+			t.Error("Expected error for nonexistent file")
+		}
+		// Should be a file system error from os.OpenFile
+		if strings.Contains(err.Error(), "path validation") {
+			t.Errorf("Should be file system error, not path validation, got %v", err)
+		}
+	})
+}
+
+func TestSecureMkdirAll(t *testing.T) {
+	tempDir := t.TempDir()
+
+	t.Run("create single directory", func(t *testing.T) {
+		dirPath := filepath.Join(tempDir, "testdir")
+		err := SecureMkdirAll(dirPath)
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+
+		// Verify directory was created
+		info, err := os.Stat(dirPath)
+		if err != nil {
+			t.Fatalf("Failed to stat directory: %v", err)
+		}
+
+		if !info.IsDir() {
+			t.Error("Expected a directory")
+		}
+
+		// Verify permissions are 0750
+		if info.Mode().Perm() != 0750 {
+			t.Errorf("Expected directory permissions 0750, got %o", info.Mode().Perm())
+		}
+	})
+
+	t.Run("create nested directories", func(t *testing.T) {
+		dirPath := filepath.Join(tempDir, "parent", "child", "grandchild")
+		err := SecureMkdirAll(dirPath)
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+
+		// Verify all directories were created
+		info, err := os.Stat(dirPath)
+		if err != nil {
+			t.Fatalf("Failed to stat directory: %v", err)
+		}
+
+		if !info.IsDir() {
+			t.Error("Expected a directory")
+		}
+
+		// Verify parent directory also has correct permissions
+		parentInfo, err := os.Stat(filepath.Join(tempDir, "parent"))
+		if err != nil {
+			t.Fatalf("Failed to stat parent directory: %v", err)
+		}
+
+		if parentInfo.Mode().Perm() != 0750 {
+			t.Errorf("Expected parent directory permissions 0750, got %o", parentInfo.Mode().Perm())
+		}
+	})
+
+	t.Run("idempotent - no error if directory exists", func(t *testing.T) {
+		dirPath := filepath.Join(tempDir, "existing")
+
+		// Create once
+		err := SecureMkdirAll(dirPath)
+		if err != nil {
+			t.Fatalf("First creation failed: %v", err)
+		}
+
+		// Create again - should not error
+		err = SecureMkdirAll(dirPath)
+		if err != nil {
+			t.Errorf("Expected no error for existing directory, got %v", err)
+		}
+	})
 }
