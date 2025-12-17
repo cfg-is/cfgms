@@ -97,13 +97,18 @@ build-cross-validate:
 		export GOOS=$${platform%/*}; \
 		export GOARCH=$${platform#*/}; \
 		printf "  %-15s" "$$GOOS/$$GOARCH:"; \
-		if go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o /dev/null ./cmd/steward 2>/dev/null && \
-		   go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o /dev/null ./cmd/controller 2>/dev/null && \
-		   go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o /dev/null ./cmd/cfgcli 2>/dev/null && \
-		   go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o /dev/null ./cmd/cert-manager 2>/dev/null; then \
+		ERROR_LOG=$$(mktemp); \
+		if go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o /dev/null ./cmd/steward 2>$$ERROR_LOG && \
+		   go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o /dev/null ./cmd/controller 2>>$$ERROR_LOG && \
+		   go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o /dev/null ./cmd/cfgcli 2>>$$ERROR_LOG && \
+		   go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o /dev/null ./cmd/cert-manager 2>>$$ERROR_LOG; then \
 			echo "✅ PASS"; \
+			rm -f $$ERROR_LOG; \
 		else \
 			echo "❌ FAIL"; \
+			echo "Errors for $$GOOS/$$GOARCH:"; \
+			cat $$ERROR_LOG | head -20; \
+			rm -f $$ERROR_LOG; \
 			FAILED=1; \
 		fi; \
 	done; \
