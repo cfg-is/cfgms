@@ -4,6 +4,7 @@ package script
 
 import (
 	"context"
+	"runtime"
 	"testing"
 	"time"
 
@@ -40,6 +41,21 @@ func TestLoggingMigration(t *testing.T) {
 
 	// Initialize global logger factory
 	logging.InitializeGlobalLoggerFactory("test", "script_test")
+
+	// Ensure cleanup of logging provider on test completion (critical for Windows file locking)
+	// Use t.Cleanup() to ensure this runs before t.TempDir() cleanup
+	t.Cleanup(func() {
+		if manager := logging.GetGlobalLoggingManager(); manager != nil {
+			// Flush all pending writes
+			_ = manager.Flush(context.Background())
+			// Close the provider to release file handles
+			_ = manager.Close()
+			// On Windows, give the filesystem extra time to release the handle
+			if runtime.GOOS == "windows" {
+				time.Sleep(250 * time.Millisecond)
+			}
+		}
+	})
 
 	// Create a new module instance
 	module := NewModule()
@@ -107,6 +123,21 @@ func TestStructuredLoggingFields(t *testing.T) {
 	// Initialize global logger factory
 	logging.InitializeGlobalLoggerFactory("test", "script_test")
 
+	// Ensure cleanup of logging provider on test completion (critical for Windows file locking)
+	// Use t.Cleanup() to ensure this runs before t.TempDir() cleanup
+	t.Cleanup(func() {
+		if manager := logging.GetGlobalLoggingManager(); manager != nil {
+			// Flush all pending writes
+			_ = manager.Flush(context.Background())
+			// Close the provider to release file handles
+			_ = manager.Close()
+			// On Windows, give the filesystem extra time to release the handle
+			if runtime.GOOS == "windows" {
+				time.Sleep(250 * time.Millisecond)
+			}
+		}
+	})
+
 	// Create module with tenant context
 	module := NewModule()
 	tenantID := "test-tenant-456"
@@ -170,6 +201,21 @@ func TestTenantIsolation(t *testing.T) {
 	require.NoError(t, err, "Failed to initialize global logging")
 
 	logging.InitializeGlobalLoggerFactory("test", "script_test")
+
+	// Ensure cleanup of logging provider on test completion (critical for Windows file locking)
+	// Use t.Cleanup() to ensure this runs before t.TempDir() cleanup
+	t.Cleanup(func() {
+		if manager := logging.GetGlobalLoggingManager(); manager != nil {
+			// Flush all pending writes
+			_ = manager.Flush(context.Background())
+			// Close the provider to release file handles
+			_ = manager.Close()
+			// On Windows, give the filesystem extra time to release the handle
+			if runtime.GOOS == "windows" {
+				time.Sleep(250 * time.Millisecond)
+			}
+		}
+	})
 
 	module := NewModule()
 

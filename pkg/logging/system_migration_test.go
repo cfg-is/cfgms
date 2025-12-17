@@ -4,6 +4,7 @@ package logging
 
 import (
 	"context"
+	"runtime"
 	"testing"
 	"time"
 
@@ -43,11 +44,19 @@ func TestSystemWideMigration(t *testing.T) {
 	InitializeGlobalLoggerFactory("cfgms_system_test", "integration")
 
 	// Ensure cleanup of logging provider on test completion (critical for Windows file locking)
-	defer func() {
+	// Use t.Cleanup() to ensure this runs before t.TempDir() cleanup
+	t.Cleanup(func() {
 		if manager := GetGlobalLoggingManager(); manager != nil {
+			// Flush all pending writes
+			_ = manager.Flush(context.Background())
+			// Close the provider to release file handles
 			_ = manager.Close()
+			// On Windows, give the filesystem extra time to release the handle
+			if runtime.GOOS == "windows" {
+				time.Sleep(250 * time.Millisecond)
+			}
 		}
-	}()
+	})
 
 	t.Run("ControllerLogging", func(t *testing.T) {
 		// Test controller-style logging
@@ -261,11 +270,19 @@ func TestGlobalProviderAvailability(t *testing.T) {
 	InitializeGlobalLoggerFactory("availability_test", "test")
 
 	// Ensure cleanup of logging provider on test completion (critical for Windows file locking)
-	defer func() {
+	// Use t.Cleanup() to ensure this runs before t.TempDir() cleanup
+	t.Cleanup(func() {
 		if manager := GetGlobalLoggingManager(); manager != nil {
+			// Flush all pending writes
+			_ = manager.Flush(context.Background())
+			// Close the provider to release file handles
 			_ = manager.Close()
+			// On Windows, give the filesystem extra time to release the handle
+			if runtime.GOOS == "windows" {
+				time.Sleep(250 * time.Millisecond)
+			}
 		}
-	}()
+	})
 
 	// Test that all component types can access the global provider
 	componentTypes := []string{
@@ -314,11 +331,19 @@ func TestMigrationBackwardCompatibility(t *testing.T) {
 	InitializeGlobalLoggerFactory("compatibility_test", "test")
 
 	// Ensure cleanup of logging provider on test completion (critical for Windows file locking)
-	defer func() {
+	// Use t.Cleanup() to ensure this runs before t.TempDir() cleanup
+	t.Cleanup(func() {
 		if manager := GetGlobalLoggingManager(); manager != nil {
+			// Flush all pending writes
+			_ = manager.Flush(context.Background())
+			// Close the provider to release file handles
 			_ = manager.Close()
+			// On Windows, give the filesystem extra time to release the handle
+			if runtime.GOOS == "windows" {
+				time.Sleep(250 * time.Millisecond)
+			}
 		}
-	}()
+	})
 
 	// Test legacy logger creation still works
 	legacyLogger := GetLogger()
