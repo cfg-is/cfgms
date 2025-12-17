@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -41,9 +42,15 @@ func TestValidateAndCleanPath(t *testing.T) {
 			errorMsg:    "path traversal attempt detected",
 		},
 		{
-			name:        "directory traversal with absolute path",
-			basePath:    tempDir,
-			userPath:    "/etc/passwd",
+			name:     "directory traversal with absolute path",
+			basePath: tempDir,
+			userPath: func() string {
+				// On Windows, use a Windows absolute path; on Unix, use a Unix absolute path
+				if runtime.GOOS == "windows" {
+					return "C:\\Windows\\System32\\config\\sam"
+				}
+				return "/etc/passwd"
+			}(),
 			expectError: true,
 			errorMsg:    "path traversal attempt detected",
 		},
@@ -128,14 +135,16 @@ func TestSecureWriteFile(t *testing.T) {
 			t.Errorf("File content mismatch. Expected %s, got %s", testData, content)
 		}
 
-		// Verify file permissions are 0600
-		info, err := os.Stat(filePath)
-		if err != nil {
-			t.Fatalf("Failed to stat file: %v", err)
-		}
+		// Verify file permissions are 0600 (Unix only - Windows uses ACLs)
+		if runtime.GOOS != "windows" {
+			info, err := os.Stat(filePath)
+			if err != nil {
+				t.Fatalf("Failed to stat file: %v", err)
+			}
 
-		if info.Mode().Perm() != 0600 {
-			t.Errorf("Expected file permissions 0600, got %o", info.Mode().Perm())
+			if info.Mode().Perm() != 0600 {
+				t.Errorf("Expected file permissions 0600, got %o", info.Mode().Perm())
+			}
 		}
 	})
 
@@ -145,15 +154,17 @@ func TestSecureWriteFile(t *testing.T) {
 			t.Fatalf("Unexpected error: %v", err)
 		}
 
-		// Verify directory was created with correct permissions
-		dirPath := filepath.Join(tempDir, "subdir", "nested")
-		info, err := os.Stat(dirPath)
-		if err != nil {
-			t.Fatalf("Failed to stat directory: %v", err)
-		}
+		// Verify directory was created with correct permissions (Unix only - Windows uses ACLs)
+		if runtime.GOOS != "windows" {
+			dirPath := filepath.Join(tempDir, "subdir", "nested")
+			info, err := os.Stat(dirPath)
+			if err != nil {
+				t.Fatalf("Failed to stat directory: %v", err)
+			}
 
-		if info.Mode().Perm() != 0750 {
-			t.Errorf("Expected directory permissions 0750, got %o", info.Mode().Perm())
+			if info.Mode().Perm() != 0750 {
+				t.Errorf("Expected directory permissions 0750, got %o", info.Mode().Perm())
+			}
 		}
 	})
 
@@ -222,14 +233,17 @@ func TestSecureWriteFileWithPerms(t *testing.T) {
 			t.Fatalf("Unexpected error: %v", err)
 		}
 
-		filePath := filepath.Join(tempDir, "script.sh")
-		info, err := os.Stat(filePath)
-		if err != nil {
-			t.Fatalf("Failed to stat file: %v", err)
-		}
+		// Verify file permissions are 0700 (Unix only - Windows uses ACLs)
+		if runtime.GOOS != "windows" {
+			filePath := filepath.Join(tempDir, "script.sh")
+			info, err := os.Stat(filePath)
+			if err != nil {
+				t.Fatalf("Failed to stat file: %v", err)
+			}
 
-		if info.Mode().Perm() != 0700 {
-			t.Errorf("Expected file permissions 0700, got %o", info.Mode().Perm())
+			if info.Mode().Perm() != 0700 {
+				t.Errorf("Expected file permissions 0700, got %o", info.Mode().Perm())
+			}
 		}
 	})
 }
@@ -377,9 +391,11 @@ func TestSecureMkdirAll(t *testing.T) {
 			t.Error("Expected a directory")
 		}
 
-		// Verify permissions are 0750
-		if info.Mode().Perm() != 0750 {
-			t.Errorf("Expected directory permissions 0750, got %o", info.Mode().Perm())
+		// Verify permissions are 0750 (Unix only - Windows uses ACLs)
+		if runtime.GOOS != "windows" {
+			if info.Mode().Perm() != 0750 {
+				t.Errorf("Expected directory permissions 0750, got %o", info.Mode().Perm())
+			}
 		}
 	})
 
@@ -400,14 +416,16 @@ func TestSecureMkdirAll(t *testing.T) {
 			t.Error("Expected a directory")
 		}
 
-		// Verify parent directory also has correct permissions
-		parentInfo, err := os.Stat(filepath.Join(tempDir, "parent"))
-		if err != nil {
-			t.Fatalf("Failed to stat parent directory: %v", err)
-		}
+		// Verify parent directory also has correct permissions (Unix only - Windows uses ACLs)
+		if runtime.GOOS != "windows" {
+			parentInfo, err := os.Stat(filepath.Join(tempDir, "parent"))
+			if err != nil {
+				t.Fatalf("Failed to stat parent directory: %v", err)
+			}
 
-		if parentInfo.Mode().Perm() != 0750 {
-			t.Errorf("Expected parent directory permissions 0750, got %o", parentInfo.Mode().Perm())
+			if parentInfo.Mode().Perm() != 0750 {
+				t.Errorf("Expected parent directory permissions 0750, got %o", parentInfo.Mode().Perm())
+			}
 		}
 	})
 

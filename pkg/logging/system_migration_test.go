@@ -42,6 +42,13 @@ func TestSystemWideMigration(t *testing.T) {
 	// Initialize global logger factory
 	InitializeGlobalLoggerFactory("cfgms_system_test", "integration")
 
+	// Ensure cleanup of logging provider on test completion (critical for Windows file locking)
+	defer func() {
+		if manager := GetGlobalLoggingManager(); manager != nil {
+			_ = manager.Close()
+		}
+	}()
+
 	t.Run("ControllerLogging", func(t *testing.T) {
 		// Test controller-style logging
 		logger := ForComponent("controller")
@@ -253,6 +260,13 @@ func TestGlobalProviderAvailability(t *testing.T) {
 
 	InitializeGlobalLoggerFactory("availability_test", "test")
 
+	// Ensure cleanup of logging provider on test completion (critical for Windows file locking)
+	defer func() {
+		if manager := GetGlobalLoggingManager(); manager != nil {
+			_ = manager.Close()
+		}
+	}()
+
 	// Test that all component types can access the global provider
 	componentTypes := []string{
 		"controller",
@@ -298,6 +312,13 @@ func TestMigrationBackwardCompatibility(t *testing.T) {
 	require.NoError(t, err, "Failed to initialize global logging")
 
 	InitializeGlobalLoggerFactory("compatibility_test", "test")
+
+	// Ensure cleanup of logging provider on test completion (critical for Windows file locking)
+	defer func() {
+		if manager := GetGlobalLoggingManager(); manager != nil {
+			_ = manager.Close()
+		}
+	}()
 
 	// Test legacy logger creation still works
 	legacyLogger := GetLogger()
