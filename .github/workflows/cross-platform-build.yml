@@ -87,6 +87,8 @@ jobs:
 
     - name: Run Unit Tests
       shell: bash
+      env:
+        CFGMS_TEST_INTEGRATION: "0"  # Disable integration tests (no Docker infrastructure in cross-platform CI)
       run: go test -race -short -timeout=5m ./pkg/... ./features/...
 
     - name: Upload Build Artifacts
@@ -96,10 +98,52 @@ jobs:
         path: bin/
         retention-days: 5
 
+  # Integration tests with Docker infrastructure (Linux only)
+  integration-tests:
+    name: Integration Tests (Docker)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Cache Go modules
+      uses: actions/cache@v4
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Start Docker Test Services
+      run: |
+        echo "🐳 Starting Docker test infrastructure..."
+        make test-integration-setup
+        echo "✅ Docker services ready"
+
+    - name: Run Integration Tests
+      env:
+        CFGMS_TEST_INTEGRATION: "1"  # Enable integration tests
+      run: |
+        echo "🧪 Running integration tests with Docker infrastructure..."
+        go test -race -timeout=10m ./pkg/testing/storage/... ./features/controller/server/...
+        echo "✅ Integration tests completed"
+
+    - name: Cleanup Docker Services
+      if: always()
+      run: make test-integration-cleanup
+
   # Integration gate - all platforms must succeed
   build-gate:
     name: Build Gate
-    needs: [cross-compile-check, native-builds]
+    needs: [cross-compile-check, native-builds, integration-tests]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -110,14 +154,16 @@ jobs:
 
         cross_compile="${{ needs.cross-compile-check.result }}"
         native="${{ needs.native-builds.result }}"
+        integration="${{ needs.integration-tests.result }}"
 
         echo "| Platform | Status |" >> $GITHUB_STEP_SUMMARY
         echo "|----------|--------|" >> $GITHUB_STEP_SUMMARY
         echo "| Cross-Compile Check | $cross_compile |" >> $GITHUB_STEP_SUMMARY
         echo "| Native Builds | $native |" >> $GITHUB_STEP_SUMMARY
+        echo "| Integration Tests | $integration |" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
 
-        if [[ "$cross_compile" == "success" && "$native" == "success" ]]; then
+        if [[ "$cross_compile" == "success" && "$native" == "success" && "$integration" == "success" ]]; then
           echo "### BUILD GATE PASSED" >> $GITHUB_STEP_SUMMARY
           echo "All platforms build and test successfully." >> $GITHUB_STEP_SUMMARY
         else

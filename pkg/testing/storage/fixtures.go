@@ -23,7 +23,13 @@ import (
 
 // isInfrastructureRequired determines if infrastructure should be available
 // Returns true in CI environments or when Docker/infrastructure is explicitly enabled
+// Returns false when running in short mode (unit tests only)
 func isInfrastructureRequired() bool {
+	// Integration test mode explicitly disabled (e.g., -short flag)
+	if os.Getenv("CFGMS_TEST_INTEGRATION") == "0" {
+		return false
+	}
+
 	// CI environments
 	if os.Getenv("CI") != "" || os.Getenv("GITHUB_ACTIONS") != "" {
 		return true
