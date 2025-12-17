@@ -197,16 +197,16 @@ After applying template:
 
 ```bash
 # Verify configuration
-cfgcli exec --device server-01 -- /usr/local/bin/cfgms-backup/verify-backup-config.sh
+cfg exec --device server-01 -- /usr/local/bin/cfgms-backup/verify-backup-config.sh
 
 # Test backup (dry run)
-cfgcli exec --device server-01 -- /usr/local/bin/cfgms-backup/perform-backup.sh daily
+cfg exec --device server-01 -- /usr/local/bin/cfgms-backup/perform-backup.sh daily
 
 # Check backup logs
-cfgcli exec --device server-01 -- tail -50 /var/log/cfgms-backup/backup-*.log
+cfg exec --device server-01 -- tail -50 /var/log/cfgms-backup/backup-*.log
 
 # List backups
-cfgcli exec --device server-01 -- ls -lh /var/backups/cfgms/daily/
+cfg exec --device server-01 -- ls -lh /var/backups/cfgms/daily/
 ```
 
 ## Monitoring
@@ -214,13 +214,13 @@ cfgcli exec --device server-01 -- ls -lh /var/backups/cfgms/daily/
 ### Backup Status
 ```bash
 # Check last backup status
-cfgcli exec --device server-01 -- tail /var/log/cfgms-backup/backup-*.log | grep "Backup Summary"
+cfg exec --device server-01 -- tail /var/log/cfgms-backup/backup-*.log | grep "Backup Summary"
 
 # Check backup sizes
-cfgcli exec --device server-01 -- du -sh /var/backups/cfgms/*/
+cfg exec --device server-01 -- du -sh /var/backups/cfgms/*/
 
 # Check disk space
-cfgcli exec --device server-01 -- df -h /var/backups/cfgms
+cfg exec --device server-01 -- df -h /var/backups/cfgms
 ```
 
 ### Alerts

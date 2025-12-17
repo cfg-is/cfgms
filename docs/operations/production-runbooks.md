@@ -185,7 +185,7 @@ journalctl -u cfgms-steward --since "10 minutes ago"
 
 ```bash
 # Backup database
-/opt/cfgms/bin/cfgcli backup --output /backup/cfgms-$(date +%Y%m%d).sql
+/opt/cfgms/bin/cfg backup --output /backup/cfgms-$(date +%Y%m%d).sql
 
 # Check database size
 du -sh /var/lib/cfgms/database/
@@ -236,7 +236,7 @@ sqlite3 /var/lib/cfgms/database/cfgms.db "PRAGMA integrity_check;"
    systemctl restart cfgms-controller
    
    # If database issues, restore from backup
-   /opt/cfgms/bin/cfgcli restore --input /backup/cfgms-latest.sql
+   /opt/cfgms/bin/cfg restore --input /backup/cfgms-latest.sql
    
    # Verify recovery
    curl https://localhost:8080/health
@@ -261,7 +261,7 @@ sqlite3 /var/lib/cfgms/database/cfgms.db "PRAGMA integrity_check;"
 2. **Mitigation Actions**
    ```bash
    # If high session count, implement session limits
-   /opt/cfgms/bin/cfgcli config set terminal.max_sessions 50
+   /opt/cfgms/bin/cfg config set terminal.max_sessions 50
    
    # If memory issues, restart controller
    systemctl restart cfgms-controller
@@ -311,7 +311,7 @@ sqlite3 /var/lib/cfgms/database/cfgms.db "PRAGMA integrity_check;"
    /opt/cfgms/bin/cert-manager revoke --serial {certificate_serial}
    
    # Force password reset for affected users
-   /opt/cfgms/bin/cfgcli user reset-password --user {username}
+   /opt/cfgms/bin/cfg user reset-password --user {username}
    
    # Terminate all active sessions
    curl -X DELETE -H "Authorization: Bearer $API_TOKEN" \
@@ -331,7 +331,7 @@ BACKUP_DIR="/backup/cfgms/$(date +%Y%m%d)"
 mkdir -p $BACKUP_DIR
 
 # Backup database
-/opt/cfgms/bin/cfgcli backup --output $BACKUP_DIR/database.sql
+/opt/cfgms/bin/cfg backup --output $BACKUP_DIR/database.sql
 
 # Backup certificates
 cp -r /etc/cfgms/certs $BACKUP_DIR/
@@ -371,7 +371,7 @@ systemctl stop cfgms-steward
 tar -xzf $BACKUP_FILE -C /tmp/
 
 # Restore database
-/opt/cfgms/bin/cfgcli restore --input /tmp/$RESTORE_DATE/database.sql
+/opt/cfgms/bin/cfg restore --input /tmp/$RESTORE_DATE/database.sql
 
 # Restore certificates
 cp -r /tmp/$RESTORE_DATE/certs/* /etc/cfgms/certs/
@@ -397,7 +397,7 @@ echo "Disaster recovery completed for backup date: $RESTORE_DATE"
 1. **Detection**
    ```bash
    # Check steward connectivity
-   /opt/cfgms/bin/cfgcli steward list --status offline
+   /opt/cfgms/bin/cfg steward list --status offline
    
    # Check network connectivity
    ping controller.example.com
@@ -437,10 +437,10 @@ echo "Disaster recovery completed for backup date: $RESTORE_DATE"
 2. **Resolution**
    ```bash
    # Reduce terminal session limit
-   /opt/cfgms/bin/cfgcli config set terminal.max_sessions 50
+   /opt/cfgms/bin/cfg config set terminal.max_sessions 50
    
    # Reduce session timeout
-   /opt/cfgms/bin/cfgcli config set terminal.session_timeout 300
+   /opt/cfgms/bin/cfg config set terminal.session_timeout 300
    
    # Restart controller to free memory
    systemctl restart cfgms-controller
@@ -463,10 +463,10 @@ echo "Disaster recovery completed for backup date: $RESTORE_DATE"
 2. **Resolution**
    ```bash
    # Limit concurrent connections
-   /opt/cfgms/bin/cfgcli config set server.max_connections 100
+   /opt/cfgms/bin/cfg config set server.max_connections 100
    
    # Implement rate limiting
-   /opt/cfgms/bin/cfgcli config set server.rate_limit 1000
+   /opt/cfgms/bin/cfg config set server.rate_limit 1000
    
    # Scale horizontally if needed
    # Deploy additional controller instances with load balancer
@@ -490,10 +490,10 @@ echo "Disaster recovery completed for backup date: $RESTORE_DATE"
 2. **Resolution**
    ```bash
    # Optimize terminal buffer size
-   /opt/cfgms/bin/cfgcli config set terminal.buffer_size 8192
+   /opt/cfgms/bin/cfg config set terminal.buffer_size 8192
    
    # Reduce terminal update frequency
-   /opt/cfgms/bin/cfgcli config set terminal.update_interval 50ms
+   /opt/cfgms/bin/cfg config set terminal.update_interval 50ms
    
    # Check for network issues
    mtr controller.example.com
@@ -533,16 +533,16 @@ find /backup/cfgms -name "*.tar.gz" -mtime +30 -delete
 /opt/cfgms/scripts/daily-backup.sh
 
 # Security audit
-/opt/cfgms/bin/cfgcli security audit --full
+/opt/cfgms/bin/cfg security audit --full
 
 # Performance baseline check
-/opt/cfgms/bin/cfgcli performance baseline --update
+/opt/cfgms/bin/cfg performance baseline --update
 
 # Certificate inventory
 /opt/cfgms/bin/cert-manager inventory --export-csv /var/log/cfgms/cert-inventory.csv
 
 # System health report
-/opt/cfgms/bin/cfgcli health report --email admin@example.com
+/opt/cfgms/bin/cfg health report --email admin@example.com
 ```
 
 ### Upgrade Procedures
@@ -563,14 +563,14 @@ systemctl stop cfgms-steward
 tar -xzf cfgms-v0.3.1-linux-amd64.tar.gz -C /opt/cfgms/
 
 # 5. Run database migrations
-/opt/cfgms/bin/cfgcli migrate --from v0.3.0 --to v0.3.1
+/opt/cfgms/bin/cfg migrate --from v0.3.0 --to v0.3.1
 
 # 6. Start services
 systemctl start cfgms-controller
 systemctl start cfgms-steward
 
 # 7. Verify upgrade
-/opt/cfgms/bin/cfgcli version
+/opt/cfgms/bin/cfg version
 curl https://localhost:8080/health
 ```
 

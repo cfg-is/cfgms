@@ -13,7 +13,7 @@ BUILD_TAGS=$(if $(TAGS),-tags $(TAGS),)
 # Binary names
 STEWARD_BINARY=cfgms-steward
 CONTROLLER_BINARY=controller
-CLI_BINARY=cfgcli
+CLI_BINARY=cfg
 CERT_MANAGER_BINARY=cert-manager
 
 # Protocol buffer variables
@@ -56,7 +56,7 @@ build-controller:
 	go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o bin/${CONTROLLER_BINARY} ./cmd/controller
 
 build-cli:
-	go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o bin/${CLI_BINARY} ./cmd/cfgcli
+	go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o bin/${CLI_BINARY} ./cmd/cfg
 
 build-cert-manager:
 	go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o bin/${CERT_MANAGER_BINARY} ./cmd/cert-manager

@@ -40,7 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SOPS storage provider configuration fix
 - Cache migration to centralized `pkg/cache` (681 lines removed)
 - gRPC removal - migrated to MQTT+QUIC protocol
-- Renamed cfgctl to cfgcli for better discoverability
+- Renamed cfgctl to cfg for better discoverability
 
 ### Changed
 - High Availability (HA) code moved to commercial tier with build tags
@@ -90,7 +90,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Email alerting via SMTP
 - Request tracing for troubleshooting
 - Health API endpoints (simple + detailed + Prometheus)
-- CLI tools: `cfgcli controller status`, `cfgcli trace <request_id>`
+- CLI tools: `cfg controller status`, `cfg trace <request_id>`
 
 ## [0.5.0] - 2025-09-15
 

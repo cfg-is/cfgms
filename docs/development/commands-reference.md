@@ -12,7 +12,7 @@ make build
 # Build individual components (current platform)
 make build-controller  # Builds controller binary
 make build-steward     # Builds steward binary
-make build-cli         # Builds cfgcli CLI binary
+make build-cli         # Builds cfg CLI binary
 ```
 
 ### Cross-Platform Builds

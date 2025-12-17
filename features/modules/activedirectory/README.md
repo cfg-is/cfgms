@@ -74,22 +74,22 @@ enable_dna_collection: true
 
 ### Query Specific User
 ```bash
-cfgcli steward get-config steward-id "query:user:Administrator"
+cfg steward get-config steward-id "query:user:Administrator"
 ```
 
 ### List All Groups
 ```bash
-cfgcli steward get-config steward-id "list:group"
+cfg steward get-config steward-id "list:group"
 ```
 
 ### Get System Status
 ```bash
-cfgcli steward get-config steward-id "status"
+cfg steward get-config steward-id "status"
 ```
 
 ### Collect Directory DNA
 ```bash
-cfgcli steward get-config steward-id "dna_collection"
+cfg steward get-config steward-id "dna_collection"
 ```
 
 ## Security considerations

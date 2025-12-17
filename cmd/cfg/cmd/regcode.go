@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2025 CFGMS Contributors
-// Package cmd implements the CLI commands for cfgcli
+// Package cmd implements the CLI commands for cfg
 package cmd
 
 import (
@@ -47,13 +47,13 @@ to the steward installer.
 
 Examples:
   # Generate a registration code
-  cfgcli regcode --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883
+  cfg regcode --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883
 
   # Generate with optional group
-  cfgcli regcode --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883 --group=production
+  cfg regcode --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883 --group=production
 
   # Decode a registration code
-  cfgcli regcode --decode eyJ0ZW5hbnRfaWQi...`,
+  cfg regcode --decode eyJ0ZW5hbnRfaWQi...`,
 	RunE: runRegCode,
 }
 

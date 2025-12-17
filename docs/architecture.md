@@ -196,7 +196,7 @@ features/
 ```
 
 ### Key Directories
-- `cmd/` - Command-line applications (controller, steward, cfgcli)
+- `cmd/` - Command-line applications (controller, steward, cfg)
 - `api/proto/` - Protocol buffer definitions (used for data serialization)
 - `pkg/` - Shared packages and central providers (logging, storage, security)
 - `features/` - Feature implementations organized by component

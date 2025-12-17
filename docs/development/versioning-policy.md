@@ -155,7 +155,7 @@ Query version information:
 ```bash
 ./bin/controller --version
 ./bin/cfgms-steward --version
-./bin/cfgcli version
+./bin/cfg version
 ```
 
 ## Upgrade Process

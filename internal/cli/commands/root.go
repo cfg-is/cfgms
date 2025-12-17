@@ -8,7 +8,7 @@ import (
 
 func NewRootCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "cfgcli",
+		Use:   "cfg",
 		Short: "Command line interface for CFGMS",
 		Long:  `A complete command line interface for managing the Configuration Management System.`,
 	}
