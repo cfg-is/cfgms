@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -107,6 +108,11 @@ group: nonexistentgroup`,
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Skip ownership tests on Windows (chown not supported)
+			if runtime.GOOS == "windows" && tt.name == "Create directory with ownership" {
+				t.Skip("Skipping ownership test on Windows - chown not supported")
+			}
+
 			if tt.setup != nil {
 				if err := tt.setup(); err != nil {
 					t.Fatalf("Setup failed: %v", err)
