@@ -1,0 +1,127 @@
+name: Cross-Platform Build Validation
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+
+env:
+  GO_VERSION: '1.23'
+
+jobs:
+  # Fast cross-compilation check (single runner, all platforms)
+  cross-compile-check:
+    name: Cross-Platform Compilation Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Cache Go modules
+      uses: actions/cache@v4
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Validate Cross-Platform Compilation
+      run: make build-cross-validate
+
+    - name: Build Summary
+      run: |
+        echo "## Cross-Platform Build Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "All target platforms compile successfully:" >> $GITHUB_STEP_SUMMARY
+        echo "- Linux (AMD64, ARM64)" >> $GITHUB_STEP_SUMMARY
+        echo "- macOS (AMD64, ARM64)" >> $GITHUB_STEP_SUMMARY
+        echo "- Windows (AMD64)" >> $GITHUB_STEP_SUMMARY
+
+  # Native build tests on each platform
+  native-builds:
+    name: Native Build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: Linux
+          - os: macos-latest
+            platform: macOS
+          - os: windows-latest
+            platform: Windows
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Cache Go modules
+      uses: actions/cache@v4
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Build All Binaries
+      shell: bash
+      run: make build
+
+    - name: Run Unit Tests
+      shell: bash
+      run: go test -race -short -timeout=5m ./pkg/... ./features/...
+
+    - name: Upload Build Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: binaries-${{ matrix.platform }}
+        path: bin/
+        retention-days: 5
+
+  # Integration gate - all platforms must succeed
+  build-gate:
+    name: Build Gate
+    needs: [cross-compile-check, native-builds]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+    - name: Check Build Results
+      run: |
+        echo "## Build Gate Results" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+
+        cross_compile="${{ needs.cross-compile-check.result }}"
+        native="${{ needs.native-builds.result }}"
+
+        echo "| Platform | Status |" >> $GITHUB_STEP_SUMMARY
+        echo "|----------|--------|" >> $GITHUB_STEP_SUMMARY
+        echo "| Cross-Compile Check | $cross_compile |" >> $GITHUB_STEP_SUMMARY
+        echo "| Native Builds | $native |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+
+        if [[ "$cross_compile" == "success" && "$native" == "success" ]]; then
+          echo "### BUILD GATE PASSED" >> $GITHUB_STEP_SUMMARY
+          echo "All platforms build and test successfully." >> $GITHUB_STEP_SUMMARY
+        else
+          echo "### BUILD GATE FAILED" >> $GITHUB_STEP_SUMMARY
+          echo "One or more platform builds failed." >> $GITHUB_STEP_SUMMARY
+          exit 1
+        fi

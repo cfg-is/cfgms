@@ -29,18 +29,31 @@ func New() modules.Module {
 
 // directoryConfig represents the configuration for a directory
 type directoryConfig struct {
-	Path        string `yaml:"path"`
-	Permissions int    `yaml:"permissions"`
-	Owner       string `yaml:"owner,omitempty"`
-	Group       string `yaml:"group,omitempty"`
-	Recursive   bool   `yaml:"recursive,omitempty"`
+	State       string `yaml:"state"`                 // "present" or "absent"
+	Path        string `yaml:"path"`                  // Directory path
+	Permissions int    `yaml:"permissions,omitempty"` // Directory permissions (e.g., 0755)
+	Owner       string `yaml:"owner,omitempty"`       // Directory owner
+	Group       string `yaml:"group,omitempty"`       // Directory group
+	Recursive   bool   `yaml:"recursive,omitempty"`   // Create parent directories if needed
 }
 
 // AsMap returns the configuration as a map for efficient field-by-field comparison
 func (c *directoryConfig) AsMap() map[string]interface{} {
-	result := map[string]interface{}{
-		"path":        c.Path,
-		"permissions": c.Permissions,
+	result := map[string]interface{}{}
+
+	// Always include state
+	if c.State != "" {
+		result["state"] = c.State
+	} else {
+		result["state"] = "present" // Default to present
+	}
+
+	// Always include path
+	result["path"] = c.Path
+
+	// Only include permissions for present state
+	if c.State != "absent" {
+		result["permissions"] = c.Permissions
 	}
 
 	if c.Owner != "" {
@@ -73,7 +86,11 @@ func (c *directoryConfig) Validate() error {
 
 // GetManagedFields returns the list of fields this configuration manages
 func (c *directoryConfig) GetManagedFields() []string {
-	fields := []string{"path", "permissions"}
+	fields := []string{"state", "path"}
+
+	if c.State != "absent" {
+		fields = append(fields, "permissions")
+	}
 
 	if c.Owner != "" {
 		fields = append(fields, "owner")
@@ -87,7 +104,7 @@ func (c *directoryConfig) GetManagedFields() []string {
 
 // validateConfig checks if the configuration is valid
 func (c *directoryConfig) validate() error {
-	// Validate path
+	// Validate path is always required
 	if c.Path == "" {
 		return ErrInvalidPath
 	}
@@ -95,7 +112,12 @@ func (c *directoryConfig) validate() error {
 		return ErrInvalidPath
 	}
 
-	// Validate permissions (must be between 0 and 0777)
+	// State "absent" doesn't require permissions
+	if c.State == "absent" {
+		return nil
+	}
+
+	// Validate permissions (must be between 0 and 0777) for present state
 	if c.Permissions < 0 || c.Permissions > 0777 {
 		return ErrInvalidPermissions
 	}
@@ -135,8 +157,18 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 	if path, ok := configMap["path"].(string); ok {
 		dirConfig.Path = path
 	}
+	// Support both "permissions" and "mode" field names for flexibility
 	if perms, ok := configMap["permissions"].(int); ok {
 		dirConfig.Permissions = perms
+	} else if mode, ok := configMap["mode"].(string); ok {
+		// Parse mode as octal string (e.g., "0755")
+		var modeInt int
+		_, err := fmt.Sscanf(mode, "%o", &modeInt)
+		if err == nil {
+			dirConfig.Permissions = modeInt
+		}
+	} else if mode, ok := configMap["mode"].(int); ok {
+		dirConfig.Permissions = mode
 	}
 	if owner, ok := configMap["owner"].(string); ok {
 		dirConfig.Owner = owner
@@ -146,6 +178,11 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 	}
 	if recursive, ok := configMap["recursive"].(bool); ok {
 		dirConfig.Recursive = recursive
+	}
+
+	// Apply default permissions if not specified (0755 is a safe default for directories)
+	if dirConfig.Permissions == 0 {
+		dirConfig.Permissions = 0755
 	}
 
 	// Validate configuration
@@ -254,10 +291,20 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 	return nil
 }
 
-// Get retrieves the current configuration of a directory
+// Get retrieves the current configuration of a directory.
+//
+// If the directory does not exist, returns a directoryConfig with State: "absent".
+// This allows the execution engine to detect that the directory needs to be created.
 func (m *directoryModule) Get(ctx context.Context, resourceID string) (modules.ConfigState, error) {
 	info, err := os.Stat(resourceID)
 	if err != nil {
+		if os.IsNotExist(err) {
+			// Directory doesn't exist - return state: absent
+			return &directoryConfig{
+				State: "absent",
+				Path:  resourceID,
+			}, nil
+		}
 		return nil, fmt.Errorf("failed to stat directory: %w", err)
 	}
 	if !info.IsDir() {
@@ -274,6 +321,7 @@ func (m *directoryModule) Get(ctx context.Context, resourceID string) (modules.C
 	}
 
 	config := &directoryConfig{
+		State:       "present",
 		Path:        resourceID,
 		Permissions: int(perms),
 		Owner:       ownerName,

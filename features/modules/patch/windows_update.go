@@ -326,7 +326,10 @@ func (w *WindowsUpdateManager) GetLastPatchDate(ctx context.Context) (time.Time,
 
 	// Convert OLE date to Go time
 	oleDate := dateVariant.Val
-	goTime := ole.GetVariantDate(uint64(oleDate))
+	goTime, err := ole.GetVariantDate(uint64(oleDate))
+	if err != nil {
+		return time.Time{}, fmt.Errorf("failed to convert OLE date: %w", err)
+	}
 
 	return goTime, nil
 }
@@ -503,7 +506,9 @@ func (w *WindowsUpdateManager) extractPatchInfo(update *ole.IDispatch) PatchInfo
 	// Get LastDeploymentChangeTime
 	if dateVariant, err := oleutil.GetProperty(update, "LastDeploymentChangeTime"); err == nil {
 		oleDate := dateVariant.Val
-		patchInfo.ReleaseDate = ole.GetVariantDate(uint64(oleDate))
+		if releaseDate, dateErr := ole.GetVariantDate(uint64(oleDate)); dateErr == nil {
+			patchInfo.ReleaseDate = releaseDate
+		}
 	}
 
 	// Get RebootRequired

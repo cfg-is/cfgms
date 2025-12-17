@@ -1,3 +1,6 @@
+//go:build !windows
+// +build !windows
+
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2025 CFGMS Contributors
 // Package syslog implements a syslog subscriber for CFGMS logging system.

@@ -185,10 +185,13 @@ permissions: 420`
 		t.Error("Set() with empty resource ID should fail")
 	}
 
-	// Test Get with non-existent file
-	_, err = module.Get(context.Background(), filepath.Join(tempDir, "nonexistent.txt"))
-	if err == nil {
-		t.Error("Get() with non-existent file should fail")
+	// Test Get with non-existent file - should return State: "absent"
+	state, err := module.Get(context.Background(), filepath.Join(tempDir, "nonexistent.txt"))
+	if err != nil {
+		t.Errorf("Get() with non-existent file should not error: %v", err)
+	}
+	if fileState, ok := state.(*FileConfig); !ok || fileState.State != "absent" {
+		t.Error("Get() with non-existent file should return State: 'absent'")
 	}
 
 	// Test file creation and verification

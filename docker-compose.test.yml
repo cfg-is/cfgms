@@ -513,6 +513,9 @@ services:
       CFGMS_HA_ENABLED: "false"
       CFGMS_CERT_PATH: "/app/certs"
       CFGMS_DATA_DIR: "/app/data"
+    # Run as root to avoid permission issues, create log dir first
+    user: root
+    command: ["sh", "-c", "mkdir -p /tmp/cfgms && ./controller"]
     volumes:
       - controller_standalone_certs:/app/certs  # Use volume for writable certs
       - controller_standalone_data:/app/data
@@ -663,6 +666,42 @@ services:
     profiles:
       - ha
 
+  # ============================================================================
+  # TRUE Standalone Steward - Tier 1: QUICK_START.md Option A Testing
+  # ============================================================================
+  # Runs steward in true standalone mode with local config file
+  # NO controller connection - validates QUICK_START.md Option A workflow
+  # Tests: File/directory creation, module execution, idempotency
+  # Start with: docker compose --profile standalone up
+  # ============================================================================
+
+  steward-true-standalone:
+    container_name: steward-true-standalone
+    build:
+      context: .
+      dockerfile: cmd/steward/Dockerfile
+    environment:
+      # Disable file logging to avoid permission issues in standalone mode
+      CFGMS_LOG_PROVIDER: "file"
+      CFGMS_LOG_DIR: "/tmp/cfgms"
+    # Run as root to avoid permission issues, create log dir first
+    user: root
+    command: ["sh", "-c", "mkdir -p /tmp/cfgms && ./steward -config /app/config/standalone.yaml -log-level info -log-provider file"]
+    volumes:
+      - ./test/integration/standalone/config:/app/config:ro  # Mount config directory
+      - steward_true_standalone_data:/app/data
+      - steward_true_standalone_workspace:/test-workspace:rw  # Workspace for file/directory tests
+    healthcheck:
+      test: ["CMD", "sh", "-c", "ps aux | grep steward | grep -v grep"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - cfgms-test
+    profiles:
+      - standalone  # NEW profile for Tier 1 testing
+
 volumes:
   postgres_test_data:
     driver: local
@@ -724,6 +763,18 @@ volumes:
       type: tmpfs
       device: tmpfs
       o: size=128m
+  steward_true_standalone_data:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=128m
+  steward_true_standalone_workspace:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=256m
 
 networks:
   cfgms-test:

@@ -1,0 +1,34 @@
+# Standalone steward configuration for Docker E2E testing
+# Matches QUICK_START.md Option A workflow
+
+steward:
+  id: quickstart-steward
+
+resources:
+  # Create a file
+  - name: hello-file
+    module: file
+    config:
+      path: /test-workspace/hello-cfgms.txt
+      content: |
+        Hello from CFGMS!
+        This file was created by CFGMS standalone mode.
+        No controller, no network, no complexity!
+      state: present
+      mode: "0644"
+
+  # Create a directory
+  - name: test-directory
+    module: directory
+    config:
+      path: /test-workspace/cfgms-test
+      state: present
+      mode: "0755"
+
+  # Create a second file in that directory
+  - name: info-file
+    module: file
+    config:
+      path: /test-workspace/cfgms-test/info.txt
+      content: "CFGMS standalone mode is working!"
+      state: present

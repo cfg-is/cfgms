@@ -174,20 +174,49 @@ cd cfgms
 make build-controller build-cli
 ```
 
-### Step 2: Start the Controller
+### Step 2: Create Minimum Configuration
+
+The controller requires a storage provider. Create a minimum configuration file:
 
 ```bash
-# Start controller in one terminal
+# Create config file
+cat > controller.yaml <<EOF
+storage:
+  provider: git
+  config:
+    repository_path: ./data/cfgms-storage
+    branch: main
+    auto_init: true
+
+certificate:
+  enable_cert_management: true
+  auto_generate: true
+  ca_path: ./certs/ca
+
+logging:
+  provider: file
+  level: INFO
+  file:
+    directory: ./logs
+EOF
+```
+
+### Step 3: Start the Controller
+
+```bash
+# Create required directories
+mkdir -p ./data ./certs ./logs
+
+# Start controller (reads controller.yaml from current directory)
 ./bin/controller
 
 # You should see:
-# INFO: Starting CFGMS Controller
-# INFO: REST API listening on :9080
-# INFO: MQTT broker listening on :1883
+# INFO: Initializing storage provider: git
+# INFO: Starting MQTT broker
 # INFO: Controller ready
 ```
 
-### Step 3: Create a Simple Workflow
+### Step 4: Create a Simple Workflow
 
 ```bash
 # Create a workflow file
@@ -210,7 +239,7 @@ steps:
 EOF
 ```
 
-### Step 4: Run the Workflow
+### Step 5: Run the Workflow
 
 ```bash
 # In another terminal
@@ -223,7 +252,7 @@ EOF
 # Workflow completed successfully
 ```
 
-### Step 5: Try an M365 Workflow (Optional)
+### Step 6: Try an M365 Workflow (Optional)
 
 If you have M365 credentials:
 
@@ -290,50 +319,98 @@ make build
 
 ### Step 2: Start the Controller
 
+First, create the controller configuration (same as Option B):
+
 ```bash
-# On the controller machine
+# Create config file
+cat > controller.yaml <<EOF
+storage:
+  provider: git
+  config:
+    repository_path: ./data/cfgms-storage
+    branch: main
+    auto_init: true
+
+certificate:
+  enable_cert_management: true
+  auto_generate: true
+  ca_path: ./certs/ca
+
+logging:
+  provider: file
+  level: INFO
+  file:
+    directory: ./logs
+
+mqtt:
+  enabled: true
+  listen_addr: "0.0.0.0:1883"
+  enable_tls: true
+
+quic:
+  enabled: true
+  listen_addr: "0.0.0.0:4433"
+EOF
+
+# Create required directories and start controller
+mkdir -p ./data ./certs ./logs
 ./bin/controller
 
-# Controller auto-generates internal CA for development
 # You should see:
-# INFO: Generated internal CA (development mode)
-# WARNING: For production, use external PKI
-# INFO: Controller ready at https://0.0.0.0:9080
+# INFO: Initializing storage provider: git
+# INFO: Starting MQTT broker
+# INFO: Controller ready
 ```
 
-### Step 3: Register First Steward
+### Step 3: Create Registration Token
+
+Registration tokens allow stewards to authenticate with the controller:
+
+```bash
+# In another terminal, create a registration token
+# Note: cfgcli token management will be available in a future release
+# For now, tokens are created via direct API calls:
+
+curl -X POST http://localhost:9080/api/v1/admin/registration-tokens \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tenant_id": "default",
+    "group": "production",
+    "validity_days": 7,
+    "single_use": false
+  }'
+
+# Returns:
+# {"token": "cfgms_reg_abc123xyz..."}
+
+# Save this token for the next step
+```
+
+### Step 4: Register First Steward
 
 ```bash
 # On the controller machine (for testing)
-./bin/cfgms-steward \
-  --controller https://localhost:9080 \
-  --register \
-  --hostname test-steward-1
+# Use the token from Step 3
+./bin/cfgms-steward -regtoken cfgms_reg_abc123xyz...
 
 # You should see:
-# INFO: Generating keypair...
-# INFO: Requesting certificate from controller...
-# INFO: Certificate obtained (auto-approved in dev mode)
-# INFO: Steward registered successfully
-# INFO: Connecting to controller...
-# INFO: Connected and healthy
+# INFO: Registering with controller via MQTT+QUIC
+# INFO: Certificate obtained
+# INFO: Connected to controller
+# INFO: Steward ready
 ```
 
-**That's it!** Certificates were generated and approved automatically (like Salt).
-
-### Step 4: Register Second Steward (Different Machine)
+### Step 5: Register Second Steward (Different Machine)
 
 ```bash
 # On another machine
-./bin/cfgms-steward \
-  --controller https://controller.example.com:9080 \
-  --register \
-  --hostname test-steward-2
+# Use the same token (if single_use was false)
+./bin/cfgms-steward -regtoken cfgms_reg_abc123xyz...
 
-# Same automatic certificate process!
+# Same automatic process!
 ```
 
-### Step 5: List Your Fleet
+### Step 6: List Your Fleet
 
 ```bash
 # On controller machine
@@ -345,7 +422,7 @@ make build
 # test-steward-2   healthy  5s ago           linux/arm64
 ```
 
-### Step 6: Push Configuration to Fleet
+### Step 7: Push Configuration to Fleet
 
 ```bash
 # Create fleet-wide configuration
@@ -384,7 +461,7 @@ EOF
 # Fleet configuration applied successfully
 ```
 
-### Step 7: Check Steward Health
+### Step 8: Check Steward Health
 
 ```bash
 # Get detailed status

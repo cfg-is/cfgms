@@ -94,11 +94,11 @@ func New(cfg *config.Config, logger logging.Logger) (*Controller, error) {
 		srv.GetCertificateManager(),
 		srv.GetTenantManager(),
 		srv.GetRBACManager(),
-		nil,                // systemMonitor - will be integrated in Phase 5
-		nil,                // platformMonitor - will be integrated in this story completion
-		nil,                // tracer - will be integrated in Phase 5
-		srv.GetHAManager(), // HA manager
-		nil,                // registrationTokenStore - only used in MQTT+QUIC mode
+		nil,                             // systemMonitor - will be integrated in Phase 5
+		nil,                             // platformMonitor - will be integrated in this story completion
+		nil,                             // tracer - will be integrated in Phase 5
+		srv.GetHAManager(),              // HA manager
+		srv.GetRegistrationTokenStore(), // registrationTokenStore - now wired for MQTT+QUIC mode
 	)
 	if err != nil {
 		return nil, err
