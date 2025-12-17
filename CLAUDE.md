@@ -237,7 +237,7 @@ prevent new violations from being committed.
 
 ### Directory Structure
 ```
-cmd/           # Command-line applications (controller, steward, cfgcli)
+cmd/           # Command-line applications (controller, steward, cfg)
 api/proto/     # Protocol buffer definitions
 pkg/           # Shared packages and global plugin interfaces
   storage/interfaces/  # Global storage contracts (import these)

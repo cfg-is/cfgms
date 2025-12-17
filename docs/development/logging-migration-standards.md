@@ -11,7 +11,7 @@ This document defines the standards for migrating all CFGMS modules and packages
 All log entries MUST include these standardized fields:
 
 #### Service Identification
-- `service_name`: Service identifier ("controller", "steward", "cfgcli")
+- `service_name`: Service identifier ("controller", "steward", "cfg")
 - `component`: Component within service (e.g., "rbac", "workflow", "dna")
 - `module`: Specific module name (e.g., "script", "firewall", "m365")
 
@@ -153,7 +153,7 @@ func main() {
     loggingConfig := &logging.LoggingConfig{
         Provider:        "file", // or "timescale" for production
         Level:          "INFO",
-        ServiceName:     "controller", // or "steward", "cfgcli"
+        ServiceName:     "controller", // or "steward", "cfg"
         Component:       "main",
         TenantIsolation: true,
         EnableCorrelation: true,

@@ -243,7 +243,7 @@ EOF
 
 ```bash
 # In another terminal
-./bin/cfgcli workflow run example-workflow.yaml
+./bin/cfg workflow run example-workflow.yaml
 
 # You should see:
 # Running workflow: hello-workflow
@@ -276,7 +276,7 @@ steps:
 EOF
 
 # Run it
-./bin/cfgcli workflow run m365-workflow.yaml
+./bin/cfg workflow run m365-workflow.yaml
 ```
 
 ### What's Next?
@@ -414,7 +414,7 @@ curl -X POST http://localhost:9080/api/v1/admin/registration-tokens \
 
 ```bash
 # On controller machine
-./bin/cfgcli steward list
+./bin/cfg steward list
 
 # Output:
 # HOSTNAME         STATUS   LAST SEEN        PLATFORM
@@ -452,7 +452,7 @@ resources:
 EOF
 
 # Apply to entire fleet
-./bin/cfgcli config apply fleet-config.yaml
+./bin/cfg config apply fleet-config.yaml
 
 # Output:
 # Applying configuration to 2 stewards...
@@ -465,7 +465,7 @@ EOF
 
 ```bash
 # Get detailed status
-./bin/cfgcli steward status test-steward-1
+./bin/cfg steward status test-steward-1
 
 # Output:
 # Hostname: test-steward-1
@@ -635,8 +635,8 @@ sudo ufw allow 9080
 # Make sure controller is running in dev mode (default)
 
 # For production, manually approve:
-./bin/cfgcli cert requests list
-./bin/cfgcli cert requests approve <steward-hostname>
+./bin/cfg cert requests list
+./bin/cfg cert requests approve <steward-hostname>
 ```
 
 ## Next Steps

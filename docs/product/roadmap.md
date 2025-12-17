@@ -160,7 +160,7 @@ For complete version history and release notes, see [CHANGELOG.md](../../CHANGEL
   - [x] Highlight breaking changes and security impacts
   - [x] Export diffs in multiple formats (text, JSON, HTML, unified, side-by-side, markdown)
   - [x] Integration with approval workflows for change review
-  - [x] CLI integration via cfgcli diff command with advanced filtering
+  - [x] CLI integration via cfg diff command with advanced filtering
   - [x] Three-way comparison support with conflict detection
   - [x] Comprehensive test suite with edge case handling
 
@@ -575,7 +575,7 @@ For complete version history and release notes, see [CHANGELOG.md](../../CHANGEL
   - ✅ Email alerting via SMTP (simple alerts, no tiered escalation)
   - ✅ Request tracing for troubleshooting (request ID propagation, CLI reconstruction)
   - ✅ Health API endpoints (simple + detailed + Prometheus)
-  - ✅ CLI tools (`cfgcli controller status`, `cfgcli trace <request_id>`)
+  - ✅ CLI tools (`cfg controller status`, `cfg trace <request_id>`)
   - ✅ 7-day performance retention (30-second collection interval)
   - ✅ Uses existing storage providers (in-memory for alpha, pluggable architecture ready)
   - ✅ <1% overhead validated (0 goroutine growth, 9.31 KB memory for 30 snapshots)
@@ -599,8 +599,8 @@ For complete version history and release notes, see [CHANGELOG.md](../../CHANGEL
   - [x] Remove google.golang.org/grpc from go.mod
   - [x] Update Makefile proto generation to skip gRPC
   - [x] Validate all tests pass after removal
-- [x] **Rename cfgctl to cfgcli** (Issue #221) - 1 day ✅ COMPLETED
-  - [x] Rename cmd/cfgctl directory to cmd/cfgcli
+- [x] **Rename cfgctl to cfg** (Issue #221) - 1 day ✅ COMPLETED
+  - [x] Rename cmd/cfgctl directory to cmd/cfg
   - [x] Update all import paths referencing cfgctl
   - [x] Update documentation and examples
   - [x] Update build scripts and Makefile targets
@@ -716,7 +716,7 @@ For complete version history and release notes, see [CHANGELOG.md](../../CHANGEL
 
 #### v0.7.5: Testing Infrastructure & Security Hardening (CRITICAL)
 
-(Issue #247)
+**Status**: 🟡 IN PROGRESS - 69% Complete (18/26 story points) - Epic #247
 
 **Goal**: Ensure tests represent real-world deployment exactly as documented, eliminating development convenience patterns that could leak into production.
 
@@ -725,13 +725,13 @@ For complete version history and release notes, see [CHANGELOG.md](../../CHANGEL
 1. **Eliminate Development Foot-guns** - Remove insecure convenience shortcuts from production code
 2. **Production-Realistic Testing** - Ensure all tests use configuration matching QUICK_START.md deployment
 
-**Combined Epic** (30-35 story points)
+**Combined Epic** (26 story points total: 18 original + 8 newly discovered)
 
 **Philosophy**: "Test what you ship, ship what you test" - If a feature requires durable storage in production, it MUST use durable storage in development and testing. Tests must validate the exact deployment methods documented in QUICK_START.md and DEVELOPMENT.md.
 
 **Why Combined**: Fixing storage foot-guns REQUIRES fixing test infrastructure (can't test durable storage with in-memory mocks). Production-realistic testing EXPOSES foot-guns (tests fail when configuration doesn't match deployment reality). Both enforce the same core principle.
 
-**Critical Violations Identified**:
+**✅ COMPLETED WORK (18 story points)**:
 
 1. **Tenant Management Storage (CRITICAL)** (Issue #262) - 5 story points ✅ COMPLETED
    - **Implemented**: TenantStore interface in `pkg/storage/interfaces/tenant_store.go`
@@ -754,21 +754,63 @@ For complete version history and release notes, see [CHANGELOG.md](../../CHANGEL
 3. **RBAC Storage (HIGH)** - 4 story points ✅ **ALREADY MIGRATED**
    - **Current State**: `features/controller/server/server.go:96-100` uses `rbac.NewManagerWithStorage()` with pluggable storage
    - **Status**: ✅ **COMPLETE** - Already migrated to `pkg/storage` in Epic 6 (v0.4.6.0)
-   - **Note**: `features/rbac/memory/store.go` exists but is not used in production code
+   - **Note**: `features/rbac/manager.go:ephemeralStore` is LEGITIMATE - properly documented as ephemeral cache
 
-4. **Rollback Operation Storage (MEDIUM)** - 3 story points ✅ **NOT IN PRODUCTION PATH**
-   - **Current State**: `features/config/rollback/store.go` has `InMemoryRollbackStore`
-   - **Status**: ✅ **NOT NEEDED** - Only used in tests (`manager_test.go`), not in production code
-   - **Note**: No action required for production deployment
+4. **CLI Token Storage (LOW)** (Issue #264) - 1 story point ✅ COMPLETED
+   - **Implemented**: CLI now uses controller REST API for all token operations
+   - **API Endpoints**: Added `/api/v1/registration/tokens` endpoints (create, list, get, delete, revoke)
+   - **API Client**: `cmd/cfg/cmd/api_client.go` provides HTTP client for controller API
+   - **CLI Commands**: `cfg token create|list|revoke|delete` all use controller API
+   - **Configuration**: `CFGMS_API_URL` and `CFGMS_API_KEY` env vars or `--api-url`/`--api-key` flags
+   - **Files Modified**: `cmd/cfg/cmd/token.go`, `features/controller/api/server.go`
+   - **Files Added**: `cmd/cfg/cmd/api_client.go`, `features/controller/api/handlers_registration_tokens.go`
+   - **Status**: ✅ **COMPLETE** (PR #270)
 
-5. **CLI Token Storage (LOW)** (Issue #264) - 1 story point
-   - **Current State**: `cmd/cfgcli/cmd/token.go:102` uses `NewMemoryStore()` with comment "in-memory for now, will be controller API in future"
-   - **Impact**: CLI-generated tokens not persisted, but CLI is ephemeral so acceptable
-   - **Fix**: Remove in-memory store, connect directly to controller API
-   - **Files**: `cmd/cfgcli/cmd/token.go`
-   - **Depends on**: Issue #263 (controller API must exist first)
+5. **Template Storage** - 0 story points ✅ **VERIFIED UNUSED**
+   - **Status**: ✅ **NOT A FOOT-GUN** - `InMemoryTemplateStore` only exists in test files
+   - **Location**: `features/templates/store.go:19`
+   - **Action**: No action needed - test-only code
 
-**Actual Remaining Work**: 1 story point (Item #264) - Issues #262 and #263 completed
+**🚧 REMAINING WORK (8 story points)**:
+
+6. **M365 Auth Client Tenant Storage (CRITICAL)** (Issue #274) - 5 story points 🚨 IN PROGRESS
+   - **Current State**: `features/modules/m365/auth/memory_client_store.go:24` uses `NewMemoryClientTenantStore()` with comment "suitable for development and testing"
+   - **Impact**: OAuth client credentials and admin consent requests lost on controller restart
+   - **Severity**: CRITICAL - OAuth credential loss is a security incident
+   - **Fix Required**: Implement storage-backed `ClientTenantStore` using `pkg/storage` + `pkg/secrets` encryption
+   - **Files**: `features/modules/m365/auth/memory_client_store.go`
+   - **Issue**: #274
+   - **Status**: Story created, ready to work
+
+7. **Rollback Operation Storage (MEDIUM)** (Issue #275) - 3 story points 🚨 IN PROGRESS
+   - **Current State**: `features/config/rollback/store.go:178` has `DatabaseRollbackStore` that is NOT IMPLEMENTED (just wraps `InMemoryRollbackStore`)
+   - **Impact**: Rollback history lost on restart, no audit trail for configuration changes
+   - **Severity**: HIGH - Compliance and audit trail requirement
+   - **Epic 6 Gap**: Story 3 (#143) claimed completion but implementation incomplete
+   - **Fix Required**: Implement actual storage-backed `RollbackStore` using `pkg/storage`
+   - **Files**: `features/config/rollback/store.go`
+   - **Issue**: #275
+   - **Status**: Story created, ready to work
+
+**Investigation Notes (2025-12-17)**:
+
+Comprehensive codebase scan completed:
+
+- **Verified Foot-guns Found**: 2 (#274, #275)
+- **Test-Only Memory Stores** (Legitimate):
+  - `features/templates/store.go` - Only used in tests
+  - `pkg/registration/store.go` - NewMemoryStore() exists but unused
+  - `features/modules/patch/mock_patch_manager.go` - Mock for testing
+- **Legitimate Ephemeral Stores**:
+  - `features/rbac/manager.go:ephemeralStore` - Documented ephemeral cache
+  - `features/reports/cache/memory.go` - Uses centralized `pkg/cache`
+
+**Next Steps**:
+
+1. Complete Story #274 (M365 Auth Storage) - 5 points
+2. Complete Story #275 (Rollback Storage) - 3 points
+3. Run final `make check-architecture` validation
+4. Close Epic #247 when all stories complete
 
 **Phase 1.5: Environment Variable Security Hardening** (Issue #250, #251) (6 story points)
 

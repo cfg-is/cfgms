@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2025 CFGMS Contributors
-// Package cmd implements the CLI commands for cfgcli
+// Package cmd implements the CLI commands for cfg
 package cmd
 
 import (
@@ -36,13 +36,13 @@ Provides operational visibility into controller status including:
 
 Examples:
   # Check controller health status
-  cfgcli controller status --url=https://controller.example.com
+  cfg controller status --url=https://controller.example.com
 
   # View detailed metrics
-  cfgcli controller metrics --url=https://controller.example.com
+  cfg controller metrics --url=https://controller.example.com
 
   # Export metrics in JSON format
-  cfgcli controller metrics --url=https://controller.example.com --format=json`,
+  cfg controller metrics --url=https://controller.example.com --format=json`,
 }
 
 // controllerStatusCmd represents the controller status command
@@ -57,10 +57,10 @@ var controllerStatusCmd = &cobra.Command{
 
 Examples:
   # Check controller status
-  cfgcli controller status --url=https://controller.example.com
+  cfg controller status --url=https://controller.example.com
 
   # With API key authentication
-  cfgcli controller status --url=https://controller.example.com --api-key=your-key`,
+  cfg controller status --url=https://controller.example.com --api-key=your-key`,
 	RunE: runControllerStatus,
 }
 
@@ -78,10 +78,10 @@ Output formats: text (default), json
 
 Examples:
   # View metrics in human-readable format
-  cfgcli controller metrics --url=https://controller.example.com
+  cfg controller metrics --url=https://controller.example.com
 
   # Export metrics as JSON
-  cfgcli controller metrics --url=https://controller.example.com --format=json`,
+  cfg controller metrics --url=https://controller.example.com --format=json`,
 	RunE: runControllerMetrics,
 }
 

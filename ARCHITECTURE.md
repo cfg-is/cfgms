@@ -88,7 +88,7 @@ CFGMS is a modern configuration management system designed for Managed Service P
 
 **Location**: `cmd/steward/`, `features/steward/`
 
-### CLI (cfgcli)
+### CLI (cfg)
 
 **Purpose**: Command-line interface for system administration
 
@@ -98,7 +98,7 @@ CFGMS is a modern configuration management system designed for Managed Service P
 - Certificate operations
 - Debugging and troubleshooting
 
-**Location**: `cmd/cfgcli/`
+**Location**: `cmd/cfg/`
 
 ## Communication Architecture
 

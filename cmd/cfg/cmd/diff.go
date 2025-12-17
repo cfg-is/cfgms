@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2025 CFGMS Contributors
-// Package cmd implements the diff command for cfgcli
+// Package cmd implements the diff command for cfg
 package cmd
 
 import (
@@ -47,19 +47,19 @@ understanding of configuration structures.
 
 Examples:
   # Compare two files
-  cfgcli diff config-old.yaml config-new.yaml
+  cfg diff config-old.yaml config-new.yaml
 
   # Compare with different output format
-  cfgcli diff --output json config-old.yaml config-new.yaml
+  cfg diff --output json config-old.yaml config-new.yaml
 
   # Three-way comparison
-  cfgcli diff --three-way --base-ref main config-branch-1.yaml config-branch-2.yaml
+  cfg diff --three-way --base-ref main config-branch-1.yaml config-branch-2.yaml
 
   # Show only high impact changes
-  cfgcli diff --filter-by-impact high,critical config-old.yaml config-new.yaml
+  cfg diff --filter-by-impact high,critical config-old.yaml config-new.yaml
 
   # Include impact analysis
-  cfgcli diff --impact-analysis config-old.yaml config-new.yaml`,
+  cfg diff --impact-analysis config-old.yaml config-new.yaml`,
 	Args: cobra.RangeArgs(2, 3), // 2 for two-way, 3 for three-way
 	RunE: runDiff,
 }

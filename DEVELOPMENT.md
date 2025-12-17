@@ -132,7 +132,7 @@ make build
 Binaries will be created in the `bin/` directory:
 - `bin/controller` - Controller server
 - `bin/cfgms-steward` - Steward agent
-- `bin/cfgcli` - Command-line interface
+- `bin/cfg` - Command-line interface
 - `bin/cert-manager` - Certificate management utility
 
 ### Build Individual Components
@@ -530,7 +530,7 @@ The controller will start on default ports:
 make build-cli
 
 # Run a workflow
-./bin/cfgcli workflow run examples/m365-user-provisioning.yaml
+./bin/cfg workflow run examples/m365-user-provisioning.yaml
 ```
 
 **No stewards needed for cloud-only automation!**
@@ -554,8 +554,8 @@ make build-steward
 
 # 3. Use CLI to manage fleet
 make build-cli
-./bin/cfgcli steward list
-./bin/cfgcli config apply fleet-config.yaml
+./bin/cfg steward list
+./bin/cfg config apply fleet-config.yaml
 ```
 
 **For production**: See [docs/development/local-development-setup.md](docs/development/local-development-setup.md) for proper certificate management.

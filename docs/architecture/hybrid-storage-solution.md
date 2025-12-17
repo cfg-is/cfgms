@@ -209,7 +209,7 @@ controller:
 ### Phase 3: Data Migration
 ```bash
 # Export configurations from database to Git
-cfgcli config export --format git --target /data/cfgms-configs
+cfg config export --format git --target /data/cfgms-configs
 
 # Initialize Git repository with existing configs
 git init /data/cfgms-configs

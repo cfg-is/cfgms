@@ -67,7 +67,7 @@ make build
 # Or build specific components
 go build ./cmd/controller
 go build ./cmd/steward
-go build ./cmd/cfgcli
+go build ./cmd/cfg
 
 # Run OSS tests (HA tests automatically excluded)
 make test

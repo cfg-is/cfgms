@@ -85,7 +85,7 @@ Examples:
 ### Insufficient Information
 ```markdown
 Thanks for reporting this issue! To help us investigate, could you please provide:
-- [ ] CFGMS version (`cfgcli version`)
+- [ ] CFGMS version (`cfg version`)
 - [ ] Operating system and version
 - [ ] Steps to reproduce
 - [ ] Relevant logs or error messages
