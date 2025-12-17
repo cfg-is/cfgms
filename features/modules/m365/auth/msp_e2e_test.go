@@ -260,7 +260,7 @@ func TestMSPEndToEndClientOnboarding(t *testing.T) {
 								t.Log("🔧 Step 7: Testing client management operations")
 
 								// Test suspend client (e.g., for maintenance)
-								err := testContext.ClientStore.UpdateClientTenantStatus(context.Background(), 
+								err := testContext.ClientStore.UpdateClientTenantStatus(context.Background(),
 									clientTenantID,
 									ClientTenantStatusSuspended,
 								)
@@ -271,7 +271,7 @@ func TestMSPEndToEndClientOnboarding(t *testing.T) {
 								assert.Equal(t, ClientTenantStatusSuspended, suspended.Status)
 
 								// Test reactivate client
-								err = testContext.ClientStore.UpdateClientTenantStatus(context.Background(), 
+								err = testContext.ClientStore.UpdateClientTenantStatus(context.Background(),
 									clientTenantID,
 									ClientTenantStatusActive,
 								)
