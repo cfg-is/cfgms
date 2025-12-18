@@ -31,12 +31,13 @@ func TestExecutor_ApplyConfiguration_Success(t *testing.T) {
 
 	// Test configuration YAML
 	// Note: permissions use octal notation (0644, 0755)
+	// Note: Use ToSlash() to convert Windows backslashes to forward slashes for YAML compatibility
 	configYAML := `
 version: "1.0"
 modules:
   file:
     - name: "test-file"
-      resource_id: "` + filepath.Join(tempDir, "test.txt") + `"
+      resource_id: "` + filepath.ToSlash(filepath.Join(tempDir, "test.txt")) + `"
       state: "present"
       config:
         content: "Hello from executor test!\n"
@@ -44,7 +45,7 @@ modules:
 
   directory:
     - name: "test-dir"
-      resource_id: "` + filepath.Join(tempDir, "testdir") + `"
+      resource_id: "` + filepath.ToSlash(filepath.Join(tempDir, "testdir")) + `"
       state: "present"
       config:
         permissions: 0755
@@ -98,12 +99,13 @@ func TestExecutor_ApplyConfiguration_WithErrors(t *testing.T) {
 	require.NoError(t, err, "Failed to create executor")
 
 	// Test configuration with invalid permissions
+	// Note: Use ToSlash() to convert Windows backslashes to forward slashes for YAML compatibility
 	configYAML := `
 version: "1.0"
 modules:
   file:
     - name: "invalid-perms-file"
-      resource_id: "` + filepath.Join(tempDir, "invalid.txt") + `"
+      resource_id: "` + filepath.ToSlash(filepath.Join(tempDir, "invalid.txt")) + `"
       state: "present"
       config:
         content: "This will fail\n"
@@ -111,7 +113,7 @@ modules:
 
   directory:
     - name: "valid-dir"
-      resource_id: "` + filepath.Join(tempDir, "validdir") + `"
+      resource_id: "` + filepath.ToSlash(filepath.Join(tempDir, "validdir")) + `"
       state: "present"
       config:
         permissions: 0755

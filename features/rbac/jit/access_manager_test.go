@@ -582,7 +582,7 @@ func TestJITAccessManager_ExtendAccess_Errors(t *testing.T) {
 				grant, _ := jam.ApproveRequest(ctx, request.ID, "approver1", "Approved")
 				return grant
 			},
-			extensionDur: 2 * time.Hour, // Would exceed max duration
+			extensionDur: 3 * time.Hour, // Would exceed max duration (total would be ~3 hours, max is 2)
 			requesterID:  "user1",
 			expectedErr:  "exceed maximum duration",
 		},

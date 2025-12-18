@@ -27,7 +27,7 @@ func NewSession(req *SessionRequest, logger logging.Logger) (*Session, error) {
 		return nil, fmt.Errorf("user_id is required")
 	}
 	if req.Shell == "" {
-		req.Shell = "bash" // Default to bash
+		req.Shell = shell.GetDefaultShell() // Default to platform-appropriate shell
 	}
 	if !ValidateShell(req.Shell) {
 		return nil, fmt.Errorf("unsupported shell: %s", req.Shell)

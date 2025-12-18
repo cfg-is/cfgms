@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"sync"
 	"time"
@@ -190,7 +191,12 @@ func (p *FileProvider) Close() error {
 		if stopChan != nil {
 			close(stopChan)
 			// Give background goroutines time to finish cleanly
-			time.Sleep(200 * time.Millisecond)
+			// Windows requires longer wait for file handle release due to asynchronous kernel operations
+			if runtime.GOOS == "windows" {
+				time.Sleep(1500 * time.Millisecond)
+			} else {
+				time.Sleep(200 * time.Millisecond)
+			}
 		}
 
 		// Now safely close resources
