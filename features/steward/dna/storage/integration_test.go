@@ -23,9 +23,10 @@ func skipIntegrationWithoutCGO(t *testing.T) {
 	t.Helper()
 	config := DefaultConfig()
 	config.Backend = BackendSQLite
+	config.DataDir = t.TempDir() // Use temp directory to avoid file conflicts
 	logger := logging.NewLogger("error")
 
-	_, err := NewManager(config, logger)
+	manager, err := NewManager(config, logger)
 	if err != nil {
 		errStr := err.Error()
 		if strings.Contains(errStr, "CGO_ENABLED=0") ||
@@ -34,6 +35,10 @@ func skipIntegrationWithoutCGO(t *testing.T) {
 			t.Skip("Skipping test: SQLite requires CGO which is not enabled (no C compiler available)")
 		}
 	}
+	// Close the manager if it was successfully created
+	if manager != nil {
+		_ = manager.Close()
+	}
 }
 
 func TestDNAStorageIntegration(t *testing.T) {
@@ -41,8 +46,10 @@ func TestDNAStorageIntegration(t *testing.T) {
 	logger := logging.NewLogger("info")
 
 	// Create a simplified config for integration testing
+	// Use t.TempDir() for proper test isolation on all platforms
 	config := &Config{
 		Backend:                BackendSQLite,
+		DataDir:                t.TempDir(), // Isolated temp directory per test
 		CompressionLevel:       6,
 		CompressionType:        "gzip",
 		TargetCompressionRatio: 0.7, // More relaxed target for testing
