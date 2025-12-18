@@ -3,6 +3,13 @@
 // Package rollback provides configuration rollback capabilities for CFGMS.
 // It integrates with the Git backend to enable safe, auditable rollback
 // of configurations at various levels (device, group, client, MSP).
+//
+// Storage Architecture:
+// Rollback operations are persisted using pkg/storage for durability across
+// controller restarts. The StorageRollbackStore implementation uses the
+// global storage provider (git or database) configured for the system.
+// This ensures rollback history and audit trails survive system restarts
+// and comply with Epic 6 requirements.
 package rollback
 
 import (

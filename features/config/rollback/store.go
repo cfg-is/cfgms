@@ -174,23 +174,3 @@ func (s *InMemoryRollbackStore) cloneOperation(op *RollbackOperation) *RollbackO
 
 	return clone
 }
-
-// DatabaseRollbackStore provides a database-backed implementation of RollbackStore
-type DatabaseRollbackStore struct {
-	// In a real implementation, this would have a database connection
-	// For now, we'll embed the in-memory store
-	*InMemoryRollbackStore
-}
-
-// NewDatabaseRollbackStore creates a new database-backed rollback store
-func NewDatabaseRollbackStore() RollbackStore {
-	// In a real implementation, this would initialize database connections
-	return &DatabaseRollbackStore{
-		InMemoryRollbackStore: &InMemoryRollbackStore{
-			operations: make(map[string]*RollbackOperation),
-		},
-	}
-}
-
-// The DatabaseRollbackStore would override methods to persist to database
-// For now, it just uses the in-memory implementation
