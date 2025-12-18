@@ -53,6 +53,9 @@ config.yaml
 *.env
 .env.local
 
+# Claude Code local settings
+.claude/settings.local.json
+
 .obsidian/
 
 # Test/development storage data
