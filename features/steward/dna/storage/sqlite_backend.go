@@ -51,11 +51,15 @@ type SQLiteBackend struct {
 
 // NewSQLiteBackend creates a new SQLite-based DNA storage backend
 func NewSQLiteBackend(config *Config, logger logging.Logger) (*SQLiteBackend, error) {
-	// Determine database path
-	dbPath := "data/dna.db" // Default path
+	// Determine database path from config
+	dataDir := config.DataDir
+	if dataDir == "" {
+		dataDir = "data" // Fallback default
+	}
+	dbPath := filepath.Join(dataDir, "dna.db")
 
 	// Ensure data directory exists
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0750); err != nil {
+	if err := os.MkdirAll(dataDir, 0750); err != nil {
 		return nil, fmt.Errorf("failed to create data directory: %w", err)
 	}
 

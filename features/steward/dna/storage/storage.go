@@ -52,6 +52,7 @@ type Manager struct {
 type Config struct {
 	// Storage backend configuration
 	Backend BackendType `json:"backend" yaml:"backend"`
+	DataDir string      `json:"data_dir" yaml:"data_dir"` // Directory for storage files (default: "data")
 
 	// Compression configuration
 	CompressionLevel       int     `json:"compression_level" yaml:"compression_level"`               // 1-9, higher = better compression
@@ -415,6 +416,7 @@ func (m *Manager) Close() error {
 func DefaultConfig() *Config {
 	return &Config{
 		Backend:                BackendSQLite,       // DEFAULT: SQLite embedded database
+		DataDir:                "data",              // Default data directory
 		CompressionLevel:       6,                   // Kept for compatibility
 		CompressionType:        "zstd",              // Kept for compatibility
 		TargetCompressionRatio: 0.3,                 // Kept for compatibility

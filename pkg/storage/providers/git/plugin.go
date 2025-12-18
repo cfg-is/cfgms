@@ -782,6 +782,9 @@ func (s *GitConfigStore) GetConfigHistory(ctx context.Context, key *interfaces.C
 		return nil, fmt.Errorf("failed to get relative path: %w", err)
 	}
 
+	// Convert to forward slashes for git (Windows compatibility)
+	relPath = filepath.ToSlash(relPath)
+
 	// Get git log for the file
 	args := []string{"log", "--oneline", fmt.Sprintf("-%d", limit), "--", relPath}
 	// #nosec G204 - Git storage requires controlled git command execution with validated args

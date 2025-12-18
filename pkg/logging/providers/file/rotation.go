@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/logging/interfaces"
@@ -496,30 +495,9 @@ func (p *FileProvider) calculateTotalStorageSize() (int64, error) {
 	return totalSize, nil
 }
 
-// calculateDiskUsage calculates disk usage percentage for the log directory
-func (p *FileProvider) calculateDiskUsage() (float64, error) {
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs(p.config.Directory, &stat); err != nil {
-		return 0, fmt.Errorf("failed to get filesystem stats: %w", err)
-	}
-
-	// Calculate usage percentage with bounds checking
-	if stat.Bsize < 0 {
-		return 0, fmt.Errorf("invalid block size: %d", stat.Bsize)
-	}
-	// #nosec G115 - Block size is validated above to be non-negative
-	blockSize := uint64(stat.Bsize)
-
-	totalBytes := stat.Blocks * blockSize
-	freeBytes := stat.Bavail * blockSize
-	usedBytes := totalBytes - freeBytes
-
-	if totalBytes == 0 {
-		return 0, nil
-	}
-
-	return float64(usedBytes) / float64(totalBytes) * 100.0, nil
-}
+// calculateDiskUsage is implemented in platform-specific files:
+// - rotation_unix.go for Linux/macOS/BSD
+// - rotation_windows.go for Windows
 
 // updateStats updates provider statistics
 func (p *FileProvider) updateStats(entriesWritten int, latency time.Duration) {

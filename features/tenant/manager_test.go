@@ -432,7 +432,8 @@ func TestManager_UpdateTenant(t *testing.T) {
 	assert.Equal(t, "Updated Description", updated.Description)
 	assert.Equal(t, "true", updated.Metadata["updated"])
 	assert.Equal(t, tenant.CreatedAt, updated.CreatedAt)
-	assert.True(t, updated.UpdatedAt.After(tenant.UpdatedAt))
+	// UpdatedAt should be at or after the original (may be equal on fast systems)
+	assert.False(t, updated.UpdatedAt.Before(tenant.UpdatedAt))
 }
 
 func TestManager_DeleteTenant(t *testing.T) {

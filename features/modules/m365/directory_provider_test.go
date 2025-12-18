@@ -5,6 +5,7 @@ package m365
 import (
 	"context"
 	"errors"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -586,7 +587,11 @@ func TestEntraIDDirectoryProvider_HealthCheck(t *testing.T) {
 			}
 
 			if tt.expectHealthy {
-				assert.NotZero(t, health.ResponseTime)
+				// Windows timer resolution may cause ResponseTime to be 0 for very fast operations
+				// This is acceptable and doesn't indicate a failure
+				if runtime.GOOS != "windows" {
+					assert.NotZero(t, health.ResponseTime)
+				}
 			}
 
 			mockAuth.AssertExpectations(t)

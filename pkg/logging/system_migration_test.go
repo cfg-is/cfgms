@@ -4,6 +4,8 @@ package logging
 
 import (
 	"context"
+	"os"
+	"runtime"
 	"testing"
 	"time"
 
@@ -16,7 +18,17 @@ import (
 // TestSystemWideMigration validates the comprehensive logging migration across all components
 func TestSystemWideMigration(t *testing.T) {
 	// Initialize global logging provider for system-wide testing
-	tempDir := t.TempDir()
+	// On Windows, skip cleanup since CI environment is ephemeral and Windows holds file handles
+	var tempDir string
+	if runtime.GOOS == "windows" {
+		var err error
+		tempDir, err = os.MkdirTemp("", "logging-test-*")
+		require.NoError(t, err)
+		// No cleanup on Windows - ephemeral CI environment
+	} else {
+		tempDir = t.TempDir()
+	}
+
 	loggingConfig := &LoggingConfig{
 		Provider:          "file",
 		Level:             "DEBUG",
@@ -41,6 +53,21 @@ func TestSystemWideMigration(t *testing.T) {
 
 	// Initialize global logger factory
 	InitializeGlobalLoggerFactory("cfgms_system_test", "integration")
+
+	// Ensure cleanup of logging provider on test completion (critical for Windows file locking)
+	// Use t.Cleanup() to ensure this runs before t.TempDir() cleanup
+	t.Cleanup(func() {
+		if manager := GetGlobalLoggingManager(); manager != nil {
+			// Flush all pending writes
+			_ = manager.Flush(context.Background())
+			// Close the provider to release file handles
+			_ = manager.Close()
+			// On Windows, give the filesystem extra time to release the handle
+			if runtime.GOOS == "windows" {
+				time.Sleep(250 * time.Millisecond)
+			}
+		}
+	})
 
 	t.Run("ControllerLogging", func(t *testing.T) {
 		// Test controller-style logging
@@ -237,7 +264,17 @@ func TestSystemWideMigration(t *testing.T) {
 // TestGlobalProviderAvailability validates that the global provider is available to all components
 func TestGlobalProviderAvailability(t *testing.T) {
 	// Initialize global logging provider
-	tempDir := t.TempDir()
+	// On Windows, skip cleanup since CI environment is ephemeral and Windows holds file handles
+	var tempDir string
+	if runtime.GOOS == "windows" {
+		var err error
+		tempDir, err = os.MkdirTemp("", "logging-test-*")
+		require.NoError(t, err)
+		// No cleanup on Windows - ephemeral CI environment
+	} else {
+		tempDir = t.TempDir()
+	}
+
 	loggingConfig := &LoggingConfig{
 		Provider:    "file",
 		Level:       "INFO",
@@ -252,6 +289,21 @@ func TestGlobalProviderAvailability(t *testing.T) {
 	require.NoError(t, err, "Failed to initialize global logging")
 
 	InitializeGlobalLoggerFactory("availability_test", "test")
+
+	// Ensure cleanup of logging provider on test completion (critical for Windows file locking)
+	// Use t.Cleanup() to ensure this runs before t.TempDir() cleanup
+	t.Cleanup(func() {
+		if manager := GetGlobalLoggingManager(); manager != nil {
+			// Flush all pending writes
+			_ = manager.Flush(context.Background())
+			// Close the provider to release file handles
+			_ = manager.Close()
+			// On Windows, give the filesystem extra time to release the handle
+			if runtime.GOOS == "windows" {
+				time.Sleep(250 * time.Millisecond)
+			}
+		}
+	})
 
 	// Test that all component types can access the global provider
 	componentTypes := []string{
@@ -283,7 +335,17 @@ func TestGlobalProviderAvailability(t *testing.T) {
 // TestMigrationBackwardCompatibility validates that legacy logging still works after migration
 func TestMigrationBackwardCompatibility(t *testing.T) {
 	// Initialize global logging
-	tempDir := t.TempDir()
+	// On Windows, skip cleanup since CI environment is ephemeral and Windows holds file handles
+	var tempDir string
+	if runtime.GOOS == "windows" {
+		var err error
+		tempDir, err = os.MkdirTemp("", "logging-test-*")
+		require.NoError(t, err)
+		// No cleanup on Windows - ephemeral CI environment
+	} else {
+		tempDir = t.TempDir()
+	}
+
 	loggingConfig := &LoggingConfig{
 		Provider:    "file",
 		Level:       "INFO",
@@ -298,6 +360,21 @@ func TestMigrationBackwardCompatibility(t *testing.T) {
 	require.NoError(t, err, "Failed to initialize global logging")
 
 	InitializeGlobalLoggerFactory("compatibility_test", "test")
+
+	// Ensure cleanup of logging provider on test completion (critical for Windows file locking)
+	// Use t.Cleanup() to ensure this runs before t.TempDir() cleanup
+	t.Cleanup(func() {
+		if manager := GetGlobalLoggingManager(); manager != nil {
+			// Flush all pending writes
+			_ = manager.Flush(context.Background())
+			// Close the provider to release file handles
+			_ = manager.Close()
+			// On Windows, give the filesystem extra time to release the handle
+			if runtime.GOOS == "windows" {
+				time.Sleep(250 * time.Millisecond)
+			}
+		}
+	})
 
 	// Test legacy logger creation still works
 	legacyLogger := GetLogger()

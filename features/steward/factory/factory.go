@@ -108,23 +108,36 @@ func NewWithStewardID(registry discovery.ModuleRegistry, errorConfig config.Erro
 	return factory
 }
 
-// LoadModule dynamically loads a module from the given path and name
+// LoadModule dynamically loads a module from the given path and name.
+//
+// Module loading follows this priority:
+//  1. Return cached instance if already loaded
+//  2. Load from registry path if module is discovered
+//  3. Fall back to built-in modules if not in registry
+//
+// This allows built-in modules (file, directory, firewall, etc.) to work
+// even when no external modules are discovered on the filesystem.
 func (f *ModuleFactory) LoadModule(moduleName string) (modules.Module, error) {
 	// Check if module is already loaded
 	if instance, exists := f.instances[moduleName]; exists {
 		return instance, nil
 	}
 
-	// Get module info from registry
-	moduleInfo, exists := f.registry[moduleName]
-	if !exists {
-		return nil, fmt.Errorf("module not found in registry: %s", moduleName)
-	}
+	var instance modules.Module
+	var err error
 
-	// Load the module
-	instance, err := f.loadModuleFromPath(moduleName, moduleInfo.Path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load module %s: %w", moduleName, err)
+	// Try to load from registry first (discovered modules take priority)
+	if moduleInfo, exists := f.registry[moduleName]; exists {
+		instance, err = f.loadModuleFromPath(moduleName, moduleInfo.Path)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load module %s from path: %w", moduleName, err)
+		}
+	} else {
+		// Fall back to built-in modules when not in registry
+		instance, err = f.loadBuiltinModule(moduleName)
+		if err != nil {
+			return nil, fmt.Errorf("module %s not found in registry and not a built-in module", moduleName)
+		}
 	}
 
 	// Validate the module implements the required interface

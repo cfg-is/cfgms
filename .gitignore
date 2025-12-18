@@ -1,5 +1,6 @@
 # Binaries
-bin/
+bin/*
+!bin/cfgms-wait-for-services
 *.exe
 *.exe~
 *.dll
@@ -51,6 +52,9 @@ certs/
 config.yaml
 *.env
 .env.local
+
+# Claude Code local settings
+.claude/settings.local.json
 
 .obsidian/
 

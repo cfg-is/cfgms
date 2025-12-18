@@ -195,6 +195,10 @@ func TestServer_New_SecurityValidation(t *testing.T) {
 // TestServer_StorageProviderValidation dynamically validates storage provider configuration
 // against all registered global storage providers
 func TestServer_StorageProviderValidation(t *testing.T) {
+	// Skip if integration tests are explicitly disabled (e.g., cross-platform CI without Docker)
+	if os.Getenv("CFGMS_TEST_INTEGRATION") == "0" {
+		t.Skip("Skipping storage provider validation - integration tests disabled (CFGMS_TEST_INTEGRATION=0)")
+	}
 
 	logger := logging.NewNoopLogger()
 	tempDir, err := os.MkdirTemp("", "storage_provider_test")

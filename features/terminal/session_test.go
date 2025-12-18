@@ -36,15 +36,15 @@ func TestSessionCreation(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "bash session (platform dependent)",
+			name: "platform default shell session",
 			request: &SessionRequest{
 				StewardID: "test-steward-001",
 				UserID:    "test-user",
-				Shell:     "bash",
+				Shell:     shell.GetDefaultShell(),
 				Cols:      80,
 				Rows:      24,
 			},
-			wantErr: runtime.GOOS == "windows", // bash doesn't work on Windows
+			wantErr: false, // Uses platform-appropriate default shell
 		},
 		{
 			name: "powershell session (platform dependent)",
@@ -73,7 +73,7 @@ func TestSessionCreation(t *testing.T) {
 			request: &SessionRequest{
 				StewardID: "",
 				UserID:    "test-user",
-				Shell:     "bash",
+				Shell:     shell.GetDefaultShell(),
 				Cols:      80,
 				Rows:      24,
 			},
@@ -84,7 +84,7 @@ func TestSessionCreation(t *testing.T) {
 			request: &SessionRequest{
 				StewardID: "test-steward-001",
 				UserID:    "test-user",
-				Shell:     "bash",
+				Shell:     shell.GetDefaultShell(),
 				Cols:      0,
 				Rows:      24,
 			},
@@ -173,7 +173,7 @@ func TestSessionState(t *testing.T) {
 	request := &SessionRequest{
 		StewardID: "test-steward-001",
 		UserID:    "test-user",
-		Shell:     "bash",
+		Shell:     shell.GetDefaultShell(),
 		Cols:      80,
 		Rows:      24,
 	}
@@ -189,9 +189,11 @@ func TestSessionState(t *testing.T) {
 	session.UpdateActivity()
 	assert.True(t, time.Since(session.LastActivity) < time.Second)
 
-	// Test timeout check
+	// Test timeout check - use a small sleep to ensure time passes
+	// Windows has ~15ms clock resolution, so use a slightly larger timeout
+	time.Sleep(10 * time.Millisecond)
 	assert.False(t, session.IsTimedOut(30*time.Minute))
-	assert.True(t, session.IsTimedOut(time.Nanosecond))
+	assert.True(t, session.IsTimedOut(time.Millisecond))
 
 	ctx := context.Background()
 
@@ -208,7 +210,7 @@ func TestSessionMetadata(t *testing.T) {
 	request := &SessionRequest{
 		StewardID: "test-steward-001",
 		UserID:    "test-user",
-		Shell:     "bash",
+		Shell:     shell.GetDefaultShell(),
 		Cols:      80,
 		Rows:      24,
 		Env: map[string]string{

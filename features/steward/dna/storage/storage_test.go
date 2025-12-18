@@ -7,7 +7,7 @@ package storage
 import (
 	"context"
 	"fmt"
-	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,38 +17,51 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+// skipWithoutCGO skips the test if CGO is not enabled (SQLite requires CGO).
+// This is a local version to avoid circular imports with testutil.
+func skipWithoutCGO(t *testing.T) {
+	t.Helper()
+	config := DefaultConfig()
+	config.Backend = BackendSQLite
+	config.DataDir = t.TempDir() // Use temp directory to avoid file conflicts
+	logger := logging.NewLogger("error")
+
+	manager, err := NewManager(config, logger)
+	if err != nil {
+		errStr := err.Error()
+		if strings.Contains(errStr, "CGO_ENABLED=0") ||
+			strings.Contains(errStr, "go-sqlite3 requires cgo") ||
+			strings.Contains(errStr, "This is a stub") {
+			t.Skip("Skipping test: SQLite requires CGO which is not enabled (no C compiler available)")
+		}
+	}
+	// Close the manager if it was successfully created
+	if manager != nil {
+		_ = manager.Close()
+	}
+}
+
 // createTestConfig creates a test configuration with unique database path
 func createTestConfig(t *testing.T, backendType BackendType) *Config {
 	config := DefaultConfig()
 	config.Backend = backendType
 
-	// For SQLite testing, the database will be created in a temporary location
-	// by the SQLite backend implementation (data/dna.db by default)
-	// Tests will run in isolated environments
+	// Use t.TempDir() for test isolation - each test gets its own temp directory
+	// that Go will automatically clean up after the test completes.
+	// This ensures proper isolation on all platforms, especially Windows where
+	// SQLite WAL files can't be deleted while the database is open.
+	config.DataDir = t.TempDir()
 
 	return config
 }
 
-// cleanupTestConfig cleans up test resources
-func cleanupTestConfig(t *testing.T, config *Config) {
-	if config.Backend == BackendSQLite {
-		// Clean up SQLite database files to ensure test isolation
-		dbFiles := []string{"data/dna.db", "data/dna.db-wal", "data/dna.db-shm"}
-		for _, file := range dbFiles {
-			if err := os.Remove(file); err != nil && !os.IsNotExist(err) {
-				t.Logf("Warning: Could not remove database file %s: %v", file, err)
-			}
-		}
-	}
-}
-
 func TestStorageManager(t *testing.T) {
+	skipWithoutCGO(t)
 	logger := logging.NewLogger("debug")
 	config := createTestConfig(t, BackendSQLite)
 
-	// Clean up before starting to ensure isolated test environment
-	cleanupTestConfig(t, config)
-	defer cleanupTestConfig(t, config)
+	// t.TempDir() automatically creates and cleans up the directory,
+	// no manual cleanup needed
 
 	manager, err := NewManager(config, logger)
 	if err != nil {
@@ -495,18 +508,18 @@ func testCompressionAlgorithm(t *testing.T, algorithm string) {
 
 func TestStorageBackends(t *testing.T) {
 	logger := logging.NewLogger("debug")
-	config := DefaultConfig()
 
 	backends := []BackendType{BackendSQLite, BackendFile}
 
 	for _, backendType := range backends {
 		t.Run(string(backendType), func(t *testing.T) {
-			// Clean database before each backend test
+			// Skip SQLite tests if CGO is not available
 			if backendType == BackendSQLite {
-				testConfig := createTestConfig(t, BackendSQLite)
-				cleanupTestConfig(t, testConfig)
+				skipWithoutCGO(t)
 			}
-			testStorageBackend(t, backendType, config, logger)
+			// Use createTestConfig to get proper temp directory isolation
+			testConfig := createTestConfig(t, backendType)
+			testStorageBackend(t, backendType, testConfig, logger)
 		})
 	}
 }

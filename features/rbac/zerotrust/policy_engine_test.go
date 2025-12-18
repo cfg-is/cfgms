@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"testing"
 	"time"
 
@@ -129,7 +130,11 @@ func TestEvaluateAccessBasic(t *testing.T) {
 	assert.NotNil(t, response)
 	assert.Contains(t, response.EvaluationID, "eval-")
 	assert.NotZero(t, response.EvaluationTime)
-	assert.NotZero(t, response.ProcessingTime)
+	// Windows timer resolution may cause ProcessingTime to be 0 for very fast operations
+	// This is acceptable and doesn't indicate a failure
+	if runtime.GOOS != "windows" {
+		assert.NotZero(t, response.ProcessingTime)
+	}
 
 	// Should have audit trail
 	assert.NotEmpty(t, response.AuditTrail)

@@ -7,6 +7,7 @@ package storage
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,12 +17,39 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+// skipIntegrationWithoutCGO skips the test if CGO is not enabled (SQLite requires CGO).
+// This is a local version to avoid circular imports with testutil.
+func skipIntegrationWithoutCGO(t *testing.T) {
+	t.Helper()
+	config := DefaultConfig()
+	config.Backend = BackendSQLite
+	config.DataDir = t.TempDir() // Use temp directory to avoid file conflicts
+	logger := logging.NewLogger("error")
+
+	manager, err := NewManager(config, logger)
+	if err != nil {
+		errStr := err.Error()
+		if strings.Contains(errStr, "CGO_ENABLED=0") ||
+			strings.Contains(errStr, "go-sqlite3 requires cgo") ||
+			strings.Contains(errStr, "This is a stub") {
+			t.Skip("Skipping test: SQLite requires CGO which is not enabled (no C compiler available)")
+		}
+	}
+	// Close the manager if it was successfully created
+	if manager != nil {
+		_ = manager.Close()
+	}
+}
+
 func TestDNAStorageIntegration(t *testing.T) {
+	skipIntegrationWithoutCGO(t)
 	logger := logging.NewLogger("info")
 
 	// Create a simplified config for integration testing
+	// Use t.TempDir() for proper test isolation on all platforms
 	config := &Config{
 		Backend:                BackendSQLite,
+		DataDir:                t.TempDir(), // Isolated temp directory per test
 		CompressionLevel:       6,
 		CompressionType:        "gzip",
 		TargetCompressionRatio: 0.7, // More relaxed target for testing

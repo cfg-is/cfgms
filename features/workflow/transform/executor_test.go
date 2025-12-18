@@ -45,7 +45,7 @@ func TestTransformExecutor_Execute(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, result.Success)
 	assert.Equal(t, "processed_hello", result.Data["result"])
-	assert.Greater(t, result.Duration, time.Duration(0))
+	assert.GreaterOrEqual(t, result.Duration, time.Duration(0))
 
 	// Verify logging
 	testLogger := logger

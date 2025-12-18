@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/features/terminal/shell"
 	testutil "github.com/cfgis/cfgms/pkg/testing"
 )
 
@@ -130,7 +131,7 @@ func TestRecordingMetadata(t *testing.T) {
 		SessionID: sessionID,
 		StewardID: "test-steward-001",
 		UserID:    "test-user",
-		Shell:     "bash",
+		Shell:     shell.GetDefaultShell(),
 		CreatedAt: time.Now(),
 		Environment: map[string]string{
 			"TERM": "xterm-256color",

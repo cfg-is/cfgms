@@ -13,6 +13,7 @@ import (
 
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/rbac/continuous"
+	"github.com/cfgis/cfgms/features/terminal/shell"
 	"github.com/cfgis/cfgms/features/rbac/memory"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -84,10 +85,11 @@ func TestTerminalRBACIntegrationReal(t *testing.T) {
 
 	t.Run("TerminalSessionWithRealComponents", func(t *testing.T) {
 		// Test terminal session creation with real session management
+		defaultShell := shell.GetDefaultShell()
 		req := &SessionRequest{
 			StewardID: "test-steward",
 			UserID:    "test-user",
-			Shell:     "bash",
+			Shell:     defaultShell,
 			Cols:      80,
 			Rows:      24,
 		}
@@ -99,7 +101,7 @@ func TestTerminalRBACIntegrationReal(t *testing.T) {
 		// Validate real session properties
 		assert.Equal(t, "test-user", session.UserID)
 		assert.Equal(t, "test-steward", session.StewardID)
-		assert.Equal(t, "bash", session.Shell)
+		assert.Equal(t, defaultShell, session.Shell)
 		assert.True(t, session.IsActive())
 		assert.False(t, session.IsClosed())
 

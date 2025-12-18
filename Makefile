@@ -61,6 +61,81 @@ build-cli:
 build-cert-manager:
 	go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o bin/${CERT_MANAGER_BINARY} ./cmd/cert-manager
 
+# Cross-platform build targets
+# Supported platforms: Linux, Windows, macOS (AMD64 and ARM64)
+PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64
+
+# Build all binaries for all platforms (outputs to bin/platform/)
+.PHONY: build-cross-platform
+build-cross-platform:
+	@echo "🌐 Building Cross-Platform Binaries"
+	@echo "===================================="
+	@for platform in $(PLATFORMS); do \
+		export GOOS=$${platform%/*}; \
+		export GOARCH=$${platform#*/}; \
+		export EXT=$$( [ "$$GOOS" = "windows" ] && echo ".exe" || echo "" ); \
+		export OUTDIR=bin/$$GOOS-$$GOARCH; \
+		echo "  Building for $$GOOS/$$GOARCH..."; \
+		mkdir -p $$OUTDIR; \
+		go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o $$OUTDIR/${STEWARD_BINARY}$$EXT ./cmd/steward && \
+		go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o $$OUTDIR/${CONTROLLER_BINARY}$$EXT ./cmd/controller && \
+		go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o $$OUTDIR/${CLI_BINARY}$$EXT ./cmd/cfg && \
+		go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o $$OUTDIR/${CERT_MANAGER_BINARY}$$EXT ./cmd/cert-manager || exit 1; \
+		echo "  ✅ $$GOOS/$$GOARCH complete"; \
+	done
+	@echo ""
+	@echo "✅ All cross-platform builds complete"
+	@echo "   Binaries in bin/<os>-<arch>/"
+
+# Validate cross-platform compilation without saving binaries (CI-friendly)
+.PHONY: build-cross-validate
+build-cross-validate:
+	@echo "🔍 Validating Cross-Platform Compilation"
+	@echo "========================================"
+	@FAILED=0; \
+	for platform in $(PLATFORMS); do \
+		export GOOS=$${platform%/*}; \
+		export GOARCH=$${platform#*/}; \
+		printf "  %-15s" "$$GOOS/$$GOARCH:"; \
+		ERROR_LOG=$$(mktemp); \
+		if go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o /dev/null ./cmd/steward 2>$$ERROR_LOG && \
+		   go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o /dev/null ./cmd/controller 2>>$$ERROR_LOG && \
+		   go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o /dev/null ./cmd/cfg 2>>$$ERROR_LOG && \
+		   go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o /dev/null ./cmd/cert-manager 2>>$$ERROR_LOG; then \
+			echo "✅ PASS"; \
+			rm -f $$ERROR_LOG; \
+		else \
+			echo "❌ FAIL"; \
+			echo "Errors for $$GOOS/$$GOARCH:"; \
+			cat $$ERROR_LOG | head -20; \
+			rm -f $$ERROR_LOG; \
+			FAILED=1; \
+		fi; \
+	done; \
+	echo ""; \
+	if [ $$FAILED -eq 1 ]; then \
+		echo "❌ Cross-platform validation FAILED"; \
+		exit 1; \
+	else \
+		echo "✅ All platforms compile successfully"; \
+	fi
+
+# Build steward for specific platform (usage: make build-steward-cross GOOS=linux GOARCH=arm64)
+.PHONY: build-steward-cross
+build-steward-cross:
+	@if [ -z "$(GOOS)" ] || [ -z "$(GOARCH)" ]; then \
+		echo "Usage: make build-steward-cross GOOS=<os> GOARCH=<arch>"; \
+		echo "Example: make build-steward-cross GOOS=linux GOARCH=arm64"; \
+		echo ""; \
+		echo "Supported platforms:"; \
+		for p in $(PLATFORMS); do echo "  $$p"; done; \
+		exit 1; \
+	fi
+	@EXT=$$( [ "$(GOOS)" = "windows" ] && echo ".exe" || echo "" ); \
+	echo "Building steward for $(GOOS)/$(GOARCH)..."; \
+	GOOS=$(GOOS) GOARCH=$(GOARCH) go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o bin/$(GOOS)-$(GOARCH)/${STEWARD_BINARY}$$EXT ./cmd/steward
+	@echo "✅ Built bin/$(GOOS)-$(GOARCH)/${STEWARD_BINARY}"
+
 # Smart test - core modules + changed modules only
 test:
 	@echo "🧪 Running Tests (Smart Mode)"

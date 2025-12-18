@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/go-ole/go-ole"
@@ -326,7 +327,10 @@ func (w *WindowsUpdateManager) GetLastPatchDate(ctx context.Context) (time.Time,
 
 	// Convert OLE date to Go time
 	oleDate := dateVariant.Val
-	goTime := ole.GetVariantDate(uint64(oleDate))
+	goTime, err := ole.GetVariantDate(uint64(oleDate))
+	if err != nil {
+		return time.Time{}, fmt.Errorf("failed to convert OLE date: %w", err)
+	}
 
 	return goTime, nil
 }
@@ -484,13 +488,40 @@ func (w *WindowsUpdateManager) extractPatchInfo(update *ole.IDispatch) PatchInfo
 		kbArticleIDs.Release()
 	}
 
+	// If no KB ID found, try to use UpdateID as fallback
+	if patchInfo.ID == "" {
+		if updateIDVariant, err := oleutil.GetProperty(update, "UpdateID"); err == nil {
+			if updateID, ok := updateIDVariant.Value().(string); ok && updateID != "" {
+				patchInfo.ID = updateID
+			}
+		}
+	}
+
+	// If still no ID, use Title as last resort (truncated to 50 chars)
+	if patchInfo.ID == "" && patchInfo.Title != "" {
+		title := patchInfo.Title
+		if len(title) > 50 {
+			title = title[:50]
+		}
+		// Replace spaces and special chars with underscores for ID safety
+		title = strings.Map(func(r rune) rune {
+			if r == ' ' || r == '(' || r == ')' || r == '[' || r == ']' {
+				return '_'
+			}
+			return r
+		}, title)
+		patchInfo.ID = "TITLE_" + title
+	}
+
 	// Get MsrcSeverity
 	if severityVariant, err := oleutil.GetProperty(update, "MsrcSeverity"); err == nil {
-		if severity, ok := severityVariant.Value().(string); ok {
-			patchInfo.Severity = severity
-		} else {
-			patchInfo.Severity = "moderate" // Default
+		if severity, ok := severityVariant.Value().(string); ok && severity != "" {
+			patchInfo.Severity = strings.ToLower(severity)
 		}
+	}
+	// Ensure we always have a severity value
+	if patchInfo.Severity == "" {
+		patchInfo.Severity = "unspecified"
 	}
 
 	// Get MaxDownloadSize
@@ -503,7 +534,9 @@ func (w *WindowsUpdateManager) extractPatchInfo(update *ole.IDispatch) PatchInfo
 	// Get LastDeploymentChangeTime
 	if dateVariant, err := oleutil.GetProperty(update, "LastDeploymentChangeTime"); err == nil {
 		oleDate := dateVariant.Val
-		patchInfo.ReleaseDate = ole.GetVariantDate(uint64(oleDate))
+		if releaseDate, dateErr := ole.GetVariantDate(uint64(oleDate)); dateErr == nil {
+			patchInfo.ReleaseDate = releaseDate
+		}
 	}
 
 	// Get RebootRequired

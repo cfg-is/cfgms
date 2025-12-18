@@ -649,6 +649,13 @@ func (s *Server) GetHAManager() *ha.Manager {
 	return s.haManager
 }
 
+// GetRegistrationTokenStore returns the registration token store
+func (s *Server) GetRegistrationTokenStore() pkgRegistration.Store {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.registrationTokenStore
+}
+
 // initializeCertificateManager initializes the certificate manager based on configuration
 func initializeCertificateManager(cfg *config.Config, logger logging.Logger) (*cert.Manager, error) {
 	// Check if CA exists or needs to be created
