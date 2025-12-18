@@ -16,12 +16,6 @@ For detailed versioning policy, support timelines, and upgrade guidance, see [Ve
 
 For complete version history and release notes, see [CHANGELOG.md](../../CHANGELOG.md).
 
-## Current Status
-
-- **Current Version**: 0.6.0 (Alpha) - ✅ v0.6.0 COMPLETE (Finalizing Foundational Endpoint CMS)
-- **Status**: v0.6.0 Complete - Foundational endpoint CMS with policy-driven automation, compliance templates, and proactive performance management
-- **Focus**: Open source preparation and advanced SaaS management capabilities
-
 ## Development Phases
 
 ### Phase 1: Foundation (v0.1.0 - v0.6.0)
@@ -42,7 +36,7 @@ Test infrastructure cleanup with 98%+ success rate, AI-assisted sprint planning 
 
 #### v0.3.0 (Alpha) - Enhanced Automation & SaaS Steward Foundation - ✅ COMPLETED
 
-Enhanced workflow engine (42 pts: error handling, conditionals, loops, SaaS steward, API framework), enterprise config management (34 pts: Git backend, rollback, templates, diff tools), DNA monitoring (34 pts: 161 attributes, storage with 90%+ compression, drift detection, reporting), remote access (39 pts: terminal with RBAC, E2E testing, production readiness with 100+ sessions).
+Enhanced workflow engine (42 pts: Stories #69-73 - error handling, conditionals, loops, SaaS steward, API framework), enterprise config management (34 pts: Stories #74-77 - Git backend, rollback, templates, diff tools), DNA monitoring (34 pts: Stories #78-81 - 161 attributes, storage with 90%+ compression, drift detection, reporting), remote access (39 pts: Stories #82-86 - terminal with RBAC, E2E testing, production readiness with 100+ sessions).
 
 #### v0.3.1 (Alpha) - Security Tools Implementation - ✅ COMPLETED
 
@@ -54,23 +48,23 @@ Critical CVE remediation (go-git v5.13.0), race condition fixes, gosec installat
 
 #### v0.4.0 (Alpha) - Advanced Multi-Tenancy & Plugin Architecture - ✅ COMPLETED
 
-Advanced module system (21 pts: dependency management, lifecycle, versioning), advanced RBAC with zero-trust (50 pts: role inheritance, JIT access, risk-based controls, continuous authorization), RBAC integration validation (25 pts: 1000+ tenants, sub-millisecond auth, attack prevention), M365 direct app access (21 pts: admin consent, OAuth2), unified directory management (47 pts: AD/Entra ID abstraction, DirectoryDNA, LDAP/Graph API).
+Advanced module system (21 pts: Issues #110-112 - dependency management, lifecycle, versioning), advanced RBAC with zero-trust (50 pts: Issues #113-115, #124-127 - role inheritance, JIT access, risk-based controls, continuous authorization), RBAC integration validation (25 pts: Issues #128-135 - 1000+ tenants, sub-millisecond auth, attack prevention), M365 direct app access (21 pts: Issues #116-117 - admin consent, OAuth2), unified directory management (47 pts: Issues #120-123 - AD/Entra ID abstraction, DirectoryDNA, LDAP/Graph API).
 
 #### v0.4.5.0 (Alpha) - Core Global Storage Foundation - ✅ COMPLETED
 
-Pluggable storage architecture with Git (SOPS encryption, GitOps) and PostgreSQL (ACID transactions) providers, auto-registration, unified configuration system.
+Pluggable storage architecture (Issues #136-139) with Git (SOPS encryption, GitOps) and PostgreSQL (ACID transactions) providers, auto-registration, unified configuration system.
 
 #### v0.4.6.0 (Alpha) - Complete Storage Migration - ✅ COMPLETED
 
-RBAC/audit/config/session migration to pluggable storage, memory provider elimination, write-through caching patterns, SQLite/PostgreSQL DNA storage, Docker testing infrastructure, 200+ lines duplicate code removed.
+RBAC/audit/config/session migration to pluggable storage (Issues #141-144, #152, #154, #157), memory provider elimination, write-through caching patterns, SQLite/PostgreSQL DNA storage (Issues #145, #159, #146), Docker testing infrastructure, 200+ lines duplicate code removed.
 
 #### v0.5.0 (Beta) - Advanced Workflows & Core Readiness - ✅ COMPLETED
 
-Global logging provider (File/TimescaleDB), advanced workflow engine (conditionals/loops/debugging/versioning), reporting framework (8 compliance templates), SIEM engine (10k+ events/sec), HA infrastructure (Raft, 1.3s failover), MQTT+QUIC migration (2,738 test lines, 100+ concurrent stewards), TLS/mTLS validation (98/100 security rating).
+Stories 1.1-12.5 (Issues #166-207): Global logging provider (File/TimescaleDB), advanced workflow engine (conditionals/loops/debugging/versioning), reporting framework (8 compliance templates), SIEM engine (10k+ events/sec), HA infrastructure (Raft, 1.3s failover), MQTT+QUIC migration (2,738 test lines, 100+ concurrent stewards), TLS/mTLS validation (98/100 security rating).
 
 #### v0.6.0 (Alpha) - Finalizing Foundational Endpoint CMS - ✅ COMPLETED
 
-Policy-driven automation with advanced script execution (Git-versioned, DNA injection, multi-platform), template marketplace (3 examples, OSS GitHub-based), Windows patch compliance (policy-driven, COM API, maintenance windows), endpoint performance monitoring (2,746 lines, <1% CPU, watchlist alerts), controller health monitoring (MQTT/storage/queue metrics, email alerts, request tracing).
+Policy-driven automation with advanced script execution (Issue #210 - Git-versioned, DNA injection, multi-platform), template marketplace (Issue #211 - 3 examples, OSS GitHub-based), Windows patch compliance (Issue #212 - policy-driven, COM API, maintenance windows), endpoint performance monitoring (Issue #213 - 2,746 lines, <1% CPU, watchlist alerts), controller health monitoring (Issue #214 - MQTT/storage/queue metrics, email alerts, request tracing).
 
 #### v0.7.0 (Pre-OSS / Alpha) - Open Source Preparation - ✅ COMPLETED
 
@@ -78,25 +72,25 @@ Codebase prepared for open source launch with proper licensing, clean architectu
 
 #### v0.7.1: Code Cleanup - ✅ COMPLETED
 
-gRPC removal, cfgctl→cfg rename, HA commercial tier separation, repository cleanup (18 files removed, 24 TODOs), sensitive data scan (zero secrets found).
+gRPC removal (Issue #220), cfgctl→cfg rename (Issue #221), HA commercial tier separation (Issue #222), repository cleanup (Issue #223 - 18 files removed, 24 TODOs), sensitive data scan (Issue #224 - zero secrets found).
 
 #### v0.7.2: Security Review - ✅ COMPLETED
 
-Internal security audit (9/9 findings remediated), infrastructure hardening (SQL validation, RLS, A- → A rating), cache consolidation (681 lines removed).
+Internal security audit (Issue #225 - 9/9 findings remediated), infrastructure hardening (Issue #239 - SQL validation, RLS, A- → A rating), cache consolidation (681 lines removed).
 
 #### v0.7.3: Licensing & Documentation - ✅ COMPLETED
 
-Apache 2.0 + Elastic v2 dual licensing (802 SPDX headers), feature boundaries documentation (10 categories, 30+ features), comprehensive docs (CONTRIBUTING/SECURITY/ARCHITECTURE/DEVELOPMENT/QUICK_START).
+Apache 2.0 + Elastic v2 dual licensing (Issue #226 - 802 SPDX headers), feature boundaries documentation (Issue #227 - 10 categories, 30+ features), comprehensive docs (Issue #228 - CONTRIBUTING/SECURITY/ARCHITECTURE/DEVELOPMENT/QUICK_START).
 
 #### v0.7.4: Community & Launch Prep - ✅ COMPLETED
 
-Community infrastructure (issue/PR templates, CODEOWNERS, good first issues including #254 CLI error messages), versioning policy, CHANGELOG.md, public roadmap, email infrastructure (security@/licensing@/conduct@).
+Community infrastructure (Issue #229 - issue/PR templates, CODEOWNERS, good first issues including #254 CLI error messages), versioning policy (Issue #230), CHANGELOG.md, public roadmap, email infrastructure (Issue #248 - security@/licensing@/conduct@).
 
 #### v0.7.5: Testing Infrastructure & Security Hardening - ✅ COMPLETED
 
-Storage foot-guns eliminated (26 pts: tenant/registration/M365 auth/rollback migrated to durable storage), configuration signing (RSA/ECDSA), explicit environment variable references.
+Storage foot-guns eliminated (26 pts: Issues #262-264, #274-275 - tenant/registration/M365 auth/rollback migrated to durable storage), configuration signing (Issue #250 - RSA/ECDSA), explicit environment variable references (Issue #251).
 
-#### v0.7.5 Phase 2: Production-Realistic Testing (12-15 story points)
+#### v0.7.5 Phase 2: Production-Realistic Testing (Issue #252 - 12-15 story points)
 
 Ensure all tests validate the exact deployment methods documented in QUICK_START.md and DEVELOPMENT.md.
 
@@ -128,7 +122,7 @@ Achieve production stability, complete core platform features, and prepare for s
 - [ ] Finalize advanced configuration management
 - [ ] Finalize advanced workflow engine and templates
 - [ ] Finalize advanced reporting
-- [ ] Communication Layer Abstraction (Issue #267) - 47 story points - Control/Data Plane provider interfaces, controller/steward migration, deprecate direct MQTT/QUIC imports
+- [ ] Communication Layer Abstraction (Issue #267 - 47 story points) - Control/Data Plane provider interfaces, controller/steward migration, deprecate direct MQTT/QUIC imports
 
 #### v0.10.0 - Web Interface Foundation
 
@@ -148,10 +142,10 @@ Achieve production stability, complete core platform features, and prepare for s
 
 #### v0.12.0 - M365 Foundation
 
-- [x] Enhanced Tenant Management (Issue #118 / PR #238) - 8 points ✅ - M365TenantManager with GDAP discovery, health monitoring, bulk operations
-- [ ] M365 CSP Infrastructure Setup - 5 points - Partner Center sandbox, GDAP relationships, enterprise app registration
-- [ ] Per-Tenant Token Storage and Management (Issue #119) - 10 points
-- [ ] M365 Integration Validation - 8 points - GDAP discovery, consent flow, health monitoring tests
+- [x] Enhanced Tenant Management (Issue #118 / PR #238 - 8 points) ✅ - M365TenantManager with GDAP discovery, health monitoring, bulk operations
+- [ ] M365 CSP Infrastructure Setup (5 points) - Partner Center sandbox, GDAP relationships, enterprise app registration
+- [ ] Per-Tenant Token Storage and Management (Issue #119 - 10 points)
+- [ ] M365 Integration Validation (8 points) - GDAP discovery, consent flow, health monitoring tests
 - [ ] SaaS Steward using workflow engine foundation
 - [ ] Core M365 modules (15+) - Entra ID, Teams, Exchange, SharePoint, Security (Defender/Intune/CA policies)
 - [ ] M365 security baseline workflows
