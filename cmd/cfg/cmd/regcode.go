@@ -75,10 +75,10 @@ func runRegCode(cmd *cobra.Command, args []string) error {
 func generateRegistrationCode() error {
 	// Validate required fields
 	if tenantID == "" {
-		return fmt.Errorf("--tenant-id is required for generation\n\nThe tenant ID is your organization's unique identifier (e.g., 'acme-corp', 'contoso').\n\nExample:\n  cfg regcode --tenant-id=acme-corp --controller-url=mqtts://controller.example.com:8883")
+		return fmt.Errorf("--tenant-id is required for generation\n\nThe tenant ID is your organization's unique identifier (e.g., 'acme-corp', 'contoso')\n\nExample:\n  cfg regcode --tenant-id=acme-corp --controller-url=mqtts://controller.example.com:8883")
 	}
 	if controllerURL == "" {
-		return fmt.Errorf("--controller-url is required for generation\n\nThe controller URL is the MQTT broker endpoint where stewards connect.\n\nFormat: mqtt://HOST:PORT or mqtts://HOST:PORT (mqtts recommended for production)\n\nExample:\n  cfg regcode --tenant-id=acme-corp --controller-url=mqtts://controller.example.com:8883")
+		return fmt.Errorf("--controller-url is required for generation\n\nThe controller URL is the MQTT broker endpoint where stewards connect\n\nFormat: mqtt://HOST:PORT or mqtts://HOST:PORT (mqtts recommended for production)\n\nExample:\n  cfg regcode --tenant-id=acme-corp --controller-url=mqtts://controller.example.com:8883")
 	}
 
 	// Validate controller URL format
@@ -123,7 +123,7 @@ func generateRegistrationCode() error {
 // decodeRegistrationCode decodes a registration code.
 func decodeRegistrationCode(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("registration code is required as argument\n\nUsage:\n  cfg regcode --decode <registration-code>\n\nExample:\n  cfg regcode --decode eyJ0ZW5hbnRfaWQi...")
+		return fmt.Errorf("registration code is required as argument\n\nUsage:\n  cfg regcode --decode <registration-code>\n\nExample:\n  cfg regcode --decode eyJ0ZW5hbnRfaWQi")
 	}
 
 	encoded := args[0]
@@ -131,7 +131,7 @@ func decodeRegistrationCode(args []string) error {
 	// Decode from base64
 	jsonData, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
-		return fmt.Errorf("failed to decode registration code: invalid base64 encoding\n\nThe registration code appears to be corrupted or incomplete.\n\nTroubleshooting:\n  - Ensure you copied the entire code (starts with 'eyJ' typically)\n  - Check for extra spaces or newlines\n  - Verify the code wasn't truncated during copy/paste\n\nError details: %w", err)
+		return fmt.Errorf("failed to decode registration code: invalid base64 encoding\n\nThe registration code appears to be corrupted or incomplete\n\nTroubleshooting:\n  - Ensure you copied the entire code (starts with 'eyJ' typically)\n  - Check for extra spaces or newlines\n  - Verify the code wasn't truncated during copy/paste\n\nError details: %w", err)
 	}
 
 	// Unmarshal JSON
