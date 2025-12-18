@@ -699,6 +699,10 @@ For complete version history and release notes, see [CHANGELOG.md](../../CHANGEL
   - [x] Create good first issue tasks (#253, #254, #255)
   - [x] Document issue triage process
   - [x] Set up GitHub Discussions (manual - GitHub UI)
+  - [x] **Story #254**: Improve CLI error messages for better user experience - 3 points ✅ COMPLETED (PR #278)
+    - Enhanced 8 error messages in regcode and diff commands with actionable guidance
+    - Established 5-step error message pattern (problem, context, valid options, troubleshooting, examples)
+    - All acceptance criteria met with comprehensive manual testing validation
 - [x] **Versioning & Roadmap Update** (Issue #230) - 2-3 days ✅ COMPLETED
   - [x] Document semantic versioning policy (see `docs/development/versioning-policy.md`)
   - [x] Update roadmap versions v1.0 -> v0.10, with clear path to v1.0
