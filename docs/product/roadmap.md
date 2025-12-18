@@ -716,7 +716,7 @@ For complete version history and release notes, see [CHANGELOG.md](../../CHANGEL
 
 #### v0.7.5: Testing Infrastructure & Security Hardening (CRITICAL)
 
-**Status**: 🟡 IN PROGRESS - 69% Complete (18/26 story points) - Epic #247
+**Status**: ✅ EPIC #247 COMPLETE - 100% Complete (26/26 story points) | 🟡 Phase 2 IN PROGRESS (0/12 story points)
 
 **Goal**: Ensure tests represent real-world deployment exactly as documented, eliminating development convenience patterns that could leak into production.
 
@@ -731,7 +731,7 @@ For complete version history and release notes, see [CHANGELOG.md](../../CHANGEL
 
 **Why Combined**: Fixing storage foot-guns REQUIRES fixing test infrastructure (can't test durable storage with in-memory mocks). Production-realistic testing EXPOSES foot-guns (tests fail when configuration doesn't match deployment reality). Both enforce the same core principle.
 
-**✅ COMPLETED WORK (18 story points)**:
+**✅ EPIC #247 COMPLETED - All Storage Foot-guns Eliminated (26 story points)**:
 
 1. **Tenant Management Storage (CRITICAL)** (Issue #262) - 5 story points ✅ COMPLETED
    - **Implemented**: TenantStore interface in `pkg/storage/interfaces/tenant_store.go`
@@ -771,8 +771,6 @@ For complete version history and release notes, see [CHANGELOG.md](../../CHANGEL
    - **Location**: `features/templates/store.go:19`
    - **Action**: No action needed - test-only code
 
-**🚧 REMAINING WORK (3 story points)**:
-
 6. **M365 Auth Client Tenant Storage (CRITICAL)** (Issue #274) - 5 story points ✅ COMPLETED
    - **Current State**: ✅ Migrated to durable storage with `pkg/storage` + `pkg/secrets` encryption
    - **Implementation**: Git and database providers with comprehensive tests (12 test cases)
@@ -782,21 +780,24 @@ For complete version history and release notes, see [CHANGELOG.md](../../CHANGEL
    - **PR**: #276
    - **Status**: ✅ COMPLETED - All acceptance criteria met
 
-7. **Rollback Operation Storage (MEDIUM)** (Issue #275) - 3 story points 🚨 IN PROGRESS
-   - **Current State**: `features/config/rollback/store.go:178` has `DatabaseRollbackStore` that is NOT IMPLEMENTED (just wraps `InMemoryRollbackStore`)
-   - **Impact**: Rollback history lost on restart, no audit trail for configuration changes
-   - **Severity**: HIGH - Compliance and audit trail requirement
-   - **Epic 6 Gap**: Story 3 (#143) claimed completion but implementation incomplete
-   - **Fix Required**: Implement actual storage-backed `RollbackStore` using `pkg/storage`
-   - **Files**: `features/config/rollback/store.go`
+7. **Rollback Operation Storage (MEDIUM)** (Issue #275) - 3 story points ✅ COMPLETED
+   - **Implemented**: StorageRollbackStore using `pkg/storage/interfaces.ConfigStore`
+   - **Git Provider**: YAML-based durable storage with metadata and tag filtering
+   - **Database Provider**: Compatible via ConfigStore abstraction
+   - **Thread Safety**: Mutex protection for concurrent audit entry additions
+   - **Durability**: Persistence validated across controller restarts (critical test)
+   - **Files**: `features/config/rollback/storage_store.go`, `features/config/rollback/storage_store_test.go`
    - **Issue**: #275
-   - **Status**: Story created, ready to work
+   - **PR**: #277
+   - **Status**: ✅ **COMPLETE** (PR #277 merged)
 
 **Investigation Notes (2025-12-17)**:
 
 Comprehensive codebase scan completed:
 
-- **Verified Foot-guns Found**: 2 (#274 ✅ FIXED, #275)
+- **Verified Foot-guns Found**: 2 (Both Fixed ✅)
+  - #274 M365 Auth Storage ✅ COMPLETED (PR #276)
+  - #275 Rollback Storage ✅ COMPLETED (PR #277)
 - **Test-Only Memory Stores** (Legitimate):
   - `features/templates/store.go` - Only used in tests
   - `pkg/registration/store.go` - NewMemoryStore() exists but unused
@@ -805,14 +806,14 @@ Comprehensive codebase scan completed:
   - `features/rbac/manager.go:ephemeralStore` - Documented ephemeral cache
   - `features/reports/cache/memory.go` - Uses centralized `pkg/cache`
 
-**Next Steps**:
+**Epic #247 Completion Status**:
 
-1. ✅ ~~Complete Story #274 (M365 Auth Storage) - 5 points~~ COMPLETED
-2. Complete Story #275 (Rollback Storage) - 3 points
-3. Run final `make check-architecture` validation
-4. Close Epic #247 when all stories complete
+1. ✅ Story #274 (M365 Auth Storage) - 5 points COMPLETED (PR #276)
+2. ✅ Story #275 (Rollback Storage) - 3 points COMPLETED (PR #277)
+3. ✅ Final `make check-architecture` validation - PASSED
+4. ✅ Epic #247 COMPLETE - All storage foot-guns eliminated
 
-**Epic #247 Progress**: 1/2 stories complete (50%)
+**Epic #247 Progress**: 2/2 stories complete (100%) ✅ **EPIC COMPLETE**
 
 **Phase 1.5: Environment Variable Security Hardening** (Issue #250, #251) (6 story points)
 
