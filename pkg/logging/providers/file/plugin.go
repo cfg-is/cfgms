@@ -191,12 +191,7 @@ func (p *FileProvider) Close() error {
 		if stopChan != nil {
 			close(stopChan)
 			// Give background goroutines time to finish cleanly
-			// Windows requires longer wait for file handle release due to asynchronous kernel operations
-			if runtime.GOOS == "windows" {
-				time.Sleep(1500 * time.Millisecond)
-			} else {
-				time.Sleep(200 * time.Millisecond)
-			}
+			time.Sleep(200 * time.Millisecond)
 		}
 
 		// Now safely close resources
@@ -211,11 +206,69 @@ func (p *FileProvider) Close() error {
 
 		if p.currentFile != nil {
 			_ = p.currentFile.Close() // Ignore close error during cleanup
+
+			// On Windows, wait for file handle to be released before clearing pointer
+			// This prevents "file in use" errors during test cleanup
+			// Must be called while p.currentFile is still set so we can get the path
+			if runtime.GOOS == "windows" {
+				p.mutex.Unlock() // Release lock during wait
+				p.waitForFileHandleRelease()
+				p.mutex.Lock() // Re-acquire before clearing
+			}
+
 			p.currentFile = nil
 		}
 	})
 
 	return err
+}
+
+// waitForFileHandleRelease waits for Windows to release file handles using exponential backoff
+// This is necessary because Windows releases file handles asynchronously
+func (p *FileProvider) waitForFileHandleRelease() {
+	if runtime.GOOS != "windows" {
+		return
+	}
+
+	// Get the file path before it's cleared
+	p.mutex.RLock()
+	var filePath string
+	if p.currentFile != nil {
+		filePath = p.currentFile.Name()
+	}
+	p.mutex.RUnlock()
+
+	if filePath == "" {
+		return
+	}
+
+	// Exponential backoff: 50ms, 100ms, 200ms, 400ms, 800ms, 1600ms = ~3.15s max
+	delay := 50 * time.Millisecond
+	maxDelay := 1600 * time.Millisecond
+	totalWait := time.Duration(0)
+	maxTotalWait := 3 * time.Second
+
+	for totalWait < maxTotalWait {
+		time.Sleep(delay)
+		totalWait += delay
+
+		// Try to open the file exclusively to check if handle is released
+		// #nosec G304 - filePath is from our own currentFile.Name()
+		testFile, err := os.OpenFile(filePath, os.O_RDWR, 0)
+		if err == nil {
+			// Successfully opened, handle is released
+			_ = testFile.Close()
+			return
+		}
+
+		// Double the delay for next iteration, cap at maxDelay
+		delay *= 2
+		if delay > maxDelay {
+			delay = maxDelay
+		}
+	}
+	// If we get here, we've waited max time and handle may still be locked
+	// This is acceptable as we've done our best effort
 }
 
 // WriteEntry writes a single log entry to the file
