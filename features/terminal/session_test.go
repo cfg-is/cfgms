@@ -189,9 +189,11 @@ func TestSessionState(t *testing.T) {
 	session.UpdateActivity()
 	assert.True(t, time.Since(session.LastActivity) < time.Second)
 
-	// Test timeout check
+	// Test timeout check - use a small sleep to ensure time passes
+	// Windows has ~15ms clock resolution, so use a slightly larger timeout
+	time.Sleep(10 * time.Millisecond)
 	assert.False(t, session.IsTimedOut(30*time.Minute))
-	assert.True(t, session.IsTimedOut(time.Nanosecond))
+	assert.True(t, session.IsTimedOut(time.Millisecond))
 
 	ctx := context.Background()
 

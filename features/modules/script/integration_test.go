@@ -88,8 +88,10 @@ func TestScriptExecution_Timeout(t *testing.T) {
 
 	switch runtime.GOOS {
 	case "windows":
-		testScript = "timeout /t 10"
-		shell = ShellCmd
+		// Use PowerShell's Start-Sleep for reliable delay on Windows
+		// The Windows 'timeout' command conflicts with GNU coreutils timeout in PATH
+		testScript = "Start-Sleep -Seconds 10"
+		shell = ShellPowerShell
 	default:
 		testScript = "sleep 10"
 		shell = ShellBash

@@ -637,7 +637,8 @@ func TestSIEMProcessor_AddToAggregation(t *testing.T) {
 	assert.Equal(t, 1, aggregation.Count)
 	assert.Len(t, aggregation.Entries, 1)
 	assert.Equal(t, entry.Message, aggregation.Entries[0].Message)
-	assert.True(t, aggregation.LastUpdated.After(aggregation.WindowStart))
+	// LastUpdated should be at or after WindowStart (may be equal on fast systems)
+	assert.False(t, aggregation.LastUpdated.Before(aggregation.WindowStart))
 }
 
 func TestSIEMProcessor_ThresholdMet(t *testing.T) {

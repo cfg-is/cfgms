@@ -785,5 +785,8 @@ func (s *AuditLoadTestSuite) printAuditLoadTestSummary() {
 
 // Test suite runner
 func TestAuditLoadTestSuite(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping audit load test suite in short mode")
+	}
 	suite.Run(t, new(AuditLoadTestSuite))
 }

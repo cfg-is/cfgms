@@ -30,11 +30,17 @@ func TestWindowsUpdateManager_New(t *testing.T) {
 
 // TestWindowsUpdateManager_ListAvailablePatches tests listing available patches
 func TestWindowsUpdateManager_ListAvailablePatches(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping Windows Update test in short mode")
+	}
+
 	manager, err := patch.NewWindowsUpdateManager()
 	require.NoError(t, err)
 	defer manager.Close()
 
-	ctx := context.Background()
+	// Use a timeout context to avoid hanging on slow Windows Update responses
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
 	// List all available patches
 	patches, err := manager.ListAvailablePatches(ctx, "all")
@@ -52,11 +58,16 @@ func TestWindowsUpdateManager_ListAvailablePatches(t *testing.T) {
 
 // TestWindowsUpdateManager_ListAvailablePatches_SecurityOnly tests filtering security patches
 func TestWindowsUpdateManager_ListAvailablePatches_SecurityOnly(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping Windows Update test in short mode")
+	}
+
 	manager, err := patch.NewWindowsUpdateManager()
 	require.NoError(t, err)
 	defer manager.Close()
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
 	// List only security patches
 	patches, err := manager.ListAvailablePatches(ctx, "security")
@@ -72,11 +83,16 @@ func TestWindowsUpdateManager_ListAvailablePatches_SecurityOnly(t *testing.T) {
 
 // TestWindowsUpdateManager_ListInstalledPatches tests listing installed patches
 func TestWindowsUpdateManager_ListInstalledPatches(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping Windows Update test in short mode")
+	}
+
 	manager, err := patch.NewWindowsUpdateManager()
 	require.NoError(t, err)
 	defer manager.Close()
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
 	// List installed patches
 	patches, err := manager.ListInstalledPatches(ctx)
@@ -96,11 +112,16 @@ func TestWindowsUpdateManager_ListInstalledPatches(t *testing.T) {
 
 // TestWindowsUpdateManager_CheckRebootRequired tests reboot status check
 func TestWindowsUpdateManager_CheckRebootRequired(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping Windows Update test in short mode")
+	}
+
 	manager, err := patch.NewWindowsUpdateManager()
 	require.NoError(t, err)
 	defer manager.Close()
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
 	// Check if reboot is required
 	rebootRequired, err := manager.CheckRebootRequired(ctx)
@@ -112,11 +133,16 @@ func TestWindowsUpdateManager_CheckRebootRequired(t *testing.T) {
 
 // TestWindowsUpdateManager_GetLastPatchDate tests getting last patch date
 func TestWindowsUpdateManager_GetLastPatchDate(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping Windows Update test in short mode")
+	}
+
 	manager, err := patch.NewWindowsUpdateManager()
 	require.NoError(t, err)
 	defer manager.Close()
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
 	// Get last patch date
 	lastDate, err := manager.GetLastPatchDate(ctx)
@@ -130,11 +156,16 @@ func TestWindowsUpdateManager_GetLastPatchDate(t *testing.T) {
 
 // TestWindowsUpdateManager_InstallPatches_TestMode tests patch installation in test mode
 func TestWindowsUpdateManager_InstallPatches_TestMode(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping Windows Update test in short mode")
+	}
+
 	manager, err := patch.NewWindowsUpdateManager()
 	require.NoError(t, err)
 	defer manager.Close()
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
 	// Create config in test mode (won't actually install)
 	config := &patch.Config{
@@ -149,6 +180,10 @@ func TestWindowsUpdateManager_InstallPatches_TestMode(t *testing.T) {
 
 // TestWindowsUpdateManager_BuildSearchCriteria tests search criteria building
 func TestWindowsUpdateManager_BuildSearchCriteria(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping Windows Update test in short mode")
+	}
+
 	// This tests the internal search criteria logic
 	// Note: This function may need to be exported for testing or we test it indirectly
 
@@ -170,7 +205,8 @@ func TestWindowsUpdateManager_BuildSearchCriteria(t *testing.T) {
 			require.NoError(t, err)
 			defer manager.Close()
 
-			ctx := context.Background()
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
 			patches, err := manager.ListAvailablePatches(ctx, tt.patchType)
 
 			if tt.mayFailSearch && err != nil {
@@ -190,11 +226,16 @@ func TestWindowsUpdateManager_BuildSearchCriteria(t *testing.T) {
 
 // TestWindowsUpdateManager_MultipleOperations tests using the manager for multiple operations
 func TestWindowsUpdateManager_MultipleOperations(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping Windows Update test in short mode")
+	}
+
 	manager, err := patch.NewWindowsUpdateManager()
 	require.NoError(t, err)
 	defer manager.Close()
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
 
 	// Perform multiple operations in sequence
 	available, err := manager.ListAvailablePatches(ctx, "all")
@@ -219,11 +260,16 @@ func TestWindowsUpdateManager_MultipleOperations(t *testing.T) {
 
 // TestWindowsUpdateManager_FilterConfig tests patch filtering with include/exclude
 func TestWindowsUpdateManager_FilterConfig(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping Windows Update test in short mode")
+	}
+
 	manager, err := patch.NewWindowsUpdateManager()
 	require.NoError(t, err)
 	defer manager.Close()
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
 
 	// Get all available patches first
 	allPatches, err := manager.ListAvailablePatches(ctx, "all")
@@ -247,11 +293,16 @@ func TestWindowsUpdateManager_FilterConfig(t *testing.T) {
 
 // TestWindowsUpdateManager_ConcurrentOperations tests thread safety
 func TestWindowsUpdateManager_ConcurrentOperations(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping Windows Update test in short mode")
+	}
+
 	manager, err := patch.NewWindowsUpdateManager()
 	require.NoError(t, err)
 	defer manager.Close()
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
 
 	// Run multiple goroutines accessing the manager
 	done := make(chan bool)

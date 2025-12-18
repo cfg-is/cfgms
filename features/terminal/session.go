@@ -166,26 +166,31 @@ func (s *Session) Resize(ctx context.Context, cols, rows int) error {
 
 // Close closes the session
 func (s *Session) Close(ctx context.Context) error {
+	// First, check if already closed and mark as closing
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if s.closed {
+		s.mu.Unlock()
 		return nil // Already closed
 	}
-
 	s.closed = true
 
-	// Close shell executor
-	if s.executor != nil {
-		if err := s.executor.Close(ctx); err != nil {
+	// Store references to resources we need to clean up
+	executor := s.executor
+	recorder := s.recorder
+	s.mu.Unlock()
+
+	// Close shell executor - done without holding lock to prevent deadlock
+	// This allows handleShellOutput to acquire the RLock and exit cleanly
+	if executor != nil {
+		if err := executor.Close(ctx); err != nil {
 			// Log error but continue cleanup
 			_ = err // Explicitly ignore close errors during cleanup
 		}
 	}
 
 	// Close recorder if set
-	if s.recorder != nil {
-		if err := s.recorder.Close(); err != nil {
+	if recorder != nil {
+		if err := recorder.Close(); err != nil {
 			// Log error but continue cleanup
 			_ = err // Explicitly ignore close errors during cleanup
 		}

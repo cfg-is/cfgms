@@ -27,7 +27,10 @@ func TestADModuleIntegration(t *testing.T) {
 	// Setup test environment
 	logger := logging.NewNoopLogger()
 	module := New(logger).(*activeDirectoryModule)
-	ctx := context.Background()
+	// Use a short timeout context for tests to avoid long DNS waits
+	// when AD environment is not available
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
 	// Test configuration for basic domain
 	basicConfig := &ADModuleConfig{

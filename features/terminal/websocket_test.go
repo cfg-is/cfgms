@@ -5,6 +5,7 @@ package terminal
 import (
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,14 @@ import (
 
 	testutil "github.com/cfgis/cfgms/pkg/testing"
 )
+
+// getTestShell returns the appropriate shell for the current platform
+func getTestShell() string {
+	if runtime.GOOS == "windows" {
+		return "powershell"
+	}
+	return "bash"
+}
 
 // waitForSessionCleanup waits for sessions to be cleaned up with exponential backoff
 func waitForSessionCleanup(t *testing.T, manager SessionManager, expectedCount int) {
@@ -79,8 +88,8 @@ func TestWebSocketUpgrade(t *testing.T) {
 	// Convert HTTP URL to WebSocket URL
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
 
-	// Test WebSocket connection
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL+"?steward_id=test-steward&user_id=test-user&shell=bash", nil)
+	// Test WebSocket connection (use platform-appropriate shell)
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL+"?steward_id=test-steward&user_id=test-user&shell="+getTestShell(), nil)
 	require.NoError(t, err)
 	defer func() {
 		if err := conn.Close(); err != nil {
@@ -118,8 +127,8 @@ func TestWebSocketMessageHandling(t *testing.T) {
 
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
 
-	// Connect to WebSocket
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL+"?steward_id=test-steward&user_id=test-user&shell=bash", nil)
+	// Connect to WebSocket (use platform-appropriate shell)
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL+"?steward_id=test-steward&user_id=test-user&shell="+getTestShell(), nil)
 	require.NoError(t, err)
 	defer func() {
 		if err := conn.Close(); err != nil {
@@ -245,8 +254,8 @@ func TestWebSocketBidirectionalCommunication(t *testing.T) {
 
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
 
-	// Connect to WebSocket
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL+"?steward_id=test-steward&user_id=test-user&shell=bash", nil)
+	// Connect to WebSocket (use platform-appropriate shell)
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL+"?steward_id=test-steward&user_id=test-user&shell="+getTestShell(), nil)
 	require.NoError(t, err)
 	defer func() {
 		if err := conn.Close(); err != nil {
@@ -299,12 +308,12 @@ func TestWebSocketSessionCleanup(t *testing.T) {
 
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
 
-	// Connect to WebSocket
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL+"?steward_id=test-steward&user_id=test-user&shell=bash", nil)
+	// Connect to WebSocket (use platform-appropriate shell)
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL+"?steward_id=test-steward&user_id=test-user&shell="+getTestShell(), nil)
 	require.NoError(t, err)
 
 	// Wait for session to be created (session creation is asynchronous)
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	// Check that session was created
 	activeSessions := manager.GetActiveSessions()
@@ -341,11 +350,11 @@ func TestWebSocketConcurrentConnections(t *testing.T) {
 
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
 
-	// Create multiple concurrent connections
+	// Create multiple concurrent connections (use platform-appropriate shell)
 	connections := make([]*websocket.Conn, 3)
 	for i := 0; i < 3; i++ {
 		conn, _, err := websocket.DefaultDialer.Dial(
-			wsURL+"?steward_id=test-steward&user_id=test-user&shell=bash",
+			wsURL+"?steward_id=test-steward&user_id=test-user&shell="+getTestShell(),
 			nil,
 		)
 		require.NoError(t, err)
@@ -353,7 +362,7 @@ func TestWebSocketConcurrentConnections(t *testing.T) {
 	}
 
 	// Give connections time to establish sessions
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	// All sessions should be active
 	activeSessions := manager.GetActiveSessions()

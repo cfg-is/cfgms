@@ -4,6 +4,7 @@ package integration
 
 import (
 	"context"
+	"runtime"
 	"testing"
 	"time"
 
@@ -15,6 +16,10 @@ import (
 
 // TestV020BasicIntegration tests the core v0.2.0 functionality without complex service dependencies
 func TestV020BasicIntegration(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping bash-based test on Windows")
+	}
+
 	t.Run("Script Module with Audit Integration", func(t *testing.T) {
 		// Test that script module with audit logging works end-to-end
 		module := script.NewModuleWithConfig("test-steward-v020", 10)
@@ -178,6 +183,10 @@ func TestV020BasicIntegration(t *testing.T) {
 
 // TestV020FeatureAvailability verifies that all v0.2.0 features are available
 func TestV020FeatureAvailability(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping bash-based test on Windows")
+	}
+
 	t.Run("Script Module Features", func(t *testing.T) {
 		module := script.NewModule()
 
