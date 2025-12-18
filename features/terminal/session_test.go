@@ -73,7 +73,7 @@ func TestSessionCreation(t *testing.T) {
 			request: &SessionRequest{
 				StewardID: "",
 				UserID:    "test-user",
-				Shell:     "bash",
+				Shell:     shell.GetDefaultShell(),
 				Cols:      80,
 				Rows:      24,
 			},
@@ -173,7 +173,7 @@ func TestSessionState(t *testing.T) {
 	request := &SessionRequest{
 		StewardID: "test-steward-001",
 		UserID:    "test-user",
-		Shell:     "bash",
+		Shell:     shell.GetDefaultShell(),
 		Cols:      80,
 		Rows:      24,
 	}
@@ -208,7 +208,7 @@ func TestSessionMetadata(t *testing.T) {
 	request := &SessionRequest{
 		StewardID: "test-steward-001",
 		UserID:    "test-user",
-		Shell:     "bash",
+		Shell:     shell.GetDefaultShell(),
 		Cols:      80,
 		Rows:      24,
 		Env: map[string]string{
