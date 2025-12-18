@@ -4,6 +4,7 @@ package logging
 
 import (
 	"context"
+	"os"
 	"runtime"
 	"testing"
 	"time"
@@ -17,7 +18,17 @@ import (
 // TestSystemWideMigration validates the comprehensive logging migration across all components
 func TestSystemWideMigration(t *testing.T) {
 	// Initialize global logging provider for system-wide testing
-	tempDir := t.TempDir()
+	// On Windows, skip cleanup since CI environment is ephemeral and Windows holds file handles
+	var tempDir string
+	if runtime.GOOS == "windows" {
+		var err error
+		tempDir, err = os.MkdirTemp("", "logging-test-*")
+		require.NoError(t, err)
+		// No cleanup on Windows - ephemeral CI environment
+	} else {
+		tempDir = t.TempDir()
+	}
+
 	loggingConfig := &LoggingConfig{
 		Provider:          "file",
 		Level:             "DEBUG",
@@ -253,7 +264,17 @@ func TestSystemWideMigration(t *testing.T) {
 // TestGlobalProviderAvailability validates that the global provider is available to all components
 func TestGlobalProviderAvailability(t *testing.T) {
 	// Initialize global logging provider
-	tempDir := t.TempDir()
+	// On Windows, skip cleanup since CI environment is ephemeral and Windows holds file handles
+	var tempDir string
+	if runtime.GOOS == "windows" {
+		var err error
+		tempDir, err = os.MkdirTemp("", "logging-test-*")
+		require.NoError(t, err)
+		// No cleanup on Windows - ephemeral CI environment
+	} else {
+		tempDir = t.TempDir()
+	}
+
 	loggingConfig := &LoggingConfig{
 		Provider:    "file",
 		Level:       "INFO",
@@ -314,7 +335,17 @@ func TestGlobalProviderAvailability(t *testing.T) {
 // TestMigrationBackwardCompatibility validates that legacy logging still works after migration
 func TestMigrationBackwardCompatibility(t *testing.T) {
 	// Initialize global logging
-	tempDir := t.TempDir()
+	// On Windows, skip cleanup since CI environment is ephemeral and Windows holds file handles
+	var tempDir string
+	if runtime.GOOS == "windows" {
+		var err error
+		tempDir, err = os.MkdirTemp("", "logging-test-*")
+		require.NoError(t, err)
+		// No cleanup on Windows - ephemeral CI environment
+	} else {
+		tempDir = t.TempDir()
+	}
+
 	loggingConfig := &LoggingConfig{
 		Provider:    "file",
 		Level:       "INFO",

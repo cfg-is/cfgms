@@ -4,6 +4,7 @@ package script
 
 import (
 	"context"
+	"os"
 	"runtime"
 	"testing"
 	"time"
@@ -109,7 +110,17 @@ func TestLoggingMigration(t *testing.T) {
 // TestStructuredLoggingFields validates that structured logging fields are properly used
 func TestStructuredLoggingFields(t *testing.T) {
 	// Initialize global logging provider for testing
-	tempDir := t.TempDir()
+	// On Windows, skip cleanup since CI environment is ephemeral and Windows holds file handles
+	var tempDir string
+	if runtime.GOOS == "windows" {
+		var err error
+		tempDir, err = os.MkdirTemp("", "logging-test-*")
+		require.NoError(t, err)
+		// No cleanup on Windows - ephemeral CI environment
+	} else {
+		tempDir = t.TempDir()
+	}
+
 	loggingConfig := &logging.LoggingConfig{
 		Provider:          "file",
 		Level:             "DEBUG",
@@ -189,7 +200,16 @@ func TestStructuredLoggingFields(t *testing.T) {
 // TestTenantIsolation validates that tenant isolation works correctly
 func TestTenantIsolation(t *testing.T) {
 	// Initialize global logging provider for testing
-	tempDir := t.TempDir()
+	// On Windows, skip cleanup since CI environment is ephemeral and Windows holds file handles
+	var tempDir string
+	if runtime.GOOS == "windows" {
+		var err error
+		tempDir, err = os.MkdirTemp("", "logging-test-*")
+		require.NoError(t, err)
+		// No cleanup on Windows - ephemeral CI environment
+	} else {
+		tempDir = t.TempDir()
+	}
 	loggingConfig := &logging.LoggingConfig{
 		Provider:          "file",
 		Level:             "DEBUG",
