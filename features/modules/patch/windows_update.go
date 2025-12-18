@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/go-ole/go-ole"
@@ -487,13 +488,24 @@ func (w *WindowsUpdateManager) extractPatchInfo(update *ole.IDispatch) PatchInfo
 		kbArticleIDs.Release()
 	}
 
+	// If no KB ID found, try to use UpdateID as fallback
+	if patchInfo.ID == "" {
+		if updateIDVariant, err := oleutil.GetProperty(update, "UpdateID"); err == nil {
+			if updateID, ok := updateIDVariant.Value().(string); ok && updateID != "" {
+				patchInfo.ID = updateID
+			}
+		}
+	}
+
 	// Get MsrcSeverity
 	if severityVariant, err := oleutil.GetProperty(update, "MsrcSeverity"); err == nil {
-		if severity, ok := severityVariant.Value().(string); ok {
-			patchInfo.Severity = severity
-		} else {
-			patchInfo.Severity = "moderate" // Default
+		if severity, ok := severityVariant.Value().(string); ok && severity != "" {
+			patchInfo.Severity = strings.ToLower(severity)
 		}
+	}
+	// Ensure we always have a severity value
+	if patchInfo.Severity == "" {
+		patchInfo.Severity = "unspecified"
 	}
 
 	// Get MaxDownloadSize
