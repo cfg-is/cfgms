@@ -497,6 +497,22 @@ func (w *WindowsUpdateManager) extractPatchInfo(update *ole.IDispatch) PatchInfo
 		}
 	}
 
+	// If still no ID, use Title as last resort (truncated to 50 chars)
+	if patchInfo.ID == "" && patchInfo.Title != "" {
+		title := patchInfo.Title
+		if len(title) > 50 {
+			title = title[:50]
+		}
+		// Replace spaces and special chars with underscores for ID safety
+		title = strings.Map(func(r rune) rune {
+			if r == ' ' || r == '(' || r == ')' || r == '[' || r == ']' {
+				return '_'
+			}
+			return r
+		}, title)
+		patchInfo.ID = "TITLE_" + title
+	}
+
 	// Get MsrcSeverity
 	if severityVariant, err := oleutil.GetProperty(update, "MsrcSeverity"); err == nil {
 		if severity, ok := severityVariant.Value().(string); ok && severity != "" {

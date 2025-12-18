@@ -36,15 +36,15 @@ func TestSessionCreation(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "bash session (platform dependent)",
+			name: "platform default shell session",
 			request: &SessionRequest{
 				StewardID: "test-steward-001",
 				UserID:    "test-user",
-				Shell:     "bash",
+				Shell:     shell.GetDefaultShell(),
 				Cols:      80,
 				Rows:      24,
 			},
-			wantErr: runtime.GOOS == "windows", // bash doesn't work on Windows
+			wantErr: false, // Uses platform-appropriate default shell
 		},
 		{
 			name: "powershell session (platform dependent)",
@@ -84,7 +84,7 @@ func TestSessionCreation(t *testing.T) {
 			request: &SessionRequest{
 				StewardID: "test-steward-001",
 				UserID:    "test-user",
-				Shell:     "bash",
+				Shell:     shell.GetDefaultShell(),
 				Cols:      0,
 				Rows:      24,
 			},
