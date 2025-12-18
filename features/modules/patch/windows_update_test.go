@@ -228,9 +228,9 @@ func TestWindowsUpdateManager_FilterConfig(t *testing.T) {
 
 	// Create config with exclude pattern
 	config := &patch.Config{
-		Type:     "all",
-		TestMode: true,
-		Exclude:  []string{"KB9999999"}, // Non-existent KB, shouldn't affect anything
+		PatchType:      "all",
+		TestMode:       true,
+		ExcludePatches: []string{"KB9999999"}, // Non-existent KB, shouldn't affect anything
 	}
 
 	// Should not error with exclude list
