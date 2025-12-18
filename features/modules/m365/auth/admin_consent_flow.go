@@ -95,17 +95,17 @@ type AdminConsentInfo struct {
 // ClientTenantStore defines the interface for storing client tenant information
 type ClientTenantStore interface {
 	// Client tenant management
-	StoreClientTenant(client *ClientTenant) error
-	GetClientTenant(tenantID string) (*ClientTenant, error)
-	GetClientTenantByIdentifier(clientIdentifier string) (*ClientTenant, error)
-	ListClientTenants(status ClientTenantStatus) ([]*ClientTenant, error)
-	UpdateClientTenantStatus(tenantID string, status ClientTenantStatus) error
-	DeleteClientTenant(tenantID string) error
+	StoreClientTenant(ctx context.Context, client *ClientTenant) error
+	GetClientTenant(ctx context.Context, tenantID string) (*ClientTenant, error)
+	GetClientTenantByIdentifier(ctx context.Context, clientIdentifier string) (*ClientTenant, error)
+	ListClientTenants(ctx context.Context, status ClientTenantStatus) ([]*ClientTenant, error)
+	UpdateClientTenantStatus(ctx context.Context, tenantID string, status ClientTenantStatus) error
+	DeleteClientTenant(ctx context.Context, tenantID string) error
 
 	// Admin consent request management
-	StoreAdminConsentRequest(request *AdminConsentRequest) error
-	GetAdminConsentRequest(state string) (*AdminConsentRequest, error)
-	DeleteAdminConsentRequest(state string) error
+	StoreAdminConsentRequest(ctx context.Context, request *AdminConsentRequest) error
+	GetAdminConsentRequest(ctx context.Context, state string) (*AdminConsentRequest, error)
+	DeleteAdminConsentRequest(ctx context.Context, state string) error
 }
 
 // NewAdminConsentFlow creates a new admin consent flow manager
@@ -140,7 +140,7 @@ func (f *AdminConsentFlow) StartAdminConsentFlow(ctx context.Context, clientIden
 	}
 
 	// Store the request
-	if err := f.clientStore.StoreAdminConsentRequest(request); err != nil {
+	if err := f.clientStore.StoreAdminConsentRequest(ctx, request); err != nil {
 		return nil, "", fmt.Errorf("failed to store admin consent request: %w", err)
 	}
 
@@ -190,7 +190,7 @@ func (f *AdminConsentFlow) HandleAdminConsentCallback(ctx context.Context, callb
 	}
 
 	// Retrieve admin consent request
-	request, err := f.clientStore.GetAdminConsentRequest(state)
+	request, err := f.clientStore.GetAdminConsentRequest(ctx, state)
 	if err != nil {
 		return &AdminConsentResult{
 			Success:      false,
@@ -226,7 +226,7 @@ func (f *AdminConsentFlow) HandleAdminConsentCallback(ctx context.Context, callb
 	}
 
 	// Store client tenant
-	if err := f.clientStore.StoreClientTenant(clientTenant); err != nil {
+	if err := f.clientStore.StoreClientTenant(ctx, clientTenant); err != nil {
 		return &AdminConsentResult{
 			Success:      false,
 			Error:        "STORAGE_FAILED",
@@ -235,7 +235,7 @@ func (f *AdminConsentFlow) HandleAdminConsentCallback(ctx context.Context, callb
 	}
 
 	// Clean up admin consent request
-	if err := f.clientStore.DeleteAdminConsentRequest(state); err != nil {
+	if err := f.clientStore.DeleteAdminConsentRequest(ctx, state); err != nil {
 		// Log warning - we could add a logger field to AdminConsentFlow in the future
 		_ = err // Acknowledge error but continue
 	}
@@ -257,7 +257,7 @@ func (f *AdminConsentFlow) HandleAdminConsentCallback(ctx context.Context, callb
 
 // GetClientTenantStatus checks the status of a client tenant
 func (f *AdminConsentFlow) GetClientTenantStatus(ctx context.Context, clientIdentifier string) (*ClientTenant, error) {
-	client, err := f.clientStore.GetClientTenantByIdentifier(clientIdentifier)
+	client, err := f.clientStore.GetClientTenantByIdentifier(ctx, clientIdentifier)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get client tenant: %w", err)
 	}
@@ -267,22 +267,22 @@ func (f *AdminConsentFlow) GetClientTenantStatus(ctx context.Context, clientIden
 
 // ActivateClientTenant activates a consented client tenant for production use
 func (f *AdminConsentFlow) ActivateClientTenant(ctx context.Context, tenantID string) error {
-	return f.clientStore.UpdateClientTenantStatus(tenantID, ClientTenantStatusActive)
+	return f.clientStore.UpdateClientTenantStatus(ctx, tenantID, ClientTenantStatusActive)
 }
 
 // SuspendClientTenant temporarily suspends a client tenant
 func (f *AdminConsentFlow) SuspendClientTenant(ctx context.Context, tenantID string) error {
-	return f.clientStore.UpdateClientTenantStatus(tenantID, ClientTenantStatusSuspended)
+	return f.clientStore.UpdateClientTenantStatus(ctx, tenantID, ClientTenantStatusSuspended)
 }
 
 // RevokeClientTenant marks a client tenant as having revoked consent
 func (f *AdminConsentFlow) RevokeClientTenant(ctx context.Context, tenantID string) error {
-	return f.clientStore.UpdateClientTenantStatus(tenantID, ClientTenantStatusRevoked)
+	return f.clientStore.UpdateClientTenantStatus(ctx, tenantID, ClientTenantStatusRevoked)
 }
 
 // ListClientTenants returns all client tenants with optional status filter
 func (f *AdminConsentFlow) ListClientTenants(ctx context.Context, status ClientTenantStatus) ([]*ClientTenant, error) {
-	return f.clientStore.ListClientTenants(status)
+	return f.clientStore.ListClientTenants(ctx, status)
 }
 
 // Helper methods
@@ -336,7 +336,7 @@ func (f *AdminConsentFlow) GetMultiTenantConfig() *MultiTenantConfig {
 
 // ValidateClientTenant validates that a client tenant is active and usable
 func (f *AdminConsentFlow) ValidateClientTenant(ctx context.Context, tenantID string) error {
-	client, err := f.clientStore.GetClientTenant(tenantID)
+	client, err := f.clientStore.GetClientTenant(ctx, tenantID)
 	if err != nil {
 		return fmt.Errorf("client tenant not found: %w", err)
 	}

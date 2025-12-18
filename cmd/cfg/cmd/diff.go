@@ -243,7 +243,8 @@ func runThreeWayDiff(ctx context.Context, engine diff.DiffEngine, args []string,
 func createConfigurationReference(path string) (*diff.ConfigurationReference, error) {
 	// Check if file exists
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return nil, fmt.Errorf("file does not exist: %s", path)
+		cwd, _ := os.Getwd()
+		return nil, fmt.Errorf("file does not exist: %s\n\nCurrent directory: %s\n\nTroubleshooting:\n  - Check if the file path is correct\n  - Use absolute paths to avoid confusion\n  - Verify file permissions\n\nExample:\n  cfg diff /path/to/config-old.yaml /path/to/config-new.yaml", path, cwd)
 	}
 
 	// Get absolute path
@@ -286,7 +287,7 @@ func parseImpactLevels(levels []string) ([]diff.ImpactLevel, error) {
 		case "critical":
 			impactLevels = append(impactLevels, diff.ImpactLevelCritical)
 		default:
-			return nil, fmt.Errorf("invalid impact level: %s", level)
+			return nil, fmt.Errorf("invalid impact level: '%s'\n\nValid impact levels:\n  low      - Minor changes with minimal impact\n  medium   - Moderate changes requiring review\n  high     - Significant changes with service impact\n  critical - Critical changes requiring immediate attention\n\nExample:\n  cfg diff --filter-by-impact high,critical config-old.yaml config-new.yaml", level)
 		}
 	}
 
@@ -311,7 +312,7 @@ func parseCategories(categories []string) ([]diff.ChangeCategory, error) {
 		case "policy":
 			changeCategories = append(changeCategories, diff.ChangeCategoryPolicy)
 		default:
-			return nil, fmt.Errorf("invalid category: %s", category)
+			return nil, fmt.Errorf("invalid category: '%s'\n\nValid categories:\n  structural - Configuration structure changes\n  value      - Value modifications\n  security   - Security-related changes\n  network    - Network configuration changes\n  access     - Access control changes\n  policy     - Policy changes\n\nExample:\n  cfg diff --filter-by-category security,access config-old.yaml config-new.yaml", category)
 		}
 	}
 
@@ -333,6 +334,6 @@ func parseExportFormat(format string) (diff.ExportFormat, error) {
 	case "markdown", "md":
 		return diff.ExportFormatMarkdown, nil
 	default:
-		return "", fmt.Errorf("unsupported format: %s", format)
+		return "", fmt.Errorf("unsupported output format: '%s'\n\nValid formats:\n  text         - Plain text output (default)\n  json         - JSON structured output\n  html         - HTML formatted output\n  unified      - Unified diff format\n  side-by-side - Side-by-side comparison\n  markdown     - Markdown formatted output\n\nExample:\n  cfg diff --output json config-old.yaml config-new.yaml", format)
 	}
 }
