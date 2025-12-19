@@ -105,10 +105,10 @@ Implemented comprehensive Docker-based E2E testing infrastructure that validates
 #### v0.8.0 Go public
 
 - [x] Create security scanning configuration files (`.gitleaks.toml`, `.gosec.json`) (issue #279) ✅ COMPLETED
-- [ ] Add public repository workflows (Dependabot, CodeQL, container scanning, license compliance, SBOM) (issue #280)
+- [x] Add public repository workflows (Dependabot, CodeQL, container scanning, license compliance, SBOM) (issue #280) ✅ COMPLETED
 - [ ] Create `SECURITY.md` vulnerability disclosure policy (issue #281)
 - [ ] Re-enable and validate GitHub Actions workflows (issue #109, issue #15)
-- [ ] Convert repository to public and activate GitHub Advanced Security features (issue #282)
+- [ ] ~~Convert repository to public and~~ activate GitHub Advanced Security features (issue #282)
 - [ ] Configure branch protection rules (issue #283)
 - [ ] Update documentation with security badges and public links (issue #284)
 
