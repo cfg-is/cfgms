@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.25-alpine AS builder
+FROM golang:1.25-alpine3.23 AS builder
 
 # Install build dependencies
 RUN apk add --no-cache git ca-certificates
@@ -19,8 +19,8 @@ COPY . .
 # Build steward
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o steward ./cmd/steward
 
-# Final stage
-FROM alpine:latest
+# Final stage - pinned to Alpine 3.23 (latest stable as of 2025-12)
+FROM alpine:3.23
 
 # Install runtime dependencies
 RUN apk --no-cache add ca-certificates netcat-openbsd

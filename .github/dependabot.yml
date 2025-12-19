@@ -1,0 +1,154 @@
+# Dependabot Configuration for CFGMS
+# Automated dependency security updates
+#
+# This configuration will activate when the repository becomes public,
+# providing automatic PRs for security patches and version updates.
+#
+# Documentation: https://docs.github.com/en/code-security/dependabot
+
+version: 2
+updates:
+  # Go module dependency updates
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "UTC"
+
+    # Limit open PRs to prevent overwhelming maintainers
+    open-pull-requests-limit: 10
+
+    # Group related updates to reduce PR noise
+    groups:
+      # Security updates get their own group for priority handling
+      security-updates:
+        patterns:
+          - "*"
+        update-types:
+          - "security"
+
+      # Development dependencies grouped together
+      development-dependencies:
+        patterns:
+          - "github.com/stretchr/testify"
+          - "honnef.co/go/tools/cmd/staticcheck"
+          - "github.com/securego/gosec"
+        update-types:
+          - "minor"
+          - "patch"
+
+      # Production dependencies grouped by domain
+      mqtt-dependencies:
+        patterns:
+          - "github.com/mochi-mqtt/*"
+        update-types:
+          - "minor"
+          - "patch"
+
+      quic-dependencies:
+        patterns:
+          - "github.com/quic-go/*"
+        update-types:
+          - "minor"
+          - "patch"
+
+      microsoft-dependencies:
+        patterns:
+          - "github.com/microsoftgraph/*"
+          - "github.com/Azure/*"
+          - "github.com/AzureAD/*"
+        update-types:
+          - "minor"
+          - "patch"
+
+      cli-dependencies:
+        patterns:
+          - "github.com/spf13/*"
+          - "github.com/urfave/*"
+        update-types:
+          - "minor"
+          - "patch"
+
+    # Assign reviewers for dependency PRs
+    reviewers:
+      - "cfg-is/maintainers"
+
+    # Add labels for easy filtering
+    labels:
+      - "dependencies"
+      - "security"
+      - "automated"
+
+    # Commit message configuration
+    commit-message:
+      prefix: "deps"
+      prefix-development: "deps-dev"
+      include: "scope"
+
+    # Allow Dependabot to rebase PRs when needed
+    rebase-strategy: "auto"
+
+    # Target branch for PRs
+    target-branch: "develop"
+
+  # GitHub Actions workflow dependency updates
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "UTC"
+
+    open-pull-requests-limit: 5
+
+    # Group all GitHub Actions updates together
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+    reviewers:
+      - "cfg-is/maintainers"
+
+    labels:
+      - "dependencies"
+      - "github-actions"
+      - "automated"
+
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+
+    target-branch: "develop"
+
+  # Docker base image updates
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "09:00"
+      timezone: "UTC"
+
+    open-pull-requests-limit: 5
+
+    reviewers:
+      - "cfg-is/maintainers"
+
+    labels:
+      - "dependencies"
+      - "docker"
+      - "security"
+      - "automated"
+
+    commit-message:
+      prefix: "docker"
+      include: "scope"
+
+    target-branch: "develop"
