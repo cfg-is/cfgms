@@ -708,11 +708,12 @@ security-trivy:
 		exit 1; \
 	fi
 	@echo "Running trivy filesystem scan..."
-	@echo "🔍 Vulnerability Scan (Critical Issues):"
-	@trivy fs . --scanners vuln --format table --severity CRITICAL,HIGH --exit-code 1 || { \
+	@echo "🔍 Vulnerability Scan (Blocking Issues):"
+	@trivy fs . --scanners vuln --format table --severity CRITICAL,HIGH,MEDIUM --exit-code 1 || { \
 		echo ""; \
-		echo "❌ CRITICAL/HIGH vulnerabilities found - deployment blocked!"; \
+		echo "❌ CRITICAL/HIGH/MEDIUM vulnerabilities found - deployment blocked!"; \
 		echo "   Please update dependencies to fix these security issues."; \
+		echo "   This matches CI/CD severity requirements."; \
 		exit 1; \
 	}
 	@echo "🔍 Complete Security Scan (All Issues):"
@@ -720,7 +721,7 @@ security-trivy:
 	@echo ""; \
 	echo "✅ Trivy scan completed"; \
 	echo "   Note: Development certificates detected in features/controller/certs/ are expected"; \
-	echo "   Critical/High vulnerabilities will block deployment"
+	echo "   Critical/High/Medium vulnerabilities will block deployment (matches CI/CD)"
 
 # Nancy Go dependency vulnerability scanning
 security-deps:
