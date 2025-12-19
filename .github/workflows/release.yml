@@ -1,0 +1,319 @@
+# Release Workflow with SBOM Generation
+# Automated release process for CFGMS
+#
+# This workflow:
+# - Creates GitHub releases
+# - Builds cross-platform binaries
+# - Generates Software Bill of Materials (SBOM)
+# - Uploads release artifacts
+#
+# Triggers on version tags (e.g., v0.8.0, v1.0.0)
+#
+# Documentation: https://github.com/anchore/sbom-action
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., v0.8.0)'
+        required: true
+        type: string
+
+env:
+  GO_VERSION: '1.23'
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+
+jobs:
+  # Create GitHub Release
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+      version: ${{ steps.get_version.outputs.version }}
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Get version
+      id: get_version
+      run: |
+        if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+          VERSION="${{ github.event.inputs.version }}"
+        else
+          VERSION=${GITHUB_REF#refs/tags/}
+        fi
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "Release version: $VERSION"
+
+    - name: Generate changelog
+      id: changelog
+      run: |
+        # Extract changelog for this version from docs
+        # If CHANGELOG.md exists, extract relevant section
+        if [ -f CHANGELOG.md ]; then
+          # Extract section for this version
+          CHANGELOG=$(awk "/## \[${{ steps.get_version.outputs.version }}\]/,/## \[/" CHANGELOG.md | head -n -1)
+        else
+          # Generate from git commits since last tag
+          LAST_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          if [ -z "$LAST_TAG" ]; then
+            CHANGELOG=$(git log --pretty=format:"- %s (%h)" --abbrev-commit)
+          else
+            CHANGELOG=$(git log ${LAST_TAG}..HEAD --pretty=format:"- %s (%h)" --abbrev-commit)
+          fi
+        fi
+
+        # Save to file for release notes
+        echo "$CHANGELOG" > release-notes.md
+
+    - name: Create GitHub Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ steps.get_version.outputs.version }}
+        release_name: CFGMS ${{ steps.get_version.outputs.version }}
+        body_path: release-notes.md
+        draft: false
+        prerelease: ${{ contains(steps.get_version.outputs.version, '-rc') || contains(steps.get_version.outputs.version, '-beta') || contains(steps.get_version.outputs.version, '-alpha') }}
+
+  # Build cross-platform binaries
+  build-binaries:
+    name: Build ${{ matrix.os }}-${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: create-release
+    strategy:
+      matrix:
+        os: [linux, darwin, windows]
+        arch: [amd64, arm64]
+        exclude:
+          # Windows ARM64 support is limited
+          - os: windows
+            arch: arm64
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Cache Go modules
+      uses: actions/cache@v4
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+
+    - name: Build binaries
+      env:
+        GOOS: ${{ matrix.os }}
+        GOARCH: ${{ matrix.arch }}
+        VERSION: ${{ needs.create-release.outputs.version }}
+      run: |
+        echo "Building for $GOOS/$GOARCH..."
+
+        # Set binary extension for Windows
+        EXT=""
+        if [ "$GOOS" == "windows" ]; then
+          EXT=".exe"
+        fi
+
+        # Build controller
+        CGO_ENABLED=0 go build \
+          -ldflags "-X github.com/cfgis/cfgms/pkg/version.Version=$VERSION -s -w" \
+          -o "cfgms-controller-$VERSION-$GOOS-$GOARCH$EXT" \
+          ./cmd/controller
+
+        # Build steward
+        CGO_ENABLED=0 go build \
+          -ldflags "-X github.com/cfgis/cfgms/pkg/version.Version=$VERSION -s -w" \
+          -o "cfgms-steward-$VERSION-$GOOS-$GOARCH$EXT" \
+          ./cmd/steward
+
+        # Build CLI
+        CGO_ENABLED=0 go build \
+          -ldflags "-X github.com/cfgis/cfgms/pkg/version.Version=$VERSION -s -w" \
+          -o "cfgms-cli-$VERSION-$GOOS-$GOARCH$EXT" \
+          ./cmd/cfg
+
+        # Create checksums
+        sha256sum cfgms-*-$GOOS-$GOARCH$EXT > "checksums-$GOOS-$GOARCH.txt"
+
+    - name: Upload controller binary
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }}
+        asset_path: ./cfgms-controller-${{ needs.create-release.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }}
+        asset_name: cfgms-controller-${{ needs.create-release.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }}
+        asset_content_type: application/octet-stream
+
+    - name: Upload steward binary
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }}
+        asset_path: ./cfgms-steward-${{ needs.create-release.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }}
+        asset_name: cfgms-steward-${{ needs.create-release.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }}
+        asset_content_type: application/octet-stream
+
+    - name: Upload CLI binary
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }}
+        asset_path: ./cfgms-cli-${{ needs.create-release.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }}
+        asset_name: cfgms-cli-${{ needs.create-release.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }}
+        asset_content_type: application/octet-stream
+
+    - name: Upload checksums
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }}
+        asset_path: ./checksums-${{ matrix.os }}-${{ matrix.arch }}.txt
+        asset_name: checksums-${{ matrix.os }}-${{ matrix.arch }}.txt
+        asset_content_type: text/plain
+
+  # Generate SBOM (Software Bill of Materials)
+  generate-sbom:
+    name: Generate SBOM
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: create-release
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    # Generate SBOM using Syft (Anchore)
+    - name: Generate SBOM for Controller
+      uses: anchore/sbom-action@v0
+      with:
+        path: ./cmd/controller
+        artifact-name: sbom-controller-${{ needs.create-release.outputs.version }}.spdx.json
+        output-file: sbom-controller.spdx.json
+        format: spdx-json
+
+    - name: Generate SBOM for Steward
+      uses: anchore/sbom-action@v0
+      with:
+        path: ./cmd/steward
+        artifact-name: sbom-steward-${{ needs.create-release.outputs.version }}.spdx.json
+        output-file: sbom-steward.spdx.json
+        format: spdx-json
+
+    - name: Generate SBOM for CLI
+      uses: anchore/sbom-action@v0
+      with:
+        path: ./cmd/cfg
+        artifact-name: sbom-cli-${{ needs.create-release.outputs.version }}.spdx.json
+        output-file: sbom-cli.spdx.json
+        format: spdx-json
+
+    # Upload SBOMs to release
+    - name: Upload Controller SBOM
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }}
+        asset_path: ./sbom-controller.spdx.json
+        asset_name: sbom-controller-${{ needs.create-release.outputs.version }}.spdx.json
+        asset_content_type: application/json
+
+    - name: Upload Steward SBOM
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }}
+        asset_path: ./sbom-steward.spdx.json
+        asset_name: sbom-steward-${{ needs.create-release.outputs.version }}.spdx.json
+        asset_content_type: application/json
+
+    - name: Upload CLI SBOM
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }}
+        asset_path: ./sbom-cli.spdx.json
+        asset_name: sbom-cli-${{ needs.create-release.outputs.version }}.spdx.json
+        asset_content_type: application/json
+
+    # Generate human-readable SBOM summary
+    - name: Generate SBOM Summary
+      run: |
+        echo "## SBOM Generation Complete" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "Software Bill of Materials (SBOM) generated for all components in SPDX-JSON format." >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Files Generated" >> $GITHUB_STEP_SUMMARY
+        echo "- \`sbom-controller-${{ needs.create-release.outputs.version }}.spdx.json\`" >> $GITHUB_STEP_SUMMARY
+        echo "- \`sbom-steward-${{ needs.create-release.outputs.version }}.spdx.json\`" >> $GITHUB_STEP_SUMMARY
+        echo "- \`sbom-cli-${{ needs.create-release.outputs.version }}.spdx.json\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### SBOM Standard" >> $GITHUB_STEP_SUMMARY
+        echo "- **Format:** SPDX 2.3 (JSON)" >> $GITHUB_STEP_SUMMARY
+        echo "- **Tool:** Syft (Anchore)" >> $GITHUB_STEP_SUMMARY
+        echo "- **Compliance:** NTIA Minimum Elements" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Use Cases" >> $GITHUB_STEP_SUMMARY
+        echo "- Supply chain security analysis" >> $GITHUB_STEP_SUMMARY
+        echo "- Vulnerability tracking" >> $GITHUB_STEP_SUMMARY
+        echo "- License compliance verification" >> $GITHUB_STEP_SUMMARY
+        echo "- Enterprise procurement requirements" >> $GITHUB_STEP_SUMMARY
+
+  # Release summary
+  release-summary:
+    name: Release Summary
+    runs-on: ubuntu-latest
+    needs: [create-release, build-binaries, generate-sbom]
+    if: always()
+    steps:
+    - name: Generate Release Summary
+      run: |
+        echo "## Release ${{ needs.create-release.outputs.version }} Complete" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Build Status" >> $GITHUB_STEP_SUMMARY
+        echo "| Component | Status |" >> $GITHUB_STEP_SUMMARY
+        echo "|-----------|--------|" >> $GITHUB_STEP_SUMMARY
+        echo "| Binaries | ${{ needs.build-binaries.result == 'success' && '✅ Built' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| SBOM | ${{ needs.generate-sbom.result == 'success' && '✅ Generated' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Platforms" >> $GITHUB_STEP_SUMMARY
+        echo "- Linux (AMD64, ARM64)" >> $GITHUB_STEP_SUMMARY
+        echo "- macOS (AMD64, ARM64)" >> $GITHUB_STEP_SUMMARY
+        echo "- Windows (AMD64)" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Release Assets" >> $GITHUB_STEP_SUMMARY
+        echo "- Cross-platform binaries (controller, steward, CLI)" >> $GITHUB_STEP_SUMMARY
+        echo "- SHA256 checksums for verification" >> $GITHUB_STEP_SUMMARY
+        echo "- SBOM files (SPDX-JSON format)" >> $GITHUB_STEP_SUMMARY

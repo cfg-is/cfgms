@@ -1,0 +1,204 @@
+# License Compliance Workflow
+# Automated license checking for Go dependencies
+#
+# This workflow ensures all dependencies use compatible open-source licenses
+# and prevents incompatible licenses from being introduced.
+#
+# Triggers on:
+# - PRs that modify go.mod or go.sum
+# - Manual workflow dispatch
+#
+# Documentation: https://github.com/google/go-licenses
+
+name: License Compliance Check
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/license-check.yml'
+  workflow_dispatch:
+
+env:
+  GO_VERSION: '1.23'
+
+jobs:
+  license-check:
+    name: Check Dependency Licenses
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Cache Go modules
+      uses: actions/cache@v4
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-go-licenses-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-licenses-
+          ${{ runner.os }}-go-
+
+    - name: Install go-licenses tool
+      run: go install github.com/google/go-licenses@latest
+
+    - name: Download dependencies
+      run: go mod download
+
+    # Check for forbidden/restricted licenses
+    - name: Check for forbidden licenses
+      id: forbidden-check
+      run: |
+        echo "🔍 Checking for forbidden licenses..."
+        echo ""
+
+        # Define forbidden license types
+        # These licenses are incompatible with Apache 2.0 or pose legal risks
+        FORBIDDEN_LICENSES=(
+          "GPL"
+          "LGPL"
+          "AGPL"
+          "CC-BY-NC"
+          "Commercial"
+          "Proprietary"
+          "SSPL"
+        )
+
+        # Check each main package
+        PACKAGES="./cmd/controller ./cmd/steward ./cmd/cfg"
+        FORBIDDEN_FOUND=0
+
+        for pkg in $PACKAGES; do
+          echo "Scanning $pkg..."
+          if go-licenses check $pkg 2>&1 | tee license-check.log; then
+            echo "  ✅ No license issues in $pkg"
+          else
+            echo "  ⚠️  License check warnings in $pkg"
+          fi
+
+          # Check for forbidden licenses in output
+          for license in "${FORBIDDEN_LICENSES[@]}"; do
+            if grep -i "$license" license-check.log; then
+              echo "❌ FORBIDDEN LICENSE DETECTED: $license"
+              FORBIDDEN_FOUND=1
+            fi
+          done
+        done
+
+        if [ $FORBIDDEN_FOUND -eq 1 ]; then
+          echo "forbidden-found=true" >> $GITHUB_OUTPUT
+          echo "status=failed" >> $GITHUB_OUTPUT
+        else
+          echo "forbidden-found=false" >> $GITHUB_OUTPUT
+          echo "status=passed" >> $GITHUB_OUTPUT
+        fi
+
+    # Generate license report
+    - name: Generate license report
+      if: always()
+      run: |
+        echo "📋 Generating license report..."
+        mkdir -p license-reports
+
+        # Generate CSV report for all packages
+        go-licenses csv ./cmd/controller > license-reports/controller-licenses.csv || true
+        go-licenses csv ./cmd/steward > license-reports/steward-licenses.csv || true
+        go-licenses csv ./cmd/cfg > license-reports/cfg-licenses.csv || true
+
+        # Generate summary report
+        cat > license-reports/summary.md << 'EOF'
+        # License Compliance Report
+
+        ## Summary
+        This report shows all third-party licenses used in CFGMS dependencies.
+
+        ## Controller Licenses
+        EOF
+
+        echo '```' >> license-reports/summary.md
+        head -20 license-reports/controller-licenses.csv >> license-reports/summary.md || echo "No controller licenses" >> license-reports/summary.md
+        echo '```' >> license-reports/summary.md
+
+        echo "" >> license-reports/summary.md
+        echo "## Steward Licenses" >> license-reports/summary.md
+        echo '```' >> license-reports/summary.md
+        head -20 license-reports/steward-licenses.csv >> license-reports/summary.md || echo "No steward licenses" >> license-reports/summary.md
+        echo '```' >> license-reports/summary.md
+
+        echo "" >> license-reports/summary.md
+        echo "## CLI Licenses" >> license-reports/summary.md
+        echo '```' >> license-reports/summary.md
+        head -20 license-reports/cfg-licenses.csv >> license-reports/summary.md || echo "No CLI licenses" >> license-reports/summary.md
+        echo '```' >> license-reports/summary.md
+
+        echo "" >> license-reports/summary.md
+        echo "## Allowed License Types" >> license-reports/summary.md
+        echo "- ✅ MIT" >> license-reports/summary.md
+        echo "- ✅ Apache-2.0" >> license-reports/summary.md
+        echo "- ✅ BSD (2-Clause, 3-Clause)" >> license-reports/summary.md
+        echo "- ✅ ISC" >> license-reports/summary.md
+        echo "- ✅ MPL-2.0" >> license-reports/summary.md
+        echo "" >> license-reports/summary.md
+        echo "## Forbidden License Types" >> license-reports/summary.md
+        echo "- ❌ GPL/LGPL/AGPL (copyleft incompatible with Apache-2.0)" >> license-reports/summary.md
+        echo "- ❌ CC-BY-NC (non-commercial restriction)" >> license-reports/summary.md
+        echo "- ❌ Commercial/Proprietary" >> license-reports/summary.md
+        echo "- ❌ SSPL (Server Side Public License)" >> license-reports/summary.md
+
+        cat license-reports/summary.md
+
+    - name: Upload license reports
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: license-compliance-report
+        path: license-reports/
+        retention-days: 90
+
+    - name: Generate step summary
+      if: always()
+      run: |
+        echo "## License Compliance Check Results" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+
+        if [ "${{ steps.forbidden-check.outputs.status }}" == "passed" ]; then
+          echo "### ✅ License Check Passed" >> $GITHUB_STEP_SUMMARY
+          echo "All dependencies use compatible open-source licenses." >> $GITHUB_STEP_SUMMARY
+        else
+          echo "### ❌ License Issues Detected" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Action Required:**" >> $GITHUB_STEP_SUMMARY
+          echo "Forbidden or restricted licenses detected in dependencies." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Next Steps:**" >> $GITHUB_STEP_SUMMARY
+          echo "1. Download the license-compliance-report artifact" >> $GITHUB_STEP_SUMMARY
+          echo "2. Review the license violations" >> $GITHUB_STEP_SUMMARY
+          echo "3. Find alternative dependencies or obtain legal approval" >> $GITHUB_STEP_SUMMARY
+          echo "4. Update go.mod to use compatible dependencies" >> $GITHUB_STEP_SUMMARY
+        fi
+
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Report Details" >> $GITHUB_STEP_SUMMARY
+        echo "Download the \`license-compliance-report\` artifact for:" >> $GITHUB_STEP_SUMMARY
+        echo "- Complete CSV listing of all dependencies and licenses" >> $GITHUB_STEP_SUMMARY
+        echo "- Summary of allowed and forbidden license types" >> $GITHUB_STEP_SUMMARY
+        echo "- Per-component license breakdown" >> $GITHUB_STEP_SUMMARY
+
+    - name: Fail on forbidden licenses
+      if: steps.forbidden-check.outputs.forbidden-found == 'true'
+      run: |
+        echo "❌ License compliance check failed"
+        echo "Forbidden or incompatible licenses detected in dependencies"
+        exit 1
