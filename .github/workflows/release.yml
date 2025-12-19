@@ -39,7 +39,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
       version: ${{ steps.get_version.outputs.version }}
     steps:
     - name: Checkout repository
@@ -80,16 +79,22 @@ jobs:
         echo "$CHANGELOG" > release-notes.md
 
     - name: Create GitHub Release
-      id: create_release
-      uses: actions/create-release@v1
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: ${{ steps.get_version.outputs.version }}
-        release_name: CFGMS ${{ steps.get_version.outputs.version }}
-        body_path: release-notes.md
-        draft: false
-        prerelease: ${{ contains(steps.get_version.outputs.version, '-rc') || contains(steps.get_version.outputs.version, '-beta') || contains(steps.get_version.outputs.version, '-alpha') }}
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        VERSION="${{ steps.get_version.outputs.version }}"
+
+        # Determine if this is a prerelease
+        PRERELEASE_FLAG=""
+        if [[ "$VERSION" == *"-rc"* ]] || [[ "$VERSION" == *"-beta"* ]] || [[ "$VERSION" == *"-alpha"* ]]; then
+          PRERELEASE_FLAG="--prerelease"
+        fi
+
+        # Create release using gh CLI
+        gh release create "$VERSION" \
+          --title "CFGMS $VERSION" \
+          --notes-file release-notes.md \
+          $PRERELEASE_FLAG
 
   # Build cross-platform binaries
   build-binaries:
@@ -157,45 +162,26 @@ jobs:
         # Create checksums
         sha256sum cfgms-*-$GOOS-$GOARCH$EXT > "checksums-$GOOS-$GOARCH.txt"
 
-    - name: Upload controller binary
-      uses: actions/upload-release-asset@v1
+    - name: Upload binaries and checksums to release
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ needs.create-release.outputs.upload_url }}
-        asset_path: ./cfgms-controller-${{ needs.create-release.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }}
-        asset_name: cfgms-controller-${{ needs.create-release.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }}
-        asset_content_type: application/octet-stream
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        VERSION="${{ needs.create-release.outputs.version }}"
+        OS="${{ matrix.os }}"
+        ARCH="${{ matrix.arch }}"
 
-    - name: Upload steward binary
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ needs.create-release.outputs.upload_url }}
-        asset_path: ./cfgms-steward-${{ needs.create-release.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }}
-        asset_name: cfgms-steward-${{ needs.create-release.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }}
-        asset_content_type: application/octet-stream
+        # Set binary extension for Windows
+        EXT=""
+        if [ "$OS" == "windows" ]; then
+          EXT=".exe"
+        fi
 
-    - name: Upload CLI binary
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ needs.create-release.outputs.upload_url }}
-        asset_path: ./cfgms-cli-${{ needs.create-release.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }}
-        asset_name: cfgms-cli-${{ needs.create-release.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }}
-        asset_content_type: application/octet-stream
-
-    - name: Upload checksums
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ needs.create-release.outputs.upload_url }}
-        asset_path: ./checksums-${{ matrix.os }}-${{ matrix.arch }}.txt
-        asset_name: checksums-${{ matrix.os }}-${{ matrix.arch }}.txt
-        asset_content_type: text/plain
+        # Upload all binaries and checksums for this platform
+        gh release upload "$VERSION" \
+          "cfgms-controller-$VERSION-$OS-$ARCH$EXT" \
+          "cfgms-steward-$VERSION-$OS-$ARCH$EXT" \
+          "cfgms-cli-$VERSION-$OS-$ARCH$EXT" \
+          "checksums-$OS-$ARCH.txt"
 
   # Generate SBOM (Software Bill of Materials)
   generate-sbom:
@@ -213,8 +199,9 @@ jobs:
         go-version: ${{ env.GO_VERSION }}
 
     # Generate SBOM using Syft (Anchore)
+    # Using v0.20.11 (latest as of 2024-12-09) with Syft v1.38.2
     - name: Generate SBOM for Controller
-      uses: anchore/sbom-action@v0
+      uses: anchore/sbom-action@v0.20.11
       with:
         path: ./cmd/controller
         artifact-name: sbom-controller-${{ needs.create-release.outputs.version }}.spdx.json
@@ -222,7 +209,7 @@ jobs:
         format: spdx-json
 
     - name: Generate SBOM for Steward
-      uses: anchore/sbom-action@v0
+      uses: anchore/sbom-action@v0.20.11
       with:
         path: ./cmd/steward
         artifact-name: sbom-steward-${{ needs.create-release.outputs.version }}.spdx.json
@@ -230,7 +217,7 @@ jobs:
         format: spdx-json
 
     - name: Generate SBOM for CLI
-      uses: anchore/sbom-action@v0
+      uses: anchore/sbom-action@v0.20.11
       with:
         path: ./cmd/cfg
         artifact-name: sbom-cli-${{ needs.create-release.outputs.version }}.spdx.json
@@ -238,35 +225,17 @@ jobs:
         format: spdx-json
 
     # Upload SBOMs to release
-    - name: Upload Controller SBOM
-      uses: actions/upload-release-asset@v1
+    - name: Upload SBOMs to release
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ needs.create-release.outputs.upload_url }}
-        asset_path: ./sbom-controller.spdx.json
-        asset_name: sbom-controller-${{ needs.create-release.outputs.version }}.spdx.json
-        asset_content_type: application/json
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        VERSION="${{ needs.create-release.outputs.version }}"
 
-    - name: Upload Steward SBOM
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ needs.create-release.outputs.upload_url }}
-        asset_path: ./sbom-steward.spdx.json
-        asset_name: sbom-steward-${{ needs.create-release.outputs.version }}.spdx.json
-        asset_content_type: application/json
-
-    - name: Upload CLI SBOM
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ needs.create-release.outputs.upload_url }}
-        asset_path: ./sbom-cli.spdx.json
-        asset_name: sbom-cli-${{ needs.create-release.outputs.version }}.spdx.json
-        asset_content_type: application/json
+        # Upload all SBOM files
+        gh release upload "$VERSION" \
+          sbom-controller.spdx.json#sbom-controller-$VERSION.spdx.json \
+          sbom-steward.spdx.json#sbom-steward-$VERSION.spdx.json \
+          sbom-cli.spdx.json#sbom-cli-$VERSION.spdx.json
 
     # Generate human-readable SBOM summary
     - name: Generate SBOM Summary
