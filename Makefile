@@ -361,7 +361,7 @@ check-architecture:
 	echo ""; \
 	echo "📦 Checking storage implementations outside pkg/storage..."; \
 	if [ -n "$$files" ]; then \
-		if echo "$$files" | xargs grep -l "sql\.Open\|git\.PlainInit" 2>/dev/null | grep -v "^pkg/storage/"; then \
+		if echo "$$files" | xargs grep -l "sql\.Open\|git\.PlainInit" 2>/dev/null | grep -v "^pkg/storage/" | grep -v "^pkg/testutil/"; then \
 			echo "  ❌ Found storage implementation - should use pkg/storage interfaces"; \
 			echo "     See CLAUDE.md Central Provider System section"; \
 			violations=$$((violations + 1)); \

@@ -31,7 +31,7 @@ func SkipWithoutCGO(t *testing.T) {
 		t.Skipf("Skipping test: Failed to open SQLite database: %v", err)
 		return
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// Try to ping the database to verify it's working
 	if err := db.Ping(); err != nil {
@@ -52,7 +52,7 @@ func RequiresCGO() bool {
 	if err != nil {
 		return false
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	if err := db.Ping(); err != nil {
 		errStr := err.Error()
