@@ -104,17 +104,17 @@ Implemented comprehensive Docker-based E2E testing infrastructure that validates
 
 #### v0.8.0 Go public
 
-- [ ] Convert repository to Public
-- [ ] Re-enable GitHub Actions workflows (move workflows-disabled/ back to workflows/) (issue 109)
-- [ ] Configure branch protection rules
-- [ ] Set Up GitHub Actions and Acceptance Tests #15
-- [ ] Set up github CI CD pipeline  
-- [ ] Review Automated secure code scanning tooling implementation
-- [ ] Validate all workflows function properly on public repository
+- [ ] Create security scanning configuration files (`.gitleaks.toml`, `.gosec.json`) (issue #279)
+- [ ] Add public repository workflows (Dependabot, CodeQL, container scanning, license compliance, SBOM) (issue #280)
+- [ ] Create `SECURITY.md` vulnerability disclosure policy (issue #281)
+- [ ] Re-enable and validate GitHub Actions workflows (issue #109, issue #15)
+- [ ] Convert repository to public and activate GitHub Advanced Security features (issue #282)
+- [ ] Configure branch protection rules (issue #283)
+- [ ] Update documentation with security badges and public links (issue #284)
 
 ### Phase 2: Production Stability & Feature Completion (v0.9.0 - v1.0.0)
 
-Achieve production stability, complete core platform features, and prepare for stable release with LTS guarantees.
+Achieve production stability, complete core platform features, and prepare for stable release.
 
 #### v0.9.0 (Beta) - Production Stability
 
@@ -134,6 +134,33 @@ Achieve production stability, complete core platform features, and prepare for s
 - [ ] User and role management
 - [ ] Workflow Management
 - [ ] Basic reporting and visualization
+
+#### v0.10.5 - Security Maturation & Web Frontend Security
+
+**Goal**: Enhance security posture with advanced tooling and prepare web interface security foundations
+
+**Backend Security Enhancements**:
+- [ ] OpenSSF Scorecard optimization (target score: 9.0+)
+- [ ] Go native fuzzing integration for critical packages
+- [ ] Evaluate and integrate Snyk (if beneficial beyond existing coverage)
+- [ ] Evaluate and integrate SonarCloud (if beneficial beyond staticcheck)
+- [ ] Security testing automation improvements
+
+**Web Frontend Security Preparation**:
+- [ ] Evaluate web application security scanners (OWASP ZAP, Burp Suite Community)
+- [ ] Plan Content Security Policy (CSP) implementation
+- [ ] Evaluate frontend dependency scanning tools (npm audit, Snyk for JavaScript)
+- [ ] Plan XSS/CSRF protection strategies
+- [ ] Evaluate SAST tools for frontend code (ESLint security plugins, semgrep for JavaScript)
+- [ ] Document web security requirements and tooling strategy
+
+**Security Policy & Process**:
+- [ ] Conduct first external security audit (if resources available)
+- [ ] Establish CVE response procedures
+- [ ] Create security incident response playbook
+- [ ] Enhance security testing documentation
+
+**Rationale**: After Web Interface Foundation (v0.10.0), we need to mature our security tooling and establish web-specific security practices before deploying web frontend to production. This ensures we maintain our excellent security posture (9/10) as the system grows in complexity.
 
 #### v0.11.0 - Outpost Foundation
 
