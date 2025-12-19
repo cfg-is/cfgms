@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.25-alpine AS builder
+FROM golang:1.23-alpine3.20 AS builder
 
 # Install build dependencies
 RUN apk add --no-cache git ca-certificates
@@ -19,8 +19,8 @@ COPY . .
 # Build controller
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o controller ./cmd/controller
 
-# Final stage
-FROM alpine:latest
+# Final stage - pinned to Alpine 3.20 (latest stable as of 2024-12)
+FROM alpine:3.20
 
 # Install runtime dependencies
 RUN apk --no-cache add ca-certificates netcat-openbsd
