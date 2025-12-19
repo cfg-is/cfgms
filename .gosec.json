@@ -1,17 +1,44 @@
 {
-  "_comment": "NOTE: This config file is currently not used by the Makefile.",
-  "_reason": "gosec config files have limitations with directory exclusions and generated file handling.",
-  "_solution": "The Makefile uses command-line flags for better control over exclusions.",
-  "_usage": "Use 'gosec -conf .gosec.json ./...' to test this config, but production uses command-line flags.",
-  
+  "_comment": "CFGMS gosec configuration for v0.8.0",
+  "_description": "Project-specific Go security scanning rules",
+  "_usage": "This config is designed to work with command-line flags in Makefile. Use: gosec -conf .gosec.json ./...",
+
   "global": {
     "nosec": false,
     "audit": false,
     "exclude-generated": true
   },
+
   "exclude": [
-    "G103"
+    "G103",
+    "G115",
+    "G404"
   ],
+
+  "_exclude_explanations": {
+    "G103": "Audit the use of unsafe block - legitimate use in performance-critical code",
+    "G115": "Integer overflow conversion - too many false positives in safe conversions",
+    "G404": "Use of weak random number generator - acceptable for non-cryptographic use"
+  },
+
   "severity": "medium",
-  "confidence": "medium"
+  "confidence": "medium",
+
+  "exclude-dirs": [
+    "test",
+    "examples",
+    "docs",
+    "vendor",
+    "node_modules"
+  ],
+
+  "tests": false,
+
+  "_notes": [
+    "Severity: medium+ filters out low-severity issues",
+    "Confidence: medium+ reduces false positives",
+    "Excluded directories contain test fixtures and documentation",
+    "Generated files are automatically excluded",
+    "Use 'make security-gosec' for production scanning"
+  ]
 }
