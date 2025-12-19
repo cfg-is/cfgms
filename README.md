@@ -199,24 +199,36 @@ The roadmap provides detailed milestone planning from v0.1.0 through v3.5.0+, in
 
 ## Security
 
-CFGMS implements a robust security architecture:
+CFGMS implements a robust security architecture with defense-in-depth principles:
 
 - **Internal Communication**
   - MQTT+QUIC hybrid protocol for steward-controller communication
   - MQTT (control plane) with mutual TLS for real-time commands and heartbeats
   - QUIC (data plane) with mutual TLS for high-performance configuration/DNA sync
   - Certificate-based authentication for all steward connections
-  - Optional OpenZiti integration for zero-trust networking
+  - Cryptographic configuration signing (RSA-SHA256/ECDSA-SHA256)
 
 - **External Access**
   - REST API with HTTPS and API key authentication
-  - Role-based access control
+  - Role-based access control (RBAC) with zero-trust policy enforcement
+  - Just-in-time (JIT) access and continuous authorization
   - Rate limiting and request validation
 
-- **Security Best Practices**
-  - No hardcoded credentials
-  - Secure defaults
-  - Comprehensive logging
+- **Data Protection**
+  - SOPS encryption for sensitive configuration data
+  - TLS 1.3 for all network communication
+  - Comprehensive audit logging and tamper-evident trails
+  - Secure secret management with OS keychain integration
+
+### Reporting Security Vulnerabilities
+
+We take security seriously. If you discover a security vulnerability:
+
+- **Report to**: [security@cfg.is](mailto:security@cfg.is)
+- **Response Time**: 48 hours for initial acknowledgment
+- **Full Policy**: See [SECURITY.md](SECURITY.md) for complete vulnerability disclosure policy
+
+**Please do not** open public GitHub issues for security vulnerabilities.
 
 ## REST API
 
