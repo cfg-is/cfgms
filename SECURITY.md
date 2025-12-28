@@ -39,7 +39,7 @@ Instead, please report security issues to:
 
 **PGP Encrypted Email** (optional, for highly sensitive reports):
 
-- **Public Key**: Available at <https://cfg.is/security/pgp-key.asc> (when configured)
+- **Public Key**: Available at <https://cfg.is/security/pgp-key.asc>
 - **Note**: PGP encryption is optional; plaintext email to security@cfg.is is acceptable for most reports
 
 ### What to Include
