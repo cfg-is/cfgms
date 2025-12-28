@@ -190,14 +190,6 @@ db_password: ${CFGMS_DB_PASSWORD}  # Required - fails if not set
 
 This approach ensures that environment variable usage is intentional, documented, and auditable.
 
-### Configuration Signing
-
-- All configurations are cryptographically signed by the controller
-- Stewards verify signatures before applying ANY configuration changes
-- Prevents MITM attacks and malicious configuration injection
-- Uses RSA-SHA256 and ECDSA-SHA256 algorithms
-- Signatures embedded in configuration YAML as `_signature` metadata
-
 ### Audit & Compliance
 - Comprehensive audit logging of all system actions
 - Tamper-evident audit trails
