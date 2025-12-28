@@ -2,14 +2,24 @@
 
 ## Supported Versions
 
-We take security seriously and provide security updates for the following versions of CFGMS:
+CFGMS follows [Semantic Versioning 2.0.0](https://semver.org/) with the following security support policy:
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 0.7.x   | :white_check_mark: |
-| < 0.7   | :x:                |
+| Version | Status | Security Support |
+|---------|--------|------------------|
+| 0.8.x (Current) | Active Development | Full support with security patches |
+| 0.7.x | Previous Minor | Security patches only (3 months) |
+| < 0.7 | End of Life | No security patches |
 
-**Note**: As CFGMS is in active pre-1.0 development, we recommend always using the latest version from the `main` branch for production deployments.
+**Pre-v1.0.0 Note**: During active development (0.x.x versions), we provide security patches for the current minor version only. Major security issues may be backported to the previous minor version on a case-by-case basis.
+
+**Post-v1.0.0 Support Policy**:
+
+- **Current Version**: Full support with bug fixes and security patches
+- **Previous Minor Version (N-1)**: Security patches only for 3 months after new minor release
+- **Long-Term Support (LTS)**: Even minor versions (v1.0, v1.2, v1.4) receive security patches for 18 months
+- **End of Life**: Versions older than N-2 minor releases are unsupported
+
+For complete versioning details, see [docs/development/versioning-policy.md](docs/development/versioning-policy.md).
 
 ## Reporting a Vulnerability
 
@@ -21,13 +31,16 @@ We appreciate responsible disclosure of security vulnerabilities. If you believe
 
 Instead, please report security issues to:
 
-**Email**: security@cfg.is
+**Email**: [security@cfg.is](mailto:security@cfg.is)
 
-**PGP Encrypted Email** (recommended for sensitive reports):
-- **Public Key**: [https://cfg.is/security/pgp-key.asc](https://cfg.is/security/pgp-key.asc)
-- **Fingerprint**: `B489 6960 2965 C241 E851  71F9 258D 1EDC F411 6969`
-- **Key ID**: `258D1EDCF4116969`
-- **Guide**: See [PGP Email Guide](docs/security/pgp-email-guide.md) for instructions on sending encrypted email
+**Expected Response Time**: 48 hours for initial acknowledgment
+
+**Disclosure Timeline**: We aim to publicly disclose vulnerabilities within 90 days of the initial report, or sooner once a patch is available.
+
+**PGP Encrypted Email** (optional, for highly sensitive reports):
+
+- **Public Key**: Available at <https://cfg.is/security/pgp-key.asc>
+- **Note**: PGP encryption is optional; plaintext email to security@cfg.is is acceptable for most reports
 
 ### What to Include
 
@@ -73,12 +86,20 @@ When a security vulnerability is confirmed:
 
 ### Disclosure Timeline
 
-- **Critical vulnerabilities**: Patch released within 7 days
-- **High vulnerabilities**: Patch released within 14 days
-- **Medium vulnerabilities**: Patch released within 30 days
-- **Low vulnerabilities**: Patch included in next regular release
+Security patches are released following this timeline:
+
+| Severity | Patch Timeline | Disclosure |
+|----------|---------------|------------|
+| **Critical** | Within 7 days | Immediate after patch |
+| **High** | Within 14 days | Within 90 days |
+| **Medium** | Within 30 days | Within 90 days |
+| **Low** | Next regular release | Next release notes |
 
 We aim to publicly disclose vulnerabilities within 90 days of the initial report, or sooner once a patch is available.
+
+### CVE Assignment
+
+Critical and High severity vulnerabilities will receive CVE (Common Vulnerabilities and Exposures) identifiers to ensure proper tracking and industry-wide awareness.
 
 ## Security Best Practices
 
@@ -169,14 +190,6 @@ db_password: ${CFGMS_DB_PASSWORD}  # Required - fails if not set
 
 This approach ensures that environment variable usage is intentional, documented, and auditable.
 
-### Configuration Signing
-
-- All configurations are cryptographically signed by the controller
-- Stewards verify signatures before applying ANY configuration changes
-- Prevents MITM attacks and malicious configuration injection
-- Uses RSA-SHA256 and ECDSA-SHA256 algorithms
-- Signatures embedded in configuration YAML as `_signature` metadata
-
 ### Audit & Compliance
 - Comprehensive audit logging of all system actions
 - Tamper-evident audit trails
@@ -188,28 +201,59 @@ This approach ensures that environment variable usage is intentional, documented
 - Resource isolation between tenants
 - Hierarchical tenant model (MSP → Client → Group → Device)
 
-## Known Security Limitations
+## Out of Scope
 
-As an early-stage project, please be aware of the following:
+The following are **not** considered security vulnerabilities for CFGMS:
+
+### Infrastructure & Operations
+
+- **Denial of Service (DoS)**: Network-level DoS attacks against CFGMS endpoints
+- **Physical Security**: Physical access to systems running CFGMS
+- **Social Engineering**: Attacks targeting users or administrators directly
+- **Third-Party Services**: Vulnerabilities in external services CFGMS integrates with (M365, Active Directory, etc.)
+- **End-of-Life Versions**: Vulnerabilities in unsupported versions (older than N-2 minor versions)
+
+### Configuration & Deployment Issues
+
+- **Misconfiguration**: Issues arising from insecure user configuration choices
+- **Weak Credentials**: User-selected weak passwords or API keys
+- **Insecure Infrastructure**: Underlying OS or network vulnerabilities
+- **Public Exposure**: Services intentionally exposed to the public internet without proper network controls
+
+### Known Limitations
 
 - **Pre-1.0 Software**: APIs and security models may change before v1.0 release
 - **Active Development**: New features are added frequently; monitor security advisories
 - **Community Review**: Security review is ongoing; additional issues may be discovered
+- **Browser-based Attacks**: XSS, CSRF in future Web UI (not yet implemented)
+
+**Note**: While these are out of scope for security bounties, we still appreciate reports that help improve CFGMS security posture.
 
 ## Security Advisories
 
-Security advisories are published via:
+Stay informed about security updates through these channels:
 
 - **GitHub Security Advisories**: [https://github.com/cfg-is/cfgms/security/advisories](https://github.com/cfg-is/cfgms/security/advisories)
-- **Mailing List**: security-announce@cfg.is (subscribe at [https://cfg.is/security/](https://cfg.is/security/))
-- **Release Notes**: Security fixes are highlighted in release notes
+- **GitHub Releases**: [https://github.com/cfg-is/cfgms/releases](https://github.com/cfg-is/cfgms/releases)
+- **CHANGELOG.md**: Detailed version history with security notes
+- **Mailing List**: security-announce@cfg.is (will be available when repository goes public)
+
+## Hall of Fame
+
+We recognize and thank security researchers who responsibly disclose vulnerabilities:
+
+### Acknowledged Researchers
+
+*(No vulnerabilities disclosed yet - project in active development)*
+
+When security vulnerabilities are responsibly disclosed, we will credit researchers here (with their permission) and in GitHub Security Advisories.
 
 ## Bug Bounty Program
 
 CFGMS does not currently have a formal bug bounty program. However, we deeply appreciate security researchers who responsibly disclose vulnerabilities and will:
 
 - Publicly acknowledge your contribution (with permission)
-- Provide swag and recognition for significant findings
+- Provide recognition for significant findings
 - Consider implementing a formal bounty program as the project matures
 
 ## Questions?

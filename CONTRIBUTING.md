@@ -150,3 +150,15 @@ Before submitting code:
    - Security tests will be run
    - Dependencies will be checked
    - Security documentation will be updated
+
+### Reporting Security Issues
+
+**DO NOT** open public GitHub issues for security vulnerabilities.
+
+If you discover a security issue in CFGMS, please report it responsibly:
+
+- **Email**: [security@cfg.is](mailto:security@cfg.is)
+- **Response Time**: 48 hours for initial acknowledgment
+- **Full Details**: See [SECURITY.md](SECURITY.md) for complete vulnerability disclosure policy
+
+We appreciate responsible disclosure and will work with you to address the issue promptly.
