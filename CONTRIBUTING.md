@@ -162,3 +162,59 @@ If you discover a security issue in CFGMS, please report it responsibly:
 - **Full Details**: See [SECURITY.md](SECURITY.md) for complete vulnerability disclosure policy
 
 We appreciate responsible disclosure and will work with you to address the issue promptly.
+
+## CI/CD Workflows
+
+CFGMS uses GitHub Actions for automated testing, security scanning, and deployment. All workflows must pass before code can be merged.
+
+### Required Status Checks
+
+The following workflows run automatically on every pull request:
+
+- **Cross-Platform Build**: Validates compilation on Linux, Windows, and macOS
+- **Test Suite**: Runs complete test suite with race condition detection
+- **Security Scan**: Checks for vulnerabilities using Trivy, gosec, and staticcheck
+- **CodeQL Analysis**: Advanced security and code quality analysis
+- **License Check**: Validates dependency license compliance
+
+**All checks must pass before merge.**
+
+### Local Validation
+
+Before pushing code, run the same validation locally:
+
+```bash
+# Run all tests (matches test-suite.yml workflow)
+make test
+
+# Run security scans (matches security-scan.yml workflow)
+make security-scan
+
+# Complete pre-commit validation (recommended)
+make test-commit
+
+# Full CI validation (matches production-gates.yml)
+make test-ci
+```
+
+### Workflow Documentation
+
+For complete workflow details, see [.github/workflows/README.md](.github/workflows/README.md)
+
+**Key workflows**:
+
+- `cross-platform-build.yml` - Multi-platform compilation and testing
+- `production-gates.yml` - Production readiness validation with emergency override support
+- `security-scan.yml` - Comprehensive security vulnerability scanning
+- `test-suite.yml` - Complete test suite execution
+
+### CI Failures
+
+**If workflows fail**:
+
+1. **Test failures**: Run `make test` locally to reproduce
+2. **Security issues**: Run `make security-scan` to identify vulnerabilities
+3. **Platform-specific failures**: Check cross-compilation with `make build`
+4. **CodeQL alerts**: Review findings in GitHub Security tab
+
+**Need help?**: Check workflow logs in GitHub Actions tab or ask in pull request comments.
