@@ -1535,6 +1535,18 @@ test-mqtt-quic-cleanup:
 	@docker compose -f docker-compose.test.yml --profile ha down --remove-orphans -v 2>/dev/null || true
 	@echo "✅ MQTT+QUIC environment cleaned up"
 
+# Synthetic Monitoring Tests
+# Runs ongoing validation tests for production-like environments
+.PHONY: test-synthetic-monitoring
+test-synthetic-monitoring:
+	@echo ""
+	@echo "🤖 Running Synthetic Monitoring Tests"
+	@echo "======================================"
+	@echo "Testing ongoing validation framework..."
+	@echo ""
+	@go test -v -race -timeout=10m ./test/e2e/... -run TestSyntheticMonitoring
+	@echo ""
+	@echo "✅ Synthetic monitoring tests completed"
 
 clean:
 	rm -rf bin/
