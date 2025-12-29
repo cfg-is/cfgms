@@ -26,17 +26,17 @@ log_info() {
 
 log_success() {
     echo -e "${GREEN}✓${NC} $1"
-    ((PASS_COUNT++))
+    ((PASS_COUNT++)) || true
 }
 
 log_error() {
     echo -e "${RED}✗${NC} $1"
-    ((FAIL_COUNT++))
+    ((FAIL_COUNT++)) || true
 }
 
 log_warning() {
     echo -e "${YELLOW}⚠${NC} $1"
-    ((WARN_COUNT++))
+    ((WARN_COUNT++)) || true
 }
 
 # Validation functions
@@ -300,7 +300,12 @@ validate_readme() {
             log_info "Checking README for: $template_name"
 
             for section in "${required_sections[@]}"; do
-                if grep -qi "## $section\|# $section" "$readme"; then
+                set +e  # Temporarily disable exit on error for grep
+                grep -qi "## $section\|# $section" "$readme"
+                local grep_result=$?
+                set -e  # Re-enable exit on error
+
+                if [ $grep_result -eq 0 ]; then
                     log_success "$template_name: Section found: $section"
                 else
                     log_warning "$template_name: Recommended section missing: $section"
@@ -423,42 +428,55 @@ COMMAND="${1:-all}"
 case "$COMMAND" in
     structure)
         validate_structure
+        generate_report
         ;;
     manifests)
         validate_manifests
+        generate_report
         ;;
     security)
         validate_security
+        generate_report
         ;;
     secrets)
         validate_secrets
+        generate_report
         ;;
     permissions)
         validate_permissions
+        generate_report
         ;;
     examples)
         validate_examples
+        generate_report
         ;;
     compliance)
         validate_compliance
+        generate_report
         ;;
     cis-check)
         validate_cis_check
+        generate_report
         ;;
     security-level)
         validate_security_level
+        generate_report
         ;;
     readme)
         validate_readme
+        generate_report
         ;;
     manifest-complete)
         validate_manifest_complete
+        generate_report
         ;;
     doc-sections)
         validate_doc_sections
+        generate_report
         ;;
     render)
         validate_render "${2:-}"
+        generate_report
         ;;
     report)
         generate_report
