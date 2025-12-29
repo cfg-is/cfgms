@@ -52,7 +52,7 @@ validate_structure() {
     local templates_found=0
     for template_dir in "$TEMPLATE_DIR"/*/ ; do
         if [ -d "$template_dir" ]; then
-            ((templates_found++))
+            ((templates_found++)) || true
             local template_name=$(basename "$template_dir")
             log_info "Checking template: $template_name"
 

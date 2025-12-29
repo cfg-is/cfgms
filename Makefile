@@ -172,7 +172,10 @@ test:
 	@echo "  ✅ Commercial HA tests pass"
 	@rm -f /tmp/controller-commercial
 	@echo ""
-	@echo "✅ BOTH TIERS VALIDATED (OSS + Commercial)"
+	@echo "🔧 Testing Shell Scripts..."
+	@./scripts/test-scripts.sh || { echo "❌ Script tests failed"; exit 1; }
+	@echo ""
+	@echo "✅ ALL VALIDATION COMPLETE (OSS + Commercial + Scripts)"
 
 # OPTIMIZED TEST TARGETS (Cache-Aware Strategy)
 
