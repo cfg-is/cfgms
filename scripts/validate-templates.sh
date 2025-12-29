@@ -338,7 +338,7 @@ validate_manifest_complete() {
             local optional_count=0
             for field in "${optional_fields[@]}"; do
                 if grep -q "^${field}:" "$manifest"; then
-                    ((optional_count++))
+                    ((optional_count++)) || true
                 fi
             done
 

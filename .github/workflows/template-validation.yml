@@ -43,7 +43,6 @@ jobs:
       - name: Install dependencies
         run: |
           go mod download
-          go install gopkg.in/yaml.v3@latest
 
       - name: Validate template structure
         run: |
