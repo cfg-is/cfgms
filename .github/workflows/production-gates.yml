@@ -494,7 +494,7 @@ jobs:
         make test-integration-setup
         echo ""
         echo "🔐 Generating TLS test certificates..."
-        ./scripts/generate-test-certs.sh
+        make generate-test-certificates
         echo "✅ Docker infrastructure ready"
 
     - name: Run Controller Integration Tests

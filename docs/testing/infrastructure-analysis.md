@@ -79,7 +79,7 @@ test/
 | `/scripts/generate-test-credentials.sh` | Ephemeral secure credentials | 130 |
 | `/scripts/wait-for-services.sh` | Health check orchestration | 144 |
 | `/scripts/test-with-infrastructure.sh` | CI integration wrapper | 62 |
-| `/scripts/generate-test-certs.sh` | TLS certificate generation | 400+ |
+| `/scripts/generate-invalid-test-certs.sh` | Invalid certificate generation (negative testing) | 150 |
 | `/scripts/setup-m365-testing.sh` | M365 integration setup | 150 |
 | `/scripts/load-credentials-from-keychain.sh` | OS keychain integration | 100+ |
 | `/scripts/migrate-credentials-to-keychain.sh` | Credential migration | 150+ |

@@ -107,19 +107,19 @@ test_license_checker() {
     fi
 }
 
-# Test 4: Certificate generation (dry run)
-test_cert_generation() {
-    log_test "Testing certificate generation script..."
+# Test 4: Invalid certificate generation (dry run)
+test_invalid_cert_generation() {
+    log_test "Testing invalid certificate generation script..."
 
-    if [ -f scripts/generate-test-certs.sh ]; then
+    if [ -f scripts/generate-invalid-test-certs.sh ]; then
         # Test with --help or check syntax at minimum
-        if bash -n scripts/generate-test-certs.sh 2>/dev/null; then
-            log_pass "generate-test-certs.sh: Valid syntax"
+        if bash -n scripts/generate-invalid-test-certs.sh 2>/dev/null; then
+            log_pass "generate-invalid-test-certs.sh: Valid syntax"
         else
-            log_fail "generate-test-certs.sh: Syntax error"
+            log_fail "generate-invalid-test-certs.sh: Syntax error"
         fi
     else
-        log_skip "generate-test-certs.sh: Not found"
+        log_skip "generate-invalid-test-certs.sh: Not found"
     fi
 }
 
@@ -160,7 +160,7 @@ test_executable_permissions() {
 
     local critical_scripts=(
         "scripts/validate-templates.sh"
-        "scripts/generate-test-certs.sh"
+        "scripts/generate-invalid-test-certs.sh"
         "scripts/generate-test-credentials.sh"
         "scripts/wait-for-services.sh"
         "scripts/test-with-infrastructure.sh"
@@ -188,7 +188,7 @@ test_template_validation
 echo ""
 test_license_checker
 echo ""
-test_cert_generation
+test_invalid_cert_generation
 echo ""
 test_credential_generation
 echo ""

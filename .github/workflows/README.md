@@ -195,6 +195,12 @@ make test-commit
 
 # Complete CI validation (matches production-gates.yml)
 make test-ci
+
+# Generate test certificates (matches CI approach)
+make generate-test-certificates
+
+# Or run full integration test setup (includes certificates)
+make test-integration-setup && make generate-test-certificates
 ```
 
 ## Workflow Trigger Matrix

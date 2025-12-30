@@ -1,0 +1,62 @@
+# Controller Test Configuration
+# This configuration is used for integration testing and demonstrates
+# production deployment patterns for certificate auto-generation.
+#
+# Story #109: Re-enable GitHub Actions Workflows
+
+controller:
+  # Basic server configuration
+  bind_address: "127.0.0.1"
+  port: 8080
+
+  # Certificate management with auto-generation
+  certificate:
+    enable_cert_management: true
+    auto_generate: true  # Controller generates CA and certs on first boot
+    ca_path: "./test/integration/mqtt_quic/certs/ca"
+    cert_path: "./test/integration/mqtt_quic/certs"
+    renewal_threshold_days: 30
+    server_cert_validity_days: 365
+    client_cert_validity_days: 365
+    enable_auto_renewal: false  # Manual control in tests
+
+    # Server certificate configuration
+    server:
+      common_name: "controller-standalone"
+      dns_names:
+        - "controller-standalone"
+        - "controller-east"
+        - "controller-central"
+        - "controller-west"
+        - "localhost"
+      ip_addresses:
+        - "127.0.0.1"
+        - "172.20.0.10"
+      organization: "CFGMS Test"
+      organizational_unit: "Test"
+      country: "US"
+      state: "Test"
+      city: "TestCity"
+
+  # MQTT broker configuration
+  mqtt:
+    enabled: true
+    bind_address: "127.0.0.1"
+    port: 8883
+    tls:
+      enabled: true
+      require_client_cert: true  # mTLS for testing
+      cert_path: "./test/integration/mqtt_quic/certs/server-cert.pem"
+      key_path: "./test/integration/mqtt_quic/certs/server-key.pem"
+      ca_path: "./test/integration/mqtt_quic/certs/ca-cert.pem"
+
+  # Storage configuration (from .env.test)
+  storage:
+    provider: "database"
+    config:
+      database_url: "${CFGMS_TEST_DB_URL}"  # Set by test infrastructure
+
+  # Logging configuration
+  logging:
+    level: "info"
+    format: "json"
