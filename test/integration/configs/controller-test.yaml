@@ -57,6 +57,12 @@ controller:
       database_url: "${CFGMS_TEST_DB_URL}"  # Set by test infrastructure
 
   # Logging configuration
+  # Production pattern: declarative logging configuration
   logging:
     level: "info"
-    format: "json"
+    provider: "file"
+    config:
+      directory: "./test/integration/logs"  # Writable in CI environments
+      max_file_size: 10485760  # 10MB
+      max_files: 3
+      compress_rotated: false
