@@ -15,7 +15,7 @@
 # 3. Production: Controller auto-generation on first boot
 #
 # See:
-# - test/integration/configs/controller-test.yaml (certificate config)
+# - test/integration/configs/controller-test.cfg (certificate config)
 # - features/controller/server/server.go::initializeCertificateManager()
 # - pkg/cert/ (native certificate management library)
 #
