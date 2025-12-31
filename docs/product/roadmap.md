@@ -122,6 +122,7 @@ Achieve production stability, complete core platform features, and prepare for s
 - [ ] Finalize production-ready security hardening
 - [ ] Complete high availability validation
 - [ ] Finalize advanced configuration management
+  - [ ] Controller config loading refactor (Issue #290) - Support `--config` flag, default to `/etc/cfgms/controller.cfg`, environment variable support (breaking change)
 - [ ] Finalize advanced workflow engine and templates
 - [ ] Finalize advanced reporting
 - [ ] Communication Layer Abstraction (Issue #267 - 47 story points) - Control/Data Plane provider interfaces, controller/steward migration, deprecate direct MQTT/QUIC imports
