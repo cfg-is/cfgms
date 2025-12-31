@@ -47,52 +47,34 @@ echo ""
 # Ensure output directory exists
 mkdir -p "${OUTPUT_DIR}"
 
-# Ensure CA certificate exists (needed to sign expired cert)
-if [ ! -f "${OUTPUT_DIR}/ca-cert.pem" ] || [ ! -f "${OUTPUT_DIR}/ca-key.pem" ]; then
-    echo -e "${YELLOW}[WARN]${NC} CA certificate not found - invalid certs require CA to exist first"
-    echo -e "${YELLOW}[WARN]${NC} Please run: make generate-test-certificates"
-    exit 1
-fi
-
 # =============================================================================
 # 1. Expired Certificate (for testing certificate expiration rejection)
 # =============================================================================
 echo -e "${GREEN}[INFO]${NC} Generating expired certificate..."
 
 openssl genrsa -out "${OUTPUT_DIR}/expired-key.pem" 2048 2>/dev/null
-openssl req -new \
-    -key "${OUTPUT_DIR}/expired-key.pem" \
-    -out "${OUTPUT_DIR}/expired-csr.pem" \
-    -subj "/C=US/ST=Test/L=TestCity/O=CFGMS Test/OU=Test Expired/CN=expired-client" \
-    2>/dev/null
 
+# Generate self-signed expired certificate (testing expiration, not CA chain)
 # Use faketime if available to backdate certificate
 if command -v faketime &> /dev/null; then
-    faketime 'yesterday' openssl x509 -req \
-        -in "${OUTPUT_DIR}/expired-csr.pem" \
-        -CA "${OUTPUT_DIR}/ca-cert.pem" \
-        -CAkey "${OUTPUT_DIR}/ca-key.pem" \
-        -CAcreateserial \
+    faketime 'yesterday' openssl req -new -x509 \
+        -key "${OUTPUT_DIR}/expired-key.pem" \
         -out "${OUTPUT_DIR}/expired-cert.pem" \
         -days 1 \
+        -subj "/C=US/ST=Test/L=TestCity/O=CFGMS Test/OU=Test Expired/CN=expired-client" \
         2>/dev/null
     echo -e "${GREEN}[INFO]${NC} ✓ Expired certificate generated (backdated with faketime)"
 else
-    # Without faketime, generate short-lived cert
-    openssl x509 -req \
-        -in "${OUTPUT_DIR}/expired-csr.pem" \
-        -CA "${OUTPUT_DIR}/ca-cert.pem" \
-        -CAkey "${OUTPUT_DIR}/ca-key.pem" \
-        -CAcreateserial \
+    # Without faketime, generate 1-day self-signed cert
+    openssl req -new -x509 \
+        -key "${OUTPUT_DIR}/expired-key.pem" \
         -out "${OUTPUT_DIR}/expired-cert.pem" \
         -days 1 \
+        -subj "/C=US/ST=Test/L=TestCity/O=CFGMS Test/OU=Test Expired/CN=expired-client" \
         2>/dev/null
     echo -e "${YELLOW}[WARN]${NC} faketime not available, generated 1-day cert instead"
     echo -e "${GREEN}[INFO]${NC} ✓ Short-lived certificate generated"
 fi
-
-# Cleanup CSR
-rm -f "${OUTPUT_DIR}/expired-csr.pem"
 
 # =============================================================================
 # 2. Self-Signed Certificate (for testing CA validation)
