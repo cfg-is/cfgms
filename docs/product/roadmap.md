@@ -123,6 +123,10 @@ Achieve production stability, complete core platform features, and prepare for s
 - [ ] Complete high availability validation
 - [ ] Finalize advanced configuration management
   - [ ] Controller config loading refactor (Issue #290) - Support `--config` flag, default to `/etc/cfgms/controller.cfg`, environment variable support (breaking change)
+- [ ] Test infrastructure improvements
+  - [ ] Chaos engineering network partition simulation (Issue #291) - Implement proper network failure injection for chaos tests
+  - [ ] RBAC failsafe component failure simulation (Issue #292) - Add test helpers to trigger fail-secure behavior
+  - [ ] Certificate test performance optimization (Issue #293) - Reduce cert generation time in tests from 4.89s to <2s
 - [ ] Finalize advanced workflow engine and templates
 - [ ] Finalize advanced reporting
 - [ ] Communication Layer Abstraction (Issue #267 - 47 story points) - Control/Data Plane provider interfaces, controller/steward migration, deprecate direct MQTT/QUIC imports
