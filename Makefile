@@ -1620,6 +1620,18 @@ cost-analysis:
 	@echo "✅ Stub target passes (implementation pending)"
 	@echo ""
 
+# Compliance Check (stub - implementation pending)
+# Validates compliance with security frameworks (SOC2, ISO27001, GDPR, HIPAA)
+.PHONY: compliance-check
+compliance-check:
+	@echo ""
+	@echo "🔒 Compliance Risk Assessment"
+	@echo "=============================="
+	@echo "⚠️  Compliance checking not yet implemented"
+	@echo "   Tracked in roadmap for future release"
+	@echo "✅ Stub target passes (implementation pending)"
+	@echo ""
+
 clean:
 	rm -rf bin/
 	rm -rf metrics/
