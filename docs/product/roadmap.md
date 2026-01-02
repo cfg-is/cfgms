@@ -118,19 +118,32 @@ Achieve production stability, complete core platform features, and prepare for s
 
 #### v0.9.0 (Beta) - Production Stability
 
-- [ ] Complete production validation with real MSP deployments
-- [ ] Finalize production-ready security hardening
-- [ ] Complete high availability validation
-- [ ] Finalize advanced configuration management
-  - [ ] Controller config loading refactor (Issue #290) - Support `--config` flag, default to `/etc/cfgms/controller.cfg`, environment variable support (breaking change)
+##### Phase 1: Test Infrastructure Foundation (Required for all validation)
+
 - [ ] Test infrastructure improvements
   - [ ] **E2E test framework for MQTT+QUIC mode (Issue #294 - 8-13 points)** - HIGH PRIORITY: Implement E2E tests that validate full system deployment (mirrors GitHub Actions integration tests, validates QUICK_START.md, regression prevention)
+  - [ ] Fix failsafe component unhealthy state detection (Issue #295 - 5-8 points) - Refactor failsafe wrappers to properly trigger unhealthy state after consecutive failures, re-enable 6 component failure security tests
+  - [ ] Enhanced monitoring controls in graceful degradation (Issue #296 - 3-5 points) - Implement enhanced_monitoring security control for admin users in RBAC graceful degradation mode, re-enable degraded mode tests
   - [ ] Chaos engineering network partition simulation (Issue #291) - Implement proper network failure injection for chaos tests
   - [ ] RBAC failsafe component failure simulation (Issue #292) - Add test helpers to trigger fail-secure behavior
   - [ ] Certificate test performance optimization (Issue #293) - Reduce cert generation time in tests from 4.89s to <2s
+
+##### Phase 2: Breaking Changes & Architecture (Do before production validation)
+
+- [ ] Finalize advanced configuration management
+  - [ ] Controller config loading refactor (Issue #290) - Support `--config` flag, default to `/etc/cfgms/controller.cfg`, environment variable support (breaking change)
+- [ ] Communication Layer Abstraction (Issue #267 - 47 story points) - Control/Data Plane provider interfaces, controller/steward migration, deprecate direct MQTT/QUIC imports (MAJOR architectural refactor - must be done before production validation)
+
+##### Phase 3: Feature Completion
+
 - [ ] Finalize advanced workflow engine and templates
 - [ ] Finalize advanced reporting
-- [ ] Communication Layer Abstraction (Issue #267 - 47 story points) - Control/Data Plane provider interfaces, controller/steward migration, deprecate direct MQTT/QUIC imports
+
+##### Phase 4: Security & Validation (After infrastructure is stable)
+
+- [ ] Finalize production-ready security hardening
+- [ ] Complete high availability validation
+- [ ] Complete production validation with real MSP deployments
 
 #### v0.10.0 - Web Interface Foundation
 
