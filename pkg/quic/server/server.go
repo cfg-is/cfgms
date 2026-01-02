@@ -188,7 +188,16 @@ func (s *Server) acceptConnections() {
 		case <-s.ctx.Done():
 			return
 		default:
-			conn, err := s.listener.Accept(s.ctx)
+			// Get listener with proper locking to avoid race condition
+			s.mu.Lock()
+			listener := s.listener
+			s.mu.Unlock()
+
+			if listener == nil {
+				return
+			}
+
+			conn, err := listener.Accept(s.ctx)
 			if err != nil {
 				if s.ctx.Err() != nil {
 					// Server is shutting down

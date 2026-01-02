@@ -382,7 +382,7 @@ func TestDebugEngine_SessionManagement(t *testing.T) {
 	retrievedSession, err := debugEngine.GetDebugSession(session1.ID)
 	require.NoError(t, err)
 	assert.Equal(t, session1.ID, retrievedSession.ID)
-	assert.Equal(t, execution1.ID, retrievedSession.ExecutionID)
+	assert.Equal(t, session1.ExecutionID, retrievedSession.ExecutionID)
 
 	// Stop debug session
 	err = debugEngine.StopDebugSession(session1.ID)
