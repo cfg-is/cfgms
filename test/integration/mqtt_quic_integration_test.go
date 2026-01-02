@@ -90,7 +90,7 @@ func (s *MQTTQUICIntegrationTestSuite) TestMQTTHeartbeatFlow() {
 	// Test heartbeat message structure
 	heartbeat := types.Heartbeat{
 		StewardID: "test-steward",
-		Status:    "healthy",
+		Status:    types.StatusHealthy,
 		Timestamp: time.Now(),
 		Metrics: map[string]string{
 			"cpu_percent": "25.3",
@@ -99,7 +99,7 @@ func (s *MQTTQUICIntegrationTestSuite) TestMQTTHeartbeatFlow() {
 	}
 
 	s.Equal("test-steward", heartbeat.StewardID)
-	s.Equal("healthy", heartbeat.Status)
+	s.Equal(types.StatusHealthy, heartbeat.Status)
 	s.NotNil(heartbeat.Metrics)
 	s.Equal("25.3", heartbeat.Metrics["cpu_percent"])
 
