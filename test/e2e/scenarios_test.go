@@ -25,6 +25,7 @@ type E2ETestSuite struct {
 
 // SetupSuite initializes the E2E testing framework
 func (s *E2ETestSuite) SetupSuite() {
+	s.T().Skip("Skipping until Issue #294: E2E test framework for MQTT+QUIC mode not yet implemented - requires full controller, MQTT broker, and steward infrastructure")
 	config := CIOptimizedConfig() // Use CI-optimized config by default
 
 	// Override with local config if running locally (not in CI)
