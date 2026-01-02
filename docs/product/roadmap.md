@@ -124,6 +124,7 @@ Achieve production stability, complete core platform features, and prepare for s
 - [ ] Finalize advanced configuration management
   - [ ] Controller config loading refactor (Issue #290) - Support `--config` flag, default to `/etc/cfgms/controller.cfg`, environment variable support (breaking change)
 - [ ] Test infrastructure improvements
+  - [ ] **E2E test framework for MQTT+QUIC mode (Issue #294 - 8-13 points)** - HIGH PRIORITY: Implement E2E tests that validate full system deployment (mirrors GitHub Actions integration tests, validates QUICK_START.md, regression prevention)
   - [ ] Chaos engineering network partition simulation (Issue #291) - Implement proper network failure injection for chaos tests
   - [ ] RBAC failsafe component failure simulation (Issue #292) - Add test helpers to trigger fail-secure behavior
   - [ ] Certificate test performance optimization (Issue #293) - Reduce cert generation time in tests from 4.89s to <2s
