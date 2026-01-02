@@ -185,16 +185,20 @@ func TestRBACDatabaseFailureSecureDefault(t *testing.T) {
 			ResourceId:   "test-resource",
 		}
 
-		// This should fail and mark the system as unhealthy
-		_, err := framework.failsafeRBAC.CheckPermission(invalidCtx, request)
-		assert.Error(t, err)
+		// Make 3 consecutive failed calls to trigger unhealthy state (Issue #292)
+		// System requires maxConsecutiveFailures: 3 to mark as unhealthy
+		for i := 0; i < 3; i++ {
+			_, err := framework.failsafeRBAC.CheckPermission(invalidCtx, request)
+			assert.Error(t, err, "Call %d should fail with cancelled context", i+1)
+			time.Sleep(10 * time.Millisecond)
+		}
 
-		// Wait a moment for health check to potentially mark as unhealthy
-		time.Sleep(100 * time.Millisecond)
+		// Wait for health check to process failures
+		time.Sleep(200 * time.Millisecond)
 
 		// Now try with valid context - should deny due to unhealthy state
 		response, err := framework.failsafeRBAC.CheckPermission(ctx, request)
-		assert.Error(t, err)
+		assert.Error(t, err, "Should fail due to unhealthy RBAC system")
 		assert.NotNil(t, response)
 		assert.False(t, response.Granted, "Access should be denied when RBAC system is unhealthy")
 		// Verify access was denied by checking Granted field
