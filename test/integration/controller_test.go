@@ -17,6 +17,7 @@ type ControllerTestSuite struct {
 }
 
 func (s *ControllerTestSuite) SetupSuite() {
+	s.T().Skip("Skipping until Issue #294: E2E test framework for MQTT+QUIC mode not yet implemented - requires running controller with full infrastructure")
 	// Create a new test environment for the suite
 	s.env = testutil.NewTestEnv(s.T())
 }

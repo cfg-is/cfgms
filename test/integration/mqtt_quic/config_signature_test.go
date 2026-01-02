@@ -41,6 +41,7 @@ type ConfigSignatureTestSuite struct {
 }
 
 func (s *ConfigSignatureTestSuite) SetupSuite() {
+	s.T().Skip("Skipping until Issue #294: E2E test framework for MQTT+QUIC mode not yet implemented - requires running controller, MQTT broker, and steward infrastructure")
 	s.helper = NewTestHelper(GetTestHTTPAddr("https://localhost:8080"))
 	s.mqttAddr = GetTestMQTTAddr("ssl://localhost:1886") // Docker controller MQTT broker port with TLS
 	s.certsPath = GetTestCertsPath("../../../features/controller/certs/ca")
