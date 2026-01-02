@@ -150,7 +150,12 @@ func (fjam *FailsafeJITAccessManager) handleRequestDuringFailure(ctx context.Con
 	fjam.metrics.RejectedByFailsafe++
 	fjam.metrics.mutex.Unlock()
 
-	switch fjam.failureMode {
+	// Read failure mode with proper locking to avoid race condition
+	fjam.mutex.RLock()
+	mode := fjam.failureMode
+	fjam.mutex.RUnlock()
+
+	switch mode {
 	case JITFailureModeAutoRevoke:
 		// Revoke all existing grants and deny new requests
 		fjam.revokeAllActiveGrants(ctx, "JIT system failure - auto-revoke mode")
@@ -475,7 +480,12 @@ func (fjam *FailsafeJITAccessManager) performHealthCheck() {
 func (fjam *FailsafeJITAccessManager) handleSystemFailure() {
 	ctx := context.Background()
 
-	switch fjam.failureMode {
+	// Read failure mode with proper locking to avoid race condition
+	fjam.mutex.RLock()
+	mode := fjam.failureMode
+	fjam.mutex.RUnlock()
+
+	switch mode {
 	case JITFailureModeAutoRevoke:
 		fjam.revokeAllActiveGrants(ctx, "JIT system failure - auto-revoke mode activated")
 	case JITFailureModeRejectNew:
