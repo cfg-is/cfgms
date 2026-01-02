@@ -24,6 +24,7 @@ type ControllerTestSuite struct {
 }
 
 func (s *ControllerTestSuite) SetupSuite() {
+	s.T().Skip("Skipping until Issue #294: E2E test framework for MQTT+QUIC mode not yet implemented - requires Docker infrastructure with controller + steward deployment")
 	s.docker = NewDockerComposeHelper()
 
 	s.T().Log("Starting controller and steward in Docker...")
