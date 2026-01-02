@@ -128,7 +128,7 @@ func (epm *EscalationPreventionManager) ValidateAndSetRoleParent(ctx context.Con
 	if err := epm.checkConcurrentModificationProtection(ctx, subjectID, roleID); err != nil {
 		operation.Success = false
 		operation.Error = err.Error()
-		epm.recordOperation(operation)
+		epm.recordOperationLocked(operation)
 
 		// Generate escalation alert
 		epm.generateAlert(AlertTypeConcurrentModification, SeverityHigh, subjectID, roleID, "",
@@ -142,7 +142,7 @@ func (epm *EscalationPreventionManager) ValidateAndSetRoleParent(ctx context.Con
 	if err := epm.checkTimingBasedProtection(ctx, subjectID, roleID); err != nil {
 		operation.Success = false
 		operation.Error = err.Error()
-		epm.recordOperation(operation)
+		epm.recordOperationLocked(operation)
 
 		// Generate escalation alert
 		epm.generateAlert(AlertTypeTimingAttack, SeverityCritical, subjectID, roleID, "",
@@ -156,7 +156,7 @@ func (epm *EscalationPreventionManager) ValidateAndSetRoleParent(ctx context.Con
 	if err := epm.enhancedCircularDependencyCheck(ctx, roleID, parentRoleID); err != nil {
 		operation.Success = false
 		operation.Error = err.Error()
-		epm.recordOperation(operation)
+		epm.recordOperationLocked(operation)
 
 		// Generate escalation alert
 		epm.generateAlert(AlertTypeCircularInheritance, SeverityCritical, subjectID, roleID, "",
@@ -166,15 +166,11 @@ func (epm *EscalationPreventionManager) ValidateAndSetRoleParent(ctx context.Con
 		return fmt.Errorf("circular inheritance prevention: %w", err)
 	}
 
-	// Acquire operation lock for thread safety
-	epm.operationMutex.Lock()
-	defer epm.operationMutex.Unlock()
-
 	// First perform validation using the RBAC manager
 	if err := epm.rbacManager.ValidateHierarchyOperation(ctx, roleID, parentRoleID); err != nil {
 		operation.Success = false
 		operation.Error = err.Error()
-		epm.recordOperation(operation)
+		epm.recordOperationLocked(operation)
 		return fmt.Errorf("hierarchy validation failed: %w", err)
 	}
 
@@ -191,7 +187,7 @@ func (epm *EscalationPreventionManager) ValidateAndSetRoleParent(ctx context.Con
 	if err != nil {
 		operation.Error = err.Error()
 	}
-	epm.recordOperation(operation)
+	epm.recordOperationLocked(operation)
 
 	// Check for escalation patterns after successful operation
 	if err == nil {
@@ -220,7 +216,7 @@ func (epm *EscalationPreventionManager) ValidateAndAssignRole(ctx context.Contex
 	if err := epm.checkRapidEscalationProtection(ctx, assignment.SubjectId, assignment.RoleId); err != nil {
 		operation.Success = false
 		operation.Error = err.Error()
-		epm.recordOperation(operation)
+		epm.recordOperationLocked(operation)
 
 		// Generate escalation alert
 		epm.generateAlert(AlertTypeRapidEscalation, SeverityHigh, assignment.SubjectId, assignment.RoleId, assignment.TenantId,
@@ -234,7 +230,7 @@ func (epm *EscalationPreventionManager) ValidateAndAssignRole(ctx context.Contex
 	if err := epm.checkCrossTenantEscalationProtection(ctx, assignment.SubjectId, assignment.TenantId); err != nil {
 		operation.Success = false
 		operation.Error = err.Error()
-		epm.recordOperation(operation)
+		epm.recordOperationLocked(operation)
 
 		// Generate escalation alert
 		epm.generateAlert(AlertTypeCrossTimZoneEscalation, SeverityCritical, assignment.SubjectId, assignment.RoleId, assignment.TenantId,
@@ -243,10 +239,6 @@ func (epm *EscalationPreventionManager) ValidateAndAssignRole(ctx context.Contex
 
 		return fmt.Errorf("cross-tenant escalation protection: %w", err)
 	}
-
-	// Acquire operation lock for thread safety
-	epm.operationMutex.Lock()
-	defer epm.operationMutex.Unlock()
 
 	// Perform the actual role assignment with write-through persistence
 	// Store in ephemeral store first, then persist to RBAC store
@@ -275,7 +267,7 @@ func (epm *EscalationPreventionManager) ValidateAndAssignRole(ctx context.Contex
 	if err != nil {
 		operation.Error = err.Error()
 	}
-	epm.recordOperation(operation)
+	epm.recordOperationLocked(operation)
 
 	// Check for privilege escalation detection after successful assignment
 	if err == nil {
@@ -437,6 +429,9 @@ func (epm *EscalationPreventionManager) countRecentChainModifications(roleID str
 	cutoff := time.Now().Add(-time.Minute * 5) // 5 minute window
 	count := 0
 
+	epm.operationMutex.RLock()
+	defer epm.operationMutex.RUnlock()
+
 	for _, operation := range epm.operationLog {
 		if operation.Type == OpTypeRoleParentSet &&
 			(operation.RoleID == roleID || operation.ParentRoleID == roleID) &&
@@ -451,6 +446,9 @@ func (epm *EscalationPreventionManager) countRecentChainModifications(roleID str
 func (epm *EscalationPreventionManager) countRecentRoleAssignments(subjectID string) int {
 	cutoff := time.Now().Add(-time.Minute * 2) // 2 minute window
 	count := 0
+
+	epm.operationMutex.RLock()
+	defer epm.operationMutex.RUnlock()
 
 	for _, operation := range epm.operationLog {
 		if operation.Type == OpTypeRoleAssignment &&
@@ -495,6 +493,9 @@ func (epm *EscalationPreventionManager) countRecentHighPrivilegeAssignments(subj
 	cutoff := time.Now().Add(-time.Minute * 5) // 5 minute window
 	count := 0
 
+	epm.operationMutex.RLock()
+	defer epm.operationMutex.RUnlock()
+
 	for _, operation := range epm.operationLog {
 		if operation.Type == OpTypeRoleAssignment &&
 			operation.SubjectID == subjectID &&
@@ -513,6 +514,9 @@ func (epm *EscalationPreventionManager) countRecentHighPrivilegeAssignments(subj
 func (epm *EscalationPreventionManager) getRecentSubjectTenants(subjectID string) []string {
 	cutoff := time.Now().Add(-time.Minute * 10) // 10 minute window
 	tenantSet := make(map[string]bool)
+
+	epm.operationMutex.RLock()
+	defer epm.operationMutex.RUnlock()
 
 	for _, operation := range epm.operationLog {
 		if operation.SubjectID == subjectID &&
@@ -595,6 +599,9 @@ func (epm *EscalationPreventionManager) getPreviousSubjectRoles(subjectID, tenan
 	// In production, this would use a proper state tracking system
 	roles := make([]*common.Role, 0)
 
+	epm.operationMutex.RLock()
+	defer epm.operationMutex.RUnlock()
+
 	for i := len(epm.operationLog) - 1; i >= 0; i-- {
 		operation := epm.operationLog[i]
 		if operation.SubjectID == subjectID &&
@@ -612,6 +619,8 @@ func (epm *EscalationPreventionManager) getPreviousSubjectRoles(subjectID, tenan
 
 // Utility functions
 
+// recordOperation records an operation to the log
+// IMPORTANT: Caller must hold epm.operationMutex.Lock() before calling
 func (epm *EscalationPreventionManager) recordOperation(operation OperationRecord) {
 	epm.operationLog = append(epm.operationLog, operation)
 
@@ -619,6 +628,14 @@ func (epm *EscalationPreventionManager) recordOperation(operation OperationRecor
 	if len(epm.operationLog) > 10000 {
 		epm.operationLog = epm.operationLog[1000:] // Keep most recent 9000 operations
 	}
+}
+
+// recordOperationLocked records an operation with automatic locking
+// Use this when caller does not already hold the lock
+func (epm *EscalationPreventionManager) recordOperationLocked(operation OperationRecord) {
+	epm.operationMutex.Lock()
+	defer epm.operationMutex.Unlock()
+	epm.recordOperation(operation)
 }
 
 func (epm *EscalationPreventionManager) generateAlert(alertType EscalationAlertType, severity AlertSeverity, subjectID, roleID, tenantID, description string, evidence map[string]interface{}, blocked bool) {

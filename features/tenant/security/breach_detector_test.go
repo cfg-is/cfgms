@@ -627,8 +627,13 @@ func TestBreachDetector_RiskScoreCalculation(t *testing.T) {
 	riskScore = bd.GetTenantRiskScore(tenantID)
 	assert.GreaterOrEqual(t, riskScore, 0.5)
 
-	// Verify we can get active breach indicators
-	indicators := bd.GetActiveBreachIndicators(tenantID)
+	// Verify we can get active breach indicators (with retry for async processing)
+	// Windows can be slower at processing breach detection events
+	var indicators []*BreachIndicator
+	require.Eventually(t, func() bool {
+		indicators = bd.GetActiveBreachIndicators(tenantID)
+		return len(indicators) > 0
+	}, 2*time.Second, 50*time.Millisecond, "Should have active breach indicators after recording suspicious events")
 	assert.NotEmpty(t, indicators)
 }
 
