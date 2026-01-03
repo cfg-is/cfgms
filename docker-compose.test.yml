@@ -486,11 +486,13 @@ services:
       CFGMS_MQTT_ENABLED: "true"
       CFGMS_MQTT_LISTEN_ADDR: "0.0.0.0:8883"
       CFGMS_MQTT_ENABLE_TLS: "true"  # Story 12.4: Enable TLS for security validation
-      CFGMS_MQTT_USE_CERT_MANAGER: "true"  # Use unified certificate manager (Story #239 dual-CA fix)
-      CFGMS_MQTT_REQUIRE_CLIENT_CERT: "true"  # Story 12.4: mTLS enabled with unified CA
+      CFGMS_MQTT_USE_CERT_MANAGER: "false"  # Use static test certificates instead of cert manager
+      CFGMS_MQTT_TLS_CERT_PATH: "/app/test-certs/server-cert.pem"  # Use static test certificates
+      CFGMS_MQTT_TLS_KEY_PATH: "/app/test-certs/server-key.pem"
+      CFGMS_MQTT_TLS_CA_PATH: "/app/test-certs/ca-cert.pem"
+      CFGMS_MQTT_REQUIRE_CLIENT_CERT: "true"  # Story 12.4: mTLS enabled
       CFGMS_QUIC_ENABLED: "true"
       CFGMS_QUIC_LISTEN_ADDR: "0.0.0.0:4433"
-      CFGMS_QUIC_USE_CERT_MANAGER: "true"  # Use unified certificate manager
       # HTTP API uses default port 9080 (no override needed)
       # Storage Configuration
       CFGMS_STORAGE_PROVIDER: "database"

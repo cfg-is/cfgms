@@ -717,6 +717,18 @@ func Load() (*Config, error) {
 		}
 	}
 
+	if mqttTLSCertPath := os.Getenv("CFGMS_MQTT_TLS_CERT_PATH"); mqttTLSCertPath != "" {
+		cfg.MQTT.TLSCertPath = mqttTLSCertPath
+	}
+
+	if mqttTLSKeyPath := os.Getenv("CFGMS_MQTT_TLS_KEY_PATH"); mqttTLSKeyPath != "" {
+		cfg.MQTT.TLSKeyPath = mqttTLSKeyPath
+	}
+
+	if mqttTLSCAPath := os.Getenv("CFGMS_MQTT_TLS_CA_PATH"); mqttTLSCAPath != "" {
+		cfg.MQTT.TLSCAPath = mqttTLSCAPath
+	}
+
 	// QUIC configuration environment variables
 	if quicEnabled := os.Getenv("CFGMS_QUIC_ENABLED"); quicEnabled != "" {
 		if val, err := strconv.ParseBool(quicEnabled); err == nil {
