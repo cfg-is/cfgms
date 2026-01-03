@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 CFGMS Contributors
+// Copyright 2026 CFGMS Contributors
 // Package session provides QUIC session management for controller-steward connections.
 //
 // Session IDs are short-lived tokens that authenticate QUIC connections after initial

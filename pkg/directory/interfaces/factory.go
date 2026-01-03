@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 CFGMS Contributors
+// Copyright 2026 CFGMS Contributors
 // Package interfaces - Provider Factory Implementation
 //
 // This file implements the provider factory pattern for dynamic directory provider selection.

@@ -2,7 +2,7 @@
 // +build !windows
 
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 CFGMS Contributors
+// Copyright 2026 CFGMS Contributors
 // Package syslog implements a syslog subscriber for CFGMS logging system.
 // This subscriber forwards log entries to syslog servers using RFC5424 format.
 package syslog

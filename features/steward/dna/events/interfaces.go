@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 CFGMS Contributors
+// Copyright 2026 CFGMS Contributors
 // Package events provides DNA change event system for real-time processing.
 //
 // This package defines the event interfaces and types used for DNA change

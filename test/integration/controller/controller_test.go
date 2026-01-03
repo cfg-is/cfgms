@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 CFGMS Contributors
+// Copyright 2026 CFGMS Contributors
 
 // Package controller contains Docker-based E2E tests for controller + steward deployment
 // Validates single controller with connected steward (Tier 2)

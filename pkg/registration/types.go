@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 CFGMS Contributors
+// Copyright 2026 CFGMS Contributors
 // Package registration provides registration token management for steward deployment.
 //
 // This package implements the registration token system that allows stewards to

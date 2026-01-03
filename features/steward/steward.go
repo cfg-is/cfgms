@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 CFGMS Contributors
+// Copyright 2026 CFGMS Contributors
 // Package steward provides standalone configuration management capabilities.
 //
 // The steward package implements a complete standalone system that can operate

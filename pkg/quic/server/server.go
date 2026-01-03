@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 CFGMS Contributors
+// Copyright 2026 CFGMS Contributors
 // Package server provides QUIC server functionality for CFGMS controller.
 //
 // This package implements the QUIC server that accepts connections from

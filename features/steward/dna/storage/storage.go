@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 CFGMS Contributors
+// Copyright 2026 CFGMS Contributors
 // Package storage provides efficient DNA storage with deduplication and compression.
 //
 // The storage system implements content-addressable storage for DNA data with:

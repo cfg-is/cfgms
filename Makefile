@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-integration-factory test-watch test-commit test-ci test-integration test-security test-performance test-docker proto lint clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates
+.PHONY: build test test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-ci test-integration test-security test-performance test-docker proto lint clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates
 
 # Use bash for all recipe commands (required for credential loading scripts)
 SHELL := /bin/bash
@@ -473,13 +473,14 @@ validate-providers:
 	fi; \
 	echo ""
 
-# Pre-commit validation (smart tests + quality gates + SECRET SCANNING + ARCHITECTURE)
-test-commit: test lint security-precommit check-architecture security-scan
+# Pre-commit validation (smart tests + quality gates + SECRET SCANNING + ARCHITECTURE + LICENSE)
+test-commit: test lint check-license-headers security-precommit check-architecture security-scan
 	@echo ""
 	@echo "✅ PRE-COMMIT VALIDATION FINISHED"
 	@echo "===================================="
 	@echo "- ✅ Smart tests passed (core + changed modules)"
 	@echo "- ✅ Linting passed"
+	@echo "- ✅ License headers validated"
 	@echo "- ✅ Secret scanning passed (no secrets in staged files)"
 	@echo "- ✅ Architecture compliance passed (no central provider violations)"
 	@echo "- ✅ Security scanning passed (vulnerabilities)"
@@ -1534,6 +1535,92 @@ test-mqtt-quic-cleanup:
 	@echo "🧹 Cleaning up MQTT+QUIC Docker environment..."
 	@docker compose -f docker-compose.test.yml --profile ha down --remove-orphans -v 2>/dev/null || true
 	@echo "✅ MQTT+QUIC environment cleaned up"
+
+# Local E2E validation - runs full integration + E2E tests with Docker infrastructure
+# Used by /story-complete to ensure full validation before PR creation
+.PHONY: test-e2e-local
+test-e2e-local:
+	@echo ""
+	@echo "🚀 RUNNING LOCAL E2E VALIDATION"
+	@echo "================================"
+	@echo "This runs all E2E tests against Docker infrastructure:"
+	@echo "  • MQTT+QUIC integration tests (controller ↔ steward)"
+	@echo "  • Controller E2E tests (Docker deployment)"
+	@echo "  • Comprehensive E2E scenarios (multi-tenant, failover)"
+	@echo ""
+	@echo "⏱️  Expected runtime: 5-10 minutes"
+	@echo ""
+	@$(MAKE) test-mqtt-quic-setup
+	@echo ""
+	@echo "🧪 Running MQTT+QUIC integration tests..."
+	@if [ -f .env.test ]; then \
+		set -a && . ./.env.test && set +a && \
+		CFGMS_TEST_HTTP_ADDR=https://localhost:8080 \
+		CFGMS_TEST_MQTT_ADDR=ssl://localhost:1886 \
+		CFGMS_TEST_QUIC_ADDR=localhost:4436 \
+		CFGMS_TEST_CERTS_PATH=$(PWD)/test/integration/mqtt_quic/certs \
+		go test -v -race -timeout=15m ./test/integration/mqtt_quic/... || { \
+			echo ""; \
+			echo "❌ MQTT+QUIC tests failed"; \
+			$(MAKE) test-mqtt-quic-cleanup; \
+			exit 1; \
+		}; \
+	else \
+		echo "❌ .env.test not found"; \
+		$(MAKE) test-mqtt-quic-cleanup; \
+		exit 1; \
+	fi
+	@echo ""
+	@echo "🧪 Running controller E2E tests (Docker deployment)..."
+	@go test -v -race -timeout=10m ./test/integration/controller/... || { \
+		echo ""; \
+		echo "❌ Controller E2E tests failed"; \
+		$(MAKE) test-mqtt-quic-cleanup; \
+		exit 1; \
+	}
+	@echo ""
+	@echo "🧪 Running comprehensive E2E scenarios..."
+	@if [ -f .env.test ]; then \
+		set -a && . ./.env.test && set +a && \
+		go test -v -race -timeout=15m ./test/e2e/... || { \
+			echo ""; \
+			echo "❌ E2E scenario tests failed"; \
+			$(MAKE) test-mqtt-quic-cleanup; \
+			exit 1; \
+		}; \
+	else \
+		echo "❌ .env.test not found"; \
+		$(MAKE) test-mqtt-quic-cleanup; \
+		exit 1; \
+	fi
+	@echo ""
+	@$(MAKE) test-mqtt-quic-cleanup
+	@echo ""
+	@echo "✅ ALL E2E TESTS PASSED"
+	@echo "======================="
+	@echo "- ✅ MQTT+QUIC integration tests passed"
+	@echo "- ✅ Controller Docker E2E tests passed"
+	@echo "- ✅ Comprehensive E2E scenarios passed"
+	@echo ""
+	@echo "🎯 Full E2E validation complete - ready for PR"
+
+# Story completion validation - comprehensive validation for /story-complete
+# Includes all commit validation PLUS full E2E testing with Docker infrastructure
+.PHONY: test-complete
+test-complete: test-commit test-e2e-local
+	@echo ""
+	@echo "✅ STORY COMPLETION VALIDATION FINISHED"
+	@echo "========================================"
+	@echo "- ✅ Unit tests passed (core + changed modules)"
+	@echo "- ✅ Linting passed"
+	@echo "- ✅ License headers validated"
+	@echo "- ✅ Secret scanning passed"
+	@echo "- ✅ Architecture compliance passed"
+	@echo "- ✅ Security scanning passed"
+	@echo "- ✅ E2E tests passed (MQTT+QUIC + Docker + Scenarios)"
+	@echo ""
+	@echo "🎯 Story validated and ready for PR creation"
+	@echo ""
 
 # Generate Test Certificates (Story #109)
 # Uses native CFGMS certificate management via controller auto-generation

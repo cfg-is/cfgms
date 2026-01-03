@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 CFGMS Contributors
+// Copyright 2026 CFGMS Contributors
 // Package interfaces defines the global directory provider system for CFGMS.
 //
 // This package implements CFGMS's pluggable infrastructure design paradigm for directory services,

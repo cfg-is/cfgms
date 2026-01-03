@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 CFGMS Contributors
+// Copyright 2026 CFGMS Contributors
 // Package builtin provides built-in transform implementations
 //
 // This package contains ready-to-use transforms that demonstrate the extensible

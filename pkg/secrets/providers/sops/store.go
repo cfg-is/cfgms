@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 CFGMS Contributors
+// Copyright 2026 CFGMS Contributors
 // Package sops implements SOPS-based secret store
 // M-AUTH-1: SecretStore implementation using git ConfigStore with SOPS encryption
 package sops

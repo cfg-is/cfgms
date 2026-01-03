@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 CFGMS Contributors
+// Copyright 2026 CFGMS Contributors
 // Package engine implements advanced reporting engine for Story #173.
 // This extends the existing DNA-focused engine to include audit data integration
 // and comprehensive multi-tenant reporting capabilities.

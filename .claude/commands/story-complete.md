@@ -17,15 +17,18 @@ Before marking any story complete, runs comprehensive validation:
 
 ### 1. Complete Test Validation (BLOCKING)
 ```bash
-make test-commit
+make test-complete
 ```
 **FINAL COMPLETION GATE**: This is the ultimate validation before story completion.
 
 **Includes**:
 - ✅ Unit tests with race detection
-- ✅ Security scanning (Trivy, Nancy, gosec, staticcheck)
 - ✅ Code linting and quality checks
-- ✅ M365 integration testing (if credentials available)
+- ✅ License header validation
+- ✅ Secret scanning (gitleaks + trufflehog)
+- ✅ Architecture compliance checking
+- ✅ Security scanning (Trivy, Nancy, gosec, staticcheck)
+- ✅ **E2E Tests** (MQTT+QUIC integration + Docker deployment + comprehensive scenarios)
 
 **Blocking Policy**:
 - ❌ **BLOCKS** completion if ANY validation fails
@@ -281,6 +284,7 @@ Co-Authored-By: Claude <noreply@anthropic.com>
 After successful PR creation:
 
 ### 1. GitHub Project Update
+
 ```bash
 # Reference exact IDs from docs/github-cli-reference.md
 gh project item-edit [project-id] --id [item-id] --field-id [status-field-id] --value "Done"
@@ -320,10 +324,11 @@ git branch -D feature/story-[NUMBER]-[description]  # Clean up local branch
 📋 Found Story #166: Logging Provider Migration and Standardization
 
 🧪 Running FINAL VALIDATION GATE...
-   ✅ Tests: make test-commit passed (486 tests)
+   ✅ Tests: make test-complete passed (486 tests)
    ✅ Security: All scans clean
    ✅ Linting: 0 issues
-   ✅ Integration: M365 tests passed
+   ✅ License headers: All files validated
+   ✅ E2E Tests: MQTT+QUIC + Docker + Scenarios passed
 
 📊 Story Completeness Check:
    ✅ All 8/8 acceptance criteria completed

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 CFGMS Contributors
+// Copyright 2026 CFGMS Contributors
 // Package config provides configuration application and module execution for stewards.
 //
 // This package implements the configuration executor that parses YAML configurations

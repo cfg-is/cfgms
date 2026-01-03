@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 CFGMS Contributors
+// Copyright 2026 CFGMS Contributors
 // Package security provides secure file access utilities for CFGMS.
 //
 // This package implements centralized security controls for file operations,

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 CFGMS Contributors
+// Copyright 2026 CFGMS Contributors
 // Package diff provides configuration version comparison and differential analysis
 // for CFGMS. It enables detailed diff views, semantic analysis, and change impact
 // assessment for configuration management and approval workflows.

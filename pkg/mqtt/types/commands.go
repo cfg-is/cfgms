@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 CFGMS Contributors
+// Copyright 2026 CFGMS Contributors
 // Package types provides common MQTT message types for CFGMS communication.
 //
 // This package defines the message structures used for MQTT communication

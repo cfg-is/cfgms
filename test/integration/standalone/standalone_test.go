@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 CFGMS Contributors
+// Copyright 2026 CFGMS Contributors
 
 // Package standalone contains Docker-based E2E tests for standalone steward deployment
 // Validates QUICK_START.md Option A workflow with real binaries in Docker containers

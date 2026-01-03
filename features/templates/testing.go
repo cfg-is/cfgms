@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 CFGMS Contributors
+// Copyright 2026 CFGMS Contributors
 // Package templates provides template testing framework for CFGMS.
 // This enables automated validation and testing of configuration templates.
 package templates

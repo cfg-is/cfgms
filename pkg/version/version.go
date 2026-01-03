@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 CFGMS Contributors
+// Copyright 2026 CFGMS Contributors
 // Package version provides build-time version information for CFGMS components.
 //
 // Version information can be injected at build time using ldflags:
