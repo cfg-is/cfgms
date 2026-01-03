@@ -41,8 +41,8 @@ type ConfigSignatureTestSuite struct {
 }
 
 func (s *ConfigSignatureTestSuite) SetupSuite() {
-	s.helper = NewTestHelper(GetTestHTTPAddr("https://localhost:8080"))
-	s.mqttAddr = GetTestMQTTAddr("ssl://localhost:1886") // Docker controller MQTT broker port with TLS
+	s.helper = NewTestHelper(GetTestHTTPAddr("https://127.0.0.1:8080"))
+	s.mqttAddr = GetTestMQTTAddr("ssl://127.0.0.1:1886") // Docker controller MQTT broker port with TLS
 	s.certsPath = GetTestCertsPath("../../../features/controller/certs/ca")
 }
 

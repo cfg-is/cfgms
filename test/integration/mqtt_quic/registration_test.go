@@ -22,7 +22,7 @@ type RegistrationTestSuite struct {
 
 func (s *RegistrationTestSuite) SetupSuite() {
 	// Connect to Docker controller (assumes docker-compose.test.yml is running)
-	s.helper = NewTestHelper(GetTestHTTPAddr("http://localhost:8080"))
+	s.helper = NewTestHelper(GetTestHTTPAddr("http://127.0.0.1:8080"))
 }
 
 func (s *RegistrationTestSuite) TearDownSuite() {

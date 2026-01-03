@@ -29,7 +29,7 @@ type ModuleExecutionTestSuite struct {
 func (s *ModuleExecutionTestSuite) SetupSuite() {
 	s.helper = NewModuleTestHelper(
 		GetTestHTTPAddr("http://localhost:9080"),
-		GetTestMQTTAddr("tcp://localhost:1886"),
+		GetTestMQTTAddr("tcp://127.0.0.1:1886"),
 	)
 
 	// Connect MQTT client for status monitoring

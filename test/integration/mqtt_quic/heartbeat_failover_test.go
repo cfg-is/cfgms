@@ -27,8 +27,8 @@ type HeartbeatFailoverTestSuite struct {
 }
 
 func (s *HeartbeatFailoverTestSuite) SetupSuite() {
-	s.helper = NewTestHelper(GetTestHTTPAddr("http://localhost:8080"))
-	s.mqttAddr = GetTestMQTTAddr("tcp://localhost:1886")
+	s.helper = NewTestHelper(GetTestHTTPAddr("http://127.0.0.1:8080"))
+	s.mqttAddr = GetTestMQTTAddr("tcp://127.0.0.1:1886")
 }
 
 // TestHeartbeatMechanism tests periodic heartbeat publishing (AC6)
