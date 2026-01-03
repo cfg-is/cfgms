@@ -17,13 +17,6 @@
 name: Docker Container Security
 
 on:
-  push:
-    branches: [ main ]
-    paths:
-      - 'cmd/**/Dockerfile*'
-      - 'go.mod'
-      - 'go.sum'
-      - '.github/workflows/docker-security.yml'
   pull_request:
     branches: [ main, develop ]
     paths:

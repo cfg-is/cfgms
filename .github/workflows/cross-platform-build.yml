@@ -1,8 +1,6 @@
 name: Cross-Platform Build Validation
 
 on:
-  push:
-    branches: [ main, develop ]
   pull_request:
     branches: [ main, develop ]
   workflow_dispatch:
