@@ -27,7 +27,6 @@ type ModuleExecutionTestSuite struct {
 }
 
 func (s *ModuleExecutionTestSuite) SetupSuite() {
-	s.T().Skip("Skipping until Issue #294: E2E test framework for MQTT+QUIC mode not yet implemented - requires running controller, MQTT broker, and steward infrastructure")
 	s.helper = NewModuleTestHelper(
 		GetTestHTTPAddr("http://localhost:9080"),
 		GetTestMQTTAddr("tcp://localhost:1886"),

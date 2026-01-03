@@ -33,7 +33,6 @@ type TLSSecurityTestSuite struct {
 }
 
 func (s *TLSSecurityTestSuite) SetupSuite() {
-	s.T().Skip("Skipping until Issue #294: E2E test framework for MQTT+QUIC mode not yet implemented - requires running controller, MQTT broker, and steward infrastructure")
 	s.helper = NewTestHelper(GetTestHTTPAddr("http://localhost:9080"))
 	// Use TLS port (8883) instead of standard MQTT port (1883)
 	s.mqttAddr = GetTestMQTTAddr("ssl://localhost:1886") // ssl:// or tls:// for TLS connections

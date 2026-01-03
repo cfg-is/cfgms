@@ -33,7 +33,6 @@ type MultiTenantTestSuite struct {
 }
 
 func (s *MultiTenantTestSuite) SetupSuite() {
-	s.T().Skip("Skipping until Issue #294: E2E test framework for MQTT+QUIC mode not yet implemented - requires running controller, MQTT broker, and steward infrastructure")
 	// Connect to Docker controller
 	s.helper = NewTestHelper(GetTestHTTPAddr("http://localhost:9080"))
 	s.tenantClients = make(map[string]mqtt.Client)

@@ -24,6 +24,9 @@ type PerformanceRegressionSuite struct {
 
 // SetupSuite initializes the performance testing framework
 func (s *PerformanceRegressionSuite) SetupSuite() {
+	// Skip until Issue #294 is complete
+	s.T().Skip("Skipping until Issue #294: E2E test framework for MQTT+QUIC mode not yet implemented - requires full controller, MQTT broker, and steward infrastructure")
+
 	config := CIOptimizedConfig()
 	config.PerformanceMode = true
 	config.TestDataSize = "small"         // Keep small for CI speed
@@ -418,6 +421,9 @@ type ProductionReadinessSuite struct {
 
 // SetupSuite initializes the production readiness testing framework
 func (s *ProductionReadinessSuite) SetupSuite() {
+	// Skip until Issue #294 is complete
+	s.T().Skip("Skipping until Issue #294: E2E test framework for MQTT+QUIC mode not yet implemented - requires full controller, MQTT broker, and steward infrastructure")
+
 	config := CIOptimizedConfig()
 	config.PerformanceMode = true
 	config.TestDataSize = "medium"        // Need more data for production testing
