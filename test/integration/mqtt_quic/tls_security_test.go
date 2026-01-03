@@ -118,12 +118,14 @@ func (s *TLSSecurityTestSuite) ensureCertificatesExist() {
 // to the flat file structure expected by LoadTLSConfig helper
 //
 // pkg/cert.Manager stores certs as:
-//   {StoragePath}/ca/ca.crt - CA certificate
-//   {StoragePath}/{serial}/cert.pem - Server/client certificates
-//   {StoragePath}/{serial}/key.pem - Server/client private keys
+//
+//	{StoragePath}/ca/ca.crt - CA certificate
+//	{StoragePath}/{serial}/cert.pem - Server/client certificates
+//	{StoragePath}/{serial}/key.pem - Server/client private keys
 //
 // LoadTLSConfig expects flat files:
-//   ca-cert.pem, server-cert.pem, server-key.pem, client-cert.pem, client-key.pem
+//
+//	ca-cert.pem, server-cert.pem, server-key.pem, client-cert.pem, client-key.pem
 func (s *TLSSecurityTestSuite) createFlatCertStructure() {
 	// Copy CA certificate (fixed location)
 	caSrc := filepath.Join(s.certsPath, "ca", "ca.crt")
