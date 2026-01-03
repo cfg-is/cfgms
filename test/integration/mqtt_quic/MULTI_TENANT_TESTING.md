@@ -54,8 +54,7 @@ All three tenant stewards:
 
 1. **Generate Test Certificates** (if not already done):
    ```bash
-   cd test/integration/mqtt_quic
-   ./scripts/generate-test-certs.sh
+   make generate-test-certificates
    ```
 
 2. **Start Docker Environment**:
@@ -173,7 +172,7 @@ If you see "connection refused" errors:
 ### Certificate Errors
 
 If you see TLS/certificate errors:
-1. Regenerate certificates: `./scripts/generate-test-certs.sh`
+1. Regenerate certificates: `make generate-test-certificates`
 2. Restart Docker containers: `docker compose -f docker-compose.test.yml --profile ha restart`
 
 ### Test Timeouts

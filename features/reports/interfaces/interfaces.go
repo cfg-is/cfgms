@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 CFGMS Contributors
+// Copyright 2026 CFGMS Contributors
 // Package interfaces defines the core interfaces for the reports subsystem.
 // This package exists to break import cycles between the main reports package
 // and its subpackages by providing shared types and interfaces.

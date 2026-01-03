@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 CFGMS Contributors
+// Copyright 2026 CFGMS Contributors
 // Package discovery provides module discovery and registry management for steward.
 //
 // This package scans the filesystem for available CFGMS modules and builds

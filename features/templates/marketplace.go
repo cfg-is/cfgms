@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 CFGMS Contributors
+// Copyright 2026 CFGMS Contributors
 // Package templates provides template marketplace functionality for CFGMS.
 // This enables OSS template sharing, discovery, and collaboration.
 package templates

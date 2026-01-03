@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 CFGMS Contributors
+// Copyright 2026 CFGMS Contributors
 // Package sops implements SOPS-based secrets provider for CFGMS
 // M-AUTH-1: Secure secret storage using Mozilla SOPS with git backend
 package sops

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 CFGMS Contributors
+// Copyright 2026 CFGMS Contributors
 // Package cert manager provides a high-level interface for certificate management.
 //
 // The Manager combines CA management, certificate storage, validation, and renewal

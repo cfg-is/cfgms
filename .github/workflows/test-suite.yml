@@ -46,6 +46,8 @@ jobs:
       run: go mod download
     
     - name: Run Fast Unit Tests
+      env:
+        CFGMS_TEST_INTEGRATION: "0"
       run: make test
     
     - name: Upload test results

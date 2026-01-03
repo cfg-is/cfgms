@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 CFGMS Contributors
+// Copyright 2026 CFGMS Contributors
 // Package workflow provides integration framework for external API providers.
 //
 // This module implements a plugin architecture for SaaS and API integrations,

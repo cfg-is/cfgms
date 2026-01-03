@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 CFGMS Contributors
+// Copyright 2026 CFGMS Contributors
 // Package saas multitenant implements multi-tenant consent flows for enterprise
 // SaaS applications, enabling MSPs to manage multiple customer tenants through
 // a single application registration.

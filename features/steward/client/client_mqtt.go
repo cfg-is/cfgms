@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 CFGMS Contributors
+// Copyright 2026 CFGMS Contributors
 // Package client provides MQTT+QUIC client functionality for steward-controller communication.
 //
 // This package implements the steward-side client for communicating with

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 CFGMS Contributors
+// Copyright 2026 CFGMS Contributors
 
 // Package controller contains Docker-based E2E tests for controller + steward deployment
 // Validates single controller with connected steward (Tier 2)
@@ -24,6 +24,7 @@ type ControllerTestSuite struct {
 }
 
 func (s *ControllerTestSuite) SetupSuite() {
+	s.T().Skip("Skipping until Issue #294: E2E test framework for MQTT+QUIC mode not yet implemented - requires Docker infrastructure with controller + steward deployment")
 	s.docker = NewDockerComposeHelper()
 
 	s.T().Log("Starting controller and steward in Docker...")

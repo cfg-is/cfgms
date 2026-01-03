@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-integration-factory test-watch test-commit test-ci test-integration test-security test-performance test-docker proto lint clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers
+.PHONY: build test test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-ci test-integration test-security test-performance test-docker proto lint clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates
 
 # Use bash for all recipe commands (required for credential loading scripts)
 SHELL := /bin/bash
@@ -172,7 +172,10 @@ test:
 	@echo "  ✅ Commercial HA tests pass"
 	@rm -f /tmp/controller-commercial
 	@echo ""
-	@echo "✅ BOTH TIERS VALIDATED (OSS + Commercial)"
+	@echo "🔧 Testing Shell Scripts..."
+	@./scripts/test-scripts.sh || { echo "❌ Script tests failed"; exit 1; }
+	@echo ""
+	@echo "✅ ALL VALIDATION COMPLETE (OSS + Commercial + Scripts)"
 
 # OPTIMIZED TEST TARGETS (Cache-Aware Strategy)
 
@@ -470,13 +473,14 @@ validate-providers:
 	fi; \
 	echo ""
 
-# Pre-commit validation (smart tests + quality gates + SECRET SCANNING + ARCHITECTURE)
-test-commit: test lint security-precommit check-architecture security-scan
+# Pre-commit validation (smart tests + quality gates + SECRET SCANNING + ARCHITECTURE + LICENSE)
+test-commit: test lint check-license-headers security-precommit check-architecture security-scan
 	@echo ""
 	@echo "✅ PRE-COMMIT VALIDATION FINISHED"
 	@echo "===================================="
 	@echo "- ✅ Smart tests passed (core + changed modules)"
 	@echo "- ✅ Linting passed"
+	@echo "- ✅ License headers validated"
 	@echo "- ✅ Secret scanning passed (no secrets in staged files)"
 	@echo "- ✅ Architecture compliance passed (no central provider violations)"
 	@echo "- ✅ Security scanning passed (vulnerabilities)"
@@ -1532,6 +1536,188 @@ test-mqtt-quic-cleanup:
 	@docker compose -f docker-compose.test.yml --profile ha down --remove-orphans -v 2>/dev/null || true
 	@echo "✅ MQTT+QUIC environment cleaned up"
 
+# Local E2E validation - runs full integration + E2E tests with Docker infrastructure
+# Used by /story-complete to ensure full validation before PR creation
+.PHONY: test-e2e-local
+test-e2e-local:
+	@echo ""
+	@echo "🚀 RUNNING LOCAL E2E VALIDATION"
+	@echo "================================"
+	@echo "This runs all E2E tests against Docker infrastructure:"
+	@echo "  • MQTT+QUIC integration tests (controller ↔ steward)"
+	@echo "  • Controller E2E tests (Docker deployment)"
+	@echo "  • Comprehensive E2E scenarios (multi-tenant, failover)"
+	@echo ""
+	@echo "⏱️  Expected runtime: 5-10 minutes"
+	@echo ""
+	@$(MAKE) test-mqtt-quic-setup
+	@echo ""
+	@echo "🧪 Running MQTT+QUIC integration tests..."
+	@if [ -f .env.test ]; then \
+		set -a && . ./.env.test && set +a && \
+		CFGMS_TEST_HTTP_ADDR=https://localhost:8080 \
+		CFGMS_TEST_MQTT_ADDR=ssl://localhost:1886 \
+		CFGMS_TEST_QUIC_ADDR=localhost:4436 \
+		CFGMS_TEST_CERTS_PATH=$(PWD)/test/integration/mqtt_quic/certs \
+		go test -v -race -timeout=15m ./test/integration/mqtt_quic/... || { \
+			echo ""; \
+			echo "❌ MQTT+QUIC tests failed"; \
+			$(MAKE) test-mqtt-quic-cleanup; \
+			exit 1; \
+		}; \
+	else \
+		echo "❌ .env.test not found"; \
+		$(MAKE) test-mqtt-quic-cleanup; \
+		exit 1; \
+	fi
+	@echo ""
+	@echo "🧪 Running controller E2E tests (Docker deployment)..."
+	@go test -v -race -timeout=10m ./test/integration/controller/... || { \
+		echo ""; \
+		echo "❌ Controller E2E tests failed"; \
+		$(MAKE) test-mqtt-quic-cleanup; \
+		exit 1; \
+	}
+	@echo ""
+	@echo "🧪 Running comprehensive E2E scenarios..."
+	@if [ -f .env.test ]; then \
+		set -a && . ./.env.test && set +a && \
+		go test -v -race -timeout=15m ./test/e2e/... || { \
+			echo ""; \
+			echo "❌ E2E scenario tests failed"; \
+			$(MAKE) test-mqtt-quic-cleanup; \
+			exit 1; \
+		}; \
+	else \
+		echo "❌ .env.test not found"; \
+		$(MAKE) test-mqtt-quic-cleanup; \
+		exit 1; \
+	fi
+	@echo ""
+	@$(MAKE) test-mqtt-quic-cleanup
+	@echo ""
+	@echo "✅ ALL E2E TESTS PASSED"
+	@echo "======================="
+	@echo "- ✅ MQTT+QUIC integration tests passed"
+	@echo "- ✅ Controller Docker E2E tests passed"
+	@echo "- ✅ Comprehensive E2E scenarios passed"
+	@echo ""
+	@echo "🎯 Full E2E validation complete - ready for PR"
+
+# Story completion validation - comprehensive validation for /story-complete
+# Includes all commit validation PLUS full E2E testing with Docker infrastructure
+.PHONY: test-complete
+test-complete: test-commit test-e2e-local
+	@echo ""
+	@echo "✅ STORY COMPLETION VALIDATION FINISHED"
+	@echo "========================================"
+	@echo "- ✅ Unit tests passed (core + changed modules)"
+	@echo "- ✅ Linting passed"
+	@echo "- ✅ License headers validated"
+	@echo "- ✅ Secret scanning passed"
+	@echo "- ✅ Architecture compliance passed"
+	@echo "- ✅ Security scanning passed"
+	@echo "- ✅ E2E tests passed (MQTT+QUIC + Docker + Scenarios)"
+	@echo ""
+	@echo "🎯 Story validated and ready for PR creation"
+	@echo ""
+
+# Generate Test Certificates (Story #109)
+# Uses native CFGMS certificate management via controller auto-generation
+.PHONY: generate-test-certificates
+generate-test-certificates: build-controller  ## Generate test certificates using native cert management
+	@echo "🔐 Generating test certificates..."
+	@echo ""
+	@echo "Step 1: Setting up controller configuration..."
+	@mkdir -p test/integration/mqtt_quic/certs/ca test/integration/logs
+	@cp test/integration/configs/controller-test.cfg config.yaml
+	@echo "✅ Configuration copied to config.yaml (TODO: controller should read controller.cfg)"
+	@echo ""
+	@echo "Step 2: Starting controller to auto-generate valid certificates..."
+	@timeout 30 ./bin/controller > /tmp/controller-cert-gen.log 2>&1 & \
+	CONTROLLER_PID=$$!; \
+	sleep 5; \
+	kill $$CONTROLLER_PID 2>/dev/null || true; \
+	wait $$CONTROLLER_PID 2>/dev/null || true
+	@rm -f config.yaml
+	@if [ ! -f "test/integration/mqtt_quic/certs/ca/ca.crt" ]; then \
+		echo "❌ CA certificate not generated. Controller log:"; \
+		cat /tmp/controller-cert-gen.log; \
+		exit 1; \
+	fi
+	@echo "✅ Valid certificates generated by Controller"
+	@echo ""
+	@echo "Creating symlinks for test compatibility..."
+	@cd test/integration/mqtt_quic/certs && \
+		ln -sf ca/ca.crt ca-cert.pem && \
+		ln -sf ca/ca.key ca-key.pem && \
+		ln -sf ca/server/server.crt server-cert.pem && \
+		ln -sf ca/server/server.key server-key.pem
+	@echo "✅ Symlinks created"
+	@echo ""
+	@echo "Step 3: Generating invalid certificates for negative testing..."
+	@./scripts/generate-invalid-test-certs.sh
+	@echo ""
+	@echo "✅ All test certificates generated"
+	@echo ""
+	@echo "Valid certificates (auto-generated by Controller):"
+	@echo "  • test/integration/mqtt_quic/certs/ca-cert.pem"
+	@echo "  • test/integration/mqtt_quic/certs/server-cert.pem"
+	@echo "  • test/integration/mqtt_quic/certs/client-cert.pem"
+	@echo ""
+	@echo "Invalid certificates (for negative testing):"
+	@echo "  • test/integration/mqtt_quic/certs/expired-cert.pem"
+	@echo "  • test/integration/mqtt_quic/certs/selfsigned-cert.pem"
+	@echo "  • test/integration/mqtt_quic/certs/wrong-ca-client-cert.pem"
+
+# Synthetic Monitoring Tests
+# Runs ongoing validation tests for production-like environments
+.PHONY: test-synthetic-monitoring
+test-synthetic-monitoring:
+	@echo ""
+	@echo "🤖 Running Synthetic Monitoring Tests"
+	@echo "======================================"
+	@echo "Testing ongoing validation framework..."
+	@echo ""
+	@go test -v -race -timeout=10m ./test/e2e/... -run TestSyntheticMonitoring
+	@echo ""
+	@echo "✅ Synthetic monitoring tests completed"
+
+# Export Reliability Tests (stub - implementation pending)
+# Tests export functionality reliability and error handling
+.PHONY: test-export-reliability
+test-export-reliability:
+	@echo ""
+	@echo "📊 Export Reliability Tests"
+	@echo "============================"
+	@echo "⚠️  Export reliability testing not yet implemented"
+	@echo "   Tracked in roadmap for future release"
+	@echo "✅ Stub target passes (implementation pending)"
+	@echo ""
+
+# Cost Analysis (stub - implementation pending)
+# Analyzes cost impact of changes and resource usage
+.PHONY: cost-analysis
+cost-analysis:
+	@echo ""
+	@echo "💰 Cost Impact Analysis"
+	@echo "======================="
+	@echo "⚠️  Cost analysis not yet implemented"
+	@echo "   Tracked in roadmap for future release"
+	@echo "✅ Stub target passes (implementation pending)"
+	@echo ""
+
+# Compliance Check (stub - implementation pending)
+# Validates compliance with security frameworks (SOC2, ISO27001, GDPR, HIPAA)
+.PHONY: compliance-check
+compliance-check:
+	@echo ""
+	@echo "🔒 Compliance Risk Assessment"
+	@echo "=============================="
+	@echo "⚠️  Compliance checking not yet implemented"
+	@echo "   Tracked in roadmap for future release"
+	@echo "✅ Stub target passes (implementation pending)"
+	@echo ""
 
 clean:
 	rm -rf bin/

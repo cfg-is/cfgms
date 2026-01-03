@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 CFGMS Contributors
+// Copyright 2026 CFGMS Contributors
 // Package dna - Directory DNA Monitoring Integration
 //
 // This file integrates DirectoryDNA monitoring with CFGMS's existing monitoring

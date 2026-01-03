@@ -479,28 +479,49 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
-    
+
     - name: Set up Go
       uses: actions/setup-go@v4
       with:
         go-version: '1.23'
-    
+
     - name: Install dependencies
       run: go mod download
-    
+
+    - name: Set up Docker test infrastructure
+      run: |
+        echo "🐳 Setting up Docker test infrastructure..."
+        make test-integration-setup
+        echo ""
+        echo "🔐 Generating TLS test certificates..."
+        make generate-test-certificates
+        echo "✅ Docker infrastructure ready"
+
     - name: Run Controller Integration Tests
+      env:
+        CFGMS_TEST_INTEGRATION: "1"
       run: |
         echo "🖥️ CONTROLLER INTEGRATION TESTS (Linux)"
         echo "======================================="
-        
-        # Run existing integration tests
+
+        # Load test environment
+        set -a
+        source .env.test
+        set +a
+
+        # Run existing integration tests with infrastructure
         go test -v -race -timeout=10m ./test/integration/...
-        
+
         # Run E2E tests with controller focus
         go test -v -race -timeout=15m ./test/e2e/... -run "TestE2EScenarios/(TestControllerStewardIntegration|TestRBACIntegration|TestWorkflowIntegration|TestDataFlow)"
-        
+
         echo ""
         echo "✅ Controller integration tests completed"
+
+    - name: Cleanup Docker infrastructure
+      if: always()
+      run: |
+        docker compose -f docker-compose.test.yml down -v || true
 
   integration-tests-steward:
     name: Steward Integration Tests

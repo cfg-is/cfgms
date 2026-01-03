@@ -2,7 +2,7 @@
 // +build !integration
 
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 CFGMS Contributors
+// Copyright 2026 CFGMS Contributors
 
 package logging_test
 

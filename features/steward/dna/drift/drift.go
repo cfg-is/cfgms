@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 CFGMS Contributors
+// Copyright 2026 CFGMS Contributors
 // Package drift provides real-time DNA drift detection and monitoring capabilities.
 //
 // This package implements comprehensive drift detection for DNA (system fingerprint) data,

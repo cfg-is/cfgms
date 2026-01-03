@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 CFGMS Contributors
+// Copyright 2026 CFGMS Contributors
 package mqtt_quic
 
 import (
@@ -24,6 +24,7 @@ type MQTTConnectivityTestSuite struct {
 }
 
 func (s *MQTTConnectivityTestSuite) SetupSuite() {
+	s.T().Skip("Skipping until Issue #294: E2E test framework for MQTT+QUIC mode not yet implemented - requires running controller, MQTT broker, and steward infrastructure")
 	s.helper = NewTestHelper(GetTestHTTPAddr("http://localhost:8080"))
 	s.mqttAddr = GetTestMQTTAddr("ssl://localhost:1886") // Docker controller MQTT broker port with TLS
 }

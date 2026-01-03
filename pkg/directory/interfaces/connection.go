@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 CFGMS Contributors
+// Copyright 2026 CFGMS Contributors
 // Package interfaces - Connection Pool Management and Health Monitoring
 //
 // This file implements connection pool management with health monitoring for directory providers.

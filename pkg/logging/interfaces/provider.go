@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 CFGMS Contributors
+// Copyright 2026 CFGMS Contributors
 // Package interfaces defines the logging provider system for time-series log data in CFGMS.
 //
 // This package provides a pluggable logging architecture similar to the storage provider system,
