@@ -493,6 +493,9 @@ jobs:
         echo ""
         echo "🔐 Generating TLS test certificates..."
         make generate-test-certificates
+        echo ""
+        echo "🌐 Starting MQTT+QUIC controller for integration tests..."
+        make test-mqtt-quic-setup
         echo "✅ Docker infrastructure ready"
 
     - name: Run Controller Integration Tests
