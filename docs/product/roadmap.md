@@ -113,6 +113,10 @@ Implemented comprehensive Docker-based E2E testing infrastructure that validates
 - [ ] Configure branch protection rules (issue #283)
 - [ ] Update documentation with security badges and public links (issue #284)
 
+#### v0.8.1 Fix bugs discovered in v0.8.0
+
+- [ ] **Single-use registration tokens not enforced in database storage (Issue #299)** - HIGH SECURITY: Fix database provider SaveToken() to use PostgreSQL UPSERT instead of plain INSERT, preventing token reuse attacks and enforcing single-use semantics for registration tokens
+
 ### Phase 2: Production Stability & Feature Completion (v0.9.0 - v1.0.0)
 
 Achieve production stability, complete core platform features, and prepare for stable release.
