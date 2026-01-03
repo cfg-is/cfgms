@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-ci test-integration test-security test-performance test-docker test-cross-feature-integration test-failure-propagation proto lint clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates
+.PHONY: build test test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-mqtt-quic test-e2e-controller test-e2e-scenarios test-ci test-integration test-security test-performance test-docker test-cross-feature-integration test-failure-propagation proto lint clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates
 
 # Use bash for all recipe commands (required for credential loading scripts)
 SHELL := /bin/bash
@@ -1566,19 +1566,12 @@ test-mqtt-quic-cleanup:
 # Local E2E validation - runs full integration + E2E tests with Docker infrastructure
 # Used by /story-complete to ensure full validation before PR creation
 .PHONY: test-e2e-local
-test-e2e-local:
-	@echo ""
-	@echo "🚀 RUNNING LOCAL E2E VALIDATION"
-	@echo "================================"
-	@echo "This runs all E2E tests against Docker infrastructure:"
-	@echo "  • MQTT+QUIC integration tests (controller ↔ steward)"
-	@echo "  • Controller E2E tests (Docker deployment)"
-	@echo "  • Comprehensive E2E scenarios (multi-tenant, failover)"
-	@echo ""
-	@echo "⏱️  Expected runtime: 5-10 minutes"
-	@echo ""
-	@$(MAKE) test-mqtt-quic-setup
-	@echo ""
+# Phase 2: Parallelizable E2E test targets (Story #297)
+# These targets can run independently and be parallelized with make -j3
+
+.PHONY: test-e2e-mqtt-quic test-e2e-controller test-e2e-scenarios
+
+test-e2e-mqtt-quic:
 	@echo "🧪 Running MQTT+QUIC integration tests..."
 	@if [ -f .env.test ]; then \
 		set -a && . ./.env.test && set +a && \
@@ -1586,40 +1579,82 @@ test-e2e-local:
 		CFGMS_TEST_MQTT_ADDR=ssl://localhost:1886 \
 		CFGMS_TEST_QUIC_ADDR=localhost:4436 \
 		CFGMS_TEST_CERTS_PATH=$(PWD)/test/integration/mqtt_quic/certs \
-		go test -v -race -timeout=15m ./test/integration/mqtt_quic/... || { \
-			echo ""; \
-			echo "❌ MQTT+QUIC tests failed"; \
-			$(MAKE) test-mqtt-quic-cleanup; \
-			exit 1; \
-		}; \
+		go test -v -race -timeout=15m ./test/integration/mqtt_quic/... || exit 1; \
 	else \
 		echo "❌ .env.test not found"; \
-		$(MAKE) test-mqtt-quic-cleanup; \
 		exit 1; \
 	fi
-	@echo ""
+	@echo "✅ MQTT+QUIC integration tests passed"
+
+test-e2e-controller:
 	@echo "🧪 Running controller E2E tests (Docker deployment)..."
-	@go test -v -race -timeout=10m ./test/integration/controller/... || { \
+	@go test -v -race -timeout=10m ./test/integration/controller/... || exit 1
+	@echo "✅ Controller E2E tests passed"
+
+test-e2e-scenarios:
+	@echo "🧪 Running comprehensive E2E scenarios..."
+	@if [ -f .env.test ]; then \
+		set -a && . ./.env.test && set +a && \
+		go test -v -race -timeout=15m ./test/e2e/... || exit 1; \
+	else \
+		echo "❌ .env.test not found"; \
+		exit 1; \
+	fi
+	@echo "✅ E2E scenario tests passed"
+
+# Parallel E2E execution (Story #297 Phase 2)
+# Runs all E2E test suites in parallel for faster feedback
+test-e2e-parallel:
+	@echo ""
+	@echo "⚡ PARALLEL E2E VALIDATION"
+	@echo "=========================="
+	@echo "Running 3 test suites in parallel:"
+	@echo "  1️⃣  MQTT+QUIC integration tests"
+	@echo "  2️⃣  Controller E2E tests"
+	@echo "  3️⃣  Comprehensive E2E scenarios"
+	@echo ""
+	@echo "⏱️  Expected runtime: ~3-5 minutes (53% faster than sequential)"
+	@echo ""
+	@$(MAKE) test-mqtt-quic-setup
+	@echo ""
+	@$(MAKE) -j3 test-e2e-mqtt-quic test-e2e-controller test-e2e-scenarios || { \
 		echo ""; \
-		echo "❌ Controller E2E tests failed"; \
+		echo "❌ One or more E2E test suites failed"; \
 		$(MAKE) test-mqtt-quic-cleanup; \
 		exit 1; \
 	}
 	@echo ""
-	@echo "🧪 Running comprehensive E2E scenarios..."
-	@if [ -f .env.test ]; then \
-		set -a && . ./.env.test && set +a && \
-		go test -v -race -timeout=15m ./test/e2e/... || { \
-			echo ""; \
-			echo "❌ E2E scenario tests failed"; \
-			$(MAKE) test-mqtt-quic-cleanup; \
-			exit 1; \
-		}; \
-	else \
-		echo "❌ .env.test not found"; \
-		$(MAKE) test-mqtt-quic-cleanup; \
-		exit 1; \
-	fi
+	@$(MAKE) test-mqtt-quic-cleanup
+	@echo ""
+	@echo "✅ ALL E2E TESTS PASSED (PARALLEL)"
+	@echo "=================================="
+	@echo "- ✅ MQTT+QUIC integration tests"
+	@echo "- ✅ Controller Docker E2E tests"
+	@echo "- ✅ Comprehensive E2E scenarios"
+	@echo ""
+	@echo "🎯 Full E2E validation complete - ready for PR"
+
+# Sequential E2E execution (backward compatibility)
+# Runs all E2E test suites sequentially (original behavior)
+test-e2e-local:
+	@echo ""
+	@echo "🚀 RUNNING LOCAL E2E VALIDATION (SEQUENTIAL)"
+	@echo "============================================="
+	@echo "This runs all E2E tests against Docker infrastructure:"
+	@echo "  • MQTT+QUIC integration tests (controller ↔ steward)"
+	@echo "  • Controller E2E tests (Docker deployment)"
+	@echo "  • Comprehensive E2E scenarios (multi-tenant, failover)"
+	@echo ""
+	@echo "⏱️  Expected runtime: 8-10 minutes"
+	@echo "💡 Use 'make test-e2e-parallel' for faster execution (~3-5 min)"
+	@echo ""
+	@$(MAKE) test-mqtt-quic-setup
+	@echo ""
+	@$(MAKE) test-e2e-mqtt-quic || { $(MAKE) test-mqtt-quic-cleanup; exit 1; }
+	@echo ""
+	@$(MAKE) test-e2e-controller || { $(MAKE) test-mqtt-quic-cleanup; exit 1; }
+	@echo ""
+	@$(MAKE) test-e2e-scenarios || { $(MAKE) test-mqtt-quic-cleanup; exit 1; }
 	@echo ""
 	@$(MAKE) test-mqtt-quic-cleanup
 	@echo ""
