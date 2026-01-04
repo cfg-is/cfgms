@@ -139,9 +139,10 @@ services:
       CFGMS_MQTT_ENABLED: "true"
       CFGMS_MQTT_LISTEN_ADDR: "0.0.0.0:8883"
       CFGMS_MQTT_ENABLE_TLS: "true"  # Story 12.4: Enable TLS for security validation
-      CFGMS_MQTT_TLS_CERT_PATH: "/app/test-certs/server-cert.pem"
-      CFGMS_MQTT_TLS_KEY_PATH: "/app/test-certs/server-key.pem"
-      CFGMS_MQTT_TLS_CA_PATH: "/app/test-certs/ca-cert.pem"
+      # Use pkg/cert.Manager auto-generation (SAFE - no static test certs)
+      # Matches Story #109 pattern: self-contained tests with auto-generated certs
+      CFGMS_MQTT_USE_CERT_MANAGER: "true"
+      # CFGMS_CERT_PATH already set to "/app/certs" - uses that for auto-generation
       # TODO: Re-enable mTLS once controller uses single CA for both HTTP and MQTT
       CFGMS_MQTT_REQUIRE_CLIENT_CERT: "false"  # Story 12.4: mTLS temporarily disabled
       CFGMS_QUIC_ENABLED: "true"
@@ -207,9 +208,10 @@ services:
       CFGMS_MQTT_ENABLED: "true"
       CFGMS_MQTT_LISTEN_ADDR: "0.0.0.0:8883"
       CFGMS_MQTT_ENABLE_TLS: "true"  # Story 12.4: Enable TLS for security validation
-      CFGMS_MQTT_TLS_CERT_PATH: "/app/test-certs/server-cert.pem"
-      CFGMS_MQTT_TLS_KEY_PATH: "/app/test-certs/server-key.pem"
-      CFGMS_MQTT_TLS_CA_PATH: "/app/test-certs/ca-cert.pem"
+      # Use pkg/cert.Manager auto-generation (SAFE - no static test certs)
+      # Matches Story #109 pattern: self-contained tests with auto-generated certs
+      CFGMS_MQTT_USE_CERT_MANAGER: "true"
+      # CFGMS_CERT_PATH already set to "/app/certs" - uses that for auto-generation
       # TODO: Re-enable mTLS once controller uses single CA for both HTTP and MQTT
       CFGMS_MQTT_REQUIRE_CLIENT_CERT: "false"  # Story 12.4: mTLS temporarily disabled
       CFGMS_QUIC_ENABLED: "true"
@@ -275,9 +277,10 @@ services:
       CFGMS_MQTT_ENABLED: "true"
       CFGMS_MQTT_LISTEN_ADDR: "0.0.0.0:8883"
       CFGMS_MQTT_ENABLE_TLS: "true"  # Story 12.4: Enable TLS for security validation
-      CFGMS_MQTT_TLS_CERT_PATH: "/app/test-certs/server-cert.pem"
-      CFGMS_MQTT_TLS_KEY_PATH: "/app/test-certs/server-key.pem"
-      CFGMS_MQTT_TLS_CA_PATH: "/app/test-certs/ca-cert.pem"
+      # Use pkg/cert.Manager auto-generation (SAFE - no static test certs)
+      # Matches Story #109 pattern: self-contained tests with auto-generated certs
+      CFGMS_MQTT_USE_CERT_MANAGER: "true"
+      # CFGMS_CERT_PATH already set to "/app/certs" - uses that for auto-generation
       # TODO: Re-enable mTLS once controller uses single CA for both HTTP and MQTT
       CFGMS_MQTT_REQUIRE_CLIENT_CERT: "false"  # Story 12.4: mTLS temporarily disabled
       CFGMS_QUIC_ENABLED: "true"
@@ -486,10 +489,10 @@ services:
       CFGMS_MQTT_ENABLED: "true"
       CFGMS_MQTT_LISTEN_ADDR: "0.0.0.0:8883"
       CFGMS_MQTT_ENABLE_TLS: "true"  # Story 12.4: Enable TLS for security validation
-      CFGMS_MQTT_USE_CERT_MANAGER: "false"  # Use static test certificates instead of cert manager
-      CFGMS_MQTT_TLS_CERT_PATH: "/app/test-certs/server-cert.pem"  # Use static test certificates
-      CFGMS_MQTT_TLS_KEY_PATH: "/app/test-certs/server-key.pem"
-      CFGMS_MQTT_TLS_CA_PATH: "/app/test-certs/ca-cert.pem"
+      # Use pkg/cert.Manager auto-generation (SAFE - no static test certs)
+      # Matches Story #109 pattern: self-contained tests with auto-generated certs
+      CFGMS_MQTT_USE_CERT_MANAGER: "true"
+      # CFGMS_CERT_PATH already set to "/app/certs" - uses that for auto-generation
       CFGMS_MQTT_REQUIRE_CLIENT_CERT: "true"  # Story 12.4: mTLS enabled
       CFGMS_QUIC_ENABLED: "true"
       CFGMS_QUIC_LISTEN_ADDR: "0.0.0.0:4433"

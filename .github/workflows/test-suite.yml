@@ -3,6 +3,9 @@ name: Test Suite Validation
 on:
   pull_request:
     branches: [ main, develop ]
+  push:
+    branches:
+      - main  # Post-merge validation ensures zero-tolerance test policy
   workflow_dispatch:
     inputs:
       test_level:

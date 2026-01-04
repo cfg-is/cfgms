@@ -3,6 +3,9 @@ name: Security Scanning Workflow
 on:
   pull_request:
     branches: [ main, develop ]
+  push:
+    branches:
+      - main  # Post-merge security validation for supply chain protection
   workflow_dispatch:
     inputs:
       scan_type:

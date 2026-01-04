@@ -1,5 +1,11 @@
 # Docker-Based E2E Testing Infrastructure
 
+## MQTT+QUIC Test Execution
+
+For MQTT+QUIC-specific testing strategy, see:
+
+- [MQTT+QUIC Testing Strategy](../../docs/testing/mqtt-quic-testing-strategy.md)
+
 ## Overview
 
 CFGMS now has production-realistic, Docker-based end-to-end testing across all three deployment tiers. Tests use actual binaries in ephemeral containers, guaranteeing that documented deployment instructions work 100%.

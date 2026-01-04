@@ -3,6 +3,9 @@ name: Production Risk Gates
 on:
   pull_request:
     branches: [ main, develop ]
+  push:
+    branches:
+      - main  # Post-merge release gate validation for production readiness
   workflow_dispatch:
     inputs:
       gate_type:

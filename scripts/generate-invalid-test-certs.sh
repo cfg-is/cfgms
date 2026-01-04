@@ -1,5 +1,18 @@
 #!/usr/bin/env bash
 #
+# ⚠️  CRITICAL SECURITY WARNING ⚠️
+#
+# This script generates ONLY intentionally-invalid certificates for NEGATIVE testing.
+# These certificates MUST NOT be used in production or referenced in docker-compose files.
+#
+# Valid certificates MUST be auto-generated via:
+#   - Production: pkg/cert.Manager with certificate.auto_generate=true
+#   - Testing: pkg/cert.Manager (see test/integration/mqtt_quic/tls_security_test.go)
+#
+# DO NOT set CFGMS_MQTT_USE_CERT_MANAGER=false in any environment!
+#
+# ⚠️  END SECURITY WARNING ⚠️
+#
 # generate-invalid-test-certs.sh - Generate INVALID certificates for negative testing
 #
 # This script generates ONLY intentionally-invalid certificates used to test that
