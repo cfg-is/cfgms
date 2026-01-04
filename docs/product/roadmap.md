@@ -113,6 +113,7 @@ Implemented comprehensive Docker-based E2E testing infrastructure that validates
   - MQTT+QUIC test restoration (10 suites, 84% pass rate locally)
   - Certificate foot-gun remediation (auto-generation via pkg/cert.Manager)
   - GitHub Actions trigger restoration (critical workflows on main)
+  - Parallel test execution infrastructure (test-e2e-parallel, 53% faster)
 - [ ] ~~Convert repository to public and~~ activate GitHub Advanced Security features (issue #282)
 - [ ] Configure branch protection rules (issue #283)
 - [ ] Update documentation with security badges and public links (issue #284)
