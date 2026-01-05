@@ -502,12 +502,29 @@ func TestSessionMonitor_ThreatLevelCalculation(t *testing.T) {
 	})
 
 	t.Run("Critical threat level - blocked commands", func(t *testing.T) {
-		// Simulate blocked commands
-		monitor.sessions[session.ID].mutex.Lock()
-		monitor.sessions[session.ID].BlockedCommands = 5
-		monitor.sessions[session.ID].mutex.Unlock()
+		// Safely update blocked commands count through the monitor's mutex
+		monitor.sessionsMutex.Lock()
+		monitoredSession, exists := monitor.sessions[session.ID]
+		if !exists {
+			monitor.sessionsMutex.Unlock()
+			t.Fatal("session not found in monitor")
+		}
 
-		monitor.updateThreatLevel(monitor.sessions[session.ID])
+		// Lock the session and update blocked commands
+		monitoredSession.mutex.Lock()
+		monitoredSession.BlockedCommands = 5
+		monitoredSession.mutex.Unlock()
+		monitor.sessionsMutex.Unlock()
+
+		// Update threat level (this will read the BlockedCommands value)
+		monitor.sessionsMutex.RLock()
+		monitoredSession, exists = monitor.sessions[session.ID]
+		monitor.sessionsMutex.RUnlock()
+		if !exists {
+			t.Fatal("session not found after blocked commands update")
+		}
+
+		monitor.updateThreatLevel(monitoredSession)
 
 		sessionInfo, err := monitor.GetSessionInfo(session.ID)
 		require.NoError(t, err)
