@@ -21,9 +21,8 @@ type RegistrationTestSuite struct {
 }
 
 func (s *RegistrationTestSuite) SetupSuite() {
-	s.T().Skip("Skipping until Issue #294: E2E test framework for MQTT+QUIC mode not yet implemented - requires running controller, MQTT broker, and steward infrastructure")
 	// Connect to Docker controller (assumes docker-compose.test.yml is running)
-	s.helper = NewTestHelper(GetTestHTTPAddr("http://localhost:8080"))
+	s.helper = NewTestHelper(GetTestHTTPAddr("http://127.0.0.1:8080"))
 }
 
 func (s *RegistrationTestSuite) TearDownSuite() {

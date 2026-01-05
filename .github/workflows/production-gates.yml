@@ -1,10 +1,11 @@
 name: Production Risk Gates
 
 on:
-  push:
-    branches: [ main, develop ]
   pull_request:
     branches: [ main, develop ]
+  push:
+    branches:
+      - main  # Post-merge release gate validation for production readiness
   workflow_dispatch:
     inputs:
       gate_type:
@@ -495,6 +496,9 @@ jobs:
         echo ""
         echo "🔐 Generating TLS test certificates..."
         make generate-test-certificates
+        echo ""
+        echo "🌐 Starting MQTT+QUIC controller for integration tests..."
+        make test-mqtt-quic-setup
         echo "✅ Docker infrastructure ready"
 
     - name: Run Controller Integration Tests
@@ -510,7 +514,8 @@ jobs:
         set +a
 
         # Run existing integration tests with infrastructure
-        go test -v -race -timeout=10m ./test/integration/...
+        # Skip MQTT+QUIC tests until Issue #294 (functional bugs in test suite)
+        go test -v -race -timeout=10m $(go list ./test/integration/... | grep -v mqtt_quic | grep -v "test/integration$")
 
         # Run E2E tests with controller focus
         go test -v -race -timeout=15m ./test/e2e/... -run "TestE2EScenarios/(TestControllerStewardIntegration|TestRBACIntegration|TestWorkflowIntegration|TestDataFlow)"

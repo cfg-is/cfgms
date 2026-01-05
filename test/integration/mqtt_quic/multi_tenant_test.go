@@ -33,7 +33,6 @@ type MultiTenantTestSuite struct {
 }
 
 func (s *MultiTenantTestSuite) SetupSuite() {
-	s.T().Skip("Skipping until Issue #294: E2E test framework for MQTT+QUIC mode not yet implemented - requires running controller, MQTT broker, and steward infrastructure")
 	// Connect to Docker controller
 	s.helper = NewTestHelper(GetTestHTTPAddr("http://localhost:9080"))
 	s.tenantClients = make(map[string]mqtt.Client)
@@ -112,7 +111,7 @@ func (s *MultiTenantTestSuite) TestMQTTTopicIsolation() {
 
 	certsPath := GetTestCertsPath("./certs")
 	tlsConfig := LoadTLSConfig(s.T(), certsPath)
-	brokerAddr := GetTestMQTTAddr("ssl://localhost:1886")
+	brokerAddr := GetTestMQTTAddr("ssl://127.0.0.1:1886")
 
 	// Create MQTT clients for tenant1 and tenant2
 	tenant1Client := s.createTenantMQTTClient("tenant1", brokerAddr, tlsConfig)
@@ -198,7 +197,7 @@ func (s *MultiTenantTestSuite) TestCrossTenantMessagePrevention() {
 
 	certsPath := GetTestCertsPath("./certs")
 	tlsConfig := LoadTLSConfig(s.T(), certsPath)
-	brokerAddr := GetTestMQTTAddr("ssl://localhost:1886")
+	brokerAddr := GetTestMQTTAddr("ssl://127.0.0.1:1886")
 
 	// Create tenant clients
 	tenant1Client := s.createTenantMQTTClient("tenant1", brokerAddr, tlsConfig)
@@ -240,7 +239,7 @@ func (s *MultiTenantTestSuite) TestConfigurationRoutingBoundaries() {
 
 	certsPath := GetTestCertsPath("./certs")
 	tlsConfig := LoadTLSConfig(s.T(), certsPath)
-	brokerAddr := GetTestMQTTAddr("ssl://localhost:1886")
+	brokerAddr := GetTestMQTTAddr("ssl://127.0.0.1:1886")
 
 	// Create tenant clients
 	tenant1Client := s.createTenantMQTTClient("tenant1-config", brokerAddr, tlsConfig)
@@ -304,7 +303,7 @@ func (s *MultiTenantTestSuite) TestDNACollectionSeparation() {
 
 	certsPath := GetTestCertsPath("./certs")
 	tlsConfig := LoadTLSConfig(s.T(), certsPath)
-	brokerAddr := GetTestMQTTAddr("ssl://localhost:1886")
+	brokerAddr := GetTestMQTTAddr("ssl://127.0.0.1:1886")
 
 	// Create tenant clients
 	tenant1Client := s.createTenantMQTTClient("tenant1-dna", brokerAddr, tlsConfig)
@@ -374,7 +373,7 @@ func (s *MultiTenantTestSuite) TestHeartbeatIsolation() {
 
 	certsPath := GetTestCertsPath("./certs")
 	tlsConfig := LoadTLSConfig(s.T(), certsPath)
-	brokerAddr := GetTestMQTTAddr("ssl://localhost:1886")
+	brokerAddr := GetTestMQTTAddr("ssl://127.0.0.1:1886")
 
 	// Create tenant clients
 	tenant1Client := s.createTenantMQTTClient("tenant1-hb", brokerAddr, tlsConfig)

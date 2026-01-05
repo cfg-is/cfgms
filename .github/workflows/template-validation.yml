@@ -11,12 +11,6 @@ on:
       - 'features/templates/*.go'
       - '.github/workflows/template-validation.yml'
       - 'scripts/validate-templates.sh'
-  push:
-    branches:
-      - develop
-      - main
-    paths:
-      - 'features/templates/marketplace/**'
 
 permissions:
   contents: read

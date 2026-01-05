@@ -37,6 +37,21 @@ func TestControllerCreation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Use a temporary directory for each test to avoid conflicts
+			tempDir := t.TempDir()
+
+			// Update config to use temp directory if provided
+			if tt.cfg != nil {
+				tt.cfg.DataDir = tempDir + "/data"
+				tt.cfg.CertPath = tempDir + "/certs"
+				if tt.cfg.Certificate != nil {
+					tt.cfg.Certificate.CAPath = tempDir + "/certs/ca"
+				}
+				if tt.cfg.Storage != nil && tt.cfg.Storage.Config != nil {
+					tt.cfg.Storage.Config["repository_path"] = tempDir + "/storage"
+				}
+			}
+
 			controller, err := New(tt.cfg, logger)
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -50,9 +65,23 @@ func TestControllerCreation(t *testing.T) {
 }
 
 func TestControllerLifecycle(t *testing.T) {
+	// Use a temporary directory for this test
+	tempDir := t.TempDir()
+
 	// Create a test logger and controller
 	logger := testutil.NewMockLogger(true)
-	ctrl, err := New(config.DefaultConfig(), logger)
+
+	cfg := config.DefaultConfig()
+	cfg.DataDir = tempDir + "/data"
+	cfg.CertPath = tempDir + "/certs"
+	if cfg.Certificate != nil {
+		cfg.Certificate.CAPath = tempDir + "/certs/ca"
+	}
+	if cfg.Storage != nil && cfg.Storage.Config != nil {
+		cfg.Storage.Config["repository_path"] = tempDir + "/storage"
+	}
+
+	ctrl, err := New(cfg, logger)
 	require.NoError(t, err)
 
 	// Start the controller
@@ -71,7 +100,16 @@ func TestControllerLifecycle(t *testing.T) {
 	}
 
 	// Verify required messages are present (order may vary based on certificate state)
-	assert.Contains(t, messages, "Loaded existing Certificate Authority")
+	// CA can be either loaded (existing) or created (new temp dir)
+	caInitialized := false
+	for _, msg := range messages {
+		if msg == "Loaded existing Certificate Authority" || msg == "Created new Certificate Authority" {
+			caInitialized = true
+			break
+		}
+	}
+	assert.True(t, caInitialized, "Expected CA to be initialized (either loaded or created)")
+
 	// M-AUTH-1: No longer generating default API keys (security anti-pattern removed)
 	assert.Contains(t, messages, "Starting controller")
 	assert.Contains(t, messages, "Controller server started (MQTT+QUIC mode)")

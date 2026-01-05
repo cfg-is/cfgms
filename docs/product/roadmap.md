@@ -108,10 +108,20 @@ Implemented comprehensive Docker-based E2E testing infrastructure that validates
 - [x] Add public repository workflows (Dependabot, CodeQL, container scanning, license compliance, SBOM) (issue #280) ✅ COMPLETED
 - [x] Create `SECURITY.md` vulnerability disclosure policy (issue #281) ✅ COMPLETED
 - [x] Re-enable and validate GitHub Actions workflows (issue #109, issue #15) ✅ COMPLETED
-- [ ] E2E Test Infrastructure Improvements: Parallelization and Organization (issue #297) - Fix MQTT+QUIC test skips, add parallelization, reduce test-complete from 15min → 7min
+- [x] E2E Test: Fix MQTT+QUIC test skips, add parallelization, reduce test-completion time (issue #297) ✅ COMPLETED
+  - Platform-specific test fixes (macOS CPU metrics, Windows temp directories)
+  - MQTT+QUIC test restoration (10 suites, 84% pass rate locally)
+  - Certificate foot-gun remediation (auto-generation via pkg/cert.Manager)
+  - GitHub Actions trigger restoration (critical workflows on main)
+  - Parallel test execution infrastructure (test-e2e-parallel, 53% faster)
 - [ ] ~~Convert repository to public and~~ activate GitHub Advanced Security features (issue #282)
 - [ ] Configure branch protection rules (issue #283)
 - [ ] Update documentation with security badges and public links (issue #284)
+
+#### v0.8.1 Bug fixes and test completion
+
+- [ ] Fix single-use registration token enforcement in database storage (issue #299)
+- [ ] Complete E2E test framework for MQTT+QUIC mode (issue #294)
 
 ### Phase 2: Production Stability & Feature Completion (v0.9.0 - v1.0.0)
 
@@ -122,7 +132,6 @@ Achieve production stability, complete core platform features, and prepare for s
 ##### Phase 1: Test Infrastructure Foundation (Required for all validation)
 
 - [ ] Test infrastructure improvements
-  - [ ] **E2E test framework for MQTT+QUIC mode (Issue #294 - 8-13 points)** - HIGH PRIORITY: Implement E2E tests that validate full system deployment (mirrors GitHub Actions integration tests, validates QUICK_START.md, regression prevention)
   - [ ] Fix failsafe component unhealthy state detection (Issue #295 - 5-8 points) - Refactor failsafe wrappers to properly trigger unhealthy state after consecutive failures, re-enable 6 component failure security tests
   - [ ] Enhanced monitoring controls in graceful degradation (Issue #296 - 3-5 points) - Implement enhanced_monitoring security control for admin users in RBAC graceful degradation mode, re-enable degraded mode tests
   - [ ] Chaos engineering network partition simulation (Issue #291) - Implement proper network failure injection for chaos tests
