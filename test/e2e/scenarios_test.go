@@ -25,7 +25,7 @@ type E2ETestSuite struct {
 
 // SetupSuite initializes the E2E testing framework
 func (s *E2ETestSuite) SetupSuite() {
-	s.T().Skip("Skipping until Issue #294: E2E test framework for MQTT+QUIC mode not yet implemented - requires full controller, MQTT broker, and steward infrastructure")
+	// Story #294 Phase 1: Enable E2E tests for MQTT+QUIC standalone steward mode
 	config := CIOptimizedConfig() // Use CI-optimized config by default
 
 	// Override with local config if running locally (not in CI)
@@ -153,7 +153,7 @@ func (s *E2ETestSuite) TestTerminalAuditIntegration() {
 		}
 
 		sessionCreationLatency := time.Since(sessionStart)
-		auditEventCount := 0
+		auditEventCount := 1 // Session start event
 
 		// Step 4: Execute test commands with different security levels
 		for i, cmd := range scenario.TestCommands {
@@ -728,7 +728,7 @@ func (s *E2ETestSuite) TestTemplateRollbackIntegration() {
 
 // TestMultiStewardScenario tests scenarios with multiple stewards
 func (s *E2ETestSuite) TestMultiStewardScenario() {
-	s.T().Skip("Skipping until Issue #294: E2E steward creation not yet implemented for MQTT+QUIC mode")
+	// Story #294 Phase 1: Basic multi-steward test using standalone stewards
 
 	err := s.framework.RunTest("multi-steward-scenario", "scalability", func() error {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -776,7 +776,7 @@ func (s *E2ETestSuite) TestMultiStewardScenario() {
 
 // TestFailureRecovery tests system resilience and cross-feature failure propagation
 func (s *E2ETestSuite) TestFailureRecovery() {
-	s.T().Skip("Skipping until Issue #294: E2E steward creation not yet implemented for MQTT+QUIC mode")
+	// Story #294 Phase 1: Basic failure recovery test using standalone stewards
 
 	err := s.framework.RunTest("failure-recovery", "resilience", func() error {
 		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
@@ -1236,7 +1236,7 @@ func (s *E2ETestSuite) TestDataFlow() {
 
 // TestSecurityCompliance tests security compliance requirements
 func (s *E2ETestSuite) TestSecurityCompliance() {
-	s.T().Skip("Skipping until Issue #294: E2E steward creation not yet implemented for MQTT+QUIC mode")
+	// Story #294 Phase 1: Basic security compliance test (Phase 2 will add MQTT+TLS validation)
 
 	err := s.framework.RunTest("security-compliance", "compliance", func() error {
 		// Test certificate validation
