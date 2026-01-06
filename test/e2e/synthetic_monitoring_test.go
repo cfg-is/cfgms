@@ -262,7 +262,7 @@ func (s *SyntheticMonitoringSuite) TestAPIEndpointMonitoring() {
 
 // TestTerminalSessionMonitoring monitors terminal session health
 func (s *SyntheticMonitoringSuite) TestTerminalSessionMonitoring() {
-	s.T().Skip("Skipping until Issue #294: E2E steward creation not yet implemented for MQTT+QUIC mode")
+	// Story #294 Phase 1: Basic terminal monitoring (Phase 2 will add MQTT communication validation)
 
 	err := s.framework.RunTest("terminal-session-monitoring", "synthetic-monitoring", func() error {
 		s.framework.logger.Info("Starting terminal session monitoring")
