@@ -5,6 +5,7 @@ This directory contains Architecture Decision Records (ADRs) for CFGMS - importa
 ## What is an ADR?
 
 An Architecture Decision Record captures a significant architectural decision, its context, the decision made, and its consequences. ADRs help teams understand:
+
 - Why certain architectural choices were made
 - What alternatives were considered
 - What trade-offs were accepted
@@ -64,6 +65,7 @@ What becomes easier or harder by making this decision?
 ## When to Create an ADR
 
 Create an ADR when making decisions about:
+
 - **System Architecture**: Major structural changes (e.g., adding central providers)
 - **Technology Choices**: Selecting frameworks, databases, protocols
 - **Patterns & Practices**: Establishing coding patterns or development workflows
@@ -71,6 +73,7 @@ Create an ADR when making decisions about:
 - **Enforcement Mechanisms**: Changes to how we enforce architectural rules
 
 **Don't create ADRs for**:
+
 - Minor implementation details
 - Routine bug fixes
 - Refactoring that doesn't change architecture
@@ -94,6 +97,7 @@ Create an ADR when making decisions about:
 ## Integration with CFGMS Development
 
 ADRs are referenced in:
+
 - **CLAUDE.md**: Link to relevant ADRs for major architectural decisions
 - **PR Reviews**: `/pr-review` may reference ADRs during Phase 3 (Architecture & Design)
 - **Story Planning**: `/story-start` may suggest creating ADR for significant changes

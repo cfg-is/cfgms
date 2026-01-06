@@ -7,7 +7,7 @@ This guide provides comprehensive instructions for setting up all security scann
 CFGMS uses a multi-layered security scanning approach with four primary tools:
 
 - **🔍 Trivy**: Filesystem scanning for vulnerabilities, secrets, and misconfigurations
-- **📦 Nancy**: Go dependency vulnerability scanning 
+- **📦 Nancy**: Go dependency vulnerability scanning
 - **🛡️ gosec**: Go security pattern analysis and anti-pattern detection
 - **🔬 staticcheck**: Advanced static analysis with curated rule sets
 
@@ -40,6 +40,7 @@ make security-check    # Same as security-scan but optimized for development
 Trivy scans for vulnerabilities, secrets, and misconfigurations in the filesystem.
 
 #### Linux (x86_64)
+
 ```bash
 # Recommended: Go installation
 go install github.com/aquasecurity/trivy/cmd/trivy@latest
@@ -49,6 +50,7 @@ curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/inst
 ```
 
 #### macOS
+
 ```bash
 # Recommended: Homebrew
 brew install trivy
@@ -58,6 +60,7 @@ go install github.com/aquasecurity/trivy/cmd/trivy@latest
 ```
 
 #### Windows (PowerShell)
+
 ```powershell
 # Go installation
 go install github.com/aquasecurity/trivy/cmd/trivy@latest
@@ -74,6 +77,7 @@ Move-Item trivy.exe $env:USERPROFILE\go\bin\trivy.exe
 Nancy scans Go dependencies for known vulnerabilities.
 
 #### Automatic Installation (Recommended)
+
 ```bash
 # Cross-platform automatic installation
 make install-nancy
@@ -85,6 +89,7 @@ make install-nancy
 #### Manual Installation Options
 
 ##### Linux (x86_64)
+
 ```bash
 # Binary download to Go bin directory
 curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v1.0.51/nancy-v1.0.51-linux-amd64 -o ~/nancy
@@ -92,6 +97,7 @@ chmod +x ~/nancy && mv ~/nancy $(go env GOPATH)/bin/nancy
 ```
 
 ##### macOS (Intel)
+
 ```bash
 # Homebrew (recommended)
 brew install nancy
@@ -102,6 +108,7 @@ chmod +x ~/nancy && mv ~/nancy $(go env GOPATH)/bin/nancy
 ```
 
 ##### macOS (Apple Silicon)
+
 ```bash
 # Binary download to Go bin directory
 curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v1.0.51/nancy-v1.0.51-darwin-arm64 -o ~/nancy
@@ -109,12 +116,14 @@ chmod +x ~/nancy && mv ~/nancy $(go env GOPATH)/bin/nancy
 ```
 
 ##### Linux (Arch)
+
 ```bash
 # AUR package
 yay -S nancy-bin
 ```
 
 ##### Windows (PowerShell)
+
 ```powershell
 # Binary download to Go bin directory
 Invoke-WebRequest -Uri 'https://github.com/sonatype-nexus-community/nancy/releases/download/v1.0.51/nancy-v1.0.51-windows-amd64.exe' -OutFile 'nancy.exe'
@@ -134,6 +143,7 @@ gosec --version
 ```
 
 **Key Features:**
+
 - Detects SQL injection, crypto weaknesses, and other security anti-patterns
 - Configurable via .gosec.json for rule management and false positive suppression
 - Non-blocking by default - reports issues without stopping development workflow
@@ -149,8 +159,9 @@ go install honnef.co/go/tools/cmd/staticcheck@latest
 ```
 
 **Configuration**: CFGMS includes a `staticcheck.conf` file with curated rules that:
+
 - Focus on critical correctness issues (SA* rules)
-- Include standard library misuse detection (ST* rules) 
+- Include standard library misuse detection (ST* rules)
 - Exclude style warnings for faster development
 - Enable performance optimizations (caching, concurrency)
 - Provide clear priority guidance for issue resolution
@@ -160,6 +171,7 @@ go install honnef.co/go/tools/cmd/staticcheck@latest
 After installing the tools, verify they're working correctly:
 
 ### 1. Tool Availability Check
+
 ```bash
 # Check all tools are in PATH
 trivy --version      # Should show: trivy version X.X.X
@@ -170,6 +182,7 @@ staticcheck --version # Should show: staticcheck version X.X.X
 ```
 
 ### 2. Individual Tool Testing
+
 ```bash
 # Test Trivy filesystem scanning
 make security-trivy
@@ -185,6 +198,7 @@ make security-staticcheck
 ```
 
 ### 3. Unified Security Validation
+
 ```bash
 # Test complete security pipeline
 make security-scan
@@ -209,6 +223,7 @@ make lint          # 3. Run linting
 ### Development Usage Patterns
 
 #### During Development
+
 ```bash
 # Quick security check while developing
 make security-check
@@ -219,12 +234,14 @@ make security-deps     # Focus on dependency issues
 ```
 
 #### Before Committing
+
 ```bash
 # Full validation (part of CLAUDE.md workflow)
 make security-scan     # Must pass before commit
 ```
 
 #### CI/CD Integration
+
 ```bash
 # In GitHub Actions (future v0.3.1 Story 3.1)
 make security-scan     # Blocks deployment on critical issues
@@ -233,6 +250,7 @@ make security-scan     # Blocks deployment on critical issues
 ## Configuration Files
 
 ### .trivyignore
+
 Located at project root, manages Trivy false positives:
 
 ```bash
@@ -247,6 +265,7 @@ dist/
 ```
 
 ### .gosec.json
+
 Located at project root, configures gosec security analysis:
 
 ```json
@@ -270,6 +289,7 @@ Located at project root, configures gosec security analysis:
 ```
 
 **Key Configuration Options:**
+
 - **exclude.paths**: Automatically excludes test files and documentation
 - **severity/confidence**: Set to "medium" to focus on actionable issues
 - **nosec comments**: Use `#nosec` in code to suppress false positives on specific lines
@@ -286,6 +306,7 @@ Located at project root, configures gosec security analysis:
 ### Common Issues
 
 #### 1. Tool Not Found in PATH
+
 ```bash
 # Symptom: "command not found" errors
 # Solution: Ensure Go bin directory is in PATH
@@ -297,6 +318,7 @@ echo 'export PATH=$PATH:$(go env GOPATH)/bin' >> ~/.zshrc   # macOS/zsh
 ```
 
 #### 2. Permission Denied on Binary Installation
+
 ```bash
 # Symptom: Permission errors when moving to /usr/local/bin
 # Solution: Use sudo or install to user directory
@@ -307,6 +329,7 @@ export PATH=$PATH:~/bin
 ```
 
 #### 3. Trivy Database Update Issues
+
 ```bash
 # Symptom: "Failed to update vulnerability database"
 # Solution: Manual database update
@@ -317,6 +340,7 @@ trivy fs . --skip-update
 ```
 
 #### 4. Nancy SSL/Network Issues
+
 ```bash
 # Symptom: SSL certificate or network errors
 # Solution: Use --skip-update-check flag (already in make target)
@@ -324,6 +348,7 @@ go list -json -deps ./... | nancy sleuth --skip-update-check
 ```
 
 #### 5. Go Module Issues
+
 ```bash
 # Symptom: "go list" errors in Nancy scanning
 # Solution: Ensure go.mod is properly initialized
@@ -334,25 +359,30 @@ go mod tidy
 ### Platform-Specific Troubleshooting
 
 #### Windows
+
 - **PowerShell Execution Policy**: Run `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`
 - **Path Issues**: Use `$env:PATH += ";C:\path\to\tools"` or add via System Properties
 
 #### macOS
+
 - **Quarantine Issues**: Run `xattr -d com.apple.quarantine /path/to/binary` for downloaded binaries
 - **ARM64 Compatibility**: Ensure you download ARM64 binaries for Apple Silicon Macs
 
 #### Linux
+
 - **Permission Issues**: Ensure user has sudo access or use user-local installation
 - **Distribution Packages**: Some tools may be available via package managers (apt, yum, pacman)
 
 ## Make Target Reference
 
 ### Installation Helpers
+
 ```bash
 make install-nancy       # Automatic cross-platform Nancy installation
 ```
 
 ### Individual Tools
+
 ```bash
 make security-trivy      # Trivy filesystem scanning
 make security-deps       # Nancy dependency scanning
@@ -361,6 +391,7 @@ make security-staticcheck # staticcheck advanced static analysis
 ```
 
 ### Unified Targets  
+
 ```bash
 make security-scan       # Run all security tools (blocking on critical issues)
 make security-check      # Quick security validation for development
@@ -369,6 +400,7 @@ make security-check      # Quick security validation for development
 ### Output Interpretation
 
 #### Success Output
+
 ```
 ✅ Trivy scan completed - no issues found
 ✅ Nancy dependency scan completed - no critical vulnerabilities found
@@ -376,6 +408,7 @@ make security-check      # Quick security validation for development
 ```
 
 #### Failure Output
+
 ```
 ❌ CRITICAL/HIGH vulnerabilities found - deployment blocked!
 ⚠️  Nancy found vulnerable dependencies. Consider updating:
@@ -386,6 +419,7 @@ make security-check      # Quick security validation for development
 ## Security Tool Versions
 
 Current tool versions (as of v0.3.1):
+
 - **Trivy**: v0.48.3+ (latest recommended)
 - **Nancy**: v1.0.51
 - **gosec**: v2.22.7+ (latest recommended via `go install @latest`)
@@ -407,6 +441,7 @@ When adding new security tools:
 **OPTIONAL** pre-commit hooks provide automated security scanning before commits for developers who want additional safety without impacting the core development workflow.
 
 ### Quick Setup
+
 ```bash
 # Install pre-commit (Python package)
 pip install pre-commit
@@ -419,20 +454,24 @@ pre-commit --version
 ```
 
 ### What's Included
+
 The `.pre-commit-config.yaml` configuration includes:
 
 **🛡️ Security Hooks (Performance Optimized):**
+
 - **gosec**: Go security pattern analysis on changed files only
 - **staticcheck**: Static analysis with curated rules on changed files only
 - **detect-secrets**: Secret detection with known development certificate exclusions
 
 **⚡ Fast Development Hooks:**
+
 - **go fmt**: Code formatting
 - **go imports**: Import organization  
 - **go vet**: Basic Go analysis
 - **go mod tidy**: Module maintenance
 
 **📁 File Quality Hooks:**
+
 - Trailing whitespace removal
 - File ending fixes
 - YAML/JSON/TOML validation
@@ -442,6 +481,7 @@ The `.pre-commit-config.yaml` configuration includes:
 ### Usage
 
 **Normal Commit (with hooks):**
+
 ```bash
 git add .
 git commit -m "Your commit message"
@@ -449,6 +489,7 @@ git commit -m "Your commit message"
 ```
 
 **Bypass When Needed:**
+
 ```bash
 # Skip all hooks (emergency commits, CI fixes, etc.)
 git commit --no-verify -m "Emergency fix"
@@ -458,6 +499,7 @@ SKIP=gosec,staticcheck git commit -m "Skip security checks"
 ```
 
 **Manual Hook Execution:**
+
 ```bash
 # Run hooks on all files (useful for initial setup)
 pre-commit run --all-files
@@ -472,12 +514,14 @@ pre-commit autoupdate
 ### Performance Design
 
 **Optimized for Development Velocity:**
+
 - Hooks run only on **changed files** (not entire codebase)
 - Security tools use **medium severity/confidence** for speed
 - **Non-blocking**: Hooks can be bypassed when needed
 - **Fast exit**: Basic checks run first, expensive checks run last
 
 **Resource Usage:**
+
 - Average hook execution: **2-5 seconds** for typical commits
 - Large commits (10+ files): **10-15 seconds**  
 - Full codebase scan: **60+ seconds** (only on `--all-files`)
@@ -485,11 +529,13 @@ pre-commit autoupdate
 ### Integration with Existing Workflow
 
 **Pre-commit hooks are OPTIONAL and do not replace:**
+
 - CLAUDE.md mandatory workflow security scanning
 - CI/CD pipeline security validation
 - Make targets for security scanning
 
 **Benefits:**
+
 - **Early Detection**: Catch issues before they reach CI/CD
 - **Developer Choice**: Enable when you want extra safety
 - **Learning Tool**: See security patterns as you develop
@@ -498,6 +544,7 @@ pre-commit autoupdate
 ### Troubleshooting
 
 **Hook Installation Issues:**
+
 ```bash
 # Reinstall hooks
 pre-commit uninstall
@@ -509,6 +556,7 @@ pre-commit install --install-hooks
 ```
 
 **Tool Not Found Errors:**
+
 ```bash
 # Install missing Go tools
 go install honnef.co/go/tools/cmd/staticcheck@latest
@@ -519,6 +567,7 @@ which staticcheck gosec
 ```
 
 **Performance Issues:**
+
 ```bash
 # Skip expensive hooks temporarily
 SKIP=detect-secrets git commit -m "Skip secret detection"

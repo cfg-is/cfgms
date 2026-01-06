@@ -21,6 +21,7 @@ gRPC is **not actively used** in CFGMS. The system migrated to MQTT+QUIC for con
 ## Current Architecture
 
 The controller uses:
+
 - **MQTT**: Control plane communication (commands, heartbeats, DNA sync)
 - **QUIC**: Data plane communication (configuration sync, bulk data transfer)
 - **HTTP REST**: External API, registration, management endpoints
@@ -68,6 +69,7 @@ features/controller/service/rbac_service.go
 
 **Status**: Active use BUT not as gRPC services
 **Details**:
+
 - These implement business logic used by MQTT/QUIC/HTTP handlers
 - They embed `UnimplementedXServer` for interface conformance (unused)
 - Methods take `context.Context` and return proto messages (still useful)
@@ -83,6 +85,7 @@ features/rbac/middleware.go
 
 **Status**: Uses gRPC interceptor pattern
 **Details**:
+
 - Implements `grpc.UnaryServerInterceptor` and `grpc.StreamServerInterceptor`
 - Extracts metadata using `metadata.FromIncomingContext`
 - NOT actually used with gRPC server
@@ -92,12 +95,14 @@ features/rbac/middleware.go
 ### 5. Dependencies
 
 **go.mod includes**:
+
 ```
 google.golang.org/grpc
 google.golang.org/protobuf
 ```
 
 **Status**:
+
 - `protobuf` is actively used (proto messages)
 - `grpc` is NOT needed (only used in unused code)
 
@@ -147,6 +152,7 @@ google.golang.org/protobuf
 ### Test Impact
 
 **Search for gRPC in tests**:
+
 ```bash
 grep -r "grpc\." test/ features/*/test*.go
 ```
@@ -158,6 +164,7 @@ Expected: Minimal impact (no gRPC server tests exist)
 **Breaking Change**: YES - if external clients use gRPC (none exist)
 
 **Current Communication Methods**:
+
 1. **Steward → Controller**: MQTT+QUIC (Story #198)
 2. **CLI → Controller**: HTTP REST API
 3. **Web UI → Controller**: HTTP REST API (future)
@@ -190,11 +197,13 @@ Expected: Minimal impact (no gRPC server tests exist)
 ## Recommended Actions
 
 ### Phase 1: Analysis and Planning (1 day)
+
 - [x] Document current gRPC usage (this document)
 - [ ] Verify no external gRPC dependencies
 - [ ] Create migration checklist
 
 ### Phase 2: Code Removal (2-3 days)
+
 - [ ] Remove service definitions from .proto files
 - [ ] Regenerate proto code without gRPC
 - [ ] Refactor service implementations
@@ -203,12 +212,14 @@ Expected: Minimal impact (no gRPC server tests exist)
 - [ ] Remove gRPC from go.mod
 
 ### Phase 3: Testing (1 day)
+
 - [ ] Run full test suite
 - [ ] Test MQTT+QUIC communication
 - [ ] Test HTTP REST API
 - [ ] Test RBAC authorization
 
 ### Phase 4: Documentation (1 day)
+
 - [ ] Update architecture docs
 - [ ] Update API documentation
 - [ ] Update contributor guide
@@ -229,6 +240,7 @@ If full removal is too aggressive for v0.7.0, consider minimal cleanup:
 ## Conclusion
 
 gRPC artifacts in CFGMS are **legacy code from pre-MQTT+QUIC architecture**. They provide no value and add:
+
 - Unnecessary dependencies
 - Confusing code structure
 - Maintenance burden

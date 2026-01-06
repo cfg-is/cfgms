@@ -15,6 +15,7 @@ CFGMS has a **comprehensive, production-aligned test infrastructure** that close
 #### Location: `/home/jrdn/git/cfg.is/cfgms/test/`
 
 **Directory Structure:**
+
 ```
 test/
 ├── e2e/                          # End-to-end tests (9 files)
@@ -64,6 +65,7 @@ test/
 | steward-tenant1/2/3 | Container | Multi-tenant isolation | ha |
 
 **Key Features**:
+
 - Ephemeral tmpfs volumes for fast I/O
 - Health checks on all services
 - TLS certificate injection for mTLS testing
@@ -93,6 +95,7 @@ test/
 **Test Orchestration**: All via Makefile targets (90+ test-related targets)
 
 **Key CI Targets**:
+
 - `make test-ci` - Full CI validation (8-12 min)
 - `make test-integration-complete` - Docker-based integration
 - `make test-mqtt-quic` - MQTT+QUIC protocol tests
@@ -127,6 +130,7 @@ test/
 #### DEVELOPMENT.md (570 lines)
 
 **Local development methods**:
+
 - Same three modes as QUICK_START
 - Built from source: `make build`
 - Pre-requisites: Go 1.25+, protobuf compiler, make
@@ -135,6 +139,7 @@ test/
 #### production-runbooks.md (627 lines)
 
 **Production operations**:
+
 - Systemd service management
 - Certificate renewal procedures
 - Database backup/restore
@@ -146,16 +151,19 @@ test/
 ### 2.2 Configuration Methods
 
 **Config File Locations**:
+
 - `/etc/cfgms/config.yaml` - Steward config
 - `/etc/cfgms/controller.yaml` - Controller config (documented in runbooks)
 - Environment variables (all services support env override)
 
 **Storage Providers**:
+
 - Git (default, with SOPS encryption)
 - PostgreSQL (pluggable)
 - Database abstraction (pluggable)
 
 **Logging Providers**:
+
 - File (default)
 - TimescaleDB (pluggable)
 - Central logging (pluggable)
@@ -167,18 +175,21 @@ test/
 ### Gap #1: Docker-Only Architecture Tests
 
 **Issue**: HA cluster tests REQUIRE Docker containers
+
 - Location: `test/integration/ha/` directory
 - Issue: Cannot run HA tests without Docker Compose
 - Production implications: HA features untested on raw systems
 - Impact: OSS users deploying HA might miss issues
 
 **Evidence**:
+
 ```makefile
 test-mqtt-quic-setup: # Requires Docker Compose --profile ha
   docker compose -f docker-compose.test.yml --profile ha up
 ```
 
-**Recommendation**: 
+**Recommendation**:
+
 - Add in-process HA cluster tests (non-Docker)
 - Use test mocks for MQTT broker instead of full container
 - Allow HA testing in CI without Docker
@@ -190,16 +201,19 @@ test-mqtt-quic-setup: # Requires Docker Compose --profile ha
 **Issue**: Quick Start shows 5-minute steward setup, but tests don't validate this flow
 
 **Current Reality**:
+
 - Steward tested as part of controller+agent pairs
 - No dedicated "Option A" integration tests
 - Script: `features/steward/...` tests focus on modules, not registration
 
 **Production Gap**:
+
 - QUICK_START Option A never validated end-to-end
 - Edge device deployments (no network) untested
 - Offline mode undefined
 
 **Recommendation**:
+
 - Create `test/integration/standalone_steward_test.go`
 - Validate entire QUICK_START Option A workflow
 - Test offline/local-only steward operation
@@ -209,11 +223,13 @@ test-mqtt-quic-setup: # Requires Docker Compose --profile ha
 ### Gap #3: Certificate Management Flow Not Tested
 
 **Issue**: Auto-certificate registration documented but not tested
+
 - QUICK_START promises: "Certificates are auto-generated and auto-approved"
 - Reality: Tests use pre-generated certificates from `/test/integration/mqtt_quic/certs/`
 - No test validates the registration flow shown in QUICK_START
 
 **Evidence**:
+
 ```bash
 # From QUICK_START
 ./bin/cfgms-steward \
@@ -224,6 +240,7 @@ test-mqtt-quic-setup: # Requires Docker Compose --profile ha
 ```
 
 **Actual Test Reality**:
+
 ```go
 // From docker_test.go
 CFGMS_MQTT_TLS_CERT_PATH: "/app/test-certs/client-cert.pem"
@@ -231,6 +248,7 @@ CFGMS_MQTT_TLS_KEY_PATH: "/app/test-certs/client-key.pem"
 ```
 
 **Recommendation**:
+
 - Add integration test for full registration flow
 - Test dev-mode auto-approval
 - Test production-mode manual approval
@@ -241,16 +259,19 @@ CFGMS_MQTT_TLS_KEY_PATH: "/app/test-certs/client-key.pem"
 ### Gap #4: Build-from-Source Not Tested
 
 **Issue**: QUICK_START and DEVELOPMENT.md require building from source
+
 - Tests use pre-built binaries via Docker
 - `make build` called in tests but not validated in CI
 - Cross-platform builds (Linux, Windows, macOS ARM64) not tested
 
 **Evidence**:
+
 - `make test-ci` runs tests against compiled code
 - But no CI job validates: `make build` → run binaries → integration tests
 - Docker tests use `FROM golang:1.25` + build in container
 
 **Recommendation**:
+
 - Add CI job: build binaries, run steward/controller via execve
 - Test cross-platform builds: Linux AMD64/ARM64, Windows AMD64/ARM64, macOS ARM64
 - Validate QUICK_START exactly as documented
@@ -260,11 +281,13 @@ CFGMS_MQTT_TLS_KEY_PATH: "/app/test-certs/client-key.pem"
 ### Gap #5: Configuration File Validation Untested
 
 **Issue**: YAML config files shown in QUICK_START not validated in tests
+
 - QUICK_START shows: `sudo tee /etc/cfgms/config.yaml << EOF`
 - Tests use environment variables and Docker compose, not YAML files
 - Config parsing untested
 
 **Evidence**:
+
 ```bash
 # QUICK_START step 2
 sudo tee /etc/cfgms/config.yaml > /dev/null <<EOF

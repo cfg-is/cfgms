@@ -7,6 +7,7 @@ This document outlines the Git workflow, branching strategy, and PR process for 
 CFGMS follows GitFlow with **MANDATORY feature branch workflow**:
 
 ### Branch Hierarchy
+
 - `main` - Production-ready code only (protected)
 - `develop` - Integration branch for features (never delete)
 - `feature/*` - New feature development (temporary)
@@ -15,6 +16,7 @@ CFGMS follows GitFlow with **MANDATORY feature branch workflow**:
 - `refactor/*` - Code improvements (temporary)
 
 ### Branch Protection Rules
+
 - `main`: Requires PR review, status checks, no direct pushes
 - `develop`: Requires PR review, allows fast-forward merges
 - Feature branches: Created from and merged back to `develop`
@@ -22,6 +24,7 @@ CFGMS follows GitFlow with **MANDATORY feature branch workflow**:
 ## Feature Branch Workflow
 
 ### 1. Starting New Work
+
 ```bash
 # Always start from develop
 git checkout develop
@@ -36,6 +39,7 @@ git checkout -b feature/story-167-enhanced-security
 ```
 
 ### 2. During Development
+
 ```bash
 # Regular commits to feature branch
 git add .
@@ -52,6 +56,7 @@ git merge develop  # or rebase if preferred
 ```
 
 ### 3. Completing Work
+
 ```bash
 # Final push of feature branch
 git push origin feature/story-166-logging-migration
@@ -68,6 +73,7 @@ git branch -D feature/story-166-logging-migration
 ## Branch Naming Conventions
 
 ### Standard Patterns
+
 - **Feature**: `feature/story-[NUMBER]-[description]`
 - **Bug Fix**: `fix/issue-[NUMBER]-[description]` or `fix/[brief-description]`
 - **Documentation**: `docs/[topic]` or `docs/story-[NUMBER]-docs`
@@ -75,6 +81,7 @@ git branch -D feature/story-166-logging-migration
 - **Hotfix**: `hotfix/[critical-issue-description]`
 
 ### Examples
+
 ```bash
 # Good examples
 feature/story-166-logging-migration
@@ -97,12 +104,14 @@ docs/updates
 ### CRITICAL RULE: Never Create Direct develop→main PRs
 
 **❌ WRONG (Will Delete Develop Branch):**
+
 ```bash
 # On develop branch - DON'T DO THIS
 gh pr create --base main --title "Epic Complete"  # ❌ Will delete develop!
 ```
 
 **✅ CORRECT (Feature Branch Workflow):**
+
 ```bash
 # ALWAYS create feature branch first
 git checkout develop
@@ -119,6 +128,7 @@ gh pr create --base main --title "Release: Epic 4 to Production"
 ```
 
 ### PR Creation Template
+
 ```bash
 gh pr create --base develop --title "Implement Story #[NUMBER]: [description]" --body "$(cat <<'EOF'
 ## Summary
@@ -146,7 +156,9 @@ EOF
 ### PR Merge Settings
 
 #### GitHub Repository Settings
+
 To prevent accidental branch deletion:
+
 1. Go to GitHub → Repository → Settings → General
 2. Under "Pull Requests" section:
    - ✅ Enable "Allow merge commits"
@@ -157,6 +169,7 @@ To prevent accidental branch deletion:
    - ❌ Never allow deletion
 
 #### Safe Merge Commands
+
 ```bash
 # Merge PR without deleting source branch
 gh pr merge [PR_NUMBER] --merge --no-delete-branch
@@ -168,12 +181,14 @@ gh pr merge [PR_NUMBER] --squash --no-delete-branch
 ## PR Review Process
 
 ### Mandatory Review Requirements
+
 - **Code Review**: All PRs require review before merge
 - **Status Checks**: Tests, security scans, and linting must pass
 - **Approval**: At least one approving review required
 - **Fresh Context**: Use structured 5-phase review methodology
 
 ### Review Commands
+
 ```bash
 # Review PR using structured methodology
 /pr-review [PR_NUMBER]
@@ -184,6 +199,7 @@ gh pr merge [PR_NUMBER] --squash --no-delete-branch
 ## Release Workflow
 
 ### Development to Production
+
 ```bash
 # 1. Feature work (on feature branches)
 git checkout -b feature/story-123-new-feature
@@ -203,6 +219,7 @@ git push origin v0.4.7.0
 ```
 
 ### Hotfix Workflow
+
 ```bash
 # 1. Create hotfix from main
 git checkout main
@@ -228,6 +245,7 @@ git push origin v0.4.7.1
 ## Commit Message Standards
 
 ### Commit Message Format
+
 ```
 [Type] Brief description (50 chars max)
 
@@ -240,6 +258,7 @@ Basic Security Review: [summary]
 ```
 
 ### Commit Types
+
 - **Implement**: New features or major functionality
 - **Fix**: Bug fixes and issue resolution
 - **Update**: Enhancements to existing features
@@ -249,6 +268,7 @@ Basic Security Review: [summary]
 - **Security**: Security-related changes
 
 ### Examples
+
 ```
 Implement Story #166: Global logging provider migration
 
@@ -264,6 +284,7 @@ input validation maintained for all logging calls
 ## Git Configuration
 
 ### Recommended Settings
+
 ```bash
 # Set up user information
 git config --global user.name "Your Name"
@@ -294,12 +315,14 @@ git config --global pull.rebase true
 The Git workflow supports CFGMS's multi-tenant architecture:
 
 ### Configuration Storage
+
 - **Hierarchical Configuration Inheritance**: MSP (Level 0) → Client (Level 1) → Group (Level 2) → Device (Level 3)
 - **Declarative Merging**: Named resources replace entire blocks rather than field-level merging
 - **Source Tracking**: Every configuration value includes source attribution and hierarchy level
 - **REST API Access**: `/api/v1/stewards/{id}/config/effective` endpoint provides merged configuration with inheritance metadata
 
 ### Branch Strategy for Multi-Tenant Features
+
 - Feature branches for tenant-specific functionality
 - Careful testing across tenant boundaries
 - Configuration inheritance validation in PRs
@@ -309,6 +332,7 @@ The Git workflow supports CFGMS's multi-tenant architecture:
 ### Common Issues
 
 #### Merge Conflicts
+
 ```bash
 # When merge conflicts occur
 git status  # See conflicted files
@@ -318,6 +342,7 @@ git commit -m "Resolve merge conflicts"
 ```
 
 #### Branch Cleanup
+
 ```bash
 # List all branches
 git branch -a
@@ -330,6 +355,7 @@ git push origin --delete feature/old-branch
 ```
 
 #### Sync Issues
+
 ```bash
 # If local develop is behind remote
 git checkout develop
@@ -343,6 +369,7 @@ git merge develop  # or git rebase develop
 ### Emergency Procedures
 
 #### Accidental Commit to Wrong Branch
+
 ```bash
 # Move commit to correct branch
 git log --oneline -5  # Get commit hash
@@ -353,6 +380,7 @@ git reset --hard HEAD~1  # Remove commit from wrong branch
 ```
 
 #### Corrupted Repository
+
 ```bash
 # Check repository integrity
 git fsck --full

@@ -24,6 +24,7 @@ make check-architecture # Central provider compliance
 ```
 
 **Exit Criteria:**
+
 - [ ] All tests pass (0 failures)
 - [ ] No linting errors
 - [ ] No critical/high security vulnerabilities
@@ -44,6 +45,7 @@ go test -v -timeout 5m
 ```
 
 **Tests Validated:**
+
 - [ ] TestQuickStartOptionA - Complete workflow validation
 - [ ] TestFilePermissions - File creation with 0644
 - [ ] TestDirectoryPermissions - Directory creation with 0755
@@ -51,6 +53,7 @@ go test -v -timeout 5m
 - [ ] TestStewardLogs - Container startup successful
 
 **Manual Validation (Optional):**
+
 ```bash
 # Build steward
 make build-steward
@@ -82,6 +85,7 @@ sudo rm /tmp/cfgms-release-test.txt /etc/cfgms/test-release.yaml
 ```
 
 **Exit Criteria:**
+
 - [ ] All Docker tests pass
 - [ ] (Optional) Manual test creates file successfully
 
@@ -100,6 +104,7 @@ go test -v -timeout 10m
 ```
 
 **Tests Validated:**
+
 - [ ] TestControllerStartup - Controller starts successfully
 - [ ] TestControllerAPI - HTTP API accessible
 - [ ] TestStewardConnection - Steward connects via MQTT+QUIC
@@ -109,6 +114,7 @@ go test -v -timeout 10m
 - [ ] TestCertificateManagement - TLS configuration correct
 
 **Exit Criteria:**
+
 - [ ] All Docker tests pass
 - [ ] Controller starts without errors
 - [ ] Steward successfully connects
@@ -118,6 +124,7 @@ go test -v -timeout 10m
 Validates full platform with registration tokens.
 
 **Manual Validation:**
+
 ```bash
 # Build all components
 make build
@@ -174,6 +181,7 @@ rm -rf /tmp/cfgms-release-* /tmp/controller-release-test.yaml
 ```
 
 **Exit Criteria:**
+
 - [ ] Controller starts successfully
 - [ ] Registration token created
 - [ ] (Optional) Steward registers successfully
@@ -192,6 +200,7 @@ go test -v -tags commercial -timeout 30m
 ```
 
 **Tests Validated:**
+
 - [ ] Leader election
 - [ ] Failover scenarios
 - [ ] Network partition handling
@@ -200,6 +209,7 @@ go test -v -tags commercial -timeout 30m
 - [ ] Authentication workflows
 
 **Exit Criteria:**
+
 - [ ] All HA tests pass (25+ tests)
 - [ ] Failover works within 10 seconds
 - [ ] No data loss during failover
@@ -218,6 +228,7 @@ make build-cross-validate
 ```
 
 **Platforms Validated:**
+
 - [ ] Linux AMD64
 - [ ] Linux ARM64
 - [ ] Windows AMD64
@@ -225,6 +236,7 @@ make build-cross-validate
 - [ ] macOS ARM64
 
 **Exit Criteria:**
+
 - [ ] All platform binaries compile successfully
 - [ ] Binary sizes are reasonable (< 100MB per binary)
 - [ ] No compilation warnings
@@ -241,6 +253,7 @@ go test -v -run TestConfigValidation
 ```
 
 **Tests Validated:**
+
 - [ ] Valid YAML parsing
 - [ ] Invalid YAML error handling
 - [ ] Missing required fields detection
@@ -249,6 +262,7 @@ go test -v -run TestConfigValidation
 - [ ] Tab vs space validation
 
 **Exit Criteria:**
+
 - [ ] All config validation tests pass
 - [ ] Error messages are user-friendly
 
@@ -260,6 +274,7 @@ go test -v -run TestCertificateRegistration
 ```
 
 **Tests Validated:**
+
 - [ ] Auto-approval in dev mode
 - [ ] Manual approval workflow
 - [ ] Certificate rotation
@@ -267,6 +282,7 @@ go test -v -run TestCertificateRegistration
 - [ ] Certificate expiry handling
 
 **Exit Criteria:**
+
 - [ ] All certificate tests pass
 - [ ] Registration flow works end-to-end
 
@@ -293,6 +309,7 @@ docker compose -f docker-compose.test.yml down -v
 ```
 
 **Exit Criteria:**
+
 - [ ] Tool reports all services ready
 - [ ] No false positives/negatives
 - [ ] Helpful error messages on failure
@@ -306,21 +323,25 @@ docker compose -f docker-compose.test.yml down -v
 Manually verify key documentation claims:
 
 **Option A - Standalone Steward:**
+
 - [ ] Step-by-step commands work exactly as written
 - [ ] Expected output matches actual output
 - [ ] No undocumented prerequisites
 
 **Option B - Standalone Controller:**
+
 - [ ] Controller.yaml configuration is complete
 - [ ] Workflow example runs successfully
 - [ ] All required directories documented
 
 **Option C - Controller + Fleet:**
+
 - [ ] Registration token creation works
 - [ ] Steward CLI flags are correct
 - [ ] MQTT+QUIC configuration complete
 
 **Exit Criteria:**
+
 - [ ] All three options validated
 - [ ] No documentation/reality gaps
 
@@ -338,12 +359,14 @@ go test -v -bench=. -benchtime=10s
 ```
 
 **Metrics to Record:**
+
 - [ ] Configuration apply time (target: < 100ms for 100 resources)
 - [ ] MQTT message throughput (target: > 1000 msg/sec)
 - [ ] Storage operation latency (target: < 50ms p99)
 - [ ] Memory usage under load (target: < 500MB)
 
 **Exit Criteria:**
+
 - [ ] Performance within acceptable ranges
 - [ ] No regressions vs previous release
 
@@ -360,6 +383,7 @@ make security-scan
 ```
 
 **Required Checks:**
+
 - [ ] Trivy: No critical/high vulnerabilities
 - [ ] Nancy: No vulnerable dependencies
 - [ ] gosec: No security patterns detected
@@ -367,6 +391,7 @@ make security-scan
 - [ ] No hardcoded secrets in codebase
 
 **Exit Criteria:**
+
 - [ ] All security scans pass
 - [ ] Known issues documented in security log
 - [ ] CVE report updated
@@ -439,16 +464,19 @@ echo "✅ Release validation complete!"
 ### Common Issues
 
 **Tests fail with "permission denied":**
+
 - Ensure Docker has sufficient permissions
 - Check /var/log/cfgms directory permissions
 - Verify user is in docker group
 
 **Cross-platform builds fail:**
+
 - Install required Go version (1.25+)
 - Check CGO requirements for platform
 - Verify GOOS/GOARCH combinations
 
 **Service wait times out:**
+
 - Check Docker Compose services are running
 - Verify network connectivity
 - Check service logs: `docker compose logs <service>`

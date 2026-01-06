@@ -21,6 +21,7 @@ These standards ensure that documentation is clear, consistent, and maintainable
 CFGMS requires comprehensive Go documentation following these standards:
 
 #### Package-Level Documentation
+
 - Every package must have a comprehensive package comment explaining its purpose
 - Include overview of key concepts, primary use cases, and design decisions
 - Provide practical usage examples using Go's example testing pattern
@@ -28,6 +29,7 @@ CFGMS requires comprehensive Go documentation following these standards:
 - Explain relationships to other packages within the system
 
 #### Function and Method Documentation
+
 - All exported functions and methods must have GoDoc comments starting with the function name
 - Document all parameters including types, expected values, and constraints
 - Document all return values including success cases and specific error conditions
@@ -36,6 +38,7 @@ CFGMS requires comprehensive Go documentation following these standards:
 - Document performance characteristics where relevant
 
 #### Type and Interface Documentation
+
 - All exported types must be documented with their purpose and key responsibilities
 - Document important fields, their relationships, and validation rules
 - Explain the type's lifecycle and proper usage patterns
@@ -43,18 +46,21 @@ CFGMS requires comprehensive Go documentation following these standards:
 - Provide examples of correct implementations and common usage patterns
 
 #### Error and Constant Documentation
+
 - Document all exported constants and variables with their purpose and valid values
 - Create custom error types with clear documentation explaining when they occur
 - Document error handling strategies and recovery options
 - Explain the relationship between different error conditions
 
 #### Example Standards
+
 - Include runnable examples using Go's `Example` function pattern
 - Examples must demonstrate real-world usage scenarios, not trivial cases
 - Test all examples to ensure they remain functional as code evolves
 - Examples should show both successful operations and error handling
 
 #### Implementation Notes
+
 - Document important design decisions and architectural trade-offs
 - Explain any non-obvious behavior, edge cases, or platform-specific considerations
 - Include performance notes for critical paths or resource-intensive operations
@@ -160,6 +166,7 @@ CFGMS requires comprehensive Go documentation following these standards:
 - Use a style checker for checking style.
 
 ## Version Information
+
 - **Document Version:** 1.0
 - **Last Updated:** 2024-04-04
-- **Status:** Draft 
+- **Status:** Draft

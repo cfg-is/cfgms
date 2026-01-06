@@ -96,20 +96,24 @@ logger.WarnCtx(ctx, "Retry attempt",
 ### Required Fields by Log Level
 
 **ERROR Level:**
+
 - `operation`: High-level operation name
 - `error_code`: Standardized error code
 - `error`: Error message
 - `resource_id`: Affected resource (if applicable)
 
 **WARN Level:**
+
 - `operation`: High-level operation name
 - Context-specific fields explaining the warning
 
 **INFO Level:**
+
 - `operation`: High-level operation name
 - Relevant operational metrics
 
 **DEBUG Level:**
+
 - Detailed debugging information
 - Use sparingly in production
 
@@ -187,14 +191,16 @@ logger.InfoCtx(ctx, "Processing configuration",
 
 ## Best Practices
 
-### DO:
+### DO
+
 - ✅ Always use `*Ctx()` methods with context
 - ✅ Use consistent field names across components
 - ✅ Include `operation` field in all log entries
 - ✅ Use structured fields instead of string interpolation
 - ✅ Add tenant/session to context early in request lifecycle
 
-### DON'T:
+### DON'T
+
 - ❌ Use `fmt.Printf()` or `log.Println()` for operational logging
 - ❌ Log sensitive information (passwords, tokens, PII)
 - ❌ Use string interpolation in log messages

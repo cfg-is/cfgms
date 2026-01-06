@@ -5,6 +5,7 @@ This guide provides comprehensive instructions for developing CFGMS modules that
 ## Overview
 
 CFGMS uses an interface-based logging injection pattern that:
+
 - Preserves module binary signatures and application allowlisting
 - Enables centralized logging collection and monitoring
 - Maintains backward compatibility with existing modules

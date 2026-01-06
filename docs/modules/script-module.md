@@ -164,6 +164,7 @@ Every script execution generates a comprehensive audit record:
 ### Performance Metrics
 
 Aggregated metrics include:
+
 - **Success Rate**: Percentage of successful executions
 - **Average Duration**: Mean execution time
 - **Shell Usage**: Distribution of shell usage

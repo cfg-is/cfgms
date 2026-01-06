@@ -5,6 +5,7 @@
 This document provides structured guidance for automated security remediation using Claude Code integration. It defines the format, patterns, and examples that enable Claude Code to automatically fix common security issues detected by our security scanning tools.
 
 **Tools Integrated:**
+
 - **Trivy**: Filesystem vulnerability scanning
 - **Nancy**: Go dependency vulnerability scanning  
 - **gosec**: Go security pattern analysis
@@ -59,11 +60,13 @@ This document provides structured guidance for automated security remediation us
 #### Pattern: Critical/High CVE in Go Module
 
 **Detection Pattern:**
+
 ```
 CVE-YYYY-NNNNN (CRITICAL/HIGH) - Update `package-name` from vX.Y.Z → vA.B.C
 ```
 
 **Automated Fix:**
+
 ```bash
 # Command to execute
 go get package-name@vA.B.C
@@ -75,7 +78,7 @@ make security-deps
 make test
 ```
 
-#### Example Vulnerabilities Currently Detected:
+#### Example Vulnerabilities Currently Detected
 
 1. **go-git CVE-2025-21613 (CRITICAL)**
    - **Issue**: Argument injection via URL field
@@ -92,11 +95,13 @@ make test
 #### Pattern: Integer Overflow (G115)
 
 **Detection Pattern:**
+
 ```
 G115 (HIGH): integer overflow conversion int -> uint32 at file.go:line
 ```
 
 **Automated Fix:**
+
 ```go
 // Before (vulnerable)
 value := uint32(someInt)
@@ -111,11 +116,13 @@ value := uint32(someInt)
 #### Pattern: Weak Random Number Generator (G404)
 
 **Detection Pattern:**
+
 ```
 G404 (HIGH): Use of weak random number generator (math/rand instead of crypto/rand)
 ```
 
 **Automated Fix:**
+
 ```go
 // Before (vulnerable)
 import "math/rand"
@@ -135,11 +142,13 @@ value := int(n.Int64())
 #### Pattern: TLS MinVersion Too Low (G402)
 
 **Detection Pattern:**
+
 ```
 G402 (HIGH): TLS MinVersion too low at file.go:line
 ```
 
 **Automated Fix:**
+
 ```go
 // Before (vulnerable)
 tlsConfig := &tls.Config{
@@ -155,11 +164,13 @@ tlsConfig := &tls.Config{
 #### Pattern: Subprocess with Variable (G204)
 
 **Detection Pattern:**
+
 ```
 G204 (MEDIUM): Subprocess launched with variable at file.go:line
 ```
 
 **Automated Fix:**
+
 ```go
 // Before (potentially vulnerable)
 cmd := exec.Command("sh", "-c", userInput)
@@ -175,11 +186,13 @@ cmd := exec.Command("sh", "-c", userInput)
 #### Pattern: File Inclusion via Variable (G304)
 
 **Detection Pattern:**
+
 ```
 G304 (MEDIUM): Potential file inclusion via variable at file.go:line
 ```
 
 **Automated Fix:**
+
 ```go
 // Before (potentially vulnerable)
 data, err := ioutil.ReadFile(userPath)
@@ -195,6 +208,7 @@ data, err := ioutil.ReadFile(cleanPath)
 #### Pattern: Insecure File Permissions (G301, G302, G306)
 
 **Detection Patterns:**
+
 ```
 G301 (MEDIUM): Expect directory permissions to be 0750 or less
 G302 (MEDIUM): Expect file permissions to be 0600 or less  
@@ -202,6 +216,7 @@ G306 (MEDIUM): Expect WriteFile permissions to be 0600 or less
 ```
 
 **Automated Fix:**
+
 ```go
 // Before (too permissive)
 os.MkdirAll(dir, 0755)           // G301
@@ -278,21 +293,24 @@ When Claude Code encounters staticcheck issues:
 After applying any automated fix:
 
 1. **Run targeted security scan**: `make security-[tool]` for the specific tool
-2. **Run comprehensive security scan**: `make security-scan` 
+2. **Run comprehensive security scan**: `make security-scan`
 3. **Run tests**: `make test`
 4. **Run full validation**: `make test-with-security`
 
 ## Files That Should Not Be Auto-Modified
 
 **Generated Files** (DO NOT MODIFY):
+
 - `*.pb.go` (Protocol buffer generated files)
 - `go.sum` (Only via `go mod tidy`)
 
 **Test Files** (SPECIAL HANDLING):
+
 - Files in `/test/` directories may have intentionally permissive settings
 - Review test-specific security exceptions before applying fixes
 
 **Configuration Files** (REVIEW REQUIRED):
+
 - TLS configurations in production paths
 - File permission settings that may be environment-specific
 

@@ -113,13 +113,16 @@ resources:
 ### Steward Section
 
 **Basic Settings:**
+
 - `name`: Unique identifier for this Steward instance
 - `log_level`: Logging verbosity (`debug`, `info`, `warn`, `error`)
 
 **Module Discovery:**
+
 - `module_paths`: List of directories to search for modules (searched in order)
 
 **Error Handling:**
+
 - `module_load_failure`: How to handle module loading failures
   - `continue`: Skip failed modules, continue with available ones (default)
   - `fail`: Stop execution if any module fails to load
@@ -131,6 +134,7 @@ resources:
   - `fail`: Stop execution on any runtime error
 
 **Execution Settings:**
+
 - `mode`: Execution mode
   - `apply`: Execute Set operations to achieve desired state (default)
   - `check`: Execute Get operations and compare (dry-run)
@@ -148,6 +152,7 @@ The `resources` section contains an array of resource configurations. Each resou
 - `config`: Module-specific configuration (varies by module)
 
 **Resource Configuration Notes:**
+
 - Only fields specified in `config` will be managed by the Steward
 - The module's `GetManagedFields()` determines which fields can be managed
 - Other system settings discovered by `Get()` will be left unchanged
@@ -155,12 +160,14 @@ The `resources` section contains an array of resource configurations. Each resou
 ## Platform-Specific Considerations
 
 ### Linux/macOS
+
 - Configuration files stored in `/etc/cfgms/`
 - Modules installed in `/opt/cfgms/modules/`
 - Use forward slashes in paths
 - Owner/group settings supported for file and directory modules
 
 ### Windows
+
 - Configuration files stored in `C:\ProgramData\cfgms\`
 - Modules installed in `C:\Program Files\cfgms\modules\`
 - Use double backslashes in paths: `"C:\\path\\to\\file"`
@@ -178,6 +185,7 @@ The Steward validates configuration files on startup:
 ## Examples
 
 ### Minimal Configuration
+
 ```yaml
 steward:
   name: "web-server-01"
@@ -191,6 +199,7 @@ resources:
 ```
 
 ### Development Configuration
+
 ```yaml
 steward:
   name: "dev-machine"

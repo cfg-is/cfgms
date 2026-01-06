@@ -30,6 +30,7 @@ Registration codes are base64-encoded JSON with the following structure:
 ```
 
 **Fields:**
+
 - `tenant_id` (required): Unique identifier for the tenant
 - `controller_url` (required): MQTT broker URL (mqtt:// or mqtts://)
 - `group` (optional): Group identifier for organization
@@ -38,6 +39,7 @@ Registration codes are base64-encoded JSON with the following structure:
 ### Example
 
 **Decoded JSON:**
+
 ```json
 {
   "tenant_id": "acme-corp",
@@ -48,6 +50,7 @@ Registration codes are base64-encoded JSON with the following structure:
 ```
 
 **Encoded Registration Code:**
+
 ```
 eyJ0ZW5hbnRfaWQiOiJhY21lLWNvcnAiLCJjb250cm9sbGVyX3VybCI6Im1xdHQ6Ly9jb250cm9sbGVyLmFjbWUuY29tOjg4ODMiLCJncm91cCI6InByb2R1Y3Rpb24iLCJ2ZXJzaW9uIjoxfQ==
 ```
@@ -103,6 +106,7 @@ msiexec /i \\domain\netlogon\cfgms-steward.msi /quiet REGCODE="$RegCode"
 ```
 
 **GPO Configuration:**
+
 1. Computer Configuration → Policies → Software Settings → Software Installation
 2. New Package → Select cfgms-steward.msi
 3. Deployment Method: Assigned
@@ -120,6 +124,7 @@ msiexec /x {ProductCode} /quiet
 ```
 
 **Intune Configuration:**
+
 1. Apps → Windows → Add → Windows app (Win32)
 2. Upload .intunewin package
 3. Install command: `msiexec /i cfgms-steward.msi /quiet REGCODE="<REGCODE>"`
@@ -291,6 +296,7 @@ MSP uses the same code-signed installer for all tenants:
 Configure allowlisting policies with single hash per platform:
 
 **Windows AppLocker:**
+
 ```xml
 <FilePathRule Id="..." Name="CFGMS Steward" Description="Allow CFGMS Steward" UserOrGroupSid="S-1-1-0" Action="Allow">
   <Conditions>
@@ -302,6 +308,7 @@ Configure allowlisting policies with single hash per platform:
 ```
 
 **macOS Gatekeeper:**
+
 ```bash
 # Code signing verification
 codesign -v /usr/local/bin/cfgms-steward
@@ -346,12 +353,14 @@ When steward starts:
 ### Secure Distribution
 
 **Recommended:**
+
 - Store registration codes in secure credential management (Vault, Key Manager)
 - Inject codes at deployment time from secure storage
 - Rotate tenant credentials periodically
 - Monitor unauthorized registration attempts
 
 **Avoid:**
+
 - Hardcoding registration codes in scripts committed to version control
 - Sharing registration codes via email or chat
 - Storing codes in plaintext configuration management systems
@@ -378,6 +387,7 @@ When rotating tenant credentials:
 **Error**: `Failed to connect to MQTT broker: connection refused`
 
 **Solution**:
+
 - Verify controller URL in registration code is correct
 - Check network connectivity to controller
 - Verify firewall allows egress to MQTT port (8883)
@@ -387,6 +397,7 @@ When rotating tenant credentials:
 **Error**: `Registration rejected: invalid tenant credentials`
 
 **Solution**:
+
 - Verify tenant_id exists on controller
 - Check tenant credentials are valid
 - Review controller logs for rejection reason
@@ -396,6 +407,7 @@ When rotating tenant credentials:
 **Error**: `Registration rejected: steward_id already exists`
 
 **Solution**:
+
 - Check for duplicate steward installations
 - Verify steward generates unique UUID for steward_id
 - Review tenant prefix collision
@@ -415,6 +427,7 @@ Use registration tokens (`--regtoken`) with MQTT+QUIC architecture instead.
 ## Implementation Status (Story #198 Complete)
 
 ✅ **Completed Features**:
+
 - MQTT-based registration with API key-style tokens
 - Controller tenant validation for registration tokens
 - Steward_id generation with tenant prefix (`{tenant_id}-{uuid}`)
@@ -422,6 +435,7 @@ Use registration tokens (`--regtoken`) with MQTT+QUIC architecture instead.
 - Session-based QUIC authentication
 
 🔜 **Future Enhancements**:
+
 - Credential rotation mechanism
 - Token revocation API
 - Multi-region token distribution

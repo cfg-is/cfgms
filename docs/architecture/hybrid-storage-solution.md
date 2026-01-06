@@ -43,6 +43,7 @@ controller:
 ### Key Benefits
 
 #### 1. GitOps Workflow Support
+
 - **Pull Request Process**: All configuration changes require PR approval
 - **Peer Review**: Critical changes reviewed by team members  
 - **Audit Trail**: Complete history via Git commits with author/timestamp
@@ -51,18 +52,21 @@ controller:
 - **SOPS Integration**: Encrypted sensitive configurations
 
 #### 2. Performance for Operational Data
+
 - **ACID Transactions**: Database ensures data consistency for audit logs
 - **Optimized Queries**: PostgreSQL indexing for compliance reporting
 - **High Throughput**: Efficient handling of high-volume audit ingestion
 - **Relational Integrity**: Foreign key constraints for tenant relationships
 
 #### 3. Security and Compliance
+
 - **Separation of Concerns**: Different security models for different data types
 - **SOPS Encryption**: Git-stored configs encrypted with Mozilla SOPS
 - **Git Access Controls**: Repository-level permissions and branch protection
 - **Immutable Audit**: Both Git commits and database provide audit trails
 
 #### 4. Migration Support
+
 - **Gradual Migration**: Existing deployments can migrate incrementally
 - **Configuration Detection**: System automatically handles both storage formats
 - **Migration Planning**: Built-in migration strategy recommendations
@@ -127,14 +131,18 @@ configStore := manager.GetConfigStore()
 ## Alternative Approaches Considered
 
 ### 1. Tenant-Level Storage Overrides
+
 **Rejected because:**
+
 - Complexity: Each tenant would need storage configuration
 - Management overhead: Multiple storage backends per deployment
 - Data consistency: Cross-tenant operations become complex
 - Security: More attack surface with multiple backends
 
 ### 2. Global Setting with Git Backup
+
 **Rejected because:**
+
 - Limited GitOps workflow: Database remains primary
 - No peer review process: Changes bypass Git workflow
 - Backup lag: Git becomes eventually consistent copy
@@ -143,6 +151,7 @@ configStore := manager.GetConfigStore()
 ## Real-World Deployment Examples
 
 ### Large MSP Scenario
+
 ```yaml
 # 5,000+ endpoints, multiple teams, compliance requirements
 controller:
@@ -165,6 +174,7 @@ controller:
 ```
 
 ### Development/Testing Environment
+
 ```yaml
 # Lightweight setup for development
 controller:
@@ -186,6 +196,7 @@ controller:
 ## Migration Path
 
 ### Phase 1: Assessment
+
 ```bash
 # Detect current configuration type
 make migration-assessment
@@ -193,6 +204,7 @@ make migration-assessment
 ```
 
 ### Phase 2: Add Git Provider
+
 ```yaml
 # Gradually add Git for configurations only
 # Existing operational data remains in database
@@ -207,6 +219,7 @@ controller:
 ```
 
 ### Phase 3: Data Migration
+
 ```bash
 # Export configurations from database to Git
 cfg config export --format git --target /data/cfgms-configs

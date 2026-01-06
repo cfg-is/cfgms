@@ -7,6 +7,7 @@ The CFGMS Git backend implements a hybrid repository structure that balances sec
 ## Repository Structure
 
 ### MSP Global Repository
+
 ```
 cfgms-msp-global/
 ├── .cfgms/
@@ -34,6 +35,7 @@ cfgms-msp-global/
 ```
 
 ### Client Repository Structure
+
 ```
 cfgms-client-{client-id}/
 ├── .cfgms/
@@ -142,11 +144,13 @@ type GitProvider interface {
 ## Multi-Tenant Design
 
 ### Repository Naming Convention
+
 - MSP Global: `cfgms-{msp-id}-global`
 - Client: `cfgms-{msp-id}-client-{client-id}`
 - Shared Resources: `cfgms-{msp-id}-shared-{resource-type}`
 
 ### Access Control
+
 ```yaml
 # Repository access mapping
 access_control:
@@ -169,6 +173,7 @@ access_control:
 ```
 
 ### Template Inheritance
+
 ```yaml
 # Client repository .cfgms/inheritance.yaml
 inheritance:
@@ -186,6 +191,7 @@ inheritance:
 ## Synchronization Strategy
 
 ### Template Propagation Flow
+
 1. Change made to MSP global template
 2. System identifies affected client repositories
 3. Creates pull requests in each client repository
@@ -194,6 +200,7 @@ inheritance:
 6. Notifies relevant stakeholders
 
 ### Cross-Repository Operations
+
 ```go
 // Example: Propagate security baseline update
 func (m *GitManager) PropagateSecurityBaseline(ctx context.Context) error {
@@ -228,6 +235,7 @@ func (m *GitManager) PropagateSecurityBaseline(ctx context.Context) error {
 ## Configuration Commit Structure
 
 ### Commit Message Format
+
 ```
 [MODULE] Action: Brief description
 
@@ -243,6 +251,7 @@ Detailed changes:
 ```
 
 ### Metadata Storage
+
 ```yaml
 # .cfgms/commits/[change-id].yaml
 change_metadata:
@@ -268,6 +277,7 @@ change_metadata:
 ## Git Hooks Implementation
 
 ### Pre-Commit Hook
+
 ```bash
 #!/bin/bash
 # Validate configuration syntax
@@ -281,6 +291,7 @@ cfg metadata verify --file="$1"
 ```
 
 ### Pre-Receive Hook (Server-side)
+
 ```bash
 #!/bin/bash
 # Verify actor permissions
@@ -296,6 +307,7 @@ cfg limits check --tenant="$TENANT_ID"
 ## Branch Strategy
 
 ### Environment Mapping
+
 - `main` → Production configuration
 - `staging` → Staging environment
 - `develop` → Development environment
@@ -303,6 +315,7 @@ cfg limits check --tenant="$TENANT_ID"
 - `hotfix/*` → Emergency fixes
 
 ### Promotion Flow
+
 ```
 feature/update-nginx → develop → staging → main
                          ↓         ↓         ↓
@@ -312,12 +325,14 @@ feature/update-nginx → develop → staging → main
 ## Performance Considerations
 
 ### Repository Size Management
+
 - Implement configuration file chunking for large deployments
 - Use Git LFS for binary artifacts
 - Regular repository maintenance (gc, prune)
 - Archive old configurations after retention period
 
 ### Caching Strategy
+
 - Local repository cache for frequently accessed configs
 - In-memory cache for active configurations
 - Redis cache for distributed deployments
@@ -325,11 +340,13 @@ feature/update-nginx → develop → staging → main
 ## Security Considerations
 
 ### Encryption
+
 - Encrypt sensitive values in Git using age or sops
 - Store encryption keys in separate key management system
 - Rotate encryption keys periodically
 
 ### Audit Trail
+
 - All Git operations logged to audit system
 - Webhook notifications for repository changes
 - Integration with SIEM systems
@@ -337,30 +354,35 @@ feature/update-nginx → develop → staging → main
 ## Implementation Phases
 
 ### Phase 1: Core Git Operations (Week 1-2)
+
 - [ ] Basic repository management
 - [ ] Local Git operations using go-git
 - [ ] Configuration read/write
 - [ ] Basic commit functionality
 
 ### Phase 2: Provider Integration (Week 2-3)
+
 - [ ] GitHub provider implementation
 - [ ] GitLab provider implementation
 - [ ] Webhook management
 - [ ] Authentication handling
 
 ### Phase 3: Multi-Repository Support (Week 3-4)
+
 - [ ] Repository discovery
 - [ ] Cross-repository operations
 - [ ] Template synchronization
 - [ ] Inheritance system
 
 ### Phase 4: Advanced Features (Week 4-5)
+
 - [ ] Branch protection rules
 - [ ] Git hooks framework
 - [ ] Automated pull requests
 - [ ] Rollback capabilities
 
 ### Phase 5: Performance & Security (Week 5-6)
+
 - [ ] Caching implementation
 - [ ] Encryption integration
 - [ ] Performance optimization

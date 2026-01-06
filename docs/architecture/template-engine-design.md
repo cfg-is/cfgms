@@ -191,6 +191,7 @@ resources:
 ## Template Inheritance Model
 
 ### Hierarchy
+
 ```
 MSP Global Templates
     ↓
@@ -204,6 +205,7 @@ Device-Specific Values
 ### Example Flow
 
 1. **MSP Global Template** (`msp-global/templates/secure-server.yaml`):
+
 ```yaml
 # Base security template all clients inherit
 $extend "templates/base.yaml"
@@ -224,7 +226,8 @@ security:
     schedule: "$default($update_schedule, 'Sun 02:00')"
 ```
 
-2. **Client Template** (`client-123/templates/server.yaml`):
+1. **Client Template** (`client-123/templates/server.yaml`):
+
 ```yaml
 $extend "msp-global/templates/secure-server.yaml"
 
@@ -244,7 +247,8 @@ firewall:
     $endif
 ```
 
-3. **Device Values** (`client-123/devices/web-server-01/config.yaml`):
+1. **Device Values** (`client-123/devices/web-server-01/config.yaml`):
+
 ```yaml
 $extend "client-123/templates/server.yaml"
 
@@ -258,6 +262,7 @@ variables:
 Pre-built templates for common compliance requirements:
 
 ### CIS Hardening Template
+
 ```yaml
 # templates/compliance/cis-hardening.yaml
 $if $enable_cis_hardening
@@ -286,6 +291,7 @@ $endif
 ```
 
 ### HIPAA Compliance Template
+
 ```yaml
 # templates/compliance/hipaa.yaml
 $if $requires_hipaa
@@ -310,6 +316,7 @@ $endif
 ## Security Considerations
 
 ### Template Sandbox
+
 - No file system access beyond designated paths
 - No network calls during template execution
 - No shell command execution
@@ -317,6 +324,7 @@ $endif
 - Timeout protection against infinite loops
 
 ### Validation Requirements
+
 1. **Syntax Validation**: Template must parse correctly
 2. **Schema Validation**: Output must match expected schema
 3. **Security Validation**: No sensitive data exposure
@@ -324,6 +332,7 @@ $endif
 5. **Dependency Validation**: Required templates must be available
 
 ### Safe Functions Only
+
 ```go
 // Allowed functions
 - String manipulation (lower, upper, trim, replace)
@@ -343,24 +352,28 @@ $endif
 ## Implementation Phases
 
 ### Phase 1: Core Template Engine
+
 - Basic template parser using Go text/template
 - Variable substitution with dot notation
 - Simple conditionals and loops
 - Integration with config inheritance
 
 ### Phase 2: DNA Integration  
+
 - DNA property access in templates
 - Real-time DNA value resolution
 - DNA-based conditionals
 - Caching for performance
 
 ### Phase 3: Advanced Features
+
 - Template inheritance and blocks
 - Built-in function library
 - External data sources
 - Template composition
 
 ### Phase 4: Compliance & Security
+
 - Pre-built compliance templates
 - Security sandbox implementation
 - Comprehensive validation
@@ -369,6 +382,7 @@ $endif
 ## Testing Strategy
 
 ### Template Test Framework
+
 ```yaml
 # test-cases/firewall-template-test.yaml
 template: "templates/secure-firewall.yaml"
@@ -395,6 +409,7 @@ test_cases:
 ```
 
 ### Validation Tests
+
 - Malformed template syntax
 - Missing required variables
 - Invalid DNA references
@@ -404,17 +419,20 @@ test_cases:
 ## Integration Points
 
 ### With Git Backend (Story #74)
+
 - Templates stored in Git repositories
 - Version control for template evolution
 - Template discovery and loading
 - Cross-repository template references
 
 ### With Rollback (Story #75)
+
 - Template changes can be rolled back
 - Template rendering history tracked
 - Safe testing of template modifications
 
 ### With Config Service
+
 - Templates rendered during config generation
 - Merged with inherited configurations
 - Validated before deployment

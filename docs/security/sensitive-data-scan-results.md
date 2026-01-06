@@ -27,9 +27,10 @@
 **Command**: `gitleaks detect --source . --verbose`
 **Result**: 21 findings across 526 commits
 
-#### Finding Categories:
+#### Finding Categories
 
 **Category A: Test Credentials (Non-Sensitive)**
+
 - **File**: `test/integration/mqtt_quic_integration_test.go:44`
   - **Secret**: `cfgms_reg_test123456789abcdef`
   - **Type**: Test registration token in integration test
@@ -49,6 +50,7 @@
   - **Action**: None required - documentation serves security purpose
 
 **Category B: Environment Variables (Non-Sensitive)**
+
 - **Files**: `Makefile`, `scripts/wait-for-services.sh`, `Makefile.backup` (DELETED)
   - **Pattern**: `$CFGMS_TEST_GITEA_PASSWORD`, `$POSTGRES_PASSWORD`
   - **Type**: Environment variable references
@@ -56,6 +58,7 @@
   - **Action**: None required
 
 **Category C: Hashed Values (Not Secrets)**
+
 - **File**: `.secrets.baseline` (3 findings)
   - **Values**: SHA1 hashes of development certificates
   - **Type**: Hashed values from detect-secrets baseline
@@ -63,6 +66,7 @@
   - **Action**: None required
 
 **Category D: Documentation Placeholders (Non-Sensitive)**
+
 - **Files**: `docs/api/rest-api.md`, `docs/guides/configuration-inheritance.md` (7 findings)
   - **Value**: `your-api-key` placeholder
   - **Type**: Documentation examples
@@ -74,9 +78,10 @@
 **Command**: `trufflehog filesystem . --json --no-update`
 **Result**: 19 findings
 
-#### Verified Secrets (CRITICAL):
+#### Verified Secrets (CRITICAL)
 
 **Finding 1: Azure Test Credentials**
+
 - **File**: `.env.local` (NOT IN GIT HISTORY)
 - **Status**: ✅ GITIGNORED, ✅ NOT TRACKED, ✅ NOT IN HISTORY
 - **Secrets Found**:
@@ -106,9 +111,10 @@
   3. ⏳ **RECOMMENDED**: Rotate both Azure app secrets after OSS release
   4. ⏳ **RECOMMENDED**: Update `.env.local` with new secrets locally
 
-#### Development Certificates (Expected):
+#### Development Certificates (Expected)
 
 **Finding 2-11: TLS/mTLS Certificate Private Keys**
+
 - **Files**:
   - `certs/ca/ca.key`
   - `features/controller/certs/ca/ca.key`
@@ -126,9 +132,10 @@
 
 **Scanned Files**: 147 files containing keywords (password, secret, token, api_key)
 
-#### Key Findings:
+#### Key Findings
 
 **Safe Patterns Identified**:
+
 1. **Docker Compose** (`docker-compose.test.yml`):
    - Uses environment variables: `${POSTGRES_PASSWORD}`, `${GITEA_SECRET_KEY}`
    - Default test values: `cfgms_test_password`
@@ -149,14 +156,16 @@
 **Scanned**: All 526 commits
 **Search Terms**: password, secret, api_key, token, email domains, customer, client, internal
 
-#### Findings:
+#### Findings
 
 **Security-Related Commits** (1 finding):
+
 - **Subject**: "Add Phase 8: API key-style registration tokens (Story #198)"
 - **Type**: Feature development reference
 - **Risk**: NONE - Development work description
 
 **Customer/Internal References**:
+
 - Searched for "customer", "client", "internal" in commit messages
 - Found 20 commits referencing "client" - all referring to:
   - MQTT client (software component)
@@ -167,15 +176,18 @@
 ### 5. Proprietary Information Check
 
 **Internal Domains Searched**:
+
 - `ritzmob.com` (development domain)
 - `76vfrz.onmicrosoft.com` (Azure test tenant)
 
 **Search Results**:
+
 - **Code**: 0 references found
 - **Markdown**: 0 references found
 - **Git History**: 0 commits found
 
 **Email Addresses in Code**:
+
 - `jrdn@ritzmob.com` appears in:
   - Git commit author field (526 commits)
   - `.env.local` (gitignored, not in history)
@@ -186,6 +198,7 @@
 ## Detailed Risk Assessment
 
 ### High Risk Items: 0
+
 *No high-risk findings*
 
 ### Medium Risk Items: 1
@@ -218,6 +231,7 @@
    - **Action**: None required for OSS
 
 ### No Risk Items: 18
+
 - Development certificates (intentional)
 - Documentation placeholders
 - Environment variable references
@@ -228,14 +242,16 @@
 
 ## Recommendations for OSS Release
 
-### MANDATORY Actions:
+### MANDATORY Actions
+
 ✅ **COMPLETE** - No mandatory blocking items
 
 All sensitive data has been confirmed to NOT be in git history.
 
-### RECOMMENDED Actions:
+### RECOMMENDED Actions
 
 1. **Azure Credential Rotation** (Best Practice):
+
    ```bash
    # Rotate secrets for both Azure applications:
    # 1. cfgms-dev-testing (d16b38b1-7493-410a-9159-e5f66594a372)
@@ -244,22 +260,25 @@ All sensitive data has been confirmed to NOT be in git history.
    # Update .env.local with new secrets locally
    # Do NOT commit .env.local (already gitignored)
    ```
+
    **Timeline**: Before OSS launch (optional) or within 30 days after
 
 2. **Add .env.local to .gitleaks.toml allowlist**:
+
    ```toml
    [[rules.allowlists]]
    paths = [
      ".env.local"
    ]
    ```
+
    **Benefit**: Prevent future accidental scanning noise
 
 3. **Document Test Credential Practices**:
    - ✅ Already documented in `docs/security/test-credential-security.md`
    - ✅ Development certificates documented
 
-### OPTIONAL Actions:
+### OPTIONAL Actions
 
 1. **Update Author Email** (Optional):
    - Current: `jrdn@ritzmob.com` in 526 commits
@@ -301,11 +320,13 @@ git rev-list --all | xargs git grep "bGO8Q"  # Should be empty
 **Final Assessment**: ✅ **APPROVED FOR OPEN SOURCE RELEASE**
 
 The CFGMS repository has been comprehensively scanned for sensitive data across:
+
 - 526 commits spanning entire git history
 - 15.24 MB of repository data
 - All configuration files, documentation, and code
 
 **Key Findings**:
+
 1. ✅ Zero production secrets in git history
 2. ✅ Zero customer information in codebase
 3. ✅ Zero internal URLs in tracked files
@@ -315,6 +336,7 @@ The CFGMS repository has been comprehensively scanned for sensitive data across:
 **Risk Level**: LOW - No blocking issues for OSS release
 
 **Post-Release Actions**:
+
 - Rotate Azure test credentials (recommended within 30 days)
 - Enable GitHub secret scanning for future PRs
 - Continue following secure development practices
@@ -331,6 +353,7 @@ The CFGMS repository has been comprehensively scanned for sensitive data across:
 ## Appendix A: Tool Configurations
 
 ### Gitleaks Configuration
+
 ```yaml
 # Default gitleaks configuration was used
 # All 127 built-in rules active
@@ -339,6 +362,7 @@ The CFGMS repository has been comprehensively scanned for sensitive data across:
 ```
 
 ### TruffleHog Configuration
+
 ```yaml
 # Filesystem scan with verification
 # All 600+ detector types active

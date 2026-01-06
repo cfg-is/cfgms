@@ -118,6 +118,7 @@ This maximizes trust, community velocity for integrations, and follows proven mo
 ## Revenue Model (Phase 1)
 
 **SaaS Pricing**: $250/month for 250 "managed units"
+
 - 1 endpoint = 1 unit
 - 1 M365 user = 0.1 unit
 - Includes: Web UI, HA, Multi-MSP, ML monitoring, orchestration
@@ -146,12 +147,14 @@ make test
 ```
 
 **OSS Includes**:
+
 - Single controller deployment
 - All modules and integrations
 - Full CLI/API functionality
 - Basic health monitoring
 
 **OSS Excludes**:
+
 - HA clustering (BlueGreenMode, ClusterMode)
 - Raft consensus
 - Automatic failover
@@ -172,6 +175,7 @@ make test TAGS=commercial
 ```
 
 **Commercial Adds**:
+
 - Full HA clustering capabilities
 - Raft-based consensus
 - Automatic failover

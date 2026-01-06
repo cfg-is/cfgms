@@ -16,6 +16,7 @@ CFGMS uses interface-based dependency injection to provide centralized logging t
 ### Core Interfaces
 
 **`LoggingInjectable`** - Modules implement this to receive logger injection:
+
 ```go
 type LoggingInjectable interface {
     InjectLogger(logger Logger) error
@@ -24,6 +25,7 @@ type LoggingInjectable interface {
 ```
 
 **`LoggerProvider`** - Factory provides loggers to modules:
+
 ```go
 type LoggerProvider interface {
     GetLoggerForModule(moduleName string) Logger
@@ -31,6 +33,7 @@ type LoggerProvider interface {
 ```
 
 **`DefaultLoggingSupport`** - Embeddable struct providing injection capability:
+
 ```go
 type DefaultLoggingSupport struct {
     injectedLogger Logger
@@ -119,15 +122,18 @@ func (m *Module) Set(ctx context.Context, resourceID string, config modules.Conf
 ### Step 3: Add Structured Logging Fields
 
 **Required fields for all log entries:**
+
 - `operation`: High-level operation name (e.g., "mymodule_set", "mymodule_get")
 - `resource_id`: Resource being operated on
 - `tenant_id`: Extracted from context using `logging.ExtractTenantFromContext(ctx)`
 
 **Additional fields for ERROR level:**
+
 - `error_code`: Standardized error code (e.g., "OPERATION_FAILED", "VALIDATION_ERROR")
 - `error`: Error message from the error object
 
 **Additional fields for INFO level:**
+
 - `duration_ms`: Operation duration in milliseconds
 - `resource_count`: Number of resources affected (if applicable)
 
@@ -194,16 +200,19 @@ for moduleName, status := range statuses {
 ### Why Interface-Based Injection?
 
 **Code Signature Preservation:**
+
 - No binary modification or runtime patching
 - Module constructors remain unchanged
 - Binary hashes stay consistent for application allowlisting
 
 **EDR Compatibility:**
+
 - Uses standard Go interfaces (no reflection or dynamic code generation)
 - No process injection or memory manipulation
 - No suspicious runtime behavior patterns
 
 **Tenant Isolation:**
+
 - Context-based tenant extraction
 - No cross-tenant information leakage
 - Automatic tenant ID inclusion in all logs
@@ -211,12 +220,14 @@ for moduleName, status := range statuses {
 ### Security Best Practices
 
 **DO:**
+
 - ✅ Always use `*Ctx()` methods with context
 - ✅ Extract tenant ID from context: `logging.ExtractTenantFromContext(ctx)`
 - ✅ Use `GetEffectiveLogger()` to handle missing injection gracefully
 - ✅ Include structured fields for all operations
 
 **DON'T:**
+
 - ❌ Directly modify module binaries or executable code
 - ❌ Store logger instances as global variables
 - ❌ Log sensitive information (passwords, tokens, PII)
@@ -385,6 +396,7 @@ When adding logging injection to an existing module:
 ## Examples from Core Modules
 
 ### Directory Module
+
 ```go
 type directoryModule struct {
     modules.DefaultLoggingSupport
@@ -404,6 +416,7 @@ func (m *directoryModule) Set(ctx context.Context, resourceID string, config mod
 ```
 
 ### File Module
+
 ```go
 type fileModule struct {
     modules.DefaultLoggingSupport
@@ -424,6 +437,7 @@ func (m *fileModule) Set(ctx context.Context, resourceID string, config modules.
 ```
 
 ### Script Module
+
 ```go
 type scriptModule struct {
     modules.DefaultLoggingSupport

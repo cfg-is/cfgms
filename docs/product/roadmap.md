@@ -4,6 +4,8 @@
 
 This document outlines the development roadmap for the Configuration Management System (CFGMS). It provides a clear vision for the project's development, including milestones, features, and release planning, incorporating recent strategic adjustments to better align with MSP market voids and core product vision.
 
+**Last Updated**: 2026-01-06
+
 ## Versioning Strategy
 
 CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
@@ -164,6 +166,7 @@ Achieve production stability, complete core platform features, and prepare for s
 **Goal**: Enhance security posture with advanced tooling and prepare web interface security foundations
 
 **Backend Security Enhancements**:
+
 - [ ] OpenSSF Scorecard optimization (target score: 9.0+)
 - [ ] Go native fuzzing integration for critical packages
 - [ ] Evaluate and integrate Snyk (if beneficial beyond existing coverage)
@@ -171,6 +174,7 @@ Achieve production stability, complete core platform features, and prepare for s
 - [ ] Security testing automation improvements
 
 **Web Frontend Security Preparation**:
+
 - [ ] Evaluate web application security scanners (OWASP ZAP, Burp Suite Community)
 - [ ] Plan Content Security Policy (CSP) implementation
 - [ ] Evaluate frontend dependency scanning tools (npm audit, Snyk for JavaScript)
@@ -179,6 +183,7 @@ Achieve production stability, complete core platform features, and prepare for s
 - [ ] Document web security requirements and tooling strategy
 
 **Security Policy & Process**:
+
 - [ ] Conduct first external security audit (if resources available)
 - [ ] Establish CVE response procedures
 - [ ] Create security incident response playbook

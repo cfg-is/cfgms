@@ -37,6 +37,7 @@ These standards ensure consistency, readability, and maintainability of Go code 
 3. Internal imports
 
 Example:
+
 ```go
 import (
     "context"
@@ -114,12 +115,14 @@ import (
 CFGMS requires comprehensive documentation for all Go code:
 
 #### Package Documentation
+
 - Every package must have a package comment explaining its purpose
 - Include overview of key concepts and primary use cases
 - Provide practical usage examples using Go's example testing pattern
 - Document any package-level configuration or initialization requirements
 
 #### Function and Method Documentation
+
 - All exported functions and methods must have `godoc` comments starting with the function name
 - Document all parameters including their types and expected values
 - Document all return values including error conditions
@@ -127,28 +130,33 @@ CFGMS requires comprehensive documentation for all Go code:
 - Include usage examples for complex functions
 
 #### Type Documentation
+
 - All exported types must be documented with their purpose
 - Document key fields and their relationships
 - Explain any validation rules or constraints
 - Document the lifecycle and proper usage patterns
 
 #### Interface Documentation
+
 - Clearly document interface contracts and expected behavior
 - Document all method requirements and guarantees
 - Explain implementation responsibilities and constraints
 - Provide examples of correct implementations
 
 #### Error Documentation
+
 - Document all possible error conditions and their meanings
 - Use custom error types with clear documentation
 - Explain error handling strategies and recovery options
 
 #### Examples and Testing
+
 - Include runnable examples using Go's example testing pattern
 - Examples should demonstrate real-world usage scenarios
 - Test examples to ensure they remain current and functional
 
 #### Implementation Documentation
+
 - Document important design decisions and trade-offs
 - Explain any non-obvious behavior or edge cases
 - Document performance characteristics where relevant
@@ -234,6 +242,7 @@ CFGMS requires comprehensive documentation for all Go code:
 - Use `go cover` for coverage analysis.
 
 ## Version Information
+
 - **Document Version:** 1.0
 - **Last Updated:** 2024-04-04
-- **Status:** Draft 
+- **Status:** Draft

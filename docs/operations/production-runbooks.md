@@ -22,6 +22,7 @@ This runbook provides step-by-step procedures for common operational scenarios i
 ## System Architecture Overview
 
 ### Core Components
+
 - **Controller**: Central management system (port 8080)
 - **Stewards**: Endpoint agents (outbound connections only)
 - **Certificate Manager**: mTLS certificate lifecycle management
@@ -30,12 +31,14 @@ This runbook provides step-by-step procedures for common operational scenarios i
 - **Workflow Engine**: Automation and orchestration
 
 ### Key Directories
+
 - `/opt/cfgms/` - Application binaries and configs
 - `/var/log/cfgms/` - Application logs
 - `/var/lib/cfgms/` - Data storage
 - `/etc/cfgms/certs/` - TLS certificates
 
 ### Network Architecture
+
 - All steward connections are outbound (no open ports on endpoints)
 - Controller listens on port 8080 (HTTPS/REST API)
 - MQTT+QUIC protocol for steward-controller communication (MQTT control plane, QUIC data plane)
@@ -46,6 +49,7 @@ This runbook provides step-by-step procedures for common operational scenarios i
 ### Critical Metrics to Monitor
 
 #### System Health
+
 - **Controller Availability**: Must be >99.9%
 - **Certificate Expiration**: Alert 7 days before expiry
 - **Memory Usage**: Alert if >80% of allocated memory
@@ -53,6 +57,7 @@ This runbook provides step-by-step procedures for common operational scenarios i
 - **Disk Space**: Alert if >85% full
 
 #### Performance Metrics
+
 - **Session Creation Latency**: Alert if >2 seconds average
 - **Terminal Session Count**: Alert if approaching MaxSessions limit
 - **MQTT Request Latency**: Alert if P95 >500ms
@@ -60,6 +65,7 @@ This runbook provides step-by-step procedures for common operational scenarios i
 - **Error Rate**: Alert if >5% of requests fail
 
 #### Security Metrics
+
 - **Failed Authentication Attempts**: Alert if >10/minute
 - **Privilege Escalation Attempts**: Alert immediately
 - **Certificate Validation Failures**: Alert immediately
@@ -68,6 +74,7 @@ This runbook provides step-by-step procedures for common operational scenarios i
 ### Monitoring Tools Integration
 
 #### Prometheus Metrics
+
 ```bash
 # Check system metrics
 curl http://localhost:8080/metrics
@@ -82,6 +89,7 @@ curl http://localhost:8080/metrics
 ```
 
 #### Health Check Endpoints
+
 ```bash
 # Controller health
 curl https://localhost:8080/health
@@ -90,6 +98,7 @@ curl https://localhost:8080/health
 ```
 
 #### Log Monitoring
+
 ```bash
 # Monitor application logs
 tail -f /var/log/cfgms/controller.log
@@ -202,9 +211,11 @@ sqlite3 /var/lib/cfgms/database/cfgms.db "PRAGMA integrity_check;"
 ### High Availability Incident Response
 
 #### Severity 1: Complete System Outage
+
 **Response Time**: 15 minutes
 
 1. **Immediate Actions** (0-5 minutes)
+
    ```bash
    # Check controller status
    systemctl status cfgms-controller
@@ -219,6 +230,7 @@ sqlite3 /var/lib/cfgms/database/cfgms.db "PRAGMA integrity_check;"
    ```
 
 2. **Diagnosis** (5-10 minutes)
+
    ```bash
    # Check recent logs
    journalctl -u cfgms-controller --since "30 minutes ago" --priority=err
@@ -231,6 +243,7 @@ sqlite3 /var/lib/cfgms/database/cfgms.db "PRAGMA integrity_check;"
    ```
 
 3. **Recovery Actions** (10-15 minutes)
+
    ```bash
    # Restart controller service
    systemctl restart cfgms-controller
@@ -243,9 +256,11 @@ sqlite3 /var/lib/cfgms/database/cfgms.db "PRAGMA integrity_check;"
    ```
 
 #### Severity 2: Performance Degradation
+
 **Response Time**: 30 minutes
 
 1. **Check Performance Metrics**
+
    ```bash
    # Check CPU and memory usage
    htop
@@ -259,6 +274,7 @@ sqlite3 /var/lib/cfgms/database/cfgms.db "PRAGMA integrity_check;"
    ```
 
 2. **Mitigation Actions**
+
    ```bash
    # If high session count, implement session limits
    /opt/cfgms/bin/cfg config set terminal.max_sessions 50
@@ -271,6 +287,7 @@ sqlite3 /var/lib/cfgms/database/cfgms.db "PRAGMA integrity_check;"
    ```
 
 #### Severity 3: Individual Component Issues
+
 **Response Time**: 60 minutes
 
 1. **Isolate Affected Component**
@@ -281,7 +298,9 @@ sqlite3 /var/lib/cfgms/database/cfgms.db "PRAGMA integrity_check;"
 ### Security Incident Response
 
 #### Unauthorized Access Attempt
+
 1. **Immediate Response**
+
    ```bash
    # Check failed authentication logs
    grep "authentication failed" /var/log/cfgms/controller.log
@@ -294,6 +313,7 @@ sqlite3 /var/lib/cfgms/database/cfgms.db "PRAGMA integrity_check;"
    ```
 
 2. **Investigation**
+
    ```bash
    # Check all recent authentication events
    grep -E "(login|authentication|certificate)" /var/log/cfgms/*.log
@@ -306,6 +326,7 @@ sqlite3 /var/lib/cfgms/database/cfgms.db "PRAGMA integrity_check;"
    ```
 
 3. **Containment**
+
    ```bash
    # Revoke compromised certificates
    /opt/cfgms/bin/cert-manager revoke --serial {certificate_serial}
@@ -323,6 +344,7 @@ sqlite3 /var/lib/cfgms/database/cfgms.db "PRAGMA integrity_check;"
 ### Data Backup Procedures
 
 #### Daily Backup
+
 ```bash
 #!/bin/bash
 # /opt/cfgms/scripts/daily-backup.sh
@@ -351,6 +373,7 @@ rm -rf $BACKUP_DIR
 ```
 
 #### Disaster Recovery Restore
+
 ```bash
 #!/bin/bash
 # /opt/cfgms/scripts/disaster-restore.sh
@@ -395,6 +418,7 @@ echo "Disaster recovery completed for backup date: $RESTORE_DATE"
 **Scenario**: Network connectivity lost between controller and stewards
 
 1. **Detection**
+
    ```bash
    # Check steward connectivity
    /opt/cfgms/bin/cfg steward list --status offline
@@ -405,6 +429,7 @@ echo "Disaster recovery completed for backup date: $RESTORE_DATE"
    ```
 
 2. **Recovery**
+
    ```bash
    # On stewards: Check network configuration
    systemctl status network
@@ -422,6 +447,7 @@ echo "Disaster recovery completed for backup date: $RESTORE_DATE"
 ### High Memory Usage
 
 1. **Diagnosis**
+
    ```bash
    # Check memory usage by component
    ps aux | grep cfgms | sort -k4 -nr
@@ -435,6 +461,7 @@ echo "Disaster recovery completed for backup date: $RESTORE_DATE"
    ```
 
 2. **Resolution**
+
    ```bash
    # Reduce terminal session limit
    /opt/cfgms/bin/cfg config set terminal.max_sessions 50
@@ -449,6 +476,7 @@ echo "Disaster recovery completed for backup date: $RESTORE_DATE"
 ### High CPU Usage
 
 1. **Diagnosis**
+
    ```bash
    # Check CPU usage by component
    top -p $(pgrep -d, cfgms)
@@ -461,6 +489,7 @@ echo "Disaster recovery completed for backup date: $RESTORE_DATE"
    ```
 
 2. **Resolution**
+
    ```bash
    # Limit concurrent connections
    /opt/cfgms/bin/cfg config set server.max_connections 100
@@ -475,6 +504,7 @@ echo "Disaster recovery completed for backup date: $RESTORE_DATE"
 ### Slow Terminal Response
 
 1. **Diagnosis**
+
    ```bash
    # Check terminal session latency
    curl -H "Authorization: Bearer $API_TOKEN" \
@@ -488,6 +518,7 @@ echo "Disaster recovery completed for backup date: $RESTORE_DATE"
    ```
 
 2. **Resolution**
+
    ```bash
    # Optimize terminal buffer size
    /opt/cfgms/bin/cfg config set terminal.buffer_size 8192
@@ -504,6 +535,7 @@ echo "Disaster recovery completed for backup date: $RESTORE_DATE"
 ### Regular Maintenance Tasks
 
 #### Weekly Maintenance
+
 ```bash
 #!/bin/bash
 # /opt/cfgms/scripts/weekly-maintenance.sh
@@ -525,6 +557,7 @@ find /backup/cfgms -name "*.tar.gz" -mtime +30 -delete
 ```
 
 #### Monthly Maintenance
+
 ```bash
 #!/bin/bash
 # /opt/cfgms/scripts/monthly-maintenance.sh
@@ -548,6 +581,7 @@ find /backup/cfgms -name "*.tar.gz" -mtime +30 -delete
 ### Upgrade Procedures
 
 #### Minor Version Upgrade (e.g., v0.3.0 to v0.3.1)
+
 ```bash
 # 1. Backup current system
 /opt/cfgms/scripts/daily-backup.sh
@@ -575,6 +609,7 @@ curl https://localhost:8080/health
 ```
 
 #### Major Version Upgrade (e.g., v0.3.x to v0.4.0)
+
 ```bash
 # Follow detailed upgrade guide for breaking changes
 # See: docs/upgrade/v0.3-to-v0.4.md
@@ -583,18 +618,21 @@ curl https://localhost:8080/health
 ## Emergency Contacts
 
 ### Escalation Matrix
+
 - **Level 1**: Operations Team (24/7)
 - **Level 2**: Engineering Team (business hours)
 - **Level 3**: Architecture Team (on-call)
 
 ### Communication Channels
+
 - **Slack**: #cfgms-ops
-- **Email**: cfgms-ops@example.com
+- **Email**: <cfgms-ops@example.com>
 - **Phone**: +1-555-CFGMS-OPS
 
 ## Appendix
 
 ### Log File Locations
+
 ```
 /var/log/cfgms/controller.log       - Controller application logs
 /var/log/cfgms/steward.log          - Steward application logs
@@ -604,6 +642,7 @@ curl https://localhost:8080/health
 ```
 
 ### Configuration Files
+
 ```
 /etc/cfgms/controller.yaml          - Controller configuration
 /etc/cfgms/steward.yaml             - Steward configuration
@@ -612,6 +651,7 @@ curl https://localhost:8080/health
 ```
 
 ### Service Files
+
 ```
 /etc/systemd/system/cfgms-controller.service
 /etc/systemd/system/cfgms-steward.service
@@ -621,6 +661,7 @@ curl https://localhost:8080/health
 ---
 
 **Document Control**
+
 - **Owner**: CFGMS Operations Team
 - **Review Cycle**: Quarterly
 - **Next Review**: 2025-11-01
