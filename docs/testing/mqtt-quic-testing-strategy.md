@@ -43,12 +43,14 @@ go test -v ./test/integration/mqtt_quic/dna_update_test.go
 ### Test Infrastructure
 
 The tests use Docker Compose to create a realistic environment:
+
 - **Controller**: Runs in MQTT+QUIC mode
 - **MQTT Broker**: Embedded in controller with TLS
 - **Database**: TimescaleDB for state persistence
 - **Certificates**: Auto-generated via `pkg/cert.Manager`
 
 **Docker Services**:
+
 ```yaml
 controller-standalone:
   - MQTT: localhost:1886 (TLS)
@@ -70,6 +72,7 @@ go test -v -race -timeout=10m $(go list ./test/integration/... | grep -v mqtt_qu
 ```
 
 **Why double grep?**
+
 - First grep excludes `test/integration/mqtt_quic/` subdirectory
 - Second grep excludes parent-level tests (`mqtt_quic_integration_test.go`, `mqtt_quic_flow_test.go`)
 
@@ -86,6 +89,7 @@ go test -v -race -timeout=10m $(go list ./test/integration/... | grep -v mqtt_qu
 **Issue #294**: Complete E2E test framework for MQTT+QUIC mode (v0.8.1)
 
 **Required Fixes**:
+
 - [ ] Remove certificate-related skips (use auto-generation consistently)
 - [ ] Add QUIC server infrastructure to docker-compose
 - [ ] Resolve async timing issues in breach indicator tests
@@ -130,6 +134,7 @@ func (s *TLSSecurityTestSuite) ensureCertificatesExist() {
 ```
 
 **Benefits**:
+
 - ✅ Production-realistic (same code path as production)
 - ✅ Self-contained (no manual certificate setup)
 - ✅ Secure (prevents static test cert foot-guns)
@@ -138,6 +143,7 @@ func (s *TLSSecurityTestSuite) ensureCertificatesExist() {
 ### Negative Tests → Static Invalid Certificates ⚠️
 
 Uses `scripts/generate-invalid-test-certs.sh` for:
+
 - `expired-cert.pem` (TLS rejection test)
 - `selfsigned-cert.pem` (CA validation test)
 - `wrong-ca-cert.pem` (mTLS failure test)
@@ -145,6 +151,7 @@ Uses `scripts/generate-invalid-test-certs.sh` for:
 **CRITICAL**: Static certs ONLY for tests that should FAIL
 
 **Example Usage**:
+
 ```go
 // Test that expired certificates are rejected
 tlsConfig := &tls.Config{
@@ -163,11 +170,13 @@ assert.Error(t, token.Error()) // Should fail with cert expired
 ### Step-by-Step Local Testing
 
 1. **Start Docker Infrastructure**:
+
    ```bash
    make test-mqtt-quic-setup
    ```
 
    Expected output:
+
    ```
    ✅ MQTT+QUIC Docker environment ready!
       MQTT: 127.0.0.1:1886 (TLS)
@@ -176,6 +185,7 @@ assert.Error(t, token.Error()) // Should fail with cert expired
    ```
 
 2. **Run Tests**:
+
    ```bash
    make test-mqtt-quic
    ```
@@ -185,6 +195,7 @@ assert.Error(t, token.Error()) // Should fail with cert expired
    - 3 subtests may skip or fail (expected until Issue #294)
 
 3. **Debug Failures**:
+
    ```bash
    # View controller logs
    docker logs cfgms-controller-standalone
@@ -202,6 +213,7 @@ assert.Error(t, token.Error()) // Should fail with cert expired
    - Issue #294 tracks full CI enablement
 
 5. **Cleanup**:
+
    ```bash
    make test-mqtt-quic-cleanup
    ```
@@ -221,6 +233,7 @@ This is a **temporary state** until the E2E framework is complete.
 **A**: Yes - investigate and report in Issue #294. Local failures may indicate real issues that need addressing.
 
 If a test consistently fails locally:
+
 1. Check Docker infrastructure is running (`docker ps`)
 2. Verify certificates were generated (`ls test/integration/mqtt_quic/certs/`)
 3. Review test logs for specific errors
@@ -234,6 +247,7 @@ Static certs violate the "No Foot-guns in Development" rule from CLAUDE.md:
 > "Never build insecure options for convenience. If a feature requires durable storage in production, it MUST use durable storage in development and testing."
 
 **Why this matters**:
+
 - If docker-compose config is copied to production, static test certs bypass security
 - Auto-generation uses the same code path as production (better testing)
 - Prevents accidental test certificate exposure
@@ -244,19 +258,21 @@ Static certs violate the "No Foot-guns in Development" rule from CLAUDE.md:
 
 **Milestone**: v0.8.1 (Q1 2026)
 
-**Tracking**: https://github.com/cfg-is/cfgms/issues/294
+**Tracking**: <https://github.com/cfg-is/cfgms/issues/294>
 
 ### Q: What's the difference between MQTT+QUIC mode and HTTP-only mode?
 
 **A**: CFGMS supports two operational modes:
 
 **MQTT+QUIC Mode** (Production Default):
+
 - MQTT control plane for real-time commands, heartbeats, failover
 - QUIC data plane for high-performance config/DNA synchronization
 - Scales to 50k+ stewards
 - Requires TLS/mTLS for security
 
 **HTTP-only Mode** (Development/Simple Deployments):
+
 - REST API only
 - Simpler deployment (no MQTT broker)
 - Limited scalability (< 1000 stewards)
@@ -279,6 +295,7 @@ assert.Error(t, client.Connect()) // Should reject expired cert
 ```
 
 **Available invalid certificates**:
+
 - `expired-cert.pem` - Expired (past validity date)
 - `selfsigned-cert.pem` - Self-signed (not from CA)
 - `wrong-ca-cert.pem` - Signed by different CA
@@ -298,8 +315,10 @@ Error: dial tcp 127.0.0.1:1886: connect: connection refused
 ## Test Suite Details
 
 ### 1. TLS Security Test Suite (`tls_security_test.go`)
+
 **Purpose**: Validate TLS/mTLS certificate handling
 **Coverage**:
+
 - CA certificate generation
 - Server certificate validation
 - Client certificate validation (mTLS)
@@ -307,79 +326,100 @@ Error: dial tcp 127.0.0.1:1886: connect: connection refused
 - Invalid certificate rejection
 
 **Key Tests**:
+
 - `TestTLSCertificateGeneration` - Auto-generation via pkg/cert
 - `TestMTLSConnection` - Mutual TLS handshake
 - `TestInvalidCertificateRejection` - Security boundary testing
 
 ### 2. Registration Test Suite (`registration_test.go`)
+
 **Purpose**: Validate steward registration flow
 **Coverage**:
+
 - Registration token generation
 - Token validation
 - Registration completion
 - Duplicate registration prevention
 
 ### 3. MQTT Connectivity Test Suite (`mqtt_connectivity_test.go`)
+
 **Purpose**: Validate MQTT broker connectivity
 **Coverage**:
+
 - TLS connection establishment
 - Client authentication
 - Topic subscription
 - Message publishing/receiving
 
 ### 4. Config Sync Test Suite (`config_sync_test.go`)
+
 **Purpose**: Validate configuration synchronization
 **Coverage**:
+
 - Configuration push to steward
 - Synchronization status reporting
 - Multi-tenant configuration isolation
 
 ### 5. Module Execution Test Suite (`module_execution_test.go`)
+
 **Purpose**: Validate module execution through steward
 **Coverage**:
+
 - Module invocation via MQTT
 - Result reporting
 - Error handling
 - Timeout management
 
 ### 6. Load Test Suite (`load_test.go`)
+
 **Purpose**: Validate system performance under load
 **Coverage**:
+
 - 1000+ concurrent steward connections
 - Message throughput measurement
 - Resource utilization monitoring
 
 ### 7. Config Signature Test Suite (`config_signature_test.go`)
+
 **Purpose**: Validate configuration signing and verification
 **Coverage**:
+
 - Signature generation
 - Signature verification
 - Tampered configuration detection
 
 ### 8. Heartbeat Failover Test Suite (`heartbeat_failover_test.go`)
+
 **Purpose**: Validate failover detection
 **Coverage**:
+
 - Heartbeat transmission
 - Missed heartbeat detection (<15s requirement)
 - Failover triggering
 
 ### 9. Multi-Tenant Test Suite (`multi_tenant_test.go`)
+
 **Purpose**: Validate tenant isolation
 **Coverage**:
+
 - Topic isolation between tenants
 - Cross-tenant message prevention
 - Configuration isolation
 
 ### 10. QUIC Session Test Suite (`quic_session_test.go`)
+
 **Purpose**: Validate QUIC data plane
 **Coverage**:
+
 - QUIC connection establishment
 - Stream management
 - DNA transfer
 
 ### 11. DNA Update Test Suite (`dna_update_test.go`)
+
 **Purpose**: Validate DNA (Desired Network Architecture) updates
 **Coverage**:
+
 - DNA push notifications
 - Update application
 - Version tracking
@@ -393,6 +433,7 @@ Error: dial tcp 127.0.0.1:1886: connect: connection refused
 **Cause**: Auto-generation failed or certificates not in expected location
 
 **Solution**:
+
 ```bash
 # Check if certificates were generated
 ls test/integration/mqtt_quic/certs/
@@ -409,6 +450,7 @@ docker logs cfgms-controller-standalone | grep -i certificate
 **Cause**: Docker infrastructure not running
 
 **Solution**:
+
 ```bash
 # Verify Docker services are running
 docker ps | grep cfgms
@@ -423,6 +465,7 @@ make test-mqtt-quic-setup
 **Cause**: Slow container startup or resource constraints
 
 **Solution**:
+
 ```bash
 # Increase timeout in test (e.g., from 5s to 10s)
 require.Eventually(t, func() bool {

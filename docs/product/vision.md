@@ -90,6 +90,7 @@ Secondary:
 - Industry-leading ease of adoption
 
 ## Version Information
+
 - **Document Version:** 1.1
 - **Last Updated:** 2024-04-07
-- **Status:** Draft 
+- **Status:** Draft

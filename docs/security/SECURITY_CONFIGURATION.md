@@ -3,6 +3,7 @@
 This document provides essential security configuration guidance for CFGMS deployments.
 
 ## Table of Contents
+
 - [API Key Management](#api-key-management)
 - [CORS Configuration](#cors-configuration)
 - [Cryptographic Settings](#cryptographic-settings)
@@ -17,6 +18,7 @@ This document provides essential security configuration guidance for CFGMS deplo
 #### Production Deployment Requirements
 
 1. **Never store plaintext API keys in environment files**
+
    ```bash
    # ❌ INSECURE - DO NOT DO THIS
    export CFGMS_API_KEY="plaintext-key-here"
@@ -32,6 +34,7 @@ This document provides essential security configuration guidance for CFGMS deplo
    - **SOPS**: For GitOps workflows (see [SOPS Integration](#sops-integration))
 
 3. **Environment File Protection**
+
    ```bash
    # Set restrictive permissions on .env files
    chmod 600 .env
@@ -115,6 +118,7 @@ http://localhost:9080    # API itself (for testing)
 ### Production Best Practices
 
 1. **Use HTTPS Only**
+
    ```bash
    # ✅ SECURE
    export CFGMS_ALLOWED_ORIGINS="https://app.example.com,https://admin.example.com"
@@ -124,6 +128,7 @@ http://localhost:9080    # API itself (for testing)
    ```
 
 2. **Specify Exact Origins**
+
    ```bash
    # ✅ SECURE - Exact match
    export CFGMS_ALLOWED_ORIGINS="https://app.example.com"
@@ -133,6 +138,7 @@ http://localhost:9080    # API itself (for testing)
    ```
 
 3. **Separate by Environment**
+
    ```bash
    # Development
    CFGMS_ALLOWED_ORIGINS="http://localhost:3000"
@@ -147,20 +153,26 @@ http://localhost:9080    # API itself (for testing)
 ### CORS Behavior
 
 #### Allowed Origins
+
 When a request includes an `Origin` header matching the allowed list:
+
 - `Access-Control-Allow-Origin`: `<matching-origin>`
 - `Access-Control-Allow-Methods`: `GET, POST, PUT, DELETE, OPTIONS`
 - `Access-Control-Allow-Headers`: `Content-Type, Authorization, X-API-Key`
 - `Access-Control-Expose-Headers`: `X-Total-Count`
 
 #### Disallowed Origins
+
 When a request includes an `Origin` header NOT in the allowed list:
+
 - Preflight (OPTIONS) requests: `403 Forbidden`
 - No CORS headers set
 - Request is rejected
 
 #### No Origin Header
+
 Requests without an `Origin` header (e.g., server-to-server):
+
 - Processed normally
 - No CORS headers added
 - No CORS restrictions applied
@@ -194,6 +206,7 @@ curl -X OPTIONS https://controller.example.com/api/v1/health \
 #### M365 Credential Encryption
 
 M365 module credentials are encrypted using:
+
 - **Algorithm**: PBKDF2-HMAC-SHA256
 - **Iterations**: 310,000 (OWASP 2023 recommendation)
 - **Key Size**: 256 bits
@@ -210,6 +223,7 @@ M365 module credentials are encrypted using:
 #### Migration from Legacy Format
 
 CFGMS automatically migrates credentials encrypted with the legacy format:
+
 - **Legacy**: 10,000 iterations, global salt
 - **New**: 310,000 iterations, per-credential salt
 - **Migration**: Transparent on first read, writes use new format
@@ -219,6 +233,7 @@ No manual intervention required - credentials are migrated on first use.
 #### Key Derivation Configuration
 
 The passphrase for credential encryption MUST be:
+
 - Minimum 32 characters
 - Stored in secret management system (not environment files)
 - Rotated annually
@@ -252,6 +267,7 @@ childRole.TenantId = "tenant-456"
 #### Audit Logging
 
 Cross-tenant access attempts are logged with CRITICAL severity:
+
 ```json
 {
   "event_type": "rbac_security_violation",
@@ -270,6 +286,7 @@ Cross-tenant access attempts are logged with CRITICAL severity:
 **Status**: Recommended for implementation - defense-in-depth measure.
 
 Pattern for future implementation:
+
 ```go
 // Validate tenant context in storage operations
 func validateTenantContext(ctx context.Context, resourceTenantID string) error {

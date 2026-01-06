@@ -8,6 +8,7 @@
 ## Executive Summary
 
 This comprehensive security audit examined the CFGMS codebase across six critical security domains:
+
 1. Automated security scanning (gosec, staticcheck, trivy)
 2. Authentication and authorization mechanisms
 3. Input validation and sanitization
@@ -27,6 +28,7 @@ The CFGMS codebase demonstrates **strong security fundamentals** with sophistica
 - **Low Severity:** 5 findings
 
 **Security Strengths:**
+
 - ✅ Zero SQL injection vulnerabilities (100% parameterized queries)
 - ✅ Zero command injection vulnerabilities
 - ✅ Strong cryptography (AES-256-GCM, TLS 1.3, SHA-256)
@@ -35,6 +37,7 @@ The CFGMS codebase demonstrates **strong security fundamentals** with sophistica
 - ✅ Excellent security testing coverage
 
 **Areas Requiring Improvement:**
+
 - ⚠️ API key logging in plaintext
 - ⚠️ CORS wildcard configuration
 - ⚠️ Missing tenant context validation in storage layer
@@ -49,6 +52,7 @@ The CFGMS codebase demonstrates **strong security fundamentals** with sophistica
 **Status:** ✅ PASSED
 
 **Findings:**
+
 - Zero critical/high vulnerabilities in dependencies
 - 4 test certificate private keys detected (expected, development only)
 - 2 Dockerfile misconfigurations (MEDIUM/LOW):
@@ -62,6 +66,7 @@ The CFGMS codebase demonstrates **strong security fundamentals** with sophistica
 **Status:** ✅ PASSED (23 findings, all documented)
 
 **Findings:**
+
 - 11 HIGH: Integer overflow conversions (uint64→int64) in performance metrics
 - 1 HIGH: TLS MinVersion in alerting SMTP (needs verification)
 - 11 MEDIUM: File operations with variable paths (all have #nosec with justification)
@@ -83,6 +88,7 @@ No critical issues found.
 **Rating:** B+ (85/100)
 
 **Strengths:**
+
 - Sophisticated RBAC engine with fine-grained permissions
 - Industry-leading privilege escalation prevention
 - Comprehensive audit logging
@@ -95,16 +101,20 @@ No critical issues found.
 ### 2.3 High Severity Findings
 
 #### H-AUTH-1: API Key Logged in Plaintext
+
 - **File:** `features/controller/api/handlers_apikeys.go:322`
 - **CVSS:** 7.5 (High)
 - **Issue:**
+
   ```go
   s.logger.Info("Generated default API key", "id", defaultKey.ID, "key", keyString)
   ```
+
 - **Risk:** API keys in log files expose credentials
 - **Remediation:** Remove `"key", keyString` from log statement
 
 #### H-AUTH-2: Environment Variable API Keys Unencrypted
+
 - **File:** `features/controller/api/handlers_apikeys.go:283-298`
 - **CVSS:** 7.0 (High)
 - **Issue:** `envAPIKey := os.Getenv("CFGMS_API_KEY")` stored directly
@@ -112,6 +122,7 @@ No critical issues found.
 - **Remediation:** Use SOPS or similar for environment secrets
 
 #### H-AUTH-3: CORS Wildcard Origin
+
 - **File:** `features/controller/api/middleware.go:63`
 - **CVSS:** 7.0 (High)
 - **Issue:** `w.Header().Set("Access-Control-Allow-Origin", "*")`
@@ -119,6 +130,7 @@ No critical issues found.
 - **Remediation:** Configure allowed origins list, validate origin header
 
 #### H-AUTH-4: Token Prefix Information Disclosure
+
 - **File:** `features/controller/api/handlers_registration.go:55`
 - **CVSS:** 6.5 (High)
 - **Issue:** Logs first 15 characters of registration token
@@ -128,11 +140,13 @@ No critical issues found.
 ### 2.4 Medium Severity Findings
 
 #### M-AUTH-1: API Keys Stored in Memory Only
+
 - **CVSS:** 5.5 (Medium)
 - **Risk:** Keys lost on service restart, no backup/recovery
 - **Remediation:** Persist API keys to durable storage with encryption
 
 #### M-AUTH-2: System Admin Unrestricted Access
+
 - **File:** `features/rbac/engine.go:163-166`
 - **CVSS:** 6.0 (Medium)
 - **Risk:** Single compromised admin account compromises entire system
@@ -147,6 +161,7 @@ No critical issues found.
 **Rating:** B+ (88/100)
 
 **Strengths:**
+
 - Multi-layer validation framework
 - Comprehensive charset restrictions
 - Injection pattern blocking
@@ -159,18 +174,21 @@ No critical issues found.
 ### 3.3 Medium Severity Findings
 
 #### M-INPUT-1: Integer Overflow in Query Parameters
+
 - **File:** `features/controller/api/validation_middleware.go:110-114`
 - **CVSS:** 5.0 (Medium)
 - **Issue:** `strconv.Atoi()` without overflow checks
 - **Remediation:** Use `strconv.ParseInt()` with explicit bit size
 
 #### M-INPUT-2: Regex Complexity Not Validated
+
 - **File:** `pkg/security/validation.go:66-78`
 - **CVSS:** 5.5 (Medium)
 - **Risk:** ReDoS (Regular Expression Denial of Service)
 - **Remediation:** Add regex timeout mechanism
 
 #### M-INPUT-3: SQL Identifier Not Whitelisted
+
 - **File:** `pkg/logging/providers/timescale/queries.go:177-186`
 - **CVSS:** 5.0 (Medium)
 - **Risk:** SQL injection if schema/table names from user input
@@ -185,6 +203,7 @@ No critical issues found.
 **Rating:** A (97/100)
 
 **Strengths:**
+
 - 100% parameterized SQL queries
 - Zero SQL injection vulnerabilities
 - Proper exec.Command usage
@@ -207,6 +226,7 @@ All SQL queries use PostgreSQL parameterized queries (`$1, $2, $3...`). Table na
 **Rating:** A- (90/100)
 
 **Strengths:**
+
 - Modern algorithms (AES-256-GCM, SHA-256, TLS 1.3)
 - Proper key management with rotation
 - Cryptographically secure random generation
@@ -215,6 +235,7 @@ All SQL queries use PostgreSQL parameterized queries (`$1, $2, $3...`). Table na
 ### 5.2 Medium Severity Findings
 
 #### M-CRYPTO-1: PBKDF2 Iteration Count Too Low
+
 - **File:** `features/modules/m365/auth/file_credential_store.go:47`
 - **CVSS:** 6.0 (Medium)
 - **Issue:** Uses 10,000 iterations (OWASP recommends 310,000+)
@@ -222,6 +243,7 @@ All SQL queries use PostgreSQL parameterized queries (`$1, $2, $3...`). Table na
 - **Remediation:** Increase to 310,000 iterations minimum
 
 #### M-CRYPTO-2: Hardcoded PBKDF2 Salt
+
 - **File:** `features/modules/m365/auth/file_credential_store.go:47`
 - **CVSS:** 6.0 (Medium)
 - **Issue:** Salt "cfgms-saas-salt" is hardcoded
@@ -231,6 +253,7 @@ All SQL queries use PostgreSQL parameterized queries (`$1, $2, $3...`). Table na
 ### 5.3 Low Severity Findings
 
 #### L-CRYPTO-1: TLS 1.2 Minimum for HTTP API
+
 - **File:** `features/controller/api/server.go:381,402`
 - **CVSS:** 3.0 (Low)
 - **Risk:** TLS 1.2 acceptable but TLS 1.3 preferred
@@ -245,6 +268,7 @@ All SQL queries use PostgreSQL parameterized queries (`$1, $2, $3...`). Table na
 **Rating:** B+ (85/100)
 
 **Strengths:**
+
 - Sophisticated multi-layer isolation architecture
 - Comprehensive breach detection
 - Tenant-specific encryption keys
@@ -253,11 +277,13 @@ All SQL queries use PostgreSQL parameterized queries (`$1, $2, $3...`). Table na
 ### 6.2 High Severity Findings
 
 #### H-TENANT-1: Missing Tenant Context Validation in Storage Operations
+
 - **File:** `pkg/storage/providers/database/config_store.go:99-222,226-289`
 - **CVSS:** 7.5 (High)
 - **Issue:** Storage operations accept tenant_id parameter but don't validate it matches authenticated user's tenant
 - **Risk:** Application-level bug could allow cross-tenant data access
 - **Remediation:**
+
   ```go
   func (s *Store) StoreConfig(ctx context.Context, config *ConfigEntry) error {
       callerTenantID := ctx.Value(tenantIDContextKey).(string)
@@ -271,6 +297,7 @@ All SQL queries use PostgreSQL parameterized queries (`$1, $2, $3...`). Table na
 ### 6.3 Medium Severity Findings
 
 #### M-TENANT-1: No Database Row-Level Security
+
 - **File:** `pkg/storage/providers/database/schemas.go`
 - **CVSS:** 6.0 (Medium)
 - **Issue:** Missing PostgreSQL Row Level Security policies
@@ -278,6 +305,7 @@ All SQL queries use PostgreSQL parameterized queries (`$1, $2, $3...`). Table na
 - **Remediation:** Implement RLS policies on all multi-tenant tables
 
 #### M-TENANT-2: Cross-Tenant Role Inheritance Not Blocked
+
 - **File:** `features/rbac/manager.go`
 - **CVSS:** 5.5 (Medium)
 - **Issue:** Child role in Tenant A could inherit from parent role in Tenant B
@@ -305,18 +333,22 @@ All SQL queries use PostgreSQL parameterized queries (`$1, $2, $3...`). Table na
 ### 7.2 Compliance Frameworks
 
 #### SOC 2 Type II
+
 - ✅ **Ready** with Priority 1-2 fixes
 - Strong access controls, audit logging, encryption
 
 #### ISO 27001
+
 - ✅ **Compliant**
 - Comprehensive security controls in place
 
 #### GDPR
+
 - ✅ **Compliant**
 - Strong tenant isolation, data encryption, audit trails
 
 #### FedRAMP
+
 - ⚠️ **Requires hardening**
 - Session management, audit retention enhancements needed
 
@@ -393,6 +425,7 @@ All SQL queries use PostgreSQL parameterized queries (`$1, $2, $3...`). Table na
 The CFGMS codebase demonstrates **strong security fundamentals** with a mature security architecture. The identified vulnerabilities are addressable and do not represent fundamental architectural flaws.
 
 **Key Achievements:**
+
 - Zero SQL injection vulnerabilities across entire codebase
 - Zero command injection vulnerabilities
 - Strong cryptographic implementations
@@ -400,6 +433,7 @@ The CFGMS codebase demonstrates **strong security fundamentals** with a mature s
 - Comprehensive security testing coverage
 
 **Recommended Actions:**
+
 1. **Immediately** fix Priority 1 issues (3 hours effort)
 2. **Within 2 weeks** complete Priority 2 improvements (6.5 hours)
 3. **Next sprint** address Priority 3 items (12 hours)

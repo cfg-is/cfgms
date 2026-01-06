@@ -7,6 +7,7 @@ This directory contains security audit reports with detailed vulnerability infor
 ## Purpose
 
 Security audit reports contain sensitive information about vulnerabilities, including:
+
 - Specific code locations of security issues
 - Exploitation methods
 - Unfixed vulnerability details
@@ -15,6 +16,7 @@ Security audit reports contain sensitive information about vulnerabilities, incl
 ## When to Commit
 
 Audit reports should only be added to version control AFTER:
+
 1. All critical and high-severity vulnerabilities are fixed
 2. Medium and low-severity issues are either fixed or accepted as risks
 3. Report is sanitized to remove exploitation details

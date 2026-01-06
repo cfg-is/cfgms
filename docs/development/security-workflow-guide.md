@@ -21,24 +21,28 @@ This guide provides comprehensive documentation for the CFGMS security workflow,
 The CFGMS security workflow integrates four complementary security scanning tools:
 
 ### 1. Trivy - Vulnerability Scanning
+
 - **Purpose**: Scans filesystem for known vulnerabilities in dependencies and infrastructure
 - **Scope**: Critical/High CVEs, secrets, misconfigurations
 - **Blocking**: Yes (Critical/High vulnerabilities block deployment)
 - **SARIF Support**: Yes (GitHub Security tab integration)
 
 ### 2. Nancy - Go Dependency Scanning
+
 - **Purpose**: Specialized Go module vulnerability scanning
 - **Scope**: Go dependencies and transitive dependencies
 - **Blocking**: No (informational, but tracked)
 - **SARIF Support**: No (custom integration)
 
 ### 3. gosec - Go Security Patterns
+
 - **Purpose**: Static analysis for Go security anti-patterns
 - **Scope**: 127+ security checks for common Go vulnerabilities
 - **Blocking**: No (informational, but tracked)
 - **SARIF Support**: Yes (GitHub Security tab integration)
 
 ### 4. staticcheck - Advanced Static Analysis
+
 - **Purpose**: Advanced Go code quality and correctness analysis
 - **Scope**: 47 categories of code quality issues
 - **Blocking**: No (code quality focus)
@@ -98,6 +102,7 @@ make test-with-security  # Runs: test + security-scan + summary
 **File**: `.github/workflows/security-scan.yml`
 
 **Features**:
+
 - Parallel execution across 4 security tools
 - SARIF output for GitHub Security tab integration
 - Tool-specific caching for performance
@@ -105,11 +110,13 @@ make test-with-security  # Runs: test + security-scan + summary
 - Failure notifications with actionable guidance
 
 **Triggers**:
+
 - Push to `develop` and `main` branches
 - Pull requests to `develop` and `main` branches
 - Manual workflow dispatch with scan type options
 
 **Parallel Jobs**:
+
 1. `trivy-scan` - Vulnerability scanning with SARIF output
 2. `nancy-scan` - Go dependency scanning
 3. `gosec-scan` - Security pattern analysis with SARIF output
@@ -121,6 +128,7 @@ make test-with-security  # Runs: test + security-scan + summary
 **File**: `.github/workflows/production-gates.yml`
 
 **Security Gate Features**:
+
 - Critical/High vulnerability blocking
 - Emergency override mechanism
 - Comprehensive audit trail
@@ -128,6 +136,7 @@ make test-with-security  # Runs: test + security-scan + summary
 - Integration with existing release gates
 
 **Gate Flow**:
+
 1. `security-deployment-gate` - Primary security validation
 2. `production-risk-assessment` - Risk analysis (requires security approval)
 3. `v030-release-gate` - Alpha release gate (requires security approval)
@@ -139,6 +148,7 @@ make test-with-security  # Runs: test + security-scan + summary
 ### Security Gate Logic
 
 The security deployment gate blocks production deployments when:
+
 - **Critical vulnerabilities** are detected (CVE severity: CRITICAL)
 - **High vulnerabilities** are detected (CVE severity: HIGH)
 - Security scanning tools fail to execute properly
@@ -155,6 +165,7 @@ The security deployment gate blocks production deployments when:
 ### Integration Points
 
 All production gates depend on security approval:
+
 - `v030-release-gate` requires `security-deployment-gate` success
 - `v040-release-gate` requires `security-deployment-gate` success
 - `production-risk-assessment` requires `security-deployment-gate` success
@@ -164,6 +175,7 @@ All production gates depend on security approval:
 ### When to Use Emergency Override
 
 Emergency override should only be used for:
+
 - **Critical production outages** requiring immediate fixes
 - **Security vulnerabilities** in production that need urgent patching
 - **Business-critical deployments** that cannot wait for vulnerability fixes
@@ -171,12 +183,14 @@ Emergency override should only be used for:
 ### Override Methods
 
 #### Method 1: Workflow Dispatch
+
 1. Go to Actions → Production Risk Gates → Run workflow
 2. Set `emergency_override` to `true`
 3. Provide detailed `override_reason`
 4. Submit and monitor execution
 
 #### Method 2: Emergency File
+
 1. Create `EMERGENCY_DEPLOYMENT` file in repository root
 2. Commit and push to trigger deployment
 3. File presence automatically enables override
@@ -184,18 +198,21 @@ Emergency override should only be used for:
 ### Override Audit Trail
 
 Every override creates comprehensive audit documentation:
+
 - **Deployment details**: Branch, commit, actor, timestamp
 - **Override reason**: Justification and authorization
 - **Security status**: Issues present during override
 - **Approval chain**: Required post-deployment actions
 
 **Audit Artifacts**:
+
 - `security-deployment-audit` (90-day retention)
 - `deployment-notification` (30-day retention)
 
 ### Post-Override Requirements
 
 When emergency override is used:
+
 1. **Immediate Risk Assessment**: Document security risks
 2. **Remediation Planning**: Create timeline for fixes
 3. **Security Review**: Obtain security team approval
@@ -265,11 +282,13 @@ make security-remediation-report
 The security workflow uses parallel job execution for optimal performance:
 
 **Before Optimization**: Sequential execution (~15-20 minutes)
+
 ```
 trivy → nancy → gosec → staticcheck → validation
 ```
 
 **After Optimization**: Parallel execution (~5-8 minutes)
+
 ```
 ┌─ trivy-scan (3-5 min)
 ├─ nancy-scan (1-2 min)  
@@ -284,6 +303,7 @@ security-validation (1 min)
 Each security tool uses optimized caching:
 
 #### Go Module Caching
+
 ```yaml
 - name: Cache Go modules
   uses: actions/cache@v3
@@ -295,6 +315,7 @@ Each security tool uses optimized caching:
 ```
 
 #### Tool-Specific Caching
+
 - **Trivy**: Database and cache directory caching
 - **Nancy**: Binary and database caching
 - **gosec**: Go module and binary caching
@@ -324,24 +345,28 @@ Each security tool uses optimized caching:
 The security workflow collects the following metrics:
 
 #### Security Scan Metrics
+
 - **Vulnerability Detection Rate**: Issues found per scan
 - **False Positive Rate**: Invalid alerts per tool
 - **Remediation Time**: Time from detection to fix
 - **Scan Success Rate**: Successful scans vs failures
 
 #### Performance Metrics
+
 - **Scan Duration**: Time per tool and total workflow
 - **Cache Hit Rate**: Caching effectiveness
 - **Resource Usage**: CPU, memory, and artifact storage
 - **Parallel Efficiency**: Speedup from parallelization
 
 #### Deployment Gate Metrics
+
 - **Blocking Rate**: Deployments blocked by security issues
 - **Override Usage**: Emergency override frequency and reasons
 - **Gate Effectiveness**: Issues caught before production
 - **Remediation Success**: Fixes applied successfully
 
 #### Developer Experience Metrics
+
 - **Local vs CI Consistency**: Tool behavior across environments
 - **Developer Adoption**: Usage of local security commands
 - **Remediation Automation**: Claude Code usage statistics
@@ -363,6 +388,7 @@ make security-workflow-survey
 ### Metrics Dashboard
 
 Future implementation will include:
+
 - **Grafana Dashboard**: Real-time security metrics
 - **Prometheus Integration**: Metrics collection and alerting
 - **GitHub Insights**: Repository security health scores
@@ -375,11 +401,13 @@ Future implementation will include:
 The current security workflow is designed to scale for team expansion:
 
 #### Current State (Individual Development)
+
 - Security scans on `develop` and `main` pushes
 - Direct branch commits with security validation
 - Manual emergency overrides
 
 #### Future State (Team Development)
+
 - Security scans on all pull requests
 - Branch protection rules requiring security approval
 - Code review integration with security results
@@ -409,6 +437,7 @@ branches:
 ### Code Review Integration
 
 Future enhancements for team workflows:
+
 - **Security Review Bot**: Automated security feedback on PRs
 - **Risk Assessment Comments**: Automated risk analysis
 - **Remediation Suggestions**: In-line fix recommendations
@@ -417,6 +446,7 @@ Future enhancements for team workflows:
 ### Training and Onboarding
 
 Documentation prepared for team expansion:
+
 - **Security Workflow Training**: Complete guide for new developers
 - **Tool-Specific Guides**: Individual tool documentation
 - **Troubleshooting Runbook**: Common issues and solutions
@@ -427,8 +457,10 @@ Documentation prepared for team expansion:
 ### Common Issues and Solutions
 
 #### Issue: Trivy Database Update Failures
+
 **Symptoms**: `trivy` fails with database update errors
 **Solution**:
+
 ```bash
 # Clear Trivy cache and database
 trivy clean --all
@@ -437,8 +469,10 @@ make security-trivy
 ```
 
 #### Issue: Nancy Binary Download Failures
+
 **Symptoms**: `nancy` installation fails or binary not found
 **Solution**:
+
 ```bash
 # Reinstall Nancy with platform detection
 make install-nancy
@@ -447,8 +481,10 @@ nancy --version
 ```
 
 #### Issue: gosec False Positives
+
 **Symptoms**: `gosec` reports issues in vendor code or test files
 **Solution**:
+
 ```bash
 # Add exclusions to .gosecrc file
 echo 'exclude-dirs: vendor,testdata' > .gosecrc
@@ -457,8 +493,10 @@ gosec -exclude G204 ./...
 ```
 
 #### Issue: staticcheck Performance Issues
+
 **Symptoms**: `staticcheck` runs slowly or times out
 **Solution**:
+
 ```bash
 # Run with specific packages only
 staticcheck ./features/... ./pkg/...
@@ -469,13 +507,16 @@ staticcheck -timeout 10m ./...
 ### GitHub Actions Troubleshooting
 
 #### Issue: Security Gate Not Blocking Deployment
+
 **Symptoms**: Deployment proceeds despite security issues
 **Diagnosis**:
+
 1. Check security gate job logs
 2. Verify `deployment-allowed` output
 3. Review security scan results
 
 **Solution**:
+
 ```bash
 # Debug security gate logic
 gh run view [run-id] --log
@@ -484,13 +525,16 @@ gh api repos/cfg-is/cfgms/actions/runs/[run-id]/jobs
 ```
 
 #### Issue: Emergency Override Not Working
+
 **Symptoms**: Override inputs ignored or not processed
 **Diagnosis**:
+
 1. Verify workflow dispatch inputs
 2. Check override reason provided
 3. Review audit trail generation
 
 **Solution**:
+
 ```bash
 # Verify workflow inputs
 gh workflow run production-gates.yml \
@@ -501,25 +545,31 @@ gh workflow run production-gates.yml \
 ### Performance Issues
 
 #### Issue: Slow Security Scans
+
 **Symptoms**: Workflow takes longer than expected
 **Diagnosis**:
+
 1. Check individual tool performance
 2. Review cache hit rates
 3. Analyze resource usage
 
 **Solution**:
+
 - Optimize Go module caching
 - Increase parallel job limits
 - Reduce scan scope if appropriate
 
 #### Issue: Cache Misses
+
 **Symptoms**: Tools reinstalling on every run
 **Diagnosis**:
+
 1. Verify cache key generation
 2. Check cache size limits
 3. Review cache restoration logs
 
 **Solution**:
+
 ```yaml
 # Optimize cache keys
 key: ${{ runner.os }}-${{ runner.arch }}-tool-${{ hashFiles('**/go.sum') }}
@@ -528,6 +578,7 @@ key: ${{ runner.os }}-${{ runner.arch }}-tool-${{ hashFiles('**/go.sum') }}
 ### Support and Escalation
 
 For additional support:
+
 1. **Internal Documentation**: Check `docs/development/` directory
 2. **GitHub Issues**: Create issue with `security` label
 3. **Security Team**: Escalate critical security issues

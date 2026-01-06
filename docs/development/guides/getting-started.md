@@ -119,6 +119,7 @@ make dev
 - Reach out to the development team for guidance.
 
 ## Version Information
+
 - **Document Version:** 1.0
 - **Last Updated:** 2024-04-04
-- **Status:** Draft 
+- **Status:** Draft

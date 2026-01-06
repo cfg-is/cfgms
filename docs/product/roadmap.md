@@ -4,6 +4,8 @@
 
 This document outlines the development roadmap for the Configuration Management System (CFGMS). It provides a clear vision for the project's development, including milestones, features, and release planning, incorporating recent strategic adjustments to better align with MSP market voids and core product vision.
 
+**Last Updated**: 2026-01-06
+
 ## Versioning Strategy
 
 CFGMS follows semantic versioning (MAJOR.MINOR.PATCH):
@@ -109,11 +111,6 @@ Implemented comprehensive Docker-based E2E testing infrastructure that validates
 - [x] Create `SECURITY.md` vulnerability disclosure policy (issue #281) ✅ COMPLETED
 - [x] Re-enable and validate GitHub Actions workflows (issue #109, issue #15) ✅ COMPLETED
 - [x] E2E Test: Fix MQTT+QUIC test skips, add parallelization, reduce test-completion time (issue #297) ✅ COMPLETED
-  - Platform-specific test fixes (macOS CPU metrics, Windows temp directories)
-  - MQTT+QUIC test restoration (10 suites, 84% pass rate locally)
-  - Certificate foot-gun remediation (auto-generation via pkg/cert.Manager)
-  - GitHub Actions trigger restoration (critical workflows on main)
-  - Parallel test execution infrastructure (test-e2e-parallel, 53% faster)
 - [ ] ~~Convert repository to public and~~ activate GitHub Advanced Security features (issue #282)
 - [ ] Configure branch protection rules (issue #283)
 - [ ] Update documentation with security badges and public links (issue #284)
@@ -169,6 +166,7 @@ Achieve production stability, complete core platform features, and prepare for s
 **Goal**: Enhance security posture with advanced tooling and prepare web interface security foundations
 
 **Backend Security Enhancements**:
+
 - [ ] OpenSSF Scorecard optimization (target score: 9.0+)
 - [ ] Go native fuzzing integration for critical packages
 - [ ] Evaluate and integrate Snyk (if beneficial beyond existing coverage)
@@ -176,6 +174,7 @@ Achieve production stability, complete core platform features, and prepare for s
 - [ ] Security testing automation improvements
 
 **Web Frontend Security Preparation**:
+
 - [ ] Evaluate web application security scanners (OWASP ZAP, Burp Suite Community)
 - [ ] Plan Content Security Policy (CSP) implementation
 - [ ] Evaluate frontend dependency scanning tools (npm audit, Snyk for JavaScript)
@@ -184,6 +183,7 @@ Achieve production stability, complete core platform features, and prepare for s
 - [ ] Document web security requirements and tooling strategy
 
 **Security Policy & Process**:
+
 - [ ] Conduct first external security audit (if resources available)
 - [ ] Establish CVE response procedures
 - [ ] Create security incident response playbook

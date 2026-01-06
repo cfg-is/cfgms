@@ -93,6 +93,7 @@ LTS versions will be designated starting with v1.0.0:
 ### Pre-v1.0.0 Development
 
 During alpha/beta development (v0.x.x):
+
 - API changes may occur between minor versions
 - Breaking changes documented in CHANGELOG
 - Migration guides provided for significant changes
@@ -135,6 +136,7 @@ git push origin v0.7.0
 ### GitHub Releases
 
 Each tagged version will have a corresponding GitHub Release with:
+
 - Release notes summarizing changes
 - Link to relevant CHANGELOG entries
 - Binary artifacts for supported platforms
@@ -152,6 +154,7 @@ Version information is embedded in binaries at build time:
 ```
 
 Query version information:
+
 ```bash
 ./bin/controller --version
 ./bin/cfgms-steward --version
@@ -171,6 +174,7 @@ Query version information:
 ### Rollback
 
 All configuration changes through CFGMS support rollback:
+
 - Git-based storage provides full history
 - Rollback manager supports previewing and executing rollbacks
 - See [Configuration Rollback](../architecture/configuration-management.md) for details

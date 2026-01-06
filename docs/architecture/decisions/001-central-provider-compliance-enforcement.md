@@ -15,12 +15,14 @@ During Story #239 security audit remediation, we discovered a critical bug: the 
 ### Root Cause Analysis
 
 The dual-CA bug occurred because:
+
 1. Certificate generation logic was duplicated between HTTP and MQTT initialization
 2. No enforcement mechanism prevented bypassing the central `pkg/cert.Manager`
 3. Developers were unaware of the existing central certificate provider
 4. Code review did not catch the architectural violation
 
 This bug represents a **class of problems** where developers re-implement functionality that already exists in central providers, leading to:
+
 - **Bugs**: Inconsistent behavior (dual-CA causing mTLS failures)
 - **Tech Debt**: Duplicate implementations to maintain
 - **Scale Issues**: Multiple code paths doing the same thing differently
@@ -31,6 +33,7 @@ This bug represents a **class of problems** where developers re-implement functi
 CFGMS implements a **pluggable provider architecture** where cross-cutting concerns are centralized in `pkg/`:
 
 **Existing Central Providers**:
+
 - `pkg/storage` - Data persistence (git, database, cache)
 - `pkg/logging` - Structured logging with tenant isolation
 - `pkg/cert` - Certificate/TLS management (prevents dual-CA bugs)
@@ -43,6 +46,7 @@ CFGMS implements a **pluggable provider architecture** where cross-cutting conce
 - And 5 others (see `CLAUDE.md`)
 
 **Architecture Pattern**:
+
 ```
 pkg/{name}/interfaces/  → Pluggable provider (multiple implementations)
 pkg/{name}/             → Direct provider (single implementation)
@@ -55,9 +59,11 @@ pkg/{name}/             → Direct provider (single implementation)
 We will implement a **multi-layered enforcement system** to prevent central provider re-invention:
 
 ### Layer 1: Automated Pre-commit Checks
+
 **Tool**: `make check-architecture` (Makefile target)
 
 **Scans staged files for violations**:
+
 - TLS/crypto usage outside `pkg/cert/`
 - Storage implementations outside `pkg/storage/`
 - Logging implementations outside `pkg/logging/`
@@ -66,6 +72,7 @@ We will implement a **multi-layered enforcement system** to prevent central prov
 **Integration**: Runs automatically in `/story-commit` workflow (blocking)
 
 **Implementation**:
+
 ```makefile
 check-architecture:
 	@violations=0
@@ -77,9 +84,11 @@ check-architecture:
 ```
 
 ### Layer 2: Pre-commit Hook (Optional)
+
 **Tool**: `.pre-commit-config.yaml`
 
 **Runs before git commit**:
+
 - Calls `make check-architecture` on changed files
 - Provides immediate feedback during development
 - Can be bypassed with `--no-verify` if needed
@@ -87,9 +96,11 @@ check-architecture:
 **Benefit**: Catches violations before `/story-commit` runs full test suite
 
 ### Layer 3: Linter Integration
+
 **Tool**: `golangci-lint` with `depguard` rules
 
 **Blocks imports at IDE level**:
+
 - `pkg/storage/providers/*` cannot be imported by `features/` (must use `interfaces`)
 - `pkg/logging/providers/*` cannot be imported by `features/`
 - Direct `crypto/tls`, `crypto/x509` imports restricted outside `pkg/cert/`
@@ -97,9 +108,11 @@ check-architecture:
 **Benefit**: Fastest feedback (IDE shows error immediately)
 
 ### Layer 4: PR Review Checklist
+
 **Tool**: `/pr-review` slash command (Phase 2)
 
 **Manual verification**:
+
 - Reviewer checks central provider compliance
 - Validates no duplicate implementations
 - Ensures proper dependency injection
@@ -107,9 +120,11 @@ check-architecture:
 **Benefit**: Human verification of architectural intent
 
 ### Layer 5: Documentation
+
 **Files**: `pkg/README.md`, `CLAUDE.md`
 
 **Content**:
+
 - Golden Rules: Cross-cutting → central provider, pluggable by default
 - Complete provider list (14 providers, categorized)
 - Decision tree for adding new providers
@@ -122,6 +137,7 @@ check-architecture:
 **New Golden Rule #2**: "All central providers SHOULD be pluggable by default (with `interfaces/` subdirectory)"
 
 **Rationale**:
+
 - Multi-tenant SaaS needs different backends
 - Commercial/Open Source feature gating
 - 50k+ Steward scale requirements
@@ -166,30 +182,37 @@ check-architecture:
 ## Alternatives Considered
 
 ### Alternative 1: Documentation Only
+
 **Approach**: Only update docs, no enforcement
 
 **Rejected Because**:
+
 - Dual-CA bug occurred despite architecture docs existing
 - Humans forget, automation doesn't
 - No guarantee developers read docs before implementing
 
 ### Alternative 2: Full Linting Only
+
 **Approach**: Only use golangci-lint depguard rules
 
 **Rejected Because**:
+
 - Limited to import-level checks (misses inline implementations)
 - Harder to maintain complex pattern rules
 - No integration with workflow commands
 
 ### Alternative 3: Runtime Enforcement
+
 **Approach**: Panic if duplicate providers detected at runtime
 
 **Rejected Because**:
+
 - Too late (bugs already in production)
 - Difficult to implement reliable detection
 - Punishes users for developer mistakes
 
 ### Chosen Approach: Multi-Layered Defense
+
 **Rationale**: Defense in depth with multiple checkpoints catches violations early while providing flexibility
 
 ## References

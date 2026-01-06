@@ -7,10 +7,11 @@ CFGMS is a modern configuration management system designed with resilience, secu
 The project is in early development. Core architecture and structure have been implemented, but many components are still being developed.
 
 ### Project Management
-Development progress is tracked through the **"CFGMS Development Roadmap"** GitHub Project:
-https://github.com/orgs/cfg-is/projects/1
+
+Development progress is tracked through the [**CFGMS Development Roadmap** GitHub Project](https://github.com/orgs/cfg-is/projects/1).
 
 This project board provides real-time visibility into:
+
 - Current development priorities and milestones
 - Issue tracking and feature requests
 - Sprint planning and task organization
@@ -24,6 +25,7 @@ CFGMS uses a **dual licensing model** to balance open source community benefits 
 - **[Elastic License 2.0](LICENSE-ELASTIC-2.0)** - A small subset of enterprise features (HA clustering, future Web UI)
 
 **Quick Summary:**
+
 - ✅ **Open Source (Apache 2.0)**: Free forever, use commercially, modify and distribute freely
 - ✅ **Commercial (Elastic 2.0)**: Free to use in your infrastructure, cannot offer as a hosted service to third parties
 
@@ -35,9 +37,10 @@ CFGMS uses an **open core** model that balances community benefits with sustaina
 
 ### Our Philosophy
 
-**"All code that touches client environments and APIs is open source"**
+> "All code that touches client environments and APIs is open source"
 
 This principle means:
+
 - ✅ **All integrations are OSS** - M365, Active Directory, endpoint modules, PSA/RMM connectors
 - ✅ **Complete automation engine** - Full workflow capabilities, no feature gating
 - ✅ **Production-ready security** - RBAC, audit logging, compliance reporting, zero-trust controls
@@ -98,6 +101,7 @@ We believe integrations should be transparent, auditable, and community-driven. 
 ### Key Takeaway
 
 **99% of CFGMS is open source.** The only commercial features are:
+
 - High Availability clustering (for enterprise scale)
 - Web UI (future - graphical interface)
 - Multi-MSP support (for SaaS providers)
@@ -112,6 +116,7 @@ Upgrading from open source to commercial features is seamless:
 ### When to Upgrade
 
 Consider commercial features when you need:
+
 - **High Availability**: Multiple controllers for 99.99% uptime
 - **Web UI**: Graphical workflow builder and dashboards (when released)
 - **Multi-MSP**: Hosting multiple MSP customers in a single deployment
@@ -122,6 +127,7 @@ Consider commercial features when you need:
 #### Self-Hosted Commercial
 
 1. **Build with commercial tags**:
+
    ```bash
    # Instead of standard build
    go build ./cmd/controller
@@ -131,6 +137,7 @@ Consider commercial features when you need:
    ```
 
 2. **Configure HA clustering**:
+
    ```yaml
    # config.yaml
    ha:
@@ -145,6 +152,7 @@ Consider commercial features when you need:
    ```
 
 3. **Deploy and test**:
+
    ```bash
    # All your existing workflows, configurations, and data work immediately
    # No migration required - it's the same codebase!
@@ -152,7 +160,8 @@ Consider commercial features when you need:
 
 #### SaaS Commercial
 
-Contact licensing@cfg.is for commercial licensing:
+Contact [licensing@cfg.is](mailto:licensing@cfg.is) for commercial licensing:
+
 - **SaaS Pricing**: $250/month for 250 "managed units"
   - 1 endpoint = 1 unit
   - 1 M365 user = 0.1 unit
@@ -169,11 +178,13 @@ For complete licensing details, feature boundaries, and FAQ, see [LICENSING.md](
 CFGMS is designed for cross-platform deployment across diverse infrastructure environments:
 
 ### Steward (Agent) Support
+
 - **Linux**: AMD64 & ARM64 - Full support across distributions
 - **Windows**: AMD64 & ARM64 - Windows 10, 11, Server 2019+
 - **macOS**: ARM64 (M series) - Apple Silicon Macs
 
 ### Controller Support  
+
 - **Linux**: AMD64 - Primary target for production deployments
 - **Windows**: AMD64 - Development and testing environments
 

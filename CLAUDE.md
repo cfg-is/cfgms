@@ -7,12 +7,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 CFGMS (Config Management System) is a modern, Go-based configuration management system designed with resilience, security, and clean architecture principles. The project implements a zero-trust security model with mutual TLS authentication and follows a feature-based organization structure.
 
 ### Platform Support
+
 **Steward (Agent) Support:**
+
 - Linux: AMD64 & ARM64 - Full cross-distribution support
 - Windows: AMD64 & ARM64 - Windows 10/11, Server 2019+
 - macOS: ARM64 (M series) - Apple Silicon Macs
 
 **Controller Support:**
+
 - Linux: AMD64 - Primary target for production deployments
 - Windows: AMD64 - Development and testing environments
 
@@ -21,6 +24,7 @@ CFGMS (Config Management System) is a modern, Go-based configuration management 
 ## Development Workflow
 
 ### Slash Commands (Automated Workflow)
+
 Use these commands to enforce mandatory development workflow:
 
 - **`/story-start`** - Begin new story with pre-flight checks and roadmap auto-detection
@@ -34,12 +38,14 @@ See `.claude/slash-commands/` for complete documentation.
 ### Critical Development Rules (MANDATORY)
 
 #### Zero Tolerance Policies
+
 - **No Failing Tests**: Cannot start new work or commit with ANY test failures
 - **Security Gates**: All security scans must pass before commits
 - **Feature Branches**: Always use `feature/story-[NUMBER]-[description]` branches
 - **Real Component Testing**: Never mock CFGMS functionality in tests - use real components
 
 #### EPIC 6 Complete: Storage Architecture (CRITICAL)
+
 - ✅ **Memory provider eliminated** from global storage choices
 - ✅ **All components migrated** to pluggable storage architecture
 - **Required Pattern**: Write-through caching (memory → durable storage)
@@ -49,6 +55,7 @@ See `.claude/slash-commands/` for complete documentation.
 ### Manual Workflow (When Not Using Slash Commands)
 
 #### Essential Steps
+
 1. **Pre-flight**: Run `make test` - must pass 100% before starting
 2. **Branch**: Create `feature/story-[NUMBER]-[description]` from develop
 3. **Develop**: Write tests first, implement with TDD approach
@@ -60,6 +67,7 @@ See [docs/development/story-checklist.md](docs/development/story-checklist.md) f
 ## Essential Commands
 
 ### Daily Development
+
 ```bash
 make test           # Run tests (must pass before commits)
 make test-commit    # Pre-commit validation (tests + security + lint)
@@ -68,6 +76,7 @@ make lint          # Code quality validation
 ```
 
 ### Building
+
 ```bash
 make build                # All binaries (current platform)
 make build-controller     # Controller binary only
@@ -75,6 +84,7 @@ make build-steward        # Steward binary only
 ```
 
 ### Validation Targets
+
 ```bash
 make test-ci       # Complete CI validation (8-12min)
 make test-integration  # M365 + storage integration tests
@@ -85,12 +95,15 @@ See [docs/development/commands-reference.md](docs/development/commands-reference
 ## Core Architecture
 
 ### System Design
+
 **Three-Tier System:**
+
 - **Controller**: Central management, SaaS operations via workflow engine
 - **Steward**: Endpoint management, local operations on devices
 - **Outpost**: Proxy cache component for network device monitoring
 
 **Communication:**
+
 - **Internal**: MQTT+QUIC hybrid protocol with mutual TLS between components
   - MQTT control plane for real-time commands, heartbeats, and failover detection
   - QUIC data plane for high-performance configuration/DNA synchronization
@@ -99,20 +112,24 @@ See [docs/development/commands-reference.md](docs/development/commands-reference
 ### Module Deployment Decision Matrix
 
 **Deploy to Controller When:**
+
 - Cross-system operations or SaaS/Cloud APIs
 - Microsoft 365, AWS, Azure integrations
 - Organization-wide policies or compliance
 
 **Deploy to Steward When:**
+
 - Local resources (files, packages, firewall)
 - Platform-specific operations
 - Performance critical or offline capability
 
 **Examples:**
+
 - Controller: `entra_user`, `conditional_access`, `tenant_management`
 - Steward: `file`, `firewall`, `package`, `script`, `directory`
 
 ### Storage Architecture (EPIC 6 Complete ✅)
+
 - **Global Storage Provider**: Single choice affects entire system (git/database)
 - **Pluggable Design**: All components use same storage interfaces
 - **Default**: Git with SOPS encryption for security and GitOps workflows
@@ -133,9 +150,11 @@ See [docs/development/commands-reference.md](docs/development/commands-reference
 See [MQTT+QUIC Testing Strategy](docs/testing/mqtt-quic-testing-strategy.md) for details.
 
 ### Central Provider System (CRITICAL)
+
 **MANDATORY**: Before implementing any new functionality, check if it belongs in a central provider.
 
 **Golden Rules**:
+
 1. **If functionality is needed by >1 feature, it MUST use or become a central provider**
 2. **All central providers SHOULD be pluggable by default** (with `interfaces/` subdirectory)
    - Default assumption: Create pluggable provider
@@ -143,6 +162,7 @@ See [MQTT+QUIC Testing Strategy](docs/testing/mqtt-quic-testing-strategy.md) for
    - **When in doubt: Make it pluggable** - prevents bugs like dual-CA issue
 
 **Why Pluggable by Default?**
+
 - Multi-tenant SaaS with different backend needs
 - Commercial/Open Source feature gating
 - 50k+ Steward scale requirements
@@ -151,6 +171,7 @@ See [MQTT+QUIC Testing Strategy](docs/testing/mqtt-quic-testing-strategy.md) for
 - Future-proofing (cheap now, expensive to retrofit)
 
 **Identifying Providers**:
+
 - **Pluggable** (has `pkg/{name}/interfaces/`) - Multiple implementations, auto-registration
 - **Direct** (no `interfaces/`) - Single implementation, direct import (exceptions only)
 - See `pkg/README.md` for detailed decision tree and exceptions
@@ -158,6 +179,7 @@ See [MQTT+QUIC Testing Strategy](docs/testing/mqtt-quic-testing-strategy.md) for
 **Current Central Providers** (as of Story #239):
 
 **Pluggable Providers** (Multiple Implementations):
+
 1. **`pkg/storage`** - Data persistence (git, database) with write-through caching
 2. **`pkg/logging`** - Structured logging (file, timescale)
 3. **`pkg/secrets`** - Secret storage with encryption (SOPS backend)
@@ -178,9 +200,11 @@ See [MQTT+QUIC Testing Strategy](docs/testing/mqtt-quic-testing-strategy.md) for
 *Note: Direct providers listed above should be evaluated for pluggable migration when adding second implementation or during major refactoring.*
 
 **Not Providers** (Utilities):
+
 - `pkg/config`, `pkg/testing`, `pkg/testutil`, `pkg/version`, `pkg/audit`
 
 **Development Rules**:
+
 - ❌ **PROHIBITED**: Creating new functionality that overlaps with central providers
 - ❌ **PROHIBITED**: Creating direct providers without justifying ALL exception criteria
 - ✅ **REQUIRED**: Extend existing central providers or propose new one
@@ -189,6 +213,7 @@ See [MQTT+QUIC Testing Strategy](docs/testing/mqtt-quic-testing-strategy.md) for
 - ⚠️ **WARNING**: Duplicate functionality will be rejected in PR review and blocked by `make check-architecture`
 
 **Before Starting Work**:
+
 1. Review `pkg/README.md` for provider identification rules and decision tree
 2. Check if your feature overlaps with existing provider functionality
 3. If overlap exists: extend the central provider instead of creating new code
@@ -199,12 +224,14 @@ See [MQTT+QUIC Testing Strategy](docs/testing/mqtt-quic-testing-strategy.md) for
 5. Update CLAUDE.md and `pkg/README.md` when adding new provider
 
 **Enforcement**:
+
 - `make check-architecture` - Automated pre-commit violation detection (enhanced detection as of bugfix/central-provider-violations)
 - `/story-commit` - Blocks commits with violations
 - `/pr-review` Phase 2 - Validates central provider compliance
 
 **Known Technical Debt** (Documented as of 2025-10-20):
 The following custom cache implementations exist and should be migrated to `pkg/cache`:
+
 - `features/rbac/zerotrust/cache.go` (364 lines) - Custom L1/L2 cache with LRU eviction
 - `features/rbac/continuous/cache_manager.go` (970 lines) - Extensive multi-tier cache manager
 - `features/reports/cache/` (346 lines across 3 files) - Custom cache package
@@ -222,6 +249,7 @@ prevent new violations from being committed.
 ## Critical Development Rules
 
 ### Must Follow
+
 - **No Foot-guns in Development (MANDATORY)**: Never build insecure options for convenience. If a feature requires durable storage in production, it MUST use durable storage in development and testing. Never document unsafe alternatives.
 - **TDD with Real Components**: Test actual program, not mocks
 - **Zero Failing Tests**: 100% pass rate required before any commits
@@ -232,6 +260,7 @@ prevent new violations from being committed.
 - **Use Central Providers**: ALWAYS check if functionality exists in central providers before creating new code
 
 ### Security Requirements
+
 - Mutual TLS for all internal communication
 - Input validation and sanitization for all user data
 - SQL injection prevention (parameterized queries only)
@@ -239,6 +268,7 @@ prevent new violations from being committed.
 - Proper certificate and key management
 
 ### Testing Standards
+
 - Write tests first (TDD approach)
 - Use real CFGMS components, not mocks
 - Test error paths and race conditions
@@ -248,7 +278,8 @@ prevent new violations from being committed.
 ## Code Organization
 
 ### Directory Structure
-```
+
+```text
 cmd/           # Command-line applications (controller, steward, cfg)
 api/proto/     # Protocol buffer definitions
 pkg/           # Shared packages and global plugin interfaces
@@ -260,6 +291,7 @@ docs/          # Comprehensive documentation
 ```
 
 ### Anti-Patterns to Avoid
+
 - Multiple representations of same data across components
 - Direct import of storage providers in business logic
 - Mocking CFGMS components in tests
@@ -273,6 +305,7 @@ docs/          # Comprehensive documentation
 ## Quick Reference
 
 ### Documentation
+
 - **Story Development**: [docs/development/story-checklist.md](docs/development/story-checklist.md)
 - **PR Reviews**: [docs/development/pr-review-methodology.md](docs/development/pr-review-methodology.md)
 - **All Commands**: [docs/development/commands-reference.md](docs/development/commands-reference.md)
@@ -281,11 +314,13 @@ docs/          # Comprehensive documentation
 - **Roadmap**: [docs/product/roadmap.md](docs/product/roadmap.md)
 
 ### Project Management
-- **GitHub Project**: https://github.com/orgs/cfg-is/projects/1
+
+- **GitHub Project**: [CFGMS Development Roadmap](https://github.com/orgs/cfg-is/projects/1)
 - **Issues & PRs**: All development tracked through GitHub
 - **Roadmap Status**: See docs/product/roadmap.md for current progress
 
 ### Development Approach
+
 - **Sprint Planning**: Always conduct sprint planning before milestones
 - **AI Integration**: Use slash commands for workflow automation
 - **Quality Gates**: Tests, security, and linting must pass
@@ -294,12 +329,14 @@ docs/          # Comprehensive documentation
 ## Multi-Tenancy & Configuration
 
 The system implements recursive parent-child tenant model:
+
 - **Hierarchical Inheritance**: MSP → Client → Group → Device (4 levels)
 - **Declarative Merging**: Named resources replace entire blocks
 - **Source Tracking**: Full auditability of configuration sources
 - **Scale**: Designed for 50k+ Stewards across multiple regions
 
 ## Dependencies
+
 - `github.com/spf13/cobra` - CLI framework
 - `github.com/stretchr/testify` - Testing utilities
 - `github.com/mochi-mqtt/server` - MQTT broker for control plane

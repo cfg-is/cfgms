@@ -34,12 +34,14 @@ Comprehensive security code review identified **9 security findings** across aut
 
 **Vulnerability**:
 API keys were logged in plaintext at two locations in `handlers_apikeys.go`:
+
 - Line 295: Environment API key registration
 - Line 320: Default API key generation
 
 **Impact**: API keys visible in log aggregation systems, SIEM platforms, and log files.
 
 **Remediation**:
+
 ```go
 // BEFORE:
 s.logger.Info("Generated default API key", "id", defaultKey.ID, "key", keyString)
@@ -50,6 +52,7 @@ s.logger.Info("Generated default API key", "id", defaultKey.ID, "created_at", de
 ```
 
 **Files Modified**:
+
 - `features/controller/api/handlers_apikeys.go` (2 locations)
 
 **Validation**: All 486 tests passing, security scan clean
@@ -68,6 +71,7 @@ Registration tokens logged with 15-character prefix, reducing brute-force comple
 **Impact**: Attackers could use logged token prefixes to significantly reduce brute-force search space.
 
 **Remediation**:
+
 ```go
 // BEFORE:
 s.logger.Info("Processing steward registration request", "token_prefix", req.Token[:min(len(req.Token), 15)])
@@ -78,11 +82,13 @@ s.logger.Info("Processing steward registration request", "token_prefix", req.Tok
 ```
 
 **Risk Reduction**:
+
 - 15 chars → 6 chars
 - Brute-force complexity: 2^38 → 2^102 operations
 - Maintains debugging capability while preventing practical attacks
 
 **Files Modified**:
+
 - `features/controller/api/handlers_registration.go`
 
 **Validation**: All 486 tests passing
@@ -101,6 +107,7 @@ Used `strconv.Atoi()` for parsing `limit` and `offset` parameters, which returns
 **Impact**: Potential DoS or unexpected behavior when large values provided.
 
 **Remediation**:
+
 ```go
 // BEFORE:
 if limit, err := strconv.Atoi(value); err == nil {
@@ -118,6 +125,7 @@ if err != nil {
 ```
 
 **Files Modified**:
+
 - `features/controller/api/validation_middleware.go`
 
 **Validation**: All 486 tests passing, explicit 64-bit integer handling
@@ -140,6 +148,7 @@ CORS middleware used `Access-Control-Allow-Origin: *` wildcard, allowing any ori
 **Remediation**:
 
 1. **Added CORS Configuration Infrastructure** (`server.go`):
+
    ```go
    type CORSConfig struct {
        AllowedOrigins []string
@@ -165,6 +174,7 @@ CORS middleware used `Access-Control-Allow-Origin: *` wildcard, allowing any ori
    ```
 
 2. **Implemented Origin Validation** (`middleware.go`):
+
    ```go
    func (s *Server) corsMiddleware(next http.Handler) http.Handler {
        return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -208,6 +218,7 @@ CORS middleware used `Access-Control-Allow-Origin: *` wildcard, allowing any ori
    - Test no origin header: Processes normally without CORS headers
 
 **Configuration**:
+
 ```bash
 # Production
 export CFGMS_ALLOWED_ORIGINS="https://app.example.com,https://admin.example.com"
@@ -217,6 +228,7 @@ export CFGMS_ALLOWED_ORIGINS="https://app.example.com,https://admin.example.com"
 ```
 
 **Files Modified**:
+
 - `features/controller/api/server.go` (added CORSConfig, configureCORS method)
 - `features/controller/api/middleware.go` (replaced wildcard with validation)
 - `features/controller/api/server_test.go` (new comprehensive CORS tests)
@@ -239,6 +251,7 @@ M365 credential encryption used 10,000 PBKDF2 iterations. OWASP 2023 recommends 
 **Impact**: Faster brute-force attacks against encrypted credential files if passphrase is compromised.
 
 **Remediation**:
+
 ```go
 // BEFORE:
 const iterations = 10000
@@ -252,6 +265,7 @@ encryptionKey := pbkdf2.Key([]byte(s.passphrase), salt, 310000, 32, sha256.New)
 **Brute-Force Time Increase**: 31x slower attacks (10k → 310k iterations)
 
 **Files Modified**:
+
 - `features/modules/m365/auth/file_credential_store.go`
 
 **Backward Compatibility**: Automatic migration (see M-CRYPTO-2)
@@ -274,11 +288,13 @@ All credential files encrypted with same global salt: `"cfgms-saas-salt"`. Allow
 **Remediation**:
 
 1. **New Credential File Format**:
+
    ```
    [32-byte unique salt][AES-256-GCM encrypted data]
    ```
 
 2. **Per-Credential Salt Generation**:
+
    ```go
    // M-CRYPTO-2: Generate unique 32-byte salt for this credential file
    salt := make([]byte, 32)
@@ -291,6 +307,7 @@ All credential files encrypted with same global salt: `"cfgms-saas-salt"`. Allow
    ```
 
 3. **Automatic Migration**:
+
    ```go
    func (s *FileCredentialStore) decrypt(data []byte) ([]byte, error) {
        const saltSize = 32
@@ -321,12 +338,14 @@ All credential files encrypted with same global salt: `"cfgms-saas-salt"`. Allow
    ```
 
 **Migration Strategy**:
+
 - **Read**: Try new format first, fall back to legacy if needed
 - **Write**: Always use new format with unique salt
 - **No Downtime**: Transparent migration on first use
 - **No Manual Steps**: Fully automatic
 
 **Files Modified**:
+
 - `features/modules/m365/auth/file_credential_store.go`
   - Changed struct field: `encryptionKey []byte` → `passphrase string`
   - Rewrote `encrypt()` to generate unique salt
@@ -351,6 +370,7 @@ RBAC `CreateRole()` method did not validate that parent role and child role belo
 **Impact**: Tenant isolation breach, privilege escalation across tenant boundaries.
 
 **Remediation**:
+
 ```go
 func (m *Manager) CreateRole(ctx context.Context, role *common.Role) error {
     // M-TENANT-2: Validate tenant boundary for role inheritance
@@ -398,12 +418,14 @@ func (m *Manager) CreateRole(ctx context.Context, role *common.Role) error {
 ```
 
 **Audit Trail**:
+
 - **Event Type**: `rbac_security_violation`
 - **Severity**: CRITICAL
 - **Error Code**: `RBAC_CROSS_TENANT_INHERITANCE_BLOCKED`
 - **Details**: Parent tenant ID, child tenant ID, security finding reference
 
 **Files Modified**:
+
 - `features/rbac/manager.go` (added imports, validation logic in CreateRole method)
 
 **Validation**: All 486 tests passing
@@ -423,9 +445,11 @@ func (m *Manager) CreateRole(ctx context.Context, role *common.Role) error {
 **Remediation**: Created comprehensive security configuration documentation.
 
 **Files Created**:
+
 - `docs/security/SECURITY_CONFIGURATION.md` (348 lines)
 
 **Documentation Sections**:
+
 1. **API Key Management**
    - Environment API key encryption requirements
    - Secret management system integration (Vault, AWS Secrets Manager, Azure Key Vault, SOPS)
@@ -468,12 +492,14 @@ func (m *Manager) CreateRole(ctx context.Context, role *common.Role) error {
 **Remediation**:
 
 1. **Added Error Constant**:
+
    ```go
    // ErrCrossTenantAccessDenied is returned when attempting to access a resource from a different tenant
    var ErrCrossTenantAccessDenied = errors.New("cross-tenant access denied")
    ```
 
 2. **Implemented Tenant Validation Helper**:
+
    ```go
    // H-TENANT-1: Tenant boundary validation helper (security audit finding)
    func (s *DatabaseRBACStore) validateTenantAccess(ctx context.Context, resourceTenantID string, isSystemResource bool) error {
@@ -513,6 +539,7 @@ func (m *Manager) CreateRole(ctx context.Context, role *common.Role) error {
    - **DeleteSubject**: Fetch first to validate tenant, then delete
 
 **Example Integration**:
+
 ```go
 func (s *DatabaseRBACStore) StoreRole(ctx context.Context, role *common.Role) error {
     s.mutex.Lock()
@@ -528,11 +555,13 @@ func (s *DatabaseRBACStore) StoreRole(ctx context.Context, role *common.Role) er
 ```
 
 **Backwards Compatibility**:
+
 - Operations without `tenant_id` in context are allowed (internal system components)
 - System resources (roles with `is_system_role=true`) bypass validation
 - No breaking changes to existing functionality
 
 **Files Modified**:
+
 - `pkg/storage/providers/database/rbac_store.go`
   - Added `ErrCrossTenantAccessDenied` error constant
   - Added `validateTenantAccess()` helper method
@@ -598,10 +627,12 @@ All remediations tracked in Story #225 branch `feature/story-225-security-code-r
 ### Security Scans
 
 **Pre-Remediation**:
+
 - gosec: 25 issues (11 HIGH, 14 MEDIUM)
 - Manual review: 9 security findings
 
 **Post-Remediation**:
+
 - gosec: 23 issues (existing architectural items, not related to findings)
 - Trivy: 0 critical/high vulnerabilities
 - Nancy: 0 critical/high dependency vulnerabilities
@@ -611,6 +642,7 @@ All remediations tracked in Story #225 branch `feature/story-225-security-code-r
 ### Backward Compatibility
 
 **Zero Breaking Changes**:
+
 - M365 credential migration: Fully automatic, transparent
 - CORS configuration: Default development origins maintained
 - API key logging: Only affects log output, not functionality
@@ -666,6 +698,7 @@ All remediations tracked in Story #225 branch `feature/story-225-security-code-r
 **Status**: Ready for external audit
 
 **Completed**:
+
 - ✅ All automated security scans passing
 - ✅ 9/9 findings remediated (100%)
 - ✅ Comprehensive security documentation
@@ -674,6 +707,7 @@ All remediations tracked in Story #225 branch `feature/story-225-security-code-r
 - ✅ Defense-in-depth security measures implemented
 
 **Pending**:
+
 - 📋 External security firm engagement
 
 ## Conclusion

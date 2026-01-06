@@ -270,28 +270,34 @@ func TestAdminConsentFlow(t *testing.T) {
 ## Plugin Development Guidelines
 
 ### 1. Plugin Naming Convention
+
 - Plugin names should be lowercase, descriptive
 - Use hyphens for multi-word names: `azure-sql`, `s3-bucket`
 
 ### 2. Dependency Management
+
 - Check dependencies in `Available()` method
 - Return descriptive errors: `"requires postgresql client library"`
 
 ### 3. Configuration Schema
+
 - Use simple `map[string]interface{}` for flexibility
 - Document required/optional fields in plugin description
 
 ### 4. Error Handling
+
 - Return wrapped errors with plugin context
 - Use consistent error formats across plugins
 
 ### 5. Documentation
+
 - Each plugin must have a README.md in its directory
 - Document configuration options and examples
 
 ## Migration from Existing Patterns
 
 ### Current State (DNA Storage)
+
 ```go
 // features/steward/dna/storage/backends.go - Multiple implementations in one file
 func NewBackend(backendType BackendType, config *Config, logger Logger) (Backend, error) {
@@ -306,6 +312,7 @@ func NewBackend(backendType BackendType, config *Config, logger Logger) (Backend
 ```
 
 ### Target State (Plugin Pattern)
+
 ```go
 // Features automatically discover plugins via init() registration
 func CreateStorageFromConfig(backendType string, config map[string]interface{}) (Backend, error) {
@@ -321,12 +328,14 @@ func CreateStorageFromConfig(backendType string, config map[string]interface{}) 
 ## Architecture Summary
 
 ### Key Concept: Global Storage Decision
+
 - **Controller** chooses ONE storage provider for the entire system
 - **All modules** use the same storage backend automatically  
 - **Users** configure storage once at the controller level
 - **No per-module storage decisions** - everything is consistent
 
 ### Configuration Flow
+
 ```
 cfgms.yaml (controller.storage.provider: "database")
     ↓
@@ -353,11 +362,13 @@ Modules get injected with interfaces (don't know it's PostgreSQL)
 ## Examples in Codebase
 
 Current implementations following this pattern:
-- **Storage Backends**: DNA storage (interfaces.go + backends.go) 
+
+- **Storage Backends**: DNA storage (interfaces.go + backends.go)
 - **Compression**: GZIP, ZSTD, LZ4 compressors
 - **Git Providers**: GitHub, GitLab, Bitbucket integration
 
 Future implementations:
+
 - **MSP Client Storage**: Memory, File, Git, Database backends
 - **KMS Providers**: Vault, AWS KMS, Azure Key Vault
 - **Database Providers**: PostgreSQL, MySQL, SQLite adapters

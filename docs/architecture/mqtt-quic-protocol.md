@@ -5,6 +5,7 @@
 This document defines the communication protocol for replacing gRPC with a hybrid MQTT+QUIC architecture.
 
 **Goals:**
+
 - 40% bandwidth reduction (Story #198 requirement)
 - <15s failover detection (Story #198 requirement)
 - Bi-directional communication (controller → steward and steward → controller)
@@ -54,9 +55,11 @@ cfgms/
 ### Message Types
 
 #### 1. Heartbeat (Steward → Controller)
+
 **Topic:** `cfgms/steward/{id}/heartbeat`
 **QoS:** 1 (at least once)
 **Payload:**
+
 ```json
 {
   "steward_id": "steward-abc123",
@@ -71,9 +74,11 @@ cfgms/
 ```
 
 #### 2. Commands (Controller → Steward)
+
 **Topic:** `cfgms/steward/{id}/commands`
 **QoS:** 1 (at least once)
 **Payload:**
+
 ```json
 {
   "command_id": "cmd-xyz789",
@@ -88,6 +93,7 @@ cfgms/
 ```
 
 **Command Types:**
+
 - `sync_config` - Request configuration sync (triggers QUIC connection)
 - `sync_dna` - Request DNA sync (triggers QUIC connection)
 - `connect_quic` - Establish QUIC connection for data transfer
@@ -95,9 +101,11 @@ cfgms/
 - `shutdown` - Graceful shutdown request
 
 #### 3. Status Updates (Steward → Controller)
+
 **Topic:** `cfgms/steward/{id}/status`
 **QoS:** 1 (at least once)
 **Payload:**
+
 ```json
 {
   "steward_id": "steward-abc123",
@@ -112,10 +120,12 @@ cfgms/
 ```
 
 #### 4. Will Message (LWT - Steward disconnect)
+
 **Topic:** `cfgms/steward/{id}/will`
 **QoS:** 1 (at least once)
 **Retain:** false
 **Payload:**
+
 ```json
 {
   "steward_id": "steward-abc123",
@@ -129,11 +139,13 @@ cfgms/
 ### Connection Model
 
 **Steward-Initiated Connections:**
+
 - Steward ALWAYS initiates QUIC connections to controller
 - Controller cannot directly connect to steward (NAT/firewall friendly)
 - Controller triggers connections via MQTT commands
 
 **Connection Flow:**
+
 1. Controller sends `connect_quic` command via MQTT
 2. Steward receives command with session_id and QUIC address
 3. Steward establishes QUIC connection to controller
@@ -162,6 +174,7 @@ QUIC Connection
 All messages use Protocol Buffers (same as gRPC).
 
 #### Control Stream (Stream 0)
+
 ```protobuf
 message QUICHandshake {
   string session_id = 1;
@@ -187,6 +200,7 @@ message StreamCapability {
 ```
 
 #### Configuration Stream (Stream 1)
+
 ```protobuf
 // Reuse existing ConfigResponse from config.proto
 message ConfigSyncRequest {
@@ -196,6 +210,7 @@ message ConfigSyncRequest {
 ```
 
 #### DNA Stream (Stream 2)
+
 ```protobuf
 // Reuse existing DNA from common.proto
 message DNASyncRequest {
@@ -206,32 +221,38 @@ message DNASyncRequest {
 ## Migration Strategy
 
 ### Phase 1: MQTT Broker (✅ Complete)
+
 - Embedded mochi-mqtt broker in controller
 - Auto-generated test certificates
 - mTLS authentication
 
 ### Phase 2: Controller Integration (✅ Complete)
+
 - MQTT broker lifecycle management
 - Default enabled as core infrastructure
 
 ### Phase 3: MQTT Heartbeats (✅ Complete)
+
 - Heartbeat service in controller
 - MQTT client in steward
 - <15s failover detection
 - gRPC heartbeat fallback
 
 ### Phase 4: MQTT Command/Control (Current)
+
 - [ ] Command handler in steward
 - [ ] Command publisher in controller
 - [ ] QUIC connection triggering via MQTT
 
 ### Phase 5: QUIC Data Plane
+
 - [ ] QUIC server in controller
 - [ ] QUIC client in steward
 - [ ] Configuration sync over QUIC
 - [ ] DNA sync over QUIC
 
 ### Phase 6: Remove gRPC
+
 - [ ] Migrate all remaining gRPC operations
 - [ ] Remove gRPC dependencies
 - [ ] Update tests for MQTT+QUIC only
@@ -239,12 +260,14 @@ message DNASyncRequest {
 ## Security
 
 ### MQTT Security
+
 - **Transport:** TLS 1.2+ with mTLS
 - **Authentication:** Client certificate verification
 - **Authorization:** ACL based on steward ID
 - **Message Signing:** Optional HMAC for critical commands
 
 ### QUIC Security
+
 - **Transport:** Built-in TLS 1.3 with mTLS
 - **Session Tokens:** Short-lived session IDs (30s TTL)
 - **Connection Verification:** Certificate + session_id validation
@@ -253,12 +276,14 @@ message DNASyncRequest {
 ## Performance Characteristics
 
 ### MQTT (Control Plane)
+
 - **Latency:** <50ms for commands
 - **Throughput:** ~10K messages/sec per broker
 - **Message Size:** <1KB typical, 256KB max
 - **Reliability:** QoS 1 (at least once delivery)
 
 ### QUIC (Data Plane)
+
 - **Latency:** ~20ms connection establishment
 - **Throughput:** ~1GB/s for large transfers
 - **Message Size:** Unlimited (streamed)
@@ -267,11 +292,13 @@ message DNASyncRequest {
 ## Bandwidth Reduction Analysis
 
 ### Current gRPC (Baseline)
+
 - Heartbeat every 30s: ~500 bytes × 2 (req+resp) = 1KB per heartbeat
 - HTTP/2 overhead: ~15% additional
 - Total: ~1.15KB per heartbeat cycle
 
 ### New MQTT+QUIC
+
 - Heartbeat via MQTT: ~250 bytes (JSON, QoS 1)
 - No response required (fire-and-forget)
 - MQTT overhead: ~5%
@@ -280,6 +307,7 @@ message DNASyncRequest {
 **Heartbeat Bandwidth Reduction:** 77% (1150 → 263 bytes)
 
 ### Configuration Sync
+
 - Current gRPC: HTTP/2 + protobuf + metadata = ~25% overhead
 - New QUIC: TLS 1.3 + protobuf only = ~5% overhead
 
@@ -290,18 +318,21 @@ message DNASyncRequest {
 ## Error Handling
 
 ### MQTT Connection Loss
+
 1. Steward detects MQTT disconnect
 2. Automatic reconnect with exponential backoff
 3. Resubscribe to command topic
 4. Heartbeat service marks steward unhealthy after 15s
 
 ### QUIC Connection Failure
+
 1. Steward reports error via MQTT status topic
 2. Controller retries with new session_id
 3. Exponential backoff (1s, 2s, 4s, 8s, max 30s)
 4. Fallback to next scheduled sync if persistent failure
 
 ### Command Timeout
+
 1. Steward sends status update when command received
 2. Controller expects completion status within timeout
 3. If timeout exceeded, command marked as failed
@@ -310,6 +341,7 @@ message DNASyncRequest {
 ## Monitoring
 
 ### Metrics to Track
+
 - MQTT message rate (messages/second)
 - MQTT message size distribution
 - QUIC connection establishment time
@@ -319,6 +351,7 @@ message DNASyncRequest {
 - Failover detection time (must be <15s)
 
 ### Logging
+
 - All MQTT commands logged with command_id
 - All QUIC sessions logged with session_id
 - All errors logged with context and steward_id

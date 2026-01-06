@@ -25,6 +25,7 @@ modules/
 ```
 
 **Required Files:**
+
 - `module.yaml` - Module metadata (name, version, description)
 - `*.go` - Implementation that implements the `Module` interface with `ConfigState`
 
@@ -37,4 +38,4 @@ modules/
 
 ## Documentation
 
-- [Module Interface](interface.md) - Essential interface specification and ConfigState details 
+- [Module Interface](interface.md) - Essential interface specification and ConfigState details

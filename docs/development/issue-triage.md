@@ -17,18 +17,21 @@ All new issues receive the `triage` label automatically through issue templates.
 ### Label Categories
 
 #### Type Labels
+
 - `bug` - Something isn't working
 - `enhancement` - New feature or improvement
 - `question` - Needs clarification or guidance
 - `documentation` - Documentation improvements
 
 #### Priority Labels
+
 - `priority/P0` - Critical - Production broken, security vulnerability
 - `priority/P1` - High - Major functionality impacted
 - `priority/P2` - Medium - Workaround available
 - `good first issue` - Suitable for new contributors
 
 #### Component Labels
+
 - `controller` - Controller component
 - `steward` - Steward component
 - `api` - REST API
@@ -38,6 +41,7 @@ All new issues receive the `triage` label automatically through issue templates.
 - `security` - Security-related
 
 #### Status Labels
+
 - `triage` - Awaiting initial review
 - `help wanted` - Open for community contribution
 - `duplicate` - Already reported
@@ -48,18 +52,21 @@ All new issues receive the `triage` label automatically through issue templates.
 ### Priority Assignment
 
 **P0 - Critical**
+
 - Security vulnerabilities
 - Data loss or corruption
 - Complete feature failure in production
 - Response time: Same day
 
 **P1 - High**
+
 - Major functionality broken
 - No workaround available
 - Affects multiple users
 - Response time: 1-2 days
 
 **P2 - Medium**
+
 - Feature partially broken
 - Workaround available
 - Affects single user/edge case
@@ -68,6 +75,7 @@ All new issues receive the `triage` label automatically through issue templates.
 ### Good First Issue Criteria
 
 Issues suitable for new contributors should:
+
 - Have clear acceptance criteria
 - Not require deep architectural knowledge
 - Be self-contained (single file or small scope)
@@ -75,6 +83,7 @@ Issues suitable for new contributors should:
 - Have existing tests as examples
 
 Examples:
+
 - Documentation improvements
 - Adding tests for existing functionality
 - Simple bug fixes with known causes
@@ -83,6 +92,7 @@ Examples:
 ## Response Templates
 
 ### Insufficient Information
+
 ```markdown
 Thanks for reporting this issue! To help us investigate, could you please provide:
 - [ ] CFGMS version (`cfg version`)
@@ -94,6 +104,7 @@ Once you've added this information, we'll be able to look into it further.
 ```
 
 ### Duplicate Issue
+
 ```markdown
 Thanks for reporting! This appears to be a duplicate of #XXX. I'm closing this issue, but please follow the linked issue for updates.
 
@@ -101,6 +112,7 @@ If you believe this is different, please reopen and explain how it differs.
 ```
 
 ### Won't Fix
+
 ```markdown
 Thanks for the suggestion! After review, we've decided not to implement this because:
 - [Reason]
@@ -109,6 +121,7 @@ If you'd like to discuss further, please open a discussion thread.
 ```
 
 ### Good First Issue
+
 ```markdown
 This looks like a good first issue for new contributors!
 
@@ -138,6 +151,6 @@ Maintainers should review the triage queue weekly:
 
 **Never discuss security vulnerabilities in public issues.**
 
-Direct reporters to: https://github.com/cfg-is/cfgms/security/advisories/new
+Direct reporters to: <https://github.com/cfg-is/cfgms/security/advisories/new>
 
 See [SECURITY.md](../../SECURITY.md) for the security disclosure policy.

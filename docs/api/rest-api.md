@@ -5,6 +5,7 @@ The CFGMS controller provides a REST API for external system integration and man
 ## Base URL
 
 By default, the REST API runs on port 9080:
+
 ```
 http://localhost:9080/api/v1
 ```
@@ -14,11 +15,13 @@ http://localhost:9080/api/v1
 All API endpoints (except `/health`) require authentication via API key. API keys can be provided in two ways:
 
 ### X-API-Key Header
+
 ```bash
 curl -H "X-API-Key: your-api-key" http://localhost:9080/api/v1/stewards
 ```
 
 ### Authorization Bearer Token
+
 ```bash
 curl -H "Authorization: Bearer your-api-key" http://localhost:9080/api/v1/stewards
 ```
@@ -28,6 +31,7 @@ curl -H "Authorization: Bearer your-api-key" http://localhost:9080/api/v1/stewar
 All API responses follow a standard format:
 
 ### Success Response
+
 ```json
 {
   "data": { ... },
@@ -36,6 +40,7 @@ All API responses follow a standard format:
 ```
 
 ### Error Response
+
 ```json
 {
   "error": {
@@ -52,11 +57,13 @@ All API responses follow a standard format:
 ### Health Check
 
 #### GET /api/v1/health
+
 Check the health status of the CFGMS controller.
 
 **Authentication:** None required
 
 **Response:**
+
 ```json
 {
   "data": {
@@ -79,11 +86,13 @@ Check the health status of the CFGMS controller.
 ### Steward Management
 
 #### GET /api/v1/stewards
+
 List all registered stewards.
 
 **Authentication:** Required
 
 **Response:**
+
 ```json
 {
   "data": [
@@ -115,14 +124,17 @@ List all registered stewards.
 ```
 
 #### GET /api/v1/stewards/{id}
+
 Get information about a specific steward.
 
 **Authentication:** Required
 
 **Parameters:**
+
 - `id` (path): Steward ID
 
 **Response:**
+
 ```json
 {
   "data": {
@@ -151,14 +163,17 @@ Get information about a specific steward.
 ```
 
 #### GET /api/v1/stewards/{id}/dna
+
 Get DNA information for a specific steward.
 
 **Authentication:** Required
 
 **Parameters:**
+
 - `id` (path): Steward ID
 
 **Response:**
+
 ```json
 {
   "data": {
@@ -181,15 +196,18 @@ Get DNA information for a specific steward.
 ### Configuration Management
 
 #### GET /api/v1/stewards/{id}/config
+
 Get configuration for a specific steward.
 
 **Authentication:** Required
 
 **Parameters:**
+
 - `id` (path): Steward ID
 - `modules` (query, optional): Comma-separated list of module names to filter
 
 **Response:**
+
 ```json
 {
   "data": {
@@ -219,14 +237,17 @@ Get configuration for a specific steward.
 ```
 
 #### POST /api/v1/stewards/{id}/config/validate
+
 Validate configuration for a steward.
 
 **Authentication:** Required
 
 **Parameters:**
+
 - `id` (path): Steward ID
 
 **Request Body:**
+
 ```json
 {
   "config": {
@@ -243,6 +264,7 @@ Validate configuration for a steward.
 ```
 
 **Response:**
+
 ```json
 {
   "data": {
@@ -260,14 +282,17 @@ Validate configuration for a steward.
 ### Certificate Management
 
 #### GET /api/v1/certificates
+
 List certificates.
 
 **Authentication:** Required
 
 **Parameters:**
+
 - `steward_id` (query, optional): Filter certificates by steward ID
 
 **Response:**
+
 ```json
 {
   "data": [
@@ -286,11 +311,13 @@ List certificates.
 ```
 
 #### POST /api/v1/certificates/provision
+
 Provision a new certificate for a steward.
 
 **Authentication:** Required
 
 **Request Body:**
+
 ```json
 {
   "steward_id": "steward-001",
@@ -301,6 +328,7 @@ Provision a new certificate for a steward.
 ```
 
 **Response:**
+
 ```json
 {
   "data": {
@@ -317,14 +345,17 @@ Provision a new certificate for a steward.
 ### RBAC Management
 
 #### GET /api/v1/rbac/permissions
+
 List available permissions.
 
 **Authentication:** Required
 
 **Parameters:**
+
 - `resource_type` (query, optional): Filter permissions by resource type
 
 **Response:**
+
 ```json
 {
   "data": [
@@ -341,14 +372,17 @@ List available permissions.
 ```
 
 #### GET /api/v1/rbac/roles
+
 List roles.
 
 **Authentication:** Required
 
 **Parameters:**
+
 - `tenant_id` (query, optional): Filter roles by tenant ID
 
 **Response:**
+
 ```json
 {
   "data": [
@@ -367,11 +401,13 @@ List roles.
 ```
 
 #### POST /api/v1/rbac/roles
+
 Create a new role.
 
 **Authentication:** Required
 
 **Request Body:**
+
 ```json
 {
   "name": "Config Manager",
@@ -382,6 +418,7 @@ Create a new role.
 ```
 
 **Response:**
+
 ```json
 {
   "data": {
@@ -400,11 +437,13 @@ Create a new role.
 ### API Key Management
 
 #### GET /api/v1/api-keys
+
 List API keys.
 
 **Authentication:** Required
 
 **Response:**
+
 ```json
 {
   "data": [
@@ -422,11 +461,13 @@ List API keys.
 ```
 
 #### POST /api/v1/api-keys
+
 Create a new API key.
 
 **Authentication:** Required
 
 **Request Body:**
+
 ```json
 {
   "name": "Monitoring Key",
@@ -437,6 +478,7 @@ Create a new API key.
 ```
 
 **Response:**
+
 ```json
 {
   "data": {
@@ -459,11 +501,13 @@ Create a new API key.
 CFGMS provides comprehensive monitoring capabilities through dedicated endpoints. These endpoints enable integration with external monitoring systems like Prometheus, Grafana, ELK stack, and others.
 
 #### GET /api/v1/monitoring/health
+
 System health overview including service status and resource utilization.
 
 **Authentication:** Required
 
 **Response:**
+
 ```json
 {
   "data": {
@@ -486,11 +530,13 @@ System health overview including service status and resource utilization.
 ```
 
 #### GET /api/v1/monitoring/metrics
+
 System performance metrics in a format suitable for time-series databases.
 
 **Authentication:** Required
 
 **Response:**
+
 ```json
 {
   "data": {
@@ -523,15 +569,18 @@ System performance metrics in a format suitable for time-series databases.
 ```
 
 #### GET /api/v1/monitoring/resources
+
 Resource utilization metrics for stewards and system components.
 
 **Authentication:** Required
 
 **Parameters:**
+
 - `steward_id` (query, optional): Filter metrics by specific steward
 - `since` (query, optional): RFC3339 timestamp to filter metrics since
 
 **Response:**
+
 ```json
 {
   "data": {
@@ -561,11 +610,13 @@ Resource utilization metrics for stewards and system components.
 ```
 
 #### GET /api/v1/monitoring/logs
+
 Recent system logs with filtering and correlation capabilities.
 
 **Authentication:** Required
 
 **Parameters:**
+
 - `level` (query, optional): Filter by log level (debug, info, warn, error)
 - `component` (query, optional): Filter by component (controller, steward, monitoring)
 - `correlation_id` (query, optional): Filter by correlation ID
@@ -573,6 +624,7 @@ Recent system logs with filtering and correlation capabilities.
 - `since` (query, optional): RFC3339 timestamp to filter logs since
 
 **Response:**
+
 ```json
 {
   "data": {
@@ -597,17 +649,20 @@ Recent system logs with filtering and correlation capabilities.
 ```
 
 #### GET /api/v1/monitoring/traces
+
 Distributed tracing information for request correlation and debugging.
 
 **Authentication:** Required
 
 **Parameters:**
+
 - `correlation_id` (query, optional): Filter by correlation ID
 - `operation` (query, optional): Filter by operation name
 - `limit` (query, optional): Maximum number of traces to return (default: 50, max: 500)
 - `since` (query, optional): RFC3339 timestamp to filter traces since
 
 **Response:**
+
 ```json
 {
   "data": {
@@ -642,17 +697,20 @@ Distributed tracing information for request correlation and debugging.
 ```
 
 #### GET /api/v1/monitoring/events
+
 System events and alerts for operational awareness.
 
 **Authentication:** Required
 
 **Parameters:**
+
 - `severity` (query, optional): Filter by severity (info, warning, error, critical)
 - `component` (query, optional): Filter by component
 - `limit` (query, optional): Maximum number of events to return (default: 100, max: 1000)
 - `since` (query, optional): RFC3339 timestamp to filter events since
 
 **Response:**
+
 ```json
 {
   "data": {
@@ -679,11 +737,13 @@ System events and alerts for operational awareness.
 ```
 
 #### GET /api/v1/monitoring/config
+
 Current monitoring system configuration and export status.
 
 **Authentication:** Required
 
 **Response:**
+
 ```json
 {
   "data": {
@@ -741,22 +801,26 @@ Current monitoring system configuration and export status.
 ## Getting Started
 
 1. **Start the controller:**
+
    ```bash
    ./bin/controller
    ```
 
 2. **Check health:**
+
    ```bash
    curl http://localhost:9080/api/v1/health
    ```
 
 3. **Get the default API key from the controller logs:**
    Look for a log message like:
+
    ```
    Generated default API key id=xxx key=yyy
    ```
 
 4. **List stewards:**
+
    ```bash
    curl -H "X-API-Key: your-api-key" http://localhost:9080/api/v1/stewards
    ```

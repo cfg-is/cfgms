@@ -14,12 +14,14 @@ This directory contains detailed development guides, standards, and workflows fo
 ## Development Workflow
 
 ### Story Development Process
+
 - [Story Checklist](story-checklist.md) - Complete checklist for implementing stories
 - [PR Review Methodology](pr-review-methodology.md) - 5-phase structured PR review process
 - [Git Workflow](git-workflow.md) - GitFlow branching strategy and commit guidelines
 - [Commands Reference](commands-reference.md) - All available make commands and utilities
 
 ### Development Guides
+
 - [Getting Started Guide](guides/getting-started.md) - Onboarding for new developers
 - [Development Workflow](guides/development-workflow.md) - Daily development workflow
 - [Standalone Steward Implementation](guides/standalone-steward-implementation.md) - Steward architecture guide
@@ -27,6 +29,7 @@ This directory contains detailed development guides, standards, and workflows fo
 ## Standards & Best Practices
 
 ### Code Quality
+
 - [Go Coding Standards](standards/go-coding-standards.md) - Go code style and patterns
 - [Testing Standards](standards/testing-standards.md) - Testing requirements and patterns
 - [Documentation Standards](standards/documentation-standards.md) - Documentation guidelines
@@ -35,6 +38,7 @@ This directory contains detailed development guides, standards, and workflows fo
 ## Security Development
 
 ### Security Workflow
+
 - [Security Setup](security-setup.md) - Development security configuration
 - [Security Workflow Guide](security-workflow-guide.md) - Security-focused development process
 - [Security Troubleshooting](security-troubleshooting.md) - Common security issues and solutions
@@ -43,6 +47,7 @@ This directory contains detailed development guides, standards, and workflows fo
 ## Logging Development
 
 ### Logging System
+
 - [Module Logging Development Guide](module-logging-development-guide.md) - Implementing logging in modules
 - [Logging Migration Standards](logging-migration-standards.md) - Migrating to new logging system
 - [Logging Migration Summary](logging-migration-summary.md) - Migration progress tracking
@@ -51,6 +56,7 @@ This directory contains detailed development guides, standards, and workflows fo
 ## Infrastructure
 
 ### CI/CD & Testing
+
 - [CI Infrastructure Setup](ci-infrastructure-setup.md) - GitHub Actions configuration
 - [Test Cache Architecture](test-cache-architecture.md) - Test performance optimization
 - [Project Management](project_management.md) - Project tracking and planning

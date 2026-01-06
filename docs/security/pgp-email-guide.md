@@ -35,9 +35,9 @@ PGP (Pretty Good Privacy) allows people to send you encrypted emails that only y
 **Setup** (5 minutes):
 
 1. **Install Mailvelope extension**:
-   - Chrome: https://chrome.google.com/webstore (search "Mailvelope")
-   - Firefox: https://addons.mozilla.org (search "Mailvelope")
-   - Edge: https://microsoftedge.microsoft.com/addons (search "Mailvelope")
+   - Chrome: <https://chrome.google.com/webstore> (search "Mailvelope")
+   - Firefox: <https://addons.mozilla.org> (search "Mailvelope")
+   - Edge: <https://microsoftedge.microsoft.com/addons> (search "Mailvelope")
 
 2. **Import your private key**:
    - Click Mailvelope icon → Options → Key Management
@@ -49,17 +49,20 @@ PGP (Pretty Good Privacy) allows people to send you encrypted emails that only y
    - When you open your webmail, you'll see Mailvelope integration
 
 **Reading encrypted email**:
+
 - Open email in your webmail interface
 - Mailvelope automatically detects PGP encrypted content
 - Click to decrypt (enter passphrase)
 - Read plaintext message
 
 **Replying with encryption**:
+
 - Click "Encrypt" button in Mailvelope compose window
 - Add recipient's public key (if they sent you their key)
 - Write message, click encrypt, send
 
 **Advantages**:
+
 - ✅ Works with any webmail provider
 - ✅ No additional software needed
 - ✅ Cross-platform (works anywhere with a browser)
@@ -68,7 +71,7 @@ PGP (Pretty Good Privacy) allows people to send you encrypted emails that only y
 
 **Setup**:
 
-1. **Download Thunderbird**: https://www.thunderbird.net
+1. **Download Thunderbird**: <https://www.thunderbird.net>
 
 2. **Add your email account**:
    - Account Settings → Add Mail Account
@@ -83,14 +86,17 @@ PGP (Pretty Good Privacy) allows people to send you encrypted emails that only y
    - Enter passphrase
 
 **Reading encrypted email**:
+
 - Encrypted emails show lock icon
 - Click to view → enter passphrase → read message
 
 **Replying**:
+
 - Compose window has "Encrypt" button
 - Automatically uses recipient's public key (if available)
 
 **Advantages**:
+
 - ✅ Built-in PGP support (no extensions needed)
 - ✅ Desktop client (works offline)
 - ✅ Better for high email volume
@@ -100,12 +106,13 @@ PGP (Pretty Good Privacy) allows people to send you encrypted emails that only y
 
 **Setup**:
 
-1. **Install GPG Suite**: https://gpgtools.org
+1. **Install GPG Suite**: <https://gpgtools.org>
 2. **Import your private key** via GPG Keychain
 3. **Apple Mail auto-detects** PGP keys
 4. **Compose with encryption** using toolbar buttons
 
 **Advantages**:
+
 - ✅ Native macOS integration
 - ✅ Works with iCloud, Gmail, Exchange, etc.
 - ✅ Clean UI
@@ -135,6 +142,7 @@ gpg --encrypt --armor --recipient researcher@example.com reply.txt
 ```
 
 **Advantages**:
+
 - ✅ Works on any system
 - ✅ Scriptable/automatable
 - ✅ Most control
@@ -146,12 +154,14 @@ gpg --encrypt --armor --recipient researcher@example.com reply.txt
 ### Scenario 1: Researcher Reports Vulnerability
 
 **They do**:
+
 1. Download your public key from your security page
 2. Write vulnerability details
 3. Encrypt with your public key
 4. Email to your security contact address
 
 **You do**:
+
 1. Check your security email inbox
 2. See encrypted email (looks like gibberish text block)
 3. Decrypt with Mailvelope/Thunderbird/GPG (enter passphrase)
@@ -181,11 +191,13 @@ Best regards,
 **Encrypted back-and-forth**:
 
 If researcher included their public key:
+
 - Your email client auto-encrypts replies
 - Entire conversation remains encrypted
 - Safe to discuss technical details
 
 If they didn't include their public key:
+
 - Reply unencrypted asking them to send their public key
 - Once received, import it and continue encrypted
 
@@ -193,7 +205,8 @@ If they didn't include their public key:
 
 ## Best Practices
 
-### DO:
+### DO
+
 ✅ Store private key passphrase in password manager
 ✅ Back up private key securely (encrypted USB, password manager vault)
 ✅ Always verify sender's identity before acting on reports
@@ -202,7 +215,8 @@ If they didn't include their public key:
 ✅ Test your setup before announcing it publicly
 ✅ Publish fingerprint on your security page for verification
 
-### DON'T:
+### DON'T
+
 ❌ Email your private key to anyone (NEVER!)
 ❌ Use same passphrase as your email password
 ❌ Reply unencrypted to encrypted message (breaks confidentiality)
@@ -228,9 +242,9 @@ gpg --encrypt --armor --recipient security@your-domain.com test.txt
 # Email the encrypted content (test.txt.asc) to security@your-domain.com
 ```
 
-2. **Log into your email**
-3. **Try decrypting** with Mailvelope/Thunderbird
-4. **Success?** You're ready!
+1. **Log into your email**
+2. **Try decrypting** with Mailvelope/Thunderbird
+3. **Success?** You're ready!
 
 ### Test with a Colleague
 
@@ -251,26 +265,31 @@ gpg --encrypt --armor --recipient security@your-domain.com test.txt
 ## Troubleshooting
 
 ### "Cannot decrypt - wrong passphrase"
+
 - Double-check passphrase (case-sensitive)
 - Verify you're using correct private key
 - Check caps lock is off
 
 ### "No public key for recipient"
+
 - Recipient needs to send their public key first
 - OR reply unencrypted asking them to include public key
 - Import their key: `gpg --import their-key.asc`
 
 ### "Expired key"
+
 - Regenerate key (or extend expiration if possible)
 - Update website with new public key
 - Notify regular correspondents
 
 ### "Email client doesn't show decrypt option"
+
 - Ensure PGP extension/plugin is enabled
 - Check email is actually PGP encrypted (starts with "-----BEGIN PGP MESSAGE-----")
 - Verify private key is imported correctly
 
 ### "Encryption button is grayed out"
+
 - Recipient's public key not imported
 - Email client doesn't recognize recipient
 - Import recipient's public key first
@@ -282,16 +301,19 @@ gpg --encrypt --armor --recipient security@your-domain.com test.txt
 ### Backing Up Your Private Key
 
 **Export private key** (store securely!):
+
 ```bash
 gpg --export-secret-keys --armor security@your-domain.com > private-key.asc
 ```
 
 **Store in**:
+
 - Password manager (1Password, Bitwarden, etc.)
 - Encrypted USB drive (locked in safe)
 - Secure backup service (encrypted)
 
 **NEVER**:
+
 - Email it to yourself
 - Store in cloud unencrypted
 - Share with anyone
@@ -311,24 +333,27 @@ gpg> quit
 If your private key is compromised:
 
 1. **Generate revocation certificate**:
+
 ```bash
 gpg --gen-revoke security@your-domain.com > revoke.asc
 ```
 
-2. **Import and publish revocation**:
+1. **Import and publish revocation**:
+
 ```bash
 gpg --import revoke.asc
 gpg --keyserver keys.openpgp.org --send-keys <KEY_ID>
 ```
 
-3. **Update your website** with notice of revoked key
-4. **Generate new key** and republish
+1. **Update your website** with notice of revoked key
+2. **Generate new key** and republish
 
 ---
 
 ## Quick Reference
 
 ### Key Locations
+
 - **Private key**: `~/.gnupg/` (Linux/macOS) or `%APPDATA%\gnupg\` (Windows)
 - **Public key**: Export and publish on your website
 
@@ -360,6 +385,7 @@ gpg --verify file.txt.sig
 ### Email Format for Encrypted Messages
 
 Encrypted emails contain:
+
 ```
 -----BEGIN PGP MESSAGE-----
 
@@ -369,6 +395,7 @@ Encrypted emails contain:
 ```
 
 Signed emails contain:
+
 ```
 -----BEGIN PGP SIGNED MESSAGE-----
 Hash: SHA256
@@ -439,19 +466,22 @@ For sensitive security reports, we support PGP encrypted email:
 ## Resources
 
 ### Tools
-- **Mailvelope** (Browser Extension): https://mailvelope.com/
-- **Thunderbird** (Email Client): https://www.thunderbird.net
-- **GPG Suite** (macOS): https://gpgtools.org
-- **Gpg4win** (Windows): https://gpg4win.org
-- **GnuPG** (Command Line): https://gnupg.org
+
+- **Mailvelope** (Browser Extension): <https://mailvelope.com/>
+- **Thunderbird** (Email Client): <https://www.thunderbird.net>
+- **GPG Suite** (macOS): <https://gpgtools.org>
+- **Gpg4win** (Windows): <https://gpg4win.org>
+- **GnuPG** (Command Line): <https://gnupg.org>
 
 ### Guides
-- **GPG Handbook**: https://www.gnupg.org/gph/en/manual.html
-- **Email Self-Defense** (FSF): https://emailselfdefense.fsf.org/
-- **Mailvelope User Guide**: https://mailvelope.com/help
-- **Thunderbird OpenPGP Guide**: https://support.mozilla.org/kb/openpgp-thunderbird
+
+- **GPG Handbook**: <https://www.gnupg.org/gph/en/manual.html>
+- **Email Self-Defense** (FSF): <https://emailselfdefense.fsf.org/>
+- **Mailvelope User Guide**: <https://mailvelope.com/help>
+- **Thunderbird OpenPGP Guide**: <https://support.mozilla.org/kb/openpgp-thunderbird>
 
 ### Key Servers
+
 - **keys.openpgp.org**: Modern, privacy-respecting keyserver
 - **keyserver.ubuntu.com**: Ubuntu keyserver
 - **pgp.mit.edu**: MIT PGP keyserver (legacy)
@@ -461,19 +491,23 @@ For sensitive security reports, we support PGP encrypted email:
 ## Security Considerations
 
 ### Threat Model
+
 PGP protects against:
+
 - ✅ Email interception (man-in-the-middle)
 - ✅ Compromised email servers
 - ✅ Data breaches exposing email content
 - ✅ Accidental disclosure
 
 PGP does NOT protect against:
+
 - ❌ Compromised endpoint (malware on your computer)
 - ❌ Keyloggers capturing passphrase
 - ❌ Metadata (sender, recipient, timestamp visible)
 - ❌ Social engineering
 
 ### Additional Security Measures
+
 - Use 2FA on email accounts
 - Keep software updated
 - Use antivirus/antimalware
@@ -486,14 +520,17 @@ PGP does NOT protect against:
 ## Legal and Compliance
 
 ### Export Restrictions
+
 - PGP/GPG may be subject to export controls in some countries
 - Check your local laws before using encryption
 
 ### Data Retention
+
 - Consider your legal obligations for retaining encrypted communications
 - Some jurisdictions require specific retention periods
 
 ### Professional Use
+
 - Document your PGP setup in organizational security policies
 - Train team members on proper use
 - Include in incident response procedures

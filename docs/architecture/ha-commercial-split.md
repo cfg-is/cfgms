@@ -11,6 +11,7 @@ This document describes the architectural separation of High Availability (HA) f
 ## Guiding Principles
 
 Per `docs/product/feature-boundaries.md`:
+
 - **OSS**: Single controller deployments
 - **Commercial**: HA clustering (Blue-Green, Multi-node clusters)
 
@@ -21,6 +22,7 @@ Per `docs/product/feature-boundaries.md`:
 All HA code is located in `commercial/ha/` with Go build tags controlling which implementation is used:
 
 **Available in Both OSS and Commercial**:
+
 - `interfaces.go` - All interface definitions and types (no build tag)
   - `ClusterManager` interface
   - `DeploymentMode` enum (SingleServerMode, BlueGreenMode, ClusterMode)
@@ -29,6 +31,7 @@ All HA code is located in `commercial/ha/` with Go build tags controlling which 
   - All other HA interfaces (SessionSynchronizer, LoadBalancer, etc.)
 
 **OSS Only** (`//go:build !commercial`):
+
 - `manager_oss.go` - OSS stub implementation
   - Implements `ClusterManager` for SingleServerMode only
   - Basic health checking
@@ -36,6 +39,7 @@ All HA code is located in `commercial/ha/` with Go build tags controlling which 
   - Compiles by default (without build tags)
 
 **Commercial Only** (`//go:build commercial`):
+
 - `manager.go` - Full ClusterManager implementation
 - `config.go` - HA configuration
 - `health.go` - Health checking implementation
@@ -50,6 +54,7 @@ All HA code is located in `commercial/ha/` with Go build tags controlling which 
 - All implementation files requiring clustering
 
 **Commercial HA Integration Tests** (`//go:build commercial`):
+
 - `test/integration/ha/*.go` - All HA integration tests
   - `cluster_formation_test.go`
   - `geographic_test.go`
@@ -103,6 +108,7 @@ No breaking changes to API contracts.
 ### Build Process
 
 **OSS Builds** (default - no build tags):
+
 ```bash
 # Build OSS version (SingleServerMode only)
 go build ./cmd/controller
@@ -114,6 +120,7 @@ make test
 ```
 
 **Commercial Builds** (requires `-tags commercial`):
+
 ```bash
 # Build Commercial version (Full HA clustering)
 go build -tags commercial ./cmd/controller
@@ -125,6 +132,7 @@ make test TAGS=commercial
 ```
 
 **Build Tag Behavior**:
+
 - Without tags: Uses `manager_oss.go` (OSS stub)
 - With `-tags commercial`: Uses `manager.go` and full HA implementation
 - Integration tests automatically excluded from OSS builds
@@ -132,11 +140,13 @@ make test TAGS=commercial
 ## Migration Impact
 
 ### For OSS Users
+
 - No functionality change - single controller was already the default
 - HA APIs still work, returning single-node information
 - No configuration changes required
 
 ### For Commercial Users
+
 - No changes - full HA functionality preserved
 - All existing HA configurations continue to work
 - Raft consensus, failover, load balancing all intact
@@ -151,12 +161,14 @@ make test TAGS=commercial
 ## Testing Strategy
 
 ### OSS Tests
+
 - Verify single-node mode works correctly
 - Verify HA APIs return appropriate single-node responses
 - Verify controller starts and stops cleanly
 - All existing controller tests pass
 
 ### Commercial Tests
+
 - All HA integration tests moved to commercial test suite
 - Cluster formation, failover, geographic distribution tests
 - Raft consensus testing
@@ -165,6 +177,7 @@ make test TAGS=commercial
 ## Documentation Updates
 
 Updated documentation:
+
 - `docs/product/feature-boundaries.md` - Confirmed HA as commercial
 - `docs/product/roadmap.md` - Marked Story #222 complete
 - `docs/architecture/ha-commercial-split.md` - This document
@@ -173,14 +186,18 @@ Updated documentation:
 ## Future Enhancements
 
 ### Extension Points
+
 The interface-based design allows for future enhancements:
+
 - Plugin-based HA implementations
 - Third-party clustering solutions
 - Alternative consensus algorithms
 - Custom load balancing strategies
 
 ### Commercial Features
+
 Potential future commercial HA features:
+
 - Geographic load balancing
 - Advanced failover policies
 - Multi-region clusters
@@ -188,7 +205,7 @@ Potential future commercial HA features:
 
 ## References
 
-- Story #222: https://github.com/cfg-is/cfgms/issues/222
+- Story #222: <https://github.com/cfg-is/cfgms/issues/222>
 - Feature Boundaries: `docs/product/feature-boundaries.md`
 - Epic: v0.7.0 Open Source Preparation
 - Related Stories: #220 (gRPC Removal), #221 (CLI Rename)

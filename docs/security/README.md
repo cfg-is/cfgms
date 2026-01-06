@@ -3,12 +3,14 @@
 ## Local Credential Setup
 
 CFGMS uses a hybrid approach for local development credentials:
+
 - **Configuration** (client IDs, tenant IDs, domains) stored in `.env.local` (gitignored)
 - **Secrets** (client secrets, API keys) stored in OS keychain (encrypted)
 
 ### Quick Start
 
 1. **Copy the example configuration:**
+
    ```bash
    cp .env.local.example .env.local
    ```
@@ -19,6 +21,7 @@ CFGMS uses a hybrid approach for local development credentials:
    - **IMPORTANT**: Leave `M365_CLIENT_SECRET=USE_KEYCHAIN` (placeholder - never use actual secret)
 
 3. **Store your client secret securely in OS keychain:**
+
    ```bash
    ./scripts/migrate-credentials-to-keychain.sh
    ```
@@ -31,11 +34,13 @@ CFGMS uses a hybrid approach for local development credentials:
    - Never write the secret to disk in plaintext
 
 4. **Load credentials for testing:**
+
    ```bash
    source ./scripts/load-credentials-from-keychain.sh
    ```
 
 5. **Run tests:**
+
    ```bash
    go test ./features/modules/m365/...
    ```
@@ -45,12 +50,14 @@ CFGMS uses a hybrid approach for local development credentials:
 ### Why This Approach?
 
 **Security Benefits:**
+
 - Client secrets stored in OS-encrypted keychain (AES-256 on Linux, AES-128 on macOS)
 - Protected by your login password
 - Never stored in plaintext on disk
 - Automatically cleared when you log out
 
 **Developer Benefits:**
+
 - Easy setup from `.env.local.example`
 - All config in one place (`.env.local`)
 - Works with standard OAuth2 workflows
@@ -59,6 +66,7 @@ CFGMS uses a hybrid approach for local development credentials:
 ### OAuth2 Security Model
 
 In OAuth2:
+
 - **Public values** (safe in `.env.local`):
   - Client ID
   - Tenant ID
@@ -75,6 +83,7 @@ This is why we can safely keep client IDs and tenant IDs in `.env.local` - they 
 ### For OSS Contributors
 
 If you don't need M365 integration:
+
 - Skip the credential setup
 - Tests will be skipped when credentials aren't available
 - Set `ALLOW_SKIP_INTEGRATION=true` for permissive mode

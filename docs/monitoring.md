@@ -190,24 +190,28 @@ monitor.RecordCustomMetric("custom.operation.duration", duration.Seconds())
 CFGMS provides REST endpoints for monitoring data access:
 
 ### Health Status
+
 ```bash
 curl -H "X-API-Key: your-key" \
   http://localhost:9080/api/v1/monitoring/health
 ```
 
 ### System Metrics
+
 ```bash
 curl -H "X-API-Key: your-key" \
   http://localhost:9080/api/v1/monitoring/metrics
 ```
 
 ### Recent Logs
+
 ```bash
 curl -H "X-API-Key: your-key" \
   "http://localhost:9080/api/v1/monitoring/logs?level=error&limit=50"
 ```
 
 ### Trace Information
+
 ```bash
 curl -H "X-API-Key: your-key" \
   "http://localhost:9080/api/v1/monitoring/traces?correlation_id=req-123"
@@ -313,6 +317,7 @@ collector:
 ### Common Issues
 
 #### High Memory Usage
+
 ```bash
 # Check memory metrics
 curl -H "X-API-Key: key" http://localhost:9080/api/v1/monitoring/metrics
@@ -323,6 +328,7 @@ curl -H "X-API-Key: key" \
 ```
 
 #### Missing Traces
+
 ```bash
 # Verify telemetry configuration
 curl -H "X-API-Key: key" http://localhost:9080/api/v1/monitoring/config
@@ -333,6 +339,7 @@ curl -H "X-API-Key: key" \
 ```
 
 #### Export Failures
+
 ```bash
 # Check exporter status
 curl -H "X-API-Key: key" http://localhost:9080/api/v1/monitoring/config

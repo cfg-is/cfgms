@@ -7,10 +7,12 @@
 ## Remediation Scope
 
 **Included in This Sprint:**
+
 - All 5 High severity findings
 - 5 selected Medium severity findings (quick wins + crypto improvements)
 
 **Deferred to Follow-up Stories:**
+
 - 4 Medium severity findings requiring significant infrastructure changes
 
 ---
@@ -20,17 +22,20 @@
 ### Phase 1: Quick Wins (45 minutes) - HIGH PRIORITY
 
 #### 1. H-AUTH-1: Remove API Key from Logs
+
 **Priority:** P0 - CRITICAL
 **Effort:** 5 minutes
 **Files:** `features/controller/api/handlers_apikeys.go:322`
 
 **Acceptance Criteria:**
+
 - [ ] Remove `"key", keyString` from log statement
 - [ ] Log only `"id"` and `"created_at"` timestamp
 - [ ] Verify API key generation still works
 - [ ] Test that logs don't contain full API keys
 
 **Implementation:**
+
 ```go
 // BEFORE:
 s.logger.Info("Generated default API key", "id", defaultKey.ID, "key", keyString)
@@ -42,16 +47,19 @@ s.logger.Info("Generated default API key", "id", defaultKey.ID, "created_at", de
 ---
 
 #### 2. H-AUTH-4: Reduce Token Prefix Logging
+
 **Priority:** P0 - CRITICAL
 **Effort:** 5 minutes
 **Files:** `features/controller/api/handlers_registration.go:55`
 
 **Acceptance Criteria:**
+
 - [ ] Reduce token prefix from 15 chars to 6 chars
 - [ ] Verify registration still works
 - [ ] Test that reduced prefix still aids debugging
 
 **Implementation:**
+
 ```go
 // BEFORE:
 s.logger.Info("Processing steward registration request", "token_prefix", req.Token[:min(len(req.Token), 15)])
@@ -63,17 +71,20 @@ s.logger.Info("Processing steward registration request", "token_prefix", req.Tok
 ---
 
 #### 3. M-INPUT-1: Fix Integer Overflow in Query Parameters
+
 **Priority:** P1 - HIGH
 **Effort:** 30 minutes
 **Files:** `features/controller/api/validation_middleware.go:110-114`
 
 **Acceptance Criteria:**
+
 - [ ] Replace `strconv.Atoi()` with `strconv.ParseInt(value, 10, 64)`
 - [ ] Add explicit range validation
 - [ ] Test with boundary values (0, 1000, max int64)
 - [ ] Verify validation still rejects invalid inputs
 
 **Implementation:**
+
 ```go
 // BEFORE:
 if limit, err := strconv.Atoi(value); err == nil {
@@ -96,11 +107,13 @@ if limit < 0 || limit > 1000 {
 ### Phase 2: CORS Security (30 minutes) - HIGH PRIORITY
 
 #### 4. H-AUTH-3: Fix CORS Wildcard Configuration
+
 **Priority:** P0 - CRITICAL
 **Effort:** 30 minutes
 **Files:** `features/controller/api/middleware.go:63`
 
 **Acceptance Criteria:**
+
 - [ ] Create configurable allowed origins list
 - [ ] Validate origin header against whitelist
 - [ ] Support localhost for development
@@ -108,6 +121,7 @@ if limit < 0 || limit > 1000 {
 - [ ] Add configuration documentation
 
 **Implementation:**
+
 ```go
 type CORSConfig struct {
     AllowedOrigins []string
@@ -155,17 +169,20 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 ### Phase 3: Cryptography Hardening (2.5 hours) - MEDIUM PRIORITY
 
 #### 5. M-CRYPTO-1: Increase PBKDF2 Iteration Count
+
 **Priority:** P1 - HIGH
 **Effort:** 30 minutes
 **Files:** `features/modules/m365/auth/file_credential_store.go:47`
 
 **Acceptance Criteria:**
+
 - [ ] Change iteration count from 10,000 to 310,000
 - [ ] Update constant with OWASP reference comment
 - [ ] Test credential encryption/decryption still works
 - [ ] Document iteration count rationale
 
 **Implementation:**
+
 ```go
 const (
     // PBKDF2 iteration count per OWASP 2023 recommendations
@@ -186,11 +203,13 @@ encryptionKey := pbkdf2.Key(
 ---
 
 #### 6. M-CRYPTO-2: Implement Salt-Per-Credential Storage
+
 **Priority:** P1 - HIGH
 **Effort:** 2 hours (includes migration)
 **Files:** `features/modules/m365/auth/file_credential_store.go`
 
 **Acceptance Criteria:**
+
 - [ ] Generate unique random salt (32 bytes) for each credential
 - [ ] Store salt alongside encrypted data
 - [ ] Update encryption to use per-credential salt
@@ -201,6 +220,7 @@ encryptionKey := pbkdf2.Key(
 - [ ] Document salt storage format
 
 **Implementation:**
+
 ```go
 type StoredCredential struct {
     TenantID      string          `json:"tenant_id"`
@@ -297,11 +317,13 @@ func (fcs *FileCredentialStore) GetClientSecret(provider string) (map[string]int
 ### Phase 4: Multi-Tenancy Hardening (4 hours) - HIGH PRIORITY
 
 #### 7. M-TENANT-2: Block Cross-Tenant Role Inheritance
+
 **Priority:** P1 - HIGH
 **Effort:** 2 hours
 **Files:** `features/rbac/manager.go`
 
 **Acceptance Criteria:**
+
 - [ ] Add tenant boundary validation to `CreateRole` with parent
 - [ ] Prevent role inheritance across tenant boundaries
 - [ ] Return clear error when cross-tenant inheritance attempted
@@ -309,6 +331,7 @@ func (fcs *FileCredentialStore) GetClientSecret(provider string) (map[string]int
 - [ ] Update role creation documentation
 
 **Implementation:**
+
 ```go
 func (m *Manager) CreateRole(ctx context.Context, role *rbac.Role) error {
     // Validate parent role if specified
@@ -331,6 +354,7 @@ func (m *Manager) CreateRole(ctx context.Context, role *rbac.Role) error {
 ```
 
 **Test:**
+
 ```go
 func TestCrossTenantRoleInheritanceBlocked(t *testing.T) {
     // Create role in tenant A
@@ -359,11 +383,13 @@ func TestCrossTenantRoleInheritanceBlocked(t *testing.T) {
 ---
 
 #### 8. H-TENANT-1: Add Tenant Context Validation to Storage
+
 **Priority:** P0 - CRITICAL
 **Effort:** 2 hours
 **Files:** `pkg/storage/providers/database/config_store.go`, `rbac_store.go`, `audit_store.go`
 
 **Acceptance Criteria:**
+
 - [ ] Add tenant context validation helper function
 - [ ] Validate tenant context in all StoreConfig operations
 - [ ] Validate tenant context in all GetConfig operations
@@ -373,6 +399,7 @@ func TestCrossTenantRoleInheritanceBlocked(t *testing.T) {
 - [ ] Update storage documentation
 
 **Implementation:**
+
 ```go
 // Common error
 var ErrCrossTenantAccessDenied = errors.New("cross-tenant access denied")
@@ -413,6 +440,7 @@ func (s *DatabaseConfigStore) GetConfig(ctx context.Context, key interfaces.Conf
 ```
 
 **Test:**
+
 ```go
 func TestCrossTenantStorageAccessBlocked(t *testing.T) {
     // Context says user is from tenant-a
@@ -437,11 +465,13 @@ func TestCrossTenantStorageAccessBlocked(t *testing.T) {
 ### Phase 5: Documentation & Configuration (30 minutes)
 
 #### 9. H-AUTH-2: Document Environment API Key Encryption Requirement
+
 **Priority:** P1 - HIGH
 **Effort:** 30 minutes
 **Files:** `docs/security/`, `README.md`
 
 **Acceptance Criteria:**
+
 - [ ] Document that environment variables should NOT contain plaintext API keys
 - [ ] Provide SOPS encryption example
 - [ ] Update deployment documentation
@@ -449,6 +479,7 @@ func TestCrossTenantStorageAccessBlocked(t *testing.T) {
 - [ ] Create example encrypted .env file
 
 **Implementation:**
+
 ```markdown
 ## Security Warning: API Key Storage
 
@@ -459,9 +490,10 @@ func TestCrossTenantStorageAccessBlocked(t *testing.T) {
 export CFGMS_API_KEY="cfgms_key_abc123xyz456..."
 ```
 
-### ✅ Secure Options:
+### ✅ Secure Options
 
 **Option 1: Use SOPS (Recommended)**
+
 ```bash
 # Encrypt secrets file
 sops --encrypt .env > .env.encrypted
@@ -471,11 +503,13 @@ CFGMS_SECRETS_FILE=".env.encrypted" ./controller
 ```
 
 **Option 2: Use HashiCorp Vault**
+
 ```bash
 vault kv put secret/cfgms/api-key value="..."
 ```
 
 **Option 3: Use Kubernetes Secrets (for K8s deployments)**
+
 ```yaml
 apiVersion: v1
 kind: Secret
@@ -487,6 +521,7 @@ stringData:
 ```
 
 See [Security Best Practices](./SECURITY.md) for details.
+
 ```
 
 ---
