@@ -3,9 +3,18 @@ name: Test Suite Validation
 on:
   pull_request:
     branches: [ main, develop ]
+    # CONSERVATIVE: Only skip for pure documentation changes
+    # If PR contains ANY code changes, this will still run
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'              # Root-level markdown only (README.md, CONTRIBUTING.md)
+      - 'LICENSE'
+      - '.gitignore'
+      - '.editorconfig'
   push:
     branches:
-      - main  # Post-merge validation ensures zero-tolerance test policy
+      - main  # ALWAYS run on main (no path filter)
+      - develop  # ALWAYS run on develop (no path filter)
   workflow_dispatch:
     inputs:
       test_level:

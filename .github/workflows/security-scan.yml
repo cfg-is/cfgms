@@ -3,9 +3,18 @@ name: Security Scanning Workflow
 on:
   pull_request:
     branches: [ main, develop ]
+    # CONSERVATIVE: Only skip for pure documentation changes
+    # Security scans still run if ANY code changes are present
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.editorconfig'
   push:
     branches:
-      - main  # Post-merge security validation for supply chain protection
+      - main  # ALWAYS run on main (no path filter)
+      - develop  # ALWAYS run on develop (no path filter)
   workflow_dispatch:
     inputs:
       scan_type:

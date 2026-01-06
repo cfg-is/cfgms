@@ -3,6 +3,14 @@ name: Cross-Platform Build Validation
 on:
   pull_request:
     branches: [ main, develop ]
+    # CONSERVATIVE: Only skip for pure documentation changes
+    # Build validation runs if ANY code changes are present
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.editorconfig'
   workflow_dispatch:
 
 env:

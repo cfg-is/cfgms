@@ -3,9 +3,18 @@ name: Production Risk Gates
 on:
   pull_request:
     branches: [ main, develop ]
+    # CONSERVATIVE: Only skip for pure documentation changes
+    # Production gates run if ANY code changes are present
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.editorconfig'
   push:
     branches:
-      - main  # Post-merge release gate validation for production readiness
+      - main  # ALWAYS run on main (no path filter)
+      - develop  # ALWAYS run on develop (no path filter)
   workflow_dispatch:
     inputs:
       gate_type:
