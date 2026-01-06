@@ -120,7 +120,7 @@ Implemented comprehensive Docker-based E2E testing infrastructure that validates
 
 #### v0.8.1 Bug fixes and test completion
 
-- [ ] Fix single-use registration token enforcement in database storage (issue #299)
+- [x] Fix single-use registration token enforcement in database storage (issue #299) ✅ COMPLETED
 - [ ] Complete E2E test framework for MQTT+QUIC mode (issue #294)
 
 ### Phase 2: Production Stability & Feature Completion (v0.9.0 - v1.0.0)

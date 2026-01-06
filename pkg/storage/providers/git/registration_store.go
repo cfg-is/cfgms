@@ -102,6 +102,7 @@ func (s *GitRegistrationTokenStore) Close() error {
 }
 
 // SaveToken implements RegistrationTokenStore.SaveToken
+// Uses upsert semantics to handle both new tokens and updates to existing tokens
 func (s *GitRegistrationTokenStore) SaveToken(ctx context.Context, token *interfaces.RegistrationTokenData) error {
 	if token == nil {
 		return fmt.Errorf("token cannot be nil")
@@ -110,11 +111,9 @@ func (s *GitRegistrationTokenStore) SaveToken(ctx context.Context, token *interf
 		return fmt.Errorf("token string cannot be empty")
 	}
 
-	// Check if token already exists
+	// Use upsert semantics: create if doesn't exist, update if exists
+	// This ensures single-use token enforcement works correctly
 	filePath := filepath.Join(s.repoPath, "registration_tokens", s.tokenFilename(token.Token))
-	if _, err := os.Stat(filePath); err == nil {
-		return fmt.Errorf("token already exists")
-	}
 
 	// Marshal token data
 	data, err := json.MarshalIndent(token, "", "  ")
@@ -122,7 +121,7 @@ func (s *GitRegistrationTokenStore) SaveToken(ctx context.Context, token *interf
 		return fmt.Errorf("failed to marshal token: %w", err)
 	}
 
-	// Write token file
+	// Write token file (overwrites if exists)
 	if err := s.safeWriteFile(filePath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write token file: %w", err)
 	}

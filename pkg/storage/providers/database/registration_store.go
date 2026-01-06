@@ -100,6 +100,7 @@ func (s *DatabaseRegistrationTokenStore) Close() error {
 }
 
 // SaveToken implements RegistrationTokenStore.SaveToken
+// Uses UPSERT to handle both new tokens and updates to existing tokens
 func (s *DatabaseRegistrationTokenStore) SaveToken(ctx context.Context, token *interfaces.RegistrationTokenData) error {
 	if token == nil {
 		return fmt.Errorf("token cannot be nil")
@@ -111,9 +112,21 @@ func (s *DatabaseRegistrationTokenStore) SaveToken(ctx context.Context, token *i
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
+	// Use UPSERT to handle both INSERT and UPDATE cases
+	// This ensures single-use token enforcement works correctly
 	query := `
 		INSERT INTO cfgms_registration_tokens (token, tenant_id, controller_url, group_name, created_at, expires_at, single_use, used_at, used_by, revoked, revoked_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		ON CONFLICT (token) DO UPDATE SET
+			tenant_id = EXCLUDED.tenant_id,
+			controller_url = EXCLUDED.controller_url,
+			group_name = EXCLUDED.group_name,
+			expires_at = EXCLUDED.expires_at,
+			single_use = EXCLUDED.single_use,
+			used_at = EXCLUDED.used_at,
+			used_by = EXCLUDED.used_by,
+			revoked = EXCLUDED.revoked,
+			revoked_at = EXCLUDED.revoked_at
 	`
 
 	_, err := s.db.ExecContext(ctx, query,
