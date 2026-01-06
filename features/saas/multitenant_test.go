@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package saas
 
 import (
@@ -129,11 +131,11 @@ func TestMultiTenantManager_StartAdminConsent(t *testing.T) {
 			credStore := NewMockCredentialStore()
 			httpClient := &http.Client{}
 			mtm := NewMultiTenantManager(credStore, httpClient)
-			
+
 			// Mock OAuth2Client
 			mockOAuth2 := &MockOAuth2Client{}
 			mtm.oauth2Client = mockOAuth2
-			
+
 			if !tt.wantErr {
 				mockOAuth2.On("StartFlow", mock.Anything, mock.Anything).Return(&OAuth2Flow{
 					AuthURL:   "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=test",
@@ -256,8 +258,8 @@ func TestMultiTenantManager_GetTenantToken_NoAccess(t *testing.T) {
 
 	// Set up consent status without the requested tenant
 	status := &ConsentStatus{
-		Provider:        provider,
-		HasAdminConsent: true,
+		Provider:         provider,
+		HasAdminConsent:  true,
 		ConsentGrantedAt: time.Now(),
 		AccessibleTenants: []TenantInfo{
 			{
@@ -267,7 +269,7 @@ func TestMultiTenantManager_GetTenantToken_NoAccess(t *testing.T) {
 			},
 		},
 	}
-	
+
 	err := mtm.storeConsentStatus(provider, status)
 	require.NoError(t, err)
 
@@ -294,7 +296,7 @@ func TestMultiTenantManager_ListAccessibleTenants(t *testing.T) {
 	tenants, err := mtm.ListAccessibleTenants(ctx, provider)
 	assert.NoError(t, err)
 	assert.Len(t, tenants, 1)
-	
+
 	// Verify the tenant data matches what the mock implementation returns
 	expectedTenant := TenantInfo{
 		TenantID:    "tenant-1",
@@ -302,7 +304,7 @@ func TestMultiTenantManager_ListAccessibleTenants(t *testing.T) {
 		Domain:      "customer1.onmicrosoft.com",
 		HasAccess:   true,
 	}
-	
+
 	assert.Equal(t, expectedTenant.TenantID, tenants[0].TenantID)
 	assert.Equal(t, expectedTenant.DisplayName, tenants[0].DisplayName)
 	assert.Equal(t, expectedTenant.Domain, tenants[0].Domain)
@@ -319,8 +321,8 @@ func TestMultiTenantManager_RevokeConsent(t *testing.T) {
 
 	// Set up consent status and tenant tokens
 	status := &ConsentStatus{
-		Provider:        provider,
-		HasAdminConsent: true,
+		Provider:         provider,
+		HasAdminConsent:  true,
 		ConsentGrantedAt: time.Now(),
 		AccessibleTenants: []TenantInfo{
 			{
@@ -329,7 +331,7 @@ func TestMultiTenantManager_RevokeConsent(t *testing.T) {
 			},
 		},
 	}
-	
+
 	err := mtm.storeConsentStatus(provider, status)
 	require.NoError(t, err)
 
@@ -369,9 +371,9 @@ func TestMultiTenantManager_RevokeConsent(t *testing.T) {
 func TestMicrosoftMultiTenantProvider_Creation(t *testing.T) {
 	credStore := NewMockCredentialStore()
 	httpClient := &http.Client{}
-	
+
 	provider := NewMicrosoftMultiTenantProvider(credStore, httpClient)
-	
+
 	assert.NotNil(t, provider)
 	assert.Equal(t, "microsoft-multitenant", provider.GetInfo().Name)
 	assert.Contains(t, provider.GetInfo().SupportedAuthTypes, "oauth2-multitenant")
@@ -386,7 +388,7 @@ func TestMicrosoftMultiTenantProvider_StartAdminConsent(t *testing.T) {
 		ClientID:           "test-client-id",
 		ClientSecret:       "test-secret",
 		RedirectURI:        "https://test.com/callback",
-		Scopes:            []string{"https://graph.microsoft.com/.default"},
+		Scopes:             []string{"https://graph.microsoft.com/.default"},
 		AdminConsentScopes: []string{"https://graph.microsoft.com/.default"},
 	}
 
@@ -404,7 +406,7 @@ func TestMicrosoftMultiTenantProvider_StartAdminConsent(t *testing.T) {
 	}, nil)
 
 	url, err := provider.StartAdminConsent(ctx, config)
-	
+
 	assert.NoError(t, err)
 	assert.NotEmpty(t, url)
 	assert.Contains(t, url, "common/oauth2/v2.0/authorize")
@@ -426,7 +428,7 @@ func TestMicrosoftMultiTenantProvider_CreateInTenant(t *testing.T) {
 
 	// Set up consent status using the simplified format that matches the mock
 	err := credStore.StoreClientSecret(
-		provider.multiTenantManager.getConsentStatusKey(provider.GetInfo().Name), 
+		provider.multiTenantManager.getConsentStatusKey(provider.GetInfo().Name),
 		"consent_granted:true;tenants:1;flow:none")
 	require.NoError(t, err)
 
@@ -441,16 +443,16 @@ func TestMicrosoftMultiTenantProvider_CreateInTenant(t *testing.T) {
 
 	// Test creating in tenant (this will use the mock implementation)
 	result, err := provider.CreateInTenant(ctx, tenantID, resourceType, data)
-	
+
 	// The mock implementation should return success
 	assert.NoError(t, err)
 	assert.NotNil(t, result)
-	
+
 	// Debug: Print result details if test fails
 	if !result.Success {
 		t.Logf("Result failed: Success=%v, Error=%v, StatusCode=%d", result.Success, result.Error, result.StatusCode)
 	}
-	
+
 	// The real HTTP call in rawAPIWithToken will fail since there's no server,
 	// but the test should still show the structure is correct
 	// For now, just verify we got a result
@@ -500,7 +502,7 @@ func TestTenantOnboardingWorkflow_StartTenantOnboarding(t *testing.T) {
 	}, nil)
 
 	result, err := workflow.StartTenantOnboarding(ctx, request)
-	
+
 	assert.NoError(t, err)
 	assert.NotNil(t, result)
 	assert.NotEmpty(t, result.OnboardingID)
@@ -586,7 +588,7 @@ func TestTenantOnboardingWorkflow_ValidateRequest(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := workflow.validateOnboardingRequest(tt.request)
-			
+
 			if tt.wantErr {
 				assert.Error(t, err)
 				assert.Contains(t, err.Error(), tt.errMsg)
@@ -619,9 +621,9 @@ func BenchmarkMultiTenantManager_GetTenantToken(b *testing.B) {
 			},
 		},
 	}
-	
+
 	_ = mtm.storeConsentStatus(provider, status)
-	
+
 	tenantKey := mtm.getTenantKey(provider, tenantID)
 	validToken := &TokenSet{
 		AccessToken: "benchmark-token",
@@ -631,7 +633,7 @@ func BenchmarkMultiTenantManager_GetTenantToken(b *testing.B) {
 	_ = credStore.StoreTokenSet(tenantKey, validToken)
 
 	b.ResetTimer()
-	
+
 	for i := 0; i < b.N; i++ {
 		_, _ = mtm.GetTenantToken(ctx, provider, tenantID)
 	}
@@ -660,9 +662,9 @@ func BenchmarkMicrosoftMultiTenantProvider_CreateInTenant(b *testing.B) {
 			},
 		},
 	}
-	
+
 	_ = provider.multiTenantManager.storeConsentStatus(provider.GetInfo().Name, status)
-	
+
 	tenantKey := provider.multiTenantManager.getTenantKey(provider.GetInfo().Name, tenantID)
 	validToken := &TokenSet{
 		AccessToken: "benchmark-token",
@@ -672,7 +674,7 @@ func BenchmarkMicrosoftMultiTenantProvider_CreateInTenant(b *testing.B) {
 	_ = credStore.StoreTokenSet(tenantKey, validToken)
 
 	b.ResetTimer()
-	
+
 	for i := 0; i < b.N; i++ {
 		_, _ = provider.CreateInTenant(ctx, tenantID, resourceType, data)
 	}

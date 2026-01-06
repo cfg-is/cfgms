@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // Package cert manager provides a high-level interface for certificate management.
 //
 // The Manager combines CA management, certificate storage, validation, and renewal
@@ -38,7 +40,6 @@
 //	if err != nil {
 //		log.Fatal(err)
 //	}
-//
 package cert
 
 import (
@@ -50,15 +51,15 @@ import (
 type ManagerConfig struct {
 	// CA configuration (required for new CAs)
 	CAConfig *CAConfig
-	
+
 	// Storage path for certificates and CA
 	StoragePath string
-	
+
 	// Whether to load existing CA or create new one
 	LoadExistingCA bool
-	
+
 	// Automatic renewal settings
-	EnableAutoRenewal bool
+	EnableAutoRenewal    bool
 	RenewalThresholdDays int
 }
 
@@ -76,22 +77,22 @@ func NewManager(config *ManagerConfig) (*Manager, error) {
 	if config == nil {
 		return nil, fmt.Errorf("manager config is required")
 	}
-	
+
 	if config.StoragePath == "" {
 		return nil, fmt.Errorf("storage path is required")
 	}
-	
+
 	// Set defaults
 	if config.RenewalThresholdDays == 0 {
 		config.RenewalThresholdDays = 30
 	}
-	
+
 	// Initialize certificate store
 	store, err := NewFileStore(config.StoragePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize certificate store: %w", err)
 	}
-	
+
 	// Initialize CA
 	var ca *CA
 	if config.LoadExistingCA {
@@ -106,27 +107,27 @@ func NewManager(config *ManagerConfig) (*Manager, error) {
 		if config.CAConfig == nil {
 			return nil, fmt.Errorf("CA config is required for new CA creation")
 		}
-		
+
 		// Set storage path for CA
 		config.CAConfig.StoragePath = filepath.Join(config.StoragePath, "ca")
-		
+
 		ca, err = NewCA(config.CAConfig)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create CA: %w", err)
 		}
-		
+
 		if err := ca.Initialize(config.CAConfig); err != nil {
 			return nil, fmt.Errorf("failed to initialize CA: %w", err)
 		}
 	}
-	
+
 	// Initialize validator
 	caCert := ca.certificate
 	validator := NewValidator(caCert)
-	
+
 	// Initialize renewer
 	renewer := NewRenewer(ca, store, validator)
-	
+
 	manager := &Manager{
 		ca:        ca,
 		store:     store,
@@ -134,7 +135,7 @@ func NewManager(config *ManagerConfig) (*Manager, error) {
 		renewer:   renewer,
 		config:    config,
 	}
-	
+
 	// Store the CA certificate in the certificate store for easy retrieval
 	if !config.LoadExistingCA {
 		caInfo, err := ca.GetCAInfo()
@@ -154,13 +155,13 @@ func NewManager(config *ManagerConfig) (*Manager, error) {
 					Fingerprint:    caInfo.Fingerprint,
 					Issuer:         "Self-signed CA",
 				}
-				
+
 				// Store the CA certificate (ignore errors as this is for convenience)
 				_ = store.StoreCertificate(caCertificate)
 			}
 		}
 	}
-	
+
 	return manager, nil
 }
 
@@ -180,12 +181,12 @@ func (m *Manager) GenerateServerCertificate(config *ServerCertConfig) (*Certific
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Store the certificate
 	if err := m.store.StoreCertificate(cert); err != nil {
 		return nil, fmt.Errorf("failed to store server certificate: %w", err)
 	}
-	
+
 	return cert, nil
 }
 
@@ -195,12 +196,12 @@ func (m *Manager) GenerateClientCertificate(config *ClientCertConfig) (*Certific
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Store the certificate
 	if err := m.store.StoreCertificate(cert); err != nil {
 		return nil, fmt.Errorf("failed to store client certificate: %w", err)
 	}
-	
+
 	return cert, nil
 }
 
@@ -234,7 +235,7 @@ func (m *Manager) GetExpiringCertificates(withinDays int) ([]*CertificateInfo, e
 	if withinDays <= 0 {
 		withinDays = m.config.RenewalThresholdDays
 	}
-	
+
 	return m.store.GetExpiringCertificates(withinDays)
 }
 
@@ -243,7 +244,7 @@ func (m *Manager) GetRenewalCandidates(withinDays int) ([]*RenewalInfo, error) {
 	if withinDays <= 0 {
 		withinDays = m.config.RenewalThresholdDays
 	}
-	
+
 	return m.renewer.GetRenewalCandidates(withinDays)
 }
 
@@ -257,11 +258,11 @@ func (m *Manager) AutoRenewCertificates(withinDays int) ([]*Certificate, error) 
 	if withinDays <= 0 {
 		withinDays = m.config.RenewalThresholdDays
 	}
-	
+
 	if !m.config.EnableAutoRenewal {
 		return nil, fmt.Errorf("automatic renewal is disabled")
 	}
-	
+
 	return m.renewer.AutoRenewCertificates(withinDays)
 }
 
@@ -276,7 +277,7 @@ func (m *Manager) SaveCertificateFiles(serialNumber, certPath, keyPath string) e
 	if err != nil {
 		return fmt.Errorf("failed to get certificate: %w", err)
 	}
-	
+
 	return SaveCertificateToFile(cert, certPath, keyPath)
 }
 
@@ -287,14 +288,14 @@ func (m *Manager) ImportCertificate(certPEM, keyPEM []byte, certType Certificate
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse certificate: %w", err)
 	}
-	
+
 	// Validate the key pair if private key is provided
 	if keyPEM != nil {
 		if err := ValidateKeyPair(certPEM, keyPEM); err != nil {
 			return nil, fmt.Errorf("certificate and key do not match: %w", err)
 		}
 	}
-	
+
 	// Create certificate object
 	cert := &Certificate{
 		Type:           certType,
@@ -308,12 +309,12 @@ func (m *Manager) ImportCertificate(certPEM, keyPEM []byte, certType Certificate
 		Fingerprint:    GetCertificateFingerprint(x509Cert),
 		Issuer:         x509Cert.Issuer.CommonName,
 	}
-	
+
 	// Store the certificate
 	if err := m.store.StoreCertificate(cert); err != nil {
 		return nil, fmt.Errorf("failed to store imported certificate: %w", err)
 	}
-	
+
 	return cert, nil
 }
 
@@ -323,13 +324,13 @@ func (m *Manager) ExportCertificate(serialNumber string, includePrivateKey bool)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get certificate: %w", err)
 	}
-	
+
 	certPEM = cert.CertificatePEM
-	
+
 	if includePrivateKey && cert.PrivateKeyPEM != nil {
 		keyPEM = cert.PrivateKeyPEM
 	}
-	
+
 	return certPEM, keyPEM, nil
 }
 
@@ -339,16 +340,16 @@ func (m *Manager) GetCertificateStatus(serialNumber string) (*CertificateStatus,
 	if err != nil {
 		return nil, fmt.Errorf("failed to get certificate: %w", err)
 	}
-	
+
 	// Validate the certificate
 	validationResult, err := m.validator.ValidateCertificateFile(cert.CertificatePEM)
 	if err != nil {
 		return nil, fmt.Errorf("failed to validate certificate: %w", err)
 	}
-	
+
 	return &CertificateStatus{
-		Certificate: cert,
-		Validation:  validationResult,
+		Certificate:  cert,
+		Validation:   validationResult,
 		NeedsRenewal: validationResult.DaysUntilExpiration <= m.config.RenewalThresholdDays,
 	}, nil
 }
@@ -359,34 +360,34 @@ func (m *Manager) GetManagerStats() (*ManagerStats, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to list certificates: %w", err)
 	}
-	
+
 	expiringCerts, err := m.store.GetExpiringCertificates(m.config.RenewalThresholdDays)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get expiring certificates: %w", err)
 	}
-	
+
 	renewalCandidates, err := m.renewer.GetRenewalCandidates(m.config.RenewalThresholdDays)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get renewal candidates: %w", err)
 	}
-	
+
 	stats := &ManagerStats{
 		TotalCertificates:    len(allCerts),
 		ExpiringCertificates: len(expiringCerts),
-		RenewalCandidates:   len(renewalCandidates),
-		CertificatesByType:  make(map[CertificateType]int),
+		RenewalCandidates:    len(renewalCandidates),
+		CertificatesByType:   make(map[CertificateType]int),
 	}
-	
+
 	// Count certificates by type
 	for _, cert := range allCerts {
 		stats.CertificatesByType[cert.Type]++
 	}
-	
+
 	// Get CA information
 	if caInfo, err := m.ca.GetCAInfo(); err == nil {
 		stats.CAInfo = caInfo
 	}
-	
+
 	return stats, nil
 }
 
@@ -401,9 +402,9 @@ type CertificateStatus struct {
 type ManagerStats struct {
 	TotalCertificates    int
 	ExpiringCertificates int
-	RenewalCandidates   int
-	CertificatesByType  map[CertificateType]int
-	CAInfo              *CertificateInfo
+	RenewalCandidates    int
+	CertificatesByType   map[CertificateType]int
+	CAInfo               *CertificateInfo
 }
 
 // GetStoragePath returns the certificate storage path

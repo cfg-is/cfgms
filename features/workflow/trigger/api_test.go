@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package trigger
 
 import (
@@ -203,9 +205,9 @@ func TestAPIHandler_HandleListTriggers(t *testing.T) {
 			expectedCount:  1,
 		},
 		{
-			name:        "invalid query parameter",
-			queryParams: "?limit=invalid",
-			setupMocks:  func(m *MockTriggerManager) {},
+			name:           "invalid query parameter",
+			queryParams:    "?limit=invalid",
+			setupMocks:     func(m *MockTriggerManager) {},
 			expectedStatus: http.StatusBadRequest,
 			expectedError:  "Invalid query parameters",
 		},
@@ -486,12 +488,12 @@ func TestAPIHandler_HandleEnableDisableTrigger(t *testing.T) {
 	handler.RegisterRoutes(router)
 
 	tests := []struct {
-		name           string
-		endpoint           string
-		triggerID          string
-		setupMocks         func()
-		expectedStatus     int
-		expectedError      string
+		name                  string
+		endpoint              string
+		triggerID             string
+		setupMocks            func()
+		expectedStatus        int
+		expectedError         string
 		expectedTriggerStatus string
 	}{
 		{
@@ -501,7 +503,7 @@ func TestAPIHandler_HandleEnableDisableTrigger(t *testing.T) {
 			setupMocks: func() {
 				mockTriggerManager.On("EnableTrigger", mock.Anything, "test-1").Return(nil)
 			},
-			expectedStatus: http.StatusOK,
+			expectedStatus:        http.StatusOK,
 			expectedTriggerStatus: "active",
 		},
 		{
@@ -511,7 +513,7 @@ func TestAPIHandler_HandleEnableDisableTrigger(t *testing.T) {
 			setupMocks: func() {
 				mockTriggerManager.On("DisableTrigger", mock.Anything, "test-1").Return(nil)
 			},
-			expectedStatus: http.StatusOK,
+			expectedStatus:        http.StatusOK,
 			expectedTriggerStatus: "inactive",
 		},
 		{
@@ -601,8 +603,8 @@ func TestAPIHandler_HandleExecuteTrigger(t *testing.T) {
 			expectedStatus: http.StatusOK,
 		},
 		{
-			name:      "execution with empty data",
-			triggerID: "test-1",
+			name:        "execution with empty data",
+			triggerID:   "test-1",
 			requestBody: map[string]interface{}{},
 			setupMocks: func() {
 				mockTriggerManager.On("ExecuteTrigger", mock.Anything, "test-1", mock.Anything).Return(executionResult, nil)
@@ -720,10 +722,10 @@ func TestAPIHandler_HandleGetTriggerExecutions(t *testing.T) {
 			expectedCount:  1,
 		},
 		{
-			name:        "invalid limit parameter",
-			triggerID:   "test-1",
-			queryParams: "?limit=invalid",
-			setupMocks:  func() {},
+			name:           "invalid limit parameter",
+			triggerID:      "test-1",
+			queryParams:    "?limit=invalid",
+			setupMocks:     func() {},
 			expectedStatus: http.StatusBadRequest,
 			expectedError:  "Invalid limit parameter",
 		},
@@ -797,17 +799,17 @@ func TestAPIHandler_ParseFilterFromQuery(t *testing.T) {
 	handler := NewAPIHandler(mockTriggerManager)
 
 	tests := []struct {
-		name          string
-		queryParams   string
+		name           string
+		queryParams    string
 		expectedFilter *TriggerFilter
-		expectError   bool
-		errorMsg      string
+		expectError    bool
+		errorMsg       string
 	}{
 		{
-			name:        "empty query",
-			queryParams: "",
+			name:           "empty query",
+			queryParams:    "",
 			expectedFilter: &TriggerFilter{},
-			expectError: false,
+			expectError:    false,
 		},
 		{
 			name:        "type filter",

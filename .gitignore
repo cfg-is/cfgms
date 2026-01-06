@@ -1,5 +1,6 @@
 # Binaries
-bin/
+bin/*
+!bin/cfgms-wait-for-services
 *.exe
 *.exe~
 *.dll
@@ -16,6 +17,14 @@ bin/
 
 # Output of the go coverage tool
 *.out
+
+# Backup and temporary files
+*.backup
+*.bak
+*.old
+*.tmp
+*.wip
+*~
 
 # Dependency directories
 vendor/
@@ -44,11 +53,16 @@ config.yaml
 *.env
 .env.local
 
+# Claude Code local settings
+.claude/settings.local.json
+
 .obsidian/
 
 # Test/development storage data
-features/controller/data/
+features/controller/**/data/
 **/cfgms-storage/
+test/integration/data/
+test/integration/logs/
 .env.test
 docker-compose.test.override.yml
 
@@ -58,3 +72,9 @@ docker-compose.test.override.yml
 *.sqlite3
 *.db-shm
 *.db-wal
+docs/product/v*-epic.md
+
+# Security audit reports (WIP audit reports with unfixed vulnerabilities)
+# Note: Remediation summaries and completed audits should be committed
+docs/security/audits/*-wip.md
+docs/security/audits/draft-*.md

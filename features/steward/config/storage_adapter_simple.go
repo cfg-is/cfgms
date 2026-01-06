@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // Package config provides simplified adapter to use ConfigStore for steward configuration loading
 // This avoids circular imports while maintaining Epic 6 compliance
 package config
@@ -199,7 +201,7 @@ func (ssa *SimpleStorageAdapter) GetConfigurationVersion(ctx context.Context, ve
 func (ssa *SimpleStorageAdapter) MigrateFromFileToStorage(ctx context.Context, configPath string) error {
 	// Load from file
 	var fileConfig *StewardConfig
-	
+
 	if configPath != "" {
 		fileConfigVal, err := loadFromPath(configPath)
 		if err != nil {
@@ -213,12 +215,12 @@ func (ssa *SimpleStorageAdapter) MigrateFromFileToStorage(ctx context.Context, c
 		}
 		fileConfig = &fileConfigVal
 	}
-	
+
 	// Store in storage provider (Epic 6 compliant)
 	if err := ssa.StoreConfiguration(ctx, fileConfig); err != nil {
 		return fmt.Errorf("failed to store configuration in storage provider: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -236,18 +238,18 @@ func isConfigNotFoundError(err error) bool {
 	if err == nil {
 		return false
 	}
-	
+
 	// Check for ConfigValidationError with CONFIG_NOT_FOUND code
 	if configErr, ok := err.(*interfaces.ConfigValidationError); ok {
 		return configErr.Code == "CONFIG_NOT_FOUND"
 	}
-	
+
 	// Check for common "not found" error patterns
 	errStr := err.Error()
-	return errStr == "configuration not found" || 
-	       errStr == "config not found" ||
-	       contains(errStr, "not found") ||
-	       contains(errStr, "does not exist")
+	return errStr == "configuration not found" ||
+		errStr == "config not found" ||
+		contains(errStr, "not found") ||
+		contains(errStr, "does not exist")
 }
 
 // contains checks if a string contains a substring
@@ -280,7 +282,7 @@ func GetDefaultTenantID() string {
 	if tenantID := os.Getenv("CFGMS_TENANT_ID"); tenantID != "" {
 		return tenantID
 	}
-	
+
 	// Default to "default" tenant
 	return "default"
 }
@@ -288,12 +290,12 @@ func GetDefaultTenantID() string {
 // Epic6CompliantLoadConfiguration is the main entry point for Epic 6 compliant configuration loading
 func Epic6CompliantLoadConfiguration(ctx context.Context, configStore interfaces.ConfigStore, tenantID, stewardID string) (*StewardConfig, error) {
 	adapter := NewSimpleStorageAdapter(configStore, tenantID, stewardID)
-	
+
 	// Try storage first, fall back to file if needed
 	config, err := adapter.LoadConfigurationWithInheritance(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load configuration: %w", err)
 	}
-	
+
 	return config, nil
 }

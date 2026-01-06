@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package modules
 
 import (
@@ -435,4 +437,3 @@ func BenchmarkDependencyGraph_TopologicalSort(b *testing.B) {
 		}
 	}
 }
-

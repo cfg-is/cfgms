@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // Package logging provides telemetry integration for correlation ID and trace extraction.
 //
 // This file provides integration between the logging and telemetry packages while
@@ -21,7 +23,7 @@ type TelemetryBridge struct{}
 func (t *TelemetryBridge) GetCorrelationIDFromContext(ctx context.Context) string {
 	// Try to get correlation ID using the telemetry package's CorrelationIDKey{}
 	// We need to match the exact type from the telemetry package
-	
+
 	// Create the key type that matches telemetry.CorrelationIDKey{}
 	type correlationIDKey struct{}
 	if value := ctx.Value(correlationIDKey{}); value != nil {
@@ -29,14 +31,14 @@ func (t *TelemetryBridge) GetCorrelationIDFromContext(ctx context.Context) strin
 			return correlationID
 		}
 	}
-	
+
 	// Fallback: Try to extract from span context if available
 	span := trace.SpanFromContext(ctx)
 	if span.SpanContext().IsValid() {
 		// Use trace ID as correlation ID if no explicit ID is set
 		return span.SpanContext().TraceID().String()
 	}
-	
+
 	// Additional fallback keys for compatibility
 	for _, key := range []interface{}{
 		"correlation_id",
@@ -48,7 +50,7 @@ func (t *TelemetryBridge) GetCorrelationIDFromContext(ctx context.Context) strin
 			}
 		}
 	}
-	
+
 	return ""
 }
 
@@ -60,7 +62,7 @@ func (t *TelemetryBridge) GetTraceInfoFromContext(ctx context.Context) (string, 
 	if !span.SpanContext().IsValid() {
 		return "", ""
 	}
-	
+
 	spanCtx := span.SpanContext()
 	return spanCtx.TraceID().String(), spanCtx.SpanID().String()
 }
@@ -81,7 +83,7 @@ func UpdatedExtractCorrelationID(ctx context.Context) string {
 	if globalTelemetryBridge != nil {
 		return globalTelemetryBridge.GetCorrelationIDFromContext(ctx)
 	}
-	
+
 	// Fallback to the original implementation
 	return extractCorrelationIDFallback(ctx)
 }
@@ -91,7 +93,7 @@ func UpdatedExtractTraceInfo(ctx context.Context) (string, string) {
 	if globalTelemetryBridge != nil {
 		return globalTelemetryBridge.GetTraceInfoFromContext(ctx)
 	}
-	
+
 	// Fallback: no trace information available
 	return "", ""
 }
@@ -103,11 +105,11 @@ func extractCorrelationIDFallback(ctx context.Context) string {
 	if correlationID, ok := ctx.Value(correlationKey{}).(string); ok {
 		return correlationID
 	}
-	
+
 	// Try string key as well
 	if correlationID, ok := ctx.Value("correlation_id").(string); ok {
 		return correlationID
 	}
-	
+
 	return ""
 }

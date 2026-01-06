@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // Package events provides drift detection event subscriber.
 
 package events
@@ -32,24 +34,24 @@ type StorageManager interface {
 
 // driftSubscriber implements EventSubscriber for drift detection.
 type driftSubscriber struct {
-	logger    logging.Logger
-	detector  DriftDetector
-	storage   StorageManager
-	config    *DriftSubscriberConfig
-	stats     *DriftSubscriberStats
+	logger   logging.Logger
+	detector DriftDetector
+	storage  StorageManager
+	config   *DriftSubscriberConfig
+	stats    *DriftSubscriberStats
 }
 
 // DriftSubscriberConfig defines configuration for drift detection subscriber.
 type DriftSubscriberConfig struct {
 	// Detection settings
 	EnableRealTimeDetection bool          `json:"enable_real_time_detection"`
-	ComparisonWindow       time.Duration `json:"comparison_window"`
-	MaxDetectionTime       time.Duration `json:"max_detection_time"`
-	
+	ComparisonWindow        time.Duration `json:"comparison_window"`
+	MaxDetectionTime        time.Duration `json:"max_detection_time"`
+
 	// Performance settings
-	SkipRecentChanges      bool          `json:"skip_recent_changes"`
-	RecentChangeThreshold  time.Duration `json:"recent_change_threshold"`
-	
+	SkipRecentChanges     bool          `json:"skip_recent_changes"`
+	RecentChangeThreshold time.Duration `json:"recent_change_threshold"`
+
 	// Event handling
 	MaxEventsPerSubscriber int           `json:"max_events_per_subscriber"`
 	EventProcessingTimeout time.Duration `json:"event_processing_timeout"`
@@ -71,7 +73,7 @@ func NewDriftSubscriber(detector DriftDetector, storage StorageManager, config *
 	if config == nil {
 		config = DefaultDriftSubscriberConfig()
 	}
-	
+
 	return &driftSubscriber{
 		logger:   logger,
 		detector: detector,
@@ -85,53 +87,53 @@ func NewDriftSubscriber(detector DriftDetector, storage StorageManager, config *
 func (d *driftSubscriber) OnEvent(ctx context.Context, event *DNAChangeEvent) error {
 	startTime := time.Now()
 	d.stats.EventsReceived++
-	
+
 	defer func() {
 		d.stats.AverageDetectionTime = time.Since(startTime)
 		d.stats.LastDetectionTime = startTime
 	}()
-	
+
 	if d.logger != nil {
 		d.logger.Debug("Processing DNA change event for drift detection",
 			"device_id", event.DeviceID,
 			"content_hash", event.ContentHash)
 	}
-	
+
 	// Skip if real-time detection is disabled
 	if !d.config.EnableRealTimeDetection {
 		d.stats.SkippedEvents++
 		return nil
 	}
-	
+
 	// Skip if this is a very recent change (avoid thrashing)
-	if d.config.SkipRecentChanges && 
+	if d.config.SkipRecentChanges &&
 		time.Since(event.Timestamp) < d.config.RecentChangeThreshold {
 		d.stats.SkippedEvents++
 		return nil
 	}
-	
+
 	// Apply detection timeout if needed
 	_ = ctx
 	if d.config.MaxDetectionTime > 0 {
 		// Would apply timeout in real implementation
 		_ = d.config.MaxDetectionTime // Timeout will be implemented in future iteration
 	}
-	
+
 	// For now, we'll just log that we would perform drift detection
 	// In a real implementation, this would:
 	// 1. Get previous DNA from storage
 	// 2. Perform drift detection
 	// 3. Handle any detected drift events
-	
+
 	d.stats.DriftDetectionRuns++
-	
+
 	if d.logger != nil {
 		d.logger.Info("Would perform drift detection",
 			"device_id", event.DeviceID,
 			"comparison_window", d.config.ComparisonWindow,
 			"detection_time", time.Since(startTime))
 	}
-	
+
 	return nil
 }
 
@@ -167,11 +169,11 @@ func (d *driftSubscriber) GetStats() *DriftSubscriberStats {
 func DefaultDriftSubscriberConfig() *DriftSubscriberConfig {
 	return &DriftSubscriberConfig{
 		EnableRealTimeDetection: true,
-		ComparisonWindow:       10 * time.Minute,
-		MaxDetectionTime:       30 * time.Second,
-		SkipRecentChanges:      true,
-		RecentChangeThreshold:  30 * time.Second,
-		MaxEventsPerSubscriber: 10,
-		EventProcessingTimeout: 60 * time.Second,
+		ComparisonWindow:        10 * time.Minute,
+		MaxDetectionTime:        30 * time.Second,
+		SkipRecentChanges:       true,
+		RecentChangeThreshold:   30 * time.Second,
+		MaxEventsPerSubscriber:  10,
+		EventProcessingTimeout:  60 * time.Second,
 	}
 }

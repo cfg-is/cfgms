@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package graph
 
 import (
@@ -82,7 +84,7 @@ func WithRetryConfig(retryConfig *RetryConfig) ClientOption {
 func (c *HTTPClient) GetUser(ctx context.Context, token *auth.AccessToken, userPrincipalName string) (*User, error) {
 	// URL encode the UPN to handle special characters
 	encodedUPN := url.QueryEscape(userPrincipalName)
-	
+
 	// Explicitly select all the fields we need to ensure they're returned
 	selectFields := "id,userPrincipalName,displayName,mailNickname,accountEnabled,mail,mobilePhone,officeLocation,jobTitle,department,companyName,createdDateTime"
 	endpoint := fmt.Sprintf("/users/%s?$select=%s", encodedUPN, selectFields)
@@ -99,7 +101,7 @@ func (c *HTTPClient) GetUser(ctx context.Context, token *auth.AccessToken, userP
 func (c *HTTPClient) ListUsers(ctx context.Context, token *auth.AccessToken, filter string) ([]User, error) {
 	// Explicitly select all the fields we need to ensure they're returned
 	selectFields := "id,userPrincipalName,displayName,mailNickname,accountEnabled,mail,mobilePhone,officeLocation,jobTitle,department,companyName,createdDateTime"
-	
+
 	var endpoint string
 	if filter != "" {
 		endpoint = fmt.Sprintf("/users?$filter=%s&$select=%s", url.QueryEscape(filter), selectFields)

@@ -1,5 +1,8 @@
 //go:build darwin
 
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
+
 package dna
 
 import (
@@ -15,13 +18,13 @@ func (d *DarwinSecurityCollector) CollectUsers(attributes map[string]string) err
 	if output, err := exec.Command("dscl", ".", "-list", "/Users").Output(); err == nil {
 		d.parseSystemUsers(string(output), attributes)
 	}
-	
+
 	// User account details
 	d.collectUserDetails(attributes)
-	
+
 	// Login shell information
 	d.collectLoginShells(attributes)
-	
+
 	return nil
 }
 
@@ -31,12 +34,12 @@ func (d *DarwinSecurityCollector) CollectGroups(attributes map[string]string) er
 	if output, err := exec.Command("dscl", ".", "-list", "/Groups").Output(); err == nil {
 		d.parseSystemGroups(string(output), attributes)
 	}
-	
+
 	// Administrative users
 	if output, err := exec.Command("dseditgroup", "-o", "checkmember", "-m", "admin").Output(); err == nil {
 		d.parseAdminUsers(string(output), attributes)
 	}
-	
+
 	return nil
 }
 
@@ -44,7 +47,7 @@ func (d *DarwinSecurityCollector) CollectGroups(attributes map[string]string) er
 func (d *DarwinSecurityCollector) CollectPermissions(attributes map[string]string) error {
 	// System directory permissions
 	d.collectSystemPermissions(attributes)
-	
+
 	// SIP (System Integrity Protection) status
 	if output, err := exec.Command("csrutil", "status").Output(); err == nil {
 		sipStatus := strings.TrimSpace(string(output))
@@ -56,16 +59,16 @@ func (d *DarwinSecurityCollector) CollectPermissions(attributes map[string]strin
 			attributes["sip_status"] = "unknown"
 		}
 	}
-	
+
 	// Gatekeeper status
 	if output, err := exec.Command("spctl", "--status").Output(); err == nil {
 		gatekeeperStatus := strings.TrimSpace(string(output))
 		attributes["gatekeeper_status"] = gatekeeperStatus
 	}
-	
+
 	// File system permissions on key directories
 	d.collectKeyDirectoryPermissions(attributes)
-	
+
 	return nil
 }
 
@@ -73,19 +76,19 @@ func (d *DarwinSecurityCollector) CollectPermissions(attributes map[string]strin
 func (d *DarwinSecurityCollector) CollectCertificates(attributes map[string]string) error {
 	// System keychain certificates
 	d.collectKeychainCertificates(attributes, "System")
-	
+
 	// Login keychain certificates
 	d.collectKeychainCertificates(attributes, "login")
-	
+
 	// System roots
 	if output, err := exec.Command("security", "list-keychains").Output(); err == nil {
 		keychains := strings.Split(strings.TrimSpace(string(output)), "\n")
 		attributes["keychain_count"] = fmt.Sprintf("%d", len(keychains))
 	}
-	
+
 	// Code signing certificates
 	d.collectCodeSigningCertificates(attributes)
-	
+
 	return nil
 }
 
@@ -94,13 +97,13 @@ func (d *DarwinSecurityCollector) parseSystemUsers(output string, attributes map
 	users := strings.Split(strings.TrimSpace(output), "\n")
 	var regularUsers []string
 	var systemUsers []string
-	
+
 	for _, user := range users {
 		user = strings.TrimSpace(user)
 		if user == "" {
 			continue
 		}
-		
+
 		// Get user ID to distinguish system vs regular users
 		if uidOutput, err := exec.Command("id", "-u", user).Output(); err == nil {
 			uidStr := strings.TrimSpace(string(uidOutput))
@@ -113,7 +116,7 @@ func (d *DarwinSecurityCollector) parseSystemUsers(output string, attributes map
 			}
 		}
 	}
-	
+
 	attributes["total_user_count"] = fmt.Sprintf("%d", len(users))
 	if len(regularUsers) > 0 {
 		attributes["regular_user_count"] = fmt.Sprintf("%d", len(regularUsers))
@@ -124,7 +127,7 @@ func (d *DarwinSecurityCollector) parseSystemUsers(output string, attributes map
 		}
 		attributes["regular_users_sample"] = strings.Join(regularUsers[:sampleSize], ",")
 	}
-	
+
 	if len(systemUsers) > 0 {
 		attributes["system_user_count"] = fmt.Sprintf("%d", len(systemUsers))
 	}
@@ -150,7 +153,7 @@ func (d *DarwinSecurityCollector) collectUserDetails(attributes map[string]strin
 			attributes["logged_in_users"] = strings.Join(loggedInUsers, ",")
 		}
 	}
-	
+
 	// Last login information
 	if output, err := exec.Command("last", "-10").Output(); err == nil {
 		lines := strings.Split(string(output), "\n")
@@ -197,13 +200,13 @@ func (d *DarwinSecurityCollector) parseSystemGroups(output string, attributes ma
 	groups := strings.Split(strings.TrimSpace(output), "\n")
 	var regularGroups []string
 	var systemGroups []string
-	
+
 	for _, group := range groups {
 		group = strings.TrimSpace(group)
 		if group == "" {
 			continue
 		}
-		
+
 		// Get group ID to distinguish system vs regular groups
 		if gidOutput, err := exec.Command("dscl", ".", "-read", "/Groups/"+group, "PrimaryGroupID").Output(); err == nil {
 			gidLine := strings.TrimSpace(string(gidOutput))
@@ -222,7 +225,7 @@ func (d *DarwinSecurityCollector) parseSystemGroups(output string, attributes ma
 			}
 		}
 	}
-	
+
 	attributes["total_group_count"] = fmt.Sprintf("%d", len(groups))
 	if len(regularGroups) > 0 {
 		attributes["regular_group_count"] = fmt.Sprintf("%d", len(regularGroups))
@@ -233,7 +236,7 @@ func (d *DarwinSecurityCollector) parseSystemGroups(output string, attributes ma
 		}
 		attributes["regular_groups_sample"] = strings.Join(regularGroups[:sampleSize], ",")
 	}
-	
+
 	if len(systemGroups) > 0 {
 		attributes["system_group_count"] = fmt.Sprintf("%d", len(systemGroups))
 	}
@@ -265,7 +268,7 @@ func (d *DarwinSecurityCollector) parseAdminUsers(_ string, attributes map[strin
 func (d *DarwinSecurityCollector) collectSystemPermissions(attributes map[string]string) {
 	// Check permissions on key system directories
 	keyDirs := []string{"/System", "/usr", "/bin", "/sbin", "/Applications"}
-	
+
 	for _, dir := range keyDirs {
 		if output, err := exec.Command("ls", "-ld", dir).Output(); err == nil {
 			permLine := strings.TrimSpace(string(output))
@@ -292,7 +295,7 @@ func (d *DarwinSecurityCollector) collectKeyDirectoryPermissions(attributes map[
 			attributes["etc_permissions"] = fields[0]
 		}
 	}
-	
+
 	// Check /tmp permissions
 	if output, err := exec.Command("ls", "-ld", "/tmp").Output(); err == nil {
 		permLine := strings.TrimSpace(string(output))
@@ -301,7 +304,7 @@ func (d *DarwinSecurityCollector) collectKeyDirectoryPermissions(attributes map[
 			attributes["tmp_permissions"] = fields[0]
 		}
 	}
-	
+
 	// Check /var permissions
 	if output, err := exec.Command("ls", "-ld", "/var").Output(); err == nil {
 		permLine := strings.TrimSpace(string(output))
@@ -319,7 +322,7 @@ func (d *DarwinSecurityCollector) collectKeychainCertificates(attributes map[str
 	if keychainName != "login" {
 		cmd = append(cmd, "-s", keychainName)
 	}
-	
+
 	if output, err := exec.Command(cmd[0], cmd[1:]...).Output(); err == nil {
 		certOutput := string(output)
 		// Count certificate entries
@@ -327,7 +330,7 @@ func (d *DarwinSecurityCollector) collectKeychainCertificates(attributes map[str
 		if certCount > 0 {
 			attributes["certificates_"+keychainName+"_count"] = fmt.Sprintf("%d", certCount)
 		}
-		
+
 		// Extract some certificate common names
 		d.extractCertificateNames(certOutput, attributes, keychainName)
 	}
@@ -337,7 +340,7 @@ func (d *DarwinSecurityCollector) collectKeychainCertificates(attributes map[str
 func (d *DarwinSecurityCollector) extractCertificateNames(output string, attributes map[string]string, keychainName string) {
 	lines := strings.Split(output, "\n")
 	var certNames []string
-	
+
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if strings.Contains(line, "\"labl\"<blob>=") {
@@ -352,7 +355,7 @@ func (d *DarwinSecurityCollector) extractCertificateNames(output string, attribu
 			}
 		}
 	}
-	
+
 	if len(certNames) > 0 {
 		attributes["certificates_"+keychainName+"_sample"] = strings.Join(certNames, ", ")
 	}
@@ -364,29 +367,29 @@ func (d *DarwinSecurityCollector) collectCodeSigningCertificates(attributes map[
 	if output, err := exec.Command("security", "find-identity", "-v", "-p", "codesigning").Output(); err == nil {
 		lines := strings.Split(string(output), "\n")
 		var validCerts int
-		
+
 		for _, line := range lines {
 			line = strings.TrimSpace(line)
 			if line != "" && strings.Contains(line, ")") && !strings.Contains(line, "0 valid identities found") {
 				validCerts++
 			}
 		}
-		
+
 		attributes["code_signing_certificates"] = fmt.Sprintf("%d", validCerts)
 	}
-	
+
 	// Check for Developer ID certificates specifically
 	if output, err := exec.Command("security", "find-identity", "-v", "-s", "Developer ID").Output(); err == nil {
 		lines := strings.Split(string(output), "\n")
 		var devIDCerts int
-		
+
 		for _, line := range lines {
 			line = strings.TrimSpace(line)
 			if line != "" && strings.Contains(line, "Developer ID") {
 				devIDCerts++
 			}
 		}
-		
+
 		if devIDCerts > 0 {
 			attributes["developer_id_certificates"] = fmt.Sprintf("%d", devIDCerts)
 		}

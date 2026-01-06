@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package engine
 
 import (
@@ -102,17 +104,17 @@ func (m *MockCache) Clear(ctx context.Context) error {
 
 func TestEngine_GenerateReport(t *testing.T) {
 	tests := []struct {
-		name          string
-		request       interfaces.ReportRequest
-		expectError   bool
-		setupMocks    func(*MockDataProvider, *MockTemplateProcessor, *MockExporter, *MockCache)
+		name           string
+		request        interfaces.ReportRequest
+		expectError    bool
+		setupMocks     func(*MockDataProvider, *MockTemplateProcessor, *MockExporter, *MockCache)
 		validateResult func(*testing.T, *interfaces.Report)
 	}{
 		{
 			name: "successful compliance report generation",
 			request: interfaces.ReportRequest{
-				Type:      interfaces.ReportTypeCompliance,
-				Template:  "compliance-summary",
+				Type:     interfaces.ReportTypeCompliance,
+				Template: "compliance-summary",
 				TimeRange: interfaces.TimeRange{
 					Start: time.Now().Add(-24 * time.Hour),
 					End:   time.Now(),
@@ -123,35 +125,35 @@ func TestEngine_GenerateReport(t *testing.T) {
 			setupMocks: func(dp *MockDataProvider, tp *MockTemplateProcessor, ex *MockExporter, cache *MockCache) {
 				// Cache miss
 				cache.On("Get", mock.Anything, mock.AnythingOfType("string")).Return(nil, assert.AnError)
-				
+
 				// Data provider returns
 				dp.On("GetDNAData", mock.Anything, mock.AnythingOfType("interfaces.DataQuery")).Return([]storage.DNARecord{
 					{DeviceID: "device1", StoredAt: time.Now()},
 					{DeviceID: "device2", StoredAt: time.Now()},
 				}, nil)
-				
+
 				dp.On("GetDriftEvents", mock.Anything, mock.AnythingOfType("interfaces.DataQuery")).Return([]drift.DriftEvent{
 					{DeviceID: "device1", Severity: drift.SeverityCritical, Timestamp: time.Now()},
 				}, nil)
-				
+
 				dp.On("GetDeviceStats", mock.Anything, mock.AnythingOfType("[]string"), mock.AnythingOfType("interfaces.TimeRange")).Return(map[string]interfaces.DeviceStats{
 					"device1": {DeviceID: "device1", ComplianceScore: 0.7, RiskLevel: interfaces.RiskLevelMedium},
 					"device2": {DeviceID: "device2", ComplianceScore: 0.9, RiskLevel: interfaces.RiskLevelLow},
 				}, nil)
-				
+
 				dp.On("GetTrendData", mock.Anything, mock.AnythingOfType("string"), mock.AnythingOfType("interfaces.DataQuery")).Return([]interfaces.TrendPoint{
 					{Timestamp: time.Now(), Value: 0.8},
 				}, nil)
-				
+
 				// Template processor returns mock report
 				mockReport := &interfaces.Report{
-					Type:      interfaces.ReportTypeCompliance,
-					Title:     "Test Compliance Report",
-					Sections:  []interfaces.ReportSection{},
-					Summary:   interfaces.ReportSummary{DevicesAnalyzed: 2, ComplianceScore: 0.8},
+					Type:     interfaces.ReportTypeCompliance,
+					Title:    "Test Compliance Report",
+					Sections: []interfaces.ReportSection{},
+					Summary:  interfaces.ReportSummary{DevicesAnalyzed: 2, ComplianceScore: 0.8},
 				}
 				tp.On("ProcessTemplate", mock.Anything, "compliance-summary", mock.AnythingOfType("interfaces.ReportData"), mock.AnythingOfType("map[string]interface {}")).Return(mockReport, nil)
-				
+
 				// Cache set
 				cache.On("Set", mock.Anything, mock.AnythingOfType("string"), mock.AnythingOfType("*interfaces.Report"), mock.AnythingOfType("time.Duration")).Return(nil)
 			},
@@ -167,8 +169,8 @@ func TestEngine_GenerateReport(t *testing.T) {
 		{
 			name: "cache hit scenario",
 			request: interfaces.ReportRequest{
-				Type:      interfaces.ReportTypeExecutive,
-				Template:  "executive-dashboard",
+				Type:     interfaces.ReportTypeExecutive,
+				Template: "executive-dashboard",
 				TimeRange: interfaces.TimeRange{
 					Start: time.Now().Add(-24 * time.Hour),
 					End:   time.Now(),
@@ -352,17 +354,17 @@ func TestEngine_ValidateRequest(t *testing.T) {
 
 func TestEngine_GetAvailableTemplates(t *testing.T) {
 	engine := New(nil, nil, nil, nil, logging.NewNoopLogger())
-	
+
 	templates := engine.GetAvailableTemplates()
-	
+
 	assert.NotEmpty(t, templates)
-	
+
 	// Check that we have the expected built-in templates
 	templateNames := make(map[string]bool)
 	for _, template := range templates {
 		templateNames[template.Name] = true
 	}
-	
+
 	assert.True(t, templateNames["compliance-summary"])
 	assert.True(t, templateNames["executive-dashboard"])
 	assert.True(t, templateNames["drift-analysis"])
@@ -389,7 +391,7 @@ func TestEngine_GenerateReportSummary(t *testing.T) {
 				RiskLevel:       interfaces.RiskLevelHigh,
 			},
 			"device2": {
-				DeviceID:        "device2", 
+				DeviceID:        "device2",
 				ComplianceScore: 0.9,
 				RiskLevel:       interfaces.RiskLevelLow,
 			},
@@ -406,8 +408,8 @@ func TestEngine_GenerateReportSummary(t *testing.T) {
 
 	assert.Equal(t, 2, summary.DevicesAnalyzed)
 	assert.Equal(t, 3, summary.DriftEventsTotal)
-	assert.Equal(t, 0.8, summary.ComplianceScore) // Average of 0.7 and 0.9
-	assert.Equal(t, 0, summary.CriticalIssues)    // No critical risk devices
+	assert.Equal(t, 0.8, summary.ComplianceScore)                      // Average of 0.7 and 0.9
+	assert.Equal(t, 0, summary.CriticalIssues)                         // No critical risk devices
 	assert.Equal(t, interfaces.TrendImproving, summary.TrendDirection) // 0.8 -> 0.85
 	assert.NotEmpty(t, summary.KeyInsights)
 	assert.NotEmpty(t, summary.RecommendedActions)
@@ -440,10 +442,10 @@ func TestEngine_GenerateCacheKey(t *testing.T) {
 
 	// Same requests should generate same cache key
 	assert.Equal(t, key1, key2)
-	
+
 	// Different requests should generate different cache keys
 	assert.NotEqual(t, key1, key3)
-	
+
 	// Cache keys should have expected format
 	assert.Contains(t, key1, "report_")
 	assert.Contains(t, key3, "report_")
@@ -451,7 +453,7 @@ func TestEngine_GenerateCacheKey(t *testing.T) {
 
 func TestEngine_WithConfig(t *testing.T) {
 	engine := New(nil, nil, nil, nil, logging.NewNoopLogger())
-	
+
 	customConfig := Config{
 		CacheEnabled:    false,
 		CacheTTL:        2 * time.Hour,

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package jit
 
 import (
@@ -67,9 +69,9 @@ func TestJITAccessManager_EnableZeroTrustPolicies(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			jam := NewJITAccessManager(&MockRBACManager{}, &MockNotificationService{})
-			
+
 			jam.EnableZeroTrustPolicies(tt.engine, tt.mode)
-			
+
 			assert.Equal(t, tt.expectedEnabled, jam.zeroTrustEnabled)
 			assert.Equal(t, tt.mode, jam.zeroTrustMode)
 			assert.Equal(t, tt.engine, jam.zeroTrustEngine)
@@ -80,16 +82,16 @@ func TestJITAccessManager_EnableZeroTrustPolicies(t *testing.T) {
 func TestJITAccessManager_SetZeroTrustMode(t *testing.T) {
 	jam := NewJITAccessManager(&MockRBACManager{}, &MockNotificationService{})
 	engine := createMockZeroTrustEngine()
-	
+
 	// First enable with an engine
 	jam.EnableZeroTrustPolicies(engine, ZeroTrustJITModeComprehensive)
 	assert.True(t, jam.zeroTrustEnabled)
-	
+
 	// Change mode to disabled
 	jam.SetZeroTrustMode(ZeroTrustJITModeDisabled)
 	assert.False(t, jam.zeroTrustEnabled)
 	assert.Equal(t, ZeroTrustJITModeDisabled, jam.GetZeroTrustMode())
-	
+
 	// Change mode back to enabled
 	jam.SetZeroTrustMode(ZeroTrustJITModeApprovalGating)
 	assert.True(t, jam.zeroTrustEnabled)
@@ -160,7 +162,7 @@ func TestJITAccessManager_RequestAccess_Success(t *testing.T) {
 			rbacManager := &MockRBACManager{}
 			notificationService := &MockNotificationService{}
 			jam := NewJITAccessManager(rbacManager, notificationService)
-			
+
 			if tt.setupMocks != nil {
 				tt.setupMocks(rbacManager, notificationService)
 			}
@@ -266,7 +268,7 @@ func TestJITAccessManager_RequestAccess_ValidationErrors(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			jam := NewJITAccessManager(&MockRBACManager{}, &MockNotificationService{})
-			
+
 			ctx := context.Background()
 			request, err := jam.RequestAccess(ctx, tt.requestSpec)
 
@@ -334,7 +336,7 @@ func TestJITAccessManager_ApproveRequest(t *testing.T) {
 	assert.Equal(t, JITAccessGrantStatusActive, grant.Status)
 	assert.NotZero(t, grant.GrantedAt)
 	assert.Equal(t, request.ExpiresAt, grant.ExpiresAt)
-	
+
 	// Check request was updated
 	updatedRequest, err := jam.GetRequest(ctx, request.ID)
 	require.NoError(t, err)
@@ -366,7 +368,7 @@ func TestJITAccessManager_ApproveRequest_Errors(t *testing.T) {
 				// Create and immediately deny a request
 				rbacManager := jam.rbacManager.(*MockRBACManager)
 				rbacManager.SetCheckPermissionResponse("user1", "read", "tenant1", false, "No access")
-				
+
 				req := &JITAccessRequestSpec{
 					RequesterID:   "user1",
 					TenantID:      "tenant1",
@@ -374,7 +376,7 @@ func TestJITAccessManager_ApproveRequest_Errors(t *testing.T) {
 					Duration:      time.Hour,
 					Justification: "Test",
 				}
-				
+
 				request, _ := jam.RequestAccess(ctx, req)
 				_ = jam.DenyRequest(ctx, request.ID, "reviewer1", "Denied for testing")
 				return request
@@ -387,7 +389,7 @@ func TestJITAccessManager_ApproveRequest_Errors(t *testing.T) {
 			setupRequest: func(jam *JITAccessManager, ctx context.Context) *JITAccessRequest {
 				rbacManager := jam.rbacManager.(*MockRBACManager)
 				rbacManager.SetCheckPermissionResponse("user1", "read", "tenant1", false, "No access")
-				
+
 				req := &JITAccessRequestSpec{
 					RequesterID:   "user1",
 					TenantID:      "tenant1",
@@ -396,7 +398,7 @@ func TestJITAccessManager_ApproveRequest_Errors(t *testing.T) {
 					Justification: "Test",
 					AutoApprove:   false,
 				}
-				
+
 				request, _ := jam.RequestAccess(ctx, req)
 				return request
 			},
@@ -412,10 +414,10 @@ func TestJITAccessManager_ApproveRequest_Errors(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			rbacManager := &MockRBACManager{}
 			jam := NewJITAccessManager(rbacManager, &MockNotificationService{})
-			
+
 			ctx := context.Background()
 			var requestID string
-			
+
 			if tt.setupRequest != nil {
 				if request := tt.setupRequest(jam, ctx); request != nil {
 					requestID = request.ID
@@ -423,7 +425,7 @@ func TestJITAccessManager_ApproveRequest_Errors(t *testing.T) {
 					requestID = "non-existent-request"
 				}
 			}
-			
+
 			if tt.setupApprover != nil {
 				tt.setupApprover(rbacManager, tt.approverID, "tenant1")
 			}
@@ -448,7 +450,7 @@ func TestJITAccessManager_DenyRequest(t *testing.T) {
 		RequesterID:   "user1",
 		TenantID:      "tenant1",
 		Permissions:   []string{"admin"}, // High privilege to prevent auto-approval
-		Duration:      2 * time.Hour,     // Longer duration to prevent auto-approval  
+		Duration:      2 * time.Hour,     // Longer duration to prevent auto-approval
 		Justification: "Need access for testing",
 		AutoApprove:   false,
 	}
@@ -462,7 +464,7 @@ func TestJITAccessManager_DenyRequest(t *testing.T) {
 	err = jam.DenyRequest(ctx, request.ID, "reviewer1", "Access not justified")
 
 	require.NoError(t, err)
-	
+
 	// Check request was updated
 	updatedRequest, err := jam.GetRequest(ctx, request.ID)
 	require.NoError(t, err)
@@ -505,7 +507,7 @@ func TestJITAccessManager_ExtendAccess(t *testing.T) {
 	err = jam.ExtendAccess(ctx, grant.ID, extensionDuration, "user1", "Need more time")
 
 	require.NoError(t, err)
-	
+
 	// Verify extension
 	extendedGrant := jam.activeGrants[grant.ID]
 	assert.Equal(t, originalExpiry.Add(extensionDuration), extendedGrant.ExpiresAt)
@@ -519,12 +521,12 @@ func TestJITAccessManager_ExtendAccess(t *testing.T) {
 
 func TestJITAccessManager_ExtendAccess_Errors(t *testing.T) {
 	tests := []struct {
-		name          string
-		setupGrant    func(*JITAccessManager, context.Context) *JITAccessGrant
-		extensionDur  time.Duration
-		requesterID   string
+		name           string
+		setupGrant     func(*JITAccessManager, context.Context) *JITAccessGrant
+		extensionDur   time.Duration
+		requesterID    string
 		setupRequester func(*MockRBACManager, string, string)
-		expectedErr   string
+		expectedErr    string
 	}{
 		{
 			name: "Grant not found",
@@ -550,7 +552,7 @@ func TestJITAccessManager_ExtendAccess_Errors(t *testing.T) {
 					Duration:      time.Hour,
 					Justification: "Test",
 				}
-				
+
 				request, _ := jam.RequestAccess(ctx, req)
 				grant, _ := jam.ApproveRequest(ctx, request.ID, "approver1", "Approved")
 				grant.ExtensionsUsed = grant.MaxExtensions // Max out extensions
@@ -575,12 +577,12 @@ func TestJITAccessManager_ExtendAccess_Errors(t *testing.T) {
 					MaxDuration:   2 * time.Hour, // Short max duration
 					Justification: "Test",
 				}
-				
+
 				request, _ := jam.RequestAccess(ctx, req)
 				grant, _ := jam.ApproveRequest(ctx, request.ID, "approver1", "Approved")
 				return grant
 			},
-			extensionDur: 2 * time.Hour, // Would exceed max duration
+			extensionDur: 3 * time.Hour, // Would exceed max duration (total would be ~3 hours, max is 2)
 			requesterID:  "user1",
 			expectedErr:  "exceed maximum duration",
 		},
@@ -598,7 +600,7 @@ func TestJITAccessManager_ExtendAccess_Errors(t *testing.T) {
 					Duration:      time.Hour,
 					Justification: "Test",
 				}
-				
+
 				request, _ := jam.RequestAccess(ctx, req)
 				grant, _ := jam.ApproveRequest(ctx, request.ID, "approver1", "Approved")
 				return grant
@@ -616,10 +618,10 @@ func TestJITAccessManager_ExtendAccess_Errors(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			rbacManager := &MockRBACManager{}
 			jam := NewJITAccessManager(rbacManager, &MockNotificationService{})
-			
+
 			ctx := context.Background()
 			var grantID string
-			
+
 			if tt.setupGrant != nil {
 				if grant := tt.setupGrant(jam, ctx); grant != nil {
 					grantID = grant.ID
@@ -627,7 +629,7 @@ func TestJITAccessManager_ExtendAccess_Errors(t *testing.T) {
 					grantID = "non-existent-grant"
 				}
 			}
-			
+
 			if tt.setupRequester != nil {
 				tt.setupRequester(rbacManager, tt.requesterID, "tenant1")
 			}
@@ -635,7 +637,9 @@ func TestJITAccessManager_ExtendAccess_Errors(t *testing.T) {
 			err := jam.ExtendAccess(ctx, grantID, tt.extensionDur, tt.requesterID, "Test extension")
 
 			assert.Error(t, err)
-			assert.Contains(t, err.Error(), tt.expectedErr)
+			if err != nil {
+				assert.Contains(t, err.Error(), tt.expectedErr)
+			}
 		})
 	}
 }
@@ -670,7 +674,7 @@ func TestJITAccessManager_RevokeAccess(t *testing.T) {
 	err = jam.RevokeAccess(ctx, grant.ID, "revoker1", "Security concern")
 
 	require.NoError(t, err)
-	
+
 	// Verify revocation
 	revokedGrant := jam.activeGrants[grant.ID]
 	assert.Equal(t, JITAccessGrantStatusRevoked, revokedGrant.Status)
@@ -696,7 +700,7 @@ func TestJITAccessManager_GetActiveGrants(t *testing.T) {
 			Justification: "Testing",
 			AutoApprove:   true,
 		}
-		
+
 		request, _ := jam.RequestAccess(context.Background(), req)
 		return request.GrantedAccess
 	}
@@ -706,18 +710,18 @@ func TestJITAccessManager_GetActiveGrants(t *testing.T) {
 	grant3 := setupGrant("user2", "admin")
 
 	ctx := context.Background()
-	
+
 	// Get grants for user1
 	grants, err := jam.GetActiveGrants(ctx, "user1", "tenant1")
 	require.NoError(t, err)
 	assert.Len(t, grants, 2)
-	
+
 	// Verify correct grants returned
 	grantIDs := []string{grants[0].ID, grants[1].ID}
 	assert.Contains(t, grantIDs, grant1.ID)
 	assert.Contains(t, grantIDs, grant2.ID)
 	assert.NotContains(t, grantIDs, grant3.ID)
-	
+
 	// Get grants for user2
 	grants2, err := jam.GetActiveGrants(ctx, "user2", "tenant1")
 	require.NoError(t, err)
@@ -729,31 +733,31 @@ func TestJITAccessManager_GetActiveGrants(t *testing.T) {
 // For now, we test the zero-trust mode configuration separately
 func TestJITAccessManager_ZeroTrustModeConfiguration(t *testing.T) {
 	jam := NewJITAccessManager(&MockRBACManager{}, &MockNotificationService{})
-	
+
 	// Test that zero-trust evaluation checks work correctly
 	assert.False(t, jam.shouldEvaluateZeroTrustForRequest())
-	assert.False(t, jam.shouldEvaluateZeroTrustForApproval()) 
+	assert.False(t, jam.shouldEvaluateZeroTrustForApproval())
 	assert.False(t, jam.shouldEvaluateZeroTrustForGrant())
-	
+
 	// Enable zero-trust with comprehensive mode
 	engine := createMockZeroTrustEngine()
 	jam.EnableZeroTrustPolicies(engine, ZeroTrustJITModeComprehensive)
-	
+
 	assert.True(t, jam.shouldEvaluateZeroTrustForRequest())
 	assert.True(t, jam.shouldEvaluateZeroTrustForApproval())
 	assert.True(t, jam.shouldEvaluateZeroTrustForGrant())
-	
+
 	// Test specific modes
 	jam.SetZeroTrustMode(ZeroTrustJITModeRequestValidation)
 	assert.True(t, jam.shouldEvaluateZeroTrustForRequest())
 	assert.False(t, jam.shouldEvaluateZeroTrustForApproval())
 	assert.False(t, jam.shouldEvaluateZeroTrustForGrant())
-	
+
 	jam.SetZeroTrustMode(ZeroTrustJITModeApprovalGating)
 	assert.False(t, jam.shouldEvaluateZeroTrustForRequest())
 	assert.True(t, jam.shouldEvaluateZeroTrustForApproval())
 	assert.False(t, jam.shouldEvaluateZeroTrustForGrant())
-	
+
 	jam.SetZeroTrustMode(ZeroTrustJITModeGrantValidation)
 	assert.False(t, jam.shouldEvaluateZeroTrustForRequest())
 	assert.False(t, jam.shouldEvaluateZeroTrustForApproval())
@@ -763,7 +767,7 @@ func TestJITAccessManager_ZeroTrustModeConfiguration(t *testing.T) {
 func TestJITAccessManager_ConcurrentAccess(t *testing.T) {
 	rbacManager := &MockRBACManager{}
 	jam := NewJITAccessManager(rbacManager, &MockNotificationService{})
-	
+
 	// Setup common RBAC responses
 	rbacManager.SetCheckPermissionResponse("user1", "read", "tenant1", false, "No access")
 	rbacManager.SetCheckPermissionResponse("system", "jit_access.approve", "tenant1", true, "System can approve")
@@ -786,7 +790,7 @@ func TestJITAccessManager_ConcurrentAccess(t *testing.T) {
 
 			ctx := context.Background()
 			request, err := jam.RequestAccess(ctx, requestSpec)
-			
+
 			if err != nil {
 				errors <- err
 			} else {
@@ -815,7 +819,7 @@ func TestJITAccessManager_ConcurrentAccess(t *testing.T) {
 
 	assert.Equal(t, numConcurrentRequests, successCount)
 	assert.Equal(t, 0, errorCount)
-	
+
 	// Verify all requests are stored
 	assert.Len(t, jam.requests, numConcurrentRequests)
 	assert.Len(t, jam.activeGrants, numConcurrentRequests)

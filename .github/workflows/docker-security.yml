@@ -1,0 +1,218 @@
+# Docker Container Security Scanning Workflow
+# Trivy container image vulnerability scanning
+#
+# This workflow scans Docker container images for:
+# - Base image vulnerabilities (OS packages)
+# - Application dependency vulnerabilities
+# - Misconfigurations
+# - Embedded secrets
+#
+# Scans trigger on:
+# - PRs that modify Dockerfiles
+# - Pushes to main branch
+# - Manual workflow dispatch
+#
+# Documentation: https://github.com/aquasecurity/trivy-action
+
+name: Docker Container Security
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'cmd/**/Dockerfile*'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/docker-security.yml'
+  workflow_dispatch:
+
+env:
+  GO_VERSION: '1.23'
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: cfg-is/cfgms
+
+jobs:
+  # Scan Controller Docker Image
+  scan-controller:
+    name: Scan Controller Image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+      packages: read
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build Controller Image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./cmd/controller/Dockerfile
+        push: false
+        load: true
+        tags: ${{ env.IMAGE_PREFIX }}/controller:scan
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@0.28.0
+      with:
+        image-ref: ${{ env.IMAGE_PREFIX }}/controller:scan
+        format: 'sarif'
+        output: 'trivy-controller-results.sarif'
+        severity: 'CRITICAL,HIGH,MEDIUM'
+        scanners: 'vuln,secret,config'
+        # Fail on CRITICAL and HIGH vulnerabilities
+        exit-code: '1'
+        ignore-unfixed: false
+        vuln-type: 'os,library'
+        timeout: '10m'
+
+    - name: Upload Trivy results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v3
+      if: always()
+      with:
+        sarif_file: 'trivy-controller-results.sarif'
+        category: 'container-controller'
+
+    - name: Generate human-readable report
+      if: always()
+      uses: aquasecurity/trivy-action@0.28.0
+      with:
+        image-ref: ${{ env.IMAGE_PREFIX }}/controller:scan
+        format: 'table'
+        output: 'trivy-controller-report.txt'
+        severity: 'CRITICAL,HIGH,MEDIUM'
+        scanners: 'vuln,secret,config'
+        timeout: '10m'
+
+    - name: Upload scan results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: trivy-controller-results
+        path: |
+          trivy-controller-results.sarif
+          trivy-controller-report.txt
+        retention-days: 30
+
+  # Scan Steward Docker Image
+  scan-steward:
+    name: Scan Steward Image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+      packages: read
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build Steward Image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./cmd/steward/Dockerfile
+        push: false
+        load: true
+        tags: ${{ env.IMAGE_PREFIX }}/steward:scan
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@0.28.0
+      with:
+        image-ref: ${{ env.IMAGE_PREFIX }}/steward:scan
+        format: 'sarif'
+        output: 'trivy-steward-results.sarif'
+        severity: 'CRITICAL,HIGH,MEDIUM'
+        scanners: 'vuln,secret,config'
+        # Fail on CRITICAL and HIGH vulnerabilities
+        exit-code: '1'
+        ignore-unfixed: false
+        vuln-type: 'os,library'
+        timeout: '10m'
+
+    - name: Upload Trivy results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v3
+      if: always()
+      with:
+        sarif_file: 'trivy-steward-results.sarif'
+        category: 'container-steward'
+
+    - name: Generate human-readable report
+      if: always()
+      uses: aquasecurity/trivy-action@0.28.0
+      with:
+        image-ref: ${{ env.IMAGE_PREFIX }}/steward:scan
+        format: 'table'
+        output: 'trivy-steward-report.txt'
+        severity: 'CRITICAL,HIGH,MEDIUM'
+        scanners: 'vuln,secret,config'
+        timeout: '10m'
+
+    - name: Upload scan results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: trivy-steward-results
+        path: |
+          trivy-steward-results.sarif
+          trivy-steward-report.txt
+        retention-days: 30
+
+  # Consolidated Security Summary
+  security-summary:
+    name: Container Security Summary
+    runs-on: ubuntu-latest
+    needs: [scan-controller, scan-steward]
+    if: always()
+    steps:
+    - name: Generate Summary
+      run: |
+        echo "## Docker Container Security Scan Results" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Image Scan Status" >> $GITHUB_STEP_SUMMARY
+        echo "| Image | Status |" >> $GITHUB_STEP_SUMMARY
+        echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+        echo "| Controller | ${{ needs.scan-controller.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Steward | ${{ needs.scan-steward.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+
+        controller_status="${{ needs.scan-controller.result }}"
+        steward_status="${{ needs.scan-steward.result }}"
+
+        if [[ "$controller_status" == "success" && "$steward_status" == "success" ]]; then
+          echo "### ✅ All Container Scans Passed" >> $GITHUB_STEP_SUMMARY
+          echo "No CRITICAL or HIGH vulnerabilities found in container images." >> $GITHUB_STEP_SUMMARY
+        else
+          echo "### ❌ Container Security Issues Detected" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Action Required:**" >> $GITHUB_STEP_SUMMARY
+          echo "1. Review findings in the [Security tab](../../security/code-scanning)" >> $GITHUB_STEP_SUMMARY
+          echo "2. Download scan results from workflow artifacts" >> $GITHUB_STEP_SUMMARY
+          echo "3. Update base images or dependencies to resolve vulnerabilities" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Common Fixes:**" >> $GITHUB_STEP_SUMMARY
+          echo "- Update base image version in Dockerfile" >> $GITHUB_STEP_SUMMARY
+          echo "- Run \`go get -u\` to update vulnerable Go dependencies" >> $GITHUB_STEP_SUMMARY
+          echo "- Review Trivy reports for specific remediation steps" >> $GITHUB_STEP_SUMMARY
+        fi
+
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Scan Coverage" >> $GITHUB_STEP_SUMMARY
+        echo "- ✅ Base OS vulnerabilities" >> $GITHUB_STEP_SUMMARY
+        echo "- ✅ Application dependencies" >> $GITHUB_STEP_SUMMARY
+        echo "- ✅ Configuration issues" >> $GITHUB_STEP_SUMMARY
+        echo "- ✅ Embedded secrets" >> $GITHUB_STEP_SUMMARY

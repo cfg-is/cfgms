@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package siem
 
 import (
@@ -14,10 +16,10 @@ import (
 // It aggregates individual log entries into batches based on size and timeout
 // to optimize throughput while maintaining low latency.
 type BatchProcessor struct {
-	logger       *logging.ModuleLogger
-	config       ProcessingConfig
-	outputChan   chan<- *ProcessingBatch
-	inputChan    <-chan interfaces.LogEntry
+	logger     *logging.ModuleLogger
+	config     ProcessingConfig
+	outputChan chan<- *ProcessingBatch
+	inputChan  <-chan interfaces.LogEntry
 
 	// Batching state
 	currentBatch *ProcessingBatch

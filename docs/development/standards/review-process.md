@@ -75,6 +75,7 @@ All updates to development standards should be documented, including:
 - Guidance on migration from old standards to new standards
 
 ## Version Information
+
 - **Document Version:** 1.0
 - **Last Updated:** 2024-04-04
-- **Status:** Draft 
+- **Status:** Draft

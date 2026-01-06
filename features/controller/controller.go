@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package controller
 
 import (
@@ -10,7 +12,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/server"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/pkg/logging"
-	
+
 	// Import logging providers for auto-registration
 	_ "github.com/cfgis/cfgms/pkg/logging/providers/file"
 	_ "github.com/cfgis/cfgms/pkg/logging/providers/timescale"
@@ -67,7 +69,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Controller, error) {
 		} else {
 			logger.Info("Initialized global logging provider", "provider", cfg.Logging.Provider)
 		}
-		
+
 		// Initialize global logger factory for module injection
 		logging.InitializeGlobalLoggerFactory(loggingConfig.ServiceName, loggingConfig.Component)
 	} else {
@@ -92,9 +94,11 @@ func New(cfg *config.Config, logger logging.Logger) (*Controller, error) {
 		srv.GetCertificateManager(),
 		srv.GetTenantManager(),
 		srv.GetRBACManager(),
-		nil, // systemMonitor - will be integrated in Phase 5
-		nil, // platformMonitor - will be integrated in this story completion
-		nil, // tracer - will be integrated in Phase 5
+		nil,                             // systemMonitor - will be integrated in Phase 5
+		nil,                             // platformMonitor - will be integrated in this story completion
+		nil,                             // tracer - will be integrated in Phase 5
+		srv.GetHAManager(),              // HA manager
+		srv.GetRegistrationTokenStore(), // registrationTokenStore - now wired for MQTT+QUIC mode
 	)
 	if err != nil {
 		return nil, err
@@ -208,7 +212,6 @@ func (c *Controller) RegisterModule(module Module) error {
 	return nil
 }
 
-
 // GetConfigurationService returns the configuration service instance
 func (c *Controller) GetConfigurationService() *service.ConfigurationService {
 	c.mu.RLock()
@@ -236,7 +239,7 @@ func (c *Controller) GetDirectoryService() directory.Service {
 func (c *Controller) ListModules() []string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	
+
 	var modules []string
 	for name := range c.modules {
 		modules = append(modules, name)

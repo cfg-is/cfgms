@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // Command m365-test provides interactive testing for M365 delegated permissions
 package main
 
@@ -17,7 +19,7 @@ import (
 
 var (
 	clientID     = flag.String("client-id", "", "M365 Application Client ID")
-	clientSecret = flag.String("client-secret", "", "M365 Application Client Secret") 
+	clientSecret = flag.String("client-secret", "", "M365 Application Client Secret")
 	tenantID     = flag.String("tenant-id", "", "M365 Tenant ID")
 	redirectURI  = flag.String("redirect-uri", "http://localhost:8080/callback", "OAuth2 Redirect URI")
 	credPath     = flag.String("cred-path", "./m365-test-creds", "Path to store credentials")
@@ -59,7 +61,7 @@ func main() {
 
 	fmt.Printf("🚀 CFGMS M365 Delegated Permissions Testing Tool\n")
 	fmt.Printf("===============================================\n\n")
-	
+
 	if *verbose {
 		fmt.Printf("Configuration:\n")
 		fmt.Printf("  Client ID: %s\n", *clientID)
@@ -112,10 +114,10 @@ func testM365Integration(ctx context.Context) error {
 
 	// Create provider
 	provider := auth.NewOAuth2Provider(credStore, config)
-	
+
 	fmt.Printf("1. Testing Application Permissions (Client Credentials)\n")
 	fmt.Printf("-----------------------------------------------------\n")
-	
+
 	// Test application permissions first
 	appToken, err := provider.GetAccessToken(ctx, *tenantID)
 	if err != nil {
@@ -164,7 +166,7 @@ func testM365Integration(ctx context.Context) error {
 	if *testScopes {
 		fmt.Printf("3. Testing Permission Scopes\n")
 		fmt.Printf("----------------------------\n")
-		
+
 		// Test delegated permissions
 		testResult, err := interactiveAuth.TestDelegatedPermissions(ctx, userContext, delegatedToken)
 		if err != nil {
@@ -267,7 +269,7 @@ func saveTestResults(result *auth.PermissionTestResult) error {
 
 	// Generate filename with timestamp
 	timestamp := result.TestTimestamp.Format("20060102-150405")
-	filename := fmt.Sprintf("permission-test-%s-%s.json", 
+	filename := fmt.Sprintf("permission-test-%s-%s.json",
 		strings.ReplaceAll(result.UserContext.UserPrincipalName, "@", "-at-"), timestamp)
 	filepath := filepath.Join(resultsDir, filename)
 

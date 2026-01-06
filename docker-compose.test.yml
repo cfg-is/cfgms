@@ -27,15 +27,18 @@ services:
       start_period: 30s
     networks:
       - cfgms-test
+    profiles:
+      - database  # Only start with --profile database
 
-  # TimescaleDB database for time-series logging provider testing
+  # TimescaleDB database for time-series logging provider testing AND HA cluster storage
+  # This service is shared between logging tests and HA integration tests
   timescaledb-test:
     image: timescale/timescaledb:latest-pg15
     container_name: cfgms-timescaledb-test
     environment:
-      POSTGRES_DB: cfgms_logs_test
-      POSTGRES_USER: cfgms_logger_test
-      POSTGRES_PASSWORD: ${TIMESCALEDB_PASSWORD}
+      POSTGRES_DB: cfgms_ha_test  # Unified database for both logging and HA tests
+      POSTGRES_USER: cfgms_test
+      POSTGRES_PASSWORD: ${TIMESCALEDB_PASSWORD:-cfgms_test_password}
       POSTGRES_INITDB_ARGS: "--auth-host=md5"
       # Enable TimescaleDB extension on startup
       TIMESCALEDB_TELEMETRY: "off"
@@ -48,15 +51,16 @@ services:
       # Use tmpfs for faster I/O in testing
       - /tmp
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U cfgms_logger_test -d cfgms_logs_test"]
-      interval: 15s
-      timeout: 10s
+      test: ["CMD-SHELL", "pg_isready -U cfgms_test -d cfgms_ha_test"]
+      interval: 10s
+      timeout: 5s
       retries: 5
-      start_period: 60s  # TimescaleDB takes longer to initialize
+      start_period: 30s  # Reduced from 60s for faster startup
     networks:
       - cfgms-test
     profiles:
       - timescale  # Only start with --profile timescale
+      - ha  # Also start with --profile ha
 
   # Gitea server for git provider testing (lightweight Git server)
   git-server-test:
@@ -92,6 +96,8 @@ services:
       - cfgms-test
     depends_on:
       - postgres-test
+    profiles:
+      - git  # Only start with --profile git
 
   # Redis for session/cache testing (future Epic support)
   redis-test:
@@ -109,6 +115,597 @@ services:
       - cfgms-test
     profiles:
       - future  # Only start with --profile future
+
+  # ============================================================================
+  # HIGH AVAILABILITY (HA) CLUSTER SERVICES
+  # Used for HA integration testing (Story #178)
+  # Start with: docker compose --profile ha up
+  # ============================================================================
+
+  # Controller East (us-east region) - MQTT+QUIC Architecture (Story #198)
+  controller-east:
+    container_name: controller-east
+    build:
+      context: .
+      dockerfile: cmd/controller/Dockerfile
+    ports:
+      - "1883:8883"   # MQTT control plane with TLS
+      - "4433:4433/udp"   # QUIC data plane
+      - "9080:9080"   # HTTP API
+    environment:
+      CFGMS_NODE_ID: "controller-east"
+      CFGMS_NODE_REGION: "us-east"
+      # MQTT+QUIC Configuration (Story #198, Story 12.4)
+      CFGMS_MQTT_ENABLED: "true"
+      CFGMS_MQTT_LISTEN_ADDR: "0.0.0.0:8883"
+      CFGMS_MQTT_ENABLE_TLS: "true"  # Story 12.4: Enable TLS for security validation
+      # Use pkg/cert.Manager auto-generation (SAFE - no static test certs)
+      # Matches Story #109 pattern: self-contained tests with auto-generated certs
+      CFGMS_MQTT_USE_CERT_MANAGER: "true"
+      # CFGMS_CERT_PATH already set to "/app/certs" - uses that for auto-generation
+      # TODO: Re-enable mTLS once controller uses single CA for both HTTP and MQTT
+      CFGMS_MQTT_REQUIRE_CLIENT_CERT: "false"  # Story 12.4: mTLS temporarily disabled
+      CFGMS_QUIC_ENABLED: "true"
+      CFGMS_QUIC_LISTEN_ADDR: "0.0.0.0:4433"
+      CFGMS_HTTP_LISTEN_ADDR: "0.0.0.0:9080"
+      # Storage Configuration
+      CFGMS_STORAGE_PROVIDER: "database"
+      CFGMS_DB_HOST: "timescaledb-test"
+      CFGMS_DB_PORT: "5432"
+      CFGMS_DB_NAME: "cfgms_ha_test"
+      CFGMS_DB_USER: "cfgms_test"
+      CFGMS_DB_PASSWORD: "${TIMESCALEDB_PASSWORD:-cfgms_test_password}"
+      CFGMS_DB_SSLMODE: "disable"
+      # Logging Configuration
+      CFGMS_LOG_LEVEL: "debug"
+      CFGMS_LOG_PROVIDER: "file"
+      CFGMS_LOG_DIR: "/tmp/cfgms"
+      CFGMS_TIMESCALE_HOST: "timescaledb-test"
+      CFGMS_TIMESCALE_PORT: "5432"
+      CFGMS_TIMESCALE_DATABASE: "cfgms_ha_test"
+      CFGMS_TIMESCALE_USER: "cfgms_test"
+      CFGMS_TIMESCALE_PASSWORD: "${TIMESCALEDB_PASSWORD:-cfgms_test_password}"
+      # HA Configuration
+      CFGMS_HA_ENABLED: "true"
+      CFGMS_HA_MODE: "cluster"
+      CFGMS_HA_EXTERNAL_ADDRESS: "controller-east:9080"
+      CFGMS_HA_CLUSTER_NODES: "controller-east:9080,controller-central:9081,controller-west:9082"
+      CFGMS_HA_DISCOVERY_METHOD: "static"
+      CFGMS_HA_DISCOVERY_INTERVAL: "10s"
+      CFGMS_HA_NODE_TIMEOUT: "15s"
+      CFGMS_HA_ELECTION_TIMEOUT: "5s"
+      CFGMS_HA_HEARTBEAT_INTERVAL: "2s"
+      CFGMS_API_KEY: "test-api-key-east"
+    volumes:
+      - ./test/integration/mqtt_quic/certs:/app/test-certs:ro  # Story 12.4: TLS certificates
+    depends_on:
+      timescaledb-test:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "sh", "-c", "netstat -ln | grep :8883"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - cfgms-test
+    profiles:
+      - ha
+
+  # Controller Central (us-central region) - MQTT+QUIC Architecture (Story #198)
+  controller-central:
+    container_name: controller-central
+    build:
+      context: .
+      dockerfile: cmd/controller/Dockerfile
+    ports:
+      - "1884:8883"   # MQTT control plane with TLS (different host port)
+      - "4434:4433/udp"   # QUIC data plane (different host port)
+      - "9081:9081"   # HTTP API
+    environment:
+      CFGMS_NODE_ID: "controller-central"
+      CFGMS_NODE_REGION: "us-central"
+      # MQTT+QUIC Configuration (Story #198, Story 12.4)
+      CFGMS_MQTT_ENABLED: "true"
+      CFGMS_MQTT_LISTEN_ADDR: "0.0.0.0:8883"
+      CFGMS_MQTT_ENABLE_TLS: "true"  # Story 12.4: Enable TLS for security validation
+      # Use pkg/cert.Manager auto-generation (SAFE - no static test certs)
+      # Matches Story #109 pattern: self-contained tests with auto-generated certs
+      CFGMS_MQTT_USE_CERT_MANAGER: "true"
+      # CFGMS_CERT_PATH already set to "/app/certs" - uses that for auto-generation
+      # TODO: Re-enable mTLS once controller uses single CA for both HTTP and MQTT
+      CFGMS_MQTT_REQUIRE_CLIENT_CERT: "false"  # Story 12.4: mTLS temporarily disabled
+      CFGMS_QUIC_ENABLED: "true"
+      CFGMS_QUIC_LISTEN_ADDR: "0.0.0.0:4433"
+      CFGMS_HTTP_LISTEN_ADDR: "0.0.0.0:9081"
+      # Storage Configuration
+      CFGMS_STORAGE_PROVIDER: "database"
+      CFGMS_DB_HOST: "timescaledb-test"
+      CFGMS_DB_PORT: "5432"
+      CFGMS_DB_NAME: "cfgms_ha_test"
+      CFGMS_DB_USER: "cfgms_test"
+      CFGMS_DB_PASSWORD: "${TIMESCALEDB_PASSWORD:-cfgms_test_password}"
+      CFGMS_DB_SSLMODE: "disable"
+      # Logging Configuration
+      CFGMS_LOG_LEVEL: "debug"
+      CFGMS_LOG_PROVIDER: "file"
+      CFGMS_LOG_DIR: "/tmp/cfgms"
+      CFGMS_TIMESCALE_HOST: "timescaledb-test"
+      CFGMS_TIMESCALE_PORT: "5432"
+      CFGMS_TIMESCALE_DATABASE: "cfgms_ha_test"
+      CFGMS_TIMESCALE_USER: "cfgms_test"
+      CFGMS_TIMESCALE_PASSWORD: "${TIMESCALEDB_PASSWORD:-cfgms_test_password}"
+      # HA Configuration
+      CFGMS_HA_ENABLED: "true"
+      CFGMS_HA_MODE: "cluster"
+      CFGMS_HA_EXTERNAL_ADDRESS: "controller-central:9081"
+      CFGMS_HA_CLUSTER_NODES: "controller-east:9080,controller-central:9081,controller-west:9082"
+      CFGMS_HA_DISCOVERY_METHOD: "static"
+      CFGMS_HA_DISCOVERY_INTERVAL: "10s"
+      CFGMS_HA_NODE_TIMEOUT: "15s"
+      CFGMS_HA_ELECTION_TIMEOUT: "5s"
+      CFGMS_HA_HEARTBEAT_INTERVAL: "2s"
+      CFGMS_API_KEY: "test-api-key-central"
+    volumes:
+      - ./test/integration/mqtt_quic/certs:/app/test-certs:ro  # Story 12.4: TLS certificates
+    depends_on:
+      timescaledb-test:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "sh", "-c", "netstat -ln | grep :8883"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - cfgms-test
+    profiles:
+      - ha
+
+  # Controller West (us-west region) - MQTT+QUIC Architecture (Story #198)
+  controller-west:
+    container_name: controller-west
+    build:
+      context: .
+      dockerfile: cmd/controller/Dockerfile
+    ports:
+      - "1885:8883"   # MQTT control plane with TLS (different host port)
+      - "4435:4433/udp"   # QUIC data plane (different host port)
+      - "9082:9082"   # HTTP API
+    environment:
+      CFGMS_NODE_ID: "controller-west"
+      CFGMS_NODE_REGION: "us-west"
+      # MQTT+QUIC Configuration (Story #198, Story 12.4)
+      CFGMS_MQTT_ENABLED: "true"
+      CFGMS_MQTT_LISTEN_ADDR: "0.0.0.0:8883"
+      CFGMS_MQTT_ENABLE_TLS: "true"  # Story 12.4: Enable TLS for security validation
+      # Use pkg/cert.Manager auto-generation (SAFE - no static test certs)
+      # Matches Story #109 pattern: self-contained tests with auto-generated certs
+      CFGMS_MQTT_USE_CERT_MANAGER: "true"
+      # CFGMS_CERT_PATH already set to "/app/certs" - uses that for auto-generation
+      # TODO: Re-enable mTLS once controller uses single CA for both HTTP and MQTT
+      CFGMS_MQTT_REQUIRE_CLIENT_CERT: "false"  # Story 12.4: mTLS temporarily disabled
+      CFGMS_QUIC_ENABLED: "true"
+      CFGMS_QUIC_LISTEN_ADDR: "0.0.0.0:4433"
+      CFGMS_HTTP_LISTEN_ADDR: "0.0.0.0:9082"
+      # Storage Configuration
+      CFGMS_STORAGE_PROVIDER: "database"
+      CFGMS_DB_HOST: "timescaledb-test"
+      CFGMS_DB_PORT: "5432"
+      CFGMS_DB_NAME: "cfgms_ha_test"
+      CFGMS_DB_USER: "cfgms_test"
+      CFGMS_DB_PASSWORD: "${TIMESCALEDB_PASSWORD:-cfgms_test_password}"
+      CFGMS_DB_SSLMODE: "disable"
+      # Logging Configuration
+      CFGMS_LOG_LEVEL: "debug"
+      CFGMS_LOG_PROVIDER: "file"
+      CFGMS_LOG_DIR: "/tmp/cfgms"
+      CFGMS_TIMESCALE_HOST: "timescaledb-test"
+      CFGMS_TIMESCALE_PORT: "5432"
+      CFGMS_TIMESCALE_DATABASE: "cfgms_ha_test"
+      CFGMS_TIMESCALE_USER: "cfgms_test"
+      CFGMS_TIMESCALE_PASSWORD: "${TIMESCALEDB_PASSWORD:-cfgms_test_password}"
+      # HA Configuration
+      CFGMS_HA_ENABLED: "true"
+      CFGMS_HA_MODE: "cluster"
+      CFGMS_HA_EXTERNAL_ADDRESS: "controller-west:9082"
+      CFGMS_HA_CLUSTER_NODES: "controller-east:9080,controller-central:9081,controller-west:9082"
+      CFGMS_HA_DISCOVERY_METHOD: "static"
+      CFGMS_HA_DISCOVERY_INTERVAL: "10s"
+      CFGMS_HA_NODE_TIMEOUT: "15s"
+      CFGMS_HA_ELECTION_TIMEOUT: "5s"
+      CFGMS_HA_HEARTBEAT_INTERVAL: "2s"
+      CFGMS_API_KEY: "test-api-key-west"
+    volumes:
+      - ./test/integration/mqtt_quic/certs:/app/test-certs:ro  # Story 12.4: TLS certificates
+    depends_on:
+      timescaledb-test:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "sh", "-c", "netstat -ln | grep :8883"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - cfgms-test
+    profiles:
+      - ha
+
+  # Steward East (connects to HA controller cluster) - MQTT+QUIC (Story #198)
+  steward-east:
+    container_name: steward-east
+    build:
+      context: .
+      dockerfile: cmd/steward/Dockerfile
+    environment:
+      # MQTT+QUIC Configuration (Story #198, Story 12.4)
+      CFGMS_REGISTRATION_TOKEN: "cfgms_reg_dockertest_east"
+      CFGMS_MQTT_BROKER: "mqtt://controller-east:8883"  # TLS port
+      CFGMS_QUIC_ADDRESS: "controller-east:4433"
+      # Story 12.4: TLS client certificate configuration
+      CFGMS_MQTT_TLS_CERT_PATH: "/app/test-certs/client-cert.pem"
+      CFGMS_MQTT_TLS_KEY_PATH: "/app/test-certs/client-key.pem"
+      CFGMS_MQTT_TLS_CA_PATH: "/app/test-certs/ca-cert.pem"
+      # Logging Configuration
+      CFGMS_LOG_LEVEL: "debug"
+      CFGMS_LOG_PROVIDER: "file"
+      CFGMS_LOG_DIR: "/tmp/cfgms"
+    volumes:
+      - ./test/integration/mqtt_quic/certs:/app/test-certs:ro  # Story 12.4: TLS client certificates
+    depends_on:
+      controller-east:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "sh", "-c", "ps aux | grep steward | grep -v grep"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - cfgms-test
+    profiles:
+      - ha
+
+  # Steward Central (connects to HA controller cluster) - MQTT+QUIC (Story #198)
+  steward-central:
+    container_name: steward-central
+    build:
+      context: .
+      dockerfile: cmd/steward/Dockerfile
+    environment:
+      # MQTT+QUIC Configuration (Story #198, Story 12.4)
+      CFGMS_REGISTRATION_TOKEN: "cfgms_reg_dockertest_central"
+      CFGMS_MQTT_BROKER: "mqtt://controller-central:8883"  # TLS port
+      CFGMS_QUIC_ADDRESS: "controller-central:4433"
+      # Story 12.4: TLS client certificate configuration
+      CFGMS_MQTT_TLS_CERT_PATH: "/app/test-certs/client-cert.pem"
+      CFGMS_MQTT_TLS_KEY_PATH: "/app/test-certs/client-key.pem"
+      CFGMS_MQTT_TLS_CA_PATH: "/app/test-certs/ca-cert.pem"
+      # Logging Configuration
+      CFGMS_LOG_LEVEL: "debug"
+      CFGMS_LOG_PROVIDER: "file"
+      CFGMS_LOG_DIR: "/tmp/cfgms"
+    volumes:
+      - ./test/integration/mqtt_quic/certs:/app/test-certs:ro  # Story 12.4: TLS client certificates
+    depends_on:
+      controller-central:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "sh", "-c", "ps aux | grep steward | grep -v grep"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - cfgms-test
+    profiles:
+      - ha
+
+  # Steward West (connects to HA controller cluster) - MQTT+QUIC (Story #198)
+  steward-west:
+    container_name: steward-west
+    build:
+      context: .
+      dockerfile: cmd/steward/Dockerfile
+    environment:
+      # MQTT+QUIC Configuration (Story #198, Story 12.4)
+      CFGMS_REGISTRATION_TOKEN: "cfgms_reg_dockertest_west"
+      CFGMS_MQTT_BROKER: "mqtt://controller-west:8883"  # TLS port
+      CFGMS_QUIC_ADDRESS: "controller-west:4433"
+      # Story 12.4: TLS client certificate configuration
+      CFGMS_MQTT_TLS_CERT_PATH: "/app/test-certs/client-cert.pem"
+      CFGMS_MQTT_TLS_KEY_PATH: "/app/test-certs/client-key.pem"
+      CFGMS_MQTT_TLS_CA_PATH: "/app/test-certs/ca-cert.pem"
+      # Logging Configuration
+      CFGMS_LOG_LEVEL: "debug"
+      CFGMS_LOG_PROVIDER: "file"
+      CFGMS_LOG_DIR: "/tmp/cfgms"
+    volumes:
+      - ./test/integration/mqtt_quic/certs:/app/test-certs:ro  # Story 12.4: TLS client certificates
+    depends_on:
+      controller-west:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "sh", "-c", "ps aux | grep steward | grep -v grep"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - cfgms-test
+    profiles:
+      - ha
+
+  # Git Server for HA testing (uses TimescaleDB for storage)
+  # Note: This is separate from git-server-test to avoid configuration conflicts
+  git-server-ha:
+    image: gitea/gitea:1.21
+    container_name: cfgms-git-server-ha
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      - GITEA__database__DB_TYPE=postgres
+      - GITEA__database__HOST=timescaledb-test:5432
+      - GITEA__database__NAME=cfgms_ha_test
+      - GITEA__database__USER=cfgms_test
+      - GITEA__database__PASSWD=${TIMESCALEDB_PASSWORD:-cfgms_test_password}
+      - GITEA__server__HTTP_PORT=3000
+      - GITEA__server__ROOT_URL=http://git-server-ha:3000
+      - GITEA__security__INSTALL_LOCK=true
+      - GITEA__security__SECRET_KEY=gitea-secret-key-for-ha-testing
+      - GITEA__service__DISABLE_REGISTRATION=true
+      - GITEA__service__REQUIRE_SIGNIN_VIEW=false
+    ports:
+      - "3002:3000"  # Use port 3002 to avoid conflict with git-server-test on 3001
+    volumes:
+      - gitea_ha_data:/data
+    depends_on:
+      timescaledb-test:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/v1/version"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - cfgms-test
+    profiles:
+      - ha
+
+  # ============================================================================
+  # STANDALONE CONTROLLER (Non-HA) - MQTT+QUIC Architecture (Story #198)
+  # Used for integration testing single-controller functionality
+  # Runs alongside HA cluster to validate both architectures in parallel
+  # Start with: docker compose --profile ha up (included in HA profile)
+  # ============================================================================
+
+  controller-standalone:
+    container_name: controller-standalone
+    build:
+      context: .
+      dockerfile: cmd/controller/Dockerfile
+    ports:
+      - "1886:8883"   # MQTT control plane with TLS (unique host port)
+      - "4436:4433/udp"   # QUIC data plane (unique host port)
+      - "8080:9080"    # HTTP API (unique host port to avoid conflict with controller-east)
+    environment:
+      CFGMS_NODE_ID: "controller-standalone"
+      # MQTT+QUIC Configuration (Story #198, Story 12.4)
+      CFGMS_MQTT_ENABLED: "true"
+      CFGMS_MQTT_LISTEN_ADDR: "0.0.0.0:8883"
+      CFGMS_MQTT_ENABLE_TLS: "true"  # Story 12.4: Enable TLS for security validation
+      # Use pkg/cert.Manager auto-generation (SAFE - no static test certs)
+      # Matches Story #109 pattern: self-contained tests with auto-generated certs
+      CFGMS_MQTT_USE_CERT_MANAGER: "true"
+      # CFGMS_CERT_PATH already set to "/app/certs" - uses that for auto-generation
+      CFGMS_MQTT_REQUIRE_CLIENT_CERT: "true"  # Story 12.4: mTLS enabled
+      CFGMS_QUIC_ENABLED: "true"
+      CFGMS_QUIC_LISTEN_ADDR: "0.0.0.0:4433"
+      # HTTP API uses default port 9080 (no override needed)
+      # Storage Configuration
+      CFGMS_STORAGE_PROVIDER: "database"
+      CFGMS_DB_HOST: "timescaledb-test"  # Share database with HA cluster
+      CFGMS_DB_PORT: "5432"
+      CFGMS_DB_NAME: "cfgms_ha_test"
+      CFGMS_DB_USER: "cfgms_test"
+      CFGMS_DB_PASSWORD: "${TIMESCALEDB_PASSWORD:-cfgms_test_password}"
+      CFGMS_DB_SSLMODE: "disable"
+      # Logging Configuration
+      CFGMS_LOG_LEVEL: "debug"
+      CFGMS_LOG_PROVIDER: "file"
+      CFGMS_LOG_DIR: "/tmp/cfgms"
+      CFGMS_TIMESCALE_HOST: "timescaledb-test"
+      CFGMS_TIMESCALE_PORT: "5432"
+      CFGMS_TIMESCALE_DATABASE: "cfgms_ha_test"
+      CFGMS_TIMESCALE_USER: "cfgms_test"
+      CFGMS_TIMESCALE_PASSWORD: "${TIMESCALEDB_PASSWORD:-cfgms_test_password}"
+      # Disable HA to run in standalone mode
+      CFGMS_HA_ENABLED: "false"
+      CFGMS_CERT_PATH: "/app/certs"
+      CFGMS_DATA_DIR: "/app/data"
+    # Run as root to avoid permission issues, create log dir first
+    user: root
+    command: ["sh", "-c", "mkdir -p /tmp/cfgms && ./controller"]
+    volumes:
+      - controller_standalone_certs:/app/certs  # Use volume for writable certs
+      - controller_standalone_data:/app/data
+      - ./test/integration/mqtt_quic/certs:/app/test-certs:ro  # Story 12.4: TLS certificates
+    depends_on:
+      timescaledb-test:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "sh", "-c", "netstat -ln | grep :8883"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - cfgms-test
+    profiles:
+      - ha  # Include in HA profile to run everything together
+
+  # ============================================================================
+  # Steward - Standalone Test Instance
+  # ============================================================================
+  # Single steward for testing with controller-standalone
+  # Used for Docker integration tests to verify real MQTT+QUIC communication
+  # Start with: docker compose --profile ha up (included in HA profile)
+  # ============================================================================
+
+  steward-standalone:
+    container_name: steward-standalone
+    build:
+      context: .
+      dockerfile: cmd/steward/Dockerfile
+    environment:
+      CFGMS_REGISTRATION_TOKEN: "cfgms_reg_dockertest_standalone"
+      CFGMS_CONTROLLER_URL: "http://controller-standalone:9080"
+      # Story 12.4: TLS client certificate configuration
+      CFGMS_MQTT_TLS_CERT_PATH: "/app/test-certs/client-cert.pem"
+      CFGMS_MQTT_TLS_KEY_PATH: "/app/test-certs/client-key.pem"
+      CFGMS_MQTT_TLS_CA_PATH: "/app/test-certs/ca-cert.pem"
+      CFGMS_LOG_LEVEL: "debug"
+      CFGMS_LOG_PROVIDER: "file"
+      CFGMS_LOG_DIR: "/tmp/cfgms"
+    command: ["./steward", "--log-level", "debug", "--log-provider", "file", "--regtoken", "cfgms_reg_dockertest_standalone"]
+    volumes:
+      - steward_standalone_data:/app/data
+      - ./test/module-execution:/test-workspace:rw  # Module execution test workspace (Story 12.3)
+      - ./test/integration/mqtt_quic/certs:/app/test-certs:ro  # Story 12.4: TLS client certificates
+    depends_on:
+      controller-standalone:
+        condition: service_healthy
+    networks:
+      - cfgms-test
+    profiles:
+      - ha  # Include in HA profile to run with controller-standalone
+
+  # ============================================================================
+  # Multi-Tenant Stewards - Story 12.5: Multi-Tenant Isolation Testing
+  # ============================================================================
+  # Three tenant-specific stewards for multi-tenant isolation validation
+  # Each connects to controller-standalone with unique tenant ID
+  # Used to validate MQTT topic isolation and tenant boundary enforcement
+  # Start with: docker compose --profile ha up
+  # ============================================================================
+
+  steward-tenant1:
+    container_name: steward-tenant1
+    build:
+      context: .
+      dockerfile: cmd/steward/Dockerfile
+    environment:
+      CFGMS_TENANT_ID: "tenant1"  # Story 12.5: Tenant isolation
+      CFGMS_REGISTRATION_TOKEN: "cfgms_reg_tenant1"
+      CFGMS_CONTROLLER_URL: "http://controller-standalone:9080"
+      # Story 12.4: TLS client certificate configuration
+      CFGMS_MQTT_TLS_CERT_PATH: "/app/test-certs/client-cert.pem"
+      CFGMS_MQTT_TLS_KEY_PATH: "/app/test-certs/client-key.pem"
+      CFGMS_MQTT_TLS_CA_PATH: "/app/test-certs/ca-cert.pem"
+      CFGMS_LOG_LEVEL: "debug"
+      CFGMS_LOG_PROVIDER: "file"
+      CFGMS_LOG_DIR: "/tmp/cfgms"
+    command: ["./steward", "--log-level", "debug", "--log-provider", "file", "--regtoken", "cfgms_reg_tenant1", "--tenant-id", "tenant1"]
+    volumes:
+      - steward_tenant1_data:/app/data
+      - ./test/module-execution:/test-workspace:rw
+      - ./test/integration/mqtt_quic/certs:/app/test-certs:ro
+    depends_on:
+      controller-standalone:
+        condition: service_healthy
+    networks:
+      - cfgms-test
+    profiles:
+      - ha
+
+  steward-tenant2:
+    container_name: steward-tenant2
+    build:
+      context: .
+      dockerfile: cmd/steward/Dockerfile
+    environment:
+      CFGMS_TENANT_ID: "tenant2"  # Story 12.5: Tenant isolation
+      CFGMS_REGISTRATION_TOKEN: "cfgms_reg_tenant2"
+      CFGMS_CONTROLLER_URL: "http://controller-standalone:9080"
+      # Story 12.4: TLS client certificate configuration
+      CFGMS_MQTT_TLS_CERT_PATH: "/app/test-certs/client-cert.pem"
+      CFGMS_MQTT_TLS_KEY_PATH: "/app/test-certs/client-key.pem"
+      CFGMS_MQTT_TLS_CA_PATH: "/app/test-certs/ca-cert.pem"
+      CFGMS_LOG_LEVEL: "debug"
+      CFGMS_LOG_PROVIDER: "file"
+      CFGMS_LOG_DIR: "/tmp/cfgms"
+    command: ["./steward", "--log-level", "debug", "--log-provider", "file", "--regtoken", "cfgms_reg_tenant2", "--tenant-id", "tenant2"]
+    volumes:
+      - steward_tenant2_data:/app/data
+      - ./test/module-execution:/test-workspace:rw
+      - ./test/integration/mqtt_quic/certs:/app/test-certs:ro
+    depends_on:
+      controller-standalone:
+        condition: service_healthy
+    networks:
+      - cfgms-test
+    profiles:
+      - ha
+
+  steward-tenant3:
+    container_name: steward-tenant3
+    build:
+      context: .
+      dockerfile: cmd/steward/Dockerfile
+    environment:
+      CFGMS_TENANT_ID: "tenant3"  # Story 12.5: Tenant isolation
+      CFGMS_REGISTRATION_TOKEN: "cfgms_reg_tenant3"
+      CFGMS_CONTROLLER_URL: "http://controller-standalone:9080"
+      # Story 12.4: TLS client certificate configuration
+      CFGMS_MQTT_TLS_CERT_PATH: "/app/test-certs/client-cert.pem"
+      CFGMS_MQTT_TLS_KEY_PATH: "/app/test-certs/client-key.pem"
+      CFGMS_MQTT_TLS_CA_PATH: "/app/test-certs/ca-cert.pem"
+      CFGMS_LOG_LEVEL: "debug"
+      CFGMS_LOG_PROVIDER: "file"
+      CFGMS_LOG_DIR: "/tmp/cfgms"
+    command: ["./steward", "--log-level", "debug", "--log-provider", "file", "--regtoken", "cfgms_reg_tenant3", "--tenant-id", "tenant3"]
+    volumes:
+      - steward_tenant3_data:/app/data
+      - ./test/module-execution:/test-workspace:rw
+      - ./test/integration/mqtt_quic/certs:/app/test-certs:ro
+    depends_on:
+      controller-standalone:
+        condition: service_healthy
+    networks:
+      - cfgms-test
+    profiles:
+      - ha
+
+  # ============================================================================
+  # TRUE Standalone Steward - Tier 1: QUICK_START.md Option A Testing
+  # ============================================================================
+  # Runs steward in true standalone mode with local config file
+  # NO controller connection - validates QUICK_START.md Option A workflow
+  # Tests: File/directory creation, module execution, idempotency
+  # Start with: docker compose --profile standalone up
+  # ============================================================================
+
+  steward-true-standalone:
+    container_name: steward-true-standalone
+    build:
+      context: .
+      dockerfile: cmd/steward/Dockerfile
+    environment:
+      # Disable file logging to avoid permission issues in standalone mode
+      CFGMS_LOG_PROVIDER: "file"
+      CFGMS_LOG_DIR: "/tmp/cfgms"
+    # Run as root to avoid permission issues, create log dir first
+    user: root
+    command: ["sh", "-c", "mkdir -p /tmp/cfgms && ./steward -config /app/config/standalone.yaml -log-level info -log-provider file"]
+    volumes:
+      - ./test/integration/standalone/config:/app/config:ro  # Mount config directory
+      - steward_true_standalone_data:/app/data
+      - steward_true_standalone_workspace:/test-workspace:rw  # Workspace for file/directory tests
+    healthcheck:
+      test: ["CMD", "sh", "-c", "ps aux | grep steward | grep -v grep"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - cfgms-test
+    profiles:
+      - standalone  # NEW profile for Tier 1 testing
 
 volumes:
   postgres_test_data:
@@ -129,6 +726,60 @@ volumes:
       type: tmpfs
       device: tmpfs
       o: size=256m
+  gitea_ha_data:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=256m
+  controller_standalone_data:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=256m
+  controller_standalone_certs:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=64m
+  steward_standalone_data:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=128m
+  steward_tenant1_data:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=128m
+  steward_tenant2_data:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=128m
+  steward_tenant3_data:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=128m
+  steward_true_standalone_data:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=128m
+  steward_true_standalone_workspace:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=256m
 
 networks:
   cfgms-test:
@@ -137,3 +788,4 @@ networks:
       driver: default
       config:
         - subnet: 172.20.0.0/16
+    name: cfgms-test  # Explicit network name to avoid name conflicts

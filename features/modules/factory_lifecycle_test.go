@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package modules
 
 import (
@@ -51,7 +53,6 @@ func (ml *mockModuleLoader) ValidateModuleInterface(module interface{}) error {
 func (ml *mockModuleLoader) GetModuleInfo(moduleName string) (discovery.ModuleInfo, bool) {
 	return discovery.ModuleInfo{}, false
 }
-
 
 func TestNewLifecycleAwareModuleFactory(t *testing.T) {
 	discoveryRegistry := make(discovery.ModuleRegistry)

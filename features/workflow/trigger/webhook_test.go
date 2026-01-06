@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package trigger
 
 import (
@@ -16,7 +18,6 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
-
 
 func TestHTTPWebhookHandler_NewHTTPWebhookHandler(t *testing.T) {
 	mockTriggerManager := &MockTriggerManager{}
@@ -411,12 +412,12 @@ func TestHTTPWebhookHandler_MapPayloadToVariables(t *testing.T) {
 	handler := &HTTPWebhookHandler{}
 
 	tests := []struct {
-		name             string
-		trigger          *Trigger
-		payload          []byte
-		headers          map[string]string
-		expectedVars     map[string]interface{}
-		expectError      bool
+		name         string
+		trigger      *Trigger
+		payload      []byte
+		headers      map[string]string
+		expectedVars map[string]interface{}
+		expectError  bool
 	}{
 		{
 			name: "JSON payload with mapping",
@@ -437,11 +438,11 @@ func TestHTTPWebhookHandler_MapPayloadToVariables(t *testing.T) {
 				"X-Source":     "webhook",
 			},
 			expectedVars: map[string]interface{}{
-				"default_var":       "default_value",
-				"event_id":          "evt_123",
-				"event_type":        "user.created",
+				"default_var":         "default_value",
+				"event_id":            "evt_123",
+				"event_type":          "user.created",
 				"header_content-type": "application/json",
-				"header_x-source":   "webhook",
+				"header_x-source":     "webhook",
 			},
 			expectError: false,
 		},

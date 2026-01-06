@@ -1,8 +1,11 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package api
 
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -15,10 +18,10 @@ type contextKey string
 
 const (
 	// Context keys
-	apiKeyContextKey        contextKey = "api_key"
-	userIDContextKey        contextKey = "user_id"
-	tenantIDContextKey      contextKey = "tenant_id"
-	authDecisionContextKey  contextKey = "auth_decision"
+	apiKeyContextKey       contextKey = "api_key"
+	userIDContextKey       contextKey = "user_id"
+	tenantIDContextKey     contextKey = "tenant_id"
+	authDecisionContextKey contextKey = "auth_decision"
 )
 
 // loggingMiddleware logs HTTP requests
@@ -57,17 +60,37 @@ func (rw *responseWriter) WriteHeader(code int) {
 }
 
 // corsMiddleware handles CORS headers
+// H-AUTH-3: Validate origin against allowed origins list (security audit finding)
 func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Set CORS headers
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
-		w.Header().Set("Access-Control-Expose-Headers", "X-Total-Count")
+		origin := r.Header.Get("Origin")
+
+		// Check if origin is in allowed list
+		allowed := false
+		if s.corsConfig != nil && origin != "" {
+			for _, allowedOrigin := range s.corsConfig.AllowedOrigins {
+				if origin == allowedOrigin {
+					allowed = true
+					break
+				}
+			}
+		}
+
+		// Only set CORS headers if origin is allowed
+		if allowed {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
+			w.Header().Set("Access-Control-Expose-Headers", "X-Total-Count")
+		}
 
 		// Handle preflight requests
 		if r.Method == "OPTIONS" {
-			w.WriteHeader(http.StatusOK)
+			if allowed {
+				w.WriteHeader(http.StatusOK)
+			} else {
+				w.WriteHeader(http.StatusForbidden)
+			}
 			return
 		}
 
@@ -88,6 +111,7 @@ func (s *Server) contentTypeMiddleware(next http.Handler) http.Handler {
 }
 
 // authenticationMiddleware validates API keys for protected endpoints
+// M-AUTH-1: Load API keys from secret store on-demand if not in cache
 func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Extract API key from header
@@ -105,14 +129,20 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Validate API key
+		// Check memory cache first
 		s.mu.RLock()
 		keyInfo, exists := s.apiKeys[apiKey]
 		s.mu.RUnlock()
 
+		// M-AUTH-1: If not in cache, try to load from secret store
 		if !exists {
-			s.writeErrorResponse(w, http.StatusUnauthorized, "Invalid API key", "INVALID_API_KEY")
-			return
+			loadedKey, err := s.loadAPIKeyFromStore(r.Context(), apiKey)
+			if err != nil {
+				s.logger.Debug("Failed to load API key from store", "error", err)
+				s.writeErrorResponse(w, http.StatusUnauthorized, "Invalid API key", "INVALID_API_KEY")
+				return
+			}
+			keyInfo = loadedKey
 		}
 
 		// Check if key is expired
@@ -128,6 +158,48 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// M-AUTH-1: loadAPIKeyFromStore loads an API key from the secret store and caches it
+func (s *Server) loadAPIKeyFromStore(ctx context.Context, apiKey string) (*APIKey, error) {
+	// Hash the API key for lookup
+	keyHash := hashAPIKey(apiKey)
+
+	// Search for the API key in secret store across all tenants
+	// We need to search all tenants since we don't know which tenant the key belongs to
+	tenants := []string{"default"} // Start with default tenant
+
+	for _, tenantID := range tenants {
+		secretKey := fmt.Sprintf("%s/%s", tenantID, keyHash)
+		secret, err := s.secretStore.GetSecret(ctx, secretKey)
+		if err != nil {
+			continue // Try next tenant
+		}
+
+		// Found the API key! Parse metadata and create APIKey object
+		keyInfo := &APIKey{
+			ID:          secret.Metadata["id"],
+			Key:         apiKey, // Store plaintext key in memory for fast lookup
+			Name:        secret.Description,
+			Permissions: parsePermissions(secret.Metadata["permissions"]),
+			CreatedAt:   secret.CreatedAt,
+			ExpiresAt:   secret.ExpiresAt,
+			TenantID:    secret.TenantID,
+		}
+
+		// Cache in memory for future requests
+		s.mu.Lock()
+		s.apiKeys[apiKey] = keyInfo
+		s.mu.Unlock()
+
+		s.logger.Debug("Loaded API key from secret store",
+			"id", keyInfo.ID,
+			"tenant_id", keyInfo.TenantID)
+
+		return keyInfo, nil
+	}
+
+	return nil, fmt.Errorf("API key not found in secret store")
 }
 
 // writeErrorResponse writes a standardized error response
@@ -168,16 +240,16 @@ func (s *Server) writeResponse(w http.ResponseWriter, statusCode int, data inter
 
 // AuthorizationDecision contains the result of an authorization check
 type AuthorizationDecision struct {
-	Granted         bool          `json:"granted"`
-	PermissionID    string        `json:"permission_id"`
-	Resource        string        `json:"resource"`
-	Action          string        `json:"action"`
-	Decision        string        `json:"decision"`
-	Reason          string        `json:"reason"`
-	CheckedAt       time.Time     `json:"checked_at"`
-	DurationMs      int64         `json:"duration_ms"`
-	SubjectID       string        `json:"subject_id"`
-	TenantID        string        `json:"tenant_id"`
+	Granted         bool                   `json:"granted"`
+	PermissionID    string                 `json:"permission_id"`
+	Resource        string                 `json:"resource"`
+	Action          string                 `json:"action"`
+	Decision        string                 `json:"decision"`
+	Reason          string                 `json:"reason"`
+	CheckedAt       time.Time              `json:"checked_at"`
+	DurationMs      int64                  `json:"duration_ms"`
+	SubjectID       string                 `json:"subject_id"`
+	TenantID        string                 `json:"tenant_id"`
 	ConditionalVars map[string]interface{} `json:"conditional_vars,omitempty"`
 }
 
@@ -201,10 +273,10 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 
 			userID, _ := r.Context().Value(userIDContextKey).(string)
 			tenantID, _ := r.Context().Value(tenantIDContextKey).(string)
-			
+
 			// Build resource identifier from URL path variables
 			resource := s.buildResourceIdentifier(r, resourceType)
-			
+
 			// Check API key permissions first (simple permission check)
 			permissionID := s.buildPermissionID(resourceType, action)
 			if !s.hasAPIKeyPermission(apiKey, permissionID) {
@@ -219,12 +291,12 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 					SubjectID:    userID,
 					TenantID:     tenantID,
 				}
-				
+
 				s.auditAuthorizationDecision(r, decision)
 				s.writeAuthorizationError(w, "Insufficient permissions", "INSUFFICIENT_PERMISSIONS", decision)
 				return
 			}
-			
+
 			// API key has correct permissions - grant access and skip RBAC check
 			decision := &AuthorizationDecision{
 				Granted:      true,
@@ -237,10 +309,10 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 				SubjectID:    userID,
 				TenantID:     tenantID,
 			}
-			
+
 			// Add decision to context
 			ctx := context.WithValue(r.Context(), authDecisionContextKey, decision)
-			
+
 			s.logger.Debug("Access granted via API key permission",
 				"subject_id", userID,
 				"permission_id", permissionID,
@@ -258,7 +330,7 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 // buildResourceIdentifier constructs a resource identifier from the request
 func (s *Server) buildResourceIdentifier(r *http.Request, resourceType string) string {
 	vars := mux.Vars(r)
-	
+
 	switch resourceType {
 	case "steward":
 		if stewardID := vars["id"]; stewardID != "" {
@@ -316,35 +388,34 @@ func (s *Server) writeAuthorizationError(w http.ResponseWriter, message, code st
 	_ = json.NewEncoder(w).Encode(errorResponse)
 }
 
-
 // auditAuthorizationDecision logs authorization decisions for security auditing
 func (s *Server) auditAuthorizationDecision(r *http.Request, decision *AuthorizationDecision) {
 	// Create comprehensive audit log entry
 	auditFields := map[string]interface{}{
-		"event_type":      "api_authorization",
-		"timestamp":       decision.CheckedAt.UTC().Format(time.RFC3339Nano),
-		"subject_id":      decision.SubjectID,
-		"tenant_id":       decision.TenantID,
-		"permission_id":   decision.PermissionID,
-		"resource":        decision.Resource,
-		"action":          decision.Action,
-		"decision":        decision.Decision,
-		"granted":         decision.Granted,
-		"reason":          decision.Reason,
-		"duration_ms":     decision.DurationMs,
-		"request_path":    r.URL.Path,
-		"request_method":  r.Method,
-		"remote_addr":     r.RemoteAddr,
-		"user_agent":      r.Header.Get("User-Agent"),
-		"request_id":      s.getRequestID(r),
-		"severity":        s.getAuditSeverity(decision),
+		"event_type":     "api_authorization",
+		"timestamp":      decision.CheckedAt.UTC().Format(time.RFC3339Nano),
+		"subject_id":     decision.SubjectID,
+		"tenant_id":      decision.TenantID,
+		"permission_id":  decision.PermissionID,
+		"resource":       decision.Resource,
+		"action":         decision.Action,
+		"decision":       decision.Decision,
+		"granted":        decision.Granted,
+		"reason":         decision.Reason,
+		"duration_ms":    decision.DurationMs,
+		"request_path":   r.URL.Path,
+		"request_method": r.Method,
+		"remote_addr":    r.RemoteAddr,
+		"user_agent":     r.Header.Get("User-Agent"),
+		"request_id":     s.getRequestID(r),
+		"severity":       s.getAuditSeverity(decision),
 	}
-	
+
 	// Add conditional variables if present
 	if decision.ConditionalVars != nil {
 		auditFields["conditional_vars"] = decision.ConditionalVars
 	}
-	
+
 	// Log at appropriate level based on decision outcome
 	if decision.Granted {
 		s.logger.Info("Authorization audit", auditFields)
@@ -352,7 +423,7 @@ func (s *Server) auditAuthorizationDecision(r *http.Request, decision *Authoriza
 		// Failed authorization attempts need higher visibility
 		s.logger.Warn("Authorization audit - access denied", auditFields)
 	}
-	
+
 	// If RBAC manager supports audit trail, also log there
 	if s.rbacManager != nil {
 		s.auditToRBACManager(decision, r)
@@ -368,7 +439,7 @@ func (s *Server) getRequestID(r *http.Request) string {
 	if reqID := r.Header.Get("X-Correlation-ID"); reqID != "" {
 		return reqID
 	}
-	
+
 	// Generate one if not present
 	return s.generateRequestID()
 }
@@ -382,21 +453,21 @@ func (s *Server) getAuditSeverity(decision *AuthorizationDecision) string {
 		}
 		return "HIGH" // Regular permission denials are high
 	}
-	
+
 	// Successful authorizations for sensitive resources
 	if strings.Contains(decision.PermissionID, "delete") ||
 		strings.Contains(decision.PermissionID, "admin") ||
 		strings.Contains(decision.Resource, "rbac") {
 		return "MEDIUM" // Sensitive operations get medium severity
 	}
-	
+
 	return "LOW" // Regular authorized operations
 }
 
 // hasAPIKeyPermission checks if an API key has a specific permission
 func (s *Server) hasAPIKeyPermission(apiKey *APIKey, permissionID string) bool {
 	if apiKey == nil || apiKey.Permissions == nil {
-		s.logger.Debug("API key permission check failed - nil key or permissions", 
+		s.logger.Debug("API key permission check failed - nil key or permissions",
 			"key_id", func() string {
 				if apiKey != nil {
 					return apiKey.ID
@@ -405,12 +476,12 @@ func (s *Server) hasAPIKeyPermission(apiKey *APIKey, permissionID string) bool {
 			}())
 		return false
 	}
-	
+
 	s.logger.Debug("Checking API key permission",
 		"key_id", apiKey.ID,
 		"required_permission", permissionID,
 		"available_permissions", apiKey.Permissions)
-	
+
 	for _, permission := range apiKey.Permissions {
 		if permission == permissionID {
 			s.logger.Debug("API key permission granted",
@@ -419,7 +490,7 @@ func (s *Server) hasAPIKeyPermission(apiKey *APIKey, permissionID string) bool {
 			return true
 		}
 	}
-	
+
 	s.logger.Debug("API key permission denied",
 		"key_id", apiKey.ID,
 		"required_permission", permissionID,
@@ -431,11 +502,9 @@ func (s *Server) hasAPIKeyPermission(apiKey *APIKey, permissionID string) bool {
 func (s *Server) auditToRBACManager(decision *AuthorizationDecision, r *http.Request) {
 	// This would integrate with the RBAC manager's audit trail
 	// For now, we'll just log that we would send it
-	s.logger.Debug("Would audit to RBAC manager", 
+	s.logger.Debug("Would audit to RBAC manager",
 		"subject_id", decision.SubjectID,
 		"decision", decision.Decision,
 		"resource", decision.Resource,
 	)
 }
-
-

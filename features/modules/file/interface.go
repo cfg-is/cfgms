@@ -1,23 +1,37 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package file
 
 import (
-	"github.com/cfgis/cfgms/features/modules"
 	"gopkg.in/yaml.v3"
+
+	"github.com/cfgis/cfgms/features/modules"
 )
 
 // FileConfig represents the configuration for a file resource
 type FileConfig struct {
-	Content     string `yaml:"content"`
-	Permissions int    `yaml:"permissions"`
-	Owner       string `yaml:"owner,omitempty"`
-	Group       string `yaml:"group,omitempty"`
+	State       string `yaml:"state"`                 // "present" or "absent"
+	Content     string `yaml:"content,omitempty"`     // File content (required when state is "present")
+	Permissions int    `yaml:"permissions,omitempty"` // File permissions (e.g., 0644)
+	Owner       string `yaml:"owner,omitempty"`       // File owner
+	Group       string `yaml:"group,omitempty"`       // File group
 }
 
 // AsMap returns the configuration as a map for efficient field-by-field comparison
 func (c *FileConfig) AsMap() map[string]interface{} {
-	result := map[string]interface{}{
-		"content":     c.Content,
-		"permissions": c.Permissions,
+	result := map[string]interface{}{}
+
+	// Always include state
+	if c.State != "" {
+		result["state"] = c.State
+	} else {
+		result["state"] = "present" // Default to present
+	}
+
+	// Only include content/permissions for present state
+	if c.State != "absent" {
+		result["content"] = c.Content
+		result["permissions"] = c.Permissions
 	}
 
 	if c.Owner != "" {
@@ -42,6 +56,12 @@ func (c *FileConfig) FromYAML(data []byte) error {
 
 // Validate ensures the configuration is valid
 func (c *FileConfig) Validate() error {
+	// State "absent" doesn't require content or permissions
+	if c.State == "absent" {
+		return nil
+	}
+
+	// For "present" state (default), content is required
 	if c.Content == "" {
 		return modules.ErrInvalidInput
 	}
@@ -57,7 +77,11 @@ func (c *FileConfig) Validate() error {
 
 // GetManagedFields returns the list of fields this configuration manages
 func (c *FileConfig) GetManagedFields() []string {
-	fields := []string{"content", "permissions"}
+	fields := []string{"state"}
+
+	if c.State != "absent" {
+		fields = append(fields, "content", "permissions")
+	}
 
 	if c.Owner != "" {
 		fields = append(fields, "owner")

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package templates
 
 import (
@@ -36,7 +38,7 @@ func New(logger logging.Logger) *Processor {
 
 	// Register built-in templates
 	p.registerBuiltinTemplates()
-	
+
 	return p
 }
 
@@ -47,8 +49,8 @@ func (p *Processor) ProcessTemplate(ctx context.Context, templateName string, da
 		return nil, fmt.Errorf("template not found: %s", templateName)
 	}
 
-	p.logger.Debug("processing template", 
-		"template", templateName, 
+	p.logger.Debug("processing template",
+		"template", templateName,
 		"type", template.Type,
 		"dna_records", len(data.DNARecords),
 		"drift_events", len(data.DriftEvents))
@@ -399,10 +401,10 @@ func (p *Processor) registerBuiltinTemplates() {
 // generateComplianceSummary generates a compliance summary report
 func (p *Processor) generateComplianceSummary(ctx context.Context, data interfaces.ReportData, params map[string]any) (*interfaces.Report, error) {
 	report := &interfaces.Report{
-		Type:      interfaces.ReportTypeCompliance,
-		Title:     "Compliance Summary Report",
-		Subtitle:  fmt.Sprintf("Analysis period: %s - %s", 
-			data.TimeRange.Start.Format("Jan 2, 2006"), 
+		Type:  interfaces.ReportTypeCompliance,
+		Title: "Compliance Summary Report",
+		Subtitle: fmt.Sprintf("Analysis period: %s - %s",
+			data.TimeRange.Start.Format("Jan 2, 2006"),
 			data.TimeRange.End.Format("Jan 2, 2006")),
 		TimeRange: data.TimeRange,
 		Sections:  make([]interfaces.ReportSection, 0),
@@ -625,7 +627,7 @@ func (p *Processor) generateDeviceComplianceSection(data interfaces.ReportData, 
 		// Include detailed table
 		headers := []string{"Device ID", "Compliance Score", "Risk Level", "Drift Events"}
 		rows := make([][]interface{}, len(devices))
-		
+
 		for i, device := range devices {
 			rows[i] = []interface{}{
 				device.DeviceID,
@@ -659,14 +661,14 @@ func (p *Processor) generateKPISection(data interfaces.ReportData) interfaces.Re
 	totalDevices := len(data.DeviceStats)
 	highRiskDevices := 0
 	avgComplianceScore := 0.0
-	
+
 	for _, stats := range data.DeviceStats {
 		avgComplianceScore += stats.ComplianceScore
 		if stats.RiskLevel == interfaces.RiskLevelHigh || stats.RiskLevel == interfaces.RiskLevelCritical {
 			highRiskDevices++
 		}
 	}
-	
+
 	if totalDevices > 0 {
 		avgComplianceScore /= float64(totalDevices)
 	}
@@ -692,12 +694,12 @@ func (p *Processor) generateKPISection(data interfaces.ReportData) interfaces.Re
 func (p *Processor) generateTrendsSection(data interfaces.ReportData) interfaces.ReportSection {
 	// Analyze trends from trend data
 	trendAnalysis := make(map[string]string)
-	
+
 	for metric, trends := range data.TrendData {
 		if len(trends) >= 2 {
 			firstValue := trends[0].Value
 			lastValue := trends[len(trends)-1].Value
-			
+
 			var direction string
 			if lastValue > firstValue*1.05 {
 				direction = "improving"
@@ -706,7 +708,7 @@ func (p *Processor) generateTrendsSection(data interfaces.ReportData) interfaces
 			} else {
 				direction = "stable"
 			}
-			
+
 			trendAnalysis[metric] = direction
 		}
 	}
@@ -1004,9 +1006,9 @@ func (p *Processor) generateSecurityAssessment(ctx context.Context, data interfa
 
 	// Security overview section
 	overviewSection := interfaces.ReportSection{
-		ID:       "security-overview",
-		Title:    "Security Overview",
-		Type:     interfaces.SectionTypeKPI,
+		ID:    "security-overview",
+		Title: "Security Overview",
+		Type:  interfaces.SectionTypeKPI,
 		Content: map[string]interface{}{
 			"total_events":    0,        // Would get from audit data
 			"threat_level":    "medium", // Would be calculated
@@ -1033,9 +1035,9 @@ func (p *Processor) generateOperationalHealth(ctx context.Context, data interfac
 
 	// Health overview section
 	overviewSection := interfaces.ReportSection{
-		ID:       "health-overview",
-		Title:    "System Health Overview",
-		Type:     interfaces.SectionTypeKPI,
+		ID:    "health-overview",
+		Title: "System Health Overview",
+		Type:  interfaces.SectionTypeKPI,
 		Content: map[string]interface{}{
 			"overall_health":    92.5,
 			"monitored_devices": len(data.DNARecords),
@@ -1062,9 +1064,9 @@ func (p *Processor) generateCISCompliance(ctx context.Context, data interfaces.R
 
 	// CIS compliance section
 	complianceSection := interfaces.ReportSection{
-		ID:       "cis-compliance",
-		Title:    "CIS Controls Assessment",
-		Type:     interfaces.SectionTypeKPI,
+		ID:    "cis-compliance",
+		Title: "CIS Controls Assessment",
+		Type:  interfaces.SectionTypeKPI,
 		Content: map[string]interface{}{
 			"overall_score":     87.5,
 			"controls_passed":   14,
@@ -1092,15 +1094,15 @@ func (p *Processor) generateHIPAACompliance(ctx context.Context, data interfaces
 
 	// HIPAA compliance section
 	complianceSection := interfaces.ReportSection{
-		ID:       "hipaa-compliance",
-		Title:    "HIPAA Safeguards Assessment",
-		Type:     interfaces.SectionTypeKPI,
+		ID:    "hipaa-compliance",
+		Title: "HIPAA Safeguards Assessment",
+		Type:  interfaces.SectionTypeKPI,
 		Content: map[string]interface{}{
 			"administrative_safeguards": 95.0,
 			"physical_safeguards":       88.0,
 			"technical_safeguards":      92.0,
 			"overall_compliance":        91.7,
-			"risk_areas":               []string{"Access logging", "Encryption at rest"},
+			"risk_areas":                []string{"Access logging", "Encryption at rest"},
 		},
 		Priority: 1,
 	}
@@ -1122,9 +1124,9 @@ func (p *Processor) generateMultiTenantSummary(ctx context.Context, data interfa
 
 	// Multi-tenant overview section
 	overviewSection := interfaces.ReportSection{
-		ID:       "multi-tenant-overview",
-		Title:    "Tenant Performance Overview",
-		Type:     interfaces.SectionTypeKPI,
+		ID:    "multi-tenant-overview",
+		Title: "Tenant Performance Overview",
+		Type:  interfaces.SectionTypeKPI,
 		Content: map[string]interface{}{
 			"total_tenants":      0, // Would get from request context
 			"average_compliance": 89.2,
@@ -1151,9 +1153,9 @@ func (p *Processor) generateChangeManagement(ctx context.Context, data interface
 
 	// Change management section
 	changeSection := interfaces.ReportSection{
-		ID:       "change-management",
-		Title:    "Change Activity Summary",
-		Type:     interfaces.SectionTypeKPI,
+		ID:    "change-management",
+		Title: "Change Activity Summary",
+		Type:  interfaces.SectionTypeKPI,
 		Content: map[string]interface{}{
 			"total_changes":     len(data.DriftEvents),
 			"pending_approval":  5,
@@ -1181,13 +1183,13 @@ func (p *Processor) generateAuditTrail(ctx context.Context, data interfaces.Repo
 
 	// Audit overview section
 	auditSection := interfaces.ReportSection{
-		ID:       "audit-overview",
-		Title:    "Audit Activity Summary",
-		Type:     interfaces.SectionTypeKPI,
+		ID:    "audit-overview",
+		Title: "Audit Activity Summary",
+		Type:  interfaces.SectionTypeKPI,
 		Content: map[string]interface{}{
-			"total_events":    0, // Would get from audit data
-			"unique_users":    0, // Would calculate from audit data
-			"critical_events": 0, // Would calculate from audit data
+			"total_events":    0,          // Would get from audit data
+			"unique_users":    0,          // Would calculate from audit data
+			"critical_events": 0,          // Would calculate from audit data
 			"event_types":     []string{}, // Would get from audit data
 		},
 		Priority: 1,
@@ -1210,15 +1212,15 @@ func (p *Processor) generateResourceUtilization(ctx context.Context, data interf
 
 	// Resource utilization section
 	resourceSection := interfaces.ReportSection{
-		ID:       "resource-utilization",
-		Title:    "Resource Utilization Summary",
-		Type:     interfaces.SectionTypeKPI,
+		ID:    "resource-utilization",
+		Title: "Resource Utilization Summary",
+		Type:  interfaces.SectionTypeKPI,
 		Content: map[string]interface{}{
 			"cpu_utilization":     72.5,
 			"memory_utilization":  68.2,
 			"storage_utilization": 45.8,
 			"network_utilization": 23.1,
-			"alerts":             []string{"High CPU usage on server-003"},
+			"alerts":              []string{"High CPU usage on server-003"},
 		},
 		Priority: 1,
 	}

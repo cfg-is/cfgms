@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package entra_group
 
 import (
@@ -8,11 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/features/modules/m365/auth"
-	"github.com/cfgis/cfgms/features/modules/m365/graph"
 	"github.com/joho/godotenv"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/features/modules/m365/auth"
+	"github.com/cfgis/cfgms/features/modules/m365/graph"
 )
 
 // loadTestEnvironment loads environment variables from .env.local if it exists
@@ -62,10 +65,10 @@ func checkM365Integration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping M365 integration test in short mode")
 	}
-	
+
 	// Load credentials from .env.local or environment
 	loadTestEnvironment(t)
-	
+
 	// Integration test behavior control
 	if !hasM365Credentials() {
 		if os.Getenv("ALLOW_SKIP_INTEGRATION") == "true" {
@@ -83,10 +86,10 @@ func TestEntraGroup_Integration_FullCRUD(t *testing.T) {
 	// Create real auth provider and graph client
 	authProvider := createRealAuthProvider(t)
 	graphClient := createRealGraphClient(t)
-	
+
 	// Create module instance
 	module := New(authProvider, graphClient).(*entraGroupModule)
-	
+
 	ctx := context.Background()
 	tenantID := os.Getenv("M365_TENANT_ID")
 	timestamp := time.Now().Format("20060102-150405")
@@ -103,7 +106,7 @@ func TestEntraGroup_Integration_FullCRUD(t *testing.T) {
 		Visibility:      "Private",
 		TenantID:        tenantID,
 		ManagedFieldsList: []string{
-			"display_name", "description", "mail_nickname", "mail_enabled", 
+			"display_name", "description", "mail_nickname", "mail_enabled",
 			"security_enabled", "group_type", "visibility",
 		},
 	}
@@ -119,11 +122,11 @@ func TestEntraGroup_Integration_FullCRUD(t *testing.T) {
 	filter := fmt.Sprintf("displayName eq '%s'", initialConfig.DisplayName)
 	token, err := authProvider.GetAccessToken(ctx, tenantID)
 	require.NoError(t, err, "Should be able to get access token")
-	
+
 	groups, err := graphClient.ListGroups(ctx, token, filter)
 	require.NoError(t, err, "Should be able to search for created group")
 	require.Greater(t, len(groups), 0, "Should find the created group")
-	
+
 	var createdGroup *graph.Group
 	for _, group := range groups {
 		if group.DisplayName == initialConfig.DisplayName {
@@ -153,17 +156,17 @@ func TestEntraGroup_Integration_FullCRUD(t *testing.T) {
 	realResourceID := tenantID + ":" + createdGroup.ID
 	getResult, err := module.Get(ctx, realResourceID)
 	require.NoError(t, err, "Should be able to retrieve created group")
-	
+
 	retrievedConfig, ok := getResult.(*EntraGroupConfig)
 	require.True(t, ok, "Retrieved config should be EntraGroupConfig")
 	assert.Equal(t, initialConfig.DisplayName, retrievedConfig.DisplayName)
 	assert.Equal(t, initialConfig.Description, retrievedConfig.Description)
 	assert.Equal(t, initialConfig.MailEnabled, retrievedConfig.MailEnabled)
 	assert.Equal(t, initialConfig.SecurityEnabled, retrievedConfig.SecurityEnabled)
-	
+
 	// Check mail nickname (may not be retrieved due to Graph API field selection)
 	if retrievedConfig.MailNickname != initialConfig.MailNickname {
-		t.Logf("⚠️ MailNickname mismatch: expected '%s', got '%s' (may be Graph API field retrieval issue)", 
+		t.Logf("⚠️ MailNickname mismatch: expected '%s', got '%s' (may be Graph API field retrieval issue)",
 			initialConfig.MailNickname, retrievedConfig.MailNickname)
 	}
 	t.Log("✅ READ: Group retrieved and validated successfully")
@@ -171,14 +174,14 @@ func TestEntraGroup_Integration_FullCRUD(t *testing.T) {
 	// 📝 STEP 3: UPDATE (modify the group)
 	t.Log("🔄 STEP 3: UPDATE group with modified configuration")
 	t.Logf("📊 Retrieved MailNickname: '%s'", retrievedConfig.MailNickname)
-	
+
 	// Use original MailNickname if retrieved one is empty
 	mailNickname := retrievedConfig.MailNickname
 	if mailNickname == "" {
 		mailNickname = testGroupName
 		t.Logf("⚠️ Using original MailNickname since retrieved was empty: '%s'", mailNickname)
 	}
-	
+
 	updatedConfig := &EntraGroupConfig{
 		DisplayName:     fmt.Sprintf("UPDATED: %s", retrievedConfig.DisplayName),
 		Description:     fmt.Sprintf("UPDATED: Integration test group updated at %s", time.Now().Format("20060102-150405")),
@@ -189,7 +192,7 @@ func TestEntraGroup_Integration_FullCRUD(t *testing.T) {
 		Visibility:      "Private",    // Keep same
 		TenantID:        tenantID,
 		ManagedFieldsList: []string{
-			"display_name", "description", "mail_nickname", "mail_enabled", 
+			"display_name", "description", "mail_nickname", "mail_enabled",
 			"security_enabled", "group_type", "visibility",
 		},
 	}
@@ -202,7 +205,7 @@ func TestEntraGroup_Integration_FullCRUD(t *testing.T) {
 	t.Log("🔄 STEP 4: READ group to validate update")
 	getResult, err = module.Get(ctx, realResourceID)
 	require.NoError(t, err, "Should be able to retrieve updated group")
-	
+
 	finalConfig, ok := getResult.(*EntraGroupConfig)
 	require.True(t, ok, "Retrieved config should be EntraGroupConfig")
 	assert.Contains(t, finalConfig.DisplayName, "UPDATED:", "Display name should be updated")
@@ -224,10 +227,10 @@ func TestEntraGroup_Integration_ConfigValidation(t *testing.T) {
 	// Create real auth provider and graph client
 	authProvider := createRealAuthProvider(t)
 	graphClient := createRealGraphClient(t)
-	
+
 	// Create module instance
 	module := New(authProvider, graphClient).(*entraGroupModule)
-	
+
 	ctx := context.Background()
 	tenantID := os.Getenv("M365_TENANT_ID")
 
@@ -242,7 +245,7 @@ func TestEntraGroup_Integration_ConfigValidation(t *testing.T) {
 
 	resourceID := tenantID + ":validation-test-group"
 	err := module.Set(ctx, resourceID, invalidConfig)
-	
+
 	// Should get validation error before making API call
 	assert.Error(t, err, "Set should return validation error for invalid config")
 	assert.Contains(t, err.Error(), "display_name", "Error should mention missing display_name")
@@ -254,13 +257,13 @@ func TestEntraGroup_Integration_AuthenticationFlow(t *testing.T) {
 
 	// Create real auth provider
 	authProvider := createRealAuthProvider(t)
-	
+
 	ctx := context.Background()
 	tenantID := os.Getenv("M365_TENANT_ID")
 
 	// Test token acquisition
 	token, err := authProvider.GetAccessToken(ctx, tenantID)
-	
+
 	if err != nil {
 		t.Logf("Authentication failed (expected for limited test credentials): %v", err)
 		// Don't fail the test if we don't have sufficient permissions
@@ -268,12 +271,12 @@ func TestEntraGroup_Integration_AuthenticationFlow(t *testing.T) {
 			"Expected authentication error, got: %v", err)
 		return
 	}
-	
+
 	require.NotNil(t, token, "Token should not be nil")
 	assert.NotEmpty(t, token.Token, "Token string should not be empty")
 	assert.Equal(t, tenantID, token.TenantID, "Token should be for correct tenant")
 	assert.False(t, token.IsExpired(), "Token should not be expired")
-	
+
 	// Test token validation
 	isValid := authProvider.IsTokenValid(token)
 	assert.True(t, isValid, "Token should be valid")
@@ -290,7 +293,7 @@ func TestEntraGroup_Integration_FullSuite(t *testing.T) {
 	t.Run("ConfigValidation", func(t *testing.T) {
 		TestEntraGroup_Integration_ConfigValidation(t)
 	})
-	
+
 	t.Run("AuthenticationFlow", func(t *testing.T) {
 		TestEntraGroup_Integration_AuthenticationFlow(t)
 	})
@@ -299,11 +302,11 @@ func TestEntraGroup_Integration_FullSuite(t *testing.T) {
 // createRealAuthProvider creates a real OAuth2Provider for integration testing
 func createRealAuthProvider(t *testing.T) auth.Provider {
 	tempDir := t.TempDir()
-	
+
 	// Create credential store
 	credStore, err := auth.NewFileCredentialStore(tempDir, "integration-test-passphrase")
 	require.NoError(t, err, "Failed to create credential store")
-	
+
 	// Create OAuth2 config from environment
 	config := &auth.OAuth2Config{
 		ClientID:             os.Getenv("M365_CLIENT_ID"),
@@ -314,10 +317,10 @@ func createRealAuthProvider(t *testing.T) auth.Provider {
 			"https://graph.microsoft.com/.default",
 		},
 	}
-	
+
 	// Create provider
 	provider := auth.NewOAuth2Provider(credStore, config)
-	
+
 	return provider
 }
 
@@ -325,6 +328,6 @@ func createRealAuthProvider(t *testing.T) auth.Provider {
 func createRealGraphClient(t *testing.T) graph.Client {
 	// Create HTTP client for real Graph API calls
 	client := graph.NewHTTPClient()
-	
+
 	return client
 }

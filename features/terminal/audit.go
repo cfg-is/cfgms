@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // #nosec G304 - Terminal audit system requires file access for session recording and compliance
 package terminal
 
@@ -15,85 +17,85 @@ import (
 
 // AuditLogger provides tamper-proof audit logging for terminal sessions
 type AuditLogger struct {
-	config          *AuditConfig
-	storage         AuditStorage
+	config           *AuditConfig
+	storage          AuditStorage
 	integrityChecker *IntegrityChecker
-	
+
 	// Logging state
-	logFile         *os.File
-	logEncoder      *json.Encoder
-	logMutex        sync.Mutex
-	
+	logFile    *os.File
+	logEncoder *json.Encoder
+	logMutex   sync.Mutex
+
 	// Security
-	hmacKey         []byte
-	sequenceNumber  uint64
-	seqMutex        sync.Mutex
-	
+	hmacKey        []byte
+	sequenceNumber uint64
+	seqMutex       sync.Mutex
+
 	// Channels
-	auditChannel    chan *AuditEntry
-	stopChannel     chan struct{}
-	stopped         chan struct{}
+	auditChannel chan *AuditEntry
+	stopChannel  chan struct{}
+	stopped      chan struct{}
 }
 
 // AuditConfig contains configuration for audit logging
 type AuditConfig struct {
-	StoragePath     string        `json:"storage_path"`
-	MaxLogSizeMB    int           `json:"max_log_size_mb"`
-	RetentionDays   int           `json:"retention_days"`
-	CompressionEnabled bool       `json:"compression_enabled"`
-	EncryptionEnabled  bool       `json:"encryption_enabled"`
-	IntegrityChecking  bool       `json:"integrity_checking"`
-	BatchSize       int           `json:"batch_size"`
-	FlushInterval   time.Duration `json:"flush_interval"`
-	
+	StoragePath        string        `json:"storage_path"`
+	MaxLogSizeMB       int           `json:"max_log_size_mb"`
+	RetentionDays      int           `json:"retention_days"`
+	CompressionEnabled bool          `json:"compression_enabled"`
+	EncryptionEnabled  bool          `json:"encryption_enabled"`
+	IntegrityChecking  bool          `json:"integrity_checking"`
+	BatchSize          int           `json:"batch_size"`
+	FlushInterval      time.Duration `json:"flush_interval"`
+
 	// Tamper-proofing
-	DigitalSigning  bool          `json:"digital_signing"`
-	HMACEnabled     bool          `json:"hmac_enabled"`
-	HMACKey         string        `json:"hmac_key"`
-	ChainHashing    bool          `json:"chain_hashing"`
+	DigitalSigning bool   `json:"digital_signing"`
+	HMACEnabled    bool   `json:"hmac_enabled"`
+	HMACKey        string `json:"hmac_key"`
+	ChainHashing   bool   `json:"chain_hashing"`
 }
 
 // AuditEntry represents a complete audit log entry
 type AuditEntry struct {
 	// Metadata
-	ID               string                 `json:"id"`
-	Timestamp        time.Time              `json:"timestamp"`
-	SequenceNumber   uint64                 `json:"sequence_number"`
-	LogLevel         AuditLevel             `json:"log_level"`
-	
+	ID             string     `json:"id"`
+	Timestamp      time.Time  `json:"timestamp"`
+	SequenceNumber uint64     `json:"sequence_number"`
+	LogLevel       AuditLevel `json:"log_level"`
+
 	// Session Information
-	SessionID        string                 `json:"session_id"`
-	UserID           string                 `json:"user_id"`
-	StewardID        string                 `json:"steward_id"`
-	TenantID         string                 `json:"tenant_id"`
-	
+	SessionID string `json:"session_id"`
+	UserID    string `json:"user_id"`
+	StewardID string `json:"steward_id"`
+	TenantID  string `json:"tenant_id"`
+
 	// Event Details
-	EventType        AuditEventType         `json:"event_type"`
-	EventData        interface{}            `json:"event_data"`
-	
+	EventType AuditEventType `json:"event_type"`
+	EventData interface{}    `json:"event_data"`
+
 	// Security Context
-	ClientIP         string                 `json:"client_ip"`
-	UserAgent        string                 `json:"user_agent"`
-	TLSFingerprint   string                 `json:"tls_fingerprint"`
-	
+	ClientIP       string `json:"client_ip"`
+	UserAgent      string `json:"user_agent"`
+	TLSFingerprint string `json:"tls_fingerprint"`
+
 	// Command Information (if applicable)
-	Command          string                 `json:"command,omitempty"`
-	CommandOutput    string                 `json:"command_output,omitempty"`
-	ExitCode         *int                   `json:"exit_code,omitempty"`
-	CommandDuration  *time.Duration         `json:"command_duration,omitempty"`
-	
+	Command         string         `json:"command,omitempty"`
+	CommandOutput   string         `json:"command_output,omitempty"`
+	ExitCode        *int           `json:"exit_code,omitempty"`
+	CommandDuration *time.Duration `json:"command_duration,omitempty"`
+
 	// Security Assessment
-	ThreatLevel      string                 `json:"threat_level,omitempty"`
-	SecurityAction   string                 `json:"security_action,omitempty"`
-	FilterRulesApplied []string             `json:"filter_rules_applied,omitempty"`
-	
+	ThreatLevel        string   `json:"threat_level,omitempty"`
+	SecurityAction     string   `json:"security_action,omitempty"`
+	FilterRulesApplied []string `json:"filter_rules_applied,omitempty"`
+
 	// Integrity Protection
-	PreviousHash     string                 `json:"previous_hash,omitempty"`
-	ContentHash      string                 `json:"content_hash"`
-	HMAC             string                 `json:"hmac"`
-	
+	PreviousHash string `json:"previous_hash,omitempty"`
+	ContentHash  string `json:"content_hash"`
+	HMAC         string `json:"hmac"`
+
 	// Additional Context
-	Metadata         map[string]interface{} `json:"metadata,omitempty"`
+	Metadata map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // AuditLevel defines the severity level of audit events
@@ -110,16 +112,16 @@ const (
 type AuditEventType string
 
 const (
-	EventSessionStart       AuditEventType = "session_start"
-	EventSessionEnd         AuditEventType = "session_end"
-	EventCommandExecuted    AuditEventType = "command_executed"
-	EventCommandBlocked     AuditEventType = "command_blocked"
-	EventSecurityViolation  AuditEventType = "security_violation"
+	EventSessionStart        AuditEventType = "session_start"
+	EventSessionEnd          AuditEventType = "session_end"
+	EventCommandExecuted     AuditEventType = "command_executed"
+	EventCommandBlocked      AuditEventType = "command_blocked"
+	EventSecurityViolation   AuditEventType = "security_violation"
 	EventPrivilegeEscalation AuditEventType = "privilege_escalation"
-	EventDataTransfer       AuditEventType = "data_transfer"
+	EventDataTransfer        AuditEventType = "data_transfer"
 	EventConfigurationChange AuditEventType = "configuration_change"
-	EventSystemAccess       AuditEventType = "system_access"
-	EventAnomalousActivity  AuditEventType = "anomalous_activity"
+	EventSystemAccess        AuditEventType = "system_access"
+	EventAnomalousActivity   AuditEventType = "anomalous_activity"
 )
 
 // AuditStorage interface defines methods for storing audit logs
@@ -132,16 +134,16 @@ type AuditStorage interface {
 
 // AuditFilter defines criteria for retrieving audit logs
 type AuditFilter struct {
-	SessionID   string        `json:"session_id,omitempty"`
-	UserID      string        `json:"user_id,omitempty"`
-	StewardID   string        `json:"steward_id,omitempty"`
-	TenantID    string        `json:"tenant_id,omitempty"`
-	EventType   AuditEventType `json:"event_type,omitempty"`
-	StartTime   *time.Time    `json:"start_time,omitempty"`
-	EndTime     *time.Time    `json:"end_time,omitempty"`
-	LogLevel    AuditLevel    `json:"log_level,omitempty"`
-	Limit       int           `json:"limit,omitempty"`
-	Offset      int           `json:"offset,omitempty"`
+	SessionID string         `json:"session_id,omitempty"`
+	UserID    string         `json:"user_id,omitempty"`
+	StewardID string         `json:"steward_id,omitempty"`
+	TenantID  string         `json:"tenant_id,omitempty"`
+	EventType AuditEventType `json:"event_type,omitempty"`
+	StartTime *time.Time     `json:"start_time,omitempty"`
+	EndTime   *time.Time     `json:"end_time,omitempty"`
+	LogLevel  AuditLevel     `json:"log_level,omitempty"`
+	Limit     int            `json:"limit,omitempty"`
+	Offset    int            `json:"offset,omitempty"`
 }
 
 // IntegrityChecker provides tamper-proof integrity checking
@@ -157,41 +159,41 @@ func NewAuditLogger(config *AuditConfig, storage AuditStorage) (*AuditLogger, er
 	if config == nil {
 		config = DefaultAuditConfig()
 	}
-	
+
 	// Generate HMAC key if not provided
 	hmacKey := []byte(config.HMACKey)
 	if len(hmacKey) == 0 {
 		hmacKey = generateHMACKey()
 	}
-	
+
 	// Create storage directory if it doesn't exist
 	if err := os.MkdirAll(config.StoragePath, 0750); err != nil {
 		return nil, fmt.Errorf("failed to create audit storage directory: %w", err)
 	}
-	
+
 	// Open log file
 	logPath := filepath.Join(config.StoragePath, fmt.Sprintf("audit-%s.log", time.Now().Format("2006-01-02")))
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open audit log file: %w", err)
 	}
-	
+
 	logger := &AuditLogger{
-		config:          config,
-		storage:         storage,
+		config:  config,
+		storage: storage,
 		integrityChecker: &IntegrityChecker{
 			hmacKey:        hmacKey,
 			previousHashes: make(map[string]string),
 			hashChain:      make([]string, 0),
 		},
-		logFile:         logFile,
-		logEncoder:      json.NewEncoder(logFile),
-		hmacKey:         hmacKey,
-		auditChannel:    make(chan *AuditEntry, config.BatchSize*2),
-		stopChannel:     make(chan struct{}),
-		stopped:         make(chan struct{}),
+		logFile:      logFile,
+		logEncoder:   json.NewEncoder(logFile),
+		hmacKey:      hmacKey,
+		auditChannel: make(chan *AuditEntry, config.BatchSize*2),
+		stopChannel:  make(chan struct{}),
+		stopped:      make(chan struct{}),
 	}
-	
+
 	return logger, nil
 }
 
@@ -204,7 +206,7 @@ func (al *AuditLogger) Start(ctx context.Context) error {
 // Stop stops the audit logger and flushes remaining entries
 func (al *AuditLogger) Stop() error {
 	close(al.stopChannel)
-	
+
 	// Wait for processing to complete
 	select {
 	case <-al.stopped:
@@ -217,20 +219,20 @@ func (al *AuditLogger) Stop() error {
 // LogSessionStart logs the start of a terminal session
 func (al *AuditLogger) LogSessionStart(ctx context.Context, sessionID, userID, stewardID, tenantID, clientIP string) error {
 	entry := &AuditEntry{
-		ID:             generateAuditID(),
-		Timestamp:      time.Now(),
-		LogLevel:       AuditLevelInfo,
-		SessionID:      sessionID,
-		UserID:         userID,
-		StewardID:      stewardID,
-		TenantID:       tenantID,
-		EventType:      EventSessionStart,
-		ClientIP:       clientIP,
+		ID:        generateAuditID(),
+		Timestamp: time.Now(),
+		LogLevel:  AuditLevelInfo,
+		SessionID: sessionID,
+		UserID:    userID,
+		StewardID: stewardID,
+		TenantID:  tenantID,
+		EventType: EventSessionStart,
+		ClientIP:  clientIP,
 		EventData: map[string]interface{}{
 			"action": "session_created",
 		},
 	}
-	
+
 	return al.logEntry(ctx, entry)
 }
 
@@ -250,7 +252,7 @@ func (al *AuditLogger) LogSessionEnd(ctx context.Context, sessionID, userID stri
 			"data_transferred": dataTransferred,
 		},
 	}
-	
+
 	return al.logEntry(ctx, entry)
 }
 
@@ -275,7 +277,7 @@ func (al *AuditLogger) LogCommandExecution(ctx context.Context, sessionID, userI
 			"output_size": len(output),
 		},
 	}
-	
+
 	return al.logEntry(ctx, entry)
 }
 
@@ -299,7 +301,7 @@ func (al *AuditLogger) LogCommandBlocked(ctx context.Context, sessionID, userID,
 			"rules_applied": rulesApplied,
 		},
 	}
-	
+
 	return al.logEntry(ctx, entry)
 }
 
@@ -312,7 +314,7 @@ func (al *AuditLogger) LogSecurityViolation(ctx context.Context, sessionID, user
 	case FilterSeverityHigh:
 		logLevel = AuditLevelError
 	}
-	
+
 	entry := &AuditEntry{
 		ID:          generateAuditID(),
 		Timestamp:   time.Now(),
@@ -324,13 +326,13 @@ func (al *AuditLogger) LogSecurityViolation(ctx context.Context, sessionID, user
 		EventType:   EventSecurityViolation,
 		ThreatLevel: string(threatLevel),
 		EventData: map[string]interface{}{
-			"action":          "security_violation",
-			"violation_type":  violationType,
-			"description":     description,
-			"threat_level":    threatLevel,
+			"action":         "security_violation",
+			"violation_type": violationType,
+			"description":    description,
+			"threat_level":   threatLevel,
 		},
 	}
-	
+
 	return al.logEntry(ctx, entry)
 }
 
@@ -341,12 +343,12 @@ func (al *AuditLogger) logEntry(ctx context.Context, entry *AuditEntry) error {
 	al.sequenceNumber++
 	entry.SequenceNumber = al.sequenceNumber
 	al.seqMutex.Unlock()
-	
+
 	// Add integrity protection
 	if err := al.addIntegrityProtection(entry); err != nil {
 		return fmt.Errorf("failed to add integrity protection: %w", err)
 	}
-	
+
 	// Send to processing channel
 	select {
 	case al.auditChannel <- entry:
@@ -363,24 +365,24 @@ func (al *AuditLogger) addIntegrityProtection(entry *AuditEntry) error {
 	if !al.config.IntegrityChecking {
 		return nil
 	}
-	
+
 	// Generate content hash
 	contentBytes, err := json.Marshal(map[string]interface{}{
-		"timestamp":        entry.Timestamp,
-		"sequence_number":  entry.SequenceNumber,
-		"session_id":       entry.SessionID,
-		"user_id":          entry.UserID,
-		"event_type":       entry.EventType,
-		"event_data":       entry.EventData,
-		"command":          entry.Command,
+		"timestamp":       entry.Timestamp,
+		"sequence_number": entry.SequenceNumber,
+		"session_id":      entry.SessionID,
+		"user_id":         entry.UserID,
+		"event_type":      entry.EventType,
+		"event_data":      entry.EventData,
+		"command":         entry.Command,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to marshal entry content: %w", err)
 	}
-	
+
 	contentHash := sha256.Sum256(contentBytes)
 	entry.ContentHash = fmt.Sprintf("%x", contentHash)
-	
+
 	// Add chain hashing
 	if al.config.ChainHashing {
 		al.integrityChecker.mutex.Lock()
@@ -390,7 +392,7 @@ func (al *AuditLogger) addIntegrityProtection(entry *AuditEntry) error {
 		al.integrityChecker.hashChain = append(al.integrityChecker.hashChain, entry.ContentHash)
 		al.integrityChecker.mutex.Unlock()
 	}
-	
+
 	// Add HMAC
 	if al.config.HMACEnabled {
 		hmacData := fmt.Sprintf("%s:%s:%s", entry.ID, entry.ContentHash, entry.PreviousHash)
@@ -398,7 +400,7 @@ func (al *AuditLogger) addIntegrityProtection(entry *AuditEntry) error {
 		mac.Write([]byte(hmacData))
 		entry.HMAC = fmt.Sprintf("%x", mac.Sum(nil))
 	}
-	
+
 	return nil
 }
 
@@ -411,12 +413,12 @@ func (al *AuditLogger) processingLoop(ctx context.Context) {
 			_ = err // Explicitly ignore file close errors during shutdown
 		}
 	}()
-	
+
 	ticker := time.NewTicker(al.config.FlushInterval)
 	defer ticker.Stop()
-	
+
 	batch := make([]*AuditEntry, 0, al.config.BatchSize)
-	
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -425,22 +427,22 @@ func (al *AuditLogger) processingLoop(ctx context.Context) {
 				al.processBatch(batch)
 			}
 			return
-			
+
 		case <-al.stopChannel:
 			// Flush remaining entries
 			if len(batch) > 0 {
 				al.processBatch(batch)
 			}
 			return
-			
+
 		case entry := <-al.auditChannel:
 			batch = append(batch, entry)
-			
+
 			if len(batch) >= al.config.BatchSize {
 				al.processBatch(batch)
 				batch = batch[:0] // Reset slice
 			}
-			
+
 		case <-ticker.C:
 			if len(batch) > 0 {
 				al.processBatch(batch)
@@ -454,14 +456,14 @@ func (al *AuditLogger) processingLoop(ctx context.Context) {
 func (al *AuditLogger) processBatch(batch []*AuditEntry) {
 	al.logMutex.Lock()
 	defer al.logMutex.Unlock()
-	
+
 	for _, entry := range batch {
 		// Write to file
 		if err := al.logEncoder.Encode(entry); err != nil {
 			// Log error but continue processing
 			continue
 		}
-		
+
 		// Store in external storage if configured
 		if al.storage != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -472,7 +474,7 @@ func (al *AuditLogger) processBatch(batch []*AuditEntry) {
 			cancel()
 		}
 	}
-	
+
 	// Flush file buffer
 	if err := al.logFile.Sync(); err != nil {
 		// Log error but continue - this is best effort and sync failures are not critical
@@ -485,40 +487,40 @@ func (al *AuditLogger) VerifyIntegrity(entry *AuditEntry) (bool, error) {
 	if !al.config.IntegrityChecking {
 		return true, nil
 	}
-	
+
 	// Verify content hash
 	contentBytes, err := json.Marshal(map[string]interface{}{
-		"timestamp":        entry.Timestamp,
-		"sequence_number":  entry.SequenceNumber,
-		"session_id":       entry.SessionID,
-		"user_id":          entry.UserID,
-		"event_type":       entry.EventType,
-		"event_data":       entry.EventData,
-		"command":          entry.Command,
+		"timestamp":       entry.Timestamp,
+		"sequence_number": entry.SequenceNumber,
+		"session_id":      entry.SessionID,
+		"user_id":         entry.UserID,
+		"event_type":      entry.EventType,
+		"event_data":      entry.EventData,
+		"command":         entry.Command,
 	})
 	if err != nil {
 		return false, fmt.Errorf("failed to marshal entry content: %w", err)
 	}
-	
+
 	contentHash := sha256.Sum256(contentBytes)
 	expectedHash := fmt.Sprintf("%x", contentHash)
-	
+
 	if entry.ContentHash != expectedHash {
 		return false, fmt.Errorf("content hash mismatch")
 	}
-	
+
 	// Verify HMAC if enabled
 	if al.config.HMACEnabled {
 		hmacData := fmt.Sprintf("%s:%s:%s", entry.ID, entry.ContentHash, entry.PreviousHash)
 		mac := hmac.New(sha256.New, al.hmacKey)
 		mac.Write([]byte(hmacData))
 		expectedHMAC := fmt.Sprintf("%x", mac.Sum(nil))
-		
+
 		if entry.HMAC != expectedHMAC {
 			return false, fmt.Errorf("HMAC verification failed")
 		}
 	}
-	
+
 	return true, nil
 }
 
@@ -527,7 +529,7 @@ func (al *AuditLogger) RetrieveAuditLogs(ctx context.Context, filter *AuditFilte
 	if al.storage != nil {
 		return al.storage.Retrieve(ctx, filter)
 	}
-	
+
 	// Fallback to file-based retrieval (basic implementation)
 	return nil, fmt.Errorf("audit log retrieval not implemented for file-only storage")
 }
@@ -589,19 +591,19 @@ func NewFileAuditStorage(basePath string) *FileAuditStorage {
 func (fas *FileAuditStorage) Store(ctx context.Context, entry *AuditEntry) error {
 	fas.mutex.Lock()
 	defer fas.mutex.Unlock()
-	
+
 	// Create directory structure based on date
 	dateDir := entry.Timestamp.Format("2006/01/02")
 	dirPath := filepath.Join(fas.basePath, dateDir)
-	
+
 	if err := os.MkdirAll(dirPath, 0750); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
-	
+
 	// Write entry to file
 	fileName := fmt.Sprintf("%s.json", entry.ID)
 	filePath := filepath.Join(dirPath, fileName)
-	
+
 	file, err := os.Create(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to create audit file: %w", err)
@@ -612,12 +614,12 @@ func (fas *FileAuditStorage) Store(ctx context.Context, entry *AuditEntry) error
 			_ = err // Explicitly ignore file close errors
 		}
 	}()
-	
+
 	encoder := json.NewEncoder(file)
 	if err := encoder.Encode(entry); err != nil {
 		return fmt.Errorf("failed to encode audit entry: %w", err)
 	}
-	
+
 	return nil
 }
 

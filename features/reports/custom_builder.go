@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package reports
 
 import (
@@ -11,9 +13,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/cfgis/cfgms/features/reports/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging"
-	"github.com/google/uuid"
 )
 
 // CustomReportBuilder implements the CustomReportBuilder interface
@@ -484,18 +487,18 @@ func (b *CustomReportBuilder) generateReportData(ctx context.Context, report *in
 	// Mock data generation for now
 	// In a real implementation, this would execute the query against data providers
 	report.Data = map[string]interface{}{
-		"query":       query,
-		"results":     []interface{}{},
+		"query":        query,
+		"results":      []interface{}{},
 		"generated_at": time.Now(),
 	}
 
 	report.Summary = interfaces.ReportSummary{
-		DevicesAnalyzed:  10,
-		DriftEventsTotal: 5,
-		ComplianceScore:  85.5,
-		CriticalIssues:   2,
-		TrendDirection:   interfaces.TrendStable,
-		KeyInsights:      []string{"System performance is stable", "Compliance has improved"},
+		DevicesAnalyzed:    10,
+		DriftEventsTotal:   5,
+		ComplianceScore:    85.5,
+		CriticalIssues:     2,
+		TrendDirection:     interfaces.TrendStable,
+		KeyInsights:        []string{"System performance is stable", "Compliance has improved"},
 		RecommendedActions: []string{"Review critical issues", "Monitor trends"},
 	}
 

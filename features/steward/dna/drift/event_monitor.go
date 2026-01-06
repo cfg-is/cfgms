@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // Package drift provides event-driven drift monitoring service.
 
 package drift
@@ -15,99 +17,99 @@ import (
 
 // eventMonitor implements event-driven drift monitoring with real-time detection.
 type eventMonitor struct {
-	logger    logging.Logger
-	config    *EventMonitorConfig
-	detector  Detector
-	storage   *storage.Manager
-	
+	logger   logging.Logger
+	config   *EventMonitorConfig
+	detector Detector
+	storage  *storage.Manager
+
 	// Event system
-	eventPublisher   events.EventPublisher
-	driftSubscriber  events.EventSubscriber
-	
+	eventPublisher  events.EventPublisher
+	driftSubscriber events.EventSubscriber
+
 	// Fallback timer-based monitoring
-	timerMonitoring    bool
-	monitoredDevices   map[string]*DeviceMonitorInfo
-	scanInterval       time.Duration
-	
+	timerMonitoring  bool
+	monitoredDevices map[string]*DeviceMonitorInfo
+	scanInterval     time.Duration
+
 	// Control channels
-	stopChan           chan struct{}
-	deviceChan         chan DeviceOperation
-	
+	stopChan   chan struct{}
+	deviceChan chan DeviceOperation
+
 	// Synchronization
-	mu                 sync.RWMutex
-	
+	mu sync.RWMutex
+
 	// Event handling
-	eventHandlers      []EventHandler
-	
+	eventHandlers []EventHandler
+
 	// Statistics
-	stats              *EventMonitorStats
-	running            bool
+	stats   *EventMonitorStats
+	running bool
 }
 
 // EventMonitorConfig defines configuration for event-driven drift monitoring.
 type EventMonitorConfig struct {
 	// Event-based monitoring
-	EnableEventMonitoring  bool          `json:"enable_event_monitoring"`
-	EventWorkerCount       int           `json:"event_worker_count"`
-	EventQueueSize         int           `json:"event_queue_size"`
-	
+	EnableEventMonitoring bool `json:"enable_event_monitoring"`
+	EventWorkerCount      int  `json:"event_worker_count"`
+	EventQueueSize        int  `json:"event_queue_size"`
+
 	// Drift detection settings
-	ComparisonWindow       time.Duration `json:"comparison_window"`
-	MaxDetectionTime       time.Duration `json:"max_detection_time"`
-	EnableAsyncProcessing  bool          `json:"enable_async_processing"`
-	
+	ComparisonWindow      time.Duration `json:"comparison_window"`
+	MaxDetectionTime      time.Duration `json:"max_detection_time"`
+	EnableAsyncProcessing bool          `json:"enable_async_processing"`
+
 	// Fallback timer-based monitoring
-	EnableFallbackTimer    bool          `json:"enable_fallback_timer"`
-	FallbackInterval       time.Duration `json:"fallback_interval"`
-	FallbackDeviceTimeout  time.Duration `json:"fallback_device_timeout"`
-	
+	EnableFallbackTimer   bool          `json:"enable_fallback_timer"`
+	FallbackInterval      time.Duration `json:"fallback_interval"`
+	FallbackDeviceTimeout time.Duration `json:"fallback_device_timeout"`
+
 	// Device management
-	MaxMonitoredDevices    int           `json:"max_monitored_devices"`
-	HealthCheckInterval    time.Duration `json:"health_check_interval"`
-	
+	MaxMonitoredDevices int           `json:"max_monitored_devices"`
+	HealthCheckInterval time.Duration `json:"health_check_interval"`
+
 	// Performance settings
-	MaxConcurrentScans     int           `json:"max_concurrent_scans"`
-	EnableParallelScanning bool          `json:"enable_parallel_scanning"`
-	
+	MaxConcurrentScans     int  `json:"max_concurrent_scans"`
+	EnableParallelScanning bool `json:"enable_parallel_scanning"`
+
 	// Event handling
-	MaxEventBuffer         int           `json:"max_event_buffer"`
-	EventProcessingDelay   time.Duration `json:"event_processing_delay"`
-	
+	MaxEventBuffer       int           `json:"max_event_buffer"`
+	EventProcessingDelay time.Duration `json:"event_processing_delay"`
+
 	// Error handling
-	MaxRetries             int           `json:"max_retries"`
-	RetryBackoff           time.Duration `json:"retry_backoff"`
-	ErrorThreshold         int           `json:"error_threshold"`
+	MaxRetries     int           `json:"max_retries"`
+	RetryBackoff   time.Duration `json:"retry_backoff"`
+	ErrorThreshold int           `json:"error_threshold"`
 }
 
 // EventMonitorStats provides statistics for event-driven drift monitoring.
 type EventMonitorStats struct {
 	// Event-based monitoring stats
-	EventsProcessed        int64         `json:"events_processed"`
-	EventDriftDetected     int64         `json:"event_drift_detected"`
-	EventProcessingTime    time.Duration `json:"event_processing_time"`
-	
+	EventsProcessed     int64         `json:"events_processed"`
+	EventDriftDetected  int64         `json:"event_drift_detected"`
+	EventProcessingTime time.Duration `json:"event_processing_time"`
+
 	// Fallback timer stats
-	TimerScansPerformed    int64         `json:"timer_scans_performed"`
-	TimerDriftDetected     int64         `json:"timer_drift_detected"`
-	TimerScanTime          time.Duration `json:"timer_scan_time"`
-	
+	TimerScansPerformed int64         `json:"timer_scans_performed"`
+	TimerDriftDetected  int64         `json:"timer_drift_detected"`
+	TimerScanTime       time.Duration `json:"timer_scan_time"`
+
 	// Overall stats
-	TotalDriftEvents       int64         `json:"total_drift_events"`
-	MonitoredDevices       int           `json:"monitored_devices"`
-	DevicesWithDrift       int           `json:"devices_with_drift"`
-	
+	TotalDriftEvents int64 `json:"total_drift_events"`
+	MonitoredDevices int   `json:"monitored_devices"`
+	DevicesWithDrift int   `json:"devices_with_drift"`
+
 	// Performance stats
-	AverageDetectionTime   time.Duration `json:"average_detection_time"`
-	LastDetectionTime      time.Time     `json:"last_detection_time"`
-	
+	AverageDetectionTime time.Duration `json:"average_detection_time"`
+	LastDetectionTime    time.Time     `json:"last_detection_time"`
+
 	// System health
-	MonitoringStatus       MonitorStatus `json:"monitoring_status"`
-	LastScanTime           time.Time     `json:"last_scan_time"`
-	ScanInterval           time.Duration `json:"scan_interval"`
-	
+	MonitoringStatus MonitorStatus `json:"monitoring_status"`
+	LastScanTime     time.Time     `json:"last_scan_time"`
+	ScanInterval     time.Duration `json:"scan_interval"`
+
 	// Error tracking
-	EventErrors            int64         `json:"event_errors"`
-	TimerErrors            int64         `json:"timer_errors"`
+	EventErrors int64 `json:"event_errors"`
+	TimerErrors int64 `json:"timer_errors"`
 }
 
 // NewEventMonitor creates a new event-driven drift monitoring service.
@@ -115,19 +117,19 @@ func NewEventMonitor(config *EventMonitorConfig, detector Detector, storage *sto
 	if config == nil {
 		config = DefaultEventMonitorConfig()
 	}
-	
+
 	if err := validateEventMonitorConfig(config); err != nil {
 		return nil, fmt.Errorf("invalid event monitor config: %w", err)
 	}
-	
+
 	if detector == nil {
 		return nil, fmt.Errorf("detector is required")
 	}
-	
+
 	if storage == nil {
 		return nil, fmt.Errorf("storage manager is required")
 	}
-	
+
 	m := &eventMonitor{
 		logger:           logger,
 		config:           config,
@@ -143,21 +145,21 @@ func NewEventMonitor(config *EventMonitorConfig, detector Detector, storage *sto
 			ScanInterval:     config.FallbackInterval,
 		},
 	}
-	
+
 	// Initialize event system if enabled
 	if config.EnableEventMonitoring {
 		if err := m.initializeEventSystem(); err != nil {
 			return nil, fmt.Errorf("failed to initialize event system: %w", err)
 		}
 	}
-	
+
 	if logger != nil {
 		logger.Info("Event drift monitor initialized",
 			"event_monitoring", config.EnableEventMonitoring,
 			"fallback_timer", config.EnableFallbackTimer,
 			"comparison_window", config.ComparisonWindow)
 	}
-	
+
 	return m, nil
 }
 
@@ -169,17 +171,17 @@ func (m *eventMonitor) initializeEventSystem() error {
 		QueueSize:     m.config.EventQueueSize,
 		WorkerTimeout: m.config.MaxDetectionTime,
 	}
-	
+
 	m.eventPublisher = events.NewPublisher(m.logger, publisherConfig)
-	
+
 	// Create drift detection subscriber
 	subscriberConfig := &events.DriftSubscriberConfig{
 		EnableRealTimeDetection: true,
-		ComparisonWindow:       m.config.ComparisonWindow,
-		MaxDetectionTime:       m.config.MaxDetectionTime,
-		EventProcessingTimeout: m.config.MaxDetectionTime,
+		ComparisonWindow:        m.config.ComparisonWindow,
+		MaxDetectionTime:        m.config.MaxDetectionTime,
+		EventProcessingTimeout:  m.config.MaxDetectionTime,
 	}
-	
+
 	// For now, we'll use simplified interfaces to avoid import cycles
 	// In a real implementation, this would use the actual detector and storage
 	m.driftSubscriber = events.NewDriftSubscriber(
@@ -188,12 +190,12 @@ func (m *eventMonitor) initializeEventSystem() error {
 		subscriberConfig,
 		m.logger,
 	)
-	
+
 	// Subscribe to DNA change events
 	if err := m.eventPublisher.Subscribe(events.EventTypeDNAWrite, m.driftSubscriber); err != nil {
 		return fmt.Errorf("failed to subscribe to DNA write events: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -201,37 +203,37 @@ func (m *eventMonitor) initializeEventSystem() error {
 func (m *eventMonitor) Start(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	if m.running {
 		return fmt.Errorf("event monitor is already running")
 	}
-	
+
 	m.running = true
 	m.stats.MonitoringStatus = MonitorStatusRunning
-	
+
 	if m.logger != nil {
 		m.logger.Info("Starting event-driven drift monitoring service",
 			"event_monitoring", m.config.EnableEventMonitoring,
 			"fallback_timer", m.config.EnableFallbackTimer,
 			"monitored_devices", len(m.monitoredDevices))
 	}
-	
+
 	// Start event system if enabled
 	if m.config.EnableEventMonitoring && m.eventPublisher != nil {
 		if err := m.eventPublisher.Start(ctx); err != nil {
 			return fmt.Errorf("failed to start event publisher: %w", err)
 		}
 	}
-	
+
 	// Start background workers
 	go m.deviceOperationWorker(ctx)
 	go m.healthCheckWorker(ctx)
-	
+
 	// Start fallback timer-based monitoring if enabled
 	if m.config.EnableFallbackTimer || m.timerMonitoring {
 		go m.fallbackScanWorker(ctx)
 	}
-	
+
 	return nil
 }
 
@@ -239,30 +241,30 @@ func (m *eventMonitor) Start(ctx context.Context) error {
 func (m *eventMonitor) Stop() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	if !m.running {
 		return fmt.Errorf("event monitor is not running")
 	}
-	
+
 	if m.logger != nil {
 		m.logger.Info("Stopping event-driven drift monitoring service")
 	}
-	
+
 	// Stop event system
 	if m.eventPublisher != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		
+
 		if err := m.eventPublisher.Stop(ctx); err != nil && m.logger != nil {
 			m.logger.Warn("Error stopping event publisher", "error", err)
 		}
 	}
-	
+
 	// Signal stop
 	close(m.stopChan)
 	m.running = false
 	m.stats.MonitoringStatus = MonitorStatusStopped
-	
+
 	return nil
 }
 
@@ -270,7 +272,7 @@ func (m *eventMonitor) Stop() error {
 func (m *eventMonitor) SetInterval(interval time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	// Apply bounds
 	if interval < time.Minute {
 		interval = time.Minute
@@ -278,10 +280,10 @@ func (m *eventMonitor) SetInterval(interval time.Duration) {
 	if interval > time.Hour {
 		interval = time.Hour
 	}
-	
+
 	m.scanInterval = interval
 	m.stats.ScanInterval = interval
-	
+
 	if m.logger != nil {
 		m.logger.Info("Fallback scan interval updated", "new_interval", interval)
 	}
@@ -291,12 +293,12 @@ func (m *eventMonitor) SetInterval(interval time.Duration) {
 func (m *eventMonitor) GetMonitoredDevices() []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	
+
 	devices := make([]string, 0, len(m.monitoredDevices))
 	for deviceID := range m.monitoredDevices {
 		devices = append(devices, deviceID)
 	}
-	
+
 	return devices
 }
 
@@ -305,36 +307,36 @@ func (m *eventMonitor) AddDevice(deviceID string) error {
 	if deviceID == "" {
 		return fmt.Errorf("device ID cannot be empty")
 	}
-	
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	// Check capacity
 	if len(m.monitoredDevices) >= m.config.MaxMonitoredDevices {
 		return fmt.Errorf("maximum monitored devices exceeded (%d)", m.config.MaxMonitoredDevices)
 	}
-	
+
 	// Check if already monitored
 	if _, exists := m.monitoredDevices[deviceID]; exists {
 		return fmt.Errorf("device %s is already being monitored", deviceID)
 	}
-	
+
 	// Add device
 	info := &DeviceMonitorInfo{
-		DeviceID:      deviceID,
-		LastScanTime:  time.Time{},
-		NextScanTime:  time.Now().Add(m.scanInterval),
-		Status:        DeviceStatusActive,
-		HealthStatus:  "healthy",
+		DeviceID:     deviceID,
+		LastScanTime: time.Time{},
+		NextScanTime: time.Now().Add(m.scanInterval),
+		Status:       DeviceStatusActive,
+		HealthStatus: "healthy",
 	}
-	
+
 	m.monitoredDevices[deviceID] = info
 	m.stats.MonitoredDevices = len(m.monitoredDevices)
-	
+
 	if m.logger != nil {
 		m.logger.Info("Device added to event-driven monitoring", "device_id", deviceID)
 	}
-	
+
 	return nil
 }
 
@@ -342,18 +344,18 @@ func (m *eventMonitor) AddDevice(deviceID string) error {
 func (m *eventMonitor) RemoveDevice(deviceID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	if _, exists := m.monitoredDevices[deviceID]; !exists {
 		return fmt.Errorf("device %s is not being monitored", deviceID)
 	}
-	
+
 	delete(m.monitoredDevices, deviceID)
 	m.stats.MonitoredDevices = len(m.monitoredDevices)
-	
+
 	if m.logger != nil {
 		m.logger.Info("Device removed from event-driven monitoring", "device_id", deviceID)
 	}
-	
+
 	return nil
 }
 
@@ -362,18 +364,18 @@ func (m *eventMonitor) GetMonitorStats() *MonitorStats {
 	m.mu.RLock()
 	eventStats := *m.stats
 	m.mu.RUnlock()
-	
+
 	// Convert event stats to legacy format
 	legacyStats := &MonitorStats{
-		MonitoredDevices:     eventStats.MonitoredDevices,
-		DevicesWithDrift:     eventStats.DevicesWithDrift,
-		MonitoringStatus:     eventStats.MonitoringStatus,
-		LastScanTime:         eventStats.LastScanTime,
-		ScanInterval:         eventStats.ScanInterval,
-		ScansCompleted:       eventStats.TimerScansPerformed,
-		AverageScanDuration:  eventStats.TimerScanTime,
+		MonitoredDevices:    eventStats.MonitoredDevices,
+		DevicesWithDrift:    eventStats.DevicesWithDrift,
+		MonitoringStatus:    eventStats.MonitoringStatus,
+		LastScanTime:        eventStats.LastScanTime,
+		ScanInterval:        eventStats.ScanInterval,
+		ScansCompleted:      eventStats.TimerScansPerformed,
+		AverageScanDuration: eventStats.TimerScanTime,
 	}
-	
+
 	return legacyStats
 }
 
@@ -381,9 +383,9 @@ func (m *eventMonitor) GetMonitorStats() *MonitorStats {
 func (m *eventMonitor) GetEventStats() *EventMonitorStats {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	
+
 	stats := *m.stats
-	
+
 	// Add event publisher stats if available
 	if m.eventPublisher != nil {
 		publisherStats := m.eventPublisher.GetStats()
@@ -391,7 +393,7 @@ func (m *eventMonitor) GetEventStats() *EventMonitorStats {
 		stats.EventErrors = publisherStats.EventsFailed
 		stats.EventProcessingTime = publisherStats.AverageProcessingTime
 	}
-	
+
 	return &stats
 }
 
@@ -399,9 +401,9 @@ func (m *eventMonitor) GetEventStats() *EventMonitorStats {
 func (m *eventMonitor) AddEventHandler(handler EventHandler) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	m.eventHandlers = append(m.eventHandlers, handler)
-	
+
 	info := handler.GetHandlerInfo()
 	if m.logger != nil {
 		m.logger.Info("Event handler added to event monitor",
@@ -416,7 +418,7 @@ func (m *eventMonitor) PublishDNAChangeEvent(ctx context.Context, event *events.
 	if m.eventPublisher == nil {
 		return fmt.Errorf("event publisher not initialized")
 	}
-	
+
 	return m.eventPublisher.Publish(ctx, events.EventTypeDNAWrite, event)
 }
 
@@ -443,7 +445,7 @@ func DefaultEventMonitorConfig() *EventMonitorConfig {
 		MaxDetectionTime:       30 * time.Second,
 		EnableAsyncProcessing:  true,
 		EnableFallbackTimer:    true,
-		FallbackInterval:       5 * time.Minute,  // Fallback scanning every 5 minutes
+		FallbackInterval:       5 * time.Minute, // Fallback scanning every 5 minutes
 		FallbackDeviceTimeout:  15 * time.Minute,
 		MaxMonitoredDevices:    1000,
 		HealthCheckInterval:    10 * time.Minute,
@@ -461,14 +463,14 @@ func validateEventMonitorConfig(config *EventMonitorConfig) error {
 	if !config.EnableEventMonitoring && !config.EnableFallbackTimer {
 		return fmt.Errorf("at least one monitoring method must be enabled")
 	}
-	
+
 	if config.ComparisonWindow < time.Minute {
 		return fmt.Errorf("comparison window must be at least 1 minute")
 	}
-	
+
 	if config.MaxMonitoredDevices <= 0 {
 		return fmt.Errorf("max monitored devices must be positive")
 	}
-	
+
 	return nil
 }

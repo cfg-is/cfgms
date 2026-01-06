@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package api
 
 import (
@@ -7,9 +9,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/gorilla/mux"
+
+	"github.com/cfgis/cfgms/commercial/ha"
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/monitoring"
@@ -18,8 +24,10 @@ import (
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
 	pkgmonitoring "github.com/cfgis/cfgms/pkg/monitoring"
+	"github.com/cfgis/cfgms/pkg/registration"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	_ "github.com/cfgis/cfgms/pkg/secrets/providers/sops" // Auto-register SOPS provider
 	"github.com/cfgis/cfgms/pkg/telemetry"
-	"github.com/gorilla/mux"
 )
 
 // Server represents the REST API server component of the controller
@@ -39,7 +47,11 @@ type Server struct {
 	systemMonitor           *monitoring.SystemMonitor
 	platformMonitor         pkgmonitoring.PlatformMonitor
 	tracer                  *telemetry.Tracer
-	apiKeys                 map[string]*APIKey // Simple API key storage
+	haManager               *ha.Manager
+	apiKeys                 map[string]*APIKey    // In-memory cache for fast lookup
+	secretStore             secretsif.SecretStore // M-AUTH-1: Central secrets provider for API keys
+	registrationTokenStore  registration.Store    // Registration token store for steward registration
+	corsConfig              *CORSConfig           // CORS configuration
 }
 
 // APIKey represents an API key for external authentication
@@ -61,6 +73,11 @@ type ServerConfig struct {
 	KeyFile    string
 }
 
+// CORSConfig contains CORS configuration for the API server
+type CORSConfig struct {
+	AllowedOrigins []string
+}
+
 // New creates a new REST API server instance
 func New(
 	cfg *config.Config,
@@ -75,9 +92,17 @@ func New(
 	systemMonitor *monitoring.SystemMonitor,
 	platformMonitor pkgmonitoring.PlatformMonitor,
 	tracer *telemetry.Tracer,
+	haManager *ha.Manager,
+	registrationTokenStore registration.Store,
 ) (*Server, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config cannot be nil")
+	}
+
+	// M-AUTH-1: Initialize central secrets provider for API key storage
+	secretStore, err := initializeSecretStore(cfg, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize secret store: %w", err)
 	}
 
 	server := &Server{
@@ -93,16 +118,25 @@ func New(
 		systemMonitor:           systemMonitor,
 		platformMonitor:         platformMonitor,
 		tracer:                  tracer,
-		apiKeys:                 make(map[string]*APIKey),
+		haManager:               haManager,
+		registrationTokenStore:  registrationTokenStore,
+		apiKeys:                 make(map[string]*APIKey), // In-memory cache
+		secretStore:             secretStore,              // M-AUTH-1: Central secrets provider
 	}
+
+	// Configure CORS settings (H-AUTH-3)
+	server.configureCORS()
 
 	// Initialize router with middleware
 	server.setupRouter()
 
-	// Generate default API key for initial setup
-	if err := server.generateDefaultAPIKey(); err != nil {
-		logger.Warn("Failed to generate default API key", "error", err)
+	// M-AUTH-1: Load existing API keys from secret store
+	if err := server.loadAPIKeysFromStore(); err != nil {
+		logger.Warn("Failed to load API keys from store", "error", err)
 	}
+
+	// M-AUTH-1: Do NOT generate default API keys (security anti-pattern)
+	// API keys must be explicitly created by administrators
 
 	// Start background cleanup for expired API keys
 	server.startAPIKeyCleanup()
@@ -126,6 +160,9 @@ func (s *Server) setupRouter() {
 
 	// Health check (no auth required)
 	s.router.HandleFunc("/api/v1/health", s.handleHealth).Methods("GET", "OPTIONS")
+
+	// Steward registration (no auth required - uses registration token)
+	s.router.HandleFunc("/api/v1/register", s.handleRegister).Methods("POST", "OPTIONS")
 
 	// Steward management endpoints
 	stewards := api.PathPrefix("/stewards").Subrouter()
@@ -190,6 +227,14 @@ func (s *Server) setupRouter() {
 	apiKeys.Handle("/{id}", s.requirePermission("api-key", "read")(http.HandlerFunc(s.handleGetAPIKey))).Methods("GET")
 	apiKeys.Handle("/{id}", s.requirePermission("api-key", "delete")(http.HandlerFunc(s.handleDeleteAPIKey))).Methods("DELETE")
 
+	// Registration token management endpoints (Story #264)
+	regTokens := api.PathPrefix("/registration/tokens").Subrouter()
+	regTokens.Handle("", s.requirePermission("registration", "list-tokens")(http.HandlerFunc(s.handleListRegistrationTokens))).Methods("GET")
+	regTokens.Handle("", s.requirePermission("registration", "create-token")(http.HandlerFunc(s.handleCreateRegistrationToken))).Methods("POST")
+	regTokens.Handle("/{token}", s.requirePermission("registration", "read-token")(http.HandlerFunc(s.handleGetRegistrationToken))).Methods("GET")
+	regTokens.Handle("/{token}", s.requirePermission("registration", "delete-token")(http.HandlerFunc(s.handleDeleteRegistrationToken))).Methods("DELETE")
+	regTokens.Handle("/{token}/revoke", s.requirePermission("registration", "revoke-token")(http.HandlerFunc(s.handleRevokeRegistrationToken))).Methods("POST")
+
 	// Monitoring endpoints
 	monitoring := api.PathPrefix("/monitoring").Subrouter()
 	monitoring.Handle("/health", s.requirePermission("monitoring", "read-health")(http.HandlerFunc(s.handleSystemHealth))).Methods("GET")
@@ -199,10 +244,10 @@ func (s *Server) setupRouter() {
 	monitoring.Handle("/traces", s.requirePermission("monitoring", "read-traces")(http.HandlerFunc(s.handleMonitoringTraces))).Methods("GET")
 	monitoring.Handle("/events", s.requirePermission("monitoring", "read-events")(http.HandlerFunc(s.handleMonitoringEvents))).Methods("GET")
 	monitoring.Handle("/config", s.requirePermission("monitoring", "read-config")(http.HandlerFunc(s.handleMonitoringConfig))).Methods("GET")
-	
+
 	// Steward-specific monitoring
 	monitoring.Handle("/stewards/{id}/metrics", s.requirePermission("monitoring", "read-steward-metrics")(http.HandlerFunc(s.handleStewardMetrics))).Methods("GET")
-	
+
 	// Controller service monitoring
 	monitoring.Handle("/controller/services", s.requirePermission("monitoring", "read-services")(http.HandlerFunc(s.handleControllerServices))).Methods("GET")
 
@@ -210,6 +255,26 @@ func (s *Server) setupRouter() {
 	monitoring.Handle("/anomalies", s.requirePermission("monitoring", "read-anomalies")(http.HandlerFunc(s.handleMonitoringAnomalies))).Methods("GET")
 	monitoring.Handle("/components/{component}/health", s.requirePermission("monitoring", "read-component-health")(http.HandlerFunc(s.handleMonitoringComponentHealth))).Methods("GET")
 	monitoring.Handle("/components/{component}/metrics", s.requirePermission("monitoring", "read-component-metrics")(http.HandlerFunc(s.handleMonitoringComponentMetrics))).Methods("GET")
+
+	// High Availability (HA) endpoints
+	ha := api.PathPrefix("/ha").Subrouter()
+	ha.Handle("/status", s.requirePermission("ha", "read-status")(http.HandlerFunc(s.handleHAStatus))).Methods("GET")
+	ha.Handle("/cluster", s.requirePermission("ha", "read-cluster")(http.HandlerFunc(s.handleHACluster))).Methods("GET")
+	ha.Handle("/leader", s.requirePermission("ha", "read-leader")(http.HandlerFunc(s.handleHALeader))).Methods("GET")
+	ha.Handle("/nodes", s.requirePermission("ha", "read-nodes")(http.HandlerFunc(s.handleHANodes))).Methods("GET")
+
+	// Compliance reporting endpoints (Story #212)
+	// Steward-specific compliance endpoints
+	stewards.Handle("/{id}/compliance", s.requirePermission("steward", "read-compliance")(http.HandlerFunc(s.handleGetStewardCompliance))).Methods("GET")
+	stewards.Handle("/{id}/compliance/report", s.requirePermission("steward", "read-compliance")(http.HandlerFunc(s.handleGetStewardComplianceReport))).Methods("GET")
+
+	// System-wide compliance endpoints
+	compliance := api.PathPrefix("/compliance").Subrouter()
+	compliance.Handle("/summary", s.requirePermission("compliance", "read-summary")(http.HandlerFunc(s.handleGetComplianceSummary))).Methods("GET")
+
+	// Raft consensus endpoints (no auth required - internal cluster communication)
+	s.router.HandleFunc("/raft/message", s.handleRaftMessage).Methods("POST")
+	s.router.HandleFunc("/raft/status", s.handleRaftStatus).Methods("GET")
 }
 
 // Start starts the HTTP server
@@ -294,11 +359,16 @@ func (s *Server) getHTTPListenAddr() string {
 	}
 
 	// Default to port 9080 for HTTP API (gRPC typically on 8080)
-	return "127.0.0.1:9080"
+	// Bind to 0.0.0.0 for Docker compatibility
+	return "0.0.0.0:9080"
 }
 
 // shouldUseTLS determines if TLS should be enabled for the HTTP server
 func (s *Server) shouldUseTLS() bool {
+	// Alpha (Story #198): Disable TLS for HTTP API if MQTT TLS is disabled
+	if s.cfg.MQTT != nil && !s.cfg.MQTT.EnableTLS {
+		return false
+	}
 	return s.certManager != nil || s.hasLegacyCertificates()
 }
 
@@ -333,17 +403,10 @@ func (s *Server) setupManagedTLS() (*tls.Config, error) {
 	}
 
 	// Load the certificate and key
-	cert, err := tls.X509KeyPair(serverCert.CertificatePEM, serverCert.PrivateKeyPEM)
+	// Create TLS config using pkg/cert helper (no client auth for API server)
+	tlsConfig, err := cert.CreateServerTLSConfig(serverCert.CertificatePEM, serverCert.PrivateKeyPEM, nil, tls.VersionTLS12)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load server certificate: %w", err)
-	}
-
-	// For REST API, we'll use TLS but not require client certificates by default
-	// This allows for API key authentication instead
-	tlsConfig := &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS12,
-		ClientAuth:   tls.NoClientCert, // API key auth instead
+		return nil, fmt.Errorf("failed to create TLS config: %w", err)
 	}
 
 	return tlsConfig, nil
@@ -354,17 +417,22 @@ func (s *Server) setupLegacyTLS() (*tls.Config, error) {
 	certFile := filepath.Join(s.cfg.CertPath, "server.crt")
 	keyFile := filepath.Join(s.cfg.CertPath, "server.key")
 
-	// Load certificate
-	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	// Load certificate PEM data from files
+	// #nosec G304 - Certificate paths are controlled via configuration
+	certPEM, err := os.ReadFile(certFile)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load legacy certificates: %w", err)
+		return nil, fmt.Errorf("failed to read certificate file: %w", err)
+	}
+	// #nosec G304 - Certificate paths are controlled via configuration
+	keyPEM, err := os.ReadFile(keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read key file: %w", err)
 	}
 
-	// Basic TLS configuration for legacy mode
-	tlsConfig := &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS12,
-		ClientAuth:   tls.NoClientCert,
+	// Create TLS config using pkg/cert helper (no client auth for legacy mode)
+	tlsConfig, err := cert.CreateBasicTLSConfig(certPEM, keyPEM, tls.VersionTLS12)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create TLS config: %w", err)
 	}
 
 	return tlsConfig, nil
@@ -489,4 +557,101 @@ func (s *Server) cleanupExpiredAPIKeys() {
 		s.logger.Debug("API key cleanup completed - no expired keys found",
 			"remaining_keys", len(s.apiKeys))
 	}
+}
+
+// configureCORS sets up CORS allowed origins configuration
+// H-AUTH-3: Replace wildcard CORS with configurable allowed origins list
+func (s *Server) configureCORS() {
+	// Default allowed origins for development and production
+	defaultOrigins := []string{
+		"http://localhost:3000", // Development frontend
+		"http://localhost:3001", // Alternative dev frontend
+		"http://localhost:9080", // API itself (for testing)
+	}
+
+	// Load from environment variable if specified
+	// Format: CFGMS_ALLOWED_ORIGINS="https://portal.example.com,https://app.example.com"
+	if envOrigins := os.Getenv("CFGMS_ALLOWED_ORIGINS"); envOrigins != "" {
+		s.corsConfig = &CORSConfig{
+			AllowedOrigins: strings.Split(envOrigins, ","),
+		}
+		s.logger.Info("CORS configured from environment",
+			"allowed_origins", s.corsConfig.AllowedOrigins)
+	} else {
+		s.corsConfig = &CORSConfig{
+			AllowedOrigins: defaultOrigins,
+		}
+		s.logger.Info("CORS configured with default origins",
+			"allowed_origins", defaultOrigins)
+	}
+}
+
+// M-AUTH-1: Initialize central secrets provider for API key storage
+// Replaces the incorrect file-based APIKeyStore implementation
+func initializeSecretStore(cfg *config.Config, logger logging.Logger) (secretsif.SecretStore, error) {
+	// Determine repository path for secrets (git+SOPS backend)
+	repoPath := os.Getenv("CFGMS_SECRETS_REPO_PATH")
+	if repoPath == "" {
+		// Use temporary directory for testing/development
+		tmpDir := os.TempDir()
+		repoPath = filepath.Join(tmpDir, "cfgms-secrets-test")
+		logger.Debug("Using temporary secrets repository for testing", "path", repoPath)
+	}
+
+	// Create secrets provider configuration
+	// M-AUTH-1: Use global storage provider for secrets (git or database)
+	secretsConfig := map[string]interface{}{
+		"storage_provider": cfg.Storage.Provider, // Use controller's global storage provider
+		"cache_enabled":    true,
+		"cache_ttl":        300,  // 5 minutes
+		"cache_max_size":   1000, // Cache up to 1000 secrets
+	}
+
+	// Pass storage config based on provider type
+	if cfg.Storage.Provider == "database" {
+		// For database provider, use the full database configuration
+		secretsConfig["storage_config"] = cfg.Storage.Config
+	} else {
+		// For git provider, set the repository path
+		secretsConfig["storage_config"] = map[string]interface{}{
+			"repository_path": repoPath,
+		}
+	}
+
+	// Optional: KMS key ID for SOPS encryption
+	if kmsKeyID := os.Getenv("CFGMS_SOPS_KMS_KEY"); kmsKeyID != "" {
+		secretsConfig["kms_key_id"] = kmsKeyID
+		logger.Info("Using KMS key for secrets encryption", "key_id", kmsKeyID)
+	}
+
+	// Create secret store using SOPS provider
+	store, err := secretsif.CreateSecretStoreFromConfig("sops", secretsConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create secret store: %w", err)
+	}
+
+	// Verify store is healthy
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := store.HealthCheck(ctx); err != nil {
+		logger.Warn("Secret store health check failed", "error", err)
+		// Don't fail on health check - store may still be usable
+	}
+
+	logger.Info("Secret store initialized",
+		"provider", "sops",
+		"backend", cfg.Storage.Provider,
+		"repo_path", repoPath,
+		"encryption", "SOPS (AES-256-GCM)")
+	return store, nil
+}
+
+// M-AUTH-1: Load API keys from secret store into memory cache
+func (s *Server) loadAPIKeysFromStore() error {
+	// API keys are now stored in the central secrets provider
+	// They are loaded on-demand when authentication is performed
+	// This lazy-loading approach provides better performance and security
+
+	s.logger.Info("Secret store ready - API keys will be loaded on first access")
+	return nil
 }

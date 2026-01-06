@@ -1,12 +1,15 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // #nosec G304 - Module metadata system requires file access for loading module definitions
 package modules
 
 import (
 	"fmt"
-	"gopkg.in/yaml.v3"
 	"io"
 	"os"
 	"path/filepath"
+
+	"gopkg.in/yaml.v3"
 )
 
 // ModuleMetadata represents the complete metadata for a module

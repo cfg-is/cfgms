@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package telemetry
 
 import (
@@ -99,7 +101,7 @@ type PropagationContext struct {
 	// TraceID from the OpenTelemetry span context
 	TraceID string `json:"trace_id,omitempty"`
 
-	// SpanID from the OpenTelemetry span context  
+	// SpanID from the OpenTelemetry span context
 	SpanID string `json:"span_id,omitempty"`
 
 	// CorrelationID for request correlation
@@ -145,7 +147,7 @@ func ExtractPropagationContext(ctx context.Context) *PropagationContext {
 //	// Extract from gRPC metadata or HTTP headers
 //	correlationID := getHeaderValue("x-correlation-id")
 //	traceID := getHeaderValue("x-trace-id")
-//	
+//
 //	propCtx := &telemetry.PropagationContext{
 //	    CorrelationID: correlationID,
 //	    TraceID: traceID,

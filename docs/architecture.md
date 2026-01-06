@@ -17,7 +17,9 @@ CFGMS (Configuration Management System) is a modern, Go-based configuration mana
 CFGMS consists of three core components:
 
 ### Controller
+
 Central management system that:
+
 - Distributes configurations to Stewards
 - Manages tenant hierarchy and RBAC
 - Provides REST API for external access
@@ -25,7 +27,9 @@ Central management system that:
 - **Platform Support**: Linux AMD64 (primary), Windows AMD64 (development)
 
 ### Steward  
+
 Cross-platform agent that:
+
 - Executes configurations on managed endpoints
 - Operates in standalone or Controller-integrated modes
 - Implements module-based resource management with platform-specific optimizations
@@ -33,7 +37,9 @@ Cross-platform agent that:
 - **Platform Support**: Linux (AMD64/ARM64), Windows (AMD64/ARM64), macOS (ARM64)
 
 ### Outpost
+
 Proxy cache component that:
+
 - Monitors network devices via SNMP/SSH
 - Provides agentless management capabilities
 - Caches configurations for offline operation
@@ -51,12 +57,14 @@ type Module interface {
 ```
 
 **Key Features:**
+
 - **ConfigState Interface**: Efficient field-level comparison without marshal/unmarshal overhead
 - **System-Level Testing**: Steward automatically compares current vs desired state
 - **Managed Fields**: Only specified fields are modified, others left unchanged
 - **Extensible Design**: Easy addition of new resource types
 
 **Available Modules:**
+
 - `directory` - Directory creation and permissions
 - `file` - File content and attributes
 - `firewall` - Firewall rules and policies  
@@ -65,25 +73,31 @@ type Module interface {
 ## Operational Modes
 
 ### Standalone Mode
+
 - **Use Case**: Single endpoints, edge devices, development
 - **Configuration**: Local `hostname.cfg` files
 - **Module Discovery**: Filesystem-based scanning
 - **Benefits**: Simple deployment, no network dependencies
 
 ### Controller-Integrated Mode
+
 - **Use Case**: Enterprise fleets, centralized management
-- **Configuration**: Controller distribution via gRPC
+- **Configuration**: Controller distribution via MQTT+QUIC
 - **Module Discovery**: Controller registry with versioning
 - **Benefits**: Centralized control, fleet orchestration
 
 ## Communication Architecture
 
 ### Internal Communication
-- **Protocol**: gRPC with mutual TLS
+
+- **Protocol**: MQTT+QUIC hybrid with mutual TLS
+  - **MQTT Control Plane**: Real-time commands, heartbeats, failover detection
+  - **QUIC Data Plane**: High-performance configuration and DNA synchronization
 - **Authentication**: Certificate-based identity
 - **Connection Model**: Stewards initiate all connections (no open ports)
 
 ### External Communication  
+
 - **Protocol**: HTTPS with API key authentication
 - **Interface**: REST API for user and system integration
 - **Documentation**: OpenAPI/Swagger specifications
@@ -91,12 +105,14 @@ type Module interface {
 ## Security Model
 
 ### Zero-Trust Principles
+
 - All communications authenticated and encrypted
 - Continuous verification of component identity
 - Principle of least privilege enforced throughout
 - No implicit trust between system components
 
 ### Certificate Management
+
 - Unique identity for each component
 - Automatic certificate rotation
 - Secure key storage and distribution
@@ -105,12 +121,14 @@ type Module interface {
 ## Multi-Tenancy
 
 ### Hierarchical Model
+
 - Recursive parent-child tenant relationships
 - Configuration inheritance with override capabilities
 - Tenant-aware RBAC with cascading permissions
 - Efficient cross-tenant operations
 
 ### Scalability
+
 - Designed to handle 50k+ Stewards across multiple regions
 - Path-based targeting for efficient operations
 - Distributed Controller architecture support
@@ -119,16 +137,18 @@ type Module interface {
 ## Platform Architecture
 
 ### Cross-Platform Design Philosophy
+
 CFGMS implements a **platform-agnostic core** with **platform-specific optimizations**:
 
 - **Unified Business Logic**: Core configuration management logic works identically across platforms
 - **Platform-Specific Collectors**: Native system information gathering (WMI on Windows, syscalls on Unix)
 - **Adaptive Module System**: Modules automatically adapt to platform capabilities and constraints
-- **Consistent API**: Same REST and gRPC interfaces regardless of underlying platform
+- **Consistent API**: Same REST API and MQTT+QUIC protocol regardless of underlying platform
 
 ### Platform-Specific Implementations
 
 #### Windows Optimizations
+
 - **WMI Integration**: Native Windows Management Instrumentation for system data
 - **PowerShell Commands**: Advanced system configuration via PowerShell execution  
 - **Windows Services**: Native service management and health monitoring
@@ -136,6 +156,7 @@ CFGMS implements a **platform-agnostic core** with **platform-specific optimizat
 - **ACL Support**: Windows Access Control List integration for security
 
 #### Unix-like Optimizations (Linux/macOS)
+
 - **Syscall Integration**: Direct system call access for efficient data collection
 - **Package Manager Integration**: Native support for apt, yum, brew, etc.
 - **POSIX Compliance**: Full POSIX file system and process management
@@ -145,6 +166,7 @@ CFGMS implements a **platform-agnostic core** with **platform-specific optimizat
 ### Deployment Patterns
 
 #### Enterprise MSP Architecture
+
 ```
                     ┌─────────────────────┐
                     │   Linux Controller  │
@@ -166,6 +188,7 @@ CFGMS implements a **platform-agnostic core** with **platform-specific optimizat
 ```
 
 #### Development Environment Architecture
+
 ```
     ┌─────────────────────────────────────────────────┐
     │          Developer Workstation                  │
@@ -186,6 +209,7 @@ For detailed platform support information, see [docs/deployment/platform-support
 ## Development Architecture
 
 ### Feature-Based Organization
+
 ```
 features/
 ├── controller/    # Controller component and server logic
@@ -194,9 +218,11 @@ features/
 ```
 
 ### Key Directories
-- `cmd/` - Command-line applications (controller, steward, cfgctl)
-- `api/proto/` - Protocol buffer definitions for gRPC
-- `pkg/` - Shared packages (logging utilities)
+
+- `cmd/` - Command-line applications (controller, steward, cfg)
+- `api/proto/` - Protocol buffer definitions (used for data serialization)
+- `pkg/` - Shared packages and central providers (logging, storage, security)
+- `features/` - Feature implementations organized by component
 - `test/` - Integration and end-to-end tests
 - `docs/` - Architecture and development documentation
 

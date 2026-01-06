@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package rbac
 
 import (
@@ -7,8 +9,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/google/uuid"
+
+	"github.com/cfgis/cfgms/api/proto/common"
 )
 
 // AuditLogger handles permission audit logging and compliance reporting
@@ -132,15 +135,15 @@ func (a *AuditLogger) GetAuditEntries(ctx context.Context, filter *AuditFilter) 
 	if filter != nil && filter.Limit > 0 {
 		start := filter.Offset
 		end := start + filter.Limit
-		
+
 		if start >= len(filtered) {
 			return []*common.PermissionAuditEntry{}, nil
 		}
-		
+
 		if end > len(filtered) {
 			end = len(filtered)
 		}
-		
+
 		filtered = filtered[start:end]
 	}
 
@@ -177,9 +180,9 @@ func (a *AuditLogger) GetComplianceReport(ctx context.Context, filter *AuditFilt
 		if entry.ResourceId != "" {
 			report.UniqueResources[entry.ResourceId] = true
 		}
-		
+
 		report.ActionBreakdown[entry.Action]++
-		
+
 		hour := time.Unix(entry.Timestamp, 0).Hour()
 		report.HourlyActivity[hour]++
 	}
@@ -193,11 +196,11 @@ func (a *AuditLogger) GetComplianceReport(ctx context.Context, filter *AuditFilt
 // GetSecurityAlerts identifies potential security issues from audit logs
 func (a *AuditLogger) GetSecurityAlerts(ctx context.Context, lookbackHours int) ([]*SecurityAlert, error) {
 	cutoffTime := time.Now().Add(-time.Duration(lookbackHours) * time.Hour).Unix()
-	
+
 	filter := &AuditFilter{
 		StartTime: cutoffTime,
 	}
-	
+
 	entries, err := a.GetAuditEntries(ctx, filter)
 	if err != nil {
 		return nil, err
@@ -323,13 +326,13 @@ func (a *AuditLogger) matchesFilter(entry *common.PermissionAuditEntry, filter *
 // exportCSV converts audit entries to CSV format
 func (a *AuditLogger) exportCSV(entries []*common.PermissionAuditEntry) ([]byte, error) {
 	csv := "ID,Subject ID,Action,Permission ID,Resource ID,Tenant ID,Granted,Reason,Timestamp,Source IP\n"
-	
+
 	for _, entry := range entries {
 		csv += fmt.Sprintf("%s,%s,%s,%s,%s,%s,%t,%s,%d,%s\n",
 			entry.Id, entry.SubjectId, entry.Action, entry.PermissionId, entry.ResourceId,
 			entry.TenantId, entry.Granted, entry.Reason, entry.Timestamp, entry.SourceIp)
 	}
-	
+
 	return []byte(csv), nil
 }
 
@@ -349,17 +352,17 @@ type AuditFilter struct {
 
 // ComplianceReport represents a compliance audit report
 type ComplianceReport struct {
-	GeneratedAt         time.Time            `json:"generated_at"`
-	Filter              *AuditFilter         `json:"filter"`
-	TotalEntries        int                  `json:"total_entries"`
-	SuccessfulAccess    int                  `json:"successful_access"`
-	DeniedAccess        int                  `json:"denied_access"`
-	UniqueSubjects      map[string]bool      `json:"-"` // Internal use only
-	UniqueSubjectCount  int                  `json:"unique_subject_count"`
-	UniqueResources     map[string]bool      `json:"-"` // Internal use only
-	UniqueResourceCount int                  `json:"unique_resource_count"`
-	ActionBreakdown     map[string]int       `json:"action_breakdown"`
-	HourlyActivity      map[int]int          `json:"hourly_activity"`
+	GeneratedAt         time.Time       `json:"generated_at"`
+	Filter              *AuditFilter    `json:"filter"`
+	TotalEntries        int             `json:"total_entries"`
+	SuccessfulAccess    int             `json:"successful_access"`
+	DeniedAccess        int             `json:"denied_access"`
+	UniqueSubjects      map[string]bool `json:"-"` // Internal use only
+	UniqueSubjectCount  int             `json:"unique_subject_count"`
+	UniqueResources     map[string]bool `json:"-"` // Internal use only
+	UniqueResourceCount int             `json:"unique_resource_count"`
+	ActionBreakdown     map[string]int  `json:"action_breakdown"`
+	HourlyActivity      map[int]int     `json:"hourly_activity"`
 }
 
 // SecurityAlert represents a potential security issue

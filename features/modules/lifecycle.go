@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package modules
 
 import (
@@ -11,17 +13,17 @@ import (
 type ModuleState int
 
 const (
-	ModuleStateUnknown ModuleState = iota
-	ModuleStateDiscovered   // Module has been discovered but not loaded
-	ModuleStateLoading      // Module is being loaded
-	ModuleStateInitializing // Module is being initialized
-	ModuleStateReady        // Module is ready but not started
-	ModuleStateStarting     // Module is starting up
-	ModuleStateRunning      // Module is running normally
-	ModuleStateStopping     // Module is shutting down
-	ModuleStateStopped      // Module has been stopped
-	ModuleStateError        // Module encountered an error
-	ModuleStateFailed       // Module has failed and cannot recover
+	ModuleStateUnknown      ModuleState = iota
+	ModuleStateDiscovered               // Module has been discovered but not loaded
+	ModuleStateLoading                  // Module is being loaded
+	ModuleStateInitializing             // Module is being initialized
+	ModuleStateReady                    // Module is ready but not started
+	ModuleStateStarting                 // Module is starting up
+	ModuleStateRunning                  // Module is running normally
+	ModuleStateStopping                 // Module is shutting down
+	ModuleStateStopped                  // Module has been stopped
+	ModuleStateError                    // Module encountered an error
+	ModuleStateFailed                   // Module has failed and cannot recover
 )
 
 // String returns a human-readable representation of the module state
@@ -64,21 +66,21 @@ func (ms ModuleState) IsErrorState() bool {
 
 // HealthStatus represents the health status of a module
 type HealthStatus struct {
-	Status    HealthState        `json:"status"`
-	Message   string             `json:"message,omitempty"`
-	Details   map[string]string  `json:"details,omitempty"`
-	Timestamp time.Time          `json:"timestamp"`
+	Status    HealthState       `json:"status"`
+	Message   string            `json:"message,omitempty"`
+	Details   map[string]string `json:"details,omitempty"`
+	Timestamp time.Time         `json:"timestamp"`
 }
 
 // HealthState represents the health state of a module
 type HealthState int
 
 const (
-	HealthStateUnknown HealthState = iota
-	HealthStateHealthy   // Module is healthy and functioning normally
-	HealthStateWarning   // Module has warnings but is still functioning
-	HealthStateUnhealthy // Module is unhealthy but may recover
-	HealthStateCritical  // Module is in critical state and needs intervention
+	HealthStateUnknown   HealthState = iota
+	HealthStateHealthy               // Module is healthy and functioning normally
+	HealthStateWarning               // Module has warnings but is still functioning
+	HealthStateUnhealthy             // Module is unhealthy but may recover
+	HealthStateCritical              // Module is in critical state and needs intervention
 )
 
 // String returns a human-readable representation of the health state
@@ -101,22 +103,22 @@ func (hs HealthState) String() string {
 type ModuleConfig struct {
 	// InitializationTimeout is the maximum time allowed for initialization
 	InitializationTimeout time.Duration `json:"initialization_timeout,omitempty"`
-	
+
 	// StartupTimeout is the maximum time allowed for startup
 	StartupTimeout time.Duration `json:"startup_timeout,omitempty"`
-	
+
 	// ShutdownTimeout is the maximum time allowed for shutdown
 	ShutdownTimeout time.Duration `json:"shutdown_timeout,omitempty"`
-	
+
 	// HealthCheckInterval is the interval for periodic health checks
 	HealthCheckInterval time.Duration `json:"health_check_interval,omitempty"`
-	
+
 	// MaxRetries is the maximum number of retry attempts for failed operations
 	MaxRetries int `json:"max_retries,omitempty"`
-	
+
 	// RetryDelay is the delay between retry attempts
 	RetryDelay time.Duration `json:"retry_delay,omitempty"`
-	
+
 	// Settings contains module-specific configuration
 	Settings map[string]interface{} `json:"settings,omitempty"`
 }
@@ -139,16 +141,16 @@ func DefaultModuleConfig() ModuleConfig {
 type ModuleLifecycle interface {
 	// Initialize prepares the module for operation with the given configuration
 	Initialize(ctx context.Context, config ModuleConfig) error
-	
+
 	// Start begins module operations
 	Start(ctx context.Context) error
-	
+
 	// Stop gracefully shuts down module operations
 	Stop(ctx context.Context) error
-	
+
 	// Shutdown performs final cleanup and resource deallocation
 	Shutdown(ctx context.Context) error
-	
+
 	// Health returns the current health status of the module
 	Health() HealthStatus
 }
@@ -157,34 +159,34 @@ type ModuleLifecycle interface {
 type ModuleInstance struct {
 	// Metadata contains the module's metadata
 	Metadata *ModuleMetadata
-	
+
 	// Module is the actual module implementation
 	Module Module
-	
+
 	// Lifecycle is the optional lifecycle implementation
 	Lifecycle ModuleLifecycle
-	
+
 	// State tracks the current lifecycle state
 	State ModuleState
-	
+
 	// Health tracks the current health status
 	Health HealthStatus
-	
+
 	// Config contains the lifecycle configuration
 	Config ModuleConfig
-	
+
 	// LoadedAt is when the module was loaded
 	LoadedAt time.Time
-	
+
 	// LastStateChange is when the state last changed
 	LastStateChange time.Time
-	
+
 	// ErrorCount tracks the number of errors encountered
 	ErrorCount int
-	
+
 	// LastError contains the most recent error
 	LastError error
-	
+
 	// mu protects concurrent access to the instance
 	mu sync.RWMutex
 }
@@ -200,7 +202,7 @@ func (mi *ModuleInstance) GetState() ModuleState {
 func (mi *ModuleInstance) SetState(state ModuleState) {
 	mi.mu.Lock()
 	defer mi.mu.Unlock()
-	
+
 	if mi.State != state {
 		mi.State = state
 		mi.LastStateChange = time.Now()
@@ -330,13 +332,13 @@ func NewDefaultLifecycleImplementation(module Module) *DefaultLifecycleImplement
 func (dli *DefaultLifecycleImplementation) Initialize(ctx context.Context, config ModuleConfig) error {
 	dli.mu.Lock()
 	defer dli.mu.Unlock()
-	
+
 	dli.health = HealthStatus{
 		Status:    HealthStateHealthy,
 		Message:   "Module initialized successfully",
 		Timestamp: time.Now(),
 	}
-	
+
 	return nil
 }
 
@@ -344,13 +346,13 @@ func (dli *DefaultLifecycleImplementation) Initialize(ctx context.Context, confi
 func (dli *DefaultLifecycleImplementation) Start(ctx context.Context) error {
 	dli.mu.Lock()
 	defer dli.mu.Unlock()
-	
+
 	dli.health = HealthStatus{
 		Status:    HealthStateHealthy,
 		Message:   "Module started successfully",
 		Timestamp: time.Now(),
 	}
-	
+
 	return nil
 }
 
@@ -358,13 +360,13 @@ func (dli *DefaultLifecycleImplementation) Start(ctx context.Context) error {
 func (dli *DefaultLifecycleImplementation) Stop(ctx context.Context) error {
 	dli.mu.Lock()
 	defer dli.mu.Unlock()
-	
+
 	dli.health = HealthStatus{
 		Status:    HealthStateHealthy,
 		Message:   "Module stopped successfully",
 		Timestamp: time.Now(),
 	}
-	
+
 	return nil
 }
 
@@ -372,13 +374,13 @@ func (dli *DefaultLifecycleImplementation) Stop(ctx context.Context) error {
 func (dli *DefaultLifecycleImplementation) Shutdown(ctx context.Context) error {
 	dli.mu.Lock()
 	defer dli.mu.Unlock()
-	
+
 	dli.health = HealthStatus{
 		Status:    HealthStateHealthy,
 		Message:   "Module shutdown successfully",
 		Timestamp: time.Now(),
 	}
-	
+
 	return nil
 }
 

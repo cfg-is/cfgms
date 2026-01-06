@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package jit
 
 import (
@@ -13,13 +15,13 @@ import (
 
 // JITIntegrationManager handles integration between JIT access and existing RBAC/tenant security
 type JITIntegrationManager struct {
-	rbacManager         rbac.RBACManager
-	tenantManager       *tenant.Manager
-	tenantSecurity      *security.TenantSecurityMiddleware
-	jitAccessManager    *JITAccessManager
-	elevationManager    *PrivilegeElevationManager
-	timeController      *TimeBasedAccessController
-	monitor             *JITAccessMonitor
+	rbacManager      rbac.RBACManager
+	tenantManager    *tenant.Manager
+	tenantSecurity   *security.TenantSecurityMiddleware
+	jitAccessManager *JITAccessManager
+	elevationManager *PrivilegeElevationManager
+	timeController   *TimeBasedAccessController
+	monitor          *JITAccessMonitor
 }
 
 // NewJITIntegrationManager creates a new JIT integration manager
@@ -29,7 +31,7 @@ func NewJITIntegrationManager(
 	tenantSecurity *security.TenantSecurityMiddleware,
 ) *JITIntegrationManager {
 	notificationService := NewSimpleNotificationService()
-	
+
 	// Initialize JIT components
 	jitAccessManager := NewJITAccessManager(rbacManager, notificationService)
 	elevationManager := NewPrivilegeElevationManager(rbacManager, jitAccessManager)
@@ -88,10 +90,10 @@ func (jim *JITIntegrationManager) EnhancedAccessCheck(ctx context.Context, reque
 
 	// Create JIT-enhanced response
 	jitResponse := &EnhancedJITAccessResponse{
-		StandardResponse: enhancedResponse.StandardResponse,
-		TenantSecurity:   enhancedResponse.TenantSecurityValidation,
+		StandardResponse:  enhancedResponse.StandardResponse,
+		TenantSecurity:    enhancedResponse.TenantSecurityValidation,
 		ValidationLatency: enhancedResponse.ValidationLatency,
-		JITAccess:        &JITAccessValidationResult{},
+		JITAccess:         &JITAccessValidationResult{},
 	}
 
 	// If standard access is granted, no need to check JIT
@@ -147,7 +149,7 @@ func (jim *JITIntegrationManager) checkJITAccess(ctx context.Context, request *c
 				result.ExpirationTimes = append(result.ExpirationTimes, grant.ExpiresAt)
 				result.Conditions = append(result.Conditions, grant.Conditions...)
 				result.GrantedPermissions = append(result.GrantedPermissions, permission)
-				
+
 				// Log the JIT access usage
 				go func(g *JITAccessGrant) {
 					_ = jim.elevationManager.LogElevatedActivity(
@@ -157,10 +159,10 @@ func (jim *JITIntegrationManager) checkJITAccess(ctx context.Context, request *c
 						request.ResourceId,
 						"granted",
 						map[string]interface{}{
-							"permission":  request.PermissionId,
-							"resource":    request.ResourceId,
-							"tenant":      request.TenantId,
-							"context":     request.Context,
+							"permission": request.PermissionId,
+							"resource":   request.ResourceId,
+							"tenant":     request.TenantId,
+							"context":    request.Context,
 						},
 					)
 				}(grant)
@@ -185,7 +187,7 @@ func (jim *JITIntegrationManager) checkJITAccess(ctx context.Context, request *c
 							// Convert ElevationConditions to AccessConditions
 							for _, elevationCondition := range session.Conditions {
 								accessCondition := AccessCondition{
-									Type:        ConditionType(elevationCondition.Type),
+									Type:        elevationCondition.Type,
 									Value:       elevationCondition.Value,
 									Description: elevationCondition.Description,
 								}
@@ -282,7 +284,7 @@ func (jim *JITIntegrationManager) validateJITRequestSecurity(ctx context.Context
 	if jim.tenantSecurity != nil {
 		// This would integrate with the tenant security isolation engine
 		// For now, we'll do basic validation
-		
+
 		// Check for high-privilege permissions
 		highPrivilegePermissions := []string{"admin", "system_config", "user_management", "security_config"}
 		for _, reqPerm := range request.Permissions {
@@ -290,7 +292,7 @@ func (jim *JITIntegrationManager) validateJITRequestSecurity(ctx context.Context
 				if reqPerm == highPerm {
 					result.SecurityLevel = "high"
 					result.RequiresReview = true
-					result.Recommendations = append(result.Recommendations, 
+					result.Recommendations = append(result.Recommendations,
 						fmt.Sprintf("High-privilege permission '%s' requires additional review", reqPerm))
 				}
 			}
@@ -298,7 +300,7 @@ func (jim *JITIntegrationManager) validateJITRequestSecurity(ctx context.Context
 
 		// Check duration against security policies
 		if request.Duration > 8*time.Hour {
-			result.Recommendations = append(result.Recommendations, 
+			result.Recommendations = append(result.Recommendations,
 				"Consider reducing access duration to 8 hours or less")
 		}
 
@@ -306,7 +308,7 @@ func (jim *JITIntegrationManager) validateJITRequestSecurity(ctx context.Context
 		if request.EmergencyAccess {
 			result.SecurityLevel = "critical"
 			result.RequiresReview = true
-			result.Recommendations = append(result.Recommendations, 
+			result.Recommendations = append(result.Recommendations,
 				"Emergency access requires enhanced monitoring and audit logging")
 		}
 	}
@@ -320,7 +322,7 @@ func (jim *JITIntegrationManager) validateElevationSecurity(ctx context.Context,
 	if jim.tenantSecurity != nil {
 		// Validate against tenant isolation rules
 		// This would check if the tenant allows privilege elevation
-		
+
 		// For break-glass access, additional validation
 		if request.BreakGlass {
 			// Ensure break-glass access is properly justified and logged
@@ -449,9 +451,9 @@ func (jim *JITIntegrationManager) initializeJITRoles(ctx context.Context) error 
 			PermissionIds: []string{"jit_access.approve", "jit_access.monitor"},
 		},
 		{
-			Id:            "jit_administrator",
-			Name:          "JIT Access Administrator",
-			Description:   "Full administrative access to JIT access system",
+			Id:          "jit_administrator",
+			Name:        "JIT Access Administrator",
+			Description: "Full administrative access to JIT access system",
 			PermissionIds: []string{
 				"jit_access.request", "jit_access.approve", "jit_access.revoke",
 				"jit_access.extend", "privilege_elevation.request",
@@ -460,9 +462,9 @@ func (jim *JITIntegrationManager) initializeJITRoles(ctx context.Context) error 
 			},
 		},
 		{
-			Id:            "security_officer",
-			Name:          "Security Officer",
-			Description:   "Security oversight for JIT access",
+			Id:          "security_officer",
+			Name:        "Security Officer",
+			Description: "Security oversight for JIT access",
 			PermissionIds: []string{
 				"jit_access.monitor", "jit_access.audit", "jit_access.revoke",
 				"privilege_elevation.revoke",
@@ -519,19 +521,19 @@ func (jim *JITIntegrationManager) Shutdown(ctx context.Context) error {
 
 // EnhancedJITAccessResponse extends the enhanced access response with JIT access information
 type EnhancedJITAccessResponse struct {
-	StandardResponse  *common.AccessResponse                 `json:"standard_response"`
+	StandardResponse  *common.AccessResponse                   `json:"standard_response"`
 	TenantSecurity    *security.TenantSecurityValidationResult `json:"tenant_security"`
-	JITAccess         *JITAccessValidationResult             `json:"jit_access"`
-	ValidationLatency time.Duration                          `json:"validation_latency"`
+	JITAccess         *JITAccessValidationResult               `json:"jit_access"`
+	ValidationLatency time.Duration                            `json:"validation_latency"`
 }
 
 // JITAccessValidationResult contains the result of JIT access validation
 type JITAccessValidationResult struct {
-	HasJITAccess        bool              `json:"has_jit_access"`
-	ActiveGrants        []string          `json:"active_grants"`
-	ElevatedSessions    []string          `json:"elevated_sessions,omitempty"`
-	ExpirationTimes     []time.Time       `json:"expiration_times"`
-	Conditions          []AccessCondition `json:"conditions"`
-	GrantedPermissions  []string          `json:"granted_permissions"`
-	ValidationTime      time.Time         `json:"validation_time"`
+	HasJITAccess       bool              `json:"has_jit_access"`
+	ActiveGrants       []string          `json:"active_grants"`
+	ElevatedSessions   []string          `json:"elevated_sessions,omitempty"`
+	ExpirationTimes    []time.Time       `json:"expiration_times"`
+	Conditions         []AccessCondition `json:"conditions"`
+	GrantedPermissions []string          `json:"granted_permissions"`
+	ValidationTime     time.Time         `json:"validation_time"`
 }

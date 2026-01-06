@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package tenant
 
 import (
@@ -12,7 +14,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-	
+
 	// Import storage providers for testing
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 )
@@ -21,21 +23,21 @@ import (
 func setupTestRBACManager(t *testing.T) *rbac.Manager {
 	config := map[string]interface{}{
 		"repository_path": t.TempDir(),
-		"branch":         "main",
-		"auto_init":      true,
+		"branch":          "main",
+		"auto_init":       true,
 	}
 	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
 	require.NoError(t, err)
-	
+
 	manager := rbac.NewManagerWithStorage(
 		storageManager.GetAuditStore(),
 		storageManager.GetClientTenantStore(),
 		storageManager.GetRBACStore(),
 	)
-	
+
 	err = manager.Initialize(context.Background())
 	require.NoError(t, err)
-	
+
 	return manager
 }
 
@@ -51,7 +53,7 @@ func newMockStore() *mockStore {
 		tenants:   make(map[string]*Tenant),
 		hierarchy: make(map[string]*TenantHierarchy),
 	}
-	
+
 	// Initialize with default tenant
 	defaultTenant := &Tenant{
 		ID:          "default",
@@ -61,7 +63,7 @@ func newMockStore() *mockStore {
 		CreatedAt:   time.Now(),
 		UpdatedAt:   time.Now(),
 	}
-	
+
 	store.tenants["default"] = defaultTenant
 	store.hierarchy["default"] = &TenantHierarchy{
 		TenantID: "default",
@@ -69,18 +71,18 @@ func newMockStore() *mockStore {
 		Depth:    0,
 		Children: []string{},
 	}
-	
+
 	return store
 }
 
 func (s *mockStore) CreateTenant(ctx context.Context, t *Tenant) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	
+
 	if _, exists := s.tenants[t.ID]; exists {
 		return ErrTenantExists
 	}
-	
+
 	var parentHierarchy *TenantHierarchy
 	if t.ParentID != "" {
 		parent, exists := s.tenants[t.ParentID]
@@ -92,18 +94,18 @@ func (s *mockStore) CreateTenant(ctx context.Context, t *Tenant) error {
 		}
 		parentHierarchy = s.hierarchy[t.ParentID]
 	}
-	
+
 	now := time.Now()
 	t.CreatedAt = now
 	t.UpdatedAt = now
-	
+
 	s.tenants[t.ID] = t
-	
+
 	hierarchy := &TenantHierarchy{
 		TenantID: t.ID,
 		Children: []string{},
 	}
-	
+
 	if parentHierarchy != nil {
 		hierarchy.Path = append(parentHierarchy.Path, t.ID)
 		hierarchy.Depth = parentHierarchy.Depth + 1
@@ -112,7 +114,7 @@ func (s *mockStore) CreateTenant(ctx context.Context, t *Tenant) error {
 		hierarchy.Path = []string{t.ID}
 		hierarchy.Depth = 0
 	}
-	
+
 	s.hierarchy[t.ID] = hierarchy
 	return nil
 }
@@ -120,12 +122,12 @@ func (s *mockStore) CreateTenant(ctx context.Context, t *Tenant) error {
 func (s *mockStore) GetTenant(ctx context.Context, tenantID string) (*Tenant, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	
+
 	t, exists := s.tenants[tenantID]
 	if !exists {
 		return nil, ErrTenantNotFound
 	}
-	
+
 	result := *t
 	return &result, nil
 }
@@ -133,12 +135,12 @@ func (s *mockStore) GetTenant(ctx context.Context, tenantID string) (*Tenant, er
 func (s *mockStore) UpdateTenant(ctx context.Context, t *Tenant) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	
+
 	existing, exists := s.tenants[t.ID]
 	if !exists {
 		return ErrTenantNotFound
 	}
-	
+
 	t.CreatedAt = existing.CreatedAt
 	t.UpdatedAt = time.Now()
 	s.tenants[t.ID] = t
@@ -148,21 +150,21 @@ func (s *mockStore) UpdateTenant(ctx context.Context, t *Tenant) error {
 func (s *mockStore) DeleteTenant(ctx context.Context, tenantID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	
+
 	t, exists := s.tenants[tenantID]
 	if !exists {
 		return ErrTenantNotFound
 	}
-	
+
 	hierarchy := s.hierarchy[tenantID]
 	if len(hierarchy.Children) > 0 {
 		return ErrTenantHasChildren
 	}
-	
+
 	if tenantID == "default" {
 		return fmt.Errorf("cannot delete default tenant")
 	}
-	
+
 	t.Status = TenantStatusInactive
 	t.UpdatedAt = time.Now()
 	return nil
@@ -171,7 +173,7 @@ func (s *mockStore) DeleteTenant(ctx context.Context, tenantID string) error {
 func (s *mockStore) ListTenants(ctx context.Context, filter *TenantFilter) ([]*Tenant, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	
+
 	var result []*Tenant
 	for _, t := range s.tenants {
 		if filter != nil {
@@ -182,41 +184,41 @@ func (s *mockStore) ListTenants(ctx context.Context, filter *TenantFilter) ([]*T
 				continue
 			}
 		}
-		
+
 		tenantCopy := *t
 		result = append(result, &tenantCopy)
 	}
-	
+
 	return result, nil
 }
 
 func (s *mockStore) GetTenantHierarchy(ctx context.Context, tenantID string) (*TenantHierarchy, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	
+
 	hierarchy, exists := s.hierarchy[tenantID]
 	if !exists {
 		return nil, ErrTenantNotFound
 	}
-	
+
 	result := *hierarchy
 	result.Children = make([]string, len(hierarchy.Children))
 	copy(result.Children, hierarchy.Children)
 	result.Path = make([]string, len(hierarchy.Path))
 	copy(result.Path, hierarchy.Path)
-	
+
 	return &result, nil
 }
 
 func (s *mockStore) GetChildTenants(ctx context.Context, parentID string) ([]*Tenant, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	
+
 	hierarchy, exists := s.hierarchy[parentID]
 	if !exists {
 		return nil, ErrTenantNotFound
 	}
-	
+
 	var children []*Tenant
 	for _, childID := range hierarchy.Children {
 		if child, exists := s.tenants[childID]; exists {
@@ -224,19 +226,19 @@ func (s *mockStore) GetChildTenants(ctx context.Context, parentID string) ([]*Te
 			children = append(children, &childCopy)
 		}
 	}
-	
+
 	return children, nil
 }
 
 func (s *mockStore) GetTenantPath(ctx context.Context, tenantID string) ([]string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	
+
 	hierarchy, exists := s.hierarchy[tenantID]
 	if !exists {
 		return nil, ErrTenantNotFound
 	}
-	
+
 	path := make([]string, len(hierarchy.Path))
 	copy(path, hierarchy.Path)
 	return path, nil
@@ -245,18 +247,18 @@ func (s *mockStore) GetTenantPath(ctx context.Context, tenantID string) ([]strin
 func (s *mockStore) IsTenantAncestor(ctx context.Context, ancestorID, descendantID string) (bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	
+
 	descendantHierarchy, exists := s.hierarchy[descendantID]
 	if !exists {
 		return false, ErrTenantNotFound
 	}
-	
+
 	for _, pathTenantID := range descendantHierarchy.Path {
 		if pathTenantID == ancestorID {
 			return true, nil
 		}
 	}
-	
+
 	return false, nil
 }
 
@@ -264,7 +266,7 @@ func TestManager_CreateTenant(t *testing.T) {
 	// Setup
 	tenantStore := newMockStore()
 	rbacManager := setupTestRBACManager(t)
-	
+
 	manager := NewManager(tenantStore, rbacManager)
 	ctx := context.Background()
 
@@ -298,7 +300,7 @@ func TestManager_CreateTenant_WithParent(t *testing.T) {
 	// Setup
 	tenantStore := newMockStore()
 	rbacManager := setupTestRBACManager(t)
-	
+
 	manager := NewManager(tenantStore, rbacManager)
 	ctx := context.Background()
 
@@ -336,7 +338,7 @@ func TestManager_CreateTenant_Validation(t *testing.T) {
 	// Setup
 	tenantStore := newMockStore()
 	rbacManager := setupTestRBACManager(t)
-	
+
 	manager := NewManager(tenantStore, rbacManager)
 	ctx := context.Background()
 
@@ -375,14 +377,14 @@ func TestManager_ListTenants(t *testing.T) {
 	// Setup
 	tenantStore := newMockStore()
 	rbacManager := setupTestRBACManager(t)
-	
+
 	manager := NewManager(tenantStore, rbacManager)
 	ctx := context.Background()
 
 	// Create test tenants
 	tenant1, err := manager.CreateTenant(ctx, &TenantRequest{Name: "Tenant1"})
 	require.NoError(t, err)
-	
+
 	tenant2, err := manager.CreateTenant(ctx, &TenantRequest{Name: "Tenant2", ParentID: tenant1.ID})
 	require.NoError(t, err)
 
@@ -403,7 +405,7 @@ func TestManager_UpdateTenant(t *testing.T) {
 	// Setup
 	tenantStore := newMockStore()
 	rbacManager := setupTestRBACManager(t)
-	
+
 	manager := NewManager(tenantStore, rbacManager)
 	ctx := context.Background()
 
@@ -423,21 +425,22 @@ func TestManager_UpdateTenant(t *testing.T) {
 			"updated": "true",
 		},
 	}
-	
+
 	updated, err := manager.UpdateTenant(ctx, tenant.ID, updateReq)
 	require.NoError(t, err)
 	assert.Equal(t, "Updated-Name", updated.Name)
 	assert.Equal(t, "Updated Description", updated.Description)
 	assert.Equal(t, "true", updated.Metadata["updated"])
 	assert.Equal(t, tenant.CreatedAt, updated.CreatedAt)
-	assert.True(t, updated.UpdatedAt.After(tenant.UpdatedAt))
+	// UpdatedAt should be at or after the original (may be equal on fast systems)
+	assert.False(t, updated.UpdatedAt.Before(tenant.UpdatedAt))
 }
 
 func TestManager_DeleteTenant(t *testing.T) {
 	// Setup
 	tenantStore := newMockStore()
 	rbacManager := setupTestRBACManager(t)
-	
+
 	manager := NewManager(tenantStore, rbacManager)
 	ctx := context.Background()
 
@@ -459,14 +462,14 @@ func TestManager_DeleteTenant_WithChildren(t *testing.T) {
 	// Setup
 	tenantStore := newMockStore()
 	rbacManager := setupTestRBACManager(t)
-	
+
 	manager := NewManager(tenantStore, rbacManager)
 	ctx := context.Background()
 
 	// Create parent and child tenants
 	parent, err := manager.CreateTenant(ctx, &TenantRequest{Name: "Parent"})
 	require.NoError(t, err)
-	
+
 	_, err = manager.CreateTenant(ctx, &TenantRequest{Name: "Child", ParentID: parent.ID})
 	require.NoError(t, err)
 
@@ -480,17 +483,17 @@ func TestManager_IsTenantAncestor(t *testing.T) {
 	// Setup
 	tenantStore := newMockStore()
 	rbacManager := setupTestRBACManager(t)
-	
+
 	manager := NewManager(tenantStore, rbacManager)
 	ctx := context.Background()
 
 	// Create hierarchy: grandparent -> parent -> child
 	grandparent, err := manager.CreateTenant(ctx, &TenantRequest{Name: "Grandparent"})
 	require.NoError(t, err)
-	
+
 	parent, err := manager.CreateTenant(ctx, &TenantRequest{Name: "Parent", ParentID: grandparent.ID})
 	require.NoError(t, err)
-	
+
 	child, err := manager.CreateTenant(ctx, &TenantRequest{Name: "Child", ParentID: parent.ID})
 	require.NoError(t, err)
 

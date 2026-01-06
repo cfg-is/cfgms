@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package logging_test
 
 import (
@@ -7,10 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/logging"
-	"github.com/cfgis/cfgms/pkg/logging/interfaces"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/logging/interfaces"
 
 	// Import providers for testing
 	_ "github.com/cfgis/cfgms/pkg/logging/providers/file"
@@ -391,9 +394,9 @@ func testMultiTenantIsolation(t *testing.T) {
 				TenantID:    tenant,
 				SessionID:   fmt.Sprintf("session-%s-%d", tenant, i),
 				Fields: map[string]interface{}{
-					"tenant":     tenant,
-					"entry_id":   i,
-					"test_type":  "tenant_isolation",
+					"tenant":    tenant,
+					"entry_id":  i,
+					"test_type": "tenant_isolation",
 				},
 			})
 		}
@@ -471,7 +474,7 @@ func getTimescaleIntegrationConfig() map[string]interface{} {
 		"table_name":        "integration_test_entries",
 		"schema_name":       "public",
 		"chunk_interval":    "24h",
-		"compression_after": "2h",  // Quick compression for testing
+		"compression_after": "2h",   // Quick compression for testing
 		"retention_after":   "168h", // 7 days retention for integration tests
 		"batch_size":        500,
 		"max_connections":   20,

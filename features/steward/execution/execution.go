@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // Package execution provides resource configuration orchestration for steward.
 //
 // This package implements the execution engine that orchestrates the complete
@@ -150,8 +152,14 @@ func (e *ExecutionEngine) ExecuteResource(ctx context.Context, resource config.R
 		Status:       StatusFailed,
 	}
 
+	// Determine the resource identifier to use with the module
+	// For modules that manage filesystem resources (file, directory), use the path from config
+	// Otherwise, fall back to the resource name
+	resourceID := e.getResourceIdentifier(resource)
+
 	e.logger.Info("Executing resource configuration",
 		"resource", resource.Name,
+		"resource_id", resourceID,
 		"module", resource.Module)
 
 	// Load the required module
@@ -180,8 +188,8 @@ func (e *ExecutionEngine) ExecuteResource(ctx context.Context, resource config.R
 		return result
 	}
 
-	// Get current state
-	currentState, err := module.Get(ctx, resource.Name)
+	// Get current state using the appropriate resource identifier
+	currentState, err := module.Get(ctx, resourceID)
 	if err != nil {
 		result.Error = fmt.Sprintf("failed to get current state: %v", err)
 		result.ExecutionTime = time.Since(startTime)
@@ -206,8 +214,8 @@ func (e *ExecutionEngine) ExecuteResource(ctx context.Context, resource config.R
 		"resource", resource.Name,
 		"changes_required", len(stateDiff.ChangedFields))
 
-	// Apply changes
-	if err := module.Set(ctx, resource.Name, desiredState); err != nil {
+	// Apply changes using the resource identifier
+	if err := module.Set(ctx, resourceID, desiredState); err != nil {
 		result.Error = fmt.Sprintf("failed to apply configuration: %v", err)
 		result.ExecutionTime = time.Since(startTime)
 		e.handleResourceError(resource, err)
@@ -217,7 +225,7 @@ func (e *ExecutionEngine) ExecuteResource(ctx context.Context, resource config.R
 	result.ChangesApplied = true
 
 	// Verify changes were applied correctly
-	if err := e.verifyChanges(ctx, module, resource.Name, desiredState); err != nil {
+	if err := e.verifyChanges(ctx, module, resourceID, desiredState); err != nil {
 		result.Error = fmt.Sprintf("verification failed: %v", err)
 		result.ExecutionTime = time.Since(startTime)
 		e.handleResourceError(resource, err)
@@ -244,6 +252,24 @@ func (e *ExecutionEngine) createConfigState(configData map[string]interface{}) (
 	return &genericConfigState{data: configData}, nil
 }
 
+// getResourceIdentifier determines the appropriate resource identifier for a module.
+//
+// For modules that manage filesystem resources (file, directory, script), the path
+// from the config is used as the identifier. For other modules, the resource name
+// is used as a fallback.
+//
+// This allows file/directory modules to correctly identify resources by their
+// filesystem path rather than by an abstract resource name.
+func (e *ExecutionEngine) getResourceIdentifier(resource config.ResourceConfig) string {
+	// Check if the config has a "path" field (common for file, directory, script modules)
+	if path, ok := resource.Config["path"].(string); ok && path != "" {
+		return path
+	}
+
+	// Fall back to resource name for other modules (firewall, package, etc.)
+	return resource.Name
+}
+
 // verifyChanges checks that the applied configuration matches the desired state
 func (e *ExecutionEngine) verifyChanges(ctx context.Context, module modules.Module,
 	resourceID string, desiredState modules.ConfigState) error {
@@ -257,8 +283,14 @@ func (e *ExecutionEngine) verifyChanges(ctx context.Context, module modules.Modu
 	// Compare again to ensure changes were applied
 	driftDetected, stateDiff := e.comparator.CompareStates(currentState, desiredState)
 	if driftDetected {
-		return fmt.Errorf("verification failed: changes not fully applied, remaining differences: %d",
-			len(stateDiff.ChangedFields))
+		// Log detailed diff for debugging
+		e.logger.Debug("Verification found remaining drift",
+			"changed_fields", stateDiff.GetChangedFieldNames(),
+			"added_fields", stateDiff.GetAddedFieldNames(),
+			"removed_fields", stateDiff.GetRemovedFieldNames(),
+			"detailed_diff", stateDiff.GetDetailedDiff())
+		return fmt.Errorf("verification failed: changes not fully applied, remaining differences: %d changed, %d added, %d removed",
+			len(stateDiff.ChangedFields), len(stateDiff.AddedFields), len(stateDiff.RemovedFields))
 	}
 
 	return nil
@@ -308,9 +340,17 @@ func (g *genericConfigState) Validate() error {
 }
 
 func (g *genericConfigState) GetManagedFields() []string {
+	// Exclude identifier fields that aren't part of the actual configuration state
+	excludedFields := map[string]bool{
+		"path": true, // path is the resourceID, not a state field
+		"name": true, // name is a resource identifier
+	}
+
 	fields := make([]string, 0, len(g.data))
 	for key := range g.data {
-		fields = append(fields, key)
+		if !excludedFields[key] {
+			fields = append(fields, key)
+		}
 	}
 	return fields
 }

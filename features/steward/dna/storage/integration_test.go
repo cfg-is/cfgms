@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // Package storage_test provides integration tests for DNA storage system.
 
 package storage
@@ -5,6 +7,7 @@ package storage
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,28 +17,55 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+// skipIntegrationWithoutCGO skips the test if CGO is not enabled (SQLite requires CGO).
+// This is a local version to avoid circular imports with testutil.
+func skipIntegrationWithoutCGO(t *testing.T) {
+	t.Helper()
+	config := DefaultConfig()
+	config.Backend = BackendSQLite
+	config.DataDir = t.TempDir() // Use temp directory to avoid file conflicts
+	logger := logging.NewLogger("error")
+
+	manager, err := NewManager(config, logger)
+	if err != nil {
+		errStr := err.Error()
+		if strings.Contains(errStr, "CGO_ENABLED=0") ||
+			strings.Contains(errStr, "go-sqlite3 requires cgo") ||
+			strings.Contains(errStr, "This is a stub") {
+			t.Skip("Skipping test: SQLite requires CGO which is not enabled (no C compiler available)")
+		}
+	}
+	// Close the manager if it was successfully created
+	if manager != nil {
+		_ = manager.Close()
+	}
+}
+
 func TestDNAStorageIntegration(t *testing.T) {
+	skipIntegrationWithoutCGO(t)
 	logger := logging.NewLogger("info")
-	
+
 	// Create a simplified config for integration testing
+	// Use t.TempDir() for proper test isolation on all platforms
 	config := &Config{
 		Backend:                BackendSQLite,
+		DataDir:                t.TempDir(), // Isolated temp directory per test
 		CompressionLevel:       6,
 		CompressionType:        "gzip",
 		TargetCompressionRatio: 0.7, // More relaxed target for testing
 		EnableDeduplication:    true,
-		BlockSize:             64 * 1024,
-		HashAlgorithm:         "sha256",
-		RetentionPeriod:       24 * time.Hour,
-		ArchivalPeriod:        1 * time.Hour,
-		MaxRecordsPerDevice:   100,
-		EnableSharding:        false, // Disable sharding for simplicity
-		ShardCount:           1,
-		ShardingStrategy:     "device_id",
-		BatchSize:            10,
-		FlushInterval:        1 * time.Minute,
-		CacheSize:            100,
-		MaxStoragePerMonth:   10 * 1024 * 1024, // 10MB
+		BlockSize:              64 * 1024,
+		HashAlgorithm:          "sha256",
+		RetentionPeriod:        24 * time.Hour,
+		ArchivalPeriod:         1 * time.Hour,
+		MaxRecordsPerDevice:    100,
+		EnableSharding:         false, // Disable sharding for simplicity
+		ShardCount:             1,
+		ShardingStrategy:       "device_id",
+		BatchSize:              10,
+		FlushInterval:          1 * time.Minute,
+		CacheSize:              100,
+		MaxStoragePerMonth:     10 * 1024 * 1024, // 10MB
 	}
 
 	manager, err := NewManager(config, logger)
@@ -52,13 +82,13 @@ func TestDNAStorageIntegration(t *testing.T) {
 
 	t.Run("BasicStorageAndRetrieval", func(t *testing.T) {
 		deviceID := "integration-test-device"
-		
+
 		// Create test DNA
 		dna := &commonpb.DNA{
 			Id: deviceID,
 			Attributes: map[string]string{
 				"os":           "linux",
-				"arch":         "amd64", 
+				"arch":         "amd64",
 				"hostname":     "test-host",
 				"cpu_count":    "8",
 				"memory_total": "16GB",
@@ -155,14 +185,14 @@ func TestDNAStorageIntegration(t *testing.T) {
 		}
 
 		if len(retrieved.DNA.Attributes) != len(attributes) {
-			t.Errorf("Attribute count mismatch after compression: expected %d, got %d", 
+			t.Errorf("Attribute count mismatch after compression: expected %d, got %d",
 				len(attributes), len(retrieved.DNA.Attributes))
 		}
 	})
 
 	t.Run("HistoricalData", func(t *testing.T) {
 		deviceID := "history-test-device"
-		
+
 		// Store multiple versions over time
 		versions := 5
 		for i := 0; i < versions; i++ {
@@ -230,7 +260,7 @@ func TestDNAStorageIntegration(t *testing.T) {
 		// Get final storage statistics
 		stats, err := manager.GetStorageStats(ctx)
 		if err != nil {
-			t.Fatalf("Failed to get storage stats: %v", err)  
+			t.Fatalf("Failed to get storage stats: %v", err)
 		}
 
 		// Verify basic statistics make sense
@@ -247,7 +277,7 @@ func TestDNAStorageIntegration(t *testing.T) {
 		t.Logf("   Total Size: %d bytes", stats.TotalSize)
 		t.Logf("   Compressed Size: %d bytes", stats.CompressedSize)
 		t.Logf("   Uncompressed Size: %d bytes", stats.UncompressedSize)
-		t.Logf("   Compression Ratio: %.3f (%.1f%% savings)", 
+		t.Logf("   Compression Ratio: %.3f (%.1f%% savings)",
 			stats.CompressionRatio, (1.0-stats.CompressionRatio)*100)
 		t.Logf("   Total Devices: %d", stats.TotalDevices)
 		t.Logf("   Active Devices: %d", stats.ActiveDevices)
@@ -292,7 +322,7 @@ func testCompressionPerformance(t *testing.T, algorithm string, level int) {
 
 	// Create test DNA with varying content patterns
 	attributes := make(map[string]string)
-	
+
 	// Add some highly compressible content
 	for i := 0; i < 10; i++ {
 		key := fmt.Sprintf("repeated_%d", i)
@@ -372,4 +402,3 @@ func testCompressionPerformance(t *testing.T, algorithm string, level int) {
 		t.Errorf("Low throughput: %.2f MB/s (expected >= 1.0)", throughputMBs)
 	}
 }
-

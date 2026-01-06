@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package cert
 
 import (
@@ -32,7 +34,7 @@ func TestNewCA(t *testing.T) {
 			expectError: false,
 		},
 		{
-			name: "config with defaults",
+			name:   "config with defaults",
 			config: &CAConfig{
 				// Only required fields, others should use defaults
 			},

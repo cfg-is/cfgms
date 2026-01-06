@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package entra_group
 
 import (
@@ -5,10 +7,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/features/modules/m365/auth"
-	"github.com/cfgis/cfgms/features/modules/m365/graph"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+
+	"github.com/cfgis/cfgms/features/modules/m365/auth"
+	"github.com/cfgis/cfgms/features/modules/m365/graph"
 )
 
 // MockAuthProvider is a mock implementation of auth.Provider
@@ -334,10 +337,10 @@ func TestEntraGroupConfig_Validate(t *testing.T) {
 		{
 			name: "team channel without display name",
 			config: &EntraGroupConfig{
-				DisplayName:     "Test Group",
-				MailNickname:    "testgroup",
-				TenantID:        "test-tenant-id",
-				IsTeamEnabled:   true,
+				DisplayName:   "Test Group",
+				MailNickname:  "testgroup",
+				TenantID:      "test-tenant-id",
+				IsTeamEnabled: true,
 				TeamChannels: []TeamChannel{
 					{Description: "Test channel without name"},
 				},
@@ -515,7 +518,7 @@ func TestParseEntraGroupResourceID(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tenant, group, err := parseEntraGroupResourceID(tt.resourceID)
-			
+
 			if tt.wantErr {
 				assert.Error(t, err)
 			} else {
@@ -556,7 +559,7 @@ tenant_id: test-tenant-id
 	config := &EntraGroupConfig{}
 	err := config.FromYAML([]byte(yamlData))
 	assert.NoError(t, err)
-	
+
 	assert.Equal(t, "Test Group", config.DisplayName)
 	assert.Equal(t, "Test description", config.Description)
 	assert.Equal(t, "testgroup", config.MailNickname)
@@ -602,7 +605,7 @@ func TestEntraGroupModule_WorkflowDemo(t *testing.T) {
 
 	// This would normally call Set() but we can't easily mock the Graph API calls
 	// In a real integration test, we would use real API calls or a more sophisticated mock
-	
+
 	// Verify the configuration is valid
 	err := config.Validate()
 	assert.NoError(t, err)

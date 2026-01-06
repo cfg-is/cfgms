@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package siem
 
 import (
@@ -11,8 +13,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/logging"
 	"gopkg.in/yaml.v3"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // RuleManagerImpl implements configurable rule management for SIEM detection rules.
@@ -22,30 +25,30 @@ type RuleManagerImpl struct {
 	logger *logging.ModuleLogger
 
 	// Rule storage
-	rules          map[string]*DetectionRule
-	rulesByTenant  map[string][]*DetectionRule
+	rules           map[string]*DetectionRule
+	rulesByTenant   map[string][]*DetectionRule
 	rulesByCategory map[string][]*DetectionRule
-	mutex          sync.RWMutex
+	mutex           sync.RWMutex
 
 	// Configuration
 	config RuleConfig
 
 	// Hot reload support
-	watcher         *FileWatcher
-	lastReloadTime  time.Time
-	reloadInterval  time.Duration
-	autoReloadStop  chan struct{}
+	watcher        *FileWatcher
+	lastReloadTime time.Time
+	reloadInterval time.Duration
+	autoReloadStop chan struct{}
 
 	// Pattern and correlation managers
 	patternMatcher  PatternMatcher
 	eventCorrelator EventCorrelator
 
 	// Statistics
-	totalRules      int64
-	enabledRules    int64
-	lastLoadTime    time.Time
-	loadErrors      int64
-	statsLock       sync.RWMutex
+	totalRules   int64
+	enabledRules int64
+	lastLoadTime time.Time
+	loadErrors   int64
+	statsLock    sync.RWMutex
 }
 
 // FileWatcher monitors rule files for changes
@@ -143,7 +146,7 @@ func (rm *RuleManagerImpl) loadRulesFromFile(ctx context.Context, filePath, form
 		"file_path", safePath,
 		"format", format)
 
-	data, err := os.ReadFile(safePath)
+	data, err := os.ReadFile(safePath) // #nosec G304 -- Path validated and sanitized by validateAndCleanPath above
 	if err != nil {
 		return fmt.Errorf("failed to read rule file: %w", err)
 	}
@@ -189,7 +192,7 @@ func (rm *RuleManagerImpl) loadRulesFromDirectory(ctx context.Context, dirPath, 
 			return nil // Continue with other files
 		}
 
-		data, err := os.ReadFile(safePath)
+		data, err := os.ReadFile(safePath) // #nosec G304 -- Path validated and sanitized by validateAndCleanPath above
 		if err != nil {
 			logger.ErrorCtx(ctx, "Failed to read rule file",
 				"file", safePath,
@@ -778,17 +781,17 @@ func (rm *RuleManagerImpl) GetStatistics() map[string]interface{} {
 	defer rm.mutex.RUnlock()
 
 	return map[string]interface{}{
-		"total_rules":        rm.totalRules,
-		"enabled_rules":      rm.enabledRules,
-		"disabled_rules":     rm.totalRules - rm.enabledRules,
-		"tenant_count":       int64(len(rm.rulesByTenant)),
-		"category_count":     int64(len(rm.rulesByCategory)),
-		"last_load_time":     rm.lastLoadTime,
-		"last_reload_time":   rm.lastReloadTime,
-		"load_errors":        rm.loadErrors,
-		"auto_reload":        rm.config.AutoReload,
-		"reload_interval":    rm.reloadInterval.String(),
-		"watched_files":      int64(len(rm.watcher.watchedPaths)),
+		"total_rules":      rm.totalRules,
+		"enabled_rules":    rm.enabledRules,
+		"disabled_rules":   rm.totalRules - rm.enabledRules,
+		"tenant_count":     int64(len(rm.rulesByTenant)),
+		"category_count":   int64(len(rm.rulesByCategory)),
+		"last_load_time":   rm.lastLoadTime,
+		"last_reload_time": rm.lastReloadTime,
+		"load_errors":      rm.loadErrors,
+		"auto_reload":      rm.config.AutoReload,
+		"reload_interval":  rm.reloadInterval.String(),
+		"watched_files":    int64(len(rm.watcher.watchedPaths)),
 	}
 }
 

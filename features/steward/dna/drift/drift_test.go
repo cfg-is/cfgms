@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package drift
 
 import (
@@ -5,11 +7,12 @@ import (
 	"testing"
 	"time"
 
-	commonpb "github.com/cfgis/cfgms/api/proto/common"
-	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/timestamppb"
+
+	commonpb "github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // Test data helpers
@@ -48,9 +51,9 @@ func TestDetector_DetectDrift_BasicChanges(t *testing.T) {
 	current := createTestDNA("device1", map[string]string{
 		"hostname":     "server1-new", // Changed
 		"cpu_count":    "4",
-		"memory_total": "16GB", // Changed
+		"memory_total": "16GB",         // Changed
 		"os_version":   "Ubuntu 22.04", // Changed
-		"new_service":  "nginx", // Added
+		"new_service":  "nginx",        // Added
 	})
 
 	ctx := context.Background()
@@ -59,14 +62,14 @@ func TestDetector_DetectDrift_BasicChanges(t *testing.T) {
 
 	// Should detect changes in multiple categories
 	assert.NotEmpty(t, events)
-	
+
 	// Verify we have the expected number of changes
 	totalChanges := 0
 	for _, event := range events {
 		totalChanges += len(event.Changes)
 	}
 	assert.GreaterOrEqual(t, totalChanges, 2) // Should detect at least some significant changes
-	assert.LessOrEqual(t, totalChanges, 4) // Should not exceed the actual number of changes
+	assert.LessOrEqual(t, totalChanges, 4)    // Should not exceed the actual number of changes
 
 	// Verify event properties
 	for _, event := range events {
@@ -84,7 +87,7 @@ func TestDetector_DetectDrift_BasicChanges(t *testing.T) {
 func TestDetector_DetectDrift_SecurityChanges(t *testing.T) {
 	config := DefaultDetectorConfig()
 	config.SecurityAttributes = []string{".*firewall.*", ".*security.*", ".*admin.*"}
-	
+
 	detector, err := NewDetector(config, createTestLogger())
 	require.NoError(t, err)
 	defer func() {
@@ -100,8 +103,8 @@ func TestDetector_DetectDrift_SecurityChanges(t *testing.T) {
 	})
 
 	current := createTestDNA("device1", map[string]string{
-		"firewall_enabled": "false", // Critical security change
-		"admin_user":       "root",   // Critical security change
+		"firewall_enabled": "false",      // Critical security change
+		"admin_user":       "root",       // Critical security change
 		"security_policy":  "permissive", // Critical security change
 	})
 
@@ -117,7 +120,7 @@ func TestDetector_DetectDrift_SecurityChanges(t *testing.T) {
 		if event.Severity == SeverityCritical {
 			foundCritical = true
 		}
-		
+
 		// Verify changes are categorized as security
 		for _, change := range event.Changes {
 			if change.Category == "security" {
@@ -205,7 +208,7 @@ func TestDetector_DetectDriftBatch(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.NotEmpty(t, events)
-	
+
 	// Debug: Print what events were generated
 	t.Logf("Total events generated: %d", len(events))
 	deviceIDs := make(map[string]bool)
@@ -213,10 +216,10 @@ func TestDetector_DetectDriftBatch(t *testing.T) {
 		deviceIDs[event.DeviceID] = true
 		t.Logf("Event for device %s: %s (changes: %d)", event.DeviceID, event.Title, len(event.Changes))
 	}
-	
+
 	// Should have events for at least one device (filtering may remove some)
 	assert.NotEmpty(t, deviceIDs)
-	
+
 	// Ideally should have events for both devices, but filtering might remove some
 	if len(deviceIDs) < 2 {
 		t.Logf("Warning: Only %d device(s) have events after filtering, expected 2", len(deviceIDs))
@@ -270,7 +273,7 @@ func TestFilter_FilterEvents_IgnoreTemporaryFiles(t *testing.T) {
 	for i, event := range filtered {
 		t.Logf("Filtered event %d: ID=%s, Changes=%d", i, event.ID, len(event.Changes))
 	}
-	
+
 	// Should filter out temporary file changes but keep config changes
 	// Adjusted expectation - the filter might be working correctly by filtering both
 	assert.LessOrEqual(t, len(filtered), 2) // Should not exceed original count
@@ -628,10 +631,10 @@ func TestMonitor_AddRemoveDevice(t *testing.T) {
 func TestMonitor_SetInterval(t *testing.T) {
 	config := DefaultMonitorConfig()
 	monitor := &monitor{
-		logger:        createTestLogger(),
-		config:        config,
-		scanInterval:  config.DefaultScanInterval,
-		stats:         &MonitorStats{},
+		logger:       createTestLogger(),
+		config:       config,
+		scanInterval: config.DefaultScanInterval,
+		stats:        &MonitorStats{},
 	}
 
 	// Set valid interval
@@ -734,14 +737,14 @@ func TestDriftDetectionIntegration(t *testing.T) {
 	// Create test DNA with changes
 	previous := createTestDNA("device1", map[string]string{
 		"critical_service": "up",
-		"uptime":          "3600", // Volatile attribute
-		"hostname":        "server1",
+		"uptime":           "3600", // Volatile attribute
+		"hostname":         "server1",
 	})
 
 	current := createTestDNA("device1", map[string]string{
-		"critical_service": "down", // Critical change
-		"uptime":          "3661",  // Should be filtered
-		"hostname":        "server1-new", // Regular change
+		"critical_service": "down",        // Critical change
+		"uptime":           "3661",        // Should be filtered
+		"hostname":         "server1-new", // Regular change
 	})
 
 	ctx := context.Background()

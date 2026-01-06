@@ -1,48 +1,16 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package main
 
 import (
 	"context"
-	"os"
-	"os/signal"
-	"syscall"
 	"testing"
 	"time"
-
-	"github.com/stretchr/testify/assert"
 )
 
-func TestSignalHandling(t *testing.T) {
-	// Create a channel to coordinate test completion
-	done := make(chan struct{})
-
-	// Start the main process in a goroutine
-	go func() {
-		// Simulate the main process
-		sigChan := make(chan os.Signal, 1)
-		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-		// Send a signal after a short delay
-		go func() {
-			time.Sleep(100 * time.Millisecond)
-			if err := syscall.Kill(syscall.Getpid(), syscall.SIGINT); err != nil {
-				t.Logf("Failed to send SIGINT: %v", err)
-			}
-		}()
-
-		// Wait for signal
-		sig := <-sigChan
-		assert.Equal(t, syscall.SIGINT, sig)
-		close(done)
-	}()
-
-	// Wait for test completion with timeout
-	select {
-	case <-done:
-		// Test completed successfully
-	case <-time.After(1 * time.Second):
-		t.Fatal("Test timed out")
-	}
-}
+// TestSignalHandling is implemented in platform-specific files:
+// - main_test_unix.go for Unix systems (uses syscall.Kill)
+// - main_test_windows.go for Windows (uses channel-based simulation)
 
 func TestGracefulShutdown(t *testing.T) {
 	// This is a more complex test that would require mocking the server
@@ -70,11 +38,7 @@ func TestGracefulShutdown(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), tt.timeout)
 			defer cancel()
 
-			// TODO: Create mock server
-			// TODO: Start server
-			// TODO: Trigger shutdown
-			// TODO: Verify shutdown behavior
-			
+			// Test skeleton - requires server implementation to complete
 			// Use ctx to avoid unused variable error
 			_ = ctx
 		})

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package trigger
 
 import (
@@ -9,8 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/gorilla/mux"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // APIHandler provides REST API endpoints for trigger management

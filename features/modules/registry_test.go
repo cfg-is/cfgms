@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package modules
 
 import (
@@ -171,7 +173,7 @@ func TestModuleRegistry_UnregisterModule(t *testing.T) {
 	appInstance := &mockModule{name: "app"}
 
 	_ = registry.RegisterModule(baseMetadata, baseInstance) // Ignore error in test setup
-	_ = registry.RegisterModule(appMetadata, appInstance)  // Ignore error in test setup
+	_ = registry.RegisterModule(appMetadata, appInstance)   // Ignore error in test setup
 
 	// Try to unregister base module (should fail - app depends on it)
 	err = registry.UnregisterModule("base")
@@ -550,7 +552,7 @@ func TestModuleRegistry_GetRegistryStatus(t *testing.T) {
 
 	_ = registry.RegisterModule(module1, &mockModule{name: "module1"}) // Ignore error in test setup
 	_ = registry.RegisterModule(module2, &mockModule{name: "module2"}) // Ignore error in test setup
-	_ = registry.Initialize() // Ignore error in test setup
+	_ = registry.Initialize()                                          // Ignore error in test setup
 
 	status = registry.GetRegistryStatus()
 	if status.TotalModules != 2 {

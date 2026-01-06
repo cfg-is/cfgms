@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package transform
 
 import (
@@ -129,11 +131,11 @@ func TestTransformResult(t *testing.T) {
 		Data: map[string]interface{}{
 			"output": "test_result",
 		},
-		Success:   true,
-		Duration:  time.Millisecond * 50,
-		Warnings:  []string{"Minor warning"},
-		Metadata:  map[string]interface{}{"process_id": 123},
-		Error:     "",
+		Success:  true,
+		Duration: time.Millisecond * 50,
+		Warnings: []string{"Minor warning"},
+		Metadata: map[string]interface{}{"process_id": 123},
+		Error:    "",
 	}
 
 	assert.True(t, result.Success)

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package shell
 
 import (
@@ -15,16 +17,16 @@ import (
 
 // UnixExecutor implements shell execution for Unix-like systems
 type UnixExecutor struct {
-	mu         sync.RWMutex
-	config     *Config
-	cmd        *exec.Cmd
-	pty        *os.File
-	outputCh   chan []byte
-	errorCh    chan error
-	running    bool
-	ctx        context.Context
-	cancel     context.CancelFunc
-	wg         sync.WaitGroup // To wait for goroutines to finish
+	mu       sync.RWMutex
+	config   *Config
+	cmd      *exec.Cmd
+	pty      *os.File
+	outputCh chan []byte
+	errorCh  chan error
+	running  bool
+	ctx      context.Context
+	cancel   context.CancelFunc
+	wg       sync.WaitGroup // To wait for goroutines to finish
 }
 
 // NewUnixExecutor creates a new Unix shell executor
@@ -68,7 +70,7 @@ func (e *UnixExecutor) Start(ctx context.Context, config *Config) error {
 	// Create command
 	// #nosec G204 - Terminal requires shell execution with validated shell paths
 	e.cmd = exec.CommandContext(e.ctx, shellPath)
-	
+
 	// Set environment variables
 	e.cmd.Env = os.Environ()
 	for key, value := range e.config.Environment {
@@ -139,7 +141,7 @@ func (e *UnixExecutor) Resize(ctx context.Context, cols, rows int) error {
 	if err != nil {
 		return err
 	}
-	
+
 	err = pty.Setsize(e.pty, winsize)
 	if err != nil {
 		return fmt.Errorf("failed to resize terminal: %w", err)
@@ -156,7 +158,7 @@ func (e *UnixExecutor) Close(ctx context.Context) error {
 		return nil // Already closed
 	}
 	e.running = false
-	
+
 	// Cancel context first to signal goroutines to stop
 	if e.cancel != nil {
 		e.cancel()
@@ -292,13 +294,13 @@ func (e *UnixExecutor) readOutput() {
 // monitorProcess monitors the shell process and handles its exit
 func (e *UnixExecutor) monitorProcess() {
 	defer e.wg.Done()
-	
+
 	if e.cmd == nil {
 		return
 	}
 
 	err := e.cmd.Wait()
-	
+
 	e.mu.Lock()
 	e.running = false
 	e.mu.Unlock()
@@ -320,12 +322,12 @@ func (e *UnixExecutor) createWinsize(rows, cols int) (*pty.Winsize, error) {
 	if rows < 0 || rows > 65535 || cols < 0 || cols > 65535 {
 		return nil, fmt.Errorf("invalid terminal dimensions: rows=%d, cols=%d", rows, cols)
 	}
-	
+
 	// Use helper functions for safe conversion
 	winsize := &pty.Winsize{}
 	winsize.Rows = e.safeUint16(rows)
 	winsize.Cols = e.safeUint16(cols)
-	
+
 	return winsize, nil
 }
 

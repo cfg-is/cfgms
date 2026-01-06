@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // Package interfaces - Bulk Operations with Batching and Rate Limiting
 //
 // This file implements bulk operations support with intelligent batching, rate limiting,
@@ -19,20 +21,20 @@ type BulkOperationManager interface {
 	BulkCreateUsers(ctx context.Context, users []*DirectoryUser, options *BulkOptions) (*BulkResult, error)
 	BulkUpdateUsers(ctx context.Context, updates []*UserUpdate, options *BulkOptions) (*BulkResult, error)
 	BulkDeleteUsers(ctx context.Context, userIDs []string, options *BulkOptions) (*BulkResult, error)
-	
+
 	// Bulk Group Operations
 	BulkCreateGroups(ctx context.Context, groups []*DirectoryGroup, options *BulkOptions) (*BulkResult, error)
 	BulkUpdateGroups(ctx context.Context, updates []*GroupUpdate, options *BulkOptions) (*BulkResult, error)
 	BulkDeleteGroups(ctx context.Context, groupIDs []string, options *BulkOptions) (*BulkResult, error)
-	
+
 	// Bulk Membership Operations
 	BulkAddUsersToGroups(ctx context.Context, memberships []*GroupMembership, options *BulkOptions) (*BulkResult, error)
 	BulkRemoveUsersFromGroups(ctx context.Context, memberships []*GroupMembership, options *BulkOptions) (*BulkResult, error)
-	
+
 	// Operation Management
 	GetOperationStatus(operationID string) (*BulkOperationStatus, error)
 	CancelOperation(operationID string) error
-	
+
 	// Configuration
 	SetRateLimit(requests int, window time.Duration)
 	SetBatchSize(batchSize int)
@@ -46,45 +48,45 @@ type DefaultBulkOperationManager struct {
 	batchProcessor   *BatchProcessor
 	operationTracker *OperationTracker
 	config           BulkConfig
-	mutex           sync.RWMutex
+	mutex            sync.RWMutex
 }
 
 // BulkConfig contains configuration for bulk operations
 type BulkConfig struct {
 	// Batching
-	DefaultBatchSize     int           `json:"default_batch_size"`      // Default items per batch
-	MaxBatchSize         int           `json:"max_batch_size"`          // Maximum items per batch
-	MinBatchSize         int           `json:"min_batch_size"`          // Minimum items per batch
-	
+	DefaultBatchSize int `json:"default_batch_size"` // Default items per batch
+	MaxBatchSize     int `json:"max_batch_size"`     // Maximum items per batch
+	MinBatchSize     int `json:"min_batch_size"`     // Minimum items per batch
+
 	// Concurrency
-	MaxConcurrentBatches int           `json:"max_concurrent_batches"`  // Maximum concurrent batches
-	WorkerPoolSize       int           `json:"worker_pool_size"`        // Number of worker goroutines
-	
+	MaxConcurrentBatches int `json:"max_concurrent_batches"` // Maximum concurrent batches
+	WorkerPoolSize       int `json:"worker_pool_size"`       // Number of worker goroutines
+
 	// Rate Limiting
-	RequestsPerSecond    int           `json:"requests_per_second"`     // Max requests per second
-	RequestsPerMinute    int           `json:"requests_per_minute"`     // Max requests per minute
-	RequestsPerHour      int           `json:"requests_per_hour"`       // Max requests per hour
-	BurstSize           int           `json:"burst_size"`              // Burst request allowance
-	
+	RequestsPerSecond int `json:"requests_per_second"` // Max requests per second
+	RequestsPerMinute int `json:"requests_per_minute"` // Max requests per minute
+	RequestsPerHour   int `json:"requests_per_hour"`   // Max requests per hour
+	BurstSize         int `json:"burst_size"`          // Burst request allowance
+
 	// Error Handling
-	MaxRetries          int           `json:"max_retries"`             // Max retry attempts
-	RetryDelay          time.Duration `json:"retry_delay"`             // Initial retry delay
-	RetryBackoffFactor  float64       `json:"retry_backoff_factor"`    // Exponential backoff factor
-	MaxRetryDelay       time.Duration `json:"max_retry_delay"`         // Maximum retry delay
-	
+	MaxRetries         int           `json:"max_retries"`          // Max retry attempts
+	RetryDelay         time.Duration `json:"retry_delay"`          // Initial retry delay
+	RetryBackoffFactor float64       `json:"retry_backoff_factor"` // Exponential backoff factor
+	MaxRetryDelay      time.Duration `json:"max_retry_delay"`      // Maximum retry delay
+
 	// Timeouts
-	OperationTimeout    time.Duration `json:"operation_timeout"`       // Overall operation timeout
-	BatchTimeout        time.Duration `json:"batch_timeout"`           // Individual batch timeout
-	
+	OperationTimeout time.Duration `json:"operation_timeout"` // Overall operation timeout
+	BatchTimeout     time.Duration `json:"batch_timeout"`     // Individual batch timeout
+
 	// Progress and Monitoring
-	ProgressReporting   bool          `json:"progress_reporting"`      // Enable progress reporting
-	ProgressInterval    time.Duration `json:"progress_interval"`       // Progress reporting interval
-	DetailedLogging     bool          `json:"detailed_logging"`        // Enable detailed logging
+	ProgressReporting bool          `json:"progress_reporting"` // Enable progress reporting
+	ProgressInterval  time.Duration `json:"progress_interval"`  // Progress reporting interval
+	DetailedLogging   bool          `json:"detailed_logging"`   // Enable detailed logging
 }
 
 // GroupUpdate represents an update to a group for bulk operations
 type GroupUpdate struct {
-	GroupID string         `json:"group_id"`
+	GroupID string          `json:"group_id"`
 	Updates *DirectoryGroup `json:"updates"`
 }
 
@@ -96,42 +98,42 @@ type GroupMembership struct {
 
 // BulkOperationStatus represents the status of a bulk operation
 type BulkOperationStatus struct {
-	OperationID     string                 `json:"operation_id"`
-	Status          OperationStatus        `json:"status"`
-	StartTime       time.Time              `json:"start_time"`
-	EndTime         *time.Time             `json:"end_time,omitempty"`
-	TotalItems      int                    `json:"total_items"`
-	ProcessedItems  int                    `json:"processed_items"`
-	SuccessCount    int                    `json:"success_count"`
-	ErrorCount      int                    `json:"error_count"`
-	Progress        float64                `json:"progress"`            // 0-100
-	EstimatedTimeRemaining *time.Duration `json:"estimated_time_remaining,omitempty"`
-	CurrentBatch    int                    `json:"current_batch"`
-	TotalBatches    int                    `json:"total_batches"`
-	Errors          []BulkItemError        `json:"errors,omitempty"`
-	Metadata        map[string]interface{} `json:"metadata,omitempty"`
-	Cancelable      bool                   `json:"cancelable"`
+	OperationID            string                 `json:"operation_id"`
+	Status                 OperationStatus        `json:"status"`
+	StartTime              time.Time              `json:"start_time"`
+	EndTime                *time.Time             `json:"end_time,omitempty"`
+	TotalItems             int                    `json:"total_items"`
+	ProcessedItems         int                    `json:"processed_items"`
+	SuccessCount           int                    `json:"success_count"`
+	ErrorCount             int                    `json:"error_count"`
+	Progress               float64                `json:"progress"` // 0-100
+	EstimatedTimeRemaining *time.Duration         `json:"estimated_time_remaining,omitempty"`
+	CurrentBatch           int                    `json:"current_batch"`
+	TotalBatches           int                    `json:"total_batches"`
+	Errors                 []BulkItemError        `json:"errors,omitempty"`
+	Metadata               map[string]interface{} `json:"metadata,omitempty"`
+	Cancelable             bool                   `json:"cancelable"`
 }
 
 // OperationStatus represents the status of a bulk operation
 type OperationStatus string
 
 const (
-	OperationStatusPending    OperationStatus = "pending"
-	OperationStatusRunning    OperationStatus = "running"
-	OperationStatusCompleted  OperationStatus = "completed"
-	OperationStatusFailed     OperationStatus = "failed"
-	OperationStatusCancelled  OperationStatus = "cancelled"
-	OperationStatusPartial    OperationStatus = "partial"    // Some items succeeded, some failed
+	OperationStatusPending   OperationStatus = "pending"
+	OperationStatusRunning   OperationStatus = "running"
+	OperationStatusCompleted OperationStatus = "completed"
+	OperationStatusFailed    OperationStatus = "failed"
+	OperationStatusCancelled OperationStatus = "cancelled"
+	OperationStatusPartial   OperationStatus = "partial" // Some items succeeded, some failed
 )
 
 // BulkCapabilities describes the bulk operation capabilities of a provider
 type BulkCapabilities struct {
-	MaxBatchSize        int                    `json:"max_batch_size"`
+	MaxBatchSize         int                   `json:"max_batch_size"`
 	MaxConcurrentBatches int                   `json:"max_concurrent_batches"`
-	SupportedOperations []string               `json:"supported_operations"`
-	RateLimits          map[string]*RateLimit  `json:"rate_limits"`
-	RequiresOrdering    bool                   `json:"requires_ordering"`     // Operations must be processed in order
+	SupportedOperations  []string              `json:"supported_operations"`
+	RateLimits           map[string]*RateLimit `json:"rate_limits"`
+	RequiresOrdering     bool                  `json:"requires_ordering"`     // Operations must be processed in order
 	SupportsTransactions bool                  `json:"supports_transactions"` // Provider supports transactional operations
 	SupportsCancellation bool                  `json:"supports_cancellation"` // Operations can be cancelled
 }
@@ -145,13 +147,13 @@ type RateLimit struct {
 
 // RateLimiter implements token bucket rate limiting
 type RateLimiter struct {
-	tokens     chan struct{}
-	ticker     *time.Ticker
-	rate       int
-	window     time.Duration
-	burstSize  int
-	mutex      sync.Mutex
-	closed     bool
+	tokens    chan struct{}
+	ticker    *time.Ticker
+	rate      int
+	window    time.Duration
+	burstSize int
+	mutex     sync.Mutex
+	closed    bool
 }
 
 // NewRateLimiter creates a new rate limiter
@@ -159,14 +161,14 @@ func NewRateLimiter(requests int, window time.Duration, burstSize int) *RateLimi
 	if burstSize <= 0 {
 		burstSize = requests
 	}
-	
+
 	limiter := &RateLimiter{
 		tokens:    make(chan struct{}, burstSize),
 		rate:      requests,
 		window:    window,
 		burstSize: burstSize,
 	}
-	
+
 	// Fill initial tokens
 tokenFill:
 	for i := 0; i < burstSize; i++ {
@@ -176,11 +178,11 @@ tokenFill:
 			break tokenFill
 		}
 	}
-	
+
 	// Start token replenishment
 	limiter.ticker = time.NewTicker(window / time.Duration(requests))
 	go limiter.replenishTokens()
-	
+
 	return limiter
 }
 
@@ -213,7 +215,7 @@ func (r *RateLimiter) replenishTokens() {
 			return
 		}
 		r.mutex.Unlock()
-		
+
 		select {
 		case r.tokens <- struct{}{}:
 		default:
@@ -226,7 +228,7 @@ func (r *RateLimiter) replenishTokens() {
 func (r *RateLimiter) Close() {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
-	
+
 	if !r.closed {
 		r.closed = true
 		r.ticker.Stop()
@@ -238,51 +240,51 @@ func (r *RateLimiter) Close() {
 type BatchProcessor struct {
 	maxConcurrentBatches int
 	workerPool           chan struct{}
-	batchQueue          chan *BatchJob
-	results             chan *BatchResult
-	ctx                 context.Context
-	cancel              context.CancelFunc
-	wg                  sync.WaitGroup
+	batchQueue           chan *BatchJob
+	results              chan *BatchResult
+	ctx                  context.Context
+	cancel               context.CancelFunc
+	wg                   sync.WaitGroup
 }
 
 // BatchJob represents a batch processing job
 type BatchJob struct {
-	ID       string
-	Items    []interface{}
+	ID        string
+	Items     []interface{}
 	Processor func(ctx context.Context, items []interface{}) (*BatchResult, error)
-	Options  *BulkOptions
+	Options   *BulkOptions
 }
 
 // BatchResult represents the result of processing a batch
 type BatchResult struct {
-	BatchID      string                 `json:"batch_id"`
-	Success      bool                   `json:"success"`
-	ProcessedCount int                  `json:"processed_count"`
-	SuccessCount int                    `json:"success_count"`
-	ErrorCount   int                    `json:"error_count"`
-	Duration     time.Duration          `json:"duration"`
-	Errors       []BulkItemError        `json:"errors,omitempty"`
-	Results      []BulkItemResult       `json:"results,omitempty"`
+	BatchID        string           `json:"batch_id"`
+	Success        bool             `json:"success"`
+	ProcessedCount int              `json:"processed_count"`
+	SuccessCount   int              `json:"success_count"`
+	ErrorCount     int              `json:"error_count"`
+	Duration       time.Duration    `json:"duration"`
+	Errors         []BulkItemError  `json:"errors,omitempty"`
+	Results        []BulkItemResult `json:"results,omitempty"`
 }
 
 // NewBatchProcessor creates a new batch processor
 func NewBatchProcessor(maxConcurrentBatches int, workerPoolSize int) *BatchProcessor {
 	ctx, cancel := context.WithCancel(context.Background())
-	
+
 	processor := &BatchProcessor{
 		maxConcurrentBatches: maxConcurrentBatches,
-		workerPool:          make(chan struct{}, workerPoolSize),
-		batchQueue:          make(chan *BatchJob, maxConcurrentBatches*2),
-		results:             make(chan *BatchResult, maxConcurrentBatches*2),
-		ctx:                 ctx,
-		cancel:              cancel,
+		workerPool:           make(chan struct{}, workerPoolSize),
+		batchQueue:           make(chan *BatchJob, maxConcurrentBatches*2),
+		results:              make(chan *BatchResult, maxConcurrentBatches*2),
+		ctx:                  ctx,
+		cancel:               cancel,
 	}
-	
+
 	// Start workers
 	for i := 0; i < workerPoolSize; i++ {
 		go processor.worker()
 	}
-	
+
 	return processor
 }
 
@@ -310,7 +312,7 @@ func (p *BatchProcessor) GetResult(ctx context.Context) (*BatchResult, error) {
 func (p *BatchProcessor) worker() {
 	p.wg.Add(1)
 	defer p.wg.Done()
-	
+
 	for {
 		select {
 		case job := <-p.batchQueue:
@@ -330,9 +332,9 @@ func (p *BatchProcessor) processBatch(job *BatchJob) {
 	case <-p.ctx.Done():
 		return
 	}
-	
+
 	startTime := time.Now()
-	
+
 	// Create batch context with timeout
 	batchCtx := p.ctx
 	if job.Options != nil && job.Options.BatchTimeout > 0 {
@@ -340,17 +342,17 @@ func (p *BatchProcessor) processBatch(job *BatchJob) {
 		batchCtx, cancel = context.WithTimeout(p.ctx, job.Options.BatchTimeout)
 		defer cancel()
 	}
-	
+
 	// Process the batch
 	result, err := job.Processor(batchCtx, job.Items)
 	if err != nil {
 		result = &BatchResult{
-			BatchID:      job.ID,
-			Success:      false,
+			BatchID:        job.ID,
+			Success:        false,
 			ProcessedCount: 0,
-			SuccessCount: 0,
-			ErrorCount:   len(job.Items),
-			Duration:     time.Since(startTime),
+			SuccessCount:   0,
+			ErrorCount:     len(job.Items),
+			Duration:       time.Since(startTime),
 			Errors: []BulkItemError{{
 				ItemIndex: -1,
 				Error:     err.Error(),
@@ -360,7 +362,7 @@ func (p *BatchProcessor) processBatch(job *BatchJob) {
 		result.BatchID = job.ID
 		result.Duration = time.Since(startTime)
 	}
-	
+
 	// Send result
 	select {
 	case p.results <- result:
@@ -394,7 +396,7 @@ func NewOperationTracker() *OperationTracker {
 func (t *OperationTracker) StartOperation(operationID string, totalItems int) *BulkOperationStatus {
 	t.mutex.Lock()
 	defer t.mutex.Unlock()
-	
+
 	status := &BulkOperationStatus{
 		OperationID:    operationID,
 		Status:         OperationStatusRunning,
@@ -408,7 +410,7 @@ func (t *OperationTracker) StartOperation(operationID string, totalItems int) *B
 		Cancelable:     true,
 		Metadata:       make(map[string]interface{}),
 	}
-	
+
 	t.operations[operationID] = status
 	return status
 }
@@ -417,15 +419,15 @@ func (t *OperationTracker) StartOperation(operationID string, totalItems int) *B
 func (t *OperationTracker) UpdateOperation(operationID string, updates func(*BulkOperationStatus)) {
 	t.mutex.Lock()
 	defer t.mutex.Unlock()
-	
+
 	if status, exists := t.operations[operationID]; exists {
 		updates(status)
-		
+
 		// Update progress
 		if status.TotalItems > 0 {
 			status.Progress = float64(status.ProcessedItems) / float64(status.TotalItems) * 100
 		}
-		
+
 		// Estimate remaining time
 		if status.ProcessedItems > 0 && status.Progress > 0 && status.Progress < 100 {
 			elapsed := time.Since(status.StartTime)
@@ -440,7 +442,7 @@ func (t *OperationTracker) UpdateOperation(operationID string, updates func(*Bul
 func (t *OperationTracker) CompleteOperation(operationID string, finalStatus OperationStatus) {
 	t.mutex.Lock()
 	defer t.mutex.Unlock()
-	
+
 	if status, exists := t.operations[operationID]; exists {
 		status.Status = finalStatus
 		now := time.Now()
@@ -454,14 +456,14 @@ func (t *OperationTracker) CompleteOperation(operationID string, finalStatus Ope
 func (t *OperationTracker) GetOperation(operationID string) (*BulkOperationStatus, error) {
 	t.mutex.RLock()
 	defer t.mutex.RUnlock()
-	
+
 	if status, exists := t.operations[operationID]; exists {
 		// Return a copy to prevent race conditions
 		statusCopy := *status
 		statusCopy.Errors = append([]BulkItemError(nil), status.Errors...)
 		return &statusCopy, nil
 	}
-	
+
 	return nil, fmt.Errorf("operation not found: %s", operationID)
 }
 
@@ -469,16 +471,16 @@ func (t *OperationTracker) GetOperation(operationID string) (*BulkOperationStatu
 func (t *OperationTracker) CancelOperation(operationID string) error {
 	t.mutex.Lock()
 	defer t.mutex.Unlock()
-	
+
 	status, exists := t.operations[operationID]
 	if !exists {
 		return fmt.Errorf("operation not found: %s", operationID)
 	}
-	
+
 	if !status.Cancelable {
 		return fmt.Errorf("operation cannot be cancelled")
 	}
-	
+
 	if status.Status == OperationStatusRunning {
 		status.Status = OperationStatusCancelled
 		now := time.Now()
@@ -486,7 +488,7 @@ func (t *OperationTracker) CancelOperation(operationID string) error {
 		status.Cancelable = false
 		return nil
 	}
-	
+
 	return fmt.Errorf("operation is not running")
 }
 
@@ -532,26 +534,26 @@ func NewDefaultBulkOperationManager(provider DirectoryProvider, config BulkConfi
 	if config.ProgressInterval <= 0 {
 		config.ProgressInterval = 30 * time.Second
 	}
-	
+
 	manager := &DefaultBulkOperationManager{
 		provider:         provider,
 		config:           config,
 		operationTracker: NewOperationTracker(),
 	}
-	
+
 	// Initialize rate limiter
 	manager.rateLimiter = NewRateLimiter(
-		config.RequestsPerSecond, 
-		time.Second, 
+		config.RequestsPerSecond,
+		time.Second,
 		config.BurstSize,
 	)
-	
+
 	// Initialize batch processor
 	manager.batchProcessor = NewBatchProcessor(
 		config.MaxConcurrentBatches,
 		config.WorkerPoolSize,
 	)
-	
+
 	return manager
 }
 
@@ -562,7 +564,7 @@ func (m *DefaultBulkOperationManager) BulkCreateUsers(ctx context.Context, users
 		for i, item := range batch {
 			userBatch[i] = item.(*DirectoryUser)
 		}
-		
+
 		return m.processBatchCreateUsers(ctx, userBatch, options)
 	})
 }
@@ -574,7 +576,7 @@ func (m *DefaultBulkOperationManager) BulkUpdateUsers(ctx context.Context, updat
 		for i, item := range batch {
 			updateBatch[i] = item.(*UserUpdate)
 		}
-		
+
 		return m.processBatchUpdateUsers(ctx, updateBatch, options)
 	})
 }
@@ -586,7 +588,7 @@ func (m *DefaultBulkOperationManager) BulkDeleteUsers(ctx context.Context, userI
 		for i, item := range batch {
 			idBatch[i] = item.(string)
 		}
-		
+
 		return m.processBatchDeleteUsers(ctx, idBatch, options)
 	})
 }
@@ -598,7 +600,7 @@ func (m *DefaultBulkOperationManager) BulkCreateGroups(ctx context.Context, grou
 		for i, item := range batch {
 			groupBatch[i] = item.(*DirectoryGroup)
 		}
-		
+
 		return m.processBatchCreateGroups(ctx, groupBatch, options)
 	})
 }
@@ -610,7 +612,7 @@ func (m *DefaultBulkOperationManager) BulkUpdateGroups(ctx context.Context, upda
 		for i, item := range batch {
 			updateBatch[i] = item.(*GroupUpdate)
 		}
-		
+
 		return m.processBatchUpdateGroups(ctx, updateBatch, options)
 	})
 }
@@ -622,7 +624,7 @@ func (m *DefaultBulkOperationManager) BulkDeleteGroups(ctx context.Context, grou
 		for i, item := range batch {
 			idBatch[i] = item.(string)
 		}
-		
+
 		return m.processBatchDeleteGroups(ctx, idBatch, options)
 	})
 }
@@ -634,7 +636,7 @@ func (m *DefaultBulkOperationManager) BulkAddUsersToGroups(ctx context.Context, 
 		for i, item := range batch {
 			membershipBatch[i] = item.(*GroupMembership)
 		}
-		
+
 		return m.processBatchAddMemberships(ctx, membershipBatch, options)
 	})
 }
@@ -646,27 +648,27 @@ func (m *DefaultBulkOperationManager) BulkRemoveUsersFromGroups(ctx context.Cont
 		for i, item := range batch {
 			membershipBatch[i] = item.(*GroupMembership)
 		}
-		
+
 		return m.processBatchRemoveMemberships(ctx, membershipBatch, options)
 	})
 }
 
 // executeBulkOperation executes a generic bulk operation with batching and monitoring
 func (m *DefaultBulkOperationManager) executeBulkOperation(
-	ctx context.Context, 
-	operationType string, 
-	items interface{}, 
+	ctx context.Context,
+	operationType string,
+	items interface{},
 	options *BulkOptions,
 	processor func(ctx context.Context, batch []interface{}) (*BatchResult, error),
 ) (*BulkResult, error) {
 	startTime := time.Now()
-	
+
 	// Convert items to []interface{}
 	itemSlice, err := m.convertToInterfaceSlice(items)
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert items: %w", err)
 	}
-	
+
 	totalItems := len(itemSlice)
 	if totalItems == 0 {
 		return &BulkResult{
@@ -676,7 +678,7 @@ func (m *DefaultBulkOperationManager) executeBulkOperation(
 			Duration:     time.Since(startTime),
 		}, nil
 	}
-	
+
 	// Apply options defaults
 	if options == nil {
 		options = &BulkOptions{
@@ -686,7 +688,7 @@ func (m *DefaultBulkOperationManager) executeBulkOperation(
 			RetryDelay:      m.config.RetryDelay,
 		}
 	}
-	
+
 	// Ensure batch size is within limits
 	batchSize := options.BatchSize
 	if batchSize <= 0 {
@@ -698,11 +700,11 @@ func (m *DefaultBulkOperationManager) executeBulkOperation(
 	if batchSize < m.config.MinBatchSize {
 		batchSize = m.config.MinBatchSize
 	}
-	
+
 	// Create operation ID and start tracking
 	operationID := fmt.Sprintf("%s_%d", operationType, time.Now().UnixNano())
 	status := m.operationTracker.StartOperation(operationID, totalItems)
-	
+
 	// Create operation context
 	opCtx := ctx
 	if m.config.OperationTimeout > 0 {
@@ -710,11 +712,11 @@ func (m *DefaultBulkOperationManager) executeBulkOperation(
 		opCtx, cancel = context.WithTimeout(ctx, m.config.OperationTimeout)
 		defer cancel()
 	}
-	
+
 	// Create batches
 	batches := m.createBatches(itemSlice, batchSize)
 	status.TotalBatches = len(batches)
-	
+
 	// Process batches
 	result := &BulkResult{
 		TotalItems:   totalItems,
@@ -723,21 +725,21 @@ func (m *DefaultBulkOperationManager) executeBulkOperation(
 		Duration:     0,
 		ItemResults:  make([]BulkItemResult, 0, totalItems),
 	}
-	
+
 	var wg sync.WaitGroup
 	resultsChan := make(chan *BatchResult, len(batches))
 	semaphore := make(chan struct{}, options.ConcurrentBatch)
-	
+
 	for i, batch := range batches {
 		// Check if operation was cancelled
 		if status.Status == OperationStatusCancelled {
 			break
 		}
-		
+
 		wg.Add(1)
 		go func(batchNum int, batchItems []interface{}) {
 			defer wg.Done()
-			
+
 			// Acquire semaphore
 			select {
 			case semaphore <- struct{}{}:
@@ -745,15 +747,15 @@ func (m *DefaultBulkOperationManager) executeBulkOperation(
 			case <-opCtx.Done():
 				return
 			}
-			
+
 			// Rate limiting
 			if err := m.rateLimiter.Wait(opCtx); err != nil {
 				if err != context.Canceled {
 					resultsChan <- &BatchResult{
-						BatchID:      fmt.Sprintf("batch_%d", batchNum),
-						Success:      false,
+						BatchID:        fmt.Sprintf("batch_%d", batchNum),
+						Success:        false,
 						ProcessedCount: 0,
-						ErrorCount:   len(batchItems),
+						ErrorCount:     len(batchItems),
 						Errors: []BulkItemError{{
 							ItemIndex: -1,
 							Error:     fmt.Sprintf("rate limit error: %v", err),
@@ -762,13 +764,13 @@ func (m *DefaultBulkOperationManager) executeBulkOperation(
 				}
 				return
 			}
-			
+
 			// Process batch with retries
 			batchResult := m.processBatchWithRetry(opCtx, batchItems, processor, options)
 			batchResult.BatchID = fmt.Sprintf("batch_%d", batchNum)
-			
+
 			resultsChan <- batchResult
-			
+
 			// Update operation status
 			m.operationTracker.UpdateOperation(operationID, func(status *BulkOperationStatus) {
 				status.CurrentBatch = batchNum + 1
@@ -779,13 +781,13 @@ func (m *DefaultBulkOperationManager) executeBulkOperation(
 			})
 		}(i, batch)
 	}
-	
+
 	// Wait for all batches to complete
 	go func() {
 		wg.Wait()
 		close(resultsChan)
 	}()
-	
+
 	// Collect results
 	for batchResult := range resultsChan {
 		result.SuccessCount += batchResult.SuccessCount
@@ -793,9 +795,9 @@ func (m *DefaultBulkOperationManager) executeBulkOperation(
 		result.Errors = append(result.Errors, batchResult.Errors...)
 		result.ItemResults = append(result.ItemResults, batchResult.Results...)
 	}
-	
+
 	result.Duration = time.Since(startTime)
-	
+
 	// Determine final status
 	finalStatus := OperationStatusCompleted
 	if result.ErrorCount > 0 {
@@ -805,10 +807,10 @@ func (m *DefaultBulkOperationManager) executeBulkOperation(
 			finalStatus = OperationStatusFailed
 		}
 	}
-	
+
 	// Complete operation tracking
 	m.operationTracker.CompleteOperation(operationID, finalStatus)
-	
+
 	return result, nil
 }
 
@@ -859,18 +861,18 @@ func (m *DefaultBulkOperationManager) convertToInterfaceSlice(items interface{})
 // createBatches splits items into batches of the specified size
 func (m *DefaultBulkOperationManager) createBatches(items []interface{}, batchSize int) [][]interface{} {
 	var batches [][]interface{}
-	
+
 	for i := 0; i < len(items); i += batchSize {
 		end := i + batchSize
 		if end > len(items) {
 			end = len(items)
 		}
-		
+
 		batch := make([]interface{}, end-i)
 		copy(batch, items[i:end])
 		batches = append(batches, batch)
 	}
-	
+
 	return batches
 }
 
@@ -883,63 +885,63 @@ func (m *DefaultBulkOperationManager) processBatchWithRetry(
 ) *BatchResult {
 	var lastResult *BatchResult
 	var lastErr error
-	
+
 	retryDelay := options.RetryDelay
 	maxDelay := m.config.MaxRetryDelay
 	backoffFactor := m.config.RetryBackoffFactor
-	
+
 	for attempt := 0; attempt <= options.RetryAttempts; attempt++ {
 		if attempt > 0 {
 			// Apply exponential backoff
 			if retryDelay > maxDelay {
 				retryDelay = maxDelay
 			}
-			
+
 			select {
 			case <-time.After(retryDelay):
 			case <-ctx.Done():
 				return &BatchResult{
-					Success:       false,
+					Success:        false,
 					ProcessedCount: len(batch),
-					ErrorCount:    len(batch),
+					ErrorCount:     len(batch),
 					Errors: []BulkItemError{{
 						ItemIndex: -1,
 						Error:     "context cancelled during retry",
 					}},
 				}
 			}
-			
+
 			retryDelay = time.Duration(float64(retryDelay) * backoffFactor)
 		}
-		
+
 		result, err := processor(ctx, batch)
 		if err == nil {
 			return result
 		}
-		
+
 		lastResult = result
 		lastErr = err
-		
+
 		// Don't retry if context was cancelled
 		if ctx.Err() != nil {
 			break
 		}
-		
+
 		// Don't retry if explicitly requested not to continue on error
 		if !options.ContinueOnError {
 			break
 		}
 	}
-	
+
 	// All retries failed
 	if lastResult != nil {
 		return lastResult
 	}
-	
+
 	return &BatchResult{
-		Success:       false,
+		Success:        false,
 		ProcessedCount: len(batch),
-		ErrorCount:    len(batch),
+		ErrorCount:     len(batch),
 		Errors: []BulkItemError{{
 			ItemIndex: -1,
 			Error:     fmt.Sprintf("batch failed after %d attempts: %v", options.RetryAttempts+1, lastErr),
@@ -953,9 +955,9 @@ func (m *DefaultBulkOperationManager) processBatchWithRetry(
 func (m *DefaultBulkOperationManager) processBatchCreateUsers(ctx context.Context, users []*DirectoryUser, options *BulkOptions) (*BatchResult, error) {
 	result := &BatchResult{
 		ProcessedCount: len(users),
-		Results:       make([]BulkItemResult, 0, len(users)),
+		Results:        make([]BulkItemResult, 0, len(users)),
 	}
-	
+
 	for i, user := range users {
 		createdUser, err := m.provider.CreateUser(ctx, user)
 		if err != nil {
@@ -981,7 +983,7 @@ func (m *DefaultBulkOperationManager) processBatchCreateUsers(ctx context.Contex
 			})
 		}
 	}
-	
+
 	result.Success = result.ErrorCount == 0
 	return result, nil
 }
@@ -990,9 +992,9 @@ func (m *DefaultBulkOperationManager) processBatchCreateUsers(ctx context.Contex
 func (m *DefaultBulkOperationManager) processBatchUpdateUsers(ctx context.Context, updates []*UserUpdate, options *BulkOptions) (*BatchResult, error) {
 	result := &BatchResult{
 		ProcessedCount: len(updates),
-		Results:       make([]BulkItemResult, 0, len(updates)),
+		Results:        make([]BulkItemResult, 0, len(updates)),
 	}
-	
+
 	for i, update := range updates {
 		updatedUser, err := m.provider.UpdateUser(ctx, update.UserID, update.Updates)
 		if err != nil {
@@ -1018,7 +1020,7 @@ func (m *DefaultBulkOperationManager) processBatchUpdateUsers(ctx context.Contex
 			})
 		}
 	}
-	
+
 	result.Success = result.ErrorCount == 0
 	return result, nil
 }
@@ -1027,9 +1029,9 @@ func (m *DefaultBulkOperationManager) processBatchUpdateUsers(ctx context.Contex
 func (m *DefaultBulkOperationManager) processBatchDeleteUsers(ctx context.Context, userIDs []string, options *BulkOptions) (*BatchResult, error) {
 	result := &BatchResult{
 		ProcessedCount: len(userIDs),
-		Results:       make([]BulkItemResult, 0, len(userIDs)),
+		Results:        make([]BulkItemResult, 0, len(userIDs)),
 	}
-	
+
 	for i, userID := range userIDs {
 		err := m.provider.DeleteUser(ctx, userID)
 		if err != nil {
@@ -1054,7 +1056,7 @@ func (m *DefaultBulkOperationManager) processBatchDeleteUsers(ctx context.Contex
 			})
 		}
 	}
-	
+
 	result.Success = result.ErrorCount == 0
 	return result, nil
 }
@@ -1063,9 +1065,9 @@ func (m *DefaultBulkOperationManager) processBatchDeleteUsers(ctx context.Contex
 func (m *DefaultBulkOperationManager) processBatchCreateGroups(ctx context.Context, groups []*DirectoryGroup, options *BulkOptions) (*BatchResult, error) {
 	result := &BatchResult{
 		ProcessedCount: len(groups),
-		Results:       make([]BulkItemResult, 0, len(groups)),
+		Results:        make([]BulkItemResult, 0, len(groups)),
 	}
-	
+
 	for i, group := range groups {
 		createdGroup, err := m.provider.CreateGroup(ctx, group)
 		if err != nil {
@@ -1091,7 +1093,7 @@ func (m *DefaultBulkOperationManager) processBatchCreateGroups(ctx context.Conte
 			})
 		}
 	}
-	
+
 	result.Success = result.ErrorCount == 0
 	return result, nil
 }
@@ -1100,9 +1102,9 @@ func (m *DefaultBulkOperationManager) processBatchCreateGroups(ctx context.Conte
 func (m *DefaultBulkOperationManager) processBatchUpdateGroups(ctx context.Context, updates []*GroupUpdate, options *BulkOptions) (*BatchResult, error) {
 	result := &BatchResult{
 		ProcessedCount: len(updates),
-		Results:       make([]BulkItemResult, 0, len(updates)),
+		Results:        make([]BulkItemResult, 0, len(updates)),
 	}
-	
+
 	for i, update := range updates {
 		updatedGroup, err := m.provider.UpdateGroup(ctx, update.GroupID, update.Updates)
 		if err != nil {
@@ -1128,7 +1130,7 @@ func (m *DefaultBulkOperationManager) processBatchUpdateGroups(ctx context.Conte
 			})
 		}
 	}
-	
+
 	result.Success = result.ErrorCount == 0
 	return result, nil
 }
@@ -1137,9 +1139,9 @@ func (m *DefaultBulkOperationManager) processBatchUpdateGroups(ctx context.Conte
 func (m *DefaultBulkOperationManager) processBatchDeleteGroups(ctx context.Context, groupIDs []string, options *BulkOptions) (*BatchResult, error) {
 	result := &BatchResult{
 		ProcessedCount: len(groupIDs),
-		Results:       make([]BulkItemResult, 0, len(groupIDs)),
+		Results:        make([]BulkItemResult, 0, len(groupIDs)),
 	}
-	
+
 	for i, groupID := range groupIDs {
 		err := m.provider.DeleteGroup(ctx, groupID)
 		if err != nil {
@@ -1164,7 +1166,7 @@ func (m *DefaultBulkOperationManager) processBatchDeleteGroups(ctx context.Conte
 			})
 		}
 	}
-	
+
 	result.Success = result.ErrorCount == 0
 	return result, nil
 }
@@ -1173,9 +1175,9 @@ func (m *DefaultBulkOperationManager) processBatchDeleteGroups(ctx context.Conte
 func (m *DefaultBulkOperationManager) processBatchAddMemberships(ctx context.Context, memberships []*GroupMembership, options *BulkOptions) (*BatchResult, error) {
 	result := &BatchResult{
 		ProcessedCount: len(memberships),
-		Results:       make([]BulkItemResult, 0, len(memberships)),
+		Results:        make([]BulkItemResult, 0, len(memberships)),
 	}
-	
+
 	for i, membership := range memberships {
 		err := m.provider.AddUserToGroup(ctx, membership.UserID, membership.GroupID)
 		if err != nil {
@@ -1202,7 +1204,7 @@ func (m *DefaultBulkOperationManager) processBatchAddMemberships(ctx context.Con
 			})
 		}
 	}
-	
+
 	result.Success = result.ErrorCount == 0
 	return result, nil
 }
@@ -1211,9 +1213,9 @@ func (m *DefaultBulkOperationManager) processBatchAddMemberships(ctx context.Con
 func (m *DefaultBulkOperationManager) processBatchRemoveMemberships(ctx context.Context, memberships []*GroupMembership, options *BulkOptions) (*BatchResult, error) {
 	result := &BatchResult{
 		ProcessedCount: len(memberships),
-		Results:       make([]BulkItemResult, 0, len(memberships)),
+		Results:        make([]BulkItemResult, 0, len(memberships)),
 	}
-	
+
 	for i, membership := range memberships {
 		err := m.provider.RemoveUserFromGroup(ctx, membership.UserID, membership.GroupID)
 		if err != nil {
@@ -1240,7 +1242,7 @@ func (m *DefaultBulkOperationManager) processBatchRemoveMemberships(ctx context.
 			})
 		}
 	}
-	
+
 	result.Success = result.ErrorCount == 0
 	return result, nil
 }
@@ -1259,15 +1261,15 @@ func (m *DefaultBulkOperationManager) CancelOperation(operationID string) error 
 func (m *DefaultBulkOperationManager) SetRateLimit(requests int, window time.Duration) {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
-	
+
 	// Close existing rate limiter
 	if m.rateLimiter != nil {
 		m.rateLimiter.Close()
 	}
-	
+
 	// Create new rate limiter
 	m.rateLimiter = NewRateLimiter(requests, window, m.config.BurstSize)
-	
+
 	// Update config
 	switch window {
 	case time.Second:
@@ -1283,7 +1285,7 @@ func (m *DefaultBulkOperationManager) SetRateLimit(requests int, window time.Dur
 func (m *DefaultBulkOperationManager) SetBatchSize(batchSize int) {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
-	
+
 	if batchSize > 0 && batchSize <= m.config.MaxBatchSize {
 		m.config.DefaultBatchSize = batchSize
 	}
@@ -1292,9 +1294,9 @@ func (m *DefaultBulkOperationManager) SetBatchSize(batchSize int) {
 // GetCapabilities returns the bulk operation capabilities
 func (m *DefaultBulkOperationManager) GetCapabilities() *BulkCapabilities {
 	providerCaps := m.provider.GetCapabilities()
-	
+
 	return &BulkCapabilities{
-		MaxBatchSize:        m.config.MaxBatchSize,
+		MaxBatchSize:         m.config.MaxBatchSize,
 		MaxConcurrentBatches: m.config.MaxConcurrentBatches,
 		SupportedOperations: []string{
 			"create_users", "update_users", "delete_users",

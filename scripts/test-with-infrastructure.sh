@@ -23,6 +23,9 @@ fi
 export CI=1
 export CFGMS_TEST_INTEGRATION=1
 
+# Set default database name if not provided
+export CFGMS_TEST_DB_NAME=${CFGMS_TEST_DB_NAME:-cfgms_test}
+
 echo ""
 echo "🔧 Test Environment Configuration:"
 echo "  Database: ${CFGMS_TEST_DB_HOST}:${CFGMS_TEST_DB_PORT}/${CFGMS_TEST_DB_NAME}"

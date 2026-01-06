@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 package git
 
 import (
@@ -22,12 +24,12 @@ type GitRBACStore struct {
 func (s *GitRBACStore) safeReadFile(targetPath string) ([]byte, error) {
 	// Clean the path to resolve any .. or . components
 	cleanPath := filepath.Clean(targetPath)
-	
+
 	// Ensure the path is within the repo directory
 	if !strings.HasPrefix(cleanPath, filepath.Clean(s.repoPath)) {
 		return nil, fmt.Errorf("path outside repository: %s", targetPath)
 	}
-	
+
 	return os.ReadFile(cleanPath)
 }
 
@@ -37,12 +39,12 @@ func NewGitRBACStore(repoPath, remoteURL string) (*GitRBACStore, error) {
 		repoPath:  repoPath,
 		remoteURL: remoteURL,
 	}
-	
+
 	// Initialize git repository if it doesn't exist
 	if err := store.initializeRepo(); err != nil {
 		return nil, fmt.Errorf("failed to initialize git repository: %w", err)
 	}
-	
+
 	return store, nil
 }
 
@@ -55,7 +57,7 @@ func (s *GitRBACStore) initializeRepo() error {
 			return fmt.Errorf("failed to create directory: %w", err)
 		}
 	}
-	
+
 	// Create subdirectories for RBAC data
 	dirs := []string{"permissions", "roles", "subjects", "assignments"}
 	for _, dir := range dirs {
@@ -64,7 +66,7 @@ func (s *GitRBACStore) initializeRepo() error {
 			return fmt.Errorf("failed to create directory %s: %w", dir, err)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -86,12 +88,12 @@ func (s *GitRBACStore) StorePermission(ctx context.Context, permission *common.P
 	if err != nil {
 		return fmt.Errorf("failed to marshal permission: %w", err)
 	}
-	
+
 	filePath := filepath.Join(s.repoPath, "permissions", permission.Id+".json")
 	if err := os.WriteFile(filePath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write permission file: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -105,12 +107,12 @@ func (s *GitRBACStore) GetPermission(ctx context.Context, id string) (*common.Pe
 		}
 		return nil, fmt.Errorf("failed to read permission file: %w", err)
 	}
-	
+
 	var permission common.Permission
 	if err := json.Unmarshal(data, &permission); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal permission: %w", err)
 	}
-	
+
 	return &permission, nil
 }
 
@@ -121,25 +123,25 @@ func (s *GitRBACStore) ListPermissions(ctx context.Context, resourceType string)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list permission files: %w", err)
 	}
-	
+
 	var permissions []*common.Permission
 	for _, file := range files {
 		data, err := s.safeReadFile(file)
 		if err != nil {
 			continue // Skip files that can't be read
 		}
-		
+
 		var permission common.Permission
 		if err := json.Unmarshal(data, &permission); err != nil {
 			continue // Skip files that can't be parsed
 		}
-		
+
 		// Filter by resource type if specified
 		if resourceType == "" || permission.ResourceType == resourceType {
 			permissions = append(permissions, &permission)
 		}
 	}
-	
+
 	return permissions, nil
 }
 
@@ -157,7 +159,7 @@ func (s *GitRBACStore) DeletePermission(ctx context.Context, id string) error {
 		}
 		return fmt.Errorf("failed to delete permission file: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -169,12 +171,12 @@ func (s *GitRBACStore) StoreRole(ctx context.Context, role *common.Role) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal role: %w", err)
 	}
-	
+
 	filePath := filepath.Join(s.repoPath, "roles", role.Id+".json")
 	if err := os.WriteFile(filePath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write role file: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -188,12 +190,12 @@ func (s *GitRBACStore) GetRole(ctx context.Context, id string) (*common.Role, er
 		}
 		return nil, fmt.Errorf("failed to read role file: %w", err)
 	}
-	
+
 	var role common.Role
 	if err := json.Unmarshal(data, &role); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal role: %w", err)
 	}
-	
+
 	return &role, nil
 }
 
@@ -204,25 +206,25 @@ func (s *GitRBACStore) ListRoles(ctx context.Context, tenantID string) ([]*commo
 	if err != nil {
 		return nil, fmt.Errorf("failed to list role files: %w", err)
 	}
-	
+
 	var roles []*common.Role
 	for _, file := range files {
 		data, err := s.safeReadFile(file)
 		if err != nil {
 			continue // Skip files that can't be read
 		}
-		
+
 		var role common.Role
 		if err := json.Unmarshal(data, &role); err != nil {
 			continue // Skip files that can't be parsed
 		}
-		
+
 		// Filter by tenant ID if specified
 		if tenantID == "" || role.TenantId == tenantID || role.IsSystemRole {
 			roles = append(roles, &role)
 		}
 	}
-	
+
 	return roles, nil
 }
 
@@ -240,7 +242,7 @@ func (s *GitRBACStore) DeleteRole(ctx context.Context, id string) error {
 		}
 		return fmt.Errorf("failed to delete role file: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -252,12 +254,12 @@ func (s *GitRBACStore) StoreSubject(ctx context.Context, subject *common.Subject
 	if err != nil {
 		return fmt.Errorf("failed to marshal subject: %w", err)
 	}
-	
+
 	filePath := filepath.Join(s.repoPath, "subjects", subject.Id+".json")
 	if err := os.WriteFile(filePath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write subject file: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -271,12 +273,12 @@ func (s *GitRBACStore) GetSubject(ctx context.Context, id string) (*common.Subje
 		}
 		return nil, fmt.Errorf("failed to read subject file: %w", err)
 	}
-	
+
 	var subject common.Subject
 	if err := json.Unmarshal(data, &subject); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal subject: %w", err)
 	}
-	
+
 	return &subject, nil
 }
 
@@ -300,7 +302,7 @@ func (s *GitRBACStore) DeleteSubject(ctx context.Context, id string) error {
 		}
 		return fmt.Errorf("failed to delete subject file: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -312,13 +314,13 @@ func (s *GitRBACStore) StoreRoleAssignment(ctx context.Context, assignment *comm
 	if err != nil {
 		return fmt.Errorf("failed to marshal assignment: %w", err)
 	}
-	
+
 	fileName := fmt.Sprintf("%s-%s-%s.json", assignment.SubjectId, assignment.RoleId, assignment.TenantId)
 	filePath := filepath.Join(s.repoPath, "assignments", fileName)
 	if err := os.WriteFile(filePath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write assignment file: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -332,7 +334,7 @@ func (s *GitRBACStore) GetRoleAssignment(ctx context.Context, id string) (*commo
 // ListRoleAssignments implements RBACStore.ListRoleAssignments
 func (s *GitRBACStore) ListRoleAssignments(ctx context.Context, subjectID, roleID, tenantID string) ([]*common.RoleAssignment, error) {
 	assignmentsDir := filepath.Join(s.repoPath, "assignments")
-	
+
 	// Read all assignment files and filter based on parameters
 	files, err := os.ReadDir(assignmentsDir)
 	if err != nil {
@@ -341,24 +343,24 @@ func (s *GitRBACStore) ListRoleAssignments(ctx context.Context, subjectID, roleI
 		}
 		return nil, fmt.Errorf("failed to read assignments directory: %w", err)
 	}
-	
+
 	var assignments []*common.RoleAssignment
 	for _, file := range files {
 		if file.IsDir() || !strings.HasSuffix(file.Name(), ".json") {
 			continue
 		}
-		
+
 		filePath := filepath.Join(assignmentsDir, file.Name())
 		data, err := s.safeReadFile(filePath)
 		if err != nil {
 			continue // Skip files that can't be read
 		}
-		
+
 		var assignment common.RoleAssignment
 		if err := json.Unmarshal(data, &assignment); err != nil {
 			continue // Skip files that can't be parsed
 		}
-		
+
 		// Apply filters
 		if subjectID != "" && assignment.SubjectId != subjectID {
 			continue
@@ -369,10 +371,10 @@ func (s *GitRBACStore) ListRoleAssignments(ctx context.Context, subjectID, roleI
 		if tenantID != "" && assignment.TenantId != tenantID {
 			continue
 		}
-		
+
 		assignments = append(assignments, &assignment)
 	}
-	
+
 	return assignments, nil
 }
 
@@ -386,7 +388,7 @@ func (s *GitRBACStore) DeleteRoleAssignment(ctx context.Context, subjectID, role
 		}
 		return fmt.Errorf("failed to delete assignment file: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -435,7 +437,7 @@ func (s *GitRBACStore) GetRolePermissions(ctx context.Context, roleID string) ([
 	if err != nil {
 		return nil, err
 	}
-	
+
 	var permissions []*common.Permission
 	for _, permissionID := range role.PermissionIds {
 		permission, err := s.GetPermission(ctx, permissionID)
@@ -444,7 +446,7 @@ func (s *GitRBACStore) GetRolePermissions(ctx context.Context, roleID string) ([
 		}
 		permissions = append(permissions, permission)
 	}
-	
+
 	return permissions, nil
 }
 

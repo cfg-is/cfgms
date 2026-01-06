@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package terminal
 
 import (
@@ -161,7 +163,7 @@ func (h *DefaultWebSocketHandler) parseSessionRequest(r *http.Request) (*Session
 func (h *DefaultWebSocketHandler) handleSession(ctx context.Context, conn *websocket.Conn, session *Session) {
 	// Set up channels for handling messages
 	done := make(chan struct{})
-	
+
 	// Start reading messages from WebSocket
 	go h.readMessages(ctx, conn, session, done)
 
@@ -183,9 +185,9 @@ func (h *DefaultWebSocketHandler) readMessages(ctx context.Context, conn *websoc
 	}
 	conn.SetPongHandler(func(string) error {
 		if err := conn.SetReadDeadline(time.Now().Add(60 * time.Second)); err != nil {
-		// Log error but continue
-		_ = err // Explicitly ignore deadline errors for resilience
-	}
+			// Log error but continue
+			_ = err // Explicitly ignore deadline errors for resilience
+		}
 		return nil
 	})
 
@@ -224,15 +226,15 @@ func (h *DefaultWebSocketHandler) writeMessages(ctx context.Context, conn *webso
 			return
 		case <-ticker.C:
 			if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
-		// Log error but continue
-		_ = err // Explicitly ignore deadline errors for resilience
-	}
+				// Log error but continue
+				_ = err // Explicitly ignore deadline errors for resilience
+			}
 			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				h.logger.Warn("Failed to send ping", "session_id", session.ID, "error", err)
 				return
 			}
-		// In a real implementation, this would include a channel for receiving
-		// output data from the steward and sending it to the WebSocket client
+			// In a real implementation, this would include a channel for receiving
+			// output data from the steward and sending it to the WebSocket client
 		}
 	}
 }
@@ -279,4 +281,3 @@ func (h *DefaultWebSocketHandler) sendError(conn *websocket.Conn, errorMsg strin
 		h.logger.Warn("Failed to send error message", "error", err)
 	}
 }
-

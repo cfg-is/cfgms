@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package workflow
 
 import (
@@ -5,9 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 func TestWorkflowConditionalLogic(t *testing.T) {
@@ -466,7 +469,7 @@ func TestWorkflowConditionalExecution(t *testing.T) {
 	workflow := Workflow{
 		Name: "conditional-test",
 		Variables: map[string]interface{}{
-			"environment": "production",
+			"environment":     "production",
 			"feature_enabled": true,
 		},
 		Steps: []Step{

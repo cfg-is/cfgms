@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package directory
 
 import (
@@ -5,10 +7,12 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"testing"
 
-	"github.com/cfgis/cfgms/features/modules"
 	"gopkg.in/yaml.v3"
+
+	"github.com/cfgis/cfgms/features/modules"
 )
 
 // createConfigFromYAML creates a directoryConfig from YAML string
@@ -104,6 +108,11 @@ group: nonexistentgroup`,
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Skip ownership tests on Windows (chown not supported)
+			if runtime.GOOS == "windows" && tt.name == "Create directory with ownership" {
+				t.Skip("Skipping ownership test on Windows - chown not supported")
+			}
+
 			if tt.setup != nil {
 				if err := tt.setup(); err != nil {
 					t.Fatalf("Setup failed: %v", err)

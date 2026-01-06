@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // Package reports provides advanced reporting capabilities for Story #173.
 // This extends the existing DNA-focused reporting system to include audit data integration,
 // comprehensive multi-tenant reporting, and advanced analytics.
@@ -59,23 +61,23 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/cfgis/cfgms/features/rbac"
 	reportcache "github.com/cfgis/cfgms/features/reports/cache"
 	"github.com/cfgis/cfgms/features/reports/engine"
 	"github.com/cfgis/cfgms/features/reports/exporters"
 	"github.com/cfgis/cfgms/features/reports/interfaces"
 	"github.com/cfgis/cfgms/features/reports/provider"
 	"github.com/cfgis/cfgms/features/reports/templates"
-	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/steward/dna/drift"
 	"github.com/cfgis/cfgms/features/steward/dna/storage"
 	"github.com/cfgis/cfgms/pkg/audit"
-	storageInterfaces "github.com/cfgis/cfgms/pkg/storage/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging"
+	storageInterfaces "github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
 // AdvancedService provides comprehensive reporting capabilities integrating DNA and audit data
 type AdvancedService struct {
-	*Service                                    // Embed existing service for backward compatibility
+	*Service         // Embed existing service for backward compatibility
 	advancedEngine   interfaces.AdvancedReportEngine
 	advancedProvider interfaces.AdvancedDataProvider
 	rbacManager      *rbac.Manager
@@ -86,31 +88,29 @@ type AdvancedService struct {
 
 // AdvancedServiceConfig contains configuration for the advanced reports service
 type AdvancedServiceConfig struct {
-	ServiceConfig                        // Embed base config
-	EnableAuditIntegration    bool       `json:"enable_audit_integration"`
-	EnableRBACValidation      bool       `json:"enable_rbac_validation"`
-	EnableCrossSystemMetrics  bool       `json:"enable_cross_system_metrics"`
-	MaxTenantsPerReport       int        `json:"max_tenants_per_report"`
-	ComplianceFrameworks      []string   `json:"compliance_frameworks"`
-	SecurityEventRetention    time.Duration `json:"security_event_retention"`
-	AdvancedCacheConfig       interfaces.AdvancedCacheConfig `json:"advanced_cache_config"`
+	ServiceConfig                                           // Embed base config
+	EnableAuditIntegration   bool                           `json:"enable_audit_integration"`
+	EnableRBACValidation     bool                           `json:"enable_rbac_validation"`
+	EnableCrossSystemMetrics bool                           `json:"enable_cross_system_metrics"`
+	MaxTenantsPerReport      int                            `json:"max_tenants_per_report"`
+	ComplianceFrameworks     []string                       `json:"compliance_frameworks"`
+	SecurityEventRetention   time.Duration                  `json:"security_event_retention"`
+	AdvancedCacheConfig      interfaces.AdvancedCacheConfig `json:"advanced_cache_config"`
 }
-
 
 // DefaultAdvancedServiceConfig returns default configuration for advanced reporting
 func DefaultAdvancedServiceConfig() AdvancedServiceConfig {
 	return AdvancedServiceConfig{
-		ServiceConfig:             DefaultServiceConfig(),
-		EnableAuditIntegration:    true,
-		EnableRBACValidation:      true,
-		EnableCrossSystemMetrics:  true,
-		MaxTenantsPerReport:       50,
-		ComplianceFrameworks:      []string{"CIS", "HIPAA", "PCI-DSS"},
-		SecurityEventRetention:    90 * 24 * time.Hour, // 90 days
-		AdvancedCacheConfig:       interfaces.DefaultAdvancedCacheConfig(),
+		ServiceConfig:            DefaultServiceConfig(),
+		EnableAuditIntegration:   true,
+		EnableRBACValidation:     true,
+		EnableCrossSystemMetrics: true,
+		MaxTenantsPerReport:      50,
+		ComplianceFrameworks:     []string{"CIS", "HIPAA", "PCI-DSS"},
+		SecurityEventRetention:   90 * 24 * time.Hour, // 90 days
+		AdvancedCacheConfig:      interfaces.DefaultAdvancedCacheConfig(),
 	}
 }
-
 
 // NewAdvancedService creates a new advanced reports service
 func NewAdvancedService(
@@ -393,13 +393,13 @@ func (s *AdvancedService) GenerateComplianceAssessment(
 	format interfaces.ExportFormat,
 ) ([]byte, error) {
 	req := interfaces.ComplianceReportRequest{
-		TimeRange:       timeRange,
-		TenantIDs:       tenantIDs,
-		Frameworks:      frameworks,
-		IncludeBaselines: true,
+		TimeRange:         timeRange,
+		TenantIDs:         tenantIDs,
+		Frameworks:        frameworks,
+		IncludeBaselines:  true,
 		IncludeExceptions: false,
-		Format:          format,
-		DetailLevel:     "detailed",
+		Format:            format,
+		DetailLevel:       "detailed",
 	}
 
 	report, err := s.GenerateComplianceReport(ctx, req)
@@ -622,19 +622,19 @@ func (s *AdvancedService) GetMetrics(ctx context.Context) map[string]interface{}
 			"cross_system_metrics": s.config.EnableCrossSystemMetrics,
 		},
 		"configuration": map[string]interface{}{
-			"max_tenants_per_report":    s.config.MaxTenantsPerReport,
-			"compliance_frameworks":     len(s.config.ComplianceFrameworks),
-			"security_event_retention":  s.config.SecurityEventRetention.String(),
-			"advanced_caching_enabled":  s.config.AdvancedCacheConfig.EnableAdvancedCaching,
+			"max_tenants_per_report":   s.config.MaxTenantsPerReport,
+			"compliance_frameworks":    len(s.config.ComplianceFrameworks),
+			"security_event_retention": s.config.SecurityEventRetention.String(),
+			"advanced_caching_enabled": s.config.AdvancedCacheConfig.EnableAdvancedCaching,
 		},
 	}
 
 	// Add cache metrics if enabled
 	if s.config.AdvancedCacheConfig.CacheMetricsEnabled {
 		metrics["cache"] = map[string]interface{}{
-			"compliance_report_ttl":  s.config.AdvancedCacheConfig.ComplianceReportTTL.String(),
-			"security_report_ttl":    s.config.AdvancedCacheConfig.SecurityReportTTL.String(),
-			"executive_report_ttl":   s.config.AdvancedCacheConfig.ExecutiveReportTTL.String(),
+			"compliance_report_ttl":   s.config.AdvancedCacheConfig.ComplianceReportTTL.String(),
+			"security_report_ttl":     s.config.AdvancedCacheConfig.SecurityReportTTL.String(),
+			"executive_report_ttl":    s.config.AdvancedCacheConfig.ExecutiveReportTTL.String(),
 			"multi_tenant_report_ttl": s.config.AdvancedCacheConfig.MultiTenantReportTTL.String(),
 		}
 	}
@@ -674,4 +674,3 @@ func (s *AdvancedService) exportAdvancedReport(ctx context.Context, report inter
 		return nil, fmt.Errorf("unsupported format: %s", format)
 	}
 }
-

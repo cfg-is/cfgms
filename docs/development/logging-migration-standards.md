@@ -11,16 +11,19 @@ This document defines the standards for migrating all CFGMS modules and packages
 All log entries MUST include these standardized fields:
 
 #### Service Identification
-- `service_name`: Service identifier ("controller", "steward", "cfgctl")
+
+- `service_name`: Service identifier ("controller", "steward", "cfg")
 - `component`: Component within service (e.g., "rbac", "workflow", "dna")
 - `module`: Specific module name (e.g., "script", "firewall", "m365")
 
 #### Multi-Tenant Context
+
 - `tenant_id`: Tenant identifier for multi-tenant isolation (REQUIRED for tenant-scoped operations)
 - `session_id`: Session identifier for tracking user sessions
 - `correlation_id`: Request correlation for distributed tracing
 
 #### Operational Context
+
 - `operation`: High-level operation being performed (e.g., "config_apply", "script_execute", "user_create")
 - `resource_id`: Specific resource being operated on (e.g., device ID, user ID)
 - `resource_type`: Type of resource (e.g., "device", "user", "configuration")
@@ -28,26 +31,31 @@ All log entries MUST include these standardized fields:
 ### Level-Specific Field Requirements
 
 #### ERROR and FATAL Levels
+
 - `error_code`: Standardized error code (e.g., "AUTH_FAILED", "CONFIG_INVALID")
 - `error_details`: Additional error context
 - `recovery_action`: Suggested recovery action if available
 
 #### INFO Level (for significant operations)
+
 - `duration_ms`: Operation duration in milliseconds
 - `status`: Operation status ("started", "completed", "failed")
 
 #### DEBUG Level
+
 - `function`: Function/method name being executed
 - `step`: Current step in multi-step operations
 
 ### Tenant Isolation Requirements
 
 #### MUST Requirements
+
 - Log entries MUST NOT contain data from other tenants
 - Cross-tenant operations MUST use separate log entries per tenant
 - Tenant ID MUST be validated before logging tenant-specific data
 
 #### Example Tenant-Safe Logging
+
 ```go
 // CORRECT: Separate log entries per tenant
 for _, tenant := range tenants {
@@ -64,21 +72,25 @@ logger.Info("Processing configurations",
 ## Migration Strategy
 
 ### Phase 1: Core Service Migration
+
 1. Update main service entry points (cmd/controller, cmd/steward)
 2. Initialize global logging provider with proper configuration
 3. Replace direct logging.NewLogger() calls with logging.ForComponent()
 
 ### Phase 2: Module Migration
+
 1. Replace logger initialization in modules with dependency injection
 2. Update all logging calls to use structured fields
 3. Add proper tenant context extraction
 
 ### Phase 3: Package Migration
+
 1. Update shared packages (pkg/*) to use global provider
 2. Ensure no direct logging initialization in packages
 3. Use logging.ForComponent() for package-specific logging
 
 ### Phase 4: Validation & Testing
+
 1. Audit all log outputs for structured format compliance
 2. Test tenant isolation under load
 3. Validate performance impact
@@ -153,7 +165,7 @@ func main() {
     loggingConfig := &logging.LoggingConfig{
         Provider:        "file", // or "timescale" for production
         Level:          "INFO",
-        ServiceName:     "controller", // or "steward", "cfgctl"
+        ServiceName:     "controller", // or "steward", "cfg"
         Component:       "main",
         TenantIsolation: true,
         EnableCorrelation: true,
@@ -177,18 +189,21 @@ func main() {
 ## Testing Requirements
 
 ### Unit Tests
+
 - Verify structured field format compliance
 - Test tenant isolation boundaries
 - Validate log level filtering
 - Ensure no cross-tenant information leakage
 
 ### Integration Tests
+
 - End-to-end logging flow testing
 - Multi-tenant scenario validation
 - Performance impact measurement
 - Provider fallback behavior
 
 ### Audit Requirements
+
 - All log outputs must be audited for compliance
 - Cross-tenant data leakage detection
 - Structured field completeness verification
@@ -196,12 +211,14 @@ func main() {
 ## Performance Considerations
 
 ### Optimization Guidelines
+
 - Use async writes for high-volume logging
 - Implement proper log level filtering
 - Cache logger instances where appropriate
 - Use structured fields efficiently
 
 ### Monitoring
+
 - Track logging performance metrics
 - Monitor provider availability
 - Alert on tenant isolation violations
@@ -219,7 +236,8 @@ This migration supports Story #166 acceptance criteria:
 
 ## Migration Checklist
 
-### For Each Module/Package:
+### For Each Module/Package
+
 - [ ] Replace direct logger initialization with global provider
 - [ ] Add structured field support
 - [ ] Implement tenant context extraction
@@ -228,13 +246,15 @@ This migration supports Story #166 acceptance criteria:
 - [ ] Write unit tests for logging behavior
 - [ ] Validate tenant isolation compliance
 
-### For Services:
+### For Services
+
 - [ ] Initialize global logging provider in main()
 - [ ] Configure appropriate provider (file/timescale)
 - [ ] Set up global logger factory
 - [ ] Update service components to use global provider
 
-### For Integration:
+### For Integration
+
 - [ ] End-to-end logging flow testing
 - [ ] Performance impact validation
 - [ ] Multi-tenant scenario testing

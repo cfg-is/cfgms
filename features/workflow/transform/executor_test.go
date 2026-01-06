@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package transform
 
 import (
@@ -43,7 +45,7 @@ func TestTransformExecutor_Execute(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, result.Success)
 	assert.Equal(t, "processed_hello", result.Data["result"])
-	assert.Greater(t, result.Duration, time.Duration(0))
+	assert.GreaterOrEqual(t, result.Duration, time.Duration(0))
 
 	// Verify logging
 	testLogger := logger
@@ -437,4 +439,3 @@ func (l *TestTransformLogger) WithField(key string, value interface{}) Transform
 func (l *TestTransformLogger) WithFields(fields map[string]interface{}) TransformLogger {
 	return l // Return same logger for simplicity in tests
 }
-

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package workflow
 
 import (
@@ -5,11 +7,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
+
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
 // MockConfigStore implements interfaces.ConfigStore for testing
@@ -88,8 +91,8 @@ func TestVersionManager_CreateWorkflow(t *testing.T) {
 		// Mock that workflow doesn't exist yet
 		mockStore.On("ListConfigs", ctx, mock.MatchedBy(func(filter *interfaces.ConfigFilter) bool {
 			return filter.Namespace == WorkflowNamespace &&
-				   len(filter.Names) == 1 &&
-				   filter.Names[0] == "test-workflow"
+				len(filter.Names) == 1 &&
+				filter.Names[0] == "test-workflow"
 		})).Return([]*interfaces.ConfigEntry{}, nil)
 
 		// Mock successful storage
@@ -128,15 +131,15 @@ func TestVersionManager_CreateWorkflow(t *testing.T) {
 		// Mock the ListWorkflowVersions call (used by GetLatestWorkflow)
 		mockStore.On("ListConfigs", ctx, mock.MatchedBy(func(filter *interfaces.ConfigFilter) bool {
 			return filter.Namespace == WorkflowNamespace &&
-				   len(filter.Names) == 1 &&
-				   filter.Names[0] == "test-workflow"
+				len(filter.Names) == 1 &&
+				filter.Names[0] == "test-workflow"
 		})).Return([]*interfaces.ConfigEntry{existingEntry}, nil)
 
 		// Mock the GetWorkflow call (used by GetLatestWorkflow after ListWorkflowVersions)
 		mockStore.On("GetConfig", ctx, mock.MatchedBy(func(key *interfaces.ConfigKey) bool {
 			return key.Namespace == WorkflowNamespace &&
-				   key.Name == "test-workflow" &&
-				   key.Scope == "1.0.0"
+				key.Name == "test-workflow" &&
+				key.Scope == "1.0.0"
 		})).Return(existingEntry, nil)
 
 		_, err := vm.CreateWorkflow(ctx, workflow, "1.0.0")
@@ -299,7 +302,7 @@ func TestVersionManager_ForkWorkflow(t *testing.T) {
 
 		assert.Equal(t, SemanticVersion{1, 1, 0, "", ""}, forked.SemanticVersion)
 		assert.Contains(t, forked.VersionTags, "stable") // Tags copied
-		assert.Len(t, forked.Changelog, 2)              // Original + fork entry
+		assert.Len(t, forked.Changelog, 2)               // Original + fork entry
 		assert.Contains(t, forked.Changelog[0].Description, "Forked from version 1.0.0")
 
 		mockStore.AssertExpectations(t)

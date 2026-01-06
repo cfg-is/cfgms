@@ -1,0 +1,118 @@
+# CFGMS Gitleaks Configuration
+# Project-specific secret detection rules for v0.8.0
+#
+# This configuration extends gitleaks default rules with CFGMS-specific patterns
+# and allowlists legitimate test fixtures and documentation examples.
+#
+# See: https://github.com/gitleaks/gitleaks
+
+title = "CFGMS Secret Detection Configuration"
+
+[extend]
+# Use all default gitleaks rules as a baseline
+useDefault = true
+
+# Custom CFGMS-specific secret patterns
+# These patterns detect CFGMS-specific credentials that could be leaked
+
+[[rules]]
+id = "cfgms-api-key"
+description = "CFGMS API Key"
+regex = '''cfgms_key_[a-zA-Z0-9]{32,}'''
+tags = ["cfgms", "api-key"]
+# Exclude test files
+[rules.allowlist]
+paths = ['''.*_test\.go$''', '''test/.*''']
+
+[[rules]]
+id = "cfgms-registration-token"
+description = "CFGMS Registration Token"
+regex = '''cfgms_reg_[a-zA-Z0-9]{32,}'''
+tags = ["cfgms", "registration"]
+# Exclude test files
+[rules.allowlist]
+paths = ['''.*_test\.go$''', '''test/.*''']
+
+[[rules]]
+id = "cfgms-session-token"
+description = "CFGMS Session Token"
+regex = '''cfgms_session_[a-zA-Z0-9]{32,}'''
+tags = ["cfgms", "session"]
+# Exclude test files
+[rules.allowlist]
+paths = ['''.*_test\.go$''', '''test/.*''']
+
+# Allowlist Configuration
+# These paths contain legitimate test fixtures and examples that should not be flagged
+
+[allowlist]
+description = "Allowlist for CFGMS test fixtures and documentation"
+
+# Test certificate private keys (generated for integration testing)
+paths = [
+    # Integration test certificates
+    '''test/integration/mqtt_quic/certs/.*\.key\.pem$''',
+    '''test/integration/mqtt_quic/certs/.*-key\.pem$''',
+    '''test/integration/.*\.key$''',
+
+    # Unit test certificates
+    '''test/unit/.*/certs/.*\.key$''',
+    '''test/unit/.*/certs/.*\.pem$''',
+
+    # Feature test certificates
+    '''features/controller/certs/.*\.key$''',
+    '''features/controller/certs/.*\.pem$''',
+
+    # Root test certificates
+    '''certs/ca/ca\.key$''',
+
+    # Test fixtures and data
+    '''test/testdata/.*''',
+    '''test/.*/fixtures/.*''',
+    '''.*/testdata/.*''',
+
+    # Environment and configuration examples
+    '''\.env\..*\.example$''',
+    '''\.env\.test$''',
+    '''\.env\.local\.example$''',
+
+    # Documentation examples
+    '''docs/.*\.md$''',
+    '''QUICK_START\.md$''',
+    '''README\.md$''',
+
+    # Known safe baseline
+    '''\.secrets\.baseline$''',
+]
+
+# Allowlist specific test values and patterns
+regexes = [
+    # Test/example API keys with known safe patterns
+    '''test-api-key-[0-9a-f]+''',
+    '''example-key-[0-9a-zA-Z]+''',
+    '''test_secret_[0-9a-zA-Z]+''',
+
+    # Common test tenant IDs (Microsoft 365 test tenants)
+    '''00000000-0000-0000-0000-000000000000''',
+    '''11111111-1111-1111-1111-111111111111''',
+
+    # Test client IDs/secrets in documentation
+    '''your-client-id-here''',
+    '''your-client-secret-here''',
+    '''REPLACE_WITH_.*''',
+    '''<your-.*>''',
+]
+
+# Commit allowlist (if needed for specific known-safe commits)
+commits = []
+
+# Stopwords that indicate test/example context
+stopwords = [
+    "test",
+    "example",
+    "sample",
+    "placeholder",
+    "dummy",
+    "fake",
+    "mock",
+]

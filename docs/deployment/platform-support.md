@@ -30,6 +30,7 @@ The CFGMS Controller is designed for infrastructure deployment:
 ### Cross-Platform Steward Capabilities
 
 #### Linux & macOS (Unix-like)
+
 - **System Information**: Native syscall-based hardware and software collection
 - **Package Management**: Native package manager integration (apt, yum, brew, etc.)
 - **Process Management**: Full Unix process control and monitoring
@@ -38,6 +39,7 @@ The CFGMS Controller is designed for infrastructure deployment:
 - **Security**: User/group management, SSH key handling, firewall configuration
 
 #### Windows
+
 - **System Information**: WMI and PowerShell-based hardware and software collection
 - **Package Management**: Chocolatey, Winget, and Windows Store app management
 - **Process Management**: Windows service management and process control
@@ -48,12 +50,14 @@ The CFGMS Controller is designed for infrastructure deployment:
 ### Controller Platform Features
 
 #### Linux (Primary Target)
+
 - **Container Ready**: Optimized for Docker and Kubernetes deployments
 - **System Integration**: Native systemd service integration
 - **High Availability**: Production-ready clustering and failover
 - **Performance**: Optimized for high-throughput steward management (50k+ endpoints)
 
 #### Windows (Development/Hybrid)
+
 - **Service Integration**: Windows Service support for production deployment
 - **Development**: Full development environment support
 - **Hybrid Environments**: Mixed Windows/Linux infrastructure management
@@ -61,6 +65,7 @@ The CFGMS Controller is designed for infrastructure deployment:
 ## Deployment Architectures
 
 ### Enterprise MSP Deployment
+
 ```
 ┌─────────────────┐    ┌──────────────────────────────────────┐
 │   Controller    │    │            Managed Endpoints         │
@@ -73,6 +78,7 @@ The CFGMS Controller is designed for infrastructure deployment:
 ```
 
 ### Development Environment
+
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │              Developer Workstation                          │
@@ -119,6 +125,7 @@ The project includes automated builds and testing for all supported platforms:
 ## Platform-Specific Installation
 
 ### Linux Steward
+
 ```bash
 # Download and install
 wget https://releases.cfgms.io/v0.3.0/cfgms-steward-linux-amd64
@@ -131,6 +138,7 @@ sudo systemctl start cfgms-steward
 ```
 
 ### Windows Steward
+
 ```powershell
 # Download and install
 Invoke-WebRequest -Uri "https://releases.cfgms.io/v0.3.0/cfgms-steward-windows-amd64.exe" -OutFile "cfgms-steward.exe"
@@ -141,6 +149,7 @@ sc start CFGMSSteward
 ```
 
 ### macOS Steward
+
 ```bash
 # Download and install
 curl -L https://releases.cfgms.io/v0.3.0/cfgms-steward-darwin-arm64 -o cfgms-steward
@@ -172,18 +181,21 @@ sudo launchctl load /Library/LaunchDaemons/com.cfgms.steward.plist
 ### Platform Security Features
 
 #### Linux
+
 - **Process Isolation**: Full namespace and cgroup support
 - **File Permissions**: POSIX ACL enforcement
 - **Network Security**: iptables/netfilter integration
 - **Certificate Management**: Native OpenSSL integration
 
 #### Windows
+
 - **Process Isolation**: Windows job objects and process isolation
 - **File Permissions**: NTFS ACL enforcement
 - **Network Security**: Windows Firewall integration
 - **Certificate Management**: Windows Certificate Store integration
 
 #### macOS
+
 - **Process Isolation**: Sandbox and entitlements support
 - **File Permissions**: Extended attributes and ACL support
 - **Network Security**: pfctl firewall integration
@@ -194,15 +206,18 @@ sudo launchctl load /Library/LaunchDaemons/com.cfgms.steward.plist
 ### Common Platform Issues
 
 #### Linux
+
 - **Permission Errors**: Ensure steward runs with appropriate privileges for resource management
 - **Systemd Integration**: Check service file permissions and user context
 
 #### Windows
+
 - **WMI Access**: Verify WMI service is running and accessible
 - **PowerShell Execution**: Check PowerShell execution policy settings
 - **Service Installation**: Require Administrator privileges for service installation
 
 #### macOS
+
 - **Gatekeeper**: Code signing may be required for distribution
 - **System Permissions**: Grant necessary permissions in System Preferences > Security
 - **Launchd Services**: Ensure proper plist format and permissions
@@ -210,6 +225,7 @@ sudo launchctl load /Library/LaunchDaemons/com.cfgms.steward.plist
 ### Platform-Specific Logging
 
 Each platform logs to appropriate system locations:
+
 - **Linux**: `/var/log/cfgms/` or systemd journal
 - **Windows**: Windows Event Log and `C:\ProgramData\CFGMS\logs\`
 - **macOS**: System log and `/usr/local/var/log/cfgms/`
@@ -217,9 +233,11 @@ Each platform logs to appropriate system locations:
 ## Future Platform Support
 
 ### Planned Additions
+
 - **Linux ARM32**: Raspberry Pi and embedded device support
 - **FreeBSD**: Advanced networking appliance support
 - **Container Platforms**: Native Kubernetes operator deployment
 
 ### Community Contributions
+
 Platform support contributions are welcome. See [CONTRIBUTING.md](../CONTRIBUTING.md) for guidelines on adding new platform support.

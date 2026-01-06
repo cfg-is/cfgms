@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package terminal
 
 import (
@@ -8,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/features/terminal/shell"
 	testutil "github.com/cfgis/cfgms/pkg/testing"
 )
 
@@ -76,7 +79,7 @@ func TestSessionLifecycle(t *testing.T) {
 	sessionReq := &SessionRequest{
 		StewardID: "test-steward-001",
 		UserID:    "test-user",
-		Shell:     "bash",
+		Shell:     shell.GetDefaultShell(),
 		Cols:      80,
 		Rows:      24,
 	}
@@ -121,7 +124,7 @@ func TestSessionConcurrency(t *testing.T) {
 		sessionReq := &SessionRequest{
 			StewardID: "test-steward-001",
 			UserID:    "test-user",
-			Shell:     "bash",
+			Shell:     shell.GetDefaultShell(),
 			Cols:      80,
 			Rows:      24,
 		}
@@ -158,7 +161,7 @@ func TestSessionTimeout(t *testing.T) {
 	sessionReq := &SessionRequest{
 		StewardID: "test-steward-001",
 		UserID:    "test-user",
-		Shell:     "bash",
+		Shell:     shell.GetDefaultShell(),
 		Cols:      80,
 		Rows:      24,
 	}
@@ -196,7 +199,7 @@ func TestMaxSessionsLimit(t *testing.T) {
 		sessionReq := &SessionRequest{
 			StewardID: "test-steward-001",
 			UserID:    "test-user",
-			Shell:     "bash",
+			Shell:     shell.GetDefaultShell(),
 			Cols:      80,
 			Rows:      24,
 		}
@@ -209,7 +212,7 @@ func TestMaxSessionsLimit(t *testing.T) {
 	sessionReq := &SessionRequest{
 		StewardID: "test-steward-001",
 		UserID:    "test-user",
-		Shell:     "bash",
+		Shell:     shell.GetDefaultShell(),
 		Cols:      80,
 		Rows:      24,
 	}
@@ -235,7 +238,7 @@ func TestSessionRecording(t *testing.T) {
 	sessionReq := &SessionRequest{
 		StewardID: "test-steward-001",
 		UserID:    "test-user",
-		Shell:     "bash",
+		Shell:     shell.GetDefaultShell(),
 		Cols:      80,
 		Rows:      24,
 	}

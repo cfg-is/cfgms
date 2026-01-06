@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package rollback
 
 import (
@@ -16,7 +18,7 @@ func NewDefaultRollbackNotifier(logger *log.Logger) RollbackNotifier {
 	if logger == nil {
 		logger = log.Default()
 	}
-	
+
 	return &DefaultRollbackNotifier{
 		logger: logger,
 	}
@@ -31,13 +33,13 @@ func (n *DefaultRollbackNotifier) NotifyRollbackStarted(ctx context.Context, ope
 		operation.Request.RollbackType,
 		operation.InitiatedBy,
 	)
-	
+
 	// In a real implementation, this would:
 	// - Send email notifications to stakeholders
 	// - Post to webhook endpoints
 	// - Send to message queues (Slack, Teams, etc.)
 	// - Update monitoring dashboards
-	
+
 	return nil
 }
 
@@ -49,10 +51,10 @@ func (n *DefaultRollbackNotifier) NotifyRollbackProgress(ctx context.Context, op
 		operation.Progress.Percentage,
 		operation.Progress.CurrentAction,
 	)
-	
+
 	// In a real implementation, this would send progress updates
 	// only at significant milestones to avoid notification spam
-	
+
 	return nil
 }
 
@@ -62,7 +64,7 @@ func (n *DefaultRollbackNotifier) NotifyRollbackCompleted(ctx context.Context, o
 	if operation.CompletedAt != nil {
 		duration = operation.CompletedAt.Sub(operation.InitiatedAt).String()
 	}
-	
+
 	n.logger.Printf("ROLLBACK COMPLETED: ID=%s, Success=%v, Duration=%s, Configs=%d, Devices=%d",
 		operation.ID,
 		operation.Result.Success,
@@ -70,9 +72,9 @@ func (n *DefaultRollbackNotifier) NotifyRollbackCompleted(ctx context.Context, o
 		operation.Result.ConfigurationsRolledBack,
 		operation.Result.DevicesAffected,
 	)
-	
+
 	// In a real implementation, this would send detailed completion reports
-	
+
 	return nil
 }
 
@@ -82,7 +84,7 @@ func (n *DefaultRollbackNotifier) NotifyRollbackFailed(ctx context.Context, oper
 		operation.ID,
 		err,
 	)
-	
+
 	if operation.Result != nil && len(operation.Result.Failures) > 0 {
 		for _, failure := range operation.Result.Failures {
 			n.logger.Printf("  - Component: %s, Error: %s, Recoverable: %v",
@@ -92,12 +94,12 @@ func (n *DefaultRollbackNotifier) NotifyRollbackFailed(ctx context.Context, oper
 			)
 		}
 	}
-	
+
 	// In a real implementation, this would:
 	// - Send high-priority alerts
 	// - Page on-call personnel for critical failures
 	// - Create incident tickets
-	
+
 	return nil
 }
 
@@ -112,7 +114,7 @@ func NewWebhookNotifier(webhookURL string, logger *log.Logger) RollbackNotifier 
 	if logger == nil {
 		logger = log.Default()
 	}
-	
+
 	return &WebhookNotifier{
 		webhookURL: webhookURL,
 		logger:     logger,
@@ -126,7 +128,7 @@ func (w *WebhookNotifier) NotifyRollbackStarted(ctx context.Context, operation *
 		"operation": operation,
 		"timestamp": operation.InitiatedAt,
 	}
-	
+
 	return w.sendWebhook(ctx, payload)
 }
 
@@ -136,13 +138,13 @@ func (w *WebhookNotifier) NotifyRollbackProgress(ctx context.Context, operation 
 	if operation.Progress.Percentage%25 != 0 {
 		return nil
 	}
-	
+
 	payload := map[string]interface{}{
 		"event":     "rollback.progress",
 		"operation": operation,
 		"progress":  operation.Progress,
 	}
-	
+
 	return w.sendWebhook(ctx, payload)
 }
 
@@ -154,7 +156,7 @@ func (w *WebhookNotifier) NotifyRollbackCompleted(ctx context.Context, operation
 		"result":    operation.Result,
 		"duration":  operation.CompletedAt.Sub(operation.InitiatedAt).Seconds(),
 	}
-	
+
 	return w.sendWebhook(ctx, payload)
 }
 
@@ -166,7 +168,7 @@ func (w *WebhookNotifier) NotifyRollbackFailed(ctx context.Context, operation *R
 		"error":     err.Error(),
 		"result":    operation.Result,
 	}
-	
+
 	return w.sendWebhook(ctx, payload)
 }
 
@@ -176,7 +178,7 @@ func (w *WebhookNotifier) sendWebhook(ctx context.Context, payload interface{}) 
 	// - Send HTTP POST to webhook URL
 	// - Handle retries and failures
 	// - Respect rate limits
-	
+
 	w.logger.Printf("Webhook notification: %+v", payload)
 	return nil
 }

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // #nosec G304 - M365 authentication requires file access for secure credential storage
 package auth
 
@@ -21,8 +23,8 @@ type FileCredentialStore struct {
 	// basePath is the directory where credentials are stored
 	basePath string
 
-	// encryptionKey is the key used for encrypting stored credentials
-	encryptionKey []byte
+	// passphrase is the passphrase used for deriving encryption keys (M-CRYPTO-2)
+	passphrase string
 
 	// Mutex for thread-safe operations
 	mutex sync.RWMutex
@@ -30,10 +32,10 @@ type FileCredentialStore struct {
 
 // StoredCredentials represents the structure of data stored in credential files
 type StoredCredentials struct {
-	Tokens           map[string]*AccessToken  `json:"tokens"`
-	DelegatedTokens  map[string]*AccessToken  `json:"delegated_tokens,omitempty"`
-	UserContexts     map[string]*UserContext  `json:"user_contexts,omitempty"`
-	Configs          map[string]*OAuth2Config `json:"configs"`
+	Tokens          map[string]*AccessToken  `json:"tokens"`
+	DelegatedTokens map[string]*AccessToken  `json:"delegated_tokens,omitempty"`
+	UserContexts    map[string]*UserContext  `json:"user_contexts,omitempty"`
+	Configs         map[string]*OAuth2Config `json:"configs"`
 }
 
 // NewFileCredentialStore creates a new file-based credential store
@@ -43,12 +45,11 @@ func NewFileCredentialStore(basePath, passphrase string) (*FileCredentialStore, 
 		return nil, fmt.Errorf("failed to create credential store directory: %w", err)
 	}
 
-	// Derive encryption key from passphrase
-	encryptionKey := pbkdf2.Key([]byte(passphrase), []byte("cfgms-saas-salt"), 10000, 32, sha256.New)
-
+	// M-CRYPTO-2: Store passphrase for per-credential key derivation instead of single global key
+	// Each credential file will use a unique salt with PBKDF2 for defense-in-depth
 	store := &FileCredentialStore{
-		basePath:      basePath,
-		encryptionKey: encryptionKey,
+		basePath:   basePath,
+		passphrase: passphrase,
 	}
 
 	return store, nil
@@ -301,10 +302,22 @@ func (s *FileCredentialStore) getCredentialPath(tenantID string) string {
 	return filepath.Join(s.basePath, fmt.Sprintf("%s.cred", sanitized))
 }
 
-// encrypt encrypts data using AES-GCM
+// encrypt encrypts data using AES-GCM with per-credential salt
+// M-CRYPTO-1 & M-CRYPTO-2: Use PBKDF2 with 310,000 iterations and unique salt per credential
 func (s *FileCredentialStore) encrypt(plaintext []byte) ([]byte, error) {
+	// M-CRYPTO-2: Generate unique 32-byte salt for this credential file
+	salt := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
+		return nil, fmt.Errorf("failed to generate salt: %w", err)
+	}
+
+	// M-CRYPTO-1: Derive encryption key using PBKDF2 with 310,000 iterations (OWASP 2023 recommendation)
+	// Previously: 10,000 iterations with global salt "cfgms-saas-salt" (insufficient)
+	// Now: 310,000 iterations with unique per-credential salt for defense-in-depth
+	encryptionKey := pbkdf2.Key([]byte(s.passphrase), salt, 310000, 32, sha256.New)
+
 	// Create AES cipher
-	block, err := aes.NewCipher(s.encryptionKey)
+	block, err := aes.NewCipher(encryptionKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create cipher: %w", err)
 	}
@@ -323,13 +336,53 @@ func (s *FileCredentialStore) encrypt(plaintext []byte) ([]byte, error) {
 
 	// Encrypt and seal
 	ciphertext := gcm.Seal(nonce, nonce, plaintext, nil)
-	return ciphertext, nil
+
+	// M-CRYPTO-2: Prepend salt to ciphertext for per-credential key derivation
+	// Format: [32-byte salt][encrypted data]
+	result := append(salt, ciphertext...)
+	return result, nil
 }
 
-// decrypt decrypts data using AES-GCM
-func (s *FileCredentialStore) decrypt(ciphertext []byte) ([]byte, error) {
+// decrypt decrypts data using AES-GCM with per-credential salt
+// M-CRYPTO-2: Supports both new format (with salt prefix) and old format (migration)
+func (s *FileCredentialStore) decrypt(data []byte) ([]byte, error) {
+	const saltSize = 32
+
+	// M-CRYPTO-2: Check if data has salt prefix (new format) or is legacy format
+	if len(data) > saltSize {
+		// Try new format first: [32-byte salt][encrypted data]
+		salt := data[:saltSize]
+		ciphertext := data[saltSize:]
+
+		// M-CRYPTO-1: Derive key with 310,000 iterations and per-credential salt
+		encryptionKey := pbkdf2.Key([]byte(s.passphrase), salt, 310000, 32, sha256.New)
+
+		// Try to decrypt with new format
+		plaintext, err := s.decryptWithKey(ciphertext, encryptionKey)
+		if err == nil {
+			return plaintext, nil
+		}
+
+		// If new format failed, fall back to legacy format for backward compatibility
+	}
+
+	// M-CRYPTO-2: Legacy format migration - use old global salt and 10,000 iterations
+	// This maintains backward compatibility with existing credential files
+	legacyKey := pbkdf2.Key([]byte(s.passphrase), []byte("cfgms-saas-salt"), 10000, 32, sha256.New)
+	plaintext, err := s.decryptWithKey(data, legacyKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decrypt with both new and legacy formats: %w", err)
+	}
+
+	// Successfully decrypted with legacy format
+	// Note: Will be automatically migrated to new format on next save
+	return plaintext, nil
+}
+
+// decryptWithKey performs AES-GCM decryption with the provided key
+func (s *FileCredentialStore) decryptWithKey(ciphertext []byte, key []byte) ([]byte, error) {
 	// Create AES cipher
-	block, err := aes.NewCipher(s.encryptionKey)
+	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create cipher: %w", err)
 	}

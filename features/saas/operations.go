@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // Package saas operations implements normalized CRUD operations
 // that provide a standardized interface across all SaaS providers.
 //
@@ -13,7 +15,7 @@
 //		"email": "john@company.com",
 //		"active": true,
 //	})
-//	
+//
 //	// List all users with pagination
 //	result, err := provider.List(ctx, "users", map[string]interface{}{
 //		"filter": "active eq true",
@@ -39,25 +41,25 @@ type NormalizedOperations struct {
 type ResourceMapping struct {
 	// NormalizedType is the standard resource type (e.g., "users", "groups")
 	NormalizedType string `json:"normalized_type"`
-	
+
 	// ProviderType is the provider-specific resource type
 	ProviderType string `json:"provider_type"`
-	
+
 	// APIPath is the API endpoint path for this resource
 	APIPath string `json:"api_path"`
-	
+
 	// IDField specifies which field contains the resource ID
 	IDField string `json:"id_field"`
-	
+
 	// NameField specifies which field contains the resource name/display name
 	NameField string `json:"name_field"`
-	
+
 	// SupportedOperations lists which CRUD operations are supported
 	SupportedOperations []string `json:"supported_operations"`
-	
+
 	// RequiredFields lists fields required for create operations
 	RequiredFields []string `json:"required_fields"`
-	
+
 	// ReadOnlyFields lists fields that cannot be modified
 	ReadOnlyFields []string `json:"read_only_fields"`
 }
@@ -66,22 +68,22 @@ type ResourceMapping struct {
 type OperationMapping struct {
 	// NormalizedOperation is the standard operation (create, read, update, delete, list)
 	NormalizedOperation string `json:"normalized_operation"`
-	
+
 	// HTTPMethod is the HTTP method to use
 	HTTPMethod string `json:"http_method"`
-	
+
 	// URLTemplate is the URL pattern with placeholders
 	URLTemplate string `json:"url_template"`
-	
+
 	// BodyTemplate defines the request body structure
 	BodyTemplate map[string]interface{} `json:"body_template"`
-	
+
 	// ResponseMapping defines how to extract data from responses
 	ResponseMapping ResponseMapping `json:"response_mapping"`
-	
+
 	// RequiredParams lists required parameters
 	RequiredParams []string `json:"required_params"`
-	
+
 	// OptionalParams lists optional parameters
 	OptionalParams []string `json:"optional_params"`
 }
@@ -90,13 +92,13 @@ type OperationMapping struct {
 type ResponseMapping struct {
 	// DataPath is the JSON path to the main data
 	DataPath string `json:"data_path"`
-	
+
 	// ItemsPath is the JSON path to items in list responses
 	ItemsPath string `json:"items_path"`
-	
+
 	// PaginationPath is the JSON path to pagination info
 	PaginationPath string `json:"pagination_path"`
-	
+
 	// ErrorPath is the JSON path to error information
 	ErrorPath string `json:"error_path"`
 }
@@ -118,29 +120,29 @@ func (no *NormalizedOperations) Create(ctx context.Context, resourceType string,
 	if !exists {
 		return nil, fmt.Errorf("resource type %s not supported", resourceType)
 	}
-	
+
 	if !contains(mapping.SupportedOperations, "create") {
 		return nil, fmt.Errorf("create operation not supported for resource type %s", resourceType)
 	}
-	
+
 	// Validate required fields
 	if err := no.validateRequiredFields(resourceType, data); err != nil {
 		return nil, fmt.Errorf("validation failed: %w", err)
 	}
-	
+
 	// Transform normalized data to provider-specific format
 	providerData, err := no.transformToProviderFormat(resourceType, data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to transform data: %w", err)
 	}
-	
+
 	// Get operation mapping
 	operation, exists := no.operationMap[resourceType+":create"]
 	if !exists {
 		// Fall back to generic create operation
 		return no.genericCreate(ctx, mapping, providerData)
 	}
-	
+
 	// Execute the create operation
 	return no.executeOperation(ctx, operation, map[string]interface{}{
 		"data": providerData,
@@ -153,18 +155,18 @@ func (no *NormalizedOperations) Read(ctx context.Context, resourceType string, r
 	if !exists {
 		return nil, fmt.Errorf("resource type %s not supported", resourceType)
 	}
-	
+
 	if !contains(mapping.SupportedOperations, "read") {
 		return nil, fmt.Errorf("read operation not supported for resource type %s", resourceType)
 	}
-	
+
 	// Get operation mapping
 	operation, exists := no.operationMap[resourceType+":read"]
 	if !exists {
 		// Fall back to generic read operation
 		return no.genericRead(ctx, mapping, resourceID)
 	}
-	
+
 	// Execute the read operation
 	return no.executeOperation(ctx, operation, map[string]interface{}{
 		"id": resourceID,
@@ -177,27 +179,27 @@ func (no *NormalizedOperations) Update(ctx context.Context, resourceType string,
 	if !exists {
 		return nil, fmt.Errorf("resource type %s not supported", resourceType)
 	}
-	
+
 	if !contains(mapping.SupportedOperations, "update") {
 		return nil, fmt.Errorf("update operation not supported for resource type %s", resourceType)
 	}
-	
+
 	// Remove read-only fields
 	updateData := no.filterReadOnlyFields(resourceType, data)
-	
+
 	// Transform normalized data to provider-specific format
 	providerData, err := no.transformToProviderFormat(resourceType, updateData)
 	if err != nil {
 		return nil, fmt.Errorf("failed to transform data: %w", err)
 	}
-	
+
 	// Get operation mapping
 	operation, exists := no.operationMap[resourceType+":update"]
 	if !exists {
 		// Fall back to generic update operation
 		return no.genericUpdate(ctx, mapping, resourceID, providerData)
 	}
-	
+
 	// Execute the update operation
 	return no.executeOperation(ctx, operation, map[string]interface{}{
 		"id":   resourceID,
@@ -211,18 +213,18 @@ func (no *NormalizedOperations) Delete(ctx context.Context, resourceType string,
 	if !exists {
 		return nil, fmt.Errorf("resource type %s not supported", resourceType)
 	}
-	
+
 	if !contains(mapping.SupportedOperations, "delete") {
 		return nil, fmt.Errorf("delete operation not supported for resource type %s", resourceType)
 	}
-	
+
 	// Get operation mapping
 	operation, exists := no.operationMap[resourceType+":delete"]
 	if !exists {
 		// Fall back to generic delete operation
 		return no.genericDelete(ctx, mapping, resourceID)
 	}
-	
+
 	// Execute the delete operation
 	return no.executeOperation(ctx, operation, map[string]interface{}{
 		"id": resourceID,
@@ -235,24 +237,24 @@ func (no *NormalizedOperations) List(ctx context.Context, resourceType string, f
 	if !exists {
 		return nil, fmt.Errorf("resource type %s not supported", resourceType)
 	}
-	
+
 	if !contains(mapping.SupportedOperations, "list") {
 		return nil, fmt.Errorf("list operation not supported for resource type %s", resourceType)
 	}
-	
+
 	// Transform normalized filters to provider-specific format
 	providerFilters, err := no.transformFilters(resourceType, filters)
 	if err != nil {
 		return nil, fmt.Errorf("failed to transform filters: %w", err)
 	}
-	
+
 	// Get operation mapping
 	operation, exists := no.operationMap[resourceType+":list"]
 	if !exists {
 		// Fall back to generic list operation
 		return no.genericList(ctx, mapping, providerFilters)
 	}
-	
+
 	// Execute the list operation
 	return no.executeOperation(ctx, operation, providerFilters)
 }
@@ -262,7 +264,7 @@ func (no *NormalizedOperations) List(ctx context.Context, resourceType string, f
 func (no *NormalizedOperations) genericCreate(ctx context.Context, mapping ResourceMapping, data map[string]interface{}) (*ProviderResult, error) {
 	// Build URL
 	url := strings.TrimSuffix(mapping.APIPath, "/")
-	
+
 	// Execute raw API call
 	return no.provider.RawAPI(ctx, "POST", url, data)
 }
@@ -270,7 +272,7 @@ func (no *NormalizedOperations) genericCreate(ctx context.Context, mapping Resou
 func (no *NormalizedOperations) genericRead(ctx context.Context, mapping ResourceMapping, resourceID string) (*ProviderResult, error) {
 	// Build URL
 	url := strings.TrimSuffix(mapping.APIPath, "/") + "/" + resourceID
-	
+
 	// Execute raw API call
 	return no.provider.RawAPI(ctx, "GET", url, nil)
 }
@@ -278,7 +280,7 @@ func (no *NormalizedOperations) genericRead(ctx context.Context, mapping Resourc
 func (no *NormalizedOperations) genericUpdate(ctx context.Context, mapping ResourceMapping, resourceID string, data map[string]interface{}) (*ProviderResult, error) {
 	// Build URL
 	url := strings.TrimSuffix(mapping.APIPath, "/") + "/" + resourceID
-	
+
 	// Execute raw API call (use PATCH for partial updates)
 	return no.provider.RawAPI(ctx, "PATCH", url, data)
 }
@@ -286,7 +288,7 @@ func (no *NormalizedOperations) genericUpdate(ctx context.Context, mapping Resou
 func (no *NormalizedOperations) genericDelete(ctx context.Context, mapping ResourceMapping, resourceID string) (*ProviderResult, error) {
 	// Build URL
 	url := strings.TrimSuffix(mapping.APIPath, "/") + "/" + resourceID
-	
+
 	// Execute raw API call
 	return no.provider.RawAPI(ctx, "DELETE", url, nil)
 }
@@ -294,7 +296,7 @@ func (no *NormalizedOperations) genericDelete(ctx context.Context, mapping Resou
 func (no *NormalizedOperations) genericList(ctx context.Context, mapping ResourceMapping, filters map[string]interface{}) (*ProviderResult, error) {
 	// Build URL with query parameters
 	url := strings.TrimSuffix(mapping.APIPath, "/")
-	
+
 	// Add filters as query parameters (simplified)
 	if len(filters) > 0 {
 		// This would need more sophisticated query building
@@ -304,7 +306,7 @@ func (no *NormalizedOperations) genericList(ctx context.Context, mapping Resourc
 		}
 		url = strings.TrimSuffix(url, "&")
 	}
-	
+
 	// Execute raw API call
 	return no.provider.RawAPI(ctx, "GET", url, nil)
 }
@@ -317,7 +319,7 @@ func (no *NormalizedOperations) executeOperation(ctx context.Context, operation 
 		placeholder := "{" + key + "}"
 		url = strings.ReplaceAll(url, placeholder, fmt.Sprintf("%v", value))
 	}
-	
+
 	// Build request body
 	var body interface{}
 	if operation.HTTPMethod != "GET" && operation.HTTPMethod != "DELETE" {
@@ -325,7 +327,7 @@ func (no *NormalizedOperations) executeOperation(ctx context.Context, operation 
 			body = data
 		}
 	}
-	
+
 	// Execute raw API call
 	return no.provider.RawAPI(ctx, operation.HTTPMethod, url, body)
 }
@@ -337,13 +339,13 @@ func (no *NormalizedOperations) validateRequiredFields(resourceType string, data
 	if !exists {
 		return fmt.Errorf("resource type %s not found", resourceType)
 	}
-	
+
 	for _, field := range mapping.RequiredFields {
 		if _, exists := data[field]; !exists {
 			return fmt.Errorf("required field %s is missing", field)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -352,14 +354,14 @@ func (no *NormalizedOperations) filterReadOnlyFields(resourceType string, data m
 	if !exists {
 		return data
 	}
-	
+
 	filtered := make(map[string]interface{})
 	for key, value := range data {
 		if !contains(mapping.ReadOnlyFields, key) {
 			filtered[key] = value
 		}
 	}
-	
+
 	return filtered
 }
 
@@ -369,7 +371,7 @@ func (no *NormalizedOperations) transformToProviderFormat(resourceType string, d
 		// No field mapping, return data as-is
 		return data, nil
 	}
-	
+
 	transformed := make(map[string]interface{})
 	for normalizedField, value := range data {
 		if providerField, exists := fieldMappings[normalizedField]; exists {
@@ -379,7 +381,7 @@ func (no *NormalizedOperations) transformToProviderFormat(resourceType string, d
 			transformed[normalizedField] = value
 		}
 	}
-	
+
 	return transformed, nil
 }
 
@@ -438,22 +440,22 @@ func getDefaultResourceMappings() map[string]ResourceMapping {
 func getDefaultFieldMappings() map[string]map[string]string {
 	return map[string]map[string]string{
 		"users": {
-			"name":        "displayName",
-			"email":       "mail",
-			"username":    "userPrincipalName",
-			"active":      "accountEnabled",
-			"first_name":  "givenName",
-			"last_name":   "surname",
-			"phone":       "mobilePhone",
-			"department":  "department",
-			"title":       "jobTitle",
+			"name":       "displayName",
+			"email":      "mail",
+			"username":   "userPrincipalName",
+			"active":     "accountEnabled",
+			"first_name": "givenName",
+			"last_name":  "surname",
+			"phone":      "mobilePhone",
+			"department": "department",
+			"title":      "jobTitle",
 		},
 		"groups": {
-			"name":         "displayName",
-			"description":  "description",
-			"type":         "groupTypes",
-			"email":        "mail",
-			"visibility":   "visibility",
+			"name":        "displayName",
+			"description": "description",
+			"type":        "groupTypes",
+			"email":       "mail",
+			"visibility":  "visibility",
 		},
 	}
 }
@@ -547,20 +549,20 @@ func (no *NormalizedOperations) ValidateData(resourceType string, data map[strin
 	if !exists {
 		return fmt.Errorf("resource type %s not supported", resourceType)
 	}
-	
+
 	// Check required fields
 	for _, field := range mapping.RequiredFields {
 		if _, exists := data[field]; !exists {
 			return fmt.Errorf("required field %s is missing", field)
 		}
 	}
-	
+
 	// Check for read-only fields in updates
 	for _, field := range mapping.ReadOnlyFields {
 		if _, exists := data[field]; exists {
 			return fmt.Errorf("field %s is read-only and cannot be modified", field)
 		}
 	}
-	
+
 	return nil
 }

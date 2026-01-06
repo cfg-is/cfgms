@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package network_activedirectory
 
 import (
@@ -7,10 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/directory/interfaces"
-	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/pkg/directory/interfaces"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // MockStewardClientForIntegration provides enhanced mock for integration testing
@@ -26,33 +29,33 @@ func NewMockStewardClientForIntegration() *MockStewardClientForIntegration {
 	return &MockStewardClientForIntegration{
 		stewards: []StewardInfo{
 			{
-				ID:       "steward-ad-primary",
-				Hostname: "dc1.corp.contoso.com",
-				Platform: "windows",
-				Version:  "1.0.0",
-				Modules:  []string{"activedirectory", "firewall", "package"},
-				Tags:     map[string]string{"ad_domain": "corp.contoso.com", "role": "domain_controller"},
-				LastSeen: time.Now(),
+				ID:        "steward-ad-primary",
+				Hostname:  "dc1.corp.contoso.com",
+				Platform:  "windows",
+				Version:   "1.0.0",
+				Modules:   []string{"activedirectory", "firewall", "package"},
+				Tags:      map[string]string{"ad_domain": "corp.contoso.com", "role": "domain_controller"},
+				LastSeen:  time.Now(),
 				IsHealthy: true,
 			},
 			{
-				ID:       "steward-ad-dev",
-				Hostname: "dc1.dev.contoso.com", 
-				Platform: "windows",
-				Version:  "1.0.0",
-				Modules:  []string{"activedirectory"},
-				Tags:     map[string]string{"ad_domain": "dev.contoso.com", "role": "domain_controller"},
-				LastSeen: time.Now(),
+				ID:        "steward-ad-dev",
+				Hostname:  "dc1.dev.contoso.com",
+				Platform:  "windows",
+				Version:   "1.0.0",
+				Modules:   []string{"activedirectory"},
+				Tags:      map[string]string{"ad_domain": "dev.contoso.com", "role": "domain_controller"},
+				LastSeen:  time.Now(),
 				IsHealthy: true,
 			},
 			{
-				ID:       "steward-gc",
-				Hostname: "gc1.contoso.com",
-				Platform: "windows", 
-				Version:  "1.0.0",
-				Modules:  []string{"activedirectory"},
-				Tags:     map[string]string{"ad_domain": "contoso.com", "role": "global_catalog"},
-				LastSeen: time.Now(),
+				ID:        "steward-gc",
+				Hostname:  "gc1.contoso.com",
+				Platform:  "windows",
+				Version:   "1.0.0",
+				Modules:   []string{"activedirectory"},
+				Tags:      map[string]string{"ad_domain": "contoso.com", "role": "global_catalog"},
+				LastSeen:  time.Now(),
 				IsHealthy: true,
 			},
 		},
@@ -65,14 +68,14 @@ func NewMockStewardClientForIntegration() *MockStewardClientForIntegration {
 				Uptime:    24 * time.Hour,
 			},
 			"steward-ad-dev": {
-				Status:    "healthy", 
+				Status:    "healthy",
 				LastCheck: time.Now(),
 				Modules:   map[string]string{"activedirectory": "healthy"},
 				Uptime:    48 * time.Hour,
 			},
 			"steward-gc": {
 				Status:    "healthy",
-				LastCheck: time.Now(), 
+				LastCheck: time.Now(),
 				Modules:   map[string]string{"activedirectory": "healthy"},
 				Uptime:    72 * time.Hour,
 			},
@@ -92,12 +95,12 @@ func (m *MockStewardClientForIntegration) GetStewardHealth(ctx context.Context, 
 	if m.errorMode {
 		return nil, fmt.Errorf("mock steward health error")
 	}
-	
+
 	health, exists := m.healthStatuses[stewardID]
 	if !exists {
 		return nil, fmt.Errorf("steward %s not found", stewardID)
 	}
-	
+
 	return health, nil
 }
 
@@ -112,29 +115,29 @@ func (m *MockStewardClientForIntegration) GetModuleState(ctx context.Context, st
 		return map[string]interface{}{
 			"connected":         true,
 			"domain_controller": "dc1.corp.contoso.com",
-			"domain":           "corp.contoso.com", 
-			"auth_method":      "kerberos",
-			"health_status":    "healthy",
-			"response_time":    "50ms",
-			"request_count":    int64(150),
-			"error_count":      int64(2),
+			"domain":            "corp.contoso.com",
+			"auth_method":       "kerberos",
+			"health_status":     "healthy",
+			"response_time":     "50ms",
+			"request_count":     int64(150),
+			"error_count":       int64(2),
 		}, nil
 
 	case "query:user:john.doe":
 		return map[string]interface{}{
-			"success":      true,
-			"query_type":   "user",
-			"object_id":    "john.doe",
-			"executed_at":  time.Now(),
+			"success":       true,
+			"query_type":    "user",
+			"object_id":     "john.doe",
+			"executed_at":   time.Now(),
 			"response_time": 45 * time.Millisecond,
 			"user": map[string]interface{}{
-				"id":                   "cn=john.doe,ou=users,dc=corp,dc=contoso,dc=com",
-				"sam_account_name":     "john.doe",
-				"user_principal_name":  "john.doe@corp.contoso.com",
-				"display_name":         "John Doe",
-				"email_address":        "john.doe@contoso.com",
-				"account_enabled":      true,
-				"distinguished_name":   "CN=John Doe,OU=Users,DC=corp,DC=contoso,DC=com",
+				"id":                  "cn=john.doe,ou=users,dc=corp,dc=contoso,dc=com",
+				"sam_account_name":    "john.doe",
+				"user_principal_name": "john.doe@corp.contoso.com",
+				"display_name":        "John Doe",
+				"email_address":       "john.doe@contoso.com",
+				"account_enabled":     true,
+				"distinguished_name":  "CN=John Doe,OU=Users,DC=corp,DC=contoso,DC=com",
 				"source":              "activedirectory",
 			},
 		}, nil
@@ -147,13 +150,13 @@ func (m *MockStewardClientForIntegration) GetModuleState(ctx context.Context, st
 			"executed_at":   time.Now(),
 			"response_time": 85 * time.Millisecond, // Slower for cross-domain
 			"user": map[string]interface{}{
-				"id":                   "cn=jane.smith,ou=developers,dc=dev,dc=contoso,dc=com",
-				"sam_account_name":     "jane.smith",
-				"user_principal_name":  "jane.smith@dev.contoso.com",
-				"display_name":         "Jane Smith",
-				"email_address":        "jane.smith@dev.contoso.com",
-				"account_enabled":      true,
-				"distinguished_name":   "CN=Jane Smith,OU=Developers,DC=dev,DC=contoso,DC=com",
+				"id":                  "cn=jane.smith,ou=developers,dc=dev,dc=contoso,dc=com",
+				"sam_account_name":    "jane.smith",
+				"user_principal_name": "jane.smith@dev.contoso.com",
+				"display_name":        "Jane Smith",
+				"email_address":       "jane.smith@dev.contoso.com",
+				"account_enabled":     true,
+				"distinguished_name":  "CN=Jane Smith,OU=Developers,DC=dev,DC=contoso,DC=com",
 				"source":              "activedirectory",
 				"source_domain":       "dev.contoso.com",
 				"cross_domain_query":  true,
@@ -180,7 +183,7 @@ func (m *MockStewardClientForIntegration) GetModuleState(ctx context.Context, st
 					"sam_account_name":    "admin.user",
 					"user_principal_name": "admin.user@dev.contoso.com",
 					"display_name":        "Admin User Dev",
-					"source_domain":       "dev.contoso.com", 
+					"source_domain":       "dev.contoso.com",
 					"forest_search":       true,
 				},
 			},
@@ -197,18 +200,18 @@ func (m *MockStewardClientForIntegration) GetModuleState(ctx context.Context, st
 
 	case "query:computer:WORKSTATION-01":
 		return map[string]interface{}{
-			"success":      true,
-			"query_type":   "computer",
-			"object_id":    "WORKSTATION-01",
-			"executed_at":  time.Now(),
+			"success":       true,
+			"query_type":    "computer",
+			"object_id":     "WORKSTATION-01",
+			"executed_at":   time.Now(),
 			"response_time": 35 * time.Millisecond,
 			"user": map[string]interface{}{ // Computer as DirectoryUser
-				"id":                  "cn=workstation-01,cn=computers,dc=corp,dc=contoso,dc=com",
-				"sam_account_name":    "WORKSTATION-01$",
-				"display_name":        "WORKSTATION-01",
-				"account_enabled":     true,
-				"distinguished_name":  "CN=WORKSTATION-01,CN=Computers,DC=corp,DC=contoso,DC=com",
-				"object_type":         "computer",
+				"id":                 "cn=workstation-01,cn=computers,dc=corp,dc=contoso,dc=com",
+				"sam_account_name":   "WORKSTATION-01$",
+				"display_name":       "WORKSTATION-01",
+				"account_enabled":    true,
+				"distinguished_name": "CN=WORKSTATION-01,CN=Computers,DC=corp,DC=contoso,DC=com",
+				"object_type":        "computer",
 			},
 		}, nil
 
@@ -222,7 +225,7 @@ func (m *MockStewardClientForIntegration) GetModuleState(ctx context.Context, st
 			"generic_object": map[string]interface{}{
 				"name":               "Default Domain Policy",
 				"display_name":       "Default Domain Policy",
-				"gpo_guid":          "{31B2F340-016D-11D2-945F-00C04FB984F9}",
+				"gpo_guid":           "{31B2F340-016D-11D2-945F-00C04FB984F9}",
 				"distinguished_name": "CN={31B2F340-016D-11D2-945F-00C04FB984F9},CN=Policies,CN=System,DC=corp,DC=contoso,DC=com",
 				"version_number":     "65537",
 				"creation_time":      "2024-01-15T10:30:00Z",
@@ -246,7 +249,7 @@ func (m *MockStewardClientForIntegration) GetModuleState(ctx context.Context, st
 				},
 				map[string]interface{}{
 					"sam_account_name":    "jane.smith",
-					"user_principal_name": "jane.smith@corp.contoso.com", 
+					"user_principal_name": "jane.smith@corp.contoso.com",
 					"display_name":        "Jane Smith",
 					"email_address":       "jane.smith@contoso.com",
 				},
@@ -271,11 +274,11 @@ func (m *MockStewardClientForIntegration) SetModuleConfig(ctx context.Context, s
 	if m.errorMode {
 		return fmt.Errorf("mock configuration error")
 	}
-	
+
 	// Store configuration for later retrieval
 	key := fmt.Sprintf("%s:%s:%s", stewardID, moduleType, resourceID)
 	m.moduleStates[key] = config
-	
+
 	return nil
 }
 
@@ -295,13 +298,13 @@ func TestADProviderIntegration(t *testing.T) {
 	// Enterprise configuration
 	config := interfaces.ProviderConfig{
 		ServerAddress:     "corp.contoso.com",
-		AuthMethod:       interfaces.AuthMethodKerberos,
-		Username:         "svc-cfgms@corp.contoso.com",
-		Password:         "enterprise-service-password",
-		UseTLS:           true,
-		Port:             636,
-		PageSize:         1000,
-		MaxConnections:   10,
+		AuthMethod:        interfaces.AuthMethodKerberos,
+		Username:          "svc-cfgms@corp.contoso.com",
+		Password:          "enterprise-service-password",
+		UseTLS:            true,
+		Port:              636,
+		PageSize:          1000,
+		MaxConnections:    10,
 		ConnectionTimeout: 60 * time.Second,
 	}
 
@@ -349,7 +352,7 @@ func TestADProviderIntegration(t *testing.T) {
 			filters := &interfaces.SearchFilters{
 				Limit: 100,
 			}
-			
+
 			userList, err := provider.ListUsers(ctx, filters)
 			require.NoError(t, err, "Should list users successfully")
 			assert.Equal(t, 3, userList.TotalCount)
@@ -362,7 +365,7 @@ func TestADProviderIntegration(t *testing.T) {
 				Query: "john",
 				Limit: 10,
 			}
-			
+
 			userList, err := provider.ListUsers(ctx, filters)
 			require.NoError(t, err, "Should search users successfully")
 			// Client-side filtering should find John Doe
@@ -375,11 +378,11 @@ func TestADProviderIntegration(t *testing.T) {
 		t.Run("Cross-Domain User Query", func(t *testing.T) {
 			result, err := provider.QueryTrustedDomain(ctx, "dev.contoso.com", "user", "jane.smith")
 			require.NoError(t, err, "Cross-domain query should succeed")
-			
+
 			// Verify cross-domain result structure
 			assert.True(t, result["success"].(bool))
 			assert.Equal(t, "user", result["query_type"])
-			
+
 			userObj := result["user"].(map[string]interface{})
 			assert.Equal(t, "jane.smith@dev.contoso.com", userObj["user_principal_name"])
 			assert.Equal(t, "dev.contoso.com", userObj["source_domain"])
@@ -389,15 +392,15 @@ func TestADProviderIntegration(t *testing.T) {
 		t.Run("Forest-Wide Search", func(t *testing.T) {
 			result, err := provider.QueryForest(ctx, "user", "admin.user")
 			require.NoError(t, err, "Forest search should succeed")
-			
+
 			// Verify forest search results
 			assert.True(t, result["success"].(bool))
 			assert.Equal(t, "forest_user", result["query_type"])
 			assert.Equal(t, 2, result["total_count"])
-			
+
 			users := result["users"].([]interface{})
 			assert.Len(t, users, 2, "Should find admin.user in multiple domains")
-			
+
 			// Verify each result has forest search markers
 			for _, userInterface := range users {
 				user := userInterface.(map[string]interface{})
@@ -454,12 +457,12 @@ func TestADProviderIntegration(t *testing.T) {
 		t.Run("Directory Schema", func(t *testing.T) {
 			schema, err := provider.GetSchema(ctx)
 			require.NoError(t, err, "Should return AD schema")
-			
+
 			// Validate user schema
 			assert.Equal(t, interfaces.DirectoryObjectTypeUser, schema.UserSchema.ObjectType)
 			assert.NotEmpty(t, schema.UserSchema.RequiredFields)
 			assert.NotEmpty(t, schema.UserSchema.SearchableFields)
-			
+
 			// Check AD-specific fields
 			hasUPN := false
 			hasSAM := false
@@ -492,10 +495,10 @@ func TestADProviderIntegration(t *testing.T) {
 		t.Run("Request Statistics", func(t *testing.T) {
 			reqCount := provider.GetRequestCount()
 			assert.Greater(t, reqCount, int64(0), "Should have processed requests")
-			
+
 			avgLatency := provider.GetAverageLatency()
 			assert.Greater(t, avgLatency, time.Duration(0), "Should have measured latency")
-			
+
 			errorCount := provider.GetErrorCount()
 			assert.GreaterOrEqual(t, errorCount, int64(0), "Error count should be non-negative")
 		})
@@ -504,7 +507,7 @@ func TestADProviderIntegration(t *testing.T) {
 	t.Run("Error Scenarios", func(t *testing.T) {
 		t.Run("Operations Without Connection", func(t *testing.T) {
 			disconnectedProvider := NewActiveDirectoryProvider(mockClient, logger)
-			
+
 			_, err := disconnectedProvider.GetUser(ctx, "testuser")
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "not connected")
@@ -513,12 +516,12 @@ func TestADProviderIntegration(t *testing.T) {
 		t.Run("Steward Unavailable", func(t *testing.T) {
 			// Enable error mode on mock client
 			mockClient.errorMode = true
-			
+
 			disconnectedProvider := NewActiveDirectoryProvider(mockClient, logger)
 			err := disconnectedProvider.Connect(ctx, config)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "steward")
-			
+
 			// Reset error mode
 			mockClient.errorMode = false
 		})
@@ -537,20 +540,20 @@ func TestADProviderIntegration(t *testing.T) {
 	t.Run("Validation and Security", func(t *testing.T) {
 		t.Run("User Validation", func(t *testing.T) {
 			validUser := &interfaces.DirectoryUser{
-				SAMAccountName:     "valid.user",
-				UserPrincipalName:  "valid.user@corp.contoso.com",
-				DisplayName:        "Valid User",
-				AccountEnabled:     true,
+				SAMAccountName:    "valid.user",
+				UserPrincipalName: "valid.user@corp.contoso.com",
+				DisplayName:       "Valid User",
+				AccountEnabled:    true,
 			}
-			
+
 			err := provider.ValidateUser(validUser)
 			require.NoError(t, err, "Valid user should pass validation")
-			
+
 			invalidUser := &interfaces.DirectoryUser{
 				SAMAccountName: "toolongusernamethatexceedslimit", // > 20 chars
 				DisplayName:    "Invalid User",
 			}
-			
+
 			err = provider.ValidateUser(invalidUser)
 			require.Error(t, err, "Invalid user should fail validation")
 			assert.Contains(t, err.Error(), "exceeds maximum length")
@@ -562,15 +565,15 @@ func TestADProviderIntegration(t *testing.T) {
 				"trust_direction": "TRUST_DIRECTION_BIDIRECTIONAL",
 				"trust_type":      "TRUST_TYPE_UPLEVEL",
 			}
-			
+
 			err := provider.ValidateDomainTrust(validTrust)
 			require.NoError(t, err, "Valid trust should pass validation")
-			
+
 			invalidTrust := map[string]interface{}{
 				"trust_partner":   "trusted.domain.com",
 				"trust_direction": "INVALID_DIRECTION",
 			}
-			
+
 			err = provider.ValidateDomainTrust(invalidTrust)
 			require.Error(t, err, "Invalid trust should fail validation")
 			assert.Contains(t, err.Error(), "invalid trust_direction")
@@ -582,7 +585,7 @@ func TestADProviderIntegration(t *testing.T) {
 			// Simulate MSP managing multiple client domains
 			clientDomains := []string{
 				"client1.local",
-				"client2.corp", 
+				"client2.corp",
 				"client3.enterprise.com",
 			}
 
@@ -590,7 +593,7 @@ func TestADProviderIntegration(t *testing.T) {
 				t.Run(fmt.Sprintf("Client_%s", domain), func(t *testing.T) {
 					clientConfig := config
 					clientConfig.ServerAddress = domain
-					
+
 					// Test provider can handle multiple client environments
 					err := provider.Connect(ctx, clientConfig)
 					if err != nil {
@@ -615,7 +618,7 @@ func TestADProviderIntegration(t *testing.T) {
 				t.Run(fmt.Sprintf("Merger_%s", scenario.sourceUser), func(t *testing.T) {
 					// Test cross-domain user synchronization capabilities
 					result, err := provider.QueryTrustedDomain(ctx, scenario.sourceDomain, "user", scenario.sourceUser)
-					
+
 					if err != nil {
 						t.Logf("Note: Merger scenario requires real multi-domain forest: %v", err)
 					} else {
@@ -692,7 +695,7 @@ func TestADProviderFailureResilience(t *testing.T) {
 
 	config := interfaces.ProviderConfig{
 		ServerAddress: "corp.contoso.com",
-		AuthMethod:   interfaces.AuthMethodLDAP,
+		AuthMethod:    interfaces.AuthMethodLDAP,
 	}
 
 	t.Run("Steward Failure Scenarios", func(t *testing.T) {
@@ -701,8 +704,8 @@ func TestADProviderFailureResilience(t *testing.T) {
 			originalStewards := mockClient.stewards
 			mockClient.stewards = []StewardInfo{
 				{
-					ID:       "steward-web",
-					Modules:  []string{"file", "directory"}, // No AD module
+					ID:        "steward-web",
+					Modules:   []string{"file", "directory"}, // No AD module
 					IsHealthy: true,
 				},
 			}
@@ -742,10 +745,10 @@ func TestADProviderFailureResilience(t *testing.T) {
 			_, err = provider.GetUser(ctx, "testuser")
 			require.Error(t, err)
 			// Error mode affects steward discovery, so check for either error type
-			assert.True(t, 
+			assert.True(t,
 				strings.Contains(err.Error(), "mock module state error") ||
-				strings.Contains(err.Error(), "mock steward discovery error") ||
-				strings.Contains(err.Error(), "no AD steward available"),
+					strings.Contains(err.Error(), "mock steward discovery error") ||
+					strings.Contains(err.Error(), "no AD steward available"),
 				"Should indicate steward communication failure, got: %v", err)
 
 			// Reset error mode
@@ -798,17 +801,17 @@ func TestADProviderFailureResilience(t *testing.T) {
 
 		t.Run("High Query Volume", func(t *testing.T) {
 			const numQueries = 100
-			
+
 			start := time.Now()
 			for i := 0; i < numQueries; i++ {
 				userID := fmt.Sprintf("user%d", i)
 				_, _ = provider.GetUser(ctx, userID)
 			}
 			duration := time.Since(start)
-			
+
 			avgLatency := duration / numQueries
 			t.Logf("Average latency for %d queries: %v", numQueries, avgLatency)
-			
+
 			// Verify statistics tracking
 			reqCount := provider.GetRequestCount()
 			assert.Greater(t, reqCount, int64(0), "Should track request count")
@@ -824,7 +827,7 @@ func TestADProviderFailureResilience(t *testing.T) {
 			for i := 0; i < numGoroutines; i++ {
 				go func(id int) {
 					defer func() { done <- true }()
-					
+
 					for j := 0; j < opsPerGoroutine; j++ {
 						userID := fmt.Sprintf("concurrent%d_%d", id, j)
 						_, _ = provider.GetUser(ctx, userID)
@@ -856,7 +859,7 @@ func BenchmarkADProviderOperations(b *testing.B) {
 
 	config := interfaces.ProviderConfig{
 		ServerAddress: "benchmark.local",
-		AuthMethod:   interfaces.AuthMethodLDAP,
+		AuthMethod:    interfaces.AuthMethodLDAP,
 	}
 
 	// Connect for benchmarks

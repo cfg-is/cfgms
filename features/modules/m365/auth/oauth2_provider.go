@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package auth
 
 import (
@@ -43,10 +45,10 @@ func NewOAuth2Provider(credentialStore CredentialStore, defaultConfig *OAuth2Con
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		credentialStore:         credentialStore,
-		tokenCache:              make(map[string]*cachedToken),
-		delegatedTokenCache:     make(map[string]*cachedToken),
-		defaultConfig:           defaultConfig,
+		credentialStore:     credentialStore,
+		tokenCache:          make(map[string]*cachedToken),
+		delegatedTokenCache: make(map[string]*cachedToken),
+		defaultConfig:       defaultConfig,
 	}
 }
 
@@ -126,7 +128,7 @@ func (p *OAuth2Provider) GetDelegatedAccessToken(ctx context.Context, tenantID s
 			// Fall back to application permissions
 			return p.GetAccessToken(ctx, tenantID)
 		}
-		return nil, NewAuthenticationError(tenantID, "DELEGATED_NOT_SUPPORTED", 
+		return nil, NewAuthenticationError(tenantID, "DELEGATED_NOT_SUPPORTED",
 			"Delegated authentication not configured for this tenant", nil)
 	}
 
@@ -209,7 +211,7 @@ func (p *OAuth2Provider) RefreshDelegatedToken(ctx context.Context, refreshToken
 	// or maintain a mapping between refresh tokens and tenant IDs
 	// For now, we'll extract from the UPN domain as a fallback
 	tenantID := userContext.UserID // This would need to be properly tracked
-	
+
 	// Note: In production, tenant ID should be tracked separately
 	// This is a placeholder for proper tenant ID resolution from refresh token context
 
@@ -253,13 +255,13 @@ func (p *OAuth2Provider) RefreshDelegatedToken(ctx context.Context, refreshToken
 	// Store the refreshed token
 	if err := p.credentialStore.StoreDelegatedToken(tenantID, userContext.UserID, token); err != nil {
 		// Log warning but don't fail
-		fmt.Printf("Warning: Failed to store delegated token for user %s in tenant %s: %v\n", 
+		fmt.Printf("Warning: Failed to store delegated token for user %s in tenant %s: %v\n",
 			userContext.UserID, tenantID, err)
 	}
 
 	// Store updated user context
 	if err := p.credentialStore.StoreUserContext(tenantID, userContext.UserID, userContext); err != nil {
-		fmt.Printf("Warning: Failed to store user context for user %s in tenant %s: %v\n", 
+		fmt.Printf("Warning: Failed to store user context for user %s in tenant %s: %v\n",
 			userContext.UserID, tenantID, err)
 	}
 
@@ -334,7 +336,7 @@ func (p *OAuth2Provider) validatePermissionsByRequest(ctx context.Context, token
 // testScopeAccess tests if a token has access to a specific scope
 func (p *OAuth2Provider) testScopeAccess(ctx context.Context, token *AccessToken, scope string) error {
 	var testURL string
-	
+
 	// Map scopes to test endpoints
 	switch scope {
 	case "User.Read":
@@ -591,7 +593,7 @@ func (p *OAuth2Provider) ClearDelegatedCacheForTenant(tenantID string) {
 	// Find and remove all cache entries for this tenant
 	keysToDelete := make([]string, 0)
 	tenantPrefix := tenantID + ":"
-	
+
 	for cacheKey := range p.delegatedTokenCache {
 		if strings.HasPrefix(cacheKey, tenantPrefix) {
 			keysToDelete = append(keysToDelete, cacheKey)
@@ -688,13 +690,13 @@ func (p *OAuth2Provider) ExchangeCodeForDelegatedToken(ctx context.Context, tena
 
 		// Store as delegated token
 		if err := p.credentialStore.StoreDelegatedToken(tenantID, userContext.UserID, token); err != nil {
-			fmt.Printf("Warning: Failed to store delegated token for user %s in tenant %s: %v\n", 
+			fmt.Printf("Warning: Failed to store delegated token for user %s in tenant %s: %v\n",
 				userContext.UserID, tenantID, err)
 		}
 
 		// Store user context
 		if err := p.credentialStore.StoreUserContext(tenantID, userContext.UserID, userContext); err != nil {
-			fmt.Printf("Warning: Failed to store user context for user %s in tenant %s: %v\n", 
+			fmt.Printf("Warning: Failed to store user context for user %s in tenant %s: %v\n",
 				userContext.UserID, tenantID, err)
 		}
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package reports
 
 import (
@@ -13,11 +15,14 @@ import (
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/logging"
 	storageInterfaces "github.com/cfgis/cfgms/pkg/storage/interfaces"
+	"github.com/cfgis/cfgms/pkg/testutil"
+
 	// Import storage providers to register them
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 )
 
 // TestAdvancedServiceCreation tests the creation of AdvancedService
@@ -43,6 +48,9 @@ func TestAdvancedServiceCreation(t *testing.T) {
 
 // TestAdvancedServiceWithConfig tests service creation with custom configuration
 func TestAdvancedServiceWithConfig(t *testing.T) {
+	// Skip test if CGO is not enabled (SQLite requires CGO)
+	testutil.SkipWithoutCGO(t)
+
 	logger := &testLogger{}
 
 	// Create DNA storage manager
@@ -52,18 +60,18 @@ func TestAdvancedServiceWithConfig(t *testing.T) {
 		CompressionType:        "gzip",
 		TargetCompressionRatio: 0.7, // More relaxed target for testing
 		EnableDeduplication:    true,
-		BlockSize:             64 * 1024,
-		HashAlgorithm:         "sha256",
-		RetentionPeriod:       24 * time.Hour,
-		ArchivalPeriod:        1 * time.Hour,
-		MaxRecordsPerDevice:   100,
-		EnableSharding:        false, // Disable sharding for simplicity
-		ShardCount:           1,
-		ShardingStrategy:     "device_id",
-		BatchSize:            10,
-		FlushInterval:        1 * time.Minute,
-		CacheSize:            100,
-		MaxStoragePerMonth:   10 * 1024 * 1024, // 10MB
+		BlockSize:              64 * 1024,
+		HashAlgorithm:          "sha256",
+		RetentionPeriod:        24 * time.Hour,
+		ArchivalPeriod:         1 * time.Hour,
+		MaxRecordsPerDevice:    100,
+		EnableSharding:         false, // Disable sharding for simplicity
+		ShardCount:             1,
+		ShardingStrategy:       "device_id",
+		BatchSize:              10,
+		FlushInterval:          1 * time.Minute,
+		CacheSize:              100,
+		MaxStoragePerMonth:     10 * 1024 * 1024, // 10MB
 	}
 	dnaStorageManager, err := storage.NewManager(dnaStorageConfig, logger)
 	require.NoError(t, err)
@@ -75,8 +83,8 @@ func TestAdvancedServiceWithConfig(t *testing.T) {
 	// Create audit components using git storage for testing
 	config := map[string]interface{}{
 		"repository_path": t.TempDir(),
-		"branch":         "main",
-		"auto_init":      true,
+		"branch":          "main",
+		"auto_init":       true,
 	}
 	globalStorageManager, err := storageInterfaces.CreateAllStoresFromConfig("git", config)
 	require.NoError(t, err)
@@ -564,6 +572,9 @@ func TestGetCrossSystemMetrics(t *testing.T) {
 
 // createTestAdvancedService creates a test instance of AdvancedService using minimal real components
 func createTestAdvancedService(t *testing.T) *AdvancedService {
+	// Skip test if CGO is not enabled (SQLite requires CGO)
+	testutil.SkipWithoutCGO(t)
+
 	logger := &testLogger{}
 
 	// Create minimal real components needed for the service
@@ -574,18 +585,18 @@ func createTestAdvancedService(t *testing.T) *AdvancedService {
 		CompressionType:        "gzip",
 		TargetCompressionRatio: 0.7, // More relaxed target for testing
 		EnableDeduplication:    true,
-		BlockSize:             64 * 1024,
-		HashAlgorithm:         "sha256",
-		RetentionPeriod:       24 * time.Hour,
-		ArchivalPeriod:        1 * time.Hour,
-		MaxRecordsPerDevice:   100,
-		EnableSharding:        false, // Disable sharding for simplicity
-		ShardCount:           1,
-		ShardingStrategy:     "device_id",
-		BatchSize:            10,
-		FlushInterval:        1 * time.Minute,
-		CacheSize:            100,
-		MaxStoragePerMonth:   10 * 1024 * 1024, // 10MB
+		BlockSize:              64 * 1024,
+		HashAlgorithm:          "sha256",
+		RetentionPeriod:        24 * time.Hour,
+		ArchivalPeriod:         1 * time.Hour,
+		MaxRecordsPerDevice:    100,
+		EnableSharding:         false, // Disable sharding for simplicity
+		ShardCount:             1,
+		ShardingStrategy:       "device_id",
+		BatchSize:              10,
+		FlushInterval:          1 * time.Minute,
+		CacheSize:              100,
+		MaxStoragePerMonth:     10 * 1024 * 1024, // 10MB
 	}
 	dnaStorageManager, err := storage.NewManager(dnaStorageConfig, logger)
 	require.NoError(t, err, "Failed to create DNA storage manager")
@@ -597,8 +608,8 @@ func createTestAdvancedService(t *testing.T) *AdvancedService {
 	// Create audit components using git storage for testing
 	config := map[string]interface{}{
 		"repository_path": t.TempDir(),
-		"branch":         "main",
-		"auto_init":      true,
+		"branch":          "main",
+		"auto_init":       true,
 	}
 	globalStorageManager, err := storageInterfaces.CreateAllStoresFromConfig("git", config)
 	require.NoError(t, err, "Failed to create global storage manager")
@@ -650,13 +661,13 @@ type testLogger struct{}
 // Ensure testLogger implements logging.Logger
 var _ logging.Logger = (*testLogger)(nil)
 
-func (l *testLogger) Debug(msg string, keysAndValues ...interface{}) {}
-func (l *testLogger) Info(msg string, keysAndValues ...interface{})  {}
-func (l *testLogger) Warn(msg string, keysAndValues ...interface{})  {}
-func (l *testLogger) Error(msg string, keysAndValues ...interface{}) {}
-func (l *testLogger) Fatal(msg string, keysAndValues ...interface{}) {}
+func (l *testLogger) Debug(msg string, keysAndValues ...interface{})                         {}
+func (l *testLogger) Info(msg string, keysAndValues ...interface{})                          {}
+func (l *testLogger) Warn(msg string, keysAndValues ...interface{})                          {}
+func (l *testLogger) Error(msg string, keysAndValues ...interface{})                         {}
+func (l *testLogger) Fatal(msg string, keysAndValues ...interface{})                         {}
 func (l *testLogger) DebugCtx(ctx context.Context, msg string, keysAndValues ...interface{}) {}
-func (l *testLogger) InfoCtx(ctx context.Context, msg string, keysAndValues ...interface{}) {}
-func (l *testLogger) WarnCtx(ctx context.Context, msg string, keysAndValues ...interface{}) {}
+func (l *testLogger) InfoCtx(ctx context.Context, msg string, keysAndValues ...interface{})  {}
+func (l *testLogger) WarnCtx(ctx context.Context, msg string, keysAndValues ...interface{})  {}
 func (l *testLogger) ErrorCtx(ctx context.Context, msg string, keysAndValues ...interface{}) {}
 func (l *testLogger) FatalCtx(ctx context.Context, msg string, keysAndValues ...interface{}) {}

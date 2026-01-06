@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package monitoring
 
 import (
@@ -8,6 +10,7 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/telemetry"
+	"github.com/cfgis/cfgms/pkg/version"
 )
 
 // platformMonitor implements the PlatformMonitor interface.
@@ -31,14 +34,14 @@ type platformMonitor struct {
 	cancel    context.CancelFunc
 
 	// Background workers
-	healthCheckTicker   *time.Ticker
-	metricsTicket      *time.Ticker
-	anomalyTicker      *time.Ticker
+	healthCheckTicker *time.Ticker
+	metricsTicket     *time.Ticker
+	anomalyTicker     *time.Ticker
 
 	// Data storage
 	lastHealthResults map[string]*ComponentHealth
-	lastMetrics      map[string]*ComponentMetrics
-	activeAnomalies  []*Anomaly
+	lastMetrics       map[string]*ComponentMetrics
+	activeAnomalies   []*Anomaly
 }
 
 // NewPlatformMonitor creates a new platform monitoring instance.
@@ -55,8 +58,8 @@ func NewPlatformMonitor(logger logging.Logger, tracer *telemetry.Tracer, config 
 		metricsCollectors: make(map[string]MetricsCollector),
 		anomalyDetectors:  make(map[string]AnomalyDetector),
 		lastHealthResults: make(map[string]*ComponentHealth),
-		lastMetrics:      make(map[string]*ComponentMetrics),
-		activeAnomalies:  make([]*Anomaly, 0),
+		lastMetrics:       make(map[string]*ComponentMetrics),
+		activeAnomalies:   make([]*Anomaly, 0),
 	}
 }
 
@@ -535,7 +538,7 @@ func (pm *platformMonitor) cleanupResolvedAnomalies() {
 
 	for _, anomaly := range pm.activeAnomalies {
 		if anomaly.Status == AnomalyStatusActive ||
-		   (anomaly.ResolvedAt != nil && anomaly.ResolvedAt.After(cutoff)) {
+			(anomaly.ResolvedAt != nil && anomaly.ResolvedAt.After(cutoff)) {
 			activeAnomalies = append(activeAnomalies, anomaly)
 		}
 	}
@@ -545,6 +548,5 @@ func (pm *platformMonitor) cleanupResolvedAnomalies() {
 
 // getVersion returns the current system version
 func getVersion() string {
-	// TODO: Get actual version from build info
-	return "0.5.0-beta"
+	return version.ShortWithoutPrefix()
 }

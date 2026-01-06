@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package rbac
 
 import (
@@ -6,11 +8,13 @@ import (
 
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+
 	// Import storage providers to register them
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 )
 
 // TestNewManagerWithStorage tests the new constructor that accepts storage interfaces
@@ -36,8 +40,8 @@ func TestNewManagerWithStorage(t *testing.T) {
 				// Git provider with temporary directory
 				config := map[string]interface{}{
 					"repository_path": t.TempDir(),
-					"branch":         "main",
-					"auto_init":      true,
+					"branch":          "main",
+					"auto_init":       true,
 				}
 				return interfaces.CreateAllStoresFromConfig("git", config)
 			},
@@ -183,8 +187,8 @@ func TestManagerWithStorage_TenantIsolation(t *testing.T) {
 	// Create storage manager using git provider
 	config := map[string]interface{}{
 		"repository_path": t.TempDir(),
-		"branch":         "main",
-		"auto_init":      true,
+		"branch":          "main",
+		"auto_init":       true,
 	}
 	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
 	require.NoError(t, err)
@@ -224,7 +228,7 @@ func TestManagerWithStorage_TenantIsolation(t *testing.T) {
 	// Verify tenant isolation - tenant 1 should only see tenant 1 roles
 	tenant1Roles, err := manager.ListRoles(ctx, "tenant-1")
 	require.NoError(t, err)
-	
+
 	found := false
 	for _, role := range tenant1Roles {
 		if role.Id == "tenant1.role" {
@@ -238,7 +242,7 @@ func TestManagerWithStorage_TenantIsolation(t *testing.T) {
 	// Verify tenant 2 isolation
 	tenant2Roles, err := manager.ListRoles(ctx, "tenant-2")
 	require.NoError(t, err)
-	
+
 	found = false
 	for _, role := range tenant2Roles {
 		if role.Id == "tenant2.role" {
@@ -255,8 +259,8 @@ func TestManagerWithStorage_AuditTrail(t *testing.T) {
 	// Create storage manager using git provider
 	config := map[string]interface{}{
 		"repository_path": t.TempDir(),
-		"branch":         "main",
-		"auto_init":      true,
+		"branch":          "main",
+		"auto_init":       true,
 	}
 	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
 	require.NoError(t, err)

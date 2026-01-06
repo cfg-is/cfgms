@@ -1,5 +1,8 @@
 //go:build linux
 
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
+
 package dna
 
 import (
@@ -15,22 +18,22 @@ func (l *LinuxHardwareCollector) CollectCPU(attributes map[string]string) error 
 	// Basic CPU count
 	attributes["cpu_count"] = fmt.Sprintf("%d", runtime.NumCPU())
 	attributes["cpu_arch"] = runtime.GOARCH
-	
+
 	// Parse /proc/cpuinfo for detailed CPU information
 	if output, err := exec.Command("cat", "/proc/cpuinfo").Output(); err == nil {
 		l.parseProcCPUInfo(string(output), attributes)
 	}
-	
+
 	// Get CPU frequency information
 	if output, err := exec.Command("cat", "/proc/cpuinfo").Output(); err == nil {
 		l.parseCPUFrequency(string(output), attributes)
 	}
-	
+
 	// CPU architecture details using lscpu if available
 	if output, err := exec.Command("lscpu").Output(); err == nil {
 		l.parseLSCPUOutput(string(output), attributes)
 	}
-	
+
 	return nil
 }
 
@@ -40,17 +43,17 @@ func (l *LinuxHardwareCollector) CollectMemory(attributes map[string]string) err
 	if output, err := exec.Command("cat", "/proc/meminfo").Output(); err == nil {
 		l.parseProcMemInfo(string(output), attributes)
 	}
-	
+
 	// Memory hardware information using dmidecode if available
 	if output, err := exec.Command("dmidecode", "-t", "memory").Output(); err == nil {
 		l.parseDMIDecodeMemory(string(output), attributes)
 	}
-	
+
 	// Memory usage summary
 	if output, err := exec.Command("free", "-h").Output(); err == nil {
 		l.parseMemoryUsage(string(output), attributes)
 	}
-	
+
 	return nil
 }
 
@@ -60,20 +63,20 @@ func (l *LinuxHardwareCollector) CollectDisk(attributes map[string]string) error
 	if output, err := exec.Command("df", "-h").Output(); err == nil {
 		l.parseDiskUsage(string(output), attributes)
 	}
-	
+
 	// Block device information using lsblk
 	if output, err := exec.Command("lsblk", "-d", "-o", "NAME,SIZE,TYPE,MODEL,VENDOR").Output(); err == nil {
 		l.parseLSBLKOutput(string(output), attributes)
 	}
-	
+
 	// Disk hardware information using fdisk if available
 	if output, err := exec.Command("fdisk", "-l").Output(); err == nil {
 		l.parseFdiskOutput(string(output), attributes)
 	}
-	
+
 	// SMART information for health status (if smartctl is available)
 	l.collectSMARTInfo(attributes)
-	
+
 	return nil
 }
 
@@ -83,63 +86,63 @@ func (l *LinuxHardwareCollector) CollectMotherboard(attributes map[string]string
 	if output, err := exec.Command("dmidecode", "-s", "system-manufacturer").Output(); err == nil {
 		attributes["system_manufacturer"] = strings.TrimSpace(string(output))
 	}
-	
+
 	if output, err := exec.Command("dmidecode", "-s", "system-product-name").Output(); err == nil {
 		attributes["system_product_name"] = strings.TrimSpace(string(output))
 	}
-	
+
 	if output, err := exec.Command("dmidecode", "-s", "system-version").Output(); err == nil {
 		attributes["system_version"] = strings.TrimSpace(string(output))
 	}
-	
+
 	if output, err := exec.Command("dmidecode", "-s", "system-serial-number").Output(); err == nil {
 		attributes["system_serial_number"] = strings.TrimSpace(string(output))
 	}
-	
+
 	if output, err := exec.Command("dmidecode", "-s", "system-uuid").Output(); err == nil {
 		attributes["system_uuid"] = strings.TrimSpace(string(output))
 	}
-	
+
 	// BIOS information
 	if output, err := exec.Command("dmidecode", "-s", "bios-vendor").Output(); err == nil {
 		attributes["bios_vendor"] = strings.TrimSpace(string(output))
 	}
-	
+
 	if output, err := exec.Command("dmidecode", "-s", "bios-version").Output(); err == nil {
 		attributes["bios_version"] = strings.TrimSpace(string(output))
 	}
-	
+
 	if output, err := exec.Command("dmidecode", "-s", "bios-release-date").Output(); err == nil {
 		attributes["bios_release_date"] = strings.TrimSpace(string(output))
 	}
-	
+
 	// Motherboard information
 	if output, err := exec.Command("dmidecode", "-s", "baseboard-manufacturer").Output(); err == nil {
 		attributes["motherboard_manufacturer"] = strings.TrimSpace(string(output))
 	}
-	
+
 	if output, err := exec.Command("dmidecode", "-s", "baseboard-product-name").Output(); err == nil {
 		attributes["motherboard_product"] = strings.TrimSpace(string(output))
 	}
-	
+
 	if output, err := exec.Command("dmidecode", "-s", "baseboard-version").Output(); err == nil {
 		attributes["motherboard_version"] = strings.TrimSpace(string(output))
 	}
-	
+
 	// System uptime
 	if output, err := exec.Command("uptime").Output(); err == nil {
 		attributes["system_uptime"] = strings.TrimSpace(string(output))
 	}
-	
+
 	// Kernel information
 	if output, err := exec.Command("uname", "-r").Output(); err == nil {
 		attributes["kernel_version"] = strings.TrimSpace(string(output))
 	}
-	
+
 	if output, err := exec.Command("uname", "-a").Output(); err == nil {
 		attributes["kernel_info"] = strings.TrimSpace(string(output))
 	}
-	
+
 	return nil
 }
 
@@ -147,21 +150,21 @@ func (l *LinuxHardwareCollector) CollectMotherboard(attributes map[string]string
 func (l *LinuxHardwareCollector) parseProcCPUInfo(output string, attributes map[string]string) {
 	lines := strings.Split(output, "\n")
 	cpuCount := 0
-	
+
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
-		
+
 		parts := strings.SplitN(line, ":", 2)
 		if len(parts) != 2 {
 			continue
 		}
-		
+
 		key := strings.TrimSpace(parts[0])
 		value := strings.TrimSpace(parts[1])
-		
+
 		switch key {
 		case "processor":
 			cpuCount++
@@ -208,7 +211,7 @@ func (l *LinuxHardwareCollector) parseProcCPUInfo(output string, attributes map[
 			}
 		}
 	}
-	
+
 	attributes["proc_cpu_count"] = fmt.Sprintf("%d", cpuCount)
 }
 
@@ -229,7 +232,7 @@ func (l *LinuxHardwareCollector) parseCPUFrequency(output string, attributes map
 			}
 		}
 	}
-	
+
 	// Try to get min/max frequencies from cpufreq if available
 	if output, err := exec.Command("cat", "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq").Output(); err == nil {
 		if minFreq, parseErr := strconv.ParseInt(strings.TrimSpace(string(output)), 10, 64); parseErr == nil {
@@ -237,7 +240,7 @@ func (l *LinuxHardwareCollector) parseCPUFrequency(output string, attributes map
 			attributes["cpu_min_frequency_mhz"] = fmt.Sprintf("%.0f", float64(minFreq)/1000)
 		}
 	}
-	
+
 	if output, err := exec.Command("cat", "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq").Output(); err == nil {
 		if maxFreq, parseErr := strconv.ParseInt(strings.TrimSpace(string(output)), 10, 64); parseErr == nil {
 			attributes["cpu_max_frequency_khz"] = fmt.Sprintf("%d", maxFreq)
@@ -254,15 +257,15 @@ func (l *LinuxHardwareCollector) parseLSCPUOutput(output string, attributes map[
 		if line == "" {
 			continue
 		}
-		
+
 		parts := strings.SplitN(line, ":", 2)
 		if len(parts) != 2 {
 			continue
 		}
-		
+
 		key := strings.TrimSpace(parts[0])
 		value := strings.TrimSpace(parts[1])
-		
+
 		switch key {
 		case "Architecture":
 			attributes["cpu_architecture"] = value
@@ -318,19 +321,19 @@ func (l *LinuxHardwareCollector) parseProcMemInfo(output string, attributes map[
 		if line == "" {
 			continue
 		}
-		
+
 		parts := strings.Fields(line)
 		if len(parts) < 2 {
 			continue
 		}
-		
+
 		key := strings.TrimSuffix(parts[0], ":")
 		value := parts[1]
 		unit := ""
 		if len(parts) > 2 {
 			unit = parts[2]
 		}
-		
+
 		switch key {
 		case "MemTotal":
 			attributes["memory_total_kb"] = value
@@ -372,7 +375,7 @@ func (l *LinuxHardwareCollector) parseDMIDecodeMemory(output string, attributes 
 	// For now, just indicate that dmidecode info is available
 	if strings.Contains(output, "Memory Device") {
 		attributes["memory_dmidecode_available"] = "true"
-		
+
 		// Count memory slots
 		slotCount := strings.Count(output, "Memory Device")
 		attributes["memory_slot_count"] = fmt.Sprintf("%d", slotCount)
@@ -403,22 +406,22 @@ func (l *LinuxHardwareCollector) parseMemoryUsage(output string, attributes map[
 func (l *LinuxHardwareCollector) parseDiskUsage(output string, attributes map[string]string) {
 	lines := strings.Split(output, "\n")
 	var diskCount int
-	
+
 	for i, line := range lines {
 		if i == 0 { // Skip header
 			continue
 		}
-		
+
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
-		
+
 		fields := strings.Fields(line)
 		if len(fields) >= 6 && strings.HasPrefix(fields[0], "/dev/") {
 			diskCount++
 			prefix := fmt.Sprintf("disk_%d", diskCount)
-			
+
 			attributes[prefix+"_device"] = fields[0]
 			attributes[prefix+"_size"] = fields[1]
 			attributes[prefix+"_used"] = fields[2]
@@ -427,7 +430,7 @@ func (l *LinuxHardwareCollector) parseDiskUsage(output string, attributes map[st
 			attributes[prefix+"_mount"] = fields[5]
 		}
 	}
-	
+
 	if diskCount > 0 {
 		attributes["disk_mount_count"] = fmt.Sprintf("%d", diskCount)
 	}
@@ -437,26 +440,26 @@ func (l *LinuxHardwareCollector) parseDiskUsage(output string, attributes map[st
 func (l *LinuxHardwareCollector) parseLSBLKOutput(output string, attributes map[string]string) {
 	lines := strings.Split(output, "\n")
 	var blockDeviceCount int
-	
+
 	for i, line := range lines {
 		if i == 0 { // Skip header
 			continue
 		}
-		
+
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
-		
+
 		fields := strings.Fields(line)
 		if len(fields) >= 3 {
 			blockDeviceCount++
 			prefix := fmt.Sprintf("block_device_%d", blockDeviceCount)
-			
+
 			attributes[prefix+"_name"] = fields[0]
 			attributes[prefix+"_size"] = fields[1]
 			attributes[prefix+"_type"] = fields[2]
-			
+
 			if len(fields) > 3 {
 				attributes[prefix+"_model"] = fields[3]
 			}
@@ -465,7 +468,7 @@ func (l *LinuxHardwareCollector) parseLSBLKOutput(output string, attributes map[
 			}
 		}
 	}
-	
+
 	if blockDeviceCount > 0 {
 		attributes["block_device_count"] = fmt.Sprintf("%d", blockDeviceCount)
 	}
@@ -478,7 +481,7 @@ func (l *LinuxHardwareCollector) parseFdiskOutput(output string, attributes map[
 	if diskCount > 0 {
 		attributes["fdisk_disk_count"] = fmt.Sprintf("%d", diskCount)
 	}
-	
+
 	// Look for disk size information
 	lines := strings.Split(output, "\n")
 	for _, line := range lines {
@@ -496,7 +499,7 @@ func (l *LinuxHardwareCollector) parseFdiskOutput(output string, attributes map[
 func (l *LinuxHardwareCollector) collectSMARTInfo(attributes map[string]string) {
 	// Try to get SMART info for first few drives
 	drives := []string{"sda", "sdb", "nvme0n1", "nvme1n1"}
-	
+
 	for _, drive := range drives {
 		// #nosec G204 - Hardware discovery requires system command execution
 		if output, err := exec.Command("smartctl", "-H", "/dev/"+drive).Output(); err == nil {

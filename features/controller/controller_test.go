@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package controller
 
 import (
@@ -35,6 +37,21 @@ func TestControllerCreation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Use a temporary directory for each test to avoid conflicts
+			tempDir := t.TempDir()
+
+			// Update config to use temp directory if provided
+			if tt.cfg != nil {
+				tt.cfg.DataDir = tempDir + "/data"
+				tt.cfg.CertPath = tempDir + "/certs"
+				if tt.cfg.Certificate != nil {
+					tt.cfg.Certificate.CAPath = tempDir + "/certs/ca"
+				}
+				if tt.cfg.Storage != nil && tt.cfg.Storage.Config != nil {
+					tt.cfg.Storage.Config["repository_path"] = tempDir + "/storage"
+				}
+			}
+
 			controller, err := New(tt.cfg, logger)
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -48,9 +65,23 @@ func TestControllerCreation(t *testing.T) {
 }
 
 func TestControllerLifecycle(t *testing.T) {
+	// Use a temporary directory for this test
+	tempDir := t.TempDir()
+
 	// Create a test logger and controller
 	logger := testutil.NewMockLogger(true)
-	ctrl, err := New(config.DefaultConfig(), logger)
+
+	cfg := config.DefaultConfig()
+	cfg.DataDir = tempDir + "/data"
+	cfg.CertPath = tempDir + "/certs"
+	if cfg.Certificate != nil {
+		cfg.Certificate.CAPath = tempDir + "/certs/ca"
+	}
+	if cfg.Storage != nil && cfg.Storage.Config != nil {
+		cfg.Storage.Config["repository_path"] = tempDir + "/storage"
+	}
+
+	ctrl, err := New(cfg, logger)
 	require.NoError(t, err)
 
 	// Start the controller
@@ -61,34 +92,38 @@ func TestControllerLifecycle(t *testing.T) {
 	// Verify start logged properly - certificate management and REST API adds extra logs
 	infoLogs := logger.GetLogs("info")
 	assert.GreaterOrEqual(t, len(infoLogs), 8)
-	
+
 	// Convert logs to messages for easier checking
 	messages := make([]string, len(infoLogs))
 	for i, log := range infoLogs {
 		messages[i] = log.Message
 	}
-	
+
 	// Verify required messages are present (order may vary based on certificate state)
-	assert.Contains(t, messages, "Loaded existing Certificate Authority")
-	assert.Contains(t, messages, "Generated default API key")
+	// CA can be either loaded (existing) or created (new temp dir)
+	caInitialized := false
+	for _, msg := range messages {
+		if msg == "Loaded existing Certificate Authority" || msg == "Created new Certificate Authority" {
+			caInitialized = true
+			break
+		}
+	}
+	assert.True(t, caInitialized, "Expected CA to be initialized (either loaded or created)")
+
+	// M-AUTH-1: No longer generating default API keys (security anti-pattern removed)
 	assert.Contains(t, messages, "Starting controller")
-	assert.Contains(t, messages, "TLS enabled for gRPC server with certificate management")
-	assert.Contains(t, messages, "Controller server started")
+	assert.Contains(t, messages, "Controller server started (MQTT+QUIC mode)")
 	assert.Contains(t, messages, "REST API server started")
 	assert.Contains(t, messages, "Controller started successfully")
-	
+
 	// Certificate message can be either "Using existing" or "Generating new" depending on environment
-	certificateFound := false
+	// With gRPC removed, we only check for HTTP server certificates
 	httpCertificateFound := false
 	for _, msg := range messages {
-		if msg == "Using existing server certificate" || msg == "Generating new server certificate" || msg == "Generated new server certificate" {
-			certificateFound = true
-		}
 		if msg == "Using existing server certificate for HTTP server" || msg == "Generated new server certificate for HTTP server" {
 			httpCertificateFound = true
 		}
 	}
-	assert.True(t, certificateFound, "Expected certificate management message not found in logs: %v", messages)
 	assert.True(t, httpCertificateFound, "Expected HTTP certificate message not found in logs: %v", messages)
 
 	// Stop the controller
@@ -98,19 +133,19 @@ func TestControllerLifecycle(t *testing.T) {
 	// Verify stop logged properly - check that required messages exist
 	infoLogs = logger.GetLogs("info")
 	assert.GreaterOrEqual(t, len(infoLogs), 10)
-	
+
 	// Update messages slice with all current logs
 	messages = make([]string, len(infoLogs))
 	for i, log := range infoLogs {
 		messages[i] = log.Message
 	}
-	
+
 	// Verify required startup messages are present
 	assert.Contains(t, messages, "Starting controller")
-	assert.Contains(t, messages, "Controller server started")
+	assert.Contains(t, messages, "Controller server started (MQTT+QUIC mode)")
 	assert.Contains(t, messages, "REST API server started")
 	assert.Contains(t, messages, "Controller started successfully")
-	
+
 	// Verify required shutdown messages are present
 	assert.Contains(t, messages, "Stopping controller")
 	assert.Contains(t, messages, "Shutting down REST API server")

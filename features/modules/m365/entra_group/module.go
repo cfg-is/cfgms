@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package entra_group
 
 import (
@@ -6,10 +8,11 @@ import (
 	"strings"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/modules/m365/auth"
 	"github.com/cfgis/cfgms/features/modules/m365/graph"
-	"gopkg.in/yaml.v3"
 )
 
 // entraGroupModule implements the Module interface for Entra ID group management
@@ -50,9 +53,9 @@ type EntraGroupConfig struct {
 	Owners  []string `yaml:"owners,omitempty"`
 
 	// Team settings (for Microsoft Teams integration)
-	IsTeamEnabled        bool                   `yaml:"is_team_enabled,omitempty"`
-	TeamSettings         *TeamSettings          `yaml:"team_settings,omitempty"`
-	TeamChannels         []TeamChannel          `yaml:"team_channels,omitempty"`
+	IsTeamEnabled bool          `yaml:"is_team_enabled,omitempty"`
+	TeamSettings  *TeamSettings `yaml:"team_settings,omitempty"`
+	TeamChannels  []TeamChannel `yaml:"team_channels,omitempty"`
 
 	// Tenant configuration
 	TenantID string `yaml:"tenant_id"`
@@ -63,23 +66,23 @@ type EntraGroupConfig struct {
 
 // TeamSettings represents Microsoft Teams specific settings
 type TeamSettings struct {
-	AllowAddRemoveApps       bool   `yaml:"allow_add_remove_apps,omitempty"`
-	AllowCreatePrivateChannels bool  `yaml:"allow_create_private_channels,omitempty"`
-	AllowCreateUpdateChannels  bool  `yaml:"allow_create_update_channels,omitempty"`
-	AllowDeleteChannels        bool  `yaml:"allow_delete_channels,omitempty"`
-	AllowUserEditMessages      bool  `yaml:"allow_user_edit_messages,omitempty"`
-	AllowGuestCreateChannels   bool  `yaml:"allow_guest_create_channels,omitempty"`
-	AllowGuestDeleteChannels   bool  `yaml:"allow_guest_delete_channels,omitempty"`
-	Fun                       string `yaml:"fun_settings,omitempty"` // "strict", "moderate", "enabled"
+	AllowAddRemoveApps         bool   `yaml:"allow_add_remove_apps,omitempty"`
+	AllowCreatePrivateChannels bool   `yaml:"allow_create_private_channels,omitempty"`
+	AllowCreateUpdateChannels  bool   `yaml:"allow_create_update_channels,omitempty"`
+	AllowDeleteChannels        bool   `yaml:"allow_delete_channels,omitempty"`
+	AllowUserEditMessages      bool   `yaml:"allow_user_edit_messages,omitempty"`
+	AllowGuestCreateChannels   bool   `yaml:"allow_guest_create_channels,omitempty"`
+	AllowGuestDeleteChannels   bool   `yaml:"allow_guest_delete_channels,omitempty"`
+	Fun                        string `yaml:"fun_settings,omitempty"` // "strict", "moderate", "enabled"
 }
 
 // TeamChannel represents a Microsoft Teams channel
 type TeamChannel struct {
-	DisplayName  string `yaml:"display_name"`
-	Description  string `yaml:"description,omitempty"`
-	ChannelType  string `yaml:"channel_type,omitempty"` // "standard", "private", "shared"
-	IsFavorite   bool   `yaml:"is_favorite,omitempty"`
-	WebURL       string `yaml:"web_url,omitempty"`
+	DisplayName string `yaml:"display_name"`
+	Description string `yaml:"description,omitempty"`
+	ChannelType string `yaml:"channel_type,omitempty"` // "standard", "private", "shared"
+	IsFavorite  bool   `yaml:"is_favorite,omitempty"`
+	WebURL      string `yaml:"web_url,omitempty"`
 }
 
 // AsMap returns the configuration as a map for efficient field-by-field comparison
@@ -169,8 +172,8 @@ func (c *EntraGroupConfig) Validate() error {
 	// Validate visibility
 	if c.Visibility != "" {
 		validVisibilities := map[string]bool{
-			"Private": true,
-			"Public":  true,
+			"Private":          true,
+			"Public":           true,
 			"Hiddenmembership": true,
 		}
 		if !validVisibilities[c.Visibility] {
@@ -406,7 +409,7 @@ func (m *entraGroupModule) createGroup(ctx context.Context, token *auth.AccessTo
 	if err != nil {
 		return fmt.Errorf("failed to create group via Graph API: %w", err)
 	}
-	
+
 	// Wait for group creation to propagate
 	time.Sleep(2 * time.Second)
 
@@ -467,7 +470,7 @@ func (m *entraGroupModule) updateGroup(ctx context.Context, token *auth.AccessTo
 	if len(updates) > 0 {
 		// Build the update request
 		updateRequest := &graph.UpdateGroupRequest{}
-		
+
 		// Map updates to the request structure (using pointers as required)
 		if displayName, ok := updates["displayName"].(string); ok {
 			updateRequest.DisplayName = &displayName
@@ -481,7 +484,7 @@ func (m *entraGroupModule) updateGroup(ctx context.Context, token *auth.AccessTo
 		if securityEnabled, ok := updates["securityEnabled"].(bool); ok {
 			updateRequest.SecurityEnabled = &securityEnabled
 		}
-		
+
 		// Make the Graph API PATCH call
 		if err := m.graphClient.UpdateGroup(ctx, token, existingGroup.ID, updateRequest); err != nil {
 			return fmt.Errorf("failed to update group via Graph API: %w", err)

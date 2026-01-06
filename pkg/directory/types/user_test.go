@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package types
 
 import (
@@ -183,7 +185,7 @@ func TestFromGraphUser(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := FromGraphUser(tt.graphUser, tt.providerName)
-			
+
 			// Check all fields except Modified (which is set to current time)
 			assert.Equal(t, tt.expected.ID, result.ID)
 			assert.Equal(t, tt.expected.UserPrincipalName, result.UserPrincipalName)
@@ -199,7 +201,7 @@ func TestFromGraphUser(t *testing.T) {
 			assert.Equal(t, tt.expected.Company, result.Company)
 			assert.Equal(t, tt.expected.CompanyName, result.CompanyName)
 			assert.Equal(t, tt.expected.Source, result.Source)
-			
+
 			// Check Created time separately
 			if tt.expected.Created != nil {
 				require.NotNil(t, result.Created)
@@ -207,7 +209,7 @@ func TestFromGraphUser(t *testing.T) {
 			} else {
 				assert.Nil(t, result.Created)
 			}
-			
+
 			// Modified should be set to current time (not zero)
 			assert.NotNil(t, result.Modified)
 			assert.False(t, result.Modified.IsZero())
@@ -323,7 +325,7 @@ func TestFromEntraUserConfig(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := FromEntraUserConfig(tt.config, tt.userID, tt.providerName)
-			
+
 			// Check all fields except Modified (which is set to current time)
 			assert.Equal(t, tt.expected.ID, result.ID)
 			assert.Equal(t, tt.expected.UserPrincipalName, result.UserPrincipalName)
@@ -340,7 +342,7 @@ func TestFromEntraUserConfig(t *testing.T) {
 			assert.Equal(t, tt.expected.CompanyName, result.CompanyName)
 			assert.Equal(t, tt.expected.Groups, result.Groups)
 			assert.Equal(t, tt.expected.Source, result.Source)
-			
+
 			// Modified should be set to current time
 			assert.NotNil(t, result.Modified)
 			assert.False(t, result.Modified.IsZero())
@@ -404,7 +406,7 @@ func TestDirectoryUser_Validate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := tt.user.Validate()
-			
+
 			if tt.expectError {
 				assert.Error(t, err)
 				if tt.expectedErr != nil {

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // #nosec G304 - Terminal recorder requires file access for session recording and playback
 package terminal
 
@@ -188,7 +190,7 @@ func (r *DefaultSessionRecorder) GetRecording(sessionID string) (*SessionRecordi
 	// Read file content - check if file was actually compressed
 	// We need to detect if this specific file was compressed by checking the first bytes
 	var reader io.Reader = file
-	
+
 	// Try to create a gzip reader first - if it works, the file is compressed
 	if r.config.Compression {
 		// Reset file position
@@ -232,7 +234,7 @@ func (r *DefaultSessionRecorder) GetRecording(sessionID string) (*SessionRecordi
 				_ = err // Explicitly ignore metadata file close errors
 			}
 		}()
-		
+
 		type recordingMetadata struct {
 			Metadata SessionMetadata `json:"metadata"`
 			Events   []RecordEvent   `json:"events"`

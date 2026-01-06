@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package export
 
 import (
@@ -50,10 +52,10 @@ func (em *ExportManager) processExportData(ctx context.Context, data ExportData)
 		}
 	}
 	em.mu.RUnlock()
-	
+
 	// Debug logging for test environments
 	if data.ExportType == ExportTypeManual {
-		em.logger.InfoCtx(ctx, "Processing manual export data", 
+		em.logger.InfoCtx(ctx, "Processing manual export data",
 			"exporters_found", len(exporters),
 			"total_exporters", len(em.exporters),
 			"export_type", data.ExportType)
@@ -81,14 +83,14 @@ func (em *ExportManager) processExportData(ctx context.Context, data ExportData)
 // exportToExporter exports data to a specific exporter with retry logic.
 func (em *ExportManager) exportToExporter(ctx context.Context, name string, exporter MonitoringExporter, data ExportData) {
 	startTime := time.Now()
-	
+
 	// Create exporter-specific context with timeout
 	exporterConfig := em.config.Exporters[name]
 	timeout := exporterConfig.Timeout
 	if timeout == 0 {
 		timeout = 30 * time.Second // Default timeout
 	}
-	
+
 	exportCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -112,7 +114,7 @@ func (em *ExportManager) exportToExporter(ctx context.Context, name string, expo
 			// Success
 			responseTime := time.Since(startTime)
 			em.updateExporterSuccess(name, responseTime)
-			
+
 			em.logger.DebugCtx(exportCtx, "Successfully exported data",
 				"exporter_name", name,
 				"response_time_ms", responseTime.Milliseconds(),
@@ -130,7 +132,7 @@ func (em *ExportManager) exportToExporter(ctx context.Context, name string, expo
 
 	// All retries failed
 	em.updateExporterFailure(name, lastErr)
-	
+
 	// Send to error channel for centralized error handling
 	select {
 	case em.errorCh <- ExportError{
@@ -193,7 +195,7 @@ func (em *ExportManager) performHealthChecks(ctx context.Context) {
 // checkExporterHealth performs a health check on a specific exporter.
 func (em *ExportManager) checkExporterHealth(ctx context.Context, name string, exporter MonitoringExporter) {
 	startTime := time.Now()
-	
+
 	// Create health check context with timeout
 	healthCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -208,11 +210,11 @@ func (em *ExportManager) checkExporterHealth(ctx context.Context, name string, e
 	existingHealth.Message = health.Message
 	existingHealth.ResponseTime = responseTime
 	existingHealth.LastHealthCheck = time.Now()
-	
+
 	if health.Status != "healthy" {
 		existingHealth.ErrorCount++
 	}
-	
+
 	em.exporterHealth[name] = existingHealth
 	em.healthMu.Unlock()
 
@@ -252,7 +254,7 @@ func (em *ExportManager) handleExportError(ctx context.Context, exportError Expo
 		"timestamp", exportError.Timestamp)
 
 	// Update exporter health to reflect the error
-	em.updateExporterHealth(exportError.ExporterName, "unhealthy", 
+	em.updateExporterHealth(exportError.ExporterName, "unhealthy",
 		fmt.Sprintf("Export failed: %v", exportError.Error), exportError.Error)
 
 	// Here you could implement additional error handling logic:
@@ -367,19 +369,19 @@ func (em *ExportManager) updateExporterFailure(name string, err error) {
 func (em *ExportManager) estimateDataSize(data ExportData) int {
 	// This is a very rough estimate - in production you might want more accurate sizing
 	size := 0
-	
+
 	// Estimate metrics size
 	size += len(data.SystemMetrics) * 50
 	size += len(data.ResourceMetrics) * 50
 	size += len(data.StewardMetrics) * 50
 	size += len(data.ControllerMetrics) * 50
 	size += len(data.WorkflowMetrics) * 50
-	
+
 	// Estimate events and logs
 	size += len(data.Events) * 200
 	size += len(data.Logs) * 150
 	size += len(data.Traces) * 300
 	size += len(data.HealthStatus) * 100
-	
+
 	return size
 }

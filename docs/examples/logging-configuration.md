@@ -5,6 +5,7 @@ This document provides configuration examples for the CFGMS global logging provi
 ## Overview
 
 CFGMS now uses a pluggable logging provider architecture that supports:
+
 - **File-based logging** (default) - Zero-dependency time-series logging with rotation
 - **TimescaleDB logging** - High-performance PostgreSQL extension for time-series data
 - **Future providers** - Extensible architecture for additional backends
@@ -50,6 +51,7 @@ controller:
 ### File Provider (Default)
 
 **Basic Configuration:**
+
 ```yaml
 controller:
   logging:
@@ -63,6 +65,7 @@ controller:
 ```
 
 **Production Configuration:**
+
 ```yaml
 controller:
   logging:
@@ -86,6 +89,7 @@ controller:
 ```
 
 **Development Configuration:**
+
 ```yaml
 controller:
   logging:
@@ -131,11 +135,13 @@ controller:
 ```
 
 **Example Syslog Output (RFC5424 format):**
+
 ```
 <165>1 2024-01-15T10:30:00.000Z cfgms-controller-01 cfgms 1234 controller_INFO [cfgms tenant_id="tenant-123" session_id="sess-456" request_id="req-789"] Request processed successfully
 ```
 
 **Production Configuration with Multiple Subscribers:**
+
 ```yaml
 controller:
   logging:
@@ -202,6 +208,7 @@ controller:
 ```
 
 **Production Configuration:**
+
 ```yaml
 controller:
   logging:
@@ -233,6 +240,7 @@ controller:
 ```
 
 **Development Configuration:**
+
 ```yaml
 controller:
   logging:
@@ -347,6 +355,7 @@ moduleLogger.Info("Enhanced message", "enhanced", true)
 ## Performance Characteristics
 
 ### File Provider
+
 - **Throughput**: ~50,000 entries/second
 - **Latency**: <5ms per entry
 - **Storage**: ~10:1 compression ratio with GZIP
@@ -354,6 +363,7 @@ moduleLogger.Info("Enhanced message", "enhanced", true)
 - **Best for**: Single-server deployments, development, edge locations
 
 ### TimescaleDB Provider
+
 - **Throughput**: ~100,000+ entries/second with batch writes
 - **Latency**: <2ms per entry (database network latency dependent)
 - **Storage**: 10:1-20:1 compression ratio with native compression
@@ -379,12 +389,14 @@ moduleLogger.Info("Enhanced message", "enhanced", true)
 ## Migration Guide
 
 ### From Legacy Logging
+
 1. **Immediate**: Existing `logging.NewLogger()` calls continue to work
 2. **Enhanced**: Use `logging.ForModule()` for structured module logging
 3. **Configuration**: Add logging section to controller config
 4. **Gradual**: Migrate modules one by one to use ModuleLogger
 
 ### Best Practices
+
 1. **Use module loggers** for consistent context
 2. **Set appropriate log levels** for production vs development  
 3. **Include tenant context** for multi-tenant deployments
@@ -394,21 +406,27 @@ moduleLogger.Info("Enhanced message", "enhanced", true)
 ## Troubleshooting
 
 ### Provider Not Available
+
 ```
 Error: logging provider 'file' not available: cannot create log directory
 ```
+
 **Solution**: Ensure the log directory exists and is writable
 
 ### High Memory Usage
+
 ```
 Warning: Logging buffer growing rapidly
 ```  
+
 **Solution**: Reduce batch_size or decrease flush_interval
 
 ### Performance Issues
+
 ```
 Warning: Logging write latency >100ms
 ```
+
 **Solution**: Enable async_writes and increase batch_size
 
 ## Monitoring and Observability

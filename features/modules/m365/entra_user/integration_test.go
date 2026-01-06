@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package entra_user
 
 import (
@@ -9,11 +11,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/features/modules/m365/auth"
-	"github.com/cfgis/cfgms/features/modules/m365/graph"
 	"github.com/joho/godotenv"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/features/modules/m365/auth"
+	"github.com/cfgis/cfgms/features/modules/m365/graph"
 )
 
 // loadTestEnvironment loads environment variables from .env.local if it exists
@@ -63,10 +66,10 @@ func checkM365Integration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping M365 integration test in short mode")
 	}
-	
+
 	// Load credentials from .env.local or environment
 	loadTestEnvironment(t)
-	
+
 	// Integration test behavior control
 	if !hasM365Credentials() {
 		if os.Getenv("ALLOW_SKIP_INTEGRATION") == "true" {
@@ -84,10 +87,10 @@ func TestEntraUser_Integration_FullCRUD(t *testing.T) {
 	// Create real auth provider and graph client
 	authProvider := createRealAuthProvider(t)
 	graphClient := createRealGraphClient(t)
-	
+
 	// Create module instance
 	module := New(authProvider, graphClient).(*entraUserModule)
-	
+
 	ctx := context.Background()
 	tenantID := os.Getenv("M365_TENANT_ID")
 	timestamp := time.Now().Format("20060102-150405")
@@ -127,11 +130,11 @@ func TestEntraUser_Integration_FullCRUD(t *testing.T) {
 	filter := fmt.Sprintf("userPrincipalName eq '%s'", initialConfig.UserPrincipalName)
 	token, err := authProvider.GetAccessToken(ctx, tenantID)
 	require.NoError(t, err, "Should be able to get access token")
-	
+
 	users, err := graphClient.ListUsers(ctx, token, filter)
 	require.NoError(t, err, "Should be able to search for created user")
 	require.Greater(t, len(users), 0, "Should find the created user")
-	
+
 	var createdUser *graph.User
 	for _, user := range users {
 		if user.UserPrincipalName == initialConfig.UserPrincipalName {
@@ -161,16 +164,16 @@ func TestEntraUser_Integration_FullCRUD(t *testing.T) {
 	realResourceID := tenantID + ":" + createdUser.ID
 	getResult, err := module.Get(ctx, realResourceID)
 	require.NoError(t, err, "Should be able to retrieve created user")
-	
+
 	retrievedConfig, ok := getResult.(*EntraUserConfig)
 	require.True(t, ok, "Retrieved config should be EntraUserConfig")
 	assert.Equal(t, initialConfig.UserPrincipalName, retrievedConfig.UserPrincipalName)
 	assert.Equal(t, initialConfig.DisplayName, retrievedConfig.DisplayName)
 	assert.Equal(t, initialConfig.JobTitle, retrievedConfig.JobTitle)
-	
+
 	// Check department (may not be retrieved due to Graph API field selection)
 	if retrievedConfig.Department != initialConfig.Department {
-		t.Logf("⚠️ Department mismatch: expected '%s', got '%s' (may be Graph API field retrieval issue)", 
+		t.Logf("⚠️ Department mismatch: expected '%s', got '%s' (may be Graph API field retrieval issue)",
 			initialConfig.Department, retrievedConfig.Department)
 	}
 	t.Log("✅ READ: User retrieved and validated successfully")
@@ -178,14 +181,14 @@ func TestEntraUser_Integration_FullCRUD(t *testing.T) {
 	// 📝 STEP 3: UPDATE (modify the user)
 	t.Log("🔄 STEP 3: UPDATE user with modified configuration")
 	t.Logf("📊 Retrieved MailNickname: '%s'", retrievedConfig.MailNickname)
-	
+
 	// Use original MailNickname if retrieved one is empty
 	mailNickname := retrievedConfig.MailNickname
 	if mailNickname == "" {
 		mailNickname = testUsername
 		t.Logf("⚠️ Using original MailNickname since retrieved was empty: '%s'", mailNickname)
 	}
-	
+
 	updatedConfig := &EntraUserConfig{
 		UserPrincipalName: retrievedConfig.UserPrincipalName, // Keep same UPN
 		DisplayName:       fmt.Sprintf("UPDATED: %s", retrievedConfig.DisplayName),
@@ -210,7 +213,7 @@ func TestEntraUser_Integration_FullCRUD(t *testing.T) {
 	t.Log("🔄 STEP 4: READ user to validate update")
 	getResult, err = module.Get(ctx, realResourceID)
 	require.NoError(t, err, "Should be able to retrieve updated user")
-	
+
 	finalConfig, ok := getResult.(*EntraUserConfig)
 	require.True(t, ok, "Retrieved config should be EntraUserConfig")
 	assert.Contains(t, finalConfig.DisplayName, "UPDATED:", "Display name should be updated")
@@ -233,10 +236,10 @@ func TestEntraUser_Integration_ConfigValidation(t *testing.T) {
 	// Create real auth provider and graph client
 	authProvider := createRealAuthProvider(t)
 	graphClient := createRealGraphClient(t)
-	
+
 	// Create module instance
 	module := New(authProvider, graphClient).(*entraUserModule)
-	
+
 	ctx := context.Background()
 	tenantID := os.Getenv("M365_TENANT_ID")
 
@@ -250,7 +253,7 @@ func TestEntraUser_Integration_ConfigValidation(t *testing.T) {
 
 	resourceID := tenantID + ":validation-test-user"
 	err := module.Set(ctx, resourceID, invalidConfig)
-	
+
 	// Should get validation error before making API call
 	assert.Error(t, err, "Set should return validation error for invalid config")
 	assert.Contains(t, err.Error(), "user_principal_name", "Error should mention missing user_principal_name")
@@ -262,13 +265,13 @@ func TestEntraUser_Integration_AuthenticationFlow(t *testing.T) {
 
 	// Create real auth provider
 	authProvider := createRealAuthProvider(t)
-	
+
 	ctx := context.Background()
 	tenantID := os.Getenv("M365_TENANT_ID")
 
 	// Test token acquisition
 	token, err := authProvider.GetAccessToken(ctx, tenantID)
-	
+
 	if err != nil {
 		t.Logf("Authentication failed (expected for limited test credentials): %v", err)
 		// Don't fail the test if we don't have sufficient permissions
@@ -276,12 +279,12 @@ func TestEntraUser_Integration_AuthenticationFlow(t *testing.T) {
 			"Expected authentication error, got: %v", err)
 		return
 	}
-	
+
 	require.NotNil(t, token, "Token should not be nil")
 	assert.NotEmpty(t, token.Token, "Token string should not be empty")
 	assert.Equal(t, tenantID, token.TenantID, "Token should be for correct tenant")
 	assert.False(t, token.IsExpired(), "Token should not be expired")
-	
+
 	// Test token validation
 	isValid := authProvider.IsTokenValid(token)
 	assert.True(t, isValid, "Token should be valid")
@@ -298,7 +301,7 @@ func TestEntraUser_Integration_FullSuite(t *testing.T) {
 	t.Run("ConfigValidation", func(t *testing.T) {
 		TestEntraUser_Integration_ConfigValidation(t)
 	})
-	
+
 	t.Run("AuthenticationFlow", func(t *testing.T) {
 		TestEntraUser_Integration_AuthenticationFlow(t)
 	})
@@ -307,11 +310,11 @@ func TestEntraUser_Integration_FullSuite(t *testing.T) {
 // createRealAuthProvider creates a real OAuth2Provider for integration testing
 func createRealAuthProvider(t *testing.T) auth.Provider {
 	tempDir := t.TempDir()
-	
+
 	// Create credential store
 	credStore, err := auth.NewFileCredentialStore(tempDir, "integration-test-passphrase")
 	require.NoError(t, err, "Failed to create credential store")
-	
+
 	// Create OAuth2 config from environment
 	config := &auth.OAuth2Config{
 		ClientID:             os.Getenv("M365_CLIENT_ID"),
@@ -322,10 +325,10 @@ func createRealAuthProvider(t *testing.T) auth.Provider {
 			"https://graph.microsoft.com/.default",
 		},
 	}
-	
+
 	// Create provider
 	provider := auth.NewOAuth2Provider(credStore, config)
-	
+
 	return provider
 }
 
@@ -333,7 +336,7 @@ func createRealAuthProvider(t *testing.T) auth.Provider {
 func createRealGraphClient(t *testing.T) graph.Client {
 	// Create HTTP client for real Graph API calls
 	client := graph.NewHTTPClient()
-	
+
 	return client
 }
 
@@ -344,7 +347,7 @@ func getTenantDomain(t *testing.T, tenantID string, authProvider auth.Provider, 
 		t.Logf("Using configured tenant domain: %s", tenantDomain)
 		return tenantDomain
 	}
-	
+
 	// Use the tenant ID to construct the default .onmicrosoft.com domain
 	// This is the pattern Azure AD uses: first 8 chars of tenant ID without dashes
 	if len(tenantID) >= 8 {
@@ -353,7 +356,7 @@ func getTenantDomain(t *testing.T, tenantID string, authProvider auth.Provider, 
 		t.Logf("Using constructed tenant domain: %s", domain)
 		return domain
 	}
-	
+
 	// Ultimate fallback
 	t.Logf("Could not determine tenant domain, using fallback")
 	return "cfgmstest.onmicrosoft.com"

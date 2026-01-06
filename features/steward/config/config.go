@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // Package config provides configuration loading and validation for standalone steward operation.
 //
 // This package handles hostname.cfg files that define steward settings, resource
@@ -51,10 +53,63 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 
 	"gopkg.in/yaml.v3"
 )
+
+// envVarPattern matches ${VAR} patterns without defaults
+// It excludes ${VAR:-default} and ${VAR:=default} patterns
+var envVarPattern = regexp.MustCompile(`\$\{([^}:]+)\}`)
+
+// envVarWithDefaultPattern matches ${VAR:-default} and ${VAR:=default} patterns
+var envVarWithDefaultPattern = regexp.MustCompile(`\$\{([^}:]+):-([^}]*)\}`)
+
+// validateEnvVars checks that all referenced environment variables (without defaults) are set.
+// This provides fail-safe behavior: if a config references ${VAR} and VAR is not set,
+// the application fails fast instead of silently using an empty value.
+func validateEnvVars(content string) error {
+	matches := envVarPattern.FindAllStringSubmatch(content, -1)
+	var missing []string
+
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+		varName := match[1]
+		if _, exists := os.LookupEnv(varName); !exists {
+			missing = append(missing, varName)
+		}
+	}
+
+	if len(missing) > 0 {
+		return fmt.Errorf("missing required environment variables: %v (use ${VAR:-default} syntax to provide defaults)", missing)
+	}
+
+	return nil
+}
+
+// expandEnvWithDefaults expands environment variables with support for ${VAR:-default} syntax.
+// This extends Go's os.ExpandEnv to support shell-style defaults.
+func expandEnvWithDefaults(content string) string {
+	// First, expand ${VAR:-default} patterns
+	result := envVarWithDefaultPattern.ReplaceAllStringFunc(content, func(match string) string {
+		parts := envVarWithDefaultPattern.FindStringSubmatch(match)
+		if len(parts) < 3 {
+			return match
+		}
+		varName := parts[1]
+		defaultValue := parts[2]
+		if value, exists := os.LookupEnv(varName); exists {
+			return value
+		}
+		return defaultValue
+	})
+
+	// Then expand remaining ${VAR} patterns using os.ExpandEnv
+	return os.ExpandEnv(result)
+}
 
 // StewardConfig represents the complete steward configuration loaded from hostname.cfg.
 //
@@ -63,13 +118,13 @@ import (
 // resource definitions, and optional module path mappings.
 type StewardConfig struct {
 	// Steward contains steward-specific configuration settings
-	Steward   StewardSettings      `yaml:"steward"`
-	
+	Steward StewardSettings `yaml:"steward"`
+
 	// Resources defines the list of resources to be managed
-	Resources []ResourceConfig     `yaml:"resources"`
-	
+	Resources []ResourceConfig `yaml:"resources"`
+
 	// Modules provides optional custom paths for specific modules
-	Modules   map[string]string    `yaml:"modules,omitempty"` // module_name -> custom_path
+	Modules map[string]string `yaml:"modules,omitempty"` // module_name -> custom_path
 }
 
 // StewardSettings contains steward-specific configuration options.
@@ -78,17 +133,17 @@ type StewardConfig struct {
 // and module discovery paths.
 type StewardSettings struct {
 	// ID is the unique identifier for this steward instance
-	ID           string              `yaml:"id"`
-	
+	ID string `yaml:"id"`
+
 	// Mode defines the operation mode (standalone or controller)
-	Mode         OperationMode       `yaml:"mode"`
-	
+	Mode OperationMode `yaml:"mode"`
+
 	// ModulePaths lists additional directories to search for modules
-	ModulePaths  []string           `yaml:"module_paths,omitempty"`
-	
+	ModulePaths []string `yaml:"module_paths,omitempty"`
+
 	// Logging configures log output format and verbosity
-	Logging      LoggingConfig      `yaml:"logging"`
-	
+	Logging LoggingConfig `yaml:"logging"`
+
 	// ErrorHandling defines how to handle various error conditions
 	ErrorHandling ErrorHandlingConfig `yaml:"error_handling"`
 }
@@ -99,13 +154,13 @@ type StewardSettings struct {
 // module-specific configuration data.
 type ResourceConfig struct {
 	// Name is the unique identifier for this resource
-	Name     string                 `yaml:"name"`
-	
+	Name string `yaml:"name"`
+
 	// Module is the name of the module that will manage this resource
-	Module   string                 `yaml:"module"`
-	
+	Module string `yaml:"module"`
+
 	// Config contains module-specific configuration data
-	Config   map[string]interface{} `yaml:"config"`
+	Config map[string]interface{} `yaml:"config"`
 }
 
 // OperationMode defines how the steward operates.
@@ -113,17 +168,17 @@ type OperationMode string
 
 const (
 	// ModeStandalone operates using local configuration files and modules
-	ModeStandalone  OperationMode = "standalone"
-	
+	ModeStandalone OperationMode = "standalone"
+
 	// ModeController connects to a remote CFGMS controller (legacy)
-	ModeController  OperationMode = "controller"
+	ModeController OperationMode = "controller"
 )
 
 // LoggingConfig defines logging output settings.
 type LoggingConfig struct {
 	// Level sets the logging verbosity (debug, info, warn, error)
-	Level  string `yaml:"level"`
-	
+	Level string `yaml:"level"`
+
 	// Format sets the log output format (text, json)
 	Format string `yaml:"format"`
 }
@@ -134,13 +189,13 @@ type LoggingConfig struct {
 // warn (log warning and proceed), or fail (log error and stop).
 type ErrorHandlingConfig struct {
 	// ModuleLoadFailure defines how to handle module loading errors
-	ModuleLoadFailure   ErrorAction `yaml:"module_load_failure"`
-	
+	ModuleLoadFailure ErrorAction `yaml:"module_load_failure"`
+
 	// ResourceFailure defines how to handle resource execution errors
-	ResourceFailure     ErrorAction `yaml:"resource_failure"`
-	
+	ResourceFailure ErrorAction `yaml:"resource_failure"`
+
 	// ConfigurationError defines how to handle configuration validation errors
-	ConfigurationError  ErrorAction `yaml:"configuration_error"`
+	ConfigurationError ErrorAction `yaml:"configuration_error"`
 }
 
 // ErrorAction defines the available error handling strategies.
@@ -149,12 +204,12 @@ type ErrorAction string
 const (
 	// ActionContinue logs the error and continues execution
 	ActionContinue ErrorAction = "continue"
-	
+
 	// ActionFail logs the error and stops execution
-	ActionFail     ErrorAction = "fail"
-	
+	ActionFail ErrorAction = "fail"
+
 	// ActionWarn logs a warning and continues execution
-	ActionWarn     ErrorAction = "warn"
+	ActionWarn ErrorAction = "warn"
 )
 
 // LoadConfiguration searches for and loads the steward configuration from hostname.cfg.
@@ -163,9 +218,9 @@ const (
 // using the current hostname. If configPath is provided, loads from that specific file.
 //
 // Configuration search order (when configPath is empty):
-//   1. Current working directory/hostname.cfg
-//   2. User configuration directories
-//   3. System configuration directories
+//  1. Current working directory/hostname.cfg
+//  2. User configuration directories
+//  3. System configuration directories
 //
 // The function automatically applies defaults for optional fields and validates
 // the complete configuration before returning.
@@ -174,64 +229,76 @@ const (
 // is found, parsing fails, or validation fails.
 func LoadConfiguration(configPath string) (StewardConfig, error) {
 	var config StewardConfig
-	
+
 	// If specific path provided, use it
 	if configPath != "" {
 		return loadFromPath(configPath)
 	}
-	
+
 	// Search for configuration file in priority order
 	searchPaths := getConfigSearchPaths()
-	
+
 	for _, path := range searchPaths {
 		if _, err := os.Stat(path); err == nil {
 			return loadFromPath(path)
 		}
 	}
-	
+
 	return config, fmt.Errorf("no configuration file found in search paths")
 }
 
 // loadFromPath loads configuration from a specific file path
 func loadFromPath(configPath string) (StewardConfig, error) {
 	var config StewardConfig
-	
+
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return config, fmt.Errorf("failed to read configuration file: %w", err)
 	}
-	
-	if err := yaml.Unmarshal(data, &config); err != nil {
+
+	content := string(data)
+
+	// Validate that all referenced env vars (without defaults) are set
+	// This provides fail-safe behavior for missing env vars
+	if err := validateEnvVars(content); err != nil {
+		return config, fmt.Errorf("configuration validation failed: %w", err)
+	}
+
+	// Expand environment variables in the configuration content
+	// This supports ${VAR} and ${VAR:-default} syntax for explicit env var references
+	expandedData := expandEnvWithDefaults(content)
+
+	if err := yaml.Unmarshal([]byte(expandedData), &config); err != nil {
 		return config, fmt.Errorf("failed to parse configuration: %w", err)
 	}
-	
+
 	// Apply defaults
 	applyDefaults(&config)
-	
+
 	// Validate configuration
 	if err := ValidateConfiguration(config); err != nil {
 		return config, fmt.Errorf("configuration validation failed: %w", err)
 	}
-	
+
 	return config, nil
 }
 
 // getConfigSearchPaths returns the prioritized list of configuration search paths
 func getConfigSearchPaths() []string {
 	var paths []string
-	
+
 	// Get hostname for the config file name
 	hostname, err := os.Hostname()
 	if err != nil {
 		hostname = "localhost"
 	}
 	configFileName := hostname + ".cfg"
-	
+
 	// Current working directory (highest priority)
 	if cwd, err := os.Getwd(); err == nil {
 		paths = append(paths, filepath.Join(cwd, configFileName))
 	}
-	
+
 	// Platform-specific paths
 	switch runtime.GOOS {
 	case "windows":
@@ -242,20 +309,20 @@ func getConfigSearchPaths() []string {
 		if userProfile := os.Getenv("USERPROFILE"); userProfile != "" {
 			paths = append(paths, filepath.Join(userProfile, ".cfgms", configFileName))
 		}
-		
+
 	case "darwin":
 		// macOS: system and user Library
-		paths = append(paths, 
+		paths = append(paths,
 			filepath.Join("/Library", "Application Support", "cfgms", configFileName),
 			filepath.Join("/usr", "local", "etc", "cfgms", configFileName),
 		)
 		if homeDir := os.Getenv("HOME"); homeDir != "" {
-			paths = append(paths, 
+			paths = append(paths,
 				filepath.Join(homeDir, "Library", "Application Support", "cfgms", configFileName),
 				filepath.Join(homeDir, ".cfgms", configFileName),
 			)
 		}
-		
+
 	case "linux":
 		// Linux: standard system and user paths
 		paths = append(paths,
@@ -263,13 +330,13 @@ func getConfigSearchPaths() []string {
 			filepath.Join("/usr", "local", "etc", "cfgms", configFileName),
 		)
 		if homeDir := os.Getenv("HOME"); homeDir != "" {
-			paths = append(paths, 
+			paths = append(paths,
 				filepath.Join(homeDir, ".config", "cfgms", configFileName),
 				filepath.Join(homeDir, ".cfgms", configFileName),
 			)
 		}
 	}
-	
+
 	return paths
 }
 
@@ -279,28 +346,28 @@ func applyDefaults(config *StewardConfig) {
 	if config.Steward.Mode == "" {
 		config.Steward.Mode = ModeStandalone
 	}
-	
+
 	if config.Steward.Logging.Level == "" {
 		config.Steward.Logging.Level = "info"
 	}
-	
+
 	if config.Steward.Logging.Format == "" {
 		config.Steward.Logging.Format = "text"
 	}
-	
+
 	// Set default error handling
 	if config.Steward.ErrorHandling.ModuleLoadFailure == "" {
 		config.Steward.ErrorHandling.ModuleLoadFailure = ActionContinue
 	}
-	
+
 	if config.Steward.ErrorHandling.ResourceFailure == "" {
 		config.Steward.ErrorHandling.ResourceFailure = ActionWarn
 	}
-	
+
 	if config.Steward.ErrorHandling.ConfigurationError == "" {
 		config.Steward.ErrorHandling.ConfigurationError = ActionFail
 	}
-	
+
 	// Set default steward ID if not provided
 	if config.Steward.ID == "" {
 		if hostname, err := os.Hostname(); err == nil {
@@ -317,7 +384,7 @@ func ValidateConfiguration(config StewardConfig) error {
 	if config.Steward.ID == "" {
 		return fmt.Errorf("steward ID is required")
 	}
-	
+
 	// Validate operation mode
 	switch config.Steward.Mode {
 	case ModeStandalone, ModeController:
@@ -325,7 +392,7 @@ func ValidateConfiguration(config StewardConfig) error {
 	default:
 		return fmt.Errorf("invalid operation mode: %s", config.Steward.Mode)
 	}
-	
+
 	// Validate logging level
 	validLogLevels := []string{"debug", "info", "warn", "error"}
 	isValidLevel := false
@@ -338,43 +405,43 @@ func ValidateConfiguration(config StewardConfig) error {
 	if !isValidLevel {
 		return fmt.Errorf("invalid log level: %s", config.Steward.Logging.Level)
 	}
-	
+
 	// Validate resources
 	resourceNames := make(map[string]bool)
 	for i, resource := range config.Resources {
 		if resource.Name == "" {
 			return fmt.Errorf("resource %d: name is required", i)
 		}
-		
+
 		if resource.Module == "" {
 			return fmt.Errorf("resource %s: module is required", resource.Name)
 		}
-		
+
 		if resourceNames[resource.Name] {
 			return fmt.Errorf("duplicate resource name: %s", resource.Name)
 		}
 		resourceNames[resource.Name] = true
-		
+
 		if resource.Config == nil {
 			return fmt.Errorf("resource %s: config is required", resource.Name)
 		}
 	}
-	
+
 	return nil
 }
 
 // GetConfiguredModules returns a list of module names required by the configuration
 func GetConfiguredModules(config StewardConfig) []string {
 	moduleSet := make(map[string]bool)
-	
+
 	for _, resource := range config.Resources {
 		moduleSet[resource.Module] = true
 	}
-	
+
 	modules := make([]string, 0, len(moduleSet))
 	for module := range moduleSet {
 		modules = append(modules, module)
 	}
-	
+
 	return modules
 }

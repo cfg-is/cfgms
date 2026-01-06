@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package modules
 
 import (
@@ -123,36 +125,36 @@ func TestDefaultVersionMigrator_GetMigrationPath(t *testing.T) {
 	}
 
 	tests := []struct {
-		name                 string
-		fromVersion          string
-		toVersion            string
-		expectedComplexity   VersionMigrationComplexity
+		name                   string
+		fromVersion            string
+		toVersion              string
+		expectedComplexity     VersionMigrationComplexity
 		expectedRequiresBackup bool
-		minSteps             int
+		minSteps               int
 	}{
 		{
-			name:                 "patch upgrade",
-			fromVersion:          "1.0.0",
-			toVersion:            "1.1.0",
-			expectedComplexity:   MigrationComplexityMedium,
+			name:                   "patch upgrade",
+			fromVersion:            "1.0.0",
+			toVersion:              "1.1.0",
+			expectedComplexity:     MigrationComplexityMedium,
 			expectedRequiresBackup: true,
-			minSteps:             5,
+			minSteps:               5,
 		},
 		{
-			name:                 "major upgrade",
-			fromVersion:          "1.0.0",
-			toVersion:            "2.0.0",
-			expectedComplexity:   MigrationComplexityHigh,
+			name:                   "major upgrade",
+			fromVersion:            "1.0.0",
+			toVersion:              "2.0.0",
+			expectedComplexity:     MigrationComplexityHigh,
 			expectedRequiresBackup: true,
-			minSteps:             6,
+			minSteps:               6,
 		},
 		{
-			name:                 "major downgrade",
-			fromVersion:          "3.0.0",
-			toVersion:            "1.0.0",
-			expectedComplexity:   MigrationComplexityHigh,
+			name:                   "major downgrade",
+			fromVersion:            "3.0.0",
+			toVersion:              "1.0.0",
+			expectedComplexity:     MigrationComplexityHigh,
 			expectedRequiresBackup: true,
-			minSteps:             6,
+			minSteps:               6,
 		},
 	}
 
@@ -174,10 +176,10 @@ func TestDefaultVersionMigrator_GetMigrationPath(t *testing.T) {
 
 			// Verify steps
 			assert.GreaterOrEqual(t, len(path.Steps), tt.minSteps)
-			
+
 			// First step should be validation
 			assert.Equal(t, MigrationStepValidation, path.Steps[0].Type)
-			
+
 			// Last step should be cleanup
 			lastStep := path.Steps[len(path.Steps)-1]
 			assert.Equal(t, MigrationStepCleanup, lastStep.Type)
@@ -368,7 +370,7 @@ func TestDefaultVersionMigrator_ExecuteMigration(t *testing.T) {
 	t.Run("concurrent migration for same module", func(t *testing.T) {
 		path1, err := migrator.GetMigrationPath("test-module", "1.0.0", "1.1.0")
 		require.NoError(t, err)
-		
+
 		path2, err := migrator.GetMigrationPath("test-module", "1.1.0", "1.0.0")
 		require.NoError(t, err)
 
@@ -381,7 +383,7 @@ func TestDefaultVersionMigrator_ExecuteMigration(t *testing.T) {
 		}
 
 		ctx := context.Background()
-		
+
 		// Start first migration
 		_, err = migrator.ExecuteMigration(ctx, path1)
 		require.NoError(t, err)
@@ -461,7 +463,7 @@ func TestDefaultVersionMigrator_GetMigrationStatus(t *testing.T) {
 
 		// Wait for completion and check again
 		time.Sleep(10 * time.Second)
-		
+
 		finalStatus, err := migrator.GetMigrationStatus(result.ID)
 		require.NoError(t, err)
 		assert.Equal(t, MigrationStatusCompleted, finalStatus.Status)
@@ -723,7 +725,7 @@ func TestMigrationStepGeneration(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			steps := migrator.generateMigrationSteps("test-module", tt.fromVersion, tt.toVersion, tt.isUpgrade, tt.complexity)
-			
+
 			assert.GreaterOrEqual(t, len(steps), tt.expectedMinSteps)
 			assert.LessOrEqual(t, len(steps), tt.expectedMaxSteps)
 
@@ -769,8 +771,8 @@ func TestMigrationStepGeneration(t *testing.T) {
 			// Check main step type
 			hasMainStep := false
 			for _, step := range steps {
-				if (tt.isUpgrade && step.Type == MigrationStepUpgrade) || 
-				   (!tt.isUpgrade && step.Type == MigrationStepDowngrade) {
+				if (tt.isUpgrade && step.Type == MigrationStepUpgrade) ||
+					(!tt.isUpgrade && step.Type == MigrationStepDowngrade) {
 					hasMainStep = true
 					assert.Equal(t, tt.complexity >= MigrationComplexityMedium, step.RequiresRestart)
 					break
@@ -785,45 +787,45 @@ func TestMigrationWarningGeneration(t *testing.T) {
 	migrator := NewDefaultVersionMigrator(nil)
 
 	tests := []struct {
-		name              string
-		complexity        VersionMigrationComplexity
-		isUpgrade         bool
+		name                string
+		complexity          VersionMigrationComplexity
+		isUpgrade           bool
 		expectedMinWarnings int
 	}{
 		{
-			name:              "low complexity upgrade",
-			complexity:        MigrationComplexityLow,
-			isUpgrade:         true,
+			name:                "low complexity upgrade",
+			complexity:          MigrationComplexityLow,
+			isUpgrade:           true,
 			expectedMinWarnings: 0,
 		},
 		{
-			name:              "medium complexity upgrade",
-			complexity:        MigrationComplexityMedium,
-			isUpgrade:         true,
+			name:                "medium complexity upgrade",
+			complexity:          MigrationComplexityMedium,
+			isUpgrade:           true,
 			expectedMinWarnings: 1,
 		},
 		{
-			name:              "medium complexity downgrade",
-			complexity:        MigrationComplexityMedium,
-			isUpgrade:         false,
+			name:                "medium complexity downgrade",
+			complexity:          MigrationComplexityMedium,
+			isUpgrade:           false,
 			expectedMinWarnings: 2, // Service restart + feature loss
 		},
 		{
-			name:              "high complexity upgrade",
-			complexity:        MigrationComplexityHigh,
-			isUpgrade:         true,
+			name:                "high complexity upgrade",
+			complexity:          MigrationComplexityHigh,
+			isUpgrade:           true,
 			expectedMinWarnings: 2,
 		},
 		{
-			name:              "high complexity downgrade",
-			complexity:        MigrationComplexityHigh,
-			isUpgrade:         false,
+			name:                "high complexity downgrade",
+			complexity:          MigrationComplexityHigh,
+			isUpgrade:           false,
 			expectedMinWarnings: 3, // Changes + disk space + data loss
 		},
 		{
-			name:              "critical complexity",
-			complexity:        MigrationComplexityCritical,
-			isUpgrade:         true,
+			name:                "critical complexity",
+			complexity:          MigrationComplexityCritical,
+			isUpgrade:           true,
 			expectedMinWarnings: 3,
 		},
 	}
@@ -831,9 +833,9 @@ func TestMigrationWarningGeneration(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			warnings := migrator.generateMigrationWarnings(tt.complexity, tt.isUpgrade)
-			
+
 			assert.GreaterOrEqual(t, len(warnings), tt.expectedMinWarnings)
-			
+
 			for _, warning := range warnings {
 				assert.NotEmpty(t, warning, "Warning should not be empty")
 			}
@@ -877,12 +879,12 @@ func TestMigrationWarningGeneration(t *testing.T) {
 
 // Helper function to check if a string contains a substring (case-insensitive)
 func contains(str, substr string) bool {
-	return len(str) >= len(substr) && 
-		   (str == substr || 
-		    len(str) > len(substr) && 
-		    (str[:len(substr)] == substr || 
-		     str[len(str)-len(substr):] == substr ||
-		     containsInMiddle(str, substr)))
+	return len(str) >= len(substr) &&
+		(str == substr ||
+			len(str) > len(substr) &&
+				(str[:len(substr)] == substr ||
+					str[len(str)-len(substr):] == substr ||
+					containsInMiddle(str, substr)))
 }
 
 func containsInMiddle(str, substr string) bool {

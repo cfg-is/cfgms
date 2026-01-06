@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package workflow
 
 import (
@@ -146,8 +148,8 @@ func (api *DebugAPI) StopDebugSession(w http.ResponseWriter, r *http.Request) {
 
 // StepExecutionRequest represents a step execution command
 type StepExecutionRequest struct {
-	Action          DebugAction                `json:"action"`
-	VariableUpdates map[string]interface{}     `json:"variable_updates,omitempty"`
+	Action          DebugAction            `json:"action"`
+	VariableUpdates map[string]interface{} `json:"variable_updates,omitempty"`
 }
 
 // StepExecution handles POST /debug/sessions/{sessionId}/step

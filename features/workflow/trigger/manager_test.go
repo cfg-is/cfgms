@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package trigger
 
 import (
@@ -5,10 +7,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/logging"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+
+	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
 // MockStorageProvider implements StorageProvider for testing
@@ -90,6 +93,16 @@ func (m *MockStorageProvider) CreateRBACStore(config map[string]interface{}) (in
 func (m *MockStorageProvider) CreateRuntimeStore(config map[string]interface{}) (interfaces.RuntimeStore, error) {
 	args := m.Called(config)
 	return args.Get(0).(interfaces.RuntimeStore), args.Error(1)
+}
+
+func (m *MockStorageProvider) CreateTenantStore(config map[string]interface{}) (interfaces.TenantStore, error) {
+	args := m.Called(config)
+	return args.Get(0).(interfaces.TenantStore), args.Error(1)
+}
+
+func (m *MockStorageProvider) CreateRegistrationTokenStore(config map[string]interface{}) (interfaces.RegistrationTokenStore, error) {
+	args := m.Called(config)
+	return args.Get(0).(interfaces.RegistrationTokenStore), args.Error(1)
 }
 
 func (m *MockStorageProvider) GetCapabilities() interfaces.ProviderCapabilities {
@@ -546,7 +559,7 @@ func TestTriggerManagerImpl_UpdateTrigger(t *testing.T) {
 				Type:         TriggerTypeSchedule,
 				WorkflowName: "invalid-workflow",
 				Schedule: &ScheduleConfig{
-					CronExpression: "",  // Empty cron expression will fail validation
+					CronExpression: "", // Empty cron expression will fail validation
 					Enabled:        true,
 				},
 			},
@@ -843,11 +856,11 @@ func TestTriggerManagerImpl_ListTriggers(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name         string
-		filter       *TriggerFilter
-		expectedLen  int
-		expectedIDs  []string
-		expectError  bool
+		name        string
+		filter      *TriggerFilter
+		expectedLen int
+		expectedIDs []string
+		expectError bool
 	}{
 		{
 			name:        "list all triggers",

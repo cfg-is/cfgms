@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // Package timescale - Schema management for TimescaleDB logging provider
 package timescale
 
@@ -86,7 +88,7 @@ func (p *TimescaleProvider) createIndexes(ctx context.Context) error {
 		return fmt.Errorf("failed to build safe table name: %w", err)
 	}
 	tableName := safeTableName
-	
+
 	indexes := []struct {
 		name  string
 		query string
@@ -100,7 +102,7 @@ func (p *TimescaleProvider) createIndexes(ctx context.Context) error {
 			"idx_log_entries_timestamp_level",
 			fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_%s_timestamp_level ON %s (timestamp DESC, level);", p.config.TableName, tableName),
 		},
-		
+
 		// Tenant isolation (critical for multi-tenant deployments)
 		{
 			"idx_log_entries_tenant_id",
@@ -110,19 +112,19 @@ func (p *TimescaleProvider) createIndexes(ctx context.Context) error {
 			"idx_log_entries_tenant_timestamp",
 			fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_%s_tenant_timestamp ON %s (tenant_id, timestamp DESC);", p.config.TableName, tableName),
 		},
-		
+
 		// Service and component tracking
 		{
 			"idx_log_entries_service_component",
 			fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_%s_service_component ON %s (service_name, component);", p.config.TableName, tableName),
 		},
-		
+
 		// Log level filtering
 		{
 			"idx_log_entries_level",
 			fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_%s_level ON %s (level);", p.config.TableName, tableName),
 		},
-		
+
 		// Correlation and tracing
 		{
 			"idx_log_entries_correlation_id",
@@ -136,19 +138,19 @@ func (p *TimescaleProvider) createIndexes(ctx context.Context) error {
 			"idx_log_entries_trace_id",
 			fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_%s_trace_id ON %s (trace_id) WHERE trace_id != '';", p.config.TableName, tableName),
 		},
-		
+
 		// Full-text search on messages
 		{
 			"idx_log_entries_message_text",
 			fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_%s_message_text ON %s USING GIN(to_tsvector('english', message));", p.config.TableName, tableName),
 		},
-		
+
 		// JSONB field queries
 		{
 			"idx_log_entries_fields",
 			fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_%s_fields ON %s USING GIN(fields);", p.config.TableName, tableName),
 		},
-		
+
 		// Composite indexes for common query patterns
 		{
 			"idx_log_entries_tenant_level_timestamp",
@@ -201,7 +203,7 @@ func (p *TimescaleProvider) createHypertable(ctx context.Context, tableName stri
 		SELECT COUNT(*) FROM timescaledb_information.hypertables 
 		WHERE hypertable_schema = $1 AND hypertable_name = $2;
 	`
-	
+
 	var count int
 	err := p.db.QueryRowContext(ctx, checkHypertableQuery, p.config.SchemaName, p.config.TableName).Scan(&count)
 	if err != nil {

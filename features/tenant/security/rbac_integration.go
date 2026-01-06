@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package security
 
 import (
@@ -11,10 +13,10 @@ import (
 
 // TenantSecurityMiddleware integrates tenant security with RBAC system
 type TenantSecurityMiddleware struct {
-	rbacManager      *rbac.Manager
-	isolationEngine  *TenantIsolationEngine
-	policyEngine     *TenantSecurityPolicyEngine
-	auditLogger      *TenantSecurityAuditLogger
+	rbacManager     *rbac.Manager
+	isolationEngine *TenantIsolationEngine
+	policyEngine    *TenantSecurityPolicyEngine
+	auditLogger     *TenantSecurityAuditLogger
 }
 
 // NewTenantSecurityMiddleware creates a new tenant security middleware
@@ -35,7 +37,7 @@ func NewTenantSecurityMiddleware(
 // EnhancedPermissionCheck performs comprehensive permission checking with tenant security
 func (tsm *TenantSecurityMiddleware) EnhancedPermissionCheck(ctx context.Context, request *common.AccessRequest) (*EnhancedAccessResponse, error) {
 	startTime := time.Now()
-	
+
 	response := &EnhancedAccessResponse{
 		StandardResponse: &common.AccessResponse{
 			Granted: false,
@@ -51,7 +53,7 @@ func (tsm *TenantSecurityMiddleware) EnhancedPermissionCheck(ctx context.Context
 	}
 
 	response.StandardResponse = rbacResponse
-	
+
 	// If RBAC denies access, no need to continue with tenant security checks
 	if !rbacResponse.Granted {
 		response.TenantSecurityValidation.Decision = "rbac_denied"
@@ -76,7 +78,7 @@ func (tsm *TenantSecurityMiddleware) EnhancedPermissionCheck(ctx context.Context
 	}
 
 	response.TenantSecurityValidation.IsolationValidation = isolationResponse
-	
+
 	if !isolationResponse.Granted {
 		response.StandardResponse.Granted = false
 		response.StandardResponse.Reason = fmt.Sprintf("Tenant isolation check failed: %s", isolationResponse.Reason)
@@ -314,10 +316,10 @@ type EnhancedAccessResponse struct {
 }
 
 type TenantSecurityValidationResult struct {
-	Decision             string                       `json:"decision"`
-	Reason               string                       `json:"reason"`
-	IsolationValidation  *TenantAccessResponse        `json:"isolation_validation,omitempty"`
-	PolicyEvaluation     *SecurityEvaluationResult    `json:"policy_evaluation,omitempty"`
+	Decision            string                    `json:"decision"`
+	Reason              string                    `json:"reason"`
+	IsolationValidation *TenantAccessResponse     `json:"isolation_validation,omitempty"`
+	PolicyEvaluation    *SecurityEvaluationResult `json:"policy_evaluation,omitempty"`
 }
 
 type CrossTenantValidationResult struct {
@@ -343,11 +345,11 @@ type TenantSecuritySubjectRequest struct {
 }
 
 type TenantSecurityAttributes struct {
-	ComplianceRequirements []string          `json:"compliance_requirements,omitempty"`
-	AccessRestrictions     []string          `json:"access_restrictions,omitempty"`
+	ComplianceRequirements []string           `json:"compliance_requirements,omitempty"`
+	AccessRestrictions     []string           `json:"access_restrictions,omitempty"`
 	DataClassification     DataClassification `json:"data_classification,omitempty"`
-	MaxSessionDuration     time.Duration     `json:"max_session_duration,omitempty"`
-	RequiredMFA            bool              `json:"required_mfa,omitempty"`
+	MaxSessionDuration     time.Duration      `json:"max_session_duration,omitempty"`
+	RequiredMFA            bool               `json:"required_mfa,omitempty"`
 }
 
 // Additional audit logger method for enhanced validation
@@ -358,21 +360,21 @@ func (tsal *TenantSecurityAuditLogger) LogEnhancedAccessValidation(ctx context.C
 	}
 
 	entry := TenantSecurityAuditEntry{
-		ID:        fmt.Sprintf("enhanced-%d", time.Now().UnixNano()),
-		Timestamp: time.Now(),
-		EventType: TenantSecurityEventAccessAttempt,
-		TenantID:  request.TenantId,
-		SubjectID: request.SubjectId,
+		ID:         fmt.Sprintf("enhanced-%d", time.Now().UnixNano()),
+		Timestamp:  time.Now(),
+		EventType:  TenantSecurityEventAccessAttempt,
+		TenantID:   request.TenantId,
+		SubjectID:  request.SubjectId,
 		ResourceID: request.ResourceId,
-		Action:    "enhanced_access_validation",
-		Result:    response.TenantSecurityValidation.Decision,
-		Severity:  severity,
+		Action:     "enhanced_access_validation",
+		Result:     response.TenantSecurityValidation.Decision,
+		Severity:   severity,
 		Details: map[string]interface{}{
-			"rbac_granted":        response.StandardResponse.Granted,
-			"rbac_reason":         response.StandardResponse.Reason,
-			"validation_latency":  response.ValidationLatency.Milliseconds(),
-			"security_decision":   response.TenantSecurityValidation.Decision,
-			"security_reason":     response.TenantSecurityValidation.Reason,
+			"rbac_granted":       response.StandardResponse.Granted,
+			"rbac_reason":        response.StandardResponse.Reason,
+			"validation_latency": response.ValidationLatency.Milliseconds(),
+			"security_decision":  response.TenantSecurityValidation.Decision,
+			"security_reason":    response.TenantSecurityValidation.Reason,
 		},
 	}
 
@@ -396,7 +398,7 @@ func (tsal *TenantSecurityAuditLogger) LogSecuritySubjectCreation(ctx context.Co
 		Result:    "success",
 		Severity:  AuditSeverityInfo,
 		Details: map[string]interface{}{
-			"subject_type":    subject.Type.String(),
+			"subject_type":   subject.Type.String(),
 			"display_name":   subject.DisplayName,
 			"security_attrs": attributes,
 		},

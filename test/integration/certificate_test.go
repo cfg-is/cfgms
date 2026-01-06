@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package integration
 
 import (
@@ -68,7 +70,7 @@ func (s *CertificateTestSuite) TestServerCertificateExists() {
 func (s *CertificateTestSuite) TestClientCertificateExists() {
 	clientCerts, err := s.env.GetCertificateInfo(cert.CertificateTypeClient)
 	s.NoError(err, "Should be able to retrieve client certificates")
-	
+
 	// Find the original test-steward certificate (the test environment creates 1, the generation test creates another)
 	var testStewardCert *cert.CertificateInfo
 	for _, certInfo := range clientCerts {
@@ -77,7 +79,7 @@ func (s *CertificateTestSuite) TestClientCertificateExists() {
 			break
 		}
 	}
-	
+
 	s.NotNil(testStewardCert, "Should find test-steward client certificate")
 	s.Equal(cert.CertificateTypeClient, testStewardCert.Type, "Certificate should be client type")
 	s.True(testStewardCert.IsValid, "Client certificate should be valid")

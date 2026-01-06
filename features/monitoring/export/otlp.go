@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package export
 
 import (
@@ -13,7 +15,7 @@ import (
 type OTLPExporter struct {
 	logger logging.Logger
 	config OTLPConfig
-	
+
 	// Connection state
 	connected   bool
 	lastExport  time.Time
@@ -26,12 +28,12 @@ type OTLPConfig struct {
 	Headers     map[string]string `json:"headers" yaml:"headers"`
 	Compression string            `json:"compression" yaml:"compression"` // "gzip", "none"
 	Timeout     time.Duration     `json:"timeout" yaml:"timeout"`
-	
+
 	// Data types to export
 	ExportTraces  bool `json:"export_traces" yaml:"export_traces"`
 	ExportMetrics bool `json:"export_metrics" yaml:"export_metrics"`
 	ExportLogs    bool `json:"export_logs" yaml:"export_logs"`
-	
+
 	// Sampling configuration
 	TraceSamplingRate   float64 `json:"trace_sampling_rate" yaml:"trace_sampling_rate"`
 	MetricsSamplingRate float64 `json:"metrics_sampling_rate" yaml:"metrics_sampling_rate"`
@@ -66,12 +68,12 @@ func (oe *OTLPExporter) Configure(config ExporterConfig) error {
 	if config.Endpoint != "" {
 		oe.config.Endpoint = config.Endpoint
 	}
-	
+
 	// Use timeout from general config
 	if config.Timeout > 0 {
 		oe.config.Timeout = config.Timeout
 	}
-	
+
 	// Extract OTLP-specific configuration
 	if config.Config != nil {
 		if compression, ok := config.Config["compression"].(string); ok {
@@ -100,19 +102,19 @@ func (oe *OTLPExporter) Configure(config ExporterConfig) error {
 			}
 		}
 	}
-	
+
 	// Add authentication headers if provided
 	if config.APIKey != "" {
 		oe.config.Headers["Authorization"] = fmt.Sprintf("Bearer %s", config.APIKey)
 	}
-	
+
 	oe.logger.InfoCtx(context.Background(), "Configured OTLP exporter",
 		"endpoint", oe.config.Endpoint,
 		"export_traces", oe.config.ExportTraces,
 		"export_metrics", oe.config.ExportMetrics,
 		"export_logs", oe.config.ExportLogs,
 		"compression", oe.config.Compression)
-	
+
 	return nil
 }
 
@@ -120,7 +122,7 @@ func (oe *OTLPExporter) Configure(config ExporterConfig) error {
 func (oe *OTLPExporter) Start(ctx context.Context) error {
 	oe.logger.InfoCtx(ctx, "Starting OTLP exporter",
 		"endpoint", oe.config.Endpoint)
-	
+
 	// Test connectivity
 	health := oe.HealthCheck(ctx)
 	if health.Status != "healthy" {
@@ -129,7 +131,7 @@ func (oe *OTLPExporter) Start(ctx context.Context) error {
 			"message", health.Message)
 		// Don't fail startup - allow degraded operation
 	}
-	
+
 	return nil
 }
 
@@ -143,52 +145,52 @@ func (oe *OTLPExporter) Stop(ctx context.Context) error {
 // Export sends monitoring data to the OTLP endpoint.
 func (oe *OTLPExporter) Export(ctx context.Context, data ExportData) error {
 	startTime := time.Now()
-	
+
 	// Create export context with timeout
 	exportCtx, cancel := context.WithTimeout(ctx, oe.config.Timeout)
 	defer cancel()
-	
+
 	var exportErrors []error
-	
+
 	// Export traces if enabled and available
 	if oe.config.ExportTraces && len(data.Traces) > 0 {
 		if err := oe.exportTraces(exportCtx, data.Traces); err != nil {
 			exportErrors = append(exportErrors, fmt.Errorf("trace export failed: %w", err))
 		}
 	}
-	
+
 	// Export metrics if enabled and available
 	if oe.config.ExportMetrics && oe.hasMetrics(data) {
 		if err := oe.exportMetrics(exportCtx, data); err != nil {
 			exportErrors = append(exportErrors, fmt.Errorf("metrics export failed: %w", err))
 		}
 	}
-	
+
 	// Export logs if enabled and available
 	if oe.config.ExportLogs && len(data.Logs) > 0 {
 		if err := oe.exportLogs(exportCtx, data.Logs); err != nil {
 			exportErrors = append(exportErrors, fmt.Errorf("logs export failed: %w", err))
 		}
 	}
-	
+
 	// Update state
 	oe.lastExport = time.Now()
 	oe.exportCount++
-	
+
 	// Handle errors
 	if len(exportErrors) > 0 {
 		oe.connected = false
 		return fmt.Errorf("OTLP export errors: %v", exportErrors)
 	}
-	
+
 	oe.connected = true
-	
+
 	oe.logger.DebugCtx(ctx, "OTLP export completed",
 		"export_time_ms", time.Since(startTime).Milliseconds(),
 		"traces_count", len(data.Traces),
 		"logs_count", len(data.Logs),
 		"has_metrics", oe.hasMetrics(data))
-	
+
 	return nil
 }
 
@@ -200,7 +202,7 @@ func (oe *OTLPExporter) HealthCheck(ctx context.Context) ExporterHealth {
 		ExportCount:     oe.exportCount,
 		LastExport:      oe.lastExport,
 	}
-	
+
 	// For now, we'll do a simple connectivity check
 	// In a full implementation, you might want to send a test span
 	if oe.connected {
@@ -210,13 +212,13 @@ func (oe *OTLPExporter) HealthCheck(ctx context.Context) ExporterHealth {
 		health.Status = "unhealthy"
 		health.Message = "OTLP endpoint not reachable"
 	}
-	
+
 	// TODO: Implement actual health check by sending test data
 	// This would involve:
 	// 1. Creating a minimal OTLP payload
 	// 2. Sending it to the endpoint
 	// 3. Checking for successful response
-	
+
 	return health
 }
 
@@ -226,14 +228,14 @@ func (oe *OTLPExporter) exportTraces(ctx context.Context, traces []TraceSpan) er
 	if oe.config.TraceSamplingRate < 1.0 {
 		traces = oe.sampleTraces(traces, oe.config.TraceSamplingRate)
 	}
-	
+
 	if len(traces) == 0 {
 		return nil // Nothing to export after sampling
 	}
-	
+
 	// Convert to OTLP format
 	otlpTraces := oe.convertTracesToOTLP(traces)
-	
+
 	// Send to OTLP traces endpoint
 	endpoint := oe.config.Endpoint + "/v1/traces"
 	return oe.sendOTLPData(ctx, endpoint, otlpTraces)
@@ -248,10 +250,10 @@ func (oe *OTLPExporter) exportMetrics(ctx context.Context, data ExportData) erro
 			return nil
 		}
 	}
-	
+
 	// Convert to OTLP format
 	otlpMetrics := oe.convertMetricsToOTLP(data)
-	
+
 	// Send to OTLP metrics endpoint
 	endpoint := oe.config.Endpoint + "/v1/metrics"
 	return oe.sendOTLPData(ctx, endpoint, otlpMetrics)
@@ -262,10 +264,10 @@ func (oe *OTLPExporter) exportLogs(ctx context.Context, logs []LogEntry) error {
 	if len(logs) == 0 {
 		return nil
 	}
-	
+
 	// Convert to OTLP format
 	otlpLogs := oe.convertLogsToOTLP(logs)
-	
+
 	// Send to OTLP logs endpoint
 	endpoint := oe.config.Endpoint + "/v1/logs"
 	return oe.sendOTLPData(ctx, endpoint, otlpLogs)
@@ -280,14 +282,14 @@ func (oe *OTLPExporter) sendOTLPData(ctx context.Context, endpoint string, data 
 	// 3. Creating HTTP request with proper headers
 	// 4. Sending POST request to endpoint
 	// 5. Handling response and errors
-	
+
 	oe.logger.DebugCtx(ctx, "Would send OTLP data",
 		"endpoint", endpoint,
 		"compression", oe.config.Compression)
-	
+
 	// Simulate network delay
 	time.Sleep(10 * time.Millisecond)
-	
+
 	return nil // Placeholder implementation
 }
 
@@ -297,7 +299,7 @@ func (oe *OTLPExporter) sendOTLPData(ctx context.Context, endpoint string, data 
 func (oe *OTLPExporter) convertTracesToOTLP(traces []TraceSpan) interface{} {
 	// TODO: Implement conversion to OTLP protobuf format
 	// This would create proper OTLP ResourceSpans structure
-	
+
 	converted := make([]map[string]interface{}, len(traces))
 	for i, trace := range traces {
 		converted[i] = map[string]interface{}{
@@ -311,7 +313,7 @@ func (oe *OTLPExporter) convertTracesToOTLP(traces []TraceSpan) interface{} {
 			"attributes":     trace.Tags,
 		}
 	}
-	
+
 	return map[string]interface{}{
 		"resource_spans": []map[string]interface{}{
 			{
@@ -335,9 +337,9 @@ func (oe *OTLPExporter) convertTracesToOTLP(traces []TraceSpan) interface{} {
 func (oe *OTLPExporter) convertMetricsToOTLP(data ExportData) interface{} {
 	// TODO: Implement conversion to OTLP protobuf format
 	// This would create proper OTLP ResourceMetrics structure
-	
+
 	allMetrics := make(map[string]interface{})
-	
+
 	// Flatten all metrics
 	for key, value := range data.SystemMetrics {
 		allMetrics["system_"+key] = value
@@ -354,7 +356,7 @@ func (oe *OTLPExporter) convertMetricsToOTLP(data ExportData) interface{} {
 	for key, value := range data.WorkflowMetrics {
 		allMetrics["workflow_"+key] = value
 	}
-	
+
 	return map[string]interface{}{
 		"resource_metrics": []map[string]interface{}{
 			{
@@ -378,18 +380,18 @@ func (oe *OTLPExporter) convertMetricsToOTLP(data ExportData) interface{} {
 func (oe *OTLPExporter) convertLogsToOTLP(logs []LogEntry) interface{} {
 	// TODO: Implement conversion to OTLP protobuf format
 	// This would create proper OTLP ResourceLogs structure
-	
+
 	converted := make([]map[string]interface{}, len(logs))
 	for i, log := range logs {
 		converted[i] = map[string]interface{}{
-			"time_unix_nano":   log.Timestamp.UnixNano(),
-			"severity_text":    log.Level,
-			"body":            log.Message,
-			"trace_id":        log.TraceID,
-			"attributes":      log.Fields,
+			"time_unix_nano": log.Timestamp.UnixNano(),
+			"severity_text":  log.Level,
+			"body":           log.Message,
+			"trace_id":       log.TraceID,
+			"attributes":     log.Fields,
 		}
 	}
-	
+
 	return map[string]interface{}{
 		"resource_logs": []map[string]interface{}{
 			{
@@ -423,7 +425,7 @@ func (oe *OTLPExporter) sampleTraces(traces []TraceSpan, rate float64) []TraceSp
 	if rate >= 1.0 {
 		return traces
 	}
-	
+
 	sampled := make([]TraceSpan, 0, int(float64(len(traces))*rate))
 	for _, trace := range traces {
 		// Use trace ID for consistent sampling decisions
@@ -431,11 +433,11 @@ func (oe *OTLPExporter) sampleTraces(traces []TraceSpan, rate float64) []TraceSp
 		for _, b := range []byte(trace.TraceID) {
 			hash = hash*31 + int(b)
 		}
-		
+
 		if float64(hash%1000)/1000.0 < rate {
 			sampled = append(sampled, trace)
 		}
 	}
-	
+
 	return sampled
 }

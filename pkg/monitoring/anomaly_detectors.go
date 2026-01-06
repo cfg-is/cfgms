@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package monitoring
 
 import (
@@ -187,12 +189,12 @@ func (bad *BasicAnomalyDetector) checkRule(ctx context.Context, rule DetectionRu
 		Status:        AnomalyStatusActive,
 		Metrics:       metrics,
 		Context: map[string]interface{}{
-			"rule_id":     rule.ID,
-			"metric":      rule.Metric,
-			"value":       *value,
-			"threshold":   rule.Threshold,
-			"condition":   rule.Condition,
-			"duration":    rule.Duration.String(),
+			"rule_id":   rule.ID,
+			"metric":    rule.Metric,
+			"value":     *value,
+			"threshold": rule.Threshold,
+			"condition": rule.Condition,
+			"duration":  rule.Duration.String(),
 		},
 		Actions: bad.generateActions(rule, *value),
 	}
@@ -477,13 +479,13 @@ func (sad *StatisticalAnomalyDetector) analyzeMetricStatistically(ctx context.Co
 			Status:        AnomalyStatusActive,
 			Metrics:       metrics,
 			Context: map[string]interface{}{
-				"metric":           metricName,
-				"current_value":    *currentValue,
-				"historical_mean":  mean,
+				"metric":             metricName,
+				"current_value":      *currentValue,
+				"historical_mean":    mean,
 				"standard_deviation": stdDev,
-				"z_score":          zScore,
-				"threshold":        sad.zScoreThreshold,
-				"sample_size":      len(values),
+				"z_score":            zScore,
+				"threshold":          sad.zScoreThreshold,
+				"sample_size":        len(values),
 			},
 			Actions: []string{
 				"Investigate recent changes that may have caused this deviation",

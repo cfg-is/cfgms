@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // Package dna provides system DNA (system attributes) collection for stewards.
 //
 // DNA represents the digital fingerprint of a system, containing hardware,
@@ -12,10 +14,9 @@
 //	if err != nil {
 //		log.Fatal(err)
 //	}
-//	
+//
 //	fmt.Printf("System ID: %s\n", dna.Id)
 //	fmt.Printf("OS: %s\n", dna.Attributes["os"])
-//
 package dna
 
 import (
@@ -71,27 +72,27 @@ func (c *Collector) Collect() (*commonpb.DNA, error) {
 	basicStart := time.Now()
 	c.collectBasicInfo(attributes)
 	c.logger.Debug("Basic info collected", "duration", time.Since(basicStart))
-	
+
 	// Collect hardware information
 	hwStart := time.Now()
 	c.collectHardwareInfo(attributes)
 	c.logger.Debug("Hardware info collected", "duration", time.Since(hwStart))
-	
+
 	// Collect software information (potentially slow)
 	swStart := time.Now()
 	c.collectSoftwareInfo(attributes)
 	c.logger.Debug("Software info collected", "duration", time.Since(swStart))
-	
-	// Collect network information  
+
+	// Collect network information
 	netStart := time.Now()
 	c.collectNetworkInfo(attributes)
 	c.logger.Debug("Network info collected", "duration", time.Since(netStart))
-	
+
 	// Collect environment information (fast)
 	envStart := time.Now()
 	c.collectEnvironmentInfo(attributes)
 	c.logger.Debug("Environment info collected", "duration", time.Since(envStart))
-	
+
 	// Collect security information (potentially slow)
 	secStart := time.Now()
 	c.collectSecurityInfo(attributes)
@@ -102,12 +103,12 @@ func (c *Collector) Collect() (*commonpb.DNA, error) {
 
 	now := time.Now()
 	totalDuration := now.Sub(startTime)
-	
+
 	dna := &commonpb.DNA{
 		Id:          systemID,
 		Attributes:  attributes,
 		LastUpdated: timestamppb.New(now),
-		
+
 		// Sync metadata (will be updated by steward with config info)
 		ConfigHash:      "", // Will be set when steward loads configuration
 		LastSyncTime:    timestamppb.New(now),
@@ -115,7 +116,7 @@ func (c *Collector) Collect() (*commonpb.DNA, error) {
 		SyncFingerprint: c.generateSyncFingerprint(systemID, attributes, ""),
 	}
 
-	c.logger.Info("System DNA collected", 
+	c.logger.Info("System DNA collected",
 		"id", systemID,
 		"attributes", len(attributes),
 		"total_duration", totalDuration)
@@ -130,11 +131,11 @@ func (c *Collector) collectBasicInfo(attributes map[string]string) {
 	attributes["runtime_os"] = runtime.GOOS
 	attributes["runtime_arch"] = runtime.GOARCH
 	attributes["num_cpu"] = fmt.Sprintf("%d", runtime.NumCPU())
-	
+
 	if hostname, err := os.Hostname(); err == nil {
 		attributes["hostname"] = hostname
 	}
-	
+
 	if wd, err := os.Getwd(); err == nil {
 		attributes["working_directory"] = wd
 	}
@@ -143,27 +144,27 @@ func (c *Collector) collectBasicInfo(attributes map[string]string) {
 // collectHardwareInfo collects hardware-specific information using platform-specific collectors.
 func (c *Collector) collectHardwareInfo(attributes map[string]string) {
 	hwCollector := NewHardwareCollector()
-	
+
 	// Collect CPU information
 	if err := hwCollector.CollectCPU(attributes); err != nil {
 		c.logger.Error("Failed to collect CPU information", "error", err)
 	}
-	
+
 	// Collect memory information
 	if err := hwCollector.CollectMemory(attributes); err != nil {
 		c.logger.Error("Failed to collect memory information", "error", err)
 	}
-	
+
 	// Collect disk information
 	if err := hwCollector.CollectDisk(attributes); err != nil {
 		c.logger.Error("Failed to collect disk information", "error", err)
 	}
-	
+
 	// Collect motherboard/system information
 	if err := hwCollector.CollectMotherboard(attributes); err != nil {
 		c.logger.Error("Failed to collect motherboard information", "error", err)
 	}
-	
+
 	// Add basic runtime information as backup
 	attributes["runtime_arch"] = runtime.GOARCH
 	attributes["runtime_os"] = runtime.GOOS
@@ -172,27 +173,27 @@ func (c *Collector) collectHardwareInfo(attributes map[string]string) {
 // collectSoftwareInfo collects software and OS information using platform-specific collectors.
 func (c *Collector) collectSoftwareInfo(attributes map[string]string) {
 	swCollector := NewSoftwareCollector()
-	
+
 	// Collect OS information
 	if err := swCollector.CollectOS(attributes); err != nil {
 		c.logger.Error("Failed to collect OS information", "error", err)
 	}
-	
+
 	// Collect installed packages/applications
 	if err := swCollector.CollectPackages(attributes); err != nil {
 		c.logger.Error("Failed to collect package information", "error", err)
 	}
-	
+
 	// Collect service information
 	if err := swCollector.CollectServices(attributes); err != nil {
 		c.logger.Error("Failed to collect service information", "error", err)
 	}
-	
+
 	// Collect process information
 	if err := swCollector.CollectProcesses(attributes); err != nil {
 		c.logger.Error("Failed to collect process information", "error", err)
 	}
-	
+
 	// Environment-based OS info as backup
 	if osName := os.Getenv("OS"); osName != "" {
 		attributes["env_os_name"] = osName
@@ -202,22 +203,22 @@ func (c *Collector) collectSoftwareInfo(attributes map[string]string) {
 // collectNetworkInfo collects network configuration information using platform-specific collectors.
 func (c *Collector) collectNetworkInfo(attributes map[string]string) {
 	netCollector := NewNetworkCollector()
-	
+
 	// Collect network interface information
 	if err := netCollector.CollectInterfaces(attributes); err != nil {
 		c.logger.Error("Failed to collect network interface information", "error", err)
 	}
-	
+
 	// Collect routing information
 	if err := netCollector.CollectRouting(attributes); err != nil {
 		c.logger.Error("Failed to collect routing information", "error", err)
 	}
-	
+
 	// Collect DNS configuration
 	if err := netCollector.CollectDNS(attributes); err != nil {
 		c.logger.Error("Failed to collect DNS information", "error", err)
 	}
-	
+
 	// Collect firewall configuration
 	if err := netCollector.CollectFirewall(attributes); err != nil {
 		c.logger.Error("Failed to collect firewall information", "error", err)
@@ -227,22 +228,22 @@ func (c *Collector) collectNetworkInfo(attributes map[string]string) {
 // collectSecurityInfo collects security attributes using platform-specific collectors.
 func (c *Collector) collectSecurityInfo(attributes map[string]string) {
 	secCollector := NewSecurityCollector()
-	
+
 	// Collect user information
 	if err := secCollector.CollectUsers(attributes); err != nil {
 		c.logger.Error("Failed to collect user information", "error", err)
 	}
-	
+
 	// Collect group information
 	if err := secCollector.CollectGroups(attributes); err != nil {
 		c.logger.Error("Failed to collect group information", "error", err)
 	}
-	
+
 	// Collect permission information
 	if err := secCollector.CollectPermissions(attributes); err != nil {
 		c.logger.Error("Failed to collect permission information", "error", err)
 	}
-	
+
 	// Collect certificate information
 	if err := secCollector.CollectCertificates(attributes); err != nil {
 		c.logger.Error("Failed to collect certificate information", "error", err)
@@ -258,23 +259,23 @@ func (c *Collector) collectEnvironmentInfo(attributes map[string]string) {
 	if home := os.Getenv("HOME"); home != "" {
 		attributes["home_directory"] = home
 	}
-	
+
 	// Path information
 	if path := os.Getenv("PATH"); path != "" {
 		// Store only the count to avoid exposing sensitive paths
 		attributes["path_elements"] = fmt.Sprintf("%d", len(strings.Split(path, string(os.PathListSeparator))))
 	}
-	
+
 	// Shell information
 	if shell := os.Getenv("SHELL"); shell != "" {
 		attributes["shell"] = shell
 	}
-	
+
 	// Terminal information
 	if term := os.Getenv("TERM"); term != "" {
 		attributes["terminal"] = term
 	}
-	
+
 	// Timezone
 	if tz := os.Getenv("TZ"); tz != "" {
 		attributes["timezone"] = tz
@@ -294,17 +295,17 @@ func (c *Collector) collectEnvironmentInfo(attributes map[string]string) {
 func (c *Collector) generateSystemID(attributes map[string]string) string {
 	// Use stable identifiers to generate system ID
 	var identifiers []string
-	
+
 	// Primary MAC address (most stable)
 	if mac := attributes["primary_mac"]; mac != "" {
 		identifiers = append(identifiers, mac)
 	}
-	
+
 	// Hostname (usually stable)
 	if hostname := attributes["hostname"]; hostname != "" {
 		identifiers = append(identifiers, hostname)
 	}
-	
+
 	// CPU count and architecture (hardware characteristics)
 	if cpuCount := attributes["cpu_count"]; cpuCount != "" {
 		identifiers = append(identifiers, cpuCount)
@@ -312,20 +313,20 @@ func (c *Collector) generateSystemID(attributes map[string]string) string {
 	if arch := attributes["arch"]; arch != "" {
 		identifiers = append(identifiers, arch)
 	}
-	
+
 	// If we have no stable identifiers, use runtime characteristics
 	if len(identifiers) == 0 {
-		identifiers = append(identifiers, 
+		identifiers = append(identifiers,
 			attributes["runtime_os"],
 			attributes["runtime_arch"],
 			fmt.Sprintf("%d", time.Now().Unix()/3600), // Change hourly as fallback
 		)
 	}
-	
+
 	// Generate SHA256 hash of identifiers
 	data := strings.Join(identifiers, "|")
 	hash := sha256.Sum256([]byte(data))
-	
+
 	// Return first 16 characters of hex encoding
 	return fmt.Sprintf("%x", hash[:8])
 }
@@ -346,21 +347,21 @@ func CompareDNA(dna1, dna2 *commonpb.DNA) bool {
 	if dna1 == nil || dna2 == nil {
 		return false
 	}
-	
+
 	// Primary comparison: system ID
 	if dna1.Id != dna2.Id {
 		return false
 	}
-	
+
 	// Secondary comparison: key hardware characteristics
 	keyAttributes := []string{"primary_mac", "hostname", "cpu_count", "arch"}
-	
+
 	for _, attr := range keyAttributes {
 		if dna1.Attributes[attr] != dna2.Attributes[attr] {
 			return false
 		}
 	}
-	
+
 	return true
 }
 
@@ -375,24 +376,24 @@ func (c *Collector) generateSyncFingerprint(systemID string, attributes map[stri
 		fmt.Sprintf("%d", len(attributes)),
 		configHash,
 	}
-	
+
 	// Generate SHA256 hash
 	data := strings.Join(elements, "|")
 	hash := sha256.Sum256([]byte(data))
-	
+
 	// Return first 12 characters for compact representation
 	return fmt.Sprintf("%x", hash[:6])
 }
 
 // UpdateSyncMetadata updates the sync-related fields in DNA.
 //
-// This should be called by the steward when configuration changes or when 
+// This should be called by the steward when configuration changes or when
 // sync verification needs to be updated.
 func (c *Collector) UpdateSyncMetadata(dna *commonpb.DNA, configHash string) {
 	if dna == nil {
 		return
 	}
-	
+
 	dna.ConfigHash = configHash
 	dna.LastSyncTime = timestamppb.New(time.Now())
 	dna.AttributeCount = c.safeInt32(len(dna.Attributes)) // Safe conversion with bounds validation

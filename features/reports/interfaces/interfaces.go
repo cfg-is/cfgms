@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // Package interfaces defines the core interfaces for the reports subsystem.
 // This package exists to break import cycles between the main reports package
 // and its subpackages by providing shared types and interfaces.
@@ -44,15 +46,15 @@ type TimeRange struct {
 
 // ReportRequest contains all parameters needed to generate a report
 type ReportRequest struct {
-	Type       ReportType        `json:"type"`
-	Template   string            `json:"template"`
-	TimeRange  TimeRange         `json:"time_range"`
-	DeviceIDs  []string          `json:"device_ids,omitempty"`
-	TenantIDs  []string          `json:"tenant_ids,omitempty"`
-	Format     ExportFormat      `json:"format"`
-	Parameters map[string]any    `json:"parameters,omitempty"`
-	Title      string            `json:"title,omitempty"`
-	Subtitle   string            `json:"subtitle,omitempty"`
+	Type       ReportType     `json:"type"`
+	Template   string         `json:"template"`
+	TimeRange  TimeRange      `json:"time_range"`
+	DeviceIDs  []string       `json:"device_ids,omitempty"`
+	TenantIDs  []string       `json:"tenant_ids,omitempty"`
+	Format     ExportFormat   `json:"format"`
+	Parameters map[string]any `json:"parameters,omitempty"`
+	Title      string         `json:"title,omitempty"`
+	Subtitle   string         `json:"subtitle,omitempty"`
 }
 
 // TrendDirection indicates whether metrics are improving or declining
@@ -131,10 +133,10 @@ type ReportSection struct {
 
 // DataPoint represents a single data point in a series
 type DataPoint struct {
-	X     any                `json:"x"`     // time, category, or numeric value
-	Y     float64            `json:"y"`     // numeric value
-	Label string             `json:"label,omitempty"`
-	Extra map[string]any     `json:"extra,omitempty"`
+	X     any            `json:"x"` // time, category, or numeric value
+	Y     float64        `json:"y"` // numeric value
+	Label string         `json:"label,omitempty"`
+	Extra map[string]any `json:"extra,omitempty"`
 }
 
 // SeriesData represents a data series in a chart
@@ -195,11 +197,11 @@ type TemplateParam struct {
 
 // TemplateInfo describes available report templates
 type TemplateInfo struct {
-	Name        string         `json:"name"`
-	Type        ReportType     `json:"type"`
-	Description string         `json:"description"`
+	Name        string          `json:"name"`
+	Type        ReportType      `json:"type"`
+	Description string          `json:"description"`
 	Parameters  []TemplateParam `json:"parameters"`
-	Formats     []ExportFormat `json:"supported_formats"`
+	Formats     []ExportFormat  `json:"supported_formats"`
 }
 
 // TrendPoint represents a point in time series data
@@ -232,10 +234,10 @@ type DataQuery struct {
 
 // ReportData aggregates data needed for report generation
 type ReportData struct {
-	DNARecords  []storage.DNARecord    `json:"dna_records"`
-	DriftEvents []drift.DriftEvent     `json:"drift_events"`
-	TimeRange   TimeRange              `json:"time_range"`
-	DeviceStats map[string]DeviceStats `json:"device_stats"`
+	DNARecords  []storage.DNARecord     `json:"dna_records"`
+	DriftEvents []drift.DriftEvent      `json:"drift_events"`
+	TimeRange   TimeRange               `json:"time_range"`
+	DeviceStats map[string]DeviceStats  `json:"device_stats"`
 	TrendData   map[string][]TrendPoint `json:"trend_data"`
 }
 
@@ -293,11 +295,11 @@ type AdvancedCacheConfig struct {
 func DefaultAdvancedCacheConfig() AdvancedCacheConfig {
 	return AdvancedCacheConfig{
 		EnableAdvancedCaching: true,
-		ComplianceReportTTL:   4 * time.Hour,   // Stable data - longer TTL
+		ComplianceReportTTL:   4 * time.Hour,    // Stable data - longer TTL
 		SecurityReportTTL:     30 * time.Minute, // Dynamic threat landscape - shorter TTL
-		ExecutiveReportTTL:    1 * time.Hour,   // Balanced freshness/performance
-		MultiTenantReportTTL:  2 * time.Hour,   // Complex aggregations - moderate TTL
-		MaxCacheSize:          1000,            // Reasonable limit
+		ExecutiveReportTTL:    1 * time.Hour,    // Balanced freshness/performance
+		MultiTenantReportTTL:  2 * time.Hour,    // Complex aggregations - moderate TTL
+		MaxCacheSize:          1000,             // Reasonable limit
 		CacheMetricsEnabled:   true,
 	}
 }

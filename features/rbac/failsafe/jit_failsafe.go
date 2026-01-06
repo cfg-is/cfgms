@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package failsafe
 
 import (
@@ -37,24 +39,24 @@ const (
 
 // JITHealthChecker monitors the health of the underlying JIT access manager
 type JITHealthChecker struct {
-	jitManager            *jit.JITAccessManager
-	lastHealthCheck       time.Time
-	healthCheckInterval   time.Duration
-	consecutiveFailures   int
+	jitManager             *jit.JITAccessManager
+	lastHealthCheck        time.Time
+	healthCheckInterval    time.Duration
+	consecutiveFailures    int
 	maxConsecutiveFailures int
-	isHealthy             bool
-	mutex                 sync.RWMutex
+	isHealthy              bool
+	mutex                  sync.RWMutex
 }
 
 // JITFailsafeMetrics tracks JIT failsafe operation metrics
 type JITFailsafeMetrics struct {
-	TotalRequests         int64
-	FailedRequests        int64
-	RejectedByFailsafe    int64
-	AutoRevokedGrants     int64
-	HealthCheckFailures   int64
-	RecoveryEvents        int64
-	mutex                 sync.RWMutex
+	TotalRequests       int64
+	FailedRequests      int64
+	RejectedByFailsafe  int64
+	AutoRevokedGrants   int64
+	HealthCheckFailures int64
+	RecoveryEvents      int64
+	mutex               sync.RWMutex
 }
 
 // NewFailsafeJITAccessManager creates a new failsafe JIT access manager
@@ -148,7 +150,12 @@ func (fjam *FailsafeJITAccessManager) handleRequestDuringFailure(ctx context.Con
 	fjam.metrics.RejectedByFailsafe++
 	fjam.metrics.mutex.Unlock()
 
-	switch fjam.failureMode {
+	// Read failure mode with proper locking to avoid race condition
+	fjam.mutex.RLock()
+	mode := fjam.failureMode
+	fjam.mutex.RUnlock()
+
+	switch mode {
 	case JITFailureModeAutoRevoke:
 		// Revoke all existing grants and deny new requests
 		fjam.revokeAllActiveGrants(ctx, "JIT system failure - auto-revoke mode")
@@ -178,43 +185,43 @@ func (fjam *FailsafeJITAccessManager) createEmergencyAccessRequest(ctx context.C
 
 	// Create emergency request with limited duration
 	emergencyRequest := &jit.JITAccessRequest{
-		ID:           requestID,
-		RequesterID:  req.RequesterID,
-		TargetID:     req.TargetID,
-		TenantID:     req.TenantID,
-		Permissions:  req.Permissions,
-		Roles:        req.Roles,
-		ResourceIDs:  req.ResourceIDs,
-		RequestedFor: req.RequestedFor,
-		Duration:     minDuration(req.Duration, 30*time.Minute), // Max 30 minutes for emergency
-		Justification: fmt.Sprintf("EMERGENCY ACCESS: %s (System degraded)", req.Justification),
+		ID:              requestID,
+		RequesterID:     req.RequesterID,
+		TargetID:        req.TargetID,
+		TenantID:        req.TenantID,
+		Permissions:     req.Permissions,
+		Roles:           req.Roles,
+		ResourceIDs:     req.ResourceIDs,
+		RequestedFor:    req.RequestedFor,
+		Duration:        minDuration(req.Duration, 30*time.Minute), // Max 30 minutes for emergency
+		Justification:   fmt.Sprintf("EMERGENCY ACCESS: %s (System degraded)", req.Justification),
 		EmergencyAccess: true,
-		Status:       jit.JITAccessRequestStatusApproved,
-		CreatedAt:    now,
-		ExpiresAt:    now.Add(minDuration(req.Duration, 30*time.Minute)),
-		ApprovedBy:   "system-failsafe",
-		ApprovalReason: "Emergency access granted during JIT system failure",
-		RequestTTL:   now.Add(1 * time.Hour),
+		Status:          jit.JITAccessRequestStatusApproved,
+		CreatedAt:       now,
+		ExpiresAt:       now.Add(minDuration(req.Duration, 30*time.Minute)),
+		ApprovedBy:      "system-failsafe",
+		ApprovalReason:  "Emergency access granted during JIT system failure",
+		RequestTTL:      now.Add(1 * time.Hour),
 	}
 
 	// Create a corresponding grant
 	emergencyGrant := &jit.JITAccessGrant{
-		ID:               requestID + "-grant",
-		RequestID:        requestID,
-		RequesterID:      req.RequesterID,
-		TargetID:         req.TargetID,
-		TenantID:         req.TenantID,
-		Permissions:      req.Permissions,
-		Roles:            req.Roles,
-		ResourceIDs:      req.ResourceIDs,
-		ApprovedBy:       "system-failsafe",
-		ApprovalReason:   "Emergency failsafe grant",
-		GrantedAt:        now,
-		ExpiresAt:        emergencyRequest.ExpiresAt,
-		Status:           jit.JITAccessGrantStatusActive,
-		MaxExtensions:    0, // No extensions allowed for emergency grants
-		ExtensionsUsed:   0,
-		ActivationMethod: jit.ActivationMethodImmediate,
+		ID:                 requestID + "-grant",
+		RequestID:          requestID,
+		RequesterID:        req.RequesterID,
+		TargetID:           req.TargetID,
+		TenantID:           req.TenantID,
+		Permissions:        req.Permissions,
+		Roles:              req.Roles,
+		ResourceIDs:        req.ResourceIDs,
+		ApprovedBy:         "system-failsafe",
+		ApprovalReason:     "Emergency failsafe grant",
+		GrantedAt:          now,
+		ExpiresAt:          emergencyRequest.ExpiresAt,
+		Status:             jit.JITAccessGrantStatusActive,
+		MaxExtensions:      0, // No extensions allowed for emergency grants
+		ExtensionsUsed:     0,
+		ActivationMethod:   jit.ActivationMethodImmediate,
 		DeactivationMethod: jit.DeactivationMethodAutomatic,
 		Conditions: []jit.AccessCondition{
 			{
@@ -290,7 +297,7 @@ func (fjam *FailsafeJITAccessManager) RevokeAccess(ctx context.Context, grantID,
 		if fjam.IsHealthy() {
 			fjam.markUnhealthy()
 		}
-		
+
 		// Even if the underlying revocation failed, remove from tracking
 		fjam.removeTrackedGrant(grantID)
 		return fmt.Errorf("JIT access revocation may have failed: %w", err)
@@ -352,10 +359,10 @@ func (fjam *FailsafeJITAccessManager) getTrackedActiveGrants(subjectID, tenantID
 	now := time.Now()
 
 	for _, grant := range fjam.activeGrants {
-		if (grant.RequesterID == subjectID || grant.TargetID == subjectID) && 
-		   grant.TenantID == tenantID && 
-		   grant.Status == jit.JITAccessGrantStatusActive && 
-		   grant.ExpiresAt.After(now) {
+		if (grant.RequesterID == subjectID || grant.TargetID == subjectID) &&
+			grant.TenantID == tenantID &&
+			grant.Status == jit.JITAccessGrantStatusActive &&
+			grant.ExpiresAt.After(now) {
 			grants = append(grants, grant)
 		}
 	}
@@ -405,7 +412,7 @@ func (fjam *FailsafeJITAccessManager) scheduleEmergencyRevocation(ctx context.Co
 
 	// Revoke the emergency grant
 	fjam.removeTrackedGrant(grant.ID)
-	
+
 	// Update grant status
 	fjam.grantsMutex.Lock()
 	if trackedGrant, exists := fjam.activeGrants[grant.ID]; exists {
@@ -433,7 +440,7 @@ func (fjam *FailsafeJITAccessManager) performHealthCheck() {
 
 	// Try to get active grants to verify system health
 	_, err := fjam.underlying.GetActiveGrants(ctx, "__health_check__", "__health_check__")
-	
+
 	fjam.healthCheck.mutex.Lock()
 	defer fjam.healthCheck.mutex.Unlock()
 
@@ -448,7 +455,7 @@ func (fjam *FailsafeJITAccessManager) performHealthCheck() {
 		if fjam.healthCheck.consecutiveFailures >= fjam.healthCheck.maxConsecutiveFailures {
 			wasHealthy := fjam.healthCheck.isHealthy
 			fjam.healthCheck.isHealthy = false
-			
+
 			if wasHealthy {
 				// JIT manager just became unhealthy - trigger failure mode
 				go fjam.handleSystemFailure()
@@ -472,8 +479,13 @@ func (fjam *FailsafeJITAccessManager) performHealthCheck() {
 // handleSystemFailure handles system failure based on the configured failure mode
 func (fjam *FailsafeJITAccessManager) handleSystemFailure() {
 	ctx := context.Background()
-	
-	switch fjam.failureMode {
+
+	// Read failure mode with proper locking to avoid race condition
+	fjam.mutex.RLock()
+	mode := fjam.failureMode
+	fjam.mutex.RUnlock()
+
+	switch mode {
 	case JITFailureModeAutoRevoke:
 		fjam.revokeAllActiveGrants(ctx, "JIT system failure - auto-revoke mode activated")
 	case JITFailureModeRejectNew:
@@ -487,12 +499,12 @@ func (fjam *FailsafeJITAccessManager) handleSystemFailure() {
 func (fjam *FailsafeJITAccessManager) markUnhealthy() {
 	fjam.healthCheck.mutex.Lock()
 	defer fjam.healthCheck.mutex.Unlock()
-	
+
 	fjam.healthCheck.consecutiveFailures++
 	if fjam.healthCheck.consecutiveFailures >= fjam.healthCheck.maxConsecutiveFailures {
 		wasHealthy := fjam.healthCheck.isHealthy
 		fjam.healthCheck.isHealthy = false
-		
+
 		if wasHealthy {
 			// Trigger failure handling
 			go fjam.handleSystemFailure()

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // Package storage provides comprehensive testing infrastructure for all storage providers
 // Addresses Epic 6 testing requirements by creating standardized test fixtures and helpers
 package storage
@@ -21,7 +23,13 @@ import (
 
 // isInfrastructureRequired determines if infrastructure should be available
 // Returns true in CI environments or when Docker/infrastructure is explicitly enabled
+// Returns false when running in short mode (unit tests only)
 func isInfrastructureRequired() bool {
+	// Integration test mode explicitly disabled (e.g., -short flag)
+	if os.Getenv("CFGMS_TEST_INTEGRATION") == "0" {
+		return false
+	}
+
 	// CI environments
 	if os.Getenv("CI") != "" || os.Getenv("GITHUB_ACTIONS") != "" {
 		return true
@@ -55,7 +63,6 @@ func requireInfrastructureOrSkip(t *testing.T, err error, component string) {
 	}
 }
 
-
 // StorageTestConfig holds configuration for testing different storage providers
 type StorageTestConfig struct {
 	Provider string
@@ -65,9 +72,9 @@ type StorageTestConfig struct {
 
 // StorageTestFixture provides a complete testing environment for storage providers
 type StorageTestFixture struct {
-	TempDir    string
-	Configs    map[string]*StorageTestConfig
-	Cleanup    func()
+	TempDir string
+	Configs map[string]*StorageTestConfig
+	Cleanup func()
 }
 
 // NewStorageTestFixture creates a comprehensive test fixture supporting all storage providers
@@ -188,7 +195,7 @@ func (f *StorageTestFixture) ValidateStorageProvider(t *testing.T, providerName 
 		t.Skipf("Storage provider '%s' not available: %v", providerName, err)
 		return
 	}
-	
+
 	require.NotNil(t, provider, "Storage provider '%s' not found in registry", providerName)
 
 	// Get test configuration
@@ -227,7 +234,7 @@ func (f *StorageTestFixture) ValidateStorageProvider(t *testing.T, providerName 
 		}
 		require.NoError(t, err, "ClientTenantStore creation should succeed")
 		require.NotNil(t, store, "ClientTenantStore should not be nil")
-		
+
 		if closer, ok := store.(interface{ Close() error }); ok {
 			defer func() { _ = closer.Close() }()
 		}
@@ -241,7 +248,7 @@ func (f *StorageTestFixture) ValidateStorageProvider(t *testing.T, providerName 
 		}
 		require.NoError(t, err, "ConfigStore creation should succeed")
 		require.NotNil(t, store, "ConfigStore should not be nil")
-		
+
 		if closer, ok := store.(interface{ Close() error }); ok {
 			defer func() { _ = closer.Close() }()
 		}
@@ -255,7 +262,7 @@ func (f *StorageTestFixture) ValidateStorageProvider(t *testing.T, providerName 
 		}
 		require.NoError(t, err, "AuditStore creation should succeed")
 		require.NotNil(t, store, "AuditStore should not be nil")
-		
+
 		if closer, ok := store.(interface{ Close() error }); ok {
 			defer func() { _ = closer.Close() }()
 		}
@@ -269,7 +276,7 @@ func (f *StorageTestFixture) ValidateStorageProvider(t *testing.T, providerName 
 		}
 		require.NoError(t, err, "RuntimeStore creation should succeed")
 		require.NotNil(t, store, "RuntimeStore should not be nil")
-		
+
 		if closer, ok := store.(interface{ Close() error }); ok {
 			defer func() { _ = closer.Close() }()
 		}
@@ -309,17 +316,31 @@ func generateSecurePassword() string {
 		// Fallback to timestamp-based password if crypto/rand fails
 		return fmt.Sprintf("test-password-%d", time.Now().Unix())
 	}
-	
+
 	// Encode as base64 and clean up for password usage
 	password := base64.StdEncoding.EncodeToString(randomBytes)
 	password = strings.ReplaceAll(password, "=", "")
 	password = strings.ReplaceAll(password, "+", "")
 	password = strings.ReplaceAll(password, "/", "")
-	
+
 	// Truncate to reasonable length
 	if len(password) > 25 {
 		password = password[:25]
 	}
-	
+
 	return password
+}
+
+// CreateTestStorageManager creates a storage manager for testing purposes
+func CreateTestStorageManager() (*interfaces.StorageManager, error) {
+	// Use git provider as it's always available for testing
+	config := map[string]interface{}{
+		"repository_path": "/tmp/cfgms-test-storage",
+		"branch":          "main",
+		"auto_init":       true,
+		"user_name":       "Test User",
+		"user_email":      "test@cfgms.test",
+	}
+
+	return interfaces.CreateAllStoresFromConfig("git", config)
 }

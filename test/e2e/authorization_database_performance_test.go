@@ -1,7 +1,8 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package e2e
 
 import (
-	testutil "github.com/cfgis/cfgms/pkg/testing"
 	"context"
 	"fmt"
 	"runtime"
@@ -9,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	testutil "github.com/cfgis/cfgms/pkg/testing"
 
 	"github.com/stretchr/testify/suite"
 
@@ -36,9 +39,9 @@ type AuthorizationDatabasePerformanceSuite struct {
 	memoryTestDuration time.Duration
 
 	// Metrics tracking
-	connectionMetrics  *ConnectionPoolMetrics
-	memoryMetrics      *MemoryStabilityMetrics
-	initialMemStats    runtime.MemStats
+	connectionMetrics *ConnectionPoolMetrics
+	memoryMetrics     *MemoryStabilityMetrics
+	initialMemStats   runtime.MemStats
 }
 
 // ConnectionPoolMetrics tracks database connection pool performance
@@ -52,41 +55,41 @@ type ConnectionPoolMetrics struct {
 	avgConnectionTimeMs   float64
 	maxConnectionTimeMs   float64
 	totalConnectionTimeNs int64
-	
+
 	// Resource exhaustion metrics
-	poolExhaustionEvents  int64
-	gracefulDegradations  int64
-	
+	poolExhaustionEvents int64
+	gracefulDegradations int64
+
 	// Recovery metrics
-	recoveryTimeMs        float64
-	successfulRecoveries  int64
-	
-	mutex                 sync.RWMutex
-	startTime             time.Time
+	recoveryTimeMs       float64
+	successfulRecoveries int64
+
+	mutex     sync.RWMutex
+	startTime time.Time
 }
 
 // MemoryStabilityMetrics tracks memory usage during authorization storms
 type MemoryStabilityMetrics struct {
-	initialAllocMB        float64
-	currentAllocMB        float64
-	peakAllocMB           float64
-	
+	initialAllocMB float64
+	currentAllocMB float64
+	peakAllocMB    float64
+
 	// Garbage collection metrics
-	gcCount               uint32
-	gcCycles              []GCCycle
-	
+	gcCount  uint32
+	gcCycles []GCCycle
+
 	// Memory leak detection
 	memoryLeakMB          float64
 	goroutineCount        int
 	goroutineLeakCount    int
 	initialGoroutineCount int
-	
+
 	// Memory pressure events (tracking for analysis)
-	
+
 	// Snapshots for trend analysis
-	memorySnapshots       []MemorySnapshot
-	
-	mutex                 sync.RWMutex
+	memorySnapshots []MemorySnapshot
+
+	mutex sync.RWMutex
 }
 
 // GCCycle represents a garbage collection cycle
@@ -190,13 +193,13 @@ func (s *AuthorizationDatabasePerformanceSuite) initializeDatabaseComponents() {
 		PermissionCacheTTL:       2 * time.Minute, // Shorter TTL to stress database
 		SessionUpdateInterval:    15 * time.Second,
 		PropagationTimeoutMs:     1000,
-		MaxRetryAttempts:         5, // More retries for connection issues
+		MaxRetryAttempts:         5,     // More retries for connection issues
 		EnableRiskReassessment:   false, // Disable for focused testing
 		RiskCheckInterval:        5 * time.Minute,
 		EnableAutoTermination:    false,
 		ViolationGracePeriod:     30 * time.Second,
 		EnableComprehensiveAudit: true,
-		AuditBufferSize:         s.maxConnections * 5,
+		AuditBufferSize:          s.maxConnections * 5,
 	}
 
 	s.continuousEngine = continuous.NewContinuousAuthorizationEngine(
@@ -269,36 +272,36 @@ func (s *AuthorizationDatabasePerformanceSuite) TestMemoryStabilityDuringAuthori
 		// Execute various storm patterns to stress memory
 		stormPatterns := []AuthorizationStormPattern{
 			{
-				Name:                "Sustained High Load",
-				ConcurrentUsers:     s.maxConnections,
-				RequestsPerUser:     50,
-				Duration:           3 * time.Minute,
-				RequestInterval:    50 * time.Millisecond,
-				CacheBypassRate:    0.0, // Use cache to reduce memory pressure
+				Name:            "Sustained High Load",
+				ConcurrentUsers: s.maxConnections,
+				RequestsPerUser: 50,
+				Duration:        3 * time.Minute,
+				RequestInterval: 50 * time.Millisecond,
+				CacheBypassRate: 0.0, // Use cache to reduce memory pressure
 			},
 			{
-				Name:                "Cache Bypass Storm",
-				ConcurrentUsers:     s.maxConnections / 2,
-				RequestsPerUser:     100,
-				Duration:           2 * time.Minute,
-				RequestInterval:    25 * time.Millisecond,
-				CacheBypassRate:    1.0, // Bypass cache to stress memory allocation
+				Name:            "Cache Bypass Storm",
+				ConcurrentUsers: s.maxConnections / 2,
+				RequestsPerUser: 100,
+				Duration:        2 * time.Minute,
+				RequestInterval: 25 * time.Millisecond,
+				CacheBypassRate: 1.0, // Bypass cache to stress memory allocation
 			},
 			{
-				Name:                "Burst Pattern",
-				ConcurrentUsers:     s.maxConnections * 2, // Oversubscribe
-				RequestsPerUser:     20,
-				Duration:           1 * time.Minute,
-				RequestInterval:    10 * time.Millisecond,
-				CacheBypassRate:    0.5, // Mixed cache usage
+				Name:            "Burst Pattern",
+				ConcurrentUsers: s.maxConnections * 2, // Oversubscribe
+				RequestsPerUser: 20,
+				Duration:        1 * time.Minute,
+				RequestInterval: 10 * time.Millisecond,
+				CacheBypassRate: 0.5, // Mixed cache usage
 			},
 			{
-				Name:                "Recovery Period",
-				ConcurrentUsers:     10,
-				RequestsPerUser:     10,
-				Duration:           1 * time.Minute,
-				RequestInterval:    500 * time.Millisecond,
-				CacheBypassRate:    0.0, // Light load for recovery
+				Name:            "Recovery Period",
+				ConcurrentUsers: 10,
+				RequestsPerUser: 10,
+				Duration:        1 * time.Minute,
+				RequestInterval: 500 * time.Millisecond,
+				CacheBypassRate: 0.0, // Light load for recovery
 			},
 		}
 
@@ -332,7 +335,7 @@ func (s *AuthorizationDatabasePerformanceSuite) TestMemoryStabilityDuringAuthori
 
 		// Final memory analysis
 		s.takeMemorySnapshot("Final")
-		
+
 		// Validate memory stability
 		return s.validateMemoryStability()
 	})
@@ -423,7 +426,7 @@ func (s *AuthorizationDatabasePerformanceSuite) TestDatabaseConnectionLeakDetect
 
 		// Final connection measurement
 		time.Sleep(5 * time.Second) // Allow cleanup
-		runtime.GC()               // Force cleanup
+		runtime.GC()                // Force cleanup
 		time.Sleep(2 * time.Second)
 
 		finalConnections := s.getCurrentActiveConnections()
@@ -452,12 +455,12 @@ func (s *AuthorizationDatabasePerformanceSuite) TestDatabaseConnectionLeakDetect
 
 // AuthorizationStormPattern defines parameters for authorization load testing
 type AuthorizationStormPattern struct {
-	Name             string
-	ConcurrentUsers  int
-	RequestsPerUser  int
-	Duration         time.Duration
-	RequestInterval  time.Duration
-	CacheBypassRate  float64 // 0.0 = always use cache, 1.0 = always bypass
+	Name            string
+	ConcurrentUsers int
+	RequestsPerUser int
+	Duration        time.Duration
+	RequestInterval time.Duration
+	CacheBypassRate float64 // 0.0 = always use cache, 1.0 = always bypass
 }
 
 // executeGradualConnectionStress gradually increases connection load
@@ -474,7 +477,7 @@ func (s *AuthorizationDatabasePerformanceSuite) executeGradualConnectionStress(c
 			Name:            fmt.Sprintf("Gradual-%d", users),
 			ConcurrentUsers: users,
 			RequestsPerUser: 25,
-			Duration:       1 * time.Minute,
+			Duration:        1 * time.Minute,
 			RequestInterval: 100 * time.Millisecond,
 			CacheBypassRate: 0.2, // Light cache bypass
 		}
@@ -506,7 +509,7 @@ func (s *AuthorizationDatabasePerformanceSuite) executeSuddenConnectionExhaustio
 		Name:            "Sudden Exhaustion",
 		ConcurrentUsers: exhaustionUsers,
 		RequestsPerUser: 10,
-		Duration:       2 * time.Minute,
+		Duration:        2 * time.Minute,
 		RequestInterval: 25 * time.Millisecond,
 		CacheBypassRate: 0.8, // High cache bypass to stress connections
 	}
@@ -542,7 +545,7 @@ func (s *AuthorizationDatabasePerformanceSuite) executeConnectionPoolRecovery(ct
 		Name:            "Recovery Test Exhaustion",
 		ConcurrentUsers: s.maxConnections * 2,
 		RequestsPerUser: 5,
-		Duration:       30 * time.Second,
+		Duration:        30 * time.Second,
 		RequestInterval: 10 * time.Millisecond,
 		CacheBypassRate: 1.0, // Full bypass to maximize connection usage
 	}
@@ -566,7 +569,7 @@ func (s *AuthorizationDatabasePerformanceSuite) executeConnectionPoolRecovery(ct
 		Name:            "Recovery Test Normal Load",
 		ConcurrentUsers: s.maxConnections / 2,
 		RequestsPerUser: 10,
-		Duration:       1 * time.Minute,
+		Duration:        1 * time.Minute,
 		RequestInterval: 200 * time.Millisecond,
 		CacheBypassRate: 0.1, // Mostly cached requests
 	}
@@ -606,7 +609,7 @@ func (s *AuthorizationDatabasePerformanceSuite) executeAuthorizationStormPattern
 	for userID := 0; userID < pattern.ConcurrentUsers; userID++ {
 		wg.Add(1)
 		go s.executeStormUser(ctx, userID, pattern, endTime, stormResults, &wg)
-		
+
 		// Stagger user launches to avoid thundering herd
 		time.Sleep(time.Millisecond * time.Duration(10+userID%50))
 	}
@@ -681,9 +684,9 @@ func (s *AuthorizationDatabasePerformanceSuite) executeStormUser(ctx context.Con
 					ResourceId:   s.selectResourceForStorm(requestCount, bypassCache),
 					TenantId:     tenantID,
 					Context: map[string]string{
-						"storm_pattern":  pattern.Name,
-						"request_count":  fmt.Sprintf("%d", requestCount),
-						"bypass_cache":   fmt.Sprintf("%v", bypassCache),
+						"storm_pattern": pattern.Name,
+						"request_count": fmt.Sprintf("%d", requestCount),
+						"bypass_cache":  fmt.Sprintf("%v", bypassCache),
 					},
 				},
 				SessionID:       sessionID,
@@ -745,7 +748,7 @@ type StormUserResult struct {
 func (s *AuthorizationDatabasePerformanceSuite) setupDatabaseTestData(ctx context.Context) {
 	// Create comprehensive test data for database stress testing
 	tenants := []string{"storm-test-tenant", "leak-test-tenant", "stress-test-tenant"}
-	
+
 	for _, tenantID := range tenants {
 		// Create tenant roles
 		err := s.rbacManager.CreateTenantDefaultRoles(ctx, tenantID)
@@ -788,24 +791,24 @@ func (s *AuthorizationDatabasePerformanceSuite) getCurrentActiveConnections() in
 
 func (s *AuthorizationDatabasePerformanceSuite) updateConnectionMetrics(latency time.Duration, success bool) {
 	atomic.AddInt64(&s.connectionMetrics.connectionAttempts, 1)
-	
+
 	if success {
 		// Simulate connection tracking
 		atomic.AddInt64(&s.connectionMetrics.totalConnections, 1)
 		connectionTimeMs := float64(latency.Milliseconds())
-		
+
 		s.connectionMetrics.mutex.Lock()
 		atomic.AddInt64(&s.connectionMetrics.totalConnectionTimeNs, latency.Nanoseconds())
-		
+
 		if connectionTimeMs > s.connectionMetrics.maxConnectionTimeMs {
 			s.connectionMetrics.maxConnectionTimeMs = connectionTimeMs
 		}
-		
+
 		// Update average (exponential moving average)
 		alpha := 0.1
 		s.connectionMetrics.avgConnectionTimeMs = (1-alpha)*s.connectionMetrics.avgConnectionTimeMs + alpha*connectionTimeMs
 		s.connectionMetrics.mutex.Unlock()
-		
+
 		// Track peak connections
 		current := atomic.AddInt64(&s.connectionMetrics.activeConnections, 1)
 		for {
@@ -814,21 +817,21 @@ func (s *AuthorizationDatabasePerformanceSuite) updateConnectionMetrics(latency 
 				break
 			}
 		}
-		
+
 		// Simulate connection release
 		go func() {
 			time.Sleep(50 * time.Millisecond) // Simulate connection hold time
 			atomic.AddInt64(&s.connectionMetrics.activeConnections, -1)
 		}()
-		
+
 	} else {
 		atomic.AddInt64(&s.connectionMetrics.connectionFailures, 1)
-		
+
 		// Check for specific failure types
 		if latency > s.connectionTimeout {
 			atomic.AddInt64(&s.connectionMetrics.connectionTimeouts, 1)
 		}
-		
+
 		// Simulate pool exhaustion detection
 		if atomic.LoadInt64(&s.connectionMetrics.activeConnections) >= int64(s.maxConnections) {
 			atomic.AddInt64(&s.connectionMetrics.poolExhaustionEvents, 1)
@@ -839,7 +842,7 @@ func (s *AuthorizationDatabasePerformanceSuite) updateConnectionMetrics(latency 
 func (s *AuthorizationDatabasePerformanceSuite) recordConnectionMetrics() {
 	s.connectionMetrics.mutex.Lock()
 	defer s.connectionMetrics.mutex.Unlock()
-	
+
 	s.framework.logger.Info("Connection metrics snapshot",
 		"total_connections", atomic.LoadInt64(&s.connectionMetrics.totalConnections),
 		"active_connections", atomic.LoadInt64(&s.connectionMetrics.activeConnections),
@@ -853,7 +856,7 @@ func (s *AuthorizationDatabasePerformanceSuite) recordConnectionMetrics() {
 func (s *AuthorizationDatabasePerformanceSuite) takeMemorySnapshot(label string) {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
-	
+
 	snapshot := MemorySnapshot{
 		Label:          label,
 		Timestamp:      time.Now(),
@@ -863,21 +866,21 @@ func (s *AuthorizationDatabasePerformanceSuite) takeMemorySnapshot(label string)
 		NumGC:          m.NumGC,
 		GoroutineCount: runtime.NumGoroutine(),
 	}
-	
+
 	s.memoryMetrics.mutex.Lock()
 	s.memoryMetrics.memorySnapshots = append(s.memoryMetrics.memorySnapshots, snapshot)
 	s.memoryMetrics.currentAllocMB = snapshot.AllocMB
 	s.memoryMetrics.goroutineCount = snapshot.GoroutineCount
-	
+
 	// Update peak memory
 	if snapshot.AllocMB > s.memoryMetrics.peakAllocMB {
 		s.memoryMetrics.peakAllocMB = snapshot.AllocMB
 	}
-	
+
 	// Track garbage collection cycles
 	if m.NumGC > s.memoryMetrics.gcCount {
 		s.memoryMetrics.gcCount = m.NumGC
-		
+
 		cycle := GCCycle{
 			Timestamp:   time.Now(),
 			PauseTimeNs: m.PauseTotalNs,
@@ -887,9 +890,9 @@ func (s *AuthorizationDatabasePerformanceSuite) takeMemorySnapshot(label string)
 		}
 		s.memoryMetrics.gcCycles = append(s.memoryMetrics.gcCycles, cycle)
 	}
-	
+
 	s.memoryMetrics.mutex.Unlock()
-	
+
 	s.framework.logger.Info("Memory snapshot taken",
 		"label", label,
 		"alloc_mb", fmt.Sprintf("%.2f", snapshot.AllocMB),
@@ -989,10 +992,10 @@ func (s *AuthorizationDatabasePerformanceSuite) validateMemoryStability() error 
 	// Calculate memory growth
 	initial := s.memoryMetrics.memorySnapshots[0]
 	final := s.memoryMetrics.memorySnapshots[len(s.memoryMetrics.memorySnapshots)-1]
-	
+
 	memoryGrowthMB := final.AllocMB - initial.AllocMB
 	goroutineGrowth := final.GoroutineCount - initial.GoroutineCount
-	
+
 	s.memoryMetrics.memoryLeakMB = memoryGrowthMB
 	s.memoryMetrics.goroutineLeakCount = goroutineGrowth
 

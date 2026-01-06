@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // Package testing provides comprehensive test scenarios for M365 delegated permissions
 package testing
 
@@ -34,13 +36,13 @@ func NewScenarioRunner(provider *auth.OAuth2Provider, tenantID string, userConte
 
 // ScenarioResult represents the result of running a test scenario
 type ScenarioResult struct {
-	ScenarioName    string                 `json:"scenario_name"`
-	Success         bool                   `json:"success"`
-	Error           string                 `json:"error,omitempty"`
-	Operations      []OperationResult      `json:"operations"`
-	Metadata        map[string]interface{} `json:"metadata"`
-	ExecutionTime   time.Duration          `json:"execution_time"`
-	UserContext     *auth.UserContext      `json:"user_context"`
+	ScenarioName  string                 `json:"scenario_name"`
+	Success       bool                   `json:"success"`
+	Error         string                 `json:"error,omitempty"`
+	Operations    []OperationResult      `json:"operations"`
+	Metadata      map[string]interface{} `json:"metadata"`
+	ExecutionTime time.Duration          `json:"execution_time"`
+	UserContext   *auth.UserContext      `json:"user_context"`
 }
 
 // OperationResult represents the result of a single Graph API operation
@@ -153,7 +155,7 @@ func (sr *ScenarioRunner) RunUserManagementScenario(ctx context.Context) *Scenar
 	}
 
 	result.ExecutionTime = time.Since(start)
-	
+
 	if result.Success {
 		fmt.Printf("  ✅ User Management scenario completed successfully\n\n")
 	} else {
@@ -235,7 +237,7 @@ func (sr *ScenarioRunner) RunDirectoryReadScenario(ctx context.Context) *Scenari
 	}
 
 	result.ExecutionTime = time.Since(start)
-	
+
 	if result.Success {
 		fmt.Printf("  ✅ Directory Read scenario completed successfully\n\n")
 	} else {
@@ -266,7 +268,7 @@ func (sr *ScenarioRunner) RunGroupManagementScenario(ctx context.Context) *Scena
 		fmt.Printf("  ✅ Successfully listed groups\n")
 		if value, ok := op1.ResponseData["value"].([]interface{}); ok {
 			result.Metadata["groups_count"] = len(value)
-			
+
 			// Count different group types
 			securityGroups := 0
 			mailGroups := 0
@@ -312,7 +314,7 @@ func (sr *ScenarioRunner) RunGroupManagementScenario(ctx context.Context) *Scena
 	}
 
 	result.ExecutionTime = time.Since(start)
-	
+
 	if result.Success {
 		fmt.Printf("  ✅ Group Management scenario completed successfully\n\n")
 	} else {
@@ -343,7 +345,7 @@ func (sr *ScenarioRunner) RunConditionalAccessScenario(ctx context.Context) *Sce
 		fmt.Printf("  ✅ Successfully listed Conditional Access policies\n")
 		if value, ok := op1.ResponseData["value"].([]interface{}); ok {
 			result.Metadata["ca_policies_count"] = len(value)
-			
+
 			// Count enabled vs disabled policies
 			enabledPolicies := 0
 			for _, policy := range value {
@@ -396,7 +398,7 @@ func (sr *ScenarioRunner) RunConditionalAccessScenario(ctx context.Context) *Sce
 	}
 
 	result.ExecutionTime = time.Since(start)
-	
+
 	if result.Success {
 		fmt.Printf("  ✅ Conditional Access scenario completed successfully\n\n")
 	} else {
@@ -469,7 +471,7 @@ func (sr *ScenarioRunner) RunIntuneScenario(ctx context.Context) *ScenarioResult
 	}
 
 	result.ExecutionTime = time.Since(start)
-	
+
 	if result.Success {
 		fmt.Printf("  ✅ Intune Device Management scenario completed successfully\n\n")
 	} else {
@@ -542,7 +544,7 @@ func (sr *ScenarioRunner) RunAuditLogScenario(ctx context.Context) *ScenarioResu
 	}
 
 	result.ExecutionTime = time.Since(start)
-	
+
 	if result.Success {
 		fmt.Printf("  ✅ Audit Logs scenario completed successfully\n\n")
 	} else {
@@ -555,15 +557,15 @@ func (sr *ScenarioRunner) RunAuditLogScenario(ctx context.Context) *ScenarioResu
 // makeGraphRequest makes a Microsoft Graph API request
 func (sr *ScenarioRunner) makeGraphRequest(ctx context.Context, method, url string, body interface{}) OperationResult {
 	start := time.Now()
-	
+
 	req, err := http.NewRequestWithContext(ctx, method, url, nil)
 	if err != nil {
 		return OperationResult{
-			Method:    method,
-			URL:       url,
-			Success:   false,
-			Error:     fmt.Sprintf("Failed to create request: %v", err),
-			Duration:  time.Since(start),
+			Method:   method,
+			URL:      url,
+			Success:  false,
+			Error:    fmt.Sprintf("Failed to create request: %v", err),
+			Duration: time.Since(start),
 		}
 	}
 
@@ -576,11 +578,11 @@ func (sr *ScenarioRunner) makeGraphRequest(ctx context.Context, method, url stri
 	resp, err := sr.httpClient.Do(req)
 	if err != nil {
 		return OperationResult{
-			Method:    method,
-			URL:       url,
-			Success:   false,
-			Error:     fmt.Sprintf("Request failed: %v", err),
-			Duration:  time.Since(start),
+			Method:   method,
+			URL:      url,
+			Success:  false,
+			Error:    fmt.Sprintf("Request failed: %v", err),
+			Duration: time.Since(start),
 		}
 	}
 	defer func() {
@@ -592,8 +594,8 @@ func (sr *ScenarioRunner) makeGraphRequest(ctx context.Context, method, url stri
 
 	// Parse response
 	var responseData map[string]interface{}
-	if resp.Header.Get("Content-Type") != "" && 
-	   strings.Contains(resp.Header.Get("Content-Type"), "application/json") {
+	if resp.Header.Get("Content-Type") != "" &&
+		strings.Contains(resp.Header.Get("Content-Type"), "application/json") {
 		decoder := json.NewDecoder(resp.Body)
 		if err := decoder.Decode(&responseData); err != nil {
 			return OperationResult{

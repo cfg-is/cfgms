@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package reports
 
 import (
@@ -5,9 +7,10 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/cfgis/cfgms/features/reports/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging"
-	"github.com/google/uuid"
 )
 
 // CustomTemplateManager implements the CustomTemplateManager interface

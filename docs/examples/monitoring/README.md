@@ -5,6 +5,7 @@ This directory contains example configurations for setting up comprehensive moni
 ## Files Overview
 
 ### Core Monitoring Stack
+
 - **`docker-compose.yml`** - Complete monitoring stack with Docker Compose
 - **`prometheus.yml`** - Prometheus configuration for metrics collection
 - **`cfgms_alerts.yml`** - Prometheus alerting rules for CFGMS
@@ -13,6 +14,7 @@ This directory contains example configurations for setting up comprehensive moni
 - **`grafana-datasources.yml`** - Grafana datasource configuration
 
 ### Log Management
+
 - **`filebeat.yml`** - Filebeat configuration for log collection
 - **`elasticsearch-template.json`** - Elasticsearch index template for CFGMS logs
 
@@ -34,6 +36,7 @@ docker-compose ps
 ```
 
 This will start:
+
 - CFGMS Controller on `http://localhost:9080`
 - Prometheus on `http://localhost:9090`
 - Grafana on `http://localhost:3000` (admin/cfgms-monitoring)
@@ -45,6 +48,7 @@ This will start:
 ### 2. Individual Component Setup
 
 #### Prometheus Only
+
 ```bash
 # Start Prometheus with CFGMS configuration
 docker run -d \
@@ -56,6 +60,7 @@ docker run -d \
 ```
 
 #### Grafana Only
+
 ```bash
 # Start Grafana with datasource configuration
 docker run -d \
@@ -88,12 +93,14 @@ CFGMS_EXPORT_ELASTICSEARCH_ENABLED=true
 ### Prometheus Configuration
 
 The Prometheus configuration scrapes metrics from:
+
 - CFGMS Controller API (`/api/v1/monitoring/metrics`)
 - CFGMS Health endpoint (`/api/v1/monitoring/health`)
 
 ### Alert Rules
 
 The alert rules monitor:
+
 - High CPU/memory usage
 - Controller availability
 - Steward connection issues
@@ -104,6 +111,7 @@ The alert rules monitor:
 ### Grafana Dashboard
 
 The dashboard includes panels for:
+
 - System overview (connected stewards, active configs)
 - Resource usage (CPU, memory)
 - Request rates and error rates
@@ -133,6 +141,7 @@ Edit `cfgms_alerts.yml` to adjust alert conditions:
 ### Configuring External Endpoints
 
 For production deployments, update endpoints in:
+
 - `prometheus.yml` - Update target addresses
 - `docker-compose.yml` - Configure external network access
 - `alertmanager.yml` - Set up proper SMTP/Slack endpoints
@@ -169,6 +178,7 @@ For production use:
 ### Common Issues
 
 #### Metrics Not Appearing
+
 ```bash
 # Check CFGMS controller logs
 docker logs cfgms-controller
@@ -181,6 +191,7 @@ curl -H "X-API-Key: your-key" http://localhost:9080/api/v1/monitoring/metrics
 ```
 
 #### Export Failures
+
 ```bash
 # Check export status
 curl -H "X-API-Key: your-key" http://localhost:9080/api/v1/monitoring/config
@@ -191,6 +202,7 @@ curl -H "X-API-Key: your-key" \
 ```
 
 #### Dashboard Not Loading
+
 ```bash
 # Check Grafana logs
 docker logs cfgms-grafana

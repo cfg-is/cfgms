@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 syntax = "proto3";
 
 package cfgms.api.controller;
@@ -6,13 +8,6 @@ option go_package = "github.com/cfgis/cfgms/api/proto/controller";
 
 import "common/common.proto";
 import "google/protobuf/timestamp.proto";
-
-service ConfigurationService {
-  rpc GetConfiguration(ConfigRequest) returns (ConfigResponse);
-  rpc ReportConfigStatus(ConfigStatusReport) returns (common.Status);
-  rpc ValidateConfig(ConfigValidationRequest) returns (ConfigValidationResponse);
-  rpc StreamConfigurationUpdates(ConfigStreamRequest) returns (stream ConfigurationUpdate);
-}
 
 message ConfigRequest {
   string steward_id = 1;

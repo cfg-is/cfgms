@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // Package events provides DNA change event publisher implementation.
 
 package events
@@ -17,21 +19,21 @@ import (
 type publisher struct {
 	logger logging.Logger
 	config *PublisherConfig
-	
+
 	// Subscriber registry
-	subscribers map[string][]subscriberRegistration
+	subscribers   map[string][]subscriberRegistration
 	subscribersMu sync.RWMutex
-	
+
 	// Worker pool
 	workers    []*eventWorker
 	eventQueue chan *eventTask
-	
+
 	// State management
-	running    bool
-	runningMu  sync.RWMutex
-	stopChan   chan struct{}
-	workerWg   sync.WaitGroup
-	
+	running   bool
+	runningMu sync.RWMutex
+	stopChan  chan struct{}
+	workerWg  sync.WaitGroup
+
 	// Statistics
 	stats     *PublisherStats
 	statsMu   sync.RWMutex
@@ -46,17 +48,17 @@ type subscriberRegistration struct {
 
 // eventTask represents a task for the worker pool.
 type eventTask struct {
-	eventType string
-	event     *DNAChangeEvent
+	eventType   string
+	event       *DNAChangeEvent
 	subscribers []subscriberRegistration
-	timestamp time.Time
+	timestamp   time.Time
 }
 
 // eventWorker processes event tasks from the queue.
 type eventWorker struct {
-	id       int
+	id        int
 	publisher *publisher
-	stopChan chan struct{}
+	stopChan  chan struct{}
 }
 
 // NewPublisher creates a new DNA change event publisher.
@@ -64,7 +66,7 @@ func NewPublisher(logger logging.Logger, config *PublisherConfig) EventPublisher
 	if config == nil {
 		config = DefaultPublisherConfig()
 	}
-	
+
 	p := &publisher{
 		logger:      logger,
 		config:      config,
@@ -75,13 +77,13 @@ func NewPublisher(logger logging.Logger, config *PublisherConfig) EventPublisher
 			SubscriberFailures: make(map[string]int64),
 		},
 	}
-	
+
 	if logger != nil {
 		logger.Info("Event publisher created",
 			"worker_count", config.WorkerCount,
 			"queue_size", config.QueueSize)
 	}
-	
+
 	return p
 }
 
@@ -90,43 +92,43 @@ func (p *publisher) Subscribe(eventType string, subscriber EventSubscriber) erro
 	if eventType == "" {
 		return fmt.Errorf("event type cannot be empty")
 	}
-	
+
 	if subscriber == nil {
 		return fmt.Errorf("subscriber cannot be nil")
 	}
-	
+
 	info := subscriber.GetSubscriberInfo()
 	if info.Name == "" {
 		return fmt.Errorf("subscriber name cannot be empty")
 	}
-	
+
 	p.subscribersMu.Lock()
 	defer p.subscribersMu.Unlock()
-	
+
 	// Check for duplicate subscribers
 	for _, reg := range p.subscribers[eventType] {
 		if reg.info.Name == info.Name {
 			return fmt.Errorf("subscriber %s is already registered for event type %s", info.Name, eventType)
 		}
 	}
-	
+
 	// Add subscriber
 	registration := subscriberRegistration{
 		subscriber: subscriber,
 		info:       info,
 	}
-	
+
 	p.subscribers[eventType] = append(p.subscribers[eventType], registration)
-	
+
 	// Sort by priority (highest first)
 	sort.Slice(p.subscribers[eventType], func(i, j int) bool {
 		return p.subscribers[eventType][i].info.Priority > p.subscribers[eventType][j].info.Priority
 	})
-	
+
 	p.statsMu.Lock()
 	p.stats.RegisteredSubscribers = p.countSubscribers()
 	p.statsMu.Unlock()
-	
+
 	if p.logger != nil {
 		p.logger.Info("Event subscriber registered",
 			"event_type", eventType,
@@ -134,7 +136,7 @@ func (p *publisher) Subscribe(eventType string, subscriber EventSubscriber) erro
 			"priority", info.Priority,
 			"async", info.Async)
 	}
-	
+
 	return nil
 }
 
@@ -142,12 +144,12 @@ func (p *publisher) Subscribe(eventType string, subscriber EventSubscriber) erro
 func (p *publisher) Unsubscribe(eventType string, subscriberName string) error {
 	p.subscribersMu.Lock()
 	defer p.subscribersMu.Unlock()
-	
+
 	subscribers, exists := p.subscribers[eventType]
 	if !exists {
 		return fmt.Errorf("no subscribers registered for event type %s", eventType)
 	}
-	
+
 	// Find and remove subscriber
 	for i, reg := range subscribers {
 		if reg.info.Name == subscriberName {
@@ -155,29 +157,29 @@ func (p *publisher) Unsubscribe(eventType string, subscriberName string) error {
 			if err := reg.subscriber.Close(); err != nil && p.logger != nil {
 				p.logger.Warn("Error closing subscriber", "name", subscriberName, "error", err)
 			}
-			
+
 			// Remove from slice
 			p.subscribers[eventType] = append(subscribers[:i], subscribers[i+1:]...)
-			
+
 			// Remove empty event type entries
 			if len(p.subscribers[eventType]) == 0 {
 				delete(p.subscribers, eventType)
 			}
-			
+
 			p.statsMu.Lock()
 			p.stats.RegisteredSubscribers = p.countSubscribers()
 			p.statsMu.Unlock()
-			
+
 			if p.logger != nil {
 				p.logger.Info("Event subscriber unregistered",
 					"event_type", eventType,
 					"subscriber", subscriberName)
 			}
-			
+
 			return nil
 		}
 	}
-	
+
 	return fmt.Errorf("subscriber %s not found for event type %s", subscriberName, eventType)
 }
 
@@ -186,14 +188,14 @@ func (p *publisher) Publish(ctx context.Context, eventType string, event *DNACha
 	if event == nil {
 		return fmt.Errorf("event cannot be nil")
 	}
-	
+
 	p.runningMu.RLock()
 	if !p.running {
 		p.runningMu.RUnlock()
 		return fmt.Errorf("event publisher is not running")
 	}
 	p.runningMu.RUnlock()
-	
+
 	// Get subscribers for this event type
 	p.subscribersMu.RLock()
 	subscribers, exists := p.subscribers[eventType]
@@ -201,12 +203,12 @@ func (p *publisher) Publish(ctx context.Context, eventType string, event *DNACha
 		p.subscribersMu.RUnlock()
 		return nil // No subscribers, not an error
 	}
-	
+
 	// Make a copy to avoid holding the lock
 	subscribersCopy := make([]subscriberRegistration, len(subscribers))
 	copy(subscribersCopy, subscribers)
 	p.subscribersMu.RUnlock()
-	
+
 	// Create task
 	task := &eventTask{
 		eventType:   eventType,
@@ -214,7 +216,7 @@ func (p *publisher) Publish(ctx context.Context, eventType string, event *DNACha
 		subscribers: subscribersCopy,
 		timestamp:   time.Now(),
 	}
-	
+
 	// Queue task for processing
 	select {
 	case p.eventQueue <- task:
@@ -247,14 +249,14 @@ func (p *publisher) Publish(ctx context.Context, eventType string, event *DNACha
 func (p *publisher) Start(ctx context.Context) error {
 	p.runningMu.Lock()
 	defer p.runningMu.Unlock()
-	
+
 	if p.running {
 		return fmt.Errorf("event publisher is already running")
 	}
-	
+
 	p.running = true
 	p.startTime = time.Now()
-	
+
 	// Start workers
 	p.workers = make([]*eventWorker, p.config.WorkerCount)
 	for i := 0; i < p.config.WorkerCount; i++ {
@@ -264,22 +266,22 @@ func (p *publisher) Start(ctx context.Context) error {
 			stopChan:  make(chan struct{}),
 		}
 		p.workers[i] = worker
-		
+
 		p.workerWg.Add(1)
 		go worker.run(ctx)
 	}
-	
+
 	p.statsMu.Lock()
 	p.stats.ActiveWorkers = len(p.workers)
 	p.stats.StartTime = p.startTime
 	p.statsMu.Unlock()
-	
+
 	if p.logger != nil {
 		p.logger.Info("Event publisher started",
 			"workers", len(p.workers),
 			"queue_size", cap(p.eventQueue))
 	}
-	
+
 	return nil
 }
 
@@ -292,24 +294,24 @@ func (p *publisher) Stop(ctx context.Context) error {
 	}
 	p.running = false
 	p.runningMu.Unlock()
-	
+
 	if p.logger != nil {
 		p.logger.Info("Stopping event publisher")
 	}
-	
+
 	// Signal stop to all workers
 	close(p.stopChan)
 	for _, worker := range p.workers {
 		close(worker.stopChan)
 	}
-	
+
 	// Wait for workers to finish
 	done := make(chan struct{})
 	go func() {
 		p.workerWg.Wait()
 		close(done)
 	}()
-	
+
 	select {
 	case <-done:
 		break
@@ -319,7 +321,7 @@ func (p *publisher) Stop(ctx context.Context) error {
 		}
 		return ctx.Err()
 	}
-	
+
 	// Close remaining subscribers
 	p.subscribersMu.Lock()
 	for eventType, subscribers := range p.subscribers {
@@ -333,15 +335,15 @@ func (p *publisher) Stop(ctx context.Context) error {
 		}
 	}
 	p.subscribersMu.Unlock()
-	
+
 	p.statsMu.Lock()
 	p.stats.ActiveWorkers = 0
 	p.statsMu.Unlock()
-	
+
 	if p.logger != nil {
 		p.logger.Info("Event publisher stopped")
 	}
-	
+
 	return nil
 }
 
@@ -349,17 +351,17 @@ func (p *publisher) Stop(ctx context.Context) error {
 func (p *publisher) GetStats() *PublisherStats {
 	p.statsMu.RLock()
 	defer p.statsMu.RUnlock()
-	
+
 	// Create a copy of the stats
 	stats := *p.stats
 	stats.SubscriberFailures = make(map[string]int64)
 	for k, v := range p.stats.SubscriberFailures {
 		stats.SubscriberFailures[k] = v
 	}
-	
+
 	// Calculate current queue depth
 	stats.QueueDepth = len(p.eventQueue)
-	
+
 	return &stats
 }
 
@@ -374,7 +376,7 @@ func (p *publisher) processTask(ctx context.Context, task *eventTask) error {
 		p.stats.LastEventTime = startTime
 		p.statsMu.Unlock()
 	}()
-	
+
 	// Process each subscriber
 	var lastErr error
 	for _, reg := range task.subscribers {
@@ -385,15 +387,15 @@ func (p *publisher) processTask(ctx context.Context, task *eventTask) error {
 			subCtx, cancel = context.WithTimeout(ctx, reg.info.Timeout)
 			defer cancel()
 		}
-		
+
 		// Execute subscriber
 		if err := reg.subscriber.OnEvent(subCtx, task.event); err != nil {
 			lastErr = err
-			
+
 			p.statsMu.Lock()
 			p.stats.SubscriberFailures[reg.info.Name]++
 			p.statsMu.Unlock()
-			
+
 			if p.logger != nil {
 				p.logger.Error("Event subscriber failed",
 					"subscriber", reg.info.Name,
@@ -403,12 +405,12 @@ func (p *publisher) processTask(ctx context.Context, task *eventTask) error {
 			}
 		}
 	}
-	
+
 	if lastErr != nil {
 		atomic.AddInt64(&p.stats.EventsFailed, 1)
 		return lastErr
 	}
-	
+
 	return nil
 }
 
@@ -424,11 +426,11 @@ func (p *publisher) countSubscribers() int {
 // run processes events for a worker.
 func (w *eventWorker) run(ctx context.Context) {
 	defer w.publisher.workerWg.Done()
-	
+
 	if w.publisher.logger != nil {
 		w.publisher.logger.Debug("Event worker started", "worker_id", w.id)
 	}
-	
+
 	for {
 		select {
 		case <-ctx.Done():

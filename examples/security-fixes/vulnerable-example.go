@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package examples
 
 // This file demonstrates common security vulnerabilities and their fixes
@@ -63,7 +65,6 @@ func secureRandomGeneration() int {
 	return int(n.Int64())
 }
 
-
 // SECURE EXAMPLE 3: Proper TLS MinVersion (G402 Fixed)
 func secureTLSConfig() *tls.Config {
 	// SECURE: Use modern TLS version
@@ -71,7 +72,6 @@ func secureTLSConfig() *tls.Config {
 		MinVersion: tls.VersionTLS12, // Use TLS 1.2 or higher
 	}
 }
-
 
 // VULNERABLE EXAMPLE 4: Subprocess with Variable (G204)
 func vulnerableSubprocess(userCommand string) error {
@@ -157,7 +157,7 @@ func secureHTTPServer() *http.Server {
 	// SECURE: Proper timeouts configured to prevent Slowloris attacks
 	return &http.Server{
 		Addr:              ":8080",
-		ReadHeaderTimeout: 10 * time.Second, // Prevent slow headers attack 
+		ReadHeaderTimeout: 10 * time.Second, // Prevent slow headers attack
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,

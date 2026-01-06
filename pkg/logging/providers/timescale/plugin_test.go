@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package timescale
 
 import (
@@ -8,10 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/logging/interfaces"
+	_ "github.com/lib/pq" // PostgreSQL driver for cleanup
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	_ "github.com/lib/pq" // PostgreSQL driver for cleanup
+
+	"github.com/cfgis/cfgms/pkg/logging/interfaces"
 )
 
 // TestTimescaleProvider_BasicFunctionality tests basic provider operations
@@ -280,7 +283,7 @@ func TestTimescaleProvider_HighVolume(t *testing.T) {
 	writeTime := time.Since(start)
 
 	assert.NoError(t, err)
-	
+
 	// Verify write performance (should be able to write 10k entries in under 10 seconds)
 	assert.Less(t, writeTime.Seconds(), 10.0, "Write performance too slow: %v", writeTime)
 
@@ -414,6 +417,18 @@ func getTestTimescaleConfigWithTable(tableSuffix string) map[string]interface{} 
 		password = "cfgms_test_password"
 	}
 
+	// Use unified database and user (cfgms_ha_test / cfgms_test)
+	// These match the docker-compose.test.yml configuration
+	database := os.Getenv("CFGMS_TEST_TIMESCALEDB_DATABASE")
+	if database == "" {
+		database = "cfgms_ha_test" // Unified database name
+	}
+
+	username := os.Getenv("CFGMS_TEST_TIMESCALEDB_USER")
+	if username == "" {
+		username = "cfgms_test" // Unified user name
+	}
+
 	// Generate unique table name using timestamp and suffix
 	tableName := fmt.Sprintf("log_entries_test_%d", time.Now().UnixNano())
 	if tableSuffix != "" {
@@ -423,12 +438,12 @@ func getTestTimescaleConfigWithTable(tableSuffix string) map[string]interface{} 
 	return map[string]interface{}{
 		"host":              host,
 		"port":              port,
-		"database":          "cfgms_logs_test",
-		"username":          "cfgms_logger_test",
+		"database":          database,
+		"username":          username,
 		"password":          password,
 		"ssl_mode":          "disable",
 		"table_name":        tableName,
-		"schema_name":       "test_logging",
+		"schema_name":       "cfgms_logs", // M-INPUT-3: Use whitelisted schema name
 		"chunk_interval":    "24h",
 		"compression_after": "1h",  // Quick compression for testing
 		"retention_after":   "48h", // Short retention for testing

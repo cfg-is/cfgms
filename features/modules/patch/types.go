@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package patch
 
 import (
@@ -278,10 +280,22 @@ func isValidPatchID(patchID string) bool {
 
 // PatchModule implements the Module interface for OS patch management
 type PatchModule struct {
-	mu           sync.RWMutex
-	patchManager PatchManager
-	lastCheck    time.Time
-	cachedStatus *PatchStatus
+	mu            sync.RWMutex
+	patchManager  PatchManager
+	policyEngine  *PolicyEngine
+	windowManager WindowManager
+	deviceID      string // Device ID for maintenance window checks
+	lastCheck     time.Time
+	cachedStatus  *PatchStatus
+}
+
+// WindowManager defines the interface for maintenance window management
+// This is imported from pkg/maintenance but defined here to avoid circular imports
+type WindowManager interface {
+	CanReboot(ctx context.Context, deviceID string) (bool, error)
+	CanPerformMaintenance(ctx context.Context, deviceID string) (bool, error)
+	GetNextWindow(ctx context.Context, deviceID string) (time.Time, error)
+	IsInWindow(ctx context.Context, deviceID string) (bool, error)
 }
 
 // PatchStatus represents the current patching status of the system

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // Package timescale - Query functionality for TimescaleDB logging provider
 package timescale
 
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	"github.com/lib/pq"
+
 	"github.com/cfgis/cfgms/pkg/logging/interfaces"
 )
 
@@ -174,6 +177,8 @@ func (p *TimescaleProvider) buildTimeRangeQuery(query interfaces.TimeRangeQuery)
 	var args []interface{}
 	argIndex := 1
 
+	// M-INPUT-3: Schema and table names already validated during initialization
+	// This provides defense-in-depth against SQL injection even though identifiers come from config
 	tableName := fmt.Sprintf("%s.%s", p.config.SchemaName, p.config.TableName)
 
 	// Base SELECT

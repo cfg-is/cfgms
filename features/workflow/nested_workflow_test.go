@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package workflow
 
 import (
@@ -149,7 +151,7 @@ func TestNestedWorkflowParameterMapping(t *testing.T) {
 func TestNestedWorkflowTimeout(t *testing.T) {
 	// Test nested workflow with timeout (using very short timeout for testing)
 	workflow := Workflow{
-		Name: "parent-with-timeout",
+		Name:      "parent-with-timeout",
 		Variables: map[string]interface{}{},
 		Steps: []Step{
 			{
@@ -185,7 +187,7 @@ func TestNestedWorkflowTimeout(t *testing.T) {
 func TestNestedWorkflowAsync(t *testing.T) {
 	// Test asynchronous nested workflow execution
 	workflow := Workflow{
-		Name: "parent-async",
+		Name:      "parent-async",
 		Variables: map[string]interface{}{},
 		Steps: []Step{
 			{

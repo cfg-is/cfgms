@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // Package audit provides compliance reporting functionality
 package audit
 
@@ -27,113 +29,113 @@ func NewComplianceReporter(manager *Manager) *ComplianceReporter {
 
 // ComplianceReport represents a comprehensive compliance report
 type ComplianceReport struct {
-	ID           string                    `json:"id"`
-	TenantID     string                    `json:"tenant_id"`
-	GeneratedAt  time.Time                 `json:"generated_at"`
-	GeneratedBy  string                    `json:"generated_by"`
-	ReportType   ComplianceReportType      `json:"report_type"`
-	TimeRange    interfaces.TimeRange      `json:"time_range"`
-	
+	ID          string               `json:"id"`
+	TenantID    string               `json:"tenant_id"`
+	GeneratedAt time.Time            `json:"generated_at"`
+	GeneratedBy string               `json:"generated_by"`
+	ReportType  ComplianceReportType `json:"report_type"`
+	TimeRange   interfaces.TimeRange `json:"time_range"`
+
 	// Summary statistics
-	TotalEvents         int64                           `json:"total_events"`
-	EventsByType        map[string]int64                `json:"events_by_type"`
-	EventsByResult      map[string]int64                `json:"events_by_result"`
-	EventsBySeverity    map[string]int64                `json:"events_by_severity"`
-	FailedActionsCount  int64                           `json:"failed_actions_count"`
-	SecurityEventsCount int64                           `json:"security_events_count"`
-	
+	TotalEvents         int64            `json:"total_events"`
+	EventsByType        map[string]int64 `json:"events_by_type"`
+	EventsByResult      map[string]int64 `json:"events_by_result"`
+	EventsBySeverity    map[string]int64 `json:"events_by_severity"`
+	FailedActionsCount  int64            `json:"failed_actions_count"`
+	SecurityEventsCount int64            `json:"security_events_count"`
+
 	// Detailed findings
-	SecurityFindings    []ComplianceFinding             `json:"security_findings"`
-	AccessFindings      []ComplianceFinding             `json:"access_findings"`
-	ConfigFindings      []ComplianceFinding             `json:"config_findings"`
-	UserActivityReport  []UserActivitySummary           `json:"user_activity_report"`
-	ResourceAccessReport []ResourceAccessSummary        `json:"resource_access_report"`
-	
+	SecurityFindings     []ComplianceFinding     `json:"security_findings"`
+	AccessFindings       []ComplianceFinding     `json:"access_findings"`
+	ConfigFindings       []ComplianceFinding     `json:"config_findings"`
+	UserActivityReport   []UserActivitySummary   `json:"user_activity_report"`
+	ResourceAccessReport []ResourceAccessSummary `json:"resource_access_report"`
+
 	// Compliance status
-	ComplianceStatus    ComplianceStatus                `json:"compliance_status"`
-	Violations          []ComplianceViolation           `json:"violations"`
-	Recommendations     []ComplianceRecommendation      `json:"recommendations"`
+	ComplianceStatus ComplianceStatus           `json:"compliance_status"`
+	Violations       []ComplianceViolation      `json:"violations"`
+	Recommendations  []ComplianceRecommendation `json:"recommendations"`
 }
 
 // ComplianceReportType defines types of compliance reports
 type ComplianceReportType string
 
 const (
-	ComplianceReportSOC2     ComplianceReportType = "soc2"      // SOC 2 compliance
-	ComplianceReportGDPR     ComplianceReportType = "gdpr"      // GDPR compliance
-	ComplianceReportHIPAA    ComplianceReportType = "hipaa"     // HIPAA compliance
-	ComplianceReportSecurity ComplianceReportType = "security"  // Security audit
-	ComplianceReportAccess   ComplianceReportType = "access"    // Access review
-	ComplianceReportGeneral  ComplianceReportType = "general"   // General audit
+	ComplianceReportSOC2     ComplianceReportType = "soc2"     // SOC 2 compliance
+	ComplianceReportGDPR     ComplianceReportType = "gdpr"     // GDPR compliance
+	ComplianceReportHIPAA    ComplianceReportType = "hipaa"    // HIPAA compliance
+	ComplianceReportSecurity ComplianceReportType = "security" // Security audit
+	ComplianceReportAccess   ComplianceReportType = "access"   // Access review
+	ComplianceReportGeneral  ComplianceReportType = "general"  // General audit
 )
 
 // ComplianceStatus represents overall compliance status
 type ComplianceStatus string
 
 const (
-	ComplianceStatusCompliant    ComplianceStatus = "compliant"
-	ComplianceStatusWarnings     ComplianceStatus = "warnings"
-	ComplianceStatusViolations   ComplianceStatus = "violations"
-	ComplianceStatusCritical     ComplianceStatus = "critical"
+	ComplianceStatusCompliant  ComplianceStatus = "compliant"
+	ComplianceStatusWarnings   ComplianceStatus = "warnings"
+	ComplianceStatusViolations ComplianceStatus = "violations"
+	ComplianceStatusCritical   ComplianceStatus = "critical"
 )
 
 // ComplianceFinding represents a specific compliance finding
 type ComplianceFinding struct {
-	ID          string                      `json:"id"`
-	Category    string                      `json:"category"`
-	Severity    interfaces.AuditSeverity    `json:"severity"`
-	Title       string                      `json:"title"`
-	Description string                      `json:"description"`
-	Count       int64                       `json:"count"`
-	FirstSeen   time.Time                   `json:"first_seen"`
-	LastSeen    time.Time                   `json:"last_seen"`
-	Examples    []string                    `json:"examples,omitempty"`
+	ID          string                   `json:"id"`
+	Category    string                   `json:"category"`
+	Severity    interfaces.AuditSeverity `json:"severity"`
+	Title       string                   `json:"title"`
+	Description string                   `json:"description"`
+	Count       int64                    `json:"count"`
+	FirstSeen   time.Time                `json:"first_seen"`
+	LastSeen    time.Time                `json:"last_seen"`
+	Examples    []string                 `json:"examples,omitempty"`
 }
 
 // ComplianceViolation represents a compliance violation
 type ComplianceViolation struct {
-	ID          string                      `json:"id"`
-	Rule        string                      `json:"rule"`
-	Severity    interfaces.AuditSeverity    `json:"severity"`
-	Description string                      `json:"description"`
-	UserID      string                      `json:"user_id,omitempty"`
-	ResourceID  string                      `json:"resource_id,omitempty"`
-	Timestamp   time.Time                   `json:"timestamp"`
-	Details     map[string]interface{}      `json:"details,omitempty"`
+	ID          string                   `json:"id"`
+	Rule        string                   `json:"rule"`
+	Severity    interfaces.AuditSeverity `json:"severity"`
+	Description string                   `json:"description"`
+	UserID      string                   `json:"user_id,omitempty"`
+	ResourceID  string                   `json:"resource_id,omitempty"`
+	Timestamp   time.Time                `json:"timestamp"`
+	Details     map[string]interface{}   `json:"details,omitempty"`
 }
 
 // ComplianceRecommendation represents a compliance recommendation
 type ComplianceRecommendation struct {
-	ID          string                      `json:"id"`
-	Category    string                      `json:"category"`
-	Priority    interfaces.AuditSeverity    `json:"priority"`
-	Title       string                      `json:"title"`
-	Description string                      `json:"description"`
-	Actions     []string                    `json:"actions"`
+	ID          string                   `json:"id"`
+	Category    string                   `json:"category"`
+	Priority    interfaces.AuditSeverity `json:"priority"`
+	Title       string                   `json:"title"`
+	Description string                   `json:"description"`
+	Actions     []string                 `json:"actions"`
 }
 
 // UserActivitySummary summarizes user activity for compliance reporting
 type UserActivitySummary struct {
-	UserID          string    `json:"user_id"`
+	UserID          string                   `json:"user_id"`
 	UserType        interfaces.AuditUserType `json:"user_type"`
-	TotalActions    int64     `json:"total_actions"`
-	FailedActions   int64     `json:"failed_actions"`
-	LastActivity    time.Time `json:"last_activity"`
-	UniqueResources int64     `json:"unique_resources"`
-	SecurityEvents  int64     `json:"security_events"`
-	HighRiskActions []string  `json:"high_risk_actions,omitempty"`
+	TotalActions    int64                    `json:"total_actions"`
+	FailedActions   int64                    `json:"failed_actions"`
+	LastActivity    time.Time                `json:"last_activity"`
+	UniqueResources int64                    `json:"unique_resources"`
+	SecurityEvents  int64                    `json:"security_events"`
+	HighRiskActions []string                 `json:"high_risk_actions,omitempty"`
 }
 
 // ResourceAccessSummary summarizes resource access for compliance reporting
 type ResourceAccessSummary struct {
-	ResourceType    string    `json:"resource_type"`
-	ResourceID      string    `json:"resource_id"`
-	ResourceName    string    `json:"resource_name,omitempty"`
-	TotalAccesses   int64     `json:"total_accesses"`
-	UniqueUsers     int64     `json:"unique_users"`
-	LastAccessed    time.Time `json:"last_accessed"`
-	AccessPatterns  []string  `json:"access_patterns,omitempty"`
-	SecurityEvents  int64     `json:"security_events"`
+	ResourceType   string    `json:"resource_type"`
+	ResourceID     string    `json:"resource_id"`
+	ResourceName   string    `json:"resource_name,omitempty"`
+	TotalAccesses  int64     `json:"total_accesses"`
+	UniqueUsers    int64     `json:"unique_users"`
+	LastAccessed   time.Time `json:"last_accessed"`
+	AccessPatterns []string  `json:"access_patterns,omitempty"`
+	SecurityEvents int64     `json:"security_events"`
 }
 
 // GenerateReport generates a comprehensive compliance report
@@ -141,7 +143,7 @@ func (r *ComplianceReporter) GenerateReport(ctx context.Context, req *Compliance
 	if req.TenantID == "" {
 		return nil, interfaces.ErrTenantIDRequired
 	}
-	
+
 	// Create the report structure
 	report := &ComplianceReport{
 		ID:          fmt.Sprintf("compliance-%s-%d", req.ReportType, time.Now().Unix()),
@@ -151,7 +153,7 @@ func (r *ComplianceReporter) GenerateReport(ctx context.Context, req *Compliance
 		ReportType:  req.ReportType,
 		TimeRange:   req.TimeRange,
 	}
-	
+
 	// Query all relevant audit entries
 	filter := &interfaces.AuditFilter{
 		TenantID:  req.TenantID,
@@ -160,12 +162,12 @@ func (r *ComplianceReporter) GenerateReport(ctx context.Context, req *Compliance
 		SortBy:    "timestamp",
 		Order:     "desc",
 	}
-	
+
 	entries, err := r.manager.QueryEntries(ctx, filter)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query audit entries: %w", err)
 	}
-	
+
 	// Analyze entries and populate report
 	r.analyzeEntries(report, entries)
 	r.generateFindings(report, entries)
@@ -173,7 +175,7 @@ func (r *ComplianceReporter) GenerateReport(ctx context.Context, req *Compliance
 	r.generateResourceAccessReport(report, entries)
 	r.assessCompliance(report)
 	r.generateRecommendations(report)
-	
+
 	return report, nil
 }
 
@@ -193,11 +195,11 @@ func (r *ComplianceReporter) ExportReport(ctx context.Context, report *Complianc
 
 // ComplianceReportRequest defines parameters for generating a compliance report
 type ComplianceReportRequest struct {
-	TenantID     string                   `json:"tenant_id"`
-	ReportType   ComplianceReportType     `json:"report_type"`
-	TimeRange    interfaces.TimeRange     `json:"time_range"`
-	GeneratedBy  string                   `json:"generated_by"`
-	IncludeDetails bool                   `json:"include_details"`
+	TenantID       string               `json:"tenant_id"`
+	ReportType     ComplianceReportType `json:"report_type"`
+	TimeRange      interfaces.TimeRange `json:"time_range"`
+	GeneratedBy    string               `json:"generated_by"`
+	IncludeDetails bool                 `json:"include_details"`
 }
 
 // ExportFormat defines supported export formats
@@ -215,22 +217,22 @@ func (r *ComplianceReporter) analyzeEntries(report *ComplianceReport, entries []
 	report.EventsByType = make(map[string]int64)
 	report.EventsByResult = make(map[string]int64)
 	report.EventsBySeverity = make(map[string]int64)
-	
+
 	for _, entry := range entries {
 		// Count by type
 		report.EventsByType[string(entry.EventType)]++
-		
+
 		// Count by result
 		report.EventsByResult[string(entry.Result)]++
-		
+
 		// Count by severity
 		report.EventsBySeverity[string(entry.Severity)]++
-		
+
 		// Count specific categories
 		if entry.Result == interfaces.AuditResultFailure || entry.Result == interfaces.AuditResultError {
 			report.FailedActionsCount++
 		}
-		
+
 		if entry.EventType == interfaces.AuditEventSecurityEvent {
 			report.SecurityEventsCount++
 		}
@@ -242,7 +244,7 @@ func (r *ComplianceReporter) generateFindings(report *ComplianceReport, entries 
 	securityFindings := make(map[string]*ComplianceFinding)
 	accessFindings := make(map[string]*ComplianceFinding)
 	configFindings := make(map[string]*ComplianceFinding)
-	
+
 	for _, entry := range entries {
 		switch entry.EventType {
 		case interfaces.AuditEventSecurityEvent:
@@ -264,7 +266,7 @@ func (r *ComplianceReporter) generateFindings(report *ComplianceReport, entries 
 					LastSeen:    entry.Timestamp,
 				}
 			}
-			
+
 		case interfaces.AuditEventAuthorization:
 			if entry.Result == interfaces.AuditResultDenied {
 				key := fmt.Sprintf("access-denied-%s", entry.Action)
@@ -286,7 +288,7 @@ func (r *ComplianceReporter) generateFindings(report *ComplianceReport, entries 
 					}
 				}
 			}
-			
+
 		case interfaces.AuditEventConfiguration:
 			if entry.Result != interfaces.AuditResultSuccess {
 				key := fmt.Sprintf("config-failed-%s", entry.Action)
@@ -310,23 +312,23 @@ func (r *ComplianceReporter) generateFindings(report *ComplianceReport, entries 
 			}
 		}
 	}
-	
+
 	// Convert maps to slices
 	report.SecurityFindings = make([]ComplianceFinding, 0, len(securityFindings))
 	for _, finding := range securityFindings {
 		report.SecurityFindings = append(report.SecurityFindings, *finding)
 	}
-	
+
 	report.AccessFindings = make([]ComplianceFinding, 0, len(accessFindings))
 	for _, finding := range accessFindings {
 		report.AccessFindings = append(report.AccessFindings, *finding)
 	}
-	
+
 	report.ConfigFindings = make([]ComplianceFinding, 0, len(configFindings))
 	for _, finding := range configFindings {
 		report.ConfigFindings = append(report.ConfigFindings, *finding)
 	}
-	
+
 	// Sort findings by severity and count
 	sortFindings := func(findings []ComplianceFinding) {
 		sort.Slice(findings, func(i, j int) bool {
@@ -336,7 +338,7 @@ func (r *ComplianceReporter) generateFindings(report *ComplianceReport, entries 
 			return findings[i].Count > findings[j].Count
 		})
 	}
-	
+
 	sortFindings(report.SecurityFindings)
 	sortFindings(report.AccessFindings)
 	sortFindings(report.ConfigFindings)
@@ -346,7 +348,7 @@ func (r *ComplianceReporter) generateFindings(report *ComplianceReport, entries 
 func (r *ComplianceReporter) generateUserActivityReport(report *ComplianceReport, entries []*interfaces.AuditEntry) {
 	userActivity := make(map[string]*UserActivitySummary)
 	resourcesByUser := make(map[string]map[string]bool)
-	
+
 	for _, entry := range entries {
 		if _, exists := userActivity[entry.UserID]; !exists {
 			userActivity[entry.UserID] = &UserActivitySummary{
@@ -355,37 +357,37 @@ func (r *ComplianceReporter) generateUserActivityReport(report *ComplianceReport
 			}
 			resourcesByUser[entry.UserID] = make(map[string]bool)
 		}
-		
+
 		summary := userActivity[entry.UserID]
 		summary.TotalActions++
-		
+
 		if entry.Timestamp.After(summary.LastActivity) {
 			summary.LastActivity = entry.Timestamp
 		}
-		
+
 		if entry.Result == interfaces.AuditResultFailure || entry.Result == interfaces.AuditResultError {
 			summary.FailedActions++
 		}
-		
+
 		if entry.EventType == interfaces.AuditEventSecurityEvent {
 			summary.SecurityEvents++
 		}
-		
+
 		// Track unique resources
 		resourceKey := fmt.Sprintf("%s:%s", entry.ResourceType, entry.ResourceID)
 		resourcesByUser[entry.UserID][resourceKey] = true
-		
+
 		// Track high-risk actions
 		if entry.Severity == interfaces.AuditSeverityCritical || entry.Severity == interfaces.AuditSeverityHigh {
 			summary.HighRiskActions = append(summary.HighRiskActions, entry.Action)
 		}
 	}
-	
+
 	// Convert to slice and calculate unique resources
 	report.UserActivityReport = make([]UserActivitySummary, 0, len(userActivity))
 	for userID, summary := range userActivity {
 		summary.UniqueResources = int64(len(resourcesByUser[userID]))
-		
+
 		// Deduplicate high-risk actions
 		if len(summary.HighRiskActions) > 0 {
 			uniqueActions := make(map[string]bool)
@@ -398,10 +400,10 @@ func (r *ComplianceReporter) generateUserActivityReport(report *ComplianceReport
 			}
 			summary.HighRiskActions = deduped
 		}
-		
+
 		report.UserActivityReport = append(report.UserActivityReport, *summary)
 	}
-	
+
 	// Sort by total actions descending
 	sort.Slice(report.UserActivityReport, func(i, j int) bool {
 		return report.UserActivityReport[i].TotalActions > report.UserActivityReport[j].TotalActions
@@ -412,10 +414,10 @@ func (r *ComplianceReporter) generateUserActivityReport(report *ComplianceReport
 func (r *ComplianceReporter) generateResourceAccessReport(report *ComplianceReport, entries []*interfaces.AuditEntry) {
 	resourceAccess := make(map[string]*ResourceAccessSummary)
 	usersByResource := make(map[string]map[string]bool)
-	
+
 	for _, entry := range entries {
 		resourceKey := fmt.Sprintf("%s:%s", entry.ResourceType, entry.ResourceID)
-		
+
 		if _, exists := resourceAccess[resourceKey]; !exists {
 			resourceAccess[resourceKey] = &ResourceAccessSummary{
 				ResourceType: entry.ResourceType,
@@ -424,31 +426,31 @@ func (r *ComplianceReporter) generateResourceAccessReport(report *ComplianceRepo
 			}
 			usersByResource[resourceKey] = make(map[string]bool)
 		}
-		
+
 		summary := resourceAccess[resourceKey]
 		summary.TotalAccesses++
-		
+
 		if entry.Timestamp.After(summary.LastAccessed) {
 			summary.LastAccessed = entry.Timestamp
 		}
-		
+
 		if entry.EventType == interfaces.AuditEventSecurityEvent {
 			summary.SecurityEvents++
 		}
-		
+
 		// Track unique users
 		usersByResource[resourceKey][entry.UserID] = true
-		
+
 		// Track access patterns
 		pattern := fmt.Sprintf("%s:%s", string(entry.UserType), entry.Action)
 		summary.AccessPatterns = append(summary.AccessPatterns, pattern)
 	}
-	
+
 	// Convert to slice and calculate unique users
 	report.ResourceAccessReport = make([]ResourceAccessSummary, 0, len(resourceAccess))
 	for resourceKey, summary := range resourceAccess {
 		summary.UniqueUsers = int64(len(usersByResource[resourceKey]))
-		
+
 		// Deduplicate access patterns
 		if len(summary.AccessPatterns) > 0 {
 			uniquePatterns := make(map[string]bool)
@@ -461,10 +463,10 @@ func (r *ComplianceReporter) generateResourceAccessReport(report *ComplianceRepo
 			}
 			summary.AccessPatterns = deduped
 		}
-		
+
 		report.ResourceAccessReport = append(report.ResourceAccessReport, *summary)
 	}
-	
+
 	// Sort by total accesses descending
 	sort.Slice(report.ResourceAccessReport, func(i, j int) bool {
 		return report.ResourceAccessReport[i].TotalAccesses > report.ResourceAccessReport[j].TotalAccesses
@@ -476,7 +478,7 @@ func (r *ComplianceReporter) assessCompliance(report *ComplianceReport) {
 	criticalFindings := 0
 	highFindings := 0
 	violations := 0
-	
+
 	// Count findings by severity
 	allFindings := append(append(report.SecurityFindings, report.AccessFindings...), report.ConfigFindings...)
 	for _, finding := range allFindings {
@@ -487,7 +489,7 @@ func (r *ComplianceReporter) assessCompliance(report *ComplianceReport) {
 			highFindings++
 		}
 	}
-	
+
 	// Generate violations based on findings
 	for _, finding := range report.SecurityFindings {
 		if finding.Severity == interfaces.AuditSeverityCritical {
@@ -501,7 +503,7 @@ func (r *ComplianceReporter) assessCompliance(report *ComplianceReport) {
 			})
 		}
 	}
-	
+
 	// Determine overall status
 	if criticalFindings > 0 || violations > 0 {
 		report.ComplianceStatus = ComplianceStatusCritical
@@ -517,7 +519,7 @@ func (r *ComplianceReporter) assessCompliance(report *ComplianceReport) {
 // generateRecommendations generates compliance recommendations
 func (r *ComplianceReporter) generateRecommendations(report *ComplianceReport) {
 	recommendations := []ComplianceRecommendation{}
-	
+
 	if report.FailedActionsCount > 50 {
 		recommendations = append(recommendations, ComplianceRecommendation{
 			ID:          "reduce-failures",
@@ -528,7 +530,7 @@ func (r *ComplianceReporter) generateRecommendations(report *ComplianceReport) {
 			Actions:     []string{"Review system logs", "Improve error handling", "Provide user training"},
 		})
 	}
-	
+
 	if report.SecurityEventsCount > 10 {
 		recommendations = append(recommendations, ComplianceRecommendation{
 			ID:          "investigate-security",
@@ -539,7 +541,7 @@ func (r *ComplianceReporter) generateRecommendations(report *ComplianceReport) {
 			Actions:     []string{"Review security events", "Check for anomalous activity", "Update security policies"},
 		})
 	}
-	
+
 	if len(report.AccessFindings) > 5 {
 		recommendations = append(recommendations, ComplianceRecommendation{
 			ID:          "review-access",
@@ -550,7 +552,7 @@ func (r *ComplianceReporter) generateRecommendations(report *ComplianceReport) {
 			Actions:     []string{"Audit user permissions", "Review role assignments", "Update access policies"},
 		})
 	}
-	
+
 	report.Recommendations = recommendations
 }
 
@@ -558,13 +560,13 @@ func (r *ComplianceReporter) generateRecommendations(report *ComplianceReport) {
 func (r *ComplianceReporter) exportCSV(report *ComplianceReport) ([]byte, error) {
 	var buf strings.Builder
 	writer := csv.NewWriter(&buf)
-	
+
 	// Write headers
 	headers := []string{"Category", "Type", "Count", "Description", "Severity", "First Seen", "Last Seen"}
 	if err := writer.Write(headers); err != nil {
 		return nil, fmt.Errorf("failed to write CSV headers: %w", err)
 	}
-	
+
 	// Write findings
 	allFindings := append(append(report.SecurityFindings, report.AccessFindings...), report.ConfigFindings...)
 	for _, finding := range allFindings {
@@ -581,12 +583,12 @@ func (r *ComplianceReporter) exportCSV(report *ComplianceReport) ([]byte, error)
 			return nil, fmt.Errorf("failed to write CSV record: %w", err)
 		}
 	}
-	
+
 	writer.Flush()
 	if err := writer.Error(); err != nil {
 		return nil, fmt.Errorf("CSV writer error: %w", err)
 	}
-	
+
 	return []byte(buf.String()), nil
 }
 
@@ -628,26 +630,26 @@ func (r *ComplianceReporter) exportHTML(report *ComplianceReport) ([]byte, error
 		report.ComplianceStatus, report.ComplianceStatus,
 		report.TotalEvents,
 	)
-	
+
 	// Add summary statistics
 	html += `
     <div class="section">
         <h2>Summary Statistics</h2>
         <table>
             <tr><th>Metric</th><th>Count</th></tr>`
-	
+
 	for eventType, count := range report.EventsByType {
 		html += fmt.Sprintf("<tr><td>%s Events</td><td>%d</td></tr>", eventType, count)
 	}
-	
+
 	html += fmt.Sprintf(`
             <tr><td>Failed Actions</td><td>%d</td></tr>
             <tr><td>Security Events</td><td>%d</td></tr>
         </table>
     </div>`, report.FailedActionsCount, report.SecurityEventsCount)
-	
+
 	html += `</body></html>`
-	
+
 	return []byte(html), nil
 }
 

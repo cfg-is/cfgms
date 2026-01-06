@@ -1,8 +1,11 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package security
 
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -625,8 +628,18 @@ func TestBreachDetector_RiskScoreCalculation(t *testing.T) {
 	riskScore = bd.GetTenantRiskScore(tenantID)
 	assert.GreaterOrEqual(t, riskScore, 0.5)
 
-	// Verify we can get active breach indicators
-	indicators := bd.GetActiveBreachIndicators(tenantID)
+	// Verify we can get active breach indicators (with retry for async processing)
+	// Windows can be significantly slower at processing breach detection events
+	// due to scheduler behavior and async breach indicator analysis
+	var indicators []*BreachIndicator
+	timeout := 2 * time.Second
+	if runtime.GOOS == "windows" {
+		timeout = 5 * time.Second // Windows needs more time for async processing
+	}
+	require.Eventually(t, func() bool {
+		indicators = bd.GetActiveBreachIndicators(tenantID)
+		return len(indicators) > 0
+	}, timeout, 50*time.Millisecond, "Should have active breach indicators after recording suspicious events")
 	assert.NotEmpty(t, indicators)
 }
 

@@ -1,0 +1,90 @@
+metadata:
+  id: certificate-expiration-check
+  name: Certificate Expiration Check
+  description: Checks SSL/TLS certificates for expiration
+  version:
+    major: 1
+    minor: 0
+    patch: 0
+  author: cfgms-team@cfg.is
+  tags:
+    - security
+    - certificates
+    - ssl
+    - monitoring
+  category: security
+  platform:
+    - linux
+    - darwin
+  shell: bash
+  parameters:
+    - name: CERT_PATHS
+      type: string
+      description: Comma-separated list of certificate paths to check
+      required: false
+      default: "/etc/ssl/certs"
+    - name: WARNING_DAYS
+      type: number
+      description: Days until expiration to trigger warning
+      required: false
+      default: "30"
+  created_at: 2025-10-13T00:00:00Z
+  updated_at: 2025-10-13T00:00:00Z
+
+content: |
+  #!/bin/bash
+  set -euo pipefail
+
+  CERT_PATHS="${CERT_PATHS:-/etc/ssl/certs}"
+  WARNING_DAYS="${WARNING_DAYS:-30}"
+  WARNINGS=0
+
+  echo "Certificate Expiration Check"
+  echo "Warning threshold: $WARNING_DAYS days"
+  echo ""
+
+  IFS=',' read -ra PATHS <<< "$CERT_PATHS"
+
+  for cert_path in "${PATHS[@]}"; do
+      if [ ! -e "$cert_path" ]; then
+          continue
+      fi
+
+      if [ -f "$cert_path" ]; then
+          files=("$cert_path")
+      else
+          files=$(find "$cert_path" -type f \( -name "*.crt" -o -name "*.pem" \) 2>/dev/null)
+      fi
+
+      for cert in $files; do
+          if ! openssl x509 -in "$cert" -noout -text >/dev/null 2>&1; then
+              continue
+          fi
+
+          expiry=$(openssl x509 -in "$cert" -noout -enddate | cut -d= -f2)
+          expiry_epoch=$(date -d "$expiry" +%s 2>/dev/null || date -j -f "%b %d %T %Y %Z" "$expiry" +%s 2>/dev/null)
+          now_epoch=$(date +%s)
+          days_left=$(( ($expiry_epoch - $now_epoch) / 86400 ))
+
+          if [ "$days_left" -lt 0 ]; then
+              echo "[CRITICAL] $cert - EXPIRED ${days_left#-} days ago"
+              ((WARNINGS++))
+          elif [ "$days_left" -lt "$WARNING_DAYS" ]; then
+              echo "[WARNING] $cert - expires in $days_left days"
+              ((WARNINGS++))
+          else
+              echo "[OK] $cert - expires in $days_left days"
+          fi
+      done
+  done
+
+  echo ""
+  if [ "$WARNINGS" -gt 0 ]; then
+      echo "Result: $WARNINGS certificate(s) require attention"
+      exit 1
+  else
+      echo "Result: All certificates OK"
+      exit 0
+  fi
+
+hash: placeholder

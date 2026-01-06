@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package network_activedirectory
 
 import (
@@ -7,9 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // TestADIntegrationSuite provides comprehensive integration testing for AD module
@@ -24,19 +27,22 @@ func TestADModuleIntegration(t *testing.T) {
 	// Setup test environment
 	logger := logging.NewNoopLogger()
 	module := New(logger).(*activeDirectoryModule)
-	ctx := context.Background()
+	// Use a short timeout context for tests to avoid long DNS waits
+	// when AD environment is not available
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
 	// Test configuration for basic domain
 	basicConfig := &ADModuleConfig{
-		Domain:        "test.local",
-		AuthMethod:    "simple",
-		Username:      "testuser",
-		Password:      "testpass",
-		OperationType: "read",
-		ObjectTypes:   []string{"user", "group", "organizational_unit"},
-		UseTLS:        false,
-		Port:          389,
-		PageSize:      100,
+		Domain:         "test.local",
+		AuthMethod:     "simple",
+		Username:       "testuser",
+		Password:       "testpass",
+		OperationType:  "read",
+		ObjectTypes:    []string{"user", "group", "organizational_unit"},
+		UseTLS:         false,
+		Port:           389,
+		PageSize:       100,
 		MaxConnections: 5,
 		RequestTimeout: 30 * time.Second,
 	}
@@ -53,10 +59,10 @@ func TestADModuleIntegration(t *testing.T) {
 		t.Run("Get Status", func(t *testing.T) {
 			result, err := module.Get(ctx, "status")
 			require.NoError(t, err)
-			
+
 			status, ok := result.(*ADConnectionStatus)
 			require.True(t, ok, "Result should be ADConnectionStatus")
-			
+
 			// Validate status structure
 			assert.NotEmpty(t, status.Domain)
 			assert.NotEmpty(t, status.AuthMethod)
@@ -99,18 +105,18 @@ func TestADModuleIntegration(t *testing.T) {
 	t.Run("Multi-Domain Support", func(t *testing.T) {
 		// Multi-domain configuration
 		multiDomainConfig := &ADModuleConfig{
-			Domain:           "primary.local",
-			AuthMethod:       "kerberos",
-			OperationType:    "read",
-			ObjectTypes:      []string{"user", "group", "computer", "gpo", "trust"},
-			UseTLS:           true,
-			Port:             636,
-			TrustedDomains:   []string{"trusted1.local", "trusted2.local"},
-			ForestRoot:       "forest.local", 
-			GlobalCatalogDC:  "gc.forest.local",
-			CrossDomainAuth:  true,
-			PageSize:         500,
-			RequestTimeout:   60 * time.Second,
+			Domain:          "primary.local",
+			AuthMethod:      "kerberos",
+			OperationType:   "read",
+			ObjectTypes:     []string{"user", "group", "computer", "gpo", "trust"},
+			UseTLS:          true,
+			Port:            636,
+			TrustedDomains:  []string{"trusted1.local", "trusted2.local"},
+			ForestRoot:      "forest.local",
+			GlobalCatalogDC: "gc.forest.local",
+			CrossDomainAuth: true,
+			PageSize:        500,
+			RequestTimeout:  60 * time.Second,
 		}
 
 		t.Run("Multi-Domain Configuration", func(t *testing.T) {
@@ -118,7 +124,7 @@ func TestADModuleIntegration(t *testing.T) {
 			if err != nil {
 				t.Logf("Note: Multi-domain requires real forest environment. Mock error: %v", err)
 			}
-			
+
 			// Validate configuration was set
 			assert.Equal(t, 2, len(multiDomainConfig.TrustedDomains))
 			assert.True(t, multiDomainConfig.CrossDomainAuth)
@@ -127,8 +133,8 @@ func TestADModuleIntegration(t *testing.T) {
 
 		t.Run("Cross-Domain Queries", func(t *testing.T) {
 			crossDomainTests := []struct {
-				name       string
-				resourceID string
+				name        string
+				resourceID  string
 				description string
 			}{
 				{"Cross-Domain User Query", "query:user:john.doe:trusted1.local", "Query user in trusted domain"},
@@ -261,7 +267,7 @@ func TestADModuleIntegration(t *testing.T) {
 			yamlData, err := config.ToYAML()
 			require.NoError(t, err)
 			assert.Contains(t, string(yamlData), "domain: test.local")
-			
+
 			// Test deserialization
 			newConfig := &ADModuleConfig{}
 			err = newConfig.FromYAML(yamlData)
@@ -299,7 +305,7 @@ func TestADModuleIntegration(t *testing.T) {
 			yamlData, err := result.ToYAML()
 			require.NoError(t, err)
 			assert.Contains(t, string(yamlData), "querytype: user")
-			
+
 			// Test deserialization
 			newResult := &ADQueryResult{}
 			err = newResult.FromYAML(yamlData)
@@ -321,20 +327,20 @@ func TestADModuleRealWorldScenarios(t *testing.T) {
 
 	// Enterprise multi-domain configuration
 	enterpriseConfig := &ADModuleConfig{
-		Domain:           "corp.contoso.com",
-		AuthMethod:       "kerberos",
-		OperationType:    "read",
-		ObjectTypes:      []string{"user", "group", "computer", "gpo", "trust"},
-		UseTLS:           true,
-		Port:             636,
-		SearchBase:       "DC=corp,DC=contoso,DC=com",
-		PageSize:         1000,
-		MaxConnections:   10,
-		RequestTimeout:   60 * time.Second,
-		TrustedDomains:   []string{"dev.contoso.com", "test.contoso.com", "external.partner.com"},
-		ForestRoot:       "contoso.com",
-		GlobalCatalogDC:  "gc1.contoso.com",
-		CrossDomainAuth:  true,
+		Domain:          "corp.contoso.com",
+		AuthMethod:      "kerberos",
+		OperationType:   "read",
+		ObjectTypes:     []string{"user", "group", "computer", "gpo", "trust"},
+		UseTLS:          true,
+		Port:            636,
+		SearchBase:      "DC=corp,DC=contoso,DC=com",
+		PageSize:        1000,
+		MaxConnections:  10,
+		RequestTimeout:  60 * time.Second,
+		TrustedDomains:  []string{"dev.contoso.com", "test.contoso.com", "external.partner.com"},
+		ForestRoot:      "contoso.com",
+		GlobalCatalogDC: "gc1.contoso.com",
+		CrossDomainAuth: true,
 	}
 
 	t.Run("Enterprise Configuration Setup", func(t *testing.T) {
@@ -350,33 +356,33 @@ func TestADModuleRealWorldScenarios(t *testing.T) {
 
 	t.Run("Cross-Domain User Lookup Scenarios", func(t *testing.T) {
 		scenarios := []struct {
-			name       string
-			userQuery  string
-			domain     string
+			name        string
+			userQuery   string
+			domain      string
 			description string
 		}{
 			{
-				name:      "Local Domain User",
-				userQuery: "query:user:john.doe",
-				domain:    "corp.contoso.com",
+				name:        "Local Domain User",
+				userQuery:   "query:user:john.doe",
+				domain:      "corp.contoso.com",
 				description: "Standard user lookup in primary domain",
 			},
 			{
-				name:      "Development Domain User", 
-				userQuery: "query:user:dev.admin:dev.contoso.com",
-				domain:    "dev.contoso.com",
+				name:        "Development Domain User",
+				userQuery:   "query:user:dev.admin:dev.contoso.com",
+				domain:      "dev.contoso.com",
 				description: "Cross-domain user lookup in development environment",
 			},
 			{
-				name:      "External Partner User",
-				userQuery: "query:user:partner.user:external.partner.com", 
-				domain:    "external.partner.com",
+				name:        "External Partner User",
+				userQuery:   "query:user:partner.user:external.partner.com",
+				domain:      "external.partner.com",
 				description: "External trust user lookup",
 			},
 			{
-				name:      "Forest-Wide User Search",
-				userQuery: "forest:user:jane.smith",
-				domain:    "contoso.com",
+				name:        "Forest-Wide User Search",
+				userQuery:   "forest:user:jane.smith",
+				domain:      "contoso.com",
 				description: "Forest-wide Global Catalog search",
 			},
 		}
@@ -385,14 +391,14 @@ func TestADModuleRealWorldScenarios(t *testing.T) {
 			t.Run(scenario.name, func(t *testing.T) {
 				result, err := module.Get(ctx, scenario.userQuery)
 				if err != nil {
-					t.Logf("Note: %s requires real forest with domain %s. Mock scenario validated.", 
+					t.Logf("Note: %s requires real forest with domain %s. Mock scenario validated.",
 						scenario.description, scenario.domain)
 					// Ensure error indicates proper AD-specific limitation, not generic error
 					errMsg := err.Error()
-					assert.True(t, 
-						strings.Contains(errMsg, "not connected") || 
-						strings.Contains(errMsg, "cross-domain authentication not enabled") ||
-						strings.Contains(errMsg, "global catalog DC not configured"),
+					assert.True(t,
+						strings.Contains(errMsg, "not connected") ||
+							strings.Contains(errMsg, "cross-domain authentication not enabled") ||
+							strings.Contains(errMsg, "global catalog DC not configured"),
 						"Should indicate connection or configuration needed for %s, got: %s", scenario.description, errMsg)
 				} else {
 					// If we somehow get a real result, validate its structure
@@ -408,7 +414,7 @@ func TestADModuleRealWorldScenarios(t *testing.T) {
 	t.Run("Trust Validation Scenarios", func(t *testing.T) {
 		trustScenarios := []string{
 			"validate_trust:dev.contoso.com",
-			"validate_trust:test.contoso.com", 
+			"validate_trust:test.contoso.com",
 			"validate_trust:external.partner.com",
 		}
 
@@ -419,9 +425,9 @@ func TestADModuleRealWorldScenarios(t *testing.T) {
 					t.Logf("Note: Trust validation for %s requires real forest environment", trustQuery)
 					// Ensure module recognizes trust validation requests with appropriate error
 					errMsg := err.Error()
-					assert.True(t, 
-						strings.Contains(errMsg, "not connected") || 
-						strings.Contains(errMsg, "unsupported operation"),
+					assert.True(t,
+						strings.Contains(errMsg, "not connected") ||
+							strings.Contains(errMsg, "unsupported operation"),
 						"Should indicate connection needed or operation limitation for trust validation, got: %s", errMsg)
 				}
 			})
@@ -435,7 +441,7 @@ func TestADModuleRealWorldScenarios(t *testing.T) {
 			objectType string
 		}{
 			{"Domain Computer", "query:computer:WORKSTATION-01", "computer"},
-			{"Member Server", "query:computer:SERVER-DB01", "computer"}, 
+			{"Member Server", "query:computer:SERVER-DB01", "computer"},
 			{"Default Domain Policy", "query:gpo:Default Domain Policy", "gpo"},
 			{"Custom GPO", "query:gpo:Workstation Security Policy", "gpo"},
 			{"External Trust", "query:trust:external.partner.com", "trust"},
@@ -460,7 +466,7 @@ func TestADModuleRealWorldScenarios(t *testing.T) {
 	t.Run("Bulk Operations", func(t *testing.T) {
 		bulkTests := []string{
 			"list:user",
-			"list:group", 
+			"list:group",
 			"list:computer",
 			"list:gpo",
 			"list:trust",
@@ -473,7 +479,7 @@ func TestADModuleRealWorldScenarios(t *testing.T) {
 					t.Logf("Note: Bulk %s requires real AD environment", bulkQuery)
 				} else {
 					queryResult, ok := result.(*ADQueryResult)
-					require.True(t, ok, "Result should be ADQueryResult") 
+					require.True(t, ok, "Result should be ADQueryResult")
 					assert.GreaterOrEqual(t, queryResult.TotalCount, 0)
 				}
 			})
@@ -490,7 +496,7 @@ func TestADModuleRealWorldScenarios(t *testing.T) {
 		t.Run("Pagination Support", func(t *testing.T) {
 			// Test that module handles large result sets with pagination
 			assert.Equal(t, 1000, enterpriseConfig.PageSize)
-			
+
 			// In real environment, this would test actual pagination
 			_, err := module.Get(ctx, "list:user")
 			if err != nil {
@@ -554,7 +560,7 @@ func TestADModuleRealWorldScenarios(t *testing.T) {
 
 			err := kerberosConfig.Validate()
 			require.NoError(t, err, "Kerberos config should be valid")
-			
+
 			// In real environment, test actual Kerberos authentication
 			err = module.Set(ctx, "config", kerberosConfig)
 			if err != nil {
@@ -592,11 +598,11 @@ func TestADModuleStressAndScale(t *testing.T) {
 	ctx := context.Background()
 
 	config := &ADModuleConfig{
-		Domain:        "loadtest.local",
-		AuthMethod:    "simple",
-		OperationType: "read",
-		ObjectTypes:   []string{"user", "group"},
-		PageSize:      1000,
+		Domain:         "loadtest.local",
+		AuthMethod:     "simple",
+		OperationType:  "read",
+		ObjectTypes:    []string{"user", "group"},
+		PageSize:       1000,
 		MaxConnections: 20,
 		RequestTimeout: 30 * time.Second,
 	}
@@ -645,7 +651,7 @@ func TestADModuleStressAndScale(t *testing.T) {
 		if err != nil {
 			t.Logf("Note: Large result set testing requires real AD with many objects")
 		}
-		
+
 		// Verify pagination configuration
 		assert.Equal(t, 1000, config.PageSize)
 		assert.Equal(t, 20, config.MaxConnections)
@@ -671,7 +677,7 @@ func TestADModuleFailureScenarios(t *testing.T) {
 			Domain:           "unreachable.test",
 			DomainController: "127.0.0.1:9999", // Localhost on definitely unused port - fast failure
 			AuthMethod:       "simple",
-			OperationType:    "read", 
+			OperationType:    "read",
 			ObjectTypes:      []string{"user"},
 			RequestTimeout:   2 * time.Second, // Shorter timeout for tests
 		}
@@ -695,10 +701,10 @@ func TestADModuleFailureScenarios(t *testing.T) {
 		err := module.Set(ctx, "config", invalidAuthConfig)
 		if err != nil {
 			// Check for either authentication or domain resolution failure
-			assert.True(t, 
-				strings.Contains(err.Error(), "authentication") || 
-				strings.Contains(err.Error(), "resolve domain") ||
-				strings.Contains(err.Error(), "no such host"), 
+			assert.True(t,
+				strings.Contains(err.Error(), "authentication") ||
+					strings.Contains(err.Error(), "resolve domain") ||
+					strings.Contains(err.Error(), "no such host"),
 				"Should indicate auth or domain resolution failure, got: %v", err)
 		}
 	})
@@ -728,7 +734,7 @@ func TestADModuleFailureScenarios(t *testing.T) {
 			AuthMethod:     "simple",
 			OperationType:  "read",
 			ObjectTypes:    []string{"user"},
-			MaxConnections: 1, // Very limited connections
+			MaxConnections: 1,               // Very limited connections
 			RequestTimeout: 1 * time.Second, // Very short timeout
 		}
 

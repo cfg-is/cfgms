@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // Package dna - Directory Drift Detection Implementation
 //
 // This file implements drift detection for directory objects, integrating with
@@ -24,57 +26,57 @@ import (
 // directory-specific drift detection capabilities and risk assessment.
 type DefaultDirectoryDriftDetector struct {
 	logger logging.Logger
-	
+
 	// Configuration
-	thresholds       *DriftThresholds
+	thresholds         *DriftThresholds
 	monitoringInterval time.Duration
-	
+
 	// State management
-	mutex            sync.RWMutex
-	isMonitoring     bool
-	handlers         map[string]DirectoryDriftHandler
-	
+	mutex        sync.RWMutex
+	isMonitoring bool
+	handlers     map[string]DirectoryDriftHandler
+
 	// Statistics
-	stats            *DriftDetectionStats
-	
+	stats *DriftDetectionStats
+
 	// Monitoring control
-	stopChan         chan struct{}
-	monitoringDone   chan struct{}
+	stopChan       chan struct{}
+	monitoringDone chan struct{}
 }
 
 // DriftDetectionStats provides statistics about drift detection.
 type DriftDetectionStats struct {
 	// Detection Statistics
-	TotalComparisons     int64     `json:"total_comparisons"`
-	DriftsDetected       int64     `json:"drifts_detected"`
-	CriticalDrifts       int64     `json:"critical_drifts"`
-	HighRiskDrifts       int64     `json:"high_risk_drifts"`
-	
+	TotalComparisons int64 `json:"total_comparisons"`
+	DriftsDetected   int64 `json:"drifts_detected"`
+	CriticalDrifts   int64 `json:"critical_drifts"`
+	HighRiskDrifts   int64 `json:"high_risk_drifts"`
+
 	// Performance Statistics
 	AverageComparisonTime time.Duration `json:"avg_comparison_time"`
 	LastDetectionTime     time.Time     `json:"last_detection_time"`
-	
+
 	// Monitoring Statistics
-	MonitoringUptime     time.Duration `json:"monitoring_uptime"`
-	LastMonitoringCycle  time.Time     `json:"last_monitoring_cycle"`
-	MonitoringCycles     int64         `json:"monitoring_cycles"`
-	
+	MonitoringUptime    time.Duration `json:"monitoring_uptime"`
+	LastMonitoringCycle time.Time     `json:"last_monitoring_cycle"`
+	MonitoringCycles    int64         `json:"monitoring_cycles"`
+
 	// Handler Statistics
-	HandlersTriggered    int64         `json:"handlers_triggered"`
-	HandlerErrors        int64         `json:"handler_errors"`
-	
+	HandlersTriggered int64 `json:"handlers_triggered"`
+	HandlerErrors     int64 `json:"handler_errors"`
+
 	// Health
-	HealthStatus         string        `json:"health_status"`
-	LastHealthCheck      time.Time     `json:"last_health_check"`
+	HealthStatus    string    `json:"health_status"`
+	LastHealthCheck time.Time `json:"last_health_check"`
 }
 
 // NewDirectoryDriftDetector creates a new directory drift detector.
 func NewDirectoryDriftDetector(logger logging.Logger) *DefaultDirectoryDriftDetector {
 	return &DefaultDirectoryDriftDetector{
 		logger:             logger,
-		thresholds:        getDefaultDriftThresholds(),
+		thresholds:         getDefaultDriftThresholds(),
 		monitoringInterval: 5 * time.Minute,
-		handlers:          make(map[string]DirectoryDriftHandler),
+		handlers:           make(map[string]DirectoryDriftHandler),
 		stats: &DriftDetectionStats{
 			HealthStatus:    "healthy",
 			LastHealthCheck: time.Now(),
@@ -85,23 +87,23 @@ func NewDirectoryDriftDetector(logger logging.Logger) *DefaultDirectoryDriftDete
 // getDefaultDriftThresholds returns default drift detection thresholds.
 func getDefaultDriftThresholds() *DriftThresholds {
 	return &DriftThresholds{
-		MaxAttributeChanges:     10,
-		AttributeChangeWindow:   1 * time.Hour,
-		MaxMembershipChanges:    5,
-		MembershipChangeWindow:  30 * time.Minute,
+		MaxAttributeChanges:    10,
+		AttributeChangeWindow:  1 * time.Hour,
+		MaxMembershipChanges:   5,
+		MembershipChangeWindow: 30 * time.Minute,
 		CriticalAttributes: []string{
 			"account_enabled",
 			"is_active",
 			"user_principal_name",
-			"sam_account_name", 
+			"sam_account_name",
 			"group_type",
 			"group_scope",
 			"distinguished_name",
 		},
-		LowRiskThreshold:        25.0,
-		MediumRiskThreshold:     50.0,
-		HighRiskThreshold:       75.0,
-		CriticalRiskThreshold:   90.0,
+		LowRiskThreshold:      25.0,
+		MediumRiskThreshold:   50.0,
+		HighRiskThreshold:     75.0,
+		CriticalRiskThreshold: 90.0,
 	}
 }
 
@@ -110,85 +112,85 @@ func getDefaultDriftThresholds() *DriftThresholds {
 // DetectDrift detects drift between current and baseline DirectoryDNA records.
 func (d *DefaultDirectoryDriftDetector) DetectDrift(ctx context.Context, current *DirectoryDNA, baseline *DirectoryDNA) (*DirectoryDrift, error) {
 	startTime := time.Now()
-	
+
 	// Validate inputs
 	if current == nil || baseline == nil {
 		return nil, fmt.Errorf("current and baseline DNA records cannot be nil")
 	}
-	
+
 	if current.ObjectID != baseline.ObjectID {
 		return nil, fmt.Errorf("object IDs do not match: %s vs %s", current.ObjectID, baseline.ObjectID)
 	}
-	
+
 	if current.ObjectType != baseline.ObjectType {
 		return nil, fmt.Errorf("object types do not match: %s vs %s", current.ObjectType, baseline.ObjectType)
 	}
-	
+
 	d.logger.Debug("Detecting drift for directory object",
 		"object_id", current.ObjectID,
 		"object_type", current.ObjectType)
-	
+
 	// Compare attributes to detect changes
 	changes := d.compareAttributes(current, baseline)
-	
+
 	// If no changes detected, return drift with empty changes for single detection
 	// but return nil for bulk detection (handled by caller)
 	if len(changes) == 0 {
 		d.updateStats(func(stats *DriftDetectionStats) {
 			stats.TotalComparisons++
 		})
-		
+
 		// Return drift object with no changes for consistency in single detection
 		drift := &DirectoryDrift{
-			DriftID:      d.generateDriftID(current.ObjectID),
-			ObjectID:     current.ObjectID,
-			ObjectType:   current.ObjectType,
-			DriftType:    DirectoryDriftTypeNoChange,
-			Severity:     DriftSeverityLow,
-			RiskScore:    0.0,
-			Changes:      []*DirectoryChange{},
-			DetectedAt:   time.Now(),
-			Description:  "No changes detected",
-			AutoRemediable: false,
+			DriftID:          d.generateDriftID(current.ObjectID),
+			ObjectID:         current.ObjectID,
+			ObjectType:       current.ObjectType,
+			DriftType:        DirectoryDriftTypeNoChange,
+			Severity:         DriftSeverityLow,
+			RiskScore:        0.0,
+			Changes:          []*DirectoryChange{},
+			DetectedAt:       time.Now(),
+			Description:      "No changes detected",
+			AutoRemediable:   false,
 			SuggestedActions: []string{},
 		}
-		
+
 		return drift, nil
 	}
-	
+
 	// Create drift record
 	drift := &DirectoryDrift{
-		DriftID:     d.generateDriftID(current.ObjectID),
-		ObjectID:    current.ObjectID,
-		ObjectType:  current.ObjectType,
-		Changes:     changes,
-		DetectedAt:  time.Now(),
-		Provider:    current.Provider,
-		TenantID:    current.TenantID,
+		DriftID:    d.generateDriftID(current.ObjectID),
+		ObjectID:   current.ObjectID,
+		ObjectType: current.ObjectType,
+		Changes:    changes,
+		DetectedAt: time.Now(),
+		Provider:   current.Provider,
+		TenantID:   current.TenantID,
 	}
-	
+
 	// Analyze drift characteristics
 	d.analyzeDrift(drift)
-	
+
 	// Assess risk
 	d.assessRisk(drift)
-	
+
 	// Generate suggested actions
 	d.generateSuggestedActions(drift)
-	
+
 	// Update statistics
 	d.updateStats(func(stats *DriftDetectionStats) {
 		stats.TotalComparisons++
 		stats.DriftsDetected++
 		stats.LastDetectionTime = time.Now()
-		
+
 		switch drift.Severity {
 		case DriftSeverityCritical:
 			stats.CriticalDrifts++
 		case DriftSeverityHigh:
 			stats.HighRiskDrifts++
 		}
-		
+
 		// Update average comparison time
 		comparisonTime := time.Since(startTime)
 		if stats.AverageComparisonTime == 0 {
@@ -197,14 +199,14 @@ func (d *DefaultDirectoryDriftDetector) DetectDrift(ctx context.Context, current
 			stats.AverageComparisonTime = (stats.AverageComparisonTime + comparisonTime) / 2
 		}
 	})
-	
+
 	d.logger.Info("Drift detected for directory object",
 		"object_id", current.ObjectID,
 		"drift_type", drift.DriftType,
 		"severity", drift.Severity,
 		"changes", len(drift.Changes),
 		"risk_score", drift.RiskScore)
-	
+
 	return drift, nil
 }
 
@@ -214,39 +216,39 @@ func (d *DefaultDirectoryDriftDetector) DetectBulkDrift(ctx context.Context, cur
 	d.logger.Info("Detecting bulk drift",
 		"current_count", len(currentSet),
 		"baseline_count", len(baselineSet))
-	
+
 	// Create lookup maps for efficient comparison
 	currentMap := make(map[string]*DirectoryDNA)
 	for _, dna := range currentSet {
 		currentMap[dna.ObjectID] = dna
 	}
-	
+
 	baselineMap := make(map[string]*DirectoryDNA)
 	for _, dna := range baselineSet {
 		baselineMap[dna.ObjectID] = dna
 	}
-	
+
 	var allDrifts []*DirectoryDrift
 	var errors []error
-	
+
 	// Control concurrency for bulk operations
 	semaphore := make(chan struct{}, 10) // Limit to 10 concurrent comparisons
 	var wg sync.WaitGroup
 	var mutex sync.Mutex
-	
+
 	// Compare objects that exist in both sets
 	for objectID, current := range currentMap {
 		if baseline, exists := baselineMap[objectID]; exists {
 			wg.Add(1)
 			go func(cur, base *DirectoryDNA) {
 				defer wg.Done()
-				
+
 				// Acquire semaphore
 				semaphore <- struct{}{}
 				defer func() { <-semaphore }()
-				
+
 				drift, err := d.DetectDrift(ctx, cur, base)
-				
+
 				mutex.Lock()
 				if err != nil {
 					errors = append(errors, fmt.Errorf("drift detection failed for %s: %w", cur.ObjectID, err))
@@ -258,60 +260,60 @@ func (d *DefaultDirectoryDriftDetector) DetectBulkDrift(ctx context.Context, cur
 			}(current, baseline)
 		}
 	}
-	
+
 	// Detect new objects (objects in current but not in baseline)
 	for objectID, current := range currentMap {
 		if _, exists := baselineMap[objectID]; !exists {
 			drift := &DirectoryDrift{
-				DriftID:    d.generateDriftID(objectID),
-				ObjectID:   objectID,
-				ObjectType: current.ObjectType,
-				DriftType:  DirectoryDriftTypeObjectCreation,
-				Severity:   DriftSeverityMedium,
+				DriftID:     d.generateDriftID(objectID),
+				ObjectID:    objectID,
+				ObjectType:  current.ObjectType,
+				DriftType:   DirectoryDriftTypeObjectCreation,
+				Severity:    DriftSeverityMedium,
 				Description: fmt.Sprintf("New %s object created", current.ObjectType),
-				DetectedAt: time.Now(),
-				Provider:   current.Provider,
-				TenantID:   current.TenantID,
-				RiskScore:  d.calculateCreationRiskScore(current),
+				DetectedAt:  time.Now(),
+				Provider:    current.Provider,
+				TenantID:    current.TenantID,
+				RiskScore:   d.calculateCreationRiskScore(current),
 			}
-			
+
 			// Assess if this is an authorized creation or potential security issue
 			d.assessCreationRisk(drift, current)
 			d.generateSuggestedActions(drift)
-			
+
 			allDrifts = append(allDrifts, drift)
 		}
 	}
-	
+
 	// Detect deleted objects (objects in baseline but not in current)
 	for objectID, baseline := range baselineMap {
 		if _, exists := currentMap[objectID]; !exists {
 			drift := &DirectoryDrift{
-				DriftID:    d.generateDriftID(objectID),
-				ObjectID:   objectID,
-				ObjectType: baseline.ObjectType,
-				DriftType:  DirectoryDriftTypeObjectDeletion,
-				Severity:   DriftSeverityHigh, // Deletions are generally higher risk
+				DriftID:     d.generateDriftID(objectID),
+				ObjectID:    objectID,
+				ObjectType:  baseline.ObjectType,
+				DriftType:   DirectoryDriftTypeObjectDeletion,
+				Severity:    DriftSeverityHigh, // Deletions are generally higher risk
 				Description: fmt.Sprintf("%s object deleted", baseline.ObjectType),
-				DetectedAt: time.Now(),
-				Provider:   baseline.Provider,
-				TenantID:   baseline.TenantID,
-				RiskScore:  d.calculateDeletionRiskScore(baseline),
+				DetectedAt:  time.Now(),
+				Provider:    baseline.Provider,
+				TenantID:    baseline.TenantID,
+				RiskScore:   d.calculateDeletionRiskScore(baseline),
 			}
-			
+
 			// Assess if this is an authorized deletion or potential security issue
 			d.assessDeletionRisk(drift, baseline)
 			d.generateSuggestedActions(drift)
-			
+
 			allDrifts = append(allDrifts, drift)
 		}
 	}
-	
+
 	// Wait for all comparisons to complete
 	wg.Wait()
-	
+
 	duration := time.Since(startTime)
-	
+
 	// Log results
 	if len(errors) > 0 {
 		d.logger.Warn("Bulk drift detection completed with errors",
@@ -325,7 +327,7 @@ func (d *DefaultDirectoryDriftDetector) DetectBulkDrift(ctx context.Context, cur
 			"drifts_detected", len(allDrifts),
 			"duration", duration)
 	}
-	
+
 	return allDrifts, nil
 }
 
@@ -334,7 +336,7 @@ func (d *DefaultDirectoryDriftDetector) DetectBulkDrift(ctx context.Context, cur
 // compareAttributes compares attributes between current and baseline DNA records.
 func (d *DefaultDirectoryDriftDetector) compareAttributes(current, baseline *DirectoryDNA) []*DirectoryChange {
 	var changes []*DirectoryChange
-	
+
 	// Track all attributes from both records
 	allAttributes := make(map[string]bool)
 	for attr := range current.Attributes {
@@ -343,15 +345,15 @@ func (d *DefaultDirectoryDriftDetector) compareAttributes(current, baseline *Dir
 	for attr := range baseline.Attributes {
 		allAttributes[attr] = true
 	}
-	
+
 	// Compare each attribute
 	for attr := range allAttributes {
 		currentValue := current.Attributes[attr]
 		baselineValue := baseline.Attributes[attr]
-		
+
 		if currentValue != baselineValue {
 			changeType := d.determineChangeType(attr, currentValue, baselineValue)
-			
+
 			change := &DirectoryChange{
 				ChangeID:     d.generateChangeID(current.ObjectID, attr),
 				ChangeType:   changeType,
@@ -361,11 +363,11 @@ func (d *DefaultDirectoryDriftDetector) compareAttributes(current, baseline *Dir
 				ChangedAt:    time.Now(),
 				ChangeSource: "drift_detection",
 			}
-			
+
 			changes = append(changes, change)
 		}
 	}
-	
+
 	return changes
 }
 
@@ -392,7 +394,7 @@ func (d *DefaultDirectoryDriftDetector) analyzeDrift(drift *DirectoryDrift) {
 	criticalChanges := 0
 	securityRelevant := 0
 	membershipChanges := 0
-	
+
 	for _, change := range drift.Changes {
 		// Check if change is in critical attributes
 		for _, criticalAttr := range d.thresholds.CriticalAttributes {
@@ -401,18 +403,18 @@ func (d *DefaultDirectoryDriftDetector) analyzeDrift(drift *DirectoryDrift) {
 				break
 			}
 		}
-		
+
 		// Check if change is security relevant
 		if d.isSecurityRelevantChange(change) {
 			securityRelevant++
 		}
-		
+
 		// Check if change is membership related
 		if d.isMembershipChange(change) {
 			membershipChanges++
 		}
 	}
-	
+
 	// Determine primary drift type based on change characteristics
 	if d.hasPermissionEscalationIndicators(drift.Changes) {
 		drift.DriftType = DirectoryDriftTypePermissionEscalation
@@ -423,7 +425,7 @@ func (d *DefaultDirectoryDriftDetector) analyzeDrift(drift *DirectoryDrift) {
 	} else {
 		drift.DriftType = DirectoryDriftTypeAttributeChange
 	}
-	
+
 	// Determine severity based on thresholds and change characteristics
 	riskFactors := 0
 	if criticalChanges > 0 {
@@ -438,7 +440,7 @@ func (d *DefaultDirectoryDriftDetector) analyzeDrift(drift *DirectoryDrift) {
 	if len(drift.Changes) > d.thresholds.MaxAttributeChanges {
 		riskFactors += 1
 	}
-	
+
 	// Boost severity for specific high-risk drift types
 	if drift.DriftType == DirectoryDriftTypePermissionEscalation {
 		riskFactors += 2 // Ensure permission escalation gets high/critical severity
@@ -446,7 +448,7 @@ func (d *DefaultDirectoryDriftDetector) analyzeDrift(drift *DirectoryDrift) {
 	if drift.DriftType == DirectoryDriftTypeUnauthorizedChange {
 		riskFactors += 3 // Ensure unauthorized changes get critical severity
 	}
-	
+
 	// Map risk factors to severity
 	switch {
 	case riskFactors >= 5:
@@ -458,16 +460,16 @@ func (d *DefaultDirectoryDriftDetector) analyzeDrift(drift *DirectoryDrift) {
 	default:
 		drift.Severity = DriftSeverityLow
 	}
-	
+
 	// Create summary
 	drift.Summary = &DriftSummary{
 		TotalChanges:       len(drift.Changes),
 		CriticalChanges:    criticalChanges,
 		SecurityRelevant:   securityRelevant,
 		AffectedAttributes: d.extractAffectedAttributes(drift.Changes),
-		TimeSpan:          d.calculateTimeSpan(drift.Changes),
+		TimeSpan:           d.calculateTimeSpan(drift.Changes),
 	}
-	
+
 	// Set description based on analysis
 	drift.Description = d.generateDriftDescription(drift)
 }
@@ -490,13 +492,13 @@ func (d *DefaultDirectoryDriftDetector) isSecurityRelevantChange(change *Directo
 		"last_login",
 		"failed_logins",
 	}
-	
+
 	for _, field := range securityFields {
 		if strings.Contains(change.Field, field) {
 			return true
 		}
 	}
-	
+
 	return false
 }
 
@@ -530,11 +532,11 @@ func (d *DefaultDirectoryDriftDetector) hasUnauthorizedChangeIndicators(changes 
 		// Multiple suspicious changes together indicate unauthorized activity
 		newVal, newOk := change.NewValue.(string)
 		oldVal, oldOk := change.OldValue.(string)
-		
+
 		if newOk && oldOk {
 			if ((change.Field == "email" || change.Field == "email_address") && newVal != oldVal) ||
-			   (change.Field == "last_login" && newVal == "unknown_location") ||
-			   (change.Field == "failed_logins" && newVal != "0" && oldVal == "0") {
+				(change.Field == "last_login" && newVal == "unknown_location") ||
+				(change.Field == "failed_logins" && newVal != "0" && oldVal == "0") {
 				suspiciousChangeCount++
 			}
 		}
@@ -551,13 +553,13 @@ func (d *DefaultDirectoryDriftDetector) isMembershipChange(change *DirectoryChan
 		"members",
 		"member_of",
 	}
-	
+
 	for _, field := range membershipFields {
 		if strings.Contains(change.Field, field) {
 			return true
 		}
 	}
-	
+
 	return false
 }
 
@@ -566,25 +568,25 @@ func (d *DefaultDirectoryDriftDetector) isMembershipChange(change *DirectoryChan
 // assessRisk calculates the risk score for the detected drift.
 func (d *DefaultDirectoryDriftDetector) assessRisk(drift *DirectoryDrift) {
 	baseRisk := 0.0
-	
+
 	// Base risk from number of changes
 	changeRisk := float64(len(drift.Changes)) * 5.0
-	
+
 	// Risk from critical attributes
 	criticalRisk := float64(drift.Summary.CriticalChanges) * 20.0
-	
+
 	// Risk from security relevant changes
 	securityRisk := float64(drift.Summary.SecurityRelevant) * 15.0
-	
+
 	// Risk from object type
 	objectTypeRisk := d.calculateObjectTypeRisk(drift.ObjectType)
-	
+
 	// Risk from drift type
 	driftTypeRisk := d.calculateDriftTypeRisk(drift.DriftType)
-	
+
 	// Combine risks
 	baseRisk = changeRisk + criticalRisk + securityRisk + objectTypeRisk + driftTypeRisk
-	
+
 	// Apply multipliers based on severity
 	switch drift.Severity {
 	case DriftSeverityCritical:
@@ -594,14 +596,14 @@ func (d *DefaultDirectoryDriftDetector) assessRisk(drift *DirectoryDrift) {
 	case DriftSeverityMedium:
 		baseRisk *= 1.2
 	}
-	
+
 	// Cap at 100
 	if baseRisk > 100 {
 		baseRisk = 100
 	}
-	
+
 	drift.RiskScore = baseRisk
-	
+
 	// Assess impact
 	drift.Impact = DirectoryDriftImpact{
 		SecurityImpact:    d.assessSecurityImpact(drift),
@@ -609,7 +611,7 @@ func (d *DefaultDirectoryDriftDetector) assessRisk(drift *DirectoryDrift) {
 		ComplianceImpact:  d.assessComplianceImpact(drift),
 		UserImpact:        d.assessUserImpact(drift),
 	}
-	
+
 	// Determine if auto-remediable
 	drift.AutoRemediable = d.isAutoRemediable(drift)
 }
@@ -724,14 +726,14 @@ func (d *DefaultDirectoryDriftDetector) generateChangeID(objectID, field string)
 func (d *DefaultDirectoryDriftDetector) extractAffectedAttributes(changes []*DirectoryChange) []string {
 	var attributes []string
 	seen := make(map[string]bool)
-	
+
 	for _, change := range changes {
 		if !seen[change.Field] {
 			attributes = append(attributes, change.Field)
 			seen[change.Field] = true
 		}
 	}
-	
+
 	return attributes
 }
 
@@ -740,10 +742,10 @@ func (d *DefaultDirectoryDriftDetector) calculateTimeSpan(changes []*DirectoryCh
 	if len(changes) == 0 {
 		return 0
 	}
-	
+
 	earliest := changes[0].ChangedAt
 	latest := changes[0].ChangedAt
-	
+
 	for _, change := range changes {
 		if change.ChangedAt.Before(earliest) {
 			earliest = change.ChangedAt
@@ -752,20 +754,20 @@ func (d *DefaultDirectoryDriftDetector) calculateTimeSpan(changes []*DirectoryCh
 			latest = change.ChangedAt
 		}
 	}
-	
+
 	return latest.Sub(earliest)
 }
 
 // generateDriftDescription generates a human-readable description of the drift.
 func (d *DefaultDirectoryDriftDetector) generateDriftDescription(drift *DirectoryDrift) string {
 	objectTypeName := string(drift.ObjectType)
-	
+
 	switch drift.DriftType {
 	case DirectoryDriftTypeUnauthorizedChange:
-		return fmt.Sprintf("Unauthorized changes detected in %s: %d attributes modified", 
+		return fmt.Sprintf("Unauthorized changes detected in %s: %d attributes modified",
 			objectTypeName, len(drift.Changes))
 	case DirectoryDriftTypePermissionEscalation:
-		return fmt.Sprintf("Potential permission escalation in %s: security-relevant changes detected", 
+		return fmt.Sprintf("Potential permission escalation in %s: security-relevant changes detected",
 			objectTypeName)
 	case DirectoryDriftTypeMembershipChange:
 		return fmt.Sprintf("Group membership changes detected for %s", objectTypeName)
@@ -774,7 +776,7 @@ func (d *DefaultDirectoryDriftDetector) generateDriftDescription(drift *Director
 	case DirectoryDriftTypeObjectDeletion:
 		return fmt.Sprintf("%s object deleted", capitalize(objectTypeName))
 	default:
-		return fmt.Sprintf("Changes detected in %s: %d attributes modified", 
+		return fmt.Sprintf("Changes detected in %s: %d attributes modified",
 			objectTypeName, len(drift.Changes))
 	}
 }
@@ -782,7 +784,7 @@ func (d *DefaultDirectoryDriftDetector) generateDriftDescription(drift *Director
 // calculateCreationRiskScore calculates risk score for object creation.
 func (d *DefaultDirectoryDriftDetector) calculateCreationRiskScore(dna *DirectoryDNA) float64 {
 	baseRisk := 30.0 // Base risk for new objects
-	
+
 	// Higher risk for privileged objects
 	if dna.ObjectType == interfaces.DirectoryObjectTypeGroup {
 		baseRisk += 15.0
@@ -790,7 +792,7 @@ func (d *DefaultDirectoryDriftDetector) calculateCreationRiskScore(dna *Director
 	if dna.ObjectType == interfaces.DirectoryObjectTypeOU {
 		baseRisk += 20.0
 	}
-	
+
 	// Check for high-privilege indicators
 	if strings.Contains(strings.ToLower(dna.Attributes["name"]), "admin") {
 		baseRisk += 25.0
@@ -798,14 +800,14 @@ func (d *DefaultDirectoryDriftDetector) calculateCreationRiskScore(dna *Director
 	if strings.Contains(strings.ToLower(dna.Attributes["display_name"]), "admin") {
 		baseRisk += 25.0
 	}
-	
+
 	return math.Min(baseRisk, 100.0)
 }
 
 // calculateDeletionRiskScore calculates risk score for object deletion.
 func (d *DefaultDirectoryDriftDetector) calculateDeletionRiskScore(dna *DirectoryDNA) float64 {
 	baseRisk := 50.0 // Base risk for deletions (higher than creations)
-	
+
 	// Higher risk for privileged objects
 	if dna.ObjectType == interfaces.DirectoryObjectTypeGroup {
 		baseRisk += 20.0
@@ -813,12 +815,12 @@ func (d *DefaultDirectoryDriftDetector) calculateDeletionRiskScore(dna *Director
 	if dna.ObjectType == interfaces.DirectoryObjectTypeOU {
 		baseRisk += 25.0
 	}
-	
+
 	// Check for high-privilege indicators
 	if strings.Contains(strings.ToLower(dna.Attributes["name"]), "admin") {
 		baseRisk += 30.0
 	}
-	
+
 	return math.Min(baseRisk, 100.0)
 }
 
@@ -844,7 +846,7 @@ func (d *DefaultDirectoryDriftDetector) assessDeletionRisk(drift *DirectoryDrift
 // generateSuggestedActions generates suggested remediation actions.
 func (d *DefaultDirectoryDriftDetector) generateSuggestedActions(drift *DirectoryDrift) {
 	var actions []string
-	
+
 	switch drift.DriftType {
 	case DirectoryDriftTypeUnauthorizedChange:
 		actions = append(actions, "Review change authorization")
@@ -852,29 +854,29 @@ func (d *DefaultDirectoryDriftDetector) generateSuggestedActions(drift *Director
 		if drift.AutoRemediable {
 			actions = append(actions, "Consider automatic reversion")
 		}
-		
+
 	case DirectoryDriftTypePermissionEscalation:
 		actions = append(actions, "Immediate security review required")
 		actions = append(actions, "Audit user/group permissions")
 		actions = append(actions, "Review access logs")
-		
+
 	case DirectoryDriftTypeMembershipChange:
 		actions = append(actions, "Review group membership changes")
 		actions = append(actions, "Validate business justification")
-		
+
 	case DirectoryDriftTypeObjectCreation:
 		actions = append(actions, "Verify object creation was authorized")
 		actions = append(actions, "Review object configuration")
-		
+
 	case DirectoryDriftTypeObjectDeletion:
 		actions = append(actions, "Verify deletion was authorized")
 		actions = append(actions, "Check if restoration is needed")
-		
+
 	default:
 		actions = append(actions, "Review detected changes")
 		actions = append(actions, "Validate change approval")
 	}
-	
+
 	// Add severity-specific actions
 	switch drift.Severity {
 	case DriftSeverityCritical:
@@ -882,7 +884,7 @@ func (d *DefaultDirectoryDriftDetector) generateSuggestedActions(drift *Director
 	case DriftSeverityHigh:
 		actions = append([]string{"High priority: Review within 1 hour"}, actions...)
 	}
-	
+
 	drift.SuggestedActions = actions
 }
 
@@ -897,7 +899,7 @@ func (d *DefaultDirectoryDriftDetector) updateStats(updater func(*DriftDetection
 func (d *DefaultDirectoryDriftDetector) GetDriftDetectionStats() *DriftDetectionStats {
 	d.mutex.RLock()
 	defer d.mutex.RUnlock()
-	
+
 	// Return a copy to prevent race conditions
 	statsCopy := *d.stats
 	return &statsCopy
@@ -928,21 +930,21 @@ func (d *DefaultDirectoryDriftDetector) GetDriftThresholds() *DriftThresholds {
 func (d *DefaultDirectoryDriftDetector) StartMonitoring(ctx context.Context) error {
 	d.mutex.Lock()
 	defer d.mutex.Unlock()
-	
+
 	if d.isMonitoring {
 		return fmt.Errorf("drift detector already monitoring")
 	}
-	
+
 	d.isMonitoring = true
 	d.stopChan = make(chan struct{})
 	d.monitoringDone = make(chan struct{})
-	
+
 	// Start monitoring goroutine (simplified for this implementation)
 	go func() {
 		defer close(d.monitoringDone)
 		ticker := time.NewTicker(d.monitoringInterval)
 		defer ticker.Stop()
-		
+
 		for {
 			select {
 			case <-ctx.Done():
@@ -954,7 +956,7 @@ func (d *DefaultDirectoryDriftDetector) StartMonitoring(ctx context.Context) err
 			}
 		}
 	}()
-	
+
 	return nil
 }
 
@@ -962,15 +964,15 @@ func (d *DefaultDirectoryDriftDetector) StartMonitoring(ctx context.Context) err
 func (d *DefaultDirectoryDriftDetector) StopMonitoring() error {
 	d.mutex.Lock()
 	defer d.mutex.Unlock()
-	
+
 	if !d.isMonitoring {
 		return fmt.Errorf("drift detector not running")
 	}
-	
+
 	close(d.stopChan)
 	<-d.monitoringDone
 	d.isMonitoring = false
-	
+
 	return nil
 }
 
@@ -979,7 +981,7 @@ func (d *DefaultDirectoryDriftDetector) SetMonitoringInterval(interval time.Dura
 	if interval <= 0 {
 		return fmt.Errorf("interval must be positive")
 	}
-	
+
 	d.mutex.Lock()
 	defer d.mutex.Unlock()
 	d.monitoringInterval = interval
@@ -991,7 +993,7 @@ func (d *DefaultDirectoryDriftDetector) SetDriftThresholds(thresholds *DriftThre
 	if thresholds == nil {
 		return fmt.Errorf("thresholds cannot be nil")
 	}
-	
+
 	d.mutex.Lock()
 	defer d.mutex.Unlock()
 	d.thresholds = thresholds
@@ -1003,15 +1005,15 @@ func (d *DefaultDirectoryDriftDetector) RegisterDriftHandler(handler DirectoryDr
 	if handler == nil {
 		return fmt.Errorf("handler cannot be nil")
 	}
-	
+
 	id := handler.GetHandlerID()
 	d.mutex.Lock()
 	defer d.mutex.Unlock()
-	
+
 	if _, exists := d.handlers[id]; exists {
 		return fmt.Errorf("handler %s already registered", id)
 	}
-	
+
 	d.handlers[id] = handler
 	return nil
 }
@@ -1020,11 +1022,11 @@ func (d *DefaultDirectoryDriftDetector) RegisterDriftHandler(handler DirectoryDr
 func (d *DefaultDirectoryDriftDetector) UnregisterDriftHandler(handlerID string) error {
 	d.mutex.Lock()
 	defer d.mutex.Unlock()
-	
+
 	if _, exists := d.handlers[handlerID]; !exists {
 		return fmt.Errorf("handler %s not found", handlerID)
 	}
-	
+
 	delete(d.handlers, handlerID)
 	return nil
 }

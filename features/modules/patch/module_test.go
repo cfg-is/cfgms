@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package patch
 
 import (
@@ -5,10 +7,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/features/modules"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
+
+	"github.com/cfgis/cfgms/features/modules"
 )
 
 // Helper function to create Config from YAML string
@@ -537,7 +540,10 @@ func TestMockPatchManager(t *testing.T) {
 	// Test GetLastPatchDate
 	lastPatch, err := mock.GetLastPatchDate(context.Background())
 	assert.NoError(t, err)
-	assert.True(t, lastPatch.Before(time.Now()))
+	// On Windows, timer resolution may cause lastPatch to equal time.Now()
+	// Accept either before or equal to current time
+	assert.True(t, lastPatch.Before(time.Now()) || lastPatch.Equal(time.Now()),
+		"Last patch date should be before or equal to current time")
 
 	// Test Name
 	name := mock.Name()

@@ -1,11 +1,14 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package api
 
 import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/gorilla/mux"
+
+	"github.com/cfgis/cfgms/features/controller/service"
 )
 
 // handleListCertificates handles GET /api/v1/certificates
@@ -36,7 +39,7 @@ func (s *Server) handleListCertificates(w http.ResponseWriter, r *http.Request) 
 				StewardID:           stewardID,
 				IsValid:             certInfo.IsValid,
 				ExpiresAt:           certInfo.ExpiresAt,
-			DaysUntilExpiration: safeInt32(certInfo.DaysUntilExpiration), // Safe conversion with bounds validation
+				DaysUntilExpiration: safeInt32(certInfo.DaysUntilExpiration), // Safe conversion with bounds validation
 				NeedsRenewal:        certInfo.NeedsRenewal,
 			})
 		}

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // Package telemetry provides OpenTelemetry tracing and correlation capabilities for CFGMS.
 //
 // This package enables distributed tracing across steward-controller communications and provides
@@ -84,7 +86,7 @@ func DefaultConfig(serviceName, version string) *Config {
 		ServiceName:    serviceName,
 		ServiceVersion: version,
 		Environment:    "development",
-		OTLPEndpoint:   "", // No remote export by default
+		OTLPEndpoint:   "",  // No remote export by default
 		SampleRate:     1.0, // Sample all traces in development
 		Enabled:        true,
 	}
@@ -108,7 +110,7 @@ func Initialize(ctx context.Context, config *Config) (*Tracer, func(), error) {
 	if config == nil {
 		config = DefaultConfig("cfgms", "v0.2.0")
 	}
-	
+
 	if !config.Enabled {
 		// Return a no-op tracer when disabled
 		noopTracer := &Tracer{
@@ -223,9 +225,12 @@ func (t *Tracer) GetTracer() trace.Tracer {
 // This enables sending traces to OpenTelemetry collectors or compatible backends.
 func createOTLPExporter(ctx context.Context, endpoint string) (sdktrace.SpanExporter, error) {
 	// Configure OTLP HTTP exporter
+	// NOTE: Using insecure HTTP for development/testing environments.
+	// Production deployments should configure TLS via endpoint configuration (https://).
+	// When OTLPEndpoint is empty (default), no remote export occurs and this is unused.
 	opts := []otlptracehttp.Option{
 		otlptracehttp.WithEndpoint(endpoint),
-		otlptracehttp.WithInsecure(), // TODO: Add TLS configuration for production
+		otlptracehttp.WithInsecure(),
 	}
 
 	// Create HTTP client

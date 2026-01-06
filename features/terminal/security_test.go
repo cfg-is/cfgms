@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package terminal
 
 import (
@@ -6,11 +8,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/api/proto/common"
-	"github.com/cfgis/cfgms/features/rbac/memory"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/features/rbac/memory"
 )
 
 // MockRBACManager is a mock implementation of rbac.RBACManager
@@ -289,45 +292,45 @@ func TestSecurityValidator_ValidateSessionAccess(t *testing.T) {
 
 func TestSecurityValidator_ValidateCommand(t *testing.T) {
 	tests := []struct {
-		name            string
-		command         string
-		expectedAllowed bool
-		expectedAction  FilterAction
+		name             string
+		command          string
+		expectedAllowed  bool
+		expectedAction   FilterAction
 		expectedSeverity FilterSeverity
 	}{
 		{
-			name:            "Safe command - ls",
-			command:         "ls -la",
-			expectedAllowed: true,
-			expectedAction:  FilterActionAllow,
+			name:             "Safe command - ls",
+			command:          "ls -la",
+			expectedAllowed:  true,
+			expectedAction:   FilterActionAllow,
 			expectedSeverity: "",
 		},
 		{
-			name:            "Dangerous command - rm -rf",
-			command:         "rm -rf /",
-			expectedAllowed: false,
-			expectedAction:  FilterActionBlock,
+			name:             "Dangerous command - rm -rf",
+			command:          "rm -rf /",
+			expectedAllowed:  false,
+			expectedAction:   FilterActionBlock,
 			expectedSeverity: FilterSeverityCritical,
 		},
 		{
-			name:            "Audit command - sudo",
-			command:         "sudo systemctl restart nginx",
-			expectedAllowed: true,
-			expectedAction:  FilterActionAudit,
+			name:             "Audit command - sudo",
+			command:          "sudo systemctl restart nginx",
+			expectedAllowed:  true,
+			expectedAction:   FilterActionAudit,
 			expectedSeverity: FilterSeverityHigh,
 		},
 		{
-			name:            "Network scanning command",
-			command:         "nmap -sS 192.168.1.0/24",
-			expectedAllowed: false,
-			expectedAction:  FilterActionBlock,
+			name:             "Network scanning command",
+			command:          "nmap -sS 192.168.1.0/24",
+			expectedAllowed:  false,
+			expectedAction:   FilterActionBlock,
 			expectedSeverity: FilterSeverityHigh,
 		},
 		{
-			name:            "System configuration edit",
-			command:         "vi /etc/passwd",
-			expectedAllowed: true,
-			expectedAction:  FilterActionAudit,
+			name:             "System configuration edit",
+			command:          "vi /etc/passwd",
+			expectedAllowed:  true,
+			expectedAction:   FilterActionAudit,
 			expectedSeverity: FilterSeverityHigh,
 		},
 	}
@@ -499,12 +502,29 @@ func TestSessionMonitor_ThreatLevelCalculation(t *testing.T) {
 	})
 
 	t.Run("Critical threat level - blocked commands", func(t *testing.T) {
-		// Simulate blocked commands
-		monitor.sessions[session.ID].mutex.Lock()
-		monitor.sessions[session.ID].BlockedCommands = 5
-		monitor.sessions[session.ID].mutex.Unlock()
+		// Safely update blocked commands count through the monitor's mutex
+		monitor.sessionsMutex.Lock()
+		monitoredSession, exists := monitor.sessions[session.ID]
+		if !exists {
+			monitor.sessionsMutex.Unlock()
+			t.Fatal("session not found in monitor")
+		}
 
-		monitor.updateThreatLevel(monitor.sessions[session.ID])
+		// Lock the session and update blocked commands
+		monitoredSession.mutex.Lock()
+		monitoredSession.BlockedCommands = 5
+		monitoredSession.mutex.Unlock()
+		monitor.sessionsMutex.Unlock()
+
+		// Update threat level (this will read the BlockedCommands value)
+		monitor.sessionsMutex.RLock()
+		monitoredSession, exists = monitor.sessions[session.ID]
+		monitor.sessionsMutex.RUnlock()
+		if !exists {
+			t.Fatal("session not found after blocked commands update")
+		}
+
+		monitor.updateThreatLevel(monitoredSession)
 
 		sessionInfo, err := monitor.GetSessionInfo(session.ID)
 		require.NoError(t, err)
@@ -534,7 +554,7 @@ func TestAuditLogger_IntegrityProtection(t *testing.T) {
 
 	// Test logging and integrity verification
 	t.Run("Log entry with integrity protection", func(t *testing.T) {
-		err := logger.LogCommandExecution(ctx, "session1", "user1", "steward1", "tenant1", 
+		err := logger.LogCommandExecution(ctx, "session1", "user1", "steward1", "tenant1",
 			"ls -la", 0, time.Second, "file1\nfile2\n")
 		assert.NoError(t, err)
 
@@ -560,7 +580,7 @@ func TestAuditLogger_IntegrityProtection(t *testing.T) {
 func TestCommandInterceptor_InputFiltering(t *testing.T) {
 	mockRBAC := &MockRBACManager{}
 	validator := NewSecurityValidator(mockRBAC)
-	
+
 	securityContext := &SessionSecurityContext{
 		SessionID:   "test-session",
 		UserID:      "test-user",
@@ -663,21 +683,21 @@ func TestSecurityLevels(t *testing.T) {
 	validator := NewSecurityValidator(mockRBAC)
 
 	tests := []struct {
-		name            string
-		permissions     []string
-		filterRules     []CommandFilterRule
-		expectedLevel   SecurityLevel
+		name          string
+		permissions   []string
+		filterRules   []CommandFilterRule
+		expectedLevel SecurityLevel
 	}{
 		{
-			name:        "Admin permissions - maximum security",
-			permissions: []string{"terminal.admin", "system.admin"},
-			filterRules: []CommandFilterRule{},
+			name:          "Admin permissions - maximum security",
+			permissions:   []string{"terminal.admin", "system.admin"},
+			filterRules:   []CommandFilterRule{},
 			expectedLevel: SecurityLevelMaximum,
 		},
 		{
-			name:        "Regular user - enhanced security",
-			permissions: []string{"terminal.session.create", "terminal.session.read"},
-			filterRules: []CommandFilterRule{},
+			name:          "Regular user - enhanced security",
+			permissions:   []string{"terminal.session.create", "terminal.session.read"},
+			filterRules:   []CommandFilterRule{},
 			expectedLevel: SecurityLevelEnhanced,
 		},
 		{

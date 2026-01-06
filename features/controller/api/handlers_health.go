@@ -1,7 +1,11 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package api
 
 import (
 	"net/http"
+
+	"github.com/cfgis/cfgms/pkg/version"
 )
 
 // handleHealth handles GET /api/v1/health
@@ -9,7 +13,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	// Create health status
 	health := HealthStatus{
 		Status:    "healthy",
-		Version:   "0.2.0", // TODO: Get from build info
+		Version:   version.ShortWithoutPrefix(),
 		Timestamp: getCurrentTimestamp(),
 		Services:  make(map[string]string),
 	}

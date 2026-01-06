@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package workflow
 
 import (
@@ -79,8 +81,8 @@ func TestHTTPClient_ExecuteRequest_WithRetry(t *testing.T) {
 		URL:    server.URL,
 		Method: "GET",
 		Retry: &RetryConfig{
-			MaxAttempts:      3,
-			InitialDelay:     10 * time.Millisecond,
+			MaxAttempts:       3,
+			InitialDelay:      10 * time.Millisecond,
 			BackoffMultiplier: 1.5,
 		},
 	}
@@ -222,7 +224,7 @@ func TestEngine_ExecuteWebhookStep(t *testing.T) {
 				receivedPayload = payload
 			}
 		}
-		
+
 		w.WriteHeader(http.StatusOK)
 		if _, err := w.Write([]byte(`{"webhook": "received"}`)); err != nil {
 			t.Logf("Failed to write webhook response: %v", err)
@@ -319,7 +321,7 @@ func TestEngine_ComplexAPIWorkflow(t *testing.T) {
 	// Create test server that simulates multiple API endpoints
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		
+
 		switch r.URL.Path {
 		case "/auth/token":
 			w.WriteHeader(http.StatusOK)
@@ -431,4 +433,3 @@ func TestEngine_ComplexAPIWorkflow(t *testing.T) {
 	assert.Equal(t, 201, finalExecution.Variables["create-user_status_code"])
 	assert.Equal(t, 200, finalExecution.Variables["send-notification_webhook_status"])
 }
-

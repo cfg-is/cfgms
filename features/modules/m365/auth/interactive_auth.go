@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package auth
 
 import (
@@ -76,7 +78,7 @@ func (ia *InteractiveAuthenticator) AuthenticateUser(ctx context.Context, tenant
 		if result.err != nil {
 			return nil, nil, result.err
 		}
-		
+
 		// Get user info from the token
 		userContext, err := ia.getUserInfo(ctx, result.token)
 		if err != nil {
@@ -101,7 +103,7 @@ type authResult struct {
 // setupCallbackHandler sets up the HTTP handler for the OAuth callback
 func (ia *InteractiveAuthenticator) setupCallbackHandler(state, codeVerifier, tenantID string, resultChan chan authResult) {
 	mux := http.NewServeMux()
-	
+
 	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
 		defer close(resultChan)
 
@@ -110,7 +112,7 @@ func (ia *InteractiveAuthenticator) setupCallbackHandler(state, codeVerifier, te
 			errDesc := r.URL.Query().Get("error_description")
 			err := fmt.Errorf("OAuth error: %s - %s", errCode, errDesc)
 			resultChan <- authResult{err: err}
-			
+
 			w.WriteHeader(http.StatusBadRequest)
 			_, _ = fmt.Fprintf(w, `
 <!DOCTYPE html>
@@ -131,7 +133,7 @@ func (ia *InteractiveAuthenticator) setupCallbackHandler(state, codeVerifier, te
 		if returnedState != state {
 			err := fmt.Errorf("state parameter mismatch")
 			resultChan <- authResult{err: err}
-			
+
 			w.WriteHeader(http.StatusBadRequest)
 			_, _ = fmt.Fprintf(w, `
 <!DOCTYPE html>
@@ -151,7 +153,7 @@ func (ia *InteractiveAuthenticator) setupCallbackHandler(state, codeVerifier, te
 		if code == "" {
 			err := fmt.Errorf("no authorization code received")
 			resultChan <- authResult{err: err}
-			
+
 			w.WriteHeader(http.StatusBadRequest)
 			_, _ = fmt.Fprintf(w, `
 <!DOCTYPE html>
@@ -173,7 +175,7 @@ func (ia *InteractiveAuthenticator) setupCallbackHandler(state, codeVerifier, te
 		token, err := ia.provider.ExchangeCodeForToken(ctx, tenantID, code, codeVerifier)
 		if err != nil {
 			resultChan <- authResult{err: err}
-			
+
 			w.WriteHeader(http.StatusInternalServerError)
 			_, _ = fmt.Fprintf(w, `
 <!DOCTYPE html>
@@ -190,7 +192,7 @@ func (ia *InteractiveAuthenticator) setupCallbackHandler(state, codeVerifier, te
 
 		// Success!
 		resultChan <- authResult{token: token}
-		
+
 		w.Header().Set("Content-Type", "text/html")
 		_, _ = fmt.Fprintf(w, `
 <!DOCTYPE html>
@@ -238,8 +240,8 @@ func (ia *InteractiveAuthenticator) setupCallbackHandler(state, codeVerifier, te
 	})
 
 	ia.server = &http.Server{
-		Addr:    ia.callbackAddr,
-		Handler: mux,
+		Addr:              ia.callbackAddr,
+		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 }
@@ -359,7 +361,7 @@ func (ia *InteractiveAuthenticator) getUserInfo(ctx context.Context, token *Acce
 // getUserRoles retrieves the user's directory roles
 func (ia *InteractiveAuthenticator) getUserRoles(ctx context.Context, token *AccessToken) ([]string, error) {
 	// Create request to get user's directory roles
-	req, err := http.NewRequestWithContext(ctx, "GET", 
+	req, err := http.NewRequestWithContext(ctx, "GET",
 		"https://graph.microsoft.com/v1.0/me/memberOf?$filter=startswith(odata.type,'microsoft.graph.directoryRole')", nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create roles request: %w", err)
@@ -428,17 +430,17 @@ func (ia *InteractiveAuthenticator) generateSessionID() string {
 // TestDelegatedPermissions tests delegated permissions with the provided user context
 func (ia *InteractiveAuthenticator) TestDelegatedPermissions(ctx context.Context, userContext *UserContext, token *AccessToken) (*PermissionTestResult, error) {
 	result := &PermissionTestResult{
-		UserContext:    userContext,
-		TestedScopes:   make(map[string]bool),
-		FailedScopes:   make([]string, 0),
-		TestResults:    make(map[string]string),
-		TestTimestamp:  time.Now(),
+		UserContext:   userContext,
+		TestedScopes:  make(map[string]bool),
+		FailedScopes:  make([]string, 0),
+		TestResults:   make(map[string]string),
+		TestTimestamp: time.Now(),
 	}
 
 	// Test common scopes
 	scopesToTest := []string{
 		"User.Read",
-		"User.ReadWrite.All", 
+		"User.ReadWrite.All",
 		"Directory.Read.All",
 		"Directory.ReadWrite.All",
 		"Group.Read.All",
@@ -452,7 +454,7 @@ func (ia *InteractiveAuthenticator) TestDelegatedPermissions(ctx context.Context
 
 	for _, scope := range scopesToTest {
 		fmt.Printf("Testing %s... ", scope)
-		
+
 		err := ia.provider.ValidatePermissions(ctx, token, []string{scope})
 		if err != nil {
 			result.TestedScopes[scope] = false
@@ -469,7 +471,7 @@ func (ia *InteractiveAuthenticator) TestDelegatedPermissions(ctx context.Context
 	fmt.Printf("\n📊 Test Summary:\n")
 	fmt.Printf("- Successful scopes: %d\n", len(result.TestedScopes)-len(result.FailedScopes))
 	fmt.Printf("- Failed scopes: %d\n", len(result.FailedScopes))
-	
+
 	if len(result.FailedScopes) > 0 {
 		fmt.Printf("- Failed scopes: %s\n", strings.Join(result.FailedScopes, ", "))
 	}
@@ -479,11 +481,11 @@ func (ia *InteractiveAuthenticator) TestDelegatedPermissions(ctx context.Context
 
 // PermissionTestResult represents the results of permission testing
 type PermissionTestResult struct {
-	UserContext    *UserContext      `json:"user_context"`
-	TestedScopes   map[string]bool   `json:"tested_scopes"`
-	FailedScopes   []string          `json:"failed_scopes"`
-	TestResults    map[string]string `json:"test_results"`
-	TestTimestamp  time.Time         `json:"test_timestamp"`
+	UserContext   *UserContext      `json:"user_context"`
+	TestedScopes  map[string]bool   `json:"tested_scopes"`
+	FailedScopes  []string          `json:"failed_scopes"`
+	TestResults   map[string]string `json:"test_results"`
+	TestTimestamp time.Time         `json:"test_timestamp"`
 }
 
 // GetScopeString returns the scopes as a formatted string for authorization URLs
@@ -491,7 +493,7 @@ func (c *OAuth2Config) GetDelegatedAuthURL() string {
 	if !c.SupportsDelegatedAuth() {
 		return ""
 	}
-	
+
 	params := url.Values{
 		"response_type": {"code"},
 		"client_id":     {c.ClientID},
@@ -499,7 +501,7 @@ func (c *OAuth2Config) GetDelegatedAuthURL() string {
 		"scope":         {c.GetDelegatedScopeString()},
 		"response_mode": {"query"},
 	}
-	
+
 	return fmt.Sprintf("%s/oauth2/v2.0/authorize?%s", c.GetAuthorityURL(), params.Encode())
 }
 

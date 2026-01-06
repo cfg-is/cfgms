@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // Package interfaces provides advanced reporting interfaces for Story #173.
 // This extends the existing DNA-focused reporting system to include audit data
 // and comprehensive multi-tenant reporting capabilities.
@@ -80,39 +82,39 @@ type AuditDataQuery struct {
 
 // ComplianceDataQuery specifies parameters for compliance-focused queries
 type ComplianceDataQuery struct {
-	TimeRange        TimeRange
-	TenantIDs        []string
+	TimeRange            TimeRange
+	TenantIDs            []string
 	ComplianceFrameworks []string // CIS, HIPAA, PCI-DSS, etc.
-	RiskLevels       []RiskLevel
-	IncludeBaselines bool
-	IncludeExceptions bool
+	RiskLevels           []RiskLevel
+	IncludeBaselines     bool
+	IncludeExceptions    bool
 }
 
 // SecurityEventQuery specifies parameters for security event queries
 type SecurityEventQuery struct {
-	TimeRange    TimeRange
-	TenantIDs    []string
-	Severities   []interfaces.AuditSeverity
-	EventTypes   []SecurityEventType
+	TimeRange       TimeRange
+	TenantIDs       []string
+	Severities      []interfaces.AuditSeverity
+	EventTypes      []SecurityEventType
 	IncludeResolved bool
 }
 
 // UserActivityQuery specifies parameters for user activity queries
 type UserActivityQuery struct {
-	TimeRange TimeRange
-	TenantIDs []string
-	UserIDs   []string
-	UserTypes []interfaces.AuditUserType
-	Actions   []string
+	TimeRange       TimeRange
+	TenantIDs       []string
+	UserIDs         []string
+	UserTypes       []interfaces.AuditUserType
+	Actions         []string
 	IncludeFailures bool
 }
 
 // CrossSystemQuery enables querying across DNA and audit data
 type CrossSystemQuery struct {
-	TimeRange    TimeRange
-	TenantIDs    []string
-	DeviceIDs    []string
-	UserIDs      []string
+	TimeRange          TimeRange
+	TenantIDs          []string
+	DeviceIDs          []string
+	UserIDs            []string
 	CorrelationMetrics []string // "drift_vs_changes", "access_vs_events", etc.
 }
 
@@ -130,46 +132,46 @@ const (
 
 // ComplianceData represents compliance assessment results
 type ComplianceData struct {
-	Framework     string                 `json:"framework"`
-	Score         float64                `json:"score"`
-	Controls      []ComplianceControl    `json:"controls"`
-	Violations    []ComplianceViolation  `json:"violations"`
-	Exceptions    []ComplianceException  `json:"exceptions"`
-	LastAssessed  time.Time              `json:"last_assessed"`
-	TrendData     []ComplianceTrend      `json:"trend_data"`
+	Framework    string                `json:"framework"`
+	Score        float64               `json:"score"`
+	Controls     []ComplianceControl   `json:"controls"`
+	Violations   []ComplianceViolation `json:"violations"`
+	Exceptions   []ComplianceException `json:"exceptions"`
+	LastAssessed time.Time             `json:"last_assessed"`
+	TrendData    []ComplianceTrend     `json:"trend_data"`
 }
 
 // ComplianceControl represents a compliance control assessment
 type ComplianceControl struct {
-	ID          string  `json:"id"`
-	Name        string  `json:"name"`
-	Category    string  `json:"category"`
-	Status      string  `json:"status"` // "compliant", "non_compliant", "not_applicable"
-	Score       float64 `json:"score"`
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Category    string   `json:"category"`
+	Status      string   `json:"status"` // "compliant", "non_compliant", "not_applicable"
+	Score       float64  `json:"score"`
 	Evidence    []string `json:"evidence"`
-	Remediation string  `json:"remediation,omitempty"`
+	Remediation string   `json:"remediation,omitempty"`
 }
 
 // ComplianceViolation represents a compliance violation
 type ComplianceViolation struct {
-	ControlID    string    `json:"control_id"`
-	DeviceID     string    `json:"device_id"`
-	Severity     string    `json:"severity"`
-	Description  string    `json:"description"`
-	DetectedAt   time.Time `json:"detected_at"`
-	Remediated   bool      `json:"remediated"`
+	ControlID    string     `json:"control_id"`
+	DeviceID     string     `json:"device_id"`
+	Severity     string     `json:"severity"`
+	Description  string     `json:"description"`
+	DetectedAt   time.Time  `json:"detected_at"`
+	Remediated   bool       `json:"remediated"`
 	RemediatedAt *time.Time `json:"remediated_at,omitempty"`
 }
 
 // ComplianceException represents an approved compliance exception
 type ComplianceException struct {
-	ID           string    `json:"id"`
-	ControlID    string    `json:"control_id"`
-	DeviceID     string    `json:"device_id"`
-	Justification string   `json:"justification"`
-	ApprovedBy   string    `json:"approved_by"`
-	ApprovedAt   time.Time `json:"approved_at"`
-	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
+	ID            string     `json:"id"`
+	ControlID     string     `json:"control_id"`
+	DeviceID      string     `json:"device_id"`
+	Justification string     `json:"justification"`
+	ApprovedBy    string     `json:"approved_by"`
+	ApprovedAt    time.Time  `json:"approved_at"`
+	ExpiresAt     *time.Time `json:"expires_at,omitempty"`
 }
 
 // ComplianceTrend represents compliance score over time
@@ -181,67 +183,67 @@ type ComplianceTrend struct {
 
 // SecurityEvent represents a security-related event
 type SecurityEvent struct {
-	ID          string            `json:"id"`
-	Type        SecurityEventType `json:"type"`
+	ID          string                   `json:"id"`
+	Type        SecurityEventType        `json:"type"`
 	Severity    interfaces.AuditSeverity `json:"severity"`
-	Description string            `json:"description"`
-	DeviceID    string            `json:"device_id,omitempty"`
-	UserID      string            `json:"user_id"`
-	TenantID    string            `json:"tenant_id"`
-	Timestamp   time.Time         `json:"timestamp"`
-	Source      string            `json:"source"`
-	Resolved    bool              `json:"resolved"`
-	ResolvedAt  *time.Time        `json:"resolved_at,omitempty"`
-	ResolvedBy  string            `json:"resolved_by,omitempty"`
-	Context     map[string]interface{} `json:"context,omitempty"`
+	Description string                   `json:"description"`
+	DeviceID    string                   `json:"device_id,omitempty"`
+	UserID      string                   `json:"user_id"`
+	TenantID    string                   `json:"tenant_id"`
+	Timestamp   time.Time                `json:"timestamp"`
+	Source      string                   `json:"source"`
+	Resolved    bool                     `json:"resolved"`
+	ResolvedAt  *time.Time               `json:"resolved_at,omitempty"`
+	ResolvedBy  string                   `json:"resolved_by,omitempty"`
+	Context     map[string]interface{}   `json:"context,omitempty"`
 }
 
 // UserActivity represents user activity summary
 type UserActivity struct {
-	UserID       string    `json:"user_id"`
-	TenantID     string    `json:"tenant_id"`
-	ActionCount  int       `json:"action_count"`
-	FailureCount int       `json:"failure_count"`
-	LastActivity time.Time `json:"last_activity"`
-	RiskScore    float64   `json:"risk_score"`
+	UserID       string               `json:"user_id"`
+	TenantID     string               `json:"tenant_id"`
+	ActionCount  int                  `json:"action_count"`
+	FailureCount int                  `json:"failure_count"`
+	LastActivity time.Time            `json:"last_activity"`
+	RiskScore    float64              `json:"risk_score"`
 	Activities   []UserActivityDetail `json:"activities"`
 }
 
 // UserActivityDetail represents detailed user activity
 type UserActivityDetail struct {
-	Action       string    `json:"action"`
-	ResourceType string    `json:"resource_type"`
-	ResourceID   string    `json:"resource_id"`
-	Timestamp    time.Time `json:"timestamp"`
+	Action       string                 `json:"action"`
+	ResourceType string                 `json:"resource_type"`
+	ResourceID   string                 `json:"resource_id"`
+	Timestamp    time.Time              `json:"timestamp"`
 	Result       interfaces.AuditResult `json:"result"`
-	IPAddress    string    `json:"ip_address,omitempty"`
+	IPAddress    string                 `json:"ip_address,omitempty"`
 }
 
 // CrossSystemMetrics represents metrics across DNA and audit systems
 type CrossSystemMetrics struct {
-	TenantID    string                    `json:"tenant_id"`
-	TimeRange   TimeRange                 `json:"time_range"`
-	DNAMetrics  DNASystemMetrics         `json:"dna_metrics"`
-	AuditMetrics AuditSystemMetrics       `json:"audit_metrics"`
-	Correlations []SystemCorrelation      `json:"correlations"`
+	TenantID     string              `json:"tenant_id"`
+	TimeRange    TimeRange           `json:"time_range"`
+	DNAMetrics   DNASystemMetrics    `json:"dna_metrics"`
+	AuditMetrics AuditSystemMetrics  `json:"audit_metrics"`
+	Correlations []SystemCorrelation `json:"correlations"`
 }
 
 // DNASystemMetrics represents DNA system metrics
 type DNASystemMetrics struct {
-	DeviceCount      int     `json:"device_count"`
-	RecordCount      int     `json:"record_count"`
-	DriftEventCount  int     `json:"drift_event_count"`
-	ComplianceScore  float64 `json:"compliance_score"`
-	HealthScore      float64 `json:"health_score"`
+	DeviceCount     int     `json:"device_count"`
+	RecordCount     int     `json:"record_count"`
+	DriftEventCount int     `json:"drift_event_count"`
+	ComplianceScore float64 `json:"compliance_score"`
+	HealthScore     float64 `json:"health_score"`
 }
 
 // AuditSystemMetrics represents audit system metrics
 type AuditSystemMetrics struct {
-	EventCount      int     `json:"event_count"`
-	UserCount       int     `json:"user_count"`
-	FailureRate     float64 `json:"failure_rate"`
-	SecurityEvents  int     `json:"security_events"`
-	CriticalEvents  int     `json:"critical_events"`
+	EventCount     int     `json:"event_count"`
+	UserCount      int     `json:"user_count"`
+	FailureRate    float64 `json:"failure_rate"`
+	SecurityEvents int     `json:"security_events"`
+	CriticalEvents int     `json:"critical_events"`
 }
 
 // SystemCorrelation represents correlation between DNA and audit data
@@ -254,81 +256,81 @@ type SystemCorrelation struct {
 
 // TenantSummary represents summary metrics for a single tenant
 type TenantSummary struct {
-	TenantID        string               `json:"tenant_id"`
-	TimeRange       TimeRange            `json:"time_range"`
-	DeviceCount     int                  `json:"device_count"`
-	UserCount       int                  `json:"user_count"`
-	ComplianceScore float64              `json:"compliance_score"`
-	SecurityScore   float64              `json:"security_score"`
-	RiskLevel       RiskLevel            `json:"risk_level"`
-	KeyMetrics      map[string]float64   `json:"key_metrics"`
-	Alerts          []TenantAlert        `json:"alerts"`
+	TenantID        string             `json:"tenant_id"`
+	TimeRange       TimeRange          `json:"time_range"`
+	DeviceCount     int                `json:"device_count"`
+	UserCount       int                `json:"user_count"`
+	ComplianceScore float64            `json:"compliance_score"`
+	SecurityScore   float64            `json:"security_score"`
+	RiskLevel       RiskLevel          `json:"risk_level"`
+	KeyMetrics      map[string]float64 `json:"key_metrics"`
+	Alerts          []TenantAlert      `json:"alerts"`
 }
 
 // TenantAlert represents an alert for a tenant
 type TenantAlert struct {
-	ID          string              `json:"id"`
-	Type        string              `json:"type"`
+	ID          string                   `json:"id"`
+	Type        string                   `json:"type"`
 	Severity    interfaces.AuditSeverity `json:"severity"`
-	Description string              `json:"description"`
-	Timestamp   time.Time           `json:"timestamp"`
-	Resolved    bool                `json:"resolved"`
+	Description string                   `json:"description"`
+	Timestamp   time.Time                `json:"timestamp"`
+	Resolved    bool                     `json:"resolved"`
 }
 
 // MultiTenantAggregation represents aggregated metrics across multiple tenants
 type MultiTenantAggregation struct {
-	TenantIDs       []string               `json:"tenant_ids"`
-	TimeRange       TimeRange              `json:"time_range"`
-	TotalDevices    int                    `json:"total_devices"`
-	TotalUsers      int                    `json:"total_users"`
-	AverageCompliance float64              `json:"average_compliance"`
-	AverageSecurity float64                `json:"average_security"`
-	TenantSummaries map[string]TenantSummary `json:"tenant_summaries"`
-	Trends          []MultiTenantTrend     `json:"trends"`
+	TenantIDs         []string                 `json:"tenant_ids"`
+	TimeRange         TimeRange                `json:"time_range"`
+	TotalDevices      int                      `json:"total_devices"`
+	TotalUsers        int                      `json:"total_users"`
+	AverageCompliance float64                  `json:"average_compliance"`
+	AverageSecurity   float64                  `json:"average_security"`
+	TenantSummaries   map[string]TenantSummary `json:"tenant_summaries"`
+	Trends            []MultiTenantTrend       `json:"trends"`
 }
 
 // MultiTenantTrend represents trends across multiple tenants
 type MultiTenantTrend struct {
-	Timestamp       time.Time `json:"timestamp"`
-	AverageCompliance float64 `json:"average_compliance"`
-	AverageSecurity float64   `json:"average_security"`
-	TotalAlerts     int       `json:"total_alerts"`
+	Timestamp         time.Time `json:"timestamp"`
+	AverageCompliance float64   `json:"average_compliance"`
+	AverageSecurity   float64   `json:"average_security"`
+	TotalAlerts       int       `json:"total_alerts"`
 }
 
 // Advanced request types
 
 // AdvancedReportRequest extends ReportRequest with advanced capabilities
 type AdvancedReportRequest struct {
-	ReportRequest               // Embed base request
-	IncludeAuditData    bool    `json:"include_audit_data"`
-	IncludeCompliance   bool    `json:"include_compliance"`
-	IncludeSecurity     bool    `json:"include_security"`
-	CorrelationAnalysis bool    `json:"correlation_analysis"`
-	RiskAssessment      bool    `json:"risk_assessment"`
+	ReportRequest            // Embed base request
+	IncludeAuditData    bool `json:"include_audit_data"`
+	IncludeCompliance   bool `json:"include_compliance"`
+	IncludeSecurity     bool `json:"include_security"`
+	CorrelationAnalysis bool `json:"correlation_analysis"`
+	RiskAssessment      bool `json:"risk_assessment"`
 }
 
 // ComplianceReportRequest specifies parameters for compliance reports
 type ComplianceReportRequest struct {
-	TimeRange       TimeRange  `json:"time_range"`
-	TenantIDs       []string   `json:"tenant_ids"`
-	DeviceIDs       []string   `json:"device_ids,omitempty"`
-	Frameworks      []string   `json:"frameworks"` // CIS, HIPAA, etc.
-	IncludeBaselines bool      `json:"include_baselines"`
-	IncludeExceptions bool     `json:"include_exceptions"`
-	Format          ExportFormat `json:"format"`
-	DetailLevel     string     `json:"detail_level"` // "summary", "detailed", "full"
+	TimeRange         TimeRange    `json:"time_range"`
+	TenantIDs         []string     `json:"tenant_ids"`
+	DeviceIDs         []string     `json:"device_ids,omitempty"`
+	Frameworks        []string     `json:"frameworks"` // CIS, HIPAA, etc.
+	IncludeBaselines  bool         `json:"include_baselines"`
+	IncludeExceptions bool         `json:"include_exceptions"`
+	Format            ExportFormat `json:"format"`
+	DetailLevel       string       `json:"detail_level"` // "summary", "detailed", "full"
 }
 
 // SecurityReportRequest specifies parameters for security reports
 type SecurityReportRequest struct {
-	TimeRange       TimeRange            `json:"time_range"`
-	TenantIDs       []string             `json:"tenant_ids"`
-	UserIDs         []string             `json:"user_ids,omitempty"`
+	TimeRange       TimeRange                  `json:"time_range"`
+	TenantIDs       []string                   `json:"tenant_ids"`
+	UserIDs         []string                   `json:"user_ids,omitempty"`
 	Severities      []interfaces.AuditSeverity `json:"severities,omitempty"`
-	EventTypes      []SecurityEventType  `json:"event_types,omitempty"`
-	IncludeResolved bool                 `json:"include_resolved"`
-	Format          ExportFormat         `json:"format"`
-	AnalysisType    string               `json:"analysis_type"` // "threat", "user_behavior", "access_patterns"
+	EventTypes      []SecurityEventType        `json:"event_types,omitempty"`
+	IncludeResolved bool                       `json:"include_resolved"`
+	Format          ExportFormat               `json:"format"`
+	AnalysisType    string                     `json:"analysis_type"` // "threat", "user_behavior", "access_patterns"
 }
 
 // ExecutiveReportRequest specifies parameters for executive reports
@@ -344,103 +346,103 @@ type ExecutiveReportRequest struct {
 
 // MultiTenantReportRequest specifies parameters for multi-tenant reports
 type MultiTenantReportRequest struct {
-	TimeRange      TimeRange           `json:"time_range"`
-	TenantIDs      []string            `json:"tenant_ids"`
-	ReportType     AdvancedReportType  `json:"report_type"`
+	TimeRange       TimeRange          `json:"time_range"`
+	TenantIDs       []string           `json:"tenant_ids"`
+	ReportType      AdvancedReportType `json:"report_type"`
 	AggregationType string             `json:"aggregation_type"` // "summary", "comparative", "drill_down"
-	IncludeDetails bool                `json:"include_details"`
-	Format         ExportFormat        `json:"format"`
+	IncludeDetails  bool               `json:"include_details"`
+	Format          ExportFormat       `json:"format"`
 }
 
 // Advanced response types
 
 // AdvancedReport extends Report with additional audit and cross-system data
 type AdvancedReport struct {
-	Report                      // Embed base report
-	AuditData      []interfaces.AuditEntry `json:"audit_data,omitempty"`
-	ComplianceData *ComplianceData         `json:"compliance_data,omitempty"`
-	SecurityEvents []SecurityEvent         `json:"security_events,omitempty"`
-	CrossSystemMetrics *CrossSystemMetrics `json:"cross_system_metrics,omitempty"`
-	RiskAssessment *RiskAssessment         `json:"risk_assessment,omitempty"`
+	Report                                     // Embed base report
+	AuditData          []interfaces.AuditEntry `json:"audit_data,omitempty"`
+	ComplianceData     *ComplianceData         `json:"compliance_data,omitempty"`
+	SecurityEvents     []SecurityEvent         `json:"security_events,omitempty"`
+	CrossSystemMetrics *CrossSystemMetrics     `json:"cross_system_metrics,omitempty"`
+	RiskAssessment     *RiskAssessment         `json:"risk_assessment,omitempty"`
 }
 
 // ComplianceReport represents a compliance assessment report
 type ComplianceReport struct {
-	ID              string            `json:"id"`
-	GeneratedAt     time.Time         `json:"generated_at"`
-	TimeRange       TimeRange         `json:"time_range"`
-	TenantIDs       []string          `json:"tenant_ids"`
-	Frameworks      []string          `json:"frameworks"`
-	OverallScore    float64           `json:"overall_score"`
-	ComplianceData  []ComplianceData  `json:"compliance_data"`
+	ID              string                `json:"id"`
+	GeneratedAt     time.Time             `json:"generated_at"`
+	TimeRange       TimeRange             `json:"time_range"`
+	TenantIDs       []string              `json:"tenant_ids"`
+	Frameworks      []string              `json:"frameworks"`
+	OverallScore    float64               `json:"overall_score"`
+	ComplianceData  []ComplianceData      `json:"compliance_data"`
 	Violations      []ComplianceViolation `json:"violations"`
-	Recommendations []string          `json:"recommendations"`
-	Charts          []ChartData       `json:"charts,omitempty"`
+	Recommendations []string              `json:"recommendations"`
+	Charts          []ChartData           `json:"charts,omitempty"`
 }
 
 // SecurityReport represents a security analysis report
 type SecurityReport struct {
-	ID                string              `json:"id"`
-	GeneratedAt       time.Time           `json:"generated_at"`
-	TimeRange         TimeRange           `json:"time_range"`
-	TenantIDs         []string            `json:"tenant_ids"`
-	SecurityScore     float64             `json:"security_score"`
-	ThreatLevel       string              `json:"threat_level"`
-	SecurityEvents    []SecurityEvent     `json:"security_events"`
-	UserActivities    []UserActivity      `json:"user_activities"`
-	Anomalies         []SecurityAnomaly   `json:"anomalies"`
-	Recommendations   []string            `json:"recommendations"`
-	Charts            []ChartData         `json:"charts,omitempty"`
+	ID              string            `json:"id"`
+	GeneratedAt     time.Time         `json:"generated_at"`
+	TimeRange       TimeRange         `json:"time_range"`
+	TenantIDs       []string          `json:"tenant_ids"`
+	SecurityScore   float64           `json:"security_score"`
+	ThreatLevel     string            `json:"threat_level"`
+	SecurityEvents  []SecurityEvent   `json:"security_events"`
+	UserActivities  []UserActivity    `json:"user_activities"`
+	Anomalies       []SecurityAnomaly `json:"anomalies"`
+	Recommendations []string          `json:"recommendations"`
+	Charts          []ChartData       `json:"charts,omitempty"`
 }
 
 // ExecutiveReport represents an executive-level summary report
 type ExecutiveReport struct {
-	ID              string                 `json:"id"`
-	GeneratedAt     time.Time              `json:"generated_at"`
-	TimeRange       TimeRange              `json:"time_range"`
-	TenantIDs       []string               `json:"tenant_ids"`
-	ExecutiveSummary string                `json:"executive_summary"`
-	KPIs            map[string]float64     `json:"kpis"`
-	Trends          []ExecutiveTrend       `json:"trends"`
-	RiskSummary     *RiskSummary           `json:"risk_summary"`
-	ActionItems     []ActionItem           `json:"action_items"`
-	Charts          []ChartData            `json:"charts,omitempty"`
+	ID               string             `json:"id"`
+	GeneratedAt      time.Time          `json:"generated_at"`
+	TimeRange        TimeRange          `json:"time_range"`
+	TenantIDs        []string           `json:"tenant_ids"`
+	ExecutiveSummary string             `json:"executive_summary"`
+	KPIs             map[string]float64 `json:"kpis"`
+	Trends           []ExecutiveTrend   `json:"trends"`
+	RiskSummary      *RiskSummary       `json:"risk_summary"`
+	ActionItems      []ActionItem       `json:"action_items"`
+	Charts           []ChartData        `json:"charts,omitempty"`
 }
 
 // MultiTenantReport represents a multi-tenant analysis report
 type MultiTenantReport struct {
-	ID              string                   `json:"id"`
-	GeneratedAt     time.Time                `json:"generated_at"`
-	TimeRange       TimeRange                `json:"time_range"`
-	TenantIDs       []string                 `json:"tenant_ids"`
-	Aggregation     *MultiTenantAggregation  `json:"aggregation"`
-	Comparisons     []TenantComparison       `json:"comparisons"`
-	BestPractices   []string                 `json:"best_practices"`
-	Charts          []ChartData              `json:"charts,omitempty"`
+	ID            string                  `json:"id"`
+	GeneratedAt   time.Time               `json:"generated_at"`
+	TimeRange     TimeRange               `json:"time_range"`
+	TenantIDs     []string                `json:"tenant_ids"`
+	Aggregation   *MultiTenantAggregation `json:"aggregation"`
+	Comparisons   []TenantComparison      `json:"comparisons"`
+	BestPractices []string                `json:"best_practices"`
+	Charts        []ChartData             `json:"charts,omitempty"`
 }
 
 // Supporting types
 
 // SecurityAnomaly represents a detected security anomaly
 type SecurityAnomaly struct {
-	ID          string    `json:"id"`
-	Type        string    `json:"type"`
-	Description string    `json:"description"`
+	ID          string                   `json:"id"`
+	Type        string                   `json:"type"`
+	Description string                   `json:"description"`
 	Severity    interfaces.AuditSeverity `json:"severity"`
-	Confidence  float64   `json:"confidence"`
-	DeviceID    string    `json:"device_id,omitempty"`
-	UserID      string    `json:"user_id,omitempty"`
-	DetectedAt  time.Time `json:"detected_at"`
-	Context     map[string]interface{} `json:"context"`
+	Confidence  float64                  `json:"confidence"`
+	DeviceID    string                   `json:"device_id,omitempty"`
+	UserID      string                   `json:"user_id,omitempty"`
+	DetectedAt  time.Time                `json:"detected_at"`
+	Context     map[string]interface{}   `json:"context"`
 }
 
 // RiskAssessment represents overall risk assessment
 type RiskAssessment struct {
-	OverallRisk   RiskLevel              `json:"overall_risk"`
-	RiskFactors   []RiskFactor           `json:"risk_factors"`
-	RiskScore     float64                `json:"risk_score"`
-	Mitigation    []string               `json:"mitigation"`
-	LastAssessed  time.Time              `json:"last_assessed"`
+	OverallRisk  RiskLevel    `json:"overall_risk"`
+	RiskFactors  []RiskFactor `json:"risk_factors"`
+	RiskScore    float64      `json:"risk_score"`
+	Mitigation   []string     `json:"mitigation"`
+	LastAssessed time.Time    `json:"last_assessed"`
 }
 
 // RiskFactor represents individual risk factors
@@ -454,10 +456,10 @@ type RiskFactor struct {
 
 // RiskSummary represents high-level risk information
 type RiskSummary struct {
-	OverallRisk     RiskLevel `json:"overall_risk"`
-	HighRiskItems   int       `json:"high_risk_items"`
-	MediumRiskItems int       `json:"medium_risk_items"`
-	LowRiskItems    int       `json:"low_risk_items"`
+	OverallRisk     RiskLevel      `json:"overall_risk"`
+	HighRiskItems   int            `json:"high_risk_items"`
+	MediumRiskItems int            `json:"medium_risk_items"`
+	LowRiskItems    int            `json:"low_risk_items"`
 	TrendDirection  TrendDirection `json:"trend_direction"`
 }
 
@@ -473,13 +475,13 @@ type ExecutiveTrend struct {
 
 // ActionItem represents recommended actions
 type ActionItem struct {
-	ID          string    `json:"id"`
-	Priority    string    `json:"priority"` // "high", "medium", "low"
-	Category    string    `json:"category"`
-	Description string    `json:"description"`
-	Owner       string    `json:"owner,omitempty"`
+	ID          string     `json:"id"`
+	Priority    string     `json:"priority"` // "high", "medium", "low"
+	Category    string     `json:"category"`
+	Description string     `json:"description"`
+	Owner       string     `json:"owner,omitempty"`
 	DueDate     *time.Time `json:"due_date,omitempty"`
-	Status      string    `json:"status"` // "open", "in_progress", "completed"
+	Status      string     `json:"status"` // "open", "in_progress", "completed"
 }
 
 // TenantComparison represents comparison between tenants
@@ -494,10 +496,10 @@ type TenantComparison struct {
 
 // AdvancedTemplateInfo extends TemplateInfo with advanced capabilities
 type AdvancedTemplateInfo struct {
-	TemplateInfo                    // Embed base template info
-	RequiresAuditData    bool       `json:"requires_audit_data"`
-	RequiresCompliance   bool       `json:"requires_compliance"`
-	SupportedTenantTypes []string   `json:"supported_tenant_types"`
-	DataSources          []string   `json:"data_sources"`
+	TemplateInfo                        // Embed base template info
+	RequiresAuditData    bool           `json:"requires_audit_data"`
+	RequiresCompliance   bool           `json:"requires_compliance"`
+	SupportedTenantTypes []string       `json:"supported_tenant_types"`
+	DataSources          []string       `json:"data_sources"`
 	OutputFormats        []ExportFormat `json:"output_formats"`
 }

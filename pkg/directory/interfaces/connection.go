@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // Package interfaces - Connection Pool Management and Health Monitoring
 //
 // This file implements connection pool management with health monitoring for directory providers.
@@ -21,12 +23,12 @@ type DirectoryConnectionPool interface {
 	Get(ctx context.Context) (DirectoryConnection, error)
 	Put(conn DirectoryConnection) error
 	Close() error
-	
+
 	// Pool management
 	GetStatistics() *PoolStatistics
 	GetHealthStatus() *PoolHealth
 	SetHealthCheck(checker HealthChecker)
-	
+
 	// Configuration
 	SetMaxConnections(max int)
 	SetIdleTimeout(timeout time.Duration)
@@ -37,22 +39,22 @@ type DirectoryConnectionPool interface {
 type DefaultDirectoryConnectionPool struct {
 	// Configuration
 	config PoolConfig
-	
+
 	// Connection management
 	connections    chan DirectoryConnection
 	activeConns    map[DirectoryConnection]bool
 	connectionFunc ConnectionFunc
 	mutex          sync.RWMutex
-	
+
 	// Health monitoring
 	healthChecker     HealthChecker
 	healthCheckTicker *time.Ticker
 	healthStatus      atomic.Value // stores *PoolHealth
-	
+
 	// Statistics
 	stats     atomic.Value // stores *PoolStatistics
 	statsLock sync.Mutex
-	
+
 	// Control
 	closed    int32
 	closeOnce sync.Once
@@ -62,24 +64,24 @@ type DefaultDirectoryConnectionPool struct {
 // PoolConfig contains configuration for the connection pool
 type PoolConfig struct {
 	// Pool sizing
-	MaxConnections    int           `json:"max_connections"`     // Maximum number of connections
-	MinConnections    int           `json:"min_connections"`     // Minimum number of connections
-	InitialSize       int           `json:"initial_size"`        // Initial pool size
-	
+	MaxConnections int `json:"max_connections"` // Maximum number of connections
+	MinConnections int `json:"min_connections"` // Minimum number of connections
+	InitialSize    int `json:"initial_size"`    // Initial pool size
+
 	// Timeouts
-	ConnectionTimeout time.Duration `json:"connection_timeout"`  // Timeout for creating connections
-	IdleTimeout       time.Duration `json:"idle_timeout"`        // Timeout for idle connections
-	MaxLifetime       time.Duration `json:"max_lifetime"`        // Maximum connection lifetime
-	
+	ConnectionTimeout time.Duration `json:"connection_timeout"` // Timeout for creating connections
+	IdleTimeout       time.Duration `json:"idle_timeout"`       // Timeout for idle connections
+	MaxLifetime       time.Duration `json:"max_lifetime"`       // Maximum connection lifetime
+
 	// Health monitoring
 	HealthCheckInterval time.Duration `json:"health_check_interval"` // Health check frequency
 	HealthCheckTimeout  time.Duration `json:"health_check_timeout"`  // Health check timeout
-	MaxRetries          int           `json:"max_retries"`            // Max connection retry attempts
-	RetryDelay          time.Duration `json:"retry_delay"`            // Delay between retries
-	
+	MaxRetries          int           `json:"max_retries"`           // Max connection retry attempts
+	RetryDelay          time.Duration `json:"retry_delay"`           // Delay between retries
+
 	// Failover
-	FailoverThreshold   int           `json:"failover_threshold"`     // Failed connections before failover
-	RecoveryInterval    time.Duration `json:"recovery_interval"`      // Recovery check interval
+	FailoverThreshold int           `json:"failover_threshold"` // Failed connections before failover
+	RecoveryInterval  time.Duration `json:"recovery_interval"`  // Recovery check interval
 }
 
 // ConnectionFunc creates a new directory connection
@@ -105,11 +107,11 @@ func (h *DefaultHealthChecker) CheckHealth(ctx context.Context, conn DirectoryCo
 	if conn == nil {
 		return fmt.Errorf("connection is nil")
 	}
-	
+
 	// Use timeout context for health check
 	checkCtx, cancel := context.WithTimeout(ctx, h.timeout)
 	defer cancel()
-	
+
 	if !conn.IsHealthy(checkCtx) {
 		return fmt.Errorf("connection health check failed")
 	}
@@ -118,15 +120,15 @@ func (h *DefaultHealthChecker) CheckHealth(ctx context.Context, conn DirectoryCo
 
 // PoolHealth represents the health status of the connection pool
 type PoolHealth struct {
-	IsHealthy           bool                       `json:"is_healthy"`
-	LastCheck           time.Time                  `json:"last_check"`
-	ActiveConnections   int                        `json:"active_connections"`
-	IdleConnections     int                        `json:"idle_connections"`
-	FailedConnections   int                        `json:"failed_connections"`
-	HealthyConnections  int                        `json:"healthy_connections"`
-	UnhealthyConnections int                       `json:"unhealthy_connections"`
-	Details             map[string]interface{}     `json:"details,omitempty"`
-	Issues              []string                   `json:"issues,omitempty"`
+	IsHealthy            bool                   `json:"is_healthy"`
+	LastCheck            time.Time              `json:"last_check"`
+	ActiveConnections    int                    `json:"active_connections"`
+	IdleConnections      int                    `json:"idle_connections"`
+	FailedConnections    int                    `json:"failed_connections"`
+	HealthyConnections   int                    `json:"healthy_connections"`
+	UnhealthyConnections int                    `json:"unhealthy_connections"`
+	Details              map[string]interface{} `json:"details,omitempty"`
+	Issues               []string               `json:"issues,omitempty"`
 }
 
 // NewDirectoryConnectionPool creates a new directory connection pool
@@ -134,11 +136,11 @@ func NewDirectoryConnectionPool(config PoolConfig, connectionFunc ConnectionFunc
 	if config.MaxConnections <= 0 {
 		return nil, fmt.Errorf("max_connections must be positive")
 	}
-	
+
 	if connectionFunc == nil {
 		return nil, fmt.Errorf("connection function cannot be nil")
 	}
-	
+
 	// Set defaults
 	if config.MinConnections <= 0 {
 		config.MinConnections = 1
@@ -167,7 +169,7 @@ func NewDirectoryConnectionPool(config PoolConfig, connectionFunc ConnectionFunc
 	if config.RetryDelay <= 0 {
 		config.RetryDelay = time.Second
 	}
-	
+
 	pool := &DefaultDirectoryConnectionPool{
 		config:         config,
 		connections:    make(chan DirectoryConnection, config.MaxConnections),
@@ -176,7 +178,7 @@ func NewDirectoryConnectionPool(config PoolConfig, connectionFunc ConnectionFunc
 		healthChecker:  NewDefaultHealthChecker(config.HealthCheckTimeout),
 		closeChan:      make(chan struct{}),
 	}
-	
+
 	// Initialize statistics
 	pool.stats.Store(&PoolStatistics{
 		MaxConnections:    config.MaxConnections,
@@ -187,21 +189,21 @@ func NewDirectoryConnectionPool(config PoolConfig, connectionFunc ConnectionFunc
 		AverageLatency:    0,
 		LastRequestTime:   time.Now(),
 	})
-	
+
 	// Initialize health status
 	pool.healthStatus.Store(&PoolHealth{
 		IsHealthy: true,
 		LastCheck: time.Now(),
 	})
-	
+
 	// Create initial connections
 	if err := pool.initialize(); err != nil {
 		return nil, fmt.Errorf("failed to initialize connection pool: %w", err)
 	}
-	
+
 	// Start health monitoring
 	pool.startHealthMonitoring()
-	
+
 	return pool, nil
 }
 
@@ -209,14 +211,14 @@ func NewDirectoryConnectionPool(config PoolConfig, connectionFunc ConnectionFunc
 func (p *DefaultDirectoryConnectionPool) initialize() error {
 	ctx, cancel := context.WithTimeout(context.Background(), p.config.ConnectionTimeout*time.Duration(p.config.InitialSize))
 	defer cancel()
-	
+
 	for i := 0; i < p.config.InitialSize; i++ {
 		conn, err := p.createConnection(ctx)
 		if err != nil {
 			// Log warning but continue with other connections
 			continue
 		}
-		
+
 		select {
 		case p.connections <- conn:
 			// Connection added to pool
@@ -225,14 +227,14 @@ func (p *DefaultDirectoryConnectionPool) initialize() error {
 			_ = conn.Close(ctx) // Ignore error during cleanup
 		}
 	}
-	
+
 	return nil
 }
 
 // createConnection creates a new directory connection with retry logic
 func (p *DefaultDirectoryConnectionPool) createConnection(ctx context.Context) (DirectoryConnection, error) {
 	var lastErr error
-	
+
 	for attempt := 0; attempt < p.config.MaxRetries; attempt++ {
 		if attempt > 0 {
 			select {
@@ -241,23 +243,23 @@ func (p *DefaultDirectoryConnectionPool) createConnection(ctx context.Context) (
 				return nil, ctx.Err()
 			}
 		}
-		
+
 		conn, err := p.connectionFunc(ctx)
 		if err != nil {
 			lastErr = err
 			continue
 		}
-		
+
 		// Test the connection
 		if err := p.healthChecker.CheckHealth(ctx, conn); err != nil {
 			_ = conn.Close(ctx) // Ignore error during cleanup // Close unhealthy connection
 			lastErr = err
 			continue
 		}
-		
+
 		return conn, nil
 	}
-	
+
 	return nil, fmt.Errorf("failed to create connection after %d attempts: %w", p.config.MaxRetries, lastErr)
 }
 
@@ -266,7 +268,7 @@ func (p *DefaultDirectoryConnectionPool) Get(ctx context.Context) (DirectoryConn
 	if atomic.LoadInt32(&p.closed) != 0 {
 		return nil, fmt.Errorf("connection pool is closed")
 	}
-	
+
 	select {
 	case conn := <-p.connections:
 		// Got connection from pool
@@ -277,27 +279,27 @@ func (p *DefaultDirectoryConnectionPool) Get(ctx context.Context) (DirectoryConn
 				_ = conn.Close(ctx) // Ignore error during cleanup
 				return p.createNewConnection(ctx)
 			}
-			
+
 			// Mark as active
 			p.mutex.Lock()
 			p.activeConns[conn] = true
 			p.mutex.Unlock()
-			
+
 			p.updateStatistics(func(stats *PoolStatistics) {
 				stats.ActiveConnections++
 				stats.IdleConnections--
 				stats.RequestCount++
 			})
-			
+
 			return conn, nil
 		}
-		
+
 		// nil connection, create new one
 		return p.createNewConnection(ctx)
-		
+
 	case <-ctx.Done():
 		return nil, ctx.Err()
-		
+
 	default:
 		// No idle connections available, try to create new one if under limit
 		return p.createNewConnection(ctx)
@@ -309,11 +311,11 @@ func (p *DefaultDirectoryConnectionPool) createNewConnection(ctx context.Context
 	p.mutex.RLock()
 	currentActive := len(p.activeConns)
 	p.mutex.RUnlock()
-	
+
 	if currentActive >= p.config.MaxConnections {
 		return nil, fmt.Errorf("connection pool exhausted (max: %d)", p.config.MaxConnections)
 	}
-	
+
 	conn, err := p.createConnection(ctx)
 	if err != nil {
 		p.updateStatistics(func(stats *PoolStatistics) {
@@ -321,17 +323,17 @@ func (p *DefaultDirectoryConnectionPool) createNewConnection(ctx context.Context
 		})
 		return nil, err
 	}
-	
+
 	// Mark as active
 	p.mutex.Lock()
 	p.activeConns[conn] = true
 	p.mutex.Unlock()
-	
+
 	p.updateStatistics(func(stats *PoolStatistics) {
 		stats.ActiveConnections++
 		stats.RequestCount++
 	})
-	
+
 	return conn, nil
 }
 
@@ -346,35 +348,35 @@ func (p *DefaultDirectoryConnectionPool) Put(conn DirectoryConnection) error {
 		}
 		return fmt.Errorf("connection pool is closed")
 	}
-	
+
 	if conn == nil {
 		return fmt.Errorf("cannot put nil connection")
 	}
-	
+
 	// Remove from active connections
 	p.mutex.Lock()
 	delete(p.activeConns, conn)
 	p.mutex.Unlock()
-	
+
 	// Check connection health before returning to pool
 	ctx, cancel := context.WithTimeout(context.Background(), p.config.HealthCheckTimeout)
 	defer cancel()
-	
+
 	if err := p.healthChecker.CheckHealth(ctx, conn); err != nil {
 		// Connection is unhealthy, close it
 		if err := conn.Close(ctx); err != nil {
 			// Log error but don't fail the health check process
 			log.Printf("Warning: failed to close unhealthy connection: %v", err)
 		}
-		
+
 		p.updateStatistics(func(stats *PoolStatistics) {
 			stats.ActiveConnections--
 			stats.ErrorCount++
 		})
-		
+
 		return nil // Don't return error, just close unhealthy connection
 	}
-	
+
 	// Try to return to pool
 	select {
 	case p.connections <- conn:
@@ -384,18 +386,18 @@ func (p *DefaultDirectoryConnectionPool) Put(conn DirectoryConnection) error {
 			stats.IdleConnections++
 		})
 		return nil
-		
+
 	default:
 		// Pool is full, close connection
 		if err := conn.Close(ctx); err != nil {
 			// Log error but don't fail the pool operation
 			log.Printf("Warning: failed to close excess connection: %v", err)
 		}
-		
+
 		p.updateStatistics(func(stats *PoolStatistics) {
 			stats.ActiveConnections--
 		})
-		
+
 		return nil
 	}
 }
@@ -403,54 +405,54 @@ func (p *DefaultDirectoryConnectionPool) Put(conn DirectoryConnection) error {
 // Close closes the connection pool and all connections
 func (p *DefaultDirectoryConnectionPool) Close() error {
 	var err error
-	
+
 	p.closeOnce.Do(func() {
 		atomic.StoreInt32(&p.closed, 1)
 		close(p.closeChan)
-		
+
 		// Stop health monitoring
 		if p.healthCheckTicker != nil {
 			p.healthCheckTicker.Stop()
 		}
-		
+
 		// Close all idle connections
 		close(p.connections)
 		for conn := range p.connections {
 			if conn != nil {
 				if err := conn.Close(context.Background()); err != nil {
-				// Log error - could add logging here if needed
-				_ = err
-			}
+					// Log error - could add logging here if needed
+					_ = err
+				}
 			}
 		}
-		
+
 		// Close all active connections
 		p.mutex.Lock()
 		for conn := range p.activeConns {
 			if conn != nil {
 				if err := conn.Close(context.Background()); err != nil {
-				// Log error - could add logging here if needed
-				_ = err
-			}
+					// Log error - could add logging here if needed
+					_ = err
+				}
 			}
 		}
 		p.activeConns = make(map[DirectoryConnection]bool)
 		p.mutex.Unlock()
-		
+
 		// Update final statistics
 		p.updateStatistics(func(stats *PoolStatistics) {
 			stats.ActiveConnections = 0
 			stats.IdleConnections = 0
 		})
 	})
-	
+
 	return err
 }
 
 // GetStatistics returns current pool statistics
 func (p *DefaultDirectoryConnectionPool) GetStatistics() *PoolStatistics {
 	stats := p.stats.Load().(*PoolStatistics)
-	
+
 	// Create a copy to prevent race conditions
 	return &PoolStatistics{
 		ActiveConnections: stats.ActiveConnections,
@@ -466,7 +468,7 @@ func (p *DefaultDirectoryConnectionPool) GetStatistics() *PoolStatistics {
 // GetHealthStatus returns the current health status of the pool
 func (p *DefaultDirectoryConnectionPool) GetHealthStatus() *PoolHealth {
 	health := p.healthStatus.Load().(*PoolHealth)
-	
+
 	// Create a copy to prevent race conditions
 	return &PoolHealth{
 		IsHealthy:            health.IsHealthy,
@@ -492,7 +494,7 @@ func (p *DefaultDirectoryConnectionPool) SetHealthCheck(checker HealthChecker) {
 func (p *DefaultDirectoryConnectionPool) SetMaxConnections(max int) {
 	if max > 0 {
 		p.config.MaxConnections = max
-		
+
 		p.updateStatistics(func(stats *PoolStatistics) {
 			stats.MaxConnections = max
 		})
@@ -510,7 +512,7 @@ func (p *DefaultDirectoryConnectionPool) SetIdleTimeout(timeout time.Duration) {
 func (p *DefaultDirectoryConnectionPool) SetHealthCheckInterval(interval time.Duration) {
 	if interval > 0 {
 		p.config.HealthCheckInterval = interval
-		
+
 		// Restart health monitoring with new interval
 		if p.healthCheckTicker != nil {
 			p.healthCheckTicker.Stop()
@@ -523,9 +525,9 @@ func (p *DefaultDirectoryConnectionPool) SetHealthCheckInterval(interval time.Du
 func (p *DefaultDirectoryConnectionPool) updateStatistics(updater func(*PoolStatistics)) {
 	p.statsLock.Lock()
 	defer p.statsLock.Unlock()
-	
+
 	current := p.stats.Load().(*PoolStatistics)
-	
+
 	// Create a copy
 	updated := &PoolStatistics{
 		ActiveConnections: current.ActiveConnections,
@@ -536,10 +538,10 @@ func (p *DefaultDirectoryConnectionPool) updateStatistics(updater func(*PoolStat
 		AverageLatency:    current.AverageLatency,
 		LastRequestTime:   time.Now(),
 	}
-	
+
 	// Apply updates
 	updater(updated)
-	
+
 	// Store the updated statistics
 	p.stats.Store(updated)
 }
@@ -547,7 +549,7 @@ func (p *DefaultDirectoryConnectionPool) updateStatistics(updater func(*PoolStat
 // startHealthMonitoring starts the background health monitoring
 func (p *DefaultDirectoryConnectionPool) startHealthMonitoring() {
 	p.healthCheckTicker = time.NewTicker(p.config.HealthCheckInterval)
-	
+
 	go func() {
 		for {
 			select {
@@ -564,13 +566,13 @@ func (p *DefaultDirectoryConnectionPool) startHealthMonitoring() {
 func (p *DefaultDirectoryConnectionPool) performHealthCheck() {
 	ctx, cancel := context.WithTimeout(context.Background(), p.config.HealthCheckTimeout*2)
 	defer cancel()
-	
+
 	p.mutex.RLock()
 	activeCount := len(p.activeConns)
 	p.mutex.RUnlock()
-	
+
 	idleCount := len(p.connections)
-	
+
 	health := &PoolHealth{
 		IsHealthy:         true,
 		LastCheck:         time.Now(),
@@ -579,27 +581,27 @@ func (p *DefaultDirectoryConnectionPool) performHealthCheck() {
 		Details:           make(map[string]interface{}),
 		Issues:            []string{},
 	}
-	
+
 	// Check if pool is within healthy limits
 	totalConnections := activeCount + idleCount
 	if totalConnections < p.config.MinConnections {
 		health.Issues = append(health.Issues, fmt.Sprintf("Below minimum connections: %d < %d", totalConnections, p.config.MinConnections))
 	}
-	
+
 	if activeCount > int(float64(p.config.MaxConnections)*0.9) {
 		health.Issues = append(health.Issues, fmt.Sprintf("High connection utilization: %d/%d", activeCount, p.config.MaxConnections))
 	}
-	
+
 	// Test a sample of idle connections
 	healthyConns := 0
 	unhealthyConns := 0
-	
+
 	// Sample up to 5 idle connections for health testing
 	sampleSize := idleCount
 	if sampleSize > 5 {
 		sampleSize = 5
 	}
-	
+
 connectionSample:
 	for i := 0; i < sampleSize; i++ {
 		select {
@@ -625,21 +627,21 @@ connectionSample:
 			break connectionSample // No more connections to test
 		}
 	}
-	
+
 	health.HealthyConnections = healthyConns
 	health.UnhealthyConnections = unhealthyConns
-	
+
 	// Determine overall health
 	if len(health.Issues) > 0 {
 		health.IsHealthy = false
 	}
-	
+
 	// Add pool utilization details
 	health.Details["utilization_percent"] = float64(activeCount) / float64(p.config.MaxConnections) * 100
 	health.Details["total_connections"] = totalConnections
 	health.Details["min_connections"] = p.config.MinConnections
 	health.Details["max_connections"] = p.config.MaxConnections
-	
+
 	// Store updated health status
 	p.healthStatus.Store(health)
 }
@@ -653,15 +655,15 @@ type DirectoryConnectionMonitor struct {
 
 // ConnectionMetrics holds aggregated metrics across all connection pools
 type ConnectionMetrics struct {
-	TotalPools           int                        `json:"total_pools"`
-	TotalConnections     int                        `json:"total_connections"`
-	TotalActiveConnections int                      `json:"total_active_connections"`
-	TotalIdleConnections int                        `json:"total_idle_connections"`
-	TotalRequests        int64                      `json:"total_requests"`
-	TotalErrors          int64                      `json:"total_errors"`
-	PoolMetrics          map[string]*PoolStatistics `json:"pool_metrics"`
-	PoolHealth           map[string]*PoolHealth      `json:"pool_health"`
-	LastUpdated          time.Time                  `json:"last_updated"`
+	TotalPools             int                        `json:"total_pools"`
+	TotalConnections       int                        `json:"total_connections"`
+	TotalActiveConnections int                        `json:"total_active_connections"`
+	TotalIdleConnections   int                        `json:"total_idle_connections"`
+	TotalRequests          int64                      `json:"total_requests"`
+	TotalErrors            int64                      `json:"total_errors"`
+	PoolMetrics            map[string]*PoolStatistics `json:"pool_metrics"`
+	PoolHealth             map[string]*PoolHealth     `json:"pool_health"`
+	LastUpdated            time.Time                  `json:"last_updated"`
 }
 
 // NewDirectoryConnectionMonitor creates a new connection monitor
@@ -680,7 +682,7 @@ func NewDirectoryConnectionMonitor() *DirectoryConnectionMonitor {
 func (m *DirectoryConnectionMonitor) RegisterPool(name string, pool DirectoryConnectionPool) {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
-	
+
 	m.pools[name] = pool
 }
 
@@ -688,7 +690,7 @@ func (m *DirectoryConnectionMonitor) RegisterPool(name string, pool DirectoryCon
 func (m *DirectoryConnectionMonitor) UnregisterPool(name string) {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
-	
+
 	delete(m.pools, name)
 	delete(m.metrics.PoolMetrics, name)
 	delete(m.metrics.PoolHealth, name)
@@ -698,31 +700,31 @@ func (m *DirectoryConnectionMonitor) UnregisterPool(name string) {
 func (m *DirectoryConnectionMonitor) GetMetrics() *ConnectionMetrics {
 	m.mutex.RLock()
 	defer m.mutex.RUnlock()
-	
+
 	metrics := &ConnectionMetrics{
-		TotalPools:      len(m.pools),
-		PoolMetrics:     make(map[string]*PoolStatistics),
-		PoolHealth:      make(map[string]*PoolHealth),
-		LastUpdated:     time.Now(),
+		TotalPools:  len(m.pools),
+		PoolMetrics: make(map[string]*PoolStatistics),
+		PoolHealth:  make(map[string]*PoolHealth),
+		LastUpdated: time.Now(),
 	}
-	
+
 	for name, pool := range m.pools {
 		stats := pool.GetStatistics()
 		health := pool.GetHealthStatus()
-		
+
 		metrics.PoolMetrics[name] = stats
 		metrics.PoolHealth[name] = health
-		
+
 		metrics.TotalConnections += stats.ActiveConnections + stats.IdleConnections
 		metrics.TotalActiveConnections += stats.ActiveConnections
 		metrics.TotalIdleConnections += stats.IdleConnections
 		metrics.TotalRequests += stats.RequestCount
 		metrics.TotalErrors += stats.ErrorCount
 	}
-	
+
 	// Update cached metrics
 	m.metrics = metrics
-	
+
 	return metrics
 }
 
@@ -730,12 +732,12 @@ func (m *DirectoryConnectionMonitor) GetMetrics() *ConnectionMetrics {
 func (m *DirectoryConnectionMonitor) GetPoolHealth(name string) (*PoolHealth, error) {
 	m.mutex.RLock()
 	defer m.mutex.RUnlock()
-	
+
 	pool, exists := m.pools[name]
 	if !exists {
 		return nil, fmt.Errorf("pool '%s' not found", name)
 	}
-	
+
 	return pool.GetHealthStatus(), nil
 }
 
@@ -743,12 +745,12 @@ func (m *DirectoryConnectionMonitor) GetPoolHealth(name string) (*PoolHealth, er
 func (m *DirectoryConnectionMonitor) IsHealthy() bool {
 	m.mutex.RLock()
 	defer m.mutex.RUnlock()
-	
+
 	for _, pool := range m.pools {
 		if health := pool.GetHealthStatus(); !health.IsHealthy {
 			return false
 		}
 	}
-	
+
 	return true
 }

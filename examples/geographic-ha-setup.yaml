@@ -1,0 +1,156 @@
+# Example geographic HA configuration for CFGMS
+# This shows how to configure a 4-node cluster across US regions
+# Replace 'example.com' with your actual domain
+
+# Node 1: US East (Primary)
+# Environment variables for first controller:
+# CFGMS_HA_MODE=cluster
+# CFGMS_HA_NODE_ID=controller-east-1
+# CFGMS_HA_NODE_NAME=cfgms-east-primary
+# CFGMS_HA_REGION=us-east
+# CFGMS_HA_AVAILABILITY_ZONE=us-east-1a
+# CFGMS_HA_EXTERNAL_ADDRESS=controller-east.example.com:8080
+# CFGMS_HA_CLUSTER_SIZE=4
+# CFGMS_HA_MIN_QUORUM=3
+# CFGMS_HA_DISCOVERY_METHOD=geographic
+# CFGMS_HA_ELECTION_TIMEOUT=15s
+# CFGMS_HA_HEARTBEAT_INTERVAL=3s
+
+# Node 2: US Central
+# Environment variables for second controller:
+# CFGMS_HA_MODE=cluster
+# CFGMS_HA_NODE_ID=controller-central-1
+# CFGMS_HA_NODE_NAME=cfgms-central-primary
+# CFGMS_HA_REGION=us-central
+# CFGMS_HA_AVAILABILITY_ZONE=us-central-1a
+# CFGMS_HA_EXTERNAL_ADDRESS=controller-central.example.com:8080
+# CFGMS_HA_CLUSTER_SIZE=4
+# CFGMS_HA_MIN_QUORUM=3
+# CFGMS_HA_DISCOVERY_METHOD=geographic
+# CFGMS_HA_ELECTION_TIMEOUT=15s
+# CFGMS_HA_HEARTBEAT_INTERVAL=3s
+
+# Node 3: US West (Primary)
+# Environment variables for third controller:
+# CFGMS_HA_MODE=cluster
+# CFGMS_HA_NODE_ID=controller-west-1
+# CFGMS_HA_NODE_NAME=cfgms-west-primary
+# CFGMS_HA_REGION=us-west
+# CFGMS_HA_AVAILABILITY_ZONE=us-west-1a
+# CFGMS_HA_EXTERNAL_ADDRESS=controller-west.example.com:8080
+# CFGMS_HA_CLUSTER_SIZE=4
+# CFGMS_HA_MIN_QUORUM=3
+# CFGMS_HA_DISCOVERY_METHOD=geographic
+# CFGMS_HA_ELECTION_TIMEOUT=15s
+# CFGMS_HA_HEARTBEAT_INTERVAL=3s
+
+# Node 4: US East (Secondary for redundancy)
+# Environment variables for fourth controller:
+# CFGMS_HA_MODE=cluster
+# CFGMS_HA_NODE_ID=controller-east-2
+# CFGMS_HA_NODE_NAME=cfgms-east-secondary
+# CFGMS_HA_REGION=us-east
+# CFGMS_HA_AVAILABILITY_ZONE=us-east-1b
+# CFGMS_HA_EXTERNAL_ADDRESS=controller-east-2.example.com:8080
+# CFGMS_HA_CLUSTER_SIZE=4
+# CFGMS_HA_MIN_QUORUM=3
+# CFGMS_HA_DISCOVERY_METHOD=geographic
+# CFGMS_HA_ELECTION_TIMEOUT=15s
+# CFGMS_HA_HEARTBEAT_INTERVAL=3s
+
+# Example YAML configuration file for geographic discovery
+ha:
+  mode: cluster
+  node:
+    region: us-east
+    availability_zone: us-east-1a
+    capabilities:
+      - config
+      - rbac
+      - monitoring
+      - workflow
+  cluster:
+    expected_size: 4
+    min_quorum: 3
+    election_timeout: 15s
+    heartbeat_interval: 3s
+    discovery:
+      method: geographic
+      interval: 30s
+      node_timeout: 120s  # Longer timeout for cross-region
+      geographic:
+        enable_region_affinity: true
+        cross_region_timeout_multiplier: 2.0
+        max_cross_region_latency: 500ms
+        latency_check_interval: 60s
+        regional_weights:
+          us-east: 1.2      # Higher weight (more capacity)
+          us-central: 1.0   # Baseline weight
+          us-west: 1.1      # Slightly higher weight
+    session_sync:
+      enabled: true
+      sync_interval: 10s    # Slower sync for cross-region
+      state_timeout: 600s   # Longer timeout for cross-region
+      max_state_size: 2097152  # 2MB for cross-region
+  health_check:
+    interval: 15s           # Slower checks for cross-region
+    timeout: 10s            # Longer timeout for cross-region
+    failure_threshold: 5    # More tolerant for cross-region
+    success_threshold: 2
+  failover:
+    enabled: true
+    timeout: 60s            # Longer timeout for cross-region failover
+    max_duration: 10m       # Allow more time for cross-region
+    grace_period: 30s       # Longer grace period
+  load_balancing:
+    strategy: geographic
+    health_based:
+      min_health_score: 0.6  # More tolerant for cross-region
+      health_weight_factor: 1.0
+    geographic:
+      enable_region_affinity: true
+      region_affinity_weight: 0.8
+      latency_weight_factor: 0.6
+      max_latency_threshold: 300ms
+      cross_region_fallback: true
+      regional_capacity_weights:
+        us-east: 1.2
+        us-central: 1.0
+        us-west: 1.1
+  split_brain:
+    enabled: true
+    detection_interval: 30s   # Slower detection for cross-region
+    quorum_interval: 60s      # Longer interval for cross-region
+    resolution_strategy: quorum-based
+
+# Steward geographic routing configuration
+# This would be used to route stewards to the nearest controller
+steward_routing:
+  geographic_affinity: true
+  regions:
+    us-east:
+      controllers:
+        - controller-east.example.com:8080
+        - controller-east-2.example.com:8080
+      fallback:
+        - controller-central.example.com:8080
+    us-central:
+      controllers:
+        - controller-central.example.com:8080
+      fallback:
+        - controller-east.example.com:8080
+        - controller-west.example.com:8080
+    us-west:
+      controllers:
+        - controller-west.example.com:8080
+      fallback:
+        - controller-central.example.com:8080
+
+# Expected Behavior:
+# 1. Controllers prefer to communicate within their region
+# 2. Cross-region communication uses longer timeouts
+# 3. Leader election considers geographic distribution
+# 4. Session migration prioritizes same-region targets
+# 5. Load balancing favors local region nodes
+# 6. Stewards connect to nearest controller by region
+# 7. Automatic failover works within <30s for same-region, <60s cross-region

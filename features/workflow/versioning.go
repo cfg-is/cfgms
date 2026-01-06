@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package workflow
 
 import (
@@ -149,11 +151,11 @@ func (sv SemanticVersion) NextPatch() SemanticVersion {
 // VersionedWorkflow represents a workflow with semantic versioning
 type VersionedWorkflow struct {
 	Workflow
-	SemanticVersion SemanticVersion   `yaml:"semantic_version" json:"semantic_version"`
-	VersionTags     []string          `yaml:"version_tags,omitempty" json:"version_tags,omitempty"`
-	Deprecated      bool              `yaml:"deprecated,omitempty" json:"deprecated,omitempty"`
-	DeprecationNote string            `yaml:"deprecation_note,omitempty" json:"deprecation_note,omitempty"`
-	Changelog       []ChangelogEntry  `yaml:"changelog,omitempty" json:"changelog,omitempty"`
+	SemanticVersion SemanticVersion  `yaml:"semantic_version" json:"semantic_version"`
+	VersionTags     []string         `yaml:"version_tags,omitempty" json:"version_tags,omitempty"`
+	Deprecated      bool             `yaml:"deprecated,omitempty" json:"deprecated,omitempty"`
+	DeprecationNote string           `yaml:"deprecation_note,omitempty" json:"deprecation_note,omitempty"`
+	Changelog       []ChangelogEntry `yaml:"changelog,omitempty" json:"changelog,omitempty"`
 }
 
 // ChangelogEntry represents a single changelog entry
@@ -186,11 +188,11 @@ const (
 
 // VersionRange represents a version constraint (e.g., ">=1.0.0,<2.0.0")
 type VersionRange struct {
-	Min         *SemanticVersion `yaml:"min,omitempty" json:"min,omitempty"`
-	Max         *SemanticVersion `yaml:"max,omitempty" json:"max,omitempty"`
-	IncludeMin  bool             `yaml:"include_min" json:"include_min"`
-	IncludeMax  bool             `yaml:"include_max" json:"include_max"`
-	Exact       *SemanticVersion `yaml:"exact,omitempty" json:"exact,omitempty"`
+	Min        *SemanticVersion `yaml:"min,omitempty" json:"min,omitempty"`
+	Max        *SemanticVersion `yaml:"max,omitempty" json:"max,omitempty"`
+	IncludeMin bool             `yaml:"include_min" json:"include_min"`
+	IncludeMax bool             `yaml:"include_max" json:"include_max"`
+	Exact      *SemanticVersion `yaml:"exact,omitempty" json:"exact,omitempty"`
 }
 
 // ParseVersionRange parses a version range string

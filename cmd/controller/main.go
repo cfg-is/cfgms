@@ -1,10 +1,11 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package main
 
 import (
 	"log"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -12,6 +13,14 @@ import (
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/server"
 	"github.com/cfgis/cfgms/pkg/logging"
+
+	// Import logging providers to register them
+	_ "github.com/cfgis/cfgms/pkg/logging/providers/file"
+	_ "github.com/cfgis/cfgms/pkg/logging/providers/timescale"
+
+	// Import storage providers to register them
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 )
 
 func main() {
@@ -50,9 +59,7 @@ func main() {
 	legacyLogger := logging.GetLogger()
 	srv, err := server.New(cfg, legacyLogger)
 	if err != nil {
-		logger.Fatal("Failed to create controller server",
-			"operation", "server_init",
-			"error", err.Error())
+		log.Fatalf("FATAL: Failed to create controller server: %v", err)
 	}
 
 	logger.Info("Starting controller server",
@@ -92,47 +99,45 @@ func main() {
 }
 
 // getLogProvider determines the logging provider from configuration
+// Note: To customize, use config file with provider: ${CFGMS_LOG_PROVIDER:-file} syntax
 func getLogProvider(cfg *config.Config) string {
-	// Check environment variable for provider
-	if provider := os.Getenv("CFGMS_LOG_PROVIDER"); provider != "" {
-		return provider
+	// Use config value if available, otherwise default to file
+	if cfg.Logging != nil && cfg.Logging.Provider != "" {
+		return cfg.Logging.Provider
 	}
-
-	// Default to file provider for controller (central hub)
 	return "file"
 }
 
 // getLogProviderConfig creates provider-specific configuration
+// Note: To customize, use config file with logging.config section and ${ENV_VAR:-default} syntax
 func getLogProviderConfig(cfg *config.Config) map[string]interface{} {
-	providerConfig := make(map[string]interface{})
-
-	// Get configuration from environment variables with defaults
-	logDir := os.Getenv("CFGMS_LOG_DIR")
-	if logDir == "" {
-		logDir = "/var/log/cfgms"
+	// Use config values if available
+	if cfg.Logging != nil && cfg.Logging.Config != nil && len(cfg.Logging.Config) > 0 {
+		return cfg.Logging.Config
 	}
 
-	maxFileSizeStr := os.Getenv("CFGMS_LOG_MAX_FILE_SIZE")
-	maxFileSize := int64(100 * 1024 * 1024) // 100MB default
-	if maxFileSizeStr != "" {
-		if parsed, err := strconv.ParseInt(maxFileSizeStr, 10, 64); err == nil {
-			maxFileSize = parsed
+	// Return sensible defaults if no config provided
+	provider := getLogProvider(cfg)
+
+	switch provider {
+	case "timescale":
+		// TimescaleDB defaults
+		return map[string]interface{}{
+			"host":     "localhost",
+			"port":     "5432",
+			"database": "cfgms",
+			"username": "cfgms",
+			"password": "cfgms",
+			"ssl_mode": "disable",
+		}
+
+	default:
+		// File provider defaults
+		return map[string]interface{}{
+			"directory":        "/var/log/cfgms",
+			"max_file_size":    int64(100 * 1024 * 1024), // 100MB
+			"max_files":        10,
+			"compress_rotated": true,
 		}
 	}
-
-	maxFilesStr := os.Getenv("CFGMS_LOG_MAX_FILES")
-	maxFiles := 10 // default
-	if maxFilesStr != "" {
-		if parsed, err := strconv.Atoi(maxFilesStr); err == nil {
-			maxFiles = parsed
-		}
-	}
-
-	// Default file provider configuration for controller
-	providerConfig["directory"] = logDir
-	providerConfig["max_file_size"] = maxFileSize
-	providerConfig["max_files"] = maxFiles
-	providerConfig["compress_rotated"] = true
-
-	return providerConfig
 }

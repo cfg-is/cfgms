@@ -1,10 +1,12 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package cache
 
 import "errors"
 
 // Common cache errors
 var (
-	ErrCacheMiss = errors.New("cache miss")
+	ErrCacheMiss  = errors.New("cache miss")
 	ErrCacheWrite = errors.New("cache write failed")
 )
 

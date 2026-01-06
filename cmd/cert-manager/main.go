@@ -1,16 +1,18 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // cert-manager is a CLI tool for CFGMS certificate management operations.
 //
 // This tool provides command-line access to certificate management functionality
 // including CA initialization, certificate generation, validation, and renewal.
 //
 // Usage:
-//   cert-manager init-ca --org "CFGMS" --country "US" --storage /etc/cfgms/certs
-//   cert-manager generate-server --common-name "cfgms-controller" --dns "localhost,controller.local"
-//   cert-manager generate-client --common-name "steward-001" --client-id "steward-001"
-//   cert-manager list
-//   cert-manager validate --serial 123456789
-//   cert-manager renew --serial 123456789
 //
+//	cert-manager init-ca --org "CFGMS" --country "US" --storage /etc/cfgms/certs
+//	cert-manager generate-server --common-name "cfgms-controller" --dns "localhost,controller.local"
+//	cert-manager generate-client --common-name "steward-001" --client-id "steward-001"
+//	cert-manager list
+//	cert-manager validate --serial 123456789
+//	cert-manager renew --serial 123456789
 package main
 
 import (
@@ -20,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+
 	"github.com/cfgis/cfgms/pkg/cert"
 )
 
@@ -46,7 +49,7 @@ func main() {
 			if cmd.Name() == "init-ca" {
 				return nil
 			}
-			
+
 			var err error
 			manager, err = cert.NewManager(&cert.ManagerConfig{
 				StoragePath:    storagePath,
@@ -55,7 +58,7 @@ func main() {
 			if err != nil {
 				return fmt.Errorf("failed to initialize certificate manager: %w", err)
 			}
-			
+
 			return nil
 		},
 	}
@@ -266,7 +269,7 @@ func listCmd() *cobra.Command {
 				return nil
 			}
 
-			safePrint("%-12s %-20s %-40s %-12s %-20s %-8s\n", 
+			safePrint("%-12s %-20s %-40s %-12s %-20s %-8s\n",
 				"Type", "Common Name", "Serial Number", "Status", "Expires", "Days Left")
 			safePrint("%s\n", strings.Repeat("-", 120))
 
@@ -415,8 +418,8 @@ func statsCmd() *cobra.Command {
 
 func exportCmd() *cobra.Command {
 	var (
-		serialNumber     string
-		outputDir        string
+		serialNumber      string
+		outputDir         string
 		includePrivateKey bool
 	)
 

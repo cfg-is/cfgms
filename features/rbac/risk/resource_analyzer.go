@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package risk
 
 import (
@@ -10,171 +12,171 @@ import (
 
 // ResourceRiskAnalyzer analyzes resource-specific risk factors for access requests
 type ResourceRiskAnalyzer struct {
-	sensitivityClassifier     *ResourceSensitivityClassifier
-	accessPatternAnalyzer     *ResourceAccessPatternAnalyzer
-	complianceValidator       *ResourceComplianceValidator
-	businessImpactAssessor    *BusinessImpactAssessor
-	dataClassificationEngine  *DataClassificationEngine
+	sensitivityClassifier    *ResourceSensitivityClassifier
+	accessPatternAnalyzer    *ResourceAccessPatternAnalyzer
+	complianceValidator      *ResourceComplianceValidator
+	businessImpactAssessor   *BusinessImpactAssessor
+	dataClassificationEngine *DataClassificationEngine
 }
 
 // ResourceSensitivityClassifier classifies resource sensitivity levels
 type ResourceSensitivityClassifier struct {
-	classificationRules       map[string]SensitivityRule
-	dataTypeClassifications   map[string]ResourceSensitivity
-	resourceCatalogue        map[string]ResourceMetadata
+	classificationRules     map[string]SensitivityRule
+	dataTypeClassifications map[string]ResourceSensitivity
+	resourceCatalogue       map[string]ResourceMetadata
 }
 
 // ResourceAccessPatternAnalyzer analyzes resource access patterns
 type ResourceAccessPatternAnalyzer struct {
-	accessHistoryDB          *AccessHistoryDatabase
-	patternLearner           *ResourcePatternLearner
-	anomalyDetector          *ResourceAnomalyDetector
+	accessHistoryDB *AccessHistoryDatabase
+	patternLearner  *ResourcePatternLearner
+	anomalyDetector *ResourceAnomalyDetector
 }
 
 // ResourceComplianceValidator validates compliance requirements
 type ResourceComplianceValidator struct {
-	complianceFrameworks     map[string]ComplianceFramework
-	requirementEngine        *ComplianceRequirementEngine
-	violationDetector        *ComplianceViolationDetector
+	complianceFrameworks map[string]ComplianceFramework
+	requirementEngine    *ComplianceRequirementEngine
+	violationDetector    *ComplianceViolationDetector
 }
 
 // BusinessImpactAssessor assesses business impact of resource access
 type BusinessImpactAssessor struct {
-	businessValueCalculator  *BusinessValueCalculator
-	criticalityAnalyzer      *ResourceCriticalityAnalyzer
-	dependencyMapper         *ServiceDependencyMapper
-	customerImpactAnalyzer   *CustomerImpactAnalyzer
+	businessValueCalculator *BusinessValueCalculator
+	criticalityAnalyzer     *ResourceCriticalityAnalyzer
+	dependencyMapper        *ServiceDependencyMapper
+	customerImpactAnalyzer  *CustomerImpactAnalyzer
 }
 
 // DataClassificationEngine handles data classification
 type DataClassificationEngine struct {
-	classificationPolicies   map[string]ClassificationPolicy
-	dataDiscoveryEngine      *DataDiscoveryEngine
-	labelingService          *DataLabelingService
+	classificationPolicies map[string]ClassificationPolicy
+	dataDiscoveryEngine    *DataDiscoveryEngine
+	labelingService        *DataLabelingService
 }
 
 // Supporting data structures
 
 // ResourceMetadata contains metadata about resources
 type ResourceMetadata struct {
-	ResourceID        string                     `json:"resource_id"`
-	ResourceType      string                     `json:"resource_type"`
-	Name              string                     `json:"name"`
-	Description       string                     `json:"description"`
-	Owner             string                     `json:"owner"`
-	Sensitivity       ResourceSensitivity        `json:"sensitivity"`
-	Classification    DataClassification         `json:"classification"`
-	BusinessValue     float64                    `json:"business_value"`
-	Criticality       ResourceCriticality        `json:"criticality"`
-	ComplianceFlags   []string                   `json:"compliance_flags"`
-	DataTypes         []string                   `json:"data_types"`
-	CreatedAt         time.Time                  `json:"created_at"`
-	LastUpdated       time.Time                  `json:"last_updated"`
-	Tags              map[string]string          `json:"tags"`
-	Attributes        map[string]interface{}     `json:"attributes"`
+	ResourceID      string                 `json:"resource_id"`
+	ResourceType    string                 `json:"resource_type"`
+	Name            string                 `json:"name"`
+	Description     string                 `json:"description"`
+	Owner           string                 `json:"owner"`
+	Sensitivity     ResourceSensitivity    `json:"sensitivity"`
+	Classification  DataClassification     `json:"classification"`
+	BusinessValue   float64                `json:"business_value"`
+	Criticality     ResourceCriticality    `json:"criticality"`
+	ComplianceFlags []string               `json:"compliance_flags"`
+	DataTypes       []string               `json:"data_types"`
+	CreatedAt       time.Time              `json:"created_at"`
+	LastUpdated     time.Time              `json:"last_updated"`
+	Tags            map[string]string      `json:"tags"`
+	Attributes      map[string]interface{} `json:"attributes"`
 }
 
 // SensitivityRule defines rules for classifying resource sensitivity
 type SensitivityRule struct {
-	RuleID       string                     `json:"rule_id"`
-	Name         string                     `json:"name"`
-	Conditions   []RuleCondition            `json:"conditions"`
-	Sensitivity  ResourceSensitivity        `json:"sensitivity"`
-	Priority     int                        `json:"priority"`
-	Enabled      bool                       `json:"enabled"`
+	RuleID      string              `json:"rule_id"`
+	Name        string              `json:"name"`
+	Conditions  []RuleCondition     `json:"conditions"`
+	Sensitivity ResourceSensitivity `json:"sensitivity"`
+	Priority    int                 `json:"priority"`
+	Enabled     bool                `json:"enabled"`
 }
 
 // ComplianceFramework defines compliance framework requirements
 type ComplianceFramework struct {
-	FrameworkID     string                     `json:"framework_id"`
-	Name            string                     `json:"name"`
-	Version         string                     `json:"version"`
-	Requirements    []ComplianceRequirement    `json:"requirements"`
-	DataTypes       []string                   `json:"data_types"`
-	Regions         []string                   `json:"regions"`
-	Industries      []string                   `json:"industries"`
+	FrameworkID  string                  `json:"framework_id"`
+	Name         string                  `json:"name"`
+	Version      string                  `json:"version"`
+	Requirements []ComplianceRequirement `json:"requirements"`
+	DataTypes    []string                `json:"data_types"`
+	Regions      []string                `json:"regions"`
+	Industries   []string                `json:"industries"`
 }
 
 // ComplianceRequirement defines a specific compliance requirement
 type ComplianceRequirement struct {
-	RequirementID   string                     `json:"requirement_id"`
-	Name            string                     `json:"name"`
-	Description     string                     `json:"description"`
-	Severity        string                     `json:"severity"`
-	Controls        []string                   `json:"controls"`
-	DataTypes       []string                   `json:"data_types"`
-	Actions         []string                   `json:"actions"`
-	Conditions      []RuleCondition            `json:"conditions"`
+	RequirementID string          `json:"requirement_id"`
+	Name          string          `json:"name"`
+	Description   string          `json:"description"`
+	Severity      string          `json:"severity"`
+	Controls      []string        `json:"controls"`
+	DataTypes     []string        `json:"data_types"`
+	Actions       []string        `json:"actions"`
+	Conditions    []RuleCondition `json:"conditions"`
 }
 
 // ClassificationPolicy defines data classification policies
 type ClassificationPolicy struct {
-	PolicyID        string                     `json:"policy_id"`
-	Name            string                     `json:"name"`
-	DataTypes       []string                   `json:"data_types"`
-	Classification  DataClassification         `json:"classification"`
-	Rules           []ClassificationRule       `json:"rules"`
-	AutoApply       bool                       `json:"auto_apply"`
-	Priority        int                        `json:"priority"`
+	PolicyID       string               `json:"policy_id"`
+	Name           string               `json:"name"`
+	DataTypes      []string             `json:"data_types"`
+	Classification DataClassification   `json:"classification"`
+	Rules          []ClassificationRule `json:"rules"`
+	AutoApply      bool                 `json:"auto_apply"`
+	Priority       int                  `json:"priority"`
 }
 
 // ClassificationRule defines rules for data classification
 type ClassificationRule struct {
-	RuleID      string                     `json:"rule_id"`
-	Pattern     string                     `json:"pattern"`
-	Confidence  float64                    `json:"confidence"`
-	Context     string                     `json:"context"`
-	Action      string                     `json:"action"`
+	RuleID     string  `json:"rule_id"`
+	Pattern    string  `json:"pattern"`
+	Confidence float64 `json:"confidence"`
+	Context    string  `json:"context"`
+	Action     string  `json:"action"`
 }
 
 // ResourceAccessHistory represents historical access data for a resource
 type ResourceAccessHistory struct {
-	ResourceID           string                     `json:"resource_id"`
-	AccessCount          int                        `json:"access_count"`
-	UniqueUsers          int                        `json:"unique_users"`
-	LastAccessed         time.Time                  `json:"last_accessed"`
-	AverageAccessTime    time.Duration              `json:"average_access_time"`
-	PeakAccessHours      []int                      `json:"peak_access_hours"`
-	TypicalUsers         map[string]float64         `json:"typical_users"`
-	AccessTrends         AccessTrendData            `json:"access_trends"`
-	AnomalyHistory       []ResourceAnomalyRecord    `json:"anomaly_history"`
-	ComplianceEvents     []ComplianceEvent          `json:"compliance_events"`
+	ResourceID        string                  `json:"resource_id"`
+	AccessCount       int                     `json:"access_count"`
+	UniqueUsers       int                     `json:"unique_users"`
+	LastAccessed      time.Time               `json:"last_accessed"`
+	AverageAccessTime time.Duration           `json:"average_access_time"`
+	PeakAccessHours   []int                   `json:"peak_access_hours"`
+	TypicalUsers      map[string]float64      `json:"typical_users"`
+	AccessTrends      AccessTrendData         `json:"access_trends"`
+	AnomalyHistory    []ResourceAnomalyRecord `json:"anomaly_history"`
+	ComplianceEvents  []ComplianceEvent       `json:"compliance_events"`
 }
 
 // AccessTrendData contains access trend information
 type AccessTrendData struct {
-	TrendDirection       TrendDirection             `json:"trend_direction"`
-	VolumeChange         float64                    `json:"volume_change"`
-	UserDiversityChange  float64                    `json:"user_diversity_change"`
-	PatternStability     float64                    `json:"pattern_stability"`
-	LastAnalyzed         time.Time                  `json:"last_analyzed"`
+	TrendDirection      TrendDirection `json:"trend_direction"`
+	VolumeChange        float64        `json:"volume_change"`
+	UserDiversityChange float64        `json:"user_diversity_change"`
+	PatternStability    float64        `json:"pattern_stability"`
+	LastAnalyzed        time.Time      `json:"last_analyzed"`
 }
 
 // ResourceAnomalyRecord represents a resource access anomaly
 type ResourceAnomalyRecord struct {
-	AnomalyID       string                     `json:"anomaly_id"`
-	Timestamp       time.Time                  `json:"timestamp"`
-	AnomalyType     string                     `json:"anomaly_type"`
-	Severity        float64                    `json:"severity"`
-	Description     string                     `json:"description"`
-	UserID          string                     `json:"user_id,omitempty"`
-	Details         map[string]interface{}     `json:"details"`
-	Resolved        bool                       `json:"resolved"`
-	ResolvedAt      *time.Time                 `json:"resolved_at,omitempty"`
+	AnomalyID   string                 `json:"anomaly_id"`
+	Timestamp   time.Time              `json:"timestamp"`
+	AnomalyType string                 `json:"anomaly_type"`
+	Severity    float64                `json:"severity"`
+	Description string                 `json:"description"`
+	UserID      string                 `json:"user_id,omitempty"`
+	Details     map[string]interface{} `json:"details"`
+	Resolved    bool                   `json:"resolved"`
+	ResolvedAt  *time.Time             `json:"resolved_at,omitempty"`
 }
 
 // ComplianceEvent represents a compliance-related event
 type ComplianceEvent struct {
-	EventID         string                     `json:"event_id"`
-	Timestamp       time.Time                  `json:"timestamp"`
-	EventType       string                     `json:"event_type"`
-	Framework       string                     `json:"framework"`
-	Requirement     string                     `json:"requirement"`
-	Severity        string                     `json:"severity"`
-	Status          string                     `json:"status"`
-	Description     string                     `json:"description"`
-	UserID          string                     `json:"user_id,omitempty"`
-	Remediation     string                     `json:"remediation,omitempty"`
+	EventID     string    `json:"event_id"`
+	Timestamp   time.Time `json:"timestamp"`
+	EventType   string    `json:"event_type"`
+	Framework   string    `json:"framework"`
+	Requirement string    `json:"requirement"`
+	Severity    string    `json:"severity"`
+	Status      string    `json:"status"`
+	Description string    `json:"description"`
+	UserID      string    `json:"user_id,omitempty"`
+	Remediation string    `json:"remediation,omitempty"`
 }
 
 // NewResourceRiskAnalyzer creates a new resource risk analyzer
@@ -226,22 +228,22 @@ func (rra *ResourceRiskAnalyzer) EvaluateResourceRisk(ctx context.Context, reque
 	accessPatternWeight := 0.25
 	complianceWeight := 0.25
 	businessImpactWeight := 0.20
-	
+
 	switch sensitivityRisk.Sensitivity {
 	case ResourceSensitivitySecret, ResourceSensitivityTopSecret:
 		// For extreme sensitivity, increase sensitivity weight significantly
-		sensitivityWeight = 0.60        // 60% weight for secret/top-secret
-		accessPatternWeight = 0.15      // 15% weight
-		complianceWeight = 0.15         // 15% weight
-		businessImpactWeight = 0.10     // 10% weight
+		sensitivityWeight = 0.60    // 60% weight for secret/top-secret
+		accessPatternWeight = 0.15  // 15% weight
+		complianceWeight = 0.15     // 15% weight
+		businessImpactWeight = 0.10 // 10% weight
 	case ResourceSensitivityConfidential:
 		// For high sensitivity, moderately increase sensitivity weight
-		sensitivityWeight = 0.45        // 45% weight for confidential
-		accessPatternWeight = 0.20      // 20% weight
-		complianceWeight = 0.20         // 20% weight
-		businessImpactWeight = 0.15     // 15% weight
+		sensitivityWeight = 0.45    // 45% weight for confidential
+		accessPatternWeight = 0.20  // 20% weight
+		complianceWeight = 0.20     // 20% weight
+		businessImpactWeight = 0.15 // 15% weight
 	}
-	
+
 	riskComponents := []float64{
 		sensitivityRisk.RiskScore * sensitivityWeight,
 		accessPatternRisk.RiskScore * accessPatternWeight,
@@ -761,7 +763,7 @@ func (rra *ResourceRiskAnalyzer) hasDataRetentionRequirements(requirements []Com
 
 func NewResourceSensitivityClassifier() *ResourceSensitivityClassifier {
 	return &ResourceSensitivityClassifier{
-		classificationRules:     make(map[string]SensitivityRule),
+		classificationRules: make(map[string]SensitivityRule),
 		dataTypeClassifications: map[string]ResourceSensitivity{
 			"pii":       ResourceSensitivityConfidential,
 			"phi":       ResourceSensitivitySecret,
@@ -775,7 +777,7 @@ func NewResourceSensitivityClassifier() *ResourceSensitivityClassifier {
 func (rsc *ResourceSensitivityClassifier) ClassifyResource(ctx context.Context, resourceContext *ResourceContext) (ResourceSensitivity, error) {
 	// Simplified resource classification
 	resourceType := strings.ToLower(resourceContext.ResourceType)
-	
+
 	switch {
 	case strings.Contains(resourceType, "database") || strings.Contains(resourceType, "db"):
 		return ResourceSensitivityConfidential, nil
@@ -869,7 +871,7 @@ func NewBusinessImpactAssessor() *BusinessImpactAssessor {
 func (bia *BusinessImpactAssessor) AssessResourceCriticality(ctx context.Context, resourceContext *ResourceContext) (ResourceCriticality, error) {
 	// Simplified criticality assessment
 	resourceType := strings.ToLower(resourceContext.ResourceType)
-	
+
 	switch {
 	case strings.Contains(resourceType, "production") || strings.Contains(resourceType, "critical"):
 		return ResourceCriticalityCritical, nil
@@ -895,7 +897,7 @@ func (bia *BusinessImpactAssessor) HasServiceDependency(ctx context.Context, res
 func (bia *BusinessImpactAssessor) AssessCustomerImpact(ctx context.Context, resourceContext *ResourceContext) (CustomerImpact, error) {
 	// Simplified customer impact assessment
 	resourceType := strings.ToLower(resourceContext.ResourceType)
-	
+
 	switch {
 	case strings.Contains(resourceType, "customer") || strings.Contains(resourceType, "frontend"):
 		return CustomerImpactHigh, nil
@@ -919,7 +921,7 @@ func NewDataClassificationEngine() *DataClassificationEngine {
 func (dce *DataClassificationEngine) ClassifyData(ctx context.Context, resourceContext *ResourceContext) (DataClassification, error) {
 	// Simplified data classification
 	resourceName := strings.ToLower(resourceContext.ResourceName)
-	
+
 	switch {
 	case strings.Contains(resourceName, "public") || strings.Contains(resourceName, "open"):
 		return DataClassificationPublic, nil

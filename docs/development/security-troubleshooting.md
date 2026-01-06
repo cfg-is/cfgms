@@ -33,7 +33,9 @@ make security-remediation-report
 ### Trivy Issues
 
 #### Database Update Failures
+
 **Error**: `Failed to initialize Trivy DB`
+
 ```bash
 # Solution 1: Clear cache and retry
 trivy clean --all
@@ -44,7 +46,9 @@ trivy image --download-db-only
 ```
 
 #### Network/Proxy Issues
+
 **Error**: `Failed to fetch security database`
+
 ```bash
 # Solution: Configure proxy
 export HTTP_PROXY=http://proxy:8080
@@ -53,7 +57,9 @@ trivy fs . --offline  # Use offline mode
 ```
 
 #### Permission Issues
+
 **Error**: `Permission denied writing to cache`
+
 ```bash
 # Solution: Fix cache permissions
 sudo chown -R $USER ~/.cache/trivy
@@ -61,7 +67,9 @@ chmod -R 755 ~/.cache/trivy
 ```
 
 #### Large Repository Timeouts
+
 **Error**: `Scan timeout exceeded`
+
 ```bash
 # Solution: Increase timeout and scope
 trivy fs . --timeout 10m --scanners vuln
@@ -72,7 +80,9 @@ trivy fs ./features --timeout 5m
 ### Nancy Issues
 
 #### Installation Problems
+
 **Error**: `nancy: command not found`
+
 ```bash
 # Solution 1: Reinstall with make target
 make install-nancy
@@ -83,7 +93,9 @@ curl -sSfL https://github.com/sonatypecommunity/nancy/releases/download/v1.0.51/
 ```
 
 #### Go Module Issues
+
 **Error**: `Could not parse go.mod`
+
 ```bash
 # Solution: Verify go.mod format
 go mod tidy
@@ -92,7 +104,9 @@ make security-deps
 ```
 
 #### False Positives
+
 **Error**: Nancy reports vulnerabilities in vendor code
+
 ```bash
 # Solution: Use .nancy-ignore file
 echo "CVE-2021-xxxxx" > .nancy-ignore
@@ -102,7 +116,9 @@ nancy sleuth --exclude-vulnerability-file .nancy-ignore
 ### gosec Issues
 
 #### High Memory Usage
+
 **Error**: `gosec killed (OOM)`
+
 ```bash
 # Solution: Limit scan scope
 gosec -exclude-dir=vendor ./...
@@ -110,7 +126,9 @@ gosec ./features/... ./pkg/...  # Specific directories only
 ```
 
 #### False Positives
+
 **Error**: gosec reports issues in test files
+
 ```bash
 # Solution 1: Use .gosecrc configuration
 cat > .gosecrc << EOF
@@ -126,7 +144,9 @@ gosec -exclude G204,G304 -exclude-dir vendor ./...
 ```
 
 #### SSL/TLS Check Issues
+
 **Error**: G402 - TLS InsecureSkipVerify set true
+
 ```bash
 # Solution: Properly handle test vs production code
 # In test files, add build constraint:
@@ -140,7 +160,9 @@ gosec -tests=false ./...
 ### staticcheck Issues
 
 #### Performance Problems
+
 **Error**: staticcheck runs very slowly
+
 ```bash
 # Solution 1: Limit scope
 staticcheck ./features/... ./pkg/...
@@ -154,7 +176,9 @@ staticcheck ./...
 ```
 
 #### Module Resolution Issues
+
 **Error**: `could not load packages`
+
 ```bash
 # Solution: Clean and rebuild
 go clean -modcache
@@ -167,8 +191,10 @@ staticcheck ./...
 ### Workflow Failures
 
 #### Security Gate Not Blocking
+
 **Symptoms**: Deployment proceeds despite security issues
 **Diagnosis**:
+
 ```bash
 # Check workflow run logs
 gh run list --workflow=production-gates.yml
@@ -180,13 +206,16 @@ gh api repos/cfg-is/cfgms/actions/runs/[run-id]/jobs | \
 ```
 
 **Solutions**:
+
 1. Verify `deployment-allowed` output is `false`
 2. Check conditional logic in dependent jobs
 3. Ensure security scan actually detected issues
 
 #### SARIF Upload Failures
+
 **Error**: `Error uploading SARIF file`
 **Solutions**:
+
 ```bash
 # Check SARIF file validity
 cat sarif-results/trivy.sarif | jq .
@@ -199,8 +228,10 @@ gh api repos/cfg-is/cfgms/security-advisories --method GET
 ```
 
 #### Cache Issues
+
 **Error**: Cache restore failures or misses
 **Solutions**:
+
 ```yaml
 # Optimize cache keys
 - name: Cache Go modules
@@ -215,8 +246,10 @@ gh api repos/cfg-is/cfgms/security-advisories --method GET
 ```
 
 #### Parallel Job Failures
+
 **Error**: Jobs failing due to resource contention
 **Solutions**:
+
 1. Reduce concurrent job count
 2. Add job dependencies to sequence resource-heavy operations
 3. Increase timeout values
@@ -224,8 +257,10 @@ gh api repos/cfg-is/cfgms/security-advisories --method GET
 ### Emergency Override Issues
 
 #### Override Not Recognized
+
 **Symptoms**: Emergency override input ignored
 **Diagnosis**:
+
 ```bash
 # Check workflow dispatch inputs
 gh run list --workflow=production-gates.yml -L 1
@@ -236,13 +271,16 @@ gh run view [run-id] --log-failed
 ```
 
 **Solutions**:
+
 1. Ensure `override_reason` is provided when using `emergency_override: true`
 2. Verify EMERGENCY_DEPLOYMENT file is in repository root
 3. Check override detection logic in workflow
 
 #### Audit Trail Missing
+
 **Symptoms**: No audit artifacts generated
 **Solutions**:
+
 1. Check artifact upload step execution
 2. Verify audit trail generation logic
 3. Ensure proper JSON formatting in audit files
@@ -252,6 +290,7 @@ gh run view [run-id] --log-failed
 ### Slow Local Scans
 
 #### Comprehensive Diagnosis
+
 ```bash
 # Benchmark individual tools
 time make security-trivy
@@ -266,6 +305,7 @@ go env GOCACHE
 ```
 
 #### Optimization Solutions
+
 ```bash
 # 1. Optimize Go build cache
 export GOCACHE=/tmp/go-build-cache
@@ -282,7 +322,9 @@ gosec -exclude-dir vendor,testdata ./...
 ### GitHub Actions Performance
 
 #### Slow Workflow Execution
+
 **Diagnosis**:
+
 ```bash
 # Analyze workflow timing
 gh run view [run-id] --json jobs | \
@@ -293,6 +335,7 @@ gh run view [run-id] --log | grep -i "resource\|memory\|cpu"
 ```
 
 **Solutions**:
+
 1. Optimize caching strategies
 2. Use faster runners (if available)
 3. Reduce scan scope for non-critical paths
@@ -303,6 +346,7 @@ gh run view [run-id] --log | grep -i "resource\|memory\|cpu"
 ### Corporate Proxy/Firewall
 
 #### Tool Configuration
+
 ```bash
 # Set proxy for all tools
 export HTTP_PROXY=http://proxy.corp.com:8080
@@ -314,6 +358,7 @@ trivy --proxy http://proxy.corp.com:8080 fs .
 ```
 
 #### Certificate Issues
+
 ```bash
 # Add corporate certificates
 export SSL_CERT_FILE=/path/to/corp-ca-bundle.crt
@@ -326,6 +371,7 @@ export TRIVY_INSECURE=true
 ### Database Update Issues
 
 #### Offline Mode Setup
+
 ```bash
 # Pre-download databases
 trivy image --download-db-only
@@ -340,7 +386,9 @@ trivy fs . --offline
 ### Claude Code Remediation
 
 #### Report Generation Failures
+
 **Error**: No remediation report generated
+
 ```bash
 # Debug report generation
 make security-remediation-report
@@ -349,7 +397,9 @@ cat /tmp/cfgms-security-remediation.json | jq .
 ```
 
 #### Invalid JSON Format
+
 **Error**: Malformed remediation JSON
+
 ```bash
 # Validate JSON format
 cat /tmp/cfgms-security-remediation.json | python -m json.tool
@@ -361,6 +411,7 @@ make security-remediation-report 2>&1 | tee remediation-debug.log
 ### Version Compatibility
 
 #### Tool Version Mismatches
+
 ```bash
 # Check current versions
 trivy --version      # Should be latest stable
@@ -376,12 +427,14 @@ go install honnef.co/go/tools/cmd/staticcheck@latest
 ## Escalation Procedures
 
 ### Level 1: Self-Service
+
 1. Check this troubleshooting guide
 2. Review tool-specific documentation
 3. Check GitHub Actions logs
 4. Try clean reinstallation
 
 ### Level 2: Team Support
+
 1. Create GitHub issue with `security` and `bug` labels
 2. Include diagnostic information:
    - Tool versions
@@ -390,14 +443,18 @@ go install honnef.co/go/tools/cmd/staticcheck@latest
    - Environment details
 
 ### Level 3: Security Team
+
 For security-critical issues:
+
 1. Escalate to security team immediately
 2. Document security impact
 3. Consider emergency override if appropriate
 4. Plan post-resolution security review
 
 ### Level 4: Emergency Response
+
 For production-blocking security issues:
+
 1. Use emergency override process
 2. Document override reason thoroughly
 3. Notify security and DevOps teams
@@ -406,6 +463,7 @@ For production-blocking security issues:
 ## Diagnostic Commands Reference
 
 ### Environment Diagnostics
+
 ```bash
 # System information
 echo "OS: $(uname -a)"
@@ -420,6 +478,7 @@ env | grep -E "(PROXY|SSL|CERT|GOPATH|GOCACHE)"
 ```
 
 ### Security Scan Diagnostics
+
 ```bash
 # Full diagnostic run
 make security-scan 2>&1 | tee security-diagnostic.log
@@ -430,6 +489,7 @@ gosec -verbose ./... 2>&1 | tee gosec-debug.log
 ```
 
 ### GitHub Actions Diagnostics
+
 ```bash
 # Recent workflow runs
 gh run list --workflow=security-scan.yml -L 5
@@ -444,18 +504,21 @@ gh run download [run-id]
 ## Prevention Best Practices
 
 ### Local Development
+
 1. Run `make security-check` regularly during development
 2. Use `make test-with-security` before commits
 3. Keep security tools updated monthly
 4. Configure IDE/editor security plugin integration
 
 ### CI/CD Maintenance
+
 1. Monitor workflow performance trends
 2. Update tool versions quarterly
 3. Review and update ignore files regularly
 4. Test emergency override procedures
 
 ### Team Coordination
+
 1. Document all override usage
 2. Share security findings with team
 3. Conduct monthly security workflow reviews
@@ -464,6 +527,7 @@ gh run download [run-id]
 ## Quick Fix Scripts
 
 ### Reset All Security Tools
+
 ```bash
 #!/bin/bash
 # reset-security-tools.sh
@@ -487,6 +551,7 @@ echo "Security tools reset complete!"
 ```
 
 ### Emergency Scan Override
+
 ```bash
 #!/bin/bash
 # emergency-scan.sh

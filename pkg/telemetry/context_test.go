@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package telemetry_test
 
 import (
@@ -42,7 +44,7 @@ func TestCorrelationID(t *testing.T) {
 
 	t.Run("missing correlation ID returns empty", func(t *testing.T) {
 		ctx := context.Background()
-		
+
 		// Should return empty string when not set
 		retrievedID := telemetry.GetCorrelationID(ctx)
 		assert.Empty(t, retrievedID)
@@ -92,7 +94,7 @@ func TestTraceID(t *testing.T) {
 
 	t.Run("missing trace ID returns empty", func(t *testing.T) {
 		ctx := context.Background()
-		
+
 		// Should return empty string when not set
 		retrievedID := telemetry.GetTraceID(ctx)
 		assert.Empty(t, retrievedID)
@@ -130,7 +132,7 @@ func TestSpanID(t *testing.T) {
 func TestMultipleIDs(t *testing.T) {
 	t.Run("all IDs in same context", func(t *testing.T) {
 		ctx := context.Background()
-		
+
 		correlationID := telemetry.GenerateCorrelationID()
 		traceID := telemetry.GenerateTraceID()
 		spanID := telemetry.GenerateSpanID()
@@ -148,11 +150,11 @@ func TestMultipleIDs(t *testing.T) {
 
 	t.Run("update individual IDs", func(t *testing.T) {
 		ctx := context.Background()
-		
+
 		// Set initial IDs
 		ctx = telemetry.WithCorrelationID(ctx, "initial-correlation")
 		ctx = telemetry.WithTraceID(ctx, "initial-trace")
-		
+
 		// Update correlation ID
 		newCorrelationID := telemetry.GenerateCorrelationID()
 		ctx = telemetry.WithCorrelationID(ctx, newCorrelationID)
@@ -196,10 +198,10 @@ func TestContextPropagation(t *testing.T) {
 func TestEnsureCorrelationID(t *testing.T) {
 	t.Run("add correlation ID if missing", func(t *testing.T) {
 		ctx := context.Background()
-		
+
 		// Ensure correlation ID exists
 		ctx = telemetry.EnsureCorrelationID(ctx)
-		
+
 		// Should have a correlation ID now
 		id := telemetry.GetCorrelationID(ctx)
 		assert.NotEmpty(t, id)
@@ -209,10 +211,10 @@ func TestEnsureCorrelationID(t *testing.T) {
 		ctx := context.Background()
 		existingID := telemetry.GenerateCorrelationID()
 		ctx = telemetry.WithCorrelationID(ctx, existingID)
-		
+
 		// Ensure should not change existing ID
 		ctx = telemetry.EnsureCorrelationID(ctx)
-		
+
 		assert.Equal(t, existingID, telemetry.GetCorrelationID(ctx))
 	})
 }
@@ -232,7 +234,7 @@ func BenchmarkGenerateTraceID(b *testing.B) {
 func BenchmarkContextWithCorrelationID(b *testing.B) {
 	ctx := context.Background()
 	correlationID := telemetry.GenerateCorrelationID()
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = telemetry.WithCorrelationID(ctx, correlationID)
@@ -242,7 +244,7 @@ func BenchmarkContextWithCorrelationID(b *testing.B) {
 func BenchmarkGetCorrelationID(b *testing.B) {
 	ctx := context.Background()
 	ctx = telemetry.WithCorrelationID(ctx, telemetry.GenerateCorrelationID())
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = telemetry.GetCorrelationID(ctx)
@@ -269,7 +271,7 @@ func TestIDFormats(t *testing.T) {
 	t.Run("correlation ID format", func(t *testing.T) {
 		id := telemetry.GenerateCorrelationID()
 		parts := strings.Split(id, "-")
-		
+
 		// UUID format: 8-4-4-4-12
 		assert.Len(t, parts, 5)
 		assert.Len(t, parts[0], 8)
@@ -281,7 +283,7 @@ func TestIDFormats(t *testing.T) {
 
 	t.Run("trace ID format", func(t *testing.T) {
 		id := telemetry.GenerateTraceID()
-		
+
 		// Should be 32 hex characters
 		assert.Len(t, id, 32)
 		for _, char := range id {
@@ -291,7 +293,7 @@ func TestIDFormats(t *testing.T) {
 
 	t.Run("span ID format", func(t *testing.T) {
 		id := telemetry.GenerateSpanID()
-		
+
 		// Should be 16 hex characters
 		assert.Len(t, id, 16)
 		for _, char := range id {

@@ -1,0 +1,154 @@
+metadata:
+  id: network-diagnostics
+  name: Network Diagnostics
+  description: Performs comprehensive network connectivity and configuration diagnostics
+  version:
+    major: 1
+    minor: 0
+    patch: 0
+  author: cfgms-team@cfg.is
+  tags:
+    - network
+    - diagnostics
+    - troubleshooting
+  category: monitoring
+  platform:
+    - linux
+    - darwin
+  shell: bash
+  parameters:
+    - name: TEST_HOSTS
+      type: string
+      description: Comma-separated list of hosts to test connectivity
+      required: false
+      default: "8.8.8.8,1.1.1.1,google.com"
+  created_at: 2025-10-13T00:00:00Z
+  updated_at: 2025-10-13T00:00:00Z
+
+content: |
+  #!/bin/bash
+  set -euo pipefail
+
+  TEST_HOSTS="${TEST_HOSTS:-8.8.8.8,1.1.1.1,google.com}"
+  ISSUES=0
+
+  echo "========================================="
+  echo "  NETWORK DIAGNOSTICS"
+  echo "========================================="
+  echo ""
+  echo "Timestamp: $(date)"
+  echo "Hostname: $(hostname)"
+  echo ""
+
+  # Network interfaces
+  echo "--- Network Interfaces ---"
+  if command -v ip >/dev/null; then
+      ip -brief addr show
+  else
+      ifconfig | grep -E "^[a-z]|inet "
+  fi
+
+  # Default gateway
+  echo ""
+  echo "--- Default Gateway ---"
+  if command -v ip >/dev/null; then
+      default_gw=$(ip route | grep default | awk '{print $3}')
+      if [ -n "$default_gw" ]; then
+          echo "Gateway: $default_gw"
+          if ping -c 2 -W 2 "$default_gw" >/dev/null 2>&1; then
+              echo "[OK] Gateway reachable"
+          else
+              echo "[FAIL] Gateway unreachable"
+              ((ISSUES++))
+          fi
+      else
+          echo "[WARN] No default gateway configured"
+          ((ISSUES++))
+      fi
+  else
+      netstat -rn | grep -E "^default|^0.0.0.0"
+  fi
+
+  # DNS Resolution
+  echo ""
+  echo "--- DNS Resolution ---"
+  if [ -f /etc/resolv.conf ]; then
+      dns_servers=$(grep "^nameserver" /etc/resolv.conf | awk '{print $2}')
+      echo "DNS Servers:"
+      echo "$dns_servers" | sed 's/^/  /'
+
+      if host google.com >/dev/null 2>&1 || nslookup google.com >/dev/null 2>&1; then
+          echo "[OK] DNS resolution working"
+      else
+          echo "[FAIL] DNS resolution failed"
+          ((ISSUES++))
+      fi
+  else
+      echo "[WARN] /etc/resolv.conf not found"
+  fi
+
+  # Connectivity tests
+  echo ""
+  echo "--- Connectivity Tests ---"
+  IFS=',' read -ra HOSTS <<< "$TEST_HOSTS"
+  for host in "${HOSTS[@]}"; do
+      if ping -c 2 -W 2 "$host" >/dev/null 2>&1; then
+          echo "[OK] $host is reachable"
+      else
+          echo "[FAIL] $host is unreachable"
+          ((ISSUES++))
+      fi
+  done
+
+  # Port connectivity (common services)
+  echo ""
+  echo "--- Common Services ---"
+  test_port() {
+      local host=$1
+      local port=$2
+      local name=$3
+
+      if timeout 2 bash -c "cat < /dev/null > /dev/tcp/$host/$port" 2>/dev/null; then
+          echo "[OK] $name ($host:$port) reachable"
+      else
+          echo "[INFO] $name ($host:$port) unreachable"
+      fi
+  }
+
+  test_port "8.8.8.8" "53" "DNS"
+  test_port "google.com" "80" "HTTP"
+  test_port "google.com" "443" "HTTPS"
+
+  # Network statistics
+  echo ""
+  echo "--- Network Statistics ---"
+  if command -v netstat >/dev/null; then
+      echo "Active connections:"
+      netstat -an | grep ESTABLISHED | wc -l
+      echo ""
+      echo "Listening services:"
+      netstat -tuln | grep LISTEN | awk '{print $4}' | sort -u | head -5
+  elif command -v ss >/dev/null; then
+      echo "Active connections:"
+      ss -tan | grep ESTAB | wc -l
+      echo ""
+      echo "Listening services:"
+      ss -tuln | grep LISTEN | awk '{print $5}' | sort -u | head -5
+  fi
+
+  # Summary
+  echo ""
+  echo "========================================="
+  echo "  SUMMARY"
+  echo "========================================="
+  echo "Issues found: $ISSUES"
+
+  if [ "$ISSUES" -gt 0 ]; then
+      echo "Result: ISSUES DETECTED"
+      exit 1
+  else
+      echo "Result: ALL CHECKS PASSED"
+      exit 0
+  fi
+
+hash: placeholder

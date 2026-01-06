@@ -1,0 +1,222 @@
+name: Documentation Validation
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+    # ONLY run when documentation actually changes
+    # Does NOT run on code-only PRs
+    paths:
+      - 'docs/**'
+      - '*.md'
+  push:
+    branches:
+      - main
+      - develop
+    # Same paths filter on push
+    paths:
+      - 'docs/**'
+      - '*.md'
+  workflow_dispatch:
+
+env:
+  NODE_VERSION: '20'
+
+jobs:
+  # Quick markdown linting
+  lint-markdown:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install markdownlint-cli
+        run: npm install -g markdownlint-cli
+
+      - name: Lint Markdown Files
+        run: |
+          markdownlint '**/*.md' \
+            --ignore node_modules \
+            --ignore .github \
+            --config .markdownlint.json || true
+        continue-on-error: true
+
+  # Validate markdown link integrity
+  check-links:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install markdown-link-check
+        run: npm install -g markdown-link-check
+
+      - name: Check Markdown Links
+        run: |
+          # Check all markdown files for broken links
+          find . -name "*.md" \
+            -not -path "./node_modules/*" \
+            -not -path "./.git/*" \
+            -exec echo "Checking: {}" \; \
+            -exec markdown-link-check {} \; || true
+        continue-on-error: true
+
+  # Validate CLAUDE.md structure and links
+  validate-claude-md:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: contains(github.event.pull_request.changed_files, 'CLAUDE.md') || github.event_name == 'push'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate CLAUDE.md Structure
+        run: |
+          echo "## CLAUDE.md Validation" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Check required sections exist
+          if grep -q "## Project Overview" CLAUDE.md; then
+            echo "✅ Project Overview section found" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Missing Project Overview section" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+
+          if grep -q "## Development Workflow" CLAUDE.md; then
+            echo "✅ Development Workflow section found" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Missing Development Workflow section" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+
+          if grep -q "## Core Architecture" CLAUDE.md; then
+            echo "✅ Core Architecture section found" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Missing Core Architecture section" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+
+          if grep -q "## Central Provider System" CLAUDE.md; then
+            echo "✅ Central Provider System section found" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Missing Central Provider System section" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ CLAUDE.md structure validation passed" >> $GITHUB_STEP_SUMMARY
+
+      - name: Check Internal File References
+        run: |
+          echo "## Internal Link Validation" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Extract file paths from markdown links (excluding URLs)
+          # Format: [text](path/to/file.md)
+          broken_links=0
+
+          while IFS= read -r file; do
+            # Skip URLs and anchors
+            if [[ "$file" =~ ^http ]] || [[ "$file" =~ ^# ]]; then
+              continue
+            fi
+
+            if [ ! -f "$file" ] && [ ! -d "$file" ]; then
+              echo "❌ Broken link: $file" >> $GITHUB_STEP_SUMMARY
+              broken_links=$((broken_links + 1))
+            fi
+          done < <(grep -oP '\[.*?\]\(\K[^)]+' CLAUDE.md 2>/dev/null || true)
+
+          if [ $broken_links -eq 0 ]; then
+            echo "✅ All internal file references are valid" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "❌ Found $broken_links broken link(s)" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+
+  # Validate roadmap structure
+  validate-roadmap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: contains(github.event.pull_request.changed_files, 'docs/product/roadmap.md') || github.event_name == 'push'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate Roadmap Format
+        run: |
+          echo "## Roadmap Validation" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Check for required sections
+          if grep -q "## Current Status" docs/product/roadmap.md; then
+            echo "✅ Current Status section found" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️  Missing Current Status section" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # Check for Epic structure
+          if grep -q "### Epic [0-9]" docs/product/roadmap.md; then
+            echo "✅ Epic structure found" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️  No Epic structure found" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # Count completed vs pending stories
+          completed=$(grep -c "\- \[x\]" docs/product/roadmap.md || echo "0")
+          pending=$(grep -c "\- \[ \]" docs/product/roadmap.md || echo "0")
+          total=$((completed + pending))
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Roadmap Statistics" >> $GITHUB_STEP_SUMMARY
+          echo "- Completed Stories: $completed" >> $GITHUB_STEP_SUMMARY
+          echo "- Pending Stories: $pending" >> $GITHUB_STEP_SUMMARY
+          echo "- Total Stories: $total" >> $GITHUB_STEP_SUMMARY
+
+          if [ $total -gt 0 ]; then
+            progress=$((completed * 100 / total))
+            echo "- Progress: $progress%" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # Documentation summary
+  documentation-summary:
+    runs-on: ubuntu-latest
+    needs: [lint-markdown, check-links]
+    if: always()
+    steps:
+      - name: Documentation Validation Summary
+        run: |
+          echo "## Documentation Validation Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [[ "${{ needs.lint-markdown.result }}" == "success" ]]; then
+            echo "✅ **Markdown Linting**: Passed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️  **Markdown Linting**: Issues found (non-blocking)" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [[ "${{ needs.check-links.result }}" == "success" ]]; then
+            echo "✅ **Link Checking**: Passed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️  **Link Checking**: Broken links found (non-blocking)" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Documentation Best Practices" >> $GITHUB_STEP_SUMMARY
+          echo "- Keep documentation in sync with code changes" >> $GITHUB_STEP_SUMMARY
+          echo "- Update CLAUDE.md when changing development workflow" >> $GITHUB_STEP_SUMMARY
+          echo "- Mark roadmap items complete when stories are merged" >> $GITHUB_STEP_SUMMARY
+          echo "- Use relative links for internal documentation" >> $GITHUB_STEP_SUMMARY

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package steward
 
 import (
@@ -42,7 +44,7 @@ func TestStewardCreation(t *testing.T) {
 			logger := logging.NewLogger("info")
 
 			var testCfg *Config
-			
+
 			if tt.cfg == nil {
 				// Use test configuration with certificates
 				if tt.name == "with custom config" {
@@ -77,23 +79,10 @@ func TestStewardCreation(t *testing.T) {
 			}
 
 			steward, err := New(testCfg, logger)
-			if tt.wantErr {
-				assert.Error(t, err)
-				assert.Nil(t, steward)
-			} else {
-				assert.NoError(t, err)
-				assert.NotNil(t, steward)
-
-				// Verify the steward was created successfully
-				assert.NotNil(t, steward)
-				
-				// Verify some basic properties
-				if tt.name == "with custom config" {
-					assert.Equal(t, "localhost:9090", testCfg.ControllerAddr)
-					assert.Equal(t, "test-steward-1", testCfg.ID)
-					assert.Equal(t, "debug", testCfg.LogLevel)
-				}
-			}
+			// Story #198: Controller mode deprecated - all calls to New() should fail
+			assert.Error(t, err)
+			assert.Nil(t, steward)
+			assert.Contains(t, err.Error(), "deprecated")
 		})
 	}
 }
@@ -117,14 +106,11 @@ func TestStewardLifecycle(t *testing.T) {
 	}
 
 	steward, err := New(cfg, logger)
-	require.NoError(t, err)
-
-	// Test that the steward was created successfully
-	assert.NotNil(t, steward)
-	assert.Equal(t, "test-steward-lifecycle", cfg.ID)
-	
-	// Note: We don't test Start() here as it would try to connect to a real controller
-	// Actual start/stop lifecycle testing is done in integration tests
+	// Story #198: Controller mode deprecated
+	require.Error(t, err)
+	require.Nil(t, steward)
+	require.Contains(t, err.Error(), "deprecated")
+	// Skip rest of test - controller mode not supported
 }
 
 func TestHealthMonitor(t *testing.T) {

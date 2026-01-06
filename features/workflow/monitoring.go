@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package workflow
 
 import (
@@ -19,35 +21,35 @@ type Monitor struct {
 
 // WorkflowMetrics contains aggregated metrics for workflow executions
 type WorkflowMetrics struct {
-	TotalExecutions     int64             `json:"total_executions"`
-	CompletedExecutions int64             `json:"completed_executions"`
-	FailedExecutions    int64             `json:"failed_executions"`
-	CancelledExecutions int64             `json:"cancelled_executions"`
-	AverageExecutionTime time.Duration    `json:"average_execution_time"`
-	WorkflowStats       map[string]*WorkflowStats `json:"workflow_stats"`
-	LastUpdated         time.Time         `json:"last_updated"`
+	TotalExecutions      int64                     `json:"total_executions"`
+	CompletedExecutions  int64                     `json:"completed_executions"`
+	FailedExecutions     int64                     `json:"failed_executions"`
+	CancelledExecutions  int64                     `json:"cancelled_executions"`
+	AverageExecutionTime time.Duration             `json:"average_execution_time"`
+	WorkflowStats        map[string]*WorkflowStats `json:"workflow_stats"`
+	LastUpdated          time.Time                 `json:"last_updated"`
 }
 
 // WorkflowStats contains statistics for a specific workflow
 type WorkflowStats struct {
-	ExecutionCount   int64         `json:"execution_count"`
-	SuccessCount     int64         `json:"success_count"`
-	FailureCount     int64         `json:"failure_count"`
-	AverageTime      time.Duration `json:"average_time"`
-	LastExecution    time.Time     `json:"last_execution"`
-	TotalSteps       int64         `json:"total_steps"`
-	SuccessfulSteps  int64         `json:"successful_steps"`
-	FailedSteps      int64         `json:"failed_steps"`
+	ExecutionCount  int64         `json:"execution_count"`
+	SuccessCount    int64         `json:"success_count"`
+	FailureCount    int64         `json:"failure_count"`
+	AverageTime     time.Duration `json:"average_time"`
+	LastExecution   time.Time     `json:"last_execution"`
+	TotalSteps      int64         `json:"total_steps"`
+	SuccessfulSteps int64         `json:"successful_steps"`
+	FailedSteps     int64         `json:"failed_steps"`
 }
 
 // ExecutionEvent represents an event in workflow execution
 type ExecutionEvent struct {
-	ExecutionID string            `json:"execution_id"`
-	WorkflowName string           `json:"workflow_name"`
-	EventType   ExecutionEventType `json:"event_type"`
-	StepName    string            `json:"step_name,omitempty"`
-	Timestamp   time.Time         `json:"timestamp"`
-	Data        map[string]interface{} `json:"data,omitempty"`
+	ExecutionID  string                 `json:"execution_id"`
+	WorkflowName string                 `json:"workflow_name"`
+	EventType    ExecutionEventType     `json:"event_type"`
+	StepName     string                 `json:"step_name,omitempty"`
+	Timestamp    time.Time              `json:"timestamp"`
+	Data         map[string]interface{} `json:"data,omitempty"`
 }
 
 // ExecutionEventType defines the type of execution event
@@ -123,7 +125,7 @@ func (m *Monitor) TrackExecution(execution *WorkflowExecution) {
 	case StatusCompleted:
 		m.metrics.CompletedExecutions++
 		workflowStats.SuccessCount++
-		
+
 		// Update execution time
 		if execution.EndTime != nil {
 			duration := execution.EndTime.Sub(execution.StartTime)
@@ -148,14 +150,14 @@ func (m *Monitor) TrackExecution(execution *WorkflowExecution) {
 	if m.metrics.CompletedExecutions > 0 {
 		totalTime := time.Duration(0)
 		count := int64(0)
-		
+
 		for _, stats := range m.metrics.WorkflowStats {
 			if stats.AverageTime > 0 && stats.SuccessCount > 0 {
 				totalTime += time.Duration(int64(stats.AverageTime) * stats.SuccessCount)
 				count += stats.SuccessCount
 			}
 		}
-		
+
 		if count > 0 {
 			m.metrics.AverageExecutionTime = totalTime / time.Duration(count)
 		}
@@ -207,7 +209,7 @@ func (m *Monitor) GetMetrics() WorkflowMetrics {
 	// Deep copy to avoid race conditions
 	metricsCopy := *m.metrics
 	metricsCopy.WorkflowStats = make(map[string]*WorkflowStats)
-	
+
 	for name, stats := range m.metrics.WorkflowStats {
 		statsCopy := *stats
 		metricsCopy.WorkflowStats[name] = &statsCopy
@@ -342,7 +344,7 @@ func (w *LoggingWatcher) OnEvent(event ExecutionEvent) {
 	if err != nil {
 		data = []byte("{\"error\": \"failed to marshal event data\"}")
 	}
-	
+
 	w.logger.Info("Workflow event",
 		"execution_id", event.ExecutionID,
 		"workflow", event.WorkflowName,
@@ -365,27 +367,27 @@ func NewReportGenerator(monitor *Monitor) *ReportGenerator {
 // GenerateReport generates a comprehensive workflow execution report
 func (r *ReportGenerator) GenerateReport() string {
 	metrics := r.monitor.GetMetrics()
-	
+
 	report := "Workflow Execution Report\n"
 	report += fmt.Sprintf("Generated: %s\n\n", time.Now().Format(time.RFC3339))
-	
+
 	report += "Overall Statistics:\n"
 	report += fmt.Sprintf("  Total Executions: %d\n", metrics.TotalExecutions)
 	report += fmt.Sprintf("  Completed: %d\n", metrics.CompletedExecutions)
 	report += fmt.Sprintf("  Failed: %d\n", metrics.FailedExecutions)
 	report += fmt.Sprintf("  Cancelled: %d\n", metrics.CancelledExecutions)
-	
+
 	if metrics.AverageExecutionTime > 0 {
 		report += fmt.Sprintf("  Average Execution Time: %s\n", metrics.AverageExecutionTime)
 	}
-	
+
 	report += "\nWorkflow Statistics:\n"
 	for workflowName, stats := range metrics.WorkflowStats {
 		successRate := float64(0)
 		if stats.ExecutionCount > 0 {
 			successRate = float64(stats.SuccessCount) / float64(stats.ExecutionCount) * 100
 		}
-		
+
 		report += fmt.Sprintf("  %s:\n", workflowName)
 		report += fmt.Sprintf("    Executions: %d\n", stats.ExecutionCount)
 		report += fmt.Sprintf("    Success Rate: %.1f%%\n", successRate)
@@ -396,6 +398,6 @@ func (r *ReportGenerator) GenerateReport() string {
 		report += fmt.Sprintf("    Failed Steps: %d\n", stats.FailedSteps)
 		report += "\n"
 	}
-	
+
 	return report
 }

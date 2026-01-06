@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package exporters
 
 import (
@@ -16,7 +18,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
-// MultiFormatExporter implements the Exporter interface  
+// MultiFormatExporter implements the Exporter interface
 type MultiFormatExporter struct {
 	logger logging.Logger
 	config Config
@@ -114,8 +116,8 @@ func (e *MultiFormatExporter) exportCSV(report *interfaces.Report) ([]byte, erro
 	if err := writer.Write([]string{"Generated At", report.GeneratedAt.Format(time.RFC3339)}); err != nil {
 		return nil, err
 	}
-	if err := writer.Write([]string{"Time Range", fmt.Sprintf("%s to %s", 
-		report.TimeRange.Start.Format(time.RFC3339), 
+	if err := writer.Write([]string{"Time Range", fmt.Sprintf("%s to %s",
+		report.TimeRange.Start.Format(time.RFC3339),
 		report.TimeRange.End.Format(time.RFC3339))}); err != nil {
 		return nil, err
 	}
@@ -181,7 +183,7 @@ func (e *MultiFormatExporter) exportCSV(report *interfaces.Report) ([]byte, erro
 		if err := writer.Write([]string{fmt.Sprintf("Section: %s", section.Title)}); err != nil {
 			return nil, err
 		}
-		
+
 		// Handle different section types
 		switch section.Type {
 		case interfaces.SectionTypeTable:
@@ -237,7 +239,7 @@ func (e *MultiFormatExporter) exportHTML(report *interfaces.Report) ([]byte, err
 			return string(runes)
 		},
 	}).Parse(e.config.HTMLTemplate)
-	
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse HTML template: %w", err)
 	}
@@ -305,7 +307,7 @@ func (e *MultiFormatExporter) writeKPIDataToCSV(writer *csv.Writer, data map[str
 	if err := writer.Write([]string{"Metric", "Value", "Unit"}); err != nil {
 		return err
 	}
-	
+
 	for key, value := range data {
 		valueStr := fmt.Sprintf("%v", value)
 		if err := writer.Write([]string{key, valueStr, ""}); err != nil {

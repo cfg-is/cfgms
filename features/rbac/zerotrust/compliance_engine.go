@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package zerotrust
 
 import (
@@ -10,98 +12,98 @@ import (
 // ComplianceFrameworkEngine provides compliance validation against major frameworks
 type ComplianceFrameworkEngine struct {
 	// Framework templates and validators
-	frameworks        map[ComplianceFramework]*FrameworkTemplate
-	validators        map[ComplianceFramework]ComplianceValidator
-	
+	frameworks map[ComplianceFramework]*FrameworkTemplate
+	validators map[ComplianceFramework]ComplianceValidator
+
 	// Compliance cache for performance
-	complianceCache   *ComplianceCache
-	
+	complianceCache *ComplianceCache
+
 	// Configuration
 	enabledFrameworks []ComplianceFramework
 	strictMode        bool
 	cacheEnabled      bool
-	
+
 	// Statistics and monitoring
-	stats            *ComplianceStats
+	stats *ComplianceStats
 }
 
 // FrameworkTemplate defines the structure and requirements for a compliance framework
 type FrameworkTemplate struct {
-	Name              string                    `json:"name"`
-	Version           string                    `json:"version"`
-	Description       string                    `json:"description"`
+	Name              string                      `json:"name"`
+	Version           string                      `json:"version"`
+	Description       string                      `json:"description"`
 	Controls          map[string]*ControlTemplate `json:"controls"`
-	Categories        []string                  `json:"categories"`
-	RequirementLevels []RequirementLevel        `json:"requirement_levels"`
-	
+	Categories        []string                    `json:"categories"`
+	RequirementLevels []RequirementLevel          `json:"requirement_levels"`
+
 	// Framework metadata
-	LastUpdated       time.Time                 `json:"last_updated"`
-	Authority         string                    `json:"authority"`
-	ApplicableRegions []string                  `json:"applicable_regions"`
+	LastUpdated       time.Time `json:"last_updated"`
+	Authority         string    `json:"authority"`
+	ApplicableRegions []string  `json:"applicable_regions"`
 }
 
 // ControlTemplate defines a specific control within a compliance framework
 type ControlTemplate struct {
-	ID                string                    `json:"id"`
-	Name              string                    `json:"name"`
-	Description       string                    `json:"description"`
-	Category          string                    `json:"category"`
-	RequirementLevel  RequirementLevel          `json:"requirement_level"`
-	
+	ID               string           `json:"id"`
+	Name             string           `json:"name"`
+	Description      string           `json:"description"`
+	Category         string           `json:"category"`
+	RequirementLevel RequirementLevel `json:"requirement_level"`
+
 	// Control requirements
-	Requirements      []ControlRequirement      `json:"requirements"`
-	ValidationRules   []ValidationRule          `json:"validation_rules"`
-	EvidenceTypes     []EvidenceType            `json:"evidence_types"`
-	
+	Requirements    []ControlRequirement `json:"requirements"`
+	ValidationRules []ValidationRule     `json:"validation_rules"`
+	EvidenceTypes   []EvidenceType       `json:"evidence_types"`
+
 	// Implementation guidance
-	ImplementationGuidance string               `json:"implementation_guidance"`
-	TestProcedures        []TestProcedure       `json:"test_procedures"`
-	CommonPitfalls        []string              `json:"common_pitfalls"`
-	
+	ImplementationGuidance string          `json:"implementation_guidance"`
+	TestProcedures         []TestProcedure `json:"test_procedures"`
+	CommonPitfalls         []string        `json:"common_pitfalls"`
+
 	// Relationships
-	RelatedControls   []string                  `json:"related_controls"`
-	Prerequisites     []string                  `json:"prerequisites"`
+	RelatedControls []string `json:"related_controls"`
+	Prerequisites   []string `json:"prerequisites"`
 }
 
 // ControlRequirement defines specific requirements for a control
 type ControlRequirement struct {
-	ID                string                    `json:"id"`
-	Description       string                    `json:"description"`
-	Type              RequirementType           `json:"type"`
-	ValidationLogic   string                    `json:"validation_logic"`
-	RequiredEvidence  []string                  `json:"required_evidence"`
-	Frequency         string                    `json:"frequency"`
-	Automated         bool                      `json:"automated"`
+	ID               string          `json:"id"`
+	Description      string          `json:"description"`
+	Type             RequirementType `json:"type"`
+	ValidationLogic  string          `json:"validation_logic"`
+	RequiredEvidence []string        `json:"required_evidence"`
+	Frequency        string          `json:"frequency"`
+	Automated        bool            `json:"automated"`
 }
 
 // ValidationRule defines how to validate a control requirement
 type ValidationRule struct {
-	ID                string                    `json:"id"`
-	Name              string                    `json:"name"`
-	Logic             string                    `json:"logic"`
-	Parameters        map[string]interface{}    `json:"parameters"`
-	ErrorMessage      string                    `json:"error_message"`
-	Severity          ValidationSeverity        `json:"severity"`
+	ID           string                 `json:"id"`
+	Name         string                 `json:"name"`
+	Logic        string                 `json:"logic"`
+	Parameters   map[string]interface{} `json:"parameters"`
+	ErrorMessage string                 `json:"error_message"`
+	Severity     ValidationSeverity     `json:"severity"`
 }
 
 // EvidenceType defines types of evidence that can satisfy control requirements
 type EvidenceType struct {
-	Type              string                    `json:"type"`
-	Description       string                    `json:"description"`
-	CollectionMethod  string                    `json:"collection_method"`
-	RetentionPeriod   time.Duration             `json:"retention_period"`
-	EncryptionRequired bool                     `json:"encryption_required"`
+	Type               string        `json:"type"`
+	Description        string        `json:"description"`
+	CollectionMethod   string        `json:"collection_method"`
+	RetentionPeriod    time.Duration `json:"retention_period"`
+	EncryptionRequired bool          `json:"encryption_required"`
 }
 
 // TestProcedure defines how to test a control
 type TestProcedure struct {
-	ID                string                    `json:"id"`
-	Name              string                    `json:"name"`
-	Description       string                    `json:"description"`
-	Steps             []string                  `json:"steps"`
-	ExpectedOutcome   string                    `json:"expected_outcome"`
-	Frequency         string                    `json:"frequency"`
-	Automated         bool                      `json:"automated"`
+	ID              string   `json:"id"`
+	Name            string   `json:"name"`
+	Description     string   `json:"description"`
+	Steps           []string `json:"steps"`
+	ExpectedOutcome string   `json:"expected_outcome"`
+	Frequency       string   `json:"frequency"`
+	Automated       bool     `json:"automated"`
 }
 
 // ComplianceValidator validates requests against specific compliance frameworks
@@ -113,40 +115,40 @@ type ComplianceValidator interface {
 
 // ComplianceCache provides high-performance caching for compliance validation results
 type ComplianceCache struct {
-	entries           map[string]*ComplianceCacheEntry
-	mutex            sync.RWMutex
-	maxSize          int
-	ttl              time.Duration
+	entries map[string]*ComplianceCacheEntry
+	mutex   sync.RWMutex
+	maxSize int
+	ttl     time.Duration
 }
 
 // ComplianceCacheEntry represents a cached compliance validation result
 type ComplianceCacheEntry struct {
-	Key               string                      `json:"key"`
-	Result            *ComplianceValidationResult `json:"result"`
-	CreatedAt         time.Time                   `json:"created_at"`
-	ExpiresAt         time.Time                   `json:"expires_at"`
-	AccessCount       int64                       `json:"access_count"`
-	LastAccessed      time.Time                   `json:"last_accessed"`
+	Key          string                      `json:"key"`
+	Result       *ComplianceValidationResult `json:"result"`
+	CreatedAt    time.Time                   `json:"created_at"`
+	ExpiresAt    time.Time                   `json:"expires_at"`
+	AccessCount  int64                       `json:"access_count"`
+	LastAccessed time.Time                   `json:"last_accessed"`
 }
 
 // ComplianceStats tracks compliance engine statistics
 type ComplianceStats struct {
-	TotalValidations      int64                                     `json:"total_validations"`
-	ValidationsByFramework map[ComplianceFramework]int64            `json:"validations_by_framework"`
-	PassedValidations     int64                                     `json:"passed_validations"`
-	FailedValidations     int64                                     `json:"failed_validations"`
-	CachedValidations     int64                                     `json:"cached_validations"`
-	
-	AverageValidationTime time.Duration                             `json:"average_validation_time"`
+	TotalValidations       int64                         `json:"total_validations"`
+	ValidationsByFramework map[ComplianceFramework]int64 `json:"validations_by_framework"`
+	PassedValidations      int64                         `json:"passed_validations"`
+	FailedValidations      int64                         `json:"failed_validations"`
+	CachedValidations      int64                         `json:"cached_validations"`
+
+	AverageValidationTime     time.Duration                         `json:"average_validation_time"`
 	ValidationTimeByFramework map[ComplianceFramework]time.Duration `json:"validation_time_by_framework"`
-	
-	ControlViolationsCount map[string]int64                        `json:"control_violations_count"`
-	MostViolatedControls   []string                                 `json:"most_violated_controls"`
-	
-	CacheHitRate          float64                                   `json:"cache_hit_rate"`
-	LastValidation        time.Time                                 `json:"last_validation"`
-	
-	mutex                sync.RWMutex
+
+	ControlViolationsCount map[string]int64 `json:"control_violations_count"`
+	MostViolatedControls   []string         `json:"most_violated_controls"`
+
+	CacheHitRate   float64   `json:"cache_hit_rate"`
+	LastValidation time.Time `json:"last_validation"`
+
+	mutex sync.RWMutex
 }
 
 // Supporting types
@@ -169,29 +171,29 @@ func NewComplianceFrameworkEngine(enabledFrameworks []ComplianceFramework) *Comp
 		enabledFrameworks: enabledFrameworks,
 		strictMode:        true,
 		cacheEnabled:      true,
-		stats:            NewComplianceStats(),
+		stats:             NewComplianceStats(),
 	}
-	
+
 	// Initialize framework templates
 	engine.initializeFrameworkTemplates()
-	
+
 	// Register framework validators
 	engine.registerFrameworkValidators()
-	
+
 	return engine
 }
 
 // ValidateCompliance validates a request against all enabled compliance frameworks
 func (c *ComplianceFrameworkEngine) ValidateCompliance(ctx context.Context, request *ZeroTrustAccessRequest, policyResults []*PolicyEvaluationResult) (*ComplianceValidationResults, error) {
 	startTime := time.Now()
-	
+
 	results := &ComplianceValidationResults{
 		OverallCompliance:   true,
 		FrameworkResults:    make([]*ComplianceValidationResult, 0),
 		ViolationsDetected:  make([]*ComplianceViolation, 0),
 		RemediationRequired: make([]*RemediationAction, 0),
 	}
-	
+
 	// Validate against each enabled framework
 	for _, framework := range c.enabledFrameworks {
 		frameworkResult, err := c.validateFrameworkCompliance(ctx, request, framework, policyResults)
@@ -209,26 +211,26 @@ func (c *ComplianceFrameworkEngine) ValidateCompliance(ctx context.Context, requ
 				ProcessingTime:    time.Since(startTime),
 			}
 		}
-		
+
 		results.FrameworkResults = append(results.FrameworkResults, frameworkResult)
-		
+
 		// Check overall compliance
 		if frameworkResult.ComplianceRate < 1.0 {
 			results.OverallCompliance = false
 		}
 	}
-	
+
 	// Update statistics
 	processingTime := time.Since(startTime)
 	c.updateStats(len(c.enabledFrameworks), results.OverallCompliance, processingTime)
-	
+
 	return results, nil
 }
 
 // validateFrameworkCompliance validates against a specific framework
 func (c *ComplianceFrameworkEngine) validateFrameworkCompliance(ctx context.Context, request *ZeroTrustAccessRequest, framework ComplianceFramework, policyResults []*PolicyEvaluationResult) (*ComplianceValidationResult, error) {
 	startTime := time.Now()
-	
+
 	// Check cache first
 	if c.cacheEnabled {
 		cacheKey := c.generateComplianceCacheKey(request, framework)
@@ -239,27 +241,27 @@ func (c *ComplianceFrameworkEngine) validateFrameworkCompliance(ctx context.Cont
 			return cachedResult, nil
 		}
 	}
-	
+
 	// Get framework validator
 	validator, exists := c.validators[framework]
 	if !exists {
 		return nil, fmt.Errorf("no validator found for framework: %s", framework)
 	}
-	
+
 	// Perform validation
 	result, err := validator.ValidateCompliance(ctx, request, framework)
 	if err != nil {
 		return nil, fmt.Errorf("framework validation failed: %w", err)
 	}
-	
+
 	result.ProcessingTime = time.Since(startTime)
-	
+
 	// Cache the result
 	if c.cacheEnabled {
 		cacheKey := c.generateComplianceCacheKey(request, framework)
 		c.complianceCache.Put(cacheKey, result)
 	}
-	
+
 	return result, nil
 }
 
@@ -587,24 +589,24 @@ func (c *ComplianceFrameworkEngine) registerFrameworkValidators() {
 // Utility methods
 
 func (c *ComplianceFrameworkEngine) generateComplianceCacheKey(request *ZeroTrustAccessRequest, framework ComplianceFramework) string {
-	return fmt.Sprintf("compliance:%s:%s:%s:%s", 
-		framework, 
-		request.AccessRequest.SubjectId, 
-		request.AccessRequest.TenantId, 
+	return fmt.Sprintf("compliance:%s:%s:%s:%s",
+		framework,
+		request.AccessRequest.SubjectId,
+		request.AccessRequest.TenantId,
 		request.RequestID)
 }
 
 func (c *ComplianceFrameworkEngine) updateStats(frameworkCount int, passed bool, processingTime time.Duration) {
 	c.stats.mutex.Lock()
 	defer c.stats.mutex.Unlock()
-	
+
 	c.stats.TotalValidations++
 	if passed {
 		c.stats.PassedValidations++
 	} else {
 		c.stats.FailedValidations++
 	}
-	
+
 	// Update average processing time
 	alpha := 0.1
 	if c.stats.AverageValidationTime == 0 {
@@ -614,7 +616,7 @@ func (c *ComplianceFrameworkEngine) updateStats(frameworkCount int, passed bool,
 		newNanos := float64(processingTime.Nanoseconds())
 		c.stats.AverageValidationTime = time.Duration(int64((1-alpha)*avgNanos + alpha*newNanos))
 	}
-	
+
 	c.stats.LastValidation = time.Now()
 }
 
@@ -622,35 +624,35 @@ func (c *ComplianceFrameworkEngine) updateStats(frameworkCount int, passed bool,
 func (c *ComplianceFrameworkEngine) GetStats() *ComplianceStats {
 	c.stats.mutex.RLock()
 	defer c.stats.mutex.RUnlock()
-	
+
 	// Return a copy to prevent external modification (without copying mutex)
 	validationsByFramework := make(map[ComplianceFramework]int64)
 	for k, v := range c.stats.ValidationsByFramework {
 		validationsByFramework[k] = v
 	}
-	
+
 	validationTimeByFramework := make(map[ComplianceFramework]time.Duration)
 	for k, v := range c.stats.ValidationTimeByFramework {
 		validationTimeByFramework[k] = v
 	}
-	
+
 	controlViolationsCount := make(map[string]int64)
 	for k, v := range c.stats.ControlViolationsCount {
 		controlViolationsCount[k] = v
 	}
-	
+
 	return &ComplianceStats{
 		TotalValidations:          c.stats.TotalValidations,
 		PassedValidations:         c.stats.PassedValidations,
-		FailedValidations:        c.stats.FailedValidations,
-		CachedValidations:        c.stats.CachedValidations,
-		ValidationsByFramework:   validationsByFramework,
+		FailedValidations:         c.stats.FailedValidations,
+		CachedValidations:         c.stats.CachedValidations,
+		ValidationsByFramework:    validationsByFramework,
 		ValidationTimeByFramework: validationTimeByFramework,
-		ControlViolationsCount:   controlViolationsCount,
-		MostViolatedControls:     append([]string(nil), c.stats.MostViolatedControls...),
-		CacheHitRate:             c.stats.CacheHitRate,
-		AverageValidationTime:    c.stats.AverageValidationTime,
-		LastValidation:           c.stats.LastValidation,
+		ControlViolationsCount:    controlViolationsCount,
+		MostViolatedControls:      append([]string(nil), c.stats.MostViolatedControls...),
+		CacheHitRate:              c.stats.CacheHitRate,
+		AverageValidationTime:     c.stats.AverageValidationTime,
+		LastValidation:            c.stats.LastValidation,
 	}
 }
 
@@ -662,20 +664,20 @@ func NewComplianceStats() *ComplianceStats {
 		ValidationTimeByFramework: make(map[ComplianceFramework]time.Duration),
 		ControlViolationsCount:    make(map[string]int64),
 		MostViolatedControls:      make([]string, 0),
-		LastValidation:           time.Now(),
+		LastValidation:            time.Now(),
 	}
 }
 
 func NewComplianceCache(maxSize int, ttl time.Duration) *ComplianceCache {
 	cache := &ComplianceCache{
-		entries:  make(map[string]*ComplianceCacheEntry),
-		maxSize:  maxSize,
-		ttl:      ttl,
+		entries: make(map[string]*ComplianceCacheEntry),
+		maxSize: maxSize,
+		ttl:     ttl,
 	}
-	
+
 	// Start cleanup goroutine
 	go cache.cleanupLoop()
-	
+
 	return cache
 }
 
@@ -684,34 +686,34 @@ func NewComplianceCache(maxSize int, ttl time.Duration) *ComplianceCache {
 func (cc *ComplianceCache) Get(key string) *ComplianceValidationResult {
 	cc.mutex.RLock()
 	defer cc.mutex.RUnlock()
-	
+
 	entry, exists := cc.entries[key]
 	if !exists {
 		return nil
 	}
-	
+
 	// Check if expired
 	if time.Now().After(entry.ExpiresAt) {
 		delete(cc.entries, key)
 		return nil
 	}
-	
+
 	// Update access information
 	entry.AccessCount++
 	entry.LastAccessed = time.Now()
-	
+
 	return entry.Result
 }
 
 func (cc *ComplianceCache) Put(key string, result *ComplianceValidationResult) {
 	cc.mutex.Lock()
 	defer cc.mutex.Unlock()
-	
+
 	// Check if we need to evict entries
 	if len(cc.entries) >= cc.maxSize {
 		cc.evictLRU()
 	}
-	
+
 	now := time.Now()
 	cc.entries[key] = &ComplianceCacheEntry{
 		Key:          key,
@@ -726,14 +728,14 @@ func (cc *ComplianceCache) Put(key string, result *ComplianceValidationResult) {
 func (cc *ComplianceCache) evictLRU() {
 	var oldestKey string
 	var oldestTime time.Time
-	
+
 	for key, entry := range cc.entries {
 		if oldestTime.IsZero() || entry.LastAccessed.Before(oldestTime) {
 			oldestKey = key
 			oldestTime = entry.LastAccessed
 		}
 	}
-	
+
 	if oldestKey != "" {
 		delete(cc.entries, oldestKey)
 	}
@@ -742,7 +744,7 @@ func (cc *ComplianceCache) evictLRU() {
 func (cc *ComplianceCache) cleanupLoop() {
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
-	
+
 	for range ticker.C {
 		cc.cleanup()
 	}
@@ -751,16 +753,16 @@ func (cc *ComplianceCache) cleanupLoop() {
 func (cc *ComplianceCache) cleanup() {
 	cc.mutex.Lock()
 	defer cc.mutex.Unlock()
-	
+
 	now := time.Now()
 	var expiredKeys []string
-	
+
 	for key, entry := range cc.entries {
 		if now.After(entry.ExpiresAt) {
 			expiredKeys = append(expiredKeys, key)
 		}
 	}
-	
+
 	for _, key := range expiredKeys {
 		delete(cc.entries, key)
 	}

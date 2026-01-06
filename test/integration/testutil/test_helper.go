@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package testutil
 
 import (
@@ -20,42 +22,63 @@ import (
 
 // TestEnv provides a test environment for integration testing
 type TestEnv struct {
-	T             *testing.T
-	TempDir       string
-	Logger        *testpkg.MockLogger
-	Controller    *controller.Controller
-	ControllerCfg *config.Config
-	Steward       *steward.Steward
-	StewardCfg    *steward.Config
-	CertManager   *cert.Manager
-	ctx           context.Context
-	cancel        context.CancelFunc
+	T                    *testing.T
+	TempDir              string
+	Logger               *testpkg.MockLogger
+	Controller           *controller.Controller
+	ControllerCfg        *config.Config
+	Steward              *steward.Steward
+	StewardCfg           *steward.Config
+	CertManager          *cert.Manager
+	ctx                  context.Context
+	cancel               context.CancelFunc
+	useDockerController  bool   // If true, connect to Docker controller instead of in-process
+	dockerControllerAddr string // Address of Docker controller (e.g., "localhost:50054")
+	registrationToken    string // MQTT registration token for testing
 }
 
-// NewTestEnv creates a new test environment
-func NewTestEnv(t *testing.T) *TestEnv {
+// NewTestEnvWithDocker creates a test environment that connects to Docker controller
+// This is used to test against the standalone controller in docker-compose.test.yml
+func NewTestEnvWithDocker(t *testing.T, dockerAddr string) *TestEnv {
+	env := NewTestEnv(t)
+	env.useDockerController = true
+	env.dockerControllerAddr = dockerAddr
+	return env
+}
+
+// NewTestEnvWithTimeout creates a test environment with custom context timeout
+func NewTestEnvWithTimeout(t *testing.T, timeout time.Duration) *TestEnv {
 	tempDir, err := os.MkdirTemp("", "cfgms-test-")
 	require.NoError(t, err)
 
 	logger := testpkg.NewMockLogger(false)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 
+	return createTestEnv(t, tempDir, logger, ctx, cancel)
+}
+
+// NewTestEnv creates a new test environment
+func NewTestEnv(t *testing.T) *TestEnv {
+	return NewTestEnvWithTimeout(t, 30*time.Second)
+}
+
+func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx context.Context, cancel context.CancelFunc) *TestEnv {
 	// Initialize production certificate manager for testing
 	certStoragePath := filepath.Join(tempDir, "certs")
-	err = os.MkdirAll(certStoragePath, 0755)
+	err := os.MkdirAll(certStoragePath, 0755)
 	require.NoError(t, err)
 
 	certManager, err := cert.NewManager(&cert.ManagerConfig{
 		StoragePath: certStoragePath,
 		CAConfig: &cert.CAConfig{
 			Organization:       "CFGMS Test CA",
-			Country:           "US",
-			State:             "Test",
-			City:              "Test",
+			Country:            "US",
+			State:              "Test",
+			City:               "Test",
 			OrganizationalUnit: "Integration Tests",
-			ValidityDays:      365,
-			KeySize:           2048,
+			ValidityDays:       365,
+			KeySize:            2048,
 		},
 		LoadExistingCA:       false, // Create new CA for each test
 		RenewalThresholdDays: 30,
@@ -76,7 +99,7 @@ func NewTestEnv(t *testing.T) *TestEnv {
 	t.Logf("Generated server certificate: %s", serverCert.SerialNumber)
 
 	controllerCfg := &config.Config{
-		ListenAddr: "127.0.0.1:0", // Use random port
+		ListenAddr: "127.0.0.1:0",   // Use random port
 		CertPath:   certStoragePath, // Legacy cert path for backward compatibility
 		DataDir:    filepath.Join(tempDir, "controller-data"),
 		LogLevel:   "debug",
@@ -91,12 +114,12 @@ func NewTestEnv(t *testing.T) *TestEnv {
 		},
 		Certificate: &config.CertificateConfig{
 			EnableCertManagement:   true,
-			CAPath:                filepath.Join(certStoragePath, "ca"),
-			AutoGenerate:          true,
-			RenewalThresholdDays:  30,
+			CAPath:                 filepath.Join(certStoragePath, "ca"),
+			AutoGenerate:           true,
+			RenewalThresholdDays:   30,
 			ServerCertValidityDays: 365,
 			ClientCertValidityDays: 365,
-			EnableAutoRenewal:     false, // Disable for tests
+			EnableAutoRenewal:      false, // Disable for tests
 			Server: &config.ServerCertificateConfig{
 				CommonName:   "cfgms-controller",
 				DNSNames:     []string{"localhost", "cfgms-controller"},
@@ -104,12 +127,24 @@ func NewTestEnv(t *testing.T) *TestEnv {
 				Organization: "CFGMS Test",
 			},
 		},
+		MQTT: &config.MQTTConfig{
+			Enabled:        true,
+			ListenAddr:     "127.0.0.1:1883",
+			EnableTLS:      false,
+			UseCertManager: true,
+		},
+		QUIC: &config.QUICConfig{
+			Enabled:        true,
+			ListenAddr:     "127.0.0.1:4433",
+			SessionTimeout: 300,
+			UseCertManager: true,
+		},
 	}
 
 	// Create controller data directory
 	err = os.MkdirAll(controllerCfg.DataDir, 0755)
 	require.NoError(t, err)
-	
+
 	// Create storage directory
 	storageDir := filepath.Join(tempDir, "storage-git")
 	err = os.MkdirAll(storageDir, 0755)
@@ -131,13 +166,13 @@ func NewTestEnv(t *testing.T) *TestEnv {
 	t.Logf("Generated client certificate: %s", clientCert.SerialNumber)
 
 	// Save certificates to files for backward compatibility with legacy client
-	err = certManager.SaveCertificateFiles(serverCert.SerialNumber, 
-		filepath.Join(certStoragePath, "server.crt"), 
+	err = certManager.SaveCertificateFiles(serverCert.SerialNumber,
+		filepath.Join(certStoragePath, "server.crt"),
 		filepath.Join(certStoragePath, "server.key"))
 	require.NoError(t, err)
 
 	err = certManager.SaveCertificateFiles(clientCert.SerialNumber,
-		filepath.Join(certStoragePath, "client.crt"), 
+		filepath.Join(certStoragePath, "client.crt"),
 		filepath.Join(certStoragePath, "client.key"))
 	require.NoError(t, err)
 
@@ -154,7 +189,7 @@ func NewTestEnv(t *testing.T) *TestEnv {
 		LogLevel:       "debug",
 		ID:             "test-steward",
 		Certificate: &steward.CertificateConfig{
-			EnableCertManagement:  false, // Disable cert management for steward in tests
+			EnableCertManagement: false, // Disable cert management for steward in tests
 			CertStoragePath:      certStoragePath,
 			EnableAutoRenewal:    false, // Disable for tests
 			RenewalThresholdDays: 30,
@@ -171,36 +206,87 @@ func NewTestEnv(t *testing.T) *TestEnv {
 	err = os.MkdirAll(stewardCfg.DataDir, 0755)
 	require.NoError(t, err)
 
-	s, err := steward.New(stewardCfg, logger)
+	// Create steward using new MQTT+QUIC testing mode
+	s, err := steward.NewForControllerTesting(stewardCfg, logger)
 	require.NoError(t, err)
 
+	// Create simple registration token for testing
+	// Format: cfgms_reg_{tenant_id}_{steward_id}_{random}
+	regToken := "cfgms_reg_test_tenant_test_steward_12345"
+
+	// Create MQTT client for steward (will be set up during Start())
+	// Note: We'll create this in Start() since we need the actual controller address
+	// For now, just create the steward with the testing constructor
+
 	return &TestEnv{
-		T:             t,
-		TempDir:       tempDir,
-		Logger:        logger,
-		Controller:    ctrl,
-		ControllerCfg: controllerCfg,
-		Steward:       s,
-		StewardCfg:    stewardCfg,
-		CertManager:   certManager,
-		ctx:           ctx,
-		cancel:        cancel,
+		T:                 t,
+		TempDir:           tempDir,
+		Logger:            logger,
+		Controller:        ctrl,
+		ControllerCfg:     controllerCfg,
+		Steward:           s,
+		StewardCfg:        stewardCfg,
+		CertManager:       certManager,
+		ctx:               ctx,
+		cancel:            cancel,
+		registrationToken: regToken,
 	}
 }
 
 // Start starts the controller and steward in the test environment
 func (e *TestEnv) Start() {
-	// Start the controller
-	_ = e.Controller.Start(e.ctx)
+	var mqttBrokerAddr string
+	var quicAddr string
 
-	// Update steward config with actual controller address
-	e.StewardCfg.ControllerAddr = e.Controller.GetListenAddr()
+	if e.useDockerController {
+		// Using Docker controller - use docker addresses
+		// Docker standalone controller uses ports 1886 (MQTT) and 4436 (QUIC)
+		mqttBrokerAddr = "tcp://localhost:1886"
+		quicAddr = "localhost:4436"
+		e.StewardCfg.ControllerAddr = e.dockerControllerAddr
+	} else {
+		// Start the in-process controller
+		_ = e.Controller.Start(e.ctx)
 
-	// Start the steward
-	_ = e.Steward.Start(e.ctx)
+		// Get actual controller addresses
+		controllerAddr := e.Controller.GetListenAddr()
+		e.StewardCfg.ControllerAddr = controllerAddr
+
+		// Extract host for MQTT/QUIC (controller provides these on fixed ports)
+		mqttBrokerAddr = "tcp://localhost:1883" // Controller MQTT broker
+		quicAddr = "localhost:4433"             // Controller QUIC server
+	}
+
+	// Create MQTT client for steward
+	mqttClient, err := client.NewMQTTClient(&client.MQTTConfig{
+		ControllerURL:     mqttBrokerAddr,
+		QUICAddress:       quicAddr,
+		RegistrationToken: e.registrationToken,
+		TLSCertPath:       e.StewardCfg.CertPath,
+		Logger:            e.Logger,
+	})
+	if err != nil {
+		e.T.Fatalf("Failed to create MQTT client: %v", err)
+	}
+
+	// For integration tests, skip registration and directly set steward ID
+	// This avoids needing the full registration service to be running
+	// The client will be configured when we call Connect() in the steward Start() method
+
+	// Inject MQTT client into steward for testing
+	e.Steward.SetMQTTClientForTesting(mqttClient)
+
+	// Start the steward (will use injected MQTT client)
+	if err := e.Steward.Start(e.ctx); err != nil {
+		e.T.Logf("Warning: Steward start returned error (may be expected for testing): %v", err)
+	}
 
 	// Wait for components to initialize
-	time.Sleep(100 * time.Millisecond)
+	if e.useDockerController {
+		time.Sleep(500 * time.Millisecond)
+	} else {
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 // Stop stops the controller and steward in the test environment
@@ -208,8 +294,10 @@ func (e *TestEnv) Stop() {
 	// Stop the steward
 	_ = e.Steward.Stop(e.ctx)
 
-	// Stop the controller
-	_ = e.Controller.Stop(e.ctx)
+	// Only stop controller if it's in-process (not Docker)
+	if !e.useDockerController && e.Controller != nil {
+		_ = e.Controller.Stop(e.ctx)
+	}
 }
 
 // Cleanup cleans up the test environment
@@ -289,9 +377,10 @@ func (e *TestEnv) GetCertificateInfo(certType cert.CertificateType) ([]*cert.Cer
 	return e.CertManager.GetCertificatesByType(certType)
 }
 
-// CreateStewardClient creates a new steward client for testing
-func (e *TestEnv) CreateStewardClient() (*client.Client, error) {
-	// Use actual server address after binding (important for :0 ports)
-	actualAddr := e.Controller.GetListenAddr()
-	return client.New(actualAddr, e.CertManager.GetStoragePath(), e.Logger)
-}
+// CreateStewardClient is OBSOLETE - removed as part of Story #198 (MQTT+QUIC migration)
+// The old gRPC client.Client no longer exists. Use client.NewMQTTClient() instead.
+// Tests using this method need to be updated for MQTT+QUIC architecture.
+// func (e *TestEnv) CreateStewardClient() (*client.Client, error) {
+// 	actualAddr := e.Controller.GetListenAddr()
+// 	return client.New(actualAddr, e.CertManager.GetStoragePath(), e.Logger)
+// }

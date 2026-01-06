@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // Package drift provides real-time DNA drift detection and monitoring capabilities.
 //
 // This package implements comprehensive drift detection for DNA (system fingerprint) data,
@@ -96,12 +98,11 @@
 //	if err != nil {
 //		log.Printf("Failed to add rule: %v", err)
 //	}
-//
 package drift
 
 import (
 	"context"
-	
+
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 )
 
@@ -129,7 +130,7 @@ func QuickDetectDrift(previous, current *commonpb.DNA) ([]*DriftEvent, error) {
 			_ = err // Explicitly ignore detector close errors
 		}
 	}()
-	
+
 	ctx := context.Background()
 	return detector.DetectDrift(ctx, previous, current)
 }
@@ -149,7 +150,7 @@ func QuickFilterEvents(events []*DriftEvent) ([]*DriftEvent, error) {
 			_ = closeErr // Explicitly ignore close errors to avoid masking main error
 		}
 	}()
-	
+
 	ctx := context.Background()
 	return filter.FilterEvents(ctx, events)
 }
@@ -169,7 +170,7 @@ func ValidateRule(rule *DriftRule) error {
 			_ = closeErr // Explicitly ignore close errors to avoid masking main error
 		}
 	}()
-	
+
 	return engine.ValidateRules([]*DriftRule{rule})
 }
 
@@ -184,7 +185,7 @@ func CompareConfigurations(previous, current map[string]string) *ComparisonSumma
 		Removed:  make([]string, 0),
 		Modified: make([]string, 0),
 	}
-	
+
 	// Check for added and modified attributes
 	for key, currentValue := range current {
 		if previousValue, exists := previous[key]; exists {
@@ -195,16 +196,16 @@ func CompareConfigurations(previous, current map[string]string) *ComparisonSumma
 			summary.Added = append(summary.Added, key)
 		}
 	}
-	
+
 	// Check for removed attributes
 	for key := range previous {
 		if _, exists := current[key]; !exists {
 			summary.Removed = append(summary.Removed, key)
 		}
 	}
-	
+
 	summary.TotalChanges = len(summary.Added) + len(summary.Removed) + len(summary.Modified)
-	
+
 	return summary
 }
 

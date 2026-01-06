@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package testing
 
 import (
@@ -72,7 +74,7 @@ func TestCompareStates_NoDrift(t *testing.T) {
 	desired := &mockConfigState{data: desiredData, managedFields: managedFields}
 
 	current.On("AsMap").Return(currentData)
-	desired.On("AsMap").Return(desiredData)  
+	desired.On("AsMap").Return(desiredData)
 	desired.On("GetManagedFields").Return(managedFields)
 
 	driftDetected, diff := comparator.CompareStates(current, desired)
@@ -98,9 +100,9 @@ func TestCompareStates_DriftDetected(t *testing.T) {
 	}
 
 	desiredData := map[string]interface{}{
-		"field1": "new_value",  // Changed
-		"field2": 42,           // Same
-		"field4": "added",      // Added
+		"field1": "new_value", // Changed
+		"field2": 42,          // Same
+		"field4": "added",     // Added
 		// field3 removed (not in desired)
 	}
 
@@ -117,7 +119,7 @@ func TestCompareStates_DriftDetected(t *testing.T) {
 
 	assert.True(t, driftDetected)
 	assert.False(t, diff.IsEmpty())
-	
+
 	// Check changed fields
 	assert.Len(t, diff.ChangedFields, 1)
 	assert.Contains(t, diff.ChangedFields, "field1")
@@ -166,7 +168,7 @@ func TestCompareStates_OnlyManagedFields(t *testing.T) {
 	driftDetected, diff := comparator.CompareStates(current, desired)
 
 	assert.True(t, driftDetected)
-	
+
 	// Only managed2 should show as changed
 	assert.Len(t, diff.ChangedFields, 1)
 	assert.Contains(t, diff.ChangedFields, "managed2")

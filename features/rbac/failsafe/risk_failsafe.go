@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package failsafe
 
 import (
@@ -34,23 +36,23 @@ const (
 
 // RiskHealthChecker monitors the health of the underlying risk engine
 type RiskHealthChecker struct {
-	riskEngine            *risk.RiskAssessmentEngine
-	lastHealthCheck       time.Time
-	healthCheckInterval   time.Duration
-	consecutiveFailures   int
+	riskEngine             *risk.RiskAssessmentEngine
+	lastHealthCheck        time.Time
+	healthCheckInterval    time.Duration
+	consecutiveFailures    int
 	maxConsecutiveFailures int
-	isHealthy             bool
-	mutex                 sync.RWMutex
+	isHealthy              bool
+	mutex                  sync.RWMutex
 }
 
 // RiskFailsafeMetrics tracks risk failsafe operation metrics
 type RiskFailsafeMetrics struct {
-	TotalAssessments      int64
-	FailedAssessments     int64
-	FailsafeAssessments   int64
-	HealthCheckFailures   int64
-	RecoveryEvents        int64
-	mutex                 sync.RWMutex
+	TotalAssessments    int64
+	FailedAssessments   int64
+	FailsafeAssessments int64
+	HealthCheckFailures int64
+	RecoveryEvents      int64
+	mutex               sync.RWMutex
 }
 
 // NewFailsafeRiskEngine creates a new failsafe risk assessment engine
@@ -222,25 +224,25 @@ func (fre *FailsafeRiskEngine) generateFailsafeRiskAssessment(request *risk.Risk
 	}
 
 	result := &risk.RiskAssessmentResult{
-		RequestID:              requestID,
-		OverallRiskScore:       riskScore,
-		RiskLevel:              riskLevel,
-		ConfidenceScore:        100.0, // High confidence in conservative assessment
-		RiskFactors:            riskFactors,
-		BehavioralRisk:         fre.generateFailsafeBehavioralRisk(),
-		EnvironmentalRisk:      fre.generateFailsafeEnvironmentalRisk(),
-		ResourceRisk:           fre.generateFailsafeResourceRisk(),
-		RecommendedActions:     mitigationActions,
-		AccessDecision:         accessDecision,
-		RequiredControls:       adaptiveControls,
-		AssessedAt:             now,
-		ValidityPeriod:         validityPeriod,
-		NextAssessmentTime:     now.Add(validityPeriod),
+		RequestID:          requestID,
+		OverallRiskScore:   riskScore,
+		RiskLevel:          riskLevel,
+		ConfidenceScore:    100.0, // High confidence in conservative assessment
+		RiskFactors:        riskFactors,
+		BehavioralRisk:     fre.generateFailsafeBehavioralRisk(),
+		EnvironmentalRisk:  fre.generateFailsafeEnvironmentalRisk(),
+		ResourceRisk:       fre.generateFailsafeResourceRisk(),
+		RecommendedActions: mitigationActions,
+		AccessDecision:     accessDecision,
+		RequiredControls:   adaptiveControls,
+		AssessedAt:         now,
+		ValidityPeriod:     validityPeriod,
+		NextAssessmentTime: now.Add(validityPeriod),
 		Metadata: map[string]interface{}{
-			"failsafe_mode":   true,
-			"failure_reason":  "risk_engine_unavailable",
-			"failure_mode":    string(fre.failureMode),
-			"generated_by":    "failsafe_risk_engine",
+			"failsafe_mode":  true,
+			"failure_reason": "risk_engine_unavailable",
+			"failure_mode":   string(fre.failureMode),
+			"generated_by":   "failsafe_risk_engine",
 		},
 	}
 
@@ -265,12 +267,12 @@ func (fre *FailsafeRiskEngine) generateFailsafeBehavioralRisk() *risk.Behavioral
 		},
 		BehaviorDeviations: []risk.BehaviorDeviation{
 			{
-				DeviationType:     "system_unavailable",
-				Metric:            "pattern_analysis",
-				ExpectedValue:     0.0,
-				ActualValue:       1.0,
-				DeviationPercent:  100.0,
-				Significance:      1.0,
+				DeviationType:    "system_unavailable",
+				Metric:           "pattern_analysis",
+				ExpectedValue:    0.0,
+				ActualValue:      1.0,
+				DeviationPercent: 100.0,
+				Significance:     1.0,
 			},
 		},
 		LearningStatus: "baseline_unavailable",
@@ -312,21 +314,21 @@ func (fre *FailsafeRiskEngine) generateFailsafeEnvironmentalRisk() *risk.Environ
 			LatencyAnomaly:   false,
 		},
 		DeviceRisk: risk.DeviceRisk{
-			RiskScore:         75.0,
-			IsKnownDevice:     false,
-			DeviceType:        "unknown",
-			OSRisk:            0.5,
-			BrowserRisk:       0.5,
-			ComplianceStatus:  "unknown",
-			LastScan:          nil,
+			RiskScore:        75.0,
+			IsKnownDevice:    false,
+			DeviceType:       "unknown",
+			OSRisk:           0.5,
+			BrowserRisk:      0.5,
+			ComplianceStatus: "unknown",
+			LastScan:         nil,
 		},
 		ThreatEnvironment: risk.ThreatEnvironmentRisk{
-			RiskScore:         80.0, // Assume elevated threat
-			ThreatLevel:       "unknown",
-			ReputationScore:   80.0,
-			ThreatCategories:  []string{},
-			ActiveThreats:     0,
-			RecentIncidents:   0,
+			RiskScore:        80.0, // Assume elevated threat
+			ThreatLevel:      "unknown",
+			ReputationScore:  80.0,
+			ThreatCategories: []string{},
+			ActiveThreats:    0,
+			RecentIncidents:  0,
 		},
 	}
 }
@@ -351,11 +353,11 @@ func (fre *FailsafeRiskEngine) generateFailsafeResourceRisk() *risk.ResourceRisk
 			UnusualAccess:     true,
 		},
 		ComplianceRisk: risk.ComplianceRisk{
-			RiskScore:      80.0,
-			Requirements:   []string{},
-			Violations:     []string{},
-			AuditRequired:  true,
-			DataRetention:  true,
+			RiskScore:     80.0,
+			Requirements:  []string{},
+			Violations:    []string{},
+			AuditRequired: true,
+			DataRetention: true,
 		},
 		BusinessImpactRisk: risk.BusinessImpactRisk{
 			RiskScore:         85.0,
@@ -400,7 +402,7 @@ func (fre *FailsafeRiskEngine) performHealthCheck() {
 	}
 
 	_, err := fre.underlying.EvaluateRisk(ctx, testRequest)
-	
+
 	fre.healthCheck.mutex.Lock()
 	defer fre.healthCheck.mutex.Unlock()
 
@@ -435,7 +437,7 @@ func (fre *FailsafeRiskEngine) performHealthCheck() {
 func (fre *FailsafeRiskEngine) markUnhealthy() {
 	fre.healthCheck.mutex.Lock()
 	defer fre.healthCheck.mutex.Unlock()
-	
+
 	fre.healthCheck.consecutiveFailures++
 	if fre.healthCheck.consecutiveFailures >= fre.healthCheck.maxConsecutiveFailures {
 		fre.healthCheck.isHealthy = false

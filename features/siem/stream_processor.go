@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package siem
 
 import (
@@ -21,9 +23,9 @@ type StreamProcessorImpl struct {
 	config ProcessingConfig
 
 	// Processing components
-	patternMatcher   PatternMatcher
-	eventCorrelator  EventCorrelator
-	ruleManager      RuleManager
+	patternMatcher  PatternMatcher
+	eventCorrelator EventCorrelator
+	ruleManager     RuleManager
 
 	// Processing pipeline
 	inputBuffer      chan interfaces.LogEntry
@@ -32,18 +34,18 @@ type StreamProcessorImpl struct {
 	batchProcessor   *BatchProcessor
 
 	// State management
-	running          int32              // atomic
-	stopChan         chan struct{}
-	workerWg         sync.WaitGroup
-	processorWg      sync.WaitGroup
+	running     int32 // atomic
+	stopChan    chan struct{}
+	workerWg    sync.WaitGroup
+	processorWg sync.WaitGroup
 
 	// Metrics tracking
-	metrics          *ProcessingMetrics
-	metricsLock      sync.RWMutex
-	startTime        time.Time
+	metrics     *ProcessingMetrics
+	metricsLock sync.RWMutex
+	startTime   time.Time
 
 	// Performance monitoring
-	latencyTracker   *LatencyTracker
+	latencyTracker    *LatencyTracker
 	throughputTracker *ThroughputTracker
 }
 
@@ -57,11 +59,11 @@ type ProcessingBatch struct {
 
 // StreamWorker handles parallel processing of log entry batches
 type StreamWorker struct {
-	id               int
-	processor        *StreamProcessorImpl
-	inputChan        chan *ProcessingBatch
-	logger           *logging.ModuleLogger
-	processingStats  *WorkerStats
+	id              int
+	processor       *StreamProcessorImpl
+	inputChan       chan *ProcessingBatch
+	logger          *logging.ModuleLogger
+	processingStats *WorkerStats
 }
 
 // WorkerStats tracks individual worker performance
@@ -145,11 +147,11 @@ func (sp *StreamProcessorImpl) Start(ctx context.Context) error {
 	sp.workers = make([]*StreamWorker, sp.config.WorkerCount)
 	for i := 0; i < sp.config.WorkerCount; i++ {
 		sp.workers[i] = &StreamWorker{
-			id:               i,
-			processor:        sp,
-			inputChan:        make(chan *ProcessingBatch, sp.config.WorkerQueueSize),
-			logger:           logger.WithField("worker_id", i),
-			processingStats:  &WorkerStats{},
+			id:              i,
+			processor:       sp,
+			inputChan:       make(chan *ProcessingBatch, sp.config.WorkerQueueSize),
+			logger:          logger.WithField("worker_id", i),
+			processingStats: &WorkerStats{},
 		}
 	}
 

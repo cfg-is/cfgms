@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package shell
 
 import (
@@ -10,22 +12,22 @@ import (
 type Executor interface {
 	// Start starts the shell process
 	Start(ctx context.Context, config *Config) error
-	
+
 	// WriteData sends input data to the shell
 	WriteData(ctx context.Context, data []byte) error
-	
+
 	// Resize resizes the terminal
 	Resize(ctx context.Context, cols, rows int) error
-	
+
 	// Close terminates the shell process
 	Close(ctx context.Context) error
-	
+
 	// OutputChannel returns a channel for receiving output data
 	OutputChannel() <-chan []byte
-	
+
 	// ErrorChannel returns a channel for receiving error notifications
 	ErrorChannel() <-chan error
-	
+
 	// IsRunning returns true if the shell process is running
 	IsRunning() bool
 }

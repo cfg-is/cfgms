@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package monitoring
 
 import (
@@ -14,7 +16,7 @@ func (sm *SystemMonitor) exportMetrics(ctx context.Context) {
 	if sm.exportManager == nil {
 		return
 	}
-	
+
 	// Prepare export data
 	exportData := export.ExportData{
 		SystemMetrics:   sm.convertSystemMetrics(),
@@ -25,7 +27,7 @@ func (sm *SystemMonitor) exportMetrics(ctx context.Context) {
 		Source:          "controller",
 		ExportType:      export.ExportTypeScheduled,
 	}
-	
+
 	// Add component-specific metrics
 	if len(sm.systemMetrics.ComponentMetrics) > 0 {
 		componentMetrics := make(map[string]interface{})
@@ -34,7 +36,7 @@ func (sm *SystemMonitor) exportMetrics(ctx context.Context) {
 		}
 		exportData.ControllerMetrics = componentMetrics
 	}
-	
+
 	// Add workflow metrics
 	workflowMetrics := sm.workflowMonitor.GetMetrics()
 	exportData.WorkflowMetrics = map[string]interface{}{
@@ -42,7 +44,7 @@ func (sm *SystemMonitor) exportMetrics(ctx context.Context) {
 		"completed_executions": workflowMetrics.CompletedExecutions,
 		"failed_executions":    workflowMetrics.FailedExecutions,
 	}
-	
+
 	// Queue for export
 	if err := sm.exportManager.Export(exportData); err != nil {
 		sm.logger.WarnCtx(ctx, "Failed to queue metrics for export", "error", err)
@@ -54,7 +56,7 @@ func (sm *SystemMonitor) exportEvent(ctx context.Context, event SystemEvent) {
 	if sm.exportManager == nil {
 		return
 	}
-	
+
 	// Convert to export format
 	exportEvent := export.SystemEvent{
 		ID:            event.ID,
@@ -68,7 +70,7 @@ func (sm *SystemMonitor) exportEvent(ctx context.Context, event SystemEvent) {
 		TraceID:       event.TraceID,
 		Data:          event.Data,
 	}
-	
+
 	// Prepare export data
 	exportData := export.ExportData{
 		Events:        []export.SystemEvent{exportEvent},
@@ -77,20 +79,19 @@ func (sm *SystemMonitor) exportEvent(ctx context.Context, event SystemEvent) {
 		Source:        "controller",
 		ExportType:    export.ExportTypeTriggered,
 	}
-	
+
 	// Queue for export
 	if err := sm.exportManager.Export(exportData); err != nil {
 		sm.logger.WarnCtx(ctx, "Failed to queue event for export", "error", err)
 	}
 }
 
-
 // GetExporterHealth returns the health status of all configured exporters.
 func (sm *SystemMonitor) GetExporterHealth() map[string]export.ExporterHealth {
 	if sm.exportManager == nil {
 		return make(map[string]export.ExporterHealth)
 	}
-	
+
 	return sm.exportManager.GetExporterHealth()
 }
 
@@ -99,18 +100,18 @@ func (sm *SystemMonitor) EnableExporter(name string, config export.ExporterConfi
 	if sm.exportRegistry == nil {
 		return fmt.Errorf("export registry not initialized")
 	}
-	
+
 	// Create exporter from registry
 	exporter, err := sm.exportRegistry.CreateExporter(name)
 	if err != nil {
 		return fmt.Errorf("failed to create exporter %s: %w", name, err)
 	}
-	
+
 	// Configure the exporter
 	if err := exporter.Configure(config); err != nil {
 		return fmt.Errorf("failed to configure exporter %s: %w", name, err)
 	}
-	
+
 	// Register with export manager
 	if sm.exportManager == nil {
 		// Create export manager if not exists
@@ -119,30 +120,30 @@ func (sm *SystemMonitor) EnableExporter(name string, config export.ExporterConfi
 			return fmt.Errorf("failed to start export manager: %w", err)
 		}
 	}
-	
+
 	if err := sm.exportManager.RegisterExporter(name, exporter); err != nil {
 		return fmt.Errorf("failed to register exporter %s: %w", name, err)
 	}
-	
+
 	// Start the exporter
 	if err := exporter.Start(context.Background()); err != nil {
 		return fmt.Errorf("failed to start exporter %s: %w", name, err)
 	}
-	
+
 	return nil
 }
 
 // convertSystemMetrics converts internal system metrics to export format.
 func (sm *SystemMonitor) convertSystemMetrics() map[string]interface{} {
 	return map[string]interface{}{
-		"total_stewards":         sm.systemMetrics.TotalStewards,
-		"connected_stewards":     sm.systemMetrics.ConnectedStewards,
-		"healthy_stewards":       sm.systemMetrics.HealthyStewards,
-		"configurations_applied": sm.systemMetrics.ConfigurationsApplied,
-		"configuration_errors":   sm.systemMetrics.ConfigurationErrors,
-		"workflow_executions":    sm.systemMetrics.WorkflowExecutions,
-		"workflow_successes":     sm.systemMetrics.WorkflowSuccesses,
-		"workflow_failures":      sm.systemMetrics.WorkflowFailures,
+		"total_stewards":           sm.systemMetrics.TotalStewards,
+		"connected_stewards":       sm.systemMetrics.ConnectedStewards,
+		"healthy_stewards":         sm.systemMetrics.HealthyStewards,
+		"configurations_applied":   sm.systemMetrics.ConfigurationsApplied,
+		"configuration_errors":     sm.systemMetrics.ConfigurationErrors,
+		"workflow_executions":      sm.systemMetrics.WorkflowExecutions,
+		"workflow_successes":       sm.systemMetrics.WorkflowSuccesses,
+		"workflow_failures":        sm.systemMetrics.WorkflowFailures,
 		"average_response_time_ms": sm.systemMetrics.AverageResponseTime.Milliseconds(),
 		"average_config_time_ms":   sm.systemMetrics.AverageConfigTime.Milliseconds(),
 		"uptime_seconds":           time.Since(sm.systemMetrics.StartTime).Seconds(),
@@ -160,7 +161,7 @@ func (sm *SystemMonitor) convertResourceMetrics() map[string]interface{} {
 		"goroutines":           sm.resourceMetrics.Goroutines,
 		"gc_cycles":            sm.resourceMetrics.GCCycles,
 	}
-	
+
 	// Add GC pause metrics if available
 	if len(sm.resourceMetrics.GCPauses) > 0 {
 		var totalPauseMs int64
@@ -173,7 +174,7 @@ func (sm *SystemMonitor) convertResourceMetrics() map[string]interface{} {
 			metrics["gc_avg_pause_ms"] = totalPauseMs / int64(len(sm.resourceMetrics.GCPauses))
 		}
 	}
-	
+
 	return metrics
 }
 
@@ -210,7 +211,7 @@ func (sm *SystemMonitor) formatEventMessage(event SystemEvent) string {
 func (sm *SystemMonitor) convertHealthStatus() map[string]export.HealthStatus {
 	// Get internal health status
 	internalHealth := sm.GetSystemHealth()
-	
+
 	// Convert to export format
 	exportHealth := make(map[string]export.HealthStatus)
 	for component, health := range internalHealth {
@@ -221,6 +222,6 @@ func (sm *SystemMonitor) convertHealthStatus() map[string]export.HealthStatus {
 			Details:     health.Details,
 		}
 	}
-	
+
 	return exportHealth
 }

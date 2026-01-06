@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package trigger
 
 import (
@@ -24,31 +26,31 @@ type LogEntry struct {
 
 // SIEMProcessor implements the SIEMIntegration interface
 type SIEMProcessor struct {
-	logger              *logging.ModuleLogger
-	triggerManager      TriggerManager
-	workflowTrigger     WorkflowTrigger
-	siemTriggers        map[string]*Trigger
-	aggregationData     map[string]*AggregationData
-	triggerConditions   map[string][]*SIEMCondition
-	mutex               sync.RWMutex
-	running             bool
-	stopChan            chan struct{}
-	logBuffer           chan LogEntry
-	bufferSize          int
-	cleanupInterval     time.Duration
-	aggregationWindows  map[string]time.Time
+	logger             *logging.ModuleLogger
+	triggerManager     TriggerManager
+	workflowTrigger    WorkflowTrigger
+	siemTriggers       map[string]*Trigger
+	aggregationData    map[string]*AggregationData
+	triggerConditions  map[string][]*SIEMCondition
+	mutex              sync.RWMutex
+	running            bool
+	stopChan           chan struct{}
+	logBuffer          chan LogEntry
+	bufferSize         int
+	cleanupInterval    time.Duration
+	aggregationWindows map[string]time.Time
 }
 
 // AggregationData holds aggregated data for SIEM analysis
 type AggregationData struct {
-	Count         int                            `json:"count"`
-	Sum           map[string]float64             `json:"sum"`
-	Average       map[string]float64             `json:"average"`
-	GroupedCounts map[string]int                 `json:"grouped_counts"`
-	LastUpdated   time.Time                      `json:"last_updated"`
-	WindowStart   time.Time                      `json:"window_start"`
-	Entries       []LogEntry                     `json:"entries"`
-	TriggerID     string                         `json:"trigger_id"`
+	Count         int                `json:"count"`
+	Sum           map[string]float64 `json:"sum"`
+	Average       map[string]float64 `json:"average"`
+	GroupedCounts map[string]int     `json:"grouped_counts"`
+	LastUpdated   time.Time          `json:"last_updated"`
+	WindowStart   time.Time          `json:"window_start"`
+	Entries       []LogEntry         `json:"entries"`
+	TriggerID     string             `json:"trigger_id"`
 }
 
 // NewSIEMProcessor creates a new SIEM integration processor

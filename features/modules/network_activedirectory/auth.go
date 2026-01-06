@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package network_activedirectory
 
 import (
@@ -44,10 +46,10 @@ func (a *AuthenticationManager) authenticateSimple(ctx context.Context, conn *ld
 	if a.config.Username == "" || a.config.Password == "" {
 		return fmt.Errorf("username and password required for simple authentication")
 	}
-	
+
 	// Convert username to proper format
 	userDN := a.config.Username
-	
+
 	// Handle different username formats
 	if !strings.Contains(userDN, "@") && !strings.Contains(userDN, "=") {
 		// Plain username - convert to UPN format
@@ -59,13 +61,13 @@ func (a *AuthenticationManager) authenticateSimple(ctx context.Context, conn *ld
 			userDN = fmt.Sprintf("%s@%s", parts[1], a.config.Domain)
 		}
 	}
-	
+
 	// Perform bind
 	err := conn.Bind(userDN, a.config.Password)
 	if err != nil {
 		return fmt.Errorf("simple bind failed for user %s: %w", userDN, err)
 	}
-	
+
 	return nil
 }
 
@@ -74,38 +76,38 @@ func (a *AuthenticationManager) authenticateKerberos(ctx context.Context, conn *
 	if a.config.Username == "" || a.config.Password == "" {
 		return fmt.Errorf("username and password required for Kerberos authentication")
 	}
-	
+
 	// Initialize Kerberos configuration
 	if err := a.initializeKerberos(); err != nil {
 		return fmt.Errorf("failed to initialize Kerberos: %w", err)
 	}
-	
+
 	// Create Kerberos credentials
 	creds := credentials.New(a.config.Username, strings.ToUpper(a.config.Domain))
 	creds.WithPassword(a.config.Password)
-	
+
 	// Create Kerberos client
 	krb5Client := client.NewWithPassword(creds.UserName(), strings.ToUpper(a.config.Domain), creds.Password(), a.krb5Config)
-	
+
 	// Login to get TGT
 	err := krb5Client.Login()
 	if err != nil {
 		return fmt.Errorf("kerberos login failed: %w", err)
 	}
-	
+
 	a.krb5Client = krb5Client
-	
+
 	// For LDAP, we can use the TGT to get a service ticket
 	// However, go-ldap doesn't directly support Kerberos SASL
 	// For now, fall back to simple bind with the same credentials
 	// In a production implementation, this would use SASL GSSAPI
-	
+
 	userPrincipal := fmt.Sprintf("%s@%s", a.config.Username, strings.ToUpper(a.config.Domain))
 	err = conn.Bind(userPrincipal, a.config.Password)
 	if err != nil {
 		return fmt.Errorf("kerberos-authenticated bind failed: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -114,7 +116,7 @@ func (a *AuthenticationManager) authenticateNTLM(ctx context.Context, conn *ldap
 	// NTLM authentication using Azure/go-ntlmssp
 	// This would require implementing NTLM SASL mechanism for LDAP
 	// For now, return an informative error
-	
+
 	return fmt.Errorf("NTLM authentication requires SASL implementation - use 'simple' or 'kerberos' authentication methods")
 }
 
@@ -123,11 +125,11 @@ func (a *AuthenticationManager) initializeKerberos() error {
 	if a.krb5Config != nil {
 		return nil // Already initialized
 	}
-	
+
 	// Create basic Kerberos configuration
 	// In a production environment, this would read from /etc/krb5.conf or Windows registry
 	realm := strings.ToUpper(a.config.Domain)
-	
+
 	configText := fmt.Sprintf(`[libdefaults]
     default_realm = %s
     dns_lookup_realm = true
@@ -145,17 +147,17 @@ func (a *AuthenticationManager) initializeKerberos() error {
 
 [domain_realm]
     .%s = %s
-    %s = %s`, 
-		realm, 
+    %s = %s`,
+		realm,
 		realm, a.config.DomainController, a.config.DomainController, strings.ToLower(a.config.Domain),
 		strings.ToLower(a.config.Domain), realm,
 		strings.ToLower(a.config.Domain), realm)
-	
+
 	cfg, err := config.NewFromString(configText)
 	if err != nil {
 		return fmt.Errorf("failed to create Kerberos configuration: %w", err)
 	}
-	
+
 	a.krb5Config = cfg
 	return nil
 }
@@ -170,11 +172,11 @@ func (a *AuthenticationManager) RefreshCredentials(ctx context.Context, conn *ld
 			return a.authenticateKerberos(ctx, conn)
 		}
 		return nil
-		
+
 	case "simple", "ntlm":
 		// Simple bind and NTLM don't typically need refresh
 		return nil
-		
+
 	default:
 		return fmt.Errorf("credential refresh not supported for auth method: %s", a.config.AuthMethod)
 	}
@@ -187,7 +189,7 @@ func (a *AuthenticationManager) Close() error {
 		// The client will be garbage collected
 		a.krb5Client = nil
 	}
-	
+
 	a.krb5Config = nil
 	return nil
 }
@@ -199,7 +201,7 @@ func (a *AuthenticationManager) GetAuthenticationStatus() map[string]interface{}
 		"username":    a.config.Username,
 		"domain":      a.config.Domain,
 	}
-	
+
 	switch a.config.AuthMethod {
 	case "kerberos":
 		if a.krb5Client != nil {
@@ -210,14 +212,14 @@ func (a *AuthenticationManager) GetAuthenticationStatus() map[string]interface{}
 			status["kerberos_initialized"] = false
 			status["ticket_status"] = "none"
 		}
-		
+
 	case "simple":
 		status["bind_type"] = "simple"
-		
+
 	case "ntlm":
 		status["ntlm_status"] = "not_implemented"
 	}
-	
+
 	return status
 }
 
@@ -225,7 +227,7 @@ func (a *AuthenticationManager) GetAuthenticationStatus() map[string]interface{}
 type SecureCredentialStorage struct {
 	// In a production implementation, this would integrate with:
 	// - Windows Credential Manager on Windows
-	// - Linux keyring on Linux  
+	// - Linux keyring on Linux
 	// - External secret management systems (Vault, etc.)
 }
 

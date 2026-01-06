@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package modules
 
 import (
@@ -318,7 +320,7 @@ func TestDefaultCompatibilityMatrix_CheckCrossModuleCompatibility(t *testing.T) 
 		assert.NotNil(t, report)
 
 		assert.Equal(t, 1.0, report.CompatibilityScore) // Single module is always compatible
-		assert.Equal(t, 0, len(report.DetailedResults))   // No pairs to analyze
+		assert.Equal(t, 0, len(report.DetailedResults)) // No pairs to analyze
 	})
 
 	t.Run("empty module set", func(t *testing.T) {
@@ -373,8 +375,8 @@ func TestDefaultCompatibilityMatrix_FindCompatibleVersionSet(t *testing.T) {
 		assert.LessOrEqual(t, versionSet.CompatibilityScore, 1.0)
 
 		// Verify that selected versions satisfy constraints
-		assert.Equal(t, "1.2.0", versionSet.ModuleVersions["module-a"]) // Latest compatible
-		assert.Equal(t, "2.1.0", versionSet.ModuleVersions["module-b"]) // Latest compatible
+		assert.Equal(t, "1.2.0", versionSet.ModuleVersions["module-a"])                       // Latest compatible
+		assert.Equal(t, "2.1.0", versionSet.ModuleVersions["module-b"])                       // Latest compatible
 		assert.Contains(t, []string{"1.0.0", "2.0.0"}, versionSet.ModuleVersions["module-c"]) // Any version
 	})
 
@@ -707,8 +709,8 @@ func TestDefaultCompatibilityMatrix_GetMatrixStatus(t *testing.T) {
 		status := matrix.GetMatrixStatus()
 		assert.NotNil(t, status)
 
-		assert.Equal(t, 2, status.TotalModules)    // module-a and module-b
-		assert.Equal(t, 3, status.TotalVersions)   // 2 versions of module-a + 1 version of module-b
+		assert.Equal(t, 2, status.TotalModules)  // module-a and module-b
+		assert.Equal(t, 3, status.TotalVersions) // 2 versions of module-a + 1 version of module-b
 		assert.GreaterOrEqual(t, status.MatrixCompleteness, 0.0)
 		assert.LessOrEqual(t, status.MatrixCompleteness, 100.0)
 	})

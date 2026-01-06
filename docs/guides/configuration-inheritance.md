@@ -168,6 +168,7 @@ modules:
 ### Example 1: Security Policy Inheritance
 
 #### MSP Level Configuration
+
 ```yaml
 # /config/msp/security-baseline.yaml
 modules:
@@ -195,6 +196,7 @@ modules:
 ```
 
 #### Client Level Customization
+
 ```yaml
 # /config/client/acme-corp/web-policy.yaml
 modules:
@@ -217,6 +219,7 @@ modules:
 ```
 
 #### Group Level Specialization
+
 ```yaml
 # /config/client/acme-corp/group/development/dev-overrides.yaml
 modules:
@@ -229,6 +232,7 @@ modules:
 ```
 
 #### Device Level Specifics
+
 ```yaml
 # /config/device/dev-server-01/local-config.yaml
 modules:
@@ -248,6 +252,7 @@ modules:
 ### Example 2: Multi-Environment Setup
 
 #### MSP: Base Monitoring
+
 ```yaml
 modules:
   monitoring:
@@ -260,6 +265,7 @@ modules:
 ```
 
 #### Client: Production Environment
+
 ```yaml
 modules:
   monitoring:
@@ -280,6 +286,7 @@ modules:
 ```
 
 #### Group: Database Servers
+
 ```yaml
 modules:
   monitoring:
@@ -372,6 +379,7 @@ Given the above configurations, the effective configuration for `dev-server-01` 
 ### 1. Configuration Organization
 
 #### Use Semantic Naming
+
 ```yaml
 # Good
 modules:
@@ -391,6 +399,7 @@ compliance_setting_a: true
 ```
 
 #### Group Related Settings
+
 ```yaml
 # Good - Related settings grouped
 modules:
@@ -413,6 +422,7 @@ ssl_protocols: ["TLSv1.2", "TLSv1.3"]
 ### 2. Inheritance Strategy
 
 #### Start with Restrictive Defaults
+
 ```yaml
 # MSP Level - Secure by default
 modules:
@@ -428,6 +438,7 @@ modules:
 ```
 
 #### Allow Controlled Relaxation
+
 ```yaml
 # Development Group - Relaxed for development
 modules:
@@ -441,6 +452,7 @@ modules:
 ### 3. Documentation and Validation
 
 #### Document Configuration Purpose
+
 ```yaml
 modules:
   backup:
@@ -454,6 +466,7 @@ modules:
 ```
 
 #### Use Configuration Validation
+
 ```bash
 # Validate configuration before applying
 curl -X POST /api/v1/stewards/{id}/config/validate \
@@ -464,6 +477,7 @@ curl -X POST /api/v1/stewards/{id}/config/validate \
 ### 4. Version Control
 
 #### Track Configuration Changes
+
 ```bash
 # Store configurations in version control
 git add config/client/acme-corp/
@@ -471,6 +485,7 @@ git commit -m "feat: add development environment config for ACME Corp"
 ```
 
 #### Use Branching for Testing
+
 ```bash
 # Test configuration changes in branches
 git checkout -b feature/acme-corp-security-update
@@ -490,6 +505,7 @@ curl -X GET /api/v1/stewards/{steward-id}/config/effective \
 ```
 
 Response includes source tracking:
+
 ```json
 {
   "steward_id": "steward-123",
@@ -563,17 +579,21 @@ curl -X PUT /api/v1/config/client/{client-id} \
 **Problem**: Device not receiving expected configuration
 
 **Solution**:
+
 1. Check hierarchy relationships:
+
    ```bash
    curl -X GET /api/v1/stewards/{id}/hierarchy
    ```
 
 2. Verify configuration at each level:
+
    ```bash
    curl -X GET /api/v1/config/effective/{steward-id}?debug=true
    ```
 
 3. Check for naming conflicts:
+
    ```bash
    # Look for similar block names
    grep -r "firewall.rules" config/
@@ -584,13 +604,16 @@ curl -X PUT /api/v1/config/client/{client-id} \
 **Problem**: Lower-level configuration not taking effect
 
 **Solution**:
+
 1. Check configuration syntax:
+
    ```bash
    curl -X POST /api/v1/config/validate \
      -d @config.json
    ```
 
 2. Verify block naming matches exactly:
+
    ```yaml
    # These are different blocks
    firewall.rules.web    # Block 1
@@ -598,6 +621,7 @@ curl -X PUT /api/v1/config/client/{client-id} \
    ```
 
 3. Check inheritance order:
+
    ```bash
    curl -X GET /api/v1/stewards/{id}/config/effective?trace=true
    ```
@@ -607,10 +631,12 @@ curl -X PUT /api/v1/config/client/{client-id} \
 **Problem**: Slow configuration resolution
 
 **Solutions**:
+
 1. Reduce configuration depth
 2. Optimize block structure
 3. Use configuration caching
 4. Monitor inheritance performance:
+
    ```bash
    curl -X GET /api/v1/monitoring/config/performance
    ```
@@ -618,21 +644,24 @@ curl -X PUT /api/v1/config/client/{client-id} \
 ### Debug Tools
 
 #### Configuration Tracer
+
 ```bash
 # Enable detailed inheritance tracing
 curl -X GET /api/v1/stewards/{id}/config/effective?trace=true
 ```
 
 #### Validation Tool
+
 ```bash
 # Validate configuration syntax and inheritance
-cfgctl config validate --file config.yaml --trace
+cfg config validate --file config.yaml --trace
 ```
 
 #### Inheritance Visualizer
+
 ```bash
 # Show configuration inheritance tree
-cfgctl config tree --steward-id {id} --format json
+cfg config tree --steward-id {id} --format json
 ```
 
 ## Advanced Topics
@@ -691,6 +720,7 @@ modules:
 ### From Flat Configuration
 
 1. **Identify Configuration Groups**
+
    ```yaml
    # Before: Flat structure
    ssh_port: 22
@@ -713,9 +743,10 @@ modules:
    - Device overrides to device level
 
 3. **Test Inheritance**
+
    ```bash
    # Verify effective configuration
-   cfgctl config preview --steward-id {id}
+   cfg config preview --steward-id {id}
    ```
 
 ### Best Migration Practices

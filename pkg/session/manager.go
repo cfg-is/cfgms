@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // Package session provides unified session management with pluggable storage
 package session
 
@@ -15,16 +17,16 @@ import (
 // It supports both ephemeral (in-memory) and persistent (database/git) sessions
 type UnifiedSessionManager struct {
 	// Storage backends
-	ephemeralStore interfaces.RuntimeStore // For ephemeral sessions (memory provider)
+	ephemeralStore  interfaces.RuntimeStore // For ephemeral sessions (memory provider)
 	persistentStore interfaces.RuntimeStore // For persistent sessions (database provider)
-	
+
 	// Configuration
 	config *Config
 	logger logging.Logger
-	
+
 	// Session routing - determines which sessions should be persistent
 	persistenceRules *PersistenceRules
-	
+
 	// Cleanup management
 	stopCleanup chan struct{}
 	cleanupWG   sync.WaitGroup
@@ -35,26 +37,26 @@ type Config struct {
 	// Session lifecycle
 	DefaultSessionTimeout time.Duration `json:"default_session_timeout"`
 	MaxSessions           int           `json:"max_sessions"`
-	
+
 	// Cleanup settings
-	CleanupInterval       time.Duration `json:"cleanup_interval"`
-	
+	CleanupInterval time.Duration `json:"cleanup_interval"`
+
 	// Persistence settings
 	PersistentSessionTypes []interfaces.SessionType `json:"persistent_session_types"`
 	ForcePersistenceForJIT bool                     `json:"force_persistence_for_jit"`
-	
+
 	// Audit integration
-	EnableAuditTrail      bool `json:"enable_audit_trail"`
+	EnableAuditTrail bool `json:"enable_audit_trail"`
 }
 
 // PersistenceRules defines which sessions should be stored persistently vs ephemeral
 type PersistenceRules struct {
 	// Session types that should always be persistent
 	PersistentTypes map[interfaces.SessionType]bool
-	
+
 	// JIT sessions are always persistent due to compliance requirements
 	PersistJIT bool
-	
+
 	// Custom rule function for complex logic
 	CustomRule func(session *interfaces.Session) bool
 }
@@ -70,11 +72,11 @@ func NewUnifiedSessionManager(
 	if ephemeralStore == nil {
 		return nil, fmt.Errorf("ephemeral store is required")
 	}
-	
+
 	if config == nil {
 		config = DefaultConfig()
 	}
-	
+
 	if logger == nil {
 		return nil, fmt.Errorf("logger is required")
 	}
@@ -140,13 +142,13 @@ func (m *UnifiedSessionManager) CreateSession(ctx context.Context, req *SessionC
 	// Route to appropriate storage
 	store := m.getStoreForSession(session)
 	if store == nil {
-		return nil, fmt.Errorf("no suitable storage available for session type %s (persistent=%v)", 
+		return nil, fmt.Errorf("no suitable storage available for session type %s (persistent=%v)",
 			session.SessionType, session.Persistent)
 	}
 
 	// Store session
 	if err := store.CreateSession(ctx, session); err != nil {
-		return nil, fmt.Errorf("failed to create session in %s store: %w", 
+		return nil, fmt.Errorf("failed to create session in %s store: %w",
 			m.getStoreType(store), err)
 	}
 
@@ -253,8 +255,8 @@ func (m *UnifiedSessionManager) TerminateSession(ctx context.Context, sessionID 
 	// Delete from storage
 	if store != nil {
 		if err := store.DeleteSession(ctx, sessionID); err != nil {
-			m.logger.Warn("Failed to delete session from storage", 
-				"session_id", sessionID, 
+			m.logger.Warn("Failed to delete session from storage",
+				"session_id", sessionID,
 				"error", err)
 		}
 	}
@@ -469,7 +471,7 @@ func (m *UnifiedSessionManager) startCleanupRoutine() {
 	m.cleanupWG.Add(1)
 	go func() {
 		defer m.cleanupWG.Done()
-		
+
 		ticker := time.NewTicker(m.config.CleanupInterval)
 		defer ticker.Stop()
 
@@ -489,7 +491,7 @@ func (m *UnifiedSessionManager) startCleanupRoutine() {
 // DefaultConfig returns default configuration for the session manager
 func DefaultConfig() *Config {
 	return &Config{
-		DefaultSessionTimeout:  30 * time.Minute,
+		DefaultSessionTimeout: 30 * time.Minute,
 		MaxSessions:           1000,
 		CleanupInterval:       5 * time.Minute,
 		PersistentSessionTypes: []interfaces.SessionType{

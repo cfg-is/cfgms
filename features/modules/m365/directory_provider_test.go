@@ -1,16 +1,20 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package m365
 
 import (
 	"context"
 	"errors"
+	"runtime"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 
 	"github.com/cfgis/cfgms/features/controller/directory"
 	"github.com/cfgis/cfgms/features/modules/m365/auth"
 	"github.com/cfgis/cfgms/features/modules/m365/graph"
 	"github.com/cfgis/cfgms/pkg/directory/types"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/mock"
 )
 
 // Mock implementations for testing
@@ -472,7 +476,7 @@ func TestEntraIDDirectoryProvider_Connect(t *testing.T) {
 			tt.setupMocks(mockLogger, mockAuth, mockGraph)
 
 			provider := NewEntraIDDirectoryProvider(mockLogger, mockAuth, mockGraph)
-			
+
 			ctx := context.Background()
 			err := provider.Connect(ctx, tt.config)
 
@@ -499,7 +503,7 @@ func TestEntraIDDirectoryProvider_Disconnect(t *testing.T) {
 	mockLogger.On("Info", "Disconnected from Entra ID").Return()
 
 	provider := NewEntraIDDirectoryProvider(mockLogger, mockAuth, mockGraph)
-	
+
 	// Simulate connected state
 	provider.connected = true
 
@@ -514,12 +518,12 @@ func TestEntraIDDirectoryProvider_Disconnect(t *testing.T) {
 
 func TestEntraIDDirectoryProvider_HealthCheck(t *testing.T) {
 	tests := []struct {
-		name            string
-		connected       bool
-		setupMocks      func(*MockAuthProvider)
-		expectHealthy   bool
-		expectError     bool
-		expectedErrMsg  string
+		name           string
+		connected      bool
+		setupMocks     func(*MockAuthProvider)
+		expectHealthy  bool
+		expectError    bool
+		expectedErrMsg string
 	}{
 		{
 			name:           "not connected",
@@ -583,7 +587,11 @@ func TestEntraIDDirectoryProvider_HealthCheck(t *testing.T) {
 			}
 
 			if tt.expectHealthy {
-				assert.NotZero(t, health.ResponseTime)
+				// Windows timer resolution may cause ResponseTime to be 0 for very fast operations
+				// This is acceptable and doesn't indicate a failure
+				if runtime.GOOS != "windows" {
+					assert.NotZero(t, health.ResponseTime)
+				}
 			}
 
 			mockAuth.AssertExpectations(t)
@@ -616,7 +624,7 @@ func TestEntraIDDirectoryProvider_GetUser(t *testing.T) {
 			setupMocks: func(mockAuth *MockAuthProvider, mockGraph *MockGraphClient) {
 				mockToken := &auth.AccessToken{Token: "test-token"}
 				mockAuth.On("GetAccessToken", mock.Anything, "test-tenant-id").Return(mockToken, nil)
-				
+
 				mockUser := &graph.User{
 					ID:                "test-user-id",
 					UserPrincipalName: "test@example.com",
@@ -682,7 +690,7 @@ func TestEntraIDDirectoryProvider_GetUser(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 				assert.NotNil(t, user)
-				
+
 				// Compare key fields
 				assert.Equal(t, tt.expectUser.ID, user.ID)
 				assert.Equal(t, tt.expectUser.UserPrincipalName, user.UserPrincipalName)

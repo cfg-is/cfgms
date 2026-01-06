@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // Package interfaces defines the global directory provider system for CFGMS.
 //
 // This package implements CFGMS's pluggable infrastructure design paradigm for directory services,
@@ -6,7 +8,7 @@
 //
 // Architecture Pattern: Global Controller Directory Selection
 // - Controller-Level Decision: Single directory provider choice affects entire system
-// - All Modules Use Same Backend: No per-module directory configuration needed  
+// - All Modules Use Same Backend: No per-module directory configuration needed
 // - Interface Injection: Modules receive interfaces, never import specific providers
 // - Discovery: Providers auto-register via init() functions
 // - Simple Configuration: One setting: controller.directory.provider: "hybrid"
@@ -15,12 +17,12 @@
 //
 //	// Business logic imports interfaces only
 //	provider, err := interfaces.GetDirectoryProvider("activedirectory")
-//	
+//
 //	// Normalized directory operations
 //	user, err := provider.GetUser(ctx, "john.doe@company.com")
 //	err = provider.CreateUser(ctx, &DirectoryUser{...})
-//	
-//	// Cross-directory operations  
+//
+//	// Cross-directory operations
 //	err = provider.SyncUser(ctx, sourceUserID, targetProviderName)
 package interfaces
 
@@ -36,52 +38,52 @@ import (
 type DirectoryProvider interface {
 	// Provider Information
 	GetProviderInfo() ProviderInfo
-	
+
 	// Connection Management
 	Connect(ctx context.Context, config ProviderConfig) error
 	Disconnect(ctx context.Context) error
 	IsConnected(ctx context.Context) bool
 	HealthCheck(ctx context.Context) (*HealthStatus, error)
-	
+
 	// User Management
 	GetUser(ctx context.Context, userID string) (*DirectoryUser, error)
 	CreateUser(ctx context.Context, user *DirectoryUser) (*DirectoryUser, error)
 	UpdateUser(ctx context.Context, userID string, updates *DirectoryUser) (*DirectoryUser, error)
 	DeleteUser(ctx context.Context, userID string) error
 	ListUsers(ctx context.Context, filters *SearchFilters) (*UserList, error)
-	
+
 	// Group Management
 	GetGroup(ctx context.Context, groupID string) (*DirectoryGroup, error)
 	CreateGroup(ctx context.Context, group *DirectoryGroup) (*DirectoryGroup, error)
 	UpdateGroup(ctx context.Context, groupID string, updates *DirectoryGroup) (*DirectoryGroup, error)
 	DeleteGroup(ctx context.Context, groupID string) error
 	ListGroups(ctx context.Context, filters *SearchFilters) (*GroupList, error)
-	
+
 	// Membership Management
 	AddUserToGroup(ctx context.Context, userID, groupID string) error
 	RemoveUserFromGroup(ctx context.Context, userID, groupID string) error
 	GetUserGroups(ctx context.Context, userID string) ([]DirectoryGroup, error)
 	GetGroupMembers(ctx context.Context, groupID string) ([]DirectoryUser, error)
-	
+
 	// Organizational Unit Management (for AD compatibility)
 	GetOU(ctx context.Context, ouID string) (*OrganizationalUnit, error)
 	CreateOU(ctx context.Context, ou *OrganizationalUnit) (*OrganizationalUnit, error)
 	UpdateOU(ctx context.Context, ouID string, updates *OrganizationalUnit) (*OrganizationalUnit, error)
 	DeleteOU(ctx context.Context, ouID string) error
 	ListOUs(ctx context.Context, filters *SearchFilters) (*OUList, error)
-	
+
 	// Advanced Search Operations
 	Search(ctx context.Context, query *DirectoryQuery) (*SearchResults, error)
-	
+
 	// Bulk Operations
 	BulkCreateUsers(ctx context.Context, users []*DirectoryUser, options *BulkOptions) (*BulkResult, error)
 	BulkUpdateUsers(ctx context.Context, updates []*UserUpdate, options *BulkOptions) (*BulkResult, error)
 	BulkDeleteUsers(ctx context.Context, userIDs []string, options *BulkOptions) (*BulkResult, error)
-	
+
 	// Cross-Directory Operations
 	SyncUser(ctx context.Context, sourceUserID string, targetProvider DirectoryProvider) error
 	SyncGroup(ctx context.Context, sourceGroupID string, targetProvider DirectoryProvider) error
-	
+
 	// Schema and Capabilities
 	GetSchema(ctx context.Context) (*DirectorySchema, error)
 	GetCapabilities() ProviderCapabilities
@@ -95,11 +97,11 @@ type DirectoryConnection interface {
 	Open(ctx context.Context, config ProviderConfig) error
 	Close(ctx context.Context) error
 	IsHealthy(ctx context.Context) bool
-	
+
 	// Connection information
 	GetConnectionInfo() ConnectionInfo
 	GetStatistics() ConnectionStatistics
-	
+
 	// Connection pool management
 	Reset(ctx context.Context) error
 	RefreshCredentials(ctx context.Context) error
@@ -107,14 +109,14 @@ type DirectoryConnection interface {
 
 // ProviderInfo contains information about a directory provider
 type ProviderInfo struct {
-	Name            string                 `json:"name"`                      // e.g., "activedirectory", "entraid"
-	DisplayName     string                 `json:"display_name"`              // e.g., "Active Directory"
-	Version         string                 `json:"version"`                   // Provider version
-	Description     string                 `json:"description"`               // Provider description
-	SupportedTypes  []DirectoryObjectType  `json:"supported_types"`           // Supported object types
-	Capabilities    ProviderCapabilities   `json:"capabilities"`              // What this provider supports
-	Configuration   ConfigurationSchema    `json:"configuration"`             // Required configuration
-	Documentation   string                 `json:"documentation,omitempty"`   // Documentation URL
+	Name           string                `json:"name"`                    // e.g., "activedirectory", "entraid"
+	DisplayName    string                `json:"display_name"`            // e.g., "Active Directory"
+	Version        string                `json:"version"`                 // Provider version
+	Description    string                `json:"description"`             // Provider description
+	SupportedTypes []DirectoryObjectType `json:"supported_types"`         // Supported object types
+	Capabilities   ProviderCapabilities  `json:"capabilities"`            // What this provider supports
+	Configuration  ConfigurationSchema   `json:"configuration"`           // Required configuration
+	Documentation  string                `json:"documentation,omitempty"` // Documentation URL
 }
 
 // ProviderCapabilities describes what operations a provider supports
@@ -123,20 +125,20 @@ type ProviderCapabilities struct {
 	SupportsUserManagement  bool `json:"supports_user_management"`
 	SupportsGroupManagement bool `json:"supports_group_management"`
 	SupportsOUManagement    bool `json:"supports_ou_management"`
-	
+
 	// Advanced features
 	SupportsBulkOperations     bool `json:"supports_bulk_operations"`
 	SupportsAdvancedSearch     bool `json:"supports_advanced_search"`
 	SupportsCrossDirectorySync bool `json:"supports_cross_directory_sync"`
 	SupportsRealTimeSync       bool `json:"supports_real_time_sync"`
-	
+
 	// Authentication methods
 	SupportedAuthMethods []AuthMethod `json:"supported_auth_methods"`
-	
+
 	// Search capabilities
 	MaxSearchResults     int      `json:"max_search_results"`
 	SupportedSearchTypes []string `json:"supported_search_types"`
-	
+
 	// Rate limiting
 	RateLimitInfo *RateLimitInfo `json:"rate_limit_info,omitempty"`
 }
@@ -144,87 +146,87 @@ type ProviderCapabilities struct {
 // DirectoryUser represents a normalized user object across all directory providers
 type DirectoryUser struct {
 	// Core Identity
-	ID                string `json:"id"`                           // Unique identifier in source directory
-	UserPrincipalName string `json:"user_principal_name"`          // UPN (user@domain.com)
-	SAMAccountName    string `json:"sam_account_name,omitempty"`   // For AD compatibility
-	DisplayName       string `json:"display_name"`                 // Full display name
-	
+	ID                string `json:"id"`                         // Unique identifier in source directory
+	UserPrincipalName string `json:"user_principal_name"`        // UPN (user@domain.com)
+	SAMAccountName    string `json:"sam_account_name,omitempty"` // For AD compatibility
+	DisplayName       string `json:"display_name"`               // Full display name
+
 	// Authentication
-	AccountEnabled bool      `json:"account_enabled"`                // Is account enabled
-	PasswordExpiry *time.Time `json:"password_expiry,omitempty"`      // When password expires
-	LastLogon      *time.Time `json:"last_logon,omitempty"`           // Last successful logon
-	
-	// Contact Information  
-	EmailAddress   string `json:"email_address,omitempty"`         // Primary email
-	PhoneNumber    string `json:"phone_number,omitempty"`          // Primary phone
-	MobilePhone    string `json:"mobile_phone,omitempty"`          // Mobile phone
-	
+	AccountEnabled bool       `json:"account_enabled"`           // Is account enabled
+	PasswordExpiry *time.Time `json:"password_expiry,omitempty"` // When password expires
+	LastLogon      *time.Time `json:"last_logon,omitempty"`      // Last successful logon
+
+	// Contact Information
+	EmailAddress string `json:"email_address,omitempty"` // Primary email
+	PhoneNumber  string `json:"phone_number,omitempty"`  // Primary phone
+	MobilePhone  string `json:"mobile_phone,omitempty"`  // Mobile phone
+
 	// Organizational Information
-	Department      string `json:"department,omitempty"`           // Department name
-	JobTitle        string `json:"job_title,omitempty"`            // Job title
-	Manager         string `json:"manager,omitempty"`              // Manager's ID
-	OfficeLocation  string `json:"office_location,omitempty"`      // Office location
-	Company         string `json:"company,omitempty"`              // Company name
-	
+	Department     string `json:"department,omitempty"`      // Department name
+	JobTitle       string `json:"job_title,omitempty"`       // Job title
+	Manager        string `json:"manager,omitempty"`         // Manager's ID
+	OfficeLocation string `json:"office_location,omitempty"` // Office location
+	Company        string `json:"company,omitempty"`         // Company name
+
 	// Directory Structure
 	DistinguishedName string   `json:"distinguished_name,omitempty"` // Full DN (for AD)
-	OU               string   `json:"ou,omitempty"`                 // Parent OU
-	Groups           []string `json:"groups,omitempty"`             // Group memberships
-	
+	OU                string   `json:"ou,omitempty"`                 // Parent OU
+	Groups            []string `json:"groups,omitempty"`             // Group memberships
+
 	// Provider-Specific Attributes
 	ProviderAttributes map[string]interface{} `json:"provider_attributes,omitempty"`
-	
+
 	// Metadata
-	Created  *time.Time `json:"created,omitempty"`               // When created
-	Modified *time.Time `json:"modified,omitempty"`              // When last modified
-	Source   string     `json:"source"`                          // Source provider name
+	Created  *time.Time `json:"created,omitempty"`  // When created
+	Modified *time.Time `json:"modified,omitempty"` // When last modified
+	Source   string     `json:"source"`             // Source provider name
 }
 
 // DirectoryGroup represents a normalized group object across all directory providers
 type DirectoryGroup struct {
 	// Core Identity
-	ID              string `json:"id"`                              // Unique identifier
-	Name            string `json:"name"`                            // Group name
-	DisplayName     string `json:"display_name"`                   // Display name
-	Description     string `json:"description,omitempty"`          // Group description
-	
+	ID          string `json:"id"`                    // Unique identifier
+	Name        string `json:"name"`                  // Group name
+	DisplayName string `json:"display_name"`          // Display name
+	Description string `json:"description,omitempty"` // Group description
+
 	// Group Properties
-	GroupType       GroupType `json:"group_type"`                   // Security vs Distribution
-	GroupScope      GroupScope `json:"group_scope,omitempty"`       // Domain, Global, Universal
-	
+	GroupType  GroupType  `json:"group_type"`            // Security vs Distribution
+	GroupScope GroupScope `json:"group_scope,omitempty"` // Domain, Global, Universal
+
 	// Directory Structure
 	DistinguishedName string   `json:"distinguished_name,omitempty"` // Full DN (for AD)
-	OU               string   `json:"ou,omitempty"`                 // Parent OU
-	Members          []string `json:"members,omitempty"`            // Member user IDs
-	
+	OU                string   `json:"ou,omitempty"`                 // Parent OU
+	Members           []string `json:"members,omitempty"`            // Member user IDs
+
 	// Provider-Specific Attributes
 	ProviderAttributes map[string]interface{} `json:"provider_attributes,omitempty"`
-	
-	// Metadata  
-	Created  *time.Time `json:"created,omitempty"`               // When created
-	Modified *time.Time `json:"modified,omitempty"`              // When last modified
-	Source   string     `json:"source"`                          // Source provider name
+
+	// Metadata
+	Created  *time.Time `json:"created,omitempty"`  // When created
+	Modified *time.Time `json:"modified,omitempty"` // When last modified
+	Source   string     `json:"source"`             // Source provider name
 }
 
 // OrganizationalUnit represents a normalized OU object (primarily for AD compatibility)
 type OrganizationalUnit struct {
 	// Core Identity
-	ID              string `json:"id"`                            // Unique identifier
-	Name            string `json:"name"`                          // OU name
-	DisplayName     string `json:"display_name"`                 // Display name
-	Description     string `json:"description,omitempty"`        // OU description
-	
+	ID          string `json:"id"`                    // Unique identifier
+	Name        string `json:"name"`                  // OU name
+	DisplayName string `json:"display_name"`          // Display name
+	Description string `json:"description,omitempty"` // OU description
+
 	// Directory Structure
-	DistinguishedName string `json:"distinguished_name"`          // Full DN
-	ParentOU         string `json:"parent_ou,omitempty"`         // Parent OU ID
-	
+	DistinguishedName string `json:"distinguished_name"`  // Full DN
+	ParentOU          string `json:"parent_ou,omitempty"` // Parent OU ID
+
 	// Provider-Specific Attributes
 	ProviderAttributes map[string]interface{} `json:"provider_attributes,omitempty"`
-	
+
 	// Metadata
-	Created  *time.Time `json:"created,omitempty"`               // When created
-	Modified *time.Time `json:"modified,omitempty"`              // When last modified
-	Source   string     `json:"source"`                          // Source provider name
+	Created  *time.Time `json:"created,omitempty"`  // When created
+	Modified *time.Time `json:"modified,omitempty"` // When last modified
+	Source   string     `json:"source"`             // Source provider name
 }
 
 // Supporting Types
@@ -259,55 +261,55 @@ const (
 type AuthMethod string
 
 const (
-	AuthMethodKerberos    AuthMethod = "kerberos"
-	AuthMethodLDAP        AuthMethod = "ldap"
-	AuthMethodOAuth2      AuthMethod = "oauth2"
-	AuthMethodClientCert  AuthMethod = "client_cert"
-	AuthMethodAPIKey      AuthMethod = "api_key"
+	AuthMethodKerberos   AuthMethod = "kerberos"
+	AuthMethodLDAP       AuthMethod = "ldap"
+	AuthMethodOAuth2     AuthMethod = "oauth2"
+	AuthMethodClientCert AuthMethod = "client_cert"
+	AuthMethodAPIKey     AuthMethod = "api_key"
 )
 
 // SearchFilters defines filters for directory searches
 type SearchFilters struct {
 	// Text search
-	Query        string `json:"query,omitempty"`                // Free text search
-	
+	Query string `json:"query,omitempty"` // Free text search
+
 	// Object filters
-	ObjectTypes  []DirectoryObjectType `json:"object_types,omitempty"`  // Filter by object type
-	
+	ObjectTypes []DirectoryObjectType `json:"object_types,omitempty"` // Filter by object type
+
 	// User-specific filters
-	Department   string `json:"department,omitempty"`           // Filter by department
-	JobTitle     string `json:"job_title,omitempty"`            // Filter by job title
-	Enabled      *bool  `json:"enabled,omitempty"`              // Filter by enabled status
-	
+	Department string `json:"department,omitempty"` // Filter by department
+	JobTitle   string `json:"job_title,omitempty"`  // Filter by job title
+	Enabled    *bool  `json:"enabled,omitempty"`    // Filter by enabled status
+
 	// OU filters
-	OU          string `json:"ou,omitempty"`                   // Filter by OU
-	Recursive   bool   `json:"recursive"`                      // Search recursively in OUs
-	
+	OU        string `json:"ou,omitempty"` // Filter by OU
+	Recursive bool   `json:"recursive"`    // Search recursively in OUs
+
 	// Pagination
-	Offset      int `json:"offset"`                            // Starting offset
-	Limit       int `json:"limit"`                             // Maximum results
-	
+	Offset int `json:"offset"` // Starting offset
+	Limit  int `json:"limit"`  // Maximum results
+
 	// Sorting
-	SortBy      string `json:"sort_by,omitempty"`              // Field to sort by
-	SortOrder   string `json:"sort_order,omitempty"`           // "asc" or "desc"
+	SortBy    string `json:"sort_by,omitempty"`    // Field to sort by
+	SortOrder string `json:"sort_order,omitempty"` // "asc" or "desc"
 }
 
 // DirectoryQuery represents advanced search queries
 type DirectoryQuery struct {
 	// LDAP-style query string
-	Filter      string            `json:"filter"`                    // LDAP filter or equivalent
-	
+	Filter string `json:"filter"` // LDAP filter or equivalent
+
 	// Attributes to retrieve
-	Attributes  []string          `json:"attributes,omitempty"`      // Specific attributes to return
-	
+	Attributes []string `json:"attributes,omitempty"` // Specific attributes to return
+
 	// Search base
-	SearchBase  string            `json:"search_base,omitempty"`     // Where to start search
-	
+	SearchBase string `json:"search_base,omitempty"` // Where to start search
+
 	// Search scope
-	Scope       SearchScope       `json:"scope"`                     // Search scope
-	
+	Scope SearchScope `json:"scope"` // Search scope
+
 	// Search options
-	Options     map[string]interface{} `json:"options,omitempty"`    // Provider-specific options
+	Options map[string]interface{} `json:"options,omitempty"` // Provider-specific options
 }
 
 // SearchScope defines the scope of directory searches
@@ -324,17 +326,17 @@ const (
 // UserList represents a paginated list of users
 type UserList struct {
 	Users      []DirectoryUser `json:"users"`
-	TotalCount int            `json:"total_count"`
-	HasMore    bool           `json:"has_more"`
-	NextToken  string         `json:"next_token,omitempty"`
-}
-
-// GroupList represents a paginated list of groups  
-type GroupList struct {
-	Groups     []DirectoryGroup `json:"groups"`
 	TotalCount int             `json:"total_count"`
 	HasMore    bool            `json:"has_more"`
 	NextToken  string          `json:"next_token,omitempty"`
+}
+
+// GroupList represents a paginated list of groups
+type GroupList struct {
+	Groups     []DirectoryGroup `json:"groups"`
+	TotalCount int              `json:"total_count"`
+	HasMore    bool             `json:"has_more"`
+	NextToken  string           `json:"next_token,omitempty"`
 }
 
 // OUList represents a paginated list of organizational units
@@ -359,22 +361,22 @@ type SearchResults struct {
 
 // BulkOptions defines options for bulk operations
 type BulkOptions struct {
-	BatchSize        int           `json:"batch_size"`                 // Items per batch
-	ConcurrentBatch  int           `json:"concurrent_batches"`         // Concurrent batches
-	ContinueOnError  bool          `json:"continue_on_error"`          // Continue if errors occur  
-	RetryAttempts    int           `json:"retry_attempts"`             // Retry attempts per item
-	RetryDelay       time.Duration `json:"retry_delay"`                // Delay between retries
-	BatchTimeout     time.Duration `json:"batch_timeout"`              // Timeout for individual batches
+	BatchSize       int           `json:"batch_size"`         // Items per batch
+	ConcurrentBatch int           `json:"concurrent_batches"` // Concurrent batches
+	ContinueOnError bool          `json:"continue_on_error"`  // Continue if errors occur
+	RetryAttempts   int           `json:"retry_attempts"`     // Retry attempts per item
+	RetryDelay      time.Duration `json:"retry_delay"`        // Delay between retries
+	BatchTimeout    time.Duration `json:"batch_timeout"`      // Timeout for individual batches
 }
 
 // BulkResult represents the result of a bulk operation
 type BulkResult struct {
-	TotalItems    int                    `json:"total_items"`
-	SuccessCount  int                    `json:"success_count"`
-	ErrorCount    int                    `json:"error_count"`
-	Errors        []BulkItemError        `json:"errors,omitempty"`
-	Duration      time.Duration          `json:"duration"`
-	ItemResults   []BulkItemResult       `json:"item_results,omitempty"`
+	TotalItems   int              `json:"total_items"`
+	SuccessCount int              `json:"success_count"`
+	ErrorCount   int              `json:"error_count"`
+	Errors       []BulkItemError  `json:"errors,omitempty"`
+	Duration     time.Duration    `json:"duration"`
+	ItemResults  []BulkItemResult `json:"item_results,omitempty"`
 }
 
 // BulkItemError represents an error for a specific item in a bulk operation
@@ -403,11 +405,11 @@ type UserUpdate struct {
 
 // HealthStatus represents the health status of a directory provider connection
 type HealthStatus struct {
-	IsHealthy    bool               `json:"is_healthy"`
-	LastCheck    time.Time          `json:"last_check"`
-	ResponseTime time.Duration      `json:"response_time"`
+	IsHealthy    bool                   `json:"is_healthy"`
+	LastCheck    time.Time              `json:"last_check"`
+	ResponseTime time.Duration          `json:"response_time"`
 	Details      map[string]interface{} `json:"details,omitempty"`
-	Errors       []string           `json:"errors,omitempty"`
+	Errors       []string               `json:"errors,omitempty"`
 }
 
 // ConnectionInfo provides information about a directory connection
@@ -422,10 +424,10 @@ type ConnectionInfo struct {
 
 // ConnectionStatistics provides statistics about a directory connection
 type ConnectionStatistics struct {
-	RequestCount    int64         `json:"request_count"`
-	ErrorCount      int64         `json:"error_count"`
-	AverageLatency  time.Duration `json:"average_latency"`
-	LastRequestTime time.Time     `json:"last_request_time"`
+	RequestCount    int64          `json:"request_count"`
+	ErrorCount      int64          `json:"error_count"`
+	AverageLatency  time.Duration  `json:"average_latency"`
+	LastRequestTime time.Time      `json:"last_request_time"`
 	ConnectionPool  PoolStatistics `json:"connection_pool,omitempty"`
 }
 
@@ -445,37 +447,37 @@ type PoolStatistics struct {
 // ProviderConfig contains configuration for a directory provider
 type ProviderConfig struct {
 	// Provider identification
-	ProviderName string `json:"provider_name"`               // Which provider to use
-	
+	ProviderName string `json:"provider_name"` // Which provider to use
+
 	// Connection settings
-	ServerAddress string            `json:"server_address"`            // Server address/URL
-	Port          int               `json:"port,omitempty"`            // Port number
-	UseTLS        bool              `json:"use_tls"`                   // Use TLS/SSL
-	
+	ServerAddress string `json:"server_address"` // Server address/URL
+	Port          int    `json:"port,omitempty"` // Port number
+	UseTLS        bool   `json:"use_tls"`        // Use TLS/SSL
+
 	// Authentication
-	AuthMethod    AuthMethod        `json:"auth_method"`               // Authentication method
-	Username      string            `json:"username,omitempty"`        // Username
-	Password      string            `json:"password,omitempty"`        // Password (will be secured)
-	ClientID      string            `json:"client_id,omitempty"`       // OAuth2 client ID
-	TenantID      string            `json:"tenant_id,omitempty"`       // Tenant ID (for multi-tenant)
-	
+	AuthMethod AuthMethod `json:"auth_method"`         // Authentication method
+	Username   string     `json:"username,omitempty"`  // Username
+	Password   string     `json:"password,omitempty"`  // Password (will be secured)
+	ClientID   string     `json:"client_id,omitempty"` // OAuth2 client ID
+	TenantID   string     `json:"tenant_id,omitempty"` // Tenant ID (for multi-tenant)
+
 	// Search settings
-	SearchBase    string            `json:"search_base,omitempty"`     // Default search base
-	PageSize      int               `json:"page_size,omitempty"`       // Default page size
-	
+	SearchBase string `json:"search_base,omitempty"` // Default search base
+	PageSize   int    `json:"page_size,omitempty"`   // Default page size
+
 	// Connection pool settings
-	MaxConnections    int           `json:"max_connections"`           // Maximum connections
-	ConnectionTimeout time.Duration `json:"connection_timeout"`        // Connection timeout
-	IdleTimeout       time.Duration `json:"idle_timeout"`              // Idle connection timeout
-	
+	MaxConnections    int           `json:"max_connections"`    // Maximum connections
+	ConnectionTimeout time.Duration `json:"connection_timeout"` // Connection timeout
+	IdleTimeout       time.Duration `json:"idle_timeout"`       // Idle connection timeout
+
 	// Provider-specific configuration
 	ProviderConfig map[string]interface{} `json:"provider_config,omitempty"`
 }
 
 // ConfigurationSchema describes the configuration requirements for a provider
 type ConfigurationSchema struct {
-	Required []ConfigField `json:"required"`              // Required configuration fields
-	Optional []ConfigField `json:"optional"`              // Optional configuration fields
+	Required []ConfigField `json:"required"` // Required configuration fields
+	Optional []ConfigField `json:"optional"` // Optional configuration fields
 }
 
 // ConfigField describes a configuration field
@@ -490,39 +492,39 @@ type ConfigField struct {
 
 // DirectorySchema describes the schema supported by a directory provider
 type DirectorySchema struct {
-	UserSchema  ObjectSchema `json:"user_schema"`             // User object schema
-	GroupSchema ObjectSchema `json:"group_schema"`            // Group object schema
-	OUSchema    ObjectSchema `json:"ou_schema,omitempty"`     // OU schema (if supported)
+	UserSchema  ObjectSchema `json:"user_schema"`         // User object schema
+	GroupSchema ObjectSchema `json:"group_schema"`        // Group object schema
+	OUSchema    ObjectSchema `json:"ou_schema,omitempty"` // OU schema (if supported)
 }
 
 // ObjectSchema describes the schema for a directory object type
 type ObjectSchema struct {
-	ObjectType      DirectoryObjectType        `json:"object_type"`
-	RequiredFields  []SchemaField              `json:"required_fields"`
-	OptionalFields  []SchemaField              `json:"optional_fields"`
-	ReadOnlyFields  []SchemaField              `json:"read_only_fields"`
-	SearchableFields []SchemaField             `json:"searchable_fields"`
+	ObjectType       DirectoryObjectType `json:"object_type"`
+	RequiredFields   []SchemaField       `json:"required_fields"`
+	OptionalFields   []SchemaField       `json:"optional_fields"`
+	ReadOnlyFields   []SchemaField       `json:"read_only_fields"`
+	SearchableFields []SchemaField       `json:"searchable_fields"`
 }
 
 // SchemaField describes a field in a directory object schema
 type SchemaField struct {
-	Name        string      `json:"name"`                    // Field name
-	Type        string      `json:"type"`                    // Data type
-	Description string      `json:"description"`             // Field description
-	MaxLength   int         `json:"max_length,omitempty"`    // Maximum length (for strings)
-	Format      string      `json:"format,omitempty"`        // Format constraints
-	Validation  string      `json:"validation,omitempty"`    // Validation rules
+	Name        string `json:"name"`                 // Field name
+	Type        string `json:"type"`                 // Data type
+	Description string `json:"description"`          // Field description
+	MaxLength   int    `json:"max_length,omitempty"` // Maximum length (for strings)
+	Format      string `json:"format,omitempty"`     // Format constraints
+	Validation  string `json:"validation,omitempty"` // Validation rules
 }
 
 // Rate Limiting
 
 // RateLimitInfo describes rate limiting for a provider
 type RateLimitInfo struct {
-	RequestsPerSecond int           `json:"requests_per_second"`      // Max requests per second
-	RequestsPerMinute int           `json:"requests_per_minute"`      // Max requests per minute
-	RequestsPerHour   int           `json:"requests_per_hour"`        // Max requests per hour
-	BurstSize         int           `json:"burst_size"`               // Burst request allowance
-	BackoffStrategy   string        `json:"backoff_strategy"`         // Backoff strategy
+	RequestsPerSecond int    `json:"requests_per_second"` // Max requests per second
+	RequestsPerMinute int    `json:"requests_per_minute"` // Max requests per minute
+	RequestsPerHour   int    `json:"requests_per_hour"`   // Max requests per hour
+	BurstSize         int    `json:"burst_size"`          // Burst request allowance
+	BackoffStrategy   string `json:"backoff_strategy"`    // Backoff strategy
 }
 
 // Global Provider Registry (following CFGMS storage provider pattern)
@@ -542,7 +544,7 @@ type providerRegistry struct {
 func RegisterDirectoryProvider(provider DirectoryProvider) {
 	globalRegistry.mutex.Lock()
 	defer globalRegistry.mutex.Unlock()
-	
+
 	info := provider.GetProviderInfo()
 	globalRegistry.providers[info.Name] = provider
 }
@@ -551,12 +553,12 @@ func RegisterDirectoryProvider(provider DirectoryProvider) {
 func GetDirectoryProvider(name string) (DirectoryProvider, error) {
 	globalRegistry.mutex.RLock()
 	defer globalRegistry.mutex.RUnlock()
-	
+
 	provider, exists := globalRegistry.providers[name]
 	if !exists {
 		return nil, fmt.Errorf("directory provider '%s' not found", name)
 	}
-	
+
 	return provider, nil
 }
 
@@ -564,7 +566,7 @@ func GetDirectoryProvider(name string) (DirectoryProvider, error) {
 func GetAvailableDirectoryProviders() map[string]DirectoryProvider {
 	globalRegistry.mutex.RLock()
 	defer globalRegistry.mutex.RUnlock()
-	
+
 	available := make(map[string]DirectoryProvider)
 	for name, provider := range globalRegistry.providers {
 		// Test basic connectivity/health
@@ -574,7 +576,7 @@ func GetAvailableDirectoryProviders() map[string]DirectoryProvider {
 		}
 		cancel()
 	}
-	
+
 	return available
 }
 
@@ -582,12 +584,12 @@ func GetAvailableDirectoryProviders() map[string]DirectoryProvider {
 func ListDirectoryProviders() []ProviderInfo {
 	globalRegistry.mutex.RLock()
 	defer globalRegistry.mutex.RUnlock()
-	
+
 	var providers []ProviderInfo
 	for _, provider := range globalRegistry.providers {
 		providers = append(providers, provider.GetProviderInfo())
 	}
-	
+
 	return providers
 }
 
@@ -604,14 +606,14 @@ func CreateDirectoryProviderFromConfig(providerName string, config ProviderConfi
 		}
 		return nil, fmt.Errorf("directory provider '%s' not available. Available providers: %v", providerName, availableNames)
 	}
-	
+
 	// Connect to the directory service
 	ctx, cancel := context.WithTimeout(context.Background(), config.ConnectionTimeout)
 	defer cancel()
-	
+
 	if err := provider.Connect(ctx, config); err != nil {
 		return nil, fmt.Errorf("failed to connect to directory provider '%s': %w", providerName, err)
 	}
-	
+
 	return provider, nil
 }

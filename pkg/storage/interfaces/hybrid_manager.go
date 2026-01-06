@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // Package interfaces provides hybrid storage management for mixed backend deployments
 package interfaces
 
@@ -9,7 +11,7 @@ import (
 type HybridStorageConfig struct {
 	// Operational data storage (audit, tenant data, sessions, health monitoring)
 	Operational StorageBackendConfig `json:"operational" yaml:"operational"`
-	
+
 	// Configuration data storage (templates, certificates, configurations)
 	Configuration StorageBackendConfig `json:"configuration" yaml:"configuration"`
 }
@@ -24,11 +26,11 @@ type StorageBackendConfig struct {
 type HybridStorageManager struct {
 	operationalProvider   StorageProvider
 	configurationProvider StorageProvider
-	
+
 	clientTenantStore ClientTenantStore
-	auditStore       AuditStore
-	configStore      ConfigStore
-	
+	auditStore        AuditStore
+	configStore       ConfigStore
+
 	config HybridStorageConfig
 }
 
@@ -37,43 +39,43 @@ func NewHybridStorageManager(config HybridStorageConfig) (*HybridStorageManager,
 	manager := &HybridStorageManager{
 		config: config,
 	}
-	
+
 	// Initialize operational provider (database recommended for performance)
 	opProvider, err := GetStorageProvider(config.Operational.Provider)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get operational storage provider '%s': %w", 
+		return nil, fmt.Errorf("failed to get operational storage provider '%s': %w",
 			config.Operational.Provider, err)
 	}
 	manager.operationalProvider = opProvider
-	
+
 	// Initialize configuration provider (git recommended for GitOps)
 	cfgProvider, err := GetStorageProvider(config.Configuration.Provider)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get configuration storage provider '%s': %w", 
+		return nil, fmt.Errorf("failed to get configuration storage provider '%s': %w",
 			config.Configuration.Provider, err)
 	}
 	manager.configurationProvider = cfgProvider
-	
+
 	// Create operational stores (high-performance queries)
 	clientTenantStore, err := opProvider.CreateClientTenantStore(config.Operational.Config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create client tenant store: %w", err)
 	}
 	manager.clientTenantStore = clientTenantStore
-	
+
 	auditStore, err := opProvider.CreateAuditStore(config.Operational.Config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create audit store: %w", err)
 	}
 	manager.auditStore = auditStore
-	
+
 	// Create configuration store (GitOps workflow)
 	configStore, err := cfgProvider.CreateConfigStore(config.Configuration.Config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create config store: %w", err)
 	}
 	manager.configStore = configStore
-	
+
 	return manager, nil
 }
 
@@ -150,36 +152,36 @@ func ValidateHybridConfig(config HybridStorageConfig) error {
 	if config.Operational.Provider == "" {
 		return fmt.Errorf("operational storage provider is required")
 	}
-	
+
 	opProvider, err := GetStorageProvider(config.Operational.Provider)
 	if err != nil {
-		return fmt.Errorf("operational storage provider '%s' not available: %w", 
+		return fmt.Errorf("operational storage provider '%s' not available: %w",
 			config.Operational.Provider, err)
 	}
-	
+
 	// Validate configuration provider
 	if config.Configuration.Provider == "" {
 		return fmt.Errorf("configuration storage provider is required")
 	}
-	
+
 	cfgProvider, err := GetStorageProvider(config.Configuration.Provider)
 	if err != nil {
-		return fmt.Errorf("configuration storage provider '%s' not available: %w", 
+		return fmt.Errorf("configuration storage provider '%s' not available: %w",
 			config.Configuration.Provider, err)
 	}
-	
+
 	// Validate operational provider capabilities for high-performance queries
 	opCaps := opProvider.GetCapabilities()
 	if !opCaps.SupportsTransactions {
 		return fmt.Errorf("operational storage provider should support transactions for data consistency")
 	}
-	
+
 	// Validate configuration provider capabilities for GitOps workflow
 	cfgCaps := cfgProvider.GetCapabilities()
 	if !cfgCaps.SupportsVersioning {
 		return fmt.Errorf("configuration storage provider should support versioning for change tracking")
 	}
-	
+
 	return nil
 }
 
@@ -189,7 +191,7 @@ func CreateHybridStorageFromConfig(config HybridStorageConfig) (*HybridStorageMa
 	if err := ValidateHybridConfig(config); err != nil {
 		return nil, fmt.Errorf("invalid hybrid storage configuration: %w", err)
 	}
-	
+
 	// Create hybrid storage manager
 	return NewHybridStorageManager(config)
 }
@@ -200,15 +202,15 @@ func GetRecommendedHybridConfig() HybridStorageConfig {
 		Operational: StorageBackendConfig{
 			Provider: "database",
 			Config: map[string]interface{}{
-				"host":                              "localhost",
-				"port":                              5432,
-				"database":                          "cfgms_ops",
-				"username":                          "cfgms",
-				"password":                          "${POSTGRES_PASSWORD}",
-				"sslmode":                          "require",
-				"max_open_connections":             50, // Higher for operational queries
-				"max_idle_connections":             10,
-				"connection_max_lifetime_minutes":  30,
+				"host":                            "localhost",
+				"port":                            5432,
+				"database":                        "cfgms_ops",
+				"username":                        "cfgms",
+				"password":                        "${POSTGRES_PASSWORD}",
+				"sslmode":                         "require",
+				"max_open_connections":            50, // Higher for operational queries
+				"max_idle_connections":            10,
+				"connection_max_lifetime_minutes": 30,
 			},
 		},
 		Configuration: StorageBackendConfig{
@@ -243,7 +245,7 @@ func PlanHybridMigration(currentProvider string, currentConfig map[string]interf
 		MigrateData:    true,
 		BackupFirst:    true,
 	}
-	
+
 	// Recommend hybrid configuration based on current setup
 	switch currentProvider {
 	case "database":
@@ -279,6 +281,6 @@ func PlanHybridMigration(currentProvider string, currentConfig map[string]interf
 			},
 		}
 	}
-	
+
 	return strategy
 }

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package auth
 
 import (
@@ -25,7 +27,7 @@ func TestDirectAppAccessConfiguration(t *testing.T) {
 	// Direct app configuration with delegated permissions
 	config := &OAuth2Config{
 		ClientID:                 "test-client-id-direct",
-		ClientSecret:             "test-client-secret-direct", 
+		ClientSecret:             "test-client-secret-direct",
 		TenantID:                 "test-tenant-id-direct",
 		RedirectURI:              "http://localhost:8080/callback",
 		UseClientCredentials:     false, // Enable delegated flow
@@ -33,17 +35,17 @@ func TestDirectAppAccessConfiguration(t *testing.T) {
 		FallbackToAppPermissions: true,  // Allow fallback to app permissions
 		// Direct app delegated scopes (most common M365 scenarios)
 		DelegatedScopes: []string{
-			"User.Read",                              // Basic user profile reading
-			"User.ReadWrite",                         // User profile management
-			"User.ReadWrite.All",                     // All user management (admin)
-			"Directory.Read.All",                     // Directory reading
-			"Group.Read.All",                         // Group reading
-			"Group.ReadWrite.All",                    // Group management
-			"Policy.ReadWrite.ConditionalAccess",     // Conditional Access management
+			"User.Read",                                   // Basic user profile reading
+			"User.ReadWrite",                              // User profile management
+			"User.ReadWrite.All",                          // All user management (admin)
+			"Directory.Read.All",                          // Directory reading
+			"Group.Read.All",                              // Group reading
+			"Group.ReadWrite.All",                         // Group management
+			"Policy.ReadWrite.ConditionalAccess",          // Conditional Access management
 			"DeviceManagementConfiguration.ReadWrite.All", // Intune policy management
-			"Mail.Read",                              // Email reading
-			"Calendars.Read",                         // Calendar reading
-			"Sites.Read.All",                         // SharePoint sites reading
+			"Mail.Read",                                   // Email reading
+			"Calendars.Read",                              // Calendar reading
+			"Sites.Read.All",                              // SharePoint sites reading
 		},
 		// Required minimum scopes for basic functionality
 		RequiredDelegatedScopes: []string{
@@ -53,7 +55,7 @@ func TestDirectAppAccessConfiguration(t *testing.T) {
 		// Application scopes as fallback (using Scopes field)
 		Scopes: []string{
 			"User.Read.All",
-			"Directory.Read.All", 
+			"Directory.Read.All",
 			"Group.Read.All",
 			"Policy.Read.All",
 			"DeviceManagementConfiguration.Read.All",
@@ -71,18 +73,18 @@ func TestDirectAppAccessConfiguration(t *testing.T) {
 		// Retrieve and verify configuration
 		retrievedConfig, err := credStore.GetConfig(config.TenantID)
 		require.NoError(t, err)
-		
+
 		// Verify basic configuration
 		assert.Equal(t, config.ClientID, retrievedConfig.ClientID)
 		assert.Equal(t, config.TenantID, retrievedConfig.TenantID)
 		assert.True(t, retrievedConfig.SupportsDelegatedAuth())
 		assert.False(t, retrievedConfig.UseClientCredentials)
-		
+
 		// Verify delegated permissions configuration
 		assert.Equal(t, config.DelegatedScopes, retrievedConfig.DelegatedScopes)
 		assert.Equal(t, config.RequiredDelegatedScopes, retrievedConfig.RequiredDelegatedScopes)
 		assert.Equal(t, config.Scopes, retrievedConfig.Scopes)
-		
+
 		// Verify fallback configuration
 		assert.True(t, retrievedConfig.FallbackToAppPermissions)
 	})
@@ -91,28 +93,28 @@ func TestDirectAppAccessConfiguration(t *testing.T) {
 		// Test various user contexts for different scenarios
 		testUsers := []*UserContext{
 			{
-				UserID:               "direct-user-standard",
-				UserPrincipalName:    "standarduser@example.com",
-				DisplayName:          "Standard User",
-				Roles:                []string{"User"},
-				LastAuthenticated:    time.Now(),
-				SessionID:            "session-standard",
+				UserID:            "direct-user-standard",
+				UserPrincipalName: "standarduser@example.com",
+				DisplayName:       "Standard User",
+				Roles:             []string{"User"},
+				LastAuthenticated: time.Now(),
+				SessionID:         "session-standard",
 			},
 			{
-				UserID:               "direct-user-admin",
-				UserPrincipalName:    "admin@example.com", 
-				DisplayName:          "Admin User",
-				Roles:                []string{"User", "GlobalAdmin"},
-				LastAuthenticated:    time.Now(),
-				SessionID:            "session-admin",
+				UserID:            "direct-user-admin",
+				UserPrincipalName: "admin@example.com",
+				DisplayName:       "Admin User",
+				Roles:             []string{"User", "GlobalAdmin"},
+				LastAuthenticated: time.Now(),
+				SessionID:         "session-admin",
 			},
 			{
-				UserID:               "direct-user-limited",
-				UserPrincipalName:    "limiteduser@example.com",
-				DisplayName:          "Limited User",
-				Roles:                []string{"User"},
-				LastAuthenticated:    time.Now().Add(-24 * time.Hour), // Last auth 24h ago
-				SessionID:            "session-limited",
+				UserID:            "direct-user-limited",
+				UserPrincipalName: "limiteduser@example.com",
+				DisplayName:       "Limited User",
+				Roles:             []string{"User"},
+				LastAuthenticated: time.Now().Add(-24 * time.Hour), // Last auth 24h ago
+				SessionID:         "session-limited",
 			},
 		}
 
@@ -198,12 +200,12 @@ func TestDirectAppAccessConfiguration(t *testing.T) {
 
 				// Test permission validation
 				err := provider.ValidatePermissions(ctx, mockToken, tc.requestedScopes)
-				
+
 				if tc.shouldSucceed {
 					assert.NoError(t, err, "Should succeed: %s", tc.description)
 				} else {
 					assert.Error(t, err, "Should fail: %s", tc.description)
-					assert.Contains(t, err.Error(), "INSUFFICIENT_PERMISSIONS", 
+					assert.Contains(t, err.Error(), "INSUFFICIENT_PERMISSIONS",
 						"Error should indicate insufficient permissions")
 				}
 			})
@@ -220,29 +222,29 @@ func TestDirectAppAccessConfiguration(t *testing.T) {
 		// Test fallback behavior when delegated token is not available
 		// This should fall back to application permissions
 		token, err := provider.GetDelegatedAccessToken(ctx, config.TenantID, userContext)
-		
+
 		// Since we don't have real credentials, we expect either:
-		// 1. An error indicating no delegated token available 
+		// 1. An error indicating no delegated token available
 		// 2. Successful fallback to application permissions (if implemented)
 		if err != nil {
 			// Check if error is related to delegated authentication
 			authErr, ok := err.(*AuthenticationError)
 			require.True(t, ok, "Expected AuthenticationError")
-			
+
 			// Valid error codes for this scenario
 			validErrorCodes := []string{
 				"NO_DELEGATED_TOKEN",
-				"CONFIG_ERROR", 
+				"CONFIG_ERROR",
 				"NO_REFRESH_TOKEN",
 			}
-			
+
 			assert.Contains(t, validErrorCodes, authErr.Code,
 				"Error code should indicate delegated auth issue: %s", authErr.Code)
 		} else {
 			// If token is obtained, verify it's properly configured
 			assert.NotNil(t, token)
 			assert.Equal(t, config.TenantID, token.TenantID)
-			
+
 			// If fallback occurred, token should not be delegated
 			if !token.IsDelegated {
 				t.Logf("Successfully fell back to application permissions")
@@ -263,7 +265,7 @@ func TestDirectAppAccessTokenFlow(t *testing.T) {
 				"expires_in":   3600,
 				"scope":        "User.Read Directory.Read.All",
 			}
-			
+
 			w.Header().Set("Content-Type", "application/json")
 			if err := json.NewEncoder(w).Encode(response); err != nil {
 				http.Error(w, "Failed to encode response", http.StatusInternalServerError)
@@ -296,7 +298,7 @@ func TestDirectAppAccessTokenFlow(t *testing.T) {
 	t.Run("TestApplicationTokenFlow", func(t *testing.T) {
 		// Test getting application token (should work with mock server)
 		token, err := provider.GetAccessToken(ctx, config.TenantID)
-		
+
 		if err != nil {
 			// Expected for client credentials flow without real server
 			t.Logf("Application token flow failed (expected with mock): %v", err)
@@ -315,7 +317,7 @@ func TestDirectAppAccessTokenFlow(t *testing.T) {
 
 		// Test delegated token with fallback to application permissions
 		token, err := provider.GetDelegatedAccessToken(ctx, config.TenantID, userContext)
-		
+
 		if err != nil {
 			// Check error type and message
 			authErr, ok := err.(*AuthenticationError)
@@ -326,7 +328,7 @@ func TestDirectAppAccessTokenFlow(t *testing.T) {
 			// If successful, verify token properties
 			assert.NotNil(t, token)
 			assert.Equal(t, config.TenantID, token.TenantID)
-			
+
 			if token.IsDelegated {
 				t.Logf("Successfully obtained delegated token")
 			} else {
@@ -463,9 +465,9 @@ func TestDirectAppAccessPermissionScenarios(t *testing.T) {
 func TestDirectAppAccessIntegration(t *testing.T) {
 	// Skip if running without real M365 credentials
 	clientID := os.Getenv("M365_CLIENT_ID")
-	clientSecret := os.Getenv("M365_CLIENT_SECRET") 
+	clientSecret := os.Getenv("M365_CLIENT_SECRET")
 	tenantID := os.Getenv("M365_TENANT_ID")
-	
+
 	if clientID == "" || clientSecret == "" || tenantID == "" {
 		t.Skip("Skipping real M365 integration test - credentials not available")
 	}
@@ -497,7 +499,7 @@ func TestDirectAppAccessIntegration(t *testing.T) {
 	t.Run("TestRealApplicationToken", func(t *testing.T) {
 		// Test getting a real application token
 		token, err := provider.GetAccessToken(ctx, tenantID)
-		
+
 		if err != nil {
 			t.Logf("Real application token failed: %v", err)
 			// Don't fail the test - network issues, config problems, etc. are common
@@ -518,13 +520,13 @@ func TestDirectAppAccessIntegration(t *testing.T) {
 
 		// Test delegated token (expected to fail and fall back to app permissions)
 		token, err := provider.GetDelegatedAccessToken(ctx, tenantID, userContext)
-		
+
 		if err != nil {
 			t.Logf("Delegated token failed as expected: %v", err)
 		} else {
 			assert.NotNil(t, token)
 			assert.Equal(t, tenantID, token.TenantID)
-			
+
 			if token.IsDelegated {
 				t.Logf("Unexpectedly obtained delegated token")
 			} else {

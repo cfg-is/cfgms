@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package trigger
 
 import (
@@ -12,10 +14,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
 // IntegrationTestSuite provides integration testing for the complete trigger system
@@ -124,6 +127,14 @@ func (t *TestStorageProvider) CreateRBACStore(config map[string]interface{}) (in
 }
 
 func (t *TestStorageProvider) CreateRuntimeStore(config map[string]interface{}) (interfaces.RuntimeStore, error) {
+	return nil, fmt.Errorf("not implemented in test provider")
+}
+
+func (t *TestStorageProvider) CreateTenantStore(config map[string]interface{}) (interfaces.TenantStore, error) {
+	return nil, fmt.Errorf("not implemented in test provider")
+}
+
+func (t *TestStorageProvider) CreateRegistrationTokenStore(config map[string]interface{}) (interfaces.RegistrationTokenStore, error) {
 	return nil, fmt.Errorf("not implemented in test provider")
 }
 

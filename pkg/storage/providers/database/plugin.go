@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // Package database implements production-ready PostgreSQL storage provider for CFGMS
 // Provides database-based storage with ACID transactions, connection pooling, and performance optimization
 package database
@@ -10,8 +12,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	_ "github.com/lib/pq" // PostgreSQL driver
+
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
 // DatabaseProvider implements the StorageProvider interface using PostgreSQL for persistence
@@ -35,16 +38,16 @@ func (p *DatabaseProvider) GetVersion() string {
 // GetCapabilities returns the provider's capabilities
 func (p *DatabaseProvider) GetCapabilities() interfaces.ProviderCapabilities {
 	return interfaces.ProviderCapabilities{
-		SupportsTransactions:    true,  // Full ACID transaction support
-		SupportsVersioning:      true,  // Version tracking in database
-		SupportsFullTextSearch:  true,  // PostgreSQL full-text search
-		SupportsEncryption:      false, // Database-level encryption (TDE)
-		SupportsCompression:     false, // Database-level compression
-		SupportsReplication:     true,  // PostgreSQL replication
-		SupportsSharding:        true,  // Database partitioning/sharding
-		MaxBatchSize:           1000,  // Optimal batch size for PostgreSQL
+		SupportsTransactions:   true,             // Full ACID transaction support
+		SupportsVersioning:     true,             // Version tracking in database
+		SupportsFullTextSearch: true,             // PostgreSQL full-text search
+		SupportsEncryption:     false,            // Database-level encryption (TDE)
+		SupportsCompression:    false,            // Database-level compression
+		SupportsReplication:    true,             // PostgreSQL replication
+		SupportsSharding:       true,             // Database partitioning/sharding
+		MaxBatchSize:           1000,             // Optimal batch size for PostgreSQL
 		MaxConfigSize:          50 * 1024 * 1024, // 50MB per config (PostgreSQL TOAST)
-		MaxAuditRetentionDays:  7300,  // 20 years with database partitioning
+		MaxAuditRetentionDays:  7300,             // 20 years with database partitioning
 	}
 }
 
@@ -62,13 +65,13 @@ func (p *DatabaseProvider) CreateClientTenantStore(config map[string]interface{}
 	if err != nil {
 		return nil, fmt.Errorf("invalid database configuration: %w", err)
 	}
-	
+
 	// Create the database client tenant store
 	store, err := NewDatabaseClientTenantStore(dsn, config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create database client tenant store: %w", err)
 	}
-	
+
 	return store, nil
 }
 
@@ -79,13 +82,13 @@ func (p *DatabaseProvider) CreateConfigStore(config map[string]interface{}) (int
 	if err != nil {
 		return nil, fmt.Errorf("invalid database configuration: %w", err)
 	}
-	
+
 	// Create the database config store
 	store, err := NewDatabaseConfigStore(dsn, config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create database config store: %w", err)
 	}
-	
+
 	return store, nil
 }
 
@@ -96,13 +99,13 @@ func (p *DatabaseProvider) CreateAuditStore(config map[string]interface{}) (inte
 	if err != nil {
 		return nil, fmt.Errorf("invalid database configuration: %w", err)
 	}
-	
+
 	// Create the database audit store
 	store, err := NewDatabaseAuditStore(dsn, config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create database audit store: %w", err)
 	}
-	
+
 	return store, nil
 }
 
@@ -151,13 +154,45 @@ func (p *DatabaseProvider) CreateRBACStore(config map[string]interface{}) (inter
 	if err != nil {
 		return nil, fmt.Errorf("invalid database configuration: %w", err)
 	}
-	
+
 	// Create the database RBAC store
 	store, err := NewDatabaseRBACStore(dsn, config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create database RBAC store: %w", err)
 	}
-	
+
+	return store, nil
+}
+
+func (p *DatabaseProvider) CreateTenantStore(config map[string]interface{}) (interfaces.TenantStore, error) {
+	// Get database connection string from config
+	dsn, err := p.getDSN(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+
+	// Create the database tenant store
+	store, err := NewDatabaseTenantStore(dsn, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database tenant store: %w", err)
+	}
+
+	return store, nil
+}
+
+func (p *DatabaseProvider) CreateRegistrationTokenStore(config map[string]interface{}) (interfaces.RegistrationTokenStore, error) {
+	// Get database connection string from config
+	dsn, err := p.getDSN(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+
+	// Create the database registration token store
+	store, err := NewDatabaseRegistrationTokenStore(dsn, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database registration token store: %w", err)
+	}
+
 	return store, nil
 }
 
@@ -167,7 +202,7 @@ func (p *DatabaseProvider) getDSN(config map[string]interface{}) (string, error)
 	if dsn, ok := config["dsn"].(string); ok && dsn != "" {
 		return dsn, nil
 	}
-	
+
 	// Otherwise, build DSN from individual components
 	host := getStringFromConfig(config, "host", "localhost")
 	port := getIntFromConfig(config, "port", 5432)
@@ -175,14 +210,14 @@ func (p *DatabaseProvider) getDSN(config map[string]interface{}) (string, error)
 	username := getStringFromConfig(config, "username", "cfgms")
 	password := getStringFromConfig(config, "password", "")
 	sslmode := getStringFromConfig(config, "sslmode", "require")
-	
+
 	if password == "" {
 		return "", fmt.Errorf("database password is required")
 	}
-	
+
 	dsn := fmt.Sprintf("host=%s port=%d dbname=%s user=%s password=%s sslmode=%s",
 		host, port, database, username, password, sslmode)
-	
+
 	return dsn, nil
 }
 
@@ -215,13 +250,13 @@ func getBoolFromConfig(config map[string]interface{}, key string, defaultValue b
 func (p *DatabaseProvider) getTableName(config map[string]interface{}, defaultName string) string {
 	// Check for table prefix
 	prefix := getStringFromConfig(config, "table_prefix", "cfgms_")
-	
+
 	// Check for custom table name
 	tableKey := defaultName + "_table"
 	if customName, ok := config[tableKey].(string); ok && customName != "" {
 		return p.validateTableName(prefix + customName)
 	}
-	
+
 	return p.validateTableName(prefix + defaultName)
 }
 
@@ -235,12 +270,12 @@ func (p *DatabaseProvider) validateTableName(tableName string) string {
 			sanitized.WriteRune(r)
 		}
 	}
-	
+
 	result := sanitized.String()
 	if result == "" {
 		return "cfgms_default" // fallback to safe default
 	}
-	
+
 	return result
 }
 
@@ -264,51 +299,69 @@ func NewDatabaseClientTenantStore(dsn string, config map[string]interface{}) (*D
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database connection: %w", err)
 	}
-	
+
 	// Configure connection pool
 	maxOpenConns := getIntFromConfig(config, "max_open_connections", 25)
 	maxIdleConns := getIntFromConfig(config, "max_idle_connections", 5)
 	connMaxLifetime := time.Duration(getIntFromConfig(config, "connection_max_lifetime_minutes", 30)) * time.Minute
-	
+
 	db.SetMaxOpenConns(maxOpenConns)
 	db.SetMaxIdleConns(maxIdleConns)
 	db.SetConnMaxLifetime(connMaxLifetime)
-	
+
 	// Test connection
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
-	
+
 	store := &DatabaseClientTenantStore{
 		db:      db,
 		config:  config,
 		schemas: NewDatabaseSchemas(),
 	}
-	
+
 	// Initialize database schema
 	if err := store.initializeSchema(); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("failed to initialize database schema: %w", err)
 	}
-	
+
 	return store, nil
 }
 
 // initializeSchema creates the necessary database tables and indexes
 func (s *DatabaseClientTenantStore) initializeSchema() error {
 	ctx := context.Background()
-	
+
+	// Use PostgreSQL advisory lock to prevent concurrent schema initialization
+	// Lock ID: 24681357 (different from other store locks)
+	const schemaLockID = 24681357
+
+	// Acquire advisory lock - will wait if another instance is initializing
+	if _, err := s.db.ExecContext(ctx, "SELECT pg_advisory_lock($1)", schemaLockID); err != nil {
+		return fmt.Errorf("failed to acquire client tenant schema initialization lock: %w", err)
+	}
+
+	// Ensure we release the lock when done
+	defer func() {
+		if _, err := s.db.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", schemaLockID); err != nil {
+			// Log but don't fail - lock will be released when connection closes
+			// This is non-critical since PostgreSQL will release advisory locks when connection closes
+			_ = err // Explicitly ignore error to satisfy linter
+		}
+	}()
+
 	// Create client tenants table
 	if err := s.schemas.CreateClientTenantsTable(ctx, s.db); err != nil {
 		return fmt.Errorf("failed to create client_tenants table: %w", err)
 	}
-	
+
 	// Create admin consent requests table
 	if err := s.schemas.CreateAdminConsentRequestsTable(ctx, s.db); err != nil {
 		return fmt.Errorf("failed to create admin_consent_requests table: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -316,28 +369,28 @@ func (s *DatabaseClientTenantStore) initializeSchema() error {
 func (s *DatabaseClientTenantStore) StoreClientTenant(client *interfaces.ClientTenant) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	
+
 	ctx := context.Background()
-	
+
 	// Begin transaction
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	
+
 	// Set timestamps
 	now := time.Now()
 	if client.CreatedAt.IsZero() {
 		client.CreatedAt = now
 	}
 	client.UpdatedAt = now
-	
+
 	// Use tenant_id as ID if not set
 	if client.ID == "" {
 		client.ID = client.TenantID
 	}
-	
+
 	// Insert or update client tenant
 	query := `
 		INSERT INTO client_tenants (id, tenant_id, tenant_name, domain_name, admin_email, consented_at, status, client_identifier, metadata, created_at, updated_at)
@@ -352,12 +405,12 @@ func (s *DatabaseClientTenantStore) StoreClientTenant(client *interfaces.ClientT
 			metadata = EXCLUDED.metadata,
 			updated_at = EXCLUDED.updated_at
 	`
-	
+
 	metadataJSON, err := serializeMetadata(client.Metadata)
 	if err != nil {
 		return fmt.Errorf("failed to serialize metadata: %w", err)
 	}
-	
+
 	_, err = tx.ExecContext(ctx, query,
 		client.ID,
 		client.TenantID,
@@ -371,16 +424,16 @@ func (s *DatabaseClientTenantStore) StoreClientTenant(client *interfaces.ClientT
 		client.CreatedAt,
 		client.UpdatedAt,
 	)
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to store client tenant: %w", err)
 	}
-	
+
 	// Commit transaction
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -388,21 +441,21 @@ func (s *DatabaseClientTenantStore) StoreClientTenant(client *interfaces.ClientT
 func (s *DatabaseClientTenantStore) GetClientTenant(tenantID string) (*interfaces.ClientTenant, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
-	
+
 	ctx := context.Background()
-	
+
 	query := `
 		SELECT id, tenant_id, tenant_name, domain_name, admin_email, consented_at, status, client_identifier, metadata, created_at, updated_at
 		FROM client_tenants
 		WHERE tenant_id = $1
 	`
-	
+
 	row := s.db.QueryRowContext(ctx, query, tenantID)
-	
+
 	client := &interfaces.ClientTenant{}
 	var statusStr string
 	var metadataJSON []byte
-	
+
 	err := row.Scan(
 		&client.ID,
 		&client.TenantID,
@@ -416,16 +469,16 @@ func (s *DatabaseClientTenantStore) GetClientTenant(tenantID string) (*interface
 		&client.CreatedAt,
 		&client.UpdatedAt,
 	)
-	
+
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("client tenant not found: %s", tenantID)
 		}
 		return nil, fmt.Errorf("failed to get client tenant: %w", err)
 	}
-	
+
 	client.Status = interfaces.ClientTenantStatus(statusStr)
-	
+
 	if len(metadataJSON) > 0 {
 		metadata, err := deserializeMetadata(metadataJSON)
 		if err != nil {
@@ -433,7 +486,7 @@ func (s *DatabaseClientTenantStore) GetClientTenant(tenantID string) (*interface
 		}
 		client.Metadata = metadata
 	}
-	
+
 	return client, nil
 }
 
@@ -441,21 +494,21 @@ func (s *DatabaseClientTenantStore) GetClientTenant(tenantID string) (*interface
 func (s *DatabaseClientTenantStore) GetClientTenantByIdentifier(clientIdentifier string) (*interfaces.ClientTenant, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
-	
+
 	ctx := context.Background()
-	
+
 	query := `
 		SELECT id, tenant_id, tenant_name, domain_name, admin_email, consented_at, status, client_identifier, metadata, created_at, updated_at
 		FROM client_tenants
 		WHERE client_identifier = $1
 	`
-	
+
 	row := s.db.QueryRowContext(ctx, query, clientIdentifier)
-	
+
 	client := &interfaces.ClientTenant{}
 	var statusStr string
 	var metadataJSON []byte
-	
+
 	err := row.Scan(
 		&client.ID,
 		&client.TenantID,
@@ -469,16 +522,16 @@ func (s *DatabaseClientTenantStore) GetClientTenantByIdentifier(clientIdentifier
 		&client.CreatedAt,
 		&client.UpdatedAt,
 	)
-	
+
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("client tenant not found by identifier: %s", clientIdentifier)
 		}
 		return nil, fmt.Errorf("failed to get client tenant by identifier: %w", err)
 	}
-	
+
 	client.Status = interfaces.ClientTenantStatus(statusStr)
-	
+
 	if len(metadataJSON) > 0 {
 		metadata, err := deserializeMetadata(metadataJSON)
 		if err != nil {
@@ -486,7 +539,7 @@ func (s *DatabaseClientTenantStore) GetClientTenantByIdentifier(clientIdentifier
 		}
 		client.Metadata = metadata
 	}
-	
+
 	return client, nil
 }
 
@@ -494,12 +547,12 @@ func (s *DatabaseClientTenantStore) GetClientTenantByIdentifier(clientIdentifier
 func (s *DatabaseClientTenantStore) ListClientTenants(status interfaces.ClientTenantStatus) ([]*interfaces.ClientTenant, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
-	
+
 	ctx := context.Background()
-	
+
 	var query string
 	var args []interface{}
-	
+
 	if status == "" {
 		query = `
 			SELECT id, tenant_id, tenant_name, domain_name, admin_email, consented_at, status, client_identifier, metadata, created_at, updated_at
@@ -515,20 +568,20 @@ func (s *DatabaseClientTenantStore) ListClientTenants(status interfaces.ClientTe
 		`
 		args = []interface{}{string(status)}
 	}
-	
+
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list client tenants: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
-	
+
 	var clients []*interfaces.ClientTenant
-	
+
 	for rows.Next() {
 		client := &interfaces.ClientTenant{}
 		var statusStr string
 		var metadataJSON []byte
-		
+
 		err := rows.Scan(
 			&client.ID,
 			&client.TenantID,
@@ -542,13 +595,13 @@ func (s *DatabaseClientTenantStore) ListClientTenants(status interfaces.ClientTe
 			&client.CreatedAt,
 			&client.UpdatedAt,
 		)
-		
+
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan client tenant: %w", err)
 		}
-		
+
 		client.Status = interfaces.ClientTenantStatus(statusStr)
-		
+
 		if len(metadataJSON) > 0 {
 			metadata, err := deserializeMetadata(metadataJSON)
 			if err != nil {
@@ -556,14 +609,14 @@ func (s *DatabaseClientTenantStore) ListClientTenants(status interfaces.ClientTe
 			}
 			client.Metadata = metadata
 		}
-		
+
 		clients = append(clients, client)
 	}
-	
+
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("error iterating client tenants: %w", err)
 	}
-	
+
 	return clients, nil
 }
 
@@ -571,41 +624,41 @@ func (s *DatabaseClientTenantStore) ListClientTenants(status interfaces.ClientTe
 func (s *DatabaseClientTenantStore) UpdateClientTenantStatus(tenantID string, status interfaces.ClientTenantStatus) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	
+
 	ctx := context.Background()
-	
+
 	// Begin transaction
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	
+
 	query := `
 		UPDATE client_tenants
 		SET status = $1, updated_at = $2
 		WHERE tenant_id = $3
 	`
-	
+
 	result, err := tx.ExecContext(ctx, query, string(status), time.Now(), tenantID)
 	if err != nil {
 		return fmt.Errorf("failed to update client tenant status: %w", err)
 	}
-	
+
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("failed to get rows affected: %w", err)
 	}
-	
+
 	if rowsAffected == 0 {
 		return fmt.Errorf("client tenant not found: %s", tenantID)
 	}
-	
+
 	// Commit transaction
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -613,28 +666,28 @@ func (s *DatabaseClientTenantStore) UpdateClientTenantStatus(tenantID string, st
 func (s *DatabaseClientTenantStore) DeleteClientTenant(tenantID string) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	
+
 	ctx := context.Background()
-	
+
 	// Begin transaction
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	
+
 	query := `DELETE FROM client_tenants WHERE tenant_id = $1`
-	
+
 	_, err = tx.ExecContext(ctx, query, tenantID)
 	if err != nil {
 		return fmt.Errorf("failed to delete client tenant: %w", err)
 	}
-	
+
 	// Commit transaction
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -642,21 +695,21 @@ func (s *DatabaseClientTenantStore) DeleteClientTenant(tenantID string) error {
 func (s *DatabaseClientTenantStore) StoreAdminConsentRequest(request *interfaces.AdminConsentRequest) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	
+
 	ctx := context.Background()
-	
+
 	// Begin transaction
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	
+
 	// Set created timestamp
 	if request.CreatedAt.IsZero() {
 		request.CreatedAt = time.Now()
 	}
-	
+
 	query := `
 		INSERT INTO admin_consent_requests (client_identifier, client_name, requested_by, state, expires_at, created_at, metadata)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -667,12 +720,12 @@ func (s *DatabaseClientTenantStore) StoreAdminConsentRequest(request *interfaces
 			expires_at = EXCLUDED.expires_at,
 			metadata = EXCLUDED.metadata
 	`
-	
+
 	metadataJSON, err := serializeMetadata(request.Metadata)
 	if err != nil {
 		return fmt.Errorf("failed to serialize metadata: %w", err)
 	}
-	
+
 	_, err = tx.ExecContext(ctx, query,
 		request.ClientIdentifier,
 		request.ClientName,
@@ -682,16 +735,16 @@ func (s *DatabaseClientTenantStore) StoreAdminConsentRequest(request *interfaces
 		request.CreatedAt,
 		metadataJSON,
 	)
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to store admin consent request: %w", err)
 	}
-	
+
 	// Commit transaction
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -699,20 +752,20 @@ func (s *DatabaseClientTenantStore) StoreAdminConsentRequest(request *interfaces
 func (s *DatabaseClientTenantStore) GetAdminConsentRequest(state string) (*interfaces.AdminConsentRequest, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
-	
+
 	ctx := context.Background()
-	
+
 	query := `
 		SELECT client_identifier, client_name, requested_by, state, expires_at, created_at, metadata
 		FROM admin_consent_requests
 		WHERE state = $1
 	`
-	
+
 	row := s.db.QueryRowContext(ctx, query, state)
-	
+
 	request := &interfaces.AdminConsentRequest{}
 	var metadataJSON []byte
-	
+
 	err := row.Scan(
 		&request.ClientIdentifier,
 		&request.ClientName,
@@ -722,19 +775,19 @@ func (s *DatabaseClientTenantStore) GetAdminConsentRequest(state string) (*inter
 		&request.CreatedAt,
 		&metadataJSON,
 	)
-	
+
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("admin consent request not found: %s", state)
 		}
 		return nil, fmt.Errorf("failed to get admin consent request: %w", err)
 	}
-	
+
 	// Check if expired
 	if time.Now().After(request.ExpiresAt) {
 		return nil, fmt.Errorf("admin consent request expired: %s", state)
 	}
-	
+
 	if len(metadataJSON) > 0 {
 		metadata, err := deserializeMetadata(metadataJSON)
 		if err != nil {
@@ -742,7 +795,7 @@ func (s *DatabaseClientTenantStore) GetAdminConsentRequest(state string) (*inter
 		}
 		request.Metadata = metadata
 	}
-	
+
 	return request, nil
 }
 
@@ -750,28 +803,28 @@ func (s *DatabaseClientTenantStore) GetAdminConsentRequest(state string) (*inter
 func (s *DatabaseClientTenantStore) DeleteAdminConsentRequest(state string) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	
+
 	ctx := context.Background()
-	
+
 	// Begin transaction
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	
+
 	query := `DELETE FROM admin_consent_requests WHERE state = $1`
-	
+
 	_, err = tx.ExecContext(ctx, query, state)
 	if err != nil {
 		return fmt.Errorf("failed to delete admin consent request: %w", err)
 	}
-	
+
 	// Commit transaction
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
-	
+
 	return nil
 }
 

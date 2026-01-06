@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package rbac
 
 import (
@@ -5,8 +7,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/google/uuid"
+
+	"github.com/cfgis/cfgms/api/proto/common"
 )
 
 // DelegationManager handles permission delegation operations
@@ -100,7 +103,7 @@ func (d *DelegationManager) ListDelegations(ctx context.Context, subjectID strin
 		if delegation.TenantId != tenantID {
 			continue
 		}
-		
+
 		if delegation.DelegatorId == subjectID || delegation.DelegateeId == subjectID {
 			result = append(result, delegation)
 		}
@@ -118,17 +121,17 @@ func (d *DelegationManager) GetActiveDelegations(ctx context.Context, delegateeI
 		if delegation.TenantId != tenantID || delegation.DelegateeId != delegateeID {
 			continue
 		}
-		
+
 		// Skip revoked delegations
 		if delegation.Revoked {
 			continue
 		}
-		
+
 		// Skip expired delegations
 		if delegation.ExpiresAt > 0 && delegation.ExpiresAt < currentTime {
 			continue
 		}
-		
+
 		result = append(result, delegation)
 	}
 
@@ -153,7 +156,7 @@ func (d *DelegationManager) CheckDelegatedPermission(ctx context.Context, subjec
 				break
 			}
 		}
-		
+
 		if !hasPermission {
 			continue
 		}
@@ -164,7 +167,7 @@ func (d *DelegationManager) CheckDelegatedPermission(ctx context.Context, subjec
 			if !allowed {
 				continue // This delegation doesn't cover the resource
 			}
-			
+
 			return true, fmt.Sprintf("permission granted through delegation %s: %s", delegation.Id, reason), nil
 		}
 
@@ -178,24 +181,24 @@ func (d *DelegationManager) CheckDelegatedPermission(ctx context.Context, subjec
 // CleanupExpiredDelegations removes expired delegations
 func (d *DelegationManager) CleanupExpiredDelegations(ctx context.Context) error {
 	currentTime := time.Now().Unix()
-	
+
 	for id, delegation := range d.delegations {
 		if delegation.ExpiresAt > 0 && delegation.ExpiresAt < currentTime {
 			delete(d.delegations, id)
 		}
 	}
-	
+
 	return nil
 }
 
 // DelegationRequest represents a request to create a permission delegation
 type DelegationRequest struct {
-	DelegatorID   string                      `json:"delegator_id"`
-	DelegateeID   string                      `json:"delegatee_id"`
-	PermissionIDs []string                    `json:"permission_ids"`
-	Scope         *common.PermissionScope     `json:"scope"`
-	ExpiresAt     int64                       `json:"expires_at"`
-	TenantID      string                      `json:"tenant_id"`
+	DelegatorID   string                  `json:"delegator_id"`
+	DelegateeID   string                  `json:"delegatee_id"`
+	PermissionIDs []string                `json:"permission_ids"`
+	Scope         *common.PermissionScope `json:"scope"`
+	ExpiresAt     int64                   `json:"expires_at"`
+	TenantID      string                  `json:"tenant_id"`
 }
 
 // validateDelegationRequest validates a delegation request
@@ -203,34 +206,34 @@ func (d *DelegationManager) validateDelegationRequest(ctx context.Context, req *
 	if req.DelegatorID == "" {
 		return fmt.Errorf("delegator ID cannot be empty")
 	}
-	
+
 	if req.DelegateeID == "" {
 		return fmt.Errorf("delegatee ID cannot be empty")
 	}
-	
+
 	if req.DelegatorID == req.DelegateeID {
 		return fmt.Errorf("cannot delegate to oneself")
 	}
-	
+
 	if len(req.PermissionIDs) == 0 {
 		return fmt.Errorf("must specify at least one permission to delegate")
 	}
-	
+
 	if req.TenantID == "" {
 		return fmt.Errorf("tenant ID cannot be empty")
 	}
-	
+
 	// Check if delegatee exists
 	_, err := d.rbacManager.GetSubject(ctx, req.DelegateeID)
 	if err != nil {
 		return fmt.Errorf("delegatee %s not found: %w", req.DelegateeID, err)
 	}
-	
+
 	// Validate expiration time
 	if req.ExpiresAt > 0 && req.ExpiresAt <= time.Now().Unix() {
 		return fmt.Errorf("expiration time must be in the future")
 	}
-	
+
 	// Validate scope if provided
 	if req.Scope != nil {
 		scopeEngine := NewScopeEngine()
@@ -238,7 +241,7 @@ func (d *DelegationManager) validateDelegationRequest(ctx context.Context, req *
 			return fmt.Errorf("invalid delegation scope: %w", err)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -249,12 +252,12 @@ func (d *DelegationManager) checkDelegatorPermission(ctx context.Context, delega
 		PermissionId: permissionID,
 		TenantId:     tenantID,
 	}
-	
+
 	response, err := d.rbacManager.CheckPermission(ctx, request)
 	if err != nil {
 		return false, err
 	}
-	
+
 	return response.Granted, nil
 }
 
@@ -265,12 +268,12 @@ func (d *DelegationManager) checkRevocationPermission(ctx context.Context, revok
 		PermissionId: "delegation.revoke",
 		TenantId:     tenantID,
 	}
-	
+
 	response, err := d.rbacManager.CheckPermission(ctx, request)
 	if err != nil {
 		return false, err
 	}
-	
+
 	return response.Granted, nil
 }
 
@@ -283,16 +286,16 @@ func (d *DelegationManager) GetDelegationStats(ctx context.Context, tenantID str
 		ExpiredDelegations: 0,
 		RevokedDelegations: 0,
 	}
-	
+
 	currentTime := time.Now().Unix()
-	
+
 	for _, delegation := range d.delegations {
 		if delegation.TenantId != tenantID {
 			continue
 		}
-		
+
 		stats.TotalDelegations++
-		
+
 		if delegation.Revoked {
 			stats.RevokedDelegations++
 		} else if delegation.ExpiresAt > 0 && delegation.ExpiresAt < currentTime {
@@ -301,7 +304,7 @@ func (d *DelegationManager) GetDelegationStats(ctx context.Context, tenantID str
 			stats.ActiveDelegations++
 		}
 	}
-	
+
 	return stats, nil
 }
 

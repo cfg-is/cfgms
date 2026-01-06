@@ -97,29 +97,40 @@ Before submitting code:
 
 #### Security Best Practices
 
-1. **Authentication & Authorization**
+1. **No Foot-guns in Development (CRITICAL)**
+   - **NEVER build insecure options for development convenience**
+   - **NEVER document unsafe alternatives**, even temporarily
+   - **NEVER create in-memory-only storage** for features requiring durability in production
+   - **Rationale**: Insecure dev options inevitably leak into production through laziness, time pressure, or copy-paste documentation
+   - **Rule**: If a feature requires durable storage in production, it MUST use durable storage in development and testing
+   - **Allowed**: In-memory write-through caches for ephemeral data (sessions, temporary state)
+   - **Forbidden**: In-memory-only stores for data that should survive restarts (configurations, users, policies)
+
+2. **Authentication & Authorization**
    - Use mTLS for internal agent communication
    - Implement proper API key validation
    - Follow principle of least privilege
    - Never store credentials in code or configuration
+   - Secrets MUST use OS keychain or encrypted storage, never plaintext files
 
-2. **Network Security**
+3. **Network Security**
    - Use HTTPS for all external communication
    - Implement proper TLS configuration
    - Validate all network inputs
    - Sanitize all logging output
 
-3. **Code Security**
+4. **Code Security**
    - Run security linters (gosec, etc.)
    - Keep dependencies updated
    - Follow secure coding practices
    - Document security considerations
 
-4. **Testing Security**
+5. **Testing Security**
    - Include security-focused test cases
    - Test authentication and authorization
    - Validate input sanitization
    - Test error handling for security scenarios
+   - Use same storage backends in tests as production
 
 #### Security Review Process
 
@@ -139,3 +150,71 @@ Before submitting code:
    - Security tests will be run
    - Dependencies will be checked
    - Security documentation will be updated
+
+### Reporting Security Issues
+
+**DO NOT** open public GitHub issues for security vulnerabilities.
+
+If you discover a security issue in CFGMS, please report it responsibly:
+
+- **Email**: [security@cfg.is](mailto:security@cfg.is)
+- **Response Time**: 48 hours for initial acknowledgment
+- **Full Details**: See [SECURITY.md](SECURITY.md) for complete vulnerability disclosure policy
+
+We appreciate responsible disclosure and will work with you to address the issue promptly.
+
+## CI/CD Workflows
+
+CFGMS uses GitHub Actions for automated testing, security scanning, and deployment. All workflows must pass before code can be merged.
+
+### Required Status Checks
+
+The following workflows run automatically on every pull request:
+
+- **Cross-Platform Build**: Validates compilation on Linux, Windows, and macOS
+- **Test Suite**: Runs complete test suite with race condition detection
+- **Security Scan**: Checks for vulnerabilities using Trivy, gosec, and staticcheck
+- **CodeQL Analysis**: Advanced security and code quality analysis
+- **License Check**: Validates dependency license compliance
+
+**All checks must pass before merge.**
+
+### Local Validation
+
+Before pushing code, run the same validation locally:
+
+```bash
+# Run all tests (matches test-suite.yml workflow)
+make test
+
+# Run security scans (matches security-scan.yml workflow)
+make security-scan
+
+# Complete pre-commit validation (recommended)
+make test-commit
+
+# Full CI validation (matches production-gates.yml)
+make test-ci
+```
+
+### Workflow Documentation
+
+For complete workflow details, see [.github/workflows/README.md](.github/workflows/README.md)
+
+**Key workflows**:
+
+- `cross-platform-build.yml` - Multi-platform compilation and testing
+- `production-gates.yml` - Production readiness validation with emergency override support
+- `security-scan.yml` - Comprehensive security vulnerability scanning
+- `test-suite.yml` - Complete test suite execution
+
+### CI Failures
+
+**If workflows fail**:
+
+1. **Test failures**: Run `make test` locally to reproduce
+2. **Security issues**: Run `make security-scan` to identify vulnerabilities
+3. **Platform-specific failures**: Check cross-compilation with `make build`
+4. **CodeQL alerts**: Review findings in GitHub Security tab
+
+**Need help?**: Check workflow logs in GitHub Actions tab or ask in pull request comments.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // Package testutil provides shared testing utilities for unit and integration tests.
 //
 // This package contains helper functions for setting up test environments,
@@ -27,13 +29,13 @@ import (
 type CertConfig struct {
 	// CertDir is the directory where certificates will be stored
 	CertDir string
-	
+
 	// ServerName is the common name for the server certificate
 	ServerName string
-	
+
 	// ClientName is the common name for the client certificate
 	ClientName string
-	
+
 	// ValidityPeriod is how long the certificates should be valid
 	ValidityPeriod time.Duration
 }
@@ -51,8 +53,9 @@ func DefaultCertConfig() *CertConfig {
 // a cleanup function. This is the main function that should be used in tests.
 //
 // Usage:
-//   certDir, cleanup := testutil.SetupTestCerts(t)
-//   t.Cleanup(cleanup)
+//
+//	certDir, cleanup := testutil.SetupTestCerts(t)
+//	t.Cleanup(cleanup)
 //
 // The returned directory will contain:
 //   - ca.crt: Certificate Authority certificate
@@ -69,7 +72,7 @@ func SetupTestCertsWithConfig(t *testing.T, config *CertConfig) (certDir string,
 	// Create temporary directory
 	tempDir, err := os.MkdirTemp("", "cfgms-test-certs-")
 	require.NoError(t, err)
-	
+
 	// Set cert directory if not specified
 	if config.CertDir == "" {
 		config.CertDir = tempDir
@@ -78,11 +81,11 @@ func SetupTestCertsWithConfig(t *testing.T, config *CertConfig) (certDir string,
 		err = os.MkdirAll(config.CertDir, 0755)
 		require.NoError(t, err)
 	}
-	
+
 	// Generate certificates
 	err = GenerateTestCertificates(config)
 	require.NoError(t, err)
-	
+
 	// Return cleanup function
 	cleanup = func() {
 		if err := os.RemoveAll(tempDir); err != nil {
@@ -96,7 +99,7 @@ func SetupTestCertsWithConfig(t *testing.T, config *CertConfig) (certDir string,
 			}
 		}
 	}
-	
+
 	return config.CertDir, cleanup
 }
 
@@ -167,12 +170,12 @@ func GenerateTestCertificates(config *CertConfig) error {
 			PostalCode:    []string{""},
 			CommonName:    config.ServerName,
 		},
-		NotBefore:    time.Now(),
-		NotAfter:     time.Now().Add(config.ValidityPeriod),
-		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		IPAddresses:  []net.IP{net.IPv4(127, 0, 0, 1)},
-		DNSNames:     []string{config.ServerName, "localhost"},
+		NotBefore:   time.Now(),
+		NotAfter:    time.Now().Add(config.ValidityPeriod),
+		KeyUsage:    x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1)},
+		DNSNames:    []string{config.ServerName, "localhost"},
 	}
 
 	serverCertDER, err := x509.CreateCertificate(rand.Reader, &serverTemplate, &caTemplate, &serverKey.PublicKey, caKey)
@@ -315,7 +318,7 @@ func VerifyTLSConnection(certDir string) error {
 // VerifyCertificatesExist verifies that all required certificates are present in the directory.
 func VerifyCertificatesExist(t *testing.T, certDir string) {
 	certFiles := []string{"ca.crt", "server.crt", "server.key", "client.crt", "client.key"}
-	
+
 	for _, certFile := range certFiles {
 		certPath := filepath.Join(certDir, certFile)
 		if _, err := os.Stat(certPath); os.IsNotExist(err) {

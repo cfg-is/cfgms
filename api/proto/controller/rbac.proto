@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 syntax = "proto3";
 
 package cfgms.api.controller;
@@ -5,44 +7,6 @@ package cfgms.api.controller;
 import "common/rbac.proto";
 
 option go_package = "github.com/cfgis/cfgms/api/proto/controller";
-
-// RBACService provides role-based access control operations
-service RBACService {
-  // Permission Management
-  rpc GetPermission(GetPermissionRequest) returns (GetPermissionResponse);
-  rpc ListPermissions(ListPermissionsRequest) returns (ListPermissionsResponse);
-  
-  // Role Management
-  rpc CreateRole(CreateRoleRequest) returns (CreateRoleResponse);
-  rpc GetRole(GetRoleRequest) returns (GetRoleResponse);
-  rpc ListRoles(ListRolesRequest) returns (ListRolesResponse);
-  rpc UpdateRole(UpdateRoleRequest) returns (UpdateRoleResponse);
-  rpc DeleteRole(DeleteRoleRequest) returns (DeleteRoleResponse);
-  
-  // Subject Management
-  rpc CreateSubject(CreateSubjectRequest) returns (CreateSubjectResponse);
-  rpc GetSubject(GetSubjectRequest) returns (GetSubjectResponse);
-  rpc ListSubjects(ListSubjectsRequest) returns (ListSubjectsResponse);
-  rpc UpdateSubject(UpdateSubjectRequest) returns (UpdateSubjectResponse);
-  rpc DeleteSubject(DeleteSubjectRequest) returns (DeleteSubjectResponse);
-  
-  // Role Assignment
-  rpc AssignRole(AssignRoleRequest) returns (AssignRoleResponse);
-  rpc RevokeRole(RevokeRoleRequest) returns (RevokeRoleResponse);
-  rpc GetSubjectRoles(GetSubjectRolesRequest) returns (GetSubjectRolesResponse);
-  
-  // Permission Checking
-  rpc CheckPermission(CheckPermissionRequest) returns (CheckPermissionResponse);
-  rpc GetSubjectPermissions(GetSubjectPermissionsRequest) returns (GetSubjectPermissionsResponse);
-  
-  // Role Hierarchy Management
-  rpc CreateRoleWithParent(CreateRoleWithParentRequest) returns (CreateRoleWithParentResponse);
-  rpc GetRoleHierarchy(GetRoleHierarchyRequest) returns (GetRoleHierarchyResponse);
-  rpc SetRoleParent(SetRoleParentRequest) returns (SetRoleParentResponse);
-  rpc RemoveRoleParent(RemoveRoleParentRequest) returns (RemoveRoleParentResponse);
-  rpc ComputeEffectivePermissions(ComputeEffectivePermissionsRequest) returns (ComputeEffectivePermissionsResponse);
-  rpc ValidateRoleHierarchy(ValidateRoleHierarchyRequest) returns (ValidateRoleHierarchyResponse);
-}
 
 // Permission Management Messages
 
@@ -98,6 +62,8 @@ message UpdateRoleResponse {
 
 message DeleteRoleRequest {
   string role_id = 1;
+  // M-AUTH-2: Justification required for sensitive delete operations
+  string justification = 2;
 }
 
 message DeleteRoleResponse {

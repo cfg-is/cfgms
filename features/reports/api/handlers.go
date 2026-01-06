@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package api
 
 import (
@@ -8,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+
 	"github.com/cfgis/cfgms/features/reports/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -31,21 +34,21 @@ func New(engine interfaces.ReportEngine, exporter interfaces.Exporter, logger lo
 // RegisterRoutes registers the reports API routes
 func (h *Handler) RegisterRoutes(router *mux.Router) {
 	reportsRouter := router.PathPrefix("/api/v1/reports").Subrouter()
-	
+
 	// Report generation and management
 	reportsRouter.HandleFunc("/generate", h.generateReport).Methods("POST")
 	reportsRouter.HandleFunc("/templates", h.getTemplates).Methods("GET")
 	reportsRouter.HandleFunc("/templates/{template}", h.getTemplate).Methods("GET")
-	
+
 	// Dashboard endpoints
 	reportsRouter.HandleFunc("/dashboard/overview", h.getDashboardOverview).Methods("GET")
 	reportsRouter.HandleFunc("/dashboard/trends", h.getDashboardTrends).Methods("GET")
 	reportsRouter.HandleFunc("/dashboard/alerts", h.getDashboardAlerts).Methods("GET")
-	
+
 	// Specific report types
 	reportsRouter.HandleFunc("/compliance/status", h.getComplianceStatus).Methods("GET")
 	reportsRouter.HandleFunc("/drift/summary", h.getDriftSummary).Methods("GET")
-	
+
 	h.logger.Info("registered reports API routes")
 }
 
@@ -85,9 +88,9 @@ func (h *Handler) generateReport(w http.ResponseWriter, r *http.Request) {
 		// Can't return error to client at this point as headers are already sent
 	}
 
-	h.logger.Info("report generated successfully", 
+	h.logger.Info("report generated successfully",
 		"report_id", report.ID,
-		"type", report.Type, 
+		"type", report.Type,
 		"format", req.Format,
 		"generation_ms", report.Metadata.GenerationMS)
 }
@@ -95,12 +98,12 @@ func (h *Handler) generateReport(w http.ResponseWriter, r *http.Request) {
 // getTemplates handles GET /api/v1/reports/templates
 func (h *Handler) getTemplates(w http.ResponseWriter, r *http.Request) {
 	templates := h.engine.GetAvailableTemplates()
-	
+
 	response := map[string]interface{}{
 		"templates": templates,
 		"count":     len(templates),
 	}
-	
+
 	h.writeJSON(w, http.StatusOK, response)
 }
 
@@ -108,7 +111,7 @@ func (h *Handler) getTemplates(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) getTemplate(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	templateName := vars["template"]
-	
+
 	if templateName == "" {
 		h.writeError(w, http.StatusBadRequest, "Template name is required", nil)
 		return
@@ -144,7 +147,7 @@ func (h *Handler) getDashboardOverview(w http.ResponseWriter, r *http.Request) {
 	deviceIDs := h.parseDeviceIDs(r)
 	tenantIDs := h.parseTenantIDs(r)
 
-	// Generate executive dashboard report  
+	// Generate executive dashboard report
 	req := interfaces.ReportRequest{
 		Type:      interfaces.ReportTypeExecutive,
 		Template:  "executive-dashboard",
@@ -166,9 +169,9 @@ func (h *Handler) getDashboardOverview(w http.ResponseWriter, r *http.Request) {
 
 	// Return the report summary and key sections
 	response := map[string]interface{}{
-		"summary":     report.Summary,
-		"metadata":    report.Metadata,
-		"time_range":  report.TimeRange,
+		"summary":      report.Summary,
+		"metadata":     report.Metadata,
+		"time_range":   report.TimeRange,
 		"generated_at": report.GeneratedAt,
 	}
 
@@ -197,7 +200,7 @@ func (h *Handler) getDashboardTrends(w http.ResponseWriter, r *http.Request) {
 	// Generate executive dashboard with charts
 	req := interfaces.ReportRequest{
 		Type:      interfaces.ReportTypeExecutive,
-		Template:  "executive-dashboard", 
+		Template:  "executive-dashboard",
 		TimeRange: timeRange,
 		DeviceIDs: deviceIDs,
 		TenantIDs: tenantIDs,
@@ -216,8 +219,8 @@ func (h *Handler) getDashboardTrends(w http.ResponseWriter, r *http.Request) {
 
 	// Return charts and trend analysis
 	response := map[string]interface{}{
-		"charts":      report.Charts,
-		"time_range":  report.TimeRange,
+		"charts":       report.Charts,
+		"time_range":   report.TimeRange,
 		"generated_at": report.GeneratedAt,
 	}
 
@@ -265,7 +268,7 @@ func (h *Handler) getDashboardAlerts(w http.ResponseWriter, r *http.Request) {
 
 	// Extract alert information
 	alerts := make([]map[string]interface{}, 0)
-	
+
 	for _, section := range report.Sections {
 		if section.Type == interfaces.SectionTypeAlert || section.ID == "drift-events" {
 			if tableData, ok := section.Content.(map[string]interface{}); ok {
@@ -274,7 +277,7 @@ func (h *Handler) getDashboardAlerts(w http.ResponseWriter, r *http.Request) {
 						if len(row) >= 4 {
 							alert := map[string]interface{}{
 								"timestamp":   row[0],
-								"device_id":   row[1], 
+								"device_id":   row[1],
 								"severity":    row[2],
 								"description": row[3],
 							}
@@ -330,9 +333,9 @@ func (h *Handler) getComplianceStatus(w http.ResponseWriter, r *http.Request) {
 
 	// Extract compliance information
 	compliance := map[string]interface{}{
-		"score":          report.Summary.ComplianceScore,
-		"trend":          report.Summary.TrendDirection,
-		"critical_issues": report.Summary.CriticalIssues,
+		"score":            report.Summary.ComplianceScore,
+		"trend":            report.Summary.TrendDirection,
+		"critical_issues":  report.Summary.CriticalIssues,
 		"devices_analyzed": report.Summary.DevicesAnalyzed,
 	}
 
@@ -496,7 +499,7 @@ func (h *Handler) setExportHeaders(w http.ResponseWriter, format interfaces.Expo
 func (h *Handler) writeJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	
+
 	if err := json.NewEncoder(w).Encode(data); err != nil {
 		h.logger.Error("failed to encode JSON response", "error", err)
 	}
@@ -504,11 +507,11 @@ func (h *Handler) writeJSON(w http.ResponseWriter, status int, data interface{})
 
 func (h *Handler) writeError(w http.ResponseWriter, status int, message string, err error) {
 	response := map[string]interface{}{
-		"error":   message,
-		"status":  status,
+		"error":     message,
+		"status":    status,
 		"timestamp": time.Now().Format(time.RFC3339),
 	}
-	
+
 	if err != nil {
 		response["details"] = err.Error()
 	}

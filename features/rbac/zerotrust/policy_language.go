@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package zerotrust
 
 import (
@@ -11,316 +13,316 @@ import (
 
 // PolicyDefinition represents the structure of a zero-trust policy in YAML/JSON format
 type PolicyDefinition struct {
-	APIVersion    string                    `json:"apiVersion" yaml:"apiVersion"`
-	Kind          string                    `json:"kind" yaml:"kind"`
-	Metadata      PolicyMetadata            `json:"metadata" yaml:"metadata"`
-	Spec          PolicySpec                `json:"spec" yaml:"spec"`
+	APIVersion string         `json:"apiVersion" yaml:"apiVersion"`
+	Kind       string         `json:"kind" yaml:"kind"`
+	Metadata   PolicyMetadata `json:"metadata" yaml:"metadata"`
+	Spec       PolicySpec     `json:"spec" yaml:"spec"`
 }
 
 // PolicyMetadata contains metadata about the policy
 type PolicyMetadata struct {
-	Name          string                    `json:"name" yaml:"name"`
-	Namespace     string                    `json:"namespace,omitempty" yaml:"namespace,omitempty"`
-	Labels        map[string]string         `json:"labels,omitempty" yaml:"labels,omitempty"`
-	Annotations   map[string]string         `json:"annotations,omitempty" yaml:"annotations,omitempty"`
-	CreatedBy     string                    `json:"createdBy" yaml:"createdBy"`
-	CreatedAt     time.Time                 `json:"createdAt" yaml:"createdAt"`
-	Version       string                    `json:"version" yaml:"version"`
+	Name        string            `json:"name" yaml:"name"`
+	Namespace   string            `json:"namespace,omitempty" yaml:"namespace,omitempty"`
+	Labels      map[string]string `json:"labels,omitempty" yaml:"labels,omitempty"`
+	Annotations map[string]string `json:"annotations,omitempty" yaml:"annotations,omitempty"`
+	CreatedBy   string            `json:"createdBy" yaml:"createdBy"`
+	CreatedAt   time.Time         `json:"createdAt" yaml:"createdAt"`
+	Version     string            `json:"version" yaml:"version"`
 }
 
 // PolicySpec defines the specification of a zero-trust policy
 type PolicySpec struct {
-	Description           string                    `json:"description" yaml:"description"`
-	Priority              int                       `json:"priority" yaml:"priority"`
-	Scope                 PolicyScopeSpec           `json:"scope" yaml:"scope"`
-	Rules                 []PolicyRuleSpec          `json:"rules" yaml:"rules"`
-	Enforcement           EnforcementSpec           `json:"enforcement" yaml:"enforcement"`
-	Compliance            ComplianceSpec            `json:"compliance,omitempty" yaml:"compliance,omitempty"`
-	Integration           IntegrationSpec           `json:"integration,omitempty" yaml:"integration,omitempty"`
-	Monitoring            MonitoringSpec            `json:"monitoring,omitempty" yaml:"monitoring,omitempty"`
+	Description string           `json:"description" yaml:"description"`
+	Priority    int              `json:"priority" yaml:"priority"`
+	Scope       PolicyScopeSpec  `json:"scope" yaml:"scope"`
+	Rules       []PolicyRuleSpec `json:"rules" yaml:"rules"`
+	Enforcement EnforcementSpec  `json:"enforcement" yaml:"enforcement"`
+	Compliance  ComplianceSpec   `json:"compliance,omitempty" yaml:"compliance,omitempty"`
+	Integration IntegrationSpec  `json:"integration,omitempty" yaml:"integration,omitempty"`
+	Monitoring  MonitoringSpec   `json:"monitoring,omitempty" yaml:"monitoring,omitempty"`
 }
 
 // PolicyScopeSpec defines the scope where the policy applies
 type PolicyScopeSpec struct {
-	Tenants               []string                  `json:"tenants,omitempty" yaml:"tenants,omitempty"`
-	Subjects              []SubjectSelector         `json:"subjects,omitempty" yaml:"subjects,omitempty"`
-	Resources             []ResourceSelector        `json:"resources,omitempty" yaml:"resources,omitempty"`
-	Actions               []string                  `json:"actions,omitempty" yaml:"actions,omitempty"`
-	Conditions            []ConditionSpec           `json:"conditions,omitempty" yaml:"conditions,omitempty"`
+	Tenants    []string           `json:"tenants,omitempty" yaml:"tenants,omitempty"`
+	Subjects   []SubjectSelector  `json:"subjects,omitempty" yaml:"subjects,omitempty"`
+	Resources  []ResourceSelector `json:"resources,omitempty" yaml:"resources,omitempty"`
+	Actions    []string           `json:"actions,omitempty" yaml:"actions,omitempty"`
+	Conditions []ConditionSpec    `json:"conditions,omitempty" yaml:"conditions,omitempty"`
 }
 
 // SubjectSelector defines how to select subjects for policy application
 type SubjectSelector struct {
-	Type                  string                    `json:"type" yaml:"type"`
-	Patterns              []string                  `json:"patterns,omitempty" yaml:"patterns,omitempty"`
-	Attributes            map[string]AttributeMatcher `json:"attributes,omitempty" yaml:"attributes,omitempty"`
-	Groups                []string                  `json:"groups,omitempty" yaml:"groups,omitempty"`
-	Roles                 []string                  `json:"roles,omitempty" yaml:"roles,omitempty"`
+	Type       string                      `json:"type" yaml:"type"`
+	Patterns   []string                    `json:"patterns,omitempty" yaml:"patterns,omitempty"`
+	Attributes map[string]AttributeMatcher `json:"attributes,omitempty" yaml:"attributes,omitempty"`
+	Groups     []string                    `json:"groups,omitempty" yaml:"groups,omitempty"`
+	Roles      []string                    `json:"roles,omitempty" yaml:"roles,omitempty"`
 }
 
 // ResourceSelector defines how to select resources for policy application
 type ResourceSelector struct {
-	Type                  string                    `json:"type" yaml:"type"`
-	Patterns              []string                  `json:"patterns,omitempty" yaml:"patterns,omitempty"`
-	Attributes            map[string]AttributeMatcher `json:"attributes,omitempty" yaml:"attributes,omitempty"`
-	Tags                  map[string]string         `json:"tags,omitempty" yaml:"tags,omitempty"`
+	Type       string                      `json:"type" yaml:"type"`
+	Patterns   []string                    `json:"patterns,omitempty" yaml:"patterns,omitempty"`
+	Attributes map[string]AttributeMatcher `json:"attributes,omitempty" yaml:"attributes,omitempty"`
+	Tags       map[string]string           `json:"tags,omitempty" yaml:"tags,omitempty"`
 }
 
 // AttributeMatcher defines how to match against attribute values
 type AttributeMatcher struct {
-	Operator              string                    `json:"operator" yaml:"operator"`
-	Values                []interface{}             `json:"values" yaml:"values"`
-	Pattern               string                    `json:"pattern,omitempty" yaml:"pattern,omitempty"`
+	Operator string        `json:"operator" yaml:"operator"`
+	Values   []interface{} `json:"values" yaml:"values"`
+	Pattern  string        `json:"pattern,omitempty" yaml:"pattern,omitempty"`
 }
 
 // PolicyRuleSpec defines a single rule within a policy
 type PolicyRuleSpec struct {
-	ID                    string                    `json:"id" yaml:"id"`
-	Name                  string                    `json:"name" yaml:"name"`
-	Description           string                    `json:"description,omitempty" yaml:"description,omitempty"`
-	Type                  string                    `json:"type" yaml:"type"` // "access", "compliance", "security"
-	
+	ID          string `json:"id" yaml:"id"`
+	Name        string `json:"name" yaml:"name"`
+	Description string `json:"description,omitempty" yaml:"description,omitempty"`
+	Type        string `json:"type" yaml:"type"` // "access", "compliance", "security"
+
 	// Rule logic
-	When                  []ConditionSpec           `json:"when,omitempty" yaml:"when,omitempty"`
-	Then                  ActionSpec                `json:"then" yaml:"then"`
-	Else                  ActionSpec                `json:"else,omitempty" yaml:"else,omitempty"`
-	
+	When []ConditionSpec `json:"when,omitempty" yaml:"when,omitempty"`
+	Then ActionSpec      `json:"then" yaml:"then"`
+	Else ActionSpec      `json:"else,omitempty" yaml:"else,omitempty"`
+
 	// Never-trust-always-verify settings
-	AlwaysValidate        bool                      `json:"alwaysValidate" yaml:"alwaysValidate"`
-	RequireExplicitGrant  bool                      `json:"requireExplicitGrant" yaml:"requireExplicitGrant"`
-	ValidationInterval    time.Duration             `json:"validationInterval,omitempty" yaml:"validationInterval,omitempty"`
-	
+	AlwaysValidate       bool          `json:"alwaysValidate" yaml:"alwaysValidate"`
+	RequireExplicitGrant bool          `json:"requireExplicitGrant" yaml:"requireExplicitGrant"`
+	ValidationInterval   time.Duration `json:"validationInterval,omitempty" yaml:"validationInterval,omitempty"`
+
 	// Rule metadata
-	Priority              int                       `json:"priority,omitempty" yaml:"priority,omitempty"`
-	Enabled               bool                      `json:"enabled" yaml:"enabled"`
-	Tags                  []string                  `json:"tags,omitempty" yaml:"tags,omitempty"`
+	Priority int      `json:"priority,omitempty" yaml:"priority,omitempty"`
+	Enabled  bool     `json:"enabled" yaml:"enabled"`
+	Tags     []string `json:"tags,omitempty" yaml:"tags,omitempty"`
 }
 
 // ConditionSpec defines a condition that must be evaluated
 type ConditionSpec struct {
-	Field                 string                    `json:"field" yaml:"field"`
-	Operator              string                    `json:"operator" yaml:"operator"`
-	Value                 interface{}               `json:"value" yaml:"value"`
-	ValueType             string                    `json:"valueType,omitempty" yaml:"valueType,omitempty"`
-	
+	Field     string      `json:"field" yaml:"field"`
+	Operator  string      `json:"operator" yaml:"operator"`
+	Value     interface{} `json:"value" yaml:"value"`
+	ValueType string      `json:"valueType,omitempty" yaml:"valueType,omitempty"`
+
 	// Logical operators
-	And                   []ConditionSpec           `json:"and,omitempty" yaml:"and,omitempty"`
-	Or                    []ConditionSpec           `json:"or,omitempty" yaml:"or,omitempty"`
-	Not                   *ConditionSpec            `json:"not,omitempty" yaml:"not,omitempty"`
+	And []ConditionSpec `json:"and,omitempty" yaml:"and,omitempty"`
+	Or  []ConditionSpec `json:"or,omitempty" yaml:"or,omitempty"`
+	Not *ConditionSpec  `json:"not,omitempty" yaml:"not,omitempty"`
 }
 
 // ActionSpec defines actions to take when a rule is triggered
 type ActionSpec struct {
-	Decision              string                    `json:"decision" yaml:"decision"` // "allow", "deny", "conditional"
-	Requirements          []RequirementSpec         `json:"requirements,omitempty" yaml:"requirements,omitempty"`
-	Logging               LoggingSpec               `json:"logging,omitempty" yaml:"logging,omitempty"`
-	Alerts                []AlertSpec               `json:"alerts,omitempty" yaml:"alerts,omitempty"`
-	Integrations          IntegrationActionSpec     `json:"integrations,omitempty" yaml:"integrations,omitempty"`
+	Decision     string                `json:"decision" yaml:"decision"` // "allow", "deny", "conditional"
+	Requirements []RequirementSpec     `json:"requirements,omitempty" yaml:"requirements,omitempty"`
+	Logging      LoggingSpec           `json:"logging,omitempty" yaml:"logging,omitempty"`
+	Alerts       []AlertSpec           `json:"alerts,omitempty" yaml:"alerts,omitempty"`
+	Integrations IntegrationActionSpec `json:"integrations,omitempty" yaml:"integrations,omitempty"`
 }
 
 // RequirementSpec defines additional requirements for access
 type RequirementSpec struct {
-	Type                  string                    `json:"type" yaml:"type"`
-	Config                map[string]interface{}    `json:"config,omitempty" yaml:"config,omitempty"`
-	Timeout               time.Duration             `json:"timeout,omitempty" yaml:"timeout,omitempty"`
-	Optional              bool                      `json:"optional,omitempty" yaml:"optional,omitempty"`
+	Type     string                 `json:"type" yaml:"type"`
+	Config   map[string]interface{} `json:"config,omitempty" yaml:"config,omitempty"`
+	Timeout  time.Duration          `json:"timeout,omitempty" yaml:"timeout,omitempty"`
+	Optional bool                   `json:"optional,omitempty" yaml:"optional,omitempty"`
 }
 
 // LoggingSpec defines logging requirements
 type LoggingSpec struct {
-	Level                 string                    `json:"level" yaml:"level"`
-	Fields                []string                  `json:"fields,omitempty" yaml:"fields,omitempty"`
-	Destination           string                    `json:"destination,omitempty" yaml:"destination,omitempty"`
-	Retention             time.Duration             `json:"retention,omitempty" yaml:"retention,omitempty"`
+	Level       string        `json:"level" yaml:"level"`
+	Fields      []string      `json:"fields,omitempty" yaml:"fields,omitempty"`
+	Destination string        `json:"destination,omitempty" yaml:"destination,omitempty"`
+	Retention   time.Duration `json:"retention,omitempty" yaml:"retention,omitempty"`
 }
 
 // AlertSpec defines alerting configuration
 type AlertSpec struct {
-	Type                  string                    `json:"type" yaml:"type"`
-	Severity              string                    `json:"severity" yaml:"severity"`
-	Recipients            []string                  `json:"recipients" yaml:"recipients"`
-	Template              string                    `json:"template,omitempty" yaml:"template,omitempty"`
-	Conditions            []ConditionSpec           `json:"conditions,omitempty" yaml:"conditions,omitempty"`
+	Type       string          `json:"type" yaml:"type"`
+	Severity   string          `json:"severity" yaml:"severity"`
+	Recipients []string        `json:"recipients" yaml:"recipients"`
+	Template   string          `json:"template,omitempty" yaml:"template,omitempty"`
+	Conditions []ConditionSpec `json:"conditions,omitempty" yaml:"conditions,omitempty"`
 }
 
 // IntegrationActionSpec defines actions for system integrations
 type IntegrationActionSpec struct {
-	RBAC                  *RBACActionSpec           `json:"rbac,omitempty" yaml:"rbac,omitempty"`
-	JIT                   *JITActionSpec            `json:"jit,omitempty" yaml:"jit,omitempty"`
-	Risk                  *RiskActionSpec           `json:"risk,omitempty" yaml:"risk,omitempty"`
-	Tenant                *TenantActionSpec         `json:"tenant,omitempty" yaml:"tenant,omitempty"`
-	ContinuousAuth        *ContinuousAuthActionSpec `json:"continuousAuth,omitempty" yaml:"continuousAuth,omitempty"`
+	RBAC           *RBACActionSpec           `json:"rbac,omitempty" yaml:"rbac,omitempty"`
+	JIT            *JITActionSpec            `json:"jit,omitempty" yaml:"jit,omitempty"`
+	Risk           *RiskActionSpec           `json:"risk,omitempty" yaml:"risk,omitempty"`
+	Tenant         *TenantActionSpec         `json:"tenant,omitempty" yaml:"tenant,omitempty"`
+	ContinuousAuth *ContinuousAuthActionSpec `json:"continuousAuth,omitempty" yaml:"continuousAuth,omitempty"`
 }
 
 // System-specific action specifications
 type RBACActionSpec struct {
-	RequireValidation     bool                      `json:"requireValidation" yaml:"requireValidation"`
-	OverrideDecision      bool                      `json:"overrideDecision,omitempty" yaml:"overrideDecision,omitempty"`
-	RequiredRoles         []string                  `json:"requiredRoles,omitempty" yaml:"requiredRoles,omitempty"`
-	RequiredPermissions   []string                  `json:"requiredPermissions,omitempty" yaml:"requiredPermissions,omitempty"`
+	RequireValidation   bool     `json:"requireValidation" yaml:"requireValidation"`
+	OverrideDecision    bool     `json:"overrideDecision,omitempty" yaml:"overrideDecision,omitempty"`
+	RequiredRoles       []string `json:"requiredRoles,omitempty" yaml:"requiredRoles,omitempty"`
+	RequiredPermissions []string `json:"requiredPermissions,omitempty" yaml:"requiredPermissions,omitempty"`
 }
 
 type JITActionSpec struct {
-	RequireJustification  bool                      `json:"requireJustification" yaml:"requireJustification"`
-	MaxDuration           time.Duration             `json:"maxDuration,omitempty" yaml:"maxDuration,omitempty"`
-	RequireApproval       bool                      `json:"requireApproval,omitempty" yaml:"requireApproval,omitempty"`
-	Approvers             []string                  `json:"approvers,omitempty" yaml:"approvers,omitempty"`
+	RequireJustification bool          `json:"requireJustification" yaml:"requireJustification"`
+	MaxDuration          time.Duration `json:"maxDuration,omitempty" yaml:"maxDuration,omitempty"`
+	RequireApproval      bool          `json:"requireApproval,omitempty" yaml:"requireApproval,omitempty"`
+	Approvers            []string      `json:"approvers,omitempty" yaml:"approvers,omitempty"`
 }
 
 type RiskActionSpec struct {
-	RequireAssessment     bool                      `json:"requireAssessment" yaml:"requireAssessment"`
-	MaxRiskLevel          string                    `json:"maxRiskLevel,omitempty" yaml:"maxRiskLevel,omitempty"`
-	RequireMitigation     bool                      `json:"requireMitigation,omitempty" yaml:"requireMitigation,omitempty"`
-	MitigationActions     []string                  `json:"mitigationActions,omitempty" yaml:"mitigationActions,omitempty"`
+	RequireAssessment bool     `json:"requireAssessment" yaml:"requireAssessment"`
+	MaxRiskLevel      string   `json:"maxRiskLevel,omitempty" yaml:"maxRiskLevel,omitempty"`
+	RequireMitigation bool     `json:"requireMitigation,omitempty" yaml:"requireMitigation,omitempty"`
+	MitigationActions []string `json:"mitigationActions,omitempty" yaml:"mitigationActions,omitempty"`
 }
 
 type TenantActionSpec struct {
-	EnforceIsolation      bool                      `json:"enforceIsolation" yaml:"enforceIsolation"`
-	RequireTenantValidation bool                    `json:"requireTenantValidation" yaml:"requireTenantValidation"`
-	AdditionalPolicies    []string                  `json:"additionalPolicies,omitempty" yaml:"additionalPolicies,omitempty"`
+	EnforceIsolation        bool     `json:"enforceIsolation" yaml:"enforceIsolation"`
+	RequireTenantValidation bool     `json:"requireTenantValidation" yaml:"requireTenantValidation"`
+	AdditionalPolicies      []string `json:"additionalPolicies,omitempty" yaml:"additionalPolicies,omitempty"`
 }
 
 type ContinuousAuthActionSpec struct {
-	RequireContinuousValidation bool                `json:"requireContinuousValidation" yaml:"requireContinuousValidation"`
-	ValidationInterval    time.Duration             `json:"validationInterval,omitempty" yaml:"validationInterval,omitempty"`
-	SessionTimeout        time.Duration             `json:"sessionTimeout,omitempty" yaml:"sessionTimeout,omitempty"`
-	RequireReauth         bool                      `json:"requireReauth,omitempty" yaml:"requireReauth,omitempty"`
+	RequireContinuousValidation bool          `json:"requireContinuousValidation" yaml:"requireContinuousValidation"`
+	ValidationInterval          time.Duration `json:"validationInterval,omitempty" yaml:"validationInterval,omitempty"`
+	SessionTimeout              time.Duration `json:"sessionTimeout,omitempty" yaml:"sessionTimeout,omitempty"`
+	RequireReauth               bool          `json:"requireReauth,omitempty" yaml:"requireReauth,omitempty"`
 }
 
 // EnforcementSpec defines policy enforcement configuration
 type EnforcementSpec struct {
-	Mode                  string                    `json:"mode" yaml:"mode"` // "enforcing", "auditing", "testing"
-	FailureMode           string                    `json:"failureMode" yaml:"failureMode"` // "secure", "open"
-	GracePeriod           time.Duration             `json:"gracePeriod,omitempty" yaml:"gracePeriod,omitempty"`
-	MaxViolations         int                       `json:"maxViolations,omitempty" yaml:"maxViolations,omitempty"`
-	ViolationWindow       time.Duration             `json:"violationWindow,omitempty" yaml:"violationWindow,omitempty"`
+	Mode            string        `json:"mode" yaml:"mode"`               // "enforcing", "auditing", "testing"
+	FailureMode     string        `json:"failureMode" yaml:"failureMode"` // "secure", "open"
+	GracePeriod     time.Duration `json:"gracePeriod,omitempty" yaml:"gracePeriod,omitempty"`
+	MaxViolations   int           `json:"maxViolations,omitempty" yaml:"maxViolations,omitempty"`
+	ViolationWindow time.Duration `json:"violationWindow,omitempty" yaml:"violationWindow,omitempty"`
 }
 
 // ComplianceSpec defines compliance framework requirements
 type ComplianceSpec struct {
-	Frameworks            []ComplianceFrameworkSpec `json:"frameworks" yaml:"frameworks"`
-	AuditRequirements     []AuditRequirementSpec    `json:"auditRequirements,omitempty" yaml:"auditRequirements,omitempty"`
-	RetentionPolicy       RetentionPolicySpec       `json:"retentionPolicy,omitempty" yaml:"retentionPolicy,omitempty"`
+	Frameworks        []ComplianceFrameworkSpec `json:"frameworks" yaml:"frameworks"`
+	AuditRequirements []AuditRequirementSpec    `json:"auditRequirements,omitempty" yaml:"auditRequirements,omitempty"`
+	RetentionPolicy   RetentionPolicySpec       `json:"retentionPolicy,omitempty" yaml:"retentionPolicy,omitempty"`
 }
 
 type ComplianceFrameworkSpec struct {
-	Name                  string                    `json:"name" yaml:"name"`
-	Version               string                    `json:"version,omitempty" yaml:"version,omitempty"`
-	Controls              []string                  `json:"controls" yaml:"controls"`
-	RequirementLevel      string                    `json:"requirementLevel" yaml:"requirementLevel"`
-	CustomValidation      []CustomValidationSpec    `json:"customValidation,omitempty" yaml:"customValidation,omitempty"`
+	Name             string                 `json:"name" yaml:"name"`
+	Version          string                 `json:"version,omitempty" yaml:"version,omitempty"`
+	Controls         []string               `json:"controls" yaml:"controls"`
+	RequirementLevel string                 `json:"requirementLevel" yaml:"requirementLevel"`
+	CustomValidation []CustomValidationSpec `json:"customValidation,omitempty" yaml:"customValidation,omitempty"`
 }
 
 type CustomValidationSpec struct {
-	Name                  string                    `json:"name" yaml:"name"`
-	Logic                 string                    `json:"logic" yaml:"logic"`
-	RequiredEvidence      []string                  `json:"requiredEvidence,omitempty" yaml:"requiredEvidence,omitempty"`
+	Name             string   `json:"name" yaml:"name"`
+	Logic            string   `json:"logic" yaml:"logic"`
+	RequiredEvidence []string `json:"requiredEvidence,omitempty" yaml:"requiredEvidence,omitempty"`
 }
 
 type AuditRequirementSpec struct {
-	Type                  string                    `json:"type" yaml:"type"`
-	Level                 string                    `json:"level" yaml:"level"`
-	Fields                []string                  `json:"fields" yaml:"fields"`
-	Encryption            bool                      `json:"encryption,omitempty" yaml:"encryption,omitempty"`
+	Type       string   `json:"type" yaml:"type"`
+	Level      string   `json:"level" yaml:"level"`
+	Fields     []string `json:"fields" yaml:"fields"`
+	Encryption bool     `json:"encryption,omitempty" yaml:"encryption,omitempty"`
 }
 
 type RetentionPolicySpec struct {
-	Duration              time.Duration             `json:"duration" yaml:"duration"`
-	ArchiveAfter          time.Duration             `json:"archiveAfter,omitempty" yaml:"archiveAfter,omitempty"`
-	DeleteAfter           time.Duration             `json:"deleteAfter,omitempty" yaml:"deleteAfter,omitempty"`
+	Duration     time.Duration `json:"duration" yaml:"duration"`
+	ArchiveAfter time.Duration `json:"archiveAfter,omitempty" yaml:"archiveAfter,omitempty"`
+	DeleteAfter  time.Duration `json:"deleteAfter,omitempty" yaml:"deleteAfter,omitempty"`
 }
 
 // IntegrationSpec defines integration with existing systems
 type IntegrationSpec struct {
-	RBAC                  *RBACIntegrationSpec      `json:"rbac,omitempty" yaml:"rbac,omitempty"`
-	JIT                   *JITIntegrationSpec       `json:"jit,omitempty" yaml:"jit,omitempty"`
-	Risk                  *RiskIntegrationSpec      `json:"risk,omitempty" yaml:"risk,omitempty"`
-	Tenant                *TenantIntegrationSpec    `json:"tenant,omitempty" yaml:"tenant,omitempty"`
-	ContinuousAuth        *ContinuousAuthIntegrationSpec `json:"continuousAuth,omitempty" yaml:"continuousAuth,omitempty"`
+	RBAC           *RBACIntegrationSpec           `json:"rbac,omitempty" yaml:"rbac,omitempty"`
+	JIT            *JITIntegrationSpec            `json:"jit,omitempty" yaml:"jit,omitempty"`
+	Risk           *RiskIntegrationSpec           `json:"risk,omitempty" yaml:"risk,omitempty"`
+	Tenant         *TenantIntegrationSpec         `json:"tenant,omitempty" yaml:"tenant,omitempty"`
+	ContinuousAuth *ContinuousAuthIntegrationSpec `json:"continuousAuth,omitempty" yaml:"continuousAuth,omitempty"`
 }
 
 type RBACIntegrationSpec struct {
-	Enabled               bool                      `json:"enabled" yaml:"enabled"`
-	Weight                float64                   `json:"weight,omitempty" yaml:"weight,omitempty"`
-	Override              bool                      `json:"override,omitempty" yaml:"override,omitempty"`
-	FallbackMode          string                    `json:"fallbackMode,omitempty" yaml:"fallbackMode,omitempty"`
+	Enabled      bool    `json:"enabled" yaml:"enabled"`
+	Weight       float64 `json:"weight,omitempty" yaml:"weight,omitempty"`
+	Override     bool    `json:"override,omitempty" yaml:"override,omitempty"`
+	FallbackMode string  `json:"fallbackMode,omitempty" yaml:"fallbackMode,omitempty"`
 }
 
 type JITIntegrationSpec struct {
-	Enabled               bool                      `json:"enabled" yaml:"enabled"`
-	Weight                float64                   `json:"weight,omitempty" yaml:"weight,omitempty"`
-	MaxDuration           time.Duration             `json:"maxDuration,omitempty" yaml:"maxDuration,omitempty"`
-	RequireApproval       bool                      `json:"requireApproval,omitempty" yaml:"requireApproval,omitempty"`
+	Enabled         bool          `json:"enabled" yaml:"enabled"`
+	Weight          float64       `json:"weight,omitempty" yaml:"weight,omitempty"`
+	MaxDuration     time.Duration `json:"maxDuration,omitempty" yaml:"maxDuration,omitempty"`
+	RequireApproval bool          `json:"requireApproval,omitempty" yaml:"requireApproval,omitempty"`
 }
 
 type RiskIntegrationSpec struct {
-	Enabled               bool                      `json:"enabled" yaml:"enabled"`
-	Weight                float64                   `json:"weight,omitempty" yaml:"weight,omitempty"`
-	ThresholdOverride     float64                   `json:"thresholdOverride,omitempty" yaml:"thresholdOverride,omitempty"`
-	RequiredMitigations   []string                  `json:"requiredMitigations,omitempty" yaml:"requiredMitigations,omitempty"`
+	Enabled             bool     `json:"enabled" yaml:"enabled"`
+	Weight              float64  `json:"weight,omitempty" yaml:"weight,omitempty"`
+	ThresholdOverride   float64  `json:"thresholdOverride,omitempty" yaml:"thresholdOverride,omitempty"`
+	RequiredMitigations []string `json:"requiredMitigations,omitempty" yaml:"requiredMitigations,omitempty"`
 }
 
 type TenantIntegrationSpec struct {
-	Enabled               bool                      `json:"enabled" yaml:"enabled"`
-	Weight                float64                   `json:"weight,omitempty" yaml:"weight,omitempty"`
-	EnforceIsolation      bool                      `json:"enforceIsolation" yaml:"enforceIsolation"`
-	OverrideTenantPolicies bool                     `json:"overrideTenantPolicies,omitempty" yaml:"overrideTenantPolicies,omitempty"`
+	Enabled                bool    `json:"enabled" yaml:"enabled"`
+	Weight                 float64 `json:"weight,omitempty" yaml:"weight,omitempty"`
+	EnforceIsolation       bool    `json:"enforceIsolation" yaml:"enforceIsolation"`
+	OverrideTenantPolicies bool    `json:"overrideTenantPolicies,omitempty" yaml:"overrideTenantPolicies,omitempty"`
 }
 
 type ContinuousAuthIntegrationSpec struct {
-	Enabled               bool                      `json:"enabled" yaml:"enabled"`
-	Weight                float64                   `json:"weight,omitempty" yaml:"weight,omitempty"`
-	RequireSession        bool                      `json:"requireSession" yaml:"requireSession"`
-	SessionTimeout        time.Duration             `json:"sessionTimeout,omitempty" yaml:"sessionTimeout,omitempty"`
+	Enabled        bool          `json:"enabled" yaml:"enabled"`
+	Weight         float64       `json:"weight,omitempty" yaml:"weight,omitempty"`
+	RequireSession bool          `json:"requireSession" yaml:"requireSession"`
+	SessionTimeout time.Duration `json:"sessionTimeout,omitempty" yaml:"sessionTimeout,omitempty"`
 }
 
 // MonitoringSpec defines monitoring and metrics configuration
 type MonitoringSpec struct {
-	Metrics               MetricsSpec               `json:"metrics,omitempty" yaml:"metrics,omitempty"`
-	Alerts                []MonitoringAlertSpec     `json:"alerts,omitempty" yaml:"alerts,omitempty"`
-	Dashboard             DashboardSpec             `json:"dashboard,omitempty" yaml:"dashboard,omitempty"`
+	Metrics   MetricsSpec           `json:"metrics,omitempty" yaml:"metrics,omitempty"`
+	Alerts    []MonitoringAlertSpec `json:"alerts,omitempty" yaml:"alerts,omitempty"`
+	Dashboard DashboardSpec         `json:"dashboard,omitempty" yaml:"dashboard,omitempty"`
 }
 
 type MetricsSpec struct {
-	Enabled               bool                      `json:"enabled" yaml:"enabled"`
-	Interval              time.Duration             `json:"interval,omitempty" yaml:"interval,omitempty"`
-	Labels                map[string]string         `json:"labels,omitempty" yaml:"labels,omitempty"`
-	CustomMetrics         []CustomMetricSpec        `json:"customMetrics,omitempty" yaml:"customMetrics,omitempty"`
+	Enabled       bool               `json:"enabled" yaml:"enabled"`
+	Interval      time.Duration      `json:"interval,omitempty" yaml:"interval,omitempty"`
+	Labels        map[string]string  `json:"labels,omitempty" yaml:"labels,omitempty"`
+	CustomMetrics []CustomMetricSpec `json:"customMetrics,omitempty" yaml:"customMetrics,omitempty"`
 }
 
 type CustomMetricSpec struct {
-	Name                  string                    `json:"name" yaml:"name"`
-	Type                  string                    `json:"type" yaml:"type"`
-	Description           string                    `json:"description,omitempty" yaml:"description,omitempty"`
-	Labels                []string                  `json:"labels,omitempty" yaml:"labels,omitempty"`
+	Name        string   `json:"name" yaml:"name"`
+	Type        string   `json:"type" yaml:"type"`
+	Description string   `json:"description,omitempty" yaml:"description,omitempty"`
+	Labels      []string `json:"labels,omitempty" yaml:"labels,omitempty"`
 }
 
 type MonitoringAlertSpec struct {
-	Name                  string                    `json:"name" yaml:"name"`
-	Condition             string                    `json:"condition" yaml:"condition"`
-	Threshold             float64                   `json:"threshold" yaml:"threshold"`
-	Duration              time.Duration             `json:"duration" yaml:"duration"`
-	Recipients            []string                  `json:"recipients" yaml:"recipients"`
+	Name       string        `json:"name" yaml:"name"`
+	Condition  string        `json:"condition" yaml:"condition"`
+	Threshold  float64       `json:"threshold" yaml:"threshold"`
+	Duration   time.Duration `json:"duration" yaml:"duration"`
+	Recipients []string      `json:"recipients" yaml:"recipients"`
 }
 
 type DashboardSpec struct {
-	Enabled               bool                      `json:"enabled" yaml:"enabled"`
-	Title                 string                    `json:"title,omitempty" yaml:"title,omitempty"`
-	Widgets               []DashboardWidgetSpec     `json:"widgets,omitempty" yaml:"widgets,omitempty"`
+	Enabled bool                  `json:"enabled" yaml:"enabled"`
+	Title   string                `json:"title,omitempty" yaml:"title,omitempty"`
+	Widgets []DashboardWidgetSpec `json:"widgets,omitempty" yaml:"widgets,omitempty"`
 }
 
 type DashboardWidgetSpec struct {
-	Type                  string                    `json:"type" yaml:"type"`
-	Title                 string                    `json:"title" yaml:"title"`
-	Query                 string                    `json:"query" yaml:"query"`
-	TimeRange             string                    `json:"timeRange,omitempty" yaml:"timeRange,omitempty"`
+	Type      string `json:"type" yaml:"type"`
+	Title     string `json:"title" yaml:"title"`
+	Query     string `json:"query" yaml:"query"`
+	TimeRange string `json:"timeRange,omitempty" yaml:"timeRange,omitempty"`
 }
 
 // PolicyLanguageEngine provides policy parsing and validation capabilities
 type PolicyLanguageEngine struct {
-	validators            map[string]PolicyValidator
-	parsers              map[string]PolicyParser
-	compilers            map[string]PolicyCompiler
+	validators map[string]PolicyValidator
+	parsers    map[string]PolicyParser
+	compilers  map[string]PolicyCompiler
 }
 
 // PolicyValidator validates policy definitions for correctness
@@ -341,10 +343,10 @@ type PolicyCompiler interface {
 
 // ValidationError represents a policy validation error
 type ValidationError struct {
-	Field       string        `json:"field"`
-	Message     string        `json:"message"`
-	Severity    ErrorSeverity `json:"severity"`
-	Code        string        `json:"code"`
+	Field    string        `json:"field"`
+	Message  string        `json:"message"`
+	Severity ErrorSeverity `json:"severity"`
+	Code     string        `json:"code"`
 }
 
 type ErrorSeverity string
@@ -362,18 +364,18 @@ func NewPolicyLanguageEngine() *PolicyLanguageEngine {
 		parsers:    make(map[string]PolicyParser),
 		compilers:  make(map[string]PolicyCompiler),
 	}
-	
+
 	// Register default parsers
 	engine.parsers["yaml"] = &YAMLPolicyParser{}
 	engine.parsers["json"] = &JSONPolicyParser{}
-	
+
 	// Register default validators
 	engine.validators["default"] = &DefaultPolicyValidator{}
 	engine.validators["compliance"] = &CompliancePolicyValidator{}
-	
+
 	// Register default compiler
 	engine.compilers["default"] = &DefaultPolicyCompiler{}
-	
+
 	return engine
 }
 
@@ -383,20 +385,20 @@ func (p *PolicyLanguageEngine) ParsePolicy(data []byte, format string) (*PolicyD
 	if !exists {
 		return nil, fmt.Errorf("unsupported policy format: %s", format)
 	}
-	
+
 	return parser.Parse(data)
 }
 
 // ValidatePolicy validates a policy definition
 func (p *PolicyLanguageEngine) ValidatePolicy(definition *PolicyDefinition) []ValidationError {
 	var allErrors []ValidationError
-	
+
 	// Run all validators
 	for _, validator := range p.validators {
 		errors := validator.Validate(definition)
 		allErrors = append(allErrors, errors...)
 	}
-	
+
 	return allErrors
 }
 
@@ -404,14 +406,14 @@ func (p *PolicyLanguageEngine) ValidatePolicy(definition *PolicyDefinition) []Va
 func (p *PolicyLanguageEngine) CompilePolicy(definition *PolicyDefinition) (*ZeroTrustPolicy, error) {
 	// First validate the policy
 	validationErrors := p.ValidatePolicy(definition)
-	
+
 	// Check for blocking errors
 	for _, err := range validationErrors {
 		if err.Severity == ErrorSeverityError {
 			return nil, fmt.Errorf("policy validation failed: %s", err.Message)
 		}
 	}
-	
+
 	// Compile the policy
 	compiler := p.compilers["default"]
 	return compiler.Compile(definition)
@@ -458,7 +460,7 @@ type DefaultPolicyValidator struct{}
 
 func (d *DefaultPolicyValidator) Validate(definition *PolicyDefinition) []ValidationError {
 	var errors []ValidationError
-	
+
 	// Validate API version
 	if definition.APIVersion == "" {
 		errors = append(errors, ValidationError{
@@ -468,7 +470,7 @@ func (d *DefaultPolicyValidator) Validate(definition *PolicyDefinition) []Valida
 			Code:     "MISSING_API_VERSION",
 		})
 	}
-	
+
 	// Validate kind
 	if definition.Kind != "ZeroTrustPolicy" {
 		errors = append(errors, ValidationError{
@@ -478,7 +480,7 @@ func (d *DefaultPolicyValidator) Validate(definition *PolicyDefinition) []Valida
 			Code:     "INVALID_KIND",
 		})
 	}
-	
+
 	// Validate metadata
 	if definition.Metadata.Name == "" {
 		errors = append(errors, ValidationError{
@@ -488,7 +490,7 @@ func (d *DefaultPolicyValidator) Validate(definition *PolicyDefinition) []Valida
 			Code:     "MISSING_NAME",
 		})
 	}
-	
+
 	// Validate policy name format
 	namePattern := regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 	if !namePattern.MatchString(definition.Metadata.Name) {
@@ -499,7 +501,7 @@ func (d *DefaultPolicyValidator) Validate(definition *PolicyDefinition) []Valida
 			Code:     "INVALID_NAME_FORMAT",
 		})
 	}
-	
+
 	// Validate rules
 	if len(definition.Spec.Rules) == 0 {
 		errors = append(errors, ValidationError{
@@ -509,7 +511,7 @@ func (d *DefaultPolicyValidator) Validate(definition *PolicyDefinition) []Valida
 			Code:     "MISSING_RULES",
 		})
 	}
-	
+
 	// Validate individual rules
 	for i, rule := range definition.Spec.Rules {
 		if rule.ID == "" {
@@ -520,7 +522,7 @@ func (d *DefaultPolicyValidator) Validate(definition *PolicyDefinition) []Valida
 				Code:     "MISSING_RULE_ID",
 			})
 		}
-		
+
 		if rule.Then.Decision == "" {
 			errors = append(errors, ValidationError{
 				Field:    fmt.Sprintf("spec.rules[%d].then.decision", i),
@@ -529,7 +531,7 @@ func (d *DefaultPolicyValidator) Validate(definition *PolicyDefinition) []Valida
 				Code:     "MISSING_RULE_DECISION",
 			})
 		}
-		
+
 		// Validate decision values
 		validDecisions := map[string]bool{"allow": true, "deny": true, "conditional": true}
 		if !validDecisions[rule.Then.Decision] {
@@ -541,7 +543,7 @@ func (d *DefaultPolicyValidator) Validate(definition *PolicyDefinition) []Valida
 			})
 		}
 	}
-	
+
 	// Validate enforcement mode
 	validModes := map[string]bool{"enforcing": true, "auditing": true, "testing": true}
 	if !validModes[definition.Spec.Enforcement.Mode] {
@@ -552,7 +554,7 @@ func (d *DefaultPolicyValidator) Validate(definition *PolicyDefinition) []Valida
 			Code:     "INVALID_ENFORCEMENT_MODE",
 		})
 	}
-	
+
 	return errors
 }
 
@@ -561,13 +563,13 @@ type CompliancePolicyValidator struct{}
 
 func (c *CompliancePolicyValidator) Validate(definition *PolicyDefinition) []ValidationError {
 	var errors []ValidationError
-	
-	// Validate compliance frameworks  
+
+	// Validate compliance frameworks
 	if len(definition.Spec.Compliance.Frameworks) > 0 {
 		supportedFrameworks := map[string]bool{
 			"SOC2": true, "ISO27001": true, "GDPR": true, "HIPAA": true,
 		}
-		
+
 		for i, framework := range definition.Spec.Compliance.Frameworks {
 			if !supportedFrameworks[framework.Name] {
 				errors = append(errors, ValidationError{
@@ -579,7 +581,7 @@ func (c *CompliancePolicyValidator) Validate(definition *PolicyDefinition) []Val
 			}
 		}
 	}
-	
+
 	return errors
 }
 
@@ -590,27 +592,27 @@ type DefaultPolicyCompiler struct{}
 
 func (d *DefaultPolicyCompiler) Compile(definition *PolicyDefinition) (*ZeroTrustPolicy, error) {
 	now := time.Now()
-	
+
 	// Create base policy
 	policy := &ZeroTrustPolicy{
-		ID:          fmt.Sprintf("policy-%s", definition.Metadata.Name),
-		Name:        definition.Metadata.Name,
-		Description: definition.Spec.Description,
-		Version:     definition.Metadata.Version,
-		CreatedBy:   definition.Metadata.CreatedBy,
-		CreatedAt:   definition.Metadata.CreatedAt,
-		UpdatedAt:   now,
+		ID:            fmt.Sprintf("policy-%s", definition.Metadata.Name),
+		Name:          definition.Metadata.Name,
+		Description:   definition.Spec.Description,
+		Version:       definition.Metadata.Version,
+		CreatedBy:     definition.Metadata.CreatedBy,
+		CreatedAt:     definition.Metadata.CreatedAt,
+		UpdatedAt:     now,
 		EffectiveFrom: now,
-		Status:      PolicyStatusActive,
-		Priority:    PolicyPriority(definition.Spec.Priority),
+		Status:        PolicyStatusActive,
+		Priority:      PolicyPriority(definition.Spec.Priority),
 	}
-	
+
 	// Set policy scope
 	policy.Scope = PolicyScope{
-		TenantIDs:     definition.Spec.Scope.Tenants,
-		Actions:       definition.Spec.Scope.Actions,
+		TenantIDs: definition.Spec.Scope.Tenants,
+		Actions:   definition.Spec.Scope.Actions,
 	}
-	
+
 	// Convert conditions
 	for _, condSpec := range definition.Spec.Scope.Conditions {
 		condition := PolicyCondition{
@@ -621,7 +623,7 @@ func (d *DefaultPolicyCompiler) Compile(definition *PolicyDefinition) (*ZeroTrus
 		}
 		policy.Scope.Conditions = append(policy.Scope.Conditions, condition)
 	}
-	
+
 	// Set enforcement mode
 	switch definition.Spec.Enforcement.Mode {
 	case "enforcing":
@@ -633,7 +635,7 @@ func (d *DefaultPolicyCompiler) Compile(definition *PolicyDefinition) (*ZeroTrus
 	default:
 		return nil, fmt.Errorf("invalid enforcement mode: %s", definition.Spec.Enforcement.Mode)
 	}
-	
+
 	// Compile rules
 	for _, ruleSpec := range definition.Spec.Rules {
 		switch ruleSpec.Type {
@@ -659,7 +661,7 @@ func (d *DefaultPolicyCompiler) Compile(definition *PolicyDefinition) (*ZeroTrus
 			return nil, fmt.Errorf("unsupported rule type: %s", ruleSpec.Type)
 		}
 	}
-	
+
 	// Set integration settings
 	integrationSpec := definition.Spec.Integration
 	if integrationSpec.RBAC != nil || integrationSpec.JIT != nil || integrationSpec.Risk != nil || integrationSpec.Tenant != nil {
@@ -667,48 +669,48 @@ func (d *DefaultPolicyCompiler) Compile(definition *PolicyDefinition) (*ZeroTrus
 			policy.RBACIntegration = &RBACPolicyIntegration{
 				RequireRBACValidation: true,
 				OverrideRBAC:          definition.Spec.Integration.RBAC.Override,
-				RBACWeight:           definition.Spec.Integration.RBAC.Weight,
+				RBACWeight:            definition.Spec.Integration.RBAC.Weight,
 			}
 		}
-		
+
 		if definition.Spec.Integration.JIT != nil && definition.Spec.Integration.JIT.Enabled {
 			policy.JITIntegration = &JITPolicyIntegration{
 				RequireJITValidation: true,
 				AllowJITOverride:     !definition.Spec.Integration.JIT.RequireApproval,
-				JITWeight:           definition.Spec.Integration.JIT.Weight,
+				JITWeight:            definition.Spec.Integration.JIT.Weight,
 			}
 		}
-		
+
 		if definition.Spec.Integration.Risk != nil && definition.Spec.Integration.Risk.Enabled {
 			policy.RiskIntegration = &RiskPolicyIntegration{
 				RequireRiskAssessment: true,
-				RiskThreshold:        definition.Spec.Integration.Risk.ThresholdOverride,
-				RiskWeight:           definition.Spec.Integration.Risk.Weight,
+				RiskThreshold:         definition.Spec.Integration.Risk.ThresholdOverride,
+				RiskWeight:            definition.Spec.Integration.Risk.Weight,
 			}
 		}
-		
+
 		if definition.Spec.Integration.Tenant != nil && definition.Spec.Integration.Tenant.Enabled {
 			policy.TenantIntegration = &TenantPolicyIntegration{
 				RequireTenantValidation: true,
 				EnforceTenantIsolation:  definition.Spec.Integration.Tenant.EnforceIsolation,
-				TenantWeight:           definition.Spec.Integration.Tenant.Weight,
+				TenantWeight:            definition.Spec.Integration.Tenant.Weight,
 			}
 		}
 	}
-	
+
 	return policy, nil
 }
 
 func (d *DefaultPolicyCompiler) compileAccessRule(spec PolicyRuleSpec) (*AccessRule, error) {
 	rule := &AccessRule{
-		ID:                    spec.ID,
-		Name:                  spec.Name,
-		Description:           spec.Description,
-		RequireExplicitGrant:  spec.RequireExplicitGrant,
-		RequireRevalidation:   spec.AlwaysValidate,
-		RevalidationInterval:  spec.ValidationInterval,
+		ID:                   spec.ID,
+		Name:                 spec.Name,
+		Description:          spec.Description,
+		RequireExplicitGrant: spec.RequireExplicitGrant,
+		RequireRevalidation:  spec.AlwaysValidate,
+		RevalidationInterval: spec.ValidationInterval,
 	}
-	
+
 	// Compile conditions
 	for _, condSpec := range spec.When {
 		condition := PolicyCondition{
@@ -719,7 +721,7 @@ func (d *DefaultPolicyCompiler) compileAccessRule(spec PolicyRuleSpec) (*AccessR
 		}
 		rule.Conditions = append(rule.Conditions, condition)
 	}
-	
+
 	// Set integration requirements based on action spec
 	if spec.Then.Integrations.RBAC != nil {
 		rule.RBACRequired = spec.Then.Integrations.RBAC.RequireValidation
@@ -733,20 +735,20 @@ func (d *DefaultPolicyCompiler) compileAccessRule(spec PolicyRuleSpec) (*AccessR
 	if spec.Then.Integrations.ContinuousAuth != nil {
 		rule.ContinuousAuthRequired = spec.Then.Integrations.ContinuousAuth.RequireContinuousValidation
 	}
-	
+
 	// Compile action
 	rule.AllowAction = PolicyAction{
 		Type:       PolicyActionType(spec.Then.Decision),
 		Parameters: make(map[string]interface{}),
 	}
-	
+
 	if spec.Else.Decision != "" {
 		rule.DenyAction = PolicyAction{
 			Type:       PolicyActionType(spec.Else.Decision),
 			Parameters: make(map[string]interface{}),
 		}
 	}
-	
+
 	return rule, nil
 }
 
@@ -756,10 +758,10 @@ func (d *DefaultPolicyCompiler) compileComplianceRule(spec PolicyRuleSpec) (*Com
 		Name:        spec.Name,
 		Description: spec.Description,
 	}
-	
+
 	// Implementation would parse compliance-specific rule details
 	// This is a stub for now
-	
+
 	return rule, nil
 }
 
@@ -769,9 +771,9 @@ func (d *DefaultPolicyCompiler) compileSecurityRule(spec PolicyRuleSpec) (*Secur
 		Name:        spec.Name,
 		Description: spec.Description,
 	}
-	
+
 	// Implementation would parse security-specific rule details
 	// This is a stub for now
-	
+
 	return rule, nil
 }

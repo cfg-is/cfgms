@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package config
 
 import (
@@ -14,14 +16,14 @@ import (
 
 func TestDefaultConfig_SecurityDefaults(t *testing.T) {
 	config := DefaultConfig()
-	
+
 	// Verify secure defaults
 	assert.NotNil(t, config)
-	
+
 	// Network security defaults
 	assert.Equal(t, "127.0.0.1:8080", config.ListenAddr,
 		"Should default to localhost binding for security")
-	
+
 	// Certificate security defaults
 	require.NotNil(t, config.Certificate)
 	assert.True(t, config.Certificate.EnableCertManagement,
@@ -30,7 +32,7 @@ func TestDefaultConfig_SecurityDefaults(t *testing.T) {
 		"Auto-generation should be enabled for security")
 	assert.True(t, config.Certificate.EnableAutoRenewal,
 		"Auto-renewal should be enabled for security")
-	
+
 	// Certificate validity defaults (security-appropriate)
 	assert.LessOrEqual(t, config.Certificate.ServerCertValidityDays, 365,
 		"Server certificates should have reasonable validity period")
@@ -38,7 +40,7 @@ func TestDefaultConfig_SecurityDefaults(t *testing.T) {
 		"Client certificates should have reasonable validity period")
 	assert.LessOrEqual(t, config.Certificate.RenewalThresholdDays, 30,
 		"Renewal threshold should be reasonable for security")
-	
+
 	// Server certificate security defaults
 	require.NotNil(t, config.Certificate.Server)
 	assert.NotEmpty(t, config.Certificate.Server.CommonName,
@@ -51,12 +53,12 @@ func TestDefaultConfig_SecurityDefaults(t *testing.T) {
 
 func TestLoad_EnvironmentVariableSecurityInjection(t *testing.T) {
 	// Test that environment variables can't be used for injection attacks
-	
+
 	tests := []struct {
-		name       string
-		envVar     string
-		envValue   string
-		testFunc   func(*testing.T, *Config)
+		name     string
+		envVar   string
+		envValue string
+		testFunc func(*testing.T, *Config)
 	}{
 		{
 			name:     "path traversal in listen addr",
@@ -140,7 +142,7 @@ func TestLoad_ConfigFileSecurityValidation(t *testing.T) {
 	originalDir, err := os.Getwd()
 	require.NoError(t, err)
 	defer func() { _ = os.Chdir(originalDir) }()
-	
+
 	err = os.Chdir(tempDir)
 	require.NoError(t, err)
 
@@ -240,7 +242,7 @@ certificate:
 					assert.Equal(t, 90, cfg.Certificate.ServerCertValidityDays)
 					assert.Equal(t, 30, cfg.Certificate.ClientCertValidityDays)
 					assert.Equal(t, 7, cfg.Certificate.RenewalThresholdDays)
-					
+
 					// Verify secure server certificate configuration
 					assert.Equal(t, "cfgms-controller.example.com", cfg.Certificate.Server.CommonName)
 					assert.Contains(t, cfg.Certificate.Server.DNSNames, "localhost")
@@ -255,7 +257,7 @@ listen_addr: "127.0.0.1:8080"
 invalid_yaml: [unclosed array
 data_dir: "test"
 `,
-			expectError: true,
+			expectError:    true,
 			securityChecks: nil, // No checks needed for error case
 		},
 	}
@@ -290,7 +292,7 @@ data_dir: "test"
 
 func TestConfig_SecurityValidationMethods(t *testing.T) {
 	// Test helper functions for validating security aspects of configuration
-	
+
 	tests := []struct {
 		name       string
 		config     *Config
@@ -334,11 +336,11 @@ func TestConfig_SecurityValidationMethods(t *testing.T) {
 				ListenAddr: "127.0.0.1:8443",
 				Certificate: &CertificateConfig{
 					EnableCertManagement:   true,
-					AutoGenerate:          true,
-					EnableAutoRenewal:     true,
+					AutoGenerate:           true,
+					EnableAutoRenewal:      true,
 					ServerCertValidityDays: 90,
 					ClientCertValidityDays: 30,
-					RenewalThresholdDays:  7,
+					RenewalThresholdDays:   7,
 				},
 			},
 			expectWarn: []string{}, // No warnings expected
@@ -371,7 +373,7 @@ func TestConfig_SecurityValidationMethods(t *testing.T) {
 
 func TestConfig_BooleanEnvironmentVariableParsing(t *testing.T) {
 	// Test security around boolean environment variable parsing
-	
+
 	tests := []struct {
 		name     string
 		envVar   string

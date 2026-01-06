@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package api
 
 import (
@@ -6,25 +8,26 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/cfgis/cfgms/features/modules/script"
 	"github.com/gorilla/mux"
+
+	"github.com/cfgis/cfgms/features/modules/script"
 )
 
 // ScriptExecutionInfo represents script execution information for API responses
 type ScriptExecutionInfo struct {
-	ID              string                     `json:"id"`
-	StewardID       string                     `json:"steward_id"`
-	ResourceID      string                     `json:"resource_id"`
-	ExecutionTime   time.Time                  `json:"execution_time"`
-	Duration        int64                      `json:"duration_ms"`
-	Status          script.ExecutionStatus     `json:"status"`
-	ExitCode        int                        `json:"exit_code"`
-	ErrorMessage    string                     `json:"error_message,omitempty"`
-	ScriptConfig    ScriptConfigInfo           `json:"script_config"`
-	Metrics         script.ExecutionMetrics    `json:"metrics"`
-	UserID          string                     `json:"user_id,omitempty"`
-	TenantID        string                     `json:"tenant_id,omitempty"`
-	CorrelationID   string                     `json:"correlation_id,omitempty"`
+	ID            string                  `json:"id"`
+	StewardID     string                  `json:"steward_id"`
+	ResourceID    string                  `json:"resource_id"`
+	ExecutionTime time.Time               `json:"execution_time"`
+	Duration      int64                   `json:"duration_ms"`
+	Status        script.ExecutionStatus  `json:"status"`
+	ExitCode      int                     `json:"exit_code"`
+	ErrorMessage  string                  `json:"error_message,omitempty"`
+	ScriptConfig  ScriptConfigInfo        `json:"script_config"`
+	Metrics       script.ExecutionMetrics `json:"metrics"`
+	UserID        string                  `json:"user_id,omitempty"`
+	TenantID      string                  `json:"tenant_id,omitempty"`
+	CorrelationID string                  `json:"correlation_id,omitempty"`
 }
 
 // ScriptConfigInfo represents sanitized script configuration for API responses
@@ -112,7 +115,7 @@ func (s *Server) handleGetScriptExecutions(w http.ResponseWriter, r *http.Reques
 	// TODO: Get script module instance for the steward
 	// This would need integration with the steward manager to get the script module
 	// For now, we'll return a placeholder response
-	
+
 	executions := []ScriptExecutionInfo{
 		{
 			ID:            "example-exec-1",
@@ -161,7 +164,7 @@ func (s *Server) handleGetScriptExecution(w http.ResponseWriter, r *http.Request
 
 	// TODO: Get specific execution by ID from script module
 	// For now, return a placeholder response
-	
+
 	execution := ScriptExecutionInfo{
 		ID:            executionID,
 		StewardID:     stewardID,
@@ -210,7 +213,7 @@ func (s *Server) handleGetScriptMetrics(w http.ResponseWriter, r *http.Request) 
 
 	// TODO: Get metrics from script module
 	// For now, return placeholder metrics
-	
+
 	metrics := ScriptMetricsInfo{
 		StewardID:       stewardID,
 		Since:           since,
@@ -243,7 +246,7 @@ func (s *Server) handleGetScriptStatus(w http.ResponseWriter, r *http.Request) {
 
 	// TODO: Get current script execution status from steward
 	// For now, return placeholder status
-	
+
 	status := map[string]interface{}{
 		"steward_id":        stewardID,
 		"script_capability": "enabled",
@@ -256,11 +259,11 @@ func (s *Server) handleGetScriptStatus(w http.ResponseWriter, r *http.Request) {
 			},
 		},
 		"last_execution": map[string]interface{}{
-			"resource_id":    "health-check",
-			"status":         "completed",
-			"exit_code":      0,
-			"completed_at":   time.Now().Add(-10 * time.Minute),
-			"duration_ms":    2340,
+			"resource_id":  "health-check",
+			"status":       "completed",
+			"exit_code":    0,
+			"completed_at": time.Now().Add(-10 * time.Minute),
+			"duration_ms":  2340,
 		},
 		"capabilities": map[string]interface{}{
 			"supported_shells": []string{"bash", "sh", "python"},
@@ -294,16 +297,15 @@ func (s *Server) handlePostScriptRetry(w http.ResponseWriter, r *http.Request) {
 	// 1. Get the original execution configuration
 	// 2. Re-execute the script with the same parameters
 	// 3. Return the new execution ID
-	
+
 	result := map[string]interface{}{
 		"original_execution_id": executionID,
 		"new_execution_id":      fmt.Sprintf("%s-retry-1", executionID),
-		"status":               "initiated",
-		"retry_count":          1,
-		"initiated_at":         time.Now(),
+		"status":                "initiated",
+		"retry_count":           1,
+		"initiated_at":          time.Now(),
 	}
 
 	s.logger.Info("Initiated script retry", "steward_id", stewardID, "execution_id", executionID)
 	s.writeSuccessResponse(w, result)
 }
-

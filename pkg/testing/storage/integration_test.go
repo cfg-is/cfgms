@@ -1,3 +1,7 @@
+//go:build integration
+
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // +build integration
 
 // Package storage provides comprehensive integration testing for storage providers
@@ -15,14 +19,14 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 
 	// Import storage providers for integration testing
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 )
 
 func TestStorageProviderIntegration_WithDockerEnvironment(t *testing.T) {
 	// This test requires Docker environment to be running
 	// Run with: make test-integration-setup && go test -v -tags=integration ./pkg/testing/storage/...
-	
+
 	if !isDockerEnvironmentAvailable() {
 		if isInfrastructureRequired() {
 			t.Fatal("REQUIRED INFRASTRUCTURE MISSING: Docker integration environment not available in CI/integration mode - run 'make test-integration-setup'")
@@ -119,7 +123,7 @@ func TestStorageProviderIntegration_LocalFallback(t *testing.T) {
 func isDockerEnvironmentAvailable() bool {
 	requiredEnvVars := []string{
 		"CFGMS_TEST_DB_PASSWORD",
-		"CFGMS_TEST_DB_HOST", 
+		"CFGMS_TEST_DB_HOST",
 		"CFGMS_TEST_GITEA_URL",
 		"CFGMS_TEST_GITEA_USER",
 		"CFGMS_TEST_GITEA_PASSWORD",

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package integration
 
 import (
@@ -18,19 +20,19 @@ import (
 
 // EnhancedAccessControlManager provides unified access control combining RBAC, JIT, Risk-based, Continuous, and Zero-Trust controls
 type EnhancedAccessControlManager struct {
-	rbacManager               rbac.RBACManager
-	tenantManager            *tenant.Manager
-	tenantSecurity           *security.TenantSecurityMiddleware
-	jitIntegrationManager    *jit.JITIntegrationManager
-	riskIntegrationManager   *risk.RiskBasedAccessIntegration
-	continuousAuthEngine     *continuous.ContinuousAuthorizationEngine
-	zeroTrustPolicyEngine    *zerotrust.ZeroTrustPolicyEngine
-	integrationMode          IntegrationMode
-	zeroTrustPolicyMode      ZeroTrustPolicyMode
-	fallbackBehavior         FallbackBehavior
-	performanceConfig        *PerformanceConfig
-	enableContinuousAuth     bool
-	enableZeroTrustPolicies  bool
+	rbacManager             rbac.RBACManager
+	tenantManager           *tenant.Manager
+	tenantSecurity          *security.TenantSecurityMiddleware
+	jitIntegrationManager   *jit.JITIntegrationManager
+	riskIntegrationManager  *risk.RiskBasedAccessIntegration
+	continuousAuthEngine    *continuous.ContinuousAuthorizationEngine
+	zeroTrustPolicyEngine   *zerotrust.ZeroTrustPolicyEngine
+	integrationMode         IntegrationMode
+	zeroTrustPolicyMode     ZeroTrustPolicyMode
+	fallbackBehavior        FallbackBehavior
+	performanceConfig       *PerformanceConfig
+	enableContinuousAuth    bool
+	enableZeroTrustPolicies bool
 }
 
 // IntegrationMode defines how the different access control systems are integrated
@@ -38,13 +40,13 @@ type IntegrationMode string
 
 const (
 	// IntegrationModeSequential evaluates RBAC -> JIT -> Risk in sequence
-	IntegrationModeSequential    IntegrationMode = "sequential"
+	IntegrationModeSequential IntegrationMode = "sequential"
 	// IntegrationModeParallel evaluates all systems in parallel and combines results
-	IntegrationModeParallel      IntegrationMode = "parallel"
+	IntegrationModeParallel IntegrationMode = "parallel"
 	// IntegrationModeRiskFirst evaluates risk first to determine appropriate controls
-	IntegrationModeRiskFirst     IntegrationMode = "risk_first"
+	IntegrationModeRiskFirst IntegrationMode = "risk_first"
 	// IntegrationModeContinuous enables per-action continuous authorization
-	IntegrationModeContinuous    IntegrationMode = "continuous"
+	IntegrationModeContinuous IntegrationMode = "continuous"
 	// IntegrationModeZeroTrustFirst evaluates zero-trust policies before other controls
 	IntegrationModeZeroTrustFirst IntegrationMode = "zero_trust_first"
 	// IntegrationModeZeroTrustAlways evaluates zero-trust policies with every access decision
@@ -56,19 +58,19 @@ type ZeroTrustPolicyMode string
 
 const (
 	// ZeroTrustPolicyModeDisabled disables zero-trust policy evaluation
-	ZeroTrustPolicyModeDisabled  ZeroTrustPolicyMode = "disabled"
+	ZeroTrustPolicyModeDisabled ZeroTrustPolicyMode = "disabled"
 	// ZeroTrustPolicyModeAugmented uses zero-trust policies to augment existing controls
 	// All existing controls AND zero-trust policies must pass
 	ZeroTrustPolicyModeAugmented ZeroTrustPolicyMode = "augmented"
 	// ZeroTrustPolicyModeEnforced uses zero-trust policies as the primary authorization
 	// Zero-trust policies override traditional access control decisions
-	ZeroTrustPolicyModeEnforced  ZeroTrustPolicyMode = "enforced"
+	ZeroTrustPolicyModeEnforced ZeroTrustPolicyMode = "enforced"
 	// ZeroTrustPolicyModeAuditing logs zero-trust policy decisions but doesn't enforce them
 	// Allows comparison between traditional and zero-trust decisions
-	ZeroTrustPolicyModeAuditing  ZeroTrustPolicyMode = "auditing"
+	ZeroTrustPolicyModeAuditing ZeroTrustPolicyMode = "auditing"
 	// ZeroTrustPolicyModeAdaptive dynamically adjusts enforcement based on risk assessment
 	// Low risk: auditing, Medium risk: augmented, High risk: enforced
-	ZeroTrustPolicyModeAdaptive  ZeroTrustPolicyMode = "adaptive"
+	ZeroTrustPolicyModeAdaptive ZeroTrustPolicyMode = "adaptive"
 )
 
 // FallbackBehavior defines behavior when components fail
@@ -76,106 +78,106 @@ type FallbackBehavior string
 
 const (
 	// FallbackBehaviorDeny denies access if any component fails
-	FallbackBehaviorDeny    FallbackBehavior = "deny"
+	FallbackBehaviorDeny FallbackBehavior = "deny"
 	// FallbackBehaviorAllow allows access if core RBAC succeeds, even if other components fail
-	FallbackBehaviorAllow   FallbackBehavior = "allow"
+	FallbackBehaviorAllow FallbackBehavior = "allow"
 	// FallbackBehaviorDegrade gracefully degrades to simpler access control on component failure
 	FallbackBehaviorDegrade FallbackBehavior = "degrade"
 )
 
 // PerformanceConfig defines performance-related configuration
 type PerformanceConfig struct {
-	MaxProcessingTime         time.Duration `json:"max_processing_time"`
-	EnableCaching             bool          `json:"enable_caching"`
-	CacheTimeout              time.Duration `json:"cache_timeout"`
-	EnableParallelEval        bool          `json:"enable_parallel_eval"`
-	RiskAssessmentTimeout     time.Duration `json:"risk_assessment_timeout"`
-	ContinuousAuthTimeout     time.Duration `json:"continuous_auth_timeout"`
-	MaxContinuousAuthLatency  time.Duration `json:"max_continuous_auth_latency"`
+	MaxProcessingTime        time.Duration `json:"max_processing_time"`
+	EnableCaching            bool          `json:"enable_caching"`
+	CacheTimeout             time.Duration `json:"cache_timeout"`
+	EnableParallelEval       bool          `json:"enable_parallel_eval"`
+	RiskAssessmentTimeout    time.Duration `json:"risk_assessment_timeout"`
+	ContinuousAuthTimeout    time.Duration `json:"continuous_auth_timeout"`
+	MaxContinuousAuthLatency time.Duration `json:"max_continuous_auth_latency"`
 }
 
 // EnhancedAccessResponse provides comprehensive access control results
 type EnhancedAccessResponse struct {
 	// Standard access response
 	StandardResponse *common.AccessResponse `json:"standard_response"`
-	
+
 	// Component-specific results
-	RBACResult         *RBACValidationResult              `json:"rbac_result"`
-	TenantSecurity     *security.TenantSecurityValidationResult `json:"tenant_security"`
-	JITAccess          *jit.JITAccessValidationResult     `json:"jit_access"`
-	RiskAssessment     *risk.RiskAssessmentResult         `json:"risk_assessment"`
-	ContinuousAuth     *ContinuousAuthValidationResult    `json:"continuous_auth"`
-	ZeroTrustPolicies  *ZeroTrustPolicyValidationResult   `json:"zero_trust_policies"`
-	
+	RBACResult        *RBACValidationResult                    `json:"rbac_result"`
+	TenantSecurity    *security.TenantSecurityValidationResult `json:"tenant_security"`
+	JITAccess         *jit.JITAccessValidationResult           `json:"jit_access"`
+	RiskAssessment    *risk.RiskAssessmentResult               `json:"risk_assessment"`
+	ContinuousAuth    *ContinuousAuthValidationResult          `json:"continuous_auth"`
+	ZeroTrustPolicies *ZeroTrustPolicyValidationResult         `json:"zero_trust_policies"`
+
 	// Applied controls and recommendations
-	AppliedControls    []risk.AdaptiveControlInstance     `json:"applied_controls"`
-	Recommendations    []AccessRecommendation             `json:"recommendations"`
-	
+	AppliedControls []risk.AdaptiveControlInstance `json:"applied_controls"`
+	Recommendations []AccessRecommendation         `json:"recommendations"`
+
 	// Processing metadata
-	ProcessingTime     time.Duration                      `json:"processing_time"`
-	ComponentLatency   map[string]time.Duration           `json:"component_latency"`
-	FallbacksUsed      []string                          `json:"fallbacks_used"`
-	
+	ProcessingTime   time.Duration            `json:"processing_time"`
+	ComponentLatency map[string]time.Duration `json:"component_latency"`
+	FallbacksUsed    []string                 `json:"fallbacks_used"`
+
 	// Risk and compliance metadata
-	RiskFactorsSummary *risk.RiskFactorsSummary           `json:"risk_factors_summary"`
-	ComplianceStatus   *ComplianceStatus                  `json:"compliance_status"`
+	RiskFactorsSummary *risk.RiskFactorsSummary `json:"risk_factors_summary"`
+	ComplianceStatus   *ComplianceStatus        `json:"compliance_status"`
 }
 
 // RBACValidationResult contains RBAC-specific validation results
 type RBACValidationResult struct {
-	HasPermission      bool                             `json:"has_permission"`
-	EffectiveRoles     []string                         `json:"effective_roles"`
-	PermissionSource   string                           `json:"permission_source"` // "direct", "role", "inheritance"
-	HierarchyPath      []string                         `json:"hierarchy_path"`
-	ValidationTime     time.Time                        `json:"validation_time"`
+	HasPermission    bool      `json:"has_permission"`
+	EffectiveRoles   []string  `json:"effective_roles"`
+	PermissionSource string    `json:"permission_source"` // "direct", "role", "inheritance"
+	HierarchyPath    []string  `json:"hierarchy_path"`
+	ValidationTime   time.Time `json:"validation_time"`
 }
 
 // ContinuousAuthValidationResult contains continuous authorization-specific validation results
 type ContinuousAuthValidationResult struct {
-	DecisionID          string                           `json:"decision_id"`
-	SessionID           string                           `json:"session_id"`
-	AuthorizationMode   continuous.AuthorizationMode     `json:"authorization_mode"`
-	PolicyEvaluation    *continuous.PolicyEvaluationResult `json:"policy_evaluation"`
-	ContextStatus       *continuous.ContextStatus        `json:"context_status"`
-	CacheHit            bool                             `json:"cache_hit"`
-	LatencyMs           int                              `json:"latency_ms"`
-	ValidationTime      time.Time                        `json:"validation_time"`
-	NextRevalidation    time.Time                        `json:"next_revalidation"`
+	DecisionID        string                             `json:"decision_id"`
+	SessionID         string                             `json:"session_id"`
+	AuthorizationMode continuous.AuthorizationMode       `json:"authorization_mode"`
+	PolicyEvaluation  *continuous.PolicyEvaluationResult `json:"policy_evaluation"`
+	ContextStatus     *continuous.ContextStatus          `json:"context_status"`
+	CacheHit          bool                               `json:"cache_hit"`
+	LatencyMs         int                                `json:"latency_ms"`
+	ValidationTime    time.Time                          `json:"validation_time"`
+	NextRevalidation  time.Time                          `json:"next_revalidation"`
 }
 
 // ZeroTrustPolicyValidationResult contains zero-trust policy-specific validation results
 type ZeroTrustPolicyValidationResult struct {
-	DecisionID          string                                  `json:"decision_id"`
-	PolicyMode          ZeroTrustPolicyMode                     `json:"policy_mode"`
-	TraditionalGranted  bool                                    `json:"traditional_granted"`
-	ZeroTrustGranted    bool                                    `json:"zero_trust_granted"`
-	FinalDecision       bool                                    `json:"final_decision"`
-	PoliciesEvaluated   []string                                `json:"policies_evaluated"`
-	PolicyResults       []*zerotrust.PolicyEvaluationResult    `json:"policy_results"`
-	ComplianceFrameworks []string                               `json:"compliance_frameworks"`
-	TrustScore          float64                                 `json:"trust_score"`
-	RiskFactors         []string                                `json:"risk_factors"`
-	ProcessingTime      time.Duration                           `json:"processing_time"`
-	ValidationTime      time.Time                               `json:"validation_time"`
-	Reason              string                                  `json:"reason"`
-	Recommendations     []string                                `json:"recommendations"`
+	DecisionID           string                              `json:"decision_id"`
+	PolicyMode           ZeroTrustPolicyMode                 `json:"policy_mode"`
+	TraditionalGranted   bool                                `json:"traditional_granted"`
+	ZeroTrustGranted     bool                                `json:"zero_trust_granted"`
+	FinalDecision        bool                                `json:"final_decision"`
+	PoliciesEvaluated    []string                            `json:"policies_evaluated"`
+	PolicyResults        []*zerotrust.PolicyEvaluationResult `json:"policy_results"`
+	ComplianceFrameworks []string                            `json:"compliance_frameworks"`
+	TrustScore           float64                             `json:"trust_score"`
+	RiskFactors          []string                            `json:"risk_factors"`
+	ProcessingTime       time.Duration                       `json:"processing_time"`
+	ValidationTime       time.Time                           `json:"validation_time"`
+	Reason               string                              `json:"reason"`
+	Recommendations      []string                            `json:"recommendations"`
 }
 
 // AccessRecommendation provides recommendations for improving access control
 type AccessRecommendation struct {
 	Type        RecommendationType `json:"type"`
-	Priority    string            `json:"priority"`
-	Description string            `json:"description"`
-	Action      string            `json:"action"`
-	Rationale   string            `json:"rationale"`
+	Priority    string             `json:"priority"`
+	Description string             `json:"description"`
+	Action      string             `json:"action"`
+	Rationale   string             `json:"rationale"`
 }
 
 // ComplianceStatus provides compliance-related status information
 type ComplianceStatus struct {
-	OverallCompliant  bool              `json:"overall_compliant"`
-	Frameworks        map[string]bool   `json:"frameworks"` // framework -> compliant
-	Violations        []string          `json:"violations"`
-	RequiredActions   []string          `json:"required_actions"`
+	OverallCompliant bool            `json:"overall_compliant"`
+	Frameworks       map[string]bool `json:"frameworks"` // framework -> compliant
+	Violations       []string        `json:"violations"`
+	RequiredActions  []string        `json:"required_actions"`
 }
 
 // RecommendationType defines types of access recommendations
@@ -195,24 +197,24 @@ func NewEnhancedAccessControlManager(
 	tenantManager *tenant.Manager,
 	tenantSecurity *security.TenantSecurityMiddleware,
 ) *EnhancedAccessControlManager {
-	
+
 	// Initialize component managers
 	jitIntegrationManager := jit.NewJITIntegrationManager(rbacManager, tenantManager, tenantSecurity)
 	riskIntegrationManager := risk.NewRiskBasedAccessIntegration(rbacManager, jitIntegrationManager, tenantSecurity)
-	
+
 	return &EnhancedAccessControlManager{
 		rbacManager:             rbacManager,
-		tenantManager:          tenantManager,
-		tenantSecurity:         tenantSecurity,
-		jitIntegrationManager:  jitIntegrationManager,
-		riskIntegrationManager: riskIntegrationManager,
-		continuousAuthEngine:   nil, // Will be set when continuous mode is enabled
-		zeroTrustPolicyEngine:  nil, // Will be set when zero-trust mode is enabled
-		integrationMode:        IntegrationModeSequential, // Default to sequential
-		zeroTrustPolicyMode:    ZeroTrustPolicyModeDisabled, // Default to disabled
-		fallbackBehavior:       FallbackBehaviorDegrade,   // Default to graceful degradation
-		enableContinuousAuth:   false,                     // Default to disabled
-		enableZeroTrustPolicies: false,                    // Default to disabled
+		tenantManager:           tenantManager,
+		tenantSecurity:          tenantSecurity,
+		jitIntegrationManager:   jitIntegrationManager,
+		riskIntegrationManager:  riskIntegrationManager,
+		continuousAuthEngine:    nil,                         // Will be set when continuous mode is enabled
+		zeroTrustPolicyEngine:   nil,                         // Will be set when zero-trust mode is enabled
+		integrationMode:         IntegrationModeSequential,   // Default to sequential
+		zeroTrustPolicyMode:     ZeroTrustPolicyModeDisabled, // Default to disabled
+		fallbackBehavior:        FallbackBehaviorDegrade,     // Default to graceful degradation
+		enableContinuousAuth:    false,                       // Default to disabled
+		enableZeroTrustPolicies: false,                       // Default to disabled
 		performanceConfig: &PerformanceConfig{
 			MaxProcessingTime:        5 * time.Second,
 			EnableCaching:            true,
@@ -237,7 +239,7 @@ func (eacm *EnhancedAccessControlManager) EnableZeroTrustPolicies(engine *zerotr
 	eacm.zeroTrustPolicyEngine = engine
 	eacm.zeroTrustPolicyMode = mode
 	eacm.enableZeroTrustPolicies = (mode != ZeroTrustPolicyModeDisabled && engine != nil)
-	
+
 	// Adjust integration mode based on zero-trust policy mode
 	if eacm.enableZeroTrustPolicies {
 		switch mode {
@@ -278,7 +280,7 @@ func (eacm *EnhancedAccessControlManager) Initialize(ctx context.Context) error 
 // CheckAccess performs comprehensive access control evaluation
 func (eacm *EnhancedAccessControlManager) CheckAccess(ctx context.Context, request *common.AccessRequest) (*EnhancedAccessResponse, error) {
 	startTime := time.Now()
-	
+
 	// Create response structure
 	response := &EnhancedAccessResponse{
 		ComponentLatency: make(map[string]time.Duration),
@@ -332,7 +334,7 @@ func (eacm *EnhancedAccessControlManager) CheckAccess(ctx context.Context, reque
 
 // evaluateSequential performs sequential evaluation: RBAC -> JIT -> Risk
 func (eacm *EnhancedAccessControlManager) evaluateSequential(ctx context.Context, request *common.AccessRequest, response *EnhancedAccessResponse) error {
-	
+
 	// Step 1: Core RBAC evaluation
 	rbacStart := time.Now()
 	rbacResult, err := eacm.evaluateRBACAccess(ctx, request)
@@ -372,7 +374,7 @@ func (eacm *EnhancedAccessControlManager) evaluateSequential(ctx context.Context
 	if response.StandardResponse != nil && response.StandardResponse.Granted {
 		riskCtx, cancel := context.WithTimeout(ctx, eacm.performanceConfig.RiskAssessmentTimeout)
 		defer cancel()
-		
+
 		riskResponse, err := eacm.riskIntegrationManager.EnhancedRiskAccessCheck(riskCtx, request)
 		if err != nil {
 			// Risk assessment failure handling based on fallback behavior
@@ -432,11 +434,11 @@ func (eacm *EnhancedAccessControlManager) evaluateRiskFirst(ctx context.Context,
 		return eacm.evaluateSequential(ctx, request, response)
 	}
 	response.ComponentLatency["risk"] = time.Since(riskStart)
-	
+
 	// Store risk information in the response structure
 	// Note: Would need to map from EnhancedRiskAccessResponse to appropriate response fields
 
-	// Step 2: Apply appropriate access control rigor based on risk level  
+	// Step 2: Apply appropriate access control rigor based on risk level
 	switch riskResponse.RiskLevel {
 	case "minimal", "low":
 		// Low risk - streamlined access control
@@ -459,7 +461,7 @@ func (eacm *EnhancedAccessControlManager) evaluateContinuous(ctx context.Context
 	}
 
 	continuousStart := time.Now()
-	
+
 	// Convert access request to continuous authorization request
 	continuousRequest := &continuous.ContinuousAuthRequest{
 		AccessRequest:   request,
@@ -485,15 +487,15 @@ func (eacm *EnhancedAccessControlManager) evaluateContinuous(ctx context.Context
 
 	// Build continuous auth validation result
 	response.ContinuousAuth = &ContinuousAuthValidationResult{
-		DecisionID:          continuousResponse.DecisionID,
-		SessionID:           continuousRequest.SessionID,
-		AuthorizationMode:   continuous.AuthorizationModeContinuous,
-		PolicyEvaluation:    continuousResponse.PolicyEvaluation,
-		ContextStatus:       continuousResponse.ContextStatus,
-		CacheHit:            continuousResponse.CacheHit,
-		LatencyMs:           int(response.ComponentLatency["continuous"].Milliseconds()),
-		ValidationTime:      time.Now(),
-		NextRevalidation:    continuousResponse.ValidUntil,
+		DecisionID:        continuousResponse.DecisionID,
+		SessionID:         continuousRequest.SessionID,
+		AuthorizationMode: continuous.AuthorizationModeContinuous,
+		PolicyEvaluation:  continuousResponse.PolicyEvaluation,
+		ContextStatus:     continuousResponse.ContextStatus,
+		CacheHit:          continuousResponse.CacheHit,
+		LatencyMs:         int(response.ComponentLatency["continuous"].Milliseconds()),
+		ValidationTime:    time.Now(),
+		NextRevalidation:  continuousResponse.ValidUntil,
 	}
 
 	// Set standard response from continuous authorization
@@ -504,7 +506,7 @@ func (eacm *EnhancedAccessControlManager) evaluateContinuous(ctx context.Context
 		// Note: Type conversion needed between continuous.RiskLevel and risk.RiskLevel
 		// Use the actual RiskScore field and CurrentRiskLevel
 		response.RiskAssessment = &risk.RiskAssessmentResult{
-			RiskLevel:    risk.RiskLevel(continuousResponse.RiskAssessment.CurrentRiskLevel),
+			RiskLevel: risk.RiskLevel(continuousResponse.RiskAssessment.CurrentRiskLevel),
 		}
 	}
 
@@ -524,11 +526,11 @@ func (eacm *EnhancedAccessControlManager) evaluateContinuous(ctx context.Context
 		response.AppliedControls = make([]risk.AdaptiveControlInstance, len(continuousResponse.AdaptiveControls))
 		for i, control := range continuousResponse.AdaptiveControls {
 			response.AppliedControls[i] = risk.AdaptiveControlInstance{
-				ID:          control.ID,
+				ID:           control.ID,
 				DefinitionID: control.Type, // Map Type to DefinitionID
-				Status:      risk.ControlStatus(control.Status),
-				AppliedAt:   control.AppliedAt,
-				Parameters:  control.Parameters,
+				Status:       risk.ControlStatus(control.Status),
+				AppliedAt:    control.AppliedAt,
+				Parameters:   control.Parameters,
 			}
 		}
 	}
@@ -564,8 +566,8 @@ func (eacm *EnhancedAccessControlManager) evaluateStreamlined(ctx context.Contex
 		}
 	} else {
 		response.StandardResponse = &common.AccessResponse{
-			Granted:   false,
-			Reason:    "Access denied by RBAC",
+			Granted: false,
+			Reason:  "Access denied by RBAC",
 		}
 	}
 
@@ -725,8 +727,8 @@ func (eacm *EnhancedAccessControlManager) handleEvaluationError(ctx context.Cont
 		// Implement graceful degradation
 		response.FallbacksUsed = append(response.FallbacksUsed, "graceful_degradation")
 		response.StandardResponse = &common.AccessResponse{
-			Granted:   false,
-			Reason:    "Access denied due to system degradation",
+			Granted: false,
+			Reason:  "Access denied due to system degradation",
 		}
 		return response, nil
 	}
@@ -744,7 +746,7 @@ func (eacm *EnhancedAccessControlManager) applyConservativeRiskControls(response
 		Parameters: map[string]interface{}{
 			"monitoring_level": "enhanced",
 			"session_timeout":  15, // 15 minutes
-			"reason":          "risk_assessment_fallback",
+			"reason":           "risk_assessment_fallback",
 		},
 	}
 	response.AppliedControls = append(response.AppliedControls, conservativeControl)
@@ -758,14 +760,14 @@ func (eacm *EnhancedAccessControlManager) evaluateZeroTrustPolicies(ctx context.
 
 	// Convert common.AccessRequest to zerotrust.ZeroTrustAccessRequest
 	zeroTrustRequest := &zerotrust.ZeroTrustAccessRequest{
-		AccessRequest:    request,
-		RequestID:        fmt.Sprintf("integration-%d", time.Now().UnixNano()),
-		RequestTime:      time.Now(),
-		SubjectType:      zerotrust.SubjectTypeUser, // Default, could be enhanced based on context
-		ResourceType:     extractResourceType(request.ResourceId),
-		SourceSystem:     "enhanced-access-control",
-		RequestSource:    zerotrust.RequestSourceSystem,
-		Priority:         zerotrust.RequestPriorityNormal,
+		AccessRequest: request,
+		RequestID:     fmt.Sprintf("integration-%d", time.Now().UnixNano()),
+		RequestTime:   time.Now(),
+		SubjectType:   zerotrust.SubjectTypeUser, // Default, could be enhanced based on context
+		ResourceType:  extractResourceType(request.ResourceId),
+		SourceSystem:  "enhanced-access-control",
+		RequestSource: zerotrust.RequestSourceSystem,
+		Priority:      zerotrust.RequestPriorityNormal,
 	}
 
 	// Extract environmental context from request
@@ -773,12 +775,12 @@ func (eacm *EnhancedAccessControlManager) evaluateZeroTrustPolicies(ctx context.
 		zeroTrustRequest.EnvironmentContext = &zerotrust.EnvironmentContext{
 			IPAddress: request.Context["source_ip"],
 		}
-		
+
 		zeroTrustRequest.SecurityContext = &zerotrust.SecurityContext{
 			AuthenticationMethod: request.Context["auth_method"],
-			TrustLevel:          zerotrust.TrustLevelMedium, // Default trust level
+			TrustLevel:           zerotrust.TrustLevelMedium, // Default trust level
 		}
-		
+
 		// Set MFA verified if available
 		if mfaStr := request.Context["mfa_verified"]; mfaStr == "true" {
 			zeroTrustRequest.SecurityContext.MFAVerified = true
@@ -793,20 +795,20 @@ func (eacm *EnhancedAccessControlManager) evaluateZeroTrustPolicies(ctx context.
 
 	// Build validation result
 	result := &ZeroTrustPolicyValidationResult{
-		DecisionID:          zeroTrustRequest.RequestID,
-		PolicyMode:          eacm.zeroTrustPolicyMode,
-		TraditionalGranted:  traditionalGranted,
-		ZeroTrustGranted:    zeroTrustResponse.Granted,
-		FinalDecision:       false, // Will be set by combineZeroTrustDecision
-		PoliciesEvaluated:   zeroTrustResponse.PoliciesEvaluated,
-		PolicyResults:       nil, // Would be populated from policy evaluation details
+		DecisionID:           zeroTrustRequest.RequestID,
+		PolicyMode:           eacm.zeroTrustPolicyMode,
+		TraditionalGranted:   traditionalGranted,
+		ZeroTrustGranted:     zeroTrustResponse.Granted,
+		FinalDecision:        false, // Will be set by combineZeroTrustDecision
+		PoliciesEvaluated:    zeroTrustResponse.PoliciesEvaluated,
+		PolicyResults:        nil, // Would be populated from policy evaluation details
 		ComplianceFrameworks: extractComplianceFrameworks(zeroTrustResponse),
-		TrustScore:          calculateTrustScore(zeroTrustResponse),
-		RiskFactors:         extractRiskFactors(zeroTrustResponse),
-		ProcessingTime:      zeroTrustResponse.ProcessingTime,
-		ValidationTime:      time.Now(),
-		Reason:              zeroTrustResponse.Reason,
-		Recommendations:     generateZeroTrustRecommendations(zeroTrustResponse),
+		TrustScore:           calculateTrustScore(zeroTrustResponse),
+		RiskFactors:          extractRiskFactors(zeroTrustResponse),
+		ProcessingTime:       zeroTrustResponse.ProcessingTime,
+		ValidationTime:       time.Now(),
+		Reason:               zeroTrustResponse.Reason,
+		Recommendations:      generateZeroTrustRecommendations(zeroTrustResponse),
 	}
 
 	return result, nil
@@ -899,11 +901,11 @@ func (eacm *EnhancedAccessControlManager) applyConservativeZeroTrustControls(res
 		Status:       risk.ControlStatusActive,
 		AppliedAt:    time.Now(),
 		Parameters: map[string]interface{}{
-			"monitoring_level":    "comprehensive",
-			"session_timeout":     10, // 10 minutes
-			"continuous_eval":     true,
-			"reason":             "zero_trust_evaluation_fallback",
-			"requires_mfa":       true,
+			"monitoring_level": "comprehensive",
+			"session_timeout":  10, // 10 minutes
+			"continuous_eval":  true,
+			"reason":           "zero_trust_evaluation_fallback",
+			"requires_mfa":     true,
 		},
 	}
 	response.AppliedControls = append(response.AppliedControls, conservativeControl)
@@ -911,7 +913,7 @@ func (eacm *EnhancedAccessControlManager) applyConservativeZeroTrustControls(res
 
 func (eacm *EnhancedAccessControlManager) generateRecommendations(ctx context.Context, request *common.AccessRequest, response *EnhancedAccessResponse) {
 	// Generate recommendations based on evaluation results
-	
+
 	// Role optimization recommendations
 	if response.RBACResult != nil && len(response.RBACResult.EffectiveRoles) > 5 {
 		response.Recommendations = append(response.Recommendations, AccessRecommendation{
@@ -963,17 +965,17 @@ func (eacm *EnhancedAccessControlManager) UpdatePerformanceConfig(config *Perfor
 // GetIntegrationStatus returns the current status of all integration components
 func (eacm *EnhancedAccessControlManager) GetIntegrationStatus(ctx context.Context) map[string]interface{} {
 	return map[string]interface{}{
-		"integration_mode":        eacm.integrationMode,
-		"zero_trust_policy_mode":  eacm.zeroTrustPolicyMode,
-		"fallback_behavior":       eacm.fallbackBehavior,
-		"performance_config":      eacm.performanceConfig,
+		"integration_mode":       eacm.integrationMode,
+		"zero_trust_policy_mode": eacm.zeroTrustPolicyMode,
+		"fallback_behavior":      eacm.fallbackBehavior,
+		"performance_config":     eacm.performanceConfig,
 		"components": map[string]bool{
-			"rbac_manager":          eacm.rbacManager != nil,
-			"jit_integration":       eacm.jitIntegrationManager != nil,
-			"risk_integration":      eacm.riskIntegrationManager != nil,
-			"tenant_security":       eacm.tenantSecurity != nil,
-			"continuous_auth":       eacm.continuousAuthEngine != nil,
-			"zero_trust_policies":   eacm.zeroTrustPolicyEngine != nil,
+			"rbac_manager":        eacm.rbacManager != nil,
+			"jit_integration":     eacm.jitIntegrationManager != nil,
+			"risk_integration":    eacm.riskIntegrationManager != nil,
+			"tenant_security":     eacm.tenantSecurity != nil,
+			"continuous_auth":     eacm.continuousAuthEngine != nil,
+			"zero_trust_policies": eacm.zeroTrustPolicyEngine != nil,
 		},
 		"continuous_auth_enabled":     eacm.enableContinuousAuth,
 		"zero_trust_policies_enabled": eacm.enableZeroTrustPolicies,
@@ -1018,12 +1020,12 @@ func extractSessionID(ctx context.Context, request *common.AccessRequest) string
 	if sessionID, exists := request.Context["session_id"]; exists {
 		return sessionID
 	}
-	
+
 	// Try to get from context metadata
 	if sessionID := getSessionIDFromContext(ctx); sessionID != "" {
 		return sessionID
 	}
-	
+
 	// Generate a session ID if none exists
 	return fmt.Sprintf("session-%s-%d", request.SubjectId, time.Now().UnixNano())
 }
@@ -1034,7 +1036,6 @@ func getSessionIDFromContext(ctx context.Context) string {
 	// This is a placeholder - real implementation would depend on how session ID is stored in context
 	return ""
 }
-
 
 // convertPolicyViolations converts continuous auth policy violations to compliance violations
 func convertPolicyViolations(policyViolations []continuous.PolicyViolation) []string {
@@ -1050,14 +1051,14 @@ func extractResourceType(resourceID string) string {
 	if resourceID == "" {
 		return "unknown"
 	}
-	
+
 	// Simple heuristic: take the first part before a dot or slash
 	for _, sep := range []string{".", "/", ":"} {
 		if idx := strings.Index(resourceID, sep); idx != -1 {
 			return resourceID[:idx]
 		}
 	}
-	
+
 	return resourceID
 }
 
@@ -1090,14 +1091,14 @@ func extractRiskFactors(response *zerotrust.ZeroTrustAccessResponse) []string {
 // generateZeroTrustRecommendations generates recommendations based on zero-trust evaluation
 func generateZeroTrustRecommendations(response *zerotrust.ZeroTrustAccessResponse) []string {
 	recommendations := make([]string, 0)
-	
+
 	if !response.Granted {
 		recommendations = append(recommendations, "Review zero-trust policy compliance")
 	}
-	
+
 	if response.ProcessingTime > 5*time.Millisecond {
 		recommendations = append(recommendations, "Optimize zero-trust policy evaluation performance")
 	}
-	
+
 	return recommendations
 }

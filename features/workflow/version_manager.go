@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package workflow
 
 import (
@@ -81,7 +83,7 @@ func (vm *VersionManager) UpdateWorkflow(ctx context.Context, name string, workf
 	newWorkflow := &VersionedWorkflow{
 		Workflow:        workflow,
 		SemanticVersion: *version,
-		VersionTags:     append([]string{}, latest.VersionTags...), // Copy tags
+		VersionTags:     append([]string{}, latest.VersionTags...),       // Copy tags
 		Changelog:       append([]ChangelogEntry{}, latest.Changelog...), // Copy existing changelog
 	}
 
@@ -320,10 +322,10 @@ func (vm *VersionManager) isBreakingChange(v1, v2 SemanticVersion) bool {
 
 // VersionComparison represents the differences between two workflow versions
 type VersionComparison struct {
-	Version1   SemanticVersion      `json:"version1"`
-	Version2   SemanticVersion      `json:"version2"`
-	Changes    []VersionDifference  `json:"changes"`
-	IsBreaking bool                 `json:"is_breaking"`
+	Version1   SemanticVersion     `json:"version1"`
+	Version2   SemanticVersion     `json:"version2"`
+	Changes    []VersionDifference `json:"changes"`
+	IsBreaking bool                `json:"is_breaking"`
 }
 
 // VersionDifference represents a single difference between versions

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package logging
 
 import (
@@ -6,9 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/logging/interfaces"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/pkg/logging/interfaces"
 )
 
 // MockSubscriber implements LoggingSubscriber for testing
@@ -27,10 +30,10 @@ type MockSubscriber struct {
 
 func NewMockSubscriber(name string) *MockSubscriber {
 	return &MockSubscriber{
-		name:        name,
-		description: "Mock subscriber for testing",
-		handled:     make([]interfaces.LogEntry, 0),
-		shouldHandle: func(interfaces.LogEntry) bool { return true },
+		name:          name,
+		description:   "Mock subscriber for testing",
+		handled:       make([]interfaces.LogEntry, 0),
+		shouldHandle:  func(interfaces.LogEntry) bool { return true },
 		availableFunc: func() (bool, error) { return true, nil },
 	}
 }
@@ -61,11 +64,11 @@ func (m *MockSubscriber) Close() error {
 func (m *MockSubscriber) HandleLogEntry(ctx context.Context, entry interfaces.LogEntry) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
-	
+
 	if m.handleError != nil {
 		return m.handleError
 	}
-	
+
 	m.handled = append(m.handled, entry)
 	return nil
 }
@@ -118,7 +121,7 @@ func TestLoggingManager_WithSubscribers(t *testing.T) {
 				Config:  map[string]interface{}{"test": "config1"},
 			},
 			{
-				Type:    "mock2", 
+				Type:    "mock2",
 				Enabled: true,
 				Config:  map[string]interface{}{"test": "config2"},
 			},
@@ -133,7 +136,7 @@ func TestLoggingManager_WithSubscribers(t *testing.T) {
 	// Create manager with mock subscriber factory
 	originalMockFactory := mockFactory
 	defer func() { mockFactory = originalMockFactory }()
-	
+
 	mockSubscribers := make(map[string]*MockSubscriber)
 	mockFactory = func(subscriberType string) (interfaces.LoggingSubscriber, error) {
 		mock := NewMockSubscriber(subscriberType)
@@ -150,19 +153,19 @@ func TestLoggingManager_WithSubscribers(t *testing.T) {
 
 	// Verify subscribers were initialized
 	assert.Len(t, manager.subscribers, 2) // Only enabled ones
-	
+
 	// Check mock1 was initialized
 	mock1, exists := mockSubscribers["mock1"]
 	require.True(t, exists)
 	assert.True(t, mock1.initialized)
 	assert.Equal(t, map[string]interface{}{"test": "config1"}, mock1.config)
-	
-	// Check mock2 was initialized  
+
+	// Check mock2 was initialized
 	mock2, exists := mockSubscribers["mock2"]
 	require.True(t, exists)
 	assert.True(t, mock2.initialized)
 	assert.Equal(t, map[string]interface{}{"test": "config2"}, mock2.config)
-	
+
 	// Check mock3 was not initialized (disabled)
 	_, exists = mockSubscribers["mock3"]
 	assert.False(t, exists)
@@ -187,7 +190,7 @@ func TestLoggingManager_WithSubscribers(t *testing.T) {
 	assert.Equal(t, "Test message", handled1[0].Message)
 
 	handled2 := mock2.GetHandled()
-	assert.Len(t, handled2, 1) 
+	assert.Len(t, handled2, 1)
 	assert.Equal(t, "Test message", handled2[0].Message)
 }
 
@@ -218,7 +221,7 @@ func TestLoggingManager_SubscriberFiltering(t *testing.T) {
 
 	originalMockFactory := mockFactory
 	defer func() { mockFactory = originalMockFactory }()
-	
+
 	mockFactory = func(subscriberType string) (interfaces.LoggingSubscriber, error) {
 		return mockSubscriber, nil
 	}
@@ -232,7 +235,7 @@ func TestLoggingManager_SubscriberFiltering(t *testing.T) {
 	// Send INFO entry (should be filtered out)
 	infoEntry := interfaces.LogEntry{
 		Timestamp: time.Now(),
-		Level:     "INFO", 
+		Level:     "INFO",
 		Message:   "Info message",
 	}
 	err = manager.WriteEntry(ctx, infoEntry)
@@ -242,7 +245,7 @@ func TestLoggingManager_SubscriberFiltering(t *testing.T) {
 	errorEntry := interfaces.LogEntry{
 		Timestamp: time.Now(),
 		Level:     "ERROR",
-		Message:   "Error message", 
+		Message:   "Error message",
 	}
 	err = manager.WriteEntry(ctx, errorEntry)
 	assert.NoError(t, err)
@@ -278,7 +281,7 @@ func TestLoggingManager_SubscriberError(t *testing.T) {
 
 	originalMockFactory := mockFactory
 	defer func() { mockFactory = originalMockFactory }()
-	
+
 	mockFactory = func(subscriberType string) (interfaces.LoggingSubscriber, error) {
 		return mockSubscriber, nil
 	}
@@ -324,10 +327,10 @@ func TestLoggingManager_EventChannelOverflow(t *testing.T) {
 	}
 
 	mockSubscriber := NewMockSubscriber("slow-subscriber")
-	
+
 	originalMockFactory := mockFactory
 	defer func() { mockFactory = originalMockFactory }()
-	
+
 	mockFactory = func(subscriberType string) (interfaces.LoggingSubscriber, error) {
 		return mockSubscriber, nil
 	}
@@ -393,7 +396,7 @@ func TestLoggingManager_Close_WithSubscribers(t *testing.T) {
 			"directory":   "/tmp/test-logs",
 			"file_prefix": "test",
 		},
-		Level:      "INFO", 
+		Level:      "INFO",
 		BufferSize: 100,
 		Subscribers: []SubscriberConfig{
 			{
@@ -405,10 +408,10 @@ func TestLoggingManager_Close_WithSubscribers(t *testing.T) {
 	}
 
 	mockSubscriber := NewMockSubscriber("close-test")
-	
+
 	originalMockFactory := mockFactory
 	defer func() { mockFactory = originalMockFactory }()
-	
+
 	mockFactory = func(subscriberType string) (interfaces.LoggingSubscriber, error) {
 		return mockSubscriber, nil
 	}
@@ -427,4 +430,3 @@ func TestLoggingManager_Close_WithSubscribers(t *testing.T) {
 	// Verify subscriber was closed
 	assert.True(t, mockSubscriber.closed)
 }
-

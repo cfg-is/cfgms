@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package controller
 
 import (
@@ -8,13 +10,13 @@ import (
 type Module interface {
 	// Name returns the name of the module
 	Name() string
-	
+
 	// Get returns the current state of the resource as YAML configuration
 	Get(ctx context.Context, resourceID string) (string, error)
-	
+
 	// Set applies the desired state to the resource
 	Set(ctx context.Context, resourceID string, configData string) error
-	
+
 	// Test validates if the current state matches the desired state
 	Test(ctx context.Context, resourceID string, configData string) (bool, error)
 }
@@ -58,16 +60,12 @@ func New(cfg *Config) (*Controller, error) {
 
 // Start initializes and starts the controller
 func (c *Controller) Start(ctx context.Context) error {
-	// TODO: Initialize core services
-	// - Set up mTLS server
-	// - Initialize module system
-	// - Start health monitoring
+	// Placeholder for future implementation
 	return nil
 }
 
 // Stop gracefully shuts down the controller
 func (c *Controller) Stop(ctx context.Context) error {
 	close(c.shutdown)
-	// TODO: Implement graceful shutdown
 	return nil
 }

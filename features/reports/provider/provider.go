@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package provider
 
 import (
@@ -79,7 +81,7 @@ func (p *DataProvider) GetDriftEvents(ctx context.Context, query interfaces.Data
 	// For now, the drift detection system doesn't have a direct historical query interface.
 	// In a full implementation, we would need to add event storage and querying to the drift package.
 	// This is a limitation that would need to be addressed in the drift detection system.
-	
+
 	p.logger.Debug("drift event querying not fully implemented - returning empty results",
 		"time_range", fmt.Sprintf("%v to %v", query.TimeRange.Start, query.TimeRange.End))
 
@@ -97,7 +99,7 @@ func (p *DataProvider) GetDeviceStats(ctx context.Context, deviceIDs []string, t
 			TimeRange: timeRange,
 			Limit:     1000, // Reasonable limit for device discovery
 		}
-		
+
 		records, err := p.GetDNAData(ctx, query)
 		if err != nil {
 			return nil, fmt.Errorf("failed to discover devices: %w", err)
@@ -108,7 +110,7 @@ func (p *DataProvider) GetDeviceStats(ctx context.Context, deviceIDs []string, t
 		for _, record := range records {
 			deviceSet[record.DeviceID] = true
 		}
-		
+
 		for deviceID := range deviceSet {
 			deviceIDs = append(deviceIDs, deviceID)
 		}
@@ -152,14 +154,14 @@ func (p *DataProvider) calculateDeviceStats(ctx context.Context, deviceID string
 		TimeRange: timeRange,
 		DeviceIDs: []string{deviceID},
 	}
-	
+
 	dnaRecords, err := p.GetDNAData(ctx, dnaQuery)
 	if err != nil {
 		return stats, fmt.Errorf("failed to get DNA records: %w", err)
 	}
-	
+
 	stats.DNARecordCount = len(dnaRecords)
-	
+
 	// Find most recent DNA record for last seen time
 	if len(dnaRecords) > 0 {
 		mostRecent := dnaRecords[0]
@@ -176,15 +178,15 @@ func (p *DataProvider) calculateDeviceStats(ctx context.Context, deviceID string
 	if err != nil {
 		return stats, fmt.Errorf("failed to get drift events: %w", err)
 	}
-	
+
 	stats.DriftEventCount = len(driftEvents)
 
 	// Calculate compliance score based on drift events and frequency
 	stats.ComplianceScore = p.calculateComplianceScore(driftEvents, timeRange)
-	
+
 	// Determine risk level
 	stats.RiskLevel = p.calculateRiskLevel(stats.ComplianceScore, driftEvents)
-	
+
 	// Calculate change frequency (changes per day)
 	durationDays := timeRange.End.Sub(timeRange.Start).Hours() / 24
 	if durationDays > 0 {
@@ -218,16 +220,16 @@ func (p *DataProvider) calculateComplianceScore(events []drift.DriftEvent, timeR
 	if durationDays == 0 {
 		durationDays = 1
 	}
-	
+
 	eventsPerDay := severityWeight / durationDays
-	
+
 	// Convert to compliance score (0-1, where 1 is perfect compliance)
 	// Assuming more than 5 weighted events per day indicates poor compliance
 	score := 1.0 - (eventsPerDay / 5.0)
 	if score < 0 {
 		score = 0
 	}
-	
+
 	return score
 }
 
@@ -249,7 +251,7 @@ func (p *DataProvider) calculateRiskLevel(complianceScore float64, events []drif
 	} else if complianceScore < 0.8 {
 		return interfaces.RiskLevelMedium
 	}
-	
+
 	return interfaces.RiskLevelLow
 }
 
@@ -263,7 +265,7 @@ func (p *DataProvider) getDriftEventTrends(ctx context.Context, query interfaces
 	// Group events by time buckets (daily)
 	buckets := p.createTimeBuckets(query.TimeRange, 24*time.Hour)
 	eventCounts := make(map[time.Time]int)
-	
+
 	for _, event := range events {
 		bucket := p.findTimeBucket(event.Timestamp, buckets)
 		eventCounts[bucket]++
@@ -295,10 +297,10 @@ func (p *DataProvider) getComplianceTrends(ctx context.Context, query interfaces
 			Start: bucket,
 			End:   bucket.Add(24 * time.Hour),
 		}
-		
+
 		dayQuery := query
 		dayQuery.TimeRange = dayRange
-		
+
 		events, err := p.GetDriftEvents(ctx, dayQuery)
 		if err != nil {
 			p.logger.Warn("failed to get events for compliance trend", "date", bucket, "error", err)
@@ -307,7 +309,7 @@ func (p *DataProvider) getComplianceTrends(ctx context.Context, query interfaces
 
 		// Calculate compliance score for this day
 		score := p.calculateComplianceScore(events, dayRange)
-		
+
 		trends = append(trends, interfaces.TrendPoint{
 			Timestamp: bucket,
 			Value:     score,
@@ -329,10 +331,10 @@ func (p *DataProvider) getDeviceCountTrends(ctx context.Context, query interface
 			Start: bucket,
 			End:   bucket.Add(24 * time.Hour),
 		}
-		
+
 		dayQuery := query
 		dayQuery.TimeRange = dayRange
-		
+
 		records, err := p.GetDNAData(ctx, dayQuery)
 		if err != nil {
 			p.logger.Warn("failed to get DNA records for device count trend", "date", bucket, "error", err)
@@ -358,13 +360,13 @@ func (p *DataProvider) getDeviceCountTrends(ctx context.Context, query interface
 // createTimeBuckets creates time buckets for trend analysis
 func (p *DataProvider) createTimeBuckets(timeRange interfaces.TimeRange, interval time.Duration) []time.Time {
 	var buckets []time.Time
-	
+
 	current := timeRange.Start.Truncate(interval)
 	for current.Before(timeRange.End) {
 		buckets = append(buckets, current)
 		current = current.Add(interval)
 	}
-	
+
 	return buckets
 }
 
@@ -376,12 +378,12 @@ func (p *DataProvider) findTimeBucket(timestamp time.Time, buckets []time.Time) 
 			return bucket
 		}
 	}
-	
+
 	// Fallback to first bucket
 	if len(buckets) > 0 {
 		return buckets[0]
 	}
-	
+
 	return timestamp.Truncate(24 * time.Hour)
 }
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package rbac
 
 import (
@@ -54,11 +56,11 @@ func (h *HierarchyEngine) ComputeEffectivePermissions(ctx context.Context, roleI
 	}
 
 	return &memory.EffectivePermissions{
-		RoleID:             roleID,
-		DirectPermissions:  directPermissions,
+		RoleID:               roleID,
+		DirectPermissions:    directPermissions,
 		InheritedPermissions: inheritedPermissions,
-		ConflictResolution: conflictResolution,
-		ComputedAt:         time.Now(),
+		ConflictResolution:   conflictResolution,
+		ComputedAt:           time.Now(),
 	}, nil
 }
 
@@ -105,8 +107,8 @@ func (h *HierarchyEngine) buildRoleHierarchyWithVisited(ctx context.Context, rol
 
 // collectHierarchyPermissions collects permissions from the role hierarchy
 func (h *HierarchyEngine) collectHierarchyPermissions(ctx context.Context, hierarchy *memory.RoleHierarchy) (
-	[]*common.Permission, 
-	map[string][]*common.Permission, 
+	[]*common.Permission,
+	map[string][]*common.Permission,
 	error,
 ) {
 	// Get direct permissions for this role
@@ -128,7 +130,7 @@ func (h *HierarchyEngine) collectHierarchyPermissions(ctx context.Context, hiera
 		case common.RoleInheritanceType_ROLE_INHERITANCE_ADDITIVE:
 			// Inherit all parent permissions
 			inheritedPermissions[hierarchy.Parent.Role.Id] = parentPermissions
-			
+
 			// Recursively collect from grandparents
 			if hierarchy.Parent.Parent != nil {
 				_, grandparentInherited, err := h.collectHierarchyPermissions(ctx, hierarchy.Parent)
@@ -162,7 +164,7 @@ func (h *HierarchyEngine) collectHierarchyPermissions(ctx context.Context, hiera
 // intersectPermissions returns permissions that exist in both sets
 func (h *HierarchyEngine) intersectPermissions(set1, set2 []*common.Permission) []*common.Permission {
 	permissionMap := make(map[string]*common.Permission)
-	
+
 	// Create map of first set
 	for _, perm := range set1 {
 		permissionMap[perm.Id] = perm
@@ -184,7 +186,7 @@ func (h *HierarchyEngine) detectPermissionConflicts(
 	inherited map[string][]*common.Permission,
 ) (map[string][]*common.Permission, error) {
 	conflicts := make(map[string][]*common.Permission)
-	
+
 	// Build map of direct permissions
 	directMap := make(map[string]*common.Permission)
 	for _, perm := range direct {
@@ -208,7 +210,6 @@ func (h *HierarchyEngine) detectPermissionConflicts(
 
 	return conflicts, nil
 }
-
 
 // resolveConflicts resolves permission conflicts based on inheritance type and role hierarchy
 func (h *HierarchyEngine) resolveConflicts(
@@ -283,7 +284,7 @@ func (h *HierarchyEngine) resolveConflicts(
 // mergePermissions combines permissions by merging their actions
 func (h *HierarchyEngine) mergePermissions(direct *common.Permission, inherited []*common.Permission) *common.Permission {
 	actionSet := make(map[string]bool)
-	
+
 	// Add direct permission actions
 	for _, action := range direct.Actions {
 		actionSet[action] = true
@@ -364,7 +365,7 @@ func (h *HierarchyEngine) detectCycles(ctx context.Context, roleID string, visit
 	if inPath[roleID] {
 		return fmt.Errorf("circular dependency detected involving role %s", roleID)
 	}
-	
+
 	if visited[roleID] {
 		return nil
 	}

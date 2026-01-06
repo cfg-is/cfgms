@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package terminal
 
 import (
@@ -216,7 +218,7 @@ func (m *DefaultSessionManager) CleanupTimedOutSessions() {
 	// Clean up timed-out sessions
 	for _, sessionID := range timedOutSessions {
 		session := m.sessions[sessionID]
-		
+
 		// Close the session
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		if err := session.Close(ctx); err != nil {

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 package git
 
 import (
@@ -31,7 +33,7 @@ func NewSOPSManager() *SOPSManager {
 		// Default to "sops" and let exec.Command fail later if not found
 		sopsPath = "sops"
 	}
-	
+
 	return &SOPSManager{
 		sopsPath: sopsPath,
 	}
@@ -48,8 +50,8 @@ func (s *SOPSManager) IsSOPSAvailable(ctx context.Context) bool {
 func (s *SOPSManager) IsSOPSEncrypted(content []byte) bool {
 	// Check for SOPS metadata section
 	contentStr := string(content)
-	return strings.Contains(contentStr, "sops:") && 
-		   strings.Contains(contentStr, "ENC[")
+	return strings.Contains(contentStr, "sops:") &&
+		strings.Contains(contentStr, "ENC[")
 }
 
 // EncryptContent encrypts content using SOPS
@@ -57,7 +59,7 @@ func (s *SOPSManager) EncryptContent(ctx context.Context, content []byte, config
 	if !config.Enabled {
 		return content, nil
 	}
-	
+
 	// Create temporary file for SOPS processing
 	tmpFile, err := s.createTempFile(content, filePath)
 	if err != nil {
@@ -69,16 +71,16 @@ func (s *SOPSManager) EncryptContent(ctx context.Context, content []byte, config
 			_ = err // Explicitly ignore temp file cleanup errors
 		}
 	}()
-	
+
 	// Determine KMS key to use
 	kmsKey, err := s.selectKMSKey(filePath, config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to select KMS key: %w", err)
 	}
-	
+
 	// Build SOPS command
 	args := []string{"--encrypt"}
-	
+
 	// Add KMS configuration
 	if kmsKey != "" {
 		provider := s.getKMSProvider(kmsKey, config)
@@ -93,29 +95,29 @@ func (s *SOPSManager) EncryptContent(ctx context.Context, content []byte, config
 			args = append(args, "--pgp", provider.KeyID)
 		}
 	}
-	
+
 	// Add encrypted field regex if auto-encrypt is enabled
 	if config.AutoEncrypt && len(config.SensitiveFieldPatterns) > 0 {
 		encryptedRegex := strings.Join(config.SensitiveFieldPatterns, "|")
 		args = append(args, "--encrypted-regex", fmt.Sprintf("^(%s)$", encryptedRegex))
 	}
-	
+
 	args = append(args, "--in-place", tmpFile)
-	
+
 	// Execute SOPS encryption
 	// #nosec G204 - SOPS encryption management requires SOPS binary execution
 	cmd := exec.CommandContext(ctx, s.sopsPath, args...)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("sops encryption failed: %s", string(output))
 	}
-	
+
 	// Read encrypted content
 	// #nosec G304 - SOPS operation requires reading temporary encrypted files
 	encryptedContent, err := os.ReadFile(tmpFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read encrypted content: %w", err)
 	}
-	
+
 	return encryptedContent, nil
 }
 
@@ -124,7 +126,7 @@ func (s *SOPSManager) DecryptContent(ctx context.Context, content []byte) ([]byt
 	if !s.IsSOPSEncrypted(content) {
 		return content, nil
 	}
-	
+
 	// Create temporary file for SOPS processing
 	tmpFile, err := s.createTempFile(content, "encrypted.yaml")
 	if err != nil {
@@ -136,21 +138,21 @@ func (s *SOPSManager) DecryptContent(ctx context.Context, content []byte) ([]byt
 			_ = err // Explicitly ignore temp file cleanup errors
 		}
 	}()
-	
+
 	// Execute SOPS decryption
 	// #nosec G204 - SOPS encryption management requires SOPS binary execution
 	cmd := exec.CommandContext(ctx, s.sopsPath, "--decrypt", "--in-place", tmpFile)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("sops decryption failed: %s", string(output))
 	}
-	
+
 	// Read decrypted content
 	// #nosec G304 - SOPS operation requires reading temporary decrypted files
 	decryptedContent, err := os.ReadFile(tmpFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read decrypted content: %w", err)
 	}
-	
+
 	return decryptedContent, nil
 }
 
@@ -159,7 +161,7 @@ func (s *SOPSManager) ShouldEncryptFile(filePath string, config *SOPSConfig) (bo
 	if !config.Enabled {
 		return false, ""
 	}
-	
+
 	// Check encryption rules
 	for _, rule := range config.EncryptionRules {
 		matched, err := regexp.MatchString(rule.PathRegex, filePath)
@@ -170,24 +172,24 @@ func (s *SOPSManager) ShouldEncryptFile(filePath string, config *SOPSConfig) (bo
 			return true, rule.KMSKey
 		}
 	}
-	
+
 	// Check for sensitive fields if auto-encrypt is enabled
 	if config.AutoEncrypt {
 		// This would require parsing the content to check for sensitive fields
 		// For now, we'll use file naming conventions
 		lowerPath := strings.ToLower(filePath)
-		if strings.Contains(lowerPath, "secret") || 
-		   strings.Contains(lowerPath, "password") ||
-		   strings.Contains(lowerPath, "credential") ||
-		   strings.HasSuffix(lowerPath, ".sops.yaml") ||
-		   strings.HasSuffix(lowerPath, ".sops.yml") {
+		if strings.Contains(lowerPath, "secret") ||
+			strings.Contains(lowerPath, "password") ||
+			strings.Contains(lowerPath, "credential") ||
+			strings.HasSuffix(lowerPath, ".sops.yaml") ||
+			strings.HasSuffix(lowerPath, ".sops.yml") {
 			// Use first available KMS key
 			for _, provider := range config.KMSProviders {
 				return true, provider.KeyID
 			}
 		}
 	}
-	
+
 	return false, ""
 }
 
@@ -196,30 +198,30 @@ func (s *SOPSManager) ValidateSOPSConfig(ctx context.Context, config *SOPSConfig
 	if !config.Enabled {
 		return nil
 	}
-	
+
 	// Check if SOPS is available
 	if !s.IsSOPSAvailable(ctx) {
 		return fmt.Errorf("SOPS binary not found - please install SOPS")
 	}
-	
+
 	// Validate KMS providers
 	for name, provider := range config.KMSProviders {
 		if err := s.validateKMSProvider(name, provider); err != nil {
 			return fmt.Errorf("invalid KMS provider %s: %w", name, err)
 		}
 	}
-	
+
 	// Validate encryption rules
 	for i, rule := range config.EncryptionRules {
 		if _, err := regexp.Compile(rule.PathRegex); err != nil {
 			return fmt.Errorf("invalid regex in rule %d: %w", i, err)
 		}
-		
+
 		if rule.KMSKey == "" {
 			return fmt.Errorf("missing KMS key in rule %d", i)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -228,23 +230,23 @@ func (s *SOPSManager) GenerateSOPSConfig(config *SOPSConfig, repoPath string) er
 	if !config.Enabled {
 		return nil
 	}
-	
+
 	sopsConfig := map[string]interface{}{
 		"creation_rules": s.buildCreationRules(config),
 	}
-	
+
 	// Marshal to YAML
 	content, err := yaml.Marshal(sopsConfig)
 	if err != nil {
 		return fmt.Errorf("failed to marshal SOPS config: %w", err)
 	}
-	
+
 	// Write .sops.yaml file
 	sopsPath := filepath.Join(repoPath, ".sops.yaml")
 	if err := os.WriteFile(sopsPath, content, 0600); err != nil {
 		return fmt.Errorf("failed to write .sops.yaml: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -256,18 +258,18 @@ func (s *SOPSManager) createTempFile(content []byte, filePath string) (string, e
 	if ext == "" {
 		ext = ".yaml"
 	}
-	
+
 	tmpFile, err := os.CreateTemp("", fmt.Sprintf("cfgms-sops-*%s", ext))
 	if err != nil {
 		return "", err
 	}
-	
+
 	if _, err := tmpFile.Write(content); err != nil {
-		_ = tmpFile.Close() // Best effort cleanup
+		_ = tmpFile.Close()           // Best effort cleanup
 		_ = os.Remove(tmpFile.Name()) // Best effort cleanup
 		return "", err
 	}
-	
+
 	if err := tmpFile.Close(); err != nil {
 		// Log error but continue - file was written successfully
 		_ = err // Explicitly ignore file close errors after successful write
@@ -286,12 +288,12 @@ func (s *SOPSManager) selectKMSKey(filePath string, config *SOPSConfig) (string,
 			return rule.KMSKey, nil
 		}
 	}
-	
+
 	// Fall back to first available provider
 	for _, provider := range config.KMSProviders {
 		return provider.KeyID, nil
 	}
-	
+
 	return "", fmt.Errorf("no KMS key found for file: %s", filePath)
 }
 
@@ -341,18 +343,18 @@ func (s *SOPSManager) validateKMSProvider(name string, provider KMSProvider) err
 	default:
 		return fmt.Errorf("unsupported provider type: %s", provider.Type)
 	}
-	
+
 	return nil
 }
 
 func (s *SOPSManager) buildCreationRules(config *SOPSConfig) []map[string]interface{} {
 	var rules []map[string]interface{}
-	
+
 	for _, rule := range config.EncryptionRules {
 		ruleMap := map[string]interface{}{
 			"path_regex": rule.PathRegex,
 		}
-		
+
 		// Find the provider for this key
 		provider := s.getKMSProvider(rule.KMSKey, config)
 		if provider != nil {
@@ -370,16 +372,16 @@ func (s *SOPSManager) buildCreationRules(config *SOPSConfig) []map[string]interf
 				ruleMap["pgp"] = provider.KeyID
 			}
 		}
-		
+
 		// Add field patterns if specified
 		if len(rule.FieldPatterns) > 0 {
 			encryptedRegex := strings.Join(rule.FieldPatterns, "|")
 			ruleMap["encrypted_regex"] = fmt.Sprintf("^(%s)$", encryptedRegex)
 		}
-		
+
 		rules = append(rules, ruleMap)
 	}
-	
+
 	return rules
 }
 
@@ -392,12 +394,12 @@ func (s *SOPSManager) PreCommitSOPSCheck(ctx context.Context, files []string, re
 		if err != nil {
 			continue // Skip files that can't be read
 		}
-		
+
 		// Check if file should be encrypted but isn't
 		if s.shouldBeEncrypted(file, content) && !s.IsSOPSEncrypted(content) {
 			return fmt.Errorf("file %s contains sensitive data but is not SOPS encrypted", file)
 		}
-		
+
 		// Check if encrypted file can be decrypted (validation)
 		if s.IsSOPSEncrypted(content) {
 			if _, err := s.DecryptContent(ctx, content); err != nil {
@@ -405,19 +407,19 @@ func (s *SOPSManager) PreCommitSOPSCheck(ctx context.Context, files []string, re
 			}
 		}
 	}
-	
+
 	return nil
 }
 
 func (s *SOPSManager) shouldBeEncrypted(filePath string, content []byte) bool {
 	// Check file name patterns
 	lowerPath := strings.ToLower(filePath)
-	if strings.Contains(lowerPath, "secret") || 
-	   strings.Contains(lowerPath, "password") ||
-	   strings.Contains(lowerPath, "credential") {
+	if strings.Contains(lowerPath, "secret") ||
+		strings.Contains(lowerPath, "password") ||
+		strings.Contains(lowerPath, "credential") {
 		return true
 	}
-	
+
 	// Check content for sensitive patterns
 	contentStr := strings.ToLower(string(content))
 	sensitivePatterns := []string{
@@ -429,13 +431,13 @@ func (s *SOPSManager) shouldBeEncrypted(filePath string, content []byte) bool {
 		"credential:",
 		"client_secret:",
 	}
-	
+
 	for _, pattern := range sensitivePatterns {
 		if strings.Contains(contentStr, pattern) {
 			return true
 		}
 	}
-	
+
 	return false
 }
 
@@ -444,26 +446,26 @@ func (s *SOPSManager) GetSOPSMetadata(content []byte) (*SOPSMetadata, error) {
 	if !s.IsSOPSEncrypted(content) {
 		return nil, fmt.Errorf("content is not SOPS encrypted")
 	}
-	
+
 	var data map[string]interface{}
 	if err := yaml.Unmarshal(content, &data); err != nil {
 		return nil, fmt.Errorf("failed to parse YAML: %w", err)
 	}
-	
+
 	sopsData, exists := data["sops"]
 	if !exists {
 		return nil, fmt.Errorf("no SOPS metadata found")
 	}
-	
+
 	sopsMap, ok := sopsData.(map[string]interface{})
 	if !ok {
 		return nil, fmt.Errorf("invalid SOPS metadata format")
 	}
-	
+
 	metadata := &SOPSMetadata{
 		Version: getString(sopsMap, "version"),
 	}
-	
+
 	// Extract KMS information
 	if kms, exists := sopsMap["kms"]; exists {
 		if kmsList, ok := kms.([]interface{}); ok {
@@ -474,10 +476,10 @@ func (s *SOPSManager) GetSOPSMetadata(content []byte) (*SOPSMetadata, error) {
 			}
 		}
 	}
-	
+
 	// Extract encrypted regex
 	metadata.EncryptedRegex = getString(sopsMap, "encrypted_regex")
-	
+
 	return metadata, nil
 }
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package jit
 
 import (
@@ -125,22 +127,22 @@ type JITAccessPolicyEngine interface {
 
 // JITAccessValidation represents the result of JIT access validation
 type JITAccessValidation struct {
-	HasJITAccess    bool          `json:"has_jit_access"`
-	ActiveGrants    []string      `json:"active_grants"`
-	ExpirationTimes []time.Time   `json:"expiration_times"`
+	HasJITAccess    bool              `json:"has_jit_access"`
+	ActiveGrants    []string          `json:"active_grants"`
+	ExpirationTimes []time.Time       `json:"expiration_times"`
 	Conditions      []AccessCondition `json:"conditions"`
-	ValidationTime  time.Time     `json:"validation_time"`
+	ValidationTime  time.Time         `json:"validation_time"`
 }
 
 // JITAccessHistory represents historical JIT access for a subject
 type JITAccessHistory struct {
-	SubjectID     string             `json:"subject_id"`
-	TenantID      string             `json:"tenant_id"`
-	TotalRequests int                `json:"total_requests"`
+	SubjectID     string              `json:"subject_id"`
+	TenantID      string              `json:"tenant_id"`
+	TotalRequests int                 `json:"total_requests"`
 	Requests      []*JITAccessRequest `json:"requests"`
-	TotalGrants   int                `json:"total_grants"`
-	Grants        []*JITAccessGrant  `json:"grants"`
-	GeneratedAt   time.Time          `json:"generated_at"`
+	TotalGrants   int                 `json:"total_grants"`
+	Grants        []*JITAccessGrant   `json:"grants"`
+	GeneratedAt   time.Time           `json:"generated_at"`
 }
 
 // SecurityValidationResult represents security validation results
@@ -154,12 +156,12 @@ type SecurityValidationResult struct {
 
 // RiskAssessment represents risk assessment results
 type RiskAssessment struct {
-	RiskLevel         string             `json:"risk_level"`
-	RiskScore         int                `json:"risk_score"`
-	RiskFactors       []string           `json:"risk_factors"`
-	MitigationActions []string           `json:"mitigation_actions"`
-	RequiresApproval  bool               `json:"requires_approval"`
-	RecommendedTTL    time.Duration      `json:"recommended_ttl"`
+	RiskLevel         string        `json:"risk_level"`
+	RiskScore         int           `json:"risk_score"`
+	RiskFactors       []string      `json:"risk_factors"`
+	MitigationActions []string      `json:"mitigation_actions"`
+	RequiresApproval  bool          `json:"requires_approval"`
+	RecommendedTTL    time.Duration `json:"recommended_ttl"`
 }
 
 // ComplianceCheck represents compliance validation results
@@ -184,44 +186,44 @@ type WorkflowStatus struct {
 
 // WorkflowStageCompletion represents a completed workflow stage
 type WorkflowStageCompletion struct {
-	StageID       string    `json:"stage_id"`
-	ApproverID    string    `json:"approver_id"`
-	Decision      string    `json:"decision"`
-	Reason        string    `json:"reason"`
-	CompletedAt   time.Time `json:"completed_at"`
+	StageID     string    `json:"stage_id"`
+	ApproverID  string    `json:"approver_id"`
+	Decision    string    `json:"decision"`
+	Reason      string    `json:"reason"`
+	CompletedAt time.Time `json:"completed_at"`
 }
 
 // WorkflowStagePending represents a pending workflow stage
 type WorkflowStagePending struct {
-	StageID         string    `json:"stage_id"`
-	PendingApprovers []string `json:"pending_approvers"`
-	TimeoutAt       time.Time `json:"timeout_at"`
+	StageID          string    `json:"stage_id"`
+	PendingApprovers []string  `json:"pending_approvers"`
+	TimeoutAt        time.Time `json:"timeout_at"`
 }
 
 // PolicyEvaluationResult represents policy evaluation results
 type PolicyEvaluationResult struct {
-	Allowed       bool                   `json:"allowed"`
-	PolicyID      string                 `json:"policy_id"`
-	Decision      string                 `json:"decision"`
-	Reason        string                 `json:"reason"`
-	Conditions    []AccessCondition      `json:"conditions"`
-	Restrictions  map[string]interface{} `json:"restrictions"`
-	EvaluatedAt   time.Time              `json:"evaluated_at"`
+	Allowed      bool                   `json:"allowed"`
+	PolicyID     string                 `json:"policy_id"`
+	Decision     string                 `json:"decision"`
+	Reason       string                 `json:"reason"`
+	Conditions   []AccessCondition      `json:"conditions"`
+	Restrictions map[string]interface{} `json:"restrictions"`
+	EvaluatedAt  time.Time              `json:"evaluated_at"`
 }
 
 // JITAccessPolicy defines policies for JIT access
 type JITAccessPolicy struct {
-	ID              string            `json:"id"`
-	Name            string            `json:"name"`
-	TenantID        string            `json:"tenant_id"`
-	Description     string            `json:"description"`
-	Rules           []PolicyRule      `json:"rules"`
-	Conditions      []PolicyCondition `json:"conditions"`
-	Actions         []PolicyAction    `json:"actions"`
-	Priority        int               `json:"priority"`
-	Status          string            `json:"status"`
-	CreatedAt       time.Time         `json:"created_at"`
-	UpdatedAt       time.Time         `json:"updated_at"`
+	ID          string            `json:"id"`
+	Name        string            `json:"name"`
+	TenantID    string            `json:"tenant_id"`
+	Description string            `json:"description"`
+	Rules       []PolicyRule      `json:"rules"`
+	Conditions  []PolicyCondition `json:"conditions"`
+	Actions     []PolicyAction    `json:"actions"`
+	Priority    int               `json:"priority"`
+	Status      string            `json:"status"`
+	CreatedAt   time.Time         `json:"created_at"`
+	UpdatedAt   time.Time         `json:"updated_at"`
 }
 
 // PolicyRule defines a rule within a JIT access policy
@@ -249,15 +251,15 @@ type PolicyAction struct {
 
 // AutoApprovalRule defines rules for automatic approval
 type AutoApprovalRule struct {
-	ID               string            `json:"id"`
-	Name             string            `json:"name"`
-	TenantID         string            `json:"tenant_id"`
-	Conditions       []PolicyCondition `json:"conditions"`
-	MaxDuration      time.Duration     `json:"max_duration"`
-	AllowedPermissions []string        `json:"allowed_permissions"`
-	ExcludedPermissions []string       `json:"excluded_permissions"`
-	TimeRestrictions *security.TimeRestriction  `json:"time_restrictions,omitempty"`
-	Priority         int               `json:"priority"`
-	Status           string            `json:"status"`
-	CreatedAt        time.Time         `json:"created_at"`
+	ID                  string                    `json:"id"`
+	Name                string                    `json:"name"`
+	TenantID            string                    `json:"tenant_id"`
+	Conditions          []PolicyCondition         `json:"conditions"`
+	MaxDuration         time.Duration             `json:"max_duration"`
+	AllowedPermissions  []string                  `json:"allowed_permissions"`
+	ExcludedPermissions []string                  `json:"excluded_permissions"`
+	TimeRestrictions    *security.TimeRestriction `json:"time_restrictions,omitempty"`
+	Priority            int                       `json:"priority"`
+	Status              string                    `json:"status"`
+	CreatedAt           time.Time                 `json:"created_at"`
 }

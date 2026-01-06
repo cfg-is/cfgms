@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package monitoring_test
 
 import (
@@ -18,11 +20,11 @@ import (
 
 // MockCollector implements MetricsCollector for testing
 type MockCollector struct {
-	name          string
-	metrics       map[string]interface{}
-	healthStatus  monitoring.HealthStatus
-	collectError  error
-	healthError   error
+	name         string
+	metrics      map[string]interface{}
+	healthStatus monitoring.HealthStatus
+	collectError error
+	healthError  error
 }
 
 func (mc *MockCollector) CollectMetrics(ctx context.Context) (map[string]interface{}, error) {
@@ -286,7 +288,7 @@ func TestSystemMonitorWatchers(t *testing.T) {
 		// Should have received events
 		events := watcher.GetEvents()
 		assert.NotEmpty(t, events)
-		
+
 		// Check for startup event
 		hasStartup := false
 		for _, event := range events {
@@ -495,7 +497,7 @@ func TestSystemMonitorIntegration(t *testing.T) {
 		// Verify events received
 		events := watcher.GetEvents()
 		assert.NotEmpty(t, events)
-		
+
 		// Should have startup and shutdown events
 		hasStartup := false
 		hasShutdown := false
@@ -526,7 +528,7 @@ func BenchmarkSystemMonitorMetricsCollection(b *testing.B) {
 	defer cleanup()
 
 	monitor := monitoring.NewSystemMonitor(logger, tracer, nil)
-	
+
 	// Register multiple collectors
 	for i := 0; i < 10; i++ {
 		collector := &MockCollector{
@@ -567,7 +569,7 @@ func BenchmarkSystemMonitorEventEmission(b *testing.B) {
 	defer cleanup()
 
 	monitor := monitoring.NewSystemMonitor(logger, tracer, nil)
-	
+
 	// Register watchers
 	for i := 0; i < 5; i++ {
 		watcher := &MockWatcher{name: fmt.Sprintf("watcher-%d", i)}

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // Package reports provides comprehensive DNA monitoring and reporting capabilities for CFGMS.
 //
 // This package implements Story #81: DNA Monitoring - Comprehensive Reporting System.
@@ -27,10 +29,10 @@
 //	templateProcessor := templates.New(logger)
 //	exporter := exporters.New(logger)
 //	cache := memory.NewCache() // or other cache implementation
-//	
+//
 //	// Create report engine
 //	engine := engine.New(dataProvider, templateProcessor, exporter, cache, logger)
-//	
+//
 //	// Generate report
 //	req := reports.interfaces.ReportRequest{
 //		Type:      reports.interfaces.ReportTypeCompliance,
@@ -38,7 +40,7 @@
 //		interfaces.TimeRange: reports.interfaces.TimeRange{Start: start, End: end},
 //		Format:    reports.interfaces.FormatJSON,
 //	}
-//	
+//
 //	report, err := engine.GenerateReport(ctx, req)
 //	if err != nil {
 //		return fmt.Errorf("failed to generate report: %w", err)
@@ -82,23 +84,23 @@ type Service struct {
 
 // ServiceConfig contains configuration for the reports service
 type ServiceConfig struct {
-	CacheEnabled     bool          `json:"cache_enabled"`
-	CacheTTL         time.Duration `json:"cache_ttl"`
-	MaxDevices       int           `json:"max_devices"`
-	MaxTimeRange     time.Duration `json:"max_time_range"`
-	TimeoutDuration  time.Duration `json:"timeout_duration"`
-	ExportConfig     exporters.Config `json:"export_config"`
+	CacheEnabled    bool             `json:"cache_enabled"`
+	CacheTTL        time.Duration    `json:"cache_ttl"`
+	MaxDevices      int              `json:"max_devices"`
+	MaxTimeRange    time.Duration    `json:"max_time_range"`
+	TimeoutDuration time.Duration    `json:"timeout_duration"`
+	ExportConfig    exporters.Config `json:"export_config"`
 }
 
 // DefaultServiceConfig returns default configuration for the reports service
 func DefaultServiceConfig() ServiceConfig {
 	return ServiceConfig{
-		CacheEnabled:     true,
-		CacheTTL:         time.Hour,
-		MaxDevices:       1000,
-		MaxTimeRange:     30 * 24 * time.Hour, // 30 days
-		TimeoutDuration:  5 * time.Minute,
-		ExportConfig:     exporters.DefaultConfig(),
+		CacheEnabled:    true,
+		CacheTTL:        time.Hour,
+		MaxDevices:      1000,
+		MaxTimeRange:    30 * 24 * time.Hour, // 30 days
+		TimeoutDuration: 5 * time.Minute,
+		ExportConfig:    exporters.DefaultConfig(),
 	}
 }
 
@@ -111,16 +113,16 @@ func NewService(
 ) *Service {
 	// Create data provider
 	dataProvider := provider.New(storageManager, driftDetector, logger)
-	
+
 	// Create template processor
 	templateProcessor := templates.New(logger)
-	
+
 	// Create exporter
 	exporter := exporters.New(logger)
-	
+
 	// Create engine with default config
 	reportEngine := engine.New(dataProvider, templateProcessor, exporter, cache, logger)
-	
+
 	return &Service{
 		engine:   reportEngine,
 		exporter: exporter,
@@ -138,13 +140,13 @@ func NewServiceWithConfig(
 ) *Service {
 	// Create data provider
 	dataProvider := provider.New(storageManager, driftDetector, logger)
-	
+
 	// Create template processor
 	templateProcessor := templates.New(logger)
-	
+
 	// Create exporter with config
 	exporter := exporters.New(logger).WithConfig(config.ExportConfig)
-	
+
 	// Create engine with custom config
 	engineConfig := engine.Config{
 		CacheEnabled:    config.CacheEnabled,
@@ -153,10 +155,10 @@ func NewServiceWithConfig(
 		MaxTimeRange:    config.MaxTimeRange,
 		TimeoutDuration: config.TimeoutDuration,
 	}
-	
+
 	reportEngine := engine.New(dataProvider, templateProcessor, exporter, cache, logger).
 		WithConfig(engineConfig)
-	
+
 	return &Service{
 		engine:   reportEngine,
 		exporter: exporter,
@@ -350,24 +352,24 @@ func (s *Service) GetDriftSummary(ctx context.Context, timeRange interfaces.Time
 
 // ComplianceStatus represents current compliance status for API responses
 type ComplianceStatus struct {
-	Score            float64        `json:"score"`
-	ComplianceRate   float64        `json:"compliance_rate"`
+	Score            float64                   `json:"score"`
+	ComplianceRate   float64                   `json:"compliance_rate"`
 	TrendDirection   interfaces.TrendDirection `json:"trend_direction"`
-	CriticalIssues   int            `json:"critical_issues"`
-	DevicesAnalyzed  int            `json:"devices_analyzed"`
-	TotalDriftEvents int            `json:"total_drift_events"`
+	CriticalIssues   int                       `json:"critical_issues"`
+	DevicesAnalyzed  int                       `json:"devices_analyzed"`
+	TotalDriftEvents int                       `json:"total_drift_events"`
 	TimeRange        interfaces.TimeRange      `json:"time_range"`
-	GeneratedAt      time.Time      `json:"generated_at"`
+	GeneratedAt      time.Time                 `json:"generated_at"`
 }
 
 // DriftSummary represents current drift summary for API responses
 type DriftSummary struct {
-	TotalEvents    int         `json:"total_events"`
-	CriticalEvents int         `json:"critical_events"`
-	WarningEvents  int         `json:"warning_events"`
-	InfoEvents     int         `json:"info_events"`
+	TotalEvents    int                    `json:"total_events"`
+	CriticalEvents int                    `json:"critical_events"`
+	WarningEvents  int                    `json:"warning_events"`
+	InfoEvents     int                    `json:"info_events"`
 	TimeRange      interfaces.TimeRange   `json:"time_range"`
-	GeneratedAt    time.Time   `json:"generated_at"`
+	GeneratedAt    time.Time              `json:"generated_at"`
 	Charts         []interfaces.ChartData `json:"charts,omitempty"`
 }
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package terminal
 
 import (
@@ -25,7 +27,7 @@ func NewSession(req *SessionRequest, logger logging.Logger) (*Session, error) {
 		return nil, fmt.Errorf("user_id is required")
 	}
 	if req.Shell == "" {
-		req.Shell = "bash" // Default to bash
+		req.Shell = shell.GetDefaultShell() // Default to platform-appropriate shell
 	}
 	if !ValidateShell(req.Shell) {
 		return nil, fmt.Errorf("unsupported shell: %s", req.Shell)
@@ -139,7 +141,7 @@ func (s *Session) HandleOutput(ctx context.Context, data []byte) error {
 func (s *Session) Resize(ctx context.Context, cols, rows int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	
+
 	if s.closed {
 		return fmt.Errorf("session is closed")
 	}
@@ -164,26 +166,31 @@ func (s *Session) Resize(ctx context.Context, cols, rows int) error {
 
 // Close closes the session
 func (s *Session) Close(ctx context.Context) error {
+	// First, check if already closed and mark as closing
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	
 	if s.closed {
+		s.mu.Unlock()
 		return nil // Already closed
 	}
-
 	s.closed = true
 
-	// Close shell executor
-	if s.executor != nil {
-		if err := s.executor.Close(ctx); err != nil {
+	// Store references to resources we need to clean up
+	executor := s.executor
+	recorder := s.recorder
+	s.mu.Unlock()
+
+	// Close shell executor - done without holding lock to prevent deadlock
+	// This allows handleShellOutput to acquire the RLock and exit cleanly
+	if executor != nil {
+		if err := executor.Close(ctx); err != nil {
 			// Log error but continue cleanup
 			_ = err // Explicitly ignore close errors during cleanup
 		}
 	}
 
 	// Close recorder if set
-	if s.recorder != nil {
-		if err := s.recorder.Close(); err != nil {
+	if recorder != nil {
+		if err := recorder.Close(); err != nil {
 			// Log error but continue cleanup
 			_ = err // Explicitly ignore close errors during cleanup
 		}
@@ -224,7 +231,7 @@ func (s *Session) IsTimedOut(timeout time.Duration) bool {
 func (s *Session) GetMetadata() *SessionMetadata {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	
+
 	metadata := &SessionMetadata{
 		SessionID:   s.ID,
 		StewardID:   s.StewardID,
@@ -294,18 +301,18 @@ func (s *Session) handleShellOutput(ctx context.Context) {
 			if !ok {
 				return // Channel closed
 			}
-			
+
 			// Handle the output data (send to WebSocket, record, etc.)
 			if err := s.HandleOutput(ctx, data); err != nil {
 				// Log error but continue processing output
 				_ = err // Explicitly ignore output handling errors for resilience
 			}
-			
+
 		case err, ok := <-errorChan:
 			if !ok {
 				return // Channel closed
 			}
-			
+
 			// Handle errors (could send error message to WebSocket)
 			_ = err // For now, just ignore errors
 		}
@@ -322,7 +329,7 @@ func (s *Session) GetOutputChannel() <-chan []byte {
 	return s.executor.OutputChannel()
 }
 
-// GetErrorChannel returns the shell error channel  
+// GetErrorChannel returns the shell error channel
 func (s *Session) GetErrorChannel() <-chan error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

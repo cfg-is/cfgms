@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package export
 
 import (
@@ -17,34 +19,34 @@ type ElasticsearchExporter struct {
 	logger     logging.Logger
 	httpClient *http.Client
 	config     ElasticsearchConfig
-	
+
 	// State tracking
-	lastExport   time.Time
-	exportCount  int64
-	errorCount   int64
-	connected    bool
+	lastExport  time.Time
+	exportCount int64
+	errorCount  int64
+	connected   bool
 }
 
 // ElasticsearchConfig contains configuration for Elasticsearch export.
 type ElasticsearchConfig struct {
-	Endpoint     string            `json:"endpoint" yaml:"endpoint"`
-	Index        string            `json:"index" yaml:"index"`
-	IndexPattern string            `json:"index_pattern" yaml:"index_pattern"` // e.g., "cfgms-logs-%{+yyyy.MM.dd}"
-	DocType      string            `json:"doc_type" yaml:"doc_type"`
-	Username     string            `json:"username" yaml:"username"`
-	Password     string            `json:"password" yaml:"password"`
-	APIKey       string            `json:"api_key" yaml:"api_key"`
-	Timeout      time.Duration     `json:"timeout" yaml:"timeout"`
-	
+	Endpoint     string        `json:"endpoint" yaml:"endpoint"`
+	Index        string        `json:"index" yaml:"index"`
+	IndexPattern string        `json:"index_pattern" yaml:"index_pattern"` // e.g., "cfgms-logs-%{+yyyy.MM.dd}"
+	DocType      string        `json:"doc_type" yaml:"doc_type"`
+	Username     string        `json:"username" yaml:"username"`
+	Password     string        `json:"password" yaml:"password"`
+	APIKey       string        `json:"api_key" yaml:"api_key"`
+	Timeout      time.Duration `json:"timeout" yaml:"timeout"`
+
 	// Bulk indexing settings
 	BulkSize     int           `json:"bulk_size" yaml:"bulk_size"`
 	FlushTimeout time.Duration `json:"flush_timeout" yaml:"flush_timeout"`
-	
+
 	// Data settings
 	IncludeEvents bool `json:"include_events" yaml:"include_events"`
 	IncludeLogs   bool `json:"include_logs" yaml:"include_logs"`
 	IncludeHealth bool `json:"include_health" yaml:"include_health"`
-	
+
 	// Field mapping
 	TimestampField string            `json:"timestamp_field" yaml:"timestamp_field"`
 	MessageField   string            `json:"message_field" yaml:"message_field"`
@@ -87,13 +89,13 @@ func (ee *ElasticsearchExporter) Configure(config ExporterConfig) error {
 	if config.Endpoint != "" {
 		ee.config.Endpoint = config.Endpoint
 	}
-	
+
 	// Use timeout from general config
 	if config.Timeout > 0 {
 		ee.config.Timeout = config.Timeout
 		ee.httpClient.Timeout = config.Timeout
 	}
-	
+
 	// Use authentication from general config
 	if config.Username != "" {
 		ee.config.Username = config.Username
@@ -104,7 +106,7 @@ func (ee *ElasticsearchExporter) Configure(config ExporterConfig) error {
 	if config.APIKey != "" {
 		ee.config.APIKey = config.APIKey
 	}
-	
+
 	// Extract Elasticsearch-specific configuration
 	if config.Config != nil {
 		if index, ok := config.Config["index"].(string); ok {
@@ -140,14 +142,14 @@ func (ee *ElasticsearchExporter) Configure(config ExporterConfig) error {
 			ee.config.MessageField = messageField
 		}
 	}
-	
+
 	ee.logger.InfoCtx(context.Background(), "Configured Elasticsearch exporter",
 		"endpoint", ee.config.Endpoint,
 		"index", ee.config.Index,
 		"bulk_size", ee.config.BulkSize,
 		"include_events", ee.config.IncludeEvents,
 		"include_logs", ee.config.IncludeLogs)
-	
+
 	return nil
 }
 
@@ -155,7 +157,7 @@ func (ee *ElasticsearchExporter) Configure(config ExporterConfig) error {
 func (ee *ElasticsearchExporter) Start(ctx context.Context) error {
 	ee.logger.InfoCtx(ctx, "Starting Elasticsearch exporter",
 		"endpoint", ee.config.Endpoint)
-	
+
 	// Test connectivity
 	health := ee.HealthCheck(ctx)
 	if health.Status != "healthy" {
@@ -164,7 +166,7 @@ func (ee *ElasticsearchExporter) Start(ctx context.Context) error {
 			"message", health.Message)
 		// Don't fail startup - allow degraded operation
 	}
-	
+
 	return nil
 }
 
@@ -178,13 +180,13 @@ func (ee *ElasticsearchExporter) Stop(ctx context.Context) error {
 // Export sends monitoring data to Elasticsearch.
 func (ee *ElasticsearchExporter) Export(ctx context.Context, data ExportData) error {
 	startTime := time.Now()
-	
+
 	// Create export context with timeout
 	exportCtx, cancel := context.WithTimeout(ctx, ee.config.Timeout)
 	defer cancel()
-	
+
 	var documents []ElasticsearchDocument
-	
+
 	// Process logs if enabled
 	if ee.config.IncludeLogs && len(data.Logs) > 0 {
 		for _, log := range data.Logs {
@@ -192,7 +194,7 @@ func (ee *ElasticsearchExporter) Export(ctx context.Context, data ExportData) er
 			documents = append(documents, doc)
 		}
 	}
-	
+
 	// Process events if enabled
 	if ee.config.IncludeEvents && len(data.Events) > 0 {
 		for _, event := range data.Events {
@@ -200,7 +202,7 @@ func (ee *ElasticsearchExporter) Export(ctx context.Context, data ExportData) er
 			documents = append(documents, doc)
 		}
 	}
-	
+
 	// Process health status if enabled
 	if ee.config.IncludeHealth && len(data.HealthStatus) > 0 {
 		for component, health := range data.HealthStatus {
@@ -208,27 +210,27 @@ func (ee *ElasticsearchExporter) Export(ctx context.Context, data ExportData) er
 			documents = append(documents, doc)
 		}
 	}
-	
+
 	if len(documents) == 0 {
 		return nil // Nothing to export
 	}
-	
+
 	// Send documents to Elasticsearch
 	if err := ee.bulkIndex(exportCtx, documents); err != nil {
 		ee.errorCount++
 		ee.connected = false
 		return fmt.Errorf("failed to bulk index documents: %w", err)
 	}
-	
+
 	// Update state
 	ee.lastExport = time.Now()
 	ee.exportCount++
 	ee.connected = true
-	
+
 	ee.logger.DebugCtx(ctx, "Elasticsearch export completed",
 		"export_time_ms", time.Since(startTime).Milliseconds(),
 		"documents_count", len(documents))
-	
+
 	return nil
 }
 
@@ -241,25 +243,25 @@ func (ee *ElasticsearchExporter) HealthCheck(ctx context.Context) ExporterHealth
 		ErrorCount:      ee.errorCount,
 		LastExport:      ee.lastExport,
 	}
-	
+
 	// Check Elasticsearch cluster health
 	healthURL := ee.config.Endpoint + "/_cluster/health"
-	
+
 	req, err := http.NewRequestWithContext(ctx, "GET", healthURL, nil)
 	if err != nil {
 		health.Status = "unhealthy"
 		health.Message = fmt.Sprintf("Failed to create health request: %v", err)
 		return health
 	}
-	
+
 	// Add authentication
 	ee.addAuthentication(req)
-	
+
 	startTime := time.Now()
 	resp, err := ee.httpClient.Do(req)
 	responseTime := time.Since(startTime)
 	health.ResponseTime = responseTime
-	
+
 	if err != nil {
 		health.Status = "unhealthy"
 		health.Message = fmt.Sprintf("Health check request failed: %v", err)
@@ -271,13 +273,13 @@ func (ee *ElasticsearchExporter) HealthCheck(ctx context.Context) ExporterHealth
 			_ = err // Explicitly ignore error for cleanup operation
 		}
 	}()
-	
+
 	if resp.StatusCode != http.StatusOK {
 		health.Status = "unhealthy"
 		health.Message = fmt.Sprintf("Health check returned status %d", resp.StatusCode)
 		return health
 	}
-	
+
 	// Parse cluster health response
 	var clusterHealth map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&clusterHealth); err != nil {
@@ -285,7 +287,7 @@ func (ee *ElasticsearchExporter) HealthCheck(ctx context.Context) ExporterHealth
 		health.Message = "Could not parse cluster health response"
 		return health
 	}
-	
+
 	// Check cluster status
 	if status, ok := clusterHealth["status"].(string); ok {
 		switch status {
@@ -306,15 +308,15 @@ func (ee *ElasticsearchExporter) HealthCheck(ctx context.Context) ExporterHealth
 		health.Status = "degraded"
 		health.Message = "Could not determine cluster status"
 	}
-	
+
 	return health
 }
 
 // ElasticsearchDocument represents a document to be indexed in Elasticsearch.
 type ElasticsearchDocument struct {
-	Index string                 `json:"_index"`
-	Type  string                 `json:"_type,omitempty"`
-	ID    string                 `json:"_id,omitempty"`
+	Index  string                 `json:"_index"`
+	Type   string                 `json:"_type,omitempty"`
+	ID     string                 `json:"_id,omitempty"`
 	Source map[string]interface{} `json:"_source"`
 }
 
@@ -336,19 +338,19 @@ func (ee *ElasticsearchExporter) convertLogToDocument(log LogEntry, data ExportD
 			"document_type":          "log",
 		},
 	}
-	
+
 	// Add log fields
 	if log.Fields != nil {
 		for key, value := range log.Fields {
 			doc.Source[key] = value
 		}
 	}
-	
+
 	// Add extra configured fields
 	for key, value := range ee.config.ExtraFields {
 		doc.Source[key] = value
 	}
-	
+
 	return doc
 }
 
@@ -372,19 +374,19 @@ func (ee *ElasticsearchExporter) convertEventToDocument(event SystemEvent, data 
 			"document_type":          "event",
 		},
 	}
-	
+
 	// Add event data
 	if event.Data != nil {
 		for key, value := range event.Data {
 			doc.Source["event_"+key] = value
 		}
 	}
-	
+
 	// Add extra configured fields
 	for key, value := range ee.config.ExtraFields {
 		doc.Source[key] = value
 	}
-	
+
 	return doc
 }
 
@@ -403,19 +405,19 @@ func (ee *ElasticsearchExporter) convertHealthToDocument(component string, healt
 			"document_type":          "health",
 		},
 	}
-	
+
 	// Add health details
 	if health.Details != nil {
 		for key, value := range health.Details {
 			doc.Source["health_"+key] = value
 		}
 	}
-	
+
 	// Add extra configured fields
 	for key, value := range ee.config.ExtraFields {
 		doc.Source[key] = value
 	}
-	
+
 	return doc
 }
 
@@ -424,7 +426,7 @@ func (ee *ElasticsearchExporter) bulkIndex(ctx context.Context, documents []Elas
 	if len(documents) == 0 {
 		return nil
 	}
-	
+
 	// Build bulk request body
 	var bulkBody bytes.Buffer
 	for _, doc := range documents {
@@ -438,27 +440,27 @@ func (ee *ElasticsearchExporter) bulkIndex(ctx context.Context, documents []Elas
 		if doc.ID != "" {
 			action["index"].(map[string]interface{})["_id"] = doc.ID
 		}
-		
+
 		actionJSON, _ := json.Marshal(action)
 		bulkBody.Write(actionJSON)
 		bulkBody.WriteString("\n")
-		
+
 		// Document source line
 		sourceJSON, _ := json.Marshal(doc.Source)
 		bulkBody.Write(sourceJSON)
 		bulkBody.WriteString("\n")
 	}
-	
+
 	// Send bulk request
 	bulkURL := ee.config.Endpoint + "/_bulk"
 	req, err := http.NewRequestWithContext(ctx, "POST", bulkURL, &bulkBody)
 	if err != nil {
 		return fmt.Errorf("failed to create bulk request: %w", err)
 	}
-	
+
 	req.Header.Set("Content-Type", "application/x-ndjson")
 	ee.addAuthentication(req)
-	
+
 	resp, err := ee.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("bulk request failed: %w", err)
@@ -469,11 +471,11 @@ func (ee *ElasticsearchExporter) bulkIndex(ctx context.Context, documents []Elas
 			_ = err // Explicitly ignore error for cleanup operation
 		}
 	}()
-	
+
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("bulk request returned status %d", resp.StatusCode)
 	}
-	
+
 	// Check for individual document errors
 	var bulkResponse map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&bulkResponse); err != nil {
@@ -484,7 +486,7 @@ func (ee *ElasticsearchExporter) bulkIndex(ctx context.Context, documents []Elas
 			"total_documents", len(documents))
 		// Don't return error - partial success is acceptable
 	}
-	
+
 	return nil
 }
 

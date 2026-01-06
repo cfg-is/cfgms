@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package shell
 
 import (
@@ -8,21 +10,22 @@ import (
 	"os/exec"
 	"sync"
 	"syscall"
+	"time"
 )
 
 // WindowsExecutor implements shell execution for Windows systems
 type WindowsExecutor struct {
-	mu         sync.RWMutex
-	config     *Config
-	cmd        *exec.Cmd
-	stdin      io.WriteCloser
-	stdout     io.ReadCloser
-	stderr     io.ReadCloser
-	outputCh   chan []byte
-	errorCh    chan error
-	running    bool
-	ctx        context.Context
-	cancel     context.CancelFunc
+	mu       sync.RWMutex
+	config   *Config
+	cmd      *exec.Cmd
+	stdin    io.WriteCloser
+	stdout   io.ReadCloser
+	stderr   io.ReadCloser
+	outputCh chan []byte
+	errorCh  chan error
+	running  bool
+	ctx      context.Context
+	cancel   context.CancelFunc
 }
 
 // NewWindowsExecutor creates a new Windows shell executor
@@ -65,11 +68,11 @@ func (e *WindowsExecutor) Start(ctx context.Context, config *Config) error {
 	case "powershell":
 		cmdPath = "powershell.exe"
 		args = []string{
-			"-NoExit",           // Don't exit after running commands
-			"-NoLogo",           // Don't show PowerShell logo
-			"-OutputFormat",     // Set output format
+			"-NoExit",       // Don't exit after running commands
+			"-NoLogo",       // Don't show PowerShell logo
+			"-OutputFormat", // Set output format
 			"Text",
-			"-InputFormat",      // Set input format
+			"-InputFormat", // Set input format
 			"Text",
 		}
 	case "cmd":
@@ -82,7 +85,7 @@ func (e *WindowsExecutor) Start(ctx context.Context, config *Config) error {
 	// Create command
 	// #nosec G204 - Terminal requires shell execution with validated shell paths
 	e.cmd = exec.CommandContext(e.ctx, cmdPath, args...)
-	
+
 	// Set environment variables
 	e.cmd.Env = os.Environ()
 	for key, value := range e.config.Environment {
@@ -165,58 +168,59 @@ func (e *WindowsExecutor) Resize(ctx context.Context, cols, rows int) error {
 	// Windows console resizing is more complex and requires Windows API calls
 	// For now, we'll just update the config values
 	// Full implementation would require syscalls to SetConsoleScreenBufferSize
-	
+
 	return nil
 }
 
 // Close terminates the shell process
 func (e *WindowsExecutor) Close(ctx context.Context) error {
+	// First, check if already closed and mark as closing
 	e.mu.Lock()
-	defer e.mu.Unlock()
-
 	if !e.running {
+		e.mu.Unlock()
 		return nil // Already closed
 	}
-
 	e.running = false
 
-	// Cancel context
+	// Cancel internal context to signal goroutines to exit
 	if e.cancel != nil {
 		e.cancel()
 	}
 
-	// Close pipes - ignore errors as they may already be closed
-	if e.stdin != nil {
-		_ = e.stdin.Close()
-	}
-	if e.stdout != nil {
-		_ = e.stdout.Close()
-	}
-	if e.stderr != nil {
-		_ = e.stderr.Close()
+	// Store references to resources we need to clean up
+	stdin := e.stdin
+	stdout := e.stdout
+	stderr := e.stderr
+	cmd := e.cmd
+	e.mu.Unlock()
+
+	// Close stdin pipe first to signal the process to exit
+	if stdin != nil {
+		_ = stdin.Close()
 	}
 
-	// Terminate process gracefully
-	if e.cmd != nil && e.cmd.Process != nil {
-		// Try graceful termination first
-		done := make(chan error, 1)
-		go func() {
-			done <- e.cmd.Wait()
-		}()
-
-		select {
-		case <-ctx.Done():
-			// Force kill if context expires
-			if err := e.cmd.Process.Kill(); err != nil {
-				// Log but continue - process might already be dead
-				_ = err // Explicitly ignore kill errors for cleanup
-			}
-		case <-done:
-			// Process exited gracefully
+	// Force kill the process immediately on Windows
+	// PowerShell doesn't exit cleanly when stdin is closed
+	if cmd != nil && cmd.Process != nil {
+		if err := cmd.Process.Kill(); err != nil {
+			// Log but continue - process might already be dead
+			_ = err // Explicitly ignore kill errors for cleanup
 		}
 	}
 
-	// Close channels
+	// Close remaining pipes
+	if stdout != nil {
+		_ = stdout.Close()
+	}
+	if stderr != nil {
+		_ = stderr.Close()
+	}
+
+	// Give goroutines a moment to see the context cancellation
+	// before closing channels
+	time.Sleep(10 * time.Millisecond)
+
+	// Close channels - safe now that goroutines should have exited
 	close(e.outputCh)
 	close(e.errorCh)
 
@@ -262,7 +266,10 @@ func (e *WindowsExecutor) readOutput(reader io.ReadCloser, isStderr bool) {
 				if err != io.EOF {
 					select {
 					case e.errorCh <- fmt.Errorf("shell read error: %w", err):
+					case <-e.ctx.Done():
+						// Context cancelled, don't send
 					default:
+						// Channel full, drop error
 					}
 				}
 				return
@@ -292,15 +299,26 @@ func (e *WindowsExecutor) monitorProcess() {
 	}
 
 	err := e.cmd.Wait()
-	
+
 	e.mu.Lock()
 	e.running = false
 	e.mu.Unlock()
 
+	// Check if context is done before sending to channels
+	// This prevents panic when Close() has already closed the channels
+	select {
+	case <-e.ctx.Done():
+		return
+	default:
+	}
+
 	if err != nil {
 		select {
 		case e.errorCh <- fmt.Errorf("shell process exited: %w", err):
+		case <-e.ctx.Done():
+			// Context cancelled, don't send
 		default:
+			// Channel full, drop error
 		}
 	}
 }

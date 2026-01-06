@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package auth
 
 import (
@@ -24,39 +26,39 @@ type InteractiveAuthFlow struct {
 // AuthFlowState represents the state of an ongoing authorization flow
 type AuthFlowState struct {
 	// PKCE parameters
-	CodeVerifier  string    `json:"code_verifier"`
-	CodeChallenge string    `json:"code_challenge"`
-	State         string    `json:"state"`
-	Nonce         string    `json:"nonce"`
-	
+	CodeVerifier  string `json:"code_verifier"`
+	CodeChallenge string `json:"code_challenge"`
+	State         string `json:"state"`
+	Nonce         string `json:"nonce"`
+
 	// Flow metadata
-	TenantID      string    `json:"tenant_id"`
-	UserID        string    `json:"user_id,omitempty"`
-	RequestedScopes []string `json:"requested_scopes"`
-	CreatedAt     time.Time `json:"created_at"`
-	ExpiresAt     time.Time `json:"expires_at"`
-	
+	TenantID        string    `json:"tenant_id"`
+	UserID          string    `json:"user_id,omitempty"`
+	RequestedScopes []string  `json:"requested_scopes"`
+	CreatedAt       time.Time `json:"created_at"`
+	ExpiresAt       time.Time `json:"expires_at"`
+
 	// Callback information
-	RedirectURI   string    `json:"redirect_uri"`
-	CallbackPath  string    `json:"callback_path"`
+	RedirectURI  string `json:"redirect_uri"`
+	CallbackPath string `json:"callback_path"`
 }
 
 // AuthFlowResult contains the result of a completed authorization flow
 type AuthFlowResult struct {
-	Success        bool          `json:"success"`
-	AccessToken    *AccessToken  `json:"access_token,omitempty"`
-	UserContext    *UserContext  `json:"user_context,omitempty"`
-	GrantedScopes  []string      `json:"granted_scopes,omitempty"`
-	Error          string        `json:"error,omitempty"`
-	ErrorDetails   string        `json:"error_details,omitempty"`
+	Success       bool         `json:"success"`
+	AccessToken   *AccessToken `json:"access_token,omitempty"`
+	UserContext   *UserContext `json:"user_context,omitempty"`
+	GrantedScopes []string     `json:"granted_scopes,omitempty"`
+	Error         string       `json:"error,omitempty"`
+	ErrorDetails  string       `json:"error_details,omitempty"`
 }
 
 // NewInteractiveAuthFlow creates a new interactive authentication flow manager
 func NewInteractiveAuthFlow(provider *OAuth2Provider, config *OAuth2Config) *InteractiveAuthFlow {
 	return &InteractiveAuthFlow{
-		provider:   provider,
-		config:     config,
-		httpClient: &http.Client{Timeout: 30 * time.Second},
+		provider:        provider,
+		config:          config,
+		httpClient:      &http.Client{Timeout: 30 * time.Second},
 		callbackHandler: NewCallbackHandler(),
 	}
 }
@@ -68,11 +70,11 @@ func (f *InteractiveAuthFlow) StartAuthFlow(ctx context.Context, tenantID string
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to generate code verifier: %w", err)
 	}
-	
+
 	codeChallenge := f.generateCodeChallenge(codeVerifier)
 	state := f.generateState()
 	nonce := f.generateNonce()
-	
+
 	// Create flow state
 	flowState := &AuthFlowState{
 		CodeVerifier:    codeVerifier,
@@ -86,18 +88,18 @@ func (f *InteractiveAuthFlow) StartAuthFlow(ctx context.Context, tenantID string
 		RedirectURI:     f.config.RedirectURI,
 		CallbackPath:    "/auth/callback",
 	}
-	
+
 	// Store flow state temporarily
 	if err := f.storeFlowState(state, flowState); err != nil {
 		return nil, "", fmt.Errorf("failed to store flow state: %w", err)
 	}
-	
+
 	// Build authorization URL
 	authURL, err := f.buildAuthorizationURL(tenantID, flowState)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to build authorization URL: %w", err)
 	}
-	
+
 	return flowState, authURL, nil
 }
 
@@ -107,86 +109,86 @@ func (f *InteractiveAuthFlow) HandleCallback(ctx context.Context, callbackURL st
 	parsedURL, err := url.Parse(callbackURL)
 	if err != nil {
 		return &AuthFlowResult{
-			Success: false,
-			Error:   "INVALID_CALLBACK_URL",
+			Success:      false,
+			Error:        "INVALID_CALLBACK_URL",
 			ErrorDetails: fmt.Sprintf("Failed to parse callback URL: %v", err),
 		}, nil
 	}
-	
+
 	query := parsedURL.Query()
-	
+
 	// Check for error in callback
 	if errorCode := query.Get("error"); errorCode != "" {
 		return &AuthFlowResult{
-			Success: false,
-			Error:   errorCode,
+			Success:      false,
+			Error:        errorCode,
 			ErrorDetails: query.Get("error_description"),
 		}, nil
 	}
-	
+
 	// Extract authorization code and state
 	authCode := query.Get("code")
 	state := query.Get("state")
-	
+
 	if authCode == "" || state == "" {
 		return &AuthFlowResult{
-			Success: false,
-			Error:   "MISSING_PARAMETERS",
+			Success:      false,
+			Error:        "MISSING_PARAMETERS",
 			ErrorDetails: "Missing authorization code or state parameter",
 		}, nil
 	}
-	
+
 	// Retrieve flow state
 	flowState, err := f.getFlowState(state)
 	if err != nil {
 		return &AuthFlowResult{
-			Success: false,
-			Error:   "INVALID_STATE",
+			Success:      false,
+			Error:        "INVALID_STATE",
 			ErrorDetails: fmt.Sprintf("Failed to retrieve flow state: %v", err),
 		}, nil
 	}
-	
+
 	// Validate flow state
 	if err := f.validateFlowState(flowState); err != nil {
 		return &AuthFlowResult{
-			Success: false,
-			Error:   "INVALID_FLOW_STATE",
+			Success:      false,
+			Error:        "INVALID_FLOW_STATE",
 			ErrorDetails: fmt.Sprintf("Flow state validation failed: %v", err),
 		}, nil
 	}
-	
+
 	// Exchange authorization code for tokens
 	tokenResponse, err := f.exchangeCodeForTokens(ctx, authCode, flowState)
 	if err != nil {
 		return &AuthFlowResult{
-			Success: false,
-			Error:   "TOKEN_EXCHANGE_FAILED",
+			Success:      false,
+			Error:        "TOKEN_EXCHANGE_FAILED",
 			ErrorDetails: fmt.Sprintf("Failed to exchange code for tokens: %v", err),
 		}, nil
 	}
-	
+
 	// Parse and validate tokens
 	accessToken, userContext, err := f.processTokenResponse(tokenResponse, flowState)
 	if err != nil {
 		return &AuthFlowResult{
-			Success: false,
-			Error:   "TOKEN_PROCESSING_FAILED",
+			Success:      false,
+			Error:        "TOKEN_PROCESSING_FAILED",
 			ErrorDetails: fmt.Sprintf("Failed to process token response: %v", err),
 		}, nil
 	}
-	
+
 	// Store tokens securely
 	if err := f.storeTokens(flowState.TenantID, accessToken, userContext); err != nil {
 		return &AuthFlowResult{
-			Success: false,
-			Error:   "TOKEN_STORAGE_FAILED",
+			Success:      false,
+			Error:        "TOKEN_STORAGE_FAILED",
 			ErrorDetails: fmt.Sprintf("Failed to store tokens: %v", err),
 		}, nil
 	}
-	
+
 	// Clean up flow state
 	f.cleanupFlowState(state)
-	
+
 	return &AuthFlowResult{
 		Success:       true,
 		AccessToken:   accessToken,
@@ -198,35 +200,35 @@ func (f *InteractiveAuthFlow) HandleCallback(ctx context.Context, callbackURL st
 // TestCapabilities verifies that the obtained tokens have the necessary permissions
 func (f *InteractiveAuthFlow) TestCapabilities(ctx context.Context, tenantID string, accessToken *AccessToken) (*CapabilityTestResult, error) {
 	testResult := &CapabilityTestResult{
-		TenantID:    tenantID,
-		TestedAt:    time.Now(),
-		Tests:       make(map[string]*CapabilityTest),
+		TenantID: tenantID,
+		TestedAt: time.Now(),
+		Tests:    make(map[string]*CapabilityTest),
 	}
-	
+
 	// Test basic user profile access
 	testResult.Tests["user_read"] = f.testUserReadAccess(ctx, accessToken)
-	
+
 	// Test directory read access
 	testResult.Tests["directory_read"] = f.testDirectoryReadAccess(ctx, accessToken)
-	
+
 	// Test group management (if scopes available)
 	if f.hasScope(accessToken, "Group.ReadWrite.All") {
 		testResult.Tests["group_management"] = f.testGroupManagementAccess(ctx, accessToken)
 	}
-	
+
 	// Test conditional access (if scopes available)
 	if f.hasScope(accessToken, "Policy.ReadWrite.ConditionalAccess") {
 		testResult.Tests["conditional_access"] = f.testConditionalAccessAccess(ctx, accessToken)
 	}
-	
+
 	// Test Intune management (if scopes available)
 	if f.hasScope(accessToken, "DeviceManagementConfiguration.ReadWrite.All") {
 		testResult.Tests["intune_management"] = f.testIntuneManagementAccess(ctx, accessToken)
 	}
-	
+
 	// Calculate overall success
 	testResult.OverallSuccess = f.calculateOverallSuccess(testResult.Tests)
-	
+
 	return testResult, nil
 }
 
@@ -238,7 +240,7 @@ func (f *InteractiveAuthFlow) generateCodeVerifier() (string, error) {
 	if _, err := rand.Read(randomBytes); err != nil {
 		return "", err
 	}
-	
+
 	// Base64 URL encode without padding
 	codeVerifier := base64.RawURLEncoding.EncodeToString(randomBytes)
 	return codeVerifier, nil
@@ -247,7 +249,7 @@ func (f *InteractiveAuthFlow) generateCodeVerifier() (string, error) {
 func (f *InteractiveAuthFlow) generateCodeChallenge(codeVerifier string) string {
 	// SHA256 hash the code verifier
 	hash := sha256.Sum256([]byte(codeVerifier))
-	
+
 	// Base64 URL encode without padding
 	codeChallenge := base64.RawURLEncoding.EncodeToString(hash[:])
 	return codeChallenge
@@ -275,7 +277,7 @@ func (f *InteractiveAuthFlow) generateNonce() string {
 
 func (f *InteractiveAuthFlow) buildAuthorizationURL(tenantID string, flowState *AuthFlowState) (string, error) {
 	baseURL := fmt.Sprintf("https://login.microsoftonline.com/%s/oauth2/v2.0/authorize", tenantID)
-	
+
 	params := url.Values{
 		"client_id":             {f.config.ClientID},
 		"response_type":         {"code"},
@@ -288,7 +290,7 @@ func (f *InteractiveAuthFlow) buildAuthorizationURL(tenantID string, flowState *
 		"code_challenge_method": {"S256"},
 		"prompt":                {"consent"}, // Force consent screen
 	}
-	
+
 	authURL := fmt.Sprintf("%s?%s", baseURL, params.Encode())
 	return authURL, nil
 }
@@ -297,7 +299,7 @@ func (f *InteractiveAuthFlow) buildAuthorizationURL(tenantID string, flowState *
 
 func (f *InteractiveAuthFlow) exchangeCodeForTokens(ctx context.Context, authCode string, flowState *AuthFlowState) (*TokenResponse, error) {
 	tokenURL := f.config.GetTokenURL()
-	
+
 	data := url.Values{
 		"grant_type":    {"authorization_code"},
 		"client_id":     {f.config.ClientID},
@@ -306,15 +308,15 @@ func (f *InteractiveAuthFlow) exchangeCodeForTokens(ctx context.Context, authCod
 		"redirect_uri":  {f.config.RedirectURI},
 		"code_verifier": {flowState.CodeVerifier},
 	}
-	
+
 	req, err := http.NewRequestWithContext(ctx, "POST", tokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
 		return nil, err
 	}
-	
+
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
-	
+
 	resp, err := f.httpClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -325,16 +327,16 @@ func (f *InteractiveAuthFlow) exchangeCodeForTokens(ctx context.Context, authCod
 			_ = err
 		}
 	}()
-	
+
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("token exchange failed with status: %d", resp.StatusCode)
 	}
-	
+
 	var tokenResponse TokenResponse
 	if err := json.NewDecoder(resp.Body).Decode(&tokenResponse); err != nil {
 		return nil, err
 	}
-	
+
 	return &tokenResponse, nil
 }
 
@@ -352,7 +354,7 @@ func (f *InteractiveAuthFlow) processTokenResponse(tokenResponse *TokenResponse,
 		IsDelegated:   true,
 		GrantedScopes: strings.Split(tokenResponse.Scope, " "),
 	}
-	
+
 	// Extract user information from ID token if available
 	userContext, err := f.extractUserContext(tokenResponse.IDToken, flowState.TenantID)
 	if err != nil {
@@ -364,9 +366,9 @@ func (f *InteractiveAuthFlow) processTokenResponse(tokenResponse *TokenResponse,
 			LastAuthenticated: time.Now(),
 		}
 	}
-	
+
 	accessToken.UserContext = userContext
-	
+
 	return accessToken, userContext, nil
 }
 
@@ -375,19 +377,19 @@ func (f *InteractiveAuthFlow) storeTokens(tenantID string, accessToken *AccessTo
 	if err := f.provider.credentialStore.StoreToken(tenantID, accessToken); err != nil {
 		return fmt.Errorf("failed to store access token: %w", err)
 	}
-	
+
 	// Store delegated token for user context
 	if userContext.UserID != "" {
 		if err := f.provider.credentialStore.StoreDelegatedToken(tenantID, userContext.UserID, accessToken); err != nil {
 			return fmt.Errorf("failed to store delegated token: %w", err)
 		}
-		
+
 		// Store user context
 		if err := f.provider.credentialStore.StoreUserContext(tenantID, userContext.UserID, userContext); err != nil {
 			return fmt.Errorf("failed to store user context: %w", err)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -407,11 +409,11 @@ func (f *InteractiveAuthFlow) validateFlowState(flowState *AuthFlowState) error 
 	if time.Now().After(flowState.ExpiresAt) {
 		return fmt.Errorf("flow state expired")
 	}
-	
+
 	if flowState.CodeVerifier == "" || flowState.TenantID == "" {
 		return fmt.Errorf("invalid flow state: missing required fields")
 	}
-	
+
 	return nil
 }
 

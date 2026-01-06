@@ -17,28 +17,36 @@ This document outlines the design for implementing configuration rollback capabi
 ### Components
 
 #### 1. Rollback Manager
+
 Central component that orchestrates rollback operations:
+
 - Interfaces with Git backend to retrieve historical configurations
 - Validates rollback safety and dependencies
 - Coordinates with Steward for configuration deployment
 - Maintains rollback audit logs
 
 #### 2. Rollback Validator
+
 Ensures rollback operations are safe:
+
 - Checks for breaking changes between versions
 - Validates module compatibility
 - Ensures dependencies are satisfied
 - Prevents rollback that would cause system instability
 
 #### 3. Rollback API
+
 REST API endpoints for rollback operations:
+
 - List available rollback points
 - Preview rollback changes
 - Execute rollback with approval workflow
 - Monitor rollback progress
 
 #### 4. Rollback Audit Logger
+
 Tracks all rollback operations:
+
 - Who initiated the rollback
 - What was rolled back
 - When the rollback occurred
@@ -147,6 +155,7 @@ graph TD
 ### API Design
 
 #### List Rollback Points
+
 ```
 GET /api/v1/rollback/points?target_type={device|group|client|msp}&target_id={id}&limit=50
 
@@ -167,6 +176,7 @@ Response:
 ```
 
 #### Preview Rollback
+
 ```
 POST /api/v1/rollback/preview
 
@@ -203,6 +213,7 @@ Response:
 ```
 
 #### Execute Rollback
+
 ```
 POST /api/v1/rollback/execute
 
@@ -233,6 +244,7 @@ Response:
 ```
 
 #### Monitor Rollback
+
 ```
 GET /api/v1/rollback/{rollback_id}/status
 
@@ -385,24 +397,28 @@ CREATE TABLE rollback_validations (
 ## Implementation Phases
 
 ### Phase 1: Core Rollback (Week 1)
+
 - Implement RollbackManager
 - Basic Git integration
 - Simple rollback operations
 - Unit tests
 
 ### Phase 2: Safety & Validation (Week 2)
+
 - Implement RollbackValidator
 - Safety checks
 - Dependency validation
 - Integration tests
 
 ### Phase 3: API & UI (Week 3)
+
 - REST API implementation
 - Approval workflow
 - Progress monitoring
 - Documentation
 
 ### Phase 4: Advanced Features (Week 4)
+
 - Emergency rollback
 - Partial rollback
 - Performance optimization

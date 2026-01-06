@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package export
 
 import (
@@ -27,10 +29,10 @@ func NewExporterRegistry(logger logging.Logger, tracer *telemetry.Tracer) *Expor
 		tracer:    tracer,
 		exporters: make(map[string]ExporterFactory),
 	}
-	
+
 	// Register built-in exporters
 	registry.RegisterBuiltinExporters()
-	
+
 	return registry
 }
 
@@ -40,17 +42,17 @@ func (er *ExporterRegistry) RegisterBuiltinExporters() {
 	er.RegisterExporter("prometheus", func(logger logging.Logger) MonitoringExporter {
 		return NewPrometheusExporter(logger)
 	})
-	
+
 	// Register OTLP exporter
 	er.RegisterExporter("otlp", func(logger logging.Logger) MonitoringExporter {
 		return NewOTLPExporter(logger)
 	})
-	
+
 	// Register Elasticsearch exporter
 	er.RegisterExporter("elasticsearch", func(logger logging.Logger) MonitoringExporter {
 		return NewElasticsearchExporter(logger)
 	})
-	
+
 	er.logger.InfoCtx(context.Background(), "Registered built-in monitoring exporters",
 		"exporters", []string{"prometheus", "otlp", "elasticsearch"})
 }
@@ -68,12 +70,12 @@ func (er *ExporterRegistry) CreateExporter(name string) (MonitoringExporter, err
 	if !exists {
 		return nil, fmt.Errorf("unknown exporter: %s", name)
 	}
-	
+
 	exporter := factory(er.logger)
 	er.logger.InfoCtx(context.Background(), "Created monitoring exporter instance",
 		"exporter_name", name,
 		"exporter_type", exporter.Name())
-	
+
 	return exporter, nil
 }
 
@@ -91,25 +93,25 @@ func (er *ExporterRegistry) CreateExportManagerWithExporters(config *ExportConfi
 	if config == nil {
 		config = DefaultExportConfig()
 	}
-	
+
 	// Create export manager
 	manager := NewExportManager(er.logger, er.tracer, config)
-	
+
 	// Register specified exporters
 	for _, name := range exporterNames {
 		exporter, err := er.CreateExporter(name)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create exporter %s: %w", name, err)
 		}
-		
+
 		if err := manager.RegisterExporter(name, exporter); err != nil {
 			return nil, fmt.Errorf("failed to register exporter %s: %w", name, err)
 		}
 	}
-	
+
 	er.logger.InfoCtx(context.Background(), "Created export manager with exporters",
 		"exporters", exporterNames)
-	
+
 	return manager, nil
 }
 
@@ -118,16 +120,16 @@ func (er *ExporterRegistry) CreateExportManagerFromConfig(config *ExportConfig) 
 	if config == nil {
 		config = DefaultExportConfig()
 	}
-	
+
 	// Create export manager
 	manager := NewExportManager(er.logger, er.tracer, config)
-	
+
 	// Register all enabled exporters from configuration
 	for exporterName, exporterConfig := range config.Exporters {
 		if !exporterConfig.Enabled {
 			continue
 		}
-		
+
 		exporter, err := er.CreateExporter(exporterName)
 		if err != nil {
 			er.logger.WarnCtx(context.Background(), "Failed to create configured exporter",
@@ -135,18 +137,18 @@ func (er *ExporterRegistry) CreateExportManagerFromConfig(config *ExportConfig) 
 				"error", err)
 			continue
 		}
-		
+
 		if err := manager.RegisterExporter(exporterName, exporter); err != nil {
 			er.logger.WarnCtx(context.Background(), "Failed to register configured exporter",
 				"exporter_name", exporterName,
 				"error", err)
 			continue
 		}
-		
+
 		er.logger.InfoCtx(context.Background(), "Registered exporter from configuration",
 			"exporter_name", exporterName)
 	}
-	
+
 	return manager, nil
 }
 
@@ -158,18 +160,18 @@ func (ExampleConfigurations) GetPrometheusConfig() *ExportConfig {
 	config := DefaultExportConfig()
 	config.Enabled = true
 	config.ExportInterval = 30 * time.Second
-	
+
 	config.Exporters["prometheus"] = ExporterConfig{
 		Enabled:  true,
 		Endpoint: "0.0.0.0:2112",
 		Config: map[string]interface{}{
-			"metrics_path":     "/metrics",
+			"metrics_path":      "/metrics",
 			"enable_go_metrics": true,
-			"metric_prefix":    "cfgms",
+			"metric_prefix":     "cfgms",
 		},
 		DataTypes: []string{"metrics", "health"},
 	}
-	
+
 	return config
 }
 
@@ -178,20 +180,20 @@ func (ExampleConfigurations) GetELKStackConfig() *ExportConfig {
 	config := DefaultExportConfig()
 	config.Enabled = true
 	config.ExportInterval = 10 * time.Second
-	
+
 	config.Exporters["elasticsearch"] = ExporterConfig{
 		Enabled:  true,
 		Endpoint: "https://elasticsearch:9200",
 		Config: map[string]interface{}{
-			"index_pattern":   "cfgms-logs-%{+2006.01.02}",
-			"bulk_size":       100,
-			"include_events":  true,
-			"include_logs":    true,
-			"include_health":  false,
+			"index_pattern":  "cfgms-logs-%{+2006.01.02}",
+			"bulk_size":      100,
+			"include_events": true,
+			"include_logs":   true,
+			"include_health": false,
 		},
 		DataTypes: []string{"logs", "events"},
 	}
-	
+
 	return config
 }
 
@@ -200,7 +202,7 @@ func (ExampleConfigurations) GetOTLPConfig() *ExportConfig {
 	config := DefaultExportConfig()
 	config.Enabled = true
 	config.ExportInterval = 15 * time.Second
-	
+
 	config.Exporters["otlp"] = ExporterConfig{
 		Enabled:  true,
 		Endpoint: "http://jaeger:4318",
@@ -214,7 +216,7 @@ func (ExampleConfigurations) GetOTLPConfig() *ExportConfig {
 		},
 		DataTypes: []string{"traces", "metrics", "logs"},
 	}
-	
+
 	return config
 }
 
@@ -224,33 +226,33 @@ func (ExampleConfigurations) GetFullMonitoringConfig() *ExportConfig {
 	config.Enabled = true
 	config.ExportInterval = 30 * time.Second
 	config.SamplingRate = 0.8 // Sample 80% of data
-	
+
 	// Prometheus for metrics
 	config.Exporters["prometheus"] = ExporterConfig{
 		Enabled:  true,
 		Endpoint: "0.0.0.0:2112",
 		Config: map[string]interface{}{
-			"metrics_path":     "/metrics",
-			"metric_prefix":    "cfgms",
+			"metrics_path":  "/metrics",
+			"metric_prefix": "cfgms",
 		},
-		DataTypes: []string{"metrics", "health"},
+		DataTypes:   []string{"metrics", "health"},
 		ExportTypes: []ExportType{ExportTypeScheduled},
 	}
-	
+
 	// Elasticsearch for logs and events
 	config.Exporters["elasticsearch"] = ExporterConfig{
 		Enabled:  true,
 		Endpoint: "https://elasticsearch:9200",
 		Config: map[string]interface{}{
-			"index_pattern":   "cfgms-logs-%{+2006.01.02}",
-			"bulk_size":       50,
-			"include_events":  true,
-			"include_logs":    true,
+			"index_pattern":  "cfgms-logs-%{+2006.01.02}",
+			"bulk_size":      50,
+			"include_events": true,
+			"include_logs":   true,
 		},
-		DataTypes: []string{"logs", "events"},
+		DataTypes:   []string{"logs", "events"},
 		ExportTypes: []ExportType{ExportTypeScheduled, ExportTypeTriggered},
 	}
-	
+
 	// OTLP for distributed tracing
 	config.Exporters["otlp"] = ExporterConfig{
 		Enabled:  true,
@@ -262,17 +264,17 @@ func (ExampleConfigurations) GetFullMonitoringConfig() *ExportConfig {
 			"trace_sampling_rate": 0.1,
 			"compression":         "gzip",
 		},
-		DataTypes: []string{"traces"},
+		DataTypes:   []string{"traces"},
 		ExportTypes: []ExportType{ExportTypeScheduled, ExportTypeTriggered},
 	}
-	
+
 	return config
 }
 
 // GetExampleConfig returns an example configuration based on the monitoring stack type.
 func GetExampleConfig(stackType string) *ExportConfig {
 	examples := ExampleConfigurations{}
-	
+
 	switch stackType {
 	case "prometheus":
 		return examples.GetPrometheusConfig()

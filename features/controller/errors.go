@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package controller
 
 import "errors"
@@ -14,4 +16,4 @@ var (
 
 	// ErrNotRunning is returned when attempting to stop a controller that's not running
 	ErrNotRunning = errors.New("controller not running")
-) 
+)

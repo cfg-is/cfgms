@@ -1,0 +1,304 @@
+name: Test Suite Validation
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+    # CONSERVATIVE: Only skip for pure documentation changes
+    # If PR contains ANY code changes, this will still run
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'              # Root-level markdown only (README.md, CONTRIBUTING.md)
+      - 'LICENSE'
+      - '.gitignore'
+      - '.editorconfig'
+  push:
+    branches:
+      - main  # ALWAYS run on main (no path filter)
+      - develop  # ALWAYS run on develop (no path filter)
+  workflow_dispatch:
+    inputs:
+      test_level:
+        description: 'Test level to run'
+        required: true
+        default: 'fast'
+        type: choice
+        options:
+        - fast
+        - all
+        - full
+
+env:
+  GO_VERSION: '1.23'
+
+jobs:
+  # Fast unit tests - runs on every push/PR
+  unit-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+    
+    - name: Cache Go modules
+      uses: actions/cache@v3
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
+      continue-on-error: true
+    
+    - name: Install dependencies
+      run: go mod download
+    
+    - name: Run Fast Unit Tests
+      env:
+        CFGMS_TEST_INTEGRATION: "0"
+      run: make test
+    
+    - name: Upload test results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: unit-test-results
+        path: |
+          coverage.out
+          test-results.xml
+        retention-days: 5
+
+  # Integration tests - runs when requested or on main/develop
+  integration-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    needs: unit-tests
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+    
+    - name: Cache Go modules
+      uses: actions/cache@v3
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
+      continue-on-error: true
+    
+    - name: Install dependencies
+      run: go mod download
+    
+    - name: Run Fast Comprehensive Tests
+      run: make test-fast
+    
+    - name: Run Production Critical Tests
+      run: make test-production-critical
+    
+    - name: Upload integration test results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: integration-test-results
+        path: |
+          integration-coverage.out
+          integration-results.xml
+        retention-days: 5
+
+  # Cross-feature integration tests - chunked for efficiency
+  cross-feature-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event.inputs.test_level == 'all' || github.event.inputs.test_level == 'full'
+    needs: integration-tests
+    strategy:
+      matrix:
+        test-chunk: [
+          "workflow-config",
+          "dna-drift", 
+          "template-rollback",
+          "terminal-audit",
+          "multi-tenant-saas"
+        ]
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+    
+    - name: Cache Go modules
+      uses: actions/cache@v3
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
+      continue-on-error: true
+    
+    - name: Install dependencies
+      run: go mod download
+    
+    - name: Run Cross-Feature Tests - ${{ matrix.test-chunk }}
+      run: |
+        case "${{ matrix.test-chunk }}" in
+          "workflow-config")
+            go test -v -race -timeout=25m ./test/e2e/... -run "TestE2EScenarios/TestWorkflowConfigurationIntegration"
+            ;;
+          "dna-drift")
+            go test -v -race -timeout=25m ./test/e2e/... -run "TestE2EScenarios/TestDNADriftWorkflowIntegration"
+            ;;
+          "template-rollback")
+            go test -v -race -timeout=25m ./test/e2e/... -run "TestE2EScenarios/TestTemplateRollbackIntegration"
+            ;;
+          "terminal-audit")
+            go test -v -race -timeout=25m ./test/e2e/... -run "TestE2EScenarios/TestTerminalAuditIntegration"
+            ;;
+          "multi-tenant-saas")
+            go test -v -race -timeout=25m ./test/e2e/... -run "TestE2EScenarios/TestMultiTenantSaaSIntegration"
+            ;;
+        esac
+
+  # Production readiness tests - chunked and run only for full validation
+  production-readiness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    if: github.event.inputs.test_level == 'full' || (github.ref == 'refs/heads/main' && github.event_name == 'push')
+    needs: integration-tests
+    strategy:
+      matrix:
+        readiness-test: [
+          "load-testing",
+          "performance-benchmarks",
+          "security-audit",
+          "disaster-recovery",
+          "monitoring-integration"
+        ]
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+    
+    - name: Cache Go modules
+      uses: actions/cache@v3
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
+      continue-on-error: true
+    
+    - name: Install dependencies
+      run: go mod download
+    
+    - name: Run Production Readiness Test - ${{ matrix.readiness-test }}
+      run: |
+        case "${{ matrix.readiness-test }}" in
+          "load-testing")
+            make test-load-testing
+            ;;
+          "performance-benchmarks")
+            make test-performance-benchmarks
+            ;;
+          "security-audit")
+            make test-security-audit
+            ;;
+          "disaster-recovery")
+            make test-disaster-recovery
+            ;;
+          "monitoring-integration")
+            make test-monitoring-integration
+            ;;
+        esac
+    
+    - name: Upload production test results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: production-test-results-${{ matrix.readiness-test }}
+        path: |
+          production-test-results.xml
+          production-coverage.out
+        retention-days: 30
+
+  # Synthetic monitoring validation - separate job for ongoing validation
+  synthetic-monitoring:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    if: github.event.inputs.test_level == 'full'
+    needs: production-readiness
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+    
+    - name: Cache Go modules
+      uses: actions/cache@v3
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
+      continue-on-error: true
+    
+    - name: Install dependencies
+      run: go mod download
+    
+    - name: Run Synthetic Monitoring Tests
+      run: make test-synthetic-monitoring
+
+  # Test summary and validation
+  test-summary:
+    runs-on: ubuntu-latest
+    needs: [unit-tests, integration-tests]
+    if: always()
+    steps:
+    - name: Test Results Summary
+      run: |
+        echo "## Test Suite Validation Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [[ "${{ needs.unit-tests.result }}" == "success" ]]; then
+          echo "✅ **Unit Tests**: Passed" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ **Unit Tests**: Failed" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        if [[ "${{ needs.integration-tests.result }}" == "success" ]]; then
+          echo "✅ **Integration Tests**: Passed" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ **Integration Tests**: Failed or Skipped" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Testing Strategy" >> $GITHUB_STEP_SUMMARY
+        echo "- **Fast Tests**: Unit tests run on every push (< 15 minutes)" >> $GITHUB_STEP_SUMMARY
+        echo "- **Integration Tests**: Run on main/develop branches (< 25 minutes)" >> $GITHUB_STEP_SUMMARY
+        echo "- **Cross-Feature Tests**: Run on workflow dispatch 'all' level" >> $GITHUB_STEP_SUMMARY
+        echo "- **Production Tests**: Run on workflow dispatch 'full' level or main pushes" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Manual Testing Commands" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+        echo "# Fast development testing" >> $GITHUB_STEP_SUMMARY
+        echo "make test" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "# Pre-commit validation" >> $GITHUB_STEP_SUMMARY
+        echo "make test-all" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "# Full production validation" >> $GITHUB_STEP_SUMMARY
+        echo "make test-full" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY

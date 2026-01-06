@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package entra_application
 
 import (
@@ -8,11 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/features/modules/m365/auth"
-	"github.com/cfgis/cfgms/features/modules/m365/graph"
 	"github.com/joho/godotenv"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/features/modules/m365/auth"
+	"github.com/cfgis/cfgms/features/modules/m365/graph"
 )
 
 // loadTestEnvironment loads environment variables from .env.local if it exists
@@ -62,10 +65,10 @@ func checkM365Integration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping M365 integration test in short mode")
 	}
-	
+
 	// Load credentials from .env.local or environment
 	loadTestEnvironment(t)
-	
+
 	// Integration test behavior control
 	if !hasM365Credentials() {
 		if os.Getenv("ALLOW_SKIP_INTEGRATION") == "true" {
@@ -83,10 +86,10 @@ func TestEntraApplication_Integration_BasicOperations(t *testing.T) {
 	// Create real auth provider and graph client
 	authProvider := createRealAuthProvider(t)
 	graphClient := createRealGraphClient(t)
-	
+
 	// Create module instance
 	module := New(authProvider, graphClient).(*entraApplicationModule)
-	
+
 	ctx := context.Background()
 	tenantID := os.Getenv("M365_TENANT_ID")
 
@@ -120,13 +123,13 @@ func TestEntraApplication_Integration_BasicOperations(t *testing.T) {
 			},
 		},
 		CreateServicePrincipal: false, // Don't create service principal in test
-		ManagedFieldsList: []string{"display_name", "description", "sign_in_audience"},
+		ManagedFieldsList:      []string{"display_name", "description", "sign_in_audience"},
 	}
 
 	// Test Get operation with non-existent application (currently returns placeholder data)
 	resourceID := tenantID + ":non-existent-application-id"
 	getResult, err := module.Get(ctx, resourceID)
-	
+
 	// Current implementation returns placeholder data - this will change when Graph API is fully implemented
 	if err != nil {
 		t.Logf("Get operation failed (expected for incomplete Graph API implementation): %v", err)
@@ -137,13 +140,13 @@ func TestEntraApplication_Integration_BasicOperations(t *testing.T) {
 			t.Logf("Get operation returned config of unexpected type: %T", getResult)
 		}
 	}
-	
+
 	// Test Set operation (create)
 	// Note: This test creates a real application - cleanup would be needed in production
 	// We use a placeholder resource ID for creation, but Microsoft Graph will assign a real GUID
 	createResourceID := tenantID + ":placeholder-" + time.Now().Format("20060102-150405")
 	err = module.Set(ctx, createResourceID, config)
-	
+
 	if err != nil {
 		t.Logf("Set operation failed (expected for limited implementation): %v", err)
 		// Accept either authentication/permission errors OR not-yet-implemented errors
@@ -153,18 +156,18 @@ func TestEntraApplication_Integration_BasicOperations(t *testing.T) {
 			"Expected authentication/permission/scope error or not implemented, got: %v", err)
 		return
 	}
-	
+
 	// If Set succeeded, find the created application by display name to get its real GUID
 	t.Logf("✅ APPLICATION CREATED SUCCESSFULLY! Display name: %s", config.DisplayName)
-	
+
 	// Find the created application by display name
 	filter := fmt.Sprintf("displayName eq '%s'", config.DisplayName)
 	token, err := authProvider.GetAccessToken(ctx, tenantID)
 	require.NoError(t, err, "Should be able to get access token for search")
-	
+
 	applications, err := graphClient.ListApplications(ctx, token, filter)
 	require.NoError(t, err, "Should be able to search for created application")
-	
+
 	var createdApp *graph.Application
 	for _, app := range applications {
 		if app.DisplayName == config.DisplayName {
@@ -173,18 +176,18 @@ func TestEntraApplication_Integration_BasicOperations(t *testing.T) {
 		}
 	}
 	require.NotNil(t, createdApp, "Should find the created application by display name")
-	
+
 	// Test Get operation with the real application GUID
 	realResourceID := tenantID + ":" + createdApp.ID
 	getResult, err = module.Get(ctx, realResourceID)
 	require.NoError(t, err, "Should be able to retrieve created application")
-	
+
 	retrievedConfig, ok := getResult.(*EntraApplicationConfig)
 	require.True(t, ok, "Retrieved config should be EntraApplicationConfig")
 	assert.Equal(t, config.DisplayName, retrievedConfig.DisplayName)
 	assert.Equal(t, config.Description, retrievedConfig.Description)
 	assert.Equal(t, config.SignInAudience, retrievedConfig.SignInAudience)
-	
+
 	// Test cleanup - delete the created application
 	t.Cleanup(func() {
 		cleanupToken, tokenErr := authProvider.GetAccessToken(ctx, tenantID)
@@ -199,7 +202,7 @@ func TestEntraApplication_Integration_BasicOperations(t *testing.T) {
 			t.Logf("Successfully cleaned up application %s (%s)", createdApp.DisplayName, createdApp.ID)
 		}
 	})
-	
+
 	t.Logf("✅ FULL CRUD OPERATIONS VERIFIED! Application: %s (ID: %s)", createdApp.DisplayName, createdApp.ID)
 }
 
@@ -210,10 +213,10 @@ func TestEntraApplication_Integration_ConfigValidation(t *testing.T) {
 	// Create real auth provider and graph client
 	authProvider := createRealAuthProvider(t)
 	graphClient := createRealGraphClient(t)
-	
+
 	// Create module instance
 	module := New(authProvider, graphClient).(*entraApplicationModule)
-	
+
 	ctx := context.Background()
 	tenantID := os.Getenv("M365_TENANT_ID")
 
@@ -226,7 +229,7 @@ func TestEntraApplication_Integration_ConfigValidation(t *testing.T) {
 
 	resourceID := tenantID + ":validation-test-application"
 	err := module.Set(ctx, resourceID, invalidConfig)
-	
+
 	// Should get validation error before making API call
 	assert.Error(t, err, "Set should return validation error for invalid config")
 	assert.Regexp(t, "(display_name|tenant_id)", err.Error(), "Error should mention missing required fields")
@@ -239,10 +242,10 @@ func TestEntraApplication_Integration_ComplexConfiguration(t *testing.T) {
 	// Create real auth provider and graph client
 	authProvider := createRealAuthProvider(t)
 	graphClient := createRealGraphClient(t)
-	
+
 	// Create module instance
 	module := New(authProvider, graphClient).(*entraApplicationModule)
-	
+
 	ctx := context.Background()
 	tenantID := os.Getenv("M365_TENANT_ID")
 
@@ -347,7 +350,7 @@ func TestEntraApplication_Integration_ComplexConfiguration(t *testing.T) {
 	// Test Set operation (this may fail due to permissions, which is expected)
 	resourceID := tenantID + ":complex-test-application-" + time.Now().Format("20060102-150405")
 	err = module.Set(ctx, resourceID, complexConfig)
-	
+
 	if err != nil {
 		t.Logf("Complex Set operation failed (expected for limited implementation): %v", err)
 		// Accept either authentication/permission errors OR not-yet-implemented errors
@@ -355,7 +358,7 @@ func TestEntraApplication_Integration_ComplexConfiguration(t *testing.T) {
 			"Expected authentication/permission/scope error or not implemented, got: %v", err)
 	} else {
 		t.Logf("Complex application created successfully: %s", complexConfig.DisplayName)
-		
+
 		// Find and cleanup the created application
 		filter := fmt.Sprintf("displayName eq '%s'", complexConfig.DisplayName)
 		token, tokenErr := authProvider.GetAccessToken(ctx, tenantID)
@@ -363,13 +366,13 @@ func TestEntraApplication_Integration_ComplexConfiguration(t *testing.T) {
 			t.Logf("Failed to get token for complex app cleanup: %v", tokenErr)
 			return
 		}
-		
+
 		applications, searchErr := graphClient.ListApplications(ctx, token, filter)
 		if searchErr != nil {
 			t.Logf("Failed to search for complex application: %v", searchErr)
 			return
 		}
-		
+
 		for _, app := range applications {
 			if app.DisplayName == complexConfig.DisplayName {
 				t.Cleanup(func() {
@@ -397,13 +400,13 @@ func TestEntraApplication_Integration_AuthenticationFlow(t *testing.T) {
 
 	// Create real auth provider
 	authProvider := createRealAuthProvider(t)
-	
+
 	ctx := context.Background()
 	tenantID := os.Getenv("M365_TENANT_ID")
 
 	// Test token acquisition
 	token, err := authProvider.GetAccessToken(ctx, tenantID)
-	
+
 	if err != nil {
 		t.Logf("Authentication failed (expected for limited test credentials): %v", err)
 		// Don't fail the test if we don't have sufficient permissions
@@ -411,16 +414,16 @@ func TestEntraApplication_Integration_AuthenticationFlow(t *testing.T) {
 			"Expected authentication error, got: %v", err)
 		return
 	}
-	
+
 	require.NotNil(t, token, "Token should not be nil")
 	assert.NotEmpty(t, token.Token, "Token string should not be empty")
 	assert.Equal(t, tenantID, token.TenantID, "Token should be for correct tenant")
 	assert.False(t, token.IsExpired(), "Token should not be expired")
-	
+
 	// Test token validation
 	isValid := authProvider.IsTokenValid(token)
 	assert.True(t, isValid, "Token should be valid")
-	
+
 	// Test required permissions
 	requiredScopes := []string{"https://graph.microsoft.com/.default"}
 	err = authProvider.ValidatePermissions(ctx, token, requiredScopes)
@@ -451,11 +454,11 @@ func TestEntraApplication_Integration_ResourceIDParsing(t *testing.T) {
 // createRealAuthProvider creates a real OAuth2Provider for integration testing
 func createRealAuthProvider(t *testing.T) auth.Provider {
 	tempDir := t.TempDir()
-	
+
 	// Create credential store
 	credStore, err := auth.NewFileCredentialStore(tempDir, "integration-test-passphrase")
 	require.NoError(t, err, "Failed to create credential store")
-	
+
 	// Create OAuth2 config from environment
 	config := &auth.OAuth2Config{
 		ClientID:             os.Getenv("M365_CLIENT_ID"),
@@ -466,10 +469,10 @@ func createRealAuthProvider(t *testing.T) auth.Provider {
 			"https://graph.microsoft.com/.default",
 		},
 	}
-	
+
 	// Create provider
 	provider := auth.NewOAuth2Provider(credStore, config)
-	
+
 	return provider
 }
 
@@ -477,7 +480,7 @@ func createRealAuthProvider(t *testing.T) auth.Provider {
 func createRealGraphClient(t *testing.T) graph.Client {
 	// Create HTTP client for real Graph API calls
 	client := graph.NewHTTPClient()
-	
+
 	return client
 }
 
@@ -488,10 +491,10 @@ func TestEntraApplication_Integration_FullCRUD(t *testing.T) {
 	// Create real auth provider and graph client
 	authProvider := createRealAuthProvider(t)
 	graphClient := createRealGraphClient(t)
-	
+
 	// Create module instance
 	module := New(authProvider, graphClient).(*entraApplicationModule)
-	
+
 	ctx := context.Background()
 	tenantID := os.Getenv("M365_TENANT_ID")
 	timestamp := time.Now().Format("20060102-150405")
@@ -538,11 +541,11 @@ func TestEntraApplication_Integration_FullCRUD(t *testing.T) {
 	filter := fmt.Sprintf("displayName eq '%s'", initialConfig.DisplayName)
 	token, err := authProvider.GetAccessToken(ctx, tenantID)
 	require.NoError(t, err, "Should be able to get access token")
-	
+
 	applications, err := graphClient.ListApplications(ctx, token, filter)
 	require.NoError(t, err, "Should be able to search for created application")
 	require.Greater(t, len(applications), 0, "Should find the created application")
-	
+
 	var createdApp *graph.Application
 	for _, app := range applications {
 		if app.DisplayName == initialConfig.DisplayName {
@@ -572,7 +575,7 @@ func TestEntraApplication_Integration_FullCRUD(t *testing.T) {
 	realResourceID := tenantID + ":" + createdApp.ID
 	getResult, err := module.Get(ctx, realResourceID)
 	require.NoError(t, err, "Should be able to retrieve created application")
-	
+
 	retrievedConfig, ok := getResult.(*EntraApplicationConfig)
 	require.True(t, ok, "Retrieved config should be EntraApplicationConfig")
 	assert.Equal(t, initialConfig.DisplayName, retrievedConfig.DisplayName)
@@ -621,12 +624,12 @@ func TestEntraApplication_Integration_FullCRUD(t *testing.T) {
 	t.Log("🔄 STEP 4: READ application to validate update")
 	getResult, err = module.Get(ctx, realResourceID)
 	require.NoError(t, err, "Should be able to retrieve updated application")
-	
+
 	finalConfig, ok := getResult.(*EntraApplicationConfig)
 	require.True(t, ok, "Retrieved config should be EntraApplicationConfig")
 	assert.Equal(t, updatedConfig.Description, finalConfig.Description, "Description should be updated")
 	assert.Equal(t, updatedConfig.SignInAudience, finalConfig.SignInAudience, "SignInAudience should be updated")
-	
+
 	// Check redirect URIs (handle potential nil)
 	if finalConfig.RedirectUris != nil {
 		assert.Len(t, finalConfig.RedirectUris.Web, 2, "Should have 2 web redirect URIs")
@@ -653,19 +656,19 @@ func TestEntraApplication_Integration_FullSuite(t *testing.T) {
 	t.Run("BasicOperations", func(t *testing.T) {
 		TestEntraApplication_Integration_BasicOperations(t)
 	})
-	
+
 	t.Run("ConfigValidation", func(t *testing.T) {
 		TestEntraApplication_Integration_ConfigValidation(t)
 	})
-	
+
 	t.Run("ComplexConfiguration", func(t *testing.T) {
 		TestEntraApplication_Integration_ComplexConfiguration(t)
 	})
-	
+
 	t.Run("AuthenticationFlow", func(t *testing.T) {
 		TestEntraApplication_Integration_AuthenticationFlow(t)
 	})
-	
+
 	t.Run("ResourceIDParsing", func(t *testing.T) {
 		TestEntraApplication_Integration_ResourceIDParsing(t)
 	})

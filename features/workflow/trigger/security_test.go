@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package trigger
 
 import (
@@ -487,8 +489,8 @@ func TestSecurityEdgeCases_TenantIsolation(t *testing.T) {
 			description: "Should not return triggers for non-existent tenant",
 		},
 		{
-			name: "No tenant filter - should get all (admin access)",
-			filter: &TriggerFilter{},
+			name:        "No tenant filter - should get all (admin access)",
+			filter:      &TriggerFilter{},
 			expectCount: 2,
 			description: "No tenant filter should return all triggers (admin access)",
 		},

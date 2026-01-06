@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package discovery
 
 import (
@@ -22,7 +24,7 @@ func TestDiscoverModules(t *testing.T) {
 				tempDir := t.TempDir()
 				modulePath := filepath.Join(tempDir, "test-module")
 				require.NoError(t, os.MkdirAll(modulePath, 0755))
-				
+
 				// Create module.yaml
 				moduleYAML := `name: test-module
 version: 1.0.0
@@ -32,7 +34,7 @@ capabilities:
 `
 				require.NoError(t, os.WriteFile(filepath.Join(modulePath, "module.yaml"), []byte(moduleYAML), 0644))
 				require.NoError(t, os.WriteFile(filepath.Join(modulePath, "module.go"), []byte("package testmodule"), 0644))
-				
+
 				return []string{tempDir}, func() {}
 			},
 			wantModules: []string{"test-module"},
@@ -50,7 +52,7 @@ capabilities:
 			name: "discovers multiple modules",
 			setupFunc: func(t *testing.T) ([]string, func()) {
 				tempDir := t.TempDir()
-				
+
 				// Create first module
 				module1Path := filepath.Join(tempDir, "module1")
 				require.NoError(t, os.MkdirAll(module1Path, 0755))
@@ -60,7 +62,7 @@ description: First module
 `
 				require.NoError(t, os.WriteFile(filepath.Join(module1Path, "module.yaml"), []byte(module1YAML), 0644))
 				require.NoError(t, os.WriteFile(filepath.Join(module1Path, "module.go"), []byte("package module1"), 0644))
-				
+
 				// Create second module
 				module2Path := filepath.Join(tempDir, "module2")
 				require.NoError(t, os.MkdirAll(module2Path, 0755))
@@ -70,7 +72,7 @@ description: Second module
 `
 				require.NoError(t, os.WriteFile(filepath.Join(module2Path, "module.yaml"), []byte(module2YAML), 0644))
 				require.NoError(t, os.WriteFile(filepath.Join(module2Path, "module.go"), []byte("package module2"), 0644))
-				
+
 				return []string{tempDir}, func() {}
 			},
 			wantModules: []string{"module1", "module2"},

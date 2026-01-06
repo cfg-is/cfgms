@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // Package interfaces defines global storage contracts used by all CFGMS modules
 package interfaces
 
@@ -25,10 +27,10 @@ type ClientTenantStore interface {
 // ClientTenant represents an MSP client organization
 type ClientTenant struct {
 	ID               string                 `json:"id"`
-	TenantID         string                 `json:"tenant_id"`         // Client's Azure AD tenant ID
-	TenantName       string                 `json:"tenant_name"`       // Client organization name
-	DomainName       string                 `json:"domain_name"`       // Primary domain (e.g., client.com)
-	AdminEmail       string                 `json:"admin_email"`       // Admin who consented
+	TenantID         string                 `json:"tenant_id"`   // Client's Azure AD tenant ID
+	TenantName       string                 `json:"tenant_name"` // Client organization name
+	DomainName       string                 `json:"domain_name"` // Primary domain (e.g., client.com)
+	AdminEmail       string                 `json:"admin_email"` // Admin who consented
 	ConsentedAt      time.Time              `json:"consented_at"`
 	Status           ClientTenantStatus     `json:"status"`
 	ClientIdentifier string                 `json:"client_identifier"` // CFGMS internal client ID
@@ -71,9 +73,9 @@ func (e *ClientTenantValidationError) Error() string {
 
 // Common client tenant errors
 var (
-	ErrTenantNotFound     = &ClientTenantValidationError{Field: "tenant_id", Message: "tenant not found", Code: "TENANT_NOT_FOUND"}
-	ErrTenantExists       = &ClientTenantValidationError{Field: "tenant_id", Message: "tenant already exists", Code: "TENANT_EXISTS"}
-	ErrInvalidTenantID    = &ClientTenantValidationError{Field: "tenant_id", Message: "invalid tenant ID", Code: "INVALID_TENANT_ID"}
-	ErrInvalidEmail       = &ClientTenantValidationError{Field: "admin_email", Message: "invalid email address", Code: "INVALID_EMAIL"}
-	ErrConsentExpired     = &ClientTenantValidationError{Field: "consent", Message: "admin consent has expired", Code: "CONSENT_EXPIRED"}
+	ErrTenantNotFound  = &ClientTenantValidationError{Field: "tenant_id", Message: "tenant not found", Code: "TENANT_NOT_FOUND"}
+	ErrTenantExists    = &ClientTenantValidationError{Field: "tenant_id", Message: "tenant already exists", Code: "TENANT_EXISTS"}
+	ErrInvalidTenantID = &ClientTenantValidationError{Field: "tenant_id", Message: "invalid tenant ID", Code: "INVALID_TENANT_ID"}
+	ErrInvalidEmail    = &ClientTenantValidationError{Field: "admin_email", Message: "invalid email address", Code: "INVALID_EMAIL"}
+	ErrConsentExpired  = &ClientTenantValidationError{Field: "consent", Message: "admin consent has expired", Code: "CONSENT_EXPIRED"}
 )

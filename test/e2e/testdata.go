@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package e2e
 
 import (
@@ -41,11 +43,11 @@ func (g *TestDataGenerator) cryptoRandInt(max int64) int64 {
 func (g *TestDataGenerator) GenerateTestDNA(stewardID string) *common.DNA {
 	// Base attributes that work across all platforms
 	attributes := map[string]string{
-		"hostname":     fmt.Sprintf("test-%s", stewardID),
-		"steward_id":   stewardID,
-		"version":      "test-1.0.0",
-		"environment":  "testing",
-		"test_mode":    "true",
+		"hostname":    fmt.Sprintf("test-%s", stewardID),
+		"steward_id":  stewardID,
+		"version":     "test-1.0.0",
+		"environment": "testing",
+		"test_mode":   "true",
 	}
 
 	// Add platform-specific attributes based on test data size
@@ -74,12 +76,12 @@ func (g *TestDataGenerator) GenerateTestDNA(stewardID string) *common.DNA {
 		attributes["kernel_version"] = g.generateKernelVersion()
 		attributes["uptime_seconds"] = fmt.Sprintf("%d", g.cryptoRandInt(86400*30))
 		attributes["load_average"] = fmt.Sprintf("%.2f", float64(g.cryptoRandInt(400))/100.0)
-		
+
 		// Add security attributes
 		attributes["firewall_enabled"] = g.randomChoice([]string{"true", "false"})
 		attributes["antivirus_status"] = g.randomChoice([]string{"active", "inactive", "unknown"})
 		attributes["encryption_status"] = g.randomChoice([]string{"enabled", "disabled", "partial"})
-		
+
 		// Add network attributes
 		for i := 0; i < int(g.cryptoRandInt(3))+1; i++ {
 			attributes[fmt.Sprintf("ip_address_%d", i)] = g.generateIPAddress()
@@ -117,7 +119,7 @@ func (g *TestDataGenerator) GenerateStewardConfig(stewardID string) *config.Stew
 	switch g.config.TestDataSize {
 	case "small":
 		// Minimal resources for fast CI testing
-		baseConfig.Resources = append(baseConfig.Resources, 
+		baseConfig.Resources = append(baseConfig.Resources,
 			g.generateDirectoryResource("test-dir", "/tmp/cfgms-test"),
 			g.generateFileResource("test-file", "/tmp/cfgms-test/test.txt", "CI Test Content"),
 		)
@@ -182,17 +184,17 @@ func (g *TestDataGenerator) GenerateStewardConfig(stewardID string) *config.Stew
 // GenerateMultipleStewardConfigs creates multiple steward configurations for scalability testing
 func (g *TestDataGenerator) GenerateMultipleStewardConfigs(count int) map[string]*config.StewardConfig {
 	configs := make(map[string]*config.StewardConfig)
-	
+
 	// Limit count for CI environments
 	if g.config.OptimizeForCI && count > 3 {
 		count = 3
 	}
-	
+
 	for i := 0; i < count; i++ {
 		stewardID := fmt.Sprintf("test-steward-%d", i)
 		configs[stewardID] = g.GenerateStewardConfig(stewardID)
 	}
-	
+
 	return configs
 }
 
@@ -212,7 +214,7 @@ func (g *TestDataGenerator) GenerateTestTenantData() map[string]interface{} {
 				"parent_id": "test-msp",
 			},
 			{
-				"id":        "test-client-2", 
+				"id":        "test-client-2",
 				"name":      "Test Client 2",
 				"type":      "client",
 				"parent_id": "test-msp",
@@ -279,8 +281,8 @@ func (g *TestDataGenerator) generateKernelVersion() string {
 }
 
 func (g *TestDataGenerator) generateIPAddress() string {
-	return fmt.Sprintf("192.168.%d.%d", 
-		g.cryptoRandInt(255)+1, 
+	return fmt.Sprintf("192.168.%d.%d",
+		g.cryptoRandInt(255)+1,
 		g.cryptoRandInt(254)+1)
 }
 
@@ -318,10 +320,10 @@ func (g *TestDataGenerator) randomChoice(choices []string) string {
 // GeneratePerformanceTestData creates data specifically for performance regression tests
 func (g *TestDataGenerator) GeneratePerformanceTestData() *PerformanceTestData {
 	return &PerformanceTestData{
-		ConcurrentStewards:    g.getPerformanceInt("stewards", 10, 100, 1000),
-		RequestsPerSecond:     g.getPerformanceInt("rps", 50, 200, 1000),
-		TestDurationSeconds:   g.getPerformanceInt("duration", 30, 60, 300),
-		DNAAttributesPerNode:  g.getPerformanceInt("dna_attrs", 10, 50, 200),
+		ConcurrentStewards:     g.getPerformanceInt("stewards", 10, 100, 1000),
+		RequestsPerSecond:      g.getPerformanceInt("rps", 50, 200, 1000),
+		TestDurationSeconds:    g.getPerformanceInt("duration", 30, 60, 300),
+		DNAAttributesPerNode:   g.getPerformanceInt("dna_attrs", 10, 50, 200),
 		ConfigResourcesPerNode: g.getPerformanceInt("config_resources", 5, 20, 100),
 	}
 }
@@ -354,7 +356,7 @@ func (g *TestDataGenerator) getPerformanceInt(metric string, small, medium, larg
 func (g *TestDataGenerator) GenerateWorkflowConfigurationScenario() *WorkflowConfigurationScenario {
 	stewardID := "workflow-config-test-steward"
 	templateID := "test-app-deployment-template"
-	
+
 	// Create a realistic deployment template
 	template := &TemplateData{
 		ID:   templateID,
@@ -400,7 +402,7 @@ resources:
 			"service_name": "testapp",
 		},
 	}
-	
+
 	// Create workflow that uses the template
 	workflow := &WorkflowData{
 		Name:        "deploy-application-workflow",
@@ -445,7 +447,7 @@ resources:
 			},
 		},
 	}
-	
+
 	return &WorkflowConfigurationScenario{
 		StewardID: stewardID,
 		Template:  template,
@@ -453,21 +455,21 @@ resources:
 	}
 }
 
-// GenerateDNADriftScenario creates data for DNA + drift detection integration testing  
+// GenerateDNADriftScenario creates data for DNA + drift detection integration testing
 func (g *TestDataGenerator) GenerateDNADriftScenario() *DNADriftScenario {
 	stewardID := "dna-drift-test-steward"
-	
+
 	// Generate baseline DNA
 	baselineDNA := g.GenerateTestDNA(stewardID)
-	
+
 	// Create modified DNA simulating system drift
 	driftedDNA := g.GenerateTestDNA(stewardID)
 	// Simulate critical changes that should trigger alerts
-	driftedDNA.Attributes["cpu_cores"] = "8"  // Changed from original
-	driftedDNA.Attributes["memory_mb"] = "8192" // Changed from original
-	driftedDNA.Attributes["firewall_enabled"] = "false" // Security-critical change
+	driftedDNA.Attributes["cpu_cores"] = "8"               // Changed from original
+	driftedDNA.Attributes["memory_mb"] = "8192"            // Changed from original
+	driftedDNA.Attributes["firewall_enabled"] = "false"    // Security-critical change
 	driftedDNA.Attributes["antivirus_status"] = "inactive" // Security-critical change
-	
+
 	// Create remediation workflow
 	remediationWorkflow := &WorkflowData{
 		Name:        "drift-remediation-workflow",
@@ -477,7 +479,7 @@ func (g *TestDataGenerator) GenerateDNADriftScenario() *DNADriftScenario {
 				Name: "assess-drift-severity",
 				Type: "conditional",
 				Condition: map[string]interface{}{
-					"type":     "expression",
+					"type":       "expression",
 					"expression": "${firewall_enabled} == 'false' || ${antivirus_status} == 'inactive'",
 				},
 				Steps: []WorkflowStep{
@@ -510,7 +512,7 @@ func (g *TestDataGenerator) GenerateDNADriftScenario() *DNADriftScenario {
 					},
 					{
 						Name: "start-antivirus",
-						Type: "script", 
+						Type: "script",
 						Config: map[string]interface{}{
 							"script":      "systemctl start clamav-daemon",
 							"interpreter": "bash",
@@ -521,12 +523,12 @@ func (g *TestDataGenerator) GenerateDNADriftScenario() *DNADriftScenario {
 			},
 		},
 	}
-	
+
 	return &DNADriftScenario{
-		StewardID:           stewardID,
-		BaselineDNA:        baselineDNA,
-		DriftedDNA:         driftedDNA,
-		RemediationWorkflow: remediationWorkflow,
+		StewardID:             stewardID,
+		BaselineDNA:           baselineDNA,
+		DriftedDNA:            driftedDNA,
+		RemediationWorkflow:   remediationWorkflow,
 		ExpectedDetectionTime: 5 * time.Minute, // SLA requirement
 	}
 }
@@ -534,7 +536,7 @@ func (g *TestDataGenerator) GenerateDNADriftScenario() *DNADriftScenario {
 // GenerateTemplateRollbackScenario creates data for template + rollback integration testing
 func (g *TestDataGenerator) GenerateTemplateRollbackScenario() *TemplateRollbackScenario {
 	stewardID := "template-rollback-test"
-	
+
 	// Create a template that will intentionally fail
 	faultyTemplate := &TemplateData{
 		ID:   "faulty-deployment-template",
@@ -561,12 +563,12 @@ resources:
 			"should_fail": true,
 		},
 	}
-	
+
 	// Create known-good rollback configuration
 	rollbackConfig := map[string]interface{}{
 		"resources": []map[string]interface{}{
 			{
-				"name":   "cleanup-directory", 
+				"name":   "cleanup-directory",
 				"module": "directory",
 				"config": map[string]interface{}{
 					"path":  "/opt/testapp",
@@ -575,12 +577,12 @@ resources:
 			},
 		},
 	}
-	
+
 	return &TemplateRollbackScenario{
-		StewardID:        stewardID,
-		FaultyTemplate:   faultyTemplate,
-		RollbackConfig:   rollbackConfig,
-		MaxRollbackTime:  30 * time.Second,
+		StewardID:       stewardID,
+		FaultyTemplate:  faultyTemplate,
+		RollbackConfig:  rollbackConfig,
+		MaxRollbackTime: 30 * time.Second,
 	}
 }
 
@@ -588,31 +590,31 @@ resources:
 func (g *TestDataGenerator) GenerateTerminalAuditScenario() *TerminalAuditScenario {
 	stewardID := "terminal-audit-test"
 	userID := "test-user"
-	
+
 	// Create test commands with different security levels
 	testCommands := []TerminalCommand{
 		{
-			Command:       "ls -la",
+			Command:        "ls -la",
 			ExpectedAction: "allow",
-			RiskLevel:     "low",
+			RiskLevel:      "low",
 		},
 		{
-			Command:       "cat /etc/passwd",
-			ExpectedAction: "allow", 
-			RiskLevel:     "medium",
+			Command:        "cat /etc/passwd",
+			ExpectedAction: "allow",
+			RiskLevel:      "medium",
 		},
 		{
-			Command:       "rm -rf /tmp/testfile",
+			Command:        "rm -rf /tmp/testfile",
 			ExpectedAction: "block",
-			RiskLevel:     "high",
+			RiskLevel:      "high",
 		},
 		{
-			Command:       "sudo su -",
+			Command:        "sudo su -",
 			ExpectedAction: "audit",
-			RiskLevel:     "critical",
+			RiskLevel:      "critical",
 		},
 	}
-	
+
 	// Create RBAC permissions for test user
 	userPermissions := map[string]bool{
 		"terminal.connect": true,
@@ -621,12 +623,12 @@ func (g *TestDataGenerator) GenerateTerminalAuditScenario() *TerminalAuditScenar
 		"terminal.audit":   false, // Cannot view audit logs
 		"terminal.admin":   false, // Cannot admin terminals
 	}
-	
+
 	return &TerminalAuditScenario{
-		StewardID:       stewardID,
-		UserID:          userID,
-		TestCommands:    testCommands,
-		UserPermissions: userPermissions,
+		StewardID:           stewardID,
+		UserID:              userID,
+		TestCommands:        testCommands,
+		UserPermissions:     userPermissions,
 		ExpectedAuditEvents: len(testCommands) + 2, // Commands + session start/end
 	}
 }
@@ -646,11 +648,11 @@ func (g *TestDataGenerator) GenerateMultiTenantSaaSScenario() *MultiTenantSaaSSc
 			},
 		},
 	}
-	
+
 	// Create client-level configuration that inherits from MSP
 	clientConfig := map[string]interface{}{
 		"tenant_id":   "test-client-1",
-		"tenant_type": "client", 
+		"tenant_type": "client",
 		"parent_id":   "test-msp",
 		"m365": map[string]interface{}{
 			"domain": "testclient1.onmicrosoft.com",
@@ -659,45 +661,45 @@ func (g *TestDataGenerator) GenerateMultiTenantSaaSScenario() *MultiTenantSaaSSc
 			},
 			"users": []map[string]interface{}{
 				{
-					"display_name":    "Test User 1",
+					"display_name":        "Test User 1",
 					"user_principal_name": "testuser1@testclient1.onmicrosoft.com",
-					"job_title":       "Test Engineer",
-					"department":      "IT",
+					"job_title":           "Test Engineer",
+					"department":          "IT",
 				},
 			},
 		},
 	}
-	
+
 	// Create expected effective configuration after inheritance
 	expectedEffectiveConfig := map[string]interface{}{
 		"tenant_id":   "test-client-1",
 		"tenant_type": "client",
-		"parent_id":   "test-msp", 
+		"parent_id":   "test-msp",
 		"m365": map[string]interface{}{
-			"domain":         "testclient1.onmicrosoft.com",
+			"domain":          "testclient1.onmicrosoft.com",
 			"default_license": "Microsoft 365 Business Premium", // Inherited from MSP
 			"security_defaults": map[string]interface{}{
-				"mfa_required":        true, // Inherited from MSP
+				"mfa_required":        true,   // Inherited from MSP
 				"password_complexity": "high", // Inherited from MSP
-				"session_timeout":     "4h", // Overridden by client
+				"session_timeout":     "4h",   // Overridden by client
 			},
 			"users": []map[string]interface{}{
 				{
-					"display_name":    "Test User 1",
+					"display_name":        "Test User 1",
 					"user_principal_name": "testuser1@testclient1.onmicrosoft.com",
-					"job_title":       "Test Engineer",
-					"department":      "IT",
+					"job_title":           "Test Engineer",
+					"department":          "IT",
 				},
 			},
 		},
 	}
-	
+
 	return &MultiTenantSaaSScenario{
 		MSPConfig:               mspConfig,
 		ClientConfig:            clientConfig,
 		ExpectedEffectiveConfig: expectedEffectiveConfig,
-		SaaSStewardID:          "saas-test-steward",
-		TenantHierarchy: []string{"test-msp", "test-client-1"},
+		SaaSStewardID:           "saas-test-steward",
+		TenantHierarchy:         []string{"test-msp", "test-client-1"},
 	}
 }
 
@@ -710,7 +712,7 @@ type WorkflowConfigurationScenario struct {
 }
 
 type DNADriftScenario struct {
-	StewardID              string
+	StewardID             string
 	BaselineDNA           *common.DNA
 	DriftedDNA            *common.DNA
 	RemediationWorkflow   *WorkflowData
@@ -736,8 +738,8 @@ type MultiTenantSaaSScenario struct {
 	MSPConfig               map[string]interface{}
 	ClientConfig            map[string]interface{}
 	ExpectedEffectiveConfig map[string]interface{}
-	SaaSStewardID          string
-	TenantHierarchy        []string
+	SaaSStewardID           string
+	TenantHierarchy         []string
 }
 
 type TemplateData struct {

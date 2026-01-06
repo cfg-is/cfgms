@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package continuous
 
 import (
@@ -10,57 +12,57 @@ import (
 // PermissionEventBus provides real-time permission event distribution
 type PermissionEventBus struct {
 	// Event channels
-	eventChannel           chan *PermissionEvent
-	subscribers           map[string]chan *PermissionEvent
-	subscriberMutex       sync.RWMutex
-	
+	eventChannel    chan *PermissionEvent
+	subscribers     map[string]chan *PermissionEvent
+	subscriberMutex sync.RWMutex
+
 	// Event processing
-	eventProcessor        *EventProcessor
-	eventStore           *EventStore
-	
+	eventProcessor *EventProcessor
+	eventStore     *EventStore
+
 	// Configuration
-	bufferSize           int
-	processingTimeout    time.Duration
-	maxRetries          int
-	
+	bufferSize        int
+	processingTimeout time.Duration
+	maxRetries        int
+
 	// Control
-	started             bool
-	stopChannel         chan struct{}
-	processingGroup     sync.WaitGroup
-	
+	started         bool
+	stopChannel     chan struct{}
+	processingGroup sync.WaitGroup
+
 	// Statistics
-	stats               EventBusStats
-	mutex              sync.RWMutex
+	stats EventBusStats
+	mutex sync.RWMutex
 }
 
 // PermissionEvent represents a permission-related event in the system
 type PermissionEvent struct {
 	// Event identification
-	EventID       string                 `json:"event_id"`
-	EventType     PermissionEventType    `json:"event_type"`
-	Timestamp     time.Time              `json:"timestamp"`
-	
+	EventID   string              `json:"event_id"`
+	EventType PermissionEventType `json:"event_type"`
+	Timestamp time.Time           `json:"timestamp"`
+
 	// Event source
-	Source        EventSource            `json:"source"`
-	SourceID      string                 `json:"source_id"`
-	
+	Source   EventSource `json:"source"`
+	SourceID string      `json:"source_id"`
+
 	// Subject information
-	SubjectID     string                 `json:"subject_id"`
-	TenantID      string                 `json:"tenant_id"`
-	SessionID     string                 `json:"session_id,omitempty"`
-	
+	SubjectID string `json:"subject_id"`
+	TenantID  string `json:"tenant_id"`
+	SessionID string `json:"session_id,omitempty"`
+
 	// Permission details
-	PermissionID  string                 `json:"permission_id,omitempty"`
-	Permissions   []string               `json:"permissions,omitempty"`
-	
+	PermissionID string   `json:"permission_id,omitempty"`
+	Permissions  []string `json:"permissions,omitempty"`
+
 	// Event data
-	Data          map[string]interface{} `json:"data"`
-	Context       map[string]interface{} `json:"context"`
-	
+	Data    map[string]interface{} `json:"data"`
+	Context map[string]interface{} `json:"context"`
+
 	// Processing metadata
-	ProcessedAt   time.Time              `json:"processed_at,omitempty"`
-	Attempts      int                    `json:"attempts"`
-	LastError     string                 `json:"last_error,omitempty"`
+	ProcessedAt time.Time `json:"processed_at,omitempty"`
+	Attempts    int       `json:"attempts"`
+	LastError   string    `json:"last_error,omitempty"`
 }
 
 // PermissionEventType defines types of permission events
@@ -68,85 +70,85 @@ type PermissionEventType string
 
 const (
 	// Permission lifecycle events
-	EventTypePermissionGranted     PermissionEventType = "permission_granted"
-	EventTypePermissionRevoked     PermissionEventType = "permission_revoked"
-	EventTypePermissionExpired     PermissionEventType = "permission_expired"
-	EventTypePermissionRenewed     PermissionEventType = "permission_renewed"
-	
+	EventTypePermissionGranted PermissionEventType = "permission_granted"
+	EventTypePermissionRevoked PermissionEventType = "permission_revoked"
+	EventTypePermissionExpired PermissionEventType = "permission_expired"
+	EventTypePermissionRenewed PermissionEventType = "permission_renewed"
+
 	// Authorization events
 	EventTypeAuthorizationRequested PermissionEventType = "authorization_requested"
 	EventTypeAuthorizationGranted   PermissionEventType = "authorization_granted"
 	EventTypeAuthorizationDenied    PermissionEventType = "authorization_denied"
 	EventTypeAuthorizationCached    PermissionEventType = "authorization_cached"
-	
+
 	// Session events
-	EventTypeSessionRegistered     PermissionEventType = "session_registered"
-	EventTypeSessionTerminated     PermissionEventType = "session_terminated"
-	EventTypeSessionExpired        PermissionEventType = "session_expired"
-	EventTypeSessionUpdated        PermissionEventType = "session_updated"
-	
+	EventTypeSessionRegistered PermissionEventType = "session_registered"
+	EventTypeSessionTerminated PermissionEventType = "session_terminated"
+	EventTypeSessionExpired    PermissionEventType = "session_expired"
+	EventTypeSessionUpdated    PermissionEventType = "session_updated"
+
 	// Policy events
-	EventTypePolicyViolation       PermissionEventType = "policy_violation"
-	EventTypePolicyEnforced        PermissionEventType = "policy_enforced"
-	EventTypePolicyUpdated         PermissionEventType = "policy_updated"
-	
+	EventTypePolicyViolation PermissionEventType = "policy_violation"
+	EventTypePolicyEnforced  PermissionEventType = "policy_enforced"
+	EventTypePolicyUpdated   PermissionEventType = "policy_updated"
+
 	// Risk events
 	EventTypeRiskAssessmentChanged PermissionEventType = "risk_assessment_changed"
 	EventTypeRiskThresholdExceeded PermissionEventType = "risk_threshold_exceeded"
-	
+
 	// System events
-	EventTypeSystemAlert           PermissionEventType = "system_alert"
-	EventTypeSystemMaintenance     PermissionEventType = "system_maintenance"
+	EventTypeSystemAlert       PermissionEventType = "system_alert"
+	EventTypeSystemMaintenance PermissionEventType = "system_maintenance"
 )
 
 // EventSource defines the source of an event
 type EventSource string
 
 const (
-	EventSourceRBAC            EventSource = "rbac"
-	EventSourceJIT             EventSource = "jit"
-	EventSourceRisk            EventSource = "risk"
-	EventSourceContinuous      EventSource = "continuous"
-	EventSourceSession         EventSource = "session"
-	EventSourcePolicy          EventSource = "policy"
-	EventSourceSystem          EventSource = "system"
+	EventSourceRBAC       EventSource = "rbac"
+	EventSourceJIT        EventSource = "jit"
+	EventSourceRisk       EventSource = "risk"
+	EventSourceContinuous EventSource = "continuous"
+	EventSourceSession    EventSource = "session"
+	EventSourcePolicy     EventSource = "policy"
+	EventSourceSystem     EventSource = "system"
 )
 
 // PermissionRevocationEvent represents a permission revocation event
 type PermissionRevocationEvent struct {
-	EventID       string    `json:"event_id"`
-	SubjectID     string    `json:"subject_id"`
-	TenantID      string    `json:"tenant_id"`
-	Permissions   []string  `json:"permissions"`
-	Timestamp     time.Time `json:"timestamp"`
-	SessionIDs    []string  `json:"session_ids"`
-	RevokedBy     string    `json:"revoked_by"`
-	Reason        string    `json:"reason"`
+	EventID     string    `json:"event_id"`
+	SubjectID   string    `json:"subject_id"`
+	TenantID    string    `json:"tenant_id"`
+	Permissions []string  `json:"permissions"`
+	Timestamp   time.Time `json:"timestamp"`
+	SessionIDs  []string  `json:"session_ids"`
+	RevokedBy   string    `json:"revoked_by"`
+	Reason      string    `json:"reason"`
 }
 
 // AuthorizationEvent represents an authorization decision event
 type AuthorizationEvent struct {
-	DecisionID    string    `json:"decision_id"`
-	SessionID     string    `json:"session_id"`
-	SubjectID     string    `json:"subject_id"`
-	PermissionID  string    `json:"permission_id"`
-	Granted       bool      `json:"granted"`
-	Timestamp     time.Time `json:"timestamp"`
-	LatencyMs     int       `json:"latency_ms"`
-	CacheHit      bool      `json:"cache_hit"`
-	Reason        string    `json:"reason,omitempty"`
+	DecisionID   string    `json:"decision_id"`
+	SessionID    string    `json:"session_id"`
+	SubjectID    string    `json:"subject_id"`
+	PermissionID string    `json:"permission_id"`
+	Granted      bool      `json:"granted"`
+	Timestamp    time.Time `json:"timestamp"`
+	LatencyMs    int       `json:"latency_ms"`
+	CacheHit     bool      `json:"cache_hit"`
+	Reason       string    `json:"reason,omitempty"`
 }
 
 // EventSubscriber defines a subscriber to permission events
 type EventSubscriber struct {
-	ID          string                    `json:"id"`
-	Name        string                    `json:"name"`
-	EventTypes  []PermissionEventType     `json:"event_types"`
-	Filter      EventFilter               `json:"filter"`
-	Handler     func(*PermissionEvent) error
-	CreatedAt   time.Time                 `json:"created_at"`
-	Active      bool                      `json:"active"`
-	Stats       SubscriberStats           `json:"stats"`
+	ID         string                `json:"id"`
+	Name       string                `json:"name"`
+	EventTypes []PermissionEventType `json:"event_types"`
+	Filter     EventFilter           `json:"filter"`
+	Handler    func(*PermissionEvent) error
+	CreatedAt  time.Time       `json:"created_at"`
+	Active     bool            `json:"active"`
+	Stats      SubscriberStats `json:"stats"`
 }
 
 // EventFilter defines filtering criteria for events
@@ -179,9 +181,9 @@ type EventHandler func(context.Context, *PermissionEvent) error
 // EventStore provides persistence for permission events
 type EventStore struct {
 	events     []StoredEvent
-	eventIndex map[string]int  // eventID -> index
+	eventIndex map[string]int // eventID -> index
 	mutex      sync.RWMutex
-	maxEvents  int             // Maximum events to store
+	maxEvents  int // Maximum events to store
 }
 
 // StoredEvent represents an event stored for audit/replay
@@ -194,17 +196,17 @@ type StoredEvent struct {
 
 // EventBusStats tracks event bus statistics
 type EventBusStats struct {
-	TotalEvents        int64                             `json:"total_events"`
-	ProcessedEvents    int64                             `json:"processed_events"`
-	FailedEvents       int64                             `json:"failed_events"`
-	EventsByType       map[PermissionEventType]int64     `json:"events_by_type"`
-	EventsBySource     map[EventSource]int64             `json:"events_by_source"`
-	AverageProcessingMs float64                          `json:"average_processing_ms"`
-	SubscriberCount    int                               `json:"subscriber_count"`
-	ActiveSubscribers  int                               `json:"active_subscribers"`
-	LastEventAt        time.Time                         `json:"last_event_at"`
-	
-	mutex             sync.RWMutex
+	TotalEvents         int64                         `json:"total_events"`
+	ProcessedEvents     int64                         `json:"processed_events"`
+	FailedEvents        int64                         `json:"failed_events"`
+	EventsByType        map[PermissionEventType]int64 `json:"events_by_type"`
+	EventsBySource      map[EventSource]int64         `json:"events_by_source"`
+	AverageProcessingMs float64                       `json:"average_processing_ms"`
+	SubscriberCount     int                           `json:"subscriber_count"`
+	ActiveSubscribers   int                           `json:"active_subscribers"`
+	LastEventAt         time.Time                     `json:"last_event_at"`
+
+	mutex sync.RWMutex
 }
 
 // SubscriberStats tracks statistics for event subscribers
@@ -219,8 +221,8 @@ type SubscriberStats struct {
 // NewPermissionEventBus creates a new permission event bus
 func NewPermissionEventBus(bufferSize int) *PermissionEventBus {
 	eventBus := &PermissionEventBus{
-		eventChannel:       make(chan *PermissionEvent, bufferSize),
-		subscribers:        make(map[string]chan *PermissionEvent),
+		eventChannel:      make(chan *PermissionEvent, bufferSize),
+		subscribers:       make(map[string]chan *PermissionEvent),
 		bufferSize:        bufferSize,
 		processingTimeout: 30 * time.Second,
 		maxRetries:        3,
@@ -294,7 +296,7 @@ func (peb *PermissionEventBus) PublishEvent(event *PermissionEvent) error {
 	if event.EventID == "" {
 		event.EventID = fmt.Sprintf("event-%d", time.Now().UnixNano())
 	}
-	
+
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now()
 	}
@@ -311,14 +313,14 @@ func (peb *PermissionEventBus) PublishEvent(event *PermissionEvent) error {
 // PublishPermissionRevocation publishes a permission revocation event
 func (peb *PermissionEventBus) PublishPermissionRevocation(revocation *PermissionRevocationEvent) error {
 	event := &PermissionEvent{
-		EventID:      revocation.EventID,
-		EventType:    EventTypePermissionRevoked,
-		Timestamp:    revocation.Timestamp,
-		Source:       EventSourceContinuous,
-		SourceID:     "continuous-auth-engine",
-		SubjectID:    revocation.SubjectID,
-		TenantID:     revocation.TenantID,
-		Permissions:  revocation.Permissions,
+		EventID:     revocation.EventID,
+		EventType:   EventTypePermissionRevoked,
+		Timestamp:   revocation.Timestamp,
+		Source:      EventSourceContinuous,
+		SourceID:    "continuous-auth-engine",
+		SubjectID:   revocation.SubjectID,
+		TenantID:    revocation.TenantID,
+		Permissions: revocation.Permissions,
 		Data: map[string]interface{}{
 			"session_ids": revocation.SessionIDs,
 			"revoked_by":  revocation.RevokedBy,
@@ -400,7 +402,7 @@ func (peb *PermissionEventBus) Unsubscribe(subscriberID string) error {
 func (peb *PermissionEventBus) SubscribeToEvents() <-chan interface{} {
 	// Create a generic channel for internal event processing
 	ch := make(chan interface{}, 100)
-	
+
 	// Create internal subscriber
 	subscriber := &EventSubscriber{
 		ID:         fmt.Sprintf("internal-%d", time.Now().UnixNano()),
@@ -419,7 +421,7 @@ func (peb *PermissionEventBus) SubscribeToEvents() <-chan interface{} {
 
 	// Subscribe to events
 	subscriberCh, _ := peb.Subscribe(subscriber)
-	
+
 	// Forward events to generic channel
 	go func() {
 		defer close(ch)
@@ -592,7 +594,7 @@ func (peb *PermissionEventBus) updateProcessingStats(processingTime time.Duratio
 	defer peb.stats.mutex.Unlock()
 
 	peb.stats.ProcessedEvents++
-	
+
 	// Update average processing time using exponential moving average
 	alpha := 0.1
 	newLatency := float64(processingTime.Milliseconds())
@@ -619,12 +621,12 @@ func (peb *PermissionEventBus) storeEvent(event *PermissionEvent) {
 		// Remove oldest events
 		excess := len(peb.eventStore.events) - peb.eventStore.maxEvents
 		removedEvents := peb.eventStore.events[:excess]
-		
+
 		// Update index
 		for _, removed := range removedEvents {
 			delete(peb.eventStore.eventIndex, removed.Event.EventID)
 		}
-		
+
 		// Rebuild index for remaining events
 		peb.eventStore.events = peb.eventStore.events[excess:]
 		peb.eventStore.eventIndex = make(map[string]int)

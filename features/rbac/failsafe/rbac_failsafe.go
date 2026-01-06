@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package failsafe
 
 import (
@@ -14,7 +16,7 @@ import (
 // FailsafeRBACManager provides fail-secure behavior for RBAC operations
 // When the underlying RBAC manager is unavailable, it defaults to denying access
 type FailsafeRBACManager struct {
-	underlying rbac.RBACManager
+	underlying  rbac.RBACManager
 	healthCheck *HealthChecker
 	failureMode FailureMode
 	mutex       sync.RWMutex
@@ -35,23 +37,23 @@ const (
 
 // HealthChecker monitors the health of the underlying RBAC manager
 type HealthChecker struct {
-	rbacManager           rbac.RBACManager
-	lastHealthCheck       time.Time
-	healthCheckInterval   time.Duration
-	consecutiveFailures   int
+	rbacManager            rbac.RBACManager
+	lastHealthCheck        time.Time
+	healthCheckInterval    time.Duration
+	consecutiveFailures    int
 	maxConsecutiveFailures int
-	isHealthy             bool
-	mutex                 sync.RWMutex
+	isHealthy              bool
+	mutex                  sync.RWMutex
 }
 
 // FailsafeMetrics tracks failsafe operation metrics
 type FailsafeMetrics struct {
-	TotalRequests         int64
-	FailedRequests        int64
-	DeniedByFailsafe      int64
-	HealthCheckFailures   int64
-	RecoveryEvents        int64
-	mutex                 sync.RWMutex
+	TotalRequests       int64
+	FailedRequests      int64
+	DeniedByFailsafe    int64
+	HealthCheckFailures int64
+	RecoveryEvents      int64
+	mutex               sync.RWMutex
 }
 
 // NewFailsafeRBACManager creates a new failsafe RBAC manager
@@ -230,7 +232,7 @@ func (fsm *FailsafeRBACManager) performHealthCheck() {
 	}
 
 	_, err := fsm.underlying.CheckPermission(ctx, testRequest)
-	
+
 	fsm.healthCheck.mutex.Lock()
 	defer fsm.healthCheck.mutex.Unlock()
 
@@ -265,7 +267,7 @@ func (fsm *FailsafeRBACManager) performHealthCheck() {
 func (fsm *FailsafeRBACManager) markUnhealthy() {
 	fsm.healthCheck.mutex.Lock()
 	defer fsm.healthCheck.mutex.Unlock()
-	
+
 	fsm.healthCheck.consecutiveFailures++
 	if fsm.healthCheck.consecutiveFailures >= fsm.healthCheck.maxConsecutiveFailures {
 		fsm.healthCheck.isHealthy = false
@@ -410,7 +412,7 @@ func (fsm *FailsafeRBACManager) GetSubjectRoles(ctx context.Context, subjectID s
 	return fsm.underlying.GetSubjectRoles(ctx, subjectID, tenantID)
 }
 
-// Role Assignment Store Methods - fail secure  
+// Role Assignment Store Methods - fail secure
 func (fsm *FailsafeRBACManager) AssignRole(ctx context.Context, assignment *common.RoleAssignment) error {
 	if !fsm.IsHealthy() {
 		return fmt.Errorf("RBAC system is unhealthy, cannot assign role")

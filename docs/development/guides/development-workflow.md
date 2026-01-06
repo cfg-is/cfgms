@@ -140,6 +140,7 @@ The development workflow ensures that code is developed, tested, and deployed in
 - Keep documentation up to date.
 
 ## Version Information
+
 - **Document Version:** 1.0
 - **Last Updated:** 2024-04-04
-- **Status:** Draft 
+- **Status:** Draft

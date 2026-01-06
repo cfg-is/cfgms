@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // Package interfaces defines the global storage provider system for CFGMS
 package interfaces
 
@@ -13,17 +15,19 @@ type StorageProvider interface {
 	Name() string
 	Description() string
 	Available() (bool, error) // Check dependencies, connectivity, etc.
-	
+
 	// Storage interface creation - All providers must implement all interfaces
 	CreateClientTenantStore(config map[string]interface{}) (ClientTenantStore, error)
 	CreateConfigStore(config map[string]interface{}) (ConfigStore, error)
 	CreateAuditStore(config map[string]interface{}) (AuditStore, error)
 	CreateRBACStore(config map[string]interface{}) (RBACStore, error)
 	CreateRuntimeStore(config map[string]interface{}) (RuntimeStore, error)
-	
+	CreateTenantStore(config map[string]interface{}) (TenantStore, error)
+	CreateRegistrationTokenStore(config map[string]interface{}) (RegistrationTokenStore, error)
+
 	// Future: CreateDNAStore for DNA storage integration (Epic 6)
 	// CreateDNAStore(config map[string]interface{}) (DNAStore, error)
-	
+
 	// Provider capabilities and metadata
 	GetCapabilities() ProviderCapabilities
 	GetVersion() string
@@ -50,18 +54,18 @@ func RegisterStorageProvider(provider StorageProvider) {
 		fmt.Printf("Warning: Failed to register storage provider '%s': %v\n", provider.Name(), err)
 		return
 	}
-	
+
 	globalRegistry.mutex.Lock()
 	defer globalRegistry.mutex.Unlock()
-	
+
 	// Check for duplicate registration
 	if existing, exists := globalRegistry.providers[provider.Name()]; exists {
-		fmt.Printf("Warning: Overwriting existing storage provider '%s' (version %s) with version %s\n", 
+		fmt.Printf("Warning: Overwriting existing storage provider '%s' (version %s) with version %s\n",
 			provider.Name(), existing.GetVersion(), provider.GetVersion())
 	}
-	
+
 	globalRegistry.providers[provider.Name()] = provider
-	fmt.Printf("Registered storage provider: %s v%s - %s\n", 
+	fmt.Printf("Registered storage provider: %s v%s - %s\n",
 		provider.Name(), provider.GetVersion(), provider.Description())
 }
 
@@ -70,43 +74,43 @@ func validateProvider(provider StorageProvider) error {
 	if provider == nil {
 		return fmt.Errorf("provider is nil")
 	}
-	
+
 	// Validate basic provider interface
 	if provider.Name() == "" {
 		return fmt.Errorf("provider name cannot be empty")
 	}
-	
+
 	if provider.Description() == "" {
 		return fmt.Errorf("provider description cannot be empty")
 	}
-	
+
 	if provider.GetVersion() == "" {
 		return fmt.Errorf("provider version cannot be empty")
 	}
-	
+
 	// Test provider availability (non-blocking)
 	if available, err := provider.Available(); !available && err != nil {
 		// Provider not available is OK (might need setup), but returning error suggests implementation issue
 		fmt.Printf("Note: Provider '%s' reports as unavailable: %v\n", provider.Name(), err)
 	}
-	
+
 	// Validate provider supports required storage interface creation methods
 	// We can't easily test interface creation without config, but we can check method existence
 	// This is done by Go's type system at compile time, so we focus on runtime validation
-	
+
 	capabilities := provider.GetCapabilities()
 	if capabilities.MaxBatchSize < 0 {
 		return fmt.Errorf("provider MaxBatchSize cannot be negative")
 	}
-	
+
 	if capabilities.MaxConfigSize < 0 {
 		return fmt.Errorf("provider MaxConfigSize cannot be negative")
 	}
-	
+
 	if capabilities.MaxAuditRetentionDays < 0 {
 		return fmt.Errorf("provider MaxAuditRetentionDays cannot be negative")
 	}
-	
+
 	return nil
 }
 
@@ -117,39 +121,47 @@ func RegisterStorageProviderWithValidation(provider StorageProvider, testConfig 
 	if err := validateProvider(provider); err != nil {
 		return fmt.Errorf("provider validation failed: %w", err)
 	}
-	
+
 	// Test interface creation with provided config
 	if available, _ := provider.Available(); available {
 		// Only test interface creation if provider is available
 		if _, err := provider.CreateClientTenantStore(testConfig); err != nil {
 			return fmt.Errorf("failed to create ClientTenantStore: %w", err)
 		}
-		
+
 		if _, err := provider.CreateConfigStore(testConfig); err != nil {
 			return fmt.Errorf("failed to create ConfigStore: %w", err)
 		}
-		
+
 		if _, err := provider.CreateAuditStore(testConfig); err != nil {
 			return fmt.Errorf("failed to create AuditStore: %w", err)
 		}
-		
+
 		if _, err := provider.CreateRBACStore(testConfig); err != nil {
 			return fmt.Errorf("failed to create RBACStore: %w", err)
 		}
-		
+
 		if _, err := provider.CreateRuntimeStore(testConfig); err != nil {
 			return fmt.Errorf("failed to create RuntimeStore: %w", err)
 		}
+
+		if _, err := provider.CreateTenantStore(testConfig); err != nil {
+			return fmt.Errorf("failed to create TenantStore: %w", err)
+		}
+
+		if _, err := provider.CreateRegistrationTokenStore(testConfig); err != nil {
+			return fmt.Errorf("failed to create RegistrationTokenStore: %w", err)
+		}
 	}
-	
+
 	// Register after successful validation
 	globalRegistry.mutex.Lock()
 	defer globalRegistry.mutex.Unlock()
-	
+
 	globalRegistry.providers[provider.Name()] = provider
-	fmt.Printf("Successfully registered and validated storage provider: %s v%s\n", 
+	fmt.Printf("Successfully registered and validated storage provider: %s v%s\n",
 		provider.Name(), provider.GetVersion())
-	
+
 	return nil
 }
 
@@ -157,12 +169,12 @@ func RegisterStorageProviderWithValidation(provider StorageProvider, testConfig 
 func GetRegisteredProviderNames() []string {
 	globalRegistry.mutex.RLock()
 	defer globalRegistry.mutex.RUnlock()
-	
+
 	names := make([]string, 0, len(globalRegistry.providers))
 	for name := range globalRegistry.providers {
 		names = append(names, name)
 	}
-	
+
 	return names
 }
 
@@ -170,12 +182,12 @@ func GetRegisteredProviderNames() []string {
 func UnregisterStorageProvider(name string) bool {
 	globalRegistry.mutex.Lock()
 	defer globalRegistry.mutex.Unlock()
-	
+
 	if _, exists := globalRegistry.providers[name]; exists {
 		delete(globalRegistry.providers, name)
 		return true
 	}
-	
+
 	return false
 }
 
@@ -183,17 +195,17 @@ func UnregisterStorageProvider(name string) bool {
 func GetStorageProvider(name string) (StorageProvider, error) {
 	globalRegistry.mutex.RLock()
 	defer globalRegistry.mutex.RUnlock()
-	
+
 	provider, exists := globalRegistry.providers[name]
 	if !exists {
 		return nil, fmt.Errorf("storage provider '%s' not found", name)
 	}
-	
+
 	// Check availability
 	if available, err := provider.Available(); !available {
 		return nil, fmt.Errorf("storage provider '%s' not available: %v", name, err)
 	}
-	
+
 	return provider, nil
 }
 
@@ -201,14 +213,14 @@ func GetStorageProvider(name string) (StorageProvider, error) {
 func GetAvailableProviders() map[string]StorageProvider {
 	globalRegistry.mutex.RLock()
 	defer globalRegistry.mutex.RUnlock()
-	
+
 	available := make(map[string]StorageProvider)
 	for name, provider := range globalRegistry.providers {
 		if ok, err := provider.Available(); ok && err == nil {
 			available[name] = provider
 		}
 	}
-	
+
 	return available
 }
 
@@ -216,24 +228,24 @@ func GetAvailableProviders() map[string]StorageProvider {
 func ListProviders() []ProviderInfo {
 	globalRegistry.mutex.RLock()
 	defer globalRegistry.mutex.RUnlock()
-	
+
 	var providers []ProviderInfo
 	for name, provider := range globalRegistry.providers {
 		available, err := provider.Available()
-		
+
 		info := ProviderInfo{
 			Name:        name,
 			Description: provider.Description(),
 			Available:   available,
 		}
-		
+
 		if err != nil {
 			info.UnavailableReason = err.Error()
 		}
-		
+
 		providers = append(providers, info)
 	}
-	
+
 	return providers
 }
 
@@ -247,13 +259,13 @@ type ProviderInfo struct {
 
 // ProviderCapabilities describes what features a storage provider supports
 type ProviderCapabilities struct {
-	SupportsTransactions    bool `json:"supports_transactions"`     // ACID transaction support
-	SupportsVersioning      bool `json:"supports_versioning"`       // Configuration versioning
-	SupportsFullTextSearch  bool `json:"supports_full_text_search"` // Full-text search in audit logs
-	SupportsEncryption      bool `json:"supports_encryption"`       // At-rest encryption
-	SupportsCompression     bool `json:"supports_compression"`      // Data compression
-	SupportsReplication     bool `json:"supports_replication"`      // Data replication/HA
-	SupportsSharding        bool `json:"supports_sharding"`         // Horizontal partitioning
+	SupportsTransactions   bool `json:"supports_transactions"`     // ACID transaction support
+	SupportsVersioning     bool `json:"supports_versioning"`       // Configuration versioning
+	SupportsFullTextSearch bool `json:"supports_full_text_search"` // Full-text search in audit logs
+	SupportsEncryption     bool `json:"supports_encryption"`       // At-rest encryption
+	SupportsCompression    bool `json:"supports_compression"`      // Data compression
+	SupportsReplication    bool `json:"supports_replication"`      // Data replication/HA
+	SupportsSharding       bool `json:"supports_sharding"`         // Horizontal partitioning
 	MaxBatchSize           int  `json:"max_batch_size"`            // Maximum batch operation size
 	MaxConfigSize          int  `json:"max_config_size"`           // Maximum single config size
 	MaxAuditRetentionDays  int  `json:"max_audit_retention_days"`  // Maximum audit retention period
@@ -273,7 +285,7 @@ func CreateClientTenantStoreFromConfig(providerName string, config map[string]in
 	if err != nil {
 		return nil, fmt.Errorf("storage provider '%s' not available: %w", providerName, err)
 	}
-	
+
 	return provider.CreateClientTenantStore(config)
 }
 
@@ -283,7 +295,7 @@ func CreateConfigStoreFromConfig(providerName string, config map[string]interfac
 	if err != nil {
 		return nil, fmt.Errorf("storage provider '%s' not available: %w", providerName, err)
 	}
-	
+
 	return provider.CreateConfigStore(config)
 }
 
@@ -293,7 +305,7 @@ func CreateAuditStoreFromConfig(providerName string, config map[string]interface
 	if err != nil {
 		return nil, fmt.Errorf("storage provider '%s' not available: %w", providerName, err)
 	}
-	
+
 	return provider.CreateAuditStore(config)
 }
 
@@ -303,7 +315,7 @@ func CreateRBACStoreFromConfig(providerName string, config map[string]interface{
 	if err != nil {
 		return nil, fmt.Errorf("storage provider '%s' not available: %w", providerName, err)
 	}
-	
+
 	return provider.CreateRBACStore(config)
 }
 
@@ -313,8 +325,28 @@ func CreateRuntimeStoreFromConfig(providerName string, config map[string]interfa
 	if err != nil {
 		return nil, fmt.Errorf("storage provider '%s' not available: %w", providerName, err)
 	}
-	
+
 	return provider.CreateRuntimeStore(config)
+}
+
+// CreateTenantStoreFromConfig creates a TenantStore from configuration
+func CreateTenantStoreFromConfig(providerName string, config map[string]interface{}) (TenantStore, error) {
+	provider, err := GetStorageProvider(providerName)
+	if err != nil {
+		return nil, fmt.Errorf("storage provider '%s' not available: %w", providerName, err)
+	}
+
+	return provider.CreateTenantStore(config)
+}
+
+// CreateRegistrationTokenStoreFromConfig creates a RegistrationTokenStore from configuration
+func CreateRegistrationTokenStoreFromConfig(providerName string, config map[string]interface{}) (RegistrationTokenStore, error) {
+	provider, err := GetStorageProvider(providerName)
+	if err != nil {
+		return nil, fmt.Errorf("storage provider '%s' not available: %w", providerName, err)
+	}
+
+	return provider.CreateRegistrationTokenStore(config)
 }
 
 // CreateAllStoresFromConfig creates all storage interfaces from a single configuration
@@ -330,53 +362,67 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 		}
 		return nil, fmt.Errorf("storage provider '%s' not available. Available providers: %v. Error: %w", providerName, availableNames, err)
 	}
-	
+
 	// Create all store interfaces
 	clientTenantStore, err := provider.CreateClientTenantStore(config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create client tenant store: %w", err)
 	}
-	
+
 	configStore, err := provider.CreateConfigStore(config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create config store: %w", err)
 	}
-	
+
 	auditStore, err := provider.CreateAuditStore(config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create audit store: %w", err)
 	}
-	
+
 	rbacStore, err := provider.CreateRBACStore(config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create RBAC store: %w", err)
 	}
-	
+
 	runtimeStore, err := provider.CreateRuntimeStore(config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create runtime store: %w", err)
 	}
-	
+
+	tenantStore, err := provider.CreateTenantStore(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create tenant store: %w", err)
+	}
+
+	registrationTokenStore, err := provider.CreateRegistrationTokenStore(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create registration token store: %w", err)
+	}
+
 	return &StorageManager{
-		providerName:      providerName,
-		provider:          provider,
-		clientTenantStore: clientTenantStore,
-		configStore:       configStore,
-		auditStore:        auditStore,
-		rbacStore:         rbacStore,
-		runtimeStore:      runtimeStore,
+		providerName:           providerName,
+		provider:               provider,
+		clientTenantStore:      clientTenantStore,
+		configStore:            configStore,
+		auditStore:             auditStore,
+		rbacStore:              rbacStore,
+		runtimeStore:           runtimeStore,
+		tenantStore:            tenantStore,
+		registrationTokenStore: registrationTokenStore,
 	}, nil
 }
 
 // StorageManager provides unified access to all storage interfaces
 type StorageManager struct {
-	providerName      string
-	provider          StorageProvider
-	clientTenantStore ClientTenantStore
-	configStore       ConfigStore
-	auditStore        AuditStore
-	rbacStore         RBACStore
-	runtimeStore      RuntimeStore
+	providerName           string
+	provider               StorageProvider
+	clientTenantStore      ClientTenantStore
+	configStore            ConfigStore
+	auditStore             AuditStore
+	rbacStore              RBACStore
+	runtimeStore           RuntimeStore
+	tenantStore            TenantStore
+	registrationTokenStore RegistrationTokenStore
 }
 
 // GetProviderName returns the name of the storage provider
@@ -414,6 +460,16 @@ func (sm *StorageManager) GetRuntimeStore() RuntimeStore {
 	return sm.runtimeStore
 }
 
+// GetTenantStore returns the tenant storage interface
+func (sm *StorageManager) GetTenantStore() TenantStore {
+	return sm.tenantStore
+}
+
+// GetRegistrationTokenStore returns the registration token storage interface
+func (sm *StorageManager) GetRegistrationTokenStore() RegistrationTokenStore {
+	return sm.registrationTokenStore
+}
+
 // GetCapabilities returns the provider's capabilities
 func (sm *StorageManager) GetCapabilities() ProviderCapabilities {
 	return sm.provider.GetCapabilities()
@@ -428,11 +484,11 @@ func (sm *StorageManager) GetVersion() string {
 func ListProvidersV2() []ProviderInfoV2 {
 	globalRegistry.mutex.RLock()
 	defer globalRegistry.mutex.RUnlock()
-	
+
 	var providers []ProviderInfoV2
 	for name, provider := range globalRegistry.providers {
 		available, err := provider.Available()
-		
+
 		info := ProviderInfoV2{
 			ProviderInfo: ProviderInfo{
 				Name:        name,
@@ -442,14 +498,14 @@ func ListProvidersV2() []ProviderInfoV2 {
 			Capabilities: provider.GetCapabilities(),
 			Version:      provider.GetVersion(),
 		}
-		
+
 		if err != nil {
 			info.UnavailableReason = err.Error()
 		}
-		
+
 		providers = append(providers, info)
 	}
-	
+
 	return providers
 }
 
@@ -458,4 +514,3 @@ func ListProvidersV2() []ProviderInfoV2 {
 func CreateHybridStorageManagerFromConfig(config HybridStorageConfig) (*HybridStorageManager, error) {
 	return CreateHybridStorageFromConfig(config)
 }
-

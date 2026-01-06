@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package diff
 
 import (
@@ -12,10 +14,10 @@ func TestDefaultSemanticAnalyzer_AnalyzeStructure(t *testing.T) {
 	analyzer := NewDefaultSemanticAnalyzer()
 
 	tests := []struct {
-		name           string
-		config         string
-		format         string
-		expectedSchema string
+		name             string
+		config           string
+		format           string
+		expectedSchema   string
 		expectedSections int
 	}{
 		{
@@ -220,7 +222,7 @@ func TestDefaultSemanticAnalyzer_DetectRuntimePatterns(t *testing.T) {
 	}
 
 	patterns := analyzer.detectRuntimePatterns(data, "")
-	
+
 	// Should detect multiple pattern types
 	patternTypes := make(map[string]bool)
 	for _, pattern := range patterns {
@@ -245,7 +247,7 @@ func TestDefaultSemanticAnalyzer_CompareStructures(t *testing.T) {
 				Type: "database",
 			},
 			{
-				Name: "logging", 
+				Name: "logging",
 				Path: "logging",
 				Type: "logging",
 			},
@@ -264,7 +266,7 @@ func TestDefaultSemanticAnalyzer_CompareStructures(t *testing.T) {
 		Sections: []ConfigSection{
 			{
 				Name: "database",
-				Path: "database", 
+				Path: "database",
 				Type: "connection", // type changed
 			},
 			{
@@ -404,7 +406,7 @@ func TestDefaultSemanticAnalyzer_ExtractProperties(t *testing.T) {
 
 func BenchmarkAnalyzeStructure(b *testing.B) {
 	analyzer := NewDefaultSemanticAnalyzer()
-	
+
 	config := `{
   "database": {
     "host": "localhost",
@@ -480,7 +482,7 @@ func TestDefaultSemanticAnalyzer_ComplexNesting(t *testing.T) {
 
 	// Should handle deep nesting
 	assert.Greater(t, len(result.Sections), 0)
-	
+
 	// Find the app section which should have children
 	var appSection *ConfigSection
 	for _, section := range result.Sections {
@@ -489,7 +491,7 @@ func TestDefaultSemanticAnalyzer_ComplexNesting(t *testing.T) {
 			break
 		}
 	}
-	
+
 	require.NotNil(t, appSection, "Should find app section")
 	assert.Greater(t, len(appSection.Children), 0, "App section should have children")
 }

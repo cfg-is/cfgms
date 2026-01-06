@@ -1,0 +1,104 @@
+metadata:
+  id: user-audit
+  name: User Account Audit
+  description: Audits user accounts for security issues
+  version:
+    major: 1
+    minor: 0
+    patch: 0
+  author: cfgms-team@cfg.is
+  tags:
+    - security
+    - audit
+    - users
+    - compliance
+  category: security
+  platform:
+    - linux
+  shell: bash
+  parameters: []
+  created_at: 2025-10-13T00:00:00Z
+  updated_at: 2025-10-13T00:00:00Z
+
+content: |
+  #!/bin/bash
+  set -euo pipefail
+
+  ISSUES=0
+
+  echo "========================================="
+  echo "  USER ACCOUNT AUDIT"
+  echo "========================================="
+  echo ""
+
+  # Check for users with UID 0 (root equivalent)
+  echo "--- UID 0 Accounts ---"
+  root_users=$(awk -F: '$3 == 0 {print $1}' /etc/passwd)
+  if [ "$(echo "$root_users" | wc -l)" -gt 1 ]; then
+      echo "[WARNING] Multiple UID 0 accounts found:"
+      echo "$root_users" | grep -v "^root$" | sed 's/^/  /'
+      ((ISSUES++))
+  else
+      echo "[OK] Only root has UID 0"
+  fi
+
+  # Check for accounts with empty passwords
+  echo ""
+  echo "--- Empty Password Check ---"
+  if [ -f /etc/shadow ]; then
+      empty_pw=$(awk -F: '$2 == "" {print $1}' /etc/shadow)
+      if [ -n "$empty_pw" ]; then
+          echo "[CRITICAL] Accounts with empty passwords:"
+          echo "$empty_pw" | sed 's/^/  /'
+          ((ISSUES++))
+      else
+          echo "[OK] No empty passwords found"
+      fi
+  fi
+
+  # Check for inactive users
+  echo ""
+  echo "--- Inactive Users (no login in 90+ days) ---"
+  lastlog -b 90 | tail -n +2 | grep -v "Never logged in" | awk '{print $1}' | while read user; do
+      if grep -q "^${user}:" /etc/passwd; then
+          shell=$(grep "^${user}:" /etc/passwd | cut -d: -f7)
+          if [[ ! "$shell" =~ nologin|false ]]; then
+              echo "[INFO] Inactive user: $user"
+          fi
+      fi
+  done
+
+  # Check for users with sudo access
+  echo ""
+  echo "--- Sudo Access ---"
+  if command -v sudo >/dev/null; then
+      sudo_users=$(grep -E "^%?sudo|^%?wheel" /etc/group | cut -d: -f4)
+      echo "Users with sudo access:"
+      echo "$sudo_users" | tr ',' '\n' | sed 's/^/  /'
+  fi
+
+  # Check password expiration policy
+  echo ""
+  echo "--- Password Policies ---"
+  if command -v chage >/dev/null; then
+      max_days=$(grep "^PASS_MAX_DAYS" /etc/login.defs | awk '{print $2}')
+      if [ "$max_days" -gt 90 ] 2>/dev/null; then
+          echo "[WARNING] Password max age is $max_days days (recommended: 90)"
+          ((ISSUES++))
+      else
+          echo "[OK] Password max age: $max_days days"
+      fi
+  fi
+
+  echo ""
+  echo "========================================="
+  echo "Total issues found: $ISSUES"
+  echo "========================================="
+
+  if [ "$ISSUES" -gt 0 ]; then
+      exit 1
+  else
+      exit 0
+  fi
+
+hash: placeholder

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package network_activedirectory
 
 import (
@@ -16,23 +18,23 @@ import (
 // by communicating with AD stewards via gRPC
 type ActiveDirectoryProvider struct {
 	logger logging.Logger
-	
+
 	// Configuration
 	config    interfaces.ProviderConfig
 	connected bool
 	connMux   sync.RWMutex
-	
+
 	// Steward communication
 	stewardClient StewardClient // Interface for gRPC communication
-	
+
 	// Statistics
 	stats struct {
 		sync.RWMutex
-		requestCount  int64
-		errorCount    int64
-		lastRequest   time.Time
-		connectedAt   time.Time
-		totalLatency  time.Duration
+		requestCount int64
+		errorCount   int64
+		lastRequest  time.Time
+		connectedAt  time.Time
+		totalLatency time.Duration
 	}
 }
 
@@ -42,7 +44,7 @@ type StewardClient interface {
 	// Module operations via steward gRPC API
 	GetModuleState(ctx context.Context, stewardID, moduleType, resourceID string) (map[string]interface{}, error)
 	SetModuleConfig(ctx context.Context, stewardID, moduleType, resourceID string, config map[string]interface{}) error
-	
+
 	// Steward discovery and health
 	GetConnectedStewards(ctx context.Context) ([]StewardInfo, error)
 	GetStewardHealth(ctx context.Context, stewardID string) (*StewardHealth, error)
@@ -50,24 +52,24 @@ type StewardClient interface {
 
 // StewardInfo represents information about a connected steward
 type StewardInfo struct {
-	ID          string            `json:"id"`
-	Hostname    string            `json:"hostname"`
-	Platform    string            `json:"platform"`
-	Version     string            `json:"version"`
-	Modules     []string          `json:"modules"`
-	Tags        map[string]string `json:"tags"`
-	LastSeen    time.Time         `json:"last_seen"`
-	IsHealthy   bool              `json:"is_healthy"`
+	ID        string            `json:"id"`
+	Hostname  string            `json:"hostname"`
+	Platform  string            `json:"platform"`
+	Version   string            `json:"version"`
+	Modules   []string          `json:"modules"`
+	Tags      map[string]string `json:"tags"`
+	LastSeen  time.Time         `json:"last_seen"`
+	IsHealthy bool              `json:"is_healthy"`
 }
 
 // StewardHealth represents the health status of a steward
 type StewardHealth struct {
-	Status      string    `json:"status"`
-	LastCheck   time.Time `json:"last_check"`
+	Status      string            `json:"status"`
+	LastCheck   time.Time         `json:"last_check"`
 	Modules     map[string]string `json:"modules"` // module -> status
-	Uptime      time.Duration `json:"uptime"`
-	CPUUsage    float64   `json:"cpu_usage"`
-	MemoryUsage float64   `json:"memory_usage"`
+	Uptime      time.Duration     `json:"uptime"`
+	CPUUsage    float64           `json:"cpu_usage"`
+	MemoryUsage float64           `json:"memory_usage"`
 }
 
 // NewActiveDirectoryProvider creates a new Active Directory provider
@@ -75,7 +77,7 @@ func NewActiveDirectoryProvider(stewardClient StewardClient, logger logging.Logg
 	if logger == nil {
 		logger = logging.NewNoopLogger()
 	}
-	
+
 	return &ActiveDirectoryProvider{
 		logger:        logger,
 		stewardClient: stewardClient,
@@ -106,7 +108,7 @@ func (p *ActiveDirectoryProvider) GetProviderInfo() interfaces.ProviderInfo {
 				interfaces.AuthMethodKerberos,
 				interfaces.AuthMethodLDAP,
 			},
-			MaxSearchResults: 10000,
+			MaxSearchResults:     10000,
 			SupportedSearchTypes: []string{"user", "group", "organizational_unit", "computer"},
 			RateLimitInfo: &interfaces.RateLimitInfo{
 				RequestsPerSecond: 100,
@@ -138,19 +140,19 @@ func (p *ActiveDirectoryProvider) GetProviderInfo() interfaces.ProviderInfo {
 func (p *ActiveDirectoryProvider) Connect(ctx context.Context, config interfaces.ProviderConfig) error {
 	p.connMux.Lock()
 	defer p.connMux.Unlock()
-	
-	p.logger.Info("Connecting to Active Directory", 
+
+	p.logger.Info("Connecting to Active Directory",
 		"domain", config.ServerAddress,
 		"auth_method", config.AuthMethod)
-	
+
 	// Find steward that can handle AD operations
 	stewardID, err := p.findADSteward(ctx, config.ServerAddress)
 	if err != nil {
 		return fmt.Errorf("failed to find AD steward: %w", err)
 	}
-	
+
 	p.logger.Debug("Found AD steward", "steward_id", stewardID)
-	
+
 	// Configure the AD module on the steward
 	moduleConfig := map[string]interface{}{
 		"domain":         config.ServerAddress,
@@ -161,7 +163,7 @@ func (p *ActiveDirectoryProvider) Connect(ctx context.Context, config interfaces
 		"username":       config.Username,
 		"password":       config.Password,
 	}
-	
+
 	if config.Port > 0 {
 		moduleConfig["port"] = config.Port
 	}
@@ -174,35 +176,35 @@ func (p *ActiveDirectoryProvider) Connect(ctx context.Context, config interfaces
 	if config.ConnectionTimeout > 0 {
 		moduleConfig["request_timeout"] = config.ConnectionTimeout
 	}
-	
+
 	// Set module configuration on steward
 	err = p.stewardClient.SetModuleConfig(ctx, stewardID, "activedirectory", "connection", moduleConfig)
 	if err != nil {
 		return fmt.Errorf("failed to configure AD module on steward: %w", err)
 	}
-	
+
 	// Test the connection by getting status
 	statusResult, err := p.stewardClient.GetModuleState(ctx, stewardID, "activedirectory", "status")
 	if err != nil {
 		return fmt.Errorf("failed to verify AD connection: %w", err)
 	}
-	
+
 	// Parse status result
 	if status, ok := statusResult["connected"]; !ok || !status.(bool) {
 		return fmt.Errorf("AD connection failed on steward")
 	}
-	
+
 	p.config = config
 	p.connected = true
-	
+
 	p.stats.Lock()
 	p.stats.connectedAt = time.Now()
 	p.stats.Unlock()
-	
-	p.logger.Info("Successfully connected to Active Directory", 
+
+	p.logger.Info("Successfully connected to Active Directory",
 		"steward_id", stewardID,
 		"domain", config.ServerAddress)
-	
+
 	return nil
 }
 
@@ -210,14 +212,14 @@ func (p *ActiveDirectoryProvider) Connect(ctx context.Context, config interfaces
 func (p *ActiveDirectoryProvider) Disconnect(ctx context.Context) error {
 	p.connMux.Lock()
 	defer p.connMux.Unlock()
-	
+
 	if !p.connected {
 		return nil
 	}
-	
+
 	p.connected = false
 	p.logger.Info("Disconnected from Active Directory")
-	
+
 	return nil
 }
 
@@ -234,43 +236,43 @@ func (p *ActiveDirectoryProvider) HealthCheck(ctx context.Context) (*interfaces.
 	connected := p.connected
 	config := p.config
 	p.connMux.RUnlock()
-	
+
 	status := &interfaces.HealthStatus{
 		IsHealthy: false,
 		LastCheck: time.Now(),
 		Details:   make(map[string]interface{}),
 	}
-	
+
 	if !connected {
 		status.Errors = []string{"not connected to Active Directory"}
 		return status, nil
 	}
-	
+
 	// Find AD steward
 	stewardID, err := p.findADSteward(ctx, config.ServerAddress)
 	if err != nil {
 		status.Errors = []string{fmt.Sprintf("AD steward not available: %v", err)}
 		return status, nil
 	}
-	
+
 	start := time.Now()
-	
+
 	// Check steward health
 	stewardHealth, err := p.stewardClient.GetStewardHealth(ctx, stewardID)
 	if err != nil {
 		status.Errors = []string{fmt.Sprintf("failed to check steward health: %v", err)}
 		return status, nil
 	}
-	
+
 	// Check AD module health on steward
 	statusResult, err := p.stewardClient.GetModuleState(ctx, stewardID, "activedirectory", "status")
 	if err != nil {
 		status.Errors = []string{fmt.Sprintf("failed to check AD module status: %v", err)}
 		return status, nil
 	}
-	
+
 	status.ResponseTime = time.Since(start)
-	
+
 	// Parse AD module status
 	if healthStr, ok := statusResult["health_status"]; ok {
 		if healthStr == "healthy" {
@@ -279,7 +281,7 @@ func (p *ActiveDirectoryProvider) HealthCheck(ctx context.Context) (*interfaces.
 			status.Errors = []string{fmt.Sprintf("AD module health: %s", healthStr)}
 		}
 	}
-	
+
 	// Add steward and module details
 	status.Details["steward_id"] = stewardID
 	status.Details["steward_status"] = stewardHealth.Status
@@ -287,7 +289,7 @@ func (p *ActiveDirectoryProvider) HealthCheck(ctx context.Context) (*interfaces.
 	status.Details["domain_controller"] = statusResult["domain_controller"]
 	status.Details["request_count"] = statusResult["request_count"]
 	status.Details["error_count"] = statusResult["error_count"]
-	
+
 	return status, nil
 }
 
@@ -297,7 +299,7 @@ func (p *ActiveDirectoryProvider) findADSteward(ctx context.Context, domain stri
 	if err != nil {
 		return "", fmt.Errorf("failed to get connected stewards: %w", err)
 	}
-	
+
 	// Look for stewards with activedirectory module that can handle this domain
 	for _, steward := range stewards {
 		// Check if steward has activedirectory module
@@ -308,22 +310,22 @@ func (p *ActiveDirectoryProvider) findADSteward(ctx context.Context, domain stri
 				break
 			}
 		}
-		
+
 		if !hasADModule {
 			continue
 		}
-		
+
 		// Check if steward is healthy
 		if !steward.IsHealthy {
 			continue
 		}
-		
+
 		// Check if steward can handle this domain (via tags or hostname)
 		if p.stewardCanHandleDomain(steward, domain) {
 			return steward.ID, nil
 		}
 	}
-	
+
 	return "", fmt.Errorf("no suitable AD steward found for domain %s", domain)
 }
 
@@ -333,7 +335,7 @@ func (p *ActiveDirectoryProvider) stewardCanHandleDomain(steward StewardInfo, do
 	if stewardDomain, exists := steward.Tags["ad_domain"]; exists {
 		return strings.EqualFold(stewardDomain, domain)
 	}
-	
+
 	// Check if steward hostname suggests it's in the target domain
 	if strings.Contains(steward.Hostname, ".") {
 		stewardDomain := strings.SplitN(steward.Hostname, ".", 2)[1]
@@ -341,7 +343,7 @@ func (p *ActiveDirectoryProvider) stewardCanHandleDomain(steward StewardInfo, do
 			return true
 		}
 	}
-	
+
 	// Default: assume steward can handle any domain if no specific assignment
 	return true
 }
@@ -352,28 +354,28 @@ func (p *ActiveDirectoryProvider) executeADQuery(ctx context.Context, resourceID
 	connected := p.connected
 	config := p.config
 	p.connMux.RUnlock()
-	
+
 	if !connected {
 		return nil, fmt.Errorf("not connected to Active Directory")
 	}
-	
+
 	// Find AD steward
 	stewardID, err := p.findADSteward(ctx, config.ServerAddress)
 	if err != nil {
 		return nil, fmt.Errorf("no AD steward available: %w", err)
 	}
-	
+
 	// Update stats
 	p.stats.Lock()
 	p.stats.requestCount++
 	p.stats.lastRequest = time.Now()
 	p.stats.Unlock()
-	
+
 	start := time.Now()
-	
+
 	// Execute query via steward
 	result, err := p.stewardClient.GetModuleState(ctx, stewardID, "activedirectory", resourceID)
-	
+
 	// Update latency stats
 	latency := time.Since(start)
 	p.stats.Lock()
@@ -382,16 +384,16 @@ func (p *ActiveDirectoryProvider) executeADQuery(ctx context.Context, resourceID
 		p.stats.errorCount++
 	}
 	p.stats.Unlock()
-	
+
 	if err != nil {
 		return nil, fmt.Errorf("AD query failed: %w", err)
 	}
-	
-	p.logger.Debug("AD query completed", 
+
+	p.logger.Debug("AD query completed",
 		"resource_id", resourceID,
 		"steward_id", stewardID,
 		"latency", latency)
-	
+
 	return result, nil
 }
 
@@ -399,11 +401,11 @@ func (p *ActiveDirectoryProvider) executeADQuery(ctx context.Context, resourceID
 func (p *ActiveDirectoryProvider) updateStats(success bool, latency time.Duration) {
 	p.stats.Lock()
 	defer p.stats.Unlock()
-	
+
 	p.stats.requestCount++
 	p.stats.lastRequest = time.Now()
 	p.stats.totalLatency += latency
-	
+
 	if !success {
 		p.stats.errorCount++
 	}
@@ -416,12 +418,12 @@ func (p *ActiveDirectoryProvider) convertToDirectoryUser(obj interface{}) (*inte
 	if !ok {
 		return nil, fmt.Errorf("invalid object format - expected map")
 	}
-	
+
 	// Extract common fields
 	user := &interfaces.DirectoryUser{
 		ProviderAttributes: make(map[string]interface{}),
 	}
-	
+
 	// Extract fields with type assertion
 	if id, ok := objMap["id"].(string); ok {
 		user.ID = id
@@ -447,7 +449,7 @@ func (p *ActiveDirectoryProvider) convertToDirectoryUser(obj interface{}) (*inte
 	if source, ok := objMap["source"].(string); ok {
 		user.Source = source
 	}
-	
+
 	// Copy all other attributes to ProviderAttributes
 	for key, value := range objMap {
 		processed := map[string]bool{
@@ -455,15 +457,14 @@ func (p *ActiveDirectoryProvider) convertToDirectoryUser(obj interface{}) (*inte
 			"display_name": true, "email_address": true, "account_enabled": true,
 			"distinguished_name": true, "source": true,
 		}
-		
+
 		if !processed[key] {
 			user.ProviderAttributes[key] = value
 		}
 	}
-	
+
 	return user, nil
 }
-
 
 // parseADQueryResult parses the result from AD module into DirectoryProvider types
 func (p *ActiveDirectoryProvider) parseADQueryResult(result map[string]interface{}) (*ADModuleQueryResult, error) {
@@ -472,35 +473,35 @@ func (p *ActiveDirectoryProvider) parseADQueryResult(result map[string]interface
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal query result: %w", err)
 	}
-	
+
 	var queryResult ADModuleQueryResult
 	if err := json.Unmarshal(resultData, &queryResult); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal query result: %w", err)
 	}
-	
+
 	return &queryResult, nil
 }
 
 // ADModuleQueryResult represents the result structure from the AD module
 type ADModuleQueryResult struct {
-	QueryType     string                              `json:"query_type"`
-	ObjectID      string                              `json:"object_id"`
-	Success       bool                                `json:"success"`
-	ExecutedAt    time.Time                           `json:"executed_at"`
-	ResponseTime  time.Duration                       `json:"response_time"`
-	TotalCount    int                                 `json:"total_count"`
-	HasMore       bool                                `json:"has_more"`
-	NextToken     string                              `json:"next_token,omitempty"`
-	Error         string                              `json:"error,omitempty"`
-	ErrorCode     string                              `json:"error_code,omitempty"`
-	
+	QueryType    string        `json:"query_type"`
+	ObjectID     string        `json:"object_id"`
+	Success      bool          `json:"success"`
+	ExecutedAt   time.Time     `json:"executed_at"`
+	ResponseTime time.Duration `json:"response_time"`
+	TotalCount   int           `json:"total_count"`
+	HasMore      bool          `json:"has_more"`
+	NextToken    string        `json:"next_token,omitempty"`
+	Error        string        `json:"error,omitempty"`
+	ErrorCode    string        `json:"error_code,omitempty"`
+
 	// Results (these come from the module's ADQueryResult)
-	User          *interfaces.DirectoryUser           `json:"user,omitempty"`
-	Group         *interfaces.DirectoryGroup          `json:"group,omitempty"`
-	OU            *interfaces.OrganizationalUnit      `json:"ou,omitempty"`
-	Users         []interfaces.DirectoryUser          `json:"users,omitempty"`
-	Groups        []interfaces.DirectoryGroup         `json:"groups,omitempty"`
-	OUs           []interfaces.OrganizationalUnit     `json:"ous,omitempty"`
+	User   *interfaces.DirectoryUser       `json:"user,omitempty"`
+	Group  *interfaces.DirectoryGroup      `json:"group,omitempty"`
+	OU     *interfaces.OrganizationalUnit  `json:"ou,omitempty"`
+	Users  []interfaces.DirectoryUser      `json:"users,omitempty"`
+	Groups []interfaces.DirectoryGroup     `json:"groups,omitempty"`
+	OUs    []interfaces.OrganizationalUnit `json:"ous,omitempty"`
 }
 
 // init registers this provider with the global factory

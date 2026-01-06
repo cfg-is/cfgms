@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package export_test
 
 import (
@@ -16,13 +18,13 @@ import (
 
 // MockExporter implements MonitoringExporter for testing
 type MockExporter struct {
-	name            string
-	config          export.ExporterConfig
-	exportedData    []export.ExportData
-	exportErrors    []error
-	healthStatus    export.ExporterHealth
-	isStarted       bool
-	mu              sync.RWMutex
+	name         string
+	config       export.ExporterConfig
+	exportedData []export.ExportData
+	exportErrors []error
+	healthStatus export.ExporterHealth
+	isStarted    bool
+	mu           sync.RWMutex
 }
 
 func NewMockExporter(name string) *MockExporter {
@@ -42,14 +44,14 @@ func (me *MockExporter) Name() string {
 func (me *MockExporter) Export(ctx context.Context, data export.ExportData) error {
 	me.mu.Lock()
 	defer me.mu.Unlock()
-	
+
 	// Check for errors first, only add data if no error
 	if len(me.exportErrors) > 0 {
 		err := me.exportErrors[0]
 		me.exportErrors = me.exportErrors[1:]
 		return err
 	}
-	
+
 	// Only add data if export succeeds
 	me.exportedData = append(me.exportedData, data)
 	return nil
@@ -146,7 +148,7 @@ func TestExportManagerLifecycle(t *testing.T) {
 		config := &export.ExportConfig{
 			Enabled: true,
 		}
-		
+
 		manager := export.NewExportManager(logger, tracer, config)
 		ctx := context.Background()
 
@@ -171,7 +173,7 @@ func TestExportManagerLifecycle(t *testing.T) {
 		config := &export.ExportConfig{
 			Enabled: false,
 		}
-		
+
 		manager := export.NewExportManager(logger, tracer, config)
 		ctx := context.Background()
 
@@ -248,10 +250,10 @@ func TestExportManagerDataExport(t *testing.T) {
 		}
 
 		manager := export.NewExportManager(logger, tracer, config)
-		
+
 		exporter1 := NewMockExporter("exporter1")
 		exporter2 := NewMockExporter("exporter2")
-		
+
 		err := manager.RegisterExporter("exporter1", exporter1)
 		require.NoError(t, err)
 		err = manager.RegisterExporter("exporter2", exporter2)
@@ -265,7 +267,7 @@ func TestExportManagerDataExport(t *testing.T) {
 				t.Logf("Failed to stop manager: %v", err)
 			}
 		}()
-		
+
 		// Verify exporters are started
 		require.True(t, exporter1.IsStarted())
 		require.True(t, exporter2.IsStarted())
@@ -287,7 +289,7 @@ func TestExportManagerDataExport(t *testing.T) {
 		// Both exporters should have received data (synchronous for manual exports)
 		data1 := exporter1.GetExportedData()
 		data2 := exporter2.GetExportedData()
-		
+
 		assert.Len(t, data1, 1)
 		assert.Len(t, data2, 1)
 		assert.Equal(t, 100, data1[0].SystemMetrics["requests"])
@@ -390,7 +392,7 @@ func TestExportManagerErrorHandling(t *testing.T) {
 			MaxRetries:   2,
 			RetryBackoff: 10 * time.Millisecond,
 			SamplingRate: 1.0, // Export everything
-			BufferSize:   10,   // Adequate buffer size
+			BufferSize:   10,  // Adequate buffer size
 			Exporters: map[string]export.ExporterConfig{
 				"error-exporter": {Enabled: true},
 			},
@@ -398,10 +400,10 @@ func TestExportManagerErrorHandling(t *testing.T) {
 
 		manager := export.NewExportManager(logger, tracer, config)
 		exporter := NewMockExporter("error-exporter")
-		
+
 		// Set up exporter to fail once, then succeed
 		exporter.SetExportError(assert.AnError)
-		
+
 		if err := manager.RegisterExporter("error-exporter", exporter); err != nil {
 			t.Fatalf("Failed to register exporter: %v", err)
 		}
@@ -446,18 +448,18 @@ func TestExportManagerHealthChecks(t *testing.T) {
 			Enabled:             true,
 			HealthCheckInterval: 50 * time.Millisecond,
 			Exporters: map[string]export.ExporterConfig{
-				"healthy": {Enabled: true},
+				"healthy":   {Enabled: true},
 				"unhealthy": {Enabled: true},
 			},
 		}
 
 		manager := export.NewExportManager(logger, tracer, config)
-		
+
 		healthyExporter := NewMockExporter("healthy")
 		unhealthyExporter := NewMockExporter("unhealthy")
 		unhealthyExporter.SetHealthStatus(export.ExporterHealth{
-			Name:   "unhealthy",
-			Status: "unhealthy",
+			Name:    "unhealthy",
+			Status:  "unhealthy",
 			Message: "Connection failed",
 		})
 
@@ -501,7 +503,7 @@ func TestExportDataFiltering(t *testing.T) {
 		config := &export.ExportConfig{
 			Enabled:      true,
 			SamplingRate: 1.0, // Export everything
-			BufferSize:   10,   // Adequate buffer size
+			BufferSize:   10,  // Adequate buffer size
 			Exporters: map[string]export.ExporterConfig{
 				"metrics-only": {
 					Enabled:   true,
@@ -515,10 +517,10 @@ func TestExportDataFiltering(t *testing.T) {
 		}
 
 		manager := export.NewExportManager(logger, tracer, config)
-		
+
 		metricsExporter := NewMockExporter("metrics-only")
 		logsExporter := NewMockExporter("logs-only")
-		
+
 		if err := manager.RegisterExporter("metrics-only", metricsExporter); err != nil {
 			t.Fatalf("Failed to register metrics exporter: %v", err)
 		}
@@ -620,7 +622,7 @@ func TestExportManagerConcurrency(t *testing.T) {
 							"goroutine_id": id,
 							"export_id":    j,
 						},
-						Timestamp: time.Now(),
+						Timestamp:  time.Now(),
 						ExportType: export.ExportTypeManual, // Use manual for synchronous processing in tests
 					}
 					if err := manager.Export(exportData); err != nil {

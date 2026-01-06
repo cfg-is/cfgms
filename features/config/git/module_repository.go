@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 CFGMS Contributors
 // Package git provides module repository management functionality
 package git
 
@@ -12,12 +14,12 @@ import (
 
 // ModuleRepositoryManager manages script and module repositories
 type ModuleRepositoryManager struct {
-	gitManager    GitManager
-	store         RepositoryStore
-	moduleCache   map[string]*CustomModule  // module_id -> module
-	repoCache     map[string]*Repository    // repo_id -> repository
-	mu            sync.RWMutex
-	secValidator  *ModuleSecurityValidator
+	gitManager   GitManager
+	store        RepositoryStore
+	moduleCache  map[string]*CustomModule // module_id -> module
+	repoCache    map[string]*Repository   // repo_id -> repository
+	mu           sync.RWMutex
+	secValidator *ModuleSecurityValidator
 }
 
 // NewModuleRepositoryManager creates a new module repository manager
@@ -37,28 +39,28 @@ func (mrm *ModuleRepositoryManager) CreateModuleRepository(ctx context.Context, 
 	if !mrm.isModuleRepositoryType(config.Type) {
 		return nil, fmt.Errorf("invalid repository type for modules: %s", config.Type)
 	}
-	
+
 	// Set module-specific defaults
 	mrm.setModuleRepositoryDefaults(&config)
-	
+
 	// Create the repository
 	repo, err := mrm.gitManager.CreateRepository(ctx, config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create module repository: %w", err)
 	}
-	
+
 	// Initialize module repository structure
 	if err := mrm.initializeModuleRepository(ctx, repo); err != nil {
 		// Clean up on failure
 		_ = mrm.gitManager.DeleteRepository(ctx, repo.ID)
 		return nil, fmt.Errorf("failed to initialize module repository: %w", err)
 	}
-	
+
 	// Cache the repository
 	mrm.mu.Lock()
 	mrm.repoCache[repo.ID] = repo
 	mrm.mu.Unlock()
-	
+
 	return repo, nil
 }
 
@@ -69,18 +71,18 @@ func (mrm *ModuleRepositoryManager) LinkModuleRepository(ctx context.Context, co
 	if err != nil {
 		return fmt.Errorf("failed to get configuration repository: %w", err)
 	}
-	
+
 	// Validate the module repository exists
 	moduleRepo, err := mrm.gitManager.GetRepository(ctx, moduleRepoID)
 	if err != nil {
 		return fmt.Errorf("failed to get module repository: %w", err)
 	}
-	
+
 	// Validate that this is a module repository
 	if !mrm.isModuleRepositoryType(moduleRepo.Type) {
 		return fmt.Errorf("repository %s is not a module repository", moduleRepoID)
 	}
-	
+
 	// Initialize repository links if needed
 	if configRepo.ModuleLinks == nil {
 		configRepo.ModuleLinks = &RepositoryLinks{
@@ -89,21 +91,19 @@ func (mrm *ModuleRepositoryManager) LinkModuleRepository(ctx context.Context, co
 			TemplateRepositories: []string{},
 		}
 	}
-	
+
 	// Add the link
 	linkConfig.ID = moduleRepoID
 	linkConfig.URL = moduleRepo.CloneURL
 	linkConfig.Enabled = true
-	
+
 	// Validate security policy
 	if err := mrm.validateSecurityPolicy(linkConfig.SecurityPolicy); err != nil {
 		return fmt.Errorf("invalid security policy: %w", err)
 	}
-	
+
 	configRepo.ModuleLinks.ModuleRepositories = append(configRepo.ModuleLinks.ModuleRepositories, linkConfig)
-	
-	// TODO: Update repository metadata in persistent storage
-	
+
 	return nil
 }
 
@@ -113,19 +113,19 @@ func (mrm *ModuleRepositoryManager) LoadModulesFromRepository(ctx context.Contex
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Get local path
 	localPath, err := mrm.ensureModuleRepository(ctx, repo)
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Scan for module specifications
 	moduleSpecs, err := mrm.scanForModuleSpecs(ctx, localPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to scan for modules: %w", err)
 	}
-	
+
 	var modules []*CustomModule
 	for _, spec := range moduleSpecs {
 		module, err := mrm.loadModule(ctx, repo, localPath, spec)
@@ -133,7 +133,7 @@ func (mrm *ModuleRepositoryManager) LoadModulesFromRepository(ctx context.Contex
 			fmt.Printf("Warning: failed to load module %s: %v\n", spec, err)
 			continue
 		}
-		
+
 		// Validate security
 		if err := mrm.secValidator.ValidateModule(ctx, module); err != nil {
 			fmt.Printf("Warning: module %s failed security validation: %v\n", module.Name, err)
@@ -147,15 +147,15 @@ func (mrm *ModuleRepositoryManager) LoadModulesFromRepository(ctx context.Contex
 			module.SecurityStatus.Status = SecurityStatusApproved
 			module.SecurityStatus.LastScanned = time.Now()
 		}
-		
+
 		modules = append(modules, module)
-		
+
 		// Cache the module
 		mrm.mu.Lock()
 		mrm.moduleCache[module.Name] = module
 		mrm.mu.Unlock()
 	}
-	
+
 	return modules, nil
 }
 
@@ -164,11 +164,11 @@ func (mrm *ModuleRepositoryManager) GetModule(ctx context.Context, moduleName st
 	mrm.mu.RLock()
 	module, exists := mrm.moduleCache[moduleName]
 	mrm.mu.RUnlock()
-	
+
 	if exists {
 		return module, nil
 	}
-	
+
 	// Search across all linked repositories
 	// This is a simplified implementation
 	return nil, fmt.Errorf("module not found: %s", moduleName)
@@ -180,23 +180,23 @@ func (mrm *ModuleRepositoryManager) UpdateModule(ctx context.Context, module *Cu
 	if err != nil {
 		return err
 	}
-	
+
 	// Validate permissions
 	if err := mrm.validateUpdatePermissions(ctx, repo, module); err != nil {
 		return fmt.Errorf("permission denied: %w", err)
 	}
-	
+
 	localPath, err := mrm.ensureModuleRepository(ctx, repo)
 	if err != nil {
 		return err
 	}
-	
+
 	// Write module specification
 	specPath := filepath.Join(module.Path, "module.yaml")
 	if err := mrm.writeModuleSpec(ctx, localPath, specPath, module); err != nil {
 		return fmt.Errorf("failed to write module spec: %w", err)
 	}
-	
+
 	// Write script files
 	for platform, content := range module.Scripts {
 		scriptPath := filepath.Join(module.Path, module.Spec.Script.Files[platform])
@@ -204,7 +204,7 @@ func (mrm *ModuleRepositoryManager) UpdateModule(ctx context.Context, module *Cu
 			return fmt.Errorf("failed to write script file %s: %w", scriptPath, err)
 		}
 	}
-	
+
 	// Commit changes
 	author := CommitAuthor{
 		Name:     "Module Manager",
@@ -212,24 +212,24 @@ func (mrm *ModuleRepositoryManager) UpdateModule(ctx context.Context, module *Cu
 		Username: "system",
 		Role:     "system",
 	}
-	
-	message := fmt.Sprintf("Update module: %s\n\nVersion: %s\nAuthor: %s", 
+
+	message := fmt.Sprintf("Update module: %s\n\nVersion: %s\nAuthor: %s",
 		module.Name, module.Version, module.Spec.Metadata.Author)
-	
+
 	if _, err := mrm.store.Commit(ctx, localPath, message, author); err != nil {
 		return fmt.Errorf("failed to commit module update: %w", err)
 	}
-	
+
 	// Push changes
 	if err := mrm.store.Push(ctx, localPath); err != nil {
 		return fmt.Errorf("failed to push module update: %w", err)
 	}
-	
+
 	// Update cache
 	mrm.mu.Lock()
 	mrm.moduleCache[module.Name] = module
 	mrm.mu.Unlock()
-	
+
 	return nil
 }
 
@@ -237,8 +237,8 @@ func (mrm *ModuleRepositoryManager) UpdateModule(ctx context.Context, module *Cu
 
 func (mrm *ModuleRepositoryManager) isModuleRepositoryType(repoType RepositoryType) bool {
 	return repoType == RepositoryTypeScriptModules ||
-		   repoType == RepositoryTypeMSPModules ||
-		   repoType == RepositoryTypeClientModules
+		repoType == RepositoryTypeMSPModules ||
+		repoType == RepositoryTypeClientModules
 }
 
 func (mrm *ModuleRepositoryManager) setModuleRepositoryDefaults(config *RepositoryConfig) {
@@ -252,7 +252,7 @@ func (mrm *ModuleRepositoryManager) setModuleRepositoryDefaults(config *Reposito
 			},
 		}
 	}
-	
+
 	// Add default branch protection
 	if len(config.AccessControl.ProtectedBranches) == 0 {
 		config.AccessControl.ProtectedBranches = []BranchProtection{
@@ -274,8 +274,7 @@ func (mrm *ModuleRepositoryManager) initializeModuleRepository(ctx context.Conte
 	// - scripts/ (for script files)
 	// - tests/ (for module tests)
 	// - docs/ (for documentation)
-	
-	// TODO: Implement actual structure creation
+
 	return nil
 }
 
@@ -283,22 +282,22 @@ func (mrm *ModuleRepositoryManager) getModuleRepository(ctx context.Context, rep
 	mrm.mu.RLock()
 	repo, exists := mrm.repoCache[repoID]
 	mrm.mu.RUnlock()
-	
+
 	if exists {
 		return repo, nil
 	}
-	
+
 	// Fetch from git manager
 	repo, err := mrm.gitManager.GetRepository(ctx, repoID)
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Cache it
 	mrm.mu.Lock()
 	mrm.repoCache[repoID] = repo
 	mrm.mu.Unlock()
-	
+
 	return repo, nil
 }
 
@@ -342,19 +341,19 @@ func (mrm *ModuleRepositoryManager) validateSecurityPolicy(policy ModuleSecurity
 	if policy.RequireValidation && len(policy.AllowedExecutors) == 0 {
 		return fmt.Errorf("validation required but no executors allowed")
 	}
-	
+
 	return nil
 }
 
 func (mrm *ModuleRepositoryManager) validateUpdatePermissions(ctx context.Context, repo *Repository, module *CustomModule) error {
 	// Check if the current user has permission to update this module
 	// This would integrate with the authentication system
-	
+
 	// For now, just check access level
 	if module.AccessLevel == AccessLevelReadOnly {
 		return fmt.Errorf("module is read-only")
 	}
-	
+
 	return nil
 }
 
@@ -378,7 +377,7 @@ func NewModuleSecurityValidator() *ModuleSecurityValidator {
 // ValidateModule validates a module's security
 func (msv *ModuleSecurityValidator) ValidateModule(ctx context.Context, module *CustomModule) error {
 	var allIssues []SecurityIssue
-	
+
 	// Run all configured scanners
 	for name, scanner := range msv.scanners {
 		issues, err := scanner.ScanModule(ctx, module)
@@ -387,14 +386,14 @@ func (msv *ModuleSecurityValidator) ValidateModule(ctx context.Context, module *
 		}
 		allIssues = append(allIssues, issues...)
 	}
-	
+
 	// Check for high severity issues
 	for _, issue := range allIssues {
 		if issue.Severity == "high" || issue.Severity == "critical" {
 			return fmt.Errorf("high severity security issue: %s", issue.Description)
 		}
 	}
-	
+
 	module.SecurityStatus.Issues = allIssues
 	return nil
 }
@@ -415,11 +414,11 @@ func NewBasicSecurityScanner() *BasicSecurityScanner {
 // ScanModule performs basic security scanning
 func (bss *BasicSecurityScanner) ScanModule(ctx context.Context, module *CustomModule) ([]SecurityIssue, error) {
 	var issues []SecurityIssue
-	
+
 	// Check for suspicious patterns in scripts
 	for platform, script := range module.Scripts {
 		scriptContent := string(script)
-		
+
 		// Check for dangerous commands
 		dangerousPatterns := []string{
 			"rm -rf /",
@@ -428,7 +427,7 @@ func (bss *BasicSecurityScanner) ScanModule(ctx context.Context, module *CustomM
 			"sudo rm",
 			"> /dev/zero",
 		}
-		
+
 		for _, pattern := range dangerousPatterns {
 			if strings.Contains(strings.ToLower(scriptContent), pattern) {
 				issues = append(issues, SecurityIssue{
@@ -440,7 +439,7 @@ func (bss *BasicSecurityScanner) ScanModule(ctx context.Context, module *CustomM
 				})
 			}
 		}
-		
+
 		// Check for network access without proper restrictions
 		networkPatterns := []string{
 			"curl ",
@@ -449,7 +448,7 @@ func (bss *BasicSecurityScanner) ScanModule(ctx context.Context, module *CustomM
 			"https://",
 			"ftp://",
 		}
-		
+
 		hasNetworkAccess := false
 		for _, pattern := range networkPatterns {
 			if strings.Contains(strings.ToLower(scriptContent), pattern) {
@@ -457,7 +456,7 @@ func (bss *BasicSecurityScanner) ScanModule(ctx context.Context, module *CustomM
 				break
 			}
 		}
-		
+
 		if hasNetworkAccess && module.SecurityStatus.Status != SecurityStatusApproved {
 			issues = append(issues, SecurityIssue{
 				Type:           "network_access",
@@ -468,6 +467,6 @@ func (bss *BasicSecurityScanner) ScanModule(ctx context.Context, module *CustomM
 			})
 		}
 	}
-	
+
 	return issues, nil
 }

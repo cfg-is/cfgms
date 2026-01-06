@@ -56,19 +56,23 @@ type ConfigState interface {
 The `Get` method retrieves the current configuration of a resource as a ConfigState.
 
 **Signature:**
+
 ```go
 Get(ctx context.Context, resourceID string) (ConfigState, error)
 ```
 
 **Parameters:**
+
 - `ctx`: Context for cancellation and timeouts
 - `resourceID`: Unique identifier for the resource to query
 
 **Returns:**
+
 - `ConfigState`: Current configuration of the resource implementing the ConfigState interface
 - `error`: Any error that occurred during the operation
 
 **Behavior:**
+
 - Must return the current state of the resource
 - Should return a complete configuration that includes all discoverable settings
 - Must handle non-existent resources appropriately
@@ -76,6 +80,7 @@ Get(ctx context.Context, resourceID string) (ConfigState, error)
 - Returns comprehensive state (not just managed fields) for complete system visibility
 
 **Example:**
+
 ```go
 // Define module-specific configuration struct
 type FileConfiguration struct {
@@ -143,19 +148,23 @@ func (m *FileModule) Get(ctx context.Context, resourceID string) (ConfigState, e
 The `Set` method updates the resource to match the desired configuration.
 
 **Signature:**
+
 ```go
 Set(ctx context.Context, resourceID string, config ConfigState) error
 ```
 
 **Parameters:**
+
 - `ctx`: Context for cancellation and timeouts
 - `resourceID`: Unique identifier for the resource to modify
 - `config`: Desired configuration for the resource implementing ConfigState interface
 
 **Returns:**
+
 - `error`: Any error that occurred during the operation
 
 **Behavior:**
+
 - Must update the resource to match the desired configuration
 - Should be idempotent - multiple calls with same config should result in same state
 - Must handle partial configurations appropriately (only update managed fields)
@@ -163,6 +172,7 @@ Set(ctx context.Context, resourceID string, config ConfigState) error
 - Must provide atomic operations where possible
 
 **Example:**
+
 ```go
 func (m *FileModule) Set(ctx context.Context, resourceID string, config ConfigState) error {
     // Type assert to module-specific configuration
@@ -217,6 +227,7 @@ func (m *FileModule) Set(ctx context.Context, resourceID string, config ConfigSt
 This approach maintains the safety of the previous Get/Test/Set pattern while simplifying the module interface and enabling intelligent partial configuration management.
 
 **Smart Comparison Logic:**
+
 ```go
 // Pseudo-code for system-level comparison
 func compareConfigurations(current, desired ConfigState) bool {
@@ -234,6 +245,7 @@ func compareConfigurations(current, desired ConfigState) bool {
 ```
 
 **Benefits of System-Level Testing:**
+
 - **Selective Comparison**: Only compares fields actually managed by the configuration
 - **Complete Visibility**: Get returns full system state for monitoring/export
 - **Performance**: Uses AsMap() for efficient field access, no marshal/unmarshal overhead
@@ -278,6 +290,7 @@ const (
 ```
 
 **Monitor Implementation Notes:**
+
 - Monitoring is **optional** - not all modules need to support it
 - Modules that implement Monitor should use OS-specific hooks (inotify, Windows Event Log, etc.)
 - Monitor implementations should be efficient and not impact system performance
@@ -328,14 +341,17 @@ steward:
 ```
 
 **Module Load Failures:**
+
 - `continue`: Skip failed modules, continue with available ones
 - `fail`: Stop execution on any module load failure
 
 **Configuration Validation Failures:**
+
 - `fail`: Stop execution on validation errors (default)
 - `continue`: Skip invalid configurations, process valid ones
 
 **Runtime Error Behavior:**
+
 - Module failures are always isolated to prevent cascade failures
 - Errors are logged with full context for troubleshooting
 - Execution continues with remaining modules unless configured otherwise
@@ -384,12 +400,14 @@ steward:
 ### Execution Flow Integration
 
 Modules should be designed knowing the Steward will:
+
 1. Call `Get()` to retrieve current ConfigState (comprehensive system state)
 2. Use `AsMap()` and `GetManagedFields()` for efficient field-level comparison
 3. Only call `Set()` when drift is detected in managed fields
 4. Call `Get()` again to verify changes
 
 This means:
+
 - Get operations should return complete system state but be optimized for performance
 - AsMap() should be fast and efficient (avoid expensive conversions)
 - Set operations should be robust and only modify managed fields

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package risk
 
 import (
@@ -11,71 +13,71 @@ import (
 
 // BehavioralRiskAnalyzer analyzes user behavioral patterns for risk assessment
 type BehavioralRiskAnalyzer struct {
-	userProfiles      map[string]*UserBehaviorProfile
-	patternDetector   *PatternDetector
-	anomalyDetector   *AnomalyDetector
-	learningEngine    *BehavioralLearningEngine
-	confidenceEngine  *ConfidenceEngine
-	mutex             sync.RWMutex
+	userProfiles     map[string]*UserBehaviorProfile
+	patternDetector  *PatternDetector
+	anomalyDetector  *AnomalyDetector
+	learningEngine   *BehavioralLearningEngine
+	confidenceEngine *ConfidenceEngine
+	mutex            sync.RWMutex
 }
 
 // UserBehaviorProfile represents a user's behavioral baseline
 type UserBehaviorProfile struct {
-	UserID                string                     `json:"user_id"`
-	TenantID              string                     `json:"tenant_id"`
-	BaselineEstablished   bool                       `json:"baseline_established"`
-	ProfileCreated        time.Time                  `json:"profile_created"`
-	LastUpdated           time.Time                  `json:"last_updated"`
-	SampleCount           int                        `json:"sample_count"`
-	TypicalAccessHours    []int                      `json:"typical_access_hours"`
-	TypicalAccessDays     []time.Weekday             `json:"typical_access_days"`
-	TypicalLocations      map[string]float64         `json:"typical_locations"`
-	TypicalResources      map[string]float64         `json:"typical_resources"`
-	AverageSessionTime    time.Duration              `json:"average_session_time"`
-	AccessVelocity        AccessVelocityProfile      `json:"access_velocity"`
-	DevicePatterns        map[string]DevicePattern   `json:"device_patterns"`
-	NetworkPatterns       map[string]NetworkPattern  `json:"network_patterns"`
-	BehaviorMeans         map[string]float64         `json:"behavior_means"`
-	BehaviorStdDevs       map[string]float64         `json:"behavior_std_devs"`
-	AnomalyHistory        []AnomalyRecord            `json:"anomaly_history"`
+	UserID              string                    `json:"user_id"`
+	TenantID            string                    `json:"tenant_id"`
+	BaselineEstablished bool                      `json:"baseline_established"`
+	ProfileCreated      time.Time                 `json:"profile_created"`
+	LastUpdated         time.Time                 `json:"last_updated"`
+	SampleCount         int                       `json:"sample_count"`
+	TypicalAccessHours  []int                     `json:"typical_access_hours"`
+	TypicalAccessDays   []time.Weekday            `json:"typical_access_days"`
+	TypicalLocations    map[string]float64        `json:"typical_locations"`
+	TypicalResources    map[string]float64        `json:"typical_resources"`
+	AverageSessionTime  time.Duration             `json:"average_session_time"`
+	AccessVelocity      AccessVelocityProfile     `json:"access_velocity"`
+	DevicePatterns      map[string]DevicePattern  `json:"device_patterns"`
+	NetworkPatterns     map[string]NetworkPattern `json:"network_patterns"`
+	BehaviorMeans       map[string]float64        `json:"behavior_means"`
+	BehaviorStdDevs     map[string]float64        `json:"behavior_std_devs"`
+	AnomalyHistory      []AnomalyRecord           `json:"anomaly_history"`
 }
 
 // AccessVelocityProfile tracks access velocity patterns
 type AccessVelocityProfile struct {
-	RequestsPerHour       float64                    `json:"requests_per_hour"`
-	RequestsPerDay        float64                    `json:"requests_per_day"`
-	PeakHourlyRate        float64                    `json:"peak_hourly_rate"`
-	AverageGapBetweenRequests time.Duration          `json:"average_gap_between_requests"`
-	BurstPatterns         []BurstPattern             `json:"burst_patterns"`
+	RequestsPerHour           float64        `json:"requests_per_hour"`
+	RequestsPerDay            float64        `json:"requests_per_day"`
+	PeakHourlyRate            float64        `json:"peak_hourly_rate"`
+	AverageGapBetweenRequests time.Duration  `json:"average_gap_between_requests"`
+	BurstPatterns             []BurstPattern `json:"burst_patterns"`
 }
 
 // BurstPattern represents patterns of burst activity
 type BurstPattern struct {
-	StartHour        int                        `json:"start_hour"`
-	Duration         time.Duration              `json:"duration"`
-	Intensity        float64                    `json:"intensity"`
-	Frequency        float64                    `json:"frequency"`
-	TypicalDays      []time.Weekday             `json:"typical_days"`
+	StartHour   int            `json:"start_hour"`
+	Duration    time.Duration  `json:"duration"`
+	Intensity   float64        `json:"intensity"`
+	Frequency   float64        `json:"frequency"`
+	TypicalDays []time.Weekday `json:"typical_days"`
 }
 
 // DevicePattern tracks device usage patterns
 type DevicePattern struct {
-	DeviceID         string                     `json:"device_id"`
-	DeviceType       string                     `json:"device_type"`
-	UsageFrequency   float64                    `json:"usage_frequency"`
-	TypicalHours     []int                      `json:"typical_hours"`
-	LastUsed         time.Time                  `json:"last_used"`
-	TrustScore       float64                    `json:"trust_score"`
+	DeviceID       string    `json:"device_id"`
+	DeviceType     string    `json:"device_type"`
+	UsageFrequency float64   `json:"usage_frequency"`
+	TypicalHours   []int     `json:"typical_hours"`
+	LastUsed       time.Time `json:"last_used"`
+	TrustScore     float64   `json:"trust_score"`
 }
 
 // NetworkPattern tracks network usage patterns
 type NetworkPattern struct {
-	NetworkID        string                     `json:"network_id"`
-	UsageFrequency   float64                    `json:"usage_frequency"`
-	LocationContext  string                     `json:"location_context"`
-	SecurityLevel    NetworkSecurityLevel       `json:"security_level"`
-	LastUsed         time.Time                  `json:"last_used"`
-	TrustScore       float64                    `json:"trust_score"`
+	NetworkID       string               `json:"network_id"`
+	UsageFrequency  float64              `json:"usage_frequency"`
+	LocationContext string               `json:"location_context"`
+	SecurityLevel   NetworkSecurityLevel `json:"security_level"`
+	LastUsed        time.Time            `json:"last_used"`
+	TrustScore      float64              `json:"trust_score"`
 }
 
 // PatternDetector detects behavioral patterns
@@ -100,12 +102,12 @@ type ConfidenceEngine struct {
 // NewBehavioralRiskAnalyzer creates a new behavioral risk analyzer
 func NewBehavioralRiskAnalyzer() *BehavioralRiskAnalyzer {
 	return &BehavioralRiskAnalyzer{
-		userProfiles:      make(map[string]*UserBehaviorProfile),
-		patternDetector:   NewPatternDetector(),
-		anomalyDetector:   NewAnomalyDetector(),
-		learningEngine:    NewBehavioralLearningEngine(),
-		confidenceEngine:  NewConfidenceEngine(),
-		mutex:             sync.RWMutex{},
+		userProfiles:     make(map[string]*UserBehaviorProfile),
+		patternDetector:  NewPatternDetector(),
+		anomalyDetector:  NewAnomalyDetector(),
+		learningEngine:   NewBehavioralLearningEngine(),
+		confidenceEngine: NewConfidenceEngine(),
+		mutex:            sync.RWMutex{},
 	}
 }
 
@@ -130,28 +132,28 @@ func (bra *BehavioralRiskAnalyzer) EvaluateBehavioralRisk(ctx context.Context, r
 	}
 
 	result := &BehavioralRiskResult{
-		LastUpdate:          startTime,
-		PatternAnomalies:    make([]PatternAnomaly, 0),
-		BehaviorDeviations:  make([]BehaviorDeviation, 0),
-		LearningStatus:      profile.getLearningStatus(),
-		BaselineAge:         time.Since(profile.ProfileCreated),
-		SamplesCount:        profile.SampleCount,
+		LastUpdate:         startTime,
+		PatternAnomalies:   make([]PatternAnomaly, 0),
+		BehaviorDeviations: make([]BehaviorDeviation, 0),
+		LearningStatus:     profile.getLearningStatus(),
+		BaselineAge:        time.Since(profile.ProfileCreated),
+		SamplesCount:       profile.SampleCount,
 	}
 
 	// For new users without baseline, perform contextual risk analysis
 	if !profile.BaselineEstablished {
 		result.ConfidenceScore = 25.0 // Low confidence without baseline
 		result.LearningStatus = LearningStatusInitializing
-		
+
 		// Perform contextual behavioral risk analysis
 		contextualRisk, patterns := bra.performContextualAnalysis(ctx, request)
 		result.RiskScore = contextualRisk
 		result.PatternAnomalies = patterns
-		
+
 		// Generate behavioral deviations for new user analysis
 		deviations := bra.generateNewUserDeviations(ctx, request)
 		result.BehaviorDeviations = deviations
-		
+
 		return result, nil
 	}
 
@@ -191,15 +193,15 @@ func (bra *BehavioralRiskAnalyzer) EvaluateBehavioralRisk(ctx context.Context, r
 		for _, anomaly := range request.HistoricalData.AnomalyHistory {
 			// Add risk based on historical anomaly severity
 			anomalyRisk += anomaly.Severity * 15.0 // Up to 15 points per anomaly
-			
+
 			// Create pattern anomaly from historical data
 			result.PatternAnomalies = append(result.PatternAnomalies, PatternAnomaly{
-				AnomalyType:   anomaly.AnomalyType,
-				Severity:      anomaly.Severity,
-				Description:   fmt.Sprintf("Historical anomaly: %s", anomaly.Description),
-				Confidence:    0.8, // Good confidence for historical data
+				AnomalyType: anomaly.AnomalyType,
+				Severity:    anomaly.Severity,
+				Description: fmt.Sprintf("Historical anomaly: %s", anomaly.Description),
+				Confidence:  0.8, // Good confidence for historical data
 			})
-			
+
 			// Create behavior deviation from historical anomaly
 			result.BehaviorDeviations = append(result.BehaviorDeviations, BehaviorDeviation{
 				DeviationType:    "historical_anomaly",
@@ -214,13 +216,13 @@ func (bra *BehavioralRiskAnalyzer) EvaluateBehavioralRisk(ctx context.Context, r
 
 	// Combine risk scores using weighted approach
 	riskComponents := map[string]float64{
-		"temporal": temporalRisk.RiskScore * 0.20,  // 20% weight
-		"spatial":  spatialRisk.RiskScore * 0.25,   // 25% weight
-		"access":   accessRisk.RiskScore * 0.25,    // 25% weight
-		"velocity": velocityRisk.RiskScore * 0.15,  // 15% weight
-		"device":   deviceRisk.RiskScore * 0.15,    // 15% weight
+		"temporal": temporalRisk.RiskScore * 0.20, // 20% weight
+		"spatial":  spatialRisk.RiskScore * 0.25,  // 25% weight
+		"access":   accessRisk.RiskScore * 0.25,   // 25% weight
+		"velocity": velocityRisk.RiskScore * 0.15, // 15% weight
+		"device":   deviceRisk.RiskScore * 0.15,   // 15% weight
 	}
-	
+
 	// Add anomaly risk to the combined score (not as a weighted component)
 	combinedAnomalyRisk := anomalyRisk
 
@@ -228,20 +230,20 @@ func (bra *BehavioralRiskAnalyzer) EvaluateBehavioralRisk(ctx context.Context, r
 	for _, score := range riskComponents {
 		combinedRisk += score
 	}
-	
+
 	// Add anomaly risk to the base combined risk
 	combinedRisk += combinedAnomalyRisk
 
 	// Apply amplification factors for high-risk combinations
 	amplificationFactor := bra.calculateAmplificationFactor(riskComponents)
-	
+
 	// Additional amplification for multiple anomalies (applies to historical anomaly cases)
-	totalAnomalies := len(temporalRisk.Anomalies) + len(spatialRisk.Anomalies) + 
-			len(accessRisk.Anomalies) + len(velocityRisk.Anomalies) + len(deviceRisk.Anomalies)
+	totalAnomalies := len(temporalRisk.Anomalies) + len(spatialRisk.Anomalies) +
+		len(accessRisk.Anomalies) + len(velocityRisk.Anomalies) + len(deviceRisk.Anomalies)
 	if totalAnomalies > 3 {
 		amplificationFactor = math.Max(amplificationFactor, 1.50) // 50% minimum amplification for multiple anomalies
 	}
-	
+
 	result.RiskScore = math.Min(combinedRisk*amplificationFactor, 100.0)
 
 	// Calculate confidence score
@@ -269,7 +271,7 @@ func (bra *BehavioralRiskAnalyzer) EvaluateBehavioralRisk(ctx context.Context, r
 // getUserBehaviorProfile gets or creates a user behavior profile
 func (bra *BehavioralRiskAnalyzer) getUserBehaviorProfile(userID, tenantID string) (*UserBehaviorProfile, error) {
 	profileKey := fmt.Sprintf("%s:%s", tenantID, userID)
-	
+
 	profile, exists := bra.userProfiles[profileKey]
 	if !exists {
 		profile = &UserBehaviorProfile{
@@ -291,7 +293,7 @@ func (bra *BehavioralRiskAnalyzer) getUserBehaviorProfile(userID, tenantID strin
 		}
 		bra.userProfiles[profileKey] = profile
 	}
-	
+
 	return profile, nil
 }
 
@@ -367,7 +369,7 @@ func (bra *BehavioralRiskAnalyzer) analyzeSpatialPatterns(ctx context.Context, r
 	if request.EnvironmentContext.GeoLocation != nil {
 		locationKey := fmt.Sprintf("%s:%s", request.EnvironmentContext.GeoLocation.Country, request.EnvironmentContext.GeoLocation.City)
 		locationFrequency, exists := profile.TypicalLocations[locationKey]
-		
+
 		if !exists || locationFrequency < 0.1 { // Less than 10% of typical access
 			risk.RiskScore += 25.0 // High risk for new/unusual locations
 
@@ -398,7 +400,7 @@ func (bra *BehavioralRiskAnalyzer) analyzeSpatialPatterns(ctx context.Context, r
 		// Get network pattern based on IP address (simplified)
 		networkKey := bra.getNetworkKey(request.SessionContext.IPAddress)
 		networkPattern, exists := profile.NetworkPatterns[networkKey]
-		
+
 		if !exists || networkPattern.UsageFrequency < 0.1 {
 			risk.RiskScore += 20.0 // Medium-high risk for new networks
 
@@ -428,7 +430,7 @@ func (bra *BehavioralRiskAnalyzer) analyzeAccessPatterns(ctx context.Context, re
 	// Analyze resource access patterns
 	resourceID := request.AccessRequest.ResourceId
 	resourceFrequency, exists := profile.TypicalResources[resourceID]
-	
+
 	if !exists || resourceFrequency < 0.05 { // Less than 5% of typical access
 		risk.RiskScore += 30.0 // High risk for unusual resources
 
@@ -492,7 +494,7 @@ func (bra *BehavioralRiskAnalyzer) analyzeDevicePatterns(ctx context.Context, re
 	// Analyze device patterns if device information is available
 	if request.SessionContext.DeviceID != "" {
 		devicePattern, exists := profile.DevicePatterns[request.SessionContext.DeviceID]
-		
+
 		if !exists || devicePattern.UsageFrequency < 0.1 {
 			risk.RiskScore += 15.0 // Medium risk for new/unusual devices
 
@@ -516,13 +518,13 @@ func (bra *BehavioralRiskAnalyzer) analyzeDevicePatterns(ctx context.Context, re
 func (bra *BehavioralRiskAnalyzer) calculateAmplificationFactor(riskComponents map[string]float64) float64 {
 	amplification := 1.0
 	highRiskCount := 0
-	
+
 	for _, score := range riskComponents {
 		if score > 60.0 {
 			highRiskCount++
 		}
 	}
-	
+
 	// Amplify risk when multiple components show high risk
 	switch highRiskCount {
 	case 2:
@@ -532,7 +534,7 @@ func (bra *BehavioralRiskAnalyzer) calculateAmplificationFactor(riskComponents m
 	case 4, 5:
 		amplification = 1.40 // 40% increase
 	}
-	
+
 	return amplification
 }
 
@@ -592,7 +594,7 @@ func (bra *BehavioralRiskAnalyzer) calculateHourDeviation(hour int, typicalHours
 	if len(typicalHours) == 0 {
 		return 1.0 // Maximum deviation if no baseline
 	}
-	
+
 	// Calculate minimum distance to any typical hour
 	minDistance := 24
 	for _, typicalHour := range typicalHours {
@@ -604,7 +606,7 @@ func (bra *BehavioralRiskAnalyzer) calculateHourDeviation(hour int, typicalHours
 			minDistance = distance
 		}
 	}
-	
+
 	return float64(minDistance) / 12.0 // Normalize to 0-1 range
 }
 
@@ -612,13 +614,13 @@ func (bra *BehavioralRiskAnalyzer) calculateDayDeviation(day time.Weekday, typic
 	if len(typicalDays) == 0 {
 		return 1.0
 	}
-	
+
 	for _, typicalDay := range typicalDays {
 		if day == typicalDay {
 			return 0.0
 		}
 	}
-	
+
 	return 0.7 // Moderate deviation for different day
 }
 
@@ -699,10 +701,10 @@ func (ubp *UserBehaviorProfile) getLearningStatus() LearningStatus {
 
 // RiskComponent represents a component of behavioral risk analysis
 type RiskComponent struct {
-	ComponentType string                     `json:"component_type"`
-	RiskScore     float64                    `json:"risk_score"`
-	Anomalies     []PatternAnomaly           `json:"anomalies"`
-	Deviations    []BehaviorDeviation        `json:"deviations"`
+	ComponentType string              `json:"component_type"`
+	RiskScore     float64             `json:"risk_score"`
+	Anomalies     []PatternAnomaly    `json:"anomalies"`
+	Deviations    []BehaviorDeviation `json:"deviations"`
 }
 
 // Component factories - simplified implementations for supporting components
@@ -731,10 +733,10 @@ func NewConfidenceEngine() *ConfidenceEngine {
 func (ce *ConfidenceEngine) calculateBehavioralConfidence(profile *UserBehaviorProfile, request *RiskAssessmentRequest, components []RiskComponent) float64 {
 	// Base confidence on sample size (0.0 to 1.0)
 	sampleConfidence := math.Min(float64(profile.SampleCount)/20.0, 1.0)
-	
+
 	// Adjust for profile age - newer profiles are less reliable (0.0 to 1.0)
 	ageConfidence := math.Min(time.Since(profile.ProfileCreated).Hours()/168.0, 1.0) // 1 week to full confidence
-	
+
 	// Combine confidence factors (result: 0.0 to 1.0)
 	return (sampleConfidence*0.6 + ageConfidence*0.4)
 }
@@ -748,77 +750,77 @@ type TemporalConfidenceAnalyzer struct{}
 func (bra *BehavioralRiskAnalyzer) performContextualAnalysis(ctx context.Context, request *RiskAssessmentRequest) (float64, []PatternAnomaly) {
 	riskScore := 30.0 // Start with low-moderate risk
 	patterns := make([]PatternAnomaly, 0)
-	
+
 	// Analyze access time patterns
 	if request.EnvironmentContext != nil {
 		accessTime := request.EnvironmentContext.AccessTime
 		hour := accessTime.Hour()
-		
+
 		// After hours access increases risk
 		if !request.EnvironmentContext.BusinessHours {
 			riskScore += 15.0
 			patterns = append(patterns, PatternAnomaly{
-				AnomalyType:   "temporal_deviation",
-				Severity:      0.6,
-				Description:   "Access outside business hours",
-				Confidence:    0.8,
+				AnomalyType: "temporal_deviation",
+				Severity:    0.6,
+				Description: "Access outside business hours",
+				Confidence:  0.8,
 			})
 		}
-		
+
 		// Very early morning access (2-6 AM) increases risk significantly
 		if hour >= 2 && hour <= 6 {
 			riskScore += 20.0
 			patterns = append(patterns, PatternAnomaly{
-				AnomalyType:   "suspicious_timing",
-				Severity:      0.8,
-				Description:   "Access during unusual hours (2-6 AM)",
-				Confidence:    0.9,
+				AnomalyType: "suspicious_timing",
+				Severity:    0.8,
+				Description: "Access during unusual hours (2-6 AM)",
+				Confidence:  0.9,
 			})
 		}
-		
+
 		// Weekend access increases risk
 		weekday := accessTime.Weekday()
 		if weekday == time.Saturday || weekday == time.Sunday {
 			riskScore += 10.0
 			patterns = append(patterns, PatternAnomaly{
-				AnomalyType:   "temporal_deviation",
-				Severity:      0.4,
-				Description:   "Weekend access",
-				Confidence:    0.7,
+				AnomalyType: "temporal_deviation",
+				Severity:    0.4,
+				Description: "Weekend access",
+				Confidence:  0.7,
 			})
 		}
-		
+
 		// Geographic location risk
 		if request.EnvironmentContext.GeoLocation != nil {
 			country := request.EnvironmentContext.GeoLocation.Country
-			
+
 			// High-risk countries significantly increase risk
 			highRiskCountries := []string{"North Korea", "Iran", "Russia", "China"}
 			for _, riskCountry := range highRiskCountries {
 				if country == riskCountry {
 					riskScore += 30.0
 					patterns = append(patterns, PatternAnomaly{
-						AnomalyType:   "geographic_anomaly",
-						Severity:      0.9,
-						Description:   fmt.Sprintf("Access from high-risk location: %s", country),
-						Confidence:    0.95,
+						AnomalyType: "geographic_anomaly",
+						Severity:    0.9,
+						Description: fmt.Sprintf("Access from high-risk location: %s", country),
+						Confidence:  0.95,
 					})
 					break
 				}
 			}
 		}
-		
+
 		// Network security factors
 		if !request.EnvironmentContext.VPNConnected {
 			riskScore += 8.0
 			patterns = append(patterns, PatternAnomaly{
-				AnomalyType:   "network_security",
-				Severity:      0.6,
-				Description:   "Direct internet access without VPN",
-				Confidence:    0.7,
+				AnomalyType: "network_security",
+				Severity:    0.6,
+				Description: "Direct internet access without VPN",
+				Confidence:  0.7,
 			})
 		}
-		
+
 		// Threat intelligence factors
 		if request.EnvironmentContext.ThreatIntelligence != nil {
 			ipRep := request.EnvironmentContext.ThreatIntelligence.IPReputationScore
@@ -826,28 +828,28 @@ func (bra *BehavioralRiskAnalyzer) performContextualAnalysis(ctx context.Context
 				riskIncrease := ipRep * 25.0 // Up to 25 point increase
 				riskScore += riskIncrease
 				patterns = append(patterns, PatternAnomaly{
-					AnomalyType:   "threat_intelligence",
-					Severity:      0.8,
-					Description:   fmt.Sprintf("High IP reputation risk score: %.2f", ipRep),
-					Confidence:    0.85,
+					AnomalyType: "threat_intelligence",
+					Severity:    0.8,
+					Description: fmt.Sprintf("High IP reputation risk score: %.2f", ipRep),
+					Confidence:  0.85,
 				})
 			}
 		}
 	}
-	
+
 	// Analyze user context factors
 	if request.UserContext != nil {
 		// No MFA significantly increases risk
 		if !request.UserContext.MFAEnabled {
 			riskScore += 15.0
 			patterns = append(patterns, PatternAnomaly{
-				AnomalyType:   "authentication_weakness",
-				Severity:      0.8,
-				Description:   "Multi-factor authentication not enabled",
-				Confidence:    0.9,
+				AnomalyType: "authentication_weakness",
+				Severity:    0.8,
+				Description: "Multi-factor authentication not enabled",
+				Confidence:  0.9,
 			})
 		}
-		
+
 		// Privileged account access increases risk
 		if request.AccessRequest != nil {
 			permission := request.AccessRequest.PermissionId
@@ -856,46 +858,46 @@ func (bra *BehavioralRiskAnalyzer) performContextualAnalysis(ctx context.Context
 				if permission == privPerm {
 					riskScore += 20.0
 					patterns = append(patterns, PatternAnomaly{
-						AnomalyType:   "privilege_escalation",
-						Severity:      0.9,
-						Description:   fmt.Sprintf("High privilege access request: %s", permission),
-						Confidence:    0.9,
+						AnomalyType: "privilege_escalation",
+						Severity:    0.9,
+						Description: fmt.Sprintf("High privilege access request: %s", permission),
+						Confidence:  0.9,
 					})
 					break
 				}
 			}
 		}
 	}
-	
+
 	// Factor in historical anomaly data if available
 	if request.HistoricalData != nil && len(request.HistoricalData.AnomalyHistory) > 0 {
 		for _, anomaly := range request.HistoricalData.AnomalyHistory {
 			// Add risk based on historical anomaly severity
 			anomalyRisk := anomaly.Severity * 15.0 // Up to 15 points per anomaly
 			riskScore += anomalyRisk
-			
+
 			// Create pattern anomaly from historical data
 			patterns = append(patterns, PatternAnomaly{
-				AnomalyType:   anomaly.AnomalyType,
-				Severity:      anomaly.Severity,
-				Description:   fmt.Sprintf("Historical anomaly: %s", anomaly.Description),
-				Confidence:    0.8, // Good confidence for historical data
+				AnomalyType: anomaly.AnomalyType,
+				Severity:    anomaly.Severity,
+				Description: fmt.Sprintf("Historical anomaly: %s", anomaly.Description),
+				Confidence:  0.8, // Good confidence for historical data
 			})
 		}
 	}
-	
+
 	// Cap risk score at 100
 	if riskScore > 100.0 {
 		riskScore = 100.0
 	}
-	
+
 	return riskScore, patterns
 }
 
 // generateNewUserDeviations generates behavioral deviations for new users
 func (bra *BehavioralRiskAnalyzer) generateNewUserDeviations(ctx context.Context, request *RiskAssessmentRequest) []BehaviorDeviation {
 	deviations := make([]BehaviorDeviation, 0)
-	
+
 	if request.EnvironmentContext != nil {
 		// Time-based deviation
 		if !request.EnvironmentContext.BusinessHours {
@@ -908,7 +910,7 @@ func (bra *BehavioralRiskAnalyzer) generateNewUserDeviations(ctx context.Context
 				Significance:     0.7,
 			})
 		}
-		
+
 		// Location-based deviation for high-risk locations
 		if request.EnvironmentContext.GeoLocation != nil {
 			country := request.EnvironmentContext.GeoLocation.Country
@@ -928,7 +930,7 @@ func (bra *BehavioralRiskAnalyzer) generateNewUserDeviations(ctx context.Context
 			}
 		}
 	}
-	
+
 	return deviations
 }
 
@@ -941,13 +943,12 @@ func (bra *BehavioralRiskAnalyzer) getMostCommonHour(hours []int) int {
 	return hours[0]
 }
 
-
 // getMostCommonLocationFrequency returns the highest frequency from typical locations
 func (bra *BehavioralRiskAnalyzer) getMostCommonLocationFrequency(locations map[string]float64) float64 {
 	if len(locations) == 0 {
 		return 0.0
 	}
-	
+
 	maxFreq := 0.0
 	for _, freq := range locations {
 		if freq > maxFreq {
@@ -964,12 +965,12 @@ func (bra *BehavioralRiskAnalyzer) establishBaselineFromHistoricalData(profile *
 	}
 
 	patterns := historicalData.AccessPatterns
-	
+
 	// Set baseline from historical patterns
 	profile.TypicalAccessHours = patterns.TypicalHours
 	profile.TypicalAccessDays = patterns.TypicalDays
 	profile.AverageSessionTime = patterns.AverageSessionTime
-	
+
 	// Convert locations to map format
 	profile.TypicalLocations = make(map[string]float64)
 	for _, location := range patterns.TypicalLocations {
@@ -980,13 +981,13 @@ func (bra *BehavioralRiskAnalyzer) establishBaselineFromHistoricalData(profile *
 		}
 		profile.TypicalLocations[location] = 0.9 // High confidence for typical locations
 	}
-	
-	// Convert resources to map format  
+
+	// Convert resources to map format
 	profile.TypicalResources = make(map[string]float64)
 	for _, resource := range patterns.TypicalResources {
 		profile.TypicalResources[resource] = 0.8 // Good confidence for typical resources
 	}
-	
+
 	// Mark baseline as established
 	profile.BaselineEstablished = true
 	profile.SampleCount = len(historicalData.RecentAccess)

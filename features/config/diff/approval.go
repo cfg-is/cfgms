@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // Package diff implements approval workflow integration for configuration changes
 package diff
 
@@ -13,10 +15,10 @@ import (
 type DefaultApprovalIntegration struct {
 	// requests stores active approval requests
 	requests map[string]*ApprovalRequest
-	
+
 	// approvers stores the list of available approvers by type
 	approvers map[string][]string
-	
+
 	// defaultExpiry is the default expiration time for approval requests
 	defaultExpiry time.Duration
 }
@@ -37,10 +39,10 @@ func (ai *DefaultApprovalIntegration) CreateApprovalRequest(ctx context.Context,
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate request ID: %w", err)
 	}
-	
+
 	// Determine required approvers based on assessment
 	requiredApprovers := ai.determineRequiredApprovers(assessment)
-	
+
 	// Create approval request
 	request := &ApprovalRequest{
 		ID:                requestID,
@@ -60,17 +62,17 @@ func (ai *DefaultApprovalIntegration) CreateApprovalRequest(ctx context.Context,
 		CreatedAt: time.Now(),
 		ExpiresAt: time.Now().Add(ai.defaultExpiry),
 	}
-	
+
 	// Store the request
 	ai.requests[requestID] = request
-	
+
 	// Send notifications to approvers
 	if err := ai.notifyApprovers(ctx, request); err != nil {
 		// Log warning but don't fail the request creation
 		// In a real implementation, this would use proper logging
 		fmt.Printf("Warning: Failed to notify approvers: %v\n", err)
 	}
-	
+
 	return request, nil
 }
 
@@ -80,22 +82,22 @@ func (ai *DefaultApprovalIntegration) UpdateApprovalRequest(ctx context.Context,
 	if !exists {
 		return fmt.Errorf("approval request %s not found", requestID)
 	}
-	
+
 	// Check if request is still active
 	if request.Status.Status != "pending" {
 		return fmt.Errorf("cannot update approval request in status: %s", request.Status.Status)
 	}
-	
+
 	// Update the changes
 	request.Changes = result
 	request.Description = ai.generateDescription(result, request.RiskAssessment)
 	request.Status.UpdatedAt = time.Now()
-	
+
 	// Notify approvers of the update
 	if err := ai.notifyApproversOfUpdate(ctx, request); err != nil {
 		fmt.Printf("Warning: Failed to notify approvers of update: %v\n", err)
 	}
-	
+
 	return nil
 }
 
@@ -105,13 +107,13 @@ func (ai *DefaultApprovalIntegration) GetApprovalStatus(ctx context.Context, req
 	if !exists {
 		return nil, fmt.Errorf("approval request %s not found", requestID)
 	}
-	
+
 	// Check if request has expired
 	if time.Now().After(request.ExpiresAt) && request.Status.Status == "pending" {
 		request.Status.Status = "expired"
 		request.Status.UpdatedAt = time.Now()
 	}
-	
+
 	return &request.Status, nil
 }
 
@@ -121,21 +123,21 @@ func (ai *DefaultApprovalIntegration) CancelApprovalRequest(ctx context.Context,
 	if !exists {
 		return fmt.Errorf("approval request %s not found", requestID)
 	}
-	
+
 	// Check if request can be cancelled
 	if request.Status.Status != "pending" {
 		return fmt.Errorf("cannot cancel approval request in status: %s", request.Status.Status)
 	}
-	
+
 	// Update status
 	request.Status.Status = "cancelled"
 	request.Status.UpdatedAt = time.Now()
-	
+
 	// Notify approvers of cancellation
 	if err := ai.notifyApproversOfCancellation(ctx, request); err != nil {
 		fmt.Printf("Warning: Failed to notify approvers of cancellation: %v\n", err)
 	}
-	
+
 	return nil
 }
 
@@ -145,24 +147,24 @@ func (ai *DefaultApprovalIntegration) AddApproval(ctx context.Context, requestID
 	if !exists {
 		return fmt.Errorf("approval request %s not found", requestID)
 	}
-	
+
 	// Check if request is still pending
 	if request.Status.Status != "pending" {
 		return fmt.Errorf("cannot add approval to request in status: %s", request.Status.Status)
 	}
-	
+
 	// Check if approver is required
 	if !ai.isRequiredApprover(approver, request.RequiredApprovers) {
 		return fmt.Errorf("approver %s is not required for this request", approver)
 	}
-	
+
 	// Check if approver has already provided approval
 	for _, approval := range request.Status.Approvals {
 		if approval.Approver == approver {
 			return fmt.Errorf("approver %s has already provided approval", approver)
 		}
 	}
-	
+
 	// Add the approval
 	approval := Approval{
 		Approver:   approver,
@@ -170,17 +172,17 @@ func (ai *DefaultApprovalIntegration) AddApproval(ctx context.Context, requestID
 		Comment:    comment,
 		ApprovedAt: time.Now(),
 	}
-	
+
 	request.Status.Approvals = append(request.Status.Approvals, approval)
-	
+
 	// Remove from pending approvers if approved
 	if decision == "approved" {
 		request.Status.PendingApprovers = ai.removePendingApprover(request.Status.PendingApprovers, approver)
 	}
-	
+
 	// Update status
 	request.Status.UpdatedAt = time.Now()
-	
+
 	// Check if all required approvals are received
 	if ai.allApprovalsReceived(request) {
 		if ai.allApproved(request) {
@@ -189,7 +191,7 @@ func (ai *DefaultApprovalIntegration) AddApproval(ctx context.Context, requestID
 			request.Status.Status = "rejected"
 		}
 	}
-	
+
 	return nil
 }
 
@@ -199,17 +201,17 @@ func (ai *DefaultApprovalIntegration) AddComment(ctx context.Context, requestID,
 	if !exists {
 		return fmt.Errorf("approval request %s not found", requestID)
 	}
-	
+
 	// Add the comment
 	approvalComment := ApprovalComment{
 		Author:    author,
 		Comment:   comment,
 		CreatedAt: time.Now(),
 	}
-	
+
 	request.Status.Comments = append(request.Status.Comments, approvalComment)
 	request.Status.UpdatedAt = time.Now()
-	
+
 	return nil
 }
 
@@ -232,49 +234,49 @@ func (ai *DefaultApprovalIntegration) generateTitle(result *ComparisonResult) st
 	} else {
 		changeSummary = fmt.Sprintf("%d configuration changes", result.Summary.TotalChanges)
 	}
-	
+
 	if result.Summary.BreakingChanges > 0 {
 		changeSummary += fmt.Sprintf(" (%d breaking)", result.Summary.BreakingChanges)
 	}
-	
+
 	return fmt.Sprintf("Configuration Update: %s", changeSummary)
 }
 
 // generateDescription generates a description for the approval request
 func (ai *DefaultApprovalIntegration) generateDescription(result *ComparisonResult, assessment *RiskAssessment) string {
-	description := fmt.Sprintf("Configuration changes from %s to %s\n\n", 
+	description := fmt.Sprintf("Configuration changes from %s to %s\n\n",
 		result.FromRef.Commit[:8], result.ToRef.Commit[:8])
-	
+
 	description += "**Summary:**\n"
 	description += fmt.Sprintf("- Total Changes: %d\n", result.Summary.TotalChanges)
 	description += fmt.Sprintf("- Added: %d\n", result.Summary.AddedItems)
 	description += fmt.Sprintf("- Modified: %d\n", result.Summary.ModifiedItems)
 	description += fmt.Sprintf("- Deleted: %d\n", result.Summary.DeletedItems)
-	
+
 	if result.Summary.BreakingChanges > 0 {
 		description += fmt.Sprintf("- **Breaking Changes: %d**\n", result.Summary.BreakingChanges)
 	}
-	
+
 	if result.Summary.SecurityChanges > 0 {
 		description += fmt.Sprintf("- **Security Changes: %d**\n", result.Summary.SecurityChanges)
 	}
-	
+
 	description += fmt.Sprintf("\n**Risk Assessment:** %s\n", assessment.OverallRisk)
-	
+
 	if len(assessment.RiskFactors) > 0 {
 		description += "\n**Risk Factors:**\n"
 		for _, factor := range assessment.RiskFactors {
 			description += fmt.Sprintf("- %s (%s): %s\n", factor.Factor, factor.Level, factor.Description)
 		}
 	}
-	
+
 	if len(assessment.Recommendations) > 0 {
 		description += "\n**Recommendations:**\n"
 		for _, rec := range assessment.Recommendations {
 			description += fmt.Sprintf("- %s\n", rec)
 		}
 	}
-	
+
 	return description
 }
 
@@ -287,14 +289,14 @@ func (ai *DefaultApprovalIntegration) getCurrentUser(ctx context.Context) string
 // determineRequiredApprovers determines who needs to approve based on risk assessment
 func (ai *DefaultApprovalIntegration) determineRequiredApprovers(assessment *RiskAssessment) []string {
 	var required []string
-	
+
 	// Add approvers based on required approvals in assessment
 	for _, requirement := range assessment.RequiredApprovals {
 		if requirement.Required {
 			required = append(required, requirement.Approvers...)
 		}
 	}
-	
+
 	// Default approvers based on risk level
 	if len(required) == 0 {
 		switch assessment.OverallRisk {
@@ -307,7 +309,7 @@ func (ai *DefaultApprovalIntegration) determineRequiredApprovers(assessment *Ris
 			required = append(required, ai.approvers["peer"]...)
 		}
 	}
-	
+
 	// Remove duplicates
 	return ai.removeDuplicates(required)
 }
@@ -316,14 +318,14 @@ func (ai *DefaultApprovalIntegration) determineRequiredApprovers(assessment *Ris
 func (ai *DefaultApprovalIntegration) removeDuplicates(approvers []string) []string {
 	seen := make(map[string]bool)
 	var unique []string
-	
+
 	for _, approver := range approvers {
 		if !seen[approver] {
 			seen[approver] = true
 			unique = append(unique, approver)
 		}
 	}
-	
+
 	return unique
 }
 
@@ -366,7 +368,7 @@ func (ai *DefaultApprovalIntegration) allApproved(request *ApprovalRequest) bool
 // notifyApprovers sends notifications to required approvers
 func (ai *DefaultApprovalIntegration) notifyApprovers(ctx context.Context, request *ApprovalRequest) error {
 	// In a real implementation, this would send emails, Slack messages, etc.
-	fmt.Printf("Notifying approvers %v for request %s: %s\n", 
+	fmt.Printf("Notifying approvers %v for request %s: %s\n",
 		request.RequiredApprovers, request.ID, request.Title)
 	return nil
 }

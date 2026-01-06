@@ -1,0 +1,256 @@
+# golangci-lint configuration for CFGMS
+# Enforces central provider architecture and Go best practices
+# Run: make lint
+
+version: 2
+
+run:
+  timeout: 5m
+  issues-exit-code: 1
+  tests: true
+  build-tags: []
+  skip-dirs:
+    - vendor
+    - node_modules
+    - .github
+  skip-files: []
+  modules-download-mode: readonly
+  allow-parallel-runners: true
+
+output:
+  format: colored-line-number
+  print-issued-lines: true
+  print-linter-name: true
+  uniq-by-line: true
+  sort-results: true
+
+linters-settings:
+  # Central Provider Architecture Enforcement (CRITICAL)
+  depguard:
+    rules:
+      main:
+        deny:
+          # BLOCK: Direct storage provider imports (must use interfaces)
+          - pkg: "github.com/cfgis/cfgms/pkg/storage/providers/git"
+            desc: "Import pkg/storage/interfaces instead - business logic must not depend on specific storage implementations"
+          - pkg: "github.com/cfgis/cfgms/pkg/storage/providers/database"
+            desc: "Import pkg/storage/interfaces instead - business logic must not depend on specific storage implementations"
+          - pkg: "github.com/cfgis/cfgms/pkg/storage/providers/memory"
+            desc: "Import pkg/storage/interfaces instead - business logic must not depend on specific storage implementations"
+          - pkg: "github.com/cfgis/cfgms/pkg/storage/providers/file"
+            desc: "Import pkg/storage/interfaces instead - business logic must not depend on specific storage implementations"
+
+          # BLOCK: Direct logging provider imports (must use interfaces)
+          - pkg: "github.com/cfgis/cfgms/pkg/logging/providers/file"
+            desc: "Import pkg/logging/interfaces instead - business logic must not depend on specific logging implementations"
+          - pkg: "github.com/cfgis/cfgms/pkg/logging/providers/timescale"
+            desc: "Import pkg/logging/interfaces instead - business logic must not depend on specific logging implementations"
+
+          # BLOCK: Direct secret provider imports (must use interfaces)
+          - pkg: "github.com/cfgis/cfgms/pkg/secrets/providers/sops"
+            desc: "Import pkg/secrets/interfaces instead - business logic must not depend on specific secret implementations"
+
+          # BLOCK: Direct directory provider imports (must use interfaces)
+          - pkg: "github.com/cfgis/cfgms/pkg/directory/providers/m365"
+            desc: "Import pkg/directory/interfaces instead - business logic must not depend on specific directory implementations"
+          - pkg: "github.com/cfgis/cfgms/pkg/directory/providers/activedirectory"
+            desc: "Import pkg/directory/interfaces instead - business logic must not depend on specific directory implementations"
+
+          # BLOCK: Direct MQTT provider imports (must use interfaces)
+          - pkg: "github.com/cfgis/cfgms/pkg/mqtt/providers/mochi"
+            desc: "Import pkg/mqtt/interfaces instead - business logic must not depend on specific MQTT implementations"
+
+      # Special rules for features/ directory
+      features:
+        files:
+          - "$all"
+          - "!**/pkg/**"
+        deny:
+          # BLOCK: Direct TLS/crypto usage outside pkg/cert (prevents dual-CA bugs)
+          - pkg: "crypto/tls"
+            desc: "Use pkg/cert.Manager instead - direct TLS configuration prevented dual-CA bug (see ADR 001)"
+          - pkg: "crypto/x509"
+            desc: "Use pkg/cert.Manager instead - direct certificate generation prevented dual-CA bug (see ADR 001)"
+
+  # Code quality and best practices
+  gofmt:
+    simplify: true
+
+  goimports:
+    local-prefixes: github.com/cfgis/cfgms
+
+  govet:
+    enable-all: true
+    disable:
+      - shadow  # Too many false positives
+
+  errcheck:
+    check-type-assertions: true
+    check-blank: true
+    exclude-functions:
+      - (io.Closer).Close
+      - (io.ReadCloser).Close
+
+  staticcheck:
+    checks:
+      - "all"
+      - "-SA1019"  # Allow deprecated functions (we manage deprecations ourselves)
+
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - performance
+      # NOTE: Disabled opinionated/style/experimental tags to reduce noise
+      # - style
+      # - experimental
+      # - opinionated
+    disabled-checks:
+      - whyNoLint  # We don't require justification for every nolint
+      - unnamedResult  # Named returns not always needed
+      - ifElseChain  # Style preference - if-else vs switch
+      - elseif  # Style preference - else if vs else {if}
+
+  revive:
+    confidence: 0.8
+    rules:
+      - name: blank-imports
+      - name: context-as-argument
+      - name: context-keys-type
+      - name: dot-imports
+      - name: error-return
+      - name: error-strings
+      - name: error-naming
+      # Disable: exported - too noisy for large codebase
+      # - name: exported
+      - name: increment-decrement
+      # Disable: var-naming - too opinionated
+      # - name: var-naming
+      - name: var-declaration
+      - name: range
+      - name: receiver-naming
+      - name: time-naming
+      - name: unexported-return
+      # Disable: indent-error-flow - style preference
+      # - name: indent-error-flow
+      - name: errorf
+      - name: empty-block
+      - name: superfluous-else
+      # Disable: unused-parameter - many false positives from framework requirements (cobra, etc)
+      # - name: unused-parameter
+      - name: unreachable-code
+      - name: redefines-builtin-id
+
+  misspell:
+    locale: US
+
+  unparam:
+    check-exported: false
+
+  nakedret:
+    max-func-lines: 30
+
+  prealloc:
+    simple: true
+    range-loops: true
+    for-loops: true
+
+  goconst:
+    min-len: 3
+    min-occurrences: 3
+
+linters:
+  disable-all: true
+  enable:
+    # Central Provider Architecture Enforcement (CRITICAL)
+    # NOTE: depguard disabled - architectural enforcement via make check-architecture
+    # - depguard       # Enforce central provider import rules
+
+    # Core Quality Linters (REQUIRED)
+    - errcheck       # Check error handling
+    - govet          # Go vet checks
+    - ineffassign    # Detect ineffectual assignments
+    - staticcheck    # Advanced static analysis (includes gosimple in v2.x)
+    - unused         # Detect unused code
+
+    # Code Quality (RECOMMENDED)
+    # NOTE: gocritic disabled - mostly style preferences (ifElseChain)
+    # - gocritic       # Comprehensive checks
+    # NOTE: revive disabled - too opinionated for large codebase
+    # - revive         # Fast, configurable linter
+    - misspell       # Spell checking
+    - unconvert      # Remove unnecessary conversions
+    # NOTE: unparam disabled - mostly framework requirements (cobra, HTTP handlers, gRPC)
+    # - unparam        # Detect unused parameters
+    - nakedret       # Naked returns in long functions
+    # NOTE: prealloc disabled - micro-optimizations with limited impact
+    # - prealloc       # Slice preallocations
+    # NOTE: goconst disabled - maintainability improvement but tedious to fix
+    # - goconst        # Repeated strings that could be constants
+
+    # Security (IMPORTANT)
+    # NOTE: gosec disabled in golangci-lint - comprehensive security scanning via make security-gosec
+    # - gosec          # Security checks (also run separately in make security-gosec)
+
+formatters:
+  disable-all: true
+  enable:
+    - gofmt          # Format checking
+    - goimports      # Import formatting
+
+issues:
+  exclude-use-default: false
+  exclude-rules:
+    # Exclude depguard for pkg/ itself (providers need to import each other)
+    - path: pkg/.*
+      linters:
+        - depguard
+
+    # Exclude depguard for cmd/ (main packages need to import providers for registration)
+    - path: cmd/.*
+      linters:
+        - depguard
+
+    # Exclude depguard for api/proto (protocol buffer definitions and tests)
+    - path: api/proto/.*
+      linters:
+        - depguard
+
+    # Exclude crypto imports for pkg/cert (it manages certificates)
+    - path: pkg/cert/.*
+      text: "crypto/tls|crypto/x509"
+      linters:
+        - depguard
+
+    # Exclude certain linters for test files
+    - path: _test\.go
+      linters:
+        - errcheck
+        - goconst
+        - unparam
+        - depguard
+        - gosec
+
+    # Exclude gosec for test/ directory (integration/e2e tests)
+    - path: test/.*
+      linters:
+        - gosec
+
+    # Exclude linters for generated code
+    - path: .pb.go$
+      linters:
+        - gofmt
+        - goimports
+        - govet
+        - revive
+
+    # Exclude linters for mocks
+    - path: mock_.*\.go$
+      linters:
+        - govet
+        - revive
+        - unused
+
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  new: false
+  fix: false

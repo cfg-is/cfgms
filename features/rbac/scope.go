@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package rbac
 
 import (
@@ -60,7 +62,7 @@ func (s *ScopeEngine) EvaluateScope(ctx context.Context, scope *common.Permissio
 				return false, fmt.Sprintf("resource missing required attribute '%s'", requiredKey)
 			}
 			if actualValue != requiredValue {
-				return false, fmt.Sprintf("resource attribute '%s' has value '%s' but requires '%s'", 
+				return false, fmt.Sprintf("resource attribute '%s' has value '%s' but requires '%s'",
 					requiredKey, actualValue, requiredValue)
 			}
 		}
@@ -78,12 +80,12 @@ func (s *ScopeEngine) matchesPattern(resourceID, pattern string) bool {
 		matched, _ := filepath.Match(pattern, resourceID)
 		return matched
 	}
-	
+
 	// Handle prefix patterns (ending with /)
 	if strings.HasSuffix(pattern, "/") {
 		return strings.HasPrefix(resourceID, pattern)
 	}
-	
+
 	// Exact match
 	return resourceID == pattern
 }
@@ -109,7 +111,7 @@ func (s *ScopeEngine) ValidateScope(ctx context.Context, scope *common.Permissio
 		if pattern == "" {
 			return fmt.Errorf("empty resource pattern not allowed")
 		}
-		
+
 		// Check for invalid pattern syntax
 		_, err := filepath.Match(pattern, "test")
 		if err != nil {
@@ -122,7 +124,7 @@ func (s *ScopeEngine) ValidateScope(ctx context.Context, scope *common.Permissio
 		if pattern == "" {
 			return fmt.Errorf("empty excluded resource pattern not allowed")
 		}
-		
+
 		// Check for invalid pattern syntax
 		_, err := filepath.Match(pattern, "test")
 		if err != nil {
@@ -141,7 +143,7 @@ func (s *ScopeEngine) ValidateScope(ctx context.Context, scope *common.Permissio
 // CreateResourceScope creates a permission scope for specific resources
 func (s *ScopeEngine) CreateResourceScope(resourceIDs []string, excludedIDs []string) *common.PermissionScope {
 	return &common.PermissionScope{
-		ResourceIds:        resourceIDs,
+		ResourceIds:       resourceIDs,
 		ExcludedResources: excludedIDs,
 	}
 }
@@ -181,7 +183,7 @@ func (s *ScopeEngine) ComputeEffectiveScope(ctx context.Context, scopes []*commo
 	if len(scopes) == 0 {
 		return nil, nil
 	}
-	
+
 	if len(scopes) == 1 {
 		return scopes[0], nil
 	}
@@ -208,7 +210,7 @@ func (s *ScopeEngine) ComputeEffectiveScope(ctx context.Context, scopes []*commo
 	if len(resourceIDSets) > 0 {
 		// Start with the first set
 		intersection := resourceIDSets[0]
-		
+
 		// Intersect with remaining sets
 		for i := 1; i < len(resourceIDSets); i++ {
 			newIntersection := make(map[string]bool)
@@ -219,7 +221,7 @@ func (s *ScopeEngine) ComputeEffectiveScope(ctx context.Context, scopes []*commo
 			}
 			intersection = newIntersection
 		}
-		
+
 		// Convert back to slice
 		for id := range intersection {
 			effective.ResourceIds = append(effective.ResourceIds, id)
@@ -253,7 +255,7 @@ func (s *ScopeEngine) ComputeEffectiveScope(ctx context.Context, scopes []*commo
 		for key, value := range scope.ResourceAttributes {
 			if existingValue, exists := effective.ResourceAttributes[key]; exists {
 				if existingValue != value {
-					return nil, fmt.Errorf("conflicting resource attribute requirements: %s='%s' vs %s='%s'", 
+					return nil, fmt.Errorf("conflicting resource attribute requirements: %s='%s' vs %s='%s'",
 						key, existingValue, key, value)
 				}
 			} else {

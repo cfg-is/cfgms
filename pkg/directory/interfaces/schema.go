@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // Package interfaces - Directory Schema Normalization Layer
 //
 // This file implements a schema normalization layer for cross-provider compatibility.
@@ -20,32 +22,32 @@ type DirectorySchemaMapper interface {
 	// Schema Operations
 	GetNormalizedSchema(providerName string) (*NormalizedSchema, error)
 	RegisterProviderSchema(providerName string, schema *ProviderSchema) error
-	
+
 	// Field Mapping
 	MapToNormalized(providerName string, objectType DirectoryObjectType, providerData map[string]interface{}) (map[string]interface{}, error)
 	MapFromNormalized(providerName string, objectType DirectoryObjectType, normalizedData map[string]interface{}) (map[string]interface{}, error)
-	
+
 	// Object Conversion
 	ConvertUserToNormalized(providerName string, providerUser map[string]interface{}) (*DirectoryUser, error)
 	ConvertUserFromNormalized(providerName string, normalizedUser *DirectoryUser) (map[string]interface{}, error)
 	ConvertGroupToNormalized(providerName string, providerGroup map[string]interface{}) (*DirectoryGroup, error)
 	ConvertGroupFromNormalized(providerName string, normalizedGroup *DirectoryGroup) (map[string]interface{}, error)
-	
+
 	// Validation
 	ValidateNormalizedObject(objectType DirectoryObjectType, data map[string]interface{}) error
 	ValidateProviderObject(providerName string, objectType DirectoryObjectType, data map[string]interface{}) error
-	
+
 	// Conflict Resolution
 	ResolveConflicts(conflicts []FieldConflict) (map[string]interface{}, error)
 }
 
 // DefaultDirectorySchemaMapper is the default implementation
 type DefaultDirectorySchemaMapper struct {
-	providerSchemas   map[string]*ProviderSchema
-	normalizedSchema  *NormalizedSchema
-	fieldMappings     map[string]*FieldMappingSet
-	transformers      map[string]DataTransformer
-	validators        map[string]FieldValidator
+	providerSchemas  map[string]*ProviderSchema
+	normalizedSchema *NormalizedSchema
+	fieldMappings    map[string]*FieldMappingSet
+	transformers     map[string]DataTransformer
+	validators       map[string]FieldValidator
 }
 
 // NormalizedSchema defines the universal schema for directory objects
@@ -57,71 +59,71 @@ type NormalizedSchema struct {
 
 // NormalizedObjectSchema defines the schema for a normalized object type
 type NormalizedObjectSchema struct {
-	ObjectType      DirectoryObjectType          `json:"object_type"`
-	CoreFields      map[string]*NormalizedField  `json:"core_fields"`      // Essential fields present in all providers
-	OptionalFields  map[string]*NormalizedField  `json:"optional_fields"`  // Optional fields that may not exist in all providers
-	ExtensionFields map[string]*NormalizedField  `json:"extension_fields"` // Provider-specific extensions
-	Relationships   map[string]*Relationship     `json:"relationships"`    // Object relationships
-	Constraints     []*ObjectConstraint          `json:"constraints"`      // Object-level constraints
+	ObjectType      DirectoryObjectType         `json:"object_type"`
+	CoreFields      map[string]*NormalizedField `json:"core_fields"`      // Essential fields present in all providers
+	OptionalFields  map[string]*NormalizedField `json:"optional_fields"`  // Optional fields that may not exist in all providers
+	ExtensionFields map[string]*NormalizedField `json:"extension_fields"` // Provider-specific extensions
+	Relationships   map[string]*Relationship    `json:"relationships"`    // Object relationships
+	Constraints     []*ObjectConstraint         `json:"constraints"`      // Object-level constraints
 }
 
 // NormalizedField defines a field in the normalized schema
 type NormalizedField struct {
-	Name         string             `json:"name"`                    // Field name
-	Type         FieldType          `json:"type"`                    // Data type
-	Description  string             `json:"description"`             // Field description
-	Required     bool               `json:"required"`                // Is field required
-	ReadOnly     bool               `json:"read_only"`               // Is field read-only
-	Searchable   bool               `json:"searchable"`              // Can field be searched
-	Sortable     bool               `json:"sortable"`                // Can field be used for sorting
-	Format       string             `json:"format,omitempty"`        // Format specification (e.g., email, phone)
-	MaxLength    int                `json:"max_length,omitempty"`    // Maximum field length
-	MinLength    int                `json:"min_length,omitempty"`    // Minimum field length
-	Pattern      string             `json:"pattern,omitempty"`       // Regex validation pattern
-	DefaultValue interface{}        `json:"default_value,omitempty"` // Default value
-	EnumValues   []interface{}      `json:"enum_values,omitempty"`   // Valid enum values
-	Validation   *FieldValidation   `json:"validation,omitempty"`    // Validation rules
+	Name         string           `json:"name"`                    // Field name
+	Type         FieldType        `json:"type"`                    // Data type
+	Description  string           `json:"description"`             // Field description
+	Required     bool             `json:"required"`                // Is field required
+	ReadOnly     bool             `json:"read_only"`               // Is field read-only
+	Searchable   bool             `json:"searchable"`              // Can field be searched
+	Sortable     bool             `json:"sortable"`                // Can field be used for sorting
+	Format       string           `json:"format,omitempty"`        // Format specification (e.g., email, phone)
+	MaxLength    int              `json:"max_length,omitempty"`    // Maximum field length
+	MinLength    int              `json:"min_length,omitempty"`    // Minimum field length
+	Pattern      string           `json:"pattern,omitempty"`       // Regex validation pattern
+	DefaultValue interface{}      `json:"default_value,omitempty"` // Default value
+	EnumValues   []interface{}    `json:"enum_values,omitempty"`   // Valid enum values
+	Validation   *FieldValidation `json:"validation,omitempty"`    // Validation rules
 }
 
 // FieldType represents the data type of a field
 type FieldType string
 
 const (
-	FieldTypeString    FieldType = "string"
-	FieldTypeInteger   FieldType = "integer"
-	FieldTypeBoolean   FieldType = "boolean"
-	FieldTypeDateTime  FieldType = "datetime"
-	FieldTypeArray     FieldType = "array"
-	FieldTypeObject    FieldType = "object"
-	FieldTypeBinary    FieldType = "binary"
+	FieldTypeString   FieldType = "string"
+	FieldTypeInteger  FieldType = "integer"
+	FieldTypeBoolean  FieldType = "boolean"
+	FieldTypeDateTime FieldType = "datetime"
+	FieldTypeArray    FieldType = "array"
+	FieldTypeObject   FieldType = "object"
+	FieldTypeBinary   FieldType = "binary"
 )
 
 // FieldValidation defines validation rules for a field
 type FieldValidation struct {
-	Pattern       string        `json:"pattern,omitempty"`         // Regex pattern
-	MinValue      interface{}   `json:"min_value,omitempty"`       // Minimum value
-	MaxValue      interface{}   `json:"max_value,omitempty"`       // Maximum value
-	CustomRules   []string      `json:"custom_rules,omitempty"`    // Custom validation rule names
+	Pattern     string      `json:"pattern,omitempty"`      // Regex pattern
+	MinValue    interface{} `json:"min_value,omitempty"`    // Minimum value
+	MaxValue    interface{} `json:"max_value,omitempty"`    // Maximum value
+	CustomRules []string    `json:"custom_rules,omitempty"` // Custom validation rule names
 }
 
 // Relationship defines relationships between directory objects
 type Relationship struct {
-	Name         string              `json:"name"`           // Relationship name
-	Type         RelationshipType    `json:"type"`           // Relationship type
-	TargetType   DirectoryObjectType `json:"target_type"`    // Target object type
-	Cardinality  Cardinality         `json:"cardinality"`    // Relationship cardinality
-	Required     bool                `json:"required"`       // Is relationship required
-	Description  string              `json:"description"`    // Relationship description
+	Name        string              `json:"name"`        // Relationship name
+	Type        RelationshipType    `json:"type"`        // Relationship type
+	TargetType  DirectoryObjectType `json:"target_type"` // Target object type
+	Cardinality Cardinality         `json:"cardinality"` // Relationship cardinality
+	Required    bool                `json:"required"`    // Is relationship required
+	Description string              `json:"description"` // Relationship description
 }
 
 // RelationshipType represents the type of relationship
 type RelationshipType string
 
 const (
-	RelationshipTypeContains   RelationshipType = "contains"   // Parent contains child
-	RelationshipTypeMemberOf   RelationshipType = "member_of"  // Object is member of group
-	RelationshipTypeManages    RelationshipType = "manages"    // Manager relationship
-	RelationshipTypeReportsTo  RelationshipType = "reports_to" // Reporting relationship
+	RelationshipTypeContains  RelationshipType = "contains"   // Parent contains child
+	RelationshipTypeMemberOf  RelationshipType = "member_of"  // Object is member of group
+	RelationshipTypeManages   RelationshipType = "manages"    // Manager relationship
+	RelationshipTypeReportsTo RelationshipType = "reports_to" // Reporting relationship
 )
 
 // Cardinality represents relationship cardinality
@@ -136,44 +138,44 @@ const (
 
 // ObjectConstraint defines constraints on directory objects
 type ObjectConstraint struct {
-	Name        string    `json:"name"`                  // Constraint name
-	Type        string    `json:"type"`                  // Constraint type (unique, dependency, etc.)
-	Fields      []string  `json:"fields"`                // Fields involved in constraint
-	Condition   string    `json:"condition,omitempty"`   // Constraint condition
-	Message     string    `json:"message"`               // Error message when constraint is violated
+	Name      string   `json:"name"`                // Constraint name
+	Type      string   `json:"type"`                // Constraint type (unique, dependency, etc.)
+	Fields    []string `json:"fields"`              // Fields involved in constraint
+	Condition string   `json:"condition,omitempty"` // Constraint condition
+	Message   string   `json:"message"`             // Error message when constraint is violated
 }
 
 // ProviderSchema defines the schema for a specific directory provider
 type ProviderSchema struct {
-	ProviderName    string                           `json:"provider_name"`
-	UserSchema      *ProviderObjectSchema            `json:"user_schema"`
-	GroupSchema     *ProviderObjectSchema            `json:"group_schema"`
-	OUSchema        *ProviderObjectSchema            `json:"ou_schema,omitempty"`
-	Mappings        *FieldMappingSet                 `json:"mappings"`          // Field mappings to normalized schema
-	Transformers    map[string]string                `json:"transformers"`      // Data transformation rules
-	Capabilities    *SchemaCapabilities              `json:"capabilities"`      // Provider-specific capabilities
+	ProviderName string                `json:"provider_name"`
+	UserSchema   *ProviderObjectSchema `json:"user_schema"`
+	GroupSchema  *ProviderObjectSchema `json:"group_schema"`
+	OUSchema     *ProviderObjectSchema `json:"ou_schema,omitempty"`
+	Mappings     *FieldMappingSet      `json:"mappings"`     // Field mappings to normalized schema
+	Transformers map[string]string     `json:"transformers"` // Data transformation rules
+	Capabilities *SchemaCapabilities   `json:"capabilities"` // Provider-specific capabilities
 }
 
 // ProviderObjectSchema defines the schema for a provider-specific object type
 type ProviderObjectSchema struct {
-	ObjectType      DirectoryObjectType       `json:"object_type"`
-	Fields          map[string]*ProviderField `json:"fields"`
-	RequiredFields  []string                  `json:"required_fields"`
-	UniqueFields    []string                  `json:"unique_fields"`
-	SearchableFields []string                 `json:"searchable_fields"`
-	Constraints     []*ObjectConstraint       `json:"constraints,omitempty"`
+	ObjectType       DirectoryObjectType       `json:"object_type"`
+	Fields           map[string]*ProviderField `json:"fields"`
+	RequiredFields   []string                  `json:"required_fields"`
+	UniqueFields     []string                  `json:"unique_fields"`
+	SearchableFields []string                  `json:"searchable_fields"`
+	Constraints      []*ObjectConstraint       `json:"constraints,omitempty"`
 }
 
 // ProviderField defines a field in a provider-specific schema
 type ProviderField struct {
-	Name            string        `json:"name"`
-	ProviderType    string        `json:"provider_type"`        // Provider-specific type (e.g., "ADsPath", "objectGUID")
-	NormalizedType  FieldType     `json:"normalized_type"`      // Mapped normalized type
-	Syntax          string        `json:"syntax,omitempty"`     // Provider syntax (LDAP syntax, etc.)
-	MultiValued     bool          `json:"multi_valued"`         // Is field multi-valued
-	SystemOnly      bool          `json:"system_only"`          // Is field system-only
-	Constructed     bool          `json:"constructed"`          // Is field constructed/computed
-	Description     string        `json:"description"`
+	Name           string    `json:"name"`
+	ProviderType   string    `json:"provider_type"`    // Provider-specific type (e.g., "ADsPath", "objectGUID")
+	NormalizedType FieldType `json:"normalized_type"`  // Mapped normalized type
+	Syntax         string    `json:"syntax,omitempty"` // Provider syntax (LDAP syntax, etc.)
+	MultiValued    bool      `json:"multi_valued"`     // Is field multi-valued
+	SystemOnly     bool      `json:"system_only"`      // Is field system-only
+	Constructed    bool      `json:"constructed"`      // Is field constructed/computed
+	Description    string    `json:"description"`
 }
 
 // FieldMappingSet contains all field mappings between provider and normalized schemas
@@ -185,20 +187,20 @@ type FieldMappingSet struct {
 
 // FieldMapping defines how to map between provider and normalized fields
 type FieldMapping struct {
-	NormalizedField string                 `json:"normalized_field"`      // Normalized field name
-	ProviderField   string                 `json:"provider_field"`        // Provider field name
-	Transform       string                 `json:"transform,omitempty"`   // Transformation function name
-	DefaultValue    interface{}            `json:"default_value,omitempty"` // Default value if not present
+	NormalizedField     string                `json:"normalized_field"`               // Normalized field name
+	ProviderField       string                `json:"provider_field"`                 // Provider field name
+	Transform           string                `json:"transform,omitempty"`            // Transformation function name
+	DefaultValue        interface{}           `json:"default_value,omitempty"`        // Default value if not present
 	ConditionalMappings []*ConditionalMapping `json:"conditional_mappings,omitempty"` // Conditional mappings
-	Bidirectional   bool                   `json:"bidirectional"`         // Can map in both directions
+	Bidirectional       bool                  `json:"bidirectional"`                  // Can map in both directions
 }
 
 // ConditionalMapping defines conditional field mapping based on other field values
 type ConditionalMapping struct {
-	Condition       string      `json:"condition"`        // Condition to check
-	ProviderField   string      `json:"provider_field"`   // Provider field to use if condition matches
-	Transform       string      `json:"transform,omitempty"` // Optional transformation
-	DefaultValue    interface{} `json:"default_value,omitempty"` // Default value
+	Condition     string      `json:"condition"`               // Condition to check
+	ProviderField string      `json:"provider_field"`          // Provider field to use if condition matches
+	Transform     string      `json:"transform,omitempty"`     // Optional transformation
+	DefaultValue  interface{} `json:"default_value,omitempty"` // Default value
 }
 
 // SchemaCapabilities defines provider-specific schema capabilities
@@ -207,7 +209,7 @@ type SchemaCapabilities struct {
 	SupportsExtensionSchema  bool     `json:"supports_extension_schema"`
 	MaxAttributeLength       int      `json:"max_attribute_length"`
 	SupportedDataTypes       []string `json:"supported_data_types"`
-	NamingContexts          []string `json:"naming_contexts,omitempty"`
+	NamingContexts           []string `json:"naming_contexts,omitempty"`
 }
 
 // DataTransformer interface for data transformation
@@ -227,15 +229,15 @@ type FieldValidator interface {
 type FieldConflict struct {
 	FieldName      string                 `json:"field_name"`
 	NormalizedName string                 `json:"normalized_name"`
-	Conflicts      map[string]interface{} `json:"conflicts"`      // provider -> value
+	Conflicts      map[string]interface{} `json:"conflicts"` // provider -> value
 	Resolution     ConflictResolution     `json:"resolution"`
 }
 
 // ConflictResolution defines how to resolve field conflicts
 type ConflictResolution struct {
-	Strategy     string      `json:"strategy"`      // Resolution strategy
-	PreferredProvider string  `json:"preferred_provider,omitempty"` // Provider to prefer
-	CustomValue  interface{} `json:"custom_value,omitempty"`       // Custom resolved value
+	Strategy          string      `json:"strategy"`                     // Resolution strategy
+	PreferredProvider string      `json:"preferred_provider,omitempty"` // Provider to prefer
+	CustomValue       interface{} `json:"custom_value,omitempty"`       // Custom resolved value
 }
 
 // NewDirectorySchemaMapper creates a new schema mapper
@@ -246,16 +248,16 @@ func NewDirectorySchemaMapper() *DefaultDirectorySchemaMapper {
 		transformers:    make(map[string]DataTransformer),
 		validators:      make(map[string]FieldValidator),
 	}
-	
+
 	// Initialize with default normalized schema
 	mapper.normalizedSchema = createDefaultNormalizedSchema()
-	
+
 	// Register built-in transformers
 	mapper.registerBuiltinTransformers()
-	
+
 	// Register built-in validators
 	mapper.registerBuiltinValidators()
-	
+
 	return mapper
 }
 
@@ -292,10 +294,10 @@ func createDefaultNormalizedSchema() *NormalizedSchema {
 					MaxLength:   256,
 				},
 				"account_enabled": {
-					Name:        "account_enabled",
-					Type:        FieldTypeBoolean,
-					Description: "Is account enabled",
-					Required:    true,
+					Name:         "account_enabled",
+					Type:         FieldTypeBoolean,
+					Description:  "Is account enabled",
+					Required:     true,
 					DefaultValue: true,
 				},
 			},
@@ -418,11 +420,11 @@ func createDefaultNormalizedSchema() *NormalizedSchema {
 					Sortable:    true,
 				},
 				"group_type": {
-					Name:        "group_type",
-					Type:        FieldTypeString,
-					Description: "Group type",
-					Required:    true,
-					EnumValues:  []interface{}{"security", "distribution"},
+					Name:         "group_type",
+					Type:         FieldTypeString,
+					Description:  "Group type",
+					Required:     true,
+					EnumValues:   []interface{}{"security", "distribution"},
 					DefaultValue: "security",
 				},
 			},
@@ -461,10 +463,10 @@ func (m *DefaultDirectorySchemaMapper) RegisterProviderSchema(providerName strin
 	if schema == nil {
 		return fmt.Errorf("schema cannot be nil")
 	}
-	
+
 	m.providerSchemas[providerName] = schema
 	m.fieldMappings[providerName] = schema.Mappings
-	
+
 	return nil
 }
 
@@ -473,7 +475,7 @@ func (m *DefaultDirectorySchemaMapper) GetNormalizedSchema(providerName string) 
 	if _, exists := m.providerSchemas[providerName]; !exists {
 		return nil, fmt.Errorf("provider schema not found: %s", providerName)
 	}
-	
+
 	// Return the universal normalized schema
 	return m.normalizedSchema, nil
 }
@@ -484,7 +486,7 @@ func (m *DefaultDirectorySchemaMapper) MapToNormalized(providerName string, obje
 	if !exists {
 		return nil, fmt.Errorf("no field mappings found for provider: %s", providerName)
 	}
-	
+
 	var fieldMappings map[string]*FieldMapping
 	switch objectType {
 	case DirectoryObjectTypeUser:
@@ -496,9 +498,9 @@ func (m *DefaultDirectorySchemaMapper) MapToNormalized(providerName string, obje
 	default:
 		return nil, fmt.Errorf("unsupported object type: %s", objectType)
 	}
-	
+
 	normalized := make(map[string]interface{})
-	
+
 	for providerField, value := range providerData {
 		mapping, exists := fieldMappings[providerField]
 		if !exists {
@@ -509,7 +511,7 @@ func (m *DefaultDirectorySchemaMapper) MapToNormalized(providerName string, obje
 			normalized["provider_attributes"].(map[string]interface{})[providerField] = value
 			continue
 		}
-		
+
 		// Apply transformation if specified
 		transformedValue := value
 		if mapping.Transform != "" {
@@ -517,20 +519,20 @@ func (m *DefaultDirectorySchemaMapper) MapToNormalized(providerName string, obje
 			if !exists {
 				return nil, fmt.Errorf("transformer not found: %s", mapping.Transform)
 			}
-			
+
 			var err error
 			transformedValue, err = transformer.Transform(value)
 			if err != nil {
 				return nil, fmt.Errorf("transformation failed for field %s: %w", providerField, err)
 			}
 		}
-		
+
 		normalized[mapping.NormalizedField] = transformedValue
 	}
-	
+
 	// Set source provider
 	normalized["source"] = providerName
-	
+
 	return normalized, nil
 }
 
@@ -540,7 +542,7 @@ func (m *DefaultDirectorySchemaMapper) MapFromNormalized(providerName string, ob
 	if !exists {
 		return nil, fmt.Errorf("no field mappings found for provider: %s", providerName)
 	}
-	
+
 	var fieldMappings map[string]*FieldMapping
 	switch objectType {
 	case DirectoryObjectTypeUser:
@@ -552,15 +554,15 @@ func (m *DefaultDirectorySchemaMapper) MapFromNormalized(providerName string, ob
 	default:
 		return nil, fmt.Errorf("unsupported object type: %s", objectType)
 	}
-	
+
 	providerData := make(map[string]interface{})
-	
+
 	for normalizedField, value := range normalizedData {
 		// Skip metadata fields
 		if normalizedField == "source" || normalizedField == "provider_attributes" {
 			continue
 		}
-		
+
 		// Find reverse mapping
 		var mapping *FieldMapping
 		var providerField string
@@ -571,11 +573,11 @@ func (m *DefaultDirectorySchemaMapper) MapFromNormalized(providerName string, ob
 				break
 			}
 		}
-		
+
 		if mapping == nil {
 			continue // No reverse mapping available
 		}
-		
+
 		// Apply reverse transformation if specified
 		transformedValue := value
 		if mapping.Transform != "" {
@@ -583,17 +585,17 @@ func (m *DefaultDirectorySchemaMapper) MapFromNormalized(providerName string, ob
 			if !exists {
 				return nil, fmt.Errorf("transformer not found: %s", mapping.Transform)
 			}
-			
+
 			var err error
 			transformedValue, err = transformer.Reverse(value)
 			if err != nil {
 				return nil, fmt.Errorf("reverse transformation failed for field %s: %w", normalizedField, err)
 			}
 		}
-		
+
 		providerData[providerField] = transformedValue
 	}
-	
+
 	// Include provider-specific attributes
 	if providerAttrs, exists := normalizedData["provider_attributes"]; exists {
 		if attrs, ok := providerAttrs.(map[string]interface{}); ok {
@@ -602,7 +604,7 @@ func (m *DefaultDirectorySchemaMapper) MapFromNormalized(providerName string, ob
 			}
 		}
 	}
-	
+
 	return providerData, nil
 }
 
@@ -612,9 +614,9 @@ func (m *DefaultDirectorySchemaMapper) ConvertUserToNormalized(providerName stri
 	if err != nil {
 		return nil, err
 	}
-	
+
 	user := &DirectoryUser{}
-	
+
 	// Map core fields
 	if id, ok := normalized["id"].(string); ok {
 		user.ID = id
@@ -631,7 +633,7 @@ func (m *DefaultDirectorySchemaMapper) ConvertUserToNormalized(providerName stri
 	if enabled, ok := normalized["account_enabled"].(bool); ok {
 		user.AccountEnabled = enabled
 	}
-	
+
 	// Map optional fields
 	if email, ok := normalized["email_address"].(string); ok {
 		user.EmailAddress = email
@@ -657,7 +659,7 @@ func (m *DefaultDirectorySchemaMapper) ConvertUserToNormalized(providerName stri
 	if company, ok := normalized["company"].(string); ok {
 		user.Company = company
 	}
-	
+
 	// Map timestamps
 	if created, ok := normalized["created"].(time.Time); ok {
 		user.Created = &created
@@ -665,29 +667,29 @@ func (m *DefaultDirectorySchemaMapper) ConvertUserToNormalized(providerName stri
 	if modified, ok := normalized["modified"].(time.Time); ok {
 		user.Modified = &modified
 	}
-	
+
 	// Map provider-specific attributes
 	if attrs, ok := normalized["provider_attributes"].(map[string]interface{}); ok {
 		user.ProviderAttributes = attrs
 	}
-	
+
 	// Set source
 	if source, ok := normalized["source"].(string); ok {
 		user.Source = source
 	}
-	
+
 	return user, nil
 }
 
 // ConvertUserFromNormalized converts DirectoryUser to provider format
 func (m *DefaultDirectorySchemaMapper) ConvertUserFromNormalized(providerName string, normalizedUser *DirectoryUser) (map[string]interface{}, error) {
 	normalized := map[string]interface{}{
-		"id":                   normalizedUser.ID,
-		"user_principal_name":  normalizedUser.UserPrincipalName,
-		"display_name":         normalizedUser.DisplayName,
-		"account_enabled":      normalizedUser.AccountEnabled,
+		"id":                  normalizedUser.ID,
+		"user_principal_name": normalizedUser.UserPrincipalName,
+		"display_name":        normalizedUser.DisplayName,
+		"account_enabled":     normalizedUser.AccountEnabled,
 	}
-	
+
 	// Add optional fields if present
 	if normalizedUser.SAMAccountName != "" {
 		normalized["sam_account_name"] = normalizedUser.SAMAccountName
@@ -716,7 +718,7 @@ func (m *DefaultDirectorySchemaMapper) ConvertUserFromNormalized(providerName st
 	if normalizedUser.Company != "" {
 		normalized["company"] = normalizedUser.Company
 	}
-	
+
 	// Add timestamps
 	if normalizedUser.Created != nil {
 		normalized["created"] = *normalizedUser.Created
@@ -724,12 +726,12 @@ func (m *DefaultDirectorySchemaMapper) ConvertUserFromNormalized(providerName st
 	if normalizedUser.Modified != nil {
 		normalized["modified"] = *normalizedUser.Modified
 	}
-	
+
 	// Add provider-specific attributes
 	if normalizedUser.ProviderAttributes != nil {
 		normalized["provider_attributes"] = normalizedUser.ProviderAttributes
 	}
-	
+
 	return m.MapFromNormalized(providerName, DirectoryObjectTypeUser, normalized)
 }
 
@@ -739,9 +741,9 @@ func (m *DefaultDirectorySchemaMapper) ConvertGroupToNormalized(providerName str
 	if err != nil {
 		return nil, err
 	}
-	
+
 	group := &DirectoryGroup{}
-	
+
 	// Map core fields
 	if id, ok := normalized["id"].(string); ok {
 		group.ID = id
@@ -755,7 +757,7 @@ func (m *DefaultDirectorySchemaMapper) ConvertGroupToNormalized(providerName str
 	if groupType, ok := normalized["group_type"].(string); ok {
 		group.GroupType = GroupType(groupType)
 	}
-	
+
 	// Map optional fields
 	if desc, ok := normalized["description"].(string); ok {
 		group.Description = desc
@@ -763,7 +765,7 @@ func (m *DefaultDirectorySchemaMapper) ConvertGroupToNormalized(providerName str
 	if scope, ok := normalized["group_scope"].(string); ok {
 		group.GroupScope = GroupScope(scope)
 	}
-	
+
 	// Map timestamps
 	if created, ok := normalized["created"].(time.Time); ok {
 		group.Created = &created
@@ -771,17 +773,17 @@ func (m *DefaultDirectorySchemaMapper) ConvertGroupToNormalized(providerName str
 	if modified, ok := normalized["modified"].(time.Time); ok {
 		group.Modified = &modified
 	}
-	
+
 	// Map provider-specific attributes
 	if attrs, ok := normalized["provider_attributes"].(map[string]interface{}); ok {
 		group.ProviderAttributes = attrs
 	}
-	
+
 	// Set source
 	if source, ok := normalized["source"].(string); ok {
 		group.Source = source
 	}
-	
+
 	return group, nil
 }
 
@@ -793,7 +795,7 @@ func (m *DefaultDirectorySchemaMapper) ConvertGroupFromNormalized(providerName s
 		"display_name": normalizedGroup.DisplayName,
 		"group_type":   string(normalizedGroup.GroupType),
 	}
-	
+
 	// Add optional fields if present
 	if normalizedGroup.Description != "" {
 		normalized["description"] = normalizedGroup.Description
@@ -801,7 +803,7 @@ func (m *DefaultDirectorySchemaMapper) ConvertGroupFromNormalized(providerName s
 	if normalizedGroup.GroupScope != "" {
 		normalized["group_scope"] = string(normalizedGroup.GroupScope)
 	}
-	
+
 	// Add timestamps
 	if normalizedGroup.Created != nil {
 		normalized["created"] = *normalizedGroup.Created
@@ -809,19 +811,19 @@ func (m *DefaultDirectorySchemaMapper) ConvertGroupFromNormalized(providerName s
 	if normalizedGroup.Modified != nil {
 		normalized["modified"] = *normalizedGroup.Modified
 	}
-	
+
 	// Add provider-specific attributes
 	if normalizedGroup.ProviderAttributes != nil {
 		normalized["provider_attributes"] = normalizedGroup.ProviderAttributes
 	}
-	
+
 	return m.MapFromNormalized(providerName, DirectoryObjectTypeGroup, normalized)
 }
 
 // ValidateNormalizedObject validates a normalized object against the schema
 func (m *DefaultDirectorySchemaMapper) ValidateNormalizedObject(objectType DirectoryObjectType, data map[string]interface{}) error {
 	var schema *NormalizedObjectSchema
-	
+
 	switch objectType {
 	case DirectoryObjectTypeUser:
 		schema = m.normalizedSchema.UserSchema
@@ -832,11 +834,11 @@ func (m *DefaultDirectorySchemaMapper) ValidateNormalizedObject(objectType Direc
 	default:
 		return fmt.Errorf("unsupported object type: %s", objectType)
 	}
-	
+
 	if schema == nil {
 		return fmt.Errorf("schema not found for object type: %s", objectType)
 	}
-	
+
 	// Check required fields
 	allFields := make(map[string]*NormalizedField)
 	for name, field := range schema.CoreFields {
@@ -845,21 +847,21 @@ func (m *DefaultDirectorySchemaMapper) ValidateNormalizedObject(objectType Direc
 	for name, field := range schema.OptionalFields {
 		allFields[name] = field
 	}
-	
+
 	for name, field := range allFields {
 		value, exists := data[name]
-		
+
 		if field.Required && !exists {
 			return fmt.Errorf("required field missing: %s", name)
 		}
-		
+
 		if exists && value != nil {
 			if err := m.validateField(field, value); err != nil {
 				return fmt.Errorf("validation failed for field %s: %w", name, err)
 			}
 		}
 	}
-	
+
 	return nil
 }
 
@@ -869,14 +871,14 @@ func (m *DefaultDirectorySchemaMapper) validateField(field *NormalizedField, val
 	if err := m.validateFieldType(field.Type, value); err != nil {
 		return err
 	}
-	
+
 	// Format validation
 	if field.Format != "" {
 		if err := m.validateFieldFormat(field.Format, value); err != nil {
 			return err
 		}
 	}
-	
+
 	// Pattern validation
 	if field.Pattern != "" {
 		if str, ok := value.(string); ok {
@@ -889,7 +891,7 @@ func (m *DefaultDirectorySchemaMapper) validateField(field *NormalizedField, val
 			}
 		}
 	}
-	
+
 	// Length validation
 	if field.MaxLength > 0 || field.MinLength > 0 {
 		if str, ok := value.(string); ok {
@@ -902,7 +904,7 @@ func (m *DefaultDirectorySchemaMapper) validateField(field *NormalizedField, val
 			}
 		}
 	}
-	
+
 	// Enum validation
 	if len(field.EnumValues) > 0 {
 		found := false
@@ -916,7 +918,7 @@ func (m *DefaultDirectorySchemaMapper) validateField(field *NormalizedField, val
 			return fmt.Errorf("value not in allowed enum values: %v", field.EnumValues)
 		}
 	}
-	
+
 	// Custom validation
 	if field.Validation != nil && len(field.Validation.CustomRules) > 0 {
 		for _, ruleName := range field.Validation.CustomRules {
@@ -927,7 +929,7 @@ func (m *DefaultDirectorySchemaMapper) validateField(field *NormalizedField, val
 			}
 		}
 	}
-	
+
 	return nil
 }
 
@@ -962,7 +964,7 @@ func (m *DefaultDirectorySchemaMapper) validateFieldType(fieldType FieldType, va
 			return fmt.Errorf("expected object, got %T", value)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -972,7 +974,7 @@ func (m *DefaultDirectorySchemaMapper) validateFieldFormat(format string, value 
 	if !ok {
 		return fmt.Errorf("format validation requires string value")
 	}
-	
+
 	switch format {
 	case "email":
 		pattern := `^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`
@@ -994,7 +996,7 @@ func (m *DefaultDirectorySchemaMapper) validateFieldFormat(format string, value 
 			return fmt.Errorf("invalid phone format")
 		}
 	}
-	
+
 	return nil
 }
 
@@ -1004,7 +1006,7 @@ func (m *DefaultDirectorySchemaMapper) ValidateProviderObject(providerName strin
 	if !exists {
 		return fmt.Errorf("provider schema not found: %s", providerName)
 	}
-	
+
 	var objectSchema *ProviderObjectSchema
 	switch objectType {
 	case DirectoryObjectTypeUser:
@@ -1016,18 +1018,18 @@ func (m *DefaultDirectorySchemaMapper) ValidateProviderObject(providerName strin
 	default:
 		return fmt.Errorf("unsupported object type: %s", objectType)
 	}
-	
+
 	if objectSchema == nil {
 		return fmt.Errorf("object schema not found for type: %s", objectType)
 	}
-	
+
 	// Check required fields
 	for _, fieldName := range objectSchema.RequiredFields {
 		if _, exists := data[fieldName]; !exists {
 			return fmt.Errorf("required field missing: %s", fieldName)
 		}
 	}
-	
+
 	// Validate field types (basic validation)
 	for fieldName, value := range data {
 		if field, exists := objectSchema.Fields[fieldName]; exists {
@@ -1039,14 +1041,14 @@ func (m *DefaultDirectorySchemaMapper) ValidateProviderObject(providerName strin
 			}
 		}
 	}
-	
+
 	return nil
 }
 
 // ResolveConflicts resolves conflicts between different provider representations
 func (m *DefaultDirectorySchemaMapper) ResolveConflicts(conflicts []FieldConflict) (map[string]interface{}, error) {
 	resolved := make(map[string]interface{})
-	
+
 	for _, conflict := range conflicts {
 		switch conflict.Resolution.Strategy {
 		case "prefer_provider":
@@ -1070,7 +1072,7 @@ func (m *DefaultDirectorySchemaMapper) ResolveConflicts(conflicts []FieldConflic
 			return nil, fmt.Errorf("unsupported conflict resolution strategy: %s", conflict.Resolution.Strategy)
 		}
 	}
-	
+
 	return resolved, nil
 }
 
@@ -1079,22 +1081,22 @@ func (m *DefaultDirectorySchemaMapper) mergeConflictValues(conflicts map[string]
 	// Simple merge strategy - concatenate strings or return first non-nil value
 	var result interface{}
 	var stringValues []string
-	
+
 	for provider, value := range conflicts {
 		if result == nil {
 			result = value
 		}
-		
+
 		if str, ok := value.(string); ok && str != "" {
 			stringValues = append(stringValues, fmt.Sprintf("%s: %s", provider, str))
 		}
 	}
-	
+
 	// If we have multiple string values, concatenate them
 	if len(stringValues) > 1 {
 		return strings.Join(stringValues, "; ")
 	}
-	
+
 	return result
 }
 
@@ -1259,7 +1261,7 @@ func (t *ParseTimestampTransformer) Transform(input interface{}) (interface{}, e
 			"2006-01-02T15:04:05",
 			"01/02/2006 15:04:05",
 		}
-		
+
 		for _, format := range formats {
 			if t, err := time.Parse(format, v); err == nil {
 				return t, nil

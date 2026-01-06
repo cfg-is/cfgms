@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // Package storage_test provides comprehensive tests for DNA storage system.
 
 package storage
@@ -5,7 +7,7 @@ package storage
 import (
 	"context"
 	"fmt"
-	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,38 +17,51 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+// skipWithoutCGO skips the test if CGO is not enabled (SQLite requires CGO).
+// This is a local version to avoid circular imports with testutil.
+func skipWithoutCGO(t *testing.T) {
+	t.Helper()
+	config := DefaultConfig()
+	config.Backend = BackendSQLite
+	config.DataDir = t.TempDir() // Use temp directory to avoid file conflicts
+	logger := logging.NewLogger("error")
+
+	manager, err := NewManager(config, logger)
+	if err != nil {
+		errStr := err.Error()
+		if strings.Contains(errStr, "CGO_ENABLED=0") ||
+			strings.Contains(errStr, "go-sqlite3 requires cgo") ||
+			strings.Contains(errStr, "This is a stub") {
+			t.Skip("Skipping test: SQLite requires CGO which is not enabled (no C compiler available)")
+		}
+	}
+	// Close the manager if it was successfully created
+	if manager != nil {
+		_ = manager.Close()
+	}
+}
+
 // createTestConfig creates a test configuration with unique database path
 func createTestConfig(t *testing.T, backendType BackendType) *Config {
 	config := DefaultConfig()
 	config.Backend = backendType
-	
-	// For SQLite testing, the database will be created in a temporary location
-	// by the SQLite backend implementation (data/dna.db by default)
-	// Tests will run in isolated environments
-	
+
+	// Use t.TempDir() for test isolation - each test gets its own temp directory
+	// that Go will automatically clean up after the test completes.
+	// This ensures proper isolation on all platforms, especially Windows where
+	// SQLite WAL files can't be deleted while the database is open.
+	config.DataDir = t.TempDir()
+
 	return config
 }
 
-// cleanupTestConfig cleans up test resources
-func cleanupTestConfig(t *testing.T, config *Config) {
-	if config.Backend == BackendSQLite {
-		// Clean up SQLite database files to ensure test isolation
-		dbFiles := []string{"data/dna.db", "data/dna.db-wal", "data/dna.db-shm"}
-		for _, file := range dbFiles {
-			if err := os.Remove(file); err != nil && !os.IsNotExist(err) {
-				t.Logf("Warning: Could not remove database file %s: %v", file, err)
-			}
-		}
-	}
-}
-
 func TestStorageManager(t *testing.T) {
+	skipWithoutCGO(t)
 	logger := logging.NewLogger("debug")
 	config := createTestConfig(t, BackendSQLite)
-	
-	// Clean up before starting to ensure isolated test environment
-	cleanupTestConfig(t, config)
-	defer cleanupTestConfig(t, config)
+
+	// t.TempDir() automatically creates and cleans up the directory,
+	// no manual cleanup needed
 
 	manager, err := NewManager(config, logger)
 	if err != nil {
@@ -130,7 +145,6 @@ func testStoreAndRetrieve(t *testing.T, manager *Manager) {
 func testDeduplication(t *testing.T, manager *Manager) {
 	ctx := context.Background()
 
-
 	device1ID := "device-001"
 	device2ID := "device-002"
 
@@ -138,11 +152,11 @@ func testDeduplication(t *testing.T, manager *Manager) {
 	// Both DNA records have identical attributes but represent different devices with the same configuration
 	sharedDNAAttributes := map[string]string{
 		"os":        "windows",
-		"arch":      "amd64", 
+		"arch":      "amd64",
 		"hostname":  "shared-config",
 		"cpu_count": "8",
 	}
-	
+
 	// Create identical DNA objects for deduplication (same content hash)
 	dna1 := &commonpb.DNA{
 		Id:              "shared-system-id", // Same system configuration
@@ -153,12 +167,12 @@ func testDeduplication(t *testing.T, manager *Manager) {
 		AttributeCount:  int32(len(sharedDNAAttributes)),
 		SyncFingerprint: "shared-sync-fingerprint",
 	}
-	
+
 	dna2 := &commonpb.DNA{
 		Id:              "shared-system-id", // Same system configuration
 		Attributes:      sharedDNAAttributes,
 		LastUpdated:     timestamppb.New(time.Now()),
-		ConfigHash:      "shared-config-hash", 
+		ConfigHash:      "shared-config-hash",
 		LastSyncTime:    timestamppb.New(time.Now()),
 		AttributeCount:  int32(len(sharedDNAAttributes)),
 		SyncFingerprint: "shared-sync-fingerprint",
@@ -213,7 +227,7 @@ func testHistoricalQueries(t *testing.T, manager *Manager) {
 
 	// Store multiple DNA versions over time
 	baseTime := time.Now().Add(-24 * time.Hour)
-	
+
 	for i := 0; i < 5; i++ {
 		attributes := map[string]string{
 			"os":           "linux",
@@ -325,8 +339,8 @@ func testCompression(t *testing.T, manager *Manager) {
 		t.Error("Expected compression ratio < 1.0 (compressed should be smaller)")
 	}
 
-	t.Logf("Compression ratio: %.3f (%.1f%% space savings)", 
-		stats.CompressionRatio, 
+	t.Logf("Compression ratio: %.3f (%.1f%% space savings)",
+		stats.CompressionRatio,
 		(1.0-stats.CompressionRatio)*100)
 
 	// Verify we can still retrieve the data correctly
@@ -350,7 +364,7 @@ func testStorageStats(t *testing.T, manager *Manager) {
 
 	// Store DNA for multiple devices
 	devices := []string{"stats-device-1", "stats-device-2", "stats-device-3"}
-	
+
 	for _, deviceID := range devices {
 		attributes := map[string]string{
 			"os":        "linux",
@@ -404,7 +418,7 @@ func testStorageStats(t *testing.T, manager *Manager) {
 
 func TestCompressionAlgorithms(t *testing.T) {
 	algorithms := []string{"gzip", "zstd", "lz4"}
-	
+
 	for _, algorithm := range algorithms {
 		t.Run(algorithm, func(t *testing.T) {
 			testCompressionAlgorithm(t, algorithm)
@@ -445,7 +459,7 @@ func testCompressionAlgorithm(t *testing.T, algorithm string) {
 	compressedSize := int64(len(compressed))
 	ratio := float64(compressedSize) / float64(originalSize)
 
-	t.Logf("%s compression: %d -> %d bytes (ratio: %.3f)", 
+	t.Logf("%s compression: %d -> %d bytes (ratio: %.3f)",
 		algorithm, originalSize, compressedSize, ratio)
 
 	// Verify compression achieved some space savings
@@ -465,7 +479,7 @@ func testCompressionAlgorithm(t *testing.T, algorithm string) {
 	}
 
 	if len(decompressed.Attributes) != len(dna.Attributes) {
-		t.Errorf("Decompressed attributes count mismatch: expected %d, got %d", 
+		t.Errorf("Decompressed attributes count mismatch: expected %d, got %d",
 			len(dna.Attributes), len(decompressed.Attributes))
 	}
 
@@ -494,25 +508,25 @@ func testCompressionAlgorithm(t *testing.T, algorithm string) {
 
 func TestStorageBackends(t *testing.T) {
 	logger := logging.NewLogger("debug")
-	config := DefaultConfig()
 
 	backends := []BackendType{BackendSQLite, BackendFile}
-	
+
 	for _, backendType := range backends {
 		t.Run(string(backendType), func(t *testing.T) {
-			// Clean database before each backend test
+			// Skip SQLite tests if CGO is not available
 			if backendType == BackendSQLite {
-				testConfig := createTestConfig(t, BackendSQLite)
-				cleanupTestConfig(t, testConfig)
+				skipWithoutCGO(t)
 			}
-			testStorageBackend(t, backendType, config, logger)
+			// Use createTestConfig to get proper temp directory isolation
+			testConfig := createTestConfig(t, backendType)
+			testStorageBackend(t, backendType, testConfig, logger)
 		})
 	}
 }
 
 func testStorageBackend(t *testing.T, backendType BackendType, config *Config, logger logging.Logger) {
 	config.Backend = backendType
-	
+
 	backend, err := NewBackend(backendType, config, logger)
 	if err != nil {
 		t.Fatalf("Failed to create %s backend: %v", backendType, err)
@@ -537,7 +551,7 @@ func testStorageBackend(t *testing.T, backendType BackendType, config *Config, l
 	if config.EnableSharding {
 		shardID = "shard_0" // Use first shard for testing
 	}
-	
+
 	record := &DNARecord{
 		DeviceID:         "backend-test-device",
 		DNA:              dna,
@@ -912,10 +926,10 @@ func BenchmarkCompression(b *testing.B) {
 
 	// Create test DNA with varying sizes
 	dna := createTestDNA("bench-device", map[string]string{
-		"os":           "linux",
-		"arch":         "amd64",
-		"large_field":  string(make([]byte, 10000)), // 10KB field
-		"repeated":     "this content repeats " + string(make([]byte, 1000)),
+		"os":          "linux",
+		"arch":        "amd64",
+		"large_field": string(make([]byte, 10000)), // 10KB field
+		"repeated":    "this content repeats " + string(make([]byte, 1000)),
 	})
 
 	b.ResetTimer()

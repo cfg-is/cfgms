@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package patch
 
 import (
@@ -258,6 +260,20 @@ func (m *MockPatchManager) AddAvailablePatch(patch PatchInfo) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.availablePatches = append(m.availablePatches, patch)
+}
+
+// SetAvailablePatches replaces the available patches list (for testing)
+func (m *MockPatchManager) SetAvailablePatches(patches []PatchInfo) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.availablePatches = patches
+}
+
+// SetRebootRequired sets the reboot required flag (for testing)
+func (m *MockPatchManager) SetRebootRequired(required bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.rebootRequired = required
 }
 
 // SimulateReboot simulates a system reboot (clears reboot required flag)

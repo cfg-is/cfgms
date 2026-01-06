@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package testutil
 
 import (
@@ -11,16 +13,16 @@ import (
 type StewardTestConfig struct {
 	// ControllerAddr is the address of the controller to connect to
 	ControllerAddr string
-	
+
 	// StewardID is the unique identifier for the steward
 	StewardID string
-	
+
 	// LogLevel is the logging level for the steward
 	LogLevel string
-	
+
 	// UseTemporaryDir indicates whether to use a temporary directory for data
 	UseTemporaryDir bool
-	
+
 	// DataDir is the directory to use for steward data (ignored if UseTemporaryDir is true)
 	DataDir string
 }
@@ -40,15 +42,15 @@ func DefaultStewardTestConfig() *StewardTestConfig {
 func SetupTestEnvironment(t *testing.T, config *StewardTestConfig) (certDir string, dataDir string, cleanup func()) {
 	// Setup certificates
 	certDir, certCleanup := SetupTestCerts(t)
-	
+
 	// Create data directory
 	var dataDirCleanup func()
-	
+
 	if config.UseTemporaryDir {
 		tempDir, err := os.MkdirTemp("", "cfgms-test-steward-")
 		require.NoError(t, err)
 		dataDir = tempDir
-		dataDirCleanup = func() { 
+		dataDirCleanup = func() {
 			if err := os.RemoveAll(tempDir); err != nil {
 				// Log error but continue cleanup
 				_ = err // Explicitly ignore cleanup errors
@@ -62,12 +64,12 @@ func SetupTestEnvironment(t *testing.T, config *StewardTestConfig) (certDir stri
 		}
 		dataDirCleanup = func() {}
 	}
-	
+
 	// Create cleanup function
 	cleanup = func() {
 		certCleanup()
 		dataDirCleanup()
 	}
-	
+
 	return certDir, dataDir, cleanup
 }

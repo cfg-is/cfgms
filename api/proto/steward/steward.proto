@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 syntax = "proto3";
 
 package cfgms.api.steward;
@@ -6,16 +8,6 @@ option go_package = "github.com/cfgis/cfgms/api/proto/steward";
 
 import "common/common.proto";
 import "common/auth.proto";
-
-service Steward {
-  // Core management
-  rpc Register(RegisterRequest) returns (RegisterResponse);
-  rpc Heartbeat(HeartbeatRequest) returns (common.Status);
-  
-  // DNA management
-  rpc UpdateDNA(common.DNA) returns (common.Status);
-  rpc GetDNA(common.Empty) returns (common.DNA);
-}
 
 message RegisterRequest {
   string version = 1;

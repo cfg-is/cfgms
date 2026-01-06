@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package storage
 
 import (
@@ -53,7 +55,7 @@ func (m *SQLiteMigrator) GetCurrentVersion() (int, error) {
 		SELECT name FROM sqlite_master 
 		WHERE type='table' AND name='migrations'
 	`).Scan(&tableName)
-	
+
 	if err == sql.ErrNoRows {
 		// No migrations table, schema is at version 0
 		return 0, nil
@@ -67,7 +69,7 @@ func (m *SQLiteMigrator) GetCurrentVersion() (int, error) {
 	err = m.db.QueryRow(`
 		SELECT COALESCE(MAX(version), 0) FROM migrations
 	`).Scan(&version)
-	
+
 	if err != nil {
 		return 0, fmt.Errorf("failed to get current version: %w", err)
 	}
@@ -88,14 +90,14 @@ func (m *SQLiteMigrator) ApplyMigrations() error {
 	}
 
 	migrations := m.getAllMigrations()
-	
+
 	for _, migration := range migrations {
 		if migration.Version <= currentVersion {
 			continue // Skip already applied migrations
 		}
 
-		m.logger.Info("Applying migration", 
-			"version", migration.Version, 
+		m.logger.Info("Applying migration",
+			"version", migration.Version,
 			"description", migration.Description)
 
 		if err := m.applyMigration(&migration); err != nil {
@@ -116,11 +118,11 @@ func (m *SQLiteMigrator) createMigrationsTable() error {
 			applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)
 	`
-	
+
 	if _, err := m.db.Exec(query); err != nil {
 		return fmt.Errorf("failed to create migrations table: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -176,7 +178,7 @@ func (m *SQLiteMigrator) getAllMigrations() []Migration {
 func (m *SQLiteMigrator) ValidateSchema() error {
 	requiredTables := []string{
 		"dna_history",
-		"dna_references", 
+		"dna_references",
 		"storage_stats",
 	}
 
@@ -192,11 +194,11 @@ func (m *SQLiteMigrator) ValidateSchema() error {
 			SELECT COUNT(*) FROM sqlite_master 
 			WHERE type='table' AND name=?
 		`, table).Scan(&count)
-		
+
 		if err != nil {
 			return fmt.Errorf("failed to check table %s: %w", table, err)
 		}
-		
+
 		if count == 0 {
 			return fmt.Errorf("required table %s not found", table)
 		}
@@ -209,11 +211,11 @@ func (m *SQLiteMigrator) ValidateSchema() error {
 			SELECT COUNT(*) FROM sqlite_master 
 			WHERE type='view' AND name=?
 		`, view).Scan(&count)
-		
+
 		if err != nil {
 			return fmt.Errorf("failed to check view %s: %w", view, err)
 		}
-		
+
 		if count == 0 {
 			return fmt.Errorf("required view %s not found", view)
 		}
@@ -238,10 +240,10 @@ func (m *SQLiteMigrator) OptimizeDatabase() error {
 	if err == nil {
 		err = m.db.QueryRow("PRAGMA freelist_count").Scan(&unusedPages)
 		if err == nil && unusedPages > pageCount/10 { // >10% unused
-			m.logger.Info("Running VACUUM to reclaim space", 
-				"total_pages", pageCount, 
+			m.logger.Info("Running VACUUM to reclaim space",
+				"total_pages", pageCount,
 				"unused_pages", unusedPages)
-			
+
 			if _, err := m.db.Exec("VACUUM"); err != nil {
 				m.logger.Warn("Failed to vacuum database", "error", err)
 			}
@@ -254,7 +256,7 @@ func (m *SQLiteMigrator) OptimizeDatabase() error {
 	if err != nil {
 		return fmt.Errorf("failed to check database integrity: %w", err)
 	}
-	
+
 	if integrityResult != "ok" {
 		return fmt.Errorf("database integrity check failed: %s", integrityResult)
 	}

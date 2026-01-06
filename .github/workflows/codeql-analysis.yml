@@ -1,0 +1,131 @@
+# CodeQL Security Analysis Workflow
+# GitHub's industry-leading SAST (Static Application Security Testing)
+#
+# This workflow will activate when the repository becomes public, providing
+# premium CodeQL scanning capabilities at no cost for open-source projects.
+#
+# CodeQL catches security issues that gosec may miss, including:
+# - SQL injection vulnerabilities
+# - Command injection flaws
+# - Path traversal issues
+# - Cross-site scripting (XSS)
+# - Insecure cryptography usage
+# - Authentication/authorization bypasses
+#
+# Documentation: https://codeql.github.com/docs/
+
+name: CodeQL Security Analysis
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+  schedule:
+    # Run weekly security scan on Wednesdays at 3 AM UTC
+    - cron: '0 3 * * 3'
+  workflow_dispatch:
+
+env:
+  GO_VERSION: '1.23'
+
+jobs:
+  analyze:
+    name: CodeQL Analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      # Required for uploading CodeQL results to GitHub Security tab
+      actions: read
+      contents: read
+      security-events: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [ 'go' ]
+        # CodeQL supports: 'cpp', 'csharp', 'go', 'java', 'javascript', 'python', 'ruby'
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Cache Go modules
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+        key: ${{ runner.os }}-go-codeql-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-codeql-
+          ${{ runner.os }}-go-
+
+    - name: Download dependencies
+      run: go mod download
+
+    # Initialize CodeQL tools for scanning
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v3
+      with:
+        languages: ${{ matrix.language }}
+        # Use security-extended query suite for comprehensive coverage
+        # Available suites:
+        #   - default: Standard security and quality queries
+        #   - security-extended: All security queries (recommended)
+        #   - security-and-quality: Security + code quality queries
+        queries: security-extended
+        # Enable automatic language detection
+        setup-python-dependencies: false
+
+    # Build the Go code for CodeQL to analyze
+    # CodeQL needs to trace the build to understand code flow
+    - name: Build project
+      run: |
+        echo "🔨 Building CFGMS for CodeQL analysis..."
+        # Build all binaries to ensure complete code coverage
+        make build
+        echo "✅ Build complete"
+
+    # Perform CodeQL Analysis
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v3
+      with:
+        category: "/language:${{ matrix.language }}"
+        # Upload results to GitHub Security tab (SARIF format)
+        upload: true
+        # Generate human-readable output in addition to SARIF
+        output: sarif-results
+        # Configure analysis to fail on high-severity issues
+        # (disabled for initial setup - enable after baseline cleanup)
+        # fail-on: high
+
+    - name: Upload CodeQL Results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: codeql-results-${{ matrix.language }}
+        path: sarif-results
+        retention-days: 30
+
+    - name: Analysis Summary
+      if: always()
+      run: |
+        echo "## CodeQL Analysis Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Language:** ${{ matrix.language }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Query Suite:** security-extended" >> $GITHUB_STEP_SUMMARY
+        echo "**Status:** Analysis complete" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Results" >> $GITHUB_STEP_SUMMARY
+        echo "View detailed findings in the [Security tab](../../security/code-scanning)" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Coverage" >> $GITHUB_STEP_SUMMARY
+        echo "CodeQL analyzed:" >> $GITHUB_STEP_SUMMARY
+        echo "- ✅ All Go source files" >> $GITHUB_STEP_SUMMARY
+        echo "- ✅ Data flow and control flow" >> $GITHUB_STEP_SUMMARY
+        echo "- ✅ Security vulnerabilities" >> $GITHUB_STEP_SUMMARY
+        echo "- ✅ Code quality issues" >> $GITHUB_STEP_SUMMARY

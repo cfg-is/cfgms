@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package security
 
 import (
@@ -19,29 +21,29 @@ type CrossTenantAccessValidator struct {
 
 // CrossTenantAccessPolicy defines access permissions between tenants
 type CrossTenantAccessPolicy struct {
-	ID                string                       `json:"id"`
-	SourceTenantID    string                       `json:"source_tenant_id"`
-	TargetTenantID    string                       `json:"target_tenant_id"`
-	AccessLevel       CrossTenantLevel             `json:"access_level"`
-	Permissions       []string                     `json:"permissions"`
-	ResourceFilters   []ResourceFilter             `json:"resource_filters"`
-	TimeRestrictions  *TimeRestriction             `json:"time_restrictions,omitempty"`
-	ApprovalRequired  bool                         `json:"approval_required"`
-	ApprovalWorkflow  string                       `json:"approval_workflow,omitempty"`
-	AutoExpiry        *time.Time                   `json:"auto_expiry,omitempty"`
-	Conditions        []AccessCondition            `json:"conditions,omitempty"`
-	Status            CrossTenantAccessStatus      `json:"status"`
-	CreatedBy         string                       `json:"created_by"`
-	ApprovedBy        string                       `json:"approved_by,omitempty"`
-	CreatedAt         time.Time                    `json:"created_at"`
-	UpdatedAt         time.Time                    `json:"updated_at"`
-	LastUsedAt        *time.Time                   `json:"last_used_at,omitempty"`
+	ID               string                  `json:"id"`
+	SourceTenantID   string                  `json:"source_tenant_id"`
+	TargetTenantID   string                  `json:"target_tenant_id"`
+	AccessLevel      CrossTenantLevel        `json:"access_level"`
+	Permissions      []string                `json:"permissions"`
+	ResourceFilters  []ResourceFilter        `json:"resource_filters"`
+	TimeRestrictions *TimeRestriction        `json:"time_restrictions,omitempty"`
+	ApprovalRequired bool                    `json:"approval_required"`
+	ApprovalWorkflow string                  `json:"approval_workflow,omitempty"`
+	AutoExpiry       *time.Time              `json:"auto_expiry,omitempty"`
+	Conditions       []AccessCondition       `json:"conditions,omitempty"`
+	Status           CrossTenantAccessStatus `json:"status"`
+	CreatedBy        string                  `json:"created_by"`
+	ApprovedBy       string                  `json:"approved_by,omitempty"`
+	CreatedAt        time.Time               `json:"created_at"`
+	UpdatedAt        time.Time               `json:"updated_at"`
+	LastUsedAt       *time.Time              `json:"last_used_at,omitempty"`
 }
 
 // ResourceFilter defines filters for resources that can be accessed
 type ResourceFilter struct {
-	Type         string   `json:"type"`         // "include" or "exclude"
-	Patterns     []string `json:"patterns"`     // Resource patterns to match
+	Type         string   `json:"type"`          // "include" or "exclude"
+	Patterns     []string `json:"patterns"`      // Resource patterns to match
 	ResourceType string   `json:"resource_type"` // Type of resource (config, script, etc.)
 }
 
@@ -75,13 +77,13 @@ const (
 
 // ApprovalWorkflow defines the approval process for cross-tenant access
 type ApprovalWorkflow struct {
-	ID            string              `json:"id"`
-	Name          string              `json:"name"`
-	Description   string              `json:"description"`
-	Steps         []ApprovalStep      `json:"steps"`
-	AutoApproval  *AutoApprovalRule   `json:"auto_approval,omitempty"`
-	Notifications []NotificationRule  `json:"notifications"`
-	MaxDurationHours int              `json:"max_duration_hours"`
+	ID               string             `json:"id"`
+	Name             string             `json:"name"`
+	Description      string             `json:"description"`
+	Steps            []ApprovalStep     `json:"steps"`
+	AutoApproval     *AutoApprovalRule  `json:"auto_approval,omitempty"`
+	Notifications    []NotificationRule `json:"notifications"`
+	MaxDurationHours int                `json:"max_duration_hours"`
 }
 
 // ApprovalStep defines a step in the approval process
@@ -103,10 +105,10 @@ type AutoApprovalRule struct {
 
 // NotificationRule defines notification settings for workflow steps
 type NotificationRule struct {
-	Event   string   `json:"event"`   // "request", "approval", "denial", "expiry"
+	Event      string   `json:"event"` // "request", "approval", "denial", "expiry"
 	Recipients []string `json:"recipients"`
-	Method  string   `json:"method"`  // "email", "slack", "webhook"
-	Template string  `json:"template"`
+	Method     string   `json:"method"` // "email", "slack", "webhook"
+	Template   string   `json:"template"`
 }
 
 // NewCrossTenantAccessValidator creates a new cross-tenant access validator
@@ -142,7 +144,7 @@ func (ctav *CrossTenantAccessValidator) CreateAccessPolicy(ctx context.Context, 
 	now := time.Now()
 	policy.CreatedAt = now
 	policy.UpdatedAt = now
-	
+
 	// Determine initial status based on approval requirements
 	if policy.ApprovalRequired {
 		policy.Status = CrossTenantAccessStatusPending
@@ -225,7 +227,7 @@ func (ctav *CrossTenantAccessValidator) ValidateCrossTenantAccess(ctx context.Co
 		validation.Granted = true
 		validation.GrantingPolicy = grantingPolicy
 		validation.Reason = fmt.Sprintf("Access granted by policy %s", grantingPolicy.ID)
-		
+
 		// Update last used time
 		now := time.Now()
 		grantingPolicy.LastUsedAt = &now
@@ -360,7 +362,7 @@ func (ctav *CrossTenantAccessValidator) validateResourceFilters(filters []Resour
 func (ctav *CrossTenantAccessValidator) validateAccessConditions(conditions []AccessCondition, context map[string]string) error {
 	for _, condition := range conditions {
 		contextValue := context[condition.Type]
-		
+
 		switch condition.Operator {
 		case "equals":
 			if len(condition.Values) == 0 || contextValue != condition.Values[0] {
@@ -402,12 +404,12 @@ func (ctav *CrossTenantAccessValidator) matchResourcePattern(resourceID, pattern
 
 // CrossTenantAccessRequest represents a request for cross-tenant access validation
 type CrossTenantAccessRequest struct {
-	SourceTenantID string                    `json:"source_tenant_id"`
-	TargetTenantID string                    `json:"target_tenant_id"`
-	SubjectID      string                    `json:"subject_id"`
-	ResourceID     string                    `json:"resource_id"`
-	AccessLevel    CrossTenantLevel          `json:"access_level"`
-	Context        map[string]string         `json:"context"`
+	SourceTenantID string            `json:"source_tenant_id"`
+	TargetTenantID string            `json:"target_tenant_id"`
+	SubjectID      string            `json:"subject_id"`
+	ResourceID     string            `json:"resource_id"`
+	AccessLevel    CrossTenantLevel  `json:"access_level"`
+	Context        map[string]string `json:"context"`
 }
 
 // CrossTenantAccessValidation represents the result of cross-tenant access validation

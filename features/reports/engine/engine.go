@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package engine
 
 import (
@@ -70,7 +72,7 @@ func (e *Engine) WithConfig(config Config) *Engine {
 // GenerateReport generates a report based on the provided request
 func (e *Engine) GenerateReport(ctx context.Context, req interfaces.ReportRequest) (*interfaces.Report, error) {
 	startTime := time.Now()
-	
+
 	// Validate the request
 	if err := e.ValidateRequest(req); err != nil {
 		return nil, fmt.Errorf("invalid request: %w", err)
@@ -78,7 +80,7 @@ func (e *Engine) GenerateReport(ctx context.Context, req interfaces.ReportReques
 
 	// Generate cache key
 	cacheKey := e.generateCacheKey(req)
-	
+
 	// Check cache if enabled
 	if e.config.CacheEnabled {
 		if cached, err := e.cache.Get(ctx, cacheKey); err == nil && cached != nil {
@@ -86,7 +88,7 @@ func (e *Engine) GenerateReport(ctx context.Context, req interfaces.ReportReques
 				"request_type", req.Type,
 				"template", req.Template,
 				"cache_key", cacheKey)
-			
+
 			cached.Metadata.CacheHit = true
 			return cached, nil
 		}
@@ -218,9 +220,9 @@ func (e *Engine) ValidateTemplate(template string) error {
 func (e *Engine) ValidateRequest(req interfaces.ReportRequest) error {
 	// Validate report type
 	switch req.Type {
-	case interfaces.ReportTypeCompliance, interfaces.ReportTypeExecutive, 
-		 interfaces.ReportTypeDrift, interfaces.ReportTypeOperational, 
-		 interfaces.ReportTypeCustom:
+	case interfaces.ReportTypeCompliance, interfaces.ReportTypeExecutive,
+		interfaces.ReportTypeDrift, interfaces.ReportTypeOperational,
+		interfaces.ReportTypeCustom:
 		// Valid types
 	default:
 		return fmt.Errorf("invalid report type: %s", req.Type)
@@ -235,7 +237,7 @@ func (e *Engine) ValidateRequest(req interfaces.ReportRequest) error {
 	if req.TimeRange.Start.IsZero() || req.TimeRange.End.IsZero() {
 		return fmt.Errorf("valid time range is required")
 	}
-	
+
 	if req.TimeRange.Start.After(req.TimeRange.End) {
 		return fmt.Errorf("start time must be before end time")
 	}
@@ -252,8 +254,8 @@ func (e *Engine) ValidateRequest(req interfaces.ReportRequest) error {
 
 	// Validate export format
 	switch req.Format {
-	case interfaces.FormatJSON, interfaces.FormatCSV, interfaces.FormatPDF, 
-		 interfaces.FormatExcel, interfaces.FormatHTML:
+	case interfaces.FormatJSON, interfaces.FormatCSV, interfaces.FormatPDF,
+		interfaces.FormatExcel, interfaces.FormatHTML:
 		// Valid formats
 	default:
 		return fmt.Errorf("invalid export format: %s", req.Format)
@@ -291,7 +293,7 @@ func (e *Engine) gatherReportData(ctx context.Context, req interfaces.ReportRequ
 	// Get trend data for key metrics
 	trendData := make(map[string][]interfaces.TrendPoint)
 	metrics := []string{"drift_events", "compliance_score", "device_count"}
-	
+
 	for _, metric := range metrics {
 		trends, err := e.dataProvider.GetTrendData(ctx, metric, query)
 		if err != nil {
@@ -321,7 +323,7 @@ func (e *Engine) enrichReportMetadata(
 	report.Type = req.Type
 	report.GeneratedAt = time.Now()
 	report.TimeRange = req.TimeRange
-	
+
 	if req.Title != "" {
 		report.Title = req.Title
 	}
@@ -352,7 +354,7 @@ func (e *Engine) generateReportSummary(data *interfaces.ReportData) interfaces.R
 	// Calculate compliance score (average across devices)
 	var totalScore float64
 	var criticalIssues int
-	
+
 	for _, stats := range data.DeviceStats {
 		totalScore += stats.ComplianceScore
 		if stats.RiskLevel == interfaces.RiskLevelCritical {
@@ -369,9 +371,9 @@ func (e *Engine) generateReportSummary(data *interfaces.ReportData) interfaces.R
 	if trends, exists := data.TrendData["compliance_score"]; exists && len(trends) >= 2 {
 		firstScore := trends[0].Value
 		lastScore := trends[len(trends)-1].Value
-		
+
 		difference := lastScore - firstScore
-		
+
 		if difference > 0.049 { // Using 0.049 to handle floating-point precision
 			summary.TrendDirection = interfaces.TrendImproving
 		} else if difference < -0.049 {
@@ -397,7 +399,7 @@ func (e *Engine) generateKeyInsights(data *interfaces.ReportData) []string {
 	// Analyze drift events by severity
 	criticalCount := 0
 	warningCount := 0
-	
+
 	for _, event := range data.DriftEvents {
 		switch event.Severity {
 		case drift.SeverityCritical:
@@ -425,7 +427,7 @@ func (e *Engine) generateKeyInsights(data *interfaces.ReportData) []string {
 
 	if highRiskDevices > 0 {
 		percentage := float64(highRiskDevices) / float64(len(data.DeviceStats)) * 100
-		insights = append(insights, fmt.Sprintf("%.1f%% of devices (%d/%d) are at high or critical risk levels", 
+		insights = append(insights, fmt.Sprintf("%.1f%% of devices (%d/%d) are at high or critical risk levels",
 			percentage, highRiskDevices, len(data.DeviceStats)))
 	}
 

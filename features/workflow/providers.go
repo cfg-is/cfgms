@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // Package workflow provides integration framework for external API providers.
 //
 // This module implements a plugin architecture for SaaS and API integrations,
@@ -15,11 +17,11 @@
 // Basic usage:
 //
 //	registry := NewProviderRegistry()
-//	
+//
 //	// Register built-in providers
 //	registry.RegisterProvider("microsoft", &MicrosoftProvider{})
 //	registry.RegisterProvider("google", &GoogleProvider{})
-//	
+//
 //	// Execute API operation
 //	result, err := registry.ExecuteOperation(ctx, "microsoft", "users", "create", params)
 package workflow
@@ -89,12 +91,12 @@ type APIResponse struct {
 
 // ProviderInfo contains information about a registered provider
 type ProviderInfo struct {
-	Name                   string
-	Services               []string
-	SupportedAuth          []AuthType
-	ConfigurationSchema    map[string]interface{}
-	DocumentationURL       string
-	Version                string
+	Name                string
+	Services            []string
+	SupportedAuth       []AuthType
+	ConfigurationSchema map[string]interface{}
+	DocumentationURL    string
+	Version             string
 }
 
 // NewProviderRegistry creates a new provider registry

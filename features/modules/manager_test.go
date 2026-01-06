@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package modules
 
 import (
@@ -629,8 +631,8 @@ func BenchmarkModuleLifecycleManager_GetSystemHealth(b *testing.B) {
 		config := DefaultModuleConfig()
 
 		if _, err := manager.RegisterModule(metadata, module, config); err != nil {
-		b.Fatalf("RegisterModule() error = %v", err)
-	}
+			b.Fatalf("RegisterModule() error = %v", err)
+		}
 	}
 
 	b.ResetTimer()
@@ -655,8 +657,8 @@ func BenchmarkModuleLifecycleManager_ListModuleInstances(b *testing.B) {
 		config := DefaultModuleConfig()
 
 		if _, err := manager.RegisterModule(metadata, module, config); err != nil {
-		b.Fatalf("RegisterModule() error = %v", err)
-	}
+			b.Fatalf("RegisterModule() error = %v", err)
+		}
 	}
 
 	b.ResetTimer()

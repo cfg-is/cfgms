@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // Package storage implements indexing for DNA records to enable fast queries.
 
 package storage
@@ -17,24 +19,24 @@ import (
 // This indexer maintains indices in memory for fast lookups and queries.
 // It's suitable for development and smaller deployments.
 type MemoryIndexer struct {
-	logger    logging.Logger
-	config    *Config
-	
+	logger logging.Logger
+	config *Config
+
 	// Device-based index: deviceID -> sorted list of record references
 	deviceIndex map[string][]*RecordRef
-	
+
 	// Time-based index: time bucket -> list of record references
 	timeIndex map[string][]*RecordRef
-	
+
 	// Attribute index: attribute key -> value -> list of record references
 	attributeIndex map[string]map[string][]*RecordRef
-	
+
 	// Version tracking: deviceID -> current version
 	versionIndex map[string]int64
-	
+
 	// Statistics
 	stats *IndexStats
-	
+
 	// Synchronization
 	mutex      sync.RWMutex
 	statsMutex sync.RWMutex
@@ -86,7 +88,7 @@ func (i *MemoryIndexer) IndexRecord(ctx context.Context, record *DNARecord) erro
 
 	// Update device index
 	i.deviceIndex[record.DeviceID] = append(i.deviceIndex[record.DeviceID], ref)
-	
+
 	// Sort device records by version (newest first)
 	sort.Slice(i.deviceIndex[record.DeviceID], func(a, b int) bool {
 		return i.deviceIndex[record.DeviceID][a].Version > i.deviceIndex[record.DeviceID][b].Version
@@ -111,7 +113,7 @@ func (i *MemoryIndexer) IndexRecord(ctx context.Context, record *DNARecord) erro
 	if len(hashDisplay) > 16 {
 		hashDisplay = hashDisplay[:16]
 	}
-	
+
 	i.logger.Debug("DNA record indexed",
 		"device_id", record.DeviceID,
 		"content_hash", hashDisplay,
@@ -211,7 +213,7 @@ func (i *MemoryIndexer) GetDeviceStats(ctx context.Context, deviceID string) (*D
 	// Calculate statistics
 	totalSize := int64(0)
 	var oldestTime, newestTime time.Time
-	
+
 	// Records are sorted by version (newest first)
 	newestTime = records[0].StoredAt
 	oldestTime = records[len(records)-1].StoredAt
@@ -227,7 +229,7 @@ func (i *MemoryIndexer) GetDeviceStats(ctx context.Context, deviceID string) (*D
 	}
 
 	averageSize := totalSize / int64(len(records))
-	
+
 	// Calculate update frequency
 	var updateFrequency time.Duration
 	if len(records) > 1 {
@@ -282,7 +284,7 @@ func (i *MemoryIndexer) Close() error {
 func (i *MemoryIndexer) indexSampleAttributes(ref *RecordRef, attributes map[string]string) {
 	// Index key attributes for fast lookup
 	keyAttributes := []string{"os", "arch", "hostname", "cpu_model", "memory_total"}
-	
+
 	for _, key := range keyAttributes {
 		if value, exists := attributes[key]; exists {
 			if i.attributeIndex[key] == nil {
@@ -332,12 +334,12 @@ func (i *MemoryIndexer) updateMovingAverage(current time.Duration, newValue time
 	if count == 1 {
 		return newValue
 	}
-	
+
 	alpha := 2.0 / (float64(count) + 1.0)
 	if alpha > 0.1 {
 		alpha = 0.1 // Cap the alpha to prevent too much volatility
 	}
-	
+
 	return time.Duration(float64(current)*(1-alpha) + float64(newValue)*alpha)
 }
 
@@ -502,10 +504,10 @@ func (i *MemoryIndexer) GetTimeRangeStats(ctx context.Context, timeRange *TimeRa
 	defer i.mutex.RUnlock()
 
 	stats := &TimeRangeStats{
-		TimeRange:    timeRange,
-		TotalRecords: 0,
+		TimeRange:     timeRange,
+		TotalRecords:  0,
 		UniqueDevices: make(map[string]bool),
-		TotalSize:    0,
+		TotalSize:     0,
 	}
 
 	// Iterate through time buckets
@@ -517,7 +519,7 @@ func (i *MemoryIndexer) GetTimeRangeStats(ctx context.Context, timeRange *TimeRa
 				if ref.StoredAt.Before(timeRange.Start) || ref.StoredAt.After(timeRange.End) {
 					continue
 				}
-				
+
 				stats.TotalRecords++
 				stats.UniqueDevices[ref.DeviceID] = true
 				stats.TotalSize += ref.Size
@@ -532,10 +534,10 @@ func (i *MemoryIndexer) GetTimeRangeStats(ctx context.Context, timeRange *TimeRa
 
 // TimeRangeStats provides statistics for a specific time range
 type TimeRangeStats struct {
-	TimeRange     *TimeRange       `json:"time_range"`
-	TotalRecords  int64            `json:"total_records"`
-	DeviceCount   int64            `json:"device_count"`
-	UniqueDevices map[string]bool  `json:"-"` // Internal use only
-	TotalSize     int64            `json:"total_size"`
-	AverageSize   int64            `json:"average_size"`
+	TimeRange     *TimeRange      `json:"time_range"`
+	TotalRecords  int64           `json:"total_records"`
+	DeviceCount   int64           `json:"device_count"`
+	UniqueDevices map[string]bool `json:"-"` // Internal use only
+	TotalSize     int64           `json:"total_size"`
+	AverageSize   int64           `json:"average_size"`
 }

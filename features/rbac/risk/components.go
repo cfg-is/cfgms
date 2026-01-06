@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package risk
 
 import (
@@ -8,9 +10,9 @@ import (
 
 // RiskPolicyEngine manages and evaluates risk-based policies
 type RiskPolicyEngine struct {
-	policies        map[string]*RiskPolicy
-	ruleEvaluator   *PolicyRuleEvaluator
-	decisionEngine  *PolicyDecisionEngine
+	policies       map[string]*RiskPolicy
+	ruleEvaluator  *PolicyRuleEvaluator
+	decisionEngine *PolicyDecisionEngine
 }
 
 // PolicyRuleEvaluator evaluates policy rules
@@ -27,9 +29,9 @@ type PolicyDecisionEngine struct {
 
 // RiskAuditLogger logs risk assessment activities
 type RiskAuditLogger struct {
-	auditStore      *RiskAuditStore
-	logFormatter    *RiskLogFormatter
-	eventPublisher  *RiskEventPublisher
+	auditStore     *RiskAuditStore
+	logFormatter   *RiskLogFormatter
+	eventPublisher *RiskEventPublisher
 }
 
 // RiskAssessmentCache provides caching for risk assessments
@@ -42,10 +44,10 @@ type RiskAssessmentCache struct {
 
 // CachedRiskAssessment represents a cached risk assessment
 type CachedRiskAssessment struct {
-	Result    *RiskAssessmentResult `json:"result"`
-	CreatedAt time.Time            `json:"created_at"`
-	ExpiresAt time.Time            `json:"expires_at"`
-	RequestHash string             `json:"request_hash"`
+	Result      *RiskAssessmentResult `json:"result"`
+	CreatedAt   time.Time             `json:"created_at"`
+	ExpiresAt   time.Time             `json:"expires_at"`
+	RequestHash string                `json:"request_hash"`
 }
 
 // NewRiskPolicyEngine creates a new risk policy engine
@@ -117,12 +119,12 @@ func (rpe *RiskPolicyEngine) evaluatePolicy(ctx context.Context, policy *RiskPol
 
 		if ruleMatches {
 			policyResult.AppliedRules = append(policyResult.AppliedRules, rule.ID)
-			
+
 			// Apply rule action
 			switch rule.Action {
 			case PolicyActionDeny:
 				policyResult.Decision = string(PolicyActionDeny)
-				policyResult.Violations = append(policyResult.Violations, 
+				policyResult.Violations = append(policyResult.Violations,
 					fmt.Sprintf("Rule %s requires access denial", rule.ID))
 			case PolicyActionChallenge:
 				policyResult.Decision = string(PolicyActionChallenge)
@@ -195,17 +197,17 @@ func NewRiskAuditLogger() *RiskAuditLogger {
 // LogRiskAssessment logs a risk assessment
 func (ral *RiskAuditLogger) LogRiskAssessment(ctx context.Context, request *RiskAssessmentRequest, result *RiskAssessmentResult) error {
 	auditEntry := &RiskAuditEntry{
-		ID:               fmt.Sprintf("risk-%d", time.Now().UnixNano()),
-		Timestamp:        time.Now(),
-		EventType:        "risk_assessment",
-		UserID:           request.UserContext.UserID,
-		TenantID:         request.AccessRequest.TenantId,
-		ResourceID:       request.AccessRequest.ResourceId,
-		RiskScore:        result.OverallRiskScore,
-		RiskLevel:        string(result.RiskLevel),
-		AccessDecision:   string(result.AccessDecision),
-		ConfidenceScore:  result.ConfidenceScore,
-		ProcessingTime:   time.Since(result.AssessedAt),
+		ID:              fmt.Sprintf("risk-%d", time.Now().UnixNano()),
+		Timestamp:       time.Now(),
+		EventType:       "risk_assessment",
+		UserID:          request.UserContext.UserID,
+		TenantID:        request.AccessRequest.TenantId,
+		ResourceID:      request.AccessRequest.ResourceId,
+		RiskScore:       result.OverallRiskScore,
+		RiskLevel:       string(result.RiskLevel),
+		AccessDecision:  string(result.AccessDecision),
+		ConfidenceScore: result.ConfidenceScore,
+		ProcessingTime:  time.Since(result.AssessedAt),
 		Metadata: map[string]interface{}{
 			"request_id":         result.RequestID,
 			"risk_factors_count": len(result.RiskFactors),
@@ -233,8 +235,8 @@ func NewRiskAssessmentCache() *RiskAssessmentCache {
 	cache := &RiskAssessmentCache{
 		cache:           make(map[string]*CachedRiskAssessment),
 		expirationTime:  15 * time.Minute, // Default 15 minute cache
-		maxSize:         1000,              // Maximum 1000 cached assessments
-		cleanupInterval: 5 * time.Minute,   // Cleanup every 5 minutes
+		maxSize:         1000,             // Maximum 1000 cached assessments
+		cleanupInterval: 5 * time.Minute,  // Cleanup every 5 minutes
 	}
 
 	// Start cleanup routine
@@ -246,7 +248,7 @@ func NewRiskAssessmentCache() *RiskAssessmentCache {
 // Get retrieves a cached risk assessment
 func (rac *RiskAssessmentCache) Get(request *RiskAssessmentRequest) *RiskAssessmentResult {
 	requestHash := rac.generateRequestHash(request)
-	
+
 	cached, exists := rac.cache[requestHash]
 	if !exists {
 		return nil
@@ -296,13 +298,13 @@ func (rac *RiskAssessmentCache) generateRequestHash(request *RiskAssessmentReque
 	if request == nil || request.AccessRequest == nil {
 		return fmt.Sprintf("nil-request-%d", time.Now().Unix()/300)
 	}
-	
+
 	// Include resource sensitivity in the hash to ensure proper cache isolation
 	resourceSensitivity := "unknown"
 	if request.ResourceContext != nil {
 		resourceSensitivity = string(request.ResourceContext.Sensitivity)
 	}
-	
+
 	// Include environmental context for proper cache isolation
 	accessTime := "unknown"
 	businessHours := "unknown"
@@ -318,9 +320,9 @@ func (rac *RiskAssessmentCache) generateRequestHash(request *RiskAssessmentReque
 			country = request.EnvironmentContext.GeoLocation.Country
 		}
 	}
-	
+
 	// Simplified hash generation - in practice would use proper hashing
-	return fmt.Sprintf("%s-%s-%s-%s-%s-%s-%s-%d", 
+	return fmt.Sprintf("%s-%s-%s-%s-%s-%s-%s-%d",
 		request.AccessRequest.SubjectId,
 		request.AccessRequest.ResourceId,
 		request.AccessRequest.PermissionId,
@@ -378,21 +380,21 @@ func (rac *RiskAssessmentCache) cleanup() {
 
 // RiskAuditEntry represents a risk audit log entry
 type RiskAuditEntry struct {
-	ID              string                     `json:"id"`
-	Timestamp       time.Time                  `json:"timestamp"`
-	EventType       string                     `json:"event_type"`
-	UserID          string                     `json:"user_id"`
-	TenantID        string                     `json:"tenant_id"`
-	ResourceID      string                     `json:"resource_id"`
-	RiskScore       float64                    `json:"risk_score"`
-	RiskLevel       string                     `json:"risk_level"`
-	AccessDecision  string                     `json:"access_decision"`
-	ConfidenceScore float64                    `json:"confidence_score"`
-	ProcessingTime  time.Duration              `json:"processing_time"`
-	IPAddress       string                     `json:"ip_address,omitempty"`
-	UserAgent       string                     `json:"user_agent,omitempty"`
-	Location        string                     `json:"location,omitempty"`
-	Metadata        map[string]interface{}     `json:"metadata,omitempty"`
+	ID              string                 `json:"id"`
+	Timestamp       time.Time              `json:"timestamp"`
+	EventType       string                 `json:"event_type"`
+	UserID          string                 `json:"user_id"`
+	TenantID        string                 `json:"tenant_id"`
+	ResourceID      string                 `json:"resource_id"`
+	RiskScore       float64                `json:"risk_score"`
+	RiskLevel       string                 `json:"risk_level"`
+	AccessDecision  string                 `json:"access_decision"`
+	ConfidenceScore float64                `json:"confidence_score"`
+	ProcessingTime  time.Duration          `json:"processing_time"`
+	IPAddress       string                 `json:"ip_address,omitempty"`
+	UserAgent       string                 `json:"user_agent,omitempty"`
+	Location        string                 `json:"location,omitempty"`
+	Metadata        map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // Factory functions for supporting components

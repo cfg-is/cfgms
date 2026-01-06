@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package jit
 
 import (
@@ -35,49 +37,49 @@ func NewPrivilegeElevationManager(rbacManager rbac.RBACManager, jitAccessManager
 
 // ElevatedSession represents an active privilege elevation session
 type ElevatedSession struct {
-	ID                    string                    `json:"id"`
-	SubjectID             string                    `json:"subject_id"`
-	TenantID              string                    `json:"tenant_id"`
-	OriginalPermissions   []string                  `json:"original_permissions"`
-	ElevatedPermissions   []string                  `json:"elevated_permissions"`
-	OriginalRoles         []string                  `json:"original_roles"`
-	ElevatedRoles         []string                  `json:"elevated_roles"`
-	ElevationType         ElevationType             `json:"elevation_type"`
-	ElevationLevel        ElevationLevel            `json:"elevation_level"`
-	JustificationRequired bool                      `json:"justification_required"`
-	Justification         string                    `json:"justification"`
-	RequestedBy           string                    `json:"requested_by"`
-	ApprovedBy            string                    `json:"approved_by,omitempty"`
-	ElevatedAt            time.Time                 `json:"elevated_at"`
-	ExpiresAt             time.Time                 `json:"expires_at"`
-	Status                ElevationStatus           `json:"status"`
-	Conditions            []ElevationCondition      `json:"conditions,omitempty"`
-	ActivityLog           []ElevationActivity       `json:"activity_log,omitempty"`
-	MaxInactivity         time.Duration             `json:"max_inactivity"`
-	LastActivity          time.Time                 `json:"last_activity"`
-	MonitoringLevel       MonitoringLevel           `json:"monitoring_level"`
-	GrantID               string                    `json:"grant_id,omitempty"` // Associated JIT grant if any
-	DelegationIDs         []string                  `json:"delegation_ids,omitempty"`
+	ID                    string               `json:"id"`
+	SubjectID             string               `json:"subject_id"`
+	TenantID              string               `json:"tenant_id"`
+	OriginalPermissions   []string             `json:"original_permissions"`
+	ElevatedPermissions   []string             `json:"elevated_permissions"`
+	OriginalRoles         []string             `json:"original_roles"`
+	ElevatedRoles         []string             `json:"elevated_roles"`
+	ElevationType         ElevationType        `json:"elevation_type"`
+	ElevationLevel        ElevationLevel       `json:"elevation_level"`
+	JustificationRequired bool                 `json:"justification_required"`
+	Justification         string               `json:"justification"`
+	RequestedBy           string               `json:"requested_by"`
+	ApprovedBy            string               `json:"approved_by,omitempty"`
+	ElevatedAt            time.Time            `json:"elevated_at"`
+	ExpiresAt             time.Time            `json:"expires_at"`
+	Status                ElevationStatus      `json:"status"`
+	Conditions            []ElevationCondition `json:"conditions,omitempty"`
+	ActivityLog           []ElevationActivity  `json:"activity_log,omitempty"`
+	MaxInactivity         time.Duration        `json:"max_inactivity"`
+	LastActivity          time.Time            `json:"last_activity"`
+	MonitoringLevel       MonitoringLevel      `json:"monitoring_level"`
+	GrantID               string               `json:"grant_id,omitempty"` // Associated JIT grant if any
+	DelegationIDs         []string             `json:"delegation_ids,omitempty"`
 }
 
 // ElevationType defines the type of privilege elevation
 type ElevationType string
 
 const (
-	ElevationTypeTemporary  ElevationType = "temporary"  // Temporary elevation with auto-revert
+	ElevationTypeTemporary  ElevationType = "temporary"    // Temporary elevation with auto-revert
 	ElevationTypeJustInTime ElevationType = "just_in_time" // JIT-based elevation
-	ElevationTypeBreakGlass ElevationType = "break_glass" // Emergency break-glass access
-	ElevationTypeScheduled  ElevationType = "scheduled"  // Pre-scheduled elevation
+	ElevationTypeBreakGlass ElevationType = "break_glass"  // Emergency break-glass access
+	ElevationTypeScheduled  ElevationType = "scheduled"    // Pre-scheduled elevation
 )
 
 // ElevationLevel defines the level of privilege elevation
 type ElevationLevel string
 
 const (
-	ElevationLevelMinimal    ElevationLevel = "minimal"    // Least additional privileges
-	ElevationLevelModerate   ElevationLevel = "moderate"   // Standard elevation
-	ElevationLevelElevated   ElevationLevel = "elevated"   // High-level privileges
-	ElevationLevelMaximum    ElevationLevel = "maximum"    // Maximum available privileges
+	ElevationLevelMinimal    ElevationLevel = "minimal"     // Least additional privileges
+	ElevationLevelModerate   ElevationLevel = "moderate"    // Standard elevation
+	ElevationLevelElevated   ElevationLevel = "elevated"    // High-level privileges
+	ElevationLevelMaximum    ElevationLevel = "maximum"     // Maximum available privileges
 	ElevationLevelBreakGlass ElevationLevel = "break_glass" // Emergency access level
 )
 
@@ -112,12 +114,12 @@ type ElevationCondition struct {
 
 // ElevationActivity represents an activity performed during elevation
 type ElevationActivity struct {
-	Timestamp   time.Time              `json:"timestamp"`
-	Action      string                 `json:"action"`
-	ResourceID  string                 `json:"resource_id,omitempty"`
-	Result      string                 `json:"result"`
-	Details     map[string]interface{} `json:"details,omitempty"`
-	RiskLevel   RiskLevel              `json:"risk_level"`
+	Timestamp  time.Time              `json:"timestamp"`
+	Action     string                 `json:"action"`
+	ResourceID string                 `json:"resource_id,omitempty"`
+	Result     string                 `json:"result"`
+	Details    map[string]interface{} `json:"details,omitempty"`
+	RiskLevel  RiskLevel              `json:"risk_level"`
 }
 
 // RiskLevel defines risk levels for activities
@@ -132,54 +134,54 @@ const (
 
 // ElevationPolicy defines policies for privilege elevation
 type ElevationPolicy struct {
-	ID                      string                   `json:"id"`
-	Name                    string                   `json:"name"`
-	TenantID                string                   `json:"tenant_id"`
-	ElevationType           ElevationType            `json:"elevation_type"`
-	MaxElevationLevel       ElevationLevel           `json:"max_elevation_level"`
-	RequireJustification    bool                     `json:"require_justification"`
-	RequireApproval         bool                     `json:"require_approval"`
-	ApprovalWorkflow        string                   `json:"approval_workflow,omitempty"`
-	MaxDuration             time.Duration            `json:"max_duration"`
-	MaxInactivity           time.Duration            `json:"max_inactivity"`
-	AllowedPermissions      []string                 `json:"allowed_permissions"`
-	ProhibitedPermissions   []string                 `json:"prohibited_permissions"`
-	AllowedRoles            []string                 `json:"allowed_roles"`
-	ProhibitedRoles         []string                 `json:"prohibited_roles"`
-	ResourceRestrictions    []ResourceRestriction    `json:"resource_restrictions,omitempty"`
-	TimeRestrictions        *security.TimeRestriction `json:"time_restrictions,omitempty"`
-	MonitoringLevel         MonitoringLevel          `json:"monitoring_level"`
-	RequiredConditions      []ElevationCondition     `json:"required_conditions,omitempty"`
-	AutoRevert              bool                     `json:"auto_revert"`
-	BreakGlassEnabled       bool                     `json:"break_glass_enabled"`
-	Priority                int                      `json:"priority"`
-	Status                  string                   `json:"status"`
-	CreatedAt               time.Time                `json:"created_at"`
-	UpdatedAt               time.Time                `json:"updated_at"`
+	ID                    string                    `json:"id"`
+	Name                  string                    `json:"name"`
+	TenantID              string                    `json:"tenant_id"`
+	ElevationType         ElevationType             `json:"elevation_type"`
+	MaxElevationLevel     ElevationLevel            `json:"max_elevation_level"`
+	RequireJustification  bool                      `json:"require_justification"`
+	RequireApproval       bool                      `json:"require_approval"`
+	ApprovalWorkflow      string                    `json:"approval_workflow,omitempty"`
+	MaxDuration           time.Duration             `json:"max_duration"`
+	MaxInactivity         time.Duration             `json:"max_inactivity"`
+	AllowedPermissions    []string                  `json:"allowed_permissions"`
+	ProhibitedPermissions []string                  `json:"prohibited_permissions"`
+	AllowedRoles          []string                  `json:"allowed_roles"`
+	ProhibitedRoles       []string                  `json:"prohibited_roles"`
+	ResourceRestrictions  []ResourceRestriction     `json:"resource_restrictions,omitempty"`
+	TimeRestrictions      *security.TimeRestriction `json:"time_restrictions,omitempty"`
+	MonitoringLevel       MonitoringLevel           `json:"monitoring_level"`
+	RequiredConditions    []ElevationCondition      `json:"required_conditions,omitempty"`
+	AutoRevert            bool                      `json:"auto_revert"`
+	BreakGlassEnabled     bool                      `json:"break_glass_enabled"`
+	Priority              int                       `json:"priority"`
+	Status                string                    `json:"status"`
+	CreatedAt             time.Time                 `json:"created_at"`
+	UpdatedAt             time.Time                 `json:"updated_at"`
 }
 
 // ResourceRestriction defines restrictions on resource access during elevation
 type ResourceRestriction struct {
-	ResourceType string   `json:"resource_type"`
-	AllowedIDs   []string `json:"allowed_ids,omitempty"`
+	ResourceType  string   `json:"resource_type"`
+	AllowedIDs    []string `json:"allowed_ids,omitempty"`
 	ProhibitedIDs []string `json:"prohibited_ids,omitempty"`
-	Scope        string   `json:"scope"` // "read", "write", "delete", "all"
+	Scope         string   `json:"scope"` // "read", "write", "delete", "all"
 }
 
 // ElevationRequest represents a request for privilege elevation
 type ElevationRequest struct {
-	SubjectID             string               `json:"subject_id"`
-	TenantID              string               `json:"tenant_id"`
-	ElevationType         ElevationType        `json:"elevation_type"`
-	RequestedLevel        ElevationLevel       `json:"requested_level"`
-	RequestedPermissions  []string             `json:"requested_permissions,omitempty"`
-	RequestedRoles        []string             `json:"requested_roles,omitempty"`
-	Duration              time.Duration        `json:"duration"`
-	Justification         string               `json:"justification"`
-	ResourceTargets       []string             `json:"resource_targets,omitempty"`
-	EmergencyAccess       bool                 `json:"emergency_access,omitempty"`
-	BreakGlass            bool                 `json:"break_glass,omitempty"`
-	Context               map[string]string    `json:"context,omitempty"`
+	SubjectID            string            `json:"subject_id"`
+	TenantID             string            `json:"tenant_id"`
+	ElevationType        ElevationType     `json:"elevation_type"`
+	RequestedLevel       ElevationLevel    `json:"requested_level"`
+	RequestedPermissions []string          `json:"requested_permissions,omitempty"`
+	RequestedRoles       []string          `json:"requested_roles,omitempty"`
+	Duration             time.Duration     `json:"duration"`
+	Justification        string            `json:"justification"`
+	ResourceTargets      []string          `json:"resource_targets,omitempty"`
+	EmergencyAccess      bool              `json:"emergency_access,omitempty"`
+	BreakGlass           bool              `json:"break_glass,omitempty"`
+	Context              map[string]string `json:"context,omitempty"`
 }
 
 // RequestPrivilegeElevation requests privilege elevation for a subject
@@ -227,26 +229,26 @@ func (pem *PrivilegeElevationManager) RequestPrivilegeElevation(ctx context.Cont
 
 	// Create the elevated session
 	session := &ElevatedSession{
-		ID:                  fmt.Sprintf("elevation-%d", time.Now().UnixNano()),
-		SubjectID:           request.SubjectID,
-		TenantID:            request.TenantID,
-		OriginalPermissions: pem.permissionsToStrings(currentPermissions),
-		ElevatedPermissions: elevatedPermissions,
-		OriginalRoles:       pem.rolesToStrings(currentRoles),
-		ElevatedRoles:       elevatedRoles,
-		ElevationType:       request.ElevationType,
-		ElevationLevel:      request.RequestedLevel,
+		ID:                    fmt.Sprintf("elevation-%d", time.Now().UnixNano()),
+		SubjectID:             request.SubjectID,
+		TenantID:              request.TenantID,
+		OriginalPermissions:   pem.permissionsToStrings(currentPermissions),
+		ElevatedPermissions:   elevatedPermissions,
+		OriginalRoles:         pem.rolesToStrings(currentRoles),
+		ElevatedRoles:         elevatedRoles,
+		ElevationType:         request.ElevationType,
+		ElevationLevel:        request.RequestedLevel,
 		JustificationRequired: policy.RequireJustification,
-		Justification:       request.Justification,
-		RequestedBy:         request.SubjectID,
-		ElevatedAt:          time.Now(),
-		ExpiresAt:           time.Now().Add(request.Duration),
-		Status:              ElevationStatusActive,
-		MaxInactivity:       policy.MaxInactivity,
-		LastActivity:        time.Now(),
-		MonitoringLevel:     policy.MonitoringLevel,
-		Conditions:          policy.RequiredConditions,
-		ActivityLog:         make([]ElevationActivity, 0),
+		Justification:         request.Justification,
+		RequestedBy:           request.SubjectID,
+		ElevatedAt:            time.Now(),
+		ExpiresAt:             time.Now().Add(request.Duration),
+		Status:                ElevationStatusActive,
+		MaxInactivity:         policy.MaxInactivity,
+		LastActivity:          time.Now(),
+		MonitoringLevel:       policy.MonitoringLevel,
+		Conditions:            policy.RequiredConditions,
+		ActivityLog:           make([]ElevationActivity, 0),
 	}
 
 	// Handle break-glass access
@@ -356,8 +358,8 @@ func (pem *PrivilegeElevationManager) LogElevatedActivity(ctx context.Context, s
 	session.LastActivity = time.Now()
 
 	// Enhanced audit logging for high-risk activities
-	if riskLevel == RiskLevelHigh || riskLevel == RiskLevelCritical || 
-	   session.MonitoringLevel == MonitoringLevelContinuous {
+	if riskLevel == RiskLevelHigh || riskLevel == RiskLevelCritical ||
+		session.MonitoringLevel == MonitoringLevelContinuous {
 		_ = pem.auditLogger.LogAccessUsage(ctx, &JITAccessGrant{
 			ID:          session.ID,
 			RequesterID: session.SubjectID,
@@ -410,7 +412,7 @@ func (pem *PrivilegeElevationManager) validateElevationRequest(ctx context.Conte
 func (pem *PrivilegeElevationManager) getApplicablePolicy(ctx context.Context, request *ElevationRequest) (*ElevationPolicy, error) {
 	// Find the highest priority policy that matches the request
 	var applicablePolicy *ElevationPolicy
-	
+
 	for _, policy := range pem.elevationPolicies {
 		if policy.TenantID == request.TenantID && policy.Status == "active" {
 			if applicablePolicy == nil || policy.Priority > applicablePolicy.Priority {
@@ -422,17 +424,17 @@ func (pem *PrivilegeElevationManager) getApplicablePolicy(ctx context.Context, r
 	if applicablePolicy == nil {
 		// Return default policy
 		return &ElevationPolicy{
-			ID:                    "default",
-			Name:                  "Default Elevation Policy",
-			TenantID:              request.TenantID,
-			MaxElevationLevel:     ElevationLevelModerate,
-			RequireJustification:  true,
-			RequireApproval:       false,
-			MaxDuration:           4 * time.Hour,
-			MaxInactivity:         30 * time.Minute,
-			MonitoringLevel:       MonitoringLevelStandard,
-			AutoRevert:            true,
-			BreakGlassEnabled:     false,
+			ID:                   "default",
+			Name:                 "Default Elevation Policy",
+			TenantID:             request.TenantID,
+			MaxElevationLevel:    ElevationLevelModerate,
+			RequireJustification: true,
+			RequireApproval:      false,
+			MaxDuration:          4 * time.Hour,
+			MaxInactivity:        30 * time.Minute,
+			MonitoringLevel:      MonitoringLevelStandard,
+			AutoRevert:           true,
+			BreakGlassEnabled:    false,
 		}, nil
 	}
 
@@ -470,14 +472,14 @@ func (pem *PrivilegeElevationManager) validateElevationAgainstPolicy(ctx context
 func (pem *PrivilegeElevationManager) applyElevation(ctx context.Context, session *ElevatedSession) error {
 	// Create JIT access grant for the elevation
 	jitRequest := &JITAccessRequestSpec{
-		RequesterID:   session.SubjectID,
-		TenantID:      session.TenantID,
-		Permissions:   session.ElevatedPermissions,
-		Roles:         session.ElevatedRoles,
-		Duration:      time.Until(session.ExpiresAt),
-		Priority:      AccessPriorityHigh,
-		Justification: session.Justification,
-		AutoApprove:   true, // Elevation requests are pre-approved
+		RequesterID:     session.SubjectID,
+		TenantID:        session.TenantID,
+		Permissions:     session.ElevatedPermissions,
+		Roles:           session.ElevatedRoles,
+		Duration:        time.Until(session.ExpiresAt),
+		Priority:        AccessPriorityHigh,
+		Justification:   session.Justification,
+		AutoApprove:     true, // Elevation requests are pre-approved
 		EmergencyAccess: session.ElevationType == ElevationTypeBreakGlass,
 	}
 
@@ -499,7 +501,7 @@ func (pem *PrivilegeElevationManager) revertElevation(ctx context.Context, sessi
 
 func (pem *PrivilegeElevationManager) calculateElevatedPermissions(ctx context.Context, current []*common.Permission, request *ElevationRequest, policy *ElevationPolicy) ([]string, error) {
 	var elevated []string
-	
+
 	// Add requested permissions that are allowed by policy
 	for _, reqPerm := range request.RequestedPermissions {
 		// Check if permission is allowed
@@ -510,18 +512,18 @@ func (pem *PrivilegeElevationManager) calculateElevatedPermissions(ctx context.C
 				break
 			}
 		}
-		
+
 		if allowed {
 			elevated = append(elevated, reqPerm)
 		}
 	}
-	
+
 	return elevated, nil
 }
 
 func (pem *PrivilegeElevationManager) calculateElevatedRoles(ctx context.Context, current []*common.Role, request *ElevationRequest, policy *ElevationPolicy) ([]string, error) {
 	var elevated []string
-	
+
 	// Add requested roles that are allowed by policy
 	for _, reqRole := range request.RequestedRoles {
 		// Check if role is allowed
@@ -532,12 +534,12 @@ func (pem *PrivilegeElevationManager) calculateElevatedRoles(ctx context.Context
 				break
 			}
 		}
-		
+
 		if allowed {
 			elevated = append(elevated, reqRole)
 		}
 	}
-	
+
 	return elevated, nil
 }
 
@@ -573,7 +575,7 @@ func (pem *PrivilegeElevationManager) validateRevoker(ctx context.Context, sessi
 		PermissionId: "privilege_elevation.revoke",
 		TenantId:     session.TenantID,
 	}
-	
+
 	response, err := pem.rbacManager.CheckPermission(ctx, accessRequest)
 	if err != nil {
 		return fmt.Errorf("failed to check revoker permission: %w", err)
@@ -611,7 +613,7 @@ func (pem *PrivilegeElevationManager) isElevationLevelAllowed(requested, maxAllo
 		ElevationLevelMaximum:    4,
 		ElevationLevelBreakGlass: 5,
 	}
-	
+
 	return levels[requested] <= levels[maxAllowed]
 }
 
@@ -637,9 +639,9 @@ func (pem *PrivilegeElevationManager) matchesElevationFilter(session *ElevatedSe
 
 // ElevationFilter for filtering elevated sessions
 type ElevationFilter struct {
-	SubjectID string `json:"subject_id,omitempty"`
-	TenantID  string `json:"tenant_id,omitempty"`
-	Status    string `json:"status,omitempty"`
+	SubjectID string     `json:"subject_id,omitempty"`
+	TenantID  string     `json:"tenant_id,omitempty"`
+	Status    string     `json:"status,omitempty"`
 	DateFrom  *time.Time `json:"date_from,omitempty"`
 	DateTo    *time.Time `json:"date_to,omitempty"`
 }

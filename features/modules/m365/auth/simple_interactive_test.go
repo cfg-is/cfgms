@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package auth
 
 import (
@@ -35,22 +37,22 @@ func TestSimpleInteractiveFlow(t *testing.T) {
 	t.Run("TestAuthURLGeneration", func(t *testing.T) {
 		// Test generating auth URL
 		flowState, authURL, err := flow.StartAuthFlow(ctx, config.TenantID, config.DelegatedScopes)
-		
+
 		require.NoError(t, err)
 		assert.NotNil(t, flowState)
 		assert.NotEmpty(t, authURL)
-		
+
 		// Basic validations
 		assert.Equal(t, config.TenantID, flowState.TenantID)
 		assert.NotEmpty(t, flowState.State)
 		assert.NotEmpty(t, flowState.CodeVerifier)
 		assert.NotEmpty(t, flowState.CodeChallenge)
-		
+
 		assert.Contains(t, authURL, "login.microsoftonline.com")
 		assert.Contains(t, authURL, config.ClientID)
 		assert.Contains(t, authURL, config.TenantID)
 		assert.Contains(t, authURL, flowState.State)
-		
+
 		t.Logf("Generated auth URL: %s", authURL)
 	})
 
@@ -60,11 +62,11 @@ func TestSimpleInteractiveFlow(t *testing.T) {
 		require.NoError(t, err)
 		assert.NotEmpty(t, codeVerifier)
 		assert.GreaterOrEqual(t, len(codeVerifier), 32) // Should be at least 32 chars
-		
+
 		codeChallenge := flow.generateCodeChallenge(codeVerifier)
 		assert.NotEmpty(t, codeChallenge)
 		assert.NotEqual(t, codeVerifier, codeChallenge) // Should be different
-		
+
 		t.Logf("Code verifier: %s", codeVerifier)
 		t.Logf("Code challenge: %s", codeChallenge)
 	})
@@ -75,15 +77,15 @@ func TestSimpleInteractiveFlow(t *testing.T) {
 		state2 := flow.generateState()
 		nonce1 := flow.generateNonce()
 		nonce2 := flow.generateNonce()
-		
+
 		assert.NotEmpty(t, state1)
 		assert.NotEmpty(t, state2)
 		assert.NotEqual(t, state1, state2) // Should be unique
-		
+
 		assert.NotEmpty(t, nonce1)
 		assert.NotEmpty(t, nonce2)
 		assert.NotEqual(t, nonce1, nonce2) // Should be unique
-		
+
 		t.Logf("State 1: %s, State 2: %s", state1, state2)
 		t.Logf("Nonce 1: %s, Nonce 2: %s", nonce1, nonce2)
 	})
@@ -92,7 +94,7 @@ func TestSimpleInteractiveFlow(t *testing.T) {
 		// Test callback handler basic functionality
 		handler := NewCallbackHandler()
 		assert.NotNil(t, handler)
-		
+
 		// Test flow state storage
 		testFlowState := &AuthFlowState{
 			CodeVerifier:  "test-verifier",
@@ -100,17 +102,17 @@ func TestSimpleInteractiveFlow(t *testing.T) {
 			State:         "test-state",
 			TenantID:      config.TenantID,
 		}
-		
+
 		err := handler.StoreFlowState("test-state", testFlowState)
 		require.NoError(t, err)
-		
+
 		// Retrieve flow state
 		retrievedState, err := handler.GetFlowState("test-state")
 		require.NoError(t, err)
 		assert.Equal(t, testFlowState.CodeVerifier, retrievedState.CodeVerifier)
 		assert.Equal(t, testFlowState.State, retrievedState.State)
 		assert.Equal(t, testFlowState.TenantID, retrievedState.TenantID)
-		
+
 		// Test cleanup
 		handler.CleanupFlowState("test-state")
 		_, err = handler.GetFlowState("test-state")
@@ -122,7 +124,7 @@ func TestSimpleInteractiveFlow(t *testing.T) {
 func TestCallbackServer(t *testing.T) {
 	handler := NewCallbackHandler()
 	ctx := context.Background()
-	
+
 	// Start server on random port
 	err := handler.StartCallbackServer(ctx, "0")
 	require.NoError(t, err)
@@ -131,14 +133,14 @@ func TestCallbackServer(t *testing.T) {
 			t.Logf("Failed to stop callback server: %v", err)
 		}
 	}()
-	
+
 	t.Run("TestHealthEndpoint", func(t *testing.T) {
 		// Get the actual port being used
 		port := handler.serverPort
 		if port == "0" {
 			t.Skip("Unable to determine server port")
 		}
-		
+
 		// This is a basic test - more comprehensive testing would require
 		// actual HTTP calls which are done in the main test file
 		t.Logf("Callback server started on port: %s", port)

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package security
 
 import (
@@ -5,17 +7,27 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/features/tenant"
-	"github.com/cfgis/cfgms/features/tenant/memory"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/features/tenant"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+
+	// Import storage providers for testing
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 )
 
 func TestEnhancedMultiTenantSecurity(t *testing.T) {
 	ctx := context.Background()
-	
-	// Setup test infrastructure
-	tenantStore := memory.NewStore()
+
+	// Setup test infrastructure with durable storage (git-backed)
+	config := map[string]interface{}{
+		"repository_path": t.TempDir(),
+	}
+	storageManager, err := interfaces.CreateAllStoresFromConfig("git", config)
+	require.NoError(t, err)
+
+	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
 	tenantManager := tenant.NewManager(tenantStore, nil)
 	auditLogger := NewTenantSecurityAuditLogger()
 	isolationEngine := NewTenantIsolationEngine(tenantManager)
@@ -169,13 +181,13 @@ func TestEnhancedMultiTenantSecurity(t *testing.T) {
 				},
 				TimeRestrictions: &TimeRestriction{
 					AllowedDaysOfWeek: []int{0, 1, 2, 3, 4, 5, 6}, // All days for testing (0=Sunday, 6=Saturday)
-					AllowedTimeRanges: []string{"00:00-23:59"}, // All hours for testing
+					AllowedTimeRanges: []string{"00:00-23:59"},    // All hours for testing
 					Timezone:          "America/New_York",
 					MaxDurationHours:  24,
 				},
 				ApprovalRequired: false,
-				Status:          CrossTenantAccessStatusActive,
-				CreatedBy:       "system-admin",
+				Status:           CrossTenantAccessStatusActive,
+				CreatedBy:        "system-admin",
 			}
 
 			createdPolicy, err := accessValidator.CreateAccessPolicy(ctx, policy)
@@ -219,8 +231,8 @@ func TestEnhancedMultiTenantSecurity(t *testing.T) {
 				AccessLevel:      CrossTenantLevelWrite,
 				ApprovalRequired: true,
 				ApprovalWorkflow: "healthcare-to-msp-approval",
-				Status:          CrossTenantAccessStatusPending,
-				CreatedBy:       "client-admin",
+				Status:           CrossTenantAccessStatusPending,
+				CreatedBy:        "client-admin",
 			}
 
 			createdPolicy, err := accessValidator.CreateAccessPolicy(ctx, policy)
@@ -247,22 +259,22 @@ func TestEnhancedMultiTenantSecurity(t *testing.T) {
 		t.Run("CreateAndEvaluateSecurityPolicy", func(t *testing.T) {
 			// Create comprehensive security policy for healthcare client
 			securityPolicy := &TenantSecurityPolicy{
-				TenantID:        "client-healthcare",
-				Name:           "HIPAA Compliance Policy",
-				Description:    "Comprehensive HIPAA compliance security policy",
-				Version:        "1.0",
+				TenantID:    "client-healthcare",
+				Name:        "HIPAA Compliance Policy",
+				Description: "Comprehensive HIPAA compliance security policy",
+				Version:     "1.0",
 				DataSecurityRules: []DataSecurityRule{
 					{
-						ID:                "data-encryption-rule",
-						Name:              "PHI Encryption Requirement",
-						Description:       "All PHI data must be encrypted with FIPS-compliant encryption",
-						Severity:          RuleSeverityCritical,
-						DataTypes:         []string{"phi", "pii"},
-						Classification:    DataClassificationRestricted,
+						ID:                 "data-encryption-rule",
+						Name:               "PHI Encryption Requirement",
+						Description:        "All PHI data must be encrypted with FIPS-compliant encryption",
+						Severity:           RuleSeverityCritical,
+						DataTypes:          []string{"phi", "pii"},
+						Classification:     DataClassificationRestricted,
 						EncryptionRequired: true,
-						EncryptionLevel:   "fips",
+						EncryptionLevel:    "fips",
 						AccessRestrictions: []string{"mfa_required", "vpn_required"},
-						RetentionPeriod:   2555, // 7 years for HIPAA
+						RetentionPeriod:    2555, // 7 years for HIPAA
 					},
 				},
 				AccessControlRules: []AccessControlRule{
@@ -311,7 +323,7 @@ func TestEnhancedMultiTenantSecurity(t *testing.T) {
 					"mfa_verified": "true",
 					"source_ip":    "10.1.1.100",
 				},
-				Permissions: []string{"phi_read", "patient_access"},
+				Permissions:        []string{"phi_read", "patient_access"},
 				DataClassification: "restricted",
 			}
 
@@ -333,7 +345,7 @@ func TestEnhancedMultiTenantSecurity(t *testing.T) {
 					"mfa_verified": "false", // MFA not verified
 					"source_ip":    "10.1.1.101",
 				},
-				Permissions: []string{"phi_read"},
+				Permissions:        []string{"phi_read"},
 				DataClassification: "restricted",
 			}
 
@@ -359,9 +371,9 @@ func TestEnhancedMultiTenantSecurity(t *testing.T) {
 			// Test monitor mode - should allow but log violations
 			monitorPolicy := &TenantSecurityPolicy{
 				TenantID:        "test-tenant-monitor",
-				Name:           "Monitor Mode Policy",
-				Version:        "1.0",
-				Status:         PolicyStatusActive,
+				Name:            "Monitor Mode Policy",
+				Version:         "1.0",
+				Status:          PolicyStatusActive,
 				EnforcementMode: PolicyEnforcementModeMonitor,
 				AccessControlRules: []AccessControlRule{
 					{
@@ -483,7 +495,7 @@ func TestEnhancedMultiTenantSecurity(t *testing.T) {
 
 	t.Run("EndToEndSecurityValidation", func(t *testing.T) {
 		// Simulate a complete security validation flow
-		
+
 		// 1. Create isolation rule
 		isolationRule := &IsolationRule{
 			TenantID:        "client-healthcare",
@@ -503,8 +515,8 @@ func TestEnhancedMultiTenantSecurity(t *testing.T) {
 		// 2. Create security policy
 		securityPolicy := &TenantSecurityPolicy{
 			TenantID:        "client-healthcare",
-			Name:           "End-to-End Test Policy",
-			Status:         PolicyStatusActive,
+			Name:            "End-to-End Test Policy",
+			Status:          PolicyStatusActive,
 			EnforcementMode: PolicyEnforcementModeBlock,
 			AccessControlRules: []AccessControlRule{
 				{
@@ -567,7 +579,7 @@ func TestEnhancedMultiTenantSecurity(t *testing.T) {
 		for _, entry := range auditEntries {
 			eventTypes[entry.EventType] = true
 		}
-		
+
 		assert.True(t, eventTypes[TenantSecurityEventIsolationRuleChange], "Should have isolation rule change events")
 		assert.True(t, eventTypes[TenantSecurityEventAccessAttempt], "Should have access attempt events")
 	})

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package workflow
 
 import (
@@ -11,62 +13,62 @@ import (
 // WorkflowTemplate represents a reusable workflow template
 type WorkflowTemplate struct {
 	// Template metadata
-	ID           string               `yaml:"id" json:"id"`
-	Name         string               `yaml:"name" json:"name"`
-	Description  string               `yaml:"description,omitempty" json:"description,omitempty"`
-	Version      SemanticVersion      `yaml:"version" json:"version"`
-	Author       string               `yaml:"author,omitempty" json:"author,omitempty"`
+	ID          string          `yaml:"id" json:"id"`
+	Name        string          `yaml:"name" json:"name"`
+	Description string          `yaml:"description,omitempty" json:"description,omitempty"`
+	Version     SemanticVersion `yaml:"version" json:"version"`
+	Author      string          `yaml:"author,omitempty" json:"author,omitempty"`
 
 	// Template inheritance
-	Extends      string               `yaml:"extends,omitempty" json:"extends,omitempty"`    // Parent template ID
-	Abstract     bool                 `yaml:"abstract,omitempty" json:"abstract,omitempty"` // Cannot be instantiated directly
+	Extends  string `yaml:"extends,omitempty" json:"extends,omitempty"`   // Parent template ID
+	Abstract bool   `yaml:"abstract,omitempty" json:"abstract,omitempty"` // Cannot be instantiated directly
 
 	// Template parameters
-	Parameters   []TemplateParameter  `yaml:"parameters,omitempty" json:"parameters,omitempty"`
-	Defaults     map[string]interface{} `yaml:"defaults,omitempty" json:"defaults,omitempty"`
+	Parameters []TemplateParameter    `yaml:"parameters,omitempty" json:"parameters,omitempty"`
+	Defaults   map[string]interface{} `yaml:"defaults,omitempty" json:"defaults,omitempty"`
 
 	// Template content
-	Workflow     Workflow             `yaml:"workflow" json:"workflow"`
+	Workflow Workflow `yaml:"workflow" json:"workflow"`
 
 	// Template metadata
-	Tags         []string             `yaml:"tags,omitempty" json:"tags,omitempty"`
-	Category     string               `yaml:"category,omitempty" json:"category,omitempty"`
-	CreatedAt    time.Time            `yaml:"created_at" json:"created_at"`
-	UpdatedAt    time.Time            `yaml:"updated_at" json:"updated_at"`
-	CreatedBy    string               `yaml:"created_by,omitempty" json:"created_by,omitempty"`
+	Tags      []string  `yaml:"tags,omitempty" json:"tags,omitempty"`
+	Category  string    `yaml:"category,omitempty" json:"category,omitempty"`
+	CreatedAt time.Time `yaml:"created_at" json:"created_at"`
+	UpdatedAt time.Time `yaml:"updated_at" json:"updated_at"`
+	CreatedBy string    `yaml:"created_by,omitempty" json:"created_by,omitempty"`
 
 	// Validation and compatibility
-	RequiredFeatures []string         `yaml:"required_features,omitempty" json:"required_features,omitempty"`
-	MinEngineVersion SemanticVersion  `yaml:"min_engine_version,omitempty" json:"min_engine_version,omitempty"`
-	Compatibility    []string         `yaml:"compatibility,omitempty" json:"compatibility,omitempty"`
+	RequiredFeatures []string        `yaml:"required_features,omitempty" json:"required_features,omitempty"`
+	MinEngineVersion SemanticVersion `yaml:"min_engine_version,omitempty" json:"min_engine_version,omitempty"`
+	Compatibility    []string        `yaml:"compatibility,omitempty" json:"compatibility,omitempty"`
 }
 
 // TemplateParameter defines a parameter that can be passed to a template
 type TemplateParameter struct {
-	Name         string      `yaml:"name" json:"name"`
-	Type         ParameterType `yaml:"type" json:"type"`
-	Description  string      `yaml:"description,omitempty" json:"description,omitempty"`
-	Required     bool        `yaml:"required,omitempty" json:"required,omitempty"`
-	Default      interface{} `yaml:"default,omitempty" json:"default,omitempty"`
-	Options      []interface{} `yaml:"options,omitempty" json:"options,omitempty"` // For enum-like parameters
-	Pattern      string      `yaml:"pattern,omitempty" json:"pattern,omitempty"`   // Validation pattern
-	MinValue     interface{} `yaml:"min_value,omitempty" json:"min_value,omitempty"`
-	MaxValue     interface{} `yaml:"max_value,omitempty" json:"max_value,omitempty"`
-	MinLength    int         `yaml:"min_length,omitempty" json:"min_length,omitempty"`
-	MaxLength    int         `yaml:"max_length,omitempty" json:"max_length,omitempty"`
+	Name        string        `yaml:"name" json:"name"`
+	Type        ParameterType `yaml:"type" json:"type"`
+	Description string        `yaml:"description,omitempty" json:"description,omitempty"`
+	Required    bool          `yaml:"required,omitempty" json:"required,omitempty"`
+	Default     interface{}   `yaml:"default,omitempty" json:"default,omitempty"`
+	Options     []interface{} `yaml:"options,omitempty" json:"options,omitempty"` // For enum-like parameters
+	Pattern     string        `yaml:"pattern,omitempty" json:"pattern,omitempty"` // Validation pattern
+	MinValue    interface{}   `yaml:"min_value,omitempty" json:"min_value,omitempty"`
+	MaxValue    interface{}   `yaml:"max_value,omitempty" json:"max_value,omitempty"`
+	MinLength   int           `yaml:"min_length,omitempty" json:"min_length,omitempty"`
+	MaxLength   int           `yaml:"max_length,omitempty" json:"max_length,omitempty"`
 }
 
 // ParameterType defines the type of a template parameter
 type ParameterType string
 
 const (
-	ParameterTypeString  ParameterType = "string"
-	ParameterTypeInt     ParameterType = "int"
-	ParameterTypeFloat   ParameterType = "float"
-	ParameterTypeBool    ParameterType = "bool"
-	ParameterTypeArray   ParameterType = "array"
-	ParameterTypeObject  ParameterType = "object"
-	ParameterTypeEnum    ParameterType = "enum"
+	ParameterTypeString ParameterType = "string"
+	ParameterTypeInt    ParameterType = "int"
+	ParameterTypeFloat  ParameterType = "float"
+	ParameterTypeBool   ParameterType = "bool"
+	ParameterTypeArray  ParameterType = "array"
+	ParameterTypeObject ParameterType = "object"
+	ParameterTypeEnum   ParameterType = "enum"
 )
 
 // TemplateInstance represents an instantiated template with specific parameters

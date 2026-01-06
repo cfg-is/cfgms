@@ -16,6 +16,7 @@ For development/testing, create an app in your development tenant:
 
 1. **Azure Portal** → **App registrations** → **New registration**
 2. Configure:
+
    ```
    Name: CFGMS-Dev-Testing
    Account types: Single tenant (for development)
@@ -23,6 +24,7 @@ For development/testing, create an app in your development tenant:
    ```
 
 3. **Add Application Permissions**:
+
    ```
    Microsoft Graph:
    - User.ReadWrite.All                              # User management (entra_user)
@@ -43,6 +45,7 @@ For development/testing, create an app in your development tenant:
 ### 1.2 Development Environment
 
 Create `.env.local` (never commit):
+
 ```bash
 M365_CLIENT_ID=your-dev-client-id
 M365_CLIENT_SECRET=your-dev-client-secret
@@ -71,11 +74,18 @@ In your **MSP tenant (cfgis.onmicrosoft.com)**:
 
 1. **Azure Portal** → **App registrations** → **New registration**
 2. Configure:
+
    ```
    Name: CFGMS MSP Production
    Account types: Multi-tenant (REQUIRED for MSP)
-   Redirect URI: https://auth.cfgms.com/admin/callback
+   Redirect URI: https://portal.example.com/admin/callback
    ```
+
+   **Note**: Replace `portal.example.com` with your actual CFGMS controller domain.
+
+   **Examples**:
+   - Self-hosted: `https://cfgms.yourcompany.com/admin/callback`
+   - cfg.is hosted beta: `https://portal.cfg.is/admin/callback`
 
 3. **Add Same Application Permissions** as development
 4. **DO NOT grant admin consent** (each client will consent individually)
@@ -84,6 +94,7 @@ In your **MSP tenant (cfgis.onmicrosoft.com)**:
 ### 2.2 MSP Client Onboarding
 
 **Step 1: MSP Admin Initiates**
+
 ```go
 // Generate admin consent URL for new client
 func OnboardNewClient(clientName, mspEmployee string) (string, error) {
@@ -101,6 +112,7 @@ func OnboardNewClient(clientName, mspEmployee string) (string, error) {
 ```
 
 **Step 2: Send to Client Admin**
+
 ```
 Subject: CFGMS MSP Setup - Admin Consent Required
 
@@ -114,6 +126,7 @@ per your service agreement.
 **Step 3: Client Admin Clicks** → Signs into their tenant → Grants consent
 
 **Step 4: Handle Callback**
+
 ```go
 func HandleAdminCallback(w http.ResponseWriter, r *http.Request) {
     result, err := flow.HandleAdminConsentCallback(ctx, r.URL.String())
@@ -129,6 +142,7 @@ func HandleAdminCallback(w http.ResponseWriter, r *http.Request) {
 ### 2.3 MSP Operations
 
 **Get Token for Client Tenant:**
+
 ```go
 // MSP app uses client credentials to access client tenant
 func GetMSPToken(clientTenantID string) (*AccessToken, error) {
@@ -149,6 +163,7 @@ func GetMSPToken(clientTenantID string) (*AccessToken, error) {
 ```
 
 **Test Client Readiness:**
+
 ```go
 func ValidateClient(clientTenantID string) {
     token, _ := GetMSPToken(clientTenantID)
@@ -171,6 +186,7 @@ CFGMS follows a **pluggable storage architecture** that allows choosing the appr
 ### Storage Options
 
 #### 3.1 File Storage (Default - Simple Deployments)
+
 ```yaml
 # cfgms.yaml
 msp:
@@ -181,12 +197,14 @@ msp:
 ```
 
 **Use Cases:**
+
 - Development environments
 - Small MSP deployments (< 50 clients)
 - Single-node deployments
 - No external dependencies required
 
 #### 3.2 Git Storage (Recommended - CFGMS Philosophy)
+
 ```yaml
 # cfgms.yaml
 msp:
@@ -198,12 +216,14 @@ msp:
 ```
 
 **Use Cases:**
+
 - Distributed MSP teams
 - Configuration version control
 - Audit trail requirements
 - Works with Mozilla's secret management
 
 #### 3.3 Database Storage (Production - High Volume)
+
 ```yaml
 # cfgms.yaml
 msp:
@@ -215,6 +235,7 @@ msp:
 ```
 
 **Database Schema (Auto-created):**
+
 ```sql
 -- Client tenant tracking
 CREATE TABLE client_tenants (
@@ -246,12 +267,14 @@ CREATE TABLE admin_consent_requests (
 ```
 
 **Use Cases:**
+
 - Large MSP deployments (> 100 clients)
 - High availability requirements
 - Complex querying needs
 - Multiple concurrent operators
 
 #### 3.4 Hybrid Storage (Enterprise)
+
 ```yaml
 # cfgms.yaml
 msp:
@@ -266,6 +289,7 @@ msp:
 ```
 
 **Use Cases:**
+
 - Enterprise MSP deployments
 - Best of both worlds (performance + audit trail)
 - Disaster recovery requirements
@@ -274,6 +298,7 @@ msp:
 ### Storage Migration
 
 **Upgrade Path:** Simple → Git → Database → Hybrid
+
 ```bash
 # Start simple for POC
 cfgms init --storage-type=file
@@ -322,13 +347,14 @@ if report.OverallSuccess {
 ## Part 5: Configuration
 
 ### MSP Production Config
+
 ```go
 type MSPConfig struct {
     ClientID                string   `yaml:"client_id"`
-    ClientSecret            string   `yaml:"client_secret"`  
-    MSPTenantID            string   `yaml:"msp_tenant_id"`    // cfgis tenant
+    ClientSecret            string   `yaml:"client_secret"`
+    MSPTenantID            string   `yaml:"msp_tenant_id"`    // Your MSP tenant ID
     ApplicationPermissions  []string `yaml:"app_permissions"`
-    AdminCallbackURI        string   `yaml:"admin_callback"`   // https://auth.cfgms.com/admin/callback
+    AdminCallbackURI        string   `yaml:"admin_callback"`   // https://portal.example.com/admin/callback
 }
 
 // Default MSP permissions
@@ -349,14 +375,17 @@ func DefaultMSPPermissions() []string {
 ## Key Concepts
 
 **MSP vs Traditional SaaS:**
+
 - **MSP**: App uses application permissions to manage client tenants on behalf of MSP employees
 - **Traditional**: Users authenticate with delegated permissions to access their own data
 
 **Admin Consent vs User Consent:**  
+
 - **Admin Consent**: Client tenant admin grants MSP app permission to manage entire tenant
 - **User Consent**: Individual users grant permission to access their personal data
 
 **Application vs Delegated Permissions:**
+
 - **Application**: App can access all data in tenant (MSP scenario)
 - **Delegated**: App can only access data the user can access (traditional scenario)
 
@@ -375,6 +404,7 @@ This means the API call is working but the service principal lacks required perm
    - `Group.ReadWrite.All` - For entra_group module (create/manage groups)
 
 2. **Verification Steps:**
+
    ```bash
    # Test specific permissions
    go test -v ./features/modules/m365/entra_application/ -run TestEntraApplication_Integration_BasicOperations
@@ -388,10 +418,12 @@ This means the API call is working but the service principal lacks required perm
    - Click "Grant admin consent" if needed
 
 **"Client tenant not found" errors:**
+
 - Verify admin consent callback was processed successfully
 - Check client_tenants table for tenant record
 
 **API access denied:**
+
 - Confirm MSP token is for correct client tenant
 - Verify specific application permission is granted (e.g., User.ReadWrite.All for /users API)
 

@@ -1,5 +1,8 @@
 //go:build darwin
 
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
+
 package dna
 
 import (
@@ -15,20 +18,20 @@ func (d *DarwinNetworkCollector) CollectInterfaces(attributes map[string]string)
 	if err := (&GenericNetworkCollector{}).CollectInterfaces(attributes); err != nil {
 		return err
 	}
-	
+
 	// Enhanced interface information using ifconfig
 	if output, err := exec.Command("ifconfig").Output(); err == nil {
 		d.parseIfconfigOutput(string(output), attributes)
 	}
-	
+
 	// Network service information using networksetup
 	if output, err := exec.Command("networksetup", "-listallnetworkservices").Output(); err == nil {
 		d.parseNetworkServices(string(output), attributes)
 	}
-	
+
 	// Wi-Fi information if available
 	d.collectWiFiInfo(attributes)
-	
+
 	return nil
 }
 
@@ -38,17 +41,17 @@ func (d *DarwinNetworkCollector) CollectRouting(attributes map[string]string) er
 	if output, err := exec.Command("netstat", "-rn", "-f", "inet").Output(); err == nil {
 		d.parseRoutingTable(string(output), attributes, "ipv4")
 	}
-	
+
 	// IPv6 routing table
 	if output, err := exec.Command("netstat", "-rn", "-f", "inet6").Output(); err == nil {
 		d.parseRoutingTable(string(output), attributes, "ipv6")
 	}
-	
+
 	// Default gateway information
 	if output, err := exec.Command("route", "get", "default").Output(); err == nil {
 		d.parseDefaultGateway(string(output), attributes)
 	}
-	
+
 	return nil
 }
 
@@ -58,13 +61,13 @@ func (d *DarwinNetworkCollector) CollectDNS(attributes map[string]string) error 
 	if output, err := exec.Command("scutil", "--dns").Output(); err == nil {
 		d.parseDNSConfig(string(output), attributes)
 	}
-	
+
 	// System DNS servers using networksetup
 	d.collectDNSServers(attributes)
-	
+
 	// Search domains
 	d.collectSearchDomains(attributes)
-	
+
 	// /etc/hosts file information
 	if output, err := exec.Command("wc", "-l", "/etc/hosts").Output(); err == nil {
 		hostsLines := strings.TrimSpace(string(output))
@@ -72,7 +75,7 @@ func (d *DarwinNetworkCollector) CollectDNS(attributes map[string]string) error 
 			attributes["hosts_file_lines"] = lines[0]
 		}
 	}
-	
+
 	return nil
 }
 
@@ -92,7 +95,7 @@ func (d *DarwinNetworkCollector) CollectFirewall(attributes map[string]string) e
 			attributes["macos_firewall_state"] = "unknown_" + firewallState
 		}
 	}
-	
+
 	// pfctl firewall rules (if enabled and accessible)
 	if output, err := exec.Command("pfctl", "-s", "rules").Output(); err == nil {
 		lines := strings.Split(string(output), "\n")
@@ -107,19 +110,19 @@ func (d *DarwinNetworkCollector) CollectFirewall(attributes map[string]string) e
 			attributes["pfctl_rule_count"] = fmt.Sprintf("%d", ruleCount)
 		}
 	}
-	
+
 	// Stealth mode status
 	if output, err := exec.Command("defaults", "read", "/Library/Preferences/com.apple.alf", "stealthenabled").Output(); err == nil {
 		stealthMode := strings.TrimSpace(string(output))
 		attributes["macos_firewall_stealth"] = stealthMode
 	}
-	
+
 	// Logging enabled status
 	if output, err := exec.Command("defaults", "read", "/Library/Preferences/com.apple.alf", "loggingenabled").Output(); err == nil {
 		loggingEnabled := strings.TrimSpace(string(output))
 		attributes["macos_firewall_logging"] = loggingEnabled
 	}
-	
+
 	return nil
 }
 
@@ -129,23 +132,23 @@ func (d *DarwinNetworkCollector) parseIfconfigOutput(output string, attributes m
 	var activeInterfaces []string
 	var wiredInterfaces []string
 	var wirelessInterfaces []string
-	
+
 	for _, interfaceBlock := range interfaces {
 		lines := strings.Split(interfaceBlock, "\n")
 		if len(lines) == 0 {
 			continue
 		}
-		
+
 		// Parse interface name from first line
 		firstLine := lines[0]
 		if strings.Contains(firstLine, ":") {
 			interfaceName := strings.Split(firstLine, ":")[0]
-			
+
 			// Check if interface is active (has RUNNING flag)
 			if strings.Contains(firstLine, "RUNNING") {
 				activeInterfaces = append(activeInterfaces, interfaceName)
 			}
-			
+
 			// Categorize interface types
 			if strings.HasPrefix(interfaceName, "en") {
 				if strings.Contains(interfaceBlock, "media: Ethernet") {
@@ -154,7 +157,7 @@ func (d *DarwinNetworkCollector) parseIfconfigOutput(output string, attributes m
 					wirelessInterfaces = append(wirelessInterfaces, interfaceName)
 				}
 			}
-			
+
 			// Extract MTU information
 			if strings.Contains(firstLine, "mtu") {
 				parts := strings.Fields(firstLine)
@@ -167,16 +170,16 @@ func (d *DarwinNetworkCollector) parseIfconfigOutput(output string, attributes m
 			}
 		}
 	}
-	
+
 	if len(activeInterfaces) > 0 {
 		attributes["active_interfaces"] = strings.Join(activeInterfaces, ",")
 		attributes["active_interface_count"] = fmt.Sprintf("%d", len(activeInterfaces))
 	}
-	
+
 	if len(wiredInterfaces) > 0 {
 		attributes["wired_interfaces"] = strings.Join(wiredInterfaces, ",")
 	}
-	
+
 	if len(wirelessInterfaces) > 0 {
 		attributes["wireless_interfaces"] = strings.Join(wirelessInterfaces, ",")
 	}
@@ -186,14 +189,14 @@ func (d *DarwinNetworkCollector) parseIfconfigOutput(output string, attributes m
 func (d *DarwinNetworkCollector) parseNetworkServices(output string, attributes map[string]string) {
 	lines := strings.Split(output, "\n")
 	var services []string
-	
+
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line != "" && !strings.HasPrefix(line, "*") {
 			services = append(services, line)
 		}
 	}
-	
+
 	if len(services) > 0 {
 		attributes["network_service_count"] = fmt.Sprintf("%d", len(services))
 		// Store first 5 services as sample
@@ -220,7 +223,7 @@ func (d *DarwinNetworkCollector) collectWiFiInfo(attributes map[string]string) {
 			}
 		}
 	}
-	
+
 	// Wi-Fi power status
 	if output, err := exec.Command("networksetup", "-getairportpower", "en0").Output(); err == nil {
 		powerStatus := strings.TrimSpace(string(output))
@@ -238,17 +241,17 @@ func (d *DarwinNetworkCollector) parseRoutingTable(output string, attributes map
 	lines := strings.Split(output, "\n")
 	var routeCount int
 	var defaultRoutes []string
-	
+
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "Routing") || strings.HasPrefix(line, "Destination") {
 			continue
 		}
-		
+
 		fields := strings.Fields(line)
 		if len(fields) >= 2 {
 			routeCount++
-			
+
 			// Check for default routes
 			if fields[0] == "default" || fields[0] == "0.0.0.0" || fields[0] == "::" {
 				if len(fields) >= 2 {
@@ -257,11 +260,11 @@ func (d *DarwinNetworkCollector) parseRoutingTable(output string, attributes map
 			}
 		}
 	}
-	
+
 	if routeCount > 0 {
 		attributes["routing_table_"+ipVersion+"_count"] = fmt.Sprintf("%d", routeCount)
 	}
-	
+
 	if len(defaultRoutes) > 0 {
 		attributes["default_gateways_"+ipVersion] = strings.Join(defaultRoutes, ",")
 	}
@@ -295,11 +298,11 @@ func (d *DarwinNetworkCollector) parseDNSConfig(output string, attributes map[st
 	if resolverCount > 0 {
 		attributes["dns_resolver_count"] = fmt.Sprintf("%d", resolverCount)
 	}
-	
+
 	// Extract first few nameservers
 	lines := strings.Split(output, "\n")
 	var nameservers []string
-	
+
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if strings.Contains(line, "nameserver[") {
@@ -315,7 +318,7 @@ func (d *DarwinNetworkCollector) parseDNSConfig(output string, attributes map[st
 			}
 		}
 	}
-	
+
 	if len(nameservers) > 0 {
 		attributes["dns_nameservers"] = strings.Join(nameservers, ",")
 	}
@@ -324,7 +327,7 @@ func (d *DarwinNetworkCollector) parseDNSConfig(output string, attributes map[st
 // collectDNSServers collects DNS servers using networksetup
 func (d *DarwinNetworkCollector) collectDNSServers(attributes map[string]string) {
 	services := []string{"Wi-Fi", "Ethernet", "USB 10/100/1000 LAN"}
-	
+
 	for _, service := range services {
 		if output, err := exec.Command("networksetup", "-getdnsservers", service).Output(); err == nil {
 			dnsOutput := strings.TrimSpace(string(output))
@@ -349,7 +352,7 @@ func (d *DarwinNetworkCollector) collectDNSServers(attributes map[string]string)
 // collectSearchDomains collects DNS search domains
 func (d *DarwinNetworkCollector) collectSearchDomains(attributes map[string]string) {
 	services := []string{"Wi-Fi", "Ethernet"}
-	
+
 	for _, service := range services {
 		if output, err := exec.Command("networksetup", "-getsearchdomains", service).Output(); err == nil {
 			searchOutput := strings.TrimSpace(string(output))

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package workflow
 
 import (
@@ -196,7 +198,9 @@ func (de *DebugEngineImpl) SetBreakpoint(sessionID string, stepName string, cond
 		"step_name", stepName,
 		"has_condition", condition != nil)
 
-	return breakpoint, nil
+	// Return a copy to prevent concurrent access issues
+	breakpointCopy := *breakpoint
+	return &breakpointCopy, nil
 }
 
 // RemoveBreakpoint removes a breakpoint
@@ -237,7 +241,9 @@ func (de *DebugEngineImpl) ListBreakpoints(sessionID string) ([]*Breakpoint, err
 
 	breakpoints := make([]*Breakpoint, 0, len(session.Breakpoints))
 	for _, breakpoint := range session.Breakpoints {
-		breakpoints = append(breakpoints, breakpoint)
+		// Return copies to prevent concurrent access issues
+		breakpointCopy := *breakpoint
+		breakpoints = append(breakpoints, &breakpointCopy)
 	}
 
 	return breakpoints, nil
@@ -472,8 +478,9 @@ func (de *DebugEngineImpl) RollbackToStep(sessionID string, stepName string) err
 
 // checkBreakpoint checks if execution should pause at a breakpoint
 func (de *DebugEngineImpl) checkBreakpoint(session *DebugSession, stepName string, variables map[string]interface{}) (*Breakpoint, bool) {
-	session.mutex.RLock()
-	defer session.mutex.RUnlock()
+	// Use full Lock instead of RLock because we modify breakpoint.HitCount and breakpoint.LastHit
+	session.mutex.Lock()
+	defer session.mutex.Unlock()
 
 	for _, breakpoint := range session.Breakpoints {
 		if !breakpoint.Enabled || breakpoint.StepName != stepName {
@@ -497,7 +504,6 @@ func (de *DebugEngineImpl) checkBreakpoint(session *DebugSession, stepName strin
 
 	return nil, false
 }
-
 
 // Helper functions for ID generation
 func generateDebugSessionID() string {

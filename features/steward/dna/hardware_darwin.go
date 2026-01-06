@@ -1,5 +1,8 @@
 //go:build darwin
 
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
+
 package dna
 
 import (
@@ -15,24 +18,24 @@ func (d *DarwinHardwareCollector) CollectCPU(attributes map[string]string) error
 	// Basic CPU count
 	attributes["cpu_count"] = fmt.Sprintf("%d", runtime.NumCPU())
 	attributes["cpu_arch"] = runtime.GOARCH
-	
+
 	// Get detailed CPU info using sysctl
 	if brand, err := d.getSysctl("machdep.cpu.brand_string"); err == nil {
 		attributes["cpu_model"] = strings.TrimSpace(brand)
 	}
-	
+
 	if family, err := d.getSysctl("machdep.cpu.family"); err == nil {
 		attributes["cpu_family"] = strings.TrimSpace(family)
 	}
-	
+
 	if model, err := d.getSysctl("machdep.cpu.model"); err == nil {
 		attributes["cpu_model_id"] = strings.TrimSpace(model)
 	}
-	
+
 	if stepping, err := d.getSysctl("machdep.cpu.stepping"); err == nil {
 		attributes["cpu_stepping"] = strings.TrimSpace(stepping)
 	}
-	
+
 	// CPU frequency (if available)
 	if freq, err := d.getSysctl("hw.cpufrequency"); err == nil {
 		if freqInt, parseErr := strconv.ParseInt(strings.TrimSpace(freq), 10, 64); parseErr == nil {
@@ -40,16 +43,16 @@ func (d *DarwinHardwareCollector) CollectCPU(attributes map[string]string) error
 			attributes["cpu_frequency_mhz"] = fmt.Sprintf("%.0f", float64(freqInt)/1000000)
 		}
 	}
-	
+
 	// Physical and logical core counts
 	if physCores, err := d.getSysctl("hw.physicalcpu"); err == nil {
 		attributes["cpu_physical_cores"] = strings.TrimSpace(physCores)
 	}
-	
+
 	if logCores, err := d.getSysctl("hw.logicalcpu"); err == nil {
 		attributes["cpu_logical_cores"] = strings.TrimSpace(logCores)
 	}
-	
+
 	return nil
 }
 
@@ -62,17 +65,17 @@ func (d *DarwinHardwareCollector) CollectMemory(attributes map[string]string) er
 			attributes["memory_total_gb"] = fmt.Sprintf("%.2f", float64(memInt)/1024/1024/1024)
 		}
 	}
-	
+
 	// Memory type and speed (if available)
 	if pageSize, err := d.getSysctl("hw.pagesize"); err == nil {
 		attributes["memory_page_size"] = strings.TrimSpace(pageSize)
 	}
-	
+
 	// Additional memory info from vm_stat if available
 	if vmstat, err := exec.Command("vm_stat").Output(); err == nil {
 		d.parseVMStat(string(vmstat), attributes)
 	}
-	
+
 	return nil
 }
 
@@ -85,12 +88,12 @@ func (d *DarwinHardwareCollector) CollectDisk(attributes map[string]string) erro
 		attributes["disk_info_available"] = "true"
 		attributes["disk_collection_method"] = "diskutil"
 	}
-	
+
 	// Get filesystem information using df
 	if output, err := exec.Command("df", "-h").Output(); err == nil {
 		d.parseDiskUsage(string(output), attributes)
 	}
-	
+
 	return nil
 }
 
@@ -100,30 +103,30 @@ func (d *DarwinHardwareCollector) CollectMotherboard(attributes map[string]strin
 	if model, err := d.getSysctl("hw.model"); err == nil {
 		attributes["hardware_model"] = strings.TrimSpace(model)
 	}
-	
+
 	// System version
 	if version, err := exec.Command("sw_vers", "-productVersion").Output(); err == nil {
 		attributes["os_version"] = strings.TrimSpace(string(version))
 	}
-	
+
 	if build, err := exec.Command("sw_vers", "-buildVersion").Output(); err == nil {
 		attributes["os_build"] = strings.TrimSpace(string(build))
 	}
-	
+
 	if name, err := exec.Command("sw_vers", "-productName").Output(); err == nil {
 		attributes["os_name"] = strings.TrimSpace(string(name))
 	}
-	
+
 	// Hardware UUID (if available)
 	if uuid, err := d.getSysctl("kern.uuid"); err == nil {
 		attributes["hardware_uuid"] = strings.TrimSpace(uuid)
 	}
-	
+
 	// Boot time
 	if boottime, err := d.getSysctl("kern.boottime"); err == nil {
 		attributes["boot_time"] = strings.TrimSpace(boottime)
 	}
-	
+
 	return nil
 }
 
@@ -165,12 +168,12 @@ func (d *DarwinHardwareCollector) parseVMStat(vmstat string, attributes map[stri
 func (d *DarwinHardwareCollector) parseDiskUsage(dfOutput string, attributes map[string]string) {
 	lines := strings.Split(dfOutput, "\n")
 	var diskCount int
-	
+
 	for i, line := range lines {
 		if i == 0 { // Skip header
 			continue
 		}
-		
+
 		fields := strings.Fields(line)
 		if len(fields) >= 6 && strings.HasPrefix(fields[0], "/dev/") {
 			diskCount++
@@ -183,7 +186,7 @@ func (d *DarwinHardwareCollector) parseDiskUsage(dfOutput string, attributes map
 			attributes[prefix+"_mount"] = fields[5]
 		}
 	}
-	
+
 	if diskCount > 0 {
 		attributes["disk_count"] = fmt.Sprintf("%d", diskCount)
 	}

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package trigger
 
 import (
@@ -394,4 +396,3 @@ func TestCronField_Parsing(t *testing.T) {
 		})
 	}
 }
-

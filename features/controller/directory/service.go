@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package directory
 
 import (
@@ -32,10 +34,10 @@ type DirectoryService struct {
 type ModuleRegistry interface {
 	// GetModule returns a module by name
 	GetModule(name string) (interface{}, error)
-	
+
 	// ListModules returns all available modules
 	ListModules() []string
-	
+
 	// ExecuteModuleOperation executes an operation on a module
 	ExecuteModuleOperation(ctx context.Context, moduleName, operation string, params map[string]interface{}) (interface{}, error)
 }

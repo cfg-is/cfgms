@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // Package directory provides a unified directory service abstraction for the CFGMS controller.
 //
 // This package follows CFGMS's architectural pattern where the controller provides a unified
@@ -127,12 +129,12 @@ type Provider interface {
 
 // ProviderInfo contains metadata about a directory provider
 type ProviderInfo struct {
-	Name         string               `json:"name"`          // e.g., "activedirectory", "entraid"
-	DisplayName  string               `json:"display_name"`  // e.g., "Active Directory"
-	Description  string               `json:"description"`   // Provider description
-	Capabilities ProviderCapabilities `json:"capabilities"`  // What this provider supports
-	ModuleName   string               `json:"module_name"`   // Which module implements this provider
-	Version      string               `json:"version"`       // Provider version
+	Name         string               `json:"name"`         // e.g., "activedirectory", "entraid"
+	DisplayName  string               `json:"display_name"` // e.g., "Active Directory"
+	Description  string               `json:"description"`  // Provider description
+	Capabilities ProviderCapabilities `json:"capabilities"` // What this provider supports
+	ModuleName   string               `json:"module_name"`  // Which module implements this provider
+	Version      string               `json:"version"`      // Provider version
 }
 
 // ProviderCapabilities describes what operations a provider supports
@@ -150,27 +152,27 @@ type ProviderCapabilities struct {
 	// Provider-specific features
 	OUSupport        bool `json:"ou_support"`         // Active Directory OUs
 	AdminUnitSupport bool `json:"admin_unit_support"` // Entra ID Administrative Units
-	
+
 	// Authentication
 	SupportedAuthMethods []string `json:"supported_auth_methods"`
 
 	// Limits
-	MaxSearchResults int `json:"max_search_results"`
+	MaxSearchResults int            `json:"max_search_results"`
 	RateLimit        *RateLimitInfo `json:"rate_limit,omitempty"`
 }
 
 // SearchQuery represents a directory search query
 type SearchQuery struct {
 	// Basic search
-	Query   string `json:"query"`    // Free text search
-	Filter  string `json:"filter"`   // Advanced filter (LDAP-style or OData)
-	
+	Query  string `json:"query"`  // Free text search
+	Filter string `json:"filter"` // Advanced filter (LDAP-style or OData)
+
 	// Object type filter
 	ObjectType ObjectType `json:"object_type"` // Users, Groups, OUs, etc.
 
 	// Scoping
-	SearchBase string `json:"search_base,omitempty"` // OU/container to search in
-	Scope      SearchScope `json:"scope"`             // Base, OneLevel, Subtree
+	SearchBase string      `json:"search_base,omitempty"` // OU/container to search in
+	Scope      SearchScope `json:"scope"`                 // Base, OneLevel, Subtree
 
 	// Results
 	Attributes []string `json:"attributes,omitempty"` // Specific attributes to return
@@ -183,11 +185,11 @@ type SearchQuery struct {
 type ObjectType string
 
 const (
-	ObjectTypeUser       ObjectType = "user"
-	ObjectTypeGroup      ObjectType = "group"
-	ObjectTypeOU         ObjectType = "organizational_unit"
-	ObjectTypeAdminUnit  ObjectType = "administrative_unit"
-	ObjectTypeAll        ObjectType = "all"
+	ObjectTypeUser      ObjectType = "user"
+	ObjectTypeGroup     ObjectType = "group"
+	ObjectTypeOU        ObjectType = "organizational_unit"
+	ObjectTypeAdminUnit ObjectType = "administrative_unit"
+	ObjectTypeAll       ObjectType = "all"
 )
 
 // SearchScope defines the scope of directory searches
@@ -214,55 +216,55 @@ type OrganizationalUnit struct {
 
 // AdministrativeUnit represents an Entra ID Administrative Unit (with graceful degradation)
 type AdministrativeUnit struct {
-	ID                   string    `json:"id"`
-	DisplayName          string    `json:"display_name"`
-	Description          string    `json:"description,omitempty"`
-	Visibility           string    `json:"visibility,omitempty"`           // Public, HiddenMembership
-	MembershipType       string    `json:"membership_type,omitempty"`      // Assigned, Dynamic
-	MembershipRule       string    `json:"membership_rule,omitempty"`      // Dynamic membership rule
-	MembershipRuleProcessingState string `json:"membership_rule_processing_state,omitempty"` // On, Paused
-	Created              time.Time `json:"created,omitempty"`
-	Modified             time.Time `json:"modified,omitempty"`
-	Source               string    `json:"source"`
+	ID                            string    `json:"id"`
+	DisplayName                   string    `json:"display_name"`
+	Description                   string    `json:"description,omitempty"`
+	Visibility                    string    `json:"visibility,omitempty"`                       // Public, HiddenMembership
+	MembershipType                string    `json:"membership_type,omitempty"`                  // Assigned, Dynamic
+	MembershipRule                string    `json:"membership_rule,omitempty"`                  // Dynamic membership rule
+	MembershipRuleProcessingState string    `json:"membership_rule_processing_state,omitempty"` // On, Paused
+	Created                       time.Time `json:"created,omitempty"`
+	Modified                      time.Time `json:"modified,omitempty"`
+	Source                        string    `json:"source"`
 }
 
 // ProviderConfig contains configuration for a directory provider
 type ProviderConfig struct {
 	ProviderName string                 `json:"provider_name"`
-	Settings     map[string]interface{} `json:"settings"`       // Provider-specific settings
-	Credentials  map[string]string      `json:"credentials"`    // Authentication credentials
-	Options      map[string]interface{} `json:"options"`        // Optional configuration
+	Settings     map[string]interface{} `json:"settings"`    // Provider-specific settings
+	Credentials  map[string]string      `json:"credentials"` // Authentication credentials
+	Options      map[string]interface{} `json:"options"`     // Optional configuration
 }
 
 // ProviderHealth represents the health status of a directory provider
 type ProviderHealth struct {
-	IsHealthy      bool                   `json:"is_healthy"`
-	LastCheck      time.Time              `json:"last_check"`
-	ResponseTime   time.Duration          `json:"response_time"`
-	ErrorMessage   string                 `json:"error_message,omitempty"`
-	Details        map[string]interface{} `json:"details,omitempty"`
-	Capabilities   ProviderCapabilities   `json:"capabilities"`
+	IsHealthy    bool                   `json:"is_healthy"`
+	LastCheck    time.Time              `json:"last_check"`
+	ResponseTime time.Duration          `json:"response_time"`
+	ErrorMessage string                 `json:"error_message,omitempty"`
+	Details      map[string]interface{} `json:"details,omitempty"`
+	Capabilities ProviderCapabilities   `json:"capabilities"`
 }
 
 // ProviderStatistics contains statistics about provider usage
 type ProviderStatistics struct {
-	TotalUsers        int64         `json:"total_users"`
-	TotalGroups       int64         `json:"total_groups"`
-	TotalOUs          int64         `json:"total_ous"`
-	TotalAdminUnits   int64         `json:"total_admin_units"`
-	RequestCount      int64         `json:"request_count"`
-	ErrorCount        int64         `json:"error_count"`
-	AverageLatency    time.Duration `json:"average_latency"`
-	LastSyncTime      time.Time     `json:"last_sync_time,omitempty"`
+	TotalUsers      int64         `json:"total_users"`
+	TotalGroups     int64         `json:"total_groups"`
+	TotalOUs        int64         `json:"total_ous"`
+	TotalAdminUnits int64         `json:"total_admin_units"`
+	RequestCount    int64         `json:"request_count"`
+	ErrorCount      int64         `json:"error_count"`
+	AverageLatency  time.Duration `json:"average_latency"`
+	LastSyncTime    time.Time     `json:"last_sync_time,omitempty"`
 }
 
 // DirectoryComparison represents the result of comparing two directories
 type DirectoryComparison struct {
-	Provider1        string                    `json:"provider1"`
-	Provider2        string                    `json:"provider2"`
-	ComparisonTime   time.Time                 `json:"comparison_time"`
-	UserDifferences  []ObjectDifference        `json:"user_differences,omitempty"`
-	GroupDifferences []ObjectDifference        `json:"group_differences,omitempty"`
+	Provider1        string                     `json:"provider1"`
+	Provider2        string                     `json:"provider2"`
+	ComparisonTime   time.Time                  `json:"comparison_time"`
+	UserDifferences  []ObjectDifference         `json:"user_differences,omitempty"`
+	GroupDifferences []ObjectDifference         `json:"group_differences,omitempty"`
 	Summary          DirectoryComparisonSummary `json:"summary"`
 }
 
@@ -270,7 +272,7 @@ type DirectoryComparison struct {
 type ObjectDifference struct {
 	ObjectType ObjectType `json:"object_type"`
 	ObjectID   string     `json:"object_id"`
-	Action     string     `json:"action"`     // "create", "update", "delete"
+	Action     string     `json:"action"` // "create", "update", "delete"
 	Field      string     `json:"field,omitempty"`
 	OldValue   string     `json:"old_value,omitempty"`
 	NewValue   string     `json:"new_value,omitempty"`

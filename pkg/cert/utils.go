@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package cert
 
 import (
@@ -15,48 +17,48 @@ func ParseCertificateFromPEM(certPEM []byte) (*x509.Certificate, error) {
 	if block == nil {
 		return nil, fmt.Errorf("failed to decode PEM block")
 	}
-	
+
 	if block.Type != "CERTIFICATE" {
 		return nil, fmt.Errorf("expected CERTIFICATE, got %s", block.Type)
 	}
-	
+
 	cert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse certificate: %w", err)
 	}
-	
+
 	return cert, nil
 }
 
 // ParseCertificateChainFromPEM parses multiple certificates from PEM data
 func ParseCertificateChainFromPEM(certChainPEM []byte) ([]*x509.Certificate, error) {
 	var certs []*x509.Certificate
-	
+
 	remaining := certChainPEM
 	for {
 		block, rest := pem.Decode(remaining)
 		if block == nil {
 			break
 		}
-		
+
 		if block.Type != "CERTIFICATE" {
 			remaining = rest
 			continue
 		}
-		
+
 		cert, err := x509.ParseCertificate(block.Bytes)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse certificate in chain: %w", err)
 		}
-		
+
 		certs = append(certs, cert)
 		remaining = rest
 	}
-	
+
 	if len(certs) == 0 {
 		return nil, fmt.Errorf("no certificates found in PEM data")
 	}
-	
+
 	return certs, nil
 }
 
@@ -66,7 +68,7 @@ func ParsePrivateKeyFromPEM(keyPEM []byte) (interface{}, error) {
 	if block == nil {
 		return nil, fmt.Errorf("failed to decode PEM block")
 	}
-	
+
 	switch block.Type {
 	case "RSA PRIVATE KEY":
 		return x509.ParsePKCS1PrivateKey(block.Bytes)
@@ -86,13 +88,13 @@ func ValidateKeyPair(certPEM, keyPEM []byte) error {
 	if err != nil {
 		return fmt.Errorf("failed to parse certificate: %w", err)
 	}
-	
+
 	// Parse private key
 	privateKey, err := ParsePrivateKeyFromPEM(keyPEM)
 	if err != nil {
 		return fmt.Errorf("failed to parse private key: %w", err)
 	}
-	
+
 	// Check if the public key in the certificate matches the private key
 	switch privKey := privateKey.(type) {
 	case *rsa.PrivateKey:
@@ -106,7 +108,7 @@ func ValidateKeyPair(certPEM, keyPEM []byte) error {
 	default:
 		return fmt.Errorf("unsupported private key type for validation")
 	}
-	
+
 	return nil
 }
 
@@ -115,7 +117,7 @@ func GetCertificateFingerprint(cert *x509.Certificate) string {
 	if cert == nil {
 		return ""
 	}
-	
+
 	// The fingerprint calculation is already implemented in ca.go
 	// We'll reuse that logic here by creating a temporary CA instance
 	ca := &CA{}
@@ -127,7 +129,7 @@ func GetCertificateInfo(cert *x509.Certificate) *CertificateInfo {
 	if cert == nil {
 		return nil
 	}
-	
+
 	certType := CertificateTypeClient
 	if cert.IsCA {
 		certType = CertificateTypeCA
@@ -140,12 +142,12 @@ func GetCertificateInfo(cert *x509.Certificate) *CertificateInfo {
 			}
 		}
 	}
-	
+
 	daysUntilExpiration := int(cert.NotAfter.Sub(cert.NotBefore).Hours() / 24)
 	if cert.NotAfter.Before(cert.NotBefore) {
 		daysUntilExpiration = 0
 	}
-	
+
 	return &CertificateInfo{
 		Type:                certType,
 		CommonName:          cert.Subject.CommonName,
@@ -167,7 +169,7 @@ func LoadCertificateFromFile(filename string) (*x509.Certificate, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to read certificate file: %w", err)
 	}
-	
+
 	return ParseCertificateFromPEM(certPEM)
 }
 
@@ -178,7 +180,7 @@ func LoadCertificateChainFromFile(filename string) ([]*x509.Certificate, error) 
 	if err != nil {
 		return nil, fmt.Errorf("failed to read certificate chain file: %w", err)
 	}
-	
+
 	return ParseCertificateChainFromPEM(certChainPEM)
 }
 
@@ -188,14 +190,14 @@ func SaveCertificateToFile(cert *Certificate, certPath, keyPath string) error {
 	if err := os.WriteFile(certPath, cert.CertificatePEM, 0600); err != nil {
 		return fmt.Errorf("failed to write certificate file: %w", err)
 	}
-	
+
 	// Save private key (if available)
 	if cert.PrivateKeyPEM != nil && keyPath != "" {
 		if err := os.WriteFile(keyPath, cert.PrivateKeyPEM, 0600); err != nil {
 			return fmt.Errorf("failed to write private key file: %w", err)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -204,7 +206,7 @@ func IsCertificateExpiring(cert *x509.Certificate, withinDays int) bool {
 	if cert == nil {
 		return false
 	}
-	
+
 	expirationThreshold := time.Now().Add(time.Duration(withinDays) * 24 * time.Hour)
 	return cert.NotAfter.Before(expirationThreshold) && cert.NotAfter.After(time.Now())
 }
@@ -214,7 +216,7 @@ func IsCertificateExpired(cert *x509.Certificate) bool {
 	if cert == nil {
 		return true
 	}
-	
+
 	return time.Now().After(cert.NotAfter)
 }
 
@@ -223,7 +225,7 @@ func FormatCertificateInfo(info *CertificateInfo) string {
 	if info == nil {
 		return "No certificate information"
 	}
-	
+
 	status := "Valid"
 	if !info.IsValid {
 		status = "Invalid"
@@ -232,7 +234,7 @@ func FormatCertificateInfo(info *CertificateInfo) string {
 	} else if info.NeedsRenewal {
 		status = "Expiring Soon"
 	}
-	
+
 	return fmt.Sprintf(
 		"Type: %s, CN: %s, Serial: %s, Status: %s, Expires: %s (%d days)",
 		info.Type.String(),

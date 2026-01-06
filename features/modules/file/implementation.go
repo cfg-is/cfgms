@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // #nosec G304 - File module requires file system access for configuration management
 package file
 
@@ -24,7 +26,10 @@ func New() modules.Module {
 	return &fileModule{}
 }
 
-// Get returns the current configuration of the file
+// Get returns the current configuration of the file.
+//
+// If the file does not exist, returns a FileConfig with State: "absent".
+// This allows the execution engine to detect that the file needs to be created.
 func (m *fileModule) Get(ctx context.Context, resourceID string) (modules.ConfigState, error) {
 	if resourceID == "" {
 		return nil, modules.ErrInvalidResourceID
@@ -32,6 +37,12 @@ func (m *fileModule) Get(ctx context.Context, resourceID string) (modules.Config
 
 	info, err := os.Stat(resourceID)
 	if err != nil {
+		if os.IsNotExist(err) {
+			// File doesn't exist - return state: absent
+			return &FileConfig{
+				State: "absent",
+			}, nil
+		}
 		return nil, err
 	}
 
@@ -47,6 +58,7 @@ func (m *fileModule) Get(ctx context.Context, resourceID string) (modules.Config
 	}
 
 	config := &FileConfig{
+		State:       "present",
 		Content:     string(content),
 		Permissions: int(info.Mode().Perm()),
 		Owner:       owner,
@@ -79,11 +91,24 @@ func (m *fileModule) Set(ctx context.Context, resourceID string, config modules.
 	configMap := config.AsMap()
 	fileConfig := &FileConfig{}
 
+	if state, ok := configMap["state"].(string); ok {
+		fileConfig.State = state
+	}
 	if content, ok := configMap["content"].(string); ok {
 		fileConfig.Content = content
 	}
+	// Support both "permissions" and "mode" field names for flexibility
 	if perms, ok := configMap["permissions"].(int); ok {
 		fileConfig.Permissions = perms
+	} else if mode, ok := configMap["mode"].(string); ok {
+		// Parse mode as octal string (e.g., "0644")
+		var modeInt int
+		_, err := fmt.Sscanf(mode, "%o", &modeInt)
+		if err == nil {
+			fileConfig.Permissions = modeInt
+		}
+	} else if mode, ok := configMap["mode"].(int); ok {
+		fileConfig.Permissions = mode
 	}
 	if owner, ok := configMap["owner"].(string); ok {
 		fileConfig.Owner = owner
@@ -92,7 +117,37 @@ func (m *fileModule) Set(ctx context.Context, resourceID string, config modules.
 		fileConfig.Group = group
 	}
 
-	// Validate configuration
+	// Handle state: absent - delete the file
+	if fileConfig.State == "absent" {
+		if err := os.Remove(resourceID); err != nil {
+			if os.IsNotExist(err) {
+				// File already doesn't exist - desired state achieved
+				logger.InfoCtx(ctx, "File already absent",
+					"operation", "file_set",
+					"resource_id", resourceID,
+					"status", "no_change")
+				return nil
+			}
+			logger.ErrorCtx(ctx, "Failed to remove file",
+				"operation", "file_set",
+				"resource_id", resourceID,
+				"error_code", "FILE_REMOVAL_FAILED",
+				"error_details", err.Error())
+			return err
+		}
+		logger.InfoCtx(ctx, "File removed successfully",
+			"operation", "file_set",
+			"resource_id", resourceID,
+			"status", "completed")
+		return nil
+	}
+
+	// Apply default permissions if not specified (0644 is a safe default)
+	if fileConfig.Permissions == 0 {
+		fileConfig.Permissions = 0644
+	}
+
+	// Validate configuration for present state
 	if err := fileConfig.Validate(); err != nil {
 		logger.ErrorCtx(ctx, "File configuration validation failed",
 			"operation", "file_set",

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package workflow
 
 import (
@@ -5,9 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 func TestWorkflowForLoop(t *testing.T) {
@@ -136,7 +139,7 @@ func TestWorkflowForLoop(t *testing.T) {
 			} else {
 				assert.Equal(t, StatusCompleted, execution.GetStatus())
 				assert.True(t, execution.HasStepResult("for-loop-step"))
-				
+
 				// Check that the loop variable reached the expected final value
 				finalVarValue, exists := execution.GetVariable(tt.loop.Variable)
 				assert.True(t, exists)
@@ -331,7 +334,7 @@ func TestWorkflowForeachLoop(t *testing.T) {
 			} else {
 				assert.Equal(t, StatusCompleted, execution.GetStatus())
 				assert.True(t, execution.HasStepResult("foreach-loop-step"))
-				
+
 				// Check that loop variables were set
 				assert.True(t, execution.HasVariable(tt.loop.Variable))
 				if tt.loop.IndexVariable != "" {

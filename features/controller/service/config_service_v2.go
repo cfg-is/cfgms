@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 // Package service provides Epic 6 compliant configuration service using ConfigStore interface
 package service
 
@@ -7,31 +9,26 @@ import (
 	"fmt"
 	"time"
 
-	"google.golang.org/grpc/metadata"
-	"google.golang.org/protobuf/types/known/timestamppb"
-
 	common "github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
-	"github.com/cfgis/cfgms/pkg/config"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/validation"
+	"github.com/cfgis/cfgms/pkg/config"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
-// ConfigurationServiceV2 implements Epic 6 compliant Configuration gRPC service
+// ConfigurationServiceV2 implements Epic 6 compliant Configuration service
 // This replaces the in-memory storage with persistent ConfigStore
 type ConfigurationServiceV2 struct {
-	controller.UnimplementedConfigurationServiceServer
-	
-	logger           logging.Logger
-	configManager    *config.Manager
-	rollbackManager  *config.RollbackManager
+	logger              logging.Logger
+	configManager       *config.Manager
+	rollbackManager     *config.RollbackManager
 	inheritanceResolver *config.InheritanceResolver
-	validationManager *config.ValidationManager
-	controllerSvc    *ControllerService
-	validator        *validation.Validator
-	storageManager   *interfaces.StorageManager
+	validationManager   *config.ValidationManager
+	controllerSvc       *ControllerService
+	validator           *validation.Validator
+	storageManager      *interfaces.StorageManager
 }
 
 // NewConfigurationServiceV2 creates a new Epic 6 compliant Configuration service
@@ -51,10 +48,10 @@ func NewConfigurationServiceV2(logger logging.Logger, storageManager *interfaces
 // GetConfiguration retrieves configuration for a specific steward using ConfigStore
 func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *controller.ConfigRequest) (*controller.ConfigResponse, error) {
 	s.logger.Debug("Configuration request received", "steward_id", req.StewardId, "modules", req.Modules)
-	
+
 	// Extract tenant context
 	tenantID := s.extractTenantID(ctx)
-	
+
 	// Verify steward exists and belongs to the tenant
 	if s.controllerSvc != nil {
 		stewardInfo, exists := s.controllerSvc.GetStewardInfo(req.StewardId)
@@ -67,10 +64,10 @@ func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *cont
 				},
 			}, nil
 		}
-		
+
 		// Check tenant isolation
 		if stewardInfo.TenantID != tenantID {
-			s.logger.Warn("Configuration request cross-tenant access denied", 
+			s.logger.Warn("Configuration request cross-tenant access denied",
 				"steward_id", req.StewardId,
 				"steward_tenant", stewardInfo.TenantID,
 				"request_tenant", tenantID)
@@ -82,7 +79,7 @@ func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *cont
 			}, nil
 		}
 	}
-	
+
 	// Get configuration with inheritance from storage
 	stewardConfig, err := s.configManager.GetConfigurationWithInheritance(ctx, tenantID, req.StewardId)
 	if err != nil {
@@ -94,10 +91,10 @@ func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *cont
 			},
 		}, nil
 	}
-	
+
 	// Filter configuration by requested modules if specified
 	filteredConfig := s.filterConfigByModules(stewardConfig, req.Modules)
-	
+
 	// Convert to JSON
 	configData, err := json.Marshal(filteredConfig)
 	if err != nil {
@@ -109,16 +106,16 @@ func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *cont
 			},
 		}, nil
 	}
-	
+
 	// Get version information from storage
 	history, err := s.configManager.GetConfigurationHistory(ctx, tenantID, req.StewardId, 1)
 	version := "unknown"
 	if err == nil && len(history) > 0 {
 		version = fmt.Sprintf("v%d", history[0].Version)
 	}
-	
+
 	s.logger.Debug("Configuration retrieved successfully", "steward_id", req.StewardId, "version", version)
-	
+
 	return &controller.ConfigResponse{
 		Status: &common.Status{
 			Code:    common.Status_OK,
@@ -140,24 +137,24 @@ func (s *ConfigurationServiceV2) SetConfiguration(ctx context.Context, tenantID,
 		}
 		return fmt.Errorf("configuration validation failed: %v", errorMessages)
 	}
-	
+
 	// Log validation warnings
 	for _, warning := range validationResult.Warnings {
-		s.logger.Warn("Configuration validation warning", 
+		s.logger.Warn("Configuration validation warning",
 			"steward_id", stewardID,
 			"field", warning.Field,
 			"message", warning.Message)
 	}
-	
+
 	// Store configuration
 	if err := s.configManager.StoreConfiguration(ctx, tenantID, stewardID, config); err != nil {
 		return fmt.Errorf("failed to store configuration: %w", err)
 	}
-	
+
 	s.logger.Info("Configuration stored successfully",
 		"tenant_id", tenantID,
 		"steward_id", stewardID)
-	
+
 	return nil
 }
 
@@ -174,7 +171,7 @@ func (s *ConfigurationServiceV2) RollbackConfiguration(ctx context.Context, requ
 		"target_version", request.TargetVersion,
 		"reason", request.Reason,
 		"requested_by", request.RequestedBy)
-	
+
 	response, err := s.rollbackManager.PerformRollback(ctx, request)
 	if err != nil {
 		s.logger.Error("Configuration rollback failed",
@@ -184,7 +181,7 @@ func (s *ConfigurationServiceV2) RollbackConfiguration(ctx context.Context, requ
 			"error", err)
 		return response, err
 	}
-	
+
 	if response.Success {
 		s.logger.Info("Configuration rollback successful",
 			"tenant_id", request.TenantID,
@@ -194,7 +191,7 @@ func (s *ConfigurationServiceV2) RollbackConfiguration(ctx context.Context, requ
 			"to_version", response.NewVersion,
 			"risk_level", response.RiskLevel)
 	}
-	
+
 	return response, nil
 }
 
@@ -221,12 +218,12 @@ func (s *ConfigurationServiceV2) BatchSetConfigurations(ctx context.Context, con
 			return fmt.Errorf("validation failed for steward %s: %v", entry.StewardID, errorMessages)
 		}
 	}
-	
+
 	// Store all configurations in batch
 	if err := s.configManager.BatchStoreConfigurations(ctx, configs); err != nil {
 		return fmt.Errorf("failed to store configurations in batch: %w", err)
 	}
-	
+
 	s.logger.Info("Batch configuration storage completed", "count", len(configs))
 	return nil
 }
@@ -234,7 +231,7 @@ func (s *ConfigurationServiceV2) BatchSetConfigurations(ctx context.Context, con
 // ValidateConfig validates a configuration using comprehensive validation
 func (s *ConfigurationServiceV2) ValidateConfig(ctx context.Context, req *controller.ConfigValidationRequest) (*controller.ConfigValidationResponse, error) {
 	s.logger.Debug("Configuration validation request received", "version", req.Version)
-	
+
 	// Parse configuration
 	var stewardConfig stewardconfig.StewardConfig
 	if err := json.Unmarshal(req.Config, &stewardConfig); err != nil {
@@ -254,14 +251,14 @@ func (s *ConfigurationServiceV2) ValidateConfig(ctx context.Context, req *contro
 			},
 		}, nil
 	}
-	
+
 	// Extract tenant and steward ID from context (simplified)
 	tenantID := s.extractTenantID(ctx)
 	stewardID := "validation" // For validation-only requests
-	
+
 	// Use comprehensive validation framework
 	validationResult := s.validationManager.ValidateConfiguration(ctx, tenantID, stewardID, &stewardConfig)
-	
+
 	// Convert validation result to proto format
 	var validationErrors []*controller.ValidationError
 	for _, issue := range validationResult.Errors {
@@ -274,7 +271,7 @@ func (s *ConfigurationServiceV2) ValidateConfig(ctx context.Context, req *contro
 			Suggestion: issue.Suggestion,
 		})
 	}
-	
+
 	for _, warning := range validationResult.Warnings {
 		protoLevel := s.convertValidationLevel(warning.Level)
 		validationErrors = append(validationErrors, &controller.ValidationError{
@@ -285,7 +282,7 @@ func (s *ConfigurationServiceV2) ValidateConfig(ctx context.Context, req *contro
 			Suggestion: warning.Suggestion,
 		})
 	}
-	
+
 	// Determine response status
 	var status *common.Status
 	if !validationResult.Valid {
@@ -304,84 +301,29 @@ func (s *ConfigurationServiceV2) ValidateConfig(ctx context.Context, req *contro
 			Message: "Configuration is fully valid",
 		}
 	}
-	
-	s.logger.Debug("Configuration validation completed", 
+
+	s.logger.Debug("Configuration validation completed",
 		"version", req.Version,
 		"valid", validationResult.Valid,
 		"errors", len(validationResult.Errors),
 		"warnings", len(validationResult.Warnings))
-	
+
 	return &controller.ConfigValidationResponse{
 		Status: status,
 		Errors: validationErrors,
 		Metadata: map[string]string{
 			"validation_timestamp": time.Now().Format(time.RFC3339),
-			"total_issues": fmt.Sprintf("%d", len(validationResult.Errors)+len(validationResult.Warnings)),
-			"storage_provider": s.storageManager.GetProviderName(),
+			"total_issues":         fmt.Sprintf("%d", len(validationResult.Errors)+len(validationResult.Warnings)),
+			"storage_provider":     s.storageManager.GetProviderName(),
 		},
 	}, nil
 }
 
 // StreamConfigurationUpdates streams configuration updates to stewards
+// NOTE: Disabled - gRPC streaming removed. Use MQTT for real-time updates.
 // This would need to be enhanced with storage-based change notifications
-func (s *ConfigurationServiceV2) StreamConfigurationUpdates(req *controller.ConfigStreamRequest, stream controller.ConfigurationService_StreamConfigurationUpdatesServer) error {
-	s.logger.Debug("Configuration stream request received", "steward_id", req.StewardId, "modules", req.Modules)
-	
-	// Verify steward exists
-	if s.controllerSvc != nil {
-		if _, exists := s.controllerSvc.GetStewardInfo(req.StewardId); !exists {
-			return fmt.Errorf("steward %s not found", req.StewardId)
-		}
-	}
-	
-	tenantID := s.extractTenantID(stream.Context())
-	
-	// Send initial configuration if it exists
-	stewardConfig, err := s.configManager.GetConfigurationWithInheritance(stream.Context(), tenantID, req.StewardId)
-	if err == nil {
-		// Filter configuration by modules if specified
-		var configBytes []byte
-		
-		if len(req.Modules) > 0 {
-			filtered := s.filterConfigByModules(stewardConfig, req.Modules)
-			configBytes, err = json.Marshal(filtered)
-		} else {
-			configBytes, err = json.Marshal(stewardConfig)
-		}
-		
-		if err != nil {
-			s.logger.Error("Failed to marshal configuration", "error", err)
-			return fmt.Errorf("failed to marshal configuration: %w", err)
-		}
-		
-		// Get version
-		history, _ := s.configManager.GetConfigurationHistory(stream.Context(), tenantID, req.StewardId, 1)
-		version := "unknown"
-		if len(history) > 0 {
-			version = fmt.Sprintf("v%d", history[0].Version)
-		}
-		
-		initialUpdate := &controller.ConfigurationUpdate{
-			StewardId:  req.StewardId,
-			Config:     configBytes,
-			Version:    version,
-			Timestamp:  timestamppb.Now(),
-			UpdateType: controller.ConfigurationUpdate_INITIAL,
-		}
-		
-		if err := stream.Send(initialUpdate); err != nil {
-			s.logger.Error("Failed to send initial configuration", "error", err)
-			return fmt.Errorf("failed to send initial configuration: %w", err)
-		}
-		
-		s.logger.Debug("Initial configuration sent", "steward_id", req.StewardId)
-	}
-	
-	// For now, keep connection open but don't send updates
-	// In a full implementation, this would listen for storage change notifications
-	<-stream.Context().Done()
-	s.logger.Debug("Configuration stream context done", "steward_id", req.StewardId)
-	return nil
+func (s *ConfigurationServiceV2) StreamConfigurationUpdates(req *controller.ConfigStreamRequest, stream interface{}) error {
+	return fmt.Errorf("streaming not supported: gRPC removed, use MQTT for real-time configuration updates")
 }
 
 // Helper methods
@@ -391,23 +333,23 @@ func (s *ConfigurationServiceV2) filterConfigByModules(config *stewardconfig.Ste
 	if len(modules) == 0 {
 		return config
 	}
-	
+
 	// Create a set of requested modules
 	moduleSet := make(map[string]bool)
 	for _, module := range modules {
 		moduleSet[module] = true
 	}
-	
+
 	// Filter resources
 	filteredConfig := *config
 	filteredConfig.Resources = nil
-	
+
 	for _, resource := range config.Resources {
 		if moduleSet[resource.Module] {
 			filteredConfig.Resources = append(filteredConfig.Resources, resource)
 		}
 	}
-	
+
 	return &filteredConfig
 }
 
@@ -427,20 +369,14 @@ func (s *ConfigurationServiceV2) convertValidationLevel(level string) controller
 	}
 }
 
-// extractTenantID extracts tenant ID from gRPC metadata
+// extractTenantID extracts tenant ID from context
 func (s *ConfigurationServiceV2) extractTenantID(ctx context.Context) string {
-	md, ok := metadata.FromIncomingContext(ctx)
-	if !ok {
-		s.logger.Debug("No metadata found in context, using default tenant")
-		return "default"
+	// Extract tenant ID from context value (set by MQTT/HTTP handlers)
+	if tenantID, ok := ctx.Value("tenant-id").(string); ok && tenantID != "" {
+		return tenantID
 	}
-	
-	values := md.Get("tenant-id")
-	if len(values) > 0 && values[0] != "" {
-		return values[0]
-	}
-	
-	s.logger.Debug("No tenant-id in metadata, using default tenant")
+
+	s.logger.Debug("No tenant-id in context, using default tenant")
 	return "default"
 }
 

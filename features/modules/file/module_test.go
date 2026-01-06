@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package file
 
 import (
@@ -8,8 +10,9 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/cfgis/cfgms/features/modules"
 	"gopkg.in/yaml.v3"
+
+	"github.com/cfgis/cfgms/features/modules"
 )
 
 // createConfigFromYAML creates a FileConfig from YAML string
@@ -110,7 +113,8 @@ owner: nonexistentuser`,
 			configData: `content: "` + testContent + `"
 permissions: 420
 group: nonexistentgroup`,
-			wantErr: true,
+			// Windows doesn't have Unix groups, so this won't error on Windows
+			wantErr: runtime.GOOS != "windows",
 		},
 	}
 
@@ -182,10 +186,13 @@ permissions: 420`
 		t.Error("Set() with empty resource ID should fail")
 	}
 
-	// Test Get with non-existent file
-	_, err = module.Get(context.Background(), filepath.Join(tempDir, "nonexistent.txt"))
-	if err == nil {
-		t.Error("Get() with non-existent file should fail")
+	// Test Get with non-existent file - should return State: "absent"
+	state, err := module.Get(context.Background(), filepath.Join(tempDir, "nonexistent.txt"))
+	if err != nil {
+		t.Errorf("Get() with non-existent file should not error: %v", err)
+	}
+	if fileState, ok := state.(*FileConfig); !ok || fileState.State != "absent" {
+		t.Error("Get() with non-existent file should return State: 'absent'")
 	}
 
 	// Test file creation and verification
@@ -208,14 +215,16 @@ permissions: 493`
 		t.Errorf("File content mismatch: got %q, want %q", string(content), "test content for verification")
 	}
 
-	// Verify permissions
-	info, err := os.Stat(testFile)
-	if err != nil {
-		t.Errorf("Failed to stat file: %v", err)
-	}
+	// Verify permissions (Unix only - Windows uses ACLs)
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(testFile)
+		if err != nil {
+			t.Errorf("Failed to stat file: %v", err)
+		}
 
-	expectedPerms := os.FileMode(0755)
-	if info.Mode().Perm() != expectedPerms {
-		t.Errorf("File permissions mismatch: got %v, want %v", info.Mode().Perm(), expectedPerms)
+		expectedPerms := os.FileMode(0755)
+		if info.Mode().Perm() != expectedPerms {
+			t.Errorf("File permissions mismatch: got %v, want %v", info.Mode().Perm(), expectedPerms)
+		}
 	}
 }

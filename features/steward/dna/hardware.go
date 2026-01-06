@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
 package dna
 
 import (
@@ -9,13 +11,13 @@ import (
 type HardwareCollector interface {
 	// CollectCPU gathers detailed CPU information
 	CollectCPU(attributes map[string]string) error
-	
-	// CollectMemory gathers detailed memory information  
+
+	// CollectMemory gathers detailed memory information
 	CollectMemory(attributes map[string]string) error
-	
+
 	// CollectDisk gathers disk and storage information
 	CollectDisk(attributes map[string]string) error
-	
+
 	// CollectMotherboard gathers motherboard and system information
 	CollectMotherboard(attributes map[string]string) error
 }
@@ -64,9 +66,8 @@ type WindowsHardwareCollector struct{}
 
 // Windows-specific implementations are in hardware_windows.go
 
-// LinuxHardwareCollector handles Linux-specific hardware collection  
+// LinuxHardwareCollector handles Linux-specific hardware collection
 type LinuxHardwareCollector struct{}
-
 
 // DarwinHardwareCollector handles macOS-specific hardware collection
 type DarwinHardwareCollector struct{}
