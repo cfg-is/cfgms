@@ -153,7 +153,7 @@ func (s *E2ETestSuite) TestTerminalAuditIntegration() {
 		}
 
 		sessionCreationLatency := time.Since(sessionStart)
-		auditEventCount := 0
+		auditEventCount := 1 // Session start event
 
 		// Step 4: Execute test commands with different security levels
 		for i, cmd := range scenario.TestCommands {
