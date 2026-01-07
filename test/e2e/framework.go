@@ -412,7 +412,7 @@ resources:
       mode: "0755"
 `, stewardID, filepath.Join(f.tempDir, "test-resource"))
 
-	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+	if err := os.WriteFile(configPath, []byte(configContent), 0600); err != nil {
 		return nil, fmt.Errorf("failed to write steward config file: %w", err)
 	}
 
