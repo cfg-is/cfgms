@@ -6,7 +6,7 @@ CFGMS uses a **dual licensing model** to balance open source community benefits 
 
 ### Apache License 2.0 (Open Source)
 
-The vast majority of CFGMS is licensed under the [Apache License 2.0](LICENSE-APACHE-2.0), including:
+The vast majority of CFGMS is licensed under the [Apache License 2.0](LICENSE), including:
 
 - **Complete CLI and API** - Full command-line and REST API functionality
 - **All Modules and Integrations** - Endpoint management, M365, Active Directory, PSA/RMM connectors
@@ -299,5 +299,5 @@ We don't monetize integrations or module development - those are community-drive
 **Version**: v0.7.0
 
 For the complete legal text:
-- [Apache License 2.0](LICENSE-APACHE-2.0)
+- [Apache License 2.0](LICENSE)
 - [Elastic License 2.0](LICENSE-ELASTIC-2.0)
