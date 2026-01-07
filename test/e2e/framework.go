@@ -533,7 +533,11 @@ func (f *E2ETestFramework) RegisterStewardWithController(stewardName, tenantID s
 
 	// Step 2: POST to /api/v1/register
 	// Note: HTTP API runs on separate port from gRPC (typically 9080 vs 8080)
-	registrationURL := fmt.Sprintf("http://localhost:%d/api/v1/register", f.config.HTTPPort)
+	protocol := "http"
+	if f.config.EnableTLS {
+		protocol = "https"
+	}
+	registrationURL := fmt.Sprintf("%s://localhost:%d/api/v1/register", protocol, f.config.HTTPPort)
 	reqBody := map[string]string{
 		"token": token,
 	}
