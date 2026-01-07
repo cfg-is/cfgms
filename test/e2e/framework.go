@@ -19,6 +19,7 @@ import (
 	"github.com/cfgis/cfgms/features/workflow"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	testutil "github.com/cfgis/cfgms/pkg/testing"
 
@@ -317,6 +318,13 @@ func (f *E2ETestFramework) initializeController() error {
 				Organization: "Test Organization",
 			},
 		},
+		// Story #294 Phase 2: Enable MQTT broker for steward registration and communication
+		MQTT: &controllerConfig.MQTTConfig{
+			Enabled:        true,
+			ListenAddr:     "localhost:1883",
+			EnableTLS:      f.config.EnableTLS,
+			UseCertManager: true, // Use auto-generated certificates from cert manager
+		},
 	}
 
 	// Create storage directory
@@ -383,57 +391,84 @@ func (f *E2ETestFramework) CreateSteward(stewardID string) (*steward.Steward, er
 		return existingSteward, nil
 	}
 
-	// Generate client certificate for this steward (like integration tests do)
-	if f.config.EnableTLS && f.certManager != nil {
-		clientCert, err := f.certManager.GenerateClientCertificate(&cert.ClientCertConfig{
-			CommonName:         stewardID,
-			Organization:       "CFGMS Test Stewards",
-			OrganizationalUnit: "E2E Tests",
-			ValidityDays:       1,
-			KeySize:            2048,
-			ClientID:           stewardID,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to generate client certificate for steward %s: %w", stewardID, err)
-		}
+	// Story #294 Phase 1: Standalone steward mode doesn't need TLS certificates or controller connection
+	// Phase 2 will add controller + MQTT broker + registration flow with certificates
 
-		f.logger.Info("Generated client certificate for steward", "steward_id", stewardID, "serial", clientCert.SerialNumber)
+	// Story #294 Phase 1: Implement standalone steward creation for E2E tests
+	// Use steward.NewStandalone() like integration tests do (see test/integration/standalone_steward_test.go)
 
-		// Save client certificate files for steward to use
-		certPath := filepath.Join(f.tempDir, "certs")
-		err = f.certManager.SaveCertificateFiles(clientCert.SerialNumber,
-			filepath.Join(certPath, "client.crt"),
-			filepath.Join(certPath, "client.key"))
-		if err != nil {
-			return nil, fmt.Errorf("failed to save client certificate files for steward %s: %w", stewardID, err)
-		}
+	// Create a simple YAML configuration file for standalone mode
+	configPath := filepath.Join(f.tempDir, fmt.Sprintf("steward-%s-config.yaml", stewardID))
+	configContent := fmt.Sprintf(`steward:
+  id: %s
+
+resources:
+  # Basic test resource to verify steward works
+  - name: test-directory
+    module: directory
+    config:
+      path: %s
+      state: present
+      mode: "0755"
+`, stewardID, filepath.Join(f.tempDir, "test-resource"))
+
+	if err := os.WriteFile(configPath, []byte(configContent), 0600); err != nil {
+		return nil, fmt.Errorf("failed to write steward config file: %w", err)
 	}
 
-	stewardConfig := &steward.Config{
-		ID:             stewardID,
-		ControllerAddr: fmt.Sprintf("localhost:%d", f.config.ControllerPort),
-		CertPath:       filepath.Join(f.tempDir, "certs"),
-		DataDir:        filepath.Join(f.tempDir, "steward-data"),
-		LogLevel:       "info",
-		Certificate: &steward.CertificateConfig{
-			EnableCertManagement: false, // Disable cert management like integration tests
-			CertStoragePath:      filepath.Join(f.tempDir, "certs"),
-			EnableAutoRenewal:    false,
-			RenewalThresholdDays: 1,
-			Provisioning: &steward.ProvisioningConfig{
-				EnableAutoProvisioning: false, // Disable auto-provisioning like integration tests
-				ProvisioningEndpoint:   fmt.Sprintf("https://localhost:%d/api/v1/certificates/provision", f.config.ControllerPort),
-				ValidityDays:           1,
-				Organization:           "Test Organization",
-			},
-		},
+	// Create standalone steward using the same approach as integration tests
+	stwd, err := steward.NewStandalone(configPath, f.logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create standalone steward %s: %w", stewardID, err)
 	}
 
-	// DEPRECATED: steward.New() is deprecated (Story #198)
-	// E2E steward creation requires implementation with MQTT+QUIC mode
-	// This is a known limitation - E2E tests should use integration tests instead
-	_ = stewardConfig // Mark config as used to avoid unused variable error
-	return nil, fmt.Errorf("E2E steward creation not yet implemented for MQTT+QUIC mode (Story #198 deprecation) - use integration tests for config signature verification")
+	f.stewards[stewardID] = stwd
+	f.logger.Info("Created standalone steward for E2E testing", "steward_id", stewardID, "config_path", configPath)
+
+	return stwd, nil
+}
+
+// CreateRegistrationToken generates a registration token for steward registration
+// Story #294 Phase 2: Enable controller + steward registration via MQTT
+func (f *E2ETestFramework) CreateRegistrationToken(tenantID string) (string, error) {
+	if f.controller == nil {
+		return "", fmt.Errorf("controller not initialized - cannot create registration token")
+	}
+
+	// Get the registration token store from the controller
+	tokenStoreInterface := f.controller.GetRegistrationTokenStore()
+	if tokenStoreInterface == nil {
+		return "", fmt.Errorf("registration token store not available")
+	}
+
+	// Type assert to registration.Store
+	tokenStore, ok := tokenStoreInterface.(registration.Store)
+	if !ok {
+		return "", fmt.Errorf("invalid registration token store type")
+	}
+
+	// Create a new registration token
+	// Note: MQTT broker is on port 1883, not the gRPC port
+	tokenReq := &registration.TokenCreateRequest{
+		TenantID:      tenantID,
+		ControllerURL: "tcp://localhost:1883",
+		Group:         "e2e-test",
+		ExpiresIn:     "",    // Never expires for testing
+		SingleUse:     false, // Can be reused for testing
+	}
+
+	token, err := registration.CreateToken(tokenReq)
+	if err != nil {
+		return "", fmt.Errorf("failed to create registration token: %w", err)
+	}
+
+	// Save the token to the store
+	if err := tokenStore.SaveToken(context.Background(), token); err != nil {
+		return "", fmt.Errorf("failed to save registration token: %w", err)
+	}
+
+	f.logger.Info("Created registration token", "tenant_id", tenantID, "token", token.Token)
+	return token.Token, nil
 }
 
 // RunTest executes a single test scenario with metrics collection and smart retry
