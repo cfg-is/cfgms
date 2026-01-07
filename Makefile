@@ -624,8 +624,39 @@ test-module:
 	@echo "🧪 Testing module: $(MODULE)"
 	@go test -race -timeout=2m ./features/modules/$(MODULE)/...
 
+# Fast comprehensive tests for CI (Story #294 Phase 4)
+.PHONY: test-fast
+test-fast:
+	@echo "🚀 Running Fast Comprehensive Tests"
+	@echo "====================================="
+	@echo "💡 Optimized for CI/CD pipelines"
+	@echo ""
+	@echo "🧪 Running unit tests..."
+	@go test -short -race -timeout=5m ./pkg/... ./features/... ./api/... ./cmd/... || exit 1
+	@echo ""
+	@echo "✅ Fast comprehensive tests complete"
 
+# Load testing for production readiness (Story #294 Phase 4)
+.PHONY: test-load-testing
+test-load-testing:
+	@echo "⚡ Running Load Tests"
+	@echo "====================="
+	@echo "📊 Testing system under high concurrency"
+	@echo ""
+	@go test -race -timeout=10m -run "Load" ./test/e2e/... ./test/integration/mqtt_quic/... ./test/performance/... || exit 1
+	@echo ""
+	@echo "✅ Load testing complete"
 
+# Performance benchmarks for production gates (Story #294 Phase 4)
+.PHONY: test-performance-benchmarks
+test-performance-benchmarks:
+	@echo "📊 Running Performance Benchmarks"
+	@echo "=================================="
+	@echo "⏱️  Validating performance SLAs"
+	@echo ""
+	@go test -bench=. -benchmem -run=^$$ ./test/performance/... ./test/e2e/... || exit 1
+	@echo ""
+	@echo "✅ Performance benchmarks complete"
 
 
 
