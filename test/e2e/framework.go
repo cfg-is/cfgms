@@ -550,7 +550,7 @@ func (f *E2ETestFramework) RegisterStewardWithController(stewardName, tenantID s
 	httpClient := &http.Client{
 		Timeout: 10 * time.Second,
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // Test environment
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // Test environment with self-signed certs
 		},
 	}
 
