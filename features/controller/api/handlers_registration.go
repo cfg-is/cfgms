@@ -117,7 +117,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		TenantID:      token.TenantID,
 		Group:         token.Group,
 		ControllerURL: token.ControllerURL,
-		MQTTBroker:    token.ControllerURL, // For now, MQTT broker is same as controller URL
+		MQTTBroker:    s.getMQTTBrokerURL(), // Story #294 Phase 3: Return proper MQTT broker URL
 		QUICAddress:   s.getQUICAddress(),
 	}
 
@@ -163,6 +163,22 @@ func (s *Server) getQUICAddress() string {
 		return s.cfg.QUIC.ListenAddr
 	}
 	return "localhost:4433" // Default QUIC address
+}
+
+// getMQTTBrokerURL returns the MQTT broker URL for steward connections
+// Story #294 Phase 3: Return proper MQTT URL with ssl:// or tcp:// protocol
+func (s *Server) getMQTTBrokerURL() string {
+	if s.cfg.MQTT == nil || !s.cfg.MQTT.Enabled {
+		return "tcp://localhost:1883" // Default MQTT address
+	}
+
+	// Determine protocol based on TLS configuration
+	protocol := "tcp"
+	if s.cfg.MQTT.EnableTLS {
+		protocol = "ssl"
+	}
+
+	return fmt.Sprintf("%s://%s", protocol, s.cfg.MQTT.ListenAddr)
 }
 
 // Helper function to create a time pointer
