@@ -3,13 +3,21 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
+
+	mqtt "github.com/eclipse/paho.mqtt.golang"
 
 	"github.com/cfgis/cfgms/features/controller"
 	controllerConfig "github.com/cfgis/cfgms/features/controller/config"
@@ -27,6 +35,23 @@ import (
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 )
 
+// RegisteredSteward represents a steward registered with the controller via MQTT
+// Story #294 Phase 3: Track MQTT-connected stewards for E2E testing
+type RegisteredSteward struct {
+	StewardID      string
+	TenantID       string
+	Group          string
+	MQTTClient     mqtt.Client
+	MQTTBroker     string
+	QUICAddress    string
+	ControllerURL  string
+	ClientCert     string
+	ClientKey      string
+	CACert         string
+	heartbeatDone  chan bool
+	commandHandler mqtt.MessageHandler
+}
+
 // E2ETestFramework provides a comprehensive end-to-end testing environment
 // optimized for GitHub Actions and CI/CD pipelines
 type E2ETestFramework struct {
@@ -38,7 +63,8 @@ type E2ETestFramework struct {
 
 	// Core components
 	controller     *controller.Controller
-	stewards       map[string]*steward.Steward
+	stewards       map[string]*steward.Steward // Standalone stewards (Phase 1)
+	registeredStewards map[string]*RegisteredSteward // MQTT-connected stewards (Phase 3)
 	certManager    *cert.Manager
 	rbacManager    rbac.RBACManager
 	terminalMgr    terminal.SessionManager
@@ -150,15 +176,16 @@ func NewE2EFramework(t *testing.T, config *E2EConfig) (*E2ETestFramework, error)
 	ctx, cancel := context.WithTimeout(context.Background(), config.TestTimeout)
 
 	framework := &E2ETestFramework{
-		t:             t,
-		tempDir:       tempDir,
-		logger:        logger,
-		ctx:           ctx,
-		cancel:        cancel,
-		stewards:      make(map[string]*steward.Steward),
-		config:        config,
-		dataGenerator: NewTestDataGenerator(config),
-		startTime:     time.Now(),
+		t:                  t,
+		tempDir:            tempDir,
+		logger:             logger,
+		ctx:                ctx,
+		cancel:             cancel,
+		stewards:           make(map[string]*steward.Steward),
+		registeredStewards: make(map[string]*RegisteredSteward), // Story #294 Phase 3
+		config:             config,
+		dataGenerator:      NewTestDataGenerator(config),
+		startTime:          time.Now(),
 		metrics: &TestMetrics{
 			StartTime:           time.Now(),
 			ComponentStartTimes: make(map[string]time.Time),
@@ -469,6 +496,252 @@ func (f *E2ETestFramework) CreateRegistrationToken(tenantID string) (string, err
 
 	f.logger.Info("Created registration token", "tenant_id", tenantID, "token", token.Token)
 	return token.Token, nil
+}
+
+// RegistrationResponse represents the HTTP registration response
+// Story #294 Phase 3: Used for steward registration via controller API
+type RegistrationResponse struct {
+	StewardID     string `json:"steward_id"`
+	TenantID      string `json:"tenant_id"`
+	Group         string `json:"group"`
+	ControllerURL string `json:"controller_url"`
+	MQTTBroker    string `json:"mqtt_broker"`
+	QUICAddress   string `json:"quic_address"`
+	ClientCert    string `json:"client_cert,omitempty"`
+	ClientKey     string `json:"client_key,omitempty"`
+	CACert        string `json:"ca_cert,omitempty"`
+}
+
+// RegisterStewardWithController performs full steward registration flow via HTTP + MQTT
+// Story #294 Phase 3: Complete registration flow for E2E testing
+func (f *E2ETestFramework) RegisterStewardWithController(stewardName, tenantID string) (*RegisteredSteward, error) {
+	// Check if already registered (with read lock)
+	f.mu.RLock()
+	if existing, exists := f.registeredStewards[stewardName]; exists {
+		f.mu.RUnlock()
+		f.logger.Info("Reusing existing registered steward", "steward_name", stewardName)
+		return existing, nil
+	}
+	f.mu.RUnlock()
+
+	// Step 1: Create registration token (no lock needed)
+	token, err := f.CreateRegistrationToken(tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create registration token: %w", err)
+	}
+
+	// Step 2: POST to /api/v1/register
+	registrationURL := fmt.Sprintf("http://localhost:%d/api/v1/register", f.config.ControllerPort)
+	reqBody := map[string]string{
+		"token": token,
+	}
+	reqJSON, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal registration request: %w", err)
+	}
+
+	// Create HTTP client with timeout
+	httpClient := &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // Test environment
+		},
+	}
+
+	resp, err := httpClient.Post(registrationURL, "application/json", bytes.NewBuffer(reqJSON))
+	if err != nil {
+		return nil, fmt.Errorf("HTTP registration request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("registration failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	// Step 3: Parse registration response
+	var regResp RegistrationResponse
+	if err := json.Unmarshal(body, &regResp); err != nil {
+		return nil, fmt.Errorf("failed to parse registration response: %w", err)
+	}
+
+	f.logger.Info("HTTP registration successful",
+		"steward_id", regResp.StewardID,
+		"tenant_id", regResp.TenantID,
+		"mqtt_broker", regResp.MQTTBroker)
+
+	// Step 4: Create TLS config from registration certificates
+	tlsConfig, err := f.createTLSConfigFromPEM(
+		[]byte(regResp.CACert),
+		[]byte(regResp.ClientCert),
+		[]byte(regResp.ClientKey),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create TLS config: %w", err)
+	}
+
+	// Step 5: Create MQTT client with TLS
+	mqttOpts := mqtt.NewClientOptions()
+	mqttOpts.AddBroker(regResp.MQTTBroker)
+	mqttOpts.SetClientID(regResp.StewardID)
+	mqttOpts.SetTLSConfig(tlsConfig)
+	mqttOpts.SetKeepAlive(30 * time.Second) // 30s keepalive for heartbeat
+	mqttOpts.SetConnectTimeout(10 * time.Second)
+	mqttOpts.SetAutoReconnect(false) // Explicit reconnection handling in tests
+
+	// Set Last Will Testament for failover detection
+	lwtTopic := fmt.Sprintf("cfgms/steward/%s/status", regResp.StewardID)
+	lwtPayload := `{"status": "offline", "reason": "connection_lost"}`
+	mqttOpts.SetWill(lwtTopic, lwtPayload, 1, false)
+
+	// Connection lost handler
+	mqttOpts.SetConnectionLostHandler(func(client mqtt.Client, err error) {
+		f.logger.Warn("MQTT connection lost", "steward_id", regResp.StewardID, "error", err)
+	})
+
+	mqttClient := mqtt.NewClient(mqttOpts)
+
+	// Step 6: Connect to MQTT broker
+	connectToken := mqttClient.Connect()
+	if !connectToken.WaitTimeout(10 * time.Second) {
+		return nil, fmt.Errorf("MQTT connection timeout")
+	}
+	if err := connectToken.Error(); err != nil {
+		return nil, fmt.Errorf("MQTT connection failed: %w", err)
+	}
+
+	f.logger.Info("MQTT connection successful", "steward_id", regResp.StewardID)
+
+	// Step 7: Subscribe to command topic
+	commandTopic := fmt.Sprintf("cfgms/steward/%s/commands", regResp.StewardID)
+	commandHandler := func(client mqtt.Client, msg mqtt.Message) {
+		f.logger.Info("Received command",
+			"steward_id", regResp.StewardID,
+			"topic", msg.Topic(),
+			"payload", string(msg.Payload()))
+		// Command handling will be implemented in tests as needed
+	}
+
+	subToken := mqttClient.Subscribe(commandTopic, 1, commandHandler)
+	if !subToken.WaitTimeout(5 * time.Second) {
+		mqttClient.Disconnect(250)
+		return nil, fmt.Errorf("command subscription timeout")
+	}
+	if err := subToken.Error(); err != nil {
+		mqttClient.Disconnect(250)
+		return nil, fmt.Errorf("command subscription failed: %w", err)
+	}
+
+	f.logger.Info("Subscribed to commands", "topic", commandTopic)
+
+	// Step 8: Create RegisteredSteward and start heartbeat
+	heartbeatDone := make(chan bool)
+	registeredSteward := &RegisteredSteward{
+		StewardID:      regResp.StewardID,
+		TenantID:       regResp.TenantID,
+		Group:          regResp.Group,
+		MQTTClient:     mqttClient,
+		MQTTBroker:     regResp.MQTTBroker,
+		QUICAddress:    regResp.QUICAddress,
+		ControllerURL:  regResp.ControllerURL,
+		ClientCert:     regResp.ClientCert,
+		ClientKey:      regResp.ClientKey,
+		CACert:         regResp.CACert,
+		heartbeatDone:  heartbeatDone,
+		commandHandler: commandHandler,
+	}
+
+	// Start heartbeat publishing goroutine
+	go f.publishHeartbeats(registeredSteward)
+
+	// Store registered steward (with write lock)
+	f.mu.Lock()
+	f.registeredStewards[stewardName] = registeredSteward
+
+	// Add cleanup function
+	f.cleanupFuncs = append(f.cleanupFuncs, func() error {
+		close(heartbeatDone)
+		if mqttClient.IsConnected() {
+			mqttClient.Disconnect(250)
+		}
+		return nil
+	})
+	f.mu.Unlock()
+
+	return registeredSteward, nil
+}
+
+// createTLSConfigFromPEM creates a TLS config from PEM-encoded certificates
+// Story #294 Phase 3: Helper for MQTT TLS setup
+func (f *E2ETestFramework) createTLSConfigFromPEM(caCertPEM, clientCertPEM, clientKeyPEM []byte) (*tls.Config, error) {
+	// Load CA certificate
+	caCertPool := x509.NewCertPool()
+	if !caCertPool.AppendCertsFromPEM(caCertPEM) {
+		return nil, fmt.Errorf("failed to parse CA certificate")
+	}
+
+	// Load client certificate and key
+	clientCert, err := tls.X509KeyPair(clientCertPEM, clientKeyPEM)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load client certificate: %w", err)
+	}
+
+	// Create TLS config
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{clientCert},
+		RootCAs:      caCertPool,
+		MinVersion:   tls.VersionTLS12,
+		ServerName:   "localhost", // Connect via localhost in tests
+	}
+
+	return tlsConfig, nil
+}
+
+// publishHeartbeats publishes periodic heartbeat messages to MQTT
+// Story #294 Phase 3: Heartbeat mechanism for failover detection
+func (f *E2ETestFramework) publishHeartbeats(steward *RegisteredSteward) {
+	heartbeatTopic := fmt.Sprintf("cfgms/steward/%s/heartbeat", steward.StewardID)
+	ticker := time.NewTicker(30 * time.Second) // Production interval
+	defer ticker.Stop()
+
+	sequence := 0
+	for {
+		select {
+		case <-steward.heartbeatDone:
+			f.logger.Info("Stopping heartbeat publishing", "steward_id", steward.StewardID)
+			return
+		case <-ticker.C:
+			sequence++
+			heartbeat := map[string]interface{}{
+				"steward_id": steward.StewardID,
+				"status":     "healthy",
+				"timestamp":  time.Now().Unix(),
+				"sequence":   sequence,
+			}
+
+			heartbeatJSON, err := json.Marshal(heartbeat)
+			if err != nil {
+				f.logger.Error("Failed to marshal heartbeat", "error", err)
+				continue
+			}
+
+			token := steward.MQTTClient.Publish(heartbeatTopic, 1, false, heartbeatJSON)
+			if !token.WaitTimeout(5 * time.Second) {
+				f.logger.Warn("Heartbeat publish timeout", "steward_id", steward.StewardID)
+				continue
+			}
+			if err := token.Error(); err != nil {
+				f.logger.Error("Heartbeat publish failed", "steward_id", steward.StewardID, "error", err)
+				continue
+			}
+
+			f.logger.Debug("Heartbeat published", "steward_id", steward.StewardID, "sequence", sequence)
+		}
+	}
 }
 
 // RunTest executes a single test scenario with metrics collection and smart retry
