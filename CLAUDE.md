@@ -42,6 +42,11 @@ See `.claude/slash-commands/` for complete documentation.
 - **No Failing Tests**: Cannot start new work or commit with ANY test failures
 - **Security Gates**: All security scans must pass before commits
 - **Feature Branches**: Always use `feature/story-[NUMBER]-[description]` branches
+- **Git Workflow (CRITICAL)**: Feature branches ALWAYS target `develop`, NEVER `main`
+  - ✅ CORRECT: `gh pr create --base develop`
+  - ❌ WRONG: `gh pr create --base main` (breaks GitFlow workflow)
+  - Only `develop → main` PRs allowed (for releases)
+  - See [docs/development/git-workflow.md](docs/development/git-workflow.md) for details
 - **Real Component Testing**: Never mock CFGMS functionality in tests - use real components
 
 #### EPIC 6 Complete: Storage Architecture (CRITICAL)
@@ -60,7 +65,7 @@ See `.claude/slash-commands/` for complete documentation.
 2. **Branch**: Create `feature/story-[NUMBER]-[description]` from develop
 3. **Develop**: Write tests first, implement with TDD approach
 4. **Commit**: Run `make test-commit` - blocks on any failures
-5. **Complete**: Create PR and update project status
+5. **Complete**: Create PR **targeting develop** (`gh pr create --base develop`) and update project status
 
 See [docs/development/story-checklist.md](docs/development/story-checklist.md) for complete manual checklist.
 
