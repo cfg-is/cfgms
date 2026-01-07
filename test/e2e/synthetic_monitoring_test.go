@@ -262,27 +262,29 @@ func (s *SyntheticMonitoringSuite) TestAPIEndpointMonitoring() {
 
 // TestTerminalSessionMonitoring monitors terminal session health
 func (s *SyntheticMonitoringSuite) TestTerminalSessionMonitoring() {
-	// Story #294 Phase 1: Basic terminal monitoring (Phase 2 will add MQTT communication validation)
+	// Story #294 Phase 4: Terminal monitoring with MQTT-connected stewards
 
 	err := s.framework.RunTest("terminal-session-monitoring", "synthetic-monitoring", func() error {
-		s.framework.logger.Info("Starting terminal session monitoring")
+		s.framework.logger.Info("Starting terminal session monitoring with MQTT stewards")
 
-		// Create steward for terminal testing
-		steward, err := s.framework.CreateSteward("synthetic-monitor-steward")
+		// Register steward with controller for terminal testing (Phase 3 MQTT framework)
+		tenantID := "synthetic-terminal-tenant"
+		registered, err := s.framework.RegisterStewardWithController("synthetic-monitor-steward", tenantID)
 		if err != nil {
-			return fmt.Errorf("failed to create steward: %w", err)
+			return fmt.Errorf("failed to register steward: %w", err)
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		go func() {
-			if err := steward.Start(ctx); err != nil {
-				// Log error but continue test
-				_ = err
-			}
-		}()
-		time.Sleep(1 * time.Second) // Allow steward to start
+		// Steward is already connected via MQTT - verify connection
+		if !registered.MQTTClient.IsConnected() {
+			return fmt.Errorf("steward MQTT connection not established")
+		}
+		s.framework.logger.Info("MQTT steward connected for terminal monitoring",
+			"steward_id", registered.StewardID)
+
+		time.Sleep(500 * time.Millisecond) // Brief delay for MQTT connection stability
 
 		testDuration := 15 * time.Second
 		if s.framework.config.OptimizeForCI {
@@ -300,9 +302,9 @@ func (s *SyntheticMonitoringSuite) TestTerminalSessionMonitoring() {
 			sessionCount++
 			startTime := time.Now()
 
-			// Create test session
+			// Create test session using MQTT-connected steward
 			req := &terminal.SessionRequest{
-				StewardID: "synthetic-monitor-steward",
+				StewardID: registered.StewardID,
 				UserID:    fmt.Sprintf("synthetic-user-%d", sessionCount),
 				Shell:     "bash",
 				Cols:      80,
@@ -446,16 +448,153 @@ func (s *SyntheticMonitoringSuite) TestResourceUsageMonitoring() {
 	s.Require().NoError(err)
 }
 
+// TestMQTTStewardHealthMonitoring monitors MQTT-connected steward health
+// Story #294 Phase 4: Synthetic monitoring for MQTT+QUIC stewards
+func (s *SyntheticMonitoringSuite) TestMQTTStewardHealthMonitoring() {
+	err := s.framework.RunTest("mqtt-steward-health-monitoring", "synthetic-monitoring", func() error {
+		s.framework.logger.Info("Starting MQTT steward health monitoring")
+
+		// Register stewards with controller for monitoring
+		stewardCount := 2
+		if s.framework.config.OptimizeForCI {
+			stewardCount = 1
+		}
+		if testing.Short() {
+			stewardCount = 1
+		}
+
+		registeredStewards := make([]*RegisteredSteward, stewardCount)
+		tenantID := "synthetic-monitoring-tenant"
+
+		// Register stewards
+		for i := 0; i < stewardCount; i++ {
+			stewardName := fmt.Sprintf("synth-steward-%d", i)
+			registered, err := s.framework.RegisterStewardWithController(stewardName, tenantID)
+			if err != nil {
+				return fmt.Errorf("failed to register steward %s: %w", stewardName, err)
+			}
+			registeredStewards[i] = registered
+			s.framework.logger.Info("Registered steward for monitoring",
+				"steward_id", registered.StewardID,
+				"tenant_id", tenantID)
+		}
+
+		// Monitor health over time
+		testDuration := 15 * time.Second
+		if s.framework.config.OptimizeForCI {
+			testDuration = 5 * time.Second
+		}
+		if testing.Short() {
+			testDuration = 3 * time.Second
+		}
+
+		endTime := time.Now().Add(testDuration)
+		checkInterval := 2 * time.Second
+		healthCheckResults := make([]SyntheticTestResult, 0)
+
+		for time.Now().Before(endTime) {
+			startTime := time.Now()
+
+			// Check MQTT connection health for all stewards
+			healthyCount := 0
+			disconnectedStewards := make([]string, 0)
+
+			for _, registered := range registeredStewards {
+				if registered.MQTTClient != nil && registered.MQTTClient.IsConnected() {
+					healthyCount++
+				} else {
+					disconnectedStewards = append(disconnectedStewards, registered.StewardID)
+				}
+			}
+
+			allHealthy := healthyCount == len(registeredStewards)
+			responseTime := time.Since(startTime)
+
+			result := SyntheticTestResult{
+				TestName:     "mqtt-steward-health",
+				Timestamp:    startTime,
+				Success:      allHealthy,
+				ResponseTime: responseTime,
+				Metrics: map[string]interface{}{
+					"total_stewards":        len(registeredStewards),
+					"healthy_stewards":      healthyCount,
+					"disconnected_stewards": len(disconnectedStewards),
+				},
+			}
+
+			if !allHealthy {
+				result.ErrorMessage = fmt.Sprintf("%d stewards disconnected: %v",
+					len(disconnectedStewards), disconnectedStewards)
+				s.generateAlert("warning",
+					fmt.Sprintf("MQTT stewards disconnected: %v", disconnectedStewards),
+					"mqtt-steward-health-monitoring")
+			}
+
+			healthCheckResults = append(healthCheckResults, result)
+			s.recordTestResult("mqtt-steward-health", result)
+
+			time.Sleep(checkInterval)
+		}
+
+		// Validate health check success rate
+		successCount := 0
+		for _, result := range healthCheckResults {
+			if result.Success {
+				successCount++
+			}
+		}
+
+		successRate := float64(successCount) / float64(len(healthCheckResults)) * 100
+		minSuccessRate := 90.0
+
+		if successRate < minSuccessRate {
+			return fmt.Errorf("MQTT steward health check success rate too low: %.2f%% < %.2f%%",
+				successRate, minSuccessRate)
+		}
+
+		s.framework.logger.Info("MQTT steward health monitoring completed",
+			"total_checks", len(healthCheckResults),
+			"success_rate_percent", fmt.Sprintf("%.2f", successRate),
+			"stewards_monitored", len(registeredStewards))
+
+		return nil
+	})
+
+	s.Require().NoError(err)
+}
+
 // Helper methods for synthetic monitoring
 
 func (s *SyntheticMonitoringSuite) performComponentHealthChecks() map[string]string {
 	componentHealth := make(map[string]string)
 
-	// Check controller health
+	// Check controller health (includes MQTT broker)
 	if s.framework.controller != nil {
 		componentHealth["controller"] = "healthy"
+		// MQTT broker is embedded in controller (Story #294 Phase 4)
+		componentHealth["mqtt-broker"] = "healthy"
 	} else {
 		componentHealth["controller"] = "unhealthy"
+		componentHealth["mqtt-broker"] = "unhealthy"
+	}
+
+	// Check registered stewards health via MQTT (Story #294 Phase 4)
+	registeredCount := len(s.framework.registeredStewards)
+	if registeredCount > 0 {
+		// Count healthy MQTT connections
+		healthyCount := 0
+		for _, registered := range s.framework.registeredStewards {
+			if registered.MQTTClient != nil && registered.MQTTClient.IsConnected() {
+				healthyCount++
+			}
+		}
+		if healthyCount == registeredCount {
+			componentHealth["mqtt-stewards"] = "healthy"
+		} else if healthyCount > 0 {
+			componentHealth["mqtt-stewards"] = "degraded"
+		} else {
+			componentHealth["mqtt-stewards"] = "unhealthy"
+		}
 	}
 
 	// Check certificate manager health
