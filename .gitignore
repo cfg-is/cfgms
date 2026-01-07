@@ -9,11 +9,19 @@ bin/*
 
 # Project binaries (built from cmd/ directories)
 /cfgctl
+/cfgcli
 /controller
 /steward
 
 # Test binary, built with 'go test -c'
 *.test
+
+# Compiled test binaries
+test-controller
+test-steward
+
+# Generated protobuf files in wrong location (should be in api/proto/)
+/steward/
 
 # Output of the go coverage tool
 *.out
@@ -35,12 +43,19 @@ vendor/
 *.swp
 *.swo
 
+# Docker temporary files
+.docker/
+
 # OS specific files
 .DS_Store
 Thumbs.db
 
 # Build artifacts
 dist/
+
+# Security scan results (auto-generated)
+sarif-results/
+*.sarif
 
 # Certificate files and keys (auto-generated during runtime/testing)
 certs/
@@ -52,6 +67,9 @@ certs/
 config.yaml
 *.env
 .env.local
+
+# Credentials directory
+m365-test-creds/
 
 # Claude Code local settings
 .claude/settings.local.json
