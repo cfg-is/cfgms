@@ -91,7 +91,8 @@ type E2EConfig struct {
 	MaxConcurrentTests int           `json:"max_concurrent_tests"`
 
 	// Component configuration
-	ControllerPort int  `json:"controller_port"`
+	ControllerPort int  `json:"controller_port"` // gRPC port (default 8080)
+	HTTPPort       int  `json:"http_port"`       // HTTP API port (default 9080)
 	EnableTLS      bool `json:"enable_tls"`
 	EnableRBAC     bool `json:"enable_rbac"`
 	EnableTerminal bool `json:"enable_terminal"`
@@ -531,7 +532,8 @@ func (f *E2ETestFramework) RegisterStewardWithController(stewardName, tenantID s
 	}
 
 	// Step 2: POST to /api/v1/register
-	registrationURL := fmt.Sprintf("http://localhost:%d/api/v1/register", f.config.ControllerPort)
+	// Note: HTTP API runs on separate port from gRPC (typically 9080 vs 8080)
+	registrationURL := fmt.Sprintf("http://localhost:%d/api/v1/register", f.config.HTTPPort)
 	reqBody := map[string]string{
 		"token": token,
 	}
@@ -960,7 +962,8 @@ func DefaultE2EConfig() *E2EConfig {
 		TestTimeout:        10 * time.Minute, // Generous for CI
 		ComponentStartup:   30 * time.Second, // Allow time for startup
 		MaxConcurrentTests: 2,                // Conservative for CI
-		ControllerPort:     8080,
+		ControllerPort:     8080,             // gRPC server port
+		HTTPPort:           9080,             // HTTP API server port
 		EnableTLS:          true,
 		EnableRBAC:         true,
 		EnableTerminal:     true,
