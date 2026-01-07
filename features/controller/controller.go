@@ -233,6 +233,14 @@ func (c *Controller) GetDirectoryService() directory.Service {
 	return c.directoryService
 }
 
+// GetRegistrationTokenStore returns the registration token store instance
+// Story #294 Phase 2: E2E framework needs access to create registration tokens
+func (c *Controller) GetRegistrationTokenStore() interface{} {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.server.GetRegistrationTokenStore()
+}
+
 // ModuleRegistry implementation for directory service integration
 
 // ListModules returns all available modules

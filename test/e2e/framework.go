@@ -19,6 +19,7 @@ import (
 	"github.com/cfgis/cfgms/features/workflow"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	testutil "github.com/cfgis/cfgms/pkg/testing"
 
@@ -317,6 +318,13 @@ func (f *E2ETestFramework) initializeController() error {
 				Organization: "Test Organization",
 			},
 		},
+		// Story #294 Phase 2: Enable MQTT broker for steward registration and communication
+		MQTT: &controllerConfig.MQTTConfig{
+			Enabled:        true,
+			ListenAddr:     "localhost:1883",
+			EnableTLS:      f.config.EnableTLS,
+			UseCertManager: true, // Use auto-generated certificates from cert manager
+		},
 	}
 
 	// Create storage directory
@@ -418,6 +426,49 @@ resources:
 	f.logger.Info("Created standalone steward for E2E testing", "steward_id", stewardID, "config_path", configPath)
 
 	return stwd, nil
+}
+
+// CreateRegistrationToken generates a registration token for steward registration
+// Story #294 Phase 2: Enable controller + steward registration via MQTT
+func (f *E2ETestFramework) CreateRegistrationToken(tenantID string) (string, error) {
+	if f.controller == nil {
+		return "", fmt.Errorf("controller not initialized - cannot create registration token")
+	}
+
+	// Get the registration token store from the controller
+	tokenStoreInterface := f.controller.GetRegistrationTokenStore()
+	if tokenStoreInterface == nil {
+		return "", fmt.Errorf("registration token store not available")
+	}
+
+	// Type assert to registration.Store
+	tokenStore, ok := tokenStoreInterface.(registration.Store)
+	if !ok {
+		return "", fmt.Errorf("invalid registration token store type")
+	}
+
+	// Create a new registration token
+	// Note: MQTT broker is on port 1883, not the gRPC port
+	tokenReq := &registration.TokenCreateRequest{
+		TenantID:      tenantID,
+		ControllerURL: "tcp://localhost:1883",
+		Group:         "e2e-test",
+		ExpiresIn:     "",    // Never expires for testing
+		SingleUse:     false, // Can be reused for testing
+	}
+
+	token, err := registration.CreateToken(tokenReq)
+	if err != nil {
+		return "", fmt.Errorf("failed to create registration token: %w", err)
+	}
+
+	// Save the token to the store
+	if err := tokenStore.SaveToken(context.Background(), token); err != nil {
+		return "", fmt.Errorf("failed to save registration token: %w", err)
+	}
+
+	f.logger.Info("Created registration token", "tenant_id", tenantID, "token", token.Token)
+	return token.Token, nil
 }
 
 // RunTest executes a single test scenario with metrics collection and smart retry

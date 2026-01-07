@@ -1236,9 +1236,22 @@ func (s *E2ETestSuite) TestDataFlow() {
 
 // TestSecurityCompliance tests security compliance requirements
 func (s *E2ETestSuite) TestSecurityCompliance() {
-	// Story #294 Phase 1: Basic security compliance test (Phase 2 will add MQTT+TLS validation)
+	// Story #294 Phase 2: Test MQTT broker and registration token system
 
 	err := s.framework.RunTest("security-compliance", "compliance", func() error {
+		// Story #294 Phase 2: Validate registration token generation
+		token, err := s.framework.CreateRegistrationToken("test-tenant-e2e")
+		if err != nil {
+			return fmt.Errorf("failed to create registration token: %w", err)
+		}
+
+		// Validate token format (should start with cfgms_reg_)
+		if !strings.HasPrefix(token, "cfgms_reg_") {
+			return fmt.Errorf("invalid token format: %s", token)
+		}
+
+		s.T().Logf("Phase 2 validation: Successfully created registration token: %s", token)
+
 		// Test certificate validation
 		// Test encryption in transit
 		// Test authentication flows
