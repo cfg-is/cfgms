@@ -111,6 +111,7 @@ Implemented comprehensive Docker-based E2E testing infrastructure that validates
 - [x] Create `SECURITY.md` vulnerability disclosure policy (issue #281) ✅ COMPLETED
 - [x] Re-enable and validate GitHub Actions workflows (issue #109, issue #15) ✅ COMPLETED
 - [x] E2E Test: Fix MQTT+QUIC test skips, add parallelization, reduce test-completion time (issue #297) ✅ COMPLETED
+- [ ] Update copyright to Jordan Ritz and implement Contributor License Agreement (issue #307)
 - [ ] ~~Convert repository to public and~~ activate GitHub Advanced Security features (issue #282)
 - [ ] Configure branch protection rules (issue #283)
 - [ ] Update documentation with security badges and public links (issue #284)
