@@ -210,7 +210,7 @@ jobs:
       - name: Run Security Scan
         run: |
           echo "🔒 Running security scan..."
-          make security-scan || true  # Don't fail on security warnings
+          make security-scan  # Fail on critical/high findings
 
       - name: Run Linting
         run: |
