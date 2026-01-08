@@ -388,6 +388,9 @@ func TestDebugEngine_SessionManagement(t *testing.T) {
 	err = debugEngine.StopDebugSession(session1.ID)
 	require.NoError(t, err)
 
+	// Wait for async cleanup to complete (Windows CI timing)
+	time.Sleep(100 * time.Millisecond)
+
 	// Verify session removed
 	sessions, err = debugEngine.ListDebugSessions()
 	require.NoError(t, err)
