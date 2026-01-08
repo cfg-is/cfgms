@@ -632,7 +632,7 @@ test-fast:
 	@echo "💡 Optimized for CI/CD pipelines"
 	@echo ""
 	@echo "🧪 Running unit tests..."
-	@go test -short -race -timeout=5m ./pkg/... ./features/... ./api/... ./cmd/... || exit 1
+	@CFGMS_TEST_SHORT=1 go test -short -race -timeout=5m ./pkg/... ./features/... ./api/... ./cmd/... || exit 1
 	@echo ""
 	@echo "✅ Fast comprehensive tests complete"
 

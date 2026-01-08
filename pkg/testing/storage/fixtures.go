@@ -30,7 +30,14 @@ func isInfrastructureRequired() bool {
 		return false
 	}
 
-	// CI environments
+	// Short mode explicitly requests skipping infrastructure tests
+	// This is set by -short flag (used in make test-fast)
+	// Database provider tests are covered by dedicated Docker integration job
+	if os.Getenv("CFGMS_TEST_SHORT") == "1" {
+		return false
+	}
+
+	// CI environments (but check short mode first)
 	if os.Getenv("CI") != "" || os.Getenv("GITHUB_ACTIONS") != "" {
 		return true
 	}
