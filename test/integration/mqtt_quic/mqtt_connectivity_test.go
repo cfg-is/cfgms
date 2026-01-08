@@ -5,6 +5,7 @@ package mqtt_quic
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -24,6 +25,11 @@ type MQTTConnectivityTestSuite struct {
 }
 
 func (s *MQTTConnectivityTestSuite) SetupSuite() {
+	// Skip if running in short/fast mode - requires MQTT broker infrastructure
+	if os.Getenv("CFGMS_TEST_SHORT") == "1" {
+		s.T().Skip("Skipping MQTT connectivity tests in short mode - requires MQTT broker")
+	}
+
 	s.helper = NewTestHelper(GetTestHTTPAddr("http://127.0.0.1:8080"))
 	s.mqttAddr = GetTestMQTTAddr("ssl://127.0.0.1:1886") // Docker controller MQTT broker port with TLS
 }

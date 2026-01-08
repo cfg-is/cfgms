@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -33,6 +34,11 @@ type MultiTenantTestSuite struct {
 }
 
 func (s *MultiTenantTestSuite) SetupSuite() {
+	// Skip if running in short/fast mode - requires MQTT broker and controller infrastructure
+	if os.Getenv("CFGMS_TEST_SHORT") == "1" {
+		s.T().Skip("Skipping multi-tenant tests in short mode - requires infrastructure")
+	}
+
 	// Connect to Docker controller
 	s.helper = NewTestHelper(GetTestHTTPAddr("http://localhost:9080"))
 	s.tenantClients = make(map[string]mqtt.Client)
