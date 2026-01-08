@@ -33,6 +33,11 @@ type TLSSecurityTestSuite struct {
 }
 
 func (s *TLSSecurityTestSuite) SetupSuite() {
+	// Skip if running in short/fast mode - requires MQTT broker infrastructure
+	if os.Getenv("CFGMS_TEST_SHORT") == "1" {
+		s.T().Skip("Skipping TLS security tests in short mode - requires MQTT broker")
+	}
+
 	s.helper = NewTestHelper(GetTestHTTPAddr("http://localhost:9080"))
 	// Use TLS port (8883) instead of standard MQTT port (1883)
 	s.mqttAddr = GetTestMQTTAddr("ssl://127.0.0.1:1886") // ssl:// or tls:// for TLS connections

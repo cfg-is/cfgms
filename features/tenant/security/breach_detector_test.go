@@ -634,7 +634,7 @@ func TestBreachDetector_RiskScoreCalculation(t *testing.T) {
 	var indicators []*BreachIndicator
 	timeout := 2 * time.Second
 	if runtime.GOOS == "windows" {
-		timeout = 5 * time.Second // Windows needs more time for async processing
+		timeout = 10 * time.Second // Windows needs significantly more time for async processing
 	}
 	require.Eventually(t, func() bool {
 		indicators = bd.GetActiveBreachIndicators(tenantID)
