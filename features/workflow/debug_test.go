@@ -362,6 +362,9 @@ func TestDebugEngine_SessionManagement(t *testing.T) {
 	execution2, err := engine.ExecuteWorkflow(ctx, workflow, map[string]interface{}{})
 	require.NoError(t, err)
 
+	// Wait for workflows to initialize (Windows CI timing)
+	time.Sleep(100 * time.Millisecond)
+
 	// Start debug sessions
 	settings := DebugSettings{MaxHistorySize: 100}
 	session1, err := debugEngine.StartDebugSession(ctx, execution1.ID, settings)
@@ -421,6 +424,9 @@ func TestDebugEngine_SessionManagement(t *testing.T) {
 
 	err = debugEngine.StopDebugSession("nonexistent")
 	assert.Error(t, err)
+
+	// Final wait for all async goroutines to complete logging (Windows CI timing)
+	time.Sleep(100 * time.Millisecond)
 }
 
 func TestDebugEngine_SecurityAndTenantIsolation(t *testing.T) {
