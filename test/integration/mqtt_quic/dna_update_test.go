@@ -5,6 +5,7 @@ package mqtt_quic
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -22,6 +23,11 @@ type DNAUpdateTestSuite struct {
 }
 
 func (s *DNAUpdateTestSuite) SetupSuite() {
+	// Skip if running in short/fast mode - requires MQTT broker infrastructure
+	if os.Getenv("CFGMS_TEST_SHORT") == "1" {
+		s.T().Skip("Skipping DNA update tests in short mode - requires MQTT broker")
+	}
+
 	s.helper = NewTestHelper(GetTestHTTPAddr("http://127.0.0.1:8080"))
 	s.mqttAddr = GetTestMQTTAddr("tcp://127.0.0.1:1886")
 }

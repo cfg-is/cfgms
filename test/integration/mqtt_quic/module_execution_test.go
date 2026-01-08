@@ -5,6 +5,7 @@ package mqtt_quic
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -27,6 +28,11 @@ type ModuleExecutionTestSuite struct {
 }
 
 func (s *ModuleExecutionTestSuite) SetupSuite() {
+	// Skip if running in short/fast mode - requires MQTT broker and controller infrastructure
+	if os.Getenv("CFGMS_TEST_SHORT") == "1" {
+		s.T().Skip("Skipping module execution tests in short mode - requires infrastructure")
+	}
+
 	s.helper = NewModuleTestHelper(
 		GetTestHTTPAddr("http://localhost:9080"),
 		GetTestMQTTAddr("tcp://127.0.0.1:1886"),
