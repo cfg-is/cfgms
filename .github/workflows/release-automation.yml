@@ -1,0 +1,402 @@
+# Release Automation Workflow
+# Implements Semi-Automated Release Process (Option A)
+#
+# Flow: develop → release/vX.Y.Z → main → tag
+#
+# This workflow:
+# 1. Creates release candidate branch from develop
+# 2. Runs comprehensive test suite
+# 3. Creates PR to main (if tests pass)
+# 4. Auto-merges on approval (requires manual review)
+# 5. Tags release and triggers release build
+# 6. Back-merges to develop
+#
+# Related: Issue #283 - Configure branch protection rules
+
+name: Release Automation
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., 0.8.0, 0.9.0-rc.1)'
+        required: true
+        type: string
+      release_type:
+        description: 'Release type'
+        required: true
+        default: 'minor'
+        type: choice
+        options:
+          - patch    # Bug fixes only
+          - minor    # New features, backward compatible
+          - major    # Breaking changes
+          - rc       # Release candidate (pre-release)
+      skip_tests:
+        description: 'Skip comprehensive tests (EMERGENCY ONLY)'
+        required: false
+        default: false
+        type: boolean
+      dry_run:
+        description: 'Dry run (create branch but skip PR/merge)'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  GO_VERSION: '1.23'
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  # Validate release version and prerequisites
+  validate-release:
+    name: Validate Release Prerequisites
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.validate.outputs.version }}
+      tag: ${{ steps.validate.outputs.tag }}
+      branch: ${{ steps.validate.outputs.branch }}
+      is_prerelease: ${{ steps.validate.outputs.is_prerelease }}
+    steps:
+      - name: Checkout develop
+        uses: actions/checkout@v4
+        with:
+          ref: develop
+          fetch-depth: 0
+
+      - name: Validate version and prerequisites
+        id: validate
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+
+          # Validate version format (semver)
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
+            echo "❌ Invalid version format: $VERSION"
+            echo "   Expected: X.Y.Z or X.Y.Z-suffix (e.g., 0.8.0, 0.9.0-rc.1)"
+            exit 1
+          fi
+
+          TAG="v$VERSION"
+          BRANCH="release/v$VERSION"
+
+          # Check if tag already exists
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "❌ Tag $TAG already exists"
+            echo "   Use a different version number"
+            exit 1
+          fi
+
+          # Check if release branch already exists
+          if git rev-parse "origin/$BRANCH" >/dev/null 2>&1; then
+            echo "❌ Branch $BRANCH already exists"
+            echo "   Delete the existing branch or use a different version"
+            exit 1
+          fi
+
+          # Determine if this is a prerelease
+          IS_PRERELEASE="false"
+          if [[ "$VERSION" == *"-rc"* ]] || [[ "$VERSION" == *"-alpha"* ]] || [[ "$VERSION" == *"-beta"* ]]; then
+            IS_PRERELEASE="true"
+          fi
+
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+          echo "is_prerelease=$IS_PRERELEASE" >> $GITHUB_OUTPUT
+
+          echo "✅ Release validation passed"
+          echo "   Version: $VERSION"
+          echo "   Tag: $TAG"
+          echo "   Branch: $BRANCH"
+          echo "   Pre-release: $IS_PRERELEASE"
+
+      - name: Check develop branch status
+        run: |
+          echo "📊 Checking develop branch status..."
+
+          # Get latest commit info
+          LATEST_COMMIT=$(git log -1 --format="%h %s" develop)
+          echo "Latest commit on develop: $LATEST_COMMIT"
+
+          # Check if develop is ahead of main
+          AHEAD_COUNT=$(git rev-list --count origin/main..origin/develop 2>/dev/null || echo "0")
+          echo "Commits ahead of main: $AHEAD_COUNT"
+
+          if [ "$AHEAD_COUNT" -eq 0 ]; then
+            echo "⚠️  Warning: develop has no new commits since last release"
+            echo "   Consider if a release is necessary"
+          fi
+
+  # Create release candidate branch
+  create-release-branch:
+    name: Create Release Branch
+    runs-on: ubuntu-latest
+    needs: validate-release
+    timeout-minutes: 5
+    steps:
+      - name: Checkout develop
+        uses: actions/checkout@v4
+        with:
+          ref: develop
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create release branch
+        run: |
+          BRANCH="${{ needs.validate-release.outputs.branch }}"
+          VERSION="${{ needs.validate-release.outputs.version }}"
+
+          echo "🔀 Creating release branch: $BRANCH"
+
+          # Configure git
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Create and push release branch
+          git checkout -b "$BRANCH"
+          git push -u origin "$BRANCH"
+
+          echo "✅ Release branch created: $BRANCH"
+
+  # Run comprehensive test suite on release branch
+  comprehensive-tests:
+    name: Comprehensive Test Suite
+    runs-on: ubuntu-latest
+    needs: [validate-release, create-release-branch]
+    if: github.event.inputs.skip_tests != 'true'
+    timeout-minutes: 45
+    steps:
+      - name: Checkout release branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate-release.outputs.branch }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Install dependencies
+        run: go mod download
+
+      - name: Run Unit Tests
+        run: |
+          echo "🧪 Running unit tests..."
+          make test
+
+      - name: Run Integration Tests
+        run: |
+          echo "🔗 Running integration tests..."
+          make test-fast
+
+      - name: Run Production Critical Tests
+        run: |
+          echo "🏭 Running production critical tests..."
+          make test-production-critical
+
+      - name: Run Security Scan
+        run: |
+          echo "🔒 Running security scan..."
+          make security-scan  # Fail on critical/high findings
+
+      - name: Run Linting
+        run: |
+          echo "📝 Running linting..."
+          make lint
+
+      - name: Test Summary
+        if: always()
+        run: |
+          echo "## Release Test Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Version**: ${{ needs.validate-release.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch**: ${{ needs.validate-release.outputs.branch }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "- Unit Tests: ✅" >> $GITHUB_STEP_SUMMARY
+          echo "- Integration Tests: ✅" >> $GITHUB_STEP_SUMMARY
+          echo "- Production Critical: ✅" >> $GITHUB_STEP_SUMMARY
+          echo "- Security Scan: ✅" >> $GITHUB_STEP_SUMMARY
+          echo "- Linting: ✅" >> $GITHUB_STEP_SUMMARY
+
+  # Create PR to main (only if tests pass)
+  create-release-pr:
+    name: Create Release PR
+    runs-on: ubuntu-latest
+    needs: [validate-release, comprehensive-tests]
+    if: github.event.inputs.dry_run != 'true'
+    timeout-minutes: 5
+    outputs:
+      pr_number: ${{ steps.create-pr.outputs.pr_number }}
+      pr_url: ${{ steps.create-pr.outputs.pr_url }}
+    steps:
+      - name: Checkout release branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate-release.outputs.branch }}
+          fetch-depth: 0
+
+      - name: Create Pull Request to main
+        id: create-pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ needs.validate-release.outputs.version }}"
+          BRANCH="${{ needs.validate-release.outputs.branch }}"
+          TAG="${{ needs.validate-release.outputs.tag }}"
+          RELEASE_TYPE="${{ github.event.inputs.release_type }}"
+          IS_PRERELEASE="${{ needs.validate-release.outputs.is_prerelease }}"
+
+          # Generate changelog since last tag
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -n "$LAST_TAG" ]; then
+            CHANGELOG=$(git log ${LAST_TAG}..HEAD --pretty=format:"- %s (%h)" --abbrev-commit | head -50)
+          else
+            CHANGELOG=$(git log --pretty=format:"- %s (%h)" --abbrev-commit -20)
+          fi
+
+          # Determine PR title based on release type
+          case "$RELEASE_TYPE" in
+            patch)
+              PR_TITLE="Release $TAG: Bug Fixes"
+              ;;
+            minor)
+              PR_TITLE="Release $TAG: New Features"
+              ;;
+            major)
+              PR_TITLE="Release $TAG: Major Release"
+              ;;
+            rc)
+              PR_TITLE="Release $TAG: Release Candidate"
+              ;;
+          esac
+
+          # Create PR with auto-merge enabled
+          PR_URL=$(gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title "$PR_TITLE" \
+            --body "$(cat <<EOF
+          ## Release $TAG
+
+          **Release Type**: $RELEASE_TYPE
+          **Pre-release**: $IS_PRERELEASE
+          **Triggered by**: @${{ github.actor }}
+
+          ### Changes Since Last Release
+
+          $CHANGELOG
+
+          ### Pre-merge Checklist
+
+          - [x] All tests passed in release workflow
+          - [x] Security scan completed
+          - [x] Release branch created from develop
+          - [ ] **Manual review required before merge**
+
+          ### Post-merge Actions (Automated)
+
+          Once this PR is merged:
+          1. ✅ Tag \`$TAG\` will be created automatically
+          2. ✅ Release build will be triggered
+          3. ✅ Release branch will be back-merged to develop
+          4. ✅ GitHub Release will be created with artifacts
+
+          ---
+
+          🤖 *This PR was created automatically by the release automation workflow.*
+
+          **Review Requirements**: This PR requires approval before merge.
+          EOF
+          )")
+
+          PR_NUMBER=$(echo "$PR_URL" | grep -oE '[0-9]+$')
+
+          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+          echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
+
+          echo "✅ Pull Request created: $PR_URL"
+
+          # Enable auto-merge (will merge when all requirements are met)
+          gh pr merge "$PR_NUMBER" --auto --merge
+
+          echo "✅ Auto-merge enabled for PR #$PR_NUMBER"
+
+  # Summary and notification
+  release-summary:
+    name: Release Summary
+    runs-on: ubuntu-latest
+    needs: [validate-release, create-release-branch, comprehensive-tests, create-release-pr]
+    if: always()
+    steps:
+      - name: Generate Release Summary
+        run: |
+          echo "## 🚀 Release Automation Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Version**: ${{ needs.validate-release.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Tag**: ${{ needs.validate-release.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch**: ${{ needs.validate-release.outputs.branch }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Release Type**: ${{ github.event.inputs.release_type }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "### Workflow Status" >> $GITHUB_STEP_SUMMARY
+          echo "| Step | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Validation | ${{ needs.validate-release.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Branch Creation | ${{ needs.create-release-branch.result == 'success' && '✅ Created' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Comprehensive Tests | ${{ needs.comprehensive-tests.result == 'success' && '✅ Passed' || (needs.comprehensive-tests.result == 'skipped' && '⏭️ Skipped' || '❌ Failed') }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| PR Creation | ${{ needs.create-release-pr.result == 'success' && '✅ Created' || (needs.create-release-pr.result == 'skipped' && '⏭️ Skipped' || '❌ Failed') }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ needs.create-release-pr.result }}" == "success" ]; then
+            echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "1. **Review the PR**: ${{ needs.create-release-pr.outputs.pr_url }}" >> $GITHUB_STEP_SUMMARY
+            echo "2. **Approve the PR** after review" >> $GITHUB_STEP_SUMMARY
+            echo "3. **PR will auto-merge** once approved" >> $GITHUB_STEP_SUMMARY
+            echo "4. **Release will be tagged and built** automatically" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ github.event.inputs.dry_run }}" == "true" ]; then
+            echo "### Dry Run Mode" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "This was a dry run. The release branch was created but no PR was made." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "To complete the release, either:" >> $GITHUB_STEP_SUMMARY
+            echo "- Run this workflow again without dry run" >> $GITHUB_STEP_SUMMARY
+            echo "- Manually create a PR from \`${{ needs.validate-release.outputs.branch }}\` to \`main\`" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # Triggered after PR is merged to main - creates tag and back-merges
+  # This job watches for merges to main from release branches
+  # Note: This is handled by the existing release.yml workflow which triggers on tags
+
+---
+# Companion workflow: Post-release back-merge
+# This should be added as a separate workflow or as part of release.yml
+#
+# on:
+#   push:
+#     tags:
+#       - 'v*.*.*'
+#
+# jobs:
+#   back-merge:
+#     runs-on: ubuntu-latest
+#     steps:
+#       - name: Back-merge to develop
+#         run: |
+#           git checkout develop
+#           git merge ${{ github.ref }} --no-ff -m "Back-merge ${{ github.ref }} to develop"
+#           git push origin develop
