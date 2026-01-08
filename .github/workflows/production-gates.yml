@@ -13,8 +13,9 @@ on:
       - '.editorconfig'
   push:
     branches:
-      - main  # ALWAYS run on main (no path filter)
-      - develop  # ALWAYS run on develop (no path filter)
+      - main  # Run on main for production deployment validation
+      - develop  # Run on develop ONLY for production-readiness-validation (load testing, benchmarks)
+      # NOTE: security-deployment-gate is redundant (already runs on PR), but kept for production-readiness-validation
   workflow_dispatch:
     inputs:
       gate_type:
@@ -38,9 +39,11 @@ on:
 
 jobs:
   # Security Gate - Critical Vulnerability Blocking (Story #99)
+  # NOTE: Runs on PRs and push to main only (skips post-merge to develop to avoid redundancy)
   security-deployment-gate:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     outputs:
       security-status: ${{ steps.security-gate.outputs.security-status }}
       deployment-allowed: ${{ steps.security-gate.outputs.deployment-allowed }}
