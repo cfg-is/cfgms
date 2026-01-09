@@ -3,6 +3,7 @@
 package mqtt_quic
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -18,8 +19,10 @@ import (
 // AC4: Configuration sync test (controller pushes config, steward receives and applies)
 type ConfigSyncTestSuite struct {
 	suite.Suite
-	helper   *TestHelper
-	mqttAddr string
+	helper    *TestHelper
+	mqttAddr  string
+	tlsConfig *tls.Config
+	stewardID string
 }
 
 func (s *ConfigSyncTestSuite) SetupSuite() {
@@ -28,24 +31,28 @@ func (s *ConfigSyncTestSuite) SetupSuite() {
 		s.T().Skip("Skipping config sync tests in short mode - requires MQTT broker")
 	}
 
-	s.helper = NewTestHelper(GetTestHTTPAddr("http://127.0.0.1:8080"))
-	s.mqttAddr = GetTestMQTTAddr("tcp://127.0.0.1:1886")
+	s.helper = NewTestHelper(GetTestHTTPAddr("https://127.0.0.1:8080"))
+	s.mqttAddr = GetTestMQTTAddr("ssl://127.0.0.1:1886") // Use TLS
+
+	// Get TLS config from registration API (required for mTLS)
+	s.tlsConfig, s.stewardID = s.helper.GetTLSConfigFromRegistration(s.T(), "default", "integration-test")
+}
+
+// createMQTTClient creates an MQTT client with TLS config
+func (s *ConfigSyncTestSuite) createMQTTClient(clientID string) mqtt.Client {
+	opts := CreateMQTTClientOptions(s.mqttAddr, clientID, s.tlsConfig)
+	return mqtt.NewClient(opts)
 }
 
 // TestConfigSyncCommand tests config sync command delivery and status reporting
 // AC4: Controller pushes config, steward receives AND APPLIES (validated via status report)
 func (s *ConfigSyncTestSuite) TestConfigSyncCommand() {
-	stewardID := "test-steward-config-sync"
+	stewardID := fmt.Sprintf("test-steward-config-sync-%d", time.Now().UnixNano())
 	commandTopic := fmt.Sprintf("cfgms/steward/%s/commands", stewardID)
 	statusTopic := fmt.Sprintf("cfgms/steward/%s/status", stewardID)
 
-	// Create steward MQTT client
-	opts := mqtt.NewClientOptions()
-	opts.AddBroker(s.mqttAddr)
-	opts.SetClientID(stewardID)
-	opts.SetConnectTimeout(10 * time.Second)
-
-	client := mqtt.NewClient(opts)
+	// Create steward MQTT client with TLS
+	client := s.createMQTTClient(stewardID)
 	token := client.Connect()
 	s.True(token.WaitTimeout(10 * time.Second))
 	s.NoError(token.Error())
@@ -212,16 +219,11 @@ func (s *ConfigSyncTestSuite) TestLargeConfigPayload() {
 
 // TestConfigStatusReport tests status reporting after config application
 func (s *ConfigSyncTestSuite) TestConfigStatusReport() {
-	stewardID := "test-steward-status"
+	stewardID := fmt.Sprintf("test-steward-status-%d", time.Now().UnixNano())
 	statusTopic := fmt.Sprintf("cfgms/steward/%s/status", stewardID)
 
-	// Create client
-	opts := mqtt.NewClientOptions()
-	opts.AddBroker(s.mqttAddr)
-	opts.SetClientID(stewardID)
-	opts.SetConnectTimeout(10 * time.Second)
-
-	client := mqtt.NewClient(opts)
+	// Create client with TLS
+	client := s.createMQTTClient(stewardID)
 	token := client.Connect()
 	s.True(token.WaitTimeout(10 * time.Second))
 	s.NoError(token.Error())

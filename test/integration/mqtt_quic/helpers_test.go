@@ -355,3 +355,20 @@ func (h *TestHelper) GetTLSConfigFromRegistration(t *testing.T, tenantID, group 
 
 	return tlsConfig, resp.StewardID
 }
+
+// CreateMQTTClientWithTLS creates an MQTT client with TLS config from registration API
+// This is a convenience method for tests that need MQTT connectivity with valid certificates
+func (h *TestHelper) CreateMQTTClientWithTLS(t *testing.T, mqttAddr, clientIDPrefix string) (mqtt.Client, string) {
+	t.Helper()
+
+	// Get TLS config from registration API
+	tlsConfig, stewardID := h.GetTLSConfigFromRegistration(t, "default", "integration-test")
+
+	// Create MQTT client options
+	clientID := fmt.Sprintf("%s-%s", clientIDPrefix, stewardID)
+	opts := CreateMQTTClientOptions(mqttAddr, clientID, tlsConfig)
+
+	// Create and return client
+	client := mqtt.NewClient(opts)
+	return client, stewardID
+}

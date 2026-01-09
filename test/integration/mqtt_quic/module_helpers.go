@@ -5,6 +5,7 @@ package mqtt_quic
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -55,13 +56,10 @@ func NewModuleTestHelper(baseURL, mqttAddr string) *ModuleTestHelper {
 }
 
 // ConnectMQTT establishes an MQTT connection for message monitoring
-func (h *ModuleTestHelper) ConnectMQTT(t *testing.T, clientID string) {
+func (h *ModuleTestHelper) ConnectMQTT(t *testing.T, clientID string, tlsConfig *tls.Config) {
 	t.Helper()
 
-	opts := mqtt.NewClientOptions()
-	opts.AddBroker(h.mqttAddr)
-	opts.SetClientID(clientID)
-	opts.SetConnectTimeout(10 * time.Second)
+	opts := CreateMQTTClientOptions(h.mqttAddr, clientID, tlsConfig)
 	opts.SetKeepAlive(30 * time.Second)
 	opts.SetAutoReconnect(true)
 
