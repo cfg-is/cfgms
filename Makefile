@@ -1652,18 +1652,49 @@ test-e2e-scenarios:
 	fi
 	@echo "✅ E2E scenario tests passed"
 
+# Fast E2E validation (excludes long-running performance/scale tests)
+# Use this for story completion validation - performance tests run separately
+test-e2e-fast:
+	@echo ""
+	@echo "⚡ FAST E2E VALIDATION"
+	@echo "======================"
+	@echo "Running 2 core test suites in parallel:"
+	@echo "  1️⃣  MQTT+QUIC integration tests"
+	@echo "  2️⃣  Controller E2E tests"
+	@echo ""
+	@echo "⏱️  Expected runtime: ~3-5 minutes"
+	@echo "⚠️  Excludes long-running performance/scale tests (use test-e2e-parallel for full validation)"
+	@echo ""
+	@$(MAKE) test-mqtt-quic-setup
+	@echo ""
+	@$(MAKE) -j2 test-e2e-mqtt-quic test-e2e-controller || { \
+		echo ""; \
+		echo "❌ One or more E2E test suites failed"; \
+		$(MAKE) test-mqtt-quic-cleanup; \
+		exit 1; \
+	}
+	@echo ""
+	@$(MAKE) test-mqtt-quic-cleanup
+	@echo ""
+	@echo "✅ FAST E2E VALIDATION PASSED"
+	@echo "=============================="
+	@echo "- ✅ MQTT+QUIC integration tests"
+	@echo "- ✅ Controller Docker E2E tests"
+	@echo ""
+	@echo "🎯 Core E2E validation complete - ready for PR"
+
 # Parallel E2E execution (Story #297 Phase 2)
-# Runs all E2E test suites in parallel for faster feedback
+# Runs all E2E test suites in parallel including long-running performance tests
 test-e2e-parallel:
 	@echo ""
-	@echo "⚡ PARALLEL E2E VALIDATION"
-	@echo "=========================="
+	@echo "⚡ PARALLEL E2E VALIDATION (FULL)"
+	@echo "=================================="
 	@echo "Running 3 test suites in parallel:"
 	@echo "  1️⃣  MQTT+QUIC integration tests"
 	@echo "  2️⃣  Controller E2E tests"
-	@echo "  3️⃣  Comprehensive E2E scenarios"
+	@echo "  3️⃣  Comprehensive E2E scenarios (performance/scale - may take 45min+)"
 	@echo ""
-	@echo "⏱️  Expected runtime: ~3-5 minutes (53% faster than sequential)"
+	@echo "⏱️  Expected runtime: ~45-60 minutes (includes long-running tests)"
 	@echo ""
 	@$(MAKE) test-mqtt-quic-setup
 	@echo ""
@@ -1717,10 +1748,11 @@ test-e2e-local:
 	@echo "🎯 Full E2E validation complete - ready for PR"
 
 # Story completion validation - comprehensive validation for /story-complete
-# Includes all commit validation PLUS full E2E testing with Docker infrastructure
-# Story #297: Now uses parallel execution for 53% faster feedback (3-5min vs 8-10min)
+# Includes all commit validation PLUS fast E2E testing (excludes long-running perf tests)
+# Story #297: Uses parallel execution for 53% faster feedback
+# Issue #315: Performance/scale tests run separately to avoid blocking story completion
 .PHONY: test-complete
-test-complete: test-commit test-e2e-parallel
+test-complete: test-commit test-e2e-fast
 	@echo ""
 	@echo "✅ STORY COMPLETION VALIDATION FINISHED"
 	@echo "========================================"
@@ -1730,9 +1762,10 @@ test-complete: test-commit test-e2e-parallel
 	@echo "- ✅ Secret scanning passed"
 	@echo "- ✅ Architecture compliance passed"
 	@echo "- ✅ Security scanning passed"
-	@echo "- ✅ E2E tests passed (MQTT+QUIC + Docker + Scenarios - PARALLEL)"
+	@echo "- ✅ Fast E2E tests passed (MQTT+QUIC + Controller - PARALLEL)"
 	@echo ""
-	@echo "⚡ Parallel execution: ~53% faster than sequential (Story #297)"
+	@echo "⚡ Fast validation: ~5-8 minutes (excludes 45min+ performance tests)"
+	@echo "ℹ️  Performance tests run in CI separately (use 'make test-e2e-parallel' for full local validation)"
 	@echo "🎯 Story validated and ready for PR creation"
 	@echo ""
 
