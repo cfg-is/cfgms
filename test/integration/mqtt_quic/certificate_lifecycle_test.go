@@ -27,7 +27,7 @@ func (s *CertificateLifecycleTestSuite) SetupSuite() {
 		s.T().Skip("Skipping certificate lifecycle tests in short mode")
 	}
 
-	s.helper = NewTestHelper(GetTestHTTPAddr("https://127.0.0.1:9080"))
+	s.helper = NewTestHelper(GetTestHTTPAddr("http://127.0.0.1:8080"))
 }
 
 // Test01_FirstBoot_GeneratesCA verifies CA generation on first boot
