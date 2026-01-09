@@ -40,18 +40,7 @@ func (s *TLSSecurityTestSuite) SetupSuite() {
 		s.T().Skip("Skipping TLS security tests in short mode - requires MQTT broker")
 	}
 
-	if os.Getenv("CFGMS_TEST_INTEGRATION") != "1" {
-		s.T().Skip("Skipping TLS security tests - CFGMS_TEST_INTEGRATION not set")
-	}
-
-	// Story #294 Phase 5: Verify controller CA exists
-	// The certificate_lifecycle_test.go suite MUST run first to create CA
-	cmd := exec.Command("docker", "exec", "controller-standalone", "test", "-f", "/app/certs/ca/ca.crt")
-	if err := cmd.Run(); err != nil {
-		s.T().Skip("Controller CA not found - run TestCertificateLifecycle first")
-	}
-
-	s.helper = NewTestHelper(GetTestHTTPAddr("http://127.0.0.1:8080"))
+	s.helper = NewTestHelper(GetTestHTTPAddr("https://127.0.0.1:9080"))
 	// Use TLS port (8883) mapped to host port 1886
 	s.mqttAddr = GetTestMQTTAddr("ssl://127.0.0.1:1886")
 	s.certsPath = GetTestCertsPath("./certs")
