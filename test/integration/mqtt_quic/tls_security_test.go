@@ -7,7 +7,6 @@ import (
 	"crypto/x509"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
