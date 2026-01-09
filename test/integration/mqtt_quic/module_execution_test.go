@@ -27,9 +27,9 @@ import (
 // AC6: Module failures reported correctly via MQTT status topic
 type ModuleExecutionTestSuite struct {
 	suite.Suite
-	helper    *ModuleTestHelper
-	tlsConfig *tls.Config
-	stewardID string
+	helper     *ModuleTestHelper
+	tlsConfig  *tls.Config
+	stewardID  string
 	testHelper *TestHelper
 }
 
