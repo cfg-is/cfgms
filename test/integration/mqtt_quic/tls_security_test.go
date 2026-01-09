@@ -189,7 +189,9 @@ func (s *TLSSecurityTestSuite) generateInvalidCertificates() {
 	s.T().Log("Generating invalid certificates for negative testing...")
 
 	// Call the script to generate invalid certs
-	cmd := exec.Command("bash", "scripts/generate-invalid-test-certs.sh", s.certsPath)
+	// Path is relative to project root (test runs from project root via go test)
+	scriptPath := filepath.Join("..", "..", "..", "scripts", "generate-invalid-test-certs.sh")
+	cmd := exec.Command("bash", scriptPath, s.certsPath)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		s.T().Logf("Script output: %s", output)
@@ -208,8 +210,8 @@ func (s *TLSSecurityTestSuite) generateInvalidCertificates() {
 func (s *TLSSecurityTestSuite) TestTLSConnectionEstablishment() {
 	s.T().Log("AC1: Testing TLS connection establishment with TLS 1.2+ enforcement")
 
-	// Load valid TLS configuration
-	tlsConfig := LoadTLSConfig(s.T(), s.certsPath)
+	// Get TLS config from registration API (Story #294: production certificate flow)
+	tlsConfig, stewardID := s.helper.GetTLSConfigFromRegistration(s.T(), "default", "integration-test")
 	s.NotNil(tlsConfig, "TLS config should be loaded successfully")
 
 	// Verify TLS version is at least 1.2
@@ -219,7 +221,7 @@ func (s *TLSSecurityTestSuite) TestTLSConnectionEstablishment() {
 	// Create MQTT client with TLS
 	opts := CreateMQTTClientOptions(
 		s.mqttAddr,
-		fmt.Sprintf("test-tls-client-%d", time.Now().UnixNano()),
+		stewardID,
 		tlsConfig,
 	)
 
@@ -243,7 +245,7 @@ func (s *TLSSecurityTestSuite) TestTLSConnectionEstablishment() {
 func (s *TLSSecurityTestSuite) TestTLSVersionEnforcement() {
 	s.T().Log("AC1: Testing TLS version enforcement (TLS 1.2+ required)")
 
-	tlsConfig := LoadTLSConfig(s.T(), s.certsPath)
+	tlsConfig, stewardID := s.helper.GetTLSConfigFromRegistration(s.T(), "default", "integration-test")
 
 	// Verify broker enforces TLS 1.2+
 	s.GreaterOrEqual(tlsConfig.MinVersion, uint16(tls.VersionTLS12),
@@ -252,7 +254,7 @@ func (s *TLSSecurityTestSuite) TestTLSVersionEnforcement() {
 	// Create client with TLS 1.2
 	opts := CreateMQTTClientOptions(
 		s.mqttAddr,
-		fmt.Sprintf("test-tls12-%d", time.Now().UnixNano()),
+		stewardID,
 		tlsConfig,
 	)
 
@@ -271,12 +273,12 @@ func (s *TLSSecurityTestSuite) TestTLSVersionEnforcement() {
 func (s *TLSSecurityTestSuite) TestTLSCipherSuites() {
 	s.T().Log("AC1: Testing secure cipher suite configuration")
 
-	tlsConfig := LoadTLSConfig(s.T(), s.certsPath)
+	tlsConfig, stewardID := s.helper.GetTLSConfigFromRegistration(s.T(), "default", "integration-test")
 
 	// Connect and verify connection uses secure cipher
 	opts := CreateMQTTClientOptions(
 		s.mqttAddr,
-		fmt.Sprintf("test-cipher-%d", time.Now().UnixNano()),
+		stewardID,
 		tlsConfig,
 	)
 
@@ -300,10 +302,10 @@ func (s *TLSSecurityTestSuite) TestTLSCipherSuites() {
 func (s *TLSSecurityTestSuite) TestValidCertificateAccepted() {
 	s.T().Log("AC2: Testing valid certificate acceptance")
 
-	tlsConfig := LoadTLSConfig(s.T(), s.certsPath)
+	tlsConfig, stewardID := s.helper.GetTLSConfigFromRegistration(s.T(), "default", "integration-test")
 	opts := CreateMQTTClientOptions(
 		s.mqttAddr,
-		fmt.Sprintf("test-valid-cert-%d", time.Now().UnixNano()),
+		stewardID,
 		tlsConfig,
 	)
 
@@ -413,10 +415,10 @@ func (s *TLSSecurityTestSuite) TestCertificateExpirationHandling() {
 	s.T().Log("AC3: Testing certificate expiration handling")
 
 	// Valid certificate should connect
-	tlsConfig := LoadTLSConfig(s.T(), s.certsPath)
+	tlsConfig, stewardID := s.helper.GetTLSConfigFromRegistration(s.T(), "default", "integration-test")
 	opts := CreateMQTTClientOptions(
 		s.mqttAddr,
-		fmt.Sprintf("test-cert-expiry-%d", time.Now().UnixNano()),
+		stewardID,
 		tlsConfig,
 	)
 
@@ -445,12 +447,12 @@ func (s *TLSSecurityTestSuite) TestMTLSMutualAuthentication() {
 	s.T().Log("AC4: Testing mTLS mutual authentication (client cert required)")
 
 	// Load TLS config with client certificate
-	tlsConfig := LoadTLSConfig(s.T(), s.certsPath)
+	tlsConfig, stewardID := s.helper.GetTLSConfigFromRegistration(s.T(), "default", "integration-test")
 	s.NotEmpty(tlsConfig.Certificates, "Client certificate should be present")
 
 	opts := CreateMQTTClientOptions(
 		s.mqttAddr,
-		fmt.Sprintf("test-mtls-%d", time.Now().UnixNano()),
+		stewardID,
 		tlsConfig,
 	)
 
@@ -535,12 +537,12 @@ func (s *TLSSecurityTestSuite) TestMTLSCertificateValidation() {
 func (s *TLSSecurityTestSuite) TestTLSRegressionBasicMessaging() {
 	s.T().Log("AC5: Testing regression - basic MQTT messaging over TLS")
 
-	tlsConfig := LoadTLSConfig(s.T(), s.certsPath)
+	tlsConfig, stewardID := s.helper.GetTLSConfigFromRegistration(s.T(), "default", "integration-test")
 
 	// Create steward client
 	stewardOpts := CreateMQTTClientOptions(
 		s.mqttAddr,
-		fmt.Sprintf("test-steward-%d", time.Now().UnixNano()),
+		stewardID,
 		tlsConfig,
 	)
 
@@ -580,10 +582,10 @@ func (s *TLSSecurityTestSuite) TestTLSRegressionBasicMessaging() {
 func (s *TLSSecurityTestSuite) TestTLSRegressionQoSLevels() {
 	s.T().Log("AC5: Testing regression - QoS levels over TLS")
 
-	tlsConfig := LoadTLSConfig(s.T(), s.certsPath)
+	tlsConfig, stewardID := s.helper.GetTLSConfigFromRegistration(s.T(), "default", "integration-test")
 	opts := CreateMQTTClientOptions(
 		s.mqttAddr,
-		fmt.Sprintf("test-qos-tls-%d", time.Now().UnixNano()),
+		stewardID,
 		tlsConfig,
 	)
 
@@ -636,10 +638,10 @@ func (s *TLSSecurityTestSuite) TestCertificateRotationConcept() {
 	s.T().Log("AC6: Testing certificate rotation concept")
 
 	// Test 1: Verify current certificates work
-	tlsConfig1 := LoadTLSConfig(s.T(), s.certsPath)
+	tlsConfig1, stewardID1 := s.helper.GetTLSConfigFromRegistration(s.T(), "default", "integration-test")
 	opts1 := CreateMQTTClientOptions(
 		s.mqttAddr,
-		fmt.Sprintf("test-rotate-1-%d", time.Now().UnixNano()),
+		stewardID1,
 		tlsConfig1,
 	)
 
@@ -650,11 +652,11 @@ func (s *TLSSecurityTestSuite) TestCertificateRotationConcept() {
 
 	s.T().Log("✓ Current certificates validated")
 
-	// Test 2: Verify new client can connect with same certificates
-	tlsConfig2 := LoadTLSConfig(s.T(), s.certsPath)
+	// Test 2: Verify new client can connect with different certificates (simulates rotation)
+	tlsConfig2, stewardID2 := s.helper.GetTLSConfigFromRegistration(s.T(), "default", "integration-test")
 	opts2 := CreateMQTTClientOptions(
 		s.mqttAddr,
-		fmt.Sprintf("test-rotate-2-%d", time.Now().UnixNano()),
+		stewardID2,
 		tlsConfig2,
 	)
 
@@ -681,10 +683,10 @@ func (s *TLSSecurityTestSuite) TestCertificateRotationGracePeriod() {
 	s.T().Log("AC6: Testing certificate rotation grace period")
 
 	// Establish initial connection
-	tlsConfig := LoadTLSConfig(s.T(), s.certsPath)
+	tlsConfig, stewardID := s.helper.GetTLSConfigFromRegistration(s.T(), "default", "integration-test")
 	opts := CreateMQTTClientOptions(
 		s.mqttAddr,
-		fmt.Sprintf("test-grace-%d", time.Now().UnixNano()),
+		stewardID,
 		tlsConfig,
 	)
 

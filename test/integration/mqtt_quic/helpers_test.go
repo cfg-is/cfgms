@@ -296,3 +296,62 @@ func CreateMQTTClientOptions(brokerAddr string, clientID string, tlsConfig *tls.
 
 	return opts
 }
+
+// GetTLSConfigFromRegistration registers a steward and returns TLS config with certificates
+// This helper enables tests to use production certificate flow instead of static test certs
+// Story #294: Migrate tests to use registration API for certificate distribution
+func (h *TestHelper) GetTLSConfigFromRegistration(t *testing.T, tenantID, group string) (*tls.Config, string) {
+	t.Helper()
+
+	// Register steward to obtain certificates
+	token := h.CreateToken(t, tenantID, group)
+	resp := h.RegisterSteward(t, token)
+
+	if resp.ClientCert == "" || resp.ClientKey == "" || resp.CACert == "" {
+		t.Fatalf("Registration did not return certificates (ClientCert=%v, ClientKey=%v, CACert=%v)",
+			resp.ClientCert != "", resp.ClientKey != "", resp.CACert != "")
+	}
+
+	// Save certificates to temporary directory
+	certDir := t.TempDir()
+	clientCertPath := filepath.Join(certDir, "client.crt")
+	clientKeyPath := filepath.Join(certDir, "client.key")
+	caCertPath := filepath.Join(certDir, "ca.crt")
+
+	if err := os.WriteFile(clientCertPath, []byte(resp.ClientCert), 0600); err != nil {
+		t.Fatalf("Failed to save client certificate: %v", err)
+	}
+	if err := os.WriteFile(clientKeyPath, []byte(resp.ClientKey), 0600); err != nil {
+		t.Fatalf("Failed to save client key: %v", err)
+	}
+	if err := os.WriteFile(caCertPath, []byte(resp.CACert), 0600); err != nil {
+		t.Fatalf("Failed to save CA certificate: %v", err)
+	}
+
+	// Load client certificate
+	clientCert, err := tls.LoadX509KeyPair(clientCertPath, clientKeyPath)
+	if err != nil {
+		t.Fatalf("Failed to load client certificate: %v", err)
+	}
+
+	// Load CA certificate for server verification
+	caCert, err := os.ReadFile(caCertPath)
+	if err != nil {
+		t.Fatalf("Failed to read CA certificate: %v", err)
+	}
+
+	caCertPool := x509.NewCertPool()
+	if !caCertPool.AppendCertsFromPEM(caCert) {
+		t.Fatal("Failed to parse CA certificate")
+	}
+
+	// Create TLS configuration
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{clientCert},
+		RootCAs:      caCertPool,
+		MinVersion:   tls.VersionTLS12,
+		ServerName:   "localhost", // Controller cert is valid for localhost
+	}
+
+	return tlsConfig, resp.StewardID
+}
