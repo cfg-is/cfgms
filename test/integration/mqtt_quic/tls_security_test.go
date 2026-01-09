@@ -719,8 +719,8 @@ func (s *TLSSecurityTestSuite) TestMTLSWithRegistrationAPI() {
 
 	// Phase 1: Register steward via HTTP API
 	s.T().Log("Phase 1: Register steward to obtain certificates")
-	token := s.helper.CreateToken(s.T(), "default", "integration-test")
-	resp := s.helper.RegisterSteward(s.T(), token)
+	regToken := s.helper.CreateToken(s.T(), "default", "integration-test")
+	resp := s.helper.RegisterSteward(s.T(), regToken)
 
 	require.NotEmpty(s.T(), resp.StewardID, "Registration should return steward ID")
 	require.NotEmpty(s.T(), resp.ClientCert, "Registration should return client certificate")
