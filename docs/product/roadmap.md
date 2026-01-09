@@ -122,6 +122,10 @@ Implemented comprehensive Docker-based E2E testing infrastructure that validates
 - [x] Complete E2E test framework for MQTT+QUIC mode (issue #294) ✅ COMPLETED
 - [ ] Enable TestModuleExecution suite with proper steward container configuration (issue #312)
 - [ ] Configure MQTT broker ACLs for topic-level access control by steward ID (issue #313)
+- [ ] Align story-commit validation with PR acceptance CI tests for local test coverage (issue #315)
+  - Ensure `make test-commit` provides maximum possible local coverage of CI validation gates
+  - Review and separate blocking vs non-blocking tests (e.g., performance tests should be non-blocking)
+  - Reduce developer friction while maintaining quality gates
 
 ### Phase 2: Production Stability & Feature Completion (v0.9.0 - v1.0.0)
 
