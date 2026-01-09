@@ -1551,12 +1551,12 @@ test-mqtt-quic: test-mqtt-quic-setup
 	@echo ""
 	@echo "🔌 Running MQTT+QUIC Integration Tests"
 	@echo "======================================"
-	@echo "Testing against controller-standalone (MQTT: 1886, QUIC: 4436, HTTP: 8080)"
+	@echo "Testing against controller-standalone (MQTT: 1886, QUIC: 4436, HTTPS: 8080)"
 	@echo ""
 	@echo "🧪 Running all MQTT+QUIC test suites..."
 	@if [ -f .env.test ]; then \
 		set -a && . ./.env.test && set +a && \
-		CFGMS_TEST_HTTP_ADDR=http://127.0.0.1:8080 \
+		CFGMS_TEST_HTTP_ADDR=https://127.0.0.1:8080 \
 		CFGMS_TEST_MQTT_ADDR=ssl://127.0.0.1:1886 \
 		CFGMS_TEST_QUIC_ADDR=127.0.0.1:4436 \
 		CFGMS_TEST_CERTS_PATH=$(PWD)/test/integration/mqtt_quic/certs \

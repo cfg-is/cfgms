@@ -39,7 +39,7 @@ func (s *TLSSecurityTestSuite) SetupSuite() {
 		s.T().Skip("Skipping TLS security tests in short mode - requires MQTT broker")
 	}
 
-	s.helper = NewTestHelper(GetTestHTTPAddr("http://127.0.0.1:8080"))
+	s.helper = NewTestHelper(GetTestHTTPAddr("https://127.0.0.1:8080"))
 	// Use TLS port (8883) mapped to host port 1886
 	s.mqttAddr = GetTestMQTTAddr("ssl://127.0.0.1:1886")
 	s.certsPath = GetTestCertsPath("./certs")
