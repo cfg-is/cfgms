@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -47,6 +48,11 @@ func (s *TLSSecurityTestSuite) SetupSuite() {
 	// TODO Story #294: Migrate remaining tests to use registration API
 	// For now, keep static cert generation for existing negative tests
 	s.ensureCertificatesExist()
+
+	// Generate invalid certificates for negative testing
+	// Uses scripts/generate-invalid-test-certs.sh to create pseudo-random
+	// expired/self-signed/wrong-CA certs (not hardcoded)
+	s.generateInvalidCertificates()
 }
 
 // ensureCertificatesExist generates test certificates if they don't already exist
@@ -174,6 +180,23 @@ func (s *TLSSecurityTestSuite) createFlatCertStructure() {
 	require.NoError(s.T(), err, "Failed to write client key")
 
 	s.T().Log("✅ Created flat certificate structure for test compatibility")
+}
+
+// generateInvalidCertificates generates invalid certificates for negative testing
+// Uses scripts/generate-invalid-test-certs.sh to create pseudo-random invalid certs
+// This ensures tests don't rely on hardcoded certificates
+func (s *TLSSecurityTestSuite) generateInvalidCertificates() {
+	s.T().Log("Generating invalid certificates for negative testing...")
+
+	// Call the script to generate invalid certs
+	cmd := exec.Command("bash", "scripts/generate-invalid-test-certs.sh", s.certsPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		s.T().Logf("Script output: %s", output)
+		s.T().Fatalf("Failed to generate invalid certificates: %v", err)
+	}
+
+	s.T().Log("✅ Invalid certificates generated successfully")
 }
 
 // ============================================================================
