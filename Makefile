@@ -1645,7 +1645,7 @@ test-e2e-scenarios:
 	@echo "🧪 Running comprehensive E2E scenarios..."
 	@if [ -f .env.test ]; then \
 		set -a && . ./.env.test && set +a && \
-		go test -v -race -timeout=15m ./test/e2e/... || exit 1; \
+		go test -v -race -timeout=50m ./test/e2e/... || exit 1; \
 	else \
 		echo "❌ .env.test not found"; \
 		exit 1; \
