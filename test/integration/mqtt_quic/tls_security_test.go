@@ -4,8 +4,10 @@ package mqtt_quic
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -38,12 +40,24 @@ func (s *TLSSecurityTestSuite) SetupSuite() {
 		s.T().Skip("Skipping TLS security tests in short mode - requires MQTT broker")
 	}
 
-	s.helper = NewTestHelper(GetTestHTTPAddr("http://localhost:9080"))
-	// Use TLS port (8883) instead of standard MQTT port (1883)
-	s.mqttAddr = GetTestMQTTAddr("ssl://127.0.0.1:1886") // ssl:// or tls:// for TLS connections
+	if os.Getenv("CFGMS_TEST_INTEGRATION") != "1" {
+		s.T().Skip("Skipping TLS security tests - CFGMS_TEST_INTEGRATION not set")
+	}
+
+	// Story #294 Phase 5: Verify controller CA exists
+	// The certificate_lifecycle_test.go suite MUST run first to create CA
+	cmd := exec.Command("docker", "exec", "controller-standalone", "test", "-f", "/app/certs/ca/ca.crt")
+	if err := cmd.Run(); err != nil {
+		s.T().Skip("Controller CA not found - run TestCertificateLifecycle first")
+	}
+
+	s.helper = NewTestHelper(GetTestHTTPAddr("http://127.0.0.1:8080"))
+	// Use TLS port (8883) mapped to host port 1886
+	s.mqttAddr = GetTestMQTTAddr("ssl://127.0.0.1:1886")
 	s.certsPath = GetTestCertsPath("./certs")
 
-	// Auto-generate certificates if they don't exist (Story #109: Self-contained tests)
+	// TODO Story #294: Migrate remaining tests to use registration API
+	// For now, keep static cert generation for existing negative tests
 	s.ensureCertificatesExist()
 }
 
@@ -696,6 +710,122 @@ func (s *TLSSecurityTestSuite) TestCertificateRotationGracePeriod() {
 	s.T().Log("✓ Certificate rotation grace period validated")
 
 	client.Disconnect(250)
+}
+
+// TestMTLSWithRegistrationAPI validates the complete production mTLS flow
+// Story #294 Phase 5: Tests should validate actual production behavior
+func (s *TLSSecurityTestSuite) TestMTLSWithRegistrationAPI() {
+	s.T().Log("🔐 Testing mTLS with Registration API (Production Flow)")
+
+	// Phase 1: Register steward via HTTP API
+	s.T().Log("Phase 1: Register steward to obtain certificates")
+	token := s.helper.CreateToken(s.T(), "default", "integration-test")
+	resp := s.helper.RegisterSteward(s.T(), token)
+
+	require.NotEmpty(s.T(), resp.StewardID, "Registration should return steward ID")
+	require.NotEmpty(s.T(), resp.ClientCert, "Registration should return client certificate")
+	require.NotEmpty(s.T(), resp.ClientKey, "Registration should return client key")
+	require.NotEmpty(s.T(), resp.CACert, "Registration should return CA certificate")
+	require.NotEmpty(s.T(), resp.MQTTBroker, "Registration should return MQTT broker address")
+
+	s.T().Logf("✓ Registered steward: %s", resp.StewardID)
+
+	// Phase 2: Save certificates to temporary directory (mimics steward auto-save)
+	s.T().Log("Phase 2: Save certificates (mimics steward auto-save)")
+	certDir := s.T().TempDir()
+	clientCertPath := filepath.Join(certDir, "client.crt")
+	clientKeyPath := filepath.Join(certDir, "client.key")
+	caCertPath := filepath.Join(certDir, "ca.crt")
+
+	err := os.WriteFile(clientCertPath, []byte(resp.ClientCert), 0600)
+	require.NoError(s.T(), err, "Failed to save client certificate")
+
+	err = os.WriteFile(clientKeyPath, []byte(resp.ClientKey), 0600)
+	require.NoError(s.T(), err, "Failed to save client key")
+
+	err = os.WriteFile(caCertPath, []byte(resp.CACert), 0600)
+	require.NoError(s.T(), err, "Failed to save CA certificate")
+
+	s.T().Logf("✓ Saved certificates to: %s", certDir)
+
+	// Phase 3: Create TLS configuration from saved certificates
+	s.T().Log("Phase 3: Create TLS configuration")
+
+	// Load client certificate
+	clientCert, err := tls.LoadX509KeyPair(clientCertPath, clientKeyPath)
+	require.NoError(s.T(), err, "Failed to load client certificate")
+
+	// Load CA certificate for server verification
+	caCert, err := os.ReadFile(caCertPath)
+	require.NoError(s.T(), err, "Failed to read CA certificate")
+
+	caCertPool := x509.NewCertPool()
+	ok := caCertPool.AppendCertsFromPEM(caCert)
+	require.True(s.T(), ok, "Failed to parse CA certificate")
+
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{clientCert},
+		RootCAs:      caCertPool,
+		MinVersion:   tls.VersionTLS12,
+		ServerName:   "localhost", // Controller cert is valid for localhost
+	}
+
+	s.T().Log("✓ TLS configuration created")
+
+	// Phase 4: Connect to MQTT broker with mTLS
+	s.T().Log("Phase 4: Connect to MQTT with mTLS")
+
+	opts := mqtt.NewClientOptions()
+	opts.AddBroker(s.mqttAddr)
+	opts.SetClientID(resp.StewardID)
+	opts.SetTLSConfig(tlsConfig)
+	opts.SetConnectTimeout(10 * time.Second)
+	opts.SetAutoReconnect(false)
+
+	client := mqtt.NewClient(opts)
+	token := client.Connect()
+	success := token.WaitTimeout(10 * time.Second)
+	require.True(s.T(), success, "Connection should complete within timeout")
+	require.NoError(s.T(), token.Error(), "mTLS connection should succeed with certificates from registration")
+	require.True(s.T(), client.IsConnected(), "Client should be connected with mTLS")
+
+	s.T().Log("✓ mTLS connection successful")
+
+	// Phase 5: Verify connection with messaging
+	s.T().Log("Phase 5: Verify connection with test message")
+
+	topic := fmt.Sprintf("test/%s/ping", resp.StewardID)
+	received := make(chan bool, 1)
+
+	token = client.Subscribe(topic, 1, func(client mqtt.Client, msg mqtt.Message) {
+		s.T().Logf("✓ Received message: %s", msg.Payload())
+		received <- true
+	})
+	success = token.WaitTimeout(5 * time.Second)
+	require.True(s.T(), success, "Subscribe should complete")
+	require.NoError(s.T(), token.Error(), "Subscribe should succeed")
+
+	token = client.Publish(topic, 1, false, []byte("test-message"))
+	success = token.WaitTimeout(5 * time.Second)
+	require.True(s.T(), success, "Publish should complete")
+	require.NoError(s.T(), token.Error(), "Publish should succeed")
+
+	select {
+	case <-received:
+		s.T().Log("✓ Message received successfully")
+	case <-time.After(5 * time.Second):
+		s.Fail("Timeout waiting for message")
+	}
+
+	// Clean up
+	client.Disconnect(250)
+
+	s.T().Log("✅ Complete production mTLS flow validated:")
+	s.T().Log("   1. Registration API provided certificates")
+	s.T().Log("   2. Certificates saved locally (steward auto-save)")
+	s.T().Log("   3. TLS configuration from saved certificates")
+	s.T().Log("   4. mTLS connection established")
+	s.T().Log("   5. Messaging verified over secure connection")
 }
 
 func TestTLSSecurity(t *testing.T) {
