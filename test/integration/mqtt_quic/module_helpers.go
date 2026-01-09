@@ -59,9 +59,18 @@ func NewModuleTestHelper(baseURL, mqttAddr string) *ModuleTestHelper {
 func (h *ModuleTestHelper) ConnectMQTT(t *testing.T, clientID string, tlsConfig *tls.Config) {
 	t.Helper()
 
-	opts := CreateMQTTClientOptions(h.mqttAddr, clientID, tlsConfig)
+	// Create MQTT client options
+	opts := mqtt.NewClientOptions()
+	opts.AddBroker(h.mqttAddr)
+	opts.SetClientID(clientID)
+	opts.SetConnectTimeout(10 * time.Second)
 	opts.SetKeepAlive(30 * time.Second)
 	opts.SetAutoReconnect(true)
+
+	// Add TLS config if provided
+	if tlsConfig != nil {
+		opts.SetTLSConfig(tlsConfig)
+	}
 
 	h.mqttClient = mqtt.NewClient(opts)
 	token := h.mqttClient.Connect()

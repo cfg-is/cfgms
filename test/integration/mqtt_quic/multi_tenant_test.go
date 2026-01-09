@@ -205,7 +205,9 @@ func (s *MultiTenantTestSuite) TestMQTTTopicIsolation() {
 
 // AC3: TestCrossTenantMessagePrevention validates cross-tenant message delivery prevention
 func (s *MultiTenantTestSuite) TestCrossTenantMessagePrevention() {
-	s.T().Skip("TODO: Requires MQTT broker ACL configuration to enforce topic-level access control by steward ID")
+	// TODO(#313): Re-enable once MQTT broker has ACLs configured for topic-level access control
+	// Test infrastructure works (unique certs per tenant), but broker allows cross-tenant subscriptions
+	s.T().Skip("TODO(#313): Requires MQTT broker ACL configuration")
 	s.T().Log("AC3: Testing cross-tenant message delivery prevention")
 
 	brokerAddr := GetTestMQTTAddr("ssl://127.0.0.1:1886")

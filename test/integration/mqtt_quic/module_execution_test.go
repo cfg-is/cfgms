@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,9 +39,32 @@ func (s *ModuleExecutionTestSuite) SetupSuite() {
 		s.T().Skip("Skipping module execution tests in short mode - requires infrastructure")
 	}
 
-	// Skip - requires steward-standalone container which isn't started by test-mqtt-quic-setup
-	// TODO: Add steward container to test setup or create separate test target
-	s.T().Skip("Requires steward-standalone container - not started by current test setup")
+	// TODO(#312): Re-enable once steward-standalone container has /test-workspace properly configured
+	// Tests successfully start the container and establish MQTT connections, but fail because
+	// the container lacks the /test-workspace directory that module execution tests require.
+	s.T().Skip("TODO(#312): Requires steward-standalone /test-workspace configuration")
+
+	// Start steward-standalone container (follows pattern from test/integration/docker_test.go)
+	s.T().Log("Starting steward-standalone container...")
+
+	// Find project root - go test changes to a temp directory
+	// Try current directory and up to 3 levels up
+	for i := 0; i < 4; i++ {
+		composePath := "docker-compose.test.yml"
+		if i > 0 {
+			composePath = strings.Repeat("../", i) + "docker-compose.test.yml"
+		}
+		if _, err := os.Stat(composePath); err == nil {
+			cmd := exec.Command("docker", "compose", "-f", composePath, "--profile", "ha", "up", "-d", "steward-standalone")
+			if output, err := cmd.CombinedOutput(); err != nil {
+				s.T().Logf("Note: Failed to start steward-standalone (may already be running): %v\nOutput: %s", err, output)
+			}
+			break
+		}
+	}
+
+	// Wait for steward to initialize
+	time.Sleep(5 * time.Second)
 
 	// Setup test helper for TLS config
 	s.testHelper = NewTestHelper(GetTestHTTPAddr("https://127.0.0.1:8080"))
@@ -57,6 +82,13 @@ func (s *ModuleExecutionTestSuite) SetupSuite() {
 func (s *ModuleExecutionTestSuite) TearDownSuite() {
 	if s.helper != nil {
 		s.helper.DisconnectMQTT(s.T())
+	}
+
+	// Stop steward-standalone container
+	s.T().Log("Stopping steward-standalone container...")
+	cmd := exec.Command("docker", "compose", "-f", "docker-compose.test.yml", "--profile", "ha", "down", "steward-standalone")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		s.T().Logf("Warning: Failed to stop steward-standalone: %v\nOutput: %s", err, output)
 	}
 }
 
