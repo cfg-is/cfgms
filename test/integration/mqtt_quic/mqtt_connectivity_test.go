@@ -3,8 +3,10 @@
 package mqtt_quic
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -21,17 +23,33 @@ type MQTTConnectivityTestSuite struct {
 	helper     *TestHelper
 	mqttClient mqtt.Client
 	mqttAddr   string
+	tlsConfig  *tls.Config
+	stewardID  string
 }
 
 func (s *MQTTConnectivityTestSuite) SetupSuite() {
-	s.helper = NewTestHelper(GetTestHTTPAddr("http://127.0.0.1:8080"))
+	// Skip if running in short/fast mode - requires MQTT broker infrastructure
+	if os.Getenv("CFGMS_TEST_SHORT") == "1" {
+		s.T().Skip("Skipping MQTT connectivity tests in short mode - requires MQTT broker")
+	}
+
+	s.helper = NewTestHelper(GetTestHTTPAddr("https://127.0.0.1:8080"))
 	s.mqttAddr = GetTestMQTTAddr("ssl://127.0.0.1:1886") // Docker controller MQTT broker port with TLS
+
+	// Get TLS config from registration API (required for mTLS)
+	s.tlsConfig, s.stewardID = s.helper.GetTLSConfigFromRegistration(s.T(), "default", "integration-test")
 }
 
 func (s *MQTTConnectivityTestSuite) TearDownSuite() {
 	if s.mqttClient != nil && s.mqttClient.IsConnected() {
 		s.mqttClient.Disconnect(250)
 	}
+}
+
+// createMQTTClient creates an MQTT client with TLS config
+func (s *MQTTConnectivityTestSuite) createMQTTClient(clientID string) mqtt.Client {
+	opts := CreateMQTTClientOptions(s.mqttAddr, clientID, s.tlsConfig)
+	return mqtt.NewClient(opts)
 }
 
 // TestMQTTBrokerConnectivity tests basic MQTT broker connection
@@ -82,13 +100,8 @@ func (s *MQTTConnectivityTestSuite) TestMQTTBrokerConnectivity() {
 
 // TestMQTTSubscription tests MQTT topic subscription
 func (s *MQTTConnectivityTestSuite) TestMQTTSubscription() {
-	// Connect to broker
-	opts := mqtt.NewClientOptions()
-	opts.AddBroker(s.mqttAddr)
-	opts.SetClientID(fmt.Sprintf("test-sub-%d", time.Now().UnixNano()))
-	opts.SetConnectTimeout(10 * time.Second)
-
-	client := mqtt.NewClient(opts)
+	// Connect to broker with TLS
+	client := s.createMQTTClient(fmt.Sprintf("test-sub-%d", time.Now().UnixNano()))
 	token := client.Connect()
 	s.True(token.WaitTimeout(10 * time.Second))
 	s.NoError(token.Error())
@@ -126,16 +139,11 @@ func (s *MQTTConnectivityTestSuite) TestMQTTSubscription() {
 
 // TestMQTTPublishReceive tests publish and receive on steward command topic
 func (s *MQTTConnectivityTestSuite) TestMQTTPublishReceive() {
-	// Create steward client
-	stewardID := "test-steward-123"
+	// Create steward client with TLS
+	stewardID := fmt.Sprintf("test-steward-%d", time.Now().UnixNano())
 	commandTopic := fmt.Sprintf("cfgms/steward/%s/commands", stewardID)
 
-	opts := mqtt.NewClientOptions()
-	opts.AddBroker(s.mqttAddr)
-	opts.SetClientID(stewardID)
-	opts.SetConnectTimeout(10 * time.Second)
-
-	stewardClient := mqtt.NewClient(opts)
+	stewardClient := s.createMQTTClient(stewardID)
 	token := stewardClient.Connect()
 	s.True(token.WaitTimeout(10 * time.Second))
 	s.NoError(token.Error())
@@ -156,12 +164,7 @@ func (s *MQTTConnectivityTestSuite) TestMQTTPublishReceive() {
 	s.NoError(subToken.Error())
 
 	// Create controller client to publish command
-	controllerOpts := mqtt.NewClientOptions()
-	controllerOpts.AddBroker(s.mqttAddr)
-	controllerOpts.SetClientID("test-controller")
-	controllerOpts.SetConnectTimeout(10 * time.Second)
-
-	controllerClient := mqtt.NewClient(controllerOpts)
+	controllerClient := s.createMQTTClient(fmt.Sprintf("test-controller-%d", time.Now().UnixNano()))
 	token = controllerClient.Connect()
 	s.True(token.WaitTimeout(10 * time.Second))
 	s.NoError(token.Error())
@@ -209,16 +212,11 @@ func (s *MQTTConnectivityTestSuite) TestMQTTPublishReceive() {
 
 // TestMQTTHeartbeatTopic tests heartbeat topic publishing
 func (s *MQTTConnectivityTestSuite) TestMQTTHeartbeatTopic() {
-	stewardID := "test-steward-heartbeat"
+	stewardID := fmt.Sprintf("test-steward-heartbeat-%d", time.Now().UnixNano())
 	heartbeatTopic := fmt.Sprintf("cfgms/steward/%s/heartbeat", stewardID)
 
-	// Create steward client
-	opts := mqtt.NewClientOptions()
-	opts.AddBroker(s.mqttAddr)
-	opts.SetClientID(stewardID)
-	opts.SetConnectTimeout(10 * time.Second)
-
-	client := mqtt.NewClient(opts)
+	// Create steward client with TLS
+	client := s.createMQTTClient(stewardID)
 	token := client.Connect()
 	s.True(token.WaitTimeout(10 * time.Second))
 	s.NoError(token.Error())
@@ -247,12 +245,7 @@ func (s *MQTTConnectivityTestSuite) TestMQTTHeartbeatTopic() {
 
 // TestMQTTQoSLevels tests different QoS levels
 func (s *MQTTConnectivityTestSuite) TestMQTTQoSLevels() {
-	opts := mqtt.NewClientOptions()
-	opts.AddBroker(s.mqttAddr)
-	opts.SetClientID(fmt.Sprintf("test-qos-%d", time.Now().UnixNano()))
-	opts.SetConnectTimeout(10 * time.Second)
-
-	client := mqtt.NewClient(opts)
+	client := s.createMQTTClient(fmt.Sprintf("test-qos-%d", time.Now().UnixNano()))
 	token := client.Connect()
 	s.True(token.WaitTimeout(10 * time.Second))
 	s.NoError(token.Error())
@@ -306,12 +299,7 @@ func (s *MQTTConnectivityTestSuite) TestMQTTConcurrentConnections() {
 		go func(idx int) {
 			defer wg.Done()
 
-			opts := mqtt.NewClientOptions()
-			opts.AddBroker(s.mqttAddr)
-			opts.SetClientID(fmt.Sprintf("concurrent-client-%d", idx))
-			opts.SetConnectTimeout(10 * time.Second)
-
-			client := mqtt.NewClient(opts)
+			client := s.createMQTTClient(fmt.Sprintf("concurrent-client-%d", idx))
 			token := client.Connect()
 			if !token.WaitTimeout(10 * time.Second) {
 				errors <- fmt.Errorf("client %d: connection timeout", idx)
@@ -359,11 +347,9 @@ func (s *MQTTConnectivityTestSuite) TestMQTTConcurrentConnections() {
 
 // TestMQTTKeepAlive tests MQTT keepalive mechanism
 func (s *MQTTConnectivityTestSuite) TestMQTTKeepAlive() {
-	opts := mqtt.NewClientOptions()
-	opts.AddBroker(s.mqttAddr)
-	opts.SetClientID(fmt.Sprintf("test-keepalive-%d", time.Now().UnixNano()))
+	clientID := fmt.Sprintf("test-keepalive-%d", time.Now().UnixNano())
+	opts := CreateMQTTClientOptions(s.mqttAddr, clientID, s.tlsConfig)
 	opts.SetKeepAlive(2 * time.Second) // 2 second keepalive
-	opts.SetConnectTimeout(10 * time.Second)
 
 	client := mqtt.NewClient(opts)
 	token := client.Connect()

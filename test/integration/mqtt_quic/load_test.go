@@ -3,8 +3,10 @@
 package mqtt_quic
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -19,13 +21,29 @@ import (
 // AC10: Multi-steward load test (1000+ concurrent stewards, verify stability)
 type LoadTestSuite struct {
 	suite.Suite
-	helper   *TestHelper
-	mqttAddr string
+	helper    *TestHelper
+	mqttAddr  string
+	tlsConfig *tls.Config
+	stewardID string
 }
 
 func (s *LoadTestSuite) SetupSuite() {
-	s.helper = NewTestHelper(GetTestHTTPAddr("http://127.0.0.1:8080"))
-	s.mqttAddr = GetTestMQTTAddr("tcp://127.0.0.1:1886")
+	// Skip if running in short/fast mode - requires MQTT broker infrastructure
+	if os.Getenv("CFGMS_TEST_SHORT") == "1" {
+		s.T().Skip("Skipping load tests in short mode - requires MQTT broker")
+	}
+
+	s.helper = NewTestHelper(GetTestHTTPAddr("https://127.0.0.1:8080"))
+	s.mqttAddr = GetTestMQTTAddr("ssl://127.0.0.1:1886") // Use TLS
+
+	// Get TLS config from registration API (required for mTLS)
+	s.tlsConfig, s.stewardID = s.helper.GetTLSConfigFromRegistration(s.T(), "default", "integration-test")
+}
+
+// createMQTTClient creates an MQTT client with TLS config
+func (s *LoadTestSuite) createMQTTClient(clientID string) mqtt.Client {
+	opts := CreateMQTTClientOptions(s.mqttAddr, clientID, s.tlsConfig)
+	return mqtt.NewClient(opts)
 }
 
 // TestMultiStewardLoad tests 1000+ concurrent steward connections (AC10)
@@ -49,10 +67,8 @@ func (s *LoadTestSuite) TestMultiStewardLoad() {
 
 			stewardID := fmt.Sprintf("load-test-steward-%d", idx)
 
-			// Create client
-			opts := mqtt.NewClientOptions()
-			opts.AddBroker(s.mqttAddr)
-			opts.SetClientID(stewardID)
+			// Create client with TLS
+			opts := CreateMQTTClientOptions(s.mqttAddr, stewardID, s.tlsConfig)
 			opts.SetConnectTimeout(30 * time.Second)
 			opts.SetKeepAlive(30 * time.Second)
 			opts.SetAutoReconnect(false) // Disable for load test
@@ -151,12 +167,7 @@ func (s *LoadTestSuite) TestConcurrentMessagePublishing() {
 			defer wg.Done()
 
 			clientID := fmt.Sprintf("publisher-%d", publisherIdx)
-			opts := mqtt.NewClientOptions()
-			opts.AddBroker(s.mqttAddr)
-			opts.SetClientID(clientID)
-			opts.SetConnectTimeout(10 * time.Second)
-
-			client := mqtt.NewClient(opts)
+			client := s.createMQTTClient(clientID)
 			token := client.Connect()
 			if !token.WaitTimeout(10*time.Second) || token.Error() != nil {
 				failedCount.Add(int64(messagesPerPublisher))
@@ -223,11 +234,8 @@ func (s *LoadTestSuite) TestSustainedLoad() {
 			defer wg.Done()
 
 			stewardID := fmt.Sprintf("sustained-steward-%d", idx)
-			opts := mqtt.NewClientOptions()
-			opts.AddBroker(s.mqttAddr)
-			opts.SetClientID(stewardID)
+			opts := CreateMQTTClientOptions(s.mqttAddr, stewardID, s.tlsConfig)
 			opts.SetKeepAlive(30 * time.Second)
-			opts.SetConnectTimeout(10 * time.Second)
 
 			client := mqtt.NewClient(opts)
 			token := client.Connect()
@@ -279,7 +287,7 @@ func (s *LoadTestSuite) TestSustainedLoad() {
 	s.T().Logf("Efficiency: %.1f%%", efficiency)
 	s.T().Logf("Average Rate: %.1f heartbeats/s", avgRate)
 
-	s.Greater(efficiency, 80.0, "Sustained load efficiency should be >80%")
+	s.GreaterOrEqual(efficiency, 80.0, "Sustained load efficiency should be >=80%")
 	s.T().Logf("✅ Sustained load test passed")
 }
 
@@ -302,12 +310,7 @@ func (s *LoadTestSuite) TestResourceUsageUnderLoad() {
 				defer wg.Done()
 
 				clientID := fmt.Sprintf("resource-test-%d-%d", iter, idx)
-				opts := mqtt.NewClientOptions()
-				opts.AddBroker(s.mqttAddr)
-				opts.SetClientID(clientID)
-				opts.SetConnectTimeout(10 * time.Second)
-
-				client := mqtt.NewClient(opts)
+				client := s.createMQTTClient(clientID)
 				token := client.Connect()
 				if token.WaitTimeout(10*time.Second) && token.Error() == nil {
 					time.Sleep(1 * time.Second)

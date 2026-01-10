@@ -13,8 +13,8 @@ on:
       - '.editorconfig'
   push:
     branches:
-      - main  # ALWAYS run on main (no path filter)
-      - develop  # ALWAYS run on develop (no path filter)
+      - main  # Run on main for release security validation
+      # NOTE: Removed develop - security scans already run on PR before merge (no redundant post-merge scanning)
   workflow_dispatch:
     inputs:
       scan_type:

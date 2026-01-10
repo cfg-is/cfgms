@@ -62,13 +62,13 @@ type E2ETestFramework struct {
 	cancel  context.CancelFunc
 
 	// Core components
-	controller     *controller.Controller
-	stewards       map[string]*steward.Steward // Standalone stewards (Phase 1)
+	controller         *controller.Controller
+	stewards           map[string]*steward.Steward   // Standalone stewards (Phase 1)
 	registeredStewards map[string]*RegisteredSteward // MQTT-connected stewards (Phase 3)
-	certManager    *cert.Manager
-	rbacManager    rbac.RBACManager
-	terminalMgr    terminal.SessionManager
-	workflowEngine *workflow.Engine
+	certManager        *cert.Manager
+	rbacManager        rbac.RBACManager
+	terminalMgr        terminal.SessionManager
+	workflowEngine     *workflow.Engine
 
 	// Test configuration
 	config *E2EConfig
@@ -551,8 +551,8 @@ func (f *E2ETestFramework) RegisterStewardWithController(stewardName, tenantID s
 		Timeout: 10 * time.Second,
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{
-				MinVersion:         tls.VersionTLS12,                         // #nosec G402 -- TLS 1.2+ for test environment
-				InsecureSkipVerify: true,                                     // #nosec G402 -- Test environment with self-signed certs
+				MinVersion:         tls.VersionTLS12, // #nosec G402 -- TLS 1.2+ for test environment
+				InsecureSkipVerify: true,             // #nosec G402 -- Test environment with self-signed certs
 			},
 		},
 	}
@@ -561,7 +561,9 @@ func (f *E2ETestFramework) RegisterStewardWithController(stewardName, tenantID s
 	if err != nil {
 		return nil, fmt.Errorf("HTTP registration request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
