@@ -121,33 +121,48 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		QUICAddress:   s.getQUICAddress(),
 	}
 
-	// Optional: Generate client certificates for mTLS (future enhancement)
-	// For alpha release, we're not using mTLS yet
-	if s.certManager != nil && s.cfg.Certificate != nil && s.cfg.Certificate.EnableCertManagement {
-		// Generate client certificate for steward
-		clientCert, err := s.certManager.GenerateClientCertificate(&cert.ClientCertConfig{
-			CommonName:   stewardID,
-			Organization: "CFGMS Stewards",
-			ClientID:     stewardID,
-			ValidityDays: s.cfg.Certificate.ClientCertValidityDays,
-		})
-		if err != nil {
-			s.logger.Warn("Failed to generate client certificate for steward", "error", err, "steward_id", stewardID)
-			// Don't fail registration - just omit certificates
-		} else {
-			// Return certificates in response
-			resp.ClientCert = string(clientCert.CertificatePEM)
-			resp.ClientKey = string(clientCert.PrivateKeyPEM)
-			if s.certManager != nil {
-				// Get CA certificate
-				caCert, err := s.certManager.GetCACertificate()
-				if err == nil && len(caCert) > 0 {
-					resp.CACert = string(caCert)
-				}
-			}
-			s.logger.Info("Generated client certificate for steward", "steward_id", stewardID)
-		}
+	// Story #294 Phase 3: Generate client certificates for mTLS (REQUIRED)
+	// Certificate generation is mandatory - mTLS required for production security
+	if s.certManager == nil {
+		s.logger.Error("Certificate manager not initialized", "steward_id", stewardID)
+		http.Error(w, "Server misconfiguration: Certificate manager unavailable", http.StatusInternalServerError)
+		return
 	}
+
+	// Generate client certificate for steward
+	validityDays := 365 // Default validity
+	if s.cfg.Certificate != nil && s.cfg.Certificate.ClientCertValidityDays > 0 {
+		validityDays = s.cfg.Certificate.ClientCertValidityDays
+	}
+
+	clientCert, err := s.certManager.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   stewardID,
+		Organization: "CFGMS Stewards",
+		ClientID:     stewardID,
+		ValidityDays: validityDays,
+	})
+	if err != nil {
+		s.logger.Error("Failed to generate client certificate", "error", err, "steward_id", stewardID)
+		http.Error(w, "Failed to generate client certificate", http.StatusInternalServerError)
+		return
+	}
+
+	// Get CA certificate (required for certificate chain validation)
+	caCert, err := s.certManager.GetCACertificate()
+	if err != nil || len(caCert) == 0 {
+		s.logger.Error("Failed to get CA certificate", "error", err, "steward_id", stewardID)
+		http.Error(w, "CA certificate unavailable", http.StatusInternalServerError)
+		return
+	}
+
+	// Return certificates in response (ALWAYS - required for mTLS)
+	resp.ClientCert = string(clientCert.CertificatePEM)
+	resp.ClientKey = string(clientCert.PrivateKeyPEM)
+	resp.CACert = string(caCert)
+
+	s.logger.Info("Generated client certificate for steward",
+		"steward_id", stewardID,
+		"validity_days", validityDays)
 
 	// Return response
 	w.Header().Set("Content-Type", "application/json")

@@ -526,8 +526,8 @@ jobs:
         set +a
 
         # Run existing integration tests with infrastructure
-        # Skip MQTT+QUIC tests until Issue #294 (functional bugs in test suite)
-        go test -v -race -timeout=10m $(go list ./test/integration/... | grep -v mqtt_quic | grep -v "test/integration$")
+        # MQTT+QUIC tests now enabled - infrastructure is ready (test-mqtt-quic-setup)
+        go test -v -race -timeout=10m $(go list ./test/integration/... | grep -v "test/integration$")
 
         # Run E2E tests with controller focus
         go test -v -race -timeout=15m ./test/e2e/... -run "TestE2EScenarios/(TestControllerStewardIntegration|TestRBACIntegration|TestWorkflowIntegration|TestDataFlow)"

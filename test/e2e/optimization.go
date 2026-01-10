@@ -201,6 +201,16 @@ func (o *GitHubActionsOptimizer) OptimizeTestExecution(testCategory string) Test
 		optimization.Priority = "medium"
 		optimization.Timeout = 6 * time.Minute
 
+	case "audit-load":
+		// Audit load tests - require extended time for compliance report generation
+		optimization.Priority = "medium"
+		optimization.Timeout = 15 * time.Minute
+
+	case "database-performance":
+		// Database performance tests - long-running with connection pool testing
+		optimization.Priority = "medium"
+		optimization.Timeout = 45 * time.Minute
+
 	default:
 		// Default conservative settings
 		optimization.Priority = "medium"

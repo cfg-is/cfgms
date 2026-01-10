@@ -3,6 +3,7 @@
 package mqtt_quic
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -18,8 +19,10 @@ import (
 // AC5: DNA update test (steward collects DNA, transmits via MQTT, controller receives and stores)
 type DNAUpdateTestSuite struct {
 	suite.Suite
-	helper   *TestHelper
-	mqttAddr string
+	helper    *TestHelper
+	mqttAddr  string
+	tlsConfig *tls.Config
+	stewardID string
 }
 
 func (s *DNAUpdateTestSuite) SetupSuite() {
@@ -28,22 +31,26 @@ func (s *DNAUpdateTestSuite) SetupSuite() {
 		s.T().Skip("Skipping DNA update tests in short mode - requires MQTT broker")
 	}
 
-	s.helper = NewTestHelper(GetTestHTTPAddr("http://127.0.0.1:8080"))
-	s.mqttAddr = GetTestMQTTAddr("tcp://127.0.0.1:1886")
+	s.helper = NewTestHelper(GetTestHTTPAddr("https://127.0.0.1:8080"))
+	s.mqttAddr = GetTestMQTTAddr("ssl://127.0.0.1:1886") // Use TLS
+
+	// Get TLS config from registration API (required for mTLS)
+	s.tlsConfig, s.stewardID = s.helper.GetTLSConfigFromRegistration(s.T(), "default", "integration-test")
+}
+
+// createMQTTClient creates an MQTT client with TLS config
+func (s *DNAUpdateTestSuite) createMQTTClient(clientID string) mqtt.Client {
+	opts := CreateMQTTClientOptions(s.mqttAddr, clientID, s.tlsConfig)
+	return mqtt.NewClient(opts)
 }
 
 // TestDNAUpdateMessage tests DNA update message structure
 func (s *DNAUpdateTestSuite) TestDNAUpdateMessage() {
-	stewardID := "test-steward-dna"
+	stewardID := fmt.Sprintf("test-steward-dna-%d", time.Now().UnixNano())
 	dnaTopic := fmt.Sprintf("cfgms/steward/%s/dna", stewardID)
 
-	// Create client
-	opts := mqtt.NewClientOptions()
-	opts.AddBroker(s.mqttAddr)
-	opts.SetClientID(stewardID)
-	opts.SetConnectTimeout(10 * time.Second)
-
-	client := mqtt.NewClient(opts)
+	// Create client with TLS
+	client := s.createMQTTClient(stewardID)
 	token := client.Connect()
 	s.True(token.WaitTimeout(10 * time.Second))
 	s.NoError(token.Error())
@@ -134,15 +141,10 @@ func (s *DNAUpdateTestSuite) TestExtendedDNACollection() {
 
 // TestDNAUpdateFrequency tests periodic DNA update cadence
 func (s *DNAUpdateTestSuite) TestDNAUpdateFrequency() {
-	stewardID := "test-steward-frequency"
+	stewardID := fmt.Sprintf("test-steward-frequency-%d", time.Now().UnixNano())
 	dnaTopic := fmt.Sprintf("cfgms/steward/%s/dna", stewardID)
 
-	opts := mqtt.NewClientOptions()
-	opts.AddBroker(s.mqttAddr)
-	opts.SetClientID(stewardID)
-	opts.SetConnectTimeout(10 * time.Second)
-
-	client := mqtt.NewClient(opts)
+	client := s.createMQTTClient(stewardID)
 	token := client.Connect()
 	s.True(token.WaitTimeout(10 * time.Second))
 	s.NoError(token.Error())
