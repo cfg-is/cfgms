@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 CFGMS Contributors
+// Copyright 2026 Jordan Ritz
 // Package testing provides intelligent configuration state comparison for steward.
 //
 // This package implements system-level testing logic that compares ConfigState

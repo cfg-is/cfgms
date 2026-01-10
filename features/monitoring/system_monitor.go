@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 CFGMS Contributors
+// Copyright 2026 Jordan Ritz
 // Package monitoring provides system-wide monitoring capabilities for CFGMS.
 //
 // This package builds upon the existing workflow monitoring framework to provide

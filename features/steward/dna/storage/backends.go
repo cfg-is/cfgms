@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 CFGMS Contributors
+// Copyright 2026 Jordan Ritz
 // Package storage implements various backend storage systems for DNA data.
 
 // #nosec G304 - DNA storage system requires file access for system state persistence

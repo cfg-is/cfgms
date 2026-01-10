@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 CFGMS Contributors
+// Copyright 2026 Jordan Ritz
 // Package commands provides MQTT command publishing for controller operations.
 //
 // This package implements the command publisher that sends MQTT commands
