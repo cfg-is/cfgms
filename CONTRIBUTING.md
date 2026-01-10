@@ -42,6 +42,59 @@ CFGMS follows the GitFlow branching model for development:
 - Keep commits focused on a single logical change
 - Sign your commits with `git commit -s`
 
+## Contributor License Agreement (CLA)
+
+**Before contributing code, you must sign the CLA.**
+
+### Why We Require a CLA
+
+CFGMS uses a dual-license model (Apache 2.0 + Elastic License 2.0) for open source and commercial features. The CLA:
+
+- **Assigns copyright** to Jordan Ritz (current copyright holder)
+- **Enables dual-licensing** of your contributions under both Apache 2.0 and Elastic License 2.0
+- **Protects you** by ensuring you have the rights to contribute
+- **Protects the project** from legal issues related to intellectual property
+- **Plans for the future** by allowing transfer to cfg.is entity when formed
+
+### How to Sign the CLA
+
+**For Individual Contributors:**
+
+1. **Read the CLA**: Review [docs/legal/CLA.md](docs/legal/CLA.md) carefully
+2. **Add your name**: Include your name in [CONTRIBUTORS.md](CONTRIBUTORS.md) as part of your first Pull Request:
+   ```markdown
+   - [Your Full Name] <your.email@example.com> - YYYY-MM-DD
+   ```
+3. **Submit your PR**: Once your name is added, you're covered for all future contributions
+
+**For Corporate Contributors:**
+
+If you're contributing on behalf of your employer:
+
+1. Ensure you have authorization from your employer
+2. Have an authorized representative add your company to the Corporate Contributors section
+3. We may require proof of authorization for significant contributions
+4. See [docs/legal/README.md](docs/legal/README.md) for corporate contribution guidance
+
+### What the CLA Covers
+
+By signing the CLA, you certify that:
+
+- ✅ You are the original author of your contributions
+- ✅ You have the right to make this contribution
+- ✅ Your contribution doesn't violate any third-party rights
+- ✅ You agree to copyright assignment to Jordan Ritz
+- ✅ Your contributions can be licensed under both Apache 2.0 and Elastic License 2.0
+
+### Questions About the CLA?
+
+- **Read the FAQ**: [docs/legal/README.md](docs/legal/README.md#frequently-asked-questions)
+- **Full legal text**: [docs/legal/CLA.md](docs/legal/CLA.md)
+- **Legal questions**: Consult your own attorney
+- **Process questions**: Open an issue with the `legal` label
+
+**Important**: PRs from contributors who haven't signed the CLA cannot be merged.
+
 ## Development Guidelines
 
 ### Test-Driven Development
