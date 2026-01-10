@@ -1,0 +1,138 @@
+name: Merge Gate
+
+# CRITICAL: This workflow acts as a merge gate for branch protection
+# It validates that all other CI checks that RAN have PASSED
+# This allows path-filtered workflows to skip without blocking merge
+# while ensuring any check that does run must succeed
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  pull_request_review:
+    types: [submitted, dismissed]
+
+permissions:
+  contents: read
+  checks: read
+  pull-requests: read
+
+jobs:
+  merge-gate:
+    name: Merge Gate Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Wait for other checks to register
+        run: |
+          echo "⏳ Waiting 30 seconds for other checks to register..."
+          sleep 30
+
+      - name: Validate all CI checks
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const sha = context.payload.pull_request.head.sha;
+
+            console.log(`🔍 Checking CI status for commit: ${sha}`);
+            console.log(`📋 PR #${context.payload.pull_request.number}`);
+
+            // Get all check runs for this commit
+            const { data: checkRuns } = await github.rest.checks.listForRef({
+              owner,
+              repo,
+              ref: sha,
+              per_page: 100
+            });
+
+            console.log(`\n📊 Found ${checkRuns.check_runs.length} total checks`);
+
+            // Filter out this workflow (merge-gate) from validation
+            const otherChecks = checkRuns.check_runs.filter(check =>
+              check.name !== 'Merge Gate Validation'
+            );
+
+            console.log(`\n✅ Validating ${otherChecks.length} checks (excluding merge-gate):\n`);
+
+            let hasFailures = false;
+            let hasPending = false;
+            const failures = [];
+            const pending = [];
+            const successes = [];
+            const skipped = [];
+
+            for (const check of otherChecks) {
+              const status = check.status;
+              const conclusion = check.conclusion;
+              const name = check.name;
+
+              // Check is still running
+              if (status !== 'completed') {
+                hasPending = true;
+                pending.push(name);
+                console.log(`⏳ ${name}: ${status}`);
+                continue;
+              }
+
+              // Check completed - evaluate conclusion
+              switch (conclusion) {
+                case 'success':
+                  successes.push(name);
+                  console.log(`✅ ${name}: success`);
+                  break;
+                case 'skipped':
+                case 'neutral':
+                  skipped.push(name);
+                  console.log(`⏭️  ${name}: ${conclusion}`);
+                  break;
+                case 'failure':
+                case 'timed_out':
+                case 'action_required':
+                  hasFailures = true;
+                  failures.push(name);
+                  console.log(`❌ ${name}: ${conclusion}`);
+                  break;
+                case 'cancelled':
+                  // Don't block on cancelled checks
+                  console.log(`⚠️  ${name}: cancelled (ignored)`);
+                  break;
+                default:
+                  console.log(`❓ ${name}: ${conclusion} (unknown)`);
+              }
+            }
+
+            // Summary
+            console.log(`\n📈 Check Summary:`);
+            console.log(`   ✅ Passed: ${successes.length}`);
+            console.log(`   ⏭️  Skipped: ${skipped.length}`);
+            console.log(`   ⏳ Pending: ${pending.length}`);
+            console.log(`   ❌ Failed: ${failures.length}`);
+
+            // Decision logic
+            if (hasPending) {
+              console.log(`\n⏳ Some checks are still pending:`);
+              pending.forEach(name => console.log(`   - ${name}`));
+              console.log(`\n⏰ Waiting for all checks to complete...`);
+              core.setFailed('Waiting for other checks to complete');
+              return;
+            }
+
+            if (hasFailures) {
+              console.log(`\n❌ MERGE GATE FAILED - The following checks failed:`);
+              failures.forEach(name => console.log(`   - ${name}`));
+              console.log(`\n⛔ Cannot merge until all checks pass`);
+              core.setFailed('One or more CI checks failed');
+              return;
+            }
+
+            console.log(`\n✅ MERGE GATE PASSED`);
+            console.log(`   All checks that ran have succeeded or were skipped`);
+            console.log(`   ✓ Safe to merge`);
+
+      - name: Wait for final check completion
+        if: failure()
+        run: |
+          echo "⏳ Some checks are still pending or have failed"
+          echo "   This check will re-run when the PR is updated"
+          echo "   Or you can manually re-run this workflow"
+          exit 1
