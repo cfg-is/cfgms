@@ -5,11 +5,29 @@ name: Merge Gate
 # This allows path-filtered workflows to skip without blocking merge
 # while ensuring any check that does run must succeed
 
+# TRIGGER STRATEGY: Uses workflow_run to only execute AFTER critical workflows complete
+# This prevents premature failures while tests are still running
+
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-  pull_request_review:
-    types: [submitted, dismissed]
+  # Trigger after critical workflows complete
+  workflow_run:
+    workflows:
+      - "Test Suite Validation"
+      - "Cross-Platform Build Validation"
+      - "Security Scanning Workflow"
+      - "CodeQL Security Analysis"
+    types:
+      - completed
+    branches:
+      - '**'  # All branches (for PRs)
+
+  # Also allow manual trigger for debugging
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to validate'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -22,20 +40,67 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Wait for other checks to register
-        run: |
-          echo "⏳ Waiting 30 seconds for other checks to register..."
-          sleep 30
-
-      - name: Validate all CI checks
+      - name: Get PR information
+        id: pr-info
         uses: actions/github-script@v7
         with:
           script: |
             const { owner, repo } = context.repo;
-            const sha = context.payload.pull_request.head.sha;
+            let sha, prNumber;
 
-            console.log(`🔍 Checking CI status for commit: ${sha}`);
-            console.log(`📋 PR #${context.payload.pull_request.number}`);
+            // Handle workflow_run trigger (most common)
+            if (context.eventName === 'workflow_run') {
+              sha = context.payload.workflow_run.head_sha;
+
+              // Find PR associated with this commit
+              const { data: prs } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+                owner,
+                repo,
+                commit_sha: sha
+              });
+
+              if (prs.length === 0) {
+                console.log('⚠️  No PR found for this commit - skipping validation');
+                core.setOutput('skip', 'true');
+                return;
+              }
+
+              prNumber = prs[0].number;
+              console.log(`📋 Found PR #${prNumber} for commit ${sha.substring(0, 7)}`);
+            }
+            // Handle manual workflow_dispatch trigger
+            else if (context.eventName === 'workflow_dispatch' && context.payload.inputs.pr_number) {
+              prNumber = context.payload.inputs.pr_number;
+              const { data: pr } = await github.rest.pulls.get({
+                owner,
+                repo,
+                pull_number: parseInt(prNumber)
+              });
+              sha = pr.head.sha;
+              console.log(`📋 Manual validation for PR #${prNumber}`);
+            }
+            else {
+              console.log('⚠️  Unexpected event type - skipping');
+              core.setOutput('skip', 'true');
+              return;
+            }
+
+            core.setOutput('sha', sha);
+            core.setOutput('pr_number', prNumber);
+            core.setOutput('skip', 'false');
+
+      - name: Validate all CI checks
+        id: validate-checks
+        if: steps.pr-info.outputs.skip != 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const sha = '${{ steps.pr-info.outputs.sha }}';
+            const prNumber = '${{ steps.pr-info.outputs.pr_number }}';
+
+            console.log(`🔍 Checking CI status for commit: ${sha.substring(0, 7)}`);
+            console.log(`📋 PR #${prNumber}`);
 
             // Get all check runs for this commit
             const { data: checkRuns } = await github.rest.checks.listForRef({
@@ -129,10 +194,19 @@ jobs:
             console.log(`   All checks that ran have succeeded or were skipped`);
             console.log(`   ✓ Safe to merge`);
 
-      - name: Wait for final check completion
-        if: failure()
-        run: |
-          echo "⏳ Some checks are still pending or have failed"
-          echo "   This check will re-run when the PR is updated"
-          echo "   Or you can manually re-run this workflow"
-          exit 1
+      - name: Post status summary
+        if: always() && steps.pr-info.outputs.skip != 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = '${{ steps.pr-info.outputs.pr_number }}';
+            const conclusion = '${{ steps.validate-checks.conclusion }}';
+
+            console.log(`\n📊 Merge Gate Summary for PR #${prNumber}:`);
+            console.log(`   Status: ${conclusion}`);
+            console.log(`   Triggered by: ${context.payload.workflow_run?.name || 'manual dispatch'}`);
+
+            if (conclusion === 'failure') {
+              console.log(`\n⚠️  This PR cannot be merged until all checks pass`);
+              console.log(`   The merge gate will automatically re-run when you push new commits`);
+            }
