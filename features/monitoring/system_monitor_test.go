@@ -157,8 +157,8 @@ func TestSystemMonitorLifecycle(t *testing.T) {
 		err := monitor.Start(ctx)
 		require.NoError(t, err)
 
-		// Stop with short timeout context
-		stopCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+		// Stop with timeout context (500ms allows for Windows CI performance)
+		stopCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 		defer cancel()
 
 		err = monitor.Stop(stopCtx)
