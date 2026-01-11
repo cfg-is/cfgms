@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 CFGMS Contributors
+// Copyright 2026 Jordan Ritz
 // cert-manager is a CLI tool for CFGMS certificate management operations.
 //
 // This tool provides command-line access to certificate management functionality

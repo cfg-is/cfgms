@@ -310,4 +310,11 @@ For full documentation, visit [docs.cfg.is](https://docs.cfg.is)
 
 ## Contributing
 
-Please read [CONTRIBUTING.md](CONTRIBUTING.md) for details on our code of conduct and development process.
+We welcome contributions to CFGMS!
+
+**Before contributing code:**
+1. **Sign the CLA** - Read and sign the [Contributor License Agreement](docs/legal/CLA.md)
+2. **Add your name** - Include yourself in [CONTRIBUTORS.md](CONTRIBUTORS.md)
+3. **Follow the process** - See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines
+
+The CLA assigns copyright to Jordan Ritz (current holder) and enables dual-licensing under Apache 2.0 and Elastic License 2.0. For details, see [docs/legal/README.md](docs/legal/README.md).

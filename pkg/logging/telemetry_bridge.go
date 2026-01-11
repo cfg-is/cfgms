@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 CFGMS Contributors
+// Copyright 2026 Jordan Ritz
 // Package logging provides telemetry integration for correlation ID and trace extraction.
 //
 // This file provides integration between the logging and telemetry packages while

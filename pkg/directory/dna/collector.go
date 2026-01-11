@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 CFGMS Contributors
+// Copyright 2026 Jordan Ritz
 // Package dna - DirectoryDNA Collector Implementation
 //
 // This file implements the DirectoryDNA collector that treats directory objects

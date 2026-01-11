@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 CFGMS Contributors
+// Copyright 2026 Jordan Ritz
 // Package interfaces defines the pluggable MQTT broker abstraction for CFGMS.
 //
 // This package provides a broker-agnostic interface that allows CFGMS to work

@@ -2,7 +2,7 @@
 // +build windows
 
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 CFGMS Contributors
+// Copyright 2026 Jordan Ritz
 // Package syslog provides stubs for Windows where native syslog is not available.
 // On Windows, syslog functionality is not supported as there is no native syslog daemon.
 // Consider using Windows Event Log instead for Windows-native logging.

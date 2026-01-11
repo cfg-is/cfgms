@@ -7,6 +7,23 @@
 <!-- Link to the GitHub issue this PR addresses -->
 Closes #
 
+## Contributor License Agreement (CLA)
+
+**⚠️ REQUIRED: All contributors must sign the CLA before code can be merged.**
+
+- [ ] **I have signed the CLA** by adding my name to [CONTRIBUTORS.md](../CONTRIBUTORS.md)
+- [ ] **I have read the CLA**: [docs/legal/CLA.md](../docs/legal/CLA.md)
+
+**For first-time contributors:**
+1. Read the [Contributor License Agreement](../docs/legal/CLA.md)
+2. Add your name to [CONTRIBUTORS.md](../CONTRIBUTORS.md) in this PR
+3. Check the box above
+
+**For corporate contributors:**
+- See [docs/legal/README.md](../docs/legal/README.md) for corporate CLA process
+
+**Questions?** See the [CLA FAQ](../docs/legal/README.md#frequently-asked-questions)
+
 ## Type of Change
 
 <!-- Mark the relevant option with an "x" -->
@@ -59,6 +76,7 @@ Closes #
 
 <!-- Ensure all items are completed before requesting review -->
 
+- [ ] **I have signed the CLA** (see section above) - **REQUIRED FOR ALL CODE CONTRIBUTIONS**
 - [ ] My code follows the project's coding standards
 - [ ] I have performed a self-review of my code
 - [ ] I have run `make test-commit` and all checks pass

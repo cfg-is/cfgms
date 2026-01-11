@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 CFGMS Contributors
+// Copyright 2026 Jordan Ritz
 // Package saas m365_tenant_manager integrates Microsoft 365 multi-tenant
 // management with CFGMS tenant system, providing discovery, sync, and
 // health monitoring for MSP M365 tenant management.
