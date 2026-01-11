@@ -6,7 +6,7 @@ CFGMS uses a **dual licensing model** to balance open source community benefits 
 
 ### Apache License 2.0 (Open Source)
 
-The vast majority of CFGMS is licensed under the [Apache License 2.0](LICENSE-APACHE-2.0), including:
+The vast majority of CFGMS is licensed under the [Apache License 2.0](LICENSE), including:
 
 - **Complete CLI and API** - Full command-line and REST API functionality
 - **All Modules and Integrations** - Endpoint management, M365, Active Directory, PSA/RMM connectors
@@ -25,6 +25,48 @@ A small subset of enterprise features is licensed under the [Elastic License 2.0
 - **Web UI** (planned future feature) - Graphical interface for workflow building and system management
 
 The Elastic License v2 is source-available and prevents competitors from offering CFGMS as a hosted service while allowing you to use it freely in your own infrastructure.
+
+## Copyright and Ownership
+
+### Current Copyright Holder
+
+**All CFGMS code is copyrighted by Jordan Ritz** (as of January 2026).
+
+Every source file in the repository includes this copyright notice:
+```go
+// SPDX-License-Identifier: Apache-2.0  (or Elastic-2.0 for commercial)
+// Copyright 2026 Jordan Ritz
+```
+
+### Future Entity Assignment
+
+When cfg.is is formed as a legal entity, copyright will be assigned to that entity. This transition is planned and documented in the Contributor License Agreement.
+
+### Why Copyright Assignment?
+
+Clear copyright ownership enables:
+
+1. **License Enforcement** - Only the copyright holder can enforce license violations (e.g., the "no hosted service" restriction in Elastic License 2.0)
+2. **Dual-License Management** - Flexibility to include contributions in either Apache 2.0 or Elastic 2.0 components
+3. **Legal Certainty** - Clear ownership prevents ambiguity about who controls the code
+4. **Future Planning** - Simplified transfer when cfg.is entity is formed
+
+### Contributor License Agreement (CLA)
+
+**All contributors must sign the CLA before their code can be merged.**
+
+The CLA establishes that:
+- Contributors **assign copyright** in their contributions to Jordan Ritz
+- Contributions can be licensed under **both Apache 2.0 and Elastic License 2.0**
+- Rights will **transfer to cfg.is** entity when formed
+- Contributors retain the right to use their own contributions (subject to local laws)
+
+**To contribute:**
+1. Read the CLA: [docs/legal/CLA.md](docs/legal/CLA.md)
+2. Add your name to [CONTRIBUTORS.md](CONTRIBUTORS.md)
+3. Submit your Pull Request
+
+See [CONTRIBUTING.md](CONTRIBUTING.md#contributor-license-agreement-cla) for complete details.
 
 ## Why Dual Licensing?
 
@@ -164,7 +206,14 @@ No. Neither Apache 2.0 nor Elastic License 2.0 requires you to open source your 
 
 ### Can I contribute to CFGMS?
 
-Absolutely! We welcome contributions to all parts of CFGMS. By contributing, you agree that your contributions will be licensed under the same license as the component you're contributing to (Apache 2.0 for OSS components, Elastic License 2.0 for commercial components).
+Absolutely! We welcome contributions to all parts of CFGMS.
+
+**Before contributing code:**
+1. Read and sign the [Contributor License Agreement](docs/legal/CLA.md)
+2. Add your name to [CONTRIBUTORS.md](CONTRIBUTORS.md)
+3. Your contributions will be licensed under the same license as the component you're contributing to (Apache 2.0 for OSS, Elastic License 2.0 for commercial)
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the complete contribution process.
 
 ### How do I know what's licensed under which license?
 
@@ -245,14 +294,13 @@ We plan features in public, accept community input, and maintain open sprint pla
 
 ### Can I contribute to commercial features?
 
-Yes, with caveats:
-- **Commercial code contributions**: Licensed under Elastic License 2.0
-- **OSS code contributions**: Licensed under Apache 2.0
-- **Contributor Agreement**: Required for commercial contributions
+Yes! Contributions to commercial features follow the same process as OSS contributions:
 
-We welcome contributions to all parts of CFGMS. By contributing, you agree your contributions will be licensed under the same license as the component you're contributing to.
+1. **Sign the CLA**: Read [docs/legal/CLA.md](docs/legal/CLA.md) and add your name to [CONTRIBUTORS.md](CONTRIBUTORS.md)
+2. **Understand the license**: Your contribution will be licensed under Elastic License 2.0 (for commercial features) or Apache 2.0 (for OSS features)
+3. **Discuss first**: For major commercial feature contributions, open a GitHub Discussion to align on approach
 
-For major commercial feature contributions, please open a GitHub Discussion first to align on approach.
+**Important**: The CLA is required for ALL contributions (OSS and commercial). By signing, you agree your contributions can be dual-licensed under both Apache 2.0 and Elastic License 2.0 as determined by the copyright holder.
 
 ### Will features move from OSS to Commercial?
 
@@ -299,5 +347,5 @@ We don't monetize integrations or module development - those are community-drive
 **Version**: v0.7.0
 
 For the complete legal text:
-- [Apache License 2.0](LICENSE-APACHE-2.0)
+- [Apache License 2.0](LICENSE)
 - [Elastic License 2.0](LICENSE-ELASTIC-2.0)

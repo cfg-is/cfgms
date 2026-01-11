@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 CFGMS Contributors
+// Copyright 2026 Jordan Ritz
 // Package file implements a file-based logging provider for CFGMS time-series logging.
 // This provider writes logs to rotating files with compression and retention policies,
 // providing zero-dependency time-series logging suitable for most deployments.

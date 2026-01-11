@@ -110,15 +110,22 @@ Implemented comprehensive Docker-based E2E testing infrastructure that validates
 - [x] Add public repository workflows (Dependabot, CodeQL, container scanning, license compliance, SBOM) (issue #280) ✅ COMPLETED
 - [x] Create `SECURITY.md` vulnerability disclosure policy (issue #281) ✅ COMPLETED
 - [x] Re-enable and validate GitHub Actions workflows (issue #109, issue #15) ✅ COMPLETED
+- [x] Configure branch protection rules for main and develop (issue #283) ✅ COMPLETED
 - [x] E2E Test: Fix MQTT+QUIC test skips, add parallelization, reduce test-completion time (issue #297) ✅ COMPLETED
-- [ ] ~~Convert repository to public and~~ activate GitHub Advanced Security features (issue #282)
-- [ ] Configure branch protection rules (issue #283)
-- [ ] Update documentation with security badges and public links (issue #284)
+- [x] Update copyright to Jordan Ritz and implement Contributor License Agreement (issue #307) ✅ COMPLETED
+- [x] Convert repository to public and activate GitHub Advanced Security features (issue #282) ✅ COMPLETED
+- [x] Update documentation with security badges and public links (issue #284) ✅ COMPLETED
 
 #### v0.8.1 Bug fixes and test completion
 
 - [x] Fix single-use registration token enforcement in database storage (issue #299) ✅ COMPLETED
-- [ ] Complete E2E test framework for MQTT+QUIC mode (issue #294)
+- [x] Complete E2E test framework for MQTT+QUIC mode (issue #294) ✅ COMPLETED
+- [ ] Enable TestModuleExecution suite with proper steward container configuration (issue #312)
+- [ ] Configure MQTT broker ACLs for topic-level access control by steward ID (issue #313)
+- [ ] Align story-commit validation with PR acceptance CI tests for local test coverage (issue #315)
+  - Ensure `make test-commit` provides maximum possible local coverage of CI validation gates
+  - Review and separate blocking vs non-blocking tests (e.g., performance tests should be non-blocking)
+  - Reduce developer friction while maintaining quality gates
 
 ### Phase 2: Production Stability & Feature Completion (v0.9.0 - v1.0.0)
 

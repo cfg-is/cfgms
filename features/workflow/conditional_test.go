@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 CFGMS Contributors
+// Copyright 2026 Jordan Ritz
 package workflow
 
 import (
@@ -518,6 +518,9 @@ func TestWorkflowConditionalExecution(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 		execution, _ = engine.GetExecution(execution.ID)
 	}
+
+	// Additional wait for async goroutines to complete logging (Windows CI timing)
+	time.Sleep(100 * time.Millisecond)
 
 	assert.Equal(t, StatusCompleted, execution.GetStatus())
 	assert.True(t, execution.HasStepResult("conditional-step"))

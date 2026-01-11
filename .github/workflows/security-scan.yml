@@ -13,8 +13,8 @@ on:
       - '.editorconfig'
   push:
     branches:
-      - main  # ALWAYS run on main (no path filter)
-      - develop  # ALWAYS run on develop (no path filter)
+      - main  # Run on main for release security validation
+      # NOTE: Removed develop - security scans already run on PR before merge (no redundant post-merge scanning)
   workflow_dispatch:
     inputs:
       scan_type:
@@ -162,8 +162,8 @@ jobs:
       run: |
         echo "🛡️  Running gosec Go Security Analysis"
         mkdir -p sarif-results
-        
-        # Run with SARIF output for GitHub Security tab using our configuration
+
+        # Run with SARIF output for local artifact storage using our configuration
         # Use -no-fail to prevent SARIF generation from failing the workflow
         if [ -f .gosec.json ]; then
           gosec -conf .gosec.json -fmt sarif -out sarif-results/gosec.sarif -no-fail ./...
@@ -171,7 +171,7 @@ jobs:
           gosec -fmt sarif -out sarif-results/gosec.sarif -no-fail ./...
         fi
         gosec_exit_code=$?
-        
+
         # Run regular scan for status checking (this honors our configuration)
         if make security-gosec; then
           echo "status=passed" >> $GITHUB_OUTPUT
@@ -180,15 +180,21 @@ jobs:
           echo "status=failed" >> $GITHUB_OUTPUT
           echo "issues-found=true" >> $GITHUB_OUTPUT
         fi
-    
-    - name: Upload gosec SARIF
-      uses: github/codeql-action/upload-sarif@v3
-      if: always() && hashFiles('sarif-results/gosec.sarif') != ''
-      with:
-        sarif_file: sarif-results/gosec.sarif
-        category: gosec-security-patterns
-      continue-on-error: true
-    
+
+    # DISABLED: Upload gosec SARIF to GitHub Security tab
+    # This was triggering duplicate GitHub Advanced Security gosec checks
+    # with default configuration that conflicts with our custom .gosec.json
+    # Our gosec-scan workflow provides comprehensive validation with proper
+    # configuration, and results are still available via workflow artifacts.
+    #
+    # - name: Upload gosec SARIF
+    #   uses: github/codeql-action/upload-sarif@v3
+    #   if: always() && hashFiles('sarif-results/gosec.sarif') != ''
+    #   with:
+    #     sarif_file: sarif-results/gosec.sarif
+    #     category: gosec-security-patterns
+    #   continue-on-error: true
+
     - name: Upload gosec Results
       uses: actions/upload-artifact@v4
       if: always()

@@ -13,8 +13,9 @@ on:
       - '.editorconfig'
   push:
     branches:
-      - main  # ALWAYS run on main (no path filter)
-      - develop  # ALWAYS run on develop (no path filter)
+      - main  # Run on main for production deployment validation
+      - develop  # Run on develop ONLY for production-readiness-validation (load testing, benchmarks)
+      # NOTE: security-deployment-gate is redundant (already runs on PR), but kept for production-readiness-validation
   workflow_dispatch:
     inputs:
       gate_type:
@@ -38,9 +39,11 @@ on:
 
 jobs:
   # Security Gate - Critical Vulnerability Blocking (Story #99)
+  # NOTE: Runs on PRs and push to main only (skips post-merge to develop to avoid redundancy)
   security-deployment-gate:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     outputs:
       security-status: ${{ steps.security-gate.outputs.security-status }}
       deployment-allowed: ${{ steps.security-gate.outputs.deployment-allowed }}
@@ -523,8 +526,8 @@ jobs:
         set +a
 
         # Run existing integration tests with infrastructure
-        # Skip MQTT+QUIC tests until Issue #294 (functional bugs in test suite)
-        go test -v -race -timeout=10m $(go list ./test/integration/... | grep -v mqtt_quic | grep -v "test/integration$")
+        # MQTT+QUIC tests now enabled - infrastructure is ready (test-mqtt-quic-setup)
+        go test -v -race -timeout=10m $(go list ./test/integration/... | grep -v "test/integration$")
 
         # Run E2E tests with controller focus
         go test -v -race -timeout=15m ./test/e2e/... -run "TestE2EScenarios/(TestControllerStewardIntegration|TestRBACIntegration|TestWorkflowIntegration|TestDataFlow)"

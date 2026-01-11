@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 CFGMS Contributors
+// Copyright 2026 Jordan Ritz
 package mqtt_quic
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -22,25 +24,38 @@ import (
 // AC9: Reconnection test
 type HeartbeatFailoverTestSuite struct {
 	suite.Suite
-	helper   *TestHelper
-	mqttAddr string
+	helper    *TestHelper
+	mqttAddr  string
+	tlsConfig *tls.Config
+	stewardID string
 }
 
 func (s *HeartbeatFailoverTestSuite) SetupSuite() {
-	s.helper = NewTestHelper(GetTestHTTPAddr("http://127.0.0.1:8080"))
-	s.mqttAddr = GetTestMQTTAddr("tcp://127.0.0.1:1886")
+	// Skip if running in short/fast mode - requires MQTT broker infrastructure
+	if os.Getenv("CFGMS_TEST_SHORT") == "1" {
+		s.T().Skip("Skipping heartbeat/failover tests in short mode - requires MQTT broker")
+	}
+
+	s.helper = NewTestHelper(GetTestHTTPAddr("https://127.0.0.1:8080"))
+	s.mqttAddr = GetTestMQTTAddr("ssl://127.0.0.1:1886") // Use TLS
+
+	// Get TLS config from registration API (required for mTLS)
+	s.tlsConfig, s.stewardID = s.helper.GetTLSConfigFromRegistration(s.T(), "default", "integration-test")
+}
+
+// createMQTTClient creates an MQTT client with TLS config
+func (s *HeartbeatFailoverTestSuite) createMQTTClient(clientID string) mqtt.Client {
+	opts := CreateMQTTClientOptions(s.mqttAddr, clientID, s.tlsConfig)
+	return mqtt.NewClient(opts)
 }
 
 // TestHeartbeatMechanism tests periodic heartbeat publishing (AC6)
 func (s *HeartbeatFailoverTestSuite) TestHeartbeatMechanism() {
-	stewardID := "test-steward-heartbeat"
+	stewardID := fmt.Sprintf("test-steward-heartbeat-%d", time.Now().UnixNano())
 	heartbeatTopic := fmt.Sprintf("cfgms/steward/%s/heartbeat", stewardID)
 
-	opts := mqtt.NewClientOptions()
-	opts.AddBroker(s.mqttAddr)
-	opts.SetClientID(stewardID)
+	opts := CreateMQTTClientOptions(s.mqttAddr, stewardID, s.tlsConfig)
 	opts.SetKeepAlive(30 * time.Second) // 30s keepalive matches MQTT PINGREQ
-	opts.SetConnectTimeout(10 * time.Second)
 
 	client := mqtt.NewClient(opts)
 	token := client.Connect()
@@ -83,14 +98,11 @@ func (s *HeartbeatFailoverTestSuite) TestHeartbeatMechanism() {
 
 // TestMQTTKeepAliveTimeout tests MQTT keepalive timeout detection (AC7)
 func (s *HeartbeatFailoverTestSuite) TestMQTTKeepAliveTimeout() {
-	stewardID := "test-steward-timeout"
+	stewardID := fmt.Sprintf("test-steward-timeout-%d", time.Now().UnixNano())
 
 	// Create client with short keepalive
-	opts := mqtt.NewClientOptions()
-	opts.AddBroker(s.mqttAddr)
-	opts.SetClientID(stewardID)
+	opts := CreateMQTTClientOptions(s.mqttAddr, stewardID, s.tlsConfig)
 	opts.SetKeepAlive(5 * time.Second) // Short keepalive for testing
-	opts.SetConnectTimeout(10 * time.Second)
 
 	// Track connection status
 	var connected atomic.Bool
@@ -125,7 +137,7 @@ func (s *HeartbeatFailoverTestSuite) TestFailoverDetectionTiming() {
 	// - Last Will Testament (LWT) message published immediately
 	// - Controller detects via LWT: offline within <15s
 
-	stewardID := "test-steward-failover"
+	stewardID := fmt.Sprintf("test-steward-failover-%d", time.Now().UnixNano())
 	lwtTopic := fmt.Sprintf("cfgms/steward/%s/status", stewardID)
 
 	// Track LWT delivery
@@ -134,12 +146,7 @@ func (s *HeartbeatFailoverTestSuite) TestFailoverDetectionTiming() {
 	var lwtTimeMutex sync.Mutex
 
 	// Create observer client to monitor LWT
-	observerOpts := mqtt.NewClientOptions()
-	observerOpts.AddBroker(s.mqttAddr)
-	observerOpts.SetClientID("test-observer")
-	observerOpts.SetConnectTimeout(10 * time.Second)
-
-	observer := mqtt.NewClient(observerOpts)
+	observer := s.createMQTTClient(fmt.Sprintf("test-observer-%d", time.Now().UnixNano()))
 	token := observer.Connect()
 	s.True(token.WaitTimeout(10 * time.Second))
 	s.NoError(token.Error())
@@ -159,11 +166,8 @@ func (s *HeartbeatFailoverTestSuite) TestFailoverDetectionTiming() {
 	s.NoError(subToken.Error())
 
 	// Create steward with LWT
-	stewardOpts := mqtt.NewClientOptions()
-	stewardOpts.AddBroker(s.mqttAddr)
-	stewardOpts.SetClientID(stewardID)
+	stewardOpts := CreateMQTTClientOptions(s.mqttAddr, stewardID, s.tlsConfig)
 	stewardOpts.SetKeepAlive(5 * time.Second)
-	stewardOpts.SetConnectTimeout(10 * time.Second)
 
 	// Configure Last Will Testament
 	lwtPayload := map[string]interface{}{
@@ -199,16 +203,11 @@ func (s *HeartbeatFailoverTestSuite) TestFailoverDetectionTiming() {
 
 // TestCommandDeliveryMechanism tests command delivery reliability (AC8)
 func (s *HeartbeatFailoverTestSuite) TestCommandDeliveryMechanism() {
-	stewardID := "test-steward-commands"
+	stewardID := fmt.Sprintf("test-steward-commands-%d", time.Now().UnixNano())
 	commandTopic := fmt.Sprintf("cfgms/steward/%s/commands", stewardID)
 
-	// Create steward client
-	opts := mqtt.NewClientOptions()
-	opts.AddBroker(s.mqttAddr)
-	opts.SetClientID(stewardID)
-	opts.SetConnectTimeout(10 * time.Second)
-
-	client := mqtt.NewClient(opts)
+	// Create steward client with TLS
+	client := s.createMQTTClient(stewardID)
 	token := client.Connect()
 	s.True(token.WaitTimeout(10 * time.Second))
 	s.NoError(token.Error())
@@ -259,18 +258,15 @@ func (s *HeartbeatFailoverTestSuite) TestCommandDeliveryMechanism() {
 
 // TestReconnectionBehavior tests automatic reconnection (AC9)
 func (s *HeartbeatFailoverTestSuite) TestReconnectionBehavior() {
-	stewardID := "test-steward-reconnect"
+	stewardID := fmt.Sprintf("test-steward-reconnect-%d", time.Now().UnixNano())
 
 	// Track connection events
 	var connectionCount atomic.Int32
 	var disconnectionCount atomic.Int32
 
-	opts := mqtt.NewClientOptions()
-	opts.AddBroker(s.mqttAddr)
-	opts.SetClientID(stewardID)
+	opts := CreateMQTTClientOptions(s.mqttAddr, stewardID, s.tlsConfig)
 	opts.SetAutoReconnect(true)
 	opts.SetMaxReconnectInterval(5 * time.Second)
-	opts.SetConnectTimeout(10 * time.Second)
 
 	opts.SetOnConnectHandler(func(client mqtt.Client) {
 		count := connectionCount.Add(1)
@@ -298,15 +294,12 @@ func (s *HeartbeatFailoverTestSuite) TestReconnectionBehavior() {
 
 // TestMessageQueuePersistence tests message queue during offline period (AC9)
 func (s *HeartbeatFailoverTestSuite) TestMessageQueuePersistence() {
-	stewardID := "test-steward-queue"
+	stewardID := fmt.Sprintf("test-steward-queue-%d", time.Now().UnixNano())
 	commandTopic := fmt.Sprintf("cfgms/steward/%s/commands", stewardID)
 
 	// Create client with persistent session (CleanSession=false would be production)
-	opts := mqtt.NewClientOptions()
-	opts.AddBroker(s.mqttAddr)
-	opts.SetClientID(stewardID)
+	opts := CreateMQTTClientOptions(s.mqttAddr, stewardID, s.tlsConfig)
 	opts.SetCleanSession(false) // Persistent session
-	opts.SetConnectTimeout(10 * time.Second)
 
 	// First connection: subscribe
 	client := mqtt.NewClient(opts)
@@ -331,12 +324,7 @@ func (s *HeartbeatFailoverTestSuite) TestMessageQueuePersistence() {
 	time.Sleep(1 * time.Second)
 
 	// Publish messages while offline (would be queued by broker)
-	publisherOpts := mqtt.NewClientOptions()
-	publisherOpts.AddBroker(s.mqttAddr)
-	publisherOpts.SetClientID("test-publisher")
-	publisherOpts.SetConnectTimeout(10 * time.Second)
-
-	publisher := mqtt.NewClient(publisherOpts)
+	publisher := s.createMQTTClient(fmt.Sprintf("test-publisher-%d", time.Now().UnixNano()))
 	token = publisher.Connect()
 	s.True(token.WaitTimeout(10 * time.Second))
 	s.NoError(token.Error())

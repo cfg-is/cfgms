@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 CFGMS Contributors
+// Copyright 2026 Jordan Ritz
 // Package examples provides example implementations of the API Module Framework
 // showing how to create providers and use them with both normalized operations
 // and raw API access.

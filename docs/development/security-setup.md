@@ -577,16 +577,134 @@ git config core.hooksPath /dev/null  # Disable
 git config --unset core.hooksPath     # Re-enable
 ```
 
+## GitHub Advanced Security Features
+
+CFGMS uses GitHub Advanced Security features for comprehensive security scanning in CI/CD:
+
+### CodeQL Analysis
+
+**What It Is**: Semantic code analysis that finds security vulnerabilities using queries against a code database.
+
+**Accessing Results**:
+1. Visit [Security Tab](https://github.com/cfg-is/cfgms/security) in the repository
+2. Click "Code scanning" to view CodeQL findings
+3. Review alerts with severity ratings and remediation guidance
+
+**Configuration**: See `.github/workflows/codeql.yml` for query configuration and scan schedule.
+
+**Local Testing**: CodeQL requires GitHub infrastructure and cannot be run locally, but findings are visible in pull requests.
+
+### Dependabot Security Updates
+
+**What It Is**: Automated dependency vulnerability detection and update pull requests.
+
+**Workflow**:
+1. Dependabot scans `go.mod` daily for vulnerable dependencies
+2. Creates automated PRs for security updates
+3. PRs include vulnerability details and version compatibility info
+
+**Managing Dependabot PRs**:
+```bash
+# Review Dependabot PR
+gh pr view [PR-NUMBER]
+
+# Check for breaking changes
+make test
+
+# Merge if tests pass
+gh pr merge [PR-NUMBER] --squash
+```
+
+**Configuration**: See `.github/dependabot.yml` for update schedules and package ecosystems.
+
+### Secret Scanning
+
+**What It Is**: Prevents accidental commit of credentials, API keys, and sensitive data.
+
+**Features**:
+- Automatic scanning of all commits for known secret patterns
+- Push protection (blocks commits with secrets)
+- Partner patterns (GitHub, AWS, Azure, etc.)
+- Custom patterns for CFGMS-specific secrets
+
+**If Secret Detected**:
+1. Do NOT force push to bypass protection
+2. Remove the secret from the commit
+3. Rotate/revoke the exposed credential
+4. Rewrite git history: `git rebase -i` or create fresh branch
+
+**Viewing Alerts**: Navigate to [Security > Secret scanning](https://github.com/cfg-is/cfgms/security/secret-scanning)
+
+### Security Advisories
+
+**What It Is**: Private vulnerability reporting and coordinated disclosure.
+
+**For Reporters**:
+1. Visit [Security Advisories](https://github.com/cfg-is/cfgms/security/advisories)
+2. Click "Report a vulnerability"
+3. Provide details privately (NOT public issues)
+4. We respond within 48 hours
+
+**For Maintainers**:
+- Triage reports in Security > Advisories
+- Create CVE if applicable
+- Coordinate disclosure timeline
+- Publish advisory after fix deployed
+
+### OpenSSF Scorecard
+
+**What It Is**: Automated security health metrics using best practice checks.
+
+**Metrics Tracked**:
+- Dependency update practices
+- Code review requirements
+- CI/CD security configuration
+- Branch protection enforcement
+- Security policy presence
+- Vulnerability disclosure process
+
+**View Scorecard**: [securityscorecards.dev/viewer/?uri=github.com/cfg-is/cfgms](https://securityscorecards.dev/viewer/?uri=github.com/cfg-is/cfgms)
+
+**Improving Score**:
+- Maintain branch protection on main/develop
+- Require code reviews for all PRs
+- Keep dependencies updated
+- Use SAST tools (CodeQL, gosec)
+- Document security policy (SECURITY.md)
+
+### Navigating GitHub Security Tab
+
+**Quick Access**:
+```
+Repository → Security tab (shield icon)
+  ├── Overview: Security posture summary
+  ├── Code scanning: CodeQL findings
+  ├── Secret scanning: Detected secrets
+  ├── Dependabot: Dependency vulnerabilities
+  ├── Security advisories: CVE reporting
+  └── Security policy: SECURITY.md
+```
+
+**Best Practices**:
+- Review security tab weekly
+- Triage high/critical findings immediately
+- Track remediation in GitHub Issues
+- Link security fixes to advisories
+
 ## Support and Documentation
 
 - **CFGMS Security Architecture**: [docs/security/architecture.md](../security/architecture.md)
 - **Development Workflow**: [CLAUDE.md](../../CLAUDE.md)
 - **Issue Reporting**: [GitHub Issues](https://github.com/cfg-is/cfgms/issues)
+- **Security Tab**: [GitHub Security](https://github.com/cfg-is/cfgms/security)
 - **Tool Documentation**:
   - [Trivy Documentation](https://aquasecurity.github.io/trivy/)
   - [Nancy Documentation](https://github.com/sonatype-nexus-community/nancy)
+  - [CodeQL Documentation](https://codeql.github.com/docs/)
+  - [Dependabot Documentation](https://docs.github.com/en/code-security/dependabot)
+  - [OpenSSF Scorecard](https://github.com/ossf/scorecard)
 
 ---
 
-**Last Updated**: 2025-08-04 (v0.3.1 Story 1.3)  
-**Version**: 1.0 - Foundation Security Tools (Trivy + Nancy)
+**Last Updated**: 2026-01-11 (v0.8.0 - Public Repository Launch)
+**Version**: 2.0 - Added GitHub Advanced Security Features

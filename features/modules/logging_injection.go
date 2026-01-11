@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 CFGMS Contributors
+// Copyright 2026 Jordan Ritz
 // Package modules defines interfaces for dependency injection into CFGMS modules.
 //
 // This package implements a secure interface-based logging injection pattern that

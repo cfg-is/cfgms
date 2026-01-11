@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 CFGMS Contributors
+// Copyright 2026 Jordan Ritz
 
 // Package integration contains integration tests that validate CFGMS deployment scenarios
 // as documented in QUICK_START.md. These tests ensure that the documented workflows

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 CFGMS Contributors
+// Copyright 2026 Jordan Ritz
 package mqtt_quic
 
 import (
@@ -22,7 +22,7 @@ type QUICSessionTestSuite struct {
 }
 
 func (s *QUICSessionTestSuite) SetupSuite() {
-	s.helper = NewTestHelper(GetTestHTTPAddr("http://127.0.0.1:8080"))
+	s.helper = NewTestHelper(GetTestHTTPAddr("https://127.0.0.1:8080"))
 
 	// Create session manager for testing
 	s.sessionManager = session.NewManager(&session.Config{

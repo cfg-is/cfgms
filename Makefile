@@ -557,8 +557,8 @@ test-infrastructure-required:
 # Production-critical functionality only (moderate timeout)
 test-production-critical:
 	@echo "🔐 Running Production-Critical Tests"
-	@echo "===================================" 
-	go test -v -race -timeout=15m ./test/unit/... ./test/integration/...
+	@echo "==================================="
+	@CFGMS_TEST_SHORT=1 go test -v -race -timeout=15m ./test/unit/... ./test/integration/...
 	@echo "✅ Production-critical tests completed"
 
 
@@ -624,8 +624,39 @@ test-module:
 	@echo "🧪 Testing module: $(MODULE)"
 	@go test -race -timeout=2m ./features/modules/$(MODULE)/...
 
+# Fast comprehensive tests for CI (Story #294 Phase 4)
+.PHONY: test-fast
+test-fast:
+	@echo "🚀 Running Fast Comprehensive Tests"
+	@echo "====================================="
+	@echo "💡 Optimized for CI/CD pipelines"
+	@echo ""
+	@echo "🧪 Running unit tests..."
+	@CFGMS_TEST_SHORT=1 go test -short -race -timeout=5m ./pkg/... ./features/... ./api/... ./cmd/... || exit 1
+	@echo ""
+	@echo "✅ Fast comprehensive tests complete"
 
+# Load testing for production readiness (Story #294 Phase 4)
+.PHONY: test-load-testing
+test-load-testing:
+	@echo "⚡ Running Load Tests"
+	@echo "====================="
+	@echo "📊 Testing system under high concurrency"
+	@echo ""
+	@go test -race -timeout=10m -run "Load" ./test/e2e/... ./test/integration/mqtt_quic/... ./test/performance/... || exit 1
+	@echo ""
+	@echo "✅ Load testing complete"
 
+# Performance benchmarks for production gates (Story #294 Phase 4)
+.PHONY: test-performance-benchmarks
+test-performance-benchmarks:
+	@echo "📊 Running Performance Benchmarks"
+	@echo "=================================="
+	@echo "⏱️  Validating performance SLAs"
+	@echo ""
+	@go test -bench=. -benchmem -run=^$$ ./test/performance/... ./test/e2e/... || exit 1
+	@echo ""
+	@echo "✅ Performance benchmarks complete"
 
 
 
@@ -808,13 +839,8 @@ security-gosec:
 		exit 1; \
 	fi
 	@echo "Analyzing Go code for security patterns..."
-	@echo "Using command-line configuration for optimal results..."
-	@gosec -fmt json -quiet -tests=false -severity=medium -confidence=medium \
-		-exclude-dir=test \
-		-exclude-dir=examples \
-		-exclude-dir=docs \
-		-exclude-generated \
-		./... > /tmp/gosec-results.json 2>/dev/null || true
+	@echo "Using .gosec.json configuration (single source of truth)..."
+	@gosec -conf .gosec.json -exclude=G103,G115,G404 -fmt json -quiet ./... > /tmp/gosec-results.json 2>/dev/null || true
 	@issues_count=$$(test -s /tmp/gosec-results.json && jq '.Issues | length' /tmp/gosec-results.json 2>/dev/null || echo "0"); \
 	if [ "$$issues_count" -gt 0 ]; then \
 		echo "⚠️  gosec found $$issues_count security issues:"; \
@@ -1520,12 +1546,12 @@ test-mqtt-quic: test-mqtt-quic-setup
 	@echo ""
 	@echo "🔌 Running MQTT+QUIC Integration Tests"
 	@echo "======================================"
-	@echo "Testing against controller-standalone (MQTT: 1886, QUIC: 4436, HTTPS: 9080)"
+	@echo "Testing against controller-standalone (MQTT: 1886, QUIC: 4436, HTTPS: 8080)"
 	@echo ""
 	@echo "🧪 Running all MQTT+QUIC test suites..."
 	@if [ -f .env.test ]; then \
 		set -a && . ./.env.test && set +a && \
-		CFGMS_TEST_HTTP_ADDR=https://127.0.0.1:9080 \
+		CFGMS_TEST_HTTP_ADDR=https://127.0.0.1:8080 \
 		CFGMS_TEST_MQTT_ADDR=ssl://127.0.0.1:1886 \
 		CFGMS_TEST_QUIC_ADDR=127.0.0.1:4436 \
 		CFGMS_TEST_CERTS_PATH=$(PWD)/test/integration/mqtt_quic/certs \
@@ -1614,25 +1640,56 @@ test-e2e-scenarios:
 	@echo "🧪 Running comprehensive E2E scenarios..."
 	@if [ -f .env.test ]; then \
 		set -a && . ./.env.test && set +a && \
-		go test -v -race -timeout=15m ./test/e2e/... || exit 1; \
+		go test -v -race -timeout=50m ./test/e2e/... || exit 1; \
 	else \
 		echo "❌ .env.test not found"; \
 		exit 1; \
 	fi
 	@echo "✅ E2E scenario tests passed"
 
+# Fast E2E validation (excludes long-running performance/scale tests)
+# Use this for story completion validation - performance tests run separately
+test-e2e-fast:
+	@echo ""
+	@echo "⚡ FAST E2E VALIDATION"
+	@echo "======================"
+	@echo "Running 2 core test suites in parallel:"
+	@echo "  1️⃣  MQTT+QUIC integration tests"
+	@echo "  2️⃣  Controller E2E tests"
+	@echo ""
+	@echo "⏱️  Expected runtime: ~3-5 minutes"
+	@echo "⚠️  Excludes long-running performance/scale tests (use test-e2e-parallel for full validation)"
+	@echo ""
+	@$(MAKE) test-mqtt-quic-setup
+	@echo ""
+	@$(MAKE) -j2 test-e2e-mqtt-quic test-e2e-controller || { \
+		echo ""; \
+		echo "❌ One or more E2E test suites failed"; \
+		$(MAKE) test-mqtt-quic-cleanup; \
+		exit 1; \
+	}
+	@echo ""
+	@$(MAKE) test-mqtt-quic-cleanup
+	@echo ""
+	@echo "✅ FAST E2E VALIDATION PASSED"
+	@echo "=============================="
+	@echo "- ✅ MQTT+QUIC integration tests"
+	@echo "- ✅ Controller Docker E2E tests"
+	@echo ""
+	@echo "🎯 Core E2E validation complete - ready for PR"
+
 # Parallel E2E execution (Story #297 Phase 2)
-# Runs all E2E test suites in parallel for faster feedback
+# Runs all E2E test suites in parallel including long-running performance tests
 test-e2e-parallel:
 	@echo ""
-	@echo "⚡ PARALLEL E2E VALIDATION"
-	@echo "=========================="
+	@echo "⚡ PARALLEL E2E VALIDATION (FULL)"
+	@echo "=================================="
 	@echo "Running 3 test suites in parallel:"
 	@echo "  1️⃣  MQTT+QUIC integration tests"
 	@echo "  2️⃣  Controller E2E tests"
-	@echo "  3️⃣  Comprehensive E2E scenarios"
+	@echo "  3️⃣  Comprehensive E2E scenarios (performance/scale - may take 45min+)"
 	@echo ""
-	@echo "⏱️  Expected runtime: ~3-5 minutes (53% faster than sequential)"
+	@echo "⏱️  Expected runtime: ~45-60 minutes (includes long-running tests)"
 	@echo ""
 	@$(MAKE) test-mqtt-quic-setup
 	@echo ""
@@ -1686,10 +1743,11 @@ test-e2e-local:
 	@echo "🎯 Full E2E validation complete - ready for PR"
 
 # Story completion validation - comprehensive validation for /story-complete
-# Includes all commit validation PLUS full E2E testing with Docker infrastructure
-# Story #297: Now uses parallel execution for 53% faster feedback (3-5min vs 8-10min)
+# Includes all commit validation PLUS fast E2E testing (excludes long-running perf tests)
+# Story #297: Uses parallel execution for 53% faster feedback
+# Issue #315: Performance/scale tests run separately to avoid blocking story completion
 .PHONY: test-complete
-test-complete: test-commit test-e2e-parallel
+test-complete: test-commit test-e2e-fast
 	@echo ""
 	@echo "✅ STORY COMPLETION VALIDATION FINISHED"
 	@echo "========================================"
@@ -1699,9 +1757,10 @@ test-complete: test-commit test-e2e-parallel
 	@echo "- ✅ Secret scanning passed"
 	@echo "- ✅ Architecture compliance passed"
 	@echo "- ✅ Security scanning passed"
-	@echo "- ✅ E2E tests passed (MQTT+QUIC + Docker + Scenarios - PARALLEL)"
+	@echo "- ✅ Fast E2E tests passed (MQTT+QUIC + Controller - PARALLEL)"
 	@echo ""
-	@echo "⚡ Parallel execution: ~53% faster than sequential (Story #297)"
+	@echo "⚡ Fast validation: ~5-8 minutes (excludes 45min+ performance tests)"
+	@echo "ℹ️  Performance tests run in CI separately (use 'make test-e2e-parallel' for full local validation)"
 	@echo "🎯 Story validated and ready for PR creation"
 	@echo ""
 

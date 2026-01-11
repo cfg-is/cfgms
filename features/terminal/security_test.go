@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 CFGMS Contributors
+// Copyright 2026 Jordan Ritz
 package terminal
 
 import (
@@ -436,7 +436,12 @@ func TestCommandFilterRules(t *testing.T) {
 func TestSessionMonitor_ThreatLevelCalculation(t *testing.T) {
 	mockRBAC := &MockRBACManager{}
 	validator := NewSecurityValidator(mockRBAC)
-	monitor := NewSessionMonitor(validator, DefaultMonitorConfig())
+
+	// Use custom config with AutoTerminateOnCritical disabled to prevent race condition
+	// The test needs to verify threat level calculation without the session being terminated
+	config := DefaultMonitorConfig()
+	config.AutoTerminateOnCritical = false
+	monitor := NewSessionMonitor(validator, config)
 
 	ctx := context.Background()
 	if err := monitor.Start(ctx); err != nil {

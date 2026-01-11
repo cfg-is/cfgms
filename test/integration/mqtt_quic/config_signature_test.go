@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 CFGMS Contributors
+// Copyright 2026 Jordan Ritz
 
 package mqtt_quic
 
@@ -41,6 +41,11 @@ type ConfigSignatureTestSuite struct {
 }
 
 func (s *ConfigSignatureTestSuite) SetupSuite() {
+	// Skip if running in short/fast mode - requires MQTT broker infrastructure
+	if os.Getenv("CFGMS_TEST_SHORT") == "1" {
+		s.T().Skip("Skipping config signature tests in short mode - requires MQTT broker")
+	}
+
 	s.helper = NewTestHelper(GetTestHTTPAddr("https://127.0.0.1:8080"))
 	s.mqttAddr = GetTestMQTTAddr("ssl://127.0.0.1:1886") // Docker controller MQTT broker port with TLS
 	s.certsPath = GetTestCertsPath("../../../features/controller/certs/ca")

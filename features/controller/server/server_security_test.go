@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 CFGMS Contributors
+// Copyright 2026 Jordan Ritz
 package server
 
 import (
@@ -228,7 +228,12 @@ func TestServer_StorageProviderValidation(t *testing.T) {
 					// For local testing, use appropriate configuration per provider
 					switch providerInfo.Name {
 					case "database":
-						// Fail if in CI/integration mode, skip in development
+						// Skip if in short mode (covered by Docker integration tests)
+						if os.Getenv("CFGMS_TEST_SHORT") == "1" {
+							t.Skipf("Database provider requires Docker environment - run 'make test-integration-setup'")
+							return
+						}
+						// Fail if in CI/integration mode without Docker, skip in development
 						if os.Getenv("CI") != "" || os.Getenv("GITHUB_ACTIONS") != "" || os.Getenv("CFGMS_TEST_DB_PASSWORD") != "" {
 							t.Fatalf("REQUIRED INFRASTRUCTURE MISSING: Database provider requires Docker environment in CI/integration mode - run 'make test-integration-setup'")
 						} else {

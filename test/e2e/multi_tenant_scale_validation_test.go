@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 CFGMS Contributors
+// Copyright 2026 Jordan Ritz
 package e2e
 
 import (
@@ -608,10 +608,18 @@ func (s *MultiTenantScaleValidationSuite) validateTenantHotspotContainment(ctx c
 	hotspotDuration := 30 * time.Second
 	var hotspotWG sync.WaitGroup
 
+	// Adjust concurrency based on environment to prevent OOM in CI
+	hotspotConcurrency := 200 // Full load for production validation
+	normalTenantsToMonitor := 20
+	if s.framework.config.OptimizeForCI {
+		hotspotConcurrency = 50 // Reduced for CI resource limits
+		normalTenantsToMonitor = 10
+	}
+
 	// Launch intensive hotspot workers
 	for _, hotspotTenant := range hotspotTenants {
 		hotspotWG.Add(1)
-		go s.runHotspotWorker(ctx, hotspotTenant.ID, 200, hotspotDuration, &hotspotWG) // 200 concurrent requests
+		go s.runHotspotWorker(ctx, hotspotTenant.ID, hotspotConcurrency, hotspotDuration, &hotspotWG)
 	}
 
 	// Measure normal tenant performance during hotspot
@@ -621,7 +629,7 @@ func (s *MultiTenantScaleValidationSuite) validateTenantHotspotContainment(ctx c
 	hotspotLatencies := make(map[string][]time.Duration)
 	hotspotMutex := sync.RWMutex{}
 
-	for _, normalTenant := range normalTenants[:min(20, len(normalTenants))] {
+	for _, normalTenant := range normalTenants[:min(normalTenantsToMonitor, len(normalTenants))] {
 		normalWG.Add(1)
 		go func(tenantID string) {
 			defer normalWG.Done()

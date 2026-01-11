@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 CFGMS Contributors
+// Copyright 2026 Jordan Ritz
 package controller
 
 import (
@@ -231,6 +231,14 @@ func (c *Controller) GetDirectoryService() directory.Service {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.directoryService
+}
+
+// GetRegistrationTokenStore returns the registration token store instance
+// Story #294 Phase 2: E2E framework needs access to create registration tokens
+func (c *Controller) GetRegistrationTokenStore() interface{} {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.server.GetRegistrationTokenStore()
 }
 
 // ModuleRegistry implementation for directory service integration

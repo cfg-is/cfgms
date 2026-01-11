@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 CFGMS Contributors
+// Copyright 2026 Jordan Ritz
 // Package directory provides a unified directory service abstraction for the CFGMS controller.
 //
 // This package follows CFGMS's architectural pattern where the controller provides a unified

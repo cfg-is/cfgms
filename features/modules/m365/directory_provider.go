@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 CFGMS Contributors
+// Copyright 2026 Jordan Ritz
 // Package m365 provides directory provider integration for Microsoft 365/Entra ID
 // that implements the controller's unified directory interface.
 //

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 CFGMS Contributors
+// Copyright 2026 Jordan Ritz
 // Package workflow provides HTTP client capabilities for workflow engine API operations.
 //
 // This module implements HTTP client functionality with authentication, rate limiting,

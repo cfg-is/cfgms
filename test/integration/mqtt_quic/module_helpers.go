@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 CFGMS Contributors
+// Copyright 2026 Jordan Ritz
 package mqtt_quic
 
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -55,15 +56,21 @@ func NewModuleTestHelper(baseURL, mqttAddr string) *ModuleTestHelper {
 }
 
 // ConnectMQTT establishes an MQTT connection for message monitoring
-func (h *ModuleTestHelper) ConnectMQTT(t *testing.T, clientID string) {
+func (h *ModuleTestHelper) ConnectMQTT(t *testing.T, clientID string, tlsConfig *tls.Config) {
 	t.Helper()
 
+	// Create MQTT client options
 	opts := mqtt.NewClientOptions()
 	opts.AddBroker(h.mqttAddr)
 	opts.SetClientID(clientID)
 	opts.SetConnectTimeout(10 * time.Second)
 	opts.SetKeepAlive(30 * time.Second)
 	opts.SetAutoReconnect(true)
+
+	// Add TLS config if provided
+	if tlsConfig != nil {
+		opts.SetTLSConfig(tlsConfig)
+	}
 
 	h.mqttClient = mqtt.NewClient(opts)
 	token := h.mqttClient.Connect()

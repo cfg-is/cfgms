@@ -1,15 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 CFGMS Contributors
+// Copyright 2026 Jordan Ritz
 package e2e
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
+
+	mqtt "github.com/eclipse/paho.mqtt.golang"
 
 	"github.com/cfgis/cfgms/features/controller"
 	controllerConfig "github.com/cfgis/cfgms/features/controller/config"
@@ -19,12 +27,30 @@ import (
 	"github.com/cfgis/cfgms/features/workflow"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	testutil "github.com/cfgis/cfgms/pkg/testing"
 
 	// Import storage providers for testing
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 )
+
+// RegisteredSteward represents a steward registered with the controller via MQTT
+// Story #294 Phase 3: Track MQTT-connected stewards for E2E testing
+type RegisteredSteward struct {
+	StewardID      string
+	TenantID       string
+	Group          string
+	MQTTClient     mqtt.Client
+	MQTTBroker     string
+	QUICAddress    string
+	ControllerURL  string
+	ClientCert     string
+	ClientKey      string
+	CACert         string
+	heartbeatDone  chan bool
+	commandHandler mqtt.MessageHandler
+}
 
 // E2ETestFramework provides a comprehensive end-to-end testing environment
 // optimized for GitHub Actions and CI/CD pipelines
@@ -36,12 +62,13 @@ type E2ETestFramework struct {
 	cancel  context.CancelFunc
 
 	// Core components
-	controller     *controller.Controller
-	stewards       map[string]*steward.Steward
-	certManager    *cert.Manager
-	rbacManager    rbac.RBACManager
-	terminalMgr    terminal.SessionManager
-	workflowEngine *workflow.Engine
+	controller         *controller.Controller
+	stewards           map[string]*steward.Steward   // Standalone stewards (Phase 1)
+	registeredStewards map[string]*RegisteredSteward // MQTT-connected stewards (Phase 3)
+	certManager        *cert.Manager
+	rbacManager        rbac.RBACManager
+	terminalMgr        terminal.SessionManager
+	workflowEngine     *workflow.Engine
 
 	// Test configuration
 	config *E2EConfig
@@ -64,7 +91,8 @@ type E2EConfig struct {
 	MaxConcurrentTests int           `json:"max_concurrent_tests"`
 
 	// Component configuration
-	ControllerPort int  `json:"controller_port"`
+	ControllerPort int  `json:"controller_port"` // gRPC port (default 8080)
+	HTTPPort       int  `json:"http_port"`       // HTTP API port (default 9080)
 	EnableTLS      bool `json:"enable_tls"`
 	EnableRBAC     bool `json:"enable_rbac"`
 	EnableTerminal bool `json:"enable_terminal"`
@@ -149,15 +177,16 @@ func NewE2EFramework(t *testing.T, config *E2EConfig) (*E2ETestFramework, error)
 	ctx, cancel := context.WithTimeout(context.Background(), config.TestTimeout)
 
 	framework := &E2ETestFramework{
-		t:             t,
-		tempDir:       tempDir,
-		logger:        logger,
-		ctx:           ctx,
-		cancel:        cancel,
-		stewards:      make(map[string]*steward.Steward),
-		config:        config,
-		dataGenerator: NewTestDataGenerator(config),
-		startTime:     time.Now(),
+		t:                  t,
+		tempDir:            tempDir,
+		logger:             logger,
+		ctx:                ctx,
+		cancel:             cancel,
+		stewards:           make(map[string]*steward.Steward),
+		registeredStewards: make(map[string]*RegisteredSteward), // Story #294 Phase 3
+		config:             config,
+		dataGenerator:      NewTestDataGenerator(config),
+		startTime:          time.Now(),
 		metrics: &TestMetrics{
 			StartTime:           time.Now(),
 			ComponentStartTimes: make(map[string]time.Time),
@@ -317,6 +346,13 @@ func (f *E2ETestFramework) initializeController() error {
 				Organization: "Test Organization",
 			},
 		},
+		// Story #294 Phase 2: Enable MQTT broker for steward registration and communication
+		MQTT: &controllerConfig.MQTTConfig{
+			Enabled:        true,
+			ListenAddr:     "localhost:1883",
+			EnableTLS:      f.config.EnableTLS,
+			UseCertManager: true, // Use auto-generated certificates from cert manager
+		},
 	}
 
 	// Create storage directory
@@ -404,7 +440,7 @@ resources:
       mode: "0755"
 `, stewardID, filepath.Join(f.tempDir, "test-resource"))
 
-	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+	if err := os.WriteFile(configPath, []byte(configContent), 0600); err != nil {
 		return nil, fmt.Errorf("failed to write steward config file: %w", err)
 	}
 
@@ -418,6 +454,305 @@ resources:
 	f.logger.Info("Created standalone steward for E2E testing", "steward_id", stewardID, "config_path", configPath)
 
 	return stwd, nil
+}
+
+// CreateRegistrationToken generates a registration token for steward registration
+// Story #294 Phase 2: Enable controller + steward registration via MQTT
+func (f *E2ETestFramework) CreateRegistrationToken(tenantID string) (string, error) {
+	if f.controller == nil {
+		return "", fmt.Errorf("controller not initialized - cannot create registration token")
+	}
+
+	// Get the registration token store from the controller
+	tokenStoreInterface := f.controller.GetRegistrationTokenStore()
+	if tokenStoreInterface == nil {
+		return "", fmt.Errorf("registration token store not available")
+	}
+
+	// Type assert to registration.Store
+	tokenStore, ok := tokenStoreInterface.(registration.Store)
+	if !ok {
+		return "", fmt.Errorf("invalid registration token store type")
+	}
+
+	// Create a new registration token
+	// Note: MQTT broker is on port 1883, not the gRPC port
+	tokenReq := &registration.TokenCreateRequest{
+		TenantID:      tenantID,
+		ControllerURL: "tcp://localhost:1883",
+		Group:         "e2e-test",
+		ExpiresIn:     "",    // Never expires for testing
+		SingleUse:     false, // Can be reused for testing
+	}
+
+	token, err := registration.CreateToken(tokenReq)
+	if err != nil {
+		return "", fmt.Errorf("failed to create registration token: %w", err)
+	}
+
+	// Save the token to the store
+	if err := tokenStore.SaveToken(context.Background(), token); err != nil {
+		return "", fmt.Errorf("failed to save registration token: %w", err)
+	}
+
+	f.logger.Info("Created registration token", "tenant_id", tenantID, "token", token.Token)
+	return token.Token, nil
+}
+
+// RegistrationResponse represents the HTTP registration response
+// Story #294 Phase 3: Used for steward registration via controller API
+type RegistrationResponse struct {
+	StewardID     string `json:"steward_id"`
+	TenantID      string `json:"tenant_id"`
+	Group         string `json:"group"`
+	ControllerURL string `json:"controller_url"`
+	MQTTBroker    string `json:"mqtt_broker"`
+	QUICAddress   string `json:"quic_address"`
+	ClientCert    string `json:"client_cert,omitempty"`
+	ClientKey     string `json:"client_key,omitempty"`
+	CACert        string `json:"ca_cert,omitempty"`
+}
+
+// RegisterStewardWithController performs full steward registration flow via HTTP + MQTT
+// Story #294 Phase 3: Complete registration flow for E2E testing
+func (f *E2ETestFramework) RegisterStewardWithController(stewardName, tenantID string) (*RegisteredSteward, error) {
+	// Check if already registered (with read lock)
+	f.mu.RLock()
+	if existing, exists := f.registeredStewards[stewardName]; exists {
+		f.mu.RUnlock()
+		f.logger.Info("Reusing existing registered steward", "steward_name", stewardName)
+		return existing, nil
+	}
+	f.mu.RUnlock()
+
+	// Step 1: Create registration token (no lock needed)
+	token, err := f.CreateRegistrationToken(tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create registration token: %w", err)
+	}
+
+	// Step 2: POST to /api/v1/register
+	// Note: HTTP API runs on separate port from gRPC (typically 9080 vs 8080)
+	protocol := "http"
+	if f.config.EnableTLS {
+		protocol = "https"
+	}
+	registrationURL := fmt.Sprintf("%s://localhost:%d/api/v1/register", protocol, f.config.HTTPPort)
+	reqBody := map[string]string{
+		"token": token,
+	}
+	reqJSON, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal registration request: %w", err)
+	}
+
+	// Create HTTP client with timeout
+	httpClient := &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				MinVersion:         tls.VersionTLS12, // #nosec G402 -- TLS 1.2+ for test environment
+				InsecureSkipVerify: true,             // #nosec G402 -- Test environment with self-signed certs
+			},
+		},
+	}
+
+	resp, err := httpClient.Post(registrationURL, "application/json", bytes.NewBuffer(reqJSON))
+	if err != nil {
+		return nil, fmt.Errorf("HTTP registration request failed: %w", err)
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("registration failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	// Step 3: Parse registration response
+	var regResp RegistrationResponse
+	if err := json.Unmarshal(body, &regResp); err != nil {
+		return nil, fmt.Errorf("failed to parse registration response: %w", err)
+	}
+
+	f.logger.Info("HTTP registration successful",
+		"steward_id", regResp.StewardID,
+		"tenant_id", regResp.TenantID,
+		"mqtt_broker", regResp.MQTTBroker)
+
+	// Step 4: Create TLS config from registration certificates
+	tlsConfig, err := f.createTLSConfigFromPEM(
+		[]byte(regResp.CACert),
+		[]byte(regResp.ClientCert),
+		[]byte(regResp.ClientKey),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create TLS config: %w", err)
+	}
+
+	// Step 5: Create MQTT client with TLS
+	mqttOpts := mqtt.NewClientOptions()
+	mqttOpts.AddBroker(regResp.MQTTBroker)
+	mqttOpts.SetClientID(regResp.StewardID)
+	mqttOpts.SetTLSConfig(tlsConfig)
+	mqttOpts.SetKeepAlive(30 * time.Second) // 30s keepalive for heartbeat
+	mqttOpts.SetConnectTimeout(10 * time.Second)
+	mqttOpts.SetAutoReconnect(false) // Explicit reconnection handling in tests
+
+	// Set Last Will Testament for failover detection
+	lwtTopic := fmt.Sprintf("cfgms/steward/%s/status", regResp.StewardID)
+	lwtPayload := `{"status": "offline", "reason": "connection_lost"}`
+	mqttOpts.SetWill(lwtTopic, lwtPayload, 1, false)
+
+	// Connection lost handler
+	mqttOpts.SetConnectionLostHandler(func(client mqtt.Client, err error) {
+		f.logger.Warn("MQTT connection lost", "steward_id", regResp.StewardID, "error", err)
+	})
+
+	mqttClient := mqtt.NewClient(mqttOpts)
+
+	// Step 6: Connect to MQTT broker
+	connectToken := mqttClient.Connect()
+	if !connectToken.WaitTimeout(10 * time.Second) {
+		return nil, fmt.Errorf("MQTT connection timeout")
+	}
+	if err := connectToken.Error(); err != nil {
+		return nil, fmt.Errorf("MQTT connection failed: %w", err)
+	}
+
+	f.logger.Info("MQTT connection successful", "steward_id", regResp.StewardID)
+
+	// Step 7: Subscribe to command topic
+	commandTopic := fmt.Sprintf("cfgms/steward/%s/commands", regResp.StewardID)
+	commandHandler := func(client mqtt.Client, msg mqtt.Message) {
+		f.logger.Info("Received command",
+			"steward_id", regResp.StewardID,
+			"topic", msg.Topic(),
+			"payload", string(msg.Payload()))
+		// Command handling will be implemented in tests as needed
+	}
+
+	subToken := mqttClient.Subscribe(commandTopic, 1, commandHandler)
+	if !subToken.WaitTimeout(5 * time.Second) {
+		mqttClient.Disconnect(250)
+		return nil, fmt.Errorf("command subscription timeout")
+	}
+	if err := subToken.Error(); err != nil {
+		mqttClient.Disconnect(250)
+		return nil, fmt.Errorf("command subscription failed: %w", err)
+	}
+
+	f.logger.Info("Subscribed to commands", "topic", commandTopic)
+
+	// Step 8: Create RegisteredSteward and start heartbeat
+	heartbeatDone := make(chan bool)
+	registeredSteward := &RegisteredSteward{
+		StewardID:      regResp.StewardID,
+		TenantID:       regResp.TenantID,
+		Group:          regResp.Group,
+		MQTTClient:     mqttClient,
+		MQTTBroker:     regResp.MQTTBroker,
+		QUICAddress:    regResp.QUICAddress,
+		ControllerURL:  regResp.ControllerURL,
+		ClientCert:     regResp.ClientCert,
+		ClientKey:      regResp.ClientKey,
+		CACert:         regResp.CACert,
+		heartbeatDone:  heartbeatDone,
+		commandHandler: commandHandler,
+	}
+
+	// Start heartbeat publishing goroutine
+	go f.publishHeartbeats(registeredSteward)
+
+	// Store registered steward (with write lock)
+	f.mu.Lock()
+	f.registeredStewards[stewardName] = registeredSteward
+
+	// Add cleanup function
+	f.cleanupFuncs = append(f.cleanupFuncs, func() error {
+		close(heartbeatDone)
+		if mqttClient.IsConnected() {
+			mqttClient.Disconnect(250)
+		}
+		return nil
+	})
+	f.mu.Unlock()
+
+	return registeredSteward, nil
+}
+
+// createTLSConfigFromPEM creates a TLS config from PEM-encoded certificates
+// Story #294 Phase 3: Helper for MQTT TLS setup
+func (f *E2ETestFramework) createTLSConfigFromPEM(caCertPEM, clientCertPEM, clientKeyPEM []byte) (*tls.Config, error) {
+	// Load CA certificate
+	caCertPool := x509.NewCertPool()
+	if !caCertPool.AppendCertsFromPEM(caCertPEM) {
+		return nil, fmt.Errorf("failed to parse CA certificate")
+	}
+
+	// Load client certificate and key
+	clientCert, err := tls.X509KeyPair(clientCertPEM, clientKeyPEM)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load client certificate: %w", err)
+	}
+
+	// Create TLS config
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{clientCert},
+		RootCAs:      caCertPool,
+		MinVersion:   tls.VersionTLS12,
+		ServerName:   "localhost", // Connect via localhost in tests
+	}
+
+	return tlsConfig, nil
+}
+
+// publishHeartbeats publishes periodic heartbeat messages to MQTT
+// Story #294 Phase 3: Heartbeat mechanism for failover detection
+func (f *E2ETestFramework) publishHeartbeats(steward *RegisteredSteward) {
+	heartbeatTopic := fmt.Sprintf("cfgms/steward/%s/heartbeat", steward.StewardID)
+	ticker := time.NewTicker(30 * time.Second) // Production interval
+	defer ticker.Stop()
+
+	sequence := 0
+	for {
+		select {
+		case <-steward.heartbeatDone:
+			f.logger.Info("Stopping heartbeat publishing", "steward_id", steward.StewardID)
+			return
+		case <-ticker.C:
+			sequence++
+			heartbeat := map[string]interface{}{
+				"steward_id": steward.StewardID,
+				"status":     "healthy",
+				"timestamp":  time.Now().Unix(),
+				"sequence":   sequence,
+			}
+
+			heartbeatJSON, err := json.Marshal(heartbeat)
+			if err != nil {
+				f.logger.Error("Failed to marshal heartbeat", "error", err)
+				continue
+			}
+
+			token := steward.MQTTClient.Publish(heartbeatTopic, 1, false, heartbeatJSON)
+			if !token.WaitTimeout(5 * time.Second) {
+				f.logger.Warn("Heartbeat publish timeout", "steward_id", steward.StewardID)
+				continue
+			}
+			if err := token.Error(); err != nil {
+				f.logger.Error("Heartbeat publish failed", "steward_id", steward.StewardID, "error", err)
+				continue
+			}
+
+			f.logger.Debug("Heartbeat published", "steward_id", steward.StewardID, "sequence", sequence)
+		}
+	}
 }
 
 // RunTest executes a single test scenario with metrics collection and smart retry
@@ -636,7 +971,8 @@ func DefaultE2EConfig() *E2EConfig {
 		TestTimeout:        10 * time.Minute, // Generous for CI
 		ComponentStartup:   30 * time.Second, // Allow time for startup
 		MaxConcurrentTests: 2,                // Conservative for CI
-		ControllerPort:     8080,
+		ControllerPort:     8080,             // gRPC server port
+		HTTPPort:           9080,             // HTTP API server port
 		EnableTLS:          true,
 		EnableRBAC:         true,
 		EnableTerminal:     true,

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 CFGMS Contributors
+// Copyright 2026 Jordan Ritz
 package e2e
 
 import (
@@ -10,11 +10,10 @@ import (
 	"testing"
 	"time"
 
+	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
-
-	"github.com/cfgis/cfgms/features/steward"
 )
 
 // E2ETestSuite provides comprehensive end-to-end testing scenarios
@@ -728,46 +727,325 @@ func (s *E2ETestSuite) TestTemplateRollbackIntegration() {
 
 // TestMultiStewardScenario tests scenarios with multiple stewards
 func (s *E2ETestSuite) TestMultiStewardScenario() {
-	// Story #294 Phase 1: Basic multi-steward test using standalone stewards
+	// Story #294 Phase 3: Multi-steward test with MQTT connection to controller
 
 	err := s.framework.RunTest("multi-steward-scenario", "scalability", func() error {
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
-
 		stewardCount := 3
 		if s.framework.config.OptimizeForCI {
 			stewardCount = 2 // Reduce for CI constraints
 		}
 
-		// Create multiple stewards
-		stewards := make([]*steward.Steward, stewardCount)
-		for i := 0; i < stewardCount; i++ {
-			stewardID := fmt.Sprintf("multi-test-steward-%d", i)
-			s, err := s.framework.CreateSteward(stewardID)
-			if err != nil {
-				return fmt.Errorf("failed to create steward %s: %w", stewardID, err)
-			}
-			stewards[i] = s
+		s.T().Logf("Creating %d stewards with MQTT connections to controller", stewardCount)
 
-			// Start steward
-			go func(steward *steward.Steward) {
-				if err := steward.Start(ctx); err != nil {
-					// Log error but continue test
-					_ = err // Explicitly ignore start errors in E2E test
-				}
-			}(s)
+		// Create multiple stewards registered with controller
+		registeredStewards := make([]*RegisteredSteward, stewardCount)
+		for i := 0; i < stewardCount; i++ {
+			stewardName := fmt.Sprintf("multi-test-steward-%d", i)
+			tenantID := "test-tenant-multi"
+
+			registered, err := s.framework.RegisterStewardWithController(stewardName, tenantID)
+			if err != nil {
+				return fmt.Errorf("failed to register steward %s: %w", stewardName, err)
+			}
+			registeredStewards[i] = registered
+
+			s.T().Logf("Registered steward %d: %s (tenant: %s)", i+1, registered.StewardID, registered.TenantID)
 		}
 
-		// Wait for all stewards to connect
+		// Verify all stewards are connected via MQTT
+		for i, registered := range registeredStewards {
+			if !registered.MQTTClient.IsConnected() {
+				return fmt.Errorf("steward %d (%s) not connected to MQTT broker", i, registered.StewardID)
+			}
+			s.T().Logf("Steward %d (%s) MQTT connection: CONNECTED", i+1, registered.StewardID)
+		}
+
+		// Verify all stewards have unique IDs
+		seenIDs := make(map[string]bool)
+		for _, registered := range registeredStewards {
+			if seenIDs[registered.StewardID] {
+				return fmt.Errorf("duplicate steward ID: %s", registered.StewardID)
+			}
+			seenIDs[registered.StewardID] = true
+		}
+
+		// Verify all stewards belong to same tenant
+		for _, registered := range registeredStewards {
+			if registered.TenantID != "test-tenant-multi" {
+				return fmt.Errorf("steward %s has wrong tenant ID: %s", registered.StewardID, registered.TenantID)
+			}
+		}
+
+		s.T().Logf("Multi-steward deployment validated: %d stewards connected", stewardCount)
+
+		// Test concurrent heartbeat publishing (heartbeats run in background)
+		// Wait to ensure at least one heartbeat cycle
+		s.T().Log("Waiting 5 seconds for heartbeat cycle...")
 		time.Sleep(5 * time.Second)
 
-		// TODO: Verify all stewards are connected
-		// Note: IsConnected method not available, would need proper connection checking
-		_ = stewards // Use variable to avoid unused warning
+		s.T().Log("Multi-steward scenario completed successfully")
+		return nil
+	})
 
-		// Test concurrent operations
-		// Implementation would test concurrent scenarios
+	require.NoError(s.T(), err)
+}
 
+// TestFailoverDetection tests controller detection of steward disconnection via LWT
+func (s *E2ETestSuite) TestFailoverDetection() {
+	// Story #294 Phase 3: Verify failover detection via Last Will Testament < 15 seconds
+
+	err := s.framework.RunTest("failover-detection", "monitoring", func() error {
+		s.T().Log("Starting failover detection test")
+
+		tenantID := "test-tenant-failover"
+		stewardName := "failover-test-steward"
+
+		// Step 1: Register steward with controller
+		s.T().Log("Registering steward with controller...")
+		registered, err := s.framework.RegisterStewardWithController(stewardName, tenantID)
+		if err != nil {
+			return fmt.Errorf("failed to register steward: %w", err)
+		}
+
+		// Verify steward is connected
+		if !registered.MQTTClient.IsConnected() {
+			return fmt.Errorf("steward MQTT client not connected")
+		}
+		s.T().Logf("Steward registered: %s (tenant: %s)", registered.StewardID, registered.TenantID)
+
+		// Step 2: Create observer MQTT client to monitor LWT topic
+		s.T().Log("Setting up LWT observer...")
+		lwtTopic := fmt.Sprintf("cfgms/steward/%s/status", registered.StewardID)
+		lwtReceived := make(chan string, 1)
+
+		// Create TLS config for observer client
+		observerTLSConfig, err := s.framework.createTLSConfigFromPEM(
+			[]byte(registered.CACert),
+			[]byte(registered.ClientCert),
+			[]byte(registered.ClientKey),
+		)
+		if err != nil {
+			return fmt.Errorf("failed to create observer TLS config: %w", err)
+		}
+
+		// Configure observer MQTT client
+		observerOpts := mqtt.NewClientOptions()
+		observerOpts.AddBroker(registered.MQTTBroker)
+		observerOpts.SetClientID(fmt.Sprintf("observer-%d", time.Now().UnixNano()))
+		observerOpts.SetTLSConfig(observerTLSConfig)
+		observerOpts.SetKeepAlive(30 * time.Second)
+		observerOpts.SetPingTimeout(10 * time.Second)
+		observerOpts.SetAutoReconnect(false)
+
+		observerClient := mqtt.NewClient(observerOpts)
+		connectToken := observerClient.Connect()
+		if !connectToken.WaitTimeout(10 * time.Second) {
+			return fmt.Errorf("observer MQTT connection timeout")
+		}
+		if connectToken.Error() != nil {
+			return fmt.Errorf("observer MQTT connection failed: %w", connectToken.Error())
+		}
+		defer observerClient.Disconnect(250)
+
+		s.T().Log("Observer connected to MQTT broker")
+
+		// Subscribe to LWT topic before triggering disconnection
+		subscribeToken := observerClient.Subscribe(lwtTopic, 1, func(client mqtt.Client, msg mqtt.Message) {
+			s.T().Logf("LWT received on topic %s: %s", msg.Topic(), string(msg.Payload()))
+			select {
+			case lwtReceived <- string(msg.Payload()):
+			default:
+				// Channel already has a value
+			}
+		})
+		if !subscribeToken.WaitTimeout(5 * time.Second) {
+			return fmt.Errorf("observer subscribe timeout")
+		}
+		if subscribeToken.Error() != nil {
+			return fmt.Errorf("observer subscribe failed: %w", subscribeToken.Error())
+		}
+
+		s.T().Logf("Observer subscribed to LWT topic: %s", lwtTopic)
+
+		// Step 3: Simulate steward failure by forcefully disconnecting
+		// Use Disconnect(0) to force immediate disconnect without grace period
+		s.T().Log("Simulating steward failure (forceful disconnect)...")
+		disconnectTime := time.Now()
+		registered.MQTTClient.Disconnect(0) // Force immediate disconnect
+
+		// Step 4: Wait for LWT message (should arrive within 15 seconds per acceptance criteria)
+		s.T().Log("Waiting for failover detection via LWT...")
+		select {
+		case lwtPayload := <-lwtReceived:
+			detectionTime := time.Since(disconnectTime)
+			s.T().Logf("Failover detected in %v (LWT: %s)", detectionTime, lwtPayload)
+
+			// Verify detection time is within 15 second threshold
+			if detectionTime > 15*time.Second {
+				return fmt.Errorf("failover detection too slow: %v (threshold: 15s)", detectionTime)
+			}
+
+			// Verify LWT payload indicates offline status
+			if !strings.Contains(lwtPayload, "offline") && !strings.Contains(lwtPayload, "connection_lost") {
+				return fmt.Errorf("unexpected LWT payload: %s", lwtPayload)
+			}
+
+			s.T().Logf("Failover detection validated: detected in %v (< 15s threshold)", detectionTime)
+			return nil
+
+		case <-time.After(20 * time.Second):
+			// Fail if no LWT received within 20 seconds (5 second buffer beyond threshold)
+			return fmt.Errorf("failover not detected within 20 seconds (threshold: 15s)")
+		}
+	})
+
+	require.NoError(s.T(), err)
+}
+
+// TestMQTTCommandResponse tests bidirectional MQTT communication
+func (s *E2ETestSuite) TestMQTTCommandResponse() {
+	// Story #294 Phase 3: Verify controller can send commands and receive responses
+
+	err := s.framework.RunTest("mqtt-command-response", "communication", func() error {
+		s.T().Log("Starting MQTT command/response test")
+
+		tenantID := "test-tenant-command"
+		stewardName := "command-test-steward"
+
+		// Step 1: Register steward with controller
+		s.T().Log("Registering steward with controller...")
+		registered, err := s.framework.RegisterStewardWithController(stewardName, tenantID)
+		if err != nil {
+			return fmt.Errorf("failed to register steward: %w", err)
+		}
+
+		// Verify steward is connected
+		if !registered.MQTTClient.IsConnected() {
+			return fmt.Errorf("steward MQTT client not connected")
+		}
+		s.T().Logf("Steward registered: %s (tenant: %s)", registered.StewardID, registered.TenantID)
+
+		// Step 2: Set up steward to respond to commands on command topic
+		commandReceived := make(chan string, 1)
+		commandTopic := fmt.Sprintf("cfgms/steward/%s/commands", registered.StewardID)
+		responseTopic := fmt.Sprintf("cfgms/steward/%s/responses", registered.StewardID)
+
+		// Subscribe to commands and auto-respond
+		subscribeToken := registered.MQTTClient.Subscribe(commandTopic, 1, func(client mqtt.Client, msg mqtt.Message) {
+			commandPayload := string(msg.Payload())
+			s.T().Logf("Steward received command: %s", commandPayload)
+
+			// Send acknowledgment
+			select {
+			case commandReceived <- commandPayload:
+			default:
+			}
+
+			// Send response back to controller
+			response := fmt.Sprintf(`{"command_id":"test-cmd-1","status":"success","received_at":%d}`, time.Now().Unix())
+			publishToken := client.Publish(responseTopic, 1, false, response)
+			publishToken.Wait()
+			if publishToken.Error() != nil {
+				s.T().Logf("Failed to publish response: %v", publishToken.Error())
+			} else {
+				s.T().Log("Steward published response")
+			}
+		})
+		if !subscribeToken.WaitTimeout(5 * time.Second) {
+			return fmt.Errorf("steward command subscribe timeout")
+		}
+		if subscribeToken.Error() != nil {
+			return fmt.Errorf("steward command subscribe failed: %w", subscribeToken.Error())
+		}
+
+		s.T().Logf("Steward subscribed to command topic: %s", commandTopic)
+
+		// Step 3: Create controller MQTT client to send commands
+		s.T().Log("Setting up controller client...")
+		controllerTLSConfig, err := s.framework.createTLSConfigFromPEM(
+			[]byte(registered.CACert),
+			[]byte(registered.ClientCert),
+			[]byte(registered.ClientKey),
+		)
+		if err != nil {
+			return fmt.Errorf("failed to create controller TLS config: %w", err)
+		}
+
+		controllerOpts := mqtt.NewClientOptions()
+		controllerOpts.AddBroker(registered.MQTTBroker)
+		controllerOpts.SetClientID(fmt.Sprintf("controller-%d", time.Now().UnixNano()))
+		controllerOpts.SetTLSConfig(controllerTLSConfig)
+		controllerOpts.SetKeepAlive(30 * time.Second)
+		controllerOpts.SetAutoReconnect(false)
+
+		controllerClient := mqtt.NewClient(controllerOpts)
+		connectToken := controllerClient.Connect()
+		if !connectToken.WaitTimeout(10 * time.Second) {
+			return fmt.Errorf("controller MQTT connection timeout")
+		}
+		if connectToken.Error() != nil {
+			return fmt.Errorf("controller MQTT connection failed: %w", connectToken.Error())
+		}
+		defer controllerClient.Disconnect(250)
+
+		s.T().Log("Controller connected to MQTT broker")
+
+		// Step 4: Subscribe to response topic before sending command
+		responseReceived := make(chan string, 1)
+		responseSubscribeToken := controllerClient.Subscribe(responseTopic, 1, func(client mqtt.Client, msg mqtt.Message) {
+			responsePayload := string(msg.Payload())
+			s.T().Logf("Controller received response: %s", responsePayload)
+			select {
+			case responseReceived <- responsePayload:
+			default:
+			}
+		})
+		if !responseSubscribeToken.WaitTimeout(5 * time.Second) {
+			return fmt.Errorf("controller response subscribe timeout")
+		}
+		if responseSubscribeToken.Error() != nil {
+			return fmt.Errorf("controller response subscribe failed: %w", responseSubscribeToken.Error())
+		}
+
+		s.T().Logf("Controller subscribed to response topic: %s", responseTopic)
+
+		// Step 5: Send test command from controller to steward
+		testCommand := `{"command_id":"test-cmd-1","type":"test","action":"ping","timestamp":` + fmt.Sprintf("%d", time.Now().Unix()) + `}`
+		s.T().Logf("Sending command to steward: %s", testCommand)
+
+		publishToken := controllerClient.Publish(commandTopic, 1, false, testCommand)
+		if !publishToken.WaitTimeout(5 * time.Second) {
+			return fmt.Errorf("controller command publish timeout")
+		}
+		if publishToken.Error() != nil {
+			return fmt.Errorf("controller command publish failed: %w", publishToken.Error())
+		}
+
+		s.T().Log("Command published by controller")
+
+		// Step 6: Wait for steward to receive command
+		select {
+		case cmd := <-commandReceived:
+			s.T().Logf("Verified steward received command: %s", cmd)
+			if !strings.Contains(cmd, "test-cmd-1") {
+				return fmt.Errorf("unexpected command payload: %s", cmd)
+			}
+		case <-time.After(10 * time.Second):
+			return fmt.Errorf("steward did not receive command within 10 seconds")
+		}
+
+		// Step 7: Wait for controller to receive response
+		select {
+		case resp := <-responseReceived:
+			s.T().Logf("Verified controller received response: %s", resp)
+			if !strings.Contains(resp, "test-cmd-1") || !strings.Contains(resp, "success") {
+				return fmt.Errorf("unexpected response payload: %s", resp)
+			}
+		case <-time.After(10 * time.Second):
+			return fmt.Errorf("controller did not receive response within 10 seconds")
+		}
+
+		s.T().Log("Bidirectional MQTT communication validated successfully")
 		return nil
 	})
 
@@ -1236,9 +1514,22 @@ func (s *E2ETestSuite) TestDataFlow() {
 
 // TestSecurityCompliance tests security compliance requirements
 func (s *E2ETestSuite) TestSecurityCompliance() {
-	// Story #294 Phase 1: Basic security compliance test (Phase 2 will add MQTT+TLS validation)
+	// Story #294 Phase 2: Test MQTT broker and registration token system
 
 	err := s.framework.RunTest("security-compliance", "compliance", func() error {
+		// Story #294 Phase 2: Validate registration token generation
+		token, err := s.framework.CreateRegistrationToken("test-tenant-e2e")
+		if err != nil {
+			return fmt.Errorf("failed to create registration token: %w", err)
+		}
+
+		// Validate token format (should start with cfgms_reg_)
+		if !strings.HasPrefix(token, "cfgms_reg_") {
+			return fmt.Errorf("invalid token format: %s", token)
+		}
+
+		s.T().Logf("Phase 2 validation: Successfully created registration token: %s", token)
+
 		// Test certificate validation
 		// Test encryption in transit
 		// Test authentication flows

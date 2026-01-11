@@ -198,7 +198,41 @@ gh pr merge [PR_NUMBER] --squash --no-delete-branch
 
 ## Release Workflow
 
-### Development to Production
+CFGMS uses a **semi-automated release process** (Option A) that combines automation with human review checkpoints.
+
+### Automated Release Process (Recommended)
+
+The release automation workflow handles most steps automatically:
+
+```
+feature/* → develop → release/vX.Y.Z → main → tag
+     ↓          ↓            ↓            ↓
+   (unit    (integration  (full suite  (release
+    tests)    tests)       + approval)   build)
+```
+
+**To start a release:**
+
+1. Go to **Actions → Release Automation → Run workflow**
+2. Enter version number (e.g., `0.8.0`, `0.9.0-rc.1`)
+3. Select release type (patch/minor/major/rc)
+4. Click **Run workflow**
+
+**What happens automatically:**
+1. ✅ Creates `release/vX.Y.Z` branch from `develop`
+2. ✅ Runs comprehensive test suite
+3. ✅ Creates PR to `main` (if tests pass)
+4. ⏸️ **Waits for human approval** (manual checkpoint)
+5. ✅ Auto-merges PR when approved
+6. ✅ Tags release (triggers build)
+7. ✅ Back-merges to `develop`
+8. ✅ Cleans up release branch
+
+See [Release Automation Workflow](../../.github/workflows/release-automation.yml) for details.
+
+### Manual Release Process (Alternative)
+
+If you need to perform a release manually:
 
 ```bash
 # 1. Feature work (on feature branches)
@@ -206,17 +240,41 @@ git checkout -b feature/story-123-new-feature
 # ... development work ...
 gh pr create --base develop  # Merge to develop
 
-# 2. Release preparation (develop → main)
+# 2. Create release branch
 git checkout develop
 git pull origin develop
-gh pr create --base main --title "Release: v0.4.7.0"
+git checkout -b release/v0.8.0
 
-# 3. After main merge, tag release
+# 3. Run full test suite
+make test-ci
+
+# 4. Create PR to main
+gh pr create --base main --title "Release: v0.8.0"
+
+# 5. After PR approval and merge, tag release
 git checkout main
 git pull origin main
-git tag v0.4.7.0
-git push origin v0.4.7.0
+git tag v0.8.0
+git push origin v0.8.0
+
+# 6. Back-merge to develop
+git checkout develop
+git merge main --no-ff -m "Back-merge v0.8.0 to develop"
+git push origin develop
+
+# 7. Cleanup release branch
+git push origin --delete release/v0.8.0
 ```
+
+### Branch Protection
+
+All branches have protection rules enforced. See [Branch Protection Rules](./branch-protection-rules.md) for configuration details.
+
+| Branch | Required Checks | Approvals | Notes |
+|--------|-----------------|-----------|-------|
+| `main` | unit-tests, security-gate, integration-gate | 1 | Strict - no bypassing |
+| `develop` | unit-tests | 1 | Admins can bypass for emergencies |
+| `release/*` | unit-tests, integration, security | 0 | Automation creates these |
 
 ### Hotfix Workflow
 

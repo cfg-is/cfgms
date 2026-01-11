@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 CFGMS Contributors
+// Copyright 2026 Jordan Ritz
 // Package registration provides controller-side registration token handling.
 //
 // This package implements MQTT-based registration using registration tokens.

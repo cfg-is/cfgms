@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 CFGMS Contributors
+// Copyright 2026 Jordan Ritz
 // Package client provides MQTT+QUIC client functionality for steward-controller communication.
 //
 // This package implements the steward-side client for communicating with
@@ -175,6 +175,17 @@ func (c *MQTTClient) RegisterWithToken(ctx context.Context, token string, mqttBr
 	c.group = resp.Group
 	c.mqtt = mqtt
 	c.mu.Unlock()
+
+	// Story #294 Phase 4: Auto-save certificates from registration
+	// Enables automatic mTLS setup with zero manual configuration
+	if resp.ClientCert != "" && resp.ClientKey != "" && resp.CACert != "" {
+		if err := c.saveCertificates(resp.ClientCert, resp.ClientKey, resp.CACert); err != nil {
+			c.logger.Warn("Failed to save certificates from registration", "error", err)
+			// Don't fail registration - steward can still operate (will retry on next boot)
+		} else {
+			c.logger.Info("Saved certificates from registration", "steward_id", resp.StewardID)
+		}
+	}
 
 	// Initialize configuration executor
 	execCfg := &config.Config{
@@ -932,9 +943,10 @@ func (c *MQTTClient) createMQTTTLSConfig() (*tls.Config, error) {
 			return nil, nil
 		}
 
-		certFile = filepath.Join(certPath, "client-cert.pem")
-		keyFile = filepath.Join(certPath, "client-key.pem")
-		caFile = filepath.Join(certPath, "ca-cert.pem")
+		// Story #294 Phase 4: Use standard certificate names (matches saveCertificates)
+		certFile = filepath.Join(certPath, "client.crt")
+		keyFile = filepath.Join(certPath, "client.key")
+		caFile = filepath.Join(certPath, "ca.crt")
 	}
 
 	// Load client certificate PEM data
@@ -1056,4 +1068,40 @@ func (c *MQTTClient) startHeartbeat() {
 			cancel()
 		}
 	}
+}
+
+// saveCertificates saves client certificates from registration to disk
+// Story #294 Phase 4: Enable automatic certificate distribution at scale
+func (c *MQTTClient) saveCertificates(clientCert, clientKey, caCert string) error {
+	// Determine certificate directory
+	certDir := os.Getenv("CFGMS_CERT_PATH")
+	if certDir == "" {
+		certDir = "/etc/cfgms/certs" // Default path
+	}
+
+	// Create directory with restricted permissions
+	if err := os.MkdirAll(certDir, 0700); err != nil {
+		return fmt.Errorf("failed to create cert directory: %w", err)
+	}
+
+	// Certificate files with standard naming (matches documentation)
+	files := map[string]struct {
+		content string
+		perm    os.FileMode
+	}{
+		"client.crt": {clientCert, 0600}, // Private: client certificate
+		"client.key": {clientKey, 0600},  // Private: client private key
+		"ca.crt":     {caCert, 0644},     // Public: CA certificate
+	}
+
+	// Write all certificate files
+	for filename, file := range files {
+		path := filepath.Join(certDir, filename)
+		if err := os.WriteFile(path, []byte(file.content), file.perm); err != nil {
+			return fmt.Errorf("failed to save %s: %w", filename, err)
+		}
+		c.logger.Debug("Saved certificate file", "path", path)
+	}
+
+	return nil
 }

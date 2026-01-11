@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 CFGMS Contributors
+// Copyright 2026 Jordan Ritz
 // Package saas microsoft_multitenant implements multi-tenant Microsoft Graph
 // provider with enterprise app support for MSP scenarios.
 //
