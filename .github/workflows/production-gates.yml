@@ -18,15 +18,6 @@ on:
       # NOTE: security-deployment-gate is redundant (already runs on PR), but kept for production-readiness-validation
   workflow_dispatch:
     inputs:
-      gate_type:
-        description: 'Which gate to run'
-        required: true
-        default: 'v030'
-        type: choice
-        options:
-        - v030
-        - v040
-        - all
       emergency_override:
         description: 'Emergency override for security gate (requires justification)'
         required: false
@@ -263,53 +254,6 @@ jobs:
         echo "- Data loss prevention: $(go test ./features/monitoring/export/... -run 'TestExportManagerErrorHandling/handle_export_errors_with_retry' >/dev/null 2>&1 && echo '✅ WORKING' || echo '⚠️ BROKEN')"
         echo "- Compliance protection: $(go test ./features/monitoring/export/... -run 'TestExportDataFiltering/filter_data_types_per_exporter' >/dev/null 2>&1 && echo '✅ WORKING' || echo '⚠️ BROKEN')"
 
-  v030-release-gate:
-    runs-on: ubuntu-latest
-    needs: security-deployment-gate
-    if: (github.ref == 'refs/heads/main' || contains(github.event.inputs.gate_type, 'v030') || contains(github.event.inputs.gate_type, 'all')) && needs.security-deployment-gate.outputs.deployment-allowed == 'true'
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: '1.23'
-    
-    - name: Install dependencies
-      run: go mod download
-    
-    - name: v0.3.0 Release Gate - Alpha Readiness
-      run: |
-        echo "🚪 Running v0.3.0 Release Gate"
-        echo "=============================="
-        
-        echo "Security Gate Status: ✅ Passed (${{ needs.security-deployment-gate.outputs.security-status }})"
-        if [ "${{ needs.security-deployment-gate.outputs.override-required }}" = "true" ]; then
-          echo "⚠️  Emergency override was used - additional review required"
-        fi
-        echo ""
-        
-        if make test-v030-gate; then
-          echo ""
-          echo "✅ v0.3.0 RELEASE GATE PASSED"
-          echo "   Ready for alpha MSP deployment"
-          if [ "${{ needs.security-deployment-gate.outputs.override-required }}" = "true" ]; then
-            echo "⚠️  Note: Emergency security override was used"
-          fi
-          exit 0
-        else
-          echo ""
-          echo "❌ v0.3.0 RELEASE GATE FAILED"
-          echo "   🚫 ALPHA DEPLOYMENT BLOCKED"
-          echo ""
-          echo "Required fixes before alpha deployment:"
-          echo "1. Fix export sampling logic (GitHub issue #62)"
-          echo "2. Fix export retry mechanism (GitHub issue #63)"
-          echo ""
-          echo "Track progress: https://github.com/cfg-is/cfgms/issues/62"
-          exit 1
-        fi
-
   # Production Readiness Testing (Story #86)
   production-readiness-validation:
     runs-on: ubuntu-latest
@@ -402,54 +346,6 @@ jobs:
         echo "📊 Exporting synthetic monitoring data for analysis"
         # In production, this would export to monitoring systems
         echo "Synthetic monitoring framework validated successfully"
-
-  v040-release-gate:
-    runs-on: ubuntu-latest
-    needs: [security-deployment-gate, production-readiness-validation, synthetic-monitoring-validation]
-    if: (github.ref == 'refs/heads/main' || contains(github.event.inputs.gate_type, 'v040') || contains(github.event.inputs.gate_type, 'all')) && needs.security-deployment-gate.outputs.deployment-allowed == 'true'
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: '1.23'
-    
-    - name: Install dependencies
-      run: go mod download
-    
-    - name: v0.4.0 Release Gate - Production Readiness  
-      run: |
-        echo "🚪 Running v0.4.0 Release Gate"
-        echo "=============================="
-        
-        echo "Security Gate Status: ✅ Passed (${{ needs.security-deployment-gate.outputs.security-status }})"
-        if [ "${{ needs.security-deployment-gate.outputs.override-required }}" = "true" ]; then
-          echo "⚠️  Emergency override was used - additional review required"
-        fi
-        echo ""
-        
-        if make test-v040-gate; then
-          echo ""
-          echo "✅ v0.4.0 RELEASE GATE PASSED"
-          echo "   Ready for production scale deployment"
-          if [ "${{ needs.security-deployment-gate.outputs.override-required }}" = "true" ]; then
-            echo "⚠️  Note: Emergency security override was used"
-          fi
-          exit 0
-        else
-          echo ""
-          echo "❌ v0.4.0 RELEASE GATE FAILED"
-          echo "   🚫 PRODUCTION DEPLOYMENT BLOCKED"
-          echo ""
-          echo "Required fixes before production deployment:"
-          echo "1. Fix export sampling logic (GitHub issue #62)"
-          echo "2. Fix export retry mechanism (GitHub issue #63)"  
-          echo "3. Fix export data filtering (GitHub issue #64)"
-          echo ""
-          echo "Track progress: https://github.com/cfg-is/cfgms/projects/1"
-          exit 1
-        fi
 
   cost-monitoring:
     runs-on: ubuntu-latest

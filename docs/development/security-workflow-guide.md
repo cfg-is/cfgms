@@ -139,9 +139,7 @@ make test-with-security  # Runs: test + security-scan + summary
 
 1. `security-deployment-gate` - Primary security validation
 2. `production-risk-assessment` - Risk analysis (requires security approval)
-3. `v030-release-gate` - Alpha release gate (requires security approval)
-4. `v040-release-gate` - Production release gate (requires security approval)
-5. `deployment-notification` - Automated status notifications
+3. `deployment-notification` - Automated status notifications
 
 ## Production Deployment Gates
 
@@ -166,8 +164,6 @@ The security deployment gate blocks production deployments when:
 
 All production gates depend on security approval:
 
-- `v030-release-gate` requires `security-deployment-gate` success
-- `v040-release-gate` requires `security-deployment-gate` success
 - `production-risk-assessment` requires `security-deployment-gate` success
 
 ## Emergency Override Process

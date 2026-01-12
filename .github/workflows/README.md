@@ -55,7 +55,6 @@ This directory contains automated CI/CD workflows for CFGMS. All workflows are n
 - Emergency override support (with justification required)
 
 **Features**:
-- Configurable gate types (v030, v040, all)
 - Emergency override mechanism with audit trail
 - Comprehensive security scanning
 - Platform-specific validation
