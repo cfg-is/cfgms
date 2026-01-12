@@ -284,8 +284,11 @@ func (s *HeartbeatFailoverTestSuite) TestReconnectionBehavior() {
 	s.NoError(token.Error())
 	defer client.Disconnect(250)
 
-	// Verify initial connection
-	s.Equal(int32(1), connectionCount.Load(), "Should have 1 connection")
+	// Wait for OnConnectHandler to execute (it's called asynchronously)
+	// The connection token completes before the handler is guaranteed to run
+	s.Eventually(func() bool {
+		return connectionCount.Load() == 1
+	}, 5*time.Second, 100*time.Millisecond, "Should have 1 connection after handler executes")
 
 	// Simulate disconnection and reconnection
 	// (In real scenario, would need to restart broker or break network)
