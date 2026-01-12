@@ -235,11 +235,7 @@ jobs:
           echo "⚠️  Emergency override was used - additional review required"
         fi
         echo ""
-        
-        echo "📊 Current Export Reliability Status:"
-        make test-export-reliability || true
-        
-        echo ""
+
         echo "💰 Cost Impact Analysis:"
         make cost-analysis
         
@@ -376,11 +372,6 @@ jobs:
           echo "⏰ Days since issue opened: $((($(date +%s) - $(date -d '2025-01-28' +%s)) / 86400)) days"
           echo "🎯 Target fix: v0.3.0 (blocks alpha deployment)"
         fi
-        
-        # Always show current status for tracking
-        echo ""
-        echo "Current status summary:"
-        make test-export-reliability || true
 
   # Cross-platform integration testing
   integration-tests-controller:
