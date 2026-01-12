@@ -2,6 +2,13 @@
 
 CFGMS is a modern configuration management system designed with resilience, security, and clean architecture in mind.
 
+[![Build Status](https://github.com/cfg-is/cfgms/workflows/Cross-Platform%20Build%20Validation/badge.svg)](https://github.com/cfg-is/cfgms/actions)
+[![Security Scan](https://github.com/cfg-is/cfgms/workflows/Security%20Scanning%20Workflow/badge.svg)](https://github.com/cfg-is/cfgms/actions)
+[![CodeQL](https://github.com/cfg-is/cfgms/workflows/CodeQL%20Security%20Analysis/badge.svg)](https://github.com/cfg-is/cfgms/security/code-scanning)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/cfg-is/cfgms/badge)](https://securityscorecards.dev/viewer/?uri=github.com/cfg-is/cfgms)
+[![Go Report Card](https://goreportcard.com/badge/github.com/cfg-is/cfgms)](https://goreportcard.com/report/github.com/cfg-is/cfgms)
+[![License](https://img.shields.io/badge/License-Apache%202.0%20%2B%20Elastic%20v2-blue.svg)](LICENSING.md)
+
 ## Project Status
 
 The project is in early development. Core architecture and structure have been implemented, but many components are still being developed.
@@ -210,7 +217,38 @@ The roadmap provides detailed milestone planning from v0.1.0 through v3.5.0+, in
 
 ## Security
 
-CFGMS implements a robust security architecture with defense-in-depth principles:
+CFGMS implements a robust security architecture with defense-in-depth principles and employs multiple layers of automated security scanning to maintain a strong security posture.
+
+### Automated Security Scanning
+
+CFGMS uses comprehensive automated security scanning integrated into the CI/CD pipeline:
+
+- **Static Application Security Testing (SAST)**
+  - **CodeQL** (GitHub Advanced Security) - Semantic code analysis for vulnerabilities
+  - **gosec** - Go-specific security scanner for common security issues
+  - **staticcheck** - Advanced static analysis for Go code quality and security
+
+- **Dependency & Vulnerability Scanning**
+  - **Trivy** - Comprehensive vulnerability scanner for dependencies and container images
+  - **Nancy** - OSS Index vulnerability checker for Go dependencies
+  - **Dependabot** - Automated dependency updates and security patches
+
+- **Secret Detection**
+  - **gitleaks** - Prevents hardcoded secrets and credentials in code
+  - **truffleHog** - Deep scanning for sensitive data exposure
+
+- **Container Security**
+  - **Trivy** - Image scanning for vulnerabilities and misconfigurations
+
+- **Supply Chain Security**
+  - **SBOM Generation** (SPDX format) - Software bill of materials for transparency
+  - **OpenSSF Scorecard** - Automated security health metrics and best practices validation
+
+📊 **View Our Security Posture**: [OpenSSF Scorecard](https://securityscorecards.dev/viewer/?uri=github.com/cfg-is/cfgms)
+
+All security scans run automatically on every commit and pull request. Critical and high-severity vulnerabilities block merges to maintain code quality and security standards.
+
+### Security Architecture
 
 - **Internal Communication**
   - MQTT+QUIC hybrid protocol for steward-controller communication
@@ -294,7 +332,7 @@ TODO: Add quick start instructions
 
 ```bash
 # Clone the repository
-git clone https://github.com/user/cfgms.git
+git clone https://github.com/cfg-is/cfgms.git
 cd cfgms
 
 # Build the controller
@@ -318,3 +356,12 @@ We welcome contributions to CFGMS!
 3. **Follow the process** - See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines
 
 The CLA assigns copyright to Jordan Ritz (current holder) and enables dual-licensing under Apache 2.0 and Elastic License 2.0. For details, see [docs/legal/README.md](docs/legal/README.md).
+
+## Community & Support
+
+- **Issues & Bug Reports**: [GitHub Issues](https://github.com/cfg-is/cfgms/issues)
+- **Feature Requests**: [GitHub Issues](https://github.com/cfg-is/cfgms/issues/new)
+- **Security Advisories**: [GitHub Security](https://github.com/cfg-is/cfgms/security/advisories)
+- **Code Scanning Results**: [GitHub Security](https://github.com/cfg-is/cfgms/security/code-scanning)
+- **Project Roadmap**: [GitHub Project Board](https://github.com/orgs/cfg-is/projects/1)
+- **Email Contact**: [licensing@cfg.is](mailto:licensing@cfg.is)

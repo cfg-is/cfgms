@@ -114,12 +114,13 @@ Implemented comprehensive Docker-based E2E testing infrastructure that validates
 - [x] E2E Test: Fix MQTT+QUIC test skips, add parallelization, reduce test-completion time (issue #297) ✅ COMPLETED
 - [x] Update copyright to Jordan Ritz and implement Contributor License Agreement (issue #307) ✅ COMPLETED
 - [x] Convert repository to public and activate GitHub Advanced Security features (issue #282) ✅ COMPLETED
-- [ ] Update documentation with security badges and public links (issue #284)
+- [x] Update documentation with security badges and public links (issue #284) ✅ COMPLETED
 
 #### v0.8.1 Bug fixes and test completion
 
 - [x] Fix single-use registration token enforcement in database storage (issue #299) ✅ COMPLETED
 - [x] Complete E2E test framework for MQTT+QUIC mode (issue #294) ✅ COMPLETED
+- [x] Remove outdated v0.3.0 and v0.4.0 release gates from production-gates workflow (issue #322) ✅ COMPLETED
 - [ ] Enable TestModuleExecution suite with proper steward container configuration (issue #312)
 - [ ] Configure MQTT broker ACLs for topic-level access control by steward ID (issue #313)
 - [ ] Align story-commit validation with PR acceptance CI tests for local test coverage (issue #315)

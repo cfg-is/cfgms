@@ -18,15 +18,6 @@ on:
       # NOTE: security-deployment-gate is redundant (already runs on PR), but kept for production-readiness-validation
   workflow_dispatch:
     inputs:
-      gate_type:
-        description: 'Which gate to run'
-        required: true
-        default: 'v030'
-        type: choice
-        options:
-        - v030
-        - v040
-        - all
       emergency_override:
         description: 'Emergency override for security gate (requires justification)'
         required: false
@@ -219,98 +210,64 @@ jobs:
         path: audit-logs/
         retention-days: 90
 
-  production-risk-assessment:
-    runs-on: ubuntu-latest
-    needs: security-deployment-gate
-    if: needs.security-deployment-gate.outputs.deployment-allowed == 'true'
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: '1.23'
-    
-    - name: Install dependencies
-      run: go mod download
-    
-    - name: Run Production Risk Analysis
-      run: |
-        echo "🔍 PRODUCTION RISK ANALYSIS"
-        echo "=========================="
-        echo ""
-        echo "Security Gate Status: ✅ ${{ needs.security-deployment-gate.outputs.security-status }}"
-        if [ "${{ needs.security-deployment-gate.outputs.override-required }}" = "true" ]; then
-          echo "⚠️  Emergency override was used - additional review required"
-        fi
-        echo ""
-        
-        echo "📊 Current Export Reliability Status:"
-        make test-export-reliability || true
-        
-        echo ""
-        echo "💰 Cost Impact Analysis:"
-        make cost-analysis
-        
-        echo ""
-        echo "🔒 Compliance Risk Assessment:"
-        make compliance-check
-        
-        echo ""
-        echo "📋 Test Summary:"
-        echo "- Core functionality: $(make test-production-critical >/dev/null 2>&1 && echo '✅ PASS' || echo '❌ FAIL')"
-        echo "- Cost protection: $(go test ./features/monitoring/export/... -run 'TestExportManagerDataExport/export_with_sampling' >/dev/null 2>&1 && echo '✅ WORKING' || echo '⚠️ BROKEN')"
-        echo "- Data loss prevention: $(go test ./features/monitoring/export/... -run 'TestExportManagerErrorHandling/handle_export_errors_with_retry' >/dev/null 2>&1 && echo '✅ WORKING' || echo '⚠️ BROKEN')"
-        echo "- Compliance protection: $(go test ./features/monitoring/export/... -run 'TestExportDataFiltering/filter_data_types_per_exporter' >/dev/null 2>&1 && echo '✅ WORKING' || echo '⚠️ BROKEN')"
 
-  v030-release-gate:
-    runs-on: ubuntu-latest
-    needs: security-deployment-gate
-    if: (github.ref == 'refs/heads/main' || contains(github.event.inputs.gate_type, 'v030') || contains(github.event.inputs.gate_type, 'all')) && needs.security-deployment-gate.outputs.deployment-allowed == 'true'
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: '1.23'
-    
-    - name: Install dependencies
-      run: go mod download
-    
-    - name: v0.3.0 Release Gate - Alpha Readiness
-      run: |
-        echo "🚪 Running v0.3.0 Release Gate"
-        echo "=============================="
-        
-        echo "Security Gate Status: ✅ Passed (${{ needs.security-deployment-gate.outputs.security-status }})"
-        if [ "${{ needs.security-deployment-gate.outputs.override-required }}" = "true" ]; then
-          echo "⚠️  Emergency override was used - additional review required"
-        fi
-        echo ""
-        
-        if make test-v030-gate; then
-          echo ""
-          echo "✅ v0.3.0 RELEASE GATE PASSED"
-          echo "   Ready for alpha MSP deployment"
-          if [ "${{ needs.security-deployment-gate.outputs.override-required }}" = "true" ]; then
-            echo "⚠️  Note: Emergency security override was used"
-          fi
-          exit 0
-        else
-          echo ""
-          echo "❌ v0.3.0 RELEASE GATE FAILED"
-          echo "   🚫 ALPHA DEPLOYMENT BLOCKED"
-          echo ""
-          echo "Required fixes before alpha deployment:"
-          echo "1. Fix export sampling logic (GitHub issue #62)"
-          echo "2. Fix export retry mechanism (GitHub issue #63)"
-          echo ""
-          echo "Track progress: https://github.com/cfg-is/cfgms/issues/62"
-          exit 1
-        fi
+  # ============================================================================
+  # TEMPORARILY DISABLED: Performance/Cost Monitoring Jobs
+  # ============================================================================
+  # These jobs track performance metrics and cost/compliance for production.
+  # They are not critical for early-stage development and have been disabled
+  # to reduce PR CI time by ~5-6 minutes.
+  #
+  # All integration tests and E2E tests remain ACTIVE for comprehensive
+  # functional validation.
+  #
+  # Re-enable when:
+  # - Project reaches scale where cost monitoring matters
+  # - Production deployments need compliance tracking
+  # - Synthetic monitoring becomes critical
+  # ============================================================================
 
-  # Production Readiness Testing (Story #86)
+  #   production-risk-assessment:
+  #     runs-on: ubuntu-latest
+  #     needs: security-deployment-gate
+  #     if: needs.security-deployment-gate.outputs.deployment-allowed == 'true'
+  #     steps:
+  #     - uses: actions/checkout@v4
+    
+  #     - name: Set up Go
+  #       uses: actions/setup-go@v4
+  #       with:
+  #         go-version: '1.23'
+    
+  #     - name: Install dependencies
+  #       run: go mod download
+    
+  #     - name: Run Production Risk Analysis
+  #       run: |
+  #         echo "🔍 PRODUCTION RISK ANALYSIS"
+  #         echo "=========================="
+  #         echo ""
+  #         echo "Security Gate Status: ✅ ${{ needs.security-deployment-gate.outputs.security-status }}"
+  #         if [ "${{ needs.security-deployment-gate.outputs.override-required }}" = "true" ]; then
+  #           echo "⚠️  Emergency override was used - additional review required"
+  #         fi
+  #         echo ""
+
+  #         echo "💰 Cost Impact Analysis:"
+  #         make cost-analysis
+        
+  #         echo ""
+  #         echo "🔒 Compliance Risk Assessment:"
+  #         make compliance-check
+        
+  #         echo ""
+  #         echo "📋 Test Summary:"
+  #         echo "- Core functionality: $(make test-production-critical >/dev/null 2>&1 && echo '✅ PASS' || echo '❌ FAIL')"
+  #         echo "- Cost protection: $(go test ./features/monitoring/export/... -run 'TestExportManagerDataExport/export_with_sampling' >/dev/null 2>&1 && echo '✅ WORKING' || echo '⚠️ BROKEN')"
+  #         echo "- Data loss prevention: $(go test ./features/monitoring/export/... -run 'TestExportManagerErrorHandling/handle_export_errors_with_retry' >/dev/null 2>&1 && echo '✅ WORKING' || echo '⚠️ BROKEN')"
+  #         echo "- Compliance protection: $(go test ./features/monitoring/export/... -run 'TestExportDataFiltering/filter_data_types_per_exporter' >/dev/null 2>&1 && echo '✅ WORKING' || echo '⚠️ BROKEN')"
+
+  #   # Production Readiness Testing (Story #86)
   production-readiness-validation:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -377,116 +334,63 @@ jobs:
         echo "🚀 CFGMS v0.3.0 Production Readiness: VALIDATED"
 
   # Synthetic Monitoring Setup
-  synthetic-monitoring-validation:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-    - uses: actions/checkout@v4
+  #   synthetic-monitoring-validation:
+  #     runs-on: ubuntu-latest
+  #     timeout-minutes: 30
+  #     steps:
+  #     - uses: actions/checkout@v4
     
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: '1.23'
+  #     - name: Set up Go
+  #       uses: actions/setup-go@v4
+  #       with:
+  #         go-version: '1.23'
     
-    - name: Install dependencies
-      run: go mod download
+  #     - name: Install dependencies
+  #       run: go mod download
     
-    - name: Synthetic Monitoring Tests
-      run: |
-        echo "🤖 Validating Synthetic Monitoring Framework"
-        echo "============================================"
-        make test-synthetic-monitoring
+  #     - name: Synthetic Monitoring Tests
+  #       run: |
+  #         echo "🤖 Validating Synthetic Monitoring Framework"
+  #         echo "============================================"
+  #         make test-synthetic-monitoring
     
-    - name: Export Monitoring Data
-      run: |
-        echo "📊 Exporting synthetic monitoring data for analysis"
-        # In production, this would export to monitoring systems
-        echo "Synthetic monitoring framework validated successfully"
+  #     - name: Export Monitoring Data
+  #       run: |
+  #         echo "📊 Exporting synthetic monitoring data for analysis"
+  #         # In production, this would export to monitoring systems
+  #         echo "Synthetic monitoring framework validated successfully"
 
-  v040-release-gate:
-    runs-on: ubuntu-latest
-    needs: [security-deployment-gate, production-readiness-validation, synthetic-monitoring-validation]
-    if: (github.ref == 'refs/heads/main' || contains(github.event.inputs.gate_type, 'v040') || contains(github.event.inputs.gate_type, 'all')) && needs.security-deployment-gate.outputs.deployment-allowed == 'true'
-    steps:
-    - uses: actions/checkout@v4
+  #   cost-monitoring:
+  #     runs-on: ubuntu-latest
+  #     steps:
+  #     - uses: actions/checkout@v4
     
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: '1.23'
+  #     - name: Set up Go
+  #       uses: actions/setup-go@v4
+  #       with:
+  #         go-version: '1.23'
     
-    - name: Install dependencies
-      run: go mod download
+  #     - name: Install dependencies
+  #       run: go mod download
     
-    - name: v0.4.0 Release Gate - Production Readiness  
-      run: |
-        echo "🚪 Running v0.4.0 Release Gate"
-        echo "=============================="
+  #     - name: Monitor Cost Risk Trends
+  #       run: |
+  #         echo "📈 COST RISK TREND MONITORING"
+  #         echo "============================="
         
-        echo "Security Gate Status: ✅ Passed (${{ needs.security-deployment-gate.outputs.security-status }})"
-        if [ "${{ needs.security-deployment-gate.outputs.override-required }}" = "true" ]; then
-          echo "⚠️  Emergency override was used - additional review required"
-        fi
-        echo ""
-        
-        if make test-v040-gate; then
-          echo ""
-          echo "✅ v0.4.0 RELEASE GATE PASSED"
-          echo "   Ready for production scale deployment"
-          if [ "${{ needs.security-deployment-gate.outputs.override-required }}" = "true" ]; then
-            echo "⚠️  Note: Emergency security override was used"
-          fi
-          exit 0
-        else
-          echo ""
-          echo "❌ v0.4.0 RELEASE GATE FAILED"
-          echo "   🚫 PRODUCTION DEPLOYMENT BLOCKED"
-          echo ""
-          echo "Required fixes before production deployment:"
-          echo "1. Fix export sampling logic (GitHub issue #62)"
-          echo "2. Fix export retry mechanism (GitHub issue #63)"  
-          echo "3. Fix export data filtering (GitHub issue #64)"
-          echo ""
-          echo "Track progress: https://github.com/cfg-is/cfgms/projects/1"
-          exit 1
-        fi
+  #         # Check if sampling is getting worse
+  #         if ! go test ./features/monitoring/export/... -run "TestExportManagerDataExport/export_with_sampling" >/dev/null 2>&1; then
+  #           echo "🚨 CRITICAL: Sampling logic still broken after $(date)"
+  #           echo "   Estimated cost impact at scale:"
+  #           echo "   - 1,000 stewards: Additional $9,720/month"
+  #           echo "   - 10,000 stewards: Additional $97,200/month" 
+  #           echo "   - 50,000 stewards: Additional $486,000/month"
+  #           echo ""
+  #           echo "⏰ Days since issue opened: $((($(date +%s) - $(date -d '2025-01-28' +%s)) / 86400)) days"
+  #           echo "🎯 Target fix: v0.3.0 (blocks alpha deployment)"
+  #         fi
 
-  cost-monitoring:
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: '1.23'
-    
-    - name: Install dependencies
-      run: go mod download
-    
-    - name: Monitor Cost Risk Trends
-      run: |
-        echo "📈 COST RISK TREND MONITORING"
-        echo "============================="
-        
-        # Check if sampling is getting worse
-        if ! go test ./features/monitoring/export/... -run "TestExportManagerDataExport/export_with_sampling" >/dev/null 2>&1; then
-          echo "🚨 CRITICAL: Sampling logic still broken after $(date)"
-          echo "   Estimated cost impact at scale:"
-          echo "   - 1,000 stewards: Additional $9,720/month"
-          echo "   - 10,000 stewards: Additional $97,200/month" 
-          echo "   - 50,000 stewards: Additional $486,000/month"
-          echo ""
-          echo "⏰ Days since issue opened: $((($(date +%s) - $(date -d '2025-01-28' +%s)) / 86400)) days"
-          echo "🎯 Target fix: v0.3.0 (blocks alpha deployment)"
-        fi
-        
-        # Always show current status for tracking
-        echo ""
-        echo "Current status summary:"
-        make test-export-reliability || true
-
-  # Cross-platform integration testing
+  #   # Cross-platform integration testing
   integration-tests-controller:
     name: Controller Integration Tests (Linux)
     runs-on: ubuntu-latest

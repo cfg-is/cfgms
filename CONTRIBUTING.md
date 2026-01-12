@@ -1,5 +1,20 @@
 # Contributing to CFGMS
 
+Thank you for your interest in contributing to CFGMS! This guide will help you get started with the contribution process.
+
+## Code of Conduct
+
+This project adheres to a Code of Conduct that all contributors are expected to follow. Please read [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) before contributing.
+
+## Getting Help & Community Resources
+
+- **Report Bugs**: [GitHub Issues](https://github.com/cfg-is/cfgms/issues)
+- **Request Features**: [GitHub Issues](https://github.com/cfg-is/cfgms/issues/new)
+- **View Pull Requests**: [GitHub Pull Requests](https://github.com/cfg-is/cfgms/pulls)
+- **Security Reports**: [security@cfg.is](mailto:security@cfg.is) (see [SECURITY.md](SECURITY.md))
+- **Project Roadmap**: [GitHub Project Board](https://github.com/orgs/cfg-is/projects/1)
+- **General Questions**: licensing@cfg.is
+
 ## Git Workflow: GitFlow
 
 CFGMS follows the GitFlow branching model for development:
