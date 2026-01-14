@@ -274,15 +274,21 @@ jobs:
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
     steps:
     - uses: actions/checkout@v4
-    
+
     - name: Set up Go
       uses: actions/setup-go@v4
       with:
         go-version: '1.23'
-    
+
     - name: Install dependencies
       run: go mod download
-    
+
+    - name: Set up Docker Test Infrastructure
+      run: |
+        echo "🐳 Setting up Docker test infrastructure for load testing..."
+        make test-mqtt-quic-setup
+        echo "✅ Docker infrastructure ready"
+
     - name: Production Readiness - Load Testing
       run: |
         echo "⚡ Testing 100+ Concurrent Terminal Sessions"
@@ -332,6 +338,12 @@ jobs:
         echo "   • Disaster recovery plans tested"
         echo ""
         echo "🚀 CFGMS v0.3.0 Production Readiness: VALIDATED"
+
+    - name: Cleanup Docker Infrastructure
+      if: always()
+      run: |
+        echo "🧹 Cleaning up Docker test infrastructure..."
+        make test-mqtt-quic-cleanup || true
 
   # Synthetic Monitoring Setup
   #   synthetic-monitoring-validation:
