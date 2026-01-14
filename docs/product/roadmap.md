@@ -123,10 +123,7 @@ Implemented comprehensive Docker-based E2E testing infrastructure that validates
 - [x] Remove outdated v0.3.0 and v0.4.0 release gates from production-gates workflow (issue #322) ✅ COMPLETED
 - [ ] Enable TestModuleExecution suite with proper steward container configuration (issue #312)
 - [ ] Configure MQTT broker ACLs for topic-level access control by steward ID (issue #313)
-- [ ] Align story-commit validation with PR acceptance CI tests for local test coverage (issue #315)
-  - Ensure `make test-commit` provides maximum possible local coverage of CI validation gates
-  - Review and separate blocking vs non-blocking tests (e.g., performance tests should be non-blocking)
-  - Reduce developer friction while maintaining quality gates
+- [x] Align test-complete with CI required checks for 100% local validation parity (issue #315) ✅ COMPLETED
 
 ### Phase 2: Production Stability & Feature Completion (v0.9.0 - v1.0.0)
 
