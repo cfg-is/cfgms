@@ -54,18 +54,41 @@ go test -v -run TestControllerStart ./features/controller/
 
 ### Streamlined Testing Workflow
 
-#### Daily Development (3 targets)
+#### Daily Development
 
 ```bash
-# Fast TDD feedback (30s) - mocked M365 tests
+# Fast TDD feedback (2-3 min) - smart unit tests
 make test
 
-# Pre-commit validation (2-3min) - gracefully skips M365 if no credentials
+# Pre-commit validation (4-6 min) - security, lint, architecture
 make test-commit
-
-# CI validation (8-12min) - fails if M365 credentials missing
-make test-ci
 ```
+
+#### Story Completion (CI Parity)
+
+```bash
+# Story completion validation (10-20 min) - MATCHES ALL CI required checks
+make test-complete
+```
+
+**Test Validation Levels** (Story #315):
+
+| Target | Time | What it Runs | When to Use |
+|--------|------|--------------|-------------|
+| `make test` | 2-3 min | Smart unit tests (core + changed modules) | TDD development loop |
+| `make test-commit` | 4-6 min | Unit tests + lint + security + architecture | Before every commit |
+| `make test-complete` | 10-20 min | **ALL CI required checks** (see below) | **Before creating PR** |
+| `make test-ci` | 15-25 min | Complete CI validation with M365 | CI simulation (optional) |
+
+**test-complete CI Parity** - Exactly matches CI required checks:
+1. ✅ unit-tests job: `make test`
+2. ✅ integration-tests job: `make test-fast` + `make test-production-critical`
+3. ✅ cross-compile-check: `make build-cross-validate`
+4. ✅ integration-tests (Docker): Storage/controller integration tests
+5. ✅ security scans: trivy, nancy, gosec, staticcheck
+6. ✅ E2E tests: MQTT+QUIC, Controller
+
+**Only CI-only gap**: Native Windows/macOS builds (requires Windows/macOS runners)
 
 #### Specialized Testing
 

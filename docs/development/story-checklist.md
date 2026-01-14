@@ -124,16 +124,28 @@ Security Review: [Brief summary - no hardcoded secrets, SQL injection prevention
 - For M365/MSP features, ensure `docs/M365_INTEGRATION_GUIDE.md` is current
 - Update relevant architecture documentation
 
-#### 11. **Final Validation** (MANDATORY)
+#### 11. **Final Story Validation** (MANDATORY)
 
 ```bash
-make test-commit  # MUST be 100% green before creating PR
+make test-complete  # MUST be 100% green (10-20 min)
 ```
 
-**COMPLETION GATE**: This is the final validation before creating a pull request. If ANY tests fail:
+**This runs ALL CI required check tests:**
+- ✅ Unit tests (test, test-fast, test-production-critical)
+- ✅ Linting and license headers
+- ✅ Security scanning (all 4 tools)
+- ✅ Architecture compliance
+- ✅ Cross-platform compilation (Linux, macOS, Windows)
+- ✅ Docker integration tests (storage, controller)
+- ✅ E2E tests (MQTT+QUIC, Controller)
 
+**Only CI-only tests:**
+- Native Windows/macOS builds (requires Windows/macOS runners)
+
+**COMPLETION GATE**: If ANY tests fail:
 - DO NOT create pull request
 - Fix all failures first, then restart from this step
+- test-complete ensures local validation matches 100% of CI (except Windows/macOS native builds)
 
 #### 12. **Create Pull Request for Code Review**
 
