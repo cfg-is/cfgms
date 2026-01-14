@@ -1539,6 +1539,21 @@ test-integration-complete: test-integration-setup test-with-real-storage test-in
 	@echo "   - Real storage provider tests executed"
 	@echo "   - Environment cleaned up"
 
+# Docker integration tests (matches CI cross-platform-build.yml integration-tests job)
+# Tests storage provider and controller server integration with Docker infrastructure
+.PHONY: test-integration-docker
+test-integration-docker:
+	@echo "🐳 Running Docker Integration Tests"
+	@echo "===================================="
+	@if [ ! -f .env.test ]; then \
+		echo "❌ Docker test environment not set up"; \
+		echo "   Run: make test-integration-setup"; \
+		exit 1; \
+	fi
+	@set -a && source .env.test && set +a && \
+		go test -race -timeout=10m ./pkg/testing/storage/... ./features/controller/server/...
+	@echo "✅ Docker integration tests passed"
+
 # MQTT+QUIC Integration Testing (Story #12.2)
 # Tests MQTT+QUIC architecture with real Docker infrastructure
 .PHONY: test-mqtt-quic test-mqtt-quic-setup test-mqtt-quic-cleanup
@@ -1743,25 +1758,31 @@ test-e2e-local:
 	@echo "🎯 Full E2E validation complete - ready for PR"
 
 # Story completion validation - comprehensive validation for /story-complete
-# Includes all commit validation PLUS fast E2E testing (excludes long-running perf tests)
-# Story #297: Uses parallel execution for 53% faster feedback
-# Issue #315: Performance/scale tests run separately to avoid blocking story completion
-.PHONY: test-complete
-test-complete: test-commit test-e2e-fast
+# Story #315: Now matches ALL CI required checks (100% parity except Windows/macOS native builds)
+# Includes all commit validation PLUS CI integration tests and E2E testing
+.PHONY: test-complete-full
+test-complete-full: test-commit test-fast test-production-critical build-cross-validate test-integration-docker test-e2e-fast
 	@echo ""
-	@echo "✅ STORY COMPLETION VALIDATION FINISHED"
+	@echo "✅ COMPLETE STORY VALIDATION FINISHED"
 	@echo "========================================"
-	@echo "- ✅ Unit tests passed (core + changed modules)"
-	@echo "- ✅ Linting passed"
-	@echo "- ✅ License headers validated"
-	@echo "- ✅ Secret scanning passed"
-	@echo "- ✅ Architecture compliance passed"
-	@echo "- ✅ Security scanning passed"
-	@echo "- ✅ Fast E2E tests passed (MQTT+QUIC + Controller - PARALLEL)"
+	@echo "- ✅ All pre-commit checks passed (test-commit)"
+	@echo "- ✅ Fast comprehensive tests passed (test-fast)"
+	@echo "- ✅ Production critical tests passed (test-production-critical)"
+	@echo "- ✅ Cross-platform compilation validated (build-cross-validate)"
+	@echo "- ✅ Docker integration tests passed (storage/controller)"
+	@echo "- ✅ E2E tests passed (MQTT+QUIC + Controller - PARALLEL)"
 	@echo ""
-	@echo "⚡ Fast validation: ~5-8 minutes (excludes 45min+ performance tests)"
-	@echo "ℹ️  Performance tests run in CI separately (use 'make test-e2e-parallel' for full local validation)"
-	@echo "🎯 Story validated and ready for PR creation"
+	@echo "🎯 Story is FULLY validated - matches all CI required checks"
+	@echo ""
+	@echo "ℹ️  Acceptable CI-only gaps:"
+	@echo "   - Native Windows/macOS builds (requires Windows/macOS runners)"
+	@echo ""
+	@echo "⏱️  Completed in 10-20 minutes - comprehensive validation"
+	@echo "✨ Story validated and ready for PR creation"
+
+# Backward compatible alias
+.PHONY: test-complete
+test-complete: test-complete-full
 	@echo ""
 
 # Generate Test Certificates (Story #109)

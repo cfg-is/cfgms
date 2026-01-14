@@ -48,6 +48,9 @@ See `.claude/slash-commands/` for complete documentation.
   - Only `develop → main` PRs allowed (for releases)
   - See [docs/development/git-workflow.md](docs/development/git-workflow.md) for details
 - **Real Component Testing**: Never mock CFGMS functionality in tests - use real components
+- **Story Completion (Story #315)**: `make test-complete` must pass 100% before creating PR
+  - test-complete runs ALL CI required checks locally (100% parity)
+  - Only acceptable gap: Windows/macOS native builds (infrastructure limitation)
 
 #### EPIC 6 Complete: Storage Architecture (CRITICAL)
 
@@ -124,9 +127,19 @@ make build-steward        # Steward binary only
 ### Validation Targets
 
 ```bash
-make test-ci       # Complete CI validation (8-12min)
+make test-complete  # Story completion (10-20 min) - MATCHES ALL CI required checks
+make test-ci        # Complete CI validation (15-25 min)
 make test-integration  # M365 + storage integration tests
 ```
+
+**Story Completion**: `make test-complete` now runs ALL CI required checks locally:
+- ✅ All pre-commit validation (test-commit)
+- ✅ Fast comprehensive tests (test-fast)
+- ✅ Production critical tests (test-production-critical)
+- ✅ Cross-platform compilation (build-cross-validate)
+- ✅ Docker integration tests (storage/controller)
+- ✅ E2E tests (MQTT+QUIC, Controller)
+- ❌ Only gap: Native Windows/macOS builds (CI-only, requires runners)
 
 See [docs/development/commands-reference.md](docs/development/commands-reference.md) for all commands.
 
