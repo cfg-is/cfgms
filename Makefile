@@ -558,7 +558,7 @@ test-infrastructure-required:
 test-production-critical:
 	@echo "🔐 Running Production-Critical Tests"
 	@echo "==================================="
-	@CFGMS_TEST_SHORT=1 go test -v -race -timeout=15m ./test/unit/... ./test/integration/...
+	@go test -v -race -short -timeout=15m ./test/unit/... ./test/integration/...
 	@echo "✅ Production-critical tests completed"
 
 

@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/cert"
@@ -164,6 +166,19 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		"steward_id", stewardID,
 		"validity_days", validityDays)
 
+	// Store registered steward in memory for API queries
+	s.mu.Lock()
+	s.registeredStewards[stewardID] = &RegisteredSteward{
+		StewardID:    stewardID,
+		TenantID:     token.TenantID,
+		Group:        token.Group,
+		RegisteredAt: time.Now(),
+		Status:       "registered", // Initial status before first heartbeat
+		MQTTBroker:   resp.MQTTBroker,
+		QUICAddress:  resp.QUICAddress,
+	}
+	s.mu.Unlock()
+
 	// Return response
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -174,10 +189,13 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 // getQUICAddress returns the QUIC server address for steward connections
 func (s *Server) getQUICAddress() string {
+	addr := "localhost:4433" // Default QUIC address
 	if s.cfg.QUIC != nil && s.cfg.QUIC.Enabled {
-		return s.cfg.QUIC.ListenAddr
+		addr = s.cfg.QUIC.ListenAddr
 	}
-	return "localhost:4433" // Default QUIC address
+
+	// Replace 0.0.0.0 with external hostname if configured (Docker/test mode)
+	return replaceBindAddress(addr)
 }
 
 // getMQTTBrokerURL returns the MQTT broker URL for steward connections
@@ -193,7 +211,31 @@ func (s *Server) getMQTTBrokerURL() string {
 		protocol = "ssl"
 	}
 
-	return fmt.Sprintf("%s://%s", protocol, s.cfg.MQTT.ListenAddr)
+	// Replace 0.0.0.0 with external hostname if configured (Docker/test mode)
+	addr := replaceBindAddress(s.cfg.MQTT.ListenAddr)
+
+	return fmt.Sprintf("%s://%s", protocol, addr)
+}
+
+// replaceBindAddress replaces 0.0.0.0 bind addresses with external hostname
+// This is needed for Docker/test environments where the controller binds to 0.0.0.0
+// but stewards need a real hostname to connect to
+func replaceBindAddress(addr string) string {
+	// Check if address starts with 0.0.0.0
+	if !strings.HasPrefix(addr, "0.0.0.0:") {
+		return addr
+	}
+
+	// Get external hostname from environment (Docker/test mode)
+	externalHostname := os.Getenv("CFGMS_EXTERNAL_HOSTNAME")
+	if externalHostname == "" {
+		// Default to localhost if not specified
+		externalHostname = "localhost"
+	}
+
+	// Replace 0.0.0.0 with external hostname
+	port := strings.TrimPrefix(addr, "0.0.0.0:")
+	return externalHostname + ":" + port
 }
 
 // Helper function to create a time pointer

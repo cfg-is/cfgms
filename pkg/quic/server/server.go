@@ -228,7 +228,7 @@ func (s *Server) handleConnection(conn *quic.Conn) {
 	// Perform handshake to get session ID and steward ID
 	sessionID, stewardID, err := s.performHandshake(stream)
 	if err != nil {
-		s.logger.Error("Handshake failed", "error", err)
+		s.logger.Error("Handshake failed", "error", err.Error())
 		_ = conn.CloseWithError(1, "handshake failed")
 		return
 	}

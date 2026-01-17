@@ -27,22 +27,18 @@ import (
 // AC6: Module failures reported correctly via MQTT status topic
 type ModuleExecutionTestSuite struct {
 	suite.Suite
-	helper     *ModuleTestHelper
-	tlsConfig  *tls.Config
-	stewardID  string
-	testHelper *TestHelper
+	helper      *ModuleTestHelper
+	tlsConfig   *tls.Config
+	stewardID   string
+	testHelper  *TestHelper
+	composePath string // Path to docker-compose.test.yml
 }
 
 func (s *ModuleExecutionTestSuite) SetupSuite() {
 	// Skip if running in short/fast mode - requires MQTT broker and controller infrastructure
-	if os.Getenv("CFGMS_TEST_SHORT") == "1" {
+	if testing.Short() {
 		s.T().Skip("Skipping module execution tests in short mode - requires infrastructure")
 	}
-
-	// TODO(#312): Re-enable once steward-standalone container has /test-workspace properly configured
-	// Tests successfully start the container and establish MQTT connections, but fail because
-	// the container lacks the /test-workspace directory that module execution tests require.
-	s.T().Skip("TODO(#312): Requires steward-standalone /test-workspace configuration")
 
 	// Start steward-standalone container (follows pattern from test/integration/docker_test.go)
 	s.T().Log("Starting steward-standalone container...")
@@ -50,12 +46,12 @@ func (s *ModuleExecutionTestSuite) SetupSuite() {
 	// Find project root - go test changes to a temp directory
 	// Try current directory and up to 3 levels up
 	for i := 0; i < 4; i++ {
-		composePath := "docker-compose.test.yml"
+		s.composePath = "docker-compose.test.yml"
 		if i > 0 {
-			composePath = strings.Repeat("../", i) + "docker-compose.test.yml"
+			s.composePath = strings.Repeat("../", i) + "docker-compose.test.yml"
 		}
-		if _, err := os.Stat(composePath); err == nil {
-			cmd := exec.Command("docker", "compose", "-f", composePath, "--profile", "ha", "up", "-d", "steward-standalone")
+		if _, err := os.Stat(s.composePath); err == nil {
+			cmd := exec.Command("docker", "compose", "-f", s.composePath, "--profile", "ha", "up", "-d", "steward-standalone")
 			if output, err := cmd.CombinedOutput(); err != nil {
 				s.T().Logf("Note: Failed to start steward-standalone (may already be running): %v\nOutput: %s", err, output)
 			}
@@ -86,9 +82,11 @@ func (s *ModuleExecutionTestSuite) TearDownSuite() {
 
 	// Stop steward-standalone container
 	s.T().Log("Stopping steward-standalone container...")
-	cmd := exec.Command("docker", "compose", "-f", "docker-compose.test.yml", "--profile", "ha", "down", "steward-standalone")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		s.T().Logf("Warning: Failed to stop steward-standalone: %v\nOutput: %s", err, output)
+	if s.composePath != "" {
+		cmd := exec.Command("docker", "compose", "-f", s.composePath, "--profile", "ha", "down", "steward-standalone")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			s.T().Logf("Warning: Failed to stop steward-standalone: %v\nOutput: %s", err, output)
+		}
 	}
 }
 
@@ -252,21 +250,56 @@ func (s *ModuleExecutionTestSuite) TestConfigStatusReporting() {
 	// TODO: Load and apply test configuration via controller API (Story 12.4)
 	// For now, we're testing status reporting mechanism directly
 
+	// Connect MQTT client for publishing commands
+	token := s.helper.mqttClient.Connect()
+	s.True(token.WaitTimeout(5*time.Second), "MQTT connection timeout")
+	s.NoError(token.Error(), "MQTT connection error")
+
+	// Get steward ID from the running container's logs
+	// (The steward ID is dynamically generated during registration)
+	stewardID, err := s.helper.GetStewardIDFromContainer(s.T(), containerName)
+	s.NoError(err, "Failed to get steward ID from container")
+	s.NotEmpty(stewardID, "Steward ID should not be empty")
+	s.T().Logf("Using steward ID from container: %s", stewardID)
+
 	// Subscribe to config status topic
 	statusReceived := make(chan *ConfigStatusMessage, 1)
-	stewardID := "steward-standalone" // Must match container name
-
 	s.helper.SubscribeToConfigStatus(s.T(), stewardID, func(msg *ConfigStatusMessage) {
 		s.T().Logf("Received config status: version=%s, status=%s, modules=%d",
 			msg.ConfigVersion, msg.Status, len(msg.Modules))
 		statusReceived <- msg
 	})
 
-	// Trigger configuration sync by publishing sync_config command
+	// First, establish QUIC connection (required for config sync)
 	// NOTE: In a real deployment, this would be done by the controller
 	// For testing, we simulate the controller command
 	commandTopic := fmt.Sprintf("cfgms/steward/%s/commands", stewardID)
-	command := map[string]interface{}{
+
+	// Step 1: Send connect_quic command
+	connectQuicCmd := map[string]interface{}{
+		"command_id": "test-cmd-connect-quic",
+		"type":       "connect_quic",
+		"timestamp":  time.Now().Format(time.RFC3339),
+		"params": map[string]interface{}{
+			"quic_address": "controller-standalone:4433",
+			"session_id":   fmt.Sprintf("test-session-%d", time.Now().Unix()),
+		},
+	}
+
+	quicCmdJSON, err := json.Marshal(connectQuicCmd)
+	s.NoError(err, "Failed to marshal connect_quic command")
+
+	token = s.helper.mqttClient.Publish(commandTopic, 1, false, quicCmdJSON)
+	s.True(token.WaitTimeout(5*time.Second), "connect_quic publish timeout")
+	s.NoError(token.Error(), "connect_quic publish error")
+
+	s.T().Log("✅ Published connect_quic command to steward")
+
+	// Wait for QUIC connection to establish
+	time.Sleep(2 * time.Second)
+
+	// Step 2: Send sync_config command
+	syncConfigCmd := map[string]interface{}{
 		"command_id": "test-cmd-ac4",
 		"type":       "sync_config",
 		"timestamp":  time.Now().Format(time.RFC3339),
@@ -275,17 +308,12 @@ func (s *ModuleExecutionTestSuite) TestConfigStatusReporting() {
 		},
 	}
 
-	commandJSON, err := json.Marshal(command)
-	s.NoError(err, "Failed to marshal command")
+	syncCmdJSON, err := json.Marshal(syncConfigCmd)
+	s.NoError(err, "Failed to marshal sync_config command")
 
-	// Publish command to steward
-	token := s.helper.mqttClient.Connect()
-	s.True(token.WaitTimeout(5*time.Second), "MQTT connection timeout")
-	s.NoError(token.Error(), "MQTT connection error")
-
-	token = s.helper.mqttClient.Publish(commandTopic, 1, false, commandJSON)
-	s.True(token.WaitTimeout(5*time.Second), "Command publish timeout")
-	s.NoError(token.Error(), "Command publish error")
+	token = s.helper.mqttClient.Publish(commandTopic, 1, false, syncCmdJSON)
+	s.True(token.WaitTimeout(5*time.Second), "sync_config publish timeout")
+	s.NoError(token.Error(), "sync_config publish error")
 
 	s.T().Log("✅ Published sync_config command to steward")
 
@@ -384,19 +412,54 @@ func (s *ModuleExecutionTestSuite) TestModuleFailureReporting() {
 	// TODO: Load and apply test configuration with intentional errors via controller API (Story 12.4)
 	// For now, we're testing error reporting mechanism directly
 
+	// Connect MQTT client for publishing commands
+	token := s.helper.mqttClient.Connect()
+	s.True(token.WaitTimeout(5*time.Second), "MQTT connection timeout")
+	s.NoError(token.Error(), "MQTT connection error")
+
+	// Get steward ID from the running container's logs
+	// (The steward ID is dynamically generated during registration)
+	stewardID, err := s.helper.GetStewardIDFromContainer(s.T(), containerName)
+	s.NoError(err, "Failed to get steward ID from container")
+	s.NotEmpty(stewardID, "Steward ID should not be empty")
+	s.T().Logf("Using steward ID from container: %s", stewardID)
+
 	// Subscribe to config status topic
 	statusReceived := make(chan *ConfigStatusMessage, 1)
-	stewardID := "steward-standalone"
-
 	s.helper.SubscribeToConfigStatus(s.T(), stewardID, func(msg *ConfigStatusMessage) {
 		s.T().Logf("Received config status: version=%s, status=%s, modules=%d",
 			msg.ConfigVersion, msg.Status, len(msg.Modules))
 		statusReceived <- msg
 	})
 
-	// Trigger configuration sync with failing config
+	// First, establish QUIC connection (required for config sync)
 	commandTopic := fmt.Sprintf("cfgms/steward/%s/commands", stewardID)
-	command := map[string]interface{}{
+
+	// Step 1: Send connect_quic command
+	connectQuicCmd := map[string]interface{}{
+		"command_id": "test-cmd-connect-quic-ac6",
+		"type":       "connect_quic",
+		"timestamp":  time.Now().Format(time.RFC3339),
+		"params": map[string]interface{}{
+			"quic_address": "controller-standalone:4433",
+			"session_id":   fmt.Sprintf("test-session-ac6-%d", time.Now().Unix()),
+		},
+	}
+
+	quicCmdJSON, err := json.Marshal(connectQuicCmd)
+	s.NoError(err, "Failed to marshal connect_quic command")
+
+	token = s.helper.mqttClient.Publish(commandTopic, 1, false, quicCmdJSON)
+	s.True(token.WaitTimeout(5*time.Second), "connect_quic publish timeout")
+	s.NoError(token.Error(), "connect_quic publish error")
+
+	s.T().Log("✅ Published connect_quic command to steward")
+
+	// Wait for QUIC connection to establish
+	time.Sleep(2 * time.Second)
+
+	// Step 2: Trigger configuration sync with failing config
+	syncConfigCmd := map[string]interface{}{
 		"command_id": "test-cmd-ac6",
 		"type":       "sync_config",
 		"timestamp":  time.Now().Format(time.RFC3339),
@@ -405,17 +468,12 @@ func (s *ModuleExecutionTestSuite) TestModuleFailureReporting() {
 		},
 	}
 
-	commandJSON, err := json.Marshal(command)
-	s.NoError(err, "Failed to marshal command")
+	syncCmdJSON, err := json.Marshal(syncConfigCmd)
+	s.NoError(err, "Failed to marshal sync_config command")
 
-	// Publish command
-	token := s.helper.mqttClient.Connect()
-	s.True(token.WaitTimeout(5*time.Second), "MQTT connection timeout")
-	s.NoError(token.Error(), "MQTT connection error")
-
-	token = s.helper.mqttClient.Publish(commandTopic, 1, false, commandJSON)
-	s.True(token.WaitTimeout(5*time.Second), "Command publish timeout")
-	s.NoError(token.Error(), "Command publish error")
+	token = s.helper.mqttClient.Publish(commandTopic, 1, false, syncCmdJSON)
+	s.True(token.WaitTimeout(5*time.Second), "sync_config publish timeout")
+	s.NoError(token.Error(), "sync_config publish error")
 
 	s.T().Log("✅ Published sync_config command with failing configuration")
 
@@ -608,5 +666,11 @@ func (s *ModuleExecutionTestSuite) TestContainerFileSystemAccess() {
 }
 
 func TestModuleExecution(t *testing.T) {
+	// Skip in short mode - requires Docker infrastructure
+	if testing.Short() {
+		t.Skip("Skipping module execution tests in short mode - requires Docker infrastructure")
+		return
+	}
+
 	suite.Run(t, new(ModuleExecutionTestSuite))
 }

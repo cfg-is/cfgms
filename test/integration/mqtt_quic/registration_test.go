@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"testing"
 
 	"github.com/stretchr/testify/suite"
@@ -23,7 +22,7 @@ type RegistrationTestSuite struct {
 
 func (s *RegistrationTestSuite) SetupSuite() {
 	// Skip if running in short/fast mode - requires controller infrastructure
-	if os.Getenv("CFGMS_TEST_SHORT") == "1" {
+	if testing.Short() {
 		s.T().Skip("Skipping registration tests in short mode - requires controller")
 	}
 

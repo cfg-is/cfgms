@@ -15,11 +15,13 @@ import (
 
 // handleListStewards handles GET /api/v1/stewards
 func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
-	// Get all stewards from the controller service
+	// Get all stewards from the controller service (connected stewards with heartbeats)
 	stewards := s.controllerService.GetAllStewards()
 
 	// Convert to API response format
 	stewardList := make([]StewardInfo, 0, len(stewards))
+	seenStewards := make(map[string]bool) // Track which stewards we've seen
+
 	for _, steward := range stewards {
 		info := StewardInfo{
 			ID:          steward.ID,
@@ -41,7 +43,24 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 		}
 
 		stewardList = append(stewardList, info)
+		seenStewards[steward.ID] = true
 	}
+
+	// Also include recently registered stewards that may not have connected yet
+	s.mu.RLock()
+	for stewardID, registered := range s.registeredStewards {
+		if !seenStewards[stewardID] {
+			// Steward registered but hasn't connected yet
+			info := StewardInfo{
+				ID:          stewardID,
+				Status:      registered.Status,
+				ConnectedAt: registered.RegisteredAt,
+				LastSeen:    registered.LastHeartbeat,
+			}
+			stewardList = append(stewardList, info)
+		}
+	}
+	s.mu.RUnlock()
 
 	s.logger.Info("Listed stewards", "count", len(stewardList))
 	s.writeSuccessResponse(w, stewardList)
@@ -293,4 +312,43 @@ func (s *Server) handleGetEffectiveConfig(w http.ResponseWriter, r *http.Request
 
 	s.logger.Info("Retrieved effective configuration", "steward_id", stewardID, "resources_count", len(effectiveConfig.Resources))
 	s.writeSuccessResponse(w, effectiveConfig)
+}
+
+// handleTriggerQUICConnection handles POST /api/v1/stewards/{id}/quic/connect
+func (s *Server) handleTriggerQUICConnection(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	stewardID := vars["id"]
+
+	if stewardID == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Steward ID is required", "MISSING_STEWARD_ID")
+		return
+	}
+
+	// Check if QUIC trigger function is available
+	s.mu.RLock()
+	triggerFunc := s.quicTriggerFunc
+	s.mu.RUnlock()
+
+	if triggerFunc == nil {
+		s.logger.Error("QUIC trigger function not configured", "steward_id", stewardID)
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "QUIC functionality not available", "QUIC_NOT_CONFIGURED")
+		return
+	}
+
+	// Trigger QUIC connection
+	commandID, err := triggerFunc(r.Context(), stewardID)
+	if err != nil {
+		s.logger.Error("Failed to trigger QUIC connection", "steward_id", stewardID, "error", err)
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to trigger QUIC connection", "QUIC_CONNECTION_FAILED")
+		return
+	}
+
+	response := map[string]interface{}{
+		"command_id": commandID,
+		"steward_id": stewardID,
+		"message":    "QUIC connection triggered successfully",
+	}
+
+	s.logger.Info("Triggered QUIC connection", "steward_id", stewardID, "command_id", commandID)
+	s.writeSuccessResponse(w, response)
 }
