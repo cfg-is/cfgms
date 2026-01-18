@@ -104,23 +104,34 @@ func (h *ModuleTestHelper) GetStewardIDFromContainer(t *testing.T, containerName
 		return "", err
 	}
 
-	// Read steward's log file to get the registered steward ID
-	// The logs contain: "steward_id":"steward-1234567890"
-	cmd := exec.Command("docker", "exec", containerName, "sh", "-c",
-		"cat /tmp/cfgms/cfgms-*.log 2>/dev/null | grep -o '\"steward_id\":\"[^\"]*\"' | head -1 | cut -d'\"' -f4")
+	// Retry loop: Wait up to 30 seconds for steward to register and write logs
+	// This handles timing issues in CI where the container may be slow to start
+	maxAttempts := 30
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		// Read steward's log file to get the registered steward ID
+		// The logs contain: "steward_id":"steward-1234567890"
+		cmd := exec.Command("docker", "exec", containerName, "sh", "-c",
+			"cat /tmp/cfgms/cfgms-*.log 2>/dev/null | grep -o '\"steward_id\":\"[^\"]*\"' | head -1 | cut -d'\"' -f4")
 
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("failed to read steward ID from container logs: %w (output: %s)", err, string(output))
+		output, err := cmd.CombinedOutput()
+		stewardID := strings.TrimSpace(string(output))
+
+		if err == nil && stewardID != "" {
+			t.Logf("Extracted steward ID from container logs: %s (attempt %d/%d)", stewardID, attempt, maxAttempts)
+			return stewardID, nil
+		}
+
+		// Log progress every 5 attempts
+		if attempt%5 == 0 {
+			t.Logf("Waiting for steward to register... (attempt %d/%d)", attempt, maxAttempts)
+		}
+
+		// Wait 1 second before retrying
+		time.Sleep(1 * time.Second)
 	}
 
-	stewardID := strings.TrimSpace(string(output))
-	if stewardID == "" {
-		return "", fmt.Errorf("could not find steward_id in container logs")
-	}
-
-	t.Logf("Extracted steward ID from container logs: %s", stewardID)
-	return stewardID, nil
+	// Final attempt - return detailed error
+	return "", fmt.Errorf("could not find steward_id in container logs after %d seconds", maxAttempts)
 }
 
 // FileInfo represents information about a file in the container
