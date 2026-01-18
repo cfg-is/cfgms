@@ -5,6 +5,7 @@ package registration
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -23,9 +24,10 @@ type HTTPClient struct {
 
 // HTTPConfig holds configuration for HTTP registration
 type HTTPConfig struct {
-	ControllerURL string
-	Timeout       time.Duration
-	Logger        logging.Logger
+	ControllerURL      string
+	Timeout            time.Duration
+	InsecureSkipVerify bool // Skip TLS verification (test mode only)
+	Logger             logging.Logger
 }
 
 // NewHTTPClient creates a new HTTP-based registration client
@@ -42,10 +44,19 @@ func NewHTTPClient(cfg *HTTPConfig) (*HTTPClient, error) {
 		timeout = 30 * time.Second
 	}
 
+	// Configure TLS if needed (test mode support)
+	transport := &http.Transport{}
+	if cfg.InsecureSkipVerify {
+		transport.TLSClientConfig = &tls.Config{
+			InsecureSkipVerify: true, // #nosec G402 - Test mode only, controlled by explicit configuration
+		}
+	}
+
 	return &HTTPClient{
 		controllerURL: cfg.ControllerURL,
 		httpClient: &http.Client{
-			Timeout: timeout,
+			Timeout:   timeout,
+			Transport: transport,
 		},
 		logger: cfg.Logger,
 	}, nil

@@ -6,7 +6,6 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"os"
 	"sync"
 	"testing"
 	"time"
@@ -29,7 +28,7 @@ type MQTTConnectivityTestSuite struct {
 
 func (s *MQTTConnectivityTestSuite) SetupSuite() {
 	// Skip if running in short/fast mode - requires MQTT broker infrastructure
-	if os.Getenv("CFGMS_TEST_SHORT") == "1" {
+	if testing.Short() {
 		s.T().Skip("Skipping MQTT connectivity tests in short mode - requires MQTT broker")
 	}
 

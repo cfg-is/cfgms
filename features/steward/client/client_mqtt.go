@@ -50,6 +50,11 @@ type MQTTClient struct {
 	// Certificate path for mTLS
 	certPath string
 
+	// Certificate PEMs (from registration response)
+	caCertPEM     string
+	clientCertPEM string
+	clientKeyPEM  string
+
 	// Command handler
 	commandHandler *commands.Handler
 
@@ -86,6 +91,15 @@ type MQTTConfig struct {
 	// TLSCertPath for mTLS (optional if using token auth)
 	TLSCertPath string
 
+	// CACertPEM is the CA certificate PEM (for TLS verification)
+	CACertPEM string
+
+	// ClientCertPEM is the client certificate PEM (for mTLS)
+	ClientCertPEM string
+
+	// ClientKeyPEM is the client private key PEM (for mTLS)
+	ClientKeyPEM string
+
 	// HeartbeatInterval for periodic heartbeats
 	HeartbeatInterval time.Duration
 
@@ -112,6 +126,9 @@ func NewMQTTClient(cfg *MQTTConfig) (*MQTTClient, error) {
 		heartbeatStop:     make(chan struct{}),
 		quicAddress:       cfg.QUICAddress,
 		certPath:          cfg.TLSCertPath,
+		caCertPEM:         cfg.CACertPEM,
+		clientCertPEM:     cfg.ClientCertPEM,
+		clientKeyPEM:      cfg.ClientKeyPEM,
 		logger:            cfg.Logger,
 		controllerURL:     cfg.ControllerURL,
 	}
@@ -348,7 +365,7 @@ func (c *MQTTClient) setupCommandHandler(ctx context.Context, stewardID string, 
 
 		// First, ensure QUIC connection is established
 		if err := c.handleConnectQUIC(ctx, cmd); err != nil {
-			c.logger.Error("Failed to establish QUIC connection for config sync", "error", err)
+			c.logger.Error("Failed to establish QUIC connection for config sync", "error", err.Error())
 			return fmt.Errorf("QUIC connection failed: %w", err)
 		}
 
@@ -927,6 +944,23 @@ func (c *MQTTClient) SetTenantID(id string) {
 // createMQTTTLSConfig creates a TLS configuration for MQTT with mTLS.
 // It loads TLS certificates from environment variables or the cert path.
 func (c *MQTTClient) createMQTTTLSConfig() (*tls.Config, error) {
+	c.mu.RLock()
+	caCertPEM := c.caCertPEM
+	clientCertPEM := c.clientCertPEM
+	clientKeyPEM := c.clientKeyPEM
+	certPath := c.certPath
+	c.mu.RUnlock()
+
+	// If PEM certificates are provided (from registration), use them directly
+	if caCertPEM != "" && clientCertPEM != "" && clientKeyPEM != "" {
+		c.logger.Info("Using TLS certificates from registration response")
+		tlsConfig, err := cert.CreateClientTLSConfig([]byte(clientCertPEM), []byte(clientKeyPEM), []byte(caCertPEM), "", tls.VersionTLS12)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create MQTT TLS config from PEM: %w", err)
+		}
+		return tlsConfig, nil
+	}
+
 	// Try environment variables first (Story 12.4: TLS support)
 	certFile := os.Getenv("CFGMS_MQTT_TLS_CERT_PATH")
 	keyFile := os.Getenv("CFGMS_MQTT_TLS_KEY_PATH")
@@ -934,10 +968,6 @@ func (c *MQTTClient) createMQTTTLSConfig() (*tls.Config, error) {
 
 	// If environment variables are not set, try using certPath
 	if certFile == "" || keyFile == "" || caFile == "" {
-		c.mu.RLock()
-		certPath := c.certPath
-		c.mu.RUnlock()
-
 		if certPath == "" {
 			// No TLS configuration available
 			return nil, nil
@@ -951,25 +981,25 @@ func (c *MQTTClient) createMQTTTLSConfig() (*tls.Config, error) {
 
 	// Load client certificate PEM data
 	// #nosec G304 - Certificate paths are controlled via configuration
-	clientCertPEM, err := os.ReadFile(certFile)
+	clientCertBytes, err := os.ReadFile(certFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read client certificate: %w", err)
 	}
 	// #nosec G304 - Certificate paths are controlled via configuration
-	clientKeyPEM, err := os.ReadFile(keyFile)
+	clientKeyBytes, err := os.ReadFile(keyFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read client key: %w", err)
 	}
 
 	// Load CA certificate
 	// #nosec G304 - Certificate paths are controlled via configuration
-	caCertPEM, err := os.ReadFile(caFile)
+	caCertBytes, err := os.ReadFile(caFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read CA certificate: %w", err)
 	}
 
 	// Create TLS config for MQTT with mTLS using pkg/cert helper
-	tlsConfig, err := cert.CreateClientTLSConfig(clientCertPEM, clientKeyPEM, caCertPEM, "", tls.VersionTLS12)
+	tlsConfig, err := cert.CreateClientTLSConfig(clientCertBytes, clientKeyBytes, caCertBytes, "", tls.VersionTLS12)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create MQTT TLS config: %w", err)
 	}
@@ -984,30 +1014,48 @@ func (c *MQTTClient) createMQTTTLSConfig() (*tls.Config, error) {
 
 // createQUICtlsConfig creates a TLS configuration for QUIC with proper mTLS.
 func (c *MQTTClient) createQUICtlsConfig(certPath string) (*tls.Config, error) {
-	if certPath == "" {
-		return nil, fmt.Errorf("certificate path is required for mTLS")
-	}
+	c.mu.RLock()
+	caCertPEMStr := c.caCertPEM
+	clientCertPEMStr := c.clientCertPEM
+	clientKeyPEMStr := c.clientKeyPEM
+	c.mu.RUnlock()
 
-	// Load CA certificate to verify controller's identity
-	caCertPath := filepath.Join(certPath, "ca.crt")
-	// #nosec G304 - Certificate paths are controlled via configuration
-	caCertPEM, err := os.ReadFile(caCertPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read CA certificate from %s: %w", caCertPath, err)
-	}
+	var caCertPEM, clientCertPEM, clientKeyPEM []byte
+	var err error
 
-	// Load client certificate for mTLS authentication
-	clientCertPath := filepath.Join(certPath, "client.crt")
-	clientKeyPath := filepath.Join(certPath, "client.key")
-	// #nosec G304 - Certificate paths are controlled via configuration
-	clientCertPEM, err := os.ReadFile(clientCertPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read client certificate from %s: %w", clientCertPath, err)
-	}
-	// #nosec G304 - Certificate paths are controlled via configuration
-	clientKeyPEM, err := os.ReadFile(clientKeyPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read client key from %s: %w", clientKeyPath, err)
+	// If PEM certificates are provided (from registration), use them directly
+	if caCertPEMStr != "" && clientCertPEMStr != "" && clientKeyPEMStr != "" {
+		c.logger.Info("Using TLS certificates from registration response for QUIC")
+		caCertPEM = []byte(caCertPEMStr)
+		clientCertPEM = []byte(clientCertPEMStr)
+		clientKeyPEM = []byte(clientKeyPEMStr)
+	} else {
+		// Fall back to reading from files
+		if certPath == "" {
+			return nil, fmt.Errorf("certificate path is required for mTLS")
+		}
+
+		// Load CA certificate to verify controller's identity
+		caCertPath := filepath.Join(certPath, "ca.crt")
+		// #nosec G304 - Certificate paths are controlled via configuration
+		caCertPEM, err = os.ReadFile(caCertPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read CA certificate from %s: %w", caCertPath, err)
+		}
+
+		// Load client certificate for mTLS authentication
+		clientCertPath := filepath.Join(certPath, "client.crt")
+		clientKeyPath := filepath.Join(certPath, "client.key")
+		// #nosec G304 - Certificate paths are controlled via configuration
+		clientCertPEM, err = os.ReadFile(clientCertPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read client certificate from %s: %w", clientCertPath, err)
+		}
+		// #nosec G304 - Certificate paths are controlled via configuration
+		clientKeyPEM, err = os.ReadFile(clientKeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read client key from %s: %w", clientKeyPath, err)
+		}
 	}
 
 	// Create TLS config with mTLS using pkg/cert helper

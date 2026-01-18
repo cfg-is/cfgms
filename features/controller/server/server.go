@@ -321,7 +321,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		return nil, fmt.Errorf("failed to initialize HTTP API server: %w", err)
 	}
 
-	return &Server{
+	logger.Info("HTTP API server initialized successfully")
+
+	srv := &Server{
 		cfg:                     cfg,
 		logger:                  logger,
 		controllerService:       controllerService,
@@ -341,7 +343,15 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		quicServer:              quicSrv,
 		quicSessionManager:      quicSessionMgr,
 		httpServer:              httpServer,
-	}, nil
+	}
+
+	// Wire up QUIC trigger function to API server (if QUIC is enabled)
+	if quicSrv != nil && quicSessionMgr != nil {
+		httpServer.SetQUICTriggerFunc(srv.TriggerQUICConnection)
+		logger.Info("QUIC trigger function wired to HTTP API server")
+	}
+
+	return srv, nil
 }
 
 // Start initializes and starts the controller server (MQTT+QUIC mode)

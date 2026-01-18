@@ -30,6 +30,12 @@ type DockerIntegrationTestSuite struct {
 }
 
 func (s *DockerIntegrationTestSuite) SetupSuite() {
+	// Skip in short mode - requires Docker infrastructure
+	if testing.Short() {
+		s.T().Skip("Skipping Docker integration tests in short mode - requires Docker infrastructure")
+		return
+	}
+
 	// Check if Docker controller MQTT broker is available
 	s.mqttAddr = os.Getenv("CFGMS_TEST_DOCKER_MQTT")
 	if s.mqttAddr == "" {
@@ -296,5 +302,11 @@ func (s *DockerIntegrationTestSuite) TestMQTTPortAccessibility() {
 }
 
 func TestDockerIntegration(t *testing.T) {
+	// Skip in short mode - requires Docker infrastructure
+	if testing.Short() {
+		t.Skip("Skipping Docker integration tests in short mode - requires Docker infrastructure")
+		return
+	}
+
 	suite.Run(t, new(DockerIntegrationTestSuite))
 }

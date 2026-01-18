@@ -181,7 +181,7 @@ func (h *Handler) executeCommand(cmd mqttTypes.Command) {
 		h.logger.Error("Command execution failed",
 			"command_id", cmd.CommandID,
 			"type", cmd.Type,
-			"error", err,
+			"error", err.Error(),
 			"execution_time", executionTime)
 
 		h.sendStatus(mqttTypes.StatusUpdate{

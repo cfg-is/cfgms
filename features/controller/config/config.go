@@ -383,7 +383,7 @@ func DefaultConfig() *Config {
 			EnableAutoRenewal:      true,
 			Server: &ServerCertificateConfig{
 				CommonName:   "cfgms-controller",
-				DNSNames:     []string{"localhost", "cfgms-controller"},
+				DNSNames:     []string{"localhost", "cfgms-controller", "controller-standalone"},
 				IPAddresses:  []string{"127.0.0.1"},
 				Organization: "CFGMS",
 			},

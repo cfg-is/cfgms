@@ -94,6 +94,35 @@ func (h *ModuleTestHelper) DisconnectMQTT(t *testing.T) {
 	}
 }
 
+// GetStewardIDFromContainer extracts the steward ID from the container's log file.
+// This is a test-only helper for discovering the dynamically-generated steward ID.
+func (h *ModuleTestHelper) GetStewardIDFromContainer(t *testing.T, containerName string) (string, error) {
+	t.Helper()
+
+	// Validate container name
+	if err := validateContainerName(containerName); err != nil {
+		return "", err
+	}
+
+	// Read steward's log file to get the registered steward ID
+	// The logs contain: "steward_id":"steward-1234567890"
+	cmd := exec.Command("docker", "exec", containerName, "sh", "-c",
+		"cat /tmp/cfgms/cfgms-*.log 2>/dev/null | grep -o '\"steward_id\":\"[^\"]*\"' | head -1 | cut -d'\"' -f4")
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("failed to read steward ID from container logs: %w (output: %s)", err, string(output))
+	}
+
+	stewardID := strings.TrimSpace(string(output))
+	if stewardID == "" {
+		return "", fmt.Errorf("could not find steward_id in container logs")
+	}
+
+	t.Logf("Extracted steward ID from container logs: %s", stewardID)
+	return stewardID, nil
+}
+
 // FileInfo represents information about a file in the container
 type FileInfo struct {
 	Path        string

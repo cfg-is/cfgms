@@ -42,7 +42,7 @@ type ConfigSignatureTestSuite struct {
 
 func (s *ConfigSignatureTestSuite) SetupSuite() {
 	// Skip if running in short/fast mode - requires MQTT broker infrastructure
-	if os.Getenv("CFGMS_TEST_SHORT") == "1" {
+	if testing.Short() {
 		s.T().Skip("Skipping config signature tests in short mode - requires MQTT broker")
 	}
 

@@ -6,7 +6,6 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -32,7 +31,7 @@ type HeartbeatFailoverTestSuite struct {
 
 func (s *HeartbeatFailoverTestSuite) SetupSuite() {
 	// Skip if running in short/fast mode - requires MQTT broker infrastructure
-	if os.Getenv("CFGMS_TEST_SHORT") == "1" {
+	if testing.Short() {
 		s.T().Skip("Skipping heartbeat/failover tests in short mode - requires MQTT broker")
 	}
 

@@ -23,7 +23,7 @@ type CertificateLifecycleTestSuite struct {
 
 // SetupSuite checks test prerequisites
 func (s *CertificateLifecycleTestSuite) SetupSuite() {
-	if os.Getenv("CFGMS_TEST_SHORT") == "1" {
+	if testing.Short() {
 		s.T().Skip("Skipping certificate lifecycle tests in short mode")
 	}
 
