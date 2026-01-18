@@ -134,8 +134,11 @@ func (s *ConfigurationService) GetConfiguration(ctx context.Context, req *contro
 	// Filter configuration by requested modules if specified
 	filteredConfig := s.filterConfigByModules(storedConfig.Config, req.Modules)
 
-	// Convert to JSON
-	configData, err := json.Marshal(filteredConfig)
+	// Transform StewardConfig to executor format (ConfigurationSpec)
+	executorConfig := s.transformToExecutorFormat(filteredConfig, storedConfig.Version)
+
+	// Convert to YAML (executor expects YAML format)
+	configData, err := json.Marshal(executorConfig)
 	if err != nil {
 		s.logger.Error("Failed to marshal configuration", "steward_id", req.StewardId, "error", err)
 		return &controller.ConfigResponse{
@@ -590,4 +593,35 @@ func (s *ConfigurationService) extractTenantID(ctx context.Context) string {
 
 	s.logger.Debug("No tenant-id in context, using default tenant")
 	return "default"
+}
+
+// transformToExecutorFormat transforms StewardConfig to executor's ConfigurationSpec format
+// The executor expects modules grouped by type with resource specs
+func (s *ConfigurationService) transformToExecutorFormat(config *stewardconfig.StewardConfig, version string) map[string]any {
+	// Group resources by module type
+	moduleGroups := make(map[string][]map[string]any)
+
+	for _, resource := range config.Resources {
+		// Create resource spec in executor format
+		resourceSpec := map[string]any{
+			"name":        resource.Name,
+			"resource_id": resource.Config["path"], // For file module, path is the resource_id
+			"state":       "present",               // Default state
+			"config":      resource.Config,
+		}
+
+		// Check for explicit state in config
+		if state, ok := resource.Config["ensure"].(string); ok {
+			resourceSpec["state"] = state
+		}
+
+		// Add to module group
+		moduleGroups[resource.Module] = append(moduleGroups[resource.Module], resourceSpec)
+	}
+
+	// Return in executor's expected format
+	return map[string]any{
+		"version": version,
+		"modules": moduleGroups,
+	}
 }
