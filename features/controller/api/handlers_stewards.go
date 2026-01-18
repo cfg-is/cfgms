@@ -11,6 +11,7 @@ import (
 	"github.com/gorilla/mux"
 
 	controller "github.com/cfgis/cfgms/api/proto/controller"
+	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/pkg/security"
 )
 
@@ -190,21 +191,56 @@ func (s *Server) handleUpdateStewardConfig(w http.ResponseWriter, r *http.Reques
 	vars := mux.Vars(r)
 	stewardID := vars["id"]
 
-	if stewardID == "" {
-		s.writeErrorResponse(w, http.StatusBadRequest, "Steward ID is required", "MISSING_STEWARD_ID")
+	// Validate steward ID to prevent log injection
+	validator := security.NewValidator()
+	validationResult := &security.ValidationResult{Valid: true}
+	validator.ValidateString(validationResult, "steward_id", stewardID, "required", "charset:alphanumeric_dash", "min_length:1")
+
+	if !validationResult.Valid {
+		s.logger.Warn("Invalid steward ID format in config update request", "validation_errors", validationResult.Errors)
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid steward ID format", "INVALID_STEWARD_ID")
 		return
 	}
 
-	// Parse request body
-	var configUpdate map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&configUpdate); err != nil {
+	// Parse request body into StewardConfig
+	var config stewardconfig.StewardConfig
+	if err := json.NewDecoder(r.Body).Decode(&config); err != nil {
+		s.logger.Error("Failed to decode config JSON", "error", err)
 		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid JSON body", "INVALID_JSON")
 		return
 	}
 
-	// For now, return a method not implemented response
-	// TODO: Implement configuration update when the backend supports it
-	s.writeErrorResponse(w, http.StatusNotImplemented, "Configuration updates not yet implemented", "NOT_IMPLEMENTED")
+	// Extract tenant from context or use default
+	tenantID := "default"
+	if tid, ok := r.Context().Value("tenant-id").(string); ok && tid != "" {
+		tenantID = tid
+	}
+
+	s.logger.Info("Configuration upload request received",
+		"steward_id", stewardID,
+		"tenant_id", tenantID,
+		"resource_count", len(config.Resources))
+
+	// Store configuration using tenant-aware config service
+	if err := s.configService.SetTenantConfiguration(tenantID, stewardID, &config); err != nil {
+		s.logger.Error("Failed to store configuration",
+			"steward_id", stewardID,
+			"tenant_id", tenantID,
+			"error", err)
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to store configuration", "STORAGE_ERROR")
+		return
+	}
+
+	s.logger.Info("Configuration stored successfully",
+		"steward_id", stewardID,
+		"tenant_id", tenantID)
+
+	s.writeSuccessResponse(w, map[string]any{
+		"steward_id": stewardID,
+		"tenant_id":  tenantID,
+		"status":     "stored",
+		"message":    "Configuration stored successfully",
+	})
 }
 
 // handleValidateConfig handles POST /api/v1/stewards/{id}/config/validate

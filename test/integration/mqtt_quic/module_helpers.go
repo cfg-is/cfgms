@@ -45,13 +45,22 @@ type ModuleTestHelper struct {
 }
 
 // NewModuleTestHelper creates a new module test helper
-func NewModuleTestHelper(baseURL, mqttAddr string) *ModuleTestHelper {
+func NewModuleTestHelper(baseURL, mqttAddr string, tlsConfig *tls.Config) *ModuleTestHelper {
+	httpClient := &http.Client{
+		Timeout: 10 * time.Second,
+	}
+
+	// Configure TLS if provided
+	if tlsConfig != nil {
+		httpClient.Transport = &http.Transport{
+			TLSClientConfig: tlsConfig,
+		}
+	}
+
 	return &ModuleTestHelper{
-		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
-		},
-		baseURL:  baseURL,
-		mqttAddr: mqttAddr,
+		httpClient: httpClient,
+		baseURL:    baseURL,
+		mqttAddr:   mqttAddr,
 	}
 }
 
@@ -363,15 +372,41 @@ func (h *ModuleTestHelper) WaitForConfigStatus(t *testing.T, stewardID string, t
 }
 
 // SendConfiguration sends a configuration to the controller via HTTP API
-// Note: This is a simplified version - in reality, we'd use the actual config API
 func (h *ModuleTestHelper) SendConfiguration(t *testing.T, stewardID string, config map[string]interface{}) error {
 	t.Helper()
 
-	// For now, we'll use a simplified approach where we trigger QUIC connection
-	// which will fetch the configuration from the controller
-	// In a full implementation, we'd POST to /api/v1/config/{stewardID}
+	// Marshal configuration to JSON
+	configJSON, err := json.Marshal(config)
+	if err != nil {
+		return fmt.Errorf("failed to marshal config: %w", err)
+	}
 
-	t.Logf("Configuration would be sent to steward %s", stewardID)
+	// Create HTTP request to upload config
+	url := fmt.Sprintf("%s/api/v1/stewards/%s/config", h.baseURL, stewardID)
+	req, err := http.NewRequest(http.MethodPut, url, bytes.NewBuffer(configJSON))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	// Send request
+	resp, err := h.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send config: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Check response status
+	if resp.StatusCode != http.StatusOK {
+		var errResp map[string]interface{}
+		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil {
+			t.Logf("Error response from config upload: %v", errResp)
+		}
+		return fmt.Errorf("config upload failed with status %d", resp.StatusCode)
+	}
+
+	t.Logf("✅ Configuration uploaded successfully for steward %s", stewardID)
 	return nil
 }
 

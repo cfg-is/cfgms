@@ -69,6 +69,7 @@ func (s *ModuleExecutionTestSuite) SetupSuite() {
 	s.helper = NewModuleTestHelper(
 		GetTestHTTPAddr("https://127.0.0.1:8080"),
 		GetTestMQTTAddr("ssl://127.0.0.1:1886"),
+		s.tlsConfig,
 	)
 
 	// Connect MQTT client for status monitoring with TLS
@@ -247,9 +248,6 @@ func (s *ModuleExecutionTestSuite) TestConfigStatusReporting() {
 	// Cleanup before test
 	s.helper.CleanupTestFiles(s.T(), containerName, testFilePath, testDirPath)
 
-	// TODO: Load and apply test configuration via controller API (Story 12.4)
-	// For now, we're testing status reporting mechanism directly
-
 	// Connect MQTT client for publishing commands
 	token := s.helper.mqttClient.Connect()
 	s.True(token.WaitTimeout(5*time.Second), "MQTT connection timeout")
@@ -261,6 +259,38 @@ func (s *ModuleExecutionTestSuite) TestConfigStatusReporting() {
 	s.NoError(err, "Failed to get steward ID from container")
 	s.NotEmpty(stewardID, "Steward ID should not be empty")
 	s.T().Logf("Using steward ID from container: %s", stewardID)
+
+	// Upload test configuration to controller
+	testConfig := map[string]any{
+		"steward": map[string]any{
+			"id":   stewardID,
+			"mode": "controller",
+		},
+		"resources": []map[string]any{
+			{
+				"name":   "test-file",
+				"module": "file",
+				"config": map[string]any{
+					"path":        testFilePath,
+					"content":     "Hello from CFGMS module execution test!\n",
+					"permissions": "0644",
+					"ensure":      "present",
+				},
+			},
+			{
+				"name":   "test-directory",
+				"module": "directory",
+				"config": map[string]any{
+					"path":        testDirPath,
+					"permissions": "0755",
+					"ensure":      "present",
+				},
+			},
+		},
+	}
+
+	err = s.helper.SendConfiguration(s.T(), stewardID, testConfig)
+	s.NoError(err, "Failed to upload test configuration")
 
 	// Subscribe to config status topic
 	statusReceived := make(chan *ConfigStatusMessage, 1)
@@ -409,9 +439,6 @@ func (s *ModuleExecutionTestSuite) TestModuleFailureReporting() {
 	// Cleanup before test
 	s.helper.CleanupTestFiles(s.T(), containerName, testFilePath, testDirPath)
 
-	// TODO: Load and apply test configuration with intentional errors via controller API (Story 12.4)
-	// For now, we're testing error reporting mechanism directly
-
 	// Connect MQTT client for publishing commands
 	token := s.helper.mqttClient.Connect()
 	s.True(token.WaitTimeout(5*time.Second), "MQTT connection timeout")
@@ -423,6 +450,38 @@ func (s *ModuleExecutionTestSuite) TestModuleFailureReporting() {
 	s.NoError(err, "Failed to get steward ID from container")
 	s.NotEmpty(stewardID, "Steward ID should not be empty")
 	s.T().Logf("Using steward ID from container: %s", stewardID)
+
+	// Upload test configuration with intentional error (invalid permissions)
+	testConfig := map[string]any{
+		"steward": map[string]any{
+			"id":   stewardID,
+			"mode": "controller",
+		},
+		"resources": []map[string]any{
+			{
+				"name":   "invalid-perms-file",
+				"module": "file",
+				"config": map[string]any{
+					"path":        testFilePath,
+					"content":     "This should fail due to invalid permissions\n",
+					"permissions": "9999", // Invalid permissions to trigger error
+					"ensure":      "present",
+				},
+			},
+			{
+				"name":   "valid-directory",
+				"module": "directory",
+				"config": map[string]any{
+					"path":        testDirPath,
+					"permissions": "0755",
+					"ensure":      "present",
+				},
+			},
+		},
+	}
+
+	err = s.helper.SendConfiguration(s.T(), stewardID, testConfig)
+	s.NoError(err, "Failed to upload test configuration")
 
 	// Subscribe to config status topic
 	statusReceived := make(chan *ConfigStatusMessage, 1)
@@ -436,7 +495,7 @@ func (s *ModuleExecutionTestSuite) TestModuleFailureReporting() {
 	commandTopic := fmt.Sprintf("cfgms/steward/%s/commands", stewardID)
 
 	// Step 1: Send connect_quic command
-	connectQuicCmd := map[string]interface{}{
+	connectQuicCmd := map[string]any{
 		"command_id": "test-cmd-connect-quic-ac6",
 		"type":       "connect_quic",
 		"timestamp":  time.Now().Format(time.RFC3339),
