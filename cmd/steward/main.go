@@ -265,8 +265,12 @@ func registerAndConnectMQTT(ctx context.Context, token string, logger logging.Lo
 		return nil, fmt.Errorf("failed to create HTTP registration client: %w", err)
 	}
 
-	// Register via HTTP
-	regResp, err := httpClient.Register(ctx, token)
+	// Register via HTTP with timeout (prevent hanging indefinitely)
+	// Use child context for HTTP call, but keep parent ctx for MQTT operations
+	regCtx, regCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer regCancel()
+
+	regResp, err := httpClient.Register(regCtx, token)
 	if err != nil {
 		return nil, fmt.Errorf("HTTP registration failed: %w", err)
 	}
