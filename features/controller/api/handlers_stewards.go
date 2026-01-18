@@ -11,6 +11,7 @@ import (
 	"github.com/gorilla/mux"
 
 	controller "github.com/cfgis/cfgms/api/proto/controller"
+	"github.com/cfgis/cfgms/pkg/security"
 )
 
 // handleListStewards handles GET /api/v1/stewards
@@ -321,6 +322,17 @@ func (s *Server) handleTriggerQUICConnection(w http.ResponseWriter, r *http.Requ
 
 	if stewardID == "" {
 		s.writeErrorResponse(w, http.StatusBadRequest, "Steward ID is required", "MISSING_STEWARD_ID")
+		return
+	}
+
+	// Validate steward ID to prevent log injection (CodeQL security finding)
+	validator := security.NewValidator()
+	validationResult := &security.ValidationResult{Valid: true}
+	validator.ValidateString(validationResult, "steward_id", stewardID, "required", "charset:alphanumeric_dash", "min_length:1")
+
+	if !validationResult.Valid {
+		s.logger.Warn("Invalid steward ID format in QUIC trigger request", "validation_errors", validationResult.Errors)
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid steward ID format", "INVALID_STEWARD_ID")
 		return
 	}
 
