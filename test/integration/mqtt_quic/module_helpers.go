@@ -119,8 +119,9 @@ func (h *ModuleTestHelper) GetStewardIDFromContainer(t *testing.T, containerName
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		// Read steward's log file to get the registered steward ID
 		// The logs contain: "steward_id":"steward-1234567890"
+		// Use tail -1 to get the LATEST steward_id (in case of retries/restarts)
 		cmd := exec.Command("docker", "exec", containerName, "sh", "-c",
-			"cat /tmp/cfgms/cfgms-*.log 2>/dev/null | grep -o '\"steward_id\":\"[^\"]*\"' | head -1 | cut -d'\"' -f4")
+			"cat /tmp/cfgms/cfgms-*.log 2>/dev/null | grep -o '\"steward_id\":\"[^\"]*\"' | tail -1 | cut -d'\"' -f4")
 
 		output, err := cmd.CombinedOutput()
 		stewardID := strings.TrimSpace(string(output))
