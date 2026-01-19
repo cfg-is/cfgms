@@ -183,8 +183,9 @@ func (s *Server) setupRouter() {
 	s.router.HandleFunc("/api/v1/register", s.handleRegister).Methods("POST", "OPTIONS")
 
 	// Test-mode config upload (no auth required - for integration tests only)
+	// Use separate path to avoid conflict with authenticated subrouter
 	// TODO: Remove or protect this endpoint in production
-	s.router.HandleFunc("/api/v1/stewards/{id}/config", s.handleUpdateStewardConfig).Methods("PUT", "OPTIONS")
+	s.router.HandleFunc("/api/v1/test/stewards/{id}/config", s.handleUpdateStewardConfig).Methods("PUT", "OPTIONS")
 
 	// Steward management endpoints (require API key authentication)
 	stewards := api.PathPrefix("/stewards").Subrouter()

@@ -381,8 +381,8 @@ func (h *ModuleTestHelper) SendConfiguration(t *testing.T, stewardID string, con
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
 
-	// Create HTTP request to upload config
-	url := fmt.Sprintf("%s/api/v1/stewards/%s/config", h.baseURL, stewardID)
+	// Create HTTP request to upload config (using test endpoint that doesn't require auth)
+	url := fmt.Sprintf("%s/api/v1/test/stewards/%s/config", h.baseURL, stewardID)
 	req, err := http.NewRequest(http.MethodPut, url, bytes.NewBuffer(configJSON))
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)

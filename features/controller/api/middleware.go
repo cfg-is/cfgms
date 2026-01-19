@@ -116,7 +116,7 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Exempt test-mode config upload endpoint from authentication
 		// TODO: Remove or protect this exemption in production
-		if r.Method == "PUT" && strings.HasPrefix(r.URL.Path, "/api/v1/stewards/") && strings.HasSuffix(r.URL.Path, "/config") {
+		if r.Method == "PUT" && strings.HasPrefix(r.URL.Path, "/api/v1/test/stewards/") && strings.HasSuffix(r.URL.Path, "/config") {
 			next.ServeHTTP(w, r)
 			return
 		}
