@@ -182,6 +182,10 @@ func (s *Server) setupRouter() {
 	// Steward registration (no auth required - uses registration token)
 	s.router.HandleFunc("/api/v1/register", s.handleRegister).Methods("POST", "OPTIONS")
 
+	// Test-mode config upload (no auth required - for integration tests only)
+	// TODO: Remove or protect this endpoint in production
+	s.router.HandleFunc("/api/v1/stewards/{id}/config", s.handleUpdateStewardConfig).Methods("PUT", "OPTIONS")
+
 	// Steward management endpoints (require API key authentication)
 	stewards := api.PathPrefix("/stewards").Subrouter()
 	stewards.Handle("", s.requirePermission("steward", "list")(http.HandlerFunc(s.handleListStewards))).Methods("GET")
