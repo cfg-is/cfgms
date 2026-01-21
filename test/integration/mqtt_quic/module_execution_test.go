@@ -67,8 +67,8 @@ func (s *ModuleExecutionTestSuite) SetupSuite() {
 	s.tlsConfig, s.stewardID = s.testHelper.GetTLSConfigFromRegistration(s.T(), "default", "integration-test")
 
 	s.helper = NewModuleTestHelper(
-		GetTestHTTPAddr("https://127.0.0.1:8080"),
-		GetTestMQTTAddr("ssl://127.0.0.1:1886"),
+		GetTestHTTPAddr("https://localhost:8080"),
+		GetTestMQTTAddr("ssl://localhost:1886"),
 		s.tlsConfig,
 	)
 
