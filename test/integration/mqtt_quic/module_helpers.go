@@ -396,7 +396,11 @@ func (h *ModuleTestHelper) SendConfiguration(t *testing.T, stewardID string, con
 	if err != nil {
 		return fmt.Errorf("failed to send config: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			t.Logf("Warning: failed to close response body: %v", err)
+		}
+	}()
 
 	// Check response status
 	if resp.StatusCode != http.StatusOK {
