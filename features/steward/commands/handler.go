@@ -93,13 +93,17 @@ func (h *Handler) RegisterHandler(cmdType mqttTypes.CommandType, handler Command
 
 // HandleCommand processes an incoming MQTT command message.
 func (h *Handler) HandleCommand(topic string, payload []byte) error {
+	fmt.Printf("[DEBUG-HANDLER] HandleCommand called, topic=%s size=%d\n", topic, len(payload))
 	h.logger.Debug("Received command message", "topic", topic, "size", len(payload))
 
 	var cmd mqttTypes.Command
 	if err := json.Unmarshal(payload, &cmd); err != nil {
+		fmt.Printf("[DEBUG-HANDLER] Failed to unmarshal command: %v\n", err)
 		h.logger.Error("Failed to parse command", "error", err, "payload", string(payload))
 		return fmt.Errorf("failed to parse command: %w", err)
 	}
+
+	fmt.Printf("[DEBUG-HANDLER] Command parsed: type=%s command_id=%s\n", cmd.Type, cmd.CommandID)
 
 	// Send command received status
 	h.sendStatus(mqttTypes.StatusUpdate{
@@ -120,6 +124,7 @@ func (h *Handler) HandleCommand(topic string, payload []byte) error {
 
 // executeCommand executes a command with timeout and error handling.
 func (h *Handler) executeCommand(cmd mqttTypes.Command) {
+	fmt.Printf("[DEBUG-HANDLER] executeCommand starting: type=%s command_id=%s\n", cmd.Type, cmd.CommandID)
 	h.logger.Info("Executing command",
 		"command_id", cmd.CommandID,
 		"type", cmd.Type,
@@ -155,7 +160,10 @@ func (h *Handler) executeCommand(cmd mqttTypes.Command) {
 	handler, exists := h.handlers[cmd.Type]
 	h.mu.RUnlock()
 
+	fmt.Printf("[DEBUG-HANDLER] Looking up handler for type=%s exists=%v\n", cmd.Type, exists)
+
 	if !exists {
+		fmt.Printf("[DEBUG-HANDLER] No handler found for type=%s\n", cmd.Type)
 		h.logger.Error("No handler registered for command type",
 			"command_id", cmd.CommandID,
 			"type", cmd.Type)
@@ -173,11 +181,15 @@ func (h *Handler) executeCommand(cmd mqttTypes.Command) {
 	}
 
 	// Execute handler
+	fmt.Printf("[DEBUG-HANDLER] Calling handler for type=%s\n", cmd.Type)
 	startTime := time.Now()
 	err := handler(ctx, cmd)
 	executionTime := time.Since(startTime)
 
+	fmt.Printf("[DEBUG-HANDLER] Handler returned: type=%s error=%v duration=%v\n", cmd.Type, err, executionTime)
+
 	if err != nil {
+		fmt.Printf("[DEBUG-HANDLER] Handler failed: %v\n", err)
 		h.logger.Error("Command execution failed",
 			"command_id", cmd.CommandID,
 			"type", cmd.Type,

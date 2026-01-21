@@ -584,3 +584,57 @@ func (h *ModuleTestHelper) ExecuteScriptInContainer(t *testing.T, containerName,
 
 	return output, nil
 }
+
+// CreateQUICSession creates a QUIC session on the controller via REST API
+func (h *ModuleTestHelper) CreateQUICSession(t *testing.T, sessionID, stewardID string) error {
+	t.Helper()
+
+	// Create session request
+	sessionReq := map[string]interface{}{
+		"session_id":   sessionID,
+		"user_id":      stewardID, // Use steward ID as user ID for QUIC sessions
+		"tenant_id":    "default",
+		"session_type": "quic",
+		"timeout":      300, // 5 minutes in seconds
+		"metadata": map[string]interface{}{
+			"steward_id": stewardID,
+		},
+	}
+
+	reqJSON, err := json.Marshal(sessionReq)
+	if err != nil {
+		return fmt.Errorf("failed to marshal session request: %w", err)
+	}
+
+	// Create HTTP request to create session (using test endpoint)
+	url := fmt.Sprintf("%s/api/v1/test/sessions", h.baseURL)
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewBuffer(reqJSON))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	// Send request
+	resp, err := h.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to create session: %w", err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			t.Logf("Warning: failed to close response body: %v", err)
+		}
+	}()
+
+	// Check response status
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		var errResp map[string]interface{}
+		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil {
+			t.Logf("Error response from session creation: %v", errResp)
+		}
+		return fmt.Errorf("session creation failed with status %d", resp.StatusCode)
+	}
+
+	t.Logf("✅ Created QUIC session: %s for steward %s", sessionID, stewardID)
+	return nil
+}

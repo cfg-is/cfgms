@@ -142,6 +142,37 @@ func (m *Manager) GenerateSession(stewardID string) (*Session, error) {
 	return session, nil
 }
 
+// CreateEphemeralSession creates a new ephemeral session with the given ID.
+// This is used for on-demand QUIC connections when the session doesn't already exist.
+func (m *Manager) CreateEphemeralSession(sessionID, stewardID string, ttl time.Duration) error {
+	if sessionID == "" {
+		return fmt.Errorf("session ID is required")
+	}
+
+	if stewardID == "" {
+		return fmt.Errorf("steward ID is required")
+	}
+
+	now := time.Now()
+	session := &Session{
+		SessionID: sessionID,
+		StewardID: stewardID,
+		CreatedAt: now,
+		ExpiresAt: now.Add(ttl),
+		Used:      false,
+	}
+
+	m.mu.Lock()
+	m.sessions[sessionID] = session
+	sessionCount := len(m.sessions)
+	m.mu.Unlock()
+
+	fmt.Printf("[DEBUG] CreateEphemeralSession: Created sessionID=%s stewardID=%s expiresAt=%v total_sessions=%d\n",
+		sessionID, stewardID, session.ExpiresAt, sessionCount)
+
+	return nil
+}
+
 // ValidateSession validates a session ID and marks it as used.
 func (m *Manager) ValidateSession(sessionID, stewardID string) (*Session, error) {
 	if sessionID == "" {

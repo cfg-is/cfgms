@@ -356,20 +356,32 @@ func (s *Server) performHandshake(stream *quic.Stream) (string, string, error) {
 
 		_, err := s.sessionManager.ValidateSession(sessionID, stewardID)
 		if err != nil {
-			s.logger.Error("Session validation failed",
+			// If session doesn't exist, auto-create an ephemeral session
+			// This supports the on-demand nature of QUIC connections
+			s.logger.Info("Session not found, auto-creating ephemeral session",
 				"session_id", sessionID,
-				"steward_id", stewardID,
-				"error", err)
+				"steward_id", stewardID)
 
-			// Send error response
-			response := fmt.Sprintf("ERROR: %s\n", err.Error())
-			_, _ = stream.Write([]byte(response))
-			return "", "", fmt.Errorf("session validation failed: %w", err)
+			if err := s.sessionManager.CreateEphemeralSession(sessionID, stewardID, 5*time.Minute); err != nil {
+				s.logger.Error("Failed to auto-create session",
+					"session_id", sessionID,
+					"steward_id", stewardID,
+					"error", err)
+
+				// Send error response
+				response := fmt.Sprintf("ERROR: failed to create session: %s\n", err.Error())
+				_, _ = stream.Write([]byte(response))
+				return "", "", fmt.Errorf("session creation failed: %w", err)
+			}
+
+			s.logger.Info("Ephemeral session auto-created successfully",
+				"session_id", sessionID,
+				"steward_id", stewardID)
+		} else {
+			s.logger.Info("Session validated successfully",
+				"session_id", sessionID,
+				"steward_id", stewardID)
 		}
-
-		s.logger.Info("Session validated successfully",
-			"session_id", sessionID,
-			"steward_id", stewardID)
 	}
 
 	// Send success response
