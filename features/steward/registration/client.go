@@ -60,6 +60,11 @@ type RegistrationResponse struct {
 	ClientCert  string `json:"client_cert,omitempty"`
 	ClientKey   string `json:"client_key,omitempty"`
 	CACert      string `json:"ca_cert,omitempty"`
+
+	// Controller's server certificate for configuration signature verification (Story #315)
+	// Used by steward to verify configurations signed by this controller
+	// In HA clusters, stewards collect and trust certs from all controllers
+	ServerCert string `json:"server_cert,omitempty"`
 }
 
 // Register registers the steward with the controller using a token.

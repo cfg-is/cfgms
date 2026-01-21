@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/pkg/cert"
 )
 
@@ -31,6 +33,11 @@ type RegistrationResponse struct {
 	ClientCert string `json:"client_cert,omitempty"`
 	ClientKey  string `json:"client_key,omitempty"`
 	CACert     string `json:"ca_cert,omitempty"`
+
+	// Controller's server certificate (public key) for configuration signature verification
+	// Stewards use this to verify configs signed by this controller
+	// In HA clusters, stewards collect and trust certs from all controllers they connect to
+	ServerCert string `json:"server_cert,omitempty"`
 }
 
 // handleRegister handles steward registration via REST API
@@ -157,10 +164,45 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Get server certificate (public key) for configuration signature verification
+	// Stewards need this to verify configs signed by this controller
+	// IMPORTANT: Must use same certificate file that the signer uses (not from cert manager store)
+	var serverCert []byte
+	if s.cfg.Certificate != nil && s.cfg.Certificate.CAPath != "" {
+		// Read server certificate from same file path that signer uses
+		serverCertPath := filepath.Join(s.cfg.Certificate.CAPath, "server", "server.crt")
+		var err error
+		serverCert, err = os.ReadFile(serverCertPath)
+		if err != nil || len(serverCert) == 0 {
+			s.logger.Warn("Server certificate unavailable, config signature verification will not work",
+				"error", err, "path", serverCertPath, "steward_id", stewardID)
+			fmt.Printf("[DEBUG] Registration: Server cert unavailable from %s, err=%v len=%d\n",
+				serverCertPath, err, len(serverCert))
+			// Don't fail registration - steward can still operate without signature verification
+		} else {
+			// Debug: Print certificate fingerprint for verification
+			fmt.Printf("[DEBUG] Registration: Returning server cert from %s to steward, size=%d\n",
+				serverCertPath, len(serverCert))
+			// Calculate fingerprint to compare with signer
+			if verifier, err := signature.NewVerifier(&signature.VerifierConfig{
+				CertificatePEM: serverCert,
+			}); err == nil {
+				fmt.Printf("[DEBUG] Registration: Server cert fingerprint=%s\n", verifier.KeyFingerprint())
+			} else {
+				fmt.Printf("[DEBUG] Registration: Failed to create verifier for fingerprint: %v\n", err)
+			}
+		}
+	} else {
+		s.logger.Warn("Certificate configuration unavailable, cannot provide server cert for signature verification",
+			"steward_id", stewardID)
+		fmt.Printf("[DEBUG] Registration: No certificate configuration available\n")
+	}
+
 	// Return certificates in response (ALWAYS - required for mTLS)
 	resp.ClientCert = string(clientCert.CertificatePEM)
 	resp.ClientKey = string(clientCert.PrivateKeyPEM)
 	resp.CACert = string(caCert)
+	resp.ServerCert = string(serverCert) // For config signature verification
 
 	s.logger.Info("Generated client certificate for steward",
 		"steward_id", stewardID,

@@ -118,13 +118,13 @@ func expandEnvWithDefaults(content string) string {
 // resource definitions, and optional module path mappings.
 type StewardConfig struct {
 	// Steward contains steward-specific configuration settings
-	Steward StewardSettings `yaml:"steward"`
+	Steward StewardSettings `yaml:"steward" json:"steward"`
 
 	// Resources defines the list of resources to be managed
-	Resources []ResourceConfig `yaml:"resources"`
+	Resources []ResourceConfig `yaml:"resources" json:"resources"`
 
 	// Modules provides optional custom paths for specific modules
-	Modules map[string]string `yaml:"modules,omitempty"` // module_name -> custom_path
+	Modules map[string]string `yaml:"modules,omitempty" json:"modules,omitempty"` // module_name -> custom_path
 }
 
 // StewardSettings contains steward-specific configuration options.
@@ -154,13 +154,13 @@ type StewardSettings struct {
 // module-specific configuration data.
 type ResourceConfig struct {
 	// Name is the unique identifier for this resource
-	Name string `yaml:"name"`
+	Name string `yaml:"name" json:"name"`
 
 	// Module is the name of the module that will manage this resource
-	Module string `yaml:"module"`
+	Module string `yaml:"module" json:"module"`
 
 	// Config contains module-specific configuration data
-	Config map[string]interface{} `yaml:"config"`
+	Config map[string]interface{} `yaml:"config" json:"config"`
 }
 
 // OperationMode defines how the steward operates.

@@ -138,8 +138,14 @@ func main() {
 			"operation", "steward_running",
 			"steward_id", mqttClient.GetStewardID())
 
+		fmt.Printf("[DEBUG] Steward entering signal wait loop, PID=%d\n", os.Getpid())
+		logger.Info("Waiting for termination signal",
+			"operation", "steward_wait",
+			"pid", os.Getpid())
+
 		// Wait for termination signal
 		sig := <-sigChan
+		fmt.Printf("[DEBUG] Steward received signal: %v\n", sig)
 		logger.Info("Received signal, shutting down...",
 			"operation", "steward_shutdown",
 			"signal", sig.String())
@@ -292,6 +298,7 @@ func registerAndConnectMQTT(ctx context.Context, token string, logger logging.Lo
 		CACertPEM:         regResp.CACert,
 		ClientCertPEM:     regResp.ClientCert,
 		ClientKeyPEM:      regResp.ClientKey,
+		ServerCertPEM:     regResp.ServerCert, // Story #315: Controller's server cert for signature verification
 		Logger:            logger,
 	})
 	if err != nil {
@@ -315,6 +322,14 @@ func registerAndConnectMQTT(ctx context.Context, token string, logger logging.Lo
 	if err := mqttClient.SendHeartbeat(ctx, "healthy", nil); err != nil {
 		logger.Warn("Failed to send initial heartbeat", "error", err)
 	}
+
+	// Initialize configuration executor (Story #315: Required for config sync)
+	// The executor needs to be initialized after MQTT connection for config application
+	if err := mqttClient.InitializeConfigExecutor(regResp.TenantID); err != nil {
+		return nil, fmt.Errorf("failed to initialize config executor: %w", err)
+	}
+
+	logger.Info("Configuration executor initialized", "tenant_id", regResp.TenantID)
 
 	// Return connected client (do NOT disconnect - maintain connection)
 	return mqttClient, nil

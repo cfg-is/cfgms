@@ -6,9 +6,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
 
 	"github.com/gorilla/mux"
+	"gopkg.in/yaml.v3"
 
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
@@ -167,9 +170,33 @@ func (s *Server) handleGetStewardConfig(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Parse configuration JSON
+	// Convert protobuf config to map for HTTP response
+	protoConfig := configResp.Config.Config
+	if protoConfig == nil {
+		s.logger.Error("Configuration is nil")
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Configuration is nil", "INTERNAL_ERROR")
+		return
+	}
+
+	// Convert protobuf to Go struct
+	goConfig, err := stewardconfig.FromProto(protoConfig)
+	if err != nil {
+		s.logger.Error("Failed to convert protobuf to Go struct", "error", err)
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to convert configuration", "CONVERSION_ERROR")
+		return
+	}
+
+	// Marshal Go struct to JSON for response
+	jsonBytes, err := json.Marshal(goConfig)
+	if err != nil {
+		s.logger.Error("Failed to marshal configuration to JSON", "error", err)
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to marshal configuration", "MARSHAL_ERROR")
+		return
+	}
+
+	// Parse into map for response
 	var config map[string]interface{}
-	if err := json.Unmarshal(configResp.Config, &config); err != nil {
+	if err := json.Unmarshal(jsonBytes, &config); err != nil {
 		s.logger.Error("Failed to parse configuration JSON", "error", err)
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to parse configuration", "PARSE_ERROR")
 		return
@@ -203,11 +230,36 @@ func (s *Server) handleUpdateStewardConfig(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Parse request body into StewardConfig
+	// Support both JSON (legacy) and YAML (production .cfg format)
 	var config stewardconfig.StewardConfig
-	if err := json.NewDecoder(r.Body).Decode(&config); err != nil {
-		s.logger.Error("Failed to decode config JSON", "error", err)
-		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid JSON body", "INVALID_JSON")
+	contentType := r.Header.Get("Content-Type")
+
+	// Read body
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		s.logger.Error("Failed to read request body", "error", err)
+		s.writeErrorResponse(w, http.StatusBadRequest, "Failed to read request body", "READ_ERROR")
 		return
+	}
+
+	// Parse based on Content-Type
+	if strings.Contains(contentType, "yaml") || strings.Contains(contentType, "x-yaml") {
+		// YAML format (production .cfg files)
+		if err := yaml.Unmarshal(bodyBytes, &config); err != nil {
+			s.logger.Error("Failed to decode config YAML", "error", err)
+			s.writeErrorResponse(w, http.StatusBadRequest, "Invalid YAML body", "INVALID_YAML")
+			return
+		}
+		s.logger.Info("Received configuration in YAML format", "steward_id", stewardID, "resources", len(config.Resources))
+		fmt.Printf("[DEBUG] YAML config parsed: resources=%d steward_id=%s\n", len(config.Resources), config.Steward.ID)
+	} else {
+		// JSON format (legacy/backward compatibility)
+		if err := json.Unmarshal(bodyBytes, &config); err != nil {
+			s.logger.Error("Failed to decode config JSON", "error", err)
+			s.writeErrorResponse(w, http.StatusBadRequest, "Invalid JSON body", "INVALID_YAML")
+			return
+		}
+		s.logger.Info("Received configuration in JSON format", "steward_id", stewardID, "resources", len(config.Resources))
 	}
 
 	// Extract tenant from context or use default

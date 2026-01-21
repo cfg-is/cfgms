@@ -173,6 +173,10 @@ func (c *Client) Connect(ctx context.Context) error {
 		if token.Error() != nil {
 			return fmt.Errorf("failed to connect: %w", token.Error())
 		}
+		// Mark as connected after successful connection
+		c.mu.Lock()
+		c.connected = true
+		c.mu.Unlock()
 		return nil
 	case <-ctx.Done():
 		return fmt.Errorf("connection timeout: %w", ctx.Err())

@@ -567,8 +567,11 @@ services:
     command: ["./steward", "--log-level", "debug", "--log-provider", "file", "--regtoken", "cfgms_reg_dockertest_standalone"]
     volumes:
       - steward_standalone_data:/app/data
-      - ./test/module-execution:/test-workspace:rw  # Module execution test workspace (Story 12.3)
       - ./test/integration/mqtt_quic/certs:/app/test-certs:ro  # Story 12.4: TLS client certificates
+    tmpfs:
+      # Story #315: Use tmpfs for module execution test workspace (writable, fast, ephemeral)
+      # Simulates real-world endpoint with writable directory, no permission issues
+      - /test-workspace:uid=1001,gid=1001,mode=0755
     depends_on:
       controller-standalone:
         condition: service_healthy
