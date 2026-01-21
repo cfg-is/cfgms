@@ -122,25 +122,31 @@ func (e *Executor) ApplyConfiguration(ctx context.Context, configData []byte, ve
 	e.logger.Info("ApplyConfiguration parsed", "resources", len(config.Resources), "steward_id", config.Steward.ID)
 
 	e.logger.Info("Parsed configuration", "resource_count", len(config.Resources))
+	fmt.Printf("[DEBUG-EXECUTOR] Parsed config: resources=%d steward_id=%s\n", len(config.Resources), config.Steward.ID)
 
 	// Group resources by module for status reporting
 	resourcesByModule := make(map[string][]ResourceConfig)
 	for _, resource := range config.Resources {
+		fmt.Printf("[DEBUG-EXECUTOR] Grouping resource: name=%s module=%s\n", resource.Name, resource.Module)
 		resourcesByModule[resource.Module] = append(resourcesByModule[resource.Module], resource)
 	}
+	fmt.Printf("[DEBUG-EXECUTOR] Grouped into %d modules\n", len(resourcesByModule))
 
 	// Apply each module's resources
 	hasErrors := false
 	for moduleName, resources := range resourcesByModule {
 		e.logger.Info("Processing module", "module", moduleName, "resource_count", len(resources))
+		fmt.Printf("[DEBUG-EXECUTOR] Processing module: name=%s resource_count=%d\n", moduleName, len(resources))
 
 		moduleStatus := e.applyModuleResources(ctx, moduleName, resources)
+		fmt.Printf("[DEBUG-EXECUTOR] Module status: name=%s status=%s message=%s\n", moduleName, moduleStatus.Status, moduleStatus.Message)
 		report.Modules[moduleName] = moduleStatus
 
 		if moduleStatus.Status != "OK" {
 			hasErrors = true
 		}
 	}
+	fmt.Printf("[DEBUG-EXECUTOR] All modules processed, hasErrors=%v\n", hasErrors)
 
 	// Set overall status
 	if hasErrors {
