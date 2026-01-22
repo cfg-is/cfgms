@@ -91,9 +91,6 @@ type ResourceSpec struct {
 // ApplyConfiguration parses and applies a configuration.
 func (e *Executor) ApplyConfiguration(ctx context.Context, configData []byte, version string) (*mqttTypes.ConfigStatusReport, error) {
 	e.logger.Info("Applying configuration", "version", version, "size", len(configData))
-	fmt.Printf("[DEBUG-EXECUTOR] ========== ApplyConfiguration CALLED ==========\n")
-	fmt.Printf("[DEBUG-EXECUTOR] version=%s size=%d bytes\n", version, len(configData))
-	fmt.Printf("[DEBUG] ApplyConfiguration: Received config data:\n%s\n", string(configData))
 
 	startTime := time.Now()
 	report := &mqttTypes.ConfigStatusReport{
@@ -125,31 +122,25 @@ func (e *Executor) ApplyConfiguration(ctx context.Context, configData []byte, ve
 	e.logger.Info("ApplyConfiguration parsed", "resources", len(config.Resources), "steward_id", config.Steward.ID)
 
 	e.logger.Info("Parsed configuration", "resource_count", len(config.Resources))
-	fmt.Printf("[DEBUG-EXECUTOR] Parsed config: resources=%d steward_id=%s\n", len(config.Resources), config.Steward.ID)
 
 	// Group resources by module for status reporting
 	resourcesByModule := make(map[string][]ResourceConfig)
 	for _, resource := range config.Resources {
-		fmt.Printf("[DEBUG-EXECUTOR] Grouping resource: name=%s module=%s\n", resource.Name, resource.Module)
 		resourcesByModule[resource.Module] = append(resourcesByModule[resource.Module], resource)
 	}
-	fmt.Printf("[DEBUG-EXECUTOR] Grouped into %d modules\n", len(resourcesByModule))
 
 	// Apply each module's resources
 	hasErrors := false
 	for moduleName, resources := range resourcesByModule {
 		e.logger.Info("Processing module", "module", moduleName, "resource_count", len(resources))
-		fmt.Printf("[DEBUG-EXECUTOR] Processing module: name=%s resource_count=%d\n", moduleName, len(resources))
 
 		moduleStatus := e.applyModuleResources(ctx, moduleName, resources)
-		fmt.Printf("[DEBUG-EXECUTOR] Module status: name=%s status=%s message=%s\n", moduleName, moduleStatus.Status, moduleStatus.Message)
 		report.Modules[moduleName] = moduleStatus
 
 		if moduleStatus.Status != "OK" {
 			hasErrors = true
 		}
 	}
-	fmt.Printf("[DEBUG-EXECUTOR] All modules processed, hasErrors=%v\n", hasErrors)
 
 	// Set overall status
 	if hasErrors {
@@ -196,19 +187,14 @@ func (e *Executor) applyModuleResources(ctx context.Context, moduleName string, 
 	errors := make([]string, 0)
 
 	for _, resource := range resources {
-		fmt.Printf("[DEBUG-EXECUTOR] Processing resource: name=%s config=%+v\n", resource.Name, resource.Config)
-
 		// Extract resource_id from config (typically the 'path' field)
 		resourceID, ok := resource.Config["path"].(string)
 		if !ok || resourceID == "" {
-			fmt.Printf("[DEBUG-EXECUTOR] Resource missing path: name=%s\n", resource.Name)
 			e.logger.Error("Resource missing path", "module", moduleName, "name", resource.Name)
 			errorCount++
 			errors = append(errors, fmt.Sprintf("%s: missing 'path' in config", resource.Name))
 			continue
 		}
-
-		fmt.Printf("[DEBUG-EXECUTOR] Extracted path: resource_id=%s\n", resourceID)
 
 		// Extract state (default to "present")
 		state := "present"
@@ -217,8 +203,6 @@ func (e *Executor) applyModuleResources(ctx context.Context, moduleName string, 
 		} else if ensureVal, ok := resource.Config["ensure"].(string); ok {
 			state = ensureVal
 		}
-
-		fmt.Printf("[DEBUG-EXECUTOR] State: %s\n", state)
 
 		e.logger.Info("Applying resource",
 			"module", moduleName,
@@ -234,9 +218,7 @@ func (e *Executor) applyModuleResources(ctx context.Context, moduleName string, 
 			Config:     resource.Config,
 		}
 
-		fmt.Printf("[DEBUG-EXECUTOR] Calling applyResourceInternal: name=%s resource_id=%s\n", resource.Name, resourceID)
 		if err := e.applyResourceInternal(ctx, moduleName, module, spec); err != nil {
-			fmt.Printf("[DEBUG-EXECUTOR] applyResourceInternal FAILED: error=%v\n", err)
 			e.logger.Error("Resource application failed",
 				"module", moduleName,
 				"name", resource.Name,
@@ -244,7 +226,6 @@ func (e *Executor) applyModuleResources(ctx context.Context, moduleName string, 
 			errorCount++
 			errors = append(errors, fmt.Sprintf("%s: %v", resource.Name, err))
 		} else {
-			fmt.Printf("[DEBUG-EXECUTOR] applyResourceInternal SUCCESS\n")
 			successCount++
 		}
 	}
@@ -304,19 +285,13 @@ func (e *Executor) applyResourceInternal(ctx context.Context, moduleName string,
 	// Convert config map to ConfigState
 	configState, err := e.buildConfigState(config)
 	if err != nil {
-		fmt.Printf("[DEBUG-EXECUTOR] buildConfigState failed: %v\n", err)
 		return fmt.Errorf("failed to build config state: %w", err)
 	}
 
-	fmt.Printf("[DEBUG-EXECUTOR] Calling module.Set: module=%s resource_id=%s config=%+v\n", moduleName, resource.ResourceID, config)
-
 	// Apply the resource
 	if err := module.Set(ctx, resource.ResourceID, configState); err != nil {
-		fmt.Printf("[DEBUG-EXECUTOR] module.Set FAILED: module=%s error=%v\n", moduleName, err)
 		return fmt.Errorf("module.Set failed: %w", err)
 	}
-
-	fmt.Printf("[DEBUG-EXECUTOR] module.Set SUCCESS: module=%s resource_id=%s\n", moduleName, resource.ResourceID)
 
 	e.logger.Info("Resource applied successfully",
 		"resource", resource.Name,
