@@ -9,6 +9,7 @@ package config
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -90,6 +91,8 @@ type ResourceSpec struct {
 // ApplyConfiguration parses and applies a configuration.
 func (e *Executor) ApplyConfiguration(ctx context.Context, configData []byte, version string) (*mqttTypes.ConfigStatusReport, error) {
 	e.logger.Info("Applying configuration", "version", version, "size", len(configData))
+	fmt.Printf("[DEBUG-EXECUTOR] ========== ApplyConfiguration CALLED ==========\n")
+	fmt.Printf("[DEBUG-EXECUTOR] version=%s size=%d bytes\n", version, len(configData))
 	fmt.Printf("[DEBUG] ApplyConfiguration: Received config data:\n%s\n", string(configData))
 
 	startTime := time.Now()
@@ -193,14 +196,19 @@ func (e *Executor) applyModuleResources(ctx context.Context, moduleName string, 
 	errors := make([]string, 0)
 
 	for _, resource := range resources {
+		fmt.Printf("[DEBUG-EXECUTOR] Processing resource: name=%s config=%+v\n", resource.Name, resource.Config)
+
 		// Extract resource_id from config (typically the 'path' field)
 		resourceID, ok := resource.Config["path"].(string)
 		if !ok || resourceID == "" {
+			fmt.Printf("[DEBUG-EXECUTOR] Resource missing path: name=%s\n", resource.Name)
 			e.logger.Error("Resource missing path", "module", moduleName, "name", resource.Name)
 			errorCount++
 			errors = append(errors, fmt.Sprintf("%s: missing 'path' in config", resource.Name))
 			continue
 		}
+
+		fmt.Printf("[DEBUG-EXECUTOR] Extracted path: resource_id=%s\n", resourceID)
 
 		// Extract state (default to "present")
 		state := "present"
@@ -209,6 +217,8 @@ func (e *Executor) applyModuleResources(ctx context.Context, moduleName string, 
 		} else if ensureVal, ok := resource.Config["ensure"].(string); ok {
 			state = ensureVal
 		}
+
+		fmt.Printf("[DEBUG-EXECUTOR] State: %s\n", state)
 
 		e.logger.Info("Applying resource",
 			"module", moduleName,
@@ -224,7 +234,9 @@ func (e *Executor) applyModuleResources(ctx context.Context, moduleName string, 
 			Config:     resource.Config,
 		}
 
+		fmt.Printf("[DEBUG-EXECUTOR] Calling applyResourceInternal: name=%s resource_id=%s\n", resource.Name, resourceID)
 		if err := e.applyResourceInternal(ctx, moduleName, module, spec); err != nil {
+			fmt.Printf("[DEBUG-EXECUTOR] applyResourceInternal FAILED: error=%v\n", err)
 			e.logger.Error("Resource application failed",
 				"module", moduleName,
 				"name", resource.Name,
@@ -232,6 +244,7 @@ func (e *Executor) applyModuleResources(ctx context.Context, moduleName string, 
 			errorCount++
 			errors = append(errors, fmt.Sprintf("%s: %v", resource.Name, err))
 		} else {
+			fmt.Printf("[DEBUG-EXECUTOR] applyResourceInternal SUCCESS\n")
 			successCount++
 		}
 	}
@@ -291,13 +304,19 @@ func (e *Executor) applyResourceInternal(ctx context.Context, moduleName string,
 	// Convert config map to ConfigState
 	configState, err := e.buildConfigState(config)
 	if err != nil {
+		fmt.Printf("[DEBUG-EXECUTOR] buildConfigState failed: %v\n", err)
 		return fmt.Errorf("failed to build config state: %w", err)
 	}
 
+	fmt.Printf("[DEBUG-EXECUTOR] Calling module.Set: module=%s resource_id=%s config=%+v\n", moduleName, resource.ResourceID, config)
+
 	// Apply the resource
 	if err := module.Set(ctx, resource.ResourceID, configState); err != nil {
+		fmt.Printf("[DEBUG-EXECUTOR] module.Set FAILED: module=%s error=%v\n", moduleName, err)
 		return fmt.Errorf("module.Set failed: %w", err)
 	}
+
+	fmt.Printf("[DEBUG-EXECUTOR] module.Set SUCCESS: module=%s resource_id=%s\n", moduleName, resource.ResourceID)
 
 	e.logger.Info("Resource applied successfully",
 		"resource", resource.Name,
@@ -354,6 +373,13 @@ func validatePermissions(perms interface{}) error {
 		permValue = int(v)
 	case float64:
 		permValue = int(v)
+	case string:
+		// Parse string as octal (e.g., "0644" -> 420 decimal)
+		parsed, err := strconv.ParseInt(v, 8, 32)
+		if err != nil {
+			return fmt.Errorf("invalid permissions string: %s (must be octal format like '0644')", v)
+		}
+		permValue = int(parsed)
 	default:
 		return fmt.Errorf("invalid permissions type: %T", perms)
 	}
