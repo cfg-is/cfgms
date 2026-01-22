@@ -13,9 +13,7 @@ on:
       - '.editorconfig'
   push:
     branches:
-      - main  # Run on main for production deployment validation
-      - develop  # Run on develop ONLY for production-readiness-validation (load testing, benchmarks)
-      # NOTE: security-deployment-gate is redundant (already runs on PR), but kept for production-readiness-validation
+      - main  # Run on main for production deployment validation and production-readiness-validation (load testing, benchmarks)
   workflow_dispatch:
     inputs:
       emergency_override:
@@ -268,10 +266,12 @@ jobs:
   #         echo "- Compliance protection: $(go test ./features/monitoring/export/... -run 'TestExportDataFiltering/filter_data_types_per_exporter' >/dev/null 2>&1 && echo '✅ WORKING' || echo '⚠️ BROKEN')"
 
   #   # Production Readiness Testing (Story #86)
+  # Only run on main branch (releases) to reduce CI overhead
+  # These are expensive, long-running load tests more appropriate for release validation
   production-readiness-validation:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    timeout-minutes: 60
+    if: github.ref == 'refs/heads/main'
     steps:
     - uses: actions/checkout@v4
 
