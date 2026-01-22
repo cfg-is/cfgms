@@ -29,31 +29,37 @@ func TestExecutor_ApplyConfiguration_Success(t *testing.T) {
 	executor, err := New(cfg)
 	require.NoError(t, err, "Failed to create executor")
 
-	// Test configuration YAML
-	// Note: permissions use octal notation (0644, 0755)
-	// Note: Use ToSlash() to convert Windows backslashes to forward slashes for YAML compatibility
-	configYAML := `
-version: "1.0"
-modules:
-  file:
-    - name: "test-file"
-      resource_id: "` + filepath.ToSlash(filepath.Join(tempDir, "test.txt")) + `"
-      state: "present"
-      config:
-        content: "Hello from executor test!\n"
-        permissions: 0644
-
-  directory:
-    - name: "test-dir"
-      resource_id: "` + filepath.ToSlash(filepath.Join(tempDir, "testdir")) + `"
-      state: "present"
-      config:
-        permissions: 0755
-`
+	// Test configuration (StewardConfig format - JSON)
+	// Note: permissions use octal notation (420 = 0644, 493 = 0755 in octal)
+	configJSON := `{
+  "steward": {
+    "id": "test-steward",
+    "mode": "controller"
+  },
+  "resources": [
+    {
+      "name": "test-file",
+      "module": "file",
+      "config": {
+        "path": "` + filepath.ToSlash(filepath.Join(tempDir, "test.txt")) + `",
+        "content": "Hello from executor test!\n",
+        "permissions": 420
+      }
+    },
+    {
+      "name": "test-dir",
+      "module": "directory",
+      "config": {
+        "path": "` + filepath.ToSlash(filepath.Join(tempDir, "testdir")) + `",
+        "permissions": 493
+      }
+    }
+  ]
+}`
 
 	// Apply configuration
 	ctx := context.Background()
-	report, err := executor.ApplyConfiguration(ctx, []byte(configYAML), "v1.0")
+	report, err := executor.ApplyConfiguration(ctx, []byte(configJSON), "v1.0")
 	require.NoError(t, err, "Configuration application failed")
 	require.NotNil(t, report, "Report should not be nil")
 
@@ -98,30 +104,36 @@ func TestExecutor_ApplyConfiguration_WithErrors(t *testing.T) {
 	executor, err := New(cfg)
 	require.NoError(t, err, "Failed to create executor")
 
-	// Test configuration with invalid permissions
-	// Note: Use ToSlash() to convert Windows backslashes to forward slashes for YAML compatibility
-	configYAML := `
-version: "1.0"
-modules:
-  file:
-    - name: "invalid-perms-file"
-      resource_id: "` + filepath.ToSlash(filepath.Join(tempDir, "invalid.txt")) + `"
-      state: "present"
-      config:
-        content: "This will fail\n"
-        permissions: 999999
-
-  directory:
-    - name: "valid-dir"
-      resource_id: "` + filepath.ToSlash(filepath.Join(tempDir, "validdir")) + `"
-      state: "present"
-      config:
-        permissions: 0755
-`
+	// Test configuration with invalid permissions (StewardConfig format - JSON)
+	configJSON := `{
+  "steward": {
+    "id": "test-steward",
+    "mode": "controller"
+  },
+  "resources": [
+    {
+      "name": "invalid-perms-file",
+      "module": "file",
+      "config": {
+        "path": "` + filepath.ToSlash(filepath.Join(tempDir, "invalid.txt")) + `",
+        "content": "This will fail\n",
+        "permissions": 999999
+      }
+    },
+    {
+      "name": "valid-dir",
+      "module": "directory",
+      "config": {
+        "path": "` + filepath.ToSlash(filepath.Join(tempDir, "validdir")) + `",
+        "permissions": 493
+      }
+    }
+  ]
+}`
 
 	// Apply configuration
 	ctx := context.Background()
-	report, _ := executor.ApplyConfiguration(ctx, []byte(configYAML), "v1.0-fail")
+	report, _ := executor.ApplyConfiguration(ctx, []byte(configJSON), "v1.0-fail")
 
 	// Configuration parsing should succeed but application should report errors
 	require.NotNil(t, report, "Report should not be nil even with errors")

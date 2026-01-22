@@ -133,9 +133,44 @@ func (m *Manager) GenerateSession(stewardID string) (*Session, error) {
 
 	m.mu.Lock()
 	m.sessions[sessionID] = session
+	sessionCount := len(m.sessions)
 	m.mu.Unlock()
 
+	fmt.Printf("[DEBUG] GenerateSession: Created sessionID=%s stewardID=%s expiresAt=%v total_sessions=%d\n",
+		sessionID, stewardID, session.ExpiresAt, sessionCount)
+
 	return session, nil
+}
+
+// CreateEphemeralSession creates a new ephemeral session with the given ID.
+// This is used for on-demand QUIC connections when the session doesn't already exist.
+func (m *Manager) CreateEphemeralSession(sessionID, stewardID string, ttl time.Duration) error {
+	if sessionID == "" {
+		return fmt.Errorf("session ID is required")
+	}
+
+	if stewardID == "" {
+		return fmt.Errorf("steward ID is required")
+	}
+
+	now := time.Now()
+	session := &Session{
+		SessionID: sessionID,
+		StewardID: stewardID,
+		CreatedAt: now,
+		ExpiresAt: now.Add(ttl),
+		Used:      false,
+	}
+
+	m.mu.Lock()
+	m.sessions[sessionID] = session
+	sessionCount := len(m.sessions)
+	m.mu.Unlock()
+
+	fmt.Printf("[DEBUG] CreateEphemeralSession: Created sessionID=%s stewardID=%s expiresAt=%v total_sessions=%d\n",
+		sessionID, stewardID, session.ExpiresAt, sessionCount)
+
+	return nil
 }
 
 // ValidateSession validates a session ID and marks it as used.
@@ -151,18 +186,36 @@ func (m *Manager) ValidateSession(sessionID, stewardID string) (*Session, error)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// Log all sessions in the map for debugging
+	sessionCount := len(m.sessions)
+	sessionIDs := make([]string, 0, sessionCount)
+	for sid := range m.sessions {
+		sessionIDs = append(sessionIDs, sid)
+	}
+
+	fmt.Printf("[DEBUG] ValidateSession called: sessionID=%s stewardID=%s total_sessions=%d session_ids=%v\n",
+		sessionID, stewardID, sessionCount, sessionIDs)
+
 	session, exists := m.sessions[sessionID]
 	if !exists {
+		fmt.Printf("[DEBUG] Session not found: sessionID=%s\n", sessionID)
 		return nil, fmt.Errorf("session not found")
 	}
 
+	fmt.Printf("[DEBUG] Session found: sessionID=%s session.StewardID=%s session.Used=%v session.ExpiresAt=%v\n",
+		sessionID, session.StewardID, session.Used, session.ExpiresAt)
+
 	// Check steward ID matches
 	if session.StewardID != stewardID {
+		fmt.Printf("[DEBUG] Steward ID mismatch: expected=%s got=%s\n", session.StewardID, stewardID)
 		return nil, fmt.Errorf("steward ID mismatch")
 	}
 
 	// Check validity
 	if !session.IsValid() {
+		now := time.Now()
+		fmt.Printf("[DEBUG] Session invalid: Used=%v ExpiresAt=%v Now=%v Expired=%v\n",
+			session.Used, session.ExpiresAt, now, now.After(session.ExpiresAt))
 		return nil, fmt.Errorf("session expired or already used")
 	}
 
@@ -171,6 +224,7 @@ func (m *Manager) ValidateSession(sessionID, stewardID string) (*Session, error)
 	session.Used = true
 	session.UsedAt = &now
 
+	fmt.Printf("[DEBUG] Session validated successfully: sessionID=%s\n", sessionID)
 	return session, nil
 }
 

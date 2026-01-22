@@ -11,6 +11,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -122,6 +123,7 @@ func (s *Server) RegisterStreamHandler(streamID int64, handler StreamHandler) {
 
 // Start starts the QUIC server.
 func (s *Server) Start(ctx context.Context) error {
+	fmt.Printf("[DEBUG] QUIC Server Start() called, listen_addr=%s\n", s.listenAddr)
 	s.logger.Info("Starting QUIC server", "listen_addr", s.listenAddr)
 
 	// Configure QUIC
@@ -130,19 +132,25 @@ func (s *Server) Start(ctx context.Context) error {
 		KeepAlivePeriod: 30 * time.Second,
 	}
 
+	fmt.Printf("[DEBUG] QUIC attempting to listen on %s\n", s.listenAddr)
 	// Create QUIC listener
 	listener, err := quic.ListenAddr(s.listenAddr, s.tlsConfig, quicConfig)
 	if err != nil {
+		fmt.Printf("[DEBUG] QUIC failed to create listener: %v\n", err)
 		return fmt.Errorf("failed to start QUIC listener: %w", err)
 	}
+
+	fmt.Printf("[DEBUG] QUIC listener created successfully\n")
 
 	s.mu.Lock()
 	s.listener = listener
 	s.mu.Unlock()
 
+	fmt.Printf("[DEBUG] QUIC starting acceptConnections goroutine\n")
 	// Start accepting connections
 	go s.acceptConnections()
 
+	fmt.Printf("[DEBUG] QUIC starting cleanupSessions goroutine\n")
 	// Start session cleanup
 	go s.cleanupSessions()
 
@@ -183,9 +191,11 @@ func (s *Server) Stop(ctx context.Context) error {
 
 // acceptConnections accepts incoming QUIC connections.
 func (s *Server) acceptConnections() {
+	fmt.Printf("[DEBUG] QUIC acceptConnections loop started\n")
 	for {
 		select {
 		case <-s.ctx.Done():
+			fmt.Printf("[DEBUG] QUIC acceptConnections context done\n")
 			return
 		default:
 			// Get listener with proper locking to avoid race condition
@@ -194,6 +204,7 @@ func (s *Server) acceptConnections() {
 			s.mu.Unlock()
 
 			if listener == nil {
+				fmt.Printf("[DEBUG] QUIC listener is nil, exiting acceptConnections\n")
 				return
 			}
 
@@ -201,13 +212,16 @@ func (s *Server) acceptConnections() {
 			if err != nil {
 				if s.ctx.Err() != nil {
 					// Server is shutting down
+					fmt.Printf("[DEBUG] QUIC server shutting down\n")
 					return
 				}
 				s.logger.Error("Failed to accept QUIC connection", "error", err)
+				fmt.Printf("[DEBUG] Failed to accept QUIC connection: %v\n", err)
 				continue
 			}
 
 			// Handle connection in background
+			fmt.Printf("[DEBUG] Accepted QUIC connection from: %v\n", conn.RemoteAddr())
 			go s.handleConnection(conn)
 		}
 	}
@@ -216,22 +230,29 @@ func (s *Server) acceptConnections() {
 // handleConnection handles a QUIC connection.
 func (s *Server) handleConnection(conn *quic.Conn) {
 	s.logger.Info("Accepted QUIC connection", "remote_addr", conn.RemoteAddr())
+	fmt.Printf("[DEBUG] handleConnection started for: %v\n", conn.RemoteAddr())
 
 	// Accept control stream (stream 0) for handshake
 	stream, err := conn.AcceptStream(s.ctx)
 	if err != nil {
 		s.logger.Error("Failed to accept control stream", "error", err)
+		fmt.Printf("[DEBUG] Failed to accept control stream: %v\n", err)
 		_ = conn.CloseWithError(1, "handshake failed")
 		return
 	}
+
+	fmt.Printf("[DEBUG] Accepted control stream, calling performHandshake\n")
 
 	// Perform handshake to get session ID and steward ID
 	sessionID, stewardID, err := s.performHandshake(stream)
 	if err != nil {
 		s.logger.Error("Handshake failed", "error", err.Error())
+		fmt.Printf("[DEBUG] performHandshake returned error: %v\n", err)
 		_ = conn.CloseWithError(1, "handshake failed")
 		return
 	}
+
+	fmt.Printf("[DEBUG] Handshake succeeded: sessionID=%s stewardID=%s\n", sessionID, stewardID)
 
 	s.logger.Info("QUIC handshake successful",
 		"session_id", sessionID,
@@ -290,36 +311,77 @@ func (s *Server) performHandshake(stream *quic.Stream) (string, string, error) {
 	buf := make([]byte, 256)
 	n, err := stream.Read(buf)
 	if err != nil {
+		s.logger.Error("Failed to read handshake from stream", "error", err)
 		return "", "", fmt.Errorf("failed to read handshake: %w", err)
 	}
 
 	handshake := string(buf[:n])
-	s.logger.Debug("Received handshake", "handshake", handshake)
+	s.logger.Info("Received QUIC handshake",
+		"handshake", handshake,
+		"bytes_read", n,
+		"raw_bytes", fmt.Sprintf("%q", buf[:n]))
+
+	fmt.Printf("[DEBUG] Handshake raw bytes: %q\n", buf[:n])
+	fmt.Printf("[DEBUG] Handshake string: %q\n", handshake)
+	fmt.Printf("[DEBUG] Handshake length: %d\n", len(handshake))
 
 	// Parse handshake: "session_id:steward_id"
-	var sessionID, stewardID string
-	if _, err := fmt.Sscanf(handshake, "%s:%s", &sessionID, &stewardID); err != nil {
-		return "", "", fmt.Errorf("invalid handshake format: %w", err)
+	// Trim whitespace and split on colon
+	parts := strings.Split(strings.TrimSpace(handshake), ":")
+	fmt.Printf("[DEBUG] Split result: parts=%v len=%d\n", parts, len(parts))
+
+	if len(parts) != 2 {
+		s.logger.Error("Failed to parse handshake format",
+			"error", "expected format 'session_id:steward_id'",
+			"handshake", handshake,
+			"parts", parts)
+		return "", "", fmt.Errorf("invalid handshake format: expected 'session_id:steward_id', got %d parts", len(parts))
 	}
 
+	sessionID := strings.TrimSpace(parts[0])
+	stewardID := strings.TrimSpace(parts[1])
+	fmt.Printf("[DEBUG] Parsed: sessionID=%q stewardID=%q\n", sessionID, stewardID)
+
+	s.logger.Info("Parsed handshake successfully",
+		"session_id", sessionID,
+		"steward_id", stewardID)
+
 	// Validate session if session manager is available
-	if s.sessionManager != nil {
-		_, err := s.sessionManager.ValidateSession(sessionID, stewardID)
-		if err != nil {
-			s.logger.Warn("Session validation failed",
-				"session_id", sessionID,
-				"steward_id", stewardID,
-				"error", err)
-
-			// Send error response
-			response := fmt.Sprintf("ERROR: %s\n", err.Error())
-			_, _ = stream.Write([]byte(response))
-			return "", "", fmt.Errorf("session validation failed: %w", err)
-		}
-
-		s.logger.Info("Session validated successfully",
+	if s.sessionManager == nil {
+		s.logger.Warn("Session manager is nil, skipping validation")
+	} else {
+		s.logger.Info("Attempting session validation",
 			"session_id", sessionID,
 			"steward_id", stewardID)
+
+		_, err := s.sessionManager.ValidateSession(sessionID, stewardID)
+		if err != nil {
+			// If session doesn't exist, auto-create an ephemeral session
+			// This supports the on-demand nature of QUIC connections
+			s.logger.Info("Session not found, auto-creating ephemeral session",
+				"session_id", sessionID,
+				"steward_id", stewardID)
+
+			if err := s.sessionManager.CreateEphemeralSession(sessionID, stewardID, 5*time.Minute); err != nil {
+				s.logger.Error("Failed to auto-create session",
+					"session_id", sessionID,
+					"steward_id", stewardID,
+					"error", err)
+
+				// Send error response
+				response := fmt.Sprintf("ERROR: failed to create session: %s\n", err.Error())
+				_, _ = stream.Write([]byte(response))
+				return "", "", fmt.Errorf("session creation failed: %w", err)
+			}
+
+			s.logger.Info("Ephemeral session auto-created successfully",
+				"session_id", sessionID,
+				"steward_id", stewardID)
+		} else {
+			s.logger.Info("Session validated successfully",
+				"session_id", sessionID,
+				"steward_id", stewardID)
+		}
 	}
 
 	// Send success response
@@ -335,6 +397,8 @@ func (s *Server) performHandshake(stream *quic.Stream) (string, string, error) {
 func (s *Server) handleStream(session *Session, stream *quic.Stream) {
 	streamID := int64(stream.StreamID())
 
+	fmt.Printf("[DEBUG] handleStream called: stream_id=%d session_id=%s steward_id=%s\n",
+		streamID, session.ID, session.StewardID)
 	s.logger.Debug("Handling stream",
 		"stream_id", streamID,
 		"session_id", session.ID,
@@ -356,14 +420,21 @@ func (s *Server) handleStream(session *Session, stream *quic.Stream) {
 	// Get handler for this stream
 	s.mu.RLock()
 	handler, exists := s.streamHandlers[streamID]
+	handlersCount := len(s.streamHandlers)
 	s.mu.RUnlock()
 
+	fmt.Printf("[DEBUG] Looking up handler: stream_id=%d exists=%v total_handlers=%d\n",
+		streamID, exists, handlersCount)
+
 	if !exists {
+		fmt.Printf("[DEBUG] No handler found for stream_id=%d, discarding data\n", streamID)
 		s.logger.Warn("No handler for stream", "stream_id", streamID)
 		// Read and discard data
 		_, _ = io.Copy(io.Discard, stream)
 		return
 	}
+
+	fmt.Printf("[DEBUG] Calling handler for stream_id=%d\n", streamID)
 
 	// Execute handler
 	if err := handler(s.ctx, session, stream); err != nil {

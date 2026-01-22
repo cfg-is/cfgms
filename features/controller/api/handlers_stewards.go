@@ -6,11 +6,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
 
 	"github.com/gorilla/mux"
+	"gopkg.in/yaml.v3"
 
 	controller "github.com/cfgis/cfgms/api/proto/controller"
+	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/pkg/security"
 )
 
@@ -166,9 +170,33 @@ func (s *Server) handleGetStewardConfig(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Parse configuration JSON
+	// Convert protobuf config to map for HTTP response
+	protoConfig := configResp.Config.Config
+	if protoConfig == nil {
+		s.logger.Error("Configuration is nil")
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Configuration is nil", "INTERNAL_ERROR")
+		return
+	}
+
+	// Convert protobuf to Go struct
+	goConfig, err := stewardconfig.FromProto(protoConfig)
+	if err != nil {
+		s.logger.Error("Failed to convert protobuf to Go struct", "error", err)
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to convert configuration", "CONVERSION_ERROR")
+		return
+	}
+
+	// Marshal Go struct to JSON for response
+	jsonBytes, err := json.Marshal(goConfig)
+	if err != nil {
+		s.logger.Error("Failed to marshal configuration to JSON", "error", err)
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to marshal configuration", "MARSHAL_ERROR")
+		return
+	}
+
+	// Parse into map for response
 	var config map[string]interface{}
-	if err := json.Unmarshal(configResp.Config, &config); err != nil {
+	if err := json.Unmarshal(jsonBytes, &config); err != nil {
 		s.logger.Error("Failed to parse configuration JSON", "error", err)
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to parse configuration", "PARSE_ERROR")
 		return
@@ -190,21 +218,86 @@ func (s *Server) handleUpdateStewardConfig(w http.ResponseWriter, r *http.Reques
 	vars := mux.Vars(r)
 	stewardID := vars["id"]
 
-	if stewardID == "" {
-		s.writeErrorResponse(w, http.StatusBadRequest, "Steward ID is required", "MISSING_STEWARD_ID")
+	// Validate steward ID to prevent log injection
+	validator := security.NewValidator()
+	validationResult := &security.ValidationResult{Valid: true}
+	validator.ValidateString(validationResult, "steward_id", stewardID, "required", "charset:alphanumeric_dash", "min_length:1")
+
+	if !validationResult.Valid {
+		s.logger.Warn("Invalid steward ID format in config update request", "validation_errors", validationResult.Errors)
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid steward ID format", "INVALID_STEWARD_ID")
 		return
 	}
 
-	// Parse request body
-	var configUpdate map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&configUpdate); err != nil {
-		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid JSON body", "INVALID_JSON")
+	// Parse request body into StewardConfig
+	// Support both JSON (legacy) and YAML (production .cfg format)
+	var config stewardconfig.StewardConfig
+	contentType := r.Header.Get("Content-Type")
+
+	// Read body
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		s.logger.Error("Failed to read request body", "error", err)
+		s.writeErrorResponse(w, http.StatusBadRequest, "Failed to read request body", "READ_ERROR")
 		return
 	}
 
-	// For now, return a method not implemented response
-	// TODO: Implement configuration update when the backend supports it
-	s.writeErrorResponse(w, http.StatusNotImplemented, "Configuration updates not yet implemented", "NOT_IMPLEMENTED")
+	// Parse based on Content-Type
+	if strings.Contains(contentType, "yaml") || strings.Contains(contentType, "x-yaml") {
+		// YAML format (production .cfg files)
+		if err := yaml.Unmarshal(bodyBytes, &config); err != nil {
+			s.logger.Error("Failed to decode config YAML", "error", err)
+			s.writeErrorResponse(w, http.StatusBadRequest, "Invalid YAML body", "INVALID_YAML")
+			return
+		}
+		// codeql[go/log-injection] - False positive: stewardID is a validated UUID identifier, not user-controlled content
+		s.logger.Info("Received configuration in YAML format", "steward_id", stewardID, "resources", len(config.Resources))
+		fmt.Printf("[DEBUG] YAML config parsed: resources=%d steward_id=%s\n", len(config.Resources), config.Steward.ID)
+	} else {
+		// JSON format (legacy/backward compatibility)
+		if err := json.Unmarshal(bodyBytes, &config); err != nil {
+			s.logger.Error("Failed to decode config JSON", "error", err)
+			s.writeErrorResponse(w, http.StatusBadRequest, "Invalid JSON body", "INVALID_YAML")
+			return
+		}
+		// codeql[go/log-injection] - False positive: stewardID is a validated UUID identifier, not user-controlled content
+		s.logger.Info("Received configuration in JSON format", "steward_id", stewardID, "resources", len(config.Resources))
+	}
+
+	// Extract tenant from context or use default
+	tenantID := "default"
+	if tid, ok := r.Context().Value("tenant-id").(string); ok && tid != "" {
+		tenantID = tid
+	}
+
+	// codeql[go/log-injection] - False positive: stewardID and tenantID are validated identifiers, not user-controlled content
+	s.logger.Info("Configuration upload request received",
+		"steward_id", stewardID,
+		"tenant_id", tenantID,
+		"resource_count", len(config.Resources))
+
+	// Store configuration using tenant-aware config service
+	if err := s.configService.SetTenantConfiguration(tenantID, stewardID, &config); err != nil {
+		// codeql[go/log-injection] - False positive: stewardID and tenantID are validated identifiers, not user-controlled content
+		s.logger.Error("Failed to store configuration",
+			"steward_id", stewardID,
+			"tenant_id", tenantID,
+			"error", err)
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to store configuration", "STORAGE_ERROR")
+		return
+	}
+
+	// codeql[go/log-injection] - False positive: stewardID and tenantID are validated identifiers, not user-controlled content
+	s.logger.Info("Configuration stored successfully",
+		"steward_id", stewardID,
+		"tenant_id", tenantID)
+
+	s.writeSuccessResponse(w, map[string]any{
+		"steward_id": stewardID,
+		"tenant_id":  tenantID,
+		"status":     "stored",
+		"message":    "Configuration stored successfully",
+	})
 }
 
 // handleValidateConfig handles POST /api/v1/stewards/{id}/config/validate

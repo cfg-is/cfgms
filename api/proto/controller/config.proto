@@ -8,6 +8,7 @@ option go_package = "github.com/cfgis/cfgms/api/proto/controller";
 
 import "common/common.proto";
 import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
 
 message ConfigRequest {
   string steward_id = 1;
@@ -16,7 +17,7 @@ message ConfigRequest {
 
 message ConfigResponse {
   common.Status status = 1;
-  bytes config = 2;  // JSON encoded configuration
+  SignedConfig config = 2;  // Protobuf configuration with embedded signature
   string version = 3;
 }
 
@@ -77,4 +78,54 @@ message ConfigurationUpdate {
     DELETE = 3;
   }
   UpdateType update_type = 5;
+}
+
+// StewardConfig represents the complete steward configuration
+message StewardConfig {
+  StewardSettings steward = 1;
+  repeated ResourceConfig resources = 2;
+  map<string, string> modules = 3;
+}
+
+// StewardSettings contains steward-specific configuration
+message StewardSettings {
+  string id = 1;
+  string mode = 2;
+  repeated string module_paths = 3;
+  LoggingConfig logging = 4;
+  ErrorHandlingConfig error_handling = 5;
+}
+
+// LoggingConfig defines logging output settings
+message LoggingConfig {
+  string level = 1;
+  string format = 2;
+}
+
+// ErrorHandlingConfig defines error handling strategies
+message ErrorHandlingConfig {
+  string module_load_failure = 1;
+  string resource_failure = 2;
+  string configuration_error = 3;
+}
+
+// ResourceConfig defines a single resource to be managed
+message ResourceConfig {
+  string name = 1;
+  string module = 2;
+  google.protobuf.Struct config = 3;  // Dynamic configuration map
+}
+
+// ConfigSignature contains cryptographic signature information
+message ConfigSignature {
+  string algorithm = 1;
+  string signature = 2;
+  int64 timestamp = 3;
+  string key_fingerprint = 4;
+}
+
+// SignedConfig wraps configuration with embedded signature
+message SignedConfig {
+  StewardConfig config = 1;
+  ConfigSignature signature = 2;
 }

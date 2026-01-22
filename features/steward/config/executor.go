@@ -9,6 +9,7 @@ package config
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -100,25 +101,40 @@ func (e *Executor) ApplyConfiguration(ctx context.Context, configData []byte, ve
 		Timestamp:     time.Now(),
 	}
 
-	// Parse YAML configuration
-	var spec ConfigurationSpec
-	if err := yaml.Unmarshal(configData, &spec); err != nil {
+	// Parse configuration (StewardConfig format)
+	// Note: Configuration may be JSON or YAML (signature system always returns YAML)
+	// Since JSON is valid YAML, we parse as YAML to accept both formats
+	e.logger.Info("ApplyConfiguration starting", "data_size", len(configData))
+	previewLen := 300
+	if len(configData) < previewLen {
+		previewLen = len(configData)
+	}
+	e.logger.Info("Config data preview", "preview", string(configData[:previewLen]))
+
+	var config StewardConfig
+	if err := yaml.Unmarshal(configData, &config); err != nil {
 		e.logger.Error("Failed to parse configuration", "error", err)
+		e.logger.Error("Config data that failed to parse", "data", string(configData))
 		report.Status = "ERROR"
 		report.Message = fmt.Sprintf("Configuration parsing failed: %v", err)
 		return report, fmt.Errorf("failed to parse configuration: %w", err)
 	}
+	e.logger.Info("ApplyConfiguration parsed", "resources", len(config.Resources), "steward_id", config.Steward.ID)
 
-	e.logger.Info("Parsed configuration",
-		"version", spec.Version,
-		"module_count", len(spec.Modules))
+	e.logger.Info("Parsed configuration", "resource_count", len(config.Resources))
+
+	// Group resources by module for status reporting
+	resourcesByModule := make(map[string][]ResourceConfig)
+	for _, resource := range config.Resources {
+		resourcesByModule[resource.Module] = append(resourcesByModule[resource.Module], resource)
+	}
 
 	// Apply each module's resources
 	hasErrors := false
-	for moduleName, resources := range spec.Modules {
+	for moduleName, resources := range resourcesByModule {
 		e.logger.Info("Processing module", "module", moduleName, "resource_count", len(resources))
 
-		moduleStatus := e.applyModule(ctx, moduleName, resources)
+		moduleStatus := e.applyModuleResources(ctx, moduleName, resources)
 		report.Modules[moduleName] = moduleStatus
 
 		if moduleStatus.Status != "OK" {
@@ -143,8 +159,8 @@ func (e *Executor) ApplyConfiguration(ctx context.Context, configData []byte, ve
 	return report, nil
 }
 
-// applyModule applies all resources for a specific module.
-func (e *Executor) applyModule(ctx context.Context, moduleName string, resources []ResourceSpec) mqttTypes.ModuleStatus {
+// applyModuleResources applies all resources for a specific module using ResourceConfig format.
+func (e *Executor) applyModuleResources(ctx context.Context, moduleName string, resources []ResourceConfig) mqttTypes.ModuleStatus {
 	status := mqttTypes.ModuleStatus{
 		Name:      moduleName,
 		Status:    "OK",
@@ -171,13 +187,38 @@ func (e *Executor) applyModule(ctx context.Context, moduleName string, resources
 	errors := make([]string, 0)
 
 	for _, resource := range resources {
+		// Extract resource_id from config (typically the 'path' field)
+		resourceID, ok := resource.Config["path"].(string)
+		if !ok || resourceID == "" {
+			e.logger.Error("Resource missing path", "module", moduleName, "name", resource.Name)
+			errorCount++
+			errors = append(errors, fmt.Sprintf("%s: missing 'path' in config", resource.Name))
+			continue
+		}
+
+		// Extract state (default to "present")
+		state := "present"
+		if stateVal, ok := resource.Config["state"].(string); ok {
+			state = stateVal
+		} else if ensureVal, ok := resource.Config["ensure"].(string); ok {
+			state = ensureVal
+		}
+
 		e.logger.Info("Applying resource",
 			"module", moduleName,
 			"name", resource.Name,
-			"resource_id", resource.ResourceID,
-			"state", resource.State)
+			"resource_id", resourceID,
+			"state", state)
 
-		if err := e.applyResource(ctx, moduleName, module, resource); err != nil {
+		// Convert ResourceConfig to ResourceSpec for applyResourceInternal
+		spec := ResourceSpec{
+			Name:       resource.Name,
+			ResourceID: resourceID,
+			State:      state,
+			Config:     resource.Config,
+		}
+
+		if err := e.applyResourceInternal(ctx, moduleName, module, spec); err != nil {
 			e.logger.Error("Resource application failed",
 				"module", moduleName,
 				"name", resource.Name,
@@ -203,8 +244,8 @@ func (e *Executor) applyModule(ctx context.Context, moduleName string, resources
 	return status
 }
 
-// applyResource applies a single resource using the appropriate module.
-func (e *Executor) applyResource(ctx context.Context, moduleName string, module modules.Module, resource ResourceSpec) error {
+// applyResourceInternal applies a single resource using the appropriate module.
+func (e *Executor) applyResourceInternal(ctx context.Context, moduleName string, module modules.Module, resource ResourceSpec) error {
 	// Add tenant context
 	ctx = logging.WithTenant(ctx, e.tenantID)
 
@@ -307,6 +348,13 @@ func validatePermissions(perms interface{}) error {
 		permValue = int(v)
 	case float64:
 		permValue = int(v)
+	case string:
+		// Parse string as octal (e.g., "0644" -> 420 decimal)
+		parsed, err := strconv.ParseInt(v, 8, 32)
+		if err != nil {
+			return fmt.Errorf("invalid permissions string: %s (must be octal format like '0644')", v)
+		}
+		permValue = int(parsed)
 	default:
 		return fmt.Errorf("invalid permissions type: %T", perms)
 	}

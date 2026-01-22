@@ -171,9 +171,10 @@ func TestGetConfiguration(t *testing.T) {
 		assert.NotEmpty(t, resp.Config)
 		assert.NotEmpty(t, resp.Version)
 
-		// Verify configuration content
-		var retrievedConfig stewardconfig.StewardConfig
-		err = json.Unmarshal(resp.Config, &retrievedConfig)
+		// Verify configuration content (protobuf format)
+		require.NotNil(t, resp.Config)
+		require.NotNil(t, resp.Config.Config)
+		retrievedConfig, err := stewardconfig.FromProto(resp.Config.Config)
 		require.NoError(t, err)
 		assert.Equal(t, config.Steward.ID, retrievedConfig.Steward.ID)
 		assert.Len(t, retrievedConfig.Resources, 2)
@@ -193,9 +194,10 @@ func TestGetConfiguration(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, common.Status_OK, resp.Status.Code)
 
-		// Verify only directory module is returned
-		var retrievedConfig stewardconfig.StewardConfig
-		err = json.Unmarshal(resp.Config, &retrievedConfig)
+		// Verify only directory module is returned (protobuf format)
+		require.NotNil(t, resp.Config)
+		require.NotNil(t, resp.Config.Config)
+		retrievedConfig, err := stewardconfig.FromProto(resp.Config.Config)
 		require.NoError(t, err)
 		assert.Len(t, retrievedConfig.Resources, 1)
 		assert.Equal(t, "directory", retrievedConfig.Resources[0].Module)
@@ -215,9 +217,10 @@ func TestGetConfiguration(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, common.Status_OK, resp.Status.Code)
 
-		// Verify both modules are returned
-		var retrievedConfig stewardconfig.StewardConfig
-		err = json.Unmarshal(resp.Config, &retrievedConfig)
+		// Verify both modules are returned (protobuf format)
+		require.NotNil(t, resp.Config)
+		require.NotNil(t, resp.Config.Config)
+		retrievedConfig, err := stewardconfig.FromProto(resp.Config.Config)
 		require.NoError(t, err)
 		assert.Len(t, retrievedConfig.Resources, 2)
 	})
@@ -236,9 +239,10 @@ func TestGetConfiguration(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, common.Status_OK, resp.Status.Code)
 
-		// Verify no resources are returned
-		var retrievedConfig stewardconfig.StewardConfig
-		err = json.Unmarshal(resp.Config, &retrievedConfig)
+		// Verify no resources are returned (protobuf format)
+		require.NotNil(t, resp.Config)
+		require.NotNil(t, resp.Config.Config)
+		retrievedConfig, err := stewardconfig.FromProto(resp.Config.Config)
 		require.NoError(t, err)
 		assert.Len(t, retrievedConfig.Resources, 0)
 	})
