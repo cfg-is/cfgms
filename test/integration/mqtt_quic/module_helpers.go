@@ -51,9 +51,14 @@ func NewModuleTestHelper(baseURL, mqttAddr string, tlsConfig *tls.Config) *Modul
 	}
 
 	// Configure TLS if provided
+	// For HTTP client, use InsecureSkipVerify in test environment with auto-generated certs
+	// The tlsConfig is still used for MQTT connections with proper verification
 	if tlsConfig != nil {
+		// Create a copy of the TLS config for HTTP client with InsecureSkipVerify
+		httpTLSConfig := tlsConfig.Clone()
+		httpTLSConfig.InsecureSkipVerify = true
 		httpClient.Transport = &http.Transport{
-			TLSClientConfig: tlsConfig,
+			TLSClientConfig: httpTLSConfig,
 		}
 	}
 
@@ -180,14 +185,16 @@ func (h *ModuleTestHelper) CheckFileInContainer(t *testing.T, containerName, fil
 
 	info.Exists = true
 
-	// Get file content
+	// Get file content (may fail for write-only files - non-fatal)
 	cmd = exec.CommandContext(ctx, "docker", "exec", containerName, "cat", filePath)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("failed to read file content: %w", err)
+		// Content read failed (e.g., write-only file) - leave content empty but continue
+		info.Content = ""
+	} else {
+		info.Content = stdout.String()
 	}
-	info.Content = stdout.String()
 
 	// Get file permissions and ownership
 	cmd = exec.CommandContext(ctx, "docker", "exec", containerName, "stat", "-c", "%a %U %G", filePath)
@@ -502,8 +509,8 @@ func (h *ModuleTestHelper) CreateFileInContainerUsingModule(t *testing.T, contai
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Write content using printf (safer than echo)
-	cmd := exec.CommandContext(ctx, "docker", "exec", containerName, "tee", filePath)
+	// Write content using tee with interactive mode (-i flag required for stdin)
+	cmd := exec.CommandContext(ctx, "docker", "exec", "-i", containerName, "tee", filePath)
 	cmd.Stdin = strings.NewReader(content)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to write file content: %w", err)

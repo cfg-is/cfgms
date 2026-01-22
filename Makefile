@@ -1635,9 +1635,9 @@ test-e2e-mqtt-quic:
 	@echo "🧪 Running MQTT+QUIC integration tests..."
 	@if [ -f .env.test ]; then \
 		set -a && . ./.env.test && set +a && \
-		CFGMS_TEST_HTTP_ADDR=https://127.0.0.1:8080 \
-		CFGMS_TEST_MQTT_ADDR=ssl://127.0.0.1:1886 \
-		CFGMS_TEST_QUIC_ADDR=127.0.0.1:4436 \
+		CFGMS_TEST_HTTP_ADDR=https://localhost:8080 \
+		CFGMS_TEST_MQTT_ADDR=ssl://localhost:1886 \
+		CFGMS_TEST_QUIC_ADDR=localhost:4436 \
 		CFGMS_TEST_CERTS_PATH=$(PWD)/test/integration/mqtt_quic/certs \
 		go test -v -race -timeout=15m ./test/integration/mqtt_quic/... || exit 1; \
 	else \
