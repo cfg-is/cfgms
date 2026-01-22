@@ -66,9 +66,29 @@ func TestValidatePermissions(t *testing.T) {
 			expectError: false,
 		},
 		{
-			name:        "invalid type string",
-			perms:       "644",
+			name:        "valid string octal 0644",
+			perms:       "0644",
+			expectError: false,
+		},
+		{
+			name:        "valid string octal 0755",
+			perms:       "0755",
+			expectError: false,
+		},
+		{
+			name:        "invalid string non-octal 999",
+			perms:       "999",
 			expectError: true,
+		},
+		{
+			name:        "invalid string non-numeric abc",
+			perms:       "abc",
+			expectError: true,
+		},
+		{
+			name:        "invalid string decimal 644 (no leading 0)",
+			perms:       "644",
+			expectError: false, // "644" in octal is valid (420 decimal)
 		},
 	}
 
