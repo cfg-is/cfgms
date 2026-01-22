@@ -165,6 +165,7 @@ func (s *LoadTestSuite) TestConcurrentMessagePublishing() {
 		go func(publisherIdx int) {
 			defer wg.Done()
 
+			// Story #313: use steward-compatible client ID
 			clientID := fmt.Sprintf("publisher-%d", publisherIdx)
 			client := s.createMQTTClient(clientID)
 			token := client.Connect()
@@ -174,7 +175,8 @@ func (s *LoadTestSuite) TestConcurrentMessagePublishing() {
 			}
 			defer client.Disconnect(250)
 
-			topic := fmt.Sprintf("cfgms/test/load/%d", publisherIdx)
+			// Story #313: use steward-specific topic pattern
+			topic := fmt.Sprintf("cfgms/steward/%s/test/load", clientID)
 
 			for j := 0; j < messagesPerPublisher; j++ {
 				message := map[string]interface{}{

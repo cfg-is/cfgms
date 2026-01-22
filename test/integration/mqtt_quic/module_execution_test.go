@@ -73,7 +73,8 @@ func (s *ModuleExecutionTestSuite) SetupSuite() {
 	)
 
 	// Connect MQTT client for status monitoring with TLS
-	s.helper.ConnectMQTT(s.T(), fmt.Sprintf("module-exec-test-%d", time.Now().Unix()), s.tlsConfig)
+	// Story #313: use test-controller- prefix to allow publishing to any steward topics
+	s.helper.ConnectMQTT(s.T(), fmt.Sprintf("test-controller-%d", time.Now().Unix()), s.tlsConfig)
 }
 
 func (s *ModuleExecutionTestSuite) TearDownSuite() {

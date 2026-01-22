@@ -204,9 +204,6 @@ func (s *MultiTenantTestSuite) TestMQTTTopicIsolation() {
 
 // AC3: TestCrossTenantMessagePrevention validates cross-tenant message delivery prevention
 func (s *MultiTenantTestSuite) TestCrossTenantMessagePrevention() {
-	// TODO(#313): Re-enable once MQTT broker has ACLs configured for topic-level access control
-	// Test infrastructure works (unique certs per tenant), but broker allows cross-tenant subscriptions
-	s.T().Skip("TODO(#313): Requires MQTT broker ACL configuration")
 	s.T().Log("AC3: Testing cross-tenant message delivery prevention")
 
 	brokerAddr := GetTestMQTTAddr("ssl://127.0.0.1:1886")
@@ -257,9 +254,10 @@ func (s *MultiTenantTestSuite) TestConfigurationRoutingBoundaries() {
 	tlsConfig := s.tlsConfig
 	brokerAddr := GetTestMQTTAddr("ssl://127.0.0.1:1886")
 
-	// Create tenant clients
-	tenant1Client := s.createTenantMQTTClient("tenant1-config", brokerAddr, tlsConfig)
-	tenant2Client := s.createTenantMQTTClient("tenant2-config", brokerAddr, tlsConfig)
+	// Create tenant clients - use tenant IDs that match the steward topic patterns
+	// Story #313: ACLs enforce that client ID must match steward ID in topics
+	tenant1Client := s.createTenantMQTTClient("tenant1", brokerAddr, tlsConfig)
+	tenant2Client := s.createTenantMQTTClient("tenant2", brokerAddr, tlsConfig)
 
 	tenant1Configs := make(chan string, 10)
 	tenant2Configs := make(chan string, 10)
@@ -320,9 +318,10 @@ func (s *MultiTenantTestSuite) TestDNACollectionSeparation() {
 	tlsConfig := s.tlsConfig
 	brokerAddr := GetTestMQTTAddr("ssl://127.0.0.1:1886")
 
-	// Create tenant clients
-	tenant1Client := s.createTenantMQTTClient("tenant1-dna", brokerAddr, tlsConfig)
-	tenant2Client := s.createTenantMQTTClient("tenant2-dna", brokerAddr, tlsConfig)
+	// Create tenant clients - use tenant IDs that match the steward topic patterns
+	// Story #313: ACLs enforce that client ID must match steward ID in topics
+	tenant1Client := s.createTenantMQTTClient("tenant1", brokerAddr, tlsConfig)
+	tenant2Client := s.createTenantMQTTClient("tenant2", brokerAddr, tlsConfig)
 
 	tenant1DNA := make(chan map[string]interface{}, 10)
 	tenant2DNA := make(chan map[string]interface{}, 10)
