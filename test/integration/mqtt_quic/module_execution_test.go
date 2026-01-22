@@ -62,8 +62,8 @@ func (s *ModuleExecutionTestSuite) SetupSuite() {
 	// Wait for steward to initialize
 	time.Sleep(5 * time.Second)
 
-	// Setup test helper for TLS config
-	s.testHelper = NewTestHelper(GetTestHTTPAddr("https://127.0.0.1:8080"))
+	// Setup test helper for TLS config (use localhost to match TLS ServerName)
+	s.testHelper = NewTestHelper(GetTestHTTPAddr("https://localhost:8080"))
 	s.tlsConfig, s.stewardID = s.testHelper.GetTLSConfigFromRegistration(s.T(), "default", "integration-test")
 
 	s.helper = NewModuleTestHelper(
@@ -646,10 +646,12 @@ func (s *ModuleExecutionTestSuite) TestFilePermissionVariations() {
 			// Verify permissions
 			fileInfo, err := s.helper.CheckFileInContainer(t, containerName, filePath)
 			s.NoError(err)
-			s.True(fileInfo.Exists)
+			if fileInfo != nil {
+				s.True(fileInfo.Exists)
 
-			expectedPermsStr := fmt.Sprintf("%o", tc.perms)
-			s.Equal(expectedPermsStr, fileInfo.Permissions, "Permissions should match for %s", tc.name)
+				expectedPermsStr := fmt.Sprintf("%o", tc.perms)
+				s.Equal(expectedPermsStr, fileInfo.Permissions, "Permissions should match for %s", tc.name)
+			}
 
 			// Cleanup after test
 			s.helper.CleanupTestFiles(t, containerName, filePath)

@@ -571,7 +571,8 @@ services:
     tmpfs:
       # Story #315: Use tmpfs for module execution test workspace (writable, fast, ephemeral)
       # Simulates real-world endpoint with writable directory, no permission issues
-      - /test-workspace:uid=1001,gid=1001,mode=0755
+      # exec flag required for script execution tests
+      - /test-workspace:uid=1001,gid=1001,mode=0755,exec
     depends_on:
       controller-standalone:
         condition: service_healthy
