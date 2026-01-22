@@ -839,6 +839,12 @@ func initializeMQTTBroker(cfg *config.Config, logger logging.Logger, certManager
 		return nil, fmt.Errorf("failed to initialize MQTT broker: %w", err)
 	}
 
+	// Configure ACL handler for multi-tenant topic isolation (Story #313)
+	// Enforces that stewards can only access topics under their own namespace:
+	// cfgms/steward/{clientID}/#
+	broker.SetACLHandler(stewardACLHandler)
+	logger.Info("MQTT broker ACL handler configured for multi-tenant isolation")
+
 	// Check if broker is available (has required certificates, etc.)
 	available, err := broker.Available()
 	if !available {

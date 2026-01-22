@@ -553,8 +553,8 @@ func (s *TLSSecurityTestSuite) TestTLSRegressionBasicMessaging() {
 	s.NoError(token.Error())
 	defer stewardClient.Disconnect(250)
 
-	// Subscribe to test topic
-	testTopic := fmt.Sprintf("cfgms/test/regression/%d", time.Now().UnixNano())
+	// Subscribe to test topic - Story #313: Use steward-specific topic pattern
+	testTopic := fmt.Sprintf("cfgms/steward/%s/test/regression/%d", stewardID, time.Now().UnixNano())
 	received := make(chan bool, 1)
 
 	subToken := stewardClient.Subscribe(testTopic, 1, func(client mqtt.Client, msg mqtt.Message) {
@@ -596,7 +596,8 @@ func (s *TLSSecurityTestSuite) TestTLSRegressionQoSLevels() {
 	s.NoError(token.Error())
 	defer client.Disconnect(250)
 
-	testTopic := fmt.Sprintf("cfgms/test/qos-tls/%d", time.Now().UnixNano())
+	// Story #313: Use steward-specific topic pattern for ACL compliance
+	testTopic := fmt.Sprintf("cfgms/steward/%s/test/qos-tls/%d", stewardID, time.Now().UnixNano())
 
 	// Test QoS 0, 1, 2
 	qosLevels := []byte{0, 1, 2}
@@ -697,7 +698,8 @@ func (s *TLSSecurityTestSuite) TestCertificateRotationGracePeriod() {
 	s.NoError(token.Error())
 
 	// Publish messages to verify connection is active
-	testTopic := fmt.Sprintf("cfgms/test/rotation/%d", time.Now().UnixNano())
+	// Story #313: Use steward-specific topic pattern for ACL compliance
+	testTopic := fmt.Sprintf("cfgms/steward/%s/test/rotation/%d", stewardID, time.Now().UnixNano())
 	received := make(chan bool, 1)
 
 	subToken := client.Subscribe(testTopic, 1, func(client mqtt.Client, msg mqtt.Message) {
@@ -808,7 +810,8 @@ func (s *TLSSecurityTestSuite) TestMTLSWithRegistrationAPI() {
 	// Phase 5: Verify connection with messaging
 	s.T().Log("Phase 5: Verify connection with test message")
 
-	topic := fmt.Sprintf("test/%s/ping", resp.StewardID)
+	// Story #313: Use steward-specific topic pattern for ACL compliance
+	topic := fmt.Sprintf("cfgms/steward/%s/test/ping", resp.StewardID)
 	received := make(chan bool, 1)
 
 	token = client.Subscribe(topic, 1, func(client mqtt.Client, msg mqtt.Message) {
