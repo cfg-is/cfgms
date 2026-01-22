@@ -121,7 +121,7 @@ Implemented comprehensive Docker-based E2E testing infrastructure that validates
 - [x] Fix single-use registration token enforcement in database storage (issue #299) ✅ COMPLETED
 - [x] Complete E2E test framework for MQTT+QUIC mode (issue #294) ✅ COMPLETED
 - [x] Remove outdated v0.3.0 and v0.4.0 release gates from production-gates workflow (issue #322) ✅ COMPLETED
-- [ ] Enable TestModuleExecution suite with proper steward container configuration (issue #312)
+- [x] Enable TestModuleExecution suite with proper steward container configuration (issue #312) ✅ COMPLETED
 - [ ] Configure MQTT broker ACLs for topic-level access control by steward ID (issue #313)
 - [x] Align test-complete with CI required checks for 100% local validation parity (issue #315) ✅ COMPLETED
 
