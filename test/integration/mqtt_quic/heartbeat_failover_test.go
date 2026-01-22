@@ -326,7 +326,8 @@ func (s *HeartbeatFailoverTestSuite) TestMessageQueuePersistence() {
 	time.Sleep(1 * time.Second)
 
 	// Publish messages while offline (would be queued by broker)
-	publisher := s.createMQTTClient(fmt.Sprintf("test-publisher-%d", time.Now().UnixNano()))
+	// Story #313: Publisher must use stewardID as client ID to match ACL pattern
+	publisher := s.createMQTTClient(stewardID)
 	token = publisher.Connect()
 	s.True(token.WaitTimeout(10 * time.Second))
 	s.NoError(token.Error())

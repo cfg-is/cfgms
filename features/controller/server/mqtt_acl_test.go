@@ -105,6 +105,48 @@ func TestStewardACLHandler(t *testing.T) {
 			reason:    "steward should NOT publish to admin topics",
 		},
 
+		// Controller access cases (Story #313 enhancement for monitoring)
+		{
+			name:      "allow_controller_subscribe_any_steward",
+			clientID:  "controller-primary",
+			topic:     "cfgms/steward/steward-123/status",
+			operation: "subscribe",
+			expected:  true,
+			reason:    "controller should subscribe to any steward status for monitoring",
+		},
+		{
+			name:      "allow_controller_publish_commands",
+			clientID:  "controller-primary",
+			topic:     "cfgms/steward/steward-456/commands",
+			operation: "publish",
+			expected:  true,
+			reason:    "controller should publish commands to any steward",
+		},
+		{
+			name:      "allow_test_observer_subscribe",
+			clientID:  "test-observer-12345",
+			topic:     "cfgms/steward/steward-789/heartbeat",
+			operation: "subscribe",
+			expected:  true,
+			reason:    "test observer should subscribe to steward topics for testing",
+		},
+		{
+			name:      "allow_test_controller_access",
+			clientID:  "test-controller-001",
+			topic:     "cfgms/steward/steward-999/dna",
+			operation: "subscribe",
+			expected:  true,
+			reason:    "test controller should have monitoring access",
+		},
+		{
+			name:      "deny_controller_non_steward_topics",
+			clientID:  "controller-primary",
+			topic:     "cfgms/admin/system",
+			operation: "subscribe",
+			expected:  false,
+			reason:    "controller ACL only allows steward topics",
+		},
+
 		// Edge cases
 		{
 			name:      "deny_empty_client_id",

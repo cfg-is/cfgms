@@ -14,6 +14,7 @@ import (
 //   - Each steward connects with a unique client ID (typically their steward ID)
 //   - Stewards can only publish/subscribe to topics under their own namespace:
 //     cfgms/steward/{clientID}/#
+//   - Controllers and test observers can subscribe to any steward topics (for monitoring)
 //   - This prevents cross-tenant message eavesdropping and unauthorized access
 //
 // Parameters:
@@ -28,10 +29,27 @@ import (
 // Examples:
 // - stewardACLHandler("steward-123", "cfgms/steward/steward-123/config", "publish") → true
 // - stewardACLHandler("steward-123", "cfgms/steward/steward-456/config", "publish") → false
+// - stewardACLHandler("controller-primary", "cfgms/steward/steward-123/status", "subscribe") → true
 func stewardACLHandler(clientID, topic, operation string) bool {
 	// Deny empty client IDs (security: prevent anonymous access)
 	if clientID == "" {
 		return false
+	}
+
+	// Allow controller clients full read access to steward topics for monitoring
+	// Controllers can: read heartbeats, LWT status, DNA updates, etc.
+	// Controllers identified by client ID prefix: controller-, test-observer-, test-controller-
+	if strings.HasPrefix(clientID, "controller-") ||
+		strings.HasPrefix(clientID, "test-observer-") ||
+		strings.HasPrefix(clientID, "test-controller-") {
+		// Controllers can subscribe to any steward topic
+		if operation == "subscribe" && strings.HasPrefix(topic, "cfgms/steward/") {
+			return true
+		}
+		// Controllers can publish to any steward topic (for commands, config delivery)
+		if operation == "publish" && strings.HasPrefix(topic, "cfgms/steward/") {
+			return true
+		}
 	}
 
 	// Define the allowed topic prefix for this client
