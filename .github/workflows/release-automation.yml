@@ -201,16 +201,25 @@ jobs:
       - name: Run Unit Tests
         run: |
           echo "🧪 Running unit tests..."
+          set -a
+          source .env.test
+          set +a
           make test
 
       - name: Run Integration Tests
         run: |
           echo "🔗 Running integration tests..."
+          set -a
+          source .env.test
+          set +a
           make test-fast
 
       - name: Run Production Critical Tests
         run: |
           echo "🏭 Running production critical tests..."
+          set -a
+          source .env.test
+          set +a
           make test-production-critical
 
       - name: Run Security Scan
