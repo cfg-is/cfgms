@@ -2,6 +2,14 @@
 
 CFGMS is a modern configuration management system designed with resilience, security, and clean architecture in mind.
 
+**Key Features:**
+- Policy-as-code enforcement or drift detection
+- Powerful and easy workflow automation platform
+- Built for MSPs multi-tenancy requirements
+- Mutual TLS security with zero-trust RBAC
+- M365, Active Directory, and endpoint integrations
+- Cross-platform support (Windows, macOS, Linux)
+
 [![Build Status](https://github.com/cfg-is/cfgms/workflows/Cross-Platform%20Build%20Validation/badge.svg)](https://github.com/cfg-is/cfgms/actions)
 [![Security Scan](https://github.com/cfg-is/cfgms/workflows/Security%20Scanning%20Workflow/badge.svg)](https://github.com/cfg-is/cfgms/actions)
 [![CodeQL](https://github.com/cfg-is/cfgms/workflows/CodeQL%20Security%20Analysis/badge.svg)](https://github.com/cfg-is/cfgms/security/code-scanning)
@@ -26,159 +34,22 @@ This project board provides real-time visibility into:
 
 ## License
 
-CFGMS uses a **dual licensing model** to balance open source community benefits with sustainable commercial development:
+CFGMS uses a **dual licensing model**:
 
-- **[Apache License 2.0](LICENSE-APACHE-2.0)** - The vast majority of CFGMS, including all modules, integrations, CLI/API, workflow engine, DNA system, RBAC, and monitoring
-- **[Elastic License 2.0](LICENSE-ELASTIC-2.0)** - A small subset of enterprise features (HA clustering, future Web UI)
+- **[Apache License 2.0](LICENSE-APACHE-2.0)** - The vast majority of CFGMS (all modules, integrations, CLI/API, workflow engine, DNA system, RBAC, monitoring)
+- **[Elastic License 2.0](LICENSE-ELASTIC-2.0)** - Small subset of enterprise features (HA clustering, future Web UI)
 
 **Quick Summary:**
-
-- ✅ **Open Source (Apache 2.0)**: Free forever, use commercially, modify and distribute freely
-- ✅ **Commercial (Elastic 2.0)**: Free to use in your infrastructure, cannot offer as a hosted service to third parties
-
-For complete licensing details, feature boundaries, and FAQ, see [LICENSING.md](LICENSING.md).
-
-## Why Open Source?
-
-CFGMS uses an **open core** model that balances community benefits with sustainable development:
-
-### Our Philosophy
-
-> "All code that touches client environments and APIs is open source"
-
-This principle means:
-
-- ✅ **All integrations are OSS** - M365, Active Directory, endpoint modules, PSA/RMM connectors
-- ✅ **Complete automation engine** - Full workflow capabilities, no feature gating
-- ✅ **Production-ready security** - RBAC, audit logging, compliance reporting, zero-trust controls
-- ✅ **Community-driven modules** - Anyone can contribute integrations and modules
-
-We believe integrations should be transparent, auditable, and community-driven. Our competitive advantage is the **platform experience** (DNA system, drift detection, unified management), not gatekeeping integrations.
-
-### Why This Matters for MSPs
-
-1. **Trust** - Audit all code that touches your client environments
-2. **Flexibility** - Start free, upgrade when you need HA or Web UI
-3. **No Vendor Lock-in** - Self-host the OSS version forever
-4. **Community Velocity** - More contributors = faster integrations
-5. **Sustainable** - Commercial features fund continued OSS development
-
-## Features: OSS vs Commercial
-
-| Category | Open Source (Apache 2.0) | Commercial (Elastic 2.0) |
-|----------|-------------------------|--------------------------|
-| **Core Platform** | | |
-| Architecture | ✅ Single controller | ✅ HA clustering (Raft consensus, auto-failover) |
-| CLI/API | ✅ Complete functionality | ❌ CLI/API always OSS |
-| Web UI | ❌ None | ✅ Drag-and-drop workflow builder, dashboards |
-| Storage | ✅ Git, SQLite, PostgreSQL | ✅ Same (HA-optimized PostgreSQL) |
-| **Modules & Integrations** | | |
-| Endpoint Management | ✅ File, directory, package, script, firewall | ❌ All modules are OSS |
-| M365 Integration | ✅ Entra ID, Teams, Exchange, SharePoint, Intune | ❌ All modules are OSS |
-| Active Directory | ✅ User/group management, GPO, LDAP | ❌ All modules are OSS |
-| PSA/RMM Connectors | ✅ All (when built) | ❌ All modules are OSS |
-| **Automation** | | |
-| Workflow Engine | ✅ YAML workflows, loops, conditions, error handling | ❌ Engine is OSS |
-| Debugging | ✅ Breakpoints, step-through, variable inspection | ❌ Debugging is OSS |
-| Orchestration | ❌ None | ✅ Multi-stage workflows, approval gates |
-| Visual Editor | ❌ None | ✅ Web UI workflow builder |
-| **DNA & Drift Detection** | | |
-| DNA Collection | ✅ Hardware, software, network, security attributes | ❌ All DNA is OSS |
-| Drift Detection | ✅ Real-time, configurable, remediation workflows | ❌ All DNA is OSS |
-| System Blueprints | ✅ Templates, comparisons, compliance | ❌ All DNA is OSS |
-| **Security & Compliance** | | |
-| RBAC | ✅ Role-based access control (CLI-managed) | ✅ Advanced (Web UI, conditional access) |
-| Audit Logging | ✅ Complete audit trail | ❌ Audit is OSS |
-| Compliance Reporting | ✅ CIS, HIPAA, PCI-DSS templates | ❌ Reporting is OSS |
-| Zero-Trust Controls | ✅ JIT access, continuous authorization | ❌ Security is OSS |
-| **Monitoring & Alerting** | | |
-| Performance Metrics | ✅ Endpoint & controller monitoring | ❌ Monitoring is OSS |
-| Threshold Alerts | ✅ Email, webhook notifications | ❌ Alerting is OSS |
-| SIEM Integration | ✅ Real-time event correlation | ❌ SIEM is OSS |
-| Predictive Analytics | ❌ None | ✅ ML-based anomaly detection, forecasting |
-| **Multi-Tenancy** | | |
-| Single MSP | ✅ Unlimited hierarchy (MSP→Client→Group→Device) | ❌ OSS supports single MSP |
-| Multiple MSPs | ❌ None | ✅ SaaS-scale multi-MSP deployments |
-| **Reporting** | | |
-| Data Reports | ✅ Generate all reports via CLI (JSON, CSV, PDF, Excel) | ❌ Reporting engine is OSS |
-| Visual Dashboards | ❌ None | ✅ Web UI charts and graphs |
-| **Terminal Access** | | |
-| Remote Terminal | ✅ Full remote shell capabilities | ❌ Terminal is OSS |
-
-### Key Takeaway
-
-**99% of CFGMS is open source.** The only commercial features are:
-
-- High Availability clustering (for enterprise scale)
-- Web UI (future - graphical interface)
-- Multi-MSP support (for SaaS providers)
-- ML-based predictive analytics (future)
-
-Everything else - all integrations, modules, automation, security, and monitoring - is **completely open source**.
-
-## Upgrade Path: OSS → Commercial
-
-Upgrading from open source to commercial features is seamless:
-
-### When to Upgrade
-
-Consider commercial features when you need:
-
-- **High Availability**: Multiple controllers for 99.99% uptime
-- **Web UI**: Graphical workflow builder and dashboards (when released)
-- **Multi-MSP**: Hosting multiple MSP customers in a single deployment
-- **Predictive Analytics**: ML-based anomaly detection and forecasting (when released)
-
-### How to Upgrade
-
-#### Self-Hosted Commercial
-
-1. **Build with commercial tags**:
-
-   ```bash
-   # Instead of standard build
-   go build ./cmd/controller
-
-   # Use commercial build
-   go build -tags commercial ./cmd/controller
-   ```
-
-2. **Configure HA clustering**:
-
-   ```yaml
-   # config.yaml
-   ha:
-     mode: cluster  # or blue-green
-     nodes:
-       - id: controller-1
-         address: controller-1.example.com:7000
-       - id: controller-2
-         address: controller-2.example.com:7000
-       - id: controller-3
-         address: controller-3.example.com:7000
-   ```
-
-3. **Deploy and test**:
-
-   ```bash
-   # All your existing workflows, configurations, and data work immediately
-   # No migration required - it's the same codebase!
-   ```
-
-#### SaaS Commercial
-
-Contact [licensing@cfg.is](mailto:licensing@cfg.is) for commercial licensing:
-
-- **SaaS Pricing**: $250/month for 250 "managed units"
-  - 1 endpoint = 1 unit
-  - 1 M365 user = 0.1 unit
-- **Includes**: Web UI, HA clustering, multi-MSP support, priority support, managed infrastructure
-
-### No Migration Required
-
-The commercial version is the **same codebase** with additional features enabled via build tags. Your configurations, workflows, and data work identically.
+- **Open Source (Apache 2.0)**: Free forever, use commercially, modify and distribute freely
+- **Commercial (Elastic 2.0)**: Free to use in your infrastructure, cannot offer as a hosted service
 
 For complete licensing details, feature boundaries, and FAQ, see [LICENSING.md](LICENSING.md).
+
+## Enterprise Features
+
+Enterprise features (HA clustering, Web UI, multi-MSP) are available by building with `-tags commercial`. These features are **free for internal use** under Elastic License 2.0.
+
+For hosted deployment or support contracts, contact [licensing@cfg.is](mailto:licensing@cfg.is). See [LICENSING.md](LICENSING.md) for complete details.
 
 ## Platform Support
 
@@ -217,91 +88,26 @@ The roadmap provides detailed milestone planning from v0.1.0 through v3.5.0+, in
 
 ## Security
 
-CFGMS implements a robust security architecture with defense-in-depth principles and employs multiple layers of automated security scanning to maintain a strong security posture.
+CFGMS implements defense-in-depth security with:
 
-### Automated Security Scanning
+- **Mutual TLS**: All internal communication (MQTT+QUIC) uses certificate-based authentication
+- **Zero-Trust RBAC**: Just-in-time access, continuous authorization, audit logging
+- **Automated Scanning**: CodeQL, Trivy, gosec, and supply chain security validation
+- **Data Protection**: SOPS encryption, TLS 1.3, OS keychain integration
 
-CFGMS uses comprehensive automated security scanning integrated into the CI/CD pipeline:
+View our security posture: [OpenSSF Scorecard](https://securityscorecards.dev/viewer/?uri=github.com/cfg-is/cfgms)
 
-- **Static Application Security Testing (SAST)**
-  - **CodeQL** (GitHub Advanced Security) - Semantic code analysis for vulnerabilities
-  - **gosec** - Go-specific security scanner for common security issues
-  - **staticcheck** - Advanced static analysis for Go code quality and security
-
-- **Dependency & Vulnerability Scanning**
-  - **Trivy** - Comprehensive vulnerability scanner for dependencies and container images
-  - **Nancy** - OSS Index vulnerability checker for Go dependencies
-  - **Dependabot** - Automated dependency updates and security patches
-
-- **Secret Detection**
-  - **gitleaks** - Prevents hardcoded secrets and credentials in code
-  - **truffleHog** - Deep scanning for sensitive data exposure
-
-- **Container Security**
-  - **Trivy** - Image scanning for vulnerabilities and misconfigurations
-
-- **Supply Chain Security**
-  - **SBOM Generation** (SPDX format) - Software bill of materials for transparency
-  - **OpenSSF Scorecard** - Automated security health metrics and best practices validation
-
-📊 **View Our Security Posture**: [OpenSSF Scorecard](https://securityscorecards.dev/viewer/?uri=github.com/cfg-is/cfgms)
-
-All security scans run automatically on every commit and pull request. Critical and high-severity vulnerabilities block merges to maintain code quality and security standards.
-
-### Security Architecture
-
-- **Internal Communication**
-  - MQTT+QUIC hybrid protocol for steward-controller communication
-  - MQTT (control plane) with mutual TLS for real-time commands and heartbeats
-  - QUIC (data plane) with mutual TLS for high-performance configuration/DNA sync
-  - Certificate-based authentication for all steward connections
-  - Cryptographic configuration signing (RSA-SHA256/ECDSA-SHA256)
-
-- **External Access**
-  - REST API with HTTPS and API key authentication
-  - Role-based access control (RBAC) with zero-trust policy enforcement
-  - Just-in-time (JIT) access and continuous authorization
-  - Rate limiting and request validation
-
-- **Data Protection**
-  - SOPS encryption for sensitive configuration data
-  - TLS 1.3 for all network communication
-  - Comprehensive audit logging and tamper-evident trails
-  - Secure secret management with OS keychain integration
-
-### Reporting Security Vulnerabilities
-
-We take security seriously. If you discover a security vulnerability:
-
-- **Report to**: [security@cfg.is](mailto:security@cfg.is)
-- **Response Time**: 48 hours for initial acknowledgment
-- **Full Policy**: See [SECURITY.md](SECURITY.md) for complete vulnerability disclosure policy
-
-**Please do not** open public GitHub issues for security vulnerabilities.
+**Report vulnerabilities** to [security@cfg.is](mailto:security@cfg.is). See [SECURITY.md](SECURITY.md) for complete policy.
 
 ## REST API
 
-CFGMS provides a comprehensive REST API for external system integration:
+CFGMS provides a comprehensive REST API for external integration:
 
-- **Base URL**: `http://localhost:9080/api/v1` (configurable)
-- **Authentication**: API key-based authentication
+- **Authentication**: API key-based
 - **Endpoints**: Steward management, configuration, certificates, RBAC
-- **Format**: JSON with standardized response structure
+- **Base URL**: `http://localhost:9080/api/v1` (configurable)
 
-### Quick API Example
-
-```bash
-# Check system health
-curl http://localhost:9080/api/v1/health
-
-# List stewards (requires API key)
-curl -H "X-API-Key: your-key" http://localhost:9080/api/v1/stewards
-
-# Get steward configuration
-curl -H "X-API-Key: your-key" http://localhost:9080/api/v1/stewards/steward-001/config
-```
-
-See [docs/api/rest-api.md](docs/api/rest-api.md) for complete API documentation.
+See [docs/api/rest-api.md](docs/api/rest-api.md) for complete documentation and examples.
 
 ## Project Structure
 
@@ -326,7 +132,22 @@ The project follows a feature-based organization:
 
 ## Quick Start
 
-TODO: Add quick start instructions
+**Prerequisites**: Go 1.21+, Git
+
+```bash
+# Clone and build
+git clone https://github.com/cfg-is/cfgms.git
+cd cfgms
+make build
+
+# Run controller
+./bin/controller
+
+# Run steward (separate terminal)
+./bin/cfgms-steward
+```
+
+For detailed setup and configuration, see [docs/deployment/](docs/deployment/).
 
 ## Building from Source
 
@@ -348,14 +169,10 @@ For full documentation, visit [docs.cfg.is](https://docs.cfg.is)
 
 ## Contributing
 
-We welcome contributions to CFGMS!
+We welcome contributions! Before submitting code:
 
-**Before contributing code:**
-1. **Sign the CLA** - Read and sign the [Contributor License Agreement](docs/legal/CLA.md)
-2. **Add your name** - Include yourself in [CONTRIBUTORS.md](CONTRIBUTORS.md)
-3. **Follow the process** - See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines
-
-The CLA assigns copyright to Jordan Ritz (current holder) and enables dual-licensing under Apache 2.0 and Elastic License 2.0. For details, see [docs/legal/README.md](docs/legal/README.md).
+1. Sign the [Contributor License Agreement](docs/legal/CLA.md) and add your name to [CONTRIBUTORS.md](CONTRIBUTORS.md)
+2. Follow the development workflow in [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ## Community & Support
 
