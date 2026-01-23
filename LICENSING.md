@@ -175,20 +175,6 @@ For a complete breakdown of what's included in OSS vs Commercial, see [docs/prod
 ✅ Support for SaaS deployments hosting multiple MSPs
 ✅ MSP-level isolation and management
 
-## Revenue Model
-
-### Open Source
-- **Free forever** for single-controller deployments
-- **Community support** via GitHub Issues and Discussions
-- **Optional paid support** available from maintainers
-
-### Commercial
-- **SaaS Pricing**: $250/month for 250 "managed units"
-  - 1 endpoint = 1 unit
-  - 1 M365 user = 0.1 unit
-  - Includes: Web UI, HA clustering, multi-MSP support, priority support
-- **Self-Hosted Commercial**: Contact for licensing terms
-
 ## FAQ
 
 ### Can I use CFGMS commercially?
@@ -245,23 +231,6 @@ Yes! Apache 2.0 components can be freely forked. Elastic License 2.0 components 
 
 You can start with OSS and upgrade anytime - it's the same codebase with features enabled via build tags.
 
-### How does CFGMS compare to other tools?
-
-**vs Traditional RMMs** (Datto, ConnectWise, N-able):
-- CFGMS: Policy-as-code, GitOps workflows, DNA-based drift detection
-- RMMs: GUI-driven, manual changes, limited automation
-- **Philosophy**: CFGMS is "configuration as policy, continuous enforcement"
-
-**vs Workflow Tools** (Rewst, N8N):
-- CFGMS: MSP-focused, endpoint + SaaS management, built-in security
-- Workflow tools: General automation, requires extensive setup for MSP use cases
-- **Difference**: CFGMS is purpose-built for MSP operations
-
-**vs Configuration Management** (Ansible, Puppet, Chef):
-- CFGMS: Multi-tenant, SaaS-aware, MSP workflows, DNA drift detection
-- Traditional CM: Single-tenant, infrastructure-focused
-- **Niche**: CFGMS bridges endpoint + SaaS management for MSPs
-
 ### What support options are available?
 
 **Community Support** (OSS):
@@ -313,11 +282,13 @@ This is documented in our [feature boundaries](docs/product/feature-boundaries.m
 
 ### How do you sustain development without gatekeeping integrations?
 
-Our sustainable revenue model:
-1. **SaaS Platform**: $250/month for hosted multi-MSP deployments
+Our sustainable revenue model focuses on:
+1. **SaaS Platform**: Hosted multi-MSP deployments
 2. **Self-Hosted Commercial**: HA clustering licensing
 3. **Professional Services**: Implementation, training, custom development
 4. **Future Web UI**: Commercial tier (CLI/API always free)
+
+Contact licensing@cfg.is for commercial licensing information.
 
 We don't monetize integrations or module development - those are community-driven OSS. We monetize platform scale and convenience (HA, Web UI, managed SaaS).
 
