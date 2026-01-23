@@ -192,6 +192,12 @@ jobs:
       - name: Install dependencies
         run: go mod download
 
+      - name: Set up Docker Test Infrastructure
+        run: |
+          echo "🐳 Setting up Docker test infrastructure..."
+          make test-mqtt-quic-setup
+          echo "✅ Docker infrastructure ready"
+
       - name: Run Unit Tests
         run: |
           echo "🧪 Running unit tests..."
@@ -231,6 +237,12 @@ jobs:
           echo "- Production Critical: ✅" >> $GITHUB_STEP_SUMMARY
           echo "- Security Scan: ✅" >> $GITHUB_STEP_SUMMARY
           echo "- Linting: ✅" >> $GITHUB_STEP_SUMMARY
+
+      - name: Cleanup Docker Infrastructure
+        if: always()
+        run: |
+          echo "🧹 Cleaning up Docker test infrastructure..."
+          docker compose -f docker-compose.test.yml down -v || true
 
   # Create PR to main (only if tests pass)
   create-release-pr:
