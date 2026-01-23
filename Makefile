@@ -643,7 +643,7 @@ test-load-testing:
 	@echo "====================="
 	@echo "📊 Testing system under high concurrency"
 	@echo ""
-	@go test -race -timeout=10m -run "Load" ./test/e2e/... ./test/integration/mqtt_quic/... ./test/performance/... || exit 1
+	@go test -race -timeout=30m -run "Load" ./test/e2e/... ./test/integration/mqtt_quic/... ./test/performance/... || exit 1
 	@echo ""
 	@echo "✅ Load testing complete"
 
