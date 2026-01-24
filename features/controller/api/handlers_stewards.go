@@ -114,6 +114,17 @@ func (s *Server) handleGetStewardDNA(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate steward ID to prevent log injection
+	validator := security.NewValidator()
+	validationResult := &security.ValidationResult{Valid: true}
+	validator.ValidateString(validationResult, "steward_id", stewardID, "required", "charset:alphanumeric_dash", "min_length:1")
+
+	if !validationResult.Valid {
+		s.logger.Warn("Invalid steward ID format in DNA request", "validation_errors", validationResult.Errors)
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid steward ID format", "INVALID_STEWARD_ID")
+		return
+	}
+
 	// Create gRPC request
 	req := &controller.StewardRequest{
 		StewardId: stewardID,
@@ -122,7 +133,7 @@ func (s *Server) handleGetStewardDNA(w http.ResponseWriter, r *http.Request) {
 	// Call gRPC service
 	dnaResp, err := s.controllerService.GetStewardDNA(context.Background(), req)
 	if err != nil {
-		s.logger.Error("Failed to get steward DNA", "steward_id", stewardID, "error", err)
+		s.logger.Error("Failed to get steward DNA", "steward_id", security.SanitizeIdentifier(stewardID), "error", err)
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to get steward DNA", "INTERNAL_ERROR")
 		return
 	}
@@ -147,6 +158,17 @@ func (s *Server) handleGetStewardConfig(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Validate steward ID to prevent log injection
+	validator := security.NewValidator()
+	validationResult := &security.ValidationResult{Valid: true}
+	validator.ValidateString(validationResult, "steward_id", stewardID, "required", "charset:alphanumeric_dash", "min_length:1")
+
+	if !validationResult.Valid {
+		s.logger.Warn("Invalid steward ID format in config request", "validation_errors", validationResult.Errors)
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid steward ID format", "INVALID_STEWARD_ID")
+		return
+	}
+
 	// Get modules filter from query params
 	modules := r.URL.Query()["modules"]
 
@@ -159,7 +181,7 @@ func (s *Server) handleGetStewardConfig(w http.ResponseWriter, r *http.Request) 
 	// Call gRPC service
 	configResp, err := s.configService.GetConfiguration(context.Background(), req)
 	if err != nil {
-		s.logger.Error("Failed to get steward configuration", "steward_id", stewardID, "error", err)
+		s.logger.Error("Failed to get steward configuration", "steward_id", security.SanitizeIdentifier(stewardID), "error", err)
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to get configuration", "INTERNAL_ERROR")
 		return
 	}
@@ -218,13 +240,9 @@ func (s *Server) handleUpdateStewardConfig(w http.ResponseWriter, r *http.Reques
 	vars := mux.Vars(r)
 	stewardID := vars["id"]
 
-	// Validate steward ID to prevent log injection
-	validator := security.NewValidator()
-	validationResult := &security.ValidationResult{Valid: true}
-	validator.ValidateString(validationResult, "steward_id", stewardID, "required", "charset:alphanumeric_dash", "min_length:1")
-
-	if !validationResult.Valid {
-		s.logger.Warn("Invalid steward ID format in config update request", "validation_errors", validationResult.Errors)
+	// Validate and sanitize steward ID for logging (prevents log injection)
+	if !security.IsValidIdentifier(stewardID) {
+		s.logger.Warn("Invalid steward ID format in config update request")
 		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid steward ID format", "INVALID_STEWARD_ID")
 		return
 	}
@@ -250,8 +268,7 @@ func (s *Server) handleUpdateStewardConfig(w http.ResponseWriter, r *http.Reques
 			s.writeErrorResponse(w, http.StatusBadRequest, "Invalid YAML body", "INVALID_YAML")
 			return
 		}
-		// codeql[go/log-injection] - False positive: stewardID is a validated UUID identifier, not user-controlled content
-		s.logger.Info("Received configuration in YAML format", "steward_id", stewardID, "resources", len(config.Resources))
+		s.logger.Info("Received configuration in YAML format", "steward_id", security.SanitizeIdentifier(stewardID), "resources", len(config.Resources))
 		fmt.Printf("[DEBUG] YAML config parsed: resources=%d steward_id=%s\n", len(config.Resources), config.Steward.ID)
 	} else {
 		// JSON format (legacy/backward compatibility)
@@ -260,8 +277,7 @@ func (s *Server) handleUpdateStewardConfig(w http.ResponseWriter, r *http.Reques
 			s.writeErrorResponse(w, http.StatusBadRequest, "Invalid JSON body", "INVALID_YAML")
 			return
 		}
-		// codeql[go/log-injection] - False positive: stewardID is a validated UUID identifier, not user-controlled content
-		s.logger.Info("Received configuration in JSON format", "steward_id", stewardID, "resources", len(config.Resources))
+		s.logger.Info("Received configuration in JSON format", "steward_id", security.SanitizeIdentifier(stewardID), "resources", len(config.Resources))
 	}
 
 	// Extract tenant from context or use default
@@ -270,27 +286,24 @@ func (s *Server) handleUpdateStewardConfig(w http.ResponseWriter, r *http.Reques
 		tenantID = tid
 	}
 
-	// codeql[go/log-injection] - False positive: stewardID and tenantID are validated identifiers, not user-controlled content
 	s.logger.Info("Configuration upload request received",
-		"steward_id", stewardID,
-		"tenant_id", tenantID,
+		"steward_id", security.SanitizeIdentifier(stewardID),
+		"tenant_id", security.SanitizeIdentifier(tenantID),
 		"resource_count", len(config.Resources))
 
 	// Store configuration using tenant-aware config service
 	if err := s.configService.SetTenantConfiguration(tenantID, stewardID, &config); err != nil {
-		// codeql[go/log-injection] - False positive: stewardID and tenantID are validated identifiers, not user-controlled content
 		s.logger.Error("Failed to store configuration",
-			"steward_id", stewardID,
-			"tenant_id", tenantID,
+			"steward_id", security.SanitizeIdentifier(stewardID),
+			"tenant_id", security.SanitizeIdentifier(tenantID),
 			"error", err)
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to store configuration", "STORAGE_ERROR")
 		return
 	}
 
-	// codeql[go/log-injection] - False positive: stewardID and tenantID are validated identifiers, not user-controlled content
 	s.logger.Info("Configuration stored successfully",
-		"steward_id", stewardID,
-		"tenant_id", tenantID)
+		"steward_id", security.SanitizeIdentifier(stewardID),
+		"tenant_id", security.SanitizeIdentifier(tenantID))
 
 	s.writeSuccessResponse(w, map[string]any{
 		"steward_id": stewardID,
@@ -307,6 +320,17 @@ func (s *Server) handleValidateConfig(w http.ResponseWriter, r *http.Request) {
 
 	if stewardID == "" {
 		s.writeErrorResponse(w, http.StatusBadRequest, "Steward ID is required", "MISSING_STEWARD_ID")
+		return
+	}
+
+	// Validate steward ID to prevent log injection
+	validator := security.NewValidator()
+	validationResult := &security.ValidationResult{Valid: true}
+	validator.ValidateString(validationResult, "steward_id", stewardID, "required", "charset:alphanumeric_dash", "min_length:1")
+
+	if !validationResult.Valid {
+		s.logger.Warn("Invalid steward ID format in config validation request", "validation_errors", validationResult.Errors)
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid steward ID format", "INVALID_STEWARD_ID")
 		return
 	}
 
@@ -333,7 +357,7 @@ func (s *Server) handleValidateConfig(w http.ResponseWriter, r *http.Request) {
 	// Call gRPC service
 	validationResp, err := s.configService.ValidateConfig(context.Background(), req)
 	if err != nil {
-		s.logger.Error("Failed to validate configuration", "steward_id", stewardID, "error", err)
+		s.logger.Error("Failed to validate configuration", "steward_id", security.SanitizeIdentifier(stewardID), "error", err)
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to validate configuration", "INTERNAL_ERROR")
 		return
 	}
@@ -364,6 +388,17 @@ func (s *Server) handleGetConfigStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate steward ID to prevent log injection
+	validator := security.NewValidator()
+	validationResult := &security.ValidationResult{Valid: true}
+	validator.ValidateString(validationResult, "steward_id", stewardID, "required", "charset:alphanumeric_dash", "min_length:1")
+
+	if !validationResult.Valid {
+		s.logger.Warn("Invalid steward ID format in config status request", "validation_errors", validationResult.Errors)
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid steward ID format", "INVALID_STEWARD_ID")
+		return
+	}
+
 	// Get configuration status from the service
 	// For now, we'll return a placeholder since we need to implement this in the service layer
 	// TODO: Implement configuration status tracking in the service layer
@@ -389,10 +424,21 @@ func (s *Server) handleGetEffectiveConfig(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Validate steward ID to prevent log injection
+	validator := security.NewValidator()
+	validationResult := &security.ValidationResult{Valid: true}
+	validator.ValidateString(validationResult, "steward_id", stewardID, "required", "charset:alphanumeric_dash", "min_length:1")
+
+	if !validationResult.Valid {
+		s.logger.Warn("Invalid steward ID format in effective config request", "validation_errors", validationResult.Errors)
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid steward ID format", "INVALID_STEWARD_ID")
+		return
+	}
+
 	// Get effective configuration from the configuration service
 	effectiveConfig, err := s.configService.GetEffectiveConfiguration(stewardID)
 	if err != nil {
-		s.logger.Error("Failed to get effective configuration", "steward_id", stewardID, "error", err)
+		s.logger.Error("Failed to get effective configuration", "steward_id", security.SanitizeIdentifier(stewardID), "error", err)
 
 		// Check if steward not found
 		if err.Error() == fmt.Sprintf("steward not found: %s", stewardID) {
@@ -404,7 +450,7 @@ func (s *Server) handleGetEffectiveConfig(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	s.logger.Info("Retrieved effective configuration", "steward_id", stewardID, "resources_count", len(effectiveConfig.Resources))
+	s.logger.Info("Retrieved effective configuration", "steward_id", security.SanitizeIdentifier(stewardID), "resources_count", len(effectiveConfig.Resources))
 	s.writeSuccessResponse(w, effectiveConfig)
 }
 
@@ -435,7 +481,7 @@ func (s *Server) handleTriggerQUICConnection(w http.ResponseWriter, r *http.Requ
 	s.mu.RUnlock()
 
 	if triggerFunc == nil {
-		s.logger.Error("QUIC trigger function not configured", "steward_id", stewardID)
+		s.logger.Error("QUIC trigger function not configured", "steward_id", security.SanitizeIdentifier(stewardID))
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "QUIC functionality not available", "QUIC_NOT_CONFIGURED")
 		return
 	}
@@ -443,7 +489,7 @@ func (s *Server) handleTriggerQUICConnection(w http.ResponseWriter, r *http.Requ
 	// Trigger QUIC connection
 	commandID, err := triggerFunc(r.Context(), stewardID)
 	if err != nil {
-		s.logger.Error("Failed to trigger QUIC connection", "steward_id", stewardID, "error", err)
+		s.logger.Error("Failed to trigger QUIC connection", "steward_id", security.SanitizeIdentifier(stewardID), "error", err)
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to trigger QUIC connection", "QUIC_CONNECTION_FAILED")
 		return
 	}
@@ -454,6 +500,6 @@ func (s *Server) handleTriggerQUICConnection(w http.ResponseWriter, r *http.Requ
 		"message":    "QUIC connection triggered successfully",
 	}
 
-	s.logger.Info("Triggered QUIC connection", "steward_id", stewardID, "command_id", commandID)
+	s.logger.Info("Triggered QUIC connection", "steward_id", security.SanitizeIdentifier(stewardID), "command_id", commandID)
 	s.writeSuccessResponse(w, response)
 }
