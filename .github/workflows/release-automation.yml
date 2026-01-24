@@ -198,6 +198,26 @@ jobs:
           make test-integration-setup
           echo "✅ Docker infrastructure ready"
 
+      - name: Install Security Tools
+        run: |
+          echo "🔧 Installing security scanning tools..."
+          echo "=============================================="
+
+          # Install Trivy
+          sudo apt-get update
+          sudo apt-get install wget apt-transport-https gnupg lsb-release
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update
+          sudo apt-get install trivy
+
+          # Install other security tools
+          make install-nancy
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+
+          echo "✅ Security tools installed"
+
       - name: Run Unit Tests
         run: |
           echo "🧪 Running unit tests..."
