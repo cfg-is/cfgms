@@ -18,7 +18,6 @@ import (
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/validation"
 	"github.com/cfgis/cfgms/pkg/logging"
-	"github.com/cfgis/cfgms/pkg/security"
 )
 
 // Regex pattern for validating identifiers (prevents log injection)
@@ -90,14 +89,10 @@ func NewConfigurationService(logger logging.Logger, controllerSvc *ControllerSer
 
 // GetConfiguration retrieves configuration for a specific steward
 func (s *ConfigurationService) GetConfiguration(ctx context.Context, req *controller.ConfigRequest) (*controller.ConfigResponse, error) {
-	// Sanitize steward ID for logging (prevents log injection)
+	// Validate and sanitize steward ID (prevents log injection)
 	stewardIDForLog := req.StewardId
 	if !identifierRegex.MatchString(req.StewardId) {
 		stewardIDForLog = "[INVALID_ID]"
-	}
-
-	// Validate steward ID format to prevent log injection
-	if !security.IsValidIdentifier(req.StewardId) {
 		s.logger.Warn("Invalid steward ID format in configuration request")
 		return &controller.ConfigResponse{
 			Status: &common.Status{
@@ -196,14 +191,10 @@ func (s *ConfigurationService) GetConfiguration(ctx context.Context, req *contro
 
 // ReportConfigStatus handles configuration status reports from stewards
 func (s *ConfigurationService) ReportConfigStatus(ctx context.Context, req *controller.ConfigStatusReport) (*common.Status, error) {
-	// Sanitize steward ID for logging (prevents log injection)
+	// Validate and sanitize steward ID (prevents log injection)
 	stewardIDForLog := req.StewardId
 	if !identifierRegex.MatchString(req.StewardId) {
 		stewardIDForLog = "[INVALID_ID]"
-	}
-
-	// Validate steward ID format to prevent log injection
-	if !security.IsValidIdentifier(req.StewardId) {
 		s.logger.Warn("Invalid steward ID format in status report")
 		return &common.Status{
 			Code:    common.Status_ERROR,

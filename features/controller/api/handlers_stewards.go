@@ -16,7 +16,6 @@ import (
 
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
-	"github.com/cfgis/cfgms/pkg/security"
 )
 
 // Regex pattern for validating identifiers (prevents log injection)
@@ -124,16 +123,6 @@ func (s *Server) handleGetStewardDNA(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate steward ID to prevent log injection
-	validator := security.NewValidator()
-	validationResult := &security.ValidationResult{Valid: true}
-	validator.ValidateString(validationResult, "steward_id", stewardID, "required", "charset:alphanumeric_dash", "min_length:1")
-
-	if !validationResult.Valid {
-		s.logger.Warn("Invalid steward ID format in DNA request", "validation_errors", validationResult.Errors)
-		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid steward ID format", "INVALID_STEWARD_ID")
-		return
-	}
 
 	// Create gRPC request
 	req := &controller.StewardRequest{
@@ -174,16 +163,6 @@ func (s *Server) handleGetStewardConfig(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Validate steward ID to prevent log injection
-	validator := security.NewValidator()
-	validationResult := &security.ValidationResult{Valid: true}
-	validator.ValidateString(validationResult, "steward_id", stewardID, "required", "charset:alphanumeric_dash", "min_length:1")
-
-	if !validationResult.Valid {
-		s.logger.Warn("Invalid steward ID format in config request", "validation_errors", validationResult.Errors)
-		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid steward ID format", "INVALID_STEWARD_ID")
-		return
-	}
 
 	// Get modules filter from query params
 	modules := r.URL.Query()["modules"]
@@ -353,16 +332,6 @@ func (s *Server) handleValidateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate steward ID to prevent log injection
-	validator := security.NewValidator()
-	validationResult := &security.ValidationResult{Valid: true}
-	validator.ValidateString(validationResult, "steward_id", stewardID, "required", "charset:alphanumeric_dash", "min_length:1")
-
-	if !validationResult.Valid {
-		s.logger.Warn("Invalid steward ID format in config validation request", "validation_errors", validationResult.Errors)
-		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid steward ID format", "INVALID_STEWARD_ID")
-		return
-	}
 
 	// Parse request body
 	var validationReq ConfigValidationRequest
@@ -418,16 +387,6 @@ func (s *Server) handleGetConfigStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate steward ID to prevent log injection
-	validator := security.NewValidator()
-	validationResult := &security.ValidationResult{Valid: true}
-	validator.ValidateString(validationResult, "steward_id", stewardID, "required", "charset:alphanumeric_dash", "min_length:1")
-
-	if !validationResult.Valid {
-		s.logger.Warn("Invalid steward ID format in config status request", "validation_errors", validationResult.Errors)
-		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid steward ID format", "INVALID_STEWARD_ID")
-		return
-	}
 
 	// Get configuration status from the service
 	// For now, we'll return a placeholder since we need to implement this in the service layer
@@ -460,16 +419,6 @@ func (s *Server) handleGetEffectiveConfig(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Validate steward ID to prevent log injection
-	validator := security.NewValidator()
-	validationResult := &security.ValidationResult{Valid: true}
-	validator.ValidateString(validationResult, "steward_id", stewardID, "required", "charset:alphanumeric_dash", "min_length:1")
-
-	if !validationResult.Valid {
-		s.logger.Warn("Invalid steward ID format in effective config request", "validation_errors", validationResult.Errors)
-		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid steward ID format", "INVALID_STEWARD_ID")
-		return
-	}
 
 	// Get effective configuration from the configuration service
 	effectiveConfig, err := s.configService.GetEffectiveConfiguration(stewardID)
@@ -506,16 +455,6 @@ func (s *Server) handleTriggerQUICConnection(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Validate steward ID to prevent log injection (CodeQL security finding)
-	validator := security.NewValidator()
-	validationResult := &security.ValidationResult{Valid: true}
-	validator.ValidateString(validationResult, "steward_id", stewardID, "required", "charset:alphanumeric_dash", "min_length:1")
-
-	if !validationResult.Valid {
-		s.logger.Warn("Invalid steward ID format in QUIC trigger request", "validation_errors", validationResult.Errors)
-		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid steward ID format", "INVALID_STEWARD_ID")
-		return
-	}
 
 	// Check if QUIC trigger function is available
 	s.mu.RLock()
