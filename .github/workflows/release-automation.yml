@@ -192,19 +192,57 @@ jobs:
       - name: Install dependencies
         run: go mod download
 
+      - name: Set up Docker Test Infrastructure
+        run: |
+          echo "🐳 Setting up Docker test infrastructure..."
+          make test-integration-setup
+          echo "✅ Docker infrastructure ready"
+
+      - name: Install Tools
+        run: |
+          echo "🔧 Installing development and security tools..."
+          echo "=============================================="
+
+          # Install Trivy
+          sudo apt-get update
+          sudo apt-get install wget apt-transport-https gnupg lsb-release
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update
+          sudo apt-get install trivy
+
+          # Install security scanning tools
+          make install-nancy
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+
+          # Install linting tools
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin latest
+
+          echo "✅ All tools installed"
+
       - name: Run Unit Tests
         run: |
           echo "🧪 Running unit tests..."
+          set -a
+          source .env.test
+          set +a
           make test
 
       - name: Run Integration Tests
         run: |
           echo "🔗 Running integration tests..."
+          set -a
+          source .env.test
+          set +a
           make test-fast
 
       - name: Run Production Critical Tests
         run: |
           echo "🏭 Running production critical tests..."
+          set -a
+          source .env.test
+          set +a
           make test-production-critical
 
       - name: Run Security Scan
@@ -231,6 +269,12 @@ jobs:
           echo "- Production Critical: ✅" >> $GITHUB_STEP_SUMMARY
           echo "- Security Scan: ✅" >> $GITHUB_STEP_SUMMARY
           echo "- Linting: ✅" >> $GITHUB_STEP_SUMMARY
+
+      - name: Cleanup Docker Infrastructure
+        if: always()
+        run: |
+          echo "🧹 Cleaning up Docker test infrastructure..."
+          docker compose -f docker-compose.test.yml down -v || true
 
   # Create PR to main (only if tests pass)
   create-release-pr:
