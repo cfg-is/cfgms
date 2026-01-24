@@ -195,7 +195,7 @@ jobs:
       - name: Set up Docker Test Infrastructure
         run: |
           echo "🐳 Setting up Docker test infrastructure..."
-          make test-mqtt-quic-setup
+          make test-integration-setup
           echo "✅ Docker infrastructure ready"
 
       - name: Run Unit Tests
