@@ -198,9 +198,9 @@ jobs:
           make test-integration-setup
           echo "✅ Docker infrastructure ready"
 
-      - name: Install Security Tools
+      - name: Install Tools
         run: |
-          echo "🔧 Installing security scanning tools..."
+          echo "🔧 Installing development and security tools..."
           echo "=============================================="
 
           # Install Trivy
@@ -211,12 +211,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install trivy
 
-          # Install other security tools
+          # Install security scanning tools
           make install-nancy
           go install github.com/securego/gosec/v2/cmd/gosec@latest
           go install honnef.co/go/tools/cmd/staticcheck@latest
 
-          echo "✅ Security tools installed"
+          # Install linting tools
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin latest
+
+          echo "✅ All tools installed"
 
       - name: Run Unit Tests
         run: |
