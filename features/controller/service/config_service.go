@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +20,9 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/security"
 )
+
+// Regex pattern for validating identifiers (prevents log injection)
+var identifierRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
 // EffectiveConfig represents the final configuration after applying inheritance
 type EffectiveConfig struct {
@@ -86,6 +90,12 @@ func NewConfigurationService(logger logging.Logger, controllerSvc *ControllerSer
 
 // GetConfiguration retrieves configuration for a specific steward
 func (s *ConfigurationService) GetConfiguration(ctx context.Context, req *controller.ConfigRequest) (*controller.ConfigResponse, error) {
+	// Sanitize steward ID for logging (prevents log injection)
+	stewardIDForLog := req.StewardId
+	if !identifierRegex.MatchString(req.StewardId) {
+		stewardIDForLog = "[INVALID_ID]"
+	}
+
 	// Validate steward ID format to prevent log injection
 	if !security.IsValidIdentifier(req.StewardId) {
 		s.logger.Warn("Invalid steward ID format in configuration request")
@@ -97,22 +107,34 @@ func (s *ConfigurationService) GetConfiguration(ctx context.Context, req *contro
 		}, nil
 	}
 
-	s.logger.Debug("Configuration request received", "steward_id", security.SanitizeIdentifier(req.StewardId), "modules", req.Modules)
+	s.logger.Debug("Configuration request received", "steward_id", stewardIDForLog, "modules", req.Modules)
 
 	// Extract tenant context
 	tenantID := s.extractTenantID(ctx)
+
+	// Sanitize tenant ID for logging (prevents log injection)
+	tenantIDForLog := tenantID
+	if !identifierRegex.MatchString(tenantID) {
+		tenantIDForLog = "[INVALID_TENANT]"
+	}
 
 	// Verify steward exists and belongs to the tenant (if registered)
 	// Allow unregistered stewards to proceed if configuration exists (for bootstrapping/testing)
 	if s.controllerSvc != nil {
 		stewardInfo, exists := s.controllerSvc.GetStewardInfo(req.StewardId)
 		if exists {
+			// Sanitize steward tenant ID for logging
+			stewardTenantForLog := stewardInfo.TenantID
+			if !identifierRegex.MatchString(stewardInfo.TenantID) {
+				stewardTenantForLog = "[INVALID_TENANT]"
+			}
+
 			// Steward is registered, enforce tenant isolation
 			if stewardInfo.TenantID != tenantID {
 				s.logger.Warn("Configuration request cross-tenant access denied",
-					"steward_id", security.SanitizeIdentifier(req.StewardId),
-					"steward_tenant", security.SanitizeIdentifier(stewardInfo.TenantID),
-					"request_tenant", security.SanitizeIdentifier(tenantID))
+					"steward_id", stewardIDForLog,
+					"steward_tenant", stewardTenantForLog,
+					"request_tenant", tenantIDForLog)
 				return &controller.ConfigResponse{
 					Status: &common.Status{
 						Code:    common.Status_UNAUTHORIZED,
@@ -123,7 +145,7 @@ func (s *ConfigurationService) GetConfiguration(ctx context.Context, req *contro
 		} else {
 			// Steward not registered yet - allow if config exists (bootstrapping/testing scenario)
 			s.logger.Debug("Configuration request from unregistered steward, checking if config exists",
-				"steward_id", security.SanitizeIdentifier(req.StewardId))
+				"steward_id", stewardIDForLog)
 		}
 	}
 
@@ -131,7 +153,7 @@ func (s *ConfigurationService) GetConfiguration(ctx context.Context, req *contro
 	storedConfig, exists := s.GetTenantConfiguration(tenantID, req.StewardId)
 
 	if !exists {
-		s.logger.Debug("No configuration found for steward", "steward_id", security.SanitizeIdentifier(req.StewardId))
+		s.logger.Debug("No configuration found for steward", "steward_id", stewardIDForLog)
 		return &controller.ConfigResponse{
 			Status: &common.Status{
 				Code:    common.Status_NOT_FOUND,
@@ -148,7 +170,7 @@ func (s *ConfigurationService) GetConfiguration(ctx context.Context, req *contro
 	// Convert Go struct to protobuf (returns unsigned config, signing happens in QUIC handler)
 	protoConfig, err := stewardconfig.ToProto(filteredConfig)
 	if err != nil {
-		s.logger.Error("Failed to convert configuration to protobuf", "steward_id", security.SanitizeIdentifier(req.StewardId), "error", err)
+		s.logger.Error("Failed to convert configuration to protobuf", "steward_id", stewardIDForLog, "error", err)
 		return &controller.ConfigResponse{
 			Status: &common.Status{
 				Code:    common.Status_ERROR,
@@ -157,7 +179,7 @@ func (s *ConfigurationService) GetConfiguration(ctx context.Context, req *contro
 		}, nil
 	}
 
-	s.logger.Debug("Configuration retrieved successfully", "steward_id", security.SanitizeIdentifier(req.StewardId), "version", storedConfig.Version)
+	s.logger.Debug("Configuration retrieved successfully", "steward_id", stewardIDForLog, "version", storedConfig.Version)
 
 	// Return unsigned protobuf config (QUIC handler will sign it)
 	// Note: Config field is now *SignedConfig, but we set it to nil here
@@ -174,6 +196,12 @@ func (s *ConfigurationService) GetConfiguration(ctx context.Context, req *contro
 
 // ReportConfigStatus handles configuration status reports from stewards
 func (s *ConfigurationService) ReportConfigStatus(ctx context.Context, req *controller.ConfigStatusReport) (*common.Status, error) {
+	// Sanitize steward ID for logging (prevents log injection)
+	stewardIDForLog := req.StewardId
+	if !identifierRegex.MatchString(req.StewardId) {
+		stewardIDForLog = "[INVALID_ID]"
+	}
+
 	// Validate steward ID format to prevent log injection
 	if !security.IsValidIdentifier(req.StewardId) {
 		s.logger.Warn("Invalid steward ID format in status report")
@@ -184,7 +212,7 @@ func (s *ConfigurationService) ReportConfigStatus(ctx context.Context, req *cont
 	}
 
 	s.logger.Debug("Configuration status report received",
-		"steward_id", security.SanitizeIdentifier(req.StewardId),
+		"steward_id", stewardIDForLog,
 		"config_version", req.ConfigVersion,
 		"status", req.Status.Code,
 		"modules", len(req.Modules))
@@ -192,7 +220,7 @@ func (s *ConfigurationService) ReportConfigStatus(ctx context.Context, req *cont
 	// Verify steward exists
 	if s.controllerSvc != nil {
 		if _, exists := s.controllerSvc.GetStewardInfo(req.StewardId); !exists {
-			s.logger.Warn("Status report from unknown steward", "steward_id", security.SanitizeIdentifier(req.StewardId))
+			s.logger.Warn("Status report from unknown steward", "steward_id", stewardIDForLog)
 			return &common.Status{
 				Code:    common.Status_NOT_FOUND,
 				Message: "Steward not found",
@@ -203,14 +231,14 @@ func (s *ConfigurationService) ReportConfigStatus(ctx context.Context, req *cont
 	// Log module status details
 	for _, moduleStatus := range req.Modules {
 		s.logger.Debug("Module status reported",
-			"steward_id", security.SanitizeIdentifier(req.StewardId),
+			"steward_id", stewardIDForLog,
 			"module", moduleStatus.Name,
 			"status", moduleStatus.Status.Code,
 			"message", moduleStatus.Message)
 	}
 
 	s.logger.Info("Configuration status report processed",
-		"steward_id", security.SanitizeIdentifier(req.StewardId),
+		"steward_id", stewardIDForLog,
 		"config_version", req.ConfigVersion,
 		"overall_status", req.Status.Code)
 
