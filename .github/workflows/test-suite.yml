@@ -302,19 +302,3 @@ jobs:
         echo "# Full production validation" >> $GITHUB_STEP_SUMMARY
         echo "make test-full" >> $GITHUB_STEP_SUMMARY
         echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-
-  # Stub job to satisfy branch protection - tracks overall integration test status
-  Integration Test Gate:
-    runs-on: ubuntu-latest
-    needs: [integration-tests]
-    if: always()
-    steps:
-    - name: Integration Test Gate
-      run: |
-        if [[ "${{ needs.integration-tests.result }}" == "success" ]]; then
-          echo "✅ Integration Test Gate: PASSED"
-          exit 0
-        else
-          echo "❌ Integration Test Gate: FAILED or SKIPPED"
-          exit 1
-        fi
