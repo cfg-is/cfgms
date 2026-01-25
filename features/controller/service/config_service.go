@@ -102,7 +102,7 @@ func (s *ConfigurationService) GetConfiguration(ctx context.Context, req *contro
 		}, nil
 	}
 
-	s.logger.Debug("Configuration request received", "steward_id", stewardIDForLog, "modules", req.Modules) // lgtm[go/log-injection] stewardIDForLog/tenantIDForLog sanitized via regex validation
+	s.logger.Debug("Configuration request received", "steward_id", stewardIDForLog, "modules", req.Modules) // codeql[go/log-injection] stewardIDForLog/tenantIDForLog sanitized via regex validation
 
 	// Extract tenant context
 	tenantID := s.extractTenantID(ctx)
@@ -148,7 +148,7 @@ func (s *ConfigurationService) GetConfiguration(ctx context.Context, req *contro
 	storedConfig, exists := s.GetTenantConfiguration(tenantID, req.StewardId)
 
 	if !exists {
-		s.logger.Debug("No configuration found for steward", "steward_id", stewardIDForLog) // lgtm[go/log-injection] stewardIDForLog/tenantIDForLog sanitized via regex validation
+		s.logger.Debug("No configuration found for steward", "steward_id", stewardIDForLog) // codeql[go/log-injection] stewardIDForLog/tenantIDForLog sanitized via regex validation
 		return &controller.ConfigResponse{
 			Status: &common.Status{
 				Code:    common.Status_NOT_FOUND,
@@ -165,7 +165,7 @@ func (s *ConfigurationService) GetConfiguration(ctx context.Context, req *contro
 	// Convert Go struct to protobuf (returns unsigned config, signing happens in QUIC handler)
 	protoConfig, err := stewardconfig.ToProto(filteredConfig)
 	if err != nil {
-		s.logger.Error("Failed to convert configuration to protobuf", "steward_id", stewardIDForLog, "error", err) // lgtm[go/log-injection] stewardIDForLog/tenantIDForLog sanitized via regex validation
+		s.logger.Error("Failed to convert configuration to protobuf", "steward_id", stewardIDForLog, "error", err) // codeql[go/log-injection] stewardIDForLog/tenantIDForLog sanitized via regex validation
 		return &controller.ConfigResponse{
 			Status: &common.Status{
 				Code:    common.Status_ERROR,
@@ -174,7 +174,7 @@ func (s *ConfigurationService) GetConfiguration(ctx context.Context, req *contro
 		}, nil
 	}
 
-	s.logger.Debug("Configuration retrieved successfully", "steward_id", stewardIDForLog, "version", storedConfig.Version) // lgtm[go/log-injection] stewardIDForLog/tenantIDForLog sanitized via regex validation
+	s.logger.Debug("Configuration retrieved successfully", "steward_id", stewardIDForLog, "version", storedConfig.Version) // codeql[go/log-injection] stewardIDForLog/tenantIDForLog sanitized via regex validation
 
 	// Return unsigned protobuf config (QUIC handler will sign it)
 	// Note: Config field is now *SignedConfig, but we set it to nil here
