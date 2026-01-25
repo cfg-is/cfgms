@@ -1,46 +1,22 @@
 # Test configuration for AC4 - successful module execution
 # This configuration creates files and directories that the integration tests will verify
 # Note: Permissions use octal notation (0644 = rw-r--r--, 0755 = rwxr-xr-x)
+# Format: StewardConfig with flat resources array (will be transformed to executor format)
 
-version: "1.0"
+steward:
+  id: ""  # Will be set by controller
+  mode: "controller"
 
-modules:
-  file:
-    - name: "test-file-1"
-      resource_id: "/test-workspace/test-file.txt"
-      state: "present"
-      config:
-        content: "Hello from CFGMS file module!\n"
-        permissions: 0644
+resources:
+  - name: "test-file-1"
+    module: "file"
+    config:
+      path: "/test-workspace/test-file.txt"
+      content: "Hello from CFGMS file module!\n"
+      permissions: 0644
 
-    - name: "test-file-executable"
-      resource_id: "/test-workspace/executable.sh"
-      state: "present"
-      config:
-        content: "#!/bin/sh\necho 'Executable test'\n"
-        permissions: 0755
-
-  directory:
-    - name: "test-directory"
-      resource_id: "/test-workspace/test-dir"
-      state: "present"
-      config:
-        permissions: 0755
-
-    - name: "nested-directory"
-      resource_id: "/test-workspace/parent/child/grandchild"
-      state: "present"
-      config:
-        permissions: 0755
-
-  script:
-    - name: "success-script"
-      resource_id: "/test-workspace/success-script.sh"
-      state: "present"
-      config:
-        content: |
-          #!/bin/sh
-          echo "Script executed successfully"
-          echo "Working directory: $(pwd)"
-          exit 0
-        permissions: 0755
+  - name: "test-directory"
+    module: "directory"
+    config:
+      path: "/test-workspace/test-dir"
+      permissions: 0755

@@ -10,16 +10,22 @@ package client
 import (
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+	"gopkg.in/yaml.v3"
+
+	controller "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/features/steward/commands"
-	"github.com/cfgis/cfgms/features/steward/config"
+	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/registration"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -50,11 +56,17 @@ type MQTTClient struct {
 	// Certificate path for mTLS
 	certPath string
 
+	// Certificate PEMs (from registration response)
+	caCertPEM     string
+	clientCertPEM string
+	clientKeyPEM  string
+	serverCertPEM string // Controller's server cert for config signature verification (Story #315)
+
 	// Command handler
 	commandHandler *commands.Handler
 
 	// Configuration executor
-	configExecutor *config.Executor
+	configExecutor *stewardconfig.Executor
 
 	// Configuration signature verifier
 	configVerifier signature.Verifier
@@ -86,6 +98,20 @@ type MQTTConfig struct {
 	// TLSCertPath for mTLS (optional if using token auth)
 	TLSCertPath string
 
+	// CACertPEM is the CA certificate PEM (for TLS verification)
+	CACertPEM string
+
+	// ClientCertPEM is the client certificate PEM (for mTLS)
+	ClientCertPEM string
+
+	// ClientKeyPEM is the client private key PEM (for mTLS)
+	ClientKeyPEM string
+
+	// ServerCertPEM is the controller's server certificate PEM (for config signature verification)
+	// Story #315: Used to verify configurations signed by the controller
+	// In HA clusters, multiple controller certs may be trusted
+	ServerCertPEM string
+
 	// HeartbeatInterval for periodic heartbeats
 	HeartbeatInterval time.Duration
 
@@ -112,6 +138,10 @@ func NewMQTTClient(cfg *MQTTConfig) (*MQTTClient, error) {
 		heartbeatStop:     make(chan struct{}),
 		quicAddress:       cfg.QUICAddress,
 		certPath:          cfg.TLSCertPath,
+		caCertPEM:         cfg.CACertPEM,
+		clientCertPEM:     cfg.ClientCertPEM,
+		clientKeyPEM:      cfg.ClientKeyPEM,
+		serverCertPEM:     cfg.ServerCertPEM,
 		logger:            cfg.Logger,
 		controllerURL:     cfg.ControllerURL,
 	}
@@ -188,11 +218,11 @@ func (c *MQTTClient) RegisterWithToken(ctx context.Context, token string, mqttBr
 	}
 
 	// Initialize configuration executor
-	execCfg := &config.Config{
+	execCfg := &stewardconfig.Config{
 		TenantID: resp.TenantID,
 		Logger:   c.logger,
 	}
-	executor, err := config.New(execCfg)
+	executor, err := stewardconfig.New(execCfg)
 	if err != nil {
 		mqtt.Disconnect()
 		return fmt.Errorf("failed to create config executor: %w", err)
@@ -210,13 +240,35 @@ func (c *MQTTClient) RegisterWithToken(ctx context.Context, token string, mqttBr
 	return nil
 }
 
+// InitializeConfigExecutor creates and initializes the configuration executor.
+// This must be called after the MQTT client is connected but before config sync.
+func (c *MQTTClient) InitializeConfigExecutor(tenantID string) error {
+	execCfg := &stewardconfig.Config{
+		TenantID: tenantID,
+		Logger:   c.logger,
+	}
+	executor, err := stewardconfig.New(execCfg)
+	if err != nil {
+		return fmt.Errorf("failed to create config executor: %w", err)
+	}
+
+	c.mu.Lock()
+	c.configExecutor = executor
+	c.mu.Unlock()
+
+	c.logger.Info("Configuration executor initialized", "tenant_id", tenantID)
+	return nil
+}
+
 // Connect establishes MQTT and QUIC connections to the controller.
 func (c *MQTTClient) Connect(ctx context.Context) error {
+	fmt.Printf("[DEBUG] MQTTClient.Connect() called\n")
 	c.logger.Info("Connecting to controller via MQTT+QUIC")
 
 	c.mu.RLock()
 	stewardID := c.stewardID
 	mqtt := c.mqtt
+	fmt.Printf("[DEBUG] stewardID=%s mqtt_client_nil=%v\n", stewardID, mqtt == nil)
 	controllerURL := c.controllerURL
 	c.mu.RUnlock()
 
@@ -226,13 +278,17 @@ func (c *MQTTClient) Connect(ctx context.Context) error {
 
 	// Create MQTT client if not already created
 	if mqtt == nil {
+		fmt.Printf("[DEBUG] Creating MQTT client for broker=%s client_id=%s\n", controllerURL, stewardID)
 		c.logger.Info("Creating MQTT client", "broker", controllerURL, "client_id", stewardID)
 
 		// Load TLS configuration if available (Story 12.4)
 		tlsConfig, err := c.createMQTTTLSConfig()
 		if err != nil {
+			fmt.Printf("[DEBUG] TLS config failed: %v\n", err)
 			c.logger.Warn("Failed to load MQTT TLS config, continuing without TLS", "error", err)
 			tlsConfig = nil
+		} else {
+			fmt.Printf("[DEBUG] TLS config loaded successfully\n")
 		}
 
 		mqttCfg := &mqttClient.Config{
@@ -243,10 +299,13 @@ func (c *MQTTClient) Connect(ctx context.Context) error {
 			TLSConfig:     tlsConfig, // Story 12.4: Enable TLS if configured
 		}
 
+		fmt.Printf("[DEBUG] Creating new MQTT client...\n")
 		mqtt, err = mqttClient.New(mqttCfg)
 		if err != nil {
+			fmt.Printf("[DEBUG] MQTT client creation failed: %v\n", err)
 			return fmt.Errorf("failed to create MQTT client: %w", err)
 		}
+		fmt.Printf("[DEBUG] MQTT client created successfully\n")
 
 		c.mu.Lock()
 		c.mqtt = mqtt
@@ -255,22 +314,31 @@ func (c *MQTTClient) Connect(ctx context.Context) error {
 
 	// Connect to MQTT if not connected
 	if !mqtt.IsConnected() {
+		fmt.Printf("[DEBUG] Connecting to MQTT broker=%s\n", controllerURL)
 		c.logger.Info("Connecting to MQTT broker", "broker", controllerURL)
 		if err := mqtt.Connect(ctx); err != nil {
+			fmt.Printf("[DEBUG] MQTT connect failed: %v\n", err)
 			return fmt.Errorf("failed to connect to MQTT: %w", err)
 		}
+		fmt.Printf("[DEBUG] MQTT connection established\n")
 		c.logger.Info("MQTT connection established")
+	} else {
+		fmt.Printf("[DEBUG] MQTT already connected\n")
 	}
 
 	// Subscribe to command topics
 	cmdTopic := fmt.Sprintf("cfgms/steward/%s/commands", stewardID)
+	fmt.Printf("[DEBUG] Command topic: %s\n", cmdTopic)
 	c.logger.Info("Subscribing to commands", "topic", cmdTopic)
 
 	// Create command handler
+	fmt.Printf("[DEBUG] Setting up command handler...\n")
 	cmdHandler, err := c.setupCommandHandler(ctx, stewardID, mqtt)
 	if err != nil {
+		fmt.Printf("[DEBUG] setupCommandHandler failed: %v\n", err)
 		return fmt.Errorf("failed to setup command handler: %w", err)
 	}
+	fmt.Printf("[DEBUG] Command handler setup complete\n")
 
 	c.mu.Lock()
 	c.commandHandler = cmdHandler
@@ -278,14 +346,18 @@ func (c *MQTTClient) Connect(ctx context.Context) error {
 
 	// Wrap HandleCommand to match MessageHandler signature
 	messageHandler := func(topic string, payload []byte) {
+		fmt.Printf("[DEBUG] Received message on topic=%s payload_size=%d\n", topic, len(payload))
 		if err := cmdHandler.HandleCommand(topic, payload); err != nil {
 			c.logger.Error("Failed to handle command", "error", err, "topic", topic)
 		}
 	}
 
+	fmt.Printf("[DEBUG] Subscribing to %s...\n", cmdTopic)
 	if err := mqtt.Subscribe(ctx, cmdTopic, 1, messageHandler); err != nil {
+		fmt.Printf("[DEBUG] Subscribe failed: %v\n", err)
 		return fmt.Errorf("failed to subscribe to commands: %w", err)
 	}
+	fmt.Printf("[DEBUG] Subscribed successfully to commands topic\n")
 
 	// QUIC connections are established on-demand when controller sends connect_quic command
 	// This is by design for the MQTT+QUIC hybrid architecture:
@@ -344,13 +416,16 @@ func (c *MQTTClient) setupCommandHandler(ctx context.Context, stewardID string, 
 
 	// Register sync_config handler
 	handler.RegisterHandler(mqttTypes.CommandSyncConfig, func(ctx context.Context, cmd mqttTypes.Command) error {
-		c.logger.Info("Received sync_config command", "command_id", cmd.CommandID)
+		fmt.Printf("[DEBUG] sync_config handler called, command_id=%s\n", cmd.CommandID)
+		c.logger.Info("Received sync_config command", "command_id", cmd.CommandID, "params", cmd.Params)
 
-		// First, ensure QUIC connection is established
-		if err := c.handleConnectQUIC(ctx, cmd); err != nil {
-			c.logger.Error("Failed to establish QUIC connection for config sync", "error", err)
-			return fmt.Errorf("QUIC connection failed: %w", err)
-		}
+		// Check if QUIC connection is already established
+		c.mu.RLock()
+		quicConnected := c.quicConnected
+		quicAddress := c.quicAddress
+		c.mu.RUnlock()
+
+		fmt.Printf("[DEBUG] QUIC status: connected=%v address=%s\n", quicConnected, quicAddress)
 
 		// Get modules filter from command params (optional)
 		var modules []string
@@ -363,34 +438,56 @@ func (c *MQTTClient) setupCommandHandler(ctx context.Context, stewardID string, 
 		}
 
 		// Retrieve configuration via QUIC
+		fmt.Printf("[DEBUG] Calling GetConfiguration via QUIC...\n")
 		configData, version, err := c.GetConfiguration(ctx, modules)
 		if err != nil {
+			fmt.Printf("[DEBUG] GetConfiguration failed: %v\n", err)
 			c.logger.Error("Failed to retrieve configuration", "error", err)
 			return fmt.Errorf("config retrieval failed: %w", err)
 		}
 
+		fmt.Printf("[DEBUG] Configuration retrieved: version=%s size=%d bytes\n", version, len(configData))
 		c.logger.Info("Configuration retrieved",
 			"command_id", cmd.CommandID,
 			"version", version,
 			"config_size", len(configData))
 
+		// Unmarshal protobuf SignedConfig
+		fmt.Printf("[DEBUG] Unmarshaling protobuf SignedConfig...\n")
+		var signedProtoConfig controller.SignedConfig
+		if err := proto.Unmarshal(configData, &signedProtoConfig); err != nil {
+			c.logger.Error("Failed to unmarshal protobuf configuration",
+				"command_id", cmd.CommandID,
+				"version", version,
+				"error", err)
+			return fmt.Errorf("failed to unmarshal protobuf config: %w", err)
+		}
+
 		// Verify configuration signature
+		fmt.Printf("[DEBUG] Starting protobuf signature verification...\n")
 		c.mu.RLock()
 		verifier := c.configVerifier
 		c.mu.RUnlock()
 
+		var unsignedProtoConfig *controller.StewardConfig
+		fmt.Printf("[DEBUG] Verifier is nil: %v\n", verifier == nil)
 		if verifier != nil {
+			fmt.Printf("[DEBUG] Verifier exists, checking signature...\n")
 			// Configuration must be signed
-			if !signature.HasSignature(configData) {
+			if signedProtoConfig.Signature == nil {
+				fmt.Printf("[DEBUG] Configuration is NOT signed\n")
 				c.logger.Error("Configuration is not signed",
 					"command_id", cmd.CommandID,
 					"version", version)
 				return fmt.Errorf("configuration signature verification failed: missing signature")
 			}
 
-			// Extract and verify signature
-			verifiedData, err := signature.ExtractAndVerify(verifier, configData)
+			fmt.Printf("[DEBUG] Configuration has signature, verifying protobuf...\n")
+			fmt.Printf("[DEBUG] Config data size: %d bytes\n", len(configData))
+			// Verify protobuf signature
+			verified, err := signature.VerifyProtoConfig(verifier, &signedProtoConfig)
 			if err != nil {
+				fmt.Printf("[DEBUG] Signature verification FAILED: %v\n", err)
 				c.logger.Error("Configuration signature verification failed",
 					"command_id", cmd.CommandID,
 					"version", version,
@@ -398,17 +495,31 @@ func (c *MQTTClient) setupCommandHandler(ctx context.Context, stewardID string, 
 				return fmt.Errorf("configuration signature verification failed: %w", err)
 			}
 
+			fmt.Printf("[DEBUG] Signature verified successfully\n")
 			c.logger.Info("Configuration signature verified",
 				"command_id", cmd.CommandID,
 				"version", version)
 
-			// Use the verified (unsigned) data for application
-			configData = verifiedData
+			unsignedProtoConfig = verified
 		} else {
+			fmt.Printf("[DEBUG] No verifier, using unsigned config\n")
 			c.logger.Warn("Configuration verifier not available, skipping signature verification",
 				"command_id", cmd.CommandID)
+			unsignedProtoConfig = signedProtoConfig.Config
 		}
 
+		// Convert protobuf to Go struct
+		fmt.Printf("[DEBUG] Converting protobuf to Go struct...\n")
+		goConfig, err := stewardconfig.FromProto(unsignedProtoConfig)
+		if err != nil {
+			c.logger.Error("Failed to convert protobuf to Go struct",
+				"command_id", cmd.CommandID,
+				"version", version,
+				"error", err)
+			return fmt.Errorf("failed to convert protobuf config: %w", err)
+		}
+
+		fmt.Printf("[DEBUG] Signature verification complete, checking executor...\n")
 		// Apply configuration using executor
 		c.mu.RLock()
 		executor := c.configExecutor
@@ -416,12 +527,27 @@ func (c *MQTTClient) setupCommandHandler(ctx context.Context, stewardID string, 
 		c.mu.RUnlock()
 
 		if executor == nil {
+			fmt.Printf("[DEBUG] Configuration executor is nil!\n")
 			c.logger.Error("Configuration executor not initialized")
 			return fmt.Errorf("configuration executor not available")
 		}
 
-		report, err := executor.ApplyConfiguration(ctx, configData, version)
+		// Executor now receives Go struct, marshal to YAML for ApplyConfiguration
+		// TODO: Update executor to work directly with Go struct instead of bytes
+		fmt.Printf("[DEBUG] Marshaling config to YAML for executor...\n")
+		configYAML, err := yaml.Marshal(goConfig)
 		if err != nil {
+			c.logger.Error("Failed to marshal config to YAML",
+				"command_id", cmd.CommandID,
+				"version", version,
+				"error", err)
+			return fmt.Errorf("failed to marshal config: %w", err)
+		}
+
+		fmt.Printf("[DEBUG] Applying configuration...\n")
+		report, err := executor.ApplyConfiguration(ctx, configYAML, version)
+		if err != nil {
+			fmt.Printf("[DEBUG] ApplyConfiguration failed: %v\n", err)
 			c.logger.Error("Configuration application failed", "error", err)
 			// Even if application fails, try to send status report
 			if report != nil {
@@ -433,11 +559,15 @@ func (c *MQTTClient) setupCommandHandler(ctx context.Context, stewardID string, 
 			return fmt.Errorf("config application failed: %w", err)
 		}
 
+		fmt.Printf("[DEBUG] Configuration applied successfully, publishing status report...\n")
 		// Publish configuration status report
 		report.StewardID = stewardID
 		if err := c.publishConfigStatus(report); err != nil {
+			fmt.Printf("[DEBUG] publishConfigStatus failed: %v\n", err)
 			c.logger.Error("Failed to publish config status", "error", err)
 			// Don't return error - config was applied successfully
+		} else {
+			fmt.Printf("[DEBUG] Config status published successfully\n")
 		}
 
 		c.logger.Info("Configuration sync completed",
@@ -549,6 +679,7 @@ func (c *MQTTClient) handleConnectQUIC(ctx context.Context, cmd mqttTypes.Comman
 
 // GetConfiguration retrieves configuration from the controller via QUIC.
 func (c *MQTTClient) GetConfiguration(ctx context.Context, modules []string) ([]byte, string, error) {
+	fmt.Printf("[DEBUG] GetConfiguration called with modules=%v\n", modules)
 	c.logger.Info("Requesting configuration via QUIC", "modules", modules)
 
 	c.mu.RLock()
@@ -556,16 +687,23 @@ func (c *MQTTClient) GetConfiguration(ctx context.Context, modules []string) ([]
 	stewardID := c.stewardID
 	c.mu.RUnlock()
 
+	fmt.Printf("[DEBUG] QUIC=%v (nil=%v) stewardID=%s\n", quic, quic == nil, stewardID)
 	if quic == nil || !quic.IsConnected() {
+		fmt.Printf("[DEBUG] QUIC not connected or nil\n")
 		return nil, "", fmt.Errorf("QUIC not connected")
 	}
 
-	// Open QUIC stream for config sync (stream ID 1)
-	stream, err := quic.OpenStream(ctx, 1)
+	// Open QUIC stream for config sync (stream ID 4)
+	// Client-initiated bidirectional streams use IDs 0, 4, 8, 12... (multiples of 4)
+	// Stream 0 is handshake, so first data stream is 4
+	fmt.Printf("[DEBUG] Opening QUIC stream 4...\n")
+	stream, err := quic.OpenStream(ctx, 4)
 	if err != nil {
+		fmt.Printf("[DEBUG] Failed to open stream: %v\n", err)
 		return nil, "", fmt.Errorf("failed to open QUIC stream: %w", err)
 	}
-	defer func() { _ = quic.CloseStream(1) }()
+	fmt.Printf("[DEBUG] Stream opened successfully\n")
+	defer func() { _ = quic.CloseStream(4) }()
 
 	// Create request
 	type ConfigRequest struct {
@@ -578,22 +716,36 @@ func (c *MQTTClient) GetConfiguration(ctx context.Context, modules []string) ([]
 		Modules:   modules,
 	}
 
+	fmt.Printf("[DEBUG] Marshaling request...\n")
 	// Send request
 	reqData, err := json.Marshal(req)
 	if err != nil {
+		fmt.Printf("[DEBUG] Marshal failed: %v\n", err)
 		return nil, "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
+	fmt.Printf("[DEBUG] Writing request to stream (%d bytes)...\n", len(reqData))
 	if _, err := (*stream).Write(reqData); err != nil {
+		fmt.Printf("[DEBUG] Write failed: %v\n", err)
 		return nil, "", fmt.Errorf("failed to write request: %w", err)
 	}
+	fmt.Printf("[DEBUG] Request written successfully\n")
 
-	// Read response
-	respData := make([]byte, 10*1024*1024) // 10MB max
-	n, err := (*stream).Read(respData)
+	// Close write side to signal EOF to server
+	if err := (*stream).Close(); err != nil {
+		fmt.Printf("[DEBUG] Stream close failed: %v\n", err)
+		return nil, "", fmt.Errorf("failed to close stream write side: %w", err)
+	}
+	fmt.Printf("[DEBUG] Stream write side closed\n")
+
+	// Read response using io.ReadAll to read until EOF
+	fmt.Printf("[DEBUG] Reading response from stream...\n")
+	respData, err := io.ReadAll(stream)
 	if err != nil {
+		fmt.Printf("[DEBUG] Read failed: %v\n", err)
 		return nil, "", fmt.Errorf("failed to read response: %w", err)
 	}
+	fmt.Printf("[DEBUG] Read %d bytes from response\n", len(respData))
 
 	// Parse response
 	type ConfigResponse struct {
@@ -603,20 +755,34 @@ func (c *MQTTClient) GetConfiguration(ctx context.Context, modules []string) ([]
 		Error         string `json:"error,omitempty"`
 	}
 
+	fmt.Printf("[DEBUG] Unmarshaling response...\n")
 	var resp ConfigResponse
-	if err := json.Unmarshal(respData[:n], &resp); err != nil {
+	if err := json.Unmarshal(respData, &resp); err != nil {
+		fmt.Printf("[DEBUG] Unmarshal failed: %v\n", err)
 		return nil, "", fmt.Errorf("failed to unmarshal response: %w", err)
 	}
 
+	fmt.Printf("[DEBUG] Response: success=%v error=%s\n", resp.Success, resp.Error)
 	if !resp.Success {
+		fmt.Printf("[DEBUG] Config sync failed: %s\n", resp.Error)
 		return nil, "", fmt.Errorf("config sync failed: %s", resp.Error)
 	}
 
+	// Base64 decode the configuration (protobuf is binary, transported as base64 in JSON)
+	configBytes, err := base64.StdEncoding.DecodeString(resp.Configuration)
+	if err != nil {
+		fmt.Printf("[DEBUG] Base64 decode failed: %v\n", err)
+		return nil, "", fmt.Errorf("failed to decode base64 configuration: %w", err)
+	}
+
+	fmt.Printf("[DEBUG] Config retrieved successfully, base64_size=%d decoded_size=%d hash=%s\n",
+		len(resp.Configuration), len(configBytes), resp.ConfigHash)
+
 	c.logger.Info("Configuration retrieved successfully",
 		"config_hash", resp.ConfigHash,
-		"size", len(resp.Configuration))
+		"decoded_size", len(configBytes))
 
-	return []byte(resp.Configuration), resp.ConfigHash, nil
+	return configBytes, resp.ConfigHash, nil
 }
 
 // SendHeartbeat sends a heartbeat to the controller via MQTT.
@@ -927,6 +1093,23 @@ func (c *MQTTClient) SetTenantID(id string) {
 // createMQTTTLSConfig creates a TLS configuration for MQTT with mTLS.
 // It loads TLS certificates from environment variables or the cert path.
 func (c *MQTTClient) createMQTTTLSConfig() (*tls.Config, error) {
+	c.mu.RLock()
+	caCertPEM := c.caCertPEM
+	clientCertPEM := c.clientCertPEM
+	clientKeyPEM := c.clientKeyPEM
+	certPath := c.certPath
+	c.mu.RUnlock()
+
+	// If PEM certificates are provided (from registration), use them directly
+	if caCertPEM != "" && clientCertPEM != "" && clientKeyPEM != "" {
+		c.logger.Info("Using TLS certificates from registration response")
+		tlsConfig, err := cert.CreateClientTLSConfig([]byte(clientCertPEM), []byte(clientKeyPEM), []byte(caCertPEM), "", tls.VersionTLS12)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create MQTT TLS config from PEM: %w", err)
+		}
+		return tlsConfig, nil
+	}
+
 	// Try environment variables first (Story 12.4: TLS support)
 	certFile := os.Getenv("CFGMS_MQTT_TLS_CERT_PATH")
 	keyFile := os.Getenv("CFGMS_MQTT_TLS_KEY_PATH")
@@ -934,10 +1117,6 @@ func (c *MQTTClient) createMQTTTLSConfig() (*tls.Config, error) {
 
 	// If environment variables are not set, try using certPath
 	if certFile == "" || keyFile == "" || caFile == "" {
-		c.mu.RLock()
-		certPath := c.certPath
-		c.mu.RUnlock()
-
 		if certPath == "" {
 			// No TLS configuration available
 			return nil, nil
@@ -951,25 +1130,25 @@ func (c *MQTTClient) createMQTTTLSConfig() (*tls.Config, error) {
 
 	// Load client certificate PEM data
 	// #nosec G304 - Certificate paths are controlled via configuration
-	clientCertPEM, err := os.ReadFile(certFile)
+	clientCertBytes, err := os.ReadFile(certFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read client certificate: %w", err)
 	}
 	// #nosec G304 - Certificate paths are controlled via configuration
-	clientKeyPEM, err := os.ReadFile(keyFile)
+	clientKeyBytes, err := os.ReadFile(keyFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read client key: %w", err)
 	}
 
 	// Load CA certificate
 	// #nosec G304 - Certificate paths are controlled via configuration
-	caCertPEM, err := os.ReadFile(caFile)
+	caCertBytes, err := os.ReadFile(caFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read CA certificate: %w", err)
 	}
 
 	// Create TLS config for MQTT with mTLS using pkg/cert helper
-	tlsConfig, err := cert.CreateClientTLSConfig(clientCertPEM, clientKeyPEM, caCertPEM, "", tls.VersionTLS12)
+	tlsConfig, err := cert.CreateClientTLSConfig(clientCertBytes, clientKeyBytes, caCertBytes, "", tls.VersionTLS12)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create MQTT TLS config: %w", err)
 	}
@@ -984,30 +1163,48 @@ func (c *MQTTClient) createMQTTTLSConfig() (*tls.Config, error) {
 
 // createQUICtlsConfig creates a TLS configuration for QUIC with proper mTLS.
 func (c *MQTTClient) createQUICtlsConfig(certPath string) (*tls.Config, error) {
-	if certPath == "" {
-		return nil, fmt.Errorf("certificate path is required for mTLS")
-	}
+	c.mu.RLock()
+	caCertPEMStr := c.caCertPEM
+	clientCertPEMStr := c.clientCertPEM
+	clientKeyPEMStr := c.clientKeyPEM
+	c.mu.RUnlock()
 
-	// Load CA certificate to verify controller's identity
-	caCertPath := filepath.Join(certPath, "ca.crt")
-	// #nosec G304 - Certificate paths are controlled via configuration
-	caCertPEM, err := os.ReadFile(caCertPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read CA certificate from %s: %w", caCertPath, err)
-	}
+	var caCertPEM, clientCertPEM, clientKeyPEM []byte
+	var err error
 
-	// Load client certificate for mTLS authentication
-	clientCertPath := filepath.Join(certPath, "client.crt")
-	clientKeyPath := filepath.Join(certPath, "client.key")
-	// #nosec G304 - Certificate paths are controlled via configuration
-	clientCertPEM, err := os.ReadFile(clientCertPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read client certificate from %s: %w", clientCertPath, err)
-	}
-	// #nosec G304 - Certificate paths are controlled via configuration
-	clientKeyPEM, err := os.ReadFile(clientKeyPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read client key from %s: %w", clientKeyPath, err)
+	// If PEM certificates are provided (from registration), use them directly
+	if caCertPEMStr != "" && clientCertPEMStr != "" && clientKeyPEMStr != "" {
+		c.logger.Info("Using TLS certificates from registration response for QUIC")
+		caCertPEM = []byte(caCertPEMStr)
+		clientCertPEM = []byte(clientCertPEMStr)
+		clientKeyPEM = []byte(clientKeyPEMStr)
+	} else {
+		// Fall back to reading from files
+		if certPath == "" {
+			return nil, fmt.Errorf("certificate path is required for mTLS")
+		}
+
+		// Load CA certificate to verify controller's identity
+		caCertPath := filepath.Join(certPath, "ca.crt")
+		// #nosec G304 - Certificate paths are controlled via configuration
+		caCertPEM, err = os.ReadFile(caCertPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read CA certificate from %s: %w", caCertPath, err)
+		}
+
+		// Load client certificate for mTLS authentication
+		clientCertPath := filepath.Join(certPath, "client.crt")
+		clientKeyPath := filepath.Join(certPath, "client.key")
+		// #nosec G304 - Certificate paths are controlled via configuration
+		clientCertPEM, err = os.ReadFile(clientCertPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read client certificate from %s: %w", clientCertPath, err)
+		}
+		// #nosec G304 - Certificate paths are controlled via configuration
+		clientKeyPEM, err = os.ReadFile(clientKeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read client key from %s: %w", clientKeyPath, err)
+		}
 	}
 
 	// Create TLS config with mTLS using pkg/cert helper
@@ -1019,31 +1216,55 @@ func (c *MQTTClient) createQUICtlsConfig(certPath string) (*tls.Config, error) {
 	// QUIC-specific configuration
 	tlsConfig.NextProtos = []string{"cfgms-quic"}
 
-	// Initialize configuration signature verifier using CA certificate
-	// The controller signs configs with its server certificate (same CA)
+	// Initialize configuration signature verifier using controller's server certificate
+	// Story #315: Use server cert from registration for signature verification
+	// The controller signs configs with its server certificate
 	c.mu.Lock()
+	fmt.Printf("[DEBUG] createQUICtlsConfig: Initializing verifier, current verifier nil=%v\n", c.configVerifier == nil)
+	fmt.Printf("[DEBUG] createQUICtlsConfig: serverCertPEM length=%d\n", len(c.serverCertPEM))
 	if c.configVerifier == nil {
-		// Load server certificate for verification (controller's cert)
-		serverCertPath := filepath.Join(certPath, "server.crt")
-		// #nosec G304 - Certificate paths are controlled via configuration
-		serverCertPEM, err := os.ReadFile(serverCertPath)
-		if err != nil {
-			c.logger.Warn("Failed to load server certificate for signature verification, using CA",
-				"error", err)
-			// Fall back to CA certificate
+		var serverCertPEM []byte
+
+		// Priority 1: Use server certificate from registration response
+		if c.serverCertPEM != "" {
+			serverCertPEM = []byte(c.serverCertPEM)
+			fmt.Printf("[DEBUG] createQUICtlsConfig: Using server cert from registration, size=%d\n", len(serverCertPEM))
+			c.logger.Info("Using server certificate from registration for signature verification")
+		} else if certPath != "" {
+			// Priority 2: Load server certificate from disk (backwards compatibility)
+			serverCertPath := filepath.Join(certPath, "server.crt")
+			// #nosec G304 - Certificate paths are controlled via configuration
+			var err error
+			serverCertPEM, err = os.ReadFile(serverCertPath)
+			if err != nil {
+				c.logger.Warn("Failed to load server certificate for signature verification, using CA",
+					"error", err)
+				// Priority 3: Fall back to CA certificate
+				serverCertPEM = caCertPEM
+			}
+		} else {
+			// Priority 3: Use CA certificate if nothing else available
+			c.logger.Warn("No server certificate available, using CA for signature verification")
 			serverCertPEM = caCertPEM
 		}
 
-		verifier, err := signature.NewVerifier(&signature.VerifierConfig{
-			CertificatePEM: serverCertPEM,
-		})
-		if err != nil {
-			c.logger.Warn("Failed to create configuration verifier",
-				"error", err)
+		if len(serverCertPEM) > 0 {
+			fmt.Printf("[DEBUG] createQUICtlsConfig: Creating verifier with cert size=%d\n", len(serverCertPEM))
+			verifier, err := signature.NewVerifier(&signature.VerifierConfig{
+				CertificatePEM: serverCertPEM,
+			})
+			if err != nil {
+				fmt.Printf("[DEBUG] createQUICtlsConfig: Failed to create verifier: %v\n", err)
+				c.logger.Warn("Failed to create configuration verifier",
+					"error", err)
+			} else {
+				c.configVerifier = verifier
+				fmt.Printf("[DEBUG] createQUICtlsConfig: Verifier created successfully, fingerprint=%s\n", verifier.KeyFingerprint())
+				c.logger.Info("Configuration signature verifier initialized",
+					"key_fingerprint", verifier.KeyFingerprint())
+			}
 		} else {
-			c.configVerifier = verifier
-			c.logger.Info("Configuration signature verifier initialized",
-				"key_fingerprint", verifier.KeyFingerprint())
+			fmt.Printf("[DEBUG] createQUICtlsConfig: No server cert PEM available\n")
 		}
 	}
 	c.mu.Unlock()

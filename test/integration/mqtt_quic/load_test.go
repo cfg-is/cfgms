@@ -6,7 +6,6 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -29,7 +28,7 @@ type LoadTestSuite struct {
 
 func (s *LoadTestSuite) SetupSuite() {
 	// Skip if running in short/fast mode - requires MQTT broker infrastructure
-	if os.Getenv("CFGMS_TEST_SHORT") == "1" {
+	if testing.Short() {
 		s.T().Skip("Skipping load tests in short mode - requires MQTT broker")
 	}
 
@@ -166,6 +165,7 @@ func (s *LoadTestSuite) TestConcurrentMessagePublishing() {
 		go func(publisherIdx int) {
 			defer wg.Done()
 
+			// Story #313: use steward-compatible client ID
 			clientID := fmt.Sprintf("publisher-%d", publisherIdx)
 			client := s.createMQTTClient(clientID)
 			token := client.Connect()
@@ -175,7 +175,8 @@ func (s *LoadTestSuite) TestConcurrentMessagePublishing() {
 			}
 			defer client.Disconnect(250)
 
-			topic := fmt.Sprintf("cfgms/test/load/%d", publisherIdx)
+			// Story #313: use steward-specific topic pattern
+			topic := fmt.Sprintf("cfgms/steward/%s/test/load", clientID)
 
 			for j := 0; j < messagesPerPublisher; j++ {
 				message := map[string]interface{}{

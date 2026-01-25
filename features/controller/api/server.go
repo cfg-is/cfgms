@@ -30,6 +30,9 @@ import (
 	"github.com/cfgis/cfgms/pkg/telemetry"
 )
 
+// QUICTriggerFunc is a function that triggers a QUIC connection for a steward
+type QUICTriggerFunc func(ctx context.Context, stewardID string) (string, error)
+
 // Server represents the REST API server component of the controller
 type Server struct {
 	mu                      sync.RWMutex
@@ -48,10 +51,12 @@ type Server struct {
 	platformMonitor         pkgmonitoring.PlatformMonitor
 	tracer                  *telemetry.Tracer
 	haManager               *ha.Manager
-	apiKeys                 map[string]*APIKey    // In-memory cache for fast lookup
-	secretStore             secretsif.SecretStore // M-AUTH-1: Central secrets provider for API keys
-	registrationTokenStore  registration.Store    // Registration token store for steward registration
-	corsConfig              *CORSConfig           // CORS configuration
+	apiKeys                 map[string]*APIKey            // In-memory cache for fast lookup
+	secretStore             secretsif.SecretStore         // M-AUTH-1: Central secrets provider for API keys
+	registrationTokenStore  registration.Store            // Registration token store for steward registration
+	registeredStewards      map[string]*RegisteredSteward // In-memory store for registered stewards
+	corsConfig              *CORSConfig                   // CORS configuration
+	quicTriggerFunc         QUICTriggerFunc               // Function to trigger QUIC connections
 }
 
 // APIKey represents an API key for external authentication
@@ -63,6 +68,18 @@ type APIKey struct {
 	CreatedAt   time.Time  `json:"created_at"`
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 	TenantID    string     `json:"tenant_id"`
+}
+
+// RegisteredSteward represents a steward that has registered with the controller
+type RegisteredSteward struct {
+	StewardID     string    `json:"steward_id"`
+	TenantID      string    `json:"tenant_id"`
+	Group         string    `json:"group"`
+	RegisteredAt  time.Time `json:"registered_at"`
+	LastHeartbeat time.Time `json:"last_heartbeat,omitempty"`
+	Status        string    `json:"status"` // online, offline, unknown
+	MQTTBroker    string    `json:"mqtt_broker,omitempty"`
+	QUICAddress   string    `json:"quic_address,omitempty"`
 }
 
 // ServerConfig contains configuration for the REST API server
@@ -120,8 +137,9 @@ func New(
 		tracer:                  tracer,
 		haManager:               haManager,
 		registrationTokenStore:  registrationTokenStore,
-		apiKeys:                 make(map[string]*APIKey), // In-memory cache
-		secretStore:             secretStore,              // M-AUTH-1: Central secrets provider
+		apiKeys:                 make(map[string]*APIKey),            // In-memory cache
+		secretStore:             secretStore,                         // M-AUTH-1: Central secrets provider
+		registeredStewards:      make(map[string]*RegisteredSteward), // In-memory steward registry
 	}
 
 	// Configure CORS settings (H-AUTH-3)
@@ -164,7 +182,16 @@ func (s *Server) setupRouter() {
 	// Steward registration (no auth required - uses registration token)
 	s.router.HandleFunc("/api/v1/register", s.handleRegister).Methods("POST", "OPTIONS")
 
-	// Steward management endpoints
+	// Test-mode config upload (no auth required - for integration tests only)
+	// Use separate path to avoid conflict with authenticated subrouter
+	// TODO: Remove or protect this endpoint in production
+	s.router.HandleFunc("/api/v1/test/stewards/{id}/config", s.handleUpdateStewardConfig).Methods("PUT", "OPTIONS")
+
+	// Test-mode QUIC trigger (no auth required - for integration tests only)
+	// TODO: Remove or protect this endpoint in production
+	s.router.HandleFunc("/api/v1/test/stewards/{id}/quic/connect", s.handleTriggerQUICConnection).Methods("POST", "OPTIONS")
+
+	// Steward management endpoints (require API key authentication)
 	stewards := api.PathPrefix("/stewards").Subrouter()
 	stewards.Handle("", s.requirePermission("steward", "list")(http.HandlerFunc(s.handleListStewards))).Methods("GET")
 	stewards.Handle("/{id}", s.requirePermission("steward", "read")(http.HandlerFunc(s.handleGetSteward))).Methods("GET")
@@ -176,6 +203,9 @@ func (s *Server) setupRouter() {
 	stewards.Handle("/{id}/config/validate", s.requirePermission("steward", "validate-config")(http.HandlerFunc(s.handleValidateConfig))).Methods("POST")
 	stewards.Handle("/{id}/config/status", s.requirePermission("steward", "read-config")(http.HandlerFunc(s.handleGetConfigStatus))).Methods("GET")
 	stewards.Handle("/{id}/config/effective", s.requirePermission("steward", "read-config")(http.HandlerFunc(s.handleGetEffectiveConfig))).Methods("GET")
+
+	// QUIC connection management endpoints
+	stewards.Handle("/{id}/quic/connect", s.requirePermission("steward", "manage")(http.HandlerFunc(s.handleTriggerQUICConnection))).Methods("POST")
 
 	// Script management endpoints
 	stewards.Handle("/{id}/scripts/executions", s.requirePermission("steward", "read-scripts")(http.HandlerFunc(s.handleGetScriptExecutions))).Methods("GET")
@@ -279,11 +309,14 @@ func (s *Server) setupRouter() {
 
 // Start starts the HTTP server
 func (s *Server) Start() error {
+	fmt.Printf("[DEBUG] HTTP Server Start() called\n")
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	fmt.Printf("[DEBUG] HTTP getting listen address\n")
 	// Determine listen address for HTTP server (different from gRPC)
 	httpAddr := s.getHTTPListenAddr()
+	fmt.Printf("[DEBUG] HTTP listen address: %s\n", httpAddr)
 
 	// Create HTTP server
 	s.httpServer = &http.Server{
@@ -293,40 +326,54 @@ func (s *Server) Start() error {
 		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
+	fmt.Printf("[DEBUG] HTTP server struct created\n")
 
 	// Configure TLS if available
+	fmt.Printf("[DEBUG] Checking TLS: shouldUseTLS=%v\n", s.shouldUseTLS())
 	if s.shouldUseTLS() {
+		fmt.Printf("[DEBUG] Setting up TLS\n")
 		tlsConfig, err := s.setupTLS()
 		if err != nil {
 			s.logger.Warn("Failed to setup TLS for HTTP server, starting without TLS", "error", err)
 		} else if tlsConfig != nil {
 			s.httpServer.TLSConfig = tlsConfig
+			fmt.Printf("[DEBUG] TLS configured\n")
 		}
 	}
 
+	fmt.Printf("[DEBUG] Launching HTTP server goroutine\n")
 	// Start server in goroutine
 	go func() {
+		fmt.Printf("[DEBUG] HTTP goroutine started, acquiring read lock\n")
 		s.mu.RLock()
 		server := s.httpServer
 		s.mu.RUnlock()
+		fmt.Printf("[DEBUG] HTTP goroutine got server reference\n")
 
 		if server != nil {
 			var err error
 			if server.TLSConfig != nil {
+				fmt.Printf("[DEBUG] Starting HTTPS server on %s\n", server.Addr)
 				s.logger.Info("Starting HTTPS REST API server", "address", httpAddr)
 				err = server.ListenAndServeTLS("", "") // Certificates in TLSConfig
 			} else {
+				fmt.Printf("[DEBUG] Starting HTTP server on %s\n", server.Addr)
 				s.logger.Info("Starting HTTP REST API server", "address", httpAddr)
 				err = server.ListenAndServe()
 			}
 
 			if err != nil && err != http.ErrServerClosed {
+				fmt.Printf("[DEBUG] HTTP server error: %v\n", err)
 				s.logger.Error("HTTP server failed", "error", err)
 			}
+		} else {
+			fmt.Printf("[DEBUG] HTTP server is nil in goroutine\n")
 		}
 	}()
 
+	fmt.Printf("[DEBUG] HTTP server goroutine launched, about to log success\n")
 	s.logger.Info("REST API server started", "address", httpAddr)
+	fmt.Printf("[DEBUG] HTTP Start() returning\n")
 	return nil
 }
 
@@ -348,6 +395,13 @@ func (s *Server) Stop() error {
 	}
 
 	return nil
+}
+
+// SetQUICTriggerFunc sets the function used to trigger QUIC connections
+func (s *Server) SetQUICTriggerFunc(fn QUICTriggerFunc) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.quicTriggerFunc = fn
 }
 
 // getHTTPListenAddr determines the HTTP listen address

@@ -485,6 +485,7 @@ services:
       - "8080:9080"    # HTTP API (unique host port to avoid conflict with controller-east)
     environment:
       CFGMS_NODE_ID: "controller-standalone"
+      CFGMS_EXTERNAL_HOSTNAME: "controller-standalone"  # Story #312: External hostname for steward connections
       # MQTT+QUIC Configuration (Story #198, Story 12.4)
       CFGMS_MQTT_ENABLED: "true"
       CFGMS_MQTT_LISTEN_ADDR: "0.0.0.0:8883"
@@ -554,7 +555,8 @@ services:
       dockerfile: cmd/steward/Dockerfile
     environment:
       CFGMS_REGISTRATION_TOKEN: "cfgms_reg_dockertest_standalone"
-      CFGMS_CONTROLLER_URL: "http://controller-standalone:9080"
+      CFGMS_CONTROLLER_URL: "https://controller-standalone:9080"
+      CFGMS_HTTP_INSECURE_SKIP_VERIFY: "true"  # Story #312: Test mode - skip TLS verification for HTTP registration
       # Story 12.4: TLS client certificate configuration
       CFGMS_MQTT_TLS_CERT_PATH: "/app/test-certs/client-cert.pem"
       CFGMS_MQTT_TLS_KEY_PATH: "/app/test-certs/client-key.pem"
@@ -565,8 +567,12 @@ services:
     command: ["./steward", "--log-level", "debug", "--log-provider", "file", "--regtoken", "cfgms_reg_dockertest_standalone"]
     volumes:
       - steward_standalone_data:/app/data
-      - ./test/module-execution:/test-workspace:rw  # Module execution test workspace (Story 12.3)
       - ./test/integration/mqtt_quic/certs:/app/test-certs:ro  # Story 12.4: TLS client certificates
+    tmpfs:
+      # Story #315: Use tmpfs for module execution test workspace (writable, fast, ephemeral)
+      # Simulates real-world endpoint with writable directory, no permission issues
+      # exec flag required for script execution tests
+      - /test-workspace:uid=1001,gid=1001,mode=0755,exec
     depends_on:
       controller-standalone:
         condition: service_healthy
@@ -592,7 +598,8 @@ services:
     environment:
       CFGMS_TENANT_ID: "tenant1"  # Story 12.5: Tenant isolation
       CFGMS_REGISTRATION_TOKEN: "cfgms_reg_tenant1"
-      CFGMS_CONTROLLER_URL: "http://controller-standalone:9080"
+      CFGMS_CONTROLLER_URL: "https://controller-standalone:9080"
+      CFGMS_HTTP_INSECURE_SKIP_VERIFY: "true"  # Story #312: Test mode - skip TLS verification for HTTP registration
       # Story 12.4: TLS client certificate configuration
       CFGMS_MQTT_TLS_CERT_PATH: "/app/test-certs/client-cert.pem"
       CFGMS_MQTT_TLS_KEY_PATH: "/app/test-certs/client-key.pem"
@@ -621,7 +628,8 @@ services:
     environment:
       CFGMS_TENANT_ID: "tenant2"  # Story 12.5: Tenant isolation
       CFGMS_REGISTRATION_TOKEN: "cfgms_reg_tenant2"
-      CFGMS_CONTROLLER_URL: "http://controller-standalone:9080"
+      CFGMS_CONTROLLER_URL: "https://controller-standalone:9080"
+      CFGMS_HTTP_INSECURE_SKIP_VERIFY: "true"  # Story #312: Test mode - skip TLS verification for HTTP registration
       # Story 12.4: TLS client certificate configuration
       CFGMS_MQTT_TLS_CERT_PATH: "/app/test-certs/client-cert.pem"
       CFGMS_MQTT_TLS_KEY_PATH: "/app/test-certs/client-key.pem"
@@ -650,7 +658,8 @@ services:
     environment:
       CFGMS_TENANT_ID: "tenant3"  # Story 12.5: Tenant isolation
       CFGMS_REGISTRATION_TOKEN: "cfgms_reg_tenant3"
-      CFGMS_CONTROLLER_URL: "http://controller-standalone:9080"
+      CFGMS_CONTROLLER_URL: "https://controller-standalone:9080"
+      CFGMS_HTTP_INSECURE_SKIP_VERIFY: "true"  # Story #312: Test mode - skip TLS verification for HTTP registration
       # Story 12.4: TLS client certificate configuration
       CFGMS_MQTT_TLS_CERT_PATH: "/app/test-certs/client-cert.pem"
       CFGMS_MQTT_TLS_KEY_PATH: "/app/test-certs/client-key.pem"

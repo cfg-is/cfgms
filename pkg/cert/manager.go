@@ -175,6 +175,35 @@ func (m *Manager) GetCAInfo() (*CertificateInfo, error) {
 	return m.ca.GetCAInfo()
 }
 
+// GetServerCertificate returns the server certificate in PEM format
+// This retrieves the first server certificate from the store
+// Used for configuration signature verification in HA clusters
+func (m *Manager) GetServerCertificate() ([]byte, error) {
+	// Get all server certificates from the store
+	serverCertInfos, err := m.store.GetCertificatesByType(CertificateTypeServer)
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve server certificates: %w", err)
+	}
+
+	if len(serverCertInfos) == 0 {
+		return nil, fmt.Errorf("no server certificate found")
+	}
+
+	// Get the full certificate data using the serial number
+	// In practice, there should only be one server certificate per controller
+	certInfo := serverCertInfos[0]
+	cert, err := m.store.GetCertificate(certInfo.SerialNumber)
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve server certificate data: %w", err)
+	}
+
+	if len(cert.CertificatePEM) == 0 {
+		return nil, fmt.Errorf("server certificate PEM data is empty")
+	}
+
+	return cert.CertificatePEM, nil
+}
+
 // GenerateServerCertificate creates a new server certificate
 func (m *Manager) GenerateServerCertificate(config *ServerCertConfig) (*Certificate, error) {
 	cert, err := m.ca.GenerateServerCertificate(config)

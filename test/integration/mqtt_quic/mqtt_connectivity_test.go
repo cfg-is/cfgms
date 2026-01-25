@@ -6,7 +6,6 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"os"
 	"sync"
 	"testing"
 	"time"
@@ -29,7 +28,7 @@ type MQTTConnectivityTestSuite struct {
 
 func (s *MQTTConnectivityTestSuite) SetupSuite() {
 	// Skip if running in short/fast mode - requires MQTT broker infrastructure
-	if os.Getenv("CFGMS_TEST_SHORT") == "1" {
+	if testing.Short() {
 		s.T().Skip("Skipping MQTT connectivity tests in short mode - requires MQTT broker")
 	}
 
@@ -100,15 +99,16 @@ func (s *MQTTConnectivityTestSuite) TestMQTTBrokerConnectivity() {
 
 // TestMQTTSubscription tests MQTT topic subscription
 func (s *MQTTConnectivityTestSuite) TestMQTTSubscription() {
-	// Connect to broker with TLS
-	client := s.createMQTTClient(fmt.Sprintf("test-sub-%d", time.Now().UnixNano()))
+	// Connect to broker with TLS (Story #313: use steward-compatible client ID)
+	stewardID := fmt.Sprintf("test-sub-%d", time.Now().UnixNano())
+	client := s.createMQTTClient(stewardID)
 	token := client.Connect()
 	s.True(token.WaitTimeout(10 * time.Second))
 	s.NoError(token.Error())
 	defer client.Disconnect(250)
 
-	// Subscribe to test topic
-	testTopic := fmt.Sprintf("cfgms/test/%d", time.Now().UnixNano())
+	// Subscribe to test topic (Story #313: use steward-specific topic pattern)
+	testTopic := fmt.Sprintf("cfgms/steward/%s/test/%d", stewardID, time.Now().UnixNano())
 	received := make(chan bool, 1)
 
 	subToken := client.Subscribe(testTopic, 1, func(client mqtt.Client, msg mqtt.Message) {
@@ -245,13 +245,16 @@ func (s *MQTTConnectivityTestSuite) TestMQTTHeartbeatTopic() {
 
 // TestMQTTQoSLevels tests different QoS levels
 func (s *MQTTConnectivityTestSuite) TestMQTTQoSLevels() {
-	client := s.createMQTTClient(fmt.Sprintf("test-qos-%d", time.Now().UnixNano()))
+	// Story #313: use steward-compatible client ID
+	stewardID := fmt.Sprintf("test-qos-%d", time.Now().UnixNano())
+	client := s.createMQTTClient(stewardID)
 	token := client.Connect()
 	s.True(token.WaitTimeout(10 * time.Second))
 	s.NoError(token.Error())
 	defer client.Disconnect(250)
 
-	testTopic := fmt.Sprintf("cfgms/test/qos/%d", time.Now().UnixNano())
+	// Story #313: use steward-specific topic pattern
+	testTopic := fmt.Sprintf("cfgms/steward/%s/test/qos/%d", stewardID, time.Now().UnixNano())
 
 	// Test QoS 0, 1, 2
 	qosLevels := []byte{0, 1, 2}
@@ -299,7 +302,9 @@ func (s *MQTTConnectivityTestSuite) TestMQTTConcurrentConnections() {
 		go func(idx int) {
 			defer wg.Done()
 
-			client := s.createMQTTClient(fmt.Sprintf("concurrent-client-%d", idx))
+			// Story #313: use steward-compatible client ID
+			clientID := fmt.Sprintf("concurrent-client-%d", idx)
+			client := s.createMQTTClient(clientID)
 			token := client.Connect()
 			if !token.WaitTimeout(10 * time.Second) {
 				errors <- fmt.Errorf("client %d: connection timeout", idx)
@@ -312,8 +317,8 @@ func (s *MQTTConnectivityTestSuite) TestMQTTConcurrentConnections() {
 
 			defer client.Disconnect(250)
 
-			// Publish test message
-			topic := fmt.Sprintf("cfgms/test/concurrent/%d", idx)
+			// Publish test message (Story #313: use steward-specific topic pattern)
+			topic := fmt.Sprintf("cfgms/steward/%s/test/concurrent", clientID)
 			pubToken := client.Publish(topic, 1, false, []byte(fmt.Sprintf("message from client %d", idx)))
 			if !pubToken.WaitTimeout(5 * time.Second) {
 				errors <- fmt.Errorf("client %d: publish timeout", idx)

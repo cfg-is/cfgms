@@ -48,6 +48,9 @@ See `.claude/slash-commands/` for complete documentation.
   - Only `develop → main` PRs allowed (for releases)
   - See [docs/development/git-workflow.md](docs/development/git-workflow.md) for details
 - **Real Component Testing**: Never mock CFGMS functionality in tests - use real components
+- **Story Completion (Story #315)**: `make test-complete` must pass 100% before creating PR
+  - test-complete runs ALL CI required checks locally (100% parity)
+  - Only acceptable gap: Windows/macOS native builds (infrastructure limitation)
 
 #### EPIC 6 Complete: Storage Architecture (CRITICAL)
 
@@ -68,6 +71,39 @@ See `.claude/slash-commands/` for complete documentation.
 5. **Complete**: Create PR **targeting develop** (`gh pr create --base develop`) and update project status
 
 See [docs/development/story-checklist.md](docs/development/story-checklist.md) for complete manual checklist.
+
+### Branch Protection & Required Checks
+
+**Develop Branch Protection** (enforced via GitHub rulesets):
+
+The `develop` branch uses direct required status checks to prevent merging without validation:
+
+**Required Checks** (all must pass):
+- `unit-tests` - Core functionality validation (fast, ~3-5 min)
+- `Build Gate` - Cross-platform compilation verification (~3-5 min)
+- `security-deployment-gate` - Security vulnerability blocking (~6-10 min)
+
+**Configuration**:
+- ✅ No review requirements (solo-friendly development)
+- ✅ Squash merge only (clean git history)
+- ✅ Strict up-to-date branch enforcement (prevents conflicts)
+- ❌ No AI bypass (tests must pass, no admin override needed normally)
+
+**Docs-Only PRs**:
+- Documentation changes (`docs/**`, `*.md`) automatically get instant green checks
+- Stub jobs in `documentation.yml` provide required check names
+- Fast merge path (<2 minutes) for docs-only changes
+
+**Code PRs**:
+- Full validation runs (5-15 minutes total)
+- All critical workflows execute with path-based filtering
+- Comprehensive test suite, security scans, and cross-platform builds
+
+**Previous Approach** (removed in Story #322):
+- ❌ Used `merge-gate.yml` with `workflow_run` trigger (had race conditions)
+- ❌ Could fail when running before other checks completed
+- ❌ Didn't work reliably for PR branches
+- ✅ Replaced with direct required checks (GitHub's recommended approach)
 
 ## Essential Commands
 
@@ -91,9 +127,19 @@ make build-steward        # Steward binary only
 ### Validation Targets
 
 ```bash
-make test-ci       # Complete CI validation (8-12min)
+make test-complete  # Story completion (10-20 min) - MATCHES ALL CI required checks
+make test-ci        # Complete CI validation (15-25 min)
 make test-integration  # M365 + storage integration tests
 ```
+
+**Story Completion**: `make test-complete` now runs ALL CI required checks locally:
+- ✅ All pre-commit validation (test-commit)
+- ✅ Fast comprehensive tests (test-fast)
+- ✅ Production critical tests (test-production-critical)
+- ✅ Cross-platform compilation (build-cross-validate)
+- ✅ Docker integration tests (storage/controller)
+- ✅ E2E tests (MQTT+QUIC, Controller)
+- ❌ Only gap: Native Windows/macOS builds (CI-only, requires runners)
 
 See [docs/development/commands-reference.md](docs/development/commands-reference.md) for all commands.
 

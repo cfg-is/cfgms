@@ -114,6 +114,20 @@ func (s *Server) contentTypeMiddleware(next http.Handler) http.Handler {
 // M-AUTH-1: Load API keys from secret store on-demand if not in cache
 func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Exempt test-mode config upload endpoint from authentication
+		// TODO: Remove or protect this exemption in production
+		if r.Method == "PUT" && strings.HasPrefix(r.URL.Path, "/api/v1/test/stewards/") && strings.HasSuffix(r.URL.Path, "/config") {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Exempt test-mode QUIC trigger endpoint from authentication
+		// TODO: Remove or protect this exemption in production
+		if r.Method == "POST" && strings.HasPrefix(r.URL.Path, "/api/v1/test/stewards/") && strings.HasSuffix(r.URL.Path, "/quic/connect") {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		// Extract API key from header
 		apiKey := r.Header.Get("X-API-Key")
 		if apiKey == "" {

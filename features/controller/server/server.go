@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -67,10 +68,12 @@ type Server struct {
 
 // New creates a new server instance
 func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
+	fmt.Printf("[DEBUG] server.New() called\n")
 	if cfg == nil {
 		return nil, ErrNilConfig
 	}
 
+	fmt.Printf("[DEBUG] server.New() - cfg validated\n")
 	logger.Info("Config validated, proceeding with storage initialization...")
 
 	// Initialize global storage provider system - REQUIRED for all deployments
@@ -290,7 +293,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// Initialize QUIC server if enabled (Story #198)
 	var quicSrv *quicServer.Server
 	var quicSessionMgr *quicSession.Manager
+	fmt.Printf("[DEBUG] New(): Checking QUIC config: nil=%v enabled=%v\n", cfg.QUIC == nil, cfg.QUIC != nil && cfg.QUIC.Enabled)
 	if cfg.QUIC != nil && cfg.QUIC.Enabled {
+		fmt.Printf("[DEBUG] New(): QUIC is enabled, initializing QUIC server...\n")
 		logger.Info("Initializing QUIC server...")
 		quicSrv, quicSessionMgr, err = initializeQUICServer(cfg, logger, certManager, configService, controllerService)
 		if err != nil {
@@ -321,7 +326,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		return nil, fmt.Errorf("failed to initialize HTTP API server: %w", err)
 	}
 
-	return &Server{
+	logger.Info("HTTP API server initialized successfully")
+
+	srv := &Server{
 		cfg:                     cfg,
 		logger:                  logger,
 		controllerService:       controllerService,
@@ -341,16 +348,27 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		quicServer:              quicSrv,
 		quicSessionManager:      quicSessionMgr,
 		httpServer:              httpServer,
-	}, nil
+	}
+
+	// Wire up QUIC trigger function to API server (if QUIC is enabled)
+	if quicSrv != nil && quicSessionMgr != nil {
+		httpServer.SetQUICTriggerFunc(srv.TriggerQUICConnection)
+		logger.Info("QUIC trigger function wired to HTTP API server")
+	}
+
+	return srv, nil
 }
 
 // Start initializes and starts the controller server (MQTT+QUIC mode)
 func (s *Server) Start() error {
+	fmt.Printf("[DEBUG] Controller Server Start() method called\n")
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	// Start HA manager with timeout
+	fmt.Printf("[DEBUG] Controller checking HA manager: %v\n", s.haManager != nil)
 	if s.haManager != nil {
+		fmt.Printf("[DEBUG] Controller starting HA manager\n")
 		s.logger.Info("Starting HA manager...")
 
 		// Create a context with timeout to prevent infinite hang
@@ -426,26 +444,47 @@ func (s *Server) Start() error {
 	}
 
 	// Start QUIC server (Story #198)
+	fmt.Printf("[DEBUG] Controller checking if quicServer is nil: %v\n", s.quicServer == nil)
 	if s.quicServer != nil {
+		fmt.Printf("[DEBUG] Controller starting QUIC server...\n")
 		s.logger.Info("Starting QUIC server...")
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
+		fmt.Printf("[DEBUG] Controller calling quicServer.Start()\n")
 		if err := s.quicServer.Start(ctx); err != nil {
+			fmt.Printf("[DEBUG] Controller quicServer.Start() returned error: %v\n", err)
 			return fmt.Errorf("failed to start QUIC server: %w", err)
 		}
+		fmt.Printf("[DEBUG] Controller quicServer.Start() succeeded\n")
 		s.logger.Info("QUIC server started successfully",
 			"listen_addr", s.cfg.QUIC.ListenAddr)
+	} else {
+		fmt.Printf("[DEBUG] Controller quicServer is nil, skipping QUIC startup\n")
 	}
 
 	// Start HTTP API server
+	fmt.Printf("[DEBUG] Controller checking if httpServer is nil: %v\n", s.httpServer == nil)
 	if s.httpServer != nil {
+		fmt.Printf("[DEBUG] Controller starting HTTP server...\n")
+		logger := s.logger // Capture logger for goroutine
 		go func() {
-			if err := s.httpServer.Start(); err != nil {
-				s.logger.Error("HTTP API server failed", "error", err)
+			fmt.Printf("[DEBUG] Controller httpServer.Start() goroutine started\n")
+			logger.Info("[DEBUG_LOGGER] HTTP goroutine started")
+			fmt.Printf("[DEBUG] About to call httpServer.Start()...\n")
+			logger.Info("[DEBUG_LOGGER] About to call httpServer.Start()")
+			err := s.httpServer.Start()
+			logger.Info("[DEBUG_LOGGER] httpServer.Start() call completed", "error", err)
+			if err != nil {
+				fmt.Printf("[DEBUG] Controller httpServer.Start() returned error: %v\n", err)
+				logger.Error("HTTP API server failed", "error", err)
+			} else {
+				fmt.Printf("[DEBUG] Controller httpServer.Start() returned successfully\n")
 			}
 		}()
 		s.logger.Info("HTTP API server started")
+	} else {
+		fmt.Printf("[DEBUG] Controller httpServer is nil, skipping HTTP startup\n")
 	}
 
 	s.logger.Info("Controller server started (MQTT+QUIC mode)",
@@ -580,11 +619,24 @@ func (s *Server) TriggerQUICConnection(ctx context.Context, stewardID string) (s
 		"session_id", session.SessionID,
 		"expires_at", session.ExpiresAt)
 
+	// Construct external QUIC address for steward connection
+	// If listen address is 0.0.0.0:port, replace with external hostname
+	quicAddress := s.cfg.QUIC.ListenAddr
+	if strings.HasPrefix(quicAddress, "0.0.0.0:") {
+		externalHostname := os.Getenv("CFGMS_EXTERNAL_HOSTNAME")
+		if externalHostname == "" {
+			externalHostname = "localhost"
+		}
+		port := strings.TrimPrefix(quicAddress, "0.0.0.0:")
+		quicAddress = externalHostname + ":" + port
+	}
+
 	// Send connect_quic command to steward via MQTT
-	commandID, err := s.commandPublisher.TriggerQUICConnection(
+	var commandID string
+	commandID, err = s.commandPublisher.TriggerQUICConnection(
 		ctx,
 		stewardID,
-		s.cfg.QUIC.ListenAddr,
+		quicAddress,
 		session.SessionID,
 	)
 	if err != nil {
@@ -595,7 +647,7 @@ func (s *Server) TriggerQUICConnection(ctx context.Context, stewardID string) (s
 		"steward_id", stewardID,
 		"session_id", session.SessionID,
 		"command_id", commandID,
-		"quic_address", s.cfg.QUIC.ListenAddr)
+		"quic_address", quicAddress)
 
 	return commandID, nil
 }
@@ -787,6 +839,12 @@ func initializeMQTTBroker(cfg *config.Config, logger logging.Logger, certManager
 		return nil, fmt.Errorf("failed to initialize MQTT broker: %w", err)
 	}
 
+	// Configure ACL handler for multi-tenant topic isolation (Story #313)
+	// Enforces that stewards can only access topics under their own namespace:
+	// cfgms/steward/{clientID}/#
+	broker.SetACLHandler(stewardACLHandler)
+	logger.Info("MQTT broker ACL handler configured for multi-tenant isolation")
+
 	// Check if broker is available (has required certificates, etc.)
 	available, err := broker.Available()
 	if !available {
@@ -940,20 +998,27 @@ func initializeQUICServer(cfg *config.Config, logger logging.Logger, certManager
 
 	// Create configuration signer using server certificate
 	var configSigner signature.Signer
+	fmt.Printf("[DEBUG] Creating signer: key_len=%d cert_len=%d\n", len(serverKeyPEMForSigner), len(serverCertPEMForSigner))
 	if len(serverKeyPEMForSigner) > 0 {
+		fmt.Printf("[DEBUG] Attempting to create signer...\n")
 		signer, err := signature.NewSigner(&signature.SignerConfig{
 			PrivateKeyPEM:  serverKeyPEMForSigner,
 			CertificatePEM: serverCertPEMForSigner,
 		})
 		if err != nil {
+			fmt.Printf("[DEBUG] Signer creation failed: %v\n", err)
 			logger.Warn("Failed to create configuration signer, configs will be unsigned",
 				"error", err)
 		} else {
 			configSigner = signer
+			fmt.Printf("[DEBUG] Signer created successfully: algorithm=%s fingerprint=%s\n",
+				signer.Algorithm(), signer.KeyFingerprint())
 			logger.Info("Configuration signer initialized",
 				"algorithm", signer.Algorithm(),
 				"key_fingerprint", signer.KeyFingerprint())
 		}
+	} else {
+		fmt.Printf("[DEBUG] No server key PEM available, signer will be nil\n")
 	}
 
 	// Create QUIC session manager

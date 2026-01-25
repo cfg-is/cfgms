@@ -56,9 +56,12 @@ func main() {
 	}
 
 	// Configure file provider if selected
-	// Note: To customize log directory, use config file with ${CFGMS_LOG_DIR:-/var/log/cfgms} syntax
 	if *provider == "file" {
-		loggingConfig.Config["directory"] = "/var/log/cfgms"
+		logDir := os.Getenv("CFGMS_LOG_DIR")
+		if logDir == "" {
+			logDir = "/tmp/cfgms" // Default to /tmp for unprivileged containers
+		}
+		loggingConfig.Config["directory"] = logDir
 	}
 
 	if err := logging.InitializeGlobalLogging(loggingConfig); err != nil {
@@ -70,6 +73,15 @@ func main() {
 
 	// Set up logging using global provider
 	logger := logging.ForComponent("steward")
+
+	// Set up context with cancellation (BEFORE registration)
+	// This context is used for long-lived MQTT operations
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Set up signal handling
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	// Handle registration token
 	var mqttClient *client.MQTTClient
@@ -84,15 +96,13 @@ func main() {
 			"token_prefix", tokenPrefix)
 
 		// Use new MQTT+QUIC registration flow
-		regCtx, regCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		mqttCl, err := registerAndConnectMQTT(regCtx, *regToken, logger)
+		// Pass main application context for long-lived MQTT operations
+		mqttCl, err := registerAndConnectMQTT(ctx, *regToken, logger)
 		if err != nil {
-			regCancel()
 			logger.Fatal("Failed to register with MQTT",
 				"operation", "registration_mqtt",
 				"error", err.Error())
 		}
-		regCancel()
 
 		mqttClient = mqttCl
 
@@ -112,14 +122,6 @@ func main() {
 			"solution", "Use --regtoken with MQTT+QUIC registration tokens")
 	}
 
-	// Set up context with cancellation
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Set up signal handling
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
 	// If using MQTT+QUIC mode with registration token, run in controller-connected mode
 	if mqttClient != nil {
 		logger.Info("Running in MQTT+QUIC controller-connected mode",
@@ -136,8 +138,14 @@ func main() {
 			"operation", "steward_running",
 			"steward_id", mqttClient.GetStewardID())
 
+		fmt.Printf("[DEBUG] Steward entering signal wait loop, PID=%d\n", os.Getpid())
+		logger.Info("Waiting for termination signal",
+			"operation", "steward_wait",
+			"pid", os.Getpid())
+
 		// Wait for termination signal
 		sig := <-sigChan
+		fmt.Printf("[DEBUG] Steward received signal: %v\n", sig)
 		logger.Info("Received signal, shutting down...",
 			"operation", "steward_shutdown",
 			"signal", sig.String())
@@ -239,22 +247,36 @@ func main() {
 func registerAndConnectMQTT(ctx context.Context, token string, logger logging.Logger) (*client.MQTTClient, error) {
 	logger.Info("Registering steward via HTTP API")
 
-	// Use default controller URL
-	// Note: To customize, use config file with controller_url: ${CFGMS_CONTROLLER_URL:-http://controller-standalone:9080} syntax
-	controllerURL := "http://controller-standalone:9080"
+	// Get controller URL from environment (for Docker test mode)
+	controllerURL := os.Getenv("CFGMS_CONTROLLER_URL")
+	if controllerURL == "" {
+		controllerURL = "http://controller-standalone:9080"
+	}
+
+	// Check if we should skip TLS verification (test mode only)
+	insecureSkipVerify := false
+	if skipVerify := os.Getenv("CFGMS_HTTP_INSECURE_SKIP_VERIFY"); skipVerify == "true" {
+		insecureSkipVerify = true
+		logger.Warn("HTTP TLS verification disabled (test mode only)")
+	}
 
 	// Create HTTP registration client
 	httpClient, err := registration.NewHTTPClient(&registration.HTTPConfig{
-		ControllerURL: controllerURL,
-		Timeout:       30 * time.Second,
-		Logger:        logger,
+		ControllerURL:      controllerURL,
+		Timeout:            30 * time.Second,
+		InsecureSkipVerify: insecureSkipVerify,
+		Logger:             logger,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTTP registration client: %w", err)
 	}
 
-	// Register via HTTP
-	regResp, err := httpClient.Register(ctx, token)
+	// Register via HTTP with timeout (prevent hanging indefinitely)
+	// Use child context for HTTP call, but keep parent ctx for MQTT operations
+	regCtx, regCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer regCancel()
+
+	regResp, err := httpClient.Register(regCtx, token)
 	if err != nil {
 		return nil, fmt.Errorf("HTTP registration failed: %w", err)
 	}
@@ -273,6 +295,10 @@ func registerAndConnectMQTT(ctx context.Context, token string, logger logging.Lo
 		ControllerURL:     mqttBroker,
 		QUICAddress:       quicAddress,
 		RegistrationToken: token,
+		CACertPEM:         regResp.CACert,
+		ClientCertPEM:     regResp.ClientCert,
+		ClientKeyPEM:      regResp.ClientKey,
+		ServerCertPEM:     regResp.ServerCert, // Story #315: Controller's server cert for signature verification
 		Logger:            logger,
 	})
 	if err != nil {
@@ -296,6 +322,14 @@ func registerAndConnectMQTT(ctx context.Context, token string, logger logging.Lo
 	if err := mqttClient.SendHeartbeat(ctx, "healthy", nil); err != nil {
 		logger.Warn("Failed to send initial heartbeat", "error", err)
 	}
+
+	// Initialize configuration executor (Story #315: Required for config sync)
+	// The executor needs to be initialized after MQTT connection for config application
+	if err := mqttClient.InitializeConfigExecutor(regResp.TenantID); err != nil {
+		return nil, fmt.Errorf("failed to initialize config executor: %w", err)
+	}
+
+	logger.Info("Configuration executor initialized", "tenant_id", regResp.TenantID)
 
 	// Return connected client (do NOT disconnect - maintain connection)
 	return mqttClient, nil

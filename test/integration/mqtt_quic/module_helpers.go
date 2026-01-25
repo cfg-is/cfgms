@@ -45,13 +45,27 @@ type ModuleTestHelper struct {
 }
 
 // NewModuleTestHelper creates a new module test helper
-func NewModuleTestHelper(baseURL, mqttAddr string) *ModuleTestHelper {
+func NewModuleTestHelper(baseURL, mqttAddr string, tlsConfig *tls.Config) *ModuleTestHelper {
+	httpClient := &http.Client{
+		Timeout: 10 * time.Second,
+	}
+
+	// Configure TLS if provided
+	// For HTTP client, use InsecureSkipVerify in test environment with auto-generated certs
+	// The tlsConfig is still used for MQTT connections with proper verification
+	if tlsConfig != nil {
+		// Create a copy of the TLS config for HTTP client with InsecureSkipVerify
+		httpTLSConfig := tlsConfig.Clone()
+		httpTLSConfig.InsecureSkipVerify = true
+		httpClient.Transport = &http.Transport{
+			TLSClientConfig: httpTLSConfig,
+		}
+	}
+
 	return &ModuleTestHelper{
-		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
-		},
-		baseURL:  baseURL,
-		mqttAddr: mqttAddr,
+		httpClient: httpClient,
+		baseURL:    baseURL,
+		mqttAddr:   mqttAddr,
 	}
 }
 
@@ -94,6 +108,47 @@ func (h *ModuleTestHelper) DisconnectMQTT(t *testing.T) {
 	}
 }
 
+// GetStewardIDFromContainer extracts the steward ID from the container's log file.
+// This is a test-only helper for discovering the dynamically-generated steward ID.
+func (h *ModuleTestHelper) GetStewardIDFromContainer(t *testing.T, containerName string) (string, error) {
+	t.Helper()
+
+	// Validate container name
+	if err := validateContainerName(containerName); err != nil {
+		return "", err
+	}
+
+	// Retry loop: Wait up to 30 seconds for steward to register and write logs
+	// This handles timing issues in CI where the container may be slow to start
+	maxAttempts := 30
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		// Read steward's log file to get the registered steward ID
+		// The logs contain: "steward_id":"steward-1234567890"
+		// Use tail -1 to get the LATEST steward_id (in case of retries/restarts)
+		cmd := exec.Command("docker", "exec", containerName, "sh", "-c",
+			"cat /tmp/cfgms/cfgms-*.log 2>/dev/null | grep -o '\"steward_id\":\"[^\"]*\"' | tail -1 | cut -d'\"' -f4")
+
+		output, err := cmd.CombinedOutput()
+		stewardID := strings.TrimSpace(string(output))
+
+		if err == nil && stewardID != "" {
+			t.Logf("Extracted steward ID from container logs: %s (attempt %d/%d)", stewardID, attempt, maxAttempts)
+			return stewardID, nil
+		}
+
+		// Log progress every 5 attempts
+		if attempt%5 == 0 {
+			t.Logf("Waiting for steward to register... (attempt %d/%d)", attempt, maxAttempts)
+		}
+
+		// Wait 1 second before retrying
+		time.Sleep(1 * time.Second)
+	}
+
+	// Final attempt - return detailed error
+	return "", fmt.Errorf("could not find steward_id in container logs after %d seconds", maxAttempts)
+}
+
 // FileInfo represents information about a file in the container
 type FileInfo struct {
 	Path        string
@@ -130,14 +185,16 @@ func (h *ModuleTestHelper) CheckFileInContainer(t *testing.T, containerName, fil
 
 	info.Exists = true
 
-	// Get file content
+	// Get file content (may fail for write-only files - non-fatal)
 	cmd = exec.CommandContext(ctx, "docker", "exec", containerName, "cat", filePath)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("failed to read file content: %w", err)
+		// Content read failed (e.g., write-only file) - leave content empty but continue
+		info.Content = ""
+	} else {
+		info.Content = stdout.String()
 	}
-	info.Content = stdout.String()
 
 	// Get file permissions and ownership
 	cmd = exec.CommandContext(ctx, "docker", "exec", containerName, "stat", "-c", "%a %U %G", filePath)
@@ -323,15 +380,45 @@ func (h *ModuleTestHelper) WaitForConfigStatus(t *testing.T, stewardID string, t
 }
 
 // SendConfiguration sends a configuration to the controller via HTTP API
-// Note: This is a simplified version - in reality, we'd use the actual config API
 func (h *ModuleTestHelper) SendConfiguration(t *testing.T, stewardID string, config map[string]interface{}) error {
 	t.Helper()
 
-	// For now, we'll use a simplified approach where we trigger QUIC connection
-	// which will fetch the configuration from the controller
-	// In a full implementation, we'd POST to /api/v1/config/{stewardID}
+	// Marshal configuration to JSON
+	configJSON, err := json.Marshal(config)
+	if err != nil {
+		return fmt.Errorf("failed to marshal config: %w", err)
+	}
 
-	t.Logf("Configuration would be sent to steward %s", stewardID)
+	// Create HTTP request to upload config (using test endpoint that doesn't require auth)
+	url := fmt.Sprintf("%s/api/v1/test/stewards/%s/config", h.baseURL, stewardID)
+	req, err := http.NewRequest(http.MethodPut, url, bytes.NewBuffer(configJSON))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	// Send request
+	resp, err := h.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send config: %w", err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			t.Logf("Warning: failed to close response body: %v", err)
+		}
+	}()
+
+	// Check response status
+	if resp.StatusCode != http.StatusOK {
+		var errResp map[string]interface{}
+		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil {
+			t.Logf("Error response from config upload: %v", errResp)
+		}
+		return fmt.Errorf("config upload failed with status %d", resp.StatusCode)
+	}
+
+	t.Logf("✅ Configuration uploaded successfully for steward %s", stewardID)
 	return nil
 }
 
@@ -422,8 +509,8 @@ func (h *ModuleTestHelper) CreateFileInContainerUsingModule(t *testing.T, contai
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Write content using printf (safer than echo)
-	cmd := exec.CommandContext(ctx, "docker", "exec", containerName, "tee", filePath)
+	// Write content using tee with interactive mode (-i flag required for stdin)
+	cmd := exec.CommandContext(ctx, "docker", "exec", "-i", containerName, "tee", filePath)
 	cmd.Stdin = strings.NewReader(content)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to write file content: %w", err)
@@ -503,4 +590,58 @@ func (h *ModuleTestHelper) ExecuteScriptInContainer(t *testing.T, containerName,
 	}
 
 	return output, nil
+}
+
+// CreateQUICSession creates a QUIC session on the controller via REST API
+func (h *ModuleTestHelper) CreateQUICSession(t *testing.T, sessionID, stewardID string) error {
+	t.Helper()
+
+	// Create session request
+	sessionReq := map[string]interface{}{
+		"session_id":   sessionID,
+		"user_id":      stewardID, // Use steward ID as user ID for QUIC sessions
+		"tenant_id":    "default",
+		"session_type": "quic",
+		"timeout":      300, // 5 minutes in seconds
+		"metadata": map[string]interface{}{
+			"steward_id": stewardID,
+		},
+	}
+
+	reqJSON, err := json.Marshal(sessionReq)
+	if err != nil {
+		return fmt.Errorf("failed to marshal session request: %w", err)
+	}
+
+	// Create HTTP request to create session (using test endpoint)
+	url := fmt.Sprintf("%s/api/v1/test/sessions", h.baseURL)
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewBuffer(reqJSON))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	// Send request
+	resp, err := h.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to create session: %w", err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			t.Logf("Warning: failed to close response body: %v", err)
+		}
+	}()
+
+	// Check response status
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		var errResp map[string]interface{}
+		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil {
+			t.Logf("Error response from session creation: %v", errResp)
+		}
+		return fmt.Errorf("session creation failed with status %d", resp.StatusCode)
+	}
+
+	t.Logf("✅ Created QUIC session: %s for steward %s", sessionID, stewardID)
+	return nil
 }

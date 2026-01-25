@@ -95,10 +95,10 @@ func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *cont
 	// Filter configuration by requested modules if specified
 	filteredConfig := s.filterConfigByModules(stewardConfig, req.Modules)
 
-	// Convert to JSON
-	configData, err := json.Marshal(filteredConfig)
+	// Convert Go struct to protobuf
+	protoConfig, err := stewardconfig.ToProto(filteredConfig)
 	if err != nil {
-		s.logger.Error("Failed to marshal configuration", "steward_id", req.StewardId, "error", err)
+		s.logger.Error("Failed to convert configuration to protobuf", "steward_id", req.StewardId, "error", err)
 		return &controller.ConfigResponse{
 			Status: &common.Status{
 				Code:    common.Status_ERROR,
@@ -121,7 +121,7 @@ func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *cont
 			Code:    common.Status_OK,
 			Message: "Configuration retrieved successfully",
 		},
-		Config:  configData,
+		Config:  &controller.SignedConfig{Config: protoConfig}, // Unsigned, QUIC handler will sign
 		Version: version,
 	}, nil
 }

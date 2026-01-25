@@ -3,6 +3,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -24,10 +25,13 @@ import (
 )
 
 func main() {
+	fmt.Printf("[DEBUG] main.go: Controller main() function started\n")
 	cfg, err := config.Load()
 	if err != nil {
+		fmt.Printf("[DEBUG] main.go: Failed to load config: %v\n", err)
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
+	fmt.Printf("[DEBUG] main.go: Configuration loaded successfully\n")
 
 	// Initialize global logging provider for central hub
 	loggingConfig := &logging.LoggingConfig{
@@ -62,22 +66,28 @@ func main() {
 		log.Fatalf("FATAL: Failed to create controller server: %v", err)
 	}
 
+	fmt.Printf("[DEBUG] main.go: Server created successfully, about to start\n")
 	logger.Info("Starting controller server",
 		"operation", "server_start",
 		"log_provider", loggingConfig.Provider,
 		"service_name", "controller")
 
+	fmt.Printf("[DEBUG] main.go: Setting up signal handling\n")
 	// Set up signal handling
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
+	fmt.Printf("[DEBUG] main.go: Launching Start() goroutine\n")
 	// Start server in a goroutine
 	go func() {
+		fmt.Printf("[DEBUG] main.go: Inside goroutine, about to call srv.Start()\n")
 		if err := srv.Start(); err != nil {
+			fmt.Printf("[DEBUG] main.go: srv.Start() returned error: %v\n", err)
 			logger.Fatal("Controller server failed",
 				"operation", "server_run",
 				"error", err.Error())
 		}
+		fmt.Printf("[DEBUG] main.go: srv.Start() completed successfully\n")
 	}()
 
 	// Wait for termination signal

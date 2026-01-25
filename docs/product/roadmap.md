@@ -4,7 +4,7 @@
 
 This document outlines the development roadmap for the Configuration Management System (CFGMS). It provides a clear vision for the project's development, including milestones, features, and release planning, incorporating recent strategic adjustments to better align with MSP market voids and core product vision.
 
-**Last Updated**: 2026-01-06
+**Last Updated**: 2026-01-12
 
 ## Versioning Strategy
 
@@ -120,12 +120,10 @@ Implemented comprehensive Docker-based E2E testing infrastructure that validates
 
 - [x] Fix single-use registration token enforcement in database storage (issue #299) ✅ COMPLETED
 - [x] Complete E2E test framework for MQTT+QUIC mode (issue #294) ✅ COMPLETED
-- [ ] Enable TestModuleExecution suite with proper steward container configuration (issue #312)
-- [ ] Configure MQTT broker ACLs for topic-level access control by steward ID (issue #313)
-- [ ] Align story-commit validation with PR acceptance CI tests for local test coverage (issue #315)
-  - Ensure `make test-commit` provides maximum possible local coverage of CI validation gates
-  - Review and separate blocking vs non-blocking tests (e.g., performance tests should be non-blocking)
-  - Reduce developer friction while maintaining quality gates
+- [x] Remove outdated v0.3.0 and v0.4.0 release gates from production-gates workflow (issue #322) ✅ COMPLETED
+- [x] Enable TestModuleExecution suite with proper steward container configuration (issue #312) ✅ COMPLETED
+- [x] Configure MQTT broker ACLs for topic-level access control by steward ID (issue #313) ✅ COMPLETED
+- [x] Align test-complete with CI required checks for 100% local validation parity (issue #315) ✅ COMPLETED
 
 ### Phase 2: Production Stability & Feature Completion (v0.9.0 - v1.0.0)
 
