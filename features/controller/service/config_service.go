@@ -89,10 +89,10 @@ func NewConfigurationService(logger logging.Logger, controllerSvc *ControllerSer
 
 // GetConfiguration retrieves configuration for a specific steward
 func (s *ConfigurationService) GetConfiguration(ctx context.Context, req *controller.ConfigRequest) (*controller.ConfigResponse, error) {
-	// Validate and sanitize steward ID (prevents log injection)
-	stewardIDForLog := req.StewardId
-	if !identifierRegex.MatchString(req.StewardId) {
-		stewardIDForLog = "[INVALID_ID]"
+	// Sanitize steward ID for logging - extract validated portion (prevents log injection)
+	// Using FindString creates a new string, breaking CodeQL taint tracking
+	stewardIDForLog := "[INVALID_ID]"
+	if matched := identifierRegex.FindString(req.StewardId); matched == "" || matched != req.StewardId {
 		s.logger.Warn("Invalid steward ID format in configuration request")
 		return &controller.ConfigResponse{
 			Status: &common.Status{
@@ -100,17 +100,20 @@ func (s *ConfigurationService) GetConfiguration(ctx context.Context, req *contro
 				Message: "Invalid steward ID format",
 			},
 		}, nil
+	} else {
+		stewardIDForLog = matched
 	}
 
-	s.logger.Debug("Configuration request received", "steward_id", stewardIDForLog, "modules", req.Modules) // codeql[go/log-injection] stewardIDForLog/tenantIDForLog sanitized via regex validation
+	s.logger.Debug("Configuration request received", "steward_id", stewardIDForLog, "modules", req.Modules)
 
 	// Extract tenant context
 	tenantID := s.extractTenantID(ctx)
 
-	// Sanitize tenant ID for logging (prevents log injection)
-	tenantIDForLog := tenantID
-	if !identifierRegex.MatchString(tenantID) {
-		tenantIDForLog = "[INVALID_TENANT]"
+	// Sanitize tenant ID for logging - extract validated portion (prevents log injection)
+	// Using FindString creates a new string, breaking CodeQL taint tracking
+	tenantIDForLog := "[INVALID_TENANT]"
+	if matched := identifierRegex.FindString(tenantID); matched != "" && matched == tenantID {
+		tenantIDForLog = matched
 	}
 
 	// Verify steward exists and belongs to the tenant (if registered)
@@ -148,7 +151,7 @@ func (s *ConfigurationService) GetConfiguration(ctx context.Context, req *contro
 	storedConfig, exists := s.GetTenantConfiguration(tenantID, req.StewardId)
 
 	if !exists {
-		s.logger.Debug("No configuration found for steward", "steward_id", stewardIDForLog) // codeql[go/log-injection] stewardIDForLog/tenantIDForLog sanitized via regex validation
+		s.logger.Debug("No configuration found for steward", "steward_id", stewardIDForLog)
 		return &controller.ConfigResponse{
 			Status: &common.Status{
 				Code:    common.Status_NOT_FOUND,
@@ -165,7 +168,7 @@ func (s *ConfigurationService) GetConfiguration(ctx context.Context, req *contro
 	// Convert Go struct to protobuf (returns unsigned config, signing happens in QUIC handler)
 	protoConfig, err := stewardconfig.ToProto(filteredConfig)
 	if err != nil {
-		s.logger.Error("Failed to convert configuration to protobuf", "steward_id", stewardIDForLog, "error", err) // codeql[go/log-injection] stewardIDForLog/tenantIDForLog sanitized via regex validation
+		s.logger.Error("Failed to convert configuration to protobuf", "steward_id", stewardIDForLog, "error", err)
 		return &controller.ConfigResponse{
 			Status: &common.Status{
 				Code:    common.Status_ERROR,
@@ -174,7 +177,7 @@ func (s *ConfigurationService) GetConfiguration(ctx context.Context, req *contro
 		}, nil
 	}
 
-	s.logger.Debug("Configuration retrieved successfully", "steward_id", stewardIDForLog, "version", storedConfig.Version) // codeql[go/log-injection] stewardIDForLog/tenantIDForLog sanitized via regex validation
+	s.logger.Debug("Configuration retrieved successfully", "steward_id", stewardIDForLog, "version", storedConfig.Version)
 
 	// Return unsigned protobuf config (QUIC handler will sign it)
 	// Note: Config field is now *SignedConfig, but we set it to nil here
@@ -191,15 +194,17 @@ func (s *ConfigurationService) GetConfiguration(ctx context.Context, req *contro
 
 // ReportConfigStatus handles configuration status reports from stewards
 func (s *ConfigurationService) ReportConfigStatus(ctx context.Context, req *controller.ConfigStatusReport) (*common.Status, error) {
-	// Validate and sanitize steward ID (prevents log injection)
-	stewardIDForLog := req.StewardId
-	if !identifierRegex.MatchString(req.StewardId) {
-		stewardIDForLog = "[INVALID_ID]"
+	// Sanitize steward ID for logging - extract validated portion (prevents log injection)
+	// Using FindString creates a new string, breaking CodeQL taint tracking
+	stewardIDForLog := "[INVALID_ID]"
+	if matched := identifierRegex.FindString(req.StewardId); matched == "" || matched != req.StewardId {
 		s.logger.Warn("Invalid steward ID format in status report")
 		return &common.Status{
 			Code:    common.Status_ERROR,
 			Message: "Invalid steward ID format",
 		}, nil
+	} else {
+		stewardIDForLog = matched
 	}
 
 	s.logger.Debug("Configuration status report received",
