@@ -123,7 +123,7 @@ func (fsm *FailsafeRBACManager) CheckPermission(ctx context.Context, request *co
 		// Fail secure: deny access when underlying system is unhealthy
 		return &common.AccessResponse{
 			Granted: false,
-			Reason:  "Access denied: RBAC system unavailable (fail-secure mode)",
+			Reason:  "Access denied: rbac system unavailable (fail-secure mode)",
 		}, fmt.Errorf("RBAC system is unhealthy, failing securely by denying access")
 	}
 
@@ -158,7 +158,7 @@ func (fsm *FailsafeRBACManager) ValidateAccess(ctx context.Context, authContext 
 		// Fail secure: deny access when underlying system is unhealthy
 		return &common.AccessResponse{
 			Granted: false,
-			Reason:  "Access denied: RBAC system unavailable (fail-secure mode)",
+			Reason:  "Access denied: rbac system unavailable (fail-secure mode)",
 		}, fmt.Errorf("RBAC system is unhealthy, failing securely by denying access")
 	}
 
@@ -272,6 +272,24 @@ func (fsm *FailsafeRBACManager) markUnhealthy() {
 	if fsm.healthCheck.consecutiveFailures >= fsm.healthCheck.maxConsecutiveFailures {
 		fsm.healthCheck.isHealthy = false
 	}
+}
+
+// ForceUnhealthy forces the system into unhealthy state for testing purposes
+// This is a test-only method that bypasses normal health check mechanisms
+func (fsm *FailsafeRBACManager) ForceUnhealthy() {
+	fsm.healthCheck.mutex.Lock()
+	defer fsm.healthCheck.mutex.Unlock()
+	fsm.healthCheck.consecutiveFailures = fsm.healthCheck.maxConsecutiveFailures
+	fsm.healthCheck.isHealthy = false
+}
+
+// ForceHealthy forces the system into healthy state for testing recovery scenarios
+// This is a test-only method that bypasses normal health check mechanisms
+func (fsm *FailsafeRBACManager) ForceHealthy() {
+	fsm.healthCheck.mutex.Lock()
+	defer fsm.healthCheck.mutex.Unlock()
+	fsm.healthCheck.consecutiveFailures = 0
+	fsm.healthCheck.isHealthy = true
 }
 
 // Delegate all other RBACManager interface methods to underlying manager with fail-secure behavior

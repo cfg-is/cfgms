@@ -115,6 +115,9 @@ func (fre *FailsafeRiskEngine) EvaluateRisk(ctx context.Context, request *risk.R
 	fre.metrics.mutex.Unlock()
 
 	if !fre.IsHealthy() {
+		fre.metrics.mutex.Lock()
+		fre.metrics.FailsafeAssessments++
+		fre.metrics.mutex.Unlock()
 		return fre.generateFailsafeRiskAssessment(request)
 	}
 
@@ -124,9 +127,11 @@ func (fre *FailsafeRiskEngine) EvaluateRisk(ctx context.Context, request *risk.R
 		fre.metrics.FailedAssessments++
 		fre.metrics.mutex.Unlock()
 
-		// Mark as unhealthy and return failsafe assessment
+		// Mark as unhealthy and return error to trigger health check degradation
 		fre.markUnhealthy()
-		return fre.generateFailsafeRiskAssessment(request)
+		// Generate failsafe assessment but return it as an error scenario
+		failsafeResult, _ := fre.generateFailsafeRiskAssessment(request)
+		return failsafeResult, fmt.Errorf("risk assessment failed, system marked unhealthy: %w", err)
 	}
 
 	return result, nil
@@ -442,6 +447,15 @@ func (fre *FailsafeRiskEngine) markUnhealthy() {
 	if fre.healthCheck.consecutiveFailures >= fre.healthCheck.maxConsecutiveFailures {
 		fre.healthCheck.isHealthy = false
 	}
+}
+
+// ForceUnhealthy forces the risk engine into unhealthy state for testing purposes
+// This is a test-only method that bypasses normal health check mechanisms
+func (fre *FailsafeRiskEngine) ForceUnhealthy() {
+	fre.healthCheck.mutex.Lock()
+	defer fre.healthCheck.mutex.Unlock()
+	fre.healthCheck.consecutiveFailures = fre.healthCheck.maxConsecutiveFailures
+	fre.healthCheck.isHealthy = false
 }
 
 // Additional risk engine methods can be wrapped similarly if needed

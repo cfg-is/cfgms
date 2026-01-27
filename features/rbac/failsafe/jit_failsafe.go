@@ -131,9 +131,9 @@ func (fjam *FailsafeJITAccessManager) RequestAccess(ctx context.Context, req *ji
 		fjam.metrics.FailedRequests++
 		fjam.metrics.mutex.Unlock()
 
-		// Mark as unhealthy and handle failure
+		// Mark as unhealthy and return error to trigger health check degradation
 		fjam.markUnhealthy()
-		return fjam.handleRequestDuringFailure(ctx, req)
+		return nil, fmt.Errorf("JIT access request failed, system marked unhealthy: %w", err)
 	}
 
 	// Track granted access for potential revocation
@@ -509,6 +509,21 @@ func (fjam *FailsafeJITAccessManager) markUnhealthy() {
 			// Trigger failure handling
 			go fjam.handleSystemFailure()
 		}
+	}
+}
+
+// ForceUnhealthy forces the JIT manager into unhealthy state for testing purposes
+// This is a test-only method that bypasses normal health check mechanisms
+func (fjam *FailsafeJITAccessManager) ForceUnhealthy() {
+	fjam.healthCheck.mutex.Lock()
+	wasHealthy := fjam.healthCheck.isHealthy
+	fjam.healthCheck.consecutiveFailures = fjam.healthCheck.maxConsecutiveFailures
+	fjam.healthCheck.isHealthy = false
+	fjam.healthCheck.mutex.Unlock()
+
+	if wasHealthy {
+		// Trigger failure handling
+		go fjam.handleSystemFailure()
 	}
 }
 

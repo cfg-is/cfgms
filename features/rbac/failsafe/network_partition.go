@@ -195,11 +195,15 @@ func (nptm *NetworkPartitionTolerantManager) CheckPermission(ctx context.Context
 			return response, nil
 		}
 
-		// Primary RBAC failed - mark as connectivity issue and fall back
+		// Primary RBAC failed - mark as connectivity issue and return error to trigger partition detection
 		nptm.markConnectivityFailure()
+		return &common.AccessResponse{
+			Granted: false,
+			Reason:  "Access denied: Network connectivity issue detected",
+		}, fmt.Errorf("network partition detected, primary RBAC failed: %w", err)
 	}
 
-	// Network is partitioned or primary failed - use partition tolerance mode
+	// Network is partitioned - use partition tolerance mode
 	return nptm.handlePartitionedPermissionCheck(ctx, request)
 }
 
@@ -213,7 +217,7 @@ func (nptm *NetworkPartitionTolerantManager) handlePartitionedPermissionCheck(ct
 	case PartitionModeFailSecure:
 		return &common.AccessResponse{
 			Granted: false,
-			Reason:  "Access denied: Network partition detected, fail-secure mode active",
+			Reason:  "Access denied: Network partition detected (network_partition_fail_secure)",
 		}, fmt.Errorf("network partition detected, failing securely by denying access")
 
 	case PartitionModeLocalCache, PartitionModeReadOnlyCache, PartitionModeGracefulDegradation:
@@ -394,6 +398,19 @@ func (nptm *NetworkPartitionTolerantManager) markConnectivityFailure() {
 			nptm.networkMonitor.partitionDetected = true
 			nptm.networkMonitor.partitionStartTime = time.Now()
 		}
+	}
+}
+
+// ForcePartitioned forces the network into partitioned state for testing purposes
+// This is a test-only method that bypasses normal connectivity checks
+func (nptm *NetworkPartitionTolerantManager) ForcePartitioned() {
+	nptm.networkMonitor.mutex.Lock()
+	defer nptm.networkMonitor.mutex.Unlock()
+	nptm.networkMonitor.consecutiveFailures = nptm.networkMonitor.maxConsecutiveFailures
+	nptm.networkMonitor.isConnected = false
+	if !nptm.networkMonitor.partitionDetected {
+		nptm.networkMonitor.partitionDetected = true
+		nptm.networkMonitor.partitionStartTime = time.Now()
 	}
 }
 
