@@ -91,7 +91,7 @@ func NewConfigurationService(logger logging.Logger, controllerSvc *ControllerSer
 func (s *ConfigurationService) GetConfiguration(ctx context.Context, req *controller.ConfigRequest) (*controller.ConfigResponse, error) {
 	// Sanitize steward ID for logging - extract validated portion (prevents log injection)
 	// Using FindString creates a new string, breaking CodeQL taint tracking
-	stewardIDForLog := "[INVALID_ID]"
+	stewardIDForLog := "[INVALID_ID]" //nolint:ineffassign // Security: assignment needed for CodeQL taint analysis
 	if matched := identifierRegex.FindString(req.StewardId); matched == "" || matched != req.StewardId {
 		s.logger.Warn("Invalid steward ID format in configuration request")
 		return &controller.ConfigResponse{
@@ -196,7 +196,7 @@ func (s *ConfigurationService) GetConfiguration(ctx context.Context, req *contro
 func (s *ConfigurationService) ReportConfigStatus(ctx context.Context, req *controller.ConfigStatusReport) (*common.Status, error) {
 	// Sanitize steward ID for logging - extract validated portion (prevents log injection)
 	// Using FindString creates a new string, breaking CodeQL taint tracking
-	stewardIDForLog := "[INVALID_ID]"
+	stewardIDForLog := "[INVALID_ID]" //nolint:ineffassign // Security: assignment needed for CodeQL taint analysis
 	if matched := identifierRegex.FindString(req.StewardId); matched == "" || matched != req.StewardId {
 		s.logger.Warn("Invalid steward ID format in status report")
 		return &common.Status{

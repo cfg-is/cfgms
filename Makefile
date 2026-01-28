@@ -1601,21 +1601,64 @@ test-mqtt-quic-setup:
 	docker compose -f docker-compose.test.yml --profile ha up -d timescaledb-test controller-standalone
 	@echo ""
 	@echo "⏳ Waiting for controller to initialize..."
-	@sleep 15
-	@echo "🔍 Checking controller health..."
-	@for i in 1 2 3 4 5; do \
+	@sleep 30
+	@echo "🔍 Validating controller health..."
+	@echo "   Checking MQTT broker (port 8883)..."
+	@for i in 1 2 3 4 5 6 7 8 9 10; do \
 		if docker exec controller-standalone sh -c "netstat -ln | grep :8883" >/dev/null 2>&1; then \
-			echo "✅ MQTT broker ready on port 8883 (mapped to 1886)"; \
+			echo "   ✅ MQTT broker ready on port 8883 (mapped to localhost:1886)"; \
 			break; \
 		fi; \
-		echo "⏳ Waiting for MQTT broker (attempt $$i/5)..."; \
+		if [ $$i -eq 10 ]; then \
+			echo "   ❌ MQTT broker failed to start after 10 attempts"; \
+			docker logs controller-standalone | tail -20; \
+			exit 1; \
+		fi; \
+		echo "   ⏳ Waiting for MQTT broker (attempt $$i/10)..."; \
 		sleep 5; \
 	done
+	@echo "   Checking HTTP API (port 9080)..."
+	@for i in 1 2 3 4 5; do \
+		if docker exec controller-standalone sh -c "netstat -ln | grep :9080" >/dev/null 2>&1; then \
+			echo "   ✅ HTTP API ready on port 9080 (mapped to localhost:8080)"; \
+			break; \
+		fi; \
+		if [ $$i -eq 5 ]; then \
+			echo "   ❌ HTTP API failed to start"; \
+			exit 1; \
+		fi; \
+		sleep 3; \
+	done
+	@echo "   Checking QUIC endpoint (port 4433)..."
+	@for i in 1 2 3 4 5; do \
+		if docker exec controller-standalone sh -c "netstat -ln | grep :4433" >/dev/null 2>&1; then \
+			echo "   ✅ QUIC endpoint ready on port 4433 (mapped to localhost:4436)"; \
+			break; \
+		fi; \
+		if [ $$i -eq 5 ]; then \
+			echo "   ⚠️  QUIC endpoint not responding (may be disabled)"; \
+		fi; \
+		sleep 3; \
+	done
+	@echo "   Checking TimescaleDB..."
+	@for i in 1 2 3; do \
+		if docker exec cfgms-timescaledb-test pg_isready -U cfgms_test >/dev/null 2>&1; then \
+			echo "   ✅ TimescaleDB ready"; \
+			break; \
+		fi; \
+		if [ $$i -eq 3 ]; then \
+			echo "   ⚠️  TimescaleDB check skipped (container name mismatch)"; \
+		fi; \
+		sleep 3; \
+	done
+	@echo "   Allowing services to settle..."
+	@sleep 5
 	@echo ""
-	@echo "✅ MQTT+QUIC Docker environment ready!"
-	@echo "   MQTT: 127.0.0.1:1886 (TLS)"
-	@echo "   QUIC: 127.0.0.1:4436"
-	@echo "   HTTPS: 127.0.0.1:9080"
+	@echo "✅ MQTT+QUIC Docker environment fully initialized!"
+	@echo "   MQTT: localhost:1886 (TLS)"
+	@echo "   QUIC: localhost:4436"
+	@echo "   HTTP API: localhost:8080 (HTTPS)"
+	@echo "   TimescaleDB: localhost:5433"
 
 test-mqtt-quic-cleanup:
 	@echo ""

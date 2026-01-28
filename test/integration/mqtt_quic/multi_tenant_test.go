@@ -41,7 +41,7 @@ func (s *MultiTenantTestSuite) SetupSuite() {
 	}
 
 	// Connect to Docker controller
-	s.helper = NewTestHelper(GetTestHTTPAddr("https://127.0.0.1:8080"))
+	s.helper = NewTestHelper(GetTestHTTPAddr("https://localhost:8080"))
 	s.tenantClients = make(map[string]mqtt.Client)
 
 	// Get TLS config from registration API (required for mTLS)
@@ -122,7 +122,7 @@ func (s *MultiTenantTestSuite) TestMQTTTopicIsolation() {
 	s.T().Log("AC2: Testing MQTT topic isolation (tenant1 vs tenant2)")
 
 	tlsConfig := s.tlsConfig
-	brokerAddr := GetTestMQTTAddr("ssl://127.0.0.1:1886")
+	brokerAddr := GetTestMQTTAddr("ssl://localhost:1886")
 
 	// Create MQTT clients for tenant1 and tenant2
 	tenant1Client := s.createTenantMQTTClient("tenant1", brokerAddr, tlsConfig)
@@ -206,7 +206,7 @@ func (s *MultiTenantTestSuite) TestMQTTTopicIsolation() {
 func (s *MultiTenantTestSuite) TestCrossTenantMessagePrevention() {
 	s.T().Log("AC3: Testing cross-tenant message delivery prevention")
 
-	brokerAddr := GetTestMQTTAddr("ssl://127.0.0.1:1886")
+	brokerAddr := GetTestMQTTAddr("ssl://localhost:1886")
 
 	// Register separate stewards for each tenant (each gets unique certificate)
 	tenant1TLS, tenant1ID := s.helper.GetTLSConfigFromRegistration(s.T(), "tenant1", "integration-test")
@@ -252,7 +252,7 @@ func (s *MultiTenantTestSuite) TestConfigurationRoutingBoundaries() {
 	s.T().Log("AC4: Testing configuration routing respects tenant boundaries")
 
 	tlsConfig := s.tlsConfig
-	brokerAddr := GetTestMQTTAddr("ssl://127.0.0.1:1886")
+	brokerAddr := GetTestMQTTAddr("ssl://localhost:1886")
 
 	// Create tenant clients - use tenant IDs that match the steward topic patterns
 	// Story #313: ACLs enforce that client ID must match steward ID in topics
@@ -316,7 +316,7 @@ func (s *MultiTenantTestSuite) TestDNACollectionSeparation() {
 	s.T().Log("AC5: Testing DNA collection separated by tenant ID")
 
 	tlsConfig := s.tlsConfig
-	brokerAddr := GetTestMQTTAddr("ssl://127.0.0.1:1886")
+	brokerAddr := GetTestMQTTAddr("ssl://localhost:1886")
 
 	// Create tenant clients - use tenant IDs that match the steward topic patterns
 	// Story #313: ACLs enforce that client ID must match steward ID in topics
@@ -385,7 +385,7 @@ func (s *MultiTenantTestSuite) TestDNACollectionSeparation() {
 func (s *MultiTenantTestSuite) TestHeartbeatIsolation() {
 	s.T().Log("AC6: Testing heartbeats isolated per tenant")
 
-	brokerAddr := GetTestMQTTAddr("ssl://127.0.0.1:1886")
+	brokerAddr := GetTestMQTTAddr("ssl://localhost:1886")
 
 	// Register separate stewards for each tenant (each gets unique certificate)
 	tenant1TLS, tenant1ID := s.helper.GetTLSConfigFromRegistration(s.T(), "tenant1", "integration-test")
