@@ -27,7 +27,7 @@ func (s *RegistrationTestSuite) SetupSuite() {
 	}
 
 	// Connect to Docker controller (assumes docker-compose.test.yml is running)
-	s.helper = NewTestHelper(GetTestHTTPAddr("https://127.0.0.1:8080"))
+	s.helper = NewTestHelper(GetTestHTTPAddr("https://localhost:8080"))
 }
 
 func (s *RegistrationTestSuite) TearDownSuite() {

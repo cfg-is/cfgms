@@ -32,8 +32,8 @@ func (s *LoadTestSuite) SetupSuite() {
 		s.T().Skip("Skipping load tests in short mode - requires MQTT broker")
 	}
 
-	s.helper = NewTestHelper(GetTestHTTPAddr("https://127.0.0.1:8080"))
-	s.mqttAddr = GetTestMQTTAddr("ssl://127.0.0.1:1886") // Use TLS
+	s.helper = NewTestHelper(GetTestHTTPAddr("https://localhost:8080"))
+	s.mqttAddr = GetTestMQTTAddr("ssl://localhost:1886") // Use TLS
 
 	// Get TLS config from registration API (required for mTLS)
 	s.tlsConfig, s.stewardID = s.helper.GetTLSConfigFromRegistration(s.T(), "default", "integration-test")
