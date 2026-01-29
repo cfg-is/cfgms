@@ -869,8 +869,22 @@ func TestDegradedModeOperationalMetrics(t *testing.T) {
 			{
 				Component: "Network",
 				Action: func() {
-					// Force network partition and test graceful degradation mode
+					// Set up graceful degradation mode and cache admin policy
+					framework.failsafeNetwork.SetPartitionMode(failsafe.PartitionModeGracefulDegradation)
+
+					// First cache the admin's permission (must happen BEFORE partition)
+					cacheRequest := &common.AccessRequest{
+						SubjectId:    "degraded-admin",
+						PermissionId: "config.read",
+						TenantId:     "degraded-tenant",
+						ResourceId:   "partition-resource",
+					}
+					_, _ = framework.failsafeNetwork.CheckPermission(ctx, cacheRequest)
+
+					// Now force network partition
 					framework.failsafeNetwork.ForcePartitioned()
+
+					// Test graceful degradation with cached policy
 					op := framework.testNetworkPartitionTolerance(ctx, "degraded-admin", "config.read", failsafe.PartitionModeGracefulDegradation)
 					framework.recordDegradedOperation(op)
 				},
