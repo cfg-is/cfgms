@@ -104,6 +104,18 @@ func NewNetworkPartitionTolerantManager(primaryRBAC rbac.RBACManager) *NetworkPa
 		mutex:       sync.RWMutex{},
 	}
 
+	// SECURITY NOTE: Production Deployment Recommendations
+	//
+	// To minimize security risk during network partitions:
+	// 1. **Aggressive Caching**: Cache ALL active user policies during normal operation
+	// 2. **Longer TTL for Admins**: Set 12-24h expiry for admin user policies
+	// 3. **Pre-populate on Startup**: Load critical admin policies into cache at startup
+	// 4. **Background Refresh**: Continuously refresh cache before expiration
+	// 5. **Cache Monitoring**: Alert when cache hit rate drops below 95%
+	//
+	// This ensures graceful degradation can serve from cache without granting unauthorized access.
+	// Following industry patterns: Kubernetes (5min TTL), Istio (5min TTL), Zanzibar (>95% hit rate)
+
 	networkMonitor := &NetworkConnectivityMonitor{
 		primaryRBAC:            primaryRBAC,
 		maxConsecutiveFailures: 3,
@@ -245,9 +257,12 @@ func (nptm *NetworkPartitionTolerantManager) checkPermissionFromCache(ctx contex
 		nptm.metrics.CacheMisses++
 		nptm.metrics.mutex.Unlock()
 
+		// SECURITY: Fail secure - deny access when no cached policy exists
+		// This prevents DDoS attacks from bypassing RBAC by triggering network partitions
+		// Production deployments should use aggressive caching to minimize cache misses
 		return &common.AccessResponse{
 			Granted: false,
-			Reason:  "Access denied: No cached policy available during network partition",
+			Reason:  "Access denied: No cached policy available during network partition (fail-secure)",
 		}, fmt.Errorf("no cached policy available for subject %s during network partition", request.SubjectId)
 	}
 
@@ -257,17 +272,12 @@ func (nptm *NetworkPartitionTolerantManager) checkPermissionFromCache(ctx contex
 		nptm.metrics.CacheExpirations++
 		nptm.metrics.mutex.Unlock()
 
-		// For graceful degradation, allow access but with restrictions
-		if nptm.partitionMode == PartitionModeGracefulDegradation {
-			return &common.AccessResponse{
-				Granted: true,
-				Reason:  "Access granted with restrictions: Cached policy expired, graceful degradation mode",
-			}, nil
-		}
-
+		// SECURITY: Fail secure on expired cache - denies access
+		// Graceful degradation does NOT bypass expiration - that would allow stale/revoked permissions
+		// Production: Use longer cache TTLs (12-24h) for critical admin users
 		return &common.AccessResponse{
 			Granted: false,
-			Reason:  "Access denied: Cached policy expired during network partition",
+			Reason:  "Access denied: Cached policy expired during network partition (fail-secure)",
 		}, fmt.Errorf("cached policy expired for subject %s during network partition", request.SubjectId)
 	}
 
@@ -279,15 +289,21 @@ func (nptm *NetworkPartitionTolerantManager) checkPermissionFromCache(ctx contex
 	permissionKey := fmt.Sprintf("%s:%s", request.PermissionId, request.ResourceId)
 	granted, exists := cachedPolicy.EffectivePermissions[permissionKey]
 	if !exists {
-		granted = false // Default to deny if specific permission not cached
+		// SECURITY: Fail secure - specific permission not in cache
+		granted = false
 	}
 
+	// For graceful degradation mode, add enhanced monitoring metadata when access is granted
+	// NOTE: Graceful degradation does NOT change the access decision - only adds monitoring
 	reason := "Access granted from cached policy during network partition"
 	if !granted {
 		reason = "Access denied by cached policy during network partition"
 	}
 
-	// Add degradation metadata would go here in production
+	// Add graceful degradation indicator for audit and monitoring
+	if nptm.partitionMode == PartitionModeGracefulDegradation && granted {
+		reason = "Access granted from cached policy during network partition (graceful degraded mode with enhanced monitoring)"
+	}
 
 	return &common.AccessResponse{
 		Granted: granted,
