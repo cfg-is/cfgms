@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -649,7 +650,7 @@ func TestConcurrentFailureScenarios(t *testing.T) {
 
 	t.Run("Multiple Component Failures", func(t *testing.T) {
 		var wg sync.WaitGroup
-		errorCount := int64(0)
+		var errorCount int64 // Use atomic operations for concurrent access
 
 		// Force all components to unhealthy state concurrently
 		components := []func(){
@@ -666,7 +667,7 @@ func TestConcurrentFailureScenarios(t *testing.T) {
 				}
 				_, err := framework.failsafeRBAC.CheckPermission(ctx, request)
 				if err != nil {
-					errorCount++
+					atomic.AddInt64(&errorCount, 1)
 				}
 			},
 			func() {
@@ -687,7 +688,7 @@ func TestConcurrentFailureScenarios(t *testing.T) {
 				result, err := framework.failsafeRisk.EvaluateRisk(ctx, riskRequest)
 				// Risk engine returns conservative assessment, not error
 				if err == nil && result.RiskLevel == risk.RiskLevelHigh {
-					errorCount++
+					atomic.AddInt64(&errorCount, 1)
 				}
 			},
 			func() {
@@ -707,7 +708,7 @@ func TestConcurrentFailureScenarios(t *testing.T) {
 				}
 				_, err := framework.failsafeJIT.RequestAccess(ctx, jitSpec)
 				if err != nil {
-					errorCount++
+					atomic.AddInt64(&errorCount, 1)
 				}
 			},
 		}
@@ -721,7 +722,7 @@ func TestConcurrentFailureScenarios(t *testing.T) {
 
 		wg.Wait()
 
-		assert.Greater(t, errorCount, int64(0), "Should have errors from component failures")
+		assert.Greater(t, atomic.LoadInt64(&errorCount), int64(0), "Should have errors from component failures")
 
 		// Verify that all systems are now in failsafe mode
 		assert.False(t, framework.failsafeRBAC.IsHealthy(), "RBAC should be unhealthy")
