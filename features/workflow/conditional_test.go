@@ -512,15 +512,24 @@ func TestWorkflowConditionalExecution(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, execution)
 
-	// Wait for completion
-	for execution.GetStatus() == StatusRunning || execution.GetStatus() == StatusPending {
-		// Small delay to allow workflow to complete
-		time.Sleep(10 * time.Millisecond)
-		execution, _ = engine.GetExecution(execution.ID)
-	}
+	// Wait for completion with timeout (reliable on Windows)
+	timeout := time.After(2 * time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
 
-	// Additional wait for async goroutines to complete logging (Windows CI timing)
-	time.Sleep(100 * time.Millisecond)
+	completed := false
+	for !completed {
+		select {
+		case <-timeout:
+			t.Fatalf("timeout waiting for workflow completion, status: %s", execution.GetStatus())
+		case <-ticker.C:
+			execution, _ = engine.GetExecution(execution.ID)
+			status := execution.GetStatus()
+			if status == StatusCompleted || status == StatusFailed || status == StatusCancelled {
+				completed = true
+			}
+		}
+	}
 
 	assert.Equal(t, StatusCompleted, execution.GetStatus())
 	assert.True(t, execution.HasStepResult("conditional-step"))

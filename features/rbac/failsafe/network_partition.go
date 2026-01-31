@@ -11,13 +11,14 @@ import (
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/rbac/memory"
+	"github.com/cfgis/cfgms/pkg/cache"
 )
 
 // NetworkPartitionTolerantManager provides network partition tolerance with local security policy enforcement
 // When network connectivity to central services is lost, it maintains security using locally cached policies
 type NetworkPartitionTolerantManager struct {
 	primaryRBAC    rbac.RBACManager
-	localCache     *LocalSecurityPolicyCache
+	localCache     *LocalSecurityPolicyStore
 	networkMonitor *NetworkConnectivityMonitor
 	partitionMode  PartitionToleranceMode
 	mutex          sync.RWMutex
@@ -38,22 +39,19 @@ const (
 	PartitionModeGracefulDegradation PartitionToleranceMode = "graceful_degradation"
 )
 
-// LocalSecurityPolicyCache maintains a local cache of security policies for partition tolerance
-type LocalSecurityPolicyCache struct {
-	permissions map[string]*common.Permission
-	roles       map[string]*common.Role
-	subjects    map[string]*common.Subject
-	assignments map[string]*common.RoleAssignment
-	policies    map[string]*CachedSecurityPolicy
+// LocalSecurityPolicyStore maintains a local cache of security policies for partition tolerance
+// Uses the global pkg/cache provider for consistent caching behavior across CFGMS
+type LocalSecurityPolicyStore struct {
+	cache       *cache.Cache // Global cache provider for policy storage
 	lastSync    time.Time
 	cacheExpiry time.Duration
 	maxCacheAge time.Duration
 	Metadata    map[string]interface{}
-	mutex       sync.RWMutex
+	mutex       sync.RWMutex // Protects lastSync and Metadata only (cache has its own mutex)
 }
 
-// CachedSecurityPolicy represents a cached security policy for offline enforcement
-type CachedSecurityPolicy struct {
+// SecurityPolicySnapshot represents a cached security policy for offline enforcement
+type SecurityPolicySnapshot struct {
 	SubjectID            string                 `json:"subject_id"`
 	TenantID             string                 `json:"tenant_id"`
 	Permissions          []*common.Permission   `json:"permissions"`
@@ -93,12 +91,17 @@ type PartitionMetrics struct {
 
 // NewNetworkPartitionTolerantManager creates a new network partition tolerant RBAC manager
 func NewNetworkPartitionTolerantManager(primaryRBAC rbac.RBACManager) *NetworkPartitionTolerantManager {
-	localCache := &LocalSecurityPolicyCache{
-		permissions: make(map[string]*common.Permission),
-		roles:       make(map[string]*common.Role),
-		subjects:    make(map[string]*common.Subject),
-		assignments: make(map[string]*common.RoleAssignment),
-		policies:    make(map[string]*CachedSecurityPolicy),
+	// Create cache using global pkg/cache provider
+	policyCache := cache.NewCache(cache.CacheConfig{
+		Name:            "rbac-partition-policies",
+		DefaultTTL:      2 * time.Hour,     // Policies expire after 2 hours
+		MaxRuntimeItems: 10000,             // Support up to 10k cached policies
+		EvictionPolicy:  cache.EvictionLRU, // Use LRU eviction for policies
+		CleanupInterval: 15 * time.Minute,  // Clean up expired policies every 15 min
+	})
+
+	localCache := &LocalSecurityPolicyStore{
+		cache:       policyCache,
 		cacheExpiry: 2 * time.Hour,  // Policies expire after 2 hours
 		maxCacheAge: 24 * time.Hour, // Maximum cache age before forced refresh
 		mutex:       sync.RWMutex{},
@@ -245,19 +248,17 @@ func (nptm *NetworkPartitionTolerantManager) handlePartitionedPermissionCheck(ct
 
 // checkPermissionFromCache checks permission using local cache
 func (nptm *NetworkPartitionTolerantManager) checkPermissionFromCache(ctx context.Context, request *common.AccessRequest) (*common.AccessResponse, error) {
-	// Look up cached policy for the subject
+	// Look up cached policy for the subject using global cache provider
 	cacheKey := fmt.Sprintf("%s:%s", request.SubjectId, request.TenantId)
 
-	nptm.localCache.mutex.RLock()
-	cachedPolicy, exists := nptm.localCache.policies[cacheKey]
-	nptm.localCache.mutex.RUnlock()
-
+	value, exists := nptm.localCache.cache.Get(cacheKey)
 	if !exists {
 		nptm.metrics.mutex.Lock()
 		nptm.metrics.CacheMisses++
 		nptm.metrics.mutex.Unlock()
 
-		// SECURITY: Fail secure - deny access when no cached policy exists
+		// SECURITY: Fail secure - deny access when no cached policy exists or expired
+		// pkg/cache.Get returns false for both missing and expired entries
 		// This prevents DDoS attacks from bypassing RBAC by triggering network partitions
 		// Production deployments should use aggressive caching to minimize cache misses
 		return &common.AccessResponse{
@@ -266,20 +267,21 @@ func (nptm *NetworkPartitionTolerantManager) checkPermissionFromCache(ctx contex
 		}, fmt.Errorf("no cached policy available for subject %s during network partition", request.SubjectId)
 	}
 
-	// Check if cached policy has expired
-	if time.Now().After(cachedPolicy.ExpiresAt) {
+	// Type assert to SecurityPolicySnapshot
+	cachedPolicy, ok := value.(*SecurityPolicySnapshot)
+	if !ok {
 		nptm.metrics.mutex.Lock()
-		nptm.metrics.CacheExpirations++
+		nptm.metrics.CacheMisses++
 		nptm.metrics.mutex.Unlock()
 
-		// SECURITY: Fail secure on expired cache - denies access
-		// Graceful degradation does NOT bypass expiration - that would allow stale/revoked permissions
-		// Production: Use longer cache TTLs (12-24h) for critical admin users
 		return &common.AccessResponse{
 			Granted: false,
-			Reason:  "Access denied: Cached policy expired during network partition (fail-secure)",
-		}, fmt.Errorf("cached policy expired for subject %s during network partition", request.SubjectId)
+			Reason:  "Access denied: Invalid cached policy type during network partition (fail-secure)",
+		}, fmt.Errorf("invalid cached policy type for subject %s", request.SubjectId)
 	}
+
+	// Note: pkg/cache handles expiration automatically, so if we got here, the policy is valid
+	// However, we still track CacheExpirations metric when we detect them in maintenance
 
 	nptm.metrics.mutex.Lock()
 	nptm.metrics.CacheHits++
@@ -320,13 +322,17 @@ func (nptm *NetworkPartitionTolerantManager) cachePermissionResult(request *comm
 	cacheKey := fmt.Sprintf("%s:%s", request.SubjectId, request.TenantId)
 	permissionKey := fmt.Sprintf("%s:%s", request.PermissionId, request.ResourceId)
 
-	nptm.localCache.mutex.Lock()
-	defer nptm.localCache.mutex.Unlock()
+	// Get or create cached policy using global cache provider
+	var policy *SecurityPolicySnapshot
+	value, exists := nptm.localCache.cache.Get(cacheKey)
+	if exists {
+		// Update existing policy
+		policy, _ = value.(*SecurityPolicySnapshot)
+	}
 
-	// Get or create cached policy
-	policy, exists := nptm.localCache.policies[cacheKey]
-	if !exists {
-		policy = &CachedSecurityPolicy{
+	if policy == nil {
+		// Create new policy
+		policy = &SecurityPolicySnapshot{
 			SubjectID:            request.SubjectId,
 			TenantID:             request.TenantId,
 			EffectivePermissions: make(map[string]bool),
@@ -334,12 +340,14 @@ func (nptm *NetworkPartitionTolerantManager) cachePermissionResult(request *comm
 			ExpiresAt:            time.Now().Add(nptm.localCache.cacheExpiry),
 			Metadata:             make(map[string]interface{}),
 		}
-		nptm.localCache.policies[cacheKey] = policy
 	}
 
 	// Update the specific permission
 	policy.EffectivePermissions[permissionKey] = response.Granted
 	policy.Metadata["last_updated"] = time.Now()
+
+	// Store back in cache with configured TTL
+	_ = nptm.localCache.cache.Set(cacheKey, policy, nptm.localCache.cacheExpiry)
 }
 
 // startNetworkMonitoring continuously monitors network connectivity
@@ -430,6 +438,35 @@ func (nptm *NetworkPartitionTolerantManager) ForcePartitioned() {
 	}
 }
 
+// ForcePartition forces the network into partitioned state for testing with auto-heal
+// This is a test-only method for chaos engineering tests
+// If duration > 0, automatically heals the partition after the specified duration
+func (nptm *NetworkPartitionTolerantManager) ForcePartition(duration time.Duration) {
+	nptm.ForcePartitioned()
+
+	// Auto-heal after duration
+	if duration > 0 {
+		time.AfterFunc(duration, func() {
+			nptm.HealPartition()
+		})
+	}
+}
+
+// HealPartition recovers from forced partition state for testing purposes
+// This is a test-only method that restores normal connectivity
+func (nptm *NetworkPartitionTolerantManager) HealPartition() {
+	nptm.networkMonitor.mutex.Lock()
+	defer nptm.networkMonitor.mutex.Unlock()
+
+	// Restore connectivity
+	nptm.networkMonitor.consecutiveFailures = 0
+	nptm.networkMonitor.isConnected = true
+	nptm.networkMonitor.partitionDetected = false
+
+	// Trigger partition recovery handler
+	nptm.handlePartitionRecovery()
+}
+
 // handlePartitionDetected handles the transition to partitioned state
 func (nptm *NetworkPartitionTolerantManager) handlePartitionDetected() {
 	// Log partition detection (would use proper logging in production)
@@ -474,29 +511,24 @@ func (nptm *NetworkPartitionTolerantManager) startCacheMaintenance() {
 	}
 }
 
-// performCacheMaintenance cleans up expired cache entries and synchronizes when connected
+// performCacheMaintenance performs cache maintenance and synchronizes when connected
+// Note: pkg/cache handles automatic expiration cleanup, so this mainly handles synchronization
 func (nptm *NetworkPartitionTolerantManager) performCacheMaintenance() {
 	now := time.Now()
 
-	nptm.localCache.mutex.Lock()
-	defer nptm.localCache.mutex.Unlock()
-
-	// Remove expired policies
-	for key, policy := range nptm.localCache.policies {
-		if now.After(policy.ExpiresAt) {
-			delete(nptm.localCache.policies, key)
-			nptm.metrics.mutex.Lock()
-			nptm.metrics.CacheExpirations++
-			nptm.metrics.mutex.Unlock()
-		}
-	}
+	// Update cache expiration metrics from pkg/cache stats
+	stats := nptm.localCache.cache.Stats()
+	nptm.metrics.mutex.Lock()
+	nptm.metrics.CacheExpirations = stats.ItemsExpired
+	nptm.metrics.mutex.Unlock()
 
 	// Synchronize with primary RBAC if connected and cache is stale
-	if nptm.IsNetworkConnected() {
-		timeSinceLastSync := now.Sub(nptm.localCache.lastSync)
-		if timeSinceLastSync > nptm.localCache.maxCacheAge {
-			go nptm.synchronizeLocalCache()
-		}
+	nptm.localCache.mutex.Lock()
+	timeSinceLastSync := now.Sub(nptm.localCache.lastSync)
+	nptm.localCache.mutex.Unlock()
+
+	if nptm.IsNetworkConnected() && timeSinceLastSync > nptm.localCache.maxCacheAge {
+		go nptm.synchronizeLocalCache()
 	}
 }
 

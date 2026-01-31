@@ -340,18 +340,10 @@ func (framework *ChaosSecurityTestFramework) injectJITFailure(failureType string
 func (framework *ChaosSecurityTestFramework) injectNetworkFailure(failureType string) {
 	switch failureType {
 	case "partition":
-		go func() {
-			ctx, cancel := context.WithCancel(context.Background())
-			cancel()
-
-			request := &common.AccessRequest{
-				SubjectId:    "chaos-user-1",
-				PermissionId: "chaos.network",
-				TenantId:     "chaos-tenant",
-			}
-
-			_, _ = framework.failsafeNetwork.CheckPermission(ctx, request)
-		}()
+		// Actually partition the network for 5 seconds with auto-heal
+		if framework.failsafeNetwork != nil {
+			framework.failsafeNetwork.ForcePartition(5 * time.Second)
+		}
 	}
 }
 
@@ -744,23 +736,41 @@ func TestChaosNetworkPartitionTolerance(t *testing.T) {
 	require.NoError(t, framework.Setup())
 
 	t.Run("Partition Tolerance Under Chaos", func(t *testing.T) {
-		t.Skip("Skipping until Issue #291: Chaos framework needs proper network failure injection implementation")
-
 		// Set to graceful degradation mode
 		framework.failsafeNetwork.SetPartitionMode(failsafe.PartitionModeGracefulDegradation)
 
-		// First, populate cache with some successful operations
+		// CRITICAL: Cache policies BEFORE partitioning (fail-secure requires cached policies)
 		ctx := context.Background()
+
+		// Cache multiple permissions for the test user
+		testPermissions := []struct {
+			permission string
+			resource   string
+		}{
+			{"config.read", "chaos-resource"},
+			{"config.write", "chaos-resource"},
+			{"chaos.network", "chaos-resource"},
+		}
+
+		for _, perm := range testPermissions {
+			request := &common.AccessRequest{
+				SubjectId:    "chaos-user-1",
+				PermissionId: perm.permission,
+				TenantId:     "chaos-tenant",
+				ResourceId:   perm.resource,
+			}
+			// Make successful request to cache the policy
+			_, err := framework.failsafeNetwork.CheckPermission(ctx, request)
+			require.NoError(t, err)
+		}
+
+		// Re-create request for main test workload
 		request := &common.AccessRequest{
 			SubjectId:    "chaos-user-1",
 			PermissionId: "config.read",
 			TenantId:     "chaos-tenant",
 			ResourceId:   "chaos-resource",
 		}
-
-		// Make successful request to cache the policy
-		_, err := framework.failsafeNetwork.CheckPermission(ctx, request)
-		require.NoError(t, err)
 
 		// Start network partition chaos
 		partitionScenario := ChaosScenario{
@@ -822,14 +832,8 @@ func TestChaosNetworkPartitionTolerance(t *testing.T) {
 					} else {
 						partitionMetrics.SuccessfulOperations++
 
-						// If access granted, verify reason indicates degraded mode
-						if response.Granted {
-							// Check if reason indicates degraded mode operation
-							if strings.Contains(response.Reason, "degraded") || strings.Contains(response.Reason, "cache") {
-								// Acceptable - degraded mode with cache, track as controlled
-								partitionMetrics.SuccessfulOperations++
-							}
-						}
+						// If access granted during partition, it should be from cache (graceful degradation)
+						// This is acceptable and expected behavior - already counted in SuccessfulOperations above
 					}
 					partitionMetrics.mutex.Unlock()
 				}
@@ -856,12 +860,17 @@ func TestChaosNetworkPartitionTolerance(t *testing.T) {
 		assert.Equal(t, int64(0), securityViolations, "Must have no security violations during network partitions")
 		assert.Greater(t, totalOps, int64(0), "Should have processed operations")
 
-		// Should have some failsafe activations due to partitions
-		assert.Greater(t, failsafeActivations, int64(0), "Should have failsafe activations during partitions")
+		// In graceful degradation mode with cached policies, operations should SUCCEED from cache
+		// Failsafe activations only occur in fail-secure mode or when cache misses
+		// Instead, verify that:
+		// 1. Operations succeeded during partition (using cache)
+		// 2. Partition was actually detected by the manager
+		assert.Greater(t, successfulOps, int64(0), "Should have successful operations using cache during partition")
 
-		// Check final partition metrics
+		// Check final partition metrics - this is the KEY validation
 		finalMetrics := framework.failsafeNetwork.GetPartitionMetrics()
 		assert.Greater(t, finalMetrics.TotalRequests, int64(0), "Should have partition requests")
 		assert.Greater(t, finalMetrics.PartitionedRequests, int64(0), "Should have detected partitions")
+		assert.Greater(t, finalMetrics.CacheHits, int64(0), "Should have cache hits during partition")
 	})
 }
