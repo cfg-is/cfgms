@@ -23,22 +23,50 @@ CFGMS (Config Management System) is a modern, Go-based configuration management 
 
 ## Development Workflow
 
-### Slash Commands (Automated Workflow)
+### Slash Commands (MANDATORY)
 
-Use these commands to enforce mandatory development workflow:
+**CRITICAL**: You MUST use these slash commands for ALL development work. Manual workflows are deprecated and prone to missing critical validation steps.
 
-- **`/story-start`** - Begin new story with pre-flight checks and roadmap auto-detection
-- **`/story-commit`** - Commit with validation and GitHub issue progress tracking
-- **`/story-complete`** - Complete story with final validation gates and PR creation
-- **`/pr-review [number]`** - Execute structured 5-phase PR review methodology
+**Required Commands:**
+- **`/story-start`** - MUST use to begin new story with pre-flight checks and roadmap auto-detection
+- **`/story-commit`** - MUST use for all commits with validation and GitHub issue progress tracking
+- **`/story-complete`** - MUST use to complete story with final validation gates and PR creation
+- **`/pr-review [number]`** - MUST use to execute structured 6-phase PR review methodology with CI verification
 - **`/dev-status`** - Quick development environment and current story status
 
-See `.claude/slash-commands/` for complete documentation.
+**Why Mandatory:**
+- Prevents broken tests from reaching develop branch
+- Ensures consistent validation across all commits
+- Verifies GitHub Actions CI status before PR approval
+- Maintains zero-tolerance quality gates
+- Provides progress tracking and audit trail
+
+See `.claude/commands/` for complete documentation.
+
+### Git Hooks Installation (MANDATORY - First Time Setup)
+
+**CRITICAL**: Before starting development, install git hooks to enforce validation:
+
+```bash
+./scripts/install-git-hooks.sh
+```
+
+**What This Installs:**
+- `pre-push` hook - Runs `make test` before every push to remote
+- Prevents broken tests from reaching remote branches
+- Provides fast feedback (2-5 minutes) before CI runs
+
+**Why Mandatory:**
+- Last line of defense against pushing broken code
+- Catches issues before GitHub Actions CI (saves time)
+- Enforces zero-tolerance policy automatically
+- Can be bypassed with `--no-verify` in emergencies (not recommended)
 
 ### Critical Development Rules (MANDATORY)
 
 #### Zero Tolerance Policies
 
+- **Git Hooks Installed**: MUST install git hooks before first commit (see above)
 - **No Failing Tests**: Cannot start new work or commit with ANY test failures
 - **Security Gates**: All security scans must pass before commits
 - **Feature Branches**: Always use `feature/story-[NUMBER]-[description]` branches
@@ -60,17 +88,30 @@ See `.claude/slash-commands/` for complete documentation.
 - **Import Rule**: Business logic imports `pkg/storage/interfaces` ONLY
 - **Prohibited**: Cleartext secrets on disk (even in development)
 
-### Manual Workflow (When Not Using Slash Commands)
+### ⚠️ Manual Workflow (DEPRECATED - DO NOT USE)
 
-#### Essential Steps
+**IMPORTANT**: Manual workflows are DEPRECATED as of Story #292 (workflow enforcement). Direct use of git/make commands bypasses critical validation gates.
 
-1. **Pre-flight**: Run `make test` - must pass 100% before starting
+**Known Issues with Manual Workflow:**
+- ❌ No automated pre-flight validation before starting work
+- ❌ Easy to forget `make test-commit` before commits
+- ❌ No GitHub Actions CI verification before PR approval
+- ❌ Missing progress tracking and audit trail
+- ❌ Allows broken tests to reach develop (root cause of workflow breakdown)
+
+**If You Must Use Manual Commands** (emergency only):
+1. **Pre-flight**: Run `make test` - MUST pass 100% before starting
 2. **Branch**: Create `feature/story-[NUMBER]-[description]` from develop
 3. **Develop**: Write tests first, implement with TDD approach
-4. **Commit**: Run `make test-commit` - blocks on any failures
-5. **Complete**: Create PR **targeting develop** (`gh pr create --base develop`) and update project status
+4. **Commit**: Run `make test-commit` - MUST pass before commit
+5. **Complete**: Run `make test-complete` - MUST pass 100% before PR
+6. **PR Creation**: Create PR **targeting develop** (`gh pr create --base develop`)
+7. **CI Verification**: WAIT for GitHub Actions CI - MUST be green before merge
+8. **Project Updates**: Manually update GitHub project status and roadmap
 
-See [docs/development/story-checklist.md](docs/development/story-checklist.md) for complete manual checklist.
+**Recommendation**: Use slash commands instead. They automate all these steps and prevent human error.
+
+See [docs/development/story-checklist.md](docs/development/story-checklist.md) for historical reference.
 
 ### Branch Protection & Required Checks
 

@@ -66,6 +66,14 @@ func createDockerTestStorageConfig(provider string) *config.StorageConfig {
 	}
 }
 
+// raceDetectorEnabled returns true if the race detector is enabled
+// This is used to adjust test timeouts since race detector adds 5-10x overhead
+func raceDetectorEnabled() bool {
+	// The race detector sets this flag when -race is used
+	// This works because when -race is enabled, the race package is linked in
+	return raceEnabled
+}
+
 func TestServer_New_SecurityValidation(t *testing.T) {
 	logger := logging.NewNoopLogger()
 
@@ -618,6 +626,13 @@ func TestServer_ConcurrentSecurity_And_RaceConditions(t *testing.T) {
 
 	const numConcurrent = 10
 
+	// Race detector adds 5-10x overhead, so increase timeout accordingly
+	// Each concurrent server creation involves: Git init, RBAC setup, storage init
+	timeout := 5 * time.Second
+	if raceDetectorEnabled() {
+		timeout = 15 * time.Second // 3x longer for race detector overhead
+	}
+
 	// Test concurrent server creation (should be thread-safe)
 	results := make(chan *Server, numConcurrent)
 	errors := make(chan error, numConcurrent)
@@ -656,8 +671,8 @@ func TestServer_ConcurrentSecurity_And_RaceConditions(t *testing.T) {
 		case err := <-errors:
 			t.Errorf("Unexpected error in concurrent server creation: %v", err)
 			errorCount++
-		case <-time.After(5 * time.Second):
-			t.Fatal("Test timed out waiting for concurrent operations")
+		case <-time.After(timeout):
+			t.Fatalf("Test timed out waiting for concurrent operations (timeout: %v)", timeout)
 		}
 	}
 
