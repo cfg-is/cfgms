@@ -9,7 +9,7 @@ parameters:
 
 # PR Review Command
 
-This command executes the comprehensive 5-phase PR review methodology required by CFGMS development workflow, ensuring objective and thorough code review with fresh context.
+This command executes the comprehensive 6-phase PR review methodology required by CFGMS development workflow, ensuring objective and thorough code review with fresh context and mandatory GitHub Actions CI verification.
 
 ## Interactive PR Selection (Optional Mode)
 
@@ -201,7 +201,7 @@ fi
 2. **Clear Context**: Automatically runs `/clear` to eliminate development history
 3. **Fresh Review**: Begins review with no prior context or assumptions
 4. **Objective Analysis**: Reviews code purely based on what's presented in the PR
-5. **Structured Methodology**: Follows all 5 review phases systematically
+5. **Structured Methodology**: Follows all 6 review phases systematically
 
 ## Review Methodology
 
@@ -449,7 +449,152 @@ gh pr diff [pr_number] | grep -E "(testify|assert|require|t\.Run)" | wc -l
 **Integration Risk**: LOW - Well-isolated changes with clear interfaces
 ```
 
-### Phase 5: Final Approval Checklist
+### Phase 5: GitHub Actions CI Verification (MANDATORY)
+
+**Objective**: Verify all GitHub Actions workflows pass for the PR
+
+**CRITICAL**: This phase is MANDATORY and BLOCKING. Do NOT approve any PR without verifying CI status.
+
+**CI Status Verification**:
+```bash
+# Get the head branch for the PR
+head_branch=$(gh pr view [pr_number] --json headRefName -q .headRefName)
+
+# Check latest workflow run for this branch
+gh run list --branch "$head_branch" --limit 5 --json conclusion,name,status,headBranch
+
+# Verify required checks specifically
+gh pr checks [pr_number] --required
+```
+
+**Required GitHub Actions Checks**:
+1. ✅ `unit-tests` - Must show "pass" or "success"
+2. ✅ `Build Gate` - Must show "pass" or "success"
+3. ✅ `security-deployment-gate` - Must show "pass" or "success"
+
+**Blocking Conditions**:
+- ❌ **BLOCKS APPROVAL** if any required check is failing
+- ❌ **BLOCKS APPROVAL** if any required check is pending/in-progress (wait for completion)
+- ❌ **BLOCKS APPROVAL** if CI hasn't run yet (may indicate branch not pushed)
+- ⚠️ **WARNS** if integration-tests job failed (not required but should investigate)
+
+**CI Verification Flow**:
+```bash
+# 1. Check if all required checks passed
+required_status=$(gh pr checks [pr_number] --required --json state -q '.[].state' | sort -u)
+
+if [[ "$required_status" == "SUCCESS" ]]; then
+  echo "✅ All required GitHub Actions checks passed"
+else
+  echo "❌ BLOCKING: Required checks have not passed"
+  echo ""
+  echo "   Check Status:"
+  gh pr checks [pr_number] --required
+  echo ""
+  echo "   ⛔ CANNOT APPROVE PR - CI must pass before merge"
+  exit 1
+fi
+
+# 2. Check integration-tests (not required but recommended)
+integration_status=$(gh run list --branch "$head_branch" --workflow="Test Suite Validation" --limit 1 --json conclusion -q '.[0].conclusion')
+
+if [[ "$integration_status" == "failure" ]]; then
+  echo "⚠️  WARNING: Integration tests failed (not required but concerning)"
+  echo "   Review test failures before approving"
+fi
+```
+
+**Error Scenarios**:
+
+**Scenario 1: Required Checks Failing**
+```bash
+❌ BLOCKING: GitHub Actions CI Failed
+
+   Required Check Status:
+   ❌ unit-tests: FAILURE
+   ✅ Build Gate: SUCCESS
+   ✅ security-deployment-gate: SUCCESS
+
+   Failed Jobs:
+   • unit-tests: 2 tests failed in pkg/logging/
+
+   Required Actions:
+   1. Review test failures in GitHub Actions UI
+   2. Developer must fix failing tests
+   3. Wait for new commit and green CI
+   4. Re-run /pr-review after CI passes
+
+   ⛔ REVIEW BLOCKED - Cannot approve with failing CI
+```
+
+**Scenario 2: CI Not Run Yet**
+```bash
+⚠️  WARNING: No CI runs found for branch
+
+   Branch: feature/story-292-rbac-failsafe-test-infrastructure
+
+   Possible Causes:
+   • Branch not pushed to remote
+   • GitHub Actions not triggered yet
+   • Branch name mismatch
+
+   Required Actions:
+   1. Verify branch is pushed: git push origin [branch]
+   2. Check GitHub Actions tab for workflow runs
+   3. Manually trigger workflow if needed
+   4. Wait for CI to complete
+   5. Re-run /pr-review
+
+   ⛔ REVIEW BLOCKED - Must verify CI before approval
+```
+
+**Scenario 3: CI In Progress**
+```bash
+⏳ GitHub Actions CI Still Running
+
+   Status:
+   ⏳ unit-tests: IN_PROGRESS (2m elapsed)
+   ⏳ Build Gate: QUEUED
+   ⚠️  security-deployment-gate: NOT STARTED
+
+   Required Actions:
+   1. Wait for all required checks to complete
+   2. Estimated time remaining: ~8-12 minutes
+   3. Re-run /pr-review after completion
+
+   💡 Tip: Use 'gh run watch' to monitor progress
+
+   ⛔ REVIEW BLOCKED - Wait for CI completion
+```
+
+**Output Example (Success)**:
+```markdown
+## Phase 5: GitHub Actions CI Verification ✅
+
+### CI Status Check:
+```bash
+$ gh pr checks 349 --required
+
+All checks passed
+✓ unit-tests                      https://github.com/cfg-is/cfgms/actions/runs/...
+✓ Build Gate                      https://github.com/cfg-is/cfgms/actions/runs/...
+✓ security-deployment-gate        https://github.com/cfg-is/cfgms/actions/runs/...
+```
+
+### Required Checks: ✅ ALL PASSING
+- ✅ **unit-tests**: SUCCESS (486 tests passed, 5m 23s)
+- ✅ **Build Gate**: SUCCESS (cross-platform builds verified, 3m 45s)
+- ✅ **security-deployment-gate**: SUCCESS (no vulnerabilities, 8m 12s)
+
+### Additional Checks (Informational):
+- ✅ **integration-tests**: SUCCESS (comprehensive validation passed)
+- ℹ️ **cross-feature-tests**: SKIPPED (workflow_dispatch only)
+- ℹ️ **production-readiness**: SKIPPED (full validation level only)
+
+**CI Verification**: ✅ PASSED - All required checks green
+```
+
+### Phase 6: Final Approval Checklist
 
 **Objective**: Comprehensive approval checklist validation
 
@@ -460,12 +605,12 @@ gh pr diff [pr_number] | grep -E "(testify|assert|require|t\.Run)" | wc -l
 - [ ] Breaking changes are properly documented and justified
 - [ ] Performance impact assessed for production workloads
 - [ ] Documentation updated for any API/interface changes
-- [ ] CI/CD validation passes (tests, security scans, linting)
+- [ ] **GitHub Actions CI verification completed (Phase 5) and ALL checks passing**
 - [ ] Deployment impact reviewed and mitigation planned
 
 **Output Example**:
 ```markdown
-## Phase 5: Final Approval Checklist ✅
+## Phase 6: Final Approval Checklist ✅
 
 ### Approval Criteria:
 - ✅ **Security**: All security patterns validated, no concerns identified
@@ -502,7 +647,7 @@ the required functionality with no identified risks or concerns.
 🔍 Starting comprehensive review of PR #233...
 📋 Fetching PR details and changes...
 
-[Complete 5-phase review execution with detailed analysis]
+[Complete 6-phase review execution with detailed analysis]
 ```
 
 ### Interactive Mode (Multiple PRs)
@@ -549,7 +694,7 @@ Your choice: a
 🔍 Starting comprehensive review of PR #218...
 📋 Fetching PR details and changes...
 
-[Complete 5-phase review execution with detailed analysis]
+[Complete 6-phase review execution with detailed analysis]
 ```
 
 ### Direct PR Number Mode
@@ -568,7 +713,7 @@ Your choice: a
 🔍 Starting comprehensive review of PR #182...
 📋 Fetching PR details and changes...
 
-[Complete 5-phase review execution with detailed analysis]
+[Complete 6-phase review execution with detailed analysis]
 
 ## Review Summary
 - **Security**: ✅ Excellent security practices
@@ -722,7 +867,7 @@ Your choice: cancel
 
    Manual Review Required:
    1. Visit: https://github.com/cfg-is/cfgms/pull/182
-   2. Follow 5-phase review methodology from CLAUDE.md
+   2. Follow 6-phase review methodology from CLAUDE.md
    3. Document review in PR comments
 ```
 
