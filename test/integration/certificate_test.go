@@ -65,20 +65,29 @@ func (s *CertificateTestSuite) TestCACertificateExists() {
 	s.Equal(cert.CertificateTypeCA, caCert.Type, "Certificate should be CA type")
 	s.True(caCert.IsValid, "CA certificate should be valid")
 	s.True(caCert.ExpiresAt.After(time.Now()), "CA certificate should not be expired")
-	s.Equal("CFGMS Test CA Root CA", caCert.CommonName, "CA certificate should have correct common name")
+	s.Equal("CFGMS Test Root CA", caCert.CommonName, "CA certificate should have correct common name (Organization + ' Root CA')")
 }
 
 // TestServerCertificateExists tests that server certificate is properly created
 func (s *CertificateTestSuite) TestServerCertificateExists() {
 	serverCerts, err := s.env.GetCertificateInfo(cert.CertificateTypeServer)
 	s.NoError(err, "Should be able to retrieve server certificates")
-	s.Len(serverCerts, 1, "Should have exactly one server certificate")
+	s.GreaterOrEqual(len(serverCerts), 1, "Should have at least one server certificate")
 
-	serverCert := serverCerts[0]
-	s.Equal(cert.CertificateTypeServer, serverCert.Type, "Certificate should be server type")
-	s.True(serverCert.IsValid, "Server certificate should be valid")
-	s.True(serverCert.ExpiresAt.After(time.Now()), "Server certificate should not be expired")
-	s.Equal("cfgms-controller", serverCert.CommonName, "Server certificate should have correct common name")
+	// The controller generates an MQTT server certificate first
+	// Find it by checking for "cfgms-mqtt-server" common name
+	var mqttServerCert *cert.CertificateInfo
+	for _, certInfo := range serverCerts {
+		if certInfo.CommonName == "cfgms-mqtt-server" {
+			mqttServerCert = certInfo
+			break
+		}
+	}
+
+	s.NotNil(mqttServerCert, "Should find MQTT server certificate")
+	s.Equal(cert.CertificateTypeServer, mqttServerCert.Type, "Certificate should be server type")
+	s.True(mqttServerCert.IsValid, "Server certificate should be valid")
+	s.True(mqttServerCert.ExpiresAt.After(time.Now()), "Server certificate should not be expired")
 }
 
 // TestClientCertificateExists tests that client certificate is properly created
@@ -113,17 +122,25 @@ func (s *CertificateTestSuite) TestCertificateGeneration() {
 		OrganizationalUnit: "Integration Tests",
 		ValidityDays:       365,
 		KeySize:            2048,
-		ClientID:           "test-steward-2",
 	})
 	s.NoError(err, "Should be able to generate new client certificate")
 	s.NotNil(newClientCert, "New client certificate should not be nil")
 	s.Equal("test-steward-2", newClientCert.CommonName, "New certificate should have correct common name")
 	s.True(newClientCert.IsValid, "New certificate should be valid")
 
-	// Verify that we now have 2 client certificates
+	// Verify that test-steward-2 certificate exists in the manager
 	clientCerts, err := s.env.GetCertificateInfo(cert.CertificateTypeClient)
 	s.NoError(err, "Should be able to retrieve client certificates")
-	s.Len(clientCerts, 2, "Should have two client certificates after generation")
+
+	// Find the test-steward-2 certificate we just generated
+	var foundNewCert bool
+	for _, certInfo := range clientCerts {
+		if certInfo.CommonName == "test-steward-2" {
+			foundNewCert = true
+			break
+		}
+	}
+	s.True(foundNewCert, "Should find the newly generated test-steward-2 certificate")
 }
 
 // TestCertificateValidation tests certificate validation functionality

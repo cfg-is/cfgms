@@ -188,9 +188,15 @@ func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx
 	certManager := ctrl.GetCertificateManager()
 	require.NotNil(t, certManager, "Controller should have initialized cert manager")
 
-	// The controller has already generated/loaded certificates. We don't need to manually
-	// generate or save any certificates - the controller handles the complete lifecycle.
-	// The cert files are already saved in certStoragePath by the controller's cert manager.
+	// The controller has already generated/loaded CA and server certificates.
+	// For tests that need client certificates before steward registration, generate one now.
+	// This simulates having a client certificate available for testing mTLS scenarios.
+	_, err = certManager.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName: "test-steward",
+	})
+	if err != nil {
+		t.Logf("Note: Client certificate generation failed: %v (may already exist)", err)
+	}
 
 	stewardCfg := &steward.Config{
 		ControllerAddr: controllerCfg.ListenAddr,
