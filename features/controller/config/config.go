@@ -104,28 +104,39 @@ type Config struct {
 
 // CertificateConfig contains certificate management settings
 type CertificateConfig struct {
-	// Enable automated certificate management
+	// Enable automated certificate lifecycle management
+	//
+	// When enabled (default: true), the controller handles the complete certificate lifecycle:
+	// - Generates certificates if they don't exist (first deployment)
+	// - Loads certificates if they exist (reboot/restart)
+	// - Validates certificates are not expired or invalid
+	// - Automatically renews certificates before expiration
+	// - Coordinates certificate distribution in HA clusters
+	//
+	// When disabled, the controller does not manage certificates. Use this for:
+	// - Testing with manually-injected invalid/expired certificates
+	// - External certificate management (e.g., Vault, cert-manager, manual PKI)
+	//
+	// Note: In production, this should always be enabled unless you have
+	// a specific external certificate management solution.
 	EnableCertManagement bool `yaml:"enable_cert_management"`
 
 	// Path to Certificate Authority storage
 	CAPath string `yaml:"ca_path"`
 
-	// Automatically generate server certificates if missing
-	AutoGenerate bool `yaml:"auto_generate"`
-
-	// Certificate renewal threshold in days
+	// Certificate renewal threshold in days (certificates renewed when within this threshold)
+	// Default: 30 days
 	RenewalThresholdDays int `yaml:"renewal_threshold_days"`
 
 	// Server certificate validity period in days
+	// Default: 365 days (1 year)
 	ServerCertValidityDays int `yaml:"server_cert_validity_days"`
 
 	// Client certificate validity period in days for stewards
+	// Default: 365 days (1 year)
 	ClientCertValidityDays int `yaml:"client_cert_validity_days"`
 
-	// Enable automatic certificate renewal
-	EnableAutoRenewal bool `yaml:"enable_auto_renewal"`
-
-	// Server certificate configuration
+	// Server certificate configuration (used when generating certificates)
 	Server *ServerCertificateConfig `yaml:"server"`
 }
 
@@ -376,11 +387,9 @@ func DefaultConfig() *Config {
 		Certificate: &CertificateConfig{
 			EnableCertManagement:   true,
 			CAPath:                 "certs/ca",
-			AutoGenerate:           true,
 			RenewalThresholdDays:   30,
 			ServerCertValidityDays: 365,
 			ClientCertValidityDays: 365,
-			EnableAutoRenewal:      true,
 			Server: &ServerCertificateConfig{
 				CommonName:   "cfgms-controller",
 				DNSNames:     []string{"localhost", "cfgms-controller", "controller-standalone"},
@@ -556,12 +565,6 @@ func Load() (*Config, error) {
 		cfg.Certificate.CAPath = caPath
 	}
 
-	if autoGen := os.Getenv("CFGMS_CERT_AUTO_GENERATE"); autoGen != "" {
-		if val, err := strconv.ParseBool(autoGen); err == nil {
-			cfg.Certificate.AutoGenerate = val
-		}
-	}
-
 	if renewalThreshold := os.Getenv("CFGMS_CERT_RENEWAL_THRESHOLD_DAYS"); renewalThreshold != "" {
 		if val, err := strconv.Atoi(renewalThreshold); err == nil {
 			cfg.Certificate.RenewalThresholdDays = val
@@ -577,12 +580,6 @@ func Load() (*Config, error) {
 	if clientValidity := os.Getenv("CFGMS_CERT_CLIENT_VALIDITY_DAYS"); clientValidity != "" {
 		if val, err := strconv.Atoi(clientValidity); err == nil {
 			cfg.Certificate.ClientCertValidityDays = val
-		}
-	}
-
-	if enableAutoRenewal := os.Getenv("CFGMS_CERT_ENABLE_AUTO_RENEWAL"); enableAutoRenewal != "" {
-		if val, err := strconv.ParseBool(enableAutoRenewal); err == nil {
-			cfg.Certificate.EnableAutoRenewal = val
 		}
 	}
 

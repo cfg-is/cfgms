@@ -15,19 +15,34 @@ import (
 // CertificateTestSuite tests certificate management functionality
 type CertificateTestSuite struct {
 	suite.Suite
-	env *testutil.TestEnv
+	env            *testutil.TestEnv
+	sharedCertPath string // Shared certificate storage for suite (simulates persistence)
 }
 
 func (s *CertificateTestSuite) SetupSuite() {
-	s.env = testutil.NewTestEnv(s.T())
+	// Create shared certificate storage directory for entire suite
+	// This simulates a production controller's certificate storage that persists across reboots
+	s.sharedCertPath = s.T().TempDir()
+	s.T().Logf("Created shared certificate storage for suite: %s", s.sharedCertPath)
+
+	// First test environment: generates fresh certificates (simulates fresh deployment)
+	s.env = testutil.NewTestEnvWithSharedCerts(s.T(), s.sharedCertPath)
 }
 
 func (s *CertificateTestSuite) TearDownSuite() {
-	s.env.Cleanup()
+	if s.env != nil {
+		s.env.Cleanup()
+	}
 }
 
 func (s *CertificateTestSuite) SetupTest() {
+	// Reset test environment but reuse shared certificates
+	// This simulates a controller reboot where certificates persist on disk
 	s.env.Reset()
+
+	// Create new test environment that reuses existing certificates from shared storage
+	// This validates the LoadExistingCA code path (production reboot scenario)
+	s.env = testutil.NewTestEnvWithSharedCerts(s.T(), s.sharedCertPath)
 }
 
 // TestCertificateManagerInitialization tests that the certificate manager is properly initialized
@@ -192,6 +207,50 @@ func (s *CertificateTestSuite) TestCertificateHealthMonitoring() {
 	// to be exposed in the test environment for full testing
 	// For now, we just verify that the system starts and runs without errors
 	s.NotNil(s.env.Steward, "Steward should be running with certificate health monitoring")
+}
+
+// TestCertificatePersistenceAcrossReboots validates that certificates persist and reload correctly
+// This test explicitly validates the production controller reboot scenario
+func (s *CertificateTestSuite) TestCertificatePersistenceAcrossReboots() {
+	// Get certificate info from first "boot"
+	certManager1 := s.env.GetCertificateManager()
+	caCerts1, err := certManager1.GetCertificatesByType(cert.CertificateTypeCA)
+	s.NoError(err, "Should retrieve CA certificates")
+	s.Len(caCerts1, 1, "Should have exactly one CA certificate")
+	originalCASerial := caCerts1[0].SerialNumber
+
+	serverCerts1, err := certManager1.GetCertificatesByType(cert.CertificateTypeServer)
+	s.NoError(err, "Should retrieve server certificates")
+	s.Len(serverCerts1, 1, "Should have exactly one server certificate")
+	originalServerSerial := serverCerts1[0].SerialNumber
+
+	// Simulate controller reboot by creating new test environment with same cert storage
+	// This validates that LoadExistingCA=true works correctly
+	s.env.Reset()
+	s.env = testutil.NewTestEnvWithSharedCerts(s.T(), s.sharedCertPath)
+
+	// Verify certificates were reloaded, not regenerated
+	certManager2 := s.env.GetCertificateManager()
+	caCerts2, err := certManager2.GetCertificatesByType(cert.CertificateTypeCA)
+	s.NoError(err, "Should retrieve CA certificates after reboot")
+	s.Len(caCerts2, 1, "Should still have exactly one CA certificate after reboot")
+	s.Equal(originalCASerial, caCerts2[0].SerialNumber, "CA certificate serial should be same after reboot (not regenerated)")
+
+	serverCerts2, err := certManager2.GetCertificatesByType(cert.CertificateTypeServer)
+	s.NoError(err, "Should retrieve server certificates after reboot")
+	s.Len(serverCerts2, 1, "Should still have exactly one server certificate after reboot")
+	s.Equal(originalServerSerial, serverCerts2[0].SerialNumber, "Server certificate serial should be same after reboot (not regenerated)")
+
+	// Verify controller starts successfully with reloaded certificates
+	s.env.Start()
+	defer s.env.Stop()
+
+	s.NotNil(s.env.Controller, "Controller should start with persisted certificates")
+	s.NotEmpty(s.env.Controller.GetListenAddr(), "Controller should be listening")
+
+	// Verify certificates are still valid after reboot
+	err = s.env.ValidateCertificateSetup()
+	s.NoError(err, "Certificate setup should remain valid after reboot")
 }
 
 func TestCertificateTestSuite(t *testing.T) {

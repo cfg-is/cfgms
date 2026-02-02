@@ -519,9 +519,9 @@ func (s *Server) getServerCertificate() (*cert.Certificate, error) {
 		}
 	}
 
-	// Generate new server certificate if auto-generation is enabled
-	if !s.cfg.Certificate.AutoGenerate {
-		return nil, fmt.Errorf("no valid server certificate found and auto-generation is disabled")
+	// Generate new server certificate if certificate lifecycle management is enabled
+	if !s.cfg.Certificate.EnableCertManagement {
+		return nil, fmt.Errorf("no valid server certificate found and certificate lifecycle management is disabled")
 	}
 
 	s.logger.Info("Generating new server certificate for HTTP server",
