@@ -73,7 +73,6 @@ func (s *CertificateRegistrationTestSuite) SetupSuite() {
 		},
 		LoadExistingCA:       false,
 		RenewalThresholdDays: 30,
-		EnableAutoRenewal:    false,
 	})
 	require.NoError(s.T(), err)
 

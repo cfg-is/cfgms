@@ -88,7 +88,6 @@ func (s *TLSSecurityTestSuite) ensureCertificatesExist() {
 		},
 		LoadExistingCA:       false, // Create new CA for tests
 		RenewalThresholdDays: 30,
-		EnableAutoRenewal:    false,
 	})
 	require.NoError(s.T(), err, "Failed to create certificate manager")
 

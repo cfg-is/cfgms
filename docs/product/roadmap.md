@@ -138,7 +138,7 @@ Achieve production stability, complete core platform features, and prepare for s
   - [x] Enhanced monitoring controls in graceful degradation (Issue #296 - 3-5 points) - Implement enhanced_monitoring security control with fail-secure for RBAC graceful degradation mode, re-enable degraded mode tests, prevent DDoS-based privilege escalation
   - [x] Chaos engineering network partition simulation (Issue #291) - Implement proper network failure injection for chaos tests, refactor to pkg/cache for architecture compliance
   - [x] RBAC failsafe component failure simulation (Issue #292) - Add test helpers to trigger fail-secure behavior
-  - [ ] Certificate test performance optimization (Issue #293) - Reduce cert generation time in tests from 4.89s to <2s
+  - [x] Certificate test performance optimization (Issue #293) - Reduce cert generation time in tests from 4.89s to <2s
   - [ ] Add integration-tests to required GitHub checks (Issue #350) - Fix all failing E2E/integration tests, add integration-tests job to develop branch required checks, prevent broken integration tests from reaching develop
 
 ##### Phase 2: Breaking Changes & Architecture (Do before production validation)

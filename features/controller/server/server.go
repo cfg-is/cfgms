@@ -722,11 +722,11 @@ func initializeCertificateManager(cfg *config.Config, logger logging.Logger) (*c
 	var err error
 
 	if caExists {
-		// Load existing CA
+		// Load existing CA (reboot/restart scenario)
 		manager, err = cert.NewManager(&cert.ManagerConfig{
 			StoragePath:          cfg.CertPath,
 			LoadExistingCA:       true,
-			EnableAutoRenewal:    cfg.Certificate.EnableAutoRenewal,
+			EnableAutoRenewal:    cfg.Certificate.EnableCertManagement, // Enable renewal when cert management is enabled
 			RenewalThresholdDays: cfg.Certificate.RenewalThresholdDays,
 		})
 		if err != nil {
@@ -734,7 +734,7 @@ func initializeCertificateManager(cfg *config.Config, logger logging.Logger) (*c
 		}
 		logger.Info("Loaded existing Certificate Authority")
 	} else {
-		// Create new CA
+		// Create new CA (first deployment scenario)
 		caConfig := &cert.CAConfig{
 			Organization: cfg.Certificate.Server.Organization,
 			Country:      "US", // Default
@@ -746,7 +746,7 @@ func initializeCertificateManager(cfg *config.Config, logger logging.Logger) (*c
 			StoragePath:          cfg.CertPath,
 			CAConfig:             caConfig,
 			LoadExistingCA:       false,
-			EnableAutoRenewal:    cfg.Certificate.EnableAutoRenewal,
+			EnableAutoRenewal:    cfg.Certificate.EnableCertManagement, // Enable renewal when cert management is enabled
 			RenewalThresholdDays: cfg.Certificate.RenewalThresholdDays,
 		})
 		if err != nil {

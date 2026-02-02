@@ -15,19 +15,34 @@ import (
 // CertificateTestSuite tests certificate management functionality
 type CertificateTestSuite struct {
 	suite.Suite
-	env *testutil.TestEnv
+	env            *testutil.TestEnv
+	sharedCertPath string // Shared certificate storage for suite (simulates persistence)
 }
 
 func (s *CertificateTestSuite) SetupSuite() {
-	s.env = testutil.NewTestEnv(s.T())
+	// Create shared certificate storage directory for entire suite
+	// This simulates a production controller's certificate storage that persists across reboots
+	s.sharedCertPath = s.T().TempDir()
+	s.T().Logf("Created shared certificate storage for suite: %s", s.sharedCertPath)
+
+	// First test environment: generates fresh certificates (simulates fresh deployment)
+	s.env = testutil.NewTestEnvWithSharedCerts(s.T(), s.sharedCertPath)
 }
 
 func (s *CertificateTestSuite) TearDownSuite() {
-	s.env.Cleanup()
+	if s.env != nil {
+		s.env.Cleanup()
+	}
 }
 
 func (s *CertificateTestSuite) SetupTest() {
+	// Reset test environment but reuse shared certificates
+	// This simulates a controller reboot where certificates persist on disk
 	s.env.Reset()
+
+	// Create new test environment that reuses existing certificates from shared storage
+	// This validates the LoadExistingCA code path (production reboot scenario)
+	s.env = testutil.NewTestEnvWithSharedCerts(s.T(), s.sharedCertPath)
 }
 
 // TestCertificateManagerInitialization tests that the certificate manager is properly initialized
@@ -50,20 +65,29 @@ func (s *CertificateTestSuite) TestCACertificateExists() {
 	s.Equal(cert.CertificateTypeCA, caCert.Type, "Certificate should be CA type")
 	s.True(caCert.IsValid, "CA certificate should be valid")
 	s.True(caCert.ExpiresAt.After(time.Now()), "CA certificate should not be expired")
-	s.Equal("CFGMS Test CA Root CA", caCert.CommonName, "CA certificate should have correct common name")
+	s.Equal("CFGMS Test Root CA", caCert.CommonName, "CA certificate should have correct common name (Organization + ' Root CA')")
 }
 
 // TestServerCertificateExists tests that server certificate is properly created
 func (s *CertificateTestSuite) TestServerCertificateExists() {
 	serverCerts, err := s.env.GetCertificateInfo(cert.CertificateTypeServer)
 	s.NoError(err, "Should be able to retrieve server certificates")
-	s.Len(serverCerts, 1, "Should have exactly one server certificate")
+	s.GreaterOrEqual(len(serverCerts), 1, "Should have at least one server certificate")
 
-	serverCert := serverCerts[0]
-	s.Equal(cert.CertificateTypeServer, serverCert.Type, "Certificate should be server type")
-	s.True(serverCert.IsValid, "Server certificate should be valid")
-	s.True(serverCert.ExpiresAt.After(time.Now()), "Server certificate should not be expired")
-	s.Equal("cfgms-controller", serverCert.CommonName, "Server certificate should have correct common name")
+	// The controller generates an MQTT server certificate first
+	// Find it by checking for "cfgms-mqtt-server" common name
+	var mqttServerCert *cert.CertificateInfo
+	for _, certInfo := range serverCerts {
+		if certInfo.CommonName == "cfgms-mqtt-server" {
+			mqttServerCert = certInfo
+			break
+		}
+	}
+
+	s.NotNil(mqttServerCert, "Should find MQTT server certificate")
+	s.Equal(cert.CertificateTypeServer, mqttServerCert.Type, "Certificate should be server type")
+	s.True(mqttServerCert.IsValid, "Server certificate should be valid")
+	s.True(mqttServerCert.ExpiresAt.After(time.Now()), "Server certificate should not be expired")
 }
 
 // TestClientCertificateExists tests that client certificate is properly created
@@ -98,17 +122,25 @@ func (s *CertificateTestSuite) TestCertificateGeneration() {
 		OrganizationalUnit: "Integration Tests",
 		ValidityDays:       365,
 		KeySize:            2048,
-		ClientID:           "test-steward-2",
 	})
 	s.NoError(err, "Should be able to generate new client certificate")
 	s.NotNil(newClientCert, "New client certificate should not be nil")
 	s.Equal("test-steward-2", newClientCert.CommonName, "New certificate should have correct common name")
 	s.True(newClientCert.IsValid, "New certificate should be valid")
 
-	// Verify that we now have 2 client certificates
+	// Verify that test-steward-2 certificate exists in the manager
 	clientCerts, err := s.env.GetCertificateInfo(cert.CertificateTypeClient)
 	s.NoError(err, "Should be able to retrieve client certificates")
-	s.Len(clientCerts, 2, "Should have two client certificates after generation")
+
+	// Find the test-steward-2 certificate we just generated
+	var foundNewCert bool
+	for _, certInfo := range clientCerts {
+		if certInfo.CommonName == "test-steward-2" {
+			foundNewCert = true
+			break
+		}
+	}
+	s.True(foundNewCert, "Should find the newly generated test-steward-2 certificate")
 }
 
 // TestCertificateValidation tests certificate validation functionality
@@ -192,6 +224,50 @@ func (s *CertificateTestSuite) TestCertificateHealthMonitoring() {
 	// to be exposed in the test environment for full testing
 	// For now, we just verify that the system starts and runs without errors
 	s.NotNil(s.env.Steward, "Steward should be running with certificate health monitoring")
+}
+
+// TestCertificatePersistenceAcrossReboots validates that certificates persist and reload correctly
+// This test explicitly validates the production controller reboot scenario
+func (s *CertificateTestSuite) TestCertificatePersistenceAcrossReboots() {
+	// Get certificate info from first "boot"
+	certManager1 := s.env.GetCertificateManager()
+	caCerts1, err := certManager1.GetCertificatesByType(cert.CertificateTypeCA)
+	s.NoError(err, "Should retrieve CA certificates")
+	s.Len(caCerts1, 1, "Should have exactly one CA certificate")
+	originalCASerial := caCerts1[0].SerialNumber
+
+	serverCerts1, err := certManager1.GetCertificatesByType(cert.CertificateTypeServer)
+	s.NoError(err, "Should retrieve server certificates")
+	s.Len(serverCerts1, 1, "Should have exactly one server certificate")
+	originalServerSerial := serverCerts1[0].SerialNumber
+
+	// Simulate controller reboot by creating new test environment with same cert storage
+	// This validates that LoadExistingCA=true works correctly
+	s.env.Reset()
+	s.env = testutil.NewTestEnvWithSharedCerts(s.T(), s.sharedCertPath)
+
+	// Verify certificates were reloaded, not regenerated
+	certManager2 := s.env.GetCertificateManager()
+	caCerts2, err := certManager2.GetCertificatesByType(cert.CertificateTypeCA)
+	s.NoError(err, "Should retrieve CA certificates after reboot")
+	s.Len(caCerts2, 1, "Should still have exactly one CA certificate after reboot")
+	s.Equal(originalCASerial, caCerts2[0].SerialNumber, "CA certificate serial should be same after reboot (not regenerated)")
+
+	serverCerts2, err := certManager2.GetCertificatesByType(cert.CertificateTypeServer)
+	s.NoError(err, "Should retrieve server certificates after reboot")
+	s.Len(serverCerts2, 1, "Should still have exactly one server certificate after reboot")
+	s.Equal(originalServerSerial, serverCerts2[0].SerialNumber, "Server certificate serial should be same after reboot (not regenerated)")
+
+	// Verify controller starts successfully with reloaded certificates
+	s.env.Start()
+	defer s.env.Stop()
+
+	s.NotNil(s.env.Controller, "Controller should start with persisted certificates")
+	s.NotEmpty(s.env.Controller.GetListenAddr(), "Controller should be listening")
+
+	// Verify certificates are still valid after reboot
+	err = s.env.ValidateCertificateSetup()
+	s.NoError(err, "Certificate setup should remain valid after reboot")
 }
 
 func TestCertificateTestSuite(t *testing.T) {

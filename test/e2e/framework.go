@@ -266,7 +266,6 @@ func (f *E2ETestFramework) initializeCertificates() error {
 		},
 		LoadExistingCA:       false, // Create new CA for each test
 		RenewalThresholdDays: 1,
-		EnableAutoRenewal:    false, // Disable for tests
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create cert manager: %w", err)
@@ -334,11 +333,9 @@ func (f *E2ETestFramework) initializeController() error {
 		Certificate: &controllerConfig.CertificateConfig{
 			EnableCertManagement:   f.config.EnableTLS,
 			CAPath:                 filepath.Join(f.tempDir, "certs", "ca"),
-			AutoGenerate:           true,
 			RenewalThresholdDays:   1,
 			ServerCertValidityDays: 1,
 			ClientCertValidityDays: 1,
-			EnableAutoRenewal:      false, // Disable for tests
 			Server: &controllerConfig.ServerCertificateConfig{
 				CommonName:   "localhost",
 				DNSNames:     []string{"localhost", "127.0.0.1"},
