@@ -134,6 +134,22 @@ jobs:
         make test-integration-setup
         echo "✅ Docker services ready"
 
+    - name: Start Controller for MQTT+QUIC Tests
+      run: |
+        echo "🚀 Starting standalone controller for MQTT+QUIC integration tests..."
+        # Source test environment variables
+        set -a
+        source .env.test
+        set +a
+        # Start controller-standalone with HA profile (includes TimescaleDB)
+        docker compose -f docker-compose.test.yml --profile ha up -d controller-standalone
+        echo "⏳ Waiting for controller to be healthy..."
+        sleep 30
+        # Verify controller is running
+        docker compose -f docker-compose.test.yml ps controller-standalone
+        docker compose -f docker-compose.test.yml logs --tail=50 controller-standalone
+        echo "✅ Controller started"
+
     - name: Run Integration Tests
       run: |
         echo "🧪 Running integration tests with Docker infrastructure..."
@@ -142,8 +158,25 @@ jobs:
         source .env.test
         set +a
         export CFGMS_TEST_INTEGRATION=1
+
+        # Run storage and controller server integration tests
         go test -race -timeout=10m ./pkg/testing/storage/... ./features/controller/server/...
+
+        # Run MQTT+QUIC integration tests (requires Docker controller)
+        # TestRegistration includes TestSingleUseToken which is the known failing test
+        go test -v -race -timeout=15m ./test/integration/mqtt_quic/... -run "TestRegistration"
+
+        # Run certificate integration tests
+        go test -v -race -timeout=10m ./test/integration/... \
+          -run "^Test(Certificate|ConfigValidation|Epic6Compliance|RegistrationTokenPersistence)$"
+
         echo "✅ Integration tests completed"
+
+    - name: Cleanup Controller
+      if: always()
+      run: |
+        echo "🧹 Stopping controller..."
+        docker compose -f docker-compose.test.yml --profile ha down || true
 
     - name: Cleanup Docker Services
       if: always()
