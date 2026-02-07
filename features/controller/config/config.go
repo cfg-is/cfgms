@@ -505,15 +505,77 @@ func DefaultConfig() *Config {
 	}
 }
 
-// Load loads the configuration from file and environment variables
-func Load() (*Config, error) {
+// findConfigFile searches for the controller configuration file using the following priority:
+// 1. Explicit path (if provided and not empty)
+// 2. CFGMS_CONTROLLER_CONFIG environment variable
+// 3. Production paths: /etc/cfgms/controller.cfg (Unix) or C:\ProgramData\cfgms\controller.cfg (Windows)
+// 4. Development path: ./controller.cfg
+//
+// Returns the path to the configuration file if found, empty string if no config file exists.
+func findConfigFile(explicitPath string) (string, error) {
+	// Priority 1: Explicit path from CLI flag
+	if explicitPath != "" {
+		if _, err := os.Stat(explicitPath); err == nil {
+			return explicitPath, nil
+		}
+		// If explicit path provided but doesn't exist, return error
+		return "", fmt.Errorf("config file not found at specified path: %s", explicitPath)
+	}
+
+	// Priority 2: Environment variable
+	if envPath := os.Getenv("CFGMS_CONTROLLER_CONFIG"); envPath != "" {
+		if _, err := os.Stat(envPath); err == nil {
+			return envPath, nil
+		}
+		// If env var set but file doesn't exist, return error
+		return "", fmt.Errorf("config file not found at CFGMS_CONTROLLER_CONFIG path: %s", envPath)
+	}
+
+	// Priority 3: Production paths (platform-specific)
+	var productionPath string
+	if isWindows() {
+		productionPath = `C:\ProgramData\cfgms\controller.cfg`
+	} else {
+		productionPath = "/etc/cfgms/controller.cfg"
+	}
+	if _, err := os.Stat(productionPath); err == nil {
+		return productionPath, nil
+	}
+
+	// Priority 4: Development path
+	devPath := "controller.cfg"
+	if _, err := os.Stat(devPath); err == nil {
+		return devPath, nil
+	}
+
+	// No config file found - this is OK, will use defaults
+	return "", nil
+}
+
+// isWindows returns true if running on Windows
+func isWindows() bool {
+	return os.PathSeparator == '\\' && os.PathListSeparator == ';'
+}
+
+// LoadWithPath loads the configuration from the specified file path (or searches for it)
+// and applies environment variable overrides.
+//
+// If configPath is empty, searches for config file using findConfigFile().
+// If no config file is found, uses default configuration with environment variable overrides.
+func LoadWithPath(configPath string) (*Config, error) {
 	cfg := DefaultConfig()
 
-	// Try to load from config file if it exists
-	if _, err := os.Stat("config.yaml"); err == nil {
-		data, err := os.ReadFile("config.yaml")
+	// Find the config file (explicit path, env var, production, or dev)
+	foundPath, err := findConfigFile(configPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// Load from config file if found
+	if foundPath != "" {
+		data, err := os.ReadFile(foundPath)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to read config file %s: %w", foundPath, err)
 		}
 
 		content := string(data)
@@ -521,7 +583,7 @@ func Load() (*Config, error) {
 		// Validate that all referenced env vars (without defaults) are set
 		// This provides fail-safe behavior for missing env vars
 		if err := validateEnvVars(content); err != nil {
-			return nil, fmt.Errorf("configuration validation failed: %w", err)
+			return nil, fmt.Errorf("configuration validation failed in %s: %w", foundPath, err)
 		}
 
 		// Expand environment variables in the configuration content
@@ -529,7 +591,7 @@ func Load() (*Config, error) {
 		expandedData := expandEnvWithDefaults(content)
 
 		if err := yaml.Unmarshal([]byte(expandedData), cfg); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to parse config file %s: %w", foundPath, err)
 		}
 	}
 
@@ -749,6 +811,19 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// Load loads the configuration using default search paths.
+// This is a convenience wrapper around LoadWithPath("") for backward compatibility.
+//
+// Config file search order:
+// 1. CFGMS_CONTROLLER_CONFIG environment variable
+// 2. /etc/cfgms/controller.cfg (Unix) or C:\ProgramData\cfgms\controller.cfg (Windows)
+// 3. ./controller.cfg
+//
+// If no config file is found, uses default configuration with environment variable overrides.
+func Load() (*Config, error) {
+	return LoadWithPath("")
 }
 
 // ToLoggingManagerConfig converts the controller logging config to pkg/logging config

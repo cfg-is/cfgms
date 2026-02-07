@@ -3,6 +3,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -25,8 +26,12 @@ import (
 )
 
 func main() {
+	// Parse CLI flags
+	configPath := flag.String("config", "", "Path to configuration file (default: search /etc/cfgms/controller.cfg, then ./controller.cfg)")
+	flag.Parse()
+
 	fmt.Printf("[DEBUG] main.go: Controller main() function started\n")
-	cfg, err := config.Load()
+	cfg, err := config.LoadWithPath(*configPath)
 	if err != nil {
 		fmt.Printf("[DEBUG] main.go: Failed to load config: %v\n", err)
 		log.Fatalf("Failed to load configuration: %v", err)
