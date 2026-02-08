@@ -1836,8 +1836,8 @@ generate-test-certificates: build-controller  ## Generate test certificates usin
 	@echo ""
 	@echo "Step 1: Setting up controller configuration..."
 	@mkdir -p test/integration/mqtt_quic/certs/ca test/integration/logs
-	@cp test/integration/configs/controller-test.cfg config.yaml
-	@echo "✅ Configuration copied to config.yaml (TODO: controller should read controller.cfg)"
+	@cp test/integration/configs/controller-test.cfg controller.cfg
+	@echo "✅ Configuration copied to controller.cfg"
 	@echo ""
 	@echo "Step 2: Starting controller to auto-generate valid certificates..."
 	@timeout 30 ./bin/controller > /tmp/controller-cert-gen.log 2>&1 & \
