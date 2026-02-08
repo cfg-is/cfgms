@@ -213,10 +213,10 @@ func TestZeroTrustPolicyEvaluationPerformance(t *testing.T) {
 					maxDuration = result.duration
 				}
 
-				// Each concurrent request should meet <10ms requirement
-				// (relaxed from 5ms to account for system scheduling under concurrent load)
-				assert.Less(t, result.duration, 10*time.Millisecond,
-					"Concurrent request should complete in <10ms, took %v", result.duration)
+				// Each concurrent request should meet <5ms requirement
+				// Lock-free atomic statistics (Issue #355) eliminated 65x contention
+				assert.Less(t, result.duration, 5*time.Millisecond,
+					"Concurrent request should complete in <5ms, took %v", result.duration)
 			}
 		}
 
