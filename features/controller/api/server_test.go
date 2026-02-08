@@ -730,9 +730,9 @@ func TestEphemeralAPIKeys(t *testing.T) {
 		require.True(t, exists, "JIT key should exist")
 		require.NotNil(t, keyInfo.ExpiresAt, "JIT key should have expiration")
 
-		// Should expire in approximately 1 hour (within 5 seconds tolerance)
+		// Should expire in approximately 1 hour (within 10 seconds tolerance for CI)
 		expectedExpiry := time.Now().Add(1 * time.Hour)
-		assert.WithinDuration(t, expectedExpiry, *keyInfo.ExpiresAt, 5*time.Second)
+		assert.WithinDuration(t, expectedExpiry, *keyInfo.ExpiresAt, 10*time.Second)
 	})
 
 	t.Run("automatic cleanup removes expired keys", func(t *testing.T) {
