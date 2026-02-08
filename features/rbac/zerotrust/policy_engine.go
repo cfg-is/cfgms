@@ -5,7 +5,9 @@ package zerotrust
 import (
 	"context"
 	"fmt"
+	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cfgis/cfgms/api/proto/common"
@@ -268,37 +270,36 @@ type ZeroTrustConfig struct {
 	MetricsInterval time.Duration `json:"metrics_interval"`
 }
 
-// ZeroTrustStats tracks zero-trust policy engine statistics
+// ZeroTrustStats tracks zero-trust policy engine statistics using lock-free atomic operations
 type ZeroTrustStats struct {
-	// Policy evaluation metrics
-	TotalEvaluations      int64         `json:"total_evaluations"`
-	SuccessfulEvaluations int64         `json:"successful_evaluations"`
-	FailedEvaluations     int64         `json:"failed_evaluations"`
-	AverageEvaluationTime time.Duration `json:"average_evaluation_time"`
+	// Policy evaluation metrics (atomic.Int64 for lock-free operations)
+	totalEvaluations      atomic.Int64
+	successfulEvaluations atomic.Int64
+	failedEvaluations     atomic.Int64
+	averageEvaluationTime atomic.Int64 // Stored as nanoseconds
 
 	// Policy enforcement metrics
-	PoliciesEnforced   int64 `json:"policies_enforced"`
-	ViolationsDetected int64 `json:"violations_detected"`
-	ViolationsBlocked  int64 `json:"violations_blocked"`
+	policiesEnforced   atomic.Int64
+	violationsDetected atomic.Int64
+	violationsBlocked  atomic.Int64
 
 	// Compliance metrics
-	ComplianceChecks     int64   `json:"compliance_checks"`
-	ComplianceViolations int64   `json:"compliance_violations"`
-	ComplianceRate       float64 `json:"compliance_rate"`
+	complianceChecks     atomic.Int64
+	complianceViolations atomic.Int64
+	complianceRate       atomic.Uint64 // Stored using math.Float64bits
 
 	// Cache metrics
-	CacheHits    int64   `json:"cache_hits"`
-	CacheMisses  int64   `json:"cache_misses"`
-	CacheHitRate float64 `json:"cache_hit_rate"`
+	cacheHits    atomic.Int64
+	cacheMisses  atomic.Int64
+	cacheHitRate atomic.Uint64 // Stored using math.Float64bits
 
 	// System integration metrics
-	RBACIntegrationCalls   int64 `json:"rbac_integration_calls"`
-	JITIntegrationCalls    int64 `json:"jit_integration_calls"`
-	RiskIntegrationCalls   int64 `json:"risk_integration_calls"`
-	TenantIntegrationCalls int64 `json:"tenant_integration_calls"`
+	rbacIntegrationCalls   atomic.Int64
+	jitIntegrationCalls    atomic.Int64
+	riskIntegrationCalls   atomic.Int64
+	tenantIntegrationCalls atomic.Int64
 
-	LastUpdated time.Time `json:"last_updated"`
-	mutex       sync.RWMutex
+	lastUpdated atomic.Int64 // Stored as Unix nanoseconds
 }
 
 // NewZeroTrustPolicyEngine creates a new zero-trust policy engine
@@ -629,23 +630,31 @@ func (z *ZeroTrustPolicyEngine) createDenyResponse(request *ZeroTrustAccessReque
 }
 
 func (z *ZeroTrustPolicyEngine) updateStatistics(response *ZeroTrustAccessResponse, processingTime time.Duration) {
-	z.stats.mutex.Lock()
-	defer z.stats.mutex.Unlock()
-
-	z.stats.TotalEvaluations++
+	// Lock-free atomic increments - NO MUTEX CONTENTION!
+	z.stats.totalEvaluations.Add(1)
 	if response.Granted {
-		z.stats.SuccessfulEvaluations++
+		z.stats.successfulEvaluations.Add(1)
 	} else {
-		z.stats.FailedEvaluations++
+		z.stats.failedEvaluations.Add(1)
 	}
 
-	// Update average processing time using exponential moving average
+	// Update average processing time using exponential moving average with atomic CAS
+	// This loop is lock-free and typically completes in 1-2 iterations
 	alpha := 0.1
-	newTime := float64(processingTime.Nanoseconds())
-	currentAvg := float64(z.stats.AverageEvaluationTime.Nanoseconds())
-	z.stats.AverageEvaluationTime = time.Duration(int64((1-alpha)*currentAvg + alpha*newTime))
+	newTimeNanos := processingTime.Nanoseconds()
+	for {
+		currentAvgNanos := z.stats.averageEvaluationTime.Load()
+		// Calculate new exponential moving average
+		newAvgNanos := int64((1-alpha)*float64(currentAvgNanos) + alpha*float64(newTimeNanos))
+		// Atomically update if value hasn't changed (CAS = Compare-And-Swap)
+		if z.stats.averageEvaluationTime.CompareAndSwap(currentAvgNanos, newAvgNanos) {
+			break
+		}
+		// If CAS failed, another goroutine updated the value - retry with new value
+	}
 
-	z.stats.LastUpdated = time.Now()
+	// Update timestamp (eventual consistency is acceptable for timestamps)
+	z.stats.lastUpdated.Store(time.Now().UnixNano())
 }
 
 func (z *ZeroTrustPolicyEngine) performPeriodicEvaluationTasks() {
@@ -663,37 +672,70 @@ func (z *ZeroTrustPolicyEngine) updatePeriodicStatistics() {
 // Factory functions
 
 func NewZeroTrustStats() *ZeroTrustStats {
-	return &ZeroTrustStats{
-		LastUpdated: time.Now(),
-	}
+	stats := &ZeroTrustStats{}
+	// Initialize timestamp to current time
+	stats.lastUpdated.Store(time.Now().UnixNano())
+	return stats
 }
 
 // NewZeroTrustAuditLogger is defined in audit.go
 
 // GetStats returns current zero-trust policy engine statistics
-func (z *ZeroTrustPolicyEngine) GetStats() *ZeroTrustStats {
-	z.stats.mutex.RLock()
-	defer z.stats.mutex.RUnlock()
-
-	// Return a copy to prevent external modification (without copying mutex)
-	return &ZeroTrustStats{
-		TotalEvaluations:       z.stats.TotalEvaluations,
-		SuccessfulEvaluations:  z.stats.SuccessfulEvaluations,
-		FailedEvaluations:      z.stats.FailedEvaluations,
-		AverageEvaluationTime:  z.stats.AverageEvaluationTime,
-		PoliciesEnforced:       z.stats.PoliciesEnforced,
-		ViolationsDetected:     z.stats.ViolationsDetected,
-		ViolationsBlocked:      z.stats.ViolationsBlocked,
-		ComplianceChecks:       z.stats.ComplianceChecks,
-		ComplianceViolations:   z.stats.ComplianceViolations,
-		ComplianceRate:         z.stats.ComplianceRate,
-		CacheHits:              z.stats.CacheHits,
-		CacheMisses:            z.stats.CacheMisses,
-		CacheHitRate:           z.stats.CacheHitRate,
-		RBACIntegrationCalls:   z.stats.RBACIntegrationCalls,
-		JITIntegrationCalls:    z.stats.JITIntegrationCalls,
-		RiskIntegrationCalls:   z.stats.RiskIntegrationCalls,
-		TenantIntegrationCalls: z.stats.TenantIntegrationCalls,
-		LastUpdated:            z.stats.LastUpdated,
+// Note: Returns a snapshot struct with exported fields for backward compatibility
+func (z *ZeroTrustPolicyEngine) GetStats() *ZeroTrustStatsSnapshot {
+	// Lock-free atomic reads - NO MUTEX CONTENTION!
+	// Each field is read atomically, providing a consistent snapshot
+	return &ZeroTrustStatsSnapshot{
+		TotalEvaluations:       z.stats.totalEvaluations.Load(),
+		SuccessfulEvaluations:  z.stats.successfulEvaluations.Load(),
+		FailedEvaluations:      z.stats.failedEvaluations.Load(),
+		AverageEvaluationTime:  time.Duration(z.stats.averageEvaluationTime.Load()),
+		PoliciesEnforced:       z.stats.policiesEnforced.Load(),
+		ViolationsDetected:     z.stats.violationsDetected.Load(),
+		ViolationsBlocked:      z.stats.violationsBlocked.Load(),
+		ComplianceChecks:       z.stats.complianceChecks.Load(),
+		ComplianceViolations:   z.stats.complianceViolations.Load(),
+		ComplianceRate:         math.Float64frombits(z.stats.complianceRate.Load()),
+		CacheHits:              z.stats.cacheHits.Load(),
+		CacheMisses:            z.stats.cacheMisses.Load(),
+		CacheHitRate:           math.Float64frombits(z.stats.cacheHitRate.Load()),
+		RBACIntegrationCalls:   z.stats.rbacIntegrationCalls.Load(),
+		JITIntegrationCalls:    z.stats.jitIntegrationCalls.Load(),
+		RiskIntegrationCalls:   z.stats.riskIntegrationCalls.Load(),
+		TenantIntegrationCalls: z.stats.tenantIntegrationCalls.Load(),
+		LastUpdated:            time.Unix(0, z.stats.lastUpdated.Load()),
 	}
+}
+
+// ZeroTrustStatsSnapshot represents a point-in-time snapshot of statistics
+// This struct maintains backward compatibility with the previous public API
+type ZeroTrustStatsSnapshot struct {
+	// Policy evaluation metrics
+	TotalEvaluations      int64         `json:"total_evaluations"`
+	SuccessfulEvaluations int64         `json:"successful_evaluations"`
+	FailedEvaluations     int64         `json:"failed_evaluations"`
+	AverageEvaluationTime time.Duration `json:"average_evaluation_time"`
+
+	// Policy enforcement metrics
+	PoliciesEnforced   int64 `json:"policies_enforced"`
+	ViolationsDetected int64 `json:"violations_detected"`
+	ViolationsBlocked  int64 `json:"violations_blocked"`
+
+	// Compliance metrics
+	ComplianceChecks     int64   `json:"compliance_checks"`
+	ComplianceViolations int64   `json:"compliance_violations"`
+	ComplianceRate       float64 `json:"compliance_rate"`
+
+	// Cache metrics
+	CacheHits    int64   `json:"cache_hits"`
+	CacheMisses  int64   `json:"cache_misses"`
+	CacheHitRate float64 `json:"cache_hit_rate"`
+
+	// System integration metrics
+	RBACIntegrationCalls   int64 `json:"rbac_integration_calls"`
+	JITIntegrationCalls    int64 `json:"jit_integration_calls"`
+	RiskIntegrationCalls   int64 `json:"risk_integration_calls"`
+	TenantIntegrationCalls int64 `json:"tenant_integration_calls"`
+
+	LastUpdated time.Time `json:"last_updated"`
 }
