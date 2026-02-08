@@ -261,7 +261,7 @@ data_dir: "test"
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Write test config file
-			configPath := filepath.Join(tempDir, "config.yaml")
+			configPath := filepath.Join(tempDir, "controller.cfg")
 			err := os.WriteFile(configPath, []byte(tt.configContent), 0644)
 			require.NoError(t, err)
 

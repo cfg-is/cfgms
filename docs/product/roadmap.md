@@ -133,13 +133,14 @@ Achieve production stability, complete core platform features, and prepare for s
 
 ##### Phase 1: Test Infrastructure Foundation (Required for all validation)
 
-- [ ] Test infrastructure improvements
-  - [x] Fix failsafe component unhealthy state detection (Issue #295 - 5-8 points) - Refactor failsafe wrappers to properly trigger unhealthy state after consecutive failures, re-enable 6 component failure security tests
-  - [x] Enhanced monitoring controls in graceful degradation (Issue #296 - 3-5 points) - Implement enhanced_monitoring security control with fail-secure for RBAC graceful degradation mode, re-enable degraded mode tests, prevent DDoS-based privilege escalation
-  - [x] Chaos engineering network partition simulation (Issue #291) - Implement proper network failure injection for chaos tests, refactor to pkg/cache for architecture compliance
-  - [x] RBAC failsafe component failure simulation (Issue #292) - Add test helpers to trigger fail-secure behavior
-  - [x] Certificate test performance optimization (Issue #293) - Reduce cert generation time in tests from 4.89s to <2s
-  - [x] Add integration-tests to required GitHub checks (Issue #350) - Fix all failing E2E/integration tests, add integration-tests job to develop branch required checks, prevent broken integration tests from reaching develop ✅ COMPLETED
+- [x] Fix failsafe component unhealthy state detection (Issue #295 - 5-8 points) - Refactor failsafe wrappers to properly trigger unhealthy state after consecutive failures, re-enable 6 component failure security tests
+- [x] Enhanced monitoring controls in graceful degradation (Issue #296 - 3-5 points) - Implement enhanced_monitoring security control with fail-secure for RBAC graceful degradation mode, re-enable degraded mode tests, prevent DDoS-based privilege escalation
+- [x] Chaos engineering network partition simulation (Issue #291) - Implement proper network failure injection for chaos tests, refactor to pkg/cache for architecture compliance
+- [x] RBAC failsafe component failure simulation (Issue #292) - Add test helpers to trigger fail-secure behavior
+- [x] Certificate test performance optimization (Issue #293) - Reduce cert generation time in tests from 4.89s to <2s
+- [x] Add integration-tests to required GitHub checks (Issue #350) - Fix all failing E2E/integration tests, add integration-tests job to develop branch required checks, prevent broken integration tests from reaching develop ✅ COMPLETED
+- [ ] Optimize zero-trust statistics lock contention (Issue #355) - Replace mutex-based stats with atomic operations or async channel to eliminate 65x performance degradation under concurrent load
+- [ ] Fix Windows flaky test timing assertion (Issue #356) - Increase TestEphemeralAPIKeys tolerance from 5s to 10s to accommodate Windows CI runner variability
 
 ##### Phase 2: Breaking Changes & Architecture (Do before production validation)
 

@@ -644,11 +644,13 @@ curl https://localhost:8080/health
 ### Configuration Files
 
 ```
-/etc/cfgms/controller.yaml          - Controller configuration
+/etc/cfgms/controller.cfg           - Controller configuration (YAML format)
 /etc/cfgms/steward.yaml             - Steward configuration
 /etc/cfgms/terminal.yaml            - Terminal configuration
 /etc/cfgms/rbac.yaml                - RBAC policies
 ```
+
+**Note**: Controller configuration file renamed from `controller.yaml` to `controller.cfg` in v0.9.0 to align with CFGMS naming conventions. All configuration files use YAML format regardless of extension.
 
 ### Service Files
 
