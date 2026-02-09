@@ -103,7 +103,7 @@ func TestBarrierStep(t *testing.T) {
 	require.NotNil(t, execution)
 
 	// Wait for completion
-	time.Sleep(200 * time.Millisecond)
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 	// Verify execution completed successfully
 	assert.Equal(t, StatusCompleted, execution.GetStatus())
@@ -159,7 +159,7 @@ func TestSemaphoreStep(t *testing.T) {
 	require.NotNil(t, execution)
 
 	// Wait for completion
-	time.Sleep(100 * time.Millisecond)
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 	// Verify execution completed successfully
 	assert.Equal(t, StatusCompleted, execution.GetStatus())
@@ -241,7 +241,7 @@ func TestLockStep(t *testing.T) {
 	require.NotNil(t, execution)
 
 	// Wait for completion
-	time.Sleep(100 * time.Millisecond)
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 	// Verify execution completed successfully
 	assert.Equal(t, StatusCompleted, execution.GetStatus())
@@ -345,7 +345,7 @@ func TestWaitGroupStep(t *testing.T) {
 	require.NotNil(t, execution)
 
 	// Wait for completion
-	time.Sleep(200 * time.Millisecond)
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 	// Verify execution completed successfully
 	assert.Equal(t, StatusCompleted, execution.GetStatus())
@@ -408,7 +408,7 @@ func TestSyncMissingConfiguration(t *testing.T) {
 			require.NotNil(t, execution)
 
 			// Wait for completion
-			time.Sleep(100 * time.Millisecond)
+			waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 			// Verify execution failed due to missing configuration
 			assert.Equal(t, StatusFailed, execution.GetStatus())
@@ -444,7 +444,7 @@ func TestSyncTimeout(t *testing.T) {
 	require.NotNil(t, execution)
 
 	// Wait for completion
-	time.Sleep(100 * time.Millisecond)
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 	// Verify execution failed due to timeout
 	assert.Equal(t, StatusFailed, execution.GetStatus())
@@ -467,7 +467,7 @@ func TestSyncCleanup(t *testing.T) {
 
 	// Complete one barrier
 	go func() {
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 		_ = barrier1.Wait(context.Background(), 100*time.Millisecond)
 	}()
 	_ = barrier1.Wait(context.Background(), 100*time.Millisecond)

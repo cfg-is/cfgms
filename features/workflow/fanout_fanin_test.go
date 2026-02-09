@@ -57,7 +57,7 @@ func TestFanOutStep(t *testing.T) {
 	require.NotNil(t, execution)
 
 	// Wait for completion
-	time.Sleep(100 * time.Millisecond)
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 	// Verify execution completed successfully
 	assert.Equal(t, StatusCompleted, execution.GetStatus())
@@ -106,7 +106,7 @@ func TestFanInStep(t *testing.T) {
 	require.NotNil(t, execution)
 
 	// Wait for completion
-	time.Sleep(100 * time.Millisecond)
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 	// Verify execution completed successfully
 	assert.Equal(t, StatusCompleted, execution.GetStatus())
@@ -210,7 +210,7 @@ func TestFanInStrategies(t *testing.T) {
 			require.NotNil(t, execution)
 
 			// Wait for completion
-			time.Sleep(100 * time.Millisecond)
+			waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 			// Verify execution completed successfully
 			assert.Equal(t, StatusCompleted, execution.GetStatus())
@@ -259,7 +259,7 @@ func TestFanOutEmptyData(t *testing.T) {
 	require.NotNil(t, execution)
 
 	// Wait for completion
-	time.Sleep(100 * time.Millisecond)
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 	// Verify execution completed successfully (empty fan-out is valid)
 	assert.Equal(t, StatusCompleted, execution.GetStatus())
@@ -297,7 +297,7 @@ func TestFanInEmptyData(t *testing.T) {
 	require.NotNil(t, execution)
 
 	// Wait for completion
-	time.Sleep(100 * time.Millisecond)
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 	// Verify execution completed successfully
 	assert.Equal(t, StatusCompleted, execution.GetStatus())
@@ -332,7 +332,7 @@ func TestFanOutMissingConfiguration(t *testing.T) {
 	require.NotNil(t, execution)
 
 	// Wait for completion
-	time.Sleep(100 * time.Millisecond)
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 	// Verify execution failed due to missing configuration
 	assert.Equal(t, StatusFailed, execution.GetStatus())
@@ -362,7 +362,7 @@ func TestFanInMissingConfiguration(t *testing.T) {
 	require.NotNil(t, execution)
 
 	// Wait for completion
-	time.Sleep(100 * time.Millisecond)
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 	// Verify execution failed due to missing configuration
 	assert.Equal(t, StatusFailed, execution.GetStatus())
@@ -415,7 +415,7 @@ func TestFanOutFanInCombined(t *testing.T) {
 	require.NotNil(t, execution)
 
 	// Wait for completion
-	time.Sleep(200 * time.Millisecond)
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 	// Verify execution completed successfully
 	assert.Equal(t, StatusCompleted, execution.GetStatus())
