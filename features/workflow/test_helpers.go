@@ -30,19 +30,16 @@ func waitForWorkflowCompletion(t *testing.T, execution *WorkflowExecution, timeo
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 
-	for {
-		select {
-		case <-ticker.C:
-			// Use GetStatus() which properly locks and reads the status
-			status := execution.GetStatus()
+	for range ticker.C {
+		// Use GetStatus() which properly locks and reads the status
+		status := execution.GetStatus()
 
-			if status != StatusPending && status != StatusRunning {
-				return
-			}
-			if time.Now().After(deadline) {
-				t.Fatalf("timeout waiting for workflow completion after %v, status: %s, execution_id: %s",
-					timeout, status, execution.ID)
-			}
+		if status != StatusPending && status != StatusRunning {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timeout waiting for workflow completion after %v, status: %s, execution_id: %s",
+				timeout, status, execution.ID)
 		}
 	}
 }
