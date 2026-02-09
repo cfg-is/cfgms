@@ -60,7 +60,7 @@ func TestForLoopBreak(t *testing.T) {
 	require.NotNil(t, execution)
 
 	// Wait for completion
-	time.Sleep(100 * time.Millisecond)
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 	// Verify execution completed successfully
 	assert.Equal(t, StatusCompleted, execution.GetStatus())
@@ -118,7 +118,7 @@ func TestForLoopContinue(t *testing.T) {
 	require.NotNil(t, execution)
 
 	// Wait for completion
-	time.Sleep(100 * time.Millisecond)
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 	// Verify execution completed successfully
 	assert.Equal(t, StatusCompleted, execution.GetStatus())
@@ -181,7 +181,7 @@ func TestWhileLoopBreak(t *testing.T) {
 	require.NotNil(t, execution)
 
 	// Wait for completion
-	time.Sleep(100 * time.Millisecond)
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 	// Verify execution completed successfully
 	assert.Equal(t, StatusCompleted, execution.GetStatus())
@@ -238,7 +238,7 @@ func TestForeachLoopBreak(t *testing.T) {
 	require.NotNil(t, execution)
 
 	// Wait for completion
-	time.Sleep(100 * time.Millisecond)
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 	// Verify execution completed successfully
 	assert.Equal(t, StatusCompleted, execution.GetStatus())
@@ -276,7 +276,7 @@ func TestBreakContinueOutsideLoop(t *testing.T) {
 	require.NotNil(t, execution)
 
 	// Wait for completion
-	time.Sleep(100 * time.Millisecond)
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 	// The workflow should complete, but the break step should be treated as an error
 	// Since we're outside a loop, the LoopControlError should propagate as a normal error

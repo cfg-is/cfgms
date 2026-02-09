@@ -13,29 +13,6 @@ import (
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
-// waitForWorkflowCompletion polls the workflow execution until it completes or times out
-func waitForWorkflowCompletion(t *testing.T, execution *WorkflowExecution, timeout time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			status := execution.GetStatus()
-			if status != StatusPending && status != StatusRunning {
-				return
-			}
-		case <-time.After(time.Until(deadline)):
-			if time.Now().After(deadline) {
-				status := execution.GetStatus()
-				t.Fatalf("Workflow did not complete within %v, final status: %v", timeout, status)
-			}
-		}
-	}
-}
-
 func TestTrySuccess(t *testing.T) {
 	// Test try block that succeeds - finally should run, catch should not
 	workflow := Workflow{

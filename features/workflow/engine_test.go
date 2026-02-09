@@ -82,7 +82,7 @@ func TestEngine_ExecuteWorkflow_Simple(t *testing.T) {
 	assert.NotEmpty(t, execution.ID)
 
 	// Wait for execution to complete
-	time.Sleep(100 * time.Millisecond)
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 	// Check final status
 	finalExecution, err := engine.GetExecution(execution.ID)
@@ -137,7 +137,7 @@ func TestEngine_ExecuteWorkflow_Parallel(t *testing.T) {
 	require.NoError(t, err)
 
 	// Wait for execution to complete
-	time.Sleep(100 * time.Millisecond)
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 	finalExecution, err := engine.GetExecution(execution.ID)
 	require.NoError(t, err)

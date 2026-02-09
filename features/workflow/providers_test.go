@@ -244,7 +244,7 @@ func TestEngine_ExecuteAPIStep_WithProviderRegistry(t *testing.T) {
 	require.NoError(t, err)
 
 	// Wait for execution to complete
-	time.Sleep(200 * time.Millisecond)
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 	finalExecution, err := engine.GetExecution(execution.ID)
 	require.NoError(t, err)

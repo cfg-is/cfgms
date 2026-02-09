@@ -370,7 +370,8 @@ func TestDebugEngine_SessionManagement(t *testing.T) {
 	require.NoError(t, err)
 
 	// Wait for workflows to initialize (Windows CI timing)
-	time.Sleep(100 * time.Millisecond)
+	waitForWorkflowCompletion(t, execution1, 2*time.Second)
+	waitForWorkflowCompletion(t, execution2, 2*time.Second)
 
 	// Start debug sessions
 	settings := DebugSettings{MaxHistorySize: 100}

@@ -513,7 +513,7 @@ func TestMLLogger_BufferManagement(t *testing.T) {
 	mlLogger.LogPerformanceSnapshot(execution, "step3") // Should trigger flush
 
 	// Wait a bit for async flush
-	time.Sleep(100 * time.Millisecond)
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 	// Verify entries were flushed to provider
 	entries := mockProvider.GetLoggedEntries()
