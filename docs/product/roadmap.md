@@ -139,13 +139,12 @@ Achieve production stability, complete core platform features, and prepare for s
 - [x] RBAC failsafe component failure simulation (Issue #292) - Add test helpers to trigger fail-secure behavior
 - [x] Certificate test performance optimization (Issue #293) - Reduce cert generation time in tests from 4.89s to <2s
 - [x] Add integration-tests to required GitHub checks (Issue #350) - Fix all failing E2E/integration tests, add integration-tests job to develop branch required checks, prevent broken integration tests from reaching develop ✅ COMPLETED
-- [ ] Optimize zero-trust statistics lock contention (Issue #355) - Replace mutex-based stats with atomic operations or async channel to eliminate 65x performance degradation under concurrent load
-- [ ] Fix Windows flaky test timing assertion (Issue #356) - Increase TestEphemeralAPIKeys tolerance from 5s to 10s to accommodate Windows CI runner variability
+- [x] Optimize zero-trust statistics lock contention (Issue #355) - Replace mutex-based stats with atomic operations or async channel to eliminate 65x performance degradation under concurrent load ✅ COMPLETED
+- [x] Fix Windows flaky test timing assertion (Issue #356) - Increase TestEphemeralAPIKeys tolerance from 5s to 10s to accommodate Windows CI runner variability ✅ COMPLETED
 
 ##### Phase 2: Breaking Changes & Architecture (Do before production validation)
 
-- [ ] Finalize advanced configuration management
-  - [ ] Controller config loading refactor (Issue #290) - Support `--config` flag, default to `/etc/cfgms/controller.cfg`, environment variable support (breaking change)
+- [x] Controller config loading refactor (Issue #290) - Support `--config` flag, default to `/etc/cfgms/controller.cfg`, environment variable support (breaking change) ✅ COMPLETED
 - [ ] Communication Layer Abstraction (Issue #267 - 47 story points) - Control/Data Plane provider interfaces, controller/steward migration, deprecate direct MQTT/QUIC imports (MAJOR architectural refactor - must be done before production validation)
 
 ##### Phase 3: Feature Completion
