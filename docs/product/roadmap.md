@@ -141,13 +141,13 @@ Achieve production stability, complete core platform features, and prepare for s
 - [x] Add integration-tests to required GitHub checks (Issue #350) - Fix all failing E2E/integration tests, add integration-tests job to develop branch required checks, prevent broken integration tests from reaching develop ✅ COMPLETED
 - [x] Optimize zero-trust statistics lock contention (Issue #355) - Replace mutex-based stats with atomic operations or async channel to eliminate 65x performance degradation under concurrent load ✅ COMPLETED
 - [x] Fix Windows flaky test timing assertion (Issue #356) - Increase TestEphemeralAPIKeys tolerance from 5s to 10s to accommodate Windows CI runner variability ✅ COMPLETED
+- [x] Fix flaky TestEnhancedMultiTenantSecurity test (Issue #366) - Fixed dual audit logger anti-pattern causing test to query different logger than engine uses ✅ COMPLETED
 
 ##### Phase 2: Breaking Changes & Architecture (Do before production validation)
 
 - [x] Controller config loading refactor (Issue #290) - Support `--config` flag, default to `/etc/cfgms/controller.cfg`, environment variable support (breaking change) ✅ COMPLETED
 - [ ] Communication Layer Abstraction (Epic #267 - 47 story points) - Control/Data Plane provider interfaces, controller/steward migration, deprecate direct MQTT/QUIC imports (MAJOR architectural refactor - must be done before production validation)
   - [ ] Story #267.1: Control Plane Provider Interface (Issue #360 - 8 points) - Define control plane abstraction, migrate MQTT implementation to pluggable provider
-  - [ ] **BLOCKING**: Fix flaky TestEnhancedMultiTenantSecurity test (Issue #366) - Test passes with `-race` but fails without it, blocks Story #360 completion and Epic #267 progress
   - [ ] Story #267.2: Data Plane Provider Interface (Issue #361 - 8 points) - Define data plane abstraction, migrate QUIC implementation to pluggable provider
   - [ ] Story #267.3: Migrate Controller to Communication Providers (Issue #362 - 13 points) - Update controller to use ControlPlane/DataPlane providers
   - [ ] Story #267.4: Migrate Steward to Communication Providers (Issue #363 - 13 points) - Update steward to use ControlPlane/DataPlane providers
