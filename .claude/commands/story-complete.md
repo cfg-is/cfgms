@@ -281,17 +281,11 @@ Co-Authored-By: Claude <noreply@anthropic.com>
 
 ## Project Management Integration
 
-After successful PR creation:
+### 1. Roadmap Update (BEFORE PR Creation)
 
-### 1. GitHub Project Update
+**CRITICAL**: Roadmap is updated as part of the story branch, not after PR creation.
 
-```bash
-# Reference exact IDs from docs/github-cli-reference.md
-gh project item-edit [project-id] --id [item-id] --field-id [status-field-id] --value "Done"
-```
-
-### 2. Roadmap Update
-Updates `docs/product/roadmap.md`:
+Updates `docs/product/roadmap.md` in the story branch:
 ```markdown
 # Before:
 - [ ] **Logging Provider Migration** (Issue #166) - 8 points 🚧 IN PROGRESS
@@ -300,18 +294,59 @@ Updates `docs/product/roadmap.md`:
 - [x] **Logging Provider Migration** (Issue #166) - 8 points ✅ COMPLETED
 ```
 
+**Workflow**:
+1. Update roadmap.md on story branch
+2. Commit roadmap changes to story branch
+3. Push story branch (includes roadmap update)
+4. Create PR (includes both code and roadmap in single PR)
+5. When PR merges, roadmap is atomically updated
+
+**Benefits**:
+- ✅ Single PR (no separate documentation PR)
+- ✅ Roadmap only shows "complete" when work actually merges
+- ✅ Atomic operation (everything or nothing)
+- ✅ No premature "complete" status
+- ✅ Fewer CI runs (no docs-only PR)
+
 **Progress Tracking**:
 - Updates epic completion percentage
 - Moves story to completed section
 - Updates milestone status if applicable
 
+### 2. GitHub Project Update (AFTER PR Creation - Optional)
+
+```bash
+# Reference exact IDs from docs/github-cli-reference.md
+gh project item-edit [project-id] --id [item-id] --field-id [status-field-id] --value "Done"
+```
+
+**Note**: This can be done manually after PR merge if preferred.
+
 ### 3. Feature Branch Cleanup
 ```bash
 # After successful PR merge
 git checkout develop
-git pull origin develop  # Get merged changes
+git pull origin develop  # Get merged changes (includes roadmap update)
 git branch -D feature/story-[NUMBER]-[description]  # Clean up local branch
 ```
+
+## Why Roadmap Updates Belong in Story Branch
+
+**OLD Approach (Inefficient)**:
+1. Create PR for story code
+2. Create separate PR for roadmap documentation
+3. Merge story PR
+4. Merge documentation PR
+5. **Problem**: Roadmap shows "complete" before story merges
+6. **Problem**: Two PRs, two CI runs, extra overhead
+
+**NEW Approach (Efficient)**:
+1. Update roadmap in story branch before pushing
+2. Commit roadmap changes to story branch
+3. Create single PR with code + roadmap
+4. Merge single PR
+5. **Benefit**: Roadmap only complete when work merges (atomic)
+6. **Benefit**: Single PR, single CI run, cleaner history
 
 ## Usage Examples
 
@@ -337,15 +372,22 @@ git branch -D feature/story-[NUMBER]-[description]  # Clean up local branch
 🚀 Pushing changes to remote...
    ✅ Changes pushed successfully
 
+📝 Updating roadmap on story branch...
+   ✅ Roadmap updated: Story #166 marked complete
+   ✅ Roadmap changes committed to story branch
+
+🚀 Pushing changes to remote...
+   ✅ Changes pushed successfully (includes roadmap update)
+
 🚀 Creating Pull Request...
    ℹ️ Existing PR detected: #181
    ✅ PR updated: https://github.com/cfg-is/cfgms/pull/181
-   ✅ GitHub project updated to "Done"
-   ✅ Roadmap updated: Story #166 marked complete
 
 ✨ Story #166 completed successfully!
    🔗 PR: https://github.com/cfg-is/cfgms/pull/182
    📊 Epic progress: 2/12 stories complete (17%)
+
+💡 Roadmap update included in PR - will be applied when merged
 ```
 
 ### Manual Story Specification
@@ -477,18 +519,21 @@ This command follows a strict execution sequence:
 /story-complete
 
 # Execution Order:
-1. Run make test-commit (BLOCKING)
+1. Run make test-complete (BLOCKING)
 2. Documentation review (BLOCKING if internal tracking found)
 3. Analyze story completeness (BLOCKING if <100%)
-4. Push changes to remote (BLOCKING)
-5. Validate git workflow (BLOCKING if feature→main)
-6. Check for duplicate PRs (auto-update if exists)
-7. Create or update PR
-8. Update GitHub project status
-9. Update roadmap
+4. Update roadmap.md in current story branch (BLOCKING)
+5. Commit roadmap changes to story branch
+6. Push story branch to remote (includes roadmap update)
+7. Validate git workflow (BLOCKING if feature→main)
+8. Check for duplicate PRs (auto-update if exists)
+9. Create or update PR (includes code + roadmap in single PR)
+10. Update GitHub project status (optional)
 ```
 
 Each step is blocking - failure prevents progression to next step.
+
+**Key Change**: Roadmap update is now part of the story branch, creating a single atomic PR that includes both the work and the documentation update. This ensures the roadmap only shows "complete" when the PR actually merges.
 
 ### Documentation Review Error Example
 
