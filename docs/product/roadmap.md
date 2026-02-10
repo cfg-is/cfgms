@@ -160,6 +160,8 @@ Achieve production stability, complete core platform features, and prepare for s
 
 ##### Phase 4: Security & Validation (After infrastructure is stable)
 
+- [ ] Eliminate hardcoded TimescaleDB password (Issue #372 - 3-5 points) - Remove "No Footguns" violation, implement JIT password generation for tests, require explicit credentials in production
+- [ ] Implement log injection prevention in pkg/logging (Issue #373 - 3-5 points) - Resolve 25 code scanning alerts, add sanitization infrastructure to prevent log forgery attacks
 - [ ] Finalize production-ready security hardening
 - [ ] Complete high availability validation
 - [ ] Complete production validation with real MSP deployments
