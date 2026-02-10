@@ -398,6 +398,9 @@ func TestProvider_GetStats(t *testing.T) {
 	err = provider.Start(ctx)
 	require.NoError(t, err)
 
+	// Wait briefly to ensure measurable uptime (prevents flaky test on fast Windows CI)
+	time.Sleep(10 * time.Millisecond)
+
 	// Get stats
 	stats, err := provider.GetStats(ctx)
 	require.NoError(t, err)
