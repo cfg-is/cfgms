@@ -449,6 +449,12 @@ func NewTenantIsolationEngine(tenantManager *tenant.Manager) *TenantIsolationEng
 	}
 }
 
+// GetAuditLogger returns the audit logger used by this isolation engine.
+// This is needed for tests to query the same audit log that receives events.
+func (tie *TenantIsolationEngine) GetAuditLogger() *TenantSecurityAuditLogger {
+	return tie.auditLogger
+}
+
 // CreateIsolationRule creates a new isolation rule for a tenant
 func (tie *TenantIsolationEngine) CreateIsolationRule(ctx context.Context, rule *IsolationRule) error {
 	tie.mutex.Lock()
