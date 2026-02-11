@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	quic "github.com/quic-go/quic-go"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	common "github.com/cfgis/cfgms/api/proto/common"
@@ -37,6 +38,7 @@ import (
 	_ "github.com/cfgis/cfgms/pkg/mqtt/providers/mochi" // Register mochi-mqtt provider
 	mqttTypes "github.com/cfgis/cfgms/pkg/mqtt/types"
 	pkgRegistration "github.com/cfgis/cfgms/pkg/registration"
+	quicServer "github.com/cfgis/cfgms/pkg/quic/server"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
@@ -466,6 +468,12 @@ func (s *Server) Start() error {
 		s.logger.Info("Data plane provider started successfully",
 			"provider", s.dataPlaneProvider.Name(),
 			"listen_addr", s.cfg.QUIC.ListenAddr)
+
+		// Register config handler with QUIC provider (bridge until session acceptance is implemented)
+		if err := s.registerConfigHandlerBridge(); err != nil {
+			s.logger.Warn("Failed to register config handler bridge", "error", err)
+			// Non-fatal - continues startup but config sync won't work
+		}
 
 		// TODO(Story #362): Session acceptance not yet fully implemented
 		// The provider pattern requires adding session queueing to pkg/quic/server
@@ -1035,6 +1043,64 @@ func initializeDataPlaneProvider(cfg *config.Config, logger logging.Logger, cert
 	return provider, nil
 }
 
+// registerConfigHandlerBridge registers the config handler with the underlying QUIC server.
+// This is a bridge solution while session acceptance is being completed (Story #362).
+// It allows config sync to work by routing QUIC stream ID 4 to the config handler.
+func (s *Server) registerConfigHandlerBridge() error {
+	if s.configHandler == nil {
+		return fmt.Errorf("config handler not initialized")
+	}
+
+	// Type assert to QUIC provider to access RegisterStreamHandler
+	type quicProvider interface {
+		RegisterStreamHandler(streamID int64, handler func(ctx context.Context, session interface{}, stream interface{}) error) error
+	}
+
+	provider, ok := s.dataPlaneProvider.(quicProvider)
+	if !ok {
+		// Not a QUIC provider, skip registration
+		s.logger.Debug("Data plane provider does not support stream handler registration")
+		return nil
+	}
+
+	// Create bridge handler that adapts old QUIC server signature to new config handler
+	bridgeHandler := func(ctx context.Context, sessionRaw interface{}, streamRaw interface{}) error {
+		// Import types for type assertion
+		type quicServerSession interface {
+			ID() string
+			PeerID() string
+			IsClosed() bool
+			RemoteAddr() string
+			LocalAddr() string
+		}
+
+		type quicStream interface {
+			Read([]byte) (int, error)
+			Write([]byte) (int, error)
+			Close() error
+			ID() uint64
+		}
+
+		// Wrap old QUIC session as DataPlaneSession
+		session := &quicSessionBridge{raw: sessionRaw}
+
+		// Wrap old QUIC stream as Stream
+		stream := &quicStreamBridge{raw: streamRaw}
+
+		// Call config handler with wrapped interfaces
+		return s.configHandler.Handle(ctx, session, stream)
+	}
+
+	// Register handler for config sync stream (stream ID 4)
+	const configSyncStreamID = 4
+	if err := provider.RegisterStreamHandler(configSyncStreamID, bridgeHandler); err != nil {
+		return fmt.Errorf("failed to register config handler: %w", err)
+	}
+
+	s.logger.Info("Config handler registered with QUIC provider", "stream_id", configSyncStreamID)
+	return nil
+}
+
 // acceptDataPlaneSessions accepts incoming data plane connections and handles them (Story #362)
 //
 //nolint:unused // Will be enabled after session acceptance is fully implemented
@@ -1298,4 +1364,129 @@ func (s *Server) sendValidationResponse(stewardID string, requestID string, resp
 	}
 
 	return nil
+}
+
+// Bridge types to adapt old QUIC server types to new provider interfaces
+// These are temporary until full session acceptance is implemented (Story #362)
+
+type quicSessionBridge struct {
+	raw interface{}
+}
+
+func (s *quicSessionBridge) ID() string {
+	// Type assert to *quicServer.Session
+	if sess, ok := s.raw.(*quicServer.Session); ok {
+		return sess.ID
+	}
+	return "unknown"
+}
+
+func (s *quicSessionBridge) PeerID() string {
+	if sess, ok := s.raw.(*quicServer.Session); ok {
+		return sess.StewardID
+	}
+	return "unknown"
+}
+
+func (s *quicSessionBridge) SendConfig(ctx context.Context, config *dataplaneTypes.ConfigTransfer) error {
+	return fmt.Errorf("SendConfig not implemented in bridge")
+}
+
+func (s *quicSessionBridge) ReceiveConfig(ctx context.Context) (*dataplaneTypes.ConfigTransfer, error) {
+	return nil, fmt.Errorf("ReceiveConfig not implemented in bridge")
+}
+
+func (s *quicSessionBridge) SendDNA(ctx context.Context, dna *dataplaneTypes.DNATransfer) error {
+	return fmt.Errorf("SendDNA not implemented in bridge")
+}
+
+func (s *quicSessionBridge) ReceiveDNA(ctx context.Context) (*dataplaneTypes.DNATransfer, error) {
+	return nil, fmt.Errorf("ReceiveDNA not implemented in bridge")
+}
+
+func (s *quicSessionBridge) SendBulk(ctx context.Context, bulk *dataplaneTypes.BulkTransfer) error {
+	return fmt.Errorf("SendBulk not implemented in bridge")
+}
+
+func (s *quicSessionBridge) ReceiveBulk(ctx context.Context) (*dataplaneTypes.BulkTransfer, error) {
+	return nil, fmt.Errorf("ReceiveBulk not implemented in bridge")
+}
+
+func (s *quicSessionBridge) OpenStream(ctx context.Context, streamType dataplaneTypes.StreamType) (dataplaneInterfaces.Stream, error) {
+	return nil, fmt.Errorf("OpenStream not implemented in bridge")
+}
+
+func (s *quicSessionBridge) AcceptStream(ctx context.Context) (dataplaneInterfaces.Stream, dataplaneTypes.StreamType, error) {
+	return nil, "", fmt.Errorf("AcceptStream not implemented in bridge")
+}
+
+func (s *quicSessionBridge) Close(ctx context.Context) error {
+	return nil // Session cleanup handled by QUIC server
+}
+
+func (s *quicSessionBridge) IsClosed() bool {
+	return false
+}
+
+func (s *quicSessionBridge) LocalAddr() string {
+	return ""
+}
+
+func (s *quicSessionBridge) RemoteAddr() string {
+	if sess, ok := s.raw.(*quicServer.Session); ok && sess.Connection != nil {
+		return (*sess.Connection).RemoteAddr().String()
+	}
+	return "unknown"
+}
+
+type quicStreamBridge struct {
+	raw interface{}
+}
+
+func (s *quicStreamBridge) Read(p []byte) (int, error) {
+	if stream, ok := s.raw.(*quic.Stream); ok {
+		return (*stream).Read(p)
+	}
+	return 0, fmt.Errorf("invalid stream type")
+}
+
+func (s *quicStreamBridge) Write(p []byte) (int, error) {
+	if stream, ok := s.raw.(*quic.Stream); ok {
+		return (*stream).Write(p)
+	}
+	return 0, fmt.Errorf("invalid stream type")
+}
+
+func (s *quicStreamBridge) Close() error {
+	if stream, ok := s.raw.(*quic.Stream); ok {
+		return (*stream).Close()
+	}
+	return nil
+}
+
+func (s *quicStreamBridge) ID() uint64 {
+	if stream, ok := s.raw.(*quic.Stream); ok {
+		return uint64((*stream).StreamID())
+	}
+	return 0
+}
+
+func (s *quicStreamBridge) Type() dataplaneTypes.StreamType {
+	// For the bridge, we know this is a config stream (stream ID 4)
+	// A more robust implementation would detect based on stream ID
+	return dataplaneTypes.StreamConfig
+}
+
+func (s *quicStreamBridge) SetDeadline(ctx context.Context) error {
+	// Extract deadline from context if present
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		// No deadline set in context
+		return nil
+	}
+
+	if stream, ok := s.raw.(*quic.Stream); ok {
+		return (*stream).SetDeadline(deadline)
+	}
+	return fmt.Errorf("invalid stream type")
 }
