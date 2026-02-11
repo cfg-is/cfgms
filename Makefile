@@ -1602,7 +1602,7 @@ test-mqtt-quic-setup:
 	fi
 	@echo "Starting TimescaleDB and standalone controller with MQTT+QUIC..."
 	@set -a && . ./.env.test && set +a && \
-	docker compose -f docker-compose.test.yml --profile ha up -d timescaledb-test controller-standalone
+	docker compose -f docker-compose.test.yml --profile ha up -d --build timescaledb-test controller-standalone
 	@echo ""
 	@echo "⏳ Waiting for controller to initialize..."
 	@sleep 30
