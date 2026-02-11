@@ -21,6 +21,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/commands"
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/heartbeat"
+	controllerQuic "github.com/cfgis/cfgms/features/controller/quic"
 	"github.com/cfgis/cfgms/features/controller/registration"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/rbac"
@@ -60,6 +61,7 @@ type Server struct {
 	registrationHandler     *registration.Handler
 	registrationTokenStore  pkgRegistration.Store
 	dataPlaneProvider       dataplaneInterfaces.DataPlaneProvider
+	configHandler           *controllerQuic.ConfigHandler
 }
 
 // New creates a new server instance
@@ -300,6 +302,14 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			"provider", dataPlane.Name())
 	}
 
+	// Initialize config handler for data plane configuration sync (Story #362)
+	var configHandler *controllerQuic.ConfigHandler
+	if dataPlane != nil {
+		// Create config handler (signer is nil for now - config will be unsigned)
+		configHandler = controllerQuic.NewConfigHandler(configService, logger, nil)
+		logger.Debug("Config handler initialized for data plane")
+	}
+
 	// Initialize HTTP API server with minimal monitoring for now
 	// TODO: Properly initialize monitoring components when needed
 	httpServer, err := api.New(
@@ -342,6 +352,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		registrationHandler:     registrationHandler,
 		registrationTokenStore:  regStore,
 		dataPlaneProvider:       dataPlane,
+		configHandler:           configHandler,
 		httpServer:              httpServer,
 	}
 
@@ -1090,10 +1101,21 @@ func (s *Server) handleDataPlaneSession(ctx context.Context, session dataplaneIn
 			s.logger.Info("Handling config sync stream",
 				"session_id", session.ID(),
 				"stream_id", stream.ID())
-			// TODO: Implement config handler with new provider pattern
-			// For now, close the stream
-			if err := stream.Close(); err != nil {
-				s.logger.Warn("Error closing config stream", "error", err)
+
+			// Call config handler (Story #362)
+			if s.configHandler != nil {
+				if err := s.configHandler.Handle(ctx, session, stream); err != nil {
+					s.logger.Error("Config handler failed",
+						"session_id", session.ID(),
+						"stream_id", stream.ID(),
+						"error", err)
+				}
+			} else {
+				s.logger.Warn("Config handler not initialized, closing stream",
+					"session_id", session.ID())
+				if err := stream.Close(); err != nil {
+					s.logger.Warn("Error closing config stream", "error", err)
+				}
 			}
 
 		case dataplaneTypes.StreamDNA:

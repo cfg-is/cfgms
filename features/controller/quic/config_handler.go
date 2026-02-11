@@ -10,14 +10,13 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/quic-go/quic-go"
 	"google.golang.org/protobuf/proto"
 
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/features/controller/service"
+	dataplaneInterfaces "github.com/cfgis/cfgms/pkg/dataplane/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging"
-	quicServer "github.com/cfgis/cfgms/pkg/quic/server"
 )
 
 // ConfigSyncStreamID is the stream ID for configuration synchronization.
@@ -56,14 +55,14 @@ type ConfigSyncResponse struct {
 	StatusCode    string `json:"status_code,omitempty"`
 }
 
-// Handle processes configuration sync requests on a QUIC stream.
-func (h *ConfigHandler) Handle(ctx context.Context, session *quicServer.Session, stream *quic.Stream) error {
-	fmt.Printf("[DEBUG] ConfigHandler.Handle() called, session_id=%s steward_id=%s stream_id=%d\n",
-		session.ID, session.StewardID, (*stream).StreamID())
+// Handle processes configuration sync requests on a data plane stream.
+func (h *ConfigHandler) Handle(ctx context.Context, session dataplaneInterfaces.DataPlaneSession, stream dataplaneInterfaces.Stream) error {
+	fmt.Printf("[DEBUG] ConfigHandler.Handle() called, session_id=%s peer_id=%s stream_id=%d\n",
+		session.ID(), session.PeerID(), stream.ID())
 	h.logger.Info("Handling config sync request",
-		"session_id", session.ID,
-		"steward_id", session.StewardID,
-		"stream_id", stream.StreamID())
+		"session_id", session.ID(),
+		"peer_id", session.PeerID(),
+		"stream_id", stream.ID())
 
 	// Read request from stream
 	fmt.Printf("[DEBUG] ConfigHandler reading from stream...\n")
@@ -83,11 +82,11 @@ func (h *ConfigHandler) Handle(ctx context.Context, session *quicServer.Session,
 	fmt.Printf("[DEBUG] ConfigHandler unmarshaled request: steward_id=%s modules=%v\n", req.StewardID, req.Modules)
 
 	// Validate steward ID matches session
-	fmt.Printf("[DEBUG] ConfigHandler validating steward ID: request=%s session=%s\n", req.StewardID, session.StewardID)
-	if req.StewardID != session.StewardID {
+	fmt.Printf("[DEBUG] ConfigHandler validating steward ID: request=%s session=%s\n", req.StewardID, session.PeerID())
+	if req.StewardID != session.PeerID() {
 		h.logger.Warn("Steward ID mismatch",
 			"request_steward", req.StewardID,
-			"session_steward", session.StewardID)
+			"session_steward", session.PeerID())
 
 		resp := &ConfigSyncResponse{
 			Success:    false,
@@ -200,8 +199,8 @@ func (h *ConfigHandler) Handle(ctx context.Context, session *quicServer.Session,
 	return h.sendResponse(stream, resp)
 }
 
-// sendResponse sends a response over the QUIC stream.
-func (h *ConfigHandler) sendResponse(stream *quic.Stream, resp *ConfigSyncResponse) error {
+// sendResponse sends a response over the data plane stream.
+func (h *ConfigHandler) sendResponse(stream dataplaneInterfaces.Stream, resp *ConfigSyncResponse) error {
 	fmt.Printf("[DEBUG] ConfigHandler sendResponse called: success=%v error=%s\n", resp.Success, resp.Error)
 	data, err := json.Marshal(resp)
 	if err != nil {
