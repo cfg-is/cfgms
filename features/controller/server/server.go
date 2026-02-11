@@ -1067,8 +1067,8 @@ func (s *Server) registerConfigHandlerBridge() error {
 	if !ok {
 		// Not a QUIC provider, skip registration
 		fmt.Printf("[DEBUG] Type assertion FAILED - not a QUIC provider\n")
-		s.logger.Debug("Data plane provider does not support stream handler registration", "provider_type", fmt.Sprintf("%T", s.dataPlaneProvider))
-		return nil
+		s.logger.Warn("Data plane provider does not support stream handler registration", "provider_type", fmt.Sprintf("%T", s.dataPlaneProvider))
+		return fmt.Errorf("provider type %T does not implement RegisterStreamHandler", s.dataPlaneProvider)
 	}
 	fmt.Printf("[DEBUG] Type assertion SUCCESS - is a QUIC provider\n")
 
