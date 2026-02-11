@@ -1059,7 +1059,7 @@ func (s *Server) registerConfigHandlerBridge() error {
 	// Type assert to QUIC provider to access RegisterStreamHandler
 	// Interface must match exact signature from pkg/dataplane/providers/quic/provider.go
 	type quicProvider interface {
-		RegisterStreamHandler(streamID int64, handler func(ctx context.Context, session *quicServer.Session, stream *quic.Stream) error) error
+		RegisterStreamHandler(streamID int64, handler quicServer.StreamHandler) error
 	}
 
 	fmt.Printf("[DEBUG] Attempting type assertion to quicProvider, provider type=%T\n", s.dataPlaneProvider)

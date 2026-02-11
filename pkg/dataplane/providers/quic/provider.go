@@ -14,8 +14,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	quicgo "github.com/quic-go/quic-go"
-
 	"github.com/cfgis/cfgms/pkg/dataplane/interfaces"
 	"github.com/cfgis/cfgms/pkg/dataplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -399,7 +397,8 @@ func (p *Provider) IsConnected() bool {
 // The handler receives the raw QUIC server session and stream, which can be wrapped for provider interface compatibility.
 //
 // Note: This method is only valid for server-mode providers and will return an error in client mode.
-func (p *Provider) RegisterStreamHandler(streamID int64, handler func(ctx context.Context, session *quicServer.Session, stream *quicgo.Stream) error) error {
+// Note: stream parameter uses *quicgo.Stream which is type-aliased from github.com/quic-go/quic-go
+func (p *Provider) RegisterStreamHandler(streamID int64, handler quicServer.StreamHandler) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
