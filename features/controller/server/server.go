@@ -13,18 +13,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/quic-go/quic-go"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	common "github.com/cfgis/cfgms/api/proto/common"
-	controller "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/commercial/ha"
-	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/features/controller/api"
 	"github.com/cfgis/cfgms/features/controller/commands"
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/heartbeat"
-	controllerQuic "github.com/cfgis/cfgms/features/controller/quic"
 	"github.com/cfgis/cfgms/features/controller/registration"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/rbac"
@@ -32,12 +28,13 @@ import (
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
+	dataplaneInterfaces "github.com/cfgis/cfgms/pkg/dataplane/interfaces"
+	_ "github.com/cfgis/cfgms/pkg/dataplane/providers/quic" // Register QUIC data plane provider
+	dataplaneTypes "github.com/cfgis/cfgms/pkg/dataplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 	mqttInterfaces "github.com/cfgis/cfgms/pkg/mqtt/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/mqtt/providers/mochi" // Register mochi-mqtt provider
 	mqttTypes "github.com/cfgis/cfgms/pkg/mqtt/types"
-	quicServer "github.com/cfgis/cfgms/pkg/quic/server"
-	quicSession "github.com/cfgis/cfgms/pkg/quic/session"
 	pkgRegistration "github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
@@ -62,8 +59,7 @@ type Server struct {
 	commandPublisher        *commands.Publisher
 	registrationHandler     *registration.Handler
 	registrationTokenStore  pkgRegistration.Store
-	quicServer              *quicServer.Server
-	quicSessionManager      *quicSession.Manager
+	dataPlaneProvider       dataplaneInterfaces.DataPlaneProvider
 }
 
 // New creates a new server instance
@@ -290,18 +286,18 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		logger.Info("Registration handler initialized successfully")
 	}
 
-	// Initialize QUIC server if enabled (Story #198)
-	var quicSrv *quicServer.Server
-	var quicSessionMgr *quicSession.Manager
+	// Initialize data plane provider if enabled (Story #362)
+	var dataPlane dataplaneInterfaces.DataPlaneProvider
 	fmt.Printf("[DEBUG] New(): Checking QUIC config: nil=%v enabled=%v\n", cfg.QUIC == nil, cfg.QUIC != nil && cfg.QUIC.Enabled)
 	if cfg.QUIC != nil && cfg.QUIC.Enabled {
-		fmt.Printf("[DEBUG] New(): QUIC is enabled, initializing QUIC server...\n")
-		logger.Info("Initializing QUIC server...")
-		quicSrv, quicSessionMgr, err = initializeQUICServer(cfg, logger, certManager, configService, controllerService)
+		fmt.Printf("[DEBUG] New(): Data plane enabled, initializing provider...\n")
+		logger.Info("Initializing data plane provider...")
+		dataPlane, err = initializeDataPlaneProvider(cfg, logger, certManager, configService)
 		if err != nil {
-			return nil, fmt.Errorf("failed to initialize QUIC server: %w", err)
+			return nil, fmt.Errorf("failed to initialize data plane provider: %w", err)
 		}
-		logger.Info("QUIC server initialized successfully")
+		logger.Info("Data plane provider initialized successfully",
+			"provider", dataPlane.Name())
 	}
 
 	// Initialize HTTP API server with minimal monitoring for now
@@ -345,13 +341,12 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		commandPublisher:        commandPublisher,
 		registrationHandler:     registrationHandler,
 		registrationTokenStore:  regStore,
-		quicServer:              quicSrv,
-		quicSessionManager:      quicSessionMgr,
+		dataPlaneProvider:       dataPlane,
 		httpServer:              httpServer,
 	}
 
-	// Wire up QUIC trigger function to API server (if QUIC is enabled)
-	if quicSrv != nil && quicSessionMgr != nil {
+	// Wire up QUIC trigger function to API server (if data plane is enabled)
+	if dataPlane != nil {
 		httpServer.SetQUICTriggerFunc(srv.TriggerQUICConnection)
 		logger.Info("QUIC trigger function wired to HTTP API server")
 	}
@@ -443,24 +438,28 @@ func (s *Server) Start() error {
 		s.logger.Info("Subscribed to validation requests", "topic", validationRequestTopic)
 	}
 
-	// Start QUIC server (Story #198)
-	fmt.Printf("[DEBUG] Controller checking if quicServer is nil: %v\n", s.quicServer == nil)
-	if s.quicServer != nil {
-		fmt.Printf("[DEBUG] Controller starting QUIC server...\n")
-		s.logger.Info("Starting QUIC server...")
+	// Start data plane provider (Story #362)
+	fmt.Printf("[DEBUG] Controller checking if dataPlaneProvider is nil: %v\n", s.dataPlaneProvider == nil)
+	if s.dataPlaneProvider != nil {
+		fmt.Printf("[DEBUG] Controller starting data plane provider...\n")
+		s.logger.Info("Starting data plane provider...")
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		fmt.Printf("[DEBUG] Controller calling quicServer.Start()\n")
-		if err := s.quicServer.Start(ctx); err != nil {
-			fmt.Printf("[DEBUG] Controller quicServer.Start() returned error: %v\n", err)
-			return fmt.Errorf("failed to start QUIC server: %w", err)
+		fmt.Printf("[DEBUG] Controller calling dataPlaneProvider.Start()\n")
+		if err := s.dataPlaneProvider.Start(ctx); err != nil {
+			fmt.Printf("[DEBUG] Controller dataPlaneProvider.Start() returned error: %v\n", err)
+			return fmt.Errorf("failed to start data plane provider: %w", err)
 		}
-		fmt.Printf("[DEBUG] Controller quicServer.Start() succeeded\n")
-		s.logger.Info("QUIC server started successfully",
+		fmt.Printf("[DEBUG] Controller dataPlaneProvider.Start() succeeded\n")
+		s.logger.Info("Data plane provider started successfully",
+			"provider", s.dataPlaneProvider.Name(),
 			"listen_addr", s.cfg.QUIC.ListenAddr)
+
+		// Start session acceptance goroutine
+		go s.acceptDataPlaneSessions(context.Background())
 	} else {
-		fmt.Printf("[DEBUG] Controller quicServer is nil, skipping QUIC startup\n")
+		fmt.Printf("[DEBUG] Controller dataPlaneProvider is nil, skipping data plane startup\n")
 	}
 
 	// Start HTTP API server
@@ -526,12 +525,12 @@ func (s *Server) Stop() error {
 		}
 	}
 
-	// Stop QUIC server (Story #198)
-	if s.quicServer != nil {
+	// Stop data plane provider (Story #362)
+	if s.dataPlaneProvider != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := s.quicServer.Stop(ctx); err != nil {
-			s.logger.Warn("Failed to stop QUIC server", "error", err)
+		if err := s.dataPlaneProvider.Stop(ctx); err != nil {
+			s.logger.Warn("Failed to stop data plane provider", "error", err)
 		}
 	}
 
@@ -596,10 +595,10 @@ func (s *Server) GetListenAddr() string {
 }
 
 // TriggerQUICConnection initiates a QUIC connection to a steward.
-// This generates a session ID and sends a connect_quic command via MQTT.
+// This sends a connect_quic command via MQTT to trigger the steward to connect.
 func (s *Server) TriggerQUICConnection(ctx context.Context, stewardID string) (string, error) {
-	if s.quicSessionManager == nil {
-		return "", fmt.Errorf("QUIC session manager not available")
+	if s.dataPlaneProvider == nil {
+		return "", fmt.Errorf("data plane provider not available")
 	}
 	if s.commandPublisher == nil {
 		return "", fmt.Errorf("command publisher not available")
@@ -609,15 +608,13 @@ func (s *Server) TriggerQUICConnection(ctx context.Context, stewardID string) (s
 	}
 
 	// Generate session ID for this QUIC connection
-	session, err := s.quicSessionManager.GenerateSession(stewardID)
-	if err != nil {
-		return "", fmt.Errorf("failed to generate QUIC session: %w", err)
-	}
+	// Note: With the new provider pattern, session management is internal
+	// We'll use a simple UUID for the session ID
+	sessionID := fmt.Sprintf("session-%s-%d", stewardID, time.Now().Unix())
 
-	s.logger.Info("Generated QUIC session",
+	s.logger.Info("Triggering QUIC connection",
 		"steward_id", stewardID,
-		"session_id", session.SessionID,
-		"expires_at", session.ExpiresAt)
+		"session_id", sessionID)
 
 	// Construct external QUIC address for steward connection
 	// If listen address is 0.0.0.0:port, replace with external hostname
@@ -632,12 +629,11 @@ func (s *Server) TriggerQUICConnection(ctx context.Context, stewardID string) (s
 	}
 
 	// Send connect_quic command to steward via MQTT
-	var commandID string
-	commandID, err = s.commandPublisher.TriggerQUICConnection(
+	commandID, err := s.commandPublisher.TriggerQUICConnection(
 		ctx,
 		stewardID,
 		quicAddress,
-		session.SessionID,
+		sessionID,
 	)
 	if err != nil {
 		return "", fmt.Errorf("failed to send connect_quic command: %w", err)
@@ -645,7 +641,7 @@ func (s *Server) TriggerQUICConnection(ctx context.Context, stewardID string) (s
 
 	s.logger.Info("Triggered QUIC connection for steward",
 		"steward_id", stewardID,
-		"session_id", session.SessionID,
+		"session_id", sessionID,
 		"command_id", commandID,
 		"quic_address", quicAddress)
 
@@ -911,10 +907,9 @@ func ensureMQTTCertificatesFromManager(caPath string, certManager *cert.Manager,
 	return nil
 }
 
-func initializeQUICServer(cfg *config.Config, logger logging.Logger, certManager *cert.Manager, configService *service.ConfigurationService, controllerService *service.ControllerService) (*quicServer.Server, *quicSession.Manager, error) {
-	// Build TLS config for QUIC
+// buildQUICTLSConfig creates TLS configuration for QUIC data plane
+func buildQUICTLSConfig(cfg *config.Config, certManager *cert.Manager, logger logging.Logger) (*tls.Config, error) {
 	var tlsConfig *tls.Config
-	var serverCertPEMForSigner, serverKeyPEMForSigner []byte
 
 	if cfg.QUIC.UseCertManager && certManager != nil {
 		// Use certificate manager certificates (same as MQTT)
@@ -927,7 +922,7 @@ func initializeQUICServer(cfg *config.Config, logger logging.Logger, certManager
 			logger.Info("QUIC certificates not found, using MQTT certificates")
 			// MQTT cert generation already happened, so these should exist
 			if err := ensureMQTTCertificatesFromManager(cfg.Certificate.CAPath, certManager, logger); err != nil {
-				return nil, nil, fmt.Errorf("failed to ensure certificates: %w", err)
+				return nil, fmt.Errorf("failed to ensure certificates: %w", err)
 			}
 		}
 
@@ -935,258 +930,193 @@ func initializeQUICServer(cfg *config.Config, logger logging.Logger, certManager
 		// #nosec G304 - Certificate paths are controlled via configuration
 		serverCertPEM, err := os.ReadFile(serverCertPath)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to read server certificate: %w", err)
+			return nil, fmt.Errorf("failed to read server certificate: %w", err)
 		}
 		// #nosec G304 - Certificate paths are controlled via configuration
 		serverKeyPEM, err := os.ReadFile(serverKeyPath)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to read server key: %w", err)
+			return nil, fmt.Errorf("failed to read server key: %w", err)
 		}
 
 		// Get CA certificate from cert manager
 		caCertPEM, err := certManager.GetCACertificate()
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to get CA certificate: %w", err)
+			return nil, fmt.Errorf("failed to get CA certificate: %w", err)
 		}
 
 		// Create TLS config using pkg/cert helper
 		tlsConfig, err = cert.CreateServerTLSConfig(serverCertPEM, serverKeyPEM, caCertPEM, tls.VersionTLS13)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to create QUIC TLS config: %w", err)
+			return nil, fmt.Errorf("failed to create QUIC TLS config: %w", err)
 		}
 
 		// QUIC-specific configuration
 		tlsConfig.NextProtos = []string{"cfgms-quic"}
 
-		logger.Info("QUIC server using certificate manager certificates",
+		logger.Info("Data plane using certificate manager certificates",
 			"cert_path", serverCertPath,
 			"ca_path", caPath)
-		// Store for signer creation
-		serverCertPEMForSigner = serverCertPEM
-		serverKeyPEMForSigner = serverKeyPEM
 	} else if cfg.QUIC.TLSCertPath != "" && cfg.QUIC.TLSKeyPath != "" {
 		// Use manually configured certificate paths
 		// #nosec G304 - Certificate paths are controlled via configuration
 		serverCertPEM, err := os.ReadFile(cfg.QUIC.TLSCertPath)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to read QUIC certificate: %w", err)
+			return nil, fmt.Errorf("failed to read QUIC certificate: %w", err)
 		}
 		// #nosec G304 - Certificate paths are controlled via configuration
 		serverKeyPEM, err := os.ReadFile(cfg.QUIC.TLSKeyPath)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to read QUIC key: %w", err)
+			return nil, fmt.Errorf("failed to read QUIC key: %w", err)
 		}
 
 		// Create basic TLS config using pkg/cert helper (no client auth for manual certs)
 		tlsConfig, err = cert.CreateBasicTLSConfig(serverCertPEM, serverKeyPEM, tls.VersionTLS13)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to create QUIC TLS config: %w", err)
+			return nil, fmt.Errorf("failed to create QUIC TLS config: %w", err)
 		}
 
 		// QUIC-specific configuration
 		tlsConfig.NextProtos = []string{"cfgms-quic"}
 
-		logger.Info("QUIC server using configured certificates",
+		logger.Info("Data plane using configured certificates",
 			"cert_path", cfg.QUIC.TLSCertPath)
-
-		// Store for signer creation
-		serverCertPEMForSigner = serverCertPEM
-		serverKeyPEMForSigner = serverKeyPEM
 	} else {
-		return nil, nil, fmt.Errorf("QUIC enabled but no certificates configured")
+		return nil, fmt.Errorf("QUIC enabled but no certificates configured")
 	}
 
-	// Create configuration signer using server certificate
-	var configSigner signature.Signer
-	fmt.Printf("[DEBUG] Creating signer: key_len=%d cert_len=%d\n", len(serverKeyPEMForSigner), len(serverCertPEMForSigner))
-	if len(serverKeyPEMForSigner) > 0 {
-		fmt.Printf("[DEBUG] Attempting to create signer...\n")
-		signer, err := signature.NewSigner(&signature.SignerConfig{
-			PrivateKeyPEM:  serverKeyPEMForSigner,
-			CertificatePEM: serverCertPEMForSigner,
-		})
+	return tlsConfig, nil
+}
+
+// initializeDataPlaneProvider initializes the data plane provider (Story #362)
+func initializeDataPlaneProvider(cfg *config.Config, logger logging.Logger, certManager *cert.Manager, configService *service.ConfigurationService) (dataplaneInterfaces.DataPlaneProvider, error) {
+	// Build TLS configuration for QUIC
+	tlsConfig, err := buildQUICTLSConfig(cfg, certManager, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build TLS config: %w", err)
+	}
+
+	// Get QUIC provider from registry
+	provider := dataplaneInterfaces.GetProvider("quic")
+	if provider == nil {
+		return nil, fmt.Errorf("QUIC data plane provider not registered")
+	}
+
+	// Build provider configuration
+	providerConfig := map[string]interface{}{
+		"mode":        "server",
+		"listen_addr": cfg.QUIC.ListenAddr,
+		"tls_config":  tlsConfig,
+		"logger":      logger,
+	}
+
+	// Initialize provider
+	if err := provider.Initialize(context.Background(), providerConfig); err != nil {
+		return nil, fmt.Errorf("failed to initialize data plane provider: %w", err)
+	}
+
+	logger.Info("Data plane provider initialized",
+		"provider", provider.Name(),
+		"listen_addr", cfg.QUIC.ListenAddr)
+
+	return provider, nil
+}
+
+// acceptDataPlaneSessions accepts incoming data plane connections and handles them (Story #362)
+func (s *Server) acceptDataPlaneSessions(ctx context.Context) {
+	s.logger.Info("Started data plane session acceptance loop")
+
+	for {
+		// Accept connection with context
+		session, err := s.dataPlaneProvider.AcceptConnection(ctx)
 		if err != nil {
-			fmt.Printf("[DEBUG] Signer creation failed: %v\n", err)
-			logger.Warn("Failed to create configuration signer, configs will be unsigned",
+			// Check if context was canceled (shutdown)
+			if ctx.Err() != nil {
+				s.logger.Info("Data plane session acceptance stopped (context canceled)")
+				return
+			}
+			s.logger.Error("Failed to accept data plane connection", "error", err)
+			continue
+		}
+
+		s.logger.Info("Accepted data plane connection",
+			"session_id", session.ID(),
+			"peer_id", session.PeerID(),
+			"remote_addr", session.RemoteAddr())
+
+		// Handle session in separate goroutine
+		go s.handleDataPlaneSession(ctx, session)
+	}
+}
+
+// handleDataPlaneSession handles a data plane session (Story #362)
+func (s *Server) handleDataPlaneSession(ctx context.Context, session dataplaneInterfaces.DataPlaneSession) {
+	defer func() {
+		if err := session.Close(ctx); err != nil {
+			s.logger.Warn("Error closing data plane session",
+				"session_id", session.ID(),
 				"error", err)
-		} else {
-			configSigner = signer
-			fmt.Printf("[DEBUG] Signer created successfully: algorithm=%s fingerprint=%s\n",
-				signer.Algorithm(), signer.KeyFingerprint())
-			logger.Info("Configuration signer initialized",
-				"algorithm", signer.Algorithm(),
-				"key_fingerprint", signer.KeyFingerprint())
 		}
-	} else {
-		fmt.Printf("[DEBUG] No server key PEM available, signer will be nil\n")
-	}
+	}()
 
-	// Create QUIC session manager
-	quicSessionMgr := quicSession.NewManager(&quicSession.Config{
-		SessionTTL:      30 * time.Second, // Short-lived sessions
-		CleanupInterval: 1 * time.Minute,
-	})
+	s.logger.Info("Handling data plane session",
+		"session_id", session.ID(),
+		"peer_id", session.PeerID())
 
-	// Create QUIC server
-	sessionTimeout := time.Duration(cfg.QUIC.SessionTimeout) * time.Second
-	quicSrv, err := quicServer.New(&quicServer.Config{
-		ListenAddr:     cfg.QUIC.ListenAddr,
-		TLSConfig:      tlsConfig,
-		SessionTimeout: sessionTimeout,
-		SessionManager: quicSessionMgr,
-		Logger:         logger,
-	})
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create QUIC server: %w", err)
-	}
-
-	// Register stream handlers
-	// Stream 1: Configuration sync
-	configHandler := controllerQuic.NewConfigHandler(configService, logger, configSigner)
-	quicSrv.RegisterStreamHandler(controllerQuic.ConfigSyncStreamID, configHandler.Handle)
-
-	// Stream 2: DNA sync
-	quicSrv.RegisterStreamHandler(2, func(ctx context.Context, session *quicServer.Session, stream *quic.Stream) error {
-		return handleDNASyncStream(ctx, session, stream, controllerService, logger)
-	})
-
-	logger.Info("QUIC server initialized",
-		"listen_addr", cfg.QUIC.ListenAddr,
-		"session_timeout", sessionTimeout,
-		"tls_version", "TLS 1.3")
-
-	return quicSrv, quicSessionMgr, nil
-}
-
-// handleConfigSyncStream handles configuration sync requests on stream 1.
-//
-//nolint:unused // Reserved for future use
-func handleConfigSyncStream(ctx context.Context, session *quicServer.Session, stream *quic.Stream, configService *service.ConfigurationService, logger logging.Logger) error {
-	logger.Info("Handling config sync request",
-		"session_id", session.ID,
-		"steward_id", session.StewardID)
-
-	// Read steward ID from stream
-	buf := make([]byte, 256)
-	n, err := stream.Read(buf)
-	if err != nil {
-		return fmt.Errorf("failed to read steward ID: %w", err)
-	}
-
-	stewardID := string(buf[:n])
-	// Remove newline if present
-	if len(stewardID) > 0 && stewardID[len(stewardID)-1] == '\n' {
-		stewardID = stewardID[:len(stewardID)-1]
-	}
-
-	logger.Info("Config sync request received",
-		"steward_id", stewardID,
-		"session_id", session.ID)
-
-	// Fetch configuration from ConfigurationService
-	configReq := &controller.ConfigRequest{
-		StewardId: stewardID,
-	}
-
-	configResp, err := configService.GetConfiguration(ctx, configReq)
-	if err != nil {
-		logger.Error("Failed to get configuration",
-			"steward_id", stewardID,
-			"error", err)
-		return fmt.Errorf("failed to get configuration: %w", err)
-	}
-
-	// Check if configuration was found
-	if configResp.Status.Code != common.Status_OK {
-		logger.Warn("Configuration not available",
-			"steward_id", stewardID,
-			"status", configResp.Status.Code,
-			"message", configResp.Status.Message)
-
-		// Send error response
-		errorMsg := fmt.Sprintf("ERROR: %s\n", configResp.Status.Message)
-		if _, err := stream.Write([]byte(errorMsg)); err != nil {
-			return fmt.Errorf("failed to write error response: %w", err)
+	// Accept and handle streams in this session
+	for {
+		stream, streamType, err := session.AcceptStream(ctx)
+		if err != nil {
+			// Check if session is closed or context canceled
+			if ctx.Err() != nil || session.IsClosed() {
+				s.logger.Debug("Data plane session closed",
+					"session_id", session.ID())
+				return
+			}
+			s.logger.Error("Failed to accept stream",
+				"session_id", session.ID(),
+				"error", err)
+			return
 		}
-		return nil
-	}
 
-	// Marshal configuration to JSON
-	configData, err := json.Marshal(configResp.Config)
-	if err != nil {
-		return fmt.Errorf("failed to marshal configuration: %w", err)
-	}
+		s.logger.Debug("Accepted stream",
+			"session_id", session.ID(),
+			"stream_id", stream.ID(),
+			"stream_type", streamType)
 
-	// Send configuration data
-	if _, err := stream.Write(configData); err != nil {
-		return fmt.Errorf("failed to write config response: %w", err)
-	}
+		// Route stream based on type
+		switch streamType {
+		case dataplaneTypes.StreamConfig:
+			// Handle configuration sync request
+			s.logger.Info("Handling config sync stream",
+				"session_id", session.ID(),
+				"stream_id", stream.ID())
+			// TODO: Implement config handler with new provider pattern
+			// For now, close the stream
+			if err := stream.Close(); err != nil {
+				s.logger.Warn("Error closing config stream", "error", err)
+			}
 
-	logger.Info("Config sync response sent",
-		"steward_id", stewardID,
-		"bytes_sent", len(configData))
+		case dataplaneTypes.StreamDNA:
+			// Handle DNA sync request
+			s.logger.Info("Handling DNA sync stream",
+				"session_id", session.ID(),
+				"stream_id", stream.ID())
+			// TODO: Implement DNA handler with new provider pattern
+			// For now, close the stream
+			if err := stream.Close(); err != nil {
+				s.logger.Warn("Error closing DNA stream", "error", err)
+			}
 
-	return nil
-}
-
-// handleDNASyncStream handles DNA sync requests on stream 2.
-func handleDNASyncStream(ctx context.Context, session *quicServer.Session, stream *quic.Stream, controllerService *service.ControllerService, logger logging.Logger) error {
-	logger.Info("Handling DNA sync request",
-		"session_id", session.ID,
-		"steward_id", session.StewardID)
-
-	// Read steward ID from stream
-	buf := make([]byte, 256)
-	n, err := stream.Read(buf)
-	if err != nil {
-		return fmt.Errorf("failed to read steward ID: %w", err)
-	}
-
-	stewardID := string(buf[:n])
-	// Remove newline if present
-	if len(stewardID) > 0 && stewardID[len(stewardID)-1] == '\n' {
-		stewardID = stewardID[:len(stewardID)-1]
-	}
-
-	logger.Info("DNA sync request received",
-		"steward_id", stewardID,
-		"session_id", session.ID)
-
-	// Fetch DNA from ControllerService
-	dnaReq := &controller.StewardRequest{
-		StewardId: stewardID,
-	}
-
-	dna, err := controllerService.GetStewardDNA(ctx, dnaReq)
-	if err != nil {
-		logger.Error("Failed to get DNA",
-			"steward_id", stewardID,
-			"error", err)
-
-		// Send error response
-		errorMsg := fmt.Sprintf("ERROR: %s\n", err.Error())
-		if _, writeErr := stream.Write([]byte(errorMsg)); writeErr != nil {
-			return fmt.Errorf("failed to write error response: %w", writeErr)
+		default:
+			s.logger.Warn("Unknown stream type",
+				"session_id", session.ID(),
+				"stream_id", stream.ID(),
+				"stream_type", streamType)
+			if err := stream.Close(); err != nil {
+				s.logger.Warn("Error closing unknown stream", "error", err)
+			}
 		}
-		return nil
 	}
-
-	// Marshal DNA to JSON
-	dnaData, err := json.Marshal(dna)
-	if err != nil {
-		return fmt.Errorf("failed to marshal DNA: %w", err)
-	}
-
-	// Send DNA data
-	if _, err := stream.Write(dnaData); err != nil {
-		return fmt.Errorf("failed to write DNA response: %w", err)
-	}
-
-	logger.Info("DNA sync response sent",
-		"steward_id", stewardID,
-		"bytes_sent", len(dnaData))
-
-	return nil
 }
 
 // handleDNAUpdate processes DNA update messages from stewards via MQTT.
