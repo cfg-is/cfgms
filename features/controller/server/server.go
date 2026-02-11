@@ -467,8 +467,11 @@ func (s *Server) Start() error {
 			"provider", s.dataPlaneProvider.Name(),
 			"listen_addr", s.cfg.QUIC.ListenAddr)
 
-		// Start session acceptance goroutine
-		go s.acceptDataPlaneSessions(context.Background())
+		// TODO(Story #362): Session acceptance not yet fully implemented
+		// The provider pattern requires adding session queueing to pkg/quic/server
+		// For now, QUIC server continues to use its internal connection handling
+		// This will be completed in a follow-up enhancement
+		// go s.acceptDataPlaneSessions(context.Background())
 	} else {
 		fmt.Printf("[DEBUG] Controller dataPlaneProvider is nil, skipping data plane startup\n")
 	}
