@@ -1036,6 +1036,8 @@ func initializeDataPlaneProvider(cfg *config.Config, logger logging.Logger, cert
 }
 
 // acceptDataPlaneSessions accepts incoming data plane connections and handles them (Story #362)
+//
+//nolint:unused // Will be enabled after session acceptance is fully implemented
 func (s *Server) acceptDataPlaneSessions(ctx context.Context) {
 	s.logger.Info("Started data plane session acceptance loop")
 
@@ -1063,6 +1065,8 @@ func (s *Server) acceptDataPlaneSessions(ctx context.Context) {
 }
 
 // handleDataPlaneSession handles a data plane session (Story #362)
+//
+//nolint:unused // Will be enabled after session acceptance is fully implemented
 func (s *Server) handleDataPlaneSession(ctx context.Context, session dataplaneInterfaces.DataPlaneSession) {
 	defer func() {
 		if err := session.Close(ctx); err != nil {
