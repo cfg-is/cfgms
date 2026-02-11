@@ -1047,56 +1047,60 @@ func initializeDataPlaneProvider(cfg *config.Config, logger logging.Logger, cert
 // This is a bridge solution while session acceptance is being completed (Story #362).
 // It allows config sync to work by routing QUIC stream ID 4 to the config handler.
 func (s *Server) registerConfigHandlerBridge() error {
+	fmt.Printf("[DEBUG] registerConfigHandlerBridge() called\n")
+	s.logger.Info("Attempting to register config handler bridge")
+
 	if s.configHandler == nil {
+		fmt.Printf("[DEBUG] config handler is nil\n")
 		return fmt.Errorf("config handler not initialized")
 	}
+	fmt.Printf("[DEBUG] config handler is initialized\n")
 
 	// Type assert to QUIC provider to access RegisterStreamHandler
+	// Interface must match exact signature from pkg/dataplane/providers/quic/provider.go
 	type quicProvider interface {
-		RegisterStreamHandler(streamID int64, handler func(ctx context.Context, session interface{}, stream interface{}) error) error
+		RegisterStreamHandler(streamID int64, handler func(ctx context.Context, session *quicServer.Session, stream *quic.Stream) error) error
 	}
 
+	fmt.Printf("[DEBUG] Attempting type assertion to quicProvider, provider type=%T\n", s.dataPlaneProvider)
 	provider, ok := s.dataPlaneProvider.(quicProvider)
 	if !ok {
 		// Not a QUIC provider, skip registration
-		s.logger.Debug("Data plane provider does not support stream handler registration")
+		fmt.Printf("[DEBUG] Type assertion FAILED - not a QUIC provider\n")
+		s.logger.Debug("Data plane provider does not support stream handler registration", "provider_type", fmt.Sprintf("%T", s.dataPlaneProvider))
 		return nil
 	}
+	fmt.Printf("[DEBUG] Type assertion SUCCESS - is a QUIC provider\n")
 
 	// Create bridge handler that adapts old QUIC server signature to new config handler
-	bridgeHandler := func(ctx context.Context, sessionRaw interface{}, streamRaw interface{}) error {
-		// Import types for type assertion
-		type quicServerSession interface {
-			ID() string
-			PeerID() string
-			IsClosed() bool
-			RemoteAddr() string
-			LocalAddr() string
-		}
-
-		type quicStream interface {
-			Read([]byte) (int, error)
-			Write([]byte) (int, error)
-			Close() error
-			ID() uint64
-		}
+	bridgeHandler := func(ctx context.Context, sess *quicServer.Session, strm *quic.Stream) error {
+		fmt.Printf("[DEBUG] BRIDGE HANDLER INVOKED: session=%s stream=%d\n", sess.ID, (*strm).StreamID())
+		s.logger.Info("Bridge handler invoked", "session_id", sess.ID, "stream_id", (*strm).StreamID())
 
 		// Wrap old QUIC session as DataPlaneSession
-		session := &quicSessionBridge{raw: sessionRaw}
+		session := &quicSessionBridge{raw: sess}
+		fmt.Printf("[DEBUG] Created session bridge: id=%s peer_id=%s\n", session.ID(), session.PeerID())
 
 		// Wrap old QUIC stream as Stream
-		stream := &quicStreamBridge{raw: streamRaw}
+		stream := &quicStreamBridge{raw: strm}
+		fmt.Printf("[DEBUG] Created stream bridge: id=%d type=%v\n", stream.ID(), stream.Type())
 
 		// Call config handler with wrapped interfaces
-		return s.configHandler.Handle(ctx, session, stream)
+		fmt.Printf("[DEBUG] Calling config handler...\n")
+		err := s.configHandler.Handle(ctx, session, stream)
+		fmt.Printf("[DEBUG] Config handler returned: err=%v\n", err)
+		return err
 	}
 
 	// Register handler for config sync stream (stream ID 4)
 	const configSyncStreamID = 4
+	fmt.Printf("[DEBUG] Calling RegisterStreamHandler for stream_id=%d\n", configSyncStreamID)
 	if err := provider.RegisterStreamHandler(configSyncStreamID, bridgeHandler); err != nil {
+		fmt.Printf("[DEBUG] RegisterStreamHandler FAILED: %v\n", err)
 		return fmt.Errorf("failed to register config handler: %w", err)
 	}
 
+	fmt.Printf("[DEBUG] RegisterStreamHandler SUCCESS\n")
 	s.logger.Info("Config handler registered with QUIC provider", "stream_id", configSyncStreamID)
 	return nil
 }
@@ -1370,20 +1374,19 @@ func (s *Server) sendValidationResponse(stewardID string, requestID string, resp
 // These are temporary until full session acceptance is implemented (Story #362)
 
 type quicSessionBridge struct {
-	raw interface{}
+	raw *quicServer.Session
 }
 
 func (s *quicSessionBridge) ID() string {
-	// Type assert to *quicServer.Session
-	if sess, ok := s.raw.(*quicServer.Session); ok {
-		return sess.ID
+	if s.raw != nil {
+		return s.raw.ID
 	}
 	return "unknown"
 }
 
 func (s *quicSessionBridge) PeerID() string {
-	if sess, ok := s.raw.(*quicServer.Session); ok {
-		return sess.StewardID
+	if s.raw != nil {
+		return s.raw.StewardID
 	}
 	return "unknown"
 }
@@ -1433,40 +1436,40 @@ func (s *quicSessionBridge) LocalAddr() string {
 }
 
 func (s *quicSessionBridge) RemoteAddr() string {
-	if sess, ok := s.raw.(*quicServer.Session); ok && sess.Connection != nil {
-		return (*sess.Connection).RemoteAddr().String()
+	if s.raw != nil && s.raw.Connection != nil {
+		return (*s.raw.Connection).RemoteAddr().String()
 	}
 	return "unknown"
 }
 
 type quicStreamBridge struct {
-	raw interface{}
+	raw *quic.Stream
 }
 
 func (s *quicStreamBridge) Read(p []byte) (int, error) {
-	if stream, ok := s.raw.(*quic.Stream); ok {
-		return (*stream).Read(p)
+	if s.raw != nil {
+		return (*s.raw).Read(p)
 	}
 	return 0, fmt.Errorf("invalid stream type")
 }
 
 func (s *quicStreamBridge) Write(p []byte) (int, error) {
-	if stream, ok := s.raw.(*quic.Stream); ok {
-		return (*stream).Write(p)
+	if s.raw != nil {
+		return (*s.raw).Write(p)
 	}
 	return 0, fmt.Errorf("invalid stream type")
 }
 
 func (s *quicStreamBridge) Close() error {
-	if stream, ok := s.raw.(*quic.Stream); ok {
-		return (*stream).Close()
+	if s.raw != nil {
+		return (*s.raw).Close()
 	}
 	return nil
 }
 
 func (s *quicStreamBridge) ID() uint64 {
-	if stream, ok := s.raw.(*quic.Stream); ok {
-		return uint64((*stream).StreamID())
+	if s.raw != nil {
+		return uint64((*s.raw).StreamID())
 	}
 	return 0
 }
@@ -1485,8 +1488,8 @@ func (s *quicStreamBridge) SetDeadline(ctx context.Context) error {
 		return nil
 	}
 
-	if stream, ok := s.raw.(*quic.Stream); ok {
-		return (*stream).SetDeadline(deadline)
+	if s.raw != nil {
+		return (*s.raw).SetDeadline(deadline)
 	}
 	return fmt.Errorf("invalid stream type")
 }
