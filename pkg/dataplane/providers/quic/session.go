@@ -331,10 +331,45 @@ func (s *Session) openStreamInternal(ctx context.Context, streamType types.Strea
 
 // acceptStreamInternal accepts a QUIC stream (implementation detail).
 func (s *Session) acceptStreamInternal(ctx context.Context) (*quicgo.Stream, types.StreamType, error) {
-	// TODO: Implement stream acceptance with type detection
-	// This requires enhancing pkg/quic/server to support AcceptStream
-	// For now, return placeholder
-	return nil, "", fmt.Errorf("AcceptStream not yet implemented")
+	if s.server != nil && s.server.Connection != nil {
+		// Server-side: accept stream from connection
+		stream, err := (*s.server.Connection).AcceptStream(ctx)
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to accept stream: %w", err)
+		}
+
+		// Detect stream type based on stream ID (current protocol)
+		streamType := detectStreamType(stream.StreamID())
+
+		return stream, streamType, nil
+	}
+
+	// Client-side doesn't accept streams (it opens them)
+	return nil, "", fmt.Errorf("accept not supported on client sessions")
+}
+
+// detectStreamType determines the stream type based on QUIC stream ID.
+//
+// Current protocol uses fixed stream ID assignments:
+//   - Stream 0: Handshake (handled separately in server)
+//   - Stream 4: Configuration sync
+//   - Stream 8: DNA sync
+//   - Stream 12: Bulk transfers
+//   - Others: Custom streams
+//
+// Note: This is a protocol-level mapping that depends on stream opening order.
+// A more robust approach would include type metadata in the stream data itself.
+func detectStreamType(streamID quicgo.StreamID) types.StreamType {
+	switch streamID {
+	case 4:
+		return types.StreamConfig
+	case 8:
+		return types.StreamDNA
+	case 12:
+		return types.StreamBulk
+	default:
+		return types.StreamCustom
+	}
 }
 
 // hashStreamType converts a stream type to a numeric stream ID.

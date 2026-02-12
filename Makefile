@@ -1383,8 +1383,12 @@ test-integration-setup:
 	@echo "Starting PostgreSQL, TimescaleDB, and Gitea test services..."
 	@set -a && . ./.env.test && set +a && docker compose -f docker-compose.test.yml -f docker-compose.test.override.yml up -d postgres-test timescaledb-test git-server-test
 	@echo ""
-	@echo "⏳ Waiting for services to be ready..."
-	@sleep 5  # Brief pause before health checks
+	@echo "⏳ Waiting for Docker healthchecks to pass..."
+	@echo "   (Gitea requires up to 60s start period + health check validation)"
+	@set -a && . ./.env.test && set +a && docker compose -f docker-compose.test.yml -f docker-compose.test.override.yml up -d --wait postgres-test timescaledb-test git-server-test
+	@echo "✅ Docker healthchecks passed"
+	@echo ""
+	@echo "🔍 Verifying service connectivity..."
 	@if [ -f .env.test ]; then \
 		set -a && . ./.env.test && set +a && ./scripts/wait-for-services.sh; \
 	else \
@@ -1597,7 +1601,9 @@ test-mqtt-quic-setup:
 		./scripts/generate-test-credentials.sh; \
 	fi
 	@echo "Starting TimescaleDB and standalone controller with MQTT+QUIC..."
+	@echo "🔨 Force rebuilding Docker images (no cache)..."
 	@set -a && . ./.env.test && set +a && \
+	DOCKER_BUILDKIT=1 docker compose -f docker-compose.test.yml --profile ha build --no-cache controller-standalone && \
 	docker compose -f docker-compose.test.yml --profile ha up -d timescaledb-test controller-standalone
 	@echo ""
 	@echo "⏳ Waiting for controller to initialize..."

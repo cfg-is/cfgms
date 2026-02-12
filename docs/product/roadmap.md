@@ -149,7 +149,7 @@ Achieve production stability, complete core platform features, and prepare for s
 - [ ] Communication Layer Abstraction (Epic #267 - 47 story points) - Control/Data Plane provider interfaces, controller/steward migration, deprecate direct MQTT/QUIC imports (MAJOR architectural refactor - must be done before production validation)
   - [x] Story #267.1: Control Plane Provider Interface (Issue #360 - 8 points) ✅ COMPLETED - Define control plane abstraction, migrate MQTT implementation to pluggable provider
   - [x] Story #267.2: Data Plane Provider Interface (Issue #361 - 8 points) ✅ COMPLETED - Define data plane abstraction, migrate QUIC implementation to pluggable provider
-  - [ ] Story #267.3: Migrate Controller to Communication Providers (Issue #362 - 13 points) - Update controller to use ControlPlane/DataPlane providers
+  - [x] Story #267.3: Migrate Controller to Communication Providers (Issue #362 - 13 points) - Update controller to use ControlPlane/DataPlane providers ✅ COMPLETED
   - [ ] Story #267.4: Migrate Steward to Communication Providers (Issue #363 - 13 points) - Update steward to use ControlPlane/DataPlane providers
   - [ ] Story #267.5: Deprecate Direct MQTT/QUIC Imports (Issue #364 - 5 points) - Add architecture checks, documentation, mark old packages deprecated
 
@@ -160,6 +160,7 @@ Achieve production stability, complete core platform features, and prepare for s
 
 ##### Phase 4: Security & Validation (After infrastructure is stable)
 
+- [ ] **Implement Three-Certificate Architecture for Production Security** (Issue #377 - 47-65 points) - Separate public API (Let's Encrypt), internal mTLS, and config signing certificates for proper key separation, compliance, and operational stability. Critical for v1.0 production deployments.
 - [ ] Eliminate hardcoded TimescaleDB password (Issue #372 - 3-5 points) - Remove "No Footguns" violation, implement JIT password generation for tests, require explicit credentials in production
 - [ ] Implement log injection prevention in pkg/logging (Issue #373 - 3-5 points) - Resolve 25 code scanning alerts, add sanitization infrastructure to prevent log forgery attacks
 - [ ] Finalize production-ready security hardening

@@ -236,11 +236,16 @@ func (p *Provider) Stop(ctx context.Context) error {
 
 // AcceptConnection accepts an incoming connection (server-side).
 func (p *Provider) AcceptConnection(ctx context.Context) (interfaces.DataPlaneSession, error) {
-	if p.mode != "server" {
+	p.mu.RLock()
+	mode := p.mode
+	server := p.server
+	p.mu.RUnlock()
+
+	if mode != "server" {
 		return nil, fmt.Errorf("AcceptConnection only available in server mode")
 	}
 
-	if p.server == nil {
+	if server == nil {
 		return nil, fmt.Errorf("server not started")
 	}
 
@@ -252,7 +257,11 @@ func (p *Provider) AcceptConnection(ctx context.Context) (interfaces.DataPlaneSe
 
 // Connect establishes a connection (client-side).
 func (p *Provider) Connect(ctx context.Context, serverAddr string) (interfaces.DataPlaneSession, error) {
-	if p.mode != "client" {
+	p.mu.RLock()
+	mode := p.mode
+	p.mu.RUnlock()
+
+	if mode != "client" {
 		return nil, fmt.Errorf("Connect only available in client mode")
 	}
 
@@ -345,6 +354,9 @@ func (p *Provider) GetStats(ctx context.Context) (*types.DataPlaneStats, error) 
 
 // Available checks if the provider can be started.
 func (p *Provider) Available() (bool, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
 	if p.tlsConfig == nil {
 		return false, fmt.Errorf("TLS configuration not provided")
 	}
@@ -362,18 +374,43 @@ func (p *Provider) Available() (bool, error) {
 
 // IsListening reports server listening status.
 func (p *Provider) IsListening() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	return p.mode == "server" && p.started.Load() && p.server != nil
 }
 
 // IsConnected reports connection status.
 func (p *Provider) IsConnected() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
 	if p.mode != "client" {
 		return false
 	}
 
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
 	// Check if we have any active sessions
 	return len(p.sessions) > 0
+}
+
+// RegisterStreamHandler registers a handler for a specific stream ID with the underlying QUIC server.
+// This is a bridge method to support the transition period while session acceptance is being implemented.
+// The handler receives the raw QUIC server session and stream, which can be wrapped for provider interface compatibility.
+//
+// Note: This method is only valid for server-mode providers and will return an error in client mode.
+// Note: stream parameter uses *quicgo.Stream which is type-aliased from github.com/quic-go/quic-go
+func (p *Provider) RegisterStreamHandler(streamID int64, handler quicServer.StreamHandler) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.mode != "server" {
+		return fmt.Errorf("RegisterStreamHandler only available in server mode")
+	}
+
+	if p.server == nil {
+		return fmt.Errorf("server not initialized")
+	}
+
+	// Register with underlying QUIC server
+	p.server.RegisterStreamHandler(streamID, handler)
+	return nil
 }
