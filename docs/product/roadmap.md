@@ -160,6 +160,7 @@ Achieve production stability, complete core platform features, and prepare for s
 
 ##### Phase 4: Security & Validation (After infrastructure is stable)
 
+- [ ] **Implement Three-Certificate Architecture for Production Security** (Issue #377 - 47-65 points) - Separate public API (Let's Encrypt), internal mTLS, and config signing certificates for proper key separation, compliance, and operational stability. Critical for v1.0 production deployments.
 - [ ] Eliminate hardcoded TimescaleDB password (Issue #372 - 3-5 points) - Remove "No Footguns" violation, implement JIT password generation for tests, require explicit credentials in production
 - [ ] Implement log injection prevention in pkg/logging (Issue #373 - 3-5 points) - Resolve 25 code scanning alerts, add sanitization infrastructure to prevent log forgery attacks
 - [ ] Finalize production-ready security hardening
