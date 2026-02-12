@@ -42,6 +42,9 @@ import (
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
+// BUILD_VERSION_CHECK is a compile-time constant to verify code version in Docker
+const BUILD_VERSION_CHECK = "story-362-bridge-pattern-v3"
+
 // Server represents the controller server component (MQTT+QUIC based)
 type Server struct {
 	mu                      sync.RWMutex
@@ -452,6 +455,8 @@ func (s *Server) Start() error {
 	}
 
 	// Start data plane provider (Story #362)
+	fmt.Printf("[DEBUG] BUILD VERSION: %s\n", BUILD_VERSION_CHECK)
+	s.logger.Info("Controller build version", "version", BUILD_VERSION_CHECK)
 	fmt.Printf("[DEBUG] Controller checking if dataPlaneProvider is nil: %v\n", s.dataPlaneProvider == nil)
 	if s.dataPlaneProvider != nil {
 		fmt.Printf("[DEBUG] Controller starting data plane provider...\n")
