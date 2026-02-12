@@ -311,32 +311,49 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// Initialize config handler for data plane configuration sync (Story #362)
 	var configHandler *controllerQuic.ConfigHandler
 	if dataPlane != nil {
+		fmt.Printf("[DEBUG] Initializing config handler with signer support...\n")
 		// Create signer from server certificate for config signing (Story #315)
 		var signer signature.Signer
 		if certManager != nil {
+			fmt.Printf("[DEBUG] certManager available, fetching server certificates...\n")
 			serverCerts, err := certManager.GetCertificatesByType(cert.CertificateTypeServer)
+			fmt.Printf("[DEBUG] GetCertificatesByType returned: err=%v numCerts=%d\n", err, len(serverCerts))
 			if err == nil && len(serverCerts) > 0 {
 				// Export server certificate with private key
+				fmt.Printf("[DEBUG] Exporting server cert with serial=%s\n", serverCerts[0].SerialNumber)
 				certPEM, keyPEM, err := certManager.ExportCertificate(serverCerts[0].SerialNumber, true)
+				fmt.Printf("[DEBUG] ExportCertificate returned: err=%v certLen=%d keyLen=%d\n", err, len(certPEM), len(keyPEM))
 				if err == nil && len(certPEM) > 0 && len(keyPEM) > 0 {
 					// Create signer from server certificate
+					fmt.Printf("[DEBUG] Creating signer from server certificate...\n")
 					signer, err = signature.NewSigner(&signature.SignerConfig{
 						PrivateKeyPEM:  keyPEM,
 						CertificatePEM: certPEM,
 					})
 					if err != nil {
+						fmt.Printf("[DEBUG] Failed to create signer: %v\n", err)
 						logger.Warn("Failed to create config signer", "error", err)
 					} else {
+						fmt.Printf("[DEBUG] Signer created successfully: algorithm=%s fingerprint=%s\n",
+							signer.Algorithm(), signer.KeyFingerprint())
 						logger.Info("Config signer initialized successfully",
 							"algorithm", signer.Algorithm(),
 							"fingerprint", signer.KeyFingerprint())
 					}
+				} else {
+					fmt.Printf("[DEBUG] Skipping signer creation: missing cert or key\n")
 				}
+			} else {
+				fmt.Printf("[DEBUG] No server certificates found or error occurred\n")
 			}
+		} else {
+			fmt.Printf("[DEBUG] certManager is nil, cannot create signer\n")
 		}
 
 		// Create config handler with signer (signs configs if signer available)
+		fmt.Printf("[DEBUG] Creating config handler with signer=%v\n", signer != nil)
 		configHandler = controllerQuic.NewConfigHandler(configService, logger, signer)
+		fmt.Printf("[DEBUG] Config handler created successfully\n")
 		logger.Debug("Config handler initialized for data plane", "signing_enabled", signer != nil)
 	}
 
