@@ -44,7 +44,7 @@ import (
 )
 
 // BUILD_VERSION_CHECK is a compile-time constant to verify code version in Docker
-const BUILD_VERSION_CHECK = "story-362-bridge-pattern-v3"
+const BUILD_VERSION_CHECK = "story-362-config-signing-enabled"
 
 // Server represents the controller server component (MQTT+QUIC based)
 type Server struct {
