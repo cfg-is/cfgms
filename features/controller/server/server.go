@@ -18,6 +18,7 @@ import (
 
 	common "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/commercial/ha"
+	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/features/controller/api"
 	"github.com/cfgis/cfgms/features/controller/commands"
 	"github.com/cfgis/cfgms/features/controller/config"
@@ -25,7 +26,6 @@ import (
 	controllerQuic "github.com/cfgis/cfgms/features/controller/quic"
 	"github.com/cfgis/cfgms/features/controller/registration"
 	"github.com/cfgis/cfgms/features/controller/service"
-	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/features/rbac"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/tenant"
@@ -38,8 +38,8 @@ import (
 	mqttInterfaces "github.com/cfgis/cfgms/pkg/mqtt/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/mqtt/providers/mochi" // Register mochi-mqtt provider
 	mqttTypes "github.com/cfgis/cfgms/pkg/mqtt/types"
-	pkgRegistration "github.com/cfgis/cfgms/pkg/registration"
 	quicServer "github.com/cfgis/cfgms/pkg/quic/server"
+	pkgRegistration "github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
