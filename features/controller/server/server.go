@@ -25,6 +25,7 @@ import (
 	controllerQuic "github.com/cfgis/cfgms/features/controller/quic"
 	"github.com/cfgis/cfgms/features/controller/registration"
 	"github.com/cfgis/cfgms/features/controller/service"
+	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/features/rbac"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/tenant"
@@ -310,9 +311,33 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// Initialize config handler for data plane configuration sync (Story #362)
 	var configHandler *controllerQuic.ConfigHandler
 	if dataPlane != nil {
-		// Create config handler (signer is nil for now - config will be unsigned)
-		configHandler = controllerQuic.NewConfigHandler(configService, logger, nil)
-		logger.Debug("Config handler initialized for data plane")
+		// Create signer from server certificate for config signing (Story #315)
+		var signer signature.Signer
+		if certManager != nil {
+			serverCerts, err := certManager.GetCertificatesByType(cert.CertificateTypeServer)
+			if err == nil && len(serverCerts) > 0 {
+				// Export server certificate with private key
+				certPEM, keyPEM, err := certManager.ExportCertificate(serverCerts[0].SerialNumber, true)
+				if err == nil && len(certPEM) > 0 && len(keyPEM) > 0 {
+					// Create signer from server certificate
+					signer, err = signature.NewSigner(&signature.SignerConfig{
+						PrivateKeyPEM:  keyPEM,
+						CertificatePEM: certPEM,
+					})
+					if err != nil {
+						logger.Warn("Failed to create config signer", "error", err)
+					} else {
+						logger.Info("Config signer initialized successfully",
+							"algorithm", signer.Algorithm(),
+							"fingerprint", signer.KeyFingerprint())
+					}
+				}
+			}
+		}
+
+		// Create config handler with signer (signs configs if signer available)
+		configHandler = controllerQuic.NewConfigHandler(configService, logger, signer)
+		logger.Debug("Config handler initialized for data plane", "signing_enabled", signer != nil)
 	}
 
 	// Initialize HTTP API server with minimal monitoring for now
