@@ -36,18 +36,80 @@ func validateContainerName(containerName string) error {
 	return nil
 }
 
+// E2ETimeouts configures timeout values for different E2E test phases
+// Story #378 Phase 3: Configurable timeouts for different environments
+type E2ETimeouts struct {
+	// MQTT connection establishment
+	MQTTConnect time.Duration
+	// MQTT publish operations
+	MQTTPublish time.Duration
+	// QUIC connection establishment (after connect_quic command)
+	QUICConnect time.Duration
+	// Config sync operation (fetch + verify + execute)
+	ConfigSync time.Duration
+	// Status report delivery (overall timeout for receiving status)
+	StatusReport time.Duration
+	// HTTP operations (config upload, API calls)
+	HTTP time.Duration
+}
+
+// DefaultE2ETimeouts returns the standard timeout configuration for local development
+func DefaultE2ETimeouts() E2ETimeouts {
+	return E2ETimeouts{
+		MQTTConnect:  10 * time.Second,
+		MQTTPublish:  5 * time.Second,
+		QUICConnect:  3 * time.Second,
+		ConfigSync:   10 * time.Second,
+		StatusReport: 30 * time.Second, // Conservative - should complete in <10s
+		HTTP:         10 * time.Second,
+	}
+}
+
+// CIE2ETimeouts returns timeout configuration for CI environments
+// CI can be slower due to resource contention, so we use more conservative timeouts
+func CIE2ETimeouts() E2ETimeouts {
+	return E2ETimeouts{
+		MQTTConnect:  20 * time.Second,
+		MQTTPublish:  10 * time.Second,
+		QUICConnect:  5 * time.Second,
+		ConfigSync:   20 * time.Second,
+		StatusReport: 60 * time.Second, // Very conservative for CI
+		HTTP:         20 * time.Second,
+	}
+}
+
+// FastE2ETimeouts returns aggressive timeouts for performance validation
+// Use these to catch performance regressions - tests should still pass
+func FastE2ETimeouts() E2ETimeouts {
+	return E2ETimeouts{
+		MQTTConnect:  5 * time.Second,
+		MQTTPublish:  2 * time.Second,
+		QUICConnect:  2 * time.Second,
+		ConfigSync:   5 * time.Second,
+		StatusReport: 10 * time.Second, // Target: <10s for full E2E flow
+		HTTP:         5 * time.Second,
+	}
+}
+
 // ModuleTestHelper provides utilities for module execution testing
 type ModuleTestHelper struct {
 	httpClient *http.Client
 	baseURL    string
 	mqttClient mqtt.Client
 	mqttAddr   string
+	timeouts   E2ETimeouts // Story #378: Configurable timeouts
 }
 
-// NewModuleTestHelper creates a new module test helper
+// NewModuleTestHelper creates a new module test helper with default timeouts
 func NewModuleTestHelper(baseURL, mqttAddr string, tlsConfig *tls.Config) *ModuleTestHelper {
+	return NewModuleTestHelperWithTimeouts(baseURL, mqttAddr, tlsConfig, DefaultE2ETimeouts())
+}
+
+// NewModuleTestHelperWithTimeouts creates a new module test helper with custom timeouts
+// Story #378 Phase 3: Support configurable timeouts for different environments
+func NewModuleTestHelperWithTimeouts(baseURL, mqttAddr string, tlsConfig *tls.Config, timeouts E2ETimeouts) *ModuleTestHelper {
 	httpClient := &http.Client{
-		Timeout: 10 * time.Second,
+		Timeout: timeouts.HTTP,
 	}
 
 	// Configure TLS if provided
@@ -66,6 +128,7 @@ func NewModuleTestHelper(baseURL, mqttAddr string, tlsConfig *tls.Config) *Modul
 		httpClient: httpClient,
 		baseURL:    baseURL,
 		mqttAddr:   mqttAddr,
+		timeouts:   timeouts,
 	}
 }
 

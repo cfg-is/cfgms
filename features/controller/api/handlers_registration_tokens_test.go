@@ -93,6 +93,7 @@ func setupTestServerWithTokenStore(t *testing.T) (*Server, registration.Store) {
 		nil, // No tracer for basic tests
 		nil, // No HA manager for basic tests
 		tokenStore,
+		"", // No signer cert serial for basic tests
 	)
 	require.NoError(t, err)
 

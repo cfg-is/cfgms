@@ -100,6 +100,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Controller, error) {
 		nil,                             // tracer - will be integrated in Phase 5
 		srv.GetHAManager(),              // HA manager
 		srv.GetRegistrationTokenStore(), // registrationTokenStore - now wired for MQTT+QUIC mode
+		srv.GetSignerCertSerial(),       // Story #378: signer cert serial for registration
 	)
 	if err != nil {
 		return nil, err

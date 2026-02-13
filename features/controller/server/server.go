@@ -68,6 +68,7 @@ type Server struct {
 	registrationTokenStore  pkgRegistration.Store
 	dataPlaneProvider       dataplaneInterfaces.DataPlaneProvider
 	configHandler           *controllerQuic.ConfigHandler
+	signerCertSerial        string // Serial number of server cert used for config signing (Story #378)
 }
 
 // New creates a new server instance
@@ -310,6 +311,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 	// Initialize config handler for data plane configuration sync (Story #362)
 	var configHandler *controllerQuic.ConfigHandler
+	var signerCertSerial string // Story #378: Track cert serial for registration handler
 	if dataPlane != nil {
 		fmt.Printf("[DEBUG] Initializing config handler with signer support...\n")
 		// Create signer from server certificate for config signing (Story #315)
@@ -320,8 +322,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			fmt.Printf("[DEBUG] GetCertificatesByType returned: err=%v numCerts=%d\n", err, len(serverCerts))
 			if err == nil && len(serverCerts) > 0 {
 				// Export server certificate with private key
-				fmt.Printf("[DEBUG] Exporting server cert with serial=%s\n", serverCerts[0].SerialNumber)
-				certPEM, keyPEM, err := certManager.ExportCertificate(serverCerts[0].SerialNumber, true)
+				signerCertSerial = serverCerts[0].SerialNumber
+				fmt.Printf("[DEBUG] Exporting server cert with serial=%s\n", signerCertSerial)
+				certPEM, keyPEM, err := certManager.ExportCertificate(signerCertSerial, true)
 				fmt.Printf("[DEBUG] ExportCertificate returned: err=%v certLen=%d keyLen=%d\n", err, len(certPEM), len(keyPEM))
 				if err == nil && len(certPEM) > 0 && len(keyPEM) > 0 {
 					// Create signer from server certificate
@@ -334,11 +337,14 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 						fmt.Printf("[DEBUG] Failed to create signer: %v\n", err)
 						logger.Warn("Failed to create config signer", "error", err)
 					} else {
-						fmt.Printf("[DEBUG] Signer created successfully: algorithm=%s fingerprint=%s\n",
-							signer.Algorithm(), signer.KeyFingerprint())
+						// CRITICAL (Story #378): Serial stored and will be passed to registration handler
+						// Registration MUST use the SAME cert serial to ensure signature verification works
+						fmt.Printf("[DEBUG] Signer created successfully: algorithm=%s fingerprint=%s serial=%s\n",
+							signer.Algorithm(), signer.KeyFingerprint(), signerCertSerial)
 						logger.Info("Config signer initialized successfully",
 							"algorithm", signer.Algorithm(),
-							"fingerprint", signer.KeyFingerprint())
+							"fingerprint", signer.KeyFingerprint(),
+							"cert_serial", signerCertSerial)
 					}
 				} else {
 					fmt.Printf("[DEBUG] Skipping signer creation: missing cert or key\n")
@@ -373,7 +379,8 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		nil, // platformMonitor
 		nil, // tracer
 		haManager,
-		regStore, // registrationTokenStore
+		regStore,         // registrationTokenStore
+		signerCertSerial, // Story #378: signer cert serial for registration
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize HTTP API server: %w", err)
@@ -401,6 +408,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		dataPlaneProvider:       dataPlane,
 		configHandler:           configHandler,
 		httpServer:              httpServer,
+		signerCertSerial:        signerCertSerial, // Story #378: For registration handler
 	}
 
 	// Wire up QUIC trigger function to API server (if data plane is enabled)
@@ -722,6 +730,13 @@ func (s *Server) GetCertificateManager() *cert.Manager {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.certManager
+}
+
+// GetSignerCertSerial returns the signer certificate serial (Story #378)
+func (s *Server) GetSignerCertSerial() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.signerCertSerial
 }
 
 // GetCertificateProvisioningService returns the certificate provisioning service instance

@@ -57,6 +57,7 @@ type Server struct {
 	registeredStewards      map[string]*RegisteredSteward // In-memory store for registered stewards
 	corsConfig              *CORSConfig                   // CORS configuration
 	quicTriggerFunc         QUICTriggerFunc               // Function to trigger QUIC connections
+	signerCertSerial        string                        // Story #378: Serial of cert used for config signing
 }
 
 // APIKey represents an API key for external authentication
@@ -111,6 +112,7 @@ func New(
 	tracer *telemetry.Tracer,
 	haManager *ha.Manager,
 	registrationTokenStore registration.Store,
+	signerCertSerial string, // Story #378: Serial of cert used for config signing
 ) (*Server, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config cannot be nil")
@@ -137,6 +139,7 @@ func New(
 		tracer:                  tracer,
 		haManager:               haManager,
 		registrationTokenStore:  registrationTokenStore,
+		signerCertSerial:        signerCertSerial,                    // Story #378: For registration handler
 		apiKeys:                 make(map[string]*APIKey),            // In-memory cache
 		secretStore:             secretStore,                         // M-AUTH-1: Central secrets provider
 		registeredStewards:      make(map[string]*RegisteredSteward), // In-memory steward registry
