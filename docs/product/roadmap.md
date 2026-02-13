@@ -163,6 +163,7 @@ Achieve production stability, complete core platform features, and prepare for s
 ##### Phase 4: Security & Validation (After infrastructure is stable)
 
 - [ ] **Implement Three-Certificate Architecture for Production Security** (Issue #377 - 47-65 points) - Separate public API (Let's Encrypt), internal mTLS, and config signing certificates for proper key separation, compliance, and operational stability. Critical for v1.0 production deployments.
+- [ ] **Authorization Memory Management & Circuit Breaker Implementation** (Issue #380 - 21 points) - Implement multi-tier circuit breakers (IP, Tenant, Global) with rate limiting and memory management to prevent DoS via resource exhaustion. Target <50MB memory for auth subsystem under load (was 20GB for 47M requests). Reduce E2E test volume from 47M to ~25K requests with smart testing.
 - [ ] Eliminate hardcoded TimescaleDB password (Issue #372 - 3-5 points) - Remove "No Footguns" violation, implement JIT password generation for tests, require explicit credentials in production
 - [ ] Implement log injection prevention in pkg/logging (Issue #373 - 3-5 points) - Resolve 25 code scanning alerts, add sanitization infrastructure to prevent log forgery attacks
 - [ ] Finalize production-ready security hardening
