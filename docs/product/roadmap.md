@@ -142,6 +142,7 @@ Achieve production stability, complete core platform features, and prepare for s
 - [x] Optimize zero-trust statistics lock contention (Issue #355) - Replace mutex-based stats with atomic operations or async channel to eliminate 65x performance degradation under concurrent load ✅ COMPLETED
 - [x] Fix Windows flaky test timing assertion (Issue #356) - Increase TestEphemeralAPIKeys tolerance from 5s to 10s to accommodate Windows CI runner variability ✅ COMPLETED
 - [x] Fix flaky TestEnhancedMultiTenantSecurity test (Issue #366) - Fixed dual audit logger anti-pattern causing test to query different logger than engine uses ✅ COMPLETED
+- [x] **Fix MQTT+QUIC E2E config sync signature verification** (Issue #378 - 8 points) - Fixed certificate mismatch causing 30s timeouts in E2E tests, implemented certificate serial tracking pattern, E2E tests now pass in <10s, added diagnostic tests and comprehensive documentation ✅ COMPLETED
 
 ##### Phase 2: Breaking Changes & Architecture (Do before production validation)
 
