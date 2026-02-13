@@ -120,9 +120,19 @@ func (p *Provider) handleCommandMessage(topic string, payload []byte) {
 		return
 	}
 
+	// Extract stewardID from topic or use command's StewardID field
+	// Topic format: cfgms/commands/{steward_id} or cfgms/commands/{tenant_id}/broadcast
+	stewardID := cmd.StewardID
+	if stewardID == "" {
+		// If command doesn't specify steward (broadcast), use provider's steward ID
+		stewardID = p.stewardID
+	}
+
 	// Find handler for this steward
+	// Story #363 bugfix: Use stewardID from command/topic, not p.stewardID
+	// This fixes the mismatch where handlers are stored by parameter but looked up by field
 	p.mu.RLock()
-	handler, exists := p.commandHandlers[p.stewardID]
+	handler, exists := p.commandHandlers[stewardID]
 	p.mu.RUnlock()
 
 	if !exists {

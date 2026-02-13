@@ -1,29 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jordan Ritz
-// Package heartbeat provides MQTT-based heartbeat monitoring for steward connections.
+// Package heartbeat provides heartbeat monitoring for steward connections.
 //
-// This service monitors steward heartbeats via MQTT and provides failover detection
-// with <15 second detection time as required by Story #198.
+// This service monitors steward heartbeats via the ControlPlaneProvider and provides
+// failover detection with <15 second detection time as required by Story #198.
+//
+// Story #363: Migrated from direct MQTT broker to ControlPlaneProvider abstraction.
 package heartbeat
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
 
+	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
+	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
-	mqttInterfaces "github.com/cfgis/cfgms/pkg/mqtt/interfaces"
 )
-
-// HeartbeatMessage represents a steward heartbeat message.
-type HeartbeatMessage struct {
-	StewardID string            `json:"steward_id"`
-	Status    string            `json:"status"`
-	Timestamp time.Time         `json:"timestamp"`
-	Metrics   map[string]string `json:"metrics,omitempty"`
-}
 
 // StewardStatus represents the current status of a steward.
 type StewardStatus struct {
@@ -39,12 +33,12 @@ type StewardStatus struct {
 // StatusChangeCallback is called when a steward's status changes.
 type StatusChangeCallback func(stewardID string, healthy bool, status StewardStatus)
 
-// Service monitors steward heartbeats via MQTT.
+// Service monitors steward heartbeats via the ControlPlaneProvider.
 type Service struct {
 	mu sync.RWMutex
 
-	// MQTT broker for subscriptions
-	broker mqttInterfaces.Broker
+	// Control plane provider for heartbeat subscriptions (Story #363)
+	controlPlane controlplaneInterfaces.ControlPlaneProvider
 
 	// Steward status tracking
 	stewards map[string]*StewardStatus
@@ -64,8 +58,8 @@ type Service struct {
 
 // Config holds heartbeat service configuration.
 type Config struct {
-	// Broker is the MQTT broker to use for subscriptions
-	Broker mqttInterfaces.Broker
+	// ControlPlane is the control plane provider for heartbeat subscriptions (Story #363)
+	ControlPlane controlplaneInterfaces.ControlPlaneProvider
 
 	// HeartbeatTimeout is how long to wait before marking a steward unhealthy
 	// Default: 15 seconds (Story #198 requirement)
@@ -84,8 +78,8 @@ type Config struct {
 
 // New creates a new heartbeat monitoring service.
 func New(cfg *Config) (*Service, error) {
-	if cfg.Broker == nil {
-		return nil, fmt.Errorf("MQTT broker is required")
+	if cfg.ControlPlane == nil {
+		return nil, fmt.Errorf("control plane provider is required")
 	}
 
 	heartbeatTimeout := cfg.HeartbeatTimeout
@@ -101,7 +95,7 @@ func New(cfg *Config) (*Service, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &Service{
-		broker:           cfg.Broker,
+		controlPlane:     cfg.ControlPlane,
 		stewards:         make(map[string]*StewardStatus),
 		heartbeatTimeout: heartbeatTimeout,
 		checkInterval:    checkInterval,
@@ -118,17 +112,14 @@ func (s *Service) Start(ctx context.Context) error {
 		"timeout", s.heartbeatTimeout,
 		"check_interval", s.checkInterval)
 
-	// Subscribe to all steward heartbeat topics
-	heartbeatTopic := "cfgms/steward/+/heartbeat"
-	if err := s.broker.Subscribe(ctx, heartbeatTopic, 1, s.handleHeartbeat); err != nil {
-		return fmt.Errorf("failed to subscribe to heartbeat topic: %w", err)
+	// Subscribe to heartbeats via control plane provider (Story #363)
+	// Uses new topic pattern: cfgms/heartbeats/+ instead of cfgms/steward/+/heartbeat
+	if err := s.controlPlane.SubscribeHeartbeats(ctx, s.handleHeartbeatFromProvider); err != nil {
+		return fmt.Errorf("failed to subscribe to heartbeats: %w", err)
 	}
 
-	// Subscribe to steward will messages (for disconnect detection)
-	willTopic := "cfgms/steward/+/will"
-	if err := s.broker.Subscribe(ctx, willTopic, 1, s.handleWill); err != nil {
-		return fmt.Errorf("failed to subscribe to will topic: %w", err)
-	}
+	// Note: Will/LWT messages are no longer subscribed separately.
+	// Steward disconnection is detected via heartbeat timeout in monitorHeartbeats().
 
 	// Start background checker for stale heartbeats
 	go s.monitorHeartbeats()
@@ -142,73 +133,48 @@ func (s *Service) Stop(ctx context.Context) error {
 	s.logger.Info("Stopping heartbeat monitoring service")
 	s.cancel()
 
-	// Unsubscribe from topics
-	_ = s.broker.Unsubscribe(ctx, "cfgms/steward/+/heartbeat")
-	_ = s.broker.Unsubscribe(ctx, "cfgms/steward/+/will")
-
+	// Provider cleanup is handled by the provider's Stop method
 	return nil
 }
 
-// handleHeartbeat processes incoming heartbeat messages.
-func (s *Service) handleHeartbeat(topic string, payload []byte, qos byte, retained bool) error {
-	var msg HeartbeatMessage
-	if err := json.Unmarshal(payload, &msg); err != nil {
-		s.logger.Warn("Failed to parse heartbeat message", "error", err, "payload", string(payload))
-		return fmt.Errorf("failed to parse heartbeat: %w", err)
-	}
-
+// handleHeartbeatFromProvider processes incoming heartbeats from the ControlPlaneProvider.
+// Story #363: Replaces direct MQTT handler with typed heartbeat handler.
+func (s *Service) handleHeartbeatFromProvider(ctx context.Context, hb *controlplaneTypes.Heartbeat) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	status, exists := s.stewards[msg.StewardID]
+	status, exists := s.stewards[hb.StewardID]
 	if !exists {
 		// New steward
 		status = &StewardStatus{
-			StewardID:      msg.StewardID,
+			StewardID:      hb.StewardID,
 			ConnectedSince: time.Now(),
 		}
-		s.stewards[msg.StewardID] = status
-		s.logger.Info("New steward registered", "steward_id", msg.StewardID)
+		s.stewards[hb.StewardID] = status
+		s.logger.Info("New steward registered", "steward_id", hb.StewardID)
 	}
 
 	previouslyHealthy := status.Healthy
 
 	// Update status
-	status.LastHeartbeat = msg.Timestamp
-	status.Status = msg.Status
-	status.Metrics = msg.Metrics
+	status.LastHeartbeat = hb.Timestamp
+	status.Status = string(hb.Status)
+
+	// Convert metrics from map[string]interface{} to map[string]string
+	if hb.Metrics != nil {
+		metrics := make(map[string]string, len(hb.Metrics))
+		for k, v := range hb.Metrics {
+			metrics[k] = fmt.Sprintf("%v", v)
+		}
+		status.Metrics = metrics
+	}
+
 	status.MissedBeats = 0
 	status.Healthy = true
 
 	// Trigger callback if status changed
 	if !previouslyHealthy && s.onStatusChange != nil {
-		s.onStatusChange(msg.StewardID, true, *status)
-	}
-
-	return nil
-}
-
-// handleWill processes last will messages (steward disconnected).
-func (s *Service) handleWill(topic string, payload []byte, qos byte, retained bool) error {
-	var msg HeartbeatMessage
-	if err := json.Unmarshal(payload, &msg); err != nil {
-		s.logger.Warn("Failed to parse will message", "error", err)
-		return fmt.Errorf("failed to parse will message: %w", err)
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	status, exists := s.stewards[msg.StewardID]
-	if exists {
-		status.Healthy = false
-		status.Status = "disconnected"
-
-		s.logger.Warn("Steward disconnected (will message)", "steward_id", msg.StewardID)
-
-		if s.onStatusChange != nil {
-			s.onStatusChange(msg.StewardID, false, *status)
-		}
+		s.onStatusChange(hb.StewardID, true, *status)
 	}
 
 	return nil

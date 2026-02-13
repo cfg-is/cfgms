@@ -5,7 +5,6 @@ package server
 import (
 	"context"
 	"crypto/tls"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,17 +26,18 @@ import (
 	"github.com/cfgis/cfgms/features/controller/registration"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/rbac"
-	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
+	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
+	_ "github.com/cfgis/cfgms/pkg/controlplane/providers/mqtt" // Register MQTT control plane provider
+	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	dataplaneInterfaces "github.com/cfgis/cfgms/pkg/dataplane/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/dataplane/providers/quic" // Register QUIC data plane provider
 	dataplaneTypes "github.com/cfgis/cfgms/pkg/dataplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 	mqttInterfaces "github.com/cfgis/cfgms/pkg/mqtt/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/mqtt/providers/mochi" // Register mochi-mqtt provider
-	mqttTypes "github.com/cfgis/cfgms/pkg/mqtt/types"
 	quicServer "github.com/cfgis/cfgms/pkg/quic/server"
 	pkgRegistration "github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
@@ -62,6 +62,7 @@ type Server struct {
 	auditManager            *audit.Manager
 	haManager               *ha.Manager
 	mqttBroker              mqttInterfaces.Broker
+	controlPlane            controlplaneInterfaces.ControlPlaneProvider // Story #363
 	heartbeatService        *heartbeat.Service
 	commandPublisher        *commands.Publisher
 	registrationHandler     *registration.Handler
@@ -164,6 +165,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 	// Initialize MQTT broker if enabled
 	var mqttBroker mqttInterfaces.Broker
+	var controlPlane controlplaneInterfaces.ControlPlaneProvider
 	var heartbeatService *heartbeat.Service
 	var commandPublisher *commands.Publisher
 	var registrationHandler *registration.Handler
@@ -176,10 +178,24 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		}
 		logger.Info("MQTT broker initialized successfully")
 
+		// Initialize control plane provider in server mode (Story #363)
+		logger.Info("Initializing control plane provider...")
+		controlPlane = controlplaneInterfaces.GetProvider("mqtt")
+		if controlPlane == nil {
+			return nil, fmt.Errorf("MQTT control plane provider not registered")
+		}
+		if err := controlPlane.Initialize(context.Background(), map[string]interface{}{
+			"mode":   "server",
+			"broker": mqttBroker,
+		}); err != nil {
+			return nil, fmt.Errorf("failed to initialize control plane provider: %w", err)
+		}
+		logger.Info("Control plane provider initialized successfully", "provider", controlPlane.Name())
+
 		// Initialize heartbeat monitoring service
 		logger.Info("Initializing heartbeat monitoring service...")
 		heartbeatService, err = heartbeat.New(&heartbeat.Config{
-			Broker:           mqttBroker,
+			ControlPlane:     controlPlane,
 			HeartbeatTimeout: 15 * time.Second, // Story #198 requirement
 			CheckInterval:    5 * time.Second,
 			OnStatusChange: func(stewardID string, healthy bool, status heartbeat.StewardStatus) {
@@ -196,11 +212,11 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		}
 		logger.Info("Heartbeat monitoring service initialized successfully")
 
-		// Initialize command publisher (Story #198)
+		// Initialize command publisher (Story #198, Story #363)
 		logger.Info("Initializing command publisher...")
 		commandPublisher, err = commands.New(&commands.Config{
-			Broker: mqttBroker,
-			Logger: logger,
+			ControlPlane: controlPlane,
+			Logger:       logger,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize command publisher: %w", err)
@@ -401,6 +417,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		auditManager:            auditManager,
 		haManager:               haManager,
 		mqttBroker:              mqttBroker,
+		controlPlane:            controlPlane, // Story #363
 		heartbeatService:        heartbeatService,
 		commandPublisher:        commandPublisher,
 		registrationHandler:     registrationHandler,
@@ -482,26 +499,22 @@ func (s *Server) Start() error {
 			s.logger.Info("Registration handler started successfully")
 		}
 
-		// Subscribe to DNA updates from stewards (Story #198)
-		dnaUpdateTopic := "cfgms/steward/+/dna"
-		if err := s.mqttBroker.Subscribe(ctx, dnaUpdateTopic, 1, s.handleDNAUpdate); err != nil {
-			return fmt.Errorf("failed to subscribe to DNA updates: %w", err)
-		}
-		s.logger.Info("Subscribed to DNA updates", "topic", dnaUpdateTopic)
+		// Start control plane provider (Story #363)
+		if s.controlPlane != nil {
+			s.logger.Info("Starting control plane provider...")
+			if err := s.controlPlane.Start(ctx); err != nil {
+				return fmt.Errorf("failed to start control plane provider: %w", err)
+			}
+			s.logger.Info("Control plane provider started successfully")
 
-		// Subscribe to configuration status reports from stewards (Story #198)
-		configStatusTopic := "cfgms/steward/+/config-status"
-		if err := s.mqttBroker.Subscribe(ctx, configStatusTopic, 1, s.handleConfigStatusReport); err != nil {
-			return fmt.Errorf("failed to subscribe to config status reports: %w", err)
+			// Subscribe to events from stewards via ControlPlaneProvider (Story #363)
+			// DNA updates, config status reports, and validation requests are received as events
+			// using new topic pattern: cfgms/events/+ instead of cfgms/steward/+/{type}
+			if err := s.controlPlane.SubscribeEvents(ctx, nil, s.handleEventFromProvider); err != nil {
+				return fmt.Errorf("failed to subscribe to events: %w", err)
+			}
+			s.logger.Info("Subscribed to steward events via control plane provider")
 		}
-		s.logger.Info("Subscribed to config status reports", "topic", configStatusTopic)
-
-		// Subscribe to configuration validation requests from stewards (Story #198)
-		validationRequestTopic := "cfgms/steward/+/validate-request"
-		if err := s.mqttBroker.Subscribe(ctx, validationRequestTopic, 1, s.handleValidationRequest); err != nil {
-			return fmt.Errorf("failed to subscribe to validation requests: %w", err)
-		}
-		s.logger.Info("Subscribed to validation requests", "topic", validationRequestTopic)
 	}
 
 	// Start data plane provider (Story #362)
@@ -599,6 +612,15 @@ func (s *Server) Stop() error {
 		event := audit.SystemEvent("system", "controller_stop", "Controller server shutting down")
 		if err := s.auditManager.RecordEvent(ctx, event); err != nil {
 			s.logger.Warn("Failed to record shutdown audit event", "error", err)
+		}
+	}
+
+	// Stop control plane provider (Story #363)
+	if s.controlPlane != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := s.controlPlane.Stop(ctx); err != nil {
+			s.logger.Warn("Failed to stop control plane provider", "error", err)
 		}
 	}
 
@@ -1280,154 +1302,110 @@ func (s *Server) handleDataPlaneSession(ctx context.Context, session dataplaneIn
 	}
 }
 
-// handleDNAUpdate processes DNA update messages from stewards via MQTT.
-func (s *Server) handleDNAUpdate(topic string, payload []byte, qos byte, retained bool) error {
-	var dnaUpdate mqttTypes.DNAUpdate
-	if err := json.Unmarshal(payload, &dnaUpdate); err != nil {
-		s.logger.Error("Failed to parse DNA update", "error", err)
-		return fmt.Errorf("failed to parse DNA update: %w", err)
+// handleEventFromProvider processes events from stewards via the ControlPlaneProvider.
+// Story #363: Unified event handler replaces separate DNA/config-status/validation handlers.
+// Events are received on the new topic pattern: cfgms/events/{steward_id}
+func (s *Server) handleEventFromProvider(ctx context.Context, event *controlplaneTypes.Event) error {
+	switch event.Type {
+	case controlplaneTypes.EventDNAChanged:
+		return s.handleDNAEvent(ctx, event)
+	case controlplaneTypes.EventConfigApplied:
+		return s.handleConfigAppliedEvent(ctx, event)
+	default:
+		// Log unhandled event types for debugging
+		s.logger.Debug("Received event from steward",
+			"steward_id", event.StewardID,
+			"event_type", event.Type,
+			"event_id", event.ID)
+	}
+	return nil
+}
+
+// handleDNAEvent processes DNA change events from stewards.
+// Story #363: Replaces handleDNAUpdate which used direct MQTT subscription.
+func (s *Server) handleDNAEvent(ctx context.Context, event *controlplaneTypes.Event) error {
+	s.logger.Info("Received DNA change event",
+		"steward_id", event.StewardID,
+		"event_id", event.ID)
+
+	// Extract DNA data from event details
+	dna := &common.DNA{
+		Id:          event.StewardID,
+		LastUpdated: timestamppb.New(event.Timestamp),
 	}
 
-	s.logger.Info("Received DNA update via MQTT",
-		"steward_id", dnaUpdate.StewardID,
-		"attributes_count", len(dnaUpdate.DNA),
-		"config_hash", dnaUpdate.ConfigHash)
-
-	// Convert to protobuf DNA format
-	dna := &common.DNA{
-		Id:              dnaUpdate.StewardID,
-		Attributes:      dnaUpdate.DNA,
-		ConfigHash:      dnaUpdate.ConfigHash,
-		SyncFingerprint: dnaUpdate.SyncFingerprint,
-		LastUpdated:     timestamppb.New(dnaUpdate.Timestamp),
+	// Extract attributes from event details
+	if details := event.Details; details != nil {
+		if attrs, ok := details["dna"].(map[string]interface{}); ok {
+			dna.Attributes = make(map[string]string, len(attrs))
+			for k, v := range attrs {
+				dna.Attributes[k] = fmt.Sprintf("%v", v)
+			}
+		}
+		if hash, ok := details["config_hash"].(string); ok {
+			dna.ConfigHash = hash
+		}
+		if fp, ok := details["sync_fingerprint"].(string); ok {
+			dna.SyncFingerprint = fp
+		}
 	}
 
 	// Update DNA in controller service
-	ctx := context.Background()
 	status, err := s.controllerService.SyncDNA(ctx, dna)
 	if err != nil {
 		s.logger.Error("Failed to sync DNA",
-			"steward_id", dnaUpdate.StewardID,
+			"steward_id", event.StewardID,
 			"error", err)
 		return fmt.Errorf("failed to sync DNA: %w", err)
 	}
 
 	if status.Code != common.Status_OK {
 		s.logger.Warn("DNA sync returned non-OK status",
-			"steward_id", dnaUpdate.StewardID,
+			"steward_id", event.StewardID,
 			"status_code", status.Code,
 			"message", status.Message)
 	} else {
-		s.logger.Info("DNA synced successfully via MQTT",
-			"steward_id", dnaUpdate.StewardID)
+		s.logger.Info("DNA synced successfully",
+			"steward_id", event.StewardID)
 	}
 
 	return nil
 }
 
-// handleConfigStatusReport processes configuration status reports from stewards via MQTT.
-func (s *Server) handleConfigStatusReport(topic string, payload []byte, qos byte, retained bool) error {
-	var report mqttTypes.ConfigStatusReport
-	if err := json.Unmarshal(payload, &report); err != nil {
-		s.logger.Error("Failed to parse config status report", "error", err)
-		return fmt.Errorf("failed to parse config status report: %w", err)
-	}
+// handleConfigAppliedEvent processes configuration applied events from stewards.
+// Story #363: Replaces handleConfigStatusReport which used direct MQTT subscription.
+func (s *Server) handleConfigAppliedEvent(ctx context.Context, event *controlplaneTypes.Event) error {
+	s.logger.Info("Received config applied event",
+		"steward_id", event.StewardID,
+		"event_id", event.ID)
 
-	s.logger.Info("Received configuration status report via MQTT",
-		"steward_id", report.StewardID,
-		"config_version", report.ConfigVersion,
-		"overall_status", report.Status,
-		"modules_count", len(report.Modules))
+	// Extract config status details from event
+	if details := event.Details; details != nil {
+		configVersion, _ := details["config_version"].(string)
+		overallStatus, _ := details["status"].(string)
 
-	// Log detailed module status
-	for moduleName, moduleStatus := range report.Modules {
-		s.logger.Info("Module status",
-			"steward_id", report.StewardID,
-			"module", moduleName,
-			"status", moduleStatus.Status,
-			"message", moduleStatus.Message)
+		s.logger.Info("Configuration status report",
+			"steward_id", event.StewardID,
+			"config_version", configVersion,
+			"overall_status", overallStatus)
+
+		// Log module details if present
+		if modules, ok := details["modules"].(map[string]interface{}); ok {
+			for moduleName, moduleData := range modules {
+				if moduleMap, ok := moduleData.(map[string]interface{}); ok {
+					moduleStatus, _ := moduleMap["status"].(string)
+					moduleMessage, _ := moduleMap["message"].(string)
+					s.logger.Info("Module status",
+						"steward_id", event.StewardID,
+						"module", moduleName,
+						"status", moduleStatus,
+						"message", moduleMessage)
+				}
+			}
+		}
 	}
 
 	// TODO: Store status report in database/audit log for MSP admin visibility
-	// This would integrate with the configuration service to track module execution history
-
-	return nil
-}
-
-// handleValidationRequest processes configuration validation requests from stewards via MQTT.
-func (s *Server) handleValidationRequest(topic string, payload []byte, qos byte, retained bool) error {
-	var request mqttTypes.ValidationRequest
-	if err := json.Unmarshal(payload, &request); err != nil {
-		s.logger.Error("Failed to parse validation request", "error", err)
-		return fmt.Errorf("failed to parse validation request: %w", err)
-	}
-
-	s.logger.Info("Received validation request via MQTT",
-		"steward_id", request.StewardID,
-		"request_id", request.RequestID,
-		"version", request.Version)
-
-	// Parse configuration
-	var stewardConfig stewardconfig.StewardConfig
-	if err := json.Unmarshal(request.Config, &stewardConfig); err != nil {
-		// Send validation error response
-		response := mqttTypes.ValidationResponse{
-			RequestID: request.RequestID,
-			Valid:     false,
-			Errors:    []string{fmt.Sprintf("Invalid configuration format: %v", err)},
-			Timestamp: time.Now(),
-		}
-		_ = s.sendValidationResponse(request.StewardID, request.RequestID, response)
-		return nil
-	}
-
-	// Validate using the steward config validation (simpler than full framework for now)
-	var errors []string
-	if err := stewardconfig.ValidateConfiguration(stewardConfig); err != nil {
-		errors = append(errors, err.Error())
-	}
-
-	// TODO: Use comprehensive validation framework like ValidateConfig does
-	// This would require access to s.configService.validator
-
-	// Create response
-	response := mqttTypes.ValidationResponse{
-		RequestID: request.RequestID,
-		Valid:     len(errors) == 0,
-		Errors:    errors,
-		Timestamp: time.Now(),
-	}
-
-	// Send response
-	if err := s.sendValidationResponse(request.StewardID, request.RequestID, response); err != nil {
-		s.logger.Error("Failed to send validation response",
-			"steward_id", request.StewardID,
-			"request_id", request.RequestID,
-			"error", err)
-		return err
-	}
-
-	s.logger.Info("Sent validation response",
-		"steward_id", request.StewardID,
-		"request_id", request.RequestID,
-		"valid", response.Valid,
-		"errors_count", len(response.Errors))
-
-	return nil
-}
-
-// sendValidationResponse sends a validation response to a steward.
-func (s *Server) sendValidationResponse(stewardID string, requestID string, response mqttTypes.ValidationResponse) error {
-	payload, err := json.Marshal(response)
-	if err != nil {
-		return fmt.Errorf("failed to marshal validation response: %w", err)
-	}
-
-	ctx := context.Background()
-	responseTopic := fmt.Sprintf("cfgms/steward/%s/validate-response/%s", stewardID, requestID)
-	if err := s.mqttBroker.Publish(ctx, responseTopic, payload, 1, false); err != nil {
-		return fmt.Errorf("failed to publish validation response: %w", err)
-	}
 
 	return nil
 }

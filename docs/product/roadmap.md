@@ -143,6 +143,7 @@ Achieve production stability, complete core platform features, and prepare for s
 - [x] Fix Windows flaky test timing assertion (Issue #356) - Increase TestEphemeralAPIKeys tolerance from 5s to 10s to accommodate Windows CI runner variability ✅ COMPLETED
 - [x] Fix flaky TestEnhancedMultiTenantSecurity test (Issue #366) - Fixed dual audit logger anti-pattern causing test to query different logger than engine uses ✅ COMPLETED
 - [x] **Fix MQTT+QUIC E2E config sync signature verification** (Issue #378 - 8 points) - Fixed certificate mismatch causing 30s timeouts in E2E tests, implemented certificate serial tracking pattern, E2E tests now pass in <10s, added diagnostic tests and comprehensive documentation ✅ COMPLETED
+- [ ] Fix Docker networking in MQTT+QUIC E2E tests (Issue #382 - 2-3 points) - Fix hardcoded `localhost:4433` QUIC address to use Docker service name `controller-standalone:4433` for container-to-container communication
 
 ##### Phase 2: Breaking Changes & Architecture (Do before production validation)
 
@@ -151,7 +152,7 @@ Achieve production stability, complete core platform features, and prepare for s
   - [x] Story #267.1: Control Plane Provider Interface (Issue #360 - 8 points) ✅ COMPLETED - Define control plane abstraction, migrate MQTT implementation to pluggable provider
   - [x] Story #267.2: Data Plane Provider Interface (Issue #361 - 8 points) ✅ COMPLETED - Define data plane abstraction, migrate QUIC implementation to pluggable provider
   - [x] Story #267.3: Migrate Controller to Communication Providers (Issue #362 - 13 points) - Update controller to use ControlPlane/DataPlane providers ✅ COMPLETED
-  - [ ] Story #267.4: Migrate Steward to Communication Providers (Issue #363 - 13 points) - Update steward to use ControlPlane/DataPlane providers
+  - [x] Story #267.4: Migrate Steward to Communication Providers (Issue #363 - 13 points) - Update steward to use ControlPlane/DataPlane providers ✅ COMPLETED
   - [ ] Story #267.5: Deprecate Direct MQTT/QUIC Imports (Issue #364 - 5 points) - Add architecture checks, documentation, mark old packages deprecated
 
 ##### Phase 3: Feature Completion
@@ -162,6 +163,7 @@ Achieve production stability, complete core platform features, and prepare for s
 ##### Phase 4: Security & Validation (After infrastructure is stable)
 
 - [ ] **Implement Three-Certificate Architecture for Production Security** (Issue #377 - 47-65 points) - Separate public API (Let's Encrypt), internal mTLS, and config signing certificates for proper key separation, compliance, and operational stability. Critical for v1.0 production deployments.
+- [ ] **Authorization Memory Management & Circuit Breaker Implementation** (Issue #380 - 21 points) - Implement multi-tier circuit breakers (IP, Tenant, Global) with rate limiting and memory management to prevent DoS via resource exhaustion. Target <50MB memory for auth subsystem under load (was 20GB for 47M requests). Reduce E2E test volume from 47M to ~25K requests with smart testing.
 - [ ] Eliminate hardcoded TimescaleDB password (Issue #372 - 3-5 points) - Remove "No Footguns" violation, implement JIT password generation for tests, require explicit credentials in production
 - [ ] Implement log injection prevention in pkg/logging (Issue #373 - 3-5 points) - Resolve 25 code scanning alerts, add sanitization infrastructure to prevent log forgery attacks
 - [ ] Finalize production-ready security hardening
