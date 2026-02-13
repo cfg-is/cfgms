@@ -10,18 +10,26 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/logging"
-	mqttClient "github.com/cfgis/cfgms/pkg/mqtt/client"
 )
+
+// MessageClient provides basic MQTT publish/subscribe operations for registration.
+// This abstraction allows the registration package to work without importing
+// pkg/mqtt/client directly, supporting the ControlPlaneProvider migration (Story #363).
+type MessageClient interface {
+	Publish(ctx context.Context, topic string, payload []byte, qos byte, retained bool) error
+	Subscribe(ctx context.Context, topic string, qos byte, callback func(topic string, payload []byte)) error
+	Unsubscribe(ctx context.Context, topic string) error
+}
 
 // Client handles steward registration with the controller using tokens.
 type Client struct {
-	mqtt   *mqttClient.Client
+	mqtt   MessageClient
 	logger logging.Logger
 }
 
 // Config holds registration client configuration.
 type Config struct {
-	MQTT   *mqttClient.Client
+	MQTT   MessageClient
 	Logger logging.Logger
 }
 

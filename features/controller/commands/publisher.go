@@ -1,31 +1,30 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jordan Ritz
-// Package commands provides MQTT command publishing for controller operations.
+// Package commands provides command publishing for controller operations.
 //
-// This package implements the command publisher that sends MQTT commands
-// to stewards (Story #198).
+// This package implements the command publisher that sends commands
+// to stewards via the ControlPlaneProvider abstraction (Story #198, Story #363).
 package commands
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 
+	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
+	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
-	mqttInterfaces "github.com/cfgis/cfgms/pkg/mqtt/interfaces"
-	mqttTypes "github.com/cfgis/cfgms/pkg/mqtt/types"
 )
 
-// Publisher publishes commands to stewards via MQTT.
+// Publisher publishes commands to stewards via the ControlPlaneProvider.
 type Publisher struct {
 	mu sync.RWMutex
 
-	// MQTT broker for publishing
-	broker mqttInterfaces.Broker
+	// Control plane provider for command publishing (Story #363)
+	controlPlane controlplaneInterfaces.ControlPlaneProvider
 
 	// Command tracking
 	pending map[string]*pendingCommand
@@ -38,18 +37,18 @@ type Publisher struct {
 type pendingCommand struct {
 	CommandID   string
 	StewardID   string
-	Type        mqttTypes.CommandType
+	Type        controlplaneTypes.CommandType
 	SentAt      time.Time
 	Timeout     time.Duration
-	OnComplete  func(status mqttTypes.StatusUpdate)
+	OnComplete  func(event *controlplaneTypes.Event)
 	OnTimeout   func()
 	cancelTimer *time.Timer
 }
 
 // Config holds command publisher configuration.
 type Config struct {
-	// Broker is the MQTT broker to use for publishing
-	Broker mqttInterfaces.Broker
+	// ControlPlane is the control plane provider for command publishing (Story #363)
+	ControlPlane controlplaneInterfaces.ControlPlaneProvider
 
 	// Logger for command logging
 	Logger logging.Logger
@@ -57,45 +56,41 @@ type Config struct {
 
 // New creates a new command publisher.
 func New(cfg *Config) (*Publisher, error) {
-	if cfg.Broker == nil {
-		return nil, fmt.Errorf("MQTT broker is required")
+	if cfg.ControlPlane == nil {
+		return nil, fmt.Errorf("control plane provider is required")
 	}
 	if cfg.Logger == nil {
 		return nil, fmt.Errorf("logger is required")
 	}
 
 	return &Publisher{
-		broker:  cfg.Broker,
-		pending: make(map[string]*pendingCommand),
-		logger:  cfg.Logger,
+		controlPlane: cfg.ControlPlane,
+		pending:      make(map[string]*pendingCommand),
+		logger:       cfg.Logger,
 	}, nil
 }
 
 // PublishCommand publishes a command to a specific steward.
-func (p *Publisher) PublishCommand(ctx context.Context, stewardID string, cmdType mqttTypes.CommandType, params map[string]interface{}) (string, error) {
+// Story #363: Uses ControlPlaneProvider.SendCommand() instead of direct MQTT publish.
+func (p *Publisher) PublishCommand(ctx context.Context, stewardID string, cmdType controlplaneTypes.CommandType, params map[string]interface{}) (string, error) {
 	// Generate unique command ID
 	commandID := uuid.New().String()
 
-	// Create command message
-	cmd := mqttTypes.Command{
-		CommandID: commandID,
+	// Create command message using control plane types
+	cmd := &controlplaneTypes.Command{
+		ID:        commandID,
 		Type:      cmdType,
+		StewardID: stewardID,
 		Timestamp: time.Now(),
 		Params:    params,
 	}
 
-	payload, err := json.Marshal(cmd)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal command: %w", err)
+	// Send via control plane provider (publishes to cfgms/commands/{stewardID})
+	if err := p.controlPlane.SendCommand(ctx, cmd); err != nil {
+		return "", fmt.Errorf("failed to send command: %w", err)
 	}
 
-	// Publish to steward's command topic
-	topic := fmt.Sprintf("cfgms/steward/%s/commands", stewardID)
-	if err := p.broker.Publish(ctx, topic, payload, 1, false); err != nil {
-		return "", fmt.Errorf("failed to publish command: %w", err)
-	}
-
-	p.logger.Info("Published command to steward",
+	p.logger.Info("Sent command to steward",
 		"command_id", commandID,
 		"steward_id", stewardID,
 		"type", cmdType)
@@ -103,14 +98,14 @@ func (p *Publisher) PublishCommand(ctx context.Context, stewardID string, cmdTyp
 	return commandID, nil
 }
 
-// PublishCommandWithCallback publishes a command and waits for completion status.
+// PublishCommandWithCallback publishes a command and waits for completion event.
 func (p *Publisher) PublishCommandWithCallback(
 	ctx context.Context,
 	stewardID string,
-	cmdType mqttTypes.CommandType,
+	cmdType controlplaneTypes.CommandType,
 	params map[string]interface{},
 	timeout time.Duration,
-	onComplete func(status mqttTypes.StatusUpdate),
+	onComplete func(event *controlplaneTypes.Event),
 	onTimeout func(),
 ) (string, error) {
 	commandID, err := p.PublishCommand(ctx, stewardID, cmdType, params)
@@ -139,18 +134,13 @@ func (p *Publisher) PublishCommandWithCallback(
 	return commandID, nil
 }
 
-// HandleStatusUpdate processes a status update from a steward.
-func (p *Publisher) HandleStatusUpdate(topic string, payload []byte, qos byte, retained bool) error {
-	var status mqttTypes.StatusUpdate
-	if err := json.Unmarshal(payload, &status); err != nil {
-		p.logger.Error("Failed to parse status update", "error", err)
-		return fmt.Errorf("failed to parse status update: %w", err)
-	}
-
+// HandleEventUpdate processes an event from a steward via the ControlPlaneProvider.
+// Story #363: Replaces HandleStatusUpdate which used direct MQTT messages.
+func (p *Publisher) HandleEventUpdate(ctx context.Context, event *controlplaneTypes.Event) error {
 	// Check if this relates to a pending command
-	if status.CommandID != "" {
+	if event.CommandID != "" {
 		p.mu.Lock()
-		pending, exists := p.pending[status.CommandID]
+		pending, exists := p.pending[event.CommandID]
 		if exists {
 			// Cancel timeout timer
 			if pending.cancelTimer != nil {
@@ -158,23 +148,23 @@ func (p *Publisher) HandleStatusUpdate(topic string, payload []byte, qos byte, r
 			}
 
 			// Remove from pending if command completed or failed
-			if status.Event == mqttTypes.EventCommandCompleted || status.Event == mqttTypes.EventCommandFailed {
-				delete(p.pending, status.CommandID)
+			if event.Type == controlplaneTypes.EventCommandCompleted || event.Type == controlplaneTypes.EventCommandFailed {
+				delete(p.pending, event.CommandID)
 			}
 		}
 		p.mu.Unlock()
 
 		// Call completion callback if exists
 		if exists && pending.OnComplete != nil {
-			pending.OnComplete(status)
+			pending.OnComplete(event)
 		}
 	}
 
-	// Log status update
-	p.logger.Info("Received status update from steward",
-		"steward_id", status.StewardID,
-		"event", status.Event,
-		"command_id", status.CommandID)
+	// Log event
+	p.logger.Info("Received event from steward",
+		"steward_id", event.StewardID,
+		"event_type", event.Type,
+		"command_id", event.CommandID)
 
 	return nil
 }
@@ -201,25 +191,29 @@ func (p *Publisher) handleCommandTimeout(commandID string) {
 	}
 }
 
-// Start subscribes to status update topics from all stewards.
+// Start subscribes to event updates from all stewards via ControlPlaneProvider.
+// Story #363: Uses SubscribeEvents() instead of direct MQTT subscription.
 func (p *Publisher) Start(ctx context.Context) error {
-	// Subscribe to status updates from all stewards
-	statusTopic := "cfgms/steward/+/status"
-	if err := p.broker.Subscribe(ctx, statusTopic, 1, p.HandleStatusUpdate); err != nil {
-		return fmt.Errorf("failed to subscribe to status updates: %w", err)
+	// Subscribe to command-related events from stewards
+	// Filter for command completion/failure events
+	filter := &controlplaneTypes.EventFilter{
+		EventTypes: []controlplaneTypes.EventType{
+			controlplaneTypes.EventCommandReceived,
+			controlplaneTypes.EventCommandCompleted,
+			controlplaneTypes.EventCommandFailed,
+		},
+	}
+	if err := p.controlPlane.SubscribeEvents(ctx, filter, p.HandleEventUpdate); err != nil {
+		return fmt.Errorf("failed to subscribe to events: %w", err)
 	}
 
-	p.logger.Info("Command publisher started", "status_topic", statusTopic)
+	p.logger.Info("Command publisher started", "event_types", "command_received,command_completed,command_failed")
 	return nil
 }
 
-// Stop unsubscribes from topics and cleans up.
+// Stop cleans up pending commands.
+// Story #363: Provider cleanup is handled by the provider's Stop method.
 func (p *Publisher) Stop(ctx context.Context) error {
-	// Unsubscribe from status updates
-	if err := p.broker.Unsubscribe(ctx, "cfgms/steward/+/status"); err != nil {
-		p.logger.Warn("Failed to unsubscribe from status updates", "error", err)
-	}
-
 	// Cancel all pending command timers
 	p.mu.Lock()
 	for _, pending := range p.pending {
@@ -247,14 +241,15 @@ func (p *Publisher) GetPendingCommands() []string {
 	return commands
 }
 
-// TriggerQUICConnection sends a connect_quic command to a steward.
+// TriggerQUICConnection sends a connect_dataplane command to a steward.
+// Story #363: Uses CommandConnectDataPlane instead of transport-specific CommandConnectQUIC.
 func (p *Publisher) TriggerQUICConnection(ctx context.Context, stewardID string, quicAddress string, sessionID string) (string, error) {
 	params := map[string]interface{}{
 		"quic_address": quicAddress,
 		"session_id":   sessionID,
 	}
 
-	commandID, err := p.PublishCommand(ctx, stewardID, mqttTypes.CommandConnectQUIC, params)
+	commandID, err := p.PublishCommand(ctx, stewardID, controlplaneTypes.CommandConnectDataPlane, params)
 	if err != nil {
 		return "", fmt.Errorf("failed to trigger QUIC connection: %w", err)
 	}
@@ -270,7 +265,7 @@ func (p *Publisher) TriggerQUICConnection(ctx context.Context, stewardID string,
 
 // TriggerConfigSync sends a sync_config command to a steward.
 func (p *Publisher) TriggerConfigSync(ctx context.Context, stewardID string) (string, error) {
-	commandID, err := p.PublishCommand(ctx, stewardID, mqttTypes.CommandSyncConfig, nil)
+	commandID, err := p.PublishCommand(ctx, stewardID, controlplaneTypes.CommandSyncConfig, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to trigger config sync: %w", err)
 	}
@@ -284,7 +279,7 @@ func (p *Publisher) TriggerConfigSync(ctx context.Context, stewardID string) (st
 
 // TriggerDNASync sends a sync_dna command to a steward.
 func (p *Publisher) TriggerDNASync(ctx context.Context, stewardID string) (string, error) {
-	commandID, err := p.PublishCommand(ctx, stewardID, mqttTypes.CommandSyncDNA, nil)
+	commandID, err := p.PublishCommand(ctx, stewardID, controlplaneTypes.CommandSyncDNA, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to trigger DNA sync: %w", err)
 	}

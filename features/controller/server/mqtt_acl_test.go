@@ -144,7 +144,101 @@ func TestStewardACLHandler(t *testing.T) {
 			topic:     "cfgms/admin/system",
 			operation: "subscribe",
 			expected:  false,
-			reason:    "controller ACL only allows steward topics",
+			reason:    "controller ACL only allows steward and control plane topics",
+		},
+
+		// Story #363: New control plane topic access (controller)
+		{
+			name:      "allow_controller_publish_new_commands",
+			clientID:  "controller-primary",
+			topic:     "cfgms/commands/steward-123",
+			operation: "publish",
+			expected:  true,
+			reason:    "controller should publish to new command topics",
+		},
+		{
+			name:      "allow_controller_subscribe_new_events",
+			clientID:  "controller-primary",
+			topic:     "cfgms/events/+",
+			operation: "subscribe",
+			expected:  true,
+			reason:    "controller should subscribe to new event topics",
+		},
+		{
+			name:      "allow_controller_subscribe_new_heartbeats",
+			clientID:  "controller-primary",
+			topic:     "cfgms/heartbeats/+",
+			operation: "subscribe",
+			expected:  true,
+			reason:    "controller should subscribe to new heartbeat topics",
+		},
+		{
+			name:      "allow_controller_subscribe_new_responses",
+			clientID:  "controller-primary",
+			topic:     "cfgms/responses/cmd-123",
+			operation: "subscribe",
+			expected:  true,
+			reason:    "controller should subscribe to new response topics",
+		},
+
+		// Story #363: New control plane topic access (steward)
+		{
+			name:      "allow_steward_subscribe_own_commands",
+			clientID:  "steward-123",
+			topic:     "cfgms/commands/steward-123",
+			operation: "subscribe",
+			expected:  true,
+			reason:    "steward should subscribe to own command topic",
+		},
+		{
+			name:      "allow_steward_publish_own_events",
+			clientID:  "steward-456",
+			topic:     "cfgms/events/steward-456",
+			operation: "publish",
+			expected:  true,
+			reason:    "steward should publish to own event topic",
+		},
+		{
+			name:      "allow_steward_publish_own_heartbeats",
+			clientID:  "steward-789",
+			topic:     "cfgms/heartbeats/steward-789",
+			operation: "publish",
+			expected:  true,
+			reason:    "steward should publish to own heartbeat topic",
+		},
+		{
+			name:      "allow_steward_publish_responses",
+			clientID:  "steward-123",
+			topic:     "cfgms/responses/cmd-456",
+			operation: "publish",
+			expected:  true,
+			reason:    "steward should publish command responses",
+		},
+		{
+			name:      "deny_steward_subscribe_other_commands",
+			clientID:  "steward-123",
+			topic:     "cfgms/commands/steward-456",
+			operation: "subscribe",
+			expected:  false,
+			reason:    "steward should NOT subscribe to another steward's commands",
+		},
+		{
+			name:      "deny_steward_publish_other_events",
+			clientID:  "steward-123",
+			topic:     "cfgms/events/steward-456",
+			operation: "publish",
+			expected:  false,
+			reason:    "steward should NOT publish events for another steward",
+		},
+
+		// Registration topics
+		{
+			name:      "allow_steward_subscribe_register",
+			clientID:  "steward-123",
+			topic:     "cfgms/register",
+			operation: "subscribe",
+			expected:  true,
+			reason:    "steward should access registration topic",
 		},
 
 		// Edge cases
