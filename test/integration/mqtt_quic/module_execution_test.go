@@ -743,7 +743,11 @@ func (s *ModuleExecutionTestSuite) TestE2ENetworkValidation() {
 	s.T().Log("🌐 Validating controller REST API connectivity...")
 	resp, err := s.helper.httpClient.Get(s.helper.baseURL + "/health")
 	if err == nil && resp != nil {
-		defer resp.Body.Close()
+		defer func() {
+			if closeErr := resp.Body.Close(); closeErr != nil {
+				s.T().Logf("Warning: failed to close response body: %v", closeErr)
+			}
+		}()
 		s.T().Logf("✅ Controller REST API: Reachable (status=%d)", resp.StatusCode)
 	} else {
 		s.T().Logf("⚠️  Controller REST API: Not responding (this may be expected if controller uses different health endpoint)")
