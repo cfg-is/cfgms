@@ -165,37 +165,36 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	// Get server certificate (public key) for configuration signature verification
 	// Stewards need this to verify configs signed by this controller
-	// CRITICAL: Must use SAME certificate that the signer uses (from cert manager, not file system)
-	// Story #362: Config handler uses certManager.GetCertificatesByType()[0] for signing
+	// CRITICAL (Story #378): Must use THE EXACT SAME certificate that the signer uses
+	// We use the signerCertSerial that was stored during signer creation to ensure they match
 	var serverCert []byte
-	if s.certManager != nil {
-		// Get server certificates from cert manager (same source as signer)
-		serverCerts, err := s.certManager.GetCertificatesByType(cert.CertificateTypeServer)
-		if err == nil && len(serverCerts) > 0 {
-			// Use FIRST server certificate (same as signer in server.go:318)
-			certPEM, _, err := s.certManager.ExportCertificate(serverCerts[0].SerialNumber, false)
-			if err == nil && len(certPEM) > 0 {
-				serverCert = certPEM
-				fmt.Printf("[DEBUG] Registration: Using server cert from cert manager, serial=%s size=%d\n",
-					serverCerts[0].SerialNumber, len(serverCert))
-				// Calculate fingerprint to verify it matches signer
-				if verifier, err := signature.NewVerifier(&signature.VerifierConfig{
-					CertificatePEM: serverCert,
-				}); err == nil {
-					fmt.Printf("[DEBUG] Registration: Server cert fingerprint=%s (should match signer)\n",
-						verifier.KeyFingerprint())
-				}
-			} else {
-				s.logger.Warn("Failed to export server certificate from cert manager",
-					"error", err, "steward_id", stewardID)
-				fmt.Printf("[DEBUG] Registration: Export failed: err=%v certLen=%d\n", err, len(certPEM))
+	if s.certManager != nil && s.signerCertSerial != "" {
+		// Use THE SAME cert serial that the signer uses (from server startup)
+		// This guarantees signature verification will work
+		certPEM, _, err := s.certManager.ExportCertificate(s.signerCertSerial, false)
+		if err == nil && len(certPEM) > 0 {
+			serverCert = certPEM
+			fmt.Printf("[DEBUG] Registration: Using SIGNER cert serial=%s size=%d\n",
+				s.signerCertSerial, len(serverCert))
+			// Calculate fingerprint to verify it matches signer
+			if verifier, err := signature.NewVerifier(&signature.VerifierConfig{
+				CertificatePEM: serverCert,
+			}); err == nil {
+				fmt.Printf("[DEBUG] Registration: Server cert fingerprint=%s (MUST match signer)\n",
+					verifier.KeyFingerprint())
 			}
+			s.logger.Info("Providing signer certificate to steward for signature verification",
+				"steward_id", stewardID,
+				"cert_serial", s.signerCertSerial)
 		} else {
-			s.logger.Warn("No server certificates found in cert manager",
-				"error", err, "steward_id", stewardID)
-			fmt.Printf("[DEBUG] Registration: GetCertificatesByType failed: err=%v numCerts=%d\n",
-				err, len(serverCerts))
+			s.logger.Warn("Failed to export signer certificate from cert manager",
+				"error", err, "steward_id", stewardID, "cert_serial", s.signerCertSerial)
+			fmt.Printf("[DEBUG] Registration: Export failed: err=%v certLen=%d\n", err, len(certPEM))
 		}
+	} else if s.signerCertSerial == "" {
+		s.logger.Warn("Signer certificate serial not available (signer may not be initialized)",
+			"steward_id", stewardID)
+		fmt.Printf("[DEBUG] Registration: signerCertSerial is empty (no signer configured)\n")
 	} else {
 		s.logger.Warn("Certificate manager unavailable, cannot provide server cert for signature verification",
 			"steward_id", stewardID)
