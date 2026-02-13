@@ -28,10 +28,12 @@ import (
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/registration"
 	"github.com/cfgis/cfgms/pkg/cert"
+	dataplaneInterfaces "github.com/cfgis/cfgms/pkg/dataplane/interfaces"
+	_ "github.com/cfgis/cfgms/pkg/dataplane/providers/quic" // Register QUIC data plane provider
+	dataplaneTypes "github.com/cfgis/cfgms/pkg/dataplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
-	mqttClient "github.com/cfgis/cfgms/pkg/mqtt/client"
+	"github.com/cfgis/cfgms/pkg/mqtt/client"
 	mqttTypes "github.com/cfgis/cfgms/pkg/mqtt/types"
-	quicClient "github.com/cfgis/cfgms/pkg/quic/client"
 )
 
 // MQTTClient represents the new MQTT+QUIC-based steward client.
@@ -47,11 +49,11 @@ type MQTTClient struct {
 	controllerURL string
 
 	// MQTT client for control plane
-	mqtt *mqttClient.Client
+	mqtt *client.Client
 
-	// QUIC client for data plane
-	quic        *quicClient.Client
-	quicAddress string
+	// QUIC data plane via provider (Story #363)
+	dataPlaneSession dataplaneInterfaces.DataPlaneSession
+	quicAddress      string
 
 	// Certificate path for mTLS
 	certPath string
@@ -161,7 +163,7 @@ func (c *MQTTClient) RegisterWithToken(ctx context.Context, token string, mqttBr
 	}
 
 	// Initialize MQTT client for registration
-	mqttCfg := &mqttClient.Config{
+	mqttCfg := &client.Config{
 		BrokerAddr:    mqttBroker,
 		ClientID:      "steward-register-" + token[:8], // Temporary client ID
 		CleanSession:  true,
@@ -169,7 +171,7 @@ func (c *MQTTClient) RegisterWithToken(ctx context.Context, token string, mqttBr
 		TLSConfig:     tlsConfig, // Story 12.4: Enable TLS if configured
 	}
 
-	mqtt, err := mqttClient.New(mqttCfg)
+	mqtt, err := client.New(mqttCfg)
 	if err != nil {
 		return fmt.Errorf("failed to create MQTT client: %w", err)
 	}
@@ -291,7 +293,7 @@ func (c *MQTTClient) Connect(ctx context.Context) error {
 			fmt.Printf("[DEBUG] TLS config loaded successfully\n")
 		}
 
-		mqttCfg := &mqttClient.Config{
+		mqttCfg := &client.Config{
 			BrokerAddr:    controllerURL,
 			ClientID:      stewardID,
 			CleanSession:  false,
@@ -300,7 +302,7 @@ func (c *MQTTClient) Connect(ctx context.Context) error {
 		}
 
 		fmt.Printf("[DEBUG] Creating new MQTT client...\n")
-		mqtt, err = mqttClient.New(mqttCfg)
+		mqtt, err = client.New(mqttCfg)
 		if err != nil {
 			fmt.Printf("[DEBUG] MQTT client creation failed: %v\n", err)
 			return fmt.Errorf("failed to create MQTT client: %w", err)
@@ -384,7 +386,7 @@ func (c *MQTTClient) Connect(ctx context.Context) error {
 }
 
 // setupCommandHandler creates and configures the command handler with all command types.
-func (c *MQTTClient) setupCommandHandler(ctx context.Context, stewardID string, mqtt *mqttClient.Client) (*commands.Handler, error) {
+func (c *MQTTClient) setupCommandHandler(ctx context.Context, stewardID string, mqtt *client.Client) (*commands.Handler, error) {
 	// Create status callback that publishes to MQTT
 	statusCallback := func(status mqttTypes.StatusUpdate) {
 		payload, err := json.Marshal(status)
@@ -645,30 +647,42 @@ func (c *MQTTClient) handleConnectQUIC(ctx context.Context, cmd mqttTypes.Comman
 		"cert_path", certPath,
 		"next_protos", tlsConfig.NextProtos)
 
-	// Initialize QUIC client
-	quicCfg := &quicClient.Config{
-		ServerAddr: quicAddress,
-		TLSConfig:  tlsConfig,
-		SessionID:  sessionID,
-		StewardID:  stewardID,
-		Logger:     c.logger,
-	}
+	// Story #363: Use DataPlaneProvider instead of direct QUIC client
+	// Initialize data plane provider if not already done
+	c.mu.RLock()
+	dataPlane := c.dataPlaneSession
+	c.mu.RUnlock()
 
-	quic, err := quicClient.New(quicCfg)
-	if err != nil {
-		return fmt.Errorf("failed to create QUIC client: %w", err)
-	}
+	if dataPlane == nil {
+		// Get data plane provider
+		dataPlaneProvider := dataplaneInterfaces.GetProvider("quic")
+		if dataPlaneProvider == nil {
+			return fmt.Errorf("QUIC data plane provider not available")
+		}
 
-	// Connect to QUIC server
-	if err := quic.Connect(ctx); err != nil {
-		return fmt.Errorf("failed to connect to QUIC server: %w", err)
-	}
+		// Initialize provider with config
+		providerCfg := map[string]interface{}{
+			"server_addr": quicAddress,
+			"tls_config":  tlsConfig,
+			"steward_id":  stewardID,
+		}
 
-	// Store QUIC client
-	c.mu.Lock()
-	c.quic = quic
-	c.quicConnected = true
-	c.mu.Unlock()
+		if err := dataPlaneProvider.Initialize(ctx, providerCfg); err != nil {
+			return fmt.Errorf("failed to initialize data plane provider: %w", err)
+		}
+
+		// Connect to controller
+		session, err := dataPlaneProvider.Connect(ctx, quicAddress)
+		if err != nil {
+			return fmt.Errorf("failed to connect to data plane: %w", err)
+		}
+
+		// Store session
+		c.mu.Lock()
+		c.dataPlaneSession = session
+		c.quicConnected = true
+		c.mu.Unlock()
+	}
 
 	c.logger.Info("QUIC connection established successfully",
 		"quic_address", quicAddress,
@@ -677,33 +691,33 @@ func (c *MQTTClient) handleConnectQUIC(ctx context.Context, cmd mqttTypes.Comman
 	return nil
 }
 
-// GetConfiguration retrieves configuration from the controller via QUIC.
+// GetConfiguration retrieves configuration from the controller via data plane.
+// Story #363: Uses DataPlaneSession instead of direct QUIC client
 func (c *MQTTClient) GetConfiguration(ctx context.Context, modules []string) ([]byte, string, error) {
 	fmt.Printf("[DEBUG] GetConfiguration called with modules=%v\n", modules)
-	c.logger.Info("Requesting configuration via QUIC", "modules", modules)
+	c.logger.Info("Requesting configuration via data plane", "modules", modules)
 
 	c.mu.RLock()
-	quic := c.quic
+	session := c.dataPlaneSession
 	stewardID := c.stewardID
 	c.mu.RUnlock()
 
-	fmt.Printf("[DEBUG] QUIC=%v (nil=%v) stewardID=%s\n", quic, quic == nil, stewardID)
-	if quic == nil || !quic.IsConnected() {
-		fmt.Printf("[DEBUG] QUIC not connected or nil\n")
-		return nil, "", fmt.Errorf("QUIC not connected")
+	fmt.Printf("[DEBUG] DataPlaneSession=%v (nil=%v) stewardID=%s\n", session, session == nil, stewardID)
+	if session == nil || session.IsClosed() {
+		fmt.Printf("[DEBUG] Data plane session not available or closed\n")
+		return nil, "", fmt.Errorf("data plane session not available")
 	}
 
-	// Open QUIC stream for config sync (stream ID 4)
-	// Client-initiated bidirectional streams use IDs 0, 4, 8, 12... (multiples of 4)
-	// Stream 0 is handshake, so first data stream is 4
-	fmt.Printf("[DEBUG] Opening QUIC stream 4...\n")
-	stream, err := quic.OpenStream(ctx, 4)
+	// Story #363: Open data plane stream for config sync
+	// Use raw stream access for custom protocol
+	fmt.Printf("[DEBUG] Opening data plane stream for config sync...\n")
+	stream, err := session.OpenStream(ctx, dataplaneTypes.StreamConfig)
 	if err != nil {
 		fmt.Printf("[DEBUG] Failed to open stream: %v\n", err)
-		return nil, "", fmt.Errorf("failed to open QUIC stream: %w", err)
+		return nil, "", fmt.Errorf("failed to open data plane stream: %w", err)
 	}
 	fmt.Printf("[DEBUG] Stream opened successfully\n")
-	defer func() { _ = quic.CloseStream(4) }()
+	defer func() { _ = stream.Close() }()
 
 	// Create request
 	type ConfigRequest struct {
@@ -725,14 +739,14 @@ func (c *MQTTClient) GetConfiguration(ctx context.Context, modules []string) ([]
 	}
 
 	fmt.Printf("[DEBUG] Writing request to stream (%d bytes)...\n", len(reqData))
-	if _, err := (*stream).Write(reqData); err != nil {
+	if _, err := stream.Write(reqData); err != nil {
 		fmt.Printf("[DEBUG] Write failed: %v\n", err)
 		return nil, "", fmt.Errorf("failed to write request: %w", err)
 	}
 	fmt.Printf("[DEBUG] Request written successfully\n")
 
 	// Close write side to signal EOF to server
-	if err := (*stream).Close(); err != nil {
+	if err := stream.Close(); err != nil {
 		fmt.Printf("[DEBUG] Stream close failed: %v\n", err)
 		return nil, "", fmt.Errorf("failed to close stream write side: %w", err)
 	}
@@ -1035,10 +1049,10 @@ func (c *MQTTClient) Disconnect(ctx context.Context) error {
 	// Stop heartbeat
 	close(c.heartbeatStop)
 
-	// Disconnect QUIC
-	if c.quic != nil {
-		if err := c.quic.Disconnect(); err != nil {
-			c.logger.Warn("Failed to disconnect QUIC", "error", err)
+	// Disconnect data plane session
+	if c.dataPlaneSession != nil {
+		if err := c.dataPlaneSession.Close(ctx); err != nil {
+			c.logger.Warn("Failed to close data plane session", "error", err)
 		}
 	}
 
