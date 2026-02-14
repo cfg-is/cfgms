@@ -1,0 +1,15 @@
+FROM golang:1.25
+WORKDIR /workspace
+
+# Install dependencies needed by tests
+RUN apt-get update && apt-get install -y \
+    netcat-openbsd \
+    docker.io \
+    docker-compose \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set up environment for container-to-container networking
+# Tests will use these service names instead of localhost
+ENV CFGMS_TEST_HTTP_ADDR="https://controller-standalone:9080" \
+    CFGMS_TEST_MQTT_ADDR="ssl://controller-standalone:8883" \
+    CFGMS_TEST_QUIC_ADDR="controller-standalone:4433"

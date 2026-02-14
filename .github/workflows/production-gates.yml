@@ -441,12 +441,37 @@ jobs:
         source .env.test
         set +a
 
-        # Run existing integration tests with infrastructure
-        # MQTT+QUIC tests now enabled - infrastructure is ready (test-mqtt-quic-setup)
-        go test -v -race -timeout=10m $(go list ./test/integration/... | grep -v "test/integration$")
+        # Build test runner for container-to-container networking (enables UDP/QUIC)
+        cat > Dockerfile.test-runner <<'EOF'
+        FROM golang:1.25
+        WORKDIR /workspace
+        RUN apt-get update && apt-get install -y netcat-openbsd && rm -rf /var/lib/apt/lists/*
+        ENV CFGMS_TEST_HTTP_ADDR="https://controller-standalone:9080" \
+            CFGMS_TEST_MQTT_ADDR="ssl://controller-standalone:8883" \
+            CFGMS_TEST_QUIC_ADDR="controller-standalone:4433"
+        EOF
+        docker build -t cfgms-test-runner -f Dockerfile.test-runner .
 
-        # Run E2E tests with controller focus
-        go test -v -race -timeout=15m ./test/e2e/... -run "TestE2EScenarios/(TestControllerStewardIntegration|TestRBACIntegration|TestWorkflowIntegration|TestDataFlow)"
+        # Run tests in container on cfgms-test network (enables container-to-container UDP/QUIC)
+        docker run --rm \
+          --network cfgms-test \
+          -v "$(pwd):/workspace" \
+          -w /workspace \
+          -e CFGMS_TEST_INTEGRATION=1 \
+          -e GITHUB_ACTIONS=true \
+          cfgms-test-runner \
+          sh -c '
+            echo "📦 Installing Go dependencies..."
+            go mod download
+
+            echo ""
+            echo "🧪 Running integration tests (container-to-container networking)..."
+            go test -v -race -timeout=10m $(go list ./test/integration/... | grep -v "test/integration$")
+
+            echo ""
+            echo "🧪 Running E2E tests..."
+            go test -v -race -timeout=15m ./test/e2e/... -run "TestE2EScenarios/(TestControllerStewardIntegration|TestRBACIntegration|TestWorkflowIntegration|TestDataFlow)"
+          '
 
         echo ""
         echo "✅ Controller integration tests completed"
