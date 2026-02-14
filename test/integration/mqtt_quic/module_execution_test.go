@@ -778,8 +778,9 @@ func (s *ModuleExecutionTestSuite) TestE2ENetworkValidation() {
 	// Test 5: QUIC Port Accessibility (verify port 4433 is accessible from steward)
 	s.T().Log("🔐 Validating QUIC endpoint accessibility...")
 	// Use docker exec to test connectivity from within steward container
+	// Story #382: Use -u flag for UDP (QUIC uses UDP, not TCP)
 	cmd = exec.Command("docker", "exec", containerName, "sh", "-c",
-		"timeout 2 nc -zv controller-standalone 4433 2>&1 || echo 'Cannot connect'")
+		"timeout 2 nc -zvu controller-standalone 4433 2>&1 || echo 'Cannot connect'")
 	output, err = cmd.CombinedOutput()
 	if err == nil {
 		outputStr := string(output)
