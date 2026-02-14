@@ -445,7 +445,11 @@ jobs:
         cat > Dockerfile.test-runner <<'EOF'
         FROM golang:1.25
         WORKDIR /workspace
-        RUN apt-get update && apt-get install -y netcat-openbsd && rm -rf /var/lib/apt/lists/*
+        RUN apt-get update && apt-get install -y \
+            netcat-openbsd \
+            docker.io \
+            docker-compose \
+            && rm -rf /var/lib/apt/lists/*
         ENV CFGMS_TEST_HTTP_ADDR="https://controller-standalone:9080" \
             CFGMS_TEST_MQTT_ADDR="ssl://controller-standalone:8883" \
             CFGMS_TEST_QUIC_ADDR="controller-standalone:4433"
@@ -456,6 +460,7 @@ jobs:
         docker run --rm \
           --network cfgms-test \
           -v "$(pwd):/workspace" \
+          -v /var/run/docker.sock:/var/run/docker.sock \
           -w /workspace \
           -e CFGMS_TEST_INTEGRATION=1 \
           -e GITHUB_ACTIONS=true \
