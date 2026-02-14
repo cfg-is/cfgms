@@ -1607,7 +1607,7 @@ test-mqtt-quic-setup:
 	docker compose -f docker-compose.test.yml --profile ha up -d timescaledb-test controller-standalone
 	@echo ""
 	@echo "⏳ Waiting for controller to initialize..."
-	@sleep 30
+	@sleep 45
 	@echo "🔍 Validating controller health..."
 	@echo "   Checking MQTT broker (port 8883)..."
 	@for i in 1 2 3 4 5 6 7 8 9 10; do \
@@ -1636,15 +1636,18 @@ test-mqtt-quic-setup:
 		sleep 3; \
 	done
 	@echo "   Checking QUIC endpoint (port 4433)..."
-	@for i in 1 2 3 4 5; do \
-		if docker exec controller-standalone sh -c "netstat -ln | grep :4433" >/dev/null 2>&1; then \
+	@for i in 1 2 3 4 5 6 7 8; do \
+		if docker exec controller-standalone sh -c "netstat -lnu 2>/dev/null | grep :4433" >/dev/null 2>&1; then \
 			echo "   ✅ QUIC endpoint ready on port 4433 (mapped to localhost:4436)"; \
 			break; \
 		fi; \
-		if [ $$i -eq 5 ]; then \
-			echo "   ⚠️  QUIC endpoint not responding (may be disabled)"; \
+		if [ $$i -eq 8 ]; then \
+			echo "   ⚠️  QUIC endpoint not responding after 8 attempts (may be disabled)"; \
+			echo "   📋 Controller logs (last 30 lines):"; \
+			docker logs controller-standalone 2>&1 | tail -30; \
 		fi; \
-		sleep 3; \
+		echo "   ⏳ Waiting for QUIC endpoint (attempt $$i/8)..."; \
+		sleep 5; \
 	done
 	@echo "   Checking TimescaleDB..."
 	@for i in 1 2 3; do \
@@ -1657,8 +1660,8 @@ test-mqtt-quic-setup:
 		fi; \
 		sleep 3; \
 	done
-	@echo "   Allowing services to settle..."
-	@sleep 5
+	@echo "   Allowing services to settle and QUIC server to fully initialize..."
+	@sleep 15
 	@echo ""
 	@echo "✅ MQTT+QUIC Docker environment fully initialized!"
 	@echo "   MQTT: localhost:1886 (TLS)"

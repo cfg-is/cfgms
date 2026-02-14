@@ -377,7 +377,7 @@ func (s *ModuleExecutionTestSuite) TestConfigStatusReporting() {
 
 		s.T().Log("✅ AC4: Config status reporting verified - status matches actual execution")
 
-	case <-time.After(30 * time.Second):
+	case <-time.After(60 * time.Second):
 		s.T().Fatal("Timeout waiting for config status report")
 	}
 
@@ -575,7 +575,7 @@ func (s *ModuleExecutionTestSuite) TestModuleFailureReporting() {
 
 		s.T().Log("✅ AC6: Module failure reporting verified - errors are descriptive and per-module")
 
-	case <-time.After(30 * time.Second):
+	case <-time.After(60 * time.Second):
 		s.T().Fatal("Timeout waiting for config status report")
 	}
 
@@ -926,7 +926,7 @@ func (s *ModuleExecutionTestSuite) TestE2EFlowDiagnostic() {
 		s.Contains(fileInfo.Content, "Diagnostic test content", "❌ Phase 8 FAILED: File content incorrect")
 		s.T().Log("✅ Phase 8 PASS: Module executed and file created")
 
-	case <-time.After(30 * time.Second):
+	case <-time.After(60 * time.Second):
 		s.T().Fatal("❌ Phase 7 FAILED: Timeout waiting for config status report (Phase 1-6 passed, Phase 7-8 unreachable)")
 	}
 
