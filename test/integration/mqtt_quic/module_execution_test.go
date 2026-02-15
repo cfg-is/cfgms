@@ -76,7 +76,9 @@ func (s *ModuleExecutionTestSuite) SetupSuite() {
 				s.composePath = strings.Repeat("../", i) + "docker-compose.test.yml"
 			}
 			if _, err := os.Stat(s.composePath); err == nil {
-				cmd := exec.Command("docker", "compose", "-f", s.composePath, "--profile", "ha", "up", "-d", "steward-standalone")
+				// Use --no-deps to only start steward-standalone without starting dependencies
+				// (controller-standalone and timescaledb-test are already running from workflow setup)
+				cmd := exec.Command("docker", "compose", "-f", s.composePath, "--profile", "ha", "up", "-d", "--no-deps", "steward-standalone")
 				if output, err := cmd.CombinedOutput(); err != nil {
 					s.T().Fatalf("Failed to start steward-standalone: %v\nOutput: %s", err, output)
 				}
