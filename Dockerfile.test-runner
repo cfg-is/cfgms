@@ -2,7 +2,7 @@ FROM golang:1.25
 WORKDIR /workspace
 
 # Install dependencies needed by tests
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     netcat-openbsd \
     docker.io \
     docker-compose \
@@ -13,3 +13,6 @@ RUN apt-get update && apt-get install -y \
 ENV CFGMS_TEST_HTTP_ADDR="https://controller-standalone:9080" \
     CFGMS_TEST_MQTT_ADDR="ssl://controller-standalone:8883" \
     CFGMS_TEST_QUIC_ADDR="controller-standalone:4433"
+
+# Run as non-root user for security
+USER nobody
