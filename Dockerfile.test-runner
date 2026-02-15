@@ -14,5 +14,6 @@ ENV CFGMS_TEST_HTTP_ADDR="https://controller-standalone:9080" \
     CFGMS_TEST_MQTT_ADDR="ssl://controller-standalone:8883" \
     CFGMS_TEST_QUIC_ADDR="controller-standalone:4433"
 
-# Run as non-root user for security
-USER nobody
+# NOTE: Running as root for now because tests need Docker socket access
+# and network capabilities. This is a test-only container in CI.
+# TODO: Investigate running as non-root with proper capabilities
