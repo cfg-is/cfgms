@@ -44,11 +44,22 @@ func (s *ModuleExecutionTestSuite) SetupSuite() {
 	// We need to check for both steward-standalone and its dependencies (controller, timescaledb)
 	// because docker compose up tries to start all dependencies
 	checkCmd := exec.Command("docker", "ps", "--filter", "name=steward-standalone", "--filter", "name=controller-standalone", "--filter", "name=cfgms-timescaledb-test", "--format", "{{.Names}}")
-	checkOutput, _ := checkCmd.CombinedOutput()
+	checkOutput, checkErr := checkCmd.CombinedOutput()
+	if checkErr != nil {
+		s.T().Logf("Warning: Failed to check for existing containers: %v", checkErr)
+	}
 	names := string(checkOutput)
+	s.T().Logf("Container detection check - found containers:\n%s", names)
+
 	infrastructureRunning := strings.Contains(names, "steward-standalone") &&
 		strings.Contains(names, "controller-standalone") &&
 		strings.Contains(names, "cfgms-timescaledb-test")
+
+	s.T().Logf("Infrastructure detection: steward=%v, controller=%v, timescaledb=%v, overall=%v",
+		strings.Contains(names, "steward-standalone"),
+		strings.Contains(names, "controller-standalone"),
+		strings.Contains(names, "cfgms-timescaledb-test"),
+		infrastructureRunning)
 
 	if infrastructureRunning {
 		s.T().Log("Found existing MQTT+QUIC infrastructure (likely started by CI/make target)")
