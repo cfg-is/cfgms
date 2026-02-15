@@ -274,13 +274,6 @@ exit 1
 
 // TestConfigStatusReporting tests that status reports reflect actual execution (AC4)
 func (s *ModuleExecutionTestSuite) TestConfigStatusReporting() {
-	// Skip in GitHub Actions - QUIC (UDP) doesn't work in GHA Docker networking
-	// This test requires QUIC communication for config status reports (Phase 7)
-	// Works locally but GHA blocks UDP between containers
-	if os.Getenv("GITHUB_ACTIONS") == "true" {
-		s.T().Skip("Skipping QUIC-dependent test in GitHub Actions - UDP not supported in CI Docker networking")
-	}
-
 	containerName := "steward-standalone"
 	testFilePath := GetAbsoluteTestPath("test-file.txt")
 	testDirPath := GetAbsoluteTestPath("test-dir")
@@ -472,13 +465,6 @@ func (s *ModuleExecutionTestSuite) TestIdempotency() {
 
 // TestModuleFailureReporting tests that module failures are reported via MQTT (AC6)
 func (s *ModuleExecutionTestSuite) TestModuleFailureReporting() {
-	// Skip in GitHub Actions - QUIC (UDP) doesn't work in GHA Docker networking
-	// This test requires QUIC communication for config status reports (Phase 7)
-	// Works locally but GHA blocks UDP between containers
-	if os.Getenv("GITHUB_ACTIONS") == "true" {
-		s.T().Skip("Skipping QUIC-dependent test in GitHub Actions - UDP not supported in CI Docker networking")
-	}
-
 	containerName := "steward-standalone"
 	testFilePath := GetAbsoluteTestPath("invalid-perms.txt")
 	testDirPath := GetAbsoluteTestPath("valid-dir")
@@ -856,13 +842,6 @@ func (s *ModuleExecutionTestSuite) TestE2ENetworkValidation() {
 // Story #378 Phase 3: Diagnostic test to quickly identify failure points
 // This test breaks down the E2E flow into discrete phases for targeted troubleshooting
 func (s *ModuleExecutionTestSuite) TestE2EFlowDiagnostic() {
-	// Skip in GitHub Actions - QUIC (UDP) doesn't work in GHA Docker networking
-	// This test requires QUIC communication for config status reports (Phase 7)
-	// Works locally but GHA blocks UDP between containers
-	if os.Getenv("GITHUB_ACTIONS") == "true" {
-		s.T().Skip("Skipping QUIC-dependent test in GitHub Actions - UDP not supported in CI Docker networking")
-	}
-
 	containerName := "steward-standalone"
 	testFilePath := GetAbsoluteTestPath("diagnostic-test-file.txt")
 
