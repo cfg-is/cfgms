@@ -40,22 +40,32 @@ func (s *ModuleExecutionTestSuite) SetupSuite() {
 		s.T().Skip("Skipping module execution tests in short mode - requires infrastructure")
 	}
 
-	// Start steward-standalone container (follows pattern from test/integration/docker_test.go)
-	s.T().Log("Starting steward-standalone container...")
+	// Check if steward-standalone container is already running (e.g., in CI)
+	checkCmd := exec.Command("docker", "ps", "--filter", "name=steward-standalone", "--format", "{{.Names}}")
+	checkOutput, _ := checkCmd.CombinedOutput()
+	containerRunning := strings.Contains(string(checkOutput), "steward-standalone")
 
-	// Find project root - go test changes to a temp directory
-	// Try current directory and up to 3 levels up
-	for i := 0; i < 4; i++ {
-		s.composePath = "docker-compose.test.yml"
-		if i > 0 {
-			s.composePath = strings.Repeat("../", i) + "docker-compose.test.yml"
-		}
-		if _, err := os.Stat(s.composePath); err == nil {
-			cmd := exec.Command("docker", "compose", "-f", s.composePath, "--profile", "ha", "up", "-d", "steward-standalone")
-			if output, err := cmd.CombinedOutput(); err != nil {
-				s.T().Logf("Note: Failed to start steward-standalone (may already be running): %v\nOutput: %s", err, output)
+	if containerRunning {
+		s.T().Log("Found existing steward-standalone container (likely started by CI/make target)")
+	} else {
+		// Start steward-standalone container (follows pattern from test/integration/docker_test.go)
+		s.T().Log("Starting steward-standalone container...")
+
+		// Find project root - go test changes to a temp directory
+		// Try current directory and up to 3 levels up
+		for i := 0; i < 4; i++ {
+			s.composePath = "docker-compose.test.yml"
+			if i > 0 {
+				s.composePath = strings.Repeat("../", i) + "docker-compose.test.yml"
 			}
-			break
+			if _, err := os.Stat(s.composePath); err == nil {
+				cmd := exec.Command("docker", "compose", "-f", s.composePath, "--profile", "ha", "up", "-d", "steward-standalone")
+				if output, err := cmd.CombinedOutput(); err != nil {
+					s.T().Fatalf("Failed to start steward-standalone: %v\nOutput: %s", err, output)
+				}
+				s.T().Log("Successfully started steward-standalone container")
+				break
+			}
 		}
 	}
 
@@ -82,13 +92,16 @@ func (s *ModuleExecutionTestSuite) TearDownSuite() {
 		s.helper.DisconnectMQTT(s.T())
 	}
 
-	// Stop steward-standalone container
-	s.T().Log("Stopping steward-standalone container...")
+	// Only stop steward-standalone if we started it (composePath will be set)
+	// In CI, containers are managed by the workflow, not by the test suite
 	if s.composePath != "" {
+		s.T().Log("Stopping steward-standalone container (started by test suite)...")
 		cmd := exec.Command("docker", "compose", "-f", s.composePath, "--profile", "ha", "down", "steward-standalone")
 		if output, err := cmd.CombinedOutput(); err != nil {
 			s.T().Logf("Warning: Failed to stop steward-standalone: %v\nOutput: %s", err, output)
 		}
+	} else {
+		s.T().Log("Skipping container cleanup (containers managed externally)")
 	}
 }
 
