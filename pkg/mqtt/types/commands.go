@@ -2,8 +2,10 @@
 // Copyright 2026 Jordan Ritz
 // Package types provides common MQTT message types for CFGMS communication.
 //
-// This package defines the message structures used for MQTT communication
-// between controller and stewards (Story #198).
+// Deprecated: Use pkg/controlplane/types instead. This package contains
+// transport-specific types that have been superseded by the transport-agnostic
+// control plane types (Story #267.5). The controlplane types support multiple
+// transport implementations (MQTT, gRPC, WebSocket).
 package types
 
 import "time"

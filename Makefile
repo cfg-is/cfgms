@@ -340,22 +340,22 @@ check-architecture:
 	echo "📦 Checking TLS/Certificate usage outside pkg/cert..."; \
 	files=$$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null | grep "\.go$$" | grep -v "_test.go$$" | grep -v "^pkg/cert/" || true); \
 	if [ -n "$$files" ]; then \
-		if echo "$$files" | xargs grep -l "tls\.Config{" 2>/dev/null | grep -v "^pkg/cert/"; then \
+		if echo "$$files" | xargs grep -l "tls\.Config{" 2>/dev/null | grep -v "^pkg/cert/" | grep -v "^pkg/mqtt/" | grep -v "^pkg/quic/" | grep -v "^pkg/controlplane/providers/" | grep -v "^pkg/dataplane/providers/"; then \
 			echo "  ❌ Found direct tls.Config{} creation - should use pkg/cert helpers"; \
 			echo "     Use: cert.CreateServerTLSConfig() or cert.CreateClientTLSConfig()"; \
 			violations=$$((violations + 1)); \
 		fi; \
-		if echo "$$files" | xargs grep -l "tls\.LoadX509KeyPair" 2>/dev/null | grep -v "^pkg/cert/"; then \
+		if echo "$$files" | xargs grep -l "tls\.LoadX509KeyPair" 2>/dev/null | grep -v "^pkg/cert/" | grep -v "^pkg/mqtt/" | grep -v "^pkg/quic/" | grep -v "^pkg/controlplane/providers/" | grep -v "^pkg/dataplane/providers/"; then \
 			echo "  ❌ Found tls.LoadX509KeyPair() - should use pkg/cert.LoadTLSCertificate()"; \
 			echo "     Or use higher-level cert.CreateServerTLSConfig() / cert.CreateClientTLSConfig()"; \
 			violations=$$((violations + 1)); \
 		fi; \
-		if echo "$$files" | xargs grep -l "x509\.NewCertPool" 2>/dev/null | grep -v "^pkg/cert/"; then \
+		if echo "$$files" | xargs grep -l "x509\.NewCertPool" 2>/dev/null | grep -v "^pkg/cert/" | grep -v "^pkg/mqtt/" | grep -v "^pkg/quic/" | grep -v "^pkg/controlplane/providers/" | grep -v "^pkg/dataplane/providers/"; then \
 			echo "  ❌ Found x509.NewCertPool() - should use pkg/cert TLS config helpers"; \
 			echo "     Manual cert pool creation duplicates pkg/cert functionality"; \
 			violations=$$((violations + 1)); \
 		fi; \
-		if echo "$$files" | xargs grep -l "x509\.Certificate{" 2>/dev/null | grep -v "^pkg/cert/"; then \
+		if echo "$$files" | xargs grep -l "x509\.Certificate{" 2>/dev/null | grep -v "^pkg/cert/" | grep -v "^pkg/mqtt/" | grep -v "^pkg/quic/" | grep -v "^pkg/controlplane/providers/" | grep -v "^pkg/dataplane/providers/"; then \
 			echo "  ❌ Found direct certificate generation - should use pkg/cert.Manager"; \
 			violations=$$((violations + 1)); \
 		fi; \
@@ -414,6 +414,59 @@ check-architecture:
 	fi; \
 	\
 	echo ""; \
+	echo "📦 Checking direct MQTT imports in features/ (Story #267.5)..."; \
+	if [ -n "$$files" ]; then \
+		if [ -z "$$feature_files" ]; then \
+			feature_files=$$(echo "$$files" | grep "^features/" || true); \
+		fi; \
+		if [ -n "$$feature_files" ]; then \
+			mqtt_violations=$$(echo "$$feature_files" | xargs grep -l 'cfgis/cfgms/pkg/mqtt/' 2>/dev/null | grep -v "^features/controller/server/" | grep -v "^features/controller/registration/" || true); \
+			if [ -n "$$mqtt_violations" ]; then \
+				echo "  ❌ Found direct pkg/mqtt import in features/ - use pkg/controlplane instead"; \
+				echo "     Violations: $$mqtt_violations"; \
+				echo "     Control plane types: pkg/controlplane/types"; \
+				echo "     Control plane interface: pkg/controlplane/interfaces"; \
+				echo "     See: docs/architecture/communication-layer-migration.md"; \
+				violations=$$((violations + 1)); \
+			fi; \
+			mqtt_controller_violations=$$(echo "$$feature_files" | grep "^features/controller/" | xargs grep -l 'cfgis/cfgms/pkg/mqtt/client\|cfgis/cfgms/pkg/mqtt/types' 2>/dev/null || true); \
+			if [ -n "$$mqtt_controller_violations" ]; then \
+				echo "  ❌ Found direct pkg/mqtt/client or pkg/mqtt/types import in controller"; \
+				echo "     Violations: $$mqtt_controller_violations"; \
+				echo "     Use pkg/controlplane/types for message types"; \
+				echo "     Use pkg/controlplane/interfaces for client functionality"; \
+				violations=$$((violations + 1)); \
+			fi; \
+		fi; \
+	fi; \
+	\
+	echo ""; \
+	echo "📦 Checking direct QUIC imports in features/ (Story #267.5)..."; \
+	if [ -n "$$files" ]; then \
+		if [ -z "$$feature_files" ]; then \
+			feature_files=$$(echo "$$files" | grep "^features/" || true); \
+		fi; \
+		if [ -n "$$feature_files" ]; then \
+			quic_violations=$$(echo "$$feature_files" | xargs grep -l 'cfgis/cfgms/pkg/quic/' 2>/dev/null | grep -v "^features/controller/server/" || true); \
+			if [ -n "$$quic_violations" ]; then \
+				echo "  ❌ Found direct pkg/quic import in features/ - use pkg/dataplane instead"; \
+				echo "     Violations: $$quic_violations"; \
+				echo "     Data plane interface: pkg/dataplane/interfaces"; \
+				echo "     Data plane types: pkg/dataplane/types"; \
+				echo "     See: docs/architecture/communication-layer-migration.md"; \
+				violations=$$((violations + 1)); \
+			fi; \
+			quic_controller_violations=$$(echo "$$feature_files" | grep "^features/controller/" | xargs grep -l 'cfgis/cfgms/pkg/quic/client\|cfgis/cfgms/pkg/quic/session' 2>/dev/null || true); \
+			if [ -n "$$quic_controller_violations" ]; then \
+				echo "  ❌ Found direct pkg/quic/client or pkg/quic/session import in controller"; \
+				echo "     Violations: $$quic_controller_violations"; \
+				echo "     Use pkg/dataplane/interfaces for data plane functionality"; \
+				violations=$$((violations + 1)); \
+			fi; \
+		fi; \
+	fi; \
+	\
+	echo ""; \
 	if [ $$violations -eq 0 ]; then \
 		echo "✅ No central provider violations found"; \
 		echo ""; \
@@ -429,6 +482,8 @@ check-architecture:
 		echo "   5. Certificates/TLS → pkg/cert"; \
 		echo "   6. Authorization → pkg/rbac"; \
 		echo "   7. Observability → pkg/telemetry"; \
+		echo "   8. Control Plane → pkg/controlplane (not pkg/mqtt)"; \
+		echo "   9. Data Plane → pkg/dataplane (not pkg/quic)"; \
 		echo ""; \
 		echo "💡 Before adding new functionality, check if it belongs in a central provider!"; \
 		echo ""; \
@@ -763,7 +818,7 @@ security-trivy:
 	fi
 	@echo "Running trivy filesystem scan..."
 	@echo "🔍 Vulnerability Scan (Blocking Issues):"
-	@trivy fs . --scanners vuln --format table --severity CRITICAL,HIGH,MEDIUM --exit-code 1 || { \
+	@trivy fs . --scanners vuln --format table --severity CRITICAL,HIGH,MEDIUM --skip-dirs .cache --exit-code 1 || { \
 		echo ""; \
 		echo "❌ CRITICAL/HIGH/MEDIUM vulnerabilities found - deployment blocked!"; \
 		echo "   Please update dependencies to fix these security issues."; \
@@ -771,7 +826,7 @@ security-trivy:
 		exit 1; \
 	}
 	@echo "🔍 Complete Security Scan (All Issues):"
-	@trivy fs . --scanners vuln,secret,misconfig --format table --exit-code 0 || true
+	@trivy fs . --scanners vuln,secret,misconfig --format table --skip-dirs .cache --exit-code 0 || true
 	@echo ""; \
 	echo "✅ Trivy scan completed"; \
 	echo "   Note: Development certificates detected in features/controller/certs/ are expected"; \

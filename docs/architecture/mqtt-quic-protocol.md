@@ -1,5 +1,14 @@
 # MQTT+QUIC Hybrid Communication Protocol (Story #198)
 
+> **Note (Story #267.5):** As of Epic #267, feature code accesses MQTT and QUIC
+> through the pluggable provider abstraction layer:
+> - **Control Plane**: `pkg/controlplane/interfaces` (wraps MQTT)
+> - **Data Plane**: `pkg/dataplane/interfaces` (wraps QUIC)
+>
+> Direct imports of `pkg/mqtt/client`, `pkg/mqtt/types`, `pkg/quic/client`, and
+> `pkg/quic/session` in feature code are deprecated and blocked by
+> `make check-architecture`. See [Communication Layer Migration Guide](communication-layer-migration.md).
+
 ## Overview
 
 This document defines the communication protocol for replacing gRPC with a hybrid MQTT+QUIC architecture.

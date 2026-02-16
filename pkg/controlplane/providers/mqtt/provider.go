@@ -17,7 +17,7 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	"github.com/cfgis/cfgms/pkg/controlplane/types"
-	mqttClient "github.com/cfgis/cfgms/pkg/mqtt/client"
+	mqttClient "github.com/cfgis/cfgms/pkg/mqtt/client" //nolint:staticcheck // SA1019: Provider wraps deprecated package
 	mqttInterfaces "github.com/cfgis/cfgms/pkg/mqtt/interfaces"
 )
 

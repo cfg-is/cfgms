@@ -8,7 +8,7 @@ import (
 
 	"github.com/stretchr/testify/suite"
 
-	"github.com/cfgis/cfgms/pkg/mqtt/types"
+	"github.com/cfgis/cfgms/pkg/mqtt/types" //nolint:staticcheck // SA1019: Testing deprecated type structures
 )
 
 // MQTTQUICFlowTestSuite tests the MQTT+QUIC communication flow.

@@ -17,9 +17,9 @@ import (
 	"github.com/cfgis/cfgms/pkg/dataplane/interfaces"
 	"github.com/cfgis/cfgms/pkg/dataplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
-	quicClient "github.com/cfgis/cfgms/pkg/quic/client"
-	quicServer "github.com/cfgis/cfgms/pkg/quic/server"
-	quicSession "github.com/cfgis/cfgms/pkg/quic/session"
+	quicClient "github.com/cfgis/cfgms/pkg/quic/client"   //nolint:staticcheck // SA1019: Provider wraps deprecated package
+	quicServer "github.com/cfgis/cfgms/pkg/quic/server"   //nolint:staticcheck // SA1019: Provider wraps deprecated package
+	quicSession "github.com/cfgis/cfgms/pkg/quic/session" //nolint:staticcheck // SA1019: Provider wraps deprecated package
 )
 
 // Provider implements the DataPlaneProvider interface using QUIC.

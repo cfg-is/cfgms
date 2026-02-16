@@ -395,7 +395,7 @@ See [MQTT+QUIC Testing Strategy](docs/testing/mqtt-quic-testing-strategy.md) for
 - **Direct** (no `interfaces/`) - Single implementation, direct import (exceptions only)
 - See `pkg/README.md` for detailed decision tree and exceptions
 
-**Current Central Providers** (as of Story #239):
+**Current Central Providers** (as of Story #267.5):
 
 **Pluggable Providers** (Multiple Implementations):
 
@@ -403,20 +403,29 @@ See [MQTT+QUIC Testing Strategy](docs/testing/mqtt-quic-testing-strategy.md) for
 2. **`pkg/logging`** - Structured logging (file, timescale)
 3. **`pkg/secrets`** - Secret storage with encryption (SOPS backend)
 4. **`pkg/directory`** - Directory services (M365, Active Directory)
-5. **`pkg/mqtt`** - MQTT broker abstraction (mochi-mqtt)
+5. **`pkg/mqtt`** - MQTT broker abstraction (mochi-mqtt) - *broker infrastructure only*
+6. **`pkg/controlplane`** - Control plane communication (MQTT provider) - commands, events, heartbeats
+7. **`pkg/dataplane`** - Data plane communication (QUIC provider) - config sync, DNA sync, bulk transfers
 
 **Direct Providers** (Single Implementation - Candidates for Pluggable Migration):
-6. **`pkg/cert`** - Certificate/TLS management (could support: Internal CA, Let's Encrypt, Vault, PKI)
-7. **`pkg/telemetry`** - Observability (could support: OpenTelemetry, Datadog, New Relic, Prometheus)
-8. **`pkg/cache`** - Write-through caching (could support: Memory, Redis, Memcached)
-9. **`pkg/session`** - Session management (could support: Memory, Redis, Database, JWT-stateless)
-10. **`pkg/registration`** - Steward registration
-11. **`pkg/monitoring`** - Health monitoring
-12. **`pkg/maintenance`** - Maintenance window scheduling
-13. **`pkg/security`** - Security utilities (input validation)
-14. **`pkg/quic`** - QUIC protocol support
+8. **`pkg/cert`** - Certificate/TLS management (could support: Internal CA, Let's Encrypt, Vault, PKI)
+9. **`pkg/telemetry`** - Observability (could support: OpenTelemetry, Datadog, New Relic, Prometheus)
+10. **`pkg/cache`** - Write-through caching (could support: Memory, Redis, Memcached)
+11. **`pkg/session`** - Session management (could support: Memory, Redis, Database, JWT-stateless)
+12. **`pkg/registration`** - Steward registration
+13. **`pkg/monitoring`** - Health monitoring
+14. **`pkg/maintenance`** - Maintenance window scheduling
+15. **`pkg/security`** - Security utilities (input validation)
+
+**Deprecated** (use providers above instead):
+- **`pkg/mqtt/client`** → use `pkg/controlplane/interfaces` (Story #267.5)
+- **`pkg/mqtt/types`** → use `pkg/controlplane/types` (Story #267.5)
+- **`pkg/quic/client`** → use `pkg/dataplane/interfaces` (Story #267.5)
+- **`pkg/quic/session`** → use `pkg/dataplane/interfaces` (Story #267.5)
+- **`pkg/quic/server`** → internal infrastructure for data plane provider only
 
 *Note: Direct providers listed above should be evaluated for pluggable migration when adding second implementation or during major refactoring.*
+*See [Communication Layer Migration Guide](docs/architecture/communication-layer-migration.md) for migration details.*
 
 **Not Providers** (Utilities):
 
@@ -520,6 +529,8 @@ docs/          # Comprehensive documentation
 - **Creating custom cache implementations** - Use `pkg/cache.Cache` with TTL and eviction
 - **Manual certificate loading** - Use `pkg/cert.LoadTLSCertificate()` instead of `tls.LoadX509KeyPair()`
 - **Manual CA pool creation** - TLS helpers handle this automatically
+- **Direct MQTT client/types imports** - Use `pkg/controlplane/interfaces` and `pkg/controlplane/types` instead of `pkg/mqtt/client` or `pkg/mqtt/types`
+- **Direct QUIC client/session imports** - Use `pkg/dataplane/interfaces` instead of `pkg/quic/client` or `pkg/quic/session`
 
 ## Quick Reference
 

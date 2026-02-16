@@ -38,7 +38,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	mqttInterfaces "github.com/cfgis/cfgms/pkg/mqtt/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/mqtt/providers/mochi" // Register mochi-mqtt provider
-	quicServer "github.com/cfgis/cfgms/pkg/quic/server"
+	quicServer "github.com/cfgis/cfgms/pkg/quic/server" //nolint:staticcheck // SA1019: Controller infrastructure bootstrap
 	pkgRegistration "github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
