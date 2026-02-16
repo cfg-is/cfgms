@@ -100,16 +100,35 @@ func (s *ModuleExecutionTestSuite) SetupSuite() {
 		GetTestMQTTAddr("ssl://localhost:1886"),
 		s.tlsConfig,
 	)
-
-	// Connect MQTT client for status monitoring with TLS
-	// Story #313: use test-controller- prefix to allow publishing to any steward topics
-	s.helper.ConnectMQTT(s.T(), fmt.Sprintf("test-controller-%d", time.Now().Unix()), s.tlsConfig)
 }
 
-func (s *ModuleExecutionTestSuite) TearDownSuite() {
+func (s *ModuleExecutionTestSuite) SetupTest() {
+	// Restart steward between tests to ensure clean state
+	// Issue #382: Tests share same steward instance and need isolation
+	s.T().Log("Restarting steward for clean test state...")
+	restartCmd := exec.Command("docker", "restart", "steward-standalone")
+	if output, err := restartCmd.CombinedOutput(); err != nil {
+		s.T().Logf("Warning: Failed to restart steward: %v (output: %s)", err, output)
+	}
+
+	// Wait for steward to restart and register
+	time.Sleep(6 * time.Second)
+
+	// Create unique MQTT client for each test to avoid subscription conflicts
+	// Issue #382: Each test needs its own client to properly handle event subscriptions
+	clientID := fmt.Sprintf("test-controller-%d-%s", time.Now().UnixNano(), s.T().Name())
+	s.helper.ConnectMQTT(s.T(), clientID, s.tlsConfig)
+}
+
+func (s *ModuleExecutionTestSuite) TearDownTest() {
+	// Disconnect MQTT client after each test
 	if s.helper != nil {
 		s.helper.DisconnectMQTT(s.T())
 	}
+}
+
+func (s *ModuleExecutionTestSuite) TearDownSuite() {
+	// MQTT client cleanup now handled in TearDownTest()
 
 	// Only stop steward-standalone if we started it (composePath will be set)
 	// In CI, containers are managed by the workflow, not by the test suite
@@ -852,9 +871,8 @@ func (s *ModuleExecutionTestSuite) TestE2EFlowDiagnostic() {
 
 	// Phase 1: Validate MQTT Connectivity
 	s.T().Log("📡 Phase 1: Validating MQTT Connectivity...")
-	token := s.helper.mqttClient.Connect()
-	s.True(token.WaitTimeout(5*time.Second), "❌ Phase 1 FAILED: MQTT connection timeout")
-	s.NoError(token.Error(), "❌ Phase 1 FAILED: MQTT connection error")
+	// MQTT client already connected in SetupTest(), just verify it's connected
+	s.True(s.helper.mqttClient.IsConnected(), "❌ Phase 1 FAILED: MQTT client not connected")
 	s.T().Log("✅ Phase 1 PASS: MQTT connection established")
 
 	// Phase 2: Validate REST API Connectivity
@@ -917,7 +935,7 @@ func (s *ModuleExecutionTestSuite) TestE2EFlowDiagnostic() {
 	quicCmdJSON, err := json.Marshal(connectQuicCmd)
 	s.NoError(err, "❌ Phase 5 FAILED: Cannot marshal connect_quic command")
 
-	token = s.helper.mqttClient.Publish(commandTopic, 1, false, quicCmdJSON)
+	token := s.helper.mqttClient.Publish(commandTopic, 1, false, quicCmdJSON)
 	s.True(token.WaitTimeout(5*time.Second), "❌ Phase 5 FAILED: connect_quic publish timeout")
 	s.NoError(token.Error(), "❌ Phase 5 FAILED: connect_quic publish error")
 	s.T().Log("✅ Phase 5 PASS: QUIC connection command published")
