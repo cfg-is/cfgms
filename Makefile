@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-mqtt-quic test-e2e-controller test-e2e-scenarios test-ci test-integration test-security test-performance test-performance-baseline test-data-consistency test-docker test-cross-feature-integration test-failure-propagation proto lint clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates
+.PHONY: build test test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-mqtt-quic test-e2e-controller test-e2e-scenarios test-ci test-integration test-security test-performance test-performance-baseline test-data-consistency test-docker test-cross-feature-integration test-failure-propagation proto lint clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates
 
 # Use bash for all recipe commands (required for credential loading scripts)
 SHELL := /bin/bash
@@ -1603,8 +1603,8 @@ test-mqtt-quic-setup:
 	@echo "Starting TimescaleDB and standalone controller with MQTT+QUIC..."
 	@echo "🔨 Force rebuilding Docker images (no cache)..."
 	@set -a && . ./.env.test && set +a && \
-	DOCKER_BUILDKIT=1 docker compose -f docker-compose.test.yml --profile ha build --no-cache controller-standalone && \
-	docker compose -f docker-compose.test.yml --profile ha up -d timescaledb-test controller-standalone
+	DOCKER_BUILDKIT=1 docker compose -f docker-compose.test.yml --profile ha build --no-cache controller-standalone steward-standalone && \
+	docker compose -f docker-compose.test.yml --profile ha up -d timescaledb-test controller-standalone steward-standalone
 	@echo ""
 	@echo "⏳ Waiting for controller to initialize..."
 	@sleep 45
@@ -1681,22 +1681,50 @@ test-mqtt-quic-cleanup:
 # Phase 2: Parallelizable E2E test targets (Story #297)
 # These targets can run independently and be parallelized with make -j3
 
-.PHONY: test-e2e-mqtt-quic test-e2e-controller test-e2e-scenarios
+.PHONY: test-e2e-ci test-e2e-mqtt-quic test-e2e-controller test-e2e-scenarios
 
-test-e2e-mqtt-quic:
-	@echo "🧪 Running MQTT+QUIC integration tests..."
-	@if [ -f .env.test ]; then \
-		set -a && . ./.env.test && set +a && \
-		CFGMS_TEST_HTTP_ADDR=https://localhost:8080 \
-		CFGMS_TEST_MQTT_ADDR=ssl://localhost:1886 \
-		CFGMS_TEST_QUIC_ADDR=localhost:4436 \
-		CFGMS_TEST_CERTS_PATH=$(PWD)/test/integration/mqtt_quic/certs \
-		go test -v -race -timeout=15m ./test/integration/mqtt_quic/... || exit 1; \
-	else \
-		echo "❌ .env.test not found"; \
-		exit 1; \
-	fi
-	@echo "✅ MQTT+QUIC integration tests passed"
+# CI-style E2E tests - matches GitHub Actions production-gates.yml exactly
+# Self-contained: sets up infrastructure, runs tests, cleans up
+# Use this single command to reproduce CI test behavior locally for troubleshooting
+test-e2e-ci:
+	@echo "🚀 Starting CI-style E2E test suite (setup → test → cleanup)..."
+	@echo ""
+	@echo "📋 Step 1/3: Setting up Docker infrastructure..."
+	@$(MAKE) test-mqtt-quic-setup
+	@echo ""
+	@echo "📋 Step 2/3: Running tests in container with container-to-container networking..."
+	@docker build -t cfgms-test-runner -f Dockerfile.test-runner . >/dev/null 2>&1 && \
+	DOCKER_GID=$$(stat -c '%g' /var/run/docker.sock) && \
+	docker run --rm \
+		--user $$(id -u):$$(id -g) \
+		--network cfgms-test \
+		--group-add $$DOCKER_GID \
+		-v "$(PWD):/workspace" \
+		-v /var/run/docker.sock:/var/run/docker.sock \
+		-w /workspace \
+		-e CFGMS_TEST_INTEGRATION=1 \
+		-e GITHUB_ACTIONS=true \
+		-e GOCACHE=/workspace/.cache/go-build \
+		-e GOMODCACHE=/workspace/.cache/go-mod \
+		cfgms-test-runner \
+		sh -c ' \
+			echo "📦 Installing Go dependencies..." && \
+			go mod download && \
+			echo "" && \
+			echo "🧪 Running integration tests (container-to-container networking)..." && \
+			go test -v -race -timeout=10m $$(go list ./test/integration/... | grep -v "test/integration$$") && \
+			echo "" && \
+			echo "🧪 Running E2E tests..." && \
+			go test -v -race -timeout=15m ./test/e2e/... -run "TestE2EScenarios/(TestControllerStewardIntegration|TestRBACIntegration|TestWorkflowIntegration|TestDataFlow)" \
+		' || { echo ""; echo "📋 Step 3/3: Cleaning up (tests failed)..."; $(MAKE) test-mqtt-quic-cleanup; exit 1; }
+	@echo ""
+	@echo "📋 Step 3/3: Cleaning up Docker infrastructure..."
+	@$(MAKE) test-mqtt-quic-cleanup
+	@echo ""
+	@echo "✅ CI-style E2E tests completed successfully"
+
+# Deprecated: Use test-e2e-ci instead (matches CI execution exactly)
+test-e2e-mqtt-quic: test-e2e-ci
 
 test-e2e-controller:
 	@echo "🧪 Running controller E2E tests (Docker deployment)..."

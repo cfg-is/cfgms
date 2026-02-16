@@ -4,9 +4,27 @@ WORKDIR /workspace
 # Install dependencies needed by tests
 RUN apt-get update && apt-get install -y --no-install-recommends \
     netcat-openbsd \
-    docker.io \
-    docker-compose \
+    ca-certificates \
+    curl \
+    gnupg \
     && rm -rf /var/lib/apt/lists/*
+
+# Install Docker CLI from official Docker repository
+# Debian's docker.io package in Trixie doesn't include CLI binary
+RUN install -m 0755 -d /etc/apt/keyrings && \
+    curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc && \
+    chmod a+r /etc/apt/keyrings/docker.asc && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian trixie stable" > /etc/apt/sources.list.d/docker.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+    docker-ce-cli \
+    docker-compose-plugin && \
+    rm -rf /var/lib/apt/lists/*
+
+# Create non-root user for running tests
+# UID 1001 matches GitHub Actions runner default
+RUN groupadd -g 1001 testuser && \
+    useradd -u 1001 -g testuser -m -s /bin/bash testuser
 
 # Set up environment for container-to-container networking
 # Tests will use these service names instead of localhost
@@ -14,6 +32,6 @@ ENV CFGMS_TEST_HTTP_ADDR="https://controller-standalone:9080" \
     CFGMS_TEST_MQTT_ADDR="ssl://controller-standalone:8883" \
     CFGMS_TEST_QUIC_ADDR="controller-standalone:4433"
 
-# NOTE: Running as root for now because tests need Docker socket access
-# and network capabilities. This is a test-only container in CI.
-# TODO: Investigate running as non-root with proper capabilities
+# Switch to non-root user
+# Note: Docker socket access is granted at runtime via --group-add flag
+USER testuser

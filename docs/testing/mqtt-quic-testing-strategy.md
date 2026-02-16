@@ -16,23 +16,20 @@ This document explains the rationale behind this strategy, how to run tests loca
 ### Running Tests
 
 ```bash
-# Full MQTT+QUIC test suite (requires Docker)
-make test-mqtt-quic-setup  # Start infrastructure
-make test-mqtt-quic        # Run all 14 test files
+# CI-style testing (self-contained: setup → test → cleanup)
+make test-e2e-ci          # Matches GitHub Actions exactly
 
-# Individual test suites
-go test -v ./test/integration/mqtt_quic/tls_security_test.go
-go test -v ./test/integration/mqtt_quic/registration_test.go
-go test -v ./test/integration/mqtt_quic/mqtt_connectivity_test.go
-go test -v ./test/integration/mqtt_quic/config_sync_test.go
-go test -v ./test/integration/mqtt_quic/module_execution_test.go
-go test -v ./test/integration/mqtt_quic/load_test.go
-go test -v ./test/integration/mqtt_quic/config_signature_test.go
-go test -v ./test/integration/mqtt_quic/heartbeat_failover_test.go
-go test -v ./test/integration/mqtt_quic/multi_tenant_test.go
-go test -v ./test/integration/mqtt_quic/quic_session_test.go
-go test -v ./test/integration/mqtt_quic/dna_update_test.go
+# Manual workflow (for interactive debugging)
+make test-mqtt-quic-setup  # Start infrastructure
+go test -v ./test/integration/mqtt_quic/config_sync_test.go  # Run specific test
+make test-mqtt-quic-cleanup  # Clean up
 ```
+
+**Recommendation**: Use `make test-e2e-ci` to reproduce CI failures locally. This single command:
+- Sets up Docker infrastructure (controller, TimescaleDB)
+- Runs tests in container with container-to-container networking
+- Cleans up infrastructure (even if tests fail)
+- Exactly matches CI execution flow
 
 ### Current Status
 
@@ -58,25 +55,91 @@ controller-standalone:
   - HTTP: localhost:8080
 ```
 
+### Container-to-Container Networking (Issue #382)
+
+**Problem**: Tests hardcoded `localhost:4433` for QUIC address, which doesn't work in CI where tests run inside a Docker container. From the steward container's perspective, `localhost` points to itself, not the controller.
+
+**Solution**: Use Docker service names for container-to-container communication.
+
+**Test Runner Architecture**:
+
+CI uses `Dockerfile.test-runner` to run tests inside a container on the `cfgms-test` network:
+
+```dockerfile
+# Non-root user for security (UID 1001 = GitHub Actions default)
+FROM golang:1.25
+RUN groupadd -g 1001 testuser && \
+    useradd -u 1001 -g testuser -m -s /bin/bash testuser
+USER testuser
+
+# Environment variables for container-to-container addressing
+ENV CFGMS_TEST_HTTP_ADDR="https://controller-standalone:9080"
+ENV CFGMS_TEST_MQTT_ADDR="ssl://controller-standalone:8883"
+ENV CFGMS_TEST_QUIC_ADDR="controller-standalone:4433"
+```
+
+**Key Features**:
+- ✅ **Non-root execution**: Uses `testuser` (UID 1001) with Docker socket access via `--group-add`
+- ✅ **Container networking**: Tests connect to `controller-standalone:4433` instead of `localhost:4433`
+- ✅ **UDP/QUIC support**: Container-to-container networking enables UDP protocol
+- ✅ **Security**: Docker socket access granted at runtime, not hardcoded root user
+
+**CI Workflow**:
+
+```bash
+# Build test runner
+docker build -t cfgms-test-runner -f Dockerfile.test-runner .
+
+# Get Docker socket group for non-root access
+DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
+
+# Run tests in container on cfgms-test network
+docker run --rm \
+  --network cfgms-test \
+  --group-add $DOCKER_GID \
+  -v "$(pwd):/workspace" \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  cfgms-test-runner \
+  go test -v ./test/integration/mqtt_quic/...
+```
+
+**Local vs CI Addressing**:
+- **Local**: `localhost:4433` works (tests run on host, connect directly)
+- **CI**: `controller-standalone:4433` required (tests run in container on Docker network)
+
+Tests automatically use correct addressing based on environment variables.
+
 ---
 
 ## CI Execution (GitHub Actions)
 
-### Exclusion Pattern
+### Test Execution Strategy (Updated: Issue #382)
 
-Tests excluded in `.github/workflows/production-gates.yml` line 514:
+✅ **MQTT+QUIC tests now ENABLED in CI** (as of Issue #382)
+
+Tests run inside test-runner container with container-to-container networking:
 
 ```bash
-# Skip MQTT+QUIC tests until Issue #294 (functional bugs in test suite)
-go test -v -race -timeout=10m $(go list ./test/integration/... | grep -v mqtt_quic | grep -v "test/integration$")
+# Build test runner for container-to-container networking
+docker build -t cfgms-test-runner -f Dockerfile.test-runner .
+
+# Run integration tests (includes MQTT+QUIC)
+docker run --rm \
+  --network cfgms-test \
+  --group-add $DOCKER_GID \
+  -v "$(pwd):/workspace" \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  cfgms-test-runner \
+  go test -v -race -timeout=10m $(go list ./test/integration/... | grep -v "test/integration$")
 ```
 
-**Why double grep?**
+**What Changed**:
+- ✅ Tests use `controller-standalone:4433` instead of `localhost:4433`
+- ✅ Container-to-container networking enables UDP/QUIC in CI
+- ✅ Non-root test execution with Docker socket access
+- ✅ All MQTT+QUIC E2E tests passing (Phase 7 timeout eliminated)
 
-- First grep excludes `test/integration/mqtt_quic/` subdirectory
-- Second grep excludes parent-level tests (`mqtt_quic_integration_test.go`, `mqtt_quic_flow_test.go`)
-
-### Why Excluded
+### Historical Context (Pre-Issue #382)
 
 1. **Certificate Issues**: Some tests skip if certs unavailable (config_signature_test.go lines 377, 383, 436, 442)
 2. **Infrastructure Dependencies**: QUIC tests require actual server (quic_session_test.go lines 257, 269)
@@ -88,15 +151,17 @@ go test -v -race -timeout=10m $(go list ./test/integration/... | grep -v mqtt_qu
 
 **Issue #294**: Complete E2E test framework for MQTT+QUIC mode (v0.8.1)
 
-**Required Fixes**:
+**Completed** ✅:
+- [x] Enable in production-gates.yml workflow (Issue #382)
+- [x] Add container-to-container networking for QUIC/UDP (Issue #382)
+- [x] Fix Docker socket access with non-root user (Issue #382)
 
+**Remaining Work**:
 - [ ] Remove certificate-related skips (use auto-generation consistently)
-- [ ] Add QUIC server infrastructure to docker-compose
 - [ ] Resolve async timing issues in breach indicator tests
 - [ ] Implement module configuration API integration
-- [ ] Enable in production-gates.yml workflow
 
-**Target Date**: v0.8.1 release
+**Status**: Tests now run in CI with container-to-container networking
 
 ---
 

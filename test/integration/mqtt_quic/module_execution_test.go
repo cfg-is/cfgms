@@ -336,7 +336,8 @@ func (s *ModuleExecutionTestSuite) TestConfigStatusReporting() {
 	// First, establish QUIC connection (required for config sync)
 	// NOTE: In a real deployment, this would be done by the controller
 	// For testing, we simulate the controller command
-	commandTopic := fmt.Sprintf("cfgms/steward/%s/commands", stewardID)
+	// Topic format: cfgms/commands/{steward_id} (matches pkg/controlplane/providers/mqtt topicCommandUnicast)
+	commandTopic := fmt.Sprintf("cfgms/commands/%s", stewardID)
 
 	// Step 1: Send connect_quic command
 	connectQuicCmd := map[string]interface{}{
@@ -525,7 +526,8 @@ func (s *ModuleExecutionTestSuite) TestModuleFailureReporting() {
 	})
 
 	// First, establish QUIC connection (required for config sync)
-	commandTopic := fmt.Sprintf("cfgms/steward/%s/commands", stewardID)
+	// Topic format: cfgms/commands/{steward_id} (matches pkg/controlplane/providers/mqtt topicCommandUnicast)
+	commandTopic := fmt.Sprintf("cfgms/commands/%s", stewardID)
 
 	// Step 1: Send connect_quic command
 	connectQuicCmd := map[string]any{
@@ -899,7 +901,8 @@ func (s *ModuleExecutionTestSuite) TestE2EFlowDiagnostic() {
 
 	// Phase 5: Validate QUIC Connection Command Delivery
 	s.T().Log("🔗 Phase 5: Validating QUIC Connection Command...")
-	commandTopic := fmt.Sprintf("cfgms/steward/%s/commands", stewardID)
+	// Topic format: cfgms/commands/{steward_id} (matches pkg/controlplane/providers/mqtt topicCommandUnicast)
+	commandTopic := fmt.Sprintf("cfgms/commands/%s", stewardID)
 
 	connectQuicCmd := map[string]interface{}{
 		"command_id": "diagnostic-connect-quic",

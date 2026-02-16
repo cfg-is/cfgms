@@ -392,20 +392,63 @@ type ModuleStatus struct {
 	Error   string `json:"error,omitempty"`
 }
 
+// getStringFromMap safely extracts a string value from a map
+func getStringFromMap(m map[string]interface{}, key string) string {
+	if val, ok := m[key]; ok {
+		if str, ok := val.(string); ok {
+			return str
+		}
+	}
+	return ""
+}
+
 // SubscribeToConfigStatus subscribes to configuration status messages
 func (h *ModuleTestHelper) SubscribeToConfigStatus(t *testing.T, stewardID string, handler func(msg *ConfigStatusMessage)) {
 	t.Helper()
 
-	topic := fmt.Sprintf("cfgms/steward/%s/config-status", stewardID)
+	// Topic format: cfgms/events/{steward_id} (matches pkg/controlplane/providers/mqtt topicEvent)
+	topic := fmt.Sprintf("cfgms/events/%s", stewardID)
 
 	token := h.mqttClient.Subscribe(topic, 1, func(client mqtt.Client, message mqtt.Message) {
-		var status ConfigStatusMessage
-		if err := json.Unmarshal(message.Payload(), &status); err != nil {
-			t.Logf("Failed to parse config status: %v", err)
+		// Parse as Event structure (steward publishes events, not flat status messages)
+		var event struct {
+			ID        string                 `json:"id"`
+			Type      string                 `json:"type"`
+			StewardID string                 `json:"steward_id"`
+			TenantID  string                 `json:"tenant_id"`
+			Timestamp time.Time              `json:"timestamp"`
+			Details   map[string]interface{} `json:"details"`
+		}
+		if err := json.Unmarshal(message.Payload(), &event); err != nil {
+			t.Logf("Failed to parse event: %v", err)
 			return
 		}
 
-		handler(&status)
+		// Convert Event.Details to ConfigStatusMessage
+		status := &ConfigStatusMessage{
+			StewardID:     event.StewardID,
+			ConfigVersion: getStringFromMap(event.Details, "config_version"),
+			Status:        getStringFromMap(event.Details, "status"),
+			Timestamp:     event.Timestamp,
+		}
+
+		// Parse modules if present
+		if modulesData, ok := event.Details["modules"]; ok {
+			if modulesMap, ok := modulesData.(map[string]interface{}); ok {
+				status.Modules = make(map[string]ModuleStatus)
+				for modName, modData := range modulesMap {
+					if modMap, ok := modData.(map[string]interface{}); ok {
+						status.Modules[modName] = ModuleStatus{
+							Status:  getStringFromMap(modMap, "status"),
+							Message: getStringFromMap(modMap, "message"),
+							Error:   getStringFromMap(modMap, "error"),
+						}
+					}
+				}
+			}
+		}
+
+		handler(status)
 	})
 
 	if !token.WaitTimeout(5 * time.Second) {
