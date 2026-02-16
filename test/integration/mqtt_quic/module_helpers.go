@@ -424,6 +424,11 @@ func (h *ModuleTestHelper) SubscribeToConfigStatus(t *testing.T, stewardID strin
 			return
 		}
 
+		// Only process config_applied events (filter out command_received, command_completed, etc.)
+		if event.Type != "config_applied" {
+			return
+		}
+
 		// Convert Event.Details to ConfigStatusMessage
 		status := &ConfigStatusMessage{
 			StewardID:     event.StewardID,
