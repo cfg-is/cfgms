@@ -185,11 +185,13 @@ func (h *ModuleTestHelper) GetStewardIDFromContainer(t *testing.T, containerName
 	// This handles timing issues in CI where the container may be slow to start
 	maxAttempts := 30
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		// Read steward's log file to get the registered steward ID
+		// Read steward's NEWEST log file to get the registered steward ID
+		// Issue #382: docker restart persists old log files, causing stale IDs
+		// Use ls -t to sort by modification time (newest first) and head -1 to get the newest file
 		// The logs contain: "steward_id":"steward-1234567890"
-		// Use tail -1 to get the LATEST steward_id (in case of retries/restarts)
+		// Use tail -1 to get the LATEST steward_id from that file
 		cmd := exec.Command("docker", "exec", containerName, "sh", "-c",
-			"cat /tmp/cfgms/cfgms-*.log 2>/dev/null | grep -o '\"steward_id\":\"[^\"]*\"' | tail -1 | cut -d'\"' -f4")
+			"ls -t /tmp/cfgms/cfgms-*.log 2>/dev/null | head -1 | xargs cat 2>/dev/null | grep -o '\"steward_id\":\"[^\"]*\"' | tail -1 | cut -d'\"' -f4")
 
 		output, err := cmd.CombinedOutput()
 		stewardID := strings.TrimSpace(string(output))
