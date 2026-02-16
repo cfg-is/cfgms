@@ -98,3 +98,4 @@ docs/product/v*-epic.md
 docs/security/audits/*-wip.md
 docs/security/audits/draft-*.md
 MIGRATION_PLAN.md
+/.cache/

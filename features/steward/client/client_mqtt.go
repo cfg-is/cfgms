@@ -576,6 +576,7 @@ func (c *MQTTClient) handleConnectQUIC(ctx context.Context, cmd *cpTypes.Command
 		}
 
 		providerCfg := map[string]interface{}{
+			"mode":        "client", // Issue #382: Steward is a client connecting to controller's QUIC server
 			"server_addr": quicAddress,
 			"tls_config":  tlsConfig,
 			"steward_id":  stewardID,

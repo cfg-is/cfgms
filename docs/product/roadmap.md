@@ -143,7 +143,7 @@ Achieve production stability, complete core platform features, and prepare for s
 - [x] Fix Windows flaky test timing assertion (Issue #356) - Increase TestEphemeralAPIKeys tolerance from 5s to 10s to accommodate Windows CI runner variability ✅ COMPLETED
 - [x] Fix flaky TestEnhancedMultiTenantSecurity test (Issue #366) - Fixed dual audit logger anti-pattern causing test to query different logger than engine uses ✅ COMPLETED
 - [x] **Fix MQTT+QUIC E2E config sync signature verification** (Issue #378 - 8 points) - Fixed certificate mismatch causing 30s timeouts in E2E tests, implemented certificate serial tracking pattern, E2E tests now pass in <10s, added diagnostic tests and comprehensive documentation ✅ COMPLETED
-- [ ] Fix Docker networking in MQTT+QUIC E2E tests (Issue #382 - 2-3 points) - Fix hardcoded `localhost:4433` QUIC address to use Docker service name `controller-standalone:4433` for container-to-container communication
+- [x] Fix Docker networking in MQTT+QUIC E2E tests (Issue #382 - 2-3 points) - Fixed event filtering (config_applied only), per-test MQTT client isolation, steward restart between tests, stale steward ID detection, and license header validation for .cache/ directory ✅ COMPLETED
 
 ##### Phase 2: Breaking Changes & Architecture (Do before production validation)
 

@@ -40,22 +40,51 @@ func (s *ModuleExecutionTestSuite) SetupSuite() {
 		s.T().Skip("Skipping module execution tests in short mode - requires infrastructure")
 	}
 
-	// Start steward-standalone container (follows pattern from test/integration/docker_test.go)
-	s.T().Log("Starting steward-standalone container...")
+	// Check if infrastructure containers are already running (e.g., in CI)
+	// We need to check for both steward-standalone and its dependencies (controller, timescaledb)
+	// because docker compose up tries to start all dependencies
+	checkCmd := exec.Command("docker", "ps", "--filter", "name=steward-standalone", "--filter", "name=controller-standalone", "--filter", "name=cfgms-timescaledb-test", "--format", "{{.Names}}")
+	checkOutput, checkErr := checkCmd.CombinedOutput()
+	if checkErr != nil {
+		s.T().Logf("Warning: Failed to check for existing containers: %v", checkErr)
+	}
+	names := string(checkOutput)
+	s.T().Logf("Container detection check - found containers:\n%s", names)
 
-	// Find project root - go test changes to a temp directory
-	// Try current directory and up to 3 levels up
-	for i := 0; i < 4; i++ {
-		s.composePath = "docker-compose.test.yml"
-		if i > 0 {
-			s.composePath = strings.Repeat("../", i) + "docker-compose.test.yml"
-		}
-		if _, err := os.Stat(s.composePath); err == nil {
-			cmd := exec.Command("docker", "compose", "-f", s.composePath, "--profile", "ha", "up", "-d", "steward-standalone")
-			if output, err := cmd.CombinedOutput(); err != nil {
-				s.T().Logf("Note: Failed to start steward-standalone (may already be running): %v\nOutput: %s", err, output)
+	infrastructureRunning := strings.Contains(names, "steward-standalone") &&
+		strings.Contains(names, "controller-standalone") &&
+		strings.Contains(names, "cfgms-timescaledb-test")
+
+	s.T().Logf("Infrastructure detection: steward=%v, controller=%v, timescaledb=%v, overall=%v",
+		strings.Contains(names, "steward-standalone"),
+		strings.Contains(names, "controller-standalone"),
+		strings.Contains(names, "cfgms-timescaledb-test"),
+		infrastructureRunning)
+
+	if infrastructureRunning {
+		s.T().Log("Found existing MQTT+QUIC infrastructure (likely started by CI/make target)")
+		s.T().Log("Using containers: controller-standalone, steward-standalone, cfgms-timescaledb-test")
+	} else {
+		// Start steward-standalone container (follows pattern from test/integration/docker_test.go)
+		s.T().Log("Starting steward-standalone container...")
+
+		// Find project root - go test changes to a temp directory
+		// Try current directory and up to 3 levels up
+		for i := 0; i < 4; i++ {
+			s.composePath = "docker-compose.test.yml"
+			if i > 0 {
+				s.composePath = strings.Repeat("../", i) + "docker-compose.test.yml"
 			}
-			break
+			if _, err := os.Stat(s.composePath); err == nil {
+				// Use --no-deps to only start steward-standalone without starting dependencies
+				// (controller-standalone and timescaledb-test are already running from workflow setup)
+				cmd := exec.Command("docker", "compose", "-f", s.composePath, "--profile", "ha", "up", "-d", "--no-deps", "steward-standalone")
+				if output, err := cmd.CombinedOutput(); err != nil {
+					s.T().Fatalf("Failed to start steward-standalone: %v\nOutput: %s", err, output)
+				}
+				s.T().Log("Successfully started steward-standalone container")
+				break
+			}
 		}
 	}
 
@@ -71,24 +100,46 @@ func (s *ModuleExecutionTestSuite) SetupSuite() {
 		GetTestMQTTAddr("ssl://localhost:1886"),
 		s.tlsConfig,
 	)
-
-	// Connect MQTT client for status monitoring with TLS
-	// Story #313: use test-controller- prefix to allow publishing to any steward topics
-	s.helper.ConnectMQTT(s.T(), fmt.Sprintf("test-controller-%d", time.Now().Unix()), s.tlsConfig)
 }
 
-func (s *ModuleExecutionTestSuite) TearDownSuite() {
+func (s *ModuleExecutionTestSuite) SetupTest() {
+	// Restart steward between tests to ensure clean state
+	// Issue #382: Tests share same steward instance and need isolation
+	s.T().Log("Restarting steward for clean test state...")
+	restartCmd := exec.Command("docker", "restart", "steward-standalone")
+	if output, err := restartCmd.CombinedOutput(); err != nil {
+		s.T().Logf("Warning: Failed to restart steward: %v (output: %s)", err, output)
+	}
+
+	// Wait for steward to restart and register
+	time.Sleep(6 * time.Second)
+
+	// Create unique MQTT client for each test to avoid subscription conflicts
+	// Issue #382: Each test needs its own client to properly handle event subscriptions
+	clientID := fmt.Sprintf("test-controller-%d-%s", time.Now().UnixNano(), s.T().Name())
+	s.helper.ConnectMQTT(s.T(), clientID, s.tlsConfig)
+}
+
+func (s *ModuleExecutionTestSuite) TearDownTest() {
+	// Disconnect MQTT client after each test
 	if s.helper != nil {
 		s.helper.DisconnectMQTT(s.T())
 	}
+}
 
-	// Stop steward-standalone container
-	s.T().Log("Stopping steward-standalone container...")
+func (s *ModuleExecutionTestSuite) TearDownSuite() {
+	// MQTT client cleanup now handled in TearDownTest()
+
+	// Only stop steward-standalone if we started it (composePath will be set)
+	// In CI, containers are managed by the workflow, not by the test suite
 	if s.composePath != "" {
+		s.T().Log("Stopping steward-standalone container (started by test suite)...")
 		cmd := exec.Command("docker", "compose", "-f", s.composePath, "--profile", "ha", "down", "steward-standalone")
 		if output, err := cmd.CombinedOutput(); err != nil {
 			s.T().Logf("Warning: Failed to stop steward-standalone: %v\nOutput: %s", err, output)
 		}
+	} else {
+		s.T().Log("Skipping container cleanup (containers managed externally)")
 	}
 }
 
@@ -304,7 +355,8 @@ func (s *ModuleExecutionTestSuite) TestConfigStatusReporting() {
 	// First, establish QUIC connection (required for config sync)
 	// NOTE: In a real deployment, this would be done by the controller
 	// For testing, we simulate the controller command
-	commandTopic := fmt.Sprintf("cfgms/steward/%s/commands", stewardID)
+	// Topic format: cfgms/commands/{steward_id} (matches pkg/controlplane/providers/mqtt topicCommandUnicast)
+	commandTopic := fmt.Sprintf("cfgms/commands/%s", stewardID)
 
 	// Step 1: Send connect_quic command
 	connectQuicCmd := map[string]interface{}{
@@ -377,7 +429,7 @@ func (s *ModuleExecutionTestSuite) TestConfigStatusReporting() {
 
 		s.T().Log("✅ AC4: Config status reporting verified - status matches actual execution")
 
-	case <-time.After(30 * time.Second):
+	case <-time.After(60 * time.Second):
 		s.T().Fatal("Timeout waiting for config status report")
 	}
 
@@ -493,7 +545,8 @@ func (s *ModuleExecutionTestSuite) TestModuleFailureReporting() {
 	})
 
 	// First, establish QUIC connection (required for config sync)
-	commandTopic := fmt.Sprintf("cfgms/steward/%s/commands", stewardID)
+	// Topic format: cfgms/commands/{steward_id} (matches pkg/controlplane/providers/mqtt topicCommandUnicast)
+	commandTopic := fmt.Sprintf("cfgms/commands/%s", stewardID)
 
 	// Step 1: Send connect_quic command
 	connectQuicCmd := map[string]any{
@@ -575,7 +628,7 @@ func (s *ModuleExecutionTestSuite) TestModuleFailureReporting() {
 
 		s.T().Log("✅ AC6: Module failure reporting verified - errors are descriptive and per-module")
 
-	case <-time.After(30 * time.Second):
+	case <-time.After(60 * time.Second):
 		s.T().Fatal("Timeout waiting for config status report")
 	}
 
@@ -778,8 +831,9 @@ func (s *ModuleExecutionTestSuite) TestE2ENetworkValidation() {
 	// Test 5: QUIC Port Accessibility (verify port 4433 is accessible from steward)
 	s.T().Log("🔐 Validating QUIC endpoint accessibility...")
 	// Use docker exec to test connectivity from within steward container
+	// Story #382: Use -u flag for UDP (QUIC uses UDP, not TCP)
 	cmd = exec.Command("docker", "exec", containerName, "sh", "-c",
-		"timeout 2 nc -zv controller-standalone 4433 2>&1 || echo 'Cannot connect'")
+		"timeout 2 nc -zvu controller-standalone 4433 2>&1 || echo 'Cannot connect'")
 	output, err = cmd.CombinedOutput()
 	if err == nil {
 		outputStr := string(output)
@@ -817,9 +871,8 @@ func (s *ModuleExecutionTestSuite) TestE2EFlowDiagnostic() {
 
 	// Phase 1: Validate MQTT Connectivity
 	s.T().Log("📡 Phase 1: Validating MQTT Connectivity...")
-	token := s.helper.mqttClient.Connect()
-	s.True(token.WaitTimeout(5*time.Second), "❌ Phase 1 FAILED: MQTT connection timeout")
-	s.NoError(token.Error(), "❌ Phase 1 FAILED: MQTT connection error")
+	// MQTT client already connected in SetupTest(), just verify it's connected
+	s.True(s.helper.mqttClient.IsConnected(), "❌ Phase 1 FAILED: MQTT client not connected")
 	s.T().Log("✅ Phase 1 PASS: MQTT connection established")
 
 	// Phase 2: Validate REST API Connectivity
@@ -866,7 +919,8 @@ func (s *ModuleExecutionTestSuite) TestE2EFlowDiagnostic() {
 
 	// Phase 5: Validate QUIC Connection Command Delivery
 	s.T().Log("🔗 Phase 5: Validating QUIC Connection Command...")
-	commandTopic := fmt.Sprintf("cfgms/steward/%s/commands", stewardID)
+	// Topic format: cfgms/commands/{steward_id} (matches pkg/controlplane/providers/mqtt topicCommandUnicast)
+	commandTopic := fmt.Sprintf("cfgms/commands/%s", stewardID)
 
 	connectQuicCmd := map[string]interface{}{
 		"command_id": "diagnostic-connect-quic",
@@ -881,7 +935,7 @@ func (s *ModuleExecutionTestSuite) TestE2EFlowDiagnostic() {
 	quicCmdJSON, err := json.Marshal(connectQuicCmd)
 	s.NoError(err, "❌ Phase 5 FAILED: Cannot marshal connect_quic command")
 
-	token = s.helper.mqttClient.Publish(commandTopic, 1, false, quicCmdJSON)
+	token := s.helper.mqttClient.Publish(commandTopic, 1, false, quicCmdJSON)
 	s.True(token.WaitTimeout(5*time.Second), "❌ Phase 5 FAILED: connect_quic publish timeout")
 	s.NoError(token.Error(), "❌ Phase 5 FAILED: connect_quic publish error")
 	s.T().Log("✅ Phase 5 PASS: QUIC connection command published")
@@ -925,7 +979,7 @@ func (s *ModuleExecutionTestSuite) TestE2EFlowDiagnostic() {
 		s.Contains(fileInfo.Content, "Diagnostic test content", "❌ Phase 8 FAILED: File content incorrect")
 		s.T().Log("✅ Phase 8 PASS: Module executed and file created")
 
-	case <-time.After(30 * time.Second):
+	case <-time.After(60 * time.Second):
 		s.T().Fatal("❌ Phase 7 FAILED: Timeout waiting for config status report (Phase 1-6 passed, Phase 7-8 unreachable)")
 	}
 

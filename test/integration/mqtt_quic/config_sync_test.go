@@ -85,7 +85,7 @@ func (s *ConfigSyncTestSuite) TestConfigSyncCommand() {
 		"command_id":   "cmd-config-123",
 		"type":         "connect_quic",
 		"timestamp":    time.Now().Unix(),
-		"quic_address": "localhost:4433",
+		"quic_address": "controller-standalone:4433",
 		"session_id":   "sess_test123",
 		"timeout":      30,
 	}

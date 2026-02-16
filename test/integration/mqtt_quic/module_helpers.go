@@ -185,11 +185,13 @@ func (h *ModuleTestHelper) GetStewardIDFromContainer(t *testing.T, containerName
 	// This handles timing issues in CI where the container may be slow to start
 	maxAttempts := 30
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		// Read steward's log file to get the registered steward ID
+		// Read steward's NEWEST log file to get the registered steward ID
+		// Issue #382: docker restart persists old log files, causing stale IDs
+		// Use ls -t to sort by modification time (newest first) and head -1 to get the newest file
 		// The logs contain: "steward_id":"steward-1234567890"
-		// Use tail -1 to get the LATEST steward_id (in case of retries/restarts)
+		// Use tail -1 to get the LATEST steward_id from that file
 		cmd := exec.Command("docker", "exec", containerName, "sh", "-c",
-			"cat /tmp/cfgms/cfgms-*.log 2>/dev/null | grep -o '\"steward_id\":\"[^\"]*\"' | tail -1 | cut -d'\"' -f4")
+			"ls -t /tmp/cfgms/cfgms-*.log 2>/dev/null | head -1 | xargs cat 2>/dev/null | grep -o '\"steward_id\":\"[^\"]*\"' | tail -1 | cut -d'\"' -f4")
 
 		output, err := cmd.CombinedOutput()
 		stewardID := strings.TrimSpace(string(output))
@@ -392,20 +394,68 @@ type ModuleStatus struct {
 	Error   string `json:"error,omitempty"`
 }
 
+// getStringFromMap safely extracts a string value from a map
+func getStringFromMap(m map[string]interface{}, key string) string {
+	if val, ok := m[key]; ok {
+		if str, ok := val.(string); ok {
+			return str
+		}
+	}
+	return ""
+}
+
 // SubscribeToConfigStatus subscribes to configuration status messages
 func (h *ModuleTestHelper) SubscribeToConfigStatus(t *testing.T, stewardID string, handler func(msg *ConfigStatusMessage)) {
 	t.Helper()
 
-	topic := fmt.Sprintf("cfgms/steward/%s/config-status", stewardID)
+	// Topic format: cfgms/events/{steward_id} (matches pkg/controlplane/providers/mqtt topicEvent)
+	topic := fmt.Sprintf("cfgms/events/%s", stewardID)
 
 	token := h.mqttClient.Subscribe(topic, 1, func(client mqtt.Client, message mqtt.Message) {
-		var status ConfigStatusMessage
-		if err := json.Unmarshal(message.Payload(), &status); err != nil {
-			t.Logf("Failed to parse config status: %v", err)
+		// Parse as Event structure (steward publishes events, not flat status messages)
+		var event struct {
+			ID        string                 `json:"id"`
+			Type      string                 `json:"type"`
+			StewardID string                 `json:"steward_id"`
+			TenantID  string                 `json:"tenant_id"`
+			Timestamp time.Time              `json:"timestamp"`
+			Details   map[string]interface{} `json:"details"`
+		}
+		if err := json.Unmarshal(message.Payload(), &event); err != nil {
+			t.Logf("Failed to parse event: %v", err)
 			return
 		}
 
-		handler(&status)
+		// Only process config_applied events (filter out command_received, command_completed, etc.)
+		if event.Type != "config_applied" {
+			return
+		}
+
+		// Convert Event.Details to ConfigStatusMessage
+		status := &ConfigStatusMessage{
+			StewardID:     event.StewardID,
+			ConfigVersion: getStringFromMap(event.Details, "config_version"),
+			Status:        getStringFromMap(event.Details, "status"),
+			Timestamp:     event.Timestamp,
+		}
+
+		// Parse modules if present
+		if modulesData, ok := event.Details["modules"]; ok {
+			if modulesMap, ok := modulesData.(map[string]interface{}); ok {
+				status.Modules = make(map[string]ModuleStatus)
+				for modName, modData := range modulesMap {
+					if modMap, ok := modData.(map[string]interface{}); ok {
+						status.Modules[modName] = ModuleStatus{
+							Status:  getStringFromMap(modMap, "status"),
+							Message: getStringFromMap(modMap, "message"),
+							Error:   getStringFromMap(modMap, "error"),
+						}
+					}
+				}
+			}
+		}
+
+		handler(status)
 	})
 
 	if !token.WaitTimeout(5 * time.Second) {
