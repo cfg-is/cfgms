@@ -187,6 +187,54 @@ type Response struct {
 	Details map[string]interface{} `json:"details,omitempty"`
 }
 
+// ModuleStatus represents the execution status of a single module.
+//
+// Used in ConfigStatusReport to provide per-module execution details
+// after configuration application.
+type ModuleStatus struct {
+	// Name is the module name
+	Name string `json:"name"`
+
+	// Status indicates success/failure (OK, ERROR, WARNING)
+	Status string `json:"status"`
+
+	// Message contains human-readable status description
+	Message string `json:"message"`
+
+	// Timestamp when the module finished executing
+	Timestamp time.Time `json:"timestamp"`
+
+	// Details contains module-specific execution details
+	Details map[string]interface{} `json:"details,omitempty"`
+}
+
+// ConfigStatusReport represents a detailed configuration status report from steward.
+//
+// This provides module-level execution details for MSP visibility,
+// published as an Event via the control plane after configuration application.
+type ConfigStatusReport struct {
+	// StewardID identifies which steward sent this report
+	StewardID string `json:"steward_id"`
+
+	// ConfigVersion is the version of the configuration that was applied
+	ConfigVersion string `json:"config_version"`
+
+	// Status is the overall status (OK, ERROR, WARNING)
+	Status string `json:"status"`
+
+	// Message contains overall status message
+	Message string `json:"message"`
+
+	// Modules contains per-module execution status
+	Modules map[string]ModuleStatus `json:"modules"`
+
+	// Timestamp when the report was created
+	Timestamp time.Time `json:"timestamp"`
+
+	// ExecutionTimeMs is how long the configuration took to apply (milliseconds)
+	ExecutionTimeMs int64 `json:"execution_time_ms,omitempty"`
+}
+
 // EventFilter defines criteria for filtering events during subscription.
 type EventFilter struct {
 	// StewardIDs filters events to specific stewards (empty = all)

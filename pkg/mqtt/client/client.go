@@ -2,8 +2,10 @@
 // Copyright 2026 Jordan Ritz
 // Package client provides an MQTT client wrapper for CFGMS steward communication.
 //
-// This package wraps the paho MQTT client to provide a simple, CFGMS-specific
-// interface for publishing heartbeats and receiving commands.
+// Deprecated: Use pkg/controlplane/interfaces.ControlPlaneProvider instead.
+// Direct MQTT client usage has been replaced by the pluggable control plane
+// provider abstraction (Story #267.5). The MQTT implementation is available
+// at pkg/controlplane/providers/mqtt.
 package client
 
 import (

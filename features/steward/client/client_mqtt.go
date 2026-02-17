@@ -36,7 +36,6 @@ import (
 	_ "github.com/cfgis/cfgms/pkg/dataplane/providers/quic" // Register QUIC data plane provider
 	dataplaneTypes "github.com/cfgis/cfgms/pkg/dataplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
-	mqttTypes "github.com/cfgis/cfgms/pkg/mqtt/types"
 )
 
 // MQTTClient represents the steward client using ControlPlaneProvider (control plane)
@@ -759,7 +758,7 @@ func (c *MQTTClient) PublishDNAUpdate(ctx context.Context, dna map[string]string
 }
 
 // publishConfigStatus publishes a config status report as an event (internal helper).
-func (c *MQTTClient) publishConfigStatus(report *mqttTypes.ConfigStatusReport) error {
+func (c *MQTTClient) publishConfigStatus(report *cpTypes.ConfigStatusReport) error {
 	ctx := context.Background()
 	return c.ReportConfigurationStatus(ctx, report.ConfigVersion, report.Status, report.Message, report.Modules)
 }
@@ -771,7 +770,7 @@ func (c *MQTTClient) ReportConfigurationStatus(
 	configVersion string,
 	overallStatus string,
 	message string,
-	moduleStatuses map[string]mqttTypes.ModuleStatus,
+	moduleStatuses map[string]cpTypes.ModuleStatus,
 ) error {
 	c.mu.RLock()
 	stewardID := c.stewardID
