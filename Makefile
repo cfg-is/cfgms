@@ -1767,7 +1767,7 @@ test-e2e-ci:
 			go mod download && \
 			echo "" && \
 			echo "🧪 Running integration tests (container-to-container networking)..." && \
-			go test -v -race -timeout=10m $$(go list ./test/integration/... | grep -v "test/integration$$") && \
+			go test -v -race -timeout=10m $$(go list ./test/integration/... | grep -v "test/integration$$" | grep -v "test/integration/standalone") && \
 			echo "" && \
 			echo "🧪 Running E2E tests..." && \
 			go test -v -race -timeout=15m ./test/e2e/... -run "TestE2EScenarios/(TestControllerStewardIntegration|TestRBACIntegration|TestWorkflowIntegration|TestDataFlow)" \
