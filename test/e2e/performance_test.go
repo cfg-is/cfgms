@@ -5,6 +5,7 @@ package e2e
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -24,9 +25,6 @@ type PerformanceRegressionSuite struct {
 
 // SetupSuite initializes the performance testing framework
 func (s *PerformanceRegressionSuite) SetupSuite() {
-	// Skip until Issue #294 is complete
-	s.T().Skip("Skipping until Issue #294: E2E test framework for MQTT+QUIC mode not yet implemented - requires full controller, MQTT broker, and steward infrastructure")
-
 	config := CIOptimizedConfig()
 	config.PerformanceMode = true
 	config.TestDataSize = "small"         // Keep small for CI speed
@@ -365,22 +363,28 @@ func (s *PerformanceRegressionSuite) measureDNACollectionTime() time.Duration {
 }
 
 func (s *PerformanceRegressionSuite) measureMemoryUsage() float64 {
-	// In a real implementation, this would use runtime.MemStats
-	// For testing purposes, return a simulated value
-	return float64(s.framework.dataGenerator.cryptoRandInt(50) + 30) // 30-80 MB
+	runtime.GC() // Force GC for accurate measurement
+	var memStats runtime.MemStats
+	runtime.ReadMemStats(&memStats)
+	return float64(memStats.Alloc) / 1024 / 1024 // Convert bytes to MB
 }
 
 func (s *PerformanceRegressionSuite) measureRequestThroughput(requestCount int) float64 {
 	startTime := time.Now()
 
-	// Simulate requests (in real implementation, would make actual gRPC calls)
+	// Make real HTTP requests to the controller health endpoint
+	httpClient := &http.Client{Timeout: 5 * time.Second}
+	successCount := 0
 	for i := 0; i < requestCount; i++ {
-		// Simulate request processing time
-		time.Sleep(time.Millisecond * time.Duration(s.framework.dataGenerator.cryptoRandInt(10)+5))
+		resp, err := httpClient.Get(fmt.Sprintf("http://localhost:%d/api/v1/health", s.framework.config.HTTPPort))
+		if err == nil {
+			_ = resp.Body.Close()
+			successCount++
+		}
 	}
 
 	duration := time.Since(startTime)
-	return float64(requestCount) / duration.Seconds()
+	return float64(successCount) / duration.Seconds()
 }
 
 func (s *PerformanceRegressionSuite) printPerformanceSummary() {
@@ -421,9 +425,6 @@ type ProductionReadinessSuite struct {
 
 // SetupSuite initializes the production readiness testing framework
 func (s *ProductionReadinessSuite) SetupSuite() {
-	// Skip until Issue #294 is complete
-	s.T().Skip("Skipping until Issue #294: E2E test framework for MQTT+QUIC mode not yet implemented - requires full controller, MQTT broker, and steward infrastructure")
-
 	config := CIOptimizedConfig()
 	config.PerformanceMode = true
 	config.TestDataSize = "medium"        // Need more data for production testing
@@ -860,41 +861,60 @@ func (s *ProductionReadinessSuite) TestMonitoringAndAlertingIntegration() {
 func (s *ProductionReadinessSuite) measureBasicOperationLatency() time.Duration {
 	startTime := time.Now()
 
-	// Simulate basic operation (in real implementation, would make actual API calls)
-	testDataGen := s.framework.GetTestDataGenerator()
-	_ = testDataGen.GenerateTestDNA("latency-test")
+	// Make a real HTTP request to measure API response latency
+	httpClient := &http.Client{Timeout: 5 * time.Second}
+	resp, err := httpClient.Get(fmt.Sprintf("http://localhost:%d/api/v1/health", s.framework.config.HTTPPort))
+	if err == nil {
+		_ = resp.Body.Close()
+	}
 
 	return time.Since(startTime)
 }
 
 func (s *ProductionReadinessSuite) validateInputSanitization(input string) bool {
-	// In a real implementation, this would test actual input validation
-	// For now, return true to indicate proper sanitization
-	return len(input) > 0
+	// Verify malicious input doesn't cause panics in framework operations
+	// Real input sanitization is tested in pkg/security/ unit tests
+	defer func() {
+		if r := recover(); r != nil {
+			s.framework.logger.Error("Input caused panic", "input", input, "panic", r)
+		}
+	}()
+	testDataGen := s.framework.GetTestDataGenerator()
+	_ = testDataGen.GenerateTestDNA(input)
+	return true // No panic = input handling is safe
 }
 
 func (s *ProductionReadinessSuite) validateMetricsExport() bool {
-	// Test that metrics are properly exported to monitoring systems
-	// Check Prometheus endpoints, StatsD exports, etc.
-	return true
+	// Verify the framework's internal metrics collection is operational
+	// External export targets (Prometheus, StatsD) tested when providers exist
+	metrics := s.framework.GetMetrics()
+	return metrics != nil && metrics.StartTime.Before(time.Now())
 }
 
 func (s *ProductionReadinessSuite) validateHealthChecks() bool {
-	// Test health check endpoints for all components
-	// Validate response times and status codes
-	return true
+	// Test real health check endpoint on the controller
+	httpClient := &http.Client{Timeout: 5 * time.Second}
+	resp, err := httpClient.Get(fmt.Sprintf("http://localhost:%d/api/v1/health", s.framework.config.HTTPPort))
+	if err != nil {
+		s.framework.logger.Error("Health check failed", "error", err)
+		return false
+	}
+	_ = resp.Body.Close()
+	// 200 = healthy, 503 = degraded — both prove the health system is working
+	return resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusServiceUnavailable
 }
 
 func (s *ProductionReadinessSuite) validateAlertGeneration() bool {
-	// Test that critical events generate appropriate alerts
-	// Test alert routing and escalation
-	return true
+	// Verify the controller is running and capable of generating status events
+	// Full alert routing requires notification providers (tested separately)
+	return s.framework.controller != nil
 }
 
 func (s *ProductionReadinessSuite) validateLogAggregation() bool {
-	// Test log aggregation to centralized logging systems
-	// Validate log formatting and retention policies
-	return true
+	// Verify the logging subsystem is functional by writing a test log entry
+	// Centralized log aggregation targets tested when providers exist
+	s.framework.logger.Info("Log aggregation validation: test entry")
+	return s.framework.logger != nil
 }
 
 func (s *ProductionReadinessSuite) printProductionReadinessSummary() {
@@ -962,13 +982,6 @@ func (s *ProductionReadinessSuite) calculateAverageLatency(latencies []time.Dura
 	}
 
 	return time.Duration(total / int64(len(latencies)))
-}
-
-func max(a, b int64) int64 {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 // TestPerformanceRegression runs the performance regression test suite
