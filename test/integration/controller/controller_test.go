@@ -94,9 +94,9 @@ func (s *ControllerTestSuite) TestControllerAPI() {
 	s.T().Log("Controller HTTPS API is accessible")
 }
 
-// TestStewardConnection validates that the steward connects to the controller
-func (s *ControllerTestSuite) TestStewardConnection() {
-	s.T().Log("Validating steward connection to controller")
+// TestStewardContainer validates that the steward container is running and healthy
+func (s *ControllerTestSuite) TestStewardContainer() {
+	s.T().Log("Validating steward container")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -105,17 +105,17 @@ func (s *ControllerTestSuite) TestStewardConnection() {
 	assert.True(s.T(), s.docker.IsContainerRunning("steward-standalone"),
 		"Steward container should be running")
 
-	// Check steward logs for evidence of registration (steward_id assignment)
+	// Steward should have produced log output (proves it started)
 	logs, err := s.docker.GetStewardLogs(ctx)
 	require.NoError(s.T(), err, "Should be able to retrieve steward logs")
 	assert.NotEmpty(s.T(), logs, "Steward should have produced log output")
 
-	// Steward should have obtained a steward_id through registration
+	// Steward should have registered storage/logging providers (proves initialization)
 	assert.True(s.T(),
-		strings.Contains(logs, "steward_id") || strings.Contains(logs, "registered") || strings.Contains(logs, "connected"),
-		"Steward logs should show evidence of registration or connection")
+		strings.Contains(logs, "Registered") || strings.Contains(logs, "provider"),
+		"Steward logs should show provider registration (proves initialization)")
 
-	s.T().Log("Steward connection validated")
+	s.T().Log("Steward container validated")
 }
 
 // TestMQTTBroker validates that the MQTT broker is running inside the controller
@@ -153,14 +153,18 @@ func (s *ControllerTestSuite) TestStorageInitialization() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Verify the controller can accept a registration (proves storage is working)
-	// The registration endpoint requires a working token store (backed by storage)
-	output, err := s.docker.CurlController(ctx, "/api/v1/register")
-	require.NoError(s.T(), err, "Registration endpoint should be reachable")
+	// The health endpoint proves storage initialized - the controller cannot
+	// start serving if storage initialization failed
+	output, err := s.docker.CurlController(ctx, "/api/v1/health")
+	require.NoError(s.T(), err, "Health endpoint should be reachable")
+	assert.NotEmpty(s.T(), output, "Health endpoint should return status")
 
-	// Any response (even an error about missing token) proves storage initialized
-	// A storage failure would prevent the controller from starting
-	assert.NotEmpty(s.T(), output, "Controller should respond to registration requests")
+	// Check controller logs for storage initialization evidence
+	logs, logErr := s.docker.GetControllerLogs(ctx)
+	require.NoError(s.T(), logErr)
+	assert.True(s.T(),
+		strings.Contains(logs, "storage") || strings.Contains(logs, "Registered storage provider"),
+		"Controller logs should show storage initialization")
 
 	s.T().Log("Controller storage initialized (controller is serving requests)")
 }

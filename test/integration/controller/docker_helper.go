@@ -6,6 +6,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -15,15 +16,24 @@ import (
 type DockerComposeHelper struct {
 	ComposeFile    string
 	ProjectName    string
-	startedBySuite bool // true if this suite started the containers (vs CI/make target)
+	controllerAddr string // "localhost:8080" on host, "controller-standalone:9080" in Docker CI
+	startedBySuite bool   // true if this suite started the containers (vs CI/make target)
 }
 
 // NewDockerComposeHelper creates a new Docker Compose helper
 // Uses the unified docker-compose.test.yml with --profile ha (includes controller-standalone)
 func NewDockerComposeHelper() *DockerComposeHelper {
+	// When running inside a Docker CI container (GITHUB_ACTIONS=true),
+	// use container hostname:internal-port instead of localhost:host-port
+	// Port mapping: host 8080 → container 9080
+	addr := "localhost:8080"
+	if os.Getenv("GITHUB_ACTIONS") == "true" {
+		addr = "controller-standalone:9080"
+	}
 	return &DockerComposeHelper{
-		ComposeFile: "../../../docker-compose.test.yml",
-		ProjectName: "cfgms-test",
+		ComposeFile:    "../../../docker-compose.test.yml",
+		ProjectName:    "cfgms-test",
+		controllerAddr: addr,
 	}
 }
 
@@ -109,7 +119,7 @@ func (h *DockerComposeHelper) WaitForControllerReady(ctx context.Context) error 
 		// Try to reach the controller's HTTPS endpoint
 		checkCmd := exec.CommandContext(ctx, "curl", "-sk", "--max-time", "2",
 			"-o", "/dev/null", "-w", "%{http_code}",
-			"https://localhost:8080/health")
+			fmt.Sprintf("https://%s/health", h.controllerAddr))
 		output, err := checkCmd.CombinedOutput()
 		if err == nil {
 			code := strings.TrimSpace(string(output))
@@ -184,7 +194,7 @@ func (h *DockerComposeHelper) GetStewardLogs(ctx context.Context) (string, error
 // CurlController makes an HTTPS request to the controller API
 // Uses -k to accept self-signed certificates from auto-generated cert manager
 func (h *DockerComposeHelper) CurlController(ctx context.Context, endpoint string) (string, error) {
-	url := fmt.Sprintf("https://localhost:8080%s", endpoint)
+	url := fmt.Sprintf("https://%s%s", h.controllerAddr, endpoint)
 	cmd := exec.CommandContext(ctx, "curl", "-sk", "--max-time", "5", url)
 	output, err := cmd.CombinedOutput()
 	return string(output), err
