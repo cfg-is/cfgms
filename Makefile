@@ -716,17 +716,14 @@ test-performance-benchmarks:
 
 
 # Performance baseline establishment (for new releases)
+# Performance regression tests removed — will be rebuilt with real profiling data
+# when the system has enough infrastructure to establish meaningful baselines
 test-performance-baseline:
-	@echo "📈 Establishing Performance Baselines"
-	@echo "====================================="
-	@if [ -f .env.test ]; then \
-		set -a && . ./.env.test && set +a && \
-		go test -v -race -timeout=30m -run "TestPerformanceRegression" ./test/e2e/... || exit 1; \
-	else \
-		echo "❌ .env.test not found"; \
-		exit 1; \
-	fi
-	@echo "✅ Performance baselines established"
+	@echo "📈 Performance Baselines"
+	@echo "========================"
+	@echo "ℹ️  Performance regression tests not yet implemented"
+	@echo "   Will be added when real profiling data establishes meaningful baselines"
+	@echo "   See: features/steward/performance/ for component-level performance tests"
 
 # Data consistency testing (Story #85)
 test-data-consistency:
