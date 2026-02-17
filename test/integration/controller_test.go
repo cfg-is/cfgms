@@ -3,88 +3,162 @@
 package integration
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
 	"testing"
+	"time"
 
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
+	"github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/test/integration/testutil"
 )
 
-// ControllerTestSuite is a test suite for controller integration tests
+// ControllerTestSuite tests in-process controller with real components.
+// Creates a real controller (not a mock) and validates lifecycle, health, and registration.
 type ControllerTestSuite struct {
 	suite.Suite
-	env *testutil.TestEnv
+	env      *testutil.TestEnv
+	httpAddr string
 }
 
 func (s *ControllerTestSuite) SetupSuite() {
-	s.T().Skip("Skipping until Issue #294: E2E test framework for MQTT+QUIC mode not yet implemented - requires running controller with full infrastructure")
-	// Create a new test environment for the suite
+	// Use a unique HTTP port to avoid conflicts with Docker containers
+	s.httpAddr = "127.0.0.1:19080"
+	s.T().Setenv("CFGMS_HTTP_LISTEN_ADDR", s.httpAddr)
+
+	// Create a real test environment (real controller, real cert manager, real storage)
 	s.env = testutil.NewTestEnv(s.T())
+
+	// Start the controller (real in-process startup)
+	ctx := s.env.GetContext()
+	err := s.env.Controller.Start(ctx)
+	require.NoError(s.T(), err, "Failed to start controller")
+
+	// Poll until HTTP API is ready (replaces hardcoded sleep)
+	s.waitForHTTPReady()
+}
+
+func (s *ControllerTestSuite) waitForHTTPReady() {
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(fmt.Sprintf("http://%s/api/v1/health", s.httpAddr))
+		if err == nil {
+			_ = resp.Body.Close()
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	s.T().Log("Warning: HTTP API may not be ready yet")
 }
 
 func (s *ControllerTestSuite) TearDownSuite() {
-	// Clean up the test environment
-	s.env.Cleanup()
+	if s.env != nil {
+		_ = s.env.Controller.Stop(s.env.GetContext())
+		s.env.Cleanup()
+	}
 }
 
 func (s *ControllerTestSuite) SetupTest() {
-	// Reset the test environment before each test
 	s.env.Reset()
 }
 
-func (s *ControllerTestSuite) TearDownTest() {
-	// Stop any running components
-	// (only if they were started in the test)
+// TestControllerStartup verifies the controller started and is serving
+func (s *ControllerTestSuite) TestControllerStartup() {
+	// Verify controller has a listen address (proves server bound to a port)
+	addr := s.env.Controller.GetListenAddr()
+	s.NotEmpty(addr, "Controller should have a listen address")
+
+	// Verify cert manager is initialized (proves real startup completed)
+	certMgr := s.env.Controller.GetCertificateManager()
+	s.NotNil(certMgr, "Controller should have an initialized certificate manager")
 }
 
-func (s *ControllerTestSuite) TestControllerStartStop() {
-	// Start the controller
-	_ = s.env.Controller.Start(s.env.GetContext())
+// TestControllerHealthEndpoint verifies the health API responds with real status
+func (s *ControllerTestSuite) TestControllerHealthEndpoint() {
+	resp, err := http.Get(fmt.Sprintf("http://%s/api/v1/health", s.httpAddr))
+	require.NoError(s.T(), err, "Health endpoint should be reachable")
+	defer func() { _ = resp.Body.Close() }()
 
-	// Verify the controller logged startup
-	infoLogs := s.env.Logger.GetLogs("info")
-	s.Require().GreaterOrEqual(len(infoLogs), 1)
-	s.Require().Equal("Starting controller", infoLogs[0].Message)
+	// Health endpoint returns 200 (healthy) or 503 (degraded) - both prove it's running
+	s.True(resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusServiceUnavailable,
+		"Health endpoint should return 200 or 503, got %d", resp.StatusCode)
 
-	// Stop the controller
-	_ = s.env.Controller.Stop(s.env.GetContext())
+	var health map[string]any
+	err = json.NewDecoder(resp.Body).Decode(&health)
+	require.NoError(s.T(), err, "Health response should be valid JSON")
 
-	// Verify the controller logged shutdown
-	infoLogs = s.env.Logger.GetLogs("info")
-	s.Require().GreaterOrEqual(len(infoLogs), 3)
-
-	// Find the "Stopping controller" message
-	found := false
-	for _, log := range infoLogs {
-		if log.Message == "Stopping controller" {
-			found = true
-			break
-		}
+	// Response may wrap status in a "data" field or at top level
+	var status any
+	if data, ok := health["data"].(map[string]any); ok {
+		status = data["status"]
+	} else {
+		status = health["status"]
 	}
-	s.Require().True(found, "Should have logged 'Stopping controller'")
+	s.NotNil(status, "Health response should contain a status field")
+
+	s.T().Logf("Health status: %v", status)
 }
 
-func (s *ControllerTestSuite) TestStewardConnectToController() {
-	// Skip: This test checks for specific log messages that are implementation details
-	// and change frequently. It should be rewritten to test actual behavior:
-	// - MQTT broker is listening and accepting connections
-	// - QUIC server is listening and accepting connections
-	// - Heartbeat monitoring is active
-	// - Registration handler is responding
-	// Instead of testing log message strings, test observable system behavior.
-	s.T().Skip("Test needs rewrite: should test behavior (endpoints available, connections accepted) not log messages")
-}
-
-// This test will be implemented once we have the registration API
+// TestStewardRegistration tests the full registration flow with a real token and real API
 func (s *ControllerTestSuite) TestStewardRegistration() {
-	s.T().Skip("This test will be implemented when the controller's registration API is ready")
+	// Get the registration token store from the running controller
+	tokenStoreIface := s.env.Controller.GetRegistrationTokenStore()
+	require.NotNil(s.T(), tokenStoreIface, "Controller should have a registration token store")
+
+	tokenStore, ok := tokenStoreIface.(registration.Store)
+	require.True(s.T(), ok, "Token store should implement registration.Store")
+
+	// Create a real registration token
+	token, err := registration.CreateToken(&registration.TokenCreateRequest{
+		TenantID:      "test-tenant",
+		ControllerURL: "mqtt://localhost:1883",
+		Group:         "test-group",
+		ExpiresIn:     "1h",
+		SingleUse:     false,
+	})
+	require.NoError(s.T(), err, "Should create registration token")
+
+	// Save token to the controller's store
+	ctx := context.Background()
+	err = tokenStore.SaveToken(ctx, token)
+	require.NoError(s.T(), err, "Should save registration token")
+
+	// Call the registration API endpoint
+	reqBody, err := json.Marshal(map[string]string{"token": token.Token})
+	require.NoError(s.T(), err)
+
+	resp, err := http.Post(
+		fmt.Sprintf("http://%s/api/v1/register", s.httpAddr),
+		"application/json",
+		bytes.NewReader(reqBody),
+	)
+	require.NoError(s.T(), err, "Registration request should reach the controller")
+	defer func() { _ = resp.Body.Close() }()
+
+	// Parse the registration response
+	var regResp map[string]any
+	err = json.NewDecoder(resp.Body).Decode(&regResp)
+	require.NoError(s.T(), err, "Registration response should be valid JSON")
+
+	// Verify registration succeeded - response must contain a steward_id
+	s.Contains(regResp, "steward_id", "Registration response should contain steward_id")
+	s.NotEmpty(regResp["steward_id"], "Steward ID should not be empty")
+
+	// Verify tenant info is correct
+	s.Equal("test-tenant", regResp["tenant_id"], "Response should contain correct tenant_id")
+
+	// Verify certificates were provided (proves cert manager is working)
+	s.Contains(regResp, "ca_cert", "Registration response should contain CA certificate")
+	s.Contains(regResp, "client_cert", "Registration response should contain client certificate")
+
+	s.T().Logf("Registration successful: steward_id=%v, tenant_id=%v", regResp["steward_id"], regResp["tenant_id"])
 }
 
 func TestControllerIntegration(t *testing.T) {
 	suite.Run(t, new(ControllerTestSuite))
-}
-
-// This test will be updated once the controller's registration API is implemented
-func TestControllerRegistration(t *testing.T) {
-	t.Skip("This test will be implemented when the controller's registration API is ready")
 }
