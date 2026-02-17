@@ -119,10 +119,10 @@ Implemented comprehensive Docker-based E2E testing infrastructure that validates
 #### v0.8.1 Bug fixes and test completion
 
 - [x] Fix single-use registration token enforcement in database storage (issue #299) ✅ COMPLETED
-- [x] Complete E2E test framework for MQTT+QUIC mode (issue #294) ✅ COMPLETED
+- [ ] Complete E2E test framework for MQTT+QUIC mode (issue #294) 🔄 REOPENED - Controller tests still skipped, no QUIC testing, no end-to-end flow
 - [x] Remove outdated v0.3.0 and v0.4.0 release gates from production-gates workflow (issue #322) ✅ COMPLETED
 - [x] Enable TestModuleExecution suite with proper steward container configuration (issue #312) ✅ COMPLETED
-- [x] Configure MQTT broker ACLs for topic-level access control by steward ID (issue #313) ✅ COMPLETED
+- [ ] Configure MQTT broker ACLs for topic-level access control by steward ID (issue #313) 🔄 REOPENED - Zero ACL config exists, test passes on timing not enforcement
 - [x] Align test-complete with CI required checks for 100% local validation parity (issue #315) ✅ COMPLETED
 
 ### Phase 2: Production Stability & Feature Completion (v0.9.0 - v1.0.0)
@@ -138,12 +138,13 @@ Achieve production stability, complete core platform features, and prepare for s
 - [x] Chaos engineering network partition simulation (Issue #291) - Implement proper network failure injection for chaos tests, refactor to pkg/cache for architecture compliance
 - [x] RBAC failsafe component failure simulation (Issue #292) - Add test helpers to trigger fail-secure behavior
 - [x] Certificate test performance optimization (Issue #293) - Reduce cert generation time in tests from 4.89s to <2s
-- [x] Add integration-tests to required GitHub checks (Issue #350) - Fix all failing E2E/integration tests, add integration-tests job to develop branch required checks, prevent broken integration tests from reaching develop ✅ COMPLETED
+- [ ] Add integration-tests to required GitHub checks (Issue #350) - Fix all failing E2E/integration tests, add integration-tests job to develop branch required checks, prevent broken integration tests from reaching develop 🔄 REOPENED - TODO placeholder tests and simulated E2E scenarios still present
 - [x] Optimize zero-trust statistics lock contention (Issue #355) - Replace mutex-based stats with atomic operations or async channel to eliminate 65x performance degradation under concurrent load ✅ COMPLETED
 - [x] Fix Windows flaky test timing assertion (Issue #356) - Increase TestEphemeralAPIKeys tolerance from 5s to 10s to accommodate Windows CI runner variability ✅ COMPLETED
 - [x] Fix flaky TestEnhancedMultiTenantSecurity test (Issue #366) - Fixed dual audit logger anti-pattern causing test to query different logger than engine uses ✅ COMPLETED
 - [x] **Fix MQTT+QUIC E2E config sync signature verification** (Issue #378 - 8 points) - Fixed certificate mismatch causing 30s timeouts in E2E tests, implemented certificate serial tracking pattern, E2E tests now pass in <10s, added diagnostic tests and comprehensive documentation ✅ COMPLETED
 - [x] Fix Docker networking in MQTT+QUIC E2E tests (Issue #382 - 2-3 points) - Fixed event filtering (config_applied only), per-test MQTT client isolation, steward restart between tests, stale steward ID detection, and license header validation for .cache/ directory ✅ COMPLETED
+- [ ] HA E2E tests: Replace mocked helper functions with real implementations (Issue #385) - Replace hardcoded mock returns in HA tests with real Docker log parsing, API calls, or container exec checks
 
 ##### Phase 2: Breaking Changes & Architecture (Do before production validation)
 
