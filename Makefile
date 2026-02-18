@@ -729,13 +729,8 @@ test-performance-baseline:
 test-data-consistency:
 	@echo "📊 DATA CONSISTENCY VALIDATION"
 	@echo "==============================="
-	@if [ -f .env.test ]; then \
-		set -a && . ./.env.test && set +a && \
-		go test -v -race -timeout=30m -run "TestE2EScenarios/TestDataFlow" ./test/e2e/... || exit 1; \
-	else \
-		echo "❌ .env.test not found"; \
-		exit 1; \
-	fi
+	@if [ -f .env.test ]; then set -a && . ./.env.test && set +a; fi && \
+		go test -v -race -timeout=30m -run "TestE2EScenarios/TestDataFlow" ./test/e2e/...
 	@echo "✅ Data consistency validation complete"
 
 # Production Risk Testing - Automated Gates
@@ -995,26 +990,16 @@ test-performance: test-performance-baseline
 test-cross-feature-integration:
 	@echo "🔗 CROSS-FEATURE INTEGRATION TESTING"
 	@echo "====================================="
-	@if [ -f .env.test ]; then \
-		set -a && . ./.env.test && set +a && \
-		go test -v -race -timeout=30m -run "TestE2EScenarios/(TestControllerStewardIntegration|TestRBACIntegration|TestWorkflowIntegration)" ./test/e2e/... || exit 1; \
-	else \
-		echo "❌ .env.test not found"; \
-		exit 1; \
-	fi
+	@if [ -f .env.test ]; then set -a && . ./.env.test && set +a; fi && \
+		go test -v -race -timeout=30m -run "TestE2EScenarios/(TestControllerStewardIntegration|TestRBACIntegration|TestWorkflowIntegration)" ./test/e2e/...
 	@echo "✅ Cross-feature integration testing complete"
 
 # Failure propagation testing (Story #85)
 test-failure-propagation:
 	@echo "🔄 FAILURE PROPAGATION TESTING"
 	@echo "==============================="
-	@if [ -f .env.test ]; then \
-		set -a && . ./.env.test && set +a && \
-		go test -v -race -timeout=30m -run "TestE2EScenarios/TestFailurePropagation" ./test/e2e/... || exit 1; \
-	else \
-		echo "❌ .env.test not found"; \
-		exit 1; \
-	fi
+	@if [ -f .env.test ]; then set -a && . ./.env.test && set +a; fi && \
+		go test -v -race -timeout=30m -run "TestE2EScenarios/TestFailurePropagation" ./test/e2e/...
 	@echo "✅ Failure propagation testing complete"
 
 # Docker environment management
