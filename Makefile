@@ -716,29 +716,22 @@ test-performance-benchmarks:
 
 
 # Performance baseline establishment (for new releases)
+# Performance regression tests removed — will be rebuilt with real profiling data
+# when the system has enough infrastructure to establish meaningful baselines
 test-performance-baseline:
-	@echo "📈 Establishing Performance Baselines"
-	@echo "====================================="
-	@echo "⏭️  Skipping until Issue #294 (E2E framework for MQTT+QUIC mode) is complete"
-	@echo ""
-	@echo "ℹ️  Performance baseline tests require:"
-	@echo "   - Full controller + MQTT broker + steward infrastructure"
-	@echo "   - E2E test framework implementation"
-	@echo ""
-	@echo "✅ Validation: Test target exists and workflow will pass"
+	@echo "📈 Performance Baselines"
+	@echo "========================"
+	@echo "ℹ️  Performance regression tests not yet implemented"
+	@echo "   Will be added when real profiling data establishes meaningful baselines"
+	@echo "   See: features/steward/performance/ for component-level performance tests"
 
 # Data consistency testing (Story #85)
-# Note: These tests require full E2E framework (Issue #294)
 test-data-consistency:
 	@echo "📊 DATA CONSISTENCY VALIDATION"
 	@echo "==============================="
-	@echo "⏭️  Skipping until Issue #294 (E2E framework for MQTT+QUIC mode) is complete"
-	@echo ""
-	@echo "ℹ️  Data consistency tests require:"
-	@echo "   - Full controller + MQTT broker + steward infrastructure"
-	@echo "   - Cross-feature integration test framework"
-	@echo ""
-	@echo "✅ Validation: Test target exists and workflow will pass"
+	@if [ -f .env.test ]; then set -a && . ./.env.test && set +a; fi && \
+		go test -v -race -timeout=30m -run "TestE2EScenarios/TestDataFlow" ./test/e2e/...
+	@echo "✅ Data consistency validation complete"
 
 # Production Risk Testing - Automated Gates
 .PHONY: test-production-critical
@@ -994,31 +987,20 @@ test-performance: test-performance-baseline
 	@echo "📊 Performance validation complete"
 
 # Cross-feature integration testing (Story #85)
-# Note: These tests require full E2E framework (Issue #294)
-# Until framework is ready, we skip with proper messaging
 test-cross-feature-integration:
 	@echo "🔗 CROSS-FEATURE INTEGRATION TESTING"
 	@echo "====================================="
-	@echo "⏭️  Skipping until Issue #294 (E2E framework for MQTT+QUIC mode) is complete"
-	@echo ""
-	@echo "ℹ️  Cross-feature integration tests require:"
-	@echo "   - Full controller + MQTT broker + steward infrastructure"
-	@echo "   - MQTT+QUIC mode E2E test framework"
-	@echo ""
-	@echo "✅ Validation: Test target exists and workflow will pass"
+	@if [ -f .env.test ]; then set -a && . ./.env.test && set +a; fi && \
+		go test -v -race -timeout=30m -run "TestE2EScenarios/(TestControllerStewardIntegration|TestRBACIntegration|TestWorkflowIntegration)" ./test/e2e/...
+	@echo "✅ Cross-feature integration testing complete"
 
 # Failure propagation testing (Story #85)
-# Note: These tests require full E2E framework (Issue #294)
 test-failure-propagation:
 	@echo "🔄 FAILURE PROPAGATION TESTING"
 	@echo "==============================="
-	@echo "⏭️  Skipping until Issue #294 (E2E framework for MQTT+QUIC mode) is complete"
-	@echo ""
-	@echo "ℹ️  Failure propagation tests require:"
-	@echo "   - Full controller + MQTT broker + steward infrastructure"
-	@echo "   - MQTT+QUIC mode E2E test framework"
-	@echo ""
-	@echo "✅ Validation: Test target exists and workflow will pass"
+	@if [ -f .env.test ]; then set -a && . ./.env.test && set +a; fi && \
+		go test -v -race -timeout=30m -run "TestE2EScenarios/TestFailurePropagation" ./test/e2e/...
+	@echo "✅ Failure propagation testing complete"
 
 # Docker environment management
 test-docker: test-integration-status

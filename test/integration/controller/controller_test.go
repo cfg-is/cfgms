@@ -24,7 +24,10 @@ type ControllerTestSuite struct {
 }
 
 func (s *ControllerTestSuite) SetupSuite() {
-	s.T().Skip("Skipping until Issue #294: E2E test framework for MQTT+QUIC mode not yet implemented - requires Docker infrastructure with controller + steward deployment")
+	if testing.Short() {
+		s.T().Skip("Skipping controller E2E tests in short mode - requires Docker infrastructure")
+	}
+
 	s.docker = NewDockerComposeHelper()
 
 	s.T().Log("Starting controller and steward in Docker...")
@@ -34,9 +37,11 @@ func (s *ControllerTestSuite) SetupSuite() {
 	err := s.docker.StartController(ctx)
 	require.NoError(s.T(), err, "Failed to start controller")
 
-	// Wait for controller and steward to start
-	s.T().Log("Waiting for controller and steward to initialize...")
-	time.Sleep(30 * time.Second)
+	// Poll until controller is accepting connections (replaces hardcoded sleep)
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer waitCancel()
+	err = s.docker.WaitForControllerReady(waitCtx)
+	require.NoError(s.T(), err, "Controller did not become ready in time")
 }
 
 func (s *ControllerTestSuite) TearDownSuite() {
@@ -49,117 +54,142 @@ func (s *ControllerTestSuite) TearDownSuite() {
 	}
 }
 
-// TestControllerStartup validates that the controller starts successfully
+// TestControllerStartup validates that the controller starts and has logs
 func (s *ControllerTestSuite) TestControllerStartup() {
 	s.T().Log("Validating controller startup")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Check controller logs for successful startup
+	// Controller container should be running
+	assert.True(s.T(), s.docker.IsContainerRunning("controller-standalone"),
+		"Controller container should be running")
+
+	// Controller should have produced log output (proves it started)
 	logs, err := s.docker.GetControllerLogs(ctx)
 	require.NoError(s.T(), err, "Should be able to retrieve controller logs")
+	assert.NotEmpty(s.T(), logs, "Controller should have produced log output")
 
-	// Verify controller started (look for MQTT broker which proves controller is running)
-	assert.True(s.T(),
-		strings.Contains(logs, "mochi mqtt") || strings.Contains(logs, "server started") || strings.Contains(logs, "Registered"),
-		"Controller should show evidence of successful startup")
-
-	s.T().Log("✅ Controller started successfully")
+	s.T().Log("Controller started successfully")
 }
 
-// TestControllerAPI validates that the controller HTTP API is accessible
+// TestControllerAPI validates that the controller HTTPS API is accessible
 func (s *ControllerTestSuite) TestControllerAPI() {
-	s.T().Log("Validating controller HTTP API")
+	s.T().Log("Validating controller HTTPS API")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Try to access the health endpoint (or any basic endpoint)
-	// Note: The actual endpoint may vary, this is a placeholder
-	output, err := s.docker.CurlController(ctx, "/health")
+	// The controller should respond to HTTPS requests
+	// WaitForControllerReady already verified this, but we test explicitly here
+	output, err := s.docker.CurlController(ctx, "/api/v1/register")
+	// We expect the register endpoint to reject GET requests or require a body,
+	// but the important thing is we got a response (not a connection refused)
+	s.T().Logf("API response: err=%v, output=%s", err, output)
 
-	// Even if there's an error, log what we got
-	if err != nil {
-		s.T().Logf("API check: %v, output: %s", err, output)
-	}
+	// If curl succeeded (exit code 0), the HTTPS server is responding
+	// Even error responses (400, 404, 405) prove the API is up
+	assert.NoError(s.T(), err, "Controller HTTPS API should be reachable")
 
-	// The API should be accessible (we'll validate basic connectivity)
-	// Specific endpoint validation will depend on what's actually implemented
-	s.T().Log("Controller API endpoint checked")
+	s.T().Log("Controller HTTPS API is accessible")
 }
 
-// TestStewardConnection validates that the steward connects to the controller
-func (s *ControllerTestSuite) TestStewardConnection() {
-	s.T().Log("Validating steward connection to controller")
+// TestStewardContainer validates that the steward container is running and healthy
+func (s *ControllerTestSuite) TestStewardContainer() {
+	s.T().Log("Validating steward container")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Check steward logs for connection messages
+	// Steward container should be running
+	assert.True(s.T(), s.docker.IsContainerRunning("steward-standalone"),
+		"Steward container should be running")
+
+	// Steward should have produced log output (proves it started)
 	logs, err := s.docker.GetStewardLogs(ctx)
 	require.NoError(s.T(), err, "Should be able to retrieve steward logs")
+	assert.NotEmpty(s.T(), logs, "Steward should have produced log output")
 
-	// Verify steward shows some activity (exact message depends on implementation)
-	s.T().Logf("Steward logs preview: %s", logs[:min(500, len(logs))])
+	// Steward should have registered storage/logging providers (proves initialization)
+	assert.True(s.T(),
+		strings.Contains(logs, "Registered") || strings.Contains(logs, "provider"),
+		"Steward logs should show provider registration (proves initialization)")
 
-	s.T().Log("Steward connection validated")
+	s.T().Log("Steward container validated")
 }
 
-// TestStorageInitialization validates that the controller initializes storage
+// TestMQTTBroker validates that the MQTT broker is running inside the controller
+func (s *ControllerTestSuite) TestMQTTBroker() {
+	s.T().Log("Validating MQTT broker is running")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Verify MQTT port (8883 TLS) is listening inside the controller container
+	output, err := s.docker.ExecInController(ctx, "sh", "-c",
+		"netstat -tlnp 2>/dev/null | grep 8883 || ss -tlnp | grep 8883 || echo 'port-check-tools-unavailable'")
+	s.T().Logf("MQTT port check: %s", output)
+
+	if strings.Contains(output, "port-check-tools-unavailable") {
+		// Fallback: check controller logs for MQTT evidence
+		logs, logErr := s.docker.GetControllerLogs(ctx)
+		require.NoError(s.T(), logErr)
+		assert.True(s.T(),
+			strings.Contains(strings.ToLower(logs), "mqtt") || strings.Contains(logs, "8883"),
+			"Controller logs should reference MQTT")
+	} else {
+		require.NoError(s.T(), err, "Port check should succeed")
+		assert.True(s.T(), strings.Contains(output, "8883"),
+			"MQTT TLS port 8883 should be listening")
+	}
+
+	s.T().Log("MQTT broker validated")
+}
+
+// TestStorageInitialization validates that the controller initialized storage
 func (s *ControllerTestSuite) TestStorageInitialization() {
 	s.T().Log("Validating controller storage initialization")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	logs, err := s.docker.GetControllerLogs(ctx)
-	require.NoError(s.T(), err, "Should be able to retrieve logs")
+	// The health endpoint proves storage initialized - the controller cannot
+	// start serving if storage initialization failed
+	output, err := s.docker.CurlController(ctx, "/api/v1/health")
+	require.NoError(s.T(), err, "Health endpoint should be reachable")
+	assert.NotEmpty(s.T(), output, "Health endpoint should return status")
 
-	// Controller should show storage initialization (using database/timescale)
+	// Check controller logs for storage initialization evidence
+	logs, logErr := s.docker.GetControllerLogs(ctx)
+	require.NoError(s.T(), logErr)
 	assert.True(s.T(),
-		strings.Contains(logs, "storage") || strings.Contains(logs, "database") || strings.Contains(logs, "timescale"),
-		"Controller should show storage initialization")
+		strings.Contains(logs, "storage") || strings.Contains(logs, "Registered storage provider"),
+		"Controller logs should show storage initialization")
 
-	s.T().Log("✅ Controller storage initialized")
+	s.T().Log("Controller storage initialized (controller is serving requests)")
 }
 
-// TestMQTTBroker validates that the MQTT broker is running
-func (s *ControllerTestSuite) TestMQTTBroker() {
-	s.T().Log("Validating MQTT broker initialization")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	logs, err := s.docker.GetControllerLogs(ctx)
-	require.NoError(s.T(), err, "Should be able to retrieve logs")
-
-	// Controller should show MQTT broker initialization
-	assert.True(s.T(),
-		strings.Contains(logs, "MQTT") || strings.Contains(logs, "mqtt") || strings.Contains(logs, "broker"),
-		"Controller should show MQTT broker initialization")
-
-	s.T().Log("✅ MQTT broker validated")
-}
-
-// TestModuleExecution validates that steward can execute modules
+// TestModuleExecution validates that the steward workspace is available for module execution
 func (s *ControllerTestSuite) TestModuleExecution() {
-	s.T().Log("Validating module execution on steward")
+	s.T().Log("Validating module execution workspace on steward")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Check if test workspace has files (from module execution tests)
-	output, err := s.docker.ExecInSteward(ctx, "ls", "-la", "/test-workspace")
+	// Verify /test-workspace directory exists in steward container
+	output, err := s.docker.ExecInSteward(ctx, "test", "-d", "/test-workspace")
+	assert.NoError(s.T(), err, "/test-workspace directory should exist in steward container")
 
-	// Log what we find
-	if err == nil {
-		s.T().Logf("Test workspace contents: %s", output)
-	} else {
-		s.T().Logf("Test workspace check: %v", err)
-	}
+	// Verify we can create and read a file (proves workspace is writable)
+	_, err = s.docker.ExecInSteward(ctx, "sh", "-c",
+		"echo 'controller-test-probe' > /test-workspace/.controller-test-probe && cat /test-workspace/.controller-test-probe")
+	assert.NoError(s.T(), err, "Should be able to write and read files in /test-workspace")
 
-	s.T().Log("Module execution environment validated")
+	// Clean up probe file
+	_, _ = s.docker.ExecInSteward(ctx, "rm", "-f", "/test-workspace/.controller-test-probe")
+
+	s.T().Logf("Workspace check output: %s", output)
+	s.T().Log("Module execution workspace validated")
 }
 
 // TestCertificateManagement validates that certificates are being managed
@@ -169,24 +199,31 @@ func (s *ControllerTestSuite) TestCertificateManagement() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	logs, err := s.docker.GetControllerLogs(ctx)
-	require.NoError(s.T(), err, "Should be able to retrieve logs")
+	// Controller with CFGMS_MQTT_USE_CERT_MANAGER=true should have generated certificates
+	// Check for CA certificate in the controller's cert storage
+	output, err := s.docker.ExecInController(ctx, "sh", "-c",
+		"find /tmp -name 'ca.crt' -o -name 'ca-cert.pem' -o -name '*.crt' 2>/dev/null | head -5")
+	s.T().Logf("Certificate files found: %s", output)
 
-	// Controller with MQTT+QUIC should have TLS configured
-	// Evidence: "TLS handshake", "address=[::]:8883" (TLS port), or startup without errors
-	assert.NotEmpty(s.T(), logs, "Controller logs should not be empty")
-
-	s.T().Log("✅ Certificate management validated (controller started with TLS config)")
-}
-
-// min returns the minimum of two integers
-func min(a, b int) int {
-	if a < b {
-		return a
+	// The controller should have generated at least one certificate file
+	if err != nil || strings.TrimSpace(output) == "" {
+		// Fallback: check logs for certificate generation evidence
+		logs, logErr := s.docker.GetControllerLogs(ctx)
+		require.NoError(s.T(), logErr)
+		assert.True(s.T(),
+			strings.Contains(logs, "certificate") || strings.Contains(logs, "cert") || strings.Contains(logs, "TLS") || strings.Contains(logs, "tls"),
+			"Controller should show evidence of certificate management in logs")
+	} else {
+		assert.NotEmpty(s.T(), strings.TrimSpace(output),
+			"Controller should have certificate files")
 	}
-	return b
+
+	s.T().Log("Certificate management validated")
 }
 
 func TestController(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping controller E2E tests in short mode - requires Docker infrastructure")
+	}
 	suite.Run(t, new(ControllerTestSuite))
 }
