@@ -202,6 +202,70 @@ func (s *MultiTenantTestSuite) TestMQTTTopicIsolation() {
 	s.T().Logf("✅ AC2 PASSED: MQTT topic isolation enforced")
 }
 
+// AC2-Deny: TestTopicIsolationDenial proves ACLs block cross-tenant topic subscriptions.
+// The happy-path AC2 test only validates routing; this test proves the broker actively denies
+// cross-tenant access by using the same positive+negative control pattern as AC3.
+func (s *MultiTenantTestSuite) TestTopicIsolationDenial() {
+	s.T().Log("AC2-Deny: Testing ACL denial of cross-tenant topic subscription")
+
+	brokerAddr := GetTestMQTTAddr("ssl://localhost:1886")
+
+	// Separate registrations — each tenant gets a unique steward ID and certificate
+	tenant1TLS, tenant1ID := s.helper.GetTLSConfigFromRegistration(s.T(), "tenant1", "integration-test")
+	tenant2TLS, tenant2ID := s.helper.GetTLSConfigFromRegistration(s.T(), "tenant2", "integration-test")
+
+	tenant1Client := s.createTenantMQTTClient(tenant1ID, brokerAddr, tenant1TLS)
+	tenant2Client := s.createTenantMQTTClient(tenant2ID, brokerAddr, tenant2TLS)
+
+	ownMessages := make(chan string, 10)
+	crossTenantMessages := make(chan string, 10)
+
+	// Tenant1 subscribes to OWN topic (positive control)
+	ownTopic := fmt.Sprintf("cfgms/steward/%s/#", tenant1ID)
+	token := tenant1Client.Subscribe(ownTopic, 0, func(c mqtt.Client, m mqtt.Message) {
+		ownMessages <- string(m.Payload())
+	})
+	s.True(token.WaitTimeout(5*time.Second), "Own topic subscribe should succeed")
+	s.NoError(token.Error())
+
+	// Tenant1 attempts to subscribe to tenant2's topic (should be denied by ACL)
+	maliciousTopic := fmt.Sprintf("cfgms/steward/%s/#", tenant2ID)
+	token = tenant1Client.Subscribe(maliciousTopic, 0, func(c mqtt.Client, m mqtt.Message) {
+		crossTenantMessages <- string(m.Payload())
+	})
+	s.True(token.WaitTimeout(5*time.Second), "Subscribe should complete")
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Tenant1 publishes to own topic (positive control)
+	token = tenant1Client.Publish(fmt.Sprintf("cfgms/steward/%s/test", tenant1ID), 0, false, "own-msg")
+	s.True(token.WaitTimeout(5 * time.Second))
+	s.NoError(token.Error())
+
+	// Tenant2 publishes to own topic
+	token = tenant2Client.Publish(fmt.Sprintf("cfgms/steward/%s/test", tenant2ID), 0, false, "secret-msg")
+	s.True(token.WaitTimeout(5 * time.Second))
+	s.NoError(token.Error())
+
+	// Positive control: tenant1 MUST receive own message
+	select {
+	case msg := <-ownMessages:
+		s.Equal("own-msg", msg, "Tenant1 should receive own message (positive control)")
+	case <-time.After(3 * time.Second):
+		s.Fail("Positive control failed: tenant1 did not receive own message")
+	}
+
+	// Negative control: tenant1 MUST NOT receive tenant2's message
+	select {
+	case msg := <-crossTenantMessages:
+		s.Fail(fmt.Sprintf("ACL denial failed: tenant1 received tenant2's message: %s", msg))
+	case <-time.After(1 * time.Second):
+		s.T().Log("ACL denial confirmed: tenant1 did not receive tenant2's message")
+	}
+
+	s.T().Logf("✅ AC2-Deny PASSED: ACL blocks cross-tenant topic subscription")
+}
+
 // AC3: TestCrossTenantMessagePrevention validates cross-tenant message delivery prevention
 // with a positive control to prove messaging works (eliminates timing as explanation).
 func (s *MultiTenantTestSuite) TestCrossTenantMessagePrevention() {
@@ -343,6 +407,72 @@ func (s *MultiTenantTestSuite) TestConfigurationRoutingBoundaries() {
 	s.T().Logf("✅ AC4 PASSED: Configuration routing respects tenant boundaries")
 }
 
+// AC4-Deny: TestConfigRoutingDenial proves ACLs block cross-tenant configuration access.
+// The happy-path AC4 test only validates routing; this test proves the broker actively denies
+// a steward subscribing to another steward's config topics.
+func (s *MultiTenantTestSuite) TestConfigRoutingDenial() {
+	s.T().Log("AC4-Deny: Testing ACL denial of cross-tenant configuration subscription")
+
+	brokerAddr := GetTestMQTTAddr("ssl://localhost:1886")
+
+	// Separate registrations for unique steward IDs
+	tenant1TLS, tenant1ID := s.helper.GetTLSConfigFromRegistration(s.T(), "tenant1", "integration-test")
+	tenant2TLS, tenant2ID := s.helper.GetTLSConfigFromRegistration(s.T(), "tenant2", "integration-test")
+
+	tenant1Client := s.createTenantMQTTClient(tenant1ID, brokerAddr, tenant1TLS)
+	tenant2Client := s.createTenantMQTTClient(tenant2ID, brokerAddr, tenant2TLS)
+
+	ownConfigs := make(chan string, 10)
+	crossTenantConfigs := make(chan string, 10)
+
+	// Tenant2 subscribes to OWN config topic (positive control)
+	ownConfigTopic := fmt.Sprintf("cfgms/steward/%s/+/config", tenant2ID)
+	token := tenant2Client.Subscribe(ownConfigTopic, 0, func(c mqtt.Client, m mqtt.Message) {
+		ownConfigs <- string(m.Payload())
+	})
+	s.True(token.WaitTimeout(5*time.Second), "Own config subscribe should succeed")
+	s.NoError(token.Error())
+
+	// Tenant2 attempts to subscribe to tenant1's config topic (should be denied by ACL)
+	maliciousConfigTopic := fmt.Sprintf("cfgms/steward/%s/+/config", tenant1ID)
+	token = tenant2Client.Subscribe(maliciousConfigTopic, 0, func(c mqtt.Client, m mqtt.Message) {
+		crossTenantConfigs <- string(m.Payload())
+	})
+	s.True(token.WaitTimeout(5*time.Second), "Subscribe should complete")
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Tenant2 publishes config to own topic (positive control)
+	tenant2ConfigPayload := `{"version":"1.0","tenant":"tenant2","modules":{"file":[]}}`
+	token = tenant2Client.Publish(fmt.Sprintf("cfgms/steward/%s/steward-test/config", tenant2ID), 0, false, tenant2ConfigPayload)
+	s.True(token.WaitTimeout(5 * time.Second))
+	s.NoError(token.Error())
+
+	// Tenant1 publishes config to own topic
+	tenant1ConfigPayload := `{"version":"1.0","tenant":"tenant1","modules":{"file":[]}}`
+	token = tenant1Client.Publish(fmt.Sprintf("cfgms/steward/%s/steward-test/config", tenant1ID), 0, false, tenant1ConfigPayload)
+	s.True(token.WaitTimeout(5 * time.Second))
+	s.NoError(token.Error())
+
+	// Positive control: tenant2 MUST receive own config
+	select {
+	case config := <-ownConfigs:
+		s.Contains(config, "tenant2", "Tenant2 should receive own config (positive control)")
+	case <-time.After(3 * time.Second):
+		s.Fail("Positive control failed: tenant2 did not receive own config")
+	}
+
+	// Negative control: tenant2 MUST NOT receive tenant1's config
+	select {
+	case config := <-crossTenantConfigs:
+		s.Fail(fmt.Sprintf("ACL denial failed: tenant2 received tenant1's config: %s", config))
+	case <-time.After(1 * time.Second):
+		s.T().Log("ACL denial confirmed: tenant2 did not receive tenant1's config")
+	}
+
+	s.T().Logf("✅ AC4-Deny PASSED: ACL blocks cross-tenant configuration access")
+}
+
 // AC5: TestDNACollectionSeparation validates DNA collection separated by tenant ID
 func (s *MultiTenantTestSuite) TestDNACollectionSeparation() {
 	s.T().Log("AC5: Testing DNA collection separated by tenant ID")
@@ -413,6 +543,72 @@ func (s *MultiTenantTestSuite) TestDNACollectionSeparation() {
 	s.T().Logf("✅ AC5 PASSED: DNA collection separated by tenant ID")
 }
 
+// AC5-Deny: TestDNACollectionDenial proves ACLs block cross-tenant DNA topic access.
+// The happy-path AC5 test only validates routing; this test proves the broker actively denies
+// a steward subscribing to another steward's DNA topics.
+func (s *MultiTenantTestSuite) TestDNACollectionDenial() {
+	s.T().Log("AC5-Deny: Testing ACL denial of cross-tenant DNA subscription")
+
+	brokerAddr := GetTestMQTTAddr("ssl://localhost:1886")
+
+	// Separate registrations for unique steward IDs
+	tenant1TLS, tenant1ID := s.helper.GetTLSConfigFromRegistration(s.T(), "tenant1", "integration-test")
+	tenant2TLS, tenant2ID := s.helper.GetTLSConfigFromRegistration(s.T(), "tenant2", "integration-test")
+
+	tenant1Client := s.createTenantMQTTClient(tenant1ID, brokerAddr, tenant1TLS)
+	tenant2Client := s.createTenantMQTTClient(tenant2ID, brokerAddr, tenant2TLS)
+
+	ownDNA := make(chan string, 10)
+	crossTenantDNA := make(chan string, 10)
+
+	// Tenant1 subscribes to OWN DNA topic (positive control)
+	ownDNATopic := fmt.Sprintf("cfgms/steward/%s/+/dna", tenant1ID)
+	token := tenant1Client.Subscribe(ownDNATopic, 0, func(c mqtt.Client, m mqtt.Message) {
+		ownDNA <- string(m.Payload())
+	})
+	s.True(token.WaitTimeout(5*time.Second), "Own DNA subscribe should succeed")
+	s.NoError(token.Error())
+
+	// Tenant1 attempts to subscribe to tenant2's DNA topic (should be denied by ACL)
+	maliciousDNATopic := fmt.Sprintf("cfgms/steward/%s/+/dna", tenant2ID)
+	token = tenant1Client.Subscribe(maliciousDNATopic, 0, func(c mqtt.Client, m mqtt.Message) {
+		crossTenantDNA <- string(m.Payload())
+	})
+	s.True(token.WaitTimeout(5*time.Second), "Subscribe should complete")
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Tenant1 publishes DNA to own topic (positive control)
+	tenant1DNAPayload := fmt.Sprintf(`{"tenant_id":"tenant1","steward_id":"%s","hostname":"host-tenant1"}`, tenant1ID)
+	token = tenant1Client.Publish(fmt.Sprintf("cfgms/steward/%s/steward-t1/dna", tenant1ID), 0, false, tenant1DNAPayload)
+	s.True(token.WaitTimeout(5 * time.Second))
+	s.NoError(token.Error())
+
+	// Tenant2 publishes DNA to own topic
+	tenant2DNAPayload := fmt.Sprintf(`{"tenant_id":"tenant2","steward_id":"%s","hostname":"host-tenant2"}`, tenant2ID)
+	token = tenant2Client.Publish(fmt.Sprintf("cfgms/steward/%s/steward-t2/dna", tenant2ID), 0, false, tenant2DNAPayload)
+	s.True(token.WaitTimeout(5 * time.Second))
+	s.NoError(token.Error())
+
+	// Positive control: tenant1 MUST receive own DNA
+	select {
+	case dna := <-ownDNA:
+		s.Contains(dna, "tenant1", "Tenant1 should receive own DNA (positive control)")
+	case <-time.After(3 * time.Second):
+		s.Fail("Positive control failed: tenant1 did not receive own DNA update")
+	}
+
+	// Negative control: tenant1 MUST NOT receive tenant2's DNA
+	select {
+	case dna := <-crossTenantDNA:
+		s.Fail(fmt.Sprintf("ACL denial failed: tenant1 received tenant2's DNA: %s", dna))
+	case <-time.After(1 * time.Second):
+		s.T().Log("ACL denial confirmed: tenant1 did not receive tenant2's DNA")
+	}
+
+	s.T().Logf("✅ AC5-Deny PASSED: ACL blocks cross-tenant DNA access")
+}
+
 // AC6: TestHeartbeatIsolation validates heartbeats isolated per tenant
 func (s *MultiTenantTestSuite) TestHeartbeatIsolation() {
 	s.T().Log("AC6: Testing heartbeats isolated per tenant")
@@ -479,6 +675,72 @@ func (s *MultiTenantTestSuite) TestHeartbeatIsolation() {
 	}
 
 	s.T().Logf("✅ AC6 PASSED: Heartbeats isolated per tenant")
+}
+
+// AC6-Deny: TestHeartbeatIsolationDenial proves ACLs block cross-tenant heartbeat snooping.
+// The happy-path AC6 test only validates routing; this test proves the broker actively denies
+// a steward subscribing to another steward's heartbeat topic.
+func (s *MultiTenantTestSuite) TestHeartbeatIsolationDenial() {
+	s.T().Log("AC6-Deny: Testing ACL denial of cross-tenant heartbeat subscription")
+
+	brokerAddr := GetTestMQTTAddr("ssl://localhost:1886")
+
+	// Separate registrations for unique steward IDs
+	tenant1TLS, tenant1ID := s.helper.GetTLSConfigFromRegistration(s.T(), "tenant1", "integration-test")
+	tenant3TLS, tenant3ID := s.helper.GetTLSConfigFromRegistration(s.T(), "tenant3", "integration-test")
+
+	tenant1Client := s.createTenantMQTTClient(tenant1ID, brokerAddr, tenant1TLS)
+	tenant3Client := s.createTenantMQTTClient(tenant3ID, brokerAddr, tenant3TLS)
+
+	ownHeartbeats := make(chan string, 10)
+	crossTenantHeartbeats := make(chan string, 10)
+
+	// Tenant1 subscribes to OWN heartbeat topic (positive control)
+	ownHBTopic := fmt.Sprintf("cfgms/steward/%s/heartbeat", tenant1ID)
+	token := tenant1Client.Subscribe(ownHBTopic, 0, func(c mqtt.Client, m mqtt.Message) {
+		ownHeartbeats <- string(m.Payload())
+	})
+	s.True(token.WaitTimeout(5*time.Second), "Own heartbeat subscribe should succeed")
+	s.NoError(token.Error())
+
+	// Tenant1 attempts to subscribe to tenant3's heartbeat topic (should be denied by ACL)
+	maliciousHBTopic := fmt.Sprintf("cfgms/steward/%s/heartbeat", tenant3ID)
+	token = tenant1Client.Subscribe(maliciousHBTopic, 0, func(c mqtt.Client, m mqtt.Message) {
+		crossTenantHeartbeats <- string(m.Payload())
+	})
+	s.True(token.WaitTimeout(5*time.Second), "Subscribe should complete")
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Tenant1 publishes heartbeat to own topic (positive control)
+	tenant1HBPayload := fmt.Sprintf(`{"steward_id":"%s","status":"online"}`, tenant1ID)
+	token = tenant1Client.Publish(ownHBTopic, 0, false, tenant1HBPayload)
+	s.True(token.WaitTimeout(5 * time.Second))
+	s.NoError(token.Error())
+
+	// Tenant3 publishes heartbeat to own topic
+	tenant3HBPayload := fmt.Sprintf(`{"steward_id":"%s","status":"online"}`, tenant3ID)
+	token = tenant3Client.Publish(fmt.Sprintf("cfgms/steward/%s/heartbeat", tenant3ID), 0, false, tenant3HBPayload)
+	s.True(token.WaitTimeout(5 * time.Second))
+	s.NoError(token.Error())
+
+	// Positive control: tenant1 MUST receive own heartbeat
+	select {
+	case hb := <-ownHeartbeats:
+		s.Contains(hb, tenant1ID, "Tenant1 should receive own heartbeat (positive control)")
+	case <-time.After(3 * time.Second):
+		s.Fail("Positive control failed: tenant1 did not receive own heartbeat")
+	}
+
+	// Negative control: tenant1 MUST NOT receive tenant3's heartbeat
+	select {
+	case hb := <-crossTenantHeartbeats:
+		s.Fail(fmt.Sprintf("ACL denial failed: tenant1 received tenant3's heartbeat: %s", hb))
+	case <-time.After(1 * time.Second):
+		s.T().Log("ACL denial confirmed: tenant1 did not receive tenant3's heartbeat")
+	}
+
+	s.T().Logf("✅ AC6-Deny PASSED: ACL blocks cross-tenant heartbeat snooping")
 }
 
 // createTenantMQTTClient creates an MQTT client for a specific tenant
