@@ -203,8 +203,9 @@ func (s *MultiTenantTestSuite) TestMQTTTopicIsolation() {
 }
 
 // AC3: TestCrossTenantMessagePrevention validates cross-tenant message delivery prevention
+// with a positive control to prove messaging works (eliminates timing as explanation).
 func (s *MultiTenantTestSuite) TestCrossTenantMessagePrevention() {
-	s.T().Log("AC3: Testing cross-tenant message delivery prevention")
+	s.T().Log("AC3: Testing cross-tenant message delivery prevention (with positive control)")
 
 	brokerAddr := GetTestMQTTAddr("ssl://localhost:1886")
 
@@ -216,15 +217,31 @@ func (s *MultiTenantTestSuite) TestCrossTenantMessagePrevention() {
 	tenant1Client := s.createTenantMQTTClient(tenant1ID, brokerAddr, tenant1TLS)
 	tenant3Client := s.createTenantMQTTClient(tenant3ID, brokerAddr, tenant3TLS)
 
-	receivedMessages := make(chan string, 10)
+	crossTenantMessages := make(chan string, 10)
+	ownMessages := make(chan string, 10)
 
 	// Tenant1 attempts to subscribe to tenant3's topic (should be isolated by ACLs)
 	maliciousTopic := fmt.Sprintf("cfgms/steward/%s/#", tenant3ID)
 	token := tenant1Client.Subscribe(maliciousTopic, 0, func(client mqtt.Client, msg mqtt.Message) {
-		receivedMessages <- string(msg.Payload())
+		crossTenantMessages <- string(msg.Payload())
 		s.T().Logf("Tenant1 (%s) received cross-tenant message: %s", tenant1ID, msg.Payload())
 	})
 	s.True(token.WaitTimeout(5*time.Second), "Subscribe should complete (may succeed or fail)")
+
+	// Positive control: Tenant1 subscribes to their OWN topic
+	ownTopic := fmt.Sprintf("cfgms/steward/%s/#", tenant1ID)
+	token = tenant1Client.Subscribe(ownTopic, 0, func(client mqtt.Client, msg mqtt.Message) {
+		ownMessages <- string(msg.Payload())
+		s.T().Logf("Tenant1 (%s) received own message: %s", tenant1ID, msg.Payload())
+	})
+	s.True(token.WaitTimeout(5*time.Second), "Own topic subscribe should succeed")
+	s.NoError(token.Error(), "Own topic subscribe should not error")
+
+	// Publish to tenant1's own topic (positive control)
+	tenant1Msg := "tenant1-control-message"
+	tenant1Topic := fmt.Sprintf("cfgms/steward/%s/test", tenant1ID)
+	token = tenant1Client.Publish(tenant1Topic, 0, false, tenant1Msg)
+	s.True(token.WaitTimeout(5*time.Second), "Tenant1 own publish should succeed")
 
 	// Tenant3 publishes a message to their own topic
 	tenant3Msg := "secret-tenant3-message"
@@ -232,19 +249,34 @@ func (s *MultiTenantTestSuite) TestCrossTenantMessagePrevention() {
 	token = tenant3Client.Publish(tenant3Topic, 0, false, tenant3Msg)
 	s.True(token.WaitTimeout(5*time.Second), "Tenant3 publish should succeed")
 
-	// Wait to ensure tenant1 does NOT receive tenant3's message
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	// Verify positive control: tenant1 receives their OWN message
+	// This proves messaging is working - if this fails, the test infrastructure is broken
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
 	select {
-	case msg := <-receivedMessages:
-		s.Fail(fmt.Sprintf("Cross-tenant message delivery detected! Tenant1 received: %s", msg))
+	case msg := <-ownMessages:
+		s.Equal(tenant1Msg, msg, "Tenant1 should receive their own message (positive control)")
+		s.T().Log("Positive control passed: tenant1 received own message")
 	case <-ctx.Done():
-		// Expected: timeout without receiving message
-		s.T().Log("✅ Cross-tenant message delivery prevented")
+		s.Fail("Positive control failed: tenant1 did not receive their own message - messaging may not be working")
 	}
 
-	s.T().Logf("✅ AC3 PASSED: Cross-tenant message delivery prevention enforced")
+	// Verify negative control: tenant1 does NOT receive tenant3's message
+	// Combined with the positive control above, this proves ACLs blocked delivery
+	// (not timing, network issues, or test infrastructure problems)
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel2()
+
+	select {
+	case msg := <-crossTenantMessages:
+		s.Fail(fmt.Sprintf("Cross-tenant message delivery detected! Tenant1 received: %s", msg))
+	case <-ctx2.Done():
+		// Expected: timeout without receiving message
+		s.T().Log("Negative control passed: cross-tenant message delivery prevented")
+	}
+
+	s.T().Logf("AC3 PASSED: Cross-tenant message delivery prevention enforced (with positive control)")
 }
 
 // AC4: TestConfigurationRoutingBoundaries validates configuration routing respects tenant boundaries
