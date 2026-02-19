@@ -9,6 +9,7 @@ package ha
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -139,6 +140,8 @@ func TestWorkflowExecutionResilience(t *testing.T) {
 
 	helper := NewDockerComposeHelper()
 
+	t.Skip("Skipping: workflow execution API not yet implemented (requires controller workflow management)")
+
 	t.Log("Starting full HA cluster for workflow resilience testing...")
 	require.NoError(t, helper.StartCluster(ctx))
 	defer func() {
@@ -211,7 +214,7 @@ func testCertificateValidityDuringFailover(t *testing.T, ctx context.Context, he
 	// Get initial authentication states
 	initialStates := make(map[string]*AuthenticationState)
 	for _, steward := range stewards {
-		state, err := getAuthenticationState(steward)
+		state, err := getAuthenticationState(ctx, helper, steward)
 		require.NoError(t, err, "Failed to get auth state for %s", steward)
 		initialStates[steward] = state
 		t.Logf("Steward %s initial auth: authenticated=%v, cert_valid=%v", steward, state.Authenticated, state.CertificateValid)
@@ -236,7 +239,7 @@ func testCertificateValidityDuringFailover(t *testing.T, ctx context.Context, he
 		authenticatedStewards := 0
 
 		for _, steward := range stewards {
-			state, err := getAuthenticationState(steward)
+			state, err := getAuthenticationState(ctx, helper, steward)
 			if err != nil {
 				continue
 			}
@@ -252,7 +255,7 @@ func testCertificateValidityDuringFailover(t *testing.T, ctx context.Context, he
 
 	// Verify reconnection counts
 	for _, steward := range stewards {
-		finalState, err := getAuthenticationState(steward)
+		finalState, err := getAuthenticationState(ctx, helper, steward)
 		require.NoError(t, err, "Failed to get final auth state for %s", steward)
 
 		assert.True(t, finalState.Authenticated, "Steward %s should be authenticated after failover", steward)
@@ -266,6 +269,7 @@ func testCertificateValidityDuringFailover(t *testing.T, ctx context.Context, he
 }
 
 func testTokenRefreshDuringFailover(t *testing.T, ctx context.Context, helper *DockerComposeHelper, controllers []string, stewards []string) {
+	t.Skip("Skipping: token refresh API not yet implemented (requires steward token management endpoint)")
 	t.Log("Testing token refresh during controller failover...")
 
 	// Simulate token refresh scenario
@@ -292,7 +296,7 @@ func testTokenRefreshDuringFailover(t *testing.T, ctx context.Context, helper *D
 		validTokens := 0
 
 		for _, steward := range stewards {
-			state, err := getAuthenticationState(steward)
+			state, err := getAuthenticationState(ctx, helper, steward)
 			if err != nil {
 				continue
 			}
@@ -314,7 +318,7 @@ func testReconnectionAuthenticationFlow(t *testing.T, ctx context.Context, helpe
 	// Get baseline connection counts
 	baselineCounts := make(map[string]int)
 	for _, steward := range stewards {
-		state, err := getAuthenticationState(steward)
+		state, err := getAuthenticationState(ctx, helper, steward)
 		require.NoError(t, err, "Failed to get baseline auth state for %s", steward)
 		baselineCounts[steward] = state.ConnectionCount
 	}
@@ -331,7 +335,7 @@ func testReconnectionAuthenticationFlow(t *testing.T, ctx context.Context, helpe
 
 		// Verify all stewards reconnected successfully
 		for _, steward := range stewards {
-			state, err := getAuthenticationState(steward)
+			state, err := getAuthenticationState(ctx, helper, steward)
 			require.NoError(t, err, "Failed to get auth state after %s failover", service)
 
 			assert.True(t, state.Authenticated, "Steward %s should be authenticated after %s failover", steward, service)
@@ -340,7 +344,7 @@ func testReconnectionAuthenticationFlow(t *testing.T, ctx context.Context, helpe
 
 	// Verify connection counts increased appropriately
 	for _, steward := range stewards {
-		finalState, err := getAuthenticationState(steward)
+		finalState, err := getAuthenticationState(ctx, helper, steward)
 		require.NoError(t, err, "Failed to get final auth state for %s", steward)
 
 		assert.Greater(t, finalState.ConnectionCount, baselineCounts[steward],
@@ -500,23 +504,41 @@ func testWorkflowStateRecoveryAfterFailover(t *testing.T, ctx context.Context, h
 
 // Helper functions for authentication and workflow testing
 
-func getAuthenticationState(stewardName string) (*AuthenticationState, error) {
-	// In real implementation, this would query steward's auth state
-	// For testing, return mock authentication state
+func getAuthenticationState(ctx context.Context, helper *DockerComposeHelper, stewardName string) (*AuthenticationState, error) {
+	// Check connection via Docker logs — mTLS connection implies authentication
+	connected, _, err := helper.CheckStewardConnection(ctx, stewardName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check steward connection: %w", err)
+	}
+
+	// Get logs to analyze connection history
+	logs, _ := helper.GetStewardLogs(ctx, stewardName, 100)
+
+	// Count connection events from logs
+	connectionCount := 0
+	for _, line := range strings.Split(logs, "\n") {
+		if strings.Contains(line, "Connected to controller") || strings.Contains(line, "gRPC connection established") {
+			connectionCount++
+		}
+	}
+	if connectionCount == 0 && connected {
+		connectionCount = 1
+	}
+
 	return &AuthenticationState{
 		StewardID:            fmt.Sprintf("%s-1", stewardName),
-		Authenticated:        true,
-		TokenValid:           true,
-		CertificateValid:     true,
+		Authenticated:        connected,
+		TokenValid:           connected, // mTLS-based: connection = valid token
+		CertificateValid:     connected, // mTLS-based: connection = valid cert
 		LastAuthentication:   time.Now(),
 		AuthenticationMethod: "mTLS",
-		ConnectionCount:      1,
+		ConnectionCount:      connectionCount,
 	}, nil
 }
 
 func simulateTokenRefresh(stewardName string) error {
-	// In real implementation, this would trigger token refresh
-	return nil
+	// Token refresh requires steward token management API (not yet implemented)
+	return fmt.Errorf("token refresh not implemented: no API available for steward %s", stewardName)
 }
 
 func createLongRunningWorkflow(workflowID string, stewardID string) *WorkflowExecution {
@@ -577,16 +599,11 @@ func createMultiStepWorkflow(workflowID string, stewardID string) *WorkflowExecu
 }
 
 func startWorkflowExecution(workflow *WorkflowExecution) error {
-	// In real implementation, this would start workflow via controller API
-	return nil
+	// Workflow execution requires controller workflow API (not yet implemented)
+	return fmt.Errorf("workflow execution not implemented: no API available for workflow %s", workflow.WorkflowID)
 }
 
 func getWorkflowStatus(executionID string) (*WorkflowExecution, error) {
-	// In real implementation, this would query workflow status
-	// For testing, return mock status
-	return &WorkflowExecution{
-		ExecutionID: executionID,
-		Status:      "running",
-		StartedAt:   time.Now(),
-	}, nil
+	// Workflow status requires controller workflow API (not yet implemented)
+	return nil, fmt.Errorf("workflow status not implemented: no API available for execution %s", executionID)
 }
