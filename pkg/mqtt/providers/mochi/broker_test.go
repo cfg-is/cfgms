@@ -4,9 +4,13 @@ package mochi
 
 import (
 	"context"
+	"fmt"
+	"net"
+	"strings"
 	"testing"
 	"time"
 
+	pahomqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -264,6 +268,111 @@ func TestBroker_AuthHandlers(t *testing.T) {
 
 	assert.NotNil(t, broker.authHandler)
 	assert.NotNil(t, broker.aclHandler)
+}
+
+// TestBroker_ACLEnforcement verifies that the mochi-mqtt broker enforces ACL rules
+// end-to-end using real MQTT clients. This proves the broker actually blocks cross-client
+// message delivery, not just that the ACL handler function returns the right values.
+//
+// Story #313 (Reopened): The previous implementation only unit-tested the handler function.
+// This test creates external Paho MQTT clients that connect to the broker's TCP listener,
+// which exercises the full ACL enforcement path through mochi-mqtt's hook system.
+func TestBroker_ACLEnforcement(t *testing.T) {
+	// Find a free TCP port for the broker
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	port := listener.Addr().(*net.TCPAddr).Port
+	require.NoError(t, listener.Close())
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+
+	// Create broker with topic-based ACL handler
+	broker := New()
+	err = broker.Initialize(map[string]interface{}{
+		"listen_addr": addr,
+		"enable_tls":  false,
+	})
+	require.NoError(t, err)
+
+	// ACL handler: each client can only access topics under test/{clientID}/
+	broker.SetACLHandler(func(clientID, topic, operation string) bool {
+		prefix := "test/" + clientID + "/"
+		wildcard := "test/" + clientID + "/#"
+		return strings.HasPrefix(topic, prefix) || topic == wildcard
+	})
+
+	ctx := context.Background()
+	err = broker.Start(ctx)
+	require.NoError(t, err)
+	defer func() { _ = broker.Stop(ctx) }()
+
+	brokerURL := fmt.Sprintf("tcp://%s", addr)
+
+	// Create client-a
+	optsA := pahomqtt.NewClientOptions().
+		AddBroker(brokerURL).
+		SetClientID("client-a").
+		SetCleanSession(true)
+	clientA := pahomqtt.NewClient(optsA)
+	tokenA := clientA.Connect()
+	require.True(t, tokenA.WaitTimeout(5*time.Second), "client-a connect should succeed")
+	require.NoError(t, tokenA.Error())
+	defer clientA.Disconnect(250)
+
+	// Create client-b
+	optsB := pahomqtt.NewClientOptions().
+		AddBroker(brokerURL).
+		SetClientID("client-b").
+		SetCleanSession(true)
+	clientB := pahomqtt.NewClient(optsB)
+	tokenB := clientB.Connect()
+	require.True(t, tokenB.WaitTimeout(5*time.Second), "client-b connect should succeed")
+	require.NoError(t, tokenB.Error())
+	defer clientB.Disconnect(250)
+
+	receivedByA := make(chan string, 10)
+	receivedByB := make(chan string, 10)
+
+	// client-a subscribes to own topic (allowed by ACL)
+	token := clientA.Subscribe("test/client-a/#", 0, func(c pahomqtt.Client, m pahomqtt.Message) {
+		receivedByA <- string(m.Payload())
+	})
+	require.True(t, token.WaitTimeout(5*time.Second))
+	require.NoError(t, token.Error())
+
+	// client-b attempts to subscribe to client-a's topic (denied by ACL)
+	// With ObscureNotAuthorized=true, the subscribe may appear to succeed
+	// but the broker will not deliver messages to this subscription
+	token = clientB.Subscribe("test/client-a/#", 0, func(c pahomqtt.Client, m pahomqtt.Message) {
+		receivedByB <- string(m.Payload())
+	})
+	require.True(t, token.WaitTimeout(5*time.Second))
+
+	// Allow subscriptions to settle
+	time.Sleep(100 * time.Millisecond)
+
+	// client-a publishes to own topic (allowed by ACL)
+	token = clientA.Publish("test/client-a/data", 0, false, "secret-data")
+	require.True(t, token.WaitTimeout(5*time.Second))
+	require.NoError(t, token.Error())
+
+	// Positive control: client-a MUST receive its own message
+	// This proves message delivery is working through the broker
+	select {
+	case msg := <-receivedByA:
+		assert.Equal(t, "secret-data", msg, "client-a should receive its own message")
+	case <-time.After(3 * time.Second):
+		t.Fatal("positive control failed: client-a did not receive its own message")
+	}
+
+	// Negative control: client-b MUST NOT receive client-a's message
+	// Combined with the positive control above, this proves ACLs blocked delivery
+	// (not timing, network issues, or test infrastructure problems)
+	select {
+	case msg := <-receivedByB:
+		t.Fatalf("ACL enforcement failed: client-b received client-a's message: %s", msg)
+	case <-time.After(1 * time.Second):
+		t.Log("ACL enforcement confirmed: client-b did not receive client-a's message")
+	}
 }
 
 func TestBroker_Registration(t *testing.T) {

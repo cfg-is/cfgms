@@ -11,6 +11,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"log/slog"
 	"os"
 	"sync"
 	"time"
@@ -113,6 +114,7 @@ func (b *Broker) Start(ctx context.Context) error {
 	b.server = mqtt.New(options)
 
 	// Add authentication hook if configured
+	aclEnabled := b.aclHandler != nil
 	if b.authHandler != nil || b.aclHandler != nil {
 		hook := &cfgmsAuthHook{
 			authHandler: b.authHandler,
@@ -180,6 +182,12 @@ func (b *Broker) Start(ctx context.Context) error {
 
 	b.running = true
 	b.startTime = time.Now()
+
+	if aclEnabled {
+		slog.Info("MQTT broker started with ACL enforcement enabled")
+	} else {
+		slog.Info("MQTT broker started with allow-all hook (no ACL enforcement)")
+	}
 
 	return nil
 }
