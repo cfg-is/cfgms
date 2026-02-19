@@ -4,7 +4,7 @@
 
 This document outlines the development roadmap for the Configuration Management System (CFGMS). It provides a clear vision for the project's development, including milestones, features, and release planning, incorporating recent strategic adjustments to better align with MSP market voids and core product vision.
 
-**Last Updated**: 2026-01-12
+**Last Updated**: 2026-02-19
 
 ## Versioning Strategy
 
@@ -127,52 +127,71 @@ Implemented comprehensive Docker-based E2E testing infrastructure that validates
 
 ### Phase 2: Production Stability & Feature Completion (v0.9.0 - v1.0.0)
 
-Achieve production stability, complete core platform features, and prepare for stable release.
+Path to functioning beta: deploy controller on test cluster, manage Windows and Linux VMs with existing modules.
 
-#### v0.9.0 (Beta) - Production Stability
+#### v0.9.0 — Test & Architecture Foundation ✅ COMPLETED
 
-##### Phase 1: Test Infrastructure Foundation (Required for all validation)
+Test infrastructure, breaking changes, and communication layer architecture — all delivered.
 
-- [x] Fix failsafe component unhealthy state detection (Issue #295 - 5-8 points) - Refactor failsafe wrappers to properly trigger unhealthy state after consecutive failures, re-enable 6 component failure security tests
-- [x] Enhanced monitoring controls in graceful degradation (Issue #296 - 3-5 points) - Implement enhanced_monitoring security control with fail-secure for RBAC graceful degradation mode, re-enable degraded mode tests, prevent DDoS-based privilege escalation
-- [x] Chaos engineering network partition simulation (Issue #291) - Implement proper network failure injection for chaos tests, refactor to pkg/cache for architecture compliance
-- [x] RBAC failsafe component failure simulation (Issue #292) - Add test helpers to trigger fail-secure behavior
-- [x] Certificate test performance optimization (Issue #293) - Reduce cert generation time in tests from 4.89s to <2s
-- [x] Add integration-tests to required GitHub checks (Issue #350) - Deleted false-confidence placeholder tests (567 lines), added integration-tests to develop branch required checks, added documentation.yml stub for docs-only PRs ✅ COMPLETED
-- [x] Optimize zero-trust statistics lock contention (Issue #355) - Replace mutex-based stats with atomic operations or async channel to eliminate 65x performance degradation under concurrent load ✅ COMPLETED
-- [x] Fix Windows flaky test timing assertion (Issue #356) - Increase TestEphemeralAPIKeys tolerance from 5s to 10s to accommodate Windows CI runner variability ✅ COMPLETED
-- [x] Fix flaky TestEnhancedMultiTenantSecurity test (Issue #366) - Fixed dual audit logger anti-pattern causing test to query different logger than engine uses ✅ COMPLETED
-- [x] **Fix MQTT+QUIC E2E config sync signature verification** (Issue #378 - 8 points) - Fixed certificate mismatch causing 30s timeouts in E2E tests, implemented certificate serial tracking pattern, E2E tests now pass in <10s, added diagnostic tests and comprehensive documentation ✅ COMPLETED
-- [x] Fix Docker networking in MQTT+QUIC E2E tests (Issue #382 - 2-3 points) - Fixed event filtering (config_applied only), per-test MQTT client isolation, steward restart between tests, stale steward ID detection, and license header validation for .cache/ directory ✅ COMPLETED
-- [ ] HA E2E tests: Replace mocked helper functions with real implementations (Issue #385) - Replace hardcoded mock returns in HA tests with real Docker log parsing, API calls, or container exec checks
+- [x] Fix failsafe component unhealthy state detection (Issue #295 - 5-8 points) ✅
+- [x] Enhanced monitoring controls in graceful degradation (Issue #296 - 3-5 points) ✅
+- [x] Chaos engineering network partition simulation (Issue #291) ✅
+- [x] RBAC failsafe component failure simulation (Issue #292) ✅
+- [x] Certificate test performance optimization (Issue #293) ✅
+- [x] Add integration-tests to required GitHub checks (Issue #350) ✅
+- [x] Optimize zero-trust statistics lock contention (Issue #355) ✅
+- [x] Fix Windows flaky test timing assertion (Issue #356) ✅
+- [x] Fix flaky TestEnhancedMultiTenantSecurity test (Issue #366) ✅
+- [x] Fix MQTT+QUIC E2E config sync signature verification (Issue #378 - 8 points) ✅
+- [x] Fix Docker networking in MQTT+QUIC E2E tests (Issue #382 - 2-3 points) ✅
+- [x] HA E2E tests: Replace mocked helpers with real implementations (Issue #385) ✅
+- [x] Controller config loading refactor (Issue #290) ✅
+- [x] Communication Layer Abstraction (Epic #267 - 47 story points) ✅
+  - [x] Story #267.1: Control Plane Provider Interface (Issue #360 - 8 points) ✅
+  - [x] Story #267.2: Data Plane Provider Interface (Issue #361 - 8 points) ✅
+  - [x] Story #267.3: Migrate Controller to Communication Providers (Issue #362 - 13 points) ✅
+  - [x] Story #267.4: Migrate Steward to Communication Providers (Issue #363 - 13 points) ✅
+  - [x] Story #267.5: Deprecate Direct MQTT/QUIC Imports (Issue #364 - 5 points) ✅
+- [x] v0.9.x Project Housekeeping (Issue #392) ✅
 
-##### Phase 2: Breaking Changes & Architecture (Do before production validation)
+#### v0.9.1 — Security Baseline & Stability (~15-20 pts, ~1-2 weeks)
 
-- [x] Controller config loading refactor (Issue #290) - Support `--config` flag, default to `/etc/cfgms/controller.cfg`, environment variable support (breaking change) ✅ COMPLETED
-- [x] Communication Layer Abstraction (Epic #267 - 47 story points) - Control/Data Plane provider interfaces, controller/steward migration, deprecate direct MQTT/QUIC imports (MAJOR architectural refactor - must be done before production validation) ✅ COMPLETED
-  - [x] Story #267.1: Control Plane Provider Interface (Issue #360 - 8 points) ✅ COMPLETED - Define control plane abstraction, migrate MQTT implementation to pluggable provider
-  - [x] Story #267.2: Data Plane Provider Interface (Issue #361 - 8 points) ✅ COMPLETED - Define data plane abstraction, migrate QUIC implementation to pluggable provider
-  - [x] Story #267.3: Migrate Controller to Communication Providers (Issue #362 - 13 points) - Update controller to use ControlPlane/DataPlane providers ✅ COMPLETED
-  - [x] Story #267.4: Migrate Steward to Communication Providers (Issue #363 - 13 points) - Update steward to use ControlPlane/DataPlane providers ✅ COMPLETED
-  - [x] Story #267.5: Deprecate Direct MQTT/QUIC Imports (Issue #364 - 5 points) - Add architecture checks, documentation, mark old packages deprecated ✅ COMPLETED
+Minimum security hygiene before deploying on a real network.
 
-##### Phase 3: Feature Completion
-
-- [ ] Finalize advanced workflow engine and templates
-- [ ] Finalize advanced reporting
-
-##### Phase 4: Security & Validation (After infrastructure is stable)
-
-- [ ] **Implement Three-Certificate Architecture for Production Security** (Issue #377 - 47-65 points) - Separate public API (Let's Encrypt), internal mTLS, and config signing certificates for proper key separation, compliance, and operational stability. Critical for v1.0 production deployments.
-- [ ] **Authorization Memory Management & Circuit Breaker Implementation** (Issue #380 - 21 points) - Implement multi-tier circuit breakers (IP, Tenant, Global) with rate limiting and memory management to prevent DoS via resource exhaustion. Target <50MB memory for auth subsystem under load (was 20GB for 47M requests). Reduce E2E test volume from 47M to ~25K requests with smart testing.
 - [ ] Eliminate hardcoded TimescaleDB password (Issue #372 - 3-5 points) - Remove "No Footguns" violation, implement JIT password generation for tests, require explicit credentials in production
 - [ ] Implement log injection prevention in pkg/logging (Issue #373 - 3-5 points) - Resolve 25 code scanning alerts, add sanitization infrastructure to prevent log forgery attacks
-- [ ] Finalize production-ready security hardening
-- [ ] Complete high availability validation
-- [ ] Complete production validation with real MSP deployments
+- [ ] Fix Windows workflow test failures (Issue #309) - Required for Windows VM management in v0.9.2
 
-#### v0.10.0 - Web Interface Foundation
+#### v0.9.2 — Beta Deployment Validation (~20-25 pts, ~2-3 weeks)
 
+Deploy on test cluster and manage real VMs — the core beta milestone.
+
+- [ ] End-to-end deployment validation on real VMs (Issue #390 - 13-21 points) - Deploy controller + stewards on actual Windows/Linux VMs, test all modules, fix blockers
+- [ ] Beta deployment guide (Issue #391 - 3-5 points) - Production-like deployment documentation beyond dev-focused QUICK_START.md
+
+#### v0.9.3 — Three-Certificate Architecture (~47-65 pts, ~3-5 weeks)
+
+Proper certificate separation for production security.
+
+- [ ] Implement Three-Certificate Architecture for Production Security (Issue #377 - 47-65 points) - Separate public API (Let's Encrypt), internal mTLS, and config signing certificates for proper key separation, compliance, and operational stability
+
+#### v0.9.4 — Production Hardening (~25-30 pts, ~2-3 weeks)
+
+Authorization hardening + fixes from deployment validation.
+
+- [ ] Authorization Memory Management & Circuit Breaker Implementation (Issue #380 - 21 points) - Implement multi-tier circuit breakers (IP, Tenant, Global) with rate limiting and memory management to prevent DoS via resource exhaustion
+- [ ] Complete high availability validation on real cluster (multi-node, beyond Docker E2E)
+- [ ] Deployment validation fixes (TBD based on v0.9.2 findings)
+
+#### v0.10.0 - Web Interface Foundation & Deferred Features
+
+**Deferred from v0.9.x** (functional but not on beta critical path):
+- [ ] Service module implementation (script module covers as workaround)
+- [ ] Workflow management REST API (engine works internally, API needed for Web UI)
+- [ ] Config broadcast push API (individual `PUT /stewards/{id}/config` works)
+- [ ] Session/connection monitoring API (steward list + health endpoints cover beta)
+
+**Web Interface**:
 - [ ] Web UI framework and authentication
 - [ ] Dashboard with fleet overview
 - [ ] Configuration management interface
@@ -359,8 +378,8 @@ Multi-layered validation approach:
 
 ## Version Information
 
-- **Document Version**: 2.9
-- **Last Updated**: 2025-11-26
+- **Document Version**: 3.0
+- **Last Updated**: 2026-02-19
 
 ### Related Documentation
 
