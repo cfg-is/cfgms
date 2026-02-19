@@ -29,6 +29,7 @@ This document defines standards and best practices for GitHub Actions workflows 
 
 **Required Status Checks** (all must pass for merge):
 - `unit-tests` - Core functionality validation (~3-5 min)
+- `integration-tests` - Fast comprehensive + production-critical tests (~5-10 min)
 - `Build Gate` - Cross-platform compilation (~3-5 min)
 - `security-deployment-gate` - Security vulnerability blocking (~6-10 min)
 

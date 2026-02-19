@@ -469,14 +469,14 @@ gh pr checks [pr_number] --required
 
 **Required GitHub Actions Checks**:
 1. ✅ `unit-tests` - Must show "pass" or "success"
-2. ✅ `Build Gate` - Must show "pass" or "success"
-3. ✅ `security-deployment-gate` - Must show "pass" or "success"
+2. ✅ `integration-tests` - Must show "pass" or "success"
+3. ✅ `Build Gate` - Must show "pass" or "success"
+4. ✅ `security-deployment-gate` - Must show "pass" or "success"
 
 **Blocking Conditions**:
 - ❌ **BLOCKS APPROVAL** if any required check is failing
 - ❌ **BLOCKS APPROVAL** if any required check is pending/in-progress (wait for completion)
 - ❌ **BLOCKS APPROVAL** if CI hasn't run yet (may indicate branch not pushed)
-- ⚠️ **WARNS** if integration-tests job failed (not required but should investigate)
 
 **CI Verification Flow**:
 ```bash
@@ -495,13 +495,7 @@ else
   exit 1
 fi
 
-# 2. Check integration-tests (not required but recommended)
-integration_status=$(gh run list --branch "$head_branch" --workflow="Test Suite Validation" --limit 1 --json conclusion -q '.[0].conclusion')
-
-if [[ "$integration_status" == "failure" ]]; then
-  echo "⚠️  WARNING: Integration tests failed (not required but concerning)"
-  echo "   Review test failures before approving"
-fi
+# 2. All required checks verified above (unit-tests, integration-tests, Build Gate, security-deployment-gate)
 ```
 
 **Error Scenarios**:
@@ -512,6 +506,7 @@ fi
 
    Required Check Status:
    ❌ unit-tests: FAILURE
+   ✅ integration-tests: SUCCESS
    ✅ Build Gate: SUCCESS
    ✅ security-deployment-gate: SUCCESS
 
@@ -554,6 +549,7 @@ fi
 
    Status:
    ⏳ unit-tests: IN_PROGRESS (2m elapsed)
+   ⏳ integration-tests: QUEUED
    ⏳ Build Gate: QUEUED
    ⚠️  security-deployment-gate: NOT STARTED
 
@@ -577,17 +573,18 @@ $ gh pr checks 349 --required
 
 All checks passed
 ✓ unit-tests                      https://github.com/cfg-is/cfgms/actions/runs/...
+✓ integration-tests               https://github.com/cfg-is/cfgms/actions/runs/...
 ✓ Build Gate                      https://github.com/cfg-is/cfgms/actions/runs/...
 ✓ security-deployment-gate        https://github.com/cfg-is/cfgms/actions/runs/...
 ```
 
 ### Required Checks: ✅ ALL PASSING
 - ✅ **unit-tests**: SUCCESS (486 tests passed, 5m 23s)
+- ✅ **integration-tests**: SUCCESS (comprehensive validation passed, 7m 15s)
 - ✅ **Build Gate**: SUCCESS (cross-platform builds verified, 3m 45s)
 - ✅ **security-deployment-gate**: SUCCESS (no vulnerabilities, 8m 12s)
 
 ### Additional Checks (Informational):
-- ✅ **integration-tests**: SUCCESS (comprehensive validation passed)
 - ℹ️ **cross-feature-tests**: SKIPPED (workflow_dispatch only)
 - ℹ️ **production-readiness**: SKIPPED (full validation level only)
 

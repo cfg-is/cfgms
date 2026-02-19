@@ -121,6 +121,7 @@ The `develop` branch uses direct required status checks to prevent merging witho
 
 **Required Checks** (all must pass):
 - `unit-tests` - Core functionality validation (fast, ~3-5 min)
+- `integration-tests` - Fast comprehensive + production-critical tests (~5-10 min)
 - `Build Gate` - Cross-platform compilation + integration tests (~10-15 min total)
   - Cross-platform compilation verification
   - Native builds (Linux, macOS, Windows)
