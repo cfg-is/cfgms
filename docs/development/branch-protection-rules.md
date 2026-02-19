@@ -81,21 +81,14 @@ CFGMS uses GitHub Rulesets to protect branches in a GitFlow-style branching mode
 | Require conversation resolution | ✅ Yes | All PR comments must be resolved |
 | Status checks required | ✅ Yes | CI checks must pass |
 
-### Required Status Checks (10 total)
+### Required Status Checks (4 total)
 
-**Same as main, excluding production gates**:
-- `cross-compile-check`
-- `native-builds`
-- `integration-tests`
-- `build-gate`
-- `trivy-scan`
-- `nancy-scan`
-- `gosec-scan`
-- `staticcheck-scan`
-- `security-validation`
-- `analyze`
+- `unit-tests` - Core functionality validation
+- `integration-tests` - Fast comprehensive + production-critical tests
+- `Build Gate` - Cross-platform compilation + Docker integration tests
+- `security-deployment-gate` - Security vulnerability blocking
 
-**Rationale**: Develop excludes production-specific gates (`security-deployment-gate`, `production-risk-assessment`, `integration-test-gate`) to allow faster iteration while maintaining quality standards.
+**Rationale**: Direct required checks pattern (Story #322) replaced the previous 10-check approach. These 4 checks cover unit tests, integration tests, cross-platform builds, and security scanning. Production-specific gates (`production-risk-assessment`, `integration-test-gate`) are excluded to allow faster iteration.
 
 ---
 

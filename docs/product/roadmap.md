@@ -138,7 +138,7 @@ Achieve production stability, complete core platform features, and prepare for s
 - [x] Chaos engineering network partition simulation (Issue #291) - Implement proper network failure injection for chaos tests, refactor to pkg/cache for architecture compliance
 - [x] RBAC failsafe component failure simulation (Issue #292) - Add test helpers to trigger fail-secure behavior
 - [x] Certificate test performance optimization (Issue #293) - Reduce cert generation time in tests from 4.89s to <2s
-- [ ] Add integration-tests to required GitHub checks (Issue #350) - Fix all failing E2E/integration tests, add integration-tests job to develop branch required checks, prevent broken integration tests from reaching develop 🔄 REOPENED - TODO placeholder tests and simulated E2E scenarios still present
+- [x] Add integration-tests to required GitHub checks (Issue #350) - Deleted false-confidence placeholder tests (567 lines), added integration-tests to develop branch required checks, added documentation.yml stub for docs-only PRs ✅ COMPLETED
 - [x] Optimize zero-trust statistics lock contention (Issue #355) - Replace mutex-based stats with atomic operations or async channel to eliminate 65x performance degradation under concurrent load ✅ COMPLETED
 - [x] Fix Windows flaky test timing assertion (Issue #356) - Increase TestEphemeralAPIKeys tolerance from 5s to 10s to accommodate Windows CI runner variability ✅ COMPLETED
 - [x] Fix flaky TestEnhancedMultiTenantSecurity test (Issue #366) - Fixed dual audit logger anti-pattern causing test to query different logger than engine uses ✅ COMPLETED
