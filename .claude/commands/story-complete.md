@@ -24,9 +24,9 @@ TeamCreate(team_name: "story-review")
 ```
 
 Create three tasks on the team task list:
-1. **Run test-complete** — Full CI-parity validation suite
+1. **Run test-quality** — Tests, linting, and builds (no security scans)
 2. **QA code review** — Review changed files for test quality
-3. **Security review** — Review security + run security scans
+3. **Security review** — All security scans + security code review
 
 ### 3. Spawn Review Teammates (ALL IN PARALLEL)
 
@@ -34,7 +34,7 @@ Spawn three teammates simultaneously via the Task tool. For each, use `subagent_
 
 **qa-test-runner** (sonnet):
 - Agent file: `.claude/agents/qa-test-runner.md`
-- Runs `make test-complete` — the comprehensive CI-parity gate
+- Runs `make test-quality` — tests, linting, builds (no security scans)
 - Reports pass/fail with specific test names and error details
 
 **qa-code-reviewer** (sonnet):
@@ -45,8 +45,9 @@ Spawn three teammates simultaneously via the Task tool. For each, use `subagent_
 
 **security-engineer** (opus):
 - Agent file: `.claude/agents/security-engineer.md`
-- Reviews all changed files for security vulnerabilities
+- Sole owner of all security scanning and security code review
 - Runs make security-precommit, check-architecture, security-scan
+- Reviews changed files for vulnerabilities, central provider violations
 - Reports blocking issues with file:line references
 
 ### 4. Collect Results
