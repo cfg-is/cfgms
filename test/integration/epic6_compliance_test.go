@@ -233,6 +233,8 @@ func (m *MockStorageProvider) CreateTenantStore(config map[string]interface{}) (
 
 // TestEpic6ComplianceConfigurationStorage validates Epic 6 compliance requirements
 func TestEpic6ComplianceConfigurationStorage(t *testing.T) {
+	t.Parallel()
+
 	ctx := context.Background()
 	logger := logging.NewNoopLogger()
 
@@ -382,6 +384,8 @@ func TestEpic6ComplianceConfigurationStorage(t *testing.T) {
 
 // TestEpic6ComplianceValidation validates that Epic 6 compliance requirements are enforced
 func TestEpic6ComplianceValidation(t *testing.T) {
+	t.Parallel()
+
 	ctx := context.Background()
 	logger := logging.NewNoopLogger()
 	configStore := NewMockConfigStore()
@@ -433,6 +437,8 @@ func TestEpic6ComplianceValidation(t *testing.T) {
 // TestEpic6TenantStoragePersistence validates tenant data persistence (Story #262)
 // This test ensures that tenant management uses durable storage and survives restarts
 func TestEpic6TenantStoragePersistence(t *testing.T) {
+	t.Parallel()
+
 	ctx := context.Background()
 
 	// Create a temporary directory for test git storage
@@ -605,6 +611,8 @@ func TestEpic6TenantStoragePersistence(t *testing.T) {
 // If this test fails, it means someone has introduced a regression by using
 // non-durable (e.g., memory-only) storage for data that must persist.
 func TestPersistenceRegressionGuard(t *testing.T) {
+	t.Parallel()
+
 	ctx := context.Background()
 	tempDir := t.TempDir()
 

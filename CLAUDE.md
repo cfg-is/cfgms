@@ -30,9 +30,8 @@ CFGMS (Config Management System) is a modern, Go-based configuration management 
 **Required Commands:**
 - **`/story-start`** - MUST use to begin new story with pre-flight checks and roadmap auto-detection
 - **`/story-commit`** - MUST use for all commits with validation and GitHub issue progress tracking
-- **`/story-complete`** - MUST use to complete story with final validation gates and PR creation
+- **`/story-complete`** - MUST use to complete story with parallel adversarial team review (QA + Security agents) and PR creation
 - **`/pr-review [number]`** - MUST use to execute structured 6-phase PR review methodology with CI verification
-- **`/dev-status`** - Quick development environment and current story status
 
 **Why Mandatory:**
 - Prevents broken tests from reaching develop branch
@@ -576,4 +575,4 @@ The system implements recursive parent-child tenant model:
 
 ---
 
-*For complete development workflow automation, use the slash commands in `.claude/slash-commands/`. For manual processes, see the detailed guides in `docs/development/`.*
+*For complete development workflow automation, use the slash commands in `.claude/commands/`. For manual processes, see the detailed guides in `docs/development/`.*

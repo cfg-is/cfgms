@@ -575,6 +575,8 @@ func (f *PrivilegeEscalationTestFramework) GetAttackMetrics() map[string]interfa
 
 // TestPrivilegeEscalationAttackPrevention is the main integration test
 func TestPrivilegeEscalationAttackPrevention(t *testing.T) {
+	t.Parallel()
+
 	t.Log("=== Privilege Escalation Attack Prevention Integration Test ===")
 
 	// Create test framework
@@ -616,6 +618,8 @@ func TestPrivilegeEscalationAttackPrevention(t *testing.T) {
 
 // TestMultiTenantPrivilegeEscalationIsolation tests cross-tenant escalation prevention
 func TestMultiTenantPrivilegeEscalationIsolation(t *testing.T) {
+	t.Parallel()
+
 	t.Log("Testing multi-tenant privilege escalation isolation...")
 
 	framework := NewPrivilegeEscalationTestFramework(t)

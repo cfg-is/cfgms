@@ -888,12 +888,26 @@ security-gosec:
 	fi
 	@echo "Analyzing Go code for security patterns..."
 	@echo "Using .gosec.json configuration (single source of truth)..."
-	@gosec -conf .gosec.json -exclude=G103,G115,G404 -fmt json -quiet ./... > /tmp/gosec-results.json 2>/dev/null || true
-	@issues_count=$$(test -s /tmp/gosec-results.json && jq '.Issues | length' /tmp/gosec-results.json 2>/dev/null || echo "0"); \
+	@echo "Running per-directory to avoid cross-package type resolution bottleneck..."
+	@rm -f /tmp/gosec-results-combined.json
+	@all_issues="[]"; \
+	for dir in pkg features cmd api test internal; do \
+		if [ -d "$$dir" ]; then \
+			gosec -conf .gosec.json -exclude=G103,G115,G404 -fmt json -quiet ./$$dir/... > /tmp/gosec-results-$$dir.json 2>/dev/null || true; \
+			if [ -s /tmp/gosec-results-$$dir.json ]; then \
+				dir_issues=$$(jq -r '.Issues // []' /tmp/gosec-results-$$dir.json 2>/dev/null); \
+				if [ "$$dir_issues" != "null" ] && [ "$$dir_issues" != "[]" ]; then \
+					all_issues=$$(echo "$$all_issues" "$$dir_issues" | jq -s '.[0] + .[1]'); \
+				fi; \
+			fi; \
+			rm -f /tmp/gosec-results-$$dir.json; \
+		fi; \
+	done; \
+	issues_count=$$(echo "$$all_issues" | jq 'length' 2>/dev/null || echo "0"); \
 	if [ "$$issues_count" -gt 0 ]; then \
 		echo "⚠️  gosec found $$issues_count security issues:"; \
 		echo ""; \
-		jq -r '.Issues[] | "  • \(.rule_id) (\(.severity)): \(.details) at \(.file):\(.line)"' /tmp/gosec-results.json 2>/dev/null || echo "  Issues found but could not parse details"; \
+		echo "$$all_issues" | jq -r '.[] | "  • \(.rule_id) (\(.severity)): \(.details) at \(.file):\(.line)"' 2>/dev/null || echo "  Issues found but could not parse details"; \
 		echo ""; \
 		echo "💡 Review and fix security patterns above"; \
 		echo "   Use #nosec comment to suppress false positives"; \
@@ -903,7 +917,6 @@ security-gosec:
 	else \
 		echo "✅ gosec analysis completed - no security patterns found"; \
 	fi
-	@rm -f /tmp/gosec-results.json
 
 # staticcheck advanced Go static analysis with curated rules and performance optimization
 security-staticcheck:
@@ -1878,6 +1891,23 @@ test-e2e-local:
 # Story #315: Now matches ALL CI required checks (100% parity except Windows/macOS native builds)
 # Includes all commit validation PLUS CI integration tests and E2E testing
 .PHONY: test-complete-full
+# Quality validation: tests, linting, builds (NO security scans)
+# Used by qa-test-runner agent — security scans run separately via security-engineer agent
+.PHONY: test-quality
+test-quality: test lint check-license-headers test-production-critical build-cross-validate test-integration-docker
+	@echo ""
+	@echo "✅ QUALITY VALIDATION FINISHED"
+	@echo "========================================"
+	@echo "- ✅ Unit tests passed with race detection (test)"
+	@echo "- ✅ Code linting passed (lint)"
+	@echo "- ✅ License headers validated (check-license-headers)"
+	@echo "- ✅ Production critical tests passed (test-production-critical)"
+	@echo "- ✅ Cross-platform compilation validated (build-cross-validate)"
+	@echo "- ✅ Docker integration tests passed (storage/controller)"
+	@echo ""
+	@echo "ℹ️  Security scans run separately via security-engineer agent"
+	@echo "ℹ️  E2E tests available via make test-e2e-fast (for local CI debugging)"
+
 test-complete-full: test-commit test-fast test-production-critical build-cross-validate test-integration-docker test-e2e-fast
 	@echo ""
 	@echo "✅ COMPLETE STORY VALIDATION FINISHED"
