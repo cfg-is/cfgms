@@ -563,5 +563,7 @@ func (s *CertificateRegistrationTestSuite) TestRegistrationFlowIntegration() {
 }
 
 func TestCertificateRegistration(t *testing.T) {
+	t.Parallel()
+
 	suite.Run(t, new(CertificateRegistrationTestSuite))
 }

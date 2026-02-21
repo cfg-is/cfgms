@@ -16,6 +16,8 @@ import (
 
 // TestV020BasicIntegration tests the core v0.2.0 functionality without complex service dependencies
 func TestV020BasicIntegration(t *testing.T) {
+	t.Parallel()
+
 	if runtime.GOOS == "windows" {
 		t.Skip("Skipping bash-based test on Windows")
 	}
@@ -183,6 +185,8 @@ func TestV020BasicIntegration(t *testing.T) {
 
 // TestV020FeatureAvailability verifies that all v0.2.0 features are available
 func TestV020FeatureAvailability(t *testing.T) {
+	t.Parallel()
+
 	if runtime.GOOS == "windows" {
 		t.Skip("Skipping bash-based test on Windows")
 	}

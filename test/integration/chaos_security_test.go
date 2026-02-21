@@ -1,6 +1,3 @@
-//go:build !short
-// +build !short
-
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jordan Ritz
 
@@ -622,6 +619,10 @@ func TestChaosEngineeringBasicFailures(t *testing.T) {
 
 // TestChaosRecoveryBehavior tests system recovery behavior after chaos
 func TestChaosRecoveryBehavior(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+
 	framework := NewChaosSecurityTestFramework(t)
 	defer framework.Cleanup()
 
@@ -730,6 +731,10 @@ func TestChaosRecoveryBehavior(t *testing.T) {
 
 // TestChaosNetworkPartitionTolerance tests network partition tolerance under chaos
 func TestChaosNetworkPartitionTolerance(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+
 	framework := NewChaosSecurityTestFramework(t)
 	defer framework.Cleanup()
 

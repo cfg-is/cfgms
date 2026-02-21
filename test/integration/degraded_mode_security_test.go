@@ -1,6 +1,3 @@
-//go:build !short
-// +build !short
-
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jordan Ritz
 
@@ -517,6 +514,10 @@ func (framework *DegradedModeSecurityTestFramework) testNetworkPartitionToleranc
 
 // TestRBACFailSecureDegradation tests RBAC fail-secure degradation behavior
 func TestRBACFailSecureDegradation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+
 	framework := NewDegradedModeSecurityTestFramework(t)
 	defer framework.Cleanup()
 
@@ -572,6 +573,10 @@ func TestRBACFailSecureDegradation(t *testing.T) {
 
 // TestRiskEngineEnhancedAuthDegradation tests risk engine enhanced auth degradation
 func TestRiskEngineEnhancedAuthDegradation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+
 	framework := NewDegradedModeSecurityTestFramework(t)
 	defer framework.Cleanup()
 
@@ -634,6 +639,10 @@ func TestRiskEngineEnhancedAuthDegradation(t *testing.T) {
 
 // TestJITAutoRevokeDegradation tests JIT auto-revoke degradation behavior
 func TestJITAutoRevokeDegradation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+
 	framework := NewDegradedModeSecurityTestFramework(t)
 	defer framework.Cleanup()
 
@@ -726,6 +735,10 @@ func TestJITAutoRevokeDegradation(t *testing.T) {
 
 // TestNetworkPartitionDegradation tests network partition degradation modes
 func TestNetworkPartitionDegradation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+
 	framework := NewDegradedModeSecurityTestFramework(t)
 	defer framework.Cleanup()
 
@@ -828,6 +841,10 @@ func TestNetworkPartitionDegradation(t *testing.T) {
 
 // TestDegradedModeOperationalMetrics tests operational metrics during degraded mode
 func TestDegradedModeOperationalMetrics(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+
 	framework := NewDegradedModeSecurityTestFramework(t)
 	defer framework.Cleanup()
 
