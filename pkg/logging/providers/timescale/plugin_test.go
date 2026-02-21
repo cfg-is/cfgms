@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/logging/interfaces"
+	"github.com/cfgis/cfgms/pkg/testutil"
 )
 
 // TestTimescaleProvider_BasicFunctionality tests basic provider operations
@@ -412,10 +413,7 @@ func getTestTimescaleConfigWithTable(tableSuffix string) map[string]interface{} 
 		port = "5434"
 	}
 
-	password := os.Getenv("CFGMS_TEST_TIMESCALEDB_PASSWORD")
-	if password == "" {
-		password = "cfgms_test_password"
-	}
+	password := testutil.GetTestTimescalePassword()
 
 	// Use unified database and user (cfgms_ha_test / cfgms_test)
 	// These match the docker-compose.test.yml configuration

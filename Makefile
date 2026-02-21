@@ -467,6 +467,18 @@ check-architecture:
 	fi; \
 	\
 	echo ""; \
+	echo "📦 Checking for hardcoded passwords (Story #372)..."; \
+	if [ -n "$$files" ]; then \
+		pw_violations=$$(echo "$$files" | xargs grep -n '"cfgms_test_password"\|"cfgms_test"\|"password": "cfgms"\|password.*=.*"cfgms' 2>/dev/null | grep -v "check-architecture\|cfgms_test_password" || true); \
+		if [ -n "$$pw_violations" ]; then \
+			echo "  ❌ Found hardcoded passwords in staged Go files:"; \
+			echo "     $$pw_violations"; \
+			echo "     Use pkg/testutil.GetTestDBPassword() or environment variables"; \
+			violations=$$((violations + 1)); \
+		fi; \
+	fi; \
+	\
+	echo ""; \
 	if [ $$violations -eq 0 ]; then \
 		echo "✅ No central provider violations found"; \
 		echo ""; \
@@ -1551,30 +1563,26 @@ test-integration-short:
 test-integration-db:
 	@echo "📊 Testing Database Storage Provider"
 	@echo "==================================="
-	@if [ -f .env.test ]; then \
-		set -a && . ./.env.test && set +a && ./scripts/wait-for-services.sh; \
-	else \
-		echo "⚠️  .env.test not found. Using default credentials."; \
-		./scripts/wait-for-services.sh; \
+	@if [ ! -f .env.test ]; then \
+		echo "❌ .env.test not found. Run: make test-integration-setup"; \
+		exit 1; \
 	fi
+	@set -a && . ./.env.test && set +a && ./scripts/wait-for-services.sh && \
 	CFGMS_TEST_DB_HOST=localhost \
 	CFGMS_TEST_DB_PORT=5433 \
-	CFGMS_TEST_DB_PASSWORD=cfgms_test_password \
 	go test -v -tags=integration ./pkg/storage/providers/database/...
 
 # Test git provider specifically  
 test-integration-git:
 	@echo "📁 Testing Git Storage Provider"
 	@echo "==============================="
-	@if [ -f .env.test ]; then \
-		set -a && . ./.env.test && set +a && ./scripts/wait-for-services.sh; \
-	else \
-		echo "⚠️  .env.test not found. Using default credentials."; \
-		./scripts/wait-for-services.sh; \
+	@if [ ! -f .env.test ]; then \
+		echo "❌ .env.test not found. Run: make test-integration-setup"; \
+		exit 1; \
 	fi
+	@set -a && . ./.env.test && set +a && ./scripts/wait-for-services.sh && \
 	CFGMS_TEST_GITEA_URL=http://localhost:3001 \
 	CFGMS_TEST_GITEA_USER=cfgms_test \
-	CFGMS_TEST_GITEA_PASSWORD=cfgms_test_password \
 	go test -v -tags=integration ./pkg/storage/providers/git/...
 
 # Future: Test Redis provider (when implemented)

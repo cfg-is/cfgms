@@ -24,14 +24,11 @@ echo "Gitea is ready!"
 # Gitea API credentials - use environment variables or secure defaults
 GITEA_URL="http://localhost:3000"
 USERNAME="${CFGMS_TEST_GITEA_USER:-cfgms_test}"
-# Get password from Docker environment or fallback
+# Get password from Docker environment (no hardcoded fallback)
 PASSWORD="${CFGMS_TEST_GITEA_PASSWORD:-$GITEA__admin__PASSWORD}"
 if [ -z "$PASSWORD" ]; then
-    PASSWORD="cfgms_test_password"
-fi
-
-if [ "$PASSWORD" != "${CFGMS_TEST_GITEA_PASSWORD:-}" ]; then
-    echo "⚠️  Warning: Using generated password. For production, set CFGMS_TEST_GITEA_PASSWORD"
+    echo "❌ ERROR: No password available. Set CFGMS_TEST_GITEA_PASSWORD or GITEA__admin__PASSWORD"
+    exit 1
 fi
 
 # Function to create repository via API
