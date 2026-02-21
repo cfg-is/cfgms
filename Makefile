@@ -1894,20 +1894,19 @@ test-e2e-local:
 # Quality validation: tests, linting, builds (NO security scans)
 # Used by qa-test-runner agent — security scans run separately via security-engineer agent
 .PHONY: test-quality
-test-quality: test lint check-license-headers test-fast test-production-critical build-cross-validate test-integration-docker test-e2e-fast
+test-quality: test lint check-license-headers test-production-critical build-cross-validate test-integration-docker
 	@echo ""
 	@echo "✅ QUALITY VALIDATION FINISHED"
 	@echo "========================================"
 	@echo "- ✅ Unit tests passed with race detection (test)"
 	@echo "- ✅ Code linting passed (lint)"
 	@echo "- ✅ License headers validated (check-license-headers)"
-	@echo "- ✅ Fast comprehensive tests passed (test-fast)"
 	@echo "- ✅ Production critical tests passed (test-production-critical)"
 	@echo "- ✅ Cross-platform compilation validated (build-cross-validate)"
 	@echo "- ✅ Docker integration tests passed (storage/controller)"
-	@echo "- ✅ E2E tests passed (MQTT+QUIC + Controller - PARALLEL)"
 	@echo ""
 	@echo "ℹ️  Security scans run separately via security-engineer agent"
+	@echo "ℹ️  E2E tests available via make test-e2e-fast (for local CI debugging)"
 
 test-complete-full: test-commit test-fast test-production-critical build-cross-validate test-integration-docker test-e2e-fast
 	@echo ""

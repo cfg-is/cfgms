@@ -34,7 +34,7 @@ Spawn three teammates simultaneously via the Task tool. For each, use `subagent_
 
 **qa-test-runner** (sonnet):
 - Agent file: `.claude/agents/qa-test-runner.md`
-- Runs `make test-quality` — tests, linting, builds (no security scans)
+- Runs `make test-quality` — unit tests, lint, production-critical, cross-platform builds, Docker integration (no security scans, no E2E)
 - Reports pass/fail with specific test names and error details
 
 **qa-code-reviewer** (sonnet):

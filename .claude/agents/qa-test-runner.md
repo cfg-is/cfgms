@@ -21,13 +21,11 @@ This runs:
 - Unit tests with race detection
 - Code linting and quality checks
 - License header validation
-- Fast comprehensive tests
-- Production critical tests
+- Production critical tests (integration + unit)
 - Cross-platform compilation validation
 - Docker integration tests (storage, controller)
-- E2E tests (MQTT+QUIC + Controller)
 
-**Note**: Security scans (gosec, Trivy, Nancy, staticcheck, secret scanning, architecture checks) are handled by the security-engineer agent. Do NOT run `make test-complete` or `make security-scan`.
+**Note**: Security scans are handled by the security-engineer agent. E2E tests are for local CI debugging only (make test-e2e-fast). Do NOT run `make test-complete` or `make security-scan`.
 
 ## Reporting
 
