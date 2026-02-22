@@ -300,13 +300,10 @@ go build -o bin/steward ./cmd/steward
 ### Testing Environment Variables
 
 ```bash
-# M365 Integration Testing
-CFGMS_TEST_DB_HOST=localhost
-CFGMS_TEST_DB_PORT=5433
-CFGMS_TEST_DB_PASSWORD=cfgms_test_password
-CFGMS_TEST_GITEA_URL=http://localhost:3001
-CFGMS_TEST_GITEA_USER=cfgms_test
-CFGMS_TEST_GITEA_PASSWORD=cfgms_test_password
+# Database and service passwords are generated per-session.
+# Run 'make test-integration-setup' to generate .env.test with secure credentials.
+# NEVER use hardcoded passwords — source .env.test instead:
+source .env.test
 
 # Integration Test Control
 ALLOW_SKIP_INTEGRATION=true  # Skips M365 tests if credentials unavailable

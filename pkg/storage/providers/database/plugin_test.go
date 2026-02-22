@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	"github.com/cfgis/cfgms/pkg/testutil"
 )
 
 // buildTestDSN creates a DSN string from test configuration
@@ -29,10 +30,7 @@ func buildTestDSN() string {
 
 // getTestConfig returns test database configuration using environment variables or defaults
 func getTestConfig() map[string]interface{} {
-	password := os.Getenv("CFGMS_TEST_DB_PASSWORD")
-	if password == "" {
-		password = "cfgms_test" // fallback for non-Docker tests
-	}
+	password := testutil.GetTestDBPassword()
 
 	port := 5432
 	if portStr := os.Getenv("CFGMS_TEST_DB_PORT"); portStr != "" {
