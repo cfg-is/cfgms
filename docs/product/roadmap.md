@@ -158,7 +158,7 @@ Test infrastructure, breaking changes, and communication layer architecture — 
 
 Minimum security hygiene before deploying on a real network.
 
-- [ ] Eliminate hardcoded TimescaleDB password (Issue #372 - 3-5 points) - Remove "No Footguns" violation, implement JIT password generation for tests, require explicit credentials in production
+- [x] Eliminate hardcoded TimescaleDB password (Issue #372 - 3-5 points) - Remove "No Footguns" violation, implement JIT password generation for tests, require explicit credentials in production
 - [ ] Implement log injection prevention in pkg/logging (Issue #373 - 3-5 points) - Resolve 25 code scanning alerts, add sanitization infrastructure to prevent log forgery attacks
 - [ ] Fix Windows workflow test failures (Issue #309) - Required for Windows VM management in v0.9.2
 

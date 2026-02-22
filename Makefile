@@ -469,7 +469,7 @@ check-architecture:
 	echo ""; \
 	echo "📦 Checking for hardcoded passwords (Story #372)..."; \
 	if [ -n "$$files" ]; then \
-		pw_violations=$$(echo "$$files" | xargs grep -n '"cfgms_test_password"\|"cfgms_test"\|"password": "cfgms"\|password.*=.*"cfgms' 2>/dev/null | grep -v "check-architecture\|cfgms_test_password" || true); \
+		pw_violations=$$(echo "$$files" | xargs grep -n '"cfgms_test_password"\|"password": "cfgms"\|"password", "cfgms"\|password.*=.*"cfgms_test_password' 2>/dev/null | grep -v "check-architecture" || true); \
 		if [ -n "$$pw_violations" ]; then \
 			echo "  ❌ Found hardcoded passwords in staged Go files:"; \
 			echo "     $$pw_violations"; \
