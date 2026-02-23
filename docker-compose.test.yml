@@ -175,7 +175,7 @@ services:
       CFGMS_HA_NODE_TIMEOUT: "15s"
       CFGMS_HA_ELECTION_TIMEOUT: "5s"
       CFGMS_HA_HEARTBEAT_INTERVAL: "2s"
-      CFGMS_API_KEY: "test-api-key-east"
+      CFGMS_API_KEY: "${API_KEY_EAST}"
     volumes:
       - ./test/integration/mqtt_quic/certs:/app/test-certs:ro  # Story 12.4: TLS certificates
     depends_on:
@@ -244,7 +244,7 @@ services:
       CFGMS_HA_NODE_TIMEOUT: "15s"
       CFGMS_HA_ELECTION_TIMEOUT: "5s"
       CFGMS_HA_HEARTBEAT_INTERVAL: "2s"
-      CFGMS_API_KEY: "test-api-key-central"
+      CFGMS_API_KEY: "${API_KEY_CENTRAL}"
     volumes:
       - ./test/integration/mqtt_quic/certs:/app/test-certs:ro  # Story 12.4: TLS certificates
     depends_on:
@@ -313,7 +313,7 @@ services:
       CFGMS_HA_NODE_TIMEOUT: "15s"
       CFGMS_HA_ELECTION_TIMEOUT: "5s"
       CFGMS_HA_HEARTBEAT_INTERVAL: "2s"
-      CFGMS_API_KEY: "test-api-key-west"
+      CFGMS_API_KEY: "${API_KEY_WEST}"
     volumes:
       - ./test/integration/mqtt_quic/certs:/app/test-certs:ro  # Story 12.4: TLS certificates
     depends_on:
@@ -337,7 +337,7 @@ services:
       dockerfile: cmd/steward/Dockerfile
     environment:
       # MQTT+QUIC Configuration (Story #198, Story 12.4)
-      CFGMS_REGISTRATION_TOKEN: "cfgms_reg_dockertest_east"
+      CFGMS_REGISTRATION_TOKEN: "${REG_TOKEN_EAST}"
       CFGMS_MQTT_BROKER: "mqtt://controller-east:8883"  # TLS port
       CFGMS_QUIC_ADDRESS: "controller-east:4433"
       # Story 12.4: TLS client certificate configuration
@@ -371,7 +371,7 @@ services:
       dockerfile: cmd/steward/Dockerfile
     environment:
       # MQTT+QUIC Configuration (Story #198, Story 12.4)
-      CFGMS_REGISTRATION_TOKEN: "cfgms_reg_dockertest_central"
+      CFGMS_REGISTRATION_TOKEN: "${REG_TOKEN_CENTRAL}"
       CFGMS_MQTT_BROKER: "mqtt://controller-central:8883"  # TLS port
       CFGMS_QUIC_ADDRESS: "controller-central:4433"
       # Story 12.4: TLS client certificate configuration
@@ -405,7 +405,7 @@ services:
       dockerfile: cmd/steward/Dockerfile
     environment:
       # MQTT+QUIC Configuration (Story #198, Story 12.4)
-      CFGMS_REGISTRATION_TOKEN: "cfgms_reg_dockertest_west"
+      CFGMS_REGISTRATION_TOKEN: "${REG_TOKEN_WEST}"
       CFGMS_MQTT_BROKER: "mqtt://controller-west:8883"  # TLS port
       CFGMS_QUIC_ADDRESS: "controller-west:4433"
       # Story 12.4: TLS client certificate configuration
@@ -447,7 +447,7 @@ services:
       - GITEA__server__HTTP_PORT=3000
       - GITEA__server__ROOT_URL=http://git-server-ha:3000
       - GITEA__security__INSTALL_LOCK=true
-      - GITEA__security__SECRET_KEY=gitea-secret-key-for-ha-testing
+      - GITEA__security__SECRET_KEY=${GITEA_SECRET_KEY}
       - GITEA__service__DISABLE_REGISTRATION=true
       - GITEA__service__REQUIRE_SIGNIN_VIEW=false
     ports:
@@ -517,6 +517,8 @@ services:
       CFGMS_TIMESCALE_PASSWORD: "${TIMESCALEDB_PASSWORD}"
       # Disable HA to run in standalone mode
       CFGMS_HA_ENABLED: "false"
+      # Enable test endpoints for integration testing (auth bypass for /api/v1/test/*)
+      CFGMS_ENABLE_TEST_ENDPOINTS: "true"
       CFGMS_CERT_PATH: "/app/certs"
       CFGMS_DATA_DIR: "/app/data"
     # Run as root to avoid permission issues, create log dir first
@@ -554,7 +556,7 @@ services:
       context: .
       dockerfile: cmd/steward/Dockerfile
     environment:
-      CFGMS_REGISTRATION_TOKEN: "cfgms_reg_dockertest_standalone"
+      CFGMS_REGISTRATION_TOKEN: "${REG_TOKEN_STANDALONE}"
       CFGMS_CONTROLLER_URL: "https://controller-standalone:9080"
       CFGMS_HTTP_INSECURE_SKIP_VERIFY: "true"  # Story #312: Test mode - skip TLS verification for HTTP registration
       # Story 12.4: TLS client certificate configuration
@@ -564,7 +566,7 @@ services:
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
-    command: ["./steward", "--log-level", "debug", "--log-provider", "file", "--regtoken", "cfgms_reg_dockertest_standalone"]
+    command: ["sh", "-c", "./steward --log-level debug --log-provider file --regtoken $$CFGMS_REGISTRATION_TOKEN"]
     volumes:
       - steward_standalone_data:/app/data
       - ./test/integration/mqtt_quic/certs:/app/test-certs:ro  # Story 12.4: TLS client certificates
@@ -597,7 +599,7 @@ services:
       dockerfile: cmd/steward/Dockerfile
     environment:
       CFGMS_TENANT_ID: "tenant1"  # Story 12.5: Tenant isolation
-      CFGMS_REGISTRATION_TOKEN: "cfgms_reg_tenant1"
+      CFGMS_REGISTRATION_TOKEN: "${REG_TOKEN_TENANT1}"
       CFGMS_CONTROLLER_URL: "https://controller-standalone:9080"
       CFGMS_HTTP_INSECURE_SKIP_VERIFY: "true"  # Story #312: Test mode - skip TLS verification for HTTP registration
       # Story 12.4: TLS client certificate configuration
@@ -607,7 +609,7 @@ services:
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
-    command: ["./steward", "--log-level", "debug", "--log-provider", "file", "--regtoken", "cfgms_reg_tenant1", "--tenant-id", "tenant1"]
+    command: ["sh", "-c", "./steward --log-level debug --log-provider file --regtoken $$CFGMS_REGISTRATION_TOKEN --tenant-id tenant1"]
     volumes:
       - steward_tenant1_data:/app/data
       - ./test/module-execution:/test-workspace:rw
@@ -627,7 +629,7 @@ services:
       dockerfile: cmd/steward/Dockerfile
     environment:
       CFGMS_TENANT_ID: "tenant2"  # Story 12.5: Tenant isolation
-      CFGMS_REGISTRATION_TOKEN: "cfgms_reg_tenant2"
+      CFGMS_REGISTRATION_TOKEN: "${REG_TOKEN_TENANT2}"
       CFGMS_CONTROLLER_URL: "https://controller-standalone:9080"
       CFGMS_HTTP_INSECURE_SKIP_VERIFY: "true"  # Story #312: Test mode - skip TLS verification for HTTP registration
       # Story 12.4: TLS client certificate configuration
@@ -637,7 +639,7 @@ services:
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
-    command: ["./steward", "--log-level", "debug", "--log-provider", "file", "--regtoken", "cfgms_reg_tenant2", "--tenant-id", "tenant2"]
+    command: ["sh", "-c", "./steward --log-level debug --log-provider file --regtoken $$CFGMS_REGISTRATION_TOKEN --tenant-id tenant2"]
     volumes:
       - steward_tenant2_data:/app/data
       - ./test/module-execution:/test-workspace:rw
@@ -657,7 +659,7 @@ services:
       dockerfile: cmd/steward/Dockerfile
     environment:
       CFGMS_TENANT_ID: "tenant3"  # Story 12.5: Tenant isolation
-      CFGMS_REGISTRATION_TOKEN: "cfgms_reg_tenant3"
+      CFGMS_REGISTRATION_TOKEN: "${REG_TOKEN_TENANT3}"
       CFGMS_CONTROLLER_URL: "https://controller-standalone:9080"
       CFGMS_HTTP_INSECURE_SKIP_VERIFY: "true"  # Story #312: Test mode - skip TLS verification for HTTP registration
       # Story 12.4: TLS client certificate configuration
@@ -667,7 +669,7 @@ services:
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
-    command: ["./steward", "--log-level", "debug", "--log-provider", "file", "--regtoken", "cfgms_reg_tenant3", "--tenant-id", "tenant3"]
+    command: ["sh", "-c", "./steward --log-level debug --log-provider file --regtoken $$CFGMS_REGISTRATION_TOKEN --tenant-id tenant3"]
     volumes:
       - steward_tenant3_data:/app/data
       - ./test/module-execution:/test-workspace:rw

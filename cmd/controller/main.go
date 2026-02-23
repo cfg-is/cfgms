@@ -162,7 +162,7 @@ func getLogProviderConfig(cfg *config.Config) map[string]interface{} {
 		}
 		sslMode := os.Getenv("CFGMS_TIMESCALE_SSLMODE")
 		if sslMode == "" {
-			sslMode = "disable"
+			sslMode = "require"
 		}
 		return map[string]interface{}{
 			"host":     host,

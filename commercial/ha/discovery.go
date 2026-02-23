@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -292,15 +293,26 @@ func (d *staticDiscovery) checkNodeHealth(node *NodeInfo) bool {
 		return false
 	}
 
-	// Simple HTTP GET to check if node is responding
-	// Use HTTPS with basic TLS config from pkg/cert
-	// TODO: Add proper certificate validation with cert manager
-	tlsConfig, err := cert.CreateBasicTLSConfig(nil, nil, tls.VersionTLS12)
+	// Use HTTPS with basic TLS config from pkg/cert (no InsecureSkipVerify).
+	// If CA cert is available via config, use it for proper validation.
+	// TLS validation failures trigger the error handler which correctly
+	// returns true (node is responding, just needs proper certs).
+	var tlsConfig *tls.Config
+	var err error
+
+	if d.manager != nil && d.manager.cfg != nil && d.manager.cfg.CACertPath != "" {
+		caCertPEM, readErr := os.ReadFile(d.manager.cfg.CACertPath)
+		if readErr == nil {
+			tlsConfig, err = cert.CreateClientTLSConfig(nil, nil, caCertPEM, "", tls.VersionTLS12)
+		}
+	}
+	if tlsConfig == nil {
+		tlsConfig, err = cert.CreateBasicTLSConfig(nil, nil, tls.VersionTLS12)
+	}
 	if err != nil {
 		log.Printf("DISCOVERY: Failed to create TLS config for health check: %v", err)
 		return false
 	}
-	tlsConfig.InsecureSkipVerify = true // TODO: Remove after implementing proper cert validation
 
 	client := &http.Client{
 		Timeout: 2 * time.Second,
@@ -312,7 +324,8 @@ func (d *staticDiscovery) checkNodeHealth(node *NodeInfo) bool {
 	url := fmt.Sprintf("https://%s/healthz", node.Address)
 	resp, err := client.Get(url)
 	if err != nil {
-		// Check if it's a TLS handshake error - means server is up but requires client cert
+		// TLS handshake errors mean the server IS responding — it just requires proper certs.
+		// This is a connectivity check, not a data exchange, so this is correct behavior.
 		if strings.Contains(err.Error(), "tls:") || strings.Contains(err.Error(), "certificate") {
 			log.Printf("HEALTH_CHECK: Node up (TLS handshake), node_id=%s, address=%s", node.ID, node.Address)
 			return true // Server is up, just needs mTLS

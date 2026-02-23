@@ -13,6 +13,9 @@ type Config struct {
 	// Node configuration
 	Node NodeConfig `yaml:"node" json:"node"`
 
+	// CACertPath is the path to the CA certificate for TLS verification between HA nodes
+	CACertPath string `yaml:"ca_cert_path,omitempty" json:"ca_cert_path,omitempty"`
+
 	// Cluster configuration (only used in commercial builds)
 	Cluster ClusterConfig `yaml:"cluster" json:"cluster"`
 

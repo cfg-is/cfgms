@@ -59,7 +59,8 @@ func main() {
 	if *provider == "file" {
 		logDir := os.Getenv("CFGMS_LOG_DIR")
 		if logDir == "" {
-			logDir = "/tmp/cfgms" // Default to /tmp for unprivileged containers
+			logDir = "/tmp/cfgms"
+			log.Printf("WARNING: Using /tmp/cfgms for logs — set CFGMS_LOG_DIR for production deployments")
 		}
 		loggingConfig.Config["directory"] = logDir
 	}
@@ -247,10 +248,12 @@ func main() {
 func registerAndConnectMQTT(ctx context.Context, token string, logger logging.Logger) (*client.MQTTClient, error) {
 	logger.Info("Registering steward via HTTP API")
 
-	// Get controller URL from environment (for Docker test mode)
+	// Get controller URL from environment — REQUIRED, no insecure defaults
 	controllerURL := os.Getenv("CFGMS_CONTROLLER_URL")
 	if controllerURL == "" {
-		controllerURL = "http://controller-standalone:9080"
+		return nil, fmt.Errorf("CFGMS_CONTROLLER_URL environment variable is required. " +
+			"Set this to your controller's address (e.g., https://controller:9080). " +
+			"See docs/deployment/ for configuration examples")
 	}
 
 	// Check if we should skip TLS verification (test mode only)
