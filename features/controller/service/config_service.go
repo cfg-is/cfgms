@@ -151,7 +151,7 @@ func (s *ConfigurationService) GetConfiguration(ctx context.Context, req *contro
 	// Filter configuration by requested modules if specified
 	filteredConfig := s.filterConfigByModules(storedConfig.Config, req.Modules)
 
-	fmt.Printf("[DEBUG] GetConfiguration: sending config with %d resources\n", len(filteredConfig.Resources))
+	s.logger.Debug("GetConfiguration: sending config", "steward_id", stewardIDForLog, "resources", len(filteredConfig.Resources))
 
 	// Convert Go struct to protobuf (returns unsigned config, signing happens in QUIC handler)
 	protoConfig, err := stewardconfig.ToProto(filteredConfig)

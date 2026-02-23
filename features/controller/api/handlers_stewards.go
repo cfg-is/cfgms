@@ -256,7 +256,6 @@ func (s *Server) handleUpdateStewardConfig(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		s.logger.Info("Received configuration in YAML format", "steward_id", stewardIDForLog, "resources", len(config.Resources))
-		fmt.Printf("[DEBUG] YAML config parsed: resources=%d steward_id=%s\n", len(config.Resources), config.Steward.ID)
 	} else {
 		// JSON format (legacy/backward compatibility)
 		if err := json.Unmarshal(bodyBytes, &config); err != nil {
