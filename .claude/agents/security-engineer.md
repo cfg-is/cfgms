@@ -62,6 +62,15 @@ Get changed files with `git diff --name-only develop...HEAD`, then review for:
 
 7. **Tenant Isolation**: Missing `tenant_id` in database queries, cross-tenant data access.
 
+8. **No Footguns / Insecure Defaults** (Story #396):
+   - Default credentials or passwords in production code paths (hardcoded connection strings, API keys)
+   - `InsecureSkipVerify = true` outside of test files (`_test.go`)
+   - Disabled encryption/TLS/SSL as default values (e.g., `sslmode=disable` as fallback)
+   - Permissive security modes as fallback when env vars are unset
+   - Any configuration that silently degrades security when env vars are missing
+   - HTTP defaults where HTTPS should be required (e.g., controller URLs defaulting to `http://`)
+   - Authentication bypasses not gated behind explicit opt-in env vars
+
 ### WARNING Issues (Should Fix, Not Blocking)
 
 8. **OWASP Top 10 Patterns**: Command injection, SSRF, broken access control.

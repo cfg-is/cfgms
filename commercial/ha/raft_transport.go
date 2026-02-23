@@ -48,11 +48,24 @@ type raftTransport struct {
 }
 
 // newRaftTransport creates a new Raft transport
-func newRaftTransport(nodeID uint64, address string, consensus *RaftConsensus) *raftTransport {
-	// Use HTTPS with basic TLS config from pkg/cert
-	// TODO: Add proper certificate validation with cert manager
-	tlsConfig, _ := cert.CreateBasicTLSConfig(nil, nil, tls.VersionTLS12)
-	tlsConfig.InsecureSkipVerify = true // TODO: Remove after implementing proper cert validation
+func newRaftTransport(nodeID uint64, address string, consensus *RaftConsensus, caCertPEM []byte) *raftTransport {
+	var tlsConfig *tls.Config
+	var err error
+
+	if len(caCertPEM) > 0 {
+		// Proper TLS validation with CA certificate
+		tlsConfig, err = cert.CreateClientTLSConfig(nil, nil, caCertPEM, "", tls.VersionTLS12)
+		if err != nil {
+			log.Printf("RAFT_TRANSPORT: Failed to create TLS config with CA cert, using basic TLS: %v", err)
+			tlsConfig, _ = cert.CreateBasicTLSConfig(nil, nil, tls.VersionTLS12)
+		}
+	} else {
+		// No CA cert available — use basic TLS without InsecureSkipVerify.
+		// Connections to peers will fail TLS validation (correct: don't run HA without proper certs).
+		log.Printf("RAFT_TRANSPORT: WARNING: No CA certificate configured for HA transport. " +
+			"Set CFGMS_HA_CA_CERT_PATH for proper TLS validation between cluster nodes.")
+		tlsConfig, _ = cert.CreateBasicTLSConfig(nil, nil, tls.VersionTLS12)
+	}
 
 	transport := &http.Transport{
 		MaxIdleConnsPerHost: 10,

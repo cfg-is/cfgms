@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"os"
 	"sync"
 	"time"
 
@@ -532,8 +533,18 @@ func (m *Manager) initializeRaftConsensus() error {
 		return fmt.Errorf("failed to create Raft consensus: %w", err)
 	}
 
+	// Load CA certificate for TLS validation between cluster nodes
+	var caCertPEM []byte
+	if m.cfg.CACertPath != "" {
+		var readErr error
+		caCertPEM, readErr = os.ReadFile(m.cfg.CACertPath)
+		if readErr != nil {
+			log.Printf("RAFT_INIT: WARNING: Failed to read CA cert from %s: %v", m.cfg.CACertPath, readErr)
+		}
+	}
+
 	// Create and attach transport
-	transport := newRaftTransport(nodeID, m.nodeInfo.Address, m.raftConsensus)
+	transport := newRaftTransport(nodeID, m.nodeInfo.Address, m.raftConsensus, caCertPEM)
 	m.raftConsensus.transport = transport
 
 	// Add peer addresses to transport

@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -301,8 +302,7 @@ func NewDatabaseBackend(config *Config, logger logging.Logger) (*DatabaseBackend
 	// Get connection string from environment or config
 	connString := os.Getenv("CFGMS_DNA_DATABASE_URL")
 	if connString == "" {
-		// Default connection string for development
-		connString = "postgres://cfgms:cfgms@localhost:5432/cfgms_dna?sslmode=disable"
+		connString = buildDNAConnString(logger)
 	}
 
 	// Open PostgreSQL connection
@@ -754,6 +754,41 @@ func (b *DatabaseBackend) calculateStats() error {
 	}
 
 	return nil
+}
+
+// buildDNAConnString constructs a PostgreSQL connection string from individual env vars.
+// CFGMS_DNA_DB_PASSWORD is required — no hardcoded defaults for credentials.
+func buildDNAConnString(_ logging.Logger) string {
+	password := os.Getenv("CFGMS_DNA_DB_PASSWORD")
+	if password == "" {
+		log.Fatal("FATAL: CFGMS_DNA_DB_PASSWORD environment variable is required for DNA database backend. " +
+			"Set this variable or use CFGMS_DNA_DATABASE_URL for a full connection string. " +
+			"See docs/deployment/ for configuration examples.")
+	}
+
+	host := os.Getenv("CFGMS_DNA_DB_HOST")
+	if host == "" {
+		host = "localhost"
+	}
+	port := os.Getenv("CFGMS_DNA_DB_PORT")
+	if port == "" {
+		port = "5432"
+	}
+	dbName := os.Getenv("CFGMS_DNA_DB_NAME")
+	if dbName == "" {
+		dbName = "cfgms_dna"
+	}
+	user := os.Getenv("CFGMS_DNA_DB_USER")
+	if user == "" {
+		user = "cfgms"
+	}
+	sslMode := os.Getenv("CFGMS_DNA_DB_SSLMODE")
+	if sslMode == "" {
+		sslMode = "require"
+	}
+
+	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s",
+		user, password, host, port, dbName, sslMode)
 }
 
 // updateStats updates statistics after storing a record
