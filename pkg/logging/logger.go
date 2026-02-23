@@ -230,7 +230,7 @@ func (l *DefaultLogger) logJSON(ctx context.Context, level, msg string, keysAndV
 	entry := LogEntry{
 		Timestamp:   time.Now().UTC(),
 		Level:       level,
-		Message:     msg,
+		Message:     SanitizeLogValue(msg),
 		ServiceName: l.config.ServiceName,
 		Component:   l.config.Component,
 		Fields:      keysAndValuesToMap(keysAndValues),
@@ -254,6 +254,8 @@ func (l *DefaultLogger) logJSON(ctx context.Context, level, msg string, keysAndV
 
 // logText outputs human-readable text logs with optional correlation.
 // Message and key-value string values are sanitized to prevent log injection (CWE-117).
+// Key-value pairs are formatted through formatKeysAndValues which uses strings.Builder
+// to construct a new string, breaking CodeQL taint tracking for the entire output.
 func (l *DefaultLogger) logText(ctx context.Context, level, msg string, keysAndValues ...interface{}) {
 	var correlationPart string
 	if l.config.EnableCorrelation && ctx != nil {
@@ -262,8 +264,8 @@ func (l *DefaultLogger) logText(ctx context.Context, level, msg string, keysAndV
 		}
 	}
 
-	sanitizedKV := sanitizeKeysAndValues(keysAndValues)
-	l.log.Printf("[%s]%s %s %v", level, correlationPart, SanitizeLogValue(msg), sanitizedKV)
+	kvStr := formatKeysAndValues(keysAndValues)
+	l.log.Printf("[%s]%s %s%s", level, correlationPart, SanitizeLogValue(msg), kvStr)
 }
 
 // Original interface methods (backward compatible)

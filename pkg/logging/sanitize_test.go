@@ -238,6 +238,34 @@ func TestSanitizeKeysAndValues_Empty(t *testing.T) {
 	assert.Empty(t, result)
 }
 
+func TestFormatKeysAndValues(t *testing.T) {
+	tests := []struct {
+		name  string
+		input []any
+		want  string
+	}{
+		{"empty", nil, ""},
+		{"empty slice", []any{}, ""},
+		{"single pair", []any{"key", "value"}, " [key=value]"},
+		{"multiple pairs", []any{"a", "1", "b", "2"}, " [a=1 b=2]"},
+		{"non-string value", []any{"count", 42}, " [count=42]"},
+		{"mixed types", []any{"id", "steward-001", "count", 5, "active", true}, " [id=steward-001 count=5 active=true]"},
+		{"sanitizes injection", []any{"id", "bad\nvalue"}, " [id=bad_value]"},
+		{"sanitizes ANSI", []any{"name", "\x1b[31mred\x1b[0m"}, " [name=_[31mred_[0m]"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := formatKeysAndValues(tt.input)
+			assert.Equal(t, tt.want, got)
+			// Verify no control characters in output
+			for _, r := range got {
+				assert.False(t, isControl(r), "control character U+%04X found in formatted output", r)
+			}
+		})
+	}
+}
+
 // isControl mirrors unicode.IsControl for test assertions
 func isControl(r rune) bool {
 	return r < 0x20 || (r >= 0x7f && r <= 0x9f)
