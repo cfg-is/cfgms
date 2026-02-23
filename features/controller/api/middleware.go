@@ -120,14 +120,14 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 		if os.Getenv("CFGMS_ENABLE_TEST_ENDPOINTS") == "true" {
 			if r.Method == "PUT" && strings.HasPrefix(r.URL.Path, "/api/v1/test/stewards/") && strings.HasSuffix(r.URL.Path, "/config") {
 				s.logger.Warn("Test endpoint accessed with authentication bypass",
-					"path", r.URL.Path, "method", r.Method, "remote_addr", r.RemoteAddr)
+					"path", sanitizeLogValue(r.URL.Path), "method", r.Method, "remote_addr", sanitizeLogValue(r.RemoteAddr))
 				next.ServeHTTP(w, r)
 				return
 			}
 
 			if r.Method == "POST" && strings.HasPrefix(r.URL.Path, "/api/v1/test/stewards/") && strings.HasSuffix(r.URL.Path, "/quic/connect") {
 				s.logger.Warn("Test endpoint accessed with authentication bypass",
-					"path", r.URL.Path, "method", r.Method, "remote_addr", r.RemoteAddr)
+					"path", sanitizeLogValue(r.URL.Path), "method", r.Method, "remote_addr", sanitizeLogValue(r.RemoteAddr))
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -526,4 +526,15 @@ func (s *Server) auditToRBACManager(decision *AuthorizationDecision, r *http.Req
 		"decision", decision.Decision,
 		"resource", decision.Resource,
 	)
+}
+
+// sanitizeLogValue removes control characters (newlines, carriage returns, tabs)
+// from user-supplied values before logging to prevent log injection (CWE-117).
+func sanitizeLogValue(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == '\t' {
+			return '_'
+		}
+		return r
+	}, s)
 }

@@ -542,6 +542,18 @@ docker compose --profile ha up -d
 # Controllers coordinate via shared database
 ```
 
+**HA Environment Variables:**
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `CFGMS_HA_MODE` | Yes | `single` | Deployment mode: `single`, `blue-green`, or `cluster` |
+| `CFGMS_HA_CA_CERT_PATH` | Recommended | (none) | Path to CA certificate PEM file for TLS validation between cluster nodes. When set, raft transport and node discovery use this CA for proper certificate verification. Without it, basic TLS is used without CA validation. |
+| `CFGMS_HA_EXTERNAL_ADDRESS` | Yes (cluster) | (none) | This node's address visible to other cluster nodes |
+| `CFGMS_HA_CLUSTER_NODES` | Yes (cluster) | (none) | Comma-separated list of all cluster node addresses |
+| `CFGMS_HA_DISCOVERY_METHOD` | No | `static` | Node discovery method |
+| `CFGMS_HA_ELECTION_TIMEOUT` | No | `5s` | Raft leader election timeout |
+| `CFGMS_HA_HEARTBEAT_INTERVAL` | No | `2s` | Heartbeat interval between nodes |
+
 ### M365 Integration
 
 ```bash

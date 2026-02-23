@@ -10,7 +10,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -302,7 +301,11 @@ func NewDatabaseBackend(config *Config, logger logging.Logger) (*DatabaseBackend
 	// Get connection string from environment or config
 	connString := os.Getenv("CFGMS_DNA_DATABASE_URL")
 	if connString == "" {
-		connString = buildDNAConnString(logger)
+		var err error
+		connString, err = buildDNAConnString()
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Open PostgreSQL connection
@@ -758,12 +761,12 @@ func (b *DatabaseBackend) calculateStats() error {
 
 // buildDNAConnString constructs a PostgreSQL connection string from individual env vars.
 // CFGMS_DNA_DB_PASSWORD is required — no hardcoded defaults for credentials.
-func buildDNAConnString(_ logging.Logger) string {
+func buildDNAConnString() (string, error) {
 	password := os.Getenv("CFGMS_DNA_DB_PASSWORD")
 	if password == "" {
-		log.Fatal("FATAL: CFGMS_DNA_DB_PASSWORD environment variable is required for DNA database backend. " +
+		return "", fmt.Errorf("CFGMS_DNA_DB_PASSWORD environment variable is required for DNA database backend. " +
 			"Set this variable or use CFGMS_DNA_DATABASE_URL for a full connection string. " +
-			"See docs/deployment/ for configuration examples.")
+			"See docs/deployment/ for configuration examples")
 	}
 
 	host := os.Getenv("CFGMS_DNA_DB_HOST")
@@ -788,7 +791,7 @@ func buildDNAConnString(_ logging.Logger) string {
 	}
 
 	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s",
-		user, password, host, port, dbName, sslMode)
+		user, password, host, port, dbName, sslMode), nil
 }
 
 // updateStats updates statistics after storing a record
