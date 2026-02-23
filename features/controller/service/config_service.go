@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -606,9 +607,12 @@ func (s *ConfigurationService) makeTenantStewardKey(tenantID, stewardID string) 
 	return fmt.Sprintf("%s:%s", tenantID, stewardID)
 }
 
+// versionCounter ensures unique version strings without relying on time-based uniqueness
+var versionCounter atomic.Int64
+
 // generateVersion generates a new version string
 func (s *ConfigurationService) generateVersion() string {
-	return fmt.Sprintf("v%d", time.Now().Unix())
+	return fmt.Sprintf("v%d.%d", time.Now().Unix(), versionCounter.Add(1))
 }
 
 // extractTenantID extracts tenant ID from context
