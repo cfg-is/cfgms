@@ -89,10 +89,8 @@ func NewConfigurationService(logger logging.Logger, controllerSvc *ControllerSer
 
 // GetConfiguration retrieves configuration for a specific steward
 func (s *ConfigurationService) GetConfiguration(ctx context.Context, req *controller.ConfigRequest) (*controller.ConfigResponse, error) {
-	// Sanitize steward ID for logging - extract validated portion (prevents log injection)
-	// Using FindString creates a new string, breaking CodeQL taint tracking
-	stewardIDForLog := "[INVALID_ID]" //nolint:ineffassign // Security: assignment needed for CodeQL taint analysis
-	if matched := identifierRegex.FindString(req.StewardId); matched == "" || matched != req.StewardId {
+	stewardIDForLog := logging.SanitizeLogValue(req.StewardId)
+	if !identifierRegex.MatchString(req.StewardId) {
 		s.logger.Warn("Invalid steward ID format in configuration request")
 		return &controller.ConfigResponse{
 			Status: &common.Status{
@@ -100,8 +98,6 @@ func (s *ConfigurationService) GetConfiguration(ctx context.Context, req *contro
 				Message: "Invalid steward ID format",
 			},
 		}, nil
-	} else {
-		stewardIDForLog = matched
 	}
 
 	s.logger.Debug("Configuration request received", "steward_id", stewardIDForLog, "modules", req.Modules)
@@ -109,23 +105,14 @@ func (s *ConfigurationService) GetConfiguration(ctx context.Context, req *contro
 	// Extract tenant context
 	tenantID := s.extractTenantID(ctx)
 
-	// Sanitize tenant ID for logging - extract validated portion (prevents log injection)
-	// Using FindString creates a new string, breaking CodeQL taint tracking
-	tenantIDForLog := "[INVALID_TENANT]"
-	if matched := identifierRegex.FindString(tenantID); matched != "" && matched == tenantID {
-		tenantIDForLog = matched
-	}
+	tenantIDForLog := logging.SanitizeLogValue(tenantID)
 
 	// Verify steward exists and belongs to the tenant (if registered)
 	// Allow unregistered stewards to proceed if configuration exists (for bootstrapping/testing)
 	if s.controllerSvc != nil {
 		stewardInfo, exists := s.controllerSvc.GetStewardInfo(req.StewardId)
 		if exists {
-			// Sanitize steward tenant ID for logging
-			stewardTenantForLog := stewardInfo.TenantID
-			if !identifierRegex.MatchString(stewardInfo.TenantID) {
-				stewardTenantForLog = "[INVALID_TENANT]"
-			}
+			stewardTenantForLog := logging.SanitizeLogValue(stewardInfo.TenantID)
 
 			// Steward is registered, enforce tenant isolation
 			if stewardInfo.TenantID != tenantID {
@@ -194,17 +181,13 @@ func (s *ConfigurationService) GetConfiguration(ctx context.Context, req *contro
 
 // ReportConfigStatus handles configuration status reports from stewards
 func (s *ConfigurationService) ReportConfigStatus(ctx context.Context, req *controller.ConfigStatusReport) (*common.Status, error) {
-	// Sanitize steward ID for logging - extract validated portion (prevents log injection)
-	// Using FindString creates a new string, breaking CodeQL taint tracking
-	stewardIDForLog := "[INVALID_ID]" //nolint:ineffassign // Security: assignment needed for CodeQL taint analysis
-	if matched := identifierRegex.FindString(req.StewardId); matched == "" || matched != req.StewardId {
+	stewardIDForLog := logging.SanitizeLogValue(req.StewardId)
+	if !identifierRegex.MatchString(req.StewardId) {
 		s.logger.Warn("Invalid steward ID format in status report")
 		return &common.Status{
 			Code:    common.Status_ERROR,
 			Message: "Invalid steward ID format",
 		}, nil
-	} else {
-		stewardIDForLog = matched
 	}
 
 	s.logger.Debug("Configuration status report received",
@@ -411,9 +394,9 @@ func (s *ConfigurationService) notifyConfigurationUpdate(stewardID string, confi
 	// Send update non-blocking
 	select {
 	case updateChan <- update:
-		s.logger.Debug("Configuration update sent", "steward_id", stewardID)
+		s.logger.Debug("Configuration update sent", "steward_id", logging.SanitizeLogValue(stewardID))
 	default:
-		s.logger.Warn("Configuration update channel full, dropping update", "steward_id", stewardID)
+		s.logger.Warn("Configuration update channel full, dropping update", "steward_id", logging.SanitizeLogValue(stewardID))
 	}
 }
 
@@ -445,8 +428,8 @@ func (s *ConfigurationService) SetTenantConfiguration(tenantID, stewardID string
 	s.mu.Unlock()
 
 	s.logger.Info("Configuration stored for tenant steward",
-		"tenant_id", tenantID,
-		"steward_id", stewardID,
+		"tenant_id", logging.SanitizeLogValue(tenantID),
+		"steward_id", logging.SanitizeLogValue(stewardID),
 		"version", storedConfig.Version)
 
 	// Notify if steward is subscribed (after releasing lock to avoid deadlock)
@@ -539,7 +522,7 @@ func (s *ConfigurationService) GetEffectiveConfiguration(stewardID string) (*Eff
 
 	// If no configuration found at any level, return basic structure
 	if !deviceExists && tenantConfig == nil {
-		s.logger.Debug("No configuration found for steward", "steward_id", stewardID)
+		s.logger.Debug("No configuration found for steward", "steward_id", logging.SanitizeLogValue(stewardID))
 	}
 
 	return effective, nil
@@ -611,8 +594,8 @@ func (s *ConfigurationService) DeleteTenantConfiguration(tenantID, stewardID str
 	if exists {
 		delete(s.configurations, key)
 		s.logger.Info("Configuration deleted for tenant steward",
-			"tenant_id", tenantID,
-			"steward_id", stewardID)
+			"tenant_id", logging.SanitizeLogValue(tenantID),
+			"steward_id", logging.SanitizeLogValue(stewardID))
 	}
 
 	return exists

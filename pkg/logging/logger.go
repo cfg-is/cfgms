@@ -175,6 +175,7 @@ func NewLoggerWithConfig(config *Config) Logger {
 }
 
 // keysAndValuesToMap converts key-value pairs to a map for structured logging.
+// String values are automatically sanitized to prevent log injection (CWE-117).
 func keysAndValuesToMap(keysAndValues []interface{}) map[string]interface{} {
 	fields := make(map[string]interface{})
 
@@ -183,6 +184,8 @@ func keysAndValuesToMap(keysAndValues []interface{}) map[string]interface{} {
 			fields[key] = keysAndValues[i+1]
 		}
 	}
+
+	sanitizeMapValues(fields)
 
 	return fields
 }
@@ -199,7 +202,7 @@ func (l *DefaultLogger) logEntry(ctx context.Context, level Level, levelStr, msg
 		if manager != nil {
 			entry := interfaces.LogEntry{
 				Level:       levelStr,
-				Message:     msg,
+				Message:     SanitizeLogValue(msg),
 				ServiceName: l.config.ServiceName,
 				Component:   l.config.Component,
 				Fields:      keysAndValuesToMap(keysAndValues),
@@ -250,6 +253,7 @@ func (l *DefaultLogger) logJSON(ctx context.Context, level, msg string, keysAndV
 }
 
 // logText outputs human-readable text logs with optional correlation.
+// Message and key-value string values are sanitized to prevent log injection (CWE-117).
 func (l *DefaultLogger) logText(ctx context.Context, level, msg string, keysAndValues ...interface{}) {
 	var correlationPart string
 	if l.config.EnableCorrelation && ctx != nil {
@@ -258,7 +262,8 @@ func (l *DefaultLogger) logText(ctx context.Context, level, msg string, keysAndV
 		}
 	}
 
-	l.log.Printf("[%s]%s %s %v", level, correlationPart, msg, keysAndValues)
+	sanitizedKV := sanitizeKeysAndValues(keysAndValues)
+	l.log.Printf("[%s]%s %s %v", level, correlationPart, SanitizeLogValue(msg), sanitizedKV)
 }
 
 // Original interface methods (backward compatible)

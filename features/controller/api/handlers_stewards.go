@@ -16,6 +16,7 @@ import (
 
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // Regex pattern for validating identifiers (prevents log injection)
@@ -112,12 +113,7 @@ func (s *Server) handleGetStewardDNA(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	stewardID := vars["id"]
 
-	// Sanitize steward ID for logging - extract validated portion (prevents log injection)
-	// Using FindString creates a new string, breaking CodeQL taint tracking
-	stewardIDForLog := "[INVALID_ID]"
-	if matched := identifierRegex.FindString(stewardID); matched != "" && matched == stewardID {
-		stewardIDForLog = matched
-	}
+	stewardIDForLog := logging.SanitizeLogValue(stewardID)
 
 	if stewardID == "" {
 		s.writeErrorResponse(w, http.StatusBadRequest, "Steward ID is required", "MISSING_STEWARD_ID")
@@ -152,12 +148,7 @@ func (s *Server) handleGetStewardConfig(w http.ResponseWriter, r *http.Request) 
 	vars := mux.Vars(r)
 	stewardID := vars["id"]
 
-	// Sanitize steward ID for logging - extract validated portion (prevents log injection)
-	// Using FindString creates a new string, breaking CodeQL taint tracking
-	stewardIDForLog := "[INVALID_ID]"
-	if matched := identifierRegex.FindString(stewardID); matched != "" && matched == stewardID {
-		stewardIDForLog = matched
-	}
+	stewardIDForLog := logging.SanitizeLogValue(stewardID)
 
 	if stewardID == "" {
 		s.writeErrorResponse(w, http.StatusBadRequest, "Steward ID is required", "MISSING_STEWARD_ID")
@@ -235,10 +226,9 @@ func (s *Server) handleUpdateStewardConfig(w http.ResponseWriter, r *http.Reques
 	vars := mux.Vars(r)
 	stewardID := vars["id"]
 
-	// Sanitize steward ID for logging (prevents log injection)
-	stewardIDForLog := stewardID
+	// Validate steward ID format
+	stewardIDForLog := logging.SanitizeLogValue(stewardID)
 	if !identifierRegex.MatchString(stewardID) {
-		stewardIDForLog = "[INVALID_ID]" //nolint:ineffassign // Security: assignment needed for CodeQL taint analysis
 		s.logger.Warn("Invalid steward ID format in config update request")
 		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid steward ID format", "INVALID_STEWARD_ID")
 		return
@@ -283,12 +273,7 @@ func (s *Server) handleUpdateStewardConfig(w http.ResponseWriter, r *http.Reques
 		tenantID = tid
 	}
 
-	// Sanitize tenant ID for logging - extract validated portion (prevents log injection)
-	// Using FindString creates a new string, breaking CodeQL taint tracking
-	tenantIDForLog := "[INVALID_TENANT]"
-	if matched := identifierRegex.FindString(tenantID); matched != "" && matched == tenantID {
-		tenantIDForLog = matched
-	}
+	tenantIDForLog := logging.SanitizeLogValue(tenantID)
 
 	s.logger.Info("Configuration upload request received",
 		"steward_id", stewardIDForLog,
@@ -322,12 +307,7 @@ func (s *Server) handleValidateConfig(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	stewardID := vars["id"]
 
-	// Sanitize steward ID for logging - extract validated portion (prevents log injection)
-	// Using FindString creates a new string, breaking CodeQL taint tracking
-	stewardIDForLog := "[INVALID_ID]"
-	if matched := identifierRegex.FindString(stewardID); matched != "" && matched == stewardID {
-		stewardIDForLog = matched
-	}
+	stewardIDForLog := logging.SanitizeLogValue(stewardID)
 
 	if stewardID == "" {
 		s.writeErrorResponse(w, http.StatusBadRequest, "Steward ID is required", "MISSING_STEWARD_ID")
@@ -408,12 +388,7 @@ func (s *Server) handleGetEffectiveConfig(w http.ResponseWriter, r *http.Request
 	vars := mux.Vars(r)
 	stewardID := vars["id"]
 
-	// Sanitize steward ID for logging - extract validated portion (prevents log injection)
-	// Using FindString creates a new string, breaking CodeQL taint tracking
-	stewardIDForLog := "[INVALID_ID]"
-	if matched := identifierRegex.FindString(stewardID); matched != "" && matched == stewardID {
-		stewardIDForLog = matched
-	}
+	stewardIDForLog := logging.SanitizeLogValue(stewardID)
 
 	if stewardID == "" {
 		s.writeErrorResponse(w, http.StatusBadRequest, "Steward ID is required", "MISSING_STEWARD_ID")
@@ -444,12 +419,7 @@ func (s *Server) handleTriggerQUICConnection(w http.ResponseWriter, r *http.Requ
 	vars := mux.Vars(r)
 	stewardID := vars["id"]
 
-	// Sanitize steward ID for logging - extract validated portion (prevents log injection)
-	// Using FindString creates a new string, breaking CodeQL taint tracking
-	stewardIDForLog := "[INVALID_ID]"
-	if matched := identifierRegex.FindString(stewardID); matched != "" && matched == stewardID {
-		stewardIDForLog = matched
-	}
+	stewardIDForLog := logging.SanitizeLogValue(stewardID)
 
 	if stewardID == "" {
 		s.writeErrorResponse(w, http.StatusBadRequest, "Steward ID is required", "MISSING_STEWARD_ID")
