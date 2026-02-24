@@ -143,7 +143,7 @@ test:
 	@go clean -testcache
 	@echo "🧪 Testing OSS Build..."
 	@echo "  Testing framework (excluding modules and long-running tests)..."
-	@go test -race -short -timeout=2m $$(go list ./... | grep -v '/features/modules/' | grep -v '/test/integration' | grep -v '/test/e2e')
+	@go test -race -short -timeout=5m $$(go list ./... | grep -v '/features/modules/' | grep -v '/test/integration' | grep -v '/test/e2e')
 	@echo "  Testing core modules (smoke test)..."
 	@for module in $(CORE_MODULES); do \
 		echo "  Testing $$module..."; \

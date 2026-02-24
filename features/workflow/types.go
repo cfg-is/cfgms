@@ -361,6 +361,11 @@ type WorkflowExecution struct {
 
 	// mutex protects concurrent access to Variables, StepResults, and ExecutionTrace
 	mutex sync.RWMutex `json:"-"`
+
+	// Done is closed when executeWorkflowAsync fully completes (including all logging).
+	// Tests wait on this channel instead of polling status to avoid race conditions
+	// where goroutines are still writing logs after status reaches a terminal state.
+	Done chan struct{} `json:"-"`
 }
 
 // Thread-safe methods for WorkflowExecution

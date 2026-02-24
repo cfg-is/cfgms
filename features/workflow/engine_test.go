@@ -153,42 +153,28 @@ func TestEngine_CancelExecution(t *testing.T) {
 		Name: "long-running-workflow",
 		Steps: []Step{
 			{
-				Name: "sequential-group",
-				Type: StepTypeSequential,
-				Steps: []Step{
-					{
-						Name: "step1",
-						Type: StepTypeConditional,
-						Condition: &Condition{
-							Type:     ConditionTypeVariable,
-							Variable: "run_step",
-							Operator: OperatorEqual,
-							Value:    true,
-						},
-						Steps: []Step{},
-					},
+				Name: "delay-step",
+				Type: StepTypeDelay,
+				Delay: &DelayConfig{
+					Duration: 5 * time.Second,
 				},
 			},
 		},
 	}
 
 	ctx := context.Background()
-	variables := map[string]interface{}{
-		"run_step": true,
-	}
 
-	execution, err := engine.ExecuteWorkflow(ctx, workflow, variables)
+	execution, err := engine.ExecuteWorkflow(ctx, workflow, nil)
 	require.NoError(t, err)
 
-	// Give execution a moment to start before cancelling
-	time.Sleep(10 * time.Millisecond)
+	// Wait for execution to reach running state before cancelling
+	waitForWorkflowRunning(t, execution, 2*time.Second)
 
 	// Cancel the execution
 	err = engine.CancelExecution(execution.ID)
 	assert.NoError(t, err)
 
-	// Give cancellation time to take effect
-	time.Sleep(10 * time.Millisecond)
+	// CancelExecution synchronously sets status — no wait needed
 
 	// Check status
 	finalExecution, err := engine.GetExecution(execution.ID)

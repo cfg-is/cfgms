@@ -512,24 +512,7 @@ func TestWorkflowConditionalExecution(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, execution)
 
-	// Wait for completion with timeout (reliable on Windows)
-	timeout := time.After(2 * time.Second)
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-
-	completed := false
-	for !completed {
-		select {
-		case <-timeout:
-			t.Fatalf("timeout waiting for workflow completion, status: %s", execution.GetStatus())
-		case <-ticker.C:
-			execution, _ = engine.GetExecution(execution.ID)
-			status := execution.GetStatus()
-			if status == StatusCompleted || status == StatusFailed || status == StatusCancelled {
-				completed = true
-			}
-		}
-	}
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 	assert.Equal(t, StatusCompleted, execution.GetStatus())
 	assert.True(t, execution.HasStepResult("conditional-step"))
