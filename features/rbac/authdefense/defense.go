@@ -3,12 +3,14 @@
 package authdefense
 
 import (
+	"fmt"
 	"math/rand/v2"
 	"net"
 	"net/http"
 	"runtime"
 	"runtime/debug"
 	"sync/atomic"
+	"time"
 
 	"github.com/cfgis/cfgms/pkg/cache"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -52,6 +54,9 @@ type AuthDefenseSystem struct {
 
 	// Tier 3
 	globalBreaker *CircuitBreaker
+
+	// Lightweight audit aggregation for failed auth attempts
+	FailedAudit *FailedAuthAggregator
 
 	// Metrics
 	Metrics *DefenseMetrics
@@ -123,6 +128,9 @@ func New(cfg AuthDefenseConfig, logger logging.Logger, opts ...Option) *AuthDefe
 		d.clock,
 	)
 
+	// Lightweight audit aggregation (30s flush interval)
+	d.FailedAudit = NewFailedAuthAggregator(30*time.Second, cfg.IPMaxTracked, d.clock)
+
 	d.samplingEpoch.Store(d.clock.Now().Unix())
 
 	return d
@@ -161,6 +169,9 @@ func (d *AuthDefenseSystem) CheckRequest(ip, tenantID string) (allowed bool, rea
 // RecordResult records the authentication outcome for all tiers
 func (d *AuthDefenseSystem) RecordResult(ip, tenantID string, success bool) {
 	if !success {
+		// Record in lightweight aggregator instead of full audit entries
+		d.FailedAudit.RecordFailure(fmt.Sprintf("ip:%s", ip), ip)
+
 		// Tier 1: record IP failure
 		d.ipRateLimiter.RecordFailure(ip)
 
