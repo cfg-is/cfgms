@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/logging/interfaces"
@@ -210,8 +211,9 @@ func (l *DefaultLogger) logEntry(ctx context.Context, level Level, levelStr, msg
 
 			// Write via provider system (handles correlation, tenant isolation, etc. automatically)
 			if err := manager.WriteEntry(ctx, entry); err != nil {
-				// Fallback to stdout if provider fails
-				fmt.Printf("[ERROR] Provider logging failed: %v - Fallback: [%s] %s\n", err, levelStr, msg)
+				// Fallback to stdout if provider fails — sanitize at sink for CodeQL CWE-117
+				sanitizedMsg := strings.ReplaceAll(strings.ReplaceAll(msg, "\n", "_"), "\r", "_")
+				fmt.Printf("[ERROR] Provider logging failed: %v - Fallback: [%s] %s\n", err, levelStr, sanitizedMsg)
 			}
 			return
 		}
@@ -245,11 +247,15 @@ func (l *DefaultLogger) logJSON(ctx context.Context, level, msg string, keysAndV
 	jsonBytes, err := json.Marshal(entry)
 	if err != nil {
 		// Fallback to text format if JSON marshaling fails
-		l.log.Printf("[ERROR] Failed to marshal log entry: %v - Original: [%s] %s %v", err, level, msg, keysAndValues)
+		sanitizedMsg := strings.ReplaceAll(strings.ReplaceAll(msg, "\n", "_"), "\r", "_")
+		l.log.Printf("[ERROR] Failed to marshal log entry: %v - Original: [%s] %s", err, level, sanitizedMsg)
 		return
 	}
 
-	l.log.Println(string(jsonBytes))
+	// json.Marshal escapes control characters, so JSON output is inherently safe.
+	// Apply strings.ReplaceAll at the sink for CodeQL CWE-117 recognition.
+	sanitizedJSON := strings.ReplaceAll(strings.ReplaceAll(string(jsonBytes), "\n", "_"), "\r", "_")
+	l.log.Println(sanitizedJSON)
 }
 
 // logText outputs human-readable text logs with optional correlation.
@@ -265,7 +271,14 @@ func (l *DefaultLogger) logText(ctx context.Context, level, msg string, keysAndV
 	}
 
 	kvStr := formatKeysAndValues(keysAndValues)
-	l.log.Printf("[%s]%s %s%s", level, correlationPart, SanitizeLogValue(msg), kvStr)
+
+	// Apply strings.ReplaceAll at the sink — CodeQL recognizes this as a CWE-117
+	// sanitizer directly at the log output point. SanitizeLogValue and formatKeysAndValues
+	// already strip all control characters, but CodeQL cannot follow sanitization through
+	// wrapper functions into the Printf sink.
+	sanitizedMsg := strings.ReplaceAll(strings.ReplaceAll(SanitizeLogValue(msg), "\n", "_"), "\r", "_")
+	sanitizedKV := strings.ReplaceAll(strings.ReplaceAll(kvStr, "\n", "_"), "\r", "_")
+	l.log.Printf("[%s]%s %s%s", level, correlationPart, sanitizedMsg, sanitizedKV)
 }
 
 // Original interface methods (backward compatible)

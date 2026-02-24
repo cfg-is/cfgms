@@ -12,8 +12,6 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
-
-	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // contextKey is a custom type for context keys to avoid collisions
@@ -42,11 +40,11 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 		duration := time.Since(start)
 		s.logger.Info("HTTP request",
 			"method", r.Method,
-			"path", logging.SanitizeLogValue(r.URL.Path),
+			"path", r.URL.Path,
 			"status", wrapped.statusCode,
 			"duration", duration,
-			"remote_addr", logging.SanitizeLogValue(r.RemoteAddr),
-			"user_agent", logging.SanitizeLogValue(r.Header.Get("User-Agent")),
+			"remote_addr", r.RemoteAddr,
+			"user_agent", r.Header.Get("User-Agent"),
 		)
 	})
 }
@@ -122,14 +120,14 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 		if os.Getenv("CFGMS_ENABLE_TEST_ENDPOINTS") == "true" {
 			if r.Method == "PUT" && strings.HasPrefix(r.URL.Path, "/api/v1/test/stewards/") && strings.HasSuffix(r.URL.Path, "/config") {
 				s.logger.Warn("Test endpoint accessed with authentication bypass",
-					"path", logging.SanitizeLogValue(r.URL.Path), "method", r.Method, "remote_addr", logging.SanitizeLogValue(r.RemoteAddr))
+					"path", r.URL.Path, "method", r.Method, "remote_addr", r.RemoteAddr)
 				next.ServeHTTP(w, r)
 				return
 			}
 
 			if r.Method == "POST" && strings.HasPrefix(r.URL.Path, "/api/v1/test/stewards/") && strings.HasSuffix(r.URL.Path, "/quic/connect") {
 				s.logger.Warn("Test endpoint accessed with authentication bypass",
-					"path", logging.SanitizeLogValue(r.URL.Path), "method", r.Method, "remote_addr", logging.SanitizeLogValue(r.RemoteAddr))
+					"path", r.URL.Path, "method", r.Method, "remote_addr", r.RemoteAddr)
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -424,10 +422,10 @@ func (s *Server) auditAuthorizationDecision(r *http.Request, decision *Authoriza
 		"granted":        decision.Granted,
 		"reason":         decision.Reason,
 		"duration_ms":    decision.DurationMs,
-		"request_path":   logging.SanitizeLogValue(r.URL.Path),
+		"request_path":   r.URL.Path,
 		"request_method": r.Method,
-		"remote_addr":    logging.SanitizeLogValue(r.RemoteAddr),
-		"user_agent":     logging.SanitizeLogValue(r.Header.Get("User-Agent")),
+		"remote_addr":    r.RemoteAddr,
+		"user_agent":     r.Header.Get("User-Agent"),
 		"request_id":     s.getRequestID(r),
 		"severity":       s.getAuditSeverity(decision),
 	}
