@@ -20,6 +20,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/monitoring"
 	"github.com/cfgis/cfgms/features/rbac"
+	"github.com/cfgis/cfgms/features/rbac/authdefense"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -51,13 +52,14 @@ type Server struct {
 	platformMonitor         pkgmonitoring.PlatformMonitor
 	tracer                  *telemetry.Tracer
 	haManager               *ha.Manager
-	apiKeys                 map[string]*APIKey            // In-memory cache for fast lookup
-	secretStore             secretsif.SecretStore         // M-AUTH-1: Central secrets provider for API keys
-	registrationTokenStore  registration.Store            // Registration token store for steward registration
-	registeredStewards      map[string]*RegisteredSteward // In-memory store for registered stewards
-	corsConfig              *CORSConfig                   // CORS configuration
-	quicTriggerFunc         QUICTriggerFunc               // Function to trigger QUIC connections
-	signerCertSerial        string                        // Story #378: Serial of cert used for config signing
+	apiKeys                 map[string]*APIKey             // In-memory cache for fast lookup
+	secretStore             secretsif.SecretStore          // M-AUTH-1: Central secrets provider for API keys
+	registrationTokenStore  registration.Store             // Registration token store for steward registration
+	registeredStewards      map[string]*RegisteredSteward  // In-memory store for registered stewards
+	corsConfig              *CORSConfig                    // CORS configuration
+	quicTriggerFunc         QUICTriggerFunc                // Function to trigger QUIC connections
+	signerCertSerial        string                         // Story #378: Serial of cert used for config signing
+	authDefense             *authdefense.AuthDefenseSystem // Story #380: Three-tier auth defense
 }
 
 // APIKey represents an API key for external authentication
@@ -145,6 +147,18 @@ func New(
 		registeredStewards:      make(map[string]*RegisteredSteward), // In-memory steward registry
 	}
 
+	// Story #380: Initialize three-tier auth defense system
+	server.authDefense = authdefense.New(
+		authdefense.DefaultConfig(),
+		logger,
+		authdefense.WithTenantExtractor(func(r *http.Request) string {
+			if tid, ok := r.Context().Value(tenantIDContextKey).(string); ok {
+				return tid
+			}
+			return ""
+		}),
+	)
+
 	// Configure CORS settings (H-AUTH-3)
 	server.configureCORS()
 
@@ -176,6 +190,7 @@ func (s *Server) setupRouter() {
 
 	// API routes with authentication and validation
 	api := s.router.PathPrefix("/api/v1").Subrouter()
+	api.Use(s.authDefense.Middleware) // Story #380: Rate limiting before auth
 	api.Use(s.authenticationMiddleware)
 	api.Use(s.validationMiddleware)
 
@@ -386,6 +401,11 @@ func (s *Server) Stop() error {
 	defer s.mu.Unlock()
 
 	s.logger.Info("Shutting down REST API server")
+
+	// Story #380: Stop auth defense system
+	if s.authDefense != nil {
+		s.authDefense.Stop()
+	}
 
 	if s.httpServer != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
