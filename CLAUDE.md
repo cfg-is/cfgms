@@ -531,7 +531,7 @@ docs/          # Comprehensive documentation
 - **Manual CA pool creation** - TLS helpers handle this automatically
 - **Direct MQTT client/types imports** - Use `pkg/controlplane/interfaces` and `pkg/controlplane/types` instead of `pkg/mqtt/client` or `pkg/mqtt/types`
 - **Direct QUIC client/session imports** - Use `pkg/dataplane/interfaces` instead of `pkg/quic/client` or `pkg/quic/session`
-- **Logging unsanitized user input** - The centralized logger (`pkg/logging`) auto-sanitizes all string values; no call-site wrapping needed
+- **Logging unsanitized user input** - Use `logging.SanitizeLogValue()` for HTTP params, URL paths, headers
 
 ## Quick Reference
 
