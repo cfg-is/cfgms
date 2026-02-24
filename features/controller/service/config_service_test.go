@@ -5,7 +5,6 @@ package service
 import (
 	"context"
 	"encoding/json"
-	"sync"
 	"testing"
 	"time"
 
@@ -16,44 +15,8 @@ import (
 	common "github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
-
-// mockLogger implements a thread-safe logger for testing
-type mockLogger struct {
-	mu   sync.Mutex
-	logs []string
-}
-
-func (m *mockLogger) appendLog(msg string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.logs = append(m.logs, msg)
-}
-
-func (m *mockLogger) Debug(msg string, fields ...interface{}) { m.appendLog(msg) }
-func (m *mockLogger) Info(msg string, fields ...interface{})  { m.appendLog(msg) }
-func (m *mockLogger) Warn(msg string, fields ...interface{})  { m.appendLog(msg) }
-func (m *mockLogger) Error(msg string, fields ...interface{}) { m.appendLog(msg) }
-func (m *mockLogger) Fatal(msg string, fields ...interface{}) { m.appendLog(msg) }
-func (m *mockLogger) DebugCtx(ctx context.Context, msg string, fields ...interface{}) {
-	m.Debug(msg, fields...)
-}
-func (m *mockLogger) InfoCtx(ctx context.Context, msg string, fields ...interface{}) {
-	m.Info(msg, fields...)
-}
-func (m *mockLogger) WarnCtx(ctx context.Context, msg string, fields ...interface{}) {
-	m.Warn(msg, fields...)
-}
-func (m *mockLogger) ErrorCtx(ctx context.Context, msg string, fields ...interface{}) {
-	m.Error(msg, fields...)
-}
-func (m *mockLogger) FatalCtx(ctx context.Context, msg string, fields ...interface{}) {
-	m.Fatal(msg, fields...)
-}
-
-func newMockLogger() *mockLogger {
-	return &mockLogger{logs: make([]string, 0)}
-}
 
 func createTestStewardConfig(stewardID string) *stewardconfig.StewardConfig {
 	return &stewardconfig.StewardConfig{
@@ -92,7 +55,7 @@ func createTestStewardConfig(stewardID string) *stewardconfig.StewardConfig {
 }
 
 func TestNewConfigurationService(t *testing.T) {
-	logger := newMockLogger()
+	logger := logging.NewNoopLogger()
 
 	service := NewConfigurationService(logger, nil)
 
@@ -103,7 +66,7 @@ func TestNewConfigurationService(t *testing.T) {
 }
 
 func TestSetConfiguration(t *testing.T) {
-	logger := newMockLogger()
+	logger := logging.NewNoopLogger()
 	service := NewConfigurationService(logger, nil)
 
 	stewardID := "test-steward"
@@ -123,7 +86,6 @@ func TestSetConfiguration(t *testing.T) {
 	assert.NotZero(t, storedConfig.LastUpdated)
 
 	// Test updating configuration
-	time.Sleep(time.Second) // Ensure different timestamp for version generation
 	config.Resources[0].Config["permissions"] = "644"
 	err = service.SetConfiguration(stewardID, config)
 	require.NoError(t, err)
@@ -139,7 +101,7 @@ func TestSetConfiguration(t *testing.T) {
 }
 
 func TestGetConfiguration(t *testing.T) {
-	logger := newMockLogger()
+	logger := logging.NewNoopLogger()
 	service := NewConfigurationService(logger, nil)
 
 	stewardID := "test-steward"
@@ -249,7 +211,7 @@ func TestGetConfiguration(t *testing.T) {
 }
 
 func TestReportConfigStatus(t *testing.T) {
-	logger := newMockLogger()
+	logger := logging.NewNoopLogger()
 	service := NewConfigurationService(logger, nil)
 
 	stewardID := "test-steward"
@@ -316,7 +278,7 @@ func TestReportConfigStatus(t *testing.T) {
 }
 
 func TestValidateConfig(t *testing.T) {
-	logger := newMockLogger()
+	logger := logging.NewNoopLogger()
 	service := NewConfigurationService(logger, nil)
 
 	stewardID := "test-steward"
@@ -395,7 +357,7 @@ func TestValidateConfig(t *testing.T) {
 }
 
 func TestFilterConfigByModules(t *testing.T) {
-	logger := newMockLogger()
+	logger := logging.NewNoopLogger()
 	service := NewConfigurationService(logger, nil)
 
 	config := createTestStewardConfig("test-steward")
@@ -429,7 +391,7 @@ func TestFilterConfigByModules(t *testing.T) {
 }
 
 func TestConfigurationServiceConcurrency(t *testing.T) {
-	logger := newMockLogger()
+	logger := logging.NewNoopLogger()
 	service := NewConfigurationService(logger, nil)
 
 	stewardID := "test-steward"
