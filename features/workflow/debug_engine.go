@@ -6,10 +6,15 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/logging"
 )
+
+// debugIDCounter ensures unique IDs even when time.Now().UnixNano() returns
+// the same value (Windows has ~15.6ms clock granularity).
+var debugIDCounter atomic.Uint64
 
 // DebugEngineImpl implements the DebugEngine interface
 type DebugEngineImpl struct {
@@ -505,15 +510,17 @@ func (de *DebugEngineImpl) checkBreakpoint(session *DebugSession, stepName strin
 	return nil, false
 }
 
-// Helper functions for ID generation
+// Helper functions for ID generation.
+// Each uses an atomic counter to guarantee uniqueness even on Windows
+// where time.Now().UnixNano() has ~15.6ms granularity.
 func generateDebugSessionID() string {
-	return fmt.Sprintf("debug_session_%d", time.Now().UnixNano())
+	return fmt.Sprintf("debug_session_%d_%d", time.Now().UnixNano(), debugIDCounter.Add(1))
 }
 
 func generateBreakpointID() string {
-	return fmt.Sprintf("bp_%d", time.Now().UnixNano())
+	return fmt.Sprintf("bp_%d_%d", time.Now().UnixNano(), debugIDCounter.Add(1))
 }
 
 func generateAPICallID() string {
-	return fmt.Sprintf("api_call_%d", time.Now().UnixNano())
+	return fmt.Sprintf("api_call_%d_%d", time.Now().UnixNano(), debugIDCounter.Add(1))
 }

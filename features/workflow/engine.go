@@ -7,12 +7,17 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/steward/factory"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
+
+// executionIDCounter ensures unique IDs even when time.Now().UnixNano() returns
+// the same value (Windows has ~15.6ms clock granularity).
+var executionIDCounter atomic.Uint64
 
 // Engine implements the WorkflowEngine interface
 type Engine struct {
@@ -1091,9 +1096,11 @@ func (e *Engine) waitForDebugCommands(session *DebugSession, execution *Workflow
 	}
 }
 
-// generateExecutionID generates a unique execution ID
+// generateExecutionID generates a unique execution ID.
+// Uses an atomic counter to guarantee uniqueness even on Windows
+// where time.Now().UnixNano() has ~15.6ms granularity.
 func generateExecutionID() string {
-	return fmt.Sprintf("exec_%d", time.Now().UnixNano())
+	return fmt.Sprintf("exec_%d_%d", time.Now().UnixNano(), executionIDCounter.Add(1))
 }
 
 // genericConfigState implements modules.ConfigState for workflow tasks
