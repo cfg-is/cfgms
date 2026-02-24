@@ -94,6 +94,7 @@ func (e *Engine) ExecuteWorkflow(ctx context.Context, workflow Workflow, variabl
 		Variables:    mergedVars,
 		Context:      execCtx,
 		Cancel:       cancel,
+		Done:         make(chan struct{}),
 	}
 
 	// Store execution
@@ -119,6 +120,11 @@ func (e *Engine) ExecuteWorkflow(ctx context.Context, workflow Workflow, variabl
 
 // executeWorkflowAsync executes the workflow asynchronously
 func (e *Engine) executeWorkflowAsync(execution *WorkflowExecution, workflow Workflow) {
+	// Close Done channel after all work (including logging) completes.
+	// This is the first defer so it runs last (LIFO), after the panic recovery
+	// defer below finishes its logging.
+	defer close(execution.Done)
+
 	execution.SetStatus(StatusRunning)
 
 	defer func() {
