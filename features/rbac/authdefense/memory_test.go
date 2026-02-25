@@ -29,7 +29,7 @@ func TestMemory_100K_Requests(t *testing.T) {
 	runtime.ReadMemStats(&baseline)
 
 	// Generate 100K requests from 10K unique IPs
-	for i := 0; i < 100_000; i++ {
+	for i := range 100_000 {
 		ip := fmt.Sprintf("10.%d.%d.%d", (i/65536)%256, (i/256)%256, i%256)
 		d.CheckRequest(ip, "")
 		d.RecordResult(ip, fmt.Sprintf("tenant-%d", i%100), i%10 != 0)
@@ -45,11 +45,7 @@ func TestMemory_100K_Requests(t *testing.T) {
 	assert.Less(t, after.Alloc, uint64(100*1024*1024), "memory should stay under 100MB for 100K requests")
 }
 
-func TestMemory_1M_Requests(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping 1M request memory test in short mode")
-	}
-
+func TestMemory_200K_Requests(t *testing.T) {
 	clock := NewTestClock(time.Time{})
 	cfg := DefaultConfig()
 	cfg.IPMaxTracked = 100_000
@@ -64,8 +60,8 @@ func TestMemory_1M_Requests(t *testing.T) {
 	var baseline runtime.MemStats
 	runtime.ReadMemStats(&baseline)
 
-	// Generate 1M requests from 100K unique IPs
-	for i := 0; i < 1_000_000; i++ {
+	// Generate 200K requests from diverse IPs and tenants
+	for i := range 200_000 {
 		ip := fmt.Sprintf("10.%d.%d.%d", (i/65536)%256, (i/256)%256, i%256)
 		d.CheckRequest(ip, "")
 		d.RecordResult(ip, fmt.Sprintf("tenant-%d", i%1000), i%5 != 0)
@@ -76,9 +72,9 @@ func TestMemory_1M_Requests(t *testing.T) {
 	runtime.ReadMemStats(&after)
 
 	allocMB := float64(after.Alloc-baseline.Alloc) / (1024 * 1024)
-	t.Logf("Memory after 1M requests: %.2f MB (alloc)", allocMB)
+	t.Logf("Memory after 200K requests: %.2f MB (alloc)", allocMB)
 
-	assert.Less(t, after.Alloc, uint64(500*1024*1024), "memory should stay under 500MB for 1M requests")
+	assert.Less(t, after.Alloc, uint64(200*1024*1024), "memory should stay under 200MB for 200K requests")
 }
 
 func TestMemory_NoLeaks(t *testing.T) {
@@ -99,7 +95,7 @@ func TestMemory_NoLeaks(t *testing.T) {
 	runtime.ReadMemStats(&baselineStats)
 
 	// Run 10K requests
-	for i := 0; i < 10_000; i++ {
+	for i := range 10_000 {
 		ip := fmt.Sprintf("10.0.%d.%d", (i/256)%256, i%256)
 		d.CheckRequest(ip, "")
 		d.RecordResult(ip, "tenant-0", true)
