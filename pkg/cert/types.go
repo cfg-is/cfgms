@@ -50,11 +50,21 @@ type CertificateType int
 
 const (
 	// CertificateTypeCA represents a Certificate Authority certificate
-	CertificateTypeCA CertificateType = iota
-	// CertificateTypeServer represents a server certificate
-	CertificateTypeServer
+	CertificateTypeCA CertificateType = 0
+	// CertificateTypeServer represents a server certificate (unified mode - all purposes)
+	CertificateTypeServer CertificateType = 1
 	// CertificateTypeClient represents a client certificate
-	CertificateTypeClient
+	CertificateTypeClient CertificateType = 2
+
+	// Three-certificate architecture types (Story #377)
+	// Explicit values prevent iota reordering from corrupting stored metadata.json
+
+	// CertificateTypePublicAPI is for HTTPS REST API only (external-facing)
+	CertificateTypePublicAPI CertificateType = 3
+	// CertificateTypeInternalServer is for MQTT + QUIC mutual TLS (internal)
+	CertificateTypeInternalServer CertificateType = 4
+	// CertificateTypeConfigSigning is for config/DNA signing only (CodeSigning EKU)
+	CertificateTypeConfigSigning CertificateType = 5
 )
 
 // String returns the string representation of the certificate type
@@ -66,9 +76,40 @@ func (ct CertificateType) String() string {
 		return "Server"
 	case CertificateTypeClient:
 		return "Client"
+	case CertificateTypePublicAPI:
+		return "PublicAPI"
+	case CertificateTypeInternalServer:
+		return "InternalServer"
+	case CertificateTypeConfigSigning:
+		return "ConfigSigning"
 	default:
 		return "Unknown"
 	}
+}
+
+// CertificateArchitecture represents the certificate deployment mode
+type CertificateArchitecture string
+
+const (
+	// CertArchitectureUnified uses a single server certificate for all purposes (backward compatible)
+	CertArchitectureUnified CertificateArchitecture = "unified"
+	// CertArchitectureSeparated uses purpose-specific certificates (public API, internal mTLS, config signing)
+	CertArchitectureSeparated CertificateArchitecture = "separated"
+)
+
+// SigningCertConfig contains configuration for config signing certificate generation
+type SigningCertConfig struct {
+	// Common name for the signing certificate
+	CommonName string
+
+	// Organization name
+	Organization string
+
+	// Certificate validity period in days (default: 1095 = 3 years)
+	ValidityDays int
+
+	// RSA key size (default: 4096)
+	KeySize int
 }
 
 // CAConfig contains configuration for Certificate Authority creation
@@ -276,6 +317,12 @@ type CAManager interface {
 
 	// GenerateClientCertificate creates a new client certificate
 	GenerateClientCertificate(config *ClientCertConfig) (*Certificate, error)
+
+	// GenerateSigningCertificate creates a config signing certificate (CodeSigning EKU, 4096-bit RSA)
+	GenerateSigningCertificate(config *SigningCertConfig) (*Certificate, error)
+
+	// GenerateInternalServerCertificate creates an internal mTLS server certificate
+	GenerateInternalServerCertificate(config *ServerCertConfig) (*Certificate, error)
 
 	// ValidateCertificate validates a certificate against this CA
 	ValidateCertificate(certPEM []byte) (*ValidationResult, error)

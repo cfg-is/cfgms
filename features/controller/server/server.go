@@ -145,6 +145,55 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			return nil, fmt.Errorf("failed to initialize certificate manager: %w", err)
 		}
 
+		// Story #377: Boot migration for separated certificate architecture
+		if cfg.Certificate.IsSeparatedArchitecture() {
+			logger.Info("Certificate architecture: separated — ensuring purpose-specific certificates")
+			internalCfg := &cert.ServerCertConfig{
+				CommonName:   "cfgms-internal",
+				DNSNames:     []string{"localhost", "cfgms-internal", "controller-standalone"},
+				IPAddresses:  []string{"127.0.0.1", "0.0.0.0"},
+				ValidityDays: 365,
+			}
+			if cfg.Certificate.Internal != nil {
+				if cfg.Certificate.Internal.CommonName != "" {
+					internalCfg.CommonName = cfg.Certificate.Internal.CommonName
+				}
+				if len(cfg.Certificate.Internal.DNSNames) > 0 {
+					internalCfg.DNSNames = cfg.Certificate.Internal.DNSNames
+				}
+				if len(cfg.Certificate.Internal.IPAddresses) > 0 {
+					internalCfg.IPAddresses = cfg.Certificate.Internal.IPAddresses
+				}
+			}
+			if cfg.Certificate.InternalCertValidityDays > 0 {
+				internalCfg.ValidityDays = cfg.Certificate.InternalCertValidityDays
+			}
+
+			signingCfg := &cert.SigningCertConfig{
+				CommonName:   "cfgms-config-signer",
+				ValidityDays: 1095,
+				KeySize:      4096,
+			}
+			if cfg.Certificate.Signing != nil {
+				if cfg.Certificate.Signing.CommonName != "" {
+					signingCfg.CommonName = cfg.Certificate.Signing.CommonName
+				}
+				if cfg.Certificate.Signing.Organization != "" {
+					signingCfg.Organization = cfg.Certificate.Signing.Organization
+				}
+			}
+			if cfg.Certificate.SigningCertValidityDays > 0 {
+				signingCfg.ValidityDays = cfg.Certificate.SigningCertValidityDays
+			}
+
+			if err := certManager.EnsureSeparatedCertificates(internalCfg, signingCfg); err != nil {
+				return nil, fmt.Errorf("failed to ensure separated certificates: %w", err)
+			}
+			logger.Info("Separated certificates ensured (internal mTLS + config signing)")
+		} else {
+			logger.Info("Certificate architecture: unified (default)")
+		}
+
 		// Create certificate provisioning service
 		certProvisioningService = service.NewCertificateProvisioningService(certManager, logger)
 		if cfg.Certificate.ClientCertValidityDays > 0 {
@@ -330,21 +379,26 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	var signerCertSerial string // Story #378: Track cert serial for registration handler
 	if dataPlane != nil {
 		fmt.Printf("[DEBUG] Initializing config handler with signer support...\n")
-		// Create signer from server certificate for config signing (Story #315)
+		// Create signer from certificate for config signing (Story #315, #377)
+		// In separated mode: use CertificateTypeConfigSigning (dedicated signing cert)
+		// In unified mode: use CertificateTypeServer (backward compatible)
 		var signer signature.Signer
 		if certManager != nil {
-			fmt.Printf("[DEBUG] certManager available, fetching server certificates...\n")
-			serverCerts, err := certManager.GetCertificatesByType(cert.CertificateTypeServer)
-			fmt.Printf("[DEBUG] GetCertificatesByType returned: err=%v numCerts=%d\n", err, len(serverCerts))
-			if err == nil && len(serverCerts) > 0 {
-				// Export server certificate with private key
-				signerCertSerial = serverCerts[0].SerialNumber
-				fmt.Printf("[DEBUG] Exporting server cert with serial=%s\n", signerCertSerial)
+			signerCertType := cert.CertificateTypeServer
+			if cfg.Certificate != nil && cfg.Certificate.IsSeparatedArchitecture() {
+				signerCertType = cert.CertificateTypeConfigSigning
+			}
+
+			fmt.Printf("[DEBUG] certManager available, fetching %s certificates...\n", signerCertType)
+			signerCerts, err := certManager.GetCertificatesByType(signerCertType)
+			fmt.Printf("[DEBUG] GetCertificatesByType(%s) returned: err=%v numCerts=%d\n", signerCertType, err, len(signerCerts))
+			if err == nil && len(signerCerts) > 0 {
+				signerCertSerial = signerCerts[0].SerialNumber
+				fmt.Printf("[DEBUG] Exporting %s cert with serial=%s\n", signerCertType, signerCertSerial)
 				certPEM, keyPEM, err := certManager.ExportCertificate(signerCertSerial, true)
 				fmt.Printf("[DEBUG] ExportCertificate returned: err=%v certLen=%d keyLen=%d\n", err, len(certPEM), len(keyPEM))
 				if err == nil && len(certPEM) > 0 && len(keyPEM) > 0 {
-					// Create signer from server certificate
-					fmt.Printf("[DEBUG] Creating signer from server certificate...\n")
+					fmt.Printf("[DEBUG] Creating signer from %s certificate...\n", signerCertType)
 					signer, err = signature.NewSigner(&signature.SignerConfig{
 						PrivateKeyPEM:  keyPEM,
 						CertificatePEM: certPEM,
@@ -353,20 +407,19 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 						fmt.Printf("[DEBUG] Failed to create signer: %v\n", err)
 						logger.Warn("Failed to create config signer", "error", err)
 					} else {
-						// CRITICAL (Story #378): Serial stored and will be passed to registration handler
-						// Registration MUST use the SAME cert serial to ensure signature verification works
-						fmt.Printf("[DEBUG] Signer created successfully: algorithm=%s fingerprint=%s serial=%s\n",
-							signer.Algorithm(), signer.KeyFingerprint(), signerCertSerial)
+						fmt.Printf("[DEBUG] Signer created successfully: algorithm=%s fingerprint=%s serial=%s type=%s\n",
+							signer.Algorithm(), signer.KeyFingerprint(), signerCertSerial, signerCertType)
 						logger.Info("Config signer initialized successfully",
 							"algorithm", signer.Algorithm(),
 							"fingerprint", signer.KeyFingerprint(),
-							"cert_serial", signerCertSerial)
+							"cert_serial", signerCertSerial,
+							"cert_type", signerCertType.String())
 					}
 				} else {
 					fmt.Printf("[DEBUG] Skipping signer creation: missing cert or key\n")
 				}
 			} else {
-				fmt.Printf("[DEBUG] No server certificates found or error occurred\n")
+				fmt.Printf("[DEBUG] No %s certificates found or error occurred\n", signerCertType)
 			}
 		} else {
 			fmt.Printf("[DEBUG] certManager is nil, cannot create signer\n")
@@ -908,7 +961,8 @@ func initializeMQTTBroker(cfg *config.Config, logger logging.Logger, certManager
 			// Check if certificates exist, if not generate them using certManager
 			if _, err := os.Stat(serverCertPath); os.IsNotExist(err) {
 				logger.Info("MQTT certificates not found, generating using certificate manager")
-				if err := ensureMQTTCertificatesFromManager(cfg.Certificate.CAPath, certManager, logger); err != nil {
+				separated := cfg.Certificate != nil && cfg.Certificate.IsSeparatedArchitecture()
+				if err := ensureMQTTCertificatesFromManagerWithArch(cfg.Certificate.CAPath, certManager, logger, separated); err != nil {
 					return nil, fmt.Errorf("failed to generate MQTT certificates: %w", err)
 				}
 			}
@@ -962,23 +1016,32 @@ func initializeMQTTBroker(cfg *config.Config, logger logging.Logger, certManager
 	return broker, nil
 }
 
-// ensureMQTTCertificatesFromManager generates MQTT server certificates using the certificate manager.
+// ensureMQTTCertificatesFromManagerWithArch generates MQTT server certificates using the certificate manager.
 // This ensures MQTT uses the same CA as the HTTP/REST API, enabling proper mTLS with unified certificate chain.
-func ensureMQTTCertificatesFromManager(caPath string, certManager *cert.Manager, logger logging.Logger) error {
+// Story #377: In separated mode, uses CertificateTypeInternalServer; in unified mode, uses CertificateTypeServer.
+func ensureMQTTCertificatesFromManagerWithArch(caPath string, certManager *cert.Manager, logger logging.Logger, separated bool) error {
 	// Create directory structure
 	serverDir := filepath.Join(caPath, "server")
 	if err := os.MkdirAll(serverDir, 0750); err != nil { // Restrict to owner+group only
 		return fmt.Errorf("failed to create server cert directory: %w", err)
 	}
 
-	// Generate MQTT server certificate using certManager (same CA as HTTP)
-	serverCert, err := certManager.GenerateServerCertificate(&cert.ServerCertConfig{
+	certCfg := &cert.ServerCertConfig{
 		CommonName:   "cfgms-mqtt-server",
 		Organization: "CFGMS",
 		DNSNames:     []string{"localhost", "cfgms-mqtt-server", "controller-standalone"},
 		IPAddresses:  []string{"127.0.0.1", "0.0.0.0"},
 		ValidityDays: 365,
-	})
+	}
+
+	// Generate certificate using appropriate type based on architecture
+	var serverCert *cert.Certificate
+	var err error
+	if separated {
+		serverCert, err = certManager.GenerateInternalServerCertificate(certCfg)
+	} else {
+		serverCert, err = certManager.GenerateServerCertificate(certCfg)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to generate MQTT server certificate: %w", err)
 	}
@@ -1027,7 +1090,8 @@ func buildQUICTLSConfig(cfg *config.Config, certManager *cert.Manager, logger lo
 		if _, err := os.Stat(serverCertPath); os.IsNotExist(err) {
 			logger.Info("QUIC certificates not found, using MQTT certificates")
 			// MQTT cert generation already happened, so these should exist
-			if err := ensureMQTTCertificatesFromManager(cfg.Certificate.CAPath, certManager, logger); err != nil {
+			separated := cfg.Certificate != nil && cfg.Certificate.IsSeparatedArchitecture()
+			if err := ensureMQTTCertificatesFromManagerWithArch(cfg.Certificate.CAPath, certManager, logger, separated); err != nil {
 				return nil, fmt.Errorf("failed to ensure certificates: %w", err)
 			}
 		}

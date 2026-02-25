@@ -473,6 +473,15 @@ func (s *Server) setupTLS() (*tls.Config, error) {
 
 // setupManagedTLS configures TLS using managed certificates
 func (s *Server) setupManagedTLS() (*tls.Config, error) {
+	// Story #377: In separated mode with external source, load from disk
+	if s.cfg.Certificate != nil && s.cfg.Certificate.IsSeparatedArchitecture() {
+		if s.cfg.Certificate.GetPublicAPISource() == "external" {
+			return s.setupExternalPublicAPICert()
+		}
+		// separated + internal: generate/use a PublicAPI cert type
+		// Falls through to standard managed TLS (uses same cert generation logic)
+	}
+
 	// Get server certificate (reuse the same logic as gRPC server)
 	serverCert, err := s.getServerCertificate()
 	if err != nil {
@@ -485,6 +494,41 @@ func (s *Server) setupManagedTLS() (*tls.Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create TLS config: %w", err)
 	}
+
+	return tlsConfig, nil
+}
+
+// setupExternalPublicAPICert loads TLS certificates from external files (e.g., certbot/Let's Encrypt)
+func (s *Server) setupExternalPublicAPICert() (*tls.Config, error) {
+	if s.cfg.Certificate.PublicAPI == nil {
+		return nil, fmt.Errorf("public API certificate configuration required for external source")
+	}
+
+	certPath := s.cfg.Certificate.PublicAPI.CertPath
+	keyPath := s.cfg.Certificate.PublicAPI.KeyPath
+	if certPath == "" || keyPath == "" {
+		return nil, fmt.Errorf("cert_path and key_path required for external public API certificate")
+	}
+
+	// #nosec G304 - Certificate paths are controlled via configuration
+	certPEM, err := os.ReadFile(certPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read external public API certificate: %w", err)
+	}
+
+	// #nosec G304 - Certificate paths are controlled via configuration
+	keyPEM, err := os.ReadFile(keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read external public API key: %w", err)
+	}
+
+	tlsConfig, err := cert.CreateServerTLSConfig(certPEM, keyPEM, nil, tls.VersionTLS12)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create TLS config from external certificates: %w", err)
+	}
+
+	s.logger.Info("HTTP API using external public API certificate",
+		"cert_path", certPath)
 
 	return tlsConfig, nil
 }
