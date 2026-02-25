@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/pkg/cert"
 )
 
@@ -179,31 +178,19 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		certPEM, _, err := s.certManager.ExportCertificate(s.signerCertSerial, false)
 		if err == nil && len(certPEM) > 0 {
 			serverCert = certPEM
-			fmt.Printf("[DEBUG] Registration: Using SIGNER cert serial=%s size=%d\n",
-				s.signerCertSerial, len(serverCert))
-			// Calculate fingerprint to verify it matches signer
-			if verifier, err := signature.NewVerifier(&signature.VerifierConfig{
-				CertificatePEM: serverCert,
-			}); err == nil {
-				fmt.Printf("[DEBUG] Registration: Server cert fingerprint=%s (MUST match signer)\n",
-					verifier.KeyFingerprint())
-			}
 			s.logger.Info("Providing signer certificate to steward for signature verification",
 				"steward_id", stewardID,
 				"cert_serial", s.signerCertSerial)
 		} else {
 			s.logger.Warn("Failed to export signer certificate from cert manager",
 				"error", err, "steward_id", stewardID, "cert_serial", s.signerCertSerial)
-			fmt.Printf("[DEBUG] Registration: Export failed: err=%v certLen=%d\n", err, len(certPEM))
 		}
 	} else if s.signerCertSerial == "" {
 		s.logger.Warn("Signer certificate serial not available (signer may not be initialized)",
 			"steward_id", stewardID)
-		fmt.Printf("[DEBUG] Registration: signerCertSerial is empty (no signer configured)\n")
 	} else {
 		s.logger.Warn("Certificate manager unavailable, cannot provide server cert for signature verification",
 			"steward_id", stewardID)
-		fmt.Printf("[DEBUG] Registration: certManager is nil\n")
 	}
 
 	// Return certificates in response (ALWAYS - required for mTLS)

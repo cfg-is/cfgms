@@ -74,12 +74,10 @@ type Server struct {
 
 // New creates a new server instance
 func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
-	fmt.Printf("[DEBUG] server.New() called\n")
 	if cfg == nil {
 		return nil, ErrNilConfig
 	}
 
-	fmt.Printf("[DEBUG] server.New() - cfg validated\n")
 	logger.Info("Config validated, proceeding with storage initialization...")
 
 	// Initialize global storage provider system - REQUIRED for all deployments
@@ -362,9 +360,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 	// Initialize data plane provider if enabled (Story #362)
 	var dataPlane dataplaneInterfaces.DataPlaneProvider
-	fmt.Printf("[DEBUG] New(): Checking QUIC config: nil=%v enabled=%v\n", cfg.QUIC == nil, cfg.QUIC != nil && cfg.QUIC.Enabled)
 	if cfg.QUIC != nil && cfg.QUIC.Enabled {
-		fmt.Printf("[DEBUG] New(): Data plane enabled, initializing provider...\n")
 		logger.Info("Initializing data plane provider...")
 		dataPlane, err = initializeDataPlaneProvider(cfg, logger, certManager, configService)
 		if err != nil {
@@ -378,7 +374,6 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	var configHandler *controllerQuic.ConfigHandler
 	var signerCertSerial string // Story #378: Track cert serial for registration handler
 	if dataPlane != nil {
-		fmt.Printf("[DEBUG] Initializing config handler with signer support...\n")
 		// Create signer from certificate for config signing (Story #315, #377)
 		// In separated mode: use CertificateTypeConfigSigning (dedicated signing cert)
 		// In unified mode: use CertificateTypeServer (backward compatible)
@@ -389,46 +384,30 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 				signerCertType = cert.CertificateTypeConfigSigning
 			}
 
-			fmt.Printf("[DEBUG] certManager available, fetching %s certificates...\n", signerCertType)
 			signerCerts, err := certManager.GetCertificatesByType(signerCertType)
-			fmt.Printf("[DEBUG] GetCertificatesByType(%s) returned: err=%v numCerts=%d\n", signerCertType, err, len(signerCerts))
 			if err == nil && len(signerCerts) > 0 {
 				signerCertSerial = signerCerts[0].SerialNumber
-				fmt.Printf("[DEBUG] Exporting %s cert with serial=%s\n", signerCertType, signerCertSerial)
 				certPEM, keyPEM, err := certManager.ExportCertificate(signerCertSerial, true)
-				fmt.Printf("[DEBUG] ExportCertificate returned: err=%v certLen=%d keyLen=%d\n", err, len(certPEM), len(keyPEM))
 				if err == nil && len(certPEM) > 0 && len(keyPEM) > 0 {
-					fmt.Printf("[DEBUG] Creating signer from %s certificate...\n", signerCertType)
 					signer, err = signature.NewSigner(&signature.SignerConfig{
 						PrivateKeyPEM:  keyPEM,
 						CertificatePEM: certPEM,
 					})
 					if err != nil {
-						fmt.Printf("[DEBUG] Failed to create signer: %v\n", err)
 						logger.Warn("Failed to create config signer", "error", err)
 					} else {
-						fmt.Printf("[DEBUG] Signer created successfully: algorithm=%s fingerprint=%s serial=%s type=%s\n",
-							signer.Algorithm(), signer.KeyFingerprint(), signerCertSerial, signerCertType)
 						logger.Info("Config signer initialized successfully",
 							"algorithm", signer.Algorithm(),
 							"fingerprint", signer.KeyFingerprint(),
 							"cert_serial", signerCertSerial,
 							"cert_type", signerCertType.String())
 					}
-				} else {
-					fmt.Printf("[DEBUG] Skipping signer creation: missing cert or key\n")
 				}
-			} else {
-				fmt.Printf("[DEBUG] No %s certificates found or error occurred\n", signerCertType)
 			}
-		} else {
-			fmt.Printf("[DEBUG] certManager is nil, cannot create signer\n")
 		}
 
 		// Create config handler with signer (signs configs if signer available)
-		fmt.Printf("[DEBUG] Creating config handler with signer=%v\n", signer != nil)
 		configHandler = controllerQuic.NewConfigHandler(configService, logger, signer)
-		fmt.Printf("[DEBUG] Config handler created successfully\n")
 		logger.Debug("Config handler initialized for data plane", "signing_enabled", signer != nil)
 	}
 
@@ -492,14 +471,11 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 // Start initializes and starts the controller server (MQTT+QUIC mode)
 func (s *Server) Start() error {
-	fmt.Printf("[DEBUG] Controller Server Start() method called\n")
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	// Start HA manager with timeout
-	fmt.Printf("[DEBUG] Controller checking HA manager: %v\n", s.haManager != nil)
 	if s.haManager != nil {
-		fmt.Printf("[DEBUG] Controller starting HA manager\n")
 		s.logger.Info("Starting HA manager...")
 
 		// Create a context with timeout to prevent infinite hang
@@ -571,21 +547,15 @@ func (s *Server) Start() error {
 	}
 
 	// Start data plane provider (Story #362)
-	fmt.Printf("[DEBUG] BUILD VERSION: %s\n", BUILD_VERSION_CHECK)
 	s.logger.Info("Controller build version", "version", BUILD_VERSION_CHECK)
-	fmt.Printf("[DEBUG] Controller checking if dataPlaneProvider is nil: %v\n", s.dataPlaneProvider == nil)
 	if s.dataPlaneProvider != nil {
-		fmt.Printf("[DEBUG] Controller starting data plane provider...\n")
 		s.logger.Info("Starting data plane provider...")
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		fmt.Printf("[DEBUG] Controller calling dataPlaneProvider.Start()\n")
 		if err := s.dataPlaneProvider.Start(ctx); err != nil {
-			fmt.Printf("[DEBUG] Controller dataPlaneProvider.Start() returned error: %v\n", err)
 			return fmt.Errorf("failed to start data plane provider: %w", err)
 		}
-		fmt.Printf("[DEBUG] Controller dataPlaneProvider.Start() succeeded\n")
 		s.logger.Info("Data plane provider started successfully",
 			"provider", s.dataPlaneProvider.Name(),
 			"listen_addr", s.cfg.QUIC.ListenAddr)
@@ -601,32 +571,17 @@ func (s *Server) Start() error {
 		// For now, QUIC server continues to use its internal connection handling
 		// This will be completed in a follow-up enhancement
 		// go s.acceptDataPlaneSessions(context.Background())
-	} else {
-		fmt.Printf("[DEBUG] Controller dataPlaneProvider is nil, skipping data plane startup\n")
 	}
 
 	// Start HTTP API server
-	fmt.Printf("[DEBUG] Controller checking if httpServer is nil: %v\n", s.httpServer == nil)
 	if s.httpServer != nil {
-		fmt.Printf("[DEBUG] Controller starting HTTP server...\n")
 		logger := s.logger // Capture logger for goroutine
 		go func() {
-			fmt.Printf("[DEBUG] Controller httpServer.Start() goroutine started\n")
-			logger.Info("[DEBUG_LOGGER] HTTP goroutine started")
-			fmt.Printf("[DEBUG] About to call httpServer.Start()...\n")
-			logger.Info("[DEBUG_LOGGER] About to call httpServer.Start()")
-			err := s.httpServer.Start()
-			logger.Info("[DEBUG_LOGGER] httpServer.Start() call completed", "error", err)
-			if err != nil {
-				fmt.Printf("[DEBUG] Controller httpServer.Start() returned error: %v\n", err)
+			if err := s.httpServer.Start(); err != nil {
 				logger.Error("HTTP API server failed", "error", err)
-			} else {
-				fmt.Printf("[DEBUG] Controller httpServer.Start() returned successfully\n")
 			}
 		}()
 		s.logger.Info("HTTP API server started")
-	} else {
-		fmt.Printf("[DEBUG] Controller httpServer is nil, skipping HTTP startup\n")
 	}
 
 	s.logger.Info("Controller server started (MQTT+QUIC mode)",
@@ -1195,14 +1150,11 @@ func initializeDataPlaneProvider(cfg *config.Config, logger logging.Logger, cert
 // This is a bridge solution while session acceptance is being completed (Story #362).
 // It allows config sync to work by routing QUIC stream ID 4 to the config handler.
 func (s *Server) registerConfigHandlerBridge() error {
-	fmt.Printf("[DEBUG] registerConfigHandlerBridge() called\n")
 	s.logger.Info("Attempting to register config handler bridge")
 
 	if s.configHandler == nil {
-		fmt.Printf("[DEBUG] config handler is nil\n")
 		return fmt.Errorf("config handler not initialized")
 	}
-	fmt.Printf("[DEBUG] config handler is initialized\n")
 
 	// Type assert to QUIC provider to access RegisterStreamHandler
 	// Interface must match exact signature from pkg/dataplane/providers/quic/provider.go
@@ -1210,45 +1162,33 @@ func (s *Server) registerConfigHandlerBridge() error {
 		RegisterStreamHandler(streamID int64, handler quicServer.StreamHandler) error
 	}
 
-	fmt.Printf("[DEBUG] Attempting type assertion to quicProvider, provider type=%T\n", s.dataPlaneProvider)
 	provider, ok := s.dataPlaneProvider.(quicProvider)
 	if !ok {
 		// Not a QUIC provider, skip registration
-		fmt.Printf("[DEBUG] Type assertion FAILED - not a QUIC provider\n")
 		s.logger.Warn("Data plane provider does not support stream handler registration", "provider_type", fmt.Sprintf("%T", s.dataPlaneProvider))
 		return fmt.Errorf("provider type %T does not implement RegisterStreamHandler", s.dataPlaneProvider)
 	}
-	fmt.Printf("[DEBUG] Type assertion SUCCESS - is a QUIC provider\n")
 
 	// Create bridge handler that adapts old QUIC server signature to new config handler
 	bridgeHandler := func(ctx context.Context, sess *quicServer.Session, strm *quic.Stream) error {
-		fmt.Printf("[DEBUG] BRIDGE HANDLER INVOKED: session=%s stream=%d\n", sess.ID, (*strm).StreamID())
 		s.logger.Info("Bridge handler invoked", "session_id", sess.ID, "stream_id", (*strm).StreamID())
 
 		// Wrap old QUIC session as DataPlaneSession
 		session := &quicSessionBridge{raw: sess}
-		fmt.Printf("[DEBUG] Created session bridge: id=%s peer_id=%s\n", session.ID(), session.PeerID())
 
 		// Wrap old QUIC stream as Stream
 		stream := &quicStreamBridge{raw: strm}
-		fmt.Printf("[DEBUG] Created stream bridge: id=%d type=%v\n", stream.ID(), stream.Type())
 
 		// Call config handler with wrapped interfaces
-		fmt.Printf("[DEBUG] Calling config handler...\n")
-		err := s.configHandler.Handle(ctx, session, stream)
-		fmt.Printf("[DEBUG] Config handler returned: err=%v\n", err)
-		return err
+		return s.configHandler.Handle(ctx, session, stream)
 	}
 
 	// Register handler for config sync stream (stream ID 4)
 	const configSyncStreamID = 4
-	fmt.Printf("[DEBUG] Calling RegisterStreamHandler for stream_id=%d\n", configSyncStreamID)
 	if err := provider.RegisterStreamHandler(configSyncStreamID, bridgeHandler); err != nil {
-		fmt.Printf("[DEBUG] RegisterStreamHandler FAILED: %v\n", err)
 		return fmt.Errorf("failed to register config handler: %w", err)
 	}
 
-	fmt.Printf("[DEBUG] RegisterStreamHandler SUCCESS\n")
 	s.logger.Info("Config handler registered with QUIC provider", "stream_id", configSyncStreamID)
 	return nil
 }
