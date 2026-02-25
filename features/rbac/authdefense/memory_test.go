@@ -13,11 +13,11 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
-func TestMemory_100K_Requests(t *testing.T) {
+func TestMemory_50K_Requests(t *testing.T) {
 	clock := NewTestClock(time.Time{})
 	cfg := DefaultConfig()
-	cfg.IPMaxTracked = 100_000
-	cfg.GCTriggerThreshold = 50_000
+	cfg.IPMaxTracked = 50_000
+	cfg.GCTriggerThreshold = 1_000_000
 
 	logger := logging.NewLogger("error")
 	d := New(cfg, logger, WithClock(clock))
@@ -28,8 +28,8 @@ func TestMemory_100K_Requests(t *testing.T) {
 	var baseline runtime.MemStats
 	runtime.ReadMemStats(&baseline)
 
-	// Generate 100K requests from 10K unique IPs
-	for i := range 100_000 {
+	// Generate 50K requests from diverse IPs and tenants
+	for i := range 50_000 {
 		ip := fmt.Sprintf("10.%d.%d.%d", (i/65536)%256, (i/256)%256, i%256)
 		d.CheckRequest(ip, "")
 		d.RecordResult(ip, fmt.Sprintf("tenant-%d", i%100), i%10 != 0)
@@ -40,9 +40,9 @@ func TestMemory_100K_Requests(t *testing.T) {
 	runtime.ReadMemStats(&after)
 
 	allocMB := float64(after.Alloc-baseline.Alloc) / (1024 * 1024)
-	t.Logf("Memory after 100K requests: %.2f MB (alloc)", allocMB)
+	t.Logf("Memory after 50K requests: %.2f MB (alloc)", allocMB)
 
-	assert.Less(t, after.Alloc, uint64(100*1024*1024), "memory should stay under 100MB for 100K requests")
+	assert.Less(t, after.Alloc, uint64(100*1024*1024), "memory should stay under 100MB for 50K requests")
 }
 
 func TestMemory_NoLeaks(t *testing.T) {

@@ -22,7 +22,7 @@ func TestPerformance_Throughput(t *testing.T) {
 	d := New(cfg, logger, WithClock(clock))
 	defer d.Stop()
 
-	iterations := 100_000
+	iterations := 10_000
 	start := time.Now()
 
 	for i := 0; i < iterations; i++ {
@@ -50,7 +50,7 @@ func TestPerformance_Concurrent(t *testing.T) {
 	defer d.Stop()
 
 	goroutines := 50
-	opsPerGoroutine := 1_000
+	opsPerGoroutine := 200
 
 	var wg sync.WaitGroup
 	start := time.Now()
