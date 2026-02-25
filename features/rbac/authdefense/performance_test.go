@@ -14,6 +14,11 @@ import (
 )
 
 func TestPerformance_Throughput(t *testing.T) {
+	iterations := 10_000
+	if testing.Short() {
+		iterations = 1_000
+	}
+
 	clock := NewTestClock(time.Time{})
 	cfg := DefaultConfig()
 	cfg.GCTriggerThreshold = 1_000_000 // don't trigger GC during perf test
@@ -22,7 +27,6 @@ func TestPerformance_Throughput(t *testing.T) {
 	d := New(cfg, logger, WithClock(clock))
 	defer d.Stop()
 
-	iterations := 10_000
 	start := time.Now()
 
 	for i := 0; i < iterations; i++ {
@@ -40,6 +44,13 @@ func TestPerformance_Throughput(t *testing.T) {
 }
 
 func TestPerformance_Concurrent(t *testing.T) {
+	goroutines := 50
+	opsPerGoroutine := 200
+	if testing.Short() {
+		goroutines = 10
+		opsPerGoroutine = 50
+	}
+
 	clock := NewTestClock(time.Time{})
 	cfg := DefaultConfig()
 	cfg.IPRateLimit = 1_000_000 // high to avoid blocks during perf test
@@ -48,9 +59,6 @@ func TestPerformance_Concurrent(t *testing.T) {
 	logger := logging.NewLogger("error")
 	d := New(cfg, logger, WithClock(clock))
 	defer d.Stop()
-
-	goroutines := 50
-	opsPerGoroutine := 200
 
 	var wg sync.WaitGroup
 	start := time.Now()

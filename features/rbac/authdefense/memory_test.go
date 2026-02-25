@@ -13,10 +13,18 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
-func TestMemory_50K_Requests(t *testing.T) {
+func TestMemory_Requests(t *testing.T) {
+	// ThreadSanitizer (race detector) maintains 5-10x shadow memory per byte of
+	// application memory. On Windows CI runners, cumulative TSan shadow memory from
+	// 90+ test packages exhausts the commit charge limit. Use -short to reduce volume.
+	numRequests := 50_000
+	if testing.Short() {
+		numRequests = 5_000
+	}
+
 	clock := NewTestClock(time.Time{})
 	cfg := DefaultConfig()
-	cfg.IPMaxTracked = 50_000
+	cfg.IPMaxTracked = numRequests
 	cfg.GCTriggerThreshold = 1_000_000
 
 	logger := logging.NewLogger("error")
@@ -28,8 +36,7 @@ func TestMemory_50K_Requests(t *testing.T) {
 	var baseline runtime.MemStats
 	runtime.ReadMemStats(&baseline)
 
-	// Generate 50K requests from diverse IPs and tenants
-	for i := range 50_000 {
+	for i := range numRequests {
 		ip := fmt.Sprintf("10.%d.%d.%d", (i/65536)%256, (i/256)%256, i%256)
 		d.CheckRequest(ip, "")
 		d.RecordResult(ip, fmt.Sprintf("tenant-%d", i%100), i%10 != 0)
@@ -40,30 +47,33 @@ func TestMemory_50K_Requests(t *testing.T) {
 	runtime.ReadMemStats(&after)
 
 	allocMB := float64(after.Alloc-baseline.Alloc) / (1024 * 1024)
-	t.Logf("Memory after 50K requests: %.2f MB (alloc)", allocMB)
+	t.Logf("Memory after %d requests: %.2f MB (alloc)", numRequests, allocMB)
 
-	assert.Less(t, after.Alloc, uint64(100*1024*1024), "memory should stay under 100MB for 50K requests")
+	assert.Less(t, after.Alloc, uint64(100*1024*1024), "memory should stay under 100MB")
 }
 
 func TestMemory_NoLeaks(t *testing.T) {
+	numRequests := 10_000
+	if testing.Short() {
+		numRequests = 1_000
+	}
+
 	clock := NewTestClock(time.Time{})
 	cfg := DefaultConfig()
 	cfg.IPMaxTracked = 1_000
 	cfg.TenantMaxTracked = 100
 	cfg.IPRateWindow = 1 * time.Second
-	cfg.GCTriggerThreshold = 5_000
+	cfg.GCTriggerThreshold = int64(numRequests) + 1000
 
 	logger := logging.NewLogger("error")
 	d := New(cfg, logger, WithClock(clock))
 	defer d.Stop()
 
-	// Warmup: run some traffic
 	runtime.GC()
 	var baselineStats runtime.MemStats
 	runtime.ReadMemStats(&baselineStats)
 
-	// Run 10K requests
-	for i := range 10_000 {
+	for i := range numRequests {
 		ip := fmt.Sprintf("10.0.%d.%d", (i/256)%256, i%256)
 		d.CheckRequest(ip, "")
 		d.RecordResult(ip, "tenant-0", true)
