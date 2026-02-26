@@ -29,4 +29,10 @@ var (
 	ErrDNSProviderRequired = errors.New("dns_provider is required when challenge_type is dns-01")
 	// ErrDNSCredentialKeyRequired is returned when dns-01 is used without a credential key
 	ErrDNSCredentialKeyRequired = errors.New("dns_credential_key is required when challenge_type is dns-01")
+	// ErrCertStoreUnsupported is returned when a cert:\ path is used on a non-Windows platform
+	ErrCertStoreUnsupported = errors.New("acme: Windows certificate store paths (cert:\\) are only supported on Windows")
+	// ErrCertStoreImportFailed is returned when certificate import into the Windows certificate store fails
+	ErrCertStoreImportFailed = errors.New("acme: failed to import certificate into Windows certificate store")
+	// ErrCertStoreOpenFailed is returned when the Windows certificate store cannot be opened
+	ErrCertStoreOpenFailed = errors.New("acme: failed to open Windows certificate store")
 )

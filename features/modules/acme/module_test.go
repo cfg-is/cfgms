@@ -13,6 +13,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -673,6 +674,108 @@ func TestModule_Set_RemoveCertificate(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify removed
+	assert.False(t, store.CertificateExists(domain))
+}
+
+// --- CertBackend Path Routing Tests ---
+
+func TestIsCertStorePath(t *testing.T) {
+	tests := []struct {
+		name     string
+		path     string
+		expected bool
+	}{
+		{"windows cert store", `cert:\LocalMachine\My`, true},
+		{"windows cert store WebHosting", `cert:\LocalMachine\WebHosting`, true},
+		{"windows cert store lowercase", `cert:\localmachine\my`, true},
+		{"windows cert store mixed case", `Cert:\LocalMachine\My`, true},
+		{"linux filesystem", "/var/lib/cfgms/certs", false},
+		{"windows filesystem", `C:\ProgramData\cfgms\certs`, false},
+		{"empty string", "", false},
+		{"cert prefix no backslash", "cert:LocalMachine", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, isCertStorePath(tt.path))
+		})
+	}
+}
+
+func TestParseCertStorePath(t *testing.T) {
+	tests := []struct {
+		name         string
+		path         string
+		wantLocation string
+		wantStore    string
+	}{
+		{"standard path", `cert:\LocalMachine\My`, "LocalMachine", "My"},
+		{"WebHosting store", `cert:\LocalMachine\WebHosting`, "LocalMachine", "WebHosting"},
+		{"CurrentUser", `cert:\CurrentUser\My`, "CurrentUser", "My"},
+		{"mixed case prefix", `Cert:\LocalMachine\My`, "LocalMachine", "My"},
+		{"location only", `cert:\LocalMachine`, "LocalMachine", "My"},
+		{"empty after prefix", `cert:\`, "LocalMachine", "My"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			location, storeName := parseCertStorePath(tt.path)
+			assert.Equal(t, tt.wantLocation, location)
+			assert.Equal(t, tt.wantStore, storeName)
+		})
+	}
+}
+
+func TestNewACMECertStore_CertStorePathRejectedOnNonWindows(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("this test validates non-Windows behavior")
+	}
+	_, err := NewACMECertStore(`cert:\LocalMachine\My`)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrCertStoreUnsupported)
+}
+
+func TestNewACMECertStore_FilesystemPathAccepted(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewACMECertStore(tmpDir)
+	require.NoError(t, err)
+	require.NotNil(t, store)
+	assert.Equal(t, tmpDir, store.GetBasePath())
+}
+
+func TestNewACMECertStore_CertBackendDelegation(t *testing.T) {
+	// Verify that cert operations delegate to the backend correctly
+	tmpDir := t.TempDir()
+	store, err := NewACMECertStore(tmpDir)
+	require.NoError(t, err)
+
+	domain := "backend-test.example.com"
+	certPEM := []byte("-----BEGIN CERTIFICATE-----\ntest cert\n-----END CERTIFICATE-----\n")
+	keyPEM := []byte("-----BEGIN EC PRIVATE KEY-----\ntest key\n-----END EC PRIVATE KEY-----\n")
+	meta := &CertificateMetadata{
+		Domain:  domain,
+		Email:   "admin@example.com",
+		KeyType: "ec256",
+	}
+
+	// Store via ACMECertStore (delegates to backend)
+	err = store.StoreCertificate(domain, certPEM, keyPEM, nil, meta)
+	require.NoError(t, err)
+
+	// Verify files exist on disk at expected location
+	keyPath := filepath.Join(tmpDir, "acme", "certificates", domain, "key.pem")
+	_, err = os.Stat(keyPath)
+	require.NoError(t, err)
+
+	// Load via ACMECertStore
+	loadedCert, loadedKey, err := store.LoadCertificate(domain)
+	require.NoError(t, err)
+	assert.Equal(t, certPEM, loadedCert)
+	assert.Equal(t, keyPEM, loadedKey)
+
+	// Delete via ACMECertStore
+	err = store.DeleteCertificate(domain)
+	require.NoError(t, err)
 	assert.False(t, store.CertificateExists(domain))
 }
 

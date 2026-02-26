@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jordan Ritz
+
 // #nosec G304 - ACME certificate store requires file system access for certificate management
 package acme
 
@@ -10,12 +11,28 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 )
 
-// ACMECertStore manages the local filesystem layout for ACME certificates and accounts
+// CertBackend abstracts certificate storage (filesystem PEM vs Windows cert store).
+// The filesystem backend stores certificates as PEM files; the Windows backend
+// imports certificates into the Windows Certificate Store via CryptoAPI while
+// keeping PEM backups for ACME renewal operations.
+type CertBackend interface {
+	StoreCertificate(domain string, certPEM, keyPEM, issuerPEM []byte, meta *CertificateMetadata) error
+	LoadCertificate(domain string) (certPEM, keyPEM []byte, err error)
+	LoadCertificateMetadata(domain string) (*CertificateMetadata, error)
+	DeleteCertificate(domain string) error
+	CertificateExists(domain string) bool
+}
+
+// ACMECertStore manages ACME certificates and accounts.
+// Certificate operations are delegated to a CertBackend (filesystem PEM or
+// Windows cert store). Account operations always use the filesystem.
 type ACMECertStore struct {
-	basePath string
+	basePath    string      // filesystem base for account data (always filesystem)
+	certBackend CertBackend // filesystem or Windows cert store
 }
 
 // CertificateMetadata stores metadata alongside certificate files
@@ -37,112 +54,66 @@ type AccountData struct {
 	URI          string `json:"uri"`
 }
 
-// NewACMECertStore creates a new certificate store at the given base path
-func NewACMECertStore(basePath string) (*ACMECertStore, error) {
-	if basePath == "" {
-		basePath = defaultCertStorePath()
+// NewACMECertStore creates a new certificate store at the given path.
+// The path determines the certificate backend:
+//   - "cert:\..." paths use the Windows Certificate Store (Windows only)
+//   - All other paths use filesystem PEM storage
+//   - Empty string uses the platform default
+func NewACMECertStore(certStorePath string) (*ACMECertStore, error) {
+	if certStorePath == "" {
+		certStorePath = defaultCertStorePath()
 	}
 
-	store := &ACMECertStore{basePath: basePath}
-
-	// Ensure base directories exist
-	dirs := []string{
-		filepath.Join(basePath, "acme", "accounts"),
-		filepath.Join(basePath, "acme", "certificates"),
+	// Determine account storage path (always filesystem).
+	// When using the Windows cert store, accounts go to the platform default filesystem path.
+	accountBasePath := certStorePath
+	if isCertStorePath(certStorePath) {
+		accountBasePath = defaultAccountStorePath()
 	}
-	for _, dir := range dirs {
-		if err := os.MkdirAll(dir, 0700); err != nil {
-			return nil, fmt.Errorf("failed to create directory %s: %w", dir, err)
-		}
+
+	// Create cert backend based on path type
+	backend, err := newCertBackend(certStorePath)
+	if err != nil {
+		return nil, err
+	}
+
+	store := &ACMECertStore{
+		basePath:    accountBasePath,
+		certBackend: backend,
+	}
+
+	// Ensure account directory exists
+	accountDir := filepath.Join(accountBasePath, "acme", "accounts")
+	if err := os.MkdirAll(accountDir, 0700); err != nil {
+		return nil, fmt.Errorf("failed to create directory %s: %w", accountDir, err)
 	}
 
 	return store, nil
 }
 
-// StoreCertificate writes certificate files to the store
+// StoreCertificate writes certificate data to the configured backend
 func (s *ACMECertStore) StoreCertificate(domain string, certPEM, keyPEM, issuerPEM []byte, meta *CertificateMetadata) error {
-	certDir := s.certPath(domain)
-	if err := os.MkdirAll(certDir, 0700); err != nil {
-		return fmt.Errorf("failed to create certificate directory: %w", err)
-	}
-
-	// Write cert.pem (parent directory is 0700, so 0600 is sufficient)
-	if err := os.WriteFile(filepath.Join(certDir, "cert.pem"), certPEM, 0600); err != nil {
-		return fmt.Errorf("failed to write cert.pem: %w", err)
-	}
-
-	// Write key.pem (owner-only)
-	if err := os.WriteFile(filepath.Join(certDir, "key.pem"), keyPEM, 0600); err != nil {
-		return fmt.Errorf("failed to write key.pem: %w", err)
-	}
-
-	// Write issuer.pem if provided
-	if len(issuerPEM) > 0 {
-		if err := os.WriteFile(filepath.Join(certDir, "issuer.pem"), issuerPEM, 0600); err != nil {
-			return fmt.Errorf("failed to write issuer.pem: %w", err)
-		}
-	}
-
-	// Write metadata
-	if meta != nil {
-		metaJSON, err := json.MarshalIndent(meta, "", "  ")
-		if err != nil {
-			return fmt.Errorf("failed to marshal metadata: %w", err)
-		}
-		if err := os.WriteFile(filepath.Join(certDir, "metadata.json"), metaJSON, 0600); err != nil {
-			return fmt.Errorf("failed to write metadata.json: %w", err)
-		}
-	}
-
-	return nil
+	return s.certBackend.StoreCertificate(domain, certPEM, keyPEM, issuerPEM, meta)
 }
 
 // LoadCertificate reads the certificate and key for a domain
 func (s *ACMECertStore) LoadCertificate(domain string) (certPEM, keyPEM []byte, err error) {
-	certDir := s.certPath(domain)
-
-	certPEM, err = os.ReadFile(filepath.Join(certDir, "cert.pem"))
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to read cert.pem: %w", err)
-	}
-
-	keyPEM, err = os.ReadFile(filepath.Join(certDir, "key.pem"))
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to read key.pem: %w", err)
-	}
-
-	return certPEM, keyPEM, nil
+	return s.certBackend.LoadCertificate(domain)
 }
 
 // LoadCertificateMetadata reads the metadata for a domain's certificate
 func (s *ACMECertStore) LoadCertificateMetadata(domain string) (*CertificateMetadata, error) {
-	metaPath := filepath.Join(s.certPath(domain), "metadata.json")
-	data, err := os.ReadFile(metaPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read metadata: %w", err)
-	}
-
-	var meta CertificateMetadata
-	if err := json.Unmarshal(data, &meta); err != nil {
-		return nil, fmt.Errorf("failed to parse metadata: %w", err)
-	}
-	return &meta, nil
+	return s.certBackend.LoadCertificateMetadata(domain)
 }
 
-// DeleteCertificate removes all certificate files for a domain
+// DeleteCertificate removes certificate data for a domain
 func (s *ACMECertStore) DeleteCertificate(domain string) error {
-	certDir := s.certPath(domain)
-	if err := os.RemoveAll(certDir); err != nil {
-		return fmt.Errorf("failed to delete certificate directory: %w", err)
-	}
-	return nil
+	return s.certBackend.DeleteCertificate(domain)
 }
 
 // CertificateExists checks if a certificate exists for the given domain
 func (s *ACMECertStore) CertificateExists(domain string) bool {
-	certPath := filepath.Join(s.certPath(domain), "cert.pem")
-	_, err := os.Stat(certPath)
-	return err == nil
+	return s.certBackend.CertificateExists(domain)
 }
 
 // StoreAccount saves ACME account data
@@ -214,23 +185,60 @@ func (s *ACMECertStore) GetBasePath() string {
 	return s.basePath
 }
 
-func (s *ACMECertStore) certPath(domain string) string {
-	return filepath.Join(s.basePath, "acme", "certificates", domain)
-}
-
 func (s *ACMECertStore) accountPath(email string) string {
 	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(email)))
 	return filepath.Join(s.basePath, "acme", "accounts", hash[:16])
 }
 
+// isCertStorePath returns true if the path refers to a Windows Certificate Store.
+// Paths starting with "cert:\" (case-insensitive) are routed to the Windows cert store backend.
+func isCertStorePath(path string) bool {
+	return strings.HasPrefix(strings.ToLower(path), `cert:\`)
+}
+
+// parseCertStorePath parses a cert:\ path into location and store name.
+// Example: "cert:\LocalMachine\My" → location="LocalMachine", storeName="My"
+func parseCertStorePath(path string) (location string, storeName string) {
+	// Remove "cert:\" prefix (case-insensitive, 6 characters)
+	trimmed := path
+	if len(trimmed) >= 6 && strings.EqualFold(trimmed[:6], `cert:\`) {
+		trimmed = trimmed[6:]
+	}
+
+	// Split on backslash: "LocalMachine\My" → ["LocalMachine", "My"]
+	parts := strings.SplitN(trimmed, `\`, 2)
+	if len(parts) == 2 {
+		return parts[0], parts[1]
+	}
+	if len(parts) == 1 && parts[0] != "" {
+		return parts[0], "My"
+	}
+	return "LocalMachine", "My"
+}
+
 func defaultCertStorePath() string {
 	switch runtime.GOOS {
+	case "windows":
+		return `cert:\LocalMachine\My`
 	case "darwin":
 		home, _ := os.UserHomeDir()
 		return filepath.Join(home, "Library", "Application Support", "cfgms", "certs")
+	default: // linux and others
+		return "/var/lib/cfgms/certs"
+	}
+}
+
+// defaultAccountStorePath returns the filesystem path for ACME account data.
+// Account data is always stored on the filesystem, even when certificates
+// use the Windows Certificate Store.
+func defaultAccountStorePath() string {
+	switch runtime.GOOS {
 	case "windows":
 		return filepath.Join(os.Getenv("ProgramData"), "cfgms", "certs")
-	default: // linux and others
+	case "darwin":
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, "Library", "Application Support", "cfgms", "certs")
+	default:
 		return "/var/lib/cfgms/certs"
 	}
 }
