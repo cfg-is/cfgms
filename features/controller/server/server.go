@@ -74,12 +74,10 @@ type Server struct {
 
 // New creates a new server instance
 func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
-	fmt.Printf("[DEBUG] server.New() called\n")
 	if cfg == nil {
 		return nil, ErrNilConfig
 	}
 
-	fmt.Printf("[DEBUG] server.New() - cfg validated\n")
 	logger.Info("Config validated, proceeding with storage initialization...")
 
 	// Initialize global storage provider system - REQUIRED for all deployments
@@ -143,6 +141,55 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		certManager, err = initializeCertificateManager(cfg, logger)
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize certificate manager: %w", err)
+		}
+
+		// Story #377: Boot migration for separated certificate architecture
+		if cfg.Certificate.IsSeparatedArchitecture() {
+			logger.Info("Certificate architecture: separated — ensuring purpose-specific certificates")
+			internalCfg := &cert.ServerCertConfig{
+				CommonName:   "cfgms-internal",
+				DNSNames:     []string{"localhost", "cfgms-internal", "controller-standalone"},
+				IPAddresses:  []string{"127.0.0.1", "0.0.0.0"},
+				ValidityDays: 365,
+			}
+			if cfg.Certificate.Internal != nil {
+				if cfg.Certificate.Internal.CommonName != "" {
+					internalCfg.CommonName = cfg.Certificate.Internal.CommonName
+				}
+				if len(cfg.Certificate.Internal.DNSNames) > 0 {
+					internalCfg.DNSNames = cfg.Certificate.Internal.DNSNames
+				}
+				if len(cfg.Certificate.Internal.IPAddresses) > 0 {
+					internalCfg.IPAddresses = cfg.Certificate.Internal.IPAddresses
+				}
+			}
+			if cfg.Certificate.InternalCertValidityDays > 0 {
+				internalCfg.ValidityDays = cfg.Certificate.InternalCertValidityDays
+			}
+
+			signingCfg := &cert.SigningCertConfig{
+				CommonName:   "cfgms-config-signer",
+				ValidityDays: 1095,
+				KeySize:      4096,
+			}
+			if cfg.Certificate.Signing != nil {
+				if cfg.Certificate.Signing.CommonName != "" {
+					signingCfg.CommonName = cfg.Certificate.Signing.CommonName
+				}
+				if cfg.Certificate.Signing.Organization != "" {
+					signingCfg.Organization = cfg.Certificate.Signing.Organization
+				}
+			}
+			if cfg.Certificate.SigningCertValidityDays > 0 {
+				signingCfg.ValidityDays = cfg.Certificate.SigningCertValidityDays
+			}
+
+			if err := certManager.EnsureSeparatedCertificates(internalCfg, signingCfg); err != nil {
+				return nil, fmt.Errorf("failed to ensure separated certificates: %w", err)
+			}
+			logger.Info("Separated certificates ensured (internal mTLS + config signing)")
+		} else {
+			logger.Info("Certificate architecture: unified (default)")
 		}
 
 		// Create certificate provisioning service
@@ -313,9 +360,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 	// Initialize data plane provider if enabled (Story #362)
 	var dataPlane dataplaneInterfaces.DataPlaneProvider
-	fmt.Printf("[DEBUG] New(): Checking QUIC config: nil=%v enabled=%v\n", cfg.QUIC == nil, cfg.QUIC != nil && cfg.QUIC.Enabled)
 	if cfg.QUIC != nil && cfg.QUIC.Enabled {
-		fmt.Printf("[DEBUG] New(): Data plane enabled, initializing provider...\n")
 		logger.Info("Initializing data plane provider...")
 		dataPlane, err = initializeDataPlaneProvider(cfg, logger, certManager, configService)
 		if err != nil {
@@ -329,53 +374,40 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	var configHandler *controllerQuic.ConfigHandler
 	var signerCertSerial string // Story #378: Track cert serial for registration handler
 	if dataPlane != nil {
-		fmt.Printf("[DEBUG] Initializing config handler with signer support...\n")
-		// Create signer from server certificate for config signing (Story #315)
+		// Create signer from certificate for config signing (Story #315, #377)
+		// In separated mode: use CertificateTypeConfigSigning (dedicated signing cert)
+		// In unified mode: use CertificateTypeServer (backward compatible)
 		var signer signature.Signer
 		if certManager != nil {
-			fmt.Printf("[DEBUG] certManager available, fetching server certificates...\n")
-			serverCerts, err := certManager.GetCertificatesByType(cert.CertificateTypeServer)
-			fmt.Printf("[DEBUG] GetCertificatesByType returned: err=%v numCerts=%d\n", err, len(serverCerts))
-			if err == nil && len(serverCerts) > 0 {
-				// Export server certificate with private key
-				signerCertSerial = serverCerts[0].SerialNumber
-				fmt.Printf("[DEBUG] Exporting server cert with serial=%s\n", signerCertSerial)
+			signerCertType := cert.CertificateTypeServer
+			if cfg.Certificate != nil && cfg.Certificate.IsSeparatedArchitecture() {
+				signerCertType = cert.CertificateTypeConfigSigning
+			}
+
+			signerCerts, err := certManager.GetCertificatesByType(signerCertType)
+			if err == nil && len(signerCerts) > 0 {
+				signerCertSerial = signerCerts[0].SerialNumber
 				certPEM, keyPEM, err := certManager.ExportCertificate(signerCertSerial, true)
-				fmt.Printf("[DEBUG] ExportCertificate returned: err=%v certLen=%d keyLen=%d\n", err, len(certPEM), len(keyPEM))
 				if err == nil && len(certPEM) > 0 && len(keyPEM) > 0 {
-					// Create signer from server certificate
-					fmt.Printf("[DEBUG] Creating signer from server certificate...\n")
 					signer, err = signature.NewSigner(&signature.SignerConfig{
 						PrivateKeyPEM:  keyPEM,
 						CertificatePEM: certPEM,
 					})
 					if err != nil {
-						fmt.Printf("[DEBUG] Failed to create signer: %v\n", err)
 						logger.Warn("Failed to create config signer", "error", err)
 					} else {
-						// CRITICAL (Story #378): Serial stored and will be passed to registration handler
-						// Registration MUST use the SAME cert serial to ensure signature verification works
-						fmt.Printf("[DEBUG] Signer created successfully: algorithm=%s fingerprint=%s serial=%s\n",
-							signer.Algorithm(), signer.KeyFingerprint(), signerCertSerial)
 						logger.Info("Config signer initialized successfully",
 							"algorithm", signer.Algorithm(),
 							"fingerprint", signer.KeyFingerprint(),
-							"cert_serial", signerCertSerial)
+							"cert_serial", signerCertSerial,
+							"cert_type", signerCertType.String())
 					}
-				} else {
-					fmt.Printf("[DEBUG] Skipping signer creation: missing cert or key\n")
 				}
-			} else {
-				fmt.Printf("[DEBUG] No server certificates found or error occurred\n")
 			}
-		} else {
-			fmt.Printf("[DEBUG] certManager is nil, cannot create signer\n")
 		}
 
 		// Create config handler with signer (signs configs if signer available)
-		fmt.Printf("[DEBUG] Creating config handler with signer=%v\n", signer != nil)
 		configHandler = controllerQuic.NewConfigHandler(configService, logger, signer)
-		fmt.Printf("[DEBUG] Config handler created successfully\n")
 		logger.Debug("Config handler initialized for data plane", "signing_enabled", signer != nil)
 	}
 
@@ -439,14 +471,11 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 // Start initializes and starts the controller server (MQTT+QUIC mode)
 func (s *Server) Start() error {
-	fmt.Printf("[DEBUG] Controller Server Start() method called\n")
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	// Start HA manager with timeout
-	fmt.Printf("[DEBUG] Controller checking HA manager: %v\n", s.haManager != nil)
 	if s.haManager != nil {
-		fmt.Printf("[DEBUG] Controller starting HA manager\n")
 		s.logger.Info("Starting HA manager...")
 
 		// Create a context with timeout to prevent infinite hang
@@ -518,21 +547,15 @@ func (s *Server) Start() error {
 	}
 
 	// Start data plane provider (Story #362)
-	fmt.Printf("[DEBUG] BUILD VERSION: %s\n", BUILD_VERSION_CHECK)
 	s.logger.Info("Controller build version", "version", BUILD_VERSION_CHECK)
-	fmt.Printf("[DEBUG] Controller checking if dataPlaneProvider is nil: %v\n", s.dataPlaneProvider == nil)
 	if s.dataPlaneProvider != nil {
-		fmt.Printf("[DEBUG] Controller starting data plane provider...\n")
 		s.logger.Info("Starting data plane provider...")
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		fmt.Printf("[DEBUG] Controller calling dataPlaneProvider.Start()\n")
 		if err := s.dataPlaneProvider.Start(ctx); err != nil {
-			fmt.Printf("[DEBUG] Controller dataPlaneProvider.Start() returned error: %v\n", err)
 			return fmt.Errorf("failed to start data plane provider: %w", err)
 		}
-		fmt.Printf("[DEBUG] Controller dataPlaneProvider.Start() succeeded\n")
 		s.logger.Info("Data plane provider started successfully",
 			"provider", s.dataPlaneProvider.Name(),
 			"listen_addr", s.cfg.QUIC.ListenAddr)
@@ -548,32 +571,17 @@ func (s *Server) Start() error {
 		// For now, QUIC server continues to use its internal connection handling
 		// This will be completed in a follow-up enhancement
 		// go s.acceptDataPlaneSessions(context.Background())
-	} else {
-		fmt.Printf("[DEBUG] Controller dataPlaneProvider is nil, skipping data plane startup\n")
 	}
 
 	// Start HTTP API server
-	fmt.Printf("[DEBUG] Controller checking if httpServer is nil: %v\n", s.httpServer == nil)
 	if s.httpServer != nil {
-		fmt.Printf("[DEBUG] Controller starting HTTP server...\n")
 		logger := s.logger // Capture logger for goroutine
 		go func() {
-			fmt.Printf("[DEBUG] Controller httpServer.Start() goroutine started\n")
-			logger.Info("[DEBUG_LOGGER] HTTP goroutine started")
-			fmt.Printf("[DEBUG] About to call httpServer.Start()...\n")
-			logger.Info("[DEBUG_LOGGER] About to call httpServer.Start()")
-			err := s.httpServer.Start()
-			logger.Info("[DEBUG_LOGGER] httpServer.Start() call completed", "error", err)
-			if err != nil {
-				fmt.Printf("[DEBUG] Controller httpServer.Start() returned error: %v\n", err)
+			if err := s.httpServer.Start(); err != nil {
 				logger.Error("HTTP API server failed", "error", err)
-			} else {
-				fmt.Printf("[DEBUG] Controller httpServer.Start() returned successfully\n")
 			}
 		}()
 		s.logger.Info("HTTP API server started")
-	} else {
-		fmt.Printf("[DEBUG] Controller httpServer is nil, skipping HTTP startup\n")
 	}
 
 	s.logger.Info("Controller server started (MQTT+QUIC mode)",
@@ -908,7 +916,8 @@ func initializeMQTTBroker(cfg *config.Config, logger logging.Logger, certManager
 			// Check if certificates exist, if not generate them using certManager
 			if _, err := os.Stat(serverCertPath); os.IsNotExist(err) {
 				logger.Info("MQTT certificates not found, generating using certificate manager")
-				if err := ensureMQTTCertificatesFromManager(cfg.Certificate.CAPath, certManager, logger); err != nil {
+				separated := cfg.Certificate != nil && cfg.Certificate.IsSeparatedArchitecture()
+				if err := ensureMQTTCertificatesFromManagerWithArch(cfg.Certificate.CAPath, certManager, logger, separated); err != nil {
 					return nil, fmt.Errorf("failed to generate MQTT certificates: %w", err)
 				}
 			}
@@ -962,23 +971,32 @@ func initializeMQTTBroker(cfg *config.Config, logger logging.Logger, certManager
 	return broker, nil
 }
 
-// ensureMQTTCertificatesFromManager generates MQTT server certificates using the certificate manager.
+// ensureMQTTCertificatesFromManagerWithArch generates MQTT server certificates using the certificate manager.
 // This ensures MQTT uses the same CA as the HTTP/REST API, enabling proper mTLS with unified certificate chain.
-func ensureMQTTCertificatesFromManager(caPath string, certManager *cert.Manager, logger logging.Logger) error {
+// Story #377: In separated mode, uses CertificateTypeInternalServer; in unified mode, uses CertificateTypeServer.
+func ensureMQTTCertificatesFromManagerWithArch(caPath string, certManager *cert.Manager, logger logging.Logger, separated bool) error {
 	// Create directory structure
 	serverDir := filepath.Join(caPath, "server")
 	if err := os.MkdirAll(serverDir, 0750); err != nil { // Restrict to owner+group only
 		return fmt.Errorf("failed to create server cert directory: %w", err)
 	}
 
-	// Generate MQTT server certificate using certManager (same CA as HTTP)
-	serverCert, err := certManager.GenerateServerCertificate(&cert.ServerCertConfig{
+	certCfg := &cert.ServerCertConfig{
 		CommonName:   "cfgms-mqtt-server",
 		Organization: "CFGMS",
 		DNSNames:     []string{"localhost", "cfgms-mqtt-server", "controller-standalone"},
 		IPAddresses:  []string{"127.0.0.1", "0.0.0.0"},
 		ValidityDays: 365,
-	})
+	}
+
+	// Generate certificate using appropriate type based on architecture
+	var serverCert *cert.Certificate
+	var err error
+	if separated {
+		serverCert, err = certManager.GenerateInternalServerCertificate(certCfg)
+	} else {
+		serverCert, err = certManager.GenerateServerCertificate(certCfg)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to generate MQTT server certificate: %w", err)
 	}
@@ -1027,7 +1045,8 @@ func buildQUICTLSConfig(cfg *config.Config, certManager *cert.Manager, logger lo
 		if _, err := os.Stat(serverCertPath); os.IsNotExist(err) {
 			logger.Info("QUIC certificates not found, using MQTT certificates")
 			// MQTT cert generation already happened, so these should exist
-			if err := ensureMQTTCertificatesFromManager(cfg.Certificate.CAPath, certManager, logger); err != nil {
+			separated := cfg.Certificate != nil && cfg.Certificate.IsSeparatedArchitecture()
+			if err := ensureMQTTCertificatesFromManagerWithArch(cfg.Certificate.CAPath, certManager, logger, separated); err != nil {
 				return nil, fmt.Errorf("failed to ensure certificates: %w", err)
 			}
 		}
@@ -1131,14 +1150,11 @@ func initializeDataPlaneProvider(cfg *config.Config, logger logging.Logger, cert
 // This is a bridge solution while session acceptance is being completed (Story #362).
 // It allows config sync to work by routing QUIC stream ID 4 to the config handler.
 func (s *Server) registerConfigHandlerBridge() error {
-	fmt.Printf("[DEBUG] registerConfigHandlerBridge() called\n")
 	s.logger.Info("Attempting to register config handler bridge")
 
 	if s.configHandler == nil {
-		fmt.Printf("[DEBUG] config handler is nil\n")
 		return fmt.Errorf("config handler not initialized")
 	}
-	fmt.Printf("[DEBUG] config handler is initialized\n")
 
 	// Type assert to QUIC provider to access RegisterStreamHandler
 	// Interface must match exact signature from pkg/dataplane/providers/quic/provider.go
@@ -1146,45 +1162,33 @@ func (s *Server) registerConfigHandlerBridge() error {
 		RegisterStreamHandler(streamID int64, handler quicServer.StreamHandler) error
 	}
 
-	fmt.Printf("[DEBUG] Attempting type assertion to quicProvider, provider type=%T\n", s.dataPlaneProvider)
 	provider, ok := s.dataPlaneProvider.(quicProvider)
 	if !ok {
 		// Not a QUIC provider, skip registration
-		fmt.Printf("[DEBUG] Type assertion FAILED - not a QUIC provider\n")
 		s.logger.Warn("Data plane provider does not support stream handler registration", "provider_type", fmt.Sprintf("%T", s.dataPlaneProvider))
 		return fmt.Errorf("provider type %T does not implement RegisterStreamHandler", s.dataPlaneProvider)
 	}
-	fmt.Printf("[DEBUG] Type assertion SUCCESS - is a QUIC provider\n")
 
 	// Create bridge handler that adapts old QUIC server signature to new config handler
 	bridgeHandler := func(ctx context.Context, sess *quicServer.Session, strm *quic.Stream) error {
-		fmt.Printf("[DEBUG] BRIDGE HANDLER INVOKED: session=%s stream=%d\n", sess.ID, (*strm).StreamID())
 		s.logger.Info("Bridge handler invoked", "session_id", sess.ID, "stream_id", (*strm).StreamID())
 
 		// Wrap old QUIC session as DataPlaneSession
 		session := &quicSessionBridge{raw: sess}
-		fmt.Printf("[DEBUG] Created session bridge: id=%s peer_id=%s\n", session.ID(), session.PeerID())
 
 		// Wrap old QUIC stream as Stream
 		stream := &quicStreamBridge{raw: strm}
-		fmt.Printf("[DEBUG] Created stream bridge: id=%d type=%v\n", stream.ID(), stream.Type())
 
 		// Call config handler with wrapped interfaces
-		fmt.Printf("[DEBUG] Calling config handler...\n")
-		err := s.configHandler.Handle(ctx, session, stream)
-		fmt.Printf("[DEBUG] Config handler returned: err=%v\n", err)
-		return err
+		return s.configHandler.Handle(ctx, session, stream)
 	}
 
 	// Register handler for config sync stream (stream ID 4)
 	const configSyncStreamID = 4
-	fmt.Printf("[DEBUG] Calling RegisterStreamHandler for stream_id=%d\n", configSyncStreamID)
 	if err := provider.RegisterStreamHandler(configSyncStreamID, bridgeHandler); err != nil {
-		fmt.Printf("[DEBUG] RegisterStreamHandler FAILED: %v\n", err)
 		return fmt.Errorf("failed to register config handler: %w", err)
 	}
 
-	fmt.Printf("[DEBUG] RegisterStreamHandler SUCCESS\n")
 	s.logger.Info("Config handler registered with QUIC provider", "stream_id", configSyncStreamID)
 	return nil
 }

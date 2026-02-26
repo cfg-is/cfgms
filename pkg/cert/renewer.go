@@ -132,6 +132,61 @@ func (r *Renewer) RenewCertificate(serialNumber string, config interface{}) (*Ce
 			return nil, fmt.Errorf("failed to generate new client certificate: %w", err)
 		}
 
+	case CertificateTypeInternalServer:
+		serverConfig, ok := config.(*ServerCertConfig)
+		if !ok {
+			serverConfig = &ServerCertConfig{
+				CommonName:   existingCert.CommonName,
+				Organization: "CFGMS",
+				ValidityDays: 365,
+				KeySize:      2048,
+			}
+
+			if existingCert.CertificatePEM != nil {
+				if cert, err := ParseCertificateFromPEM(existingCert.CertificatePEM); err == nil {
+					serverConfig.DNSNames = cert.DNSNames
+					for _, ip := range cert.IPAddresses {
+						serverConfig.IPAddresses = append(serverConfig.IPAddresses, ip.String())
+					}
+					if len(cert.Subject.Organization) > 0 {
+						serverConfig.Organization = cert.Subject.Organization[0]
+					}
+				}
+			}
+		}
+
+		newCert, err = r.ca.GenerateInternalServerCertificate(serverConfig)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate new internal server certificate: %w", err)
+		}
+
+	case CertificateTypeConfigSigning:
+		signingConfig, ok := config.(*SigningCertConfig)
+		if !ok {
+			signingConfig = &SigningCertConfig{
+				CommonName:   existingCert.CommonName,
+				Organization: "CFGMS",
+				ValidityDays: 1095,
+				KeySize:      4096,
+			}
+
+			if existingCert.CertificatePEM != nil {
+				if cert, err := ParseCertificateFromPEM(existingCert.CertificatePEM); err == nil {
+					if len(cert.Subject.Organization) > 0 {
+						signingConfig.Organization = cert.Subject.Organization[0]
+					}
+				}
+			}
+		}
+
+		newCert, err = r.ca.GenerateSigningCertificate(signingConfig)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate new signing certificate: %w", err)
+		}
+
+	case CertificateTypePublicAPI:
+		return nil, fmt.Errorf("public API certificates are externally managed and cannot be renewed through this method")
+
 	case CertificateTypeCA:
 		return nil, fmt.Errorf("CA certificate renewal is not supported through this method")
 
@@ -319,6 +374,53 @@ func (r *Renewer) ValidateRenewalConfig(certType CertificateType, config interfa
 		if clientConfig.KeySize != 0 && clientConfig.KeySize < 2048 {
 			return fmt.Errorf("key size must be at least 2048 bits")
 		}
+
+	case CertificateTypeInternalServer:
+		if config == nil {
+			return nil
+		}
+
+		serverConfig, ok := config.(*ServerCertConfig)
+		if !ok {
+			return fmt.Errorf("expected ServerCertConfig for internal server certificate renewal")
+		}
+
+		if serverConfig.CommonName == "" {
+			return fmt.Errorf("common name is required for internal server certificate")
+		}
+
+		if serverConfig.ValidityDays <= 0 {
+			return fmt.Errorf("validity days must be positive")
+		}
+
+		if serverConfig.KeySize != 0 && serverConfig.KeySize < 2048 {
+			return fmt.Errorf("key size must be at least 2048 bits")
+		}
+
+	case CertificateTypeConfigSigning:
+		if config == nil {
+			return nil
+		}
+
+		signingConfig, ok := config.(*SigningCertConfig)
+		if !ok {
+			return fmt.Errorf("expected SigningCertConfig for config signing certificate renewal")
+		}
+
+		if signingConfig.CommonName == "" {
+			return fmt.Errorf("common name is required for signing certificate")
+		}
+
+		if signingConfig.ValidityDays <= 0 {
+			return fmt.Errorf("validity days must be positive")
+		}
+
+		if signingConfig.KeySize != 0 && signingConfig.KeySize < 2048 {
+			return fmt.Errorf("key size must be at least 2048 bits")
+		}
+
+	case CertificateTypePublicAPI:
+		return fmt.Errorf("public API certificates are externally managed")
 
 	case CertificateTypeCA:
 		return fmt.Errorf("CA certificate renewal is not supported")

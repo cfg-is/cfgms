@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/pkg/cert"
 )
 
@@ -37,6 +36,11 @@ type RegistrationResponse struct {
 	// Stewards use this to verify configs signed by this controller
 	// In HA clusters, stewards collect and trust certs from all controllers they connect to
 	ServerCert string `json:"server_cert,omitempty"`
+
+	// Story #377: Dedicated config signing certificate (separated architecture)
+	// When present, stewards should use this for config signature verification instead of ServerCert
+	// In unified mode, this is empty and ServerCert is used for both
+	SigningCert string `json:"signing_cert,omitempty"`
 }
 
 // handleRegister handles steward registration via REST API
@@ -174,38 +178,42 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		certPEM, _, err := s.certManager.ExportCertificate(s.signerCertSerial, false)
 		if err == nil && len(certPEM) > 0 {
 			serverCert = certPEM
-			fmt.Printf("[DEBUG] Registration: Using SIGNER cert serial=%s size=%d\n",
-				s.signerCertSerial, len(serverCert))
-			// Calculate fingerprint to verify it matches signer
-			if verifier, err := signature.NewVerifier(&signature.VerifierConfig{
-				CertificatePEM: serverCert,
-			}); err == nil {
-				fmt.Printf("[DEBUG] Registration: Server cert fingerprint=%s (MUST match signer)\n",
-					verifier.KeyFingerprint())
-			}
 			s.logger.Info("Providing signer certificate to steward for signature verification",
 				"steward_id", stewardID,
 				"cert_serial", s.signerCertSerial)
 		} else {
 			s.logger.Warn("Failed to export signer certificate from cert manager",
 				"error", err, "steward_id", stewardID, "cert_serial", s.signerCertSerial)
-			fmt.Printf("[DEBUG] Registration: Export failed: err=%v certLen=%d\n", err, len(certPEM))
 		}
 	} else if s.signerCertSerial == "" {
 		s.logger.Warn("Signer certificate serial not available (signer may not be initialized)",
 			"steward_id", stewardID)
-		fmt.Printf("[DEBUG] Registration: signerCertSerial is empty (no signer configured)\n")
 	} else {
 		s.logger.Warn("Certificate manager unavailable, cannot provide server cert for signature verification",
 			"steward_id", stewardID)
-		fmt.Printf("[DEBUG] Registration: certManager is nil\n")
 	}
 
 	// Return certificates in response (ALWAYS - required for mTLS)
 	resp.ClientCert = string(clientCert.CertificatePEM)
 	resp.ClientKey = string(clientCert.PrivateKeyPEM)
 	resp.CACert = string(caCert)
-	resp.ServerCert = string(serverCert) // For config signature verification
+	resp.ServerCert = string(serverCert) // For config signature verification (backward compat)
+
+	// Story #377: In separated mode, also provide the dedicated signing certificate
+	// Stewards should prefer SigningCert for config verification when present
+	if s.cfg.Certificate != nil && s.cfg.Certificate.IsSeparatedArchitecture() && s.certManager != nil {
+		signingCertPEM, err := s.certManager.GetSigningCertificate()
+		if err == nil && len(signingCertPEM) > 0 {
+			resp.SigningCert = string(signingCertPEM)
+			// Also set ServerCert to signing cert for backward compatibility with older stewards
+			resp.ServerCert = string(signingCertPEM)
+			s.logger.Info("Providing dedicated signing certificate to steward",
+				"steward_id", stewardID)
+		} else {
+			s.logger.Warn("Failed to get signing certificate for registration response",
+				"error", err, "steward_id", stewardID)
+		}
+	}
 
 	s.logger.Info("Generated client certificate for steward",
 		"steward_id", stewardID,

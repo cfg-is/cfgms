@@ -138,6 +138,69 @@ type CertificateConfig struct {
 
 	// Server certificate configuration (used when generating certificates)
 	Server *ServerCertificateConfig `yaml:"server"`
+
+	// Story #377: Three-certificate architecture
+
+	// Architecture selects the certificate deployment mode: "unified" (default) or "separated"
+	// Unified: Single CertificateTypeServer for all purposes (backward compatible)
+	// Separated: Purpose-specific certs (public API, internal mTLS, config signing)
+	Architecture string `yaml:"architecture"`
+
+	// SigningCertValidityDays is the validity for config signing certificates (default: 1095 = 3 years)
+	SigningCertValidityDays int `yaml:"signing_cert_validity_days"`
+
+	// InternalCertValidityDays is the validity for internal mTLS certificates (default: 365)
+	InternalCertValidityDays int `yaml:"internal_cert_validity_days"`
+
+	// PublicAPI contains configuration for the public-facing API certificate
+	PublicAPI *PublicAPICertConfig `yaml:"public_api"`
+
+	// Internal contains configuration for the internal mTLS certificate
+	Internal *InternalCertConfig `yaml:"internal"`
+
+	// Signing contains configuration for the config signing certificate
+	Signing *SigningCertificateConfig `yaml:"signing"`
+}
+
+// PublicAPICertConfig contains configuration for the public-facing API certificate
+type PublicAPICertConfig struct {
+	// Source specifies where the certificate comes from: "internal" (default) or "external"
+	// External: Load from CertPath/KeyPath (e.g., certbot/Let's Encrypt managed)
+	// Internal: Generate from internal CA
+	Source string `yaml:"source"`
+
+	// CertPath is the path to the certificate file (for source=external)
+	CertPath string `yaml:"cert_path"`
+
+	// KeyPath is the path to the private key file (for source=external)
+	KeyPath string `yaml:"key_path"`
+
+	// CommonName for the public API certificate
+	CommonName string `yaml:"common_name"`
+
+	// DNSNames for Subject Alternative Names
+	DNSNames []string `yaml:"dns_names"`
+}
+
+// InternalCertConfig contains configuration for the internal mTLS certificate
+type InternalCertConfig struct {
+	// CommonName for the internal certificate (default: "cfgms-internal")
+	CommonName string `yaml:"common_name"`
+
+	// DNSNames for Subject Alternative Names
+	DNSNames []string `yaml:"dns_names"`
+
+	// IPAddresses for Subject Alternative Names
+	IPAddresses []string `yaml:"ip_addresses"`
+}
+
+// SigningCertificateConfig contains configuration for the config signing certificate
+type SigningCertificateConfig struct {
+	// CommonName for the signing certificate (default: "cfgms-config-signer")
+	CommonName string `yaml:"common_name"`
+
+	// Organization name
+	Organization string `yaml:"organization"`
 }
 
 // ServerCertificateConfig contains server certificate settings
@@ -653,6 +716,38 @@ func LoadWithPath(configPath string) (*Config, error) {
 		cfg.Certificate.Server.Organization = serverOrg
 	}
 
+	// Story #377: Three-certificate architecture environment variables
+	if certArch := os.Getenv("CFGMS_CERT_ARCHITECTURE"); certArch != "" {
+		cfg.Certificate.Architecture = certArch
+	}
+
+	if signingValidity := os.Getenv("CFGMS_CERT_SIGNING_VALIDITY_DAYS"); signingValidity != "" {
+		if val, err := strconv.Atoi(signingValidity); err == nil {
+			cfg.Certificate.SigningCertValidityDays = val
+		}
+	}
+
+	if publicAPISource := os.Getenv("CFGMS_CERT_PUBLIC_API_SOURCE"); publicAPISource != "" {
+		if cfg.Certificate.PublicAPI == nil {
+			cfg.Certificate.PublicAPI = &PublicAPICertConfig{}
+		}
+		cfg.Certificate.PublicAPI.Source = publicAPISource
+	}
+
+	if publicAPICertPath := os.Getenv("CFGMS_CERT_PUBLIC_API_CERT_PATH"); publicAPICertPath != "" {
+		if cfg.Certificate.PublicAPI == nil {
+			cfg.Certificate.PublicAPI = &PublicAPICertConfig{}
+		}
+		cfg.Certificate.PublicAPI.CertPath = publicAPICertPath
+	}
+
+	if publicAPIKeyPath := os.Getenv("CFGMS_CERT_PUBLIC_API_KEY_PATH"); publicAPIKeyPath != "" {
+		if cfg.Certificate.PublicAPI == nil {
+			cfg.Certificate.PublicAPI = &PublicAPICertConfig{}
+		}
+		cfg.Certificate.PublicAPI.KeyPath = publicAPIKeyPath
+	}
+
 	// Storage configuration environment variables
 	if storageProvider := os.Getenv("CFGMS_STORAGE_PROVIDER"); storageProvider != "" {
 		cfg.Storage.Provider = storageProvider
@@ -867,4 +962,17 @@ func (lc *LoggingConfig) ToLoggingManagerConfig() *loggingPkg.LoggingConfig {
 		EnableTracing:     lc.EnableTracing,
 		Subscribers:       subscribers,
 	}
+}
+
+// IsSeparatedArchitecture returns true if the certificate architecture is "separated"
+func (cc *CertificateConfig) IsSeparatedArchitecture() bool {
+	return cc != nil && cc.Architecture == "separated"
+}
+
+// GetPublicAPISource returns the public API certificate source, defaulting to "internal"
+func (cc *CertificateConfig) GetPublicAPISource() string {
+	if cc != nil && cc.PublicAPI != nil && cc.PublicAPI.Source != "" {
+		return cc.PublicAPI.Source
+	}
+	return "internal"
 }

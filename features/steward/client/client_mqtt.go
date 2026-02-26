@@ -63,10 +63,11 @@ type MQTTClient struct {
 	certPath string
 
 	// Certificate PEMs (from registration response)
-	caCertPEM     string
-	clientCertPEM string
-	clientKeyPEM  string
-	serverCertPEM string // Controller's server cert for config signature verification (Story #315)
+	caCertPEM      string
+	clientCertPEM  string
+	clientKeyPEM   string
+	serverCertPEM  string // Controller's server cert for config signature verification (Story #315)
+	signingCertPEM string // Story #377: Dedicated signing cert (preferred over serverCertPEM)
 
 	// Command handler
 	commandHandler *commands.Handler
@@ -118,6 +119,10 @@ type MQTTConfig struct {
 	// In HA clusters, multiple controller certs may be trusted
 	ServerCertPEM string
 
+	// SigningCertPEM is the controller's dedicated signing certificate PEM (Story #377)
+	// When present, preferred over ServerCertPEM for config signature verification
+	SigningCertPEM string
+
 	// HeartbeatInterval for periodic heartbeats
 	HeartbeatInterval time.Duration
 
@@ -148,6 +153,7 @@ func NewMQTTClient(cfg *MQTTConfig) (*MQTTClient, error) {
 		clientCertPEM:     cfg.ClientCertPEM,
 		clientKeyPEM:      cfg.ClientKeyPEM,
 		serverCertPEM:     cfg.ServerCertPEM,
+		signingCertPEM:    cfg.SigningCertPEM,
 		logger:            cfg.Logger,
 		controllerURL:     cfg.ControllerURL,
 	}
@@ -192,6 +198,19 @@ func (c *MQTTClient) RegisterWithToken(ctx context.Context, token string, mqttBr
 			c.logger.Warn("Failed to save certificates from registration", "error", err)
 		} else {
 			c.logger.Info("Saved certificates from registration", "steward_id", resp.StewardID)
+		}
+	}
+
+	// Story #377: Store signing certificate if provided (separated architecture)
+	if resp.SigningCert != "" {
+		c.mu.Lock()
+		c.signingCertPEM = resp.SigningCert
+		c.mu.Unlock()
+		c.logger.Info("Received dedicated signing certificate from controller", "steward_id", resp.StewardID)
+
+		// Persist signing.crt alongside other cert files
+		if err := c.saveSigningCertificate(resp.SigningCert); err != nil {
+			c.logger.Warn("Failed to save signing certificate", "error", err)
 		}
 	}
 
@@ -1003,23 +1022,37 @@ func (c *MQTTClient) createQUICtlsConfig(certPath string) (*tls.Config, error) {
 
 	tlsConfig.NextProtos = []string{"cfgms-quic"}
 
-	// Initialize configuration signature verifier using controller's server certificate
+	// Initialize configuration signature verifier using controller's certificate
+	// Story #377: Prefer dedicated signing cert over server cert
 	c.mu.Lock()
 	if c.configVerifier == nil {
 		var serverCertPEM []byte
 
-		if c.serverCertPEM != "" {
+		if c.signingCertPEM != "" {
+			serverCertPEM = []byte(c.signingCertPEM)
+			c.logger.Info("Using dedicated signing certificate for signature verification")
+		} else if c.serverCertPEM != "" {
 			serverCertPEM = []byte(c.serverCertPEM)
 			c.logger.Info("Using server certificate from registration for signature verification")
 		} else if certPath != "" {
+			// Story #377: Try signing.crt first, fall back to server.crt
+			signingCertPath := filepath.Join(certPath, "signing.crt")
 			serverCertPath := filepath.Join(certPath, "server.crt")
+
 			// #nosec G304 - Certificate paths are controlled via configuration
 			var readErr error
-			serverCertPEM, readErr = os.ReadFile(serverCertPath)
+			serverCertPEM, readErr = os.ReadFile(signingCertPath)
 			if readErr != nil {
-				c.logger.Warn("Failed to load server certificate for signature verification, using CA",
-					"error", readErr)
-				serverCertPEM = caCertPEM
+				// Fall back to server.crt
+				// #nosec G304 - Certificate paths are controlled via configuration
+				serverCertPEM, readErr = os.ReadFile(serverCertPath)
+				if readErr != nil {
+					c.logger.Warn("Failed to load signing/server certificate for signature verification, using CA",
+						"error", readErr)
+					serverCertPEM = caCertPEM
+				}
+			} else {
+				c.logger.Info("Using signing.crt from disk for signature verification")
 			}
 		} else {
 			c.logger.Warn("No server certificate available, using CA for signature verification")
@@ -1092,5 +1125,25 @@ func (c *MQTTClient) saveCertificates(clientCert, clientKey, caCert string) erro
 		c.logger.Debug("Saved certificate file", "path", path)
 	}
 
+	return nil
+}
+
+// saveSigningCertificate persists the dedicated signing certificate to disk
+func (c *MQTTClient) saveSigningCertificate(signingCert string) error {
+	certDir := os.Getenv("CFGMS_CERT_PATH")
+	if certDir == "" {
+		certDir = "/etc/cfgms/certs"
+	}
+
+	if err := os.MkdirAll(certDir, 0700); err != nil {
+		return fmt.Errorf("failed to create cert directory: %w", err)
+	}
+
+	path := filepath.Join(certDir, "signing.crt")
+	if err := os.WriteFile(path, []byte(signingCert), 0644); err != nil {
+		return fmt.Errorf("failed to save signing certificate: %w", err)
+	}
+
+	c.logger.Debug("Saved signing certificate file", "path", path)
 	return nil
 }

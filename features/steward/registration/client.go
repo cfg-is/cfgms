@@ -73,6 +73,10 @@ type RegistrationResponse struct {
 	// Used by steward to verify configurations signed by this controller
 	// In HA clusters, stewards collect and trust certs from all controllers
 	ServerCert string `json:"server_cert,omitempty"`
+
+	// Story #377: Dedicated config signing certificate (separated architecture)
+	// When present, steward should prefer this for config signature verification
+	SigningCert string `json:"signing_cert,omitempty"`
 }
 
 // Register registers the steward with the controller using a token.

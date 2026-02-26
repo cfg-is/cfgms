@@ -327,14 +327,11 @@ func (s *Server) setupRouter() {
 
 // Start starts the HTTP server
 func (s *Server) Start() error {
-	fmt.Printf("[DEBUG] HTTP Server Start() called\n")
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	fmt.Printf("[DEBUG] HTTP getting listen address\n")
 	// Determine listen address for HTTP server (different from gRPC)
 	httpAddr := s.getHTTPListenAddr()
-	fmt.Printf("[DEBUG] HTTP listen address: %s\n", httpAddr)
 
 	// Create HTTP server
 	s.httpServer = &http.Server{
@@ -344,54 +341,40 @@ func (s *Server) Start() error {
 		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
-	fmt.Printf("[DEBUG] HTTP server struct created\n")
 
 	// Configure TLS if available
-	fmt.Printf("[DEBUG] Checking TLS: shouldUseTLS=%v\n", s.shouldUseTLS())
 	if s.shouldUseTLS() {
-		fmt.Printf("[DEBUG] Setting up TLS\n")
 		tlsConfig, err := s.setupTLS()
 		if err != nil {
 			s.logger.Warn("Failed to setup TLS for HTTP server, starting without TLS", "error", err)
 		} else if tlsConfig != nil {
 			s.httpServer.TLSConfig = tlsConfig
-			fmt.Printf("[DEBUG] TLS configured\n")
 		}
 	}
 
-	fmt.Printf("[DEBUG] Launching HTTP server goroutine\n")
 	// Start server in goroutine
 	go func() {
-		fmt.Printf("[DEBUG] HTTP goroutine started, acquiring read lock\n")
 		s.mu.RLock()
 		server := s.httpServer
 		s.mu.RUnlock()
-		fmt.Printf("[DEBUG] HTTP goroutine got server reference\n")
 
 		if server != nil {
 			var err error
 			if server.TLSConfig != nil {
-				fmt.Printf("[DEBUG] Starting HTTPS server on %s\n", server.Addr)
 				s.logger.Info("Starting HTTPS REST API server", "address", httpAddr)
 				err = server.ListenAndServeTLS("", "") // Certificates in TLSConfig
 			} else {
-				fmt.Printf("[DEBUG] Starting HTTP server on %s\n", server.Addr)
 				s.logger.Info("Starting HTTP REST API server", "address", httpAddr)
 				err = server.ListenAndServe()
 			}
 
 			if err != nil && err != http.ErrServerClosed {
-				fmt.Printf("[DEBUG] HTTP server error: %v\n", err)
 				s.logger.Error("HTTP server failed", "error", err)
 			}
-		} else {
-			fmt.Printf("[DEBUG] HTTP server is nil in goroutine\n")
 		}
 	}()
 
-	fmt.Printf("[DEBUG] HTTP server goroutine launched, about to log success\n")
 	s.logger.Info("REST API server started", "address", httpAddr)
-	fmt.Printf("[DEBUG] HTTP Start() returning\n")
 	return nil
 }
 
@@ -473,6 +456,15 @@ func (s *Server) setupTLS() (*tls.Config, error) {
 
 // setupManagedTLS configures TLS using managed certificates
 func (s *Server) setupManagedTLS() (*tls.Config, error) {
+	// Story #377: In separated mode with external source, load from disk
+	if s.cfg.Certificate != nil && s.cfg.Certificate.IsSeparatedArchitecture() {
+		if s.cfg.Certificate.GetPublicAPISource() == "external" {
+			return s.setupExternalPublicAPICert()
+		}
+		// separated + internal: generate/use a PublicAPI cert type
+		// Falls through to standard managed TLS (uses same cert generation logic)
+	}
+
 	// Get server certificate (reuse the same logic as gRPC server)
 	serverCert, err := s.getServerCertificate()
 	if err != nil {
@@ -485,6 +477,41 @@ func (s *Server) setupManagedTLS() (*tls.Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create TLS config: %w", err)
 	}
+
+	return tlsConfig, nil
+}
+
+// setupExternalPublicAPICert loads TLS certificates from external files (e.g., certbot/Let's Encrypt)
+func (s *Server) setupExternalPublicAPICert() (*tls.Config, error) {
+	if s.cfg.Certificate.PublicAPI == nil {
+		return nil, fmt.Errorf("public API certificate configuration required for external source")
+	}
+
+	certPath := s.cfg.Certificate.PublicAPI.CertPath
+	keyPath := s.cfg.Certificate.PublicAPI.KeyPath
+	if certPath == "" || keyPath == "" {
+		return nil, fmt.Errorf("cert_path and key_path required for external public API certificate")
+	}
+
+	// #nosec G304 - Certificate paths are controlled via configuration
+	certPEM, err := os.ReadFile(certPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read external public API certificate: %w", err)
+	}
+
+	// #nosec G304 - Certificate paths are controlled via configuration
+	keyPEM, err := os.ReadFile(keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read external public API key: %w", err)
+	}
+
+	tlsConfig, err := cert.CreateServerTLSConfig(certPEM, keyPEM, nil, tls.VersionTLS12)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create TLS config from external certificates: %w", err)
+	}
+
+	s.logger.Info("HTTP API using external public API certificate",
+		"cert_path", certPath)
 
 	return tlsConfig, nil
 }

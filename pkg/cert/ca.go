@@ -386,6 +386,103 @@ func (ca *CA) GenerateClientCertificate(config *ClientCertConfig) (*Certificate,
 	}, nil
 }
 
+// GenerateSigningCertificate creates a config signing certificate with CodeSigning EKU.
+// This certificate is used exclusively for signing configurations and DNA packages.
+// Key properties: 4096-bit RSA, CodeSigning EKU (NOT ServerAuth), DigitalSignature only, 3-year default validity.
+func (ca *CA) GenerateSigningCertificate(config *SigningCertConfig) (*Certificate, error) {
+	if !ca.initialized {
+		return nil, fmt.Errorf("CA is not initialized")
+	}
+
+	if config == nil {
+		return nil, fmt.Errorf("signing certificate config is required")
+	}
+
+	// Set defaults
+	if config.KeySize == 0 {
+		config.KeySize = 4096
+	}
+	if config.ValidityDays == 0 {
+		config.ValidityDays = 1095 // 3 years
+	}
+	if config.Organization == "" {
+		config.Organization = ca.config.Organization
+	}
+	if config.CommonName == "" {
+		config.CommonName = "cfgms-config-signer"
+	}
+
+	// Generate signing private key (4096-bit RSA for long-lived signing)
+	privateKey, err := rsa.GenerateKey(rand.Reader, config.KeySize)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate signing private key: %w", err)
+	}
+
+	// Generate serial number
+	serialNumber, err := ca.generateSerialNumber()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate serial number: %w", err)
+	}
+
+	// Create signing certificate template
+	// KeyUsage: DigitalSignature ONLY (no KeyEncipherment - not for TLS)
+	// ExtKeyUsage: CodeSigning ONLY (not ServerAuth)
+	template := &x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject: pkix.Name{
+			Organization: []string{config.Organization},
+			CommonName:   config.CommonName,
+		},
+		NotBefore:   time.Now(),
+		NotAfter:    time.Now().Add(time.Duration(config.ValidityDays) * 24 * time.Hour),
+		KeyUsage:    x509.KeyUsageDigitalSignature,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning},
+	}
+
+	// Create the signing certificate
+	certDER, err := x509.CreateCertificate(rand.Reader, template, ca.certificate, &privateKey.PublicKey, ca.privateKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create signing certificate: %w", err)
+	}
+
+	// Encode certificate and key to PEM
+	certPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: certDER,
+	})
+
+	keyPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(privateKey),
+	})
+
+	fingerprint := ca.calculateFingerprint(certDER)
+
+	return &Certificate{
+		Type:           CertificateTypeConfigSigning,
+		CommonName:     config.CommonName,
+		SerialNumber:   serialNumber.String(),
+		CreatedAt:      template.NotBefore,
+		ExpiresAt:      template.NotAfter,
+		IsValid:        true,
+		CertificatePEM: certPEM,
+		PrivateKeyPEM:  keyPEM,
+		Fingerprint:    fingerprint,
+		Issuer:         ca.certificate.Subject.CommonName,
+	}, nil
+}
+
+// GenerateInternalServerCertificate creates a server certificate for internal mTLS (MQTT + QUIC).
+// This has the same properties as GenerateServerCertificate but returns CertificateTypeInternalServer.
+func (ca *CA) GenerateInternalServerCertificate(config *ServerCertConfig) (*Certificate, error) {
+	cert, err := ca.GenerateServerCertificate(config)
+	if err != nil {
+		return nil, err
+	}
+	cert.Type = CertificateTypeInternalServer
+	return cert, nil
+}
+
 // ValidateCertificate validates a certificate against this CA
 func (ca *CA) ValidateCertificate(certPEM []byte) (*ValidationResult, error) {
 	if !ca.initialized {
