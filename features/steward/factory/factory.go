@@ -39,6 +39,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/features/modules"
+	acme_module "github.com/cfgis/cfgms/features/modules/acme"
 	"github.com/cfgis/cfgms/features/modules/directory"
 	"github.com/cfgis/cfgms/features/modules/file"
 	"github.com/cfgis/cfgms/features/modules/firewall"
@@ -180,6 +181,8 @@ func (f *ModuleFactory) loadBuiltinModule(moduleName string) (modules.Module, er
 	// For now, we'll use a simple registry pattern
 
 	switch moduleName {
+	case "acme":
+		return acme_module.New(), nil
 	case "directory":
 		return directory.New(), nil
 	case "file":

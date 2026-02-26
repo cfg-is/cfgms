@@ -1,0 +1,33 @@
+name: acme
+version: 0.1.0
+description: >
+  Manages TLS certificates via ACME protocol (RFC 8555).
+  Supports Let's Encrypt and compatible ACME servers with
+  HTTP-01 and DNS-01 challenge types. Uses lego library
+  for pure-Go, cross-platform certificate management.
+
+executors:
+  - steward
+  - controller
+
+dependencies: []
+
+requirements:
+  os: [linux, darwin, windows]
+  arch: [amd64, arm64]
+  min_memory: "128MB"
+  min_disk: "10MB"
+
+interfaces:
+  - Get
+  - Set
+  - Test
+
+security:
+  requires_root: false
+  capabilities: [net_bind_service]  # HTTP-01 on port 80
+  ports: [80]
+
+documentation:
+  api: "docs/api.md"
+  examples: "docs/examples/"
