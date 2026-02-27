@@ -470,9 +470,11 @@ func (s *StewardSecretStore) saveIndex() error {
 	return nil
 }
 
-// keyToBlobFile converts a secret key to a blob filename using SHA-256 hash.
-func keyToBlobFile(key string) string {
-	hash := sha256.Sum256([]byte(key))
+// keyToBlobFile maps a secret name to a filesystem-safe encrypted blob filename.
+// SHA-256 is used as a non-cryptographic name-to-filename mapping function.
+// The secret VALUE is encrypted separately — this only hashes the non-sensitive key name.
+func keyToBlobFile(secretName string) string {
+	hash := sha256.Sum256([]byte(secretName))
 	return hex.EncodeToString(hash[:]) + ".enc"
 }
 

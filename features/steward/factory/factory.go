@@ -34,6 +34,7 @@ package factory
 
 import (
 	"fmt"
+	"log"
 	"reflect"
 	"time"
 
@@ -309,7 +310,7 @@ func (f *ModuleFactory) attemptSecretStoreInjection(instance modules.Module, mod
 
 	if err := injectable.SetSecretStore(f.secretStore); err != nil {
 		// Log but don't fail - module can operate without secrets
-		fmt.Printf("Warning: Failed to inject secret store into module %s: %v\n", moduleName, err)
+		log.Printf("Warning: failed to inject secret store into module %s: %v", moduleName, err)
 	}
 }
 
