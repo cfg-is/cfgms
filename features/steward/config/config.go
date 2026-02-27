@@ -146,6 +146,18 @@ type StewardSettings struct {
 
 	// ErrorHandling defines how to handle various error conditions
 	ErrorHandling ErrorHandlingConfig `yaml:"error_handling"`
+
+	// Secrets configures the steward secret store
+	Secrets SecretsConfig `yaml:"secrets,omitempty"`
+}
+
+// SecretsConfig defines configuration for steward-side secret storage.
+type SecretsConfig struct {
+	// SecretsDir overrides the default platform-specific secrets directory
+	SecretsDir string `yaml:"secrets_dir,omitempty"`
+
+	// Provider selects the secrets provider (default: "steward")
+	Provider string `yaml:"provider,omitempty"`
 }
 
 // ResourceConfig defines a single resource to be managed by the steward.

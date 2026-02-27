@@ -47,6 +47,7 @@ import (
 	"github.com/cfgis/cfgms/features/steward/testing"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
 // Config holds the steward configuration for controller mode (legacy compatibility).
@@ -169,6 +170,9 @@ type Steward struct {
 	// MQTT+QUIC client for controller testing mode (Story #198)
 	mqttClient interface{} // *client.MQTTClient - interface{} to avoid import cycle
 
+	// Secret store for steward-side secret management
+	secretStore secretsif.SecretStore
+
 	// Certificate management (for controller mode)
 	certManager *cert.Manager
 
@@ -267,6 +271,31 @@ func NewStandalone(configPath string, logger logging.Logger) (*Steward, error) {
 	}
 	moduleFactory := factory.NewWithStewardID(registry, cfg.Steward.ErrorHandling, stewardID)
 
+	// Initialize steward secret store if provider is available
+	var secretStore secretsif.SecretStore
+	secretsProvider := cfg.Steward.Secrets.Provider
+	if secretsProvider == "" {
+		secretsProvider = "steward"
+	}
+	secretsConfig := map[string]interface{}{
+		"secrets_dir": cfg.Steward.Secrets.SecretsDir,
+	}
+	secretStore, err = secretsif.CreateSecretStoreFromConfig(secretsProvider, secretsConfig)
+	if err != nil {
+		// Secret store is best-effort in standalone mode — log warning but continue
+		if logger != nil {
+			logger.Warn("Failed to initialize secret store, modules requiring secrets will not function",
+				"provider", secretsProvider,
+				"error", err)
+		}
+	} else {
+		// Inject secret store into factory for module injection
+		moduleFactory.SetSecretStore(secretStore)
+		if logger != nil {
+			logger.Info("Steward secret store initialized", "provider", secretsProvider)
+		}
+	}
+
 	// Create state comparator for configuration drift detection
 	comparator := testing.NewStateComparator()
 
@@ -282,6 +311,7 @@ func NewStandalone(configPath string, logger logging.Logger) (*Steward, error) {
 		healthCheck:      healthMonitor,
 		moduleRegistry:   registry,
 		moduleFactory:    moduleFactory,
+		secretStore:      secretStore,
 		comparator:       comparator,
 		executionEngine:  executionEngine,
 		shutdown:         make(chan struct{}),
@@ -549,6 +579,12 @@ func (s *Steward) Stop(ctx context.Context) error {
 
 	// Cleanup based on mode
 	if s.isStandalone {
+		// Close secret store if initialized
+		if s.secretStore != nil {
+			if err := s.secretStore.Close(); err != nil {
+				s.logger.Warn("Failed to close secret store", "error", err)
+			}
+		}
 		// Standalone mode: unload modules
 		if s.moduleFactory != nil {
 			s.moduleFactory.UnloadAllModules()
