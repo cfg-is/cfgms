@@ -6,6 +6,7 @@ package steward
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -116,7 +117,9 @@ func TestLoadOrGenerateSalt_NewSalt(t *testing.T) {
 	saltPath := filepath.Join(tmpDir, saltFileName)
 	info, err := os.Stat(saltPath)
 	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
+	if runtime.GOOS != "windows" {
+		assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
+	}
 }
 
 func TestLoadOrGenerateSalt_ExistingSalt(t *testing.T) {
