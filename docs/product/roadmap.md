@@ -176,7 +176,7 @@ Proper certificate separation for production security.
 
 - [x] Implement Three-Certificate Architecture for Production Security (Issue #377 - 47-65 points) - Separate public API (Let's Encrypt), internal mTLS, and config signing certificates for proper key separation, compliance, and operational stability
 - [x] Steward-Side Secret Management (Issue #404) - OS-native encrypted storage provider for steward endpoints using DPAPI (Windows) and AES-256-GCM with HKDF (Linux/macOS), implementing SecretStore interface with auto-registration
-- [ ] Let's Encrypt Automation via Certbot Module (Issue #401) - Automated certbot integration for public API certificate management in separated architecture
+- [x] Let's Encrypt Automation via Certbot Module (Issue #401) - Automated certbot integration for public API certificate management in separated architecture
 
 #### v0.9.4 — Production Hardening (~25-30 pts, ~2-3 weeks)
 
