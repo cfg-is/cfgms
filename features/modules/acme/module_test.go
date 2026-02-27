@@ -465,11 +465,13 @@ func TestACMECertStore_StorageRoundTrip(t *testing.T) {
 	assert.Equal(t, domain, loadedMeta.Domain)
 	assert.Equal(t, "admin@example.com", loadedMeta.Email)
 
-	// Verify key.pem permissions (Unix only)
-	keyPath := filepath.Join(tmpDir, "acme", "certificates", domain, "key.pem")
-	info, err := os.Stat(keyPath)
-	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
+	// Verify key.pem permissions (Unix only — Windows doesn't support POSIX file modes)
+	if runtime.GOOS != "windows" {
+		keyPath := filepath.Join(tmpDir, "acme", "certificates", domain, "key.pem")
+		info, err := os.Stat(keyPath)
+		require.NoError(t, err)
+		assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
+	}
 
 	// Delete
 	err = store.DeleteCertificate(domain)
