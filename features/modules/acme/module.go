@@ -44,6 +44,11 @@ func (m *acmeModule) Get(ctx context.Context, resourceID string) (modules.Config
 		return nil, modules.ErrInvalidResourceID
 	}
 
+	// Validate resourceID as domain — it is used in filesystem paths
+	if err := validateDomain(resourceID); err != nil {
+		return nil, fmt.Errorf("%w: %v", modules.ErrInvalidResourceID, err)
+	}
+
 	logger := m.GetEffectiveLogger(logging.ForModule("acme"))
 	logger.InfoCtx(ctx, "Getting ACME certificate state",
 		"operation", "acme_get",

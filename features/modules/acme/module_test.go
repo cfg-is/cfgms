@@ -563,6 +563,11 @@ func TestValidateDomain(t *testing.T) {
 		{"single label", "localhost", true},
 		{"IP address", "1.2.3.4", true},
 		{"IPv6", "::1", true},
+		{"path traversal forward slash", "../../etc.evil", true},
+		{"path traversal backslash", `..\..\etc.evil`, true},
+		{"path traversal dot-dot", "..example.com", true},
+		{"embedded forward slash", "foo/bar.com", true},
+		{"embedded backslash", `foo\bar.com`, true},
 	}
 
 	for _, tt := range tests {
@@ -589,6 +594,20 @@ func TestModule_Get_EmptyResourceID(t *testing.T) {
 	_, err := m.Get(context.Background(), "")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, modules.ErrInvalidResourceID)
+}
+
+func TestModule_Get_PathTraversal_Rejected(t *testing.T) {
+	m := New()
+	traversalDomains := []string{
+		"../../etc.evil",
+		`..\..\windows\system32`,
+		"foo/../../../etc/passwd.com",
+	}
+	for _, domain := range traversalDomains {
+		_, err := m.Get(context.Background(), domain)
+		require.Error(t, err, "domain %q should be rejected", domain)
+		assert.ErrorIs(t, err, modules.ErrInvalidResourceID)
+	}
 }
 
 func TestModule_Set_EmptyResourceID(t *testing.T) {

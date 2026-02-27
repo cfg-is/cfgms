@@ -203,6 +203,11 @@ func validateDomain(domain string) error {
 		return fmt.Errorf("domain cannot be empty")
 	}
 
+	// Reject path traversal characters — domains are used in filesystem paths
+	if strings.Contains(domain, "/") || strings.Contains(domain, "\\") || strings.Contains(domain, "..") {
+		return fmt.Errorf("domain %q contains invalid path characters", domain)
+	}
+
 	// Strip wildcard prefix for validation
 	checkDomain := domain
 	if strings.HasPrefix(domain, "*.") {
