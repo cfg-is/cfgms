@@ -370,7 +370,8 @@ func (s *StewardSecretStore) ExpireSecret(_ context.Context, key string) error {
 	}
 
 	now := time.Now()
-	entry.ExpiresAt = &now
+	expiredAt := now.Add(-time.Millisecond) // set in the past to guarantee immediate expiration
+	entry.ExpiresAt = &expiredAt
 	entry.UpdatedAt = now
 
 	if err := s.saveIndex(); err != nil {
