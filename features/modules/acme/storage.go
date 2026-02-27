@@ -5,6 +5,7 @@
 package acme
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -13,6 +14,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	secretsinterfaces "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
 // CertBackend abstracts certificate storage (filesystem PEM vs Windows cert store).
@@ -29,10 +32,12 @@ type CertBackend interface {
 
 // ACMECertStore manages ACME certificates and accounts.
 // Certificate operations are delegated to a CertBackend (filesystem PEM or
-// Windows cert store). Account operations always use the filesystem.
+// Windows cert store). Account operations (keys + registration data) are
+// routed through the secret store for encrypted-at-rest storage.
 type ACMECertStore struct {
-	basePath    string      // filesystem base for account data (always filesystem)
-	certBackend CertBackend // filesystem or Windows cert store
+	basePath    string                        // filesystem base for account data (legacy, used for dir structure)
+	certBackend CertBackend                   // filesystem or Windows cert store
+	secretStore secretsinterfaces.SecretStore // required for account key/data operations
 }
 
 // CertificateMetadata stores metadata alongside certificate files
@@ -82,13 +87,28 @@ func NewACMECertStore(certStorePath string) (*ACMECertStore, error) {
 		certBackend: backend,
 	}
 
-	// Ensure account directory exists
-	accountDir := filepath.Join(accountBasePath, "acme", "accounts")
-	if err := os.MkdirAll(accountDir, 0700); err != nil {
-		return nil, fmt.Errorf("failed to create directory %s: %w", accountDir, err)
-	}
-
 	return store, nil
+}
+
+// SetSecretStore injects a secret store for encrypted account key/data storage.
+func (s *ACMECertStore) SetSecretStore(store secretsinterfaces.SecretStore) {
+	s.secretStore = store
+}
+
+// emailHash returns the first 16 hex chars of SHA-256(email), used as account identifier.
+func (s *ACMECertStore) emailHash(email string) string {
+	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(email)))
+	return hash[:16]
+}
+
+// accountSecretKey returns the secret store key for an ACME account private key.
+func (s *ACMECertStore) accountSecretKey(email string) string {
+	return "acme/account-key/" + s.emailHash(email)
+}
+
+// accountDataSecretKey returns the secret store key for ACME account registration data.
+func (s *ACMECertStore) accountDataSecretKey(email string) string {
+	return "acme/account/" + s.emailHash(email)
 }
 
 // StoreCertificate writes certificate data to the configured backend
@@ -116,78 +136,84 @@ func (s *ACMECertStore) CertificateExists(domain string) bool {
 	return s.certBackend.CertificateExists(domain)
 }
 
-// StoreAccount saves ACME account data
+// StoreAccount saves ACME account data via the secret store.
 func (s *ACMECertStore) StoreAccount(email string, data *AccountData) error {
-	accountDir := s.accountPath(email)
-	if err := os.MkdirAll(accountDir, 0700); err != nil {
-		return fmt.Errorf("failed to create account directory: %w", err)
+	if s.secretStore == nil {
+		return fmt.Errorf("secret store not configured: cannot store account data without encryption")
 	}
 
-	accountJSON, err := json.MarshalIndent(data, "", "  ")
+	accountJSON, err := json.Marshal(data)
 	if err != nil {
 		return fmt.Errorf("failed to marshal account data: %w", err)
 	}
 
-	if err := os.WriteFile(filepath.Join(accountDir, "account.json"), accountJSON, 0600); err != nil {
-		return fmt.Errorf("failed to write account.json: %w", err)
-	}
-
-	return nil
+	return s.secretStore.StoreSecret(context.Background(), &secretsinterfaces.SecretRequest{
+		Key:         s.accountDataSecretKey(email),
+		Value:       string(accountJSON),
+		Metadata:    map[string]string{"type": "acme-account-data"},
+		Tags:        []string{"acme", "account"},
+		CreatedBy:   "acme-module",
+		Description: "ACME account registration data",
+	})
 }
 
-// LoadAccount reads ACME account data
+// LoadAccount reads ACME account data from the secret store.
 func (s *ACMECertStore) LoadAccount(email string) (*AccountData, error) {
-	accountPath := filepath.Join(s.accountPath(email), "account.json")
-	data, err := os.ReadFile(accountPath)
+	if s.secretStore == nil {
+		return nil, fmt.Errorf("secret store not configured: cannot load account data without encryption")
+	}
+
+	secret, err := s.secretStore.GetSecret(context.Background(), s.accountDataSecretKey(email))
 	if err != nil {
-		return nil, fmt.Errorf("failed to read account: %w", err)
+		return nil, fmt.Errorf("failed to read account data from secret store: %w", err)
 	}
 
 	var account AccountData
-	if err := json.Unmarshal(data, &account); err != nil {
-		return nil, fmt.Errorf("failed to parse account: %w", err)
+	if err := json.Unmarshal([]byte(secret.Value), &account); err != nil {
+		return nil, fmt.Errorf("failed to parse account data: %w", err)
 	}
 	return &account, nil
 }
 
-// AccountExists checks if an account exists for the given email
+// AccountExists checks if an account exists for the given email via the secret store.
 func (s *ACMECertStore) AccountExists(email string) bool {
-	accountPath := filepath.Join(s.accountPath(email), "account.json")
-	_, err := os.Stat(accountPath)
+	if s.secretStore == nil {
+		return false
+	}
+	_, err := s.secretStore.GetSecretMetadata(context.Background(), s.accountSecretKey(email))
 	return err == nil
 }
 
-// StoreAccountKey saves the ACME account private key
+// StoreAccountKey saves the ACME account private key via the secret store.
 func (s *ACMECertStore) StoreAccountKey(email string, keyPEM []byte) error {
-	accountDir := s.accountPath(email)
-	if err := os.MkdirAll(accountDir, 0700); err != nil {
-		return fmt.Errorf("failed to create account directory: %w", err)
+	if s.secretStore == nil {
+		return fmt.Errorf("secret store not configured: cannot store account key without encryption")
 	}
-
-	if err := os.WriteFile(filepath.Join(accountDir, "account_key.pem"), keyPEM, 0600); err != nil {
-		return fmt.Errorf("failed to write account_key.pem: %w", err)
-	}
-	return nil
+	return s.secretStore.StoreSecret(context.Background(), &secretsinterfaces.SecretRequest{
+		Key:         s.accountSecretKey(email),
+		Value:       string(keyPEM),
+		Metadata:    map[string]string{"type": "acme-account-key"},
+		Tags:        []string{"acme", "account-key"},
+		CreatedBy:   "acme-module",
+		Description: "ACME account private key",
+	})
 }
 
-// LoadAccountKey reads the ACME account private key
+// LoadAccountKey reads the ACME account private key from the secret store.
 func (s *ACMECertStore) LoadAccountKey(email string) ([]byte, error) {
-	keyPath := filepath.Join(s.accountPath(email), "account_key.pem")
-	data, err := os.ReadFile(keyPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read account key: %w", err)
+	if s.secretStore == nil {
+		return nil, fmt.Errorf("secret store not configured: cannot load account key without encryption")
 	}
-	return data, nil
+	secret, err := s.secretStore.GetSecret(context.Background(), s.accountSecretKey(email))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read account key from secret store: %w", err)
+	}
+	return []byte(secret.Value), nil
 }
 
 // GetBasePath returns the base storage path
 func (s *ACMECertStore) GetBasePath() string {
 	return s.basePath
-}
-
-func (s *ACMECertStore) accountPath(email string) string {
-	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(email)))
-	return filepath.Join(s.basePath, "acme", "accounts", hash[:16])
 }
 
 // isCertStorePath returns true if the path refers to a Windows Certificate Store.

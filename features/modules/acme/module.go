@@ -29,6 +29,7 @@ import (
 // acmeModule implements the modules.Module interface for ACME certificate management
 type acmeModule struct {
 	modules.DefaultLoggingSupport
+	modules.DefaultSecretStoreSupport
 }
 
 // New creates a new instance of the ACME module
@@ -52,6 +53,11 @@ func (m *acmeModule) Get(ctx context.Context, resourceID string) (modules.Config
 	store, err := NewACMECertStore("")
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize certificate store: %w", err)
+	}
+
+	// Inject secret store for account operations
+	if secretStore, injected := m.GetSecretStore(); injected {
+		store.SetSecretStore(secretStore)
 	}
 
 	if !store.CertificateExists(resourceID) {
@@ -138,6 +144,11 @@ func (m *acmeModule) Set(ctx context.Context, resourceID string, config modules.
 	store, err := NewACMECertStore(acmeConfig.CertStorePath)
 	if err != nil {
 		return fmt.Errorf("failed to initialize certificate store: %w", err)
+	}
+
+	// Inject secret store for account operations
+	if secretStore, injected := m.GetSecretStore(); injected {
+		store.SetSecretStore(secretStore)
 	}
 
 	// Load existing certificate if any
@@ -277,10 +288,22 @@ func (m *acmeModule) createChallengeSolver(cfg *ACMEConfig) (ChallengeSolver, er
 	case "http-01":
 		return NewHTTPChallengeSolver(cfg.HTTPBindAddress), nil
 	case "dns-01":
-		// DNS provider creation requires a secret store, which will be injected
-		// at the module level in production. For now, return an error if no
-		// provider is configured.
-		return nil, fmt.Errorf("%w: DNS-01 challenge requires a secret store for credential retrieval", ErrChallengeFailed)
+		secretStore, injected := m.GetSecretStore()
+		if !injected {
+			return nil, fmt.Errorf("%w: DNS-01 requires secret store for credential retrieval", ErrChallengeFailed)
+		}
+		if cfg.DNSProvider == "" {
+			return nil, ErrDNSProviderRequired
+		}
+		if cfg.DNSCredentialKey == "" {
+			return nil, ErrDNSCredentialKeyRequired
+		}
+		factory := NewDNSProviderFactory(secretStore)
+		provider, err := factory.CreateProvider(context.Background(), cfg.DNSProvider, cfg.DNSCredentialKey)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrChallengeFailed, err)
+		}
+		return NewDNSChallengeSolver(provider), nil
 	default:
 		return nil, ErrInvalidChallengeType
 	}

@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,6 +22,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/modules"
+	secretsinterfaces "github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	_ "github.com/cfgis/cfgms/pkg/secrets/providers/steward"
 )
 
 // --- Config Validation Tests ---
@@ -474,10 +477,30 @@ func TestACMECertStore_StorageRoundTrip(t *testing.T) {
 	assert.False(t, store.CertificateExists(domain))
 }
 
+// newTestSecretStore creates a real steward secret store for testing.
+func newTestSecretStore(t *testing.T) secretsinterfaces.SecretStore {
+	t.Helper()
+	tmpDir := t.TempDir()
+
+	provider, err := secretsinterfaces.GetSecretProvider("steward")
+	require.NoError(t, err, "steward secret provider must be registered")
+
+	store, err := provider.CreateSecretStore(map[string]interface{}{
+		"secrets_dir": tmpDir,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	return store
+}
+
 func TestACMECertStore_AccountRoundTrip(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, err := NewACMECertStore(tmpDir)
 	require.NoError(t, err)
+
+	// Inject real secret store
+	secretStore := newTestSecretStore(t)
+	store.SetSecretStore(secretStore)
 
 	email := "admin@example.com"
 
@@ -777,6 +800,193 @@ func TestNewACMECertStore_CertBackendDelegation(t *testing.T) {
 	err = store.DeleteCertificate(domain)
 	require.NoError(t, err)
 	assert.False(t, store.CertificateExists(domain))
+}
+
+// --- Secret Store Integration Tests ---
+
+func TestACMECertStore_AccountKey_NoSecretStore_Error(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewACMECertStore(tmpDir)
+	require.NoError(t, err)
+
+	// No secret store injected — all account operations must fail
+
+	keyPEM := []byte("-----BEGIN EC PRIVATE KEY-----\ntest\n-----END EC PRIVATE KEY-----\n")
+
+	err = store.StoreAccountKey("admin@example.com", keyPEM)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "secret store not configured")
+
+	_, err = store.LoadAccountKey("admin@example.com")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "secret store not configured")
+
+	assert.False(t, store.AccountExists("admin@example.com"))
+
+	err = store.StoreAccount("admin@example.com", &AccountData{Email: "admin@example.com"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "secret store not configured")
+
+	_, err = store.LoadAccount("admin@example.com")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "secret store not configured")
+}
+
+func TestACMECertStore_AccountKey_EncryptedAtRest(t *testing.T) {
+	secretsDir := t.TempDir()
+
+	provider, err := secretsinterfaces.GetSecretProvider("steward")
+	require.NoError(t, err)
+
+	secretStore, err := provider.CreateSecretStore(map[string]interface{}{
+		"secrets_dir": secretsDir,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = secretStore.Close() })
+
+	certDir := t.TempDir()
+	store, err := NewACMECertStore(certDir)
+	require.NoError(t, err)
+	store.SetSecretStore(secretStore)
+
+	email := "encrypted-test@example.com"
+	keyPEM := []byte("-----BEGIN EC PRIVATE KEY-----\nMHQCAQEEIBhMwIwJ3mAHKMB\n-----END EC PRIVATE KEY-----\n")
+
+	err = store.StoreAccountKey(email, keyPEM)
+	require.NoError(t, err)
+
+	// Verify the plaintext PEM does NOT appear in any file on disk in the secrets dir
+	err = filepath.Walk(secretsDir, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if info.IsDir() {
+			return nil
+		}
+		data, readErr := os.ReadFile(path) // #nosec G304 — test-only read
+		if readErr != nil {
+			return readErr
+		}
+		if strings.Contains(string(data), "BEGIN EC PRIVATE KEY") {
+			t.Errorf("plaintext PEM found in file %s — account key is NOT encrypted at rest", path)
+		}
+		return nil
+	})
+	require.NoError(t, err)
+
+	// Verify we can still read it back correctly through the secret store
+	loadedKey, err := store.LoadAccountKey(email)
+	require.NoError(t, err)
+	assert.Equal(t, keyPEM, loadedKey)
+}
+
+func TestACMECertStore_AccountData_SecretStore_RoundTrip(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewACMECertStore(tmpDir)
+	require.NoError(t, err)
+
+	secretStore := newTestSecretStore(t)
+	store.SetSecretStore(secretStore)
+
+	email := "data-test@example.com"
+	accountData := &AccountData{
+		Email:        email,
+		Registration: []byte(`{"status":"valid"}`),
+		URI:          "https://acme-v02.api.letsencrypt.org/acme/acct/456",
+	}
+
+	err = store.StoreAccount(email, accountData)
+	require.NoError(t, err)
+
+	loadedAccount, err := store.LoadAccount(email)
+	require.NoError(t, err)
+	assert.Equal(t, email, loadedAccount.Email)
+	assert.Equal(t, accountData.URI, loadedAccount.URI)
+	assert.Equal(t, accountData.Registration, loadedAccount.Registration)
+}
+
+func TestModule_DNS01_NoSecretStore_Error(t *testing.T) {
+	m := New().(*acmeModule)
+	// No secret store injected
+
+	cfg := &ACMEConfig{
+		State:            "present",
+		Domains:          []string{"example.com"},
+		Email:            "admin@example.com",
+		ChallengeType:    "dns-01",
+		DNSProvider:      "cloudflare",
+		DNSCredentialKey: "acme/cf-token",
+	}
+
+	solver, err := m.createChallengeSolver(cfg)
+	require.Error(t, err)
+	assert.Nil(t, solver)
+	assert.ErrorIs(t, err, ErrChallengeFailed)
+	assert.Contains(t, err.Error(), "secret store")
+}
+
+func TestModule_DNS01_MissingProvider_Error(t *testing.T) {
+	m := New().(*acmeModule)
+	secretStore := newTestSecretStore(t)
+	err := m.SetSecretStore(secretStore)
+	require.NoError(t, err)
+
+	cfg := &ACMEConfig{
+		State:            "present",
+		Domains:          []string{"example.com"},
+		Email:            "admin@example.com",
+		ChallengeType:    "dns-01",
+		DNSProvider:      "",
+		DNSCredentialKey: "acme/cf-token",
+	}
+
+	solver, err := m.createChallengeSolver(cfg)
+	require.Error(t, err)
+	assert.Nil(t, solver)
+	assert.ErrorIs(t, err, ErrDNSProviderRequired)
+}
+
+func TestModule_DNS01_MissingCredentialKey_Error(t *testing.T) {
+	m := New().(*acmeModule)
+	secretStore := newTestSecretStore(t)
+	err := m.SetSecretStore(secretStore)
+	require.NoError(t, err)
+
+	cfg := &ACMEConfig{
+		State:            "present",
+		Domains:          []string{"example.com"},
+		Email:            "admin@example.com",
+		ChallengeType:    "dns-01",
+		DNSProvider:      "cloudflare",
+		DNSCredentialKey: "",
+	}
+
+	solver, err := m.createChallengeSolver(cfg)
+	require.Error(t, err)
+	assert.Nil(t, solver)
+	assert.ErrorIs(t, err, ErrDNSCredentialKeyRequired)
+}
+
+func TestModule_SecretStoreInjectable(t *testing.T) {
+	m := New()
+
+	// Verify the module implements SecretStoreInjectable
+	injectable, ok := m.(modules.SecretStoreInjectable)
+	require.True(t, ok, "acmeModule must implement SecretStoreInjectable")
+
+	// Initially no secret store
+	_, injected := injectable.GetSecretStore()
+	assert.False(t, injected)
+
+	// Inject a real secret store
+	secretStore := newTestSecretStore(t)
+	err := injectable.SetSecretStore(secretStore)
+	require.NoError(t, err)
+
+	// Now it's available
+	got, injected := injectable.GetSecretStore()
+	assert.True(t, injected)
+	assert.NotNil(t, got)
 }
 
 // --- Helper: generate a self-signed test certificate ---
