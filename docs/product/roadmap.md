@@ -163,12 +163,28 @@ Minimum security hygiene before deploying on a real network.
 - [x] Implement log injection prevention in pkg/logging (Issue #373 - 3-5 points) - Resolve 25 code scanning alerts, add sanitization infrastructure to prevent log forgery attacks
 - [x] Fix Windows workflow test failures (Issue #309) - Required for Windows VM management in v0.9.2
 
-#### v0.9.2 — Beta Deployment Validation (~20-25 pts, ~2-3 weeks)
+#### v0.9.2 — Beta Deployment Validation
 
 Deploy on test cluster and manage real VMs — the core beta milestone.
 
+**Blockers (must resolve before E2E validation):**
+- [ ] Controller: wire ConfigurationServiceV2 durable storage — V1 is in-memory (Issue #409) - Configs lost on controller restart, deployment blocker
+- [ ] Controller: separate first-run initialization from normal startup (Issue #410) - Prevent silent CA regeneration on misconfigured restart
+
+**E2E validation:**
 - [ ] End-to-end deployment validation on real VMs (Issue #390 - 13-21 points) - Deploy controller + stewards on actual Windows/Linux VMs, test all modules, fix blockers
 - [ ] Beta deployment guide (Issue #391 - 3-5 points) - Production-like deployment documentation beyond dev-focused QUICK_START.md
+
+**Post-validation (discovered gaps, do not block #390):**
+- [ ] Steward: unify operating model — cfg-driven convergence with optional controller channel (Issue #411) - Two divergent code paths that should be one
+- [ ] Steward: unify execution engines — standalone has 7 modules, controller has 3 (Issue #412) - Controller-connected steward has fewer capabilities
+- [ ] Steward: wire drift detection and performance monitoring into lifecycle (Issue #413) - Built but never started
+- [ ] Steward: implement offline report queueing (Issue #419) - Reports discarded when controller unreachable
+- [ ] Steward/Controller: implement hash-based DNA sync (Issue #418) - Full DNA sent every time, QUIC handler is a stub
+- [ ] Controller: wire monitoring and health infrastructure into server (Issue #417) - Passed as nil, placeholder responses
+- [ ] Controller: wire reports engine and rollback system into API (Issue #416) - Built but routes never registered
+- [ ] Controller: implement multi-node orchestration (Issue #415) - No multi-steward coordination
+- [ ] Controller: implement workflow engine (Issue #414) - Documented as core capability, no code exists
 
 #### v0.9.3 — Three-Certificate Architecture (~47-65 pts, ~3-5 weeks)
 

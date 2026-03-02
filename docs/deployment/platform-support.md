@@ -124,15 +124,38 @@ The project includes automated builds and testing for all supported platforms:
 
 ## Platform-Specific Installation
 
+### Building from Source
+
+CFGMS does not yet publish pre-built release binaries. Build from source:
+
+```bash
+# Clone and build
+git clone https://github.com/cfg-is/cfgms.git
+cd cfgms
+make build
+# Creates: bin/controller, bin/cfgms-steward, bin/cfg
+```
+
+### Cross-Platform Steward Builds
+
+```bash
+# Build for a specific platform
+make build-steward-cross GOOS=linux GOARCH=arm64
+make build-steward-cross GOOS=windows GOARCH=amd64
+make build-steward-cross GOOS=darwin GOARCH=arm64
+```
+
 ### Linux Steward
 
 ```bash
-# Download and install
-wget https://releases.cfgms.io/v0.3.0/cfgms-steward-linux-amd64
-chmod +x cfgms-steward-linux-amd64
-sudo mv cfgms-steward-linux-amd64 /usr/local/bin/cfgms-steward
+# Copy binary to target and install
+sudo cp bin/cfgms-steward /usr/local/bin/cfgms-steward
+sudo chmod +x /usr/local/bin/cfgms-steward
 
-# systemd service (optional)
+# Register with controller and start
+./cfgms-steward --regtoken <TOKEN>
+
+# systemd service (optional, see home-lab-deployment-guide.md)
 sudo systemctl enable cfgms-steward
 sudo systemctl start cfgms-steward
 ```
@@ -140,21 +163,26 @@ sudo systemctl start cfgms-steward
 ### Windows Steward
 
 ```powershell
-# Download and install
-Invoke-WebRequest -Uri "https://releases.cfgms.io/v0.3.0/cfgms-steward-windows-amd64.exe" -OutFile "cfgms-steward.exe"
+# Copy binary to target
+Copy-Item cfgms-steward.exe "C:\Program Files\CFGMS\cfgms-steward.exe"
+
+# Register with controller
+& "C:\Program Files\CFGMS\cfgms-steward.exe" --regtoken <TOKEN>
 
 # Windows Service (optional)
-sc create CFGMSSteward binPath="C:\Program Files\CFGMS\cfgms-steward.exe"
+sc create CFGMSSteward binPath="C:\Program Files\CFGMS\cfgms-steward.exe --regtoken <TOKEN>"
 sc start CFGMSSteward
 ```
 
 ### macOS Steward
 
 ```bash
-# Download and install
-curl -L https://releases.cfgms.io/v0.3.0/cfgms-steward-darwin-arm64 -o cfgms-steward
-chmod +x cfgms-steward
-sudo mv cfgms-steward /usr/local/bin/
+# Copy binary to target and install
+sudo cp bin/cfgms-steward /usr/local/bin/cfgms-steward
+sudo chmod +x /usr/local/bin/cfgms-steward
+
+# Register with controller
+./cfgms-steward --regtoken <TOKEN>
 
 # launchd service (optional)
 sudo launchctl load /Library/LaunchDaemons/com.cfgms.steward.plist
@@ -162,18 +190,20 @@ sudo launchctl load /Library/LaunchDaemons/com.cfgms.steward.plist
 
 ## Performance Characteristics
 
-### Resource Usage by Platform
+### Resource Usage by Platform (Targets)
 
-| Platform | CPU Usage | Memory Usage | Disk I/O | Network |
+> **Note**: These are design targets, not measured benchmarks. Actual measurements will be collected during deployment validation (Issue #390).
+
+| Platform | CPU Usage (target) | Memory Usage (target) | Disk I/O | Network |
 |----------|-----------|--------------|----------|---------|
 | Linux    | ~1% idle, ~5% active | 50-80 MB | Minimal | mTLS optimized |
 | Windows  | ~2% idle, ~8% active | 60-100 MB | WMI overhead | mTLS optimized |
 | macOS    | ~1% idle, ~6% active | 55-85 MB | Minimal | mTLS optimized |
 
-### Scale Testing Results
+### Scale Targets
 
-- **Linux Controller**: Tested with 50,000+ concurrent stewards
-- **Cross-platform Stewards**: Validated across mixed infrastructure environments
+- **Linux Controller**: Designed for 50,000+ concurrent stewards
+- **Cross-platform Stewards**: Supports mixed infrastructure environments
 - **Network Efficiency**: mTLS connection pooling reduces overhead across platforms
 
 ## Security Considerations

@@ -1,8 +1,8 @@
 # CFGMS Home Lab Deployment Guide
 
-**Story #378**: Comprehensive guide for deploying CFGMS to a home lab environment with full MQTT+QUIC integration validated.
+**Story #391**: Comprehensive guide for deploying CFGMS to a home lab environment with native binaries and full MQTT+QUIC integration.
 
-**Last Updated**: 2026-02-12
+**Last Updated**: 2026-02-28
 **CFGMS Version**: v0.9.x
 **Deployment Time**: ~30-45 minutes (first-time setup)
 
@@ -11,27 +11,28 @@
 1. [Overview](#overview)
 2. [Architecture](#architecture)
 3. [Prerequisites](#prerequisites)
-4. [Quick Start](#quick-start)
-5. [Detailed Setup](#detailed-setup)
-6. [Validation](#validation)
-7. [Troubleshooting](#troubleshooting)
-8. [Advanced Configuration](#advanced-configuration)
+4. [Detailed Setup](#detailed-setup)
+5. [Validation](#validation)
+6. [Troubleshooting](#troubleshooting)
+7. [Advanced Configuration](#advanced-configuration)
 
 ## Overview
 
-This guide walks you through deploying a complete CFGMS environment in your home lab, including:
+This guide walks you through deploying a complete CFGMS environment in your home lab using native binaries, including:
 
-- **Controller**: Central management server (REST API, gRPC, QUIC)
+- **Controller**: Central management server (REST API + embedded MQTT broker + QUIC data plane)
 - **Steward(s)**: Endpoint agents for configuration management
-- **MQTT Broker**: Message broker for real-time communication
 - **Storage Backend**: Git with SOPS encryption (default)
 
+> **Quick Start?** See [QUICK_START.md](../../QUICK_START.md) for a 5-15 minute getting-started guide.
+> This document covers production-style native deployment with systemd.
+
 **What You'll Achieve**:
-- Fully functional CFGMS deployment
+- Fully functional CFGMS deployment on native VMs
 - Validated MQTT+QUIC communication paths
 - E2E config distribution flow working end-to-end
-- Secure certificate-based authentication
-- Production-ready infrastructure
+- Secure certificate-based authentication (auto-generated)
+- systemd-managed services for production reliability
 
 ## Architecture
 
@@ -41,21 +42,20 @@ This guide walks you through deploying a complete CFGMS environment in your home
 ┌─────────────────────────────────────────────────────────────┐
 │                      Home Lab Network                        │
 │                                                              │
-│  ┌──────────────┐                  ┌──────────────┐         │
-│  │              │  MQTT (TLS)      │              │         │
-│  │  Controller  │◄────────────────►│ MQTT Broker  │         │
-│  │              │  1886            │              │         │
-│  │  - REST API  │                  │ - mochi-mqtt │         │
-│  │  - gRPC      │                  │ - TLS auth   │         │
-│  │  - QUIC      │                  └──────────────┘         │
-│  │              │                         ▲                  │
-│  └──────────────┘                         │ MQTT (TLS)      │
-│         ▲                                 │ 1886            │
-│         │                                 │                  │
-│         │ QUIC (mTLS)                     │                  │
-│         │ 4433                            │                  │
-│         │                                 │                  │
-│  ┌──────┴─────────────────────────────────┴──────┐          │
+│  ┌──────────────────────────────┐                           │
+│  │         Controller           │                           │
+│  │                              │                           │
+│  │  - REST API       :9080      │                           │
+│  │  - MQTT broker    :1883      │  (embedded, not separate) │
+│  │  - QUIC server    :4433      │                           │
+│  │  - Certificate CA            │                           │
+│  └──────────────────────────────┘                           │
+│         ▲              ▲                                     │
+│         │              │                                     │
+│    MQTT (mTLS)    QUIC (mTLS)                               │
+│    :1883          :4433                                      │
+│         │              │                                     │
+│  ┌──────┴──────────────┴────────────────────────┐          │
 │  │                                                │          │
 │  │              Steward(s)                        │          │
 │  │                                                │          │
@@ -66,14 +66,16 @@ This guide walks you through deploying a complete CFGMS environment in your home
 │                                                              │
 └─────────────────────────────────────────────────────────────┘
 
-Control Plane: MQTT (commands, heartbeats, status reports)
-Data Plane: QUIC (configuration sync, high-throughput data)
-Management Plane: REST API (config uploads, admin operations)
+Control Plane: MQTT (commands, heartbeats, status reports) - port 1883
+Data Plane: QUIC (configuration sync, high-throughput data) - port 4433
+Management Plane: REST API (config uploads, admin operations) - port 9080
 ```
+
+**Note**: The MQTT broker is embedded in the controller binary. There is no separate MQTT broker service to deploy.
 
 ### Communication Protocols
 
-1. **MQTT** (Control Plane - Port 1886 with TLS):
+1. **MQTT** (Control Plane - Port 1883 with mTLS):
    - Command delivery (`connect_quic`, `sync_config`, `heartbeat`)
    - Status reporting (`config-status`, `health-status`)
    - Real-time notifications
@@ -83,15 +85,11 @@ Management Plane: REST API (config uploads, admin operations)
    - High-performance data transfer
    - DNA (Desired Next Action) delivery
 
-3. **REST API** (Management Plane - Port 8080 with HTTPS):
+3. **REST API** (Management Plane - Port 9080):
    - Configuration uploads
-   - Steward registration
+   - Steward registration token management
    - Administrative operations
    - Health checks
-
-4. **gRPC** (Optional - Port 9090):
-   - Legacy support
-   - Inter-controller communication (future)
 
 ## Prerequisites
 
@@ -102,25 +100,16 @@ Management Plane: REST API (config uploads, admin operations)
 | CPU | 2 cores | 4+ cores |
 | RAM | 4 GB | 8 GB |
 | Disk | 20 GB free | 50 GB free |
-| OS | Linux, macOS, Windows | Linux (Ubuntu 22.04+) |
-| Docker | 20.10+ | 24.0+ |
-| Docker Compose | 2.0+ | 2.20+ |
-| Go (for building) | 1.23+ | 1.23+ |
+| Controller OS | Debian 12+, Ubuntu 22.04+ | Debian 12 |
+| Steward OS | Linux, macOS, Windows | See [platform-support.md](platform-support.md) |
+| Go (for building) | 1.25+ | 1.25+ |
 
 ### Software Prerequisites
 
 ```bash
-# Verify Docker
-docker --version
-# Expected: Docker version 24.0.0 or later
-
-# Verify Docker Compose
-docker compose version
-# Expected: Docker Compose version v2.20.0 or later
-
-# Verify Go (if building from source)
+# Verify Go (required for building from source)
 go version
-# Expected: go version go1.23.0 or later
+# Expected: go version go1.25.0 or later
 
 # Optional: MQTT client tools for testing
 mosquitto_pub --help  # mosquitto-clients package
@@ -128,218 +117,235 @@ mosquitto_pub --help  # mosquitto-clients package
 
 ### Network Requirements
 
-**Ports** (ensure these are available):
-- `8080`: Controller REST API (HTTPS)
-- `9090`: Controller gRPC (optional)
-- `4433`: Controller QUIC server
-- `1883`: MQTT broker (non-TLS, optional)
-- `1886`: MQTT broker (TLS)
+**Ports** (ensure these are available on the controller):
+- `9080`: Controller REST API (HTTP/HTTPS)
+- `1883`: MQTT broker (mTLS, embedded in controller)
+- `4433`: QUIC data plane (mTLS)
 
 **Firewall Rules** (if applicable):
-- Allow inbound on ports above from your home network
-- Allow outbound HTTPS (443) for external integrations (M365, etc.)
-
-## Quick Start
-
-**For experienced users** - get CFGMS running in 5 minutes:
-
 ```bash
-# 1. Clone and build
-git clone https://github.com/cfg-is/cfgms.git
-cd cfgms
-make build
-
-# 2. Start infrastructure
-docker compose up -d controller mqtt-broker
-
-# 3. Start a test steward
-docker compose up -d steward-standalone
-
-# 4. Verify deployment
-docker logs controller | grep "Controller started"
-docker logs steward-standalone | grep "Registration successful"
-
-# 5. Run E2E validation
-cd test/integration/mqtt_quic
-go test -v -run TestE2EFlowDiagnostic
+# Controller firewall (e.g., ufw on Debian)
+sudo ufw allow 9080/tcp   # REST API
+sudo ufw allow 1883/tcp   # MQTT control plane
+sudo ufw allow 4433/udp   # QUIC data plane (UDP protocol)
+sudo ufw allow 22/tcp     # SSH management
 ```
-
-**Success**: If diagnostic test passes, your deployment is functional! Continue to [Validation](#validation) section.
 
 ## Detailed Setup
 
-### Step 1: Repository Setup
+### Step 1: Build CFGMS Binaries
 
 ```bash
 # Clone the repository
 git clone https://github.com/cfg-is/cfgms.git
 cd cfgms
 
-# Checkout the latest stable release
-git checkout main
-
-# Verify repository structure
-ls -la
-# You should see: cmd/, features/, pkg/, test/, docker-compose.yml, Makefile
-```
-
-### Step 2: Build CFGMS Binaries
-
-```bash
-# Run complete validation (tests + security + lint)
-make test-complete
-# This MUST pass 100% before deploying
-
-# Build binaries for your platform
+# Build all binaries
 make build
-# Creates: bin/controller, bin/steward, bin/cfg
+# Creates: bin/controller, bin/cfgms-steward, bin/cfg
 
 # Verify binaries
 ./bin/controller --version
-./bin/steward --version
+./bin/cfgms-steward --version
+./bin/cfg --version
 ```
 
 **Troubleshooting Build Issues**:
-- If tests fail: Fix the failing tests before proceeding (zero tolerance policy)
-- If build fails: Check Go version is 1.23+, run `go mod tidy`
-- If security scan fails: Review and remediate security findings
+- If build fails: Check Go version is 1.25+, run `go mod tidy`
+- If tests fail: Fix the failing tests before deploying (zero tolerance policy)
 
-### Step 3: Configure Storage Backend
+### Step 2: Configure Storage Backend
 
-**Option A: Git with SOPS** (Recommended for Home Lab)
+**Git with SOPS** (Recommended for Home Lab)
 
 ```bash
 # SOPS is used for encryption - install if not present
+# On Debian/Ubuntu: apt install sops
 # On macOS: brew install sops
-# On Linux: Download from https://github.com/mozilla/sops/releases
+# Or download from https://github.com/mozilla/sops/releases
 
 # Generate age encryption key for SOPS
 age-keygen -o ~/.config/sops/age/keys.txt
 
-# Extract public key
+# Extract public key (you'll need this for .sops.yaml)
 grep "public key:" ~/.config/sops/age/keys.txt
-
-# Configure controller to use git storage
-# Edit docker-compose.yml or set environment variables:
-export CFGMS_STORAGE_PROVIDER=git
-export CFGMS_STORAGE_GIT_URL=/data/git-storage
-export CFGMS_SOPS_AGE_KEY=$(cat ~/.config/sops/age/keys.txt)
 ```
 
-**Option B: Database** (Advanced - for larger deployments)
+### Step 3: Deploy Controller
+
+#### 3a: Copy Binary to Controller VM
 
 ```bash
-# Start PostgreSQL or TimescaleDB
-docker compose up -d timescale
-
-# Configure controller for database storage
-export CFGMS_STORAGE_PROVIDER=database
-export CFGMS_DB_HOST=localhost
-export CFGMS_DB_PORT=5432
-export CFGMS_DB_USER=cfgms
-export CFGMS_DB_PASSWORD=$(openssl rand -base64 32)  # Generate secure password
-export CFGMS_DB_NAME=cfgms
+# From build machine to controller VM
+scp bin/controller user@controller-vm:/usr/local/bin/cfgms-controller
+ssh user@controller-vm "chmod +x /usr/local/bin/cfgms-controller"
 ```
 
-### Step 4: Start Controller
+#### 3b: Create Controller Configuration
 
 ```bash
-# Start controller and MQTT broker
-docker compose up -d controller mqtt-broker
+# On the controller VM
+sudo mkdir -p /etc/cfgms /var/lib/cfgms/storage /var/lib/cfgms/certs /var/log/cfgms
 
-# Watch logs for initialization
-docker logs -f controller
+sudo tee /etc/cfgms/controller.cfg > /dev/null <<EOF
+storage:
+  provider: git
+  config:
+    repository_path: /var/lib/cfgms/storage
+    branch: main
+    auto_init: true
 
-# Look for these log messages (wait 10-15 seconds):
-# ✓ "Certificate manager initialized"
-# ✓ "Generated server certificate" (if auto-generating)
-# ✓ "MQTT client connected"
-# ✓ "QUIC server listening on :4433"
-# ✓ "REST API server listening on :8080"
-# ✓ "Controller started successfully"
+certificate:
+  enable_cert_management: true
+  auto_generate: true
+  ca_path: /var/lib/cfgms/certs
 
-# Ctrl+C to stop watching logs
+logging:
+  provider: file
+  level: INFO
+  file:
+    directory: /var/log/cfgms
+
+mqtt:
+  enabled: true
+  listen_addr: "0.0.0.0:1883"
+  enable_tls: true
+
+quic:
+  enabled: true
+  listen_addr: "0.0.0.0:4433"
+EOF
 ```
 
-**Verify Controller Health**:
+#### 3c: Create systemd Service
 
 ```bash
-# Check REST API
-curl -k https://localhost:8080/health
-# Expected: {"status":"healthy"} or similar
+sudo tee /etc/systemd/system/cfgms-controller.service > /dev/null <<EOF
+[Unit]
+Description=CFGMS Controller
+After=network-online.target
+Wants=network-online.target
 
-# Check container status
-docker ps | grep controller
-# Expected: STATUS shows "Up X seconds/minutes"
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/cfgms-controller
+Restart=always
+RestartSec=10
+User=root
+WorkingDirectory=/var/lib/cfgms
 
-# Check logs for errors
-docker logs controller | grep -i error
-# Expected: No critical errors (warnings are okay)
+# Environment (adjust SOPS key path as needed)
+Environment=SOPS_AGE_KEY_FILE=/root/.config/sops/age/keys.txt
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable cfgms-controller
+sudo systemctl start cfgms-controller
 ```
 
-### Step 5: Start MQTT Broker
-
-**Note**: If using `docker compose`, MQTT broker starts automatically with controller.
+#### 3d: Verify Controller Health
 
 ```bash
-# Verify MQTT broker is running
-docker logs mqtt-broker
+# Check service status
+sudo systemctl status cfgms-controller
 
-# Look for:
-# ✓ "mochi mqtt server started"
-# ✓ "listening on :1886" (TLS)
-
-# Test MQTT connectivity (requires mosquitto-clients)
-mosquitto_pub -h localhost -p 1883 -t "test/topic" -m "hello" -d
-# Expected: No errors, message published successfully
-```
-
-### Step 6: Deploy First Steward
-
-```bash
-# Option A: Docker Compose (easiest for testing)
-docker compose up -d steward-standalone
-
-# Option B: Native binary (for production stewards)
-./bin/steward --config steward-config.yaml
-
-# Watch steward logs
-docker logs -f steward-standalone
+# Check logs for successful startup
+sudo journalctl -u cfgms-controller --no-pager -n 30
 
 # Look for these log messages:
-# ✓ "Starting steward registration"
-# ✓ "Registration successful"
-# ✓ "Steward ID: steward-XXXXX"
-# ✓ "MQTT client connected"
-# ✓ "Ready to receive commands"
+# ✓ "Certificate manager initialized"
+# ✓ "Generated server certificate" (first boot only)
+# ✓ "MQTT broker started"
+# ✓ "QUIC server listening on :4433"
+# ✓ "REST API server listening on :9080"
+
+# Check REST API
+curl http://localhost:9080/api/v1/health
 ```
 
-**Verify Steward Registration**:
+### Step 4: Create Registration Token
 
 ```bash
-# Extract steward ID from logs
-STEWARD_ID=$(docker logs steward-standalone 2>&1 | grep "Steward ID:" | tail -1 | awk '{print $NF}')
-echo "Steward ID: $STEWARD_ID"
+# Create a registration token for stewards
+curl -X POST http://localhost:9080/api/v1/admin/registration-tokens \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tenant_id": "default",
+    "group": "production",
+    "validity_days": 7,
+    "single_use": false
+  }'
+
+# Save the token from the response for steward deployment
+```
+
+### Step 5: Deploy First Steward
+
+#### 5a: Copy Binary to Steward VM
+
+```bash
+# From build machine to steward VM
+scp bin/cfgms-steward user@steward-vm:/usr/local/bin/cfgms-steward
+ssh user@steward-vm "chmod +x /usr/local/bin/cfgms-steward"
+```
+
+#### 5b: Create systemd Service
+
+```bash
+# On the steward VM
+# Replace CONTROLLER_IP and TOKEN with actual values
+
+sudo tee /etc/systemd/system/cfgms-steward.service > /dev/null <<EOF
+[Unit]
+Description=CFGMS Steward Configuration Management Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/cfgms-steward --regtoken REPLACE_WITH_TOKEN
+Restart=always
+RestartSec=10
+User=root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable cfgms-steward
+sudo systemctl start cfgms-steward
+```
+
+#### 5c: Verify Steward Registration
+
+```bash
+# Check steward logs
+sudo journalctl -u cfgms-steward --no-pager -n 30
+
+# Look for:
+# ✓ "Registering with controller via MQTT+QUIC"
+# ✓ "Certificate obtained"
+# ✓ "Connected to controller"
+# ✓ "Steward ready"
 
 # Verify controller sees the steward
-docker logs controller | grep "$STEWARD_ID"
-# Expected: Registration confirmation message
+sudo journalctl -u cfgms-controller --no-pager | grep -i "registration"
 ```
 
-### Step 7: Test Configuration Sync
+### Step 6: Test Configuration Sync
 
 ```bash
-# Create a simple test configuration
+# On the controller VM, upload a test configuration
 cat > /tmp/test-config.yaml <<EOF
-steward:
-  id: $STEWARD_ID
-  mode: controller
-
 resources:
   - name: test-file
     module: file
     config:
-      path: /test-workspace/hello.txt
+      path: /tmp/hello-cfgms.txt
       content: |
         Hello from CFGMS!
         Deployed successfully to home lab.
@@ -347,177 +353,126 @@ resources:
       ensure: present
 EOF
 
-# Upload configuration to controller
-curl -k -X POST https://localhost:8080/api/v1/configurations \
+curl -X POST http://localhost:9080/api/v1/configurations \
   -H "Content-Type: application/yaml" \
   --data-binary @/tmp/test-config.yaml
 
-# Trigger config sync via MQTT (or use controller API)
-# The steward should automatically sync within 60 seconds
-# OR manually trigger via commands (see advanced section)
-```
-
-**Verify Config Execution**:
-
-```bash
-# Check steward logs for config sync
-docker logs steward-standalone | tail -30
-# Look for:
-# ✓ "QUIC connection established"
-# ✓ "Configuration fetched"
-# ✓ "Signature verified"
-# ✓ "Module executed: file"
-# ✓ "Status report published"
-
-# Verify file was created
-docker exec steward-standalone cat /test-workspace/hello.txt
-# Expected: File content matches config
+# The steward should sync within 60 seconds
+# Check steward logs for config application:
+ssh user@steward-vm "sudo journalctl -u cfgms-steward --no-pager -n 20"
 ```
 
 ## Validation
 
 ### Automated E2E Tests
 
-**Run the comprehensive E2E test suite**:
+The E2E test suite validates the complete MQTT+QUIC flow:
 
 ```bash
 cd test/integration/mqtt_quic
 
-# Network validation (pre-flight checks)
-go test -v -run TestE2ENetworkValidation
-# Expected: All phases pass, no connectivity issues
+# Registration flow
+go test -v -run TestRegistration -timeout 60s
 
-# Flow diagnostic (validates each E2E phase)
-go test -v -run TestE2EFlowDiagnostic
-# Expected: All 8 phases pass in < 30 seconds
+# Configuration sync via QUIC
+go test -v -run TestConfigSync -timeout 60s
 
-# Config status reporting (full E2E flow)
-go test -v -run TestConfigStatusReporting
-# Expected: Status report received within 10 seconds
+# Module execution (file, directory, script)
+go test -v -run TestModuleExecution -timeout 60s
 
-# Module failure reporting
-go test -v -run TestModuleFailureReporting
-# Expected: Error status report received correctly
+# Heartbeat and failover detection
+go test -v -run TestHeartbeatFailover -timeout 60s
+
+# Multi-tenant isolation
+go test -v -run TestMultiTenant -timeout 60s
+
+# TLS/mTLS security validation
+go test -v -run TestTLSSecurity -timeout 60s
 ```
 
 **Success Criteria**:
-- ✅ All E2E tests pass
-- ✅ Tests complete in < 30 seconds (not timeout)
-- ✅ No errors in test output
-- ✅ Status reports received correctly
+- All 6 E2E tests pass
+- Tests complete without timeout
+- No errors in test output
 
 ### Manual Validation Steps
 
 **1. MQTT Connectivity**:
 ```bash
-# Subscribe to all steward topics
-mosquitto_sub -h localhost -p 1883 -t "cfgms/steward/#" -v
+# Subscribe to steward topics (requires mosquitto-clients)
+mosquitto_sub -h controller-vm -p 1883 -t "cfgms/steward/#" -v
 
-# In another terminal, check if you see:
-# - Heartbeat messages
-# - Status reports
-# - Command acknowledgments
+# You should see heartbeat and status messages
 ```
 
 **2. QUIC Connectivity**:
 ```bash
-# Check controller QUIC server is listening
-docker logs controller | grep "QUIC server listening"
+# Check controller logs for QUIC server
+sudo journalctl -u cfgms-controller | grep "QUIC server listening"
 
-# Check steward can connect
-docker logs steward-standalone | grep "QUIC.*established"
+# Check steward logs for QUIC connection
+sudo journalctl -u cfgms-steward | grep "QUIC.*established"
 ```
 
-**3. Config Distribution**:
+**3. REST API Health**:
 ```bash
-# Upload config (as shown in Step 7)
-# Verify config appears in storage backend
-
-# For git storage:
-docker exec controller ls -la /data/git-storage/
-
-# For database storage:
-docker exec timescale psql -U cfgms -c "SELECT * FROM configurations;"
-```
-
-**4. Module Execution**:
-```bash
-# Create test file via config (shown above)
-# Verify file exists
-docker exec steward-standalone ls -la /test-workspace/
-
-# Create test directory
-# Verify directory exists
-# Verify permissions are correct
-```
-
-**5. Status Reporting**:
-```bash
-# Check controller logs for status reports
-docker logs controller | grep "config.*status"
-
-# Verify status matches actual execution
-# (file created → status should be "OK")
+# From any machine that can reach the controller
+curl http://controller-vm:9080/api/v1/health
 ```
 
 ## Troubleshooting
 
-See [home-lab-checklist.md](home-lab-checklist.md) for detailed troubleshooting steps.
+See [home-lab-checklist.md](home-lab-checklist.md) for a detailed pre-deployment checklist.
 
 ### Quick Debug Commands
 
 ```bash
-# View all container logs
-docker compose logs -f
+# View controller logs
+sudo journalctl -u cfgms-controller -f
 
-# Check controller health
-curl -k https://localhost:8080/health
+# View steward logs
+sudo journalctl -u cfgms-steward -f
 
 # Restart a component
-docker restart controller
-docker restart steward-standalone
-docker restart mqtt-broker
+sudo systemctl restart cfgms-controller
+sudo systemctl restart cfgms-steward
 
-# Clean restart (removes all data!)
-docker compose down -v
-docker compose up -d
+# Check listening ports on controller
+sudo ss -tlnp | grep -E '9080|1883|4433'
 ```
 
 ### Common Issues
 
 **Issue**: "Error: signature verification failed"
-- **Root Cause**: Controller using mismatched certificates (Story #378)
-- **Fix**: Ensure you're running v0.9.x with Story #378 fix applied
+- **Root Cause**: Controller using mismatched certificates
+- **Fix**: Ensure controller generated certs on first boot; check `/var/lib/cfgms/certs/`
 - **Verify**: Check controller logs show same certificate serial for signer and registration
 
 **Issue**: "Timeout waiting for config status"
-- **Debug**: Check QUIC connection established
+- **Debug**: Check QUIC connection established in steward logs
 - **Debug**: Check module executor initialized
 - **Debug**: Check MQTT publish succeeds
 - **Fix**: See diagnostic test output for exact failure point
 
 **Issue**: "Cannot connect to MQTT broker"
-- **Debug**: Check MQTT broker is running: `docker ps | grep mqtt`
-- **Debug**: Check port 1886 is accessible
-- **Fix**: Verify firewall rules, restart mqtt-broker
+- **Debug**: Check controller is running: `sudo systemctl status cfgms-controller`
+- **Debug**: Check port 1883 is accessible: `nc -zv controller-vm 1883`
+- **Fix**: Verify firewall rules allow port 1883
 
 **Issue**: "QUIC connection failed"
-- **Debug**: Check port 4433 is accessible from steward
-- **Debug**: Check certificates are valid
-- **Fix**: Test connectivity: `nc -zv controller-standalone 4433`
+- **Debug**: Check port 4433 is accessible from steward: `nc -zuv controller-vm 4433`
+- **Debug**: Check certificates are valid in controller logs
+- **Fix**: Verify firewall allows UDP port 4433
 
 ## Advanced Configuration
 
 ### Multi-Steward Deployment
 
 ```bash
-# Deploy multiple stewards
-for i in {1..3}; do
-  docker compose up -d steward-$i
-done
-
-# Each steward gets unique ID automatically
-# All connect to same controller via MQTT+QUIC
+# Use the same registration token (if single_use was false)
+# Deploy cfgms-steward binary to each VM with its own systemd unit
+# Each steward gets a unique ID automatically
+# All connect to the same controller via MQTT+QUIC
 ```
 
 ### Custom Certificate Authority
@@ -536,10 +491,7 @@ export CFGMS_CERT_KEY_PATH=/path/to/server-key.pem
 
 ```bash
 # Start multiple controllers (requires shared storage backend)
-docker compose --profile ha up -d
-
-# Use load balancer for REST API
-# Controllers coordinate via shared database
+# Controllers coordinate via Raft consensus
 ```
 
 **HA Environment Variables:**
@@ -547,7 +499,7 @@ docker compose --profile ha up -d
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `CFGMS_HA_MODE` | Yes | `single` | Deployment mode: `single`, `blue-green`, or `cluster` |
-| `CFGMS_HA_CA_CERT_PATH` | Recommended | (none) | Path to CA certificate PEM file for TLS validation between cluster nodes. When set, raft transport and node discovery use this CA for proper certificate verification. Without it, basic TLS is used without CA validation. |
+| `CFGMS_HA_CA_CERT_PATH` | Recommended | (none) | Path to CA certificate PEM file for TLS validation between cluster nodes |
 | `CFGMS_HA_EXTERNAL_ADDRESS` | Yes (cluster) | (none) | This node's address visible to other cluster nodes |
 | `CFGMS_HA_CLUSTER_NODES` | Yes (cluster) | (none) | Comma-separated list of all cluster node addresses |
 | `CFGMS_HA_DISCOVERY_METHOD` | No | `static` | Node discovery method |
@@ -564,7 +516,7 @@ export CFGMS_M365_CLIENT_ID=your-client-id
 export CFGMS_M365_CLIENT_SECRET=your-client-secret
 
 # Restart controller
-docker restart controller
+sudo systemctl restart cfgms-controller
 ```
 
 ## Next Steps
@@ -583,11 +535,12 @@ After successful deployment:
 - **Architecture**: [docs/architecture/](../architecture/)
 - **E2E Testing**: [docs/testing/e2e-testing-guide.md](../testing/e2e-testing-guide.md)
 - **MQTT+QUIC Details**: [docs/testing/mqtt-quic-testing-strategy.md](../testing/mqtt-quic-testing-strategy.md)
-- **Troubleshooting**: [docs/troubleshooting/connectivity.md](../troubleshooting/connectivity.md)
+- **Quick Start**: [QUICK_START.md](../../QUICK_START.md)
 
 ---
 
 **Deployment Support**: If you encounter issues, check GitHub issues or create a new issue with:
-- Output of `docker compose logs`
+- Output of `sudo journalctl -u cfgms-controller --no-pager -n 50`
+- Output of `sudo journalctl -u cfgms-steward --no-pager -n 50`
 - Output of E2E test runs
 - Description of unexpected behavior

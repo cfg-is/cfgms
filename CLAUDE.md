@@ -313,6 +313,14 @@ See [docs/development/commands-reference.md](docs/development/commands-reference
 
 ## Core Architecture
 
+### Operating Model (IMPORTANT)
+
+The operating model documents define how CFGMS behaves at runtime. Every steward or controller feature should be consistent with these docs. **Consult them before implementing changes to steward or controller behavior.**
+
+- **System-level**: [docs/architecture/operating-model.md](docs/architecture/operating-model.md) — component roles, communication model, failure modes, deployment modes
+- **Steward**: [docs/architecture/steward-operating-model.md](docs/architecture/steward-operating-model.md) — convergence loop, module contract, DNA sync, self-awareness, reporting, offline queueing
+- **Controller**: [docs/architecture/controller-operating-model.md](docs/architecture/controller-operating-model.md) — first-run vs startup, cfg management, fleet management, orchestration, workflow engine, identity, multi-tenancy
+
 ### System Design
 
 **Three-Tier System:**
@@ -542,6 +550,9 @@ docs/          # Comprehensive documentation
 - **All Commands**: [docs/development/commands-reference.md](docs/development/commands-reference.md)
 - **Git Workflow**: [docs/development/git-workflow.md](docs/development/git-workflow.md)
 - **Architecture**: [docs/architecture/](docs/architecture/)
+- **Operating Model (System)**: [docs/architecture/operating-model.md](docs/architecture/operating-model.md)
+- **Operating Model (Steward)**: [docs/architecture/steward-operating-model.md](docs/architecture/steward-operating-model.md)
+- **Operating Model (Controller)**: [docs/architecture/controller-operating-model.md](docs/architecture/controller-operating-model.md)
 - **Roadmap**: [docs/product/roadmap.md](docs/product/roadmap.md)
 
 ### Project Management
