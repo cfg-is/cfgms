@@ -295,27 +295,29 @@ See [SECURITY.md](SECURITY.md) for security policy and vulnerability reporting.
 
 ## Multi-Tenancy
 
-CFGMS supports **hierarchical multi-tenancy** for MSP environments:
+CFGMS supports **recursive multi-tenancy** for MSP and SaaS environments:
 
-### Tenant Hierarchy
+### Tenant Model
+
+Tenants form a **recursive parent-child tree** with no fixed depth. "MSP → Client → Group → Device" is a common convention, not a structural limit. Tenants are identified by path (e.g., `acme-msp/client-a/production`).
 
 ```
-MSP (Top Level)
- ├── Client A
- │   ├── Production Group
- │   │   ├── Device 1
- │   │   └── Device 2
- │   └── Development Group
- │       └── Device 3
- └── Client B
-     └── Device 4
+acme-msp (root)
+ ├── client-a
+ │   ├── production
+ │   │   ├── device-1 (steward)
+ │   │   └── device-2 (steward)
+ │   └── development
+ │       └── device-3 (steward)
+ └── client-b
+     └── device-4 (steward)
 ```
 
 ### Configuration Inheritance
 
-- **Hierarchical Merging**: Child tenants inherit parent configurations
-- **Override Capability**: Children can override parent settings
-- **Source Tracking**: Full auditability of configuration sources
+- **Recursive Resolution**: Cfgs resolve from root to leaf, merging at each level
+- **Override Capability**: Any tenant can override inherited settings
+- **Source Tracking**: Every value carries its source tenant path and version
 - **Declarative Merging**: Named resources replace entire blocks
 
 ### Isolation
@@ -324,6 +326,14 @@ MSP (Top Level)
 - **Resource Isolation**: CPU/memory limits per tenant
 - **Network Isolation**: Separate certificate chains per tenant
 - **Audit Isolation**: Separate audit logs per tenant
+- **Multi-Root Isolation** (Commercial): Independent root tenants are fully isolated
+
+### Licensing Boundary
+
+- **Apache (OSS)**: Single root tenant tree, unlimited depth
+- **Elastic (Commercial)**: Multiple independent root trees on shared infrastructure (SaaS/platform mode)
+
+See [Feature Boundaries](docs/product/feature-boundaries.md) for the complete breakdown.
 
 ### Scale
 

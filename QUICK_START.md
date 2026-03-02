@@ -380,10 +380,17 @@ curl -X POST http://localhost:9080/api/v1/admin/registration-tokens \
     "single_use": false
   }'
 
-# Returns:
-# {"token": "cfgms_reg_abc123xyz..."}
+# Returns JSON with token and metadata:
+# {
+#   "token": "cfgms_reg_abc123xyz...",
+#   "tenant_id": "default",
+#   "controller_url": "...",
+#   "group": "production",
+#   "created_at": "...",
+#   "single_use": false
+# }
 
-# Save this token for the next step
+# Save the "token" value for the next step
 ```
 
 ### Step 4: Register First Steward

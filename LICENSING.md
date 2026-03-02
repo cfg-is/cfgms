@@ -166,14 +166,20 @@ For a complete breakdown of what's included in OSS vs Commercial, see [docs/prod
 
 ## Multi-Tenancy
 
-### Single MSP (OSS)
-✅ Unlimited hierarchical depth (MSP → Client → Group → Device)
-✅ Complete tenant isolation and security
-✅ Full multi-tenant capabilities
+The licensing boundary is **single-root vs multi-root** tenant trees:
 
-### Multiple MSPs (Commercial)
-✅ Support for SaaS deployments hosting multiple MSPs
-✅ MSP-level isolation and management
+### Single Root (OSS — Apache 2.0)
+✅ Recursive parent-child tenant hierarchy with unlimited depth
+✅ Path-based tenant identification (e.g., `acme-msp/client-a/production`)
+✅ Complete tenant isolation and security
+✅ Full multi-tenant capabilities within one root tree
+✅ One MSP operates their own controller
+
+### Multi-Root / Platform Mode (Commercial — Elastic 2.0)
+✅ Multiple independent root tenant trees on shared infrastructure
+✅ Per-MSP isolation (no cross-root visibility or inheritance)
+✅ Platform-level management, resource scheduling, and billing
+✅ Enables cfg.is to host hundreds of MSPs on a single cluster
 
 ## FAQ
 
@@ -218,7 +224,7 @@ Yes! Apache 2.0 components can be freely forked. Elastic License 2.0 components 
 ### Which version should I use: OSS or Commercial?
 
 **Use OSS if**:
-- Running a single MSP with one controller
+- Running a single MSP with one controller (single root tenant tree, unlimited depth)
 - Don't need Web UI (CLI/API is sufficient)
 - Want maximum flexibility and no licensing restrictions
 - Evaluating CFGMS for your environment
@@ -226,7 +232,7 @@ Yes! Apache 2.0 components can be freely forked. Elastic License 2.0 components 
 **Upgrade to Commercial if**:
 - Need 99.99% uptime with automatic failover
 - Want Web UI for workflow building and dashboards (when available)
-- Running SaaS platform hosting multiple MSPs
+- Running SaaS platform hosting multiple independent MSPs (multi-root tenant trees)
 - Need predictive analytics and ML-based monitoring (future)
 
 You can start with OSS and upgrade anytime - it's the same codebase with features enabled via build tags.

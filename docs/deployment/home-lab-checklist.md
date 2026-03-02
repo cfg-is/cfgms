@@ -1,49 +1,47 @@
 # CFGMS Home Lab Deployment Checklist
 
-**Story #378**: This checklist ensures all prerequisites and deployment steps are validated before deploying CFGMS to your home lab environment.
+**Story #391**: This checklist ensures all prerequisites and deployment steps are validated before deploying CFGMS to your home lab environment.
 
-**Last Updated**: 2026-02-12
+**Last Updated**: 2026-02-28
 **CFGMS Version**: v0.9.x
 
 ## Pre-Deployment Checklist
 
 ### Infrastructure Requirements
 
-- [ ] **Docker Engine** installed and running (version 20.10+ recommended)
+- [ ] **Controller VM** provisioned (Debian 12+ or Ubuntu 22.04+ recommended)
   ```bash
-  docker --version
-  docker ps  # Should show running containers or empty list
+  cat /etc/os-release  # Verify OS
   ```
 
-- [ ] **Docker Compose** installed (version 2.0+ with `docker compose` command)
-  ```bash
-  docker compose version
-  ```
+- [ ] **Steward VM(s)** provisioned (Linux, Windows, or macOS)
+  - See [platform-support.md](platform-support.md) for supported platforms
 
-- [ ] **Sufficient Resources** available on host machine:
+- [ ] **Sufficient Resources** available on host machines:
   - **CPU**: Minimum 2 cores, recommended 4+ cores
   - **RAM**: Minimum 4GB, recommended 8GB+
   - **Disk**: Minimum 20GB free space, recommended 50GB+
   ```bash
-  # Check available resources
-  df -h /var/lib/docker  # Disk space
-  free -h                # Memory
-  nproc                  # CPU cores
+  df -h /              # Disk space
+  free -h              # Memory
+  nproc                # CPU cores
   ```
 
-- [ ] **Network Ports** available and not in use:
-  - `8080`: Controller REST API (HTTPS)
-  - `9090`: Controller gRPC
-  - `4433`: Controller QUIC (config sync)
-  - `1883`: MQTT broker (non-TLS)
-  - `1886`: MQTT broker (TLS)
+- [ ] **Network Ports** available on controller (not already in use):
+  - `9080`: REST API
+  - `1883`: MQTT broker (embedded in controller)
+  - `4433`: QUIC data plane
   ```bash
-  # Check if ports are available
-  sudo lsof -i :8080
-  sudo lsof -i :9090
-  sudo lsof -i :4433
-  sudo lsof -i :1883
-  sudo lsof -i :1886
+  # Check if ports are available on controller
+  sudo ss -tlnp | grep -E '9080|1883'
+  sudo ss -ulnp | grep 4433
+  ```
+
+- [ ] **Firewall Rules** configured on controller:
+  ```bash
+  sudo ufw allow 9080/tcp   # REST API
+  sudo ufw allow 1883/tcp   # MQTT control plane
+  sudo ufw allow 4433/udp   # QUIC data plane
   ```
 
 ### Repository and Build
@@ -56,9 +54,9 @@
   git pull origin main
   ```
 
-- [ ] **Go Environment** configured (version 1.23+ required)
+- [ ] **Go Environment** configured (version 1.25+ required)
   ```bash
-  go version  # Should show go1.23 or later
+  go version  # Should show go1.25 or later
   ```
 
 - [ ] **All Tests Passing** before deployment
@@ -68,7 +66,7 @@
 
 - [ ] **Binaries Built** successfully
   ```bash
-  make build  # Should create ./bin/controller and ./bin/steward
+  make build  # Creates: bin/controller, bin/cfgms-steward, bin/cfg
   ```
 
 ### Security Prerequisites
@@ -88,59 +86,82 @@
 
 ## Deployment Checklist
 
-### Step 1: Initial Deployment
+### Step 1: Controller Deployment
 
-- [ ] **Start Core Infrastructure** (controller + MQTT broker)
+- [ ] **Binary Deployed** to controller VM
   ```bash
-  docker compose up -d controller mqtt-broker
+  scp bin/controller user@controller-vm:/usr/local/bin/cfgms-controller
+  ssh user@controller-vm "chmod +x /usr/local/bin/cfgms-controller"
   ```
 
-- [ ] **Verify Controller Health**
+- [ ] **Configuration Created** at `/etc/cfgms/controller.cfg`
   ```bash
-  # Wait 10-15 seconds for controller to initialize
-  docker logs controller | grep "Controller started"
-
-  # Check controller is listening
-  curl -k https://localhost:8080/health  # Should return 200 OK
+  sudo mkdir -p /etc/cfgms /var/lib/cfgms/storage /var/lib/cfgms/certs /var/log/cfgms
+  # See home-lab-deployment-guide.md Step 3b for full config
   ```
 
-- [ ] **Verify MQTT Broker Health**
+- [ ] **systemd Service Installed** and started
   ```bash
-  docker logs mqtt-broker | grep "started"
+  # See home-lab-deployment-guide.md Step 3c for service file
+  sudo systemctl daemon-reload
+  sudo systemctl enable cfgms-controller
+  sudo systemctl start cfgms-controller
+  ```
 
-  # Test MQTT connectivity (requires mosquitto-clients)
-  mosquitto_pub -h localhost -p 1883 -t "test/topic" -m "test" -d
+- [ ] **Controller Health Verified**
+  ```bash
+  # Check service is running
+  sudo systemctl status cfgms-controller
+
+  # Check REST API responds
+  curl http://localhost:9080/api/v1/health
+
+  # Check logs for successful startup
+  sudo journalctl -u cfgms-controller --no-pager -n 30
+  # Look for: "Certificate manager initialized", "MQTT broker started",
+  # "QUIC server listening on :4433", "REST API server listening on :9080"
   ```
 
 - [ ] **Certificates Auto-Generated** (if using auto-generation)
   ```bash
-  docker logs controller | grep "Certificate manager initialized"
-  docker logs controller | grep "Generated server certificate"
+  sudo journalctl -u cfgms-controller | grep "Certificate manager initialized"
+  sudo journalctl -u cfgms-controller | grep "Generated server certificate"
   ```
 
 ### Step 2: Steward Deployment
 
 - [ ] **Registration Token Created**
   ```bash
-  # Via REST API or CLI (depends on your setup)
-  # Store token securely - it's used for steward registration
+  curl -X POST http://localhost:9080/api/v1/admin/registration-tokens \
+    -H "Content-Type: application/json" \
+    -d '{"tenant_id": "default", "group": "production", "validity_days": 7}'
+  # Save the token from the response
   ```
 
-- [ ] **Start First Steward** (test deployment)
+- [ ] **Steward Binary Deployed** to steward VM
   ```bash
-  docker compose up -d steward-standalone
+  scp bin/cfgms-steward user@steward-vm:/usr/local/bin/cfgms-steward
+  ssh user@steward-vm "chmod +x /usr/local/bin/cfgms-steward"
   ```
 
-- [ ] **Verify Steward Registration**
+- [ ] **systemd Service Installed** and started
   ```bash
-  docker logs steward-standalone | grep "Registration successful"
-  docker logs steward-standalone | grep "Steward ID:"
+  # See home-lab-deployment-guide.md Step 5b for service file
+  sudo systemctl daemon-reload
+  sudo systemctl enable cfgms-steward
+  sudo systemctl start cfgms-steward
   ```
 
-- [ ] **Verify MQTT Connection**
+- [ ] **Steward Registration Verified**
   ```bash
-  docker logs steward-standalone | grep "MQTT.*connected"
-  docker logs controller | grep "steward.*connected"
+  sudo journalctl -u cfgms-steward | grep "Registration successful"
+  sudo journalctl -u cfgms-steward | grep "Steward ID:"
+  ```
+
+- [ ] **MQTT Connection Verified**
+  ```bash
+  sudo journalctl -u cfgms-steward | grep "MQTT.*connected"
+  sudo journalctl -u cfgms-controller | grep "steward.*connected"
   ```
 
 ### Step 3: E2E Validation
@@ -151,50 +172,41 @@
   # Verify it appears in controller's storage backend
   ```
 
-- [ ] **Publish MQTT Commands** (connect_quic + sync_config)
-  ```bash
-  # Use MQTT client to publish commands
-  # OR use controller's REST API to trigger config sync
-  ```
-
 - [ ] **Verify Config Sync** via QUIC
   ```bash
-  # Check steward logs for:
-  docker logs steward-standalone | grep "QUIC.*connected"
-  docker logs steward-standalone | grep "Config.*fetched"
-  docker logs steward-standalone | grep "signature.*verified"
+  sudo journalctl -u cfgms-steward | grep "QUIC.*connected"
+  sudo journalctl -u cfgms-steward | grep "Config.*fetched"
+  sudo journalctl -u cfgms-steward | grep "signature.*verified"
   ```
 
 - [ ] **Verify Module Execution**
   ```bash
-  # Check steward logs for module execution
-  docker logs steward-standalone | grep "module.*executed"
-
-  # Verify test file was created
-  docker exec steward-standalone ls -la /test-workspace/
+  sudo journalctl -u cfgms-steward | grep "module.*executed"
   ```
 
 - [ ] **Verify Status Reporting**
   ```bash
-  # Check controller logs for status report receipt
-  docker logs controller | grep "config.*status"
-  docker logs controller | grep "steward.*OK"
+  sudo journalctl -u cfgms-controller | grep "config.*status"
   ```
 
 - [ ] **Run E2E Tests** (validates full flow programmatically)
   ```bash
   cd test/integration/mqtt_quic
-  go test -v -run TestE2EFlowDiagnostic
-  go test -v -run TestConfigStatusReporting
+  go test -v -run TestRegistration -timeout 60s
+  go test -v -run TestConfigSync -timeout 60s
+  go test -v -run TestModuleExecution -timeout 60s
+  go test -v -run TestHeartbeatFailover -timeout 60s
+  go test -v -run TestMultiTenant -timeout 60s
+  go test -v -run TestTLSSecurity -timeout 60s
   ```
 
 ### Step 4: Production Readiness
 
 - [ ] **Security Hardening** applied:
-  - [ ] Changed default passwords/tokens
-  - [ ] Firewall rules configured (if applicable)
-  - [ ] TLS certificate verification enabled
+  - [ ] Firewall rules configured (ports 9080, 1883, 4433 only)
+  - [ ] TLS certificate verification enabled (default)
   - [ ] SOPS encryption keys secured
+  - [ ] Registration tokens have appropriate expiry
 
 - [ ] **Backup Strategy** implemented:
   - [ ] Git repository backed up (if using git storage)
@@ -203,9 +215,9 @@
 
 - [ ] **Monitoring** configured:
   - [ ] Log aggregation (optional but recommended)
-  - [ ] Health check monitoring
+  - [ ] Health check monitoring (`curl http://controller:9080/api/v1/health`)
   - [ ] Disk space monitoring
-  - [ ] Container restart policy set
+  - [ ] systemd service restart policy verified
 
 - [ ] **Documentation** created for your deployment:
   - [ ] Network diagram showing all components
@@ -224,56 +236,28 @@
 - [ ] **Test Config Updates** (modify config, verify steward receives update)
 - [ ] **Test Idempotency** (apply same config twice, verify no changes)
 
-### Performance Tests
-
-- [ ] **Measure Config Sync Latency**
-  - Expected: < 5 seconds for small configs
-  - Check logs for timing information
-
-- [ ] **Measure MQTT Message Delivery**
-  - Expected: < 1 second for command delivery
-  - Use MQTT client to test round-trip time
-
-- [ ] **Verify Resource Usage**
-  ```bash
-  # Check container resource usage
-  docker stats controller steward-standalone mqtt-broker
-
-  # Expected:
-  # - Controller: < 200MB RAM, < 5% CPU (idle)
-  # - Steward: < 100MB RAM, < 2% CPU (idle)
-  # - MQTT: < 50MB RAM, < 1% CPU
-  ```
-
 ### Resilience Tests
 
 - [ ] **Controller Restart Recovery**
   ```bash
-  docker restart controller
+  sudo systemctl restart cfgms-controller
   # Wait 15 seconds
   # Verify steward reconnects automatically
-  docker logs steward-standalone | tail -20
+  sudo journalctl -u cfgms-steward --no-pager -n 20
   ```
 
 - [ ] **Steward Restart Recovery**
   ```bash
-  docker restart steward-standalone
+  sudo systemctl restart cfgms-steward
   # Wait 10 seconds
   # Verify steward re-registers and reconnects
-  docker logs steward-standalone | tail -20
-  ```
-
-- [ ] **MQTT Broker Restart Recovery**
-  ```bash
-  docker restart mqtt-broker
-  # Wait 10 seconds
-  # Verify both controller and steward reconnect
+  sudo journalctl -u cfgms-steward --no-pager -n 20
   ```
 
 - [ ] **Network Interruption Recovery** (optional - advanced)
   ```bash
-  # Temporarily disable network on steward container
-  # Verify it reconnects when network restored
+  # Temporarily block network to controller from steward
+  # Verify steward reconnects when connectivity restored
   ```
 
 ## Troubleshooting Quick Reference
@@ -281,44 +265,44 @@
 ### Common Issues
 
 **Issue**: Controller fails to start
-- Check: Docker logs for error messages
-- Check: Port 8080, 9090, 4433 available
+- Check: `sudo journalctl -u cfgms-controller --no-pager -n 50`
+- Check: Ports 9080, 1883, 4433 available (`sudo ss -tlnp`)
 - Check: Sufficient disk space for certificate generation
 
 **Issue**: Steward cannot register
 - Check: Registration token is valid and not expired
-- Check: Controller is reachable from steward
-- Check: MQTT broker is running and accessible
+- Check: Controller is reachable from steward (`curl http://controller-vm:9080/api/v1/health`)
+- Check: MQTT port 1883 is accessible (`nc -zv controller-vm 1883`)
 
 **Issue**: QUIC connection fails
-- Check: Port 4433 is accessible from steward
+- Check: Port 4433/UDP is accessible from steward
 - Check: Certificates are generated and valid
 - Check: Controller logs for QUIC server startup
 
 **Issue**: Config sync times out
 - Check: Configuration is uploaded to controller
 - Check: Steward received sync_config command
-- Check: Signature verification passes (Story #378 fix)
+- Check: Signature verification passes
 - Check: Module executor is initialized
 
 **Issue**: Status reports not received
-- Check: MQTT broker is running
-- Check: Steward can publish to MQTT
-- Check: Controller is subscribed to status topic
+- Check: Controller is running
+- Check: Steward can publish to MQTT (check steward logs)
+- Check: Controller is subscribed to status topics
 - Check: No MQTT authentication errors
 
 ## Success Criteria
 
 Your home lab deployment is ready when:
 
-- ✅ All containers start without errors
-- ✅ Controller and steward can communicate via MQTT
-- ✅ Config sync completes via QUIC in < 10 seconds
-- ✅ Modules execute successfully
-- ✅ Status reports are received by controller
-- ✅ E2E tests pass 100%
-- ✅ System recovers from component restarts
-- ✅ Logs show no errors or warnings
+- All services start without errors (`systemctl status` shows active)
+- Controller and steward communicate via MQTT (port 1883)
+- Config sync completes via QUIC (port 4433) in < 10 seconds
+- Modules execute successfully
+- Status reports are received by controller
+- E2E tests pass (TestRegistration, TestConfigSync, TestModuleExecution, TestHeartbeatFailover, TestMultiTenant, TestTLSSecurity)
+- System recovers from component restarts
+- Logs show no errors or warnings
 
 ## Next Steps
 
@@ -334,5 +318,5 @@ After successful deployment:
 
 **Need Help?**
 - See: [Home Lab Deployment Guide](home-lab-deployment-guide.md)
-- See: [Troubleshooting Guide](../troubleshooting/connectivity.md)
+- See: [Quick Start Guide](../../QUICK_START.md)
 - See: [E2E Testing Guide](../testing/e2e-testing-guide.md)
