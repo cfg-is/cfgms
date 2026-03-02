@@ -8,9 +8,11 @@
 # - Embedded secrets
 #
 # Scans trigger on:
-# - PRs that modify Dockerfiles
-# - Pushes to main branch
+# - PRs that modify Dockerfiles or dependencies
 # - Manual workflow dispatch
+#
+# Trivy binary is installed once per job and cached across runs.
+# Only the vulnerability database is updated each run.
 #
 # Documentation: https://github.com/aquasecurity/trivy-action
 
@@ -30,6 +32,7 @@ env:
   GO_VERSION: '1.23'
   REGISTRY: ghcr.io
   IMAGE_PREFIX: cfg-is/cfgms
+  TRIVY_VERSION: 'v0.69.2'
 
 jobs:
   # Scan Controller Docker Image
@@ -46,6 +49,20 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
+    - name: Install Trivy (cached)
+      uses: aquasecurity/setup-trivy@v0.2.5
+      with:
+        version: ${{ env.TRIVY_VERSION }}
+        cache: true
+
+    - name: Cache Trivy vulnerability database
+      uses: actions/cache@v4
+      with:
+        path: ${{ github.workspace }}/.cache/trivy
+        key: trivy-db-${{ runner.os }}-${{ github.run_id }}
+        restore-keys: |
+          trivy-db-${{ runner.os }}-
+
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
@@ -61,18 +78,19 @@ jobs:
         cache-to: type=gha,mode=max
 
     - name: Run Trivy vulnerability scanner
-      uses: aquasecurity/trivy-action@0.28.0
+      uses: aquasecurity/trivy-action@0.34.2
       with:
         image-ref: ${{ env.IMAGE_PREFIX }}/controller:scan
         format: 'sarif'
         output: 'trivy-controller-results.sarif'
         severity: 'CRITICAL,HIGH,MEDIUM'
         scanners: 'vuln,secret,config'
-        # Fail on CRITICAL and HIGH vulnerabilities
         exit-code: '1'
         ignore-unfixed: false
         vuln-type: 'os,library'
         timeout: '10m'
+        cache-dir: ${{ github.workspace }}/.cache/trivy
+        skip-setup-trivy: true
 
     - name: Upload Trivy results to GitHub Security tab
       uses: github/codeql-action/upload-sarif@v3
@@ -83,7 +101,7 @@ jobs:
 
     - name: Generate human-readable report
       if: always()
-      uses: aquasecurity/trivy-action@0.28.0
+      uses: aquasecurity/trivy-action@0.34.2
       with:
         image-ref: ${{ env.IMAGE_PREFIX }}/controller:scan
         format: 'table'
@@ -91,6 +109,8 @@ jobs:
         severity: 'CRITICAL,HIGH,MEDIUM'
         scanners: 'vuln,secret,config'
         timeout: '10m'
+        cache-dir: ${{ github.workspace }}/.cache/trivy
+        skip-setup-trivy: true
 
     - name: Upload scan results
       uses: actions/upload-artifact@v4
@@ -116,6 +136,20 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
+    - name: Install Trivy (cached)
+      uses: aquasecurity/setup-trivy@v0.2.5
+      with:
+        version: ${{ env.TRIVY_VERSION }}
+        cache: true
+
+    - name: Cache Trivy vulnerability database
+      uses: actions/cache@v4
+      with:
+        path: ${{ github.workspace }}/.cache/trivy
+        key: trivy-db-${{ runner.os }}-${{ github.run_id }}
+        restore-keys: |
+          trivy-db-${{ runner.os }}-
+
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
@@ -131,18 +165,19 @@ jobs:
         cache-to: type=gha,mode=max
 
     - name: Run Trivy vulnerability scanner
-      uses: aquasecurity/trivy-action@0.28.0
+      uses: aquasecurity/trivy-action@0.34.2
       with:
         image-ref: ${{ env.IMAGE_PREFIX }}/steward:scan
         format: 'sarif'
         output: 'trivy-steward-results.sarif'
         severity: 'CRITICAL,HIGH,MEDIUM'
         scanners: 'vuln,secret,config'
-        # Fail on CRITICAL and HIGH vulnerabilities
         exit-code: '1'
         ignore-unfixed: false
         vuln-type: 'os,library'
         timeout: '10m'
+        cache-dir: ${{ github.workspace }}/.cache/trivy
+        skip-setup-trivy: true
 
     - name: Upload Trivy results to GitHub Security tab
       uses: github/codeql-action/upload-sarif@v3
@@ -153,7 +188,7 @@ jobs:
 
     - name: Generate human-readable report
       if: always()
-      uses: aquasecurity/trivy-action@0.28.0
+      uses: aquasecurity/trivy-action@0.34.2
       with:
         image-ref: ${{ env.IMAGE_PREFIX }}/steward:scan
         format: 'table'
@@ -161,6 +196,8 @@ jobs:
         severity: 'CRITICAL,HIGH,MEDIUM'
         scanners: 'vuln,secret,config'
         timeout: '10m'
+        cache-dir: ${{ github.workspace }}/.cache/trivy
+        skip-setup-trivy: true
 
     - name: Upload scan results
       uses: actions/upload-artifact@v4
