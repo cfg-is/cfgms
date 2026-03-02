@@ -170,6 +170,7 @@ Deploy on test cluster and manage real VMs — the core beta milestone.
 **Blockers (must resolve before E2E validation):**
 - [ ] Controller: wire ConfigurationServiceV2 durable storage — V1 is in-memory (Issue #409) - Configs lost on controller restart, deployment blocker
 - [ ] Controller: separate first-run initialization from normal startup (Issue #410) - Prevent silent CA regeneration on misconfigured restart
+- [ ] Steward: compile-time controller URL, remove regtoken prefix (Issue #421) - Controller URL baked in at build for signed binary security, shorter tokens for MDM deployment
 
 **E2E validation:**
 - [ ] End-to-end deployment validation on real VMs (Issue #390 - 13-21 points) - Deploy controller + stewards on actual Windows/Linux VMs, test all modules, fix blockers
@@ -185,6 +186,7 @@ Deploy on test cluster and manage real VMs — the core beta milestone.
 - [ ] Controller: wire reports engine and rollback system into API (Issue #416) - Built but routes never registered
 - [ ] Controller: implement multi-node orchestration (Issue #415) - No multi-steward coordination
 - [ ] Controller: implement workflow engine (Issue #414) - Documented as core capability, no code exists
+- [ ] Steward: registration approval via workflow engine hook (Issue #422) - Approval logic as workflow policy, default accept-all, depends on #414
 
 #### v0.9.3 — Three-Certificate Architecture (~47-65 pts, ~3-5 weeks)
 

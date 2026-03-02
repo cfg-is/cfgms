@@ -570,12 +570,22 @@ docs/          # Comprehensive documentation
 
 ## Multi-Tenancy & Configuration
 
-The system implements recursive parent-child tenant model:
+The system implements a **recursive parent-child tenant model** with arbitrary depth:
 
-- **Hierarchical Inheritance**: MSP → Client → Group → Device (4 levels)
-- **Declarative Merging**: Named resources replace entire blocks
-- **Source Tracking**: Full auditability of configuration sources
-- **Scale**: Designed for 50k+ Stewards across multiple regions
+- **Recursive Hierarchy**: Every tenant has an ID and an optional parent ID. No fixed levels — "MSP → Client → Group → Device" is a convention, not a structural limit. Tenants can nest to any depth.
+- **Path-Based Identification**: Tenants are identified by path (e.g., `root/msp-a/client-1/servers`). Prefix matching enables efficient targeting across subtrees.
+- **Recursive Cfg Inheritance**: Configuration resolves from root to leaf. Any level can override inherited settings. Named resources replace entire blocks (declarative merging).
+- **Source Tracking**: Full auditability — every config value carries its source tenant path and version.
+- **Scale**: Designed for 50k+ Stewards across multiple regions.
+
+### Licensing Boundary: Single-Root vs Multi-Root (IMPORTANT)
+
+**This is the Apache vs Elastic licensing line for multi-tenancy.** Developers must be aware of this when building tenant-related features.
+
+- **Apache (OSS)**: **Single root tenant tree.** One MSP operates their own controller with unlimited hierarchy depth. All multi-tenancy code that operates within a single root tree is Apache-licensed.
+- **Elastic (Commercial)**: **Multi-root / platform mode.** Multiple independent MSP trees under a platform tenant (e.g., cfg.is hosting hundreds of MSPs). Code that enables multi-root isolation, per-MSP resource scheduling, cross-MSP billing, and platform-level management is Elastic-licensed.
+
+When building a feature, ask: "Does this work within a single tenant tree, or does it require awareness of multiple independent roots?" Single-tree = Apache. Multi-root = Elastic.
 
 ## Dependencies
 

@@ -111,7 +111,7 @@ The controller decides which steward gets which cfg based on:
 
 - **Direct assignment** — a cfg explicitly targets a steward by ID
 - **Group membership** — a cfg targets a group; all stewards in that group receive it
-- **Tenant hierarchy** — cfgs inherit through the MSP → Client → Group → Device hierarchy. Child levels can override parent settings
+- **Tenant hierarchy** — cfgs inherit through the recursive tenant hierarchy (e.g., MSP → Client → Group → Device). Child tenants can override parent settings at any depth
 - **Effective cfg** — the controller resolves inheritance and produces the effective cfg for each steward, merging all applicable layers
 
 ### Config Signing
@@ -359,7 +359,7 @@ All API operations are governed by role-based access control:
 - **Permissions** — fine-grained actions (e.g., `steward:list`, `steward:write-config`)
 - **Roles** — groups of permissions (e.g., `admin`, `operator`, `viewer`)
 - **Subjects** — users or API keys assigned to roles
-- **Tenant scoping** — permissions are scoped to tenant hierarchy; an MSP admin sees all clients, a client admin sees only their devices
+- **Tenant scoping** — permissions are scoped to tenant path; an MSP admin sees all descendants, a client admin sees only their subtree
 - **Zero-trust evaluation** — every request is evaluated against the policy engine
 
 ### API Authentication
@@ -371,27 +371,76 @@ All API operations are governed by role-based access control:
 
 The controller enforces strict tenant isolation across all operations.
 
-### Tenant Hierarchy
+### Tenant Model
+
+CFGMS uses a **recursive parent-child tenant model**. Every tenant has a unique identifier and an optional parent identifier. There are no fixed hierarchy levels — "MSP → Client → Group → Device" is a common convention, but the system supports arbitrary depth.
+
+Tenants are identified by **path** (e.g., `root/msp-a/client-1/servers`). Path-based identification enables:
+
+- **Prefix matching** — target all tenants under `root/msp-a/` with a single operation
+- **Wildcard targeting** — `root/msp-a/*/production` matches all production groups across clients
+- **Efficient resolution** — cfg inheritance walks the path from root to leaf
+
+#### Example: Single MSP (Apache / OSS)
 
 ```
-MSP (top level)
- ├── Client A
- │   ├── Production Group
- │   │   ├── Device 1 (steward)
- │   │   └── Device 2 (steward)
- │   └── Development Group
- │       └── Device 3 (steward)
- └── Client B
-     └── Device 4 (steward)
+acme-msp (root)
+ ├── client-a
+ │   ├── production
+ │   │   ├── device-1 (steward)
+ │   │   └── device-2 (steward)
+ │   └── development
+ │       └── device-3 (steward)
+ ├── client-b
+ │   ├── servers
+ │   │   └── device-4 (steward)
+ │   └── workstations
+ │       └── device-5 (steward)
+ └── internal
+     └── device-6 (steward)
 ```
+
+One root tenant, unlimited depth. This is the Apache-licensed deployment model.
+
+#### Example: SaaS Platform (Elastic / Commercial)
+
+```
+cfg-is (platform root)
+ ├── msp-alpha (root)
+ │   ├── client-1
+ │   │   └── ...
+ │   └── client-2
+ │       └── ...
+ ├── msp-beta (root)
+ │   ├── client-1
+ │   │   └── ...
+ │   └── client-2
+ │       └── ...
+ └── msp-gamma (root)
+     └── ...
+```
+
+Multiple independent root tenants under a platform tenant. MSPs cannot see each other's trees. This is the Elastic-licensed deployment model — it enables cfg.is to host hundreds of MSPs on shared infrastructure with per-MSP isolation, resource scheduling, and billing.
+
+### Cfg Inheritance
+
+Configuration resolves recursively from root to leaf:
+
+1. Start with the root tenant's cfg
+2. At each level, merge the child tenant's cfg over the parent's
+3. Named resources replace entire blocks (declarative merging)
+4. The leaf cfg (effective cfg for a steward) is the fully-resolved result
+
+Every value in the effective cfg carries its **source path** and **version** for auditability — an admin can see exactly which tenant level provided each setting.
 
 ### Isolation Guarantees
 
 - **Data isolation** — tenants cannot access other tenants' cfgs, DNA, or reports
 - **MQTT isolation** — ACL rules enforce per-steward topic namespacing; stewards cannot see other stewards' messages
 - **Certificate isolation** — each steward gets its own client certificate
-- **RBAC isolation** — permissions are scoped to tenant; a client admin cannot manage another client's devices
+- **RBAC isolation** — permissions are scoped to tenant path; a client admin cannot manage another client's devices
 - **Cfg inheritance** — flows down the hierarchy only; children inherit from parents, never sideways
+- **Multi-root isolation** (commercial) — independent root tenants are fully isolated; no inheritance, no visibility, no shared state between roots
 
 ## Monitoring and Reporting
 
@@ -455,7 +504,7 @@ The REST API is the admin interface to the controller. All operations are authen
 | **Certificates** | List, provision, revoke certificates |
 | **RBAC** | Manage permissions, roles, subjects |
 | **API keys** | Create, list, delete API keys |
-| **Tenants** | Manage tenant hierarchy |
+| **Tenants** | Manage recursive tenant hierarchy (create, move, delete tenants at any depth) |
 | **Monitoring** | Fleet metrics, health, logs, traces |
 | **Compliance** | Compliance status, reports |
 | **HA** | Cluster status, leader info, node list |
