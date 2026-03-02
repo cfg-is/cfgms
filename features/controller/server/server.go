@@ -26,6 +26,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/registration"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/rbac"
+	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
@@ -74,6 +75,7 @@ type Server struct {
 
 // New creates a new server instance
 func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
+	fmt.Printf("[DEBUG] server.New() called\n")
 	if cfg == nil {
 		return nil, ErrNilConfig
 	}
@@ -471,6 +473,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 // Start initializes and starts the controller server (MQTT+QUIC mode)
 func (s *Server) Start() error {
+	fmt.Printf("[DEBUG] Controller Server Start() method called\n")
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

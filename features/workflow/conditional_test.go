@@ -514,6 +514,9 @@ func TestWorkflowConditionalExecution(t *testing.T) {
 
 	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
+	// Additional wait for async goroutines to complete logging (Windows CI timing)
+	time.Sleep(100 * time.Millisecond)
+
 	assert.Equal(t, StatusCompleted, execution.GetStatus())
 	assert.True(t, execution.HasStepResult("conditional-step"))
 	assert.True(t, execution.HasStepResult("inner-step"))

@@ -741,6 +741,8 @@ func TestChaosNetworkPartitionTolerance(t *testing.T) {
 	require.NoError(t, framework.Setup())
 
 	t.Run("Partition Tolerance Under Chaos", func(t *testing.T) {
+		t.Skip("Skipping until Issue #291: Chaos framework needs proper network failure injection implementation")
+
 		// Set to graceful degradation mode
 		framework.failsafeNetwork.SetPartitionMode(failsafe.PartitionModeGracefulDegradation)
 

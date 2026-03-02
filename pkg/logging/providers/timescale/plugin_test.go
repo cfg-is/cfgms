@@ -427,6 +427,18 @@ func getTestTimescaleConfigWithTable(tableSuffix string) map[string]interface{} 
 		username = "cfgms_test" // Unified user name
 	}
 
+	// Use unified database and user (cfgms_ha_test / cfgms_test)
+	// These match the docker-compose.test.yml configuration
+	database := os.Getenv("CFGMS_TEST_TIMESCALEDB_DATABASE")
+	if database == "" {
+		database = "cfgms_ha_test" // Unified database name
+	}
+
+	username := os.Getenv("CFGMS_TEST_TIMESCALEDB_USER")
+	if username == "" {
+		username = "cfgms_test" // Unified user name
+	}
+
 	// Generate unique table name using timestamp and suffix
 	tableName := fmt.Sprintf("log_entries_test_%d", time.Now().UnixNano())
 	if tableSuffix != "" {

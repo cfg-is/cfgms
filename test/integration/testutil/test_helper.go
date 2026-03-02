@@ -91,7 +91,7 @@ func NewTestEnvWithSharedCerts(t *testing.T, sharedCertPath string) *TestEnv {
 
 	logger := testpkg.NewMockLogger(false)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 
 	return createTestEnv(t, tempDir, logger, ctx, cancel, true, sharedCertPath)
 }
