@@ -120,7 +120,6 @@ func (s *Server) handleGetStewardDNA(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-
 	// Create gRPC request
 	req := &controller.StewardRequest{
 		StewardId: stewardID,
@@ -155,7 +154,6 @@ func (s *Server) handleGetStewardConfig(w http.ResponseWriter, r *http.Request) 
 		s.writeErrorResponse(w, http.StatusBadRequest, "Steward ID is required", "MISSING_STEWARD_ID")
 		return
 	}
-
 
 	// Get modules filter from query params
 	modules := r.URL.Query()["modules"]
@@ -315,7 +313,6 @@ func (s *Server) handleValidateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-
 	// Parse request body
 	var validationReq ConfigValidationRequest
 	if err := json.NewDecoder(r.Body).Decode(&validationReq); err != nil {
@@ -370,7 +367,6 @@ func (s *Server) handleGetConfigStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-
 	// Get configuration status from the service
 	// For now, we'll return a placeholder since we need to implement this in the service layer
 	// TODO: Implement configuration status tracking in the service layer
@@ -397,7 +393,6 @@ func (s *Server) handleGetEffectiveConfig(w http.ResponseWriter, r *http.Request
 		s.writeErrorResponse(w, http.StatusBadRequest, "Steward ID is required", "MISSING_STEWARD_ID")
 		return
 	}
-
 
 	// Get effective configuration from the configuration service
 	effectiveConfig, err := s.configService.GetEffectiveConfiguration(stewardID)

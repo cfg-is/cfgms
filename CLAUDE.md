@@ -273,39 +273,6 @@ Fixes #355
 - [ ] **No code dumps**: Let the diff show code changes
 - [ ] **Issue linked**: `Fixes #XXX` or `Part of #XXX`
 
-### Branch Protection & Required Checks
-
-**Develop Branch Protection** (enforced via GitHub rulesets):
-
-The `develop` branch uses direct required status checks to prevent merging without validation:
-
-**Required Checks** (all must pass):
-- `unit-tests` - Core functionality validation (fast, ~3-5 min)
-- `Build Gate` - Cross-platform compilation verification (~3-5 min)
-- `security-deployment-gate` - Security vulnerability blocking (~6-10 min)
-
-**Configuration**:
-- ✅ No review requirements (solo-friendly development)
-- ✅ Squash merge only (clean git history)
-- ✅ Strict up-to-date branch enforcement (prevents conflicts)
-- ❌ No AI bypass (tests must pass, no admin override needed normally)
-
-**Docs-Only PRs**:
-- Documentation changes (`docs/**`, `*.md`) automatically get instant green checks
-- Stub jobs in `documentation.yml` provide required check names
-- Fast merge path (<2 minutes) for docs-only changes
-
-**Code PRs**:
-- Full validation runs (5-15 minutes total)
-- All critical workflows execute with path-based filtering
-- Comprehensive test suite, security scans, and cross-platform builds
-
-**Previous Approach** (removed in Story #322):
-- ❌ Used `merge-gate.yml` with `workflow_run` trigger (had race conditions)
-- ❌ Could fail when running before other checks completed
-- ❌ Didn't work reliably for PR branches
-- ✅ Replaced with direct required checks (GitHub's recommended approach)
-
 ## Essential Commands
 
 ### Daily Development
