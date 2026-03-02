@@ -29,8 +29,9 @@ func TestEnhancedMultiTenantSecurity(t *testing.T) {
 
 	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
 	tenantManager := tenant.NewManager(tenantStore, nil)
-	auditLogger := NewTenantSecurityAuditLogger()
 	isolationEngine := NewTenantIsolationEngine(tenantManager)
+	// Get the audit logger from the isolation engine to ensure we query the same logger that receives events
+	auditLogger := isolationEngine.GetAuditLogger()
 	policyEngine := NewTenantSecurityPolicyEngine(tenantManager, auditLogger, isolationEngine)
 
 	// Create test tenants

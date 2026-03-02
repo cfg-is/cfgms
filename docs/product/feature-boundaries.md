@@ -48,11 +48,17 @@ This maximizes trust, community velocity for integrations, and follows proven mo
 
 ### Multi-Tenancy
 
+The licensing boundary for multi-tenancy is **single-root vs multi-root**:
+
 | Feature | OSS | Commercial (includes all OSS) | Notes |
 |---------|-----|-------------------------------|-------|
-| **Single MSP** | ✅ Unlimited depth | ✅ Same | Full hierarchy: MSP→Client→Group→Device |
-| **Multiple MSPs** | ❌ None | ✅ Unlimited | SaaS/Multi-MSP deployments |
+| **Recursive Tenant Hierarchy** | ✅ Unlimited depth | ✅ Same | Parent-child model, path-based identification, no fixed levels |
+| **Single Root Tenant Tree** | ✅ Full | ✅ Same | One MSP operates their own controller |
+| **Multi-Root / Platform Mode** | ❌ None | ✅ Unlimited roots | Multiple independent MSP trees on shared infrastructure (SaaS) |
 | **Tenant Isolation** | ✅ All | ✅ Same | Security enforced everywhere |
+| **Multi-Root Isolation** | N/A | ✅ Full | Per-MSP resource scheduling, billing, zero cross-root visibility |
+
+**Developer guideline**: If a feature works within a single tenant tree, it belongs in Apache-licensed code. If it requires awareness of multiple independent root tenants (platform-level management, cross-MSP isolation, per-MSP billing), it belongs in Elastic-licensed code.
 
 ### Workflow System
 

@@ -1,0 +1,67 @@
+# Example: Controller with Separated Certificate Architecture (Story #377)
+#
+# This configuration uses three purpose-specific certificates:
+# 1. Public API cert (external, from certbot/Let's Encrypt)
+# 2. Internal mTLS cert (auto-generated from internal CA)
+# 3. Config signing cert (auto-generated, 4096-bit RSA, 3-year validity)
+#
+# See docs/security/certificate-architecture.md for full documentation.
+
+certificate:
+  enable_cert_management: true
+  ca_path: /etc/cfgms/certs/ca
+
+  # Enable separated certificate architecture
+  architecture: separated
+
+  # Signing certificate: 3-year validity (default: 1095 days)
+  signing_cert_validity_days: 1095
+
+  # Internal mTLS certificate: 1-year validity (default: 365 days)
+  internal_cert_validity_days: 365
+
+  # Public API certificate configuration
+  public_api:
+    # Use externally-managed certificate (e.g., certbot/Let's Encrypt)
+    source: external
+    cert_path: /etc/letsencrypt/live/api.example.com/fullchain.pem
+    key_path: /etc/letsencrypt/live/api.example.com/privkey.pem
+
+  # Internal mTLS certificate configuration
+  internal:
+    common_name: cfgms-internal
+    dns_names:
+      - localhost
+      - cfgms-internal
+      - controller.cfgms.local
+    ip_addresses:
+      - 127.0.0.1
+      - 10.0.0.1
+
+  # Config signing certificate configuration
+  signing:
+    common_name: cfgms-config-signer
+    organization: "My Organization"
+
+  # Standard settings (unchanged)
+  renewal_threshold_days: 30
+  server_cert_validity_days: 365
+  client_cert_validity_days: 365
+  server:
+    common_name: cfgms-controller
+    dns_names:
+      - localhost
+      - cfgms-controller
+    organization: CFGMS
+
+# ---
+# Alternative: Separated with Internal CA for all certs (no external cert)
+#
+# certificate:
+#   architecture: separated
+#   public_api:
+#     source: internal  # Default - generates from internal CA
+#     common_name: api.example.com
+#     dns_names:
+#       - api.example.com
+#       - localhost

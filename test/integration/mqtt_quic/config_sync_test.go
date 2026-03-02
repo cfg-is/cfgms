@@ -30,8 +30,8 @@ func (s *ConfigSyncTestSuite) SetupSuite() {
 		s.T().Skip("Skipping config sync tests in short mode - requires MQTT broker")
 	}
 
-	s.helper = NewTestHelper(GetTestHTTPAddr("https://127.0.0.1:8080"))
-	s.mqttAddr = GetTestMQTTAddr("ssl://127.0.0.1:1886") // Use TLS
+	s.helper = NewTestHelper(GetTestHTTPAddr("https://localhost:8080"))
+	s.mqttAddr = GetTestMQTTAddr("ssl://localhost:1886") // Use TLS
 
 	// Get TLS config from registration API (required for mTLS)
 	s.tlsConfig, s.stewardID = s.helper.GetTLSConfigFromRegistration(s.T(), "default", "integration-test")
@@ -85,7 +85,7 @@ func (s *ConfigSyncTestSuite) TestConfigSyncCommand() {
 		"command_id":   "cmd-config-123",
 		"type":         "connect_quic",
 		"timestamp":    time.Now().Unix(),
-		"quic_address": "localhost:4433",
+		"quic_address": "controller-standalone:4433",
 		"session_id":   "sess_test123",
 		"timeout":      30,
 	}

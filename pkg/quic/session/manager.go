@@ -2,9 +2,10 @@
 // Copyright 2026 Jordan Ritz
 // Package session provides QUIC session management for controller-steward connections.
 //
-// Session IDs are short-lived tokens that authenticate QUIC connections after initial
-// MQTT registration. This prevents unauthorized QUIC connections while allowing the
-// controller to trigger on-demand QUIC sessions for large data transfers.
+// Deprecated: Use pkg/dataplane/interfaces.DataPlaneSession instead.
+// Session management is now handled by the data plane provider abstraction
+// (Story #267.5). This package is retained as internal infrastructure.
+// Feature code should not import directly.
 package session
 
 import (

@@ -2,8 +2,10 @@
 // Copyright 2026 Jordan Ritz
 // Package client provides QUIC client functionality for CFGMS steward.
 //
-// This package implements the QUIC client that connects to the controller
-// for high-throughput data transfers (Story #198).
+// Deprecated: Use pkg/dataplane/interfaces.DataPlaneProvider instead.
+// Direct QUIC client usage has been replaced by the pluggable data plane
+// provider abstraction (Story #267.5). The QUIC implementation is available
+// at pkg/dataplane/providers/quic.
 package client
 
 import (

@@ -380,10 +380,17 @@ curl -X POST http://localhost:9080/api/v1/admin/registration-tokens \
     "single_use": false
   }'
 
-# Returns:
-# {"token": "cfgms_reg_abc123xyz..."}
+# Returns JSON with token and metadata:
+# {
+#   "token": "cfgms_reg_abc123xyz...",
+#   "tenant_id": "default",
+#   "controller_url": "...",
+#   "group": "production",
+#   "created_at": "...",
+#   "single_use": false
+# }
 
-# Save this token for the next step
+# Save the "token" value for the next step
 ```
 
 ### Step 4: Register First Steward
@@ -574,13 +581,13 @@ logging:
     host: ${CFGMS_TIMESCALE_HOST:-localhost}
     port: ${CFGMS_TIMESCALE_PORT:-5432}
     database: ${CFGMS_TIMESCALE_DATABASE:-cfgms}
-    username: ${CFGMS_DB_USER}              # Required - must be set
-    password: ${CFGMS_DB_PASSWORD}          # Required - must be set
+    username: ${CFGMS_TIMESCALE_USER:-cfgms}
+    password: ${CFGMS_TIMESCALE_PASSWORD}   # Required - must be set
 ```
 
 With this configuration:
-- `host`, `port`, `database` use sensible defaults if not set
-- `username` and `password` are required and will fail startup if missing
+- `host`, `port`, `database`, `username` use sensible defaults if not set
+- `password` (`CFGMS_TIMESCALE_PASSWORD`) is required and will fail startup if missing
 
 ### Migration from Implicit Env Vars
 

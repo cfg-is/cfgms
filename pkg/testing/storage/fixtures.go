@@ -5,13 +5,10 @@
 package storage
 
 import (
-	"crypto/rand"
-	"encoding/base64"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -19,6 +16,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	"github.com/cfgis/cfgms/pkg/testutil"
 )
 
 // isInfrastructureRequired determines if infrastructure should be available
@@ -129,13 +127,7 @@ func (f *StorageTestFixture) setupGitConfig(t *testing.T) {
 
 // setupDatabaseConfig creates a proper database provider configuration for testing
 func (f *StorageTestFixture) setupDatabaseConfig(t *testing.T) {
-	// Check if we have test database environment variables
-	testPassword := os.Getenv("CFGMS_TEST_DB_PASSWORD")
-	if testPassword == "" {
-		// Generate a secure random password for this test session
-		testPassword = generateSecurePassword()
-		t.Logf("Generated secure test database password for session")
-	}
+	testPassword := testutil.GetTestDBPassword()
 
 	testHost := os.Getenv("CFGMS_TEST_DB_HOST")
 	if testHost == "" {
@@ -313,29 +305,6 @@ func SkipIfDatabaseNotAvailable(t *testing.T) {
 func SkipIfGitNotAvailable(t *testing.T) {
 	// Git should always be available as it uses local filesystem
 	// This is a placeholder for future git-specific requirements
-}
-
-// generateSecurePassword creates a cryptographically secure random password for testing
-func generateSecurePassword() string {
-	// Generate 32 bytes of random data
-	randomBytes := make([]byte, 32)
-	if _, err := rand.Read(randomBytes); err != nil {
-		// Fallback to timestamp-based password if crypto/rand fails
-		return fmt.Sprintf("test-password-%d", time.Now().Unix())
-	}
-
-	// Encode as base64 and clean up for password usage
-	password := base64.StdEncoding.EncodeToString(randomBytes)
-	password = strings.ReplaceAll(password, "=", "")
-	password = strings.ReplaceAll(password, "+", "")
-	password = strings.ReplaceAll(password, "/", "")
-
-	// Truncate to reasonable length
-	if len(password) > 25 {
-		password = password[:25]
-	}
-
-	return password
 }
 
 // CreateTestStorageManager creates a storage manager for testing purposes

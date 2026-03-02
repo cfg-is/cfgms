@@ -8,16 +8,15 @@ package commands
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
 
+	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
-	mqttTypes "github.com/cfgis/cfgms/pkg/mqtt/types"
 )
 
-// Handler processes MQTT commands from the controller.
+// Handler processes control plane commands from the controller.
 type Handler struct {
 	mu sync.RWMutex
 
@@ -25,9 +24,9 @@ type Handler struct {
 	stewardID string
 
 	// Command handlers
-	handlers map[mqttTypes.CommandType]CommandFunc
+	handlers map[cpTypes.CommandType]CommandFunc
 
-	// Status callback for reporting back to controller
+	// Status callback for reporting back to controller via events
 	onStatus StatusCallback
 
 	// Logger
@@ -38,10 +37,10 @@ type Handler struct {
 }
 
 // CommandFunc is a function that handles a specific command type.
-type CommandFunc func(ctx context.Context, cmd mqttTypes.Command) error
+type CommandFunc func(ctx context.Context, cmd *cpTypes.Command) error
 
-// StatusCallback is called when status updates should be sent to controller.
-type StatusCallback func(status mqttTypes.StatusUpdate)
+// StatusCallback is called when status events should be published to controller.
+type StatusCallback func(ctx context.Context, event *cpTypes.Event)
 
 // executionContext tracks command execution state.
 type executionContext struct {
@@ -76,7 +75,7 @@ func New(cfg *Config) (*Handler, error) {
 
 	return &Handler{
 		stewardID: cfg.StewardID,
-		handlers:  make(map[mqttTypes.CommandType]CommandFunc),
+		handlers:  make(map[cpTypes.CommandType]CommandFunc),
 		onStatus:  cfg.OnStatus,
 		logger:    cfg.Logger,
 		executing: make(map[string]*executionContext),
@@ -84,33 +83,26 @@ func New(cfg *Config) (*Handler, error) {
 }
 
 // RegisterHandler registers a handler function for a specific command type.
-func (h *Handler) RegisterHandler(cmdType mqttTypes.CommandType, handler CommandFunc) {
+func (h *Handler) RegisterHandler(cmdType cpTypes.CommandType, handler CommandFunc) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.handlers[cmdType] = handler
 	h.logger.Info("Registered command handler", "type", cmdType)
 }
 
-// HandleCommand processes an incoming MQTT command message.
-func (h *Handler) HandleCommand(topic string, payload []byte) error {
-	fmt.Printf("[DEBUG-HANDLER] HandleCommand called, topic=%s size=%d\n", topic, len(payload))
-	h.logger.Debug("Received command message", "topic", topic, "size", len(payload))
+// HandleCommand processes an incoming control plane command.
+// Story #363: Now receives a pre-deserialized command from the ControlPlaneProvider
+// instead of raw topic/payload from MQTT.
+func (h *Handler) HandleCommand(ctx context.Context, cmd *cpTypes.Command) error {
+	h.logger.Debug("Received command", "id", cmd.ID, "type", cmd.Type)
 
-	var cmd mqttTypes.Command
-	if err := json.Unmarshal(payload, &cmd); err != nil {
-		fmt.Printf("[DEBUG-HANDLER] Failed to unmarshal command: %v\n", err)
-		h.logger.Error("Failed to parse command", "error", err, "payload", string(payload))
-		return fmt.Errorf("failed to parse command: %w", err)
-	}
-
-	fmt.Printf("[DEBUG-HANDLER] Command parsed: type=%s command_id=%s\n", cmd.Type, cmd.CommandID)
-
-	// Send command received status
-	h.sendStatus(mqttTypes.StatusUpdate{
+	// Send command received event
+	h.sendStatus(ctx, &cpTypes.Event{
+		ID:        fmt.Sprintf("evt_%d", time.Now().UnixNano()),
+		Type:      cpTypes.EventCommandReceived,
 		StewardID: h.stewardID,
+		CommandID: cmd.ID,
 		Timestamp: time.Now(),
-		Event:     mqttTypes.EventCommandReceived,
-		CommandID: cmd.CommandID,
 		Details: map[string]interface{}{
 			"command_type": string(cmd.Type),
 		},
@@ -123,10 +115,9 @@ func (h *Handler) HandleCommand(topic string, payload []byte) error {
 }
 
 // executeCommand executes a command with timeout and error handling.
-func (h *Handler) executeCommand(cmd mqttTypes.Command) {
-	fmt.Printf("[DEBUG-HANDLER] executeCommand starting: type=%s command_id=%s\n", cmd.Type, cmd.CommandID)
+func (h *Handler) executeCommand(cmd *cpTypes.Command) {
 	h.logger.Info("Executing command",
-		"command_id", cmd.CommandID,
+		"command_id", cmd.ID,
 		"type", cmd.Type,
 		"timestamp", cmd.Timestamp)
 
@@ -141,8 +132,8 @@ func (h *Handler) executeCommand(cmd mqttTypes.Command) {
 
 	// Track execution
 	h.mu.Lock()
-	h.executing[cmd.CommandID] = &executionContext{
-		CommandID: cmd.CommandID,
+	h.executing[cmd.ID] = &executionContext{
+		CommandID: cmd.ID,
 		StartTime: time.Now(),
 		Cancel:    cancel,
 	}
@@ -151,7 +142,7 @@ func (h *Handler) executeCommand(cmd mqttTypes.Command) {
 	// Clean up execution tracking
 	defer func() {
 		h.mu.Lock()
-		delete(h.executing, cmd.CommandID)
+		delete(h.executing, cmd.ID)
 		h.mu.Unlock()
 	}()
 
@@ -160,19 +151,17 @@ func (h *Handler) executeCommand(cmd mqttTypes.Command) {
 	handler, exists := h.handlers[cmd.Type]
 	h.mu.RUnlock()
 
-	fmt.Printf("[DEBUG-HANDLER] Looking up handler for type=%s exists=%v\n", cmd.Type, exists)
-
 	if !exists {
-		fmt.Printf("[DEBUG-HANDLER] No handler found for type=%s\n", cmd.Type)
 		h.logger.Error("No handler registered for command type",
-			"command_id", cmd.CommandID,
+			"command_id", cmd.ID,
 			"type", cmd.Type)
 
-		h.sendStatus(mqttTypes.StatusUpdate{
+		h.sendStatus(ctx, &cpTypes.Event{
+			ID:        fmt.Sprintf("evt_%d", time.Now().UnixNano()),
+			Type:      cpTypes.EventCommandFailed,
 			StewardID: h.stewardID,
+			CommandID: cmd.ID,
 			Timestamp: time.Now(),
-			Event:     mqttTypes.EventCommandFailed,
-			CommandID: cmd.CommandID,
 			Details: map[string]interface{}{
 				"error": fmt.Sprintf("no handler for command type: %s", cmd.Type),
 			},
@@ -181,26 +170,23 @@ func (h *Handler) executeCommand(cmd mqttTypes.Command) {
 	}
 
 	// Execute handler
-	fmt.Printf("[DEBUG-HANDLER] Calling handler for type=%s\n", cmd.Type)
 	startTime := time.Now()
 	err := handler(ctx, cmd)
 	executionTime := time.Since(startTime)
 
-	fmt.Printf("[DEBUG-HANDLER] Handler returned: type=%s error=%v duration=%v\n", cmd.Type, err, executionTime)
-
 	if err != nil {
-		fmt.Printf("[DEBUG-HANDLER] Handler failed: %v\n", err)
 		h.logger.Error("Command execution failed",
-			"command_id", cmd.CommandID,
+			"command_id", cmd.ID,
 			"type", cmd.Type,
 			"error", err.Error(),
 			"execution_time", executionTime)
 
-		h.sendStatus(mqttTypes.StatusUpdate{
+		h.sendStatus(ctx, &cpTypes.Event{
+			ID:        fmt.Sprintf("evt_%d", time.Now().UnixNano()),
+			Type:      cpTypes.EventCommandFailed,
 			StewardID: h.stewardID,
+			CommandID: cmd.ID,
 			Timestamp: time.Now(),
-			Event:     mqttTypes.EventCommandFailed,
-			CommandID: cmd.CommandID,
 			Details: map[string]interface{}{
 				"error":             err.Error(),
 				"execution_time_ms": executionTime.Milliseconds(),
@@ -210,25 +196,26 @@ func (h *Handler) executeCommand(cmd mqttTypes.Command) {
 	}
 
 	h.logger.Info("Command completed successfully",
-		"command_id", cmd.CommandID,
+		"command_id", cmd.ID,
 		"type", cmd.Type,
 		"execution_time", executionTime)
 
-	h.sendStatus(mqttTypes.StatusUpdate{
+	h.sendStatus(ctx, &cpTypes.Event{
+		ID:        fmt.Sprintf("evt_%d", time.Now().UnixNano()),
+		Type:      cpTypes.EventCommandCompleted,
 		StewardID: h.stewardID,
+		CommandID: cmd.ID,
 		Timestamp: time.Now(),
-		Event:     mqttTypes.EventCommandCompleted,
-		CommandID: cmd.CommandID,
 		Details: map[string]interface{}{
 			"execution_time_ms": executionTime.Milliseconds(),
 		},
 	})
 }
 
-// sendStatus sends a status update via the callback.
-func (h *Handler) sendStatus(status mqttTypes.StatusUpdate) {
+// sendStatus publishes a status event via the callback.
+func (h *Handler) sendStatus(ctx context.Context, event *cpTypes.Event) {
 	if h.onStatus != nil {
-		h.onStatus(status)
+		h.onStatus(ctx, event)
 	}
 }
 

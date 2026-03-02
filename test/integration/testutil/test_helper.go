@@ -40,7 +40,13 @@ type TestEnv struct {
 // NewTestEnvWithDocker creates a test environment that connects to Docker controller
 // This is used to test against the standalone controller in docker-compose.test.yml
 func NewTestEnvWithDocker(t *testing.T, dockerAddr string) *TestEnv {
-	env := NewTestEnv(t)
+	tempDir, err := os.MkdirTemp("", "cfgms-test-")
+	require.NoError(t, err)
+
+	logger := testpkg.NewMockLogger(false)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+
+	env := createTestEnv(t, tempDir, logger, ctx, cancel, false, "")
 	env.useDockerController = true
 	env.dockerControllerAddr = dockerAddr
 	return env
@@ -55,7 +61,39 @@ func NewTestEnvWithTimeout(t *testing.T, timeout time.Duration) *TestEnv {
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 
-	return createTestEnv(t, tempDir, logger, ctx, cancel)
+	return createTestEnv(t, tempDir, logger, ctx, cancel, false, "")
+}
+
+// NewTestEnvWithSharedCerts creates a test environment that reuses existing certificates
+// from a shared certificate storage path. This simulates a controller reboot scenario
+// where certificates are already present on disk.
+//
+// Use this for test suites where you want to:
+// - Test certificate persistence across restarts
+// - Optimize test performance by generating certs once
+// - Validate LoadExistingCA code path
+//
+// Example usage in a test suite:
+//
+//	func (s *MySuite) SetupSuite() {
+//	    s.sharedCertPath = s.T().TempDir()
+//	    // First test will generate certs
+//	    s.env = NewTestEnvWithSharedCerts(s.T(), s.sharedCertPath)
+//	}
+//
+//	func (s *MySuite) SetupTest() {
+//	    // Subsequent tests reuse certs (simulates reboot)
+//	    s.env = NewTestEnvWithSharedCerts(s.T(), s.sharedCertPath)
+//	}
+func NewTestEnvWithSharedCerts(t *testing.T, sharedCertPath string) *TestEnv {
+	tempDir, err := os.MkdirTemp("", "cfgms-test-")
+	require.NoError(t, err)
+
+	logger := testpkg.NewMockLogger(false)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+
+	return createTestEnv(t, tempDir, logger, ctx, cancel, true, sharedCertPath)
 }
 
 // NewTestEnv creates a new test environment
@@ -63,40 +101,30 @@ func NewTestEnv(t *testing.T) *TestEnv {
 	return NewTestEnvWithTimeout(t, 30*time.Second)
 }
 
-func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx context.Context, cancel context.CancelFunc) *TestEnv {
-	// Initialize production certificate manager for testing
-	certStoragePath := filepath.Join(tempDir, "certs")
+func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx context.Context, cancel context.CancelFunc, useSharedCerts bool, sharedCertPath string) *TestEnv {
+	// Determine certificate storage path
+	var certStoragePath string
+
+	if useSharedCerts && sharedCertPath != "" {
+		// Use shared certificate storage (simulates controller reboot)
+		certStoragePath = sharedCertPath
+
+		// Check if CA already exists to log appropriate message
+		caPath := filepath.Join(certStoragePath, "ca", "ca.crt")
+		if _, err := os.Stat(caPath); err == nil {
+			t.Logf("Controller will load existing certificates from shared storage (simulates reboot)")
+		} else {
+			t.Logf("Controller will generate new certificates in shared storage (first test in suite)")
+		}
+	} else {
+		// Isolated test environment (fresh deployment scenario)
+		certStoragePath = filepath.Join(tempDir, "certs")
+		t.Logf("Controller will generate fresh certificates (isolated test)")
+	}
+
+	// Create cert storage directory
 	err := os.MkdirAll(certStoragePath, 0755)
 	require.NoError(t, err)
-
-	certManager, err := cert.NewManager(&cert.ManagerConfig{
-		StoragePath: certStoragePath,
-		CAConfig: &cert.CAConfig{
-			Organization:       "CFGMS Test CA",
-			Country:            "US",
-			State:              "Test",
-			City:               "Test",
-			OrganizationalUnit: "Integration Tests",
-			ValidityDays:       365,
-			KeySize:            2048,
-		},
-		LoadExistingCA:       false, // Create new CA for each test
-		RenewalThresholdDays: 30,
-		EnableAutoRenewal:    false, // Disable for tests
-	})
-	require.NoError(t, err)
-
-	// Generate server certificate for controller
-	serverCert, err := certManager.GenerateServerCertificate(&cert.ServerCertConfig{
-		CommonName:   "cfgms-controller",
-		DNSNames:     []string{"localhost", "cfgms-controller"},
-		IPAddresses:  []string{"127.0.0.1"},
-		Organization: "CFGMS Test",
-		ValidityDays: 365,
-		KeySize:      2048,
-	})
-	require.NoError(t, err)
-	t.Logf("Generated server certificate: %s", serverCert.SerialNumber)
 
 	controllerCfg := &config.Config{
 		ListenAddr: "127.0.0.1:0",   // Use random port
@@ -113,13 +141,11 @@ func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx
 			},
 		},
 		Certificate: &config.CertificateConfig{
-			EnableCertManagement:   true,
+			EnableCertManagement:   true, // Enable full certificate lifecycle management
 			CAPath:                 filepath.Join(certStoragePath, "ca"),
-			AutoGenerate:           true,
 			RenewalThresholdDays:   30,
 			ServerCertValidityDays: 365,
 			ClientCertValidityDays: 365,
-			EnableAutoRenewal:      false, // Disable for tests
 			Server: &config.ServerCertificateConfig{
 				CommonName:   "cfgms-controller",
 				DNSNames:     []string{"localhost", "cfgms-controller"},
@@ -150,37 +176,27 @@ func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx
 	err = os.MkdirAll(storageDir, 0755)
 	require.NoError(t, err)
 
+	// Create controller - it will handle certificate lifecycle automatically
+	// If EnableCertManagement: true (which we set), the controller will:
+	// - Generate CA and certs if they don't exist (first deployment)
+	// - Load CA and certs if they exist (reboot scenario)
 	ctrl, err := controller.New(controllerCfg, logger)
 	require.NoError(t, err)
 
-	// Generate client certificate for steward
-	clientCert, err := certManager.GenerateClientCertificate(&cert.ClientCertConfig{
-		CommonName:         "test-steward",
-		Organization:       "CFGMS Test Stewards",
-		OrganizationalUnit: "Integration Tests",
-		ValidityDays:       365,
-		KeySize:            2048,
-		ClientID:           "test-steward",
+	// Get the cert manager that the controller created and initialized
+	// This contains either newly generated certs or loaded existing certs
+	certManager := ctrl.GetCertificateManager()
+	require.NotNil(t, certManager, "Controller should have initialized cert manager")
+
+	// The controller has already generated/loaded CA and server certificates.
+	// For tests that need client certificates before steward registration, generate one now.
+	// This simulates having a client certificate available for testing mTLS scenarios.
+	_, err = certManager.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName: "test-steward",
 	})
-	require.NoError(t, err)
-	t.Logf("Generated client certificate: %s", clientCert.SerialNumber)
-
-	// Save certificates to files for backward compatibility with legacy client
-	err = certManager.SaveCertificateFiles(serverCert.SerialNumber,
-		filepath.Join(certStoragePath, "server.crt"),
-		filepath.Join(certStoragePath, "server.key"))
-	require.NoError(t, err)
-
-	err = certManager.SaveCertificateFiles(clientCert.SerialNumber,
-		filepath.Join(certStoragePath, "client.crt"),
-		filepath.Join(certStoragePath, "client.key"))
-	require.NoError(t, err)
-
-	// Save CA certificate
-	caCertPEM, err := certManager.GetCACertificate()
-	require.NoError(t, err)
-	err = os.WriteFile(filepath.Join(certStoragePath, "ca.crt"), caCertPEM, 0644)
-	require.NoError(t, err)
+	if err != nil {
+		t.Logf("Note: Client certificate generation failed: %v (may already exist)", err)
+	}
 
 	stewardCfg := &steward.Config{
 		ControllerAddr: controllerCfg.ListenAddr,
@@ -189,9 +205,8 @@ func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx
 		LogLevel:       "debug",
 		ID:             "test-steward",
 		Certificate: &steward.CertificateConfig{
-			EnableCertManagement: false, // Disable cert management for steward in tests
+			EnableCertManagement: false, // Disable cert management for steward in tests - uses controller's certs
 			CertStoragePath:      certStoragePath,
-			EnableAutoRenewal:    false, // Disable for tests
 			RenewalThresholdDays: 30,
 			Provisioning: &steward.ProvisioningConfig{
 				EnableAutoProvisioning: false, // Disable for tests

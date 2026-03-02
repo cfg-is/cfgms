@@ -15,6 +15,8 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/logging/interfaces"
 
+	"github.com/cfgis/cfgms/pkg/testutil"
+
 	// Import providers for testing
 	_ "github.com/cfgis/cfgms/pkg/logging/providers/file"
 	_ "github.com/cfgis/cfgms/pkg/logging/providers/timescale"
@@ -459,10 +461,7 @@ func getTimescaleIntegrationConfig() map[string]interface{} {
 		host = "localhost"
 	}
 
-	password := os.Getenv("CFGMS_TEST_TIMESCALEDB_PASSWORD")
-	if password == "" {
-		password = "cfgms_test_password"
-	}
+	password := testutil.GetTestTimescalePassword()
 
 	return map[string]interface{}{
 		"host":              host,

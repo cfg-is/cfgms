@@ -11,9 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Semantic versioning policy documentation
 - CHANGELOG.md for tracking version history
 - Public-facing roadmap for community visibility
+- Controller `--config` CLI flag for specifying custom configuration file path
+- `CFGMS_CONTROLLER_CONFIG` environment variable for configuration file path
+- Production-ready configuration file search paths with priority order
 
 ### Changed
 - Roadmap version numbering updated for clearer progression
+- **BREAKING**: Controller configuration file renamed from `config.yaml` to `controller.cfg` (Issue #290)
+  - Migration: Rename your `config.yaml` to `controller.cfg` or use `--config` flag
+  - New search priority: CLI flag → `CFGMS_CONTROLLER_CONFIG` env → `/etc/cfgms/controller.cfg` → `./controller.cfg`
+  - All configuration files remain in YAML format despite `.cfg` extension
+  - Aligns with CFGMS naming convention (steward uses `<hostname>.cfg`)
 
 ## [0.7.0] - Unreleased
 

@@ -7,12 +7,17 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/steward/factory"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
+
+// executionIDCounter ensures unique IDs even when time.Now().UnixNano() returns
+// the same value (Windows has ~15.6ms clock granularity).
+var executionIDCounter atomic.Uint64
 
 // Engine implements the WorkflowEngine interface
 type Engine struct {
@@ -94,6 +99,7 @@ func (e *Engine) ExecuteWorkflow(ctx context.Context, workflow Workflow, variabl
 		Variables:    mergedVars,
 		Context:      execCtx,
 		Cancel:       cancel,
+		Done:         make(chan struct{}),
 	}
 
 	// Store execution
@@ -119,6 +125,11 @@ func (e *Engine) ExecuteWorkflow(ctx context.Context, workflow Workflow, variabl
 
 // executeWorkflowAsync executes the workflow asynchronously
 func (e *Engine) executeWorkflowAsync(execution *WorkflowExecution, workflow Workflow) {
+	// Close Done channel after all work (including logging) completes.
+	// This is the first defer so it runs last (LIFO), after the panic recovery
+	// defer below finishes its logging.
+	defer close(execution.Done)
+
 	execution.SetStatus(StatusRunning)
 
 	defer func() {
@@ -1085,9 +1096,11 @@ func (e *Engine) waitForDebugCommands(session *DebugSession, execution *Workflow
 	}
 }
 
-// generateExecutionID generates a unique execution ID
+// generateExecutionID generates a unique execution ID.
+// Uses an atomic counter to guarantee uniqueness even on Windows
+// where time.Now().UnixNano() has ~15.6ms granularity.
 func generateExecutionID() string {
-	return fmt.Sprintf("exec_%d", time.Now().UnixNano())
+	return fmt.Sprintf("exec_%d_%d", time.Now().UnixNano(), executionIDCounter.Add(1))
 }
 
 // genericConfigState implements modules.ConfigState for workflow tasks

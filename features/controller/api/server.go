@@ -20,6 +20,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/monitoring"
 	"github.com/cfgis/cfgms/features/rbac"
+	"github.com/cfgis/cfgms/features/rbac/authdefense"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -51,12 +52,14 @@ type Server struct {
 	platformMonitor         pkgmonitoring.PlatformMonitor
 	tracer                  *telemetry.Tracer
 	haManager               *ha.Manager
-	apiKeys                 map[string]*APIKey            // In-memory cache for fast lookup
-	secretStore             secretsif.SecretStore         // M-AUTH-1: Central secrets provider for API keys
-	registrationTokenStore  registration.Store            // Registration token store for steward registration
-	registeredStewards      map[string]*RegisteredSteward // In-memory store for registered stewards
-	corsConfig              *CORSConfig                   // CORS configuration
-	quicTriggerFunc         QUICTriggerFunc               // Function to trigger QUIC connections
+	apiKeys                 map[string]*APIKey             // In-memory cache for fast lookup
+	secretStore             secretsif.SecretStore          // M-AUTH-1: Central secrets provider for API keys
+	registrationTokenStore  registration.Store             // Registration token store for steward registration
+	registeredStewards      map[string]*RegisteredSteward  // In-memory store for registered stewards
+	corsConfig              *CORSConfig                    // CORS configuration
+	quicTriggerFunc         QUICTriggerFunc                // Function to trigger QUIC connections
+	signerCertSerial        string                         // Story #378: Serial of cert used for config signing
+	authDefense             *authdefense.AuthDefenseSystem // Story #380: Three-tier auth defense
 }
 
 // APIKey represents an API key for external authentication
@@ -111,6 +114,7 @@ func New(
 	tracer *telemetry.Tracer,
 	haManager *ha.Manager,
 	registrationTokenStore registration.Store,
+	signerCertSerial string, // Story #378: Serial of cert used for config signing
 ) (*Server, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config cannot be nil")
@@ -137,10 +141,23 @@ func New(
 		tracer:                  tracer,
 		haManager:               haManager,
 		registrationTokenStore:  registrationTokenStore,
+		signerCertSerial:        signerCertSerial,                    // Story #378: For registration handler
 		apiKeys:                 make(map[string]*APIKey),            // In-memory cache
 		secretStore:             secretStore,                         // M-AUTH-1: Central secrets provider
 		registeredStewards:      make(map[string]*RegisteredSteward), // In-memory steward registry
 	}
+
+	// Story #380: Initialize three-tier auth defense system
+	server.authDefense = authdefense.New(
+		authdefense.DefaultConfig(),
+		logger,
+		authdefense.WithTenantExtractor(func(r *http.Request) string {
+			if tid, ok := r.Context().Value(tenantIDContextKey).(string); ok {
+				return tid
+			}
+			return ""
+		}),
+	)
 
 	// Configure CORS settings (H-AUTH-3)
 	server.configureCORS()
@@ -173,6 +190,7 @@ func (s *Server) setupRouter() {
 
 	// API routes with authentication and validation
 	api := s.router.PathPrefix("/api/v1").Subrouter()
+	api.Use(s.authDefense.Middleware) // Story #380: Rate limiting before auth
 	api.Use(s.authenticationMiddleware)
 	api.Use(s.validationMiddleware)
 
@@ -309,14 +327,11 @@ func (s *Server) setupRouter() {
 
 // Start starts the HTTP server
 func (s *Server) Start() error {
-	fmt.Printf("[DEBUG] HTTP Server Start() called\n")
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	fmt.Printf("[DEBUG] HTTP getting listen address\n")
 	// Determine listen address for HTTP server (different from gRPC)
 	httpAddr := s.getHTTPListenAddr()
-	fmt.Printf("[DEBUG] HTTP listen address: %s\n", httpAddr)
 
 	// Create HTTP server
 	s.httpServer = &http.Server{
@@ -326,54 +341,40 @@ func (s *Server) Start() error {
 		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
-	fmt.Printf("[DEBUG] HTTP server struct created\n")
 
 	// Configure TLS if available
-	fmt.Printf("[DEBUG] Checking TLS: shouldUseTLS=%v\n", s.shouldUseTLS())
 	if s.shouldUseTLS() {
-		fmt.Printf("[DEBUG] Setting up TLS\n")
 		tlsConfig, err := s.setupTLS()
 		if err != nil {
 			s.logger.Warn("Failed to setup TLS for HTTP server, starting without TLS", "error", err)
 		} else if tlsConfig != nil {
 			s.httpServer.TLSConfig = tlsConfig
-			fmt.Printf("[DEBUG] TLS configured\n")
 		}
 	}
 
-	fmt.Printf("[DEBUG] Launching HTTP server goroutine\n")
 	// Start server in goroutine
 	go func() {
-		fmt.Printf("[DEBUG] HTTP goroutine started, acquiring read lock\n")
 		s.mu.RLock()
 		server := s.httpServer
 		s.mu.RUnlock()
-		fmt.Printf("[DEBUG] HTTP goroutine got server reference\n")
 
 		if server != nil {
 			var err error
 			if server.TLSConfig != nil {
-				fmt.Printf("[DEBUG] Starting HTTPS server on %s\n", server.Addr)
 				s.logger.Info("Starting HTTPS REST API server", "address", httpAddr)
 				err = server.ListenAndServeTLS("", "") // Certificates in TLSConfig
 			} else {
-				fmt.Printf("[DEBUG] Starting HTTP server on %s\n", server.Addr)
 				s.logger.Info("Starting HTTP REST API server", "address", httpAddr)
 				err = server.ListenAndServe()
 			}
 
 			if err != nil && err != http.ErrServerClosed {
-				fmt.Printf("[DEBUG] HTTP server error: %v\n", err)
 				s.logger.Error("HTTP server failed", "error", err)
 			}
-		} else {
-			fmt.Printf("[DEBUG] HTTP server is nil in goroutine\n")
 		}
 	}()
 
-	fmt.Printf("[DEBUG] HTTP server goroutine launched, about to log success\n")
 	s.logger.Info("REST API server started", "address", httpAddr)
-	fmt.Printf("[DEBUG] HTTP Start() returning\n")
 	return nil
 }
 
@@ -383,6 +384,11 @@ func (s *Server) Stop() error {
 	defer s.mu.Unlock()
 
 	s.logger.Info("Shutting down REST API server")
+
+	// Story #380: Stop auth defense system
+	if s.authDefense != nil {
+		s.authDefense.Stop()
+	}
 
 	if s.httpServer != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -450,6 +456,15 @@ func (s *Server) setupTLS() (*tls.Config, error) {
 
 // setupManagedTLS configures TLS using managed certificates
 func (s *Server) setupManagedTLS() (*tls.Config, error) {
+	// Story #377: In separated mode with external source, load from disk
+	if s.cfg.Certificate != nil && s.cfg.Certificate.IsSeparatedArchitecture() {
+		if s.cfg.Certificate.GetPublicAPISource() == "external" {
+			return s.setupExternalPublicAPICert()
+		}
+		// separated + internal: generate/use a PublicAPI cert type
+		// Falls through to standard managed TLS (uses same cert generation logic)
+	}
+
 	// Get server certificate (reuse the same logic as gRPC server)
 	serverCert, err := s.getServerCertificate()
 	if err != nil {
@@ -462,6 +477,41 @@ func (s *Server) setupManagedTLS() (*tls.Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create TLS config: %w", err)
 	}
+
+	return tlsConfig, nil
+}
+
+// setupExternalPublicAPICert loads TLS certificates from external files (e.g., certbot/Let's Encrypt)
+func (s *Server) setupExternalPublicAPICert() (*tls.Config, error) {
+	if s.cfg.Certificate.PublicAPI == nil {
+		return nil, fmt.Errorf("public API certificate configuration required for external source")
+	}
+
+	certPath := s.cfg.Certificate.PublicAPI.CertPath
+	keyPath := s.cfg.Certificate.PublicAPI.KeyPath
+	if certPath == "" || keyPath == "" {
+		return nil, fmt.Errorf("cert_path and key_path required for external public API certificate")
+	}
+
+	// #nosec G304 - Certificate paths are controlled via configuration
+	certPEM, err := os.ReadFile(certPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read external public API certificate: %w", err)
+	}
+
+	// #nosec G304 - Certificate paths are controlled via configuration
+	keyPEM, err := os.ReadFile(keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read external public API key: %w", err)
+	}
+
+	tlsConfig, err := cert.CreateServerTLSConfig(certPEM, keyPEM, nil, tls.VersionTLS12)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create TLS config from external certificates: %w", err)
+	}
+
+	s.logger.Info("HTTP API using external public API certificate",
+		"cert_path", certPath)
 
 	return tlsConfig, nil
 }
@@ -519,9 +569,9 @@ func (s *Server) getServerCertificate() (*cert.Certificate, error) {
 		}
 	}
 
-	// Generate new server certificate if auto-generation is enabled
-	if !s.cfg.Certificate.AutoGenerate {
-		return nil, fmt.Errorf("no valid server certificate found and auto-generation is disabled")
+	// Generate new server certificate if certificate lifecycle management is enabled
+	if !s.cfg.Certificate.EnableCertManagement {
+		return nil, fmt.Errorf("no valid server certificate found and certificate lifecycle management is disabled")
 	}
 
 	s.logger.Info("Generating new server certificate for HTTP server",

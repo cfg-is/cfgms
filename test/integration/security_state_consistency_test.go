@@ -1,6 +1,3 @@
-//go:build !short
-// +build !short
-
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jordan Ritz
 
@@ -514,6 +511,10 @@ func (framework *SecurityStateConsistencyTestFramework) simulateRecovery(compone
 
 // TestSecurityStateConsistencyRBACFailureRecovery tests RBAC failure/recovery consistency
 func TestSecurityStateConsistencyRBACFailureRecovery(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+
 	t.Skip("Skipping until Issue #295: Failsafe wrappers don't properly trigger unhealthy state after failures")
 
 	framework := NewSecurityStateConsistencyTestFramework(t)
@@ -617,6 +618,10 @@ func TestSecurityStateConsistencyRBACFailureRecovery(t *testing.T) {
 
 // TestSecurityStateConsistencyMultiComponentFailure tests consistency across multiple component failures
 func TestSecurityStateConsistencyMultiComponentFailure(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+
 	framework := NewSecurityStateConsistencyTestFramework(t)
 	defer framework.Cleanup()
 
@@ -719,6 +724,10 @@ func TestSecurityStateConsistencyMultiComponentFailure(t *testing.T) {
 
 // TestSecurityStateConsistencyRapidFailureRecovery tests consistency under rapid failure/recovery cycles
 func TestSecurityStateConsistencyRapidFailureRecovery(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+
 	framework := NewSecurityStateConsistencyTestFramework(t)
 	defer framework.Cleanup()
 

@@ -257,3 +257,14 @@ jobs:
           echo "✅ Documentation-only PR detected"
           echo "   Skipping build validation (no code changes)"
           echo "   No compilation required for documentation updates"
+
+  integration-tests:
+    name: integration-tests
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Docs-only integration test validation
+        run: |
+          echo "Documentation-only PR detected"
+          echo "   Skipping integration tests (no code changes)"
+          echo "   No integration test validation required for docs-only changes"

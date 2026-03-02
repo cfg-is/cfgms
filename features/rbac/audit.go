@@ -14,16 +14,22 @@ import (
 	"github.com/cfgis/cfgms/api/proto/common"
 )
 
+// defaultMaxAuditEntries is the maximum number of audit entries before trimming.
+// When exceeded, the oldest 10% of entries are removed to prevent unbounded memory growth.
+const defaultMaxAuditEntries = 100_000
+
 // AuditLogger handles permission audit logging and compliance reporting
 type AuditLogger struct {
-	entries []*common.PermissionAuditEntry
-	mutex   sync.RWMutex
+	entries    []*common.PermissionAuditEntry
+	maxEntries int
+	mutex      sync.RWMutex
 }
 
 // NewAuditLogger creates a new audit logger
 func NewAuditLogger() *AuditLogger {
 	return &AuditLogger{
-		entries: make([]*common.PermissionAuditEntry, 0),
+		entries:    make([]*common.PermissionAuditEntry, 0),
+		maxEntries: defaultMaxAuditEntries,
 	}
 }
 
@@ -47,6 +53,7 @@ func (a *AuditLogger) LogPermissionCheck(ctx context.Context, req *common.Access
 	a.mutex.Lock()
 	defer a.mutex.Unlock()
 	a.entries = append(a.entries, &entry)
+	a.trimEntriesLocked()
 
 	return nil
 }
@@ -69,6 +76,7 @@ func (a *AuditLogger) LogPermissionGrant(ctx context.Context, subjectID, permiss
 	a.mutex.Lock()
 	defer a.mutex.Unlock()
 	a.entries = append(a.entries, &entry)
+	a.trimEntriesLocked()
 
 	return nil
 }
@@ -91,6 +99,7 @@ func (a *AuditLogger) LogPermissionRevoke(ctx context.Context, subjectID, permis
 	a.mutex.Lock()
 	defer a.mutex.Unlock()
 	a.entries = append(a.entries, &entry)
+	a.trimEntriesLocked()
 
 	return nil
 }
@@ -112,6 +121,7 @@ func (a *AuditLogger) LogPermissionDelegate(ctx context.Context, delegatorID, de
 
 		a.mutex.Lock()
 		a.entries = append(a.entries, &entry)
+		a.trimEntriesLocked()
 		a.mutex.Unlock()
 	}
 
@@ -279,6 +289,18 @@ func (a *AuditLogger) ExportAuditLog(ctx context.Context, filter *AuditFilter, f
 		return a.exportCSV(entries)
 	default:
 		return nil, fmt.Errorf("unsupported export format: %s", format)
+	}
+}
+
+// trimEntriesLocked removes the oldest 10% of entries when max is exceeded.
+// Must be called while holding a.mutex write lock.
+func (a *AuditLogger) trimEntriesLocked() {
+	if len(a.entries) > a.maxEntries {
+		trimCount := a.maxEntries / 10
+		if trimCount < 1 {
+			trimCount = 1
+		}
+		a.entries = a.entries[trimCount:]
 	}
 }
 

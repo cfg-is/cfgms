@@ -4,7 +4,7 @@
 
 This document outlines the development roadmap for the Configuration Management System (CFGMS). It provides a clear vision for the project's development, including milestones, features, and release planning, incorporating recent strategic adjustments to better align with MSP market voids and core product vision.
 
-**Last Updated**: 2026-01-12
+**Last Updated**: 2026-02-19
 
 ## Versioning Strategy
 
@@ -127,38 +127,92 @@ Implemented comprehensive Docker-based E2E testing infrastructure that validates
 
 ### Phase 2: Production Stability & Feature Completion (v0.9.0 - v1.0.0)
 
-Achieve production stability, complete core platform features, and prepare for stable release.
+Path to functioning beta: deploy controller on test cluster, manage Windows and Linux VMs with existing modules.
 
-#### v0.9.0 (Beta) - Production Stability
+#### v0.9.0 — Test & Architecture Foundation ✅ COMPLETED
 
-##### Phase 1: Test Infrastructure Foundation (Required for all validation)
+Test infrastructure, breaking changes, and communication layer architecture — all delivered.
 
-- [ ] Test infrastructure improvements
-  - [ ] Fix failsafe component unhealthy state detection (Issue #295 - 5-8 points) - Refactor failsafe wrappers to properly trigger unhealthy state after consecutive failures, re-enable 6 component failure security tests
-  - [ ] Enhanced monitoring controls in graceful degradation (Issue #296 - 3-5 points) - Implement enhanced_monitoring security control for admin users in RBAC graceful degradation mode, re-enable degraded mode tests
-  - [ ] Chaos engineering network partition simulation (Issue #291) - Implement proper network failure injection for chaos tests
-  - [ ] RBAC failsafe component failure simulation (Issue #292) - Add test helpers to trigger fail-secure behavior
-  - [ ] Certificate test performance optimization (Issue #293) - Reduce cert generation time in tests from 4.89s to <2s
+- [x] Fix failsafe component unhealthy state detection (Issue #295 - 5-8 points) ✅
+- [x] Enhanced monitoring controls in graceful degradation (Issue #296 - 3-5 points) ✅
+- [x] Chaos engineering network partition simulation (Issue #291) ✅
+- [x] RBAC failsafe component failure simulation (Issue #292) ✅
+- [x] Certificate test performance optimization (Issue #293) ✅
+- [x] Add integration-tests to required GitHub checks (Issue #350) ✅
+- [x] Optimize zero-trust statistics lock contention (Issue #355) ✅
+- [x] Fix Windows flaky test timing assertion (Issue #356) ✅
+- [x] Fix flaky TestEnhancedMultiTenantSecurity test (Issue #366) ✅
+- [x] Fix MQTT+QUIC E2E config sync signature verification (Issue #378 - 8 points) ✅
+- [x] Fix Docker networking in MQTT+QUIC E2E tests (Issue #382 - 2-3 points) ✅
+- [x] HA E2E tests: Replace mocked helpers with real implementations (Issue #385) ✅
+- [x] Controller config loading refactor (Issue #290) ✅
+- [x] Communication Layer Abstraction (Epic #267 - 47 story points) ✅
+  - [x] Story #267.1: Control Plane Provider Interface (Issue #360 - 8 points) ✅
+  - [x] Story #267.2: Data Plane Provider Interface (Issue #361 - 8 points) ✅
+  - [x] Story #267.3: Migrate Controller to Communication Providers (Issue #362 - 13 points) ✅
+  - [x] Story #267.4: Migrate Steward to Communication Providers (Issue #363 - 13 points) ✅
+  - [x] Story #267.5: Deprecate Direct MQTT/QUIC Imports (Issue #364 - 5 points) ✅
+- [x] v0.9.x Project Housekeeping (Issue #392) ✅
 
-##### Phase 2: Breaking Changes & Architecture (Do before production validation)
+#### v0.9.1 — Security Baseline & Stability (~15-20 pts, ~1-2 weeks)
 
-- [ ] Finalize advanced configuration management
-  - [ ] Controller config loading refactor (Issue #290) - Support `--config` flag, default to `/etc/cfgms/controller.cfg`, environment variable support (breaking change)
-- [ ] Communication Layer Abstraction (Issue #267 - 47 story points) - Control/Data Plane provider interfaces, controller/steward migration, deprecate direct MQTT/QUIC imports (MAJOR architectural refactor - must be done before production validation)
+Minimum security hygiene before deploying on a real network.
 
-##### Phase 3: Feature Completion
+- [x] Eliminate hardcoded TimescaleDB password (Issue #372 - 3-5 points) - Remove "No Footguns" violation, implement JIT password generation for tests, require explicit credentials in production
+- [x] No Footguns sweep: audit and fix remaining insecure defaults (Issue #396 - 3-5 points) - Full codebase audit for hardcoded secrets and insecure defaults, update security-engineer agent with footgun detection
+- [x] Implement log injection prevention in pkg/logging (Issue #373 - 3-5 points) - Resolve 25 code scanning alerts, add sanitization infrastructure to prevent log forgery attacks
+- [x] Fix Windows workflow test failures (Issue #309) - Required for Windows VM management in v0.9.2
 
-- [ ] Finalize advanced workflow engine and templates
-- [ ] Finalize advanced reporting
+#### v0.9.2 — Beta Deployment Validation
 
-##### Phase 4: Security & Validation (After infrastructure is stable)
+Deploy on test cluster and manage real VMs — the core beta milestone.
 
-- [ ] Finalize production-ready security hardening
-- [ ] Complete high availability validation
-- [ ] Complete production validation with real MSP deployments
+**Blockers (must resolve before E2E validation):**
+- [ ] Controller: wire ConfigurationServiceV2 durable storage — V1 is in-memory (Issue #409) - Configs lost on controller restart, deployment blocker
+- [ ] Controller: separate first-run initialization from normal startup (Issue #410) - Prevent silent CA regeneration on misconfigured restart
+- [ ] Steward: compile-time controller URL, remove regtoken prefix (Issue #421) - Controller URL baked in at build for signed binary security, shorter tokens for MDM deployment
 
-#### v0.10.0 - Web Interface Foundation
+**E2E validation:**
+- [ ] End-to-end deployment validation on real VMs (Issue #390 - 13-21 points) - Deploy controller + stewards on actual Windows/Linux VMs, test all modules, fix blockers
+- [ ] Beta deployment guide (Issue #391 - 3-5 points) - Production-like deployment documentation beyond dev-focused QUICK_START.md
 
+**Post-validation (discovered gaps, do not block #390):**
+- [ ] Steward: unify operating model — cfg-driven convergence with optional controller channel (Issue #411) - Two divergent code paths that should be one
+- [ ] Steward: unify execution engines — standalone has 7 modules, controller has 3 (Issue #412) - Controller-connected steward has fewer capabilities
+- [ ] Steward: wire drift detection and performance monitoring into lifecycle (Issue #413) - Built but never started
+- [ ] Steward: implement offline report queueing (Issue #419) - Reports discarded when controller unreachable
+- [ ] Steward/Controller: implement hash-based DNA sync (Issue #418) - Full DNA sent every time, QUIC handler is a stub
+- [ ] Controller: wire monitoring and health infrastructure into server (Issue #417) - Passed as nil, placeholder responses
+- [ ] Controller: wire reports engine and rollback system into API (Issue #416) - Built but routes never registered
+- [ ] Controller: implement multi-node orchestration (Issue #415) - No multi-steward coordination
+- [ ] Controller: implement workflow engine (Issue #414) - Documented as core capability, no code exists
+- [ ] Steward: registration approval via workflow engine hook (Issue #422) - Approval logic as workflow policy, default accept-all, depends on #414
+
+#### v0.9.3 — Three-Certificate Architecture (~47-65 pts, ~3-5 weeks)
+
+Proper certificate separation for production security.
+
+- [x] Implement Three-Certificate Architecture for Production Security (Issue #377 - 47-65 points) - Separate public API (Let's Encrypt), internal mTLS, and config signing certificates for proper key separation, compliance, and operational stability
+- [x] Steward-Side Secret Management (Issue #404) - OS-native encrypted storage provider for steward endpoints using DPAPI (Windows) and AES-256-GCM with HKDF (Linux/macOS), implementing SecretStore interface with auto-registration
+- [x] Let's Encrypt Automation via Certbot Module (Issue #401) - Automated certbot integration for public API certificate management in separated architecture
+
+#### v0.9.4 — Production Hardening (~25-30 pts, ~2-3 weeks)
+
+Authorization hardening + fixes from deployment validation.
+
+- [x] Authorization Memory Management & Circuit Breaker Implementation (Issue #380 - 21 points) - Implement multi-tier circuit breakers (IP, Tenant, Global) with rate limiting and memory management to prevent DoS via resource exhaustion
+- [ ] Complete high availability validation on real cluster (multi-node, beyond Docker E2E)
+- [ ] Deployment validation fixes (TBD based on v0.9.2 findings)
+
+#### v0.10.0 - Web Interface Foundation & Deferred Features
+
+**Deferred from v0.9.x** (functional but not on beta critical path):
+- [ ] Service module implementation (script module covers as workaround)
+- [ ] Workflow management REST API (engine works internally, API needed for Web UI)
+- [ ] Config broadcast push API (individual `PUT /stewards/{id}/config` works)
+- [ ] Session/connection monitoring API (steward list + health endpoints cover beta)
+
+**Web Interface**:
 - [ ] Web UI framework and authentication
 - [ ] Dashboard with fleet overview
 - [ ] Configuration management interface
@@ -345,8 +399,8 @@ Multi-layered validation approach:
 
 ## Version Information
 
-- **Document Version**: 2.9
-- **Last Updated**: 2025-11-26
+- **Document Version**: 3.0
+- **Last Updated**: 2026-02-19
 
 ### Related Documentation
 

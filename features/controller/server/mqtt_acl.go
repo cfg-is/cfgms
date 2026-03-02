@@ -36,23 +36,56 @@ func stewardACLHandler(clientID, topic, operation string) bool {
 		return false
 	}
 
-	// Allow controller clients full read access to steward topics for monitoring
-	// Controllers can: read heartbeats, LWT status, DNA updates, etc.
+	// Allow controller clients full access to control plane topics
+	// Controllers can: send commands, read events/heartbeats/responses
 	// Controllers identified by client ID prefix: controller-, test-observer-, test-controller-
 	if strings.HasPrefix(clientID, "controller-") ||
 		strings.HasPrefix(clientID, "test-observer-") ||
 		strings.HasPrefix(clientID, "test-controller-") {
-		// Controllers can subscribe to any steward topic
+		// Controllers can subscribe to any steward topic (legacy)
 		if operation == "subscribe" && strings.HasPrefix(topic, "cfgms/steward/") {
 			return true
 		}
-		// Controllers can publish to any steward topic (for commands, config delivery)
+		// Controllers can publish to any steward topic (legacy commands)
 		if operation == "publish" && strings.HasPrefix(topic, "cfgms/steward/") {
+			return true
+		}
+		// Story #363: Controllers can publish commands to stewards (new topics)
+		if operation == "publish" && strings.HasPrefix(topic, "cfgms/commands/") {
+			return true
+		}
+		// Story #363: Controllers can subscribe to events, heartbeats, responses (new topics)
+		if operation == "subscribe" && (strings.HasPrefix(topic, "cfgms/events/") ||
+			strings.HasPrefix(topic, "cfgms/heartbeats/") ||
+			strings.HasPrefix(topic, "cfgms/responses/")) {
 			return true
 		}
 	}
 
-	// Define the allowed topic prefix for this client
+	// Story #363: Allow stewards access to new control plane topics
+	// Stewards can subscribe to their own commands: cfgms/commands/{clientID}
+	if strings.HasPrefix(topic, "cfgms/commands/"+clientID) {
+		return true
+	}
+	// Stewards can publish events: cfgms/events/{clientID}
+	if operation == "publish" && topic == "cfgms/events/"+clientID {
+		return true
+	}
+	// Stewards can publish heartbeats: cfgms/heartbeats/{clientID}
+	if operation == "publish" && topic == "cfgms/heartbeats/"+clientID {
+		return true
+	}
+	// Stewards can publish responses: cfgms/responses/{commandID}
+	if operation == "publish" && strings.HasPrefix(topic, "cfgms/responses/") {
+		return true
+	}
+
+	// Allow registration topics (bootstrap phase, pre-control-plane)
+	if topic == "cfgms/register" || strings.HasPrefix(topic, "cfgms/register/") {
+		return true
+	}
+
+	// Legacy: Define the allowed topic prefix for this client
 	// Pattern: cfgms/steward/{clientID}/
 	allowedPrefix := "cfgms/steward/" + clientID + "/"
 

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -25,8 +26,12 @@ import (
 )
 
 func main() {
+	// Parse CLI flags
+	configPath := flag.String("config", "", "Path to configuration file (default: search /etc/cfgms/controller.cfg, then ./controller.cfg)")
+	flag.Parse()
+
 	fmt.Printf("[DEBUG] main.go: Controller main() function started\n")
-	cfg, err := config.Load()
+	cfg, err := config.LoadWithPath(*configPath)
 	if err != nil {
 		fmt.Printf("[DEBUG] main.go: Failed to load config: %v\n", err)
 		log.Fatalf("Failed to load configuration: %v", err)
@@ -131,14 +136,41 @@ func getLogProviderConfig(cfg *config.Config) map[string]interface{} {
 
 	switch provider {
 	case "timescale":
-		// TimescaleDB defaults
+		// TimescaleDB configuration from environment variables
+		// CFGMS_TIMESCALE_PASSWORD is REQUIRED — no hardcoded defaults
+		password := os.Getenv("CFGMS_TIMESCALE_PASSWORD")
+		if password == "" {
+			log.Fatal("FATAL: CFGMS_TIMESCALE_PASSWORD environment variable is required when using " +
+				"timescale logging provider. Set this variable or configure logging.config.password " +
+				"in the config file. See QUICK_START.md for configuration examples.")
+		}
+		host := os.Getenv("CFGMS_TIMESCALE_HOST")
+		if host == "" {
+			host = "localhost"
+		}
+		port := os.Getenv("CFGMS_TIMESCALE_PORT")
+		if port == "" {
+			port = "5432"
+		}
+		database := os.Getenv("CFGMS_TIMESCALE_DATABASE")
+		if database == "" {
+			database = "cfgms"
+		}
+		username := os.Getenv("CFGMS_TIMESCALE_USER")
+		if username == "" {
+			username = "cfgms"
+		}
+		sslMode := os.Getenv("CFGMS_TIMESCALE_SSLMODE")
+		if sslMode == "" {
+			sslMode = "require"
+		}
 		return map[string]interface{}{
-			"host":     "localhost",
-			"port":     "5432",
-			"database": "cfgms",
-			"username": "cfgms",
-			"password": "cfgms",
-			"ssl_mode": "disable",
+			"host":     host,
+			"port":     port,
+			"database": database,
+			"username": username,
+			"password": password,
+			"ssl_mode": sslMode,
 		}
 
 	default:

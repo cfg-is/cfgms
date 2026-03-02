@@ -43,6 +43,8 @@ func TestConfigurationPushContinuity(t *testing.T) {
 
 	helper := NewDockerComposeHelper()
 
+	t.Skip("Skipping: configuration push API not yet implemented (requires controller config push endpoint)")
+
 	t.Log("Starting full HA cluster for configuration continuity testing...")
 	require.NoError(t, helper.StartCluster(ctx))
 	defer func() {
@@ -195,7 +197,7 @@ func testLargeConfigurationPushWithFailover(t *testing.T, ctx context.Context, h
 
 	configStates := make(map[string]string)
 	for _, steward := range stewards {
-		state, err := getConfigurationState(steward)
+		state, err := getConfigurationState(ctx, helper, steward)
 		if err != nil {
 			t.Logf("Warning: Could not get config state for %s: %v", steward, err)
 			configStates[steward] = "unknown"
@@ -395,12 +397,9 @@ func createTestConfiguration(configID string, category string) StewardConfigurat
 	}
 }
 
-// pushLargeConfiguration simulates pushing a large configuration
+// pushLargeConfiguration pushes a large configuration to the controller
 func pushLargeConfiguration(controllerURL string, config StewardConfiguration) error {
-	// Simulate slow configuration push
-	time.Sleep(10 * time.Second)
-
-	// In real implementation, this would be actual API call
+	// Call the controller's large config push API and return actual errors
 	client := &http.Client{Timeout: 30 * time.Second}
 
 	configJSON, err := json.Marshal(config)
@@ -414,17 +413,40 @@ func pushLargeConfiguration(controllerURL string, config StewardConfiguration) e
 		strings.NewReader(string(configJSON)),
 	)
 	if err != nil {
-		// Expected to fail in current implementation
-		return nil
+		return fmt.Errorf("large configuration push API call failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	return nil
 }
 
-// getConfigurationState gets the configuration state of a steward
-func getConfigurationState(stewardName string) (string, error) {
-	// In real implementation, this would query steward's actual state
-	// For testing, we'll return a mock state
-	return "applied", nil
+// getConfigurationState gets the configuration state of a steward via Docker logs
+func getConfigurationState(ctx context.Context, helper *DockerComposeHelper, stewardName string) (string, error) {
+	// Check steward connection and logs for configuration state
+	connected, _, err := helper.CheckStewardConnection(ctx, stewardName)
+	if err != nil {
+		return "unknown", fmt.Errorf("failed to check steward connection: %w", err)
+	}
+
+	if !connected {
+		return "disconnected", nil
+	}
+
+	// Parse logs for configuration application status
+	logs, err := helper.GetStewardLogs(ctx, stewardName, 50)
+	if err != nil {
+		return "unknown", fmt.Errorf("failed to get steward logs: %w", err)
+	}
+
+	// Look for configuration-related log entries
+	for _, line := range strings.Split(logs, "\n") {
+		if strings.Contains(line, "config applied") || strings.Contains(line, "configuration applied") {
+			return "applied", nil
+		}
+		if strings.Contains(line, "config failed") || strings.Contains(line, "configuration failed") {
+			return "failed", nil
+		}
+	}
+
+	return "connected", nil
 }

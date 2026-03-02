@@ -206,7 +206,11 @@ gh pr diff [pr_number] | grep -E "(testify|assert|require|t\.Run)"
 - [ ] Breaking changes are properly documented and justified
 - [ ] Performance impact assessed for production workloads
 - [ ] Documentation updated for any API/interface changes
-- [ ] CI/CD validation passes (tests, security scans, linting)
+- [ ] CI/CD validation passes (all required checks must be green):
+  - `unit-tests` - Core functionality validation
+  - `integration-tests` - Fast comprehensive + production-critical tests
+  - `Build Gate` - Cross-platform builds + Docker integration tests (MQTT+QUIC, storage, controller)
+  - `security-deployment-gate` - Security vulnerability scans
 - [ ] Deployment impact reviewed and mitigation planned
 
 **Final Decision Matrix**:

@@ -52,8 +52,8 @@ func TestErrorWorkflowStep(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, execution)
 
-	// Wait for completion
-	time.Sleep(200 * time.Millisecond)
+	// Wait for completion (fixes Windows CI async race condition - Issue #309)
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 	// Verify execution completed successfully
 	assert.Equal(t, StatusCompleted, execution.GetStatus())
@@ -96,8 +96,8 @@ func TestErrorWorkflowWithPath(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, execution)
 
-	// Wait for completion
-	time.Sleep(200 * time.Millisecond)
+	// Wait for completion (fixes Windows CI async race condition - Issue #309)
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 	// Verify execution completed successfully
 	assert.Equal(t, StatusCompleted, execution.GetStatus())
@@ -152,8 +152,8 @@ func TestErrorWorkflowAsync(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, execution)
 
-	// Wait for completion
-	time.Sleep(200 * time.Millisecond)
+	// Wait for completion (fixes Windows CI async race condition - Issue #309)
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 	// Verify execution completed successfully
 	assert.Equal(t, StatusCompleted, execution.GetStatus())
@@ -188,7 +188,7 @@ func TestErrorWorkflowMissingConfiguration(t *testing.T) {
 	require.NotNil(t, execution)
 
 	// Wait for completion
-	time.Sleep(100 * time.Millisecond)
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 	// Verify execution failed due to missing configuration
 	assert.Equal(t, StatusFailed, execution.GetStatus())
@@ -223,7 +223,7 @@ func TestErrorWorkflowMissingWorkflowSpec(t *testing.T) {
 	require.NotNil(t, execution)
 
 	// Wait for completion
-	time.Sleep(100 * time.Millisecond)
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 	// Verify execution failed due to missing workflow specification
 	assert.Equal(t, StatusFailed, execution.GetStatus())
@@ -269,7 +269,7 @@ func TestErrorWorkflowWithRecoveryActions(t *testing.T) {
 			require.NotNil(t, execution)
 
 			// Wait for completion
-			time.Sleep(200 * time.Millisecond)
+			waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 			// Verify execution completed successfully
 			assert.Equal(t, StatusCompleted, execution.GetStatus())
@@ -326,8 +326,8 @@ func TestErrorWorkflowParameterAndOutputMappings(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, execution)
 
-	// Wait for completion
-	time.Sleep(200 * time.Millisecond)
+	// Wait for completion (fixes Windows CI async race condition - Issue #309)
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 	// Verify execution completed successfully
 	assert.Equal(t, StatusCompleted, execution.GetStatus())
@@ -368,8 +368,8 @@ func TestErrorWorkflowTimeout(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, execution)
 
-	// Wait for completion
-	time.Sleep(200 * time.Millisecond)
+	// Wait for completion (fixes Windows CI async race condition - Issue #309)
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 	// The workflow should complete (the timeout handling is internal to the error workflow)
 	// The actual timeout behavior depends on the implementation details

@@ -66,6 +66,14 @@ func createDockerTestStorageConfig(provider string) *config.StorageConfig {
 	}
 }
 
+// raceDetectorEnabled returns true if the race detector is enabled
+// This is used to adjust test timeouts since race detector adds 5-10x overhead
+func raceDetectorEnabled() bool {
+	// The race detector sets this flag when -race is used
+	// This works because when -race is enabled, the race package is linked in
+	return raceEnabled
+}
+
 func TestServer_New_SecurityValidation(t *testing.T) {
 	logger := logging.NewNoopLogger()
 
@@ -141,8 +149,6 @@ func TestServer_New_SecurityValidation(t *testing.T) {
 					EnableCertManagement:   true,
 					ClientCertValidityDays: 30,
 					CAPath:                 tempDir,
-					AutoGenerate:           true,
-					EnableAutoRenewal:      true,
 					ServerCertValidityDays: 90,
 					RenewalThresholdDays:   7,
 					Server: &config.ServerCertificateConfig{
@@ -370,8 +376,6 @@ func TestServer_SecurityConfiguration(t *testing.T) {
 					EnableCertManagement:   true,
 					ClientCertValidityDays: 30, // Short validity for security
 					ServerCertValidityDays: 90, // Short server cert validity
-					AutoGenerate:           true,
-					EnableAutoRenewal:      true,
 					CAPath:                 tempDir,
 					RenewalThresholdDays:   7,
 					Server: &config.ServerCertificateConfig{
@@ -470,7 +474,6 @@ func TestServer_SecurityEdgeCases_And_AttackVectors(t *testing.T) {
 					Certificate: &config.CertificateConfig{
 						EnableCertManagement: true,
 						CAPath:               "../../../etc/passwd", // Path traversal attempt
-						AutoGenerate:         true,
 						Server: &config.ServerCertificateConfig{
 							CommonName:   "test-controller",
 							Organization: "Test Org",
@@ -501,7 +504,6 @@ func TestServer_SecurityEdgeCases_And_AttackVectors(t *testing.T) {
 						ClientCertValidityDays: 36500, // 100 years - excessive
 						ServerCertValidityDays: 36500, // 100 years - excessive
 						CAPath:                 tempDir,
-						AutoGenerate:           true,
 						Server: &config.ServerCertificateConfig{
 							CommonName:   "test-controller",
 							Organization: "Test Org",
@@ -574,7 +576,6 @@ func TestServer_SecurityEdgeCases_And_AttackVectors(t *testing.T) {
 					Certificate: &config.CertificateConfig{
 						EnableCertManagement: true, // Should require TLS for wildcard
 						CAPath:               tempDir,
-						AutoGenerate:         true,
 						Server: &config.ServerCertificateConfig{
 							CommonName:   "wildcard-controller",
 							Organization: "Test Org",
@@ -618,6 +619,13 @@ func TestServer_ConcurrentSecurity_And_RaceConditions(t *testing.T) {
 
 	const numConcurrent = 10
 
+	// Race detector adds 5-10x overhead, so increase timeout accordingly
+	// Each concurrent server creation involves: Git init, RBAC setup, storage init
+	timeout := 5 * time.Second
+	if raceDetectorEnabled() {
+		timeout = 15 * time.Second // 3x longer for race detector overhead
+	}
+
 	// Test concurrent server creation (should be thread-safe)
 	results := make(chan *Server, numConcurrent)
 	errors := make(chan error, numConcurrent)
@@ -656,8 +664,8 @@ func TestServer_ConcurrentSecurity_And_RaceConditions(t *testing.T) {
 		case err := <-errors:
 			t.Errorf("Unexpected error in concurrent server creation: %v", err)
 			errorCount++
-		case <-time.After(5 * time.Second):
-			t.Fatal("Test timed out waiting for concurrent operations")
+		case <-time.After(timeout):
+			t.Fatalf("Test timed out waiting for concurrent operations (timeout: %v)", timeout)
 		}
 	}
 
@@ -783,8 +791,6 @@ func TestServer_CertificateSecurityValidation(t *testing.T) {
 					ClientCertValidityDays: 7,  // Very short for high security
 					ServerCertValidityDays: 30, // Short server cert validity
 					RenewalThresholdDays:   3,  // Early renewal
-					AutoGenerate:           true,
-					EnableAutoRenewal:      true,
 					CAPath:                 tempDir,
 					Server: &config.ServerCertificateConfig{
 						CommonName:   "secure-controller",
@@ -813,8 +819,6 @@ func TestServer_CertificateSecurityValidation(t *testing.T) {
 				CertPath:   tempDir,
 				Certificate: &config.CertificateConfig{
 					EnableCertManagement: true,
-					AutoGenerate:         true,
-					EnableAutoRenewal:    true,
 					CAPath:               tempDir,
 					Server: &config.ServerCertificateConfig{
 						CommonName:   "auto-controller",
@@ -825,10 +829,8 @@ func TestServer_CertificateSecurityValidation(t *testing.T) {
 			description: "Auto-generation and renewal reduce operational security risks",
 			securityChecks: []func(*testing.T, *Server){
 				func(t *testing.T, s *Server) {
-					assert.True(t, s.cfg.Certificate.AutoGenerate,
-						"Auto-generation should be enabled for security")
-					assert.True(t, s.cfg.Certificate.EnableAutoRenewal,
-						"Auto-renewal should be enabled for security")
+					assert.True(t, s.cfg.Certificate.EnableCertManagement,
+						"Certificate management should be enabled for security (handles generation + renewal)")
 				},
 			},
 		},
@@ -876,7 +878,6 @@ func TestServer_EnvironmentSecurityIsolation(t *testing.T) {
 		Certificate: &config.CertificateConfig{
 			EnableCertManagement: true,
 			CAPath:               tempDir1,
-			AutoGenerate:         true,
 			Server: &config.ServerCertificateConfig{
 				CommonName:   "server1-controller",
 				Organization: "Server1 Org",
@@ -893,7 +894,6 @@ func TestServer_EnvironmentSecurityIsolation(t *testing.T) {
 		Certificate: &config.CertificateConfig{
 			EnableCertManagement: true,
 			CAPath:               tempDir2,
-			AutoGenerate:         true,
 			Server: &config.ServerCertificateConfig{
 				CommonName:   "server2-controller",
 				Organization: "Server2 Org",

@@ -73,7 +73,6 @@ func (s *CertificateRegistrationTestSuite) SetupSuite() {
 		},
 		LoadExistingCA:       false,
 		RenewalThresholdDays: 30,
-		EnableAutoRenewal:    false,
 	})
 	require.NoError(s.T(), err)
 
@@ -564,5 +563,7 @@ func (s *CertificateRegistrationTestSuite) TestRegistrationFlowIntegration() {
 }
 
 func TestCertificateRegistration(t *testing.T) {
+	t.Parallel()
+
 	suite.Run(t, new(CertificateRegistrationTestSuite))
 }

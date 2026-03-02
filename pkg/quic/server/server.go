@@ -2,8 +2,10 @@
 // Copyright 2026 Jordan Ritz
 // Package server provides QUIC server functionality for CFGMS controller.
 //
-// This package implements the QUIC server that accepts connections from
-// stewards for high-throughput data transfers (Story #198).
+// Deprecated: Server-side QUIC functionality should be accessed through
+// pkg/dataplane/interfaces.DataPlaneProvider (Story #267.5). This package
+// is retained as internal infrastructure for the QUIC data plane provider
+// at pkg/dataplane/providers/quic. Feature code should not import directly.
 package server
 
 import (
@@ -18,7 +20,7 @@ import (
 	"github.com/quic-go/quic-go"
 
 	"github.com/cfgis/cfgms/pkg/logging"
-	quicSession "github.com/cfgis/cfgms/pkg/quic/session"
+	quicSession "github.com/cfgis/cfgms/pkg/quic/session" //nolint:staticcheck // SA1019: Internal infrastructure
 )
 
 // Server represents a QUIC server for steward data transfers.

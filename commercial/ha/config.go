@@ -127,6 +127,11 @@ func (c *Config) LoadFromEnvironment() error {
 		}
 	}
 
+	// Load CA certificate path for TLS verification between HA nodes
+	if caCertPath := os.Getenv("CFGMS_HA_CA_CERT_PATH"); caCertPath != "" {
+		c.CACertPath = caCertPath
+	}
+
 	// Load node configuration
 	nodeID := os.Getenv("CFGMS_NODE_ID")
 	if nodeID != "" {

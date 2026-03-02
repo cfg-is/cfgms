@@ -34,10 +34,12 @@ package factory
 
 import (
 	"fmt"
+	"log"
 	"reflect"
 	"time"
 
 	"github.com/cfgis/cfgms/features/modules"
+	acme_module "github.com/cfgis/cfgms/features/modules/acme"
 	"github.com/cfgis/cfgms/features/modules/directory"
 	"github.com/cfgis/cfgms/features/modules/file"
 	"github.com/cfgis/cfgms/features/modules/firewall"
@@ -47,6 +49,7 @@ import (
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
 // ModuleFactory manages module instantiation and lifecycle for the steward.
@@ -69,6 +72,9 @@ type ModuleFactory struct {
 
 	// loggerProvider creates loggers for module injection
 	loggerProvider modules.LoggerProvider
+
+	// secretStore is injected into modules that implement SecretStoreInjectable
+	secretStore secretsif.SecretStore
 
 	// injectionStatus tracks logger injection status for each module
 	injectionStatus map[string]modules.LoggerInjectionStatus
@@ -148,6 +154,9 @@ func (f *ModuleFactory) LoadModule(moduleName string) (modules.Module, error) {
 	// Attempt logger injection if supported
 	f.attemptLoggerInjection(instance, moduleName)
 
+	// Attempt secret store injection if supported
+	f.attemptSecretStoreInjection(instance, moduleName)
+
 	// Cache the instance
 	f.instances[moduleName] = instance
 
@@ -172,6 +181,8 @@ func (f *ModuleFactory) loadBuiltinModule(moduleName string) (modules.Module, er
 	// For now, we'll use a simple registry pattern
 
 	switch moduleName {
+	case "acme":
+		return acme_module.New(), nil
 	case "directory":
 		return directory.New(), nil
 	case "file":
@@ -285,6 +296,24 @@ func (f *ModuleFactory) SetStewardID(stewardID string) {
 	f.stewardID = stewardID
 	f.loggerProvider = &StewardLoggerProvider{
 		stewardID: stewardID,
+	}
+}
+
+// SetSecretStore sets the secret store for module injection.
+func (f *ModuleFactory) SetSecretStore(store secretsif.SecretStore) {
+	f.secretStore = store
+}
+
+// attemptSecretStoreInjection tries to inject a secret store into a module if it supports injection.
+func (f *ModuleFactory) attemptSecretStoreInjection(instance modules.Module, moduleName string) {
+	injectable, ok := instance.(modules.SecretStoreInjectable)
+	if !ok || f.secretStore == nil {
+		return
+	}
+
+	if err := injectable.SetSecretStore(f.secretStore); err != nil {
+		// Log but don't fail - module can operate without secrets
+		log.Printf("Warning: failed to inject secret store into module %s: %v", moduleName, err)
 	}
 }
 

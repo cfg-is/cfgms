@@ -258,6 +258,9 @@ jobs:
       issues-found: ${{ steps.summary.outputs.issues-found }}
     
     steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
     - name: Set up Go
       uses: actions/setup-go@v4
       with:

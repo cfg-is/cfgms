@@ -27,11 +27,7 @@ func TestDefaultConfig_SecurityDefaults(t *testing.T) {
 	// Certificate security defaults
 	require.NotNil(t, config.Certificate)
 	assert.True(t, config.Certificate.EnableCertManagement,
-		"Certificate management should be enabled by default for zero-trust")
-	assert.True(t, config.Certificate.AutoGenerate,
-		"Auto-generation should be enabled for security")
-	assert.True(t, config.Certificate.EnableAutoRenewal,
-		"Auto-renewal should be enabled for security")
+		"Certificate management should be enabled by default for zero-trust (handles generation + renewal)")
 
 	// Certificate validity defaults (security-appropriate)
 	assert.LessOrEqual(t, config.Certificate.ServerCertValidityDays, 365,
@@ -265,7 +261,7 @@ data_dir: "test"
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Write test config file
-			configPath := filepath.Join(tempDir, "config.yaml")
+			configPath := filepath.Join(tempDir, "controller.cfg")
 			err := os.WriteFile(configPath, []byte(tt.configContent), 0644)
 			require.NoError(t, err)
 
@@ -336,8 +332,6 @@ func TestConfig_SecurityValidationMethods(t *testing.T) {
 				ListenAddr: "127.0.0.1:8443",
 				Certificate: &CertificateConfig{
 					EnableCertManagement:   true,
-					AutoGenerate:           true,
-					EnableAutoRenewal:      true,
 					ServerCertValidityDays: 90,
 					ClientCertValidityDays: 30,
 					RenewalThresholdDays:   7,
@@ -436,7 +430,8 @@ func TestConfig_BooleanEnvironmentVariableParsing(t *testing.T) {
 			case "CFGMS_CERT_ENABLE_MANAGEMENT":
 				actualValue = config.Certificate.EnableCertManagement
 			case "CFGMS_CERT_AUTO_GENERATE":
-				actualValue = config.Certificate.AutoGenerate
+				// AutoGenerate removed - now handled by EnableCertManagement
+				actualValue = config.Certificate.EnableCertManagement
 			}
 
 			if tt.valid {

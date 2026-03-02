@@ -41,9 +41,9 @@ func (s *TLSSecurityTestSuite) SetupSuite() {
 		return
 	}
 
-	s.helper = NewTestHelper(GetTestHTTPAddr("https://127.0.0.1:8080"))
+	s.helper = NewTestHelper(GetTestHTTPAddr("https://localhost:8080"))
 	// Use TLS port (8883) mapped to host port 1886
-	s.mqttAddr = GetTestMQTTAddr("ssl://127.0.0.1:1886")
+	s.mqttAddr = GetTestMQTTAddr("ssl://localhost:1886")
 	s.certsPath = GetTestCertsPath("./certs")
 
 	// TODO Story #294: Migrate remaining tests to use registration API
@@ -88,7 +88,6 @@ func (s *TLSSecurityTestSuite) ensureCertificatesExist() {
 		},
 		LoadExistingCA:       false, // Create new CA for tests
 		RenewalThresholdDays: 30,
-		EnableAutoRenewal:    false,
 	})
 	require.NoError(s.T(), err, "Failed to create certificate manager")
 

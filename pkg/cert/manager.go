@@ -234,6 +234,104 @@ func (m *Manager) GenerateClientCertificate(config *ClientCertConfig) (*Certific
 	return cert, nil
 }
 
+// GenerateSigningCertificate creates a config signing certificate and stores it
+func (m *Manager) GenerateSigningCertificate(config *SigningCertConfig) (*Certificate, error) {
+	cert, err := m.ca.GenerateSigningCertificate(config)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := m.store.StoreCertificate(cert); err != nil {
+		return nil, fmt.Errorf("failed to store signing certificate: %w", err)
+	}
+
+	return cert, nil
+}
+
+// GenerateInternalServerCertificate creates an internal mTLS server certificate and stores it
+func (m *Manager) GenerateInternalServerCertificate(config *ServerCertConfig) (*Certificate, error) {
+	cert, err := m.ca.GenerateInternalServerCertificate(config)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := m.store.StoreCertificate(cert); err != nil {
+		return nil, fmt.Errorf("failed to store internal server certificate: %w", err)
+	}
+
+	return cert, nil
+}
+
+// EnsureSeparatedCertificates generates missing separated-mode certificates.
+// Idempotent: safe to call on every startup. Only generates certs that don't exist yet.
+func (m *Manager) EnsureSeparatedCertificates(internalCfg *ServerCertConfig, signingCfg *SigningCertConfig) error {
+	// Check for existing internal server certificate
+	internalCerts, err := m.store.GetCertificatesByType(CertificateTypeInternalServer)
+	if err != nil {
+		return fmt.Errorf("failed to check for internal server certificates: %w", err)
+	}
+
+	if len(internalCerts) == 0 {
+		if internalCfg == nil {
+			internalCfg = &ServerCertConfig{
+				CommonName:   "cfgms-internal",
+				DNSNames:     []string{"localhost", "cfgms-internal"},
+				IPAddresses:  []string{"127.0.0.1"},
+				ValidityDays: 365,
+			}
+		}
+		if _, err := m.GenerateInternalServerCertificate(internalCfg); err != nil {
+			return fmt.Errorf("failed to generate internal server certificate: %w", err)
+		}
+	}
+
+	// Check for existing config signing certificate
+	signingCerts, err := m.store.GetCertificatesByType(CertificateTypeConfigSigning)
+	if err != nil {
+		return fmt.Errorf("failed to check for config signing certificates: %w", err)
+	}
+
+	if len(signingCerts) == 0 {
+		if signingCfg == nil {
+			signingCfg = &SigningCertConfig{
+				CommonName:   "cfgms-config-signer",
+				ValidityDays: 1095,
+				KeySize:      4096,
+			}
+		}
+		if _, err := m.GenerateSigningCertificate(signingCfg); err != nil {
+			return fmt.Errorf("failed to generate config signing certificate: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// GetSigningCertificate returns the newest valid config signing certificate PEM (public only)
+func (m *Manager) GetSigningCertificate() ([]byte, error) {
+	signingCerts, err := m.store.GetCertificatesByType(CertificateTypeConfigSigning)
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve signing certificates: %w", err)
+	}
+
+	if len(signingCerts) == 0 {
+		return nil, fmt.Errorf("no config signing certificate found")
+	}
+
+	// Get the full certificate data (use first valid one)
+	certInfo := signingCerts[0]
+	cert, err := m.store.GetCertificate(certInfo.SerialNumber)
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve signing certificate data: %w", err)
+	}
+
+	if len(cert.CertificatePEM) == 0 {
+		return nil, fmt.Errorf("signing certificate PEM data is empty")
+	}
+
+	return cert.CertificatePEM, nil
+}
+
 // GetCertificate retrieves a certificate by serial number
 func (m *Manager) GetCertificate(serialNumber string) (*Certificate, error) {
 	return m.store.GetCertificate(serialNumber)

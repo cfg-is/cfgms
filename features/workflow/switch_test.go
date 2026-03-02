@@ -162,7 +162,7 @@ func TestSwitchStep_BasicFunctionality(t *testing.T) {
 			require.NotNil(t, execution)
 
 			// Wait for completion
-			time.Sleep(100 * time.Millisecond)
+			waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 			// Verify execution completed successfully
 			assert.Equal(t, StatusCompleted, execution.GetStatus())
@@ -243,7 +243,7 @@ func TestSwitchStep_DefaultCase(t *testing.T) {
 	require.NotNil(t, execution)
 
 	// Wait for completion
-	time.Sleep(100 * time.Millisecond)
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 	// Verify execution completed successfully
 	assert.Equal(t, StatusCompleted, execution.GetStatus())
@@ -297,7 +297,7 @@ func TestSwitchStep_NoMatchNoDefault(t *testing.T) {
 	require.NotNil(t, execution)
 
 	// Wait for completion
-	time.Sleep(100 * time.Millisecond)
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 	// Verify execution completed successfully (no match is valid)
 	assert.Equal(t, StatusCompleted, execution.GetStatus())
@@ -376,7 +376,7 @@ func TestSwitchStep_ExpressionBasedSwitch(t *testing.T) {
 	require.NotNil(t, execution)
 
 	// Wait for completion
-	time.Sleep(100 * time.Millisecond)
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 	// Verify execution completed successfully
 	assert.Equal(t, StatusCompleted, execution.GetStatus())
@@ -426,7 +426,7 @@ func TestSwitchStep_VariableResolutionError(t *testing.T) {
 	require.NotNil(t, execution)
 
 	// Wait for completion
-	time.Sleep(100 * time.Millisecond)
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 	// Verify execution failed due to missing variable
 	assert.Equal(t, StatusFailed, execution.GetStatus())
@@ -506,7 +506,7 @@ func TestSwitchStep_NestedSwitchStatements(t *testing.T) {
 	require.NotNil(t, execution)
 
 	// Wait for completion
-	time.Sleep(100 * time.Millisecond)
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 	// Verify execution completed successfully
 	assert.Equal(t, StatusCompleted, execution.GetStatus())

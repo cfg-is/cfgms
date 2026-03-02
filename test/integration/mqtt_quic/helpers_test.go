@@ -195,7 +195,7 @@ func LoadTLSConfig(t *testing.T, certsPath string) *tls.Config {
 		Certificates: []tls.Certificate{clientCert},
 		RootCAs:      caCertPool,
 		MinVersion:   tls.VersionTLS12,
-		// Use localhost as ServerName since we connect via 127.0.0.1:1886
+		// Use localhost as ServerName since we connect via localhost:1886
 		// The server certificate is valid for "localhost" and "cfgms-mqtt-server"
 		InsecureSkipVerify: false,
 		ServerName:         "localhost",
@@ -273,7 +273,7 @@ func LoadTLSConfigFromPEM(caCertPEM, clientCertPEM, clientKeyPEM []byte) (*tls.C
 		Certificates: []tls.Certificate{clientCert},
 		RootCAs:      caCertPool,
 		MinVersion:   tls.VersionTLS12,
-		// Use localhost as ServerName since we connect via 127.0.0.1:1886
+		// Use localhost as ServerName since we connect via localhost:1886
 		ServerName: "localhost",
 	}
 

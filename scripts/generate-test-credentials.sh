@@ -20,6 +20,20 @@ GITEA_SECRET_KEY=$(openssl rand -base64 48 | tr -d "=+/\n" | cut -c1-32)
 GITEA_INTERNAL_TOKEN=$(openssl rand -base64 48 | tr -d "=+/\n" | cut -c1-32)
 REDIS_PASSWORD=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-25)
 
+# Generate API keys for HA controller nodes
+API_KEY_EAST=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-32)
+API_KEY_CENTRAL=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-32)
+API_KEY_WEST=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-32)
+
+# Generate registration tokens for steward nodes
+REG_TOKEN_EAST="cfgms_reg_$(openssl rand -hex 16)"
+REG_TOKEN_CENTRAL="cfgms_reg_$(openssl rand -hex 16)"
+REG_TOKEN_WEST="cfgms_reg_$(openssl rand -hex 16)"
+REG_TOKEN_STANDALONE="cfgms_reg_$(openssl rand -hex 16)"
+REG_TOKEN_TENANT1="cfgms_reg_$(openssl rand -hex 16)"
+REG_TOKEN_TENANT2="cfgms_reg_$(openssl rand -hex 16)"
+REG_TOKEN_TENANT3="cfgms_reg_$(openssl rand -hex 16)"
+
 # Create environment file for test session
 TEST_ENV_FILE=".env.test"
 cat > "$TEST_ENV_FILE" <<EOF
@@ -48,6 +62,20 @@ GITEA_INTERNAL_TOKEN=$GITEA_INTERNAL_TOKEN
 
 # Redis credentials
 REDIS_PASSWORD=$REDIS_PASSWORD
+
+# API keys for HA controller nodes
+API_KEY_EAST=$API_KEY_EAST
+API_KEY_CENTRAL=$API_KEY_CENTRAL
+API_KEY_WEST=$API_KEY_WEST
+
+# Registration tokens for steward nodes
+REG_TOKEN_EAST=$REG_TOKEN_EAST
+REG_TOKEN_CENTRAL=$REG_TOKEN_CENTRAL
+REG_TOKEN_WEST=$REG_TOKEN_WEST
+REG_TOKEN_STANDALONE=$REG_TOKEN_STANDALONE
+REG_TOKEN_TENANT1=$REG_TOKEN_TENANT1
+REG_TOKEN_TENANT2=$REG_TOKEN_TENANT2
+REG_TOKEN_TENANT3=$REG_TOKEN_TENANT3
 
 # Service URLs (static)
 CFGMS_TEST_DB_HOST=localhost

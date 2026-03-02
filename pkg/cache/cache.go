@@ -18,6 +18,7 @@ type Cache struct {
 	mutex       *sync.RWMutex
 	stopCleanup chan struct{}
 	cleanupDone *sync.WaitGroup
+	closeOnce   sync.Once
 }
 
 // NewCache creates a new general-purpose cache with the specified configuration
@@ -144,12 +145,15 @@ func (c *Cache) Stats() CacheStats {
 	return stats
 }
 
-// Close stops the cleanup routine and releases resources
+// Close stops the cleanup routine and releases resources.
+// Close is idempotent and safe to call multiple times.
 func (c *Cache) Close() {
-	if c.cleanupDone != nil {
-		close(c.stopCleanup)
-		c.cleanupDone.Wait()
-	}
+	c.closeOnce.Do(func() {
+		if c.cleanupDone != nil {
+			close(c.stopCleanup)
+			c.cleanupDone.Wait()
+		}
+	})
 }
 
 // GetMany retrieves multiple values from the cache in a single call

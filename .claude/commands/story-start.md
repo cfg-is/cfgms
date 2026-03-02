@@ -1,9 +1,9 @@
 ---
 name: story-start
-description: Start a new story with all mandatory pre-flight checks and roadmap auto-detection
+description: Start a new story with mandatory pre-flight validation and roadmap auto-detection
 parameters:
   - name: story_number
-    description: The story/issue number (optional - will auto-detect next story if omitted)
+    description: The story/issue number (optional - auto-detects from roadmap if omitted)
     required: false
   - name: description
     description: Brief description for branch name (optional if auto-detecting)
@@ -12,169 +12,60 @@ parameters:
 
 # Story Start Command
 
-This command ensures all mandatory pre-flight checks pass before starting development and can automatically detect the next story from the roadmap.
+Start a new story with mandatory pre-flight checks that establish an **accountability baseline**. If tests pass now, any failures during development are unambiguously caused by the current work.
 
-## Auto-Detection Logic
+## Execution Flow
 
-When run without parameters (`/story-start`), the command will:
+### 1. Auto-Detection (when no story number provided)
 
-1. **Parse Roadmap**: Examine `docs/product/roadmap.md` for next uncompleted story
-2. **Cross-Reference GitHub**: Use `gh project item-list` to check project status
-3. **Find Candidates**: Look for stories marked as "Todo" or not yet "In Progress"
-4. **Present Options**: If multiple candidates found, present selection menu
+Parse `docs/product/roadmap.md` for uncompleted stories:
+- Find lines matching `- [ ] **...** (Issue #NNN)` patterns
+- Cross-reference with `gh issue list` for status
+- If one candidate: confirm with user
+- If multiple: present selection menu with AskUserQuestion
 
-## Pre-Flight Checks (MANDATORY)
+### 2. Pre-Flight Validation (BLOCKING)
 
-Before creating any branch, the command performs blocking validation:
+**CRITICAL**: This establishes the clean baseline. No starting work on top of failures.
 
-1. **Clean Baseline Check**:
-   ```bash
-   make test
-   ```
-   - ❌ **BLOCKS** if ANY tests are failing
-   - ❌ **BLOCKS** if security issues exist
-   - ❌ **BLOCKS** if linting errors present
-   - ✅ Only proceeds with 100% clean baseline
-
-2. **Git Status Validation**:
-   - Verifies on `develop` branch
-   - Checks for uncommitted changes
-   - Ensures local branch is up-to-date
-
-## Branch Creation
-
-After successful validation:
-
-1. **Feature Branch Creation**:
-   ```bash
-   git checkout -b feature/story-[NUMBER]-[description]
-   ```
-
-2. **Branch Verification**:
-   ```bash
-   git branch --show-current  # Must show new feature branch
-   ```
-
-3. **GitHub Project Update**:
-   ```bash
-   gh project item-edit --field-id "Status" --value "In Progress"
-   ```
-
-## Roadmap Integration
-
-### Pattern Recognition
-The command searches for stories in this format:
-```markdown
-- [ ] **Story Name** (Issue #XXX) - [points] ✅ COMPLETED/🚧 IN PROGRESS/⏳ PENDING
-```
-
-### Auto-Detection Flow
-```
-1. Parse docs/product/roadmap.md
-2. Find uncompleted stories: `- [ ]` prefix
-3. Extract issue numbers: `(Issue #XXX)`
-4. Cross-reference with GitHub project status
-5. Present next logical story or selection menu
-```
-
-## Usage Examples
-
-### Auto-Detection Mode
 ```bash
-/story-start
-
-# Output:
-🔍 Analyzing roadmap for next story...
-📋 Found next story from roadmap:
-   Story #166: Logging Provider Migration and Standardization
-   Epic: v0.5.0 Beta - Advanced Workflows & Core Readiness
-   Status: Todo in GitHub Project
-   Points: 8
-
-🚦 Pre-flight checks:
-   ✅ All tests passing
-   ✅ Security scan clean
-   ✅ On develop branch
-
-✨ Proceed with Story #166? (y/n): y
-
-🌟 Creating feature branch: feature/story-166-logging-migration
-✅ Story #166 started successfully!
+make test
 ```
 
-### Manual Mode (Legacy)
+- **BLOCKS** if ANY tests fail — fix failures before starting new work
+- **BLOCKS** if security issues exist
+- **BLOCKS** if linting errors present
+- Must achieve 100% clean baseline
+
+**Why this matters**: With a documented clean baseline, there is zero ambiguity about who owns test failures found later. If it passed at start and fails during development, the current work caused it. No excuses.
+
+### 3. Git Status Validation
+
+- Verify on `develop` branch (or prompt to switch)
+- Check for uncommitted changes (warn if dirty)
+- Ensure local branch is up-to-date: `git pull origin develop`
+
+### 4. Branch Creation
+
 ```bash
-/story-start 165 logging-provider
-
-# Same pre-flight checks, then creates:
-# feature/story-165-logging-provider
+git checkout -b feature/story-[NUMBER]-[description]
 ```
 
-## TodoWrite Integration
+Verify: `git branch --show-current` shows new feature branch.
 
-After successful branch creation, initializes TodoWrite with:
+### 5. GitHub Project Update
 
-```markdown
-- [pending] Implement Story #166: Logging Provider Migration
-- [pending] Review acceptance criteria from GitHub issue
-- [pending] Set up development environment for story
-- [pending] Run tests frequently during development
-- [in_progress] Begin story development following TDD approach
+```bash
+# Move issue to "In Progress" on project board
+gh project item-edit [project-id] --id [item-id] --field-id [status-field-id] --value "In Progress"
 ```
+
+### 6. Story Context (invoke story-context skill)
+
+Use the story-context skill to fetch issue details and display acceptance criteria for the story being started.
 
 ## Error Handling
 
-### Pre-Flight Failures
-```bash
-❌ PRE-FLIGHT CHECK FAILED: Tests are failing
-
-   Failed Tests:
-   • pkg/logging/manager_test.go: TestManager_Race
-   • features/controller/server_test.go: TestServer_Health
-
-   🛠️ Action Required:
-   1. Fix failing tests first
-   2. Run: make test
-   3. Retry: /story-start
-
-   📋 ZERO TOLERANCE POLICY: Cannot start new work with failing tests
-```
-
-### Roadmap Parse Errors
-```bash
-⚠️ Could not parse roadmap automatically
-   Falling back to manual story entry
-
-   Please specify story number:
-   /story-start [story-number] [description]
-```
-
-### GitHub Integration Errors
-```bash
-⚠️ GitHub CLI unavailable - manual project update required
-
-   Created branch: feature/story-166-logging-migration
-   📋 Manual action needed:
-   1. Visit: https://github.com/orgs/cfg-is/projects/1
-   2. Move issue #166 to "In Progress"
-```
-
-## Security Notes
-
-- **No Secrets**: Command never exposes credentials or sensitive data
-- **Validation Only**: Pre-flight checks are read-only operations
-- **Branch Protection**: Respects Git branch protection rules
-- **Safe Parsing**: Roadmap parsing uses safe text processing only
-
-## Integration Points
-
-- **GitHub CLI**: Used for project management integration
-- **Roadmap Format**: Expects standard CFGMS roadmap.md format
-- **Testing Framework**: Integrates with existing make test infrastructure
-- **Branch Naming**: Follows established feature/story-[NUMBER]-[description] pattern
-
----
-
-## Command Implementation Details
-
-This command automates the critical first steps of the CFGMS development workflow while maintaining all mandatory quality gates and providing intelligent roadmap-driven story selection.
+- **Pre-flight fails**: Report specific failures, block branch creation. User must fix and retry.
+- **Roadmap parse fails**: Fall back to manual story entry — prompt user for story number.
+- **GitHub CLI unavailable**: Create branch locally, warn that project update requires manual action.

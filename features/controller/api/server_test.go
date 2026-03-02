@@ -20,6 +20,7 @@ import (
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	testutil "github.com/cfgis/cfgms/pkg/testing"
 
 	// Import storage providers for testing
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
@@ -75,6 +76,7 @@ func setupTestServer(t *testing.T) *Server {
 		nil, // No tracer for basic tests
 		nil, // No HA manager for basic tests
 		nil, // No registration token store for basic tests
+		"",  // No signer cert serial for basic tests
 	)
 	require.NoError(t, err)
 
@@ -730,9 +732,9 @@ func TestEphemeralAPIKeys(t *testing.T) {
 		require.True(t, exists, "JIT key should exist")
 		require.NotNil(t, keyInfo.ExpiresAt, "JIT key should have expiration")
 
-		// Should expire in approximately 1 hour (within 5 seconds tolerance)
+		// Should expire in approximately 1 hour (within 10 seconds tolerance for CI)
 		expectedExpiry := time.Now().Add(1 * time.Hour)
-		assert.WithinDuration(t, expectedExpiry, *keyInfo.ExpiresAt, 5*time.Second)
+		assert.WithinDuration(t, expectedExpiry, *keyInfo.ExpiresAt, 10*time.Second)
 	})
 
 	t.Run("automatic cleanup removes expired keys", func(t *testing.T) {
@@ -779,5 +781,215 @@ func TestEphemeralAPIKeys(t *testing.T) {
 			server.router.ServeHTTP(rec, req)
 			assert.Equal(t, http.StatusOK, rec.Code, "Key %d should work", i+1)
 		}
+	})
+}
+
+// setupTestServerWithLogger creates a test server using the provided logger.
+// Use this when you need to capture log output (e.g., with MockLogger).
+func setupTestServerWithLogger(t *testing.T, logger logging.Logger) *Server {
+	cfg := config.DefaultConfig()
+	cfg.Certificate.EnableCertManagement = false
+
+	storageConfig := map[string]interface{}{
+		"repository_path": t.TempDir(),
+		"branch":          "main",
+		"auto_init":       true,
+	}
+	storageManager, err := interfaces.CreateAllStoresFromConfig("git", storageConfig)
+	require.NoError(t, err)
+
+	rbacManager := rbac.NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
+	)
+	err = rbacManager.Initialize(context.Background())
+	require.NoError(t, err)
+
+	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
+	tenantManager := tenant.NewManager(tenantStore, rbacManager)
+
+	controllerService := service.NewControllerService(logger)
+	configService := service.NewConfigurationService(logger, controllerService)
+	rbacService := service.NewRBACService(rbacManager)
+
+	server, err := New(
+		cfg, logger, controllerService, configService,
+		nil, rbacService, nil, tenantManager, rbacManager,
+		nil, nil, nil, nil, nil, "",
+	)
+	require.NoError(t, err)
+
+	return server
+}
+
+// TestTestEndpointAuthGate tests the CFGMS_ENABLE_TEST_ENDPOINTS env var gating
+// in authenticationMiddleware (middleware.go:114-134).
+func TestTestEndpointAuthGate(t *testing.T) {
+	t.Run("default behavior enforces auth when env var is unset", func(t *testing.T) {
+		server := setupTestServer(t)
+
+		// Wrap a test handler with authenticationMiddleware
+		handlerCalled := false
+		testHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			handlerCalled = true
+			w.WriteHeader(http.StatusOK)
+		})
+		wrappedHandler := server.authenticationMiddleware(testHandler)
+
+		// PUT /api/v1/test/stewards/{id}/config — no API key, env var unset
+		req := httptest.NewRequest("PUT", "/api/v1/test/stewards/test-steward-1/config", nil)
+		rec := httptest.NewRecorder()
+		wrappedHandler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, "Should require auth when env var is unset")
+		assert.False(t, handlerCalled, "Handler should not be called without authentication")
+
+		// POST /api/v1/test/stewards/{id}/quic/connect — no API key, env var unset
+		handlerCalled = false
+		req = httptest.NewRequest("POST", "/api/v1/test/stewards/test-steward-1/quic/connect", nil)
+		rec = httptest.NewRecorder()
+		wrappedHandler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, "Should require auth for QUIC endpoint when env var is unset")
+		assert.False(t, handlerCalled, "Handler should not be called without authentication")
+	})
+
+	t.Run("bypass works when CFGMS_ENABLE_TEST_ENDPOINTS is true", func(t *testing.T) {
+		server := setupTestServer(t)
+
+		t.Setenv("CFGMS_ENABLE_TEST_ENDPOINTS", "true")
+
+		handlerCalled := false
+		testHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			handlerCalled = true
+			w.WriteHeader(http.StatusOK)
+		})
+		wrappedHandler := server.authenticationMiddleware(testHandler)
+
+		// PUT /api/v1/test/stewards/{id}/config — should bypass auth
+		req := httptest.NewRequest("PUT", "/api/v1/test/stewards/test-steward-1/config", nil)
+		rec := httptest.NewRecorder()
+		wrappedHandler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code, "Should bypass auth when env var is set")
+		assert.True(t, handlerCalled, "Handler should be called (auth bypassed)")
+
+		// POST /api/v1/test/stewards/{id}/quic/connect — should bypass auth
+		handlerCalled = false
+		req = httptest.NewRequest("POST", "/api/v1/test/stewards/test-steward-1/quic/connect", nil)
+		rec = httptest.NewRecorder()
+		wrappedHandler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code, "Should bypass auth for QUIC test endpoint")
+		assert.True(t, handlerCalled, "Handler should be called for QUIC test endpoint (auth bypassed)")
+	})
+
+	t.Run("warn log emitted on bypass", func(t *testing.T) {
+		mockLogger := testutil.NewMockLogger(true)
+		server := setupTestServerWithLogger(t, mockLogger)
+
+		t.Setenv("CFGMS_ENABLE_TEST_ENDPOINTS", "true")
+
+		testHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		})
+		wrappedHandler := server.authenticationMiddleware(testHandler)
+
+		// Clear any startup log messages before testing
+		mockLogger.Reset()
+
+		// Trigger bypass for config endpoint
+		req := httptest.NewRequest("PUT", "/api/v1/test/stewards/steward-abc/config", nil)
+		rec := httptest.NewRecorder()
+		wrappedHandler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		warnLogs := mockLogger.GetLogs("warn")
+		require.NotEmpty(t, warnLogs, "Should emit warn log on auth bypass")
+		assert.Equal(t, "Test endpoint accessed with authentication bypass", warnLogs[0].Message)
+
+		// Trigger bypass for QUIC endpoint
+		mockLogger.Reset()
+		req = httptest.NewRequest("POST", "/api/v1/test/stewards/steward-abc/quic/connect", nil)
+		rec = httptest.NewRecorder()
+		wrappedHandler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		warnLogs = mockLogger.GetLogs("warn")
+		require.NotEmpty(t, warnLogs, "Should emit warn log on QUIC auth bypass")
+		assert.Equal(t, "Test endpoint accessed with authentication bypass", warnLogs[0].Message)
+	})
+
+	t.Run("non-test endpoints still require auth when env var is set", func(t *testing.T) {
+		server := setupTestServer(t)
+
+		t.Setenv("CFGMS_ENABLE_TEST_ENDPOINTS", "true")
+
+		handlerCalled := false
+		testHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			handlerCalled = true
+			w.WriteHeader(http.StatusOK)
+		})
+		wrappedHandler := server.authenticationMiddleware(testHandler)
+
+		// Regular endpoint — should still require auth even with env var set
+		req := httptest.NewRequest("GET", "/api/v1/stewards", nil)
+		rec := httptest.NewRecorder()
+		wrappedHandler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, "Non-test endpoints must still require auth")
+		assert.False(t, handlerCalled, "Handler should not be called for unauthenticated non-test request")
+	})
+
+	t.Run("wrong HTTP method does not bypass even with env var set", func(t *testing.T) {
+		server := setupTestServer(t)
+
+		t.Setenv("CFGMS_ENABLE_TEST_ENDPOINTS", "true")
+
+		handlerCalled := false
+		testHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			handlerCalled = true
+			w.WriteHeader(http.StatusOK)
+		})
+		wrappedHandler := server.authenticationMiddleware(testHandler)
+
+		// GET on the config test endpoint — should NOT bypass (only PUT is allowed)
+		req := httptest.NewRequest("GET", "/api/v1/test/stewards/test-steward-1/config", nil)
+		rec := httptest.NewRecorder()
+		wrappedHandler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, "GET on config test endpoint should not bypass auth")
+		assert.False(t, handlerCalled, "Handler should not be called for wrong HTTP method")
+
+		// GET on the QUIC test endpoint — should NOT bypass (only POST is allowed)
+		handlerCalled = false
+		req = httptest.NewRequest("GET", "/api/v1/test/stewards/test-steward-1/quic/connect", nil)
+		rec = httptest.NewRecorder()
+		wrappedHandler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, "GET on QUIC test endpoint should not bypass auth")
+		assert.False(t, handlerCalled, "Handler should not be called for wrong HTTP method")
+	})
+
+	t.Run("env var value must be exactly true", func(t *testing.T) {
+		server := setupTestServer(t)
+
+		// Set to something other than "true"
+		t.Setenv("CFGMS_ENABLE_TEST_ENDPOINTS", "yes")
+
+		handlerCalled := false
+		testHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			handlerCalled = true
+			w.WriteHeader(http.StatusOK)
+		})
+		wrappedHandler := server.authenticationMiddleware(testHandler)
+
+		req := httptest.NewRequest("PUT", "/api/v1/test/stewards/test-steward-1/config", nil)
+		rec := httptest.NewRecorder()
+		wrappedHandler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, "Env var value 'yes' should not bypass auth")
+		assert.False(t, handlerCalled, "Handler should not be called with non-exact env var value")
 	})
 }

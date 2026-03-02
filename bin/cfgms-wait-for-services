@@ -17,13 +17,13 @@ POSTGRES_HOST="localhost"
 POSTGRES_PORT="${CFGMS_TEST_DB_PORT:-5433}"
 POSTGRES_USER="cfgms_test"
 POSTGRES_DB="cfgms_test"
-POSTGRES_PASSWORD="${CFGMS_TEST_DB_PASSWORD:-cfgms_test_password}"
+POSTGRES_PASSWORD="${CFGMS_TEST_DB_PASSWORD:?ERROR: CFGMS_TEST_DB_PASSWORD not set. Run: make test-integration-setup}"
 
 TIMESCALEDB_HOST="localhost"
 TIMESCALEDB_PORT="${CFGMS_TEST_TIMESCALEDB_PORT:-5434}"
 TIMESCALEDB_USER="cfgms_test"  # Unified user for both logging and HA tests
 TIMESCALEDB_DB="cfgms_ha_test"  # Unified database for both logging and HA tests
-TIMESCALEDB_PASSWORD="${CFGMS_TEST_TIMESCALEDB_PASSWORD:-cfgms_test_password}"
+TIMESCALEDB_PASSWORD="${CFGMS_TEST_TIMESCALEDB_PASSWORD:?ERROR: CFGMS_TEST_TIMESCALEDB_PASSWORD not set. Run: make test-integration-setup}"
 
 GITEA_URL="http://localhost:3001"
 GITEA_HEALTH_URL="http://localhost:3001/api/healthz"
@@ -122,7 +122,7 @@ if wait_for_service "Gitea" check_gitea; then
     fi
     
     # Check if test repositories exist
-    if curl -s -u "cfgms_test:${CFGMS_TEST_GITEA_PASSWORD:-cfgms_test_password}" "$GITEA_URL/api/v1/user/repos" | grep -q "cfgms-test"; then
+    if curl -s -u "cfgms_test:${CFGMS_TEST_GITEA_PASSWORD}" "$GITEA_URL/api/v1/user/repos" | grep -q "cfgms-test"; then
         echo -e "${GREEN}   ✅ Test repositories found${NC}"
     else
         echo -e "${YELLOW}   ⚠️  Test repositories not found - run setup script${NC}"

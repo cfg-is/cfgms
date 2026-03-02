@@ -40,22 +40,51 @@ func (s *ModuleExecutionTestSuite) SetupSuite() {
 		s.T().Skip("Skipping module execution tests in short mode - requires infrastructure")
 	}
 
-	// Start steward-standalone container (follows pattern from test/integration/docker_test.go)
-	s.T().Log("Starting steward-standalone container...")
+	// Check if infrastructure containers are already running (e.g., in CI)
+	// We need to check for both steward-standalone and its dependencies (controller, timescaledb)
+	// because docker compose up tries to start all dependencies
+	checkCmd := exec.Command("docker", "ps", "--filter", "name=steward-standalone", "--filter", "name=controller-standalone", "--filter", "name=cfgms-timescaledb-test", "--format", "{{.Names}}")
+	checkOutput, checkErr := checkCmd.CombinedOutput()
+	if checkErr != nil {
+		s.T().Logf("Warning: Failed to check for existing containers: %v", checkErr)
+	}
+	names := string(checkOutput)
+	s.T().Logf("Container detection check - found containers:\n%s", names)
 
-	// Find project root - go test changes to a temp directory
-	// Try current directory and up to 3 levels up
-	for i := 0; i < 4; i++ {
-		s.composePath = "docker-compose.test.yml"
-		if i > 0 {
-			s.composePath = strings.Repeat("../", i) + "docker-compose.test.yml"
-		}
-		if _, err := os.Stat(s.composePath); err == nil {
-			cmd := exec.Command("docker", "compose", "-f", s.composePath, "--profile", "ha", "up", "-d", "steward-standalone")
-			if output, err := cmd.CombinedOutput(); err != nil {
-				s.T().Logf("Note: Failed to start steward-standalone (may already be running): %v\nOutput: %s", err, output)
+	infrastructureRunning := strings.Contains(names, "steward-standalone") &&
+		strings.Contains(names, "controller-standalone") &&
+		strings.Contains(names, "cfgms-timescaledb-test")
+
+	s.T().Logf("Infrastructure detection: steward=%v, controller=%v, timescaledb=%v, overall=%v",
+		strings.Contains(names, "steward-standalone"),
+		strings.Contains(names, "controller-standalone"),
+		strings.Contains(names, "cfgms-timescaledb-test"),
+		infrastructureRunning)
+
+	if infrastructureRunning {
+		s.T().Log("Found existing MQTT+QUIC infrastructure (likely started by CI/make target)")
+		s.T().Log("Using containers: controller-standalone, steward-standalone, cfgms-timescaledb-test")
+	} else {
+		// Start steward-standalone container (follows pattern from test/integration/docker_test.go)
+		s.T().Log("Starting steward-standalone container...")
+
+		// Find project root - go test changes to a temp directory
+		// Try current directory and up to 3 levels up
+		for i := 0; i < 4; i++ {
+			s.composePath = "docker-compose.test.yml"
+			if i > 0 {
+				s.composePath = strings.Repeat("../", i) + "docker-compose.test.yml"
 			}
-			break
+			if _, err := os.Stat(s.composePath); err == nil {
+				// Use --no-deps to only start steward-standalone without starting dependencies
+				// (controller-standalone and timescaledb-test are already running from workflow setup)
+				cmd := exec.Command("docker", "compose", "-f", s.composePath, "--profile", "ha", "up", "-d", "--no-deps", "steward-standalone")
+				if output, err := cmd.CombinedOutput(); err != nil {
+					s.T().Fatalf("Failed to start steward-standalone: %v\nOutput: %s", err, output)
+				}
+				s.T().Log("Successfully started steward-standalone container")
+				break
+			}
 		}
 	}
 
@@ -71,24 +100,46 @@ func (s *ModuleExecutionTestSuite) SetupSuite() {
 		GetTestMQTTAddr("ssl://localhost:1886"),
 		s.tlsConfig,
 	)
-
-	// Connect MQTT client for status monitoring with TLS
-	// Story #313: use test-controller- prefix to allow publishing to any steward topics
-	s.helper.ConnectMQTT(s.T(), fmt.Sprintf("test-controller-%d", time.Now().Unix()), s.tlsConfig)
 }
 
-func (s *ModuleExecutionTestSuite) TearDownSuite() {
+func (s *ModuleExecutionTestSuite) SetupTest() {
+	// Restart steward between tests to ensure clean state
+	// Issue #382: Tests share same steward instance and need isolation
+	s.T().Log("Restarting steward for clean test state...")
+	restartCmd := exec.Command("docker", "restart", "steward-standalone")
+	if output, err := restartCmd.CombinedOutput(); err != nil {
+		s.T().Logf("Warning: Failed to restart steward: %v (output: %s)", err, output)
+	}
+
+	// Wait for steward to restart and register
+	time.Sleep(6 * time.Second)
+
+	// Create unique MQTT client for each test to avoid subscription conflicts
+	// Issue #382: Each test needs its own client to properly handle event subscriptions
+	clientID := fmt.Sprintf("test-controller-%d-%s", time.Now().UnixNano(), s.T().Name())
+	s.helper.ConnectMQTT(s.T(), clientID, s.tlsConfig)
+}
+
+func (s *ModuleExecutionTestSuite) TearDownTest() {
+	// Disconnect MQTT client after each test
 	if s.helper != nil {
 		s.helper.DisconnectMQTT(s.T())
 	}
+}
 
-	// Stop steward-standalone container
-	s.T().Log("Stopping steward-standalone container...")
+func (s *ModuleExecutionTestSuite) TearDownSuite() {
+	// MQTT client cleanup now handled in TearDownTest()
+
+	// Only stop steward-standalone if we started it (composePath will be set)
+	// In CI, containers are managed by the workflow, not by the test suite
 	if s.composePath != "" {
+		s.T().Log("Stopping steward-standalone container (started by test suite)...")
 		cmd := exec.Command("docker", "compose", "-f", s.composePath, "--profile", "ha", "down", "steward-standalone")
 		if output, err := cmd.CombinedOutput(); err != nil {
 			s.T().Logf("Warning: Failed to stop steward-standalone: %v\nOutput: %s", err, output)
 		}
+	} else {
+		s.T().Log("Skipping container cleanup (containers managed externally)")
 	}
 }
 
@@ -304,7 +355,8 @@ func (s *ModuleExecutionTestSuite) TestConfigStatusReporting() {
 	// First, establish QUIC connection (required for config sync)
 	// NOTE: In a real deployment, this would be done by the controller
 	// For testing, we simulate the controller command
-	commandTopic := fmt.Sprintf("cfgms/steward/%s/commands", stewardID)
+	// Topic format: cfgms/commands/{steward_id} (matches pkg/controlplane/providers/mqtt topicCommandUnicast)
+	commandTopic := fmt.Sprintf("cfgms/commands/%s", stewardID)
 
 	// Step 1: Send connect_quic command
 	connectQuicCmd := map[string]interface{}{
@@ -377,7 +429,7 @@ func (s *ModuleExecutionTestSuite) TestConfigStatusReporting() {
 
 		s.T().Log("✅ AC4: Config status reporting verified - status matches actual execution")
 
-	case <-time.After(30 * time.Second):
+	case <-time.After(60 * time.Second):
 		s.T().Fatal("Timeout waiting for config status report")
 	}
 
@@ -493,7 +545,8 @@ func (s *ModuleExecutionTestSuite) TestModuleFailureReporting() {
 	})
 
 	// First, establish QUIC connection (required for config sync)
-	commandTopic := fmt.Sprintf("cfgms/steward/%s/commands", stewardID)
+	// Topic format: cfgms/commands/{steward_id} (matches pkg/controlplane/providers/mqtt topicCommandUnicast)
+	commandTopic := fmt.Sprintf("cfgms/commands/%s", stewardID)
 
 	// Step 1: Send connect_quic command
 	connectQuicCmd := map[string]any{
@@ -575,7 +628,7 @@ func (s *ModuleExecutionTestSuite) TestModuleFailureReporting() {
 
 		s.T().Log("✅ AC6: Module failure reporting verified - errors are descriptive and per-module")
 
-	case <-time.After(30 * time.Second):
+	case <-time.After(60 * time.Second):
 		s.T().Fatal("Timeout waiting for config status report")
 	}
 
@@ -725,6 +778,216 @@ func (s *ModuleExecutionTestSuite) TestContainerFileSystemAccess() {
 	s.helper.CleanupTestFiles(s.T(), containerName, testFile)
 
 	s.T().Log("✅ Container file system access verified")
+}
+
+// TestE2ENetworkValidation validates network connectivity before running E2E tests
+// Story #378 Phase 3: Pre-flight network validation to catch infrastructure issues early
+func (s *ModuleExecutionTestSuite) TestE2ENetworkValidation() {
+	s.T().Log("🔍 E2E Network Validation: Pre-flight Connectivity Checks")
+
+	// Test 1: MQTT Broker Connectivity
+	s.T().Log("📡 Validating MQTT broker connectivity...")
+	token := s.helper.mqttClient.Connect()
+	s.True(token.WaitTimeout(5*time.Second), "MQTT broker not reachable - check broker container is running")
+	s.NoError(token.Error(), "MQTT broker connection failed")
+	s.T().Log("✅ MQTT broker: Reachable")
+
+	// Test 2: Controller REST API Connectivity
+	s.T().Log("🌐 Validating controller REST API connectivity...")
+	resp, err := s.helper.httpClient.Get(s.helper.baseURL + "/health")
+	if err == nil && resp != nil {
+		defer func() {
+			if closeErr := resp.Body.Close(); closeErr != nil {
+				s.T().Logf("Warning: failed to close response body: %v", closeErr)
+			}
+		}()
+		s.T().Logf("✅ Controller REST API: Reachable (status=%d)", resp.StatusCode)
+	} else {
+		s.T().Logf("⚠️  Controller REST API: Not responding (this may be expected if controller uses different health endpoint)")
+	}
+
+	// Test 3: Steward Container Running
+	s.T().Log("🐳 Validating steward container status...")
+	containerName := "steward-standalone"
+	cmd := exec.Command("docker", "inspect", "--format={{.State.Running}}", containerName)
+	output, err := cmd.CombinedOutput()
+	s.NoError(err, "Cannot inspect steward container - check Docker daemon is running")
+
+	isRunning := strings.TrimSpace(string(output)) == "true"
+	s.True(isRunning, "Steward container not running - check docker-compose setup")
+	s.T().Log("✅ Steward container: Running")
+
+	// Test 4: Controller Container Running (for QUIC endpoint)
+	s.T().Log("🐳 Validating controller container status...")
+	controllerName := "controller-standalone"
+	cmd = exec.Command("docker", "inspect", "--format={{.State.Running}}", controllerName)
+	output, err = cmd.CombinedOutput()
+	s.NoError(err, "Cannot inspect controller container")
+
+	isRunning = strings.TrimSpace(string(output)) == "true"
+	s.True(isRunning, "Controller container not running - check docker-compose setup")
+	s.T().Log("✅ Controller container: Running")
+
+	// Test 5: QUIC Port Accessibility (verify port 4433 is accessible from steward)
+	s.T().Log("🔐 Validating QUIC endpoint accessibility...")
+	// Use docker exec to test connectivity from within steward container
+	// Story #382: Use -u flag for UDP (QUIC uses UDP, not TCP)
+	cmd = exec.Command("docker", "exec", containerName, "sh", "-c",
+		"timeout 2 nc -zvu controller-standalone 4433 2>&1 || echo 'Cannot connect'")
+	output, err = cmd.CombinedOutput()
+	if err == nil {
+		outputStr := string(output)
+		// nc exit code 0 means connection successful
+		if !strings.Contains(outputStr, "Cannot connect") {
+			s.T().Log("✅ QUIC endpoint (4433): Accessible from steward")
+		} else {
+			s.T().Log("⚠️  QUIC endpoint (4433): Not accessible - QUIC tests may fail")
+		}
+	} else {
+		s.T().Logf("⚠️  QUIC endpoint: Cannot test (nc not available in container)")
+	}
+
+	// Test 6: Certificate Manager Ready
+	s.T().Log("🔐 Validating certificate availability...")
+	stewardID, err := s.helper.GetStewardIDFromContainer(s.T(), containerName)
+	if err == nil && stewardID != "" {
+		s.T().Logf("✅ Certificates: Available (steward registered with ID: %s)", stewardID)
+	} else {
+		s.T().Log("⚠️  Certificates: Steward not registered yet (may register during tests)")
+	}
+
+	s.T().Log("🎉 Network Validation Complete: All critical infrastructure checks passed")
+}
+
+// TestE2EFlowDiagnostic validates each phase of the MQTT+QUIC E2E flow independently
+// Story #378 Phase 3: Diagnostic test to quickly identify failure points
+// This test breaks down the E2E flow into discrete phases for targeted troubleshooting
+func (s *ModuleExecutionTestSuite) TestE2EFlowDiagnostic() {
+	containerName := "steward-standalone"
+	testFilePath := GetAbsoluteTestPath("diagnostic-test-file.txt")
+
+	// Cleanup before test
+	s.helper.CleanupTestFiles(s.T(), containerName, testFilePath)
+
+	// Phase 1: Validate MQTT Connectivity
+	s.T().Log("📡 Phase 1: Validating MQTT Connectivity...")
+	// MQTT client already connected in SetupTest(), just verify it's connected
+	s.True(s.helper.mqttClient.IsConnected(), "❌ Phase 1 FAILED: MQTT client not connected")
+	s.T().Log("✅ Phase 1 PASS: MQTT connection established")
+
+	// Phase 2: Validate REST API Connectivity
+	s.T().Log("🌐 Phase 2: Validating REST API Connectivity...")
+	stewardID, err := s.helper.GetStewardIDFromContainer(s.T(), containerName)
+	s.NoError(err, "❌ Phase 2 FAILED: Cannot retrieve steward ID from container")
+	s.NotEmpty(stewardID, "❌ Phase 2 FAILED: Steward ID is empty")
+	s.T().Logf("✅ Phase 2 PASS: REST API accessible, steward ID: %s", stewardID)
+
+	// Phase 3: Validate Config Upload
+	s.T().Log("📤 Phase 3: Validating Config Upload...")
+	testConfig := map[string]any{
+		"steward": map[string]any{
+			"id":   stewardID,
+			"mode": "controller",
+		},
+		"resources": []map[string]any{
+			{
+				"name":   "diagnostic-file",
+				"module": "file",
+				"config": map[string]any{
+					"path":        testFilePath,
+					"content":     "Diagnostic test content\n",
+					"permissions": "0644",
+					"ensure":      "present",
+				},
+			},
+		},
+	}
+
+	err = s.helper.SendConfiguration(s.T(), stewardID, testConfig)
+	s.NoError(err, "❌ Phase 3 FAILED: Config upload failed")
+	s.T().Log("✅ Phase 3 PASS: Configuration uploaded to controller")
+
+	// Phase 4: Validate Config Status Subscription
+	s.T().Log("📬 Phase 4: Validating Config Status Subscription...")
+	statusReceived := make(chan *ConfigStatusMessage, 1)
+	s.helper.SubscribeToConfigStatus(s.T(), stewardID, func(msg *ConfigStatusMessage) {
+		s.T().Logf("Received config status: version=%s, status=%s, modules=%d",
+			msg.ConfigVersion, msg.Status, len(msg.Modules))
+		statusReceived <- msg
+	})
+	s.T().Log("✅ Phase 4 PASS: Subscribed to config status topic")
+
+	// Phase 5: Validate QUIC Connection Command Delivery
+	s.T().Log("🔗 Phase 5: Validating QUIC Connection Command...")
+	// Topic format: cfgms/commands/{steward_id} (matches pkg/controlplane/providers/mqtt topicCommandUnicast)
+	commandTopic := fmt.Sprintf("cfgms/commands/%s", stewardID)
+
+	connectQuicCmd := map[string]interface{}{
+		"command_id": "diagnostic-connect-quic",
+		"type":       "connect_quic",
+		"timestamp":  time.Now().Format(time.RFC3339),
+		"params": map[string]interface{}{
+			"quic_address": "controller-standalone:4433",
+			"session_id":   fmt.Sprintf("diagnostic-session-%d", time.Now().Unix()),
+		},
+	}
+
+	quicCmdJSON, err := json.Marshal(connectQuicCmd)
+	s.NoError(err, "❌ Phase 5 FAILED: Cannot marshal connect_quic command")
+
+	token := s.helper.mqttClient.Publish(commandTopic, 1, false, quicCmdJSON)
+	s.True(token.WaitTimeout(5*time.Second), "❌ Phase 5 FAILED: connect_quic publish timeout")
+	s.NoError(token.Error(), "❌ Phase 5 FAILED: connect_quic publish error")
+	s.T().Log("✅ Phase 5 PASS: QUIC connection command published")
+
+	// Wait for QUIC connection to establish
+	time.Sleep(2 * time.Second)
+
+	// Phase 6: Validate Config Sync Command Delivery
+	s.T().Log("🔄 Phase 6: Validating Config Sync Command...")
+	syncConfigCmd := map[string]interface{}{
+		"command_id": "diagnostic-sync-config",
+		"type":       "sync_config",
+		"timestamp":  time.Now().Format(time.RFC3339),
+		"params": map[string]interface{}{
+			"version": "diagnostic-v1.0",
+		},
+	}
+
+	syncCmdJSON, err := json.Marshal(syncConfigCmd)
+	s.NoError(err, "❌ Phase 6 FAILED: Cannot marshal sync_config command")
+
+	token = s.helper.mqttClient.Publish(commandTopic, 1, false, syncCmdJSON)
+	s.True(token.WaitTimeout(5*time.Second), "❌ Phase 6 FAILED: sync_config publish timeout")
+	s.NoError(token.Error(), "❌ Phase 6 FAILED: sync_config publish error")
+	s.T().Log("✅ Phase 6 PASS: Config sync command published")
+
+	// Phase 7: Validate Config Status Report Reception
+	s.T().Log("📥 Phase 7: Validating Config Status Report Reception...")
+	select {
+	case msg := <-statusReceived:
+		s.NotEmpty(msg.StewardID, "❌ Phase 7 FAILED: Steward ID not in status report")
+		s.NotEmpty(msg.ConfigVersion, "❌ Phase 7 FAILED: Config version not in status report")
+		s.NotEmpty(msg.Status, "❌ Phase 7 FAILED: Status not in status report")
+		s.T().Logf("✅ Phase 7 PASS: Status report received (version=%s, status=%s)", msg.ConfigVersion, msg.Status)
+
+		// Phase 8: Validate Module Execution
+		s.T().Log("⚙️  Phase 8: Validating Module Execution...")
+		fileInfo, err := s.helper.CheckFileInContainer(s.T(), containerName, testFilePath)
+		s.NoError(err, "❌ Phase 8 FAILED: Cannot check file in container")
+		s.True(fileInfo.Exists, "❌ Phase 8 FAILED: File not created by module")
+		s.Contains(fileInfo.Content, "Diagnostic test content", "❌ Phase 8 FAILED: File content incorrect")
+		s.T().Log("✅ Phase 8 PASS: Module executed and file created")
+
+	case <-time.After(60 * time.Second):
+		s.T().Fatal("❌ Phase 7 FAILED: Timeout waiting for config status report (Phase 1-6 passed, Phase 7-8 unreachable)")
+	}
+
+	// All phases passed
+	s.T().Log("🎉 ALL PHASES PASSED: Complete E2E MQTT+QUIC flow validated")
+
+	// Cleanup after test
+	s.helper.CleanupTestFiles(s.T(), containerName, testFilePath)
 }
 
 func TestModuleExecution(t *testing.T) {

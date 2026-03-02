@@ -1,6 +1,3 @@
-//go:build !short
-// +build !short
-
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jordan Ritz
 
@@ -517,6 +514,10 @@ func (framework *DegradedModeSecurityTestFramework) testNetworkPartitionToleranc
 
 // TestRBACFailSecureDegradation tests RBAC fail-secure degradation behavior
 func TestRBACFailSecureDegradation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+
 	framework := NewDegradedModeSecurityTestFramework(t)
 	defer framework.Cleanup()
 
@@ -572,6 +573,10 @@ func TestRBACFailSecureDegradation(t *testing.T) {
 
 // TestRiskEngineEnhancedAuthDegradation tests risk engine enhanced auth degradation
 func TestRiskEngineEnhancedAuthDegradation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+
 	framework := NewDegradedModeSecurityTestFramework(t)
 	defer framework.Cleanup()
 
@@ -634,6 +639,10 @@ func TestRiskEngineEnhancedAuthDegradation(t *testing.T) {
 
 // TestJITAutoRevokeDegradation tests JIT auto-revoke degradation behavior
 func TestJITAutoRevokeDegradation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+
 	framework := NewDegradedModeSecurityTestFramework(t)
 	defer framework.Cleanup()
 
@@ -726,6 +735,10 @@ func TestJITAutoRevokeDegradation(t *testing.T) {
 
 // TestNetworkPartitionDegradation tests network partition degradation modes
 func TestNetworkPartitionDegradation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+
 	framework := NewDegradedModeSecurityTestFramework(t)
 	defer framework.Cleanup()
 
@@ -741,36 +754,36 @@ func TestNetworkPartitionDegradation(t *testing.T) {
 
 	for _, mode := range partitionModes {
 		t.Run(fmt.Sprintf("Partition Mode %s", mode), func(t *testing.T) {
-			// Skip graceful degradation until Issue #296 implements enhanced monitoring controls
-			if mode == failsafe.PartitionModeGracefulDegradation {
-				t.Skip("Skipping until Issue #296: Enhanced monitoring controls not yet implemented for admin users in graceful degradation mode")
-			}
 
-			// First make a successful request to potentially populate cache
+			// First make successful requests to populate cache with actual test permissions
+			// SECURITY: This validates the fail-secure model - only cached permissions grant access
 			if mode != failsafe.PartitionModeFailSecure {
 				framework.failsafeNetwork.SetPartitionMode(failsafe.PartitionModeLocalCache)
 
-				cacheRequest := &common.AccessRequest{
-					SubjectId:    "degraded-user-low",
-					PermissionId: "config.read",
-					TenantId:     "degraded-tenant",
-					ResourceId:   "cache-resource",
+				// Cache permissions for both subjects that will be tested
+				testSubjects := []struct {
+					subject    string
+					permission string
+				}{
+					{"degraded-user-low", "config.read"},
+					{"degraded-user-low", "config.write"},
+					{"degraded-admin", "config.read"},
+					{"degraded-admin", "config.write"},
 				}
 
-				_, _ = framework.failsafeNetwork.CheckPermission(ctx, cacheRequest)
+				for _, ts := range testSubjects {
+					cacheRequest := &common.AccessRequest{
+						SubjectId:    ts.subject,
+						PermissionId: ts.permission,
+						TenantId:     "degraded-tenant",
+						ResourceId:   "partition-resource", // Must match test resource
+					}
+					_, _ = framework.failsafeNetwork.CheckPermission(ctx, cacheRequest)
+				}
 			}
 
-			// Simulate network partition
-			invalidCtx, cancel := context.WithCancel(context.Background())
-			cancel()
-
-			partitionRequest := &common.AccessRequest{
-				SubjectId:    "degraded-user-low",
-				PermissionId: "partition.test",
-				TenantId:     "degraded-tenant",
-			}
-
-			_, _ = framework.failsafeNetwork.CheckPermission(invalidCtx, partitionRequest)
+			// Simulate network partition by forcing the partitioned state
+			framework.failsafeNetwork.ForcePartitioned()
 
 			time.Sleep(100 * time.Millisecond)
 
@@ -828,7 +841,9 @@ func TestNetworkPartitionDegradation(t *testing.T) {
 
 // TestDegradedModeOperationalMetrics tests operational metrics during degraded mode
 func TestDegradedModeOperationalMetrics(t *testing.T) {
-	t.Skip("Skipping until Issue #296: Enhanced monitoring controls not yet implemented for admin users in graceful degradation mode")
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
 
 	framework := NewDegradedModeSecurityTestFramework(t)
 	defer framework.Cleanup()
@@ -865,6 +880,29 @@ func TestDegradedModeOperationalMetrics(t *testing.T) {
 				Action: func() {
 					framework.failsafeJIT.SetFailureMode(failsafe.JITFailureModeAutoRevoke)
 					op := framework.testJITAccessInDegradedMode(ctx, "degraded-user-low", false)
+					framework.recordDegradedOperation(op)
+				},
+			},
+			{
+				Component: "Network",
+				Action: func() {
+					// Set up graceful degradation mode and cache admin policy
+					framework.failsafeNetwork.SetPartitionMode(failsafe.PartitionModeGracefulDegradation)
+
+					// First cache the admin's permission (must happen BEFORE partition)
+					cacheRequest := &common.AccessRequest{
+						SubjectId:    "degraded-admin",
+						PermissionId: "config.read",
+						TenantId:     "degraded-tenant",
+						ResourceId:   "partition-resource",
+					}
+					_, _ = framework.failsafeNetwork.CheckPermission(ctx, cacheRequest)
+
+					// Now force network partition
+					framework.failsafeNetwork.ForcePartitioned()
+
+					// Test graceful degradation with cached policy
+					op := framework.testNetworkPartitionTolerance(ctx, "degraded-admin", "config.read", failsafe.PartitionModeGracefulDegradation)
 					framework.recordDegradedOperation(op)
 				},
 			},

@@ -63,13 +63,12 @@ This directory contains detailed development guides, standards, and workflows fo
 
 ## Slash Commands (Automated Workflow)
 
-For automated development workflow, use the slash commands documented in `/.claude/slash-commands/`:
+For automated development workflow, use the slash commands documented in `.claude/commands/`:
 
 - `/story-start` - Begin new story with pre-flight checks
 - `/story-commit` - Commit with validation and progress tracking
-- `/story-complete` - Complete story with PR creation
+- `/story-complete` - Complete story with parallel team review and PR creation
 - `/pr-review [number]` - Execute structured PR review
-- `/dev-status` - Quick development environment status
 
 See [CLAUDE.md](../../CLAUDE.md) for complete slash command documentation.
 

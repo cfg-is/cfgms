@@ -23,22 +23,49 @@ CFGMS (Config Management System) is a modern, Go-based configuration management 
 
 ## Development Workflow
 
-### Slash Commands (Automated Workflow)
+### Slash Commands (MANDATORY)
 
-Use these commands to enforce mandatory development workflow:
+**CRITICAL**: You MUST use these slash commands for ALL development work. Manual workflows are deprecated and prone to missing critical validation steps.
 
-- **`/story-start`** - Begin new story with pre-flight checks and roadmap auto-detection
-- **`/story-commit`** - Commit with validation and GitHub issue progress tracking
-- **`/story-complete`** - Complete story with final validation gates and PR creation
-- **`/pr-review [number]`** - Execute structured 5-phase PR review methodology
-- **`/dev-status`** - Quick development environment and current story status
+**Required Commands:**
+- **`/story-start`** - MUST use to begin new story with pre-flight checks and roadmap auto-detection
+- **`/story-commit`** - MUST use for all commits with validation and GitHub issue progress tracking
+- **`/story-complete`** - MUST use to complete story with parallel adversarial team review (QA + Security agents) and PR creation
+- **`/pr-review [number]`** - MUST use to execute structured 6-phase PR review methodology with CI verification
 
-See `.claude/slash-commands/` for complete documentation.
+**Why Mandatory:**
+- Prevents broken tests from reaching develop branch
+- Ensures consistent validation across all commits
+- Verifies GitHub Actions CI status before PR approval
+- Maintains zero-tolerance quality gates
+- Provides progress tracking and audit trail
+
+See `.claude/commands/` for complete documentation.
+
+### Git Hooks Installation (MANDATORY - First Time Setup)
+
+**CRITICAL**: Before starting development, install git hooks to enforce validation:
+
+```bash
+./scripts/install-git-hooks.sh
+```
+
+**What This Installs:**
+- `pre-push` hook - Runs `make test` before every push to remote
+- Prevents broken tests from reaching remote branches
+- Provides fast feedback (2-5 minutes) before CI runs
+
+**Why Mandatory:**
+- Last line of defense against pushing broken code
+- Catches issues before GitHub Actions CI (saves time)
+- Enforces zero-tolerance policy automatically
+- Can be bypassed with `--no-verify` in emergencies (not recommended)
 
 ### Critical Development Rules (MANDATORY)
 
 #### Zero Tolerance Policies
 
+- **Git Hooks Installed**: MUST install git hooks before first commit (see above)
 - **No Failing Tests**: Cannot start new work or commit with ANY test failures
 - **Security Gates**: All security scans must pass before commits
 - **Feature Branches**: Always use `feature/story-[NUMBER]-[description]` branches
@@ -60,17 +87,30 @@ See `.claude/slash-commands/` for complete documentation.
 - **Import Rule**: Business logic imports `pkg/storage/interfaces` ONLY
 - **Prohibited**: Cleartext secrets on disk (even in development)
 
-### Manual Workflow (When Not Using Slash Commands)
+### ⚠️ Manual Workflow (DEPRECATED - DO NOT USE)
 
-#### Essential Steps
+**IMPORTANT**: Manual workflows are DEPRECATED as of Story #292 (workflow enforcement). Direct use of git/make commands bypasses critical validation gates.
 
-1. **Pre-flight**: Run `make test` - must pass 100% before starting
+**Known Issues with Manual Workflow:**
+- ❌ No automated pre-flight validation before starting work
+- ❌ Easy to forget `make test-commit` before commits
+- ❌ No GitHub Actions CI verification before PR approval
+- ❌ Missing progress tracking and audit trail
+- ❌ Allows broken tests to reach develop (root cause of workflow breakdown)
+
+**If You Must Use Manual Commands** (emergency only):
+1. **Pre-flight**: Run `make test` - MUST pass 100% before starting
 2. **Branch**: Create `feature/story-[NUMBER]-[description]` from develop
 3. **Develop**: Write tests first, implement with TDD approach
-4. **Commit**: Run `make test-commit` - blocks on any failures
-5. **Complete**: Create PR **targeting develop** (`gh pr create --base develop`) and update project status
+4. **Commit**: Run `make test-commit` - MUST pass before commit
+5. **Complete**: Run `make test-complete` - MUST pass 100% before PR
+6. **PR Creation**: Create PR **targeting develop** (`gh pr create --base develop`)
+7. **CI Verification**: WAIT for GitHub Actions CI - MUST be green before merge
+8. **Project Updates**: Manually update GitHub project status and roadmap
 
-See [docs/development/story-checklist.md](docs/development/story-checklist.md) for complete manual checklist.
+**Recommendation**: Use slash commands instead. They automate all these steps and prevent human error.
+
+See [docs/development/story-checklist.md](docs/development/story-checklist.md) for historical reference.
 
 ### Branch Protection & Required Checks
 
@@ -80,7 +120,11 @@ The `develop` branch uses direct required status checks to prevent merging witho
 
 **Required Checks** (all must pass):
 - `unit-tests` - Core functionality validation (fast, ~3-5 min)
-- `Build Gate` - Cross-platform compilation verification (~3-5 min)
+- `integration-tests` - Fast comprehensive + production-critical tests (~5-10 min)
+- `Build Gate` - Cross-platform compilation + integration tests (~10-15 min total)
+  - Cross-platform compilation verification
+  - Native builds (Linux, macOS, Windows)
+  - Docker integration tests (storage, controller, MQTT+QUIC)
 - `security-deployment-gate` - Security vulnerability blocking (~6-10 min)
 
 **Configuration**:
@@ -104,6 +148,130 @@ The `develop` branch uses direct required status checks to prevent merging witho
 - ❌ Could fail when running before other checks completed
 - ❌ Didn't work reliably for PR branches
 - ✅ Replaced with direct required checks (GitHub's recommended approach)
+
+## Git Messages & PR Standards
+
+### Core Principle: FACTS ONLY
+
+**CRITICAL**: Everything in commit/PR messages must be provable fact from actual measurements, not estimates or aspirations.
+
+**✅ GOOD:** "Reduced max latency from 5.4ms to 34µs (measured in test run)"
+**❌ BAD:** "Should reduce latency by ~50%" (not measured)
+
+**When in doubt:** Either measure it or don't claim it.
+
+### Commit Messages
+
+**Format:** `<scope>: <what changed> (Issue #XXX)`
+**Length:** 15-25 lines for significant changes
+
+**Rules:**
+- **Title**: Imperative mood ("Fix" not "Fixed"), lowercase after colon, no period
+- **Body**: Explain WHY (problem + solution context), then FACTS with citations
+- **Changes**: 3-5 bullets of key modifications
+- **Footer**: `Fixes #XXX` and `Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>`
+
+**Example:**
+```
+features/rbac: eliminate statistics lock contention (Issue #355)
+
+The zero-trust policy engine used mutex-based statistics tracking.
+Under concurrent load (50 goroutines), this caused serialization
+where goroutine #50 waited 5ms while earlier goroutines held the
+lock for 100ns each. This was causing performance test failures.
+
+Replaced mutex with atomic operations (atomic.Int64, CAS loop for
+EMA). Performance test results show:
+- Concurrent max: 5.421ms → 34.093µs (measured in test output)
+- Average: 77µs → 5.658µs (50 iterations)
+- 100% success rate: 50/50 requests completed
+
+Changes:
+- Convert ZeroTrustStats fields to atomic.Int64/Uint64
+- Replace mutex.Lock() with atomic.Add() for counters
+- Use CAS loop for exponential moving average updates
+- Restore 5ms timeout in performance tests (was 10ms)
+
+Fixes #355
+Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>
+```
+
+### Pull Request Descriptions
+
+**Length:** 60-80 lines for significant changes
+
+**Rules:**
+- **Summary**: 2-3 sentences with measured impact and actual numbers
+- **Problem Context**: 1-2 paragraphs explaining WHY (enough context to avoid clicking through)
+- **Changes**: 3-5 bullets of key technical changes (no code examples)
+- **Measured Impact**: FACTS ONLY - cite test names, use table for 4+ metrics
+- **Testing**: What was tested + pass/fail status
+
+**Anti-patterns to avoid:**
+- ❌ Speculation ("should", "approximately", "estimated")
+- ❌ Code dumps (trust the diff)
+- ❌ Implementation lectures (belongs in code comments)
+- ❌ Repetition (say things once)
+
+**Example:**
+```markdown
+## Summary
+
+Replaces mutex-based statistics with atomic operations in zero-trust
+policy engine. Under concurrent load (50 goroutines), eliminates
+serialization that caused 5.4ms max latency. Test results show max
+latency reduced to 34µs.
+
+## Problem Context
+
+The zero-trust policy engine tracked statistics using mutex-protected
+counters. When 50 goroutines evaluated access concurrently, each
+waited for exclusive lock access to increment counters. This created
+serialization where goroutine #50 waited 5ms while earlier goroutines
+held the lock for ~100ns each.
+
+PR #353 worked around this by relaxing timeout from 5ms to 10ms, but
+this was a band-aid that masked the root cause.
+
+## Changes
+
+- Convert ZeroTrustStats fields to atomic.Int64/atomic.Uint64
+- Remove sync.RWMutex, use atomic.Add() for counter increments
+- Implement CAS loop for exponential moving average calculation
+- Create ZeroTrustStatsSnapshot for backward-compatible public API
+- Restore 5ms timeout in performance test
+
+## Measured Impact
+
+Test: TestZeroTrustPolicyEvaluationPerformance/Concurrent
+- Max latency: 5.421ms → 34.093µs (159x improvement)
+- Average: 77µs → 5.658µs (13x improvement)
+- Success rate: 50/50 requests (100%)
+
+All measurements from actual test output in test-complete run.
+
+## Testing
+
+Scenarios tested:
+- Concurrent load: 50 goroutines evaluating simultaneously
+- Sequential batch: 10, 50, 100 request batches
+- Sustained load: 478 requests over 5 seconds
+
+Results:
+✅ All validation passed (test-complete)
+✅ Performance requirements met (<5ms timeout)
+✅ Zero test failures
+
+Fixes #355
+```
+
+### Pre-Commit Checklist
+
+- [ ] **Facts verified**: All performance claims from actual measurements
+- [ ] **Sources cited**: Test names or benchmark references included
+- [ ] **No speculation**: No "should", "approximately", "estimated"
+- [ ] **No code dumps**: Let the diff show code changes
+- [ ] **Issue linked**: `Fixes #XXX` or `Part of #XXX`
 
 ## Essential Commands
 
@@ -144,6 +312,14 @@ make test-integration  # M365 + storage integration tests
 See [docs/development/commands-reference.md](docs/development/commands-reference.md) for all commands.
 
 ## Core Architecture
+
+### Operating Model (IMPORTANT)
+
+The operating model documents define how CFGMS behaves at runtime. Every steward or controller feature should be consistent with these docs. **Consult them before implementing changes to steward or controller behavior.**
+
+- **System-level**: [docs/architecture/operating-model.md](docs/architecture/operating-model.md) — component roles, communication model, failure modes, deployment modes
+- **Steward**: [docs/architecture/steward-operating-model.md](docs/architecture/steward-operating-model.md) — convergence loop, module contract, DNA sync, self-awareness, reporting, offline queueing
+- **Controller**: [docs/architecture/controller-operating-model.md](docs/architecture/controller-operating-model.md) — first-run vs startup, cfg management, fleet management, orchestration, workflow engine, identity, multi-tenancy
 
 ### System Design
 
@@ -227,7 +403,7 @@ See [MQTT+QUIC Testing Strategy](docs/testing/mqtt-quic-testing-strategy.md) for
 - **Direct** (no `interfaces/`) - Single implementation, direct import (exceptions only)
 - See `pkg/README.md` for detailed decision tree and exceptions
 
-**Current Central Providers** (as of Story #239):
+**Current Central Providers** (as of Story #267.5):
 
 **Pluggable Providers** (Multiple Implementations):
 
@@ -235,20 +411,29 @@ See [MQTT+QUIC Testing Strategy](docs/testing/mqtt-quic-testing-strategy.md) for
 2. **`pkg/logging`** - Structured logging (file, timescale)
 3. **`pkg/secrets`** - Secret storage with encryption (SOPS backend)
 4. **`pkg/directory`** - Directory services (M365, Active Directory)
-5. **`pkg/mqtt`** - MQTT broker abstraction (mochi-mqtt)
+5. **`pkg/mqtt`** - MQTT broker abstraction (mochi-mqtt) - *broker infrastructure only*
+6. **`pkg/controlplane`** - Control plane communication (MQTT provider) - commands, events, heartbeats
+7. **`pkg/dataplane`** - Data plane communication (QUIC provider) - config sync, DNA sync, bulk transfers
 
 **Direct Providers** (Single Implementation - Candidates for Pluggable Migration):
-6. **`pkg/cert`** - Certificate/TLS management (could support: Internal CA, Let's Encrypt, Vault, PKI)
-7. **`pkg/telemetry`** - Observability (could support: OpenTelemetry, Datadog, New Relic, Prometheus)
-8. **`pkg/cache`** - Write-through caching (could support: Memory, Redis, Memcached)
-9. **`pkg/session`** - Session management (could support: Memory, Redis, Database, JWT-stateless)
-10. **`pkg/registration`** - Steward registration
-11. **`pkg/monitoring`** - Health monitoring
-12. **`pkg/maintenance`** - Maintenance window scheduling
-13. **`pkg/security`** - Security utilities (input validation)
-14. **`pkg/quic`** - QUIC protocol support
+8. **`pkg/cert`** - Certificate/TLS management (could support: Internal CA, Let's Encrypt, Vault, PKI)
+9. **`pkg/telemetry`** - Observability (could support: OpenTelemetry, Datadog, New Relic, Prometheus)
+10. **`pkg/cache`** - Write-through caching (could support: Memory, Redis, Memcached)
+11. **`pkg/session`** - Session management (could support: Memory, Redis, Database, JWT-stateless)
+12. **`pkg/registration`** - Steward registration
+13. **`pkg/monitoring`** - Health monitoring
+14. **`pkg/maintenance`** - Maintenance window scheduling
+15. **`pkg/security`** - Security utilities (input validation)
+
+**Deprecated** (use providers above instead):
+- **`pkg/mqtt/client`** → use `pkg/controlplane/interfaces` (Story #267.5)
+- **`pkg/mqtt/types`** → use `pkg/controlplane/types` (Story #267.5)
+- **`pkg/quic/client`** → use `pkg/dataplane/interfaces` (Story #267.5)
+- **`pkg/quic/session`** → use `pkg/dataplane/interfaces` (Story #267.5)
+- **`pkg/quic/server`** → internal infrastructure for data plane provider only
 
 *Note: Direct providers listed above should be evaluated for pluggable migration when adding second implementation or during major refactoring.*
+*See [Communication Layer Migration Guide](docs/architecture/communication-layer-migration.md) for migration details.*
 
 **Not Providers** (Utilities):
 
@@ -352,6 +537,9 @@ docs/          # Comprehensive documentation
 - **Creating custom cache implementations** - Use `pkg/cache.Cache` with TTL and eviction
 - **Manual certificate loading** - Use `pkg/cert.LoadTLSCertificate()` instead of `tls.LoadX509KeyPair()`
 - **Manual CA pool creation** - TLS helpers handle this automatically
+- **Direct MQTT client/types imports** - Use `pkg/controlplane/interfaces` and `pkg/controlplane/types` instead of `pkg/mqtt/client` or `pkg/mqtt/types`
+- **Direct QUIC client/session imports** - Use `pkg/dataplane/interfaces` instead of `pkg/quic/client` or `pkg/quic/session`
+- **Logging unsanitized user input** - Use `logging.SanitizeLogValue()` for HTTP params, URL paths, headers
 
 ## Quick Reference
 
@@ -362,6 +550,9 @@ docs/          # Comprehensive documentation
 - **All Commands**: [docs/development/commands-reference.md](docs/development/commands-reference.md)
 - **Git Workflow**: [docs/development/git-workflow.md](docs/development/git-workflow.md)
 - **Architecture**: [docs/architecture/](docs/architecture/)
+- **Operating Model (System)**: [docs/architecture/operating-model.md](docs/architecture/operating-model.md)
+- **Operating Model (Steward)**: [docs/architecture/steward-operating-model.md](docs/architecture/steward-operating-model.md)
+- **Operating Model (Controller)**: [docs/architecture/controller-operating-model.md](docs/architecture/controller-operating-model.md)
 - **Roadmap**: [docs/product/roadmap.md](docs/product/roadmap.md)
 
 ### Project Management
@@ -379,12 +570,22 @@ docs/          # Comprehensive documentation
 
 ## Multi-Tenancy & Configuration
 
-The system implements recursive parent-child tenant model:
+The system implements a **recursive parent-child tenant model** with arbitrary depth:
 
-- **Hierarchical Inheritance**: MSP → Client → Group → Device (4 levels)
-- **Declarative Merging**: Named resources replace entire blocks
-- **Source Tracking**: Full auditability of configuration sources
-- **Scale**: Designed for 50k+ Stewards across multiple regions
+- **Recursive Hierarchy**: Every tenant has an ID and an optional parent ID. No fixed levels — "MSP → Client → Group → Device" is a convention, not a structural limit. Tenants can nest to any depth.
+- **Path-Based Identification**: Tenants are identified by path (e.g., `root/msp-a/client-1/servers`). Prefix matching enables efficient targeting across subtrees.
+- **Recursive Cfg Inheritance**: Configuration resolves from root to leaf. Any level can override inherited settings. Named resources replace entire blocks (declarative merging).
+- **Source Tracking**: Full auditability — every config value carries its source tenant path and version.
+- **Scale**: Designed for 50k+ Stewards across multiple regions.
+
+### Licensing Boundary: Single-Root vs Multi-Root (IMPORTANT)
+
+**This is the Apache vs Elastic licensing line for multi-tenancy.** Developers must be aware of this when building tenant-related features.
+
+- **Apache (OSS)**: **Single root tenant tree.** One MSP operates their own controller with unlimited hierarchy depth. All multi-tenancy code that operates within a single root tree is Apache-licensed.
+- **Elastic (Commercial)**: **Multi-root / platform mode.** Multiple independent MSP trees under a platform tenant (e.g., cfg.is hosting hundreds of MSPs). Code that enables multi-root isolation, per-MSP resource scheduling, cross-MSP billing, and platform-level management is Elastic-licensed.
+
+When building a feature, ask: "Does this work within a single tenant tree, or does it require awareness of multiple independent roots?" Single-tree = Apache. Multi-root = Elastic.
 
 ## Dependencies
 
@@ -396,4 +597,4 @@ The system implements recursive parent-child tenant model:
 
 ---
 
-*For complete development workflow automation, use the slash commands in `.claude/slash-commands/`. For manual processes, see the detailed guides in `docs/development/`.*
+*For complete development workflow automation, use the slash commands in `.claude/commands/`. For manual processes, see the detailed guides in `docs/development/`.*

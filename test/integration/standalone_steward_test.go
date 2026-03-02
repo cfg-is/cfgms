@@ -433,5 +433,7 @@ resources:
 }
 
 func TestStandaloneSteward(t *testing.T) {
+	t.Parallel()
+
 	suite.Run(t, new(StandaloneStewardTestSuite))
 }

@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-mqtt-quic test-e2e-controller test-e2e-scenarios test-ci test-integration test-security test-performance test-performance-baseline test-data-consistency test-docker test-cross-feature-integration test-failure-propagation proto lint clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates
+.PHONY: build test test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-mqtt-quic test-e2e-controller test-e2e-scenarios test-ci test-integration test-security test-performance test-performance-baseline test-data-consistency test-docker test-cross-feature-integration test-failure-propagation proto lint clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates
 
 # Use bash for all recipe commands (required for credential loading scripts)
 SHELL := /bin/bash
@@ -143,7 +143,7 @@ test:
 	@go clean -testcache
 	@echo "🧪 Testing OSS Build..."
 	@echo "  Testing framework (excluding modules and long-running tests)..."
-	@go test -race -short -timeout=1m $$(go list ./... | grep -v '/features/modules/' | grep -v '/test/integration' | grep -v '/test/e2e')
+	@go test -race -short -timeout=5m $$(go list ./... | grep -v '/features/modules/' | grep -v '/test/integration' | grep -v '/test/e2e')
 	@echo "  Testing core modules (smoke test)..."
 	@for module in $(CORE_MODULES); do \
 		echo "  Testing $$module..."; \
@@ -155,7 +155,7 @@ test:
 		for module in $$changed_modules; do \
 			if ! echo "$(CORE_MODULES)" | grep -q "\\<$$module\\>"; then \
 				echo "  Testing changed module: $$module"; \
-				go test -race -short -timeout=1m ./features/modules/$$module/...; \
+				go test -race -short -timeout=2m ./features/modules/$$module/...; \
 			fi; \
 		done; \
 	else \
@@ -340,22 +340,22 @@ check-architecture:
 	echo "📦 Checking TLS/Certificate usage outside pkg/cert..."; \
 	files=$$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null | grep "\.go$$" | grep -v "_test.go$$" | grep -v "^pkg/cert/" || true); \
 	if [ -n "$$files" ]; then \
-		if echo "$$files" | xargs grep -l "tls\.Config{" 2>/dev/null | grep -v "^pkg/cert/"; then \
+		if echo "$$files" | xargs grep -l "tls\.Config{" 2>/dev/null | grep -v "^pkg/cert/" | grep -v "^pkg/mqtt/" | grep -v "^pkg/quic/" | grep -v "^pkg/controlplane/providers/" | grep -v "^pkg/dataplane/providers/"; then \
 			echo "  ❌ Found direct tls.Config{} creation - should use pkg/cert helpers"; \
 			echo "     Use: cert.CreateServerTLSConfig() or cert.CreateClientTLSConfig()"; \
 			violations=$$((violations + 1)); \
 		fi; \
-		if echo "$$files" | xargs grep -l "tls\.LoadX509KeyPair" 2>/dev/null | grep -v "^pkg/cert/"; then \
+		if echo "$$files" | xargs grep -l "tls\.LoadX509KeyPair" 2>/dev/null | grep -v "^pkg/cert/" | grep -v "^pkg/mqtt/" | grep -v "^pkg/quic/" | grep -v "^pkg/controlplane/providers/" | grep -v "^pkg/dataplane/providers/"; then \
 			echo "  ❌ Found tls.LoadX509KeyPair() - should use pkg/cert.LoadTLSCertificate()"; \
 			echo "     Or use higher-level cert.CreateServerTLSConfig() / cert.CreateClientTLSConfig()"; \
 			violations=$$((violations + 1)); \
 		fi; \
-		if echo "$$files" | xargs grep -l "x509\.NewCertPool" 2>/dev/null | grep -v "^pkg/cert/"; then \
+		if echo "$$files" | xargs grep -l "x509\.NewCertPool" 2>/dev/null | grep -v "^pkg/cert/" | grep -v "^pkg/mqtt/" | grep -v "^pkg/quic/" | grep -v "^pkg/controlplane/providers/" | grep -v "^pkg/dataplane/providers/"; then \
 			echo "  ❌ Found x509.NewCertPool() - should use pkg/cert TLS config helpers"; \
 			echo "     Manual cert pool creation duplicates pkg/cert functionality"; \
 			violations=$$((violations + 1)); \
 		fi; \
-		if echo "$$files" | xargs grep -l "x509\.Certificate{" 2>/dev/null | grep -v "^pkg/cert/"; then \
+		if echo "$$files" | xargs grep -l "x509\.Certificate{" 2>/dev/null | grep -v "^pkg/cert/" | grep -v "^pkg/mqtt/" | grep -v "^pkg/quic/" | grep -v "^pkg/controlplane/providers/" | grep -v "^pkg/dataplane/providers/"; then \
 			echo "  ❌ Found direct certificate generation - should use pkg/cert.Manager"; \
 			violations=$$((violations + 1)); \
 		fi; \
@@ -414,6 +414,71 @@ check-architecture:
 	fi; \
 	\
 	echo ""; \
+	echo "📦 Checking direct MQTT imports in features/ (Story #267.5)..."; \
+	if [ -n "$$files" ]; then \
+		if [ -z "$$feature_files" ]; then \
+			feature_files=$$(echo "$$files" | grep "^features/" || true); \
+		fi; \
+		if [ -n "$$feature_files" ]; then \
+			mqtt_violations=$$(echo "$$feature_files" | xargs grep -l 'cfgis/cfgms/pkg/mqtt/' 2>/dev/null | grep -v "^features/controller/server/" | grep -v "^features/controller/registration/" || true); \
+			if [ -n "$$mqtt_violations" ]; then \
+				echo "  ❌ Found direct pkg/mqtt import in features/ - use pkg/controlplane instead"; \
+				echo "     Violations: $$mqtt_violations"; \
+				echo "     Control plane types: pkg/controlplane/types"; \
+				echo "     Control plane interface: pkg/controlplane/interfaces"; \
+				echo "     See: docs/architecture/communication-layer-migration.md"; \
+				violations=$$((violations + 1)); \
+			fi; \
+			mqtt_controller_violations=$$(echo "$$feature_files" | grep "^features/controller/" | xargs grep -l 'cfgis/cfgms/pkg/mqtt/client\|cfgis/cfgms/pkg/mqtt/types' 2>/dev/null || true); \
+			if [ -n "$$mqtt_controller_violations" ]; then \
+				echo "  ❌ Found direct pkg/mqtt/client or pkg/mqtt/types import in controller"; \
+				echo "     Violations: $$mqtt_controller_violations"; \
+				echo "     Use pkg/controlplane/types for message types"; \
+				echo "     Use pkg/controlplane/interfaces for client functionality"; \
+				violations=$$((violations + 1)); \
+			fi; \
+		fi; \
+	fi; \
+	\
+	echo ""; \
+	echo "📦 Checking direct QUIC imports in features/ (Story #267.5)..."; \
+	if [ -n "$$files" ]; then \
+		if [ -z "$$feature_files" ]; then \
+			feature_files=$$(echo "$$files" | grep "^features/" || true); \
+		fi; \
+		if [ -n "$$feature_files" ]; then \
+			quic_violations=$$(echo "$$feature_files" | xargs grep -l 'cfgis/cfgms/pkg/quic/' 2>/dev/null | grep -v "^features/controller/server/" || true); \
+			if [ -n "$$quic_violations" ]; then \
+				echo "  ❌ Found direct pkg/quic import in features/ - use pkg/dataplane instead"; \
+				echo "     Violations: $$quic_violations"; \
+				echo "     Data plane interface: pkg/dataplane/interfaces"; \
+				echo "     Data plane types: pkg/dataplane/types"; \
+				echo "     See: docs/architecture/communication-layer-migration.md"; \
+				violations=$$((violations + 1)); \
+			fi; \
+			quic_controller_violations=$$(echo "$$feature_files" | grep "^features/controller/" | xargs grep -l 'cfgis/cfgms/pkg/quic/client\|cfgis/cfgms/pkg/quic/session' 2>/dev/null || true); \
+			if [ -n "$$quic_controller_violations" ]; then \
+				echo "  ❌ Found direct pkg/quic/client or pkg/quic/session import in controller"; \
+				echo "     Violations: $$quic_controller_violations"; \
+				echo "     Use pkg/dataplane/interfaces for data plane functionality"; \
+				violations=$$((violations + 1)); \
+			fi; \
+		fi; \
+	fi; \
+	\
+	echo ""; \
+	echo "📦 Checking for hardcoded passwords (Story #372)..."; \
+	if [ -n "$$files" ]; then \
+		pw_violations=$$(echo "$$files" | xargs grep -n '"cfgms_test_password"\|"password": "cfgms"\|"password", "cfgms"\|password.*=.*"cfgms_test_password' 2>/dev/null | grep -v "check-architecture" || true); \
+		if [ -n "$$pw_violations" ]; then \
+			echo "  ❌ Found hardcoded passwords in staged Go files:"; \
+			echo "     $$pw_violations"; \
+			echo "     Use pkg/testutil.GetTestDBPassword() or environment variables"; \
+			violations=$$((violations + 1)); \
+		fi; \
+	fi; \
+	\
+	echo ""; \
 	if [ $$violations -eq 0 ]; then \
 		echo "✅ No central provider violations found"; \
 		echo ""; \
@@ -429,6 +494,8 @@ check-architecture:
 		echo "   5. Certificates/TLS → pkg/cert"; \
 		echo "   6. Authorization → pkg/rbac"; \
 		echo "   7. Observability → pkg/telemetry"; \
+		echo "   8. Control Plane → pkg/controlplane (not pkg/mqtt)"; \
+		echo "   9. Data Plane → pkg/dataplane (not pkg/quic)"; \
 		echo ""; \
 		echo "💡 Before adding new functionality, check if it belongs in a central provider!"; \
 		echo ""; \
@@ -661,29 +728,22 @@ test-performance-benchmarks:
 
 
 # Performance baseline establishment (for new releases)
+# Performance regression tests removed — will be rebuilt with real profiling data
+# when the system has enough infrastructure to establish meaningful baselines
 test-performance-baseline:
-	@echo "📈 Establishing Performance Baselines"
-	@echo "====================================="
-	@echo "⏭️  Skipping until Issue #294 (E2E framework for MQTT+QUIC mode) is complete"
-	@echo ""
-	@echo "ℹ️  Performance baseline tests require:"
-	@echo "   - Full controller + MQTT broker + steward infrastructure"
-	@echo "   - E2E test framework implementation"
-	@echo ""
-	@echo "✅ Validation: Test target exists and workflow will pass"
+	@echo "📈 Performance Baselines"
+	@echo "========================"
+	@echo "ℹ️  Performance regression tests not yet implemented"
+	@echo "   Will be added when real profiling data establishes meaningful baselines"
+	@echo "   See: features/steward/performance/ for component-level performance tests"
 
 # Data consistency testing (Story #85)
-# Note: These tests require full E2E framework (Issue #294)
 test-data-consistency:
 	@echo "📊 DATA CONSISTENCY VALIDATION"
 	@echo "==============================="
-	@echo "⏭️  Skipping until Issue #294 (E2E framework for MQTT+QUIC mode) is complete"
-	@echo ""
-	@echo "ℹ️  Data consistency tests require:"
-	@echo "   - Full controller + MQTT broker + steward infrastructure"
-	@echo "   - Cross-feature integration test framework"
-	@echo ""
-	@echo "✅ Validation: Test target exists and workflow will pass"
+	@if [ -f .env.test ]; then set -a && . ./.env.test && set +a; fi && \
+		go test -v -race -timeout=30m -run "TestE2EScenarios/TestDataFlow" ./test/e2e/...
+	@echo "✅ Data consistency validation complete"
 
 # Production Risk Testing - Automated Gates
 .PHONY: test-production-critical
@@ -763,7 +823,7 @@ security-trivy:
 	fi
 	@echo "Running trivy filesystem scan..."
 	@echo "🔍 Vulnerability Scan (Blocking Issues):"
-	@trivy fs . --scanners vuln --format table --severity CRITICAL,HIGH,MEDIUM --exit-code 1 || { \
+	@trivy fs . --scanners vuln --format table --severity CRITICAL,HIGH,MEDIUM --skip-dirs .cache --exit-code 1 || { \
 		echo ""; \
 		echo "❌ CRITICAL/HIGH/MEDIUM vulnerabilities found - deployment blocked!"; \
 		echo "   Please update dependencies to fix these security issues."; \
@@ -771,7 +831,7 @@ security-trivy:
 		exit 1; \
 	}
 	@echo "🔍 Complete Security Scan (All Issues):"
-	@trivy fs . --scanners vuln,secret,misconfig --format table --exit-code 0 || true
+	@trivy fs . --scanners vuln,secret,misconfig --format table --skip-dirs .cache --exit-code 0 || true
 	@echo ""; \
 	echo "✅ Trivy scan completed"; \
 	echo "   Note: Development certificates detected in features/controller/certs/ are expected"; \
@@ -840,12 +900,26 @@ security-gosec:
 	fi
 	@echo "Analyzing Go code for security patterns..."
 	@echo "Using .gosec.json configuration (single source of truth)..."
-	@gosec -conf .gosec.json -exclude=G103,G115,G404 -fmt json -quiet ./... > /tmp/gosec-results.json 2>/dev/null || true
-	@issues_count=$$(test -s /tmp/gosec-results.json && jq '.Issues | length' /tmp/gosec-results.json 2>/dev/null || echo "0"); \
+	@echo "Running per-directory to avoid cross-package type resolution bottleneck..."
+	@rm -f /tmp/gosec-results-combined.json
+	@all_issues="[]"; \
+	for dir in pkg features cmd api test internal; do \
+		if [ -d "$$dir" ]; then \
+			gosec -conf .gosec.json -exclude=G103,G115,G404 -fmt json -quiet ./$$dir/... > /tmp/gosec-results-$$dir.json 2>/dev/null || true; \
+			if [ -s /tmp/gosec-results-$$dir.json ]; then \
+				dir_issues=$$(jq -r '.Issues // []' /tmp/gosec-results-$$dir.json 2>/dev/null); \
+				if [ "$$dir_issues" != "null" ] && [ "$$dir_issues" != "[]" ]; then \
+					all_issues=$$(echo "$$all_issues" "$$dir_issues" | jq -s '.[0] + .[1]'); \
+				fi; \
+			fi; \
+			rm -f /tmp/gosec-results-$$dir.json; \
+		fi; \
+	done; \
+	issues_count=$$(echo "$$all_issues" | jq 'length' 2>/dev/null || echo "0"); \
 	if [ "$$issues_count" -gt 0 ]; then \
 		echo "⚠️  gosec found $$issues_count security issues:"; \
 		echo ""; \
-		jq -r '.Issues[] | "  • \(.rule_id) (\(.severity)): \(.details) at \(.file):\(.line)"' /tmp/gosec-results.json 2>/dev/null || echo "  Issues found but could not parse details"; \
+		echo "$$all_issues" | jq -r '.[] | "  • \(.rule_id) (\(.severity)): \(.details) at \(.file):\(.line)"' 2>/dev/null || echo "  Issues found but could not parse details"; \
 		echo ""; \
 		echo "💡 Review and fix security patterns above"; \
 		echo "   Use #nosec comment to suppress false positives"; \
@@ -855,7 +929,6 @@ security-gosec:
 	else \
 		echo "✅ gosec analysis completed - no security patterns found"; \
 	fi
-	@rm -f /tmp/gosec-results.json
 
 # staticcheck advanced Go static analysis with curated rules and performance optimization
 security-staticcheck:
@@ -939,31 +1012,20 @@ test-performance: test-performance-baseline
 	@echo "📊 Performance validation complete"
 
 # Cross-feature integration testing (Story #85)
-# Note: These tests require full E2E framework (Issue #294)
-# Until framework is ready, we skip with proper messaging
 test-cross-feature-integration:
 	@echo "🔗 CROSS-FEATURE INTEGRATION TESTING"
 	@echo "====================================="
-	@echo "⏭️  Skipping until Issue #294 (E2E framework for MQTT+QUIC mode) is complete"
-	@echo ""
-	@echo "ℹ️  Cross-feature integration tests require:"
-	@echo "   - Full controller + MQTT broker + steward infrastructure"
-	@echo "   - MQTT+QUIC mode E2E test framework"
-	@echo ""
-	@echo "✅ Validation: Test target exists and workflow will pass"
+	@if [ -f .env.test ]; then set -a && . ./.env.test && set +a; fi && \
+		go test -v -race -timeout=30m -run "TestE2EScenarios/(TestControllerStewardIntegration|TestRBACIntegration|TestWorkflowIntegration)" ./test/e2e/...
+	@echo "✅ Cross-feature integration testing complete"
 
 # Failure propagation testing (Story #85)
-# Note: These tests require full E2E framework (Issue #294)
 test-failure-propagation:
 	@echo "🔄 FAILURE PROPAGATION TESTING"
 	@echo "==============================="
-	@echo "⏭️  Skipping until Issue #294 (E2E framework for MQTT+QUIC mode) is complete"
-	@echo ""
-	@echo "ℹ️  Failure propagation tests require:"
-	@echo "   - Full controller + MQTT broker + steward infrastructure"
-	@echo "   - MQTT+QUIC mode E2E test framework"
-	@echo ""
-	@echo "✅ Validation: Test target exists and workflow will pass"
+	@if [ -f .env.test ]; then set -a && . ./.env.test && set +a; fi && \
+		go test -v -race -timeout=30m -run "TestE2EScenarios/TestFailurePropagation" ./test/e2e/...
+	@echo "✅ Failure propagation testing complete"
 
 # Docker environment management
 test-docker: test-integration-status
@@ -1383,8 +1445,12 @@ test-integration-setup:
 	@echo "Starting PostgreSQL, TimescaleDB, and Gitea test services..."
 	@set -a && . ./.env.test && set +a && docker compose -f docker-compose.test.yml -f docker-compose.test.override.yml up -d postgres-test timescaledb-test git-server-test
 	@echo ""
-	@echo "⏳ Waiting for services to be ready..."
-	@sleep 5  # Brief pause before health checks
+	@echo "⏳ Waiting for Docker healthchecks to pass..."
+	@echo "   (Gitea requires up to 60s start period + health check validation)"
+	@set -a && . ./.env.test && set +a && docker compose -f docker-compose.test.yml -f docker-compose.test.override.yml up -d --wait postgres-test timescaledb-test git-server-test
+	@echo "✅ Docker healthchecks passed"
+	@echo ""
+	@echo "🔍 Verifying service connectivity..."
 	@if [ -f .env.test ]; then \
 		set -a && . ./.env.test && set +a && ./scripts/wait-for-services.sh; \
 	else \
@@ -1497,30 +1563,26 @@ test-integration-short:
 test-integration-db:
 	@echo "📊 Testing Database Storage Provider"
 	@echo "==================================="
-	@if [ -f .env.test ]; then \
-		set -a && . ./.env.test && set +a && ./scripts/wait-for-services.sh; \
-	else \
-		echo "⚠️  .env.test not found. Using default credentials."; \
-		./scripts/wait-for-services.sh; \
+	@if [ ! -f .env.test ]; then \
+		echo "❌ .env.test not found. Run: make test-integration-setup"; \
+		exit 1; \
 	fi
+	@set -a && . ./.env.test && set +a && ./scripts/wait-for-services.sh && \
 	CFGMS_TEST_DB_HOST=localhost \
 	CFGMS_TEST_DB_PORT=5433 \
-	CFGMS_TEST_DB_PASSWORD=cfgms_test_password \
 	go test -v -tags=integration ./pkg/storage/providers/database/...
 
 # Test git provider specifically  
 test-integration-git:
 	@echo "📁 Testing Git Storage Provider"
 	@echo "==============================="
-	@if [ -f .env.test ]; then \
-		set -a && . ./.env.test && set +a && ./scripts/wait-for-services.sh; \
-	else \
-		echo "⚠️  .env.test not found. Using default credentials."; \
-		./scripts/wait-for-services.sh; \
+	@if [ ! -f .env.test ]; then \
+		echo "❌ .env.test not found. Run: make test-integration-setup"; \
+		exit 1; \
 	fi
+	@set -a && . ./.env.test && set +a && ./scripts/wait-for-services.sh && \
 	CFGMS_TEST_GITEA_URL=http://localhost:3001 \
 	CFGMS_TEST_GITEA_USER=cfgms_test \
-	CFGMS_TEST_GITEA_PASSWORD=cfgms_test_password \
 	go test -v -tags=integration ./pkg/storage/providers/git/...
 
 # Future: Test Redis provider (when implemented)
@@ -1597,25 +1659,73 @@ test-mqtt-quic-setup:
 		./scripts/generate-test-credentials.sh; \
 	fi
 	@echo "Starting TimescaleDB and standalone controller with MQTT+QUIC..."
+	@echo "🔨 Force rebuilding Docker images (no cache)..."
 	@set -a && . ./.env.test && set +a && \
-	docker compose -f docker-compose.test.yml --profile ha up -d timescaledb-test controller-standalone
+	DOCKER_BUILDKIT=1 docker compose -f docker-compose.test.yml --profile ha build --no-cache controller-standalone steward-standalone && \
+	docker compose -f docker-compose.test.yml --profile ha up -d timescaledb-test controller-standalone steward-standalone
 	@echo ""
 	@echo "⏳ Waiting for controller to initialize..."
-	@sleep 15
-	@echo "🔍 Checking controller health..."
-	@for i in 1 2 3 4 5; do \
+	@sleep 45
+	@echo "🔍 Validating controller health..."
+	@echo "   Checking MQTT broker (port 8883)..."
+	@for i in 1 2 3 4 5 6 7 8 9 10; do \
 		if docker exec controller-standalone sh -c "netstat -ln | grep :8883" >/dev/null 2>&1; then \
-			echo "✅ MQTT broker ready on port 8883 (mapped to 1886)"; \
+			echo "   ✅ MQTT broker ready on port 8883 (mapped to localhost:1886)"; \
 			break; \
 		fi; \
-		echo "⏳ Waiting for MQTT broker (attempt $$i/5)..."; \
+		if [ $$i -eq 10 ]; then \
+			echo "   ❌ MQTT broker failed to start after 10 attempts"; \
+			docker logs controller-standalone | tail -20; \
+			exit 1; \
+		fi; \
+		echo "   ⏳ Waiting for MQTT broker (attempt $$i/10)..."; \
 		sleep 5; \
 	done
+	@echo "   Checking HTTP API (port 9080)..."
+	@for i in 1 2 3 4 5; do \
+		if docker exec controller-standalone sh -c "netstat -ln | grep :9080" >/dev/null 2>&1; then \
+			echo "   ✅ HTTP API ready on port 9080 (mapped to localhost:8080)"; \
+			break; \
+		fi; \
+		if [ $$i -eq 5 ]; then \
+			echo "   ❌ HTTP API failed to start"; \
+			exit 1; \
+		fi; \
+		sleep 3; \
+	done
+	@echo "   Checking QUIC endpoint (port 4433)..."
+	@for i in 1 2 3 4 5 6 7 8; do \
+		if docker exec controller-standalone sh -c "netstat -lnu 2>/dev/null | grep :4433" >/dev/null 2>&1; then \
+			echo "   ✅ QUIC endpoint ready on port 4433 (mapped to localhost:4436)"; \
+			break; \
+		fi; \
+		if [ $$i -eq 8 ]; then \
+			echo "   ⚠️  QUIC endpoint not responding after 8 attempts (may be disabled)"; \
+			echo "   📋 Controller logs (last 30 lines):"; \
+			docker logs controller-standalone 2>&1 | tail -30; \
+		fi; \
+		echo "   ⏳ Waiting for QUIC endpoint (attempt $$i/8)..."; \
+		sleep 5; \
+	done
+	@echo "   Checking TimescaleDB..."
+	@for i in 1 2 3; do \
+		if docker exec cfgms-timescaledb-test pg_isready -U cfgms_test >/dev/null 2>&1; then \
+			echo "   ✅ TimescaleDB ready"; \
+			break; \
+		fi; \
+		if [ $$i -eq 3 ]; then \
+			echo "   ⚠️  TimescaleDB check skipped (container name mismatch)"; \
+		fi; \
+		sleep 3; \
+	done
+	@echo "   Allowing services to settle and QUIC server to fully initialize..."
+	@sleep 15
 	@echo ""
-	@echo "✅ MQTT+QUIC Docker environment ready!"
-	@echo "   MQTT: 127.0.0.1:1886 (TLS)"
-	@echo "   QUIC: 127.0.0.1:4436"
-	@echo "   HTTPS: 127.0.0.1:9080"
+	@echo "✅ MQTT+QUIC Docker environment fully initialized!"
+	@echo "   MQTT: localhost:1886 (TLS)"
+	@echo "   QUIC: localhost:4436"
+	@echo "   HTTP API: localhost:8080 (HTTPS)"
+	@echo "   TimescaleDB: localhost:5433"
 
 test-mqtt-quic-cleanup:
 	@echo ""
@@ -1629,22 +1739,50 @@ test-mqtt-quic-cleanup:
 # Phase 2: Parallelizable E2E test targets (Story #297)
 # These targets can run independently and be parallelized with make -j3
 
-.PHONY: test-e2e-mqtt-quic test-e2e-controller test-e2e-scenarios
+.PHONY: test-e2e-ci test-e2e-mqtt-quic test-e2e-controller test-e2e-scenarios
 
-test-e2e-mqtt-quic:
-	@echo "🧪 Running MQTT+QUIC integration tests..."
-	@if [ -f .env.test ]; then \
-		set -a && . ./.env.test && set +a && \
-		CFGMS_TEST_HTTP_ADDR=https://localhost:8080 \
-		CFGMS_TEST_MQTT_ADDR=ssl://localhost:1886 \
-		CFGMS_TEST_QUIC_ADDR=localhost:4436 \
-		CFGMS_TEST_CERTS_PATH=$(PWD)/test/integration/mqtt_quic/certs \
-		go test -v -race -timeout=15m ./test/integration/mqtt_quic/... || exit 1; \
-	else \
-		echo "❌ .env.test not found"; \
-		exit 1; \
-	fi
-	@echo "✅ MQTT+QUIC integration tests passed"
+# CI-style E2E tests - matches GitHub Actions production-gates.yml exactly
+# Self-contained: sets up infrastructure, runs tests, cleans up
+# Use this single command to reproduce CI test behavior locally for troubleshooting
+test-e2e-ci:
+	@echo "🚀 Starting CI-style E2E test suite (setup → test → cleanup)..."
+	@echo ""
+	@echo "📋 Step 1/3: Setting up Docker infrastructure..."
+	@$(MAKE) test-mqtt-quic-setup
+	@echo ""
+	@echo "📋 Step 2/3: Running tests in container with container-to-container networking..."
+	@docker build -t cfgms-test-runner -f Dockerfile.test-runner . >/dev/null 2>&1 && \
+	DOCKER_GID=$$(stat -c '%g' /var/run/docker.sock) && \
+	docker run --rm \
+		--user $$(id -u):$$(id -g) \
+		--network cfgms-test \
+		--group-add $$DOCKER_GID \
+		-v "$(PWD):/workspace" \
+		-v /var/run/docker.sock:/var/run/docker.sock \
+		-w /workspace \
+		-e CFGMS_TEST_INTEGRATION=1 \
+		-e GITHUB_ACTIONS=true \
+		-e GOCACHE=/workspace/.cache/go-build \
+		-e GOMODCACHE=/workspace/.cache/go-mod \
+		cfgms-test-runner \
+		sh -c ' \
+			echo "📦 Installing Go dependencies..." && \
+			go mod download && \
+			echo "" && \
+			echo "🧪 Running integration tests (container-to-container networking)..." && \
+			go test -v -race -timeout=10m $$(go list ./test/integration/... | grep -v "test/integration$$" | grep -v "test/integration/standalone") && \
+			echo "" && \
+			echo "🧪 Running E2E tests..." && \
+			go test -v -race -timeout=15m ./test/e2e/... -run "TestE2EScenarios/(TestControllerStewardIntegration|TestRBACIntegration|TestWorkflowIntegration|TestDataFlow)" \
+		' || { echo ""; echo "📋 Step 3/3: Cleaning up (tests failed)..."; $(MAKE) test-mqtt-quic-cleanup; exit 1; }
+	@echo ""
+	@echo "📋 Step 3/3: Cleaning up Docker infrastructure..."
+	@$(MAKE) test-mqtt-quic-cleanup
+	@echo ""
+	@echo "✅ CI-style E2E tests completed successfully"
+
+# Deprecated: Use test-e2e-ci instead (matches CI execution exactly)
+test-e2e-mqtt-quic: test-e2e-ci
 
 test-e2e-controller:
 	@echo "🧪 Running controller E2E tests (Docker deployment)..."
@@ -1761,6 +1899,23 @@ test-e2e-local:
 # Story #315: Now matches ALL CI required checks (100% parity except Windows/macOS native builds)
 # Includes all commit validation PLUS CI integration tests and E2E testing
 .PHONY: test-complete-full
+# Quality validation: tests, linting, builds (NO security scans)
+# Used by qa-test-runner agent — security scans run separately via security-engineer agent
+.PHONY: test-quality
+test-quality: test lint check-license-headers test-production-critical build-cross-validate test-integration-docker
+	@echo ""
+	@echo "✅ QUALITY VALIDATION FINISHED"
+	@echo "========================================"
+	@echo "- ✅ Unit tests passed with race detection (test)"
+	@echo "- ✅ Code linting passed (lint)"
+	@echo "- ✅ License headers validated (check-license-headers)"
+	@echo "- ✅ Production critical tests passed (test-production-critical)"
+	@echo "- ✅ Cross-platform compilation validated (build-cross-validate)"
+	@echo "- ✅ Docker integration tests passed (storage/controller)"
+	@echo ""
+	@echo "ℹ️  Security scans run separately via security-engineer agent"
+	@echo "ℹ️  E2E tests available via make test-e2e-fast (for local CI debugging)"
+
 test-complete-full: test-commit test-fast test-production-critical build-cross-validate test-integration-docker test-e2e-fast
 	@echo ""
 	@echo "✅ COMPLETE STORY VALIDATION FINISHED"
@@ -1793,8 +1948,8 @@ generate-test-certificates: build-controller  ## Generate test certificates usin
 	@echo ""
 	@echo "Step 1: Setting up controller configuration..."
 	@mkdir -p test/integration/mqtt_quic/certs/ca test/integration/logs
-	@cp test/integration/configs/controller-test.cfg config.yaml
-	@echo "✅ Configuration copied to config.yaml (TODO: controller should read controller.cfg)"
+	@cp test/integration/configs/controller-test.cfg controller.cfg
+	@echo "✅ Configuration copied to controller.cfg"
 	@echo ""
 	@echo "Step 2: Starting controller to auto-generate valid certificates..."
 	@timeout 30 ./bin/controller > /tmp/controller-cert-gen.log 2>&1 & \

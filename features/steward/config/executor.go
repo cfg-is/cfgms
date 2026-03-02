@@ -19,8 +19,8 @@ import (
 	"github.com/cfgis/cfgms/features/modules/directory"
 	"github.com/cfgis/cfgms/features/modules/file"
 	"github.com/cfgis/cfgms/features/modules/script"
+	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
-	mqttTypes "github.com/cfgis/cfgms/pkg/mqtt/types"
 )
 
 // Executor applies configurations by executing modules.
@@ -89,15 +89,15 @@ type ResourceSpec struct {
 }
 
 // ApplyConfiguration parses and applies a configuration.
-func (e *Executor) ApplyConfiguration(ctx context.Context, configData []byte, version string) (*mqttTypes.ConfigStatusReport, error) {
+func (e *Executor) ApplyConfiguration(ctx context.Context, configData []byte, version string) (*cpTypes.ConfigStatusReport, error) {
 	e.logger.Info("Applying configuration", "version", version, "size", len(configData))
 
 	startTime := time.Now()
-	report := &mqttTypes.ConfigStatusReport{
+	report := &cpTypes.ConfigStatusReport{
 		ConfigVersion: version,
 		Status:        "OK",
 		Message:       "Configuration applied successfully",
-		Modules:       make(map[string]mqttTypes.ModuleStatus),
+		Modules:       make(map[string]cpTypes.ModuleStatus),
 		Timestamp:     time.Now(),
 	}
 
@@ -160,8 +160,8 @@ func (e *Executor) ApplyConfiguration(ctx context.Context, configData []byte, ve
 }
 
 // applyModuleResources applies all resources for a specific module using ResourceConfig format.
-func (e *Executor) applyModuleResources(ctx context.Context, moduleName string, resources []ResourceConfig) mqttTypes.ModuleStatus {
-	status := mqttTypes.ModuleStatus{
+func (e *Executor) applyModuleResources(ctx context.Context, moduleName string, resources []ResourceConfig) cpTypes.ModuleStatus {
+	status := cpTypes.ModuleStatus{
 		Name:      moduleName,
 		Status:    "OK",
 		Message:   fmt.Sprintf("Applied %d resources", len(resources)),

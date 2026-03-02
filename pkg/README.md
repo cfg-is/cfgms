@@ -42,7 +42,7 @@ pkg/{name}/             → Direct provider (single implementation)
 - Support multiple backends (git, database, timescale, etc.)
 - Use auto-registration pattern (Salt-style)
 - Business logic imports `pkg/{name}/interfaces` ONLY
-- Examples: `storage`, `logging`, `secrets`, `directory`, `mqtt`
+- Examples: `storage`, `logging`, `secrets`, `directory`, `mqtt`, `controlplane`, `dataplane`
 
 **Direct Providers** (no `interfaces/` subdirectory):
 - Single implementation

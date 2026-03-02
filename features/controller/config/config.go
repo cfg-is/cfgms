@@ -104,29 +104,103 @@ type Config struct {
 
 // CertificateConfig contains certificate management settings
 type CertificateConfig struct {
-	// Enable automated certificate management
+	// Enable automated certificate lifecycle management
+	//
+	// When enabled (default: true), the controller handles the complete certificate lifecycle:
+	// - Generates certificates if they don't exist (first deployment)
+	// - Loads certificates if they exist (reboot/restart)
+	// - Validates certificates are not expired or invalid
+	// - Automatically renews certificates before expiration
+	// - Coordinates certificate distribution in HA clusters
+	//
+	// When disabled, the controller does not manage certificates. Use this for:
+	// - Testing with manually-injected invalid/expired certificates
+	// - External certificate management (e.g., Vault, cert-manager, manual PKI)
+	//
+	// Note: In production, this should always be enabled unless you have
+	// a specific external certificate management solution.
 	EnableCertManagement bool `yaml:"enable_cert_management"`
 
 	// Path to Certificate Authority storage
 	CAPath string `yaml:"ca_path"`
 
-	// Automatically generate server certificates if missing
-	AutoGenerate bool `yaml:"auto_generate"`
-
-	// Certificate renewal threshold in days
+	// Certificate renewal threshold in days (certificates renewed when within this threshold)
+	// Default: 30 days
 	RenewalThresholdDays int `yaml:"renewal_threshold_days"`
 
 	// Server certificate validity period in days
+	// Default: 365 days (1 year)
 	ServerCertValidityDays int `yaml:"server_cert_validity_days"`
 
 	// Client certificate validity period in days for stewards
+	// Default: 365 days (1 year)
 	ClientCertValidityDays int `yaml:"client_cert_validity_days"`
 
-	// Enable automatic certificate renewal
-	EnableAutoRenewal bool `yaml:"enable_auto_renewal"`
-
-	// Server certificate configuration
+	// Server certificate configuration (used when generating certificates)
 	Server *ServerCertificateConfig `yaml:"server"`
+
+	// Story #377: Three-certificate architecture
+
+	// Architecture selects the certificate deployment mode: "unified" (default) or "separated"
+	// Unified: Single CertificateTypeServer for all purposes (backward compatible)
+	// Separated: Purpose-specific certs (public API, internal mTLS, config signing)
+	Architecture string `yaml:"architecture"`
+
+	// SigningCertValidityDays is the validity for config signing certificates (default: 1095 = 3 years)
+	SigningCertValidityDays int `yaml:"signing_cert_validity_days"`
+
+	// InternalCertValidityDays is the validity for internal mTLS certificates (default: 365)
+	InternalCertValidityDays int `yaml:"internal_cert_validity_days"`
+
+	// PublicAPI contains configuration for the public-facing API certificate
+	PublicAPI *PublicAPICertConfig `yaml:"public_api"`
+
+	// Internal contains configuration for the internal mTLS certificate
+	Internal *InternalCertConfig `yaml:"internal"`
+
+	// Signing contains configuration for the config signing certificate
+	Signing *SigningCertificateConfig `yaml:"signing"`
+}
+
+// PublicAPICertConfig contains configuration for the public-facing API certificate
+type PublicAPICertConfig struct {
+	// Source specifies where the certificate comes from: "internal" (default) or "external"
+	// External: Load from CertPath/KeyPath (e.g., certbot/Let's Encrypt managed)
+	// Internal: Generate from internal CA
+	Source string `yaml:"source"`
+
+	// CertPath is the path to the certificate file (for source=external)
+	CertPath string `yaml:"cert_path"`
+
+	// KeyPath is the path to the private key file (for source=external)
+	KeyPath string `yaml:"key_path"`
+
+	// CommonName for the public API certificate
+	CommonName string `yaml:"common_name"`
+
+	// DNSNames for Subject Alternative Names
+	DNSNames []string `yaml:"dns_names"`
+}
+
+// InternalCertConfig contains configuration for the internal mTLS certificate
+type InternalCertConfig struct {
+	// CommonName for the internal certificate (default: "cfgms-internal")
+	CommonName string `yaml:"common_name"`
+
+	// DNSNames for Subject Alternative Names
+	DNSNames []string `yaml:"dns_names"`
+
+	// IPAddresses for Subject Alternative Names
+	IPAddresses []string `yaml:"ip_addresses"`
+}
+
+// SigningCertificateConfig contains configuration for the config signing certificate
+type SigningCertificateConfig struct {
+	// CommonName for the signing certificate (default: "cfgms-config-signer")
+	CommonName string `yaml:"common_name"`
+
+	// Organization name
+	Organization string `yaml:"organization"`
 }
 
 // ServerCertificateConfig contains server certificate settings
@@ -376,11 +450,9 @@ func DefaultConfig() *Config {
 		Certificate: &CertificateConfig{
 			EnableCertManagement:   true,
 			CAPath:                 "certs/ca",
-			AutoGenerate:           true,
 			RenewalThresholdDays:   30,
 			ServerCertValidityDays: 365,
 			ClientCertValidityDays: 365,
-			EnableAutoRenewal:      true,
 			Server: &ServerCertificateConfig{
 				CommonName:   "cfgms-controller",
 				DNSNames:     []string{"localhost", "cfgms-controller", "controller-standalone"},
@@ -496,15 +568,77 @@ func DefaultConfig() *Config {
 	}
 }
 
-// Load loads the configuration from file and environment variables
-func Load() (*Config, error) {
+// findConfigFile searches for the controller configuration file using the following priority:
+// 1. Explicit path (if provided and not empty)
+// 2. CFGMS_CONTROLLER_CONFIG environment variable
+// 3. Production paths: /etc/cfgms/controller.cfg (Unix) or C:\ProgramData\cfgms\controller.cfg (Windows)
+// 4. Development path: ./controller.cfg
+//
+// Returns the path to the configuration file if found, empty string if no config file exists.
+func findConfigFile(explicitPath string) (string, error) {
+	// Priority 1: Explicit path from CLI flag
+	if explicitPath != "" {
+		if _, err := os.Stat(explicitPath); err == nil {
+			return explicitPath, nil
+		}
+		// If explicit path provided but doesn't exist, return error
+		return "", fmt.Errorf("config file not found at specified path: %s", explicitPath)
+	}
+
+	// Priority 2: Environment variable
+	if envPath := os.Getenv("CFGMS_CONTROLLER_CONFIG"); envPath != "" {
+		if _, err := os.Stat(envPath); err == nil {
+			return envPath, nil
+		}
+		// If env var set but file doesn't exist, return error
+		return "", fmt.Errorf("config file not found at CFGMS_CONTROLLER_CONFIG path: %s", envPath)
+	}
+
+	// Priority 3: Production paths (platform-specific)
+	var productionPath string
+	if isWindows() {
+		productionPath = `C:\ProgramData\cfgms\controller.cfg`
+	} else {
+		productionPath = "/etc/cfgms/controller.cfg"
+	}
+	if _, err := os.Stat(productionPath); err == nil {
+		return productionPath, nil
+	}
+
+	// Priority 4: Development path
+	devPath := "controller.cfg"
+	if _, err := os.Stat(devPath); err == nil {
+		return devPath, nil
+	}
+
+	// No config file found - this is OK, will use defaults
+	return "", nil
+}
+
+// isWindows returns true if running on Windows
+func isWindows() bool {
+	return os.PathSeparator == '\\' && os.PathListSeparator == ';'
+}
+
+// LoadWithPath loads the configuration from the specified file path (or searches for it)
+// and applies environment variable overrides.
+//
+// If configPath is empty, searches for config file using findConfigFile().
+// If no config file is found, uses default configuration with environment variable overrides.
+func LoadWithPath(configPath string) (*Config, error) {
 	cfg := DefaultConfig()
 
-	// Try to load from config file if it exists
-	if _, err := os.Stat("config.yaml"); err == nil {
-		data, err := os.ReadFile("config.yaml")
+	// Find the config file (explicit path, env var, production, or dev)
+	foundPath, err := findConfigFile(configPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// Load from config file if found
+	if foundPath != "" {
+		data, err := os.ReadFile(foundPath)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to read config file %s: %w", foundPath, err)
 		}
 
 		content := string(data)
@@ -512,7 +646,7 @@ func Load() (*Config, error) {
 		// Validate that all referenced env vars (without defaults) are set
 		// This provides fail-safe behavior for missing env vars
 		if err := validateEnvVars(content); err != nil {
-			return nil, fmt.Errorf("configuration validation failed: %w", err)
+			return nil, fmt.Errorf("configuration validation failed in %s: %w", foundPath, err)
 		}
 
 		// Expand environment variables in the configuration content
@@ -520,7 +654,7 @@ func Load() (*Config, error) {
 		expandedData := expandEnvWithDefaults(content)
 
 		if err := yaml.Unmarshal([]byte(expandedData), cfg); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to parse config file %s: %w", foundPath, err)
 		}
 	}
 
@@ -556,12 +690,6 @@ func Load() (*Config, error) {
 		cfg.Certificate.CAPath = caPath
 	}
 
-	if autoGen := os.Getenv("CFGMS_CERT_AUTO_GENERATE"); autoGen != "" {
-		if val, err := strconv.ParseBool(autoGen); err == nil {
-			cfg.Certificate.AutoGenerate = val
-		}
-	}
-
 	if renewalThreshold := os.Getenv("CFGMS_CERT_RENEWAL_THRESHOLD_DAYS"); renewalThreshold != "" {
 		if val, err := strconv.Atoi(renewalThreshold); err == nil {
 			cfg.Certificate.RenewalThresholdDays = val
@@ -580,18 +708,44 @@ func Load() (*Config, error) {
 		}
 	}
 
-	if enableAutoRenewal := os.Getenv("CFGMS_CERT_ENABLE_AUTO_RENEWAL"); enableAutoRenewal != "" {
-		if val, err := strconv.ParseBool(enableAutoRenewal); err == nil {
-			cfg.Certificate.EnableAutoRenewal = val
-		}
-	}
-
 	if serverCommonName := os.Getenv("CFGMS_CERT_SERVER_COMMON_NAME"); serverCommonName != "" {
 		cfg.Certificate.Server.CommonName = serverCommonName
 	}
 
 	if serverOrg := os.Getenv("CFGMS_CERT_SERVER_ORGANIZATION"); serverOrg != "" {
 		cfg.Certificate.Server.Organization = serverOrg
+	}
+
+	// Story #377: Three-certificate architecture environment variables
+	if certArch := os.Getenv("CFGMS_CERT_ARCHITECTURE"); certArch != "" {
+		cfg.Certificate.Architecture = certArch
+	}
+
+	if signingValidity := os.Getenv("CFGMS_CERT_SIGNING_VALIDITY_DAYS"); signingValidity != "" {
+		if val, err := strconv.Atoi(signingValidity); err == nil {
+			cfg.Certificate.SigningCertValidityDays = val
+		}
+	}
+
+	if publicAPISource := os.Getenv("CFGMS_CERT_PUBLIC_API_SOURCE"); publicAPISource != "" {
+		if cfg.Certificate.PublicAPI == nil {
+			cfg.Certificate.PublicAPI = &PublicAPICertConfig{}
+		}
+		cfg.Certificate.PublicAPI.Source = publicAPISource
+	}
+
+	if publicAPICertPath := os.Getenv("CFGMS_CERT_PUBLIC_API_CERT_PATH"); publicAPICertPath != "" {
+		if cfg.Certificate.PublicAPI == nil {
+			cfg.Certificate.PublicAPI = &PublicAPICertConfig{}
+		}
+		cfg.Certificate.PublicAPI.CertPath = publicAPICertPath
+	}
+
+	if publicAPIKeyPath := os.Getenv("CFGMS_CERT_PUBLIC_API_KEY_PATH"); publicAPIKeyPath != "" {
+		if cfg.Certificate.PublicAPI == nil {
+			cfg.Certificate.PublicAPI = &PublicAPICertConfig{}
+		}
+		cfg.Certificate.PublicAPI.KeyPath = publicAPIKeyPath
 	}
 
 	// Storage configuration environment variables
@@ -754,6 +908,19 @@ func Load() (*Config, error) {
 	return cfg, nil
 }
 
+// Load loads the configuration using default search paths.
+// This is a convenience wrapper around LoadWithPath("") for backward compatibility.
+//
+// Config file search order:
+// 1. CFGMS_CONTROLLER_CONFIG environment variable
+// 2. /etc/cfgms/controller.cfg (Unix) or C:\ProgramData\cfgms\controller.cfg (Windows)
+// 3. ./controller.cfg
+//
+// If no config file is found, uses default configuration with environment variable overrides.
+func Load() (*Config, error) {
+	return LoadWithPath("")
+}
+
 // ToLoggingManagerConfig converts the controller logging config to pkg/logging config
 func (lc *LoggingConfig) ToLoggingManagerConfig() *loggingPkg.LoggingConfig {
 	if lc == nil {
@@ -795,4 +962,17 @@ func (lc *LoggingConfig) ToLoggingManagerConfig() *loggingPkg.LoggingConfig {
 		EnableTracing:     lc.EnableTracing,
 		Subscribers:       subscribers,
 	}
+}
+
+// IsSeparatedArchitecture returns true if the certificate architecture is "separated"
+func (cc *CertificateConfig) IsSeparatedArchitecture() bool {
+	return cc != nil && cc.Architecture == "separated"
+}
+
+// GetPublicAPISource returns the public API certificate source, defaulting to "internal"
+func (cc *CertificateConfig) GetPublicAPISource() string {
+	if cc != nil && cc.PublicAPI != nil && cc.PublicAPI.Source != "" {
+		return cc.PublicAPI.Source
+	}
+	return "internal"
 }
