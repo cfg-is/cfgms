@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -289,29 +290,38 @@ func TestConfigurationServiceV2Concurrency(t *testing.T) {
 	err := svc.SetConfiguration(ctx, "default", stewardID, cfg)
 	require.NoError(t, err)
 
-	done := make(chan bool)
+	errs := make(chan error, 10)
 
 	// Goroutine 1: Set configuration
 	go func() {
 		for i := 0; i < 5; i++ {
 			newConfig := createTestStewardConfig(stewardID)
 			newConfig.Resources[0].Config["permissions"] = "755"
-			_ = svc.SetConfiguration(ctx, "default", stewardID, newConfig)
+			if err := svc.SetConfiguration(ctx, "default", stewardID, newConfig); err != nil {
+				errs <- fmt.Errorf("SetConfiguration iteration %d: %w", i, err)
+				return
+			}
 		}
-		done <- true
+		errs <- nil
 	}()
 
 	// Goroutine 2: Get configuration
 	go func() {
 		for i := 0; i < 5; i++ {
 			req := &controller.ConfigRequest{StewardId: stewardID}
-			_, _ = svc.GetConfiguration(ctx, req)
+			if _, err := svc.GetConfiguration(ctx, req); err != nil {
+				errs <- fmt.Errorf("GetConfiguration iteration %d: %w", i, err)
+				return
+			}
 		}
-		done <- true
+		errs <- nil
 	}()
 
-	<-done
-	<-done
+	for i := 0; i < 2; i++ {
+		if err := <-errs; err != nil {
+			t.Errorf("Concurrent operation failed: %v", err)
+		}
+	}
 
 	// Verify final state is retrievable
 	req := &controller.ConfigRequest{StewardId: stewardID}

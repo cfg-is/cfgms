@@ -47,7 +47,7 @@ func NewConfigurationServiceV2(logger logging.Logger, storageManager *interfaces
 
 // GetConfiguration retrieves configuration for a specific steward using ConfigStore
 func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *controller.ConfigRequest) (*controller.ConfigResponse, error) {
-	s.logger.Debug("Configuration request received", "steward_id", req.StewardId, "modules", req.Modules)
+	s.logger.Debug("Configuration request received", "steward_id", logging.SanitizeLogValue(req.StewardId), "modules", req.Modules)
 
 	// Extract tenant context
 	tenantID := s.extractTenantID(ctx)
@@ -56,7 +56,7 @@ func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *cont
 	if s.controllerSvc != nil {
 		stewardInfo, exists := s.controllerSvc.GetStewardInfo(req.StewardId)
 		if !exists {
-			s.logger.Warn("Configuration request from unknown steward", "steward_id", req.StewardId)
+			s.logger.Warn("Configuration request from unknown steward", "steward_id", logging.SanitizeLogValue(req.StewardId))
 			return &controller.ConfigResponse{
 				Status: &common.Status{
 					Code:    common.Status_NOT_FOUND,
@@ -68,9 +68,9 @@ func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *cont
 		// Check tenant isolation
 		if stewardInfo.TenantID != tenantID {
 			s.logger.Warn("Configuration request cross-tenant access denied",
-				"steward_id", req.StewardId,
-				"steward_tenant", stewardInfo.TenantID,
-				"request_tenant", tenantID)
+				"steward_id", logging.SanitizeLogValue(req.StewardId),
+				"steward_tenant", logging.SanitizeLogValue(stewardInfo.TenantID),
+				"request_tenant", logging.SanitizeLogValue(tenantID))
 			return &controller.ConfigResponse{
 				Status: &common.Status{
 					Code:    common.Status_UNAUTHORIZED,
@@ -83,7 +83,7 @@ func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *cont
 	// Get configuration with inheritance from storage
 	stewardConfig, err := s.configManager.GetConfigurationWithInheritance(ctx, tenantID, req.StewardId)
 	if err != nil {
-		s.logger.Debug("No configuration found for steward", "steward_id", req.StewardId, "error", err)
+		s.logger.Debug("No configuration found for steward", "steward_id", logging.SanitizeLogValue(req.StewardId), "error", err)
 		return &controller.ConfigResponse{
 			Status: &common.Status{
 				Code:    common.Status_NOT_FOUND,
@@ -98,7 +98,7 @@ func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *cont
 	// Convert Go struct to protobuf
 	protoConfig, err := stewardconfig.ToProto(filteredConfig)
 	if err != nil {
-		s.logger.Error("Failed to convert configuration to protobuf", "steward_id", req.StewardId, "error", err)
+		s.logger.Error("Failed to convert configuration to protobuf", "steward_id", logging.SanitizeLogValue(req.StewardId), "error", err)
 		return &controller.ConfigResponse{
 			Status: &common.Status{
 				Code:    common.Status_ERROR,
@@ -114,7 +114,7 @@ func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *cont
 		version = fmt.Sprintf("v%d", history[0].Version)
 	}
 
-	s.logger.Debug("Configuration retrieved successfully", "steward_id", req.StewardId, "version", version)
+	s.logger.Debug("Configuration retrieved successfully", "steward_id", logging.SanitizeLogValue(req.StewardId), "version", version)
 
 	return &controller.ConfigResponse{
 		Status: &common.Status{
@@ -141,7 +141,7 @@ func (s *ConfigurationServiceV2) SetConfiguration(ctx context.Context, tenantID,
 	// Log validation warnings
 	for _, warning := range validationResult.Warnings {
 		s.logger.Warn("Configuration validation warning",
-			"steward_id", stewardID,
+			"steward_id", logging.SanitizeLogValue(stewardID),
 			"field", warning.Field,
 			"message", warning.Message)
 	}
@@ -152,8 +152,8 @@ func (s *ConfigurationServiceV2) SetConfiguration(ctx context.Context, tenantID,
 	}
 
 	s.logger.Info("Configuration stored successfully",
-		"tenant_id", tenantID,
-		"steward_id", stewardID)
+		"tenant_id", logging.SanitizeLogValue(tenantID),
+		"steward_id", logging.SanitizeLogValue(stewardID))
 
 	return nil
 }
