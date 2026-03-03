@@ -619,11 +619,11 @@ func TestServer_ConcurrentSecurity_And_RaceConditions(t *testing.T) {
 
 	const numConcurrent = 10
 
-	// Race detector adds 5-10x overhead, so increase timeout accordingly
+	// Race detector adds 5-10x overhead, and full suite load adds further contention
 	// Each concurrent server creation involves: Git init, RBAC setup, storage init
 	timeout := 5 * time.Second
 	if raceDetectorEnabled() {
-		timeout = 15 * time.Second // 3x longer for race detector overhead
+		timeout = 45 * time.Second // Race + full suite resource contention
 	}
 
 	// Test concurrent server creation (should be thread-safe)
