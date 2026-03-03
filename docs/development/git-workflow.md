@@ -17,8 +17,9 @@ CFGMS follows GitFlow with **MANDATORY feature branch workflow**:
 
 ### Branch Protection Rules
 
-- `main`: Requires PR review, status checks, no direct pushes
-- `develop`: Requires PR review, allows fast-forward merges
+- `main`: Merge commits only (no squash/rebase), required status checks, no direct pushes
+- `develop`: Squash merge only, required status checks, cannot be deleted
+- `release/*`: No direct pushes (non-fast-forward only), no required checks (main handles that)
 - Feature branches: Created from and merged back to `develop`
 
 ## Feature Branch Workflow
@@ -110,21 +111,17 @@ docs/updates
 gh pr create --base main --title "Epic Complete"  # ❌ Will delete develop!
 ```
 
-**✅ CORRECT (Feature Branch Workflow):**
+**✅ CORRECT (Release Branch Workflow):**
 
 ```bash
-# ALWAYS create feature branch first
+# For releases, create a release branch from develop
 git checkout develop
-git checkout -b feature/epic-4-unified-directory
-git push origin feature/epic-4-unified-directory
+git pull origin develop
+git checkout -b release/vX.Y.Z
+git push -u origin release/vX.Y.Z
 
-# Create PR: feature → develop (for development)
-gh pr create --base develop --title "Epic 4: Unified Directory Management"
-
-# After develop integration, create PR: develop → main (for release)
-git checkout develop
-git pull origin develop  # Ensure develop has latest
-gh pr create --base main --title "Release: Epic 4 to Production"
+# Create PR: release → main (merge commit, not squash)
+gh pr create --base main --title "Release vX.Y.Z"
 ```
 
 ### PR Creation Template
@@ -155,28 +152,20 @@ EOF
 
 ### PR Merge Settings
 
-#### GitHub Repository Settings
+Merge methods are enforced by branch protection rulesets — GitHub only shows allowed options:
 
-To prevent accidental branch deletion:
-
-1. Go to GitHub → Repository → Settings → General
-2. Under "Pull Requests" section:
-   - ✅ Enable "Allow merge commits"
-   - ❌ Disable "Automatically delete head branches"
-3. For develop branch specifically:
-   - ✅ Enable branch protection
-   - ✅ Require pull request reviews
-   - ❌ Never allow deletion
-
-#### Safe Merge Commands
+- **PRs to `develop`**: Squash merge only (enforced)
+- **PRs to `main`**: Merge commit only (enforced)
 
 ```bash
-# Merge PR without deleting source branch
-gh pr merge [PR_NUMBER] --merge --no-delete-branch
+# Merging a feature PR to develop (squash is the only option)
+gh pr merge [PR_NUMBER] --squash
 
-# Or use squash merge (preferred for clean history)
-gh pr merge [PR_NUMBER] --squash --no-delete-branch
+# Merging a release PR to main (merge commit is the only option)
+gh pr merge [PR_NUMBER] --merge
 ```
+
+See [Release Workflow](#release-workflow) for why different merge methods are used.
 
 ## PR Review Process
 
@@ -198,83 +187,98 @@ gh pr merge [PR_NUMBER] --squash --no-delete-branch
 
 ## Release Workflow
 
-CFGMS uses a **semi-automated release process** (Option A) that combines automation with human review checkpoints.
+CFGMS uses a manual release process with strict merge strategy rules to maintain clean history and enable reliable back-sync between main and develop.
 
-### Automated Release Process (Recommended)
+### Merge Strategy Rules (CRITICAL)
 
-The release automation workflow handles most steps automatically:
+Each merge target has a specific merge method enforced by branch protection:
+
+| Merge | Method | Why |
+|-------|--------|-----|
+| `feature/*` → `develop` | **Squash** | Clean atomic commits, one per story |
+| `release/*` → `main` | **Merge commit** | Preserves ancestry so main→develop back-sync works cleanly |
+| `main` → `develop` (post-release) | **Merge commit** | Syncs release fixes back without conflicts |
+
+**Why merge commits for releases?** Squash merging a release branch into main creates a new commit with no parent relationship to develop's history. This means git sees the entire codebase as "new" when trying to sync main back to develop, producing thousands of false conflicts. Merge commits preserve the parent chain, enabling clean back-sync.
+
+### Release Process
 
 ```
-feature/* → develop → release/vX.Y.Z → main → tag
-     ↓          ↓            ↓            ↓
-   (unit    (integration  (full suite  (release
-    tests)    tests)       + approval)   build)
+feature/* → develop → release/vX.Y.Z → main → tag → back-sync to develop
+               ↑         (squash)           (merge commit)     (merge commit)
 ```
 
-**To start a release:**
-
-1. Go to **Actions → Release Automation → Run workflow**
-2. Enter version number (e.g., `0.8.0`, `0.9.0-rc.1`)
-3. Select release type (patch/minor/major/rc)
-4. Click **Run workflow**
-
-**What happens automatically:**
-1. ✅ Creates `release/vX.Y.Z` branch from `develop`
-2. ✅ Runs comprehensive test suite
-3. ✅ Creates PR to `main` (if tests pass)
-4. ⏸️ **Waits for human approval** (manual checkpoint)
-5. ✅ Auto-merges PR when approved
-6. ✅ Tags release (triggers build)
-7. ✅ Back-merges to `develop`
-8. ✅ Cleans up release branch
-
-See [Release Automation Workflow](../../.github/workflows/release-automation.yml) for details.
-
-### Manual Release Process (Alternative)
-
-If you need to perform a release manually:
+**Step-by-step:**
 
 ```bash
-# 1. Feature work (on feature branches)
-git checkout -b feature/story-123-new-feature
-# ... development work ...
-gh pr create --base develop  # Merge to develop
-
-# 2. Create release branch
+# 1. Ensure develop is clean
 git checkout develop
 git pull origin develop
-git checkout -b release/v0.8.0
+make test  # Must pass 100%
 
-# 3. Run full test suite
-make test-ci
+# 2. Create release branch
+git checkout -b release/vX.Y.Z
 
-# 4. Create PR to main
-gh pr create --base main --title "Release: v0.8.0"
+# 3. Run full validation
+make test-complete
 
-# 5. After PR approval and merge, tag release
+# 4. Push release branch and create PR to main
+git push -u origin release/vX.Y.Z
+gh pr create --base main --title "Release vX.Y.Z" --body "Release description"
+
+# 5. Wait for all CI checks to pass
+# Required: unit-tests, integration-tests, security-deployment-gate, Build Gate
+
+# 6. Merge PR using MERGE COMMIT (enforced by branch protection)
+# GitHub UI will only show "Create a merge commit" option
+gh pr merge [PR_NUMBER] --merge
+
+# 7. Tag the release on main
 git checkout main
 git pull origin main
-git tag v0.8.0
-git push origin v0.8.0
+git tag vX.Y.Z
+git push origin vX.Y.Z
 
-# 6. Back-merge to develop
-git checkout develop
-git merge main --no-ff -m "Back-merge v0.8.0 to develop"
-git push origin develop
+# 8. Back-sync main to develop (brings release merge + any hotfixes)
+# Develop requires PRs, so create a sync branch:
+git checkout main
+git checkout -b sync/main-to-develop-vX.Y.Z
+git push -u origin sync/main-to-develop-vX.Y.Z
+gh pr create --base develop --title "Sync: main back to develop after vX.Y.Z"
+# This PR uses squash merge (develop's merge method) — that's fine for sync
+gh pr merge [PR_NUMBER] --squash
 
-# 7. Cleanup release branch
-git push origin --delete release/v0.8.0
+# 9. Clean up
+git push origin --delete release/vX.Y.Z
+git push origin --delete sync/main-to-develop-vX.Y.Z
 ```
 
-### Branch Protection
+### Handling Release Conflicts
 
-All branches have protection rules enforced. See [Branch Protection Rules](./branch-protection-rules.md) for configuration details.
+If the PR from release→main has merge conflicts (e.g., from Dependabot PRs merged directly to main):
 
-| Branch | Required Checks | Approvals | Notes |
-|--------|-----------------|-----------|-------|
-| `main` | unit-tests, security-gate, integration-gate | 1 | Strict - no bypassing |
-| `develop` | unit-tests | 1 | Admins can bypass for emergencies |
-| `release/*` | unit-tests, integration, security | 0 | Automation creates these |
+```bash
+# On the release branch, merge main into it to resolve conflicts
+git checkout release/vX.Y.Z
+git merge origin/main
+# Resolve conflicts — develop's content is authoritative for application code
+# go.mod/go.sum: keep develop's versions, they're newer
+git add .
+git commit -m "Resolve merge conflicts with main"
+git push origin release/vX.Y.Z
+```
+
+**Prevention:** Avoid merging Dependabot PRs directly to main. Instead, merge them to develop and include the dependency updates in the next release.
+
+### Branch Protection Summary
+
+All branch protection is enforced via GitHub rulesets.
+
+| Branch | Merge Method | Required Checks | Notes |
+|--------|-------------|-----------------|-------|
+| `main` | Merge commit only | unit-tests, integration-tests, security-deployment-gate, Build Gate | No squash/rebase allowed |
+| `develop` | Squash only | unit-tests, Build Gate, security-deployment-gate | Cannot be deleted |
+| `release/*` | N/A (no PRs into release branches) | None | Non-fast-forward only; main handles merge checks |
 
 ### Hotfix Workflow
 
