@@ -188,6 +188,8 @@ Deploy on test cluster and manage real VMs — the core beta milestone.
 - [ ] Controller: implement workflow engine (Issue #414) - Documented as core capability, no code exists
 - [ ] Steward: registration approval via workflow engine hook (Issue #422) - Approval logic as workflow policy, default accept-all, depends on #414
 - [ ] Controller: per-tenant config source routing via mount points (Issue #428) - External git repos as read-only config source at any hierarchy level, one-way sync, versioned compiled configs
+- [ ] Controller: fix tenant context key mismatch between auth middleware and config handlers (Issue #430) - Tenant ID never flows from auth to config operations, all ops use "default"
+- [ ] Controller: replace MockConfigStore in config_service_storage_test.go with real storage (Issue #431) - Testing standards violation, uses mock instead of real git backend
 
 #### v0.9.3 — Three-Certificate Architecture (~47-65 pts, ~3-5 weeks)
 
