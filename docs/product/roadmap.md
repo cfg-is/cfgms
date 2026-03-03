@@ -168,7 +168,7 @@ Minimum security hygiene before deploying on a real network.
 Deploy on test cluster and manage real VMs — the core beta milestone.
 
 **Blockers (must resolve before E2E validation):**
-- [ ] Controller: wire ConfigurationServiceV2 durable storage — V1 is in-memory (Issue #409) - Configs lost on controller restart, deployment blocker
+- [x] Controller: wire ConfigurationServiceV2 durable storage — V1 is in-memory (Issue #409) - Configs lost on controller restart, deployment blocker
 - [ ] Controller: separate first-run initialization from normal startup (Issue #410) - Prevent silent CA regeneration on misconfigured restart
 - [ ] Steward: compile-time controller URL, remove regtoken prefix (Issue #421) - Controller URL baked in at build for signed binary security, shorter tokens for MDM deployment
 
