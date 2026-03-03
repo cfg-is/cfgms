@@ -42,7 +42,7 @@ type Server struct {
 	httpServer              *http.Server
 	router                  *mux.Router
 	controllerService       *service.ControllerService
-	configService           *service.ConfigurationService
+	configService           *service.ConfigurationServiceV2
 	certProvisioningService *service.CertificateProvisioningService
 	rbacService             *service.RBACService
 	certManager             *cert.Manager
@@ -103,7 +103,7 @@ func New(
 	cfg *config.Config,
 	logger logging.Logger,
 	controllerService *service.ControllerService,
-	configService *service.ConfigurationService,
+	configService *service.ConfigurationServiceV2,
 	certProvisioningService *service.CertificateProvisioningService,
 	rbacService *service.RBACService,
 	certManager *cert.Manager,

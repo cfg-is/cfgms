@@ -16,6 +16,16 @@ import (
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
+// StoredConfiguration represents a configuration stored in the controller with metadata
+type StoredConfiguration struct {
+	StewardID   string
+	TenantID    string // Multi-tenant support
+	Version     string
+	Config      *stewardconfig.StewardConfig
+	LastUpdated time.Time
+	CreatedAt   time.Time
+}
+
 // ConfigurationStorageMigration provides Epic 6 compliant storage for ConfigurationService
 // This replaces the in-memory map[string]*StoredConfiguration with ConfigStore persistence
 type ConfigurationStorageMigration struct {

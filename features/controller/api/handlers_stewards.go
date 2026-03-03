@@ -5,7 +5,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"regexp"
@@ -279,8 +278,8 @@ func (s *Server) handleUpdateStewardConfig(w http.ResponseWriter, r *http.Reques
 		"tenant_id", tenantIDForLog,
 		"resource_count", len(config.Resources))
 
-	// Store configuration using tenant-aware config service
-	if err := s.configService.SetTenantConfiguration(tenantID, stewardID, &config); err != nil {
+	// Store configuration using V2 durable config service
+	if err := s.configService.SetConfiguration(r.Context(), tenantID, stewardID, &config); err != nil {
 		s.logger.Error("Failed to store configuration",
 			"steward_id", stewardIDForLog,
 			"tenant_id", tenantIDForLog,
@@ -394,22 +393,21 @@ func (s *Server) handleGetEffectiveConfig(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Get effective configuration from the configuration service
-	effectiveConfig, err := s.configService.GetEffectiveConfiguration(stewardID)
+	// Extract tenant from context or use default
+	tenantID := "default"
+	if tid, ok := r.Context().Value("tenant-id").(string); ok && tid != "" {
+		tenantID = tid
+	}
+
+	// Get effective configuration from the V2 configuration service (durable storage)
+	effectiveConfig, err := s.configService.GetEffectiveConfiguration(r.Context(), tenantID, stewardID)
 	if err != nil {
 		s.logger.Error("Failed to get effective configuration", "steward_id", stewardIDForLog, "error", err)
-
-		// Check if steward not found
-		if err.Error() == fmt.Sprintf("steward not found: %s", stewardID) {
-			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
-			return
-		}
-
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve effective configuration", "INTERNAL_ERROR")
 		return
 	}
 
-	s.logger.Info("Retrieved effective configuration", "steward_id", stewardIDForLog, "resources_count", len(effectiveConfig.Resources))
+	s.logger.Info("Retrieved effective configuration", "steward_id", stewardIDForLog)
 	s.writeSuccessResponse(w, effectiveConfig)
 }
 
