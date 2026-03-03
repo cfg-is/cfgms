@@ -215,7 +215,7 @@ func (c *Controller) RegisterModule(module Module) error {
 }
 
 // GetConfigurationService returns the configuration service instance
-func (c *Controller) GetConfigurationService() *service.ConfigurationService {
+func (c *Controller) GetConfigurationService() *service.ConfigurationServiceV2 {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.server.GetConfigurationService()

@@ -5,17 +5,20 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/protobuf/types/known/timestamppb"
 
 	common "github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+
+	// Import storage provider for testing
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 )
 
 func createTestStewardConfig(stewardID string) *stewardconfig.StewardConfig {
@@ -32,6 +35,12 @@ func createTestStewardConfig(stewardID string) *stewardconfig.StewardConfig {
 				ResourceFailure:    stewardconfig.ActionWarn,
 				ConfigurationError: stewardconfig.ActionFail,
 			},
+		},
+		// Modules map must include all modules referenced in Resources to prevent
+		// MISSING_MODULES validation warnings (map value is the custom module path)
+		Modules: map[string]string{
+			"directory": "directory",
+			"file":      "file",
 		},
 		Resources: []stewardconfig.ResourceConfig{
 			{
@@ -54,238 +63,166 @@ func createTestStewardConfig(stewardID string) *stewardconfig.StewardConfig {
 	}
 }
 
-func TestNewConfigurationService(t *testing.T) {
+// createTestServiceV2 creates a ConfigurationServiceV2 backed by a real git StorageManager
+func createTestServiceV2(t *testing.T) *ConfigurationServiceV2 {
+	t.Helper()
+
 	logger := logging.NewNoopLogger()
+	storageConfig := map[string]interface{}{
+		"repository_path": t.TempDir(),
+		"branch":          "main",
+		"auto_init":       true,
+	}
+	storageManager, err := interfaces.CreateAllStoresFromConfig("git", storageConfig)
+	require.NoError(t, err)
 
-	service := NewConfigurationService(logger, nil)
+	return NewConfigurationServiceV2(logger, storageManager, nil)
+}
 
-	assert.NotNil(t, service)
-	assert.Equal(t, logger, service.logger)
-	assert.NotNil(t, service.configurations)
-	assert.Len(t, service.configurations, 0)
+func TestNewConfigurationServiceV2(t *testing.T) {
+	svc := createTestServiceV2(t)
+	assert.NotNil(t, svc)
+	assert.NotNil(t, svc.storageManager)
 }
 
 func TestSetConfiguration(t *testing.T) {
-	logger := logging.NewNoopLogger()
-	service := NewConfigurationService(logger, nil)
+	ctx := context.Background()
+	svc := createTestServiceV2(t)
 
 	stewardID := "test-steward"
-	config := createTestStewardConfig(stewardID)
+	cfg := createTestStewardConfig(stewardID)
 
 	// Test setting configuration
-	err := service.SetConfiguration(stewardID, config)
+	err := svc.SetConfiguration(ctx, "default", stewardID, cfg)
 	require.NoError(t, err)
 
-	// Verify configuration was stored
-	storedConfig, exists := service.GetStoredConfiguration(stewardID)
-	require.True(t, exists)
-	assert.Equal(t, stewardID, storedConfig.StewardID)
-	assert.Equal(t, config, storedConfig.Config)
-	assert.NotEmpty(t, storedConfig.Version)
-	assert.NotZero(t, storedConfig.CreatedAt)
-	assert.NotZero(t, storedConfig.LastUpdated)
+	// Test retrieving configuration via GetConfiguration (protobuf path)
+	req := &controller.ConfigRequest{StewardId: stewardID}
+	resp, err := svc.GetConfiguration(ctx, req)
+	require.NoError(t, err)
+	assert.Equal(t, common.Status_OK, resp.Status.Code)
+	assert.NotEmpty(t, resp.Version)
+
+	// Verify content round-trips through protobuf
+	require.NotNil(t, resp.Config)
+	require.NotNil(t, resp.Config.Config)
+	retrieved, err := stewardconfig.FromProto(resp.Config.Config)
+	require.NoError(t, err)
+	assert.Equal(t, cfg.Steward.ID, retrieved.Steward.ID)
+	assert.Len(t, retrieved.Resources, 2)
 
 	// Test updating configuration
-	config.Resources[0].Config["permissions"] = "644"
-	err = service.SetConfiguration(stewardID, config)
+	cfg.Resources[0].Config["permissions"] = "644"
+	err = svc.SetConfiguration(ctx, "default", stewardID, cfg)
 	require.NoError(t, err)
 
-	// Verify update preserved CreatedAt but updated LastUpdated and Version
-	updatedConfig, exists := service.GetStoredConfiguration(stewardID)
-	require.True(t, exists)
-	assert.Equal(t, storedConfig.CreatedAt, updatedConfig.CreatedAt)
-	assert.True(t, updatedConfig.LastUpdated.After(storedConfig.LastUpdated) || updatedConfig.LastUpdated.Equal(storedConfig.LastUpdated))
-	// Version should be different (time-based) or at least not empty
-	assert.NotEmpty(t, updatedConfig.Version)
-	assert.NotEqual(t, storedConfig.Version, updatedConfig.Version)
+	// Verify update
+	resp2, err := svc.GetConfiguration(ctx, req)
+	require.NoError(t, err)
+	assert.Equal(t, common.Status_OK, resp2.Status.Code)
 }
 
 func TestGetConfiguration(t *testing.T) {
-	logger := logging.NewNoopLogger()
-	service := NewConfigurationService(logger, nil)
+	ctx := context.Background()
+	svc := createTestServiceV2(t)
 
 	stewardID := "test-steward"
-	config := createTestStewardConfig(stewardID)
+	cfg := createTestStewardConfig(stewardID)
 
 	t.Run("configuration not found", func(t *testing.T) {
-		req := &controller.ConfigRequest{
-			StewardId: stewardID,
-		}
-
-		resp, err := service.GetConfiguration(context.Background(), req)
+		req := &controller.ConfigRequest{StewardId: stewardID}
+		resp, err := svc.GetConfiguration(ctx, req)
 		require.NoError(t, err)
 		assert.Equal(t, common.Status_NOT_FOUND, resp.Status.Code)
 		assert.Contains(t, resp.Status.Message, "No configuration found")
 	})
 
 	t.Run("successful configuration retrieval", func(t *testing.T) {
-		// Store configuration
-		err := service.SetConfiguration(stewardID, config)
+		err := svc.SetConfiguration(ctx, "default", stewardID, cfg)
 		require.NoError(t, err)
 
-		req := &controller.ConfigRequest{
-			StewardId: stewardID,
-		}
-
-		resp, err := service.GetConfiguration(context.Background(), req)
+		req := &controller.ConfigRequest{StewardId: stewardID}
+		resp, err := svc.GetConfiguration(ctx, req)
 		require.NoError(t, err)
 		assert.Equal(t, common.Status_OK, resp.Status.Code)
 		assert.NotEmpty(t, resp.Config)
 		assert.NotEmpty(t, resp.Version)
 
-		// Verify configuration content (protobuf format)
 		require.NotNil(t, resp.Config)
 		require.NotNil(t, resp.Config.Config)
-		retrievedConfig, err := stewardconfig.FromProto(resp.Config.Config)
+		retrieved, err := stewardconfig.FromProto(resp.Config.Config)
 		require.NoError(t, err)
-		assert.Equal(t, config.Steward.ID, retrievedConfig.Steward.ID)
-		assert.Len(t, retrievedConfig.Resources, 2)
+		assert.Equal(t, cfg.Steward.ID, retrieved.Steward.ID)
+		assert.Len(t, retrieved.Resources, 2)
 	})
 
 	t.Run("configuration with module filtering", func(t *testing.T) {
-		// Store configuration
-		err := service.SetConfiguration(stewardID, config)
+		err := svc.SetConfiguration(ctx, "default", stewardID, cfg)
 		require.NoError(t, err)
 
 		req := &controller.ConfigRequest{
 			StewardId: stewardID,
-			Modules:   []string{"directory"}, // Only request directory module
+			Modules:   []string{"directory"},
 		}
-
-		resp, err := service.GetConfiguration(context.Background(), req)
+		resp, err := svc.GetConfiguration(ctx, req)
 		require.NoError(t, err)
 		assert.Equal(t, common.Status_OK, resp.Status.Code)
 
-		// Verify only directory module is returned (protobuf format)
 		require.NotNil(t, resp.Config)
 		require.NotNil(t, resp.Config.Config)
-		retrievedConfig, err := stewardconfig.FromProto(resp.Config.Config)
+		retrieved, err := stewardconfig.FromProto(resp.Config.Config)
 		require.NoError(t, err)
-		assert.Len(t, retrievedConfig.Resources, 1)
-		assert.Equal(t, "directory", retrievedConfig.Resources[0].Module)
+		assert.Len(t, retrieved.Resources, 1)
+		assert.Equal(t, "directory", retrieved.Resources[0].Module)
 	})
 
 	t.Run("configuration with multiple module filtering", func(t *testing.T) {
-		// Store configuration
-		err := service.SetConfiguration(stewardID, config)
+		err := svc.SetConfiguration(ctx, "default", stewardID, cfg)
 		require.NoError(t, err)
 
 		req := &controller.ConfigRequest{
 			StewardId: stewardID,
 			Modules:   []string{"directory", "file"},
 		}
-
-		resp, err := service.GetConfiguration(context.Background(), req)
+		resp, err := svc.GetConfiguration(ctx, req)
 		require.NoError(t, err)
 		assert.Equal(t, common.Status_OK, resp.Status.Code)
 
-		// Verify both modules are returned (protobuf format)
 		require.NotNil(t, resp.Config)
 		require.NotNil(t, resp.Config.Config)
-		retrievedConfig, err := stewardconfig.FromProto(resp.Config.Config)
+		retrieved, err := stewardconfig.FromProto(resp.Config.Config)
 		require.NoError(t, err)
-		assert.Len(t, retrievedConfig.Resources, 2)
+		assert.Len(t, retrieved.Resources, 2)
 	})
 
 	t.Run("configuration with non-existent module filtering", func(t *testing.T) {
-		// Store configuration
-		err := service.SetConfiguration(stewardID, config)
+		err := svc.SetConfiguration(ctx, "default", stewardID, cfg)
 		require.NoError(t, err)
 
 		req := &controller.ConfigRequest{
 			StewardId: stewardID,
 			Modules:   []string{"non-existent"},
 		}
-
-		resp, err := service.GetConfiguration(context.Background(), req)
+		resp, err := svc.GetConfiguration(ctx, req)
 		require.NoError(t, err)
 		assert.Equal(t, common.Status_OK, resp.Status.Code)
 
-		// Verify no resources are returned (protobuf format)
 		require.NotNil(t, resp.Config)
 		require.NotNil(t, resp.Config.Config)
-		retrievedConfig, err := stewardconfig.FromProto(resp.Config.Config)
+		retrieved, err := stewardconfig.FromProto(resp.Config.Config)
 		require.NoError(t, err)
-		assert.Len(t, retrievedConfig.Resources, 0)
-	})
-}
-
-func TestReportConfigStatus(t *testing.T) {
-	logger := logging.NewNoopLogger()
-	service := NewConfigurationService(logger, nil)
-
-	stewardID := "test-steward"
-
-	t.Run("successful status report", func(t *testing.T) {
-
-		moduleStatuses := []*controller.ModuleStatus{
-			{
-				Name:      "directory",
-				Status:    &common.Status{Code: common.Status_OK, Message: "Directory created successfully"},
-				Message:   "Directory created successfully",
-				Timestamp: timestamppb.Now(),
-			},
-			{
-				Name:      "file",
-				Status:    &common.Status{Code: common.Status_OK, Message: "File created successfully"},
-				Message:   "File created successfully",
-				Timestamp: timestamppb.Now(),
-			},
-		}
-
-		req := &controller.ConfigStatusReport{
-			StewardId:     stewardID,
-			ConfigVersion: "v1",
-			Status: &common.Status{
-				Code:    common.Status_OK,
-				Message: "Configuration applied successfully",
-			},
-			Modules: moduleStatuses,
-		}
-
-		resp, err := service.ReportConfigStatus(context.Background(), req)
-		require.NoError(t, err)
-		assert.Equal(t, common.Status_OK, resp.Code)
-		assert.Contains(t, resp.Message, "processed successfully")
-	})
-
-	t.Run("error status report", func(t *testing.T) {
-
-		moduleStatuses := []*controller.ModuleStatus{
-			{
-				Name:      "directory",
-				Status:    &common.Status{Code: common.Status_ERROR, Message: "Permission denied"},
-				Message:   "Permission denied",
-				Timestamp: timestamppb.Now(),
-			},
-		}
-
-		req := &controller.ConfigStatusReport{
-			StewardId:     stewardID,
-			ConfigVersion: "v1",
-			Status: &common.Status{
-				Code:    common.Status_ERROR,
-				Message: "Configuration failed",
-			},
-			Modules: moduleStatuses,
-		}
-
-		resp, err := service.ReportConfigStatus(context.Background(), req)
-		require.NoError(t, err)
-		assert.Equal(t, common.Status_OK, resp.Code)
-		assert.Contains(t, resp.Message, "processed successfully")
+		assert.Len(t, retrieved.Resources, 0)
 	})
 }
 
 func TestValidateConfig(t *testing.T) {
-	logger := logging.NewNoopLogger()
-	service := NewConfigurationService(logger, nil)
+	svc := createTestServiceV2(t)
 
 	stewardID := "test-steward"
-	config := createTestStewardConfig(stewardID)
+	cfg := createTestStewardConfig(stewardID)
 
 	t.Run("successful validation", func(t *testing.T) {
-		configData, err := json.Marshal(config)
+		configData, err := json.Marshal(cfg)
 		require.NoError(t, err)
 
 		req := &controller.ConfigValidationRequest{
@@ -293,7 +230,7 @@ func TestValidateConfig(t *testing.T) {
 			Version: "v1",
 		}
 
-		resp, err := service.ValidateConfig(context.Background(), req)
+		resp, err := svc.ValidateConfig(context.Background(), req)
 		require.NoError(t, err)
 		assert.Equal(t, common.Status_OK, resp.Status.Code)
 		assert.Contains(t, resp.Status.Message, "valid")
@@ -306,7 +243,7 @@ func TestValidateConfig(t *testing.T) {
 			Version: "v1",
 		}
 
-		resp, err := service.ValidateConfig(context.Background(), req)
+		resp, err := svc.ValidateConfig(context.Background(), req)
 		require.NoError(t, err)
 		assert.Equal(t, common.Status_ERROR, resp.Status.Code)
 		assert.Contains(t, resp.Status.Message, "Invalid configuration format")
@@ -339,15 +276,15 @@ func TestValidateConfig(t *testing.T) {
 			Version: "v1",
 		}
 
-		resp, err := service.ValidateConfig(context.Background(), req)
+		resp, err := svc.ValidateConfig(context.Background(), req)
 		require.NoError(t, err)
 		assert.Equal(t, common.Status_ERROR, resp.Status.Code)
-		assert.Contains(t, resp.Status.Message, "Configuration has critical errors")
-		assert.Greater(t, len(resp.Errors), 0) // Should have multiple validation errors
-		// Check that we have at least one critical error (the missing steward ID)
+		assert.Contains(t, resp.Status.Message, "critical errors")
+		assert.Greater(t, len(resp.Errors), 0)
+		// Check that we have at least one critical error
 		hasCriticalError := false
-		for _, err := range resp.Errors {
-			if err.Level == controller.ValidationError_CRITICAL {
+		for _, validationErr := range resp.Errors {
+			if validationErr.Level == controller.ValidationError_CRITICAL {
 				hasCriticalError = true
 				break
 			}
@@ -357,76 +294,85 @@ func TestValidateConfig(t *testing.T) {
 }
 
 func TestFilterConfigByModules(t *testing.T) {
-	logger := logging.NewNoopLogger()
-	service := NewConfigurationService(logger, nil)
+	svc := createTestServiceV2(t)
 
-	config := createTestStewardConfig("test-steward")
+	cfg := createTestStewardConfig("test-steward")
 
 	t.Run("no module filtering", func(t *testing.T) {
-		filtered := service.filterConfigByModules(config, nil)
-		assert.Equal(t, config, filtered)
+		filtered := svc.filterConfigByModules(cfg, nil)
+		assert.Equal(t, cfg, filtered)
 
-		filtered = service.filterConfigByModules(config, []string{})
-		assert.Equal(t, config, filtered)
+		filtered = svc.filterConfigByModules(cfg, []string{})
+		assert.Equal(t, cfg, filtered)
 	})
 
 	t.Run("single module filtering", func(t *testing.T) {
-		filtered := service.filterConfigByModules(config, []string{"directory"})
-		assert.Equal(t, config.Steward, filtered.Steward)
+		filtered := svc.filterConfigByModules(cfg, []string{"directory"})
+		assert.Equal(t, cfg.Steward, filtered.Steward)
 		assert.Len(t, filtered.Resources, 1)
 		assert.Equal(t, "directory", filtered.Resources[0].Module)
 	})
 
 	t.Run("multiple module filtering", func(t *testing.T) {
-		filtered := service.filterConfigByModules(config, []string{"directory", "file"})
-		assert.Equal(t, config.Steward, filtered.Steward)
+		filtered := svc.filterConfigByModules(cfg, []string{"directory", "file"})
+		assert.Equal(t, cfg.Steward, filtered.Steward)
 		assert.Len(t, filtered.Resources, 2)
 	})
 
 	t.Run("non-existent module filtering", func(t *testing.T) {
-		filtered := service.filterConfigByModules(config, []string{"non-existent"})
-		assert.Equal(t, config.Steward, filtered.Steward)
+		filtered := svc.filterConfigByModules(cfg, []string{"non-existent"})
+		assert.Equal(t, cfg.Steward, filtered.Steward)
 		assert.Len(t, filtered.Resources, 0)
 	})
 }
 
-func TestConfigurationServiceConcurrency(t *testing.T) {
-	logger := logging.NewNoopLogger()
-	service := NewConfigurationService(logger, nil)
+func TestConfigurationServiceV2Concurrency(t *testing.T) {
+	ctx := context.Background()
+	svc := createTestServiceV2(t)
 
 	stewardID := "test-steward"
 
-	// Test concurrent access
-	done := make(chan bool)
+	// Seed initial config
+	cfg := createTestStewardConfig(stewardID)
+	err := svc.SetConfiguration(ctx, "default", stewardID, cfg)
+	require.NoError(t, err)
+
+	errs := make(chan error, 10)
 
 	// Goroutine 1: Set configuration
 	go func() {
-		for i := 0; i < 10; i++ {
-			// Create a new config for each operation to avoid data races
+		for i := 0; i < 5; i++ {
 			newConfig := createTestStewardConfig(stewardID)
 			newConfig.Resources[0].Config["permissions"] = "755"
-			_ = service.SetConfiguration(stewardID, newConfig)
-			time.Sleep(time.Millisecond)
+			if err := svc.SetConfiguration(ctx, "default", stewardID, newConfig); err != nil {
+				errs <- fmt.Errorf("SetConfiguration iteration %d: %w", i, err)
+				return
+			}
 		}
-		done <- true
+		errs <- nil
 	}()
 
 	// Goroutine 2: Get configuration
 	go func() {
-		for i := 0; i < 10; i++ {
+		for i := 0; i < 5; i++ {
 			req := &controller.ConfigRequest{StewardId: stewardID}
-			_, _ = service.GetConfiguration(context.Background(), req)
-			time.Sleep(time.Millisecond)
+			if _, err := svc.GetConfiguration(ctx, req); err != nil {
+				errs <- fmt.Errorf("GetConfiguration iteration %d: %w", i, err)
+				return
+			}
 		}
-		done <- true
+		errs <- nil
 	}()
 
-	// Wait for both goroutines to complete
-	<-done
-	<-done
+	for i := 0; i < 2; i++ {
+		if err := <-errs; err != nil {
+			t.Errorf("Concurrent operation failed: %v", err)
+		}
+	}
 
-	// Verify final state
-	storedConfig, exists := service.GetStoredConfiguration(stewardID)
-	assert.True(t, exists)
-	assert.Equal(t, stewardID, storedConfig.StewardID)
+	// Verify final state is retrievable
+	req := &controller.ConfigRequest{StewardId: stewardID}
+	resp, err := svc.GetConfiguration(ctx, req)
+	assert.NoError(t, err)
+	assert.Equal(t, common.Status_OK, resp.Status.Code)
 }

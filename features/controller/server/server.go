@@ -53,7 +53,7 @@ type Server struct {
 	logger                  logging.Logger
 	httpServer              *api.Server
 	controllerService       *service.ControllerService
-	configService           *service.ConfigurationService
+	configService           *service.ConfigurationServiceV2
 	rbacService             *service.RBACService
 	certProvisioningService *service.CertificateProvisioningService
 	certManager             *cert.Manager
@@ -127,8 +127,8 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// Create the controller service
 	controllerService := service.NewControllerService(logger)
 
-	// Create the configuration service
-	configService := service.NewConfigurationService(logger, controllerService)
+	// Create the configuration service (V2: durable storage via StorageManager)
+	configService := service.NewConfigurationServiceV2(logger, storageManager, controllerService)
 
 	// Create the RBAC service
 	rbacService := service.NewRBACService(rbacManager)
@@ -688,7 +688,7 @@ func (s *Server) Stop() error {
 }
 
 // GetConfigurationService returns the configuration service instance
-func (s *Server) GetConfigurationService() *service.ConfigurationService {
+func (s *Server) GetConfigurationService() *service.ConfigurationServiceV2 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.configService
@@ -1113,7 +1113,7 @@ func buildQUICTLSConfig(cfg *config.Config, certManager *cert.Manager, logger lo
 }
 
 // initializeDataPlaneProvider initializes the data plane provider (Story #362)
-func initializeDataPlaneProvider(cfg *config.Config, logger logging.Logger, certManager *cert.Manager, configService *service.ConfigurationService) (dataplaneInterfaces.DataPlaneProvider, error) {
+func initializeDataPlaneProvider(cfg *config.Config, logger logging.Logger, certManager *cert.Manager, configService *service.ConfigurationServiceV2) (dataplaneInterfaces.DataPlaneProvider, error) {
 	// Build TLS configuration for QUIC
 	tlsConfig, err := buildQUICTLSConfig(cfg, certManager, logger)
 	if err != nil {

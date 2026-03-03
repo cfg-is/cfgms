@@ -26,13 +26,13 @@ const ConfigSyncStreamID = 4
 
 // ConfigHandler handles configuration sync over QUIC streams.
 type ConfigHandler struct {
-	configService *service.ConfigurationService
+	configService *service.ConfigurationServiceV2
 	logger        logging.Logger
 	signer        signature.Signer
 }
 
 // NewConfigHandler creates a new config sync handler.
-func NewConfigHandler(configService *service.ConfigurationService, logger logging.Logger, signer signature.Signer) *ConfigHandler {
+func NewConfigHandler(configService *service.ConfigurationServiceV2, logger logging.Logger, signer signature.Signer) *ConfigHandler {
 	return &ConfigHandler{
 		configService: configService,
 		logger:        logger,

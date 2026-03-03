@@ -55,9 +55,9 @@ func setupTestServer(t *testing.T) *Server {
 	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
 	tenantManager := tenant.NewManager(tenantStore, rbacManager)
 
-	// Create mock services
+	// Create services
 	controllerService := service.NewControllerService(logger)
-	configService := service.NewConfigurationService(logger, controllerService)
+	configService := service.NewConfigurationServiceV2(logger, storageManager, controllerService)
 	rbacService := service.NewRBACService(rbacManager)
 
 	// Create REST API server
@@ -810,7 +810,7 @@ func setupTestServerWithLogger(t *testing.T, logger logging.Logger) *Server {
 	tenantManager := tenant.NewManager(tenantStore, rbacManager)
 
 	controllerService := service.NewControllerService(logger)
-	configService := service.NewConfigurationService(logger, controllerService)
+	configService := service.NewConfigurationServiceV2(logger, storageManager, controllerService)
 	rbacService := service.NewRBACService(rbacManager)
 
 	server, err := New(

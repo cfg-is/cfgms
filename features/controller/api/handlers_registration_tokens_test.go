@@ -72,9 +72,9 @@ func setupTestServerWithTokenStore(t *testing.T) (*Server, registration.Store) {
 
 	tokenStore := registration.NewStorageAdapter(gitTokenStore)
 
-	// Create mock services
+	// Create services
 	controllerService := service.NewControllerService(logger)
-	configService := service.NewConfigurationService(logger, controllerService)
+	configService := service.NewConfigurationServiceV2(logger, storageManager, controllerService)
 	rbacService := service.NewRBACService(rbacManager)
 
 	// Create REST API server with token store

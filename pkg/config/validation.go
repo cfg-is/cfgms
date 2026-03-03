@@ -83,7 +83,7 @@ func (vm *ValidationManager) ValidateConfiguration(ctx context.Context, tenantID
 			Field:   "steward_config",
 			Message: fmt.Sprintf("Basic validation failed: %v", err),
 			Code:    "BASIC_VALIDATION_FAILED",
-			Level:   "error",
+			Level:   "critical",
 		})
 	}
 
