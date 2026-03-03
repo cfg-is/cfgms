@@ -22,6 +22,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/commands"
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/heartbeat"
+	"github.com/cfgis/cfgms/features/controller/initialization"
 	controllerQuic "github.com/cfgis/cfgms/features/controller/quic"
 	"github.com/cfgis/cfgms/features/controller/registration"
 	"github.com/cfgis/cfgms/features/controller/service"
@@ -137,10 +138,25 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	var certManager *cert.Manager
 	var certProvisioningService *service.CertificateProvisioningService
 	if cfg.Certificate != nil && cfg.Certificate.EnableCertManagement {
+		// Init guard: controller must be initialized before normal startup
+		caPath := cfg.Certificate.CAPath
+		if !initialization.IsInitialized(caPath) {
+			if initialization.CAFilesExist(caPath) {
+				// Legacy: existing CA files but no marker — auto-create marker for backward compat
+				logger.Info("Legacy CA detected without init marker, creating marker for backward compatibility", "ca_path", caPath)
+				if err := initialization.CreateLegacyMarker(caPath); err != nil {
+					return nil, fmt.Errorf("failed to create legacy init marker: %w", err)
+				}
+			} else {
+				// Not initialized — refuse to start
+				return nil, ErrNotInitialized
+			}
+		}
+
 		var err error
-		certManager, err = initializeCertificateManager(cfg, logger)
+		certManager, err = loadExistingCertificateManager(cfg, logger)
 		if err != nil {
-			return nil, fmt.Errorf("failed to initialize certificate manager: %w", err)
+			return nil, fmt.Errorf("failed to load certificate manager: %w", err)
 		}
 
 		// Story #377: Boot migration for separated certificate architecture
@@ -818,52 +834,25 @@ func (s *Server) GetRegistrationTokenStore() pkgRegistration.Store {
 	return s.registrationTokenStore
 }
 
-// initializeCertificateManager initializes the certificate manager based on configuration
-func initializeCertificateManager(cfg *config.Config, logger logging.Logger) (*cert.Manager, error) {
-	// Check if CA exists or needs to be created
-	caExists := false
-	if _, err := os.Stat(filepath.Join(cfg.Certificate.CAPath, "ca.crt")); err == nil {
-		if _, err := os.Stat(filepath.Join(cfg.Certificate.CAPath, "ca.key")); err == nil {
-			caExists = true
-		}
+// loadExistingCertificateManager loads the certificate manager from an existing CA.
+// Unlike the old initializeCertificateManager, this never creates a new CA — that
+// responsibility belongs to `controller --init` (initialization.Run).
+func loadExistingCertificateManager(cfg *config.Config, logger logging.Logger) (*cert.Manager, error) {
+	certPath := cfg.CertPath
+	if certPath == "" {
+		certPath = cfg.Certificate.CAPath
 	}
 
-	var manager *cert.Manager
-	var err error
-
-	if caExists {
-		// Load existing CA (reboot/restart scenario)
-		manager, err = cert.NewManager(&cert.ManagerConfig{
-			StoragePath:          cfg.CertPath,
-			LoadExistingCA:       true,
-			EnableAutoRenewal:    cfg.Certificate.EnableCertManagement, // Enable renewal when cert management is enabled
-			RenewalThresholdDays: cfg.Certificate.RenewalThresholdDays,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to load existing CA: %w", err)
-		}
-		logger.Info("Loaded existing Certificate Authority")
-	} else {
-		// Create new CA (first deployment scenario)
-		caConfig := &cert.CAConfig{
-			Organization: cfg.Certificate.Server.Organization,
-			Country:      "US", // Default
-			ValidityDays: 3650, // 10 years for CA
-			StoragePath:  cfg.Certificate.CAPath,
-		}
-
-		manager, err = cert.NewManager(&cert.ManagerConfig{
-			StoragePath:          cfg.CertPath,
-			CAConfig:             caConfig,
-			LoadExistingCA:       false,
-			EnableAutoRenewal:    cfg.Certificate.EnableCertManagement, // Enable renewal when cert management is enabled
-			RenewalThresholdDays: cfg.Certificate.RenewalThresholdDays,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to create new CA: %w", err)
-		}
-		logger.Info("Created new Certificate Authority")
+	manager, err := cert.NewManager(&cert.ManagerConfig{
+		StoragePath:          certPath,
+		LoadExistingCA:       true,
+		EnableAutoRenewal:    cfg.Certificate.EnableCertManagement,
+		RenewalThresholdDays: cfg.Certificate.RenewalThresholdDays,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to load existing CA from %s: %w", cfg.Certificate.CAPath, err)
 	}
+	logger.Info("Loaded existing Certificate Authority", "ca_path", cfg.Certificate.CAPath)
 
 	return manager, nil
 }

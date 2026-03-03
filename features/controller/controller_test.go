@@ -10,8 +10,31 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/controller/initialization"
+	"github.com/cfgis/cfgms/pkg/cert"
 	testutil "github.com/cfgis/cfgms/pkg/testing"
 )
+
+// preInitForTest creates a CA and writes an init marker so that tests using
+// DefaultConfig() (which has cert management enabled) can start the controller.
+// certPath is the CertPath (parent dir), caPath is the Certificate.CAPath.
+// The cert manager stores CA at certPath/ca/ which must match caPath.
+func preInitForTest(t *testing.T, certPath, caPath string) {
+	t.Helper()
+	_, err := cert.NewManager(&cert.ManagerConfig{
+		StoragePath: certPath,
+		CAConfig: &cert.CAConfig{
+			Organization: "Test Org",
+			Country:      "US",
+			ValidityDays: 3650,
+			StoragePath:  caPath,
+		},
+		LoadExistingCA: false,
+	})
+	require.NoError(t, err, "preInitForTest: failed to create CA")
+	err = initialization.CreateLegacyMarker(caPath)
+	require.NoError(t, err, "preInitForTest: failed to write init marker")
+}
 
 func TestControllerCreation(t *testing.T) {
 	// Create a test logger
@@ -50,6 +73,10 @@ func TestControllerCreation(t *testing.T) {
 				if tt.cfg.Storage != nil && tt.cfg.Storage.Config != nil {
 					tt.cfg.Storage.Config["repository_path"] = tempDir + "/storage"
 				}
+				// Pre-initialize if cert management is enabled (Story #410)
+				if tt.cfg.Certificate != nil && tt.cfg.Certificate.EnableCertManagement {
+					preInitForTest(t, tt.cfg.CertPath, tt.cfg.Certificate.CAPath)
+				}
 			}
 
 			controller, err := New(tt.cfg, logger)
@@ -81,6 +108,9 @@ func TestControllerLifecycle(t *testing.T) {
 		cfg.Storage.Config["repository_path"] = tempDir + "/storage"
 	}
 
+	// Pre-initialize (Story #410: controller requires explicit init)
+	preInitForTest(t, cfg.CertPath, cfg.Certificate.CAPath)
+
 	ctrl, err := New(cfg, logger)
 	require.NoError(t, err)
 
@@ -99,16 +129,15 @@ func TestControllerLifecycle(t *testing.T) {
 		messages[i] = log.Message
 	}
 
-	// Verify required messages are present (order may vary based on certificate state)
-	// CA can be either loaded (existing) or created (new temp dir)
-	caInitialized := false
+	// Verify required messages are present: CA is always loaded (init was done by preInitForTest)
+	caLoaded := false
 	for _, msg := range messages {
-		if msg == "Loaded existing Certificate Authority" || msg == "Created new Certificate Authority" {
-			caInitialized = true
+		if msg == "Loaded existing Certificate Authority" {
+			caLoaded = true
 			break
 		}
 	}
-	assert.True(t, caInitialized, "Expected CA to be initialized (either loaded or created)")
+	assert.True(t, caLoaded, "Expected CA to be loaded from pre-initialized state")
 
 	// M-AUTH-1: No longer generating default API keys (security anti-pattern removed)
 	assert.Contains(t, messages, "Starting controller")
@@ -156,7 +185,18 @@ func TestControllerLifecycle(t *testing.T) {
 func TestModuleRegistration(t *testing.T) {
 	// Create a test logger and controller
 	logger := testutil.NewMockLogger(true)
-	ctrl, err := New(config.DefaultConfig(), logger)
+	tempDir := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.DataDir = tempDir + "/data"
+	cfg.CertPath = tempDir + "/certs"
+	if cfg.Certificate != nil {
+		cfg.Certificate.CAPath = tempDir + "/certs/ca"
+	}
+	if cfg.Storage != nil && cfg.Storage.Config != nil {
+		cfg.Storage.Config["repository_path"] = tempDir + "/storage"
+	}
+	preInitForTest(t, cfg.CertPath, cfg.Certificate.CAPath)
+	ctrl, err := New(cfg, logger)
 	require.NoError(t, err)
 
 	// Create mock modules

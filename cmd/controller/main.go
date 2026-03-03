@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/controller/initialization"
 	"github.com/cfgis/cfgms/features/controller/server"
 	"github.com/cfgis/cfgms/pkg/logging"
 
@@ -28,6 +29,7 @@ import (
 func main() {
 	// Parse CLI flags
 	configPath := flag.String("config", "", "Path to configuration file (default: search /etc/cfgms/controller.cfg, then ./controller.cfg)")
+	initMode := flag.Bool("init", false, "Perform first-run initialization (creates CA, storage, RBAC defaults)")
 	flag.Parse()
 
 	fmt.Printf("[DEBUG] main.go: Controller main() function started\n")
@@ -63,6 +65,22 @@ func main() {
 
 	// Use global logging provider
 	logger := logging.ForComponent("controller")
+
+	// Handle --init mode: perform first-run initialization and exit
+	if *initMode {
+		logger.Info("Starting controller first-run initialization...", "operation", "init")
+		result, err := initialization.Run(cfg, logger)
+		if err != nil {
+			log.Fatalf("FATAL: Initialization failed: %v", err)
+		}
+
+		fmt.Println("Controller initialization complete:")
+		fmt.Printf("  CA Fingerprint:    %s\n", result.CAFingerprint)
+		fmt.Printf("  Storage Provider:  %s\n", result.StorageProvider)
+		fmt.Printf("  Initialized At:    %s\n", result.InitializedAt.Format(time.RFC3339))
+		fmt.Println("\nThe controller is now ready to start with: controller --config <path>")
+		os.Exit(0)
+	}
 
 	// For backward compatibility, create legacy logger for server
 	legacyLogger := logging.GetLogger()

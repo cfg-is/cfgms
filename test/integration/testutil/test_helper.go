@@ -14,6 +14,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/controller"
 	"github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/controller/initialization"
 	"github.com/cfgis/cfgms/features/steward"
 	"github.com/cfgis/cfgms/features/steward/client"
 	"github.com/cfgis/cfgms/pkg/cert"
@@ -176,10 +177,16 @@ func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx
 	err = os.MkdirAll(storageDir, 0755)
 	require.NoError(t, err)
 
-	// Create controller - it will handle certificate lifecycle automatically
-	// If EnableCertManagement: true (which we set), the controller will:
-	// - Generate CA and certs if they don't exist (first deployment)
-	// - Load CA and certs if they exist (reboot scenario)
+	// Pre-initialize if not already initialized (Story #410: first-run init guard)
+	caPath := controllerCfg.Certificate.CAPath
+	if !initialization.IsInitialized(caPath) && !initialization.CAFilesExist(caPath) {
+		t.Logf("Pre-initializing controller for test (Story #410 init guard)")
+		initResult, initErr := initialization.Run(controllerCfg, logger)
+		require.NoError(t, initErr, "Failed to pre-initialize controller for test")
+		t.Logf("Controller pre-initialized, CA fingerprint: %s", initResult.CAFingerprint)
+	}
+
+	// Create controller - loads existing CA from pre-initialization
 	ctrl, err := controller.New(controllerCfg, logger)
 	require.NoError(t, err)
 
