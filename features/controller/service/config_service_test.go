@@ -36,6 +36,12 @@ func createTestStewardConfig(stewardID string) *stewardconfig.StewardConfig {
 				ConfigurationError: stewardconfig.ActionFail,
 			},
 		},
+		// Modules map must include all modules referenced in Resources to prevent
+		// MISSING_MODULES validation warnings (map value is the custom module path)
+		Modules: map[string]string{
+			"directory": "directory",
+			"file":      "file",
+		},
 		Resources: []stewardconfig.ResourceConfig{
 			{
 				Name:   "test-directory",
@@ -228,6 +234,7 @@ func TestValidateConfig(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, common.Status_OK, resp.Status.Code)
 		assert.Contains(t, resp.Status.Message, "valid")
+		assert.Empty(t, resp.Errors)
 	})
 
 	t.Run("invalid JSON", func(t *testing.T) {
@@ -243,6 +250,46 @@ func TestValidateConfig(t *testing.T) {
 		assert.Len(t, resp.Errors, 1)
 		assert.Equal(t, "config", resp.Errors[0].Field)
 		assert.Contains(t, resp.Errors[0].Message, "JSON parsing error")
+	})
+
+	t.Run("validation failure", func(t *testing.T) {
+		// Create invalid configuration (missing required fields)
+		invalidConfig := &stewardconfig.StewardConfig{
+			Steward: stewardconfig.StewardSettings{
+				// Missing ID field
+				Mode: stewardconfig.ModeController,
+			},
+			Resources: []stewardconfig.ResourceConfig{
+				{
+					Name:   "test-resource",
+					Module: "directory",
+					// Missing Config field
+				},
+			},
+		}
+
+		configData, err := json.Marshal(invalidConfig)
+		require.NoError(t, err)
+
+		req := &controller.ConfigValidationRequest{
+			Config:  configData,
+			Version: "v1",
+		}
+
+		resp, err := svc.ValidateConfig(context.Background(), req)
+		require.NoError(t, err)
+		assert.Equal(t, common.Status_ERROR, resp.Status.Code)
+		assert.Contains(t, resp.Status.Message, "critical errors")
+		assert.Greater(t, len(resp.Errors), 0)
+		// Check that we have at least one critical error
+		hasCriticalError := false
+		for _, validationErr := range resp.Errors {
+			if validationErr.Level == controller.ValidationError_CRITICAL {
+				hasCriticalError = true
+				break
+			}
+		}
+		assert.True(t, hasCriticalError, "Should have at least one critical validation error")
 	})
 }
 

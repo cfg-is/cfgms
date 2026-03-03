@@ -402,8 +402,13 @@ func (s *Server) handleGetEffectiveConfig(w http.ResponseWriter, r *http.Request
 	// Get effective configuration from the V2 configuration service (durable storage)
 	effectiveConfig, err := s.configService.GetEffectiveConfiguration(r.Context(), tenantID, stewardID)
 	if err != nil {
-		s.logger.Error("Failed to get effective configuration", "steward_id", stewardIDForLog, "error", err)
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve effective configuration", "INTERNAL_ERROR")
+		if strings.Contains(err.Error(), "not found") {
+			s.logger.Debug("No effective configuration found", "steward_id", stewardIDForLog)
+			s.writeErrorResponse(w, http.StatusNotFound, "No effective configuration found for steward", "NOT_FOUND")
+		} else {
+			s.logger.Error("Failed to get effective configuration", "steward_id", stewardIDForLog, "error", err)
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve effective configuration", "INTERNAL_ERROR")
+		}
 		return
 	}
 

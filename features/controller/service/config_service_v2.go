@@ -47,7 +47,11 @@ func NewConfigurationServiceV2(logger logging.Logger, storageManager *interfaces
 
 // GetConfiguration retrieves configuration for a specific steward using ConfigStore
 func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *controller.ConfigRequest) (*controller.ConfigResponse, error) {
-	s.logger.Debug("Configuration request received", "steward_id", logging.SanitizeLogValue(req.StewardId), "modules", req.Modules)
+	sanitizedModules := make([]string, len(req.Modules))
+	for i, m := range req.Modules {
+		sanitizedModules[i] = logging.SanitizeLogValue(m)
+	}
+	s.logger.Debug("Configuration request received", "steward_id", logging.SanitizeLogValue(req.StewardId), "modules", sanitizedModules)
 
 	// Extract tenant context
 	tenantID := s.extractTenantID(ctx)
