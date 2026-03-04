@@ -63,10 +63,10 @@ func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
 	rollback := NewRollbackTracker()
 
 	// Step 1: Initialize storage backend
-	logger.Info("Initializing storage backend...", "provider", cfg.Storage.Provider)
 	if cfg.Storage == nil {
 		return nil, fmt.Errorf("storage configuration is required for initialization")
 	}
+	logger.Info("Initializing storage backend...", "provider", cfg.Storage.Provider)
 
 	storageManager, err := interfaces.CreateAllStoresFromConfig(cfg.Storage.Provider, cfg.Storage.Config)
 	if err != nil {
@@ -165,28 +165,11 @@ func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
 		logger.Info("Separated certificates created")
 	}
 
-	// Step 3: Generate server certificate
-	if cfg.Certificate.Server != nil {
-		logger.Info("Generating server certificate...")
-		serverCertConfig := &cert.ServerCertConfig{
-			CommonName:   cfg.Certificate.Server.CommonName,
-			DNSNames:     cfg.Certificate.Server.DNSNames,
-			IPAddresses:  cfg.Certificate.Server.IPAddresses,
-			ValidityDays: cfg.Certificate.ServerCertValidityDays,
-		}
-		if serverCertConfig.ValidityDays == 0 {
-			serverCertConfig.ValidityDays = 90
-		}
-		if _, err := certManager.GenerateServerCertificate(serverCertConfig); err != nil {
-			if rbErr := rollback.Execute(); rbErr != nil {
-				logger.Error("Rollback failed after server cert error", "rollback_error", rbErr.Error())
-			}
-			return nil, fmt.Errorf("failed to generate server certificate: %w", err)
-		}
-		logger.Info("Server certificate generated")
-	}
+	// Note: Server certificates are NOT generated during initialization.
+	// They are created by the controller startup (MQTT/QUIC subsystems)
+	// which know the specific cert names and file paths they require.
 
-	// Step 4: Initialize RBAC
+	// Step 3: Initialize RBAC
 	logger.Info("Initializing RBAC...")
 	auditStore := storageManager.GetAuditStore()
 	clientTenantStore := storageManager.GetClientTenantStore()
@@ -198,7 +181,7 @@ func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
 	}
 	logger.Info("RBAC initialized")
 
-	// Step 5: Get CA fingerprint for marker
+	// Step 4: Get CA fingerprint for marker
 	caInfo, err := certManager.GetCAInfo()
 	if err != nil {
 		if rbErr := rollback.Execute(); rbErr != nil {
@@ -207,7 +190,7 @@ func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
 		return nil, fmt.Errorf("failed to get CA info: %w", err)
 	}
 
-	// Step 7: Write init marker (LAST — all-or-nothing)
+	// Step 5: Write init marker (LAST — all-or-nothing)
 	logger.Info("Writing initialization marker...")
 	marker := &InitMarker{
 		Version:           1,
