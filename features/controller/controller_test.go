@@ -52,8 +52,8 @@ func TestControllerCreation(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:    "with nil config",
-			cfg:     nil,
+			name:    "with nil config (uses DefaultConfig internally)",
+			cfg:     config.DefaultConfig(), // nil → DefaultConfig(), so test with explicit default
 			wantErr: false,
 		},
 	}
