@@ -1951,7 +1951,8 @@ generate-test-certificates: build-controller  ## Generate test certificates usin
 	@cp test/integration/configs/controller-test.cfg controller.cfg
 	@echo "✅ Configuration copied to controller.cfg"
 	@echo ""
-	@echo "Step 2: Starting controller to auto-generate valid certificates..."
+	@echo "Step 2: Initializing and starting controller to auto-generate valid certificates..."
+	@./bin/controller --init > /tmp/controller-init.log 2>&1 || true
 	@timeout 30 ./bin/controller > /tmp/controller-cert-gen.log 2>&1 & \
 	CONTROLLER_PID=$$!; \
 	sleep 5; \
