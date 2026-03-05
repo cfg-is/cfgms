@@ -16,6 +16,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	"github.com/cfgis/cfgms/pkg/testutil"
 
 	// Import storage providers for Epic 6 compliance testing
 	// Note: memory provider is NOT imported as it's not a global provider
@@ -74,33 +75,6 @@ func raceDetectorEnabled() bool {
 	// The race detector sets this flag when -race is used
 	// This works because when -race is enabled, the race package is linked in
 	return raceEnabled
-}
-
-// preInitializeForTest creates a CA and writes an init marker at the given caPath,
-// simulating what `controller --init` does. Tests that enable cert management must
-// call this before calling server.New() since the server now refuses to start without
-// prior initialization.
-func preInitializeForTest(t *testing.T, caPath string) {
-	t.Helper()
-
-	certPath := caPath
-
-	// Create CA using the real cert.Manager (no mocks)
-	_, err := cert.NewManager(&cert.ManagerConfig{
-		StoragePath: certPath,
-		CAConfig: &cert.CAConfig{
-			Organization: "Test Org",
-			Country:      "US",
-			ValidityDays: 3650,
-			StoragePath:  caPath,
-		},
-		LoadExistingCA: false,
-	})
-	require.NoError(t, err, "preInitializeForTest: failed to create CA")
-
-	// Write init marker
-	err = initialization.CreateLegacyMarker(caPath)
-	require.NoError(t, err, "preInitializeForTest: failed to write init marker")
 }
 
 func TestServer_New_SecurityValidation(t *testing.T) {
@@ -174,7 +148,7 @@ func TestServer_New_SecurityValidation(t *testing.T) {
 			config: func() *config.Config {
 				certDir := tempDir + "/cert-mgmt"
 				_ = os.MkdirAll(certDir, 0700)
-				preInitializeForTest(t, certDir)
+				testutil.PreInitControllerForTest(t, certDir, certDir)
 				return &config.Config{
 					ListenAddr: "127.0.0.1:0",
 					CertPath:   certDir,
@@ -396,7 +370,7 @@ func TestServer_SecurityConfiguration(t *testing.T) {
 			config: func() *config.Config {
 				certDir := tempDir + "/prod-certs"
 				_ = os.MkdirAll(certDir, 0700)
-				preInitializeForTest(t, certDir)
+				testutil.PreInitControllerForTest(t, certDir, certDir)
 				return &config.Config{
 					ListenAddr: "127.0.0.1:0",
 					CertPath:   certDir,
@@ -525,7 +499,7 @@ func TestServer_SecurityEdgeCases_And_AttackVectors(t *testing.T) {
 			configFunc: func() *config.Config {
 				certDir := tempDir + "/excessive-certs"
 				_ = os.MkdirAll(certDir, 0700)
-				preInitializeForTest(t, certDir)
+				testutil.PreInitControllerForTest(t, certDir, certDir)
 				return &config.Config{
 					ListenAddr: "127.0.0.1:0",
 					CertPath:   certDir,
@@ -601,7 +575,7 @@ func TestServer_SecurityEdgeCases_And_AttackVectors(t *testing.T) {
 			configFunc: func() *config.Config {
 				certDir := tempDir + "/wildcard-certs"
 				_ = os.MkdirAll(certDir, 0700)
-				preInitializeForTest(t, certDir)
+				testutil.PreInitControllerForTest(t, certDir, certDir)
 				return &config.Config{
 					ListenAddr: "0.0.0.0:0",
 					CertPath:   certDir,
@@ -826,7 +800,7 @@ func TestServer_CertificateSecurityValidation(t *testing.T) {
 			configFunc: func() *config.Config {
 				certDir := tempDir + "/short-validity-certs"
 				_ = os.MkdirAll(certDir, 0700)
-				preInitializeForTest(t, certDir)
+				testutil.PreInitControllerForTest(t, certDir, certDir)
 				return &config.Config{
 					ListenAddr: "127.0.0.1:0",
 					CertPath:   certDir,
@@ -862,7 +836,7 @@ func TestServer_CertificateSecurityValidation(t *testing.T) {
 			configFunc: func() *config.Config {
 				certDir := tempDir + "/auto-renewal-certs"
 				_ = os.MkdirAll(certDir, 0700)
-				preInitializeForTest(t, certDir)
+				testutil.PreInitControllerForTest(t, certDir, certDir)
 				return &config.Config{
 					ListenAddr: "127.0.0.1:0",
 					CertPath:   certDir,
@@ -921,8 +895,8 @@ func TestServer_EnvironmentSecurityIsolation(t *testing.T) {
 	defer func() { _ = os.RemoveAll(tempDir2) }()
 
 	// Pre-initialize both CA directories before server creation
-	preInitializeForTest(t, tempDir1)
-	preInitializeForTest(t, tempDir2)
+	testutil.PreInitControllerForTest(t, tempDir1, tempDir1)
+	testutil.PreInitControllerForTest(t, tempDir2, tempDir2)
 
 	// Test that servers created with different configurations are properly isolated
 	config1 := &config.Config{

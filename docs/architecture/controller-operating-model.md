@@ -17,19 +17,48 @@ The controller distinguishes between first run and normal startup. First run req
 
 **Why**: If the controller auto-generated a CA and certs on every startup where it couldn't find existing ones, a misconfigured storage mount or wrong config path would silently create a new CA — breaking trust with every registered steward. This is a catastrophic failure disguised as a successful startup.
 
-**First run options:**
+#### The `--init` command
 
-- **Interactive wizard** — `controller --init` walks an admin through storage, certificate, and tenant setup with prompts and validation
-- **Automated setup** — `controller --init --config /path/to/controller.cfg` reads all settings from the config file and initializes non-interactively (for CI/automation)
+Initialization is performed by running `controller --init --config /path/to/controller.cfg`. This is a one-shot command: it performs all initialization steps, prints the result (CA fingerprint, storage provider, timestamp), and exits. It does not start the server.
 
-First run creates:
-1. Storage backend and initial schema
-2. Root CA and server certificates
-3. Signing certificate (for cfg signatures)
-4. Default tenant and admin API key
-5. Marks the installation as initialized (a state flag in storage)
+#### Init sequence
 
-First run only succeeds if all steps complete. Partial initialization is rolled back.
+The `initialization.Run()` function performs the following steps in order:
+
+1. **Pre-flight validation** — verifies that config is present, certificate management is enabled (`certificate.enable_cert_management: true`), and `certificate.ca_path` is set
+2. **Idempotent guard** — reads the CA directory for an existing `.cfgms-initialized` marker. If the marker exists, init refuses to run and reports when and with what CA the controller was previously initialized. To re-initialize, the operator must remove the CA directory and run `--init` again
+3. **Storage backend creation** — initializes the configured storage provider (git or database) via `interfaces.CreateAllStoresFromConfig()`
+4. **CA directory and CA generation** — creates the CA directory (`os.MkdirAll` with `0700`), then creates a new Certificate Authority via `pkg/cert.Manager` with `LoadExistingCA: false`
+5. **Internal mTLS certificate** — if separated certificate architecture is configured, generates the `cfgms-internal` certificate used for MQTT/QUIC inter-component communication
+6. **Config signing certificate** — if separated architecture, generates the `cfgms-config-signer` certificate used to sign cfgs distributed to stewards (4096-bit RSA key)
+7. **RBAC store initialization** — initializes default permissions, roles, and subjects via `rbac.NewManagerWithStorage()`
+8. **Init marker written last** — the `.cfgms-initialized` marker is the final step. If any earlier step fails, no marker is written, and the installation is not considered initialized
+
+Server certificates (for MQTT/QUIC listeners) are **not** created during `--init`. Those are generated during normal startup by the MQTT and QUIC subsystems, which know the specific certificate names and file paths they require.
+
+#### The `.cfgms-initialized` marker
+
+The marker is a JSON file named `.cfgms-initialized` placed in the CA directory. It records:
+
+- `version` — marker format version (for future migration)
+- `initialized_at` — UTC timestamp of initialization
+- `controller_version` — version of the controller binary that ran `--init`
+- `storage_provider` — storage backend used (e.g., `git`, `database`)
+- `ca_fingerprint` — SHA-256 fingerprint of the generated CA certificate
+
+The marker is written atomically using a temp file + rename pattern (`WriteInitMarker` writes to `.cfgms-initialized.tmp`, then renames). Placing the marker in the CA directory is intentional: if the CA mount is missing, both CA files and marker are absent, producing the correct failure mode on startup.
+
+#### Rollback on failure
+
+A `RollbackTracker` registers cleanup functions as initialization progresses. If any step fails, all registered cleanup functions execute in LIFO order (e.g., removing the CA directory that was just created). The tracker collects all rollback errors rather than stopping at the first failure.
+
+#### Server startup init guard
+
+On normal startup (without `--init`), the server checks for the marker before loading the certificate manager:
+
+- **Marker present** — proceed with normal startup
+- **No marker but CA files exist** — legacy installation from before the init guard was introduced. The server auto-creates a marker with `storage_provider: unknown-legacy` and the existing CA's fingerprint, then proceeds normally
+- **No marker and no CA files** — refuse to start with `ErrNotInitialized`, directing the operator to run `controller --init --config <path>`
 
 ### Normal Startup
 

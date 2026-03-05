@@ -11,9 +11,8 @@ import (
 
 	"github.com/cfgis/cfgms/features/controller"
 	"github.com/cfgis/cfgms/features/controller/config"
-	"github.com/cfgis/cfgms/features/controller/initialization"
-	"github.com/cfgis/cfgms/pkg/cert"
 	testutil "github.com/cfgis/cfgms/pkg/testing"
+	pkgtestutil "github.com/cfgis/cfgms/pkg/testutil"
 	unit "github.com/cfgis/cfgms/test/unit"
 )
 
@@ -29,19 +28,8 @@ func newTestController(t *testing.T) *controller.Controller {
 	cfg.Certificate.CAPath = tempDir + "/certs/ca"
 	cfg.Storage.Config["repository_path"] = tempDir + "/storage"
 
-	// Pre-initialize: create CA and write init marker
-	_, err := cert.NewManager(&cert.ManagerConfig{
-		StoragePath: cfg.CertPath,
-		CAConfig: &cert.CAConfig{
-			Organization: "Test Org",
-			Country:      "US",
-			ValidityDays: 3650,
-			StoragePath:  cfg.Certificate.CAPath,
-		},
-		LoadExistingCA: false,
-	})
-	require.NoError(t, err, "failed to create test CA")
-	require.NoError(t, initialization.CreateLegacyMarker(cfg.Certificate.CAPath), "failed to write init marker")
+	// Pre-initialize: create CA and write init marker (Story #410)
+	pkgtestutil.PreInitControllerForTest(t, cfg.CertPath, cfg.Certificate.CAPath)
 
 	logger := unit.NewTestLogger(t)
 	ctrl, err := controller.New(cfg, logger)

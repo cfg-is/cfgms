@@ -10,31 +10,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/controller/config"
-	"github.com/cfgis/cfgms/features/controller/initialization"
-	"github.com/cfgis/cfgms/pkg/cert"
 	testutil "github.com/cfgis/cfgms/pkg/testing"
+	pkgtestutil "github.com/cfgis/cfgms/pkg/testutil"
 )
-
-// preInitForTest creates a CA and writes an init marker so that tests using
-// DefaultConfig() (which has cert management enabled) can start the controller.
-// certPath is the CertPath (parent dir), caPath is the Certificate.CAPath.
-// The cert manager stores CA at certPath/ca/ which must match caPath.
-func preInitForTest(t *testing.T, certPath, caPath string) {
-	t.Helper()
-	_, err := cert.NewManager(&cert.ManagerConfig{
-		StoragePath: certPath,
-		CAConfig: &cert.CAConfig{
-			Organization: "Test Org",
-			Country:      "US",
-			ValidityDays: 3650,
-			StoragePath:  caPath,
-		},
-		LoadExistingCA: false,
-	})
-	require.NoError(t, err, "preInitForTest: failed to create CA")
-	err = initialization.CreateLegacyMarker(caPath)
-	require.NoError(t, err, "preInitForTest: failed to write init marker")
-}
 
 func TestControllerCreation(t *testing.T) {
 	// Create a test logger
@@ -75,7 +53,7 @@ func TestControllerCreation(t *testing.T) {
 				}
 				// Pre-initialize if cert management is enabled (Story #410)
 				if tt.cfg.Certificate != nil && tt.cfg.Certificate.EnableCertManagement {
-					preInitForTest(t, tt.cfg.CertPath, tt.cfg.Certificate.CAPath)
+					pkgtestutil.PreInitControllerForTest(t, tt.cfg.CertPath, tt.cfg.Certificate.CAPath)
 				}
 			}
 
@@ -109,7 +87,7 @@ func TestControllerLifecycle(t *testing.T) {
 	}
 
 	// Pre-initialize (Story #410: controller requires explicit init)
-	preInitForTest(t, cfg.CertPath, cfg.Certificate.CAPath)
+	pkgtestutil.PreInitControllerForTest(t, cfg.CertPath, cfg.Certificate.CAPath)
 
 	ctrl, err := New(cfg, logger)
 	require.NoError(t, err)
@@ -129,7 +107,7 @@ func TestControllerLifecycle(t *testing.T) {
 		messages[i] = log.Message
 	}
 
-	// Verify required messages are present: CA is always loaded (init was done by preInitForTest)
+	// Verify required messages are present: CA is always loaded (init was done by PreInitControllerForTest)
 	caLoaded := false
 	for _, msg := range messages {
 		if msg == "Loaded existing Certificate Authority" {
@@ -195,7 +173,7 @@ func TestModuleRegistration(t *testing.T) {
 	if cfg.Storage != nil && cfg.Storage.Config != nil {
 		cfg.Storage.Config["repository_path"] = tempDir + "/storage"
 	}
-	preInitForTest(t, cfg.CertPath, cfg.Certificate.CAPath)
+	pkgtestutil.PreInitControllerForTest(t, cfg.CertPath, cfg.Certificate.CAPath)
 	ctrl, err := New(cfg, logger)
 	require.NoError(t, err)
 
