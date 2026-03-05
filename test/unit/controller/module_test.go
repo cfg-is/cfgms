@@ -10,23 +10,42 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/controller"
+	"github.com/cfgis/cfgms/features/controller/config"
 	testutil "github.com/cfgis/cfgms/pkg/testing"
+	pkgtestutil "github.com/cfgis/cfgms/pkg/testutil"
 	unit "github.com/cfgis/cfgms/test/unit"
 )
 
-func TestModuleInterface(t *testing.T) {
-	// Create a test logger
-	logger := unit.NewTestLogger(t)
+// newTestController creates a controller with pre-initialized CA and init marker
+// in a temp directory, matching the Story #410 requirement that controllers must
+// be explicitly initialized before startup.
+func newTestController(t *testing.T) *controller.Controller {
+	t.Helper()
+	tempDir := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.DataDir = tempDir + "/data"
+	cfg.CertPath = tempDir + "/certs"
+	cfg.Certificate.CAPath = tempDir + "/certs/ca"
+	cfg.Storage.Config["repository_path"] = tempDir + "/storage"
 
-	// Create a controller
-	ctrl, err := controller.New(nil, logger)
+	// Pre-initialize: create CA and write init marker (Story #410)
+	pkgtestutil.PreInitControllerForTest(t, cfg.CertPath, cfg.Certificate.CAPath)
+
+	logger := unit.NewTestLogger(t)
+	ctrl, err := controller.New(cfg, logger)
 	require.NoError(t, err)
+	return ctrl
+}
+
+func TestModuleInterface(t *testing.T) {
+	// Create a pre-initialized controller (Story #410: explicit init required)
+	ctrl := newTestController(t)
 
 	// Create a mock module
 	module := testutil.NewMockModule("test-module")
 
 	// Register the module
-	err = ctrl.RegisterModule(module)
+	err := ctrl.RegisterModule(module)
 	assert.NoError(t, err)
 
 	// Get the module using the typed method
@@ -75,12 +94,8 @@ func TestModuleInterface(t *testing.T) {
 }
 
 func TestModuleCustomBehavior(t *testing.T) {
-	// Create a test logger
-	logger := unit.NewTestLogger(t)
-
-	// Create a controller
-	ctrl, err := controller.New(nil, logger)
-	require.NoError(t, err)
+	// Create a pre-initialized controller (Story #410: explicit init required)
+	ctrl := newTestController(t)
 
 	// Create a mock module with custom behavior
 	module := testutil.NewMockModule("custom-module")
@@ -101,7 +116,7 @@ func TestModuleCustomBehavior(t *testing.T) {
 	})
 
 	// Register the module
-	err = ctrl.RegisterModule(module)
+	err := ctrl.RegisterModule(module)
 	assert.NoError(t, err)
 
 	// Get the module using the typed method

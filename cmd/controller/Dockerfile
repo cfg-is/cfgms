@@ -48,5 +48,6 @@ USER cfgms
 # 9080: HTTP API (default)
 EXPOSE 1883 4433/udp 8080 9080
 
-# Set default command
-CMD ["./controller"]
+# Set default command: initialize on first boot (idempotent), then start controller
+# The --init step exits 0 on success or non-zero if already initialized (expected on restarts)
+CMD ["sh", "-c", "./controller --init 2>&1 || echo 'Init skipped (already initialized or cert management disabled)'; exec ./controller"]

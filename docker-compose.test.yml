@@ -523,7 +523,7 @@ services:
       CFGMS_DATA_DIR: "/app/data"
     # Run as root to avoid permission issues, create log dir first
     user: root
-    command: ["sh", "-c", "mkdir -p /tmp/cfgms && ./controller"]
+    command: ["sh", "-c", "mkdir -p /tmp/cfgms && ./controller --init 2>/dev/null; exec ./controller"]
     volumes:
       - controller_standalone_certs:/app/certs  # Use volume for writable certs
       - controller_standalone_data:/app/data

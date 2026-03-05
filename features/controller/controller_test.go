@@ -11,6 +11,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/controller/config"
 	testutil "github.com/cfgis/cfgms/pkg/testing"
+	pkgtestutil "github.com/cfgis/cfgms/pkg/testutil"
 )
 
 func TestControllerCreation(t *testing.T) {
@@ -29,8 +30,8 @@ func TestControllerCreation(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:    "with nil config",
-			cfg:     nil,
+			name:    "with nil config (uses DefaultConfig internally)",
+			cfg:     config.DefaultConfig(), // nil → DefaultConfig(), so test with explicit default
 			wantErr: false,
 		},
 	}
@@ -49,6 +50,10 @@ func TestControllerCreation(t *testing.T) {
 				}
 				if tt.cfg.Storage != nil && tt.cfg.Storage.Config != nil {
 					tt.cfg.Storage.Config["repository_path"] = tempDir + "/storage"
+				}
+				// Pre-initialize if cert management is enabled (Story #410)
+				if tt.cfg.Certificate != nil && tt.cfg.Certificate.EnableCertManagement {
+					pkgtestutil.PreInitControllerForTest(t, tt.cfg.CertPath, tt.cfg.Certificate.CAPath)
 				}
 			}
 
@@ -81,6 +86,9 @@ func TestControllerLifecycle(t *testing.T) {
 		cfg.Storage.Config["repository_path"] = tempDir + "/storage"
 	}
 
+	// Pre-initialize (Story #410: controller requires explicit init)
+	pkgtestutil.PreInitControllerForTest(t, cfg.CertPath, cfg.Certificate.CAPath)
+
 	ctrl, err := New(cfg, logger)
 	require.NoError(t, err)
 
@@ -99,16 +107,15 @@ func TestControllerLifecycle(t *testing.T) {
 		messages[i] = log.Message
 	}
 
-	// Verify required messages are present (order may vary based on certificate state)
-	// CA can be either loaded (existing) or created (new temp dir)
-	caInitialized := false
+	// Verify required messages are present: CA is always loaded (init was done by PreInitControllerForTest)
+	caLoaded := false
 	for _, msg := range messages {
-		if msg == "Loaded existing Certificate Authority" || msg == "Created new Certificate Authority" {
-			caInitialized = true
+		if msg == "Loaded existing Certificate Authority" {
+			caLoaded = true
 			break
 		}
 	}
-	assert.True(t, caInitialized, "Expected CA to be initialized (either loaded or created)")
+	assert.True(t, caLoaded, "Expected CA to be loaded from pre-initialized state")
 
 	// M-AUTH-1: No longer generating default API keys (security anti-pattern removed)
 	assert.Contains(t, messages, "Starting controller")
@@ -156,7 +163,18 @@ func TestControllerLifecycle(t *testing.T) {
 func TestModuleRegistration(t *testing.T) {
 	// Create a test logger and controller
 	logger := testutil.NewMockLogger(true)
-	ctrl, err := New(config.DefaultConfig(), logger)
+	tempDir := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.DataDir = tempDir + "/data"
+	cfg.CertPath = tempDir + "/certs"
+	if cfg.Certificate != nil {
+		cfg.Certificate.CAPath = tempDir + "/certs/ca"
+	}
+	if cfg.Storage != nil && cfg.Storage.Config != nil {
+		cfg.Storage.Config["repository_path"] = tempDir + "/storage"
+	}
+	pkgtestutil.PreInitControllerForTest(t, cfg.CertPath, cfg.Certificate.CAPath)
+	ctrl, err := New(cfg, logger)
 	require.NoError(t, err)
 
 	// Create mock modules
