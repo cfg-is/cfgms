@@ -1,0 +1,113 @@
+name: Agent Story
+description: A well-scoped implementation task for automated agent dispatch
+title: ""
+labels: ["story", "agent:ready"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Create a well-scoped story for automated agent dispatch. Stories should be self-contained — agents cannot ask clarifying questions during execution.
+
+  - type: input
+    id: title
+    attributes:
+      label: Title
+      description: One-line implementation goal
+      placeholder: "Add retry logic to QUIC data plane reconnection"
+    validations:
+      required: true
+
+  - type: textarea
+    id: task-description
+    attributes:
+      label: Task Description
+      description: What to implement and why. Be specific — agents work best with clear, unambiguous instructions.
+      placeholder: |
+        Implement retry logic for QUIC data plane reconnection when the
+        controller becomes temporarily unavailable. Currently, stewards
+        fail permanently on first disconnect. The retry should use
+        exponential backoff with jitter, starting at 1s and capping at 60s.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope
+      description: Which area of the codebase does this story affect?
+      options:
+        - pkg/
+        - features/
+        - cmd/
+        - test/
+        - docs/
+    validations:
+      required: true
+
+  - type: textarea
+    id: reference-implementation
+    attributes:
+      label: Reference Implementation
+      description: >
+        Path to an existing file that follows the same pattern. Stories with
+        reference implementations have significantly higher agent success rates.
+        When unavailable, provide more detailed implementation guidance in the
+        Task Description.
+      placeholder: |
+        pkg/controlplane/providers/mqtt/reconnect.go
+    validations:
+      required: false
+
+  - type: textarea
+    id: key-files
+    attributes:
+      label: Key Files
+      description: Files the agent should read before starting. One path per line.
+      placeholder: |
+        pkg/dataplane/interfaces/provider.go
+        pkg/dataplane/providers/quic/client.go
+        docs/architecture/operating-model.md
+    validations:
+      required: false
+
+  - type: textarea
+    id: acceptance-criteria
+    attributes:
+      label: Acceptance Criteria
+      description: >
+        Checkbox list of requirements. Must be specific and testable — agents
+        cannot ask clarifying questions. Each criterion should be independently
+        verifiable.
+      placeholder: |
+        - [ ] Reconnection attempts use exponential backoff (1s, 2s, 4s, ... 60s cap)
+        - [ ] Jitter of ±25% applied to each backoff interval
+        - [ ] Maximum of 10 retry attempts before reporting failure
+        - [ ] Unit tests cover all backoff calculations
+        - [ ] Integration test verifies reconnection after simulated disconnect
+      render: markdown
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope-constraints
+    attributes:
+      label: Scope Constraints
+      description: Files or directories the agent should NOT modify. Helps prevent unintended side effects.
+      placeholder: |
+        Do NOT modify:
+        - pkg/controlplane/ (separate component)
+        - cmd/controller/ (out of scope)
+    validations:
+      required: false
+
+  - type: textarea
+    id: external-references
+    attributes:
+      label: External References
+      description: Links to API docs, design docs, RFCs, or related issues.
+      placeholder: |
+        - https://quic-go.net/docs/
+        - docs/architecture/communication-layer-migration.md
+        - Related: #123
+    validations:
+      required: false
