@@ -163,6 +163,29 @@ Minimum security hygiene before deploying on a real network.
 - [x] Implement log injection prevention in pkg/logging (Issue #373 - 3-5 points) - Resolve 25 code scanning alerts, add sanitization infrastructure to prevent log forgery attacks
 - [x] Fix Windows workflow test failures (Issue #309) - Required for Windows VM management in v0.9.2
 
+#### v0.9.1.1 — Agent Dispatch Infrastructure (~60 pts, ~3 sprints)
+
+Transition from interactive Claude Code sessions to headless agent dispatch in Docker containers. Adapts Stripe's "Minion" model for solo developer workflow: architect writes PRDs/stories, agents implement in sandboxed containers, developer reviews PRs and merges. See [Agent Dispatch PRD](../development/prd-agent-dispatch.md).
+
+**Sprint 1 — Prerequisites & Configuration (~13 pts):**
+- [ ] CI: add integration-tests-controller as required check on develop (Issue #433 - 2 points) - Close CI coverage gap before agents skip Docker tests
+- [ ] CLAUDE.md: add agent execution mode and headless workflow (Issue #434 - 5 points) - Dual-mode CLAUDE.md with CFGMS_AGENT_MODE detection
+- [ ] Makefile: add test-agent-complete target for container validation (Issue #435 - 2 points) - test-complete minus Docker targets (~95% coverage)
+- [ ] GitHub: create agent-story issue template for dispatch workflow (Issue #436 - 3 points) - Structured YAML template with reference impl, acceptance criteria
+- [ ] GitHub: create agent dispatch label set (Issue #437 - 1 point) - agent:ready/in-progress/success/failed/blocked labels
+
+**Sprint 2 — Devcontainer Image (~21 pts):**
+- [ ] Devcontainer: base Dockerfile with Go toolchain and security tools (Issue #438 - 8 points) - golang:1.24-bookworm, golangci-lint, gosec, trivy, nancy, gitleaks, Claude Code
+- [ ] Devcontainer: firewall script with allowlisted outbound networking (Issue #439 - 5 points) - iptables default-deny, allowlist GitHub/Anthropic/Go proxy only
+- [ ] Devcontainer: entrypoint script with issue fetch and agent prompt (Issue #440 - 8 points) - 4-phase agent workflow, credential restore, label management
+
+**Sprint 3 — Scripts, Setup & Docs (~26 pts):**
+- [ ] Scripts: dispatch.sh for launching agent containers from issues (Issue #441 - 8 points) - Worktree creation, container launch, pre-dispatch quality checks
+- [ ] Scripts: monitor.sh background daemon for agent cleanup (Issue #442 - 5 points) - Container cleanup, worktree removal, PR URL extraction, notifications
+- [ ] Scripts: status.sh for agent state overview (Issue #443 - 3 points) - Running/completed agents, worktrees, dispatch history
+- [ ] Scripts: setup-agent-dispatch.sh one-time bootstrap (Issue #444 - 5 points) - Image build, credential setup, label creation, directory setup
+- [ ] Docs: agent dispatch infrastructure developer reference (Issue #445 - 5 points) - Story sizing guidelines, CI failure workflow, troubleshooting
+
 #### v0.9.2 — Beta Deployment Validation
 
 Deploy on test cluster and manage real VMs — the core beta milestone.
