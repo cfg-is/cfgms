@@ -186,6 +186,18 @@ Transition from interactive Claude Code sessions to headless agent dispatch in D
 - [ ] Scripts: setup-agent-dispatch.sh one-time bootstrap (Issue #444 - 5 points) - Image build, credential setup, label creation, directory setup
 - [ ] Docs: agent dispatch infrastructure developer reference (Issue #445 - 5 points) - Story sizing guidelines, CI failure workflow, troubleshooting
 
+#### v0.9.1.2 — Code Structure Refactoring (~23 pts, ~2 sprints)
+
+Split oversized Go source files into cohesive, single-responsibility modules. 183 of 598 source files (31%) exceed 500 lines. This milestone targets the 7 worst offenders (1,233–3,110 lines each) that violate SRP with multiple unrelated concerns in a single file. Pure mechanical refactoring — no behavior changes, no API changes.
+
+- [ ] Split features/workflow/engine.go into 5 cohesive modules (Issue #449 - 5 points) - 3110 lines, 75 methods across 6 concerns: conditions, loops, HTTP, sync, composition
+- [ ] Split pkg/storage/providers/git/plugin.go by store type (Issue #450 - 3 points) - 2354 lines, 4 store types with duplicated git helpers
+- [ ] Split features/tenant/security/isolation.go into 4 security domains (Issue #451 - 3 points) - 1794 lines, 4 concerns: rules, vulnerabilities, zero-trust, adaptive
+- [ ] Split pkg/storage/providers/database/rbac_store.go by entity type (Issue #452 - 3 points) - 1387 lines, 4 entity types with repetitive CRUD
+- [ ] Split pkg/directory/interfaces/schema.go — extract transformers and validators (Issue #453 - 3 points) - 1367 lines, schema mapping mixed with implementations
+- [ ] Split features/rbac/risk/integration.go into focused modules (Issue #454 - 3 points) - 1329 lines, 8+ responsibilities in one file
+- [ ] Split features/tenant/security/policy_engine.go — extract coordination and audit (Issue #455 - 3 points) - 1233 lines, policy eval + zero-trust coordination + audit
+
 #### v0.9.2 — Beta Deployment Validation
 
 Deploy on test cluster and manage real VMs — the core beta milestone.
