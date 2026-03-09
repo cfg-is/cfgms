@@ -21,11 +21,61 @@ CFGMS (Config Management System) is a modern, Go-based configuration management 
 
 **Cross-Platform Development:** All components compile and run on developer workstations across Windows, macOS, and Linux for seamless development experience.
 
-## Development Workflow
+## Execution Mode
+
+CFGMS supports two execution modes, detected automatically. Both enforce identical validation gates.
+
+- **Agent Mode**: `CFGMS_AGENT_MODE=true` env var is set. Follow [Agent Implementation Workflow](#agent-implementation-workflow) below.
+- **Interactive Mode** (default): Use mandatory [slash commands](#slash-commands-mandatory) for all development work.
+
+### Agent Implementation Workflow
+
+When `CFGMS_AGENT_MODE=true`, follow these four phases:
+
+**Phase 1: Implement**
+
+1. Read the GitHub issue (`gh issue view <NUMBER>`)
+2. Check [central providers](#central-provider-system-critical) and [operating model docs](#operating-model-important) for overlap
+3. Write tests first (TDD), implement with real components (no mocks)
+4. Branch from `develop`: `feature/story-<NUMBER>-<description>`
+
+**Phase 2: Validate**
+Run the agent validation target (matches all CI required checks):
+```bash
+make test-agent-complete  # test-commit + test-fast + test-production-critical + build-cross-validate
+```
+
+**Phase 3: Self-Review**
+Before committing, verify your own changes against QA and security checks:
+- No mocks of CFGMS components (use real implementations)
+- No skipped tests (`t.Skip()` without justification)
+- No hacky workarounds (TODO/HACK/FIXME without issue reference)
+- All new code has test coverage
+- No hardcoded secrets, credentials, or unsanitized user input in logs
+- No SQL/command injection (parameterized queries only)
+- No central provider violations (`make check-architecture`)
+- Storage imports use `pkg/storage/interfaces` only
+
+**Phase 4: Commit and PR**
+1. Commit with proper format: `<scope>: <what changed> (Issue #XXX)` with `Fixes #XXX` in body
+2. Create PR targeting `develop`: `gh pr create --base develop`
+3. PR description follows [PR Standards](#pull-request-descriptions)
+
+### Agent Failure Handling
+
+If validation fails after 3 fix iterations, create a **draft** PR (`gh pr create --base develop --draft`) with error output under `## Validation Failures`. Do NOT force-merge or skip validation gates.
+
+### Agent Scope Constraints
+- **Protected files**: Do not modify `CLAUDE.md`, `Makefile` root targets, `.github/workflows/`, or `scripts/install-git-hooks.sh` unless the story explicitly requires it
+- **Dependencies**: Do not add new Go module dependencies without story justification
+- **Architecture**: Do not create new central providers — extend existing ones or flag for human review
+- **Destructive git**: Never force-push, reset --hard, or delete branches
+
+## Development Workflow (Interactive Mode)
 
 ### Slash Commands (MANDATORY)
 
-**CRITICAL**: You MUST use these slash commands for ALL development work. Manual workflows are deprecated and prone to missing critical validation steps.
+**CRITICAL**: In interactive mode, you MUST use these slash commands for ALL development work. Manual workflows are deprecated and prone to missing critical validation steps. (In agent mode, follow the [Agent Implementation Workflow](#agent-implementation-workflow) instead.)
 
 **Required Commands:**
 - **`/story-start`** - MUST use to begin new story with pre-flight checks and roadmap auto-detection
