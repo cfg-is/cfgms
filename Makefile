@@ -3,6 +3,19 @@
 # Use bash for all recipe commands (required for credential loading scripts)
 SHELL := /bin/bash
 
+# Git worktree safety: concurrent worktree operations can corrupt core.bare,
+# which breaks Go's VCS stamping (go build/test runs "git status" at module root).
+# This finds the main repo's git dir and ensures core.bare=false.
+.PHONY: fix-git-bare
+fix-git-bare:
+	@MAIN_GIT_DIR=$$(git rev-parse --git-common-dir 2>/dev/null); \
+	if [ -n "$$MAIN_GIT_DIR" ] && [ -f "$$MAIN_GIT_DIR/config" ]; then \
+		if git config --file "$$MAIN_GIT_DIR/config" core.bare 2>/dev/null | grep -q true; then \
+			echo "⚠️  Fixing core.bare=true in $$MAIN_GIT_DIR/config (worktree corruption)"; \
+			git config --file "$$MAIN_GIT_DIR/config" core.bare false; \
+		fi; \
+	fi
+
 # Build settings
 GO_BUILD_FLAGS=-trimpath -ldflags="-s -w"
 
@@ -45,7 +58,7 @@ proto: check-proto-tools
 
 # Build all binaries
 .PHONY: build
-build: build-steward build-controller build-cli build-cert-manager
+build: fix-git-bare build-steward build-controller build-cli build-cert-manager
 
 # Build individual binaries
 .PHONY: build-steward build-controller build-cli build-cert-manager
@@ -137,7 +150,7 @@ build-steward-cross:
 	@echo "✅ Built bin/$(GOOS)-$(GOARCH)/${STEWARD_BINARY}"
 
 # Smart test - core modules + changed modules only
-test:
+test: fix-git-bare
 	@echo "🧪 Running Tests (Smart Mode)"
 	@echo "============================="
 	@go clean -testcache
@@ -1939,6 +1952,30 @@ test-complete-full: test-commit test-fast test-production-critical build-cross-v
 .PHONY: test-complete
 test-complete: test-complete-full
 	@echo ""
+
+# Agent container validation - everything from test-complete minus Docker targets
+# Used by headless agent containers that don't have access to Docker daemon
+# Story #435: Provides ~95% of validation coverage without Docker-in-Docker
+.PHONY: test-agent-complete
+test-agent-complete: test-commit test-fast test-production-critical build-cross-validate
+	@echo ""
+	@echo "✅ AGENT CONTAINER VALIDATION FINISHED"
+	@echo "========================================"
+	@echo "- ✅ All pre-commit checks passed (test-commit)"
+	@echo "- ✅ Fast comprehensive tests passed (test-fast)"
+	@echo "- ✅ Production critical tests passed (test-production-critical)"
+	@echo "- ✅ Cross-platform compilation validated (build-cross-validate)"
+	@echo ""
+	@echo "⏩ Deferred to CI (requires Docker daemon):"
+	@echo "   - test-integration-docker (storage/controller Docker tests)"
+	@echo "   - test-e2e-fast (MQTT+QUIC + Controller E2E tests)"
+	@echo ""
+	@echo "ℹ️  Acceptable CI-only gaps:"
+	@echo "   - Native Windows/macOS builds (requires Windows/macOS runners)"
+	@echo "   - Docker integration tests (requires Docker-in-Docker)"
+	@echo "   - E2E tests (requires Docker-in-Docker)"
+	@echo ""
+	@echo "🎯 Agent container validated (~95% of test-complete coverage)"
 
 # Generate Test Certificates (Story #109)
 # Uses native CFGMS certificate management via controller auto-generation
