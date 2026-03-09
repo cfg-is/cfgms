@@ -154,5 +154,8 @@ func (s *StandaloneTestSuite) TestIdempotency() {
 }
 
 func TestStandaloneSteward(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping standalone steward tests in short mode - requires Docker infrastructure")
+	}
 	suite.Run(t, new(StandaloneTestSuite))
 }

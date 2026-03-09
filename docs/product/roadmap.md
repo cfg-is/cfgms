@@ -170,7 +170,7 @@ Transition from interactive Claude Code sessions to headless agent dispatch in D
 **Sprint 1 — Prerequisites & Configuration (~13 pts):**
 - [x] CI: add integration-tests-controller as required check on develop (Issue #433 - 2 points) - Close CI coverage gap before agents skip Docker tests
 - [x] CLAUDE.md: add agent execution mode and headless workflow (Issue #434 - 5 points) - Dual-mode CLAUDE.md with CFGMS_AGENT_MODE detection
-- [ ] Makefile: add test-agent-complete target for container validation (Issue #435 - 2 points) - test-complete minus Docker targets (~95% coverage)
+- [x] Makefile: add test-agent-complete target for container validation (Issue #435 - 2 points) - test-complete minus Docker targets (~95% coverage)
 - [ ] GitHub: create agent-story issue template for dispatch workflow (Issue #436 - 3 points) - Structured YAML template with reference impl, acceptance criteria
 - [ ] GitHub: create agent dispatch label set (Issue #437 - 1 point) - agent:ready/in-progress/success/failed/blocked labels
 
