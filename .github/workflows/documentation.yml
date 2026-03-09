@@ -268,3 +268,14 @@ jobs:
           echo "Documentation-only PR detected"
           echo "   Skipping integration tests (no code changes)"
           echo "   No integration test validation required for docs-only changes"
+
+  integration-tests-controller:
+    name: Controller Integration Tests (Linux)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Docs-only controller integration test validation
+        run: |
+          echo "✅ Documentation-only PR detected"
+          echo "   Skipping controller integration tests (no code changes)"
+          echo "   No controller test validation required for docs-only changes"
