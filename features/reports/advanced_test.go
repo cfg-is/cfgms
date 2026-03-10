@@ -56,6 +56,7 @@ func TestAdvancedServiceWithConfig(t *testing.T) {
 	// Create DNA storage manager
 	dnaStorageConfig := &storage.Config{
 		Backend:                storage.BackendSQLite,
+		DataDir:                t.TempDir(),
 		CompressionLevel:       6,
 		CompressionType:        "gzip",
 		TargetCompressionRatio: 0.7, // More relaxed target for testing
@@ -75,6 +76,7 @@ func TestAdvancedServiceWithConfig(t *testing.T) {
 	}
 	dnaStorageManager, err := storage.NewManager(dnaStorageConfig, logger)
 	require.NoError(t, err)
+	t.Cleanup(func() { dnaStorageManager.Close() })
 
 	// Create real components
 	driftDetector, err := drift.NewDetector(drift.DefaultDetectorConfig(), logger)
@@ -581,6 +583,7 @@ func createTestAdvancedService(t *testing.T) *AdvancedService {
 	// Create DNA storage manager (which is what the constructor expects)
 	dnaStorageConfig := &storage.Config{
 		Backend:                storage.BackendSQLite,
+		DataDir:                t.TempDir(),
 		CompressionLevel:       6,
 		CompressionType:        "gzip",
 		TargetCompressionRatio: 0.7, // More relaxed target for testing
@@ -600,6 +603,7 @@ func createTestAdvancedService(t *testing.T) *AdvancedService {
 	}
 	dnaStorageManager, err := storage.NewManager(dnaStorageConfig, logger)
 	require.NoError(t, err, "Failed to create DNA storage manager")
+	t.Cleanup(func() { dnaStorageManager.Close() })
 
 	// Create minimal drift detector
 	driftDetector, err := drift.NewDetector(drift.DefaultDetectorConfig(), logger)
