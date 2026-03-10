@@ -74,6 +74,7 @@ m365-test-creds/
 
 # Claude Code local settings
 .claude/settings.local.json
+.claude/worktrees/
 
 .obsidian/
 
