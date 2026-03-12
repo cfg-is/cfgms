@@ -8,7 +8,27 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
+
+// safePath validates that the resolved path stays within the base directory,
+// preventing path traversal attacks via malicious tenant IDs, config keys, etc.
+func safePath(base string, segments ...string) (string, error) {
+	joined := filepath.Join(append([]string{base}, segments...)...)
+	cleaned := filepath.Clean(joined)
+	absBase, err := filepath.Abs(base)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve base path: %w", err)
+	}
+	absCleaned, err := filepath.Abs(cleaned)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve target path: %w", err)
+	}
+	if !strings.HasPrefix(absCleaned, absBase+string(filepath.Separator)) && absCleaned != absBase {
+		return "", fmt.Errorf("path traversal detected: resolved path %q escapes base %q", absCleaned, absBase)
+	}
+	return cleaned, nil
+}
 
 // initializeGitRepo ensures a git repository exists at repoPath, creating and
 // configuring it if necessary. This consolidates the identical initialization

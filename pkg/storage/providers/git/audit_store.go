@@ -43,12 +43,12 @@ func NewGitAuditStore(repoPath, remoteURL string) (*GitAuditStore, error) {
 // getAuditPath returns the file path for an audit entry.
 // Uses date-based hierarchical structure for efficient organization.
 // Example: audit/2025/01/15/tenant-a/authentication-events.json
-func (s *GitAuditStore) getAuditPath(entry *interfaces.AuditEntry) string {
+func (s *GitAuditStore) getAuditPath(entry *interfaces.AuditEntry) (string, error) {
 	year := entry.Timestamp.Format("2006")
 	month := entry.Timestamp.Format("01")
 	day := entry.Timestamp.Format("02")
 	fileName := fmt.Sprintf("%s-events.json", entry.EventType)
-	return filepath.Join(s.repoPath, year, month, day, entry.TenantID, fileName)
+	return safePath(s.repoPath, year, month, day, entry.TenantID, fileName)
 }
 
 // StoreAuditEntry stores an audit entry as JSON in git
@@ -79,7 +79,10 @@ func (s *GitAuditStore) StoreAuditEntry(ctx context.Context, entry *interfaces.A
 		entry.Timestamp = time.Now()
 	}
 
-	filePath := s.getAuditPath(entry)
+	filePath, err := s.getAuditPath(entry)
+	if err != nil {
+		return fmt.Errorf("invalid audit path: %w", err)
+	}
 
 	// #nosec G301 - Git repository directories need standard permissions for git operations
 	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
@@ -222,7 +225,10 @@ func (s *GitAuditStore) StoreAuditBatch(ctx context.Context, entries []*interfac
 		if err := s.validateAndSetMetadata(entry); err != nil {
 			return fmt.Errorf("failed to validate entry %s: %w", entry.ID, err)
 		}
-		filePath := s.getAuditPath(entry)
+		filePath, err := s.getAuditPath(entry)
+		if err != nil {
+			return fmt.Errorf("invalid audit path for entry %s: %w", entry.ID, err)
+		}
 		fileGroups[filePath] = append(fileGroups[filePath], entry)
 	}
 

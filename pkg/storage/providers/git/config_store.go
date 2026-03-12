@@ -73,15 +73,15 @@ func (s *GitConfigStore) loadSOPSConfig() error {
 	return nil
 }
 
-// getConfigPath returns the file path for a config entry
-func (s *GitConfigStore) getConfigPath(key *interfaces.ConfigKey) string {
+// getConfigPath returns the file path for a config entry, validated against path traversal
+func (s *GitConfigStore) getConfigPath(key *interfaces.ConfigKey) (string, error) {
 	var fileName string
 	if key.Scope != "" {
 		fileName = fmt.Sprintf("%s@%s.yaml", key.Name, key.Scope)
 	} else {
 		fileName = fmt.Sprintf("%s.yaml", key.Name)
 	}
-	return filepath.Join(s.repoPath, key.TenantID, key.Namespace, fileName)
+	return safePath(s.repoPath, key.TenantID, key.Namespace, fileName)
 }
 
 // StoreConfig stores a configuration entry as YAML in git
@@ -113,14 +113,17 @@ func (s *GitConfigStore) StoreConfig(ctx context.Context, config *interfaces.Con
 	hasher.Write(config.Data)
 	config.Checksum = hex.EncodeToString(hasher.Sum(nil))
 
-	filePath := s.getConfigPath(config.Key)
+	filePath, err := s.getConfigPath(config.Key)
+	if err != nil {
+		return fmt.Errorf("invalid config path: %w", err)
+	}
 
 	// #nosec G301 - Git repository directories need standard permissions for git operations
 	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	_, err := os.Stat(filePath)
+	_, err = os.Stat(filePath)
 	isUpdate := !os.IsNotExist(err)
 
 	if isUpdate {
@@ -156,7 +159,10 @@ func (s *GitConfigStore) GetConfig(ctx context.Context, key *interfaces.ConfigKe
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
-	filePath := s.getConfigPath(key)
+	filePath, err := s.getConfigPath(key)
+	if err != nil {
+		return nil, fmt.Errorf("invalid config path: %w", err)
+	}
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
 		return nil, interfaces.ErrConfigNotFound
 	}
@@ -174,7 +180,10 @@ func (s *GitConfigStore) DeleteConfig(ctx context.Context, key *interfaces.Confi
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	filePath := s.getConfigPath(key)
+	filePath, err := s.getConfigPath(key)
+	if err != nil {
+		return fmt.Errorf("invalid config path: %w", err)
+	}
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
 		return interfaces.ErrConfigNotFound
 	}
@@ -266,7 +275,10 @@ func (s *GitConfigStore) GetConfigHistory(ctx context.Context, key *interfaces.C
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
-	filePath := s.getConfigPath(key)
+	filePath, err := s.getConfigPath(key)
+	if err != nil {
+		return nil, fmt.Errorf("invalid config path: %w", err)
+	}
 
 	relPath, err := filepath.Rel(s.repoPath, filePath)
 	if err != nil {
@@ -339,7 +351,11 @@ func (s *GitConfigStore) StoreConfigBatch(ctx context.Context, configs []*interf
 		if err := s.storeConfigInternal(config); err != nil {
 			return fmt.Errorf("failed to store config %s: %w", config.Key.String(), err)
 		}
-		filePaths = append(filePaths, s.getConfigPath(config.Key))
+		fp, err := s.getConfigPath(config.Key)
+		if err != nil {
+			return fmt.Errorf("invalid config path for %s: %w", config.Key.String(), err)
+		}
+		filePaths = append(filePaths, fp)
 	}
 
 	commitMsg := fmt.Sprintf("Batch update %d configurations", len(configs))
@@ -358,7 +374,10 @@ func (s *GitConfigStore) DeleteConfigBatch(ctx context.Context, keys []*interfac
 	var filePaths []string
 
 	for _, key := range keys {
-		filePath := s.getConfigPath(key)
+		filePath, err := s.getConfigPath(key)
+		if err != nil {
+			return fmt.Errorf("invalid config path for %s: %w", key.String(), err)
+		}
 		if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("failed to delete config %s: %w", key.String(), err)
 		}
@@ -470,14 +489,17 @@ func (s *GitConfigStore) storeConfigInternal(config *interfaces.ConfigEntry) err
 	hasher.Write(config.Data)
 	config.Checksum = hex.EncodeToString(hasher.Sum(nil))
 
-	filePath := s.getConfigPath(config.Key)
+	filePath, err := s.getConfigPath(config.Key)
+	if err != nil {
+		return fmt.Errorf("invalid config path: %w", err)
+	}
 
 	// #nosec G301 - Git repository directories need standard permissions for git operations
 	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	_, err := os.Stat(filePath)
+	_, err = os.Stat(filePath)
 	isUpdate := !os.IsNotExist(err)
 
 	if isUpdate {
