@@ -1,0 +1,33 @@
+# Agent dispatch configuration for CFGMS
+# Used by /dispatch, /isoagents, and /agent-setup skills
+
+project: cfgms
+repo: cfg-is/cfgms
+
+# Git workflow
+base_branch: develop
+pr_target: develop
+branch_pattern: "feature/story-{issue}-agent"
+
+# Container settings
+container:
+  image: cfg-agent:latest
+  dockerfile: .devcontainer/Dockerfile
+  memory: 4g
+  cpus: 4
+  timeout: 3600
+  model: claude-sonnet-4-6
+
+# Validation command run inside agent container
+validation_command: "make test-agent-complete"
+
+# Worktree directory (relative to repo parent)
+worktree_dir: "../worktrees"
+
+# Label lifecycle
+labels:
+  ready: "agent:ready"
+  in_progress: "agent:in-progress"
+  success: "agent:success"
+  failed: "agent:failed"
+  blocked: "agent:blocked"

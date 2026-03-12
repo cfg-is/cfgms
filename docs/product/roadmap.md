@@ -175,15 +175,14 @@ Transition from interactive Claude Code sessions to headless agent dispatch in D
 - [x] GitHub: create agent dispatch label set (Issue #437 - 1 point) - agent:ready/in-progress/success/failed/blocked labels ✅ COMPLETED
 
 **Sprint 2 — Devcontainer Image (~21 pts):**
-- [ ] Devcontainer: base Dockerfile with Go toolchain and security tools (Issue #438 - 8 points) - golang:1.24-bookworm, golangci-lint, gosec, trivy, nancy, gitleaks, Claude Code
-- [ ] Devcontainer: firewall script with allowlisted outbound networking (Issue #439 - 5 points) - iptables default-deny, allowlist GitHub/Anthropic/Go proxy only
-- [ ] Devcontainer: entrypoint script with issue fetch and agent prompt (Issue #440 - 8 points) - 4-phase agent workflow, credential restore, label management
+- [x] Devcontainer: base Dockerfile with Go toolchain and security tools (Issue #438 - 8 points) - golang:1.25-bookworm, gosec, staticcheck, trivy, nancy, gitleaks, trufflehog, Claude Code, pre-cached Go modules + Trivy DB
+- [x] Devcontainer: firewall script with allowlisted outbound networking (Issue #439 - 5 points) - iptables default-deny, allowlist GitHub/Anthropic/Go proxy only
+- [x] Devcontainer: entrypoint script with issue fetch and agent prompt (Issue #440 - 8 points) - 4-phase agent workflow, credential restore, label management, draft PR on failure
 
-**Sprint 3 — Scripts, Setup & Docs (~26 pts):**
-- [ ] Scripts: dispatch.sh for launching agent containers from issues (Issue #441 - 8 points) - Worktree creation, container launch, pre-dispatch quality checks
-- [ ] Scripts: monitor.sh background daemon for agent cleanup (Issue #442 - 5 points) - Container cleanup, worktree removal, PR URL extraction, notifications
-- [ ] Scripts: status.sh for agent state overview (Issue #443 - 3 points) - Running/completed agents, worktrees, dispatch history
-- [ ] Scripts: setup-agent-dispatch.sh one-time bootstrap (Issue #444 - 5 points) - Image build, credential setup, label creation, directory setup
+**Sprint 3 — Skills & Setup (~26 pts) — Pivoted from bash scripts to Claude Code skills:**
+- [x] Skill: `/dispatch` for launching agent containers from issues (Issue #441 - 8 points) - Replaces dispatch.sh; worktree creation, `docker run -d` (non-blocking), quality checks
+- [x] Skill: `/isoagents` for agent status and lifecycle management (Issues #442, #443 - 8 points) - Replaces monitor.sh + status.sh; status dashboard, detailed logs, cleanup, PR review suggestions
+- [x] Skill: `/agent-setup` one-time bootstrap (Issue #444 - 5 points) - Replaces setup.sh; image build, credential setup, label creation, directory setup
 - [ ] Docs: agent dispatch infrastructure developer reference (Issue #445 - 5 points) - Story sizing guidelines, CI failure workflow, troubleshooting
 
 #### v0.9.1.2 — Code Structure Refactoring (~23 pts, ~2 sprints)
