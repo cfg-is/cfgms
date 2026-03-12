@@ -154,11 +154,11 @@ else
     gh issue edit "$ISSUE_NUM" --add-label "agent:failed" 2>/dev/null || true
     echo "Agent failed with exit code ${EXIT_CODE}"
 
-    # Create draft PR if none exists and there are changes
-    if [ -z "$PR_URL" ] && [ -n "$(git status --porcelain 2>/dev/null)" ]; then
-        git add -A
+    # Create draft PR if none exists and there are tracked changes
+    if [ -z "$PR_URL" ] && [ -n "$(git diff --name-only 2>/dev/null)" ]; then
+        git add --update
         git commit -m "WIP: agent attempt for issue #${ISSUE_NUM} (failed validation)" \
-            --allow-empty 2>/dev/null || true
+            2>/dev/null || true
         git push -u origin "$BRANCH" 2>/dev/null || true
         gh pr create --base develop --draft \
             --title "WIP: Issue #${ISSUE_NUM} (agent failed)" \

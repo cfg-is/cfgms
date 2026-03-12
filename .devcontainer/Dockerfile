@@ -19,6 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gnupg \
     npm \
     ripgrep \
+    dnsutils \
     && rm -rf /var/lib/apt/lists/*
 
 # GitHub CLI

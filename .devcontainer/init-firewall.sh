@@ -53,6 +53,8 @@ sudo iptables -A OUTPUT -m limit --limit 1/min \
     -j LOG --log-prefix "AGENT-BLOCKED: " --log-level warning
 
 # Drop IPv6 entirely (containers typically don't use it)
+sudo ip6tables -F OUTPUT 2>/dev/null || true
+sudo ip6tables -F INPUT 2>/dev/null || true
 sudo ip6tables -P OUTPUT DROP 2>/dev/null || true
 sudo ip6tables -P INPUT DROP 2>/dev/null || true
 sudo ip6tables -A OUTPUT -o lo -j ACCEPT 2>/dev/null || true
