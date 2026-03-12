@@ -76,7 +76,7 @@ func TestAdvancedServiceWithConfig(t *testing.T) {
 	}
 	dnaStorageManager, err := storage.NewManager(dnaStorageConfig, logger)
 	require.NoError(t, err)
-	t.Cleanup(func() { dnaStorageManager.Close() })
+	t.Cleanup(func() { _ = dnaStorageManager.Close() })
 
 	// Create real components
 	driftDetector, err := drift.NewDetector(drift.DefaultDetectorConfig(), logger)
@@ -603,7 +603,7 @@ func createTestAdvancedService(t *testing.T) *AdvancedService {
 	}
 	dnaStorageManager, err := storage.NewManager(dnaStorageConfig, logger)
 	require.NoError(t, err, "Failed to create DNA storage manager")
-	t.Cleanup(func() { dnaStorageManager.Close() })
+	t.Cleanup(func() { _ = dnaStorageManager.Close() })
 
 	// Create minimal drift detector
 	driftDetector, err := drift.NewDetector(drift.DefaultDetectorConfig(), logger)

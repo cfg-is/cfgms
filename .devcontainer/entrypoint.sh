@@ -5,6 +5,12 @@ set -euo pipefail
 ISSUE_NUM="${1:?Usage: entrypoint.sh <ISSUE_NUMBER> [--dry-run]}"
 DRY_RUN="${2:-}"
 
+# Validate issue number is numeric
+if [[ ! "$ISSUE_NUM" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: Issue number must be numeric, got: $ISSUE_NUM"
+    exit 1
+fi
+
 # --- Phase 0: Environment setup ---
 
 # Initialize firewall

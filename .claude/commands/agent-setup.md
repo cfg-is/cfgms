@@ -68,7 +68,7 @@ One-time bootstrap for agent dispatch. Builds the container image, sets up crede
 
 8. **Verify setup** (after image build completes):
    ```bash
-   docker run --rm cfg-agent:latest --version  # Should print claude version
+   docker run --rm --entrypoint claude cfg-agent:latest --version  # Should print claude version
    ```
 
 9. **Print summary**:
