@@ -7,7 +7,10 @@ import (
 	"fmt"
 
 	"github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
+
+var enforcerLogger = logging.NewModuleLogger("rbac-risk", "enforcer")
 
 // RiskDecisionEnforcer enforces risk-based access decisions
 type RiskDecisionEnforcer struct {
@@ -40,7 +43,7 @@ func (rde *RiskDecisionEnforcer) ApplyAdaptiveControls(ctx context.Context, requ
 	err := rde.complianceTracker.TrackControlApplication(ctx, request, controls)
 	if err != nil {
 		// Log but don't fail
-		fmt.Printf("Warning: Failed to track compliance: %v", err)
+		enforcerLogger.Warn("failed to track compliance", "error", err)
 	}
 
 	return nil
@@ -54,7 +57,7 @@ type RiskControlApplicator struct{}
 
 func (rca *RiskControlApplicator) ApplyControl(ctx context.Context, request *common.AccessRequest, control *AdaptiveControl) error {
 	// Simplified control application - in practice would interact with session management, monitoring, etc.
-	fmt.Printf("Applied control: %s with parameters: %+v", control.Type, control.Parameters)
+	enforcerLogger.Info("applied control", "type", control.Type, "parameters", fmt.Sprintf("%+v", control.Parameters))
 	return nil
 }
 

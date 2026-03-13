@@ -8,7 +8,13 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
+
+var contextLogger = logging.NewModuleLogger("rbac-risk", "context")
+
+// stubIPAddress is a placeholder used by stub data providers until real request context extraction is implemented.
+const stubIPAddress = "192.168.1.100"
 
 // RiskContextBuilder builds risk assessment contexts from access requests
 type RiskContextBuilder struct {
@@ -68,7 +74,7 @@ func (rcb *RiskContextBuilder) BuildRiskContext(ctx context.Context, request *co
 	historicalData, err := rcb.historicalDataProvider.GetHistoricalData(ctx, request.SubjectId, request.ResourceId, request.TenantId)
 	if err != nil {
 		// Historical data is optional - don't fail if not available
-		fmt.Printf("Warning: Could not get historical data: %v", err)
+		contextLogger.Warn("could not get historical data", "error", err)
 	}
 	riskRequest.HistoricalData = historicalData
 
@@ -97,7 +103,7 @@ func (sdp *SessionDataProvider) GetSessionContext(ctx context.Context, request *
 	// Simplified session context - in practice would extract from HTTP context
 	return &SessionContext{
 		SessionID:       fmt.Sprintf("session-%d", time.Now().UnixNano()),
-		IPAddress:       "192.168.1.100", // Would extract from request
+		IPAddress:       stubIPAddress, // Would extract from request
 		LoginTime:       time.Now().Add(-30 * time.Minute),
 		LastActivity:    time.Now(),
 		SessionDuration: 30 * time.Minute,
@@ -147,7 +153,7 @@ func (hdp *HistoricalDataProvider) GetHistoricalData(ctx context.Context, userID
 				ResourceID: resourceID,
 				Action:     "read",
 				Result:     "granted",
-				IPAddress:  "192.168.1.100",
+				IPAddress:  stubIPAddress,
 			},
 		},
 		AccessPatterns: &AccessPatternAnalysis{

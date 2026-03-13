@@ -14,6 +14,15 @@ import (
 	"github.com/cfgis/cfgms/features/tenant/security"
 )
 
+// DefaultRiskIntegrationConfig returns sensible defaults for risk integration configuration
+func DefaultRiskIntegrationConfig() *RiskIntegrationConfig {
+	return &RiskIntegrationConfig{
+		FailSecure:   true,
+		RiskWeight:   0.5,
+		PolicyWeight: 0.5,
+	}
+}
+
 // RiskBasedAccessIntegration integrates risk assessment with RBAC, JIT access, zero-trust policies, and continuous authorization
 type RiskBasedAccessIntegration struct {
 	riskEngine            *RiskAssessmentEngine
@@ -115,6 +124,8 @@ func NewRiskBasedAccessIntegration(
 		zeroTrustEngine:   nil,
 		zeroTrustEnabled:  false,
 		zeroTrustRiskMode: ZeroTrustRiskModeDisabled,
+
+		config: DefaultRiskIntegrationConfig(),
 
 		continuousRiskMonitor: NewContinuousRiskMonitor(riskEngine),
 		sessionRiskTracker:    NewSessionRiskTracker(),

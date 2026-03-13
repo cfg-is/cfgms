@@ -9,7 +9,10 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
+
+var monitoringLogger = logging.NewModuleLogger("rbac-risk", "monitoring")
 
 // ContinuousRiskMonitor monitors risk levels for active sessions
 type ContinuousRiskMonitor struct {
@@ -295,7 +298,7 @@ func (crm *ContinuousRiskMonitor) performScheduledAssessments(ctx context.Contex
 		_, err := crm.ReassessRisk(ctx, sessionID, "scheduled_assessment")
 		if err != nil {
 			// Log error but continue with other sessions
-			fmt.Printf("Warning: Failed to reassess risk for session %s: %v", sessionID, err)
+			monitoringLogger.Warn("failed to reassess risk for session", "session_id", sessionID, "error", err)
 		}
 	}
 }
@@ -342,7 +345,7 @@ func (crm *ContinuousRiskMonitor) notifyRiskEvent(sessionID string, event *RiskE
 	for _, callback := range crm.eventCallbacks {
 		go func(cb RiskEventCallback) {
 			if err := cb(sessionID, event); err != nil {
-				fmt.Printf("Warning: Risk event callback failed: %v", err)
+				monitoringLogger.Warn("risk event callback failed", "error", err)
 			}
 		}(callback)
 	}
