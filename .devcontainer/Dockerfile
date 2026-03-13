@@ -58,7 +58,8 @@ RUN npm install -g @anthropic-ai/claude-code
 
 # Non-root agent user with sudo for iptables only
 RUN useradd -m -s /bin/bash agent \
-    && echo "agent ALL=(root) NOPASSWD: /usr/sbin/iptables, /usr/sbin/ip6tables, /usr/sbin/dnsmasq, /usr/bin/tee" > /etc/sudoers.d/agent \
+    && echo "agent ALL=(root) NOPASSWD: /usr/sbin/iptables, /usr/sbin/ip6tables, /usr/sbin/dnsmasq" > /etc/sudoers.d/agent \
+    && chown agent:agent /etc/resolv.conf \
     && mkdir -p /persist && chown agent:agent /persist
 
 # Pre-download Trivy vulnerability DB (avoids runtime download behind firewall)

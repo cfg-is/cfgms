@@ -132,8 +132,7 @@ case "$cmd" in
     fi
 
     # Credentials check
-    docker run --rm -v claude-creds:/persist --entrypoint test cfg-agent:latest -f /persist/.credentials.json 2>/dev/null
-    if [[ $? -eq 0 ]]; then
+    if docker run --rm -v claude-creds:/persist --entrypoint test cfg-agent:latest -f /persist/.credentials.json 2>/dev/null; then
       echo "INFO:creds:Credentials present in claude-creds volume"
     else
       echo "WARN:creds:No credentials found — run /agent-setup creds"

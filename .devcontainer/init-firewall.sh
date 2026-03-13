@@ -52,7 +52,7 @@ sudo ip6tables -A INPUT -i lo -j ACCEPT 2>/dev/null || true
 # --- Start dnsmasq with domain allowlist ---
 
 # Point system DNS at our filtered resolver
-echo "nameserver 127.0.0.1" | sudo tee /etc/resolv.conf >/dev/null
+echo "nameserver 127.0.0.1" > /etc/resolv.conf
 
 # Start dnsmasq as a daemon (backgrounds itself)
 sudo dnsmasq --conf-file=/etc/dnsmasq-allowlist.conf \
