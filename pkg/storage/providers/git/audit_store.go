@@ -48,7 +48,11 @@ func (s *GitAuditStore) getAuditPath(entry *interfaces.AuditEntry) (string, erro
 	month := entry.Timestamp.Format("01")
 	day := entry.Timestamp.Format("02")
 	fileName := fmt.Sprintf("%s-events.json", entry.EventType)
-	return safePath(s.repoPath, year, month, day, entry.TenantID, fileName)
+	p, err := safePath(s.repoPath, year, month, day, entry.TenantID, fileName)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(p), nil // explicit Clean for CodeQL path-injection analysis
 }
 
 // StoreAuditEntry stores an audit entry as JSON in git

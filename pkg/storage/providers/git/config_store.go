@@ -81,7 +81,11 @@ func (s *GitConfigStore) getConfigPath(key *interfaces.ConfigKey) (string, error
 	} else {
 		fileName = fmt.Sprintf("%s.yaml", key.Name)
 	}
-	return safePath(s.repoPath, key.TenantID, key.Namespace, fileName)
+	p, err := safePath(s.repoPath, key.TenantID, key.Namespace, fileName)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(p), nil // explicit Clean for CodeQL path-injection analysis
 }
 
 // StoreConfig stores a configuration entry as YAML in git
