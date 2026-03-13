@@ -180,7 +180,8 @@ The `develop` branch uses direct required status checks to prevent merging witho
 **Configuration**:
 - ✅ No review requirements (solo-friendly development)
 - ✅ Squash merge only (clean git history)
-- ✅ Strict up-to-date branch enforcement (prevents conflicts)
+- ✅ Relaxed up-to-date policy (PRs don't need latest develop to merge — reduces CI churn for concurrent PRs)
+- ✅ Auto-merge enabled (`gh pr merge --squash --auto` queues merge for when checks pass)
 - ❌ No AI bypass (tests must pass, no admin override needed normally)
 
 **Docs-Only PRs**:
