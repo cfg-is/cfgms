@@ -22,24 +22,36 @@ One-time bootstrap for agent dispatch. Builds the container image, sets up crede
 
 2. **If `$ARGUMENTS` is 'creds'**: Skip to step 5 (credentials only).
 
-3. **If `$ARGUMENTS` is 'rebuild'**: Force rebuild with `--no-cache` (refreshes Trivy DB and Go modules).
+3. **Health check** (runs when image already exists and `$ARGUMENTS` is NOT 'rebuild'):
+   ```bash
+   ./scripts/agent-dispatch.sh health-check
+   ```
+   Parse the output lines:
+   - `WARN:image_age:...` — Image is stale, recommend rebuild
+   - `WARN:claude_version:...` — Version mismatch, recommend rebuild
+   - `WARN:creds:...` — Credentials missing
+   - If any `WARN:image_age` or `WARN:claude_version` lines appear, recommend: "Image is stale. Run `/agent-setup rebuild` to refresh Trivy DB, Go modules, and Claude Code."
+   - If the only warning is `WARN:creds`, proceed normally (step 5 handles it)
+   - If no warnings, print "Image is healthy" and proceed
 
-4. **Build agent container image** (use `run_in_background` since this takes 3-5 minutes):
+4. **If `$ARGUMENTS` is 'rebuild'**: Force rebuild with `--no-cache` (refreshes Trivy DB and Go modules).
+
+5. **Build agent container image** (use `run_in_background` since this takes 3-5 minutes):
    ```bash
    docker build -t cfg-agent:latest -f .devcontainer/Dockerfile .
    ```
    For rebuild: `docker build --no-cache -t cfg-agent:latest -f .devcontainer/Dockerfile .`
 
-   While waiting, proceed with steps 5-7 (they're independent).
+   While waiting, proceed with steps 6-8 (they're independent).
 
-5. **Set up Claude credentials**:
+6. **Set up Claude credentials**:
    - Create Docker volume: `docker volume create claude-creds` (idempotent)
    - Check if credentials already exist in the volume:
      ```bash
      docker run --rm -v claude-creds:/persist cfg-agent:latest \
        test -f /persist/.credentials.json && echo "exists"
      ```
-   - If credentials exist and not `$ARGUMENTS` == 'creds': skip
+   - If credentials exist and `$ARGUMENTS` is not 'creds': skip
    - If credentials missing or refreshing:
      - Tell user: "Claude credentials need setup. This requires an interactive login."
      - Run interactive container for OAuth:
@@ -52,12 +64,12 @@ One-time bootstrap for agent dispatch. Builds the container image, sets up crede
        ```
      - **IMPORTANT**: This step requires user interaction (OAuth flow). Tell the user what to expect.
 
-6. **Create directories**:
+7. **Create directories**:
    ```bash
    mkdir -p ../worktrees
    ```
 
-7. **Verify GitHub labels exist** (idempotent):
+8. **Verify GitHub labels exist** (idempotent):
    ```bash
    gh label create "agent:ready" --color "0E8A16" --description "Story ready for agent dispatch" --force
    gh label create "agent:in-progress" --color "FBCA04" --description "Agent container running" --force
@@ -66,12 +78,12 @@ One-time bootstrap for agent dispatch. Builds the container image, sets up crede
    gh label create "agent:blocked" --color "E4E669" --description "Needs human intervention" --force
    ```
 
-8. **Verify setup** (after image build completes):
+9. **Verify setup** (after image build completes):
    ```bash
    docker run --rm --entrypoint claude cfg-agent:latest --version  # Should print claude version
    ```
 
-9. **Print summary**:
+10. **Print summary**:
    - Image: built/exists
    - Credentials: configured/missing
    - Labels: created
