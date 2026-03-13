@@ -6,7 +6,11 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
+
+var componentsLogger = logging.NewModuleLogger("rbac-risk", "components")
 
 // RiskPolicyEngine manages and evaluates risk-based policies
 type RiskPolicyEngine struct {
@@ -224,7 +228,7 @@ func (ral *RiskAuditLogger) LogRiskAssessment(ctx context.Context, request *Risk
 	// Publish audit event for real-time processing
 	if err := ral.eventPublisher.PublishRiskEvent(ctx, auditEntry); err != nil {
 		// Log but don't fail the assessment
-		fmt.Printf("Failed to publish risk event: %v", err)
+		componentsLogger.Warn("failed to publish risk event", "error", err)
 	}
 
 	return nil
