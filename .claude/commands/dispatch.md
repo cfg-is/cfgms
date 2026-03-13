@@ -38,32 +38,26 @@ Launch isolated agent containers to implement GitHub issues. Each agent runs in 
       - Check for reference implementation mention — warn if absent
       - Print quality summary for the issue
 
-   c. **Check for conflicts**:
-      - If a container named `cfg-agent-<NUM>` already exists: skip with warning
-      - If the worktree path already exists: skip with warning
-      - If the branch already exists: skip with warning
-
-   d. **Create git worktree** (skip in dry-run):
+   c. **Check for conflicts** (uses helper to avoid approval prompts):
       ```bash
-      git worktree add ../worktrees/story-<NUM> -b feature/story-<NUM>-agent develop
+      ./scripts/agent-dispatch.sh check-conflicts <NUM1> [NUM2...]
       ```
+      Output lines prefixed `CONTAINER_EXISTS:<NUM>:` or `CLONE_EXISTS:<NUM>:` indicate conflicts — skip those issues with a warning.
+
+   d. **Create local clone** (skip in dry-run):
+      ```bash
+      ./scripts/agent-dispatch.sh create-clone <NUM>
+      ```
+      This creates a fully independent repo copy using hardlinks (fast, low disk usage).
+      Each container gets its own `.git` directory — no shared state, safe for 3+ concurrent agents.
+      The remote URL is reset to GitHub so `gh` CLI works inside the container.
 
    e. **Launch container** (skip in dry-run):
       ```bash
-      docker run -d \
-        --name "cfg-agent-<NUM>" \
-        --label "cfg-agent=true" \
-        --label "issue=<NUM>" \
-        --memory=4g \
-        --cpus=4 \
-        --stop-timeout=3600 \
-        -v "$(realpath ../worktrees/story-<NUM>):/workspace" \
-        -v "claude-creds:/persist:ro" \
-        -v "${HOME}/.config/gh:/home/agent/.config/gh:ro" \
-        --cap-add NET_ADMIN \
-        cfg-agent:latest \
-        "<NUM>"
+      ./scripts/agent-dispatch.sh launch <NUM>
       ```
+      Note: `GH_TOKEN` is passed at launch time from the host keyring. The gh config
+      mount is no longer needed — `GH_TOKEN` env var is sufficient for all gh CLI operations.
 
    f. **Update labels** (skip in dry-run):
       ```bash
@@ -79,5 +73,5 @@ Launch isolated agent containers to implement GitHub issues. Each agent runs in 
 - **Docker not running**: Tell user to start Docker and retry
 - **Image not found**: Tell user to run `/agent-setup`
 - **Issue fetch fails**: Skip that issue, continue with others
-- **Worktree/container conflict**: Skip with warning, suggest `/isoagents` to check existing state
+- **Clone/container conflict**: Skip with warning, suggest `/isoagents` to check existing state
 - **All issues skipped**: Print summary of why each was skipped
