@@ -146,8 +146,8 @@ func (s *ConfigurationServiceV2) SetConfiguration(ctx context.Context, tenantID,
 	for _, warning := range validationResult.Warnings {
 		s.logger.Warn("Configuration validation warning",
 			"steward_id", logging.SanitizeLogValue(stewardID),
-			"field", warning.Field,
-			"message", warning.Message)
+			"field", logging.SanitizeLogValue(warning.Field),
+			"message", logging.SanitizeLogValue(warning.Message))
 	}
 
 	// Store configuration
@@ -234,7 +234,7 @@ func (s *ConfigurationServiceV2) BatchSetConfigurations(ctx context.Context, con
 
 // ValidateConfig validates a configuration using comprehensive validation
 func (s *ConfigurationServiceV2) ValidateConfig(ctx context.Context, req *controller.ConfigValidationRequest) (*controller.ConfigValidationResponse, error) {
-	s.logger.Debug("Configuration validation request received", "version", req.Version)
+	s.logger.Debug("Configuration validation request received", "version", logging.SanitizeLogValue(req.Version))
 
 	// Parse configuration
 	var stewardConfig stewardconfig.StewardConfig
@@ -307,7 +307,7 @@ func (s *ConfigurationServiceV2) ValidateConfig(ctx context.Context, req *contro
 	}
 
 	s.logger.Debug("Configuration validation completed",
-		"version", req.Version,
+		"version", logging.SanitizeLogValue(req.Version),
 		"valid", validationResult.Valid,
 		"errors", len(validationResult.Errors),
 		"warnings", len(validationResult.Warnings))
