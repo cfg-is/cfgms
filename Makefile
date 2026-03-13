@@ -19,6 +19,11 @@ fix-git-bare:
 # Build settings
 GO_BUILD_FLAGS=-trimpath -ldflags="-s -w"
 
+# Steward controller URL baked in at build time (security: no runtime override).
+# Override for MSP builds: make build-steward STEWARD_CONTROLLER_URL=https://ctrl.mymsp.com
+STEWARD_CONTROLLER_URL ?= https://localhost:9080
+STEWARD_BUILD_FLAGS=-trimpath -ldflags="-s -w -X main.ControllerURL=$(STEWARD_CONTROLLER_URL)"
+
 # Build tags (optional - use TAGS=commercial for commercial builds)
 # Example: make build-controller TAGS=commercial
 BUILD_TAGS=$(if $(TAGS),-tags $(TAGS),)
@@ -63,7 +68,7 @@ build: fix-git-bare build-steward build-controller build-cli build-cert-manager
 # Build individual binaries
 .PHONY: build-steward build-controller build-cli build-cert-manager
 build-steward:
-	go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o bin/${STEWARD_BINARY} ./cmd/steward
+	go build ${BUILD_TAGS} ${STEWARD_BUILD_FLAGS} -o bin/${STEWARD_BINARY} ./cmd/steward
 
 build-controller:
 	go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o bin/${CONTROLLER_BINARY} ./cmd/controller
@@ -90,7 +95,7 @@ build-cross-platform:
 		export OUTDIR=bin/$$GOOS-$$GOARCH; \
 		echo "  Building for $$GOOS/$$GOARCH..."; \
 		mkdir -p $$OUTDIR; \
-		go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o $$OUTDIR/${STEWARD_BINARY}$$EXT ./cmd/steward && \
+		go build ${BUILD_TAGS} ${STEWARD_BUILD_FLAGS} -o $$OUTDIR/${STEWARD_BINARY}$$EXT ./cmd/steward && \
 		go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o $$OUTDIR/${CONTROLLER_BINARY}$$EXT ./cmd/controller && \
 		go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o $$OUTDIR/${CLI_BINARY}$$EXT ./cmd/cfg && \
 		go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o $$OUTDIR/${CERT_MANAGER_BINARY}$$EXT ./cmd/cert-manager || exit 1; \
@@ -111,7 +116,7 @@ build-cross-validate:
 		export GOARCH=$${platform#*/}; \
 		printf "  %-15s" "$$GOOS/$$GOARCH:"; \
 		ERROR_LOG=$$(mktemp); \
-		if go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o /dev/null ./cmd/steward 2>$$ERROR_LOG && \
+		if go build ${BUILD_TAGS} ${STEWARD_BUILD_FLAGS} -o /dev/null ./cmd/steward 2>$$ERROR_LOG && \
 		   go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o /dev/null ./cmd/controller 2>>$$ERROR_LOG && \
 		   go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o /dev/null ./cmd/cfg 2>>$$ERROR_LOG && \
 		   go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o /dev/null ./cmd/cert-manager 2>>$$ERROR_LOG; then \
@@ -146,7 +151,7 @@ build-steward-cross:
 	fi
 	@EXT=$$( [ "$(GOOS)" = "windows" ] && echo ".exe" || echo "" ); \
 	echo "Building steward for $(GOOS)/$(GOARCH)..."; \
-	GOOS=$(GOOS) GOARCH=$(GOARCH) go build ${BUILD_TAGS} ${GO_BUILD_FLAGS} -o bin/$(GOOS)-$(GOARCH)/${STEWARD_BINARY}$$EXT ./cmd/steward
+	GOOS=$(GOOS) GOARCH=$(GOARCH) go build ${BUILD_TAGS} ${STEWARD_BUILD_FLAGS} -o bin/$(GOOS)-$(GOARCH)/${STEWARD_BINARY}$$EXT ./cmd/steward
 	@echo "✅ Built bin/$(GOOS)-$(GOARCH)/${STEWARD_BINARY}"
 
 # Smart test - core modules + changed modules only

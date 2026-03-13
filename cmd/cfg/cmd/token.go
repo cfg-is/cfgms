@@ -54,7 +54,7 @@ Examples:
   cfg token list --tenant-id=acme-corp
 
   # Revoke a token
-  cfg token revoke cfgms_reg_abc123def456`,
+  cfg token revoke abcdefghijklmnopqrstuvwxyz`,
 }
 
 // tokenCreateCmd represents the token create command
@@ -63,7 +63,7 @@ var tokenCreateCmd = &cobra.Command{
 	Short: "Create a new registration token",
 	Long: `Create a new registration token for steward deployment.
 
-The token will be a short API key-style string (e.g., cfgms_reg_abc123def456)
+The token will be a bare base32-encoded string (e.g., abcdefghijklmnopqrstuvwxyz)
 that stewards can use to auto-register with the controller.
 
 Expiration formats:
@@ -111,7 +111,7 @@ The token will be marked as revoked but not deleted from storage.
 This allows for audit trail of token usage.
 
 Examples:
-  cfg token revoke cfgms_reg_abc123def456`,
+  cfg token revoke abcdefghijklmnopqrstuvwxyz`,
 	Args: cobra.ExactArgs(1),
 	RunE: runTokenRevoke,
 }
@@ -126,7 +126,7 @@ This permanently removes the token. Use 'revoke' instead if you want
 to maintain an audit trail.
 
 Examples:
-  cfg token delete cfgms_reg_abc123def456`,
+  cfg token delete abcdefghijklmnopqrstuvwxyz`,
 	Args: cobra.ExactArgs(1),
 	RunE: runTokenDelete,
 }

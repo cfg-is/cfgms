@@ -1524,9 +1524,9 @@ func (s *E2ETestSuite) TestSecurityCompliance() {
 			return fmt.Errorf("failed to create registration token: %w", err)
 		}
 
-		// Validate token format (should start with cfgms_reg_)
-		if !strings.HasPrefix(token, "cfgms_reg_") {
-			return fmt.Errorf("invalid token format: %s", token)
+		// Validate token format (bare base32, no prefix, ~26 chars)
+		if len(token) < 20 {
+			return fmt.Errorf("invalid token format (too short): %s", token)
 		}
 
 		s.T().Logf("Phase 2 validation: Successfully created registration token: %s", token)

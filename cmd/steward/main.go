@@ -30,6 +30,12 @@ import (
 	_ "github.com/cfgis/cfgms/pkg/secrets/providers/steward"
 )
 
+// ControllerURL is the controller address baked in at build time via ldflags.
+// Set during build: go build -ldflags "-X main.ControllerURL=https://ctrl.example.com"
+// No runtime override is supported — the signed binary is a trust assertion about
+// which controller it connects to.
+var ControllerURL string
+
 func main() {
 	// Parse command line arguments
 	var (
@@ -251,12 +257,13 @@ func main() {
 func registerAndConnectMQTT(ctx context.Context, token string, logger logging.Logger) (*client.MQTTClient, error) {
 	logger.Info("Registering steward via HTTP API")
 
-	// Get controller URL from environment — REQUIRED, no insecure defaults
-	controllerURL := os.Getenv("CFGMS_CONTROLLER_URL")
+	// Use the controller URL baked in at build time via ldflags.
+	// No runtime override — the signed binary is a trust assertion.
+	controllerURL := ControllerURL
 	if controllerURL == "" {
-		return nil, fmt.Errorf("CFGMS_CONTROLLER_URL environment variable is required. " +
-			"Set this to your controller's address (e.g., https://controller:9080). " +
-			"See docs/deployment/ for configuration examples")
+		return nil, fmt.Errorf("controller URL not set: binary must be built with " +
+			"-ldflags \"-X main.ControllerURL=https://your-controller.example.com\". " +
+			"See docs/deployment/ for build instructions")
 	}
 
 	// Check if we should skip TLS verification (test mode only)

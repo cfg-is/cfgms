@@ -192,7 +192,7 @@ type Steward struct {
 func New(cfg *Config, logger logging.Logger) (*Steward, error) {
 	// DEPRECATED: gRPC-based controller mode removed in Story #198
 	// Use NewStandalone() or cmd/steward --regtoken for MQTT+QUIC mode
-	return nil, fmt.Errorf("steward controller mode with gRPC is deprecated (Story #198) - use NewStandalone() or cmd/steward --regtoken=cfgms_reg_xxx for MQTT+QUIC mode")
+	return nil, fmt.Errorf("steward controller mode with gRPC is deprecated (Story #198) - use NewStandalone() or cmd/steward --regtoken=<token> for MQTT+QUIC mode")
 }
 
 // NewForControllerTesting creates a new Steward instance for integration testing with MQTT+QUIC.
