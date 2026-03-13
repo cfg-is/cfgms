@@ -283,7 +283,7 @@ func (s *Server) handleUpdateStewardConfig(w http.ResponseWriter, r *http.Reques
 		s.logger.Error("Failed to store configuration",
 			"steward_id", stewardIDForLog,
 			"tenant_id", tenantIDForLog,
-			"error", err)
+			"error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to store configuration", "STORAGE_ERROR")
 		return
 	}
