@@ -16,8 +16,11 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Build steward
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o steward ./cmd/steward
+# Build steward with compile-time controller URL
+ARG STEWARD_CONTROLLER_URL=https://localhost:9080
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo \
+    -ldflags="-s -w -X main.ControllerURL=${STEWARD_CONTROLLER_URL}" \
+    -o steward ./cmd/steward
 
 # Final stage - pinned to Alpine 3.23 (latest stable as of 2025-12)
 FROM alpine:3.23

@@ -53,7 +53,7 @@ No prefix — the `--regtoken` flag identifies the token type. Short enough for 
 
 ```bash
 # Build with controller URL baked in
-make build-steward CONTROLLER_URL=https://controller.yourmsp.com
+make build-steward STEWARD_CONTROLLER_URL=https://controller.yourmsp.com
 
 # Or directly with go build
 go build -ldflags "-X main.ControllerURL=https://controller.yourmsp.com" \
@@ -74,7 +74,7 @@ codesign -s "Developer ID Application: Your Company" cfgms-steward
 
 ```bash
 # Build pointing at local controller
-make build-steward CONTROLLER_URL=https://localhost:9080
+make build-steward STEWARD_CONTROLLER_URL=https://localhost:9080
 ```
 
 ## Creating Registration Tokens
@@ -207,7 +207,7 @@ After initial registration, the steward reconnects automatically on restart usin
 One build per MSP deployment. The controller URL is the only compile-time setting.
 
 ```bash
-make build-steward CONTROLLER_URL=https://controller.yourmsp.com
+make build-steward STEWARD_CONTROLLER_URL=https://controller.yourmsp.com
 # Sign for each target platform
 ```
 
@@ -335,7 +335,7 @@ One binary hash per platform — all tenants use the same signed binary.
 
 - Move controller URL from runtime env var to compile-time constant
 - Remove `cfgms_reg_` token prefix
-- Add `CONTROLLER_URL` support to Makefile build targets
+- Add `STEWARD_CONTROLLER_URL` support to Makefile build targets
 
 ### Future Enhancements
 

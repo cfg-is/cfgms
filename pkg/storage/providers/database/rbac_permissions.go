@@ -205,4 +205,3 @@ func (s *DatabaseRBACStore) DeletePermission(ctx context.Context, id string) err
 
 	return nil
 }
-

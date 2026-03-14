@@ -256,4 +256,3 @@ func (s *DatabaseRBACStore) DeleteRole(ctx context.Context, id string) error {
 
 	return nil
 }
-

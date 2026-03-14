@@ -302,7 +302,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		expiredTime := now.Add(-1 * time.Hour)
 		testTokens := []*pkgRegistration.Token{
 			{
-				Token:         "cfgms_reg_dockertest_standalone",
+				Token:         "dockertest_standalone",
 				TenantID:      "test-tenant",
 				ControllerURL: "tcp://controller-standalone:1883",
 				Group:         "test-group",
@@ -312,7 +312,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 				Revoked:       false,
 			},
 			{
-				Token:         "cfgms_reg_integration_reusable",
+				Token:         "integration_reusable",
 				TenantID:      "test-tenant-integration",
 				ControllerURL: "tcp://localhost:1886",
 				Group:         "production",
@@ -322,7 +322,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 				Revoked:       false,
 			},
 			{
-				Token:         "cfgms_reg_integration_expired",
+				Token:         "integration_expired",
 				TenantID:      "test-tenant-integration",
 				ControllerURL: "tcp://localhost:1886",
 				Group:         "production",
@@ -332,7 +332,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 				Revoked:       false,
 			},
 			{
-				Token:         "cfgms_reg_integration_revoked",
+				Token:         "integration_revoked",
 				TenantID:      "test-tenant-integration",
 				ControllerURL: "tcp://localhost:1886",
 				Group:         "production",
@@ -343,7 +343,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 				RevokedAt:     &now,
 			},
 			{
-				Token:         "cfgms_reg_integration_singleuse",
+				Token:         "integration_singleuse",
 				TenantID:      "test-tenant-integration",
 				ControllerURL: "tcp://localhost:1886",
 				Group:         "production",
