@@ -25,14 +25,16 @@ API_KEY_EAST=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-32)
 API_KEY_CENTRAL=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-32)
 API_KEY_WEST=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-32)
 
-# Generate registration tokens for steward nodes
-REG_TOKEN_EAST="cfgms_reg_$(openssl rand -hex 16)"
-REG_TOKEN_CENTRAL="cfgms_reg_$(openssl rand -hex 16)"
-REG_TOKEN_WEST="cfgms_reg_$(openssl rand -hex 16)"
-REG_TOKEN_STANDALONE="cfgms_reg_$(openssl rand -hex 16)"
-REG_TOKEN_TENANT1="cfgms_reg_$(openssl rand -hex 16)"
-REG_TOKEN_TENANT2="cfgms_reg_$(openssl rand -hex 16)"
-REG_TOKEN_TENANT3="cfgms_reg_$(openssl rand -hex 16)"
+# Registration tokens for steward nodes
+# These must match the seed tokens in features/controller/server/server.go
+# The controller pre-creates these tokens on startup for Docker testing
+REG_TOKEN_STANDALONE="dockertest_standalone"
+REG_TOKEN_EAST="$(openssl rand -hex 16)"
+REG_TOKEN_CENTRAL="$(openssl rand -hex 16)"
+REG_TOKEN_WEST="$(openssl rand -hex 16)"
+REG_TOKEN_TENANT1="$(openssl rand -hex 16)"
+REG_TOKEN_TENANT2="$(openssl rand -hex 16)"
+REG_TOKEN_TENANT3="$(openssl rand -hex 16)"
 
 # Create environment file for test session
 TEST_ENV_FILE=".env.test"
