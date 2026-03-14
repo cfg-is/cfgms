@@ -335,6 +335,8 @@ services:
     build:
       context: .
       dockerfile: cmd/steward/Dockerfile
+      args:
+        STEWARD_CONTROLLER_URL: "https://controller-east:9080"
     environment:
       # MQTT+QUIC Configuration (Story #198, Story 12.4)
       CFGMS_REGISTRATION_TOKEN: "${REG_TOKEN_EAST}"
@@ -369,6 +371,8 @@ services:
     build:
       context: .
       dockerfile: cmd/steward/Dockerfile
+      args:
+        STEWARD_CONTROLLER_URL: "https://controller-central:9080"
     environment:
       # MQTT+QUIC Configuration (Story #198, Story 12.4)
       CFGMS_REGISTRATION_TOKEN: "${REG_TOKEN_CENTRAL}"
@@ -403,6 +407,8 @@ services:
     build:
       context: .
       dockerfile: cmd/steward/Dockerfile
+      args:
+        STEWARD_CONTROLLER_URL: "https://controller-west:9080"
     environment:
       # MQTT+QUIC Configuration (Story #198, Story 12.4)
       CFGMS_REGISTRATION_TOKEN: "${REG_TOKEN_WEST}"

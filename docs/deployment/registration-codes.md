@@ -331,11 +331,11 @@ One binary hash per platform — all tenants use the same signed binary.
 - mTLS certificate provisioning during registration
 - Session-based QUIC authentication
 
-### Pending (Issue #421)
+### Completed (Story #421)
 
-- Move controller URL from runtime env var to compile-time constant
-- Remove `cfgms_reg_` token prefix
-- Add `STEWARD_CONTROLLER_URL` support to Makefile build targets
+- Compile-time controller URL via ldflags (no runtime override)
+- Removed `cfgms_reg_` token prefix (26-char base32 tokens)
+- `STEWARD_CONTROLLER_URL` Makefile variable for build targets
 
 ### Future Enhancements
 

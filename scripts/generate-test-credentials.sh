@@ -29,12 +29,13 @@ API_KEY_WEST=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-32)
 # These must match the seed tokens in features/controller/server/server.go
 # The controller pre-creates these tokens on startup for Docker testing
 REG_TOKEN_STANDALONE="dockertest_standalone"
-REG_TOKEN_EAST="$(openssl rand -hex 16)"
-REG_TOKEN_CENTRAL="$(openssl rand -hex 16)"
-REG_TOKEN_WEST="$(openssl rand -hex 16)"
-REG_TOKEN_TENANT1="$(openssl rand -hex 16)"
-REG_TOKEN_TENANT2="$(openssl rand -hex 16)"
-REG_TOKEN_TENANT3="$(openssl rand -hex 16)"
+# Other tokens use base32 format matching production GenerateToken() output (26 chars, a-z2-7)
+REG_TOKEN_EAST="$(openssl rand 16 | basenc --base32 | tr 'A-Z' 'a-z' | tr -d '=' | cut -c1-26)"
+REG_TOKEN_CENTRAL="$(openssl rand 16 | basenc --base32 | tr 'A-Z' 'a-z' | tr -d '=' | cut -c1-26)"
+REG_TOKEN_WEST="$(openssl rand 16 | basenc --base32 | tr 'A-Z' 'a-z' | tr -d '=' | cut -c1-26)"
+REG_TOKEN_TENANT1="$(openssl rand 16 | basenc --base32 | tr 'A-Z' 'a-z' | tr -d '=' | cut -c1-26)"
+REG_TOKEN_TENANT2="$(openssl rand 16 | basenc --base32 | tr 'A-Z' 'a-z' | tr -d '=' | cut -c1-26)"
+REG_TOKEN_TENANT3="$(openssl rand 16 | basenc --base32 | tr 'A-Z' 'a-z' | tr -d '=' | cut -c1-26)"
 
 # Create environment file for test session
 TEST_ENV_FILE=".env.test"
