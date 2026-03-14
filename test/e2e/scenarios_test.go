@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -1524,9 +1525,10 @@ func (s *E2ETestSuite) TestSecurityCompliance() {
 			return fmt.Errorf("failed to create registration token: %w", err)
 		}
 
-		// Validate token format (should start with cfgms_reg_)
-		if !strings.HasPrefix(token, "cfgms_reg_") {
-			return fmt.Errorf("invalid token format: %s", token)
+		// Validate token format (26-char base32 encoded)
+		matched, _ := regexp.MatchString("^[a-z2-7]{26}$", token)
+		if !matched {
+			return fmt.Errorf("invalid token format (expected 26-char base32): %s", token)
 		}
 
 		s.T().Logf("Phase 2 validation: Successfully created registration token: %s", token)

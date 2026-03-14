@@ -169,7 +169,7 @@ func TestAPIClientCreateToken(t *testing.T) {
 
 			// Return created token
 			resp := APITokenResponse{
-				Token:         "cfgms_reg_test123",
+				Token:         "test123",
 				TenantID:      req.TenantID,
 				ControllerURL: req.ControllerURL,
 				CreatedAt:     "2025-01-01T00:00:00Z",
@@ -200,7 +200,7 @@ func TestAPIClientCreateToken(t *testing.T) {
 		resp, err := client.CreateToken(context.Background(), req)
 		require.NoError(t, err)
 
-		assert.Equal(t, "cfgms_reg_test123", resp.Token)
+		assert.Equal(t, "test123", resp.Token)
 		assert.Equal(t, "test-tenant", resp.TenantID)
 	})
 

@@ -675,7 +675,7 @@ func TestTokenResponseFormat(t *testing.T) {
 	revokedAt := now.Add(2 * time.Hour)
 
 	token := &registration.Token{
-		Token:         "cfgms_reg_testformat123",
+		Token:         "testformat123",
 		TenantID:      "format-test-tenant",
 		ControllerURL: "mqtt://controller.example.com:8883",
 		Group:         "format-group",
@@ -704,7 +704,7 @@ func TestTokenResponseFormat(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify all fields are present and correctly formatted
-	assert.Equal(t, "cfgms_reg_testformat123", resp.Token)
+	assert.Equal(t, "testformat123", resp.Token)
 	assert.Equal(t, "format-test-tenant", resp.TenantID)
 	assert.Equal(t, "mqtt://controller.example.com:8883", resp.ControllerURL)
 	assert.Equal(t, "format-group", resp.Group)

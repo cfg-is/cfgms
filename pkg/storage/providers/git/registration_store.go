@@ -81,7 +81,7 @@ func (s *GitRegistrationTokenStore) safeWriteFile(targetPath string, data []byte
 }
 
 // tokenFilename generates a safe filename for a token
-// Token format is typically "cfgms_reg_abc123def456" - we use the full token as filename
+// Token format is a bare base32 string - we use the full token as filename
 // but sanitize it to prevent path traversal
 func (s *GitRegistrationTokenStore) tokenFilename(tokenStr string) string {
 	// Replace any potentially dangerous characters

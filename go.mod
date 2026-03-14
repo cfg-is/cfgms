@@ -2,7 +2,7 @@ module github.com/cfgis/cfgms
 
 go 1.25.0
 
-toolchain go1.25.3
+toolchain go1.25.8
 
 require (
 	github.com/creack/pty v1.1.24

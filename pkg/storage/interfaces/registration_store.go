@@ -25,7 +25,7 @@ type RegistrationTokenStore interface {
 
 // RegistrationTokenData represents a registration token in the storage layer
 type RegistrationTokenData struct {
-	// Token is the unique token string (e.g., "cfgms_reg_abc123def456")
+	// Token is the unique token string (e.g., "abcdefghijklmnopqrstuvwxyz")
 	Token string `json:"token" yaml:"token"`
 
 	// TenantID is the tenant this token belongs to

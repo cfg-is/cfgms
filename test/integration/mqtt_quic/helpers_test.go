@@ -55,7 +55,7 @@ func (h *TestHelper) CreateToken(t *testing.T, tenantID, group string) string {
 
 	// Use pre-created reusable token from controller
 	// This token is created by the controller on startup when MQTT is enabled
-	return "cfgms_reg_integration_reusable"
+	return "integration_reusable"
 }
 
 // RegisterSteward registers a steward via HTTP API

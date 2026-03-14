@@ -34,7 +34,7 @@ func TestGitRegistrationTokenStore_CRUD(t *testing.T) {
 	t.Run("SaveToken", func(t *testing.T) {
 		now := time.Now()
 		token := &interfaces.RegistrationTokenData{
-			Token:         "cfgms_reg_test123",
+			Token:         "test123",
 			TenantID:      "tenant-1",
 			ControllerURL: "tcp://localhost:1883",
 			Group:         "test-group",
@@ -49,9 +49,9 @@ func TestGitRegistrationTokenStore_CRUD(t *testing.T) {
 
 	// Test GetToken
 	t.Run("GetToken", func(t *testing.T) {
-		token, err := store.GetToken(ctx, "cfgms_reg_test123")
+		token, err := store.GetToken(ctx, "test123")
 		require.NoError(t, err)
-		assert.Equal(t, "cfgms_reg_test123", token.Token)
+		assert.Equal(t, "test123", token.Token)
 		assert.Equal(t, "tenant-1", token.TenantID)
 		assert.Equal(t, "tcp://localhost:1883", token.ControllerURL)
 		assert.Equal(t, "test-group", token.Group)
@@ -68,7 +68,7 @@ func TestGitRegistrationTokenStore_CRUD(t *testing.T) {
 
 	// Test UpdateToken
 	t.Run("UpdateToken", func(t *testing.T) {
-		token, err := store.GetToken(ctx, "cfgms_reg_test123")
+		token, err := store.GetToken(ctx, "test123")
 		require.NoError(t, err)
 
 		// Mark as used
@@ -80,7 +80,7 @@ func TestGitRegistrationTokenStore_CRUD(t *testing.T) {
 		require.NoError(t, err)
 
 		// Verify update
-		updated, err := store.GetToken(ctx, "cfgms_reg_test123")
+		updated, err := store.GetToken(ctx, "test123")
 		require.NoError(t, err)
 		assert.NotNil(t, updated.UsedAt)
 		assert.Equal(t, "steward-001", updated.UsedBy)
@@ -91,7 +91,7 @@ func TestGitRegistrationTokenStore_CRUD(t *testing.T) {
 		// Add another token for the same tenant
 		now := time.Now()
 		token2 := &interfaces.RegistrationTokenData{
-			Token:         "cfgms_reg_test456",
+			Token:         "test456",
 			TenantID:      "tenant-1",
 			ControllerURL: "tcp://localhost:1883",
 			Group:         "test-group-2",
@@ -104,7 +104,7 @@ func TestGitRegistrationTokenStore_CRUD(t *testing.T) {
 
 		// Add token for different tenant
 		token3 := &interfaces.RegistrationTokenData{
-			Token:         "cfgms_reg_other",
+			Token:         "other_tenant",
 			TenantID:      "tenant-2",
 			ControllerURL: "tcp://localhost:1883",
 			Group:         "other-group",
@@ -139,7 +139,7 @@ func TestGitRegistrationTokenStore_CRUD(t *testing.T) {
 		tokens, err := store.ListTokens(ctx, filter)
 		require.NoError(t, err)
 		assert.Len(t, tokens, 1)
-		assert.Equal(t, "cfgms_reg_test456", tokens[0].Token)
+		assert.Equal(t, "test456", tokens[0].Token)
 
 		// Filter by used status
 		used := true
@@ -149,16 +149,16 @@ func TestGitRegistrationTokenStore_CRUD(t *testing.T) {
 		tokens, err = store.ListTokens(ctx, filter)
 		require.NoError(t, err)
 		assert.Len(t, tokens, 1)
-		assert.Equal(t, "cfgms_reg_test123", tokens[0].Token)
+		assert.Equal(t, "test123", tokens[0].Token)
 	})
 
 	// Test DeleteToken
 	t.Run("DeleteToken", func(t *testing.T) {
-		err := store.DeleteToken(ctx, "cfgms_reg_test456")
+		err := store.DeleteToken(ctx, "test456")
 		require.NoError(t, err)
 
 		// Verify deleted
-		_, err = store.GetToken(ctx, "cfgms_reg_test456")
+		_, err = store.GetToken(ctx, "test456")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "not found")
 	})
@@ -188,7 +188,7 @@ func TestGitRegistrationTokenStore_TokenValidation(t *testing.T) {
 	t.Run("IsValid_Active", func(t *testing.T) {
 		now := time.Now()
 		token := &interfaces.RegistrationTokenData{
-			Token:     "cfgms_reg_valid",
+			Token:     "valid_token",
 			TenantID:  "tenant-1",
 			CreatedAt: now,
 			SingleUse: false,
@@ -197,7 +197,7 @@ func TestGitRegistrationTokenStore_TokenValidation(t *testing.T) {
 		err := store.SaveToken(ctx, token)
 		require.NoError(t, err)
 
-		retrieved, err := store.GetToken(ctx, "cfgms_reg_valid")
+		retrieved, err := store.GetToken(ctx, "valid_token")
 		require.NoError(t, err)
 		assert.True(t, retrieved.IsValid())
 	})
@@ -206,7 +206,7 @@ func TestGitRegistrationTokenStore_TokenValidation(t *testing.T) {
 		now := time.Now()
 		expired := now.Add(-1 * time.Hour)
 		token := &interfaces.RegistrationTokenData{
-			Token:     "cfgms_reg_expired",
+			Token:     "expired_token",
 			TenantID:  "tenant-1",
 			CreatedAt: now.Add(-2 * time.Hour),
 			ExpiresAt: &expired,
@@ -216,7 +216,7 @@ func TestGitRegistrationTokenStore_TokenValidation(t *testing.T) {
 		err := store.SaveToken(ctx, token)
 		require.NoError(t, err)
 
-		retrieved, err := store.GetToken(ctx, "cfgms_reg_expired")
+		retrieved, err := store.GetToken(ctx, "expired_token")
 		require.NoError(t, err)
 		assert.False(t, retrieved.IsValid())
 	})
@@ -224,7 +224,7 @@ func TestGitRegistrationTokenStore_TokenValidation(t *testing.T) {
 	t.Run("IsValid_Revoked", func(t *testing.T) {
 		now := time.Now()
 		token := &interfaces.RegistrationTokenData{
-			Token:     "cfgms_reg_revoked",
+			Token:     "revoked_token",
 			TenantID:  "tenant-1",
 			CreatedAt: now,
 			SingleUse: false,
@@ -234,7 +234,7 @@ func TestGitRegistrationTokenStore_TokenValidation(t *testing.T) {
 		err := store.SaveToken(ctx, token)
 		require.NoError(t, err)
 
-		retrieved, err := store.GetToken(ctx, "cfgms_reg_revoked")
+		retrieved, err := store.GetToken(ctx, "revoked_token")
 		require.NoError(t, err)
 		assert.False(t, retrieved.IsValid())
 	})
@@ -242,7 +242,7 @@ func TestGitRegistrationTokenStore_TokenValidation(t *testing.T) {
 	t.Run("IsValid_SingleUseUsed", func(t *testing.T) {
 		now := time.Now()
 		token := &interfaces.RegistrationTokenData{
-			Token:     "cfgms_reg_singleuse",
+			Token:     "singleuse_token",
 			TenantID:  "tenant-1",
 			CreatedAt: now,
 			SingleUse: true,
@@ -253,7 +253,7 @@ func TestGitRegistrationTokenStore_TokenValidation(t *testing.T) {
 		err := store.SaveToken(ctx, token)
 		require.NoError(t, err)
 
-		retrieved, err := store.GetToken(ctx, "cfgms_reg_singleuse")
+		retrieved, err := store.GetToken(ctx, "singleuse_token")
 		require.NoError(t, err)
 		assert.False(t, retrieved.IsValid())
 	})

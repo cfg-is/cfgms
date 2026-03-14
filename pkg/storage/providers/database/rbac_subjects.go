@@ -269,4 +269,3 @@ func (s *DatabaseRBACStore) DeleteSubject(ctx context.Context, id string) error 
 
 	return nil
 }
-

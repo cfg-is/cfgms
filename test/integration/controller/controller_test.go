@@ -200,23 +200,14 @@ func (s *ControllerTestSuite) TestCertificateManagement() {
 	defer cancel()
 
 	// Controller with CFGMS_MQTT_USE_CERT_MANAGER=true should have generated certificates
-	// Check for CA certificate in the controller's cert storage
+	// Check for CA certificate and steward certs in the controller's cert storage (CFGMS_CERT_PATH=/app/certs)
 	output, err := s.docker.ExecInController(ctx, "sh", "-c",
-		"find /tmp -name 'ca.crt' -o -name 'ca-cert.pem' -o -name '*.crt' 2>/dev/null | head -5")
+		"find /app/certs -name 'ca.crt' -o -name 'ca.key' -o -name '*.pem' 2>/dev/null | head -10")
 	s.T().Logf("Certificate files found: %s", output)
 
-	// The controller should have generated at least one certificate file
-	if err != nil || strings.TrimSpace(output) == "" {
-		// Fallback: check logs for certificate generation evidence
-		logs, logErr := s.docker.GetControllerLogs(ctx)
-		require.NoError(s.T(), logErr)
-		assert.True(s.T(),
-			strings.Contains(logs, "certificate") || strings.Contains(logs, "cert") || strings.Contains(logs, "TLS") || strings.Contains(logs, "tls"),
-			"Controller should show evidence of certificate management in logs")
-	} else {
-		assert.NotEmpty(s.T(), strings.TrimSpace(output),
-			"Controller should have certificate files")
-	}
+	require.NoError(s.T(), err, "Should be able to search cert directory")
+	assert.NotEmpty(s.T(), strings.TrimSpace(output),
+		"Controller should have generated certificate files in /app/certs")
 
 	s.T().Log("Certificate management validated")
 }

@@ -196,7 +196,6 @@ const (
 	PolicyEnforcementModeBlock   PolicyEnforcementMode = "block"   // Block action
 )
 
-
 type RuleSeverity string
 
 const (

@@ -533,6 +533,20 @@ proper testing and validation.
 **Detection**: Enhanced `make check-architecture` now detects custom cache implementations and will
 prevent new violations from being committed.
 
+## Desired State Development (DSD)
+
+CFGMS follows **Desired State Development** — stories are outcome-based. Each story takes a component from state A to state B, and the work is complete only when the entire system reflects the desired end state.
+
+### Principles
+
+1. **Issues define desired state in acceptance criteria.** Every GitHub issue must clearly describe the target end state, not just a list of code changes. Acceptance criteria answer: "What does the system look like when this is done?"
+
+2. **There are no "pre-existing conditions."** If any file, test, fixture, config, script, or documentation prevents achieving the desired state, it is unfinished work — part of the current story. A test that fails because a credential script generates the old token format is not a "pre-existing issue" — it's a file that hasn't been brought to the desired state yet.
+
+3. **Trace the full path.** When changing a value, format, or behavior, trace every file that touches it: source code, tests, fixtures, config generators, Docker files, documentation, CI scripts, `.env` templates. All must reflect the new state.
+
+4. **Validation proves desired state.** The story is done when all tests pass against the new state — not when the code changes compile. If E2E tests fail because infrastructure doesn't match the new state, the infrastructure is in scope.
+
 ## Critical Development Rules
 
 ### Must Follow

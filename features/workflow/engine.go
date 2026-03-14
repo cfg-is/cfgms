@@ -1143,4 +1143,3 @@ type fanOutResult struct {
 	StepResult interface{}
 	Error      error
 }
-

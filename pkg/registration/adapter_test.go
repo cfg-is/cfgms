@@ -35,7 +35,7 @@ func TestStorageAdapter_WithGitStore(t *testing.T) {
 	t.Run("SaveToken", func(t *testing.T) {
 		now := time.Now()
 		token := &Token{
-			Token:         "cfgms_reg_adapter_test",
+			Token:         "adapter_test_token",
 			TenantID:      "tenant-adapter",
 			ControllerURL: "tcp://localhost:1883",
 			Group:         "adapter-group",
@@ -50,9 +50,9 @@ func TestStorageAdapter_WithGitStore(t *testing.T) {
 
 	// Test GetToken
 	t.Run("GetToken", func(t *testing.T) {
-		token, err := adapter.GetToken(ctx, "cfgms_reg_adapter_test")
+		token, err := adapter.GetToken(ctx, "adapter_test_token")
 		require.NoError(t, err)
-		assert.Equal(t, "cfgms_reg_adapter_test", token.Token)
+		assert.Equal(t, "adapter_test_token", token.Token)
 		assert.Equal(t, "tenant-adapter", token.TenantID)
 		assert.Equal(t, "tcp://localhost:1883", token.ControllerURL)
 		assert.Equal(t, "adapter-group", token.Group)
@@ -60,7 +60,7 @@ func TestStorageAdapter_WithGitStore(t *testing.T) {
 
 	// Test UpdateToken
 	t.Run("UpdateToken", func(t *testing.T) {
-		token, err := adapter.GetToken(ctx, "cfgms_reg_adapter_test")
+		token, err := adapter.GetToken(ctx, "adapter_test_token")
 		require.NoError(t, err)
 
 		// Mark as used using the Token method
@@ -70,7 +70,7 @@ func TestStorageAdapter_WithGitStore(t *testing.T) {
 		require.NoError(t, err)
 
 		// Verify update
-		updated, err := adapter.GetToken(ctx, "cfgms_reg_adapter_test")
+		updated, err := adapter.GetToken(ctx, "adapter_test_token")
 		require.NoError(t, err)
 		assert.NotNil(t, updated.UsedAt)
 		assert.Equal(t, "steward-adapter-001", updated.UsedBy)
@@ -81,7 +81,7 @@ func TestStorageAdapter_WithGitStore(t *testing.T) {
 		// Add another token
 		now := time.Now()
 		token2 := &Token{
-			Token:         "cfgms_reg_adapter_test2",
+			Token:         "adapter_test_token2",
 			TenantID:      "tenant-adapter",
 			ControllerURL: "tcp://localhost:1883",
 			Group:         "adapter-group-2",
@@ -100,17 +100,17 @@ func TestStorageAdapter_WithGitStore(t *testing.T) {
 
 	// Test DeleteToken
 	t.Run("DeleteToken", func(t *testing.T) {
-		err := adapter.DeleteToken(ctx, "cfgms_reg_adapter_test2")
+		err := adapter.DeleteToken(ctx, "adapter_test_token2")
 		require.NoError(t, err)
 
 		// Verify deleted
-		_, err = adapter.GetToken(ctx, "cfgms_reg_adapter_test2")
+		_, err = adapter.GetToken(ctx, "adapter_test_token2")
 		require.Error(t, err)
 	})
 
 	// Test Token.IsValid method
 	t.Run("Token_IsValid", func(t *testing.T) {
-		token, err := adapter.GetToken(ctx, "cfgms_reg_adapter_test")
+		token, err := adapter.GetToken(ctx, "adapter_test_token")
 		require.NoError(t, err)
 		// Token was marked as used but it's not single-use, so still valid
 		assert.True(t, token.IsValid())
@@ -118,7 +118,7 @@ func TestStorageAdapter_WithGitStore(t *testing.T) {
 
 	// Test Token.Revoke method
 	t.Run("Token_Revoke", func(t *testing.T) {
-		token, err := adapter.GetToken(ctx, "cfgms_reg_adapter_test")
+		token, err := adapter.GetToken(ctx, "adapter_test_token")
 		require.NoError(t, err)
 
 		// Revoke the token
@@ -127,7 +127,7 @@ func TestStorageAdapter_WithGitStore(t *testing.T) {
 		require.NoError(t, err)
 
 		// Verify it's no longer valid
-		updated, err := adapter.GetToken(ctx, "cfgms_reg_adapter_test")
+		updated, err := adapter.GetToken(ctx, "adapter_test_token")
 		require.NoError(t, err)
 		assert.True(t, updated.Revoked)
 		assert.NotNil(t, updated.RevokedAt)
