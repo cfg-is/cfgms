@@ -61,7 +61,7 @@ func (s *RegistrationTestSuite) TestHTTPRegistrationEndpoint() {
 // TestInvalidToken tests registration with invalid token
 func (s *RegistrationTestSuite) TestInvalidToken() {
 	reqBody := map[string]string{
-		"token": "cfgms_reg_invalid_token_12345",
+		"token": "invalid_token_12345",
 	}
 	reqJSON, err := json.Marshal(reqBody)
 	s.NoError(err)
@@ -80,7 +80,7 @@ func (s *RegistrationTestSuite) TestExpiredToken() {
 	// Use pre-created expired token from controller
 	// This token is created by the controller on startup when MQTT is enabled
 	reqBody := map[string]string{
-		"token": "cfgms_reg_integration_expired",
+		"token": "integration_expired",
 	}
 	reqJSON, err := json.Marshal(reqBody)
 	s.NoError(err)
@@ -99,7 +99,7 @@ func (s *RegistrationTestSuite) TestRevokedToken() {
 	// Use pre-created revoked token from controller
 	// This token is created by the controller on startup when MQTT is enabled
 	reqBody := map[string]string{
-		"token": "cfgms_reg_integration_revoked",
+		"token": "integration_revoked",
 	}
 	reqJSON, err := json.Marshal(reqBody)
 	s.NoError(err)
@@ -118,7 +118,7 @@ func (s *RegistrationTestSuite) TestSingleUseToken() {
 	// Use pre-created single-use token from controller
 	// This token is created by the controller on startup when MQTT is enabled
 	reqBody := map[string]string{
-		"token": "cfgms_reg_integration_singleuse",
+		"token": "integration_singleuse",
 	}
 	reqJSON, err := json.Marshal(reqBody)
 	s.NoError(err)
@@ -172,7 +172,7 @@ func (s *RegistrationTestSuite) TestConcurrentRegistrations() {
 
 	// Use pre-created reusable token from controller
 	// This token is created by the controller on startup when MQTT is enabled
-	token := "cfgms_reg_integration_reusable"
+	token := "integration_reusable"
 
 	// Launch concurrent registrations
 	for i := 0; i < numConcurrent; i++ {
