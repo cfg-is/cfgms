@@ -13,20 +13,17 @@ Detect internal tracking documents in the diff that should NOT be in PRs. These 
 
 ## Scan Steps
 
-1. **Find potentially problematic files in the diff**:
-   ```bash
-   git diff --name-only develop...HEAD -- docs/ | grep -iE '(status|summary|validation|report|review|sprint|milestone|story-[0-9]+)'
-   ```
+Run the doc scan helper (wraps pipe+regex commands to avoid approval prompts):
 
-2. **Check for version-specific internal reports**:
-   ```bash
-   git ls-files docs/ | grep -E 'v[0-9]+\.[0-9]+\.[0-9]+'
-   ```
+```bash
+./scripts/pr-review-helper.sh doc-scan
+```
 
-3. **Look for "Story #" references in new docs** (may indicate internal tracking):
-   ```bash
-   git diff --name-only develop...HEAD -- docs/ | xargs grep -l "Story #[0-9]" 2>/dev/null
-   ```
+Parse the output sections:
+- **Changed docs in PR** — Files matching internal tracking patterns (status, summary, report, etc.)
+- **Version-specific internal reports** — Files with version numbers in their name
+- **New docs with Story references** — Changed docs containing "Story #NNN" references
+- `(none)` means that section found nothing
 
 ## Classification Rules
 

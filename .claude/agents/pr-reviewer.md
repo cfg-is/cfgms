@@ -14,10 +14,10 @@ You are reviewing PR #$ARGUMENTS for the CFGMS project. Execute all 6 phases seq
 
 ## Phase 1: PR Overview Assessment
 
-Fetch PR details and validate workflow:
+Fetch PR details and validate workflow (uses helper to avoid approval prompts):
 
 ```bash
-gh pr view $ARGUMENTS --json title,body,baseRefName,headRefName,state,author,files
+./scripts/pr-review-helper.sh pr-overview $ARGUMENTS
 ```
 
 **Validate git workflow FIRST (BLOCKING)**:
@@ -72,7 +72,7 @@ Check all changed `.go` files for violations:
 - Table-driven patterns where appropriate
 
 ```bash
-gh pr diff $ARGUMENTS -- '*.go' | grep -n "t\.Skip\|mock\|fake\|stub"
+./scripts/pr-review-helper.sh diff-scan $ARGUMENTS
 ```
 
 ## Phase 4: Documentation & Integration Review
@@ -86,7 +86,7 @@ gh pr diff $ARGUMENTS -- '*.go' | grep -n "t\.Skip\|mock\|fake\|stub"
 ## Phase 5: GitHub Actions CI Verification (MANDATORY — BLOCKING)
 
 ```bash
-gh pr checks $ARGUMENTS --required
+./scripts/pr-review-helper.sh pr-checks $ARGUMENTS
 ```
 
 **Required checks** (ALL must pass):

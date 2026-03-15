@@ -92,7 +92,7 @@ Commit roadmap changes to the story branch so they're included in the single PR.
 ### 9. Push to Remote
 
 ```bash
-git push -u origin $(git branch --show-current)
+git push -u origin HEAD
 ```
 
 Verify push succeeds before creating PR.
@@ -101,9 +101,12 @@ Verify push succeeds before creating PR.
 
 **Git workflow rules**: Feature/tooling branches ALWAYS target `develop`. Never `main`.
 
-Check for existing PR on this branch:
+Check for existing PR on this branch. First get the branch name with `git branch --show-current`, then use it:
 ```bash
-gh pr list --head $(git branch --show-current) --state=open
+git branch --show-current
+```
+```bash
+gh pr list --head <branch-name-from-above> --state=open
 ```
 
 - **If existing PR found**: Update it with `gh pr edit [number] --body "[template]" --base develop`

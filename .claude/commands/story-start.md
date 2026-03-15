@@ -1,6 +1,6 @@
 ---
 name: story-start
-description: Start a new story with mandatory pre-flight validation and roadmap auto-detection
+description: Start a new story with mandatory pre-flight validation and roadmap auto-detection. MUST use when beginning any new development work, picking up an issue, or the user says "start story", "new story", "work on issue", "begin work on #X", or similar.
 parameters:
   - name: story_number
     description: The story/issue number (optional - auto-detects from roadmap if omitted)

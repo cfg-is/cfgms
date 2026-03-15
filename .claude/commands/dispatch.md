@@ -64,9 +64,38 @@ Launch isolated agent containers to implement GitHub issues. Each agent runs in 
       gh issue edit <NUM> --remove-label "agent:ready" --add-label "agent:in-progress"
       ```
 
-5. **Print summary table**: Show all dispatched issues with container IDs and branch names.
+5. **Post-launch auth check** (skip in dry-run): After ALL containers are launched, verify they survive past the OAuth authentication phase. Auth failures cause containers to exit within ~10 seconds.
 
-6. **Remind user**: "Use `/isoagents` to check progress. Agents typically complete in 15-45 minutes."
+   ```bash
+   ./scripts/agent-dispatch.sh wait-for-auth <NUM1> [NUM2...]
+   ```
+   Pass all dispatched issue numbers. The helper polls every 5s for up to 30s.
+
+   Parse output lines:
+   - `AUTH_OK:<NUM>:...` — Container survived auth, agent is working
+   - `AUTH_FAILED:<NUM>:...` — Container died early (likely expired OAuth token). Print the exit code and last log lines. Suggest: "Run `/agent-setup creds` to refresh OAuth credentials, then re-dispatch."
+   - `AUTH_UNKNOWN:<NUM>:...` — Unexpected state, report as warning
+
+   If ANY container fails auth, prominently warn the user that credentials likely need refresh before dispatching more agents.
+
+6. **Print full agent dashboard** (skip in dry-run): After auth check, gather state for ALL agents (not just the ones dispatched this run) to give the user a complete picture:
+
+   ```bash
+   ./scripts/agent-dispatch.sh list-running
+   ./scripts/agent-dispatch.sh list-exited
+   ```
+
+   Print a single summary table showing ALL agents:
+
+   **Agent Dashboard:**
+   | Issue | Status | Auth | Branch | Notes |
+   |-------|--------|------|--------|-------|
+
+   Status values: Running, Exited (exit code), Not found
+   Auth column: OK / FAILED / n/a (for agents from prior dispatches)
+   Notes: uptime for running, PR URL for exited with code 0, failure hint for exited with non-zero
+
+7. **Remind user**: If all auth checks passed: "Agents are running. Use `/isoagents` to check progress (typically 15-45 minutes)." If any failed: "Some agents failed auth — run `/agent-setup creds` to refresh, then `/dispatch` the failed issues again."
 
 ## Error Handling
 

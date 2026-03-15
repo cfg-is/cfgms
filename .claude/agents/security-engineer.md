@@ -73,11 +73,11 @@ Get changed files with `git diff --name-only develop...HEAD`, then review for:
 
 ### WARNING Issues (Should Fix, Not Blocking)
 
-8. **OWASP Top 10 Patterns**: Command injection, SSRF, broken access control.
+9. **OWASP Top 10 Patterns**: Command injection, SSRF, broken access control.
 
-9. **Cryptographic Concerns**: Weak algorithms, insufficient key lengths, predictable randomness.
+10. **Cryptographic Concerns**: Weak algorithms, insufficient key lengths, predictable randomness.
 
-10. **Logging Sensitive Data**: Secrets, tokens, or PII in log statements.
+11. **Logging Sensitive Data**: Secrets, tokens, or PII in log statements.
 
 ## Output Format
 
