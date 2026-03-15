@@ -45,6 +45,8 @@ One-time bootstrap for agent dispatch. Builds the container image, sets up crede
    While waiting, proceed with steps 6-8 (they're independent).
 
 6. **Set up Claude credentials**:
+   **IMPORTANT**: The OAuth flow below requires a real TTY for interactive browser login. The Bash tool CANNOT provide this. Do NOT attempt to run the `docker run --rm -it` command via the Bash tool — it will fail with "the input device is not a TTY". Instead, print the command and tell the user to run it manually in their terminal.
+
    - Create Docker volume: `docker volume create claude-creds` (idempotent)
    - Check if credentials already exist in the volume:
      ```bash
@@ -54,15 +56,17 @@ One-time bootstrap for agent dispatch. Builds the container image, sets up crede
    - If credentials exist and `$ARGUMENTS` is not 'creds': skip
    - If credentials missing or refreshing:
      - Tell user: "Claude credentials need setup. This requires an interactive login."
-     - Run interactive container for OAuth:
+     - Run interactive container for OAuth (runs as root to allow npm update, then switches to agent user for OAuth):
        ```bash
        docker run --rm -it \
          -v claude-creds:/persist \
+         --user root \
          --entrypoint bash \
          cfg-agent:latest \
-         -c "claude --dangerously-skip-permissions && cp ~/.claude/.credentials.json /persist/"
+         -c "npm update -g @anthropic-ai/claude-code && su agent -c 'claude --dangerously-skip-permissions && cp ~/.claude/.credentials.json /persist/'"
        ```
      - **IMPORTANT**: This step requires user interaction (OAuth flow). Tell the user what to expect.
+     - The `npm update` ensures the container's Claude Code matches the latest version before authenticating.
 
 7. **Create directories**:
    ```bash

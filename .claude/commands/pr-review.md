@@ -1,6 +1,6 @@
 ---
 name: pr-review
-description: Structured PR review using the pr-reviewer agent for fresh-context 6-phase methodology
+description: Structured PR review using the pr-reviewer agent for fresh-context 6-phase methodology. Use when reviewing PRs, checking PR quality, or the user says "review PR", "check the PR", "is this ready to merge", "review #X", or wants to approve/reject a pull request.
 parameters:
   - name: pr_number
     description: Pull request number to review (optional - auto-selects if 1 PR, shows menu if multiple)
@@ -27,15 +27,15 @@ gh pr list --state=open --json number,title,author,headRefName,isDraft --limit 2
 
 ### 2. Pre-Review Git Sync
 
-Ensure the local repo reflects the latest state:
+Ensure the local repo reflects the latest state (uses helper to avoid approval prompts):
 
 ```bash
-git fetch origin
+./scripts/pr-review-helper.sh pre-review <NUM>
 ```
 
-Check for uncommitted changes — warn if working directory is dirty.
-
-Check for unpushed commits on feature branches — push them before review so the PR reflects all code.
+Parse output:
+- `DIRTY:true` — warn user about uncommitted changes
+- `UNPUSHED:true` — warn user about unpushed commits, suggest pushing before review
 
 ### 3. Launch PR Reviewer Agent
 
@@ -59,6 +59,19 @@ When the agent completes, relay its findings to the user:
 - Phase-by-phase summary
 - Final recommendation (APPROVED / CHANGES REQUIRED / BLOCKED)
 - Any blocking issues that need resolution
+
+### 5. Agent Cleanup on Approval
+
+If the review result is **APPROVED FOR MERGE** or **APPROVED WITH COMMENTS**, check whether the PR branch came from an agent dispatch (branch pattern `feature/story-*-agent`). If so:
+
+1. Extract the story number from the branch name
+2. Clean up the agent's container and clone:
+   ```bash
+   ./scripts/agent-dispatch.sh cleanup-issue <story_number>
+   ```
+3. Report what was cleaned up
+
+This keeps agent infrastructure tidy — once a PR is approved, the container and worktree are no longer needed.
 
 ## Error Handling
 

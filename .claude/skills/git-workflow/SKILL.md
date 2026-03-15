@@ -25,17 +25,15 @@ user-invocable: false
 
 ## Push Procedures
 - Verify all changes committed before push: `git status --porcelain`
-- Push with upstream tracking: `git push -u origin $(git branch --show-current)`
+- Push with upstream tracking: `git push -u origin HEAD`
 - After push, verify remote is up to date
 
 ## Branch Validation
-```bash
-current_branch=$(git branch --show-current)
-if [[ $current_branch == feature/* ]] || [[ $current_branch == tooling/* ]]; then
-  target_branch="develop"
-elif [[ $current_branch == hotfix/* ]]; then
-  target_branch="main"
-else
-  echo "ERROR: Unexpected branch pattern"
-fi
-```
+
+Determine the correct PR base branch from the current branch name:
+- `feature/*` or `tooling/*` → base is `develop`
+- `hotfix/*` → base is `main`
+- Anything else → ERROR: unexpected branch pattern
+
+Use `git branch --show-current` to get the current branch, then match the prefix.
+Do NOT compose multi-line bash scripts or use `$()` command substitution for this — use the Bash tool with simple single commands and apply the logic in your reasoning.
