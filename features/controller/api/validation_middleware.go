@@ -13,6 +13,7 @@ import (
 
 	"github.com/gorilla/mux"
 
+	"github.com/cfgis/cfgms/features/controller/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/security"
 )
 
@@ -68,7 +69,7 @@ func (s *Server) buildSecurityContext(r *http.Request) *security.SecurityContext
 	if userID, ok := r.Context().Value(userIDContextKey).(string); ok {
 		ctx.UserID = userID
 	}
-	if tenantID, ok := r.Context().Value(tenantIDContextKey).(string); ok {
+	if tenantID, ok := r.Context().Value(ctxkeys.TenantID).(string); ok {
 		ctx.TenantID = tenantID
 	}
 

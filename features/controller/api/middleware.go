@@ -13,6 +13,7 @@ import (
 
 	"github.com/gorilla/mux"
 
+	"github.com/cfgis/cfgms/features/controller/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -23,7 +24,6 @@ const (
 	// Context keys
 	apiKeyContextKey       contextKey = "api_key"
 	userIDContextKey       contextKey = "user_id"
-	tenantIDContextKey     contextKey = "tenant_id"
 	authDecisionContextKey contextKey = "auth_decision"
 )
 
@@ -175,7 +175,7 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 		// Add key info to request context
 		ctx := context.WithValue(r.Context(), apiKeyContextKey, keyInfo)
 		ctx = context.WithValue(ctx, userIDContextKey, keyInfo.ID)
-		ctx = context.WithValue(ctx, tenantIDContextKey, keyInfo.TenantID)
+		ctx = context.WithValue(ctx, ctxkeys.TenantID, keyInfo.TenantID)
 
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
@@ -293,7 +293,7 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 			}
 
 			userID, _ := r.Context().Value(userIDContextKey).(string)
-			tenantID, _ := r.Context().Value(tenantIDContextKey).(string)
+			tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
 
 			// Build resource identifier from URL path variables
 			resource := s.buildResourceIdentifier(r, resourceType)
