@@ -161,4 +161,3 @@ SyslogIdentifier=cfgms-steward
 WantedBy=multi-user.target
 `, linuxInstallPath, token)
 }
-

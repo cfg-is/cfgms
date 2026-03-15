@@ -211,14 +211,9 @@ func runSteward(ctx context.Context, regToken, configPath, opMode, logLevel, log
 		logger.Info("Starting steward in standalone mode",
 			"operation", "steward_start", "mode", "standalone", "config_path", configPath)
 	} else {
-		cfg := steward.DefaultConfig()
-		cfg.LogLevel = logLevel
-		s, err = steward.New(cfg, legacyLogger)
-		if err != nil {
-			return fmt.Errorf("failed to create steward: %w", err)
-		}
-		logger.Info("Starting steward in controller mode",
-			"operation", "steward_start", "mode", "controller")
+		// Legacy gRPC controller mode was removed in Story #198.
+		// Controller-connected stewards use --regtoken (MQTT+QUIC) handled above.
+		return fmt.Errorf("standalone mode requires --config flag; for controller mode use --regtoken")
 	}
 
 	go func() {

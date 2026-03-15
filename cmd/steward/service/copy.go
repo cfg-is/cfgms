@@ -4,6 +4,7 @@
 package service
 
 import (
+	"fmt"
 	"io"
 	"os"
 )
@@ -15,7 +16,7 @@ func copyBinary(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer in.Close()
+	defer func() { _ = in.Close() }()
 
 	tmp := dst + ".tmp"
 	out, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0755)
@@ -24,13 +25,13 @@ func copyBinary(src, dst string) error {
 	}
 
 	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
-		os.Remove(tmp)
-		return err
+		_ = out.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("copy failed: %w", err)
 	}
 	if err := out.Close(); err != nil {
-		os.Remove(tmp)
-		return err
+		_ = os.Remove(tmp)
+		return fmt.Errorf("close failed: %w", err)
 	}
 
 	return os.Rename(tmp, dst)
