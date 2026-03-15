@@ -70,8 +70,9 @@ func (m *windowsManager) Install(token string) error {
 	if existing, err := scm.OpenService(windowsServiceName); err == nil {
 		fmt.Println("Stopping existing service...")
 		_, _ = existing.Control(svc.Stop)
-		// Allow the service process to exit before replacing the binary.
-		time.Sleep(2 * time.Second)
+		if err := waitForStop(existing, 30*time.Second); err != nil {
+			fmt.Printf("Warning: %v — proceeding anyway\n", err)
+		}
 		fmt.Println("Removing existing service definition...")
 		if err := existing.Delete(); err != nil {
 			existing.Close()
@@ -149,7 +150,9 @@ func (m *windowsManager) Uninstall(purge bool) error {
 	} else {
 		fmt.Println("Stopping service...")
 		_, _ = existing.Control(svc.Stop)
-		time.Sleep(2 * time.Second)
+		if err := waitForStop(existing, 30*time.Second); err != nil {
+			fmt.Printf("Warning: %v — proceeding anyway\n", err)
+		}
 
 		fmt.Println("Removing service definition...")
 		if err := existing.Delete(); err != nil {
@@ -202,6 +205,24 @@ func (m *windowsManager) Status() (*ServiceStatus, error) {
 	status.Running = q.State == svc.Running
 
 	return status, nil
+}
+
+// waitForStop polls the service state until it reaches Stopped or the timeout
+// expires. This replaces an arbitrary time.Sleep so we proceed as soon as the
+// service actually stops rather than guessing how long it takes.
+func waitForStop(s *mgr.Service, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		status, err := s.Query()
+		if err != nil {
+			return fmt.Errorf("failed to query service state: %w", err)
+		}
+		if status.State == svc.Stopped {
+			return nil
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	return fmt.Errorf("service did not stop within %s", timeout)
 }
 
 // copyBinary copies src to dst atomically using a temp file.

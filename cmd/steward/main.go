@@ -60,7 +60,6 @@ func buildRootCommand() *cobra.Command {
 		opMode      string
 		logLevel    string
 		logProvider string
-		regCode     string
 		regToken    string
 	)
 
@@ -79,7 +78,7 @@ Entry paths:
 		// SilenceUsage prevents cobra printing usage on every error.
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runRootCommand(cmd, regToken, configPath, opMode, logLevel, logProvider, regCode)
+			return runRootCommand(cmd, regToken, configPath, opMode, logLevel, logProvider)
 		},
 	}
 
@@ -88,7 +87,6 @@ Entry paths:
 	root.Flags().StringVar(&opMode, "mode", "", "Operation mode: 'standalone' or 'controller'")
 	root.Flags().StringVar(&logLevel, "log-level", "info", "Log level: debug, info, warn, error")
 	root.Flags().StringVar(&logProvider, "log-provider", "file", "Logging provider: file, timescale")
-	root.Flags().StringVar(&regCode, "regcode", "", "Registration code (deprecated — use --regtoken)")
 	root.Flags().StringVar(&regToken, "regtoken", "", "Registration token for controller registration")
 
 	// Subcommands.
@@ -103,9 +101,9 @@ Entry paths:
 
 // runRootCommand implements the default (foreground) run behaviour.
 // When no meaningful flags are provided it enters interactive mode.
-func runRootCommand(cmd *cobra.Command, regToken, configPath, opMode, logLevel, logProvider, regCode string) error {
+func runRootCommand(cmd *cobra.Command, regToken, configPath, opMode, logLevel, logProvider string) error {
 	// Interactive mode: no flags set and no subcommand selected.
-	noFlags := regToken == "" && configPath == "" && opMode == "" && regCode == ""
+	noFlags := regToken == "" && configPath == "" && opMode == ""
 	if noFlags && !cmd.Flags().Changed("log-level") && !cmd.Flags().Changed("log-provider") {
 		return runInteractive()
 	}
@@ -158,12 +156,6 @@ func runSteward(ctx context.Context, regToken, configPath, opMode, logLevel, log
 
 	logging.InitializeGlobalLoggerFactory("steward", "main")
 	logger := logging.ForComponent("steward")
-
-	// Handle deprecated --regcode flag.
-	if regToken == "" {
-		// regCode check: warn and fail so the user migrates.
-		// (regCode is already rejected below in the same way as before.)
-	}
 
 	// MQTT+QUIC registration flow.
 	if regToken != "" {
