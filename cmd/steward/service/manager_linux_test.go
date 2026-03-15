@@ -71,7 +71,7 @@ func TestGenerateSystemdUnit(t *testing.T) {
 	assert.Contains(t, unit, "[Install]")
 	assert.Contains(t, unit, "Restart=always")
 	assert.Contains(t, unit, "RestartSec=10")
-	assert.Contains(t, unit, "--regtoken "+token)
+	assert.Contains(t, unit, `--regtoken "`+token+`"`)
 	assert.Contains(t, unit, linuxInstallPath)
 	assert.Contains(t, unit, "WantedBy=multi-user.target")
 

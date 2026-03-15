@@ -7,7 +7,6 @@ package service
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -151,7 +150,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%s --regtoken %s
+ExecStart=%s --regtoken "%s"
 Restart=always
 RestartSec=10
 StandardOutput=journal
@@ -163,30 +162,3 @@ WantedBy=multi-user.target
 `, linuxInstallPath, token)
 }
 
-// copyBinary copies src to dst with execute permissions.
-func copyBinary(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-
-	// Write to a temp file first to make the replacement atomic.
-	tmp := dst + ".tmp"
-	out, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0755)
-	if err != nil {
-		return err
-	}
-
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := out.Close(); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-
-	return os.Rename(tmp, dst)
-}
