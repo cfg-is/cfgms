@@ -2,7 +2,7 @@
 
 **Story #391**: Comprehensive guide for deploying CFGMS to a home lab environment with native binaries and full MQTT+QUIC integration.
 
-**Last Updated**: 2026-02-28
+**Last Updated**: 2026-03-15
 **CFGMS Version**: v0.9.x
 **Deployment Time**: ~30-45 minutes (first-time setup)
 
@@ -12,6 +12,13 @@
 2. [Architecture](#architecture)
 3. [Prerequisites](#prerequisites)
 4. [Detailed Setup](#detailed-setup)
+   - [Step 1: Build Binaries](#step-1-build-cfgms-binaries)
+   - [Step 2: Configure Storage](#step-2-configure-storage-backend)
+   - [Step 3: Deploy Controller](#step-3-deploy-controller)
+   - [Step 4: Create Registration Token](#step-4-create-registration-token)
+   - [Step 5: Deploy Linux Steward](#step-5-deploy-linux-steward)
+   - [Step 6: Deploy Windows Steward](#step-6-deploy-windows-steward)
+   - [Step 7: Module Configuration Examples](#step-7-module-configuration-examples)
 5. [Validation](#validation)
 6. [Troubleshooting](#troubleshooting)
 7. [Advanced Configuration](#advanced-configuration)
@@ -122,14 +129,39 @@ mosquitto_pub --help  # mosquitto-clients package
 - `1883`: MQTT broker (mTLS, embedded in controller)
 - `4433`: QUIC data plane (mTLS)
 
-**Firewall Rules** (if applicable):
+**Firewall Rules** (controller host):
+
+All three ports must be reachable by stewards. Note that QUIC uses **UDP**, not TCP.
+
 ```bash
-# Controller firewall (e.g., ufw on Debian)
-sudo ufw allow 9080/tcp   # REST API
-sudo ufw allow 1883/tcp   # MQTT control plane
-sudo ufw allow 4433/udp   # QUIC data plane (UDP protocol)
+# Linux (ufw)
+sudo ufw allow 9080/tcp   # REST API (registration + admin)
+sudo ufw allow 1883/tcp   # MQTT control plane (heartbeats, commands)
+sudo ufw allow 4433/udp   # QUIC data plane (config sync) — UDP, not TCP
 sudo ufw allow 22/tcp     # SSH management
+
+# Linux (firewalld)
+sudo firewall-cmd --permanent --add-port=9080/tcp
+sudo firewall-cmd --permanent --add-port=1883/tcp
+sudo firewall-cmd --permanent --add-port=4433/udp
+sudo firewall-cmd --reload
+
+# Windows (PowerShell, if controller runs on Windows)
+New-NetFirewallRule -DisplayName "CFGMS REST API" -Direction Inbound -Port 9080 -Protocol TCP -Action Allow
+New-NetFirewallRule -DisplayName "CFGMS MQTT" -Direction Inbound -Port 1883 -Protocol TCP -Action Allow
+New-NetFirewallRule -DisplayName "CFGMS QUIC" -Direction Inbound -Port 4433 -Protocol UDP -Action Allow
 ```
+
+**Steward outbound requirements** (steward hosts only need outbound access):
+
+| Destination | Port | Protocol | Purpose |
+|-------------|------|----------|---------|
+| Controller | 9080 | TCP | Initial registration (one-time) |
+| Controller | 1883 | TCP | MQTT control plane (persistent) |
+| Controller | 4433 | UDP | QUIC data plane (on-demand) |
+
+Stewards do **not** need any inbound ports opened. All connections are initiated outbound
+from the steward to the controller.
 
 ## Detailed Setup
 
@@ -188,36 +220,90 @@ ssh user@controller-vm "chmod +x /usr/local/bin/cfgms-controller"
 sudo mkdir -p /etc/cfgms /var/lib/cfgms/storage /var/lib/cfgms/certs /var/log/cfgms
 
 sudo tee /etc/cfgms/controller.cfg > /dev/null <<EOF
+# CFGMS Controller Configuration
+# See docs/examples/ for additional configuration options.
+
+# --- Networking ---
+# listen_addr: REST API bind address. Use 0.0.0.0 to accept connections
+# from stewards on other machines.
+listen_addr: "0.0.0.0:9080"
+
+# external_url: The address stewards use to reach this controller.
+# Set this to the controller's hostname or IP as seen from the network.
+# Stewards receive MQTT/QUIC addresses derived from this URL during registration.
+external_url: "https://CONTROLLER_IP_OR_HOSTNAME:9080"
+
+# --- Storage ---
 storage:
   provider: git
   config:
     repository_path: /var/lib/cfgms/storage
     branch: main
     auto_init: true
+    # Optional: push to a remote for backup
+    # remote_url: "git@github.com:yourorg/cfgms-config.git"
+    # ssh_key_path: "/etc/cfgms/deploy-key"
 
+# --- Certificates ---
+# On first boot (--init), the controller generates a CA and server certificates.
+# All MQTT and QUIC connections use mTLS from these certificates.
+# Stewards receive their client certificates automatically during registration.
 certificate:
   enable_cert_management: true
-  auto_generate: true
   ca_path: /var/lib/cfgms/certs
+  server:
+    common_name: cfgms-controller
+    # Add your controller's hostname and IP so stewards can verify TLS.
+    dns_names:
+      - localhost
+      - cfgms-controller
+      - CONTROLLER_HOSTNAME
+    ip_addresses:
+      - "127.0.0.1"
+      - "CONTROLLER_IP"
 
+# --- Logging ---
 logging:
   provider: file
   level: INFO
-  file:
+  config:
     directory: /var/log/cfgms
 
+# --- MQTT (Control Plane) ---
 mqtt:
   enabled: true
   listen_addr: "0.0.0.0:1883"
   enable_tls: true
+  use_cert_manager: true
+  require_client_cert: true
 
+# --- QUIC (Data Plane) ---
 quic:
   enabled: true
   listen_addr: "0.0.0.0:4433"
+  use_cert_manager: true
 EOF
+
+echo ""
+echo "IMPORTANT: Edit /etc/cfgms/controller.cfg and replace:"
+echo "  - CONTROLLER_IP_OR_HOSTNAME with your controller's IP or hostname"
+echo "  - CONTROLLER_HOSTNAME with the DNS name (if any)"
+echo "  - CONTROLLER_IP with the IP address"
 ```
 
-#### 3c: Create systemd Service
+#### 3c: Initialize Controller (First Boot Only)
+
+```bash
+# Run initialization to generate CA, certificates, and storage.
+# This only needs to happen once. Subsequent starts skip initialization.
+sudo /usr/local/bin/cfgms-controller --init --config /etc/cfgms/controller.cfg
+
+# Verify certificates were generated
+ls /var/lib/cfgms/certs/
+# Expected: ca/ directory with CA cert and key, plus server certificates
+```
+
+#### 3d: Create systemd Service
 
 ```bash
 sudo tee /etc/systemd/system/cfgms-controller.service > /dev/null <<EOF
@@ -246,7 +332,7 @@ sudo systemctl enable cfgms-controller
 sudo systemctl start cfgms-controller
 ```
 
-#### 3d: Verify Controller Health
+#### 3e: Verify Controller Health
 
 ```bash
 # Check service status
@@ -282,21 +368,57 @@ curl -X POST http://localhost:9080/api/v1/admin/registration-tokens \
 # Save the token from the response for steward deployment
 ```
 
-### Step 5: Deploy First Steward
+### Step 5: Deploy Linux Steward
 
-#### 5a: Copy Binary to Steward VM
+The steward binary must be built with the controller URL baked in at compile time.
+This is a security feature — the signed binary is a trust assertion about which controller it connects to.
+
+#### 5a: Build Steward with Controller URL
 
 ```bash
-# From build machine to steward VM
-scp bin/cfgms-steward user@steward-vm:/usr/local/bin/cfgms-steward
-ssh user@steward-vm "chmod +x /usr/local/bin/cfgms-steward"
+# On the build machine, build with the controller URL embedded.
+# Replace CONTROLLER_IP_OR_HOSTNAME with the same value from controller.cfg.
+make build-steward STEWARD_CONTROLLER_URL=https://CONTROLLER_IP_OR_HOSTNAME:9080
+
+# Or build directly with ldflags:
+go build -ldflags "-X main.ControllerURL=https://CONTROLLER_IP_OR_HOSTNAME:9080" \
+  -o bin/cfgms-steward ./cmd/steward
 ```
 
-#### 5b: Create systemd Service
+#### 5b: Copy Binary to Steward VM
 
 ```bash
-# On the steward VM
-# Replace CONTROLLER_IP and TOKEN with actual values
+scp bin/cfgms-steward user@steward-vm:/tmp/cfgms-steward
+ssh user@steward-vm "chmod +x /tmp/cfgms-steward"
+```
+
+#### 5c: Install as Service
+
+The steward has a built-in `install` subcommand that copies the binary to `/usr/local/bin/`,
+creates a systemd unit with `Restart=always` and `RestartSec=10`, and starts the service.
+
+```bash
+# On the steward VM (requires root)
+# Replace TOKEN with the registration token from Step 4.
+sudo /tmp/cfgms-steward install --regtoken TOKEN
+```
+
+Expected output:
+```
+Installing to /usr/local/bin/cfgms-steward...
+Registering systemd service...
+Starting service...
+
+Done. CFGMS Steward installed and running.
+  Service name: cfgms-steward
+  Status:  cfgms-steward status
+  Remove:  cfgms-steward uninstall
+```
+
+**Alternative: Manual systemd setup** (if you prefer to control the unit file):
+
+```bash
+sudo cp /tmp/cfgms-steward /usr/local/bin/cfgms-steward
 
 sudo tee /etc/systemd/system/cfgms-steward.service > /dev/null <<EOF
 [Unit]
@@ -306,60 +428,386 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/cfgms-steward --regtoken REPLACE_WITH_TOKEN
+ExecStart=/usr/local/bin/cfgms-steward --regtoken TOKEN
 Restart=always
 RestartSec=10
 User=root
+Environment=CFGMS_LOG_DIR=/var/log/cfgms
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
 sudo systemctl daemon-reload
-sudo systemctl enable cfgms-steward
-sudo systemctl start cfgms-steward
+sudo systemctl enable --now cfgms-steward
 ```
 
-#### 5c: Verify Steward Registration
+#### 5d: Verify Registration
 
 ```bash
-# Check steward logs
+# Check steward service status
+sudo systemctl status cfgms-steward
+
+# Check logs for successful registration
 sudo journalctl -u cfgms-steward --no-pager -n 30
 
-# Look for:
-# ✓ "Registering with controller via MQTT+QUIC"
-# ✓ "Certificate obtained"
-# ✓ "Connected to controller"
-# ✓ "Steward ready"
+# Look for these messages (in order):
+# ✓ "Using registration token for auto-registration (MQTT+QUIC mode)"
+# ✓ "Registration successful via HTTP"
+# ✓ "Connected to controller via MQTT+QUIC"
+# ✓ "Configuration executor initialized"
 
-# Verify controller sees the steward
-sudo journalctl -u cfgms-controller --no-pager | grep -i "registration"
+# Or use the built-in status command:
+cfgms-steward status
 ```
 
-### Step 6: Test Configuration Sync
+#### 5e: Managing the Service
 
 ```bash
-# On the controller VM, upload a test configuration
-cat > /tmp/test-config.yaml <<EOF
+# Check status
+cfgms-steward status
+
+# View live logs
+sudo journalctl -u cfgms-steward -f
+
+# Restart
+sudo systemctl restart cfgms-steward
+
+# Uninstall (stops service, removes unit file)
+sudo cfgms-steward uninstall
+
+# Uninstall and remove the binary
+sudo cfgms-steward uninstall --purge
+```
+
+### Step 6: Deploy Windows Steward
+
+#### 6a: Build for Windows
+
+```bash
+# Cross-compile from Linux/macOS build machine:
+make build-steward-cross GOOS=windows GOARCH=amd64 \
+  STEWARD_CONTROLLER_URL=https://CONTROLLER_IP_OR_HOSTNAME:9080
+
+# Or build directly:
+GOOS=windows GOARCH=amd64 go build \
+  -ldflags "-X main.ControllerURL=https://CONTROLLER_IP_OR_HOSTNAME:9080" \
+  -o bin/cfgms-steward.exe ./cmd/steward
+
+# If building on Windows directly:
+go build -ldflags "-X main.ControllerURL=https://CONTROLLER_IP_OR_HOSTNAME:9080" ^
+  -o bin\cfgms-steward.exe .\cmd\steward
+```
+
+#### 6b: Copy Binary to Windows Machine
+
+Copy `bin/cfgms-steward.exe` to the Windows machine. Any of these work:
+- SCP/SFTP to a temporary location
+- Network share
+- USB drive
+- RMM tool deployment
+
+#### 6c: Install as Windows Service
+
+**Option A: Interactive mode (double-click)**
+
+Double-click `cfgms-steward.exe`. The interactive UI prompts for the registration token
+and offers to install as a service:
+
+```
+CFGMS Steward v0.9.2
+
+Controller: https://controller.example.com:9080
+
+Registration token: ████████████████████████████
+
+  [1] Install as service (recommended)
+  [2] Run once (foreground)
+  [3] Exit
+
+Choice: 1
+
+Installing to C:\Program Files\CFGMS\cfgms-steward.exe...
+Registering Windows service...
+Starting service...
+
+Done. CFGMS Steward installed and running.
+  Service name: CFGMSSteward
+  Status:  cfgms-steward status
+  Remove:  cfgms-steward uninstall
+```
+
+**Option B: Command-line install (Administrator)**
+
+Open an Administrator Command Prompt or PowerShell:
+
+```powershell
+# Install as Windows Service (copies binary to C:\Program Files\CFGMS\)
+.\cfgms-steward.exe install --regtoken TOKEN
+```
+
+The steward uses the native Windows Service API (`golang.org/x/sys/windows/svc`) — not
+`sc.exe`. The service is registered as `CFGMSSteward` with automatic start and failure
+recovery (restart after 10s, 30s, 60s escalating delays).
+
+#### 6d: Verify on Windows
+
+```powershell
+# Built-in status command (works without Administrator)
+cfgms-steward.exe status
+
+# Or check Windows Services (services.msc)
+# Look for "CFGMSSteward" — should show Status: Running, Startup Type: Automatic
+
+# View logs in Event Viewer or log directory
+# Default log location: C:\ProgramData\CFGMS\logs\ (when CFGMS_LOG_DIR is not set)
+```
+
+#### 6e: Managing the Windows Service
+
+```powershell
+# Check status
+cfgms-steward.exe status
+
+# Uninstall (stops service, removes registration)
+cfgms-steward.exe uninstall
+
+# Uninstall and remove binary from Program Files
+cfgms-steward.exe uninstall --purge
+```
+
+**Re-installing (idempotent)**: Running `install` again stops the existing service,
+replaces the binary, and restarts — no need to uninstall first.
+
+### Step 7: Module Configuration Examples
+
+After stewards are registered and connected, push configurations from the controller.
+Below are practical examples for common modules.
+
+#### Test Connectivity First
+
+```bash
+# On the controller, push a simple test file to verify the pipeline works.
+curl -X POST http://localhost:9080/api/v1/configurations \
+  -H "Content-Type: application/yaml" \
+  --data-binary @- <<EOF
 resources:
-  - name: test-file
+  - name: smoke-test
     module: file
     config:
-      path: /tmp/hello-cfgms.txt
-      content: |
-        Hello from CFGMS!
-        Deployed successfully to home lab.
+      path: /tmp/cfgms-test.txt
+      content: "CFGMS is working."
       permissions: "0644"
       ensure: present
 EOF
 
-curl -X POST http://localhost:9080/api/v1/configurations \
-  -H "Content-Type: application/yaml" \
-  --data-binary @/tmp/test-config.yaml
+# Check steward logs — should see config applied within 60 seconds.
+```
 
-# The steward should sync within 60 seconds
-# Check steward logs for config application:
-ssh user@steward-vm "sudo journalctl -u cfgms-steward --no-pager -n 20"
+#### File Module
+
+Manages file content, ownership, and permissions. The steward creates the file if
+it does not exist and corrects drift if the content or metadata changes.
+
+```yaml
+resources:
+  - name: ntp-config
+    module: file
+    config:
+      path: /etc/ntp.conf
+      content: |
+        # Managed by CFGMS — do not edit manually
+        driftfile /var/lib/ntp/drift
+        server 0.pool.ntp.org iburst
+        server 1.pool.ntp.org iburst
+        restrict default kod nomodify notrap nopeer noquery
+        restrict 127.0.0.1
+      owner: root
+      group: root
+      permissions: "0644"
+
+  - name: motd
+    module: file
+    config:
+      path: /etc/motd
+      content: |
+        ========================================
+        This server is managed by CFGMS.
+        Unauthorized changes will be reverted.
+        ========================================
+      permissions: "0644"
+```
+
+#### Directory Module
+
+Creates directories and enforces ownership and permissions recursively.
+
+```yaml
+resources:
+  - name: app-directories
+    module: directory
+    config:
+      path: /opt/myapp
+      owner: appuser
+      permissions: 755
+      recursive: true
+
+  - name: log-directory
+    module: directory
+    config:
+      path: /var/log/myapp
+      owner: appuser
+      group: appuser
+      permissions: 750
+```
+
+#### Script Module
+
+Executes scripts on the steward. Use for tasks that don't fit neatly into
+declarative modules (bootstrapping, one-time setup, health checks).
+
+```yaml
+resources:
+  - name: ensure-swap
+    module: script
+    config:
+      interpreter: /bin/bash
+      content: |
+        #!/bin/bash
+        # Ensure 2GB swap file exists
+        if [ ! -f /swapfile ]; then
+          fallocate -l 2G /swapfile
+          chmod 600 /swapfile
+          mkswap /swapfile
+          swapon /swapfile
+          echo '/swapfile none swap sw 0 0' >> /etc/fstab
+          echo "Swap created"
+        else
+          echo "Swap already exists"
+        fi
+```
+
+#### Package Module
+
+Installs, removes, or updates packages. The steward detects the platform package
+manager automatically (apt, yum/dnf, brew, choco).
+
+```yaml
+resources:
+  - name: baseline-packages
+    module: package
+    config:
+      packages:
+        - name: curl
+          state: installed
+        - name: htop
+          state: installed
+        - name: unattended-upgrades
+          state: installed
+          version: latest
+        - name: telnet
+          state: absent
+```
+
+#### Firewall Module
+
+Manages firewall rules. Uses iptables on Linux, Windows Firewall on Windows.
+
+```yaml
+resources:
+  - name: web-server-rules
+    module: firewall
+    config:
+      rules:
+        - name: allow-ssh
+          port: 22
+          protocol: tcp
+          action: allow
+          source: "10.0.0.0/8"
+        - name: allow-http
+          port: 80
+          protocol: tcp
+          action: allow
+          source: "0.0.0.0/0"
+        - name: allow-https
+          port: 443
+          protocol: tcp
+          action: allow
+          source: "0.0.0.0/0"
+        - name: block-telnet
+          port: 23
+          protocol: tcp
+          action: deny
+          source: "0.0.0.0/0"
+```
+
+#### Combining Modules (Real-World Example)
+
+A complete configuration for a web server steward:
+
+```yaml
+resources:
+  # 1. Ensure directory structure exists
+  - name: web-directories
+    module: directory
+    config:
+      path: /var/www/html
+      owner: www-data
+      group: www-data
+      permissions: 755
+      recursive: true
+
+  # 2. Install required packages
+  - name: web-packages
+    module: package
+    config:
+      packages:
+        - name: nginx
+          state: installed
+        - name: certbot
+          state: installed
+
+  # 3. Deploy nginx configuration
+  - name: nginx-config
+    module: file
+    config:
+      path: /etc/nginx/sites-available/default
+      content: |
+        server {
+            listen 80 default_server;
+            root /var/www/html;
+            index index.html;
+            server_name _;
+
+            location / {
+                try_files $uri $uri/ =404;
+            }
+        }
+      owner: root
+      group: root
+      permissions: "0644"
+
+  # 4. Open firewall ports
+  - name: web-firewall
+    module: firewall
+    config:
+      rules:
+        - name: allow-http
+          port: 80
+          protocol: tcp
+          action: allow
+        - name: allow-https
+          port: 443
+          protocol: tcp
+          action: allow
+
+  # 5. Restart nginx after config changes
+  - name: restart-nginx
+    module: script
+    config:
+      interpreter: /bin/bash
+      content: |
+        nginx -t && systemctl reload nginx
 ```
 
 ## Validation
@@ -443,26 +891,71 @@ sudo ss -tlnp | grep -E '9080|1883|4433'
 
 ### Common Issues
 
-**Issue**: "Error: signature verification failed"
-- **Root Cause**: Controller using mismatched certificates
-- **Fix**: Ensure controller generated certs on first boot; check `/var/lib/cfgms/certs/`
-- **Verify**: Check controller logs show same certificate serial for signer and registration
+**Issue**: Steward fails with "controller URL not set"
+- **Cause**: Binary was built without `-ldflags "-X main.ControllerURL=..."`.
+- **Fix**: Rebuild the steward with the controller URL. See [Step 5a](#5a-build-steward-with-controller-url).
 
-**Issue**: "Timeout waiting for config status"
-- **Debug**: Check QUIC connection established in steward logs
-- **Debug**: Check module executor initialized
-- **Debug**: Check MQTT publish succeeds
-- **Fix**: See diagnostic test output for exact failure point
+**Issue**: "HTTP registration failed" or "connection refused"
+- **Cause**: Steward cannot reach the controller REST API on port 9080.
+- **Debug**: From the steward machine, test connectivity:
+  ```bash
+  # Linux
+  curl -k https://CONTROLLER_IP:9080/api/v1/health
+
+  # Windows (PowerShell)
+  Invoke-WebRequest -Uri https://CONTROLLER_IP:9080/api/v1/health -SkipCertificateCheck
+  ```
+- **Fix**: Check controller is running, firewall allows 9080/tcp, and `external_url` in
+  controller.cfg matches the address stewards use.
+
+**Issue**: "Error: signature verification failed"
+- **Cause**: Controller using mismatched certificates (e.g., certs regenerated after stewards registered).
+- **Fix**: Ensure controller generated certs on first boot with `--init`; check `/var/lib/cfgms/certs/`.
+- **Verify**: Check controller logs show same certificate serial for signer and registration.
 
 **Issue**: "Cannot connect to MQTT broker"
-- **Debug**: Check controller is running: `sudo systemctl status cfgms-controller`
-- **Debug**: Check port 1883 is accessible: `nc -zv controller-vm 1883`
-- **Fix**: Verify firewall rules allow port 1883
+- **Cause**: Steward registered but cannot establish MQTT control plane connection.
+- **Debug**:
+  ```bash
+  # Check controller is running
+  sudo systemctl status cfgms-controller
+
+  # Check port 1883 is reachable from steward machine
+  nc -zv CONTROLLER_IP 1883
+  ```
+- **Fix**: Verify firewall allows port 1883/tcp. Check controller logs for MQTT broker startup.
 
 **Issue**: "QUIC connection failed"
-- **Debug**: Check port 4433 is accessible from steward: `nc -zuv controller-vm 4433`
-- **Debug**: Check certificates are valid in controller logs
-- **Fix**: Verify firewall allows UDP port 4433
+- **Cause**: Data plane cannot be established (config sync will fail).
+- **Debug**:
+  ```bash
+  # QUIC uses UDP — test differently than TCP
+  nc -zuv CONTROLLER_IP 4433
+  ```
+- **Fix**: Verify firewall allows **UDP** port 4433 (not TCP). This is the most commonly
+  missed rule since QUIC runs over UDP.
+
+**Issue**: "Timeout waiting for config status"
+- **Cause**: MQTT connected but config sync over QUIC did not complete.
+- **Debug**: Check steward logs for QUIC connection, module executor initialization, and
+  MQTT publish success. The failure point narrows the root cause.
+
+**Issue (Windows)**: "install requires Administrator privileges"
+- **Cause**: The `install` and `uninstall` subcommands need elevated access to register a
+  Windows Service.
+- **Fix**: Right-click `cfgms-steward.exe` and select "Run as administrator", or open an
+  Administrator Command Prompt/PowerShell first.
+
+**Issue (Windows)**: Service shows "Stopped" in services.msc immediately after install
+- **Debug**: Check Windows Event Viewer > Application log for the `CFGMSSteward` source.
+- **Common cause**: Controller URL not baked in at build time, or controller unreachable
+  from the Windows machine. The service starts, fails registration, and exits. The recovery
+  policy will retry after 10 seconds.
+
+**Issue (Linux)**: Steward logs show "WARNING: Using /tmp/cfgms for logs"
+- **Cause**: `CFGMS_LOG_DIR` environment variable not set.
+- **Fix**: Either set `Environment=CFGMS_LOG_DIR=/var/log/cfgms` in the systemd unit or
+  create the directory: `sudo mkdir -p /var/log/cfgms`
 
 ## Advanced Configuration
 
