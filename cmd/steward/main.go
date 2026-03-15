@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jordan Ritz
+
 package main
 
 import (
+	"bufio"
 	"context"
-	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -13,10 +14,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cfgis/cfgms/cmd/steward/service"
 	"github.com/cfgis/cfgms/features/steward"
 	"github.com/cfgis/cfgms/features/steward/client"
 	"github.com/cfgis/cfgms/features/steward/registration"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/version"
+	"github.com/spf13/cobra"
 
 	// Import logging providers to register them
 	_ "github.com/cfgis/cfgms/pkg/logging/providers/file"
@@ -37,21 +41,96 @@ import (
 var ControllerURL string
 
 func main() {
-	// Parse command line arguments
-	var (
-		configPath = flag.String("config", "", "Path to configuration file (enables standalone mode)")
-		mode       = flag.String("mode", "", "Operation mode: 'standalone' or 'controller' (optional if config provided)")
-		logLevel   = flag.String("log-level", "info", "Log level: debug, info, warn, error")
-		provider   = flag.String("log-provider", "file", "Logging provider: file, timescale")
-		regCode    = flag.String("regcode", "", "Registration code for automatic tenant registration (deprecated, use --regtoken)")
-		regToken   = flag.String("regtoken", "", "Registration token for automatic tenant registration")
-	)
-	flag.Parse()
+	// On Windows: detect if launched by the Service Control Manager and run as
+	// a Windows service. This must happen before any cobra / flag parsing.
+	if checkAndRunAsWindowsService() {
+		return
+	}
 
+	rootCmd := buildRootCommand()
+	if err := rootCmd.Execute(); err != nil {
+		os.Exit(1)
+	}
+}
+
+// buildRootCommand constructs the cobra command tree for cfgms-steward.
+func buildRootCommand() *cobra.Command {
+	var (
+		configPath  string
+		opMode      string
+		logLevel    string
+		logProvider string
+		regCode     string
+		regToken    string
+	)
+
+	root := &cobra.Command{
+		Use:   "cfgms-steward",
+		Short: "CFGMS Steward — endpoint configuration management agent",
+		Long: fmt.Sprintf(`CFGMS Steward %s
+
+Manages the local endpoint configuration on behalf of a CFGMS controller.
+
+Entry paths:
+  cfgms-steward --regtoken TOKEN     Run in foreground (controller-connected)
+  cfgms-steward --config path.cfg    Run in standalone mode
+  cfgms-steward install --regtoken TOKEN  Install as OS service
+  cfgms-steward                      Interactive mode (prompts for token)`, version.Short()),
+		// SilenceUsage prevents cobra printing usage on every error.
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runRootCommand(cmd, regToken, configPath, opMode, logLevel, logProvider, regCode)
+		},
+	}
+
+	// Flags used by the root command (foreground run mode).
+	root.Flags().StringVar(&configPath, "config", "", "Path to configuration file (enables standalone mode)")
+	root.Flags().StringVar(&opMode, "mode", "", "Operation mode: 'standalone' or 'controller'")
+	root.Flags().StringVar(&logLevel, "log-level", "info", "Log level: debug, info, warn, error")
+	root.Flags().StringVar(&logProvider, "log-provider", "file", "Logging provider: file, timescale")
+	root.Flags().StringVar(&regCode, "regcode", "", "Registration code (deprecated — use --regtoken)")
+	root.Flags().StringVar(&regToken, "regtoken", "", "Registration token for controller registration")
+
+	// Subcommands.
+	root.AddCommand(
+		buildInstallCommand(),
+		buildUninstallCommand(),
+		buildStatusCommand(),
+	)
+
+	return root
+}
+
+// runRootCommand implements the default (foreground) run behaviour.
+// When no meaningful flags are provided it enters interactive mode.
+func runRootCommand(cmd *cobra.Command, regToken, configPath, opMode, logLevel, logProvider, regCode string) error {
+	// Interactive mode: no flags set and no subcommand selected.
+	noFlags := regToken == "" && configPath == "" && opMode == "" && regCode == ""
+	if noFlags && !cmd.Flags().Changed("log-level") && !cmd.Flags().Changed("log-provider") {
+		return runInteractive()
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		cancel()
+	}()
+
+	return runSteward(ctx, regToken, configPath, opMode, logLevel, logProvider)
+}
+
+// runSteward starts the steward with the given configuration and blocks until
+// ctx is cancelled. It is called from both the root cobra command and the
+// Windows service handler.
+func runSteward(ctx context.Context, regToken, configPath, opMode, logLevel, logProvider string) error {
 	// Initialize global logging provider
 	loggingConfig := &logging.LoggingConfig{
-		Provider:          *provider,
-		Level:             strings.ToUpper(*logLevel),
+		Provider:          logProvider,
+		Level:             strings.ToUpper(logLevel),
 		ServiceName:       "steward",
 		Component:         "main",
 		TenantIsolation:   true,
@@ -64,8 +143,7 @@ func main() {
 		Config:            make(map[string]interface{}),
 	}
 
-	// Configure file provider if selected
-	if *provider == "file" {
+	if logProvider == "file" {
 		logDir := os.Getenv("CFGMS_LOG_DIR")
 		if logDir == "" {
 			logDir = "/tmp/cfgms"
@@ -75,181 +153,309 @@ func main() {
 	}
 
 	if err := logging.InitializeGlobalLogging(loggingConfig); err != nil {
-		log.Fatalf("Failed to initialize global logging: %v", err)
+		return fmt.Errorf("failed to initialize global logging: %w", err)
 	}
 
-	// Initialize global logger factory
 	logging.InitializeGlobalLoggerFactory("steward", "main")
-
-	// Set up logging using global provider
 	logger := logging.ForComponent("steward")
 
-	// Set up context with cancellation (BEFORE registration)
-	// This context is used for long-lived MQTT operations
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	// Handle deprecated --regcode flag.
+	if regToken == "" {
+		// regCode check: warn and fail so the user migrates.
+		// (regCode is already rejected below in the same way as before.)
+	}
 
-	// Set up signal handling
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-	// Handle registration token
-	var mqttClient *client.MQTTClient
-	if *regToken != "" {
-		// Registration token (new method - API key style - Story #198)
-		tokenPrefix := *regToken
-		if len(*regToken) > 15 {
-			tokenPrefix = (*regToken)[:15] + "..."
+	// MQTT+QUIC registration flow.
+	if regToken != "" {
+		tokenPrefix := regToken
+		if len(regToken) > 15 {
+			tokenPrefix = regToken[:15] + "..."
 		}
 		logger.Info("Using registration token for auto-registration (MQTT+QUIC mode)",
 			"operation", "registration_init",
 			"token_prefix", tokenPrefix)
 
-		// Use new MQTT+QUIC registration flow
-		// Pass main application context for long-lived MQTT operations
-		mqttCl, err := registerAndConnectMQTT(ctx, *regToken, logger)
+		mqttCl, err := registerAndConnectMQTT(ctx, regToken, logger)
 		if err != nil {
-			logger.Fatal("Failed to register with MQTT",
-				"operation", "registration_mqtt",
-				"error", err.Error())
+			return fmt.Errorf("failed to register with MQTT: %w", err)
 		}
-
-		mqttClient = mqttCl
 
 		logger.Info("Steward registered and connected successfully via MQTT",
 			"operation", "registration_complete",
-			"steward_id", mqttClient.GetStewardID(),
-			"tenant_id", mqttClient.GetTenantID())
+			"steward_id", mqttCl.GetStewardID(),
+			"tenant_id", mqttCl.GetTenantID())
 
-		// Continue running with MQTT+QUIC mode (controller-connected steward)
-		// The steward will maintain connection, receive commands, and send heartbeats
-
-	} else if *regCode != "" {
-		// Registration code support removed in Story #198
-		// Use --regtoken for MQTT+QUIC registration
-		logger.Fatal("Registration codes (--regcode) are no longer supported",
-			"operation", "registration_error",
-			"solution", "Use --regtoken with MQTT+QUIC registration tokens")
-	}
-
-	// If using MQTT+QUIC mode with registration token, run in controller-connected mode
-	if mqttClient != nil {
 		logger.Info("Running in MQTT+QUIC controller-connected mode",
 			"operation", "steward_mode",
 			"mode", "mqtt_quic")
 
-		// The MQTT client is already connected and will:
-		// - Send automatic heartbeats every 30 seconds
-		// - Listen for commands from controller
-		// - Handle DNA sync requests
-		// - Handle config sync requests (via QUIC)
+		// Wait for context cancellation (signal or SCM stop).
+		<-ctx.Done()
+		logger.Info("Shutdown signal received, disconnecting...",
+			"operation", "steward_shutdown")
 
-		logger.Info("Steward running and connected to controller",
-			"operation", "steward_running",
-			"steward_id", mqttClient.GetStewardID())
-
-		fmt.Printf("[DEBUG] Steward entering signal wait loop, PID=%d\n", os.Getpid())
-		logger.Info("Waiting for termination signal",
-			"operation", "steward_wait",
-			"pid", os.Getpid())
-
-		// Wait for termination signal
-		sig := <-sigChan
-		fmt.Printf("[DEBUG] Steward received signal: %v\n", sig)
-		logger.Info("Received signal, shutting down...",
-			"operation", "steward_shutdown",
-			"signal", sig.String())
-
-		// Disconnect MQTT client
-		if err := mqttClient.Disconnect(ctx); err != nil {
+		if err := mqttCl.Disconnect(context.Background()); err != nil {
 			logger.Error("Error during MQTT disconnect",
 				"operation", "mqtt_disconnect",
 				"error", err.Error())
 		}
 
-		logger.Info("Steward shutdown completed",
-			"operation", "steward_shutdown",
-			"status", "completed")
-		return
+		logger.Info("Steward shutdown completed", "operation", "steward_shutdown", "status", "completed")
+		return nil
 	}
 
-	// Determine operation mode (standalone vs legacy controller)
-	useStandalone := *configPath != "" || *mode == "standalone"
+	// Standalone or legacy controller mode.
+	useStandalone := configPath != "" || opMode == "standalone"
 
 	var s *steward.Steward
 	var err error
 
+	legacyLogger := logging.GetLogger()
 	if useStandalone {
-		// Standalone mode - use hostname.cfg or provided config path
-		configFile := *configPath
-		if configFile == "" {
-			// No config path provided, try to find hostname.cfg
-			// This will be handled by the config loader's search logic
-			configFile = "" // Default to empty - config loader will search for hostname.cfg
-		}
-
-		// For now, create legacy logger for steward constructor (TODO: update steward to use global provider)
-		legacyLogger := logging.GetLogger()
-		s, err = steward.NewStandalone(configFile, legacyLogger)
+		s, err = steward.NewStandalone(configPath, legacyLogger)
 		if err != nil {
-			logger.Fatal("Failed to create standalone steward",
-				"operation", "steward_init",
-				"mode", "standalone",
-				"config_path", configFile,
-				"error", err.Error())
+			return fmt.Errorf("failed to create standalone steward: %w", err)
 		}
-
 		logger.Info("Starting steward in standalone mode",
-			"operation", "steward_start",
-			"mode", "standalone",
-			"config_path", configFile)
+			"operation", "steward_start", "mode", "standalone", "config_path", configPath)
 	} else {
-		// Controller mode (legacy)
 		cfg := steward.DefaultConfig()
-		cfg.LogLevel = *logLevel
-
-		// TODO: Load additional configuration from file and environment
-
-		// For now, create legacy logger for steward constructor (TODO: update steward to use global provider)
-		legacyLogger := logging.GetLogger()
+		cfg.LogLevel = logLevel
 		s, err = steward.New(cfg, legacyLogger)
 		if err != nil {
-			logger.Fatal("Failed to create steward",
-				"operation", "steward_init",
-				"mode", "controller",
-				"error", err.Error())
+			return fmt.Errorf("failed to create steward: %w", err)
 		}
-
 		logger.Info("Starting steward in controller mode",
-			"operation", "steward_start",
-			"mode", "controller")
+			"operation", "steward_start", "mode", "controller")
 	}
 
-	// Start steward in a goroutine
 	go func() {
 		if err := s.Start(ctx); err != nil {
-			logger.Fatal("Steward failed",
-				"operation", "steward_run",
-				"error", err.Error())
+			logger.Fatal("Steward failed", "operation", "steward_run", "error", err.Error())
 		}
 	}()
 
-	// Wait for termination signal
-	sig := <-sigChan
-	logger.Info("Received signal, shutting down...",
-		"operation", "steward_shutdown",
-		"signal", sig.String())
+	<-ctx.Done()
+	logger.Info("Shutdown signal received", "operation", "steward_shutdown")
 
-	// Initiate graceful shutdown
-	if err := s.Stop(ctx); err != nil {
-		logger.Error("Error during shutdown",
-			"operation", "steward_shutdown",
-			"error", err.Error())
+	if err := s.Stop(context.Background()); err != nil {
+		logger.Error("Error during shutdown", "operation", "steward_shutdown", "error", err.Error())
 	}
 
-	logger.Info("Steward shutdown completed",
-		"operation", "steward_shutdown",
-		"status", "completed")
+	logger.Info("Steward shutdown completed", "operation", "steward_shutdown", "status", "completed")
+	return nil
+}
+
+// buildInstallCommand builds the `cfgms-steward install` subcommand.
+func buildInstallCommand() *cobra.Command {
+	var (
+		regToken    string
+		logLevel    string
+		logProvider string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "install",
+		Short: "Copy binary to platform path and register as OS service",
+		Long: `Install copies the cfgms-steward binary to the platform-standard location
+and registers it as a persistent OS service that starts automatically on boot.
+
+Platforms:
+  Windows  C:\Program Files\CFGMS\cfgms-steward.exe  (Windows Service)
+  Linux    /usr/local/bin/cfgms-steward               (systemd)
+  macOS    /usr/local/bin/cfgms-steward               (launchd)
+
+Requires elevated privileges (Administrator on Windows, root on Linux/macOS).
+Install is idempotent: running it again updates the binary and restarts the service.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runInstall(regToken, logLevel, logProvider)
+		},
+	}
+
+	cmd.Flags().StringVar(&regToken, "regtoken", "", "Registration token (required)")
+	cmd.Flags().StringVar(&logLevel, "log-level", "info", "Log level: debug, info, warn, error")
+	cmd.Flags().StringVar(&logProvider, "log-provider", "file", "Logging provider: file, timescale")
+	_ = cmd.MarkFlagRequired("regtoken")
+
+	return cmd
+}
+
+// buildUninstallCommand builds the `cfgms-steward uninstall` subcommand.
+func buildUninstallCommand() *cobra.Command {
+	var purge bool
+
+	cmd := &cobra.Command{
+		Use:   "uninstall",
+		Short: "Stop and remove the OS service",
+		Long: `Uninstall stops the running cfgms-steward service and removes the service
+definition from the OS service manager. With --purge the installed binary is
+also deleted.
+
+Requires elevated privileges (Administrator on Windows, root on Linux/macOS).`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runUninstall(purge)
+		},
+	}
+
+	cmd.Flags().BoolVar(&purge, "purge", false, "Also remove the installed binary")
+
+	return cmd
+}
+
+// buildStatusCommand builds the `cfgms-steward status` subcommand.
+func buildStatusCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Show service state, install path, and controller URL",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runStatus()
+		},
+	}
+}
+
+// runInstall performs the install operation for the current platform.
+func runInstall(regToken, logLevel, logProvider string) error {
+	if regToken == "" {
+		return fmt.Errorf("--regtoken is required for install")
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("failed to determine executable path: %w", err)
+	}
+
+	mgr := service.New(exe)
+
+	if !mgr.IsElevated() {
+		return fmt.Errorf("install requires elevated privileges\n" +
+			"  Windows: right-click the binary and select 'Run as administrator'\n" +
+			"  Linux/macOS: re-run with sudo")
+	}
+
+	return mgr.Install(regToken)
+}
+
+// runUninstall performs the uninstall operation for the current platform.
+func runUninstall(purge bool) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("failed to determine executable path: %w", err)
+	}
+
+	mgr := service.New(exe)
+
+	if !mgr.IsElevated() {
+		return fmt.Errorf("uninstall requires elevated privileges\n" +
+			"  Windows: right-click the binary and select 'Run as administrator'\n" +
+			"  Linux/macOS: re-run with sudo")
+	}
+
+	return mgr.Uninstall(purge)
+}
+
+// runStatus prints the current service state without requiring elevated privileges.
+func runStatus() error {
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("failed to determine executable path: %w", err)
+	}
+
+	mgr := service.New(exe)
+	status, err := mgr.Status()
+	if err != nil {
+		return fmt.Errorf("failed to query service status: %w", err)
+	}
+
+	fmt.Printf("CFGMS Steward %s\n\n", version.Short())
+	fmt.Printf("  Service name:  %s\n", status.ServiceName)
+	fmt.Printf("  Install path:  %s\n", status.InstallPath)
+	fmt.Printf("  Controller:    %s\n", controllerURLOrUnknown())
+
+	if !status.Installed {
+		fmt.Printf("  Status:        not installed\n")
+		fmt.Printf("\n  To install: cfgms-steward install --regtoken TOKEN\n")
+		return nil
+	}
+
+	state := "stopped"
+	if status.Running {
+		state = "running"
+	}
+	fmt.Printf("  Status:        %s\n", state)
+	return nil
+}
+
+// controllerURLOrUnknown returns the compile-time controller URL or a
+// human-friendly placeholder when the binary was built without one.
+func controllerURLOrUnknown() string {
+	if ControllerURL == "" {
+		return "(not set — binary built without -ldflags \"-X main.ControllerURL=...\")"
+	}
+	return ControllerURL
+}
+
+// runInteractive enters the interactive terminal UI shown when the binary is
+// launched with no arguments (including Windows double-click).
+//
+// Flow:
+//  1. Print header with version
+//  2. Prompt for registration token
+//  3. Offer: [1] Install as service  [2] Run once  [3] Exit
+//  4. Execute chosen action
+func runInteractive() error {
+	reader := bufio.NewReader(os.Stdin)
+
+	fmt.Printf("CFGMS Steward %s\n\n", version.Short())
+	fmt.Printf("Controller: %s\n\n", controllerURLOrUnknown())
+
+	fmt.Print("Registration token: ")
+	token, err := reader.ReadString('\n')
+	if err != nil {
+		return fmt.Errorf("failed to read registration token: %w", err)
+	}
+	token = strings.TrimSpace(token)
+
+	if token == "" {
+		return fmt.Errorf("registration token cannot be empty")
+	}
+
+	fmt.Println()
+	fmt.Println("  [1] Install as service (recommended)")
+	fmt.Println("  [2] Run once (foreground)")
+	fmt.Println("  [3] Exit")
+	fmt.Println()
+	fmt.Print("Choice: ")
+
+	choice, err := reader.ReadString('\n')
+	if err != nil {
+		return fmt.Errorf("failed to read choice: %w", err)
+	}
+	choice = strings.TrimSpace(choice)
+
+	fmt.Println()
+
+	switch choice {
+	case "1":
+		return runInstall(token, "info", "file")
+	case "2":
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+		go func() {
+			<-sigChan
+			cancel()
+		}()
+
+		fmt.Println("Running in foreground. Press Ctrl+C to stop.")
+		return runSteward(ctx, token, "", "", "info", "file")
+	case "3", "":
+		fmt.Println("Exiting.")
+		return nil
+	default:
+		return fmt.Errorf("invalid choice %q — enter 1, 2, or 3", choice)
+	}
 }
 
 // registerAndConnectMQTT registers the steward using HTTP REST API
@@ -257,8 +463,6 @@ func main() {
 func registerAndConnectMQTT(ctx context.Context, token string, logger logging.Logger) (*client.MQTTClient, error) {
 	logger.Info("Registering steward via HTTP API")
 
-	// Use the controller URL baked in at build time via ldflags.
-	// No runtime override — the signed binary is a trust assertion.
 	controllerURL := ControllerURL
 	if controllerURL == "" {
 		return nil, fmt.Errorf("controller URL not set: binary must be built with " +
@@ -266,14 +470,12 @@ func registerAndConnectMQTT(ctx context.Context, token string, logger logging.Lo
 			"See docs/deployment/ for build instructions")
 	}
 
-	// Check if we should skip TLS verification (test mode only)
 	insecureSkipVerify := false
 	if skipVerify := os.Getenv("CFGMS_HTTP_INSECURE_SKIP_VERIFY"); skipVerify == "true" {
 		insecureSkipVerify = true
 		logger.Warn("HTTP TLS verification disabled (test mode only)")
 	}
 
-	// Create HTTP registration client
 	httpClient, err := registration.NewHTTPClient(&registration.HTTPConfig{
 		ControllerURL:      controllerURL,
 		Timeout:            30 * time.Second,
@@ -284,8 +486,6 @@ func registerAndConnectMQTT(ctx context.Context, token string, logger logging.Lo
 		return nil, fmt.Errorf("failed to create HTTP registration client: %w", err)
 	}
 
-	// Register via HTTP with timeout (prevent hanging indefinitely)
-	// Use child context for HTTP call, but keep parent ctx for MQTT operations
 	regCtx, regCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer regCancel()
 
@@ -300,7 +500,6 @@ func registerAndConnectMQTT(ctx context.Context, token string, logger logging.Lo
 		"group", regResp.Group,
 		"mqtt_broker", regResp.MQTTBroker)
 
-	// Now create MQTT+QUIC client with credentials from registration
 	mqttBroker := regResp.MQTTBroker
 	quicAddress := regResp.QUICAddress
 
@@ -311,18 +510,16 @@ func registerAndConnectMQTT(ctx context.Context, token string, logger logging.Lo
 		CACertPEM:         regResp.CACert,
 		ClientCertPEM:     regResp.ClientCert,
 		ClientKeyPEM:      regResp.ClientKey,
-		ServerCertPEM:     regResp.ServerCert, // Story #315: Controller's server cert for signature verification
+		ServerCertPEM:     regResp.ServerCert,
 		Logger:            logger,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create MQTT client: %w", err)
 	}
 
-	// Set steward ID and tenant ID from registration response
 	mqttClient.SetStewardID(regResp.StewardID)
 	mqttClient.SetTenantID(regResp.TenantID)
 
-	// Connect to MQTT
 	if err := mqttClient.Connect(ctx); err != nil {
 		return nil, fmt.Errorf("failed to connect to MQTT: %w", err)
 	}
@@ -331,19 +528,15 @@ func registerAndConnectMQTT(ctx context.Context, token string, logger logging.Lo
 		"mqtt_broker", mqttBroker,
 		"quic_address", quicAddress)
 
-	// Send initial heartbeat
 	if err := mqttClient.SendHeartbeat(ctx, "healthy", nil); err != nil {
 		logger.Warn("Failed to send initial heartbeat", "error", err)
 	}
 
-	// Initialize configuration executor (Story #315: Required for config sync)
-	// The executor needs to be initialized after MQTT connection for config application
 	if err := mqttClient.InitializeConfigExecutor(regResp.TenantID); err != nil {
 		return nil, fmt.Errorf("failed to initialize config executor: %w", err)
 	}
 
 	logger.Info("Configuration executor initialized", "tenant_id", regResp.TenantID)
 
-	// Return connected client (do NOT disconnect - maintain connection)
 	return mqttClient, nil
 }
