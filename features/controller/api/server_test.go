@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/controller/ctxkeys"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/tenant"
@@ -992,4 +993,71 @@ func TestTestEndpointAuthGate(t *testing.T) {
 		assert.Equal(t, http.StatusUnauthorized, rec.Code, "Env var value 'yes' should not bypass auth")
 		assert.False(t, handlerCalled, "Handler should not be called with non-exact env var value")
 	})
+}
+
+// TestTenantContextPropagation verifies that tenant ID set by the auth middleware flows
+// through to the config handler and is used for config storage (not silently falling back
+// to "default"). This is a regression test for the context key type mismatch fixed in
+// Issue #430: auth middleware used typed contextKey("tenant_id") while handlers used
+// plain string "tenant-id" — so context.Value() always returned nil before the fix.
+func TestTenantContextPropagation(t *testing.T) {
+	server := setupTestServer(t)
+
+	// Create an API key for a specific tenant (not the default "test-tenant").
+	// NewEphemeralTestKey stores the key with this tenantID in the server's in-memory
+	// key map, so when the auth middleware validates the key it will read TenantID = "acme-corp"
+	// and store it under ctxkeys.TenantID in the request context.
+	configWriteKey := NewEphemeralTestKey(t, server, []string{"steward:write-config"}, "acme-corp", 5*time.Minute)
+
+	// Build a minimal valid StewardConfig that passes ValidateConfiguration.
+	configBody := []byte(`{
+		"steward": {
+			"id": "test-steward-1",
+			"mode": "standalone",
+			"logging": {"level": "info"}
+		},
+		"resources": []
+	}`)
+
+	req := httptest.NewRequest("PUT", "/api/v1/stewards/test-steward-1/config", bytes.NewReader(configBody))
+	req.Header.Set("X-API-Key", configWriteKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "Config write should succeed; body: %s", rec.Body.String())
+
+	var response APIResponse
+	err := json.Unmarshal(rec.Body.Bytes(), &response)
+	require.NoError(t, err)
+
+	data, ok := response.Data.(map[string]interface{})
+	require.True(t, ok, "Response data should be a map")
+
+	// The tenant_id in the response must match the key's tenant, not "default".
+	// Before the fix the handler extracted via plain string "tenant-id" which never
+	// matched the typed contextKey set by the middleware, so tenantID was always "default".
+	assert.Equal(t, "acme-corp", data["tenant_id"],
+		"tenant_id in response should reflect the authenticated API key's tenant, not 'default'")
+	assert.Equal(t, "test-steward-1", data["steward_id"])
+}
+
+// TestTenantContextKeyType verifies that ctxkeys.TenantID can be retrieved from a context
+// that was populated using the same key — confirming the type identity that was broken before.
+func TestTenantContextKeyType(t *testing.T) {
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "acme-corp")
+
+	val, ok := ctx.Value(ctxkeys.TenantID).(string)
+	assert.True(t, ok, "ctxkeys.TenantID should be retrievable with the same typed key")
+	assert.Equal(t, "acme-corp", val)
+
+	// Plain string "tenant_id" must NOT match the typed key — this confirms the
+	// type-safe key prevents silent collisions with untyped string keys.
+	plainVal := ctx.Value("tenant_id")
+	assert.Nil(t, plainVal, "plain string 'tenant_id' must not match the typed ctxkeys.TenantID")
+
+	// Old hyphenated string "tenant-id" must also not match.
+	oldVal := ctx.Value("tenant-id")
+	assert.Nil(t, oldVal, "old plain string 'tenant-id' must not match the typed ctxkeys.TenantID")
 }

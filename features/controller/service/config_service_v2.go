@@ -11,6 +11,7 @@ import (
 
 	common "github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
+	"github.com/cfgis/cfgms/features/controller/ctxkeys"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/validation"
 	"github.com/cfgis/cfgms/pkg/config"
@@ -375,12 +376,12 @@ func (s *ConfigurationServiceV2) convertValidationLevel(level string) controller
 
 // extractTenantID extracts tenant ID from context
 func (s *ConfigurationServiceV2) extractTenantID(ctx context.Context) string {
-	// Extract tenant ID from context value (set by MQTT/HTTP handlers)
-	if tenantID, ok := ctx.Value("tenant-id").(string); ok && tenantID != "" {
+	// Extract tenant ID from context value (set by auth middleware)
+	if tenantID, ok := ctx.Value(ctxkeys.TenantID).(string); ok && tenantID != "" {
 		return tenantID
 	}
 
-	s.logger.Debug("No tenant-id in context, using default tenant")
+	s.logger.Debug("No tenant ID in context, using default tenant")
 	return "default"
 }
 

@@ -14,6 +14,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	controller "github.com/cfgis/cfgms/api/proto/controller"
+	"github.com/cfgis/cfgms/features/controller/ctxkeys"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -267,7 +268,7 @@ func (s *Server) handleUpdateStewardConfig(w http.ResponseWriter, r *http.Reques
 
 	// Extract tenant from context or use default
 	tenantID := "default"
-	if tid, ok := r.Context().Value("tenant-id").(string); ok && tid != "" {
+	if tid, ok := r.Context().Value(ctxkeys.TenantID).(string); ok && tid != "" {
 		tenantID = tid
 	}
 
@@ -395,7 +396,7 @@ func (s *Server) handleGetEffectiveConfig(w http.ResponseWriter, r *http.Request
 
 	// Extract tenant from context or use default
 	tenantID := "default"
-	if tid, ok := r.Context().Value("tenant-id").(string); ok && tid != "" {
+	if tid, ok := r.Context().Value(ctxkeys.TenantID).(string); ok && tid != "" {
 		tenantID = tid
 	}
 

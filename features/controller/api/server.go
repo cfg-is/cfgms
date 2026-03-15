@@ -17,6 +17,7 @@ import (
 
 	"github.com/cfgis/cfgms/commercial/ha"
 	"github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/controller/ctxkeys"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/monitoring"
 	"github.com/cfgis/cfgms/features/rbac"
@@ -152,7 +153,7 @@ func New(
 		authdefense.DefaultConfig(),
 		logger,
 		authdefense.WithTenantExtractor(func(r *http.Request) string {
-			if tid, ok := r.Context().Value(tenantIDContextKey).(string); ok {
+			if tid, ok := r.Context().Value(ctxkeys.TenantID).(string); ok {
 				return tid
 			}
 			return ""
