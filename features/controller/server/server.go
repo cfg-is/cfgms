@@ -17,6 +17,9 @@ import (
 
 	common "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/commercial/ha"
+	configgit "github.com/cfgis/cfgms/features/config/git"
+	gitStorage "github.com/cfgis/cfgms/features/config/git/storage"
+	"github.com/cfgis/cfgms/features/config/rollback"
 	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/features/controller/api"
 	"github.com/cfgis/cfgms/features/controller/commands"
@@ -29,6 +32,14 @@ import (
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/tenant"
+	reportapi "github.com/cfgis/cfgms/features/reports/api"
+	reportscache "github.com/cfgis/cfgms/features/reports/cache"
+	reportsengine "github.com/cfgis/cfgms/features/reports/engine"
+	reportsexporters "github.com/cfgis/cfgms/features/reports/exporters"
+	reportsprovider "github.com/cfgis/cfgms/features/reports/provider"
+	reportstemplates "github.com/cfgis/cfgms/features/reports/templates"
+	dnadrift "github.com/cfgis/cfgms/features/steward/dna/drift"
+	dnaStorage "github.com/cfgis/cfgms/features/steward/dna/storage"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
@@ -515,7 +526,90 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		logger.Info("QUIC trigger function wired to HTTP API server")
 	}
 
+	// Story #416: Wire rollback manager into API server
+	rollbackManager := initializeRollbackManager(storageManager, logger)
+	httpServer.SetRollbackManager(rollbackManager)
+	logger.Info("Rollback manager wired to HTTP API server")
+
+	// Story #416: Wire reports engine into API server
+	reportsHandler := initializeReportsHandler(logger)
+	if reportsHandler != nil {
+		httpServer.SetReportsHandler(reportsHandler)
+		logger.Info("Reports engine wired to HTTP API server")
+	}
+
 	return srv, nil
+}
+
+// noOpModuleRegistry is a minimal ModuleRegistry for controller wiring.
+// Returns safe defaults when no external module registry is configured.
+type noOpModuleRegistry struct{}
+
+func (r *noOpModuleRegistry) GetModuleVersion(_ context.Context, _ string) (string, error) {
+	return "latest", nil
+}
+
+func (r *noOpModuleRegistry) GetModuleDependencies(_ context.Context, _ string) ([]string, error) {
+	return nil, nil
+}
+
+func (r *noOpModuleRegistry) IsModuleCompatible(_ context.Context, _, _ string) (bool, error) {
+	return true, nil
+}
+
+// initializeRollbackManager creates and wires the rollback manager.
+func initializeRollbackManager(storageManager *interfaces.StorageManager, logger logging.Logger) rollback.RollbackManager {
+	// Use durable storage for rollback operations
+	rollbackStore := rollback.NewStorageRollbackStore(storageManager.GetConfigStore())
+
+	// Create validator with no-op module registry (full module registry requires separate story)
+	rollbackValidator := rollback.NewRollbackValidator(&noOpModuleRegistry{}, nil)
+
+	// Create notifier using standard logger
+	rollbackNotifier := rollback.NewDefaultRollbackNotifier(nil)
+
+	// Create local git store for commit history access
+	localGitStore := gitStorage.NewLocalRepositoryStore("", "")
+
+	// Create git manager for rollback point discovery (nil provider = local-only mode)
+	gitManager := configgit.NewGitManager(nil, localGitStore, configgit.GitManagerConfig{
+		DefaultBranch: "main",
+		AutoSync:      false,
+	})
+
+	manager := rollback.NewRollbackManager(gitManager, rollbackValidator, rollbackStore, rollbackNotifier)
+	logger.Info("Rollback manager initialized")
+	return manager
+}
+
+// initializeReportsHandler creates the reports API handler with its dependencies.
+func initializeReportsHandler(logger logging.Logger) *reportapi.Handler {
+	// Initialize DNA storage with SQLite backend in a dedicated directory
+	dnaStorageConfig := dnaStorage.DefaultConfig()
+	dnaStorageConfig.DataDir = filepath.Join(os.TempDir(), "cfgms-dna-reports")
+
+	dnaStorageManager, err := dnaStorage.NewManager(dnaStorageConfig, logger)
+	if err != nil {
+		logger.Warn("Failed to initialize DNA storage for reports engine", "error", err)
+		return nil
+	}
+
+	// Initialize drift detector with default configuration
+	driftDetector, err := dnadrift.NewDetector(nil, logger)
+	if err != nil {
+		logger.Warn("Failed to initialize drift detector for reports engine", "error", err)
+		return nil
+	}
+
+	// Build the reports engine from its components
+	dataProvider := reportsprovider.New(dnaStorageManager, driftDetector, logger)
+	templateProcessor := reportstemplates.New(logger)
+	exporter := reportsexporters.New(logger)
+	reportsCache := reportscache.NewMemoryCache()
+	reportEngine := reportsengine.New(dataProvider, templateProcessor, exporter, reportsCache, logger)
+
+	logger.Info("Reports engine initialized")
+	return reportapi.New(reportEngine, exporter, logger)
 }
 
 // Start initializes and starts the controller server (MQTT+QUIC mode)
