@@ -26,6 +26,7 @@ import (
 	controllerQuic "github.com/cfgis/cfgms/features/controller/quic"
 	"github.com/cfgis/cfgms/features/controller/registration"
 	"github.com/cfgis/cfgms/features/controller/service"
+	"github.com/cfgis/cfgms/features/monitoring"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/audit"
@@ -37,11 +38,13 @@ import (
 	_ "github.com/cfgis/cfgms/pkg/dataplane/providers/quic" // Register QUIC data plane provider
 	dataplaneTypes "github.com/cfgis/cfgms/pkg/dataplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
+	pkgmonitoring "github.com/cfgis/cfgms/pkg/monitoring"
 	mqttInterfaces "github.com/cfgis/cfgms/pkg/mqtt/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/mqtt/providers/mochi" // Register mochi-mqtt provider
 	quicServer "github.com/cfgis/cfgms/pkg/quic/server" //nolint:staticcheck // SA1019: Controller infrastructure bootstrap
 	pkgRegistration "github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	"github.com/cfgis/cfgms/pkg/telemetry"
 )
 
 // BUILD_VERSION_CHECK is a compile-time constant to verify code version in Docker
@@ -71,6 +74,9 @@ type Server struct {
 	dataPlaneProvider       dataplaneInterfaces.DataPlaneProvider
 	configHandler           *controllerQuic.ConfigHandler
 	signerCertSerial        string // Serial number of server cert used for config signing (Story #378)
+	systemMonitor           *monitoring.SystemMonitor
+	platformMonitor         pkgmonitoring.PlatformMonitor
+	telemetryCleanup        func()
 }
 
 // New creates a new server instance
@@ -427,8 +433,28 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		logger.Debug("Config handler initialized for data plane", "signing_enabled", signer != nil)
 	}
 
-	// Initialize HTTP API server with minimal monitoring for now
-	// TODO: Properly initialize monitoring components when needed
+	// Initialize telemetry tracer (no-op by default; OTLP endpoint enables export)
+	logger.Info("Initializing telemetry tracer...")
+	tracer, telemetryCleanup, err := telemetry.Initialize(context.Background(), &telemetry.Config{
+		ServiceName: "cfgms-controller",
+		Enabled:     false, // No-op until OTLP endpoint is configured in cfg
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize telemetry: %w", err)
+	}
+	logger.Info("Telemetry tracer initialized")
+
+	// Initialize system monitor (features/monitoring)
+	logger.Info("Initializing system monitor...")
+	systemMonitor := monitoring.NewSystemMonitor(logger, tracer, nil)
+	logger.Info("System monitor initialized")
+
+	// Initialize platform monitor (pkg/monitoring)
+	logger.Info("Initializing platform monitor...")
+	platformMonitor := pkgmonitoring.NewPlatformMonitor(logger, tracer, nil)
+	logger.Info("Platform monitor initialized")
+
+	// Initialize HTTP API server with monitoring infrastructure
 	httpServer, err := api.New(
 		cfg,
 		logger,
@@ -439,9 +465,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		certManager,
 		tenantManager,
 		rbacManager,
-		nil, // systemMonitor
-		nil, // platformMonitor
-		nil, // tracer
+		systemMonitor,
+		platformMonitor,
+		tracer,
 		haManager,
 		regStore,         // registrationTokenStore
 		signerCertSerial, // Story #378: signer cert serial for registration
@@ -474,6 +500,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		configHandler:           configHandler,
 		httpServer:              httpServer,
 		signerCertSerial:        signerCertSerial, // Story #378: For registration handler
+		systemMonitor:           systemMonitor,
+		platformMonitor:         platformMonitor,
+		telemetryCleanup:        telemetryCleanup,
 	}
 
 	// Wire up QUIC trigger function to API server (if data plane is enabled)
@@ -600,6 +629,30 @@ func (s *Server) Start() error {
 		s.logger.Info("HTTP API server started")
 	}
 
+	// Start platform monitor (pkg/monitoring)
+	if s.platformMonitor != nil {
+		s.logger.Info("Starting platform monitor...")
+		startCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := s.platformMonitor.Start(startCtx); err != nil {
+			s.logger.Warn("Failed to start platform monitor", "error", err)
+		} else {
+			s.logger.Info("Platform monitor started")
+		}
+	}
+
+	// Start system monitor (features/monitoring)
+	if s.systemMonitor != nil {
+		s.logger.Info("Starting system monitor...")
+		startCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := s.systemMonitor.Start(startCtx); err != nil {
+			s.logger.Warn("Failed to start system monitor", "error", err)
+		} else {
+			s.logger.Info("System monitor started")
+		}
+	}
+
 	s.logger.Info("Controller server started (MQTT+QUIC mode)",
 		"ha_mode", s.haManager.GetDeploymentMode().String(),
 		"is_leader", s.haManager.IsLeader())
@@ -693,11 +746,34 @@ func (s *Server) Stop() error {
 		}
 	}
 
+	// Stop system monitor
+	if s.systemMonitor != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := s.systemMonitor.Stop(ctx); err != nil {
+			s.logger.Warn("Failed to stop system monitor", "error", err)
+		}
+	}
+
+	// Stop platform monitor
+	if s.platformMonitor != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := s.platformMonitor.Stop(ctx); err != nil {
+			s.logger.Warn("Failed to stop platform monitor", "error", err)
+		}
+	}
+
 	// Stop HTTP server
 	if s.httpServer != nil {
 		if err := s.httpServer.Stop(); err != nil {
 			s.logger.Warn("Failed to stop HTTP server", "error", err)
 		}
+	}
+
+	// Cleanup telemetry
+	if s.telemetryCleanup != nil {
+		s.telemetryCleanup()
 	}
 
 	return nil
