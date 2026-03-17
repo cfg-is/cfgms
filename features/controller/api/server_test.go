@@ -78,6 +78,7 @@ func setupTestServer(t *testing.T) *Server {
 		nil, // No HA manager for basic tests
 		nil, // No registration token store for basic tests
 		"",  // No signer cert serial for basic tests
+		nil, // No health collector for basic tests
 	)
 	require.NoError(t, err)
 
@@ -817,7 +818,7 @@ func setupTestServerWithLogger(t *testing.T, logger logging.Logger) *Server {
 	server, err := New(
 		cfg, logger, controllerService, configService,
 		nil, rbacService, nil, tenantManager, rbacManager,
-		nil, nil, nil, nil, nil, "",
+		nil, nil, nil, nil, nil, "", nil,
 	)
 	require.NoError(t, err)
 

@@ -101,6 +101,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Controller, error) {
 		srv.GetHAManager(),              // HA manager
 		srv.GetRegistrationTokenStore(), // registrationTokenStore - now wired for MQTT+QUIC mode
 		srv.GetSignerCertSerial(),       // Story #378: signer cert serial for registration
+		nil,                             // healthCollector - wired in server.New() for MQTT+QUIC mode
 	)
 	if err != nil {
 		return nil, err
