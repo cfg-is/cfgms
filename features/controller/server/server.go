@@ -434,14 +434,11 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	var healthCollector *health.Collector
 	var healthAlertManager *health.DefaultAlertManager
 	{
-		// MQTT stats adapter — uses real broker if available, otherwise nil-safe
-		var mqttStats health.MQTTBrokerStats
+		// MQTT collector — only created when broker is configured
+		var mqttCollector health.MQTTCollector
 		if mqttBroker != nil {
-			mqttStats = NewMochiBrokerStatsAdapter(mqttBroker)
-		} else {
-			mqttStats = &health.MockMQTTBrokerStats{} // zeros
+			mqttCollector = health.NewDefaultMQTTCollector(NewMochiBrokerStatsAdapter(mqttBroker))
 		}
-		mqttCollector := health.NewDefaultMQTTCollector(mqttStats)
 
 		// Storage stats — provider name only, latency instrumentation is follow-up
 		storageStats := NewBasicStorageStats(cfg.Storage.Provider)
@@ -453,8 +450,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// System stats (CPU, memory, goroutines)
 		systemCollector, sysErr := health.NewDefaultSystemCollector()
 		if sysErr != nil {
-			logger.Warn("Failed to initialize system collector, using fallback", "error", sysErr)
-			systemCollector, _ = health.NewDefaultSystemCollector()
+			logger.Warn("Failed to initialize system collector", "error", sysErr)
 		}
 
 		healthCollector = health.NewCollector(mqttCollector, storageCollector, appCollector, systemCollector)

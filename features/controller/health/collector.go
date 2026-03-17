@@ -210,23 +210,42 @@ func (c *Collector) collectMetrics() error {
 		}
 	}
 
-	// Start all collections
-	wg.Add(4)
-	go collectWithTimeout(c.mqttCollector, "MQTT")
-	go collectWithTimeout(c.storageCollector, "Storage")
-	go collectWithTimeout(c.applicationCollector, "Application")
-	go collectWithTimeout(c.systemCollector, "System")
+	// Start collections for non-nil collectors
+	if c.mqttCollector != nil {
+		wg.Add(1)
+		go collectWithTimeout(c.mqttCollector, "MQTT")
+	}
+	if c.storageCollector != nil {
+		wg.Add(1)
+		go collectWithTimeout(c.storageCollector, "Storage")
+	}
+	if c.applicationCollector != nil {
+		wg.Add(1)
+		go collectWithTimeout(c.applicationCollector, "Application")
+	}
+	if c.systemCollector != nil {
+		wg.Add(1)
+		go collectWithTimeout(c.systemCollector, "System")
+	}
 
 	// Wait for all collections to complete
 	wg.Wait()
 
-	// Aggregate metrics
+	// Aggregate metrics — nil collectors produce nil metric sections
 	metrics := &ControllerMetrics{
-		Timestamp:   timestamp,
-		MQTT:        c.mqttCollector.GetMetrics(),
-		Storage:     c.storageCollector.GetMetrics(),
-		Application: c.applicationCollector.GetMetrics(),
-		System:      c.systemCollector.GetMetrics(),
+		Timestamp: timestamp,
+	}
+	if c.mqttCollector != nil {
+		metrics.MQTT = c.mqttCollector.GetMetrics()
+	}
+	if c.storageCollector != nil {
+		metrics.Storage = c.storageCollector.GetMetrics()
+	}
+	if c.applicationCollector != nil {
+		metrics.Application = c.applicationCollector.GetMetrics()
+	}
+	if c.systemCollector != nil {
+		metrics.System = c.systemCollector.GetMetrics()
 	}
 
 	// Store metrics
