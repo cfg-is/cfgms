@@ -118,10 +118,14 @@ func (s *Server) handleGetStewardCompliance(w http.ResponseWriter, r *http.Reque
 	complianceStatus := "compliant"
 	alertLevel := "info"
 	daysUntilBreach := 0
-	lastChecked := time.Now().UTC().Format(time.RFC3339)
+	var lastChecked string
 
 	if exists {
-		lastChecked = registered.LastHeartbeat.UTC().Format(time.RFC3339)
+		if registered.LastHeartbeat.IsZero() {
+			lastChecked = registered.RegisteredAt.UTC().Format(time.RFC3339)
+		} else {
+			lastChecked = registered.LastHeartbeat.UTC().Format(time.RFC3339)
+		}
 		switch registered.Status {
 		case "offline":
 			complianceStatus = "critical"

@@ -31,7 +31,6 @@ import (
 	"github.com/cfgis/cfgms/features/controller/registration"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/rbac"
-	"github.com/cfgis/cfgms/features/tenant"
 	reportapi "github.com/cfgis/cfgms/features/reports/api"
 	reportscache "github.com/cfgis/cfgms/features/reports/cache"
 	reportsengine "github.com/cfgis/cfgms/features/reports/engine"
@@ -40,6 +39,7 @@ import (
 	reportstemplates "github.com/cfgis/cfgms/features/reports/templates"
 	dnadrift "github.com/cfgis/cfgms/features/steward/dna/drift"
 	dnaStorage "github.com/cfgis/cfgms/features/steward/dna/storage"
+	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
@@ -532,7 +532,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	logger.Info("Rollback manager wired to HTTP API server")
 
 	// Story #416: Wire reports engine into API server
-	reportsHandler := initializeReportsHandler(logger)
+	reportsHandler := initializeReportsHandler(cfg, logger)
 	if reportsHandler != nil {
 		httpServer.SetReportsHandler(reportsHandler)
 		logger.Info("Reports engine wired to HTTP API server")
@@ -583,10 +583,10 @@ func initializeRollbackManager(storageManager *interfaces.StorageManager, logger
 }
 
 // initializeReportsHandler creates the reports API handler with its dependencies.
-func initializeReportsHandler(logger logging.Logger) *reportapi.Handler {
+func initializeReportsHandler(cfg *config.Config, logger logging.Logger) *reportapi.Handler {
 	// Initialize DNA storage with SQLite backend in a dedicated directory
 	dnaStorageConfig := dnaStorage.DefaultConfig()
-	dnaStorageConfig.DataDir = filepath.Join(os.TempDir(), "cfgms-dna-reports")
+	dnaStorageConfig.DataDir = filepath.Join(cfg.DataDir, "dna-reports")
 
 	dnaStorageManager, err := dnaStorage.NewManager(dnaStorageConfig, logger)
 	if err != nil {
