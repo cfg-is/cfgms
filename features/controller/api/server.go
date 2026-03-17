@@ -336,13 +336,15 @@ func (s *Server) setupRouter() {
 	// Rollback management endpoints (Story #416)
 	if s.rollbackManager != nil {
 		rollbackHandler := NewRollbackHandler(s.rollbackManager)
-		rollbackHandler.RegisterRoutes(s.router)
+		rollbackRouter := api.PathPrefix("/rollback").Subrouter()
+		rollbackHandler.RegisterRoutes(rollbackRouter)
 		s.logger.Info("Rollback API routes registered")
 	}
 
 	// Reports engine endpoints (Story #416)
 	if s.reportsHandler != nil {
-		s.reportsHandler.RegisterRoutes(s.router)
+		reportsRouter := api.PathPrefix("/reports").Subrouter()
+		s.reportsHandler.RegisterRoutes(reportsRouter)
 		s.logger.Info("Reports API routes registered")
 	}
 }
