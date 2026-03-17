@@ -4,7 +4,7 @@
 
 This document outlines the development roadmap for the Configuration Management System (CFGMS). It provides a clear vision for the project's development, including milestones, features, and release planning, incorporating recent strategic adjustments to better align with MSP market voids and core product vision.
 
-**Last Updated**: 2026-03-09
+**Last Updated**: 2026-03-15
 
 ## Versioning Strategy
 
@@ -205,7 +205,7 @@ Deploy on test cluster and manage real VMs — the core beta milestone.
 - [x] Controller: wire ConfigurationServiceV2 durable storage — V1 is in-memory (Issue #409) - Configs lost on controller restart, deployment blocker
 - [x] Controller: separate first-run initialization from normal startup (Issue #410) - Prevent silent CA regeneration on misconfigured restart
 - [x] Steward: compile-time controller URL, remove regtoken prefix (Issue #421) - Controller URL baked in at build for signed binary security, shorter tokens for MDM deployment
-- [ ] Steward: self-install subcommand with interactive mode for GUI launch (Issue #472 - 8-13 points) - `install`/`uninstall`/`status` subcommands, interactive token prompt on double-click, native Windows Service/systemd/launchd registration
+- [x] Steward: self-install subcommand with interactive mode for GUI launch (Issue #472 - 8-13 points) - `install`/`uninstall`/`status` subcommands, interactive token prompt on double-click, native Windows Service/systemd/launchd registration
 
 **E2E validation:**
 - [ ] End-to-end deployment validation on real VMs (Issue #390 - 13-21 points) - Deploy controller + stewards on actual Windows/Linux VMs, test all modules, fix blockers
@@ -217,14 +217,14 @@ Deploy on test cluster and manage real VMs — the core beta milestone.
 - [ ] Steward: wire drift detection and performance monitoring into lifecycle (Issue #413) - Built but never started
 - [ ] Steward: implement offline report queueing (Issue #419) - Reports discarded when controller unreachable
 - [ ] Steward/Controller: implement hash-based DNA sync (Issue #418) - Full DNA sent every time, QUIC handler is a stub
-- [ ] Controller: wire monitoring and health infrastructure into server (Issue #417) - Passed as nil, placeholder responses
+- [x] Controller: wire monitoring and health infrastructure into server (Issue #417) - Passed as nil, placeholder responses
 - [ ] Controller: wire reports engine and rollback system into API (Issue #416) - Built but routes never registered
 - [ ] Controller: implement multi-node orchestration (Issue #415) - No multi-steward coordination
 - [ ] Controller: implement workflow engine (Issue #414) - Documented as core capability, no code exists
 - [ ] Steward: registration approval via workflow engine hook (Issue #422) - Approval logic as workflow policy, default accept-all, depends on #414
 - [ ] Controller: per-tenant config source routing via mount points (Issue #428) - External git repos as read-only config source at any hierarchy level, one-way sync, versioned compiled configs
-- [ ] Controller: fix tenant context key mismatch between auth middleware and config handlers (Issue #430) - Tenant ID never flows from auth to config operations, all ops use "default"
-- [ ] Controller: replace MockConfigStore in config_service_storage_test.go with real storage (Issue #431) - Testing standards violation, uses mock instead of real git backend
+- [x] Controller: fix tenant context key mismatch between auth middleware and config handlers (Issue #430) - Tenant ID never flows from auth to config operations, all ops use "default"
+- [x] Controller: replace MockConfigStore in config_service_storage_test.go with real storage (Issue #431) - Testing standards violation, uses mock instead of real git backend
 
 #### v0.9.3 — Three-Certificate Architecture (~47-65 pts, ~3-5 weeks)
 
@@ -438,7 +438,7 @@ Multi-layered validation approach:
 ## Version Information
 
 - **Document Version**: 3.0
-- **Last Updated**: 2026-03-09
+- **Last Updated**: 2026-03-15
 
 ### Related Documentation
 
