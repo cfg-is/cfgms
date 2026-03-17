@@ -88,27 +88,43 @@ func (s *Server) handleSystemHealth(w http.ResponseWriter, r *http.Request) {
 
 // handleBasicSystemHealth provides fallback health check when platform monitor is not available
 func (s *Server) handleBasicSystemHealth(w http.ResponseWriter, r *http.Request) {
-	// Calculate uptime (placeholder - would need actual start time)
-	uptime := "24h30m15s" // This should be calculated from actual start time
-
-	// Check component health
 	components := map[string]string{
-		"database":       "healthy",
 		"certificate_ca": "healthy",
 		"grpc_server":    "healthy",
 		"rbac_service":   "healthy",
 	}
-
-	// Check dependencies
 	dependencies := map[string]string{
 		"storage":    "available",
 		"networking": "available",
 	}
 
-	// Determine overall health status
+	// Use real health collector metrics if available (Story #417)
+	if s.healthCollector != nil {
+		if metrics, err := s.healthCollector.GetCurrentMetrics(); err == nil {
+			if metrics.MQTT != nil {
+				if metrics.MQTT.ActiveConnections > 0 {
+					components["mqtt_broker"] = "healthy"
+				} else {
+					components["mqtt_broker"] = "no_connections"
+				}
+			}
+			if metrics.Storage != nil && metrics.Storage.Provider != "" {
+				components["storage"] = "healthy"
+				dependencies["storage"] = metrics.Storage.Provider
+			}
+			if metrics.System != nil {
+				if metrics.System.CPUPercent > 90 || metrics.System.MemoryPercent > 90 {
+					components["system_resources"] = "degraded"
+				} else {
+					components["system_resources"] = "healthy"
+				}
+			}
+		}
+	}
+
 	status := "healthy"
-	for _, componentStatus := range components {
-		if componentStatus != "healthy" {
+	for _, cs := range components {
+		if cs == "degraded" || cs == "unhealthy" {
 			status = "degraded"
 			break
 		}
@@ -117,8 +133,8 @@ func (s *Server) handleBasicSystemHealth(w http.ResponseWriter, r *http.Request)
 	health := SystemHealth{
 		Status:       status,
 		Timestamp:    time.Now(),
-		Version:      "0.5.0", // Updated version
-		Uptime:       uptime,
+		Version:      "0.5.0",
+		Uptime:       "unknown",
 		Components:   components,
 		Dependencies: dependencies,
 	}
@@ -179,40 +195,37 @@ func (s *Server) handleSystemMetrics(w http.ResponseWriter, r *http.Request) {
 
 // handleBasicSystemMetrics provides fallback metrics when platform monitor is not available
 func (s *Server) handleBasicSystemMetrics(w http.ResponseWriter, r *http.Request) {
-	// In a real implementation, these would be collected from actual system monitoring
 	metrics := SystemMetrics{
-		Timestamp: time.Now(),
-		CPU: map[string]float64{
-			"usage_percent": 15.5,
-			"load_1m":       1.2,
-			"load_5m":       1.1,
-			"load_15m":      0.9,
-		},
-		Memory: map[string]int64{
-			"total_bytes":     8589934592, // 8GB
-			"used_bytes":      2147483648, // 2GB
-			"available_bytes": 6442450944, // 6GB
-			"cache_bytes":     1073741824, // 1GB
-		},
-		Disk: map[string]int64{
-			"total_bytes":     1099511627776, // 1TB
-			"used_bytes":      214748364800,  // 200GB
-			"available_bytes": 884763262976,  // 800GB
-		},
-		Network: map[string]int64{
-			"bytes_sent":       1048576000, // 1GB
-			"bytes_received":   2097152000, // 2GB
-			"packets_sent":     1000000,
-			"packets_received": 1500000,
-		},
-		ActiveStewards: 42,
-		TotalStewards:  50,
-		ConfigRequests: 10000,
-		Errors: map[string]int64{
-			"authentication": 5,
-			"configuration":  2,
-			"network":        1,
-		},
+		Timestamp:      time.Now(),
+		CPU:            map[string]float64{},
+		Memory:         map[string]int64{},
+		Disk:           map[string]int64{},
+		Network:        map[string]int64{},
+		ActiveStewards: 0,
+		TotalStewards:  0,
+		ConfigRequests: 0,
+		Errors:         map[string]int64{},
+	}
+
+	// Use real health collector metrics if available (Story #417)
+	if s.healthCollector != nil {
+		if cm, err := s.healthCollector.GetCurrentMetrics(); err == nil {
+			if cm.System != nil {
+				metrics.CPU["usage_percent"] = cm.System.CPUPercent
+				metrics.Memory["used_bytes"] = cm.System.MemoryUsedBytes
+				metrics.Memory["heap_bytes"] = cm.System.HeapBytes
+				metrics.Memory["rss_bytes"] = cm.System.RSSBytes
+			}
+			if cm.MQTT != nil {
+				metrics.ActiveStewards = int(cm.MQTT.ActiveConnections)
+				metrics.Network["mqtt_messages_sent"] = cm.MQTT.TotalMessagesSent
+				metrics.Network["mqtt_messages_received"] = cm.MQTT.TotalMessagesReceived
+				metrics.Errors["mqtt_connection_errors"] = cm.MQTT.ConnectionErrors
+			}
+			if cm.Storage != nil {
+				metrics.Errors["storage_query_errors"] = cm.Storage.QueryErrors
+			}
+		}
 	}
 
 	s.writeSuccessResponse(w, metrics)

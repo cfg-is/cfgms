@@ -21,6 +21,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/api"
 	"github.com/cfgis/cfgms/features/controller/commands"
 	"github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/controller/health"
 	"github.com/cfgis/cfgms/features/controller/heartbeat"
 	"github.com/cfgis/cfgms/features/controller/initialization"
 	controllerQuic "github.com/cfgis/cfgms/features/controller/quic"
@@ -71,6 +72,8 @@ type Server struct {
 	dataPlaneProvider       dataplaneInterfaces.DataPlaneProvider
 	configHandler           *controllerQuic.ConfigHandler
 	signerCertSerial        string // Serial number of server cert used for config signing (Story #378)
+	healthCollector         *health.Collector
+	alertManager            *health.DefaultAlertManager
 }
 
 // New creates a new server instance
@@ -427,8 +430,35 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		logger.Debug("Config handler initialized for data plane", "signing_enabled", signer != nil)
 	}
 
-	// Initialize HTTP API server with minimal monitoring for now
-	// TODO: Properly initialize monitoring components when needed
+	// Initialize health collectors (Story #417)
+	var healthCollector *health.Collector
+	var healthAlertManager *health.DefaultAlertManager
+	{
+		// MQTT collector — only created when broker is configured
+		var mqttCollector health.MQTTCollector
+		if mqttBroker != nil {
+			mqttCollector = health.NewDefaultMQTTCollector(NewMochiBrokerStatsAdapter(mqttBroker))
+		}
+
+		// Storage stats — provider name only, latency instrumentation is follow-up
+		storageStats := NewBasicStorageStats(cfg.Storage.Provider)
+		storageCollector := health.NewDefaultStorageCollector(storageStats)
+
+		// Application stats — no-op until workflow engine exists
+		appCollector := health.NewDefaultApplicationCollector(&NoOpApplicationQueueStats{})
+
+		// System stats (CPU, memory, goroutines)
+		systemCollector, sysErr := health.NewDefaultSystemCollector()
+		if sysErr != nil {
+			logger.Warn("Failed to initialize system collector", "error", sysErr)
+		}
+
+		healthCollector = health.NewCollector(mqttCollector, storageCollector, appCollector, systemCollector)
+		healthAlertManager = health.NewAlertManager(health.DefaultThresholds(), health.SMTPConfig{})
+		logger.Info("Health collectors initialized (Story #417)")
+	}
+
+	// Initialize HTTP API server
 	httpServer, err := api.New(
 		cfg,
 		logger,
@@ -445,6 +475,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		haManager,
 		regStore,         // registrationTokenStore
 		signerCertSerial, // Story #378: signer cert serial for registration
+		healthCollector,  // Story #417: CFGMS health monitoring
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize HTTP API server: %w", err)
@@ -474,6 +505,8 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		configHandler:           configHandler,
 		httpServer:              httpServer,
 		signerCertSerial:        signerCertSerial, // Story #378: For registration handler
+		healthCollector:         healthCollector,
+		alertManager:            healthAlertManager,
 	}
 
 	// Wire up QUIC trigger function to API server (if data plane is enabled)
@@ -589,6 +622,22 @@ func (s *Server) Start() error {
 		// go s.acceptDataPlaneSessions(context.Background())
 	}
 
+	// Start health collector and alert manager (Story #417)
+	if s.healthCollector != nil {
+		if err := s.healthCollector.Start(context.Background(), 30*time.Second); err != nil {
+			s.logger.Warn("Failed to start health collector", "error", err)
+		} else {
+			s.logger.Info("Health collector started", "interval", "30s")
+		}
+	}
+	if s.alertManager != nil {
+		if err := s.alertManager.Start(context.Background()); err != nil {
+			s.logger.Warn("Failed to start alert manager", "error", err)
+		} else {
+			s.logger.Info("Alert manager started")
+		}
+	}
+
 	// Start HTTP API server
 	if s.httpServer != nil {
 		logger := s.logger // Capture logger for goroutine
@@ -622,6 +671,18 @@ func (s *Server) Stop() error {
 	defer s.mu.Unlock()
 
 	s.logger.Info("Shutting down controller server")
+
+	// Stop health collector and alert manager (Story #417)
+	if s.healthCollector != nil {
+		if err := s.healthCollector.Stop(); err != nil {
+			s.logger.Warn("Failed to stop health collector", "error", err)
+		}
+	}
+	if s.alertManager != nil {
+		if err := s.alertManager.Stop(); err != nil {
+			s.logger.Warn("Failed to stop alert manager", "error", err)
+		}
+	}
 
 	// Stop HA manager first
 	if s.haManager != nil {

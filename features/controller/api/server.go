@@ -18,6 +18,7 @@ import (
 	"github.com/cfgis/cfgms/commercial/ha"
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/ctxkeys"
+	"github.com/cfgis/cfgms/features/controller/health"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/monitoring"
 	"github.com/cfgis/cfgms/features/rbac"
@@ -51,6 +52,7 @@ type Server struct {
 	rbacManager             *rbac.Manager
 	systemMonitor           *monitoring.SystemMonitor
 	platformMonitor         pkgmonitoring.PlatformMonitor
+	healthCollector         *health.Collector
 	tracer                  *telemetry.Tracer
 	haManager               *ha.Manager
 	apiKeys                 map[string]*APIKey             // In-memory cache for fast lookup
@@ -116,6 +118,7 @@ func New(
 	haManager *ha.Manager,
 	registrationTokenStore registration.Store,
 	signerCertSerial string, // Story #378: Serial of cert used for config signing
+	healthCollector *health.Collector, // Story #417: CFGMS health monitoring
 ) (*Server, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config cannot be nil")
@@ -139,6 +142,7 @@ func New(
 		rbacManager:             rbacManager,
 		systemMonitor:           systemMonitor,
 		platformMonitor:         platformMonitor,
+		healthCollector:         healthCollector,
 		tracer:                  tracer,
 		haManager:               haManager,
 		registrationTokenStore:  registrationTokenStore,
