@@ -1,19 +1,22 @@
 [
   {
-    "id": "0c080bc0-e9e6-4016-a694-0f7c728a949e",
+    "id": "e0cc4870-2b30-49de-9f8f-e609b4256add",
     "tenant_id": "test-tenant",
-    "timestamp": "2026-03-19T02:24:45.961899425Z",
+    "timestamp": "2026-03-19T02:29:19.279445781Z",
     "event_type": "configuration",
-    "action": "config_update",
-    "user_id": "user2",
+    "action": "test_action",
+    "user_id": "test-user",
     "user_type": "human",
-    "resource_type": "config",
-    "resource_id": "config1",
-    "resource_name": "Test Config",
+    "resource_type": "test_resource",
+    "resource_id": "test-id",
+    "resource_name": "Test Resource",
     "result": "success",
+    "details": {
+      "test_key": "test_value"
+    },
     "severity": "medium",
     "source": "test",
     "version": "1.0",
-    "checksum": "4507f85755d46353c78d1c9cf865ff2316b0629737b8ab835bfda82328419311"
+    "checksum": "c9c510fa1ff759ec32ce962978fbfb382c508cccaa69e87f0b263224f21cbd09"
   }
 ]
