@@ -54,8 +54,8 @@ func (m *mockProvider) SendCommand(ctx context.Context, cmd *types.Command) erro
 	return nil
 }
 
-func (m *mockProvider) BroadcastCommand(ctx context.Context, cmd *types.Command) error {
-	return nil
+func (m *mockProvider) FanOutCommand(ctx context.Context, cmd *types.Command, stewardIDs []string) (*types.FanOutResult, error) {
+	return &types.FanOutResult{Succeeded: stewardIDs, Failed: make(map[string]error)}, nil
 }
 
 func (m *mockProvider) SubscribeCommands(ctx context.Context, stewardID string, handler CommandHandler) error {

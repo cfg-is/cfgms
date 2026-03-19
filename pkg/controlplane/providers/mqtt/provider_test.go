@@ -4,6 +4,7 @@ package mqtt
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -19,6 +20,7 @@ type mockBroker struct {
 	mu          sync.RWMutex
 	published   []mockMessage
 	subscribers map[string]mqttInterfaces.MessageHandler
+	failTopics  map[string]error // topics that should return an error on Publish
 }
 
 type mockMessage struct {
@@ -32,6 +34,7 @@ func newMockBroker() *mockBroker {
 	return &mockBroker{
 		published:   []mockMessage{},
 		subscribers: make(map[string]mqttInterfaces.MessageHandler),
+		failTopics:  make(map[string]error),
 	}
 }
 
@@ -52,6 +55,13 @@ func (m *mockBroker) Stop(ctx context.Context) error {
 
 func (m *mockBroker) Publish(ctx context.Context, topic string, payload []byte, qos byte, retain bool) error {
 	m.mu.Lock()
+
+	// Check if this topic should fail
+	if err, shouldFail := m.failTopics[topic]; shouldFail {
+		m.mu.Unlock()
+		return err
+	}
+
 	m.published = append(m.published, mockMessage{
 		topic:   topic,
 		payload: payload,
@@ -320,7 +330,7 @@ func TestProvider_SendCommand(t *testing.T) {
 	assert.Equal(t, int64(1), stats.CommandsSent)
 }
 
-func TestProvider_BroadcastCommand(t *testing.T) {
+func TestProvider_FanOutCommand(t *testing.T) {
 	provider := New(ModeServer)
 	broker := newMockBroker()
 
@@ -332,24 +342,36 @@ func TestProvider_BroadcastCommand(t *testing.T) {
 	err := provider.Initialize(ctx, config)
 	require.NoError(t, err)
 
-	// Broadcast command
 	cmd := &types.Command{
-		ID:        "cmd-456",
+		ID:        "cmd-fanout",
 		Type:      types.CommandExecuteTask,
-		TenantID:  "tenant-1",
 		Timestamp: time.Now(),
 	}
 
-	err = provider.BroadcastCommand(ctx, cmd)
+	stewardIDs := []string{"steward-1", "steward-2", "steward-3"}
+	result, err := provider.FanOutCommand(ctx, cmd, stewardIDs)
 	require.NoError(t, err)
+	require.NotNil(t, result)
 
-	// Verify broadcast was published
-	msg := broker.getLastPublished()
-	require.NotNil(t, msg)
-	assert.Equal(t, "cfgms/commands/tenant-1/broadcast", msg.topic)
+	// All 3 should succeed
+	assert.Len(t, result.Succeeded, 3)
+	assert.Empty(t, result.Failed)
+
+	// Verify 3 messages published to correct unicast topics
+	broker.mu.RLock()
+	assert.Len(t, broker.published, 3)
+	topics := make([]string, len(broker.published))
+	for i, msg := range broker.published {
+		topics[i] = msg.topic
+	}
+	broker.mu.RUnlock()
+
+	assert.Contains(t, topics, "cfgms/commands/steward-1")
+	assert.Contains(t, topics, "cfgms/commands/steward-2")
+	assert.Contains(t, topics, "cfgms/commands/steward-3")
 }
 
-func TestProvider_BroadcastCommand_RequiresTenantID(t *testing.T) {
+func TestProvider_FanOutCommand_PartialFailure(t *testing.T) {
 	provider := New(ModeServer)
 	broker := newMockBroker()
 
@@ -361,15 +383,91 @@ func TestProvider_BroadcastCommand_RequiresTenantID(t *testing.T) {
 	err := provider.Initialize(ctx, config)
 	require.NoError(t, err)
 
-	// Broadcast without tenant ID should fail
+	// Make steward-2's topic fail
+	broker.failTopics["cfgms/commands/steward-2"] = fmt.Errorf("connection refused")
+
 	cmd := &types.Command{
-		ID:   "cmd-456",
+		ID:        "cmd-partial",
+		Type:      types.CommandExecuteTask,
+		Timestamp: time.Now(),
+	}
+
+	stewardIDs := []string{"steward-1", "steward-2", "steward-3"}
+	result, err := provider.FanOutCommand(ctx, cmd, stewardIDs)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	assert.Len(t, result.Succeeded, 2)
+	assert.Len(t, result.Failed, 1)
+	assert.Contains(t, result.Failed, "steward-2")
+	assert.Contains(t, result.Failed["steward-2"].Error(), "connection refused")
+}
+
+func TestProvider_FanOutCommand_EmptyList(t *testing.T) {
+	provider := New(ModeServer)
+	broker := newMockBroker()
+
+	config := map[string]interface{}{
+		"broker": broker,
+	}
+
+	ctx := context.Background()
+	err := provider.Initialize(ctx, config)
+	require.NoError(t, err)
+
+	cmd := &types.Command{
+		ID:   "cmd-empty",
 		Type: types.CommandExecuteTask,
 	}
 
-	err = provider.BroadcastCommand(ctx, cmd)
+	result, err := provider.FanOutCommand(ctx, cmd, []string{})
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "TenantID")
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "stewardIDs must not be empty")
+}
+
+func TestProvider_FanOutCommand_ServerModeOnly(t *testing.T) {
+	provider := New(ModeClient)
+
+	ctx := context.Background()
+	cmd := &types.Command{ID: "cmd-1", Type: types.CommandSyncConfig}
+
+	result, err := provider.FanOutCommand(ctx, cmd, []string{"steward-1"})
+	assert.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "server mode")
+}
+
+func TestProvider_FanOutCommand_Stats(t *testing.T) {
+	provider := New(ModeServer)
+	broker := newMockBroker()
+
+	config := map[string]interface{}{
+		"broker": broker,
+	}
+
+	ctx := context.Background()
+	err := provider.Initialize(ctx, config)
+	require.NoError(t, err)
+
+	// Make one topic fail
+	broker.failTopics["cfgms/commands/steward-3"] = fmt.Errorf("timeout")
+
+	cmd := &types.Command{
+		ID:        "cmd-stats",
+		Type:      types.CommandExecuteTask,
+		Timestamp: time.Now(),
+	}
+
+	_, err = provider.FanOutCommand(ctx, cmd, []string{"steward-1", "steward-2", "steward-3"})
+	require.NoError(t, err)
+
+	stats, err := provider.GetStats(ctx)
+	require.NoError(t, err)
+
+	// 2 succeeded, 1 failed
+	assert.Equal(t, int64(2), stats.CommandsSent)
+	assert.Equal(t, int64(1), stats.DeliveryFailures)
 }
 
 func TestProvider_SendCommand_ClientMode_Error(t *testing.T) {
