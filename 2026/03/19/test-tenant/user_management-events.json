@@ -1,23 +1,22 @@
 [
   {
-    "id": "22e1ea5e-bb3d-40c1-ab6f-e9bfc9a47ebb",
+    "id": "634da01f-4d98-45e7-8851-132274e63886",
     "tenant_id": "test-tenant",
-    "timestamp": "2026-03-19T02:24:35.415737844Z",
+    "timestamp": "2026-03-19T02:24:36.241772773Z",
     "event_type": "user_management",
-    "action": "create_role",
-    "user_id": "system",
+    "action": "revoke_role",
+    "user_id": "test-user-1",
     "user_type": "human",
-    "resource_type": "role",
-    "resource_id": "test-role-no-manager",
-    "resource_name": "Test Role No Manager",
+    "resource_type": "role_assignment",
+    "resource_id": "test-tenant.tenant.admin",
     "result": "success",
     "details": {
-      "role_description": "",
-      "role_permissions": 0
+      "revoked_role": "test-tenant.tenant.admin",
+      "subject_id": "test-user-1"
     },
     "severity": "high",
     "source": "rbac",
     "version": "1.0",
-    "checksum": "8061956cc45e7aff33fb45f76a6d6d9fd95364de3ef21ef333999450b56c9e3a"
+    "checksum": "adef645f432409802251fb85e160238db06251da11c040214cd4ebf9c936fbdc"
   }
 ]
