@@ -12,7 +12,7 @@ config:
         mode: standalone
 metadata:
     checksum: 63aed0ebc8e9f585e7f7691dc517e62dfd0c46f2af47e0a7b53cfc9499c2e57e
-    created_at: 2026-03-18T22:24:33.306800329-04:00
+    created_at: 2026-03-18T22:29:06.955745946-04:00
     created_by: config-service
     format: yaml
     name: steward1
@@ -23,6 +23,6 @@ metadata:
         - steward-config
         - migration
     tenant_id: tenant1
-    updated_at: 2026-03-18T22:24:33.306804817-04:00
+    updated_at: 2026-03-18T22:29:06.955749733-04:00
     updated_by: config-service
     version: 1
