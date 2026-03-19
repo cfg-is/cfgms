@@ -19,5 +19,26 @@
     "source": "rbac",
     "version": "1.0",
     "checksum": "0a3f80fda20e0771cc794a925bbae6f82e9167c0af5494d415a372c3978de2cf"
+  },
+  {
+    "id": "ed39c601-b68b-4d2b-a00d-7704509176cc",
+    "tenant_id": "tenant-1",
+    "timestamp": "2026-03-19T02:24:35.504301185Z",
+    "event_type": "user_management",
+    "action": "create_role",
+    "user_id": "system",
+    "user_type": "human",
+    "resource_type": "role",
+    "resource_id": "child.test",
+    "resource_name": "Child Test Role",
+    "result": "success",
+    "details": {
+      "role_description": "Test child role",
+      "role_permissions": 1
+    },
+    "severity": "high",
+    "source": "rbac",
+    "version": "1.0",
+    "checksum": "bd8c0d532ccc40e9d386c4b8bf0c10b8001e59f635ef6cb113c8d2456db90843"
   }
 ]
