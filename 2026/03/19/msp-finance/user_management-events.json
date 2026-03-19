@@ -19,5 +19,26 @@
     "source": "rbac",
     "version": "1.0",
     "checksum": "0ab258dae13f965705d310b5a87a46c2afc0ebedf57e27d3a35bf140e80797dd"
+  },
+  {
+    "id": "ef48bc9b-d92e-4b10-87c6-35059de2222d",
+    "tenant_id": "msp-finance",
+    "timestamp": "2026-03-19T02:24:42.463165127Z",
+    "event_type": "user_management",
+    "action": "create_role",
+    "user_id": "system",
+    "user_type": "human",
+    "resource_type": "role",
+    "resource_id": "finance-admin-role",
+    "resource_name": "Finance Administrator",
+    "result": "success",
+    "details": {
+      "role_description": "",
+      "role_permissions": 5
+    },
+    "severity": "high",
+    "source": "rbac",
+    "version": "1.0",
+    "checksum": "4ff0126897bfc18addabb81dc2209cea6200239fcc974dbf90c3c4afe442ecd9"
   }
 ]
