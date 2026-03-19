@@ -1,0 +1,17 @@
+[
+  {
+    "id": "b90fd6be8ed9d8eb",
+    "tenant_id": "security-tenant",
+    "timestamp": "2026-03-18T21:24:54.104819234-04:00",
+    "event_type": "authentication",
+    "action": "login",
+    "user_id": "user-1",
+    "user_type": "human",
+    "resource_type": "session",
+    "resource_id": "session-1",
+    "result": "failure",
+    "severity": "medium",
+    "source": "",
+    "checksum": ""
+  }
+]
