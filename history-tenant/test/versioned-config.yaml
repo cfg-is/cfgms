@@ -1,7 +1,7 @@
-config: version-2-data
+config: version-3-data
 metadata:
-    checksum: 7860a466233001ce218bcba246e1dfddd080f19fc4df975027a3fa7289a77c08
-    created_at: 2026-03-18T22:24:53.783037994-04:00
+    checksum: 97b76b1429bb79af3517b2567eb69e9ebf0842b082c1dbaa3c980112e1ea982a
+    created_at: 2026-03-18T22:24:53.815901489-04:00
     created_by: history-user
     format: yaml
     name: versioned-config
@@ -10,6 +10,6 @@ metadata:
     source: ""
     tags: []
     tenant_id: history-tenant
-    updated_at: 2026-03-18T22:24:53.783037994-04:00
+    updated_at: 2026-03-18T22:24:53.815901489-04:00
     updated_by: ""
-    version: 2
+    version: 3
