@@ -1,0 +1,15 @@
+config: template-config-1
+metadata:
+    checksum: 4b9bb1f07e050180257d90d971434eb2f01a5520854e39f16a2499a3116fd77d
+    created_at: 2026-03-18T22:24:53.90802965-04:00
+    created_by: ""
+    format: yaml
+    name: config2
+    namespace: templates
+    scope: ""
+    source: ""
+    tags: []
+    tenant_id: tenant-1
+    updated_at: 2026-03-18T22:24:53.90802965-04:00
+    updated_by: ""
+    version: 1
