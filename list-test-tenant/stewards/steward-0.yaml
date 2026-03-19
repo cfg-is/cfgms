@@ -1,0 +1,33 @@
+config:
+    resources:
+        - config:
+            path: /opt/test
+            permissions: "755"
+          module: directory
+          name: test-resource
+    steward:
+        error_handling:
+            configuration_error: ""
+            module_load_failure: ""
+            resource_failure: ""
+        id: steward-0
+        logging:
+            format: text
+            level: info
+        mode: standalone
+metadata:
+    checksum: 53e0d74c9c0dff361849b29b9e03a259dc75f54113c7153c4da1ab5fd708983c
+    created_at: 2026-03-18T22:24:32.720903632-04:00
+    created_by: config-service
+    format: yaml
+    name: steward-0
+    namespace: stewards
+    scope: ""
+    source: cfgms-controller
+    tags:
+        - steward-config
+        - migration
+    tenant_id: list-test-tenant
+    updated_at: 2026-03-18T22:24:32.720920723-04:00
+    updated_by: config-service
+    version: 1
