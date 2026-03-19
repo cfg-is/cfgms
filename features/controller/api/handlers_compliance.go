@@ -5,6 +5,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/gorilla/mux"
 )
@@ -108,15 +109,52 @@ func (s *Server) handleGetStewardCompliance(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// TODO: Integrate with patch module to get actual compliance status
-	// For now, return placeholder response showing the API structure
+	// Look up steward status from registered stewards
+	s.mu.RLock()
+	registered, exists := s.registeredStewards[stewardID]
+	s.mu.RUnlock()
+
+	// Derive compliance status from steward connection status
+	complianceStatus := "compliant"
+	alertLevel := "info"
+	daysUntilBreach := 0
+	var lastChecked string
+
+	if exists {
+		if registered.LastHeartbeat.IsZero() {
+			lastChecked = registered.RegisteredAt.UTC().Format(time.RFC3339)
+		} else {
+			lastChecked = registered.LastHeartbeat.UTC().Format(time.RFC3339)
+		}
+		switch registered.Status {
+		case "offline":
+			complianceStatus = "critical"
+			alertLevel = "critical"
+		case "unknown":
+			complianceStatus = "warning"
+			alertLevel = "warning"
+		}
+	} else {
+		// Check active stewards via controller service
+		if stewardInfo, found := s.controllerService.GetStewardInfo(stewardID); found {
+			lastChecked = stewardInfo.LastHeartbeat.UTC().Format(time.RFC3339)
+			if stewardInfo.Status != "online" {
+				complianceStatus = "warning"
+				alertLevel = "warning"
+			}
+		} else {
+			http.Error(w, "steward not found", http.StatusNotFound)
+			return
+		}
+	}
+
 	response := ComplianceStatusResponse{
 		DeviceID:        stewardID,
-		DeviceName:      "DESKTOP-WIN11",
-		Status:          "warning",
-		DaysUntilBreach: 4,
-		LastChecked:     "2024-01-15T10:30:00Z",
-		AlertLevel:      "warning",
+		DeviceName:      stewardID,
+		Status:          complianceStatus,
+		DaysUntilBreach: daysUntilBreach,
+		LastChecked:     lastChecked,
+		AlertLevel:      alertLevel,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -177,27 +215,50 @@ func (s *Server) handleGetStewardComplianceReport(w http.ResponseWriter, r *http
 		return
 	}
 
-	// TODO: Integrate with patch module to get actual compliance report
-	// For now, return placeholder response showing the API structure
+	// Look up steward from registered stewards or active controller service
+	s.mu.RLock()
+	registered, exists := s.registeredStewards[stewardID]
+	s.mu.RUnlock()
+
+	complianceStatus := "compliant"
+	reportGeneratedAt := time.Now().UTC().Format(time.RFC3339)
+	lastPatchDate := ""
+
+	if exists {
+		if registered.LastHeartbeat.IsZero() {
+			lastPatchDate = registered.RegisteredAt.UTC().Format(time.RFC3339)
+		} else {
+			lastPatchDate = registered.LastHeartbeat.UTC().Format(time.RFC3339)
+		}
+		switch registered.Status {
+		case "offline":
+			complianceStatus = "critical"
+		case "unknown":
+			complianceStatus = "warning"
+		}
+	} else {
+		// Check active stewards via controller service
+		if stewardInfo, found := s.controllerService.GetStewardInfo(stewardID); found {
+			lastPatchDate = stewardInfo.LastHeartbeat.UTC().Format(time.RFC3339)
+			if stewardInfo.Status != "online" {
+				complianceStatus = "warning"
+			}
+		} else {
+			http.Error(w, "steward not found", http.StatusNotFound)
+			return
+		}
+	}
+
+	// Return real steward data; patch details require patch module integration
 	response := ComplianceReportResponse{
-		DeviceID:        stewardID,
-		DeviceName:      "DESKTOP-WIN11",
-		Status:          "warning",
-		DaysUntilBreach: 4,
-		MissingPatches: []MissingPatchResponse{
-			{
-				ID:           "KB8888888",
-				Title:        "Critical Security Update",
-				Severity:     "critical",
-				Category:     "security",
-				ReleaseDate:  "2024-01-10T00:00:00Z",
-				DaysOverdue:  0,
-				DaysUntilDue: 4,
-			},
-		},
-		OSVersion:         "Windows 11 23H2",
-		LastPatchDate:     "2024-01-01T12:00:00Z",
-		ReportGeneratedAt: "2024-01-15T10:30:00Z",
+		DeviceID:          stewardID,
+		DeviceName:        stewardID,
+		Status:            complianceStatus,
+		DaysUntilBreach:   0,
+		MissingPatches:    []MissingPatchResponse{},
+		OSVersion:         "",
+		LastPatchDate:     lastPatchDate,
+		ReportGeneratedAt: reportGeneratedAt,
 		Policy: PatchPolicyResponse{
 			CriticalDeadlineDays:         7,
 			ImportantDeadlineDays:        14,
@@ -205,12 +266,7 @@ func (s *Server) handleGetStewardComplianceReport(w http.ResponseWriter, r *http
 			LowDeadlineDays:              60,
 			WarningThresholdDays:         7,
 			CriticalThresholdDays:        1,
-			MaintenanceWindowsConfigured: true,
-		},
-		CompatibilityInfo: &CompatibilityInfoResponse{
-			Windows11Compatible: true,
-			MissingRequirements: []string{},
-			LastChecked:         "2024-01-15T09:00:00Z",
+			MaintenanceWindowsConfigured: false,
 		},
 	}
 
@@ -255,55 +311,57 @@ func (s *Server) handleGetComplianceSummary(w http.ResponseWriter, r *http.Reque
 	// Get optional tenant_id filter from query params
 	tenantID := r.URL.Query().Get("tenant_id")
 
-	// TODO: Integrate with patch module and steward registry to get actual compliance summary
-	// For now, return placeholder response showing the API structure
-	response := ComplianceSummaryResponse{
-		TotalDevices:     100,
-		CompliantDevices: 75,
-		WarningDevices:   15,
-		CriticalDevices:  8,
-		BreachedDevices:  2,
-		ByTenant: []TenantComplianceStatus{
-			{
-				TenantID:         "tenant-1",
-				TenantName:       "Acme Corp",
-				TotalDevices:     50,
-				CompliantDevices: 40,
-				WarningDevices:   7,
-				CriticalDevices:  2,
-				BreachedDevices:  1,
-			},
-			{
-				TenantID:         "tenant-2",
-				TenantName:       "Beta Inc",
-				TotalDevices:     50,
-				CompliantDevices: 35,
-				WarningDevices:   8,
-				CriticalDevices:  6,
-				BreachedDevices:  1,
-			},
-		},
-		GeneratedAt: "2024-01-15T10:30:00Z",
+	// Build compliance summary from registered stewards
+	s.mu.RLock()
+	tenantStats := make(map[string]*TenantComplianceStatus)
+	for stewardID, st := range s.registeredStewards {
+		if tenantID != "" && st.TenantID != tenantID {
+			continue
+		}
+		tcs, ok := tenantStats[st.TenantID]
+		if !ok {
+			tcs = &TenantComplianceStatus{
+				TenantID:   st.TenantID,
+				TenantName: st.TenantID,
+			}
+			tenantStats[st.TenantID] = tcs
+		}
+		tcs.TotalDevices++
+		switch st.Status {
+		case "online":
+			tcs.CompliantDevices++
+		case "offline":
+			tcs.CriticalDevices++
+		default:
+			tcs.WarningDevices++
+		}
+		_ = stewardID // used as map key above
+	}
+	s.mu.RUnlock()
+
+	// Aggregate totals
+	totalDevices := 0
+	compliantDevices := 0
+	warningDevices := 0
+	criticalDevices := 0
+	byTenant := make([]TenantComplianceStatus, 0, len(tenantStats))
+
+	for _, tcs := range tenantStats {
+		totalDevices += tcs.TotalDevices
+		compliantDevices += tcs.CompliantDevices
+		warningDevices += tcs.WarningDevices
+		criticalDevices += tcs.CriticalDevices
+		byTenant = append(byTenant, *tcs)
 	}
 
-	// Filter by tenant if requested
-	if tenantID != "" {
-		filtered := make([]TenantComplianceStatus, 0)
-		for _, tenant := range response.ByTenant {
-			if tenant.TenantID == tenantID {
-				filtered = append(filtered, tenant)
-			}
-		}
-		response.ByTenant = filtered
-
-		// Recalculate totals for filtered tenant
-		if len(filtered) == 1 {
-			response.TotalDevices = filtered[0].TotalDevices
-			response.CompliantDevices = filtered[0].CompliantDevices
-			response.WarningDevices = filtered[0].WarningDevices
-			response.CriticalDevices = filtered[0].CriticalDevices
-			response.BreachedDevices = filtered[0].BreachedDevices
-		}
+	response := ComplianceSummaryResponse{
+		TotalDevices:     totalDevices,
+		CompliantDevices: compliantDevices,
+		WarningDevices:   warningDevices,
+		CriticalDevices:  criticalDevices,
+		BreachedDevices:  0, // Requires patch module integration
+		ByTenant:         byTenant,
+		GeneratedAt:      time.Now().UTC().Format(time.RFC3339),
 	}
 
 	w.Header().Set("Content-Type", "application/json")

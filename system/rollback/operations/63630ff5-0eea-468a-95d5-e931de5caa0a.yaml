@@ -1,0 +1,127 @@
+config:
+    audittrail:
+        - action: Rollback operation initiated
+          actor: test-user
+          details: {}
+          eventtype: rollback_initiated
+          result: success
+          timestamp: 2026-03-18T22:29:01.293971946-04:00
+        - action: Concurrent audit entry
+          actor: test-user
+          details:
+            index: 5
+          eventtype: concurrent_test
+          result: success
+          timestamp: 2026-03-18T22:29:01.317687789-04:00
+        - action: Concurrent audit entry
+          actor: test-user
+          details:
+            index: 3
+          eventtype: concurrent_test
+          result: success
+          timestamp: 2026-03-18T22:29:01.319175795-04:00
+        - action: Concurrent audit entry
+          actor: test-user
+          details:
+            index: 7
+          eventtype: concurrent_test
+          result: success
+          timestamp: 2026-03-18T22:29:01.319187897-04:00
+        - action: Concurrent audit entry
+          actor: test-user
+          details:
+            index: 0
+          eventtype: concurrent_test
+          result: success
+          timestamp: 2026-03-18T22:29:01.319199048-04:00
+        - action: Concurrent audit entry
+          actor: test-user
+          details:
+            index: 8
+          eventtype: concurrent_test
+          result: success
+          timestamp: 2026-03-18T22:29:01.319201252-04:00
+        - action: Concurrent audit entry
+          actor: test-user
+          details:
+            index: 1
+          eventtype: concurrent_test
+          result: success
+          timestamp: 2026-03-18T22:29:01.319222331-04:00
+        - action: Concurrent audit entry
+          actor: test-user
+          details:
+            index: 6
+          eventtype: concurrent_test
+          result: success
+          timestamp: 2026-03-18T22:29:01.31922732-04:00
+        - action: Concurrent audit entry
+          actor: test-user
+          details:
+            index: 2
+          eventtype: concurrent_test
+          result: success
+          timestamp: 2026-03-18T22:29:01.319233021-04:00
+        - action: Concurrent audit entry
+          actor: test-user
+          details:
+            index: 4
+          eventtype: concurrent_test
+          result: success
+          timestamp: 2026-03-18T22:29:01.319259009-04:00
+        - action: Concurrent audit entry
+          actor: test-user
+          details:
+            index: 9
+          eventtype: concurrent_test
+          result: success
+          timestamp: 2026-03-18T22:29:01.319263557-04:00
+    completedat: null
+    id: 63630ff5-0eea-468a-95d5-e931de5caa0a
+    initiatedat: 2026-03-18T22:29:01.293971946-04:00
+    initiatedby: test-user
+    progress:
+        currentaction: ""
+        estimatedcompletion: null
+        itemsprocessed: 0
+        itemstotal: 0
+        percentage: 0
+        stage: initializing
+        startedat: 0001-01-01T00:00:00Z
+    request:
+        approvalid: ""
+        configurations: []
+        dryrun: false
+        emergency: false
+        modules: []
+        options:
+            force: false
+            notifyusers: false
+            preserveuserdata: false
+            progressive: false
+            progressivepercent: 0
+            skipvalidation: false
+        reason: Test rollback operation
+        rollbackto: abc123def456
+        rollbacktype: full
+        targetid: device-123
+        targettype: device
+    result: null
+    status: pending
+metadata:
+    checksum: 5d905197eaa6ab242338369a10808a7a02c250d203a54aeb84cb045644f96cd9
+    created_at: 2026-03-18T22:29:01.293971946-04:00
+    created_by: test-user
+    format: yaml
+    name: 63630ff5-0eea-468a-95d5-e931de5caa0a
+    namespace: rollback/operations
+    scope: ""
+    source: rollback_manager
+    tags:
+        - rollback
+        - pending
+        - device
+    tenant_id: system
+    updated_at: 2026-03-18T22:29:01.665685186-04:00
+    updated_by: test-user
+    version: 11

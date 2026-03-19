@@ -1,0 +1,26 @@
+[
+  {
+    "id": "test-audit-entry-1",
+    "tenant_id": "test-tenant",
+    "timestamp": "2026-03-18T22:29:25.207295936-04:00",
+    "event_type": "configuration",
+    "action": "create",
+    "user_id": "test-user",
+    "user_type": "human",
+    "resource_type": "configuration",
+    "resource_id": "firewall-config-1",
+    "resource_name": "Web Server Firewall",
+    "result": "success",
+    "details": {
+      "namespace": "firewall",
+      "version": 1
+    },
+    "tags": [
+      "test",
+      "configuration"
+    ],
+    "severity": "medium",
+    "source": "test-suite",
+    "checksum": "test-checksum-123"
+  }
+]

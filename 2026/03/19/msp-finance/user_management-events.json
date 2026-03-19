@@ -1,0 +1,86 @@
+[
+  {
+    "id": "6475d23c-25b9-49b3-a2ff-e598e53580bf",
+    "tenant_id": "msp-finance",
+    "timestamp": "2026-03-19T02:29:18.30521074Z",
+    "event_type": "user_management",
+    "action": "create_role",
+    "user_id": "system",
+    "user_type": "human",
+    "resource_type": "role",
+    "resource_id": "finance-user-role",
+    "resource_name": "Finance User",
+    "result": "success",
+    "details": {
+      "role_description": "",
+      "role_permissions": 3
+    },
+    "severity": "high",
+    "source": "rbac",
+    "version": "1.0",
+    "checksum": "bee71e4bffbfb31fe4e4e9d75d5aeb093bb75c078e5fb5ae651d8508e18d55d0"
+  },
+  {
+    "id": "f8dc95c7-2548-47c1-a299-0981b5bffdd1",
+    "tenant_id": "msp-finance",
+    "timestamp": "2026-03-19T02:29:18.326479114Z",
+    "event_type": "user_management",
+    "action": "create_role",
+    "user_id": "system",
+    "user_type": "human",
+    "resource_type": "role",
+    "resource_id": "finance-admin-role",
+    "resource_name": "Finance Administrator",
+    "result": "success",
+    "details": {
+      "role_description": "",
+      "role_permissions": 5
+    },
+    "severity": "high",
+    "source": "rbac",
+    "version": "1.0",
+    "checksum": "18de170970bd70d71530bebd6e2169fa9dc9b02617ebe78f67df5049ae83ff28"
+  },
+  {
+    "id": "1be1f567-6f9b-4b9a-93d6-5fe79b9edc37",
+    "tenant_id": "msp-finance",
+    "timestamp": "2026-03-19T02:29:18.467880589Z",
+    "event_type": "user_management",
+    "action": "create_role",
+    "user_id": "system",
+    "user_type": "human",
+    "resource_type": "role",
+    "resource_id": "finance-manager-role",
+    "resource_name": "Finance Manager",
+    "result": "success",
+    "details": {
+      "role_description": "",
+      "role_permissions": 2
+    },
+    "severity": "high",
+    "source": "rbac",
+    "version": "1.0",
+    "checksum": "b409b75de842039cb389004b1b738138d557c5c06879f331669122a26d4891a9"
+  },
+  {
+    "id": "a155c6dd-2695-46c4-a401-3c416ac2f867",
+    "tenant_id": "msp-finance",
+    "timestamp": "2026-03-19T02:29:18.489990016Z",
+    "event_type": "user_management",
+    "action": "create_role",
+    "user_id": "system",
+    "user_type": "human",
+    "resource_type": "role",
+    "resource_id": "finance-analyst-role",
+    "resource_name": "Finance Analyst",
+    "result": "success",
+    "details": {
+      "role_description": "",
+      "role_permissions": 1
+    },
+    "severity": "high",
+    "source": "rbac",
+    "version": "1.0",
+    "checksum": "f251f79f46bec494e0f1e5aa44bedc1d616086ca8cd7c239d6c4eb88c9865657"
+  }
+]

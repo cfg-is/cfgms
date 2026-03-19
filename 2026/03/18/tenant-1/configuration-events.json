@@ -1,0 +1,17 @@
+[
+  {
+    "id": "3b37124879538c8e",
+    "tenant_id": "tenant-1",
+    "timestamp": "2026-03-18T21:59:25.237154816-04:00",
+    "event_type": "configuration",
+    "action": "update",
+    "user_id": "user-1",
+    "user_type": "human",
+    "resource_type": "configuration",
+    "resource_id": "config-1",
+    "result": "success",
+    "severity": "medium",
+    "source": "",
+    "checksum": ""
+  }
+]

@@ -1,0 +1,17 @@
+[
+  {
+    "id": "a1d95ec3a7fb649d",
+    "tenant_id": "stats-tenant-1",
+    "timestamp": "2026-03-18T22:19:25.440041293-04:00",
+    "event_type": "security_event",
+    "action": "security_violation",
+    "user_id": "user-3",
+    "user_type": "human",
+    "resource_type": "system",
+    "resource_id": "security-check",
+    "result": "denied",
+    "severity": "critical",
+    "source": "",
+    "checksum": ""
+  }
+]

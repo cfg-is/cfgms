@@ -1,0 +1,21 @@
+config:
+    rules:
+        - allow: 80
+        - allow: 443
+        - allow: 8080
+metadata:
+    checksum: 6790c66bd167b171d1cbe3422290b460801bf9a09f3473c6936fd162665abcc2
+    created_at: 2026-03-18T22:29:24.781239956-04:00
+    created_by: test-user
+    format: yaml
+    name: web-server
+    namespace: firewall
+    scope: ""
+    source: test
+    tags:
+        - test
+        - firewall
+    tenant_id: test-tenant
+    updated_at: 2026-03-18T22:29:24.802807203-04:00
+    updated_by: updated-user
+    version: 2

@@ -16,6 +16,7 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/cfgis/cfgms/commercial/ha"
+	"github.com/cfgis/cfgms/features/config/rollback"
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/ctxkeys"
 	"github.com/cfgis/cfgms/features/controller/health"
@@ -23,6 +24,7 @@ import (
 	"github.com/cfgis/cfgms/features/monitoring"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/rbac/authdefense"
+	reportapi "github.com/cfgis/cfgms/features/reports/api"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -63,6 +65,8 @@ type Server struct {
 	quicTriggerFunc         QUICTriggerFunc                // Function to trigger QUIC connections
 	signerCertSerial        string                         // Story #378: Serial of cert used for config signing
 	authDefense             *authdefense.AuthDefenseSystem // Story #380: Three-tier auth defense
+	rollbackManager         rollback.RollbackManager       // Story #416: Rollback system
+	reportsHandler          *reportapi.Handler             // Story #416: Reports engine
 }
 
 // APIKey represents an API key for external authentication
@@ -328,6 +332,21 @@ func (s *Server) setupRouter() {
 	// Raft consensus endpoints (no auth required - internal cluster communication)
 	s.router.HandleFunc("/raft/message", s.handleRaftMessage).Methods("POST")
 	s.router.HandleFunc("/raft/status", s.handleRaftStatus).Methods("GET")
+
+	// Rollback management endpoints (Story #416)
+	if s.rollbackManager != nil {
+		rollbackHandler := NewRollbackHandler(s.rollbackManager)
+		rollbackRouter := api.PathPrefix("/rollback").Subrouter()
+		rollbackHandler.RegisterRoutes(rollbackRouter)
+		s.logger.Info("Rollback API routes registered")
+	}
+
+	// Reports engine endpoints (Story #416)
+	if s.reportsHandler != nil {
+		reportsRouter := api.PathPrefix("/reports").Subrouter()
+		s.reportsHandler.RegisterRoutes(reportsRouter)
+		s.logger.Info("Reports API routes registered")
+	}
 }
 
 // Start starts the HTTP server
@@ -413,6 +432,20 @@ func (s *Server) SetQUICTriggerFunc(fn QUICTriggerFunc) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.quicTriggerFunc = fn
+}
+
+// SetRollbackManager sets the rollback manager for rollback API routes (Story #416)
+func (s *Server) SetRollbackManager(m rollback.RollbackManager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rollbackManager = m
+}
+
+// SetReportsHandler sets the reports handler for reports API routes (Story #416)
+func (s *Server) SetReportsHandler(h *reportapi.Handler) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reportsHandler = h
 }
 
 // getHTTPListenAddr determines the HTTP listen address

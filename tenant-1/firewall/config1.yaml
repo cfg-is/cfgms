@@ -1,0 +1,15 @@
+config: firewall-config-1
+metadata:
+    checksum: 244acf6554d127ec9a4a8d01859fea6ef1f89322ef431e4b8153a96ca8e7c71d
+    created_at: 2026-03-18T22:29:25.136922918-04:00
+    created_by: ""
+    format: yaml
+    name: config1
+    namespace: firewall
+    scope: ""
+    source: ""
+    tags: []
+    tenant_id: tenant-1
+    updated_at: 2026-03-18T22:29:25.136922918-04:00
+    updated_by: ""
+    version: 1

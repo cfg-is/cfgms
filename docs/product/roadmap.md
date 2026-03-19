@@ -218,7 +218,7 @@ Deploy on test cluster and manage real VMs — the core beta milestone.
 - [ ] Steward: implement offline report queueing (Issue #419) - Reports discarded when controller unreachable
 - [ ] Steward/Controller: implement hash-based DNA sync (Issue #418) - Full DNA sent every time, QUIC handler is a stub
 - [x] Controller: wire monitoring and health infrastructure into server (Issue #417) - Passed as nil, placeholder responses
-- [ ] Controller: wire reports engine and rollback system into API (Issue #416) - Built but routes never registered
+- [x] Controller: wire reports engine and rollback system into API (Issue #416) - Built but routes never registered
 - [ ] Controller: implement multi-node orchestration (Issue #415) - No multi-steward coordination
 - [ ] Controller: implement workflow engine (Issue #414) - Documented as core capability, no code exists
 - [ ] Steward: registration approval via workflow engine hook (Issue #422) - Approval logic as workflow policy, default accept-all, depends on #414

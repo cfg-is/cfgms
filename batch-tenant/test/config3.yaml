@@ -1,0 +1,15 @@
+config: config3-data
+metadata:
+    checksum: 4a7f95e0b3ee99ff565a27296ed631ac5b146c15eb1f5d9109967b28c944a7c0
+    created_at: 2026-03-18T22:29:24.922179888-04:00
+    created_by: batch-user
+    format: yaml
+    name: config3
+    namespace: test
+    scope: ""
+    source: ""
+    tags: []
+    tenant_id: batch-tenant
+    updated_at: 2026-03-18T22:29:24.922179888-04:00
+    updated_by: ""
+    version: 1

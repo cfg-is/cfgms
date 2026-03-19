@@ -1,0 +1,48 @@
+[
+  {
+    "id": "d30121b2-aa49-4e34-ae09-3ba4f8cffb00",
+    "tenant_id": "client-subsidiary-a",
+    "timestamp": "2026-03-19T02:29:18.390416614Z",
+    "event_type": "user_management",
+    "action": "create_role",
+    "user_id": "system",
+    "user_type": "human",
+    "resource_type": "role",
+    "resource_id": "subsidiary-admin-role",
+    "resource_name": "Subsidiary Administrator",
+    "result": "success",
+    "details": {
+      "role_description": "",
+      "role_permissions": 2
+    },
+    "severity": "high",
+    "source": "rbac",
+    "version": "1.0",
+    "checksum": "1f01cb636ad3a27d0f5c1c38ef5e70439110784eb6dfe761b8d89ab36c24f65d"
+  },
+  {
+    "id": "46a51067-7041-4c36-917b-5c14f7493f4b",
+    "tenant_id": "client-subsidiary-a",
+    "timestamp": "2026-03-19T02:29:18.443187082Z",
+    "event_type": "user_management",
+    "action": "create_role",
+    "user_id": "system",
+    "user_type": "human",
+    "resource_type": "role",
+    "resource_id": "child-admin-role",
+    "resource_name": "Child Administrator",
+    "result": "error",
+    "error_code": "RBAC_CROSS_TENANT_INHERITANCE_BLOCKED",
+    "error_message": "cross-tenant role inheritance not allowed: parent tenant=parent-corp, child tenant=client-subsidiary-a (security finding M-TENANT-2)",
+    "details": {
+      "child_tenant": "client-subsidiary-a",
+      "parent_role_id": "parent-admin-role",
+      "parent_tenant": "parent-corp",
+      "security_finding": "M-TENANT-2"
+    },
+    "severity": "critical",
+    "source": "rbac",
+    "version": "1.0",
+    "checksum": "5b5286d013776cd7f3083bce8dc21c9b82a86963cef31e2a87fc1de61216d841"
+  }
+]

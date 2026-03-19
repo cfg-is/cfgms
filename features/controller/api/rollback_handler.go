@@ -25,19 +25,20 @@ func NewRollbackHandler(rollbackManager rollback.RollbackManager) *RollbackHandl
 	}
 }
 
-// RegisterRoutes registers rollback API routes
+// RegisterRoutes registers rollback API routes on the provided subrouter.
+// The router should already be scoped to the rollback path prefix.
 func (h *RollbackHandler) RegisterRoutes(router *mux.Router) {
 	// Rollback points
-	router.HandleFunc("/api/v1/rollback/points", h.ListRollbackPoints).Methods("GET")
+	router.HandleFunc("/points", h.ListRollbackPoints).Methods("GET")
 
 	// Rollback operations
-	router.HandleFunc("/api/v1/rollback/preview", h.PreviewRollback).Methods("POST")
-	router.HandleFunc("/api/v1/rollback/execute", h.ExecuteRollback).Methods("POST")
-	router.HandleFunc("/api/v1/rollback/{rollback_id}/status", h.GetRollbackStatus).Methods("GET")
-	router.HandleFunc("/api/v1/rollback/{rollback_id}/cancel", h.CancelRollback).Methods("POST")
+	router.HandleFunc("/preview", h.PreviewRollback).Methods("POST")
+	router.HandleFunc("/execute", h.ExecuteRollback).Methods("POST")
+	router.HandleFunc("/{rollback_id}/status", h.GetRollbackStatus).Methods("GET")
+	router.HandleFunc("/{rollback_id}/cancel", h.CancelRollback).Methods("POST")
 
 	// Rollback history
-	router.HandleFunc("/api/v1/rollback/history", h.ListRollbackHistory).Methods("GET")
+	router.HandleFunc("/history", h.ListRollbackHistory).Methods("GET")
 }
 
 // ListRollbackPoints returns available rollback points

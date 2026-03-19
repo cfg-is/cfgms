@@ -31,23 +31,22 @@ func New(engine interfaces.ReportEngine, exporter interfaces.Exporter, logger lo
 	}
 }
 
-// RegisterRoutes registers the reports API routes
+// RegisterRoutes registers the reports API routes on the provided subrouter.
+// The router should already be scoped to the reports path prefix.
 func (h *Handler) RegisterRoutes(router *mux.Router) {
-	reportsRouter := router.PathPrefix("/api/v1/reports").Subrouter()
-
 	// Report generation and management
-	reportsRouter.HandleFunc("/generate", h.generateReport).Methods("POST")
-	reportsRouter.HandleFunc("/templates", h.getTemplates).Methods("GET")
-	reportsRouter.HandleFunc("/templates/{template}", h.getTemplate).Methods("GET")
+	router.HandleFunc("/generate", h.generateReport).Methods("POST")
+	router.HandleFunc("/templates", h.getTemplates).Methods("GET")
+	router.HandleFunc("/templates/{template}", h.getTemplate).Methods("GET")
 
 	// Dashboard endpoints
-	reportsRouter.HandleFunc("/dashboard/overview", h.getDashboardOverview).Methods("GET")
-	reportsRouter.HandleFunc("/dashboard/trends", h.getDashboardTrends).Methods("GET")
-	reportsRouter.HandleFunc("/dashboard/alerts", h.getDashboardAlerts).Methods("GET")
+	router.HandleFunc("/dashboard/overview", h.getDashboardOverview).Methods("GET")
+	router.HandleFunc("/dashboard/trends", h.getDashboardTrends).Methods("GET")
+	router.HandleFunc("/dashboard/alerts", h.getDashboardAlerts).Methods("GET")
 
 	// Specific report types
-	reportsRouter.HandleFunc("/compliance/status", h.getComplianceStatus).Methods("GET")
-	reportsRouter.HandleFunc("/drift/summary", h.getDriftSummary).Methods("GET")
+	router.HandleFunc("/compliance/status", h.getComplianceStatus).Methods("GET")
+	router.HandleFunc("/drift/summary", h.getDriftSummary).Methods("GET")
 
 	h.logger.Info("registered reports API routes")
 }

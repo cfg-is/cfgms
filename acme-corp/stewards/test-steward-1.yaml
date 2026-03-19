@@ -1,0 +1,27 @@
+config:
+    resources: []
+    steward:
+        error_handling:
+            configuration_error: ""
+            module_load_failure: ""
+            resource_failure: ""
+        id: test-steward-1
+        logging:
+            format: ""
+            level: info
+        mode: standalone
+metadata:
+    checksum: e51ea27cabdb286b923f5f0886972a6c21688cd75e400d7960050c7a188682ee
+    created_at: 2026-03-18T22:29:52.66957283-04:00
+    created_by: config-manager
+    format: yaml
+    name: test-steward-1
+    namespace: stewards
+    scope: ""
+    source: cfgms-controller
+    tags:
+        - steward-config
+    tenant_id: acme-corp
+    updated_at: 2026-03-18T22:29:52.669575335-04:00
+    updated_by: config-manager
+    version: 1
