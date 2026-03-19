@@ -1,23 +1,23 @@
 [
   {
-    "id": "abb29608-633e-48c4-ab72-60689cb240c1",
+    "id": "75f4528e-5e7e-45e4-a495-c3484bfbbf2b",
     "tenant_id": "tenant-1",
-    "timestamp": "2026-03-19T02:24:36.002082247Z",
+    "timestamp": "2026-03-19T02:29:08.05437468Z",
     "event_type": "user_management",
     "action": "create_role",
     "user_id": "system",
     "user_type": "human",
     "resource_type": "role",
-    "resource_id": "tenant1.role",
-    "resource_name": "Tenant 1 Role",
+    "resource_id": "parent.test",
+    "resource_name": "Parent Test Role",
     "result": "success",
     "details": {
-      "role_description": "Role for tenant 1",
-      "role_permissions": 0
+      "role_description": "Test parent role",
+      "role_permissions": 1
     },
     "severity": "high",
     "source": "rbac",
     "version": "1.0",
-    "checksum": "9e5ea0974fd8fceee5d9992854f91962f3ffa9de72ce549694828f47f9b8634f"
+    "checksum": "66f7b896f35ea6be6767613eb213639e7dc547021592ffa100f7e09ee653f96a"
   }
 ]
