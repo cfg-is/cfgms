@@ -15,8 +15,8 @@ config:
         estimatedcompletion: null
         itemsprocessed: 0
         itemstotal: 0
-        percentage: 0
-        stage: initializing
+        percentage: 50
+        stage: executing
         startedat: 0001-01-01T00:00:00Z
     request:
         approvalid: ""
@@ -37,9 +37,9 @@ config:
         targetid: device-123
         targettype: device
     result: null
-    status: pending
+    status: in_progress
 metadata:
-    checksum: 8c360d1b658b699dcf592d3ecb708c57a48c3414c8ed18671d2698ae8144e0c4
+    checksum: 88dfdc181bd0339325c7af8b7e5e35c919a85b71c9778fba6538b99c9b4786dc
     created_at: 2026-03-18T22:29:00.204381795-04:00
     created_by: test-user
     format: yaml
@@ -49,9 +49,9 @@ metadata:
     source: rollback_manager
     tags:
         - rollback
-        - pending
+        - in_progress
         - device
     tenant_id: system
-    updated_at: 2026-03-18T22:29:00.205449886-04:00
+    updated_at: 2026-03-18T22:29:00.233694517-04:00
     updated_by: test-user
-    version: 1
+    version: 2
