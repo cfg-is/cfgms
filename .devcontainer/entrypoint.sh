@@ -12,9 +12,9 @@ DRY_RUN=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --branch)  MODE="branch"; BRANCH="$2"; shift 2 ;;
-        --issue)   ISSUE_NUM="$2"; shift 2 ;;
-        --fix-pr)  MODE="fix-pr"; PR_NUM="$2"; shift 2 ;;
+        --branch)  [[ $# -ge 2 ]] || { echo "ERROR: --branch requires a value"; exit 1; }; MODE="branch"; BRANCH="$2"; shift 2 ;;
+        --issue)   [[ $# -ge 2 ]] || { echo "ERROR: --issue requires a value"; exit 1; }; ISSUE_NUM="$2"; shift 2 ;;
+        --fix-pr)  [[ $# -ge 2 ]] || { echo "ERROR: --fix-pr requires a value"; exit 1; }; MODE="fix-pr"; PR_NUM="$2"; shift 2 ;;
         --dry-run) DRY_RUN="true"; shift ;;
         *)
             if [[ "$1" =~ ^[0-9]+$ ]]; then
@@ -277,9 +277,14 @@ compose_prfix_prompt() {
     # Fetch review comments
     echo "Fetching review comments..."
     local owner repo
-    owner=$(gh repo view --json owner -q '.owner.login' 2>/dev/null)
-    repo=$(gh repo view --json name -q '.name' 2>/dev/null)
-    REVIEW_COMMENTS=$(gh api "repos/${owner}/${repo}/pulls/${PR_NUM}/comments" 2>/dev/null || echo "[]")
+    owner=$(gh repo view --json owner -q '.owner.login' 2>/dev/null || echo "")
+    repo=$(gh repo view --json name -q '.name' 2>/dev/null || echo "")
+    if [[ -z "$owner" ]] || [[ -z "$repo" ]]; then
+        echo "WARN: Could not determine repo owner/name; skipping review comments fetch"
+        REVIEW_COMMENTS="[]"
+    else
+        REVIEW_COMMENTS=$(gh api "repos/${owner}/${repo}/pulls/${PR_NUM}/comments" 2>/dev/null || echo "[]")
+    fi
 
     # Extract review body comments (top-level review comments, not inline)
     REVIEWS=$(echo "$PR_JSON" | jq -r '.reviews[] | select(.body != "") | "**\(.author.login)** (\(.state)):\n\(.body)\n"' 2>/dev/null || echo "")
@@ -387,7 +392,7 @@ claude --dangerously-skip-permissions --model claude-sonnet-4-6 -p "$PROMPT" || 
 # Claude Code may refresh the OAuth token during its session — persisting it
 # ensures the next container launch gets a valid token instead of a stale one.
 if [ -f ~/.claude/.credentials.json ]; then
-    cp ~/.claude/.credentials.json /persist/.credentials.json 2>/dev/null || true
+    cp ~/.claude/.credentials.json /persist/.credentials.json 2>/dev/null || echo "WARN: Failed to write back credentials to /persist volume"
 fi
 
 # --- Phase 3: Cleanup and reporting ---
@@ -425,7 +430,7 @@ else
     echo "Agent failed with exit code ${EXIT_CODE}"
 
     # Create draft PR if none exists and there are tracked changes (issue and branch modes only)
-    if [[ "$MODE" != "fix-pr" ]] && [ -z "$PR_URL" ] && [ -n "$(git diff --name-only 2>/dev/null)" ]; then
+    if [[ "$MODE" != "fix-pr" ]] && [ -z "$PR_URL" ] && [ -n "$(git status --porcelain 2>/dev/null)" ]; then
         git add --update
         local_issue_ref=""
         if [[ -n "$ISSUE_NUM" ]]; then

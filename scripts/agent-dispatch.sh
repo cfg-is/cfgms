@@ -7,6 +7,15 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORKTREE_BASE="$(cd "$REPO_ROOT/.." && pwd)/worktrees"
 
+# Validate branch name: only allow safe characters (alphanumeric, /, -, ., _)
+validate_branch() {
+  local branch="$1"
+  if [[ ! "$branch" =~ ^[a-zA-Z0-9/_.-]+$ ]]; then
+    echo "ERROR: Invalid branch name '${branch}'. Only alphanumeric, '/', '-', '.', and '_' are allowed."
+    exit 1
+  fi
+}
+
 # Sanitize branch name for use in container/directory names: / → --
 sanitize_branch() {
   echo "$1" | sed 's|/|--|g'
@@ -52,6 +61,7 @@ case "$cmd" in
       --branch)
         [[ $# -ge 2 ]] || { echo "check-conflicts --branch requires a branch name"; exit 1; }
         branch="$2"
+        validate_branch "$branch"
         sanitized=$(sanitize_branch "$branch")
         container_name="cfg-agent-branch-${sanitized}"
         clone_dir="${WORKTREE_BASE}/${sanitized}"
@@ -99,21 +109,25 @@ case "$cmd" in
     num="$1"
     dest="${WORKTREE_BASE}/story-${num}"
     github_url=$(git -C "$REPO_ROOT" remote get-url origin)
+    trap "rm -rf '$dest'" ERR
     git clone --local --branch develop "$REPO_ROOT" "$dest"
     cd "$dest"
     git remote set-url origin "$github_url"
     git checkout -b "feature/story-${num}-agent"
+    trap - ERR
     echo "CLONE_OK:${num}:$(git branch --show-current)"
     ;;
 
   create-clone-branch)
     [[ $# -eq 1 ]] || { echo "create-clone-branch requires exactly one branch name"; exit 1; }
     branch="$1"
+    validate_branch "$branch"
     sanitized=$(sanitize_branch "$branch")
     dest="${WORKTREE_BASE}/${sanitized}"
     github_url=$(git -C "$REPO_ROOT" remote get-url origin)
 
     # Check if branch exists on remote
+    trap "rm -rf '$dest'" ERR
     if git -C "$REPO_ROOT" ls-remote --heads origin "$branch" | grep -q .; then
       # Branch exists: clone develop, then fetch and checkout the branch
       git clone --local --branch develop "$REPO_ROOT" "$dest"
@@ -121,6 +135,7 @@ case "$cmd" in
       git remote set-url origin "$github_url"
       git fetch origin "$branch"
       git checkout "$branch"
+      trap - ERR
       echo "CLONE_OK:${sanitized}:${branch}"
     else
       # Branch does not exist: clone develop, create new branch
@@ -128,6 +143,7 @@ case "$cmd" in
       cd "$dest"
       git remote set-url origin "$github_url"
       git checkout -b "$branch"
+      trap - ERR
       echo "CLONE_NEW:${sanitized}:${branch}"
     fi
     ;;
@@ -152,11 +168,13 @@ case "$cmd" in
     fi
 
     # Clone and checkout the PR branch
+    trap "rm -rf '$dest'" ERR
     git clone --local --branch develop "$REPO_ROOT" "$dest"
     cd "$dest"
     git remote set-url origin "$github_url"
     git fetch origin "$pr_branch"
     git checkout "$pr_branch"
+    trap - ERR
 
     echo "CLONE_OK:pr-fix-${pr_num}:${pr_branch}:issue=${issue_num:-none}"
     ;;
@@ -237,6 +255,7 @@ case "$cmd" in
   launch-interactive)
     [[ $# -ge 1 ]] || { echo "launch-interactive requires a branch name and optional clone dir"; exit 1; }
     branch="$1"
+    validate_branch "$branch"
     sanitized=$(sanitize_branch "$branch")
     clone_dir="${2:-${WORKTREE_BASE}/${sanitized}}"
     real_path=$(realpath "$clone_dir")
