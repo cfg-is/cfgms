@@ -40,5 +40,26 @@
     "source": "rbac",
     "version": "1.0",
     "checksum": "0bb4bdb4a556fb8764472d817a68d211b2e1d3aec6fe8573ec373437b618710a"
+  },
+  {
+    "id": "0a693545-97ab-4aab-8dd6-704443cd0838",
+    "tenant_id": "tenant-1",
+    "timestamp": "2026-03-19T02:24:35.640678426Z",
+    "event_type": "user_management",
+    "action": "create_role",
+    "user_id": "system",
+    "user_type": "human",
+    "resource_type": "role",
+    "resource_id": "leaf.role",
+    "resource_name": "Leaf Role",
+    "result": "success",
+    "details": {
+      "role_description": "",
+      "role_permissions": 0
+    },
+    "severity": "high",
+    "source": "rbac",
+    "version": "1.0",
+    "checksum": "572a2ef34a8df315851c5e69090aac5cffea9be9de55e01193d7ed8a35b94315"
   }
 ]
