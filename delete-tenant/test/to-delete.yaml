@@ -1,0 +1,15 @@
+config: delete-me
+metadata:
+    checksum: af77c0879d9cc69681600bb17fa8fedccfe7ae605b65974fee792581ed63a84c
+    created_at: 2026-03-18T22:29:25.519105651-04:00
+    created_by: test-user
+    format: yaml
+    name: to-delete
+    namespace: test
+    scope: ""
+    source: ""
+    tags: []
+    tenant_id: delete-tenant
+    updated_at: 2026-03-18T22:29:25.519105651-04:00
+    updated_by: ""
+    version: 1
