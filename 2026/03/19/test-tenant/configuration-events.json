@@ -1,0 +1,22 @@
+[
+  {
+    "id": "0f3e1dab-d352-477e-a4e7-15cb1655ee64",
+    "tenant_id": "test-tenant",
+    "timestamp": "2026-03-19T02:24:45.912201317Z",
+    "event_type": "configuration",
+    "action": "test_action",
+    "user_id": "test-user",
+    "user_type": "human",
+    "resource_type": "test_resource",
+    "resource_id": "test-id",
+    "resource_name": "Test Resource",
+    "result": "success",
+    "details": {
+      "test_key": "test_value"
+    },
+    "severity": "medium",
+    "source": "test",
+    "version": "1.0",
+    "checksum": "f911326fe76067b447445d1ab37e6b72def1ef58c86c674ad412460a213d2934"
+  }
+]
