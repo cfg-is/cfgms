@@ -85,6 +85,7 @@ type Server struct {
 	signerCertSerial        string // Serial number of server cert used for config signing (Story #378)
 	healthCollector         *health.Collector
 	alertManager            *health.DefaultAlertManager
+	dnaStorageManager       *dnaStorage.Manager // Reports engine DNA storage (must be closed on Stop)
 }
 
 // New creates a new server instance
@@ -532,9 +533,10 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	logger.Info("Rollback manager wired to HTTP API server")
 
 	// Story #416: Wire reports engine into API server
-	reportsHandler := initializeReportsHandler(cfg, logger)
+	reportsHandler, reportsDNAManager := initializeReportsHandler(cfg, logger)
 	if reportsHandler != nil {
 		httpServer.SetReportsHandler(reportsHandler)
+		srv.dnaStorageManager = reportsDNAManager
 		logger.Info("Reports engine wired to HTTP API server")
 	}
 
@@ -583,7 +585,8 @@ func initializeRollbackManager(storageManager *interfaces.StorageManager, logger
 }
 
 // initializeReportsHandler creates the reports API handler with its dependencies.
-func initializeReportsHandler(cfg *config.Config, logger logging.Logger) *reportapi.Handler {
+// Returns both the handler and the DNA storage manager (which must be closed on shutdown).
+func initializeReportsHandler(cfg *config.Config, logger logging.Logger) (*reportapi.Handler, *dnaStorage.Manager) {
 	// Initialize DNA storage with SQLite backend in a dedicated directory
 	dnaStorageConfig := dnaStorage.DefaultConfig()
 	dnaStorageConfig.DataDir = filepath.Join(cfg.DataDir, "dna-reports")
@@ -591,14 +594,14 @@ func initializeReportsHandler(cfg *config.Config, logger logging.Logger) *report
 	dnaStorageManager, err := dnaStorage.NewManager(dnaStorageConfig, logger)
 	if err != nil {
 		logger.Warn("Failed to initialize DNA storage for reports engine", "error", err)
-		return nil
+		return nil, nil
 	}
 
 	// Initialize drift detector with default configuration
 	driftDetector, err := dnadrift.NewDetector(nil, logger)
 	if err != nil {
 		logger.Warn("Failed to initialize drift detector for reports engine", "error", err)
-		return nil
+		return nil, nil
 	}
 
 	// Build the reports engine from its components
@@ -609,7 +612,7 @@ func initializeReportsHandler(cfg *config.Config, logger logging.Logger) *report
 	reportEngine := reportsengine.New(dataProvider, templateProcessor, exporter, reportsCache, logger)
 
 	logger.Info("Reports engine initialized")
-	return reportapi.New(reportEngine, exporter, logger)
+	return reportapi.New(reportEngine, exporter, logger), dnaStorageManager
 }
 
 // Start initializes and starts the controller server (MQTT+QUIC mode)
@@ -845,6 +848,13 @@ func (s *Server) Stop() error {
 		defer cancel()
 		if err := s.mqttBroker.Stop(ctx); err != nil {
 			s.logger.Warn("Failed to stop MQTT broker", "error", err)
+		}
+	}
+
+	// Close DNA storage manager (releases SQLite DB file handles)
+	if s.dnaStorageManager != nil {
+		if err := s.dnaStorageManager.Close(); err != nil {
+			s.logger.Warn("Failed to close DNA storage manager", "error", err)
 		}
 	}
 
