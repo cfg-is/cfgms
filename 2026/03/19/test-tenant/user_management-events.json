@@ -1,0 +1,23 @@
+[
+  {
+    "id": "ada0330e-ac84-4adc-93da-44c75f1500b1",
+    "tenant_id": "test-tenant",
+    "timestamp": "2026-03-19T02:24:35.044498189Z",
+    "event_type": "user_management",
+    "action": "create_role",
+    "user_id": "system",
+    "user_type": "human",
+    "resource_type": "role",
+    "resource_id": "test-role-audit",
+    "resource_name": "Test Role for Audit",
+    "result": "success",
+    "details": {
+      "role_description": "A test role to verify audit logging",
+      "role_permissions": 1
+    },
+    "severity": "high",
+    "source": "rbac",
+    "version": "1.0",
+    "checksum": "eb6676172c15246cf4f60ce610a89ff67afeda1dfeaccee481fdc784eb87e12f"
+  }
+]
