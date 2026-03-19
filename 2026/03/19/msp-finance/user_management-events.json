@@ -1,0 +1,23 @@
+[
+  {
+    "id": "8769ee5e-7abb-4afb-9443-57e9ed24227d",
+    "tenant_id": "msp-finance",
+    "timestamp": "2026-03-19T02:24:42.434519757Z",
+    "event_type": "user_management",
+    "action": "create_role",
+    "user_id": "system",
+    "user_type": "human",
+    "resource_type": "role",
+    "resource_id": "finance-user-role",
+    "resource_name": "Finance User",
+    "result": "success",
+    "details": {
+      "role_description": "",
+      "role_permissions": 3
+    },
+    "severity": "high",
+    "source": "rbac",
+    "version": "1.0",
+    "checksum": "0ab258dae13f965705d310b5a87a46c2afc0ebedf57e27d3a35bf140e80797dd"
+  }
+]
