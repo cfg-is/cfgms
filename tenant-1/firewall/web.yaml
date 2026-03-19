@@ -1,0 +1,15 @@
+config: web-config
+metadata:
+    checksum: 8659a963999aab29097bd9d19bcdd3771e64430de7529a266c79a46864f4dffd
+    created_at: 2026-03-18T22:29:24.835141392-04:00
+    created_by: user-1
+    format: yaml
+    name: web
+    namespace: firewall
+    scope: ""
+    source: ""
+    tags: []
+    tenant_id: tenant-1
+    updated_at: 2026-03-18T22:29:24.835141392-04:00
+    updated_by: ""
+    version: 1
