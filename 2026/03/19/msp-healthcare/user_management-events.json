@@ -1,0 +1,23 @@
+[
+  {
+    "id": "c4123aae-0497-4de4-9dbc-af60aaf3686d",
+    "tenant_id": "msp-healthcare",
+    "timestamp": "2026-03-19T02:24:42.487637276Z",
+    "event_type": "user_management",
+    "action": "create_role",
+    "user_id": "system",
+    "user_type": "human",
+    "resource_type": "role",
+    "resource_id": "healthcare-user-role",
+    "resource_name": "Healthcare User",
+    "result": "success",
+    "details": {
+      "role_description": "",
+      "role_permissions": 3
+    },
+    "severity": "high",
+    "source": "rbac",
+    "version": "1.0",
+    "checksum": "ac09c9c40379d829d29556541ab0fa92abbf551b346bdfa08a6ec356619e6b16"
+  }
+]
