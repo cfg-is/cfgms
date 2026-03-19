@@ -61,5 +61,26 @@
     "source": "rbac",
     "version": "1.0",
     "checksum": "ccf41c4cbaef56893c01ac83e7a84badcd3c1fde5b8e887644753bdf71ed01ac"
+  },
+  {
+    "id": "1efd6908-2333-40fc-bcbc-fbe4110aaee9",
+    "tenant_id": "tenant-1",
+    "timestamp": "2026-03-19T02:29:08.194442873Z",
+    "event_type": "user_management",
+    "action": "create_role",
+    "user_id": "system",
+    "user_type": "human",
+    "resource_type": "role",
+    "resource_id": "another.child",
+    "resource_name": "Another Child",
+    "result": "success",
+    "details": {
+      "role_description": "",
+      "role_permissions": 0
+    },
+    "severity": "high",
+    "source": "rbac",
+    "version": "1.0",
+    "checksum": "1753ad63f44ab4541abe8a95cd02ab28b6282b44165cf97339805c43f792fbcb"
   }
 ]
