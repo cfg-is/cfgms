@@ -1,164 +1,23 @@
 [
   {
-    "id": "ada0330e-ac84-4adc-93da-44c75f1500b1",
+    "id": "22e1ea5e-bb3d-40c1-ab6f-e9bfc9a47ebb",
     "tenant_id": "test-tenant",
-    "timestamp": "2026-03-19T02:24:35.044498189Z",
+    "timestamp": "2026-03-19T02:24:35.415737844Z",
     "event_type": "user_management",
     "action": "create_role",
     "user_id": "system",
     "user_type": "human",
     "resource_type": "role",
-    "resource_id": "test-role-audit",
-    "resource_name": "Test Role for Audit",
-    "result": "success",
-    "details": {
-      "role_description": "A test role to verify audit logging",
-      "role_permissions": 1
-    },
-    "severity": "high",
-    "source": "rbac",
-    "version": "1.0",
-    "checksum": "eb6676172c15246cf4f60ce610a89ff67afeda1dfeaccee481fdc784eb87e12f"
-  },
-  {
-    "id": "d7888c21-33ea-43bb-8e7a-8e52cf507787",
-    "tenant_id": "test-tenant",
-    "timestamp": "2026-03-19T02:24:35.07061918Z",
-    "event_type": "user_management",
-    "action": "create_role",
-    "user_id": "system",
-    "user_type": "human",
-    "resource_type": "role",
-    "resource_id": "test-role-update-audit",
-    "resource_name": "Original Role Name",
-    "result": "success",
-    "details": {
-      "role_description": "Original description",
-      "role_permissions": 1
-    },
-    "severity": "high",
-    "source": "rbac",
-    "version": "1.0",
-    "checksum": "a13b52c4a212a0e9a8465c3af0dbca3217c760b4357087bd84528b159d1f9f51"
-  },
-  {
-    "id": "b540e21a-2ef6-402c-8c5b-dd0478f3151a",
-    "tenant_id": "test-tenant",
-    "timestamp": "2026-03-19T02:24:35.097691327Z",
-    "event_type": "user_management",
-    "action": "update_role",
-    "user_id": "system",
-    "user_type": "human",
-    "resource_type": "role",
-    "resource_id": "test-role-update-audit",
-    "resource_name": "Updated Role Name",
-    "result": "success",
-    "details": {
-      "role_permissions": 2
-    },
-    "changes": {
-      "before": {
-        "description": "Original description",
-        "name": "Original Role Name",
-        "permission_count": 1
-      },
-      "after": {
-        "description": "Updated description",
-        "name": "Updated Role Name",
-        "permission_count": 2
-      },
-      "fields": [
-        "name",
-        "description",
-        "permissions"
-      ]
-    },
-    "severity": "high",
-    "source": "rbac",
-    "version": "1.0",
-    "checksum": "ec41d3e6ed20f46e96dbf207eb5344fd69f35cdbad1cbc8de3e57bc3f1958222"
-  },
-  {
-    "id": "e387fd1b-35d7-4403-a7d0-079d81171621",
-    "tenant_id": "test-tenant",
-    "timestamp": "2026-03-19T02:24:35.133379236Z",
-    "event_type": "user_management",
-    "action": "create_role",
-    "user_id": "system",
-    "user_type": "human",
-    "resource_type": "role",
-    "resource_id": "test-role-delete-audit",
-    "resource_name": "Role to Delete",
-    "result": "success",
-    "details": {
-      "role_description": "This role will be deleted",
-      "role_permissions": 1
-    },
-    "severity": "high",
-    "source": "rbac",
-    "version": "1.0",
-    "checksum": "366629b9d5f422df8f0538303364475f5e6b319aa117ae05038cd1c7487402d4"
-  },
-  {
-    "id": "5ac71fe2-3375-4c91-af67-7ddcb195061d",
-    "tenant_id": "test-tenant",
-    "timestamp": "2026-03-19T02:24:35.196531797Z",
-    "event_type": "user_management",
-    "action": "delete_role",
-    "user_id": "system",
-    "user_type": "human",
-    "resource_type": "role",
-    "resource_id": "test-role-delete-audit",
-    "resource_name": "Role to Delete",
-    "result": "success",
-    "details": {
-      "deleted_permissions": 1,
-      "role_description": "This role will be deleted"
-    },
-    "severity": "critical",
-    "source": "rbac",
-    "version": "1.0",
-    "checksum": "c40c3bf5d1b9851dff56c0e8c2b0d5e7035614db6d3b1f1ab29e9d6feb590ad5"
-  },
-  {
-    "id": "5cce52d5-8e8e-46b9-840b-e8559f14fd80",
-    "tenant_id": "test-tenant",
-    "timestamp": "2026-03-19T02:24:35.257330693Z",
-    "event_type": "user_management",
-    "action": "create_role",
-    "user_id": "system",
-    "user_type": "human",
-    "resource_type": "role",
-    "resource_id": "test-role-revoke",
-    "resource_name": "Test Role for Revoke",
+    "resource_id": "test-role-no-manager",
+    "resource_name": "Test Role No Manager",
     "result": "success",
     "details": {
       "role_description": "",
-      "role_permissions": 1
+      "role_permissions": 0
     },
     "severity": "high",
     "source": "rbac",
     "version": "1.0",
-    "checksum": "71710cf67289d0f122c7d3cff32b2c6464e3775c84729a4bee61bcd41b352cda"
-  },
-  {
-    "id": "dd331cf9-53bd-40e3-b9da-499d74bda92b",
-    "tenant_id": "test-tenant",
-    "timestamp": "2026-03-19T02:24:35.291547276Z",
-    "event_type": "user_management",
-    "action": "revoke_role",
-    "user_id": "test-user-revoke",
-    "user_type": "human",
-    "resource_type": "role_assignment",
-    "resource_id": "test-role-revoke",
-    "result": "success",
-    "details": {
-      "revoked_role": "test-role-revoke",
-      "subject_id": "test-user-revoke"
-    },
-    "severity": "high",
-    "source": "rbac",
-    "version": "1.0",
-    "checksum": "10a3e4cddcf0c815cc6e9eb1726e750de989ec62b7c43cbc601fabfe06ccec07"
+    "checksum": "8061956cc45e7aff33fb45f76a6d6d9fd95364de3ef21ef333999450b56c9e3a"
   }
 ]
