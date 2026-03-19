@@ -40,5 +40,26 @@
     "source": "rbac",
     "version": "1.0",
     "checksum": "364650924b392fce0bbc46fe128b0e066de0f3471bec0a2ae878ac835bbd6bcf"
+  },
+  {
+    "id": "6be96042-1108-40dc-b88e-300ea0fd2acd",
+    "tenant_id": "tenant-1",
+    "timestamp": "2026-03-19T02:29:08.359518372Z",
+    "event_type": "user_management",
+    "action": "create_role",
+    "user_id": "system",
+    "user_type": "human",
+    "resource_type": "role",
+    "resource_id": "child.override",
+    "resource_name": "Child Override Role",
+    "result": "success",
+    "details": {
+      "role_description": "",
+      "role_permissions": 2
+    },
+    "severity": "high",
+    "source": "rbac",
+    "version": "1.0",
+    "checksum": "ff312abf29d51f01d9e9de3758cc8e3943d8453c52dcbeb926269778a953a796"
   }
 ]
