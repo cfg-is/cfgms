@@ -98,5 +98,26 @@
     "source": "rbac",
     "version": "1.0",
     "checksum": "366629b9d5f422df8f0538303364475f5e6b319aa117ae05038cd1c7487402d4"
+  },
+  {
+    "id": "5ac71fe2-3375-4c91-af67-7ddcb195061d",
+    "tenant_id": "test-tenant",
+    "timestamp": "2026-03-19T02:24:35.196531797Z",
+    "event_type": "user_management",
+    "action": "delete_role",
+    "user_id": "system",
+    "user_type": "human",
+    "resource_type": "role",
+    "resource_id": "test-role-delete-audit",
+    "resource_name": "Role to Delete",
+    "result": "success",
+    "details": {
+      "deleted_permissions": 1,
+      "role_description": "This role will be deleted"
+    },
+    "severity": "critical",
+    "source": "rbac",
+    "version": "1.0",
+    "checksum": "c40c3bf5d1b9851dff56c0e8c2b0d5e7035614db6d3b1f1ab29e9d6feb590ad5"
   }
 ]
