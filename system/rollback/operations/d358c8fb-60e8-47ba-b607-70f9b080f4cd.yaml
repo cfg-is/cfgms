@@ -6,6 +6,14 @@ config:
           eventtype: rollback_initiated
           result: success
           timestamp: 2026-03-18T22:24:29.42123544-04:00
+        - action: Progress update
+          actor: test-user
+          details:
+            percentage: 25
+            stage: validating
+          eventtype: rollback_progress
+          result: success
+          timestamp: 2026-03-18T22:24:29.444154151-04:00
     completedat: null
     id: d358c8fb-60e8-47ba-b607-70f9b080f4cd
     initiatedat: 2026-03-18T22:24:29.42123544-04:00
@@ -39,7 +47,7 @@ config:
     result: null
     status: pending
 metadata:
-    checksum: 110d46fc62f11c6816ba1264b6ebaa5733efe03d53a68393ba3f91c93fb6c71f
+    checksum: 45b28503402d71a3ca208f4c9c72e2d0a07d1bb7718027ee44973a576eab4724
     created_at: 2026-03-18T22:24:29.42123544-04:00
     created_by: test-user
     format: yaml
@@ -52,6 +60,6 @@ metadata:
         - pending
         - device
     tenant_id: system
-    updated_at: 2026-03-18T22:24:29.422155047-04:00
+    updated_at: 2026-03-18T22:24:29.453660567-04:00
     updated_by: test-user
-    version: 1
+    version: 2
