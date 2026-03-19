@@ -61,5 +61,26 @@
     "source": "rbac",
     "version": "1.0",
     "checksum": "e0afb4f3812a4d438880e4238c7aaa64636b77d6c82dec121c3ee2f5d2c8d6d0"
+  },
+  {
+    "id": "b418a97b-c35b-4acb-b3eb-d13d0bb1ff04",
+    "tenant_id": "msp-finance",
+    "timestamp": "2026-03-19T02:24:42.65476365Z",
+    "event_type": "user_management",
+    "action": "create_role",
+    "user_id": "system",
+    "user_type": "human",
+    "resource_type": "role",
+    "resource_id": "finance-analyst-role",
+    "resource_name": "Finance Analyst",
+    "result": "success",
+    "details": {
+      "role_description": "",
+      "role_permissions": 1
+    },
+    "severity": "high",
+    "source": "rbac",
+    "version": "1.0",
+    "checksum": "8ec77a505bcfe5f0ca906147657e87d13f167dc0fc41e86ff4767ec8bb8f1fd6"
   }
 ]
