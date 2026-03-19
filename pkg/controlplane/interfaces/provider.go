@@ -58,11 +58,16 @@ type ControlPlaneProvider interface {
 	// for command execution - use SubscribeEvents to receive completion events.
 	SendCommand(ctx context.Context, cmd *types.Command) error
 
-	// BroadcastCommand sends a command to all stewards in a tenant
+	// FanOutCommand sends a command to a specific list of stewards.
 	//
-	// The command's TenantID field is used to target stewards. Stewards
-	// filter broadcasts based on their tenant membership.
-	BroadcastCommand(ctx context.Context, cmd *types.Command) error
+	// The caller is responsible for resolving target steward IDs (by tenant,
+	// search results, online status, etc.). The transport layer delivers to
+	// each steward without knowledge of organizational hierarchy.
+	//
+	// Returns FanOutResult with per-steward delivery status. The error return
+	// is for systemic failures (provider not started, etc.), not per-steward
+	// delivery failures which are reported in FanOutResult.Failed.
+	FanOutCommand(ctx context.Context, cmd *types.Command, stewardIDs []string) (*types.FanOutResult, error)
 
 	// SubscribeCommands subscribes to commands (steward-side)
 	//

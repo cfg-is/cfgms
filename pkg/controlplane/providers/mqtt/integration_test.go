@@ -154,8 +154,8 @@ func TestIntegration_EventFlow(t *testing.T) {
 	mu.Unlock()
 }
 
-// TestIntegration_BroadcastToMultipleStewards tests broadcast functionality
-func TestIntegration_BroadcastToMultipleStewards(t *testing.T) {
+// TestIntegration_FanOutToMultipleStewards tests fan-out delivery to explicit steward list
+func TestIntegration_FanOutToMultipleStewards(t *testing.T) {
 	broker := newMockBroker()
 
 	// Controller
@@ -165,28 +165,31 @@ func TestIntegration_BroadcastToMultipleStewards(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Broadcast command to tenant
+	// Fan out command to specific stewards
 	cmd := &types.Command{
-		ID:        "broadcast-cmd",
+		ID:        "fanout-cmd",
 		Type:      types.CommandExecuteTask,
-		TenantID:  "tenant-1",
 		Timestamp: time.Now(),
 	}
 
-	err = controller.BroadcastCommand(context.Background(), cmd)
+	stewardIDs := []string{"steward-1", "steward-2"}
+	result, err := controller.FanOutCommand(context.Background(), cmd, stewardIDs)
 	require.NoError(t, err)
+	assert.Len(t, result.Succeeded, 2)
+	assert.Empty(t, result.Failed)
 
-	// Verify broadcast was published to correct topic
-	lastMsg := broker.getLastPublished()
-	require.NotNil(t, lastMsg)
-	assert.Equal(t, "cfgms/commands/tenant-1/broadcast", lastMsg.topic)
+	// Verify messages published to correct unicast topics
+	broker.mu.RLock()
+	require.Len(t, broker.published, 2)
+	assert.Equal(t, "cfgms/commands/steward-1", broker.published[0].topic)
+	assert.Equal(t, "cfgms/commands/steward-2", broker.published[1].topic)
+	broker.mu.RUnlock()
 
-	// Verify command can be deserialized
+	// Verify command can be deserialized from either message
 	var decoded types.Command
-	err = unmarshalMessage(lastMsg.payload, &decoded)
+	err = unmarshalMessage(broker.published[0].payload, &decoded)
 	require.NoError(t, err)
-	assert.Equal(t, "broadcast-cmd", decoded.ID)
-	assert.Equal(t, "tenant-1", decoded.TenantID)
+	assert.Equal(t, "fanout-cmd", decoded.ID)
 }
 
 // TestIntegration_ResponseWaitFlow tests request-response pattern
