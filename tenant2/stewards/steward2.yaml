@@ -12,7 +12,7 @@ config:
         mode: controller
 metadata:
     checksum: 707c6d5d108606ad3a58ce655e788f9f7aa570c5c39b66d76cd95d41b43354c1
-    created_at: 2026-03-18T22:24:33.34219689-04:00
+    created_at: 2026-03-18T22:29:06.933690208-04:00
     created_by: config-service
     format: yaml
     name: steward2
@@ -23,6 +23,6 @@ metadata:
         - steward-config
         - migration
     tenant_id: tenant2
-    updated_at: 2026-03-18T22:24:33.342201108-04:00
+    updated_at: 2026-03-18T22:29:06.933698313-04:00
     updated_by: config-service
     version: 1
