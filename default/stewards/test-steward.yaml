@@ -5,7 +5,7 @@ config:
     resources:
         - config:
             path: /tmp/test
-            permissions: "644"
+            permissions: "755"
           module: directory
           name: test-directory
         - config:
@@ -24,8 +24,8 @@ config:
             level: info
         mode: controller
 metadata:
-    checksum: 797cfd7287ab878adf085a2a47ce6f586e5ebf704da79a3186a09c778c089f5c
-    created_at: 2026-03-18T22:29:07.072743187-04:00
+    checksum: 2597e44543a2ec9b76a02b2a833839c09211866a7123dd6abc4a7f159b5779d1
+    created_at: 2026-03-18T22:29:07.131790801-04:00
     created_by: config-manager
     format: yaml
     name: test-steward
@@ -35,6 +35,6 @@ metadata:
     tags:
         - steward-config
     tenant_id: default
-    updated_at: 2026-03-18T22:29:07.072746704-04:00
+    updated_at: 2026-03-18T22:29:07.131794939-04:00
     updated_by: config-manager
-    version: 2
+    version: 1
