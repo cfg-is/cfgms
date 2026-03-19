@@ -1,0 +1,18 @@
+[
+  {
+    "id": "d578d613-e9dc-43b3-9268-88d33a3367eb",
+    "tenant_id": "test-tenant",
+    "timestamp": "2026-03-19T02:24:45.961859952Z",
+    "event_type": "authentication",
+    "action": "login",
+    "user_id": "user1",
+    "user_type": "human",
+    "resource_type": "session",
+    "resource_id": "session1",
+    "result": "success",
+    "severity": "high",
+    "source": "test",
+    "version": "1.0",
+    "checksum": "10053b67dd65c52670ed173482bc77720203c82116bab1e5b9da1042bae4a854"
+  }
+]
