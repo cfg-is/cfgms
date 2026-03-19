@@ -39,37 +39,43 @@ func (p *Provider) SendCommand(ctx context.Context, cmd *types.Command) error {
 	return nil
 }
 
-// BroadcastCommand sends a command to all stewards in a tenant (controller-side).
-func (p *Provider) BroadcastCommand(ctx context.Context, cmd *types.Command) error {
+// FanOutCommand sends a command to a specific list of stewards (controller-side).
+func (p *Provider) FanOutCommand(ctx context.Context, cmd *types.Command, stewardIDs []string) (*types.FanOutResult, error) {
 	if p.mode != ModeServer {
-		return fmt.Errorf("BroadcastCommand only available in server mode")
+		return nil, fmt.Errorf("FanOutCommand only available in server mode")
 	}
 
-	if cmd.TenantID == "" {
-		return fmt.Errorf("TenantID required for broadcast commands")
+	if len(stewardIDs) == 0 {
+		return nil, fmt.Errorf("stewardIDs must not be empty")
 	}
 
-	p.mu.Lock()
-	p.stats.CommandsSent++
-	p.mu.Unlock()
-
-	// Serialize command to JSON
+	// Serialize command once; reuse payload for all stewards
 	payload, err := marshalMessage(cmd)
 	if err != nil {
-		return fmt.Errorf("failed to marshal command: %w", err)
+		return nil, fmt.Errorf("failed to marshal command: %w", err)
 	}
 
-	// Publish to tenant broadcast topic
-	topic := fmt.Sprintf(topicCommandTenantBcast, cmd.TenantID)
-	err = p.broker.Publish(ctx, topic, payload, 1, false)
-	if err != nil {
-		p.mu.Lock()
-		p.stats.DeliveryFailures++
-		p.mu.Unlock()
-		return fmt.Errorf("failed to broadcast command: %w", err)
+	result := &types.FanOutResult{
+		Succeeded: make([]string, 0, len(stewardIDs)),
+		Failed:    make(map[string]error),
 	}
 
-	return nil
+	for _, stewardID := range stewardIDs {
+		topic := fmt.Sprintf(topicCommandUnicast, stewardID)
+		if pubErr := p.broker.Publish(ctx, topic, payload, 1, false); pubErr != nil {
+			p.mu.Lock()
+			p.stats.DeliveryFailures++
+			p.mu.Unlock()
+			result.Failed[stewardID] = pubErr
+		} else {
+			p.mu.Lock()
+			p.stats.CommandsSent++
+			p.mu.Unlock()
+			result.Succeeded = append(result.Succeeded, stewardID)
+		}
+	}
+
+	return result, nil
 }
 
 // SubscribeCommands subscribes to commands for a steward (steward-side).

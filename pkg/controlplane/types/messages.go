@@ -235,6 +235,15 @@ type ConfigStatusReport struct {
 	ExecutionTimeMs int64 `json:"execution_time_ms,omitempty"`
 }
 
+// FanOutResult reports per-steward delivery status from a FanOutCommand.
+type FanOutResult struct {
+	// Succeeded contains steward IDs that received the command
+	Succeeded []string
+
+	// Failed maps steward IDs to their delivery errors
+	Failed map[string]error
+}
+
 // EventFilter defines criteria for filtering events during subscription.
 type EventFilter struct {
 	// StewardIDs filters events to specific stewards (empty = all)
