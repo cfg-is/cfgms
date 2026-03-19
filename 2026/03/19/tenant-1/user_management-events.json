@@ -1,8 +1,8 @@
 [
   {
-    "id": "decb743a-ca1f-4fe3-bf44-6a87fdef0adc",
+    "id": "d3d87129-5320-4e0e-9fb8-8f90b47086c4",
     "tenant_id": "tenant-1",
-    "timestamp": "2026-03-19T02:29:08.247379608Z",
+    "timestamp": "2026-03-19T02:29:08.321418812Z",
     "event_type": "user_management",
     "action": "create_role",
     "user_id": "system",
@@ -13,32 +13,11 @@
     "result": "success",
     "details": {
       "role_description": "",
-      "role_permissions": 0
+      "role_permissions": 2
     },
     "severity": "high",
     "source": "rbac",
     "version": "1.0",
-    "checksum": "bdc0f76a0940b1659840653a8a7e94086ca2bb557979c550ea1ac2745e15632a"
-  },
-  {
-    "id": "dd3b38ec-25e3-445e-a6de-909ea362a077",
-    "tenant_id": "tenant-1",
-    "timestamp": "2026-03-19T02:29:08.267760325Z",
-    "event_type": "user_management",
-    "action": "create_role",
-    "user_id": "system",
-    "user_type": "human",
-    "resource_type": "role",
-    "resource_id": "child.role",
-    "resource_name": "Child Role",
-    "result": "success",
-    "details": {
-      "role_description": "",
-      "role_permissions": 0
-    },
-    "severity": "high",
-    "source": "rbac",
-    "version": "1.0",
-    "checksum": "4e0c54ace793f7be3ac32d59a4654df8e3004873e0bc2b7a47aa17cae2c03d04"
+    "checksum": "9ae88f5f3e128d5b558873deb9f505e039b935fda2bfacc624ca07d293272aec"
   }
 ]
