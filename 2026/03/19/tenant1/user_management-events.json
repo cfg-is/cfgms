@@ -40,5 +40,26 @@
     "source": "rbac",
     "version": "1.0",
     "checksum": "a4338e32dc7a9dccd3b226a2a016b5efa117a85dbbf23d79ea1b8561c05985bd"
+  },
+  {
+    "id": "1f965c61-28cc-4668-84e2-95509c54a752",
+    "tenant_id": "tenant1",
+    "timestamp": "2026-03-19T02:24:34.963563578Z",
+    "event_type": "user_management",
+    "action": "create_role",
+    "user_id": "system",
+    "user_type": "human",
+    "resource_type": "role",
+    "resource_id": "ed1ad013-fb68-41ec-a20b-67b06ebd36c9",
+    "resource_name": "Developer Template-dev1",
+    "result": "success",
+    "details": {
+      "role_description": "Role created from template: Standard developer permissions",
+      "role_permissions": 1
+    },
+    "severity": "high",
+    "source": "rbac",
+    "version": "1.0",
+    "checksum": "dd2d66974dba386f2dd12bf043fad49654aaae377753709b6a018c7c7213727a"
   }
 ]
