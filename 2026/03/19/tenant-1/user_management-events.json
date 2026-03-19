@@ -1,44 +1,23 @@
 [
   {
-    "id": "d090b318-899a-4801-bdf5-4bae0d109a16",
+    "id": "abb29608-633e-48c4-ab72-60689cb240c1",
     "tenant_id": "tenant-1",
-    "timestamp": "2026-03-19T02:24:35.919033154Z",
+    "timestamp": "2026-03-19T02:24:36.002082247Z",
     "event_type": "user_management",
     "action": "create_role",
     "user_id": "system",
     "user_type": "human",
     "resource_type": "role",
-    "resource_id": "role1",
-    "resource_name": "Role 1",
+    "resource_id": "tenant1.role",
+    "resource_name": "Tenant 1 Role",
     "result": "success",
     "details": {
-      "role_description": "",
+      "role_description": "Role for tenant 1",
       "role_permissions": 0
     },
     "severity": "high",
     "source": "rbac",
     "version": "1.0",
-    "checksum": "a11f7f49ea2ef9e0127cc1f385a95ef7d1fc4e4ef46e0e263f98100e0e395647"
-  },
-  {
-    "id": "1f875b06-6d82-4fc4-af07-a327df6e2e71",
-    "tenant_id": "tenant-1",
-    "timestamp": "2026-03-19T02:24:35.941073484Z",
-    "event_type": "user_management",
-    "action": "create_role",
-    "user_id": "system",
-    "user_type": "human",
-    "resource_type": "role",
-    "resource_id": "role2",
-    "resource_name": "Role 2",
-    "result": "success",
-    "details": {
-      "role_description": "",
-      "role_permissions": 0
-    },
-    "severity": "high",
-    "source": "rbac",
-    "version": "1.0",
-    "checksum": "6e92c618846944583d5e97c990afccad6c15196f32d10c2c2f63e59c807c9532"
+    "checksum": "9e5ea0974fd8fceee5d9992854f91962f3ffa9de72ce549694828f47f9b8634f"
   }
 ]
