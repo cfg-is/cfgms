@@ -1,0 +1,17 @@
+[
+  {
+    "id": "0c812523a95f6b7a",
+    "tenant_id": "tenant-1",
+    "timestamp": "2026-03-18T21:24:53.997390182-04:00",
+    "event_type": "authentication",
+    "action": "login",
+    "user_id": "user-1",
+    "user_type": "human",
+    "resource_type": "session",
+    "resource_id": "session-1",
+    "result": "success",
+    "severity": "low",
+    "source": "",
+    "checksum": ""
+  }
+]
