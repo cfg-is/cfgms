@@ -1,65 +1,23 @@
 [
   {
-    "id": "42eacff5-0851-4b56-b103-0b1a09e053c0",
+    "id": "d090b318-899a-4801-bdf5-4bae0d109a16",
     "tenant_id": "tenant-1",
-    "timestamp": "2026-03-19T02:24:35.815387606Z",
+    "timestamp": "2026-03-19T02:24:35.919033154Z",
     "event_type": "user_management",
     "action": "create_role",
     "user_id": "system",
     "user_type": "human",
     "resource_type": "role",
-    "resource_id": "parent.role",
-    "resource_name": "Parent Role",
+    "resource_id": "role1",
+    "resource_name": "Role 1",
     "result": "success",
     "details": {
       "role_description": "",
-      "role_permissions": 2
+      "role_permissions": 0
     },
     "severity": "high",
     "source": "rbac",
     "version": "1.0",
-    "checksum": "cfc249589104737087099b1d004d95717c9db6d0d8016a5d6422dc9c44a944ba"
-  },
-  {
-    "id": "13a459e0-ce9c-4c54-85a5-fa0bc39aaa10",
-    "tenant_id": "tenant-1",
-    "timestamp": "2026-03-19T02:24:35.837168477Z",
-    "event_type": "user_management",
-    "action": "create_role",
-    "user_id": "system",
-    "user_type": "human",
-    "resource_type": "role",
-    "resource_id": "child.additive",
-    "resource_name": "Child Additive Role",
-    "result": "success",
-    "details": {
-      "role_description": "",
-      "role_permissions": 1
-    },
-    "severity": "high",
-    "source": "rbac",
-    "version": "1.0",
-    "checksum": "c82c1157bd5605605638c9e25a74a1e0aa9d9d061ff580c57812362680f42c68"
-  },
-  {
-    "id": "40438692-49aa-4f0e-841d-5c7173ece250",
-    "tenant_id": "tenant-1",
-    "timestamp": "2026-03-19T02:24:35.858789382Z",
-    "event_type": "user_management",
-    "action": "create_role",
-    "user_id": "system",
-    "user_type": "human",
-    "resource_type": "role",
-    "resource_id": "child.override",
-    "resource_name": "Child Override Role",
-    "result": "success",
-    "details": {
-      "role_description": "",
-      "role_permissions": 2
-    },
-    "severity": "high",
-    "source": "rbac",
-    "version": "1.0",
-    "checksum": "d646c9961d697631515ac699290717de1e6e97128c6256ba395772d11c170b74"
+    "checksum": "a11f7f49ea2ef9e0127cc1f385a95ef7d1fc4e4ef46e0e263f98100e0e395647"
   }
 ]
