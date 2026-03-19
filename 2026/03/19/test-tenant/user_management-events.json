@@ -40,5 +40,42 @@
     "source": "rbac",
     "version": "1.0",
     "checksum": "160c5f3a026d9ad3d101dcedf9d5c7a81dab8b1d13d0ad51225cada0491444da"
+  },
+  {
+    "id": "b1351dd1-1eba-41c2-a018-436eeb8f1489",
+    "tenant_id": "test-tenant",
+    "timestamp": "2026-03-19T02:29:07.799855675Z",
+    "event_type": "user_management",
+    "action": "update_role",
+    "user_id": "system",
+    "user_type": "human",
+    "resource_type": "role",
+    "resource_id": "test-role-update-audit",
+    "resource_name": "Updated Role Name",
+    "result": "success",
+    "details": {
+      "role_permissions": 2
+    },
+    "changes": {
+      "before": {
+        "description": "Original description",
+        "name": "Original Role Name",
+        "permission_count": 1
+      },
+      "after": {
+        "description": "Updated description",
+        "name": "Updated Role Name",
+        "permission_count": 2
+      },
+      "fields": [
+        "name",
+        "description",
+        "permissions"
+      ]
+    },
+    "severity": "high",
+    "source": "rbac",
+    "version": "1.0",
+    "checksum": "d328fdfd02fb3f120e8dc71cf9628ac34773109f91e083df72ce0b8fa39aedb4"
   }
 ]
