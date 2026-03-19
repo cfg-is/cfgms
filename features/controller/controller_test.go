@@ -64,6 +64,9 @@ func TestControllerCreation(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 				assert.NotNil(t, controller)
+				if controller != nil {
+					t.Cleanup(func() { _ = controller.Close() })
+				}
 			}
 		})
 	}
@@ -176,6 +179,7 @@ func TestModuleRegistration(t *testing.T) {
 	pkgtestutil.PreInitControllerForTest(t, cfg.CertPath, cfg.Certificate.CAPath)
 	ctrl, err := New(cfg, logger)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = ctrl.Close() })
 
 	// Create mock modules
 	moduleA := testutil.NewMockModule("moduleA")

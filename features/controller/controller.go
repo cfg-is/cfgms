@@ -164,6 +164,11 @@ func (c *Controller) Stop(ctx context.Context) error {
 		return ErrNotRunning
 	}
 
+	return c.stopLocked()
+}
+
+// stopLocked performs the actual shutdown. Caller must hold c.mu.
+func (c *Controller) stopLocked() error {
 	c.logger.Info("Stopping controller")
 
 	// Stop the REST API server
@@ -197,6 +202,23 @@ func (c *Controller) Stop(ctx context.Context) error {
 	}
 	c.running = false
 	c.logger.Info("Controller stopped successfully")
+	return nil
+}
+
+// Close releases resources held by the controller without requiring it to be running.
+// Use this when the controller was created but never started (e.g., in tests).
+func (c *Controller) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.running {
+		return c.stopLocked()
+	}
+
+	// Even if not running, close server resources (e.g., SQLite DB handles)
+	if c.server != nil {
+		return c.server.Stop()
+	}
 	return nil
 }
 
