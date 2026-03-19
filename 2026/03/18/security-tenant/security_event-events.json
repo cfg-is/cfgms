@@ -1,0 +1,17 @@
+[
+  {
+    "id": "7df6415c54852525",
+    "tenant_id": "security-tenant",
+    "timestamp": "2026-03-18T21:54:54.104819234-04:00",
+    "event_type": "security_event",
+    "action": "unauthorized_access",
+    "user_id": "attacker",
+    "user_type": "human",
+    "resource_type": "configuration",
+    "resource_id": "sensitive-config",
+    "result": "denied",
+    "severity": "critical",
+    "source": "",
+    "checksum": ""
+  }
+]
