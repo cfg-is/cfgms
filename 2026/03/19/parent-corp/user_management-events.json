@@ -1,0 +1,23 @@
+[
+  {
+    "id": "4b96e9fe-df75-4f6e-aed2-3e8e01a3a7a3",
+    "tenant_id": "parent-corp",
+    "timestamp": "2026-03-19T02:24:42.574805492Z",
+    "event_type": "user_management",
+    "action": "create_role",
+    "user_id": "system",
+    "user_type": "human",
+    "resource_type": "role",
+    "resource_id": "parent-admin-role",
+    "resource_name": "Parent Administrator",
+    "result": "success",
+    "details": {
+      "role_description": "",
+      "role_permissions": 2
+    },
+    "severity": "high",
+    "source": "rbac",
+    "version": "1.0",
+    "checksum": "86f731c060e3dc41c44748b9f74fc2e200ebb3abaadc54098814f939378e44df"
+  }
+]
