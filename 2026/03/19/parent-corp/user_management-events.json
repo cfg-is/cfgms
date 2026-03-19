@@ -1,8 +1,8 @@
 [
   {
-    "id": "4b96e9fe-df75-4f6e-aed2-3e8e01a3a7a3",
+    "id": "3a90a3a1-1e72-46a6-9374-35231f661387",
     "tenant_id": "parent-corp",
-    "timestamp": "2026-03-19T02:24:42.574805492Z",
+    "timestamp": "2026-03-19T02:29:18.414851373Z",
     "event_type": "user_management",
     "action": "create_role",
     "user_id": "system",
@@ -18,6 +18,6 @@
     "severity": "high",
     "source": "rbac",
     "version": "1.0",
-    "checksum": "86f731c060e3dc41c44748b9f74fc2e200ebb3abaadc54098814f939378e44df"
+    "checksum": "969a93fbf2b17cc0d8b6dff21178ca4b8f6714699022ea1777a0f1b462fc8137"
   }
 ]
