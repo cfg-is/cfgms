@@ -1,0 +1,17 @@
+[
+  {
+    "id": "6abaa8a412cc566f",
+    "tenant_id": "security-tenant",
+    "timestamp": "2026-03-18T22:14:54.104819234-04:00",
+    "event_type": "configuration",
+    "action": "update",
+    "user_id": "admin-user",
+    "user_type": "human",
+    "resource_type": "configuration",
+    "resource_id": "normal-config",
+    "result": "success",
+    "severity": "low",
+    "source": "",
+    "checksum": ""
+  }
+]
