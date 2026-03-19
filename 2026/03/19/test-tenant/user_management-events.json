@@ -1,22 +1,23 @@
 [
   {
-    "id": "634da01f-4d98-45e7-8851-132274e63886",
+    "id": "21e00094-b878-4a88-b2f6-701ea2b51cca",
     "tenant_id": "test-tenant",
-    "timestamp": "2026-03-19T02:24:36.241772773Z",
+    "timestamp": "2026-03-19T02:29:07.696009557Z",
     "event_type": "user_management",
-    "action": "revoke_role",
-    "user_id": "test-user-1",
+    "action": "create_role",
+    "user_id": "system",
     "user_type": "human",
-    "resource_type": "role_assignment",
-    "resource_id": "test-tenant.tenant.admin",
+    "resource_type": "role",
+    "resource_id": "test-role-audit",
+    "resource_name": "Test Role for Audit",
     "result": "success",
     "details": {
-      "revoked_role": "test-tenant.tenant.admin",
-      "subject_id": "test-user-1"
+      "role_description": "A test role to verify audit logging",
+      "role_permissions": 1
     },
     "severity": "high",
     "source": "rbac",
     "version": "1.0",
-    "checksum": "adef645f432409802251fb85e160238db06251da11c040214cd4ebf9c936fbdc"
+    "checksum": "028e7fb874e671dbe9147d352a4cf7d588f8720f0b7ac63a6f434ddaa0007787"
   }
 ]
