@@ -6,6 +6,13 @@ config:
           eventtype: rollback_initiated
           result: success
           timestamp: 2026-03-18T22:24:30.411497853-04:00
+        - action: Concurrent audit entry
+          actor: test-user
+          details:
+            index: 2
+          eventtype: concurrent_test
+          result: success
+          timestamp: 2026-03-18T22:24:30.438041103-04:00
     completedat: null
     id: 4a5d4613-db9b-41c4-b01b-5b00ddafb2f8
     initiatedat: 2026-03-18T22:24:30.411497853-04:00
@@ -39,7 +46,7 @@ config:
     result: null
     status: pending
 metadata:
-    checksum: 89ec5e8290647b5eaa6b2fbe32d8c58cb715d43dd3600c3a1a1e7770bffe5418
+    checksum: b1c68801b1ae0581ef7315cc1111ebbfb2ba392007cacf8533447a88e79db864
     created_at: 2026-03-18T22:24:30.411497853-04:00
     created_by: test-user
     format: yaml
@@ -52,6 +59,6 @@ metadata:
         - pending
         - device
     tenant_id: system
-    updated_at: 2026-03-18T22:24:30.412292419-04:00
+    updated_at: 2026-03-18T22:24:30.44505585-04:00
     updated_by: test-user
-    version: 1
+    version: 2
