@@ -217,16 +217,16 @@ architecture rules, and coding standards. CFGMS_AGENT_MODE=true is set.
 
 ## Phase 2: Validate
 
-5. Run \`make test-agent-complete\` which runs all validation that works without Docker:
+4. Run \`make test-agent-complete\` which runs all validation that works without Docker:
    - test-commit (tests + lint + security + architecture checks)
    - test-fast (fast comprehensive tests)
    - test-production-critical (production critical tests)
    - build-cross-validate (cross-platform compilation)
-6. If validation fails, fix issues and retry. Maximum 3 fix iterations.
+5. If validation fails, fix issues and retry. Maximum 3 fix iterations.
 
 ## Phase 3: Self-Review
 
-7. Review your own changes for quality issues:
+6. Review your own changes for quality issues:
    - Check for mocks, t.Skip(), empty assertions, hacky workarounds
    - Check for hardcoded secrets, SQL injection, information disclosure
    - Check for central provider violations (see CLAUDE.md Central Provider System)
@@ -235,11 +235,11 @@ architecture rules, and coding standards. CFGMS_AGENT_MODE=true is set.
 
 ## Phase 4: Commit and Push
 
-8. Run \`go mod tidy\` if dependencies changed
-9. Stage all changes
-10. Commit with message following CLAUDE.md format
+7. Run \`go mod tidy\` if dependencies changed
+8. Stage all changes
+9. Commit with message following CLAUDE.md format
     - Include \`Co-Authored-By: Claude <noreply@anthropic.com>\`${issue_ref}
-11. Push branch: \`git push -u origin \$(git branch --show-current)\`
+10. Push branch: \`git push -u origin \$(git branch --show-current)\`
 ${pr_instruction}
 
 ## Failure Handling
@@ -260,7 +260,7 @@ PROMPT_EOF
 )"
 }
 
-compose_prfix_prompt() {
+compose_pr_fix_prompt() {
     echo "Fetching PR #${PR_NUM} metadata..."
     PR_JSON=$(gh pr view "$PR_NUM" --json number,title,body,headRefName,reviews 2>&1) || {
         echo "ERROR: Failed to fetch PR #${PR_NUM}"
@@ -367,7 +367,7 @@ PROMPT_EOF
 case "$MODE" in
     issue)    compose_issue_prompt ;;
     branch)   compose_branch_prompt ;;
-    fix-pr)   compose_prfix_prompt ;;
+    fix-pr)   compose_pr_fix_prompt ;;
 esac
 
 if [ "$DRY_RUN" = "true" ]; then

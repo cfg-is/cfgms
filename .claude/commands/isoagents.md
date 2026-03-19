@@ -40,7 +40,7 @@ Show the status of all agent containers and offer lifecycle actions (cleanup, re
    - PR status: `gh pr list --head "feature/story-<NUM>-agent" --json url,state,title`
    - Suggest next actions based on state
 
-3. **If `$ARGUMENTS` is a container name** (contains `cfg-agent-`): Show detailed info:
+3. **If `$ARGUMENTS` is a container name** (contains `cfg-agent-`) **or a branch name** (contains `/`): Show detailed info. For branch names, derive the container name by sanitizing (`/` → `--`) and checking for `cfg-agent-branch-<sanitized>` or `cfg-agent-interactive-<sanitized>`:
    - Container status and logs: `./scripts/agent-dispatch.sh inspect-container <NAME>`
    - Extract branch from container labels, check for PR on that branch
    - For PR-fix containers: show the original PR being fixed

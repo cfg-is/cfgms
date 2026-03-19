@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Setup for interactive agent sessions.
-# Restores credentials, configures git, prints usage help.
+# Setup for interactive agent sessions — standalone utility script.
+# Not called by launch-interactive (which inlines equivalent setup to avoid
+# depending on /workspace files from other branches). Useful for manual
+# container sessions: docker run -it ... -c "./setup-interactive.sh && bash"
 set -euo pipefail
 
 # Initialize firewall
