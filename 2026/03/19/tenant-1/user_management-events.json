@@ -19,5 +19,26 @@
     "source": "rbac",
     "version": "1.0",
     "checksum": "fd11cd3b4b04fdf43427a9be436d29d7355866c61e1cb277e24afa6410060041"
+  },
+  {
+    "id": "6c6b597b-784c-4e46-9f70-898c727edb4b",
+    "tenant_id": "tenant-1",
+    "timestamp": "2026-03-19T02:29:08.158851983Z",
+    "event_type": "user_management",
+    "action": "create_role",
+    "user_id": "system",
+    "user_type": "human",
+    "resource_type": "role",
+    "resource_id": "middle.role",
+    "resource_name": "Middle Role",
+    "result": "success",
+    "details": {
+      "role_description": "",
+      "role_permissions": 0
+    },
+    "severity": "high",
+    "source": "rbac",
+    "version": "1.0",
+    "checksum": "897f4a015d94ff46b7455a6de2bff333aa130b0b894a0ad164dd158676c71c5d"
   }
 ]
