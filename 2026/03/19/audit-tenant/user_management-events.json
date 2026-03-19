@@ -1,0 +1,23 @@
+[
+  {
+    "id": "8e500021-8423-46ae-b462-7c846674f34a",
+    "tenant_id": "audit-tenant",
+    "timestamp": "2026-03-19T02:24:36.079288527Z",
+    "event_type": "user_management",
+    "action": "create_role",
+    "user_id": "system",
+    "user_type": "human",
+    "resource_type": "role",
+    "resource_id": "audit.test.role",
+    "resource_name": "Audit Test Role",
+    "result": "success",
+    "details": {
+      "role_description": "Role for testing audit trail",
+      "role_permissions": 0
+    },
+    "severity": "high",
+    "source": "rbac",
+    "version": "1.0",
+    "checksum": "bf548718492e9ac02494fb619e3427fcc6d2062198e703cf7f6aae4edc045af7"
+  }
+]
