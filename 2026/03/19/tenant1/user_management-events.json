@@ -1,0 +1,23 @@
+[
+  {
+    "id": "343b2c21-afee-4c5c-82d6-21c9090bdd0c",
+    "tenant_id": "tenant1",
+    "timestamp": "2026-03-19T02:24:34.908525274Z",
+    "event_type": "user_management",
+    "action": "create_role",
+    "user_id": "system",
+    "user_type": "human",
+    "resource_type": "role",
+    "resource_id": "test-role",
+    "resource_name": "Test Role",
+    "result": "success",
+    "details": {
+      "role_description": "",
+      "role_permissions": 1
+    },
+    "severity": "high",
+    "source": "rbac",
+    "version": "1.0",
+    "checksum": "584fe33ceb2553509e84139ff14e41014cafc9b975208d7ea777d5621ce21337"
+  }
+]
