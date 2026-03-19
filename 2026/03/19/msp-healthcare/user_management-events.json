@@ -1,8 +1,8 @@
 [
   {
-    "id": "c4123aae-0497-4de4-9dbc-af60aaf3686d",
+    "id": "1d176319-9d8d-4111-b916-f3feb31965c1",
     "tenant_id": "msp-healthcare",
-    "timestamp": "2026-03-19T02:24:42.487637276Z",
+    "timestamp": "2026-03-19T02:29:18.348455837Z",
     "event_type": "user_management",
     "action": "create_role",
     "user_id": "system",
@@ -18,27 +18,6 @@
     "severity": "high",
     "source": "rbac",
     "version": "1.0",
-    "checksum": "ac09c9c40379d829d29556541ab0fa92abbf551b346bdfa08a6ec356619e6b16"
-  },
-  {
-    "id": "91b9c179-e960-4461-a841-79672f9cad31",
-    "tenant_id": "msp-healthcare",
-    "timestamp": "2026-03-19T02:24:42.514492061Z",
-    "event_type": "user_management",
-    "action": "create_role",
-    "user_id": "system",
-    "user_type": "human",
-    "resource_type": "role",
-    "resource_id": "healthcare-admin-role",
-    "resource_name": "Healthcare Administrator",
-    "result": "success",
-    "details": {
-      "role_description": "",
-      "role_permissions": 4
-    },
-    "severity": "high",
-    "source": "rbac",
-    "version": "1.0",
-    "checksum": "8cf34c8468ab16d37750dd6c2a087438187c631b68c637d9ffd9d6068859b453"
+    "checksum": "f22332cb60d6eb97cc4a40fe581a599ab9c661585997c1064c289500472ac3a3"
   }
 ]
