@@ -1,0 +1,23 @@
+[
+  {
+    "id": "77b7a654-3f2b-465c-9777-471640c2c048",
+    "tenant_id": "tenant-2",
+    "timestamp": "2026-03-19T02:24:36.021841487Z",
+    "event_type": "user_management",
+    "action": "create_role",
+    "user_id": "system",
+    "user_type": "human",
+    "resource_type": "role",
+    "resource_id": "tenant2.role",
+    "resource_name": "Tenant 2 Role",
+    "result": "success",
+    "details": {
+      "role_description": "Role for tenant 2",
+      "role_permissions": 0
+    },
+    "severity": "high",
+    "source": "rbac",
+    "version": "1.0",
+    "checksum": "192d5cb0ffbdf4e0c256e512bf152aeea8315d05b09a091d2b7126326083b887"
+  }
+]
