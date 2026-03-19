@@ -140,5 +140,25 @@
     "source": "rbac",
     "version": "1.0",
     "checksum": "f806cd272b458fe0b23e9e5eb6838e27cc2bbb1a9915cbc58232a13064c143eb"
+  },
+  {
+    "id": "721e4af6-1bd0-4d0b-871e-7e8eaccfbdea",
+    "tenant_id": "test-tenant",
+    "timestamp": "2026-03-19T02:29:07.898316835Z",
+    "event_type": "user_management",
+    "action": "revoke_role",
+    "user_id": "test-user-revoke",
+    "user_type": "human",
+    "resource_type": "role_assignment",
+    "resource_id": "test-role-revoke",
+    "result": "success",
+    "details": {
+      "revoked_role": "test-role-revoke",
+      "subject_id": "test-user-revoke"
+    },
+    "severity": "high",
+    "source": "rbac",
+    "version": "1.0",
+    "checksum": "5a071be3b65a83b70b1a1981046c3ae49420c555e30a56419eec38cbfb3284da"
   }
 ]
