@@ -1,8 +1,8 @@
 [
   {
-    "id": "8e500021-8423-46ae-b462-7c846674f34a",
+    "id": "a5bffd82-d7f2-4327-b1bb-c508a612c13c",
     "tenant_id": "audit-tenant",
-    "timestamp": "2026-03-19T02:24:36.079288527Z",
+    "timestamp": "2026-03-19T02:29:08.61987987Z",
     "event_type": "user_management",
     "action": "create_role",
     "user_id": "system",
@@ -18,6 +18,6 @@
     "severity": "high",
     "source": "rbac",
     "version": "1.0",
-    "checksum": "bf548718492e9ac02494fb619e3427fcc6d2062198e703cf7f6aae4edc045af7"
+    "checksum": "7a5db400e37b3a1c6a2f0544f4a67b9a5065da3fe8a6f4d92d00a1d0c6f2dc6b"
   }
 ]
