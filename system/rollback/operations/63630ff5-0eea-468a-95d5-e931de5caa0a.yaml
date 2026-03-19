@@ -27,6 +27,13 @@ config:
           eventtype: concurrent_test
           result: success
           timestamp: 2026-03-18T22:29:01.319187897-04:00
+        - action: Concurrent audit entry
+          actor: test-user
+          details:
+            index: 0
+          eventtype: concurrent_test
+          result: success
+          timestamp: 2026-03-18T22:29:01.319199048-04:00
     completedat: null
     id: 63630ff5-0eea-468a-95d5-e931de5caa0a
     initiatedat: 2026-03-18T22:29:01.293971946-04:00
@@ -60,7 +67,7 @@ config:
     result: null
     status: pending
 metadata:
-    checksum: 0653475ce403e52bf195b7328fdfbcbed0963c888b0edc22c33ee2d8744595ec
+    checksum: 19a20dc643f7c81330d357d1f72fc9d80ad6311bb6bca9c049a76ca3cc3e4e58
     created_at: 2026-03-18T22:29:01.293971946-04:00
     created_by: test-user
     format: yaml
@@ -73,6 +80,6 @@ metadata:
         - pending
         - device
     tenant_id: system
-    updated_at: 2026-03-18T22:29:01.387129166-04:00
+    updated_at: 2026-03-18T22:29:01.426605758-04:00
     updated_by: test-user
-    version: 4
+    version: 5
