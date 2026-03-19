@@ -1,0 +1,57 @@
+config:
+    audittrail:
+        - action: Rollback operation initiated
+          actor: test-user
+          details: {}
+          eventtype: rollback_initiated
+          result: success
+          timestamp: 2026-03-18T22:24:29.784947371-04:00
+    completedat: null
+    id: 98ca9f99-97ce-4732-a12c-2b6de4ee0036
+    initiatedat: 2026-03-18T22:24:29.784947371-04:00
+    initiatedby: test-user
+    progress:
+        currentaction: ""
+        estimatedcompletion: null
+        itemsprocessed: 0
+        itemstotal: 0
+        percentage: 0
+        stage: initializing
+        startedat: 0001-01-01T00:00:00Z
+    request:
+        approvalid: ""
+        configurations: []
+        dryrun: false
+        emergency: false
+        modules: []
+        options:
+            force: false
+            notifyusers: false
+            preserveuserdata: false
+            progressive: false
+            progressivepercent: 0
+            skipvalidation: false
+        reason: Test rollback operation
+        rollbackto: abc123def456
+        rollbacktype: full
+        targetid: device-123
+        targettype: device
+    result: null
+    status: pending
+metadata:
+    checksum: d6b4f3d6da8af82e1c5f2d20aeb8d2ce366a7d9a03692638b2f9151b94d98cd3
+    created_at: 2026-03-18T22:24:29.784947371-04:00
+    created_by: test-user
+    format: yaml
+    name: 98ca9f99-97ce-4732-a12c-2b6de4ee0036
+    namespace: rollback/operations
+    scope: ""
+    source: rollback_manager
+    tags:
+        - rollback
+        - pending
+        - device
+    tenant_id: system
+    updated_at: 2026-03-18T22:24:29.830059915-04:00
+    updated_by: test-user
+    version: 1
