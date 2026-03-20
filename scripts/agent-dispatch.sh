@@ -279,7 +279,10 @@ case "$cmd" in
     setup_cmds="init-firewall.sh"
     setup_cmds+=" && mkdir -p ~/.claude"
     setup_cmds+=" && cp /persist/.credentials.json ~/.claude/.credentials.json 2>/dev/null || echo 'WARN: No credentials'"
-    setup_cmds+=" && echo '{\"hasCompletedOnboarding\":true,\"installMethod\":\"native\"}' > ~/.claude/.claude.json"
+    # Restore trust state and Claude config saved by /agent-setup
+    setup_cmds+=" && if [ -f /persist/.claude-config.json ]; then cp /persist/.claude-config.json ~/.claude.json 2>/dev/null || true; fi"
+    setup_cmds+=" && if [ -d /persist/.claude-state ]; then cp -rn /persist/.claude-state/. ~/.claude/ 2>/dev/null || true; fi"
+    setup_cmds+=" && if [ ! -f ~/.claude.json ]; then echo '{\"hasCompletedOnboarding\":true,\"installMethod\":\"native\"}' > ~/.claude.json; fi"
     setup_cmds+=" && git config --global user.name cfg-agent"
     setup_cmds+=" && git config --global user.email agent@cfg.is"
     setup_cmds+=" && git config --global push.autoSetupRemote true"

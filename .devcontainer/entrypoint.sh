@@ -66,7 +66,7 @@ else
     echo "Run: agent-setup to configure credentials"
     exit 1
 fi
-cat > ~/.claude/.claude.json <<'ONBOARD'
+cat > ~/.claude.json <<'ONBOARD'
 {"hasCompletedOnboarding":true,"installMethod":"native"}
 ONBOARD
 
