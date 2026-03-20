@@ -1,0 +1,85 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
+syntax = "proto3";
+
+package cfgms.transport;
+
+option go_package = "github.com/cfgis/cfgms/api/proto/transport";
+
+import "google/protobuf/timestamp.proto";
+
+// === Config Sync ===
+
+message ConfigSyncRequest {
+  string steward_id = 1;
+  string current_version = 2;  // steward's current config version (for delta)
+  repeated string modules = 3; // optional: specific modules to sync
+}
+
+message ConfigChunk {
+  bytes data = 1;              // chunk of signed config data
+  int32 chunk_index = 2;
+  int32 total_chunks = 3;
+  string version = 4;
+  string config_id = 5;
+}
+
+// === DNA Sync ===
+
+message DNAChunk {
+  string steward_id = 1;
+  string tenant_id = 2;
+  bytes data = 3;              // chunk of DNA data
+  int32 chunk_index = 4;
+  int32 total_chunks = 5;
+  bool is_delta = 6;           // true = delta update, false = full snapshot
+  string dna_hash = 7;
+}
+
+message DNASyncResponse {
+  bool accepted = 1;
+  string message = 2;
+  string new_hash = 3;         // controller's computed hash after applying
+}
+
+// === Bulk Transfer ===
+
+message BulkChunk {
+  string transfer_id = 1;
+  string transfer_type = 2;   // package, script, log_batch, binary
+  bytes data = 3;
+  int64 offset = 4;
+  int64 total_size = 5;
+  bool is_last = 6;
+  map<string, string> metadata = 7;
+}
+
+// === Interactive (future) ===
+
+message TaskMessage {
+  string task_id = 1;
+  string type = 2;             // start, progress, output, complete, cancel
+  bytes payload = 3;
+  google.protobuf.Timestamp timestamp = 4;
+}
+
+message TerminalData {
+  string session_id = 1;
+  bytes data = 2;              // raw terminal I/O
+  bool is_resize = 3;
+  int32 rows = 4;
+  int32 cols = 5;
+}
+
+message LogEntry {
+  string steward_id = 1;
+  string level = 2;
+  string message = 3;
+  google.protobuf.Timestamp timestamp = 4;
+  map<string, string> fields = 5;
+}
+
+message LogStreamResponse {
+  int64 entries_received = 1;
+  bool acknowledged = 2;
+}
