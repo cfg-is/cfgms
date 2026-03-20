@@ -44,29 +44,54 @@ One-time bootstrap for agent dispatch. Builds the container image, sets up crede
 
    While waiting, proceed with steps 6-8 (they're independent).
 
-6. **Set up Claude credentials**:
-   **IMPORTANT**: The OAuth flow below requires a real TTY for interactive browser login. The Bash tool CANNOT provide this. Do NOT attempt to run the `docker run --rm -it` command via the Bash tool — it will fail with "the input device is not a TTY". Instead, print the command and tell the user to run it manually in their terminal.
+6. **Set up Claude credentials and workspace trust**:
+   **IMPORTANT**: This step requires a real TTY for interactive login and trust acceptance. The Bash tool CANNOT provide this. Do NOT attempt to run the `docker run --rm -it` command via the Bash tool — it will fail with "the input device is not a TTY". Instead, print the command and tell the user to run it manually in their terminal.
 
    - Create Docker volume: `docker volume create claude-creds` (idempotent)
    - Check if credentials already exist in the volume:
      ```bash
-     docker run --rm -v claude-creds:/persist cfg-agent:latest \
-       test -f /persist/.credentials.json && echo "exists"
+     docker run --rm -v claude-creds:/persist --entrypoint test cfg-agent:latest \
+       -f /persist/.credentials.json && echo "exists"
      ```
    - If credentials exist and `$ARGUMENTS` is not 'creds': skip
    - If credentials missing or refreshing:
-     - Tell user: "Claude credentials need setup. This requires an interactive login."
-     - Run interactive container for OAuth (runs as root to allow npm update, then switches to agent user for OAuth):
+     - Tell user: "Claude credentials need setup. This requires interactive login, workspace trust acceptance, and remote-control approval."
+     - Print the following command for the user to run manually in their terminal:
        ```bash
        docker run --rm -it \
          -v claude-creds:/persist \
+         -w /workspace \
+         --cap-add NET_ADMIN \
          --user root \
          --entrypoint bash \
          cfg-agent:latest \
-         -c "npm update -g @anthropic-ai/claude-code && su agent -c 'claude --dangerously-skip-permissions && cp ~/.claude/.credentials.json /persist/'"
+         -c "mkdir -p /workspace && npm update -g @anthropic-ai/claude-code && su agent -c '
+           init-firewall.sh
+           echo \"\"
+           echo \"Step 1/4: OAuth login...\"
+           claude --dangerously-skip-permissions -p ready
+           echo \"\"
+           echo \"Step 2/4: Accepting workspace trust...\"
+           echo \"  → Type yes to trust /workspace, then /exit to quit\"
+           cd /workspace && claude
+           echo \"\"
+           echo \"Step 3/4: Accepting remote-control consent...\"
+           echo \"  → Type y to enable remote control, then Ctrl+C after it starts\"
+           cd /workspace && claude remote-control --permission-mode bypassPermissions --name setup-test || true
+           echo \"\"
+           echo \"Step 4/4: Saving all state...\"
+           cp ~/.claude/.credentials.json /persist/
+           cp ~/.claude.json /persist/.claude-config.json 2>/dev/null || true
+           cp -r ~/.claude /persist/.claude-state
+           echo \"Done! Credentials, trust, and remote-control consent saved.\"
+         '"
        ```
-     - **IMPORTANT**: This step requires user interaction (OAuth flow). Tell the user what to expect.
-     - The `npm update` ensures the container's Claude Code matches the latest version before authenticating.
+     - **What the user will experience**:
+       1. OAuth browser login (automatic redirect)
+       2. Workspace trust dialog — type `yes`, then `/exit`
+       3. Remote-control consent — type `y`, then `Ctrl+C` after it starts listening
+     - The `npm update` ensures the container's Claude Code matches the latest version.
+     - `~/.claude.json` (trust + remote consent) and `~/.claude/` (sessions, plugins) are saved to the volume.
 
 7. **Create directories**:
    ```bash

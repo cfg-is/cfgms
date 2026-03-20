@@ -31,6 +31,16 @@ Launch isolated agent containers to implement GitHub issues, continue work on br
    - Verify Docker is running: `docker info >/dev/null 2>&1`
    - Verify agent image exists: `docker image inspect cfg-agent:latest >/dev/null 2>&1`
    - If image missing, tell user to run `/agent-setup` first
+   - **Check credential validity**:
+     ```bash
+     ./scripts/agent-dispatch.sh check-creds
+     ```
+     Parse the output:
+     - `CREDS_OK:<minutes>` — Credentials valid, proceed
+     - `CREDS_LOW:<minutes>` — Warn: "Credentials expire in <minutes> min — agents may fail mid-run. Run `/agent-setup creds` to refresh."
+     - `CREDS_EXPIRED:<minutes>` — **STOP**: "Credentials expired <abs(minutes)> min ago. Run `/agent-setup creds` to refresh before dispatching."
+     - `CREDS_MISSING:*` — **STOP**: "No credentials found. Run `/agent-setup creds` first."
+     - `CREDS_ERROR:*` — Warn and continue (non-blocking)
 
 4. **Dispatch based on target type**:
 

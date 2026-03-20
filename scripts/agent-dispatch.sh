@@ -7,6 +7,13 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORKTREE_BASE="$(cd "$REPO_ROOT/.." && pwd)/worktrees"
 
+# Ensure clone is based on latest remote develop, not stale local state.
+# Called inside fresh clones after setting the remote URL.
+sync_to_remote_develop() {
+  git fetch origin develop
+  git reset --hard origin/develop
+}
+
 # Validate branch name: only allow safe characters (alphanumeric, /, -, ., _)
 validate_branch() {
   local branch="$1"
@@ -37,6 +44,7 @@ Commands:
   launch-interactive <BRANCH>               Print docker run command for interactive session
   wait-for-auth   <NUM> [NUM...]            Poll containers until past auth phase (~30s)
   wait-for-auth   --container <NAME> [...]  Poll named containers until past auth phase
+  check-creds                                Check OAuth credential validity and remaining time
   cleanup-issue   <NUM>                     Remove container and clone for a specific issue
   cleanup-container <NAME>                  Remove container and associated clone by name
   list-running                              List running agent containers
@@ -113,6 +121,7 @@ case "$cmd" in
     git clone --local --branch develop "$REPO_ROOT" "$dest"
     cd "$dest"
     git remote set-url origin "$github_url"
+    sync_to_remote_develop
     git checkout -b "feature/story-${num}-agent"
     trap - ERR
     echo "CLONE_OK:${num}:$(git branch --show-current)"
@@ -133,6 +142,7 @@ case "$cmd" in
       git clone --local --branch develop "$REPO_ROOT" "$dest"
       cd "$dest"
       git remote set-url origin "$github_url"
+      sync_to_remote_develop
       git fetch origin "$branch"
       git checkout "$branch"
       trap - ERR
@@ -142,6 +152,7 @@ case "$cmd" in
       git clone --local --branch develop "$REPO_ROOT" "$dest"
       cd "$dest"
       git remote set-url origin "$github_url"
+      sync_to_remote_develop
       git checkout -b "$branch"
       trap - ERR
       echo "CLONE_NEW:${sanitized}:${branch}"
@@ -172,6 +183,7 @@ case "$cmd" in
     git clone --local --branch develop "$REPO_ROOT" "$dest"
     cd "$dest"
     git remote set-url origin "$github_url"
+    sync_to_remote_develop
     git fetch origin "$pr_branch"
     git checkout "$pr_branch"
     trap - ERR
@@ -267,7 +279,10 @@ case "$cmd" in
     setup_cmds="init-firewall.sh"
     setup_cmds+=" && mkdir -p ~/.claude"
     setup_cmds+=" && cp /persist/.credentials.json ~/.claude/.credentials.json 2>/dev/null || echo 'WARN: No credentials'"
-    setup_cmds+=" && echo '{\"hasCompletedOnboarding\":true,\"installMethod\":\"native\"}' > ~/.claude/.claude.json"
+    # Restore trust state and Claude config saved by /agent-setup
+    setup_cmds+=" && if [ -f /persist/.claude-config.json ]; then cp /persist/.claude-config.json ~/.claude.json 2>/dev/null || true; fi"
+    setup_cmds+=" && if [ -d /persist/.claude-state ]; then cp -rn /persist/.claude-state/. ~/.claude/ 2>/dev/null || true; fi"
+    setup_cmds+=" && if [ ! -f ~/.claude.json ]; then echo '{\"hasCompletedOnboarding\":true,\"installMethod\":\"native\"}' > ~/.claude.json; fi"
     setup_cmds+=" && git config --global user.name cfg-agent"
     setup_cmds+=" && git config --global user.email agent@cfg.is"
     setup_cmds+=" && git config --global push.autoSetupRemote true"
@@ -378,6 +393,32 @@ case "$cmd" in
       fi
     done
     echo "WAIT_DONE"
+    ;;
+
+  check-creds)
+    # Check OAuth credential validity in the shared volume
+    if ! docker volume inspect claude-creds >/dev/null 2>&1; then
+      echo "CREDS_MISSING:no claude-creds volume"
+    elif ! docker run --rm -v claude-creds:/persist --entrypoint test cfg-agent:latest -f /persist/.credentials.json 2>/dev/null; then
+      echo "CREDS_MISSING:no credentials file"
+    else
+      result=$(docker run --rm -v claude-creds:/persist --entrypoint python3 cfg-agent:latest -c "
+import json, time
+d = json.load(open('/persist/.credentials.json'))
+oauth = d.get('claudeAiOauth', {})
+exp_ms = oauth.get('expiresAt', 0)
+exp_s = exp_ms / 1000
+now = time.time()
+remaining_min = int((exp_s - now) / 60)
+if remaining_min < 0:
+    print(f'CREDS_EXPIRED:{remaining_min}')
+elif remaining_min < 15:
+    print(f'CREDS_LOW:{remaining_min}')
+else:
+    print(f'CREDS_OK:{remaining_min}')
+" 2>/dev/null || echo "CREDS_ERROR:failed to parse")
+      echo "$result"
+    fi
     ;;
 
   cleanup-issue)
