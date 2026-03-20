@@ -25,6 +25,239 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// CommandType enumerates the types of commands a controller sends to a steward.
+type CommandType int32
+
+const (
+	CommandType_COMMAND_TYPE_UNSPECIFIED       CommandType = 0
+	CommandType_COMMAND_TYPE_SYNC_CONFIG       CommandType = 1
+	CommandType_COMMAND_TYPE_SYNC_DNA          CommandType = 2
+	CommandType_COMMAND_TYPE_CONNECT_DATAPLANE CommandType = 3
+	CommandType_COMMAND_TYPE_EXECUTE_TASK      CommandType = 4
+	CommandType_COMMAND_TYPE_SHUTDOWN          CommandType = 5
+	CommandType_COMMAND_TYPE_VALIDATE_CONFIG   CommandType = 6
+)
+
+// Enum value maps for CommandType.
+var (
+	CommandType_name = map[int32]string{
+		0: "COMMAND_TYPE_UNSPECIFIED",
+		1: "COMMAND_TYPE_SYNC_CONFIG",
+		2: "COMMAND_TYPE_SYNC_DNA",
+		3: "COMMAND_TYPE_CONNECT_DATAPLANE",
+		4: "COMMAND_TYPE_EXECUTE_TASK",
+		5: "COMMAND_TYPE_SHUTDOWN",
+		6: "COMMAND_TYPE_VALIDATE_CONFIG",
+	}
+	CommandType_value = map[string]int32{
+		"COMMAND_TYPE_UNSPECIFIED":       0,
+		"COMMAND_TYPE_SYNC_CONFIG":       1,
+		"COMMAND_TYPE_SYNC_DNA":          2,
+		"COMMAND_TYPE_CONNECT_DATAPLANE": 3,
+		"COMMAND_TYPE_EXECUTE_TASK":      4,
+		"COMMAND_TYPE_SHUTDOWN":          5,
+		"COMMAND_TYPE_VALIDATE_CONFIG":   6,
+	}
+)
+
+func (x CommandType) Enum() *CommandType {
+	p := new(CommandType)
+	*p = x
+	return p
+}
+
+func (x CommandType) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (CommandType) Descriptor() protoreflect.EnumDescriptor {
+	return file_transport_control_proto_enumTypes[0].Descriptor()
+}
+
+func (CommandType) Type() protoreflect.EnumType {
+	return &file_transport_control_proto_enumTypes[0]
+}
+
+func (x CommandType) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use CommandType.Descriptor instead.
+func (CommandType) EnumDescriptor() ([]byte, []int) {
+	return file_transport_control_proto_rawDescGZIP(), []int{0}
+}
+
+// EventType enumerates the types of events a steward emits to a controller.
+type EventType int32
+
+const (
+	EventType_EVENT_TYPE_UNSPECIFIED    EventType = 0
+	EventType_EVENT_TYPE_CONFIG_APPLIED EventType = 1
+	EventType_EVENT_TYPE_DNA_SYNCED     EventType = 2
+	EventType_EVENT_TYPE_TASK_COMPLETED EventType = 3
+	EventType_EVENT_TYPE_TASK_FAILED    EventType = 4
+	EventType_EVENT_TYPE_ERROR          EventType = 5
+)
+
+// Enum value maps for EventType.
+var (
+	EventType_name = map[int32]string{
+		0: "EVENT_TYPE_UNSPECIFIED",
+		1: "EVENT_TYPE_CONFIG_APPLIED",
+		2: "EVENT_TYPE_DNA_SYNCED",
+		3: "EVENT_TYPE_TASK_COMPLETED",
+		4: "EVENT_TYPE_TASK_FAILED",
+		5: "EVENT_TYPE_ERROR",
+	}
+	EventType_value = map[string]int32{
+		"EVENT_TYPE_UNSPECIFIED":    0,
+		"EVENT_TYPE_CONFIG_APPLIED": 1,
+		"EVENT_TYPE_DNA_SYNCED":     2,
+		"EVENT_TYPE_TASK_COMPLETED": 3,
+		"EVENT_TYPE_TASK_FAILED":    4,
+		"EVENT_TYPE_ERROR":          5,
+	}
+)
+
+func (x EventType) Enum() *EventType {
+	p := new(EventType)
+	*p = x
+	return p
+}
+
+func (x EventType) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (EventType) Descriptor() protoreflect.EnumDescriptor {
+	return file_transport_control_proto_enumTypes[1].Descriptor()
+}
+
+func (EventType) Type() protoreflect.EnumType {
+	return &file_transport_control_proto_enumTypes[1]
+}
+
+func (x EventType) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use EventType.Descriptor instead.
+func (EventType) EnumDescriptor() ([]byte, []int) {
+	return file_transport_control_proto_rawDescGZIP(), []int{1}
+}
+
+// Severity is used by both Event and LogEntry to indicate importance level.
+type Severity int32
+
+const (
+	Severity_SEVERITY_UNSPECIFIED Severity = 0
+	Severity_SEVERITY_INFO        Severity = 1
+	Severity_SEVERITY_WARNING     Severity = 2
+	Severity_SEVERITY_ERROR       Severity = 3
+	Severity_SEVERITY_CRITICAL    Severity = 4
+)
+
+// Enum value maps for Severity.
+var (
+	Severity_name = map[int32]string{
+		0: "SEVERITY_UNSPECIFIED",
+		1: "SEVERITY_INFO",
+		2: "SEVERITY_WARNING",
+		3: "SEVERITY_ERROR",
+		4: "SEVERITY_CRITICAL",
+	}
+	Severity_value = map[string]int32{
+		"SEVERITY_UNSPECIFIED": 0,
+		"SEVERITY_INFO":        1,
+		"SEVERITY_WARNING":     2,
+		"SEVERITY_ERROR":       3,
+		"SEVERITY_CRITICAL":    4,
+	}
+)
+
+func (x Severity) Enum() *Severity {
+	p := new(Severity)
+	*p = x
+	return p
+}
+
+func (x Severity) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (Severity) Descriptor() protoreflect.EnumDescriptor {
+	return file_transport_control_proto_enumTypes[2].Descriptor()
+}
+
+func (Severity) Type() protoreflect.EnumType {
+	return &file_transport_control_proto_enumTypes[2]
+}
+
+func (x Severity) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use Severity.Descriptor instead.
+func (Severity) EnumDescriptor() ([]byte, []int) {
+	return file_transport_control_proto_rawDescGZIP(), []int{2}
+}
+
+// StewardStatus enumerates the health states a steward can report.
+type StewardStatus int32
+
+const (
+	StewardStatus_STEWARD_STATUS_UNSPECIFIED  StewardStatus = 0
+	StewardStatus_STEWARD_STATUS_HEALTHY      StewardStatus = 1
+	StewardStatus_STEWARD_STATUS_DEGRADED     StewardStatus = 2
+	StewardStatus_STEWARD_STATUS_ERROR        StewardStatus = 3
+	StewardStatus_STEWARD_STATUS_DISCONNECTED StewardStatus = 4
+)
+
+// Enum value maps for StewardStatus.
+var (
+	StewardStatus_name = map[int32]string{
+		0: "STEWARD_STATUS_UNSPECIFIED",
+		1: "STEWARD_STATUS_HEALTHY",
+		2: "STEWARD_STATUS_DEGRADED",
+		3: "STEWARD_STATUS_ERROR",
+		4: "STEWARD_STATUS_DISCONNECTED",
+	}
+	StewardStatus_value = map[string]int32{
+		"STEWARD_STATUS_UNSPECIFIED":  0,
+		"STEWARD_STATUS_HEALTHY":      1,
+		"STEWARD_STATUS_DEGRADED":     2,
+		"STEWARD_STATUS_ERROR":        3,
+		"STEWARD_STATUS_DISCONNECTED": 4,
+	}
+)
+
+func (x StewardStatus) Enum() *StewardStatus {
+	p := new(StewardStatus)
+	*p = x
+	return p
+}
+
+func (x StewardStatus) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (StewardStatus) Descriptor() protoreflect.EnumDescriptor {
+	return file_transport_control_proto_enumTypes[3].Descriptor()
+}
+
+func (StewardStatus) Type() protoreflect.EnumType {
+	return &file_transport_control_proto_enumTypes[3]
+}
+
+func (x StewardStatus) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use StewardStatus.Descriptor instead.
+func (StewardStatus) EnumDescriptor() ([]byte, []int) {
+	return file_transport_control_proto_rawDescGZIP(), []int{3}
+}
+
 // ControlMessage is the envelope for all C2 traffic on the ControlChannel stream.
 type ControlMessage struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -144,7 +377,7 @@ func (*ControlMessage_Response) isControlMessage_Payload() {}
 type Command struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Type          string                 `protobuf:"bytes,2,opt,name=type,proto3" json:"type,omitempty"` // sync_config, sync_dna, connect_dataplane, execute_task, shutdown, validate_config
+	Type          CommandType            `protobuf:"varint,2,opt,name=type,proto3,enum=cfgms.transport.CommandType" json:"type,omitempty"`
 	StewardId     string                 `protobuf:"bytes,3,opt,name=steward_id,json=stewardId,proto3" json:"steward_id,omitempty"`
 	TenantId      string                 `protobuf:"bytes,4,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
 	Timestamp     *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
@@ -191,11 +424,11 @@ func (x *Command) GetId() string {
 	return ""
 }
 
-func (x *Command) GetType() string {
+func (x *Command) GetType() CommandType {
 	if x != nil {
 		return x.Type
 	}
-	return ""
+	return CommandType_COMMAND_TYPE_UNSPECIFIED
 }
 
 func (x *Command) GetStewardId() string {
@@ -237,13 +470,13 @@ func (x *Command) GetPriority() int32 {
 type Event struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Type          string                 `protobuf:"bytes,2,opt,name=type,proto3" json:"type,omitempty"` // config_applied, dna_synced, task_completed, task_failed, error, etc.
+	Type          EventType              `protobuf:"varint,2,opt,name=type,proto3,enum=cfgms.transport.EventType" json:"type,omitempty"`
 	StewardId     string                 `protobuf:"bytes,3,opt,name=steward_id,json=stewardId,proto3" json:"steward_id,omitempty"`
 	TenantId      string                 `protobuf:"bytes,4,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
 	Timestamp     *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
 	CommandId     string                 `protobuf:"bytes,6,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"` // correlation to originating command
 	Details       map[string]string      `protobuf:"bytes,7,rep,name=details,proto3" json:"details,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	Severity      string                 `protobuf:"bytes,8,opt,name=severity,proto3" json:"severity,omitempty"` // info, warning, error, critical
+	Severity      Severity               `protobuf:"varint,8,opt,name=severity,proto3,enum=cfgms.transport.Severity" json:"severity,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -285,11 +518,11 @@ func (x *Event) GetId() string {
 	return ""
 }
 
-func (x *Event) GetType() string {
+func (x *Event) GetType() EventType {
 	if x != nil {
 		return x.Type
 	}
-	return ""
+	return EventType_EVENT_TYPE_UNSPECIFIED
 }
 
 func (x *Event) GetStewardId() string {
@@ -327,11 +560,11 @@ func (x *Event) GetDetails() map[string]string {
 	return nil
 }
 
-func (x *Event) GetSeverity() string {
+func (x *Event) GetSeverity() Severity {
 	if x != nil {
 		return x.Severity
 	}
-	return ""
+	return Severity_SEVERITY_UNSPECIFIED
 }
 
 // Heartbeat is sent from steward to controller via ControlChannel.
@@ -339,7 +572,7 @@ type Heartbeat struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	StewardId     string                 `protobuf:"bytes,1,opt,name=steward_id,json=stewardId,proto3" json:"steward_id,omitempty"`
 	TenantId      string                 `protobuf:"bytes,2,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
-	Status        string                 `protobuf:"bytes,3,opt,name=status,proto3" json:"status,omitempty"` // healthy, degraded, error, disconnected
+	Status        StewardStatus          `protobuf:"varint,3,opt,name=status,proto3,enum=cfgms.transport.StewardStatus" json:"status,omitempty"`
 	Timestamp     *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
 	Metrics       map[string]string      `protobuf:"bytes,5,rep,name=metrics,proto3" json:"metrics,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	Version       string                 `protobuf:"bytes,6,opt,name=version,proto3" json:"version,omitempty"`
@@ -392,11 +625,11 @@ func (x *Heartbeat) GetTenantId() string {
 	return ""
 }
 
-func (x *Heartbeat) GetStatus() string {
+func (x *Heartbeat) GetStatus() StewardStatus {
 	if x != nil {
 		return x.Status
 	}
-	return ""
+	return StewardStatus_STEWARD_STATUS_UNSPECIFIED
 }
 
 func (x *Heartbeat) GetTimestamp() *timestamppb.Timestamp {
@@ -522,10 +755,10 @@ const file_transport_control_proto_rawDesc = "" +
 	"\x05event\x18\x02 \x01(\v2\x16.cfgms.transport.EventH\x00R\x05event\x12:\n" +
 	"\theartbeat\x18\x03 \x01(\v2\x1a.cfgms.transport.HeartbeatH\x00R\theartbeat\x127\n" +
 	"\bresponse\x18\x04 \x01(\v2\x19.cfgms.transport.ResponseH\x00R\bresponseB\t\n" +
-	"\apayload\"\xb8\x02\n" +
+	"\apayload\"\xd6\x02\n" +
 	"\aCommand\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
-	"\x04type\x18\x02 \x01(\tR\x04type\x12\x1d\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x120\n" +
+	"\x04type\x18\x02 \x01(\x0e2\x1c.cfgms.transport.CommandTypeR\x04type\x12\x1d\n" +
 	"\n" +
 	"steward_id\x18\x03 \x01(\tR\tstewardId\x12\x1b\n" +
 	"\ttenant_id\x18\x04 \x01(\tR\btenantId\x128\n" +
@@ -534,26 +767,26 @@ const file_transport_control_proto_rawDesc = "" +
 	"\bpriority\x18\a \x01(\x05R\bpriority\x1a9\n" +
 	"\vParamsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xd7\x02\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x8e\x03\n" +
 	"\x05Event\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
-	"\x04type\x18\x02 \x01(\tR\x04type\x12\x1d\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12.\n" +
+	"\x04type\x18\x02 \x01(\x0e2\x1a.cfgms.transport.EventTypeR\x04type\x12\x1d\n" +
 	"\n" +
 	"steward_id\x18\x03 \x01(\tR\tstewardId\x12\x1b\n" +
 	"\ttenant_id\x18\x04 \x01(\tR\btenantId\x128\n" +
 	"\ttimestamp\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\x12\x1d\n" +
 	"\n" +
 	"command_id\x18\x06 \x01(\tR\tcommandId\x12=\n" +
-	"\adetails\x18\a \x03(\v2#.cfgms.transport.Event.DetailsEntryR\adetails\x12\x1a\n" +
-	"\bseverity\x18\b \x01(\tR\bseverity\x1a:\n" +
+	"\adetails\x18\a \x03(\v2#.cfgms.transport.Event.DetailsEntryR\adetails\x125\n" +
+	"\bseverity\x18\b \x01(\x0e2\x19.cfgms.transport.SeverityR\bseverity\x1a:\n" +
 	"\fDetailsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xcd\x02\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xed\x02\n" +
 	"\tHeartbeat\x12\x1d\n" +
 	"\n" +
 	"steward_id\x18\x01 \x01(\tR\tstewardId\x12\x1b\n" +
-	"\ttenant_id\x18\x02 \x01(\tR\btenantId\x12\x16\n" +
-	"\x06status\x18\x03 \x01(\tR\x06status\x128\n" +
+	"\ttenant_id\x18\x02 \x01(\tR\btenantId\x126\n" +
+	"\x06status\x18\x03 \x01(\x0e2\x1e.cfgms.transport.StewardStatusR\x06status\x128\n" +
 	"\ttimestamp\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\x12A\n" +
 	"\ametrics\x18\x05 \x03(\v2'.cfgms.transport.Heartbeat.MetricsEntryR\ametrics\x12\x18\n" +
 	"\aversion\x18\x06 \x01(\tR\aversion\x12\x19\n" +
@@ -572,7 +805,34 @@ const file_transport_control_proto_rawDesc = "" +
 	"\adetails\x18\x06 \x03(\v2&.cfgms.transport.Response.DetailsEntryR\adetails\x1a:\n" +
 	"\fDetailsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B,Z*github.com/cfgis/cfgms/api/proto/transportb\x06proto3"
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01*\xe4\x01\n" +
+	"\vCommandType\x12\x1c\n" +
+	"\x18COMMAND_TYPE_UNSPECIFIED\x10\x00\x12\x1c\n" +
+	"\x18COMMAND_TYPE_SYNC_CONFIG\x10\x01\x12\x19\n" +
+	"\x15COMMAND_TYPE_SYNC_DNA\x10\x02\x12\"\n" +
+	"\x1eCOMMAND_TYPE_CONNECT_DATAPLANE\x10\x03\x12\x1d\n" +
+	"\x19COMMAND_TYPE_EXECUTE_TASK\x10\x04\x12\x19\n" +
+	"\x15COMMAND_TYPE_SHUTDOWN\x10\x05\x12 \n" +
+	"\x1cCOMMAND_TYPE_VALIDATE_CONFIG\x10\x06*\xb2\x01\n" +
+	"\tEventType\x12\x1a\n" +
+	"\x16EVENT_TYPE_UNSPECIFIED\x10\x00\x12\x1d\n" +
+	"\x19EVENT_TYPE_CONFIG_APPLIED\x10\x01\x12\x19\n" +
+	"\x15EVENT_TYPE_DNA_SYNCED\x10\x02\x12\x1d\n" +
+	"\x19EVENT_TYPE_TASK_COMPLETED\x10\x03\x12\x1a\n" +
+	"\x16EVENT_TYPE_TASK_FAILED\x10\x04\x12\x14\n" +
+	"\x10EVENT_TYPE_ERROR\x10\x05*x\n" +
+	"\bSeverity\x12\x18\n" +
+	"\x14SEVERITY_UNSPECIFIED\x10\x00\x12\x11\n" +
+	"\rSEVERITY_INFO\x10\x01\x12\x14\n" +
+	"\x10SEVERITY_WARNING\x10\x02\x12\x12\n" +
+	"\x0eSEVERITY_ERROR\x10\x03\x12\x15\n" +
+	"\x11SEVERITY_CRITICAL\x10\x04*\xa3\x01\n" +
+	"\rStewardStatus\x12\x1e\n" +
+	"\x1aSTEWARD_STATUS_UNSPECIFIED\x10\x00\x12\x1a\n" +
+	"\x16STEWARD_STATUS_HEALTHY\x10\x01\x12\x1b\n" +
+	"\x17STEWARD_STATUS_DEGRADED\x10\x02\x12\x18\n" +
+	"\x14STEWARD_STATUS_ERROR\x10\x03\x12\x1f\n" +
+	"\x1bSTEWARD_STATUS_DISCONNECTED\x10\x04B,Z*github.com/cfgis/cfgms/api/proto/transportb\x06proto3"
 
 var (
 	file_transport_control_proto_rawDescOnce sync.Once
@@ -586,37 +846,46 @@ func file_transport_control_proto_rawDescGZIP() []byte {
 	return file_transport_control_proto_rawDescData
 }
 
+var file_transport_control_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
 var file_transport_control_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
 var file_transport_control_proto_goTypes = []any{
-	(*ControlMessage)(nil),        // 0: cfgms.transport.ControlMessage
-	(*Command)(nil),               // 1: cfgms.transport.Command
-	(*Event)(nil),                 // 2: cfgms.transport.Event
-	(*Heartbeat)(nil),             // 3: cfgms.transport.Heartbeat
-	(*Response)(nil),              // 4: cfgms.transport.Response
-	nil,                           // 5: cfgms.transport.Command.ParamsEntry
-	nil,                           // 6: cfgms.transport.Event.DetailsEntry
-	nil,                           // 7: cfgms.transport.Heartbeat.MetricsEntry
-	nil,                           // 8: cfgms.transport.Response.DetailsEntry
-	(*timestamppb.Timestamp)(nil), // 9: google.protobuf.Timestamp
+	(CommandType)(0),              // 0: cfgms.transport.CommandType
+	(EventType)(0),                // 1: cfgms.transport.EventType
+	(Severity)(0),                 // 2: cfgms.transport.Severity
+	(StewardStatus)(0),            // 3: cfgms.transport.StewardStatus
+	(*ControlMessage)(nil),        // 4: cfgms.transport.ControlMessage
+	(*Command)(nil),               // 5: cfgms.transport.Command
+	(*Event)(nil),                 // 6: cfgms.transport.Event
+	(*Heartbeat)(nil),             // 7: cfgms.transport.Heartbeat
+	(*Response)(nil),              // 8: cfgms.transport.Response
+	nil,                           // 9: cfgms.transport.Command.ParamsEntry
+	nil,                           // 10: cfgms.transport.Event.DetailsEntry
+	nil,                           // 11: cfgms.transport.Heartbeat.MetricsEntry
+	nil,                           // 12: cfgms.transport.Response.DetailsEntry
+	(*timestamppb.Timestamp)(nil), // 13: google.protobuf.Timestamp
 }
 var file_transport_control_proto_depIdxs = []int32{
-	1,  // 0: cfgms.transport.ControlMessage.command:type_name -> cfgms.transport.Command
-	2,  // 1: cfgms.transport.ControlMessage.event:type_name -> cfgms.transport.Event
-	3,  // 2: cfgms.transport.ControlMessage.heartbeat:type_name -> cfgms.transport.Heartbeat
-	4,  // 3: cfgms.transport.ControlMessage.response:type_name -> cfgms.transport.Response
-	9,  // 4: cfgms.transport.Command.timestamp:type_name -> google.protobuf.Timestamp
-	5,  // 5: cfgms.transport.Command.params:type_name -> cfgms.transport.Command.ParamsEntry
-	9,  // 6: cfgms.transport.Event.timestamp:type_name -> google.protobuf.Timestamp
-	6,  // 7: cfgms.transport.Event.details:type_name -> cfgms.transport.Event.DetailsEntry
-	9,  // 8: cfgms.transport.Heartbeat.timestamp:type_name -> google.protobuf.Timestamp
-	7,  // 9: cfgms.transport.Heartbeat.metrics:type_name -> cfgms.transport.Heartbeat.MetricsEntry
-	9,  // 10: cfgms.transport.Response.timestamp:type_name -> google.protobuf.Timestamp
-	8,  // 11: cfgms.transport.Response.details:type_name -> cfgms.transport.Response.DetailsEntry
-	12, // [12:12] is the sub-list for method output_type
-	12, // [12:12] is the sub-list for method input_type
-	12, // [12:12] is the sub-list for extension type_name
-	12, // [12:12] is the sub-list for extension extendee
-	0,  // [0:12] is the sub-list for field type_name
+	5,  // 0: cfgms.transport.ControlMessage.command:type_name -> cfgms.transport.Command
+	6,  // 1: cfgms.transport.ControlMessage.event:type_name -> cfgms.transport.Event
+	7,  // 2: cfgms.transport.ControlMessage.heartbeat:type_name -> cfgms.transport.Heartbeat
+	8,  // 3: cfgms.transport.ControlMessage.response:type_name -> cfgms.transport.Response
+	0,  // 4: cfgms.transport.Command.type:type_name -> cfgms.transport.CommandType
+	13, // 5: cfgms.transport.Command.timestamp:type_name -> google.protobuf.Timestamp
+	9,  // 6: cfgms.transport.Command.params:type_name -> cfgms.transport.Command.ParamsEntry
+	1,  // 7: cfgms.transport.Event.type:type_name -> cfgms.transport.EventType
+	13, // 8: cfgms.transport.Event.timestamp:type_name -> google.protobuf.Timestamp
+	10, // 9: cfgms.transport.Event.details:type_name -> cfgms.transport.Event.DetailsEntry
+	2,  // 10: cfgms.transport.Event.severity:type_name -> cfgms.transport.Severity
+	3,  // 11: cfgms.transport.Heartbeat.status:type_name -> cfgms.transport.StewardStatus
+	13, // 12: cfgms.transport.Heartbeat.timestamp:type_name -> google.protobuf.Timestamp
+	11, // 13: cfgms.transport.Heartbeat.metrics:type_name -> cfgms.transport.Heartbeat.MetricsEntry
+	13, // 14: cfgms.transport.Response.timestamp:type_name -> google.protobuf.Timestamp
+	12, // 15: cfgms.transport.Response.details:type_name -> cfgms.transport.Response.DetailsEntry
+	16, // [16:16] is the sub-list for method output_type
+	16, // [16:16] is the sub-list for method input_type
+	16, // [16:16] is the sub-list for extension type_name
+	16, // [16:16] is the sub-list for extension extendee
+	0,  // [0:16] is the sub-list for field type_name
 }
 
 func init() { file_transport_control_proto_init() }
@@ -635,13 +904,14 @@ func file_transport_control_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_transport_control_proto_rawDesc), len(file_transport_control_proto_rawDesc)),
-			NumEnums:      0,
+			NumEnums:      4,
 			NumMessages:   9,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
 		GoTypes:           file_transport_control_proto_goTypes,
 		DependencyIndexes: file_transport_control_proto_depIdxs,
+		EnumInfos:         file_transport_control_proto_enumTypes,
 		MessageInfos:      file_transport_control_proto_msgTypes,
 	}.Build()
 	File_transport_control_proto = out.File

@@ -7,6 +7,26 @@ package cfgms.transport;
 option go_package = "github.com/cfgis/cfgms/api/proto/transport";
 
 import "google/protobuf/timestamp.proto";
+import "transport/control.proto";
+
+// TransferType enumerates the categories of bulk data transferred between components.
+enum TransferType {
+  TRANSFER_TYPE_UNSPECIFIED = 0;
+  TRANSFER_TYPE_PACKAGE = 1;
+  TRANSFER_TYPE_SCRIPT = 2;
+  TRANSFER_TYPE_LOG_BATCH = 3;
+  TRANSFER_TYPE_BINARY = 4;
+}
+
+// TaskMessageType enumerates the lifecycle events for task execution streams.
+enum TaskMessageType {
+  TASK_MESSAGE_TYPE_UNSPECIFIED = 0;
+  TASK_MESSAGE_TYPE_START = 1;
+  TASK_MESSAGE_TYPE_PROGRESS = 2;
+  TASK_MESSAGE_TYPE_OUTPUT = 3;
+  TASK_MESSAGE_TYPE_COMPLETE = 4;
+  TASK_MESSAGE_TYPE_CANCEL = 5;
+}
 
 // === Config Sync ===
 
@@ -46,7 +66,7 @@ message DNASyncResponse {
 
 message BulkChunk {
   string transfer_id = 1;
-  string transfer_type = 2;   // package, script, log_batch, binary
+  TransferType transfer_type = 2;
   bytes data = 3;
   int64 offset = 4;
   int64 total_size = 5;
@@ -58,7 +78,7 @@ message BulkChunk {
 
 message TaskMessage {
   string task_id = 1;
-  string type = 2;             // start, progress, output, complete, cancel
+  TaskMessageType type = 2;
   bytes payload = 3;
   google.protobuf.Timestamp timestamp = 4;
 }
@@ -73,7 +93,7 @@ message TerminalData {
 
 message LogEntry {
   string steward_id = 1;
-  string level = 2;
+  Severity level = 2;          // reuses Severity from control.proto (same package)
   string message = 3;
   google.protobuf.Timestamp timestamp = 4;
   map<string, string> fields = 5;

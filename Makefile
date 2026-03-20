@@ -36,7 +36,7 @@ CERT_MANAGER_BINARY=cert-manager
 
 # Protocol buffer variables
 PROTO_DIR=api/proto
-PROTO_FILES=$(shell find $(PROTO_DIR) -name "*.proto")
+PROTO_FILES=$(shell find $(PROTO_DIR) -name "*.proto" -not -path "*/transport/*")
 PROTO_INCLUDES=-I$(PROTO_DIR)
 
 # Check for required tools
@@ -52,6 +52,7 @@ check-proto-tools:
 	}
 
 # Generate Go code from proto files (message definitions only, no gRPC services)
+# NOTE: Transport protos excluded — use 'make proto-gen' (requires gRPC plugin)
 .PHONY: proto
 proto: check-proto-tools
 	@echo "Generating proto files (messages only, no gRPC services)..."
@@ -77,6 +78,7 @@ check-proto-grpc-tools: check-proto-tools
 # Generate Go code from proto files including gRPC service stubs.
 # Generates both message code (*.pb.go) and gRPC stubs (*_grpc.pb.go) for the
 # transport package. Does not regenerate existing message-only proto files.
+# IMPORTANT: This is the authoritative target for transport protos.
 .PHONY: proto-gen
 proto-gen: check-proto-grpc-tools
 	@echo "Generating transport proto files (messages + gRPC services)..."

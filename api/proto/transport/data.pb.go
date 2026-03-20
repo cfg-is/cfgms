@@ -25,6 +25,121 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// TransferType enumerates the categories of bulk data transferred between components.
+type TransferType int32
+
+const (
+	TransferType_TRANSFER_TYPE_UNSPECIFIED TransferType = 0
+	TransferType_TRANSFER_TYPE_PACKAGE     TransferType = 1
+	TransferType_TRANSFER_TYPE_SCRIPT      TransferType = 2
+	TransferType_TRANSFER_TYPE_LOG_BATCH   TransferType = 3
+	TransferType_TRANSFER_TYPE_BINARY      TransferType = 4
+)
+
+// Enum value maps for TransferType.
+var (
+	TransferType_name = map[int32]string{
+		0: "TRANSFER_TYPE_UNSPECIFIED",
+		1: "TRANSFER_TYPE_PACKAGE",
+		2: "TRANSFER_TYPE_SCRIPT",
+		3: "TRANSFER_TYPE_LOG_BATCH",
+		4: "TRANSFER_TYPE_BINARY",
+	}
+	TransferType_value = map[string]int32{
+		"TRANSFER_TYPE_UNSPECIFIED": 0,
+		"TRANSFER_TYPE_PACKAGE":     1,
+		"TRANSFER_TYPE_SCRIPT":      2,
+		"TRANSFER_TYPE_LOG_BATCH":   3,
+		"TRANSFER_TYPE_BINARY":      4,
+	}
+)
+
+func (x TransferType) Enum() *TransferType {
+	p := new(TransferType)
+	*p = x
+	return p
+}
+
+func (x TransferType) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (TransferType) Descriptor() protoreflect.EnumDescriptor {
+	return file_transport_data_proto_enumTypes[0].Descriptor()
+}
+
+func (TransferType) Type() protoreflect.EnumType {
+	return &file_transport_data_proto_enumTypes[0]
+}
+
+func (x TransferType) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use TransferType.Descriptor instead.
+func (TransferType) EnumDescriptor() ([]byte, []int) {
+	return file_transport_data_proto_rawDescGZIP(), []int{0}
+}
+
+// TaskMessageType enumerates the lifecycle events for task execution streams.
+type TaskMessageType int32
+
+const (
+	TaskMessageType_TASK_MESSAGE_TYPE_UNSPECIFIED TaskMessageType = 0
+	TaskMessageType_TASK_MESSAGE_TYPE_START       TaskMessageType = 1
+	TaskMessageType_TASK_MESSAGE_TYPE_PROGRESS    TaskMessageType = 2
+	TaskMessageType_TASK_MESSAGE_TYPE_OUTPUT      TaskMessageType = 3
+	TaskMessageType_TASK_MESSAGE_TYPE_COMPLETE    TaskMessageType = 4
+	TaskMessageType_TASK_MESSAGE_TYPE_CANCEL      TaskMessageType = 5
+)
+
+// Enum value maps for TaskMessageType.
+var (
+	TaskMessageType_name = map[int32]string{
+		0: "TASK_MESSAGE_TYPE_UNSPECIFIED",
+		1: "TASK_MESSAGE_TYPE_START",
+		2: "TASK_MESSAGE_TYPE_PROGRESS",
+		3: "TASK_MESSAGE_TYPE_OUTPUT",
+		4: "TASK_MESSAGE_TYPE_COMPLETE",
+		5: "TASK_MESSAGE_TYPE_CANCEL",
+	}
+	TaskMessageType_value = map[string]int32{
+		"TASK_MESSAGE_TYPE_UNSPECIFIED": 0,
+		"TASK_MESSAGE_TYPE_START":       1,
+		"TASK_MESSAGE_TYPE_PROGRESS":    2,
+		"TASK_MESSAGE_TYPE_OUTPUT":      3,
+		"TASK_MESSAGE_TYPE_COMPLETE":    4,
+		"TASK_MESSAGE_TYPE_CANCEL":      5,
+	}
+)
+
+func (x TaskMessageType) Enum() *TaskMessageType {
+	p := new(TaskMessageType)
+	*p = x
+	return p
+}
+
+func (x TaskMessageType) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (TaskMessageType) Descriptor() protoreflect.EnumDescriptor {
+	return file_transport_data_proto_enumTypes[1].Descriptor()
+}
+
+func (TaskMessageType) Type() protoreflect.EnumType {
+	return &file_transport_data_proto_enumTypes[1]
+}
+
+func (x TaskMessageType) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use TaskMessageType.Descriptor instead.
+func (TaskMessageType) EnumDescriptor() ([]byte, []int) {
+	return file_transport_data_proto_rawDescGZIP(), []int{1}
+}
+
 type ConfigSyncRequest struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	StewardId      string                 `protobuf:"bytes,1,opt,name=steward_id,json=stewardId,proto3" json:"steward_id,omitempty"`
@@ -316,7 +431,7 @@ func (x *DNASyncResponse) GetNewHash() string {
 type BulkChunk struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	TransferId    string                 `protobuf:"bytes,1,opt,name=transfer_id,json=transferId,proto3" json:"transfer_id,omitempty"`
-	TransferType  string                 `protobuf:"bytes,2,opt,name=transfer_type,json=transferType,proto3" json:"transfer_type,omitempty"` // package, script, log_batch, binary
+	TransferType  TransferType           `protobuf:"varint,2,opt,name=transfer_type,json=transferType,proto3,enum=cfgms.transport.TransferType" json:"transfer_type,omitempty"`
 	Data          []byte                 `protobuf:"bytes,3,opt,name=data,proto3" json:"data,omitempty"`
 	Offset        int64                  `protobuf:"varint,4,opt,name=offset,proto3" json:"offset,omitempty"`
 	TotalSize     int64                  `protobuf:"varint,5,opt,name=total_size,json=totalSize,proto3" json:"total_size,omitempty"`
@@ -363,11 +478,11 @@ func (x *BulkChunk) GetTransferId() string {
 	return ""
 }
 
-func (x *BulkChunk) GetTransferType() string {
+func (x *BulkChunk) GetTransferType() TransferType {
 	if x != nil {
 		return x.TransferType
 	}
-	return ""
+	return TransferType_TRANSFER_TYPE_UNSPECIFIED
 }
 
 func (x *BulkChunk) GetData() []byte {
@@ -408,7 +523,7 @@ func (x *BulkChunk) GetMetadata() map[string]string {
 type TaskMessage struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	TaskId        string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
-	Type          string                 `protobuf:"bytes,2,opt,name=type,proto3" json:"type,omitempty"` // start, progress, output, complete, cancel
+	Type          TaskMessageType        `protobuf:"varint,2,opt,name=type,proto3,enum=cfgms.transport.TaskMessageType" json:"type,omitempty"`
 	Payload       []byte                 `protobuf:"bytes,3,opt,name=payload,proto3" json:"payload,omitempty"`
 	Timestamp     *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -452,11 +567,11 @@ func (x *TaskMessage) GetTaskId() string {
 	return ""
 }
 
-func (x *TaskMessage) GetType() string {
+func (x *TaskMessage) GetType() TaskMessageType {
 	if x != nil {
 		return x.Type
 	}
-	return ""
+	return TaskMessageType_TASK_MESSAGE_TYPE_UNSPECIFIED
 }
 
 func (x *TaskMessage) GetPayload() []byte {
@@ -552,7 +667,7 @@ func (x *TerminalData) GetCols() int32 {
 type LogEntry struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	StewardId     string                 `protobuf:"bytes,1,opt,name=steward_id,json=stewardId,proto3" json:"steward_id,omitempty"`
-	Level         string                 `protobuf:"bytes,2,opt,name=level,proto3" json:"level,omitempty"`
+	Level         Severity               `protobuf:"varint,2,opt,name=level,proto3,enum=cfgms.transport.Severity" json:"level,omitempty"` // reuses Severity from control.proto (same package)
 	Message       string                 `protobuf:"bytes,3,opt,name=message,proto3" json:"message,omitempty"`
 	Timestamp     *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
 	Fields        map[string]string      `protobuf:"bytes,5,rep,name=fields,proto3" json:"fields,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
@@ -597,11 +712,11 @@ func (x *LogEntry) GetStewardId() string {
 	return ""
 }
 
-func (x *LogEntry) GetLevel() string {
+func (x *LogEntry) GetLevel() Severity {
 	if x != nil {
 		return x.Level
 	}
-	return ""
+	return Severity_SEVERITY_UNSPECIFIED
 }
 
 func (x *LogEntry) GetMessage() string {
@@ -681,7 +796,7 @@ var File_transport_data_proto protoreflect.FileDescriptor
 
 const file_transport_data_proto_rawDesc = "" +
 	"\n" +
-	"\x14transport/data.proto\x12\x0fcfgms.transport\x1a\x1fgoogle/protobuf/timestamp.proto\"u\n" +
+	"\x14transport/data.proto\x12\x0fcfgms.transport\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x17transport/control.proto\"u\n" +
 	"\x11ConfigSyncRequest\x12\x1d\n" +
 	"\n" +
 	"steward_id\x18\x01 \x01(\tR\tstewardId\x12'\n" +
@@ -707,11 +822,11 @@ const file_transport_data_proto_rawDesc = "" +
 	"\x0fDNASyncResponse\x12\x1a\n" +
 	"\baccepted\x18\x01 \x01(\bR\baccepted\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x12\x19\n" +
-	"\bnew_hash\x18\x03 \x01(\tR\anewHash\"\xb8\x02\n" +
+	"\bnew_hash\x18\x03 \x01(\tR\anewHash\"\xd7\x02\n" +
 	"\tBulkChunk\x12\x1f\n" +
 	"\vtransfer_id\x18\x01 \x01(\tR\n" +
-	"transferId\x12#\n" +
-	"\rtransfer_type\x18\x02 \x01(\tR\ftransferType\x12\x12\n" +
+	"transferId\x12B\n" +
+	"\rtransfer_type\x18\x02 \x01(\x0e2\x1d.cfgms.transport.TransferTypeR\ftransferType\x12\x12\n" +
 	"\x04data\x18\x03 \x01(\fR\x04data\x12\x16\n" +
 	"\x06offset\x18\x04 \x01(\x03R\x06offset\x12\x1d\n" +
 	"\n" +
@@ -720,10 +835,10 @@ const file_transport_data_proto_rawDesc = "" +
 	"\bmetadata\x18\a \x03(\v2(.cfgms.transport.BulkChunk.MetadataEntryR\bmetadata\x1a;\n" +
 	"\rMetadataEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x8e\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xb0\x01\n" +
 	"\vTaskMessage\x12\x17\n" +
-	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x12\n" +
-	"\x04type\x18\x02 \x01(\tR\x04type\x12\x18\n" +
+	"\atask_id\x18\x01 \x01(\tR\x06taskId\x124\n" +
+	"\x04type\x18\x02 \x01(\x0e2 .cfgms.transport.TaskMessageTypeR\x04type\x12\x18\n" +
 	"\apayload\x18\x03 \x01(\fR\apayload\x128\n" +
 	"\ttimestamp\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\"\x86\x01\n" +
 	"\fTerminalData\x12\x1d\n" +
@@ -732,11 +847,11 @@ const file_transport_data_proto_rawDesc = "" +
 	"\x04data\x18\x02 \x01(\fR\x04data\x12\x1b\n" +
 	"\tis_resize\x18\x03 \x01(\bR\bisResize\x12\x12\n" +
 	"\x04rows\x18\x04 \x01(\x05R\x04rows\x12\x12\n" +
-	"\x04cols\x18\x05 \x01(\x05R\x04cols\"\x8d\x02\n" +
+	"\x04cols\x18\x05 \x01(\x05R\x04cols\"\xa8\x02\n" +
 	"\bLogEntry\x12\x1d\n" +
 	"\n" +
-	"steward_id\x18\x01 \x01(\tR\tstewardId\x12\x14\n" +
-	"\x05level\x18\x02 \x01(\tR\x05level\x12\x18\n" +
+	"steward_id\x18\x01 \x01(\tR\tstewardId\x12/\n" +
+	"\x05level\x18\x02 \x01(\x0e2\x19.cfgms.transport.SeverityR\x05level\x12\x18\n" +
 	"\amessage\x18\x03 \x01(\tR\amessage\x128\n" +
 	"\ttimestamp\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\x12=\n" +
 	"\x06fields\x18\x05 \x03(\v2%.cfgms.transport.LogEntry.FieldsEntryR\x06fields\x1a9\n" +
@@ -745,7 +860,20 @@ const file_transport_data_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"b\n" +
 	"\x11LogStreamResponse\x12)\n" +
 	"\x10entries_received\x18\x01 \x01(\x03R\x0fentriesReceived\x12\"\n" +
-	"\facknowledged\x18\x02 \x01(\bR\facknowledgedB,Z*github.com/cfgis/cfgms/api/proto/transportb\x06proto3"
+	"\facknowledged\x18\x02 \x01(\bR\facknowledged*\x99\x01\n" +
+	"\fTransferType\x12\x1d\n" +
+	"\x19TRANSFER_TYPE_UNSPECIFIED\x10\x00\x12\x19\n" +
+	"\x15TRANSFER_TYPE_PACKAGE\x10\x01\x12\x18\n" +
+	"\x14TRANSFER_TYPE_SCRIPT\x10\x02\x12\x1b\n" +
+	"\x17TRANSFER_TYPE_LOG_BATCH\x10\x03\x12\x18\n" +
+	"\x14TRANSFER_TYPE_BINARY\x10\x04*\xcd\x01\n" +
+	"\x0fTaskMessageType\x12!\n" +
+	"\x1dTASK_MESSAGE_TYPE_UNSPECIFIED\x10\x00\x12\x1b\n" +
+	"\x17TASK_MESSAGE_TYPE_START\x10\x01\x12\x1e\n" +
+	"\x1aTASK_MESSAGE_TYPE_PROGRESS\x10\x02\x12\x1c\n" +
+	"\x18TASK_MESSAGE_TYPE_OUTPUT\x10\x03\x12\x1e\n" +
+	"\x1aTASK_MESSAGE_TYPE_COMPLETE\x10\x04\x12\x1c\n" +
+	"\x18TASK_MESSAGE_TYPE_CANCEL\x10\x05B,Z*github.com/cfgis/cfgms/api/proto/transportb\x06proto3"
 
 var (
 	file_transport_data_proto_rawDescOnce sync.Once
@@ -759,31 +887,38 @@ func file_transport_data_proto_rawDescGZIP() []byte {
 	return file_transport_data_proto_rawDescData
 }
 
+var file_transport_data_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
 var file_transport_data_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
 var file_transport_data_proto_goTypes = []any{
-	(*ConfigSyncRequest)(nil),     // 0: cfgms.transport.ConfigSyncRequest
-	(*ConfigChunk)(nil),           // 1: cfgms.transport.ConfigChunk
-	(*DNAChunk)(nil),              // 2: cfgms.transport.DNAChunk
-	(*DNASyncResponse)(nil),       // 3: cfgms.transport.DNASyncResponse
-	(*BulkChunk)(nil),             // 4: cfgms.transport.BulkChunk
-	(*TaskMessage)(nil),           // 5: cfgms.transport.TaskMessage
-	(*TerminalData)(nil),          // 6: cfgms.transport.TerminalData
-	(*LogEntry)(nil),              // 7: cfgms.transport.LogEntry
-	(*LogStreamResponse)(nil),     // 8: cfgms.transport.LogStreamResponse
-	nil,                           // 9: cfgms.transport.BulkChunk.MetadataEntry
-	nil,                           // 10: cfgms.transport.LogEntry.FieldsEntry
-	(*timestamppb.Timestamp)(nil), // 11: google.protobuf.Timestamp
+	(TransferType)(0),             // 0: cfgms.transport.TransferType
+	(TaskMessageType)(0),          // 1: cfgms.transport.TaskMessageType
+	(*ConfigSyncRequest)(nil),     // 2: cfgms.transport.ConfigSyncRequest
+	(*ConfigChunk)(nil),           // 3: cfgms.transport.ConfigChunk
+	(*DNAChunk)(nil),              // 4: cfgms.transport.DNAChunk
+	(*DNASyncResponse)(nil),       // 5: cfgms.transport.DNASyncResponse
+	(*BulkChunk)(nil),             // 6: cfgms.transport.BulkChunk
+	(*TaskMessage)(nil),           // 7: cfgms.transport.TaskMessage
+	(*TerminalData)(nil),          // 8: cfgms.transport.TerminalData
+	(*LogEntry)(nil),              // 9: cfgms.transport.LogEntry
+	(*LogStreamResponse)(nil),     // 10: cfgms.transport.LogStreamResponse
+	nil,                           // 11: cfgms.transport.BulkChunk.MetadataEntry
+	nil,                           // 12: cfgms.transport.LogEntry.FieldsEntry
+	(*timestamppb.Timestamp)(nil), // 13: google.protobuf.Timestamp
+	(Severity)(0),                 // 14: cfgms.transport.Severity
 }
 var file_transport_data_proto_depIdxs = []int32{
-	9,  // 0: cfgms.transport.BulkChunk.metadata:type_name -> cfgms.transport.BulkChunk.MetadataEntry
-	11, // 1: cfgms.transport.TaskMessage.timestamp:type_name -> google.protobuf.Timestamp
-	11, // 2: cfgms.transport.LogEntry.timestamp:type_name -> google.protobuf.Timestamp
-	10, // 3: cfgms.transport.LogEntry.fields:type_name -> cfgms.transport.LogEntry.FieldsEntry
-	4,  // [4:4] is the sub-list for method output_type
-	4,  // [4:4] is the sub-list for method input_type
-	4,  // [4:4] is the sub-list for extension type_name
-	4,  // [4:4] is the sub-list for extension extendee
-	0,  // [0:4] is the sub-list for field type_name
+	0,  // 0: cfgms.transport.BulkChunk.transfer_type:type_name -> cfgms.transport.TransferType
+	11, // 1: cfgms.transport.BulkChunk.metadata:type_name -> cfgms.transport.BulkChunk.MetadataEntry
+	1,  // 2: cfgms.transport.TaskMessage.type:type_name -> cfgms.transport.TaskMessageType
+	13, // 3: cfgms.transport.TaskMessage.timestamp:type_name -> google.protobuf.Timestamp
+	14, // 4: cfgms.transport.LogEntry.level:type_name -> cfgms.transport.Severity
+	13, // 5: cfgms.transport.LogEntry.timestamp:type_name -> google.protobuf.Timestamp
+	12, // 6: cfgms.transport.LogEntry.fields:type_name -> cfgms.transport.LogEntry.FieldsEntry
+	7,  // [7:7] is the sub-list for method output_type
+	7,  // [7:7] is the sub-list for method input_type
+	7,  // [7:7] is the sub-list for extension type_name
+	7,  // [7:7] is the sub-list for extension extendee
+	0,  // [0:7] is the sub-list for field type_name
 }
 
 func init() { file_transport_data_proto_init() }
@@ -791,18 +926,20 @@ func file_transport_data_proto_init() {
 	if File_transport_data_proto != nil {
 		return
 	}
+	file_transport_control_proto_init()
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_transport_data_proto_rawDesc), len(file_transport_data_proto_rawDesc)),
-			NumEnums:      0,
+			NumEnums:      2,
 			NumMessages:   11,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
 		GoTypes:           file_transport_data_proto_goTypes,
 		DependencyIndexes: file_transport_data_proto_depIdxs,
+		EnumInfos:         file_transport_data_proto_enumTypes,
 		MessageInfos:      file_transport_data_proto_msgTypes,
 	}.Build()
 	File_transport_data_proto = out.File

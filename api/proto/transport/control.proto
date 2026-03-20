@@ -8,6 +8,45 @@ option go_package = "github.com/cfgis/cfgms/api/proto/transport";
 
 import "google/protobuf/timestamp.proto";
 
+// CommandType enumerates the types of commands a controller sends to a steward.
+enum CommandType {
+  COMMAND_TYPE_UNSPECIFIED = 0;
+  COMMAND_TYPE_SYNC_CONFIG = 1;
+  COMMAND_TYPE_SYNC_DNA = 2;
+  COMMAND_TYPE_CONNECT_DATAPLANE = 3;
+  COMMAND_TYPE_EXECUTE_TASK = 4;
+  COMMAND_TYPE_SHUTDOWN = 5;
+  COMMAND_TYPE_VALIDATE_CONFIG = 6;
+}
+
+// EventType enumerates the types of events a steward emits to a controller.
+enum EventType {
+  EVENT_TYPE_UNSPECIFIED = 0;
+  EVENT_TYPE_CONFIG_APPLIED = 1;
+  EVENT_TYPE_DNA_SYNCED = 2;
+  EVENT_TYPE_TASK_COMPLETED = 3;
+  EVENT_TYPE_TASK_FAILED = 4;
+  EVENT_TYPE_ERROR = 5;
+}
+
+// Severity is used by both Event and LogEntry to indicate importance level.
+enum Severity {
+  SEVERITY_UNSPECIFIED = 0;
+  SEVERITY_INFO = 1;
+  SEVERITY_WARNING = 2;
+  SEVERITY_ERROR = 3;
+  SEVERITY_CRITICAL = 4;
+}
+
+// StewardStatus enumerates the health states a steward can report.
+enum StewardStatus {
+  STEWARD_STATUS_UNSPECIFIED = 0;
+  STEWARD_STATUS_HEALTHY = 1;
+  STEWARD_STATUS_DEGRADED = 2;
+  STEWARD_STATUS_ERROR = 3;
+  STEWARD_STATUS_DISCONNECTED = 4;
+}
+
 // ControlMessage is the envelope for all C2 traffic on the ControlChannel stream.
 message ControlMessage {
   oneof payload {
@@ -21,7 +60,7 @@ message ControlMessage {
 // Command is sent from controller to steward via ControlChannel.
 message Command {
   string id = 1;
-  string type = 2;          // sync_config, sync_dna, connect_dataplane, execute_task, shutdown, validate_config
+  CommandType type = 2;
   string steward_id = 3;
   string tenant_id = 4;
   google.protobuf.Timestamp timestamp = 5;
@@ -32,20 +71,20 @@ message Command {
 // Event is sent from steward to controller via ControlChannel.
 message Event {
   string id = 1;
-  string type = 2;          // config_applied, dna_synced, task_completed, task_failed, error, etc.
+  EventType type = 2;
   string steward_id = 3;
   string tenant_id = 4;
   google.protobuf.Timestamp timestamp = 5;
   string command_id = 6;    // correlation to originating command
   map<string, string> details = 7;
-  string severity = 8;      // info, warning, error, critical
+  Severity severity = 8;
 }
 
 // Heartbeat is sent from steward to controller via ControlChannel.
 message Heartbeat {
   string steward_id = 1;
   string tenant_id = 2;
-  string status = 3;        // healthy, degraded, error, disconnected
+  StewardStatus status = 3;
   google.protobuf.Timestamp timestamp = 4;
   map<string, string> metrics = 5;
   string version = 6;

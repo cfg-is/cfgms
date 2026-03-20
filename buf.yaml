@@ -1,8 +1,9 @@
-version: v1
-name: buf.build/cfgis/cfgms
+version: v2
+modules:
+  - path: api/proto
 lint:
   use:
-    - DEFAULT
+    - STANDARD
   except:
     - PACKAGE_VERSION_SUFFIX
 breaking:
