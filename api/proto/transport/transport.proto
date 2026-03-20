@@ -1,0 +1,68 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
+syntax = "proto3";
+
+package cfgms.transport;
+
+option go_package = "github.com/cfgis/cfgms/api/proto/transport";
+
+import "transport/control.proto";
+import "transport/data.proto";
+import "controller/controller.proto";
+
+// StewardTransport is the unified controller-steward communication service.
+//
+// All RPCs run over a single QUIC connection per steward. The ControlChannel
+// bidi stream carries C2 traffic (commands, events, heartbeats, responses).
+// Data transfer RPCs carry config sync, DNA sync, and bulk transfers.
+service StewardTransport {
+  // === Lifecycle ===
+
+  // Register authenticates a steward and establishes identity.
+  // Called once on first connection or after credential rotation.
+  rpc Register(cfgms.api.controller.RegisterRequest) returns (cfgms.api.controller.RegisterResponse);
+
+  // Ping is a lightweight health check / latency probe.
+  rpc Ping(PingRequest) returns (PingResponse);
+
+  // === Control Channel ===
+
+  // ControlChannel is a persistent bidirectional stream for C2 traffic.
+  // Steward opens on connect, stays open for connection lifetime.
+  // Controller pushes Commands; steward sends Events, Heartbeats, Responses.
+  rpc ControlChannel(stream ControlMessage) returns (stream ControlMessage);
+
+  // === Data Transfers ===
+
+  // SyncConfig streams configuration from controller to steward.
+  rpc SyncConfig(ConfigSyncRequest) returns (stream ConfigChunk);
+
+  // SyncDNA streams DNA data from steward to controller.
+  rpc SyncDNA(stream DNAChunk) returns (DNASyncResponse);
+
+  // BulkTransfer handles bidirectional bulk data (packages, scripts, logs).
+  rpc BulkTransfer(stream BulkChunk) returns (stream BulkChunk);
+
+  // === Interactive (future — define now, implement later) ===
+
+  // TaskStream provides bidirectional task execution updates.
+  rpc TaskStream(stream TaskMessage) returns (stream TaskMessage);
+
+  // Terminal provides interactive terminal access to a steward.
+  rpc Terminal(stream TerminalData) returns (stream TerminalData);
+
+  // LogStream streams logs from steward to controller.
+  rpc LogStream(stream LogEntry) returns (LogStreamResponse);
+}
+
+// PingRequest is a lightweight health check.
+message PingRequest {
+  string steward_id = 1;
+  int64 timestamp_ns = 2;  // nanosecond timestamp for latency measurement
+}
+
+// PingResponse echoes the request timestamp for RTT calculation.
+message PingResponse {
+  int64 request_timestamp_ns = 1;
+  int64 response_timestamp_ns = 2;
+}

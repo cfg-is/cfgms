@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-mqtt-quic test-e2e-controller test-e2e-scenarios test-ci test-integration test-security test-performance test-performance-baseline test-data-consistency test-docker test-cross-feature-integration test-failure-propagation proto lint clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates
+.PHONY: build test test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-mqtt-quic test-e2e-controller test-e2e-scenarios test-ci test-integration test-security test-performance test-performance-baseline test-data-consistency test-docker test-cross-feature-integration test-failure-propagation proto proto-gen lint clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates
 
 # Use bash for all recipe commands (required for credential loading scripts)
 SHELL := /bin/bash
@@ -36,7 +36,7 @@ CERT_MANAGER_BINARY=cert-manager
 
 # Protocol buffer variables
 PROTO_DIR=api/proto
-PROTO_FILES=$(shell find $(PROTO_DIR) -name "*.proto")
+PROTO_FILES=$(shell find $(PROTO_DIR) -name "*.proto" -not -path "*/transport/*")
 PROTO_INCLUDES=-I$(PROTO_DIR)
 
 # Check for required tools
@@ -52,6 +52,7 @@ check-proto-tools:
 	}
 
 # Generate Go code from proto files (message definitions only, no gRPC services)
+# NOTE: Transport protos excluded — use 'make proto-gen' (requires gRPC plugin)
 .PHONY: proto
 proto: check-proto-tools
 	@echo "Generating proto files (messages only, no gRPC services)..."
@@ -60,6 +61,32 @@ proto: check-proto-tools
 			--go_out=. --go_opt=paths=source_relative \
 			$$file; \
 	done
+
+# Transport proto files requiring gRPC service generation
+TRANSPORT_PROTO_DIR=api/proto/transport
+TRANSPORT_PROTO_FILES=$(shell find $(TRANSPORT_PROTO_DIR) -name "*.proto")
+
+# Check for protoc-gen-go-grpc (required for gRPC service generation)
+.PHONY: check-proto-grpc-tools
+check-proto-grpc-tools: check-proto-tools
+	@which protoc-gen-go-grpc > /dev/null || { \
+		echo "Error: protoc-gen-go-grpc is not installed."; \
+		echo "Install with: go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest"; \
+		exit 1; \
+	}
+
+# Generate Go code from proto files including gRPC service stubs.
+# Generates both message code (*.pb.go) and gRPC stubs (*_grpc.pb.go) for the
+# transport package. Does not regenerate existing message-only proto files.
+# IMPORTANT: This is the authoritative target for transport protos.
+.PHONY: proto-gen
+proto-gen: check-proto-grpc-tools
+	@echo "Generating transport proto files (messages + gRPC services)..."
+	@protoc $(PROTO_INCLUDES) \
+		--go_out=$(PROTO_DIR) --go_opt=paths=source_relative \
+		--go-grpc_out=$(PROTO_DIR) --go-grpc_opt=paths=source_relative \
+		$(TRANSPORT_PROTO_FILES)
+	@echo "Done. Generated files in $(TRANSPORT_PROTO_DIR)/"
 
 # Build all binaries
 .PHONY: build

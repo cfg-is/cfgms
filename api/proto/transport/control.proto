@@ -1,0 +1,102 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
+syntax = "proto3";
+
+package cfgms.transport;
+
+option go_package = "github.com/cfgis/cfgms/api/proto/transport";
+
+import "google/protobuf/timestamp.proto";
+
+// CommandType enumerates the types of commands a controller sends to a steward.
+enum CommandType {
+  COMMAND_TYPE_UNSPECIFIED = 0;
+  COMMAND_TYPE_SYNC_CONFIG = 1;
+  COMMAND_TYPE_SYNC_DNA = 2;
+  COMMAND_TYPE_CONNECT_DATAPLANE = 3;
+  COMMAND_TYPE_EXECUTE_TASK = 4;
+  COMMAND_TYPE_SHUTDOWN = 5;
+  COMMAND_TYPE_VALIDATE_CONFIG = 6;
+}
+
+// EventType enumerates the types of events a steward emits to a controller.
+enum EventType {
+  EVENT_TYPE_UNSPECIFIED = 0;
+  EVENT_TYPE_CONFIG_APPLIED = 1;
+  EVENT_TYPE_DNA_SYNCED = 2;
+  EVENT_TYPE_TASK_COMPLETED = 3;
+  EVENT_TYPE_TASK_FAILED = 4;
+  EVENT_TYPE_ERROR = 5;
+}
+
+// Severity is used by both Event and LogEntry to indicate importance level.
+enum Severity {
+  SEVERITY_UNSPECIFIED = 0;
+  SEVERITY_INFO = 1;
+  SEVERITY_WARNING = 2;
+  SEVERITY_ERROR = 3;
+  SEVERITY_CRITICAL = 4;
+}
+
+// StewardStatus enumerates the health states a steward can report.
+enum StewardStatus {
+  STEWARD_STATUS_UNSPECIFIED = 0;
+  STEWARD_STATUS_HEALTHY = 1;
+  STEWARD_STATUS_DEGRADED = 2;
+  STEWARD_STATUS_ERROR = 3;
+  STEWARD_STATUS_DISCONNECTED = 4;
+}
+
+// ControlMessage is the envelope for all C2 traffic on the ControlChannel stream.
+message ControlMessage {
+  oneof payload {
+    Command command = 1;
+    Event event = 2;
+    Heartbeat heartbeat = 3;
+    Response response = 4;
+  }
+}
+
+// Command is sent from controller to steward via ControlChannel.
+message Command {
+  string id = 1;
+  CommandType type = 2;
+  string steward_id = 3;
+  string tenant_id = 4;
+  google.protobuf.Timestamp timestamp = 5;
+  map<string, string> params = 6;
+  int32 priority = 7;
+}
+
+// Event is sent from steward to controller via ControlChannel.
+message Event {
+  string id = 1;
+  EventType type = 2;
+  string steward_id = 3;
+  string tenant_id = 4;
+  google.protobuf.Timestamp timestamp = 5;
+  string command_id = 6;    // correlation to originating command
+  map<string, string> details = 7;
+  Severity severity = 8;
+}
+
+// Heartbeat is sent from steward to controller via ControlChannel.
+message Heartbeat {
+  string steward_id = 1;
+  string tenant_id = 2;
+  StewardStatus status = 3;
+  google.protobuf.Timestamp timestamp = 4;
+  map<string, string> metrics = 5;
+  string version = 6;
+  string dna_hash = 7;      // for hash-based sync detection
+}
+
+// Response is sent from steward to controller for command acknowledgment.
+message Response {
+  string command_id = 1;
+  string steward_id = 2;
+  bool success = 3;
+  string message = 4;
+  google.protobuf.Timestamp timestamp = 5;
+  map<string, string> details = 6;
+}
