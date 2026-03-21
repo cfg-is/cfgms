@@ -471,7 +471,7 @@ func TestRegistry_ConcurrentSend(t *testing.T) {
 // Connection tests
 // =============================================================================
 
-// TestStewardConnection_Send verifies that Send updates LastActivity.
+// TestStewardConnection_Send verifies that Send updates lastActivity.
 func TestStewardConnection_Send(t *testing.T) {
 	conn := &StewardConnection{
 		StewardID: "s1",
@@ -484,8 +484,9 @@ func TestStewardConnection_Send(t *testing.T) {
 	}
 	after := time.Now()
 
-	if conn.LastActivity.Before(before) || conn.LastActivity.After(after) {
-		t.Errorf("LastActivity = %v, want between %v and %v", conn.LastActivity, before, after)
+	activity := conn.GetLastActivity()
+	if activity.Before(before) || activity.After(after) {
+		t.Errorf("GetLastActivity() = %v, want between %v and %v", activity, before, after)
 	}
 }
 

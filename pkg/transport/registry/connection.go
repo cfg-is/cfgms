@@ -38,33 +38,44 @@ type StewardConnection struct {
 	// ConnectedAt records when this connection was registered.
 	ConnectedAt time.Time
 
-	// LastActivity records the most recent send or received activity.
-	LastActivity time.Time
+	// lastActivity records the most recent send or received activity.
+	// Access via GetLastActivity() for thread-safe reads.
+	lastActivity time.Time
 
 	// RemoteAddr is the network address of the connected steward.
 	RemoteAddr string
 
-	// mu serializes writes to Sender.
+	// mu serializes writes to Sender and lastActivity.
 	mu sync.Mutex
 }
 
 // Send writes a message to this steward's connection.
 //
 // Send is thread-safe — concurrent callers are serialized via an internal
-// mutex. LastActivity is updated on every successful or failed send attempt.
+// mutex. lastActivity is updated on every successful or failed send attempt.
 func (c *StewardConnection) Send(msg interface{}) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.LastActivity = time.Now()
+	c.lastActivity = time.Now()
 	return c.Sender.SendMsg(msg)
 }
 
 // UpdateActivity records the current time as the most recent activity.
 //
 // Call this when a message is received from the steward to keep the
-// LastActivity timestamp current for health monitoring purposes.
+// activity timestamp current for health monitoring purposes.
 func (c *StewardConnection) UpdateActivity() {
 	c.mu.Lock()
-	c.LastActivity = time.Now()
+	c.lastActivity = time.Now()
 	c.mu.Unlock()
+}
+
+// GetLastActivity returns the most recent activity timestamp.
+//
+// Thread-safe — acquires the internal mutex to read the timestamp
+// that is written by Send() and UpdateActivity().
+func (c *StewardConnection) GetLastActivity() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lastActivity
 }
