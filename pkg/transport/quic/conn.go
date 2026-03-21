@@ -4,6 +4,7 @@
 package quic
 
 import (
+	"crypto/tls"
 	"net"
 	"time"
 
@@ -14,8 +15,10 @@ import (
 //
 // Read, Write, Close, and deadline operations delegate to the underlying
 // QUIC stream. Address methods return the addresses from the parent QUIC
-// connection.
+// connection. The parent connection reference is kept so that TLS state
+// from the QUIC handshake can be exposed via TLSConnectionState.
 type Conn struct {
+	quicConn   *quicgo.Conn
 	stream     *quicgo.Stream
 	localAddr  net.Addr
 	remoteAddr net.Addr
@@ -24,9 +27,12 @@ type Conn struct {
 // Compile-time check that Conn implements net.Conn.
 var _ net.Conn = (*Conn)(nil)
 
-// newConn creates a Conn from a QUIC stream and connection addresses.
-func newConn(stream *quicgo.Stream, localAddr, remoteAddr net.Addr) *Conn {
+// newConn creates a Conn from a QUIC connection, one of its streams, and the
+// pre-computed addresses. The quicConn reference is required so that
+// TLSConnectionState can expose the peer certificate after the handshake.
+func newConn(quicConn *quicgo.Conn, stream *quicgo.Stream, localAddr, remoteAddr net.Addr) *Conn {
 	return &Conn{
+		quicConn:   quicConn,
 		stream:     stream,
 		localAddr:  localAddr,
 		remoteAddr: remoteAddr,
@@ -71,4 +77,18 @@ func (c *Conn) SetReadDeadline(t time.Time) error {
 // SetWriteDeadline sets the write deadline on the QUIC stream.
 func (c *Conn) SetWriteDeadline(t time.Time) error {
 	return c.stream.SetWriteDeadline(t)
+}
+
+// TLSConnectionState returns the TLS connection state from the underlying QUIC
+// connection. The state includes the negotiated cipher suite, the peer's
+// certificate chain, and the ALPN protocol, all of which are established
+// during the QUIC handshake.
+//
+// Returns nil if the parent connection reference is not available.
+func (c *Conn) TLSConnectionState() *tls.ConnectionState {
+	if c.quicConn == nil {
+		return nil
+	}
+	state := c.quicConn.ConnectionState().TLS
+	return &state
 }

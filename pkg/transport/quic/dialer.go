@@ -34,7 +34,7 @@ func Dial(ctx context.Context, addr string, tlsConfig *tls.Config, quicConfig *q
 
 	localAddr := newAddr(quicConn.LocalAddr().String())
 	remoteAddr := newAddr(quicConn.RemoteAddr().String())
-	return newConn(stream, localAddr, remoteAddr), nil
+	return newConn(quicConn, stream, localAddr, remoteAddr), nil
 }
 
 // NewDialer returns a function compatible with grpc.WithContextDialer.

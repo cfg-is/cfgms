@@ -80,7 +80,7 @@ func (l *Listener) Accept() (net.Conn, error) {
 
 	localAddr := newAddr(quicConn.LocalAddr().String())
 	remoteAddr := newAddr(quicConn.RemoteAddr().String())
-	return newConn(stream, localAddr, remoteAddr), nil
+	return newConn(quicConn, stream, localAddr, remoteAddr), nil
 }
 
 // Close stops the listener. Any blocked Accept call will return with an error.
