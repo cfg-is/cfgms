@@ -68,7 +68,7 @@ func (h *Handler) generateReport(w http.ResponseWriter, r *http.Request) {
 	// Generate the report
 	report, err := h.engine.GenerateReport(r.Context(), req)
 	if err != nil {
-		h.logger.Error("failed to generate report", "error", err, "format", logging.SanitizeLogValue(string(req.Format)))
+		h.logger.Error("failed to generate report", "error", logging.SanitizeLogValue(err.Error()), "format", logging.SanitizeLogValue(string(req.Format)))
 		h.writeError(w, http.StatusInternalServerError, "Failed to generate report", err)
 		return
 	}
@@ -76,12 +76,13 @@ func (h *Handler) generateReport(w http.ResponseWriter, r *http.Request) {
 	// Export in requested format
 	exportData, err := h.exporter.Export(r.Context(), report, req.Format)
 	if err != nil {
-		h.logger.Error("failed to export report", "error", err, "format", logging.SanitizeLogValue(string(req.Format)))
+		h.logger.Error("failed to export report", "error", logging.SanitizeLogValue(err.Error()), "format", logging.SanitizeLogValue(string(req.Format)))
 		h.writeError(w, http.StatusInternalServerError, "Failed to export report", err)
 		return
 	}
 
-	// Set appropriate content type and headers
+	// Set appropriate content type and headers (nosniff prevents MIME-type sniffing XSS)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	h.setExportHeaders(w, req.Format, report.ID)
 	if _, err := w.Write(exportData); err != nil {
 		h.logger.Error("failed to write export data", "error", err)
@@ -89,8 +90,8 @@ func (h *Handler) generateReport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.logger.Info("report generated successfully",
-		"report_id", report.ID,
-		"type", report.Type,
+		"report_id", logging.SanitizeLogValue(report.ID),
+		"type", logging.SanitizeLogValue(string(report.Type)),
 		"format", logging.SanitizeLogValue(string(req.Format)),
 		"generation_ms", report.Metadata.GenerationMS)
 }

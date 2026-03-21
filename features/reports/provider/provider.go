@@ -70,7 +70,7 @@ func (p *DataProvider) GetDNAData(ctx context.Context, query interfaces.DataQuer
 
 	p.logger.Debug("retrieved DNA records",
 		"count", len(allRecords),
-		"time_range", fmt.Sprintf("%v to %v", query.TimeRange.Start, query.TimeRange.End),
+		"time_range", logging.SanitizeLogValue(fmt.Sprintf("%v to %v", query.TimeRange.Start, query.TimeRange.End)),
 		"devices", len(query.DeviceIDs))
 
 	return allRecords, nil
@@ -83,7 +83,7 @@ func (p *DataProvider) GetDriftEvents(ctx context.Context, query interfaces.Data
 	// This is a limitation that would need to be addressed in the drift detection system.
 
 	p.logger.Debug("drift event querying not fully implemented - returning empty results",
-		"time_range", fmt.Sprintf("%v to %v", query.TimeRange.Start, query.TimeRange.End))
+		"time_range", logging.SanitizeLogValue(fmt.Sprintf("%v to %v", query.TimeRange.Start, query.TimeRange.End)))
 
 	// Return empty slice for now
 	return []drift.DriftEvent{}, nil
