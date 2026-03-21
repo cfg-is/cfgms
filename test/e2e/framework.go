@@ -516,11 +516,21 @@ func (f *E2ETestFramework) RegisterStewardWithController(stewardName, tenantID s
 	// Check if already registered (with read lock)
 	f.mu.RLock()
 	if existing, exists := f.registeredStewards[stewardName]; exists {
+		if existing.MQTTClient != nil && existing.MQTTClient.IsConnected() {
+			f.mu.RUnlock()
+			f.logger.Info("Reusing existing registered steward", "steward_name", stewardName)
+			return existing, nil
+		}
+		// Stale entry — client was disconnected (e.g., by a failover test).
+		// Remove it and re-register below.
 		f.mu.RUnlock()
-		f.logger.Info("Reusing existing registered steward", "steward_name", stewardName)
-		return existing, nil
+		f.mu.Lock()
+		delete(f.registeredStewards, stewardName)
+		f.mu.Unlock()
+		f.logger.Info("Evicting disconnected steward, will re-register", "steward_name", stewardName)
+	} else {
+		f.mu.RUnlock()
 	}
-	f.mu.RUnlock()
 
 	// Step 1: Create registration token (no lock needed)
 	token, err := f.CreateRegistrationToken(tenantID)
