@@ -56,7 +56,7 @@ func (e *MultiFormatExporter) WithConfig(config Config) *MultiFormatExporter {
 
 // Export exports a report in the specified format
 func (e *MultiFormatExporter) Export(ctx context.Context, report *interfaces.Report, format interfaces.ExportFormat) ([]byte, error) {
-	e.logger.Debug("exporting report", "format", format, "report_id", report.ID)
+	e.logger.Debug("exporting report", "format", logging.SanitizeLogValue(string(format)), "report_id", report.ID)
 
 	switch format {
 	case interfaces.FormatJSON:

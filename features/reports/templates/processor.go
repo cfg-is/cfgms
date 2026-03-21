@@ -50,7 +50,7 @@ func (p *Processor) ProcessTemplate(ctx context.Context, templateName string, da
 	}
 
 	p.logger.Debug("processing template",
-		"template", templateName,
+		"template", logging.SanitizeLogValue(templateName),
 		"type", template.Type,
 		"dna_records", len(data.DNARecords),
 		"drift_events", len(data.DriftEvents))

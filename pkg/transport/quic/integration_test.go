@@ -225,9 +225,8 @@ func startEchoServer(t *testing.T, tlsPair *testTLSPair) (*grpc.Server, string) 
 	srv.RegisterService(&echoServiceDesc, &echoServer{})
 
 	go func() {
-		if serveErr := srv.Serve(lis); serveErr != nil {
-			// Serve returns an error when the listener is closed.
-		}
+		// Serve returns an error when the listener is closed; ignore it.
+		_ = srv.Serve(lis)
 	}()
 
 	t.Cleanup(func() {

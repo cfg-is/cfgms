@@ -353,7 +353,7 @@ func (m *Manager) GetHistory(ctx context.Context, deviceID string, options *Quer
 	}
 
 	m.logger.Debug("DNA history retrieved",
-		"device_id", deviceID,
+		"device_id", logging.SanitizeLogValue(deviceID),
 		"records_found", len(records),
 		"total_count", totalCount,
 		"execution_time", executionTime,

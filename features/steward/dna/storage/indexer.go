@@ -173,7 +173,7 @@ func (i *MemoryIndexer) QueryRecords(ctx context.Context, deviceID string, optio
 	result := filteredRecords[start_idx:end_idx]
 
 	i.logger.Debug("DNA records queried",
-		"device_id", deviceID,
+		"device_id", logging.SanitizeLogValue(deviceID),
 		"total_found", totalCount,
 		"returned", len(result),
 		"query_time", time.Since(start))
