@@ -5,7 +5,6 @@ package quic
 
 import (
 	"context"
-	"net"
 	"testing"
 	"time"
 
@@ -38,7 +37,6 @@ func TestDialer_ReturnsNetConn(t *testing.T) {
 	// doesn't leak waiting in AcceptStream.
 	_, _ = conn.Write([]byte{0x00})
 
-	var _ net.Conn = conn
 	assert.NotNil(t, conn.LocalAddr())
 	assert.NotNil(t, conn.RemoteAddr())
 
@@ -51,9 +49,6 @@ func TestDialer_NewDialer_ContextDialer(t *testing.T) {
 	tlsPair := newTestTLSPair(t)
 
 	dialFn := NewDialer(tlsPair.client, nil)
-
-	// Verify the function signature matches grpc.WithContextDialer expectation.
-	var _ func(ctx context.Context, addr string) (net.Conn, error) = dialFn
 
 	lis, err := Listen("127.0.0.1:0", tlsPair.server, nil)
 	require.NoError(t, err)

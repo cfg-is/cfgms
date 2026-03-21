@@ -20,6 +20,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/transport/http"
 
 	cfgit "github.com/cfgis/cfgms/features/config/git"
+	"github.com/cfgis/cfgms/pkg/security"
 )
 
 // LocalRepositoryStore implements RepositoryStore using go-git
@@ -109,7 +110,10 @@ func (s *LocalRepositoryStore) Push(ctx context.Context, localPath string) error
 
 // ReadFile reads a file from the repository
 func (s *LocalRepositoryStore) ReadFile(ctx context.Context, localPath, filePath string) ([]byte, error) {
-	fullPath := filepath.Join(localPath, filePath)
+	fullPath, err := security.ValidateAndCleanPath(localPath, filePath)
+	if err != nil {
+		return nil, fmt.Errorf("invalid file path: %w", err)
+	}
 
 	data, err := os.ReadFile(fullPath)
 	if err != nil {
@@ -124,7 +128,10 @@ func (s *LocalRepositoryStore) ReadFile(ctx context.Context, localPath, filePath
 
 // WriteFile writes a file to the repository
 func (s *LocalRepositoryStore) WriteFile(ctx context.Context, localPath, filePath string, content []byte) error {
-	fullPath := filepath.Join(localPath, filePath)
+	fullPath, err := security.ValidateAndCleanPath(localPath, filePath)
+	if err != nil {
+		return fmt.Errorf("invalid file path: %w", err)
+	}
 
 	// Create directory if needed
 	dir := filepath.Dir(fullPath)
@@ -158,7 +165,10 @@ func (s *LocalRepositoryStore) WriteFile(ctx context.Context, localPath, filePat
 
 // DeleteFile deletes a file from the repository
 func (s *LocalRepositoryStore) DeleteFile(ctx context.Context, localPath, filePath string) error {
-	fullPath := filepath.Join(localPath, filePath)
+	fullPath, err := security.ValidateAndCleanPath(localPath, filePath)
+	if err != nil {
+		return fmt.Errorf("invalid file path: %w", err)
+	}
 
 	// Check if file exists
 	if _, err := os.Stat(fullPath); os.IsNotExist(err) {

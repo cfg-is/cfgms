@@ -54,7 +54,7 @@ func (p *DataProvider) GetDNAData(ctx context.Context, query interfaces.DataQuer
 
 			historyResult, err := p.storageManager.GetHistory(ctx, deviceID, options)
 			if err != nil {
-				p.logger.Warn("failed to get DNA history for device", "device_id", deviceID, "error", err)
+				p.logger.Warn("failed to get DNA history for device", "device_id", logging.SanitizeLogValue(deviceID), "error", err)
 				continue
 			}
 
@@ -120,7 +120,7 @@ func (p *DataProvider) GetDeviceStats(ctx context.Context, deviceIDs []string, t
 	for _, deviceID := range deviceIDs {
 		deviceStats, err := p.calculateDeviceStats(ctx, deviceID, timeRange)
 		if err != nil {
-			p.logger.Warn("failed to calculate stats for device", "device_id", deviceID, "error", err)
+			p.logger.Warn("failed to calculate stats for device", "device_id", logging.SanitizeLogValue(deviceID), "error", err)
 			continue
 		}
 		stats[deviceID] = deviceStats

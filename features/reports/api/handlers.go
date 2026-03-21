@@ -5,6 +5,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"html"
 	"net/http"
 	"strconv"
 	"time"
@@ -67,7 +68,7 @@ func (h *Handler) generateReport(w http.ResponseWriter, r *http.Request) {
 	// Generate the report
 	report, err := h.engine.GenerateReport(r.Context(), req)
 	if err != nil {
-		h.logger.Error("failed to generate report", "error", err, "request", req)
+		h.logger.Error("failed to generate report", "error", err, "format", logging.SanitizeLogValue(string(req.Format)))
 		h.writeError(w, http.StatusInternalServerError, "Failed to generate report", err)
 		return
 	}
@@ -75,7 +76,7 @@ func (h *Handler) generateReport(w http.ResponseWriter, r *http.Request) {
 	// Export in requested format
 	exportData, err := h.exporter.Export(r.Context(), report, req.Format)
 	if err != nil {
-		h.logger.Error("failed to export report", "error", err, "format", req.Format)
+		h.logger.Error("failed to export report", "error", err, "format", logging.SanitizeLogValue(string(req.Format)))
 		h.writeError(w, http.StatusInternalServerError, "Failed to export report", err)
 		return
 	}
@@ -90,7 +91,7 @@ func (h *Handler) generateReport(w http.ResponseWriter, r *http.Request) {
 	h.logger.Info("report generated successfully",
 		"report_id", report.ID,
 		"type", report.Type,
-		"format", req.Format,
+		"format", logging.SanitizeLogValue(string(req.Format)),
 		"generation_ms", report.Metadata.GenerationMS)
 }
 
@@ -423,7 +424,7 @@ func (h *Handler) parseTimeRange(r *http.Request) (interfaces.TimeRange, error) 
 		if parsedStart, err := time.Parse(time.RFC3339, startStr); err == nil {
 			start = parsedStart
 		} else {
-			return interfaces.TimeRange{}, fmt.Errorf("invalid start time format: %s", startStr)
+			return interfaces.TimeRange{}, fmt.Errorf("invalid start time format: %s", html.EscapeString(startStr))
 		}
 	}
 
@@ -431,7 +432,7 @@ func (h *Handler) parseTimeRange(r *http.Request) (interfaces.TimeRange, error) 
 		if parsedEnd, err := time.Parse(time.RFC3339, endStr); err == nil {
 			end = parsedEnd
 		} else {
-			return interfaces.TimeRange{}, fmt.Errorf("invalid end time format: %s", endStr)
+			return interfaces.TimeRange{}, fmt.Errorf("invalid end time format: %s", html.EscapeString(endStr))
 		}
 	}
 
