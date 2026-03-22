@@ -19,6 +19,20 @@ type Cache struct {
 	stopCleanup chan struct{}
 	cleanupDone *sync.WaitGroup
 	closeOnce   sync.Once
+	accessSeq   uint64 // monotonic counter for deterministic LRU ordering
+}
+
+// now returns the current time using the configured clock, or time.Now() if no clock is set.
+func (c *Cache) now() time.Time {
+	if c.config.Clock != nil {
+		return c.config.Clock.Now()
+	}
+	return time.Now()
+}
+
+// isExpired checks if the cache entry has expired using the cache's clock.
+func (c *Cache) isExpired(e *CacheEntry) bool {
+	return c.now().After(e.ExpiresAt)
 }
 
 // NewCache creates a new general-purpose cache with the specified configuration
@@ -53,13 +67,15 @@ func (c *Cache) Get(key string) (interface{}, bool) {
 	}
 
 	// Check expiration
-	if entry.IsExpired() {
+	if c.isExpired(entry) {
 		c.stats.Misses++
 		return nil, false
 	}
 
 	// Update access tracking for LRU/LFU eviction
-	entry.LastAccessed = time.Now()
+	entry.LastAccessed = c.now()
+	c.accessSeq++
+	entry.LastAccessSeq = c.accessSeq
 	entry.AccessCount++
 
 	c.stats.Hits++
@@ -76,13 +92,15 @@ func (c *Cache) Set(key string, value interface{}, ttl time.Duration) error {
 		ttl = c.config.DefaultTTL
 	}
 
-	now := time.Now()
+	now := c.now()
+	c.accessSeq++
 	c.items[key] = &CacheEntry{
-		Value:        value,
-		ExpiresAt:    now.Add(ttl),
-		CreatedAt:    now,
-		LastAccessed: now,
-		AccessCount:  0,
+		Value:         value,
+		ExpiresAt:     now.Add(ttl),
+		CreatedAt:     now,
+		LastAccessed:  now,
+		LastAccessSeq: c.accessSeq,
+		AccessCount:   0,
 	}
 
 	// Enforce size limits
@@ -163,11 +181,13 @@ func (c *Cache) GetMany(keys []string) map[string]interface{} {
 	defer c.mutex.Unlock()
 
 	result := make(map[string]interface{})
-	now := time.Now()
+	now := c.now()
 	for _, key := range keys {
-		if entry, exists := c.items[key]; exists && !entry.IsExpired() {
+		if entry, exists := c.items[key]; exists && !c.isExpired(entry) {
 			// Update access tracking for LRU/LFU eviction
 			entry.LastAccessed = now
+			c.accessSeq++
+			entry.LastAccessSeq = c.accessSeq
 			entry.AccessCount++
 
 			result[key] = entry.Value
@@ -190,15 +210,17 @@ func (c *Cache) SetMany(items map[string]interface{}, ttl time.Duration) error {
 		ttl = c.config.DefaultTTL
 	}
 
-	now := time.Now()
+	now := c.now()
 	expiresAt := now.Add(ttl)
 	for key, value := range items {
+		c.accessSeq++
 		c.items[key] = &CacheEntry{
-			Value:        value,
-			ExpiresAt:    expiresAt,
-			CreatedAt:    now,
-			LastAccessed: now,
-			AccessCount:  0,
+			Value:         value,
+			ExpiresAt:     expiresAt,
+			CreatedAt:     now,
+			LastAccessed:  now,
+			LastAccessSeq: c.accessSeq,
+			AccessCount:   0,
 		}
 	}
 
@@ -251,11 +273,11 @@ func (c *Cache) cleanupExpiredItems() {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
-	now := time.Now()
+	now := c.now()
 	expired := int64(0)
 
 	for key, entry := range c.items {
-		if entry.IsExpired() {
+		if c.isExpired(entry) {
 			delete(c.items, key)
 			expired++
 		}
@@ -326,23 +348,24 @@ func (c *Cache) evictFIFO(count int) {
 	c.stats.Evictions += int64(count)
 }
 
-// evictLRU removes the least recently accessed items
+// evictLRU removes the least recently accessed items using monotonic sequence
+// numbers for deterministic ordering regardless of clock resolution.
 func (c *Cache) evictLRU(count int) {
 	type entry struct {
-		key          string
-		lastAccessed time.Time
+		key       string
+		accessSeq uint64
 	}
 
-	// Collect all entries with last access times
+	// Collect all entries with access sequence numbers
 	entries := make([]entry, 0, len(c.items))
 	for key, item := range c.items {
-		entries = append(entries, entry{key: key, lastAccessed: item.LastAccessed})
+		entries = append(entries, entry{key: key, accessSeq: item.LastAccessSeq})
 	}
 
-	// Sort by last access time (least recently accessed first)
+	// Sort by access sequence (lowest sequence = least recently accessed)
 	for i := 0; i < len(entries)-1; i++ {
 		for j := i + 1; j < len(entries); j++ {
-			if entries[i].lastAccessed.After(entries[j].lastAccessed) {
+			if entries[i].accessSeq > entries[j].accessSeq {
 				entries[i], entries[j] = entries[j], entries[i]
 			}
 		}

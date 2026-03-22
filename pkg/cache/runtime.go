@@ -13,6 +13,12 @@ import (
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
+// Clock abstracts time operations for deterministic testing of cache behavior.
+// When nil in CacheConfig, the cache defaults to using time.Now().
+type Clock interface {
+	Now() time.Time
+}
+
 // CacheConfig defines configuration for the runtime cache
 type CacheConfig struct {
 	// Name identifies the cache instance (for logging/debugging)
@@ -28,6 +34,9 @@ type CacheConfig struct {
 
 	// Eviction strategy when cache is full
 	EvictionPolicy EvictionPolicy // FIFO, LRU, or LFU eviction policy
+
+	// Clock provides time for expiration and LRU tracking. If nil, uses time.Now().
+	Clock Clock
 }
 
 // DefaultCacheConfig returns a sensible default configuration
@@ -56,14 +65,16 @@ const (
 
 // CacheEntry represents a cached item with expiration and access tracking
 type CacheEntry struct {
-	Value        interface{}
-	ExpiresAt    time.Time
-	CreatedAt    time.Time // When the entry was created
-	LastAccessed time.Time // When the entry was last accessed (for LRU)
-	AccessCount  int64     // Number of times accessed (for LFU)
+	Value         interface{}
+	ExpiresAt     time.Time
+	CreatedAt     time.Time // When the entry was created
+	LastAccessed  time.Time // When the entry was last accessed (for LRU)
+	LastAccessSeq uint64    // Monotonic sequence number for deterministic LRU ordering
+	AccessCount   int64     // Number of times accessed (for LFU)
 }
 
-// IsExpired checks if the cache entry has expired
+// IsExpired checks if the cache entry has expired using the system clock.
+// For clock-aware expiration checking, use Cache.isExpired() instead.
 func (e *CacheEntry) IsExpired() bool {
 	return time.Now().After(e.ExpiresAt)
 }

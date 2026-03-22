@@ -114,17 +114,22 @@ func TestIPRateLimiter_LRUEviction(t *testing.T) {
 	limiter := NewIPRateLimiter(cfg, clock)
 	defer limiter.Close()
 
-	// Fill cache beyond max tracked
+	// Fill cache beyond max tracked, advancing clock between each to ensure
+	// distinct timestamps for deterministic LRU ordering (Windows has ~15ms
+	// time.Now() resolution which caused flaky eviction order).
 	for i := 0; i < 20; i++ {
 		ip := fmt.Sprintf("10.0.0.%d", i)
 		limiter.RecordFailure(ip)
+		clock.Advance(1 * time.Millisecond)
 	}
 
-	// Most recent IPs should still be tracked
+	// Most recent IPs should still be tracked (they have the newest timestamps)
 	assert.True(t, limiter.IsRateLimited("10.0.0.19"))
+	assert.True(t, limiter.IsRateLimited("10.0.0.15"))
 
-	// Earliest IPs may have been evicted (LRU) — exact behavior depends on cache eviction
-	// We just verify no panic and that recent entries work
+	// Earliest IPs should have been evicted (LRU)
+	assert.False(t, limiter.IsRateLimited("10.0.0.0"))
+	assert.False(t, limiter.IsRateLimited("10.0.0.5"))
 }
 
 func TestIPRateLimiter_ConcurrentAccess(t *testing.T) {

@@ -363,7 +363,7 @@ func TestGRPCOverQUIC_mTLS_NoCert(t *testing.T) {
 		// Dial itself failed — server rejected immediately.
 		return
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Write data to trigger the server to process our (absent) certificate.
 	_, _ = conn.Write([]byte{0x00})
@@ -424,7 +424,7 @@ func TestGRPCOverQUIC_mTLS_WrongCA(t *testing.T) {
 	if dialErr != nil {
 		return
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	_, _ = conn.Write([]byte{0x00})
 	time.Sleep(100 * time.Millisecond)
