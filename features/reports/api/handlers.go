@@ -488,6 +488,7 @@ func (h *Handler) setExportHeaders(w http.ResponseWriter, format interfaces.Expo
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"report_%s.csv\"", reportID))
 	case interfaces.FormatHTML:
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"report_%s.html\"", reportID))
 	case interfaces.FormatPDF:
 		w.Header().Set("Content-Type", "application/pdf")
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"report_%s.pdf\"", reportID))
