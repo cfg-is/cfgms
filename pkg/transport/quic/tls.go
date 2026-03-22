@@ -9,9 +9,11 @@ import (
 	"fmt"
 )
 
-// alpnProtocol is the ALPN protocol identifier for gRPC-over-QUIC in CFGMS.
+// ALPNProtocol is the ALPN protocol identifier for gRPC-over-QUIC in CFGMS.
 // Both sides must agree on this value for the TLS handshake to succeed.
-const alpnProtocol = "cfgms-grpc"
+// Use this constant when configuring TLS NextProtos outside of the
+// ServerTLSConfig/ClientTLSConfig helpers.
+const ALPNProtocol = "cfgms-grpc"
 
 // ServerTLSConfig returns a *tls.Config suitable for the QUIC listener (controller side).
 //
@@ -32,7 +34,7 @@ func ServerTLSConfig(serverCert tls.Certificate, clientCAs *x509.CertPool) (*tls
 		ClientAuth:   tls.RequireAndVerifyClientCert,
 		ClientCAs:    clientCAs,
 		MinVersion:   tls.VersionTLS13,
-		NextProtos:   []string{alpnProtocol},
+		NextProtos:   []string{ALPNProtocol},
 	}, nil
 }
 
@@ -54,7 +56,7 @@ func ClientTLSConfig(clientCert tls.Certificate, rootCAs *x509.CertPool) (*tls.C
 		Certificates: []tls.Certificate{clientCert},
 		RootCAs:      rootCAs,
 		MinVersion:   tls.VersionTLS13,
-		NextProtos:   []string{alpnProtocol},
+		NextProtos:   []string{ALPNProtocol},
 	}, nil
 }
 

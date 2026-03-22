@@ -90,7 +90,7 @@ func TestServerTLSConfig_Valid(t *testing.T) {
 
 	assert.Equal(t, uint16(tls.VersionTLS13), cfg.MinVersion, "must enforce TLS 1.3")
 	assert.Equal(t, tls.RequireAndVerifyClientCert, cfg.ClientAuth, "must require client certificate")
-	assert.Equal(t, []string{alpnProtocol}, cfg.NextProtos, "must set ALPN to cfgms-grpc")
+	assert.Equal(t, []string{ALPNProtocol}, cfg.NextProtos, "must set ALPN to cfgms-grpc")
 	assert.Len(t, cfg.Certificates, 1)
 }
 
@@ -121,7 +121,7 @@ func TestClientTLSConfig_Valid(t *testing.T) {
 	require.NotNil(t, cfg)
 
 	assert.Equal(t, uint16(tls.VersionTLS13), cfg.MinVersion, "must enforce TLS 1.3")
-	assert.Equal(t, []string{alpnProtocol}, cfg.NextProtos, "must set ALPN to cfgms-grpc")
+	assert.Equal(t, []string{ALPNProtocol}, cfg.NextProtos, "must set ALPN to cfgms-grpc")
 	assert.Len(t, cfg.Certificates, 1)
 	assert.NotNil(t, cfg.RootCAs)
 }
@@ -334,7 +334,7 @@ func TestGRPCOverQUIC_mTLS_NoCert(t *testing.T) {
 		RootCAs:    caPool,
 		ServerName: "localhost",
 		MinVersion: tls.VersionTLS13,
-		NextProtos: []string{alpnProtocol},
+		NextProtos: []string{ALPNProtocol},
 	}
 
 	lis, err := Listen("127.0.0.1:0", serverTLS, nil)

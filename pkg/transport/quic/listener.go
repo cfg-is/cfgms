@@ -12,12 +12,25 @@ import (
 	quicgo "github.com/quic-go/quic-go"
 )
 
-// defaultQuicConfig returns the default QUIC configuration for the transport
-// adapter. Callers may override individual fields by passing their own config.
+// defaultQuicConfig returns the default QUIC configuration for the transport adapter.
+//
+// Keepalive tuning rationale (Story #504):
+//
+//   - KeepAlivePeriod 25s: Under the 30s worst-case NAT/firewall UDP pinhole timeout.
+//     At 50k stewards this produces ~2,000 PING frames/sec (vs 5,000 at 10s).
+//     Application heartbeats (default 30s) provide additional traffic that keeps
+//     connections alive, so QUIC keepalives are a safety net, not the primary signal.
+//
+//   - MaxIdleTimeout 90s: 3.6× the keepalive period. A connection is torn down only
+//     after ~3 missed keepalives AND no application traffic. This is generous enough
+//     to survive transient network blips while still detecting genuinely dead connections
+//     well before the controller's heartbeat timeout (default 15s detection + this).
+//
+// Both values can be overridden by passing a custom *quic.Config to Listen/Dial.
 func defaultQuicConfig() *quicgo.Config {
 	return &quicgo.Config{
-		MaxIdleTimeout:  30 * time.Second,
-		KeepAlivePeriod: 10 * time.Second,
+		MaxIdleTimeout:  90 * time.Second,
+		KeepAlivePeriod: 25 * time.Second,
 	}
 }
 
@@ -46,8 +59,8 @@ var _ net.Listener = (*Listener)(nil)
 // Listen creates a new QUIC listener on the given address.
 //
 // tlsConfig must have NextProtos set to a value agreed with the client.
-// If quicConfig is nil, sensible defaults (MaxIdleTimeout: 30s,
-// KeepAlivePeriod: 10s) are used.
+// If quicConfig is nil, sensible defaults (MaxIdleTimeout: 90s,
+// KeepAlivePeriod: 25s) are used. See defaultQuicConfig for rationale.
 func Listen(addr string, tlsConfig *tls.Config, quicConfig *quicgo.Config) (*Listener, error) {
 	ql, err := quicgo.ListenAddr(addr, tlsConfig, mergeQuicConfig(quicConfig))
 	if err != nil {
