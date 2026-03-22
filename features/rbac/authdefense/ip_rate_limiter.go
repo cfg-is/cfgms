@@ -65,6 +65,7 @@ func NewIPRateLimiter(cfg AuthDefenseConfig, clock Clock) *IPRateLimiter {
 		DefaultTTL:      cfg.IPRateWindow * 2, // keep entries alive a bit beyond window
 		CleanupInterval: cfg.IPRateWindow,
 		EvictionPolicy:  cache.EvictionLRU,
+		Clock:           clock, // share clock with cache for deterministic LRU ordering
 	})
 
 	return &IPRateLimiter{
