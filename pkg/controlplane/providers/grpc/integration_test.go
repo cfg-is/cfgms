@@ -267,8 +267,14 @@ func TestWaitForResponse(t *testing.T) {
 		close(done)
 	}()
 
-	// Send the command
-	time.Sleep(50 * time.Millisecond) // let WaitForResponse register first
+	// Wait for the pending response channel to be registered before sending
+	require.Eventually(t, func() bool {
+		env.server.responseMu.Lock()
+		_, ok := env.server.pendingResponses["cmd-resp-001"]
+		env.server.responseMu.Unlock()
+		return ok
+	}, 5*time.Second, time.Millisecond)
+
 	err = env.server.SendCommand(context.Background(), &types.Command{
 		ID:        "cmd-resp-001",
 		Type:      types.CommandSyncConfig,
@@ -338,9 +344,10 @@ func TestEventFilter(t *testing.T) {
 		t.Fatal("timed out waiting for filtered event")
 	}
 
-	// Give a moment to ensure the non-matching event doesn't arrive
-	time.Sleep(200 * time.Millisecond)
-	assert.Empty(t, received, "non-matching event should not have been delivered")
+	// Verify the non-matching event does not arrive
+	require.Never(t, func() bool {
+		return len(received) > 0
+	}, 200*time.Millisecond, 20*time.Millisecond, "non-matching event should not have been delivered")
 }
 
 func TestFanOutCommand(t *testing.T) {
@@ -471,6 +478,16 @@ func TestDisconnectCleansUpRegistry(t *testing.T) {
 		_, ok := reg.Get("steward-disconnect")
 		return !ok
 	}, 5*time.Second, 10*time.Millisecond, "steward should be unregistered after disconnect")
+
+	// SendCommand to the disconnected steward should return an error
+	err = server.SendCommand(context.Background(), &types.Command{
+		ID:        "cmd-after-disconnect",
+		Type:      types.CommandSyncConfig,
+		StewardID: "steward-disconnect",
+		Timestamp: time.Now(),
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not connected")
 }
 
 func TestMultipleConcurrentStewards(t *testing.T) {
@@ -499,29 +516,31 @@ func TestMultipleConcurrentStewards(t *testing.T) {
 		clientConfigs[id] = tc.clientTLSConfig(t, id)
 	}
 
+	// Create and initialize all clients on the main goroutine (safe for t.Cleanup),
+	// then connect them concurrently.
+	clients := make([]*Provider, numStewards)
+	for i := 0; i < numStewards; i++ {
+		id := fmt.Sprintf("steward-%d", i)
+		client := New(ModeClient)
+		err := client.Initialize(context.Background(), map[string]interface{}{
+			"mode":       "client",
+			"addr":       listenAddr,
+			"tls_config": clientConfigs[id],
+			"steward_id": id,
+		})
+		require.NoError(t, err)
+		clients[i] = client
+		t.Cleanup(func() { _ = client.Stop(context.Background()) })
+	}
+
 	var wg sync.WaitGroup
 	for i := 0; i < numStewards; i++ {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			id := fmt.Sprintf("steward-%d", idx)
-
-			client := New(ModeClient)
-			err := client.Initialize(context.Background(), map[string]interface{}{
-				"mode":       "client",
-				"addr":       listenAddr,
-				"tls_config": clientConfigs[id],
-				"steward_id": id,
-			})
-			if err != nil {
-				t.Errorf("steward %s init failed: %v", id, err)
-				return
+			if err := clients[idx].Start(context.Background()); err != nil {
+				t.Errorf("steward-%d start failed: %v", idx, err)
 			}
-			if err := client.Start(context.Background()); err != nil {
-				t.Errorf("steward %s start failed: %v", id, err)
-				return
-			}
-			t.Cleanup(func() { _ = client.Stop(context.Background()) })
 		}(i)
 	}
 
@@ -560,8 +579,12 @@ func TestStatsTracking(t *testing.T) {
 		StewardID: "steward-stats-test", Status: types.StatusHealthy, Timestamp: now,
 	}))
 
-	// Give dispatchers time to process
-	time.Sleep(200 * time.Millisecond)
+	// Poll until all stats are populated (async dispatch via goroutines)
+	require.Eventually(t, func() bool {
+		return env.server.eventsReceived.Load() >= 1 &&
+			env.server.heartbeatsReceived.Load() >= 1 &&
+			env.client.commandsReceived.Load() >= 1
+	}, 5*time.Second, 10*time.Millisecond)
 
 	// Check server stats
 	serverStats, err := env.server.GetStats(context.Background())
