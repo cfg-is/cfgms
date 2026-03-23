@@ -47,7 +47,7 @@ func newTestEnv(t *testing.T, stewardID string) *testEnv {
 	// Start server on ephemeral port
 	err = server.Start(context.Background())
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = server.Stop(context.Background()) })
+	t.Cleanup(func() { forceStopServer(server) })
 
 	// Get the actual listen address
 	listenAddr := server.listener.Addr().String()
@@ -364,7 +364,7 @@ func TestFanOutCommand(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NoError(t, server.Start(context.Background()))
-	t.Cleanup(func() { _ = server.Stop(context.Background()) })
+	t.Cleanup(func() { forceStopServer(server) })
 
 	listenAddr := server.listener.Addr().String()
 
@@ -387,8 +387,9 @@ func TestFanOutCommand(t *testing.T) {
 		ch := make(chan *types.Command, 1)
 		received[id] = ch
 		id := id
+		cmdCh := ch // capture for closure to avoid concurrent map read
 		require.NoError(t, client.SubscribeCommands(context.Background(), id, func(ctx context.Context, cmd *types.Command) error {
-			received[id] <- cmd
+			cmdCh <- cmd
 			return nil
 		}))
 	}
@@ -450,7 +451,7 @@ func TestDisconnectCleansUpRegistry(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NoError(t, server.Start(context.Background()))
-	t.Cleanup(func() { _ = server.Stop(context.Background()) })
+	t.Cleanup(func() { forceStopServer(server) })
 
 	listenAddr := server.listener.Addr().String()
 
@@ -503,7 +504,7 @@ func TestMultipleConcurrentStewards(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NoError(t, server.Start(context.Background()))
-	t.Cleanup(func() { _ = server.Stop(context.Background()) })
+	t.Cleanup(func() { forceStopServer(server) })
 
 	listenAddr := server.listener.Addr().String()
 
