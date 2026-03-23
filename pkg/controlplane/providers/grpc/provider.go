@@ -493,6 +493,20 @@ func (p *Provider) getState() ConnectionState {
 	return ConnectionState(p.connState.Load())
 }
 
+// sendControlMessage sends a ControlMessage on the client stream under sendMu.
+// It handles the TOCTOU race where closeClientConn may nil the stream between
+// the checkClientConnected call and the actual send.
+func (p *Provider) sendControlMessage(msg *transportpb.ControlMessage) error {
+	p.sendMu.Lock()
+	stream := p.controlStream
+	p.sendMu.Unlock()
+
+	if stream == nil {
+		return fmt.Errorf("provider is %s", p.getState())
+	}
+	return stream.Send(msg)
+}
+
 // checkClientConnected returns an error if the client is not in the Connected state.
 func (p *Provider) checkClientConnected() error {
 	state := p.getState()
@@ -633,11 +647,7 @@ func (p *Provider) PublishEvent(ctx context.Context, event *types.Event) error {
 		Payload: &transportpb.ControlMessage_Event{Event: eventToProto(event)},
 	}
 
-	p.sendMu.Lock()
-	err := p.controlStream.Send(msg)
-	p.sendMu.Unlock()
-
-	if err != nil {
+	if err := p.sendControlMessage(msg); err != nil {
 		p.deliveryFailures.Add(1)
 		return fmt.Errorf("failed to publish event: %w", err)
 	}
@@ -676,11 +686,7 @@ func (p *Provider) SendHeartbeat(ctx context.Context, heartbeat *types.Heartbeat
 		Payload: &transportpb.ControlMessage_Heartbeat{Heartbeat: heartbeatToProto(heartbeat)},
 	}
 
-	p.sendMu.Lock()
-	err := p.controlStream.Send(msg)
-	p.sendMu.Unlock()
-
-	if err != nil {
+	if err := p.sendControlMessage(msg); err != nil {
 		p.deliveryFailures.Add(1)
 		return fmt.Errorf("failed to send heartbeat: %w", err)
 	}
@@ -716,11 +722,7 @@ func (p *Provider) SendResponse(ctx context.Context, response *types.Response) e
 		Payload: &transportpb.ControlMessage_Response{Response: responseToProto(response)},
 	}
 
-	p.sendMu.Lock()
-	err := p.controlStream.Send(msg)
-	p.sendMu.Unlock()
-
-	if err != nil {
+	if err := p.sendControlMessage(msg); err != nil {
 		p.deliveryFailures.Add(1)
 		return fmt.Errorf("failed to send response: %w", err)
 	}
