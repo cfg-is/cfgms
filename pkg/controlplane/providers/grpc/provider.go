@@ -309,6 +309,13 @@ func (p *Provider) startClient() error {
 // dialAndOpenStream creates a new gRPC client connection over QUIC and opens the
 // ControlChannel bidi stream. On failure, any partially created connection is closed.
 func (p *Provider) dialAndOpenStream() error {
+	// Check context before attempting to dial
+	select {
+	case <-p.ctx.Done():
+		return p.ctx.Err()
+	default:
+	}
+
 	// Read addr under sendMu (not mu) because this function is called from
 	// startClient which already holds mu. sendMu serializes with the test
 	// helper restartServerAndRepoint which updates addr under sendMu.
@@ -466,15 +473,17 @@ func (p *Provider) reconnectLoop() {
 // closeClientConn closes the current gRPC connection and clears the stream reference.
 func (p *Provider) closeClientConn() {
 	p.sendMu.Lock()
-	if p.controlStream != nil {
-		_ = p.controlStream.CloseSend()
-		p.controlStream = nil
-	}
-	if p.grpcConn != nil {
-		_ = p.grpcConn.Close()
-		p.grpcConn = nil
-	}
+	// Nil the stream reference first to prevent new sends. Don't call
+	// CloseSend — it races with concurrent Recv in clientReceiveLoop.
+	// Closing the gRPC conn below will terminate the stream.
+	p.controlStream = nil
+	conn := p.grpcConn
+	p.grpcConn = nil
 	p.sendMu.Unlock()
+
+	if conn != nil {
+		_ = conn.Close()
+	}
 }
 
 // setState updates the connection state and fires the on_state_change callback.
