@@ -309,10 +309,17 @@ func (p *Provider) startClient() error {
 // dialAndOpenStream creates a new gRPC client connection over QUIC and opens the
 // ControlChannel bidi stream. On failure, any partially created connection is closed.
 func (p *Provider) dialAndOpenStream() error {
+	// Read addr under sendMu (not mu) because this function is called from
+	// startClient which already holds mu. sendMu serializes with the test
+	// helper restartServerAndRepoint which updates addr under sendMu.
+	p.sendMu.Lock()
+	addr := p.addr
+	p.sendMu.Unlock()
+
 	dialer := quictransport.NewDialer(p.tlsConfig, p.quicConfig())
 
 	conn, err := grpc.NewClient(
-		p.addr,
+		addr,
 		grpc.WithContextDialer(dialer),
 		grpc.WithTransportCredentials(quictransport.TransportCredentials()),
 	)
@@ -390,10 +397,22 @@ func (p *Provider) clientReceiveLoop() {
 	}
 }
 
+// testBackoffOverride allows tests to use shorter backoff intervals.
+// Only set from test code via the unexported field.
+var testBackoffOverride *backoff
+
 // reconnectLoop attempts to re-establish the ControlChannel with exponential backoff.
 // It runs until either a connection is established or the provider context is cancelled.
 func (p *Provider) reconnectLoop() {
 	bo := defaultBackoff()
+	if testBackoffOverride != nil {
+		bo = &backoff{
+			initial:    testBackoffOverride.initial,
+			max:        testBackoffOverride.max,
+			multiplier: testBackoffOverride.multiplier,
+			jitter:     testBackoffOverride.jitter,
+		}
+	}
 
 	for {
 		select {

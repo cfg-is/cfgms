@@ -5,6 +5,7 @@ package grpc
 
 import (
 	"context"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -33,10 +34,11 @@ func restartServerAndRepoint(t *testing.T, client *Provider, tc *testCA, reg reg
 	require.NoError(t, server.Start(context.Background()))
 	t.Cleanup(func() { forceStopServer(server) })
 
-	// Point the client's reconnection loop at the new server address
-	client.mu.Lock()
+	// Point the client's reconnection loop at the new server address.
+	// Use sendMu because dialAndOpenStream reads addr under sendMu.
+	client.sendMu.Lock()
 	client.addr = server.listener.Addr().String()
-	client.mu.Unlock()
+	client.sendMu.Unlock()
 
 	return server
 }
@@ -52,6 +54,17 @@ func forceStopServer(s *Provider) {
 	if s.grpcServer != nil {
 		s.grpcServer.Stop()
 	}
+}
+
+func TestMain(m *testing.M) {
+	// Use fast backoff for all reconnection tests to avoid timeouts with race detector.
+	testBackoffOverride = &backoff{
+		initial:    50 * time.Millisecond,
+		max:        200 * time.Millisecond,
+		multiplier: 2.0,
+		jitter:     0.1,
+	}
+	os.Exit(m.Run())
 }
 
 func TestReconnectAfterServerRestart(t *testing.T) {
