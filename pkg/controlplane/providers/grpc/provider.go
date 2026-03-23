@@ -67,6 +67,8 @@ type Provider struct {
 	grpcClient    transportpb.StewardTransportClient
 	controlStream grpc.BidiStreamingClient[transportpb.ControlMessage, transportpb.ControlMessage]
 	sendMu        sync.Mutex // serializes writes to controlStream
+	connState     atomic.Int32
+	onStateChange func(ConnectionState)
 
 	// Shared configuration
 	config          map[string]interface{}
@@ -104,6 +106,11 @@ type Provider struct {
 	responsesSent      atomic.Int64
 	responsesReceived  atomic.Int64
 	deliveryFailures   atomic.Int64
+	reconnectAttempts  atomic.Int64
+
+	// Connection timestamps (protected by mu)
+	lastConnectedAt    time.Time
+	lastDisconnectedAt time.Time
 }
 
 // eventSubscription represents an event subscription with filter.
@@ -137,6 +144,7 @@ func (p *Provider) Description() string { return p.description }
 //   - "logger": *slog.Logger - Logger (optional)
 //   - "keepalive_period": time.Duration - QUIC keepalive interval (optional, default 25s)
 //   - "idle_timeout": time.Duration - QUIC idle timeout (optional, default 90s)
+//   - "on_state_change": func(ConnectionState) - Connection state change callback (optional, client mode only)
 //
 // Server mode additional keys:
 //   - "registry": registry.Registry - Connection registry (optional, creates one if nil)
@@ -171,6 +179,9 @@ func (p *Provider) Initialize(ctx context.Context, config map[string]interface{}
 	}
 	if it, ok := config["idle_timeout"].(time.Duration); ok {
 		p.idleTimeout = it
+	}
+	if cb, ok := config["on_state_change"].(func(ConnectionState)); ok {
+		p.onStateChange = cb
 	}
 
 	switch p.mode {
@@ -277,11 +288,29 @@ func (p *Provider) startServer() error {
 	return nil
 }
 
+// startClient must be called with p.mu held.
 func (p *Provider) startClient() error {
+	p.setState(StateConnecting)
+
+	if err := p.dialAndOpenStream(); err != nil {
+		p.setState(StateDisconnected)
+		return err
+	}
+
+	p.setState(StateConnected)
+	p.lastConnectedAt = time.Now() // mu already held by caller
+
+	go p.clientReceiveLoop()
+
+	p.logger.Info("gRPC control plane client connected", "addr", p.addr, "steward_id", p.stewardID)
+	return nil
+}
+
+// dialAndOpenStream creates a new gRPC client connection over QUIC and opens the
+// ControlChannel bidi stream. On failure, any partially created connection is closed.
+func (p *Provider) dialAndOpenStream() error {
 	dialer := quictransport.NewDialer(p.tlsConfig, p.quicConfig())
 
-	// TLS happens at the QUIC layer. We use quictransport.TransportCredentials()
-	// to bridge the QUIC TLS state into gRPC's AuthInfo for peer identity.
 	conn, err := grpc.NewClient(
 		p.addr,
 		grpc.WithContextDialer(dialer),
@@ -290,33 +319,54 @@ func (p *Provider) startClient() error {
 	if err != nil {
 		return fmt.Errorf("failed to create gRPC client: %w", err)
 	}
-	p.grpcConn = conn
-	p.grpcClient = transportpb.NewStewardTransportClient(conn)
 
-	stream, err := p.grpcClient.ControlChannel(p.ctx)
+	stream, err := transportpb.NewStewardTransportClient(conn).ControlChannel(p.ctx)
 	if err != nil {
 		_ = conn.Close()
 		return fmt.Errorf("failed to open ControlChannel: %w", err)
 	}
+
+	p.sendMu.Lock()
+	p.grpcConn = conn
+	p.grpcClient = transportpb.NewStewardTransportClient(conn)
 	p.controlStream = stream
+	p.sendMu.Unlock()
 
-	go p.clientReceiveLoop()
-
-	p.logger.Info("gRPC control plane client connected", "addr", p.addr, "steward_id", p.stewardID)
 	return nil
 }
 
 // clientReceiveLoop reads messages from the ControlChannel and dispatches them.
+// When the stream breaks, it triggers the reconnection loop unless the provider
+// is shutting down.
 func (p *Provider) clientReceiveLoop() {
+	// Capture the stream reference at goroutine start to avoid reading the
+	// field concurrently with closeClientConn/dialAndOpenStream writes.
+	p.sendMu.Lock()
+	stream := p.controlStream
+	p.sendMu.Unlock()
+
+	if stream == nil {
+		p.logger.Error("clientReceiveLoop started with nil stream")
+		return
+	}
+
 	for {
-		msg, err := p.controlStream.Recv()
+		msg, err := stream.Recv()
 		if err != nil {
 			select {
 			case <-p.ctx.Done():
+				p.setState(StateDisconnected)
 				return
 			default:
 			}
 			p.logger.Error("ControlChannel receive error", "error", err)
+			p.setState(StateDisconnected)
+			p.mu.Lock()
+			p.lastDisconnectedAt = time.Now()
+			p.mu.Unlock()
+
+			p.closeClientConn()
+			p.reconnectLoop()
 			return
 		}
 
@@ -338,6 +388,99 @@ func (p *Provider) clientReceiveLoop() {
 			}
 		}
 	}
+}
+
+// reconnectLoop attempts to re-establish the ControlChannel with exponential backoff.
+// It runs until either a connection is established or the provider context is cancelled.
+func (p *Provider) reconnectLoop() {
+	bo := defaultBackoff()
+
+	for {
+		select {
+		case <-p.ctx.Done():
+			p.setState(StateDisconnected)
+			return
+		default:
+		}
+
+		p.setState(StateReconnecting)
+		p.reconnectAttempts.Add(1)
+
+		wait := bo.next()
+		p.logger.Info("reconnecting to controller",
+			"attempt", bo.attempt,
+			"backoff", wait,
+			"addr", p.addr,
+		)
+
+		// Wait for backoff duration or cancellation
+		timer := time.NewTimer(wait)
+		select {
+		case <-p.ctx.Done():
+			timer.Stop()
+			p.setState(StateDisconnected)
+			return
+		case <-timer.C:
+		}
+
+		// Attempt to reconnect
+		if err := p.dialAndOpenStream(); err != nil {
+			p.logger.Warn("reconnection failed", "error", err, "attempt", bo.attempt)
+			continue
+		}
+
+		// Success — reset backoff and restart receive loop
+		bo.reset()
+		p.setState(StateConnected)
+		p.mu.Lock()
+		p.lastConnectedAt = time.Now()
+		p.mu.Unlock()
+
+		p.logger.Info("reconnected to controller", "addr", p.addr, "steward_id", p.stewardID)
+
+		// Restart the receive loop (which will call reconnectLoop again if it breaks)
+		go p.clientReceiveLoop()
+		return
+	}
+}
+
+// closeClientConn closes the current gRPC connection and clears the stream reference.
+func (p *Provider) closeClientConn() {
+	p.sendMu.Lock()
+	if p.controlStream != nil {
+		_ = p.controlStream.CloseSend()
+		p.controlStream = nil
+	}
+	if p.grpcConn != nil {
+		_ = p.grpcConn.Close()
+		p.grpcConn = nil
+	}
+	p.sendMu.Unlock()
+}
+
+// setState updates the connection state and fires the on_state_change callback.
+func (p *Provider) setState(state ConnectionState) {
+	old := ConnectionState(p.connState.Swap(int32(state)))
+	if old == state {
+		return
+	}
+	if p.onStateChange != nil {
+		p.onStateChange(state)
+	}
+}
+
+// getState returns the current connection state.
+func (p *Provider) getState() ConnectionState {
+	return ConnectionState(p.connState.Load())
+}
+
+// checkClientConnected returns an error if the client is not in the Connected state.
+func (p *Provider) checkClientConnected() error {
+	state := p.getState()
+	if state != StateConnected {
+		return fmt.Errorf("provider is %s", state)
+	}
+	return nil
 }
 
 // Stop gracefully shuts down the control plane.
@@ -372,12 +515,10 @@ func (p *Provider) stopServer() error {
 }
 
 func (p *Provider) stopClient() error {
-	if p.controlStream != nil {
-		_ = p.controlStream.CloseSend()
-	}
-	if p.grpcConn != nil {
-		_ = p.grpcConn.Close()
-	}
+	// cancel() was already called in Stop(), which will cause reconnectLoop
+	// and clientReceiveLoop to exit. Clean up the connection.
+	p.closeClientConn()
+	p.setState(StateDisconnected)
 	return nil
 }
 
@@ -464,6 +605,10 @@ func (p *Provider) PublishEvent(ctx context.Context, event *types.Event) error {
 	if p.mode != ModeClient {
 		return fmt.Errorf("PublishEvent is only available in client mode")
 	}
+	if err := p.checkClientConnected(); err != nil {
+		p.deliveryFailures.Add(1)
+		return fmt.Errorf("failed to publish event: %w", err)
+	}
 
 	msg := &transportpb.ControlMessage{
 		Payload: &transportpb.ControlMessage_Event{Event: eventToProto(event)},
@@ -503,6 +648,10 @@ func (p *Provider) SendHeartbeat(ctx context.Context, heartbeat *types.Heartbeat
 	if p.mode != ModeClient {
 		return fmt.Errorf("SendHeartbeat is only available in client mode")
 	}
+	if err := p.checkClientConnected(); err != nil {
+		p.deliveryFailures.Add(1)
+		return fmt.Errorf("failed to send heartbeat: %w", err)
+	}
 
 	msg := &transportpb.ControlMessage{
 		Payload: &transportpb.ControlMessage_Heartbeat{Heartbeat: heartbeatToProto(heartbeat)},
@@ -538,6 +687,10 @@ func (p *Provider) SubscribeHeartbeats(ctx context.Context, handler interfaces.H
 func (p *Provider) SendResponse(ctx context.Context, response *types.Response) error {
 	if p.mode != ModeClient {
 		return fmt.Errorf("SendResponse is only available in client mode")
+	}
+	if err := p.checkClientConnected(); err != nil {
+		p.deliveryFailures.Add(1)
+		return fmt.Errorf("failed to send response: %w", err)
 	}
 
 	msg := &transportpb.ControlMessage{
@@ -656,6 +809,7 @@ func (p *Provider) GetStats(ctx context.Context) (*types.ControlPlaneStats, erro
 		ResponsesSent:      p.responsesSent.Load(),
 		ResponsesReceived:  p.responsesReceived.Load(),
 		DeliveryFailures:   p.deliveryFailures.Load(),
+		ProviderMetrics:    make(map[string]interface{}),
 	}
 
 	p.mu.RLock()
@@ -664,12 +818,26 @@ func (p *Provider) GetStats(ctx context.Context) (*types.ControlPlaneStats, erro
 	}
 	numEventHandlers := int64(len(p.eventHandlers))
 	numHeartbeatHandlers := int64(len(p.heartbeatHandlers))
+	lastConnected := p.lastConnectedAt
+	lastDisconnected := p.lastDisconnectedAt
 	p.mu.RUnlock()
 
 	stats.ActiveSubscriptions = numEventHandlers + numHeartbeatHandlers
 
 	if p.mode == ModeServer && p.registry != nil {
 		stats.ConnectedStewards = int64(p.registry.Count())
+	}
+
+	// Client-mode reconnection metrics
+	if p.mode == ModeClient {
+		stats.ProviderMetrics["reconnect_attempts"] = p.reconnectAttempts.Load()
+		stats.ProviderMetrics["connection_state"] = p.getState().String()
+		if !lastConnected.IsZero() {
+			stats.ProviderMetrics["last_connected_at"] = lastConnected
+		}
+		if !lastDisconnected.IsZero() {
+			stats.ProviderMetrics["last_disconnected_at"] = lastDisconnected
+		}
 	}
 
 	return stats, nil
@@ -696,14 +864,13 @@ func (p *Provider) Available() (bool, error) {
 }
 
 func (p *Provider) IsConnected() bool {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
 	switch p.mode {
 	case ModeServer:
+		p.mu.RLock()
+		defer p.mu.RUnlock()
 		return p.grpcServer != nil && p.listener != nil
 	case ModeClient:
-		return p.controlStream != nil
+		return p.getState() == StateConnected
 	default:
 		return false
 	}
