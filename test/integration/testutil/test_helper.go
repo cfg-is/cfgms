@@ -232,7 +232,7 @@ func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx
 	err = os.MkdirAll(stewardCfg.DataDir, 0755)
 	require.NoError(t, err)
 
-	// Create steward using new MQTT+QUIC testing mode
+	// Create steward using gRPC transport testing mode
 	s, err := steward.NewForControllerTesting(stewardCfg, logger)
 	require.NoError(t, err)
 
@@ -261,13 +261,10 @@ func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx
 
 // Start starts the controller and steward in the test environment
 func (e *TestEnv) Start() {
-	var mqttBrokerAddr string
 	var quicAddr string
 
 	if e.useDockerController {
-		// Using Docker controller - use docker addresses
-		// Docker standalone controller uses ports 1886 (MQTT) and 4436 (QUIC)
-		mqttBrokerAddr = "tcp://localhost:1886"
+		// Using Docker controller - use docker gRPC transport address (port 4436)
 		quicAddr = "localhost:4436"
 		e.StewardCfg.ControllerAddr = e.dockerControllerAddr
 	} else {
@@ -278,29 +275,27 @@ func (e *TestEnv) Start() {
 		controllerAddr := e.Controller.GetListenAddr()
 		e.StewardCfg.ControllerAddr = controllerAddr
 
-		// Extract host for MQTT/QUIC (controller provides these on fixed ports)
-		mqttBrokerAddr = "tcp://localhost:1883" // Controller MQTT broker
-		quicAddr = "localhost:4433"             // Controller QUIC server
+		// gRPC transport address (controller listens on fixed port 4433)
+		quicAddr = "localhost:4433"
 	}
 
-	// Create MQTT client for steward
-	mqttClient, err := client.NewMQTTClient(&client.MQTTConfig{
-		ControllerURL:     mqttBrokerAddr,
-		QUICAddress:       quicAddr,
+	// Create transport client for steward — uses gRPC-over-QUIC transport address
+	transportClient, err := client.NewTransportClient(&client.TransportConfig{
+		ControllerURL:     quicAddr,
 		RegistrationToken: e.registrationToken,
 		TLSCertPath:       e.StewardCfg.CertPath,
 		Logger:            e.Logger,
 	})
 	if err != nil {
-		e.T.Fatalf("Failed to create MQTT client: %v", err)
+		e.T.Fatalf("Failed to create transport client: %v", err)
 	}
 
 	// For integration tests, skip registration and directly set steward ID
 	// This avoids needing the full registration service to be running
 	// The client will be configured when we call Connect() in the steward Start() method
 
-	// Inject MQTT client into steward for testing
-	e.Steward.SetMQTTClientForTesting(mqttClient)
+	// Inject transport client into steward for testing
+	e.Steward.SetMQTTClientForTesting(transportClient)
 
 	// Start the steward (will use injected MQTT client)
 	if err := e.Steward.Start(e.ctx); err != nil {

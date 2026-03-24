@@ -1,20 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jordan Ritz
-// Package client provides control plane client functionality for steward-controller communication.
+// Package client provides transport client functionality for steward-controller communication.
 //
 // This package implements the steward-side client for communicating with
-// the CFGMS controller using the ControlPlaneProvider abstraction (control plane)
-// and DataPlaneProvider (data plane). Story #363 migrated from direct pkg/mqtt/client
-// usage to the pluggable ControlPlaneProvider interface.
+// the CFGMS controller using the gRPC-over-QUIC ControlPlaneProvider (control plane)
+// and gRPC DataPlaneProvider (data plane). Both share the same transport_address
+// received from the HTTP registration response.
+// Story #516: Replaced MQTTClient with TransportClient using gRPC providers.
 package client
 
 import (
 	"context"
 	"crypto/tls"
-	"encoding/base64"
-	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -30,18 +28,18 @@ import (
 	"github.com/cfgis/cfgms/features/steward/registration"
 	"github.com/cfgis/cfgms/pkg/cert"
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
-	controlplaneMQTT "github.com/cfgis/cfgms/pkg/controlplane/providers/mqtt"
+	_ "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc" // Register gRPC control plane provider
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	dataplaneInterfaces "github.com/cfgis/cfgms/pkg/dataplane/interfaces"
-	_ "github.com/cfgis/cfgms/pkg/dataplane/providers/quic" // Register QUIC data plane provider
-	dataplaneTypes "github.com/cfgis/cfgms/pkg/dataplane/types"
+	_ "github.com/cfgis/cfgms/pkg/dataplane/providers/grpc" // Register gRPC data plane provider
 	"github.com/cfgis/cfgms/pkg/logging"
+	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 )
 
-// MQTTClient represents the steward client using ControlPlaneProvider (control plane)
-// and DataPlaneProvider (data plane) for controller communication.
-// Story #363: Migrated from direct pkg/mqtt/client to ControlPlaneProvider.
-type MQTTClient struct {
+// TransportClient represents the steward client using gRPC-over-QUIC for both
+// control plane and data plane communication with the controller.
+// Story #516: Replaces MQTTClient — connects once to transport_address for both CP and DP.
+type TransportClient struct {
 	mu sync.RWMutex
 
 	// Steward identification
@@ -49,17 +47,16 @@ type MQTTClient struct {
 	tenantID  string
 	group     string
 
-	// Controller connection info
-	controllerURL string
+	// Transport address (gRPC-over-QUIC, from registration response)
+	transportAddress string
 
-	// Control plane provider (Story #363: replaces direct mqtt *client.Client)
+	// Control plane provider (gRPC, Story #516)
 	controlPlane controlplaneInterfaces.ControlPlaneProvider
 
-	// QUIC data plane via provider (Story #363)
+	// Data plane session (gRPC, Story #516)
 	dataPlaneSession dataplaneInterfaces.DataPlaneSession
-	quicAddress      string
 
-	// Certificate path for mTLS
+	// Certificate path for mTLS (disk-based fallback when PEM certs unavailable)
 	certPath string
 
 	// Certificate PEMs (from registration response)
@@ -78,10 +75,8 @@ type MQTTClient struct {
 	// Configuration signature verifier
 	configVerifier signature.Verifier
 
-	// Connection state
-	connected     bool
-	mqttConnected bool
-	quicConnected bool
+	// Connection state — single flag for unified gRPC transport
+	connected bool
 
 	// Heartbeat
 	heartbeatInterval time.Duration
@@ -91,18 +86,16 @@ type MQTTClient struct {
 	logger logging.Logger
 }
 
-// MQTTConfig holds configuration for the MQTT+QUIC client.
-type MQTTConfig struct {
-	// ControllerURL is the MQTT broker URL (from registration token)
+// TransportConfig holds configuration for the gRPC-over-QUIC transport client.
+type TransportConfig struct {
+	// ControllerURL is the gRPC-over-QUIC transport address (e.g., "controller:4433").
+	// Received from the registration response as transport_address.
 	ControllerURL string
-
-	// QUICAddress is the QUIC server address (e.g., "controller:4433")
-	QUICAddress string
 
 	// RegistrationToken for initial registration
 	RegistrationToken string
 
-	// TLSCertPath for mTLS (optional if using token auth)
+	// TLSCertPath for mTLS (optional if PEM certs provided from registration)
 	TLSCertPath string
 
 	// CACertPEM is the CA certificate PEM (for TLS verification)
@@ -116,7 +109,6 @@ type MQTTConfig struct {
 
 	// ServerCertPEM is the controller's server certificate PEM (for config signature verification)
 	// Story #315: Used to verify configurations signed by the controller
-	// In HA clusters, multiple controller certs may be trusted
 	ServerCertPEM string
 
 	// SigningCertPEM is the controller's dedicated signing certificate PEM (Story #377)
@@ -130,8 +122,8 @@ type MQTTConfig struct {
 	Logger logging.Logger
 }
 
-// NewMQTTClient creates a new steward client.
-func NewMQTTClient(cfg *MQTTConfig) (*MQTTClient, error) {
+// NewTransportClient creates a new steward transport client.
+func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 	if cfg.ControllerURL == "" {
 		return nil, fmt.Errorf("controller URL is required")
 	}
@@ -144,10 +136,10 @@ func NewMQTTClient(cfg *MQTTConfig) (*MQTTClient, error) {
 		heartbeatInterval = 30 * time.Second
 	}
 
-	client := &MQTTClient{
+	c := &TransportClient{
 		heartbeatInterval: heartbeatInterval,
 		heartbeatStop:     make(chan struct{}),
-		quicAddress:       cfg.QUICAddress,
+		transportAddress:  cfg.ControllerURL,
 		certPath:          cfg.TLSCertPath,
 		caCertPEM:         cfg.CACertPEM,
 		clientCertPEM:     cfg.ClientCertPEM,
@@ -155,17 +147,16 @@ func NewMQTTClient(cfg *MQTTConfig) (*MQTTClient, error) {
 		serverCertPEM:     cfg.ServerCertPEM,
 		signingCertPEM:    cfg.SigningCertPEM,
 		logger:            cfg.Logger,
-		controllerURL:     cfg.ControllerURL,
 	}
 
-	return client, nil
+	return c, nil
 }
 
 // RegisterWithToken registers the steward with the controller using a token.
-// Story #363: Accepts a registration.MessageClient for the temporary MQTT connection
-// instead of creating a direct pkg/mqtt/client.Client internally.
-func (c *MQTTClient) RegisterWithToken(ctx context.Context, token string, mqttBroker string, msgClient registration.MessageClient) error {
-	c.logger.Info("Starting registration with token", "broker", mqttBroker)
+// Story #363: Accepts a registration.MessageClient for the temporary connection
+// instead of creating a transport client internally.
+func (c *TransportClient) RegisterWithToken(ctx context.Context, token string, brokerAddr string, msgClient registration.MessageClient) error {
+	c.logger.Info("Starting registration with token", "addr", brokerAddr)
 
 	// Create registration client using the provided MessageClient
 	regCfg := &registration.Config{
@@ -189,7 +180,7 @@ func (c *MQTTClient) RegisterWithToken(ctx context.Context, token string, mqttBr
 	c.stewardID = resp.StewardID
 	c.tenantID = resp.TenantID
 	c.group = resp.Group
-	c.controllerURL = mqttBroker
+	c.transportAddress = brokerAddr
 	c.mu.Unlock()
 
 	// Story #294 Phase 4: Auto-save certificates from registration
@@ -238,7 +229,7 @@ func (c *MQTTClient) RegisterWithToken(ctx context.Context, token string, mqttBr
 
 // InitializeConfigExecutor creates and initializes the configuration executor.
 // This must be called after the client is connected but before config sync.
-func (c *MQTTClient) InitializeConfigExecutor(tenantID string) error {
+func (c *TransportClient) InitializeConfigExecutor(tenantID string) error {
 	execCfg := &stewardconfig.Config{
 		TenantID: tenantID,
 		Logger:   c.logger,
@@ -256,15 +247,17 @@ func (c *MQTTClient) InitializeConfigExecutor(tenantID string) error {
 	return nil
 }
 
-// Connect establishes control plane and data plane connections to the controller.
-// Story #363: Uses ControlPlaneProvider instead of direct MQTT client.
-func (c *MQTTClient) Connect(ctx context.Context) error {
-	c.logger.Info("Connecting to controller via control plane")
+// Connect establishes gRPC control plane and data plane connections to the controller.
+// Both use the unified transport_address over QUIC. The data plane is initialized
+// eagerly alongside the control plane — no lazy connect_dataplane command required.
+// Story #516: Replaces MQTT+QUIC separate connection logic.
+func (c *TransportClient) Connect(ctx context.Context) error {
+	c.logger.Info("Connecting to controller via gRPC transport")
 
 	c.mu.RLock()
 	stewardID := c.stewardID
 	controlPlane := c.controlPlane
-	controllerURL := c.controllerURL
+	transportAddress := c.transportAddress
 	tenantID := c.tenantID
 	c.mu.RUnlock()
 
@@ -272,25 +265,27 @@ func (c *MQTTClient) Connect(ctx context.Context) error {
 		return fmt.Errorf("not registered - call SetStewardID first")
 	}
 
-	// Create ControlPlaneProvider if not already created
+	// Create TLS configuration for gRPC-over-QUIC
+	tlsConfig, err := c.createTLSConfig()
+	if err != nil {
+		c.logger.Warn("Failed to load TLS config, continuing without TLS", "error", err)
+		tlsConfig = nil
+	}
+
+	// Initialize gRPC control plane provider if not already set
 	if controlPlane == nil {
-		c.logger.Info("Creating MQTT control plane provider", "broker", controllerURL, "steward_id", stewardID)
+		c.logger.Info("Initializing gRPC control plane provider",
+			"addr", transportAddress, "steward_id", stewardID)
 
-		// Create MQTT control plane provider in client mode
-		provider := controlplaneMQTT.New(controlplaneMQTT.ModeClient)
-
-		// Load TLS configuration if available
-		tlsConfig, err := c.createMQTTTLSConfig()
-		if err != nil {
-			c.logger.Warn("Failed to load MQTT TLS config, continuing without TLS", "error", err)
-			tlsConfig = nil
+		provider := controlplaneInterfaces.GetProvider("grpc")
+		if provider == nil {
+			return fmt.Errorf("gRPC control plane provider not registered")
 		}
 
-		// Initialize provider with connection config
 		providerCfg := map[string]interface{}{
-			"broker_addr": controllerURL,
-			"client_id":   stewardID,
-			"steward_id":  stewardID,
+			"mode":       "client",
+			"addr":       transportAddress,
+			"steward_id": stewardID,
 		}
 		if tenantID != "" {
 			providerCfg["tenant_id"] = tenantID
@@ -300,7 +295,7 @@ func (c *MQTTClient) Connect(ctx context.Context) error {
 		}
 
 		if err := provider.Initialize(ctx, providerCfg); err != nil {
-			return fmt.Errorf("failed to initialize control plane provider: %w", err)
+			return fmt.Errorf("failed to initialize gRPC control plane provider: %w", err)
 		}
 
 		controlPlane = provider
@@ -309,14 +304,49 @@ func (c *MQTTClient) Connect(ctx context.Context) error {
 		c.mu.Unlock()
 	}
 
-	// Start the provider (connects to MQTT broker)
+	// Start the control plane (connects to gRPC server over QUIC)
 	if !controlPlane.IsConnected() {
-		c.logger.Info("Connecting to MQTT broker", "broker", controllerURL)
+		c.logger.Info("Starting gRPC control plane connection", "addr", transportAddress)
 		if err := controlPlane.Start(ctx); err != nil {
-			return fmt.Errorf("failed to start control plane: %w", err)
+			return fmt.Errorf("failed to start gRPC control plane: %w", err)
 		}
-		c.logger.Info("Control plane connection established")
+		c.logger.Info("gRPC control plane connection established")
 	}
+
+	// Initialize gRPC data plane provider eagerly — shares the same transport_address
+	c.logger.Info("Initializing gRPC data plane provider", "addr", transportAddress)
+	dpProvider := dataplaneInterfaces.GetProvider("grpc")
+	if dpProvider == nil {
+		return fmt.Errorf("gRPC data plane provider not registered")
+	}
+
+	dpCfg := map[string]interface{}{
+		"mode":        "client",
+		"server_addr": transportAddress,
+		"steward_id":  stewardID,
+	}
+	if tlsConfig != nil {
+		dpCfg["tls_config"] = tlsConfig
+	}
+
+	if err := dpProvider.Initialize(ctx, dpCfg); err != nil {
+		return fmt.Errorf("failed to initialize gRPC data plane provider: %w", err)
+	}
+
+	if err := dpProvider.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start gRPC data plane provider: %w", err)
+	}
+
+	session, err := dpProvider.Connect(ctx, "")
+	if err != nil {
+		return fmt.Errorf("failed to establish data plane session: %w", err)
+	}
+
+	c.mu.Lock()
+	c.dataPlaneSession = session
+	c.mu.Unlock()
+
+	c.logger.Info("gRPC data plane initialized", "session_id", session.ID())
 
 	// Setup command handler
 	cmdHandler, err := c.setupCommandHandler(ctx, stewardID)
@@ -328,7 +358,7 @@ func (c *MQTTClient) Connect(ctx context.Context) error {
 	c.commandHandler = cmdHandler
 	c.mu.Unlock()
 
-	// Subscribe to commands via ControlPlaneProvider
+	// Subscribe to commands via gRPC control plane provider
 	c.logger.Info("Subscribing to commands", "steward_id", stewardID)
 	if err := controlPlane.SubscribeCommands(ctx, stewardID, func(ctx context.Context, cmd *cpTypes.Command) error {
 		return cmdHandler.HandleCommand(ctx, cmd)
@@ -336,30 +366,21 @@ func (c *MQTTClient) Connect(ctx context.Context) error {
 		return fmt.Errorf("failed to subscribe to commands: %w", err)
 	}
 
-	// QUIC connections are established on-demand when controller sends connect_dataplane command
-	if c.quicAddress != "" {
-		c.logger.Info("QUIC address configured - connections established on-demand",
-			"quic_address", c.quicAddress)
-	} else {
-		c.logger.Warn("QUIC address not configured, config sync will not be available")
-	}
-
 	c.mu.Lock()
 	c.connected = true
-	c.mqttConnected = true
 	c.mu.Unlock()
 
 	// Start heartbeat
 	go c.startHeartbeat()
 
-	c.logger.Info("Connected to controller successfully")
+	c.logger.Info("Connected to controller successfully via gRPC transport")
 	return nil
 }
 
 // setupCommandHandler creates and configures the command handler with all command types.
-// Story #363: Status updates are now published as events via ControlPlaneProvider.
-func (c *MQTTClient) setupCommandHandler(ctx context.Context, stewardID string) (*commands.Handler, error) {
-	// Create status callback that publishes events via ControlPlaneProvider
+// Story #516: connect_dataplane handler removed — DP is initialized eagerly in Connect().
+func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID string) (*commands.Handler, error) {
+	// Create status callback that publishes events via gRPC control plane provider
 	statusCallback := func(ctx context.Context, event *cpTypes.Event) {
 		c.mu.RLock()
 		cp := c.controlPlane
@@ -382,27 +403,11 @@ func (c *MQTTClient) setupCommandHandler(ctx context.Context, stewardID string) 
 		return nil, fmt.Errorf("failed to create command handler: %w", err)
 	}
 
-	// Register connect_dataplane handler (backward compat: also handles "connect_quic")
-	connectHandler := func(ctx context.Context, cmd *cpTypes.Command) error {
-		return c.handleConnectQUIC(ctx, cmd)
-	}
-	handler.RegisterHandler(cpTypes.CommandConnectDataPlane, connectHandler)     //nolint:staticcheck // backward compat with older controllers
-	handler.RegisterHandler(cpTypes.CommandType("connect_quic"), connectHandler) // backward compatibility
-
-	// Register sync_config handler
+	// Register sync_config handler — retrieves config via gRPC data plane ReceiveConfig()
 	handler.RegisterHandler(cpTypes.CommandSyncConfig, func(ctx context.Context, cmd *cpTypes.Command) error {
 		c.logger.Info("Received sync_config command", "command_id", cmd.ID, "params", cmd.Params)
 
-		// Check if QUIC connection is already established
-		c.mu.RLock()
-		quicConnected := c.quicConnected
-		quicAddress := c.quicAddress
-		c.mu.RUnlock()
-
-		_ = quicConnected // Used for logging context
-		_ = quicAddress
-
-		// Get modules filter from command params (optional)
+		// Get modules filter from command params (optional, passed as context but not used in gRPC request)
 		var modules []string
 		if modulesParam, ok := cmd.Params["modules"].([]interface{}); ok {
 			for _, m := range modulesParam {
@@ -412,7 +417,7 @@ func (c *MQTTClient) setupCommandHandler(ctx context.Context, stewardID string) 
 			}
 		}
 
-		// Retrieve configuration via QUIC
+		// Retrieve configuration via gRPC data plane
 		configData, version, err := c.GetConfiguration(ctx, modules)
 		if err != nil {
 			c.logger.Error("Failed to retrieve configuration", "error", err)
@@ -549,157 +554,33 @@ func (c *MQTTClient) setupCommandHandler(ctx context.Context, stewardID string) 
 	return handler, nil
 }
 
-// handleConnectQUIC handles the connect_dataplane (or legacy connect_quic) command.
-func (c *MQTTClient) handleConnectQUIC(ctx context.Context, cmd *cpTypes.Command) error {
-	c.logger.Info("Handling connect_dataplane command", "command_id", cmd.ID)
-
-	quicAddress, ok := cmd.Params["quic_address"].(string)
-	if !ok || quicAddress == "" {
-		return fmt.Errorf("quic_address parameter is required")
-	}
-
-	sessionID, ok := cmd.Params["session_id"].(string)
-	if !ok || sessionID == "" {
-		return fmt.Errorf("session_id parameter is required")
-	}
-
-	c.logger.Info("Connecting to QUIC server",
-		"quic_address", quicAddress,
-		"session_id", sessionID)
-
-	c.mu.RLock()
-	stewardID := c.stewardID
-	certPath := c.certPath
-	c.mu.RUnlock()
-
-	// Create TLS config for QUIC with proper mTLS
-	tlsConfig, err := c.createQUICtlsConfig(certPath)
-	if err != nil {
-		return fmt.Errorf("failed to create TLS config: %w", err)
-	}
-
-	c.logger.Info("Using mTLS for QUIC connection",
-		"cert_path", certPath,
-		"next_protos", tlsConfig.NextProtos)
-
-	// Story #363: Use DataPlaneProvider instead of direct QUIC client
-	c.mu.RLock()
-	dataPlane := c.dataPlaneSession
-	c.mu.RUnlock()
-
-	if dataPlane == nil {
-		dataPlaneProvider := dataplaneInterfaces.GetProvider("quic")
-		if dataPlaneProvider == nil {
-			return fmt.Errorf("QUIC data plane provider not available")
-		}
-
-		providerCfg := map[string]interface{}{
-			"mode":        "client", // Issue #382: Steward is a client connecting to controller's QUIC server
-			"server_addr": quicAddress,
-			"tls_config":  tlsConfig,
-			"steward_id":  stewardID,
-		}
-
-		if err := dataPlaneProvider.Initialize(ctx, providerCfg); err != nil {
-			return fmt.Errorf("failed to initialize data plane provider: %w", err)
-		}
-
-		session, err := dataPlaneProvider.Connect(ctx, quicAddress)
-		if err != nil {
-			return fmt.Errorf("failed to connect to data plane: %w", err)
-		}
-
-		c.mu.Lock()
-		c.dataPlaneSession = session
-		c.quicConnected = true
-		c.mu.Unlock()
-	}
-
-	c.logger.Info("QUIC connection established successfully",
-		"quic_address", quicAddress,
-		"session_id", sessionID)
-
-	return nil
-}
-
-// GetConfiguration retrieves configuration from the controller via data plane.
-func (c *MQTTClient) GetConfiguration(ctx context.Context, modules []string) ([]byte, string, error) {
-	c.logger.Info("Requesting configuration via data plane", "modules", modules)
+// GetConfiguration retrieves configuration from the controller via gRPC data plane.
+// Story #516: Uses DataPlaneSession.ReceiveConfig() over gRPC instead of raw QUIC streams.
+func (c *TransportClient) GetConfiguration(ctx context.Context, modules []string) ([]byte, string, error) {
+	c.logger.Info("Requesting configuration via gRPC data plane")
 
 	c.mu.RLock()
 	session := c.dataPlaneSession
-	stewardID := c.stewardID
 	c.mu.RUnlock()
 
 	if session == nil || session.IsClosed() {
 		return nil, "", fmt.Errorf("data plane session not available")
 	}
 
-	stream, err := session.OpenStream(ctx, dataplaneTypes.StreamConfig)
+	transfer, err := session.ReceiveConfig(ctx)
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to open data plane stream: %w", err)
-	}
-	defer func() { _ = stream.Close() }()
-
-	type ConfigRequest struct {
-		StewardID string   `json:"steward_id"`
-		Modules   []string `json:"modules,omitempty"`
+		return nil, "", fmt.Errorf("failed to receive configuration: %w", err)
 	}
 
-	req := ConfigRequest{
-		StewardID: stewardID,
-		Modules:   modules,
-	}
+	c.logger.Info("Configuration received",
+		"version", transfer.Version,
+		"data_size", len(transfer.Data))
 
-	reqData, err := json.Marshal(req)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	if _, err := stream.Write(reqData); err != nil {
-		return nil, "", fmt.Errorf("failed to write request: %w", err)
-	}
-
-	if err := stream.Close(); err != nil {
-		return nil, "", fmt.Errorf("failed to close stream write side: %w", err)
-	}
-
-	respData, err := io.ReadAll(stream)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to read response: %w", err)
-	}
-
-	type ConfigResponse struct {
-		Success       bool   `json:"success"`
-		Configuration string `json:"configuration,omitempty"`
-		ConfigHash    string `json:"config_hash,omitempty"`
-		Error         string `json:"error,omitempty"`
-	}
-
-	var resp ConfigResponse
-	if err := json.Unmarshal(respData, &resp); err != nil {
-		return nil, "", fmt.Errorf("failed to unmarshal response: %w", err)
-	}
-
-	if !resp.Success {
-		return nil, "", fmt.Errorf("config sync failed: %s", resp.Error)
-	}
-
-	configBytes, err := base64.StdEncoding.DecodeString(resp.Configuration)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to decode base64 configuration: %w", err)
-	}
-
-	c.logger.Info("Configuration retrieved successfully",
-		"config_hash", resp.ConfigHash,
-		"decoded_size", len(configBytes))
-
-	return configBytes, resp.ConfigHash, nil
+	return transfer.Data, transfer.Version, nil
 }
 
-// SendHeartbeat sends a heartbeat to the controller via the control plane provider.
-// Story #363: Uses ControlPlaneProvider.SendHeartbeat() instead of direct MQTT publish.
-func (c *MQTTClient) SendHeartbeat(ctx context.Context, status string, metrics map[string]string) error {
+// SendHeartbeat sends a heartbeat to the controller via the gRPC control plane provider.
+func (c *TransportClient) SendHeartbeat(ctx context.Context, status string, metrics map[string]string) error {
 	c.mu.RLock()
 	stewardID := c.stewardID
 	tenantID := c.tenantID
@@ -738,9 +619,8 @@ func (c *MQTTClient) SendHeartbeat(ctx context.Context, status string, metrics m
 	return nil
 }
 
-// PublishDNAUpdate publishes DNA changes to the controller via the control plane provider.
-// Story #363: Uses ControlPlaneProvider.PublishEvent() instead of direct MQTT publish.
-func (c *MQTTClient) PublishDNAUpdate(ctx context.Context, dna map[string]string, configHash, syncFingerprint string) error {
+// PublishDNAUpdate publishes DNA changes to the controller via the gRPC control plane provider.
+func (c *TransportClient) PublishDNAUpdate(ctx context.Context, dna map[string]string, configHash, syncFingerprint string) error {
 	c.mu.RLock()
 	stewardID := c.stewardID
 	tenantID := c.tenantID
@@ -777,14 +657,13 @@ func (c *MQTTClient) PublishDNAUpdate(ctx context.Context, dna map[string]string
 }
 
 // publishConfigStatus publishes a config status report as an event (internal helper).
-func (c *MQTTClient) publishConfigStatus(report *cpTypes.ConfigStatusReport) error {
+func (c *TransportClient) publishConfigStatus(report *cpTypes.ConfigStatusReport) error {
 	ctx := context.Background()
 	return c.ReportConfigurationStatus(ctx, report.ConfigVersion, report.Status, report.Message, report.Modules)
 }
 
 // ReportConfigurationStatus reports detailed configuration execution status to the controller.
-// Story #363: Uses ControlPlaneProvider.PublishEvent() instead of direct MQTT publish.
-func (c *MQTTClient) ReportConfigurationStatus(
+func (c *TransportClient) ReportConfigurationStatus(
 	ctx context.Context,
 	configVersion string,
 	overallStatus string,
@@ -832,20 +711,17 @@ func (c *MQTTClient) ReportConfigurationStatus(
 }
 
 // ValidateConfiguration validates a configuration with the controller without applying it.
-// Story #363: Not yet supported via ControlPlaneProvider (requires provider extension for
-// request/response patterns from steward to controller).
-// TODO: Add validation support to ControlPlaneProvider interface.
-func (c *MQTTClient) ValidateConfiguration(
+// TODO: Add validation support to ControlPlaneProvider interface (Story #363 carried forward).
+func (c *TransportClient) ValidateConfiguration(
 	ctx context.Context,
 	config []byte,
 	version string,
 ) ([]string, error) {
-	return nil, fmt.Errorf("configuration validation not yet supported via control plane provider (Story #363 TODO)")
+	return nil, fmt.Errorf("configuration validation not yet supported via control plane provider")
 }
 
-// Disconnect closes all connections to the controller.
-// Story #363: Uses ControlPlaneProvider.Stop() instead of direct MQTT disconnect.
-func (c *MQTTClient) Disconnect(ctx context.Context) error {
+// Disconnect closes all gRPC connections to the controller.
+func (c *TransportClient) Disconnect(ctx context.Context) error {
 	c.logger.Info("Disconnecting from controller")
 
 	c.mu.Lock()
@@ -854,7 +730,7 @@ func (c *MQTTClient) Disconnect(ctx context.Context) error {
 	// Stop heartbeat
 	close(c.heartbeatStop)
 
-	// Disconnect data plane session
+	// Close data plane session
 	if c.dataPlaneSession != nil {
 		if err := c.dataPlaneSession.Close(ctx); err != nil {
 			c.logger.Warn("Failed to close data plane session", "error", err)
@@ -869,131 +745,68 @@ func (c *MQTTClient) Disconnect(ctx context.Context) error {
 	}
 
 	c.connected = false
-	c.mqttConnected = false
-	c.quicConnected = false
 
 	c.logger.Info("Disconnected from controller")
 	return nil
 }
 
 // IsConnected returns whether the client is connected.
-func (c *MQTTClient) IsConnected() bool {
+func (c *TransportClient) IsConnected() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.connected && c.mqttConnected
+	return c.connected
 }
 
 // GetStewardID returns the steward ID.
-func (c *MQTTClient) GetStewardID() string {
+func (c *TransportClient) GetStewardID() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.stewardID
 }
 
 // GetTenantID returns the tenant ID.
-func (c *MQTTClient) GetTenantID() string {
+func (c *TransportClient) GetTenantID() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.tenantID
 }
 
 // SetStewardID sets the steward ID (used after HTTP registration).
-func (c *MQTTClient) SetStewardID(id string) {
+func (c *TransportClient) SetStewardID(id string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.stewardID = id
 }
 
 // SetTenantID sets the tenant ID (used after HTTP registration).
-func (c *MQTTClient) SetTenantID(id string) {
+func (c *TransportClient) SetTenantID(id string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.tenantID = id
 }
 
-// createMQTTTLSConfig creates a TLS configuration for MQTT with mTLS.
-func (c *MQTTClient) createMQTTTLSConfig() (*tls.Config, error) {
-	c.mu.RLock()
-	caCertPEM := c.caCertPEM
-	clientCertPEM := c.clientCertPEM
-	clientKeyPEM := c.clientKeyPEM
-	certPath := c.certPath
-	c.mu.RUnlock()
-
-	// If PEM certificates are provided (from registration), use them directly
-	if caCertPEM != "" && clientCertPEM != "" && clientKeyPEM != "" {
-		c.logger.Info("Using TLS certificates from registration response")
-		tlsConfig, err := cert.CreateClientTLSConfig([]byte(clientCertPEM), []byte(clientKeyPEM), []byte(caCertPEM), "", tls.VersionTLS12)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create MQTT TLS config from PEM: %w", err)
-		}
-		return tlsConfig, nil
-	}
-
-	// Try environment variables first
-	certFile := os.Getenv("CFGMS_MQTT_TLS_CERT_PATH")
-	keyFile := os.Getenv("CFGMS_MQTT_TLS_KEY_PATH")
-	caFile := os.Getenv("CFGMS_MQTT_TLS_CA_PATH")
-
-	if certFile == "" || keyFile == "" || caFile == "" {
-		if certPath == "" {
-			return nil, nil
-		}
-		certFile = filepath.Join(certPath, "client.crt")
-		keyFile = filepath.Join(certPath, "client.key")
-		caFile = filepath.Join(certPath, "ca.crt")
-	}
-
-	// #nosec G304 - Certificate paths are controlled via configuration
-	clientCertBytes, err := os.ReadFile(certFile)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read client certificate: %w", err)
-	}
-	// #nosec G304 - Certificate paths are controlled via configuration
-	clientKeyBytes, err := os.ReadFile(keyFile)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read client key: %w", err)
-	}
-	// #nosec G304 - Certificate paths are controlled via configuration
-	caCertBytes, err := os.ReadFile(caFile)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read CA certificate: %w", err)
-	}
-
-	tlsConfig, err := cert.CreateClientTLSConfig(clientCertBytes, clientKeyBytes, caCertBytes, "", tls.VersionTLS12)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create MQTT TLS config: %w", err)
-	}
-
-	c.logger.Info("Loaded MQTT TLS configuration",
-		"cert_file", certFile,
-		"key_file", keyFile,
-		"ca_file", caFile)
-
-	return tlsConfig, nil
-}
-
-// createQUICtlsConfig creates a TLS configuration for QUIC with proper mTLS.
-func (c *MQTTClient) createQUICtlsConfig(certPath string) (*tls.Config, error) {
+// createTLSConfig creates a TLS configuration for gRPC-over-QUIC with mTLS.
+// Sets ALPN to "cfgms-grpc" required by the QUIC transport layer.
+// Sources: PEM certs from registration (preferred), disk path, or environment variables.
+func (c *TransportClient) createTLSConfig() (*tls.Config, error) {
 	c.mu.RLock()
 	caCertPEMStr := c.caCertPEM
 	clientCertPEMStr := c.clientCertPEM
 	clientKeyPEMStr := c.clientKeyPEM
+	certPath := c.certPath
 	c.mu.RUnlock()
 
 	var caCertPEM, clientCertPEM, clientKeyPEM []byte
 	var err error
 
 	if caCertPEMStr != "" && clientCertPEMStr != "" && clientKeyPEMStr != "" {
-		c.logger.Info("Using TLS certificates from registration response for QUIC")
+		// Primary path: PEM certs from HTTP registration response
+		c.logger.Info("Using TLS certificates from registration response")
 		caCertPEM = []byte(caCertPEMStr)
 		clientCertPEM = []byte(clientCertPEMStr)
 		clientKeyPEM = []byte(clientKeyPEMStr)
-	} else {
-		if certPath == "" {
-			return nil, fmt.Errorf("certificate path is required for mTLS")
-		}
-
+	} else if certPath != "" {
+		// Secondary path: certificates on disk
 		caCertPath := filepath.Join(certPath, "ca.crt")
 		// #nosec G304 - Certificate paths are controlled via configuration
 		caCertPEM, err = os.ReadFile(caCertPath)
@@ -1013,17 +826,48 @@ func (c *MQTTClient) createQUICtlsConfig(certPath string) (*tls.Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to read client key from %s: %w", clientKeyPath, err)
 		}
+
+		c.logger.Info("Loaded TLS configuration from disk", "cert_path", certPath)
+	} else {
+		// Tertiary path: environment variables
+		certFile := os.Getenv("CFGMS_TLS_CERT_PATH")
+		keyFile := os.Getenv("CFGMS_TLS_KEY_PATH")
+		caFile := os.Getenv("CFGMS_TLS_CA_PATH")
+
+		if certFile == "" || keyFile == "" || caFile == "" {
+			// No TLS config available — provider will connect without mTLS
+			return nil, nil
+		}
+
+		// #nosec G304 - Certificate paths are controlled via configuration
+		clientCertPEM, err = os.ReadFile(certFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read client certificate: %w", err)
+		}
+		// #nosec G304 - Certificate paths are controlled via configuration
+		clientKeyPEM, err = os.ReadFile(keyFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read client key: %w", err)
+		}
+		// #nosec G304 - Certificate paths are controlled via configuration
+		caCertPEM, err = os.ReadFile(caFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read CA certificate: %w", err)
+		}
+
+		c.logger.Info("Loaded TLS configuration from environment variables")
 	}
 
 	tlsConfig, err := cert.CreateClientTLSConfig(clientCertPEM, clientKeyPEM, caCertPEM, "", tls.VersionTLS13)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create QUIC TLS config: %w", err)
+		return nil, fmt.Errorf("failed to create TLS config: %w", err)
 	}
 
-	tlsConfig.NextProtos = []string{"cfgms-quic"}
+	// gRPC-over-QUIC requires the cfgms-grpc ALPN protocol
+	tlsConfig.NextProtos = []string{quictransport.ALPNProtocol}
 
-	// Initialize configuration signature verifier using controller's certificate
-	// Story #377: Prefer dedicated signing cert over server cert
+	// Initialize configuration signature verifier using controller's certificate.
+	// Story #377: Prefer dedicated signing cert over server cert.
 	c.mu.Lock()
 	if c.configVerifier == nil {
 		var serverCertPEM []byte
@@ -1047,8 +891,7 @@ func (c *MQTTClient) createQUICtlsConfig(certPath string) (*tls.Config, error) {
 				// #nosec G304 - Certificate paths are controlled via configuration
 				serverCertPEM, readErr = os.ReadFile(serverCertPath)
 				if readErr != nil {
-					c.logger.Warn("Failed to load signing/server certificate for signature verification, using CA",
-						"error", readErr)
+					c.logger.Warn("Failed to load signing/server certificate for signature verification, using CA")
 					serverCertPEM = caCertPEM
 				}
 			} else {
@@ -1064,8 +907,7 @@ func (c *MQTTClient) createQUICtlsConfig(certPath string) (*tls.Config, error) {
 				CertificatePEM: serverCertPEM,
 			})
 			if verErr != nil {
-				c.logger.Warn("Failed to create configuration verifier",
-					"error", verErr)
+				c.logger.Warn("Failed to create configuration verifier", "error", verErr)
 			} else {
 				c.configVerifier = verifier
 				c.logger.Info("Configuration signature verifier initialized",
@@ -1079,7 +921,7 @@ func (c *MQTTClient) createQUICtlsConfig(certPath string) (*tls.Config, error) {
 }
 
 // startHeartbeat starts the periodic heartbeat goroutine.
-func (c *MQTTClient) startHeartbeat() {
+func (c *TransportClient) startHeartbeat() {
 	ticker := time.NewTicker(c.heartbeatInterval)
 	defer ticker.Stop()
 
@@ -1097,8 +939,8 @@ func (c *MQTTClient) startHeartbeat() {
 	}
 }
 
-// saveCertificates saves client certificates from registration to disk
-func (c *MQTTClient) saveCertificates(clientCert, clientKey, caCert string) error {
+// saveCertificates saves client certificates from registration to disk.
+func (c *TransportClient) saveCertificates(clientCert, clientKey, caCert string) error {
 	certDir := os.Getenv("CFGMS_CERT_PATH")
 	if certDir == "" {
 		certDir = "/etc/cfgms/certs"
@@ -1128,8 +970,8 @@ func (c *MQTTClient) saveCertificates(clientCert, clientKey, caCert string) erro
 	return nil
 }
 
-// saveSigningCertificate persists the dedicated signing certificate to disk
-func (c *MQTTClient) saveSigningCertificate(signingCert string) error {
+// saveSigningCertificate persists the dedicated signing certificate to disk.
+func (c *TransportClient) saveSigningCertificate(signingCert string) error {
 	certDir := os.Getenv("CFGMS_CERT_PATH")
 	if certDir == "" {
 		certDir = "/etc/cfgms/certs"

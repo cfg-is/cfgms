@@ -157,38 +157,38 @@ func runSteward(ctx context.Context, regToken, configPath, opMode, logLevel, log
 	logging.InitializeGlobalLoggerFactory("steward", "main")
 	logger := logging.ForComponent("steward")
 
-	// MQTT+QUIC registration flow.
+	// gRPC transport registration flow.
 	if regToken != "" {
 		tokenPrefix := regToken
 		if len(regToken) > 15 {
 			tokenPrefix = regToken[:15] + "..."
 		}
-		logger.Info("Using registration token for auto-registration (MQTT+QUIC mode)",
+		logger.Info("Using registration token for auto-registration (gRPC transport mode)",
 			"operation", "registration_init",
 			"token_prefix", tokenPrefix)
 
-		mqttCl, err := registerAndConnectMQTT(ctx, regToken, logger)
+		transportCl, err := registerAndConnect(ctx, regToken, logger)
 		if err != nil {
-			return fmt.Errorf("failed to register with MQTT: %w", err)
+			return fmt.Errorf("failed to register with controller: %w", err)
 		}
 
-		logger.Info("Steward registered and connected successfully via MQTT",
+		logger.Info("Steward registered and connected successfully via gRPC transport",
 			"operation", "registration_complete",
-			"steward_id", mqttCl.GetStewardID(),
-			"tenant_id", mqttCl.GetTenantID())
+			"steward_id", transportCl.GetStewardID(),
+			"tenant_id", transportCl.GetTenantID())
 
-		logger.Info("Running in MQTT+QUIC controller-connected mode",
+		logger.Info("Running in gRPC controller-connected mode",
 			"operation", "steward_mode",
-			"mode", "mqtt_quic")
+			"mode", "grpc_transport")
 
 		// Wait for context cancellation (signal or SCM stop).
 		<-ctx.Done()
 		logger.Info("Shutdown signal received, disconnecting...",
 			"operation", "steward_shutdown")
 
-		if err := mqttCl.Disconnect(context.Background()); err != nil {
-			logger.Error("Error during MQTT disconnect",
-				"operation", "mqtt_disconnect",
+		if err := transportCl.Disconnect(context.Background()); err != nil {
+			logger.Error("Error during transport disconnect",
+				"operation", "transport_disconnect",
 				"error", err.Error())
 		}
 
@@ -211,8 +211,8 @@ func runSteward(ctx context.Context, regToken, configPath, opMode, logLevel, log
 		logger.Info("Starting steward in standalone mode",
 			"operation", "steward_start", "mode", "standalone", "config_path", configPath)
 	} else {
-		// Legacy gRPC controller mode was removed in Story #198.
-		// Controller-connected stewards use --regtoken (MQTT+QUIC) handled above.
+		// Legacy controller mode was removed in Story #198.
+		// Controller-connected stewards use --regtoken (gRPC transport) handled above.
 		return fmt.Errorf("standalone mode requires --config flag; for controller mode use --regtoken")
 	}
 
@@ -445,9 +445,10 @@ func runInteractive() error {
 	}
 }
 
-// registerAndConnectMQTT registers the steward using HTTP REST API
-// and then establishes MQTT+QUIC connections for ongoing communication.
-func registerAndConnectMQTT(ctx context.Context, token string, logger logging.Logger) (*client.MQTTClient, error) {
+// registerAndConnect registers the steward using HTTP REST API
+// and then establishes gRPC-over-QUIC connections for ongoing communication.
+// Both control plane and data plane use the transport_address from the registration response.
+func registerAndConnect(ctx context.Context, token string, logger logging.Logger) (*client.TransportClient, error) {
 	logger.Info("Registering steward via HTTP API")
 
 	controllerURL := ControllerURL
@@ -487,11 +488,8 @@ func registerAndConnectMQTT(ctx context.Context, token string, logger logging.Lo
 		"group", regResp.Group,
 		"transport_address", regResp.TransportAddress)
 
-	transportAddress := regResp.TransportAddress
-
-	mqttClient, err := client.NewMQTTClient(&client.MQTTConfig{
-		ControllerURL:     transportAddress,
-		QUICAddress:       transportAddress,
+	transportClient, err := client.NewTransportClient(&client.TransportConfig{
+		ControllerURL:     regResp.TransportAddress,
 		RegistrationToken: token,
 		CACertPEM:         regResp.CACert,
 		ClientCertPEM:     regResp.ClientCert,
@@ -500,28 +498,28 @@ func registerAndConnectMQTT(ctx context.Context, token string, logger logging.Lo
 		Logger:            logger,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create MQTT client: %w", err)
+		return nil, fmt.Errorf("failed to create transport client: %w", err)
 	}
 
-	mqttClient.SetStewardID(regResp.StewardID)
-	mqttClient.SetTenantID(regResp.TenantID)
+	transportClient.SetStewardID(regResp.StewardID)
+	transportClient.SetTenantID(regResp.TenantID)
 
-	if err := mqttClient.Connect(ctx); err != nil {
-		return nil, fmt.Errorf("failed to connect to MQTT: %w", err)
+	if err := transportClient.Connect(ctx); err != nil {
+		return nil, fmt.Errorf("failed to connect to controller: %w", err)
 	}
 
-	logger.Info("Connected to controller via MQTT+QUIC",
-		"transport_address", transportAddress)
+	logger.Info("Connected to controller via gRPC transport",
+		"transport_address", regResp.TransportAddress)
 
-	if err := mqttClient.SendHeartbeat(ctx, "healthy", nil); err != nil {
+	if err := transportClient.SendHeartbeat(ctx, "healthy", nil); err != nil {
 		logger.Warn("Failed to send initial heartbeat", "error", err)
 	}
 
-	if err := mqttClient.InitializeConfigExecutor(regResp.TenantID); err != nil {
+	if err := transportClient.InitializeConfigExecutor(regResp.TenantID); err != nil {
 		return nil, fmt.Errorf("failed to initialize config executor: %w", err)
 	}
 
 	logger.Info("Configuration executor initialized", "tenant_id", regResp.TenantID)
 
-	return mqttClient, nil
+	return transportClient, nil
 }
