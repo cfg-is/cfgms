@@ -92,6 +92,12 @@ func TestControllerLifecycle(t *testing.T) {
 	// Pre-initialize (Story #410: controller requires explicit init)
 	pkgtestutil.PreInitControllerForTest(t, cfg.CertPath, cfg.Certificate.CAPath)
 
+	// Disable legacy QUIC data plane to avoid port conflict with gRPC-over-QUIC control plane
+	// (both would bind to 0.0.0.0:4433 by default; this test focuses on lifecycle, not data plane)
+	if cfg.QUIC != nil {
+		cfg.QUIC.Enabled = false
+	}
+
 	ctrl, err := New(cfg, logger)
 	require.NoError(t, err)
 
@@ -122,7 +128,7 @@ func TestControllerLifecycle(t *testing.T) {
 
 	// M-AUTH-1: No longer generating default API keys (security anti-pattern removed)
 	assert.Contains(t, messages, "Starting controller")
-	assert.Contains(t, messages, "Controller server started (MQTT+QUIC mode)")
+	assert.Contains(t, messages, "Controller server started (gRPC-over-QUIC transport mode)")
 	assert.Contains(t, messages, "REST API server started")
 	assert.Contains(t, messages, "Controller started successfully")
 
@@ -152,7 +158,7 @@ func TestControllerLifecycle(t *testing.T) {
 
 	// Verify required startup messages are present
 	assert.Contains(t, messages, "Starting controller")
-	assert.Contains(t, messages, "Controller server started (MQTT+QUIC mode)")
+	assert.Contains(t, messages, "Controller server started (gRPC-over-QUIC transport mode)")
 	assert.Contains(t, messages, "REST API server started")
 	assert.Contains(t, messages, "Controller started successfully")
 
