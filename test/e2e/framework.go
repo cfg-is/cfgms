@@ -20,6 +20,7 @@ import (
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	controlplaneGRPC "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
+	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 
 	"github.com/cfgis/cfgms/features/controller"
 	controllerConfig "github.com/cfgis/cfgms/features/controller/config"
@@ -349,6 +350,14 @@ func (f *E2ETestFramework) initializeController() error {
 			ListenAddr:     "localhost:1883",
 			EnableTLS:      f.config.EnableTLS,
 			UseCertManager: true, // Use auto-generated certificates from cert manager
+		},
+		// Issue #516: Enable gRPC-over-QUIC transport for steward connections
+		Transport: &controllerConfig.TransportConfig{
+			ListenAddr:      "localhost:4433",
+			UseCertManager:  true,
+			MaxConnections:  100,
+			KeepalivePeriod: controllerConfig.Duration(30 * time.Second),
+			IdleTimeout:     controllerConfig.Duration(5 * time.Minute),
 		},
 	}
 
@@ -683,12 +692,13 @@ func (f *E2ETestFramework) createTLSConfigFromPEM(caCertPEM, clientCertPEM, clie
 		return nil, fmt.Errorf("failed to load client certificate: %w", err)
 	}
 
-	// Create TLS config
+	// Create TLS config with ALPN protocol for gRPC-over-QUIC
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{clientCert},
 		RootCAs:      caCertPool,
 		MinVersion:   tls.VersionTLS12,
-		ServerName:   "localhost", // Connect via localhost in tests
+		ServerName:   "localhost",                    // Connect via localhost in tests
+		NextProtos:   []string{quictransport.ALPNProtocol}, // Required for QUIC transport
 	}
 
 	return tlsConfig, nil
