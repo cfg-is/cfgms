@@ -70,27 +70,29 @@ func (h *Handler) HandleDetailedHealth(w http.ResponseWriter, r *http.Request) {
 	// Build component health status
 	components := make(map[string]ComponentHealth)
 
-	// MQTT component
-	mqttStatus := "healthy"
-	mqttMessage := "MQTT broker operating normally"
-	if metrics.MQTT != nil {
-		if metrics.MQTT.MessageQueueDepth > 1000 {
-			mqttStatus = "degraded"
-			mqttMessage = fmt.Sprintf("High message queue depth: %d", metrics.MQTT.MessageQueueDepth)
+	// Transport component
+	transportStatus := "healthy"
+	transportMessage := "Transport provider operating normally"
+	if metrics.Transport != nil {
+		if metrics.Transport.StreamErrors > 100 {
+			transportStatus = "degraded"
+			transportMessage = fmt.Sprintf("High stream error count: %d", metrics.Transport.StreamErrors)
 		}
-		if metrics.MQTT.ConnectionErrors > 100 {
-			mqttStatus = "unhealthy"
-			mqttMessage = fmt.Sprintf("High connection errors: %d", metrics.MQTT.ConnectionErrors)
+		if metrics.Transport.StreamErrors > 500 {
+			transportStatus = "unhealthy"
+			transportMessage = fmt.Sprintf("Critical stream error count: %d", metrics.Transport.StreamErrors)
 		}
-		components["mqtt"] = ComponentHealth{
-			Name:      "MQTT Broker",
-			Status:    mqttStatus,
-			Message:   mqttMessage,
-			LastCheck: metrics.MQTT.CollectedAt,
+		components["transport"] = ComponentHealth{
+			Name:      "Transport Provider",
+			Status:    transportStatus,
+			Message:   transportMessage,
+			LastCheck: metrics.Transport.CollectedAt,
 			Details: map[string]interface{}{
-				"active_connections": metrics.MQTT.ActiveConnections,
-				"queue_depth":        metrics.MQTT.MessageQueueDepth,
-				"throughput":         metrics.MQTT.MessageThroughput,
+				"connected_stewards":    metrics.Transport.ConnectedStewards,
+				"stream_errors":         metrics.Transport.StreamErrors,
+				"messages_sent":         metrics.Transport.MessagesSent,
+				"messages_received":     metrics.Transport.MessagesReceived,
+				"reconnection_attempts": metrics.Transport.ReconnectionAttempts,
 			},
 		}
 	}
@@ -389,23 +391,27 @@ func (h *Handler) HandlePrometheusMetrics(w http.ResponseWriter, r *http.Request
 	// Build Prometheus format output
 	var output string
 
-	// MQTT metrics
-	if metrics.MQTT != nil {
-		output += "# HELP cfgms_mqtt_active_connections Number of active MQTT connections\n"
-		output += "# TYPE cfgms_mqtt_active_connections gauge\n"
-		output += fmt.Sprintf("cfgms_mqtt_active_connections %d\n", metrics.MQTT.ActiveConnections)
+	// Transport metrics
+	if metrics.Transport != nil {
+		output += "# HELP cfgms_transport_connected_stewards Number of connected stewards\n"
+		output += "# TYPE cfgms_transport_connected_stewards gauge\n"
+		output += fmt.Sprintf("cfgms_transport_connected_stewards %d\n", metrics.Transport.ConnectedStewards)
 
-		output += "# HELP cfgms_mqtt_queue_depth MQTT message queue depth\n"
-		output += "# TYPE cfgms_mqtt_queue_depth gauge\n"
-		output += fmt.Sprintf("cfgms_mqtt_queue_depth %d\n", metrics.MQTT.MessageQueueDepth)
+		output += "# HELP cfgms_transport_stream_errors Total transport stream errors\n"
+		output += "# TYPE cfgms_transport_stream_errors counter\n"
+		output += fmt.Sprintf("cfgms_transport_stream_errors %d\n", metrics.Transport.StreamErrors)
 
-		output += "# HELP cfgms_mqtt_throughput MQTT message throughput (messages per second)\n"
-		output += "# TYPE cfgms_mqtt_throughput gauge\n"
-		output += fmt.Sprintf("cfgms_mqtt_throughput %.2f\n", metrics.MQTT.MessageThroughput)
+		output += "# HELP cfgms_transport_messages_sent Total messages sent\n"
+		output += "# TYPE cfgms_transport_messages_sent counter\n"
+		output += fmt.Sprintf("cfgms_transport_messages_sent %d\n", metrics.Transport.MessagesSent)
 
-		output += "# HELP cfgms_mqtt_connection_errors Total MQTT connection errors\n"
-		output += "# TYPE cfgms_mqtt_connection_errors counter\n"
-		output += fmt.Sprintf("cfgms_mqtt_connection_errors %d\n", metrics.MQTT.ConnectionErrors)
+		output += "# HELP cfgms_transport_messages_received Total messages received\n"
+		output += "# TYPE cfgms_transport_messages_received counter\n"
+		output += fmt.Sprintf("cfgms_transport_messages_received %d\n", metrics.Transport.MessagesReceived)
+
+		output += "# HELP cfgms_transport_reconnection_attempts Total reconnection attempts\n"
+		output += "# TYPE cfgms_transport_reconnection_attempts counter\n"
+		output += fmt.Sprintf("cfgms_transport_reconnection_attempts %d\n", metrics.Transport.ReconnectionAttempts)
 	}
 
 	// Storage metrics

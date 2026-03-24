@@ -425,14 +425,16 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		logger.Debug("Config handler initialized for data plane", "signing_enabled", signer != nil)
 	}
 
-	// Initialize health collectors (Story #417)
+	// Initialize health collectors (Story #417, #517)
 	var healthCollector *health.Collector
 	var healthAlertManager *health.DefaultAlertManager
 	{
-		// MQTT collector is intentionally nil: the embedded MQTT broker was removed in Story #514
-		// and replaced by the gRPC control plane provider. health.NewCollector handles nil safely
-		// (see collector.go lines 214, 238). A future story can wire a gRPC-based health collector.
-		var mqttCollector health.MQTTCollector // always nil until gRPC health collector is implemented
+		// Transport collector reads from the gRPC control plane provider (Issue #517).
+		// Remains nil when no controlPlane is initialized (e.g., Transport config absent).
+		var transportCollector health.TransportCollector
+		if controlPlane != nil {
+			transportCollector = health.NewDefaultTransportCollector(NewGRPCTransportStatsAdapter(controlPlane))
+		}
 
 		// Storage stats — provider name only, latency instrumentation is follow-up
 		storageStats := NewBasicStorageStats(cfg.Storage.Provider)
@@ -447,7 +449,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			logger.Warn("Failed to initialize system collector", "error", sysErr)
 		}
 
-		healthCollector = health.NewCollector(mqttCollector, storageCollector, appCollector, systemCollector)
+		healthCollector = health.NewCollector(transportCollector, storageCollector, appCollector, systemCollector)
 		healthAlertManager = health.NewAlertManager(health.DefaultThresholds(), health.SMTPConfig{})
 		logger.Info("Health collectors initialized (Story #417)")
 	}

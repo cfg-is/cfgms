@@ -10,7 +10,7 @@ import (
 type MetricType string
 
 const (
-	MetricTypeMQTT        MetricType = "mqtt"
+	MetricTypeTransport   MetricType = "transport"
 	MetricTypeStorage     MetricType = "storage"
 	MetricTypeApplication MetricType = "application"
 	MetricTypeSystem      MetricType = "system"
@@ -29,8 +29,8 @@ const (
 type ControllerMetrics struct {
 	Timestamp time.Time `json:"timestamp"`
 
-	// MQTT Broker Metrics
-	MQTT *MQTTMetrics `json:"mqtt"`
+	// Transport Provider Metrics
+	Transport *TransportMetrics `json:"transport"`
 
 	// Storage Provider Metrics
 	Storage *StorageMetrics `json:"storage"`
@@ -42,25 +42,25 @@ type ControllerMetrics struct {
 	System *SystemMetrics `json:"system"`
 }
 
-// MQTTMetrics represents MQTT broker metrics
-type MQTTMetrics struct {
-	// Active steward connections
-	ActiveConnections int64 `json:"active_connections"`
+// TransportMetrics represents transport provider metrics
+type TransportMetrics struct {
+	// Number of connected stewards
+	ConnectedStewards int `json:"connected_stewards"`
 
-	// Message queue depth
-	MessageQueueDepth int64 `json:"message_queue_depth"`
+	// Total stream/delivery errors
+	StreamErrors int64 `json:"stream_errors"`
 
-	// Message throughput (messages per second)
-	MessageThroughput float64 `json:"message_throughput"`
+	// Total messages sent (commands + responses + heartbeats + events)
+	MessagesSent int64 `json:"messages_sent"`
 
-	// Total messages sent
-	TotalMessagesSent int64 `json:"total_messages_sent"`
+	// Total messages received (commands + responses + heartbeats + events)
+	MessagesReceived int64 `json:"messages_received"`
 
-	// Total messages received
-	TotalMessagesReceived int64 `json:"total_messages_received"`
+	// Total reconnection attempts
+	ReconnectionAttempts int64 `json:"reconnection_attempts"`
 
-	// Connection errors
-	ConnectionErrors int64 `json:"connection_errors"`
+	// Average message latency
+	AvgLatency time.Duration `json:"avg_latency_ns"`
 
 	// Last collection time
 	CollectedAt time.Time `json:"collected_at"`

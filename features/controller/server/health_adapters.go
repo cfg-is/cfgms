@@ -4,64 +4,83 @@ package server
 
 import (
 	"context"
+	"time"
 
-	mqttInterfaces "github.com/cfgis/cfgms/pkg/mqtt/interfaces"
+	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 )
 
-// MochiBrokerStatsAdapter adapts the MQTT broker's GetStats() to the
-// health.MQTTBrokerStats interface used by the health collector.
-type MochiBrokerStatsAdapter struct {
-	broker mqttInterfaces.Broker
+// GRPCTransportStatsAdapter adapts the gRPC ControlPlaneProvider's GetStats() to
+// the health.TransportProviderStats interface used by the health collector.
+type GRPCTransportStatsAdapter struct {
+	provider controlplaneInterfaces.ControlPlaneProvider
 }
 
-// NewMochiBrokerStatsAdapter creates an adapter wrapping an MQTT broker.
-func NewMochiBrokerStatsAdapter(broker mqttInterfaces.Broker) *MochiBrokerStatsAdapter {
-	return &MochiBrokerStatsAdapter{broker: broker}
+// NewGRPCTransportStatsAdapter creates an adapter wrapping a ControlPlaneProvider.
+func NewGRPCTransportStatsAdapter(provider controlplaneInterfaces.ControlPlaneProvider) *GRPCTransportStatsAdapter {
+	return &GRPCTransportStatsAdapter{provider: provider}
 }
 
-// GetActiveConnections returns the number of connected MQTT clients.
-func (a *MochiBrokerStatsAdapter) GetActiveConnections() int64 {
-	stats, err := a.broker.GetStats(context.Background())
+// GetConnectedStewards returns the number of connected stewards from the gRPC provider.
+func (a *GRPCTransportStatsAdapter) GetConnectedStewards() int {
+	stats, err := a.provider.GetStats(context.Background())
 	if err != nil {
 		return 0
 	}
-	return stats.ClientsConnected
+	return int(stats.ConnectedStewards) // #nosec G115 -- steward count will never exceed int max
 }
 
-// GetMessageQueueDepth returns messages dropped as a proxy for queue pressure.
-func (a *MochiBrokerStatsAdapter) GetMessageQueueDepth() int64 {
-	stats, err := a.broker.GetStats(context.Background())
+// GetStreamErrors returns delivery failures as a proxy for stream errors.
+func (a *GRPCTransportStatsAdapter) GetStreamErrors() int64 {
+	stats, err := a.provider.GetStats(context.Background())
 	if err != nil {
 		return 0
 	}
-	return stats.MessagesDropped
+	return stats.DeliveryFailures
 }
 
-// GetTotalMessagesSent returns the total messages sent by the broker.
-func (a *MochiBrokerStatsAdapter) GetTotalMessagesSent() int64 {
-	stats, err := a.broker.GetStats(context.Background())
+// GetMessagesSent returns the total messages sent (commands + responses + heartbeats + events).
+func (a *GRPCTransportStatsAdapter) GetMessagesSent() int64 {
+	stats, err := a.provider.GetStats(context.Background())
 	if err != nil {
 		return 0
 	}
-	return stats.MessagesSent
+	return stats.CommandsSent + stats.ResponsesSent + stats.HeartbeatsSent + stats.EventsPublished
 }
 
-// GetTotalMessagesReceived returns the total messages received by the broker.
-func (a *MochiBrokerStatsAdapter) GetTotalMessagesReceived() int64 {
-	stats, err := a.broker.GetStats(context.Background())
+// GetMessagesReceived returns the total messages received (commands + responses + heartbeats + events).
+func (a *GRPCTransportStatsAdapter) GetMessagesReceived() int64 {
+	stats, err := a.provider.GetStats(context.Background())
 	if err != nil {
 		return 0
 	}
-	return stats.MessagesReceived
+	return stats.CommandsReceived + stats.ResponsesReceived + stats.HeartbeatsReceived + stats.EventsReceived
 }
 
-// GetConnectionErrors returns messages dropped as a proxy for connection errors.
-func (a *MochiBrokerStatsAdapter) GetConnectionErrors() int64 {
-	stats, err := a.broker.GetStats(context.Background())
+// GetReconnectionAttempts returns the reconnection attempts from provider metrics.
+// Returns 0 if the provider does not expose reconnection metrics (server mode).
+func (a *GRPCTransportStatsAdapter) GetReconnectionAttempts() int64 {
+	stats, err := a.provider.GetStats(context.Background())
 	if err != nil {
 		return 0
 	}
-	return stats.MessagesDropped
+	if stats.ProviderMetrics == nil {
+		return 0
+	}
+	if v, ok := stats.ProviderMetrics["reconnect_attempts"]; ok {
+		if attempts, ok := v.(int64); ok {
+			return attempts
+		}
+	}
+	return 0
+}
+
+// GetAvgLatency returns the average message latency.
+func (a *GRPCTransportStatsAdapter) GetAvgLatency() time.Duration {
+	stats, err := a.provider.GetStats(context.Background())
+	if err != nil {
+		return 0
+	}
+	return stats.AvgLatency
 }
 
 // BasicStorageStats implements health.StorageProviderStats with the provider

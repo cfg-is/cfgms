@@ -101,11 +101,11 @@ func (s *Server) handleBasicSystemHealth(w http.ResponseWriter, r *http.Request)
 	// Use real health collector metrics if available (Story #417)
 	if s.healthCollector != nil {
 		if metrics, err := s.healthCollector.GetCurrentMetrics(); err == nil {
-			if metrics.MQTT != nil {
-				if metrics.MQTT.ActiveConnections > 0 {
-					components["mqtt_broker"] = "healthy"
+			if metrics.Transport != nil {
+				if metrics.Transport.ConnectedStewards > 0 {
+					components["transport"] = "healthy"
 				} else {
-					components["mqtt_broker"] = "no_connections"
+					components["transport"] = "no_connections"
 				}
 			}
 			if metrics.Storage != nil && metrics.Storage.Provider != "" {
@@ -216,11 +216,11 @@ func (s *Server) handleBasicSystemMetrics(w http.ResponseWriter, r *http.Request
 				metrics.Memory["heap_bytes"] = cm.System.HeapBytes
 				metrics.Memory["rss_bytes"] = cm.System.RSSBytes
 			}
-			if cm.MQTT != nil {
-				metrics.ActiveStewards = int(cm.MQTT.ActiveConnections)
-				metrics.Network["mqtt_messages_sent"] = cm.MQTT.TotalMessagesSent
-				metrics.Network["mqtt_messages_received"] = cm.MQTT.TotalMessagesReceived
-				metrics.Errors["mqtt_connection_errors"] = cm.MQTT.ConnectionErrors
+			if cm.Transport != nil {
+				metrics.ActiveStewards = cm.Transport.ConnectedStewards
+				metrics.Network["transport_messages_sent"] = cm.Transport.MessagesSent
+				metrics.Network["transport_messages_received"] = cm.Transport.MessagesReceived
+				metrics.Errors["transport_stream_errors"] = cm.Transport.StreamErrors
 			}
 			if cm.Storage != nil {
 				metrics.Errors["storage_query_errors"] = cm.Storage.QueryErrors
