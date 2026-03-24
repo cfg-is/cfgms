@@ -166,6 +166,10 @@ func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx
 			SessionTimeout: 300,
 			UseCertManager: true,
 		},
+		Transport: &config.TransportConfig{
+			ListenAddr:     "127.0.0.1:0",
+			UseCertManager: true,
+		},
 	}
 
 	// Create controller data directory

@@ -74,11 +74,11 @@ func (s *CertificateTestSuite) TestServerCertificateExists() {
 	s.NoError(err, "Should be able to retrieve server certificates")
 	s.GreaterOrEqual(len(serverCerts), 1, "Should have at least one server certificate")
 
-	// The controller generates a server certificate via ensureServerCertificatesFromManager
-	// Find it by checking for "cfgms-server" common name
+	// The controller generates a server certificate for the gRPC transport layer
+	// Find it by checking for "cfgms-grpc-server" common name
 	var serverCert *cert.CertificateInfo
 	for _, certInfo := range serverCerts {
-		if certInfo.CommonName == "cfgms-server" {
+		if certInfo.CommonName == "cfgms-grpc-server" {
 			serverCert = certInfo
 			break
 		}
