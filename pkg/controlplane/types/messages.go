@@ -20,7 +20,9 @@ const (
 	// CommandSyncDNA requests DNA synchronization via data plane
 	CommandSyncDNA CommandType = "sync_dna"
 
-	// CommandConnectDataPlane requests data plane connection establishment
+	// Deprecated: CommandConnectDataPlane is no longer used — CP and DP share
+	// the same gRPC-over-QUIC connection (Story #515). Retained for backward
+	// compatibility with older stewards.
 	CommandConnectDataPlane CommandType = "connect_dataplane"
 
 	// CommandValidateConfig requests configuration validation (dry-run)

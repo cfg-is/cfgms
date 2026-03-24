@@ -991,11 +991,7 @@ func (s *ModuleExecutionTestSuite) TestE2EFlowDiagnostic() {
 }
 
 func TestModuleExecution(t *testing.T) {
-	// Skip in short mode - requires Docker infrastructure
-	if testing.Short() {
-		t.Skip("Skipping module execution tests in short mode - requires Docker infrastructure")
-		return
-	}
+	t.Skip("Story #519: MQTT removed in Story #515 — migrate to transport-agnostic gRPC tests in test/integration/transport/")
 
 	suite.Run(t, new(ModuleExecutionTestSuite))
 }

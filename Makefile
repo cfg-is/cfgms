@@ -1707,23 +1707,24 @@ test-mqtt-quic-setup:
 	@echo "🔨 Force rebuilding Docker images (no cache)..."
 	@set -a && . ./.env.test && set +a && \
 	DOCKER_BUILDKIT=1 docker compose -f docker-compose.test.yml --profile ha build --no-cache controller-standalone steward-standalone && \
-	docker compose -f docker-compose.test.yml --profile ha up -d timescaledb-test controller-standalone steward-standalone
+	docker compose -f docker-compose.test.yml --profile ha up -d timescaledb-test controller-standalone steward-standalone || \
+	{ echo "❌ Docker compose failed — controller-standalone logs:"; docker logs controller-standalone 2>&1 | tail -30; exit 1; }
 	@echo ""
 	@echo "⏳ Waiting for controller to initialize..."
 	@sleep 45
 	@echo "🔍 Validating controller health..."
-	@echo "   Checking MQTT broker (port 8883)..."
+	@echo "   Checking gRPC transport (port 4433)..."
 	@for i in 1 2 3 4 5 6 7 8 9 10; do \
-		if docker exec controller-standalone sh -c "netstat -ln | grep :8883" >/dev/null 2>&1; then \
-			echo "   ✅ MQTT broker ready on port 8883 (mapped to localhost:1886)"; \
+		if docker exec controller-standalone sh -c "netstat -ln | grep :4433" >/dev/null 2>&1; then \
+			echo "   ✅ gRPC transport ready on port 4433 (mapped to localhost:4436)"; \
 			break; \
 		fi; \
 		if [ $$i -eq 10 ]; then \
-			echo "   ❌ MQTT broker failed to start after 10 attempts"; \
+			echo "   ❌ gRPC transport failed to start after 10 attempts"; \
 			docker logs controller-standalone | tail -20; \
 			exit 1; \
 		fi; \
-		echo "   ⏳ Waiting for MQTT broker (attempt $$i/10)..."; \
+		echo "   ⏳ Waiting for gRPC transport (attempt $$i/10)..."; \
 		sleep 5; \
 	done
 	@echo "   Checking HTTP API (port 9080)..."
@@ -2038,7 +2039,6 @@ generate-test-certificates: build-controller  ## Generate test certificates usin
 	@echo "Creating symlinks for test compatibility..."
 	@cd test/integration/mqtt_quic/certs && \
 		ln -sf ca/ca.crt ca-cert.pem && \
-		ln -sf ca/ca.key ca-key.pem && \
 		ln -sf ca/server/server.crt server-cert.pem && \
 		ln -sf ca/server/server.key server-key.pem
 	@echo "✅ Symlinks created"

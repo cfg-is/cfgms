@@ -92,8 +92,11 @@ func TestControllerLifecycle(t *testing.T) {
 	// Pre-initialize (Story #410: controller requires explicit init)
 	pkgtestutil.PreInitControllerForTest(t, cfg.CertPath, cfg.Certificate.CAPath)
 
-	// Disable legacy QUIC data plane to avoid port conflict with gRPC-over-QUIC control plane
-	// (both would bind to 0.0.0.0:4433 by default; this test focuses on lifecycle, not data plane)
+	// Use ephemeral port for transport to avoid port conflicts in tests
+	if cfg.Transport != nil {
+		cfg.Transport.ListenAddr = "127.0.0.1:0"
+	}
+	// Disable legacy QUIC data plane (replaced by gRPC DP on shared transport, Story #515)
 	if cfg.QUIC != nil {
 		cfg.QUIC.Enabled = false
 	}

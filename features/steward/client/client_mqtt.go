@@ -386,7 +386,7 @@ func (c *MQTTClient) setupCommandHandler(ctx context.Context, stewardID string) 
 	connectHandler := func(ctx context.Context, cmd *cpTypes.Command) error {
 		return c.handleConnectQUIC(ctx, cmd)
 	}
-	handler.RegisterHandler(cpTypes.CommandConnectDataPlane, connectHandler)
+	handler.RegisterHandler(cpTypes.CommandConnectDataPlane, connectHandler)     //nolint:staticcheck // backward compat with older controllers
 	handler.RegisterHandler(cpTypes.CommandType("connect_quic"), connectHandler) // backward compatibility
 
 	// Register sync_config handler

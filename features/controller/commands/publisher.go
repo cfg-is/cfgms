@@ -241,28 +241,6 @@ func (p *Publisher) GetPendingCommands() []string {
 	return commands
 }
 
-// TriggerQUICConnection sends a connect_dataplane command to a steward.
-// Story #363: Uses CommandConnectDataPlane instead of transport-specific CommandConnectQUIC.
-func (p *Publisher) TriggerQUICConnection(ctx context.Context, stewardID string, quicAddress string, sessionID string) (string, error) {
-	params := map[string]interface{}{
-		"quic_address": quicAddress,
-		"session_id":   sessionID,
-	}
-
-	commandID, err := p.PublishCommand(ctx, stewardID, controlplaneTypes.CommandConnectDataPlane, params)
-	if err != nil {
-		return "", fmt.Errorf("failed to trigger QUIC connection: %w", err)
-	}
-
-	p.logger.Info("Triggered QUIC connection",
-		"steward_id", stewardID,
-		"quic_address", quicAddress,
-		"session_id", sessionID,
-		"command_id", commandID)
-
-	return commandID, nil
-}
-
 // TriggerConfigSync sends a sync_config command to a steward.
 func (p *Publisher) TriggerConfigSync(ctx context.Context, stewardID string) (string, error) {
 	commandID, err := p.PublishCommand(ctx, stewardID, controlplaneTypes.CommandSyncConfig, nil)

@@ -486,23 +486,14 @@ services:
       context: .
       dockerfile: cmd/controller/Dockerfile
     ports:
-      - "1886:8883"   # MQTT control plane with TLS (unique host port)
-      - "4436:4433/udp"   # QUIC data plane (unique host port)
+      - "4436:4433/udp"   # gRPC-over-QUIC transport (CP+DP on single port, Story #515)
       - "8080:9080"    # HTTP API (unique host port to avoid conflict with controller-east)
     environment:
       CFGMS_NODE_ID: "controller-standalone"
       CFGMS_EXTERNAL_HOSTNAME: "controller-standalone"  # Story #312: External hostname for steward connections
-      # MQTT+QUIC Configuration (Story #198, Story 12.4)
-      CFGMS_MQTT_ENABLED: "true"
-      CFGMS_MQTT_LISTEN_ADDR: "0.0.0.0:8883"
-      CFGMS_MQTT_ENABLE_TLS: "true"  # Story 12.4: Enable TLS for security validation
-      # Use pkg/cert.Manager auto-generation (SAFE - no static test certs)
-      # Matches Story #109 pattern: self-contained tests with auto-generated certs
-      CFGMS_MQTT_USE_CERT_MANAGER: "true"
-      # CFGMS_CERT_PATH already set to "/app/certs" - uses that for auto-generation
-      CFGMS_MQTT_REQUIRE_CLIENT_CERT: "true"  # Story 12.4: mTLS enabled
-      CFGMS_QUIC_ENABLED: "true"
-      CFGMS_QUIC_LISTEN_ADDR: "0.0.0.0:4433"
+      # Unified gRPC-over-QUIC transport (Story #515: replaces separate MQTT+QUIC)
+      CFGMS_TRANSPORT_LISTEN_ADDR: "0.0.0.0:4433"
+      CFGMS_TRANSPORT_USE_CERT_MANAGER: "true"
       # HTTP API uses default port 9080 (no override needed)
       # Storage Configuration
       CFGMS_STORAGE_PROVIDER: "database"
@@ -538,7 +529,7 @@ services:
       timescaledb-test:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "sh", "-c", "netstat -ln | grep :8883"]
+      test: ["CMD", "sh", "-c", "netstat -ln | grep :4433"]
       interval: 10s
       timeout: 5s
       retries: 5

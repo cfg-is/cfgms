@@ -229,5 +229,6 @@ func (s *RegistrationTestSuite) TestConcurrentRegistrations() {
 }
 
 func TestRegistration(t *testing.T) {
+	t.Skip("Story #519: MQTT removed in Story #515 — migrate to transport-agnostic gRPC tests in test/integration/transport/")
 	suite.Run(t, new(RegistrationTestSuite))
 }

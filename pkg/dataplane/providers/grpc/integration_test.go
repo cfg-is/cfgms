@@ -23,8 +23,6 @@ import (
 type integrationEnv struct {
 	serverProvider *Provider
 	clientProvider *Provider
-	serverSession  interfaces.DataPlaneSession
-	clientSession  interfaces.DataPlaneSession
 }
 
 // newIntegrationEnv creates a matched server and client connected over real QUIC+mTLS.

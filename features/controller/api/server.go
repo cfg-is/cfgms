@@ -35,9 +35,6 @@ import (
 	"github.com/cfgis/cfgms/pkg/telemetry"
 )
 
-// QUICTriggerFunc is a function that triggers a QUIC connection for a steward
-type QUICTriggerFunc func(ctx context.Context, stewardID string) (string, error)
-
 // Server represents the REST API server component of the controller
 type Server struct {
 	mu                      sync.RWMutex
@@ -62,7 +59,6 @@ type Server struct {
 	registrationTokenStore  registration.Store             // Registration token store for steward registration
 	registeredStewards      map[string]*RegisteredSteward  // In-memory store for registered stewards
 	corsConfig              *CORSConfig                    // CORS configuration
-	quicTriggerFunc         QUICTriggerFunc                // Function to trigger QUIC connections
 	signerCertSerial        string                         // Story #378: Serial of cert used for config signing
 	authDefense             *authdefense.AuthDefenseSystem // Story #380: Three-tier auth defense
 	rollbackManager         rollback.RollbackManager       // Story #416: Rollback system
@@ -213,10 +209,6 @@ func (s *Server) setupRouter() {
 	// TODO: Remove or protect this endpoint in production
 	s.router.HandleFunc("/api/v1/test/stewards/{id}/config", s.handleUpdateStewardConfig).Methods("PUT", "OPTIONS")
 
-	// Test-mode QUIC trigger (no auth required - for integration tests only)
-	// TODO: Remove or protect this endpoint in production
-	s.router.HandleFunc("/api/v1/test/stewards/{id}/quic/connect", s.handleTriggerQUICConnection).Methods("POST", "OPTIONS")
-
 	// Steward management endpoints (require API key authentication)
 	stewards := api.PathPrefix("/stewards").Subrouter()
 	stewards.Handle("", s.requirePermission("steward", "list")(http.HandlerFunc(s.handleListStewards))).Methods("GET")
@@ -231,8 +223,6 @@ func (s *Server) setupRouter() {
 	stewards.Handle("/{id}/config/effective", s.requirePermission("steward", "read-config")(http.HandlerFunc(s.handleGetEffectiveConfig))).Methods("GET")
 
 	// QUIC connection management endpoints
-	stewards.Handle("/{id}/quic/connect", s.requirePermission("steward", "manage")(http.HandlerFunc(s.handleTriggerQUICConnection))).Methods("POST")
-
 	// Script management endpoints
 	stewards.Handle("/{id}/scripts/executions", s.requirePermission("steward", "read-scripts")(http.HandlerFunc(s.handleGetScriptExecutions))).Methods("GET")
 	stewards.Handle("/{id}/scripts/executions/{execution_id}", s.requirePermission("steward", "read-scripts")(http.HandlerFunc(s.handleGetScriptExecution))).Methods("GET")
@@ -424,13 +414,6 @@ func (s *Server) Stop() error {
 	}
 
 	return nil
-}
-
-// SetQUICTriggerFunc sets the function used to trigger QUIC connections
-func (s *Server) SetQUICTriggerFunc(fn QUICTriggerFunc) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.quicTriggerFunc = fn
 }
 
 // SetRollbackManager sets the rollback manager for rollback API routes (Story #416)

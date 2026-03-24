@@ -57,10 +57,11 @@ type Provider struct {
 	mode        Mode
 
 	// Server-side components
-	grpcServer *grpc.Server
-	listener   *quictransport.Listener
-	registry   registry.Registry
-	serverImpl *transportServer
+	grpcServer    *grpc.Server
+	ownGRPCServer bool // true when this provider created the gRPC server
+	listener      *quictransport.Listener
+	registry      registry.Registry
+	serverImpl    *transportServer
 
 	// Client-side components
 	grpcConn      *grpc.ClientConn
@@ -147,6 +148,8 @@ func (p *Provider) Description() string { return p.description }
 //   - "on_state_change": func(ConnectionState) - Connection state change callback (optional, client mode only)
 //
 // Server mode additional keys:
+//   - "grpc_server": *grpc.Server - Externally-created gRPC server (optional; when provided,
+//     the provider will not create its own QUIC listener or gRPC server)
 //   - "registry": registry.Registry - Connection registry (optional, creates one if nil)
 //
 // Client mode additional keys:
@@ -195,11 +198,21 @@ func (p *Provider) Initialize(ctx context.Context, config map[string]interface{}
 }
 
 func (p *Provider) initializeServer(config map[string]interface{}) error {
-	if p.addr == "" {
-		return fmt.Errorf("server mode requires 'addr' in config")
-	}
-	if p.tlsConfig == nil {
-		return fmt.Errorf("server mode requires 'tls_config' in config")
+	// Accept an externally-created gRPC server (Story #515: shared CP+DP server).
+	// When provided, the provider will not create its own QUIC listener or gRPC server.
+	if srv, ok := config["grpc_server"].(*grpc.Server); ok && srv != nil {
+		p.grpcServer = srv
+		p.ownGRPCServer = false
+		p.logger.Info("CP provider using external gRPC server (ownGRPCServer=false)")
+	} else {
+		p.ownGRPCServer = true
+		p.logger.Info("CP provider will create own gRPC server (ownGRPCServer=true)")
+		if p.addr == "" {
+			return fmt.Errorf("server mode requires 'addr' or 'grpc_server' in config")
+		}
+		if p.tlsConfig == nil {
+			return fmt.Errorf("server mode requires 'tls_config' when creating own gRPC server")
+		}
 	}
 
 	if reg, ok := config["registry"].(registry.Registry); ok {
@@ -266,25 +279,34 @@ func (p *Provider) quicConfig() *quicgo.Config {
 }
 
 func (p *Provider) startServer() error {
-	ql, err := quictransport.Listen(p.addr, p.tlsConfig, p.quicConfig())
-	if err != nil {
-		return fmt.Errorf("failed to start QUIC listener: %w", err)
-	}
-	p.listener = ql
-
 	p.serverImpl = &transportServer{provider: p}
-	p.grpcServer = grpc.NewServer(
-		grpc.Creds(quictransport.TransportCredentials()),
-	)
-	transportpb.RegisterStewardTransportServer(p.grpcServer, p.serverImpl)
 
-	go func() {
-		if err := p.grpcServer.Serve(ql); err != nil {
-			p.logger.Error("gRPC server stopped", "error", err)
+	if p.ownGRPCServer {
+		ql, err := quictransport.Listen(p.addr, p.tlsConfig, p.quicConfig())
+		if err != nil {
+			return fmt.Errorf("failed to start QUIC listener: %w", err)
 		}
-	}()
+		p.listener = ql
 
-	p.logger.Info("gRPC control plane server started", "addr", p.addr)
+		p.grpcServer = grpc.NewServer(
+			grpc.Creds(quictransport.TransportCredentials()),
+		)
+		transportpb.RegisterStewardTransportServer(p.grpcServer, p.serverImpl)
+
+		go func() {
+			if err := p.grpcServer.Serve(ql); err != nil {
+				p.logger.Error("gRPC server stopped", "error", err)
+			}
+		}()
+
+		p.logger.Info("gRPC control plane server started", "addr", p.addr)
+	} else {
+		// External gRPC server (Story #515): the caller is responsible for
+		// registering a composite handler and starting the server. We only
+		// create serverImpl so ServerHandler() returns a usable handler.
+		p.logger.Info("gRPC control plane handler attached to existing gRPC server")
+	}
+
 	return nil
 }
 
@@ -545,12 +567,19 @@ func (p *Provider) Stop(ctx context.Context) error {
 }
 
 func (p *Provider) stopServer() error {
-	if p.grpcServer != nil {
-		p.grpcServer.GracefulStop()
+	if p.ownGRPCServer {
+		if p.grpcServer != nil {
+			p.grpcServer.GracefulStop()
+		}
+		if p.listener != nil {
+			_ = p.listener.Close()
+		}
 	}
-	if p.listener != nil {
-		_ = p.listener.Close()
-	}
+	// Clear server state so the singleton can be re-initialized cleanly
+	// (e.g., when multiple integration tests create separate controllers)
+	p.grpcServer = nil
+	p.listener = nil
+	p.serverImpl = nil
 	p.eventHandlers = nil
 	p.heartbeatHandlers = nil
 	return nil
@@ -910,7 +939,10 @@ func (p *Provider) IsConnected() bool {
 	case ModeServer:
 		p.mu.RLock()
 		defer p.mu.RUnlock()
-		return p.grpcServer != nil && p.listener != nil
+		if p.ownGRPCServer {
+			return p.grpcServer != nil && p.listener != nil
+		}
+		return p.grpcServer != nil && p.serverImpl != nil
 	case ModeClient:
 		return p.getState() == StateConnected
 	default:
@@ -933,12 +965,24 @@ func (p *Provider) ListenAddr() string {
 // waiting for in-progress RPCs to complete. Use in tests when GracefulStop
 // would hang on long-lived ControlChannel streams.
 func (p *Provider) ForceStop() {
-	if p.listener != nil {
-		_ = p.listener.Close()
+	if p.ownGRPCServer {
+		if p.listener != nil {
+			_ = p.listener.Close()
+		}
+		if p.grpcServer != nil {
+			p.grpcServer.Stop()
+		}
 	}
-	if p.grpcServer != nil {
-		p.grpcServer.Stop()
-	}
+}
+
+// ServerHandler returns the CP handler that implements StewardTransportServer
+// for control plane RPCs (Register, Ping, ControlChannel). Used by the controller
+// to build a composite handler that delegates CP and DP RPCs appropriately.
+// Returns nil if Start() has not been called.
+func (p *Provider) ServerHandler() transportpb.StewardTransportServer {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.serverImpl
 }
 
 // --- gRPC StewardTransportServer implementation ---
