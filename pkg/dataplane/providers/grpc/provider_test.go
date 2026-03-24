@@ -10,6 +10,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/dataplane/interfaces"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
 )
 
 // TestProvider_Registration verifies the provider registers itself as "grpc" via init().
@@ -184,4 +185,56 @@ func TestProvider_IsConnected(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.False(t, p.IsConnected(), "not connected before Start")
+}
+
+// TestProvider_Handler_NilBeforeStart verifies Handler returns nil before Start.
+func TestProvider_Handler_NilBeforeStart(t *testing.T) {
+	p := New()
+	err := p.Initialize(context.Background(), map[string]interface{}{
+		"mode":        "server",
+		"listen_addr": "127.0.0.1:0",
+		"tls_config":  &tls.Config{MinVersion: tls.VersionTLS13}, //nolint:gosec // test config
+	})
+	require.NoError(t, err)
+	assert.Nil(t, p.Handler(), "handler should be nil before Start")
+}
+
+// TestProvider_Handler_NonNilAfterStart verifies Handler returns non-nil after Start.
+func TestProvider_Handler_NonNilAfterStart(t *testing.T) {
+	p := New()
+	err := p.Initialize(context.Background(), map[string]interface{}{
+		"mode":        "server",
+		"listen_addr": "127.0.0.1:0",
+		"tls_config":  &tls.Config{MinVersion: tls.VersionTLS13}, //nolint:gosec // test config
+	})
+	require.NoError(t, err)
+
+	// Manually mark as started and set up handler (avoids needing real QUIC)
+	p.started.Store(true)
+	p.handler = newDataPlaneHandler()
+
+	handler := p.Handler()
+	require.NotNil(t, handler, "Handler should return non-nil after Start")
+}
+
+// TestProvider_Handler_WithExternalServer verifies Handler works when using grpc_server config.
+func TestProvider_Handler_WithExternalServer(t *testing.T) {
+	p := New()
+	err := p.Initialize(context.Background(), map[string]interface{}{
+		"mode":        "server",
+		"grpc_server": grpcNewServer(), // external server
+	})
+	require.NoError(t, err)
+	assert.False(t, p.ownGRPCServer)
+
+	// Manually start to create handler
+	p.started.Store(true)
+	p.handler = newDataPlaneHandler()
+
+	handler := p.Handler()
+	require.NotNil(t, handler)
+}
+
+func grpcNewServer() *grpc.Server {
+	return grpc.NewServer()
 }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jordan Ritz
-// Package quic provides QUIC stream handlers for controller operations.
-package quic
+// Package transport provides data plane handlers for controller operations.
+package transport
 
 import (
 	"context"
@@ -10,9 +10,11 @@ import (
 	"fmt"
 	"io"
 
+	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
 
 	controller "github.com/cfgis/cfgms/api/proto/controller"
+	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/features/controller/service"
 	dataplaneInterfaces "github.com/cfgis/cfgms/pkg/dataplane/interfaces"
@@ -24,7 +26,10 @@ import (
 // Stream 0 is handshake, so first data stream is 4.
 const ConfigSyncStreamID = 4
 
-// ConfigHandler handles configuration sync over QUIC streams.
+// chunkSize is the maximum payload per ConfigChunk (64 KB).
+const chunkSize = 64 * 1024
+
+// ConfigHandler handles configuration sync over data plane streams.
 type ConfigHandler struct {
 	configService *service.ConfigurationServiceV2
 	logger        logging.Logger
@@ -55,7 +60,8 @@ type ConfigSyncResponse struct {
 	StatusCode    string `json:"status_code,omitempty"`
 }
 
-// Handle processes configuration sync requests on a data plane stream.
+// Handle processes configuration sync requests on a raw data plane stream.
+// This is the legacy path used by the standalone QUIC provider.
 func (h *ConfigHandler) Handle(ctx context.Context, session dataplaneInterfaces.DataPlaneSession, stream dataplaneInterfaces.Stream) error {
 	h.logger.Info("Handling config sync request",
 		"session_id", session.ID(),
@@ -180,6 +186,97 @@ func (h *ConfigHandler) Handle(ctx context.Context, session dataplaneInterfaces.
 		"signed", h.signer != nil)
 
 	return h.sendResponse(stream, resp)
+}
+
+// HandleGRPC processes a SyncConfig RPC on the shared gRPC-over-QUIC server.
+// This is the gRPC path used by the composite handler (Story #515).
+//
+// It extracts the steward ID from the request, looks up the configuration,
+// signs it if a signer is available, and streams the result as ConfigChunks.
+func (h *ConfigHandler) HandleGRPC(ctx context.Context, req *transportpb.ConfigSyncRequest, stream grpc.ServerStreamingServer[transportpb.ConfigChunk]) error {
+	stewardID := req.GetStewardId()
+	h.logger.Info("Handling gRPC config sync request",
+		"steward_id", stewardID,
+		"current_version", req.GetCurrentVersion())
+
+	// Get configuration from service
+	configReq := &controller.ConfigRequest{
+		StewardId: stewardID,
+	}
+
+	configResp, err := h.configService.GetConfiguration(ctx, configReq)
+	if err != nil {
+		h.logger.Error("Failed to get configuration",
+			"steward_id", stewardID,
+			"error", err)
+		return fmt.Errorf("failed to get configuration: %w", err)
+	}
+
+	// Check status
+	if configResp.Status.Code != 0 { // 0 = OK
+		h.logger.Warn("Configuration request failed",
+			"steward_id", stewardID,
+			"status", configResp.Status.Code,
+			"message", configResp.Status.Message)
+		return fmt.Errorf("configuration request failed: %s", configResp.Status.Message)
+	}
+
+	// Sign the protobuf configuration if signer is available
+	var finalConfig *controller.SignedConfig
+	if h.signer != nil {
+		signed, err := signature.SignProtoConfig(h.signer, configResp.Config.Config)
+		if err != nil {
+			h.logger.Error("Failed to sign configuration", "steward_id", stewardID, "error", err)
+			return fmt.Errorf("failed to sign configuration: %w", err)
+		}
+		finalConfig = signed
+		h.logger.Info("Configuration signed successfully",
+			"steward_id", stewardID,
+			"algorithm", h.signer.Algorithm(),
+			"key_fingerprint", h.signer.KeyFingerprint())
+	} else {
+		finalConfig = configResp.Config
+	}
+
+	// Marshal to bytes
+	configBytes, err := proto.Marshal(finalConfig)
+	if err != nil {
+		return fmt.Errorf("failed to marshal configuration: %w", err)
+	}
+
+	// Chunk and stream
+	totalChunks := (len(configBytes) + chunkSize - 1) / chunkSize
+	if totalChunks == 0 {
+		totalChunks = 1
+	}
+
+	for i := 0; i < totalChunks; i++ {
+		start := i * chunkSize
+		end := start + chunkSize
+		if end > len(configBytes) {
+			end = len(configBytes)
+		}
+
+		chunk := &transportpb.ConfigChunk{
+			Data:        configBytes[start:end],
+			ChunkIndex:  int32(i),
+			TotalChunks: int32(totalChunks),
+			Version:     configResp.Version,
+		}
+
+		if err := stream.Send(chunk); err != nil {
+			return fmt.Errorf("failed to send config chunk %d/%d: %w", i+1, totalChunks, err)
+		}
+	}
+
+	h.logger.Info("gRPC config sync successful",
+		"steward_id", stewardID,
+		"version", configResp.Version,
+		"chunks", totalChunks,
+		"bytes", len(configBytes),
+		"signed", h.signer != nil)
+
+	return nil
 }
 
 // sendResponse sends a response over the data plane stream.

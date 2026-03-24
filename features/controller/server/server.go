@@ -6,13 +6,12 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
-	quic "github.com/quic-go/quic-go"
+	transportpb "github.com/cfgis/cfgms/api/proto/transport"
+	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	common "github.com/cfgis/cfgms/api/proto/common"
@@ -27,8 +26,8 @@ import (
 	"github.com/cfgis/cfgms/features/controller/health"
 	"github.com/cfgis/cfgms/features/controller/heartbeat"
 	"github.com/cfgis/cfgms/features/controller/initialization"
-	controllerQuic "github.com/cfgis/cfgms/features/controller/quic"
 	"github.com/cfgis/cfgms/features/controller/service"
+	controllerTransport "github.com/cfgis/cfgms/features/controller/transport"
 	"github.com/cfgis/cfgms/features/rbac"
 	reportapi "github.com/cfgis/cfgms/features/reports/api"
 	reportscache "github.com/cfgis/cfgms/features/reports/cache"
@@ -42,13 +41,11 @@ import (
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
-	_ "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc" // Register gRPC control plane provider
+	grpcCP "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc" // gRPC control plane provider
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	dataplaneInterfaces "github.com/cfgis/cfgms/pkg/dataplane/interfaces"
-	_ "github.com/cfgis/cfgms/pkg/dataplane/providers/quic" // Register QUIC data plane provider
-	dataplaneTypes "github.com/cfgis/cfgms/pkg/dataplane/types"
+	_ "github.com/cfgis/cfgms/pkg/dataplane/providers/grpc" // Register gRPC data plane provider
 	"github.com/cfgis/cfgms/pkg/logging"
-	quicServer "github.com/cfgis/cfgms/pkg/quic/server" //nolint:staticcheck // SA1019: Controller infrastructure bootstrap
 	pkgRegistration "github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
@@ -77,8 +74,10 @@ type Server struct {
 	commandPublisher        *commands.Publisher
 	registrationTokenStore  pkgRegistration.Store
 	dataPlaneProvider       dataplaneInterfaces.DataPlaneProvider
-	configHandler           *controllerQuic.ConfigHandler
-	signerCertSerial        string // Serial number of server cert used for config signing (Story #378)
+	configHandler           *controllerTransport.ConfigHandler
+	grpcServer              *grpc.Server            // Shared gRPC server for CP+DP (Story #515)
+	quicListener            *quictransport.Listener // Shared QUIC listener (Story #515)
+	signerCertSerial        string                  // Serial number of server cert used for config signing (Story #378)
 	healthCollector         *health.Collector
 	alertManager            *health.DefaultAlertManager
 	dnaStorageManager       *dnaStorage.Manager // Reports engine DNA storage (must be closed on Stop)
@@ -313,7 +312,8 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		}
 	}
 
-	// Initialize gRPC control plane provider (Story #514)
+	// Initialize gRPC control plane provider (Story #515)
+	// The shared QUIC listener and gRPC server are created during Start().
 	var controlPlane controlplaneInterfaces.ControlPlaneProvider
 	var heartbeatService *heartbeat.Service
 	var commandPublisher *commands.Publisher
@@ -322,9 +322,10 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 		grpcTLSConfig, err := buildGRPCControlPlaneTLSConfig(cfg, certManager, logger)
 		if err != nil {
-			return nil, fmt.Errorf("failed to build gRPC control plane TLS config: %w", err)
+			return nil, fmt.Errorf("failed to build transport TLS config: %w", err)
 		}
 
+		// Initialize CP provider with external server mode (listener created in Start)
 		controlPlane = controlplaneInterfaces.GetProvider("grpc")
 		if controlPlane == nil {
 			return nil, fmt.Errorf("gRPC control plane provider not registered")
@@ -372,20 +373,27 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		logger.Warn("Transport config not set — gRPC control plane disabled")
 	}
 
-	// Initialize data plane provider if enabled (Story #362)
+	// Initialize gRPC data plane provider (Story #515)
+	// The shared gRPC server is passed during Start().
 	var dataPlane dataplaneInterfaces.DataPlaneProvider
-	if cfg.QUIC != nil && cfg.QUIC.Enabled {
-		logger.Info("Initializing data plane provider...")
-		dataPlane, err = initializeDataPlaneProvider(cfg, logger, certManager, configService)
-		if err != nil {
-			return nil, fmt.Errorf("failed to initialize data plane provider: %w", err)
+	if controlPlane != nil {
+		logger.Info("Initializing gRPC data plane provider...")
+		dataPlane = dataplaneInterfaces.GetProvider("grpc")
+		if dataPlane == nil {
+			return nil, fmt.Errorf("gRPC data plane provider not registered")
 		}
-		logger.Info("Data plane provider initialized successfully",
-			"provider", dataPlane.Name())
+		// Initialize in server mode; the shared gRPC server will be wired during Start
+		if err := dataPlane.Initialize(context.Background(), map[string]interface{}{
+			"mode":        "server",
+			"grpc_server": grpc.NewServer(), // placeholder; real server created in Start
+		}); err != nil {
+			return nil, fmt.Errorf("failed to initialize gRPC data plane provider: %w", err)
+		}
+		logger.Info("gRPC data plane provider initialized", "provider", dataPlane.Name())
 	}
 
 	// Initialize config handler for data plane configuration sync (Story #362)
-	var configHandler *controllerQuic.ConfigHandler
+	var configHandler *controllerTransport.ConfigHandler
 	var signerCertSerial string // Story #378: Track cert serial for registration handler
 	if dataPlane != nil {
 		// Create signer from certificate for config signing (Story #315, #377)
@@ -421,7 +429,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		}
 
 		// Create config handler with signer (signs configs if signer available)
-		configHandler = controllerQuic.NewConfigHandler(configService, logger, signer)
+		configHandler = controllerTransport.NewConfigHandler(configService, logger, signer)
 		logger.Debug("Config handler initialized for data plane", "signing_enabled", signer != nil)
 	}
 
@@ -499,12 +507,6 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		signerCertSerial:        signerCertSerial, // Story #378: For registration handler
 		healthCollector:         healthCollector,
 		alertManager:            healthAlertManager,
-	}
-
-	// Wire up QUIC trigger function to API server (if data plane is enabled)
-	if dataPlane != nil {
-		httpServer.SetQUICTriggerFunc(srv.TriggerQUICConnection)
-		logger.Info("QUIC trigger function wired to HTTP API server")
 	}
 
 	// Story #416: Wire rollback manager into API server
@@ -614,67 +616,93 @@ func (s *Server) Start() error {
 		s.logger.Info("HA manager started successfully")
 	}
 
-	// Start gRPC control plane provider (Story #514)
+	// Start shared gRPC-over-QUIC transport and wire composite handler (Story #515)
+	s.logger.Info("Controller build version", "version", BUILD_VERSION_CHECK)
 	if s.controlPlane != nil {
-		s.logger.Info("Starting gRPC control plane provider...")
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		if err := s.controlPlane.Start(ctx); err != nil {
-			return fmt.Errorf("failed to start gRPC control plane provider: %w", err)
+		// Build TLS config for the QUIC listener
+		grpcTLSConfig, err := buildGRPCControlPlaneTLSConfig(s.cfg, s.certManager, s.logger)
+		if err != nil {
+			return fmt.Errorf("failed to build transport TLS config: %w", err)
 		}
-		s.logger.Info("gRPC control plane provider started successfully", "provider", s.controlPlane.Name())
+
+		// Create shared QUIC listener and gRPC server
+		ql, err := quictransport.Listen(s.cfg.Transport.ListenAddr, grpcTLSConfig, nil)
+		if err != nil {
+			return fmt.Errorf("failed to start shared QUIC listener: %w", err)
+		}
+		s.quicListener = ql
+		s.grpcServer = grpc.NewServer(grpc.Creds(quictransport.TransportCredentials()))
+
+		// Start CP and DP providers (they create their handlers but don't register/listen)
+		if err := s.controlPlane.Start(context.Background()); err != nil {
+			return fmt.Errorf("failed to start control plane provider: %w", err)
+		}
+		s.logger.Info("Control plane provider started")
+
+		if s.dataPlaneProvider != nil {
+			if err := s.dataPlaneProvider.Start(context.Background()); err != nil {
+				return fmt.Errorf("failed to start data plane provider: %w", err)
+			}
+			s.logger.Info("Data plane provider started", "provider", s.dataPlaneProvider.Name())
+		}
+
+		// Build and register composite handler
+		cpProvider, ok := s.controlPlane.(*grpcCP.Provider)
+		if !ok {
+			return fmt.Errorf("control plane provider is not *grpcCP.Provider (got %T)", s.controlPlane)
+		}
+		cpHandler := cpProvider.ServerHandler()
+		if cpHandler == nil {
+			return fmt.Errorf("CP provider ServerHandler() returned nil")
+		}
+
+		// DP handler — use Unimplemented fallback if DP not initialized
+		var dpHandler transportpb.StewardTransportServer
+		if s.dataPlaneProvider != nil {
+			type handlerProvider interface {
+				Handler() transportpb.StewardTransportServer
+			}
+			if hp, ok := s.dataPlaneProvider.(handlerProvider); ok {
+				dpHandler = hp.Handler()
+			}
+		}
+		if dpHandler == nil {
+			dpHandler = &transportpb.UnimplementedStewardTransportServer{}
+		}
+
+		composite := newCompositeTransportServer(cpHandler, dpHandler, s.configHandler, s.logger)
+		transportpb.RegisterStewardTransportServer(s.grpcServer, composite)
+
+		// Start serving on the shared QUIC listener
+		go func() {
+			if err := s.grpcServer.Serve(s.quicListener); err != nil {
+				s.logger.Error("Shared gRPC server stopped", "error", err)
+			}
+		}()
+		s.logger.Info("Shared gRPC-over-QUIC transport started",
+			"addr", s.quicListener.Addr().String())
 
 		// Subscribe to events from stewards via ControlPlaneProvider
-		if err := s.controlPlane.SubscribeEvents(ctx, nil, s.handleEventFromProvider); err != nil {
+		if err := s.controlPlane.SubscribeEvents(context.Background(), nil, s.handleEventFromProvider); err != nil {
 			return fmt.Errorf("failed to subscribe to events: %w", err)
 		}
 		s.logger.Info("Subscribed to steward events via gRPC control plane provider")
 
 		// Start heartbeat monitoring service
 		if s.heartbeatService != nil {
-			s.logger.Info("Starting heartbeat monitoring service...")
-			if err := s.heartbeatService.Start(ctx); err != nil {
+			if err := s.heartbeatService.Start(context.Background()); err != nil {
 				return fmt.Errorf("failed to start heartbeat service: %w", err)
 			}
-			s.logger.Info("Heartbeat monitoring service started successfully")
+			s.logger.Info("Heartbeat monitoring service started")
 		}
 
 		// Start command publisher
 		if s.commandPublisher != nil {
-			s.logger.Info("Starting command publisher...")
-			if err := s.commandPublisher.Start(ctx); err != nil {
+			if err := s.commandPublisher.Start(context.Background()); err != nil {
 				return fmt.Errorf("failed to start command publisher: %w", err)
 			}
-			s.logger.Info("Command publisher started successfully")
+			s.logger.Info("Command publisher started")
 		}
-	}
-
-	// Start data plane provider (Story #362)
-	s.logger.Info("Controller build version", "version", BUILD_VERSION_CHECK)
-	if s.dataPlaneProvider != nil {
-		s.logger.Info("Starting data plane provider...")
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		if err := s.dataPlaneProvider.Start(ctx); err != nil {
-			return fmt.Errorf("failed to start data plane provider: %w", err)
-		}
-		s.logger.Info("Data plane provider started successfully",
-			"provider", s.dataPlaneProvider.Name(),
-			"listen_addr", s.cfg.QUIC.ListenAddr)
-
-		// Register config handler with QUIC provider (bridge until session acceptance is implemented)
-		if err := s.registerConfigHandlerBridge(); err != nil {
-			s.logger.Warn("Failed to register config handler bridge", "error", err)
-			// Non-fatal - continues startup but config sync won't work
-		}
-
-		// TODO(Story #362): Session acceptance not yet fully implemented
-		// The provider pattern requires adding session queueing to pkg/quic/server
-		// For now, QUIC server continues to use its internal connection handling
-		// This will be completed in a follow-up enhancement
-		// go s.acceptDataPlaneSessions(context.Background())
 	}
 
 	// Start health collector and alert manager (Story #417)
@@ -773,6 +801,14 @@ func (s *Server) Stop() error {
 		}
 	}
 
+	// Stop shared gRPC server and QUIC listener (Story #515)
+	if s.grpcServer != nil {
+		s.grpcServer.GracefulStop()
+	}
+	if s.quicListener != nil {
+		_ = s.quicListener.Close()
+	}
+
 	// Stop command publisher
 	if s.commandPublisher != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -820,60 +856,6 @@ func (s *Server) GetListenAddr() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.cfg.ListenAddr
-}
-
-// TriggerQUICConnection initiates a QUIC connection to a steward.
-// This sends a connect_quic command via MQTT to trigger the steward to connect.
-func (s *Server) TriggerQUICConnection(ctx context.Context, stewardID string) (string, error) {
-	if s.dataPlaneProvider == nil {
-		return "", fmt.Errorf("data plane provider not available")
-	}
-	if s.commandPublisher == nil {
-		return "", fmt.Errorf("command publisher not available")
-	}
-	if s.cfg.QUIC == nil || !s.cfg.QUIC.Enabled {
-		return "", fmt.Errorf("QUIC is not enabled")
-	}
-
-	// Generate session ID for this QUIC connection
-	// Note: With the new provider pattern, session management is internal
-	// We'll use a simple UUID for the session ID
-	sessionID := fmt.Sprintf("session-%s-%d", stewardID, time.Now().Unix())
-
-	s.logger.Info("Triggering QUIC connection",
-		"steward_id", stewardID,
-		"session_id", sessionID)
-
-	// Construct external QUIC address for steward connection
-	// If listen address is 0.0.0.0:port, replace with external hostname
-	quicAddress := s.cfg.QUIC.ListenAddr
-	if strings.HasPrefix(quicAddress, "0.0.0.0:") {
-		externalHostname := os.Getenv("CFGMS_EXTERNAL_HOSTNAME")
-		if externalHostname == "" {
-			externalHostname = "localhost"
-		}
-		port := strings.TrimPrefix(quicAddress, "0.0.0.0:")
-		quicAddress = externalHostname + ":" + port
-	}
-
-	// Send connect_quic command to steward via MQTT
-	commandID, err := s.commandPublisher.TriggerQUICConnection(
-		ctx,
-		stewardID,
-		quicAddress,
-		sessionID,
-	)
-	if err != nil {
-		return "", fmt.Errorf("failed to send connect_quic command: %w", err)
-	}
-
-	s.logger.Info("Triggered QUIC connection for steward",
-		"steward_id", stewardID,
-		"session_id", sessionID,
-		"command_id", commandID,
-		"quic_address", quicAddress)
-
-	return commandID, nil
 }
 
 // GetCertificateManager returns the certificate manager instance
@@ -1054,335 +1036,6 @@ func buildGRPCControlPlaneTLSConfig(cfg *config.Config, certManager *cert.Manage
 	return tlsConfig, nil
 }
 
-// ensureServerCertificatesFromManager generates server certificates on disk using the certificate manager.
-// Used by the QUIC data plane provider which reads TLS certificates from the filesystem.
-// In separated architecture mode, uses CertificateTypeInternalServer; otherwise CertificateTypeServer.
-func ensureServerCertificatesFromManager(caPath string, certManager *cert.Manager, logger logging.Logger, separated bool) error {
-	serverDir := filepath.Join(caPath, "server")
-	if err := os.MkdirAll(serverDir, 0750); err != nil {
-		return fmt.Errorf("failed to create server cert directory: %w", err)
-	}
-
-	certCfg := &cert.ServerCertConfig{
-		CommonName:   "cfgms-server",
-		Organization: "CFGMS",
-		DNSNames:     []string{"localhost", "cfgms-server", "controller-standalone"},
-		IPAddresses:  []string{"127.0.0.1", "0.0.0.0"},
-		ValidityDays: 365,
-	}
-
-	var serverCert *cert.Certificate
-	var err error
-	if separated {
-		serverCert, err = certManager.GenerateInternalServerCertificate(certCfg)
-	} else {
-		serverCert, err = certManager.GenerateServerCertificate(certCfg)
-	}
-	if err != nil {
-		return fmt.Errorf("failed to generate server certificate: %w", err)
-	}
-
-	serverCertPath := filepath.Join(serverDir, "server.crt")
-	if err := os.WriteFile(serverCertPath, serverCert.CertificatePEM, 0600); err != nil {
-		return fmt.Errorf("failed to write server certificate: %w", err)
-	}
-
-	serverKeyPath := filepath.Join(serverDir, "server.key")
-	if err := os.WriteFile(serverKeyPath, serverCert.PrivateKeyPEM, 0600); err != nil {
-		return fmt.Errorf("failed to write server key: %w", err)
-	}
-
-	caCert, err := certManager.GetCACertificate()
-	if err != nil {
-		return fmt.Errorf("failed to get CA certificate: %w", err)
-	}
-
-	caFilePath := filepath.Join(caPath, "ca.crt")
-	if err := os.WriteFile(caFilePath, caCert, 0600); err != nil {
-		return fmt.Errorf("failed to write CA certificate: %w", err)
-	}
-
-	logger.Info("Generated server certificates using certificate manager",
-		"server_cert", serverCertPath,
-		"ca_cert", caFilePath)
-
-	return nil
-}
-
-// buildQUICTLSConfig creates TLS configuration for QUIC data plane
-func buildQUICTLSConfig(cfg *config.Config, certManager *cert.Manager, logger logging.Logger) (*tls.Config, error) {
-	var tlsConfig *tls.Config
-
-	if cfg.QUIC.UseCertManager && certManager != nil {
-		// Use certificate manager certificates (same as MQTT)
-		serverCertPath := filepath.Join(cfg.Certificate.CAPath, "server", "server.crt")
-		serverKeyPath := filepath.Join(cfg.Certificate.CAPath, "server", "server.key")
-		caPath := filepath.Join(cfg.Certificate.CAPath, "ca.crt")
-
-		// Check if certificates exist, generate them if not
-		if _, err := os.Stat(serverCertPath); os.IsNotExist(err) {
-			logger.Info("QUIC data plane certificates not found, generating using certificate manager")
-			separated := cfg.Certificate != nil && cfg.Certificate.IsSeparatedArchitecture()
-			if err := ensureServerCertificatesFromManager(cfg.Certificate.CAPath, certManager, logger, separated); err != nil {
-				return nil, fmt.Errorf("failed to ensure QUIC data plane certificates: %w", err)
-			}
-		}
-
-		// Load certificate and key from disk
-		// #nosec G304 - Certificate paths are controlled via configuration
-		serverCertPEM, err := os.ReadFile(serverCertPath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read server certificate: %w", err)
-		}
-		// #nosec G304 - Certificate paths are controlled via configuration
-		serverKeyPEM, err := os.ReadFile(serverKeyPath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read server key: %w", err)
-		}
-
-		// Get CA certificate from cert manager
-		caCertPEM, err := certManager.GetCACertificate()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get CA certificate: %w", err)
-		}
-
-		// Create TLS config using pkg/cert helper
-		tlsConfig, err = cert.CreateServerTLSConfig(serverCertPEM, serverKeyPEM, caCertPEM, tls.VersionTLS13)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create QUIC TLS config: %w", err)
-		}
-
-		// QUIC-specific configuration
-		tlsConfig.NextProtos = []string{"cfgms-quic"}
-
-		logger.Info("Data plane using certificate manager certificates",
-			"cert_path", serverCertPath,
-			"ca_path", caPath)
-	} else if cfg.QUIC.TLSCertPath != "" && cfg.QUIC.TLSKeyPath != "" {
-		// Use manually configured certificate paths
-		// #nosec G304 - Certificate paths are controlled via configuration
-		serverCertPEM, err := os.ReadFile(cfg.QUIC.TLSCertPath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read QUIC certificate: %w", err)
-		}
-		// #nosec G304 - Certificate paths are controlled via configuration
-		serverKeyPEM, err := os.ReadFile(cfg.QUIC.TLSKeyPath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read QUIC key: %w", err)
-		}
-
-		// Create basic TLS config using pkg/cert helper (no client auth for manual certs)
-		tlsConfig, err = cert.CreateBasicTLSConfig(serverCertPEM, serverKeyPEM, tls.VersionTLS13)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create QUIC TLS config: %w", err)
-		}
-
-		// QUIC-specific configuration
-		tlsConfig.NextProtos = []string{"cfgms-quic"}
-
-		logger.Info("Data plane using configured certificates",
-			"cert_path", cfg.QUIC.TLSCertPath)
-	} else {
-		return nil, fmt.Errorf("QUIC enabled but no certificates configured")
-	}
-
-	return tlsConfig, nil
-}
-
-// initializeDataPlaneProvider initializes the data plane provider (Story #362)
-func initializeDataPlaneProvider(cfg *config.Config, logger logging.Logger, certManager *cert.Manager, configService *service.ConfigurationServiceV2) (dataplaneInterfaces.DataPlaneProvider, error) {
-	// Build TLS configuration for QUIC
-	tlsConfig, err := buildQUICTLSConfig(cfg, certManager, logger)
-	if err != nil {
-		return nil, fmt.Errorf("failed to build TLS config: %w", err)
-	}
-
-	// Get QUIC provider from registry
-	provider := dataplaneInterfaces.GetProvider("quic")
-	if provider == nil {
-		return nil, fmt.Errorf("QUIC data plane provider not registered")
-	}
-
-	// Build provider configuration
-	providerConfig := map[string]interface{}{
-		"mode":        "server",
-		"listen_addr": cfg.QUIC.ListenAddr,
-		"tls_config":  tlsConfig,
-		"logger":      logger,
-	}
-
-	// Initialize provider
-	if err := provider.Initialize(context.Background(), providerConfig); err != nil {
-		return nil, fmt.Errorf("failed to initialize data plane provider: %w", err)
-	}
-
-	logger.Info("Data plane provider initialized",
-		"provider", provider.Name(),
-		"listen_addr", cfg.QUIC.ListenAddr)
-
-	return provider, nil
-}
-
-// registerConfigHandlerBridge registers the config handler with the underlying QUIC server.
-// This is a bridge solution while session acceptance is being completed (Story #362).
-// It allows config sync to work by routing QUIC stream ID 4 to the config handler.
-func (s *Server) registerConfigHandlerBridge() error {
-	s.logger.Info("Attempting to register config handler bridge")
-
-	if s.configHandler == nil {
-		return fmt.Errorf("config handler not initialized")
-	}
-
-	// Type assert to QUIC provider to access RegisterStreamHandler
-	// Interface must match exact signature from pkg/dataplane/providers/quic/provider.go
-	type quicProvider interface {
-		RegisterStreamHandler(streamID int64, handler quicServer.StreamHandler) error
-	}
-
-	provider, ok := s.dataPlaneProvider.(quicProvider)
-	if !ok {
-		// Not a QUIC provider, skip registration
-		s.logger.Warn("Data plane provider does not support stream handler registration", "provider_type", fmt.Sprintf("%T", s.dataPlaneProvider))
-		return fmt.Errorf("provider type %T does not implement RegisterStreamHandler", s.dataPlaneProvider)
-	}
-
-	// Create bridge handler that adapts old QUIC server signature to new config handler
-	bridgeHandler := func(ctx context.Context, sess *quicServer.Session, strm *quic.Stream) error {
-		s.logger.Info("Bridge handler invoked", "session_id", sess.ID, "stream_id", (*strm).StreamID())
-
-		// Wrap old QUIC session as DataPlaneSession
-		session := &quicSessionBridge{raw: sess}
-
-		// Wrap old QUIC stream as Stream
-		stream := &quicStreamBridge{raw: strm}
-
-		// Call config handler with wrapped interfaces
-		return s.configHandler.Handle(ctx, session, stream)
-	}
-
-	// Register handler for config sync stream (stream ID 4)
-	const configSyncStreamID = 4
-	if err := provider.RegisterStreamHandler(configSyncStreamID, bridgeHandler); err != nil {
-		return fmt.Errorf("failed to register config handler: %w", err)
-	}
-
-	s.logger.Info("Config handler registered with QUIC provider", "stream_id", configSyncStreamID)
-	return nil
-}
-
-// acceptDataPlaneSessions accepts incoming data plane connections and handles them (Story #362)
-//
-//nolint:unused // Will be enabled after session acceptance is fully implemented
-func (s *Server) acceptDataPlaneSessions(ctx context.Context) {
-	s.logger.Info("Started data plane session acceptance loop")
-
-	for {
-		// Accept connection with context
-		session, err := s.dataPlaneProvider.AcceptConnection(ctx)
-		if err != nil {
-			// Check if context was canceled (shutdown)
-			if ctx.Err() != nil {
-				s.logger.Info("Data plane session acceptance stopped (context canceled)")
-				return
-			}
-			s.logger.Error("Failed to accept data plane connection", "error", err)
-			continue
-		}
-
-		s.logger.Info("Accepted data plane connection",
-			"session_id", session.ID(),
-			"peer_id", session.PeerID(),
-			"remote_addr", session.RemoteAddr())
-
-		// Handle session in separate goroutine
-		go s.handleDataPlaneSession(ctx, session)
-	}
-}
-
-// handleDataPlaneSession handles a data plane session (Story #362)
-//
-//nolint:unused // Will be enabled after session acceptance is fully implemented
-func (s *Server) handleDataPlaneSession(ctx context.Context, session dataplaneInterfaces.DataPlaneSession) {
-	defer func() {
-		if err := session.Close(ctx); err != nil {
-			s.logger.Warn("Error closing data plane session",
-				"session_id", session.ID(),
-				"error", err)
-		}
-	}()
-
-	s.logger.Info("Handling data plane session",
-		"session_id", session.ID(),
-		"peer_id", session.PeerID())
-
-	// Accept and handle streams in this session
-	for {
-		stream, streamType, err := session.AcceptStream(ctx)
-		if err != nil {
-			// Check if session is closed or context canceled
-			if ctx.Err() != nil || session.IsClosed() {
-				s.logger.Debug("Data plane session closed",
-					"session_id", session.ID())
-				return
-			}
-			s.logger.Error("Failed to accept stream",
-				"session_id", session.ID(),
-				"error", err)
-			return
-		}
-
-		s.logger.Debug("Accepted stream",
-			"session_id", session.ID(),
-			"stream_id", stream.ID(),
-			"stream_type", streamType)
-
-		// Route stream based on type
-		switch streamType {
-		case dataplaneTypes.StreamConfig:
-			// Handle configuration sync request
-			s.logger.Info("Handling config sync stream",
-				"session_id", session.ID(),
-				"stream_id", stream.ID())
-
-			// Call config handler (Story #362)
-			if s.configHandler != nil {
-				if err := s.configHandler.Handle(ctx, session, stream); err != nil {
-					s.logger.Error("Config handler failed",
-						"session_id", session.ID(),
-						"stream_id", stream.ID(),
-						"error", err)
-				}
-			} else {
-				s.logger.Warn("Config handler not initialized, closing stream",
-					"session_id", session.ID())
-				if err := stream.Close(); err != nil {
-					s.logger.Warn("Error closing config stream", "error", err)
-				}
-			}
-
-		case dataplaneTypes.StreamDNA:
-			// Handle DNA sync request
-			s.logger.Info("Handling DNA sync stream",
-				"session_id", session.ID(),
-				"stream_id", stream.ID())
-			// TODO: Implement DNA handler with new provider pattern
-			// For now, close the stream
-			if err := stream.Close(); err != nil {
-				s.logger.Warn("Error closing DNA stream", "error", err)
-			}
-
-		default:
-			s.logger.Warn("Unknown stream type",
-				"session_id", session.ID(),
-				"stream_id", stream.ID(),
-				"stream_type", streamType)
-			if err := stream.Close(); err != nil {
-				s.logger.Warn("Error closing unknown stream", "error", err)
-			}
-		}
-	}
-}
-
 // handleEventFromProvider processes events from stewards via the ControlPlaneProvider.
 // Story #363: Unified event handler replaces separate DNA/config-status/validation handlers.
 // Events are received on the new topic pattern: cfgms/events/{steward_id}
@@ -1489,128 +1142,4 @@ func (s *Server) handleConfigAppliedEvent(ctx context.Context, event *controlpla
 	// TODO: Store status report in database/audit log for MSP admin visibility
 
 	return nil
-}
-
-// Bridge types to adapt old QUIC server types to new provider interfaces
-// These are temporary until full session acceptance is implemented (Story #362)
-
-type quicSessionBridge struct {
-	raw *quicServer.Session
-}
-
-func (s *quicSessionBridge) ID() string {
-	if s.raw != nil {
-		return s.raw.ID
-	}
-	return "unknown"
-}
-
-func (s *quicSessionBridge) PeerID() string {
-	if s.raw != nil {
-		return s.raw.StewardID
-	}
-	return "unknown"
-}
-
-func (s *quicSessionBridge) SendConfig(ctx context.Context, config *dataplaneTypes.ConfigTransfer) error {
-	return fmt.Errorf("SendConfig not implemented in bridge")
-}
-
-func (s *quicSessionBridge) ReceiveConfig(ctx context.Context) (*dataplaneTypes.ConfigTransfer, error) {
-	return nil, fmt.Errorf("ReceiveConfig not implemented in bridge")
-}
-
-func (s *quicSessionBridge) SendDNA(ctx context.Context, dna *dataplaneTypes.DNATransfer) error {
-	return fmt.Errorf("SendDNA not implemented in bridge")
-}
-
-func (s *quicSessionBridge) ReceiveDNA(ctx context.Context) (*dataplaneTypes.DNATransfer, error) {
-	return nil, fmt.Errorf("ReceiveDNA not implemented in bridge")
-}
-
-func (s *quicSessionBridge) SendBulk(ctx context.Context, bulk *dataplaneTypes.BulkTransfer) error {
-	return fmt.Errorf("SendBulk not implemented in bridge")
-}
-
-func (s *quicSessionBridge) ReceiveBulk(ctx context.Context) (*dataplaneTypes.BulkTransfer, error) {
-	return nil, fmt.Errorf("ReceiveBulk not implemented in bridge")
-}
-
-func (s *quicSessionBridge) OpenStream(ctx context.Context, streamType dataplaneTypes.StreamType) (dataplaneInterfaces.Stream, error) {
-	return nil, fmt.Errorf("OpenStream not implemented in bridge")
-}
-
-func (s *quicSessionBridge) AcceptStream(ctx context.Context) (dataplaneInterfaces.Stream, dataplaneTypes.StreamType, error) {
-	return nil, "", fmt.Errorf("AcceptStream not implemented in bridge")
-}
-
-func (s *quicSessionBridge) Close(ctx context.Context) error {
-	return nil // Session cleanup handled by QUIC server
-}
-
-func (s *quicSessionBridge) IsClosed() bool {
-	return false
-}
-
-func (s *quicSessionBridge) LocalAddr() string {
-	return ""
-}
-
-func (s *quicSessionBridge) RemoteAddr() string {
-	if s.raw != nil && s.raw.Connection != nil {
-		return (*s.raw.Connection).RemoteAddr().String()
-	}
-	return "unknown"
-}
-
-type quicStreamBridge struct {
-	raw *quic.Stream
-}
-
-func (s *quicStreamBridge) Read(p []byte) (int, error) {
-	if s.raw != nil {
-		return (*s.raw).Read(p)
-	}
-	return 0, fmt.Errorf("invalid stream type")
-}
-
-func (s *quicStreamBridge) Write(p []byte) (int, error) {
-	if s.raw != nil {
-		return (*s.raw).Write(p)
-	}
-	return 0, fmt.Errorf("invalid stream type")
-}
-
-func (s *quicStreamBridge) Close() error {
-	if s.raw != nil {
-		return (*s.raw).Close()
-	}
-	return nil
-}
-
-func (s *quicStreamBridge) ID() uint64 {
-	if s.raw != nil {
-		return uint64((*s.raw).StreamID())
-	}
-	return 0
-}
-
-func (s *quicStreamBridge) Type() dataplaneTypes.StreamType {
-	// For the bridge, we know this is a config stream (stream ID 4)
-	// A more robust implementation would detect based on stream ID
-	return dataplaneTypes.StreamConfig
-}
-
-func (s *quicStreamBridge) SetDeadline(ctx context.Context) error {
-	// Extract deadline from context if present
-	deadline, ok := ctx.Deadline()
-	if !ok {
-		// No deadline set in context
-		return nil
-	}
-
-	if s.raw != nil {
-		return (*s.raw).SetDeadline(deadline)
-	}
-	return fmt.Errorf("invalid stream type")
 }

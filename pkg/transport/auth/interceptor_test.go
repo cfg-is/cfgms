@@ -74,12 +74,6 @@ type mockStream struct {
 
 func (m *mockStream) Context() context.Context { return m.ctx }
 
-// captureStream records the stream passed to the handler so tests can inspect
-// the wrapped stream's context.
-type captureStream struct {
-	received grpc.ServerStream
-}
-
 // noopUnaryHandler is a grpc.UnaryHandler that succeeds without side effects.
 func noopUnaryHandler(_ context.Context, _ interface{}) (interface{}, error) {
 	return nil, nil

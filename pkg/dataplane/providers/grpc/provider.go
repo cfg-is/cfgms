@@ -56,14 +56,14 @@ type Provider struct {
 	tlsConfig  *tls.Config
 
 	// Server-side (one or the other, not both)
-	grpcServer    *grpc.Server             // may be externally provided or owned
-	ownGRPCServer bool                     // true if we started grpcServer
-	listener      *quictransport.Listener  // QUIC listener, only when ownGRPCServer
-	handler       *dataPlaneHandler        // incoming-RPC dispatch handler
+	grpcServer    *grpc.Server            // may be externally provided or owned
+	ownGRPCServer bool                    // true if we started grpcServer
+	listener      *quictransport.Listener // QUIC listener, only when ownGRPCServer
+	handler       *dataPlaneHandler       // incoming-RPC dispatch handler
 
 	// Client-side (one or the other, not both)
-	grpcConn    *grpc.ClientConn                    // may be externally provided or owned
-	ownGRPCConn bool                                // true if we dialed grpcConn
+	grpcConn    *grpc.ClientConn // may be externally provided or owned
+	ownGRPCConn bool             // true if we dialed grpcConn
 	grpcClient  transportpb.StewardTransportClient
 
 	// Session tracking
@@ -288,6 +288,16 @@ func (p *Provider) Stop(ctx context.Context) error {
 	return nil
 }
 
+// Handler returns the DP handler that implements StewardTransportServer for
+// data plane RPCs (SyncConfig, SyncDNA, BulkTransfer). Used by the controller
+// to build a composite handler that delegates CP and DP RPCs appropriately.
+// Returns nil if Start() has not been called.
+func (p *Provider) Handler() transportpb.StewardTransportServer {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.handler
+}
+
 // AcceptConnection accepts an incoming data-plane connection (server-side).
 //
 // In the gRPC model, "accepting a connection" means returning a Session that
@@ -309,11 +319,11 @@ func (p *Provider) AcceptConnection(_ context.Context) (interfaces.DataPlaneSess
 
 	sessionID := fmt.Sprintf("grpc-server-session-%d", p.sessionCounter.Add(1))
 	s := &Session{
-		id:         sessionID,
-		peerID:     "",  // populated from RPC context when first RPC arrives
-		mode:       "server",
-		handler:    handler,
-		provider:   p,
+		id:       sessionID,
+		peerID:   "", // populated from RPC context when first RPC arrives
+		mode:     "server",
+		handler:  handler,
+		provider: p,
 	}
 
 	p.mu.Lock()

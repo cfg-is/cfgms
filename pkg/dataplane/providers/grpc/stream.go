@@ -58,7 +58,7 @@ func configTransferToChunks(cfg *types.ConfigTransfer) ([]*transportpb.ConfigChu
 		}
 		chunks = append(chunks, &transportpb.ConfigChunk{
 			Data:        data[start:end],
-			ChunkIndex:  int32(i),   //nolint:gosec // G115: bounded by total > math.MaxInt32 check above
+			ChunkIndex:  int32(i),     //nolint:gosec // G115: bounded by total > math.MaxInt32 check above
 			TotalChunks: int32(total), //nolint:gosec // G115: bounded by total > math.MaxInt32 check above
 			Version:     cfg.Version,
 			ConfigId:    cfg.ID,
