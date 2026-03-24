@@ -575,6 +575,11 @@ func (p *Provider) stopServer() error {
 			_ = p.listener.Close()
 		}
 	}
+	// Clear server state so the singleton can be re-initialized cleanly
+	// (e.g., when multiple integration tests create separate controllers)
+	p.grpcServer = nil
+	p.listener = nil
+	p.serverImpl = nil
 	p.eventHandlers = nil
 	p.heartbeatHandlers = nil
 	return nil

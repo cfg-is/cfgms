@@ -317,7 +317,6 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	var controlPlane controlplaneInterfaces.ControlPlaneProvider
 	var heartbeatService *heartbeat.Service
 	var commandPublisher *commands.Publisher
-	var sharedGRPCServer *grpc.Server
 	if cfg.Transport != nil && certManager != nil {
 		logger.Info("Initializing gRPC control plane provider...", "addr", cfg.Transport.ListenAddr)
 
@@ -326,19 +325,15 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			return nil, fmt.Errorf("failed to build transport TLS config: %w", err)
 		}
 
-		// Create shared gRPC server (QUIC listener created in Start)
-		sharedGRPCServer = grpc.NewServer(grpc.Creds(quictransport.TransportCredentials()))
-
-		// Initialize CP provider with the shared gRPC server (won't create its own listener)
+		// Initialize CP provider (shared gRPC server created fresh in Start)
 		controlPlane = controlplaneInterfaces.GetProvider("grpc")
 		if controlPlane == nil {
 			return nil, fmt.Errorf("gRPC control plane provider not registered")
 		}
 		if err := controlPlane.Initialize(context.Background(), map[string]interface{}{
-			"mode":        "server",
-			"addr":        cfg.Transport.ListenAddr,
-			"tls_config":  grpcTLSConfig,
-			"grpc_server": sharedGRPCServer,
+			"mode":       "server",
+			"addr":       cfg.Transport.ListenAddr,
+			"tls_config": grpcTLSConfig,
 		}); err != nil {
 			return nil, fmt.Errorf("failed to initialize gRPC control plane provider: %w", err)
 		}
@@ -390,7 +385,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// Initialize in server mode; the shared gRPC server will be wired during Start
 		if err := dataPlane.Initialize(context.Background(), map[string]interface{}{
 			"mode":        "server",
-			"grpc_server": sharedGRPCServer,
+			"grpc_server": grpc.NewServer(), // placeholder; real server created in Start
 		}); err != nil {
 			return nil, fmt.Errorf("failed to initialize gRPC data plane provider: %w", err)
 		}
@@ -508,7 +503,6 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		registrationTokenStore:  regStore,
 		dataPlaneProvider:       dataPlane,
 		configHandler:           configHandler,
-		grpcServer:              sharedGRPCServer,
 		httpServer:              httpServer,
 		signerCertSerial:        signerCertSerial, // Story #378: For registration handler
 		healthCollector:         healthCollector,
@@ -631,12 +625,24 @@ func (s *Server) Start() error {
 			return fmt.Errorf("failed to build transport TLS config: %w", err)
 		}
 
-		// Create shared QUIC listener and gRPC server
+		// Create fresh shared gRPC server + QUIC listener per Start() cycle.
+		// grpc.Server is not reusable after Stop(), so we create a new one each time.
+		s.grpcServer = grpc.NewServer(grpc.Creds(quictransport.TransportCredentials()))
 		ql, err := quictransport.Listen(s.cfg.Transport.ListenAddr, grpcTLSConfig, nil)
 		if err != nil {
 			return fmt.Errorf("failed to start shared QUIC listener: %w", err)
 		}
 		s.quicListener = ql
+
+		// Re-initialize CP provider with the fresh gRPC server
+		if err := s.controlPlane.Initialize(context.Background(), map[string]interface{}{
+			"mode":        "server",
+			"addr":        s.cfg.Transport.ListenAddr,
+			"tls_config":  grpcTLSConfig,
+			"grpc_server": s.grpcServer,
+		}); err != nil {
+			return fmt.Errorf("failed to re-initialize CP provider with shared server: %w", err)
+		}
 
 		// Start CP and DP providers (they create their handlers but don't register/listen)
 		if err := s.controlPlane.Start(context.Background()); err != nil {
@@ -645,6 +651,13 @@ func (s *Server) Start() error {
 		s.logger.Info("Control plane provider started")
 
 		if s.dataPlaneProvider != nil {
+			// Re-initialize DP with the fresh gRPC server
+			if err := s.dataPlaneProvider.Initialize(context.Background(), map[string]interface{}{
+				"mode":        "server",
+				"grpc_server": s.grpcServer,
+			}); err != nil {
+				return fmt.Errorf("failed to re-initialize DP provider with shared server: %w", err)
+			}
 			if err := s.dataPlaneProvider.Start(context.Background()); err != nil {
 				return fmt.Errorf("failed to start data plane provider: %w", err)
 			}
