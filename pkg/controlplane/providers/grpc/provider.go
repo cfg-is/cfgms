@@ -203,8 +203,10 @@ func (p *Provider) initializeServer(config map[string]interface{}) error {
 	if srv, ok := config["grpc_server"].(*grpc.Server); ok && srv != nil {
 		p.grpcServer = srv
 		p.ownGRPCServer = false
+		p.logger.Info("CP provider using external gRPC server (ownGRPCServer=false)")
 	} else {
 		p.ownGRPCServer = true
+		p.logger.Info("CP provider will create own gRPC server (ownGRPCServer=true)")
 		if p.addr == "" {
 			return fmt.Errorf("server mode requires 'addr' or 'grpc_server' in config")
 		}
