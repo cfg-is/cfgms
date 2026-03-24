@@ -62,12 +62,13 @@ type RegistrationResponse struct {
 	Group         string `json:"group,omitempty"`
 	Error         string `json:"error,omitempty"`
 
-	// HTTP registration fields (Story #198)
-	MQTTBroker  string `json:"mqtt_broker,omitempty"`
-	QUICAddress string `json:"quic_address,omitempty"`
-	ClientCert  string `json:"client_cert,omitempty"`
-	ClientKey   string `json:"client_key,omitempty"`
-	CACert      string `json:"ca_cert,omitempty"`
+	// Unified transport address for gRPC-over-QUIC connection (Issue #513)
+	TransportAddress string `json:"transport_address,omitempty"`
+
+	// Certificate fields
+	ClientCert string `json:"client_cert,omitempty"`
+	ClientKey  string `json:"client_key,omitempty"`
+	CACert     string `json:"ca_cert,omitempty"`
 
 	// Controller's server certificate for configuration signature verification (Story #315)
 	// Used by steward to verify configurations signed by this controller

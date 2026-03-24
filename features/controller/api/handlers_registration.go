@@ -20,12 +20,11 @@ type RegistrationRequest struct {
 
 // RegistrationResponse represents the steward registration response
 type RegistrationResponse struct {
-	StewardID     string `json:"steward_id"`
-	TenantID      string `json:"tenant_id"`
-	Group         string `json:"group"`
-	ControllerURL string `json:"controller_url"`
-	MQTTBroker    string `json:"mqtt_broker"`
-	QUICAddress   string `json:"quic_address"`
+	StewardID        string `json:"steward_id"`
+	TenantID         string `json:"tenant_id"`
+	Group            string `json:"group"`
+	ControllerURL    string `json:"controller_url"`
+	TransportAddress string `json:"transport_address"`
 
 	// Certificate information (optional for alpha, required for production mTLS)
 	ClientCert string `json:"client_cert,omitempty"`
@@ -125,12 +124,11 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	// Build response with connection details
 	resp := RegistrationResponse{
-		StewardID:     stewardID,
-		TenantID:      token.TenantID,
-		Group:         token.Group,
-		ControllerURL: token.ControllerURL,
-		MQTTBroker:    s.getMQTTBrokerURL(), // Story #294 Phase 3: Return proper MQTT broker URL
-		QUICAddress:   s.getQUICAddress(),
+		StewardID:        stewardID,
+		TenantID:         token.TenantID,
+		Group:            token.Group,
+		ControllerURL:    token.ControllerURL,
+		TransportAddress: s.getTransportAddress(),
 	}
 
 	// Story #294 Phase 3: Generate client certificates for mTLS (REQUIRED)
@@ -222,13 +220,12 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	// Store registered steward in memory for API queries
 	s.mu.Lock()
 	s.registeredStewards[stewardID] = &RegisteredSteward{
-		StewardID:    stewardID,
-		TenantID:     token.TenantID,
-		Group:        token.Group,
-		RegisteredAt: time.Now(),
-		Status:       "registered", // Initial status before first heartbeat
-		MQTTBroker:   resp.MQTTBroker,
-		QUICAddress:  resp.QUICAddress,
+		StewardID:        stewardID,
+		TenantID:         token.TenantID,
+		Group:            token.Group,
+		RegisteredAt:     time.Now(),
+		Status:           "registered", // Initial status before first heartbeat
+		TransportAddress: resp.TransportAddress,
 	}
 	s.mu.Unlock()
 
@@ -240,34 +237,16 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// getQUICAddress returns the QUIC server address for steward connections
-func (s *Server) getQUICAddress() string {
-	addr := "localhost:4433" // Default QUIC address
-	if s.cfg.QUIC != nil && s.cfg.QUIC.Enabled {
-		addr = s.cfg.QUIC.ListenAddr
+// getTransportAddress returns the unified transport address for steward connections.
+// This is a host:port string (e.g., "controller:4433"); the transport provider handles protocol details.
+func (s *Server) getTransportAddress() string {
+	addr := "localhost:4433" // Default transport address
+	if s.cfg.Transport != nil && s.cfg.Transport.ListenAddr != "" {
+		addr = s.cfg.Transport.ListenAddr
 	}
 
 	// Replace 0.0.0.0 with external hostname if configured (Docker/test mode)
 	return replaceBindAddress(addr)
-}
-
-// getMQTTBrokerURL returns the MQTT broker URL for steward connections
-// Story #294 Phase 3: Return proper MQTT URL with ssl:// or tcp:// protocol
-func (s *Server) getMQTTBrokerURL() string {
-	if s.cfg.MQTT == nil || !s.cfg.MQTT.Enabled {
-		return "tcp://localhost:1883" // Default MQTT address
-	}
-
-	// Determine protocol based on TLS configuration
-	protocol := "tcp"
-	if s.cfg.MQTT.EnableTLS {
-		protocol = "ssl"
-	}
-
-	// Replace 0.0.0.0 with external hostname if configured (Docker/test mode)
-	addr := replaceBindAddress(s.cfg.MQTT.ListenAddr)
-
-	return fmt.Sprintf("%s://%s", protocol, addr)
 }
 
 // replaceBindAddress replaces 0.0.0.0 bind addresses with external hostname

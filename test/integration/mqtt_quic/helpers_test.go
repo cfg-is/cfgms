@@ -96,15 +96,14 @@ func (h *TestHelper) RegisterSteward(t *testing.T, token string) *RegistrationRe
 
 // RegistrationResponse represents the registration API response
 type RegistrationResponse struct {
-	StewardID     string `json:"steward_id"`
-	TenantID      string `json:"tenant_id"`
-	Group         string `json:"group"`
-	ControllerURL string `json:"controller_url"`
-	MQTTBroker    string `json:"mqtt_broker"`
-	QUICAddress   string `json:"quic_address"`
-	ClientCert    string `json:"client_cert,omitempty"`
-	ClientKey     string `json:"client_key,omitempty"`
-	CACert        string `json:"ca_cert,omitempty"`
+	StewardID        string `json:"steward_id"`
+	TenantID         string `json:"tenant_id"`
+	Group            string `json:"group"`
+	ControllerURL    string `json:"controller_url"`
+	TransportAddress string `json:"transport_address"`
+	ClientCert       string `json:"client_cert,omitempty"`
+	ClientKey        string `json:"client_key,omitempty"`
+	CACert           string `json:"ca_cert,omitempty"`
 }
 
 // WaitForCondition waits for a condition with timeout
