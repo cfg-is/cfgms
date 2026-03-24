@@ -529,7 +529,7 @@ services:
       timescaledb-test:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "sh", "-c", "netstat -ln | grep :8883"]
+      test: ["CMD", "sh", "-c", "netstat -ln | grep :4433"]
       interval: 10s
       timeout: 5s
       retries: 5
