@@ -570,6 +570,9 @@ func (p *Provider) SendCommand(ctx context.Context, cmd *types.Command) error {
 	if p.mode != ModeServer {
 		return fmt.Errorf("SendCommand is only available in server mode")
 	}
+	if cmd == nil {
+		return fmt.Errorf("SendCommand: command must not be nil")
+	}
 
 	conn, ok := p.registry.Get(cmd.StewardID)
 	if !ok {
@@ -647,6 +650,9 @@ func (p *Provider) PublishEvent(ctx context.Context, event *types.Event) error {
 	if p.mode != ModeClient {
 		return fmt.Errorf("PublishEvent is only available in client mode")
 	}
+	if event == nil {
+		return fmt.Errorf("PublishEvent: event must not be nil")
+	}
 	if err := p.checkClientConnected(); err != nil {
 		p.deliveryFailures.Add(1)
 		return fmt.Errorf("failed to publish event: %w", err)
@@ -686,6 +692,9 @@ func (p *Provider) SendHeartbeat(ctx context.Context, heartbeat *types.Heartbeat
 	if p.mode != ModeClient {
 		return fmt.Errorf("SendHeartbeat is only available in client mode")
 	}
+	if heartbeat == nil {
+		return fmt.Errorf("SendHeartbeat: heartbeat must not be nil")
+	}
 	if err := p.checkClientConnected(); err != nil {
 		p.deliveryFailures.Add(1)
 		return fmt.Errorf("failed to send heartbeat: %w", err)
@@ -721,6 +730,9 @@ func (p *Provider) SubscribeHeartbeats(ctx context.Context, handler interfaces.H
 func (p *Provider) SendResponse(ctx context.Context, response *types.Response) error {
 	if p.mode != ModeClient {
 		return fmt.Errorf("SendResponse is only available in client mode")
+	}
+	if response == nil {
+		return fmt.Errorf("SendResponse: response must not be nil")
 	}
 	if err := p.checkClientConnected(); err != nil {
 		p.deliveryFailures.Add(1)
@@ -903,6 +915,29 @@ func (p *Provider) IsConnected() bool {
 		return p.getState() == StateConnected
 	default:
 		return false
+	}
+}
+
+// ListenAddr returns the actual listen address after Start() in server mode.
+// Returns empty string if not started or in client mode.
+func (p *Provider) ListenAddr() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.listener != nil {
+		return p.listener.Addr().String()
+	}
+	return ""
+}
+
+// ForceStop immediately closes all connections and stops the server without
+// waiting for in-progress RPCs to complete. Use in tests when GracefulStop
+// would hang on long-lived ControlChannel streams.
+func (p *Provider) ForceStop() {
+	if p.listener != nil {
+		_ = p.listener.Close()
+	}
+	if p.grpcServer != nil {
+		p.grpcServer.Stop()
 	}
 }
 
