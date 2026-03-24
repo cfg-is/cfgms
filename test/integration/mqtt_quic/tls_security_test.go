@@ -741,7 +741,7 @@ func (s *TLSSecurityTestSuite) TestMTLSWithRegistrationAPI() {
 	require.NotEmpty(s.T(), resp.ClientCert, "Registration should return client certificate")
 	require.NotEmpty(s.T(), resp.ClientKey, "Registration should return client key")
 	require.NotEmpty(s.T(), resp.CACert, "Registration should return CA certificate")
-	require.NotEmpty(s.T(), resp.MQTTBroker, "Registration should return MQTT broker address")
+	require.NotEmpty(s.T(), resp.TransportAddress, "Registration should return transport address")
 
 	s.T().Logf("✓ Registered steward: %s", resp.StewardID)
 

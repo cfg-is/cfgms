@@ -109,7 +109,7 @@ func (s *MultiTenantTestSuite) TestSimultaneousTenants() {
 	regCount := 0
 	for regResp := range registrations {
 		s.NotEmpty(regResp.StewardID, "Steward ID should be assigned")
-		s.NotEmpty(regResp.MQTTBroker, "MQTT broker should be assigned")
+		s.NotEmpty(regResp.TransportAddress, "Transport address should be assigned")
 		regCount++
 	}
 
