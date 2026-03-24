@@ -1707,7 +1707,8 @@ test-mqtt-quic-setup:
 	@echo "🔨 Force rebuilding Docker images (no cache)..."
 	@set -a && . ./.env.test && set +a && \
 	DOCKER_BUILDKIT=1 docker compose -f docker-compose.test.yml --profile ha build --no-cache controller-standalone steward-standalone && \
-	docker compose -f docker-compose.test.yml --profile ha up -d timescaledb-test controller-standalone steward-standalone
+	docker compose -f docker-compose.test.yml --profile ha up -d timescaledb-test controller-standalone steward-standalone || \
+	{ echo "❌ Docker compose failed — controller-standalone logs:"; docker logs controller-standalone 2>&1 | tail -30; exit 1; }
 	@echo ""
 	@echo "⏳ Waiting for controller to initialize..."
 	@sleep 45
