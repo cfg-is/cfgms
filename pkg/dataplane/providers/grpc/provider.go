@@ -440,9 +440,9 @@ func (p *Provider) IsConnected() bool {
 	return p.mode == "client" && p.started.Load() && p.grpcClient != nil
 }
 
-// listenAddress returns the actual listen address (after port assignment).
-// Used by tests to get the ephemeral port.
-func (p *Provider) listenAddress() string {
+// ListenAddr returns the actual listen address (after port assignment).
+// Returns empty string if not started or in client mode.
+func (p *Provider) ListenAddr() string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.listenAddr

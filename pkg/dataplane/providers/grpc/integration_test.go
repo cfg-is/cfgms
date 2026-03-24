@@ -46,7 +46,7 @@ func newIntegrationEnv(t *testing.T) *integrationEnv {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = sp.Stop(context.Background()) })
 
-	listenAddr := sp.listenAddress()
+	listenAddr := sp.ListenAddr()
 
 	// Start client
 	cp := New()
