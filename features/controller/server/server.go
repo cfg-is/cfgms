@@ -28,7 +28,6 @@ import (
 	"github.com/cfgis/cfgms/features/controller/heartbeat"
 	"github.com/cfgis/cfgms/features/controller/initialization"
 	controllerQuic "github.com/cfgis/cfgms/features/controller/quic"
-	"github.com/cfgis/cfgms/features/controller/registration"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/rbac"
 	reportapi "github.com/cfgis/cfgms/features/reports/api"
@@ -43,17 +42,16 @@ import (
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
-	_ "github.com/cfgis/cfgms/pkg/controlplane/providers/mqtt" // Register MQTT control plane provider
+	_ "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc" // Register gRPC control plane provider
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	dataplaneInterfaces "github.com/cfgis/cfgms/pkg/dataplane/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/dataplane/providers/quic" // Register QUIC data plane provider
 	dataplaneTypes "github.com/cfgis/cfgms/pkg/dataplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
-	mqttInterfaces "github.com/cfgis/cfgms/pkg/mqtt/interfaces"
-	_ "github.com/cfgis/cfgms/pkg/mqtt/providers/mochi" // Register mochi-mqtt provider
 	quicServer "github.com/cfgis/cfgms/pkg/quic/server" //nolint:staticcheck // SA1019: Controller infrastructure bootstrap
 	pkgRegistration "github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 )
 
 // BUILD_VERSION_CHECK is a compile-time constant to verify code version in Docker
@@ -74,11 +72,9 @@ type Server struct {
 	rbacManager             *rbac.Manager
 	auditManager            *audit.Manager
 	haManager               *ha.Manager
-	mqttBroker              mqttInterfaces.Broker
-	controlPlane            controlplaneInterfaces.ControlPlaneProvider // Story #363
+	controlPlane            controlplaneInterfaces.ControlPlaneProvider // Story #363 / #514
 	heartbeatService        *heartbeat.Service
 	commandPublisher        *commands.Publisher
-	registrationHandler     *registration.Handler
 	registrationTokenStore  pkgRegistration.Store
 	dataPlaneProvider       dataplaneInterfaces.DataPlaneProvider
 	configHandler           *controllerQuic.ConfigHandler
@@ -241,70 +237,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	}
 	logger.Info("HA manager initialized successfully")
 
-	// Initialize MQTT broker if enabled
-	var mqttBroker mqttInterfaces.Broker
-	var controlPlane controlplaneInterfaces.ControlPlaneProvider
-	var heartbeatService *heartbeat.Service
-	var commandPublisher *commands.Publisher
-	var registrationHandler *registration.Handler
+	// Initialize registration token store for HTTP-based registration (Story #263)
 	var regStore pkgRegistration.Store
-	if cfg.MQTT != nil && cfg.MQTT.Enabled {
-		logger.Info("Initializing MQTT broker...")
-		mqttBroker, err = initializeMQTTBroker(cfg, logger, certManager)
-		if err != nil {
-			return nil, fmt.Errorf("failed to initialize MQTT broker: %w", err)
-		}
-		logger.Info("MQTT broker initialized successfully")
-
-		// Initialize control plane provider in server mode (Story #363)
-		logger.Info("Initializing control plane provider...")
-		controlPlane = controlplaneInterfaces.GetProvider("mqtt")
-		if controlPlane == nil {
-			return nil, fmt.Errorf("MQTT control plane provider not registered")
-		}
-		if err := controlPlane.Initialize(context.Background(), map[string]interface{}{
-			"mode":   "server",
-			"broker": mqttBroker,
-		}); err != nil {
-			return nil, fmt.Errorf("failed to initialize control plane provider: %w", err)
-		}
-		logger.Info("Control plane provider initialized successfully", "provider", controlPlane.Name())
-
-		// Initialize heartbeat monitoring service
-		logger.Info("Initializing heartbeat monitoring service...")
-		heartbeatService, err = heartbeat.New(&heartbeat.Config{
-			ControlPlane:     controlPlane,
-			HeartbeatTimeout: 15 * time.Second, // Story #198 requirement
-			CheckInterval:    5 * time.Second,
-			OnStatusChange: func(stewardID string, healthy bool, status heartbeat.StewardStatus) {
-				if healthy {
-					logger.Info("Steward heartbeat recovered", "steward_id", stewardID)
-				} else {
-					logger.Warn("Steward heartbeat failed", "steward_id", stewardID, "status", status.Status)
-				}
-			},
-			Logger: logger,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to initialize heartbeat service: %w", err)
-		}
-		logger.Info("Heartbeat monitoring service initialized successfully")
-
-		// Initialize command publisher (Story #198, Story #363)
-		logger.Info("Initializing command publisher...")
-		commandPublisher, err = commands.New(&commands.Config{
-			ControlPlane: controlPlane,
-			Logger:       logger,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to initialize command publisher: %w", err)
-		}
-		logger.Info("Command publisher initialized successfully")
-
-		// Initialize registration handler (Story #198, updated Story #263)
-		logger.Info("Initializing registration handler...")
-		// Registration token storage - now uses durable storage from storage manager
-		// Story #263: Migrated from in-memory to pluggable durable storage (git/database)
+	{
 		regTokenStore := storageManager.GetRegistrationTokenStore()
 		if err := regTokenStore.Initialize(context.Background()); err != nil {
 			return nil, fmt.Errorf("failed to initialize registration token store: %w", err)
@@ -312,7 +247,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		regStore = pkgRegistration.NewStorageAdapter(regTokenStore)
 
 		// For Docker testing: Create pre-configured test tokens
-		// These tokens are used by integration tests in test/integration/mqtt_quic/
+		// These tokens are used by integration tests in test/integration/
 		now := time.Now()
 		expiredTime := now.Add(-1 * time.Hour)
 		testTokens := []*pkgRegistration.Token{
@@ -376,17 +311,65 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 				logger.Info("Created test registration token for Docker testing", "token", testToken.Token, "tenant", testToken.TenantID)
 			}
 		}
+	}
 
-		regValidator := pkgRegistration.NewValidator(regStore)
-		registrationHandler, err = registration.New(&registration.Config{
-			Broker:    mqttBroker,
-			Validator: regValidator,
-			Logger:    logger,
+	// Initialize gRPC control plane provider (Story #514)
+	var controlPlane controlplaneInterfaces.ControlPlaneProvider
+	var heartbeatService *heartbeat.Service
+	var commandPublisher *commands.Publisher
+	if cfg.Transport != nil && certManager != nil {
+		logger.Info("Initializing gRPC control plane provider...", "addr", cfg.Transport.ListenAddr)
+
+		grpcTLSConfig, err := buildGRPCControlPlaneTLSConfig(cfg, certManager, logger)
+		if err != nil {
+			return nil, fmt.Errorf("failed to build gRPC control plane TLS config: %w", err)
+		}
+
+		controlPlane = controlplaneInterfaces.GetProvider("grpc")
+		if controlPlane == nil {
+			return nil, fmt.Errorf("gRPC control plane provider not registered")
+		}
+		if err := controlPlane.Initialize(context.Background(), map[string]interface{}{
+			"mode":       "server",
+			"addr":       cfg.Transport.ListenAddr,
+			"tls_config": grpcTLSConfig,
+		}); err != nil {
+			return nil, fmt.Errorf("failed to initialize gRPC control plane provider: %w", err)
+		}
+		logger.Info("gRPC control plane provider initialized", "provider", controlPlane.Name(), "addr", cfg.Transport.ListenAddr)
+
+		// Initialize heartbeat monitoring service
+		logger.Info("Initializing heartbeat monitoring service...")
+		heartbeatService, err = heartbeat.New(&heartbeat.Config{
+			ControlPlane:     controlPlane,
+			HeartbeatTimeout: 15 * time.Second,
+			CheckInterval:    5 * time.Second,
+			OnStatusChange: func(stewardID string, healthy bool, status heartbeat.StewardStatus) {
+				if healthy {
+					logger.Info("Steward heartbeat recovered", "steward_id", stewardID)
+				} else {
+					logger.Warn("Steward heartbeat failed", "steward_id", stewardID, "status", status.Status)
+				}
+			},
+			Logger: logger,
 		})
 		if err != nil {
-			return nil, fmt.Errorf("failed to initialize registration handler: %w", err)
+			return nil, fmt.Errorf("failed to initialize heartbeat service: %w", err)
 		}
-		logger.Info("Registration handler initialized successfully")
+		logger.Info("Heartbeat monitoring service initialized successfully")
+
+		// Initialize command publisher (Story #198, Story #363, Story #514)
+		logger.Info("Initializing command publisher...")
+		commandPublisher, err = commands.New(&commands.Config{
+			ControlPlane: controlPlane,
+			Logger:       logger,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize command publisher: %w", err)
+		}
+		logger.Info("Command publisher initialized successfully")
+	} else {
+		logger.Warn("Transport config not set — gRPC control plane disabled")
 	}
 
 	// Initialize data plane provider if enabled (Story #362)
@@ -446,11 +429,10 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	var healthCollector *health.Collector
 	var healthAlertManager *health.DefaultAlertManager
 	{
-		// MQTT collector — only created when broker is configured
-		var mqttCollector health.MQTTCollector
-		if mqttBroker != nil {
-			mqttCollector = health.NewDefaultMQTTCollector(NewMochiBrokerStatsAdapter(mqttBroker))
-		}
+		// MQTT collector is intentionally nil: the embedded MQTT broker was removed in Story #514
+		// and replaced by the gRPC control plane provider. health.NewCollector handles nil safely
+		// (see collector.go lines 214, 238). A future story can wire a gRPC-based health collector.
+		var mqttCollector health.MQTTCollector // always nil until gRPC health collector is implemented
 
 		// Storage stats — provider name only, latency instrumentation is follow-up
 		storageStats := NewBasicStorageStats(cfg.Storage.Provider)
@@ -507,11 +489,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		rbacManager:             rbacManager,
 		auditManager:            auditManager,
 		haManager:               haManager,
-		mqttBroker:              mqttBroker,
-		controlPlane:            controlPlane, // Story #363
+		controlPlane:            controlPlane, // Story #363 / #514
 		heartbeatService:        heartbeatService,
 		commandPublisher:        commandPublisher,
-		registrationHandler:     registrationHandler,
 		registrationTokenStore:  regStore,
 		dataPlaneProvider:       dataPlane,
 		configHandler:           configHandler,
@@ -634,18 +614,22 @@ func (s *Server) Start() error {
 		s.logger.Info("HA manager started successfully")
 	}
 
-	// Start MQTT broker if configured
-	if s.mqttBroker != nil {
-		s.logger.Info("Starting MQTT broker...")
+	// Start gRPC control plane provider (Story #514)
+	if s.controlPlane != nil {
+		s.logger.Info("Starting gRPC control plane provider...")
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		if err := s.mqttBroker.Start(ctx); err != nil {
-			return fmt.Errorf("failed to start MQTT broker: %w", err)
+		if err := s.controlPlane.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start gRPC control plane provider: %w", err)
 		}
-		s.logger.Info("MQTT broker started successfully",
-			"listen_addr", s.mqttBroker.GetListenAddress(),
-			"provider", s.mqttBroker.Name())
+		s.logger.Info("gRPC control plane provider started successfully", "provider", s.controlPlane.Name())
+
+		// Subscribe to events from stewards via ControlPlaneProvider
+		if err := s.controlPlane.SubscribeEvents(ctx, nil, s.handleEventFromProvider); err != nil {
+			return fmt.Errorf("failed to subscribe to events: %w", err)
+		}
+		s.logger.Info("Subscribed to steward events via gRPC control plane provider")
 
 		// Start heartbeat monitoring service
 		if s.heartbeatService != nil {
@@ -656,39 +640,13 @@ func (s *Server) Start() error {
 			s.logger.Info("Heartbeat monitoring service started successfully")
 		}
 
-		// Start command publisher (Story #198)
+		// Start command publisher
 		if s.commandPublisher != nil {
 			s.logger.Info("Starting command publisher...")
 			if err := s.commandPublisher.Start(ctx); err != nil {
 				return fmt.Errorf("failed to start command publisher: %w", err)
 			}
 			s.logger.Info("Command publisher started successfully")
-		}
-
-		// Start registration handler (Story #198)
-		if s.registrationHandler != nil {
-			s.logger.Info("Starting registration handler...")
-			if err := s.registrationHandler.Start(ctx); err != nil {
-				return fmt.Errorf("failed to start registration handler: %w", err)
-			}
-			s.logger.Info("Registration handler started successfully")
-		}
-
-		// Start control plane provider (Story #363)
-		if s.controlPlane != nil {
-			s.logger.Info("Starting control plane provider...")
-			if err := s.controlPlane.Start(ctx); err != nil {
-				return fmt.Errorf("failed to start control plane provider: %w", err)
-			}
-			s.logger.Info("Control plane provider started successfully")
-
-			// Subscribe to events from stewards via ControlPlaneProvider (Story #363)
-			// DNA updates, config status reports, and validation requests are received as events
-			// using new topic pattern: cfgms/events/+ instead of cfgms/steward/+/{type}
-			if err := s.controlPlane.SubscribeEvents(ctx, nil, s.handleEventFromProvider); err != nil {
-				return fmt.Errorf("failed to subscribe to events: %w", err)
-			}
-			s.logger.Info("Subscribed to steward events via control plane provider")
 		}
 	}
 
@@ -746,7 +704,7 @@ func (s *Server) Start() error {
 		s.logger.Info("HTTP API server started")
 	}
 
-	s.logger.Info("Controller server started (MQTT+QUIC mode)",
+	s.logger.Info("Controller server started (gRPC-over-QUIC transport mode)",
 		"ha_mode", s.haManager.GetDeploymentMode().String(),
 		"is_leader", s.haManager.IsLeader())
 
@@ -824,30 +782,12 @@ func (s *Server) Stop() error {
 		}
 	}
 
-	// Stop registration handler
-	if s.registrationHandler != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := s.registrationHandler.Stop(ctx); err != nil {
-			s.logger.Warn("Failed to stop registration handler", "error", err)
-		}
-	}
-
 	// Stop heartbeat service
 	if s.heartbeatService != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := s.heartbeatService.Stop(ctx); err != nil {
 			s.logger.Warn("Failed to stop heartbeat service", "error", err)
-		}
-	}
-
-	// Stop MQTT broker
-	if s.mqttBroker != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := s.mqttBroker.Stop(ctx); err != nil {
-			s.logger.Warn("Failed to stop MQTT broker", "error", err)
 		}
 	}
 
@@ -1040,110 +980,97 @@ func initializeHAManager(cfg *config.Config, logger logging.Logger, storageManag
 	return haManager, nil
 }
 
-func initializeMQTTBroker(cfg *config.Config, logger logging.Logger, certManager *cert.Manager) (mqttInterfaces.Broker, error) {
-	// Get mochi-mqtt broker from registry
-	broker := mqttInterfaces.GetBroker("mochi")
-	if broker == nil {
-		return nil, fmt.Errorf("mochi-mqtt broker not registered")
+// buildGRPCControlPlaneTLSConfig creates TLS configuration for the gRPC control plane provider.
+//
+// Uses the certificate manager to load or generate the server certificate and CA, then creates
+// a mTLS config with the ALPN identifier required by the gRPC-over-QUIC transport layer.
+// In separated architecture mode, uses CertificateTypeInternalServer for mTLS separation.
+// Generates a server certificate on first boot if none exists.
+func buildGRPCControlPlaneTLSConfig(cfg *config.Config, certManager *cert.Manager, logger logging.Logger) (*tls.Config, error) {
+	separated := cfg.Certificate != nil && cfg.Certificate.IsSeparatedArchitecture()
+	certType := cert.CertificateTypeServer
+	if separated {
+		certType = cert.CertificateTypeInternalServer
 	}
 
-	// Build MQTT broker configuration
-	mqttConfig := map[string]interface{}{
-		"listen_addr":             cfg.MQTT.ListenAddr,
-		"enable_tls":              cfg.MQTT.EnableTLS,
-		"require_client_cert":     cfg.MQTT.RequireClientCert,
-		"max_clients":             cfg.MQTT.MaxClients,
-		"max_message_size":        float64(cfg.MQTT.MaxMessageSize),
-		"session_expiry_interval": cfg.MQTT.SessionExpiryInterval,
+	var serverCertPEM, serverKeyPEM []byte
+
+	// Try to load existing certificate; generate one on first boot if none exists
+	serverCerts, err := certManager.GetCertificatesByType(certType)
+	if err != nil || len(serverCerts) == 0 {
+		if separated {
+			// Also check base server type as fallback in separated mode
+			serverCerts, err = certManager.GetCertificatesByType(cert.CertificateTypeServer)
+		}
 	}
 
-	// Configure TLS certificates
-	if cfg.MQTT.EnableTLS {
-		var serverCertPath, serverKeyPath, caPath string
-
-		if cfg.MQTT.UseCertManager && certManager != nil {
-			// Use certificate manager certificates
-			serverCertPath = filepath.Join(cfg.Certificate.CAPath, "server", "server.crt")
-			serverKeyPath = filepath.Join(cfg.Certificate.CAPath, "server", "server.key")
-			caPath = filepath.Join(cfg.Certificate.CAPath, "ca.crt")
-
-			// Check if certificates exist, if not generate them using certManager
-			if _, err := os.Stat(serverCertPath); os.IsNotExist(err) {
-				logger.Info("MQTT certificates not found, generating using certificate manager")
-				separated := cfg.Certificate != nil && cfg.Certificate.IsSeparatedArchitecture()
-				if err := ensureMQTTCertificatesFromManagerWithArch(cfg.Certificate.CAPath, certManager, logger, separated); err != nil {
-					return nil, fmt.Errorf("failed to generate MQTT certificates: %w", err)
-				}
-			}
-
-			logger.Info("MQTT broker using certificate manager certificates",
-				"cert_path", serverCertPath,
-				"ca_path", caPath)
-		} else if cfg.MQTT.TLSCertPath != "" && cfg.MQTT.TLSKeyPath != "" {
-			// Use manually configured certificate paths
-			serverCertPath = cfg.MQTT.TLSCertPath
-			serverKeyPath = cfg.MQTT.TLSKeyPath
-			caPath = cfg.MQTT.TLSCAPath
-
-			logger.Info("MQTT broker using configured certificates",
-				"cert_path", cfg.MQTT.TLSCertPath,
-				"ca_path", cfg.MQTT.TLSCAPath)
+	if err != nil || len(serverCerts) == 0 {
+		// First boot: generate server certificate for gRPC control plane
+		logger.Info("Generating gRPC control plane server certificate")
+		certCfg := &cert.ServerCertConfig{
+			CommonName:   "cfgms-grpc-server",
+			Organization: "CFGMS",
+			DNSNames:     []string{"localhost", "cfgms-grpc-server", "controller-standalone"},
+			IPAddresses:  []string{"127.0.0.1", "0.0.0.0"},
+			ValidityDays: 365,
+		}
+		var generatedCert *cert.Certificate
+		if separated {
+			generatedCert, err = certManager.GenerateInternalServerCertificate(certCfg)
 		} else {
-			return nil, fmt.Errorf("TLS enabled but no certificates configured")
+			generatedCert, err = certManager.GenerateServerCertificate(certCfg)
 		}
-
-		mqttConfig["tls_cert_path"] = serverCertPath
-		mqttConfig["tls_key_path"] = serverKeyPath
-		if caPath != "" {
-			mqttConfig["tls_ca_path"] = caPath
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate gRPC control plane server certificate: %w", err)
 		}
+		serverCertPEM = generatedCert.CertificatePEM
+		serverKeyPEM = generatedCert.PrivateKeyPEM
+		logger.Info("gRPC control plane server certificate generated", "serial", generatedCert.SerialNumber)
+	} else {
+		// Load existing certificate
+		serial := serverCerts[0].SerialNumber
+		serverCertPEM, serverKeyPEM, err = certManager.ExportCertificate(serial, true)
+		if err != nil {
+			return nil, fmt.Errorf("failed to export gRPC control plane server certificate: %w", err)
+		}
+		logger.Info("gRPC control plane using existing server certificate", "serial", serial)
 	}
 
-	// Initialize broker with configuration
-	if err := broker.Initialize(mqttConfig); err != nil {
-		return nil, fmt.Errorf("failed to initialize MQTT broker: %w", err)
+	caCertPEM, err := certManager.GetCACertificate()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get CA certificate for gRPC control plane: %w", err)
 	}
 
-	// Configure ACL handler for multi-tenant topic isolation (Story #313)
-	// Enforces that stewards can only access topics under their own namespace:
-	// cfgms/steward/{clientID}/#
-	broker.SetACLHandler(stewardACLHandler)
-	logger.Info("MQTT broker ACL handler configured for multi-tenant isolation")
-
-	// Check if broker is available (has required certificates, etc.)
-	available, err := broker.Available()
-	if !available {
-		return nil, fmt.Errorf("MQTT broker not available: %w", err)
+	// Build mTLS server config using pkg/cert helper
+	tlsConfig, err := cert.CreateServerTLSConfig(serverCertPEM, serverKeyPEM, caCertPEM, tls.VersionTLS13)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create gRPC control plane TLS config: %w", err)
 	}
 
-	logger.Info("MQTT broker initialized and ready",
-		"provider", broker.Name(),
-		"listen_addr", cfg.MQTT.ListenAddr,
-		"tls_enabled", cfg.MQTT.EnableTLS,
-		"mtls_enabled", cfg.MQTT.RequireClientCert)
+	// Set gRPC-over-QUIC ALPN (distinguishes control plane from data plane on same port)
+	tlsConfig.NextProtos = []string{quictransport.ALPNProtocol}
 
-	return broker, nil
+	logger.Info("gRPC control plane TLS config created", "alpn", quictransport.ALPNProtocol)
+	return tlsConfig, nil
 }
 
-// ensureMQTTCertificatesFromManagerWithArch generates MQTT server certificates using the certificate manager.
-// This ensures MQTT uses the same CA as the HTTP/REST API, enabling proper mTLS with unified certificate chain.
-// Story #377: In separated mode, uses CertificateTypeInternalServer; in unified mode, uses CertificateTypeServer.
-func ensureMQTTCertificatesFromManagerWithArch(caPath string, certManager *cert.Manager, logger logging.Logger, separated bool) error {
-	// Create directory structure
+// ensureServerCertificatesFromManager generates server certificates on disk using the certificate manager.
+// Used by the QUIC data plane provider which reads TLS certificates from the filesystem.
+// In separated architecture mode, uses CertificateTypeInternalServer; otherwise CertificateTypeServer.
+func ensureServerCertificatesFromManager(caPath string, certManager *cert.Manager, logger logging.Logger, separated bool) error {
 	serverDir := filepath.Join(caPath, "server")
-	if err := os.MkdirAll(serverDir, 0750); err != nil { // Restrict to owner+group only
+	if err := os.MkdirAll(serverDir, 0750); err != nil {
 		return fmt.Errorf("failed to create server cert directory: %w", err)
 	}
 
 	certCfg := &cert.ServerCertConfig{
-		CommonName:   "cfgms-mqtt-server",
+		CommonName:   "cfgms-server",
 		Organization: "CFGMS",
-		DNSNames:     []string{"localhost", "cfgms-mqtt-server", "controller-standalone"},
+		DNSNames:     []string{"localhost", "cfgms-server", "controller-standalone"},
 		IPAddresses:  []string{"127.0.0.1", "0.0.0.0"},
 		ValidityDays: 365,
 	}
 
-	// Generate certificate using appropriate type based on architecture
 	var serverCert *cert.Certificate
 	var err error
 	if separated {
@@ -1152,35 +1079,32 @@ func ensureMQTTCertificatesFromManagerWithArch(caPath string, certManager *cert.
 		serverCert, err = certManager.GenerateServerCertificate(certCfg)
 	}
 	if err != nil {
-		return fmt.Errorf("failed to generate MQTT server certificate: %w", err)
+		return fmt.Errorf("failed to generate server certificate: %w", err)
 	}
 
-	// Save server certificate
 	serverCertPath := filepath.Join(serverDir, "server.crt")
-	if err := os.WriteFile(serverCertPath, serverCert.CertificatePEM, 0600); err != nil { // Restrict to owner only
+	if err := os.WriteFile(serverCertPath, serverCert.CertificatePEM, 0600); err != nil {
 		return fmt.Errorf("failed to write server certificate: %w", err)
 	}
 
-	// Save server key
 	serverKeyPath := filepath.Join(serverDir, "server.key")
 	if err := os.WriteFile(serverKeyPath, serverCert.PrivateKeyPEM, 0600); err != nil {
 		return fmt.Errorf("failed to write server key: %w", err)
 	}
 
-	// Export CA certificate to caPath for MQTT broker
 	caCert, err := certManager.GetCACertificate()
 	if err != nil {
 		return fmt.Errorf("failed to get CA certificate: %w", err)
 	}
 
-	caPath = filepath.Join(caPath, "ca.crt")
-	if err := os.WriteFile(caPath, caCert, 0600); err != nil { // Restrict to owner only
+	caFilePath := filepath.Join(caPath, "ca.crt")
+	if err := os.WriteFile(caFilePath, caCert, 0600); err != nil {
 		return fmt.Errorf("failed to write CA certificate: %w", err)
 	}
 
-	logger.Info("Generated MQTT certificates using unified certificate manager",
+	logger.Info("Generated server certificates using certificate manager",
 		"server_cert", serverCertPath,
-		"ca_cert", caPath)
+		"ca_cert", caFilePath)
 
 	return nil
 }
@@ -1195,13 +1119,12 @@ func buildQUICTLSConfig(cfg *config.Config, certManager *cert.Manager, logger lo
 		serverKeyPath := filepath.Join(cfg.Certificate.CAPath, "server", "server.key")
 		caPath := filepath.Join(cfg.Certificate.CAPath, "ca.crt")
 
-		// Check if certificates exist
+		// Check if certificates exist, generate them if not
 		if _, err := os.Stat(serverCertPath); os.IsNotExist(err) {
-			logger.Info("QUIC certificates not found, using MQTT certificates")
-			// MQTT cert generation already happened, so these should exist
+			logger.Info("QUIC data plane certificates not found, generating using certificate manager")
 			separated := cfg.Certificate != nil && cfg.Certificate.IsSeparatedArchitecture()
-			if err := ensureMQTTCertificatesFromManagerWithArch(cfg.Certificate.CAPath, certManager, logger, separated); err != nil {
-				return nil, fmt.Errorf("failed to ensure certificates: %w", err)
+			if err := ensureServerCertificatesFromManager(cfg.Certificate.CAPath, certManager, logger, separated); err != nil {
+				return nil, fmt.Errorf("failed to ensure QUIC data plane certificates: %w", err)
 			}
 		}
 
