@@ -313,11 +313,11 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		}
 	}
 
-	// Initialize gRPC control plane provider (Story #515)
-	// The shared QUIC listener and gRPC server are created during Start().
+	// Initialize shared gRPC-over-QUIC transport (Story #515)
 	var controlPlane controlplaneInterfaces.ControlPlaneProvider
 	var heartbeatService *heartbeat.Service
 	var commandPublisher *commands.Publisher
+	var sharedGRPCServer *grpc.Server
 	if cfg.Transport != nil && certManager != nil {
 		logger.Info("Initializing gRPC control plane provider...", "addr", cfg.Transport.ListenAddr)
 
@@ -326,15 +326,19 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			return nil, fmt.Errorf("failed to build transport TLS config: %w", err)
 		}
 
-		// Initialize CP provider with external server mode (listener created in Start)
+		// Create shared gRPC server (QUIC listener created in Start)
+		sharedGRPCServer = grpc.NewServer(grpc.Creds(quictransport.TransportCredentials()))
+
+		// Initialize CP provider with the shared gRPC server (won't create its own listener)
 		controlPlane = controlplaneInterfaces.GetProvider("grpc")
 		if controlPlane == nil {
 			return nil, fmt.Errorf("gRPC control plane provider not registered")
 		}
 		if err := controlPlane.Initialize(context.Background(), map[string]interface{}{
-			"mode":       "server",
-			"addr":       cfg.Transport.ListenAddr,
-			"tls_config": grpcTLSConfig,
+			"mode":        "server",
+			"addr":        cfg.Transport.ListenAddr,
+			"tls_config":  grpcTLSConfig,
+			"grpc_server": sharedGRPCServer,
 		}); err != nil {
 			return nil, fmt.Errorf("failed to initialize gRPC control plane provider: %w", err)
 		}
@@ -386,7 +390,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// Initialize in server mode; the shared gRPC server will be wired during Start
 		if err := dataPlane.Initialize(context.Background(), map[string]interface{}{
 			"mode":        "server",
-			"grpc_server": grpc.NewServer(), // placeholder; real server created in Start
+			"grpc_server": sharedGRPCServer,
 		}); err != nil {
 			return nil, fmt.Errorf("failed to initialize gRPC data plane provider: %w", err)
 		}
@@ -504,6 +508,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		registrationTokenStore:  regStore,
 		dataPlaneProvider:       dataPlane,
 		configHandler:           configHandler,
+		grpcServer:              sharedGRPCServer,
 		httpServer:              httpServer,
 		signerCertSerial:        signerCertSerial, // Story #378: For registration handler
 		healthCollector:         healthCollector,
@@ -632,7 +637,6 @@ func (s *Server) Start() error {
 			return fmt.Errorf("failed to start shared QUIC listener: %w", err)
 		}
 		s.quicListener = ql
-		s.grpcServer = grpc.NewServer(grpc.Creds(quictransport.TransportCredentials()))
 
 		// Start CP and DP providers (they create their handlers but don't register/listen)
 		if err := s.controlPlane.Start(context.Background()); err != nil {
