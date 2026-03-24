@@ -278,10 +278,10 @@ func (s *SyntheticMonitoringSuite) TestTerminalSessionMonitoring() {
 		defer cancel()
 
 		// Steward is already connected via MQTT - verify connection
-		if !registered.MQTTClient.IsConnected() {
-			return fmt.Errorf("steward MQTT connection not established")
+		if !registered.ControlPlane.IsConnected() {
+			return fmt.Errorf("steward control plane connection not established")
 		}
-		s.framework.logger.Info("MQTT steward connected for terminal monitoring",
+		s.framework.logger.Info("gRPC steward connected for terminal monitoring",
 			"steward_id", registered.StewardID)
 
 		time.Sleep(500 * time.Millisecond) // Brief delay for MQTT connection stability
@@ -495,12 +495,12 @@ func (s *SyntheticMonitoringSuite) TestMQTTStewardHealthMonitoring() {
 		for time.Now().Before(endTime) {
 			startTime := time.Now()
 
-			// Check MQTT connection health for all stewards
+			// Check transport connection health for all stewards
 			healthyCount := 0
 			disconnectedStewards := make([]string, 0)
 
 			for _, registered := range registeredStewards {
-				if registered.MQTTClient != nil && registered.MQTTClient.IsConnected() {
+				if registered.ControlPlane != nil && registered.ControlPlane.IsConnected() {
 					healthyCount++
 				} else {
 					disconnectedStewards = append(disconnectedStewards, registered.StewardID)
@@ -584,7 +584,7 @@ func (s *SyntheticMonitoringSuite) performComponentHealthChecks() map[string]str
 		// Count healthy MQTT connections
 		healthyCount := 0
 		for _, registered := range s.framework.registeredStewards {
-			if registered.MQTTClient != nil && registered.MQTTClient.IsConnected() {
+			if registered.ControlPlane != nil && registered.ControlPlane.IsConnected() {
 				healthyCount++
 			}
 		}

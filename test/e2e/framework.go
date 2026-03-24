@@ -17,7 +17,10 @@ import (
 	"testing"
 	"time"
 
-	mqtt "github.com/eclipse/paho.mqtt.golang"
+	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
+	controlplaneGRPC "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc"
+	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
+	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 
 	"github.com/cfgis/cfgms/features/controller"
 	controllerConfig "github.com/cfgis/cfgms/features/controller/config"
@@ -35,20 +38,19 @@ import (
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/git"
 )
 
-// RegisteredSteward represents a steward registered with the controller via MQTT
-// Story #294 Phase 3: Track MQTT-connected stewards for E2E testing
+// RegisteredSteward represents a steward registered with the controller via gRPC transport
+// Story #294 Phase 3: Track transport-connected stewards for E2E testing
 type RegisteredSteward struct {
 	StewardID        string
 	TenantID         string
 	Group            string
-	MQTTClient       mqtt.Client
+	ControlPlane     controlplaneInterfaces.ControlPlaneProvider
 	TransportAddress string
 	ControllerURL    string
 	ClientCert       string
 	ClientKey        string
 	CACert           string
 	heartbeatDone    chan bool
-	commandHandler   mqtt.MessageHandler
 }
 
 // E2ETestFramework provides a comprehensive end-to-end testing environment
@@ -349,6 +351,14 @@ func (f *E2ETestFramework) initializeController() error {
 			EnableTLS:      f.config.EnableTLS,
 			UseCertManager: true, // Use auto-generated certificates from cert manager
 		},
+		// Issue #516: Enable gRPC-over-QUIC transport for steward connections
+		Transport: &controllerConfig.TransportConfig{
+			ListenAddr:      "localhost:4433",
+			UseCertManager:  true,
+			MaxConnections:  100,
+			KeepalivePeriod: controllerConfig.Duration(30 * time.Second),
+			IdleTimeout:     controllerConfig.Duration(5 * time.Minute),
+		},
 	}
 
 	// Create storage directory
@@ -514,7 +524,7 @@ func (f *E2ETestFramework) RegisterStewardWithController(stewardName, tenantID s
 	// Check if already registered (with read lock)
 	f.mu.RLock()
 	if existing, exists := f.registeredStewards[stewardName]; exists {
-		if existing.MQTTClient != nil && existing.MQTTClient.IsConnected() {
+		if existing.ControlPlane != nil && existing.ControlPlane.IsConnected() {
 			f.mu.RUnlock()
 			f.logger.Info("Reusing existing registered steward", "steward_name", stewardName)
 			return existing, nil
@@ -600,59 +610,37 @@ func (f *E2ETestFramework) RegisterStewardWithController(stewardName, tenantID s
 		return nil, fmt.Errorf("failed to create TLS config: %w", err)
 	}
 
-	// Step 5: Create MQTT client with TLS
-	mqttOpts := mqtt.NewClientOptions()
-	mqttOpts.AddBroker(regResp.TransportAddress)
-	mqttOpts.SetClientID(regResp.StewardID)
-	mqttOpts.SetTLSConfig(tlsConfig)
-	mqttOpts.SetKeepAlive(30 * time.Second) // 30s keepalive for heartbeat
-	mqttOpts.SetConnectTimeout(10 * time.Second)
-	mqttOpts.SetAutoReconnect(false) // Explicit reconnection handling in tests
-
-	// Set Last Will Testament for failover detection
-	lwtTopic := fmt.Sprintf("cfgms/steward/%s/status", regResp.StewardID)
-	lwtPayload := `{"status": "offline", "reason": "connection_lost"}`
-	mqttOpts.SetWill(lwtTopic, lwtPayload, 1, false)
-
-	// Connection lost handler
-	mqttOpts.SetConnectionLostHandler(func(client mqtt.Client, err error) {
-		f.logger.Warn("MQTT connection lost", "steward_id", regResp.StewardID, "error", err)
-	})
-
-	mqttClient := mqtt.NewClient(mqttOpts)
-
-	// Step 6: Connect to MQTT broker
-	connectToken := mqttClient.Connect()
-	if !connectToken.WaitTimeout(10 * time.Second) {
-		return nil, fmt.Errorf("MQTT connection timeout")
-	}
-	if err := connectToken.Error(); err != nil {
-		return nil, fmt.Errorf("MQTT connection failed: %w", err)
+	// Step 5: Create gRPC control plane client
+	controlPlane := controlplaneGRPC.New(controlplaneGRPC.ModeClient)
+	if err := controlPlane.Initialize(f.ctx, map[string]interface{}{
+		"addr":       regResp.TransportAddress,
+		"tls_config": tlsConfig,
+		"steward_id": regResp.StewardID,
+		"tenant_id":  regResp.TenantID,
+	}); err != nil {
+		return nil, fmt.Errorf("failed to initialize gRPC control plane: %w", err)
 	}
 
-	f.logger.Info("MQTT connection successful", "steward_id", regResp.StewardID)
+	// Step 6: Connect to gRPC transport
+	if err := controlPlane.Start(f.ctx); err != nil {
+		return nil, fmt.Errorf("gRPC control plane start failed: %w", err)
+	}
 
-	// Step 7: Subscribe to command topic
-	commandTopic := fmt.Sprintf("cfgms/steward/%s/commands", regResp.StewardID)
-	commandHandler := func(client mqtt.Client, msg mqtt.Message) {
+	f.logger.Info("gRPC control plane connected", "steward_id", regResp.StewardID)
+
+	// Step 7: Subscribe to commands
+	if err := controlPlane.SubscribeCommands(f.ctx, regResp.StewardID, func(ctx context.Context, cmd *controlplaneTypes.Command) error {
 		f.logger.Info("Received command",
 			"steward_id", regResp.StewardID,
-			"topic", msg.Topic(),
-			"payload", string(msg.Payload()))
-		// Command handling will be implemented in tests as needed
+			"command_id", cmd.ID,
+			"type", string(cmd.Type))
+		return nil
+	}); err != nil {
+		_ = controlPlane.Stop(f.ctx)
+		return nil, fmt.Errorf("failed to subscribe to commands: %w", err)
 	}
 
-	subToken := mqttClient.Subscribe(commandTopic, 1, commandHandler)
-	if !subToken.WaitTimeout(5 * time.Second) {
-		mqttClient.Disconnect(250)
-		return nil, fmt.Errorf("command subscription timeout")
-	}
-	if err := subToken.Error(); err != nil {
-		mqttClient.Disconnect(250)
-		return nil, fmt.Errorf("command subscription failed: %w", err)
-	}
-
-	f.logger.Info("Subscribed to commands", "topic", commandTopic)
+	f.logger.Info("Subscribed to commands", "steward_id", regResp.StewardID)
 
 	// Step 8: Create RegisteredSteward and start heartbeat
 	heartbeatDone := make(chan bool)
@@ -660,14 +648,13 @@ func (f *E2ETestFramework) RegisterStewardWithController(stewardName, tenantID s
 		StewardID:        regResp.StewardID,
 		TenantID:         regResp.TenantID,
 		Group:            regResp.Group,
-		MQTTClient:       mqttClient,
+		ControlPlane:     controlPlane,
 		TransportAddress: regResp.TransportAddress,
 		ControllerURL:    regResp.ControllerURL,
 		ClientCert:       regResp.ClientCert,
 		ClientKey:        regResp.ClientKey,
 		CACert:           regResp.CACert,
 		heartbeatDone:    heartbeatDone,
-		commandHandler:   commandHandler,
 	}
 
 	// Start heartbeat publishing goroutine
@@ -680,8 +667,8 @@ func (f *E2ETestFramework) RegisterStewardWithController(stewardName, tenantID s
 	// Add cleanup function
 	f.cleanupFuncs = append(f.cleanupFuncs, func() error {
 		close(heartbeatDone)
-		if mqttClient.IsConnected() {
-			mqttClient.Disconnect(250)
+		if controlPlane.IsConnected() {
+			_ = controlPlane.Stop(context.Background())
 		}
 		return nil
 	})
@@ -705,25 +692,26 @@ func (f *E2ETestFramework) createTLSConfigFromPEM(caCertPEM, clientCertPEM, clie
 		return nil, fmt.Errorf("failed to load client certificate: %w", err)
 	}
 
-	// Create TLS config
+	// Create TLS config with ALPN protocol for gRPC-over-QUIC
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{clientCert},
 		RootCAs:      caCertPool,
 		MinVersion:   tls.VersionTLS12,
-		ServerName:   "localhost", // Connect via localhost in tests
+		ServerName:   "localhost",                    // Connect via localhost in tests
+		NextProtos:   []string{quictransport.ALPNProtocol}, // Required for QUIC transport
 	}
 
 	return tlsConfig, nil
 }
 
-// publishHeartbeats publishes periodic heartbeat messages to MQTT
+// publishHeartbeats sends periodic heartbeat messages via the gRPC control plane
 // Story #294 Phase 3: Heartbeat mechanism for failover detection
 func (f *E2ETestFramework) publishHeartbeats(steward *RegisteredSteward) {
-	heartbeatTopic := fmt.Sprintf("cfgms/steward/%s/heartbeat", steward.StewardID)
 	ticker := time.NewTicker(30 * time.Second) // Production interval
 	defer ticker.Stop()
 
 	sequence := 0
+	ctx := context.Background()
 	for {
 		select {
 		case <-steward.heartbeatDone:
@@ -731,30 +719,19 @@ func (f *E2ETestFramework) publishHeartbeats(steward *RegisteredSteward) {
 			return
 		case <-ticker.C:
 			sequence++
-			heartbeat := map[string]interface{}{
-				"steward_id": steward.StewardID,
-				"status":     "healthy",
-				"timestamp":  time.Now().Unix(),
-				"sequence":   sequence,
-			}
-
-			heartbeatJSON, err := json.Marshal(heartbeat)
-			if err != nil {
-				f.logger.Error("Failed to marshal heartbeat", "error", err)
+			if err := steward.ControlPlane.SendHeartbeat(ctx, &controlplaneTypes.Heartbeat{
+				StewardID: steward.StewardID,
+				TenantID:  steward.TenantID,
+				Status:    controlplaneTypes.StatusHealthy,
+				Timestamp: time.Now(),
+				Metrics: map[string]interface{}{
+					"sequence": sequence,
+				},
+			}); err != nil {
+				f.logger.Error("Heartbeat send failed", "steward_id", steward.StewardID, "error", err)
 				continue
 			}
-
-			token := steward.MQTTClient.Publish(heartbeatTopic, 1, false, heartbeatJSON)
-			if !token.WaitTimeout(5 * time.Second) {
-				f.logger.Warn("Heartbeat publish timeout", "steward_id", steward.StewardID)
-				continue
-			}
-			if err := token.Error(); err != nil {
-				f.logger.Error("Heartbeat publish failed", "steward_id", steward.StewardID, "error", err)
-				continue
-			}
-
-			f.logger.Debug("Heartbeat published", "steward_id", steward.StewardID, "sequence", sequence)
+			f.logger.Debug("Heartbeat sent", "steward_id", steward.StewardID, "sequence", sequence)
 		}
 	}
 }
