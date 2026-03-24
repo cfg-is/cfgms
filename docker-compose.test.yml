@@ -177,7 +177,7 @@ services:
       CFGMS_HA_HEARTBEAT_INTERVAL: "2s"
       CFGMS_API_KEY: "${API_KEY_EAST}"
     volumes:
-      - ./test/integration/mqtt_quic/certs:/app/test-certs:ro  # Story 12.4: TLS certificates
+      - ./test/integration/transport/certs:/app/test-certs:ro  # Story 12.4/519: TLS certificates
     depends_on:
       timescaledb-test:
         condition: service_healthy
@@ -246,7 +246,7 @@ services:
       CFGMS_HA_HEARTBEAT_INTERVAL: "2s"
       CFGMS_API_KEY: "${API_KEY_CENTRAL}"
     volumes:
-      - ./test/integration/mqtt_quic/certs:/app/test-certs:ro  # Story 12.4: TLS certificates
+      - ./test/integration/transport/certs:/app/test-certs:ro  # Story 12.4/519: TLS certificates
     depends_on:
       timescaledb-test:
         condition: service_healthy
@@ -315,7 +315,7 @@ services:
       CFGMS_HA_HEARTBEAT_INTERVAL: "2s"
       CFGMS_API_KEY: "${API_KEY_WEST}"
     volumes:
-      - ./test/integration/mqtt_quic/certs:/app/test-certs:ro  # Story 12.4: TLS certificates
+      - ./test/integration/transport/certs:/app/test-certs:ro  # Story 12.4/519: TLS certificates
     depends_on:
       timescaledb-test:
         condition: service_healthy
@@ -351,7 +351,7 @@ services:
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
     volumes:
-      - ./test/integration/mqtt_quic/certs:/app/test-certs:ro  # Story 12.4: TLS client certificates
+      - ./test/integration/transport/certs:/app/test-certs:ro  # Story 12.4/519: TLS client certificates
     depends_on:
       controller-east:
         condition: service_healthy
@@ -387,7 +387,7 @@ services:
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
     volumes:
-      - ./test/integration/mqtt_quic/certs:/app/test-certs:ro  # Story 12.4: TLS client certificates
+      - ./test/integration/transport/certs:/app/test-certs:ro  # Story 12.4/519: TLS client certificates
     depends_on:
       controller-central:
         condition: service_healthy
@@ -423,7 +423,7 @@ services:
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
     volumes:
-      - ./test/integration/mqtt_quic/certs:/app/test-certs:ro  # Story 12.4: TLS client certificates
+      - ./test/integration/transport/certs:/app/test-certs:ro  # Story 12.4/519: TLS client certificates
     depends_on:
       controller-west:
         condition: service_healthy
@@ -524,7 +524,7 @@ services:
     volumes:
       - controller_standalone_certs:/app/certs  # Use volume for writable certs
       - controller_standalone_data:/app/data
-      - ./test/integration/mqtt_quic/certs:/app/test-certs:ro  # Story 12.4: TLS certificates
+      - ./test/integration/transport/certs:/app/test-certs:ro  # Story 12.4/519: TLS certificates
     depends_on:
       timescaledb-test:
         condition: service_healthy
@@ -557,17 +557,13 @@ services:
     environment:
       CFGMS_REGISTRATION_TOKEN: "${REG_TOKEN_STANDALONE}"
       CFGMS_HTTP_INSECURE_SKIP_VERIFY: "true"  # Story #312: Test mode - skip TLS verification for HTTP registration
-      # Story 12.4: TLS client certificate configuration
-      CFGMS_MQTT_TLS_CERT_PATH: "/app/test-certs/client-cert.pem"
-      CFGMS_MQTT_TLS_KEY_PATH: "/app/test-certs/client-key.pem"
-      CFGMS_MQTT_TLS_CA_PATH: "/app/test-certs/ca-cert.pem"
+      # gRPC transport uses TLS auto-negotiated via registration response (no static cert paths needed)
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
     command: ["sh", "-c", "./steward --log-level debug --log-provider file --regtoken $$CFGMS_REGISTRATION_TOKEN"]
     volumes:
       - steward_standalone_data:/app/data
-      - ./test/integration/mqtt_quic/certs:/app/test-certs:ro  # Story 12.4: TLS client certificates
     tmpfs:
       # Story #315: Use tmpfs for module execution test workspace (writable, fast, ephemeral)
       # Simulates real-world endpoint with writable directory, no permission issues
@@ -586,7 +582,7 @@ services:
   # ============================================================================
   # Three tenant-specific stewards for multi-tenant isolation validation
   # Each connects to controller-standalone with unique tenant ID
-  # Used to validate MQTT topic isolation and tenant boundary enforcement
+  # Used to validate gRPC connection registry isolation and tenant boundary enforcement
   # Start with: docker compose --profile ha up
   # ============================================================================
 
@@ -601,10 +597,6 @@ services:
       CFGMS_TENANT_ID: "tenant1"  # Story 12.5: Tenant isolation
       CFGMS_REGISTRATION_TOKEN: "${REG_TOKEN_TENANT1}"
       CFGMS_HTTP_INSECURE_SKIP_VERIFY: "true"  # Story #312: Test mode - skip TLS verification for HTTP registration
-      # Story 12.4: TLS client certificate configuration
-      CFGMS_MQTT_TLS_CERT_PATH: "/app/test-certs/client-cert.pem"
-      CFGMS_MQTT_TLS_KEY_PATH: "/app/test-certs/client-key.pem"
-      CFGMS_MQTT_TLS_CA_PATH: "/app/test-certs/ca-cert.pem"
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
@@ -612,7 +604,6 @@ services:
     volumes:
       - steward_tenant1_data:/app/data
       - ./test/module-execution:/test-workspace:rw
-      - ./test/integration/mqtt_quic/certs:/app/test-certs:ro
     depends_on:
       controller-standalone:
         condition: service_healthy
@@ -632,10 +623,6 @@ services:
       CFGMS_TENANT_ID: "tenant2"  # Story 12.5: Tenant isolation
       CFGMS_REGISTRATION_TOKEN: "${REG_TOKEN_TENANT2}"
       CFGMS_HTTP_INSECURE_SKIP_VERIFY: "true"  # Story #312: Test mode - skip TLS verification for HTTP registration
-      # Story 12.4: TLS client certificate configuration
-      CFGMS_MQTT_TLS_CERT_PATH: "/app/test-certs/client-cert.pem"
-      CFGMS_MQTT_TLS_KEY_PATH: "/app/test-certs/client-key.pem"
-      CFGMS_MQTT_TLS_CA_PATH: "/app/test-certs/ca-cert.pem"
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
@@ -643,7 +630,6 @@ services:
     volumes:
       - steward_tenant2_data:/app/data
       - ./test/module-execution:/test-workspace:rw
-      - ./test/integration/mqtt_quic/certs:/app/test-certs:ro
     depends_on:
       controller-standalone:
         condition: service_healthy
@@ -663,10 +649,6 @@ services:
       CFGMS_TENANT_ID: "tenant3"  # Story 12.5: Tenant isolation
       CFGMS_REGISTRATION_TOKEN: "${REG_TOKEN_TENANT3}"
       CFGMS_HTTP_INSECURE_SKIP_VERIFY: "true"  # Story #312: Test mode - skip TLS verification for HTTP registration
-      # Story 12.4: TLS client certificate configuration
-      CFGMS_MQTT_TLS_CERT_PATH: "/app/test-certs/client-cert.pem"
-      CFGMS_MQTT_TLS_KEY_PATH: "/app/test-certs/client-key.pem"
-      CFGMS_MQTT_TLS_CA_PATH: "/app/test-certs/ca-cert.pem"
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
@@ -674,7 +656,6 @@ services:
     volumes:
       - steward_tenant3_data:/app/data
       - ./test/module-execution:/test-workspace:rw
-      - ./test/integration/mqtt_quic/certs:/app/test-certs:ro
     depends_on:
       controller-standalone:
         condition: service_healthy

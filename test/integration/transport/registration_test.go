@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jordan Ritz
-package mqtt_quic
+package transport
 
 import (
 	"bytes"
@@ -13,55 +13,47 @@ import (
 	"github.com/stretchr/testify/suite"
 )
 
-// RegistrationTestSuite tests end-to-end registration flow
-// AC1: End-to-end registration test (HTTP → MQTT subscribe → QUIC session → steward ID)
+// RegistrationTestSuite tests end-to-end registration flow with gRPC transport.
+// AC1: HTTP registration returns transport_address (not mqtt_broker)
+// AC2: Invalid/expired/revoked tokens rejected with 401
+// AC3: Concurrent registrations return unique steward IDs
 type RegistrationTestSuite struct {
 	suite.Suite
 	helper *TestHelper
 }
 
 func (s *RegistrationTestSuite) SetupSuite() {
-	// Skip if running in short/fast mode - requires controller infrastructure
 	if testing.Short() {
 		s.T().Skip("Skipping registration tests in short mode - requires controller")
 	}
 
-	// Connect to Docker controller (assumes docker-compose.test.yml is running)
 	s.helper = NewTestHelper(GetTestHTTPAddr("https://localhost:8080"))
 }
 
-func (s *RegistrationTestSuite) TearDownSuite() {
-	// No cleanup needed - Docker containers persist
-}
+func (s *RegistrationTestSuite) TearDownSuite() {}
 
-// TestHTTPRegistrationEndpoint tests the HTTP registration endpoint
+// TestHTTPRegistrationEndpoint tests the HTTP registration endpoint returns transport_address.
 func (s *RegistrationTestSuite) TestHTTPRegistrationEndpoint() {
-	// Use pre-created reusable token from controller
-	// This token is created by the controller on startup when MQTT is enabled
 	token := s.helper.CreateToken(s.T(), "", "")
 	expectedTenantID := "test-tenant-integration"
 	expectedGroup := "production"
 
 	s.T().Logf("Using test token: %s", token)
 
-	// Register steward
 	regResp := s.helper.RegisterSteward(s.T(), token)
 
-	// Verify response fields
 	s.NotEmpty(regResp.StewardID, "Steward ID should be generated")
 	s.Equal(expectedTenantID, regResp.TenantID, "Tenant ID should match")
 	s.Equal(expectedGroup, regResp.Group, "Group should match")
-	s.NotEmpty(regResp.TransportAddress, "Transport address should be provided")
+	s.NotEmpty(regResp.TransportAddress, "Transport address should be provided (gRPC-over-QUIC)")
 
 	s.T().Logf("Registration successful: steward_id=%s, tenant_id=%s, transport_address=%s",
 		regResp.StewardID, regResp.TenantID, regResp.TransportAddress)
 }
 
-// TestInvalidToken tests registration with invalid token
+// TestInvalidToken tests registration with invalid token returns 401.
 func (s *RegistrationTestSuite) TestInvalidToken() {
-	reqBody := map[string]string{
-		"token": "invalid_token_12345",
-	}
+	reqBody := map[string]string{"token": "invalid_token_12345"}
 	reqJSON, err := json.Marshal(reqBody)
 	s.NoError(err)
 
@@ -70,17 +62,12 @@ func (s *RegistrationTestSuite) TestInvalidToken() {
 	s.NoError(err)
 	defer func() { _ = resp.Body.Close() }()
 
-	// Should return 401 Unauthorized for invalid token
 	s.Equal(http.StatusUnauthorized, resp.StatusCode, "Invalid token should return 401")
 }
 
-// TestExpiredToken tests registration with expired token
+// TestExpiredToken tests registration with expired token returns 401.
 func (s *RegistrationTestSuite) TestExpiredToken() {
-	// Use pre-created expired token from controller
-	// This token is created by the controller on startup when MQTT is enabled
-	reqBody := map[string]string{
-		"token": "integration_expired",
-	}
+	reqBody := map[string]string{"token": "integration_expired"}
 	reqJSON, err := json.Marshal(reqBody)
 	s.NoError(err)
 
@@ -89,17 +76,12 @@ func (s *RegistrationTestSuite) TestExpiredToken() {
 	s.NoError(err)
 	defer func() { _ = resp.Body.Close() }()
 
-	// Should return 401 Unauthorized
 	s.Equal(http.StatusUnauthorized, resp.StatusCode, "Expired token should return 401")
 }
 
-// TestRevokedToken tests registration with revoked token
+// TestRevokedToken tests registration with revoked token returns 401.
 func (s *RegistrationTestSuite) TestRevokedToken() {
-	// Use pre-created revoked token from controller
-	// This token is created by the controller on startup when MQTT is enabled
-	reqBody := map[string]string{
-		"token": "integration_revoked",
-	}
+	reqBody := map[string]string{"token": "integration_revoked"}
 	reqJSON, err := json.Marshal(reqBody)
 	s.NoError(err)
 
@@ -108,17 +90,12 @@ func (s *RegistrationTestSuite) TestRevokedToken() {
 	s.NoError(err)
 	defer func() { _ = resp.Body.Close() }()
 
-	// Should return 401 Unauthorized
 	s.Equal(http.StatusUnauthorized, resp.StatusCode, "Revoked token should return 401")
 }
 
-// TestSingleUseToken tests that single-use tokens can only be used once
+// TestSingleUseToken tests that single-use tokens can only be used once.
 func (s *RegistrationTestSuite) TestSingleUseToken() {
-	// Use pre-created single-use token from controller
-	// This token is created by the controller on startup when MQTT is enabled
-	reqBody := map[string]string{
-		"token": "integration_singleuse",
-	}
+	reqBody := map[string]string{"token": "integration_singleuse"}
 	reqJSON, err := json.Marshal(reqBody)
 	s.NoError(err)
 
@@ -129,7 +106,6 @@ func (s *RegistrationTestSuite) TestSingleUseToken() {
 
 	s.Equal(http.StatusOK, resp1.StatusCode, "First registration should succeed")
 
-	// Second registration with same token should fail
 	resp2, err := s.helper.httpClient.Post(registrationURL, "application/json", bytes.NewBuffer(reqJSON))
 	s.NoError(err)
 	defer func() { _ = resp2.Body.Close() }()
@@ -137,10 +113,8 @@ func (s *RegistrationTestSuite) TestSingleUseToken() {
 	s.Equal(http.StatusUnauthorized, resp2.StatusCode, "Second registration with single-use token should fail")
 }
 
-// TestTenantIsolation tests that steward IDs are unique
-func (s *RegistrationTestSuite) TestTenantIsolation() {
-	// Register multiple stewards using the reusable token
-	// All will be in the same tenant (test-tenant-integration) but should get unique IDs
+// TestStewardIDUniqueness tests that each registration produces a unique steward ID.
+func (s *RegistrationTestSuite) TestStewardIDUniqueness() {
 	const numStewards = 3
 	stewardIDs := make([]string, 0, numStewards)
 
@@ -152,7 +126,6 @@ func (s *RegistrationTestSuite) TestTenantIsolation() {
 		stewardIDs = append(stewardIDs, regResp.StewardID)
 	}
 
-	// Verify each steward ID is unique
 	seen := make(map[string]bool)
 	for _, stewardID := range stewardIDs {
 		s.False(seen[stewardID], "Steward IDs should be unique")
@@ -162,24 +135,18 @@ func (s *RegistrationTestSuite) TestTenantIsolation() {
 	s.T().Logf("Verified steward ID uniqueness: %d unique steward IDs generated", len(stewardIDs))
 }
 
-// TestConcurrentRegistrations tests multiple simultaneous registrations
+// TestConcurrentRegistrations tests multiple simultaneous registrations.
 func (s *RegistrationTestSuite) TestConcurrentRegistrations() {
 	const numConcurrent = 50
 
 	results := make(chan error, numConcurrent)
 	stewardIDs := make(chan string, numConcurrent)
 
-	// Use pre-created reusable token from controller
-	// This token is created by the controller on startup when MQTT is enabled
 	token := "integration_reusable"
 
-	// Launch concurrent registrations
 	for i := 0; i < numConcurrent; i++ {
 		go func(idx int) {
-
-			reqBody := map[string]string{
-				"token": token,
-			}
+			reqBody := map[string]string{"token": token}
 			reqJSON, _ := json.Marshal(reqBody)
 
 			registrationURL := fmt.Sprintf("%s/api/v1/register", s.helper.baseURL)
@@ -206,7 +173,6 @@ func (s *RegistrationTestSuite) TestConcurrentRegistrations() {
 		}(i)
 	}
 
-	// Collect results
 	successCount := 0
 	uniqueIDs := make(map[string]bool)
 
@@ -219,16 +185,12 @@ func (s *RegistrationTestSuite) TestConcurrentRegistrations() {
 		}
 	}
 
-	// All registrations should succeed
 	s.Equal(numConcurrent, successCount, "All concurrent registrations should succeed")
-
-	// All steward IDs should be unique
 	s.Equal(numConcurrent, len(uniqueIDs), "All steward IDs should be unique")
 
 	s.T().Logf("Concurrent registrations: %d successful, %d unique steward IDs", successCount, len(uniqueIDs))
 }
 
 func TestRegistration(t *testing.T) {
-	t.Skip("Story #519: MQTT removed in Story #515 — migrate to transport-agnostic gRPC tests in test/integration/transport/")
 	suite.Run(t, new(RegistrationTestSuite))
 }

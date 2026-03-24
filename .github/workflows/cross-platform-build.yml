@@ -134,9 +134,9 @@ jobs:
         make test-integration-setup
         echo "✅ Docker services ready"
 
-    - name: Start Controller for MQTT+QUIC Tests
+    - name: Start Controller for Transport Tests
       run: |
-        echo "🚀 Starting standalone controller for MQTT+QUIC integration tests..."
+        echo "🚀 Starting standalone controller for transport integration tests..."
         # Source test environment variables
         set -a
         source .env.test
@@ -162,9 +162,9 @@ jobs:
         # Run storage and controller server integration tests
         go test -race -timeout=10m ./pkg/testing/storage/... ./features/controller/server/...
 
-        # Run MQTT+QUIC integration tests (requires Docker controller)
+        # Run transport integration tests (requires Docker controller)
         # TestRegistration includes TestSingleUseToken which is the known failing test
-        go test -v -race -timeout=15m ./test/integration/mqtt_quic/... -run "TestRegistration"
+        go test -v -race -timeout=15m ./test/integration/transport/... -run "TestRegistration"
 
         # Run certificate integration tests
         go test -v -race -timeout=10m ./test/integration/... \
