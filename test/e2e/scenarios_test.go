@@ -831,7 +831,7 @@ func (s *E2ETestSuite) TestFailoverDetection() {
 
 		// Configure observer MQTT client
 		observerOpts := mqtt.NewClientOptions()
-		observerOpts.AddBroker(registered.MQTTBroker)
+		observerOpts.AddBroker(registered.TransportAddress)
 		// Story #313: use test-observer- prefix to match ACL controller whitelist
 		observerOpts.SetClientID(fmt.Sprintf("test-observer-%d", time.Now().UnixNano()))
 		observerOpts.SetTLSConfig(observerTLSConfig)
@@ -974,7 +974,7 @@ func (s *E2ETestSuite) TestMQTTCommandResponse() {
 		}
 
 		controllerOpts := mqtt.NewClientOptions()
-		controllerOpts.AddBroker(registered.MQTTBroker)
+		controllerOpts.AddBroker(registered.TransportAddress)
 		controllerOpts.SetClientID(fmt.Sprintf("controller-%d", time.Now().UnixNano()))
 		controllerOpts.SetTLSConfig(controllerTLSConfig)
 		controllerOpts.SetKeepAlive(30 * time.Second)

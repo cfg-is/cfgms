@@ -485,14 +485,13 @@ func registerAndConnectMQTT(ctx context.Context, token string, logger logging.Lo
 		"steward_id", regResp.StewardID,
 		"tenant_id", regResp.TenantID,
 		"group", regResp.Group,
-		"mqtt_broker", regResp.MQTTBroker)
+		"transport_address", regResp.TransportAddress)
 
-	mqttBroker := regResp.MQTTBroker
-	quicAddress := regResp.QUICAddress
+	transportAddress := regResp.TransportAddress
 
 	mqttClient, err := client.NewMQTTClient(&client.MQTTConfig{
-		ControllerURL:     mqttBroker,
-		QUICAddress:       quicAddress,
+		ControllerURL:     transportAddress,
+		QUICAddress:       transportAddress,
 		RegistrationToken: token,
 		CACertPEM:         regResp.CACert,
 		ClientCertPEM:     regResp.ClientCert,
@@ -512,8 +511,7 @@ func registerAndConnectMQTT(ctx context.Context, token string, logger logging.Lo
 	}
 
 	logger.Info("Connected to controller via MQTT+QUIC",
-		"mqtt_broker", mqttBroker,
-		"quic_address", quicAddress)
+		"transport_address", transportAddress)
 
 	if err := mqttClient.SendHeartbeat(ctx, "healthy", nil); err != nil {
 		logger.Warn("Failed to send initial heartbeat", "error", err)

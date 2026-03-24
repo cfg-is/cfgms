@@ -38,18 +38,17 @@ import (
 // RegisteredSteward represents a steward registered with the controller via MQTT
 // Story #294 Phase 3: Track MQTT-connected stewards for E2E testing
 type RegisteredSteward struct {
-	StewardID      string
-	TenantID       string
-	Group          string
-	MQTTClient     mqtt.Client
-	MQTTBroker     string
-	QUICAddress    string
-	ControllerURL  string
-	ClientCert     string
-	ClientKey      string
-	CACert         string
-	heartbeatDone  chan bool
-	commandHandler mqtt.MessageHandler
+	StewardID        string
+	TenantID         string
+	Group            string
+	MQTTClient       mqtt.Client
+	TransportAddress string
+	ControllerURL    string
+	ClientCert       string
+	ClientKey        string
+	CACert           string
+	heartbeatDone    chan bool
+	commandHandler   mqtt.MessageHandler
 }
 
 // E2ETestFramework provides a comprehensive end-to-end testing environment
@@ -499,15 +498,14 @@ func (f *E2ETestFramework) CreateRegistrationToken(tenantID string) (string, err
 // RegistrationResponse represents the HTTP registration response
 // Story #294 Phase 3: Used for steward registration via controller API
 type RegistrationResponse struct {
-	StewardID     string `json:"steward_id"`
-	TenantID      string `json:"tenant_id"`
-	Group         string `json:"group"`
-	ControllerURL string `json:"controller_url"`
-	MQTTBroker    string `json:"mqtt_broker"`
-	QUICAddress   string `json:"quic_address"`
-	ClientCert    string `json:"client_cert,omitempty"`
-	ClientKey     string `json:"client_key,omitempty"`
-	CACert        string `json:"ca_cert,omitempty"`
+	StewardID        string `json:"steward_id"`
+	TenantID         string `json:"tenant_id"`
+	Group            string `json:"group"`
+	ControllerURL    string `json:"controller_url"`
+	TransportAddress string `json:"transport_address"`
+	ClientCert       string `json:"client_cert,omitempty"`
+	ClientKey        string `json:"client_key,omitempty"`
+	CACert           string `json:"ca_cert,omitempty"`
 }
 
 // RegisterStewardWithController performs full steward registration flow via HTTP + MQTT
@@ -590,7 +588,7 @@ func (f *E2ETestFramework) RegisterStewardWithController(stewardName, tenantID s
 	f.logger.Info("HTTP registration successful",
 		"steward_id", regResp.StewardID,
 		"tenant_id", regResp.TenantID,
-		"mqtt_broker", regResp.MQTTBroker)
+		"transport_address", regResp.TransportAddress)
 
 	// Step 4: Create TLS config from registration certificates
 	tlsConfig, err := f.createTLSConfigFromPEM(
@@ -604,7 +602,7 @@ func (f *E2ETestFramework) RegisterStewardWithController(stewardName, tenantID s
 
 	// Step 5: Create MQTT client with TLS
 	mqttOpts := mqtt.NewClientOptions()
-	mqttOpts.AddBroker(regResp.MQTTBroker)
+	mqttOpts.AddBroker(regResp.TransportAddress)
 	mqttOpts.SetClientID(regResp.StewardID)
 	mqttOpts.SetTLSConfig(tlsConfig)
 	mqttOpts.SetKeepAlive(30 * time.Second) // 30s keepalive for heartbeat
@@ -659,18 +657,17 @@ func (f *E2ETestFramework) RegisterStewardWithController(stewardName, tenantID s
 	// Step 8: Create RegisteredSteward and start heartbeat
 	heartbeatDone := make(chan bool)
 	registeredSteward := &RegisteredSteward{
-		StewardID:      regResp.StewardID,
-		TenantID:       regResp.TenantID,
-		Group:          regResp.Group,
-		MQTTClient:     mqttClient,
-		MQTTBroker:     regResp.MQTTBroker,
-		QUICAddress:    regResp.QUICAddress,
-		ControllerURL:  regResp.ControllerURL,
-		ClientCert:     regResp.ClientCert,
-		ClientKey:      regResp.ClientKey,
-		CACert:         regResp.CACert,
-		heartbeatDone:  heartbeatDone,
-		commandHandler: commandHandler,
+		StewardID:        regResp.StewardID,
+		TenantID:         regResp.TenantID,
+		Group:            regResp.Group,
+		MQTTClient:       mqttClient,
+		TransportAddress: regResp.TransportAddress,
+		ControllerURL:    regResp.ControllerURL,
+		ClientCert:       regResp.ClientCert,
+		ClientKey:        regResp.ClientKey,
+		CACert:           regResp.CACert,
+		heartbeatDone:    heartbeatDone,
+		commandHandler:   commandHandler,
 	}
 
 	// Start heartbeat publishing goroutine

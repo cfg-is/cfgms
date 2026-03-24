@@ -82,14 +82,13 @@ type APIKey struct {
 
 // RegisteredSteward represents a steward that has registered with the controller
 type RegisteredSteward struct {
-	StewardID     string    `json:"steward_id"`
-	TenantID      string    `json:"tenant_id"`
-	Group         string    `json:"group"`
-	RegisteredAt  time.Time `json:"registered_at"`
-	LastHeartbeat time.Time `json:"last_heartbeat,omitempty"`
-	Status        string    `json:"status"` // online, offline, unknown
-	MQTTBroker    string    `json:"mqtt_broker,omitempty"`
-	QUICAddress   string    `json:"quic_address,omitempty"`
+	StewardID        string    `json:"steward_id"`
+	TenantID         string    `json:"tenant_id"`
+	Group            string    `json:"group"`
+	RegisteredAt     time.Time `json:"registered_at"`
+	LastHeartbeat    time.Time `json:"last_heartbeat,omitempty"`
+	Status           string    `json:"status"` // online, offline, unknown
+	TransportAddress string    `json:"transport_address,omitempty"`
 }
 
 // ServerConfig contains configuration for the REST API server

@@ -51,11 +51,10 @@ func (s *RegistrationTestSuite) TestHTTPRegistrationEndpoint() {
 	s.NotEmpty(regResp.StewardID, "Steward ID should be generated")
 	s.Equal(expectedTenantID, regResp.TenantID, "Tenant ID should match")
 	s.Equal(expectedGroup, regResp.Group, "Group should match")
-	s.NotEmpty(regResp.MQTTBroker, "MQTT broker address should be provided")
-	s.NotEmpty(regResp.QUICAddress, "QUIC address should be provided")
+	s.NotEmpty(regResp.TransportAddress, "Transport address should be provided")
 
-	s.T().Logf("Registration successful: steward_id=%s, tenant_id=%s, mqtt=%s, quic=%s",
-		regResp.StewardID, regResp.TenantID, regResp.MQTTBroker, regResp.QUICAddress)
+	s.T().Logf("Registration successful: steward_id=%s, tenant_id=%s, transport_address=%s",
+		regResp.StewardID, regResp.TenantID, regResp.TransportAddress)
 }
 
 // TestInvalidToken tests registration with invalid token
