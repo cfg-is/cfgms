@@ -35,12 +35,6 @@ type ComponentCollector interface {
 	CollectMetrics(ctx context.Context) error
 }
 
-// MQTTCollector collects MQTT broker metrics
-type MQTTCollector interface {
-	ComponentCollector
-	GetMetrics() *MQTTMetrics
-}
-
 // StorageCollector collects storage provider metrics
 type StorageCollector interface {
 	ComponentCollector
@@ -61,7 +55,7 @@ type SystemCollector interface {
 
 // Collector implements MetricsCollector for comprehensive controller monitoring
 type Collector struct {
-	mqttCollector        MQTTCollector
+	transportCollector   TransportCollector
 	storageCollector     StorageCollector
 	applicationCollector ApplicationCollector
 	systemCollector      SystemCollector
@@ -80,15 +74,17 @@ type Collector struct {
 	startTime  time.Time
 }
 
-// NewCollector creates a new metrics collector
+// NewCollector creates a new metrics collector.
+// transportCollector may be nil when the transport has not yet started — the
+// corresponding Transport section of ControllerMetrics will be nil in that case.
 func NewCollector(
-	mqttCollector MQTTCollector,
+	transportCollector TransportCollector,
 	storageCollector StorageCollector,
 	applicationCollector ApplicationCollector,
 	systemCollector SystemCollector,
 ) *Collector {
 	return &Collector{
-		mqttCollector:        mqttCollector,
+		transportCollector:   transportCollector,
 		storageCollector:     storageCollector,
 		applicationCollector: applicationCollector,
 		systemCollector:      systemCollector,
@@ -211,9 +207,9 @@ func (c *Collector) collectMetrics() error {
 	}
 
 	// Start collections for non-nil collectors
-	if c.mqttCollector != nil {
+	if c.transportCollector != nil {
 		wg.Add(1)
-		go collectWithTimeout(c.mqttCollector, "MQTT")
+		go collectWithTimeout(c.transportCollector, "Transport")
 	}
 	if c.storageCollector != nil {
 		wg.Add(1)
@@ -235,8 +231,8 @@ func (c *Collector) collectMetrics() error {
 	metrics := &ControllerMetrics{
 		Timestamp: timestamp,
 	}
-	if c.mqttCollector != nil {
-		metrics.MQTT = c.mqttCollector.GetMetrics()
+	if c.transportCollector != nil {
+		metrics.Transport = c.transportCollector.GetMetrics()
 	}
 	if c.storageCollector != nil {
 		metrics.Storage = c.storageCollector.GetMetrics()

@@ -14,7 +14,7 @@ import (
 )
 
 func TestNewCollector(t *testing.T) {
-	mqttCollector := &health.MockMQTTBrokerStats{}
+	transportCollector := health.NewDefaultTransportCollector(&health.MockTransportProviderStats{})
 	storageCollector := &health.MockStorageProviderStats{ProviderName: "git"}
 	appCollector := &health.MockApplicationQueueStats{}
 
@@ -22,7 +22,7 @@ func TestNewCollector(t *testing.T) {
 	require.NoError(t, err)
 
 	collector := health.NewCollector(
-		health.NewDefaultMQTTCollector(mqttCollector),
+		transportCollector,
 		health.NewDefaultStorageCollector(storageCollector),
 		health.NewDefaultApplicationCollector(appCollector),
 		systemCollector,
@@ -32,7 +32,7 @@ func TestNewCollector(t *testing.T) {
 }
 
 func TestCollector_StartStop(t *testing.T) {
-	mqttCollector := &health.MockMQTTBrokerStats{}
+	transportCollector := health.NewDefaultTransportCollector(&health.MockTransportProviderStats{})
 	storageCollector := &health.MockStorageProviderStats{ProviderName: "git"}
 	appCollector := &health.MockApplicationQueueStats{}
 
@@ -40,7 +40,7 @@ func TestCollector_StartStop(t *testing.T) {
 	require.NoError(t, err)
 
 	collector := health.NewCollector(
-		health.NewDefaultMQTTCollector(mqttCollector),
+		transportCollector,
 		health.NewDefaultStorageCollector(storageCollector),
 		health.NewDefaultApplicationCollector(appCollector),
 		systemCollector,
@@ -59,7 +59,7 @@ func TestCollector_StartStop(t *testing.T) {
 	metrics, err := collector.GetCurrentMetrics()
 	require.NoError(t, err)
 	assert.NotNil(t, metrics)
-	assert.NotNil(t, metrics.MQTT)
+	assert.NotNil(t, metrics.Transport)
 	assert.NotNil(t, metrics.Storage)
 	assert.NotNil(t, metrics.Application)
 	assert.NotNil(t, metrics.System)
@@ -70,12 +70,12 @@ func TestCollector_StartStop(t *testing.T) {
 }
 
 func TestCollector_MetricsCollection(t *testing.T) {
-	mqttStats := &health.MockMQTTBrokerStats{
-		ActiveConnections:     42,
-		MessageQueueDepth:     100,
-		TotalMessagesSent:     1000,
-		TotalMessagesReceived: 1500,
-		ConnectionErrors:      5,
+	transportStats := &health.MockTransportProviderStats{
+		ConnectedStewardsVal:    42,
+		StreamErrorsVal:         5,
+		MessagesSentVal:         1000,
+		MessagesReceivedVal:     1500,
+		ReconnectionAttemptsVal: 3,
 	}
 
 	storageStats := &health.MockStorageProviderStats{
@@ -102,7 +102,7 @@ func TestCollector_MetricsCollection(t *testing.T) {
 	require.NoError(t, err)
 
 	collector := health.NewCollector(
-		health.NewDefaultMQTTCollector(mqttStats),
+		health.NewDefaultTransportCollector(transportStats),
 		health.NewDefaultStorageCollector(storageStats),
 		health.NewDefaultApplicationCollector(appStats),
 		systemCollector,
@@ -125,10 +125,12 @@ func TestCollector_MetricsCollection(t *testing.T) {
 	metrics, err := collector.GetCurrentMetrics()
 	require.NoError(t, err)
 
-	// Verify MQTT metrics
-	assert.Equal(t, int64(42), metrics.MQTT.ActiveConnections)
-	assert.Equal(t, int64(100), metrics.MQTT.MessageQueueDepth)
-	assert.Equal(t, int64(5), metrics.MQTT.ConnectionErrors)
+	// Verify Transport metrics
+	assert.Equal(t, 42, metrics.Transport.ConnectedStewards)
+	assert.Equal(t, int64(5), metrics.Transport.StreamErrors)
+	assert.Equal(t, int64(1000), metrics.Transport.MessagesSent)
+	assert.Equal(t, int64(1500), metrics.Transport.MessagesReceived)
+	assert.Equal(t, int64(3), metrics.Transport.ReconnectionAttempts)
 
 	// Verify Storage metrics
 	assert.Equal(t, "git", metrics.Storage.Provider)
@@ -149,7 +151,7 @@ func TestCollector_MetricsCollection(t *testing.T) {
 }
 
 func TestCollector_MetricsHistory(t *testing.T) {
-	mqttCollector := &health.MockMQTTBrokerStats{}
+	transportCollector := health.NewDefaultTransportCollector(&health.MockTransportProviderStats{})
 	storageCollector := &health.MockStorageProviderStats{ProviderName: "git"}
 	appCollector := &health.MockApplicationQueueStats{}
 
@@ -157,7 +159,7 @@ func TestCollector_MetricsHistory(t *testing.T) {
 	require.NoError(t, err)
 
 	collector := health.NewCollector(
-		health.NewDefaultMQTTCollector(mqttCollector),
+		transportCollector,
 		health.NewDefaultStorageCollector(storageCollector),
 		health.NewDefaultApplicationCollector(appCollector),
 		systemCollector,
@@ -186,7 +188,7 @@ func TestCollector_MetricsHistory(t *testing.T) {
 }
 
 func TestCollector_StartAlreadyStarted(t *testing.T) {
-	mqttCollector := &health.MockMQTTBrokerStats{}
+	transportCollector := health.NewDefaultTransportCollector(&health.MockTransportProviderStats{})
 	storageCollector := &health.MockStorageProviderStats{ProviderName: "git"}
 	appCollector := &health.MockApplicationQueueStats{}
 
@@ -194,7 +196,7 @@ func TestCollector_StartAlreadyStarted(t *testing.T) {
 	require.NoError(t, err)
 
 	collector := health.NewCollector(
-		health.NewDefaultMQTTCollector(mqttCollector),
+		transportCollector,
 		health.NewDefaultStorageCollector(storageCollector),
 		health.NewDefaultApplicationCollector(appCollector),
 		systemCollector,
@@ -215,7 +217,7 @@ func TestCollector_StartAlreadyStarted(t *testing.T) {
 }
 
 func TestCollector_StopNotStarted(t *testing.T) {
-	mqttCollector := &health.MockMQTTBrokerStats{}
+	transportCollector := health.NewDefaultTransportCollector(&health.MockTransportProviderStats{})
 	storageCollector := &health.MockStorageProviderStats{ProviderName: "git"}
 	appCollector := &health.MockApplicationQueueStats{}
 
@@ -223,7 +225,7 @@ func TestCollector_StopNotStarted(t *testing.T) {
 	require.NoError(t, err)
 
 	collector := health.NewCollector(
-		health.NewDefaultMQTTCollector(mqttCollector),
+		transportCollector,
 		health.NewDefaultStorageCollector(storageCollector),
 		health.NewDefaultApplicationCollector(appCollector),
 		systemCollector,
@@ -235,7 +237,7 @@ func TestCollector_StopNotStarted(t *testing.T) {
 }
 
 func TestCollector_GetCurrentMetricsBeforeStart(t *testing.T) {
-	mqttCollector := &health.MockMQTTBrokerStats{}
+	transportCollector := health.NewDefaultTransportCollector(&health.MockTransportProviderStats{})
 	storageCollector := &health.MockStorageProviderStats{ProviderName: "git"}
 	appCollector := &health.MockApplicationQueueStats{}
 
@@ -243,7 +245,7 @@ func TestCollector_GetCurrentMetricsBeforeStart(t *testing.T) {
 	require.NoError(t, err)
 
 	collector := health.NewCollector(
-		health.NewDefaultMQTTCollector(mqttCollector),
+		transportCollector,
 		health.NewDefaultStorageCollector(storageCollector),
 		health.NewDefaultApplicationCollector(appCollector),
 		systemCollector,
@@ -254,37 +256,35 @@ func TestCollector_GetCurrentMetricsBeforeStart(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestMQTTCollector_ThroughputCalculation(t *testing.T) {
-	mqttStats := &health.MockMQTTBrokerStats{
-		ActiveConnections:     10,
-		TotalMessagesSent:     1000,
-		TotalMessagesReceived: 1000,
-	}
+func TestCollector_NilTransportCollector(t *testing.T) {
+	storageCollector := &health.MockStorageProviderStats{ProviderName: "git"}
+	appCollector := &health.MockApplicationQueueStats{}
 
-	collector := health.NewDefaultMQTTCollector(mqttStats)
+	systemCollector, err := health.NewDefaultSystemCollector()
+	require.NoError(t, err)
+
+	// nil transport collector - transport not yet started
+	collector := health.NewCollector(
+		nil,
+		health.NewDefaultStorageCollector(storageCollector),
+		health.NewDefaultApplicationCollector(appCollector),
+		systemCollector,
+	)
 
 	ctx := context.Background()
 
-	// First collection
-	err := collector.CollectMetrics(ctx)
+	err = collector.Start(ctx, 100*time.Millisecond)
 	require.NoError(t, err)
+	defer func() {
+		_ = collector.Stop()
+	}()
 
-	metrics1 := collector.GetMetrics()
-	assert.Equal(t, float64(0), metrics1.MessageThroughput, "First collection should have 0 throughput")
+	time.Sleep(200 * time.Millisecond)
 
-	// Update stats to simulate activity
-	mqttStats.TotalMessagesSent = 1100
-	mqttStats.TotalMessagesReceived = 1100
-
-	// Wait a bit
-	time.Sleep(100 * time.Millisecond)
-
-	// Second collection
-	err = collector.CollectMetrics(ctx)
+	metrics, err := collector.GetCurrentMetrics()
 	require.NoError(t, err)
-
-	metrics2 := collector.GetMetrics()
-	assert.Greater(t, metrics2.MessageThroughput, float64(0), "Second collection should have non-zero throughput")
+	assert.Nil(t, metrics.Transport, "Transport metrics should be nil when collector is nil")
+	assert.NotNil(t, metrics.Storage)
 }
 
 func TestSystemCollector_CollectsMetrics(t *testing.T) {

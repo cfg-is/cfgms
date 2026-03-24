@@ -293,8 +293,8 @@ func TestAlertManager_AddRemoveThreshold(t *testing.T) {
 func TestAlertManager_GetAlertHistory(t *testing.T) {
 	thresholds := []health.Threshold{
 		{
-			MetricName: "mqtt_queue_depth",
-			Value:      500,
+			MetricName: "transport_stream_errors",
+			Value:      100,
 			Operator:   ">",
 			Severity:   health.SeverityCritical,
 			Duration:   50 * time.Millisecond,
@@ -313,10 +313,10 @@ func TestAlertManager_GetAlertHistory(t *testing.T) {
 	// Create metrics that breach the threshold
 	metrics := &health.ControllerMetrics{
 		Timestamp: time.Now(),
-		MQTT: &health.MQTTMetrics{
-			ActiveConnections: 50,
-			MessageQueueDepth: 600, // Above threshold
-			MessageThroughput: 100.0,
+		Transport: &health.TransportMetrics{
+			ConnectedStewards: 50,
+			StreamErrors:      200, // Above threshold
+			MessagesSent:      1000,
 			CollectedAt:       time.Now(),
 		},
 	}

@@ -188,15 +188,19 @@ func (m *DefaultAlertManager) EvaluateMetrics(metrics *ControllerMetrics) error 
 
 // extractMetricValue extracts a specific metric value from ControllerMetrics
 func (m *DefaultAlertManager) extractMetricValue(metrics *ControllerMetrics, metricName string) (float64, MetricType, error) {
-	// MQTT metrics
-	if metrics.MQTT != nil {
+	// Transport metrics
+	if metrics.Transport != nil {
 		switch metricName {
-		case "mqtt_active_connections":
-			return float64(metrics.MQTT.ActiveConnections), MetricTypeMQTT, nil
-		case "mqtt_queue_depth":
-			return float64(metrics.MQTT.MessageQueueDepth), MetricTypeMQTT, nil
-		case "mqtt_connection_errors":
-			return float64(metrics.MQTT.ConnectionErrors), MetricTypeMQTT, nil
+		case "transport_connected_stewards":
+			return float64(metrics.Transport.ConnectedStewards), MetricTypeTransport, nil
+		case "transport_stream_errors":
+			return float64(metrics.Transport.StreamErrors), MetricTypeTransport, nil
+		case "transport_messages_sent":
+			return float64(metrics.Transport.MessagesSent), MetricTypeTransport, nil
+		case "transport_messages_received":
+			return float64(metrics.Transport.MessagesReceived), MetricTypeTransport, nil
+		case "transport_reconnection_attempts":
+			return float64(metrics.Transport.ReconnectionAttempts), MetricTypeTransport, nil
 		}
 	}
 
@@ -476,8 +480,8 @@ func (m *DefaultAlertManager) RemoveThreshold(metricName string) error {
 func DefaultThresholds() []Threshold {
 	return []Threshold{
 		{
-			MetricName: "mqtt_queue_depth",
-			Value:      1000,
+			MetricName: "transport_stream_errors",
+			Value:      100,
 			Operator:   ">",
 			Severity:   SeverityCritical,
 			Duration:   5 * time.Minute,
