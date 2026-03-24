@@ -4,6 +4,7 @@ package config
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"regexp"
 	"strconv"
@@ -100,6 +101,10 @@ type Config struct {
 
 	// QUIC server configuration for data plane communication
 	QUIC *QUICConfig `yaml:"quic"`
+
+	// Transport is the unified, protocol-agnostic transport configuration.
+	// Replaces the separate MQTT and QUIC sections. Old sections map here with deprecation warnings.
+	Transport *TransportConfig `yaml:"transport"`
 }
 
 // CertificateConfig contains certificate management settings
@@ -439,6 +444,72 @@ type QUICConfig struct {
 	SessionTimeout int `yaml:"session_timeout"`
 }
 
+// Duration is a time.Duration that supports YAML string parsing ("30s", "5m", etc.)
+// This allows human-readable duration values in configuration files.
+type Duration time.Duration
+
+// UnmarshalYAML parses duration strings like "30s", "5m", "1h" from YAML.
+func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
+	dur, err := time.ParseDuration(value.Value)
+	if err != nil {
+		return fmt.Errorf("invalid duration %q: %w", value.Value, err)
+	}
+	*d = Duration(dur)
+	return nil
+}
+
+// MarshalYAML serializes the duration as a human-readable string.
+func (d Duration) MarshalYAML() (interface{}, error) {
+	return time.Duration(d).String(), nil
+}
+
+// AsDuration returns the underlying time.Duration value.
+func (d Duration) AsDuration() time.Duration {
+	return time.Duration(d)
+}
+
+// TransportConfig is the unified, protocol-agnostic transport configuration.
+// It replaces the separate MQTTConfig and QUICConfig sections.
+// A single listen address serves both control plane and data plane over gRPC-over-QUIC,
+// and can accommodate future transport implementations without config changes.
+type TransportConfig struct {
+	// ListenAddr is the address for the unified transport server (e.g., "0.0.0.0:4433")
+	ListenAddr string `yaml:"listen_addr"`
+
+	// UseCertManager enables the controller's certificate manager for TLS.
+	// When true (default), certificates are managed automatically.
+	UseCertManager bool `yaml:"use_cert_manager"`
+
+	// MaxConnections is the maximum number of concurrent client connections.
+	MaxConnections int `yaml:"max_connections"`
+
+	// KeepalivePeriod is how often keepalive probes are sent to detect dead connections.
+	// Minimum: 1s. Default: 30s.
+	KeepalivePeriod Duration `yaml:"keepalive_period"`
+
+	// IdleTimeout is how long a connection can remain idle before being closed.
+	// Default: 5m.
+	IdleTimeout Duration `yaml:"idle_timeout"`
+}
+
+// Validate checks the TransportConfig for invalid values.
+// Returns an error if listen_addr is empty, max_connections < 1, or keepalive_period < 1s.
+func (t *TransportConfig) Validate() error {
+	if t == nil {
+		return fmt.Errorf("transport config must not be nil")
+	}
+	if t.ListenAddr == "" {
+		return fmt.Errorf("transport.listen_addr must not be empty")
+	}
+	if t.MaxConnections < 1 {
+		return fmt.Errorf("transport.max_connections must be at least 1, got %d", t.MaxConnections)
+	}
+	if t.KeepalivePeriod.AsDuration() < time.Second {
+		return fmt.Errorf("transport.keepalive_period must be at least 1s, got %v", t.KeepalivePeriod.AsDuration())
+	}
+	return nil
+}
+
 // DefaultConfig returns a Config with reasonable defaults
 func DefaultConfig() *Config {
 	return &Config{
@@ -565,6 +636,71 @@ func DefaultConfig() *Config {
 			UseCertManager: true, // Use controller's certificate manager
 			SessionTimeout: 300,  // 5 minutes
 		},
+		Transport: &TransportConfig{
+			ListenAddr:      "0.0.0.0:4433",
+			UseCertManager:  true,
+			MaxConnections:  50000,
+			KeepalivePeriod: Duration(30 * time.Second),
+			IdleTimeout:     Duration(5 * time.Minute),
+		},
+	}
+}
+
+// migrateTransportConfig detects deprecated mqtt: and quic: sections in the raw YAML
+// and migrates their fields to the Transport section with deprecation warnings.
+//
+// Migration rules:
+//   - If transport: is present and old sections are also present: new section wins, log warning
+//   - If only mqtt: is present: migrate listen_addr and use_cert_manager to transport
+//   - If only quic: is present: migrate listen_addr and use_cert_manager to transport
+//   - If both mqtt: and quic: are present (no transport:): quic takes priority over mqtt
+func migrateTransportConfig(cfg *Config, rawYAML []byte) {
+	var raw map[string]interface{}
+	if err := yaml.Unmarshal(rawYAML, &raw); err != nil {
+		return // Can't detect keys, skip migration
+	}
+
+	_, hasTransport := raw["transport"]
+	_, hasMQTT := raw["mqtt"]
+	_, hasQUIC := raw["quic"]
+
+	if !hasMQTT && !hasQUIC {
+		return // Nothing to migrate
+	}
+
+	if hasTransport {
+		// New section wins; warn that old sections are ignored
+		log.Printf("[WARN] config: transport: section overrides deprecated mqtt:/quic: sections — old sections are ignored")
+		return
+	}
+
+	// No transport: section in YAML — migrate from old sections
+	if cfg.Transport == nil {
+		cfg.Transport = &TransportConfig{
+			ListenAddr:      "0.0.0.0:4433",
+			UseCertManager:  true,
+			MaxConnections:  50000,
+			KeepalivePeriod: Duration(30 * time.Second),
+			IdleTimeout:     Duration(5 * time.Minute),
+		}
+	}
+
+	// MQTT migration (older protocol)
+	if hasMQTT && cfg.MQTT != nil {
+		log.Printf("[WARN] config: mqtt: section is deprecated; please migrate to transport: section")
+		if cfg.MQTT.ListenAddr != "" {
+			cfg.Transport.ListenAddr = cfg.MQTT.ListenAddr
+		}
+		cfg.Transport.UseCertManager = cfg.MQTT.UseCertManager
+	}
+
+	// QUIC migration takes priority over MQTT (more recent transport)
+	if hasQUIC && cfg.QUIC != nil {
+		log.Printf("[WARN] config: quic: section is deprecated; please migrate to transport: section")
+		if cfg.QUIC.ListenAddr != "" {
+			cfg.Transport.ListenAddr = cfg.QUIC.ListenAddr
+		}
+		cfg.Transport.UseCertManager = cfg.QUIC.UseCertManager
 	}
 }
 
@@ -652,10 +788,14 @@ func LoadWithPath(configPath string) (*Config, error) {
 		// Expand environment variables in the configuration content
 		// This supports ${VAR} and ${VAR:-default} syntax for explicit env var references
 		expandedData := expandEnvWithDefaults(content)
+		expandedBytes := []byte(expandedData)
 
-		if err := yaml.Unmarshal([]byte(expandedData), cfg); err != nil {
+		if err := yaml.Unmarshal(expandedBytes, cfg); err != nil {
 			return nil, fmt.Errorf("failed to parse config file %s: %w", foundPath, err)
 		}
+
+		// Migrate deprecated mqtt:/quic: sections to the unified transport: section
+		migrateTransportConfig(cfg, expandedBytes)
 	}
 
 	// Override with environment variables if set
@@ -851,6 +991,11 @@ func LoadWithPath(configPath string) (*Config, error) {
 
 	if mqttListenAddr := os.Getenv("CFGMS_MQTT_LISTEN_ADDR"); mqttListenAddr != "" {
 		cfg.MQTT.ListenAddr = mqttListenAddr
+		// Deprecated: also apply to transport if CFGMS_TRANSPORT_LISTEN_ADDR is not set
+		if os.Getenv("CFGMS_TRANSPORT_LISTEN_ADDR") == "" && cfg.Transport != nil {
+			cfg.Transport.ListenAddr = mqttListenAddr
+			log.Printf("[WARN] env: CFGMS_MQTT_LISTEN_ADDR is deprecated; use CFGMS_TRANSPORT_LISTEN_ADDR instead")
+		}
 	}
 
 	if mqttEnableTLS := os.Getenv("CFGMS_MQTT_ENABLE_TLS"); mqttEnableTLS != "" {
@@ -897,6 +1042,35 @@ func LoadWithPath(configPath string) (*Config, error) {
 	if quicUseCertManager := os.Getenv("CFGMS_QUIC_USE_CERT_MANAGER"); quicUseCertManager != "" {
 		if val, err := strconv.ParseBool(quicUseCertManager); err == nil {
 			cfg.QUIC.UseCertManager = val
+		}
+	}
+
+	// Transport configuration environment variables
+	if transportListenAddr := os.Getenv("CFGMS_TRANSPORT_LISTEN_ADDR"); transportListenAddr != "" && cfg.Transport != nil {
+		cfg.Transport.ListenAddr = transportListenAddr
+	}
+
+	if transportUseCertManager := os.Getenv("CFGMS_TRANSPORT_USE_CERT_MANAGER"); transportUseCertManager != "" && cfg.Transport != nil {
+		if val, err := strconv.ParseBool(transportUseCertManager); err == nil {
+			cfg.Transport.UseCertManager = val
+		}
+	}
+
+	if transportMaxConns := os.Getenv("CFGMS_TRANSPORT_MAX_CONNECTIONS"); transportMaxConns != "" && cfg.Transport != nil {
+		if val, err := strconv.Atoi(transportMaxConns); err == nil {
+			cfg.Transport.MaxConnections = val
+		}
+	}
+
+	if transportKeepalive := os.Getenv("CFGMS_TRANSPORT_KEEPALIVE_PERIOD"); transportKeepalive != "" && cfg.Transport != nil {
+		if dur, err := time.ParseDuration(transportKeepalive); err == nil {
+			cfg.Transport.KeepalivePeriod = Duration(dur)
+		}
+	}
+
+	if transportIdleTimeout := os.Getenv("CFGMS_TRANSPORT_IDLE_TIMEOUT"); transportIdleTimeout != "" && cfg.Transport != nil {
+		if dur, err := time.ParseDuration(transportIdleTimeout); err == nil {
+			cfg.Transport.IdleTimeout = Duration(dur)
 		}
 	}
 
