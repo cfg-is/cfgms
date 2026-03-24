@@ -2038,7 +2038,6 @@ generate-test-certificates: build-controller  ## Generate test certificates usin
 	@echo "Creating symlinks for test compatibility..."
 	@cd test/integration/mqtt_quic/certs && \
 		ln -sf ca/ca.crt ca-cert.pem && \
-		ln -sf ca/ca.key ca-key.pem && \
 		ln -sf ca/server/server.crt server-cert.pem && \
 		ln -sf ca/server/server.key server-key.pem
 	@echo "✅ Symlinks created"
