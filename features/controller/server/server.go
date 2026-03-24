@@ -368,6 +368,8 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			return nil, fmt.Errorf("failed to initialize command publisher: %w", err)
 		}
 		logger.Info("Command publisher initialized successfully")
+	} else {
+		logger.Warn("Transport config not set — gRPC control plane disabled")
 	}
 
 	// Initialize data plane provider if enabled (Story #362)
@@ -427,8 +429,10 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	var healthCollector *health.Collector
 	var healthAlertManager *health.DefaultAlertManager
 	{
-		// MQTT collector — nil for gRPC transport (no embedded MQTT broker)
-		var mqttCollector health.MQTTCollector
+		// MQTT collector is intentionally nil: the embedded MQTT broker was removed in Story #514
+		// and replaced by the gRPC control plane provider. health.NewCollector handles nil safely
+		// (see collector.go lines 214, 238). A future story can wire a gRPC-based health collector.
+		var mqttCollector health.MQTTCollector // always nil until gRPC health collector is implemented
 
 		// Storage stats — provider name only, latency instrumentation is follow-up
 		storageStats := NewBasicStorageStats(cfg.Storage.Provider)

@@ -74,20 +74,20 @@ func (s *CertificateTestSuite) TestServerCertificateExists() {
 	s.NoError(err, "Should be able to retrieve server certificates")
 	s.GreaterOrEqual(len(serverCerts), 1, "Should have at least one server certificate")
 
-	// The controller generates an MQTT server certificate first
-	// Find it by checking for "cfgms-mqtt-server" common name
-	var mqttServerCert *cert.CertificateInfo
+	// The controller generates a server certificate via ensureServerCertificatesFromManager
+	// Find it by checking for "cfgms-server" common name
+	var serverCert *cert.CertificateInfo
 	for _, certInfo := range serverCerts {
-		if certInfo.CommonName == "cfgms-mqtt-server" {
-			mqttServerCert = certInfo
+		if certInfo.CommonName == "cfgms-server" {
+			serverCert = certInfo
 			break
 		}
 	}
 
-	s.NotNil(mqttServerCert, "Should find MQTT server certificate")
-	s.Equal(cert.CertificateTypeServer, mqttServerCert.Type, "Certificate should be server type")
-	s.True(mqttServerCert.IsValid, "Server certificate should be valid")
-	s.True(mqttServerCert.ExpiresAt.After(time.Now()), "Server certificate should not be expired")
+	s.NotNil(serverCert, "Should find server certificate")
+	s.Equal(cert.CertificateTypeServer, serverCert.Type, "Certificate should be server type")
+	s.True(serverCert.IsValid, "Server certificate should be valid")
+	s.True(serverCert.ExpiresAt.After(time.Now()), "Server certificate should not be expired")
 }
 
 // TestClientCertificateExists tests that client certificate is properly created
