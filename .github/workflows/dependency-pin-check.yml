@@ -53,6 +53,7 @@ jobs:
         check_version "trufflehog"  "trufflesecurity/trufflehog"              "v3.94.0"
         check_version "trivy"       "aquasecurity/trivy"                      "v0.69.3"
         check_version "go-licenses" "google/go-licenses"                      "v2.0.1"
+        check_version "golangci-lint" "golangci/golangci-lint"                "v2.11.4"
 
         if [ -z "$outdated" ]; then
           echo ""
