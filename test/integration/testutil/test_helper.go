@@ -160,12 +160,6 @@ func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx
 			EnableTLS:      false,
 			UseCertManager: true,
 		},
-		QUIC: &config.QUICConfig{
-			Enabled:        true,
-			ListenAddr:     "127.0.0.1:4433",
-			SessionTimeout: 300,
-			UseCertManager: true,
-		},
 		Transport: &config.TransportConfig{
 			ListenAddr:     "127.0.0.1:0",
 			UseCertManager: true,

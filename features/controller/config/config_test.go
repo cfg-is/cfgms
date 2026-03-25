@@ -153,54 +153,6 @@ mqtt:
 		"mqtt.use_cert_manager must be migrated to transport.use_cert_manager")
 }
 
-// TestLoadWithPath_MigrationFromQUIC verifies deprecated quic: section is migrated to transport:.
-func TestLoadWithPath_MigrationFromQUIC(t *testing.T) {
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "controller.cfg")
-
-	content := `
-quic:
-  listen_addr: "0.0.0.0:9999"
-  use_cert_manager: true
-`
-	require.NoError(t, os.WriteFile(configPath, []byte(content), 0600))
-
-	cfg, err := LoadWithPath(configPath)
-	require.NoError(t, err)
-	require.NotNil(t, cfg.Transport, "Transport must be populated after QUIC migration")
-
-	assert.Equal(t, "0.0.0.0:9999", cfg.Transport.ListenAddr,
-		"quic.listen_addr must be migrated to transport.listen_addr")
-	assert.True(t, cfg.Transport.UseCertManager,
-		"quic.use_cert_manager must be migrated to transport.use_cert_manager")
-}
-
-// TestLoadWithPath_QUICOverridesMQTTInMigration verifies that quic: takes priority over mqtt: when both present.
-func TestLoadWithPath_QUICOverridesMQTTInMigration(t *testing.T) {
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "controller.cfg")
-
-	content := `
-mqtt:
-  listen_addr: "0.0.0.0:1883"
-  use_cert_manager: false
-quic:
-  listen_addr: "0.0.0.0:4433"
-  use_cert_manager: true
-`
-	require.NoError(t, os.WriteFile(configPath, []byte(content), 0600))
-
-	cfg, err := LoadWithPath(configPath)
-	require.NoError(t, err)
-	require.NotNil(t, cfg.Transport)
-
-	// QUIC takes priority when both old sections are present
-	assert.Equal(t, "0.0.0.0:4433", cfg.Transport.ListenAddr,
-		"quic.listen_addr must take priority over mqtt.listen_addr")
-	assert.True(t, cfg.Transport.UseCertManager,
-		"quic.use_cert_manager must take priority over mqtt.use_cert_manager")
-}
-
 // TestLoadWithPath_NewSectionOverridesOld verifies transport: wins when both old and new sections present.
 func TestLoadWithPath_NewSectionOverridesOld(t *testing.T) {
 	dir := t.TempDir()
@@ -313,13 +265,12 @@ func TestDuration_AsDuration(t *testing.T) {
 	assert.Equal(t, 30*time.Second, d.AsDuration())
 }
 
-// TestLoadWithPath_DefaultConfigHasTransportAlongsideLegacy verifies Config has Transport alongside MQTT and QUIC.
+// TestLoadWithPath_DefaultConfigHasTransportAlongsideLegacy verifies Config has Transport alongside MQTT.
 func TestLoadWithPath_DefaultConfigHasTransportAlongsideLegacy(t *testing.T) {
 	cfg := DefaultConfig()
 
-	// All three sections must exist during Phase 10 transition
+	// Both sections must exist during Phase 10 transition
 	require.NotNil(t, cfg.MQTT, "MQTT must remain for backward compat during Phase 10")
-	require.NotNil(t, cfg.QUIC, "QUIC must remain for backward compat during Phase 10")
 	require.NotNil(t, cfg.Transport, "Transport must be present as new unified section")
 }
 
