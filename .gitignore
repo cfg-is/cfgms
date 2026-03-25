@@ -1,6 +1,5 @@
 # Binaries
-bin/*
-!bin/cfgms-wait-for-services
+bin/
 *.exe
 *.exe~
 *.dll
@@ -19,7 +18,6 @@ bin/*
 # Compiled test binaries
 test-controller
 test-steward
-test-*
 
 # Generated protobuf files in wrong location (should be in api/proto/)
 /steward/
@@ -41,6 +39,7 @@ vendor/
 # IDE specific files
 .idea/
 .vscode/
+.obsidian/
 *.swp
 *.swo
 
@@ -76,8 +75,6 @@ m365-test-creds/
 .claude/settings.local.json
 .claude/worktrees/
 
-.obsidian/
-
 # Test/development storage data
 features/controller/**/data/
 **/cfgms-storage/
@@ -92,11 +89,36 @@ docker-compose.test.override.yml
 *.sqlite3
 *.db-shm
 *.db-wal
+
+# Epic planning docs (WIP)
 docs/product/v*-epic.md
 
-# Security audit reports (WIP audit reports with unfixed vulnerabilities)
-# Note: Remediation summaries and completed audits should be committed
+# Security audit reports (WIP)
 docs/security/audits/*-wip.md
 docs/security/audits/draft-*.md
+
+# Internal planning docs
 MIGRATION_PLAN.md
+IMPLEMENTATION_SUMMARY.md
+.pr-description.md
+
+# Build cache
 /.cache/
+
+# Git storage provider test artifacts (tenant data written to repo root by tests)
+# These are created when git-storage tests use repo-relative paths instead of t.TempDir()
+/2026/
+/acme-corp/
+/batch-tenant/
+/default/
+/epic6-tenant/
+/history-tenant/
+/list-test-tenant/
+/stats-tenant/
+/system/
+/tenant-1/
+/tenant1/
+/tenant-2/
+/tenant2/
+/test-tenant/
+/version-tenant/
