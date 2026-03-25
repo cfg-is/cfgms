@@ -286,7 +286,7 @@ jobs:
     - name: Set up Docker Test Infrastructure
       run: |
         echo "🐳 Setting up Docker test infrastructure for load testing..."
-        make test-mqtt-quic-setup
+        make test-transport-setup
         echo "✅ Docker infrastructure ready"
 
     - name: Production Readiness - Load Testing
@@ -343,7 +343,7 @@ jobs:
       if: always()
       run: |
         echo "🧹 Cleaning up Docker test infrastructure..."
-        make test-mqtt-quic-cleanup || true
+        make test-transport-cleanup || true
 
   # Synthetic Monitoring Setup
   #   synthetic-monitoring-validation:
@@ -425,8 +425,8 @@ jobs:
         echo "🔐 Generating TLS test certificates..."
         make generate-test-certificates
         echo ""
-        echo "🌐 Starting MQTT+QUIC controller for integration tests..."
-        make test-mqtt-quic-setup
+        echo "🌐 Starting transport controller for integration tests..."
+        make test-transport-setup
         echo "✅ Docker infrastructure ready"
 
     - name: Run Controller Integration Tests

@@ -607,14 +607,14 @@ test-ci:
 		echo "🔐 Loading M365 credentials from OS keychain..."; \
 		. ./scripts/load-credentials-from-keychain.sh && \
 		export M365_CLIENT_ID M365_CLIENT_SECRET M365_TENANT_ID M365_TENANT_DOMAIN M365_MSP_CLIENT_ID M365_MSP_CLIENT_SECRET M365_MSP_TENANT_ID M365_INTEGRATION_ENABLED M365_MSP_INTEGRATION_ENABLED && \
-		$(MAKE) test-infrastructure-required lint security-scan test-m365-integration test-integration-complete test-integration-factory test-mqtt-quic; \
+		$(MAKE) test-infrastructure-required lint security-scan test-m365-integration test-integration-complete test-integration-factory test-transport; \
 	elif [ -n "$$M365_CLIENT_SECRET" ]; then \
 		echo "🔐 Using M365 credentials from environment..."; \
-		$(MAKE) test-infrastructure-required lint security-scan test-m365-integration test-integration-complete test-integration-factory test-mqtt-quic; \
+		$(MAKE) test-infrastructure-required lint security-scan test-m365-integration test-integration-complete test-integration-factory test-transport; \
 	else \
 		echo "⚠️  No M365 credentials found (keychain or environment)"; \
 		echo "   M365 integration tests may fail"; \
-		$(MAKE) test-infrastructure-required lint security-scan test-m365-integration test-integration-complete test-integration-factory test-mqtt-quic; \
+		$(MAKE) test-infrastructure-required lint security-scan test-m365-integration test-integration-complete test-integration-factory test-transport; \
 	fi
 
 # Robust CI infrastructure test target - ensures infrastructure works every time
@@ -755,7 +755,7 @@ test-load-testing:
 	@echo "====================="
 	@echo "📊 Testing system under high concurrency"
 	@echo ""
-	@go test -race -timeout=30m -run "Load" ./test/e2e/... ./test/integration/mqtt_quic/... ./test/performance/... || exit 1
+	@go test -race -timeout=30m -run "Load" ./test/e2e/... ./test/integration/transport/... ./test/performance/... || exit 1
 	@echo ""
 	@echo "✅ Load testing complete"
 
@@ -1661,43 +1661,47 @@ test-integration-docker:
 		go test -race -timeout=10m ./pkg/testing/storage/... ./features/controller/server/...
 	@echo "✅ Docker integration tests passed"
 
-# MQTT+QUIC Integration Testing (Story #12.2)
-# Tests MQTT+QUIC architecture with real Docker infrastructure
+# Transport Integration Testing (Story #519: replaces MQTT+QUIC tests)
+# Tests gRPC-over-QUIC transport architecture with real Docker infrastructure
+.PHONY: test-transport test-transport-setup test-transport-cleanup
+# Keep old names as aliases for backwards compatibility during transition
 .PHONY: test-mqtt-quic test-mqtt-quic-setup test-mqtt-quic-cleanup
-test-mqtt-quic: test-mqtt-quic-setup
+test-mqtt-quic: test-transport
+test-mqtt-quic-setup: test-transport-setup
+test-mqtt-quic-cleanup: test-transport-cleanup
+
+test-transport: test-transport-setup
 	@echo ""
-	@echo "🔌 Running MQTT+QUIC Integration Tests"
+	@echo "🔌 Running Transport Integration Tests"
 	@echo "======================================"
-	@echo "Testing against controller-standalone (MQTT: 1886, QUIC: 4436, HTTPS: 8080)"
+	@echo "Testing against controller-standalone (gRPC: 4433/4436, HTTPS: 8080)"
 	@echo ""
-	@echo "🧪 Running all MQTT+QUIC test suites..."
+	@echo "🧪 Running all transport test suites..."
 	@if [ -f .env.test ]; then \
 		set -a && . ./.env.test && set +a && \
 		CFGMS_TEST_HTTP_ADDR=https://127.0.0.1:8080 \
-		CFGMS_TEST_MQTT_ADDR=ssl://127.0.0.1:1886 \
-		CFGMS_TEST_QUIC_ADDR=127.0.0.1:4436 \
-		CFGMS_TEST_CERTS_PATH=$(PWD)/test/integration/mqtt_quic/certs \
-		go test -v -race -timeout=15m ./test/integration/mqtt_quic/... || { \
+		CFGMS_TEST_TRANSPORT_ADDR=127.0.0.1:4436 \
+		go test -v -race -timeout=15m ./test/integration/transport/... || { \
 			echo ""; \
-			echo "❌ MQTT+QUIC tests failed"; \
-			make test-mqtt-quic-cleanup; \
+			echo "❌ Transport tests failed"; \
+			make test-transport-cleanup; \
 			exit 1; \
 		}; \
 	else \
 		echo "❌ .env.test not found. Run 'make test-integration-setup' first"; \
 		exit 1; \
 	fi
-	@make test-mqtt-quic-cleanup
+	@make test-transport-cleanup
 	@echo ""
-	@echo "✅ MQTT+QUIC Integration Tests Passed!"
-	@echo "   - Registration flow validated"
-	@echo "   - MQTT connectivity tested"
-	@echo "   - QUIC session authentication verified"
-	@echo "   - Config sync, DNA updates, heartbeat/failover tested"
-	@echo "   - Load testing completed (100+ concurrent stewards)"
+	@echo "✅ Transport Integration Tests Passed!"
+	@echo "   - Registration flow validated (transport_address returned)"
+	@echo "   - gRPC-over-QUIC transport verified"
+	@echo "   - Config sync, heartbeat/failover, TLS tested"
+	@echo "   - Multi-tenant isolation validated"
+	@echo "   - Module execution E2E validated"
 
-test-mqtt-quic-setup:
-	@echo "🐳 Setting up MQTT+QUIC Docker Test Environment"
+test-transport-setup:
+	@echo "🐳 Setting up Transport Docker Test Environment"
 	@echo "==============================================="
 	@if [ ! -f .env.test ]; then \
 		echo "Generating test credentials..."; \
@@ -1767,17 +1771,16 @@ test-mqtt-quic-setup:
 	@echo "   Allowing services to settle and QUIC server to fully initialize..."
 	@sleep 15
 	@echo ""
-	@echo "✅ MQTT+QUIC Docker environment fully initialized!"
-	@echo "   MQTT: localhost:1886 (TLS)"
-	@echo "   QUIC: localhost:4436"
+	@echo "✅ Transport Docker environment fully initialized!"
+	@echo "   gRPC-over-QUIC: localhost:4436 (host) → 4433 (container)"
 	@echo "   HTTP API: localhost:8080 (HTTPS)"
 	@echo "   TimescaleDB: localhost:5433"
 
-test-mqtt-quic-cleanup:
+test-transport-cleanup:
 	@echo ""
-	@echo "🧹 Cleaning up MQTT+QUIC Docker environment..."
+	@echo "🧹 Cleaning up transport Docker environment..."
 	@docker compose -f docker-compose.test.yml --profile ha down --remove-orphans -v 2>/dev/null || true
-	@echo "✅ MQTT+QUIC environment cleaned up"
+	@echo "✅ Transport environment cleaned up"
 
 # Local E2E validation - runs full integration + E2E tests with Docker infrastructure
 # Used by /story-complete to ensure full validation before PR creation
@@ -1785,7 +1788,7 @@ test-mqtt-quic-cleanup:
 # Phase 2: Parallelizable E2E test targets (Story #297)
 # These targets can run independently and be parallelized with make -j3
 
-.PHONY: test-e2e-ci test-e2e-mqtt-quic test-e2e-controller test-e2e-scenarios
+.PHONY: test-e2e-ci test-e2e-transport test-e2e-mqtt-quic test-e2e-controller test-e2e-scenarios
 
 # CI-style E2E tests - matches GitHub Actions production-gates.yml exactly
 # Self-contained: sets up infrastructure, runs tests, cleans up
@@ -1794,7 +1797,7 @@ test-e2e-ci:
 	@echo "🚀 Starting CI-style E2E test suite (setup → test → cleanup)..."
 	@echo ""
 	@echo "📋 Step 1/3: Setting up Docker infrastructure..."
-	@$(MAKE) test-mqtt-quic-setup
+	@$(MAKE) test-transport-setup
 	@echo ""
 	@echo "📋 Step 2/3: Running tests in container with container-to-container networking..."
 	@docker build -t cfgms-test-runner -f Dockerfile.test-runner . >/dev/null 2>&1 && \
@@ -1820,14 +1823,15 @@ test-e2e-ci:
 			echo "" && \
 			echo "🧪 Running E2E tests..." && \
 			go test -v -race -timeout=15m ./test/e2e/... -run "TestE2EScenarios/(TestControllerStewardIntegration|TestRBACIntegration|TestWorkflowIntegration|TestDataFlow)" \
-		' || { echo ""; echo "📋 Step 3/3: Cleaning up (tests failed)..."; $(MAKE) test-mqtt-quic-cleanup; exit 1; }
+		' || { echo ""; echo "📋 Step 3/3: Cleaning up (tests failed)..."; $(MAKE) test-transport-cleanup; exit 1; }
 	@echo ""
 	@echo "📋 Step 3/3: Cleaning up Docker infrastructure..."
-	@$(MAKE) test-mqtt-quic-cleanup
+	@$(MAKE) test-transport-cleanup
 	@echo ""
 	@echo "✅ CI-style E2E tests completed successfully"
 
-# Deprecated: Use test-e2e-ci instead (matches CI execution exactly)
+# Aliases: Use test-e2e-ci or test-e2e-transport instead
+test-e2e-transport: test-e2e-ci
 test-e2e-mqtt-quic: test-e2e-ci
 
 test-e2e-controller:
@@ -1853,26 +1857,26 @@ test-e2e-fast:
 	@echo "⚡ FAST E2E VALIDATION"
 	@echo "======================"
 	@echo "Running 2 core test suites in parallel:"
-	@echo "  1️⃣  MQTT+QUIC integration tests"
+	@echo "  1️⃣  Transport integration tests"
 	@echo "  2️⃣  Controller E2E tests"
 	@echo ""
 	@echo "⏱️  Expected runtime: ~3-5 minutes"
 	@echo "⚠️  Excludes long-running performance/scale tests (use test-e2e-parallel for full validation)"
 	@echo ""
-	@$(MAKE) test-mqtt-quic-setup
+	@$(MAKE) test-transport-setup
 	@echo ""
-	@$(MAKE) -j2 test-e2e-mqtt-quic test-e2e-controller || { \
+	@$(MAKE) -j2 test-e2e-transport test-e2e-controller || { \
 		echo ""; \
 		echo "❌ One or more E2E test suites failed"; \
-		$(MAKE) test-mqtt-quic-cleanup; \
+		$(MAKE) test-transport-cleanup; \
 		exit 1; \
 	}
 	@echo ""
-	@$(MAKE) test-mqtt-quic-cleanup
+	@$(MAKE) test-transport-cleanup
 	@echo ""
 	@echo "✅ FAST E2E VALIDATION PASSED"
 	@echo "=============================="
-	@echo "- ✅ MQTT+QUIC integration tests"
+	@echo "- ✅ Transport integration tests"
 	@echo "- ✅ Controller Docker E2E tests"
 	@echo ""
 	@echo "🎯 Core E2E validation complete - ready for PR"
@@ -1884,26 +1888,26 @@ test-e2e-parallel:
 	@echo "⚡ PARALLEL E2E VALIDATION (FULL)"
 	@echo "=================================="
 	@echo "Running 3 test suites in parallel:"
-	@echo "  1️⃣  MQTT+QUIC integration tests"
+	@echo "  1️⃣  Transport integration tests"
 	@echo "  2️⃣  Controller E2E tests"
 	@echo "  3️⃣  Comprehensive E2E scenarios (performance/scale - may take 45min+)"
 	@echo ""
 	@echo "⏱️  Expected runtime: ~45-60 minutes (includes long-running tests)"
 	@echo ""
-	@$(MAKE) test-mqtt-quic-setup
+	@$(MAKE) test-transport-setup
 	@echo ""
-	@$(MAKE) -j3 test-e2e-mqtt-quic test-e2e-controller test-e2e-scenarios || { \
+	@$(MAKE) -j3 test-e2e-transport test-e2e-controller test-e2e-scenarios || { \
 		echo ""; \
 		echo "❌ One or more E2E test suites failed"; \
-		$(MAKE) test-mqtt-quic-cleanup; \
+		$(MAKE) test-transport-cleanup; \
 		exit 1; \
 	}
 	@echo ""
-	@$(MAKE) test-mqtt-quic-cleanup
+	@$(MAKE) test-transport-cleanup
 	@echo ""
 	@echo "✅ ALL E2E TESTS PASSED (PARALLEL)"
 	@echo "=================================="
-	@echo "- ✅ MQTT+QUIC integration tests"
+	@echo "- ✅ Transport integration tests"
 	@echo "- ✅ Controller Docker E2E tests"
 	@echo "- ✅ Comprehensive E2E scenarios"
 	@echo ""
@@ -1916,26 +1920,26 @@ test-e2e-local:
 	@echo "🚀 RUNNING LOCAL E2E VALIDATION (SEQUENTIAL)"
 	@echo "============================================="
 	@echo "This runs all E2E tests against Docker infrastructure:"
-	@echo "  • MQTT+QUIC integration tests (controller ↔ steward)"
+	@echo "  • Transport integration tests (controller ↔ steward via gRPC)"
 	@echo "  • Controller E2E tests (Docker deployment)"
 	@echo "  • Comprehensive E2E scenarios (multi-tenant, failover)"
 	@echo ""
 	@echo "⏱️  Expected runtime: 8-10 minutes"
 	@echo "💡 Use 'make test-e2e-parallel' for faster execution (~3-5 min)"
 	@echo ""
-	@$(MAKE) test-mqtt-quic-setup
+	@$(MAKE) test-transport-setup
 	@echo ""
-	@$(MAKE) test-e2e-mqtt-quic || { $(MAKE) test-mqtt-quic-cleanup; exit 1; }
+	@$(MAKE) test-e2e-transport || { $(MAKE) test-transport-cleanup; exit 1; }
 	@echo ""
-	@$(MAKE) test-e2e-controller || { $(MAKE) test-mqtt-quic-cleanup; exit 1; }
+	@$(MAKE) test-e2e-controller || { $(MAKE) test-transport-cleanup; exit 1; }
 	@echo ""
-	@$(MAKE) test-e2e-scenarios || { $(MAKE) test-mqtt-quic-cleanup; exit 1; }
+	@$(MAKE) test-e2e-scenarios || { $(MAKE) test-transport-cleanup; exit 1; }
 	@echo ""
-	@$(MAKE) test-mqtt-quic-cleanup
+	@$(MAKE) test-transport-cleanup
 	@echo ""
 	@echo "✅ ALL E2E TESTS PASSED"
 	@echo "======================="
-	@echo "- ✅ MQTT+QUIC integration tests passed"
+	@echo "- ✅ Transport integration tests passed"
 	@echo "- ✅ Controller Docker E2E tests passed"
 	@echo "- ✅ Comprehensive E2E scenarios passed"
 	@echo ""
@@ -2017,7 +2021,7 @@ generate-test-certificates: build-controller  ## Generate test certificates usin
 	@echo "🔐 Generating test certificates..."
 	@echo ""
 	@echo "Step 1: Setting up controller configuration..."
-	@mkdir -p test/integration/mqtt_quic/certs/ca test/integration/logs
+	@mkdir -p test/integration/transport/certs/ca test/integration/logs
 	@cp test/integration/configs/controller-test.cfg controller.cfg
 	@echo "✅ Configuration copied to controller.cfg"
 	@echo ""
@@ -2029,7 +2033,7 @@ generate-test-certificates: build-controller  ## Generate test certificates usin
 	kill $$CONTROLLER_PID 2>/dev/null || true; \
 	wait $$CONTROLLER_PID 2>/dev/null || true
 	@rm -f config.yaml
-	@if [ ! -f "test/integration/mqtt_quic/certs/ca/ca.crt" ]; then \
+	@if [ ! -f "test/integration/transport/certs/ca/ca.crt" ]; then \
 		echo "❌ CA certificate not generated. Controller log:"; \
 		cat /tmp/controller-cert-gen.log; \
 		exit 1; \
@@ -2037,7 +2041,7 @@ generate-test-certificates: build-controller  ## Generate test certificates usin
 	@echo "✅ Valid certificates generated by Controller"
 	@echo ""
 	@echo "Creating symlinks for test compatibility..."
-	@cd test/integration/mqtt_quic/certs && \
+	@cd test/integration/transport/certs && \
 		ln -sf ca/ca.crt ca-cert.pem && \
 		ln -sf ca/server/server.crt server-cert.pem && \
 		ln -sf ca/server/server.key server-key.pem
@@ -2049,14 +2053,14 @@ generate-test-certificates: build-controller  ## Generate test certificates usin
 	@echo "✅ All test certificates generated"
 	@echo ""
 	@echo "Valid certificates (auto-generated by Controller):"
-	@echo "  • test/integration/mqtt_quic/certs/ca-cert.pem"
-	@echo "  • test/integration/mqtt_quic/certs/server-cert.pem"
-	@echo "  • test/integration/mqtt_quic/certs/client-cert.pem"
+	@echo "  • test/integration/transport/certs/ca-cert.pem"
+	@echo "  • test/integration/transport/certs/server-cert.pem"
+	@echo "  • test/integration/transport/certs/client-cert.pem"
 	@echo ""
 	@echo "Invalid certificates (for negative testing):"
-	@echo "  • test/integration/mqtt_quic/certs/expired-cert.pem"
-	@echo "  • test/integration/mqtt_quic/certs/selfsigned-cert.pem"
-	@echo "  • test/integration/mqtt_quic/certs/wrong-ca-client-cert.pem"
+	@echo "  • test/integration/transport/certs/expired-cert.pem"
+	@echo "  • test/integration/transport/certs/selfsigned-cert.pem"
+	@echo "  • test/integration/transport/certs/wrong-ca-client-cert.pem"
 
 # Synthetic Monitoring Tests
 # Runs ongoing validation tests for production-like environments
