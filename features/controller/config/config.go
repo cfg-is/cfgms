@@ -749,7 +749,7 @@ func LoadWithPath(configPath string) (*Config, error) {
 			return nil, fmt.Errorf("failed to parse config file %s: %w", foundPath, err)
 		}
 
-		// Migrate deprecated mqtt:/quic: sections to the unified transport: section
+		// Migrate deprecated mqtt: section to the unified transport: section
 		migrateTransportConfig(cfg, expandedBytes)
 	}
 

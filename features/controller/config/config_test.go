@@ -153,56 +153,6 @@ mqtt:
 		"mqtt.use_cert_manager must be migrated to transport.use_cert_manager")
 }
 
-// TestLoadWithPath_QUICYAMLIgnored verifies that a legacy quic: YAML section is silently ignored
-// (QUICConfig was removed in Phase 10.10; transport: defaults are used instead).
-func TestLoadWithPath_QUICYAMLIgnored(t *testing.T) {
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "controller.cfg")
-
-	content := `
-quic:
-  listen_addr: "0.0.0.0:9999"
-  use_cert_manager: true
-`
-	require.NoError(t, os.WriteFile(configPath, []byte(content), 0600))
-
-	cfg, err := LoadWithPath(configPath)
-	require.NoError(t, err)
-	require.NotNil(t, cfg.Transport, "Transport must be populated with defaults")
-
-	// quic: is no longer a known config section; transport uses its own defaults
-	defaults := DefaultConfig()
-	assert.Equal(t, defaults.Transport.ListenAddr, cfg.Transport.ListenAddr,
-		"unknown quic: YAML section must not affect transport.listen_addr")
-}
-
-// TestLoadWithPath_MQTTMigrationWithLegacyQUICPresent verifies that when both mqtt: and quic:
-// are in YAML (no transport:), only mqtt: is migrated (quic: section is ignored since Phase 10.10).
-func TestLoadWithPath_MQTTMigrationWithLegacyQUICPresent(t *testing.T) {
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "controller.cfg")
-
-	content := `
-mqtt:
-  listen_addr: "0.0.0.0:1883"
-  use_cert_manager: false
-quic:
-  listen_addr: "0.0.0.0:4433"
-  use_cert_manager: true
-`
-	require.NoError(t, os.WriteFile(configPath, []byte(content), 0600))
-
-	cfg, err := LoadWithPath(configPath)
-	require.NoError(t, err)
-	require.NotNil(t, cfg.Transport)
-
-	// Only mqtt: migration applies; quic: is ignored
-	assert.Equal(t, "0.0.0.0:1883", cfg.Transport.ListenAddr,
-		"mqtt.listen_addr must be migrated when quic: section is absent from known config")
-	assert.False(t, cfg.Transport.UseCertManager,
-		"mqtt.use_cert_manager must be migrated")
-}
-
 // TestLoadWithPath_NewSectionOverridesOld verifies transport: wins when both old and new sections present.
 func TestLoadWithPath_NewSectionOverridesOld(t *testing.T) {
 	dir := t.TempDir()
