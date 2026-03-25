@@ -45,6 +45,11 @@ func NewTestHelper(baseURL string) *TestHelper {
 
 // CreateToken returns a pre-created reusable test token.
 // The controller pre-creates test tokens on startup when transport is enabled.
+//
+// NOTE: tenantID and group parameters are currently ignored — all registrations
+// use the same shared token with pre-configured metadata. Multi-tenant isolation
+// tests verify unique steward IDs but do NOT validate per-tenant token boundaries.
+// Per-tenant tokens require seeding distinct tokens in the controller test setup.
 func (h *TestHelper) CreateToken(_ *testing.T, _, _ string) string {
 	return "integration_reusable"
 }

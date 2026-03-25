@@ -84,8 +84,7 @@ func (s *ConfigSyncTestSuite) TestConfigUploadAPI() {
 	client := s.helper.httpClient
 	resp, err := client.Do(req)
 	if err != nil {
-		s.T().Logf("Config upload failed (test endpoint may not be available): %v", err)
-		return
+		s.T().Skipf("Config upload test endpoint not available (infrastructure not running): %v", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 

@@ -122,31 +122,21 @@ services:
   # Start with: docker compose --profile ha up
   # ============================================================================
 
-  # Controller East (us-east region) - MQTT+QUIC Architecture (Story #198)
+  # Controller East (us-east region) - gRPC-over-QUIC Transport (Issue #519)
   controller-east:
     container_name: controller-east
     build:
       context: .
       dockerfile: cmd/controller/Dockerfile
     ports:
-      - "1883:8883"   # MQTT control plane with TLS
-      - "4433:4433/udp"   # QUIC data plane
+      - "4433:4433/udp"   # gRPC-over-QUIC transport
       - "9080:9080"   # HTTP API
     environment:
       CFGMS_NODE_ID: "controller-east"
       CFGMS_NODE_REGION: "us-east"
-      # MQTT+QUIC Configuration (Story #198, Story 12.4)
-      CFGMS_MQTT_ENABLED: "true"
-      CFGMS_MQTT_LISTEN_ADDR: "0.0.0.0:8883"
-      CFGMS_MQTT_ENABLE_TLS: "true"  # Story 12.4: Enable TLS for security validation
-      # Use pkg/cert.Manager auto-generation (SAFE - no static test certs)
-      # Matches Story #109 pattern: self-contained tests with auto-generated certs
-      CFGMS_MQTT_USE_CERT_MANAGER: "true"
-      # CFGMS_CERT_PATH already set to "/app/certs" - uses that for auto-generation
-      # TODO: Re-enable mTLS once controller uses single CA for both HTTP and MQTT
-      CFGMS_MQTT_REQUIRE_CLIENT_CERT: "false"  # Story 12.4: mTLS temporarily disabled
-      CFGMS_QUIC_ENABLED: "true"
-      CFGMS_QUIC_LISTEN_ADDR: "0.0.0.0:4433"
+      # gRPC-over-QUIC Transport (Issue #519: replaces MQTT+QUIC)
+      CFGMS_TRANSPORT_LISTEN_ADDR: "0.0.0.0:4433"
+      CFGMS_TRANSPORT_USE_CERT_MANAGER: "true"
       CFGMS_HTTP_LISTEN_ADDR: "0.0.0.0:9080"
       # Storage Configuration
       CFGMS_STORAGE_PROVIDER: "database"
@@ -182,7 +172,7 @@ services:
       timescaledb-test:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "sh", "-c", "netstat -ln | grep :8883"]
+      test: ["CMD", "sh", "-c", "netstat -ln | grep :4433"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -191,31 +181,21 @@ services:
     profiles:
       - ha
 
-  # Controller Central (us-central region) - MQTT+QUIC Architecture (Story #198)
+  # Controller Central (us-central region) - gRPC-over-QUIC Transport (Issue #519)
   controller-central:
     container_name: controller-central
     build:
       context: .
       dockerfile: cmd/controller/Dockerfile
     ports:
-      - "1884:8883"   # MQTT control plane with TLS (different host port)
-      - "4434:4433/udp"   # QUIC data plane (different host port)
+      - "4434:4433/udp"   # gRPC-over-QUIC transport (different host port)
       - "9081:9081"   # HTTP API
     environment:
       CFGMS_NODE_ID: "controller-central"
       CFGMS_NODE_REGION: "us-central"
-      # MQTT+QUIC Configuration (Story #198, Story 12.4)
-      CFGMS_MQTT_ENABLED: "true"
-      CFGMS_MQTT_LISTEN_ADDR: "0.0.0.0:8883"
-      CFGMS_MQTT_ENABLE_TLS: "true"  # Story 12.4: Enable TLS for security validation
-      # Use pkg/cert.Manager auto-generation (SAFE - no static test certs)
-      # Matches Story #109 pattern: self-contained tests with auto-generated certs
-      CFGMS_MQTT_USE_CERT_MANAGER: "true"
-      # CFGMS_CERT_PATH already set to "/app/certs" - uses that for auto-generation
-      # TODO: Re-enable mTLS once controller uses single CA for both HTTP and MQTT
-      CFGMS_MQTT_REQUIRE_CLIENT_CERT: "false"  # Story 12.4: mTLS temporarily disabled
-      CFGMS_QUIC_ENABLED: "true"
-      CFGMS_QUIC_LISTEN_ADDR: "0.0.0.0:4433"
+      # gRPC-over-QUIC Transport (Issue #519: replaces MQTT+QUIC)
+      CFGMS_TRANSPORT_LISTEN_ADDR: "0.0.0.0:4433"
+      CFGMS_TRANSPORT_USE_CERT_MANAGER: "true"
       CFGMS_HTTP_LISTEN_ADDR: "0.0.0.0:9081"
       # Storage Configuration
       CFGMS_STORAGE_PROVIDER: "database"
@@ -251,7 +231,7 @@ services:
       timescaledb-test:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "sh", "-c", "netstat -ln | grep :8883"]
+      test: ["CMD", "sh", "-c", "netstat -ln | grep :4433"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -260,31 +240,21 @@ services:
     profiles:
       - ha
 
-  # Controller West (us-west region) - MQTT+QUIC Architecture (Story #198)
+  # Controller West (us-west region) - gRPC-over-QUIC Transport (Issue #519)
   controller-west:
     container_name: controller-west
     build:
       context: .
       dockerfile: cmd/controller/Dockerfile
     ports:
-      - "1885:8883"   # MQTT control plane with TLS (different host port)
-      - "4435:4433/udp"   # QUIC data plane (different host port)
+      - "4435:4433/udp"   # gRPC-over-QUIC transport (different host port)
       - "9082:9082"   # HTTP API
     environment:
       CFGMS_NODE_ID: "controller-west"
       CFGMS_NODE_REGION: "us-west"
-      # MQTT+QUIC Configuration (Story #198, Story 12.4)
-      CFGMS_MQTT_ENABLED: "true"
-      CFGMS_MQTT_LISTEN_ADDR: "0.0.0.0:8883"
-      CFGMS_MQTT_ENABLE_TLS: "true"  # Story 12.4: Enable TLS for security validation
-      # Use pkg/cert.Manager auto-generation (SAFE - no static test certs)
-      # Matches Story #109 pattern: self-contained tests with auto-generated certs
-      CFGMS_MQTT_USE_CERT_MANAGER: "true"
-      # CFGMS_CERT_PATH already set to "/app/certs" - uses that for auto-generation
-      # TODO: Re-enable mTLS once controller uses single CA for both HTTP and MQTT
-      CFGMS_MQTT_REQUIRE_CLIENT_CERT: "false"  # Story 12.4: mTLS temporarily disabled
-      CFGMS_QUIC_ENABLED: "true"
-      CFGMS_QUIC_LISTEN_ADDR: "0.0.0.0:4433"
+      # gRPC-over-QUIC Transport (Issue #519: replaces MQTT+QUIC)
+      CFGMS_TRANSPORT_LISTEN_ADDR: "0.0.0.0:4433"
+      CFGMS_TRANSPORT_USE_CERT_MANAGER: "true"
       CFGMS_HTTP_LISTEN_ADDR: "0.0.0.0:9082"
       # Storage Configuration
       CFGMS_STORAGE_PROVIDER: "database"
@@ -320,7 +290,7 @@ services:
       timescaledb-test:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "sh", "-c", "netstat -ln | grep :8883"]
+      test: ["CMD", "sh", "-c", "netstat -ln | grep :4433"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -329,7 +299,7 @@ services:
     profiles:
       - ha
 
-  # Steward East (connects to HA controller cluster) - MQTT+QUIC (Story #198)
+  # Steward East (connects to HA controller cluster) - gRPC-over-QUIC (Issue #519)
   steward-east:
     container_name: steward-east
     build:
@@ -338,14 +308,9 @@ services:
       args:
         STEWARD_CONTROLLER_URL: "https://controller-east:9080"
     environment:
-      # MQTT+QUIC Configuration (Story #198, Story 12.4)
+      # gRPC-over-QUIC Transport (Issue #519: replaces MQTT+QUIC)
       CFGMS_REGISTRATION_TOKEN: "${REG_TOKEN_EAST}"
-      CFGMS_MQTT_BROKER: "mqtt://controller-east:8883"  # TLS port
-      CFGMS_QUIC_ADDRESS: "controller-east:4433"
-      # Story 12.4: TLS client certificate configuration
-      CFGMS_MQTT_TLS_CERT_PATH: "/app/test-certs/client-cert.pem"
-      CFGMS_MQTT_TLS_KEY_PATH: "/app/test-certs/client-key.pem"
-      CFGMS_MQTT_TLS_CA_PATH: "/app/test-certs/ca-cert.pem"
+      CFGMS_TRANSPORT_ADDRESS: "controller-east:4433"
       # Logging Configuration
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"
@@ -365,7 +330,7 @@ services:
     profiles:
       - ha
 
-  # Steward Central (connects to HA controller cluster) - MQTT+QUIC (Story #198)
+  # Steward Central (connects to HA controller cluster) - gRPC-over-QUIC (Issue #519)
   steward-central:
     container_name: steward-central
     build:
@@ -374,14 +339,9 @@ services:
       args:
         STEWARD_CONTROLLER_URL: "https://controller-central:9080"
     environment:
-      # MQTT+QUIC Configuration (Story #198, Story 12.4)
+      # gRPC-over-QUIC Transport (Issue #519: replaces MQTT+QUIC)
       CFGMS_REGISTRATION_TOKEN: "${REG_TOKEN_CENTRAL}"
-      CFGMS_MQTT_BROKER: "mqtt://controller-central:8883"  # TLS port
-      CFGMS_QUIC_ADDRESS: "controller-central:4433"
-      # Story 12.4: TLS client certificate configuration
-      CFGMS_MQTT_TLS_CERT_PATH: "/app/test-certs/client-cert.pem"
-      CFGMS_MQTT_TLS_KEY_PATH: "/app/test-certs/client-key.pem"
-      CFGMS_MQTT_TLS_CA_PATH: "/app/test-certs/ca-cert.pem"
+      CFGMS_TRANSPORT_ADDRESS: "controller-central:4433"
       # Logging Configuration
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"
@@ -401,7 +361,7 @@ services:
     profiles:
       - ha
 
-  # Steward West (connects to HA controller cluster) - MQTT+QUIC (Story #198)
+  # Steward West (connects to HA controller cluster) - gRPC-over-QUIC (Issue #519)
   steward-west:
     container_name: steward-west
     build:
@@ -410,14 +370,9 @@ services:
       args:
         STEWARD_CONTROLLER_URL: "https://controller-west:9080"
     environment:
-      # MQTT+QUIC Configuration (Story #198, Story 12.4)
+      # gRPC-over-QUIC Transport (Issue #519: replaces MQTT+QUIC)
       CFGMS_REGISTRATION_TOKEN: "${REG_TOKEN_WEST}"
-      CFGMS_MQTT_BROKER: "mqtt://controller-west:8883"  # TLS port
-      CFGMS_QUIC_ADDRESS: "controller-west:4433"
-      # Story 12.4: TLS client certificate configuration
-      CFGMS_MQTT_TLS_CERT_PATH: "/app/test-certs/client-cert.pem"
-      CFGMS_MQTT_TLS_KEY_PATH: "/app/test-certs/client-key.pem"
-      CFGMS_MQTT_TLS_CA_PATH: "/app/test-certs/ca-cert.pem"
+      CFGMS_TRANSPORT_ADDRESS: "controller-west:4433"
       # Logging Configuration
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"
@@ -474,7 +429,7 @@ services:
       - ha
 
   # ============================================================================
-  # STANDALONE CONTROLLER (Non-HA) - MQTT+QUIC Architecture (Story #198)
+  # STANDALONE CONTROLLER (Non-HA) - gRPC-over-QUIC Transport (Issue #519)
   # Used for integration testing single-controller functionality
   # Runs alongside HA cluster to validate both architectures in parallel
   # Start with: docker compose --profile ha up (included in HA profile)
