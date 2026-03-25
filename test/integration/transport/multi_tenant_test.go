@@ -24,7 +24,6 @@ import (
 type MultiTenantTestSuite struct {
 	suite.Suite
 	helper *TestHelper
-	mu     sync.RWMutex
 }
 
 func (s *MultiTenantTestSuite) SetupSuite() {

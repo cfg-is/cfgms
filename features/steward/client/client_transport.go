@@ -44,7 +44,6 @@ type TransportClient struct {
 	// Steward identification
 	stewardID string
 	tenantID  string
-	group     string
 
 	// Transport address (gRPC-over-QUIC, from registration response)
 	transportAddress string
@@ -863,53 +862,3 @@ func (c *TransportClient) startHeartbeat() {
 	}
 }
 
-// saveCertificates saves client certificates from registration to disk.
-func (c *TransportClient) saveCertificates(clientCert, clientKey, caCert string) error {
-	certDir := os.Getenv("CFGMS_CERT_PATH")
-	if certDir == "" {
-		certDir = "/etc/cfgms/certs"
-	}
-
-	if err := os.MkdirAll(certDir, 0700); err != nil {
-		return fmt.Errorf("failed to create cert directory: %w", err)
-	}
-
-	files := map[string]struct {
-		content string
-		perm    os.FileMode
-	}{
-		"client.crt": {clientCert, 0600},
-		"client.key": {clientKey, 0600},
-		"ca.crt":     {caCert, 0644},
-	}
-
-	for filename, file := range files {
-		path := filepath.Join(certDir, filename)
-		if err := os.WriteFile(path, []byte(file.content), file.perm); err != nil {
-			return fmt.Errorf("failed to save %s: %w", filename, err)
-		}
-		c.logger.Debug("Saved certificate file", "path", path)
-	}
-
-	return nil
-}
-
-// saveSigningCertificate persists the dedicated signing certificate to disk.
-func (c *TransportClient) saveSigningCertificate(signingCert string) error {
-	certDir := os.Getenv("CFGMS_CERT_PATH")
-	if certDir == "" {
-		certDir = "/etc/cfgms/certs"
-	}
-
-	if err := os.MkdirAll(certDir, 0700); err != nil {
-		return fmt.Errorf("failed to create cert directory: %w", err)
-	}
-
-	path := filepath.Join(certDir, "signing.crt")
-	if err := os.WriteFile(path, []byte(signingCert), 0644); err != nil {
-		return fmt.Errorf("failed to save signing certificate: %w", err)
-	}
-
-	c.logger.Debug("Saved signing certificate file", "path", path)
-	return nil
-}
