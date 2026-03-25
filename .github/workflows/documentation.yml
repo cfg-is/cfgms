@@ -86,37 +86,36 @@ jobs:
           echo "## CLAUDE.md Validation" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
-          # Check required sections exist
-          if grep -q "## Project Overview" CLAUDE.md; then
-            echo "✅ Project Overview section found" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "❌ Missing Project Overview section" >> $GITHUB_STEP_SUMMARY
-            exit 1
-          fi
+          # Check essential content exists (concept-based, not exact heading names)
+          errors=0
 
-          if grep -q "## Development Workflow" CLAUDE.md; then
-            echo "✅ Development Workflow section found" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "❌ Missing Development Workflow section" >> $GITHUB_STEP_SUMMARY
-            exit 1
-          fi
+          check_content() {
+            local description="$1"
+            local pattern="$2"
+            if grep -qi "$pattern" CLAUDE.md; then
+              echo "✅ $description" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "❌ Missing: $description (pattern: $pattern)" >> $GITHUB_STEP_SUMMARY
+              errors=$((errors + 1))
+            fi
+          }
 
-          if grep -q "## Core Architecture" CLAUDE.md; then
-            echo "✅ Core Architecture section found" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "❌ Missing Core Architecture section" >> $GITHUB_STEP_SUMMARY
-            exit 1
-          fi
-
-          if grep -q "## Central Provider System" CLAUDE.md; then
-            echo "✅ Central Provider System section found" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "❌ Missing Central Provider System section" >> $GITHUB_STEP_SUMMARY
-            exit 1
-          fi
+          check_content "Project overview" "CFGMS"
+          check_content "Agent workflow" "CFGMS_AGENT_MODE"
+          check_content "Slash commands" "story-start\|story-commit\|story-complete"
+          check_content "Git workflow (PRs target develop)" "base develop"
+          check_content "Central providers" "central provider"
+          check_content "Testing standards" "TDD\|real.*components\|no.*mock"
+          check_content "DSD principles" "Desired State"
+          check_content "Security rules" "mTLS\|mutual TLS"
 
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "✅ CLAUDE.md structure validation passed" >> $GITHUB_STEP_SUMMARY
+          if [ $errors -eq 0 ]; then
+            echo "✅ CLAUDE.md structure validation passed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ CLAUDE.md validation failed: $errors missing sections" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
 
       - name: Check Internal File References
         run: |
