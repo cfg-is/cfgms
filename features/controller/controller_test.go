@@ -96,11 +96,6 @@ func TestControllerLifecycle(t *testing.T) {
 	if cfg.Transport != nil {
 		cfg.Transport.ListenAddr = "127.0.0.1:0"
 	}
-	// Disable legacy QUIC data plane (replaced by gRPC DP on shared transport, Story #515)
-	if cfg.QUIC != nil {
-		cfg.QUIC.Enabled = false
-	}
-
 	ctrl, err := New(cfg, logger)
 	require.NoError(t, err)
 

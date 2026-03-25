@@ -99,9 +99,6 @@ type Config struct {
 	// MQTT broker configuration for control plane communication
 	MQTT *MQTTConfig `yaml:"mqtt"`
 
-	// QUIC server configuration for data plane communication
-	QUIC *QUICConfig `yaml:"quic"`
-
 	// Transport is the unified, protocol-agnostic transport configuration.
 	// Replaces the separate MQTT and QUIC sections. Old sections map here with deprecation warnings.
 	Transport *TransportConfig `yaml:"transport"`
@@ -420,30 +417,6 @@ type MQTTConfig struct {
 	KeepaliveMultiplier float64 `yaml:"keepalive_multiplier"`
 }
 
-// QUICConfig contains QUIC server configuration for data plane
-type QUICConfig struct {
-	// Enable QUIC server
-	Enabled bool `yaml:"enabled"`
-
-	// QUIC listen address (e.g., "0.0.0.0:4433")
-	ListenAddr string `yaml:"listen_addr"`
-
-	// Use certificate manager for QUIC certificates
-	UseCertManager bool `yaml:"use_cert_manager"`
-
-	// TLS certificate path (if not using cert manager)
-	TLSCertPath string `yaml:"tls_cert_path,omitempty"`
-
-	// TLS key path (if not using cert manager)
-	TLSKeyPath string `yaml:"tls_key_path,omitempty"`
-
-	// CA certificate path for client verification
-	TLSCAPath string `yaml:"tls_ca_path,omitempty"`
-
-	// Session timeout in seconds
-	SessionTimeout int `yaml:"session_timeout"`
-}
-
 // Duration is a time.Duration that supports YAML string parsing ("30s", "5m", etc.)
 // This allows human-readable duration values in configuration files.
 type Duration time.Duration
@@ -469,7 +442,7 @@ func (d Duration) AsDuration() time.Duration {
 }
 
 // TransportConfig is the unified, protocol-agnostic transport configuration.
-// It replaces the separate MQTTConfig and QUICConfig sections.
+// It replaces the separate MQTTConfig section (and the now-removed QUICConfig).
 // A single listen address serves both control plane and data plane over gRPC-over-QUIC,
 // and can accommodate future transport implementations without config changes.
 type TransportConfig struct {
@@ -630,12 +603,6 @@ func DefaultConfig() *Config {
 			SessionExpiryInterval: 3600,        // 1 hour
 			KeepaliveMultiplier:   1.5,         // Disconnect if no activity for keepalive * 1.5
 		},
-		QUIC: &QUICConfig{
-			Enabled:        true, // Core data plane - enabled by default (Story #198)
-			ListenAddr:     "0.0.0.0:4433",
-			UseCertManager: true, // Use controller's certificate manager
-			SessionTimeout: 300,  // 5 minutes
-		},
 		Transport: &TransportConfig{
 			ListenAddr:      "0.0.0.0:4433",
 			UseCertManager:  true,
@@ -646,14 +613,12 @@ func DefaultConfig() *Config {
 	}
 }
 
-// migrateTransportConfig detects deprecated mqtt: and quic: sections in the raw YAML
-// and migrates their fields to the Transport section with deprecation warnings.
+// migrateTransportConfig detects deprecated mqtt: section in the raw YAML
+// and migrates its fields to the Transport section with a deprecation warning.
 //
 // Migration rules:
-//   - If transport: is present and old sections are also present: new section wins, log warning
+//   - If transport: is present and mqtt: is also present: new section wins, log warning
 //   - If only mqtt: is present: migrate listen_addr and use_cert_manager to transport
-//   - If only quic: is present: migrate listen_addr and use_cert_manager to transport
-//   - If both mqtt: and quic: are present (no transport:): quic takes priority over mqtt
 func migrateTransportConfig(cfg *Config, rawYAML []byte) {
 	var raw map[string]interface{}
 	if err := yaml.Unmarshal(rawYAML, &raw); err != nil {
@@ -662,19 +627,18 @@ func migrateTransportConfig(cfg *Config, rawYAML []byte) {
 
 	_, hasTransport := raw["transport"]
 	_, hasMQTT := raw["mqtt"]
-	_, hasQUIC := raw["quic"]
 
-	if !hasMQTT && !hasQUIC {
+	if !hasMQTT {
 		return // Nothing to migrate
 	}
 
 	if hasTransport {
-		// New section wins; warn that old sections are ignored
-		log.Printf("[WARN] config: transport: section overrides deprecated mqtt:/quic: sections — old sections are ignored")
+		// New section wins; warn that old section is ignored
+		log.Printf("[WARN] config: transport: section overrides deprecated mqtt: section — old section is ignored")
 		return
 	}
 
-	// No transport: section in YAML — migrate from old sections
+	// No transport: section in YAML — migrate from mqtt section
 	if cfg.Transport == nil {
 		cfg.Transport = &TransportConfig{
 			ListenAddr:      "0.0.0.0:4433",
@@ -685,22 +649,13 @@ func migrateTransportConfig(cfg *Config, rawYAML []byte) {
 		}
 	}
 
-	// MQTT migration (older protocol)
+	// MQTT migration
 	if hasMQTT && cfg.MQTT != nil {
 		log.Printf("[WARN] config: mqtt: section is deprecated; please migrate to transport: section")
 		if cfg.MQTT.ListenAddr != "" {
 			cfg.Transport.ListenAddr = cfg.MQTT.ListenAddr
 		}
 		cfg.Transport.UseCertManager = cfg.MQTT.UseCertManager
-	}
-
-	// QUIC migration takes priority over MQTT (more recent transport)
-	if hasQUIC && cfg.QUIC != nil {
-		log.Printf("[WARN] config: quic: section is deprecated; please migrate to transport: section")
-		if cfg.QUIC.ListenAddr != "" {
-			cfg.Transport.ListenAddr = cfg.QUIC.ListenAddr
-		}
-		cfg.Transport.UseCertManager = cfg.QUIC.UseCertManager
 	}
 }
 
@@ -1026,23 +981,6 @@ func LoadWithPath(configPath string) (*Config, error) {
 
 	if mqttTLSCAPath := os.Getenv("CFGMS_MQTT_TLS_CA_PATH"); mqttTLSCAPath != "" {
 		cfg.MQTT.TLSCAPath = mqttTLSCAPath
-	}
-
-	// QUIC configuration environment variables
-	if quicEnabled := os.Getenv("CFGMS_QUIC_ENABLED"); quicEnabled != "" {
-		if val, err := strconv.ParseBool(quicEnabled); err == nil {
-			cfg.QUIC.Enabled = val
-		}
-	}
-
-	if quicListenAddr := os.Getenv("CFGMS_QUIC_LISTEN_ADDR"); quicListenAddr != "" {
-		cfg.QUIC.ListenAddr = quicListenAddr
-	}
-
-	if quicUseCertManager := os.Getenv("CFGMS_QUIC_USE_CERT_MANAGER"); quicUseCertManager != "" {
-		if val, err := strconv.ParseBool(quicUseCertManager); err == nil {
-			cfg.QUIC.UseCertManager = val
-		}
 	}
 
 	// Transport configuration environment variables

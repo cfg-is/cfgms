@@ -313,13 +313,12 @@ func TestDuration_AsDuration(t *testing.T) {
 	assert.Equal(t, 30*time.Second, d.AsDuration())
 }
 
-// TestLoadWithPath_DefaultConfigHasTransportAlongsideLegacy verifies Config has Transport alongside MQTT and QUIC.
+// TestLoadWithPath_DefaultConfigHasTransportAlongsideLegacy verifies Config has Transport alongside MQTT.
 func TestLoadWithPath_DefaultConfigHasTransportAlongsideLegacy(t *testing.T) {
 	cfg := DefaultConfig()
 
-	// All three sections must exist during Phase 10 transition
+	// Both sections must exist during Phase 10 transition
 	require.NotNil(t, cfg.MQTT, "MQTT must remain for backward compat during Phase 10")
-	require.NotNil(t, cfg.QUIC, "QUIC must remain for backward compat during Phase 10")
 	require.NotNil(t, cfg.Transport, "Transport must be present as new unified section")
 }
 
