@@ -182,7 +182,6 @@ The controller can send commands to stewards over the gRPC control plane service
 | Command | Purpose |
 |---------|---------|
 | `sync_config` | Tell steward to fetch its latest cfg now (optimization — steward also checks on schedule) |
-| `connect_dataplane` | Establish QUIC data plane session |
 | `sync_dna` | Request fresh DNA collection and upload |
 | `execute_script` | Run an ad-hoc script (outside the cfg) |
 
