@@ -213,13 +213,13 @@ func runControllerMetrics(cmd *cobra.Command, args []string) error {
 	var metrics struct {
 		Timestamp time.Time `json:"timestamp"`
 		Transport *struct {
-			ConnectedStewards     int       `json:"connected_stewards"`
-			StreamErrors          int64     `json:"stream_errors"`
-			MessagesSent          int64     `json:"messages_sent"`
-			MessagesReceived      int64     `json:"messages_received"`
-			ReconnectionAttempts  int64     `json:"reconnection_attempts"`
-			AvgLatencyNs          int64     `json:"avg_latency_ns"`
-			CollectedAt           time.Time `json:"collected_at"`
+			ConnectedStewards    int       `json:"connected_stewards"`
+			StreamErrors         int64     `json:"stream_errors"`
+			MessagesSent         int64     `json:"messages_sent"`
+			MessagesReceived     int64     `json:"messages_received"`
+			ReconnectionAttempts int64     `json:"reconnection_attempts"`
+			AvgLatencyNs         int64     `json:"avg_latency_ns"`
+			CollectedAt          time.Time `json:"collected_at"`
 		} `json:"transport"`
 		Storage *struct {
 			Provider          string    `json:"provider"`

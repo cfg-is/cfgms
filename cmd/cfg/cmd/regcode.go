@@ -7,7 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"strings"
+	"net"
 
 	"github.com/spf13/cobra"
 )
@@ -81,8 +81,10 @@ func generateRegistrationCode() error {
 		return fmt.Errorf("--controller-url is required for generation\n\nThe controller URL is the transport address where stewards connect\n\nFormat: HOST:PORT\n\nExample:\n  cfg regcode --tenant-id=acme-corp --controller-url=controller.example.com:4433")
 	}
 
-	// Validate controller URL format (host:port)
-	if !strings.Contains(controllerURL, ":") {
+	// Validate controller URL format (host:port) using net.SplitHostPort
+	// This rejects scheme-prefixed URLs (e.g., mqtt://host:port) and bare hostnames
+	host, port, err := net.SplitHostPort(controllerURL)
+	if err != nil || host == "" || port == "" {
 		return fmt.Errorf("controller URL must be in HOST:PORT format\n\nYour URL: %s\n\nExample:\n  controller.example.com:4433", controllerURL)
 	}
 

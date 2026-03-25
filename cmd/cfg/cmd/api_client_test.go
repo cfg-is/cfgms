@@ -165,7 +165,7 @@ func TestAPIClientCreateToken(t *testing.T) {
 			require.NoError(t, err)
 
 			assert.Equal(t, "test-tenant", req.TenantID)
-			assert.Equal(t, "mqtt://controller:8883", req.ControllerURL)
+			assert.Equal(t, "controller:4433", req.ControllerURL)
 
 			// Return created token
 			resp := APITokenResponse{
@@ -194,7 +194,7 @@ func TestAPIClientCreateToken(t *testing.T) {
 
 		req := &APITokenCreateRequest{
 			TenantID:      "test-tenant",
-			ControllerURL: "mqtt://controller:8883",
+			ControllerURL: "controller:4433",
 		}
 
 		resp, err := client.CreateToken(context.Background(), req)
@@ -220,7 +220,7 @@ func TestAPIClientCreateToken(t *testing.T) {
 		require.NoError(t, err)
 
 		req := &APITokenCreateRequest{
-			ControllerURL: "mqtt://controller:8883",
+			ControllerURL: "controller:4433",
 		}
 
 		resp, err := client.CreateToken(context.Background(), req)
@@ -305,7 +305,7 @@ func TestAPIClientGetToken(t *testing.T) {
 			resp := APITokenResponse{
 				Token:         "test-token",
 				TenantID:      "test-tenant",
-				ControllerURL: "mqtt://controller:8883",
+				ControllerURL: "controller:4433",
 			}
 
 			w.Header().Set("Content-Type", "application/json")
@@ -558,7 +558,7 @@ func TestAPIClientRequestHeaders(t *testing.T) {
 
 		req := &APITokenCreateRequest{
 			TenantID:      "test",
-			ControllerURL: "mqtt://test:8883",
+			ControllerURL: "test:4433",
 		}
 
 		_, err = client.CreateToken(context.Background(), req)
