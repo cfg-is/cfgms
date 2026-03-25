@@ -13,15 +13,15 @@ import (
 
 // HeartbeatTestSuite tests heartbeat delivery and failover detection via gRPC transport.
 //
-// In the gRPC transport architecture, heartbeats flow over the gRPC control plane stream
-// (not via MQTT PINGREQ/PINGRESP). Failover detection occurs via stream break + reconnection
-// (not via MQTT Last Will Testament). Tests verify observable system state via HTTP API.
+// In the gRPC transport architecture, heartbeats flow over the gRPC control plane stream.
+// Failover detection occurs via stream break + reconnection.
+// Tests verify observable system state via HTTP API.
 //
-// MQTT-specific scenarios dropped (no gRPC equivalent):
-//   - MQTT QoS levels (MQTT-specific)
-//   - MQTT PINGREQ keepalive (gRPC uses HTTP/2 PING internally)
-//   - MQTT persistent sessions / offline message queueing (Issue #419)
-//   - MQTT Last Will Testament (replaced by stream break detection)
+// Scenarios handled differently from previous transports:
+//   - QoS levels: not applicable (HTTP/2 provides reliable delivery)
+//   - Keepalive: gRPC uses HTTP/2 PING internally
+//   - Persistent sessions / offline message queueing (Issue #419)
+//   - Failover detection: stream break replaces Last Will Testament
 type HeartbeatTestSuite struct {
 	suite.Suite
 	helper *TestHelper
@@ -69,7 +69,7 @@ func (s *HeartbeatTestSuite) TestHeartbeatOverGRPC() {
 // TestFailoverDetectionReconnection tests that a new registration succeeds after
 // the previous steward session is lost. In gRPC transport, failover detection
 // occurs via stream break — the controller detects the closed stream immediately
-// (no LWT delay as in MQTT).
+// (detection is immediate via stream break).
 func (s *HeartbeatTestSuite) TestFailoverDetectionReconnection() {
 	s.T().Log("Testing failover detection via stream break + re-registration")
 

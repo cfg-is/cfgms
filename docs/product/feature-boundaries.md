@@ -25,7 +25,7 @@ This maximizes trust, community velocity for integrations, and follows proven mo
 |---------|-----|-------------------------------|-------|
 | **Architecture** | ✅ Single controller | ✅ Single controller + HA clustering | HA: Raft consensus, auto-failover |
 | **Storage** | ✅ Git, SQLite, PostgreSQL | ✅ Same + HA-optimized PostgreSQL | All providers support encryption |
-| **Communication** | ✅ MQTT+QUIC | ✅ Same | No difference |
+| **Communication** | ✅ gRPC-over-QUIC | ✅ Same | No difference |
 | **CLI/API** | ✅ All | ✅ Same | Complete CLI access in both |
 | **Web UI** | ❌ None | ✅ Full UI | Graphical workflow builder, dashboards |
 

@@ -20,7 +20,7 @@ CFGMS has a **comprehensive, production-aligned test infrastructure** that close
 test/
 ├── e2e/                          # End-to-end tests (9 files)
 ├── integration/                  # Integration tests (40+ files, 5,972 lines)
-│   ├── mqtt_quic/               # MQTT+QUIC protocol tests (15+ files)
+│   ├── transport/               # gRPC-over-QUIC protocol tests (15+ files)
 │   ├── ha/                       # High availability cluster tests (13 files)
 │   ├── logging/                  # Logging provider integration (3 files)
 │   └── [other integration tests] # Docker, certificate, steward-controller
@@ -29,7 +29,7 @@ test/
 │   └── steward/                  # Steward unit tests
 ├── configs/                      # Test configuration files
 ├── testdata/                      # Test fixtures (YAML configs, test data)
-├── integration/mqtt_quic/certs/   # Test certificates (23 files)
+├── integration/transport/certs/   # Test certificates (23 files)
 ├── sql/                          # Database initialization scripts
 ├── gitea-init/                   # Gitea repository setup
 ├── module-execution/             # Module test workspace
@@ -60,7 +60,7 @@ test/
 | steward-central | Container | HA steward 2 | ha |
 | steward-west | Container | HA steward 3 | ha |
 | git-server-ha | Container | Git for HA tests | ha |
-| controller-standalone | Container | MQTT+QUIC standalone | ha |
+| controller-standalone | Container | Standalone controller | ha |
 | steward-standalone | Container | Standalone steward | ha |
 | steward-tenant1/2/3 | Container | Multi-tenant isolation | ha |
 
@@ -98,7 +98,7 @@ test/
 
 - `make test-ci` - Full CI validation (8-12 min)
 - `make test-integration-complete` - Docker-based integration
-- `make test-mqtt-quic` - MQTT+QUIC protocol tests
+- `make test-transport` - gRPC-over-QUIC transport tests
 - `make security-scan` - Security validation gates
 - `make test-infrastructure-required` - CI-hardened tests
 
@@ -184,14 +184,14 @@ test/
 **Evidence**:
 
 ```makefile
-test-mqtt-quic-setup: # Requires Docker Compose --profile ha
+test-transport-setup: # Requires Docker Compose --profile ha
   docker compose -f docker-compose.test.yml --profile ha up
 ```
 
 **Recommendation**:
 
 - Add in-process HA cluster tests (non-Docker)
-- Use test mocks for MQTT broker instead of full container
+- Use test implementations for transport instead of full container
 - Allow HA testing in CI without Docker
 
 ---
@@ -225,7 +225,7 @@ test-mqtt-quic-setup: # Requires Docker Compose --profile ha
 **Issue**: Auto-certificate registration documented but not tested
 
 - QUICK_START promises: "Certificates are auto-generated and auto-approved"
-- Reality: Tests use pre-generated certificates from `/test/integration/mqtt_quic/certs/`
+- Reality: Tests use pre-generated certificates from `/test/integration/transport/certs/`
 - No test validates the registration flow shown in QUICK_START
 
 **Evidence**:
@@ -243,8 +243,8 @@ test-mqtt-quic-setup: # Requires Docker Compose --profile ha
 
 ```go
 // From docker_test.go
-CFGMS_MQTT_TLS_CERT_PATH: "/app/test-certs/client-cert.pem"
-CFGMS_MQTT_TLS_KEY_PATH: "/app/test-certs/client-key.pem"
+CFGMS_TRANSPORT_TLS_CERT_PATH: "/app/test-certs/client-cert.pem"
+CFGMS_TRANSPORT_TLS_KEY_PATH: "/app/test-certs/client-key.pem"
 ```
 
 **Recommendation**:

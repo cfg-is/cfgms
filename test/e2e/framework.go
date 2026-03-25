@@ -65,7 +65,7 @@ type E2ETestFramework struct {
 	// Core components
 	controller         *controller.Controller
 	stewards           map[string]*steward.Steward   // Standalone stewards (Phase 1)
-	registeredStewards map[string]*RegisteredSteward // MQTT-connected stewards (Phase 3)
+	registeredStewards map[string]*RegisteredSteward // gRPC-connected stewards (Phase 3)
 	certManager        *cert.Manager
 	rbacManager        rbac.RBACManager
 	terminalMgr        terminal.SessionManager
@@ -419,7 +419,7 @@ func (f *E2ETestFramework) CreateSteward(stewardID string) (*steward.Steward, er
 	}
 
 	// Story #294 Phase 1: Standalone steward mode doesn't need TLS certificates or controller connection
-	// Phase 2 will add controller + MQTT broker + registration flow with certificates
+	// Phase 2 will add controller + gRPC transport + registration flow with certificates
 
 	// Story #294 Phase 1: Implement standalone steward creation for E2E tests
 	// Use steward.NewStandalone() like integration tests do (see test/integration/standalone_steward_test.go)
@@ -456,7 +456,7 @@ resources:
 }
 
 // CreateRegistrationToken generates a registration token for steward registration
-// Story #294 Phase 2: Enable controller + steward registration via MQTT
+// Story #294 Phase 2: Enable controller + steward registration via gRPC transport
 func (f *E2ETestFramework) CreateRegistrationToken(tenantID string) (string, error) {
 	if f.controller == nil {
 		return "", fmt.Errorf("controller not initialized - cannot create registration token")
@@ -510,7 +510,7 @@ type RegistrationResponse struct {
 	CACert           string `json:"ca_cert,omitempty"`
 }
 
-// RegisterStewardWithController performs full steward registration flow via HTTP + MQTT
+// RegisterStewardWithController performs full steward registration flow via HTTP + gRPC transport
 // Story #294 Phase 3: Complete registration flow for E2E testing
 func (f *E2ETestFramework) RegisterStewardWithController(stewardName, tenantID string) (*RegisteredSteward, error) {
 	// Check if already registered (with read lock)
@@ -670,7 +670,7 @@ func (f *E2ETestFramework) RegisterStewardWithController(stewardName, tenantID s
 }
 
 // createTLSConfigFromPEM creates a TLS config from PEM-encoded certificates
-// Story #294 Phase 3: Helper for MQTT TLS setup
+// Story #294 Phase 3: Helper for mTLS setup
 func (f *E2ETestFramework) createTLSConfigFromPEM(caCertPEM, clientCertPEM, clientKeyPEM []byte) (*tls.Config, error) {
 	// Load CA certificate
 	caCertPool := x509.NewCertPool()

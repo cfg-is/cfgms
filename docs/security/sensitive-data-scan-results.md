@@ -31,7 +31,7 @@
 
 **Category A: Test Credentials (Non-Sensitive)**
 
-- **File**: `test/integration/mqtt_quic_integration_test.go:44`
+- **File**: `test/integration/transport_integration_test.go:44`
   - **Secret**: `cfgms_reg_test123456789abcdef`
   - **Type**: Test registration token in integration test
   - **Risk**: LOW - Test token, not production
@@ -120,7 +120,7 @@
   - `features/controller/certs/ca/ca.key`
   - `features/controller/certs/ca/server/server.key`
   - `features/controller/certs/263506570549843655839033408111061453186/key.pem`
-  - `test/integration/mqtt_quic/certs/*.pem` (5 files)
+  - `test/integration/transport/certs/*.pem` (5 files)
   - `test/unit/controller/certs/ca/server/server.key`
 
 - **Type**: Development/test TLS certificates
@@ -168,7 +168,7 @@
 
 - Searched for "customer", "client", "internal" in commit messages
 - Found 20 commits referencing "client" - all referring to:
-  - MQTT client (software component)
+  - Transport client (software component)
   - HTTP client (software component)
   - Multi-tenant client entities (data model)
 - Risk: NONE - Technical terminology, not actual customer names
@@ -220,7 +220,7 @@
 
 2. **Test Registration Tokens in Tests**
    - **Severity**: Low
-   - **File**: `test/integration/mqtt_quic_integration_test.go`
+   - **File**: `test/integration/transport_integration_test.go`
    - **Status**: Test-only tokens, not production
    - **Action**: None required
 

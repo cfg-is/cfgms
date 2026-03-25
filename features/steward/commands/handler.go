@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jordan Ritz
-// Package commands provides MQTT command handling for steward operations.
+// Package commands provides command handling for steward operations.
 //
-// This package implements the command handler that processes MQTT commands
+// This package implements the command handler that processes commands
 // from the controller and executes appropriate actions (Story #198).
 package commands
 
@@ -92,7 +92,7 @@ func (h *Handler) RegisterHandler(cmdType cpTypes.CommandType, handler CommandFu
 
 // HandleCommand processes an incoming control plane command.
 // Story #363: Now receives a pre-deserialized command from the ControlPlaneProvider
-// instead of raw topic/payload from MQTT.
+// instead of raw topic/payload from the transport layer.
 func (h *Handler) HandleCommand(ctx context.Context, cmd *cpTypes.Command) error {
 	h.logger.Debug("Received command", "id", cmd.ID, "type", cmd.Type)
 

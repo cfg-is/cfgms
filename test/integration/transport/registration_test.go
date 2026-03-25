@@ -14,7 +14,7 @@ import (
 )
 
 // RegistrationTestSuite tests end-to-end registration flow with gRPC transport.
-// AC1: HTTP registration returns transport_address (not mqtt_broker)
+// AC1: HTTP registration returns transport_address
 // AC2: Invalid/expired/revoked tokens rejected with 401
 // AC3: Concurrent registrations return unique steward IDs
 type RegistrationTestSuite struct {

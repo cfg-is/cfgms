@@ -262,12 +262,12 @@ func (s *SyntheticMonitoringSuite) TestAPIEndpointMonitoring() {
 
 // TestTerminalSessionMonitoring monitors terminal session health
 func (s *SyntheticMonitoringSuite) TestTerminalSessionMonitoring() {
-	// Story #294 Phase 4: Terminal monitoring with MQTT-connected stewards
+	// Story #294 Phase 4: Terminal monitoring with gRPC-connected stewards
 
 	err := s.framework.RunTest("terminal-session-monitoring", "synthetic-monitoring", func() error {
-		s.framework.logger.Info("Starting terminal session monitoring with MQTT stewards")
+		s.framework.logger.Info("Starting terminal session monitoring with gRPC stewards")
 
-		// Register steward with controller for terminal testing (Phase 3 MQTT framework)
+		// Register steward with controller for terminal testing (Phase 3 gRPC transport framework)
 		tenantID := "synthetic-terminal-tenant"
 		registered, err := s.framework.RegisterStewardWithController("synthetic-monitor-steward", tenantID)
 		if err != nil {
@@ -277,14 +277,14 @@ func (s *SyntheticMonitoringSuite) TestTerminalSessionMonitoring() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		// Steward is already connected via MQTT - verify connection
+		// Steward is already connected via gRPC transport - verify connection
 		if !registered.ControlPlane.IsConnected() {
 			return fmt.Errorf("steward control plane connection not established")
 		}
 		s.framework.logger.Info("gRPC steward connected for terminal monitoring",
 			"steward_id", registered.StewardID)
 
-		time.Sleep(500 * time.Millisecond) // Brief delay for MQTT connection stability
+		time.Sleep(500 * time.Millisecond) // Brief delay for gRPC connection stability
 
 		testDuration := 15 * time.Second
 		if s.framework.config.OptimizeForCI {
@@ -302,7 +302,7 @@ func (s *SyntheticMonitoringSuite) TestTerminalSessionMonitoring() {
 			sessionCount++
 			startTime := time.Now()
 
-			// Create test session using MQTT-connected steward
+			// Create test session using gRPC-connected steward
 			req := &terminal.SessionRequest{
 				StewardID: registered.StewardID,
 				UserID:    fmt.Sprintf("synthetic-user-%d", sessionCount),
@@ -448,11 +448,11 @@ func (s *SyntheticMonitoringSuite) TestResourceUsageMonitoring() {
 	s.Require().NoError(err)
 }
 
-// TestMQTTStewardHealthMonitoring monitors MQTT-connected steward health
-// Story #294 Phase 4: Synthetic monitoring for MQTT+QUIC stewards
-func (s *SyntheticMonitoringSuite) TestMQTTStewardHealthMonitoring() {
-	err := s.framework.RunTest("mqtt-steward-health-monitoring", "synthetic-monitoring", func() error {
-		s.framework.logger.Info("Starting MQTT steward health monitoring")
+// TestTransportStewardHealthMonitoring monitors gRPC-connected steward health
+// Story #294 Phase 4: Synthetic monitoring for gRPC-over-QUIC stewards
+func (s *SyntheticMonitoringSuite) TestTransportStewardHealthMonitoring() {
+	err := s.framework.RunTest("transport-steward-health-monitoring", "synthetic-monitoring", func() error {
+		s.framework.logger.Info("Starting transport steward health monitoring")
 
 		// Register stewards with controller for monitoring
 		stewardCount := 2
@@ -511,7 +511,7 @@ func (s *SyntheticMonitoringSuite) TestMQTTStewardHealthMonitoring() {
 			responseTime := time.Since(startTime)
 
 			result := SyntheticTestResult{
-				TestName:     "mqtt-steward-health",
+				TestName:     "transport-steward-health",
 				Timestamp:    startTime,
 				Success:      allHealthy,
 				ResponseTime: responseTime,
@@ -526,12 +526,12 @@ func (s *SyntheticMonitoringSuite) TestMQTTStewardHealthMonitoring() {
 				result.ErrorMessage = fmt.Sprintf("%d stewards disconnected: %v",
 					len(disconnectedStewards), disconnectedStewards)
 				s.generateAlert("warning",
-					fmt.Sprintf("MQTT stewards disconnected: %v", disconnectedStewards),
-					"mqtt-steward-health-monitoring")
+					fmt.Sprintf("Transport stewards disconnected: %v", disconnectedStewards),
+					"transport-steward-health-monitoring")
 			}
 
 			healthCheckResults = append(healthCheckResults, result)
-			s.recordTestResult("mqtt-steward-health", result)
+			s.recordTestResult("transport-steward-health", result)
 
 			time.Sleep(checkInterval)
 		}
@@ -548,11 +548,11 @@ func (s *SyntheticMonitoringSuite) TestMQTTStewardHealthMonitoring() {
 		minSuccessRate := 90.0
 
 		if successRate < minSuccessRate {
-			return fmt.Errorf("MQTT steward health check success rate too low: %.2f%% < %.2f%%",
+			return fmt.Errorf("transport steward health check success rate too low: %.2f%% < %.2f%%",
 				successRate, minSuccessRate)
 		}
 
-		s.framework.logger.Info("MQTT steward health monitoring completed",
+		s.framework.logger.Info("Transport steward health monitoring completed",
 			"total_checks", len(healthCheckResults),
 			"success_rate_percent", fmt.Sprintf("%.2f", successRate),
 			"stewards_monitored", len(registeredStewards))
@@ -568,20 +568,20 @@ func (s *SyntheticMonitoringSuite) TestMQTTStewardHealthMonitoring() {
 func (s *SyntheticMonitoringSuite) performComponentHealthChecks() map[string]string {
 	componentHealth := make(map[string]string)
 
-	// Check controller health (includes MQTT broker)
+	// Check controller health (includes gRPC transport)
 	if s.framework.controller != nil {
 		componentHealth["controller"] = "healthy"
-		// MQTT broker is embedded in controller (Story #294 Phase 4)
-		componentHealth["mqtt-broker"] = "healthy"
+		// gRPC transport is embedded in controller (Story #294 Phase 4)
+		componentHealth["grpc-transport"] = "healthy"
 	} else {
 		componentHealth["controller"] = "unhealthy"
-		componentHealth["mqtt-broker"] = "unhealthy"
+		componentHealth["grpc-transport"] = "unhealthy"
 	}
 
-	// Check registered stewards health via MQTT (Story #294 Phase 4)
+	// Check registered stewards health via gRPC transport (Story #294 Phase 4)
 	registeredCount := len(s.framework.registeredStewards)
 	if registeredCount > 0 {
-		// Count healthy MQTT connections
+		// Count healthy gRPC connections
 		healthyCount := 0
 		for _, registered := range s.framework.registeredStewards {
 			if registered.ControlPlane != nil && registered.ControlPlane.IsConnected() {
@@ -589,11 +589,11 @@ func (s *SyntheticMonitoringSuite) performComponentHealthChecks() map[string]str
 			}
 		}
 		if healthyCount == registeredCount {
-			componentHealth["mqtt-stewards"] = "healthy"
+			componentHealth["transport-stewards"] = "healthy"
 		} else if healthyCount > 0 {
-			componentHealth["mqtt-stewards"] = "degraded"
+			componentHealth["transport-stewards"] = "degraded"
 		} else {
-			componentHealth["mqtt-stewards"] = "unhealthy"
+			componentHealth["transport-stewards"] = "unhealthy"
 		}
 	}
 

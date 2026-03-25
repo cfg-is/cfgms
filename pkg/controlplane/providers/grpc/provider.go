@@ -4,8 +4,8 @@
 // Package grpc provides a gRPC-over-QUIC control plane provider implementation.
 //
 // This provider implements the ControlPlaneProvider interface using a persistent
-// bidirectional gRPC ControlChannel stream per steward, replacing the MQTT broker
-// with direct controller-steward communication over QUIC.
+// bidirectional gRPC ControlChannel stream per steward, enabling direct
+// controller-steward communication over QUIC.
 package grpc
 
 import (

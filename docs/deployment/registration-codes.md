@@ -195,7 +195,7 @@ When a steward starts with `--regtoken`:
 2. **Submit token** — controller validates: token exists, not revoked, not expired, not already used (if single-use)
 3. **Receive certificates** — controller provisions mTLS certificates for ongoing communication
 4. **Generate steward_id** — controller creates a unique ID with tenant prefix: `{tenant_id}-{uuid}`
-5. **Switch to MQTT+QUIC** — steward establishes control plane (MQTT, port 1883) and data plane (QUIC, port 4433)
+5. **Switch to gRPC-over-QUIC** — steward establishes transport connection (gRPC-over-QUIC, port 4433)
 6. **Begin operations** — heartbeats, config sync, status reporting
 
 After initial registration, the steward reconnects automatically on restart using its stored certificates. The registration token is only used once per steward.
@@ -298,7 +298,7 @@ One binary hash per platform — all tenants use the same signed binary.
 **Solution**:
 - Verify controller is running and listening on port 9080
 - Check network connectivity: `curl -k https://controller-host:9080/api/v1/health`
-- Verify firewall allows TCP ports 9080 (REST), 1883 (MQTT), 4433 (QUIC/UDP)
+- Verify firewall allows TCP port 9080 (REST) and UDP port 4433 (gRPC-over-QUIC)
 - Confirm the binary was built with the correct controller URL
 
 ### Registration Rejected
@@ -324,12 +324,12 @@ One binary hash per platform — all tenants use the same signed binary.
 
 ### Completed (Story #198)
 
-- MQTT-based registration with `--regtoken`
+- Transport-based registration with `--regtoken`
 - Controller tenant validation
 - Steward_id generation with tenant prefix
 - Token expiration and single-use support
 - mTLS certificate provisioning during registration
-- Session-based QUIC authentication
+- Session-based gRPC-over-QUIC authentication
 
 ### Completed (Story #421)
 

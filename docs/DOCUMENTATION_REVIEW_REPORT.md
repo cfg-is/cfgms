@@ -35,7 +35,7 @@ Reviewed 68 documentation files across 13 categories. **All critical and major i
 
 **Resolution** (Commit 2165a80):
 
-- Updated 4 gRPC references to MQTT+QUIC
+- Updated 4 gRPC references to gRPC-over-QUIC
 - Confirmed NOT redundant - serves different purpose (technical details vs. root overview)
 - Updated protocol references throughout
 - Preserved valuable platform-specific content
@@ -55,7 +55,7 @@ Reviewed 68 documentation files across 13 categories. **All critical and major i
 
 ### Files Referencing Outdated gRPC Communication ✅ ALL 14 FILES RESOLVED
 
-**Issue**: Multiple files reference gRPC when system now uses MQTT+QUIC protocol
+**Issue**: Multiple files reference gRPC when system now uses gRPC-over-QUIC protocol
 
 **Resolution Summary** (Commits 5b9c8b1, 2165a80):
 
@@ -64,13 +64,13 @@ All 14 files were reviewed and updated appropriately:
 1. ✅ `docs/product/roadmap.md` - Historical references only, kept for context
 2. ✅ `docs/architecture/ha-commercial-split.md` - Historical reference, kept for context
 3. ✅ `docs/product/v0.7.0-epic.md` - Historical task list, kept as-is
-4. ✅ `docs/operations/production-runbooks.md` - **UPDATED**: 4 references to MQTT+QUIC
-5. ✅ `docs/architecture.md` - **UPDATED**: 4 references to MQTT+QUIC (see Critical #2)
+4. ✅ `docs/operations/production-runbooks.md` - **UPDATED**: 4 references to gRPC-over-QUIC
+5. ✅ `docs/architecture.md` - **UPDATED**: 4 references to gRPC-over-QUIC (see Critical #2)
 6. ✅ `docs/security/architecture.md` - **UPDATED**: 2 references + configuration examples
 7. ✅ `docs/security/zero_trust_security_analysis.md` - **UPDATED**: 1 reference
 8. ✅ `docs/api/rest-api.md` - No gRPC references found
 9. ✅ `docs/architecture/grpc-usage-analysis.md` - **MARKED HISTORICAL** with prominent header
-10. ✅ `docs/architecture/mqtt-quic-protocol.md` - Already correct (documents new protocol)
+10. ✅ `docs/architecture/communication-layer-migration.md` - Already correct (documents current transport)
 11. ✅ `docs/terminology.md` - **UPDATED**: 2 mermaid diagrams
 12. ✅ `docs/monitoring.md` - **UPDATED**: 1 reference
 13. ✅ `docs/examples/monitoring/grafana-dashboard.json` - Reviewed, no updates needed
@@ -78,8 +78,8 @@ All 14 files were reviewed and updated appropriately:
 
 **Key Changes:**
 
-- Updated active protocol references to "MQTT+QUIC hybrid protocol"
-- Added configuration examples showing MQTT control plane and QUIC data plane
+- Updated active protocol references to "gRPC-over-QUIC hybrid protocol"
+- Added configuration examples showing gRPC control plane and gRPC data plane
 - Preserved historical references in roadmap and epic documents for context
 - Marked deprecated design documents with "HISTORICAL DOCUMENT" headers
 
@@ -213,7 +213,7 @@ The following files appear accurate and ready for OSS launch:
 
 ### High Priority (Within 1 Week of Launch) ✅ 2/3 COMPLETE
 
-1. ✅ **COMPLETE**: Update all gRPC references in the 14 affected files to MQTT+QUIC (Commits 5b9c8b1, 2165a80)
+1. ✅ **COMPLETE**: Update all gRPC references in the 14 affected files to gRPC-over-QUIC (Commits 5b9c8b1, 2165a80)
 2. ✅ **COMPLETE**: Review operations/production-runbooks.md for internal infrastructure details (Updated - Commit 5b9c8b1)
 3. ⚠️ **REMAINING**: Update dates on files with 2024-04 or earlier timestamps (LOW PRIORITY - cosmetic only)
 
@@ -221,7 +221,7 @@ The following files appear accurate and ready for OSS launch:
 
 1. **Review terminology.md** for accuracy (may already be complete - needs verification)
 2. **Create missing diagrams** referenced in documentation
-3. **Add examples** for new MQTT+QUIC protocol usage (some examples added in security/architecture.md)
+3. **Add examples** for new gRPC-over-QUIC protocol usage (some examples added in security/architecture.md)
 4. **Update examples/monitoring/** configs to reflect current architecture
 
 ### Low Priority (Future Improvement)
@@ -251,7 +251,7 @@ The following files appear accurate and ready for OSS launch:
 ## Architecture & Design
 - [Plugin Architecture](architecture/plugin-architecture.md)
 - [Storage Architecture](architecture/git-backend-design.md)
-- [MQTT+QUIC Protocol](architecture/archived/mqtt-quic-protocol.md) *(archived — replaced by gRPC-over-QUIC)*
+- [Communication Layer Migration](architecture/communication-layer-migration.md) - Transport architecture
 - [Module System](architecture/modules/README.md)
 - [Architecture Decisions](architecture/decisions/README.md)
 

@@ -99,9 +99,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Controller, error) {
 		nil,                             // platformMonitor - will be integrated in this story completion
 		nil,                             // tracer - will be integrated in Phase 5
 		srv.GetHAManager(),              // HA manager
-		srv.GetRegistrationTokenStore(), // registrationTokenStore - now wired for MQTT+QUIC mode
+		srv.GetRegistrationTokenStore(), // registrationTokenStore - wired for gRPC transport mode
 		srv.GetSignerCertSerial(),       // Story #378: signer cert serial for registration
-		nil,                             // healthCollector - wired in server.New() for MQTT+QUIC mode
+		nil,                             // healthCollector - wired in server.New() for gRPC transport mode
 	)
 	if err != nil {
 		return nil, err

@@ -7,7 +7,7 @@
 
 This guide helps diagnose and resolve connectivity issues in CFGMS deployments. As of Phase 10.11,
 all controller-steward communication uses the unified **gRPC-over-QUIC transport** on port 4433 (UDP).
-The previous MQTT (port 1883) and standalone QUIC data plane have been removed.
+The previous transport (port 1883) and standalone QUIC data plane have been removed.
 
 ## Table of Contents
 
@@ -31,7 +31,7 @@ docker ps
 # Expected output should show:
 # - controller (or controller-standalone)
 # - steward (or steward-standalone)
-# (No separate mqtt-broker required)
+# (No separate broker required)
 
 # 2. Check for errors in logs
 docker compose logs | grep -i error
@@ -485,4 +485,4 @@ If issues persist after following this guide:
 - **E2E Testing Guide**: [docs/testing/e2e-testing-guide.md](../testing/e2e-testing-guide.md)
 - **Home Lab Deployment**: [docs/deployment/home-lab-deployment-guide.md](../deployment/home-lab-deployment-guide.md)
 - **Transport Architecture**: [docs/architecture/communication-layer-migration.md](../architecture/communication-layer-migration.md)
-- **Archived: MQTT+QUIC Strategy**: [docs/testing/archived/mqtt-quic-testing-strategy.md](../testing/archived/mqtt-quic-testing-strategy.md)
+- **Transport Architecture**: See [communication-layer-migration.md](../architecture/communication-layer-migration.md) for current transport design

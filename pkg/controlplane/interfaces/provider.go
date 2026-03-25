@@ -3,7 +3,7 @@
 // Package interfaces defines the pluggable control plane abstraction for CFGMS.
 //
 // The control plane handles commands, events, and heartbeats between controller
-// and stewards, abstracting away transport-specific details (MQTT, gRPC, etc.).
+// and stewards, abstracting away transport-specific details (gRPC, WebSocket, etc.).
 package interfaces
 
 import (
@@ -21,7 +21,7 @@ import (
 //
 // Implementations must be thread-safe and support concurrent operations.
 type ControlPlaneProvider interface {
-	// Name returns the provider name (e.g., "mqtt", "grpc", "websocket")
+	// Name returns the provider name (e.g., "grpc", "websocket")
 	Name() string
 
 	// Description returns a human-readable description

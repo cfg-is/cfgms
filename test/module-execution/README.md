@@ -8,7 +8,7 @@ This workspace is mounted into the `steward-standalone` Docker container at `/te
 
 ## Usage
 
-The integration tests in `test/integration/mqtt_quic/module_execution_test.go` use this workspace to:
+The integration tests in `test/integration/transport/module_execution_test.go` use this workspace to:
 
 1. **File Module Testing**: Verify that file modules create files with correct content and permissions
 2. **Directory Module Testing**: Validate directory creation with proper permissions and structure

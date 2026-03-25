@@ -472,7 +472,7 @@ func (ca *CA) GenerateSigningCertificate(config *SigningCertConfig) (*Certificat
 	}, nil
 }
 
-// GenerateInternalServerCertificate creates a server certificate for internal mTLS (MQTT + QUIC).
+// GenerateInternalServerCertificate creates a server certificate for internal mTLS (gRPC-over-QUIC).
 // This has the same properties as GenerateServerCertificate but returns CertificateTypeInternalServer.
 func (ca *CA) GenerateInternalServerCertificate(config *ServerCertConfig) (*Certificate, error) {
 	cert, err := ca.GenerateServerCertificate(config)

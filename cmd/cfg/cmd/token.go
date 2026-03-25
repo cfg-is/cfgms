@@ -140,7 +140,7 @@ func init() {
 
 	// Create command flags
 	tokenCreateCmd.Flags().StringVar(&tokenTenantID, "tenant-id", "", "Tenant ID (required)")
-	tokenCreateCmd.Flags().StringVar(&tokenControllerURL, "controller-url", "", "Controller MQTT URL for steward connections (required)")
+	tokenCreateCmd.Flags().StringVar(&tokenControllerURL, "controller-url", "", "Controller transport URL for steward connections (required)")
 	tokenCreateCmd.Flags().StringVar(&tokenGroup, "group", "", "Optional group identifier")
 	tokenCreateCmd.Flags().StringVar(&tokenExpiresIn, "expires", "", "Expiration duration (e.g., 24h, 7d, 30d)")
 	tokenCreateCmd.Flags().BoolVar(&tokenSingleUse, "single-use", false, "Token can only be used once")

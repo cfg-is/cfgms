@@ -107,9 +107,9 @@ go test -v -timeout 10m
 
 - [ ] TestControllerStartup - Controller starts successfully
 - [ ] TestControllerAPI - HTTP API accessible
-- [ ] TestStewardConnection - Steward connects via MQTT+QUIC
+- [ ] TestStewardConnection - Steward connects via gRPC-over-QUIC
 - [ ] TestStorageInitialization - Git storage initialized
-- [ ] TestMQTTBroker - MQTT broker running
+- [ ] TestTransportServer - Transport server running
 - [ ] TestModuleExecution - Module execution validated
 - [ ] TestCertificateManagement - TLS configuration correct
 
@@ -149,14 +149,9 @@ logging:
   file:
     directory: /tmp/cfgms-release-logs
 
-mqtt:
-  enabled: true
-  listen_addr: "127.0.0.1:1883"
-  enable_tls: true
-
-quic:
-  enabled: true
+transport:
   listen_addr: "127.0.0.1:4433"
+  use_cert_manager: true
 EOF
 
 mkdir -p /tmp/cfgms-release-{storage,certs,logs}
@@ -338,7 +333,7 @@ Manually verify key documentation claims:
 
 - [ ] Registration token creation works
 - [ ] Steward CLI flags are correct
-- [ ] MQTT+QUIC configuration complete
+- [ ] gRPC-over-QUIC transport configuration complete
 
 **Exit Criteria:**
 
@@ -361,7 +356,7 @@ go test -v -bench=. -benchtime=10s
 **Metrics to Record:**
 
 - [ ] Configuration apply time (target: < 100ms for 100 resources)
-- [ ] MQTT message throughput (target: > 1000 msg/sec)
+- [ ] Transport message throughput (target: > 1000 msg/sec)
 - [ ] Storage operation latency (target: < 50ms p99)
 - [ ] Memory usage under load (target: < 500MB)
 

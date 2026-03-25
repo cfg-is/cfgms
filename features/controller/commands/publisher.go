@@ -71,7 +71,7 @@ func New(cfg *Config) (*Publisher, error) {
 }
 
 // PublishCommand publishes a command to a specific steward.
-// Story #363: Uses ControlPlaneProvider.SendCommand() instead of direct MQTT publish.
+// Story #363: Uses ControlPlaneProvider.SendCommand() for delivery.
 func (p *Publisher) PublishCommand(ctx context.Context, stewardID string, cmdType controlplaneTypes.CommandType, params map[string]interface{}) (string, error) {
 	// Generate unique command ID
 	commandID := uuid.New().String()
@@ -135,7 +135,7 @@ func (p *Publisher) PublishCommandWithCallback(
 }
 
 // HandleEventUpdate processes an event from a steward via the ControlPlaneProvider.
-// Story #363: Replaces HandleStatusUpdate which used direct MQTT messages.
+// Story #363: Replaces HandleStatusUpdate via ControlPlaneProvider events.
 func (p *Publisher) HandleEventUpdate(ctx context.Context, event *controlplaneTypes.Event) error {
 	// Check if this relates to a pending command
 	if event.CommandID != "" {
@@ -192,7 +192,7 @@ func (p *Publisher) handleCommandTimeout(commandID string) {
 }
 
 // Start subscribes to event updates from all stewards via ControlPlaneProvider.
-// Story #363: Uses SubscribeEvents() instead of direct MQTT subscription.
+// Story #363: Uses SubscribeEvents() via ControlPlaneProvider.
 func (p *Publisher) Start(ctx context.Context) error {
 	// Subscribe to command-related events from stewards
 	// Filter for command completion/failure events

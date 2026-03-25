@@ -43,7 +43,7 @@ If you're new to the project, start with these essential documents:
 
 ### Historical Design Documents
 
-- [gRPC Usage Analysis](architecture/grpc-usage-analysis.md) - Historical: Why we migrated from gRPC to MQTT+QUIC
+- [gRPC Usage Analysis](architecture/grpc-usage-analysis.md) - Historical: Analysis that led to the gRPC-over-QUIC unified transport
 
 ## Development Guides
 
