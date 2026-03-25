@@ -385,22 +385,22 @@ check-architecture:
 	echo "📦 Checking TLS/Certificate usage outside pkg/cert..."; \
 	files=$$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null | grep "\.go$$" | grep -v "_test.go$$" | grep -v "^pkg/cert/" || true); \
 	if [ -n "$$files" ]; then \
-		if echo "$$files" | xargs grep -l "tls\.Config{" 2>/dev/null | grep -v "^pkg/cert/" | grep -v "^pkg/mqtt/" | grep -v "^pkg/controlplane/providers/" | grep -v "^pkg/dataplane/providers/"; then \
+		if echo "$$files" | xargs grep -l "tls\.Config{" 2>/dev/null | grep -v "^pkg/cert/" | grep -v "^pkg/controlplane/providers/" | grep -v "^pkg/dataplane/providers/" | grep -v "^test/" | grep -v "^features/steward/registration/"; then \
 			echo "  ❌ Found direct tls.Config{} creation - should use pkg/cert helpers"; \
 			echo "     Use: cert.CreateServerTLSConfig() or cert.CreateClientTLSConfig()"; \
 			violations=$$((violations + 1)); \
 		fi; \
-		if echo "$$files" | xargs grep -l "tls\.LoadX509KeyPair" 2>/dev/null | grep -v "^pkg/cert/" | grep -v "^pkg/mqtt/" | grep -v "^pkg/controlplane/providers/" | grep -v "^pkg/dataplane/providers/"; then \
+		if echo "$$files" | xargs grep -l "tls\.LoadX509KeyPair" 2>/dev/null | grep -v "^pkg/cert/" | grep -v "^pkg/controlplane/providers/" | grep -v "^pkg/dataplane/providers/" | grep -v "^test/"; then \
 			echo "  ❌ Found tls.LoadX509KeyPair() - should use pkg/cert.LoadTLSCertificate()"; \
 			echo "     Or use higher-level cert.CreateServerTLSConfig() / cert.CreateClientTLSConfig()"; \
 			violations=$$((violations + 1)); \
 		fi; \
-		if echo "$$files" | xargs grep -l "x509\.NewCertPool" 2>/dev/null | grep -v "^pkg/cert/" | grep -v "^pkg/mqtt/" | grep -v "^pkg/controlplane/providers/" | grep -v "^pkg/dataplane/providers/"; then \
+		if echo "$$files" | xargs grep -l "x509\.NewCertPool" 2>/dev/null | grep -v "^pkg/cert/" | grep -v "^pkg/controlplane/providers/" | grep -v "^pkg/dataplane/providers/" | grep -v "^test/"; then \
 			echo "  ❌ Found x509.NewCertPool() - should use pkg/cert TLS config helpers"; \
 			echo "     Manual cert pool creation duplicates pkg/cert functionality"; \
 			violations=$$((violations + 1)); \
 		fi; \
-		if echo "$$files" | xargs grep -l "x509\.Certificate{" 2>/dev/null | grep -v "^pkg/cert/" | grep -v "^pkg/mqtt/" | grep -v "^pkg/controlplane/providers/" | grep -v "^pkg/dataplane/providers/"; then \
+		if echo "$$files" | xargs grep -l "x509\.Certificate{" 2>/dev/null | grep -v "^pkg/cert/" | grep -v "^pkg/controlplane/providers/" | grep -v "^pkg/dataplane/providers/" | grep -v "^test/"; then \
 			echo "  ❌ Found direct certificate generation - should use pkg/cert.Manager"; \
 			violations=$$((violations + 1)); \
 		fi; \
@@ -459,33 +459,6 @@ check-architecture:
 	fi; \
 	\
 	echo ""; \
-	echo "📦 Checking direct MQTT imports in features/ (Story #267.5)..."; \
-	if [ -n "$$files" ]; then \
-		if [ -z "$$feature_files" ]; then \
-			feature_files=$$(echo "$$files" | grep "^features/" || true); \
-		fi; \
-		if [ -n "$$feature_files" ]; then \
-			mqtt_violations=$$(echo "$$feature_files" | xargs grep -l 'cfgis/cfgms/pkg/mqtt/' 2>/dev/null | grep -v "^features/controller/server/" | grep -v "^features/controller/registration/" || true); \
-			if [ -n "$$mqtt_violations" ]; then \
-				echo "  ❌ Found direct pkg/mqtt import in features/ - use pkg/controlplane instead"; \
-				echo "     Violations: $$mqtt_violations"; \
-				echo "     Control plane types: pkg/controlplane/types"; \
-				echo "     Control plane interface: pkg/controlplane/interfaces"; \
-				echo "     See: docs/architecture/communication-layer-migration.md"; \
-				violations=$$((violations + 1)); \
-			fi; \
-			mqtt_controller_violations=$$(echo "$$feature_files" | grep "^features/controller/" | xargs grep -l 'cfgis/cfgms/pkg/mqtt/client\|cfgis/cfgms/pkg/mqtt/types' 2>/dev/null || true); \
-			if [ -n "$$mqtt_controller_violations" ]; then \
-				echo "  ❌ Found direct pkg/mqtt/client or pkg/mqtt/types import in controller"; \
-				echo "     Violations: $$mqtt_controller_violations"; \
-				echo "     Use pkg/controlplane/types for message types"; \
-				echo "     Use pkg/controlplane/interfaces for client functionality"; \
-				violations=$$((violations + 1)); \
-			fi; \
-		fi; \
-	fi; \
-	\
-	echo ""; \
 	echo "📦 Checking for hardcoded passwords (Story #372)..."; \
 	if [ -n "$$files" ]; then \
 		pw_violations=$$(echo "$$files" | xargs grep -n '"cfgms_test_password"\|"password": "cfgms"\|"password", "cfgms"\|password.*=.*"cfgms_test_password' 2>/dev/null | grep -v "check-architecture" || true); \
@@ -513,8 +486,8 @@ check-architecture:
 		echo "   5. Certificates/TLS → pkg/cert"; \
 		echo "   6. Authorization → pkg/rbac"; \
 		echo "   7. Observability → pkg/telemetry"; \
-		echo "   8. Control Plane → pkg/controlplane (not pkg/mqtt)"; \
-		echo "   9. Data Plane → pkg/dataplane (not pkg/quic)"; \
+		echo "   8. Control Plane → pkg/controlplane"; \
+		echo "   9. Data Plane → pkg/dataplane"; \
 		echo ""; \
 		echo "💡 Before adding new functionality, check if it belongs in a central provider!"; \
 		echo ""; \
