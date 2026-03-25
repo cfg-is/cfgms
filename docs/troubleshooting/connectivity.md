@@ -1,23 +1,24 @@
 # CFGMS Connectivity Troubleshooting Guide
 
-**Story #378**: Comprehensive troubleshooting procedures for MQTT+QUIC connectivity and E2E flow issues.
-
-**Last Updated**: 2026-02-12
-**CFGMS Version**: v0.9.x
+**Last Updated**: 2026-03-25 (updated for gRPC-over-QUIC transport, Phase 10.12)
+**CFGMS Version**: v0.9.x+
 
 ## Overview
 
-This guide helps diagnose and resolve connectivity issues in CFGMS deployments, focusing on the MQTT+QUIC hybrid communication architecture.
+This guide helps diagnose and resolve connectivity issues in CFGMS deployments. As of Phase 10.11,
+all controller-steward communication uses the unified **gRPC-over-QUIC transport** on port 4433 (UDP).
+The previous MQTT (port 1883) and standalone QUIC data plane have been removed.
 
 ## Table of Contents
 
 1. [Quick Diagnostic](#quick-diagnostic)
-2. [MQTT Connectivity Issues](#mqtt-connectivity-issues)
-3. [QUIC Connectivity Issues](#quic-connectivity-issues)
-4. [Certificate and TLS Issues](#certificate-and-tls-issues)
+2. [Transport Connectivity Issues](#transport-connectivity-issues)
+3. [TLS and mTLS Issues](#tls-and-mtls-issues)
+4. [gRPC Stream Issues](#grpc-stream-issues)
 5. [Config Sync Issues](#config-sync-issues)
-6. [Performance Issues](#performance-issues)
-7. [Advanced Debugging](#advanced-debugging)
+6. [Reconnection Issues](#reconnection-issues)
+7. [Performance Issues](#performance-issues)
+8. [Advanced Debugging](#advanced-debugging)
 
 ## Quick Diagnostic
 
@@ -29,599 +30,432 @@ docker ps
 
 # Expected output should show:
 # - controller (or controller-standalone)
-# - mqtt-broker
 # - steward (or steward-standalone)
+# (No separate mqtt-broker required)
 
 # 2. Check for errors in logs
 docker compose logs | grep -i error
 
 # 3. Run E2E diagnostic test
-cd test/integration/mqtt_quic
+cd test/integration/transport
 go test -v -run TestE2EFlowDiagnostic
 
-# This will show exactly which phase fails (1-8)
+# This will show exactly which phase fails
 ```
 
 ### Diagnostic Test Output Interpretation
 
 ```
-📡 Phase 1 PASS: MQTT connection established
-🌐 Phase 2 PASS: REST API accessible
-📤 Phase 3 PASS: Configuration uploaded
-📬 Phase 4 PASS: Subscribed to config status
-🔗 Phase 5 PASS: QUIC connection command published
-🔄 Phase 6 PASS: Config sync command published
-📥 Phase 7 PASS: Status report received
-⚙️  Phase 8 PASS: Module executed and file created
+🌐 Phase 1 PASS: REST API accessible
+📤 Phase 2 PASS: Configuration uploaded
+🔗 Phase 3 PASS: Transport connection established
+🔄 Phase 4 PASS: Config sync command delivered
+📥 Phase 5 PASS: Status report received
+⚙️  Phase 6 PASS: Module executed and file created
 ```
 
-**If Phase 1-2 fail**: [MQTT Connectivity Issues](#mqtt-connectivity-issues)
-**If Phase 3-4 fail**: [REST API / Config Upload Issues](#rest-api-issues)
-**If Phase 5-6 fail**: [MQTT Command Delivery Issues](#mqtt-command-issues)
-**If Phase 7 fails**: [QUIC / Signature / Executor Issues](#config-sync-issues)
-**If Phase 8 fails**: [Module Execution Issues](#module-execution-issues)
+**If Phase 1 fails**: [REST API Issues](#rest-api-issues)
+**If Phase 2 fails**: [Config Upload Issues](#config-sync-issues)
+**If Phase 3 fails**: [Transport Connectivity Issues](#transport-connectivity-issues)
+**If Phase 4–5 fail**: [gRPC Stream Issues](#grpc-stream-issues)
+**If Phase 6 fails**: Module execution issues (check steward logs)
 
-## MQTT Connectivity Issues
+## Transport Connectivity Issues
 
-### Issue: "MQTT connection timeout"
+The transport layer uses **QUIC (UDP) on port 4433** for all controller-steward communication.
+Common causes of transport failures:
+
+### Issue: "Connection refused on port 4433"
 
 **Symptoms**:
-- Steward logs show "Failed to connect to MQTT broker"
-- Controller logs show "MQTT client disconnected"
-- Diagnostic test Phase 1 fails
+- Steward logs show "failed to connect to controller transport"
+- `nc -zuv controller-vm 4433` reports no response
 
 **Root Causes & Solutions**:
 
-**1. MQTT Broker Not Running**
+**1. Controller Not Running**
 
 ```bash
-# Check if mqtt-broker container is running
-docker ps | grep mqtt-broker
+# Check controller status
+systemctl status cfgms-controller
+# or for Docker:
+docker ps | grep controller
 
-# If not running, start it
-docker compose up -d mqtt-broker
-
-# Wait 5 seconds and check logs
-docker logs mqtt-broker
-
-# Should see: "mochi mqtt server started" and "listening on :1886"
+# Start if not running
+systemctl start cfgms-controller
 ```
 
-**2. Port Not Accessible**
+**2. Port Not Listening**
 
 ```bash
-# Check if port 1886 is listening
-sudo lsof -i :1886
+# Check UDP port 4433 is listening
+sudo ss -ulnp | grep 4433
+# or:
+sudo netstat -ulnp | grep 4433
 
-# Expected: mqtt-broker process listening
+# Expected: controller process bound to 0.0.0.0:4433
 
-# If port conflict exists, change MQTT port in docker-compose.yml
-# or stop conflicting process
+# If not listening, check controller config:
+grep -A5 "transport:" /etc/cfgms/controller.cfg
+# listen_addr must be "0.0.0.0:4433" (not 127.0.0.1)
 ```
 
-**3. Network Isolation (Docker)**
+**3. Firewall Blocking UDP**
+
+```bash
+# QUIC uses UDP — many firewalls default to TCP-only
+sudo ufw status
+sudo ufw allow 4433/udp
+
+# Or iptables:
+sudo iptables -A INPUT -p udp --dport 4433 -j ACCEPT
+```
+
+**4. Container Networking (Docker)**
 
 ```bash
 # Verify containers are on same network
-docker network ls
 docker network inspect cfgms_default
 
-# All CFGMS containers should be in "cfgms_default" or similar network
-
-# If not, recreate network
-docker compose down
-docker compose up -d
+# Check port mapping
+docker ps --format "table {{.Names}}\t{{.Ports}}"
+# controller should show: 0.0.0.0:4433->4433/udp
 ```
 
-**4. Firewall Blocking Connections**
-
-```bash
-# Check firewall status (Linux)
-sudo ufw status
-
-# Allow MQTT ports if needed
-sudo ufw allow 1883/tcp
-sudo ufw allow 1886/tcp
-
-# Or disable firewall temporarily for testing
-sudo ufw disable
-```
-
-**5. TLS Certificate Issues**
-
-```bash
-# Check controller has valid certificates
-docker logs controller | grep "Certificate manager initialized"
-docker logs controller | grep "Generated.*certificate"
-
-# Check steward has certificates from registration
-docker logs steward-standalone | grep "Registration successful"
-
-# If certificates missing, verify registration flow:
-docker logs steward-standalone | grep -i "registration"
-```
-
-### Issue: "MQTT authentication failed"
+### Issue: "Transport connection timeout"
 
 **Symptoms**:
-- Logs show "authentication failed" or "not authorized"
-- Connection attempts immediately rejected
+- Connection attempts hang without response
+- No entries in controller logs for attempted connection
 
-**Solutions**:
-
-```bash
-# 1. Check MQTT broker authentication settings
-docker exec mqtt-broker ps aux | grep mqtt
-
-# 2. Verify steward has valid client certificates
-docker exec steward-standalone ls -la /etc/cfgms/certs/
-
-# Expected: client.pem, client-key.pem, ca.pem
-
-# 3. Check certificate fingerprints match
-docker logs controller | grep "Fingerprint"
-docker logs steward-standalone | grep "Fingerprint"
-
-# Steward's CA fingerprint should match controller's CA fingerprint
-```
-
-## QUIC Connectivity Issues
-
-### Issue: "QUIC connection failed" or "timeout connecting to QUIC server"
-
-**Symptoms**:
-- Steward logs show "Failed to establish QUIC connection"
-- Diagnostic test Phase 7 fails (never receives status report)
-- Story #378 signature verification failures
-
-**Root Causes & Solutions**:
-
-**1. QUIC Port Not Accessible**
+**Diagnostic**:
 
 ```bash
-# From steward container, test QUIC port connectivity
-docker exec steward-standalone sh -c "nc -zv controller-standalone 4433"
+# From steward host, test UDP reachability:
+# (nc -zu is unreliable for QUIC; check controller logs instead)
+docker logs controller | grep "transport\|QUIC\|connection"
 
-# Expected: "Connection to controller-standalone 4433 port [tcp/*] succeeded!"
-
-# If connection fails:
-# - Check controller is running
-# - Check port 4433 is exposed in docker-compose.yml
-# - Check no firewall blocking port 4433
+# Check steward logs for where the timeout occurs
+docker logs steward-standalone | grep "transport\|dial\|timeout"
 ```
 
-**2. Controller QUIC Server Not Started**
+## TLS and mTLS Issues
 
-```bash
-# Check controller logs for QUIC server startup
-docker logs controller | grep -i "quic"
-
-# Expected: "QUIC server listening on :4433" or similar
-
-# If not found:
-# - Controller may have failed to start QUIC server
-# - Check for errors in controller startup
-# - Verify QUIC configuration in controller config
-```
-
-**3. mTLS Handshake Failure**
-
-```bash
-# Check steward has valid client certificates
-docker logs steward-standalone | grep -i "certificate"
-
-# Check controller accepts steward's certificate
-docker logs controller | grep "QUIC.*client.*connected"
-
-# If handshake fails:
-# - Verify steward registered successfully
-# - Check client cert issued by controller's CA
-# - Verify CA certificate valid
-```
-
-**4. Story #378: Certificate Mismatch** (CRITICAL)
-
-**Symptoms**:
-- QUIC connects but signature verification fails
-- Steward logs show "signature verification failed"
-- Config fetch succeeds but executor rejects config
-
-**Root Cause**: Controller using different certificates for signing vs registration
-
-**Solution**:
-```bash
-# Verify you're running CFGMS v0.9.x with Story #378 fix
-git log --oneline | grep "378"
-
-# Should see commit: "bugfix: fix signature verification by tracking signer certificate serial"
-
-# If not present, pull latest changes:
-git pull origin develop
-
-# Rebuild and redeploy:
-make build
-docker compose down
-docker compose up -d
-```
-
-**Verification**:
-```bash
-# Check controller logs show same certificate serial for signer and registration
-docker logs controller | grep "signerCertSerial"
-
-# Should see consistent serial number throughout
-```
-
-## Certificate and TLS Issues
+All transport connections use mTLS — both sides present certificates. Every failure to connect
+is ultimately a TLS or certificate issue unless the port is unreachable.
 
 ### Issue: "x509: certificate signed by unknown authority"
 
 **Symptoms**:
-- Steward cannot connect to controller
-- TLS handshake fails
-- Certificate validation errors in logs
+- Steward cannot complete TLS handshake
+- Logs show "certificate signed by unknown authority" or "x509 verification failed"
 
 **Solutions**:
 
 ```bash
-# 1. Verify CA certificate is present and valid
-docker exec controller ls -la /etc/cfgms/certs/
-# Expected: ca.pem, ca-key.pem, server.pem, server-key.pem
-
-# 2. Check steward has controller's CA cert
-docker exec steward-standalone ls -la /etc/cfgms/certs/
-# Expected: ca.pem (should match controller's ca.pem)
-
-# 3. Verify CA fingerprints match
+# 1. Verify CA fingerprints match on both sides
 docker exec controller openssl x509 -in /etc/cfgms/certs/ca.pem -noout -fingerprint -sha256
 docker exec steward-standalone openssl x509 -in /etc/cfgms/certs/ca.pem -noout -fingerprint -sha256
-
 # Fingerprints MUST be identical
 
-# 4. If mismatched, steward needs to re-register
-docker compose down steward-standalone
-docker compose up -d steward-standalone
-# This triggers new registration with current CA
+# 2. If mismatched, steward needs to re-register
+docker compose restart steward-standalone
+# Steward will re-register and obtain certificates from current CA
+
+# 3. Check controller logs for certificate generation:
+docker logs controller | grep "Certificate manager initialized"
+docker logs controller | grep "Generated.*certificate"
 ```
 
-### Issue: "certificate has expired" or "certificate is not yet valid"
+### Issue: "certificate has expired" or "certificate not yet valid"
 
 **Symptoms**:
-- TLS errors mentioning expiration
-- Connections fail with time-related errors
+- TLS errors mentioning expiration or validity dates
+- Connections fail immediately after TLS ClientHello
 
 **Solutions**:
 
 ```bash
-# 1. Check certificate validity
+# 1. Check certificate validity dates
 docker exec controller openssl x509 -in /etc/cfgms/certs/server.pem -noout -dates
 
-# Shows: "notBefore" and "notAfter" dates
-
-# 2. Verify system time is correct
+# 2. Verify system clocks match (QUIC is sensitive to clock skew)
 docker exec controller date
 docker exec steward-standalone date
-date  # Host system time
+date  # Host system
 
-# Times should match closely (within a few seconds)
-
-# 3. If time is wrong, sync time:
-# On Linux:
-sudo ntpdate pool.ntp.org
-# Or:
+# 3. Sync clocks if drifted:
 sudo timedatectl set-ntp true
 
-# 4. If certificates expired, regenerate them:
+# 4. If certificates genuinely expired, regenerate:
 docker compose down
-rm -rf /path/to/cert/storage  # BE CAREFUL - backs up first!
+# Remove cert storage (backs up first)
 docker compose up -d
+```
+
+### Issue: "TLS handshake failure" (client certificate rejected)
+
+**Symptoms**:
+- Controller logs show "TLS: client certificate rejected"
+- Steward logs show "bad certificate" or "handshake failure"
+
+**Diagnostic**:
+
+```bash
+# Check steward has valid client certificate
+docker exec steward-standalone ls -la /etc/cfgms/certs/
+# Expected: client.pem, client-key.pem, ca.pem
+
+# Verify client cert was issued by controller CA
+docker exec steward-standalone openssl verify \
+  -CAfile /etc/cfgms/certs/ca.pem \
+  /etc/cfgms/certs/client.pem
+# Expected: client.pem: OK
+```
+
+## gRPC Stream Issues
+
+Once the QUIC connection is established, gRPC streams carry the actual calls. These can fail
+independently of the underlying transport.
+
+### Issue: "gRPC stream reset" or "stream broken"
+
+**Symptoms**:
+- Steward connects but commands are not delivered
+- Controller logs show "stream reset" or "unexpected EOF"
+- Heartbeats stop after initial connection
+
+**Solutions**:
+
+```bash
+# 1. Enable debug logging to see gRPC frame details
+CFGMS_LOG_LEVEL=debug docker compose up -d controller steward-standalone
+
+docker logs -f controller | grep -i "grpc\|stream"
+docker logs -f steward-standalone | grep -i "grpc\|stream"
+
+# 2. Check keepalive settings — streams break if keepalive is too aggressive
+# In controller.cfg:
+# transport:
+#   keepalive_period: 30s   # increase if streams reset frequently
+#   idle_timeout: 5m        # increase for slow networks
+
+# 3. Check for firewall stateful rules that expire UDP "connections"
+# QUIC uses long-lived UDP flows — some NAT/firewall rules close them after 30s
+# Solution: Configure longer UDP timeout in firewall, or enable keepalive probes
+```
+
+### Issue: "rpc error: code = Unavailable"
+
+**Symptoms**:
+- gRPC calls fail with code = Unavailable
+- Usually happens after idle periods or network blips
+
+**Solutions**:
+
+```bash
+# This typically means the underlying QUIC connection was lost
+# The steward should automatically reconnect — check reconnection logs:
+docker logs steward-standalone | grep -i "reconnect\|retry\|backoff"
+
+# If reconnection is not happening:
+docker logs steward-standalone | grep -i "error\|failed" | tail -20
+
+# Manual trigger: restart steward (will reconnect cleanly)
+docker compose restart steward-standalone
 ```
 
 ## Config Sync Issues
 
-### Issue: "Timeout waiting for config status report" (Story #378)
+### Issue: "Config uploaded but never applied by steward"
 
 **Symptoms**:
-- E2E tests timeout at 30+ seconds
-- Steward never publishes status report
-- Diagnostic test fails at Phase 7
-
-**Root Cause**: This was the exact issue fixed in Story #378
+- Config upload via REST API returns 200
+- Steward never applies the config
+- No convergence activity in steward logs
 
 **Diagnostic Steps**:
 
 ```bash
-# 1. Check QUIC connection established
-docker logs steward-standalone | grep -i "quic.*connect"
-
-# 2. Check config fetch attempt
-docker logs steward-standalone | grep -i "config.*fetch"
-
-# 3. Check signature verification
-docker logs steward-standalone | grep -i "signature"
-
-# 4. If signature verification fails, check certificate serial
-docker logs controller | grep "signerCertSerial"
-docker logs steward-standalone | grep "certificate.*serial"
-
-# 5. Verify Story #378 fix is applied
-docker logs controller | grep "GetSignerCertSerial"
-# Should show function being called during API server initialization
-```
-
-**Solution**: Apply Story #378 fix (certificate serial tracking)
-
-```bash
-# Pull latest code with fix
-git fetch origin
-git checkout bugfix/story-378-signature-cert-mismatch
-# OR if merged:
-git checkout develop
-git pull
-
-# Rebuild and redeploy
-make build
-docker compose down
-docker compose up -d
-
-# Verify fix worked
-cd test/integration/mqtt_quic
-go test -v -run TestConfigStatusReporting
-# Should PASS in < 10 seconds
-```
-
-### Issue: "Config uploaded but never fetched by steward"
-
-**Symptoms**:
-- Config upload succeeds (REST API returns 200)
-- Steward never receives or fetches config
-- No QUIC activity in logs
-
-**Diagnostic Steps**:
-
-```bash
-# 1. Verify config actually stored
-# For git storage:
+# 1. Verify config was stored
 docker exec controller ls -la /data/git-storage/
 
-# For database storage:
-docker exec timescale psql -U cfgms -c "SELECT id, steward_id FROM configurations;"
+# 2. Check steward received sync command via gRPC control plane
+docker logs steward-standalone | grep "sync_config\|SyncConfig"
 
-# 2. Check steward received sync_config command
-docker logs steward-standalone | grep "sync_config"
+# 3. Check controller sent the command
+docker logs controller | grep "SyncConfig\|dispatch.*steward"
 
-# 3. Check MQTT command was published
-docker logs mqtt-broker | grep "cfgms/steward/.*/commands"
+# 4. Verify steward is connected (shows up in heartbeat logs)
+docker logs controller | grep "heartbeat\|steward.*connected"
 ```
 
 **Solutions**:
 
-**A. Manual trigger (if auto-sync not working)**:
-
+**A. Trigger manual sync via REST API**:
 ```bash
-# Publish connect_quic command manually
-mosquitto_pub -h localhost -p 1883 \
-  -t "cfgms/steward/$STEWARD_ID/commands" \
-  -m '{"command_id":"manual-1","type":"connect_quic","timestamp":"2026-02-12T20:00:00Z","params":{"quic_address":"controller-standalone:4433","session_id":"manual-session"}}'
-
-# Wait 2 seconds, then publish sync_config
-mosquitto_pub -h localhost -p 1883 \
-  -t "cfgms/steward/$STEWARD_ID/commands" \
-  -m '{"command_id":"manual-2","type":"sync_config","timestamp":"2026-02-12T20:00:05Z","params":{"version":"manual-v1"}}'
+# Force config push for a specific steward
+curl -X POST http://controller:9080/api/v1/stewards/$STEWARD_ID/sync \
+  -H "Authorization: Bearer $API_KEY"
 ```
 
-**B. Check steward is subscribed to commands topic**:
-
+**B. Reconnect steward**:
 ```bash
-docker logs steward-standalone | grep "Subscribed to"
-
-# Expected: "Subscribed to cfgms/steward/$STEWARD_ID/commands"
-
-# If not subscribed:
-# - Steward MQTT client may have failed to connect
-# - Check MQTT connectivity (see above section)
+docker compose restart steward-standalone
+# On reconnect, steward automatically checks for pending configs
 ```
 
-## Module Execution Issues
-
-### Issue: "Module execution failed" or "Module not found"
+### Issue: "Signature verification failed"
 
 **Symptoms**:
-- Config sync completes but modules fail
-- Status report shows ERROR
-- Diagnostic test Phase 8 fails
+- Steward receives config but rejects it
+- Logs show "signature verification failed" or "signer certificate mismatch"
 
-**Diagnostic Steps**:
+**Solution**:
+```bash
+# Verify controller's signing certificate serial is consistent
+docker logs controller | grep "signerCertSerial\|config.*signer"
+
+# If mismatch, reinitialize controller (extreme case - backs up first)
+# More likely: steward has stale signer cert from old registration
+docker compose restart steward-standalone
+```
+
+## Reconnection Issues
+
+### Issue: "Steward disconnects and does not reconnect"
+
+**Symptoms**:
+- Steward initially connects, then disconnects
+- Does not attempt to reconnect after the first failure
+- Controller logs show steward offline indefinitely
+
+**Diagnostic**:
 
 ```bash
-# 1. Check which module failed
-docker logs steward-standalone | grep -i "module.*failed"
+# Check steward reconnection behavior
+docker logs steward-standalone | grep -E "reconnect|backoff|retry"
 
-# 2. Check if module is registered
-docker logs steward-standalone | grep "Registered module"
-
-# Expected modules: file, directory, script
-
-# 3. Check module execution logs
-docker logs steward-standalone | grep -A 5 "Executing module"
-
-# 4. Verify workspace is accessible
-docker exec steward-standalone ls -la /test-workspace/
-docker exec steward-standalone df -h /test-workspace/
+# Check for fatal errors that prevent reconnection
+docker logs steward-standalone | grep -E "fatal|panic|exit"
 ```
 
 **Solutions**:
 
-**A. File module fails**:
-
 ```bash
-# Check permissions on workspace
-docker exec steward-standalone stat /test-workspace/
+# 1. Check backoff configuration — steward uses exponential backoff
+# Default: starts at 1s, max 5min, indefinite retries
+# Controller must be reachable for reconnection to succeed
 
-# Should be writable by steward process
+# 2. Verify controller is healthy
+curl http://controller:9080/api/v1/health
 
-# Check if path is absolute
-# Bad: path: "test.txt"
-# Good: path: "/test-workspace/test.txt"
+# 3. Check for certificate expiry preventing reconnection
+docker exec steward-standalone openssl x509 -in /etc/cfgms/certs/client.pem -noout -dates
+# If expired, steward cannot reconnect — must re-register
 ```
 
-**B. Directory module fails**:
+### Issue: "High reconnection rate / flapping"
+
+**Symptoms**:
+- Steward connects and disconnects repeatedly
+- Controller logs show rapid connect/disconnect cycle
+- Performance degraded due to TLS handshake overhead
+
+**Solutions**:
 
 ```bash
-# Check parent directory exists
-# If creating /test-workspace/foo/bar, ensure /test-workspace/foo exists
-# Or use ensure_parent: true in config
+# 1. Increase keepalive to reduce false disconnect detection
+# transport:
+#   keepalive_period: 60s  # was 30s
 
-# Check permissions allow directory creation
-docker exec steward-standalone touch /test-workspace/test-perm
-# If this fails, workspace not writable
-```
+# 2. Check network stability between steward and controller
+ping -c 20 controller-vm
+# High packet loss or latency causes QUIC connection failures
 
-**C. Module not registered**:
-
-```bash
-# Modules should auto-register on steward startup
-# Check steward logs for module registration:
-docker logs steward-standalone | head -50
-
-# Should see:
-# "Registered module: file"
-# "Registered module: directory"
-# "Registered module: script"
-
-# If not registered, steward startup failed
-# Check for errors in steward initialization
+# 3. Check for resource exhaustion on controller
+docker stats controller
+# If CPU > 90%, connection handling degrades — scale up or reduce max_connections
 ```
 
 ## Performance Issues
 
 ### Issue: "Config sync takes > 10 seconds"
 
-**Target**: Config sync should complete in < 5 seconds for small configs
+**Target**: Config sync should complete in < 5 seconds for small configs.
 
 **Diagnostic**:
 
 ```bash
-# Run diagnostic test and check phase timings
+# Run transport E2E diagnostic with timing
+cd test/integration/transport
 go test -v -run TestE2EFlowDiagnostic | grep "Phase.*PASS"
 
-# Example output:
-# Phase 7 PASS: Status report received (2.60s)  ← GOOD
-# Phase 7 PASS: Status report received (15.2s)  ← SLOW
-
 # Check resource usage
-docker stats controller steward-standalone mqtt-broker
+docker stats controller steward-standalone
 
-# High CPU or memory usage indicates performance issue
+# Trace slow operations in logs
+docker logs controller | grep -E "took|duration|elapsed|slow"
 ```
 
 **Solutions**:
 
 ```bash
-# 1. Check for resource constraints
-docker stats
-# Controller/Steward using > 80% CPU? Add resources.
-
-# 2. Check disk I/O (for git storage)
+# 1. Check disk I/O (for git storage — commit is on critical path)
 docker exec controller df -h
-docker exec controller iostat -x 1 5  # If available
+docker exec controller iostat -x 1 5
 
-# High iowait %? Disk performance issue.
-
-# 3. Check network latency between containers
+# 2. Check network round-trip time
 docker exec steward-standalone ping -c 5 controller-standalone
 
-# High latency? Network issue.
-
-# 4. Profile slow operations
-docker logs controller | grep -E "took|duration|elapsed"
-docker logs steward-standalone | grep -E "took|duration|elapsed"
-```
-
-### Issue: "E2E tests timeout in CI but pass locally"
-
-**Root Cause**: CI environment slower than local (resource contention)
-
-**Solutions**:
-
-```bash
-# Use CI-specific timeout configuration
-# In test code:
-timeouts := CIE2ETimeouts()  # Uses more conservative timeouts
-
-# Or via environment variable:
-CFGMS_E2E_MODE=ci go test -v -timeout 30m
-
-# Verify CI resources are sufficient:
-# - Minimum 4 vCPUs
-# - Minimum 8GB RAM
-# - Fast SSD storage
+# 3. Scale max_connections if controller is overloaded
+# transport:
+#   max_connections: 10000  # default; reduce if CPU-bound
 ```
 
 ## Advanced Debugging
 
 ### Enable Debug Logging
 
-**Controller**:
 ```bash
-# Edit docker-compose.yml or set environment variable:
+# Controller
 CFGMS_LOG_LEVEL=debug docker compose up -d controller
+docker logs -f controller | grep -i "transport\|grpc\|quic"
 
-# Restart to apply
-docker restart controller
-
-# View debug logs
-docker logs -f controller | grep DEBUG
-```
-
-**Steward**:
-```bash
+# Steward
 CFGMS_LOG_LEVEL=debug docker compose up -d steward-standalone
-
-docker logs -f steward-standalone | grep DEBUG
+docker logs -f steward-standalone | grep -i "transport\|grpc\|quic"
 ```
 
-### Packet Capture (MQTT)
+### Packet Capture (QUIC/UDP)
 
 ```bash
-# Capture MQTT traffic
-sudo tcpdump -i any port 1886 -w /tmp/mqtt-capture.pcap
+# Capture QUIC traffic on port 4433
+sudo tcpdump -i any udp port 4433 -w /tmp/quic-capture.pcap
 
-# In another terminal, run your test
-go test -v -run TestConfigStatusReporting
+# In another terminal, trigger a test
+cd test/integration/transport
+go test -v -run TestConfigSync
 
 # Stop tcpdump (Ctrl+C)
-
-# Analyze with Wireshark or:
-tcpdump -r /tmp/mqtt-capture.pcap -A | less
-```
-
-### QUIC Connection Tracing
-
-```bash
-# Enable QUIC debugging (requires code change or debug build)
-CFGMS_QUIC_DEBUG=true docker compose up -d controller steward-standalone
-
-# View QUIC-specific logs
-docker logs controller | grep QUIC
-docker logs steward-standalone | grep QUIC
+# Analyze in Wireshark (has QUIC dissector)
+wireshark /tmp/quic-capture.pcap
 ```
 
 ### Health Check Endpoints
 
 ```bash
 # Controller health
-curl -k https://localhost:8080/health
-# Expected: {"status":"healthy"} or similar
+curl http://localhost:9080/api/v1/health
 
-# Controller metrics (if enabled)
-curl -k https://localhost:8080/metrics
-# Prometheus-format metrics
+# Transport health
+curl http://localhost:9080/api/v1/health/transport
 
-# Check specific component health
-curl -k https://localhost:8080/api/v1/health/mqtt
-curl -k https://localhost:8080/api/v1/health/storage
-curl -k https://localhost:8080/api/v1/health/quic
+# Storage health
+curl http://localhost:9080/api/v1/health/storage
+
+# Metrics (if enabled)
+curl http://localhost:9080/metrics
 ```
 
 ## Getting Help
@@ -630,8 +464,8 @@ If issues persist after following this guide:
 
 1. **Collect diagnostic information**:
    ```bash
-   # Run full diagnostic
-   cd test/integration/mqtt_quic
+   # Run full E2E diagnostic
+   cd test/integration/transport
    go test -v -run TestE2EFlowDiagnostic > /tmp/diagnostic.log 2>&1
 
    # Collect logs
@@ -639,23 +473,16 @@ If issues persist after following this guide:
 
    # System info
    docker version > /tmp/system-info.txt
-   docker compose version >> /tmp/system-info.txt
    uname -a >> /tmp/system-info.txt
    ```
 
-2. **Create GitHub issue** with:
-   - Diagnostic test output (`/tmp/diagnostic.log`)
-   - Container logs (`/tmp/cfgms-logs.txt`)
-   - System information (`/tmp/system-info.txt`)
-   - Description of issue and steps to reproduce
+2. **Create GitHub issue** with the above files and a description of the problem.
 
-3. **Check existing issues**:
-   - https://github.com/cfg-is/cfgms/issues
-   - Search for similar problems and solutions
+3. **Check existing issues**: https://github.com/cfg-is/cfgms/issues
 
 ## References
 
 - **E2E Testing Guide**: [docs/testing/e2e-testing-guide.md](../testing/e2e-testing-guide.md)
 - **Home Lab Deployment**: [docs/deployment/home-lab-deployment-guide.md](../deployment/home-lab-deployment-guide.md)
-- **MQTT+QUIC Strategy**: [docs/testing/mqtt-quic-testing-strategy.md](../testing/mqtt-quic-testing-strategy.md)
-- **Story #378 Analysis**: `/tmp/story-378-root-cause.md` (development artifact)
+- **Transport Architecture**: [docs/architecture/communication-layer-migration.md](../architecture/communication-layer-migration.md)
+- **Archived: MQTT+QUIC Strategy**: [docs/testing/archived/mqtt-quic-testing-strategy.md](../testing/archived/mqtt-quic-testing-strategy.md)

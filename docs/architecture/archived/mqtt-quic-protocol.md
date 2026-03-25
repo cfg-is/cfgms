@@ -1,5 +1,13 @@
 # MQTT+QUIC Hybrid Communication Protocol (Story #198)
 
+> **ARCHIVED — 2026-03-25**
+>
+> This document describes the MQTT+QUIC hybrid transport that was active from Story #198 through Phase 10.10.
+> As of Phase 10.11 (Story #520–#522), MQTT and the standalone QUIC data plane have been removed.
+> The current transport is **gRPC-over-QUIC** — see [communication-layer-migration.md](../communication-layer-migration.md).
+>
+> This document is preserved for historical reference only.
+
 > **Note (Story #267.5):** As of Epic #267, feature code accesses MQTT and QUIC
 > through the pluggable provider abstraction layer:
 > - **Control Plane**: `pkg/controlplane/interfaces` (wraps MQTT)

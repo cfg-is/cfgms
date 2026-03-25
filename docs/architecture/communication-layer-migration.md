@@ -1,15 +1,33 @@
 # Communication Layer Migration Guide
 
-## Overview
+## Status: Migration Complete (Phase 10.11)
 
-As of Epic #267 (Communication Layer Abstraction), CFGMS uses pluggable provider
-interfaces for all controller-steward communication. Direct imports of `pkg/mqtt`
-and `pkg/quic` in feature code are deprecated and blocked by `make check-architecture`.
+As of Phase 10.11 (Stories #519–#522), the MQTT+QUIC hybrid transport has been fully replaced
+by **gRPC-over-QUIC**. All controller-steward communication now uses a single unified transport:
 
-**Control Plane** (commands, events, heartbeats): `pkg/controlplane/interfaces`
-**Data Plane** (config sync, DNA sync, bulk transfers): `pkg/dataplane/interfaces`
+- **Control Plane** (commands, events, heartbeats): `pkg/controlplane/interfaces` with gRPC provider
+- **Data Plane** (config sync, DNA sync, bulk transfers): `pkg/dataplane/interfaces` with gRPC provider
+- **Transport layer**: `pkg/transport/quic` — QUIC connection management with mTLS
 
-## Architecture
+### What Was Removed
+
+- `pkg/mqtt` — MQTT broker infrastructure (mochi-mqtt)
+- `pkg/mqtt/client`, `pkg/mqtt/types` — deprecated client wrappers
+- `pkg/quic/client`, `pkg/quic/session` — standalone QUIC client (replaced by transport layer)
+- `github.com/mochi-mqtt/server` — go.mod dependency
+
+### What Replaced It
+
+| Before | After |
+|--------|-------|
+| MQTT control plane (port 1883) | gRPC control service over QUIC (port 4433) |
+| Standalone QUIC data plane (port 4433) | gRPC data service over QUIC (port 4433) |
+| Two separate protocols, two ports | Single unified transport, one port |
+| Separate MQTT broker process in controller | Lightweight gRPC server on transport listener |
+
+---
+
+## Current Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -19,130 +37,35 @@ and `pkg/quic` in feature code are deprecated and blocked by `make check-archite
 │  pkg/controlplane/interfaces  │  pkg/dataplane/interfaces│
 │  (ControlPlaneProvider)       │  (DataPlaneProvider)     │
 ├───────────────────────────────┼──────────────────────────┤
-│  providers/mqtt (MQTT impl)   │  providers/quic (QUIC)   │
-│  (future: gRPC, WebSocket)    │  (future: gRPC, WS)     │
-├───────────────────────────────┼──────────────────────────┤
-│  pkg/mqtt (broker infra)      │  pkg/quic (transport)    │
-│  [internal - do not import]   │  [internal - do not import]│
-└───────────────────────────────┴──────────────────────────┘
+│  providers/grpc (gRPC impl)   │  providers/grpc (gRPC)   │
+├───────────────────────────────┴──────────────────────────┤
+│  pkg/transport/quic (QUIC connection management)         │
+│  [mTLS, multiplexed streams, reconnection]               │
+└──────────────────────────────────────────────────────────┘
 ```
 
-## Migration Guide
+## Transport Configuration
 
-### Control Plane: pkg/mqtt → pkg/controlplane
+The unified transport is configured via the `transport` block in `controller.cfg`:
 
-#### Before (deprecated)
-
-```go
-import (
-    mqttClient "github.com/cfgis/cfgms/pkg/mqtt/client"
-    mqttTypes "github.com/cfgis/cfgms/pkg/mqtt/types"
-)
-
-// Create MQTT client directly
-client := mqttClient.New(broker, tlsConfig, stewardID)
-client.Connect(ctx)
-
-// Publish heartbeat via raw MQTT
-heartbeat := mqttTypes.Heartbeat{
-    StewardID: stewardID,
-    Status:    mqttTypes.StatusHealthy,
-}
-client.Publish(ctx, "cfgms/heartbeat/"+stewardID, heartbeatJSON, 1)
-
-// Subscribe to commands via raw MQTT
-client.Subscribe(ctx, "cfgms/steward/"+stewardID+"/commands", handler)
+```yaml
+transport:
+  listen_addr: "0.0.0.0:4433"   # Single port for all controller-steward traffic
+  use_cert_manager: true          # Use controller's cert manager for TLS (recommended)
+  max_connections: 10000          # Maximum concurrent steward connections
+  keepalive_period: 30s           # How often keepalive probes are sent
+  idle_timeout: 5m                # Connection idle timeout
 ```
 
-#### After (required)
+### Environment Variables
 
-```go
-import (
-    cpInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
-    _ "github.com/cfgis/cfgms/pkg/controlplane/providers/mqtt" // Register provider
-    cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
-)
-
-// Get provider via registry
-provider := cpInterfaces.GetProvider("mqtt")
-provider.Initialize(ctx, config)
-
-// Send heartbeat via provider (transport-agnostic)
-heartbeat := &cpTypes.Heartbeat{
-    StewardID: stewardID,
-    Status:    cpTypes.StatusHealthy,
-    Timestamp: time.Now(),
-}
-provider.SendHeartbeat(ctx, heartbeat)
-
-// Subscribe to commands via provider
-provider.SubscribeCommands(ctx, stewardID, func(cmd *cpTypes.Command) error {
-    // Handle command
-    return nil
-})
-```
-
-### Data Plane: pkg/quic → pkg/dataplane
-
-#### Before (deprecated)
-
-```go
-import (
-    quicClient "github.com/cfgis/cfgms/pkg/quic/client"
-)
-
-// Create QUIC client directly
-client := quicClient.New(controllerAddr, tlsConfig)
-conn, err := client.Connect(ctx)
-
-// Send/receive data via raw QUIC streams
-stream, _ := conn.OpenStream()
-stream.Write(configData)
-```
-
-#### After (required)
-
-```go
-import (
-    dpInterfaces "github.com/cfgis/cfgms/pkg/dataplane/interfaces"
-    _ "github.com/cfgis/cfgms/pkg/dataplane/providers/quic" // Register provider
-    dpTypes "github.com/cfgis/cfgms/pkg/dataplane/types"
-)
-
-// Get provider via registry
-provider := dpInterfaces.GetProvider("quic")
-provider.Initialize(ctx, config)
-
-// Connect via provider (transport-agnostic)
-session, err := provider.Connect(ctx, controllerAddr, tlsConfig)
-
-// Transfer data via semantic methods
-err = session.SendConfig(ctx, configData, metadata)
-config, err := session.ReceiveConfig(ctx)
-```
-
-### Message Types: pkg/mqtt/types → pkg/controlplane/types
-
-| Old Type (pkg/mqtt/types)       | New Type (pkg/controlplane/types) |
-|---------------------------------|-----------------------------------|
-| `types.Command`                 | `cpTypes.Command`                 |
-| `types.CommandType`             | `cpTypes.CommandType`             |
-| `types.StatusUpdate`            | `cpTypes.Event`                   |
-| `types.StatusEvent`             | `cpTypes.EventType`               |
-| `types.Heartbeat`               | `cpTypes.Heartbeat`               |
-| `types.HeartbeatStatus`         | `cpTypes.HeartbeatStatus`         |
-| `types.ConfigStatusReport`      | `cpTypes.ConfigStatusReport`      |
-| `types.ModuleStatus`            | `cpTypes.ModuleStatus`            |
-| `types.CommandSyncConfig`       | `cpTypes.CommandSyncConfig`       |
-| `types.CommandConnectQUIC`      | `cpTypes.CommandConnectDataPlane` |
-
-### Key Differences
-
-1. **Transport-agnostic naming**: `CommandConnectQUIC` → `CommandConnectDataPlane`
-2. **Richer types**: Control plane types include `TenantID`, `Priority`, `Severity`
-3. **Separate Response type**: Synchronous acknowledgments via `cpTypes.Response`
-4. **Event filtering**: `cpTypes.EventFilter` for subscription filtering
-5. **Provider registry**: Auto-registration pattern for multiple implementations
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `CFGMS_TRANSPORT_LISTEN_ADDR` | Transport listen address | `0.0.0.0:4433` |
+| `CFGMS_TRANSPORT_USE_CERT_MANAGER` | Use cert manager for TLS | `true` |
+| `CFGMS_TRANSPORT_MAX_CONNECTIONS` | Maximum concurrent connections | `10000` |
+| `CFGMS_TRANSPORT_KEEPALIVE_PERIOD` | Keepalive probe interval | `30s` |
+| `CFGMS_TRANSPORT_IDLE_TIMEOUT` | Connection idle timeout | `5m` |
 
 ## Architecture Check Enforcement
 
@@ -150,23 +73,10 @@ config, err := session.ReceiveConfig(ctx)
 
 | Blocked Import             | Replacement                        |
 |----------------------------|------------------------------------|
-| `pkg/mqtt/client`          | `pkg/controlplane/interfaces`      |
-| `pkg/mqtt/types`           | `pkg/controlplane/types`           |
-| `pkg/quic/client`          | `pkg/dataplane/interfaces`         |
-| `pkg/quic/session`         | `pkg/dataplane/interfaces`         |
-
-### Known Infrastructure Exceptions
-
-The controller server (`features/controller/server/`) retains direct imports for
-infrastructure bootstrap:
-
-- `pkg/mqtt/interfaces` - MQTT broker lifecycle management (start/stop)
-- `pkg/mqtt/providers/mochi` - Broker provider registration
-- `pkg/quic/server` - QUIC listener management
-
-These are server-side infrastructure that the providers wrap internally. Feature
-code should never import these; they are used only by the controller's server
-initialization.
+| `pkg/mqtt/client`          | (removed — use `pkg/controlplane/interfaces`) |
+| `pkg/mqtt/types`           | (removed — use `pkg/controlplane/types`) |
+| `pkg/quic/client`          | (removed — use `pkg/dataplane/interfaces`) |
+| `pkg/quic/session`         | (removed — use `pkg/dataplane/interfaces`) |
 
 ## Provider Registration Pattern
 
@@ -175,20 +85,17 @@ Both control plane and data plane use auto-registration via blank imports:
 ```go
 // In your main or init code, register providers:
 import (
-    _ "github.com/cfgis/cfgms/pkg/controlplane/providers/mqtt" // Register MQTT
-    _ "github.com/cfgis/cfgms/pkg/dataplane/providers/quic"    // Register QUIC
+    _ "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc" // Register gRPC
+    _ "github.com/cfgis/cfgms/pkg/dataplane/providers/grpc"    // Register gRPC
 )
 
 // Then retrieve via registry:
-cp := cpInterfaces.GetProvider("mqtt")
-dp := dpInterfaces.GetProvider("quic")
+cp := cpInterfaces.GetProvider("grpc")
+dp := dpInterfaces.GetProvider("grpc")
 ```
-
-This pattern enables future transport alternatives (gRPC, WebSocket) without
-changing feature code.
 
 ## Related Documentation
 
-- [MQTT+QUIC Protocol Design](mqtt-quic-protocol.md) - Original protocol specification
 - [Plugin Architecture](plugin-architecture.md) - Provider pattern foundation
 - [Central Provider Compliance](decisions/001-central-provider-compliance-enforcement.md) - Enforcement ADR
+- [Archived: MQTT+QUIC Protocol Design](archived/mqtt-quic-protocol.md) - Historical protocol specification

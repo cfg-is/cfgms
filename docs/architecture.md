@@ -82,7 +82,7 @@ type Module interface {
 ### Controller-Integrated Mode
 
 - **Use Case**: Enterprise fleets, centralized management
-- **Configuration**: Controller distribution via MQTT+QUIC
+- **Configuration**: Controller distribution via gRPC-over-QUIC
 - **Module Discovery**: Controller registry with versioning
 - **Benefits**: Centralized control, fleet orchestration
 
@@ -90,9 +90,9 @@ type Module interface {
 
 ### Internal Communication
 
-- **Protocol**: MQTT+QUIC hybrid with mutual TLS
-  - **MQTT Control Plane**: Real-time commands, heartbeats, failover detection
-  - **QUIC Data Plane**: High-performance configuration and DNA synchronization
+- **Protocol**: gRPC-over-QUIC with mutual TLS
+  - **Control Plane** (gRPC service): Real-time commands, heartbeats, failover detection
+  - **Data Plane** (gRPC service): High-performance configuration and DNA synchronization
 - **Authentication**: Certificate-based identity
 - **Connection Model**: Stewards initiate all connections (no open ports)
 
@@ -143,7 +143,7 @@ CFGMS implements a **platform-agnostic core** with **platform-specific optimizat
 - **Unified Business Logic**: Core configuration management logic works identically across platforms
 - **Platform-Specific Collectors**: Native system information gathering (WMI on Windows, syscalls on Unix)
 - **Adaptive Module System**: Modules automatically adapt to platform capabilities and constraints
-- **Consistent API**: Same REST API and MQTT+QUIC protocol regardless of underlying platform
+- **Consistent API**: Same REST API and gRPC-over-QUIC transport protocol regardless of underlying platform
 
 ### Platform-Specific Implementations
 

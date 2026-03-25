@@ -109,8 +109,10 @@ Controller                              Steward
     │                                      │
 ```
 
-- **Control plane (MQTT)**: lightweight messages — heartbeats (including DNA hash), commands, status, events, DNA deltas
-- **Data plane (QUIC)**: bulk transfers — cfgs, full DNA snapshots (on hash mismatch), performance metrics
+- **Control plane**: lightweight messages — heartbeats (including DNA hash), commands, status, events, DNA deltas
+- **Data plane**: bulk transfers — cfgs, full DNA snapshots (on hash mismatch), performance metrics
+
+Both planes use the unified **gRPC-over-QUIC** transport (port 4433, mTLS). All controller-steward communication flows over a single multiplexed QUIC connection with distinct gRPC services for control and data operations.
 
 The controller can tell a steward to sync its cfg immediately (e.g., after an admin pushes a change). But the steward also re-checks on its own schedule. The command is an optimization, not a dependency.
 
@@ -141,7 +143,7 @@ When connection is restored:
 ### Controller restarts
 
 Stewards are unaffected. They continue maintaining their cfgs independently. When the controller comes back:
-- Stewards reconnect automatically (MQTT reconnect)
+- Stewards reconnect automatically (gRPC-over-QUIC transport reconnect with exponential backoff)
 - Queued reports are delivered
 - Controller rebuilds its view of fleet state from steward reports
 

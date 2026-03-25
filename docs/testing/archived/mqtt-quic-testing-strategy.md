@@ -1,5 +1,13 @@
 # MQTT+QUIC Test Execution Strategy
 
+> **ARCHIVED — 2026-03-25**
+>
+> This document describes the MQTT+QUIC test execution strategy that was active before Phase 10.11.
+> As of Phase 10.11 (Story #520–#522), MQTT has been removed and all transport tests use the
+> unified gRPC-over-QUIC transport. See `test/integration/transport/` for current transport tests.
+>
+> This document is preserved for historical reference only.
+
 ## Overview
 
 MQTT+QUIC integration tests use different execution strategies for local development vs CI:
