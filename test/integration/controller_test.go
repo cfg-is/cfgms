@@ -5,6 +5,7 @@ package integration
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -44,9 +45,10 @@ func (s *ControllerTestSuite) SetupSuite() {
 }
 
 func (s *ControllerTestSuite) waitForHTTPReady() {
+	client := s.tlsClient()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(fmt.Sprintf("http://%s/api/v1/health", s.httpAddr))
+		resp, err := client.Get(fmt.Sprintf("https://%s/api/v1/health", s.httpAddr))
 		if err == nil {
 			_ = resp.Body.Close()
 			return
@@ -54,6 +56,15 @@ func (s *ControllerTestSuite) waitForHTTPReady() {
 		time.Sleep(100 * time.Millisecond)
 	}
 	s.T().Log("Warning: HTTP API may not be ready yet")
+}
+
+// tlsClient returns an HTTP client that skips TLS verification for self-signed test certs.
+func (s *ControllerTestSuite) tlsClient() *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // #nosec G402 — test-only, self-signed cert
+		},
+	}
 }
 
 func (s *ControllerTestSuite) TearDownSuite() {
@@ -80,7 +91,7 @@ func (s *ControllerTestSuite) TestControllerStartup() {
 
 // TestControllerHealthEndpoint verifies the health API responds with real status
 func (s *ControllerTestSuite) TestControllerHealthEndpoint() {
-	resp, err := http.Get(fmt.Sprintf("http://%s/api/v1/health", s.httpAddr))
+	resp, err := s.tlsClient().Get(fmt.Sprintf("https://%s/api/v1/health", s.httpAddr))
 	require.NoError(s.T(), err, "Health endpoint should be reachable")
 	defer func() { _ = resp.Body.Close() }()
 
@@ -116,7 +127,7 @@ func (s *ControllerTestSuite) TestStewardRegistration() {
 	// Create a real registration token
 	token, err := registration.CreateToken(&registration.TokenCreateRequest{
 		TenantID:      "test-tenant",
-		ControllerURL: "mqtt://localhost:1883",
+		ControllerURL: fmt.Sprintf("quic://%s", s.env.Controller.GetListenAddr()),
 		Group:         "test-group",
 		ExpiresIn:     "1h",
 		SingleUse:     false,
@@ -132,8 +143,8 @@ func (s *ControllerTestSuite) TestStewardRegistration() {
 	reqBody, err := json.Marshal(map[string]string{"token": token.Token})
 	require.NoError(s.T(), err)
 
-	resp, err := http.Post(
-		fmt.Sprintf("http://%s/api/v1/register", s.httpAddr),
+	resp, err := s.tlsClient().Post(
+		fmt.Sprintf("https://%s/api/v1/register", s.httpAddr),
 		"application/json",
 		bytes.NewReader(reqBody),
 	)
