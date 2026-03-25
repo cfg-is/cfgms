@@ -17,7 +17,7 @@ type RegistrationCode struct {
 	// TenantID is the unique identifier for the tenant
 	TenantID string `json:"tenant_id"`
 
-	// ControllerURL is the MQTT broker URL (e.g., "mqtt://controller.example.com:8883")
+	// ControllerURL is the controller address (e.g., "controller.example.com:4433")
 	ControllerURL string `json:"controller_url"`
 
 	// Group is an optional group identifier for organization
@@ -47,10 +47,10 @@ to the steward installer.
 
 Examples:
   # Generate a registration code
-  cfg regcode --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883
+  cfg regcode --tenant-id=acme-corp --controller-url=controller.acme.com:4433
 
   # Generate with optional group
-  cfg regcode --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883 --group=production
+  cfg regcode --tenant-id=acme-corp --controller-url=controller.acme.com:4433 --group=production
 
   # Decode a registration code
   cfg regcode --decode eyJ0ZW5hbnRfaWQi...`,
@@ -59,7 +59,7 @@ Examples:
 
 func init() {
 	regcodeCmd.Flags().StringVar(&tenantID, "tenant-id", "", "Tenant ID (required for generation)")
-	regcodeCmd.Flags().StringVar(&controllerURL, "controller-url", "", "Controller MQTT URL (required for generation)")
+	regcodeCmd.Flags().StringVar(&controllerURL, "controller-url", "", "Controller address host:port (required for generation)")
 	regcodeCmd.Flags().StringVar(&group, "group", "", "Optional group identifier")
 	regcodeCmd.Flags().BoolVar(&decode, "decode", false, "Decode a registration code (provide code as argument)")
 }
@@ -75,15 +75,15 @@ func runRegCode(cmd *cobra.Command, args []string) error {
 func generateRegistrationCode() error {
 	// Validate required fields
 	if tenantID == "" {
-		return fmt.Errorf("--tenant-id is required for generation\n\nThe tenant ID is your organization's unique identifier (e.g., 'acme-corp', 'contoso')\n\nExample:\n  cfg regcode --tenant-id=acme-corp --controller-url=mqtts://controller.example.com:8883")
+		return fmt.Errorf("--tenant-id is required for generation\n\nThe tenant ID is your organization's unique identifier (e.g., 'acme-corp', 'contoso')\n\nExample:\n  cfg regcode --tenant-id=acme-corp --controller-url=controller.example.com:4433")
 	}
 	if controllerURL == "" {
-		return fmt.Errorf("--controller-url is required for generation\n\nThe controller URL is the MQTT broker endpoint where stewards connect\n\nFormat: mqtt://HOST:PORT or mqtts://HOST:PORT (mqtts recommended for production)\n\nExample:\n  cfg regcode --tenant-id=acme-corp --controller-url=mqtts://controller.example.com:8883")
+		return fmt.Errorf("--controller-url is required for generation\n\nThe controller URL is the transport address where stewards connect\n\nFormat: HOST:PORT\n\nExample:\n  cfg regcode --tenant-id=acme-corp --controller-url=controller.example.com:4433")
 	}
 
-	// Validate controller URL format
-	if !strings.HasPrefix(controllerURL, "mqtt://") && !strings.HasPrefix(controllerURL, "mqtts://") {
-		return fmt.Errorf("controller URL must start with mqtt:// or mqtts://\n\nYour URL: %s\n\nValid formats:\n  mqtts://HOST:PORT  (TLS-encrypted, recommended for production)\n  mqtt://HOST:PORT   (unencrypted, development only)\n\nExample:\n  mqtts://controller.example.com:8883", controllerURL)
+	// Validate controller URL format (host:port)
+	if !strings.Contains(controllerURL, ":") {
+		return fmt.Errorf("controller URL must be in HOST:PORT format\n\nYour URL: %s\n\nExample:\n  controller.example.com:4433", controllerURL)
 	}
 
 	// Create registration code structure

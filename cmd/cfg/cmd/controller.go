@@ -30,7 +30,7 @@ var controllerCmd = &cobra.Command{
 
 Provides operational visibility into controller status including:
 - Overall health status and component health
-- Performance metrics (MQTT, storage, application, system)
+- Performance metrics (transport, storage, application, system)
 - Active alerts and threshold breaches
 - Request traces for debugging
 
@@ -51,7 +51,7 @@ var controllerStatusCmd = &cobra.Command{
 	Short: "Show controller health status",
 	Long: `Display human-readable controller health status including:
 - Overall health (healthy, degraded, unhealthy)
-- Component status (MQTT, storage, application, system)
+- Component status (transport, storage, application, system)
 - Active alerts
 - Uptime
 
@@ -69,7 +69,7 @@ var controllerMetricsCmd = &cobra.Command{
 	Use:   "metrics",
 	Short: "Show detailed controller metrics",
 	Long: `Display detailed controller performance metrics including:
-- MQTT broker: connections, queue depth, throughput
+- Transport: connected stewards, stream errors, message throughput
 - Storage: latency, pool utilization, slow queries
 - Application: workflow/script queue depths, active executions
 - System: CPU, memory, goroutines
@@ -212,15 +212,15 @@ func runControllerMetrics(cmd *cobra.Command, args []string) error {
 	// Parse response
 	var metrics struct {
 		Timestamp time.Time `json:"timestamp"`
-		MQTT      *struct {
-			ActiveConnections     int64     `json:"active_connections"`
-			MessageQueueDepth     int64     `json:"message_queue_depth"`
-			MessageThroughput     float64   `json:"message_throughput"`
-			TotalMessagesSent     int64     `json:"total_messages_sent"`
-			TotalMessagesReceived int64     `json:"total_messages_received"`
-			ConnectionErrors      int64     `json:"connection_errors"`
+		Transport *struct {
+			ConnectedStewards     int       `json:"connected_stewards"`
+			StreamErrors          int64     `json:"stream_errors"`
+			MessagesSent          int64     `json:"messages_sent"`
+			MessagesReceived      int64     `json:"messages_received"`
+			ReconnectionAttempts  int64     `json:"reconnection_attempts"`
+			AvgLatencyNs          int64     `json:"avg_latency_ns"`
 			CollectedAt           time.Time `json:"collected_at"`
-		} `json:"mqtt"`
+		} `json:"transport"`
 		Storage *struct {
 			Provider          string    `json:"provider"`
 			PoolUtilization   float64   `json:"pool_utilization"`
@@ -268,15 +268,15 @@ func runControllerMetrics(cmd *cobra.Command, args []string) error {
 	fmt.Printf("\nController Metrics - %s\n", metrics.Timestamp.Format("2006-01-02 15:04:05 MST"))
 	fmt.Println()
 
-	// MQTT metrics
-	if metrics.MQTT != nil {
-		fmt.Println("=== MQTT Broker ===")
-		fmt.Printf("Active Connections:     %d\n", metrics.MQTT.ActiveConnections)
-		fmt.Printf("Message Queue Depth:    %d\n", metrics.MQTT.MessageQueueDepth)
-		fmt.Printf("Message Throughput:     %.2f msg/sec\n", metrics.MQTT.MessageThroughput)
-		fmt.Printf("Total Messages Sent:    %d\n", metrics.MQTT.TotalMessagesSent)
-		fmt.Printf("Total Messages Received: %d\n", metrics.MQTT.TotalMessagesReceived)
-		fmt.Printf("Connection Errors:      %d\n", metrics.MQTT.ConnectionErrors)
+	// Transport metrics
+	if metrics.Transport != nil {
+		fmt.Println("=== Transport (gRPC-over-QUIC) ===")
+		fmt.Printf("Connected Stewards:     %d\n", metrics.Transport.ConnectedStewards)
+		fmt.Printf("Stream Errors:          %d\n", metrics.Transport.StreamErrors)
+		fmt.Printf("Messages Sent:          %d\n", metrics.Transport.MessagesSent)
+		fmt.Printf("Messages Received:      %d\n", metrics.Transport.MessagesReceived)
+		fmt.Printf("Reconnection Attempts:  %d\n", metrics.Transport.ReconnectionAttempts)
+		fmt.Printf("Avg Latency:            %dns\n", metrics.Transport.AvgLatencyNs)
 		fmt.Println()
 	}
 

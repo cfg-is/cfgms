@@ -45,10 +45,10 @@ The controller URL and API key can be provided via flags or environment variable
 
 Examples:
   # Create a token that expires in 7 days
-  cfg token create --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883 --expires=7d
+  cfg token create --tenant-id=acme-corp --controller-url=controller.acme.com:4433 --expires=7d
 
   # Create a single-use token for production group
-  cfg token create --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883 --group=production --single-use
+  cfg token create --tenant-id=acme-corp --controller-url=controller.acme.com:4433 --group=production --single-use
 
   # List all tokens for a tenant
   cfg token list --tenant-id=acme-corp
@@ -74,13 +74,13 @@ Expiration formats:
 
 Examples:
   # 7-day expiring token
-  cfg token create --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883 --expires=7d
+  cfg token create --tenant-id=acme-corp --controller-url=controller.acme.com:4433 --expires=7d
 
   # Single-use token
-  cfg token create --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883 --single-use
+  cfg token create --tenant-id=acme-corp --controller-url=controller.acme.com:4433 --single-use
 
   # Token for specific group
-  cfg token create --tenant-id=acme-corp --controller-url=mqtt://controller.acme.com:8883 --group=production`,
+  cfg token create --tenant-id=acme-corp --controller-url=controller.acme.com:4433 --group=production`,
 	RunE: runTokenCreate,
 }
 

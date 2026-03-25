@@ -282,7 +282,7 @@ func (e *TestEnv) Start() {
 	// The client will be configured when we call Connect() in the steward Start() method
 
 	// Inject transport client into steward for testing
-	e.Steward.SetMQTTClientForTesting(transportClient)
+	e.Steward.SetTransportClientForTesting(transportClient)
 
 	// Start the steward (will use injected transport client)
 	if err := e.Steward.Start(e.ctx); err != nil {

@@ -162,13 +162,13 @@ type Steward struct {
 	executionEngine *execution.ExecutionEngine
 
 	// Controller mode components - DEPRECATED (Story #198)
-	// The old gRPC-based controller mode is replaced by MQTT+QUIC registration
+	// The old gRPC-based controller mode is replaced by gRPC-over-QUIC registration
 	// Use cmd/steward/main.go with --regtoken parameter instead
 	// controllerClient *client.Client
 	dnaCollector *dna.Collector
 
-	// MQTT+QUIC client for controller testing mode (Story #198)
-	mqttClient interface{} // *client.MQTTClient - interface{} to avoid import cycle
+	// Transport client for controller testing mode (interface{} to avoid import cycle)
+	transportClient interface{}
 
 	// Secret store for steward-side secret management
 	secretStore secretsif.SecretStore
@@ -191,21 +191,21 @@ type Steward struct {
 // Returns an error if controller client or DNA collector initialization fails.
 func New(cfg *Config, logger logging.Logger) (*Steward, error) {
 	// DEPRECATED: gRPC-based controller mode removed in Story #198
-	// Use NewStandalone() or cmd/steward --regtoken for MQTT+QUIC mode
-	return nil, fmt.Errorf("steward controller mode with gRPC is deprecated (Story #198) - use NewStandalone() or cmd/steward --regtoken=<token> for MQTT+QUIC mode")
+	// Use NewStandalone() or cmd/steward --regtoken for gRPC-over-QUIC mode
+	return nil, fmt.Errorf("steward controller mode with gRPC is deprecated (Story #198) - use NewStandalone() or cmd/steward --regtoken=<token> for gRPC-over-QUIC mode")
 }
 
-// NewForControllerTesting creates a new Steward instance for integration testing with MQTT+QUIC.
+// NewForControllerTesting creates a new Steward instance for integration testing with gRPC-over-QUIC.
 //
 // This constructor is specifically for integration tests that need to validate
-// steward-controller communication using the new MQTT+QUIC architecture.
+// steward-controller communication using the new gRPC-over-QUIC architecture.
 // It creates a minimal steward with only the components needed for testing:
 // - DNA collector for system fingerprinting
-// - MQTT client for communication
+// - transport client for communication
 // - Health monitoring
 //
 // The steward will register with the controller using certificates from cfg.CertPath
-// and communicate via MQTT broker at cfg.ControllerAddr.
+// and communicate via controller at cfg.ControllerAddr.
 //
 // This is NOT for production use - use cmd/steward with --regtoken for production.
 func NewForControllerTesting(cfg *Config, logger logging.Logger) (*Steward, error) {
@@ -378,30 +378,30 @@ func (s *Steward) startStandalone(ctx context.Context) error {
 
 // startController starts the steward in controller mode with full gRPC integration.
 //
-// DEPRECATED: Controller mode removed in Story #198 (MQTT+QUIC Migration)
-// Use cmd/steward --regtoken for MQTT+QUIC registration instead
+// DEPRECATED: Controller mode removed in Story #198 (gRPC-over-QUIC Migration)
+// Use cmd/steward --regtoken for gRPC-over-QUIC registration instead
 //
 // Returns an error indicating the mode is deprecated.
 func (s *Steward) startController(ctx context.Context) error {
-	// Check if this is the new testing mode with MQTT client
-	if s.mqttClient != nil {
+	// Check if this is the new testing mode with transport client
+	if s.transportClient != nil {
 		return s.startControllerTesting(ctx)
 	}
-	return fmt.Errorf("controller mode deprecated (Story #198) - use cmd/steward --regtoken for MQTT+QUIC mode")
+	return fmt.Errorf("controller mode deprecated (Story #198) - use cmd/steward --regtoken for gRPC-over-QUIC mode")
 }
 
-// startControllerTesting starts the steward in controller testing mode with MQTT+QUIC.
+// startControllerTesting starts the steward in controller testing mode with gRPC-over-QUIC.
 //
 // This method implements the integration test workflow:
 //  1. Start health monitoring
-//  2. Connect to MQTT broker
+//  2. Connect to controller
 //  3. Collect system DNA
 //  4. Register with controller
 //  5. Start heartbeat loop
 //
-// This mirrors the old startController behavior but uses MQTT+QUIC instead of gRPC.
+// This mirrors the old startController behavior but uses gRPC-over-QUIC instead of gRPC.
 func (s *Steward) startControllerTesting(ctx context.Context) error {
-	s.logger.Info("Starting steward in controller testing mode (MQTT+QUIC)", "id", s.legacyConfig.ID)
+	s.logger.Info("Starting steward in controller testing mode (gRPC-over-QUIC)", "id", s.legacyConfig.ID)
 
 	// Start health monitoring in background
 	go func() {
@@ -413,7 +413,7 @@ func (s *Steward) startControllerTesting(ctx context.Context) error {
 
 	// For testing mode, we expect a specific interface - use reflection to call methods
 	// This avoids import cycles with the client package
-	type mqttClientInterface interface {
+	type transportClientInterface interface {
 		Connect(context.Context) error
 		Disconnect(context.Context) error
 		SendHeartbeat(context.Context, string, map[string]string) error
@@ -421,17 +421,16 @@ func (s *Steward) startControllerTesting(ctx context.Context) error {
 		GetTenantID() string
 	}
 
-	mqttClient, ok := s.mqttClient.(mqttClientInterface)
+	tc, ok := s.transportClient.(transportClientInterface)
 	if !ok {
-		return fmt.Errorf("invalid MQTT client type: expected mqttClientInterface, got %T", s.mqttClient)
+		return fmt.Errorf("invalid transport client type: expected transportClientInterface, got %T", s.transportClient)
 	}
 
-	// Connect to MQTT broker (for testing, we log success even if connection details aren't fully set up)
-	connectErr := mqttClient.Connect(ctx)
+	// Connect to transport (for testing, we log success even if connection details aren't fully set up)
+	connectErr := tc.Connect(ctx)
 	if connectErr != nil {
-		// For integration testing, we still log connection messages even if MQTT setup is incomplete
-		// The tests verify logging behavior, not actual MQTT connectivity
-		s.logger.Warn("MQTT connection incomplete (test mode)", "error", connectErr.Error())
+		// For integration testing, we still log connection messages even if setup is incomplete
+		s.logger.Warn("Transport connection incomplete (test mode)", "error", connectErr.Error())
 	}
 
 	// Always log successful connection for integration tests
@@ -450,23 +449,23 @@ func (s *Steward) startControllerTesting(ctx context.Context) error {
 			"attributes", len(systemDNA.Attributes))
 	}
 
-	// Get steward ID from MQTT client
-	stewardID := mqttClient.GetStewardID()
+	// Get steward ID from transport client
+	stewardID := tc.GetStewardID()
 	if stewardID != "" {
 		s.logger.Info("Steward registered successfully",
 			"steward_id", stewardID,
-			"tenant_id", mqttClient.GetTenantID())
+			"tenant_id", tc.GetTenantID())
 	}
 
 	// Start heartbeat loop in background
-	go s.heartbeatLoopTesting(ctx, mqttClient)
+	go s.heartbeatLoopTesting(ctx, tc)
 
 	s.logger.Info("Steward started successfully in controller testing mode")
 	return nil
 }
 
-// heartbeatLoopTesting sends periodic heartbeats to the controller via MQTT.
-func (s *Steward) heartbeatLoopTesting(ctx context.Context, mqttClient interface {
+// heartbeatLoopTesting sends periodic heartbeats to the controller via transport client.
+func (s *Steward) heartbeatLoopTesting(ctx context.Context, transportClient interface {
 	SendHeartbeat(ctx context.Context, status string, metrics map[string]string) error
 }) {
 	ticker := time.NewTicker(30 * time.Second)
@@ -480,7 +479,7 @@ func (s *Steward) heartbeatLoopTesting(ctx context.Context, mqttClient interface
 			return
 		case <-ticker.C:
 			// Send heartbeat
-			if err := mqttClient.SendHeartbeat(ctx, "healthy", nil); err != nil {
+			if err := transportClient.SendHeartbeat(ctx, "healthy", nil); err != nil {
 				s.logger.Warn("Failed to send heartbeat", "error", err)
 				s.healthCheck.RecordHeartbeatError()
 			} else {
@@ -590,15 +589,15 @@ func (s *Steward) Stop(ctx context.Context) error {
 			s.moduleFactory.UnloadAllModules()
 		}
 	} else {
-		// Controller testing mode: disconnect MQTT client if present
-		if s.mqttClient != nil {
-			if mqttClient, ok := s.mqttClient.(interface {
+		// Controller testing mode: disconnect transport client if present
+		if s.transportClient != nil {
+			if tc, ok := s.transportClient.(interface {
 				Disconnect(ctx context.Context) error
 			}); ok {
-				if err := mqttClient.Disconnect(ctx); err != nil {
-					s.logger.Warn("Failed to disconnect MQTT client", "error", err)
+				if err := tc.Disconnect(ctx); err != nil {
+					s.logger.Warn("Failed to disconnect transport client", "error", err)
 				} else {
-					s.logger.Info("MQTT client disconnected successfully")
+					s.logger.Info("Transport client disconnected successfully")
 				}
 			}
 		} else {
@@ -681,7 +680,7 @@ func (s *Steward) GetSystemDNA(ctx context.Context) (*commonpb.DNA, error) {
 // to the controller, or if DNA collection or synchronization fails.
 func (s *Steward) SyncDNAWithController(ctx context.Context) error {
 	// DEPRECATED: Controller mode removed (Story #198)
-	return fmt.Errorf("controller mode deprecated (Story #198) - use cmd/steward --regtoken for MQTT+QUIC mode")
+	return fmt.Errorf("controller mode deprecated (Story #198) - use cmd/steward --regtoken for gRPC-over-QUIC mode")
 }
 
 // GetControllerConnectionStatus returns the connection status with the controller.
@@ -742,7 +741,7 @@ func initializeStewardCertificateManager(cfg *Config, logger logging.Logger) (*c
 
 // createControllerClient creates a controller client with optional certificate management.
 // DEPRECATED: createControllerClient removed in Story #198
-// Use MQTT+QUIC client via cmd/steward --regtoken instead
+// Use gRPC-over-QUIC client via cmd/steward --regtoken instead
 /*
 func createControllerClient(cfg *Config, certManager *cert.Manager, logger logging.Logger) (*client.Client, error) {
 	certPath := cfg.CertPath
@@ -772,9 +771,9 @@ func createControllerClient(cfg *Config, certManager *cert.Manager, logger loggi
 }
 */
 
-// SetMQTTClientForTesting injects an MQTT client for integration testing.
-// This is used by the test helper to set up the MQTT client before calling Start().
+// SetTransportClientForTesting injects a transport client for integration testing.
+// This is used by the test helper to set up the transport client before calling Start().
 // FOR TESTING ONLY - not for production use.
-func (s *Steward) SetMQTTClientForTesting(mqttClient interface{}) {
-	s.mqttClient = mqttClient
+func (s *Steward) SetTransportClientForTesting(tc interface{}) {
+	s.transportClient = tc
 }
