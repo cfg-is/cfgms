@@ -35,15 +35,15 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
       with:
         go-version: ${{ env.GO_VERSION }}
 
     - name: Cache Go modules
-      uses: actions/cache@v4
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
       with:
         path: ~/go/pkg/mod
         key: ${{ runner.os }}-go-licenses-${{ hashFiles('**/go.sum') }}
@@ -52,7 +52,7 @@ jobs:
           ${{ runner.os }}-go-
 
     - name: Install go-licenses tool
-      run: go install github.com/google/go-licenses@latest
+      run: go install github.com/google/go-licenses@v2.0.1
 
     - name: Download dependencies
       run: go mod download
@@ -160,7 +160,7 @@ jobs:
         cat license-reports/summary.md
 
     - name: Upload license reports
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       if: always()
       with:
         name: license-compliance-report

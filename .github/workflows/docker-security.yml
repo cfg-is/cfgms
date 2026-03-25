@@ -32,7 +32,7 @@ env:
   GO_VERSION: '1.23'
   REGISTRY: ghcr.io
   IMAGE_PREFIX: cfg-is/cfgms
-  TRIVY_VERSION: 'v0.69.2'
+  TRIVY_VERSION: 'v0.69.3'
 
 jobs:
   # Scan Controller Docker Image
@@ -47,16 +47,16 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
     - name: Install Trivy (cached)
-      uses: aquasecurity/setup-trivy@v0.2.6
+      uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514 # v0.2.6 — pinned to SHA per CVE-2026-33634
       with:
         version: ${{ env.TRIVY_VERSION }}
         cache: true
 
     - name: Cache Trivy vulnerability database
-      uses: actions/cache@v4
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
       with:
         path: ${{ github.workspace }}/.cache/trivy
         key: trivy-db-${{ runner.os }}-${{ github.run_id }}
@@ -64,10 +64,10 @@ jobs:
           trivy-db-${{ runner.os }}-
 
     - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
+      uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
     - name: Build Controller Image
-      uses: docker/build-push-action@v5
+      uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
       with:
         context: .
         file: ./cmd/controller/Dockerfile
@@ -78,7 +78,7 @@ jobs:
         cache-to: type=gha,mode=max
 
     - name: Run Trivy vulnerability scanner
-      uses: aquasecurity/trivy-action@v0.35.0
+      uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0 — pinned to SHA per CVE-2026-33634
       with:
         image-ref: ${{ env.IMAGE_PREFIX }}/controller:scan
         format: 'sarif'
@@ -93,7 +93,7 @@ jobs:
         skip-setup-trivy: true
 
     - name: Upload Trivy results to GitHub Security tab
-      uses: github/codeql-action/upload-sarif@v3
+      uses: github/codeql-action/upload-sarif@480db559a14342288b67e54bd959dd52dc3ee68f # v3
       if: always()
       with:
         sarif_file: 'trivy-controller-results.sarif'
@@ -101,7 +101,7 @@ jobs:
 
     - name: Generate human-readable report
       if: always()
-      uses: aquasecurity/trivy-action@v0.35.0
+      uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0 — pinned to SHA per CVE-2026-33634
       with:
         image-ref: ${{ env.IMAGE_PREFIX }}/controller:scan
         format: 'table'
@@ -113,7 +113,7 @@ jobs:
         skip-setup-trivy: true
 
     - name: Upload scan results
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       if: always()
       with:
         name: trivy-controller-results
@@ -134,16 +134,16 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
     - name: Install Trivy (cached)
-      uses: aquasecurity/setup-trivy@v0.2.6
+      uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514 # v0.2.6 — pinned to SHA per CVE-2026-33634
       with:
         version: ${{ env.TRIVY_VERSION }}
         cache: true
 
     - name: Cache Trivy vulnerability database
-      uses: actions/cache@v4
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
       with:
         path: ${{ github.workspace }}/.cache/trivy
         key: trivy-db-${{ runner.os }}-${{ github.run_id }}
@@ -151,10 +151,10 @@ jobs:
           trivy-db-${{ runner.os }}-
 
     - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
+      uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
     - name: Build Steward Image
-      uses: docker/build-push-action@v5
+      uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
       with:
         context: .
         file: ./cmd/steward/Dockerfile
@@ -165,7 +165,7 @@ jobs:
         cache-to: type=gha,mode=max
 
     - name: Run Trivy vulnerability scanner
-      uses: aquasecurity/trivy-action@v0.35.0
+      uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0 — pinned to SHA per CVE-2026-33634
       with:
         image-ref: ${{ env.IMAGE_PREFIX }}/steward:scan
         format: 'sarif'
@@ -180,7 +180,7 @@ jobs:
         skip-setup-trivy: true
 
     - name: Upload Trivy results to GitHub Security tab
-      uses: github/codeql-action/upload-sarif@v3
+      uses: github/codeql-action/upload-sarif@480db559a14342288b67e54bd959dd52dc3ee68f # v3
       if: always()
       with:
         sarif_file: 'trivy-steward-results.sarif'
@@ -188,7 +188,7 @@ jobs:
 
     - name: Generate human-readable report
       if: always()
-      uses: aquasecurity/trivy-action@v0.35.0
+      uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0 — pinned to SHA per CVE-2026-33634
       with:
         image-ref: ${{ env.IMAGE_PREFIX }}/steward:scan
         format: 'table'
@@ -200,7 +200,7 @@ jobs:
         skip-setup-trivy: true
 
     - name: Upload scan results
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       if: always()
       with:
         name: trivy-steward-results

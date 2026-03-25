@@ -42,7 +42,7 @@ jobs:
       version: ${{ steps.get_version.outputs.version }}
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       with:
         fetch-depth: 0
 
@@ -112,15 +112,15 @@ jobs:
             arch: arm64
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
       with:
         go-version: ${{ env.GO_VERSION }}
 
     - name: Cache Go modules
-      uses: actions/cache@v4
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
       with:
         path: ~/go/pkg/mod
         key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
@@ -191,17 +191,17 @@ jobs:
     needs: create-release
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
       with:
         go-version: ${{ env.GO_VERSION }}
 
     # Generate SBOM using Syft (Anchore)
     # Using v0.20.11 (latest as of 2024-12-09) with Syft v1.38.2
     - name: Generate SBOM for Controller
-      uses: anchore/sbom-action@v0.20.11
+      uses: anchore/sbom-action@43a17d6e7add2b5535efe4dcae9952337c479a93 # v0.20.11
       with:
         path: ./cmd/controller
         artifact-name: sbom-controller-${{ needs.create-release.outputs.version }}.spdx.json
@@ -209,7 +209,7 @@ jobs:
         format: spdx-json
 
     - name: Generate SBOM for Steward
-      uses: anchore/sbom-action@v0.20.11
+      uses: anchore/sbom-action@43a17d6e7add2b5535efe4dcae9952337c479a93 # v0.20.11
       with:
         path: ./cmd/steward
         artifact-name: sbom-steward-${{ needs.create-release.outputs.version }}.spdx.json
@@ -217,7 +217,7 @@ jobs:
         format: spdx-json
 
     - name: Generate SBOM for CLI
-      uses: anchore/sbom-action@v0.20.11
+      uses: anchore/sbom-action@43a17d6e7add2b5535efe4dcae9952337c479a93 # v0.20.11
       with:
         path: ./cmd/cfg
         artifact-name: sbom-cli-${{ needs.create-release.outputs.version }}.spdx.json
@@ -268,7 +268,7 @@ jobs:
     if: success()
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       with:
         ref: develop
         fetch-depth: 0

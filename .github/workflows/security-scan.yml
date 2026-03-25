@@ -40,7 +40,7 @@ jobs:
       issues-found: ${{ steps.scan.outputs.issues-found }}
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
     
     - name: Install Trivy
       run: |
@@ -49,7 +49,7 @@ jobs:
         wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
         echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
         sudo apt-get update
-        sudo apt-get install trivy
+        sudo apt-get install -y trivy=0.69.3  # Pinned: v0.69.4+ are compromised (CVE-2026-33634)
     
     - name: Run Trivy Scan
       id: scan
@@ -71,7 +71,7 @@ jobs:
         fi
     
     - name: Upload Trivy SARIF
-      uses: github/codeql-action/upload-sarif@v3
+      uses: github/codeql-action/upload-sarif@480db559a14342288b67e54bd959dd52dc3ee68f # v3
       if: always() && hashFiles('sarif-results/trivy.sarif') != ''
       with:
         sarif_file: sarif-results/trivy.sarif
@@ -79,7 +79,7 @@ jobs:
       continue-on-error: true
     
     - name: Upload Trivy Results
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       if: always()
       with:
         name: trivy-results
@@ -94,16 +94,16 @@ jobs:
       issues-found: ${{ steps.scan.outputs.issues-found }}
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
     
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@7b8cf10d4e4a01d4992d18a89f4d7dc5a3e6d6f4 # v4
       with:
         go-version: ${{ env.GO_VERSION }}
     
     # Cache disabled due to parallel job conflicts causing tar extraction failures
     # - name: Cache Go modules
-    #   uses: actions/cache@v3
+    #   uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
     #   with:
     #     path: ~/go/pkg/mod
     #     key: ${{ runner.os }}-nancy-${{ hashFiles('**/go.sum') }}
@@ -136,16 +136,16 @@ jobs:
       issues-found: ${{ steps.scan.outputs.issues-found }}
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
     
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@7b8cf10d4e4a01d4992d18a89f4d7dc5a3e6d6f4 # v4
       with:
         go-version: ${{ env.GO_VERSION }}
     
     # Cache disabled due to parallel job conflicts causing tar extraction failures
     # - name: Cache Go modules
-    #   uses: actions/cache@v3
+    #   uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
     #   with:
     #     path: ~/go/pkg/mod
     #     key: ${{ runner.os }}-gosec-${{ hashFiles('**/go.sum') }}
@@ -155,7 +155,7 @@ jobs:
     #   continue-on-error: true
     
     - name: Install gosec
-      run: go install github.com/securego/gosec/v2/cmd/gosec@latest
+      run: go install github.com/securego/gosec/v2/cmd/gosec@v2.25.0
     
     - name: Run gosec Scan
       id: scan
@@ -188,7 +188,7 @@ jobs:
     # configuration, and results are still available via workflow artifacts.
     #
     # - name: Upload gosec SARIF
-    #   uses: github/codeql-action/upload-sarif@v3
+    #   uses: github/codeql-action/upload-sarif@480db559a14342288b67e54bd959dd52dc3ee68f # v3
     #   if: always() && hashFiles('sarif-results/gosec.sarif') != ''
     #   with:
     #     sarif_file: sarif-results/gosec.sarif
@@ -196,7 +196,7 @@ jobs:
     #   continue-on-error: true
 
     - name: Upload gosec Results
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       if: always()
       with:
         name: gosec-results
@@ -211,16 +211,16 @@ jobs:
       issues-found: ${{ steps.scan.outputs.issues-found }}
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
     
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@7b8cf10d4e4a01d4992d18a89f4d7dc5a3e6d6f4 # v4
       with:
         go-version: ${{ env.GO_VERSION }}
     
     # Cache disabled due to parallel job conflicts causing tar extraction failures
     # - name: Cache Go modules
-    #   uses: actions/cache@v3
+    #   uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
     #   with:
     #     path: ~/go/pkg/mod
     #     key: ${{ runner.os }}-staticcheck-${{ hashFiles('**/go.sum') }}
@@ -230,7 +230,7 @@ jobs:
     #   continue-on-error: true
     
     - name: Install staticcheck
-      run: go install honnef.co/go/tools/cmd/staticcheck@latest
+      run: go install honnef.co/go/tools/cmd/staticcheck@2026.1
     
     - name: Run staticcheck Scan
       id: scan
@@ -259,10 +259,10 @@ jobs:
     
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@7b8cf10d4e4a01d4992d18a89f4d7dc5a3e6d6f4 # v4
       with:
         go-version: ${{ env.GO_VERSION }}
     
@@ -303,11 +303,11 @@ jobs:
         wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
         echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
         sudo apt-get update
-        sudo apt-get install trivy
+        sudo apt-get install -y trivy=0.69.3  # Pinned: v0.69.4+ are compromised (CVE-2026-33634)
         
         # Install gosec and staticcheck
-        go install github.com/securego/gosec/v2/cmd/gosec@latest
-        go install honnef.co/go/tools/cmd/staticcheck@latest
+        go install github.com/securego/gosec/v2/cmd/gosec@v2.25.0
+        go install honnef.co/go/tools/cmd/staticcheck@2026.1
     
     - name: Generate Remediation Report on Failure
       if: steps.summary.outputs.issues-found == 'true'
@@ -325,7 +325,7 @@ jobs:
         fi
     
     - name: Upload Consolidated Security Results
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       if: always()
       with:
         name: security-scan-consolidated
