@@ -3,7 +3,7 @@
 // Package types provides message types for the control plane communication layer.
 //
 // This package defines semantic message types for controller-steward communication,
-// abstracting away transport-specific details (MQTT, gRPC, etc.).
+// abstracting away transport-specific details.
 package types
 
 import (
@@ -19,11 +19,6 @@ const (
 
 	// CommandSyncDNA requests DNA synchronization via data plane
 	CommandSyncDNA CommandType = "sync_dna"
-
-	// Deprecated: CommandConnectDataPlane is no longer used — CP and DP share
-	// the same gRPC-over-QUIC connection (Story #515). Retained for backward
-	// compatibility with older stewards.
-	CommandConnectDataPlane CommandType = "connect_dataplane"
 
 	// CommandValidateConfig requests configuration validation (dry-run)
 	CommandValidateConfig CommandType = "validate_config"

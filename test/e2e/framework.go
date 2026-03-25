@@ -344,13 +344,6 @@ func (f *E2ETestFramework) initializeController() error {
 				Organization: "Test Organization",
 			},
 		},
-		// Story #294 Phase 2: Enable MQTT broker for steward registration and communication
-		MQTT: &controllerConfig.MQTTConfig{
-			Enabled:        true,
-			ListenAddr:     "localhost:1883",
-			EnableTLS:      f.config.EnableTLS,
-			UseCertManager: true, // Use auto-generated certificates from cert manager
-		},
 		// Issue #516: Enable gRPC-over-QUIC transport for steward connections
 		Transport: &controllerConfig.TransportConfig{
 			ListenAddr:      "localhost:4433",

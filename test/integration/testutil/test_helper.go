@@ -154,12 +154,6 @@ func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx
 				Organization: "CFGMS Test",
 			},
 		},
-		MQTT: &config.MQTTConfig{
-			Enabled:        true,
-			ListenAddr:     "127.0.0.1:1883",
-			EnableTLS:      false,
-			UseCertManager: true,
-		},
 		QUIC: &config.QUICConfig{
 			Enabled:        true,
 			ListenAddr:     "127.0.0.1:4433",

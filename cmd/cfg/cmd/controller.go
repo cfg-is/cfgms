@@ -212,15 +212,6 @@ func runControllerMetrics(cmd *cobra.Command, args []string) error {
 	// Parse response
 	var metrics struct {
 		Timestamp time.Time `json:"timestamp"`
-		MQTT      *struct {
-			ActiveConnections     int64     `json:"active_connections"`
-			MessageQueueDepth     int64     `json:"message_queue_depth"`
-			MessageThroughput     float64   `json:"message_throughput"`
-			TotalMessagesSent     int64     `json:"total_messages_sent"`
-			TotalMessagesReceived int64     `json:"total_messages_received"`
-			ConnectionErrors      int64     `json:"connection_errors"`
-			CollectedAt           time.Time `json:"collected_at"`
-		} `json:"mqtt"`
 		Storage *struct {
 			Provider          string    `json:"provider"`
 			PoolUtilization   float64   `json:"pool_utilization"`
@@ -267,18 +258,6 @@ func runControllerMetrics(cmd *cobra.Command, args []string) error {
 	// Text format
 	fmt.Printf("\nController Metrics - %s\n", metrics.Timestamp.Format("2006-01-02 15:04:05 MST"))
 	fmt.Println()
-
-	// MQTT metrics
-	if metrics.MQTT != nil {
-		fmt.Println("=== MQTT Broker ===")
-		fmt.Printf("Active Connections:     %d\n", metrics.MQTT.ActiveConnections)
-		fmt.Printf("Message Queue Depth:    %d\n", metrics.MQTT.MessageQueueDepth)
-		fmt.Printf("Message Throughput:     %.2f msg/sec\n", metrics.MQTT.MessageThroughput)
-		fmt.Printf("Total Messages Sent:    %d\n", metrics.MQTT.TotalMessagesSent)
-		fmt.Printf("Total Messages Received: %d\n", metrics.MQTT.TotalMessagesReceived)
-		fmt.Printf("Connection Errors:      %d\n", metrics.MQTT.ConnectionErrors)
-		fmt.Println()
-	}
 
 	// Storage metrics
 	if metrics.Storage != nil {

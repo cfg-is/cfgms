@@ -17,22 +17,20 @@ import (
 
 // commandTypeToProto maps semantic CommandType to proto enum.
 var commandTypeToProto = map[types.CommandType]transportpb.CommandType{
-	types.CommandSyncConfig:       transportpb.CommandType_COMMAND_TYPE_SYNC_CONFIG,
-	types.CommandSyncDNA:          transportpb.CommandType_COMMAND_TYPE_SYNC_DNA,
-	types.CommandConnectDataPlane: transportpb.CommandType_COMMAND_TYPE_CONNECT_DATAPLANE, //nolint:staticcheck // backward compat
-	types.CommandValidateConfig:   transportpb.CommandType_COMMAND_TYPE_VALIDATE_CONFIG,
-	types.CommandExecuteTask:      transportpb.CommandType_COMMAND_TYPE_EXECUTE_TASK,
-	types.CommandShutdown:         transportpb.CommandType_COMMAND_TYPE_SHUTDOWN,
+	types.CommandSyncConfig:     transportpb.CommandType_COMMAND_TYPE_SYNC_CONFIG,
+	types.CommandSyncDNA:        transportpb.CommandType_COMMAND_TYPE_SYNC_DNA,
+	types.CommandValidateConfig: transportpb.CommandType_COMMAND_TYPE_VALIDATE_CONFIG,
+	types.CommandExecuteTask:    transportpb.CommandType_COMMAND_TYPE_EXECUTE_TASK,
+	types.CommandShutdown:       transportpb.CommandType_COMMAND_TYPE_SHUTDOWN,
 }
 
 // protoToCommandType maps proto enum to semantic CommandType.
 var protoToCommandType = map[transportpb.CommandType]types.CommandType{
-	transportpb.CommandType_COMMAND_TYPE_SYNC_CONFIG:       types.CommandSyncConfig,
-	transportpb.CommandType_COMMAND_TYPE_SYNC_DNA:          types.CommandSyncDNA,
-	transportpb.CommandType_COMMAND_TYPE_CONNECT_DATAPLANE: types.CommandConnectDataPlane, //nolint:staticcheck // backward compat
-	transportpb.CommandType_COMMAND_TYPE_VALIDATE_CONFIG:   types.CommandValidateConfig,
-	transportpb.CommandType_COMMAND_TYPE_EXECUTE_TASK:      types.CommandExecuteTask,
-	transportpb.CommandType_COMMAND_TYPE_SHUTDOWN:          types.CommandShutdown,
+	transportpb.CommandType_COMMAND_TYPE_SYNC_CONFIG:     types.CommandSyncConfig,
+	transportpb.CommandType_COMMAND_TYPE_SYNC_DNA:        types.CommandSyncDNA,
+	transportpb.CommandType_COMMAND_TYPE_VALIDATE_CONFIG: types.CommandValidateConfig,
+	transportpb.CommandType_COMMAND_TYPE_EXECUTE_TASK:    types.CommandExecuteTask,
+	transportpb.CommandType_COMMAND_TYPE_SHUTDOWN:        types.CommandShutdown,
 }
 
 func commandToProto(cmd *types.Command) *transportpb.Command {

@@ -91,7 +91,6 @@ func TestCommandTypeRoundTrip(t *testing.T) {
 	allTypes := []types.CommandType{
 		types.CommandSyncConfig,
 		types.CommandSyncDNA,
-		types.CommandConnectDataPlane, //nolint:staticcheck // backward compat
 		types.CommandValidateConfig,
 		types.CommandExecuteTask,
 		types.CommandShutdown,

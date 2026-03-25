@@ -131,28 +131,6 @@ transport:
 	assert.Equal(t, 10*time.Minute, cfg.Transport.IdleTimeout.AsDuration())
 }
 
-// TestLoadWithPath_MigrationFromMQTT verifies deprecated mqtt: section is migrated to transport:.
-func TestLoadWithPath_MigrationFromMQTT(t *testing.T) {
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "controller.cfg")
-
-	content := `
-mqtt:
-  listen_addr: "0.0.0.0:1883"
-  use_cert_manager: false
-`
-	require.NoError(t, os.WriteFile(configPath, []byte(content), 0600))
-
-	cfg, err := LoadWithPath(configPath)
-	require.NoError(t, err)
-	require.NotNil(t, cfg.Transport, "Transport must be populated after MQTT migration")
-
-	assert.Equal(t, "0.0.0.0:1883", cfg.Transport.ListenAddr,
-		"mqtt.listen_addr must be migrated to transport.listen_addr")
-	assert.False(t, cfg.Transport.UseCertManager,
-		"mqtt.use_cert_manager must be migrated to transport.use_cert_manager")
-}
-
 // TestLoadWithPath_MigrationFromQUIC verifies deprecated quic: section is migrated to transport:.
 func TestLoadWithPath_MigrationFromQUIC(t *testing.T) {
 	dir := t.TempDir()
@@ -175,40 +153,14 @@ quic:
 		"quic.use_cert_manager must be migrated to transport.use_cert_manager")
 }
 
-// TestLoadWithPath_QUICOverridesMQTTInMigration verifies that quic: takes priority over mqtt: when both present.
-func TestLoadWithPath_QUICOverridesMQTTInMigration(t *testing.T) {
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "controller.cfg")
-
-	content := `
-mqtt:
-  listen_addr: "0.0.0.0:1883"
-  use_cert_manager: false
-quic:
-  listen_addr: "0.0.0.0:4433"
-  use_cert_manager: true
-`
-	require.NoError(t, os.WriteFile(configPath, []byte(content), 0600))
-
-	cfg, err := LoadWithPath(configPath)
-	require.NoError(t, err)
-	require.NotNil(t, cfg.Transport)
-
-	// QUIC takes priority when both old sections are present
-	assert.Equal(t, "0.0.0.0:4433", cfg.Transport.ListenAddr,
-		"quic.listen_addr must take priority over mqtt.listen_addr")
-	assert.True(t, cfg.Transport.UseCertManager,
-		"quic.use_cert_manager must take priority over mqtt.use_cert_manager")
-}
-
-// TestLoadWithPath_NewSectionOverridesOld verifies transport: wins when both old and new sections present.
+// TestLoadWithPath_NewSectionOverridesOld verifies transport: wins when both quic: and transport: present.
 func TestLoadWithPath_NewSectionOverridesOld(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "controller.cfg")
 
 	content := `
-mqtt:
-  listen_addr: "0.0.0.0:1883"
+quic:
+  listen_addr: "0.0.0.0:4433"
   use_cert_manager: false
 transport:
   listen_addr: "0.0.0.0:4433"
@@ -225,7 +177,7 @@ transport:
 
 	// transport: section wins
 	assert.Equal(t, "0.0.0.0:4433", cfg.Transport.ListenAddr,
-		"transport: section must win over mqtt: section")
+		"transport: section must win over quic: section")
 	assert.True(t, cfg.Transport.UseCertManager)
 }
 
@@ -259,31 +211,6 @@ func TestLoadWithPath_TransportKeepaliveEnvVar(t *testing.T) {
 	assert.Equal(t, 2*time.Minute, cfg.Transport.KeepalivePeriod.AsDuration())
 }
 
-// TestLoadWithPath_MQTTListenAddrDeprecatedEnvVar verifies CFGMS_MQTT_LISTEN_ADDR maps to transport with deprecation.
-func TestLoadWithPath_MQTTListenAddrDeprecatedEnvVar(t *testing.T) {
-	// Ensure the new transport env var is not set
-	t.Setenv("CFGMS_MQTT_LISTEN_ADDR", "0.0.0.0:9876")
-
-	cfg, err := Load()
-	require.NoError(t, err)
-	require.NotNil(t, cfg.Transport)
-	// Deprecated CFGMS_MQTT_LISTEN_ADDR should propagate to Transport when CFGMS_TRANSPORT_LISTEN_ADDR is not set
-	assert.Equal(t, "0.0.0.0:9876", cfg.Transport.ListenAddr,
-		"deprecated CFGMS_MQTT_LISTEN_ADDR must propagate to transport.listen_addr")
-}
-
-// TestLoadWithPath_TransportEnvVarWinsOverMQTTDeprecated verifies CFGMS_TRANSPORT_LISTEN_ADDR takes priority.
-func TestLoadWithPath_TransportEnvVarWinsOverMQTTDeprecated(t *testing.T) {
-	t.Setenv("CFGMS_MQTT_LISTEN_ADDR", "0.0.0.0:9876")
-	t.Setenv("CFGMS_TRANSPORT_LISTEN_ADDR", "0.0.0.0:4433")
-
-	cfg, err := Load()
-	require.NoError(t, err)
-	require.NotNil(t, cfg.Transport)
-	assert.Equal(t, "0.0.0.0:4433", cfg.Transport.ListenAddr,
-		"CFGMS_TRANSPORT_LISTEN_ADDR must win over deprecated CFGMS_MQTT_LISTEN_ADDR")
-}
-
 // TestDuration_UnmarshalYAML verifies Duration type parses human-readable strings from YAML.
 func TestDuration_UnmarshalYAML(t *testing.T) {
 	dir := t.TempDir()
@@ -313,13 +240,11 @@ func TestDuration_AsDuration(t *testing.T) {
 	assert.Equal(t, 30*time.Second, d.AsDuration())
 }
 
-// TestLoadWithPath_DefaultConfigHasTransportAlongsideLegacy verifies Config has Transport alongside MQTT and QUIC.
-func TestLoadWithPath_DefaultConfigHasTransportAlongsideLegacy(t *testing.T) {
+// TestLoadWithPath_DefaultConfigHasTransportAlongsideQUIC verifies Config has Transport alongside QUIC.
+func TestLoadWithPath_DefaultConfigHasTransportAlongsideQUIC(t *testing.T) {
 	cfg := DefaultConfig()
 
-	// All three sections must exist during Phase 10 transition
-	require.NotNil(t, cfg.MQTT, "MQTT must remain for backward compat during Phase 10")
-	require.NotNil(t, cfg.QUIC, "QUIC must remain for backward compat during Phase 10")
+	require.NotNil(t, cfg.QUIC, "QUIC must remain for backward compat")
 	require.NotNil(t, cfg.Transport, "Transport must be present as new unified section")
 }
 

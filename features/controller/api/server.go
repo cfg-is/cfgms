@@ -445,10 +445,6 @@ func (s *Server) getHTTPListenAddr() string {
 
 // shouldUseTLS determines if TLS should be enabled for the HTTP server
 func (s *Server) shouldUseTLS() bool {
-	// Alpha (Story #198): Disable TLS for HTTP API if MQTT TLS is disabled
-	if s.cfg.MQTT != nil && !s.cfg.MQTT.EnableTLS {
-		return false
-	}
 	return s.certManager != nil || s.hasLegacyCertificates()
 }
 

@@ -15,6 +15,38 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
+// RegistrationRequest represents a registration request to the controller.
+type RegistrationRequest struct {
+	Token string `json:"token"`
+}
+
+// RegistrationResponse represents the response from the controller.
+type RegistrationResponse struct {
+	Success       bool   `json:"success"`
+	StewardID     string `json:"steward_id,omitempty"`
+	TenantID      string `json:"tenant_id,omitempty"`
+	ControllerURL string `json:"controller_url,omitempty"`
+	Group         string `json:"group,omitempty"`
+	Error         string `json:"error,omitempty"`
+
+	// Unified transport address for gRPC-over-QUIC connection (Issue #513)
+	TransportAddress string `json:"transport_address,omitempty"`
+
+	// Certificate fields
+	ClientCert string `json:"client_cert,omitempty"`
+	ClientKey  string `json:"client_key,omitempty"`
+	CACert     string `json:"ca_cert,omitempty"`
+
+	// Controller's server certificate for configuration signature verification (Story #315)
+	// Used by steward to verify configurations signed by this controller
+	// In HA clusters, stewards collect and trust certs from all controllers
+	ServerCert string `json:"server_cert,omitempty"`
+
+	// Story #377: Dedicated config signing certificate (separated architecture)
+	// When present, steward should prefer this for config signature verification
+	SigningCert string `json:"signing_cert,omitempty"`
+}
+
 // HTTPClient handles steward registration via REST API
 type HTTPClient struct {
 	controllerURL string

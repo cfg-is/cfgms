@@ -297,7 +297,6 @@ func TestCommandTypes(t *testing.T) {
 	types := []CommandType{
 		CommandSyncConfig,
 		CommandSyncDNA,
-		CommandConnectDataPlane,
 		CommandValidateConfig,
 		CommandExecuteTask,
 		CommandShutdown,
