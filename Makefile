@@ -336,7 +336,7 @@ security-precommit:
 			echo "⚠️  gitleaks not found - secret scanning SKIPPED"; \
 			echo ""; \
 			echo "Install gitleaks:"; \
-			echo "  go install github.com/zricethezav/gitleaks/v8@latest"; \
+			echo "  go install github.com/zricethezav/gitleaks/v8@v8.30.1"; \
 			echo ""; \
 			echo "❌ COMMIT BLOCKED: gitleaks must be installed"; \
 			exit 1; \
@@ -752,7 +752,7 @@ test-data-consistency:
 
 # Automatic Nancy installation (cross-platform)
 install-nancy:
-	@echo "📦 Installing Nancy v1.0.51..."
+	@echo "📦 Installing Nancy v1.2.0..."
 	@echo "============================="
 	@if command -v nancy >/dev/null 2>&1; then \
 		echo "✅ Nancy is already installed: $$(nancy --version)"; \
@@ -770,16 +770,16 @@ install-nancy:
 	case "$$os" in \
 		linux) \
 			if [ "$$arch" = "x86_64" ]; then \
-				curl -L "https://github.com/sonatype-nexus-community/nancy/releases/download/v1.0.51/nancy-v1.0.51-linux-amd64" -o "$$gopath/bin/nancy"; \
+				curl -L "https://github.com/sonatype-nexus-community/nancy/releases/download/v1.2.0/nancy-v1.2.0-linux-amd64" -o "$$gopath/bin/nancy"; \
 			else \
 				echo "❌ Unsupported architecture: $$arch"; \
 				exit 1; \
 			fi ;; \
 		darwin) \
 			if [ "$$arch" = "x86_64" ]; then \
-				curl -L "https://github.com/sonatype-nexus-community/nancy/releases/download/v1.0.51/nancy-v1.0.51-darwin-amd64" -o "$$gopath/bin/nancy"; \
+				curl -L "https://github.com/sonatype-nexus-community/nancy/releases/download/v1.2.0/nancy-v1.2.0-darwin-amd64" -o "$$gopath/bin/nancy"; \
 			elif [ "$$arch" = "arm64" ]; then \
-				curl -L "https://github.com/sonatype-nexus-community/nancy/releases/download/v1.0.51/nancy-v1.0.51-darwin-arm64" -o "$$gopath/bin/nancy"; \
+				curl -L "https://github.com/sonatype-nexus-community/nancy/releases/download/v1.2.0/nancy-v1.2.0-darwin-arm64" -o "$$gopath/bin/nancy"; \
 			else \
 				echo "❌ Unsupported architecture: $$arch"; \
 				exit 1; \
@@ -801,15 +801,12 @@ security-trivy:
 	@if ! command -v trivy >/dev/null 2>&1; then \
 		echo "❌ Error: trivy is not installed"; \
 		echo ""; \
-		echo "Install trivy using Go (recommended for Go projects):"; \
-		echo "  go install github.com/aquasecurity/trivy/cmd/trivy@latest"; \
-		echo ""; \
-		echo "Or pin to specific version for reproducible builds:"; \
-		echo "  go install github.com/aquasecurity/trivy/cmd/trivy@v0.48.3"; \
+		echo "Install trivy v0.69.3 (NEVER use @latest — CVE-2026-33634):"; \
+		echo "  go install github.com/aquasecurity/trivy/cmd/trivy@v0.69.3"; \
 		echo ""; \
 		echo "Alternative installation methods:"; \
 		echo "  # Binary download:"; \
-		echo "  curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin v0.48.3"; \
+		echo "  curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin v0.69.3"; \
 		echo "  # Official documentation: https://aquasecurity.github.io/trivy/latest/getting-started/installation/"; \
 		exit 1; \
 	fi
@@ -836,25 +833,25 @@ security-deps:
 	@if ! command -v nancy >/dev/null 2>&1; then \
 		echo "❌ Error: nancy is not installed"; \
 		echo ""; \
-		echo "Install nancy (v1.0.51) for your platform:"; \
+		echo "Install nancy (v1.2.0) for your platform:"; \
 		echo ""; \
 		echo "🚀 Quick Install (recommended):"; \
 		echo "  make install-nancy"; \
 		echo ""; \
 		echo "📥 Manual Install - Linux (amd64):"; \
-		echo "  curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v1.0.51/nancy-v1.0.51-linux-amd64 -o ~/nancy"; \
+		echo "  curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v1.2.0/nancy-v1.2.0-linux-amd64 -o ~/nancy"; \
 		echo "  chmod +x ~/nancy && mv ~/nancy \$$(go env GOPATH)/bin/nancy"; \
 		echo ""; \
 		echo "🍎 Manual Install - macOS (Intel):"; \
-		echo "  curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v1.0.51/nancy-v1.0.51-darwin-amd64 -o ~/nancy"; \
+		echo "  curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v1.2.0/nancy-v1.2.0-darwin-amd64 -o ~/nancy"; \
 		echo "  chmod +x ~/nancy && mv ~/nancy \$$(go env GOPATH)/bin/nancy"; \
 		echo ""; \
 		echo "🍎 Manual Install - macOS (Apple Silicon):"; \
-		echo "  curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v1.0.51/nancy-v1.0.51-darwin-arm64 -o ~/nancy"; \
+		echo "  curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v1.2.0/nancy-v1.2.0-darwin-arm64 -o ~/nancy"; \
 		echo "  chmod +x ~/nancy && mv ~/nancy \$$(go env GOPATH)/bin/nancy"; \
 		echo ""; \
 		echo "🪟 Manual Install - Windows (PowerShell):"; \
-		echo "  Invoke-WebRequest -Uri 'https://github.com/sonatype-nexus-community/nancy/releases/download/v1.0.51/nancy-v1.0.51-windows-amd64.exe' -OutFile 'nancy.exe'"; \
+		echo "  Invoke-WebRequest -Uri 'https://github.com/sonatype-nexus-community/nancy/releases/download/v1.2.0/nancy-v1.2.0-windows-amd64.exe' -OutFile 'nancy.exe'"; \
 		echo "  Move-Item nancy.exe \$$(go env GOPATH)\\bin\\nancy.exe"; \
 		echo ""; \
 		echo "📦 Package Managers:"; \
@@ -885,7 +882,7 @@ security-gosec:
 		echo "❌ Error: gosec is not installed"; \
 		echo ""; \
 		echo "Install gosec using Go:"; \
-		echo "  go install github.com/securego/gosec/v2/cmd/gosec@latest"; \
+		echo "  go install github.com/securego/gosec/v2/cmd/gosec@v2.25.0"; \
 		echo ""; \
 		echo "For more info: https://github.com/securego/gosec"; \
 		exit 1; \
@@ -930,7 +927,7 @@ security-staticcheck:
 		echo "❌ Error: staticcheck is not installed"; \
 		echo ""; \
 		echo "Install staticcheck using Go:"; \
-		echo "  go install honnef.co/go/tools/cmd/staticcheck@latest"; \
+		echo "  go install honnef.co/go/tools/cmd/staticcheck@2026.1"; \
 		echo ""; \
 		echo "For more info: https://staticcheck.io/"; \
 		exit 1; \

@@ -207,6 +207,8 @@ case "$cmd" in
       --stop-timeout=3600 \
       -v "${real_path}:/workspace" \
       -v "claude-creds:/persist" \
+      -v "cfgms-go-build-cache:/home/agent/.cache/go-build" \
+      -v "cfgms-go-mod-cache:/home/agent/go/pkg/mod" \
       -e "GH_TOKEN=${gh_token}" \
       --cap-add NET_ADMIN \
       cfg-agent:latest \
@@ -251,6 +253,8 @@ case "$cmd" in
       --stop-timeout=3600 \
       -v "${real_path}:/workspace" \
       -v "claude-creds:/persist" \
+      -v "cfgms-go-build-cache:/home/agent/.cache/go-build" \
+      -v "cfgms-go-mod-cache:/home/agent/go/pkg/mod" \
       -e "GH_TOKEN=${gh_token}" \
       --cap-add NET_ADMIN \
       cfg-agent:latest \
@@ -274,18 +278,10 @@ case "$cmd" in
     gh_token=$(gh auth token)
     container_name="cfg-agent-interactive-${sanitized}"
 
-    # Inline setup script — can't reference /workspace files since the cloned
-    # branch may not contain our tooling files
-    setup_cmds="init-firewall.sh"
-    setup_cmds+=" && mkdir -p ~/.claude"
-    setup_cmds+=" && cp /persist/.credentials.json ~/.claude/.credentials.json 2>/dev/null || echo 'WARN: No credentials'"
-    # Restore trust state and Claude config saved by /agent-setup
-    setup_cmds+=" && if [ -f /persist/.claude-config.json ]; then cp /persist/.claude-config.json ~/.claude.json 2>/dev/null || true; fi"
-    setup_cmds+=" && if [ -d /persist/.claude-state ]; then cp -rn /persist/.claude-state/. ~/.claude/ 2>/dev/null || true; fi"
-    setup_cmds+=" && if [ ! -f ~/.claude.json ]; then echo '{\"hasCompletedOnboarding\":true,\"installMethod\":\"native\"}' > ~/.claude.json; fi"
-    setup_cmds+=" && git config --global user.name cfg-agent"
-    setup_cmds+=" && git config --global user.email agent@cfg.is"
-    setup_cmds+=" && git config --global push.autoSetupRemote true"
+    # Use setup-env.sh for shared setup (firewall, credential symlinks, git config).
+    # setup-env.sh is baked into the image at /usr/local/bin/ so it works even when
+    # the cloned branch doesn't contain our tooling files.
+    setup_cmds="setup-env.sh"
     setup_cmds+=" && echo '================================================'"
     setup_cmds+=" && echo ' CFGMS Interactive Agent Session'"
     setup_cmds+=" && echo ' Branch: ${branch}'"
@@ -308,6 +304,8 @@ case "$cmd" in
       --stop-timeout=3600 \
       -v "${real_path}:/workspace" \
       -v "claude-creds:/persist" \
+      -v "cfgms-go-build-cache:/home/agent/.cache/go-build" \
+      -v "cfgms-go-mod-cache:/home/agent/go/pkg/mod" \
       -e "GH_TOKEN=${gh_token}" \
       -e "CFGMS_AGENT_MODE=true" \
       --cap-add NET_ADMIN \
