@@ -137,7 +137,7 @@ make test-complete  # MUST be 100% green (10-20 min)
 - ✅ Architecture compliance
 - ✅ Cross-platform compilation (Linux, macOS, Windows)
 - ✅ Docker integration tests (storage, controller)
-- ✅ E2E tests (MQTT+QUIC, Controller)
+- ✅ E2E tests (transport, Controller)
 
 **Only CI-only tests:**
 - Native Windows/macOS builds (requires Windows/macOS runners)
