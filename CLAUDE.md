@@ -9,7 +9,7 @@ CFGMS (Config Management System) is a Go-based configuration management system w
 **Three-Tier System:**
 - **Controller**: Central management, SaaS operations, fleet orchestration
 - **Steward**: Endpoint agent, local operations on devices
-- **Outpost**: Proxy cache for network device monitoring
+- **Outpost**(future): Proxy cache for stewards, network probe and agentless monitoring 
 
 **Communication:** gRPC-over-QUIC with mTLS (internal), REST API with HTTPS (external)
 
@@ -24,7 +24,7 @@ Two modes, detected automatically. Both enforce identical validation gates.
 
 ### Agent Implementation Workflow
 
-**Phase 1 — Implement:** Read the issue (`gh issue view <N>`), check central providers and operating model docs for overlap, write tests first (TDD), implement with real components (no mocks). Branch from `develop`: `feature/story-<N>-<description>`.
+**Phase 1 — Implement:** Read the issue (`gh issue view <N> --json title,body,labels,state`), check central providers and operating model docs for overlap, write tests first (TDD), implement with real components (no mocks). Branch from `develop`: `feature/story-<N>-<description>`.
 
 **Phase 2 — Validate:** `make test-agent-complete`
 
