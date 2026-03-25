@@ -153,8 +153,9 @@ mqtt:
 		"mqtt.use_cert_manager must be migrated to transport.use_cert_manager")
 }
 
-// TestLoadWithPath_MigrationFromQUIC verifies deprecated quic: section is migrated to transport:.
-func TestLoadWithPath_MigrationFromQUIC(t *testing.T) {
+// TestLoadWithPath_QUICYAMLIgnored verifies that a legacy quic: YAML section is silently ignored
+// (QUICConfig was removed in Phase 10.10; transport: defaults are used instead).
+func TestLoadWithPath_QUICYAMLIgnored(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "controller.cfg")
 
@@ -167,16 +168,17 @@ quic:
 
 	cfg, err := LoadWithPath(configPath)
 	require.NoError(t, err)
-	require.NotNil(t, cfg.Transport, "Transport must be populated after QUIC migration")
+	require.NotNil(t, cfg.Transport, "Transport must be populated with defaults")
 
-	assert.Equal(t, "0.0.0.0:9999", cfg.Transport.ListenAddr,
-		"quic.listen_addr must be migrated to transport.listen_addr")
-	assert.True(t, cfg.Transport.UseCertManager,
-		"quic.use_cert_manager must be migrated to transport.use_cert_manager")
+	// quic: is no longer a known config section; transport uses its own defaults
+	defaults := DefaultConfig()
+	assert.Equal(t, defaults.Transport.ListenAddr, cfg.Transport.ListenAddr,
+		"unknown quic: YAML section must not affect transport.listen_addr")
 }
 
-// TestLoadWithPath_QUICOverridesMQTTInMigration verifies that quic: takes priority over mqtt: when both present.
-func TestLoadWithPath_QUICOverridesMQTTInMigration(t *testing.T) {
+// TestLoadWithPath_MQTTMigrationWithLegacyQUICPresent verifies that when both mqtt: and quic:
+// are in YAML (no transport:), only mqtt: is migrated (quic: section is ignored since Phase 10.10).
+func TestLoadWithPath_MQTTMigrationWithLegacyQUICPresent(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "controller.cfg")
 
@@ -194,11 +196,11 @@ quic:
 	require.NoError(t, err)
 	require.NotNil(t, cfg.Transport)
 
-	// QUIC takes priority when both old sections are present
-	assert.Equal(t, "0.0.0.0:4433", cfg.Transport.ListenAddr,
-		"quic.listen_addr must take priority over mqtt.listen_addr")
-	assert.True(t, cfg.Transport.UseCertManager,
-		"quic.use_cert_manager must take priority over mqtt.use_cert_manager")
+	// Only mqtt: migration applies; quic: is ignored
+	assert.Equal(t, "0.0.0.0:1883", cfg.Transport.ListenAddr,
+		"mqtt.listen_addr must be migrated when quic: section is absent from known config")
+	assert.False(t, cfg.Transport.UseCertManager,
+		"mqtt.use_cert_manager must be migrated")
 }
 
 // TestLoadWithPath_NewSectionOverridesOld verifies transport: wins when both old and new sections present.
