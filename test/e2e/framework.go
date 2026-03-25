@@ -689,7 +689,7 @@ func (f *E2ETestFramework) createTLSConfigFromPEM(caCertPEM, clientCertPEM, clie
 		Certificates: []tls.Certificate{clientCert},
 		RootCAs:      caCertPool,
 		MinVersion:   tls.VersionTLS12,
-		ServerName:   "localhost",                    // Connect via localhost in tests
+		ServerName:   "localhost",                          // Connect via localhost in tests
 		NextProtos:   []string{quictransport.ALPNProtocol}, // Required for QUIC transport
 	}
 
