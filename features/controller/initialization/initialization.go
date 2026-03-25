@@ -166,8 +166,8 @@ func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
 	}
 
 	// Note: Server certificates are NOT generated during initialization.
-	// They are created by the controller startup (MQTT/QUIC subsystems)
-	// which know the specific cert names and file paths they require.
+	// They are created by the controller startup (gRPC-over-QUIC transport)
+	// which knows the specific cert names and file paths they require.
 
 	// Step 3: Initialize RBAC
 	logger.Info("Initializing RBAC...")

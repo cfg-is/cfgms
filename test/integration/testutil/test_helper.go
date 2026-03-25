@@ -35,7 +35,7 @@ type TestEnv struct {
 	cancel               context.CancelFunc
 	useDockerController  bool   // If true, connect to Docker controller instead of in-process
 	dockerControllerAddr string // Address of Docker controller (e.g., "localhost:50054")
-	registrationToken    string // MQTT registration token for testing
+	registrationToken    string // Registration token for testing
 }
 
 // NewTestEnvWithDocker creates a test environment that connects to Docker controller
@@ -234,9 +234,8 @@ func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx
 	// Format: cfgms_reg_{tenant_id}_{steward_id}_{random}
 	regToken := "cfgms_reg_test_tenant_test_steward_12345"
 
-	// Create MQTT client for steward (will be set up during Start())
-	// Note: We'll create this in Start() since we need the actual controller address
-	// For now, just create the steward with the testing constructor
+	// Transport client for steward will be set up during Start()
+	// once we have the actual controller address
 
 	return &TestEnv{
 		T:                 t,
@@ -291,7 +290,7 @@ func (e *TestEnv) Start() {
 	// Inject transport client into steward for testing
 	e.Steward.SetMQTTClientForTesting(transportClient)
 
-	// Start the steward (will use injected MQTT client)
+	// Start the steward (will use injected transport client)
 	if err := e.Steward.Start(e.ctx); err != nil {
 		e.T.Logf("Warning: Steward start returned error (may be expected for testing): %v", err)
 	}
