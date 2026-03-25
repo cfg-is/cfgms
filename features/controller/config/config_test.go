@@ -131,37 +131,12 @@ transport:
 	assert.Equal(t, 10*time.Minute, cfg.Transport.IdleTimeout.AsDuration())
 }
 
-// TestLoadWithPath_MigrationFromMQTT verifies deprecated mqtt: section is migrated to transport:.
-func TestLoadWithPath_MigrationFromMQTT(t *testing.T) {
+// TestLoadWithPath_TransportSectionFromYAML verifies transport: section is loaded from YAML.
+func TestLoadWithPath_TransportSectionFromYAML(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "controller.cfg")
 
 	content := `
-mqtt:
-  listen_addr: "0.0.0.0:1883"
-  use_cert_manager: false
-`
-	require.NoError(t, os.WriteFile(configPath, []byte(content), 0600))
-
-	cfg, err := LoadWithPath(configPath)
-	require.NoError(t, err)
-	require.NotNil(t, cfg.Transport, "Transport must be populated after MQTT migration")
-
-	assert.Equal(t, "0.0.0.0:1883", cfg.Transport.ListenAddr,
-		"mqtt.listen_addr must be migrated to transport.listen_addr")
-	assert.False(t, cfg.Transport.UseCertManager,
-		"mqtt.use_cert_manager must be migrated to transport.use_cert_manager")
-}
-
-// TestLoadWithPath_NewSectionOverridesOld verifies transport: wins when both old and new sections present.
-func TestLoadWithPath_NewSectionOverridesOld(t *testing.T) {
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "controller.cfg")
-
-	content := `
-mqtt:
-  listen_addr: "0.0.0.0:1883"
-  use_cert_manager: false
 transport:
   listen_addr: "0.0.0.0:4433"
   use_cert_manager: true
@@ -175,9 +150,7 @@ transport:
 	require.NoError(t, err)
 	require.NotNil(t, cfg.Transport)
 
-	// transport: section wins
-	assert.Equal(t, "0.0.0.0:4433", cfg.Transport.ListenAddr,
-		"transport: section must win over mqtt: section")
+	assert.Equal(t, "0.0.0.0:4433", cfg.Transport.ListenAddr)
 	assert.True(t, cfg.Transport.UseCertManager)
 }
 
@@ -211,29 +184,15 @@ func TestLoadWithPath_TransportKeepaliveEnvVar(t *testing.T) {
 	assert.Equal(t, 2*time.Minute, cfg.Transport.KeepalivePeriod.AsDuration())
 }
 
-// TestLoadWithPath_MQTTListenAddrDeprecatedEnvVar verifies CFGMS_MQTT_LISTEN_ADDR maps to transport with deprecation.
-func TestLoadWithPath_MQTTListenAddrDeprecatedEnvVar(t *testing.T) {
-	// Ensure the new transport env var is not set
-	t.Setenv("CFGMS_MQTT_LISTEN_ADDR", "0.0.0.0:9876")
-
-	cfg, err := Load()
-	require.NoError(t, err)
-	require.NotNil(t, cfg.Transport)
-	// Deprecated CFGMS_MQTT_LISTEN_ADDR should propagate to Transport when CFGMS_TRANSPORT_LISTEN_ADDR is not set
-	assert.Equal(t, "0.0.0.0:9876", cfg.Transport.ListenAddr,
-		"deprecated CFGMS_MQTT_LISTEN_ADDR must propagate to transport.listen_addr")
-}
-
-// TestLoadWithPath_TransportEnvVarWinsOverMQTTDeprecated verifies CFGMS_TRANSPORT_LISTEN_ADDR takes priority.
-func TestLoadWithPath_TransportEnvVarWinsOverMQTTDeprecated(t *testing.T) {
-	t.Setenv("CFGMS_MQTT_LISTEN_ADDR", "0.0.0.0:9876")
+// TestLoadWithPath_TransportListenAddrEnvVar verifies CFGMS_TRANSPORT_LISTEN_ADDR overrides config.
+func TestLoadWithPath_TransportListenAddrEnvVar(t *testing.T) {
 	t.Setenv("CFGMS_TRANSPORT_LISTEN_ADDR", "0.0.0.0:4433")
 
 	cfg, err := Load()
 	require.NoError(t, err)
 	require.NotNil(t, cfg.Transport)
 	assert.Equal(t, "0.0.0.0:4433", cfg.Transport.ListenAddr,
-		"CFGMS_TRANSPORT_LISTEN_ADDR must win over deprecated CFGMS_MQTT_LISTEN_ADDR")
+		"CFGMS_TRANSPORT_LISTEN_ADDR must override transport.listen_addr")
 }
 
 // TestDuration_UnmarshalYAML verifies Duration type parses human-readable strings from YAML.
@@ -265,13 +224,11 @@ func TestDuration_AsDuration(t *testing.T) {
 	assert.Equal(t, 30*time.Second, d.AsDuration())
 }
 
-// TestLoadWithPath_DefaultConfigHasTransportAlongsideLegacy verifies Config has Transport alongside MQTT.
-func TestLoadWithPath_DefaultConfigHasTransportAlongsideLegacy(t *testing.T) {
+// TestLoadWithPath_DefaultConfigHasTransport verifies Config has Transport section.
+func TestLoadWithPath_DefaultConfigHasTransport(t *testing.T) {
 	cfg := DefaultConfig()
 
-	// Both sections must exist during Phase 10 transition
-	require.NotNil(t, cfg.MQTT, "MQTT must remain for backward compat during Phase 10")
-	require.NotNil(t, cfg.Transport, "Transport must be present as new unified section")
+	require.NotNil(t, cfg.Transport, "Transport must be present as unified section")
 }
 
 // TestLoadWithPath_NoConfigFileUsesDefaults verifies defaults are used when no config file exists.

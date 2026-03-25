@@ -344,13 +344,6 @@ func (f *E2ETestFramework) initializeController() error {
 				Organization: "Test Organization",
 			},
 		},
-		// Story #294 Phase 2: Enable MQTT broker for steward registration and communication
-		MQTT: &controllerConfig.MQTTConfig{
-			Enabled:        true,
-			ListenAddr:     "localhost:1883",
-			EnableTLS:      f.config.EnableTLS,
-			UseCertManager: true, // Use auto-generated certificates from cert manager
-		},
 		// Issue #516: Enable gRPC-over-QUIC transport for steward connections
 		Transport: &controllerConfig.TransportConfig{
 			ListenAddr:      "localhost:4433",
@@ -482,10 +475,9 @@ func (f *E2ETestFramework) CreateRegistrationToken(tenantID string) (string, err
 	}
 
 	// Create a new registration token
-	// Note: MQTT broker is on port 1883, not the gRPC port
 	tokenReq := &registration.TokenCreateRequest{
 		TenantID:      tenantID,
-		ControllerURL: "tcp://localhost:1883",
+		ControllerURL: "grpc://localhost:4433",
 		Group:         "e2e-test",
 		ExpiresIn:     "",    // Never expires for testing
 		SingleUse:     false, // Can be reused for testing

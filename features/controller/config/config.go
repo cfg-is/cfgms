@@ -4,7 +4,6 @@ package config
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"regexp"
 	"strconv"
@@ -96,11 +95,7 @@ type Config struct {
 	// High Availability configuration
 	HA *HAConfig `yaml:"ha"`
 
-	// MQTT broker configuration for control plane communication
-	MQTT *MQTTConfig `yaml:"mqtt"`
-
 	// Transport is the unified, protocol-agnostic transport configuration.
-	// Replaces the separate MQTT and QUIC sections. Old sections map here with deprecation warnings.
 	Transport *TransportConfig `yaml:"transport"`
 }
 
@@ -378,45 +373,6 @@ type HASplitBrainConfig struct {
 	ResolutionStrategy string `yaml:"resolution_strategy"`
 }
 
-// MQTTConfig contains MQTT broker configuration
-type MQTTConfig struct {
-	// Enable MQTT broker
-	Enabled bool `yaml:"enabled"`
-
-	// MQTT listen address (e.g., "0.0.0.0:1883")
-	ListenAddr string `yaml:"listen_addr"`
-
-	// Enable TLS for MQTT
-	EnableTLS bool `yaml:"enable_tls"`
-
-	// Use certificate manager for MQTT certificates
-	UseCertManager bool `yaml:"use_cert_manager"`
-
-	// TLS certificate path (if not using cert manager)
-	TLSCertPath string `yaml:"tls_cert_path,omitempty"`
-
-	// TLS key path (if not using cert manager)
-	TLSKeyPath string `yaml:"tls_key_path,omitempty"`
-
-	// CA certificate path for client verification
-	TLSCAPath string `yaml:"tls_ca_path,omitempty"`
-
-	// Require client certificates (mTLS)
-	RequireClientCert bool `yaml:"require_client_cert"`
-
-	// Maximum concurrent clients
-	MaxClients int `yaml:"max_clients"`
-
-	// Maximum message size in bytes
-	MaxMessageSize int64 `yaml:"max_message_size"`
-
-	// Session expiry interval in seconds
-	SessionExpiryInterval int64 `yaml:"session_expiry_interval"`
-
-	// Keepalive multiplier for heartbeat detection
-	KeepaliveMultiplier float64 `yaml:"keepalive_multiplier"`
-}
-
 // Duration is a time.Duration that supports YAML string parsing ("30s", "5m", etc.)
 // This allows human-readable duration values in configuration files.
 type Duration time.Duration
@@ -442,7 +398,6 @@ func (d Duration) AsDuration() time.Duration {
 }
 
 // TransportConfig is the unified, protocol-agnostic transport configuration.
-// It replaces the separate MQTTConfig section (and the now-removed QUICConfig).
 // A single listen address serves both control plane and data plane over gRPC-over-QUIC,
 // and can accommodate future transport implementations without config changes.
 type TransportConfig struct {
@@ -592,17 +547,6 @@ func DefaultConfig() *Config {
 				ResolutionStrategy: "quorum-based",
 			},
 		},
-		MQTT: &MQTTConfig{
-			Enabled:               true, // Core communication channel - enabled by default
-			ListenAddr:            "0.0.0.0:1883",
-			EnableTLS:             true,
-			UseCertManager:        true, // Use controller's certificate manager
-			RequireClientCert:     true, // mTLS for security
-			MaxClients:            10000,
-			MaxMessageSize:        1024 * 1024, // 1MB
-			SessionExpiryInterval: 3600,        // 1 hour
-			KeepaliveMultiplier:   1.5,         // Disconnect if no activity for keepalive * 1.5
-		},
 		Transport: &TransportConfig{
 			ListenAddr:      "0.0.0.0:4433",
 			UseCertManager:  true,
@@ -610,52 +554,6 @@ func DefaultConfig() *Config {
 			KeepalivePeriod: Duration(30 * time.Second),
 			IdleTimeout:     Duration(5 * time.Minute),
 		},
-	}
-}
-
-// migrateTransportConfig detects deprecated mqtt: section in the raw YAML
-// and migrates its fields to the Transport section with a deprecation warning.
-//
-// Migration rules:
-//   - If transport: is present and mqtt: is also present: new section wins, log warning
-//   - If only mqtt: is present: migrate listen_addr and use_cert_manager to transport
-func migrateTransportConfig(cfg *Config, rawYAML []byte) {
-	var raw map[string]interface{}
-	if err := yaml.Unmarshal(rawYAML, &raw); err != nil {
-		return // Can't detect keys, skip migration
-	}
-
-	_, hasTransport := raw["transport"]
-	_, hasMQTT := raw["mqtt"]
-
-	if !hasMQTT {
-		return // Nothing to migrate
-	}
-
-	if hasTransport {
-		// New section wins; warn that old section is ignored
-		log.Printf("[WARN] config: transport: section overrides deprecated mqtt: section — old section is ignored")
-		return
-	}
-
-	// No transport: section in YAML — migrate from mqtt section
-	if cfg.Transport == nil {
-		cfg.Transport = &TransportConfig{
-			ListenAddr:      "0.0.0.0:4433",
-			UseCertManager:  true,
-			MaxConnections:  50000,
-			KeepalivePeriod: Duration(30 * time.Second),
-			IdleTimeout:     Duration(5 * time.Minute),
-		}
-	}
-
-	// MQTT migration
-	if hasMQTT && cfg.MQTT != nil {
-		log.Printf("[WARN] config: mqtt: section is deprecated; please migrate to transport: section")
-		if cfg.MQTT.ListenAddr != "" {
-			cfg.Transport.ListenAddr = cfg.MQTT.ListenAddr
-		}
-		cfg.Transport.UseCertManager = cfg.MQTT.UseCertManager
 	}
 }
 
@@ -749,8 +647,6 @@ func LoadWithPath(configPath string) (*Config, error) {
 			return nil, fmt.Errorf("failed to parse config file %s: %w", foundPath, err)
 		}
 
-		// Migrate deprecated mqtt: section to the unified transport: section
-		migrateTransportConfig(cfg, expandedBytes)
 	}
 
 	// Override with environment variables if set
@@ -935,52 +831,6 @@ func LoadWithPath(configPath string) (*Config, error) {
 
 	if component := os.Getenv("CFGMS_LOGGING_COMPONENT"); component != "" {
 		cfg.Logging.Component = component
-	}
-
-	// MQTT configuration environment variables
-	if mqttEnabled := os.Getenv("CFGMS_MQTT_ENABLED"); mqttEnabled != "" {
-		if val, err := strconv.ParseBool(mqttEnabled); err == nil {
-			cfg.MQTT.Enabled = val
-		}
-	}
-
-	if mqttListenAddr := os.Getenv("CFGMS_MQTT_LISTEN_ADDR"); mqttListenAddr != "" {
-		cfg.MQTT.ListenAddr = mqttListenAddr
-		// Deprecated: also apply to transport if CFGMS_TRANSPORT_LISTEN_ADDR is not set
-		if os.Getenv("CFGMS_TRANSPORT_LISTEN_ADDR") == "" && cfg.Transport != nil {
-			cfg.Transport.ListenAddr = mqttListenAddr
-			log.Printf("[WARN] env: CFGMS_MQTT_LISTEN_ADDR is deprecated; use CFGMS_TRANSPORT_LISTEN_ADDR instead")
-		}
-	}
-
-	if mqttEnableTLS := os.Getenv("CFGMS_MQTT_ENABLE_TLS"); mqttEnableTLS != "" {
-		if val, err := strconv.ParseBool(mqttEnableTLS); err == nil {
-			cfg.MQTT.EnableTLS = val
-		}
-	}
-
-	if mqttUseCertManager := os.Getenv("CFGMS_MQTT_USE_CERT_MANAGER"); mqttUseCertManager != "" {
-		if val, err := strconv.ParseBool(mqttUseCertManager); err == nil {
-			cfg.MQTT.UseCertManager = val
-		}
-	}
-
-	if mqttRequireClientCert := os.Getenv("CFGMS_MQTT_REQUIRE_CLIENT_CERT"); mqttRequireClientCert != "" {
-		if val, err := strconv.ParseBool(mqttRequireClientCert); err == nil {
-			cfg.MQTT.RequireClientCert = val
-		}
-	}
-
-	if mqttTLSCertPath := os.Getenv("CFGMS_MQTT_TLS_CERT_PATH"); mqttTLSCertPath != "" {
-		cfg.MQTT.TLSCertPath = mqttTLSCertPath
-	}
-
-	if mqttTLSKeyPath := os.Getenv("CFGMS_MQTT_TLS_KEY_PATH"); mqttTLSKeyPath != "" {
-		cfg.MQTT.TLSKeyPath = mqttTLSKeyPath
-	}
-
-	if mqttTLSCAPath := os.Getenv("CFGMS_MQTT_TLS_CA_PATH"); mqttTLSCAPath != "" {
-		cfg.MQTT.TLSCAPath = mqttTLSCAPath
 	}
 
 	// Transport configuration environment variables

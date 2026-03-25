@@ -25,7 +25,6 @@ import (
 	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/features/steward/commands"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
-	"github.com/cfgis/cfgms/features/steward/registration"
 	"github.com/cfgis/cfgms/pkg/cert"
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc" // Register gRPC control plane provider
@@ -150,81 +149,6 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 	}
 
 	return c, nil
-}
-
-// RegisterWithToken registers the steward with the controller using a token.
-// Story #363: Accepts a registration.MessageClient for the temporary connection
-// instead of creating a transport client internally.
-func (c *TransportClient) RegisterWithToken(ctx context.Context, token string, brokerAddr string, msgClient registration.MessageClient) error {
-	c.logger.Info("Starting registration with token", "addr", brokerAddr)
-
-	// Create registration client using the provided MessageClient
-	regCfg := &registration.Config{
-		MQTT:   msgClient,
-		Logger: c.logger,
-	}
-
-	regClient, err := registration.New(regCfg)
-	if err != nil {
-		return fmt.Errorf("failed to create registration client: %w", err)
-	}
-
-	// Register with token
-	resp, err := regClient.Register(ctx, token)
-	if err != nil {
-		return fmt.Errorf("registration failed: %w", err)
-	}
-
-	// Store registration response
-	c.mu.Lock()
-	c.stewardID = resp.StewardID
-	c.tenantID = resp.TenantID
-	c.group = resp.Group
-	c.transportAddress = brokerAddr
-	c.mu.Unlock()
-
-	// Story #294 Phase 4: Auto-save certificates from registration
-	if resp.ClientCert != "" && resp.ClientKey != "" && resp.CACert != "" {
-		if err := c.saveCertificates(resp.ClientCert, resp.ClientKey, resp.CACert); err != nil {
-			c.logger.Warn("Failed to save certificates from registration", "error", err)
-		} else {
-			c.logger.Info("Saved certificates from registration", "steward_id", resp.StewardID)
-		}
-	}
-
-	// Story #377: Store signing certificate if provided (separated architecture)
-	if resp.SigningCert != "" {
-		c.mu.Lock()
-		c.signingCertPEM = resp.SigningCert
-		c.mu.Unlock()
-		c.logger.Info("Received dedicated signing certificate from controller", "steward_id", resp.StewardID)
-
-		// Persist signing.crt alongside other cert files
-		if err := c.saveSigningCertificate(resp.SigningCert); err != nil {
-			c.logger.Warn("Failed to save signing certificate", "error", err)
-		}
-	}
-
-	// Initialize configuration executor
-	execCfg := &stewardconfig.Config{
-		TenantID: resp.TenantID,
-		Logger:   c.logger,
-	}
-	executor, err := stewardconfig.New(execCfg)
-	if err != nil {
-		return fmt.Errorf("failed to create config executor: %w", err)
-	}
-
-	c.mu.Lock()
-	c.configExecutor = executor
-	c.mu.Unlock()
-
-	c.logger.Info("Registration successful",
-		"steward_id", c.stewardID,
-		"tenant_id", c.tenantID,
-		"group", c.group)
-
-	return nil
 }
 
 // InitializeConfigExecutor creates and initializes the configuration executor.
