@@ -40,13 +40,6 @@ updates:
           - "patch"
 
       # Production dependencies grouped by domain
-      mqtt-dependencies:
-        patterns:
-          - "github.com/mochi-mqtt/*"
-        update-types:
-          - "minor"
-          - "patch"
-
       quic-dependencies:
         patterns:
           - "github.com/quic-go/*"

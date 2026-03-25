@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-mqtt-quic test-e2e-controller test-e2e-scenarios test-ci test-integration test-security test-performance test-performance-baseline test-data-consistency test-docker test-cross-feature-integration test-failure-propagation proto proto-gen lint clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates
+.PHONY: build test test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-ci test-integration test-security test-performance test-performance-baseline test-data-consistency test-docker test-cross-feature-integration test-failure-propagation proto proto-gen lint clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates
 
 # Use bash for all recipe commands (required for credential loading scripts)
 SHELL := /bin/bash
@@ -1511,8 +1511,8 @@ test-integration-unified:
 	@echo "⏳ Waiting for standalone controller to be healthy..."
 	@sleep 10
 	@echo ""
-	@echo "🧪 Running standalone Docker controller tests (MQTT+QUIC)..."
-	@CFGMS_TEST_DOCKER_MQTT=localhost:1883 go test -v -race ./test/integration -run TestDocker -timeout=10m || (echo "❌ Standalone tests failed"; exit 1)
+	@echo "🧪 Running standalone Docker controller tests..."
+	@go test -v -race ./test/integration -run TestDocker -timeout=10m || (echo "❌ Standalone tests failed"; exit 1)
 	@echo ""
 	@echo "🧪 Running in-process integration tests..."
 	@go test -v -race ./test/integration -run TestDetailedIntegration -timeout=10m || (echo "❌ In-process tests failed"; exit 1)
@@ -1611,11 +1611,6 @@ test-integration-docker:
 # Transport Integration Testing (Story #519: replaces MQTT+QUIC tests)
 # Tests gRPC-over-QUIC transport architecture with real Docker infrastructure
 .PHONY: test-transport test-transport-setup test-transport-cleanup
-# Keep old names as aliases for backwards compatibility during transition
-.PHONY: test-mqtt-quic test-mqtt-quic-setup test-mqtt-quic-cleanup
-test-mqtt-quic: test-transport
-test-mqtt-quic-setup: test-transport-setup
-test-mqtt-quic-cleanup: test-transport-cleanup
 
 test-transport: test-transport-setup
 	@echo ""
@@ -1654,7 +1649,7 @@ test-transport-setup:
 		echo "Generating test credentials..."; \
 		./scripts/generate-test-credentials.sh; \
 	fi
-	@echo "Starting TimescaleDB and standalone controller with MQTT+QUIC..."
+	@echo "Starting TimescaleDB and standalone controller (gRPC transport)..."
 	@echo "🔨 Force rebuilding Docker images (no cache)..."
 	@set -a && . ./.env.test && set +a && \
 	DOCKER_BUILDKIT=1 docker compose -f docker-compose.test.yml --profile ha build --no-cache controller-standalone steward-standalone && \
@@ -1735,7 +1730,7 @@ test-transport-cleanup:
 # Phase 2: Parallelizable E2E test targets (Story #297)
 # These targets can run independently and be parallelized with make -j3
 
-.PHONY: test-e2e-ci test-e2e-transport test-e2e-mqtt-quic test-e2e-controller test-e2e-scenarios
+.PHONY: test-e2e-ci test-e2e-transport test-e2e-controller test-e2e-scenarios
 
 # CI-style E2E tests - matches GitHub Actions production-gates.yml exactly
 # Self-contained: sets up infrastructure, runs tests, cleans up
@@ -1777,9 +1772,8 @@ test-e2e-ci:
 	@echo ""
 	@echo "✅ CI-style E2E tests completed successfully"
 
-# Aliases: Use test-e2e-ci or test-e2e-transport instead
+# Alias: Use test-e2e-ci instead
 test-e2e-transport: test-e2e-ci
-test-e2e-mqtt-quic: test-e2e-ci
 
 test-e2e-controller:
 	@echo "🧪 Running controller E2E tests (Docker deployment)..."
@@ -1922,7 +1916,7 @@ test-complete-full: test-commit test-fast test-production-critical build-cross-v
 	@echo "- ✅ Production critical tests passed (test-production-critical)"
 	@echo "- ✅ Cross-platform compilation validated (build-cross-validate)"
 	@echo "- ✅ Docker integration tests passed (storage/controller)"
-	@echo "- ✅ E2E tests passed (MQTT+QUIC + Controller - PARALLEL)"
+	@echo "- ✅ E2E tests passed (Transport + Controller - PARALLEL)"
 	@echo ""
 	@echo "🎯 Story is FULLY validated - matches all CI required checks"
 	@echo ""
@@ -1952,7 +1946,7 @@ test-agent-complete: test-commit test-fast test-production-critical build-cross-
 	@echo ""
 	@echo "⏩ Deferred to CI (requires Docker daemon):"
 	@echo "   - test-integration-docker (storage/controller Docker tests)"
-	@echo "   - test-e2e-fast (MQTT+QUIC + Controller E2E tests)"
+	@echo "   - test-e2e-fast (Transport + Controller E2E tests)"
 	@echo ""
 	@echo "ℹ️  Acceptable CI-only gaps:"
 	@echo "   - Native Windows/macOS builds (requires Windows/macOS runners)"
