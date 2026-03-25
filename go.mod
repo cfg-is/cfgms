@@ -6,7 +6,6 @@ toolchain go1.25.8
 
 require (
 	github.com/creack/pty v1.1.24
-	github.com/eclipse/paho.mqtt.golang v1.5.1
 	github.com/go-acme/lego/v4 v4.32.0
 	github.com/go-git/go-git/v5 v5.16.5
 	github.com/go-ldap/ldap/v3 v3.4.11
@@ -19,7 +18,6 @@ require (
 	github.com/joho/godotenv v1.5.1
 	github.com/lib/pq v1.10.9
 	github.com/mattn/go-sqlite3 v1.14.32
-	github.com/mochi-mqtt/server/v2 v2.7.9
 	github.com/quic-go/quic-go v0.57.0
 	github.com/shirou/gopsutil/v3 v3.24.5
 	github.com/spf13/cobra v1.8.0
@@ -99,7 +97,6 @@ require (
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/power-devops/perfstat v0.0.0-20210106213030-5aafc221ea8c // indirect
-	github.com/rs/xid v1.4.0 // indirect
 	github.com/sergi/go-diff v1.3.2-0.20230802210424-5b0b94c5c0d3 // indirect
 	github.com/shoenig/go-m1cpu v0.1.6 // indirect
 	github.com/skeema/knownhosts v1.3.1 // indirect
