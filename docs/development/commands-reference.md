@@ -86,7 +86,7 @@ make test-complete
 3. ✅ cross-compile-check: `make build-cross-validate`
 4. ✅ integration-tests (Docker): Storage/controller integration tests
 5. ✅ security scans: trivy, nancy, gosec, staticcheck
-6. ✅ E2E tests: MQTT+QUIC, Controller
+6. ✅ E2E tests: Transport (gRPC-over-QUIC), Controller
 
 **Only CI-only gap**: Native Windows/macOS builds (requires Windows/macOS runners)
 

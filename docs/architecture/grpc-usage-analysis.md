@@ -2,11 +2,18 @@
 
 > **⚠️ HISTORICAL DOCUMENT**
 >
-> This document is preserved for historical reference and explains the decision to migrate from gRPC to MQTT+QUIC.
+> This document is preserved for historical reference and explains the analysis that led to the initial gRPC-to-MQTT+QUIC migration (Story #220), and later to the gRPC-over-QUIC unified transport.
 >
-> **Date**: 2025-10-15
-> **Context**: v0.7.0 Pre-OSS preparation - Analysis that led to gRPC removal (Story #220)
-> **Current Protocol**: MQTT+QUIC hybrid (see [mqtt-quic-protocol.md](mqtt-quic-protocol.md))
+> **Analysis Date**: 2025-10-15
+> **Context**: v0.7.0 Pre-OSS preparation — Analysis that led to gRPC removal (Story #220)
+>
+> **Implementation History**:
+> - v0.7.0 (Story #220): gRPC service layer removed, replaced with MQTT+QUIC hybrid
+> - v0.9.x (Phase 10.11, Stories #519–#522): MQTT removed, gRPC re-introduced as the **transport** over QUIC
+>
+> **Current Protocol**: gRPC-over-QUIC unified transport (see [communication-layer-migration.md](communication-layer-migration.md))
+>
+> **Key Insight**: The analysis below correctly identified that the gRPC _service layer_ added unnecessary complexity. What it did not anticipate was that gRPC as a _serialization and RPC framework_ over QUIC (rather than HTTP/2) would become the ideal solution — retaining protobuf type safety and bidirectional streaming while eliminating the HTTP/2 and broker overhead that motivated the original removal.
 >
 > ---
 

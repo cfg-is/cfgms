@@ -21,7 +21,7 @@ If you're new to the project, start with these essential documents:
 - [Plugin Architecture](architecture/plugin-architecture.md) - Extensible module system design
 - [Git Backend Design](architecture/git-backend-design.md) - GitOps storage backend
 - [Hybrid Storage Solution](architecture/hybrid-storage-solution.md) - Flexible storage options
-- [MQTT+QUIC Protocol](architecture/mqtt-quic-protocol.md) - Communication protocol design
+- [Communication Layer Migration](architecture/communication-layer-migration.md) - Transport architecture (gRPC-over-QUIC)
 - [Rollback Design](architecture/rollback-design.md) - Configuration rollback system
 - [Template Engine Design](architecture/template-engine-design.md) - Configuration templating
 - [Workflow Debug System](architecture/workflow-debug-system.md) - Workflow debugging capabilities

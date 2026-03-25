@@ -2,8 +2,8 @@
 
 **Story #391**: This checklist ensures all prerequisites and deployment steps are validated before deploying CFGMS to your home lab environment.
 
-**Last Updated**: 2026-02-28
-**CFGMS Version**: v0.9.x
+**Last Updated**: 2026-03-25 (updated for gRPC-over-QUIC transport, Phase 10.12)
+**CFGMS Version**: v0.9.x+
 
 ## Pre-Deployment Checklist
 
@@ -28,20 +28,18 @@
   ```
 
 - [ ] **Network Ports** available on controller (not already in use):
-  - `9080`: REST API
-  - `1883`: MQTT broker (embedded in controller)
-  - `4433`: QUIC data plane
+  - `9080`: REST API (TCP)
+  - `4433`: gRPC-over-QUIC transport — all controller-steward traffic (UDP)
   ```bash
   # Check if ports are available on controller
-  sudo ss -tlnp | grep -E '9080|1883'
+  sudo ss -tlnp | grep 9080
   sudo ss -ulnp | grep 4433
   ```
 
 - [ ] **Firewall Rules** configured on controller:
   ```bash
   sudo ufw allow 9080/tcp   # REST API
-  sudo ufw allow 1883/tcp   # MQTT control plane
-  sudo ufw allow 4433/udp   # QUIC data plane
+  sudo ufw allow 4433/udp   # gRPC-over-QUIC transport (UDP)
   ```
 
 ### Repository and Build
@@ -118,8 +116,8 @@
 
   # Check logs for successful startup
   sudo journalctl -u cfgms-controller --no-pager -n 30
-  # Look for: "Certificate manager initialized", "MQTT broker started",
-  # "QUIC server listening on :4433", "REST API server listening on :9080"
+  # Look for: "Certificate manager initialized", "Generated server certificate" (first boot),
+  # "Transport server listening on :4433", "REST API server listening on :9080"
   ```
 
 - [ ] **Certificates Auto-Generated** (if using auto-generation)
@@ -158,9 +156,9 @@
   sudo journalctl -u cfgms-steward | grep "Steward ID:"
   ```
 
-- [ ] **MQTT Connection Verified**
+- [ ] **Transport Connection Verified**
   ```bash
-  sudo journalctl -u cfgms-steward | grep "MQTT.*connected"
+  sudo journalctl -u cfgms-steward | grep -i "transport.*established\|connected to controller"
   sudo journalctl -u cfgms-controller | grep "steward.*connected"
   ```
 
@@ -172,10 +170,9 @@
   # Verify it appears in controller's storage backend
   ```
 
-- [ ] **Verify Config Sync** via QUIC
+- [ ] **Verify Config Sync** via gRPC data plane
   ```bash
-  sudo journalctl -u cfgms-steward | grep "QUIC.*connected"
-  sudo journalctl -u cfgms-steward | grep "Config.*fetched"
+  sudo journalctl -u cfgms-steward | grep -i "config.*fetched\|SyncConfig"
   sudo journalctl -u cfgms-steward | grep "signature.*verified"
   ```
 
@@ -186,12 +183,12 @@
 
 - [ ] **Verify Status Reporting**
   ```bash
-  sudo journalctl -u cfgms-controller | grep "config.*status"
+  sudo journalctl -u cfgms-controller | grep "config.*status\|ReportStatus"
   ```
 
 - [ ] **Run E2E Tests** (validates full flow programmatically)
   ```bash
-  cd test/integration/mqtt_quic
+  cd test/integration/transport
   go test -v -run TestRegistration -timeout 60s
   go test -v -run TestConfigSync -timeout 60s
   go test -v -run TestModuleExecution -timeout 60s
@@ -203,7 +200,7 @@
 ### Step 4: Production Readiness
 
 - [ ] **Security Hardening** applied:
-  - [ ] Firewall rules configured (ports 9080, 1883, 4433 only)
+  - [ ] Firewall rules configured (ports 9080/TCP and 4433/UDP only)
   - [ ] TLS certificate verification enabled (default)
   - [ ] SOPS encryption keys secured
   - [ ] Registration tokens have appropriate expiry
@@ -266,41 +263,41 @@
 
 **Issue**: Controller fails to start
 - Check: `sudo journalctl -u cfgms-controller --no-pager -n 50`
-- Check: Ports 9080, 1883, 4433 available (`sudo ss -tlnp`)
+- Check: Ports 9080/TCP and 4433/UDP available
 - Check: Sufficient disk space for certificate generation
 
 **Issue**: Steward cannot register
 - Check: Registration token is valid and not expired
 - Check: Controller is reachable from steward (`curl http://controller-vm:9080/api/v1/health`)
-- Check: MQTT port 1883 is accessible (`nc -zv controller-vm 1883`)
+- Check: Port 4433/UDP is accessible (`nc -zuv controller-vm 4433`)
 
-**Issue**: QUIC connection fails
+**Issue**: Transport connection fails
 - Check: Port 4433/UDP is accessible from steward
-- Check: Certificates are generated and valid
-- Check: Controller logs for QUIC server startup
+- Check: Certificates are generated and valid (fingerprints match)
+- Check: Controller logs for transport server startup
+- Check: Firewall allows UDP traffic (not just TCP)
 
 **Issue**: Config sync times out
 - Check: Configuration is uploaded to controller
-- Check: Steward received sync_config command
+- Check: Steward received SyncConfig gRPC call
 - Check: Signature verification passes
 - Check: Module executor is initialized
 
 **Issue**: Status reports not received
 - Check: Controller is running
-- Check: Steward can publish to MQTT (check steward logs)
-- Check: Controller is subscribed to status topics
-- Check: No MQTT authentication errors
+- Check: gRPC control plane stream is established (steward logs)
+- Check: No TLS errors in steward logs
 
 ## Success Criteria
 
 Your home lab deployment is ready when:
 
 - All services start without errors (`systemctl status` shows active)
-- Controller and steward communicate via MQTT (port 1883)
-- Config sync completes via QUIC (port 4433) in < 10 seconds
+- Controller and steward communicate via gRPC-over-QUIC (port 4433/UDP)
+- Config sync completes in < 10 seconds
 - Modules execute successfully
 - Status reports are received by controller
-- E2E tests pass (TestRegistration, TestConfigSync, TestModuleExecution, TestHeartbeatFailover, TestMultiTenant, TestTLSSecurity)
+- E2E tests pass (`TestRegistration`, `TestConfigSync`, `TestModuleExecution`, `TestHeartbeatFailover`, `TestMultiTenant`, `TestTLSSecurity`)
 - System recovers from component restarts
 - Logs show no errors or warnings
 
@@ -320,3 +317,4 @@ After successful deployment:
 - See: [Home Lab Deployment Guide](home-lab-deployment-guide.md)
 - See: [Quick Start Guide](../../QUICK_START.md)
 - See: [E2E Testing Guide](../testing/e2e-testing-guide.md)
+- See: [Connectivity Troubleshooting](../troubleshooting/connectivity.md)

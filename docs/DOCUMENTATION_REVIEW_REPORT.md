@@ -251,7 +251,7 @@ The following files appear accurate and ready for OSS launch:
 ## Architecture & Design
 - [Plugin Architecture](architecture/plugin-architecture.md)
 - [Storage Architecture](architecture/git-backend-design.md)
-- [MQTT+QUIC Protocol](architecture/mqtt-quic-protocol.md)
+- [MQTT+QUIC Protocol](architecture/archived/mqtt-quic-protocol.md) *(archived — replaced by gRPC-over-QUIC)*
 - [Module System](architecture/modules/README.md)
 - [Architecture Decisions](architecture/decisions/README.md)
 

@@ -17,7 +17,7 @@ The steward is a daemon that maintains a device in the state described by its cf
 2. **Discover modules** — Scan module paths, load available modules, validate that all modules referenced in the cfg are available
 3. **Initial convergence** — Evaluate every resource in the cfg immediately (apply or monitor, depending on mode)
 4. **Collect DNA** — Gather device identity and attributes (hardware, software, network, security)
-5. **Connect to controller** (if configured) — Establish MQTT control plane and QUIC data plane connections. Check for cfg updates
+5. **Connect to controller** (if configured) — Establish a gRPC-over-QUIC transport connection. Check for cfg updates
 6. **Start schedule** — Begin the compliance re-check loop on the interval defined in the cfg
 
 ### Normal Operation
@@ -50,7 +50,7 @@ The steward runs three concurrent activities:
 
 1. Complete any in-progress resource operations
 2. Flush queued reports (to controller if connected, otherwise ensure local logs are written)
-3. Disconnect from controller cleanly (MQTT disconnect, QUIC session close)
+3. Disconnect from controller cleanly (gRPC-over-QUIC transport close)
 4. Exit
 
 ## Convergence Loop
@@ -230,7 +230,7 @@ These behaviors require an active controller connection and are not available in
 
 ### Cfg Delivery
 
-The controller pushes cfg updates to the steward over the QUIC data plane. Cfgs are signed by the controller's signing certificate — the steward verifies the signature before applying, ensuring cfgs cannot be tampered with in transit or injected by a rogue source. The steward stores the verified cfg locally and triggers a convergence run. If the connection is later lost, the steward continues using the last-received cfg.
+The controller pushes cfg updates to the steward over the gRPC data plane service. Cfgs are signed by the controller's signing certificate — the steward verifies the signature before applying, ensuring cfgs cannot be tampered with in transit or injected by a rogue source. The steward stores the verified cfg locally and triggers a convergence run. If the connection is later lost, the steward continues using the last-received cfg.
 
 ### Ad-Hoc Script Execution
 
@@ -257,7 +257,7 @@ How a steward joins a controller.
 2. Steward is started with `--regtoken <token>`
 3. Steward contacts controller, submits token
 4. Controller validates token, provisions steward identity, issues mTLS certificates
-5. Steward stores certificates locally and establishes MQTT + QUIC connections
+5. Steward stores certificates locally and establishes a gRPC-over-QUIC transport connection
 6. Steward checks for a cfg from the controller
 7. Normal operation begins
 

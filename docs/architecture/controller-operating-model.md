@@ -29,12 +29,12 @@ The `initialization.Run()` function performs the following steps in order:
 2. **Idempotent guard** — reads the CA directory for an existing `.cfgms-initialized` marker. If the marker exists, init refuses to run and reports when and with what CA the controller was previously initialized. To re-initialize, the operator must remove the CA directory and run `--init` again
 3. **Storage backend creation** — initializes the configured storage provider (git or database) via `interfaces.CreateAllStoresFromConfig()`
 4. **CA directory and CA generation** — creates the CA directory (`os.MkdirAll` with `0700`), then creates a new Certificate Authority via `pkg/cert.Manager` with `LoadExistingCA: false`
-5. **Internal mTLS certificate** — if separated certificate architecture is configured, generates the `cfgms-internal` certificate used for MQTT/QUIC inter-component communication
+5. **Internal mTLS certificate** — if separated certificate architecture is configured, generates the `cfgms-internal` certificate used for gRPC-over-QUIC inter-component communication
 6. **Config signing certificate** — if separated architecture, generates the `cfgms-config-signer` certificate used to sign cfgs distributed to stewards (4096-bit RSA key)
 7. **RBAC store initialization** — initializes default permissions, roles, and subjects via `rbac.NewManagerWithStorage()`
 8. **Init marker written last** — the `.cfgms-initialized` marker is the final step. If any earlier step fails, no marker is written, and the installation is not considered initialized
 
-Server certificates (for MQTT/QUIC listeners) are **not** created during `--init`. Those are generated during normal startup by the MQTT and QUIC subsystems, which know the specific certificate names and file paths they require.
+Server certificates (for the transport listener) are **not** created during `--init`. Those are generated during normal startup by the transport subsystem, which knows the specific certificate names and file paths it requires.
 
 #### The `.cfgms-initialized` marker
 
@@ -68,8 +68,7 @@ After initialization, the controller starts normally. If required infrastructure
 2. **Initialize storage** — Connect to durable storage backend. Fail if unreachable — the controller cannot operate without persistent storage
 3. **Verify security** — Load existing CA, server certs, and signing cert. Fail if missing or invalid — never regenerate silently
 4. **Initialize RBAC** — Load permissions, roles, subjects from storage
-5. **Start MQTT broker** — Embedded broker for steward control plane (port 1883, mTLS)
-6. **Start QUIC server** — Data plane for cfg delivery and bulk transfers (port 4433, mTLS)
+5. **Start transport server** — Unified gRPC-over-QUIC server for all controller-steward communication (port 4433, mTLS). Serves both control plane (heartbeats, commands, status) and data plane (cfg delivery, DNA sync, bulk transfers) over multiplexed QUIC streams
 7. **Start services** — Heartbeat monitoring, command publisher, registration handler, tenant manager
 8. **Start HA** (if clustered) — Join Raft cluster, participate in leader election
 9. **Start REST API** — HTTP server for administration (port 9080)
@@ -81,6 +80,7 @@ After initialization, the controller starts normally. If required infrastructure
 - CA/certs missing → error explaining that `--init` is required
 - CA/certs expired → error with expiry details and renewal instructions
 - Storage schema mismatch → error with migration instructions
+- Transport address conflict → error with port details and resolution steps
 
 ### Normal Operation
 
@@ -115,7 +115,7 @@ The controller runs several concurrent activities:
 3. Notify stewards of impending disconnect (stewards continue operating independently)
 4. Flush pending writes to storage
 5. Leave HA cluster cleanly (if clustered)
-6. Close MQTT broker and QUIC server
+6. Close transport server (gRPC-over-QUIC)
 7. Exit
 
 ## Cfg Management
@@ -159,7 +159,7 @@ For each steward, the controller tracks:
 |------|--------|-----------------|
 | Identity (ID, tenant, group) | Registration | Once |
 | Connection status | Heartbeats | Configurable interval |
-| Last heartbeat | MQTT heartbeat messages | Configurable interval |
+| Last heartbeat | gRPC heartbeat calls | Configurable interval |
 | Health status | Heartbeat payload | With each heartbeat |
 | Compliance status | Convergence result reports | After each convergence run |
 | DNA hash | Heartbeat payload | With each heartbeat |
@@ -177,7 +177,7 @@ The controller monitors steward heartbeats to detect connectivity loss:
 
 ### Commands
 
-The controller can send commands to stewards over the MQTT control plane:
+The controller can send commands to stewards over the gRPC control plane service:
 
 | Command | Purpose |
 |---------|---------|
@@ -465,7 +465,7 @@ Every value in the effective cfg carries its **source path** and **version** for
 ### Isolation Guarantees
 
 - **Data isolation** — tenants cannot access other tenants' cfgs, DNA, or reports
-- **MQTT isolation** — ACL rules enforce per-steward topic namespacing; stewards cannot see other stewards' messages
+- **Transport isolation** — each steward connects with its own mTLS client certificate; gRPC service handlers enforce per-steward identity on every call
 - **Certificate isolation** — each steward gets its own client certificate
 - **RBAC isolation** — permissions are scoped to tenant path; a client admin cannot manage another client's devices
 - **Cfg inheritance** — flows down the hierarchy only; children inherit from parents, never sideways

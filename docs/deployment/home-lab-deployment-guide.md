@@ -1,6 +1,6 @@
 # CFGMS Home Lab Deployment Guide
 
-**Story #391**: Comprehensive guide for deploying CFGMS to a home lab environment with native binaries and full MQTT+QUIC integration.
+**Story #391**: Comprehensive guide for deploying CFGMS to a home lab environment with native binaries and full gRPC-over-QUIC transport.
 
 **Last Updated**: 2026-02-28
 **CFGMS Version**: v0.9.x
@@ -20,7 +20,7 @@
 
 This guide walks you through deploying a complete CFGMS environment in your home lab using native binaries, including:
 
-- **Controller**: Central management server (REST API + embedded MQTT broker + QUIC data plane)
+- **Controller**: Central management server (REST API + gRPC-over-QUIC transport)
 - **Steward(s)**: Endpoint agents for configuration management
 - **Storage Backend**: Git with SOPS encryption (default)
 
@@ -29,7 +29,7 @@ This guide walks you through deploying a complete CFGMS environment in your home
 
 **What You'll Achieve**:
 - Fully functional CFGMS deployment on native VMs
-- Validated MQTT+QUIC communication paths
+- Validated gRPC-over-QUIC communication paths
 - E2E config distribution flow working end-to-end
 - Secure certificate-based authentication (auto-generated)
 - systemd-managed services for production reliability
@@ -46,16 +46,15 @@ This guide walks you through deploying a complete CFGMS environment in your home
 │  │         Controller           │                           │
 │  │                              │                           │
 │  │  - REST API       :9080      │                           │
-│  │  - MQTT broker    :1883      │  (embedded, not separate) │
-│  │  - QUIC server    :4433      │                           │
+│  │  - Transport      :4433      │  (gRPC-over-QUIC, mTLS)  │
 │  │  - Certificate CA            │                           │
 │  └──────────────────────────────┘                           │
-│         ▲              ▲                                     │
-│         │              │                                     │
-│    MQTT (mTLS)    QUIC (mTLS)                               │
-│    :1883          :4433                                      │
-│         │              │                                     │
-│  ┌──────┴──────────────┴────────────────────────┐          │
+│                    ▲                                         │
+│                    │                                         │
+│          gRPC-over-QUIC (mTLS)                              │
+│          :4433 (control + data plane)                        │
+│                    │                                         │
+│  ┌─────────────────┴────────────────────────────┐          │
 │  │                                                │          │
 │  │              Steward(s)                        │          │
 │  │                                                │          │
@@ -66,26 +65,20 @@ This guide walks you through deploying a complete CFGMS environment in your home
 │                                                              │
 └─────────────────────────────────────────────────────────────┘
 
-Control Plane: MQTT (commands, heartbeats, status reports) - port 1883
-Data Plane: QUIC (configuration sync, high-throughput data) - port 4433
+Transport: gRPC-over-QUIC (commands, heartbeats, status, config sync) - port 4433 (UDP)
 Management Plane: REST API (config uploads, admin operations) - port 9080
 ```
 
-**Note**: The MQTT broker is embedded in the controller binary. There is no separate MQTT broker service to deploy.
+**Note**: A single port (4433/UDP) handles all controller-steward communication via gRPC-over-QUIC. There is no separate MQTT broker.
 
 ### Communication Protocols
 
-1. **MQTT** (Control Plane - Port 1883 with mTLS):
-   - Command delivery (`connect_quic`, `sync_config`, `heartbeat`)
-   - Status reporting (`config-status`, `health-status`)
-   - Real-time notifications
+1. **gRPC-over-QUIC** (Transport - Port 4433 with mTLS):
+   - **Control plane**: Commands, heartbeats, status events, DNA deltas
+   - **Data plane**: Configuration synchronization (signed configs), full DNA snapshots, bulk data transfer
+   - Single multiplexed QUIC connection per steward with distinct gRPC service methods for each operation
 
-2. **QUIC** (Data Plane - Port 4433 with mTLS):
-   - Configuration synchronization (signed configs)
-   - High-performance data transfer
-   - DNA (Desired Next Action) delivery
-
-3. **REST API** (Management Plane - Port 9080):
+2. **REST API** (Management Plane - Port 9080):
    - Configuration uploads
    - Steward registration token management
    - Administrative operations
@@ -111,23 +104,21 @@ Management Plane: REST API (config uploads, admin operations) - port 9080
 go version
 # Expected: go version go1.25.0 or later
 
-# Optional: MQTT client tools for testing
-mosquitto_pub --help  # mosquitto-clients package
+# Optional: grpcurl for testing gRPC endpoints
+grpcurl --version  # grpcurl is a command-line tool for gRPC
 ```
 
 ### Network Requirements
 
 **Ports** (ensure these are available on the controller):
 - `9080`: Controller REST API (HTTP/HTTPS)
-- `1883`: MQTT broker (mTLS, embedded in controller)
-- `4433`: QUIC data plane (mTLS)
+- `4433`: gRPC-over-QUIC transport — all controller-steward communication (UDP)
 
 **Firewall Rules** (if applicable):
 ```bash
 # Controller firewall (e.g., ufw on Debian)
 sudo ufw allow 9080/tcp   # REST API
-sudo ufw allow 1883/tcp   # MQTT control plane
-sudo ufw allow 4433/udp   # QUIC data plane (UDP protocol)
+sudo ufw allow 4433/udp   # gRPC-over-QUIC transport (UDP protocol)
 sudo ufw allow 22/tcp     # SSH management
 ```
 
@@ -206,14 +197,12 @@ logging:
   file:
     directory: /var/log/cfgms
 
-mqtt:
-  enabled: true
-  listen_addr: "0.0.0.0:1883"
-  enable_tls: true
-
-quic:
-  enabled: true
+transport:
   listen_addr: "0.0.0.0:4433"
+  use_cert_manager: true
+  max_connections: 10000
+  keepalive_period: 30s
+  idle_timeout: 5m
 EOF
 ```
 
@@ -258,8 +247,7 @@ sudo journalctl -u cfgms-controller --no-pager -n 30
 # Look for these log messages:
 # ✓ "Certificate manager initialized"
 # ✓ "Generated server certificate" (first boot only)
-# ✓ "MQTT broker started"
-# ✓ "QUIC server listening on :4433"
+# ✓ "Transport server listening on :4433"
 # ✓ "REST API server listening on :9080"
 
 # Check REST API
@@ -327,8 +315,9 @@ sudo systemctl start cfgms-steward
 sudo journalctl -u cfgms-steward --no-pager -n 30
 
 # Look for:
-# ✓ "Registering with controller via MQTT+QUIC"
+# ✓ "Registering with controller"
 # ✓ "Certificate obtained"
+# ✓ "Transport connection established"
 # ✓ "Connected to controller"
 # ✓ "Steward ready"
 
@@ -366,15 +355,15 @@ ssh user@steward-vm "sudo journalctl -u cfgms-steward --no-pager -n 20"
 
 ### Automated E2E Tests
 
-The E2E test suite validates the complete MQTT+QUIC flow:
+The E2E test suite validates the complete gRPC-over-QUIC transport flow:
 
 ```bash
-cd test/integration/mqtt_quic
+cd test/integration/transport
 
 # Registration flow
 go test -v -run TestRegistration -timeout 60s
 
-# Configuration sync via QUIC
+# Configuration sync via gRPC data plane
 go test -v -run TestConfigSync -timeout 60s
 
 # Module execution (file, directory, script)
@@ -397,24 +386,19 @@ go test -v -run TestTLSSecurity -timeout 60s
 
 ### Manual Validation Steps
 
-**1. MQTT Connectivity**:
+**1. Transport Connectivity**:
 ```bash
-# Subscribe to steward topics (requires mosquitto-clients)
-mosquitto_sub -h controller-vm -p 1883 -t "cfgms/steward/#" -v
+# Check controller logs for transport server
+sudo journalctl -u cfgms-controller | grep "Transport server listening"
 
-# You should see heartbeat and status messages
+# Check steward logs for transport connection
+sudo journalctl -u cfgms-steward | grep -i "transport.*established\|connected to controller"
+
+# Verify port 4433 (UDP) is listening
+sudo ss -ulnp | grep 4433
 ```
 
-**2. QUIC Connectivity**:
-```bash
-# Check controller logs for QUIC server
-sudo journalctl -u cfgms-controller | grep "QUIC server listening"
-
-# Check steward logs for QUIC connection
-sudo journalctl -u cfgms-steward | grep "QUIC.*established"
-```
-
-**3. REST API Health**:
+**2. REST API Health**:
 ```bash
 # From any machine that can reach the controller
 curl http://controller-vm:9080/api/v1/health
@@ -437,8 +421,9 @@ sudo journalctl -u cfgms-steward -f
 sudo systemctl restart cfgms-controller
 sudo systemctl restart cfgms-steward
 
-# Check listening ports on controller
-sudo ss -tlnp | grep -E '9080|1883|4433'
+# Check listening ports on controller (TCP for REST API, UDP for transport)
+sudo ss -tlnp | grep 9080
+sudo ss -ulnp | grep 4433
 ```
 
 ### Common Issues
@@ -449,20 +434,21 @@ sudo ss -tlnp | grep -E '9080|1883|4433'
 - **Verify**: Check controller logs show same certificate serial for signer and registration
 
 **Issue**: "Timeout waiting for config status"
-- **Debug**: Check QUIC connection established in steward logs
+- **Debug**: Check transport connection established in steward logs
 - **Debug**: Check module executor initialized
-- **Debug**: Check MQTT publish succeeds
+- **Debug**: Check gRPC SyncConfig call visible in steward logs
 - **Fix**: See diagnostic test output for exact failure point
 
-**Issue**: "Cannot connect to MQTT broker"
+**Issue**: "Cannot connect to transport / connection refused on :4433"
 - **Debug**: Check controller is running: `sudo systemctl status cfgms-controller`
-- **Debug**: Check port 1883 is accessible: `nc -zv controller-vm 1883`
-- **Fix**: Verify firewall rules allow port 1883
-
-**Issue**: "QUIC connection failed"
 - **Debug**: Check port 4433 is accessible from steward: `nc -zuv controller-vm 4433`
 - **Debug**: Check certificates are valid in controller logs
-- **Fix**: Verify firewall allows UDP port 4433
+- **Fix**: Verify firewall allows UDP port 4433; confirm transport config `listen_addr` is correct
+
+**Issue**: "gRPC stream broken / TLS handshake error"
+- **Debug**: Check steward and controller certificate fingerprints match
+- **Debug**: Look for "certificate signed by unknown authority" in steward logs
+- **Fix**: Steward may need to re-register to obtain a fresh certificate from the current CA
 
 ## Advanced Configuration
 
@@ -472,7 +458,7 @@ sudo ss -tlnp | grep -E '9080|1883|4433'
 # Use the same registration token (if single_use was false)
 # Deploy cfgms-steward binary to each VM with its own systemd unit
 # Each steward gets a unique ID automatically
-# All connect to the same controller via MQTT+QUIC
+# All connect to the same controller via gRPC-over-QUIC (port 4433)
 ```
 
 ### Custom Certificate Authority
@@ -534,7 +520,7 @@ After successful deployment:
 - **Roadmap**: [docs/product/roadmap.md](../product/roadmap.md)
 - **Architecture**: [docs/architecture/](../architecture/)
 - **E2E Testing**: [docs/testing/e2e-testing-guide.md](../testing/e2e-testing-guide.md)
-- **MQTT+QUIC Details**: [docs/testing/mqtt-quic-testing-strategy.md](../testing/mqtt-quic-testing-strategy.md)
+- **Transport Architecture**: [docs/architecture/communication-layer-migration.md](../architecture/communication-layer-migration.md)
 - **Quick Start**: [QUICK_START.md](../../QUICK_START.md)
 
 ---
