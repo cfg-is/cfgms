@@ -18,6 +18,7 @@ bin/
 # Compiled test binaries
 test-controller
 test-steward
+test-*
 
 # Generated protobuf files in wrong location (should be in api/proto/)
 /steward/
