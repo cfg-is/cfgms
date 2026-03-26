@@ -273,10 +273,10 @@ Runs the full test suite as it would run in GitHub Actions.
 
 4. **Commit your changes**:
    ```bash
-   git add .
-   git commit -m "Add my new feature
+   git add <specific-files>  # Never use git add . or git add -A
+   git commit -m "scope: what changed (Issue #XXX)
 
-   Brief explanation of the feature and why it was added.
+   Brief explanation of why the change was made.
 
    Fixes #issue_number"
    ```
@@ -558,7 +558,7 @@ make build-cli
 ./bin/cfg config apply fleet-config.yaml
 ```
 
-**For production**: See [docs/development/local-development-setup.md](docs/development/local-development-setup.md) for proper certificate management.
+**For production**: See [docs/development/security-setup.md](docs/development/security-setup.md) for proper certificate management.
 
 ## Next Steps
 

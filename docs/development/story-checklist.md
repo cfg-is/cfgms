@@ -111,10 +111,12 @@ This ensures optimal order and provides clear validation status. M365 tests are 
 #### 9. **Commit Feature Work**
 
 ```bash
-git add .
-git commit -m "Add [feature description]
+git add <specific-files>  # Never use git add . or git add -A
+git commit -m "scope: what changed (Issue #XXX)
 
-Security Review: [Brief summary - no hardcoded secrets, SQL injection prevention, input validation present]"
+Why this change was made and what it achieves.
+
+Fixes #XXX"
 ```
 
 #### 10. **Update Documentation** (REQUIRED)

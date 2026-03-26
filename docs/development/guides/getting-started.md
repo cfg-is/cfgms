@@ -8,7 +8,7 @@ This guide aims to help new developers quickly get up to speed with the CFGMS pr
 
 ## Prerequisites
 
-- Go 1.21 or later
+- Go 1.25 or later
 - Git
 - Docker
 - Make

@@ -377,7 +377,7 @@ curl -X POST http://localhost:9080/api/v1/admin/registration-tokens \
 
 # Returns JSON with token and metadata:
 # {
-#   "token": "cfgms_reg_abc123xyz...",
+#   "token": "abcdefghijklmnopqrstuvwxyz",
 #   "tenant_id": "default",
 #   "controller_url": "...",
 #   "group": "production",
@@ -393,7 +393,7 @@ curl -X POST http://localhost:9080/api/v1/admin/registration-tokens \
 ```bash
 # On the controller machine (for testing)
 # Use the token from Step 3
-./bin/cfgms-steward -regtoken cfgms_reg_abc123xyz...
+./bin/cfgms-steward -regtoken abcdefghijklmnopqrstuvwxyz
 
 # You should see:
 # INFO: Registering with controller via gRPC-over-QUIC
@@ -407,7 +407,7 @@ curl -X POST http://localhost:9080/api/v1/admin/registration-tokens \
 ```bash
 # On another machine
 # Use the same token (if single_use was false)
-./bin/cfgms-steward -regtoken cfgms_reg_abc123xyz...
+./bin/cfgms-steward -regtoken abcdefghijklmnopqrstuvwxyz
 
 # Same automatic process!
 ```
