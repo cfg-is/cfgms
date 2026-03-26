@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -13,6 +14,37 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/logging"
 )
+
+// testFileConfig returns a file resource config appropriate for the current platform.
+// On Unix, includes permissions (0644 = 420 decimal). On Windows, omits permissions
+// since NTFS does not support Unix-style permission bits.
+func testFileConfig(path, content string) string {
+	if runtime.GOOS == "windows" {
+		return `{
+        "path": "` + filepath.ToSlash(path) + `",
+        "content": "` + content + `"
+      }`
+	}
+	return `{
+        "path": "` + filepath.ToSlash(path) + `",
+        "content": "` + content + `",
+        "permissions": 420
+      }`
+}
+
+// testDirConfig returns a directory resource config appropriate for the current platform.
+// On Unix, includes permissions (0755 = 493 decimal). On Windows, omits permissions.
+func testDirConfig(path string) string {
+	if runtime.GOOS == "windows" {
+		return `{
+        "path": "` + filepath.ToSlash(path) + `"
+      }`
+	}
+	return `{
+        "path": "` + filepath.ToSlash(path) + `",
+        "permissions": 493
+      }`
+}
 
 func TestNewExecutor(t *testing.T) {
 	logger := logging.ForModule("executor_test")
@@ -55,7 +87,6 @@ func TestExecutor_ApplyConfiguration_Success(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Permissions: 420 = 0644 octal, 493 = 0755 octal
 	configJSON := `{
   "steward": {
     "id": "test-steward",
@@ -65,19 +96,12 @@ func TestExecutor_ApplyConfiguration_Success(t *testing.T) {
     {
       "name": "test-file",
       "module": "file",
-      "config": {
-        "path": "` + filepath.ToSlash(filepath.Join(tempDir, "test.txt")) + `",
-        "content": "Hello from executor test!\n",
-        "permissions": 420
-      }
+      "config": ` + testFileConfig(filepath.Join(tempDir, "test.txt"), "Hello from executor test!\\n") + `
     },
     {
       "name": "test-dir",
       "module": "directory",
-      "config": {
-        "path": "` + filepath.ToSlash(filepath.Join(tempDir, "testdir")) + `",
-        "permissions": 493
-      }
+      "config": ` + testDirConfig(filepath.Join(tempDir, "testdir")) + `
     }
   ]
 }`
@@ -120,7 +144,7 @@ func TestExecutor_ApplyConfiguration_WithErrors(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// 999999 is an invalid permissions value (> 0777 octal)
+	// 999999 is an invalid permissions value (> 0777 octal) on all platforms
 	configJSON := `{
   "steward": {
     "id": "test-steward",
@@ -139,10 +163,7 @@ func TestExecutor_ApplyConfiguration_WithErrors(t *testing.T) {
     {
       "name": "valid-dir",
       "module": "directory",
-      "config": {
-        "path": "` + filepath.ToSlash(filepath.Join(tempDir, "validdir")) + `",
-        "permissions": 493
-      }
+      "config": ` + testDirConfig(filepath.Join(tempDir, "validdir")) + `
     }
   ]
 }`
@@ -198,11 +219,7 @@ func TestExecutor_GetCompareSetVerify_Workflow(t *testing.T) {
     {
       "name": "idempotent-file",
       "module": "file",
-      "config": {
-        "path": "` + filepath.ToSlash(filepath.Join(tempDir, "idempotent.txt")) + `",
-        "content": "stable content\n",
-        "permissions": 420
-      }
+      "config": ` + testFileConfig(filepath.Join(tempDir, "idempotent.txt"), "stable content\\n") + `
     }
   ]
 }`
@@ -218,4 +235,42 @@ func TestExecutor_GetCompareSetVerify_Workflow(t *testing.T) {
 	report2, err := executor.ApplyConfiguration(ctx, []byte(configJSON), "v1.0")
 	require.NoError(t, err)
 	assert.Equal(t, "OK", report2.Status)
+}
+
+func TestExecutor_ApplyConfiguration_PermissionsRejectedOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-only test")
+	}
+
+	tempDir := t.TempDir()
+	logger := logging.ForModule("executor_test")
+
+	executor, err := NewExecutor(&ExecutorConfig{Logger: logger})
+	require.NoError(t, err)
+
+	// On Windows, specifying Unix permissions should produce an error
+	configJSON := `{
+  "steward": {"id": "test-steward", "mode": "controller"},
+  "resources": [
+    {
+      "name": "perms-rejected",
+      "module": "file",
+      "config": {
+        "path": "` + filepath.ToSlash(filepath.Join(tempDir, "rejected.txt")) + `",
+        "content": "should fail on Windows\n",
+        "permissions": 420
+      }
+    }
+  ]
+}`
+
+	ctx := context.Background()
+	report, _ := executor.ApplyConfiguration(ctx, []byte(configJSON), "v1.0")
+	require.NotNil(t, report)
+	assert.Equal(t, "ERROR", report.Status)
+
+	fileStatus, ok := report.Modules["file"]
+	assert.True(t, ok)
+	assert.Equal(t, "ERROR", fileStatus.Status)
+	assert.Contains(t, fileStatus.Message, "not supported on this platform")
 }

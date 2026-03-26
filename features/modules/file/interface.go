@@ -80,7 +80,10 @@ func (c *FileConfig) GetManagedFields() []string {
 	fields := []string{"state"}
 
 	if c.State != "absent" {
-		fields = append(fields, "content", "permissions")
+		fields = append(fields, "content")
+		if platformSupportsPermissions() {
+			fields = append(fields, "permissions")
+		}
 	}
 
 	if c.Owner != "" {

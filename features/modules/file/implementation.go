@@ -60,7 +60,7 @@ func (m *fileModule) Get(ctx context.Context, resourceID string) (modules.Config
 	config := &FileConfig{
 		State:       "present",
 		Content:     string(content),
-		Permissions: int(info.Mode().Perm()),
+		Permissions: getFilePermissions(info),
 		Owner:       owner,
 		Group:       group,
 	}
@@ -142,9 +142,14 @@ func (m *fileModule) Set(ctx context.Context, resourceID string, config modules.
 		return nil
 	}
 
-	// Apply default permissions if not specified (0644 is a safe default)
+	// Platform-specific permissions handling
+	if !platformSupportsPermissions() && fileConfig.Permissions != 0 {
+		return fmt.Errorf("Unix-style permissions are not supported on this platform (NTFS uses ACLs); remove the permissions field from your configuration")
+	}
+
+	// Apply default permissions if not specified
 	if fileConfig.Permissions == 0 {
-		fileConfig.Permissions = 0644
+		fileConfig.Permissions = int(defaultFileMode())
 	}
 
 	// Validate configuration for present state
