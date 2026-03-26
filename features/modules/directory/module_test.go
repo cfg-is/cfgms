@@ -24,6 +24,25 @@ func createConfigFromYAML(yamlData string) modules.ConfigState {
 	return &config
 }
 
+// testDirConfigYAML returns a directory config YAML string appropriate for the platform.
+// On Windows, omits permissions since NTFS does not support Unix permission bits.
+func testDirConfigYAML(path, owner, group string, extraFields string) string {
+	cfg := "path: " + path
+	if platformSupportsPermissions() {
+		cfg += "\npermissions: 0755"
+	}
+	if owner != "" {
+		cfg += "\nowner: " + owner
+	}
+	if group != "" {
+		cfg += "\ngroup: " + group
+	}
+	if extraFields != "" {
+		cfg += "\n" + extraFields
+	}
+	return cfg
+}
+
 func TestDirectoryModule(t *testing.T) {
 	// Create a temporary directory for testing
 	tempDir, err := os.MkdirTemp("", "directory-module-test-*")
@@ -59,25 +78,20 @@ func TestDirectoryModule(t *testing.T) {
 		{
 			name:       "Create new directory",
 			resourceID: filepath.Join(tempDir, "newdir"),
-			configData: `path: ` + filepath.Join(tempDir, "newdir") + `
-permissions: 0755`,
-			wantErr: false,
+			configData: testDirConfigYAML(filepath.Join(tempDir, "newdir"), "", "", ""),
+			wantErr:    false,
 		},
 		{
 			name:       "Create directory with ownership",
 			resourceID: filepath.Join(tempDir, "owned-dir"),
-			configData: `path: ` + filepath.Join(tempDir, "owned-dir") + `
-permissions: 0750
-owner: ` + currentUser.Username + `
-group: ` + currentGroup.Name,
-			wantErr: false,
+			configData: testDirConfigYAML(filepath.Join(tempDir, "owned-dir"), currentUser.Username, currentGroup.Name, ""),
+			wantErr:    false,
 		},
 		{
 			name:       "Invalid path",
 			resourceID: "",
-			configData: `path: ""
-permissions: 0755`,
-			wantErr: true,
+			configData: testDirConfigYAML("", "", "", ""),
+			wantErr:    true,
 		},
 		{
 			name:       "Invalid permissions",
@@ -89,18 +103,14 @@ permissions: 9999`,
 		{
 			name:       "Invalid owner",
 			resourceID: filepath.Join(tempDir, "invalid-owner"),
-			configData: `path: ` + filepath.Join(tempDir, "invalid-owner") + `
-permissions: 0755
-owner: nonexistentuser`,
-			wantErr: true,
+			configData: testDirConfigYAML(filepath.Join(tempDir, "invalid-owner"), "nonexistentuser", "", ""),
+			wantErr:    true,
 		},
 		{
 			name:       "Invalid group",
 			resourceID: filepath.Join(tempDir, "invalid-group"),
-			configData: `path: ` + filepath.Join(tempDir, "invalid-group") + `
-permissions: 0755
-group: nonexistentgroup`,
-			wantErr: true,
+			configData: testDirConfigYAML(filepath.Join(tempDir, "invalid-group"), "", "nonexistentgroup", ""),
+			wantErr:    true,
 		},
 	}
 
@@ -176,8 +186,7 @@ func TestDirectoryModule_EdgeCases(t *testing.T) {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
 
-	configData := `path: ` + filePath + `
-permissions: 0755`
+	configData := testDirConfigYAML(filePath, "", "", "")
 
 	// Should fail because path exists but is not a directory
 	configState := createConfigFromYAML(configData)
@@ -188,9 +197,7 @@ permissions: 0755`
 
 	// Test with non-existent parent directory and recursive=false
 	nonExistentPath := filepath.Join(tempDir, "nonexistent", "dir")
-	configData = `path: ` + nonExistentPath + `
-permissions: 0755
-recursive: false`
+	configData = testDirConfigYAML(nonExistentPath, "", "", "recursive: false")
 
 	configState = createConfigFromYAML(configData)
 	err = module.Set(context.Background(), nonExistentPath, configState)
@@ -199,13 +206,30 @@ recursive: false`
 	}
 
 	// Test with non-existent parent directory and recursive=true
-	configData = `path: ` + nonExistentPath + `
-permissions: 0755
-recursive: true`
+	configData = testDirConfigYAML(nonExistentPath, "", "", "recursive: true")
 
 	configState = createConfigFromYAML(configData)
 	err = module.Set(context.Background(), nonExistentPath, configState)
 	if err != nil {
 		t.Errorf("Set() with non-existent parent and recursive=true error = %v", err)
+	}
+}
+
+func TestDirectoryModule_PermissionsRejectedOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-only test")
+	}
+
+	tempDir := t.TempDir()
+	module := New()
+
+	dirPath := filepath.Join(tempDir, "testdir")
+	configData := `path: ` + dirPath + `
+permissions: 0755`
+	configState := createConfigFromYAML(configData)
+
+	err := module.Set(context.Background(), dirPath, configState)
+	if err == nil {
+		t.Error("Set() with Unix permissions on Windows should fail")
 	}
 }

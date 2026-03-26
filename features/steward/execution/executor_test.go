@@ -4,9 +4,11 @@ package execution
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -272,5 +274,17 @@ func TestExecutor_ApplyConfiguration_PermissionsRejectedOnWindows(t *testing.T) 
 	fileStatus, ok := report.Modules["file"]
 	assert.True(t, ok)
 	assert.Equal(t, "ERROR", fileStatus.Status)
-	assert.Contains(t, fileStatus.Message, "not supported on this platform")
+
+	// The error text lands in Details["errors"] as a []string, not in Message
+	errList, ok := fileStatus.Details["errors"].([]string)
+	assert.True(t, ok, "Details[errors] should be a string slice")
+	require.NotEmpty(t, errList)
+	found := false
+	for _, e := range errList {
+		if strings.Contains(e, "not supported on this platform") {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, fmt.Sprintf("expected error about unsupported permissions, got: %v", errList))
 }
