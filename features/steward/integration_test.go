@@ -3,12 +3,15 @@
 package steward
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/testutil"
 )
 
 func TestStewardStandaloneMode(t *testing.T) {
@@ -96,4 +99,100 @@ func TestHealthMonitorControllerConnectivity(t *testing.T) {
 	metrics = monitor.GetMetrics()
 	assert.Equal(t, 0, metrics.HeartbeatErrors)
 	assert.True(t, metrics.ControllerConnected)
+}
+
+func TestDriftServiceInitializedInControllerTestingMode(t *testing.T) {
+	logger := logging.NewLogger("debug")
+
+	testConfig := testutil.DefaultStewardTestConfig()
+	testConfig.StewardID = "test-steward-drift"
+	certDir, dataDir, cleanup := testutil.SetupTestEnvironment(t, testConfig)
+	t.Cleanup(cleanup)
+
+	cfg := &Config{
+		ControllerAddr: testConfig.ControllerAddr,
+		CertPath:       certDir,
+		DataDir:        dataDir,
+		LogLevel:       testConfig.LogLevel,
+		ID:             testConfig.StewardID,
+	}
+
+	steward, err := NewForControllerTesting(cfg, logger)
+	require.NoError(t, err)
+	require.NotNil(t, steward)
+
+	// Drift service and performance collector must be initialized
+	assert.NotNil(t, steward.driftService, "drift service must be initialized")
+	assert.NotNil(t, steward.perfCollector, "performance collector must be initialized")
+	assert.NotNil(t, steward.driftDNACollector, "drift DNA collector must be initialized")
+}
+
+func TestDriftAndPerformanceSubsystemsStartAndStop(t *testing.T) {
+	logger := logging.NewLogger("debug")
+
+	testConfig := testutil.DefaultStewardTestConfig()
+	testConfig.StewardID = "test-steward-subsystems"
+	certDir, dataDir, cleanup := testutil.SetupTestEnvironment(t, testConfig)
+	t.Cleanup(cleanup)
+
+	cfg := &Config{
+		ControllerAddr: testConfig.ControllerAddr,
+		CertPath:       certDir,
+		DataDir:        dataDir,
+		LogLevel:       testConfig.LogLevel,
+		ID:             testConfig.StewardID,
+	}
+
+	steward, err := NewForControllerTesting(cfg, logger)
+	require.NoError(t, err)
+	require.NotNil(t, steward)
+
+	// Start via the drift monitor loop directly (controller testing Start requires network)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	// Start performance collector directly to verify it works
+	perfErr := steward.perfCollector.Start(ctx)
+	require.NoError(t, perfErr, "performance collector must start without error")
+
+	// Give it a moment to collect initial metrics
+	time.Sleep(50 * time.Millisecond)
+
+	// Current metrics should be available after starting
+	metrics, err := steward.perfCollector.GetCurrentMetrics()
+	require.NoError(t, err, "current metrics must be available after start")
+	assert.NotNil(t, metrics, "metrics must not be nil")
+
+	// Stop the performance collector
+	stopErr := steward.perfCollector.Stop()
+	require.NoError(t, stopErr, "performance collector must stop without error")
+}
+
+func TestDriftServiceDetectorAvailable(t *testing.T) {
+	logger := logging.NewLogger("debug")
+
+	testConfig := testutil.DefaultStewardTestConfig()
+	testConfig.StewardID = "test-steward-detector"
+	certDir, dataDir, cleanup := testutil.SetupTestEnvironment(t, testConfig)
+	t.Cleanup(cleanup)
+
+	cfg := &Config{
+		ControllerAddr: testConfig.ControllerAddr,
+		CertPath:       certDir,
+		DataDir:        dataDir,
+		LogLevel:       testConfig.LogLevel,
+		ID:             testConfig.StewardID,
+	}
+
+	steward, err := NewForControllerTesting(cfg, logger)
+	require.NoError(t, err)
+	require.NotNil(t, steward)
+
+	// The drift service must expose a working detector
+	detector := steward.driftService.GetDetector()
+	require.NotNil(t, detector, "drift detector must be available")
+
+	// Closing the drift service must not error
+	err = steward.driftService.Close()
+	require.NoError(t, err, "drift service Close must succeed")
 }

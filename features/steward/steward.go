@@ -42,8 +42,10 @@ import (
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
 	"github.com/cfgis/cfgms/features/steward/dna"
+	"github.com/cfgis/cfgms/features/steward/dna/drift"
 	"github.com/cfgis/cfgms/features/steward/execution"
 	"github.com/cfgis/cfgms/features/steward/factory"
+	"github.com/cfgis/cfgms/features/steward/performance"
 	"github.com/cfgis/cfgms/features/steward/testing"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -161,6 +163,13 @@ type Steward struct {
 	comparator      *testing.StateComparator
 	executionEngine *execution.ExecutionEngine
 
+	// Drift detection subsystem
+	driftService     *drift.DriftService
+	driftDNACollector *dna.Collector
+
+	// Performance monitoring subsystem
+	perfCollector performance.Collector
+
 	// Controller mode components - DEPRECATED (Story #198)
 	// The old gRPC-based controller mode is replaced by gRPC-over-QUIC registration
 	// Use cmd/steward/main.go with --regtoken parameter instead
@@ -222,13 +231,29 @@ func NewForControllerTesting(cfg *Config, logger logging.Logger) (*Steward, erro
 	// Create health monitor
 	healthMonitor := NewHealthMonitor(logger)
 
+	// Create drift detection service
+	driftService, err := drift.NewDriftService(nil, nil, nil, nil, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create drift service: %w", err)
+	}
+
+	// Create performance monitoring collector
+	stewardID := cfg.ID
+	if stewardID == "" {
+		stewardID = "steward-controller"
+	}
+	perfCollector := performance.NewCollector(stewardID, nil)
+
 	return &Steward{
-		legacyConfig: cfg,
-		logger:       logger,
-		dnaCollector: dnaCollector,
-		healthCheck:  healthMonitor,
-		shutdown:     make(chan struct{}),
-		isStandalone: false, // Controller testing mode
+		legacyConfig:      cfg,
+		logger:            logger,
+		dnaCollector:      dnaCollector,
+		driftService:      driftService,
+		driftDNACollector: dnaCollector, // Reuse the DNA collector for drift detection
+		perfCollector:     perfCollector,
+		healthCheck:       healthMonitor,
+		shutdown:          make(chan struct{}),
+		isStandalone:      false, // Controller testing mode
 	}, nil
 }
 
@@ -305,17 +330,35 @@ func NewStandalone(configPath string, logger logging.Logger) (*Steward, error) {
 	// Create health monitor for metrics collection
 	healthMonitor := NewHealthMonitor(logger)
 
+	// Create drift detection service for environmental drift monitoring
+	driftService, err := drift.NewDriftService(nil, nil, nil, nil, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create drift service: %w", err)
+	}
+
+	// Create a dedicated DNA collector for drift detection comparisons
+	driftDNACollector := dna.NewCollector(logger)
+
+	// Create performance monitoring collector for local metrics collection
+	if stewardID == "" {
+		stewardID = "steward-standalone"
+	}
+	perfCollector := performance.NewCollector(stewardID, nil)
+
 	return &Steward{
-		standaloneConfig: cfg,
-		logger:           logger,
-		healthCheck:      healthMonitor,
-		moduleRegistry:   registry,
-		moduleFactory:    moduleFactory,
-		secretStore:      secretStore,
-		comparator:       comparator,
-		executionEngine:  executionEngine,
-		shutdown:         make(chan struct{}),
-		isStandalone:     true,
+		standaloneConfig:  cfg,
+		logger:            logger,
+		healthCheck:       healthMonitor,
+		moduleRegistry:    registry,
+		moduleFactory:     moduleFactory,
+		secretStore:       secretStore,
+		comparator:        comparator,
+		executionEngine:   executionEngine,
+		driftService:      driftService,
+		driftDNACollector: driftDNACollector,
+		perfCollector:     perfCollector,
+		shutdown:          make(chan struct{}),
+		isStandalone:      true,
 	}, nil
 }
 
@@ -354,6 +397,16 @@ func (s *Steward) startStandalone(ctx context.Context) error {
 	go func() {
 		s.healthCheck.Start(ctx)
 	}()
+
+	// Start performance monitoring in background
+	go func() {
+		if err := s.perfCollector.Start(ctx); err != nil {
+			s.logger.Warn("Performance collector failed to start", "error", err)
+		}
+	}()
+
+	// Start drift detection monitoring in background
+	go s.driftMonitorLoop(ctx)
 
 	// Give health monitor a moment to start
 	time.Sleep(50 * time.Millisecond)
@@ -407,6 +460,16 @@ func (s *Steward) startControllerTesting(ctx context.Context) error {
 	go func() {
 		s.healthCheck.Start(ctx)
 	}()
+
+	// Start performance monitoring in background
+	go func() {
+		if err := s.perfCollector.Start(ctx); err != nil {
+			s.logger.Warn("Performance collector failed to start", "error", err)
+		}
+	}()
+
+	// Start drift detection monitoring in background
+	go s.driftMonitorLoop(ctx)
 
 	// Give health monitor a moment to start
 	time.Sleep(50 * time.Millisecond)
@@ -462,6 +525,55 @@ func (s *Steward) startControllerTesting(ctx context.Context) error {
 
 	s.logger.Info("Steward started successfully in controller testing mode")
 	return nil
+}
+
+// driftMonitorLoop periodically collects DNA and detects environmental drift.
+//
+// This loop runs in standalone and controller testing modes. It collects system DNA
+// on each tick and compares it against the previous snapshot to detect configuration
+// drift. Detected drift events are logged for operator awareness.
+func (s *Steward) driftMonitorLoop(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	var previousDNA *commonpb.DNA
+
+	s.logger.Info("Drift monitoring loop started")
+
+	for {
+		select {
+		case <-ctx.Done():
+			s.logger.Info("Drift monitoring loop stopped due to context cancellation")
+			return
+		case <-s.shutdown:
+			s.logger.Info("Drift monitoring loop stopped")
+			return
+		case <-ticker.C:
+			currentDNA, err := s.driftDNACollector.Collect()
+			if err != nil {
+				s.logger.Warn("Failed to collect DNA for drift detection", "error", err)
+				continue
+			}
+
+			if previousDNA != nil {
+				events, detectErr := s.driftService.GetDetector().DetectDrift(ctx, previousDNA, currentDNA)
+				if detectErr != nil {
+					s.logger.Warn("Drift detection failed", "error", detectErr)
+				} else if len(events) > 0 {
+					s.logger.Info("Environmental drift detected", "event_count", len(events))
+					for _, event := range events {
+						s.logger.Warn("Drift event",
+							"severity", event.Severity,
+							"category", event.Category,
+							"description", event.Description,
+							"change_count", event.ChangeCount)
+					}
+				}
+			}
+
+			previousDNA = currentDNA
+		}
+	}
 }
 
 // heartbeatLoopTesting sends periodic heartbeats to the controller via transport client.
@@ -575,6 +687,20 @@ func (s *Steward) Stop(ctx context.Context) error {
 
 	// Stop health monitoring
 	s.healthCheck.Stop()
+
+	// Stop performance monitoring
+	if s.perfCollector != nil {
+		if err := s.perfCollector.Stop(); err != nil {
+			s.logger.Warn("Failed to stop performance collector", "error", err)
+		}
+	}
+
+	// Close drift detection service
+	if s.driftService != nil {
+		if err := s.driftService.Close(); err != nil {
+			s.logger.Warn("Failed to close drift service", "error", err)
+		}
+	}
 
 	// Cleanup based on mode
 	if s.isStandalone {
