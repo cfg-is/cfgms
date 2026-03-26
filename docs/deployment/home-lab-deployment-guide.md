@@ -1,215 +1,164 @@
-# CFGMS Home Lab Deployment Guide
+# CFGMS Deployment Guide
 
-**Story #391**: Comprehensive guide for deploying CFGMS to a home lab environment with native binaries and full gRPC-over-QUIC transport.
+A modular guide to deploying CFGMS with a controller and stewards. Follow the sections relevant to your environment.
 
-**Last Updated**: 2026-02-28
-**CFGMS Version**: v0.9.x
-**Deployment Time**: ~30-45 minutes (first-time setup)
-
-## Table of Contents
-
-1. [Overview](#overview)
-2. [Architecture](#architecture)
-3. [Prerequisites](#prerequisites)
-4. [Detailed Setup](#detailed-setup)
-5. [Validation](#validation)
-6. [Troubleshooting](#troubleshooting)
-7. [Advanced Configuration](#advanced-configuration)
-
-## Overview
-
-This guide walks you through deploying a complete CFGMS environment in your home lab using native binaries, including:
-
-- **Controller**: Central management server (REST API + gRPC-over-QUIC transport)
-- **Steward(s)**: Endpoint agents for configuration management
-- **Storage Backend**: Git with SOPS encryption (default)
-
-> **Quick Start?** See [QUICK_START.md](../../QUICK_START.md) for a 5-15 minute getting-started guide.
-> This document covers production-style native deployment with systemd.
-
-**What You'll Achieve**:
-- Fully functional CFGMS deployment on native VMs
-- Validated gRPC-over-QUIC communication paths
-- E2E config distribution flow working end-to-end
-- Secure certificate-based authentication (auto-generated)
-- systemd-managed services for production reliability
+**Time**: ~30 minutes (first-time setup)
 
 ## Architecture
 
-### Component Communication Flow
-
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                      Home Lab Network                        │
-│                                                              │
-│  ┌──────────────────────────────┐                           │
-│  │         Controller           │                           │
-│  │                              │                           │
-│  │  - REST API       :9080      │                           │
-│  │  - Transport      :4433      │  (gRPC-over-QUIC, mTLS)  │
-│  │  - Certificate CA            │                           │
-│  └──────────────────────────────┘                           │
-│                    ▲                                         │
-│                    │                                         │
-│          gRPC-over-QUIC (mTLS)                              │
-│          :4433 (control + data plane)                        │
-│                    │                                         │
-│  ┌─────────────────┴────────────────────────────┐          │
-│  │                                                │          │
-│  │              Steward(s)                        │          │
-│  │                                                │          │
-│  │  - Config executor                            │          │
-│  │  - Module engine (file, directory, script)    │          │
-│  │  - Status reporter                            │          │
-│  └───────────────────────────────────────────────┘          │
-│                                                              │
-└─────────────────────────────────────────────────────────────┘
-
-Transport: gRPC-over-QUIC (commands, heartbeats, status, config sync) - port 4433 (UDP)
-Management Plane: REST API (config uploads, admin operations) - port 9080
+┌─────────────────────────────────────────┐
+│            Controller (Linux)           │
+│                                         │
+│  REST API (HTTPS)        :8080          │
+│  gRPC-over-QUIC (mTLS)  :4433/UDP      │
+│  Auto-generated CA + certificates       │
+│  Git+SOPS config storage                │
+└────────────┬───────────────┬────────────┘
+             │               │
+     outbound connections only
+             │               │
+┌────────────┴──┐  ┌────────┴────────────┐
+│ Linux Steward │  │  Windows Steward    │
+│               │  │                     │
+│ systemd svc   │  │  Windows Service    │
+│ file, dir,    │  │  file, dir, script, │
+│ script, pkg,  │  │  pkg, firewall,     │
+│ firewall      │  │  patch              │
+└───────────────┘  └─────────────────────┘
 ```
 
-**Note**: A single port (4433/UDP) handles all controller-steward communication via gRPC-over-QUIC. There is no separate broker process.
-
-### Communication Protocols
-
-1. **gRPC-over-QUIC** (Transport - Port 4433 with mTLS):
-   - **Control plane**: Commands, heartbeats, status events, DNA deltas
-   - **Data plane**: Configuration synchronization (signed configs), full DNA snapshots, bulk data transfer
-   - Single multiplexed QUIC connection per steward with distinct gRPC service methods for each operation
-
-2. **REST API** (Management Plane - Port 9080):
-   - Configuration uploads
-   - Steward registration token management
-   - Administrative operations
-   - Health checks
+**Ports**: Controller listens on 8080/TCP (REST) and 4433/UDP (transport). Stewards make outbound connections only — no ports to open.
 
 ## Prerequisites
 
-### System Requirements
+- **Controller**: Debian/Ubuntu Linux VM with `git` and `sops` installed
+- **Linux steward**: Any Linux VM with systemd
+- **Windows steward**: Windows 10/11 or Server 2019+
+- **Network**: Stewards must reach the controller on ports 8080 and 4433
+- **Go toolchain**: v1.25+ on the build machine (can be the controller VM)
 
-| Component | Minimum | Recommended |
-|-----------|---------|-------------|
-| CPU | 2 cores | 4+ cores |
-| RAM | 4 GB | 8 GB |
-| Disk | 20 GB free | 50 GB free |
-| Controller OS | Debian 12+, Ubuntu 22.04+ | Debian 12 |
-| Steward OS | Linux, macOS, Windows | See [platform-support.md](platform-support.md) |
-| Go (for building) | 1.25+ | 1.25+ |
+## Step 1: Build Binaries
 
-### Software Prerequisites
-
-```bash
-# Verify Go (required for building from source)
-go version
-# Expected: go version go1.25.0 or later
-
-# Optional: grpcurl for testing gRPC endpoints
-grpcurl --version  # grpcurl is a command-line tool for gRPC
-```
-
-### Network Requirements
-
-**Ports** (ensure these are available on the controller):
-- `9080`: Controller REST API (HTTP/HTTPS)
-- `4433`: gRPC-over-QUIC transport — all controller-steward communication (UDP)
-
-**Firewall Rules** (if applicable):
-```bash
-# Controller firewall (e.g., ufw on Debian)
-sudo ufw allow 9080/tcp   # REST API
-sudo ufw allow 4433/udp   # gRPC-over-QUIC transport (UDP protocol)
-sudo ufw allow 22/tcp     # SSH management
-```
-
-## Detailed Setup
-
-### Step 1: Build CFGMS Binaries
+On your build machine (can be the controller VM):
 
 ```bash
 # Clone the repository
 git clone https://github.com/cfg-is/cfgms.git
 cd cfgms
 
-# Build all binaries
-make build
-# Creates: bin/controller, bin/cfgms-steward, bin/cfg
+# Build controller (Linux AMD64)
+GOOS=linux GOARCH=amd64 go build -o bin/controller ./cmd/controller
 
-# Verify binaries
-./bin/controller --version
-./bin/cfgms-steward --version
-./bin/cfg --version
+# Build steward for Linux
+GOOS=linux GOARCH=amd64 go build \
+  -ldflags "-X main.ControllerURL=https://controller.example.com:8080" \
+  -o bin/cfgms-steward-linux ./cmd/steward
+
+# Build steward for Windows
+GOOS=windows GOARCH=amd64 go build \
+  -ldflags "-X main.ControllerURL=https://controller.example.com:8080" \
+  -o bin/cfgms-steward-windows.exe ./cmd/steward
 ```
 
-**Troubleshooting Build Issues**:
-- If build fails: Check Go version is 1.25+, run `go mod tidy`
-- If tests fail: Fix the failing tests before deploying (zero tolerance policy)
+> **Replace `controller.example.com`** with your controller's hostname or IP address. This URL is compiled into the steward binary and cannot be changed after build.
 
-### Step 2: Configure Storage Backend
+## Step 2: Deploy Controller
 
-**Git with SOPS** (Recommended for Home Lab)
+Copy `bin/controller` to the controller VM.
+
+### Create configuration
 
 ```bash
-# SOPS is used for encryption - install if not present
-# On Debian/Ubuntu: apt install sops
-# On macOS: brew install sops
-# Or download from https://github.com/mozilla/sops/releases
-
-# Generate age encryption key for SOPS
-age-keygen -o ~/.config/sops/age/keys.txt
-
-# Extract public key (you'll need this for .sops.yaml)
-grep "public key:" ~/.config/sops/age/keys.txt
+sudo mkdir -p /etc/cfgms
 ```
 
-### Step 3: Deploy Controller
+Create `/etc/cfgms/controller.cfg`:
 
-#### 3a: Copy Binary to Controller VM
+```yaml
+# Controller configuration
+# Adjust listen_addr to your controller's IP or 0.0.0.0 for all interfaces
+listen_addr: "0.0.0.0:8080"
 
-```bash
-# From build machine to controller VM
-scp bin/controller user@controller-vm:/usr/local/bin/cfgms-controller
-ssh user@controller-vm "chmod +x /usr/local/bin/cfgms-controller"
-```
-
-#### 3b: Create Controller Configuration
-
-```bash
-# On the controller VM
-sudo mkdir -p /etc/cfgms /var/lib/cfgms/storage /var/lib/cfgms/certs /var/log/cfgms
-
-sudo tee /etc/cfgms/controller.cfg > /dev/null <<EOF
-storage:
-  provider: git
-  config:
-    repository_path: /var/lib/cfgms/storage
-    branch: main
-    auto_init: true
-
+# Certificate management (auto-generates CA and certs on first boot)
 certificate:
   enable_cert_management: true
-  auto_generate: true
-  ca_path: /var/lib/cfgms/certs
+  ca_path: "/var/lib/cfgms/certs/ca"
+  cert_path: "/var/lib/cfgms/certs"
+  renewal_threshold_days: 30
+  server_cert_validity_days: 365
+  client_cert_validity_days: 365
+  server:
+    common_name: "controller.example.com"
+    dns_names:
+      - "controller.example.com"
+      - "localhost"
+    ip_addresses:
+      - "127.0.0.1"
+    organization: "My Organization"
 
+# Storage backend (Git with SOPS encryption)
+storage:
+  provider: "git"
+  config:
+    repository_path: "/var/lib/cfgms/storage"
+    branch: "main"
+    auto_init: true
+
+# Logging
 logging:
-  provider: file
-  level: INFO
-  file:
-    directory: /var/log/cfgms
+  level: "info"
+  provider: "file"
+  config:
+    directory: "/var/log/cfgms"
+    max_file_size: 10485760
+    max_files: 5
 
+# gRPC-over-QUIC transport (steward connections)
 transport:
   listen_addr: "0.0.0.0:4433"
   use_cert_manager: true
-  max_connections: 10000
-  keepalive_period: 30s
-  idle_timeout: 5m
-EOF
+  max_connections: 50000
+  keepalive_period: "30s"
+  idle_timeout: "5m"
 ```
 
-#### 3c: Create systemd Service
+> **Replace `controller.example.com`** with your controller's actual hostname or IP in `common_name`, `dns_names`, and wherever it appears.
+
+### Initialize and start
 
 ```bash
-sudo tee /etc/systemd/system/cfgms-controller.service > /dev/null <<EOF
+# Create data directories
+sudo mkdir -p /var/lib/cfgms /var/log/cfgms
+
+# Copy binary to standard location
+sudo cp bin/controller /usr/local/bin/cfgms-controller
+sudo chmod +x /usr/local/bin/cfgms-controller
+
+# Initialize (generates CA and certificates)
+sudo cfgms-controller --init --config /etc/cfgms/controller.cfg
+
+# Start the controller
+sudo cfgms-controller --config /etc/cfgms/controller.cfg
+```
+
+### Verify
+
+```bash
+# Health check
+curl -k https://localhost:8080/health
+
+# Or use the cfg CLI
+cfg controller status --url https://localhost:8080 --insecure
+```
+
+You should see a healthy response with certificate info and transport status.
+
+### Install as systemd service (recommended)
+
+Create `/etc/systemd/system/cfgms-controller.service`:
+
+```ini
 [Unit]
 Description=CFGMS Controller
 After=network-online.target
@@ -217,316 +166,330 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/cfgms-controller
-Restart=always
-RestartSec=10
+ExecStart=/usr/local/bin/cfgms-controller --config /etc/cfgms/controller.cfg
+Restart=on-failure
+RestartSec=5
 User=root
 WorkingDirectory=/var/lib/cfgms
 
-# Environment (adjust SOPS key path as needed)
-Environment=SOPS_AGE_KEY_FILE=/root/.config/sops/age/keys.txt
-
 [Install]
 WantedBy=multi-user.target
-EOF
+```
 
+```bash
 sudo systemctl daemon-reload
 sudo systemctl enable cfgms-controller
 sudo systemctl start cfgms-controller
-```
-
-#### 3d: Verify Controller Health
-
-```bash
-# Check service status
 sudo systemctl status cfgms-controller
-
-# Check logs for successful startup
-sudo journalctl -u cfgms-controller --no-pager -n 30
-
-# Look for these log messages:
-# ✓ "Certificate manager initialized"
-# ✓ "Generated server certificate" (first boot only)
-# ✓ "Transport server listening on :4433"
-# ✓ "REST API server listening on :9080"
-
-# Check REST API
-curl http://localhost:9080/api/v1/health
 ```
 
-### Step 4: Create Registration Token
+## Step 3: Create Registration Token
 
 ```bash
-# Create a registration token for stewards
-curl -X POST http://localhost:9080/api/v1/admin/registration-tokens \
+cfg token create \
+  --tenant-id=my-lab \
+  --controller-url=controller.example.com:4433 \
+  --expires=30d
+```
+
+Save the token output — stewards need it to register.
+
+## Step 4: Deploy Linux Steward
+
+Copy `bin/cfgms-steward-linux` to the target Linux VM.
+
+```bash
+# Install as systemd service (requires root)
+sudo ./cfgms-steward-linux install --regtoken <TOKEN>
+```
+
+This copies the binary to `/usr/local/bin/cfgms-steward`, creates a systemd service, registers with the controller, and starts automatically.
+
+### Verify
+
+```bash
+sudo systemctl status cfgms-steward
+sudo journalctl -u cfgms-steward -f
+```
+
+Look for: `Registration successful`, `Connected to controller successfully`, `Heartbeat sent`.
+
+## Step 5: Deploy Windows Steward
+
+Copy `bin/cfgms-steward-windows.exe` to the target Windows VM.
+
+Open an **Administrator PowerShell**:
+
+```powershell
+.\cfgms-steward-windows.exe install --regtoken <TOKEN>
+```
+
+This copies to `C:\Program Files\CFGMS\cfgms-steward.exe`, registers as a Windows Service, and starts automatically.
+
+### Verify
+
+```powershell
+Get-Service cfgms-steward
+Get-EventLog -LogName Application -Source cfgms-steward -Newest 20
+```
+
+## Step 6: Push Configuration
+
+Find your steward IDs:
+
+```bash
+curl -k https://controller.example.com:8080/api/v1/stewards | jq '.[] | {id, hostname}'
+```
+
+Replace `<STEWARD_ID>` in the examples below with a real steward ID.
+
+### File module
+
+Create a managed config file on the target.
+
+**Linux** (`/etc/cfgms/example.conf`):
+
+```bash
+curl -k -X PUT https://controller.example.com:8080/api/v1/stewards/<STEWARD_ID>/config \
   -H "Content-Type: application/json" \
   -d '{
-    "tenant_id": "default",
-    "group": "production",
-    "validity_days": 7,
-    "single_use": false
+    "steward": {"id": "<STEWARD_ID>", "mode": "controller"},
+    "resources": [{
+      "name": "example-config",
+      "module": "file",
+      "config": {
+        "path": "/etc/cfgms/example.conf",
+        "content": "# Managed by CFGMS\nserver_name=my-server\nlog_level=info\n",
+        "mode": "0644"
+      }
+    }]
   }'
-
-# Save the token from the response for steward deployment
 ```
 
-### Step 5: Deploy First Steward
-
-#### 5a: Copy Binary to Steward VM
+**Windows** (`C:\cfgms\example.conf`):
 
 ```bash
-# From build machine to steward VM
-scp bin/cfgms-steward user@steward-vm:/usr/local/bin/cfgms-steward
-ssh user@steward-vm "chmod +x /usr/local/bin/cfgms-steward"
+curl -k -X PUT https://controller.example.com:8080/api/v1/stewards/<STEWARD_ID>/config \
+  -H "Content-Type: application/json" \
+  -d '{
+    "steward": {"id": "<STEWARD_ID>", "mode": "controller"},
+    "resources": [{
+      "name": "example-config-win",
+      "module": "file",
+      "config": {
+        "path": "C:\\cfgms\\example.conf",
+        "content": "# Managed by CFGMS\r\nserver_name=my-server\r\nlog_level=info\r\n",
+        "mode": "0644"
+      }
+    }]
+  }'
 ```
 
-#### 5b: Create systemd Service
+### Directory module
 
 ```bash
-# On the steward VM
-# Replace CONTROLLER_IP and TOKEN with actual values
-
-sudo tee /etc/systemd/system/cfgms-steward.service > /dev/null <<EOF
-[Unit]
-Description=CFGMS Steward Configuration Management Agent
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/cfgms-steward --regtoken REPLACE_WITH_TOKEN
-Restart=always
-RestartSec=10
-User=root
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-sudo systemctl daemon-reload
-sudo systemctl enable cfgms-steward
-sudo systemctl start cfgms-steward
+curl -k -X PUT https://controller.example.com:8080/api/v1/stewards/<STEWARD_ID>/config \
+  -H "Content-Type: application/json" \
+  -d '{
+    "steward": {"id": "<STEWARD_ID>", "mode": "controller"},
+    "resources": [{
+      "name": "app-directories",
+      "module": "directory",
+      "config": {
+        "path": "/opt/myapp",
+        "mode": "0755"
+      }
+    }]
+  }'
 ```
 
-#### 5c: Verify Steward Registration
+### Script module
+
+**Linux** (bash):
 
 ```bash
-# Check steward logs
-sudo journalctl -u cfgms-steward --no-pager -n 30
-
-# Look for:
-# ✓ "Registering with controller"
-# ✓ "Certificate obtained"
-# ✓ "Transport connection established"
-# ✓ "Connected to controller"
-# ✓ "Steward ready"
-
-# Verify controller sees the steward
-sudo journalctl -u cfgms-controller --no-pager | grep -i "registration"
+curl -k -X PUT https://controller.example.com:8080/api/v1/stewards/<STEWARD_ID>/config \
+  -H "Content-Type: application/json" \
+  -d '{
+    "steward": {"id": "<STEWARD_ID>", "mode": "controller"},
+    "resources": [{
+      "name": "setup-script",
+      "module": "script",
+      "config": {
+        "interpreter": "/bin/bash",
+        "content": "#!/bin/bash\necho \"CFGMS setup complete\" > /tmp/cfgms-setup.log\ndate >> /tmp/cfgms-setup.log",
+        "timeout": "30s"
+      }
+    }]
+  }'
 ```
 
-### Step 6: Test Configuration Sync
+**Windows** (PowerShell):
 
 ```bash
-# On the controller VM, upload a test configuration
-cat > /tmp/test-config.yaml <<EOF
-resources:
-  - name: test-file
-    module: file
-    config:
-      path: /tmp/hello-cfgms.txt
-      content: |
-        Hello from CFGMS!
-        Deployed successfully to home lab.
-      permissions: "0644"
-      ensure: present
-EOF
-
-curl -X POST http://localhost:9080/api/v1/configurations \
-  -H "Content-Type: application/yaml" \
-  --data-binary @/tmp/test-config.yaml
-
-# The steward should sync within 60 seconds
-# Check steward logs for config application:
-ssh user@steward-vm "sudo journalctl -u cfgms-steward --no-pager -n 20"
+curl -k -X PUT https://controller.example.com:8080/api/v1/stewards/<STEWARD_ID>/config \
+  -H "Content-Type: application/json" \
+  -d '{
+    "steward": {"id": "<STEWARD_ID>", "mode": "controller"},
+    "resources": [{
+      "name": "setup-script-win",
+      "module": "script",
+      "config": {
+        "interpreter": "powershell",
+        "content": "Write-Output \"CFGMS setup complete\" | Out-File C:\\cfgms\\setup.log\nGet-Date | Out-File C:\\cfgms\\setup.log -Append",
+        "timeout": "30s"
+      }
+    }]
+  }'
 ```
 
-## Validation
+### Package module
 
-### Automated E2E Tests
-
-The E2E test suite validates the complete gRPC-over-QUIC transport flow:
+**Linux** (apt):
 
 ```bash
-cd test/integration/transport
-
-# Registration flow
-go test -v -run TestRegistration -timeout 60s
-
-# Configuration sync via gRPC data plane
-go test -v -run TestConfigSync -timeout 60s
-
-# Module execution (file, directory, script)
-go test -v -run TestModuleExecution -timeout 60s
-
-# Heartbeat and failover detection
-go test -v -run TestHeartbeatFailover -timeout 60s
-
-# Multi-tenant isolation
-go test -v -run TestMultiTenant -timeout 60s
-
-# TLS/mTLS security validation
-go test -v -run TestTLSSecurity -timeout 60s
+curl -k -X PUT https://controller.example.com:8080/api/v1/stewards/<STEWARD_ID>/config \
+  -H "Content-Type: application/json" \
+  -d '{
+    "steward": {"id": "<STEWARD_ID>", "mode": "controller"},
+    "resources": [{
+      "name": "install-htop",
+      "module": "package",
+      "config": {
+        "name": "htop",
+        "state": "present",
+        "provider": "apt"
+      }
+    }]
+  }'
 ```
 
-**Success Criteria**:
-- All 6 E2E tests pass
-- Tests complete without timeout
-- No errors in test output
+**Windows** (winget):
 
-### Manual Validation Steps
-
-**1. Transport Connectivity**:
 ```bash
-# Check controller logs for transport server
-sudo journalctl -u cfgms-controller | grep "Transport server listening"
-
-# Check steward logs for transport connection
-sudo journalctl -u cfgms-steward | grep -i "transport.*established\|connected to controller"
-
-# Verify port 4433 (UDP) is listening
-sudo ss -ulnp | grep 4433
+curl -k -X PUT https://controller.example.com:8080/api/v1/stewards/<STEWARD_ID>/config \
+  -H "Content-Type: application/json" \
+  -d '{
+    "steward": {"id": "<STEWARD_ID>", "mode": "controller"},
+    "resources": [{
+      "name": "install-notepadpp",
+      "module": "package",
+      "config": {
+        "name": "Notepad++.Notepad++",
+        "state": "present",
+        "provider": "winget"
+      }
+    }]
+  }'
 ```
 
-**2. REST API Health**:
+### Firewall module
+
 ```bash
-# From any machine that can reach the controller
-curl http://controller-vm:9080/api/v1/health
+curl -k -X PUT https://controller.example.com:8080/api/v1/stewards/<STEWARD_ID>/config \
+  -H "Content-Type: application/json" \
+  -d '{
+    "steward": {"id": "<STEWARD_ID>", "mode": "controller"},
+    "resources": [{
+      "name": "allow-http",
+      "module": "firewall",
+      "config": {
+        "rule": "allow",
+        "protocol": "tcp",
+        "port": 80,
+        "direction": "inbound",
+        "description": "Allow HTTP traffic"
+      }
+    }]
+  }'
 ```
+
+### Patch module (Windows only)
+
+```bash
+curl -k -X PUT https://controller.example.com:8080/api/v1/stewards/<STEWARD_ID>/config \
+  -H "Content-Type: application/json" \
+  -d '{
+    "steward": {"id": "<STEWARD_ID>", "mode": "controller"},
+    "resources": [{
+      "name": "patch-compliance",
+      "module": "patch",
+      "config": {
+        "action": "check",
+        "maintenance_window": {
+          "start": "02:00",
+          "end": "06:00",
+          "days": ["Saturday", "Sunday"]
+        }
+      }
+    }]
+  }'
+```
+
+## Step 7: Validation Checklist
+
+- [ ] **File**: Config files created with correct content and permissions
+- [ ] **Directory**: Directories created with correct ownership
+- [ ] **Script**: Scripts executed, output files created
+- [ ] **Package**: Packages installed (`which htop`, `winget list`)
+- [ ] **Firewall**: Rules active (`iptables -L` / `Get-NetFirewallRule`)
+- [ ] **Patch**: Compliance check completed (Windows)
+- [ ] **Status**: `curl -k https://controller.example.com:8080/api/v1/stewards/<ID>/config/status`
+- [ ] **Controller restart**: `sudo systemctl restart cfgms-controller` — stewards reconnect
+- [ ] **Steward restart**: Restart steward service — re-registers and reconnects
 
 ## Troubleshooting
 
-See [home-lab-checklist.md](home-lab-checklist.md) for a detailed pre-deployment checklist.
-
-### Quick Debug Commands
+### Controller won't start
 
 ```bash
-# View controller logs
-sudo journalctl -u cfgms-controller -f
+sudo journalctl -u cfgms-controller -n 50
 
-# View steward logs
-sudo journalctl -u cfgms-steward -f
+# Port in use:
+ss -tlnp | grep 8080
 
-# Restart a component
-sudo systemctl restart cfgms-controller
-sudo systemctl restart cfgms-steward
+# Permission denied:
+ls -la /var/lib/cfgms /var/log/cfgms
 
-# Check listening ports on controller (TCP for REST API, UDP for transport)
-sudo ss -tlnp | grep 9080
-sudo ss -ulnp | grep 4433
+# Certificate error — re-initialize:
+sudo rm -rf /var/lib/cfgms/certs
+sudo cfgms-controller --init --config /etc/cfgms/controller.cfg
 ```
 
-### Common Issues
-
-**Issue**: "Error: signature verification failed"
-- **Root Cause**: Controller using mismatched certificates
-- **Fix**: Ensure controller generated certs on first boot; check `/var/lib/cfgms/certs/`
-- **Verify**: Check controller logs show same certificate serial for signer and registration
-
-**Issue**: "Timeout waiting for config status"
-- **Debug**: Check transport connection established in steward logs
-- **Debug**: Check module executor initialized
-- **Debug**: Check gRPC SyncConfig call visible in steward logs
-- **Fix**: See diagnostic test output for exact failure point
-
-**Issue**: "Cannot connect to transport / connection refused on :4433"
-- **Debug**: Check controller is running: `sudo systemctl status cfgms-controller`
-- **Debug**: Check port 4433 is accessible from steward: `nc -zuv controller-vm 4433`
-- **Debug**: Check certificates are valid in controller logs
-- **Fix**: Verify firewall allows UDP port 4433; confirm transport config `listen_addr` is correct
-
-**Issue**: "gRPC stream broken / TLS handshake error"
-- **Debug**: Check steward and controller certificate fingerprints match
-- **Debug**: Look for "certificate signed by unknown authority" in steward logs
-- **Fix**: Steward may need to re-register to obtain a fresh certificate from the current CA
-
-## Advanced Configuration
-
-### Multi-Steward Deployment
+### Steward won't register
 
 ```bash
-# Use the same registration token (if single_use was false)
-# Deploy cfgms-steward binary to each VM with its own systemd unit
-# Each steward gets a unique ID automatically
-# All connect to the same controller via gRPC-over-QUIC (port 4433)
+# Linux logs
+sudo journalctl -u cfgms-steward -n 50
+
+# Windows logs
+Get-EventLog -LogName Application -Source cfgms-steward -Newest 20
+
+# "connection refused" → controller not running or firewall blocking 8080/4433
+# "invalid token" → token expired or single-use already consumed
+# "certificate error" → controller hostname doesn't match cert DNS names
 ```
 
-### Custom Certificate Authority
+### Config not applying
 
 ```bash
-# Generate your own CA (instead of auto-generated)
-./scripts/generate-ca.sh
+# Check config status on controller
+curl -k https://controller.example.com:8080/api/v1/stewards/<ID>/config/status
 
-# Configure controller to use custom CA
-export CFGMS_CERT_CA_PATH=/path/to/ca.pem
-export CFGMS_CERT_CERT_PATH=/path/to/server.pem
-export CFGMS_CERT_KEY_PATH=/path/to/server-key.pem
+# Check steward logs for module errors
+sudo journalctl -u cfgms-steward --since "5 minutes ago"
 ```
 
-### High Availability Setup
+### Connection drops
 
-```bash
-# Start multiple controllers (requires shared storage backend)
-# Controllers coordinate via Raft consensus
-```
-
-**HA Environment Variables:**
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `CFGMS_HA_MODE` | Yes | `single` | Deployment mode: `single`, `blue-green`, or `cluster` |
-| `CFGMS_HA_CA_CERT_PATH` | Recommended | (none) | Path to CA certificate PEM file for TLS validation between cluster nodes |
-| `CFGMS_HA_EXTERNAL_ADDRESS` | Yes (cluster) | (none) | This node's address visible to other cluster nodes |
-| `CFGMS_HA_CLUSTER_NODES` | Yes (cluster) | (none) | Comma-separated list of all cluster node addresses |
-| `CFGMS_HA_DISCOVERY_METHOD` | No | `static` | Node discovery method |
-| `CFGMS_HA_ELECTION_TIMEOUT` | No | `5s` | Raft leader election timeout |
-| `CFGMS_HA_HEARTBEAT_INTERVAL` | No | `2s` | Heartbeat interval between nodes |
-
-### M365 Integration
-
-```bash
-# Configure Microsoft 365 directory provider
-export CFGMS_DIRECTORY_PROVIDER=m365
-export CFGMS_M365_TENANT_ID=your-tenant-id
-export CFGMS_M365_CLIENT_ID=your-client-id
-export CFGMS_M365_CLIENT_SECRET=your-client-secret
-
-# Restart controller
-sudo systemctl restart cfgms-controller
-```
+Stewards reconnect automatically with exponential backoff. Check:
+- Network connectivity to controller ports 8080 and 4433
+- Controller logs: `sudo journalctl -u cfgms-controller | grep -i error`
+- Transport metrics: `cfg controller metrics --url https://controller.example.com:8080 --insecure`
 
 ## Next Steps
 
-After successful deployment:
-
-1. **Read the User Guide**: Understand module configuration and resource management
-2. **Explore Modules**: Try file, directory, and script modules
-3. **Set Up Monitoring**: Configure logging provider (TimescaleDB recommended)
-4. **Plan Scaling**: Add more stewards to manage more endpoints
-5. **Enable Advanced Features**: RBAC, multi-tenancy, conditional access
-
-## References
-
-- **Roadmap**: [docs/product/roadmap.md](../product/roadmap.md)
-- **Architecture**: [docs/architecture/](../architecture/)
-- **E2E Testing**: [docs/testing/e2e-testing-guide.md](../testing/e2e-testing-guide.md)
-- **Transport Architecture**: [docs/architecture/communication-layer-migration.md](../architecture/communication-layer-migration.md)
-- **Quick Start**: [QUICK_START.md](../../QUICK_START.md)
-
----
-
-**Deployment Support**: If you encounter issues, check GitHub issues or create a new issue with:
-- Output of `sudo journalctl -u cfgms-controller --no-pager -n 50`
-- Output of `sudo journalctl -u cfgms-steward --no-pager -n 50`
-- Output of E2E test runs
-- Description of unexpected behavior
+- Push configs with multiple resources in a single request
+- Create sub-tenants for organizing stewards by role or location
+- Monitor fleet health with `cfg controller metrics`
+- Scale to 50,000+ concurrent steward connections
